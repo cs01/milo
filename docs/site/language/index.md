@@ -236,7 +236,7 @@ Milo has no exceptions and no null. Instead, the type system makes you deal with
 
 `Result<T, E>` is an enum with two variants: `Result.Ok(value)` for success or `Result.Err(error)` for failure. Similarly, `Option<T>` is `Option.Some(value)` or `Option.None`. The compiler won't let you use the inner value without checking which case you're in.
 
-The `?` operator is where it gets ergonomic: if a result is an error, `?` returns it from the current function automatically. No try/catch blocks, no forgotten error checks.
+Every fallible call site has to be handled — `!` to unwrap or panic, `??` for a default, or `?` to propagate. `?` is the ergonomic one: on an error it returns from the current function immediately, converting the error to the caller's error type if that type has a wrapping variant. The same operator as Rust's `?`, minus Go's hand-written `if err != nil` at every call.
 
 ```milo
 fn divide(a: f64, b: f64): Result<f64, string> {
@@ -270,7 +270,25 @@ You can also write `T?` as shorthand for `Option<T>`, and `value ?? default` to 
 
 ## Collections
 
-Milo includes growable arrays and hash maps. `Vec<T>` is the workhorse — you'll use it constantly. It owns its elements, frees them when it goes out of scope, and has built-in methods like `map`, `filter`, and `join`.
+Milo has fixed-size arrays, growable arrays, and hash maps. `Vec<T>` is the workhorse — you'll use it constantly. It owns its elements, frees them when it goes out of scope, and has built-in methods like `map`, `filter`, and `join`.
+
+### Arrays — fixed size, on the stack
+
+`[T; N]` is a fixed-length array. No allocation, no free, bounds-checked on every access. Reach for one when the length is known at compile time — a scratch buffer, a lookup table.
+
+```milo
+fn main(): i32 {
+    let primes = [2, 3, 5, 7, 11]
+    print(primes[0])
+    print(primes.len)
+
+    var buf: [u8; 4096] = [0; 4096]   // repeat syntax: 4096 zeros
+    buf[0] = 42
+    return 0
+}
+```
+
+An out-of-bounds index is a panic, not silent corruption.
 
 ### Vec — dynamic arrays
 

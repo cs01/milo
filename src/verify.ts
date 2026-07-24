@@ -34,6 +34,11 @@ interface CallModel {
   decls: string[];
   assumes: string[];
   n: number;
+  // Every symbol the enclosing function's VCs declare. A callee contract may mention names
+  // that exist only in the callee (a local, a field of its own receiver); substituting its
+  // parameters does not remove those, and emitting them here would put an undeclared
+  // symbol back in the query — the exact failure this call model exists to prevent.
+  scope: Set<string>;
   // A body is lowered more than once per function (once for call-site obligations, once
   // per postcondition), so key on the AST node: the same call site must map to the same
   // constant. Two textually identical call sites are deliberately NOT shared — a Milo fn
@@ -48,6 +53,24 @@ let CALL_MODEL: CallModel | null = null;
 // are discovered while lowering bodies, which happens after the declaration block is
 // assembled. Left as-is it is an SMT comment, so a missed substitution is inert.
 const CALL_MODEL_SLOT = "; (call model)";
+
+// SMT-LIB operators and literals that are not symbols needing a declaration.
+const SMT_BUILTINS = new Set([
+  "and", "or", "not", "=>", "=", "distinct", "ite", "true", "false",
+  "div", "mod", "abs", "to_real", "to_int", "let", "-", "+", "*", "/",
+  "<", ">", "<=", ">=",
+]);
+
+// Every free symbol in `smt` must already be declared in the enclosing function's query.
+function symbolsResolve(smt: string, ctx: CallModel): boolean {
+  for (const m of smt.matchAll(/[A-Za-z_][A-Za-z0-9_.]*/g)) {
+    const sym = m[0];
+    if (SMT_BUILTINS.has(sym)) continue;
+    if (ctx.scope.has(sym)) continue;
+    return false;
+  }
+  return true;
+}
 
 function modelCall(site: object, name: string, args: Expr[]): string | null {
   const ctx = CALL_MODEL;
@@ -79,10 +102,29 @@ function modelCall(site: object, name: string, args: Expr[]): string | null {
     .filter(s => !/UNSUPPORTED/.test(s));
   if (facts.length === 0) return null;
 
+  // A callee only guarantees its `ensures` when its `requires` were met, so what may be
+  // assumed here is the implication, never the bare postcondition. Assuming the bare form
+  // is circular: discharging `lo <= hi` at a call to clamp would get to assume clamp's
+  // `lo <= result <= hi`, which entails `lo <= hi` — the obligation proves itself.
+  const guards = callee.contracts
+    .filter(c => c.kind === "requires")
+    .map(c => exprToSmtWithEnv(c.expr, subst));
+  // An untranslatable `requires` can't be stated as the implication's antecedent, and
+  // dropping it would silently restore the circular form.
+  if (guards.some(g => /UNSUPPORTED/.test(g))) return null;
+
+  if (![...facts, ...guards].every(s => symbolsResolve(s, ctx))) return null;
+
+  const conclusion = facts.length === 1 ? facts[0]! : `(and ${facts.join(" ")})`;
+  const antecedent = guards.length === 0
+    ? null
+    : guards.length === 1 ? guards[0]! : `(and ${guards.join(" ")})`;
+
   ctx.decls.push(`(declare-const ${retName} ${miloTypeToSmt(retType)})`);
   const range = intRangeAssumption(retName, retType);
   if (range) ctx.assumes.push(range);
-  for (const f of facts) ctx.assumes.push(`(assert ${f})`);
+  ctx.assumes.push(`(assert ${antecedent ? `(=> ${antecedent} ${conclusion})` : conclusion})`);
+  ctx.scope.add(retName);   // a later call may take this one's result as an argument
   ctx.bySite.set(site, retName);
   return retName;
 }
@@ -485,7 +527,7 @@ export function generateVerificationConditions(program: Program, opts?: { onlyFi
     const ensures = fn.contracts.filter(c => c.kind === "ensures");
     contractCount += fn.contracts.length;
 
-    CALL_MODEL = { ensuresByFn, decls: [], assumes: [], n: 0, bySite: new WeakMap() };
+    CALL_MODEL = { ensuresByFn, decls: [], assumes: [], n: 0, bySite: new WeakMap(), scope: new Set() };
     const vcStart = conditions.length;
 
     const paramDecls = fn.params.map(p => `(declare-const ${p.name} ${miloTypeToSmt(p.type?.name ?? "i64")})`).join("\n");
@@ -499,6 +541,9 @@ export function generateVerificationConditions(program: Program, opts?: { onlyFi
     for (const c of fn.contracts) collectFieldRefs(c.expr, fieldRefs);
     collectFieldRefsFromBody(fn.body, fieldRefs);
     const fieldDecls = [...fieldRefs].map(f => `(declare-const ${f} Int)`).join("\n");
+    // Must be set before any contract or body expression is lowered — that is when call
+    // modelling runs and needs to know which symbols this function's query declares.
+    CALL_MODEL.scope = new Set([...fn.params.map(p => p.name), ...fieldRefs, "result"]);
     let allDecls = fieldDecls ? `${paramDecls}\n${fieldDecls}` : paramDecls;
     if (paramRanges) allDecls = `${allDecls}\n${paramRanges}`;
     allDecls = `${allDecls}\n${CALL_MODEL_SLOT}`;

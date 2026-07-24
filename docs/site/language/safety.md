@@ -3,7 +3,7 @@
 Milo lets you write down what your functions promise — and then prove it.
 
 - **Contracts** — `requires`, `ensures`, `invariant`: what a function expects, what it guarantees, what stays true in a loop. Type-checked like the rest of your code.
-- **`milo prove`** proves them. `milo verify` prints the same obligations as SMT-LIB2 instead of solving them.
+- **`milo prove`** checks that they hold — for every input, without running the program.
 - **Safety profiles** — DO-178C, ISO 26262, IEC 62304 and friends, enforced as compiler flags.
 
 ## Walkthrough
@@ -314,7 +314,7 @@ A call inside a function body is modelled by the callee's contract rather than b
 
 ### Seeing the raw conditions — `milo verify`
 
-`milo verify` runs the same generator as `milo prove` and produces the same conditions — it prints them as [SMT-LIB2](https://smtlib.cs.uiowa.edu/) instead of discharging them. There is no subset: `prove` and `verify` on the same file always report the same count.
+Despite the name, `milo verify` does not check anything. It runs the same generator as `milo prove` and then **prints** the resulting proof obligations as [SMT-LIB2](https://smtlib.cs.uiowa.edu/) rather than solving them. If you want an answer about your code, you want `milo prove`; this command is for when you want the raw mathematics. There is no subset — `prove` and `verify` on the same file always report the same count.
 
 Three reasons to want the text: to drive a solver Milo doesn't bundle ([CVC5](https://cvc5.github.io/)), to understand an `unknown`, or to archive the obligations as certification evidence.
 

@@ -35,7 +35,7 @@ Every program starts at `main`, which returns an `i32` exit code. `print` is a b
 
 ```milo
 fn main(): i32 {
-    let x = 42              // immutable, type inferred as i32
+    let x = 42              // immutable, type inferred as i64
     var count: i32 = 0      // mutable, type annotated
     count = count + 1
 

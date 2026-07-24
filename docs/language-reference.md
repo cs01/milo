@@ -255,7 +255,7 @@ fn identity<T>(x: T): T {
     return x
 }
 
-let n = identity(42)       // T inferred as i32
+let n = identity(42)       // T inferred as i64
 let s = identity("hello")  // T inferred as string
 ```
 

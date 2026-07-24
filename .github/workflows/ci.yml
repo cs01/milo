@@ -37,10 +37,24 @@ jobs:
       - uses: actions/checkout@v4
       - uses: oven-sh/setup-bun@v2
       - run: bun install --frozen-lockfile
+      # clang is what milo shells out to for every compile, so the job cannot work without
+      # it — but it was never installed here, only inherited from whatever the runner image
+      # happened to ship. That is a dependency on an image GitHub rebuilds continuously: a
+      # run went red with "no C compiler found: need either 'clang' or 'llc'+'cc' on PATH"
+      # twelve minutes after an identical run passed. Install it rather than hope for it.
+      # Noble's `clang` metapackage is clang-18, comfortably over MIN_CLANG_MAJOR (16) in
+      # src/main.ts; if a future image defaults below that, detectToolchain says so by
+      # version and the dump below shows what resolved.
+      #
       # z3 mirrors the macOS job's contract gate. lld provides ld.lld for the bare-metal
       # ARM link; qemu-system-arm runs those binaries (tests/embedded.test.ts skips itself
       # when QEMU is absent, so without it that lane silently proves nothing).
-      - run: sudo apt-get update && sudo apt-get install -y z3 lld qemu-system-arm libssl-dev libsqlite3-dev
+      - run: sudo apt-get update && sudo apt-get install -y clang z3 lld qemu-system-arm libssl-dev libsqlite3-dev
+      # When this job goes red, the toolchain it actually resolved is the first thing you
+      # need and the most annoying to get after the fact (mirrors the Windows job).
+      - name: Toolchain info
+        run: clang --version && clang -print-target-triple
+        continue-on-error: true
       - run: bun test
       # Reads this runner's headers, so it's the only thing that can check the Linux decls.
       - run: bun run scripts/audit-extern-returns.ts

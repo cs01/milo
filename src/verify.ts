@@ -20,6 +20,83 @@ export interface VerifyResult {
 let GLOBAL_CONST_SMT = new Map<string, string>(); // name -> SMT literal string
 let GLOBAL_CONST_NUM = new Map<string, bigint>();  // name -> numeric value
 
+// A call inside a body or contract can't be inlined (the callee may be recursive, and
+// unfolding is unbounded anyway), so each call site becomes one fresh constant standing
+// for that single invocation, constrained by the callee's `ensures` — standard modular
+// verification. Without this a call reached the solver as an undeclared symbol and z3
+// rejected the entire query instead of returning a verdict.
+//
+// For a self-recursive call this is induction, which is only sound if the recursion
+// terminates. Milo has no termination checker (no `decreases` clause), so a proof
+// involving recursion is conditional on termination.
+interface CallModel {
+  ensuresByFn: Map<string, Function>;
+  decls: string[];
+  assumes: string[];
+  n: number;
+  // A body is lowered more than once per function (once for call-site obligations, once
+  // per postcondition), so key on the AST node: the same call site must map to the same
+  // constant. Two textually identical call sites are deliberately NOT shared — a Milo fn
+  // may read mutable state, so assuming f(x) == f(x) across invocations could prove
+  // something false.
+  bySite: WeakMap<object, string>;
+}
+let CALL_MODEL: CallModel | null = null;
+
+// Placeholder line in a VC's SMT-LIB, replaced with this function's accumulated call
+// declarations once every VC for the function has been built. Needed because call sites
+// are discovered while lowering bodies, which happens after the declaration block is
+// assembled. Left as-is it is an SMT comment, so a missed substitution is inert.
+const CALL_MODEL_SLOT = "; (call model)";
+
+function modelCall(site: object, name: string, args: Expr[]): string | null {
+  const ctx = CALL_MODEL;
+  if (!ctx) return null;
+  const cached = ctx.bySite.get(site);
+  if (cached) return cached;
+  const callee = ctx.ensuresByFn.get(name);
+  // No contract to constrain the return value: an unconstrained fresh constant would let
+  // the solver "violate" a postcondition using a return value the callee can never
+  // produce. Report unknown rather than a counterexample the user can't reproduce.
+  if (!callee || callee.params.length !== args.length) return null;
+  const ensures = callee.contracts.filter(c => c.kind === "ensures");
+  if (ensures.length === 0) return null;
+
+  const argSmt = args.map(a => exprToSmt(a));
+  if (argSmt.some(a => /UNSUPPORTED/.test(a))) return null;
+  // The declaration block is shared by every VC of the enclosing function, but `result`
+  // is only declared in postcondition VCs — an assumption mentioning it would leak an
+  // undeclared symbol into the precondition ones.
+  if (argSmt.some(a => /\bresult\b/.test(a))) return null;
+
+  const retName = `${name}__ret${ctx.n++}`;
+  const retType = callee.retType?.name ?? "i64";
+  const subst = new Map<string, string>();
+  callee.params.forEach((p, i) => subst.set(p.name, argSmt[i]!));
+  subst.set("result", retName);
+  const facts = ensures
+    .map(e => exprToSmtWithEnv(e.expr, subst))
+    .filter(s => !/UNSUPPORTED/.test(s));
+  if (facts.length === 0) return null;
+
+  ctx.decls.push(`(declare-const ${retName} ${miloTypeToSmt(retType)})`);
+  const range = intRangeAssumption(retName, retType);
+  if (range) ctx.assumes.push(range);
+  for (const f of facts) ctx.assumes.push(`(assert ${f})`);
+  ctx.bySite.set(site, retName);
+  return retName;
+}
+
+// Splice the accumulated call declarations into every VC built for one function.
+function fillCallModel(conditions: VerificationCondition[], from: number) {
+  const ctx = CALL_MODEL;
+  if (!ctx || (ctx.decls.length === 0 && ctx.assumes.length === 0)) return;
+  const block = [...ctx.decls, ...ctx.assumes].join("\n");
+  for (let i = from; i < conditions.length; i++) {
+    conditions[i]!.smtlib = conditions[i]!.smtlib.replace(CALL_MODEL_SLOT, block);
+  }
+}
+
 // Fold a constant expression (int literals, const globals, const arithmetic) to
 // a number, or null if it isn't statically constant. Used to recognise shift
 // amounts and power-of-two masks in the bitwise lowering below.
@@ -391,8 +468,11 @@ export function generateVerificationConditions(program: Program, opts?: { onlyFi
 
   // Callee preconditions, for the call-site obligations below.
   const requiresByFn = new Map<string, Function>();
+  // Callee postconditions, for modelling calls that appear inside a body or contract.
+  const ensuresByFn = new Map<string, Function>();
   for (const fn of program.functions) {
     if (fn.contracts.some(c => c.kind === "requires")) requiresByFn.set(fn.name, fn);
+    if (fn.contracts.some(c => c.kind === "ensures")) ensuresByFn.set(fn.name, fn);
   }
 
   for (const fn of program.functions) {
@@ -404,6 +484,9 @@ export function generateVerificationConditions(program: Program, opts?: { onlyFi
     const requires = fn.contracts.filter(c => c.kind === "requires");
     const ensures = fn.contracts.filter(c => c.kind === "ensures");
     contractCount += fn.contracts.length;
+
+    CALL_MODEL = { ensuresByFn, decls: [], assumes: [], n: 0, bySite: new WeakMap() };
+    const vcStart = conditions.length;
 
     const paramDecls = fn.params.map(p => `(declare-const ${p.name} ${miloTypeToSmt(p.type?.name ?? "i64")})`).join("\n");
     // What the type already guarantees. Without it the solver invents out-of-range inputs.
@@ -418,6 +501,7 @@ export function generateVerificationConditions(program: Program, opts?: { onlyFi
     const fieldDecls = [...fieldRefs].map(f => `(declare-const ${f} Int)`).join("\n");
     let allDecls = fieldDecls ? `${paramDecls}\n${fieldDecls}` : paramDecls;
     if (paramRanges) allDecls = `${allDecls}\n${paramRanges}`;
+    allDecls = `${allDecls}\n${CALL_MODEL_SLOT}`;
 
     const preAssumptions = requires.map(r => `(assert ${exprToSmt(r.expr)})`).join("\n");
 
@@ -548,6 +632,10 @@ export function generateVerificationConditions(program: Program, opts?: { onlyFi
       }
     }
 
+    fillCallModel(conditions, vcStart);
+    // Loop-invariant VCs carry no declaration block of their own, so there is nowhere to
+    // splice a call model into — leave calls in them untranslatable.
+    CALL_MODEL = null;
     loopCount += collectLoopInvariants(fn.name, fn.body, conditions);
   }
 
@@ -622,15 +710,23 @@ function exprToSmt(expr: Expr): string {
       if (expr.op === "!") return `(not ${exprToSmt(expr.operand)})`;
       if (expr.op === "-") return `(- ${exprToSmt(expr.operand)})`;
       return `(UNSUPPORTED_UNARY ${expr.op})`;
-    case "Call":
-      return `(${expr.func} ${expr.args.map(exprToSmt).join(" ")})`;
+    case "Call": {
+      if (typeof expr.func === "string") {
+        const modeled = modelCall(expr, expr.func, expr.args);
+        if (modeled) return modeled;
+        return `(UNSUPPORTED_CALL ${expr.func})`;
+      }
+      return `(UNSUPPORTED Call)`;
+    }
     case "FieldAccess": {
       const flat = flattenFieldAccess(expr);
       if (flat) return flat;
       return `(${exprToSmt(expr.object)}.${expr.field})`;
     }
     case "MethodCall":
-      return `(${expr.method} ${exprToSmt(expr.object)} ${expr.args.map(exprToSmt).join(" ")})`;
+      // No modular model for methods yet (no receiver encoding), and emitting the bare
+      // application would hand the solver an undeclared symbol.
+      return `(UNSUPPORTED_METHOD ${expr.method})`;
     default:
       return `(UNSUPPORTED ${expr.kind})`;
   }
@@ -725,7 +821,15 @@ export function untranslatable(smtlib: string): string[] {
   for (const m of smtlib.matchAll(/\(UNSUPPORTED (\w+)\)/g)) out.add(`${m[1]} expressions`);
   for (const m of smtlib.matchAll(/\(UNSUPPORTED_UNARY (\S+?)\)/g)) out.add(`unary '${m[1]}'`);
   for (const m of smtlib.matchAll(/UNSUPPORTED_OP_(\S+?)[\s)]/g)) out.add(`operator '${m[1]}'`);
+  for (const m of smtlib.matchAll(/\(UNSUPPORTED_CALL (\S+?)\)/g)) out.add(`calls to '${m[1]}' (it declares no 'ensures' to model its result by)`);
+  for (const m of smtlib.matchAll(/\(UNSUPPORTED_METHOD (\S+?)\)/g)) out.add(`method calls ('.${m[1]}')`);
   return [...out];
+}
+
+// Solver diagnostics land in a one-line-per-VC report; a raw multi-line message would
+// interleave with the next verdict.
+function oneLine(s: string): string {
+  return s.replace(/\s+/g, " ").trim();
 }
 
 export function untranslatableDetail(kinds: string[]): string {
@@ -756,8 +860,16 @@ export function proveWithZ3(result: VerifyResult): ProveResult {
       timeout: 10000,
     });
 
+    // z3 keeps going after a bad command, so a rejected query prints `(error ...)` AND a
+    // verdict for the remaining assertions. That verdict describes a formula z3 didn't
+    // fully accept, so an error anywhere invalidates the whole run — and its text must be
+    // flattened to one line or it breaks the report layout.
     const output = (proc.stdout ?? "").trim();
-    if (output === "unsat") {
+    const lines = output.split("\n").map(l => l.trim()).filter(Boolean);
+    const errLine = lines.find(l => l.startsWith("(error"));
+    if (errLine) {
+      results.push({ vc, status: "error", detail: oneLine(errLine) });
+    } else if (output === "unsat") {
       // negation is unsat → contract always holds
       results.push({ vc, status: "proven" });
     } else if (output === "sat") {
@@ -766,7 +878,7 @@ export function proveWithZ3(result: VerifyResult): ProveResult {
     } else if (output === "unknown") {
       results.push({ vc, status: "unknown", detail: "solver could not decide" });
     } else {
-      results.push({ vc, status: "error", detail: output || proc.stderr || "z3 produced no output" });
+      results.push({ vc, status: "error", detail: oneLine(output || proc.stderr || "z3 produced no output") });
     }
   }
 

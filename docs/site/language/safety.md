@@ -5,11 +5,38 @@ Milo lets you write down what your functions promise — and then prove it.
 - **Contracts** (`requires`, `ensures`, `invariant`) are annotations that say what a function expects, what it guarantees, and what stays true inside loops. The compiler type-checks them alongside your code — no separate annotation language, no external tool needed just to write them.
 - **Safety profiles** enforce coding standards from domains like avionics (DO-178C), automotive (ISO 26262), and medical devices (IEC 62304) — as compiler flags, not expensive third-party tools.
 
-A few points up front:
+## When a contract is checked
 
-- **Free in optimized builds, checked in debug builds.** At `-O1`/`-O2`/`-O3` (the default) contracts are not emitted — zero runtime cost. Under `--debug`, or `--overflow-checks` at any `-O`, every `requires`, `ensures`, and `invariant` becomes a runtime assert that aborts with `runtime error: requires clause violated at file:line`.
-- **Three levels of checking.** The compiler rejects ill-formed contracts (type errors, bad references) and *also* rejects call sites it can prove violate a `requires` outright. `milo prove` discharges the rest against a solver. `--debug` catches whatever the solver left `unknown`.
-- **Memory safety is already handled** — by ownership and move checking at compile time (use-after-free, double-free), plus always-on bounds checks and generational arena handles at runtime. Contracts extend that to *logic errors*, which none of those catch.
+Take a logarithm that only accepts positive inputs:
+
+```milo
+pub fn log2(x: f64): f64
+requires x > 0.0
+{ ... }
+```
+
+There are three separate moments where `x > 0.0` can be enforced. They are independent — the first and third always apply, the second only if you ask for it.
+
+**1. At compile time, at every optimization level.** If the compiler can see the argument value, it rejects the program. `log2(-1.0)` does not build:
+
+```
+error: requires clause 'x > 0.0' violated
+  ──> main.milo:10:11
+```
+
+This only reaches as far as constant folding does. A value read from a file or a sensor is invisible to it.
+
+**2. At compile time, when you run `milo prove`.** A separate command — `build` never runs it. It proves the contract holds for *every* input, not just the visible ones, and reports which obligations it could not decide. It does not change the binary.
+
+**3. At runtime, in `--debug` builds only.** Each `requires`, `ensures`, and `invariant` becomes an assert. Passing a negative value that reached your program at runtime prints and exits 1:
+
+```
+runtime error: requires clause violated at math.milo:2
+```
+
+At `-O1`/`-O2`/`-O3` — the default for `milo build` — no check is emitted and the contract costs nothing. `--overflow-checks` turns the runtime asserts on at any optimization level.
+
+Contracts are for *logic* errors. Memory safety is already handled elsewhere: ownership and move checking reject use-after-free and double-free at compile time, bounds checks stay on at every optimization level, and arenas use generational handles. None of those catch a negative logarithm.
 
 ## Why types aren't enough
 
@@ -196,21 +223,31 @@ verification: 4 conditions
   ✓ [precondition] main: proven
 ```
 
-The outcomes are distinct and the distinction matters: `proven` means the condition holds on every path. `failed` means there is a counterexample. `unknown` means *this engine* could not decide it — not that the contract is wrong. `std/smt` covers the linear-arithmetic fragment; non-linear multiplication, bitwise operators, and recursion fall outside it.
+Three outcomes, and the difference matters. `proven` means the condition holds on every path, for every input. `failed` means there is a counterexample. `unknown` means the engine could not decide it — that is a limit of the engine, not a defect in your contract, and it is never reported as a failure.
 
-For non-linear arithmetic, hand the conditions to Z3:
+### Two engines
+
+`milo prove` builds the proof obligations, then hands them to a solver. There are two, and they differ only in what mathematics they understand:
+
+| | `std/smt` (default) | `--solver=z3` |
+|---|---|---|
+| What it is | a solver written in Milo, in the standard library | the external [Z3](https://github.com/Z3Prover/z3) program |
+| Install | none — compiled once to a cached binary | you install it yourself; must be on `PATH` |
+| Decides | linear integer arithmetic: `+`, `-`, comparisons, multiplication by a constant | the above, plus non-linear arithmetic (`n * n`, `n * factorial(n - 1)`) |
+
+The obligations are identical either way. Anything `std/smt` returns `unknown` on is worth retrying with Z3:
 
 ```bash
-milo prove flight_controller.milo --solver=z3      # requires z3 on PATH
+milo prove flight_controller.milo --solver=z3      # same conditions, bigger solver
 milo prove flight_controller.milo --all            # include imported stdlib
 ```
 
 ```
-? [postcondition] sq: unknown — outside linear fragment (std/smt)    # ensures result >= 0 over n * n
-✓ [postcondition] sq: proven                                         # same condition, --solver=z3
+? [postcondition] factorial: unknown — outside linear fragment (std/smt)
+✓ [postcondition] factorial: proven                                        # same condition, --solver=z3
 ```
 
-Recursion is a gap in the *encoding*, not in the solver: a recursive call is emitted as an undeclared symbol, so Z3 reports an error on it rather than a verdict. Recursive postconditions are not provable by either engine today.
+A call inside a function body is modelled by the callee's own `ensures` rather than by inlining it, which is what lets `factorial` above be proven from its own postcondition. For a self-recursive call that is induction, and Milo has no termination checker — so a proof involving recursion is conditional on the recursion terminating.
 
 ### Exporting the raw conditions — `milo verify`
 
@@ -237,7 +274,7 @@ postcondition of clamp: (and (>= result lo) (<= result hi))
 
 The middle `assert` is the function body: one disjunct per return path, each guarded by the branch conditions that reach it. The last `assert` negates the postcondition, so `unsat` means the postcondition always holds and `sat` yields a counterexample.
 
-**Current limitations:** the encoding covers preconditions, postconditions, and loop invariants over scalar arithmetic. Outside that — bitwise operators, indexing, `Vec` lengths through a builder, struct fields as loop invariants, recursion — conditions come back `unknown` (or, for recursion under `--solver=z3`, `error`), never a false `failed`. Build with `--debug` to catch those at runtime instead.
+**Current limitations:** the encoding covers preconditions, postconditions, and loop invariants over scalar arithmetic, plus calls modelled through the callee's `ensures`. Outside that — bitwise operators, indexing, method calls, `Vec` lengths through a builder, struct fields as loop invariants, and calls to functions that declare no `ensures` — conditions come back `unknown`, never a false `failed`. Build with `--debug` to catch those at runtime instead.
 
 This approach — contracts as source-level annotations, discharged by a solver — is the same architecture as SPARK/Ada and Dafny. Unlike SPARK, Milo ships its prover in the standard library, so the common case needs nothing installed; Z3 or CVC5 are opt-in for the theories `std/smt` doesn't model yet.
 

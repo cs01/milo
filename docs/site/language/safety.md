@@ -8,7 +8,7 @@ Milo lets you write down what your functions promise — and then prove it.
 
 ## Walkthrough
 
-Let's say you have a function that computes an integer square root. It is undefined for negative input, and it never returns a negative one — that's one `requires` and one `ensures`:
+Let's say you have a function that computes an integer square root. It is undefined for negative input, and it never returns a negative one. The contract says exactly that: the caller must pass `n >= 0` (`requires`), and in return the result is never negative (`ensures`):
 
 ```milo
 // sqrt.milo
@@ -24,9 +24,9 @@ ensures result >= 0
 }
 ```
 
-What decides when `n >= 0` gets enforced is **not** the optimization level. It is whether the compiler can see the value.
+With the contract in place, there are three ways it gets enforced. Which one you get is **not** decided by the optimization level — it is decided by whether the compiler can see the value.
 
-### 1. A value it can see — rejected at compile time, in every build
+### 1. A static value — rejected at compile time
 
 ```milo
 pub fn main(): i32 {
@@ -46,7 +46,7 @@ error: requires clause 'n >= 0' violated
 
 Identical output under `--debug` and under `--release`. This is not a debug-only check — you cannot build this program at any optimization level.
 
-### 2. A value it can't see — asserted at runtime, in debug builds only
+### 2. An unpredictable value — asserted at runtime in debug builds
 
 Let's say the value passed to `sqrt` is no longer a constant, but a number drawn at runtime. There is nothing left for the compiler to fold:
 
@@ -82,7 +82,7 @@ $ echo $?
 
 `--overflow-checks` turns those same asserts on at any optimization level, if you want them in a release build.
 
-### 3. `milo prove` — catch it statically instead
+### 3. `milo prove` — proven for every input, before you run it
 
 Neither of the two cases above covers what you actually worry about: a value that only goes negative on some input you never thought to test. That is what the prover is for. Let's say a `scale` function forwards its argument straight through without checking it:
 
@@ -105,7 +105,7 @@ $ echo $?
 
 Nothing was run and no input was supplied — the solver derived `raw = -1` by itself. And notice what it proved along the way: `ensures result >= 0` holds for *every* `n`, which no amount of testing can establish.
 
-### 4. Add the guard — handle every case instead of aborting on one
+**Now that we have the violation of the contract, we can modify the code to satisfy it, then run the prover again.**
 
 ```milo
 pub fn scale(raw: i64): i64 {
@@ -127,7 +127,7 @@ $ echo $?
 0
 ```
 
-The negative now never reaches `sqrt` — `raw < 0` returns `0`, a defined result on a path you wrote, so there is nothing left to abort on. A runtime assert only backstops the cases you haven't established; `proven` means every input is handled in ordinary code. Anything still `unknown` is yours to catch, and `milo prove` exits non-zero on a failure so CI enforces the difference.
+The negative never reaches `sqrt` now — `raw < 0` returns `0`, a defined result on a path you wrote — so there is nothing left to abort on, and no runtime assert is doing the work. `proven` means every input is handled in ordinary code; a runtime assert only backstops what you haven't established. Anything still `unknown` is yours to catch, and `milo prove` exits non-zero on a failure, so CI enforces the difference.
 
 ### Which solver
 

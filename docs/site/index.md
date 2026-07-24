@@ -179,16 +179,16 @@ fn main() {
   <div class="cat cat-dev">
     <h3 class="cat-head">Developer tools</h3>
     <div class="tile-grid">
-      <a class="tile" href="https://github.com/milo-language/milo/tree/main/examples/tools/hades">
-        <img class="tile-img" src="/hades/debugging.png" alt="hades web debugger stopped at a breakpoint" loading="lazy">
+      <a class="tile" href="https://github.com/milo-language/dapweb">
+        <img class="tile-img" src="/dapweb/debugging.png" alt="dapweb debugger stopped at a breakpoint" loading="lazy">
         <h3>Debugger</h3>
-        <p>hades: debug any program from the browser, with an AI in the loop.</p>
-        <div class="tile-tags"><span>HTTP server</span><span>WebSockets</span><span>JSON-RPC (DAP)</span><span>PTY</span><span>MCP</span></div>
-        <span class="tile-copy" role="button" tabindex="0" data-cmd="milo build examples/tools/hades/src/main.milo -o hades && ./hades web" title="milo build examples/tools/hades/src/main.milo -o hades && ./hades web">⧉ copy run command</span>
+        <p>dapweb: debug any program from the browser, with an AI in the loop.</p>
+        <div class="tile-tags"><span>HTTP server</span><span>WebSockets</span><span>JSON-RPC (DAP)</span><span>PTY</span><span>CLI API</span></div>
+        <span class="tile-copy" role="button" tabindex="0" data-cmd="git clone https://github.com/milo-language/dapweb && cd dapweb && src/web/ui/build.sh && milo build src/main.milo -o dapweb && ./dapweb web" title="git clone https://github.com/milo-language/dapweb && cd dapweb && src/web/ui/build.sh && milo build src/main.milo -o dapweb && ./dapweb web">⧉ copy run command</span>
       </a>
       <a class="tile" href="https://github.com/milo-language/milo/tree/main/examples/tools/java-dap">
         <h3>Java Debugger</h3>
-        <p>A DAP-compliant debugger for the JVM, so hades debugs Java too.</p>
+        <p>A DAP-compliant debugger for the JVM, so dapweb debugs Java too.</p>
         <div class="tile-tags"><span>JDWP</span><span>TCP sockets</span><span>binary protocol</span></div>
         <span class="tile-copy" role="button" tabindex="0" data-cmd="milo build examples/tools/java-dap/src/main.milo -o java-dap" title="milo build examples/tools/java-dap/src/main.milo -o java-dap">⧉ copy run command</span>
       </a>

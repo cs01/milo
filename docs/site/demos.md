@@ -20,7 +20,7 @@ Pick what you have in mind. Each row jumps to real, runnable examples further do
 | **A web server or API** | [Servers & network apps](#servers-network-apps) | [Error handling](/language/error-handling), [Concurrency](/language/concurrency), [Get started](/getting-started/quickstart) |
 | **A command-line tool** | [CLI tools](#cli-tools) | [Quickstart](/getting-started/quickstart), [Strings](/language/strings), [Collections](/language/collections) |
 | **A terminal app (TUI)** | [Terminal & graphics apps](#terminal-graphics-apps) | [Concurrency: green tasks & Select](/language/concurrency) |
-| **A debugger or dev tool** | [Debugger: hades, java-dap](#debugger) | [FFI](/language/ffi), [Modules](/language/modules) |
+| **A debugger or dev tool** | [Debugger: dapweb, java-dap](#debugger) | [FFI](/language/ffi), [Modules](/language/modules) |
 | **A language or interpreter** | [Data & interpreters](#data-interpreters), [the prover and formatter](#the-language-feeding-itself) | [Enums & pattern matching](/language/enums), [Ownership](/language/ownership) |
 | **Low-level / embedded** | [flightController](#terminal-graphics-apps) | [Safety](/language/safety), [FFI](/language/ffi) |
 
@@ -42,7 +42,7 @@ Motorola 68000 + Z80 dual-CPU core with the VDP graphics processor and FM/PSG au
 
 ### <a href="/milo/snes/" target="_self">SNES</a>
 
-65C816 CPU plus the SNES PPU, including a Super FX (GSU) coprocessor core. Plays Super Mario World and Donkey Kong Country; Star Fox boots with GSU-rendered 3D. Load an `.sfc` / `.smc` ROM.
+65C816 CPU plus the SNES PPU, including a Super FX (GSU) coprocessor core. Plays Super Mario World and Donkey Kong Country; Star Fox boots with GSU-rendered 3D. Preset homebrew: **UWOL: Quest for Money**, **Super Boss Gaiden**, **BLT**, **Bucket**, **Mega Family Bros**, **Hilda**. Load your own `.sfc` / `.smc` ROM to play anything else.
 
 ![Super Mario World running on the Milo SNES emulator](/showcase/snes.png)
 
@@ -50,15 +50,15 @@ Motorola 68000 + Z80 dual-CPU core with the VDP graphics processor and FM/PSG au
 
 ## Debugger
 
-### <a href="https://github.com/milo-language/milo/tree/main/examples/tools/hades" target="_blank">hades</a>
+### <a href="https://github.com/milo-language/dapweb" target="_blank">dapweb</a>
 
-[![hades web UI stopped at a breakpoint inside classify(), showing the source view, call stack, locals, and a live lldb terminal](/hades/debugging.png)](https://github.com/milo-language/milo/tree/main/examples/tools/hades)
+[![dapweb stopped at a breakpoint inside classify(), showing the source view, call stack, locals, and a live lldb terminal](/dapweb/debugging.png)](https://github.com/milo-language/dapweb)
 
-A web + AI interface for any DAP debugger (lldb-dap, debugpy), written in Milo. One binary, two subcommands: `hades web` serves a React + Monaco + xterm.js debugging UI from a Milo HTTP/WebSocket server: breakpoints, stepping, call stacks, expandable locals, watch expressions, an ARM64/x86 disassembly pane, and a real PTY terminal you can type into while your program runs. `hades mcp` exposes the same session to an AI over MCP: both you and the model see and drive the same debuggee. Debugs Milo binaries too; the compiler emits standard DWARF.
+A web + AI interface for any DAP debugger (lldb-dap, debugpy, delve), written in Milo. One binary, two subcommands: `dapweb web` serves a React + Monaco + xterm.js debugging UI from a Milo HTTP/WebSocket server: breakpoints, stepping, call stacks, expandable locals, watch expressions, an ARM64/x86 disassembly pane, and a real PTY terminal you can type into while your program runs. `dapweb api` drives that same session from the CLI — every verb is the JSON the browser sends, so an agent or a shell script and a human share one debuggee. Debugs Milo binaries too; the compiler emits standard DWARF.
 
 ### <a href="https://github.com/milo-language/milo/tree/main/examples/tools/java-dap" target="_blank">java-dap</a>
 
-A standalone Debug Adapter Protocol server for the JVM, written in Milo. No Eclipse, no jdt.ls, no JVM-side code: the whole adapter is a DAP-to-JDWP protocol translator in about 1300 lines. Works with any DAP client, and hades finds it automatically, so you can debug Java the same way you debug Milo.
+A standalone Debug Adapter Protocol server for the JVM, written in Milo. No Eclipse, no jdt.ls, no JVM-side code: the whole adapter is a DAP-to-JDWP protocol translator in about 1300 lines. Works with any DAP client, and dapweb finds it automatically, so you can debug Java the same way you debug Milo.
 
 ## Terminal & graphics apps
 

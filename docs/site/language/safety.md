@@ -2,9 +2,9 @@
 
 Milo lets you write down what your functions promise — and then prove it.
 
-- **Contracts** (`requires`, `ensures`, `invariant`) are annotations that say what a function expects, what it guarantees, and what stays true inside loops. The compiler type-checks them alongside your code — no separate annotation language, no external tool needed just to write them.
-- **Safety profiles** enforce coding standards from domains like avionics (DO-178C), automotive (ISO 26262), and medical devices (IEC 62304) — as compiler flags, not expensive third-party tools.
-- **Two commands, one set of obligations.** `milo prove` builds the proof obligations and discharges them, printing a verdict per contract — this is the one you want. `milo verify` builds the *same* obligations and prints them as raw SMT-LIB2 instead of solving them. Nothing is exported selectively; it is the same work, shown rather than run. Reach for it to drive a solver Milo doesn't bundle (CVC5), to see why a condition came back `unknown`, or to keep the obligations as certification evidence. Neither command touches the binary.
+- **Contracts** — `requires`, `ensures`, `invariant`: what a function expects, what it guarantees, what stays true in a loop. Type-checked like the rest of your code.
+- **`milo prove`** proves them. `milo verify` prints the same obligations as SMT-LIB2 instead of solving them.
+- **Safety profiles** — DO-178C, ISO 26262, IEC 62304 and friends, enforced as compiler flags.
 
 ## Walkthrough
 

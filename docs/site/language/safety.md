@@ -312,9 +312,11 @@ A call inside a function body is modelled by the callee's contract rather than b
 - What gets assumed is `requires` **implies** `ensures`, never the bare `ensures`. A callee only promises its postcondition to callers that met its precondition, and assuming the bare form would be circular — discharging `lo <= hi` at a call to `clamp` would get to assume `lo <= result <= hi`, which entails the very thing being proved.
 - For a self-recursive call this is induction, and Milo has no termination checker. A proof involving recursion is therefore conditional on the recursion terminating.
 
-### Seeing the raw conditions — `milo verify`
+### Seeing the raw conditions — `prove --emit-smt`
 
-Despite the name, `milo verify` does not check anything. It runs the same generator as `milo prove` and then **prints** the resulting proof obligations as [SMT-LIB2](https://smtlib.cs.uiowa.edu/) rather than solving them. If you want an answer about your code, you want `milo prove`; this command is for when you want the raw mathematics. There is no subset — `prove` and `verify` on the same file always report the same count.
+Same command, same obligations — `--emit-smt` prints them as [SMT-LIB2](https://smtlib.cs.uiowa.edu/) instead of solving them. Nothing is filtered; the count matches what `milo prove` reports on the same file.
+
+(`milo verify` is the old spelling of this. It still works and prints a deprecation warning.)
 
 Three reasons to want the text: to drive a solver Milo doesn't bundle ([CVC5](https://cvc5.github.io/)), to understand an `unknown`, or to archive the obligations as certification evidence.
 
@@ -328,7 +330,7 @@ $ milo prove sqrt.milo
 and as the formula behind it:
 
 ```
-$ milo verify sqrt.milo
+$ milo prove sqrt.milo --emit-smt
 ── precondition ── scale ──
 call to sqrt from scale: (>= raw 0)
 ; Call-site precondition proof: scale -> sqrt
@@ -343,7 +345,7 @@ Read it as a question: "can `raw >= 0` fail?" The last `assert` negates the obli
 A postcondition is bigger, because the function body has to be encoded too:
 
 ```
-$ milo verify clamp.milo
+$ milo prove clamp.milo --emit-smt
 ── postcondition ── clamp ──
 postcondition of clamp: (and (>= result lo) (<= result hi))
 ; Postcondition proof for clamp

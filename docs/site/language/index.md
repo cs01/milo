@@ -567,7 +567,7 @@ fn clamp(value: i64, lo: i64, hi: i64): i64
 }
 ```
 
-Use `milo prove` to discharge contracts against the prover built into the standard library — no external solver needed — or `milo verify` to export the raw verification conditions (SMT-LIB2) for Z3 or CVC5. Use `milo safety --safety=do178c-a` to check your code against avionics, automotive, spacecraft, industrial, or medical device coding standards — all at compile time.
+Use `milo prove` to discharge contracts against the prover built into the standard library — no external solver needed; add `--emit-smt` to print the raw verification conditions (SMT-LIB2) for Z3 or CVC5 instead. Use `milo safety --safety=do178c-a` to check your code against avionics, automotive, spacecraft, industrial, or medical device coding standards — all at compile time.
 
 [Learn more](/language/safety)
 

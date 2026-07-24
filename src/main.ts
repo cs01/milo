@@ -1319,8 +1319,10 @@ async function main() {
     console.log("  build-lib <files...>   compile to static library (.a)");
     console.log("  emit-js <file>         emit JavaScript (playground target)");
     console.log("  fmt <file...>          format source files (-w to write in place)");
-    console.log("  verify <file>          generate SMT-LIB2 verification conditions (--all: include imported stdlib)");
-    console.log("  prove <file>           verify contracts via std/smt, the milo-native prover (--solver=z3 to use z3; --all: include imported stdlib)");
+    console.log("  prove <file>           prove contracts hold, via std/smt, the milo-native prover");
+    console.log("                           --solver=z3   use z3 instead (adds non-linear arithmetic)");
+    console.log("                           --emit-smt    print the SMT-LIB2 obligations instead of solving them");
+    console.log("                           --all         include imported stdlib");
     console.log("  safety <file>          check safety profile compliance");
     console.log("  safety --list          list available safety profiles");
     console.log("  wcet <file>            emit OTAWA flow facts (loop bounds) for WCET analysis");
@@ -1507,7 +1509,12 @@ async function main() {
 
   if (!source && cmd !== "--help") { console.error("error: no source file"); process.exit(1); }
 
+  // `verify` never verified anything — it prints the obligations `prove` discharges. It
+  // lives on as an alias so existing scripts keep working; `prove --emit-smt` is the name.
   if (cmd === "verify") {
+    console.error("warning: 'milo verify' is deprecated — use 'milo prove <file> --emit-smt'");
+  }
+  if (cmd === "verify" || (cmd === "prove" && rest.includes("--emit-smt"))) {
     const src = readFileSync(source!, "utf-8");
     const program = parseCheckProgram(src, target, source!, warningConfig);
     const result = generateVerificationConditions(program, rest.includes("--all") ? undefined : { onlyFile: source! });

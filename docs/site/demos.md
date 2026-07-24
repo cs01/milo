@@ -8,7 +8,7 @@ last-verified: 2026-07-15
 
 # Built with Milo
 
-Real programs written in Milo. Every one is a single `.milo` file. Clone the repo and [run or build any of them yourself](#run-these-yourself) with the `./milo` wrapper. They double as integration tests for the standard library.
+Real programs written in Milo. Most are a single `.milo` file in [`examples/`](https://github.com/milo-language/milo/tree/main/examples); the bigger ones — the [emulators](https://github.com/milo-language/emulators) and [milojs](https://github.com/milo-language/milojs) — have their own repos. [Run or build any of them yourself](#run-these-yourself) with the `./milo` wrapper. They double as integration tests for the standard library.
 
 ## What do you want to build today?
 
@@ -21,7 +21,7 @@ Pick what you have in mind. Each row jumps to real, runnable examples further do
 | **A command-line tool** | [CLI tools](#cli-tools) | [Quickstart](/getting-started/quickstart), [Strings](/language/strings), [Collections](/language/collections) |
 | **A terminal app (TUI)** | [Terminal & graphics apps](#terminal-graphics-apps) | [Concurrency: green tasks & Select](/language/concurrency) |
 | **A debugger or dev tool** | [Debugger: hades, java-dap](#debugger) | [FFI](/language/ffi), [Modules](/language/modules) |
-| **A language or interpreter** | [Data & interpreters](#data-interpreters), [the compiler itself](#the-language-feeding-itself) | [Enums & pattern matching](/language/enums), [Ownership](/language/ownership) |
+| **A language or interpreter** | [Data & interpreters](#data-interpreters), [the prover and formatter](#the-language-feeding-itself) | [Enums & pattern matching](/language/enums), [Ownership](/language/ownership) |
 | **Low-level / embedded** | [flightController](#terminal-graphics-apps) | [Safety](/language/safety), [FFI](/language/ffi) |
 
 ## Emulators: desktop and browser
@@ -46,7 +46,7 @@ Motorola 68000 + Z80 dual-CPU core with the VDP graphics processor and FM/PSG au
 
 ![Super Mario World running on the Milo SNES emulator](/showcase/snes.png)
 
-> All three run natively too: `examples/emulators/arcade.sh <rom>` builds the right core with SDL video, audio, and input. [`examples/emulators/retro/`](https://github.com/milo-language/milo/tree/main/examples/emulators/retro) turns them into a Raspberry Pi couch console with a gamepad-driven menu.
+> All three live in [milo-language/emulators](https://github.com/milo-language/emulators) and run natively too: `./arcade.sh <rom>` builds the right core with SDL video, audio, and input. [`retro/`](https://github.com/milo-language/emulators/tree/main/retro) turns them into a Raspberry Pi couch console with a gamepad-driven menu.
 
 ## Debugger
 
@@ -74,7 +74,7 @@ TUIs in [`examples/terminal/`](https://github.com/milo-language/milo/tree/main/e
 | [chihuahua](https://github.com/milo-language/milo/blob/main/examples/graphics/chihuahua.milo) | DVD-logo-style bouncing screensaver with a shaded pixel-art sprite |
 | [splitPty](https://github.com/milo-language/milo/blob/main/examples/terminal/splitPty.milo) | Two commands side-by-side in real PTYs; a mini tmux |
 | [flightController](https://github.com/milo-language/milo/blob/main/examples/embedded/flightController.milo) | Single-axis PID altitude controller with an interactive TUI |
-| [menu](https://github.com/milo-language/milo/blob/main/examples/emulators/menu.milo) | Fullscreen SDL retro-console front-end with a gamepad/keyboard ROM picker |
+| [menu](https://github.com/milo-language/emulators/blob/main/menu.milo) | Fullscreen SDL retro-console front-end with a gamepad/keyboard ROM picker |
 
 ## Servers & network apps
 
@@ -91,7 +91,7 @@ TUIs in [`examples/terminal/`](https://github.com/milo-language/milo/tree/main/e
 
 | Program | What it is |
 |---------|-----------|
-| [milojs](https://github.com/milo-language/milo/tree/main/examples/runtimes/milojs) | A JavaScript engine in Milo: parser, evaluator, mark-sweep GC. Runs express |
+| [milojs](https://github.com/milo-language/milojs) | A JavaScript engine in Milo: parser, evaluator, mark-sweep GC. Runs express |
 | [kvstore](https://github.com/milo-language/milo/blob/main/examples/basics/kvstore.milo) | Page-based key-value store with cursors, in the sled/buffer-pool style |
 | [minilang](https://github.com/milo-language/milo/blob/main/examples/basics/minilang.milo) | Tree-walking interpreter for a small expression language |
 
@@ -99,7 +99,6 @@ TUIs in [`examples/terminal/`](https://github.com/milo-language/milo/tree/main/e
 
 | Program | What it is |
 |---------|-----------|
-| [src-milo](https://github.com/milo-language/milo/tree/main/src-milo) | The Milo compiler, in Milo. Self-hosting: it compiles itself, and the result is identical every time |
 | [smtSolve](https://github.com/milo-language/milo/blob/main/tools/smtSolve.milo) | The SMT solver behind `milo prove`. Milo's contracts are discharged by a Milo binary |
 | [fmt](https://github.com/milo-language/milo/blob/main/examples/cli-tools/fmt.milo) | The Milo source formatter, in Milo |
 
@@ -124,11 +123,18 @@ Coreutils-style tools in [`examples/cli-tools/`](https://github.com/milo-languag
 
 ## Run these yourself
 
-Every program above is a single `.milo` file. Clone the repo and run or build any of them with the `./milo` wrapper:
+Clone the repo and run or build any of the `examples/` programs with the `./milo` wrapper:
 
 ```bash
 ./milo run examples/cli-tools/grep.milo -- "hello" myfile.txt
 ./milo build examples/net/serve.milo -o serve && ./serve
+```
+
+The emulators and milojs live in their own repos; clone them next to an installed `milo` and run them the same way:
+
+```bash
+git clone https://github.com/milo-language/emulators && emulators/arcade.sh <rom>
+git clone https://github.com/milo-language/milojs && milo run milojs/milojs.milo app.js
 ```
 
 ### A taste: grep in Milo

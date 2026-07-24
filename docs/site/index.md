@@ -121,7 +121,7 @@ fn main() {
         <h3>NES Emulator</h3>
         <p>A complete Nintendo, playable right here in your browser.</p>
         <div class="tile-tags"><span>6502 core</span><span>bitwise</span><span>emit-js</span><span>SDL</span></div>
-        <span class="tile-copy" role="button" tabindex="0" data-cmd="examples/emulators/arcade.sh <rom.nes>" title="examples/emulators/arcade.sh <rom.nes>">⧉ copy run command</span>
+        <span class="tile-copy" role="button" tabindex="0" data-cmd="git clone https://github.com/milo-language/emulators && emulators/arcade.sh <rom.nes>" title="git clone https://github.com/milo-language/emulators && emulators/arcade.sh <rom.nes>">⧉ copy run command</span>
       </a>
       <a class="tile" href="/milo/genesis/">
         <img class="tile-img" src="/showcase/genesis.png" alt="Sonic the Hedgehog running on the Milo Genesis emulator" loading="lazy">
@@ -129,7 +129,7 @@ fn main() {
         <h3>Genesis Emulator</h3>
         <p>A complete Sega Genesis. Sonic runs.</p>
         <div class="tile-tags"><span>68000 + Z80</span><span>DMA</span><span>emit-js</span><span>SDL</span></div>
-        <span class="tile-copy" role="button" tabindex="0" data-cmd="examples/emulators/arcade.sh <rom.md>" title="examples/emulators/arcade.sh <rom.md>">⧉ copy run command</span>
+        <span class="tile-copy" role="button" tabindex="0" data-cmd="git clone https://github.com/milo-language/emulators && emulators/arcade.sh <rom.md>" title="git clone https://github.com/milo-language/emulators && emulators/arcade.sh <rom.md>">⧉ copy run command</span>
       </a>
       <a class="tile" href="/milo/snes/">
         <img class="tile-img" src="/showcase/snes.png" alt="Super Mario World running on the Milo SNES emulator" loading="lazy">
@@ -137,25 +137,19 @@ fn main() {
         <h3>SNES Emulator</h3>
         <p>A Super Nintendo. Mario World, Donkey Kong Country, Star Fox.</p>
         <div class="tile-tags"><span>Super FX GSU</span><span>bitwise</span><span>emit-js</span></div>
-        <span class="tile-copy" role="button" tabindex="0" data-cmd="examples/emulators/arcade.sh <rom.sfc>" title="examples/emulators/arcade.sh <rom.sfc>">⧉ copy run command</span>
+        <span class="tile-copy" role="button" tabindex="0" data-cmd="git clone https://github.com/milo-language/emulators && emulators/arcade.sh <rom.sfc>" title="git clone https://github.com/milo-language/emulators && emulators/arcade.sh <rom.sfc>">⧉ copy run command</span>
       </a>
     </div>
   </div>
   <div class="cat cat-lang">
     <h3 class="cat-head">Compilers &amp; interpreters</h3>
     <div class="tile-grid">
-      <a class="tile" href="https://github.com/milo-language/milo/tree/main/src-milo">
-        <h3>The Compiler</h3>
-        <p>The Milo compiler is written in Milo. It compiles itself.</p>
-        <div class="tile-tags"><span>self-hosting</span><span>LLVM IR</span><span>monomorphization</span></div>
-        <span class="tile-copy" role="button" tabindex="0" data-cmd="sh scripts/selfhost.sh" title="sh scripts/selfhost.sh">⧉ copy run command</span>
-      </a>
-      <a class="tile" href="https://github.com/milo-language/milo/tree/main/examples/runtimes/milojs">
+      <a class="tile" href="https://github.com/milo-language/milojs">
         <img class="tile-img" src="/showcase/js-engine.png" alt="milojs REPL evaluating console.log('Woof!')" loading="lazy">
         <h3>JS Engine</h3>
         <p>A JavaScript engine and Node-compatible runtime — runs real npm apps (express, tRPC, zod).</p>
         <div class="tile-tags"><span>mark-sweep GC</span><span>closures</span><span>event loop</span><span>TLS fetch</span></div>
-        <span class="tile-copy" role="button" tabindex="0" data-cmd="milo run examples/runtimes/milojs/milojs.milo examples/runtimes/milojs/bench/realistic.js" title="milo run examples/runtimes/milojs/milojs.milo examples/runtimes/milojs/bench/realistic.js">⧉ copy run command</span>
+        <span class="tile-copy" role="button" tabindex="0" data-cmd="git clone https://github.com/milo-language/milojs && milo run milojs/milojs.milo milojs/bench/realistic.js" title="git clone https://github.com/milo-language/milojs && milo run milojs/milojs.milo milojs/bench/realistic.js">⧉ copy run command</span>
       </a>
       <a class="tile" href="https://github.com/milo-language/milo/blob/main/tools/smtSolve.milo">
         <h3>The Prover</h3>

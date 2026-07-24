@@ -1894,10 +1894,29 @@ export class Codegen {
   private emitDivByZeroCheck(lines: string[], divisor: string, dividend: string, llType: string, signed: boolean, bits: number, span?: { line: number; col: number }) {
     this.needsPrintf = true;
     this.needsExit = true;
+    const at = `${span?.line ?? 0}:${span?.col ?? 0}`;
+    const okLabel = this.nextLabel("divz.ok");
+    const zeroFail = this.nextLabel("divz.zero");
+
+    // The two causes get their own messages. Reporting the overflow as "division by zero"
+    // sends the reader hunting for a zero divisor that isn't there — the divisor is -1.
+    const abort = (label: string, msg: string) => {
+      lines.push(`${label}:`);
+      const s = this.addString(`${msg}\n`);
+      const errPtr = this.nextTemp();
+      lines.push(`  ${errPtr} = getelementptr [${s.length} x i8], ptr ${s.label}, i32 0, i32 0`);
+      lines.push(`  call i32 (ptr, ...) @printf(ptr ${errPtr})`);
+      lines.push(`  call void @exit(i32 1)`);
+      lines.push(`  unreachable`);
+    };
+
     const isZero = this.nextTemp();
     lines.push(`  ${isZero} = icmp eq ${llType} ${divisor}, 0`);
-    let flag = isZero;
     if (signed) {
+      const ovfCheck = this.nextLabel("divz.chkovf");
+      const ovfFail = this.nextLabel("divz.ovf");
+      lines.push(`  br i1 ${isZero}, label %${zeroFail}, label %${ovfCheck}`);
+      lines.push(`${ovfCheck}:`);
       const minVal = (-(BigInt(2) ** BigInt(bits - 1))).toString();
       const isMin = this.nextTemp();
       lines.push(`  ${isMin} = icmp eq ${llType} ${dividend}, ${minVal}`);
@@ -1905,20 +1924,12 @@ export class Codegen {
       lines.push(`  ${isNeg1} = icmp eq ${llType} ${divisor}, -1`);
       const ovf = this.nextTemp();
       lines.push(`  ${ovf} = and i1 ${isMin}, ${isNeg1}`);
-      const both = this.nextTemp();
-      lines.push(`  ${both} = or i1 ${isZero}, ${ovf}`);
-      flag = both;
+      lines.push(`  br i1 ${ovf}, label %${ovfFail}, label %${okLabel}`);
+      abort(ovfFail, `milo: division overflow (i${bits}::MIN / -1) at ${at}`);
+    } else {
+      lines.push(`  br i1 ${isZero}, label %${zeroFail}, label %${okLabel}`);
     }
-    const okLabel = this.nextLabel("divz.ok");
-    const failLabel = this.nextLabel("divz.fail");
-    lines.push(`  br i1 ${flag}, label %${failLabel}, label %${okLabel}`);
-    lines.push(`${failLabel}:`);
-    const { label, length } = this.addString(`milo: division by zero at ${span?.line ?? 0}:${span?.col ?? 0}\n`);
-    const errPtr = this.nextTemp();
-    lines.push(`  ${errPtr} = getelementptr [${length} x i8], ptr ${label}, i32 0, i32 0`);
-    lines.push(`  call i32 (ptr, ...) @printf(ptr ${errPtr})`);
-    lines.push(`  call void @exit(i32 1)`);
-    lines.push(`  unreachable`);
+    abort(zeroFail, `milo: division by zero at ${at}`);
     lines.push(`${okLabel}:`);
   }
 

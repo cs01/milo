@@ -235,9 +235,10 @@ fn main() {
   <div class="cat cat-web">
     <h3 class="cat-head">Web &amp; networking</h3>
     <div class="tile-grid">
-      <a class="tile" href="https://github.com/milo-language/milo/tree/main/examples/net/weather">
+      <a class="tile" href="https://chadsmith.dev/weather/">
+        <span class="tile-play">▶ VISIT</span>
         <h3>Weather App</h3>
-        <p>A weather website served from a single static binary.</p>
+        <p>A weather website served from a single static binary — live at chadsmith.dev/weather.</p>
         <div class="tile-tags"><span>HTTP server</span><span>TLS fetch</span><span>JSON</span></div>
         <span class="tile-copy" role="button" tabindex="0" data-cmd="milo run examples/net/weather/app.milo" title="milo run examples/net/weather/app.milo">⧉ copy run command</span>
       </a>

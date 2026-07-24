@@ -24,6 +24,8 @@ ensures result >= 0
 }
 ```
 
+`result` is a keyword, valid in `ensures` clauses: it stands for the return value.
+
 With the contract in place, there are three ways it gets enforced. Which one you get is **not** decided by the optimization level — it is decided by whether the compiler can see the value.
 
 ### 1. A static value — rejected at compile time
@@ -133,30 +135,7 @@ The negative never reaches `sqrt` now — `raw < 0` returns `0`, a defined resul
 
 By default `milo prove` uses `std/smt`, a solver written in Milo and shipped in the standard library, so the walkthrough above needs nothing installed. It is not in Z3's league: it decides linear integer arithmetic — `+`, `-`, comparisons, multiplication by a constant — and returns `unknown` on the rest, including `n * n` and recursion. Pass `--solver=z3` to send the same obligations to Z3, which decides those too, or `--emit-smt` to print them as SMT-LIB2 for another tool.
 
-## Why types aren't enough
-
-Types catch a lot — you can't pass a `String` where an `i64` is expected. But they can't express *value* constraints. Consider a square root function:
-
-```milo
-fn sqrt(n: f64): f64 {
-    // ...
-}
-```
-
-The type system says `n` is an `f64`. It doesn't say `n` must be non-negative — so a caller can pass `-1.0` and get garbage (or a panic) at runtime. That's a logic error hiding behind a perfectly valid type signature.
-
-With a contract, the constraint is explicit and compiler-checked:
-
-```milo
-fn sqrt(n: f64): f64
-  requires n >= 0.0
-  ensures result >= 0.0
-{
-    // ...
-}
-```
-
-`result` is a special keyword in `ensures` clauses — it refers to the return value of the function.
+## What types can't say
 
 A fair objection to the walkthrough: its `requires n >= 0` is on an `i64`, and declaring `n: u64` would carry that constraint in the type instead. True — where a type *can* state the rule, use the type. Contracts are for the rules no type can hold:
 

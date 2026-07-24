@@ -115,7 +115,7 @@ fn main() {
 <div class="showcase">
   <div class="showcase-head">
     <h2>Built with Milo</h2>
-    <p>We build the language by building things with it. We dogfood Milo to get a feedback loop that helps us continuously improve the safety and ergonomics of the language.</p>
+    <p>Milo is young — still a puppy 🐶 — but we have built a lot with it already. Real programs are how we find out what actually works, and every rough edge we hit goes back into the language.</p>
   </div>
   <div class="cat cat-emu">
     <h3 class="cat-head">Emulators</h3>

@@ -7,9 +7,9 @@ Milo lets you write down what your functions promise — and then prove it.
 
 A few points up front:
 
-- **Zero runtime cost.** Contracts are checked for well-formedness at compile time but never inserted into the binary.
-- **Proving is separate.** The compiler catches ill-formed contracts (type errors, bad references). To verify contracts actually *hold*, run `milo verify` to export SMT-LIB2 and pipe it to a solver like [Z3](https://github.com/Z3Prover/z3). This is the same architecture used by SPARK/Ada and Dafny.
-- **Ownership already covers memory safety.** Contracts extend that to *logic errors* — the class of bugs that use-after-free protection can't catch.
+- **Free in optimized builds, checked in debug builds.** At `-O1`/`-O2`/`-O3` (the default) contracts are not emitted — zero runtime cost. Under `--debug`, or `--overflow-checks` at any `-O`, every `requires`, `ensures`, and `invariant` becomes a runtime assert that aborts with `runtime error: requires clause violated at file:line`.
+- **Three levels of checking.** The compiler rejects ill-formed contracts (type errors, bad references) and *also* rejects call sites it can prove violate a `requires` outright. `milo prove` discharges the rest against a solver. `--debug` catches whatever the solver left `unknown`.
+- **Memory safety is already handled** — by ownership and move checking at compile time (use-after-free, double-free), plus always-on bounds checks and generational arena handles at runtime. Contracts extend that to *logic errors*, which none of those catch.
 
 ## Why types aren't enough
 
@@ -38,7 +38,7 @@ fn sqrt(n: f64): f64
 
 Now anyone reading this function knows exactly what it needs and what it promises.
 
-What about runtime values? If `n` comes from a sensor reading, nobody can prove it's non-negative at compile time. That's not what verification does. What `milo verify` + Z3 actually checks is the *chain of proof obligations*: if you call `sqrt(sensorValue)` without first checking `sensorValue >= 0.0`, the verifier flags it. You still write a runtime check at the boundary where unknown data enters — the proof just guarantees you never forgot one.
+What about runtime values? If `n` comes from a sensor reading, nobody can prove it's non-negative at compile time. That's not what verification does. What `milo prove` checks is the *chain of proof obligations*: if you call `sqrt(sensorValue)` without first checking `sensorValue >= 0.0`, the prover flags it. You still write a runtime check at the boundary where unknown data enters — the proof just guarantees you never forgot one.
 
 ```milo
 fn processSensor(raw: f64): f64 {
@@ -49,7 +49,7 @@ fn processSensor(raw: f64): f64 {
 }
 ```
 
-This is the gap contracts fill: **types describe the shape of data, contracts describe the rules about values.** Milo's ownership system prevents memory bugs (use-after-free, data races, null dereferences). Contracts extend that to logic errors — the bugs that memory safety alone can't catch, and that runtime checks alone can't guarantee you remembered everywhere.
+This is the gap contracts fill: **types describe the shape of data, contracts describe the rules about values.** Milo already rules out the memory bugs — use-after-free and double-free at compile time via ownership and move checking, out-of-bounds via bounds checks that stay on at every optimization level, null dereferences by not having null. Contracts extend that to logic errors — the bugs that memory safety alone can't catch, and that runtime checks alone can't guarantee you remembered everywhere.
 
 ## Why an SMT solver?
 
@@ -64,11 +64,20 @@ fn clamp(value: i64, lo: i64, hi: i64): i64
 { ... }
 ```
 
-The compiler confirms `lo <= hi` is a valid boolean expression over `i64` parameters. It does **not** analyze callers to verify they always pass `lo <= hi`, nor does it trace the function body to prove the postcondition. Those are *semantic* properties that require reasoning about values, paths, and arithmetic — exactly what SMT solvers are designed for.
+The compiler confirms `lo <= hi` is a valid boolean expression over `i64` parameters. Where the argument values are visible at the call site it goes further and rejects the call outright:
 
-`milo verify` bridges the gap: it translates your contracts into SMT-LIB2 formulas that encode the question "can this contract be violated?" If Z3 answers `unsat`, no violation is possible. If it answers `sat`, there's a concrete counterexample. This is the same architecture used by SPARK/Ada and Dafny — contracts live in the source, proofs run externally.
+```
+error: requires clause 'n >= 0' violated
+  ──> main.milo:10:11
+10 │     print(half(-8))
+   │           ^
+```
 
-**In short:** the compiler catches *ill-formed* contracts (type errors, unknown variables). The SMT solver catches *violated* contracts (logic errors, missed edge cases). Both are needed.
+But that only reaches as far as constant folding does. Whether `clamp` upholds its postcondition on *every* path, for every symbolic input, is a semantic property that requires reasoning about values, paths, and arithmetic — exactly what SMT solvers are designed for.
+
+`milo prove` bridges the gap: it translates contracts into SMT-LIB2 formulas encoding "can this contract be violated?", including a path-sensitive encoding of the function body, and discharges them. `unsat` means no violation is possible; `sat` means there's a concrete counterexample.
+
+**In short:** the compiler catches *ill-formed* contracts and locally-obvious violations. The solver catches the rest — violations that only show up over symbolic inputs and all paths. Anything the solver leaves `unknown` is still caught at runtime in a `--debug` build.
 
 ## WCET analysis
 
@@ -167,35 +176,70 @@ error: requires clause must be bool, got i64
   |            ^^^^^
 ```
 
-Note: the compiler does **not** verify that contracts hold — it only checks that they are well-typed. To prove correctness, export verification conditions with `milo verify` and check them with an SMT solver (see below).
+Beyond well-typedness, the compiler rejects call sites whose arguments it can constant-fold into a `requires` violation. Everything else is left to `milo prove`.
 
-## Verification condition export — `milo verify`
+## Proving contracts — `milo prove`
 
-The `verify` command translates contracts into [SMT-LIB2](https://smtlib.cs.uiowa.edu/) format — the standard input language for theorem provers like [Z3](https://github.com/Z3Prover/z3) and [CVC5](https://cvc5.github.io/).
+`milo prove` generates the verification conditions and discharges them. No external solver is required: the default engine is `std/smt`, a prover written in Milo itself.
+
+```bash
+milo prove tests/fixtures/contracts.milo
+```
+
+```
+verification: 4 conditions
+  proven: 3  failed: 0  unknown: 1  errors: 0
+
+  ✓ [postcondition] clamp: proven
+  ? [postcondition] factorial: unknown — outside linear fragment (std/smt)
+  ✓ [precondition] main: proven
+  ✓ [precondition] main: proven
+```
+
+The outcomes are distinct and the distinction matters: `proven` means the condition holds on every path. `failed` means there is a counterexample. `unknown` means *this engine* could not decide it — not that the contract is wrong. `std/smt` covers the linear-arithmetic fragment; non-linear multiplication, bitwise operators, and recursion fall outside it.
+
+For non-linear arithmetic, hand the conditions to Z3:
+
+```bash
+milo prove flight_controller.milo --solver=z3      # requires z3 on PATH
+milo prove flight_controller.milo --all            # include imported stdlib
+```
+
+```
+? [postcondition] sq: unknown — outside linear fragment (std/smt)    # ensures result >= 0 over n * n
+✓ [postcondition] sq: proven                                         # same condition, --solver=z3
+```
+
+Recursion is a gap in the *encoding*, not in the solver: a recursive call is emitted as an undeclared symbol, so Z3 reports an error on it rather than a verdict. Recursive postconditions are not provable by either engine today.
+
+### Exporting the raw conditions — `milo verify`
+
+`milo verify` emits the underlying [SMT-LIB2](https://smtlib.cs.uiowa.edu/) so you can pipe it to [Z3](https://github.com/Z3Prover/z3), [CVC5](https://cvc5.github.io/), or your own tooling:
 
 ```bash
 milo verify flight_controller.milo
 ```
 
-This outputs verification conditions that you can pipe to Z3:
-
 ```
-── precondition ── clamp ──
-precondition of clamp: (<= lo hi)
-(set-logic QF_LIA)
+── postcondition ── clamp ──
+postcondition of clamp: (and (>= result lo) (<= result hi))
+; Postcondition proof for clamp
+(set-logic ALL)
 (declare-const value Int)
 (declare-const lo Int)
 (declare-const hi Int)
-(assert (not (<= lo hi)))
+(declare-const result Int)
+(assert (<= lo hi))
+(assert (or (and (< value lo) (= result lo)) (and (and (not (< value lo)) (> value hi)) (= result hi)) (and (and (not (< value lo)) (not (> value hi))) (= result value))))
+(assert (not (and (>= result lo) (<= result hi))))
 (check-sat)
-; sat = precondition can be violated, unsat = always holds
 ```
 
-If Z3 returns `unsat`, the condition always holds. If it returns `sat`, there exists a counterexample where the contract can be violated.
+The middle `assert` is the function body: one disjunct per return path, each guarded by the branch conditions that reach it. The last `assert` negates the postcondition, so `unsat` means the postcondition always holds and `sat` yields a counterexample.
 
-**Current limitations:** Verification condition generation currently covers preconditions and loop invariants. Postcondition verification requires modeling the function body (weakest-precondition analysis), which is not yet implemented — postcondition VCs are exported but do not model the relationship between inputs and return values. This is an active area of development.
+**Current limitations:** the encoding covers preconditions, postconditions, and loop invariants over scalar arithmetic. Outside that — bitwise operators, indexing, `Vec` lengths through a builder, struct fields as loop invariants, recursion — conditions come back `unknown` (or, for recursion under `--solver=z3`, `error`), never a false `failed`. Build with `--debug` to catch those at runtime instead.
 
-This approach — contracts as source-level annotations with SMT export — is similar to SPARK/Ada and Dafny. Unlike SPARK, Milo does not bundle a solver or run verification automatically; you need Z3 or CVC5 installed separately. The advantage over external annotation languages is that contracts use Milo syntax and are type-checked alongside your code.
+This approach — contracts as source-level annotations, discharged by a solver — is the same architecture as SPARK/Ada and Dafny. Unlike SPARK, Milo ships its prover in the standard library, so the common case needs nothing installed; Z3 or CVC5 are opt-in for the theories `std/smt` doesn't model yet.
 
 ## Safety profiles — `milo safety`
 

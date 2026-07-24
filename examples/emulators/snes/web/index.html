@@ -79,6 +79,17 @@
   <span id="fps"></span>
 </div>
 
+<!-- One-click free homebrew (fetched from retrobrews' own CORS-open hosting) -->
+<div id="bar">
+  <span style="color:#8b949e">Free homebrew:</span>
+  <button data-rom="https://raw.githubusercontent.com/retrobrews/snes-games/master/questformoney.sfc">UWOL</button>
+  <button data-rom="https://raw.githubusercontent.com/retrobrews/snes-games/master/superbossgaiden.sfc">Super Boss Gaiden</button>
+  <button data-rom="https://raw.githubusercontent.com/retrobrews/snes-games/master/blt.sfc">BLT</button>
+  <button data-rom="https://raw.githubusercontent.com/retrobrews/snes-games/master/bucket.smc">Bucket</button>
+  <button data-rom="https://raw.githubusercontent.com/retrobrews/snes-games/master/megafamilybros.smc">Mega Family Bros</button>
+  <button data-rom="https://raw.githubusercontent.com/retrobrews/snes-games/master/hilda.sfc">Hilda</button>
+</div>
+
 <!-- Your own ROMs, served same-origin by serve.ts. Hidden on the public build. -->
 <div id="localBar" style="display:none">
   <span style="color:#8b949e">Your ROMs:</span>
@@ -214,6 +225,15 @@ async function loadUrl(url, label) {
     statusEl.textContent = "Could not load " + (label || url) + " — host must allow CORS. " + e.message;
   }
 }
+// data-rom="<url>" on any button loads that ROM on click.
+for (const btn of document.querySelectorAll("[data-rom]")) {
+  btn.addEventListener("click", () => loadUrl(btn.dataset.rom, btn.textContent));
+}
+
+// Auto-start a game so the page is alive on load (video only until a gesture
+// unlocks audio). Pick the first homebrew button's ROM as the default.
+const firstRom = document.querySelector("[data-rom]");
+if (firstRom) loadUrl(firstRom.dataset.rom, firstRom.textContent);
 
 document.getElementById("rom").addEventListener("change", e => { if (e.target.files[0]) loadFile(e.target.files[0]); });
 pauseBtn.addEventListener("click", () => {

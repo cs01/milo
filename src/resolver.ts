@@ -337,8 +337,11 @@ export function resolveImports(program: Program, sourceDir: string, target: Targ
   // Externs are exempt (redeclarations all bind the same C symbol).
   const stripSpan = (k: string, v: unknown) =>
     k === "span" ? undefined : typeof v === "bigint" ? `${v}n` : v;
+  // `isPub` is stripped too: visibility is not part of a body. Two files can hold
+  // the identical helper with only one of them exported, and that still merges —
+  // enforcement reads per-file pub-ness from declOrigins, not from the merged decl.
   const stripForCompare = (k: string, v: unknown) =>
-    k === "span" || k === "sourceFile" ? undefined : typeof v === "bigint" ? `${v}n` : v;
+    k === "span" || k === "sourceFile" || k === "isPub" ? undefined : typeof v === "bigint" ? `${v}n` : v;
   // Signature identity ignores param *names* — only arity, param types, and the
   // return type decide whether one fn can stand in for another.
   const sigKey = (f: typeof functions[number]) =>

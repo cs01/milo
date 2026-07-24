@@ -59,6 +59,24 @@ fn main(): void {
   expect(r.out.trim()).toBe("14");
 });
 
+test("identical bodies merge even when only one copy is pub", () => {
+  // Visibility is not part of a body. `helper` is exported from one file and
+  // private in the other; the merge must still see one implementation, and the
+  // exported copy must stay importable from a third file.
+  write("pubsame_a.milo", `pub fn helper(): i64 { return 7 }\npub fn fromA(): i64 { return helper() }\n`);
+  write("pubsame_b.milo", `fn helper(): i64 { return 7 }\npub fn fromB(): i64 { return helper() }\n`);
+  const main = write("pubsame_main.milo", `from "pubsame_a" import { fromA, helper }
+from "pubsame_b" import { fromB }
+fn main(): void {
+    print(fromA() + fromB() + helper())
+}
+`);
+  const r = milo(`run ${main}`);
+  expect(r.err).toBe("");
+  expect(r.code).toBe(0);
+  expect(r.out.trim()).toBe("21");
+});
+
 test("user redefinition of a prelude fn (same signature) warns but still overrides", () => {
   // Same signature as std/string's strIndexOf, different body. Compiles — the sigs
   // match — but the flat namespace makes this body win everywhere, so it warns

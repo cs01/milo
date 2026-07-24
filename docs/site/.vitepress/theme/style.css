@@ -122,7 +122,7 @@
   max-width: 720px;
   margin: 0 auto 3rem;
   padding: 0 24px;
-  text-align: center;
+  text-align: left;
   font-size: 1.15rem;
   line-height: 1.7;
   color: var(--vp-c-text-1);
@@ -134,26 +134,17 @@
 }
 .intro a:hover { text-decoration: underline; }
 
-/* The intro is centered prose, but a list of links reads better ragged-right. */
 .intro ul {
-  display: inline-block;
-  text-align: left;
   margin: 0;
-  padding-left: 1.2rem;
-  list-style: none;
+  padding-left: 1.3rem;
+  list-style: disc;
 }
 .intro li {
-  position: relative;
   margin: 0.55rem 0;
   font-size: 1.05rem;
   color: var(--vp-c-text-2);
 }
-.intro li::before {
-  content: "→";
-  position: absolute;
-  left: -1.2rem;
-  color: var(--vp-c-brand-1);
-}
+.intro li::marker { color: var(--vp-c-brand-1); }
 
 .section-break {
   max-width: 720px;

@@ -16,7 +16,7 @@ Everything else follows from keeping that rule simple:
 - **Errors point at real problems** — a rejected program usually has a genuine flaw in how data flows or who owns what. The fix tends to make the structure clearer.
 - **Zero-cost safety** — the guarantees are checked at compile time and cost nothing at runtime. Safe code compiles to the same machine code you'd write by hand.
 - **Readable without a manual** — if you know a mainstream language, you can read Milo code and follow what it does. Little to memorize before you're productive.
-- **Proof is shipped software** — a full showcase to check out, from emulators to webapps to CLI tools and more.
+- **We improve it by dogfooding it** - we've already built a variety of programs with Milo that you can run today!
 
 ## Hello, Milo
 

@@ -62,7 +62,10 @@ Push to main is allowed org-wide. Note `milo` itself sits at `~/git/milo`, *outs
 
 Three traps in the paths above:
 
-- `~/git/milo/examples/emulators` is **in-repo example code**, not the `emulators` repo.
+- The emulators and the debugger were deleted from `examples/` once they got their own repos —
+  `examples/emulators` and `examples/tools/hades` are gone from `main`, so work on them in the
+  clones above. Untracked leftovers (ROMs, `node_modules`, built binaries) may still sit at the
+  old paths on this machine; they are not the source.
 - `~/git/milo-blackhat` is a second clone of `milo-language/milo`, not a separate project.
 - `~/git/hades` is a local-only leftover from before the `hades` → `dapweb` rename. It has
   **no git remote** and carries commits whose subjects appear nowhere in `dapweb`. It is not

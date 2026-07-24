@@ -1,9 +1,13 @@
 ---
 name: emu-debug
-description: Diagnose emulator bugs (black screen, garbled graphics, freezes, derails) in examples/emulators/{nes,snes,genesis}. Use whenever a game renders wrong, hangs, goes black, or crashes in a Milo emulator — BEFORE reading emulator source or guessing.
+description: Diagnose emulator bugs (black screen, garbled graphics, freezes, derails) in ~/git/milo-language/emulators/{nes,snes,genesis}. Use whenever a game renders wrong, hangs, goes black, or crashes in a Milo emulator — BEFORE reading emulator source or guessing.
 ---
 
 # Emulator debugging
+
+The emulators are their own repo (`milo-language/emulators`, cloned at
+`~/git/milo-language/emulators`); the compiler is this one. A bug is usually theirs, but the
+same harnesses are how you prove it is the compiler's.
 
 Battle-tested triage for the Milo NES / SNES / Genesis emulators. The #1 failure
 mode of agents debugging these: staring at pixels or source code before reading
@@ -26,7 +30,7 @@ sessions stacked ~300% CPU of dead `/tmp/*_ctrl` / `/tmp/menu` orphans once.
   leftovers are greppable.
 - **When done, sweep for survivors** (do this at the end of any emu session):
   ```bash
-  pkill -9 -f '/tmp/(snes|nes|gen|menu)' ; pkill -9 -f 'examples/emulators/retro/bin/'
+  pkill -9 -f '/tmp/(snes|nes|gen|menu)' ; pkill -9 -f 'emulators/retro/bin/'
   ps -Ao pid,ppid,%cpu,command -r | grep -Ei '_ctrl|retro/bin|/tmp/menu' | grep -v grep
   ```
   Orphans show `PPID 1` — kill by PID if the pattern misses.
@@ -42,12 +46,12 @@ ffmpeg -y -loglevel error -i out.ppm out.png   # then Read the .png
 
 | System | Harness | Notes |
 |---|---|---|
-| SNES | `examples/emulators/snes/dbg.milo` | **the full diagnoser** — see below |
-| NES | `examples/emulators/nes/shot.milo` → `/tmp/shot <rom> <frames> <out.rgb>` | raw RGB24: `ffmpeg -f rawvideo -pixel_format rgb24 -video_size 256x240 -i out.rgb -y out.png`. No input injection — copy dbg.milo's `--press` pattern in if you need menus |
-| Genesis | `examples/emulators/genesis/bootRun.milo` | traces 68k boot + dumps VDP state + PPM |
+| SNES | `~/git/milo-language/emulators/snes/dbg.milo` | **the full diagnoser** — see below |
+| NES | `~/git/milo-language/emulators/nes/shot.milo` → `/tmp/shot <rom> <frames> <out.rgb>` | raw RGB24: `ffmpeg -f rawvideo -pixel_format rgb24 -video_size 256x240 -i out.rgb -y out.png`. No input injection — copy dbg.milo's `--press` pattern in if you need menus |
+| Genesis | `~/git/milo-language/emulators/genesis/bootRun.milo` | traces 68k boot + dumps VDP state + PPM |
 
-Build (SNES example): `bun run src/main.ts build examples/emulators/snes/dbg.milo -o /tmp/snes/dbg --debug`
-ROMs: `/tmp/snes/roms/{smw,dkc}.smc` (originals in `~/Downloads/nesgames/`; NES: `examples/emulators/nes/roms/`).
+Build (SNES example): `bun run src/main.ts build ~/git/milo-language/emulators/snes/dbg.milo -o /tmp/snes/dbg --debug`
+ROMs: `/tmp/snes/roms/{smw,dkc}.smc` (originals in `~/Downloads/nesgames/`; NES: `~/git/milo-language/emulators/nes/roms/`).
 
 ### SNES `dbg` flags
 
@@ -127,9 +131,9 @@ a gap, it's not a mystery — it's a feature to implement:
 **6. Oracle it.** When steps 1-5 leave a genuine core-behavior question:
 
 - **CPU single-instruction:** Harte SingleStepTests, already wired —
-  `examples/emulators/snes/harte.sh <opcode-hex …>` (65816), `harteSpc.sh` (SPC700),
+  `~/git/milo-language/emulators/snes/harte.sh <opcode-hex …>` (65816), `harteSpc.sh` (SPC700),
   Genesis `runHarte.milo`. Run the suspect opcodes, not the full suite.
-- **NES whole-game:** jsnes harness at `examples/emulators/nes/oracle/` (see its
+- **NES whole-game:** jsnes harness at `~/git/milo-language/emulators/nes/oracle/` (see its
   README). Diff register-write profiles or per-scanline tile/bank state
   frame-by-frame; find the first divergence.
 - **SNES whole-game:** no oracle wired yet. Set up Mesen2's Trace Logger and
@@ -155,11 +159,12 @@ user to play in the SDL emu and press **F5** at the broken moment → writes
 
 ## Institutional memory — read before deep-diving
 
-- `examples/emulators/snes/PROGRESS.md` — SNES status, milestones, reference links
+- `~/git/milo-language/emulators/snes/PROGRESS.md` — SNES status, milestones, reference links
   (fullsnes, snes.nesdev.org, Harte, krom).
-- `git log --oneline -- examples/emulators/<sys>/` — commit messages carry full
-  root-cause writeups of every bug fixed so far; search them for your symptom
-  (`git log --grep=latch -- examples/emulators/nes/`).
+- `git log --oneline -- <sys>/` **run inside the emulators clone** — commit messages carry
+  full root-cause writeups of every bug fixed so far; search them for your symptom
+  (`git log --grep=latch -- nes/`). History before the split is in the `milo` repo under
+  the old `examples/emulators/` paths.
 - Hard-won gotchas live in the user's memory notes (NES: IRQ level-OR not
   latch, MMC2 fetch-order latches; Genesis: DMA-fill on arm, IO regs power-on
   0, Z80 busreq/HALT; SNES: SPC handshake interleave, stack-wrap quirks).

@@ -24,20 +24,28 @@ jobs:
         with:
           bun-version: latest
 
+      # The emulators are their own repo; the docs site only hosts their browser
+      # builds. Checked out here so the deployed cores always match that repo's
+      # main — nothing emulator-shaped lives in this one.
+      - uses: actions/checkout@v4
+        with:
+          repository: milo-language/emulators
+          path: .emulators
+
       # Compile the Milo emulator cores to JS and stage each demo under the
       # VitePress public dir so they deploy at /milo/nes/, /milo/genesis/ and
-      # /milo/snes/. Source of truth stays in examples/emulators/*/web; the *-core.js
-      # files are regenerated here to match their webcore.milo.
+      # /milo/snes/. The *-core.js checked into the emulators repo is regenerated
+      # here so a compiler change can never ship a stale core.
       - name: Build Milo browser demos
         run: |
           bun install
-          bun run src/main.ts emit-js examples/emulators/nes/webcore.milo -o examples/emulators/nes/web/nes-core.js
-          bun run src/main.ts emit-js examples/emulators/genesis/genesisWebcore.milo -o examples/emulators/genesis/web/genesis-core.js
-          bun run src/main.ts emit-js examples/emulators/snes/snesWebcore.milo -o examples/emulators/snes/web/snes-core.js
+          bun run src/main.ts emit-js .emulators/nes/webcore.milo -o .emulators/nes/web/nes-core.js
+          bun run src/main.ts emit-js .emulators/genesis/genesisWebcore.milo -o .emulators/genesis/web/genesis-core.js
+          bun run src/main.ts emit-js .emulators/snes/snesWebcore.milo -o .emulators/snes/web/snes-core.js
           mkdir -p docs/site/public/nes docs/site/public/genesis docs/site/public/snes
-          cp examples/emulators/nes/web/index.html examples/emulators/nes/web/nes-core.js docs/site/public/nes/
-          cp examples/emulators/genesis/web/index.html examples/emulators/genesis/web/genesis-core.js docs/site/public/genesis/
-          cp examples/emulators/snes/web/index.html examples/emulators/snes/web/snes-core.js docs/site/public/snes/
+          cp .emulators/nes/web/index.html .emulators/nes/web/nes-core.js docs/site/public/nes/
+          cp .emulators/genesis/web/index.html .emulators/genesis/web/genesis-core.js docs/site/public/genesis/
+          cp .emulators/snes/web/index.html .emulators/snes/web/snes-core.js docs/site/public/snes/
 
       - name: Install dependencies
         run: cd docs/site && bun install

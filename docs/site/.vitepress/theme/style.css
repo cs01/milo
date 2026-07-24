@@ -197,6 +197,7 @@
 .cat-web  { --cat: #0d9488; }
 .cat-term { --cat: #ec4899; }
 .cat-crypto { --cat: #16a34a; }
+.cat-sim  { --cat: #ef4444; }
 .tile-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));

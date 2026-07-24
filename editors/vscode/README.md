@@ -1,6 +1,6 @@
 # Milo VS Code Extension
 
-Syntax highlighting + LSP client (`milod`) for Milo.
+Syntax highlighting + LSP client for Milo. The extension spawns the language server with `milo lsp` (`bun run src/main.ts lsp`) — there is no separate daemon to install.
 
 ## Install (local dev)
 

@@ -3,7 +3,7 @@ system: install
 purpose: how end users get a working milo (source-only; clone + wrapper on PATH)
 key-files: milo, install.sh, README.md
 update-when: the install path changes (e.g. prebuilt binaries/releases return) or the wrapper's PATH/symlink story changes
-last-verified: 2026-07-15
+last-verified: 2026-07-24
 -->
 
 # Installation
@@ -61,4 +61,21 @@ You should see:
 Hello, Milo!
 ```
 
-Next: [Quickstart →](./quickstart)
+## Editor support
+
+Milo ships an LSP server (`milo lsp`) with diagnostics, hover, and go-to-definition, plus a VS Code extension for syntax highlighting on top.
+
+**VS Code** — build and symlink the bundled extension:
+
+```bash
+cd editors/vscode && bun install && bun run build
+ln -s "$(pwd)" ~/.vscode/extensions/milo.milo-lang-0.2.0
+```
+
+Restart VS Code and open any `.milo` file.
+
+**Other editors** — point any LSP client at `milo lsp`.
+
+Full details, including what each feature does, are on the [IDE Setup →](./ide-setup) page.
+
+Next: [Your first program →](./quickstart)

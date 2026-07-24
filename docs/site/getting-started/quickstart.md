@@ -1,6 +1,4 @@
-# Quickstart
-
-## Your first program
+# Your first program
 
 Create `hello.milo`:
 

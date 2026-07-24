@@ -15,26 +15,22 @@ requires x > 0.0
 { ... }
 ```
 
-There are three separate moments where `x > 0.0` can be enforced. They are independent — the first and third always apply, the second only if you ask for it.
+What splits the cases is not the optimization level — it is whether the compiler can see the value.
 
-**1. At compile time, at every optimization level.** If the compiler can see the argument value, it rejects the program. `log2(-1.0)` does not build:
+**Values it can see are rejected at compile time, in every build.** `log2(-1.0)` fails to compile at `--debug`, `-O2`, and `--release` alike:
 
 ```
 error: requires clause 'x > 0.0' violated
   ──> main.milo:10:11
 ```
 
-This only reaches as far as constant folding does. A value read from a file or a sensor is invisible to it.
-
-**2. At compile time, when you run `milo prove`.** A separate command — `build` never runs it. It proves the contract holds for *every* input, not just the visible ones, and reports which obligations it could not decide. It does not change the binary.
-
-**3. At runtime, in `--debug` builds only.** Each `requires`, `ensures`, and `invariant` becomes an assert. Passing a negative value that reached your program at runtime prints and exits 1:
+**Values it can't see are asserted at runtime, in debug builds only.** A negative that arrived from a file or a sensor aborts under `--debug`, and goes unchecked at `-O1`/`-O2`/`-O3`, where nothing is emitted and the contract costs nothing:
 
 ```
 runtime error: requires clause violated at math.milo:2
 ```
 
-At `-O1`/`-O2`/`-O3` — the default for `milo build` — no check is emitted and the contract costs nothing. `--overflow-checks` turns the runtime asserts on at any optimization level.
+`--overflow-checks` turns those runtime asserts on at any optimization level. To cover the invisible values *statically* instead, run `milo prove` — a separate command that `build` never invokes, which proves the contract for every input and leaves the binary unchanged.
 
 Contracts are for *logic* errors. Memory safety is already handled elsewhere: ownership and move checking reject use-after-free and double-free at compile time, bounds checks stay on at every optimization level, and arenas use generational handles. None of those catch a negative logarithm.
 

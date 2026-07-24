@@ -134,34 +134,47 @@ The negative never reaches `sqrt` now — `raw < 0` returns `0`, a defined resul
 
 ### Loop invariants
 
-`requires` and `ensures` describe a function's boundary. `invariant` describes a loop: something that has to hold on every iteration. It sits between the `while` condition and the body, and a loop can carry more than one.
+`requires` and `ensures` describe a function's boundary. `invariant` describes a loop, and it exists for one reason: **the prover does not unroll loops.** It cannot — the trip count usually isn't known. So on the way out of a loop, everything the loop assigned is an unknown value, and an `invariant` is the only thing that survives to say something about it.
 
 ```milo
-from "std/random" import { randRange }
-
-pub fn drain(start: i64): i64
-requires start >= 0
+pub fn sumTo(n: i64): i64
+requires n >= 0
+ensures result >= 0
 {
-    var level = start
-    while level > 0
-    invariant level >= 0
+    var total: i64 = 0
+    var i: i64 = 1
+    while i <= n
+    invariant total >= 0
+    invariant i >= 1
     {
-        level = level - randRange(1, 3)   // a step can overshoot past zero
+        total = total + i
+        i = i + 1
     }
-    return level
+    return total
 }
 ```
 
-The loop guard says `level > 0`, but the step size doesn't divide evenly into it — a draw of `3` against a `level` of `2` lands on `-1`. Same rule as the rest of the walkthrough: in a debug build the invariant becomes a check, evaluated on every iteration.
-
 ```
-$ milo build drain.milo --debug -o drain && ./drain
-runtime error: invariant clause violated at drain.milo:8
-$ echo $?
-1
+$ milo prove sumTo.milo
+verification: 5 conditions
+  proven: 5  failed: 0  unknown: 0  errors: 0
 ```
 
-Safety profiles use the same clause as evidence rather than as a check — `do178c-a` and `nasa-a` require every `while` loop to carry an `invariant`.
+Five conditions from one loop: the postcondition, plus two per invariant — that it **holds on entry**, and that one pass through the body **re-establishes** it. That second half is why an invariant has to be inductive rather than merely true. Delete `invariant i >= 1` and the remaining one stops being provable:
+
+```
+  ✗ [loop-invariant] sumTo: failed — counterexample: total__loop0 = 0, i__loop1 = -1
+```
+
+`total >= 0` is true of every run of this function, but it isn't preserved *on its own*: nothing in it rules out a negative `i` dragging the sum below zero. The solver says so with the offending value. Adding `i >= 1` closes it.
+
+Delete both and the postcondition itself fails — `result` is simply unknown after the loop:
+
+```
+  ✗ [postcondition] sumTo: failed — counterexample: total__loop0 = -1, result = -1
+```
+
+Invariants are checked at runtime too, on every iteration, under the same rule as the rest of the walkthrough — `--debug`, or `--contract-checks` at any optimization level. And safety profiles use the clause as evidence rather than as a check: `do178c-a` and `nasa-a` require every `while` loop to carry one.
 
 ### Which solver
 

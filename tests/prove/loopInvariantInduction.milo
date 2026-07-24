@@ -1,0 +1,35 @@
+// @proven: 5
+// @failed: 0
+// @unknown: 0
+// Loop invariants carry a proof across a loop, by induction rather than unrolling.
+//
+// Three obligations per invariant, all discharged here:
+//   establishment — it holds on the way in, in the pre-loop state
+//   preservation  — invariant + guard + one pass through the body re-establishes it
+//   use           — after the loop, invariant + negated guard is what the postcondition
+//                   gets to assume (the loop's variables are fresh unknowns by then)
+//
+// `sumTo` needs BOTH clauses to be inductive: `total >= 0` alone is not preserved, because
+// nothing would stop `i` from being negative and driving the sum below zero. That is not a
+// solver weakness — it is the invariant being too weak, and the prover says so with a
+// counterexample naming the offending `i`.
+//
+// Count: 1 postcondition + establishment x2 + preservation x2 = 5, all decided by std/smt
+// with no external solver.
+pub fn sumTo(n: i64): i64
+requires n >= 0
+ensures result >= 0
+{
+    var total: i64 = 0
+    var i: i64 = 1
+    while i <= n
+    invariant
+    total >= 0
+    invariant
+    i >= 1
+    {
+        total = total + i
+        i = i + 1
+    }
+    return total
+}

@@ -1,0 +1,30 @@
+// @proven: 1
+// @failed: 1
+// @unknown: 0
+// Soundness: a loop must never be skipped, or the prover certifies false postconditions.
+//
+// The VC generator used to have no case for `WhileStmt` at all. Symbolic execution walked
+// straight past it, so the environment still held the PRE-loop value of every variable the
+// loop assigned — here `r` stayed `0`. `ensures result == 0` was reported **proven** for a
+// function that returns 5. That is a false proof: the worst answer a prover can give.
+//
+// The fix is havoc: every variable a loop assigns becomes a fresh unknown on the way out,
+// constrained only by whatever `invariant` was written (none here). So `result` is now some
+// unconstrained value, `== 0` is refuted, and the counterexample is real — `countUp(5)`
+// really does return 5.
+//
+// The 1 proven is main's own call-site obligation (countUp's `requires n >= 0` with 5).
+pub fn countUp(n: i64): i64
+requires n >= 0
+ensures result == 0
+{
+    var r: i64 = 0
+    while r < n {
+        r = r + 1
+    }
+    return r
+}
+
+pub fn main() {
+    print(countUp(5))
+}

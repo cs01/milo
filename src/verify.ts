@@ -194,6 +194,49 @@ function bitOpToSmt(op: string, leftStr: string, rightExpr: Expr): string | null
   return null;
 }
 
+// Every variable a statement list assigns to, including through nested control flow.
+// A loop's effect on the environment is unbounded, so these are the names that have to be
+// replaced by fresh unknowns (havoc) before execution can continue past it.
+function collectAssignedVars(stmts: Stmt[], out: Set<string>): void {
+  for (const stmt of stmts) {
+    switch (stmt.kind) {
+      case "Assign":
+        if (stmt.target.kind === "Ident") out.add(stmt.target.name);
+        else if (stmt.target.kind === "FieldAccess") {
+          const flat = flattenFieldAccess(stmt.target);
+          if (flat) out.add(flat);
+        }
+        break;
+      case "IfStmt":
+        collectAssignedVars(stmt.thenBody, out);
+        if (stmt.elseBody) collectAssignedVars(stmt.elseBody, out);
+        break;
+      case "IfLetStmt":
+        collectAssignedVars(stmt.thenBody, out);
+        if (stmt.elseBody) collectAssignedVars(stmt.elseBody, out);
+        break;
+      case "WhileStmt": collectAssignedVars(stmt.body, out); break;
+      case "ForInStmt": collectAssignedVars(stmt.body, out); break;
+      case "UnsafeBlock": collectAssignedVars(stmt.body, out); break;
+      case "LetElseStmt": collectAssignedVars(stmt.elseBody, out); break;
+      case "MatchStmt":
+        for (const arm of stmt.arms) collectAssignedVars(arm.body, out);
+        break;
+    }
+  }
+}
+
+// A loop that needs establishment/preservation obligations proved, captured while walking
+// the enclosing body so both are stated in the environment that actually reaches the loop.
+interface LoopObligation {
+  entryConds: string[];             // path conditions holding at loop entry
+  entryEnv: Map<string, string>;    // environment at loop entry, for establishment
+  havocEnv: Map<string, string>;    // entry env with modified vars replaced by fresh consts
+  guard: string;                    // loop condition, lowered in havocEnv
+  invariants: Contract[];
+  body: Stmt[];
+}
+
 // Symbolic path through a function body
 interface SymPath {
   conditions: string[];  // path conditions as SMT expressions
@@ -206,6 +249,10 @@ interface SymExecResult {
   paths: SymPath[];
   finalEnvs: { conditions: string[]; env: Map<string, string> }[];
   calls: CallSite[];
+  // Fresh constants introduced by havoc, to be spliced into the function's declaration
+  // block — path conditions reference them, so an undeclared one poisons every VC.
+  havocDecls: string[];
+  loops: LoopObligation[];
 }
 
 // A call reached during symbolic execution, with the path conditions that hold when it
@@ -234,85 +281,43 @@ function collectCallsInExpr(expr: Expr, conds: string[], env: Map<string, string
   }
 }
 
-function collectPaths(stmts: Stmt[], env: Map<string, string>): SymExecResult {
+function collectPaths(stmts: Stmt[], env: Map<string, string>, types?: Map<string, string>): SymExecResult {
   const paths: SymPath[] = [];
   const calls: CallSite[] = [];
+  const havocDecls: string[] = [];
+  const loops: LoopObligation[] = [];
+  const varTypes = new Map(types ?? []);
+  // Names must be deterministic: a body is walked more than once per function (call-site
+  // obligations, then postconditions) and the two runs have to agree on them, or the
+  // declaration block built from one run won't cover the path conditions from the other.
+  let havocSeq = 0;
 
-  function walk(stmts: Stmt[], idx: number, pathConds: string[], localEnv: Map<string, string>): void {
-    for (let i = idx; i < stmts.length; i++) {
-      const stmt = stmts[i];
-
-      if (stmt.kind === "LetDecl" || stmt.kind === "VarDecl") {
-        if (stmt.value) {
-          localEnv.set(stmt.name, exprToSmtWithEnv(stmt.value, localEnv));
-        }
-        continue;
-      }
-
-      if (stmt.kind === "Assign") {
-        if (stmt.target.kind === "Ident") {
-          localEnv.set(stmt.target.name, exprToSmtWithEnv(stmt.value, localEnv));
-        } else if (stmt.target.kind === "FieldAccess") {
-          const flat = flattenFieldAccess(stmt.target);
-          if (flat) localEnv.set(flat, exprToSmtWithEnv(stmt.value, localEnv));
-        }
-        continue;
-      }
-
-      if (stmt.kind === "Return") {
-        const val = stmt.value ? exprToSmtWithEnv(stmt.value, localEnv) : "0";
-        paths.push({ conditions: [...pathConds], result: val });
-        return;
-      }
-
-      if (stmt.kind === "UnsafeBlock") {
-        // transparent — process inner statements but skip unhandled ones (while loops, etc.)
-        for (const inner of stmt.body) {
-          if (inner.kind === "Assign") {
-            if (inner.target.kind === "Ident") {
-              localEnv.set(inner.target.name, exprToSmtWithEnv(inner.value, localEnv));
-            } else if (inner.target.kind === "FieldAccess") {
-              const flat = flattenFieldAccess(inner.target);
-              if (flat) localEnv.set(flat, exprToSmtWithEnv(inner.value, localEnv));
-            }
-          } else if (inner.kind === "LetDecl" || inner.kind === "VarDecl") {
-            if (inner.value) localEnv.set(inner.name, exprToSmtWithEnv(inner.value, localEnv));
-          } else if (inner.kind === "Return") {
-            const val = inner.value ? exprToSmtWithEnv(inner.value, localEnv) : "0";
-            paths.push({ conditions: [...pathConds], result: val });
-            return;
-          }
-          // skip while loops, calls, etc. in unsafe — they don't affect provable state
-        }
-        continue;
-      }
-
-      if (stmt.kind === "IfStmt") {
-        const cond = exprToSmtWithEnv(stmt.cond, localEnv);
-        // then branch
-        const thenEnv = new Map(localEnv);
-        walk(stmt.thenBody, 0, [...pathConds, cond], thenEnv);
-        // else/fall-through with negated condition
-        const elseEnv = new Map(localEnv);
-        const negCond = `(not ${cond})`;
-        if (stmt.elseBody && stmt.elseBody.length > 0) {
-          walk(stmt.elseBody, 0, [...pathConds, negCond], elseEnv);
-        } else if (branchAlwaysReturns(stmt.thenBody)) {
-          // then always returns → fall through rest of function with negated condition
-          walk(stmts, i + 1, [...pathConds, negCond], elseEnv);
-        } else {
-          walk(stmts, i + 1, [...pathConds, negCond], elseEnv);
-        }
-        return;
-      }
+  // Replace every variable the block assigns with a fresh constant of the same type. This
+  // is the only sound way past a loop without unrolling it: whatever the loop did, the
+  // value afterwards is *some* value, constrained only by an invariant if one was written.
+  function havoc(block: Stmt[], localEnv: Map<string, string>): Map<string, string> {
+    const mods = new Set<string>();
+    collectAssignedVars(block, mods);
+    const out = new Map(localEnv);
+    for (const name of mods) {
+      const fresh = `${name.replace(/[^A-Za-z0-9_]/g, "_")}__loop${havocSeq++}`;
+      // No annotation and no float literal to learn from means Int, matching how the rest
+      // of this file treats an unknown type. A float local would be modelled as an integer
+      // here, which is why floatish() also looks at the initializer.
+      const typeName = varTypes.get(name) ?? "i64";
+      havocDecls.push(`(declare-const ${fresh} ${miloTypeToSmt(typeName)})`);
+      const range = intRangeAssumption(fresh, typeName);
+      if (range) havocDecls.push(range);
+      CALL_MODEL?.scope.add(fresh);
+      out.set(name, fresh);
     }
+    return out;
   }
+
 
   // for void functions, we need to capture final env state
   const finalEnvs: { conditions: string[]; env: Map<string, string> }[] = [];
 
-  const origWalk = walk;
-  // patch: also capture fall-through paths (void functions)
   function walkCapture(stmts: Stmt[], idx: number, pathConds: string[], localEnv: Map<string, string>): void {
     for (let i = idx; i < stmts.length; i++) {
       const stmt = stmts[i];
@@ -326,6 +331,8 @@ function collectPaths(stmts: Stmt[], env: Map<string, string>): SymExecResult {
       }
 
       if (stmt.kind === "LetDecl" || stmt.kind === "VarDecl") {
+        if (stmt.type?.name) varTypes.set(stmt.name, stmt.type.name);
+        else if (stmt.value?.kind === "FloatLit") varTypes.set(stmt.name, "f64");
         if (stmt.value) localEnv.set(stmt.name, exprToSmtWithEnv(stmt.value, localEnv));
         continue;
       }
@@ -373,14 +380,55 @@ function collectPaths(stmts: Stmt[], env: Map<string, string>): SymExecResult {
         }
         return;
       }
-      // skip unhandled statements (while, for, etc.)
+      if (stmt.kind === "WhileStmt") {
+        // Establishment is checked against the state that reaches the loop, so it has to be
+        // recorded before the havoc wipes it.
+        const havocEnv = havoc(stmt.body, localEnv);
+        const guard = exprToSmtWithEnv(stmt.cond, havocEnv);
+        loops.push({
+          entryConds: [...pathConds],
+          entryEnv: new Map(localEnv),
+          havocEnv: new Map(havocEnv),
+          guard,
+          invariants: stmt.invariants ?? [],
+          body: stmt.body,
+        });
+        // Past the loop, all that is known is: the invariant still holds (it was proved to,
+        // by the two VCs above) and the guard is false. Everything the loop touched is now
+        // one of the fresh constants. Assuming the invariant here is what makes a loop
+        // provable at all; without it the walker used to carry the *pre-loop* values
+        // forward and certify postconditions that the function violates at runtime.
+        const known: string[] = [];
+        for (const inv of stmt.invariants ?? []) {
+          const smt = exprToSmtWithEnv(inv.expr, havocEnv);
+          if (!/UNSUPPORTED/.test(smt)) known.push(smt);
+        }
+        if (!/UNSUPPORTED/.test(guard)) known.push(`(not ${guard})`);
+        for (const [k, v] of havocEnv) localEnv.set(k, v);
+        pathConds = [...pathConds, ...known];
+        continue;
+      }
+      if (stmt.kind === "ForInStmt" || stmt.kind === "MatchStmt" || stmt.kind === "IfLetStmt" || stmt.kind === "LetElseStmt") {
+        // Not modelled, but they still assign: havoc so nothing downstream reads a value
+        // this walker only *thinks* survived. No invariant syntax exists for these, so
+        // afterwards the variables are simply unknown.
+        const blocks: Stmt[][] =
+          stmt.kind === "ForInStmt" ? [stmt.body]
+          : stmt.kind === "MatchStmt" ? stmt.arms.map(a => a.body)
+          : stmt.kind === "IfLetStmt" ? [stmt.thenBody, stmt.elseBody ?? []]
+          : [stmt.elseBody];
+        const havocEnv = havoc(blocks.flat(), localEnv);
+        for (const [k, v] of havocEnv) localEnv.set(k, v);
+        continue;
+      }
+      // skip unhandled statements
     }
     // reached end of body without return → void path
     finalEnvs.push({ conditions: [...pathConds], env: new Map(localEnv) });
   }
 
   walkCapture(stmts, 0, [], new Map(env));
-  return { paths, finalEnvs, calls };
+  return { paths, finalEnvs, calls, havocDecls, loops };
 }
 
 function branchAlwaysReturns(stmts: Stmt[]): boolean {
@@ -547,8 +595,21 @@ export function generateVerificationConditions(program: Program, opts?: { onlyFi
     // Must be set before any contract or body expression is lowered — that is when call
     // modelling runs and needs to know which symbols this function's query declares.
     CALL_MODEL.scope = new Set([...fn.params.map(p => p.name), ...fieldRefs, "result"]);
+
+    // One symbolic run, shared by every VC below. It has to happen before the declaration
+    // block is assembled: walking the body is what discovers the havoc constants, and each
+    // one has to be declared in the same block the path conditions referencing it land in.
+    const paramEnv = new Map<string, string>();
+    const paramTypes = new Map<string, string>();
+    for (const p of fn.params) {
+      paramEnv.set(p.name, p.name);
+      if (p.type?.name) paramTypes.set(p.name, p.type.name);
+    }
+    const symResult = collectPaths(fn.body, paramEnv, paramTypes);
+
     let allDecls = fieldDecls ? `${paramDecls}\n${fieldDecls}` : paramDecls;
     if (paramRanges) allDecls = `${allDecls}\n${paramRanges}`;
+    if (symResult.havocDecls.length > 0) allDecls = `${allDecls}\n${symResult.havocDecls.join("\n")}`;
     allDecls = `${allDecls}\n${CALL_MODEL_SLOT}`;
 
     const preAssumptions = requires.map(r => `(assert ${exprToSmt(r.expr)})`).join("\n");
@@ -558,10 +619,7 @@ export function generateVerificationConditions(program: Program, opts?: { onlyFi
     // an assumption. (Debug builds do assert it at entry — language-reference.md:267 —
     // so this closes the *static* half, not an unchecked hole.)
     {
-      const paramEnv = new Map<string, string>();
-      for (const p of fn.params) paramEnv.set(p.name, p.name);
-      const { calls } = collectPaths(fn.body, paramEnv);
-      for (const call of calls) {
+      for (const call of symResult.calls) {
         const callee = requiresByFn.get(call.name);
         if (!callee || callee.name === fn.name) continue;   // self-recursion: needs induction, skip
         if (call.args.length !== callee.params.length) continue;  // variadic/defaulted: can't map args to params
@@ -592,9 +650,6 @@ export function generateVerificationConditions(program: Program, opts?: { onlyFi
 
     // Postconditions: symbolically execute body to build path constraints
     if (ensures.length > 0) {
-      const paramEnv = new Map<string, string>();
-      for (const p of fn.params) paramEnv.set(p.name, p.name);
-      const symResult = collectPaths(fn.body, paramEnv);
       const isVoid = fn.retType.name === "void";
 
       for (const ens of ensures) {
@@ -680,11 +735,77 @@ export function generateVerificationConditions(program: Program, opts?: { onlyFi
       }
     }
 
+    // Loop invariants, the two halves of the induction. Both are stated in the same
+    // declaration block as everything else, so the fresh havoc constants they quantify over
+    // are actually declared — the previous stub emitted a bare `(assert (not INV))` with no
+    // declarations at all, which z3 rejected outright and std/smt reported as unknown.
+    for (const loop of symResult.loops) {
+      const entryCond = loop.entryConds.length > 0 ? `(assert (and true ${loop.entryConds.join(" ")}))` : "";
+      for (const inv of loop.invariants) {
+        // Establishment: the invariant has to hold on the way in, in the pre-loop state.
+        const atEntry = exprToSmtWithEnv(inv.expr, loop.entryEnv);
+        if (!/UNSUPPORTED/.test(atEntry)) {
+          conditions.push({
+            fn: fn.name,
+            kind: "loop-invariant",
+            description: `loop invariant holds on entry in ${fn.name}: ${atEntry}`,
+            smtlib: [
+              `; Loop invariant establishment for ${fn.name}`,
+              `(set-logic ALL)`,
+              allDecls,
+              preAssumptions,
+              entryCond,
+              `(assert (not ${atEntry}))`,
+              `(check-sat)`,
+            ].filter(Boolean).join("\n"),
+          });
+          loopCount++;
+        }
+      }
+
+      // Preservation: assuming every invariant and the guard, one pass through the body
+      // has to re-establish them. Body paths that `return` leave the loop, so only the
+      // fall-through environments have anything to preserve.
+      const bodyRun = collectPaths(loop.body, loop.havocEnv, paramTypes);
+      const assumed = loop.invariants
+        .map(inv => exprToSmtWithEnv(inv.expr, loop.havocEnv))
+        .filter(s => !/UNSUPPORTED/.test(s));
+      // A nested loop inside the body mints its own havoc constants; without these
+      // declarations the preservation query would reference undeclared symbols.
+      const nestedDecls = bodyRun.havocDecls.length > 0 ? bodyRun.havocDecls.join("\n") : "";
+      for (const inv of loop.invariants) {
+        const violations: string[] = [];
+        let translatable = bodyRun.finalEnvs.length > 0;
+        for (const fe of bodyRun.finalEnvs) {
+          const after = exprToSmtWithEnv(inv.expr, fe.env);
+          if (/UNSUPPORTED/.test(after)) { translatable = false; break; }
+          const conds = fe.conditions.length > 0 ? `(and true ${fe.conditions.join(" ")})` : "true";
+          violations.push(`(and ${conds} (not ${after}))`);
+        }
+        if (!translatable || violations.length === 0) continue;
+        const guardAssume = /UNSUPPORTED/.test(loop.guard) ? "" : `(assert ${loop.guard})`;
+        conditions.push({
+          fn: fn.name,
+          kind: "loop-invariant",
+          description: `loop invariant preserved by body in ${fn.name}: ${exprToSmt(inv.expr)}`,
+          smtlib: [
+            `; Loop invariant preservation for ${fn.name}`,
+            `(set-logic ALL)`,
+            allDecls,
+            nestedDecls,
+            preAssumptions,
+            ...assumed.map(a => `(assert ${a})`),
+            guardAssume,
+            `(assert ${violations.length === 1 ? violations[0] : `(or ${violations.join(" ")})`})`,
+            `(check-sat)`,
+          ].filter(Boolean).join("\n"),
+        });
+        loopCount++;
+      }
+    }
+
     fillCallModel(conditions, vcStart);
-    // Loop-invariant VCs carry no declaration block of their own, so there is nowhere to
-    // splice a call model into — leave calls in them untranslatable.
     CALL_MODEL = null;
-    loopCount += collectLoopInvariants(fn.name, fn.body, conditions);
   }
 
   return {
@@ -695,34 +816,6 @@ export function generateVerificationConditions(program: Program, opts?: { onlyFi
       loops: loopCount,
     },
   };
-}
-
-function collectLoopInvariants(fnName: string, stmts: Stmt[], conditions: VerificationCondition[]): number {
-  let count = 0;
-  for (const stmt of stmts) {
-    if (stmt.kind === "WhileStmt") {
-      for (const inv of stmt.invariants ?? []) {
-        const smt = exprToSmt(inv.expr);
-        conditions.push({
-          fn: fnName,
-          kind: "loop-invariant",
-          description: `loop invariant in ${fnName}: ${smt}`,
-          smtlib: [
-            `; Loop invariant check in ${fnName}`,
-            `(set-logic ALL)`,
-            `(assert (not ${smt}))`,
-            `(check-sat)`,
-          ].join("\n"),
-        });
-        count++;
-      }
-      count += collectLoopInvariants(fnName, stmt.body, conditions);
-    } else if (stmt.kind === "IfStmt") {
-      count += collectLoopInvariants(fnName, stmt.thenBody, conditions);
-      if (stmt.elseBody) count += collectLoopInvariants(fnName, stmt.elseBody, conditions);
-    }
-  }
-  return count;
 }
 
 function hasLoopInvariants(stmts: Stmt[]): boolean {

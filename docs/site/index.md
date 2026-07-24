@@ -21,12 +21,12 @@ hero:
 
 <div class="intro">
 
-- [**Run Milo in your browser**](/playground) — the playground, nothing to install.
-- [**Learn the basics**](/tour) — an 11-lesson tour, from hello world to owning your data.
-- [**Contracts and formal verification**](/language/safety) — write down what a function promises, then prove it holds for every input.
-- [**Compare to Rust's safety profile**](/language/vs-rust) — what Milo guarantees, what it gives up, and where the borrow checker went.
-- [**Browse the standard library**](/stdlib/) — io, fs, net, http, json, crypto, compression, and the rest.
-- [**Read the language reference**](/language/) — the whole language, one page per topic.
+- [**Run Milo in your browser**](/playground)
+- [**Learn the basics**](/tour)
+- [**Contracts and formal verification**](/language/safety)
+- [**Compare to Rust's safety profile**](/language/vs-rust)
+- [**Browse the standard library**](/stdlib/)
+- [**Read the language reference**](/language/)
 
 </div>
 

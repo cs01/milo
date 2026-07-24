@@ -1,3 +1,11 @@
+<!-- doc-meta
+system: annotations
+purpose: the `@` surface — every compile-time builtin and declaration attribute the compiler understands
+key-files: src/parser.ts, src/checker.ts (validateAttributes), src/lower.ts (embedFile/targetOs), src/codegen.ts (cSigGuard)
+update-when: an `@` construct is added, removed, or changes what it accepts
+last-verified: 2026-07-24
+-->
+
 # Annotations and Compiler Builtins
 
 `@` marks something the compiler handles, not the runtime. It is the whole mechanism —

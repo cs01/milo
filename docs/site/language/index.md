@@ -445,6 +445,8 @@ print(a == b)   // true — generated field-by-field comparison
 
 `@derive(Eq)` auto-generates `==` and `!=`. You can also implement `Add`, `Sub`, `Mul`, and `Div` traits to overload arithmetic operators on your types.
 
+`@` always means the compiler handles it — there is no preprocessor and no macro system. See [Annotations & Builtins](./annotations) for the whole set.
+
 ## Interfaces
 
 Traits are compile-time — the compiler generates specialized code for each concrete type (monomorphization). But sometimes you need runtime polymorphism: passing different types through the same function, storing mixed types in a collection, or writing plugin-style architectures where the concrete types aren't known until runtime.

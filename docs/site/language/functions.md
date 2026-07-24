@@ -31,6 +31,10 @@ let s = identity("hello")  // T inferred as string
 | `exit(code)` | Exit the process |
 | `jsonStringify(val)` | Serialize a struct to JSON |
 | `@embedFile(path)` | Embed file contents at compile time |
+| `@targetOs()` | The OS being compiled for, as a string |
+
+The `@` marks a compiler-level construct: it runs while compiling, not at runtime. See
+[Annotations & Builtins](./annotations) for the full `@` surface.
 
 ## Reference parameters
 

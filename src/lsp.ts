@@ -2152,11 +2152,10 @@ function startServer() {
       try {
         const msg = JSON.parse(body);
         if (msg.id !== undefined && msg.method) {
-          process.stderr.write(`milod: req ${msg.method}\n`);
           if (LSP_DEBUG) lspDebug(`req ${msg.method} params=${JSON.stringify(msg.params)}`);
           handleRequest(msg.id, msg.method, msg.params);
         } else if (msg.method) {
-          process.stderr.write(`milod: notif ${msg.method}\n`);
+          if (LSP_DEBUG) lspDebug(`notif ${msg.method}`);
           handleNotification(msg.method, msg.params);
         }
       } catch (e: any) {
@@ -2168,8 +2167,12 @@ function startServer() {
   // Identify exactly which server this is — critical when multiple milo
   // checkouts exist and a stale one could be answering (restarts won't help then).
   process.stderr.write(
-    `milod: language server started — pid=${process.pid} runtime=${process.execPath} ` +
-    `entry=${fileURLToPath(import.meta.url)} cwd=${process.cwd()} debug=${LSP_DEBUG ? "on" : "off"}\n`,
+    `milod: language server started\n` +
+    `  pid     ${process.pid}\n` +
+    `  runtime ${process.execPath}\n` +
+    `  entry   ${fileURLToPath(import.meta.url)}\n` +
+    `  cwd     ${process.cwd()}\n` +
+    `  debug   ${LSP_DEBUG ? "on" : "off"}\n`,
   );
 }
 

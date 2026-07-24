@@ -156,4 +156,4 @@ print(s.area())    // auto-derefs through Heap, then dispatches via itable
 
 All heap types (Vec, HashMap, Heap) auto-free when they go out of scope. No GC pauses, no `free()`, no `defer`.
 
-Next: [Strings →](./strings)
+Next: [Strings](./strings)

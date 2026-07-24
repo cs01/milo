@@ -57,4 +57,4 @@ Milo auto-borrows at call sites — you write `double(n)` not `double(&n)`.
 
 See [Ownership](./ownership) for why references are restricted to function parameters.
 
-Next: [Structs →](./structs)
+Next: [Structs](./structs)

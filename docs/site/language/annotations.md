@@ -227,4 +227,4 @@ Contract clauses — `requires`, `ensures`, `invariant` — are ordinary keyword
 declaration, not `@` annotations, because they are type-checked expressions rather than
 instructions to the compiler. See [Contracts & Safety](./safety).
 
-Next: [C FFI →](./ffi)
+Next: [C FFI](./ffi)

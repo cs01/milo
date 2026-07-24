@@ -566,7 +566,7 @@ from "std/json" import { jsonParse }
 from "lib/utils" import { validate }
 ```
 
-Milo has a built-in package manager for installing and managing third-party dependencies. The standard library covers I/O, networking, HTTP, JSON, SQLite, testing, date/time, crypto, and more. [See the full stdlib →](/stdlib/)
+Milo has a built-in package manager for installing and managing third-party dependencies. The standard library covers I/O, networking, HTTP, JSON, SQLite, testing, date/time, crypto, and more. [See the full stdlib](/stdlib/)
 
 [Learn more](/language/modules)
 

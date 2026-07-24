@@ -83,4 +83,4 @@ while i < 10 {
 }
 ```
 
-Next: [Functions →](./functions)
+Next: [Functions](./functions)

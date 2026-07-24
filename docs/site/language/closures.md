@@ -152,4 +152,4 @@ A `Promise.blocking` closure runs on a real OS thread, so its captures must addi
 
 Regular (non-`move`) closures are non-escaping: they cannot be returned from functions or stored in structs. This is by design -- it keeps the ownership model simple and guarantees that captured references are always valid. If you need a closure that escapes, reach for `move`.
 
-Next: [Modules →](./modules)
+Next: [Modules](./modules)

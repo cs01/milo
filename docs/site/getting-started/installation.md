@@ -63,19 +63,6 @@ Hello, Milo!
 
 ## Editor support
 
-Milo ships an LSP server (`milo lsp`) with diagnostics, hover, and go-to-definition, plus a VS Code extension for syntax highlighting on top.
+To set up your editor, see [IDE Setup](./ide-setup). Milo ships an LSP server (`milo lsp`) plus a VS Code extension.
 
-**VS Code** — build and symlink the bundled extension:
-
-```bash
-cd editors/vscode && bun install && bun run build
-ln -s "$(pwd)" ~/.vscode/extensions/milo.milo-lang-0.2.0
-```
-
-Restart VS Code and open any `.milo` file.
-
-**Other editors** — point any LSP client at `milo lsp`.
-
-Full details, including what each feature does, are on the [IDE Setup →](./ide-setup) page.
-
-Next: [Your first program →](./quickstart)
+Next: [Your first program](./quickstart)

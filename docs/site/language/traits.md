@@ -81,4 +81,4 @@ struct Point { x: i32, y: i32 }
 
 These are on the roadmap.
 
-Next: [Closures →](./closures)
+Next: [Closures](./closures)

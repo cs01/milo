@@ -63,4 +63,4 @@ let json = jsonStringify(user)
 // {"name":"Alice","age":30,"active":true}
 ```
 
-Next: [Enums & Matching →](./enums)
+Next: [Enums & Matching](./enums)

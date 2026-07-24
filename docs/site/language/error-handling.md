@@ -115,4 +115,4 @@ fn process(path: string): Result<i32, AppError> {
 
 In Rust, this requires the `thiserror` crate or hand-written `From` implementations. In Milo, the compiler generates the conversion automatically.
 
-Next: [Ownership →](./ownership)
+Next: [Ownership](./ownership)

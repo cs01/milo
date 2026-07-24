@@ -1,6 +1,7 @@
 import type { HIRModule, HIRFunction, HIRStmt, HIRExpr, HIRArg, HIRPattern, HIRContract, HIRStruct } from "./hir";
 import { type TypeKind, needsDrop } from "./types";
 import type { TargetInfo } from "./target";
+import type { Span } from "./ast";
 import { genVecSort, genVecSortBy, genVecSortByKey } from "./codegen-vec";
 import { classifyArg, classifyRet, AbiError, type ArgClass, type RetClass, type AbiStruct, type AbiLeaf } from "./abi";
 import { resolve, dirname, basename } from "path";
@@ -108,6 +109,13 @@ export class Codegen {
   private itableLayouts = new Map<string, { globalName: string; methodCount: number }>();
 
   private filePath?: string;
+
+  // Overflow/range/contract failures print `file:line`. Every module merges into one
+  // LLVM module, so the file has to come from the *check's own span* — a single
+  // module-wide constant named the entry file and reported std failures as if they
+  // were in the user's main file, which is undiagnosable. One interned constant per
+  // distinct file; only the files that actually contain a check are emitted.
+  private checkFileConstants = new Map<string, string>();
 
   // ── DWARF line-table emission (M1) ──
   // Off unless `emitDebug`. All metadata is interned here and rendered as trailing
@@ -1171,9 +1179,8 @@ export class Codegen {
       this.output.splice(1, 0, `declare void @llvm.dbg.declare(metadata, metadata, metadata)`);
     if (this.needsBoundsCheck)
       this.output.splice(1, 0, `@.bounds_err = private unnamed_addr constant [40 x i8] c"milo: array index out of bounds: %d/%d\\0A\\00"`);
-    if (this.needsOverflowCheck || this.needsRangeCheck || this.needsContractCheck) {
-      const file = this.filePath ?? "<unknown>";
-      this.output.splice(1, 0, `@.overflow_file = private unnamed_addr constant [${file.length + 1} x i8] c"${file}\\00"`);
+    for (const [file, name] of this.checkFileConstants) {
+      this.output.splice(1, 0, `${name} = private unnamed_addr constant [${file.length + 1} x i8] c"${file}\\00"`);
     }
     if (this.needsContractCheck) {
       const msg = "runtime error: %s clause violated at %s:%d";
@@ -1449,7 +1456,7 @@ export class Codegen {
         if (c.kind !== "requires") continue;
         const [condLines, condVal] = this.genExpr(c.expr);
         lines.push(...condLines);
-        this.emitContractCheck(lines, condVal, "requires", c.span?.line ?? 0);
+        this.emitContractCheck(lines, condVal, "requires", c.span);
       }
     }
 
@@ -1579,7 +1586,7 @@ export class Codegen {
         this.dbgDeclare(lines, stmt.name, addrName, storedTypeKind, stmt.span?.line ?? 0, 0);
         if (stmt.rangeCheck) {
           const signed = stmt.type.tag === "int" && stmt.type.signed;
-          this.emitRangeCheck(lines, val, declTy, signed, stmt.rangeCheck.min, stmt.rangeCheck.max, stmt.span?.line ?? 0);
+          this.emitRangeCheck(lines, val, declTy, signed, stmt.rangeCheck.min, stmt.rangeCheck.max, stmt.span);
         }
         // Locals that borrow from a ref are a shallow copy — data owned elsewhere.
         if (declDroppable) {
@@ -1910,7 +1917,20 @@ export class Codegen {
     lines.push(`${okLabel}:`);
   }
 
-  private emitCheckedArith(lines: string[], op: string, unsigned: boolean, llType: string, lv: string, rv: string, line: number): string {
+  // Pointer to the interned name of the file a check lives in, for its error message.
+  private emitCheckFilePtr(lines: string[], span?: Span): string {
+    const file = span?.file ?? this.filePath ?? "<unknown>";
+    let global = this.checkFileConstants.get(file);
+    if (!global) {
+      global = `@.check_file_${this.checkFileConstants.size}`;
+      this.checkFileConstants.set(file, global);
+    }
+    const ptr = this.nextTemp();
+    lines.push(`  ${ptr} = getelementptr [${file.length + 1} x i8], ptr ${global}, i32 0, i32 0`);
+    return ptr;
+  }
+
+  private emitCheckedArith(lines: string[], op: string, unsigned: boolean, llType: string, lv: string, rv: string, span: Span | undefined): string {
     this.needsOverflowCheck = true;
     this.needsPrintf = true;
     this.needsExit = true;
@@ -1929,16 +1949,15 @@ export class Codegen {
     lines.push(`${failLabel}:`);
     const fmtPtr = this.nextTemp();
     lines.push(`  ${fmtPtr} = getelementptr [46 x i8], ptr @.overflow_err, i32 0, i32 0`);
-    const filePtr = this.nextTemp();
-    lines.push(`  ${filePtr} = getelementptr [${(this.filePath ?? "<unknown>").length + 1} x i8], ptr @.overflow_file, i32 0, i32 0`);
-    lines.push(`  call i32 (ptr, ...) @printf(ptr ${fmtPtr}, ptr ${filePtr}, i32 ${line})`);
+    const filePtr = this.emitCheckFilePtr(lines, span);
+    lines.push(`  call i32 (ptr, ...) @printf(ptr ${fmtPtr}, ptr ${filePtr}, i32 ${span?.line ?? 0})`);
     lines.push(`  call void @exit(i32 1)`);
     lines.push(`  unreachable`);
     lines.push(`${okLabel}:`);
     return val;
   }
 
-  private emitRangeCheck(lines: string[], val: string, llType: string, signed: boolean, min: number, max: number, line: number) {
+  private emitRangeCheck(lines: string[], val: string, llType: string, signed: boolean, min: number, max: number, span: Span | undefined) {
     this.needsRangeCheck = true;
     this.needsPrintf = true;
     this.needsExit = true;
@@ -1956,9 +1975,8 @@ export class Codegen {
     lines.push(`${failLabel}:`);
     const fmtPtr = this.nextTemp();
     lines.push(`  ${fmtPtr} = getelementptr [44 x i8], ptr @.range_err, i32 0, i32 0`);
-    const filePtr = this.nextTemp();
-    lines.push(`  ${filePtr} = getelementptr [${(this.filePath ?? "<unknown>").length + 1} x i8], ptr @.overflow_file, i32 0, i32 0`);
-    lines.push(`  call i32 (ptr, ...) @printf(ptr ${fmtPtr}, ptr ${filePtr}, i32 ${line})`);
+    const filePtr = this.emitCheckFilePtr(lines, span);
+    lines.push(`  call i32 (ptr, ...) @printf(ptr ${fmtPtr}, ptr ${filePtr}, i32 ${span?.line ?? 0})`);
     lines.push(`  call void @exit(i32 1)`);
     lines.push(`  unreachable`);
     lines.push(`${okLabel}:`);
@@ -1968,11 +1986,11 @@ export class Codegen {
     for (const c of this.currentEnsures) {
       const [condLines, condVal] = this.genExpr(c.expr);
       lines.push(...condLines);
-      this.emitContractCheck(lines, condVal, "ensures", c.span?.line ?? 0);
+      this.emitContractCheck(lines, condVal, "ensures", c.span);
     }
   }
 
-  private emitContractCheck(lines: string[], condVal: string, kind: "requires" | "ensures" | "invariant", line: number) {
+  private emitContractCheck(lines: string[], condVal: string, kind: "requires" | "ensures" | "invariant", span: Span | undefined) {
     this.needsContractCheck = true;
     this.needsPrintf = true;
     this.needsExit = true;
@@ -1984,9 +2002,8 @@ export class Codegen {
     lines.push(`  ${fmtPtr} = getelementptr [44 x i8], ptr @.contract_err, i32 0, i32 0`);
     const kindPtr = this.nextTemp();
     lines.push(`  ${kindPtr} = getelementptr [${kind.length + 1} x i8], ptr @.contract_kind_${kind}, i32 0, i32 0`);
-    const filePtr = this.nextTemp();
-    lines.push(`  ${filePtr} = getelementptr [${(this.filePath ?? "<unknown>").length + 1} x i8], ptr @.overflow_file, i32 0, i32 0`);
-    lines.push(`  call i32 (ptr, ...) @printf(ptr ${fmtPtr}, ptr ${kindPtr}, ptr ${filePtr}, i32 ${line})`);
+    const filePtr = this.emitCheckFilePtr(lines, span);
+    lines.push(`  call i32 (ptr, ...) @printf(ptr ${fmtPtr}, ptr ${kindPtr}, ptr ${filePtr}, i32 ${span?.line ?? 0})`);
     lines.push(`  call void @exit(i32 1)`);
     lines.push(`  unreachable`);
     lines.push(`${okLabel}:`);
@@ -2038,7 +2055,7 @@ export class Codegen {
       for (const inv of stmt.invariants) {
         const [invLines, invVal] = this.genExpr(inv.expr);
         lines.push(...invLines);
-        this.emitContractCheck(lines, invVal, "invariant", inv.span?.line ?? 0);
+        this.emitContractCheck(lines, invVal, "invariant", inv.span);
       }
     }
     const [condLines, condVal] = this.genExpr(stmt.cond);
@@ -3491,7 +3508,7 @@ export class Codegen {
           const op = isFloat ? floatOps[expr.op] : intOps[expr.op];
           const checkedOps: Record<string, string> = { "+": "add", "-": "sub", "*": "mul" };
           if (this.debugOverflow && !isFloat && expr.op in checkedOps && expr.span) {
-            const val = this.emitCheckedArith(lines, checkedOps[expr.op], unsigned, llt, lv, rv, expr.span.line);
+            const val = this.emitCheckedArith(lines, checkedOps[expr.op], unsigned, llt, lv, rv, expr.span);
             return [lines, val, llt];
           }
           // Integer division/remainder by zero (and signed INT_MIN / -1) is UB —
@@ -3524,7 +3541,7 @@ export class Codegen {
           if (ot === "float" || ot === "double") lines.push(`  ${tmp} = fneg ${ot} ${ov}`);
           else if (this.debugOverflow && expr.span) {
             const unsigned = this.isUnsigned(expr.operand.type);
-            const val = this.emitCheckedArith(lines, "sub", unsigned, ot, "0", ov, expr.span.line);
+            const val = this.emitCheckedArith(lines, "sub", unsigned, ot, "0", ov, expr.span);
             return [lines, val, ot];
           } else lines.push(`  ${tmp} = sub ${ot} 0, ${ov}`);
           return [lines, tmp, ot];

@@ -130,6 +130,41 @@ Structs can be generic too — `Pair<A, B>`, `Heap<T>`, etc. The standard librar
 
 [Learn more](/language/structs)
 
+## Traits
+
+No classes, no inheritance. Data lives in structs, behavior lives in traits and `impl` blocks — so you can give an existing type new behavior without touching its definition. Traits also carry default implementations, constrain generics, and drive operator overloading (`+`, `-`, `==`).
+
+```milo
+trait Area {
+    fn area(self: &Self): f64
+}
+
+struct Circle { radius: f64 }
+struct Square { side: f64 }
+
+impl Area for Circle {
+    fn area(self: &Self): f64 {
+        return 3.14159 * self.radius * self.radius
+    }
+}
+
+impl Area for Square {
+    fn area(self: &Self): f64 {
+        return self.side * self.side
+    }
+}
+
+fn main(): i32 {
+    let c = Circle { radius: 5.0 }
+    let s = Square { side: 4.0 }
+    print(c.area())   // 78.53975
+    print(s.area())   // 16.0
+    return 0
+}
+```
+
+[Learn more](/language/traits)
+
 ## Enums and Pattern Matching
 
 Each enum variant can carry different data, which makes enums good for modeling states, results, and other multi-case values. An enum value is one of its variants, and the compiler checks that you handle every case.
@@ -410,43 +445,6 @@ fn main(): i32 {
 ```
 
 [Learn more](/language/closures)
-
-## Traits
-
-Milo has no classes. If you've worked with class hierarchies in other languages, you've probably run into the downsides: fragile base classes, deep inheritance chains that are hard to reason about, and the "where do I put this method?" problem when behavior doesn't fit neatly into one hierarchy. Milo takes the approach Rust pioneered — separate your data (structs) from your behavior (trait implementations). You define *what* a type can do through traits, and *how* it does it through `impl` blocks. This means you can add new behavior to existing types without modifying them, and you avoid inheritance diamonds and superclass changes breaking your code.
-
-If you've used interfaces in Go or TypeScript, traits will feel familiar — but Milo traits can also have default implementations, constrain generics, and enable operator overloading (`+`, `-`, `==`, etc.).
-
-```milo
-trait Area {
-    fn area(self: &Self): f64
-}
-
-struct Circle { radius: f64 }
-struct Square { side: f64 }
-
-impl Area for Circle {
-    fn area(self: &Self): f64 {
-        return 3.14159 * self.radius * self.radius
-    }
-}
-
-impl Area for Square {
-    fn area(self: &Self): f64 {
-        return self.side * self.side
-    }
-}
-
-fn main(): i32 {
-    let c = Circle { radius: 5.0 }
-    let s = Square { side: 4.0 }
-    print(c.area())   // 78.53975
-    print(s.area())   // 16.0
-    return 0
-}
-```
-
-[Learn more](/language/traits)
 
 ## Annotations
 

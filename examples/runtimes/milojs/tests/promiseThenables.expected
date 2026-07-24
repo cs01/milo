@@ -1,4 +1,0 @@
-all: ["thenable-value","plain",7]
-settled: ["fulfilled","rejected"]
-rejected via thenable: nope
-await thenable: thenable-value

@@ -1,1 +1,0 @@
-then:r | catch:x | all:1,2 | race:fast | settled:fulfilled,rejected

@@ -17,7 +17,6 @@ Runnable Milo programs. They double as integration smoke tests for the standard 
 | [`terminal/`](terminal) | TUIs and PTY work: tetris, sysmon, a mini tmux |
 | [`net/`](net) | HTTP servers and clients, plus the weather and termpair apps |
 | [`embedded/`](embedded) | Bare-metal and control code: PID step, flight controller |
-| [`runtimes/`](runtimes) | Language runtimes written in Milo: milojs (a JS engine), minibun |
 | [`tools/`](tools) | Developer tools: java-dap (JVM debug adapter) |
 
 Network examples need an internet connection.

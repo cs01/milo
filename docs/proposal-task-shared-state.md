@@ -1,7 +1,7 @@
 <!-- doc-meta
 system: proposal-task-shared-state
 purpose: language options for sharing long-lived state across green tasks without lifetimes, and why milojs needs global singletons today
-key-files: std/runtime.milo, src/checker.ts, examples/runtimes/milojs/runtime.milo, examples/runtimes/milojs/ast.milo
+key-files: std/runtime.milo, src/checker.ts (milojs itself lives in https://github.com/milo-language/milojs)
 update-when: any of these options is adopted, rejected, or the second-class reference rule changes
 last-verified: 2026-07-20
 -->
@@ -14,7 +14,7 @@ in the abstract.
 ## The case
 
 milojs runs each async activation on its own green task (see
-[milojs-async-suspension.md](milojs-async-suspension.md)). Such an activation
+[milojs-async-suspension.md](https://github.com/milo-language/milojs/blob/main/docs/milojs-async-suspension.md)). Such an activation
 outlives the call that started it, and its body needs the program and the
 interpreter.
 

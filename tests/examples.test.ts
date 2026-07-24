@@ -24,20 +24,16 @@ beforeAll(() => {
 // Multi-file apps (dirs with helper/smoke files) — list the real entry points;
 // a bare glob would try to compile partial modules that have no main().
 const DIR_ENTRIES = [
-  "emulators/nes/nes.milo",
-  "emulators/genesis/genesis.milo",
-  "emulators/snes/snes.milo",
   "net/weather/app.milo",
   "net/termpair/server.milo",
   "net/termpair/client.milo",
-  "tools/hades/src/main.milo",
 ];
 
 // Only the top level of each folder: subdirs hold helper modules and smoke
 // programs that aren't standalone entry points (those go in DIR_ENTRIES).
 const TOP_LEVEL_DIRS = [
   ".", "basics", "cli-tools", "graphics", "simulation",
-  "terminal", "net", "emulators", "embedded", "runtimes",
+  "terminal", "net", "embedded",
 ];
 
 function topLevel(dir: string): string[] {

@@ -1,349 +1,197 @@
+<!-- doc-meta
+system: planning
+purpose: canonical status — what shipped, what is in flight, what is planned, what was retired
+key-files: docs/backlog.md (ROI ordering over the open items), docs/safety-roadmap.md, docs/self-hosting.md, docs/verification-roadmap.md
+update-when: a feature ships, a track is abandoned, or a new track opens
+last-verified: 2026-07-24 (audited against the CLI surface, std/, src-milo/, tests/, examples/, .github/workflows/)
+-->
+
 # Milo Roadmap
+
+Status source of truth. [backlog.md](backlog.md) ranks the *open* items by return-on-investment; this file records what is true.
+
+Shipped items are one-liners here — git history and the linked design docs keep the debugging record.
+
+---
 
 ## Completed
 
 ### Core Language
 
-The foundation is complete: primitive types, let/var bindings, if/else, while/for loops, functions, structs, enums with pattern matching (exhaustiveness checked), generics with monomorphization and type inference, move semantics with use-after-move detection, second-class references (`&T`/`&mut T` in params only), closures (including escaping/move closures), traits with static dispatch and `@derive(Eq)`, operator overloading via traits, `Heap<T>`, `Option<T>`, `Result<T,E>` with `!`/`?`/`??` operators, string interpolation, bitwise operators, hex/binary literals, type casts, for-in loops over ranges/Vec/array/string/HashMap, HIR-based typed IR, and Go-style interfaces with structural typing and vtable-based dynamic dispatch.
+Primitive types, `let`/`var`, if/else, while/for, functions, structs, enums with exhaustiveness-checked pattern matching, generics with monomorphization and inference, move semantics with use-after-move detection, second-class references (`&T`/`&mut T` in params only), closures (including escaping/move closures), traits with static dispatch and `@derive(Eq)`, operator overloading, Go-style interfaces (structural typing, vtable dispatch), `Heap<T>`, `Option<T>`, `Result<T,E>` with `!`/`?`/`??`, auto-`From` error conversion through `?`, `let`-else, string interpolation, bitwise ops, hex/binary literals, `as` casts, for-in over ranges/Vec/array/string/HashMap and any type with `next(&mut Self): Option<T>`, slicing on Vec/array/string, `pub`/private visibility with per-file enforcement, `@embedFile`, `@export`, `@targetOs()`, HIR-based typed IR.
 
 ### Type System & Safety
 
-- **Ownership**: single-owner move semantics, compiler-tracked drops, no GC
-- **Null safety**: `Option<T>` — no null pointers in safe code
-- **Race safety**: `Send`/`Sync` traits — compiler rejects data races at `spawn()` boundaries
-- **Overflow safety**: compile-time range checks + debug-mode traps via LLVM overflow intrinsics
+- **Ownership**: single-owner moves, compiler-tracked drops, no GC, no RC
+- **Null safety**: `Option<T>` — no null in safe code
+- **Race safety**: structural `Send`/`Sync`, checked at `spawn()`/`Promise.blocking` boundaries
+- **Overflow safety**: compile-time range proof + traps at `--debug`; `--overflow-checks` / `--no-overflow-checks` force either behaviour at any `-O` (release still wraps by default — see In Progress)
+- **`unsafe` blocks**: required for deref, pointer indexing, address-of, pointer casts, `zeroed<T>()`, unsafe-signature extern calls; unused-`unsafe` lint on by default
+- **Borrow invalidation**: ref-while-frozen and use-after-invalidate for built-in borrows; call-site exclusivity (`f(&mut v, &v[0])` rejected)
+- **Arena safety**: identity + generation validation at runtime for `Arena<T>`/`Handle<T>`
 - **No implicit coercion**: explicit `as` casts only
-- **Ranged integers (L1+L2)**: `type Altitude = i32(0..50000)` with range propagation through arithmetic
+- **Ranged integers (L1+L2)**: `type Altitude = i32(0..50000)`, range propagation through arithmetic
+- **Off-by-default warnings** promotable with `--deny=`: `unused-move`, `unused-import`, `unverified-extern`, `large-stack-array`
+
+See [safety-roadmap.md](safety-roadmap.md) for the enforced-vs-remaining breakdown and the explicit trust boundaries; [memory-safety-vs-rust.md](memory-safety-vs-rust.md) for the 13-probe battle test (0 UB misses).
+
+### Contracts & Proving
+
+- `requires` / `ensures` / `invariant` on functions and loops; runtime asserts at `--debug`, forced either way with `--contract-checks` / `--no-contract-checks`
+- The compiler rejects violations it can see statically
+- **`milo prove`** discharges obligations through **`std/smt`** — a solver written *in Milo* (Fourier-Motzkin over linear scalar arithmetic), dogfooding the language on its own verification. `--solver=z3` swaps in Z3 for non-linear arithmetic; `--emit-smt` prints SMT-LIB2 instead of solving; `--all` includes imported stdlib
+- Loop invariants proved by induction
+- Callee `ensures` are assumed only under the callee's `requires` (the bare form let a call-site precondition prove itself)
+- `unknown` is reported as unknown, never as proven — an i64 overflow inside the elimination degrades the verdict rather than producing a false proof
+
+Known frontier (tracked in backlog Tier 2 #2/#3): no bitvector theory (`&`, `<<`), no `IndexAccess` reasoning, no `Vec.len` through a builder, and *intermediate* arithmetic carries no range, so derived values can be refuted by inputs no real i32 could produce. `milo verify` remains as a deprecated alias for `prove`.
+
+### Safety Profiles, WCET, Bare Metal
+
+- **`milo safety --list` / `--safety=<profile>`**: DO-178C DAL A/B/C, ISO 26262 ASIL A–D, NASA Class A/B, IEC 61508 SIL 3
+- **`milo wcet`**: OTAWA flow facts (loop bounds) plus cycle estimates
+- **Bare-metal targets**: `cortex-m0/m3/m4/m4f/m7` (plus `rp2040`/STM32 aliases) — freestanding, QEMU machine per target, `--heap-size=<N>` cap, working heap (`Vec`/`String` over a bump allocator), OOM surfaces as `ENOMEM`. A reclaiming allocator is deliberately not planned.
 
 ### Concurrency
 
 Green-tier concurrency with one OS-thread escape hatch:
 
-- **Green threads** (`std/runtime`): stackful coroutines via ucontext (64KB stacks, guard pages, kqueue/epoll), cooperative scheduling, transparent async I/O — `stream.recv()`/`stream.send()` auto-yield on EAGAIN
-- **Promises** (`std/runtime`): `Promise<T>.run()`, `.await()`, `Promise.all()`, `Promise.race()` — structured concurrency over green threads
-- **Task API** (`std/runtime`): `Task.spawn()` for fire-and-forget lightweight concurrency
-- **`Promise.blocking()`** (`std/runtime`): the one OS-thread escape hatch — CPU-bound work or blocking FFI, `Send`-checked captures, result via `await`
-- **Synchronization** (`std/sync`): `Channel<T>` (bounded FIFO, multi-producer, blocking + non-blocking), `WaitGroup`, `select`, `AtomicI64`, `AtomicBool`
-- **No async/await**: write normal blocking code — it yields automatically in green thread context
-- Public `Thread`/`Mutex`/`RwLock`/`parallel` removed 2026-07-10 (green-tier only; re-add on demand — see concurrency-simplification.md)
+- **Green threads** (`std/runtime`): stackful coroutines (ucontext / Win32 fibers), 64KB stacks with guard pages, kqueue/epoll/Win32-event backends, transparent async I/O — `recv`/`send` auto-yield on EAGAIN
+- **Promises**: `Promise<T>.run()`, `.await()`, `Promise.all()`, `Promise.race()`, `p.channel()` to arm one in a `Select`
+- **Tasks**: `Task.spawn()`, `Task.join()`, `WaitGroup`, Go-style exit semantics
+- **`Promise.blocking()`**: the one OS-thread escape hatch for CPU-bound work or blocking FFI, `Send`-checked captures
+- **`std/sync`**: `Channel<T>` (bounded FIFO, multi-producer, blocking + non-blocking), `AtomicI64`, `AtomicBool`
+- **`std/select`**: fd, timer, channel, promise and child-exit arms
+- **No async/await** — blocking-shaped code yields automatically in green context
+- Public `Thread`/`Mutex`/`RwLock`/`parallel` were **removed** 2026-07-10 (green tier only — see [concurrency-simplification.md](concurrency-simplification.md))
 
-### Standard Library (44 modules)
+### Standard Library (69 modules)
 
-I/O & system: io, fs, path, env, args, process, signal
-Networking: net, http, url
-Data: json, csv, toml, base64, hex, sqlite, arena, set
-Concurrency: thread, sync, runtime, event
-Strings: string, fmt, strconv, unicode, regex
-Math: math, random, sort
-CLI: argparse, color, log
-Crypto: crypto
-Time: time, datetime, uuid
-Testing: testing
-Memory: mem
+I/O & system: `io`, `fs`, `path`, `env`, `environ`, `args`, `process`, `signal`, `dl`, `sysinfo`, `mem`, `os`, `platform`, `term`, `pty`, `keys`, `ansi`
+Networking: `net` (TCP + DNS), `unix` (AF_UNIX), `fetch` (HTTPS client + TLS), `http`, `httpmw`, `ws`, `url`
+Data: `json`, `csv`, `toml`, `base64`, `base32`, `hex`, `sqlite`, `arena`, `set`, `pool`, `png`
+Compression: `deflate`, `inflate`, `zip`, `zstd`
+Crypto & auth: `crypto`, `sha256`, `sha1`, `hmac`, `jwt`, `totp`, `checksum`, `xxhash`
+Concurrency: `runtime`, `sync`, `select`, `event`
+Strings: `string`, `fmt`, `strconv`, `unicode`, `regex`, `cstr`
+Math & verification: `math`, `random`, `sort`, `smt`
+CLI: `argparse`, `color`, `log`
+Time: `time`, `datetime`, `uuid`
+Testing: `testing`
+Prelude: `prelude`
 
-### Developer Experience
+(88 files — several modules are platform splits.) Discover signatures with `milo api <terms>`; dump a module with `milo api --module std/<name>`.
 
-- **LSP server**: diagnostics, hover, go-to-definition, completions, code lens
-- **VS Code extension**: syntax highlighting + LSP client
-- **Formatter** (`milo-fmt`): context-sensitive formatting, LSP integration (written in Milo)
-- **Package manager** (`milo add`/`install`/`publish`): git-based cache with lockfile, GitHub repos as the registry — see [plans/package-manager.md](plans/package-manager.md). Folded into the `milo` CLI, not a separate binary
-- **Test framework**: `@expect:`/`@error:` annotations, `milo test` runner
-- **Example apps**: web servers (7), CLI tools (jq, grep, rg, cat, wc, tree, calc, hex, timeout, fmt)
-- **GitHub Actions CI**: build + test on push/PR, release pipeline
-- **Playground**: browser-based compiler via JS backend (in progress)
+TLS clients verify certificates (`SSL_VERIFY_PEER` + hostname binding); JSON parsing is RFC 8259-strict with a lenient `jsonParseJsonc` and a `jsonPull` streaming tokenizer.
 
 ### Self-Hosting — Bootstrap Converges
 
-`milo0` (`src-milo/`, ~8.2K lines) — the Milo compiler written in Milo — compiles its own source and reaches a **byte-identical fixed point at the production `-O2` level**: `stage1 == stage2 == stage3`, 157K-line IR identical. Manifest-wide, 212/339 fixtures emit byte-identical IR between stage1 and stage2, zero divergences. See **[docs/self-hosting.md](self-hosting.md)** for the full milestone log (M0–M5) and the eight oracle miscompiles the self-compile exposed and fixed.
+`milo0` (`src-milo/`, ~20.8K lines) — the Milo compiler written in Milo — compiles its own source to a **byte-identical fixed point at the production `-O2` level**: `stage1 == stage2 == stage3`. Manifest-wide, 212/339 fixtures emit byte-identical IR between stage1 and stage2, zero divergences. Drop-glue slice 1 (drop infra, `Ident` move-zeroing, reassign-drop) has landed and stays ASAN-clean.
 
-Reproduce: `sh scripts/selfhost.sh` (builds stage1 via the oracle — required; `.selfhost/milo-self.bin` is gitignored), then `bun test tests/selfhost.test.ts`.
+See [self-hosting.md](self-hosting.md) for the M0–M5 milestone log and the eight oracle miscompiles the self-compile exposed and fixed.
 
-Remaining (M6, incremental): grow the manifest toward full fixture parity. Expected gaps are the constructs bootstrap doesn't need — closures, user generics, traits beyond `impl Clone`, threads/green-runtime.
+Reproduce: `sh scripts/selfhost.sh` (builds stage1 via the oracle — required; `.selfhost/milo-self.bin` is gitignored), then `bun test tests/selfhost.test.ts`. **Never run `.selfhost/milo-self.bin` bare** — see the memory guards in CLAUDE.md.
+
+### Platforms
+
+- **darwin + linux**, aarch64 + x86_64 — full support, both CI-tested
+- **Windows x64/arm64** — partial; core language, `std/io`, process, crypto hashing, ConPTY, plain TCP and the non-fd/socket green tiers all run as native PEs, CI-verified on `windows-latest`. Shipped pieces: COFF via `lld-link`, UCRT divergences (`_write`/`__acrt_iob_func`), Microsoft x64 struct ABI, platform splits for `platform`/`event`/`random`/`term`/`environ`/`sysinfo`/`crypto`/`pty`/`os` fd calls, pthreads over `SRWLOCK`/`CONDITION_VARIABLE`, green scheduler over `CreateFiber`, sockets over Winsock with `WSAEventSelect` readiness, `CreateProcess` for `fork`/`waitpid`/`kill`, cross-target `@cLayout`/`@cSig` verification against the xwin SDK, and the `std/net`→`std/fetch` split that lets a plain-TCP program link without OpenSSL. Remaining tiers are in In Progress. Dev loop: `xwin splat` + `MILO_WINDOWS_SDK`, sweep under Wine with `bun scripts/windows-sweep.ts` — but CI's `test-windows` job is the authority on real-OS execution. See [breaking-changes.md](breaking-changes.md) for the `std/os` → `std/platform` relocation it required.
+- Remaining `// @skip-os: win32` fixtures carry their reason inline — the skip list *is* the remaining port work, item by item.
+
+### C Interop
+
+- Safe extern calls when args coerce safely and the return is scalar/void; `string.cstr()`, `extern type` opaque handles, pointer-to-struct field access, typed fn-pointer params, `std/cstr`
+- **`@cLayout` / `@cSig`** verify extern struct layouts and function signatures against the real system headers by compiling a throwaway TU at build time — cross-target too, when a sysroot is available. `scripts/audit-extern-returns.ts` sweeps return types with no annotations required; std is clean on macOS and Linux
+- Variadic externs are checked against libc's real fixed-param count (a wrong arity miscompiles silently on AArch64 — it found a live `execl` bug in our own `std/process`)
+- Struct-by-value across the C ABI (`abi.ts`) for System V and Microsoft x64
+- **Consuming Milo from C**: `emit-obj`, `build-lib` (static `.a`), and generated C headers declaring the `pub` surface
+
+### Developer Experience
+
+- **LSP**: diagnostics, hover, go-to-definition, completions, code lens, document symbols, workspace symbols, code actions, signature help, inlay hints, references, document highlight, rename, formatting
+- **VS Code extension**: syntax highlighting + LSP client
+- **Formatter**: `milo fmt` — written in Milo (`fmt.milo` is the only implementation)
+- **Package manager**: `milo init/new/add/remove/install/update/tree/why/vendor/publish` plus `tool install/uninstall/list/run`, git-based cache with a lockfile, GitHub repos as the registry, per-package name mangling. Folded into the one `milo` binary. First published package: [milo-language/yaml](https://github.com/milo-language/yaml). See [plans/package-manager.md](plans/package-manager.md)
+- **Docs from source**: `milo doc <file|dir>` generates reference markdown from doc-comments; `milo api <terms>` searches std signatures
+- **Test framework**: `@expect:`/`@error:` annotations, `milo test` runner — 441 fixtures, 120 error fixtures, 10 prove fixtures
+- **Benchmarks**: `benchmarks/run.sh` with per-benchmark `results-*.md` (fib, binarytrees, grep, json, matmul, maplookup)
+- **JS target**: `milo emit-js` — the playground on the docs site runs the compiler output in-browser
+- **CI**: build + test on push/PR across macOS, Linux and Windows; release pipeline with `--static-deps` static linking (built on ubuntu-22.04 runners for glibc compatibility, never musl)
+- **Examples**: `basics/` (9), `cli-tools/` (13), `net/` (4), `graphics/` (6), `simulation/` (3), `terminal/` (6), `embedded/` (2), `tools/java-dap`. Treated as integration smoke tests for stdlib changes
+- **Debugging**: `-g` emits DWARF that composes with any `-O`; the DAP debugger lives in [milo-language/dapweb](https://github.com/milo-language/dapweb)
 
 ---
 
 ## In Progress
 
-### Self-Hosting — Stage-1
+### Self-Hosting — M6
 
-Blocking full milo0-on-milo0:
+- [ ] Drop-glue slice 2 — scope and loop drops (slice 1 landed; this is the big leak win)
+- [ ] Grow the fixture manifest toward parity. Expected gaps are what bootstrap doesn't need: closures (the `%Closure` decay fix is written up in `self-hosting.md`), user generics, traits beyond `impl Clone`, the green runtime
 
-- [ ] `Vec<T>` in milo0 — 84 use sites, biggest blocker
-- [ ] `String.push` in milo0 — needs mutation-through-self + realloc
-- [ ] Port type checker, HIR, lower, codegen to Milo
+### Windows — Remaining Tiers
 
-End goal: compiler compiles itself, producing equivalent IR for the full Milo source set.
+- [ ] **Pipe readiness** (~3 fixtures) — `WSAEventSelect` is sockets-only and a `CreatePipe` handle is not a SOCKET, so green readiness on a pipe fd genuinely needs overlapped IO / IOCP. Until then green IO on a non-socket fd fails loud rather than deadlocking
+- [ ] **TLS backend** — SChannel, or OpenSSL built for `windows-msvc`; blocks HTTPS and `wsBasic`
+- [ ] **AES-GCM over CNG** — hashing landed; `BCryptEncrypt` with `BCRYPT_AUTHENTICATED_CIPHER_MODE_INFO` is the remaining piece
+- [ ] **`std/regex`** — no C-linkable regex exists on Windows, so the Windows arm is a fail-loud stub. The real fix is a pure-Milo engine (which would drop the libc dependency everywhere)
+- [ ] **fd width** — `socket`/`accept` return `SOCKET` (`UINT_PTR`) but `std/os` declares `i32`; the audit script correctly flags it and stays off the Windows CI job until the fd layer goes i64
+- [ ] Unskip `tcpIpv6` / `tcpGreenConnectRefused` once real Windows confirms them (they link; Wine can't emulate `AF_INET6` or a refused `FD_CONNECT`)
+
+### Overflow Traps by Default
+
+Direction is **decided** — trap by default in release (Ethos #1; silent release wrap is the one inherited footgun), with `wrappingAdd`/`saturatingAdd`/`checkedAdd` for intentional wrap. What is owed is the measurement, not the decision: the compiler proves most arithmetic safe and emits no check at all (`matmul` emits zero traps even with the flag on), while arithmetic-dominated code with unprovable operand ranges measured **~+8%** (0.37s → 0.40s over 400M iterations). Real benchmarks are sub-0.3s and need a quiet machine. Do it with the emulators as the stress case, then flip.
 
 ---
 
 ## Planned
 
-### Runtime Maturity — `node-milo`
-
-`node-milo` is the current stress test for Milo as an implementation language. If a missing feature keeps runtime logic in C++ or forces raw pointer arithmetic in Milo, it moves up the roadmap.
-
-- [ ] Move more `internalBinding()` implementations out of C++ and into Milo
-- [ ] Track success by Node compat %, shrinking C++ glue, and keeping `unsafe` contained to binding seams
-- [ ] **V8 C API wrapper — eliminate bridge/*.cpp entirely**. Currently `bridge/core.cpp`, `bridge/fs.cpp`, `bridge/timers.cpp` (1235 lines of C++) exist solely because V8 has no C API — every binding must extract V8 args and return V8 values through C++ types (`FunctionCallbackInfo<Value>&`, `HandleScope`, etc.). The fix: write a single `v8_c_api.cpp` that wraps V8's C++ API in `extern "C"` functions (`v8c_get_string_arg`, `v8c_return_int`, `v8c_throw_error`, etc.), then `declare` those in Milo and move all binding orchestration into `.milo` files. This collapses the three-layer architecture (JS → C++ glue → Milo) into two layers (JS → Milo via V8 C wrapper). For reference, even bun (which uses JSC's C API from Zig/Rust) still has 153K lines of C++ — our 1.2K line bridge is already thin, but eliminating it makes the codebase purely Milo + one mechanical C wrapper.
-
-### Safety Hardening
-
-**Shipped 2026-07-16 — `--overflow-checks`.** `+ - *` trap at `-O0` but silently WRAP at
--O2/-O3: `i64::MAX + 1` quietly becomes `i64::MIN` in a release build (Rust's wart; Swift
-traps in every mode). The flag turns traps on at any -O so the cost can be measured before
-deciding the default. `tests/overflowChecks.test.ts` pins BOTH halves against `--release` —
-it lives outside tests/runtime-errors/ because that harness compiles at `--debug`, where
-overflow already traps, so a fixture there would pass whether or not the flag worked.
-**Not yet the default**, and the benchmark to justify that is still owed: the compiler
-proves most arithmetic safe and emits no check at all (`matmul` emits zero traps even with
-the flag on), while arithmetic-dominated code with unprovable operand ranges measured
-~+8% (0.37s -> 0.40s over 400M iterations). Real benchmarks are sub-0.3s and need a quiet
-machine to measure credibly.
-
-**Fixed 2026-07-16 — a fixed-size array of Copy elements is now Copy** (Rust's
-`[T; N]: Copy where T: Copy`). `[u8; 16]` — an IPv6 address — could not be passed to two
-functions: the first call MOVED it, and the compiler's own hint said to "clone it at the
-point of transfer", which arrays have no method for. The diagnostic named a fix that could
-not be applied. The element check keeps it sound: `[string; 2]` still moves
-(`tests/errors/arrayNonCopyMove.milo`), so two owners can't free the same heap. It does not
-make big buffers copy by value either — `[u8; 4096]` decays to `*u8` at every call site in
-std, and nothing passes a large array by value.
-
-**Shipped 2026-07-16 — IPv6 in `std/net`.** `ip6("::1")` (16 raw bytes via `inet_pton`),
-`TcpStream.connect6`, `TcpListener.bind6`, with `scopeId` for link-local peers. Added
-ALONGSIDE the v4 API, not replacing it: `ip4()` returns a u32 and `connect(ip: u32, ...)`
-bakes IPv4 into its signature, and a u32 cannot hold a 128-bit address. `AF_INET6` is 30 on
-darwin / 10 on linux (verified) — one of the few socket constants that genuinely differs —
-so it comes from the platform split. A v4 literal is NOT auto-mapped: `ip6("127.0.0.1")` is
-None rather than a v4-mapped address, which is the trap that made node-milo's v4-only stack
-appear to work. Verified by a real ::1 round-trip (`tests/fixtures/tcpIpv6.milo`).
-
-**Shipped 2026-07-16 — `std/unix` (AF_UNIX stream sockets).** `UnixListener`/`UnixStream`
-with the same shape as the TCP pair (green-aware `accept`/`connect`, `incoming()` channel,
-`take()`), so a local daemon gets a filesystem-scoped transport instead of a localhost TCP
-port. It needed the sockaddr seam first: the syscalls take `struct sockaddr *` and read the
-family from its first bytes, so `bind`/`connect` cannot be declared per-family (the resolver
-merges every decl of an imported file, so a second one at another type just loses). With
-`std/os` declaring them raw against `*SockAddr` behind typed per-family wrappers, this module
-holds no `unsafe` at all. A path longer than `sun_path` is rejected rather than silently
-truncated into a different socket. See `tests/fixtures/unixSocket.milo`.
-
-**Fixed 2026-07-16 — a `&mut self` method on a match-bound COPY silently discarded the write.**
-`match b { Box.Full(c) => { c.bump() } }` compiled, ran against a snapshot, and threw the
-result away (inside `bump` v==2, after the match v==1) — while the identical operation
-through a `&mut` fn arg was correctly rejected. The method receiver was the one path that
-skipped `setAutoBorrowChecked`. Rejecting every copy-bound receiver is too blunt (it broke
-six shipped programs); three things must line up for the loss to be observable: the binding
-is by value (a ref writes through), the payload is Copy (a non-Copy payload is MOVED, so the
-binding owns it), AND the subject is a place that outlives the arm. `match Child.spawn(...)
-{ Ok(child) => child.closeStdin() }` is legal for the opposite reason — the subject is a
-temporary, so the binding IS the owner. if-let and let-else share the binding path and are
-covered. Fixtures pin both directions: `tests/errors/matchCopyBindMutate.milo` and
-`tests/fixtures/matchTempBindMutate.milo`.
-
-**Fixed 2026-07-16 — `string.push(65)` needed an explicit `as u8`.** The arg was checked
-with no expected type, so an int literal inferred i64 and then failed a u8 equality check;
-`Vec.push` had always hinted its arg. Nothing else loosens: an out-of-range literal is
-rejected by the coercion ("integer literal 300 overflows u8"), and a real i64 value is still
-refused (`tests/errors/stringPushI64.milo`) — silently truncating that is the opposite of
-the point.
-
-**Fixed 2026-07-16 — signal self-pipes were a single global, cross-wiring any program that
-armed two signals.** `_sigPipeW` was one `i32`, so installing a second signal re-pointed the
-shared handler at the second pipe: raising SIGWINCH made **SIGCHLD's** fd readable while the
-resize fd stayed empty — a resize delivered as a child exit, silently. It survived because
-nothing had ever armed two at once; `timeout` arming SIGCHLD while `splitPty` arms SIGWINCH
-is what made the pair reachable. Now one write-end per signal, and the shared handler picks
-the pipe from its argument (the only input a C handler gets). Out-of-range signals are
-rejected instead of indexing off the table. `tests/fixtures/signalTwoPipes.milo` asserts both
-directions — each signal hits its own pipe and only its own.
-
-**Shipped 2026-07-16 — `timeout` waits on an event, not a 50ms poll.** Its loop was
-`waitpid(pid, status, WNOHANG)` + `sleepMs(50)` — the last genuine I/O poll in the tree. Now
-a `Select` over the SIGCHLD self-pipe fd and the deadline. Behaviour is identical (verified
-case-by-case against the pre-change binary: exit code, timeout=124 in 1.04s not 5s,
-`-k`, and signal-death — which returns 0 both before and after, because the child exits
-*normally* after `system()` returns). Three hazards the conversion has to handle, all
-documented at the call site: fd arms need a scheduler even with no green tasks
-(`schedulerEnsureInit()`); the pipe must be installed BEFORE `fork` or a fast child's exit
-is missed; and the handler plus its pipe write-end are **inherited across fork**, so the
-child calls `resetSignal(sigchld())` before `system()` — otherwise its grandchild's exit
-wakes the parent for the wrong death.
-
-**Fixed 2026-07-16 — a timer-only main-context `Select` spun forever (regression from the
-same day's C1 fix).** The main wait loop polls the scheduler and re-checks the claim, but
-`_schedulerRunOnce` returns early when `numTasks == 0` and only polls the event loop while
-tasks remain. Select arms don't live on the task list — fd/timer arms hang off `sSelFdHead`
-and are claimed by `_pollAndWake` — so once the last green task finished, the poll became a
-no-op and the loop spun. Before C1 this returned `-1` immediately: wrong, but it terminated.
-`_schedulerPollMainSelect` now polls the event loop directly when nothing is runnable
-(`_selMinTimeout` bounds the sleep, so it blocks rather than busy-spins). Caught by building
-the child-exit arm, not by the suite — `selectMainContext.milo` misses it because its task is
-still alive when the claim lands. `tests/fixtures/selectTimerMain.milo` pins it.
-
-**Shipped 2026-07-16 — child-exit `Select` arm.** No new API: `installSignalPipe(sigchld())`
-+ `sel.onRead(fd)` + `waitpid(pid, buf, WNOHANG)`. The pieces just never existed at once —
-SIGCHLD landed the same day, and WNOHANG is 1 on both platforms (verified). Unblocks the
-event-driven `timeout` rewrite. See `tests/fixtures/selectChildExit.milo`.
-
-**Shipped 2026-07-16 — a `Promise` can be armed in a `Select` (`p.channel()`).** The two
-concurrency tiers didn't compose: `Promise` runs work on an OS thread, `Select` waits on the
-green event loop, and an event-driven `timeout` wanted to bridge them. `Promise` always held
-a `Channel<T>`; nothing exposed it. Handing it out is safe because `Channel<T>` is a single
-`*u8` and therefore an implicitly Copy handle — it needs no `clone()`, and `let a = ch; let
-b = ch` already alias (the old blocker checked for a `@copy` attribute rather than the
-property). `await()` still owns the fetch.
-
-That needed a third wait tier. With no scheduler (a main using only `Promise.blocking`)
-there is nothing to park on and nothing to poll, so `SelectState` gained a condvar that a
-foreign pthread's claim signals — the same ladder channels already use. **Timer and fd arms
-are inert without a scheduler** (they need the poll loop), so `onTimeout` is not a safety
-net there; `wait()` returns -1 for a select whose arms are all inert rather than blocking on
-a wake that can never come, and mixed arms are not rescued. Documented at the top of
-`std/select.milo`.
-
-**Fixed 2026-07-16 — `Select.wait()` returned `-1` instead of the winning arm on the main
-context.** `schedulerCurrent()` is 0 there, so `schedulerPark()` no-opped and the unclaimed
-`-1` fell straight through — select still woke at the right moment, so callers just couldn't
-tell which arm fired and the demos drained every arm to compensate. Main now takes the shape
-channels already use (`_schedulerPollMain`): it can't park, because nobody else would drive
-the scheduler, so it polls a bounded tick and re-checks the claim. Green tasks still park.
-`tests/fixtures/selectMainContext.milo` pins the arm index (a 5s timeout arm makes a stalled
-poll fail on the index rather than hang the suite).
-
-**Fixed 2026-07-16 — a closure's expected return type was never propagated.** Param hints
-were, but not the return, so an un-annotated `() => 0` always inferred i64 and
-`opt.unwrapOrElse(() => 0)` on an `Option<i32>` failed with "callback must return i32, got
-i64". The caller's expected return now seeds the closure's body context (an explicit
-annotation still wins; an `unknown` hint, as Vec.map gives, still infers from the body).
-Caught by the language-reference doc test, which type-checks every `milo` block.
-
-**Shipped 2026-07-16 — `Option.map` / `Option.unwrapOrElse`.** Both lower through `OptionOp`
-with a real branch rather than the `select` that `unwrapOr` uses: `select` evaluates both
-arms, so the callback would run even when it shouldn't — defeating the point of each. `map`
-builds its result enum via `monomorphizeEnum("Option", [U])`, so `U` need not equal `T`
-(`Option<i64>.map(n => n > 5)` gives `Option<bool>`). `map` takes the payload by `&T`, which
-is why it needs no Copy gate, unlike `unwrapOr`/`unwrapOrElse` which load the payload out —
-nothing is moved out of the receiver, so an owned inner can't gain a second owner. Fixtures
-`optionMap.milo` / `optionUnwrapOrElse.milo` pin laziness via output ordering and cover the
-non-Copy (`Option<string>`) case.
-
-**Fixed 2026-07-16 — `std/signal.onSignal` handed its handler a garbage signal number.**
-It took `handler: (i32) => void`, i.e. a closure, whose code pointer takes `(env, sig)`. A C
-signal handler has no user-data slot, so `signal()` called it with the signal number in the
-env slot and the handler read garbage as its `sig` (1794499728 instead of 20). Nothing
-caught it because the only in-tree handler, `_sigPipeHandler`, ignores its argument — so
-SIGWINCH via `installSignalPipe` worked and the doc comment "Handler receives the signal
-number" stayed false. Now takes a raw `*u8` fn pointer. Also added `SIGCHLD` — the one
-signal here whose number differs per platform (20 darwin / 17 linux, both verified against
-the real headers), so it lives in the `std/platform` split; `tests/fixtures/signalSigchld.milo`
-asserts it by raising the signal rather than restating the number.
-
-**Fixed 2026-07-16 — variadic externs declared with the wrong fixed arity miscompiled
-silently.** A libc fn like `fcntl(int, int, ...)` declared as `extern fn fcntl(fd, cmd, arg)`
-compiles clean and calls with the wrong ABI: AArch64 passes variadic args on the stack while
-a fixed-arity call puts them in registers, so the callee reads garbage. x86_64 hides it (the
-conventions agree for integer args). node-milo lost hours to exactly this — `O_NONBLOCK`
-never landed, so every socket stayed blocking and it presented as a throughput mystery.
-The checker now compares each extern against libc's real fixed-param count
-(`checkVariadicExtern`). It immediately found a live one in **our own std**: `execl` was
-declared with 1 fixed param but C fixes 2 (`path`, `arg0`), so `std/process.spawn` handed
-every child a garbage `argv[0]` and shifted the real one to `argv[1]` — observable as
-`/bin/echo` echoing its own path. Covered by `tests/errors/variadicExternFixedArity.milo`.
-
-**Fixed 2026-07-16 — `std/net` + `std/ws` TLS clients verified no certificates.** Both
-called `SSL_CTX_set_default_verify_paths` and stopped: that loads the trust store but an
-OpenSSL client defaults to `SSL_VERIFY_NONE`, so it was never consulted. A self-signed
-cert that `openssl s_client` rejects handshook fine, and an attacker's cert for any host
-satisfied `wss://` — a MITM was undetectable. Loading the CA store *looked* like
-verification, which is why it survived. Now: `SSL_VERIFY_PEER` + `SSL_set1_host`
-(hostname binding — SNI selects the server's cert, it verifies nothing) +
-`SSL_get_verify_result`. Covered by `tests/tlsVerify.test.ts`, whose hostname case holds
-the chain valid so it can only fail on the hostname.
-
-See **[docs/safety-roadmap.md](safety-roadmap.md)** for the full plan. Summary:
-
-1. `unsafe` blocks — quarantine FFI and low-level code behind a grep target
-2. Flow-sensitive invalidation tracking — catch aliased mutation at compile time (ref-while-frozen, use-after-invalidate, arena scope tainting)
-3. Interprocedural exclusivity — reject aliasing `&var` + `&` at call sites, purity inference, arena lifetime scoping
-4. Dynamic fallback — debug ref counting and sanitizer mode for patterns static analysis can't reach
-5. Safety profiles — `default`, `strict` (aircraft-grade), `performance`
 ### Language
 
-Runtime pressure from `node-milo` changes the order here: binary data and FFI safety land before more expressive abstractions.
-
-- [x] ~~**Safe extern call expansion**~~ — extern calls no longer need `unsafe` when all args are safely coerced (string→`*u8`, array→`*T`, `*T`→`*T`, `fn`→fn ptr) and return is scalar/void. Dramatically reduces `unsafe` in FFI code.
-- [x] ~~**`string.cstr()` builtin**~~ — returns `*u8` data pointer without `unsafe`. Replaces `_strDataPtr` intrinsic for ergonomic C string interop.
-- [x] ~~**Opaque foreign handle types**~~ — `extern type sqlite3`, `extern type SSL` — opaque types that can only exist behind `*T`. Prevents handle mixups between different FFI types. No LLVM layout emitted.
-- [x] ~~**Pointer-to-struct field access**~~ — `ptr.field` auto-derefs `*Struct` for field access (requires `unsafe`). Eliminates manual byte-offset pointer arithmetic for C struct access.
-- [x] ~~**Typed function pointers in extern decls**~~ — extern fns accept `(*u8, *u8) => i32` params directly. Passing a Milo function no longer needs `as *u8` cast.
-- [x] ~~**CStr stdlib**~~ — `std/cstr.milo` provides `CStr.wrap(ptr)`, `.toString()`, `.byte(i)`, `.eq()` for safe NUL-terminated C string access.
-- [ ] **Unused import warnings** — compiler should warn (or error) on imported symbols that are never used in the module. Currently `main.milo` imports all binding symbols just so they link, but ideally re-exports or `pub` declarations in binding modules would handle this without polluting the import list.
-- [ ] **Borrowed slices / byte views** — `&[T]` / `&mut [T]`, with slicing generalized beyond `string`. Unblocks offset/length I/O, `Buffer`/`ArrayBuffer` interop, and zero-copy protocol parsing.
-- [ ] **C ABI / layout control** — packed structs, alignment control. `extern struct` and `sizeOf`/`offsetOf` already work.
-- [x] ~~**`@cLayout` — extern struct layout verification**~~ — a declared `extern struct` layout was taken on faith; a wrong offset silently read the neighbouring field and returned plausible garbage. `@cLayout("struct timespec", "time.h")` now emits a throwaway C TU asserting each field's `offsetof` **and** `sizeof` against the real header, compiles it with the system `cc` at build, and discards it. Size checked `>=` so prefix decls stay legal; skipped for bare-metal. Opt-in, and hand-written `extern fn` decls remain unchecked; `unsafe` deliberately covers neither (tracks provenance, not layout/effects). Stepping stone to a full `@cImport`. See `~/git/node/src/milo/MILO_PAINPOINTS.md` #8.
-- [ ] **Structured OS / syscall errors** — `OsError`/`SysError` carrying `errno`/code plus syscall/path context. Needed for runtime bindings, better diagnostics, and Node-compatible error surfacing.
-
-- [x] **Interfaces (runtime polymorphism)** — Go-style interfaces with structural typing and vtable dispatch. `interface Shape { fn area(self: &Self): f64 }` — any type with matching methods satisfies the interface. Separate from traits (which remain compile-time only).
-- [ ] **Heap\<Interface\> + heterogeneous collections** — `Vec<Heap<Shape>>` for mixed-type collections via heap-allocated interface values.
-- [ ] **Iterators** — iterator trait, `.map().filter().collect()` chains, lazy evaluation. Needs associated types.
-- [ ] **Error conversion** — `From` trait for automatic error conversion in `?`, `anyhow`-style boxing.
-- [ ] **Ranged integers L3** — branch narrowing: after `if x < 50`, x is known `(min..49)` in the then-branch.
-- [ ] **MIR** — lower-level IR for optimization passes (post self-hosting)
+- [ ] **`&mut [T]` views + checked disjoint split** — slices are immutable-only today, so no workload can hand N workers N non-overlapping mutable windows into one buffer. Range disjointness is linear scalar arithmetic, which `milo prove` already discharges — so `splitMut` should need no `unsafe` (backlog Tier 2 #9)
+- [ ] **Borrowed byte views** — `Buffer`/`ArrayBuffer`-shaped interop and zero-copy protocol parsing; gates the zero-copy form of the JSON byte-feed
+- [ ] **Named enum-variant fields** — `ForEach { varName: string, … }` instead of an 8-slot positional payload. Greenlit as a language feature; hits the self-hosted compiler hardest. Parser + checker + formatter + LSP
+- [ ] **Tuple binding in for-in** — `for (i, x) in vec.enumerate()`; converts most `while i < len()` loops. match already destructures tuples
+- [ ] **Iterator breadth** — `map`/`filter`/`each`/`enumerate`/`find`/`any`/`all` ship on `Vec`; missing `fold`/`reduce`/`sum`/`take`/`skip`/`zip`, and the combinators are gated on `Vec` so arrays/maps/user types are excluded. Lazy/fusing adapters are deliberately out
+- [ ] **`Heap<Interface>`** — heterogeneous collections (`Vec<Heap<Shape>>`)
+- [ ] **Error boxing** — the `?` half of error conversion shipped; `anyhow`-style boxing wants `Heap<Interface>`
+- [ ] **Ranged integers L3** — branch narrowing: after `if x < 50`, `x` is `(min..49)` in the then-branch
+- [ ] **Structured OS / syscall errors** — `OsError` carrying `errno` plus syscall/path context
+- [ ] **C ABI layout control** — packed structs, alignment. `extern struct`, `sizeOf`/`offsetOf` already work
+- [ ] **Const / value generic params** — generics are type-only. The bun-rs audit found 1,120 `const B: bool` sites; the only real language gap that audit surfaced. Weigh against Ethos #3 when a concrete Milo need appears
+- [ ] **MIR** — lower-level IR for optimization passes, post self-hosting
 
 ### Standard Library
 
-- [x] ~~**JSON streaming / pull parser**~~ — shipped: `jsonPull(src).next()` yields `JsonToken`s (`StartObject`/`Key`/`Str`/`Num`/…/`End`) via a container-stack state machine, never building the tree — O(depth) memory (cf. Go `json.Decoder.Token`). Reuses `jsonSkipWs`/`jsonScanStringRange`/`jsonMaterializeStr`. Still string-backed; incremental byte-feed (true unbounded stream) is a later layer on the same tokenizer.
-- [ ] **JSON builder ergonomics** — the *read* side is clean; constructing a document by hand (`jsonObj().str(k,v).int(k,n).build()` chains) is clunky vs the fluent parse API. Flagged from Hades. Wants nicer literal/builder sugar for the write path.
+- [ ] **JSON incremental byte-feed** — `jsonPull` is string-backed; unbounded input (socket, multi-GB) wants a reader layer over the same tokenizer
+- [ ] **JSON builder ergonomics** — the read side is clean; hand-constructing a document is clunky, and `JsonObj.build()` returns `string` rather than `Json`
+- [ ] **Pure-Milo regex engine** — unblocks Windows and drops a libc dependency everywhere
+- [ ] **`std/decimal`** — scaled-i128 for financial math; stdlib only, no compiler change
+- [ ] **Missing bindings** — `alarm`/`setitimer`, `setpgid`/`killpg` (`execvp` shipped)
 
 ### Tooling
 
-- [x] ~~**LSP: rename + find references**~~ — shipped: `textDocument/references`, `documentHighlight`, and `rename`, plus workspace-wide search over every `.milo` under the workspace root. Name-based like hover/goto (not scope-resolved), which is fine for the read-only ones. Rename is the exception — it WRITES, so params/locals are confined to their enclosing function in their own file; only top-level names get the workspace-wide replace. Before that, renaming `a` in `fn f(a)` also rewrote the unrelated `a` in `fn g(a)`.
-- [ ] **Doc comments + generation** — `///` comments, `milo doc` to generate HTML/markdown
-- [ ] **Cross-compilation** — `--target aarch64-linux` etc. (infrastructure exists in target.ts, needs CLI flag + sysroot handling)
-- [~] **Windows port** — *core + green async (non-fd and socket IO) work and are CI-verified; the pipe-readiness (overlapped/IOCP) and TLS/full-`std/net` tiers do not yet.* `getHostTarget()` used to fall through to the Linux entry for any non-darwin host, so Windows silently claimed `x86_64-unknown-linux-gnu` and emitted ELF-targeting IR — it didn't fail, it lied. `windows-x64`/`windows-arm64` are now real targets (`x86_64-pc-windows-msvc`), and CI's `windows-latest` job runs **the fixture suite itself** — the great majority compile and run as native PEs on real Windows (was 401/441; this pass resolved the process/`CreateProcess`, `environ`/`sysinfo`, `std/crypto` hashing, ConPTY, and blocking-socket tiers, shrinking the skip list further — CI is the authority on the exact count). The remaining `// @skip-os: win32` fixtures carry the reason inline, so the skip list is the remaining port work, item-by-item, rather than a number in a doc; the per-tier state is below. See [breaking-changes.md](breaking-changes.md) for the `std/os` → `std/platform` relocation this required.
-  - [x] **target + link** — COFF via `lld-link`, `.exe` suffix, no `-lm` (the UCRT has no separate libm and `lld-link` treats it as a hard error, not a no-op), `bcrypt`/`ws2_32` auto-linked from the SDK when their symbols appear.
-  - [x] **CRT divergence** — `print` lowers to `_write` (32-bit count, LLP64), `eprint` and the assert/bounds paths to `fprintf(__acrt_iob_func(2), …)`: MSVC has no `dprintf` and no linkable `stderr` symbol.
-  - [x] **win64 struct ABI** (`abi.ts`) — Microsoft x64, not System V: a struct rides in one integer register **only** at size 1/2/4/8, everything else by pointer, no HFA rule. Before this, struct-by-value externs silently returned garbage (`externStructLarge` gave 4294967297001 for 1001) instead of failing to link.
-  - [x] **platform arms** — `platform`, `event`, `random`, `term`. Constants were read out of Microsoft's headers by compiling a probe against the SDK, not inferred: `AF_INET6` is 23 (vs 30 darwin / 10 linux), `_stat64` is 56 bytes (vs 144), `sockaddr_in` has no `sin_len`, and the open flags need `_O_BINARY` or the CRT rewrites `\n`→`\r\n`.
-  - [x] **pthreads → Win32** — all 17 moved into the platform split and implemented over `SRWLOCK`/`CONDITION_VARIABLE`, so `std/sync` and `std/runtime` stay single-source.
-  - [x] **green scheduler** — ucontext over `CreateFiber`/`SwitchToFiber` (the runtime reads its context layout through `uctxSize()`/offsets, so the Windows arm defines its own), `mmap` over `VirtualAlloc`, `gettimeofday`/`usleep` over `GetSystemTimeAsFileTime`/`Sleep`, `getentropy` over `BCryptGenRandom`.
-  - [x] **dev loop** — cross-compile from macOS/Linux with `xwin splat` + `MILO_WINDOWS_SDK`, sweep every fixture under Wine with `bun scripts/windows-sweep.ts`; CI's `test-windows` job is the authority on real-OS execution.
-  - [~] **Async event loop** — *readiness model kept; ported onto Win32 primitives instead of an IOCP/completion rewrite.* The scope note below held: all the async fixtures route their park/wake through the one `eventPoll` seam. That seam is now real on Windows in two layers, so the readiness API (`eventRegisterRead(fd)` → `eventPoll` says "fd ready" → task does the `read`) is preserved and `std/runtime` needs no completion-model restructure:
-    - **Non-fd async (DONE):** `eventPoll` is a bounded wait on a Win32 auto-reset **Event** (timers via its timeout, cross-thread unpark via `SetEvent`). The per-loop state (a kqueue fd on POSIX) lives in a slot-indexed table since a Win32 wait has no fd. Unblocked the 11 pure-scheduler/timer/channel/`Promise.blocking` fixtures (`promiseSleep`, `channelMain*`, `parkUnparkCrossThread`, `selectTimerMain`, …).
-    - **Socket readiness (DONE):** `eventRegisterRead/Write` associate each socket with a `WSAEVENT` via `WSAEventSelect` (READ/ACCEPT/CLOSE, or WRITE/**CONNECT** — the FD_CONNECT bit is how a *refused* non-blocking connect surfaces, which a plain readiness poll can't see); `eventPoll` folds those handles into one `WaitForMultipleObjects` alongside the wakeup Event and enumerates the fired ones. Verified end-to-end under Wine by `greenThreadEcho` (green connect/accept/recv/send/close over the scheduler). Registering a **non-socket** fd fails loud (`WSAEventSelect` → `WSAENOTSOCK`) rather than silently never firing.
-    - **Pipe readiness (remaining, ~3 fixtures — `selectFdVsChannel`, `eventLoop`, `greenIoPipe`):** `WSAEventSelect` is sockets-only, and a `CreatePipe`/`_pipe` handle is not a SOCKET, so green readiness on a pipe fd is the one piece that genuinely needs **overlapped IO / IOCP**: a green `read` issues an overlapped `ReadFile` keyed to the parked task and the scheduler waits on `GetQueuedCompletionStatus`. Until then green IO on a non-socket fd refuses up front (`setNonblocking`/`ioctlsocket` fails on a non-socket), so it fails loud rather than deadlocking.
-  - [~] **Winsock** — **primitives + green socket IO done; `std/net` link decoupling done; TLS backend + IPv6-under-Wine remain.** `ensureNetInit()` (→ `WSAStartup`, a no-op on POSIX) runs before any socket; `netErrno`/`netEagain`/`netEinprogress` fold to `WSAGetLastError`/`WSAEWOULDBLOCK` on Windows and to `errno`/`EAGAIN` on POSIX (a non-blocking **connect** reports `WSAEWOULDBLOCK`, *not* `WSAEINPROGRESS`, so `netEinprogress` is 10035 on Windows); `closeSocket()` routes to `closesocket` (a Windows SOCKET is **not** a CRT fd — `_close` on one trips the CRT fastfail). Socket **data IO** goes through a `sockRead`/`sockWrite` seam (POSIX read/write; Windows `recv`/`send`) behind new green helpers `recvFd`/`sendFd`, kept separate from `readFd`/`writeFd` which stay on the CRT path for stdout/stdin/pipes. `greenThreadEcho` (raw green TCP echo) is green under Wine end-to-end.
-    - **`std/net` link decoupling (DONE):** `TlsStream` + the whole `fetch` client (`Response`, `FetchOptions`, `httpsDo`/`doFetch`/`fetch*`, the HTTP/URL parsers) moved to a new **`std/fetch`** module; `std/net` now holds only TCP + DNS and imports **zero** `SSL_*`. Before this, importing plain `TcpStream` dragged `TlsStream`'s `Drop` glue and its `incoming()` closure (codegen emits drop glue for the type whether or not one is constructed), which reference `SSL_free`/`SSL_read`/… — undefined for the target because `xwin` ships no OpenSSL, so *any* `std/net` program failed to link. Now a plain-TCP program cross-links clean for `windows-x64`; a TLS program still (correctly) fails on the OpenSSL symbols. Both are guarded on the dev host, not just CI, by two new `tests/linkDeps.test.ts` cases (gated on `MILO_WINDOWS_SDK` + `lld-link`). The 6 importers (`httpClient`, `fetch`, `tlsVerify`, `linkDeps`, and the two JS runtimes then in-tree) were repointed; the JS runtime and the debugger still build.
-    - **Still gated (runtime, CI-authoritative):** `tcpIpv6` and `tcpGreenConnectRefused` link now but stay `@skip-os: win32` because Wine can't verify their runtime — Wine can't create an `AF_INET6` socket at all (`socket(23,…) → -1`), and it crashes emulating `FD_CONNECT` for a *refused* non-blocking connect (exit 9). The *successful* green socket path runs clean under Wine (`greenThreadEcho`), so the mechanism is sound; real Windows (`test-windows`) is the authority — unskip once it confirms there. Full HTTPS/`wsBasic` additionally need a target TLS backend (SChannel, or OpenSSL-for-`windows-msvc`).
-    - The **type-width problem** remains: `socket`/`accept` return `SOCKET` (`UINT_PTR`, 8 bytes) but `std/os` declares them `i32` (valid because MS documents SOCKET values fit in 32 bits); `scripts/audit-extern-returns.ts` correctly flags it and stays off the Windows CI job until the fd layer goes i64.
-  - [x] **`fork`/`waitpid`/`kill`** → `CreateProcess` (`std/process.windows.milo`). No fork semantics to emulate: a process is created whole, waited on through its HANDLE, killed with `TerminateProcess`. Pipe redirection wires `_pipe` fds inheritable-per-end (a wrong `_O_NOINHERIT` combination trips the CRT invalid-parameter fastfail — `0x8080`, not `0x8180`). A missing program is reported by `spawn()` up front, not by `wait()` as on POSIX. `processPipe`/`processPipeExecFail` made portable via `@targetOs()`; verified under Wine.
-  - [x] **`std/environ` + `std/sysinfo`** — `GetEnvironmentStringsA` (double-NUL block), `GetSystemInfo`/`GlobalMemoryStatusEx`/`GetComputerNameA`/`GetTickCount64`. POSIX-only concepts (uid/gid/ppid/loadavg) degrade to the same zero/empty the POSIX arms return on failure, never a fabricated value. Unblocks `examples/terminal/sysmon.milo` (once `std/pty` links).
-  - [x] **`std/crypto`** → CNG / `bcrypt.dll` (no OpenSSL needed): `sha256`/`sha1`/`md5` via `BCryptHash` versioned pseudo-handles (one-shot, no provider open), digests verified against known vectors under Wine. `stdCrypto`/`cryptoSha1` unskipped. **AES-GCM still fails loud** — CNG's `BCryptEncrypt` + `BCRYPT_AUTHENTICATED_CIPHER_MODE_INFO` path (GCM-chained key, wide-string chaining-mode property) is the remaining piece; `cryptoAesGcm`/`wsBasic` stay skipped.
-  - [x] **`std/pty`** → ConPTY (`CreatePseudoConsole` + a `PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE` proc-thread attribute list on `STARTUPINFOEX`). `COORD` is packed as an i32 (ABI-identical in a register). `slavePath` is `""` — there is no pts device. Open/spawn/wait/resize/close verified under Wine (`ptyLifecycle.milo`, portable via `@targetOs()`). Caveat: a ConPTY output pipe does **not** EOF on child exit the way a pts does (its conhost keeps the write end), so a read-to-EOF loop must be driven by `output()` + `wait()`; the two POSIX-pts-specific fixtures stay skipped.
-  - [ ] **`std/regex`** (1) — no C-linkable regex exists on Windows (`<regex.h>` is absent, `std::regex` is C++-only), so `std/regex.windows.milo` is a **fail-loud arm** for now: the surface links so cross-platform code compiles, and any use aborts with a named message. The real fix is a **pure-Milo regex engine**, which would also let every platform drop the libc dependency — its own tracked piece of work.
-  - [x] **`std/os` fd calls were wrong on Windows** — found by running the c-decl guards natively for the first time. `read`/`write` linked through the UCRT oldnames shim to `int _read(int, void *, unsigned int)` while `std/os` declared 64-bit count and return; Win64 leaves the upper half of RAX undefined for an `int` return, so a `-1` could arrive as a large positive `i64`. Fixed the right way: `read`/`write`/`open`/`close`/`lseek`/`access` (and `getpid`, `dlopen`/`dlsym`/`dlclose`/`dlerror`) moved into the platform split, where the file name states the C library. The Windows arm binds `_read`/`_write`/`_lseeki64` at their true widths and widens once; `std/dl` runs on Windows now (`LoadLibrary`/`GetProcAddress`). See [breaking-changes.md](breaking-changes.md).
-  - [x] **cross-target C decl verification (Windows)** — `verifyCDecls` used to skip on every target≠host cross, so the `@cLayout`/`@cSig` guards that catch LLP64 mistakes (`long` is 4 bytes on Windows, 8 everywhere else) were absent cross-compiling — which is exactly how the `ADDRESS_FAMILY` include-order bug reached CI instead of a local build. Now a Windows cross with `MILO_WINDOWS_SDK` set compiles the guard TU with `--target=<triple>` against xwin's headers (correct LLP64 model), so those guards run on the dev host. Other target≠host crosses still skip, announced (no sysroot to read).
-  - [ ] **non-portable fixtures** — `dateTimeLocal` declares its own POSIX `setenv`; the struct-ABI C peers used `long` where they meant `int64_t` (fixed). These are test-side portability bugs, not compiler gaps.
-  - [ ] **examples** — SDL2 is itself cross-platform, so the emulators may come nearly free once the base exists.
-- [ ] **Benchmarking** — `@bench` annotations, `milo bench` runner
-- [ ] **Documentation / tutorials / "the book"**
+- [ ] **Cross-compilation for hosted targets** — `--target` reaches clang and fails loudly with a hint, but a real cross needs a target linker + sysroot; the compiler has no `-isysroot`/`--sysroot` notion. Bare-metal and Windows crosses already work
+- [ ] **Compile-time reduction** — profiled: the frontend is 0.38s and clang `-O2` is **7.3s, 95% of a self-host build**. Not generics (only 8 monomorphized instances). Levers, in order: interned method IDs instead of `src-milo/codegen`'s string-compare dispatch chains, `String`-by-value struct shredding, then MIR. `--fast` (~2x) exists as the edit-loop workaround
+- [ ] **`@bench` annotations + `milo bench`** — the harness exists as a shell script; the in-language form does not
+- [ ] **"The book"** — documentation and tutorials beyond the reference
+
+### Safety Hardening
+
+Phases 1–3a are done (see Type System & Safety). Remaining, from [safety-roadmap.md](safety-roadmap.md):
+
+- [ ] **3b — purity inference** for safe overlap at call sites
+- [ ] **4a — debug ref counting** for patterns static analysis can't reach (`--sanitize` already links ASAN)
+- [ ] **`unsafe fn` declarations** and `--deny-unsafe` for user code; `unsafe` visibility in the LSP
 
 ---
 
-## Known Bugs
+## Retired / Not Planned
 
-- [x] ~~**Missing `linkonce_odr` linkage**~~ — fixed: all non-main functions now emit `define linkonce_odr`, eliminating duplicate symbol errors when the same monomorphized generic or prelude function appears in multiple compilation units.
-- [x] ~~**Duplicate symbol errors from prelude**~~ — resolved by `linkonce_odr` fix above.
-- [x] ~~**No module-level state**~~ — fixed: `let` and `var` at module scope now work everywhere. Parser, checker, lower, and codegen all handle `GlobalDecl` nodes. Emitted as LLVM `internal global`. Supports int/float/bool literal initializers.
-- [x] ~~**Large array codegen crash (>=65536 bytes)**~~ — fixed: aggregate types (arrays, structs) no longer fall through to the scalar trunc/ext cast path in genCast.
-- [x] ~~**Codegen: `break`/`continue` skip drop cleanup**~~ — fixed: break and continue now emit `emitLoopDropGlue()` for loop-local owned values before branching. All 6 loop variants (while, for-range, for-each vec/string/array/hashmap) track `loopDropStart`.
-- [x] ~~**No `string` → `*u8` cast**~~ — fixed: `"literal" as *u8` and `myString as *u8` now work in unsafe blocks. Codegen extracts the data pointer from the String struct.
-- [x] ~~**`string` not coercing to `*u8` in all positions**~~ — fixed: string→`*u8` coercion now works in let/var declarations, assignments, and return statements, in addition to function call arguments.
-- ~~**Variadic ABI corruption on ARM64**~~ — investigated: variadic support already implemented (parser, AST, codegen all handle `...`). Not a bug.
-
-## Missing Stdlib Bindings
-
-- [ ] **`execvp`** — needed for tools that exec subcommands with argument arrays (timeout, xargs, env). Currently must route through `system()` which double-forks through `/bin/sh`.
-- [ ] **`alarm` / `setitimer`** — enables signal-based timeouts without polling loops
-- [ ] **`setpgid` / `killpg`** — process group control for proper job management in tools like timeout
+- **`node-milo`** (the Node.js fork) — **frozen 2026-07-22, abandoned.** It was the runtime stress test that shaped the FFI and binary-data ordering above; that role now belongs to **milojs**, our own JS engine and runtime, which lives in [milo-language/milojs](https://github.com/milo-language/milojs) with its own roadmap and backlog. The V8-C-API-wrapper plan died with the fork. `docs/node-milo.md` is kept as the retrospective (the kqueue connect-failure and IPv6 gotchas generalize to any Milo runtime)
+- **Emulators (NES/SNES/Genesis), milojs, and the DAP debugger** moved out of this repo 2026-07-24 — [milo-language/emulators](https://github.com/milo-language/emulators), [milo-language/milojs](https://github.com/milo-language/milojs), [milo-language/dapweb](https://github.com/milo-language/dapweb). The docs site builds the browser emulator cores from the emulators repo
+- **`Thread`/`Mutex`/`RwLock`/`parallel`** — removed 2026-07-10 in favour of the green tier; re-add on demand
+- **Lazy / fusing iterator adapters** — laziness buys performance only through aggressive inlining and would pull associated types into the trait system (Graydon review decision #2). Eager `Vec`-returning stages stay
+- **Dependent types + proof terms** — Tier 3 in [verification-roadmap.md](verification-roadmap.md); a different language identity. Milo's lane is SMT-discharged contracts with no proof terms
+- **Reclaiming bare-metal allocator** — the bump allocator plus `--heap-size` closed the safety-critical story
+- **Lowercase type aliases, script mode, let-chains, an `any` type** — considered and declined

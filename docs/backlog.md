@@ -3,7 +3,7 @@ system: planning
 purpose: ROI/difficulty-ranked lens over outstanding work; a prioritization view, NOT the source of truth for status
 key-files: docs/roadmap.md (canonical status), docs/safety-roadmap.md
 update-when: an item ships (flip in roadmap.md, then DELETE it here) or a new item is triaged
-last-verified: 2026-07-16 (full audit — every entry in every tier verified against code)
+last-verified: 2026-07-24 (roadmap.md re-audited against the tree; node-milo entries dropped — the fork is abandoned)
 -->
 
 # Backlog — prioritized
@@ -52,7 +52,6 @@ Track in [roadmap.md](roadmap.md); pull up when a concrete need appears.
 - **`-O2` codegen blowup + int-widening** — deferred from emulator work (memory: emulator-feedback-fixes)
 - **Missing bindings** — `alarm`/`setitimer`, `setpgid`/`killpg`. (`execvp` shipped: declared in `std/os.milo`, used by `std/process` and `std/pty`.) (roadmap.md)
 - **MIR** — optimization IR, post self-hosting (roadmap.md)
-- **node-milo V8 C API wrapper** — eliminate `bridge/*.cpp` (roadmap.md)
 - **"The book"** — documentation/tutorials (roadmap.md). Cross-compilation is Tier 2 #5, not a separate item; the benchmarking harness shipped (`benchmarks/run.sh` + per-bench `results-*.md`).
 - **Re-enable `noUncheckedIndexedAccess`** — off deliberately 2026-07-16 so the tsc gate could enforce at zero; it was a bun-init default with ~700 violations, i.e. enforcing nothing. Retrofitting means ~700 `arr[i]!` assertions, which silence rather than prove. Revisit per-file only if index bugs actually show up. (`tsconfig.json`)
 - **Const/value generic params** — Milo generics are type-only; bun-rs audit (2026-07-17) found 1,120 `const B: bool`-style sites (js_parser lexer monomorphizes over 9 const bools for perf). Workaround: runtime bools (perf loss) or hand-duplication. Only surfaced gap that's a real language feature; weigh against Ethos #3 when a concrete Milo need appears.

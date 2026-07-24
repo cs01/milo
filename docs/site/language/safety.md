@@ -102,7 +102,7 @@ $ echo $?
 
 Nothing was run and no input was supplied — the solver derived `raw = -1` by itself. And notice what it proved along the way: `ensures result >= 0` holds for *every* `n`, which no amount of testing can establish.
 
-### 4. Add the guard, and the proof goes through
+### 4. Add the guard — handle every case instead of aborting on one
 
 ```milo
 pub fn scale(raw: i64): i64 {
@@ -124,7 +124,11 @@ $ echo $?
 0
 ```
 
-The guard is ordinary code — you still write the runtime check where unknown data enters. What the proof adds is the guarantee that you never forgot one. `milo prove` exits non-zero on a failed condition, so that guarantee holds in CI.
+Compare that to step 2. There, a negative reached `sqrt` and the program died — `--debug` aborted, and the optimized build didn't even do that, it just returned a wrong answer. Here the negative never reaches `sqrt`: `raw < 0` returns `0`, a defined result on a path you wrote. Nothing aborts because there is nothing left to abort on.
+
+That is the point of proving rather than asserting. A runtime assert is a backstop for the cases you haven't established; once a condition comes back `proven`, every input is accounted for in ordinary code, and the optimized build that omits the check is no longer skipping anything. The guard itself is nothing clever — you were always going to write it. What you couldn't do before was find out you'd forgotten one, short of hitting it in production.
+
+Two honest limits: this covers the contracts you actually wrote, and only the conditions that came back `proven`. Anything `unknown` is still yours to catch, which is what the `--debug` assert is for. `milo prove` exits non-zero on a failure, so the distinction is enforced in CI rather than by discipline.
 
 Contracts are for *logic* errors. Memory safety is already handled elsewhere: ownership and move checking reject use-after-free and double-free at compile time, bounds checks stay on at every optimization level, and arenas use generational handles. None of those catch `sqrt(-1)`.
 

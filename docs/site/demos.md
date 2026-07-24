@@ -119,7 +119,6 @@ Coreutils-style tools in [`examples/cli-tools/`](https://github.com/milo-languag
 | [calc](https://github.com/milo-language/milo/blob/main/examples/cli-tools/calc.milo) | Expression evaluator |
 | [parallel](https://github.com/milo-language/milo/blob/main/examples/cli-tools/parallel.milo) | Run shell commands in parallel across input lines (fork-based) |
 | [timeout](https://github.com/milo-language/milo/blob/main/examples/cli-tools/timeout.milo) | Run a command with a time limit |
-| [pkg](https://github.com/milo-language/milo/blob/main/examples/cli-tools/pkg.milo) | Milo's own package manager: install and publish packages over git, with a lockfile and GitHub registry |
 
 ## Run these yourself
 

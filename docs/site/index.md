@@ -272,12 +272,6 @@ fn main() {
         <div class="tile-tags"><span>PTY</span><span>multiplexing</span><span>green tasks</span></div>
         <span class="tile-copy" role="button" tabindex="0" data-cmd="milo run examples/terminal/splitPty.milo" title="milo run examples/terminal/splitPty.milo">⧉ copy run command</span>
       </a>
-      <a class="tile" href="https://github.com/milo-language/milo/blob/main/examples/cli-tools/pkg.milo">
-        <h3>Package Manager</h3>
-        <p>Milo's own package manager. Install and publish packages over git.</p>
-        <div class="tile-tags"><span>git</span><span>HTTP</span><span>TOML</span></div>
-        <span class="tile-copy" role="button" tabindex="0" data-cmd="milo run examples/cli-tools/pkg.milo -- --help" title="milo run examples/cli-tools/pkg.milo -- --help">⧉ copy run command</span>
-      </a>
     </div>
   </div>
   <div class="showcase-cta">

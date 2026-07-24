@@ -48,36 +48,39 @@ Identical output under `--debug` and under `--release`. This is not a debug-only
 
 ### 2. A value it can't see — asserted at runtime, in debug builds only
 
-Let's say the value passed to `sqrt` is no longer a constant, but a variable that is not known at compile time. Here it depends on how the program was invoked, so there is nothing for the compiler to fold:
+Let's say the value passed to `sqrt` is no longer a constant, but a number drawn at runtime. There is nothing left for the compiler to fold:
 
 ```milo
-from "std/args" import { args }
+from "std/random" import { randRange }
 
 pub fn main(): i32 {
-    var reading: i64 = -1
-    if args().len() > 99 {
-        reading = 49
-    }
+    let reading: i64 = randRange(-100, 100)
     print(sqrt(reading))
     return 0
 }
 ```
 
-This compiles. What happens next depends on the build:
+This compiles. What happens on a negative draw depends entirely on the build.
+
+**Release builds** — `-O1`, `-O2`, `-O3`, the default for `milo build`. No assertion is emitted, so the contract costs nothing and catches nothing:
 
 ```
 $ milo build sqrt.milo -o sqrt && ./sqrt
-0                                                    # -O2 (default): no check emitted
+0                      # negative draw: sqrt returned a meaningless 0
 $ echo $?
 0
+```
 
+**Debug builds** — `--debug`. Every `requires`, `ensures`, and `invariant` becomes a runtime assert, naming the clause that failed and its line:
+
+```
 $ milo build sqrt.milo --debug -o sqrt && ./sqrt
 runtime error: requires clause violated at sqrt.milo:5
 $ echo $?
 1
 ```
 
-At `-O1`/`-O2`/`-O3` the contract costs nothing and catches nothing. `--debug` turns every `requires`, `ensures`, and `invariant` into an assert; `--overflow-checks` does the same at any optimization level.
+`--overflow-checks` turns those same asserts on at any optimization level, if you want them in a release build.
 
 ### 3. `milo prove` — catch it statically instead
 

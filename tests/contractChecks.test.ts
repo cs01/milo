@@ -43,6 +43,11 @@ function build(out: string, extra: string[]) {
     { cwd: ROOT, stdio: ["pipe", "pipe", "pipe"] });
 }
 
+function emitIr(extra: string[]): string {
+  return execFileSync("bun", ["run", MAIN, "emit-ir", join(dir, "contract.milo"), ...extra],
+    { cwd: ROOT, encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"] });
+}
+
 function run(bin: string): { out: string; code: number } {
   try {
     return { out: execFileSync(join(dir, bin), { encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"] }), code: 0 };
@@ -81,4 +86,19 @@ test("--no-overflow-checks alone does not turn contract asserts off", () => {
   const r = run("dbgNoOvf");
   expect(r.code).not.toBe(0);
   expect(r.out).toContain("requires clause violated");
+}, 120000);
+
+test("emit-ir honors explicit contract-check settings", () => {
+  const checked = emitIr(["--release", "--contract-checks"]);
+  const unchecked = emitIr(["--release", "--no-contract-checks"]);
+  expect(checked).toContain("@.contract_err");
+  expect(unchecked).not.toContain("@.contract_err");
+  expect(checked).not.toBe(unchecked);
+}, 120000);
+
+test("emit-ir honors explicit overflow-check settings", () => {
+  const checked = emitIr(["--release", "--overflow-checks", "--no-contract-checks"]);
+  const unchecked = emitIr(["--release", "--no-overflow-checks", "--no-contract-checks"]);
+  expect(checked).toContain("llvm.smul.with.overflow.i64");
+  expect(unchecked).not.toContain("llvm.smul.with.overflow.i64");
 }, 120000);

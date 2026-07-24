@@ -1,0 +1,40 @@
+// @proven: 2
+// @failed: 2
+// @unknown: 0
+// Control-flow wrappers inside a loop must not hide a break from symbolic execution.
+pub fn unsafeBreak(): i64
+ensures result >= 0
+{
+    var x: i64 = 0
+    while true
+    invariant
+    x >= 0
+    {
+        unsafe {
+            x = -1
+            break
+            x = 0
+        }
+    }
+    return x
+}
+
+pub fn matchBreak(n: i64): i64
+ensures result >= 0
+{
+    var x: i64 = 0
+    while true
+    invariant
+    x >= 0
+    {
+        match n {
+            0 => {
+                x = -1
+                break
+                x = 0
+            }
+            _ => { break }
+        }
+    }
+    return x
+}

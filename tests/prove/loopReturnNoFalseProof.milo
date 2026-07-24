@@ -1,0 +1,16 @@
+// @proven: 1
+// @failed: 1
+// @unknown: 0
+// A return from a loop body is a function exit and must reach the postcondition VC.
+pub fn returnFromLoop(n: i64): i64
+requires n >= 0
+ensures result >= 0
+{
+    while n > 0
+    invariant
+    n >= 0
+    {
+        return -1
+    }
+    return 0
+}

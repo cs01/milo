@@ -235,6 +235,7 @@ interface LoopObligation {
   guard: string;                    // loop condition, lowered in havocEnv
   invariants: Contract[];
   body: Stmt[];
+  bodyRun: SymExecResult;
 }
 
 // Symbolic path through a function body
@@ -248,11 +249,18 @@ interface SymPath {
 interface SymExecResult {
   paths: SymPath[];
   finalEnvs: { conditions: string[]; env: Map<string, string> }[];
+  breakEnvs: { conditions: string[]; env: Map<string, string> }[];
+  continueEnvs: { conditions: string[]; env: Map<string, string> }[];
   calls: CallSite[];
   // Fresh constants introduced by havoc, to be spliced into the function's declaration
   // block — path conditions reference them, so an undeclared one poisons every VC.
   havocDecls: string[];
   loops: LoopObligation[];
+}
+
+interface SymExecContext {
+  havocSeq: number;
+  havocDecls: string[];
 }
 
 // A call reached during symbolic execution, with the path conditions that hold when it
@@ -281,16 +289,12 @@ function collectCallsInExpr(expr: Expr, conds: string[], env: Map<string, string
   }
 }
 
-function collectPaths(stmts: Stmt[], env: Map<string, string>, types?: Map<string, string>): SymExecResult {
+function collectPaths(stmts: Stmt[], env: Map<string, string>, types?: Map<string, string>, context?: SymExecContext): SymExecResult {
   const paths: SymPath[] = [];
   const calls: CallSite[] = [];
-  const havocDecls: string[] = [];
+  const ctx = context ?? { havocSeq: 0, havocDecls: [] };
   const loops: LoopObligation[] = [];
   const varTypes = new Map(types ?? []);
-  // Names must be deterministic: a body is walked more than once per function (call-site
-  // obligations, then postconditions) and the two runs have to agree on them, or the
-  // declaration block built from one run won't cover the path conditions from the other.
-  let havocSeq = 0;
 
   // Replace every variable the block assigns with a fresh constant of the same type. This
   // is the only sound way past a loop without unrolling it: whatever the loop did, the
@@ -300,14 +304,14 @@ function collectPaths(stmts: Stmt[], env: Map<string, string>, types?: Map<strin
     collectAssignedVars(block, mods);
     const out = new Map(localEnv);
     for (const name of mods) {
-      const fresh = `${name.replace(/[^A-Za-z0-9_]/g, "_")}__loop${havocSeq++}`;
+      const fresh = `${name.replace(/[^A-Za-z0-9_]/g, "_")}__loop${ctx.havocSeq++}`;
       // No annotation and no float literal to learn from means Int, matching how the rest
       // of this file treats an unknown type. A float local would be modelled as an integer
       // here, which is why floatish() also looks at the initializer.
       const typeName = varTypes.get(name) ?? "i64";
-      havocDecls.push(`(declare-const ${fresh} ${miloTypeToSmt(typeName)})`);
+      ctx.havocDecls.push(`(declare-const ${fresh} ${miloTypeToSmt(typeName)})`);
       const range = intRangeAssumption(fresh, typeName);
-      if (range) havocDecls.push(range);
+      if (range) ctx.havocDecls.push(range);
       CALL_MODEL?.scope.add(fresh);
       out.set(name, fresh);
     }
@@ -317,6 +321,8 @@ function collectPaths(stmts: Stmt[], env: Map<string, string>, types?: Map<strin
 
   // for void functions, we need to capture final env state
   const finalEnvs: { conditions: string[]; env: Map<string, string> }[] = [];
+  const breakEnvs: { conditions: string[]; env: Map<string, string> }[] = [];
+  const continueEnvs: { conditions: string[]; env: Map<string, string> }[] = [];
 
   function walkCapture(stmts: Stmt[], idx: number, pathConds: string[], localEnv: Map<string, string>): void {
     for (let i = idx; i < stmts.length; i++) {
@@ -350,34 +356,24 @@ function collectPaths(stmts: Stmt[], env: Map<string, string>, types?: Map<strin
         paths.push({ conditions: [...pathConds], result: val });
         return;
       }
+      if (stmt.kind === "BreakStmt") {
+        breakEnvs.push({ conditions: [...pathConds], env: new Map(localEnv) });
+        return;
+      }
+      if (stmt.kind === "ContinueStmt") {
+        continueEnvs.push({ conditions: [...pathConds], env: new Map(localEnv) });
+        return;
+      }
       if (stmt.kind === "UnsafeBlock") {
-        for (const inner of stmt.body) {
-          if (inner.kind === "Assign") {
-            if (inner.target.kind === "Ident") {
-              localEnv.set(inner.target.name, exprToSmtWithEnv(inner.value, localEnv));
-            } else if (inner.target.kind === "FieldAccess") {
-              const flat = flattenFieldAccess(inner.target);
-              if (flat) localEnv.set(flat, exprToSmtWithEnv(inner.value, localEnv));
-            }
-          } else if (inner.kind === "LetDecl" || inner.kind === "VarDecl") {
-            if (inner.value) localEnv.set(inner.name, exprToSmtWithEnv(inner.value, localEnv));
-          }
-        }
-        continue;
+        walkCapture([...stmt.body, ...stmts.slice(i + 1)], 0, pathConds, new Map(localEnv));
+        return;
       }
       if (stmt.kind === "IfStmt") {
         const cond = exprToSmtWithEnv(stmt.cond, localEnv);
-        const thenEnv = new Map(localEnv);
-        walkCapture(stmt.thenBody, 0, [...pathConds, cond], thenEnv);
-        const elseEnv = new Map(localEnv);
+        const remainder = stmts.slice(i + 1);
+        walkCapture([...stmt.thenBody, ...remainder], 0, [...pathConds, cond], new Map(localEnv));
         const negCond = `(not ${cond})`;
-        if (stmt.elseBody && stmt.elseBody.length > 0) {
-          walkCapture(stmt.elseBody, 0, [...pathConds, negCond], elseEnv);
-        } else if (branchAlwaysReturns(stmt.thenBody)) {
-          walkCapture(stmts, i + 1, [...pathConds, negCond], elseEnv);
-        } else {
-          walkCapture(stmts, i + 1, [...pathConds, negCond], elseEnv);
-        }
+        walkCapture([...(stmt.elseBody ?? []), ...remainder], 0, [...pathConds, negCond], new Map(localEnv));
         return;
       }
       if (stmt.kind === "WhileStmt") {
@@ -385,6 +381,11 @@ function collectPaths(stmts: Stmt[], env: Map<string, string>, types?: Map<strin
         // recorded before the havoc wipes it.
         const havocEnv = havoc(stmt.body, localEnv);
         const guard = exprToSmtWithEnv(stmt.cond, havocEnv);
+        const assumed = (stmt.invariants ?? [])
+          .map(inv => exprToSmtWithEnv(inv.expr, havocEnv))
+          .filter(s => !/UNSUPPORTED/.test(s));
+        const bodyRun = collectPaths(stmt.body, havocEnv, varTypes, ctx);
+        const active = [...pathConds, ...assumed, ...(/UNSUPPORTED/.test(guard) ? [] : [guard])];
         loops.push({
           entryConds: [...pathConds],
           entryEnv: new Map(localEnv),
@@ -392,34 +393,67 @@ function collectPaths(stmts: Stmt[], env: Map<string, string>, types?: Map<strin
           guard,
           invariants: stmt.invariants ?? [],
           body: stmt.body,
+          bodyRun,
         });
+        loops.push(...bodyRun.loops.map(nested => ({
+          ...nested,
+          entryConds: [...active, ...nested.entryConds],
+        })));
+        for (const path of bodyRun.paths) {
+          paths.push({ conditions: [...active, ...path.conditions], result: path.result });
+        }
+        for (const call of bodyRun.calls) {
+          calls.push({ ...call, conditions: [...active, ...call.conditions] });
+        }
         // Past the loop, all that is known is: the invariant still holds (it was proved to,
         // by the two VCs above) and the guard is false. Everything the loop touched is now
         // one of the fresh constants. Assuming the invariant here is what makes a loop
         // provable at all; without it the walker used to carry the *pre-loop* values
         // forward and certify postconditions that the function violates at runtime.
-        const known: string[] = [];
-        for (const inv of stmt.invariants ?? []) {
-          const smt = exprToSmtWithEnv(inv.expr, havocEnv);
-          if (!/UNSUPPORTED/.test(smt)) known.push(smt);
+        const remainder = stmts.slice(i + 1);
+        const normalExit = [...pathConds, ...assumed, ...(/UNSUPPORTED/.test(guard) ? [] : [`(not ${guard})`])];
+        walkCapture(remainder, 0, normalExit, new Map(havocEnv));
+        for (const exit of bodyRun.breakEnvs) {
+          walkCapture(remainder, 0, [...active, ...exit.conditions], new Map(exit.env));
         }
-        if (!/UNSUPPORTED/.test(guard)) known.push(`(not ${guard})`);
-        for (const [k, v] of havocEnv) localEnv.set(k, v);
-        pathConds = [...pathConds, ...known];
-        continue;
+        return;
       }
-      if (stmt.kind === "ForInStmt" || stmt.kind === "MatchStmt" || stmt.kind === "IfLetStmt" || stmt.kind === "LetElseStmt") {
-        // Not modelled, but they still assign: havoc so nothing downstream reads a value
-        // this walker only *thinks* survived. No invariant syntax exists for these, so
-        // afterwards the variables are simply unknown.
-        const blocks: Stmt[][] =
-          stmt.kind === "ForInStmt" ? [stmt.body]
-          : stmt.kind === "MatchStmt" ? stmt.arms.map(a => a.body)
-          : stmt.kind === "IfLetStmt" ? [stmt.thenBody, stmt.elseBody ?? []]
-          : [stmt.elseBody];
-        const havocEnv = havoc(blocks.flat(), localEnv);
-        for (const [k, v] of havocEnv) localEnv.set(k, v);
-        continue;
+      if (stmt.kind === "ForInStmt") {
+        // A for-loop may run any number of times. Analyze one arbitrary iteration to retain
+        // returns and consume its own break/continue exits; state after normal completion is
+        // otherwise havoced because there is no invariant syntax for this loop form.
+        const havocEnv = havoc(stmt.body, localEnv);
+        const bodyRun = collectPaths(stmt.body, havocEnv, varTypes, ctx);
+        loops.push(...bodyRun.loops.map(nested => ({
+          ...nested,
+          entryConds: [...pathConds, ...nested.entryConds],
+        })));
+        for (const path of bodyRun.paths) {
+          paths.push({ conditions: [...pathConds, ...path.conditions], result: path.result });
+        }
+        for (const call of bodyRun.calls) {
+          calls.push({ ...call, conditions: [...pathConds, ...call.conditions] });
+        }
+        const remainder = stmts.slice(i + 1);
+        walkCapture(remainder, 0, pathConds, new Map(havocEnv));
+        for (const exit of bodyRun.breakEnvs) {
+          walkCapture(remainder, 0, [...pathConds, ...exit.conditions], new Map(exit.env));
+        }
+        return;
+      }
+      if (stmt.kind === "MatchStmt" || stmt.kind === "IfLetStmt" || stmt.kind === "LetElseStmt") {
+        // Pattern predicates are not translated yet. Explore every possible arm so an exit
+        // can make a proof fail, but never disappear and make an invalid proof pass.
+        const branches: Stmt[][] = stmt.kind === "MatchStmt"
+          ? stmt.arms.map(arm => arm.body)
+          : stmt.kind === "IfLetStmt"
+            ? [stmt.thenBody, stmt.elseBody ?? []]
+            : [[], stmt.elseBody];
+        const remainder = stmts.slice(i + 1);
+        for (const branch of branches) {
+          walkCapture([...branch, ...remainder], 0, pathConds, new Map(localEnv));
+        }
+        return;
       }
       // skip unhandled statements
     }
@@ -428,18 +462,7 @@ function collectPaths(stmts: Stmt[], env: Map<string, string>, types?: Map<strin
   }
 
   walkCapture(stmts, 0, [], new Map(env));
-  return { paths, finalEnvs, calls, havocDecls, loops };
-}
-
-function branchAlwaysReturns(stmts: Stmt[]): boolean {
-  if (stmts.length === 0) return false;
-  const last = stmts[stmts.length - 1];
-  if (last.kind === "Return") return true;
-  if (last.kind === "IfStmt") {
-    if (!last.elseBody || last.elseBody.length === 0) return false;
-    return branchAlwaysReturns(last.thenBody) && branchAlwaysReturns(last.elseBody);
-  }
-  return false;
+  return { paths, finalEnvs, breakEnvs, continueEnvs, calls, havocDecls: ctx.havocDecls, loops };
 }
 
 function collectFieldRefs(expr: Expr, refs: Set<string>): void {
@@ -766,17 +789,17 @@ export function generateVerificationConditions(program: Program, opts?: { onlyFi
       // Preservation: assuming every invariant and the guard, one pass through the body
       // has to re-establish them. Body paths that `return` leave the loop, so only the
       // fall-through environments have anything to preserve.
-      const bodyRun = collectPaths(loop.body, loop.havocEnv, paramTypes);
+      const bodyRun = loop.bodyRun;
       const assumed = loop.invariants
         .map(inv => exprToSmtWithEnv(inv.expr, loop.havocEnv))
         .filter(s => !/UNSUPPORTED/.test(s));
       // A nested loop inside the body mints its own havoc constants; without these
       // declarations the preservation query would reference undeclared symbols.
-      const nestedDecls = bodyRun.havocDecls.length > 0 ? bodyRun.havocDecls.join("\n") : "";
       for (const inv of loop.invariants) {
         const violations: string[] = [];
-        let translatable = bodyRun.finalEnvs.length > 0;
-        for (const fe of bodyRun.finalEnvs) {
+        const nextIterationEnvs = [...bodyRun.finalEnvs, ...bodyRun.continueEnvs];
+        let translatable = nextIterationEnvs.length > 0;
+        for (const fe of nextIterationEnvs) {
           const after = exprToSmtWithEnv(inv.expr, fe.env);
           if (/UNSUPPORTED/.test(after)) { translatable = false; break; }
           const conds = fe.conditions.length > 0 ? `(and true ${fe.conditions.join(" ")})` : "true";
@@ -792,7 +815,6 @@ export function generateVerificationConditions(program: Program, opts?: { onlyFi
             `; Loop invariant preservation for ${fn.name}`,
             `(set-logic ALL)`,
             allDecls,
-            nestedDecls,
             preAssumptions,
             ...assumed.map(a => `(assert ${a})`),
             guardAssume,

@@ -178,9 +178,9 @@ function compileToJS(source: string, target: TargetInfo, filePath?: string, warn
   return new CodegenJS().generate(hirModule);
 }
 
-function compileToIr(sourcePath: string, outputPath: string | null, target: TargetInfo, warningConfig?: WarningConfig, debugOverflow = false, emitDebug = false) {
+function compileToIr(sourcePath: string, outputPath: string | null, target: TargetInfo, warningConfig?: WarningConfig, debugOverflow = false, emitDebug = false, contractChecks = false) {
   const source = readFileSync(sourcePath, "utf-8");
-  const ir = compile(source, target, sourcePath, warningConfig, debugOverflow, emitDebug);
+  const ir = compile(source, target, sourcePath, warningConfig, debugOverflow, emitDebug, contractChecks);
   if (outputPath) {
     writeFileSync(outputPath, ir);
     console.log(`wrote ${outputPath}`);
@@ -430,9 +430,11 @@ function fmtBinStale(fmtBin: string, fmtSrc: string, root: string): boolean {
   }
 }
 
-function compileToObj(sourcePath: string, outputPath: string | null, target: TargetInfo, optFlag: string = "", warningConfig?: WarningConfig, noEntry = false): string {
+function compileToObj(sourcePath: string, outputPath: string | null, target: TargetInfo, optFlag: string = "", warningConfig?: WarningConfig, noEntry = false, forceOverflowChecks: boolean | null = null, forceContractChecks: boolean | null = null): string {
   const source = readFileSync(sourcePath, "utf-8");
-  const { ir, cGuards } = compileWithGuards(source, target, sourcePath, warningConfig);
+  const debugOverflow = forceOverflowChecks ?? (optFlag === "-O0");
+  const contractChecks = forceContractChecks ?? (optFlag === "-O0");
+  const { ir, cGuards } = compileWithGuards(source, target, sourcePath, warningConfig, debugOverflow, false, contractChecks);
   verifyCDecls(cGuards, target);
 
   const base = basename(sourcePath).replace(/\.milo$/, "");
@@ -484,13 +486,13 @@ function writeHeader(sourcePath: string, headerPath: string, target: TargetInfo,
   console.log(`wrote ${headerPath}`);
 }
 
-function buildLib(sourcePaths: string[], outputPath: string, target: TargetInfo, optFlag: string = "", warningConfig?: WarningConfig) {
+function buildLib(sourcePaths: string[], outputPath: string, target: TargetInfo, optFlag: string = "", warningConfig?: WarningConfig, forceOverflowChecks: boolean | null = null, forceContractChecks: boolean | null = null) {
   const objFiles: string[] = [];
   try {
     for (const src of sourcePaths) {
       const id = crypto.randomUUID().slice(0, 8);
       const tmpObj = join(tmpdir(), `milo_${id}.o`);
-      compileToObj(src, tmpObj, target, optFlag, warningConfig, true);
+      compileToObj(src, tmpObj, target, optFlag, warningConfig, true, forceOverflowChecks, forceContractChecks);
       objFiles.push(tmpObj);
     }
     const objs = objFiles.map(f => `"${f}"`).join(" ");
@@ -1510,7 +1512,7 @@ async function main() {
     const sources = libArgs.filter(a => a.endsWith(".milo"));
     const libOutput = output ?? "lib.a";
     if (sources.length === 0) { console.error("error: no .milo source files"); process.exit(1); }
-    buildLib(sources, libOutput, target, optFlag, warningConfig);
+    buildLib(sources, libOutput, target, optFlag, warningConfig, overflowChecks, contractChecks);
     console.log(`compiled ${sources.length} file(s) -> ${libOutput}`);
     return;
   }
@@ -1640,10 +1642,12 @@ async function main() {
     const bin = compileToBinary(source!, output, target, optFlag, warningConfig, rest, sanitize, emitDebug, heapSize, overflowChecks, staticDeps, contractChecks);
     reportCompiled(source!, bin, Date.now() - t0);
   } else if (cmd === "emit-ir") {
-    compileToIr(source!, output, target, warningConfig, optFlag === "-O0", emitDebug);
+    const debugOverflow = overflowChecks ?? (optFlag === "-O0");
+    const emitContractChecks = contractChecks ?? (optFlag === "-O0");
+    compileToIr(source!, output, target, warningConfig, debugOverflow, emitDebug, emitContractChecks);
   } else if (cmd === "emit-obj") {
     const t0 = Date.now();
-    const obj = compileToObj(source!, output, target, optFlag, warningConfig, noEntry);
+    const obj = compileToObj(source!, output, target, optFlag, warningConfig, noEntry, overflowChecks, contractChecks);
     reportCompiled(source!, obj, Date.now() - t0);
     if (emitHeader) writeHeader(source!, obj.replace(/\.o$/, "") + ".h", target, warningConfig);
   } else if (cmd === "emit-js") {

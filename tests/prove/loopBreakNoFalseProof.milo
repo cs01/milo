@@ -1,0 +1,18 @@
+// @proven: 1
+// @failed: 1
+// @unknown: 0
+// A break exits with the state at the break, not the state after unreachable statements.
+pub fn breakWithBadResult(): i64
+ensures result >= 0
+{
+    var x: i64 = 0
+    while true
+    invariant
+    x >= 0
+    {
+        x = -1
+        break
+        x = 0
+    }
+    return x
+}

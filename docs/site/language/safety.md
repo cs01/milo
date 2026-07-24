@@ -1,3 +1,11 @@
+<!-- doc-meta
+system: contracts-safety-guide
+purpose: user guide to contracts, proof, loop invariants, runtime checks, and safety profiles
+key-files: src/verify.ts, src/prove-milo.ts, src/safety.ts, src/codegen.ts
+update-when: contract semantics, proof obligations, runtime checks, or safety profiles change
+last-verified: 2026-07-24
+-->
+
 # Contracts & Safety
 
 Milo lets you write down what your functions promise — and then prove it.
@@ -167,6 +175,8 @@ Five conditions from one loop: the postcondition, plus two per invariant — tha
 ```
 
 `total >= 0` is true of every run of this function, but it isn't preserved *on its own*: nothing in it rules out a negative `i` dragging the sum below zero. The solver says so with the offending value. Adding `i >= 1` closes it.
+
+Control-flow exits keep their actual state. A `continue` path must preserve the invariant; a `break` path proceeds to the code after the loop without assuming the guard is false; and a `return` path is checked directly against the function's postcondition. Nested loops generate their own establishment and preservation conditions.
 
 Delete both and the postcondition itself fails — `result` is simply unknown after the loop:
 

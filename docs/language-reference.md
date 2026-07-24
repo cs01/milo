@@ -1599,11 +1599,20 @@ milo build-lib mathlib.milo -o libmathlib.a   # also writes libmathlib.h
 milo emit-obj mathlib.milo --emit-header       # writes mathlib.h next to mathlib.o
 ```
 
-The header declares the exported functions and the extern structs (opaque `extern type`
+`pub` is the API boundary: only `pub` functions are declared, so a non-`pub` helper stays
+out of the published surface. (The object still carries an external symbol for it — the
+header is the contract, not yet the linkage; see `docs/backlog.md`.)
+
+Alongside them the header declares the extern structs (opaque `extern type`
 declarations become forward `typedef struct X X;`). Anything without a stable C
 spelling — a `Vec`/`String`/enum in a signature, or (until define-side ABI lowering
 lands) an exported function that passes or returns a struct by value — is emitted as a
 `/* skipped: ... */` comment so the header stays valid and the gap stays visible.
+
+```bash
+$ milo emit-obj mathlib.milo -o mathlib.o --emit-header
+$ clang main.c mathlib.o -o demo    # or: clang main.c -L. -lmathlib -o demo
+```
 
 ### Typed Function Pointers in Extern Decls
 

@@ -15,7 +15,14 @@ pub extern struct Rect {
 }
 
 pub fn add(a: i32, b: i32): i32 {
-    return a + b
+    return privateBump(a) + b - 1
+}
+
+// Not `pub`: must stay out of the generated header. The header is the library's published
+// API, and `userFnNames` (what the header used to be built from) is every fn in the entry
+// file regardless of visibility.
+fn privateBump(x: i32): i32 {
+    return x + 1
 }
 
 pub fn scale(v: f64, k: f64): f64 {

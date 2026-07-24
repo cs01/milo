@@ -195,11 +195,68 @@ fn main(): i32 {
 
 ## Calling Milo from C
 
-`build-lib` writes a companion C header next to the archive:
+Two ways out, depending on what the other build system wants to consume:
 
 ```bash
-milo build-lib mathlib.milo -o libmathlib.a    # also writes libmathlib.h
-milo emit-obj mathlib.milo --emit-header       # writes mathlib.h next to mathlib.o
+milo emit-obj mathlib.milo -o mathlib.o --emit-header   # one object file + mathlib.h
+milo build-lib mathlib.milo -o libmathlib.a             # static archive + libmathlib.h
 ```
 
-The header declares the exported functions and the extern structs; opaque `extern type` declarations become forward `typedef struct X X;`. Anything without a stable C spelling — a `Vec`, `String`, or enum in a signature — is emitted as a `/* skipped: ... */` comment, so the header stays valid and the gap stays visible.
+`pub` is the API boundary. Only `pub` functions are declared in the header, so a helper
+you never marked `pub` stays out of the published surface:
+
+```milo
+// mathlib.milo
+pub fn gcd(a: i32, b: i32): i32 {
+    var x = a
+    var y = b
+    while y != 0 {
+        let t = x % y
+        x = y
+        y = t
+    }
+    return x
+}
+
+fn unusedHelper(n: i32): i32 { return n + 1 }   // not pub — not in the header
+```
+
+The generated `mathlib.h` declares `gcd` and nothing else:
+
+```c
+/* exported functions */
+int32_t gcd(int32_t a, int32_t b);
+```
+
+Include it and link the object like any other:
+
+```c
+// main.c
+#include <stdio.h>
+#include "mathlib.h"
+
+int main(void) {
+    printf("gcd(84, 36) = %d\n", gcd(84, 36));
+    return 0;
+}
+```
+
+```bash
+$ milo emit-obj mathlib.milo -o mathlib.o --emit-header
+$ clang main.c mathlib.o -o demo && ./demo
+gcd(84, 36) = 12
+```
+
+The archive works the same way — `clang main.c -L. -lmathlib -o demo`.
+
+Alongside the functions, the header declares the extern structs; opaque `extern type`
+declarations become forward `typedef struct X X;`. Anything without a stable C spelling — a
+`Vec`, `String`, or enum in a signature — is emitted as a `/* skipped: ... */` comment, so
+the header stays valid and the gap stays visible.
+
+::: warning Linkage is wider than the header
+The header is the contract, but the object still carries external symbols for non-`pub`
+functions, so a determined caller can declare and link one by hand. Narrowing the symbols
+themselves is tracked in [backlog.md](https://github.com/milo-language/milo/blob/main/docs/backlog.md);
+don't rely on a name the header doesn't declare.
+:::

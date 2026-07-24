@@ -27,6 +27,14 @@ describe("header generation", () => {
     expect(header).toContain(`extern "C" {`);
   });
 
+  // `pub` is the API boundary. The header used to be built from `userFnNames`, which is
+  // every fn in the entry file regardless of visibility, so private helpers were published
+  // as linkable C entry points.
+  test("non-pub functions are not declared", () => {
+    expect(header).toContain("int32_t add(");
+    expect(header).not.toContain("privateBump");
+  });
+
   test("opaque extern type → forward typedef only", () => {
     expect(header).toContain("typedef struct Handle Handle;");
     expect(header).not.toContain("struct Handle {");

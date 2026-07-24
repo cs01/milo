@@ -136,6 +136,10 @@ export function generateHeader(module: HIRModule, headerName: string): string {
   for (const name of exported) {
     const fn = fnByName.get(name);
     if (!fn || fn.isExtern || fn.isVariadic) continue;
+    // `userFnNames` is every fn in the entry file, `pub` or not — it exists to separate
+    // the author's code from internalizable stdlib code, not to describe an API. Declaring
+    // the non-`pub` ones here published private helpers as linkable C entry points.
+    if (!fn.isPub) continue;
     if (hasByValueStruct(fn)) { protos.push(`/* skipped ${name}: by-value struct params/return not yet exported (needs define-side ABI lowering) */`); continue; }
     const ret = cType(fn.retType);
     if (!ret) { protos.push(`/* skipped ${name}: non-C-representable return type */`); continue; }

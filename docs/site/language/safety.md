@@ -124,13 +124,7 @@ $ echo $?
 0
 ```
 
-Compare that to step 2. There, a negative reached `sqrt` and the program died — `--debug` aborted, and the optimized build didn't even do that, it just returned a wrong answer. Here the negative never reaches `sqrt`: `raw < 0` returns `0`, a defined result on a path you wrote. Nothing aborts because there is nothing left to abort on.
-
-That is the point of proving rather than asserting. A runtime assert is a backstop for the cases you haven't established; once a condition comes back `proven`, every input is accounted for in ordinary code, and the optimized build that omits the check is no longer skipping anything. The guard itself is nothing clever — you were always going to write it. What you couldn't do before was find out you'd forgotten one, short of hitting it in production.
-
-Two honest limits: this covers the contracts you actually wrote, and only the conditions that came back `proven`. Anything `unknown` is still yours to catch, which is what the `--debug` assert is for. `milo prove` exits non-zero on a failure, so the distinction is enforced in CI rather than by discipline.
-
-Contracts are for *logic* errors. Memory safety is already handled elsewhere: ownership and move checking reject use-after-free and double-free at compile time, bounds checks stay on at every optimization level, and arenas use generational handles. None of those catch `sqrt(-1)`.
+The negative now never reaches `sqrt` — `raw < 0` returns `0`, a defined result on a path you wrote, so there is nothing left to abort on. A runtime assert only backstops the cases you haven't established; `proven` means every input is handled in ordinary code. Anything still `unknown` is yours to catch, and `milo prove` exits non-zero on a failure so CI enforces the difference.
 
 ## Why types aren't enough
 

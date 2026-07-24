@@ -120,7 +120,7 @@ fn main() {
   <div class="cat cat-emu">
     <h3 class="cat-head">Emulators</h3>
     <div class="tile-grid">
-      <a class="tile" href="/milo/nes/">
+      <a class="tile" href="/milo/nes/" data-vp-ignore>
         <img class="tile-img" src="/showcase/nes.png" alt="Super Mario Bros. 3 running on the Milo NES emulator" loading="lazy">
         <span class="tile-play">▶ PLAY</span>
         <h3>NES Emulator</h3>
@@ -128,7 +128,7 @@ fn main() {
         <div class="tile-tags"><span>6502 core</span><span>bitwise</span><span>emit-js</span><span>SDL</span></div>
         <span class="tile-copy" role="button" tabindex="0" data-cmd="git clone https://github.com/milo-language/emulators && emulators/arcade.sh <rom.nes>" title="git clone https://github.com/milo-language/emulators && emulators/arcade.sh <rom.nes>">⧉ copy run command</span>
       </a>
-      <a class="tile" href="/milo/genesis/">
+      <a class="tile" href="/milo/genesis/" data-vp-ignore>
         <img class="tile-img" src="/showcase/genesis.png" alt="Sonic the Hedgehog running on the Milo Genesis emulator" loading="lazy">
         <span class="tile-play">▶ PLAY</span>
         <h3>Genesis Emulator</h3>
@@ -136,7 +136,7 @@ fn main() {
         <div class="tile-tags"><span>68000 + Z80</span><span>DMA</span><span>emit-js</span><span>SDL</span></div>
         <span class="tile-copy" role="button" tabindex="0" data-cmd="git clone https://github.com/milo-language/emulators && emulators/arcade.sh <rom.md>" title="git clone https://github.com/milo-language/emulators && emulators/arcade.sh <rom.md>">⧉ copy run command</span>
       </a>
-      <a class="tile" href="/milo/snes/">
+      <a class="tile" href="/milo/snes/" data-vp-ignore>
         <img class="tile-img" src="/showcase/snes.png" alt="Super Mario World running on the Milo SNES emulator" loading="lazy">
         <span class="tile-play">▶ PLAY</span>
         <h3>SNES Emulator</h3>

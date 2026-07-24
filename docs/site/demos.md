@@ -28,19 +28,19 @@ Pick what you have in mind. Each row jumps to real, runnable examples further do
 
 Three retro-console cores. Same Milo source runs two ways: native binary on desktop (SDL video/audio/input) or JavaScript in the browser via `milo emit-js`. No plugins. Drop a ROM and play.
 
-### <a href="/milo/nes/" target="_self">NES</a>
+### <a href="/milo/nes/" target="_self" data-vp-ignore>NES</a>
 
 Cycle-stepped 6502, PPU, and APU with DMC audio and multiple mappers. Ships six free homebrew games playable in one click: **Blade Buster**, **Battle Kid**, **Super PakPak**, **Sir Ababol**, **Lawn Mower**, **Mad Wizard**. Drag in your own `.nes` ROM to play anything else.
 
 ![Super Mario Bros. 3 running on the Milo NES emulator](/showcase/nes.png)
 
-### <a href="/milo/genesis/" target="_self">Genesis / Mega Drive</a>
+### <a href="/milo/genesis/" target="_self" data-vp-ignore>Genesis / Mega Drive</a>
 
 Motorola 68000 + Z80 dual-CPU core with the VDP graphics processor and FM/PSG audio. Preset homebrew: **Headship**, **Astro Perdido**, **Gravity Pig**, **Dragon's Castle**. Accepts `.md` / `.bin` / `.gen` / `.smd` ROMs.
 
 ![Sonic the Hedgehog running on the Milo Genesis emulator](/showcase/genesis.png)
 
-### <a href="/milo/snes/" target="_self">SNES</a>
+### <a href="/milo/snes/" target="_self" data-vp-ignore>SNES</a>
 
 65C816 CPU plus the SNES PPU, including a Super FX (GSU) coprocessor core. Plays Super Mario World and Donkey Kong Country; Star Fox boots with GSU-rendered 3D. Preset homebrew: **UWOL: Quest for Money**, **Super Boss Gaiden**, **BLT**, **Bucket**, **Mega Family Bros**, **Hilda**. Load your own `.sfc` / `.smc` ROM to play anything else.
 

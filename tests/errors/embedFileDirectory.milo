@@ -1,0 +1,8 @@
+// @error: is a directory
+
+// A directory used to surface as a raw EISDIR stack trace from the compiler.
+
+fn main(): i32 {
+    let x = @embedFile("../fixtures/lib")
+    return 0
+}

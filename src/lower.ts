@@ -7,7 +7,7 @@ import type { CheckResult, FnSig, EnumInfo } from "./checker";
 import type { HIRModule, HIRFunction, HIRStmt, HIRExpr, HIRArg, HIRPattern, HIRStruct, HIREnum, HIRGlobal } from "./hir";
 import type { TypeKind } from "./types";
 import { typeFromAst } from "./types";
-import { readFileSync, existsSync } from "fs";
+import { readFileSync, existsSync, statSync } from "fs";
 import { resolve, dirname } from "path";
 
 export function lower(program: Program, checked: CheckResult, sourceDir?: string, targetOs?: string): HIRModule {
@@ -560,6 +560,13 @@ class LowerCtx {
           const absPath = resolve(callerDir, path);
           if (!existsSync(absPath)) {
             throw new Error(`error[embed]: ${expr.span?.line}:${expr.span?.col}: cannot open '${path}'`);
+          }
+          // A directory would otherwise surface as a raw EISDIR stack trace. There is
+          // no directory form: one call embeds one file, by design — the set of
+          // embedded assets stays visible in the source instead of varying with
+          // whatever happened to be on disk at build time.
+          if (statSync(absPath).isDirectory()) {
+            throw new Error(`error[embed]: ${expr.span?.line}:${expr.span?.col}: '${path}' is a directory — @embedFile embeds one file; call it once per file`);
           }
           // Read as bytes, not UTF-8: embedding a PNG/font/any binary through a
           // UTF-8 decode silently corrupts it (invalid sequences become U+FFFD,

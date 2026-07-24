@@ -494,6 +494,9 @@ function buildLib(sourcePaths: string[], outputPath: string, target: TargetInfo,
       objFiles.push(tmpObj);
     }
     const objs = objFiles.map(f => `"${f}"`).join(" ");
+    // `ar r` merges into an existing archive, and the temp object names are random,
+    // so a rebuild would append a second copy of every symbol instead of replacing it.
+    try { unlinkSync(outputPath); } catch {}
     execSync(`ar rcs "${outputPath}" ${objs}`, { stdio: ["pipe", "pipe", "pipe"] });
   } catch (e: any) {
     console.error(`error[build-lib]: ${e.stderr?.toString() ?? e.message}`);

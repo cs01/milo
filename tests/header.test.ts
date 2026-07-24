@@ -68,4 +68,13 @@ int main(void) {
     const out = execSync(bin, { encoding: "utf-8" }).trim();
     expect(out).toBe("7 10.0 30");
   });
+
+  // `ar r` merges rather than replaces, and each build names its temp object randomly,
+  // so a rebuild over an existing archive used to stack a second copy of every symbol.
+  test("rebuilding over an existing archive replaces it", () => {
+    execSync(`bun run ${COMPILER} build-lib ${FIXTURE} -o ${libPath}`, { stdio: ["pipe", "pipe", "pipe"] });
+    const members = execSync(`ar t ${libPath}`, { encoding: "utf-8" })
+      .split("\n").filter(l => l.endsWith(".o"));
+    expect(members.length).toBe(1);
+  });
 });

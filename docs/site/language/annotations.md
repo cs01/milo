@@ -2,7 +2,7 @@
 
 `@` marks something the compiler handles, not the runtime. It is the whole mechanism —
 there is no preprocessor, no `#[cfg]`, no macro system. Everything spelled with an `@`
-is one of the seven constructs below.
+is one of the eight constructs below.
 
 | Construct | Goes on | What it does |
 |---|---|---|
@@ -36,6 +36,50 @@ let html = @embedFile("index.html")
 
 The argument must be a string literal, and the path resolves relative to the file
 containing the call. Contents are read as raw bytes, so binary assets embed intact.
+
+What comes back is an ordinary `string`, so the data is parsed with the same code that
+would parse it off disk — the only difference is that there is no disk, and no failure
+path to handle:
+
+```milo
+// Sitting next to this file: version.txt holding `1.4.2`, and pairs.tsv holding
+// two tab-separated rows — `alpha  bravo` and `charlie  delta`.
+
+fn main(): i32 {
+    let version = @embedFile("version.txt").trim()
+    print(version)                                  // 1.4.2
+
+    for line in @embedFile("pairs.tsv").trim().split("\n") {
+        let cols = line.split("\t")
+        print(cols[0] + " -> " + cols[1])           // alpha -> bravo, charlie -> delta
+    }
+    return 0
+}
+```
+
+The parsing still runs at startup; only the *reading* moved to compile time. That is the
+usual reason to reach for it — a single-file binary that carries its own assets, with no
+install step and no path to get wrong at the customer site.
+
+Web servers are where that pays off most, since the alternative is shipping a static
+directory next to the binary and keeping the two in sync. A handler returns the asset
+directly:
+
+```milo
+pub fn homeHandler(ctx: &mut Context): Response {
+    return ctx.html(@embedFile("index.html"))
+}
+
+pub fn styleHandler(ctx: &mut Context): Response {
+    return Response.Status(200, "text/css; charset=utf-8", @embedFile("public/style.css"))
+}
+```
+
+`examples/net/webserver.milo` serves its home page this way.
+`examples/net/weather/app.milo` goes further and embeds an entire PWA — HTML, CSS, JS,
+service worker, PNG icons, and a US place-name index — so the deployable is one file
+with no asset root to configure. `examples/net/termpair/server.milo` embeds xterm.js the
+same way. Binary assets work because the contents are raw bytes, not text.
 
 ### `@targetOs()`
 
@@ -84,14 +128,65 @@ extern fn SDL_Init(flags: u32): i32
 ### `@export`
 
 Forces external linkage on a function the compiler would otherwise see as unreachable
-and drop. Needed when the only caller is outside the program — a `dlopen`'d library
-resolving a symbol back against this executable, for instance, which no reachability
-analysis can see.
+and drop. There is one reason to need it, in two settings: the only caller is outside
+what reachability analysis can see. That is a `dlopen`'d library resolving a symbol back
+against this executable, or a C program linking a Milo archive — in both cases nothing
+inside the program calls the function, so nothing keeps it.
 
 ```milo
 @export
 pub fn pluginEntry(): i32 { return 7 }
 ```
+
+The rule is about *where the definition lives*, not about `pub`. Functions in the file
+being compiled get external linkage already; a function reached only through an `import`
+is `internal` by default, so dead-code elimination is free to drop it. `@export` is what
+overrides that.
+
+`build-lib` shows the difference, since its header declares exactly the functions that
+kept external linkage:
+
+```milo
+// mathlib.milo — the file passed to build-lib
+from "./helpers" import { miloAdd }
+
+pub fn miloGreet(): void { print("hello from milo") }
+```
+
+```milo
+// helpers.milo — reached only by import, so it needs @export
+@export
+pub fn miloAdd(a: i32, b: i32): i32 { return a + b }
+```
+
+Drop the `@export` and `miloAdd` vanishes from both the header and the archive, and the
+C side fails to link. `miloGreet` needs no annotation, being in the file that was built.
+
+```bash
+milo build-lib mathlib.milo -o libmathlib.a    # also writes libmathlib.h
+```
+
+```c
+/* host.c */
+#include <stdio.h>
+#include "libmathlib.h"
+
+int main(void) {
+    miloGreet();
+    printf("%d\n", miloAdd(2, 3));
+    return 0;
+}
+```
+
+```bash
+clang host.c libmathlib.a -o host && ./host
+# hello from milo
+# 5
+```
+
+No wrapper, no runtime to initialize, and no linker flags beyond the archive itself — the
+Milo runtime is inside it. What the generated header does and does not cover is in
+[C FFI](./ffi#calling-milo-from-c).
 
 ## Verifying claims about C
 
@@ -117,11 +212,5 @@ and `--deny=unverified-extern` for finding declarations nobody annotated — are
 
 Note that the C checks run when a program is actually built (`milo build`, `milo run`,
 `milo build-lib`). `milo emit-ir` stops before that step and does not run them.
-
-## Not annotations
-
-Contract clauses — `requires`, `ensures`, `invariant` — are ordinary keywords in the
-declaration, not `@` annotations, because they are type-checked expressions rather than
-instructions to the compiler. See [Contracts & Safety](./safety).
 
 Next: [C FFI →](./ffi)

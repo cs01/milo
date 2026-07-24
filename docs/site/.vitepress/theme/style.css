@@ -119,9 +119,10 @@
 /* ---- home page sections ---- */
 
 .intro {
-  max-width: 720px;
-  margin: 0 auto 3rem;
-  padding: 0 24px;
+  /* no box of its own: the parent .vp-doc.container already carries the same
+     max-width + responsive padding as VPHero, so inheriting them is what puts
+     the intro's text edge exactly on the hero's */
+  margin: 0 0 3rem;
   text-align: left;
   font-size: 1.15rem;
   line-height: 1.7;
@@ -135,7 +136,8 @@
 .intro a:hover { text-decoration: underline; }
 
 .intro ul {
-  margin: 0;
+  /* markers hang into the padding so the link text, not the bullet, aligns */
+  margin: 0 0 0 -1.3rem;
   padding-left: 1.3rem;
   list-style: disc;
 }
@@ -154,7 +156,9 @@
 }
 
 .showcase {
-  max-width: 960px;
+  /* wide enough for four 220px tiles in one row — the sim and terminal
+     categories have four, and 960px left the fourth stranded on its own row */
+  max-width: 1100px;
   margin: 0 auto 3rem;
   padding: 0 24px;
 }

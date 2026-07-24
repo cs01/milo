@@ -3,7 +3,7 @@ layout: home
 hero:
   name: Milo
   text: "A memory-safe systems language that guides you to correct, readable programs."
-  tagline: "Contracts and formal verification built in — ship correct code with confidence."
+  tagline: "Contracts and formal verification built in. Ship correct code with confidence."
   image:
     src: /logo.svg
     alt: Milo
@@ -150,24 +150,28 @@ fn main() {
     <h3 class="cat-head">Graphics &amp; simulation</h3>
     <div class="tile-grid">
       <a class="tile" href="https://github.com/milo-language/milo/blob/main/examples/graphics/raytrace3d.milo">
+        <img class="tile-img" src="/showcase/raytracer.png" alt="Chrome and coloured spheres reflecting each other on a checkerboard floor" loading="lazy">
         <h3>Real-time Ray Tracer</h3>
         <p>Chrome spheres bouncing in a mirrored box — reflections, hard shadows and rigid-body physics, traced per pixel every frame at 60fps. Pure CPU, no GPU.</p>
         <div class="tile-tags"><span>Whitted tracing</span><span>Blinn-Phong</span><span>SDL</span></div>
         <span class="tile-copy" role="button" tabindex="0" data-cmd="milo run examples/graphics/raytrace3d.milo" title="milo run examples/graphics/raytrace3d.milo">⧉ copy run command</span>
       </a>
       <a class="tile" href="https://github.com/milo-language/milo/blob/main/examples/graphics/raytracer.milo">
+        <img class="tile-img" src="/showcase/pathtracer.png" alt="Diffuse and metal spheres lit by indirect bounce light in the Milo path tracer" loading="lazy">
         <h3>Path Tracer</h3>
         <p>Unbiased Monte-Carlo global illumination on the CPU. Soft shadows and colour bleed fall out of the bounce integral — nothing is faked.</p>
         <div class="tile-tags"><span>progressive</span><span>importance sampling</span><span>f64 math</span></div>
         <span class="tile-copy" role="button" tabindex="0" data-cmd="milo run examples/graphics/raytracer.milo" title="milo run examples/graphics/raytracer.milo">⧉ copy run command</span>
       </a>
       <a class="tile" href="https://github.com/milo-language/milo/blob/main/examples/simulation/cloth.milo">
+        <video class="tile-img" src="/showcase/cloth.mp4" poster="/showcase/cloth.png" autoplay muted loop playsinline preload="auto" aria-label="A cloth mesh being dragged and folding under position-based dynamics"></video>
         <h3>Cloth</h3>
         <p>Position-Based Dynamics — Verlet point masses woven by distance constraints, the method real cloth engines use. Grab a node and fling it.</p>
         <div class="tile-tags"><span>PBD</span><span>Verlet</span><span>constraint solver</span></div>
         <span class="tile-copy" role="button" tabindex="0" data-cmd="milo run examples/simulation/cloth.milo" title="milo run examples/simulation/cloth.milo">⧉ copy run command</span>
       </a>
       <a class="tile" href="https://github.com/milo-language/milo/blob/main/examples/simulation/phasespace.milo">
+        <video class="tile-img" src="/showcase/phasespace.mp4" poster="/showcase/phasespace.png" autoplay muted loop playsinline preload="auto" aria-label="Two cat's-eye vortices winding up in the Vlasov phase-space distribution"></video>
         <h3>Plasma Physics</h3>
         <p>A collisionless Vlasov solver in (x, v) phase space — finite-volume MUSCL with Strang splitting, winding a Maxwellian into trapped-particle vortices.</p>
         <div class="tile-tags"><span>Vlasov</span><span>MUSCL / minmod</span><span>Strang splitting</span></div>

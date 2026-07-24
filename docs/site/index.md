@@ -21,7 +21,11 @@ hero:
 
 <div class="intro">
 
-Milo is a memory-safe systems language that guides you to correct, readable programs. Contracts are built in, enabling formal verification that guarantees correctness across your codebase, no matter how large. People and AI ship with confidence that their code is correct. <a href="/milo/language/">Learn more</a> or see how it <a href="/milo/language/vs-rust">measures up to Rust</a>.
+- [**Learn the basics**](/tour) — an 11-lesson tour, from hello world to owning your data.
+- [**Contracts and formal verification**](/language/safety) — write down what a function promises, then prove it holds for every input.
+- [**Compare to Rust's safety profile**](/language/vs-rust) — what Milo guarantees, what it gives up, and where the borrow checker went.
+- [**Browse the standard library**](/stdlib/) — io, fs, net, http, json, crypto, compression, and the rest.
+- [**Read the language reference**](/language/) — the whole language, one page per topic.
 
 </div>
 

@@ -221,4 +221,10 @@ and `--deny=unverified-extern` for finding declarations nobody annotated — are
 Note that the C checks run when a program is actually built (`milo build`, `milo run`,
 `milo build-lib`). `milo emit-ir` stops before that step and does not run them.
 
+## Not annotations
+
+Contract clauses — `requires`, `ensures`, `invariant` — are ordinary keywords in the
+declaration, not `@` annotations, because they are type-checked expressions rather than
+instructions to the compiler. See [Contracts & Safety](./safety).
+
 Next: [C FFI →](./ffi)

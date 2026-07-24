@@ -65,6 +65,10 @@ export class Codegen {
   // ensures clauses of the function being generated; checked at every return site
   private currentEnsures: HIRContract[] = [];
   private debugOverflow = false;
+  // Independent of debugOverflow: `requires`/`ensures`/`invariant` become runtime
+  // asserts. Both default on at -O0 and off above it, but they answer different
+  // questions, so `--contract-checks` / `--overflow-checks` set them separately.
+  private contractChecks = false;
   private usedOverflowIntrinsics = new Set<string>();
   private needsPrintf = false;
   private needsDprintf = false;
@@ -142,11 +146,12 @@ export class Codegen {
   private usedDbgDeclare = false;
   private diTypes = new Map<string, number>();
 
-  constructor(target: TargetInfo, filePath?: string, debugOverflow = false, emitDebug = false) {
+  constructor(target: TargetInfo, filePath?: string, debugOverflow = false, emitDebug = false, contractChecks = false) {
     this.target = target;
     this.filePath = filePath;
     this.debugOverflow = debugOverflow;
     this.emitDebug = emitDebug;
+    this.contractChecks = contractChecks;
   }
 
   // The MSVC CRT is not POSIX: the byte-level I/O the print builtins lower to has
@@ -1443,7 +1448,7 @@ export class Codegen {
     const allocaInsertPoint = lines.length;
 
     this.currentEnsures = [];
-    if (this.debugOverflow && fn.contracts) {
+    if (this.contractChecks && fn.contracts) {
       const ensures = fn.contracts.filter(c => c.kind === "ensures");
       if (ensures.length > 0) {
         this.currentEnsures = ensures;
@@ -2051,7 +2056,7 @@ export class Codegen {
     lines.push(`  br label %${condLabel}`);
     lines.push(`${condLabel}:`);
     // invariant must hold before every condition eval: loop entry, each back-edge, and exit
-    if (this.debugOverflow && stmt.invariants) {
+    if (this.contractChecks && stmt.invariants) {
       for (const inv of stmt.invariants) {
         const [invLines, invVal] = this.genExpr(inv.expr);
         lines.push(...invLines);

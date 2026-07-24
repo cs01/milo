@@ -26,9 +26,11 @@ ensures result >= 0
 
 `result` is a keyword, valid in `ensures` clauses: it stands for the return value.
 
-With the contract in place, there are three ways it gets enforced. Which one you get is **not** decided by the optimization level — it is decided by whether the compiler can see the value.
+With the contract in place, there are three ways it gets enforced.
 
 ### 1. A static value — rejected at compile time
+
+If the compiler can determine the value, it will enforce it. Here we pass -1 directly.
 
 ```milo
 pub fn main(): i32 {
@@ -37,6 +39,7 @@ pub fn main(): i32 {
 }
 ```
 
+Notice it catches this and prints an error:
 ```
 $ milo build sqrt.milo -o sqrt
 error: requires clause 'n >= 0' violated
@@ -46,9 +49,7 @@ error: requires clause 'n >= 0' violated
    │           ^
 ```
 
-Identical output under `--debug` and under `--release`. This is not a debug-only check — you cannot build this program at any optimization level.
-
-### 2. An unpredictable value — asserted at runtime in debug builds
+### 2. An unpredictable value — abort at runtime
 
 Let's say the value passed to `sqrt` is no longer a constant, but a number drawn at runtime. There is nothing left for the compiler to fold:
 
@@ -62,19 +63,7 @@ pub fn main(): i32 {
 }
 ```
 
-This compiles. What happens on a negative draw depends entirely on the build.
-
-**Release builds** — `-O1`, `-O2`, `-O3`, the default for `milo build`. No assertion is emitted, so the contract costs nothing and catches nothing:
-
-```
-$ milo build sqrt.milo -o sqrt && ./sqrt
-0                      # negative draw: sqrt returned a meaningless 0
-$ echo $?
-0
-```
-
-**Debug builds** — `--debug`. Every `requires`, `ensures`, and `invariant` becomes a runtime assert, naming the clause that failed and its line:
-
+This compiles and runs. Let's see what happens on a debug build:
 ```
 $ milo build sqrt.milo --debug -o sqrt && ./sqrt
 runtime error: requires clause violated at sqrt.milo:5
@@ -82,7 +71,19 @@ $ echo $?
 1
 ```
 
-`--overflow-checks` turns those same asserts on at any optimization level, if you want them in a release build.
+In a debug build, every `requires`, `ensures`, and `invariant` becomes a runtime assert. If it fails, it names the clause that failed and its line.
+
+Now let's see what happens on a release build:
+
+```
+$ milo build sqrt.milo -o sqrt && ./sqrt
+0
+$ echo $?
+0
+```
+Whoops, the sqrt returned 0 and continued on. Nothing asserted or aborted. If you don't like this potentially violation of the contract, see the next option.
+
+`--contract-checks` turns those same asserts on at any optimization level, if you want them in a release build. It is its own switch — `--overflow-checks` covers arithmetic, not contracts.
 
 ### 3. `milo prove` — proven for every input, before you run it
 
@@ -131,23 +132,42 @@ $ echo $?
 
 The negative never reaches `sqrt` now — `raw < 0` returns `0`, a defined result on a path you wrote — so there is nothing left to abort on, and no runtime assert is doing the work. `proven` means every input is handled in ordinary code; a runtime assert only backstops what you haven't established. Anything still `unknown` is yours to catch, and `milo prove` exits non-zero on a failure, so CI enforces the difference.
 
-### Which solver
+### Loop invariants
 
-By default `milo prove` uses `std/smt`, a solver written in Milo and shipped in the standard library, so the walkthrough above needs nothing installed. It is not in Z3's league: it decides linear integer arithmetic — `+`, `-`, comparisons, multiplication by a constant — and returns `unknown` on the rest, including `n * n` and recursion. Pass `--solver=z3` to send the same obligations to Z3, which decides those too, or `--emit-smt` to print them as SMT-LIB2 for another tool.
-
-## What types can't say
-
-A fair objection to the walkthrough: its `requires n >= 0` is on an `i64`, and declaring `n: u64` would carry that constraint in the type instead. True — where a type *can* state the rule, use the type. Contracts are for the rules no type can hold:
+`requires` and `ensures` describe a function's boundary. `invariant` describes a loop: something that has to hold on every iteration. It sits between the `while` condition and the body, and a loop can carry more than one.
 
 ```milo
-pub fn clamp(value: i64, lo: i64, hi: i64): i64
-requires lo <= hi                              // a relation between two arguments
-ensures result >= lo && result <= hi           // the result related back to them
+from "std/random" import { randRange }
+
+pub fn drain(start: i64): i64
+requires start >= 0
+{
+    var level = start
+    while level > 0
+    invariant level >= 0
+    {
+        level = level - randRange(1, 3)   // a step can overshoot past zero
+    }
+    return level
+}
 ```
 
-No signedness helps here. `lo <= hi` is a fact about two arguments together, and `result <= hi` ties the return value to an argument — neither is expressible as a type, in Milo or anywhere else. Floats make the same point from the other side: there is no unsigned `f64`, so `requires x > 0.0` has nowhere to live but a contract.
+The loop guard says `level > 0`, but the step size doesn't divide evenly into it — a draw of `3` against a `level` of `2` lands on `-1`. Same rule as the rest of the walkthrough: in a debug build the invariant becomes a check, evaluated on every iteration.
 
-This is the gap contracts fill: **types describe the shape of data, contracts describe the rules about values.** Milo already rules out the memory bugs — use-after-free and double-free at compile time via ownership and move checking, out-of-bounds via bounds checks that stay on at every optimization level, null dereferences by not having null. Contracts extend that to logic errors — the bugs that memory safety alone can't catch, and that runtime checks alone can't guarantee you remembered everywhere.
+```
+$ milo build drain.milo --debug -o drain && ./drain
+runtime error: invariant clause violated at drain.milo:8
+$ echo $?
+1
+```
+
+Safety profiles use the same clause as evidence rather than as a check — `do178c-a` and `nasa-a` require every `while` loop to carry an `invariant`.
+
+### Which solver
+
+By default `milo prove` uses `std/smt`, a solver written in Milo and shipped in the standard library, so the walkthrough above needs nothing installed. It is not in Z3's league: it decides linear integer arithmetic — `+`, `-`, comparisons, multiplication by a constant — and returns `unknown` on anything else, `n * n` included. Pass `--solver=z3` to send the same obligations to Z3, which does decide the nonlinear ones, or `--emit-smt` to print them as SMT-LIB2 for another tool.
+
+A recursive function is `unknown` under either solver — the translator has no rule for a call to the function being verified, so nothing about it reaches a solver in the first place. Changing solvers cannot fix that one.
 
 ## Safety profiles — `milo safety`
 

@@ -237,6 +237,10 @@ Generated, committed, JSON, flat. Nested trees are npm's mistake.
 
 Refs: `@v1.2.0` tag · `@a1b2c3d` SHA · `@main` branch. Branch refs are allowed but warn — unreproducible without the lock.
 
+**A spec with no ref means the latest release.** `milo add github.com/foo/bar` and `milo tool install github.com/foo/bar` list the remote's tags, take the highest, and write *that tag* into the manifest — so the second build resolves from the manifest and never re-queries the network. A repo with no tags keeps floating on its default branch, which is the only remaining meaning. There is no `@latest` sugar: a ref goes straight to git, so `@latest` would look for a branch or tag literally named `latest`, and the ref-less form already covers the intent. Track a branch deliberately by naming it (`@main`).
+
+Only `add` and `tool install` resolve this way. `install`, `build`, and `run` never query tags — they read the manifest and lock, which is what makes a checked-out project build the same code tomorrow.
+
 No semver ranges. Ranges require enumerating available versions, which requires an index. With git-as-registry, `milo update` re-resolves by listing tags on the remote and picking the highest matching one; the manifest stores the exact ref it settled on. Simpler and honest about what the system can actually guarantee.
 
 ### Cache layout
@@ -254,7 +258,7 @@ The readable path stays because it is debuggable and already wired. `.blobs/` de
 ```
 milo init                    # milo.json in cwd, name inferred from directory
 milo new <name>              # scaffold: dir, main.milo, milo.json, .gitignore
-milo add <pkg>[@ver]         # library dep: resolve, fetch, verify, write manifest + lock
+milo add <pkg>[@ver]         # library dep: resolve (no ref = latest tag), fetch, verify, write manifest + lock
 milo add --dev <pkg>
 milo remove <pkg>            # manifest + lock, prune orphans
 milo install                 # sync cache from lock (no package argument — see below)

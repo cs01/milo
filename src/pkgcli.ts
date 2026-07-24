@@ -141,6 +141,28 @@ function packageNameFor(spec: string, dir: string): string {
   return source.kind === "local" ? cleaned : cleaned.replace(/^milo-/, "");
 }
 
+// A spec with no `@ref` means "the latest release", not "whatever is on main":
+// pin it to the highest tag the remote publishes. Only `add`/`tool install` do
+// this — the manifest they write records the tag, so later builds resolve from
+// the manifest and never re-query. A repo with no tags at all keeps floating on
+// its default branch, which is the only thing left to mean.
+//
+// Network failure here is not fatal: falling back to the unpinned spec gives the
+// same behaviour as before, and `ensurePresent` reports the real error if the
+// remote is genuinely unreachable.
+function pinToLatestRelease(spec: string): string {
+  const source = parseSource(spec);
+  if (source.kind !== "git" && source.kind !== "giturl") return spec;
+  if (source.ref !== undefined) return spec;
+  let tags: string[];
+  try {
+    tags = listRemoteTags(source);
+  } catch {
+    return spec;
+  }
+  return tags.length > 0 ? `${spec}@${tags[0]}` : spec;
+}
+
 // ── Graph resolution ─────────────────────────────────────────────────────────
 
 interface ResolveOpts {
@@ -444,8 +466,9 @@ async function cmdAdd(cwd: string, args: string[]): Promise<number> {
   if (specs.length === 0) fail("usage: milo add [--dev] <pkg>[@ver]");
   const project = requireProject(cwd);
 
-  for (const spec of specs) {
-    parseSource(spec); // validates the scheme before anything touches the network
+  for (const raw of specs) {
+    parseSource(raw); // validates the scheme before anything touches the network
+    const spec = pinToLatestRelease(raw);
     const { dir } = await ensurePresent(spec, project.dir, true);
     const manifest = readManifestAt(dir);
     const name = packageNameFor(spec, dir);
@@ -757,8 +780,9 @@ async function cmdTool(cwd: string, args: string[], host: PkgHost): Promise<numb
 }
 
 // Resolve a spec to its cached tree + manifest, requiring installable binaries.
-async function toolPackage(spec: string, cwd: string): Promise<{ dir: string; manifest: Manifest; commit: string }> {
+async function toolPackage(rawSpec: string, cwd: string): Promise<{ dir: string; manifest: Manifest; commit: string; spec: string }> {
   const project = findProject(cwd);
+  const spec = pinToLatestRelease(rawSpec);
   const { dir, commit } = await ensurePresent(spec, project?.dir ?? cwd, true);
   const manifest = readManifestAt(dir);
   if (!manifest) fail(`${spec} has no milo.json — cannot tell what to install`);
@@ -766,7 +790,7 @@ async function toolPackage(spec: string, cwd: string): Promise<{ dir: string; ma
     fail(libOnlyMessage(manifest.name, spec));
   }
   checkCompilerConstraint(manifest);
-  return { dir, manifest, commit: commit ?? "unknown" };
+  return { dir, manifest, commit: commit ?? "unknown", spec };
 }
 
 async function toolInstall(cwd: string, args: string[], host: PkgHost): Promise<number> {
@@ -779,8 +803,8 @@ async function toolInstall(cwd: string, args: string[], host: PkgHost): Promise<
   mkdirSync(dir, { recursive: true });
   const receipts = readReceipts();
 
-  for (const spec of specs) {
-    const { dir: pkgDir, manifest, commit } = await toolPackage(spec, cwd);
+  for (const rawSpec of specs) {
+    const { dir: pkgDir, manifest, commit, spec } = await toolPackage(rawSpec, cwd);
     const bins = Object.entries(manifest.bin!).filter(([n]) => only === null || n === only);
     if (bins.length === 0) fail(`${manifest.name} has no binary named '${only}'`);
 

@@ -400,6 +400,44 @@ describe("git sources (local file:// remote, still no network)", () => {
     expect(dirty.err).toContain("working tree is dirty");
   }, 60000);
 
+  test("add with no ref pins the highest release tag", () => {
+    const dir = project("gitapp4");
+    expect(milo(dir, "init").code).toBe(0);
+    const r = milo(dir, "add", `git+file://${repo}`);
+    expect(r.code).toBe(0);
+    expect(r.out).toContain(`git+file://${repo}@v1.0.0`);
+    const m = JSON.parse(readFileSync(join(dir, "milo.json"), "utf-8"));
+    expect(m.deps.gpkg).toBe(`git+file://${repo}@v1.0.0`);
+    const lock = JSON.parse(readFileSync(join(dir, "milo.lock"), "utf-8"));
+    expect(lock.packages.gpkg.version).toBe("v1.0.0");
+    expect(lock.packages.gpkg.commit).toBe(sha);
+  });
+
+  test("add with no ref keeps floating when the remote has no tags", () => {
+    const untagged = join(ROOT, "untaggedrepo");
+    mkdirSync(untagged, { recursive: true });
+    const g = (...args: string[]) => spawnSync("git", args, { cwd: untagged, encoding: "utf-8" });
+    g("init", "-q", ".");
+    g("config", "user.email", "test@example.com");
+    g("config", "user.name", "test");
+    writeFileSync(join(untagged, "milo.json"), `{ "name": "untagged", "version": "0.0.1", "lib": "lib.milo" }`);
+    writeFileSync(join(untagged, "lib.milo"), `pub fn hi(): i64 {\n  return 1\n}\n`);
+    g("add", "-A");
+    g("commit", "-qm", "init");
+    // git init defaults to whatever init.defaultBranch says; the fetcher's ref-less
+    // path must work regardless, so name it explicitly.
+    g("branch", "-M", "main");
+
+    const dir = project("gitapp5");
+    expect(milo(dir, "init").code).toBe(0);
+    const r = milo(dir, "add", `git+file://${untagged}`);
+    expect(r.code).toBe(0);
+    const m = JSON.parse(readFileSync(join(dir, "milo.json"), "utf-8"));
+    expect(m.deps.untagged).toBe(`git+file://${untagged}`);
+    const lock = JSON.parse(readFileSync(join(dir, "milo.lock"), "utf-8"));
+    expect(lock.packages.untagged.version).toBe("main");
+  });
+
   test("update re-resolves a ref-less dep to the highest tag", () => {
     const dir = project("gitapp3");
     writeFileSync(

@@ -129,13 +129,16 @@ function modelCall(site: object, name: string, args: Expr[]): string | null {
   return retName;
 }
 
-// Splice the accumulated call declarations into every VC built for one function.
+// Splice the accumulated call declarations into every VC built for one function. Runs
+// even when nothing was modelled, so the placeholder never survives into emitted SMT.
 function fillCallModel(conditions: VerificationCondition[], from: number) {
   const ctx = CALL_MODEL;
-  if (!ctx || (ctx.decls.length === 0 && ctx.assumes.length === 0)) return;
+  if (!ctx) return;
   const block = [...ctx.decls, ...ctx.assumes].join("\n");
   for (let i = from; i < conditions.length; i++) {
-    conditions[i]!.smtlib = conditions[i]!.smtlib.replace(CALL_MODEL_SLOT, block);
+    conditions[i]!.smtlib = block
+      ? conditions[i]!.smtlib.replace(CALL_MODEL_SLOT, block)
+      : conditions[i]!.smtlib.replace(`${CALL_MODEL_SLOT}\n`, "");
   }
 }
 

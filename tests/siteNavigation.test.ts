@@ -13,7 +13,12 @@ describe("emulator site navigation", () => {
       const links = [...source.matchAll(/<a\b[^>]*href="\/milo\/(nes|genesis|snes)\/"[^>]*>/g)];
 
       expect(links.map((match) => match[1])).toEqual(emulatorPaths);
-      for (const [anchor] of links) expect(anchor).toContain("data-vp-ignore");
+      // target="_self" is the reliable escape hatch: VitePress only intercepts a link when
+      // its target attribute is empty. data-vp-ignore is kept as a belt-and-suspenders hint.
+      for (const [anchor] of links) {
+        expect(anchor).toContain('target="_self"');
+        expect(anchor).toContain("data-vp-ignore");
+      }
     });
   }
 });

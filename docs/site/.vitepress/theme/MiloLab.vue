@@ -10,11 +10,7 @@
 <template>
   <div class="lab" ref="rootEl">
     <div class="lab-head">
-      <img class="lab-mascot" :src="base + 'mascot.svg'" alt="Milo the lab dog" width="72" height="72" />
-      <div class="kicker">Interactive · runs in your browser</div>
-      <h2 class="title">Learn Milo by running it</h2>
-      <p class="sub">Try Milo in your browser! Milo has multiple backends — it builds native binaries, and also JavaScript to run right here in your browser.</p>
-      <a class="sub-link" :href="base + 'language/javascript-target'">Learn how it works — the emit-js backend →</a>
+      <a class="sub-link" :href="base + 'language/javascript-target'">Runs in your browser via the emit-js backend →</a>
     </div>
 
     <!-- rail: Sandbox (free play) first, then the 10 lessons -->
@@ -36,7 +32,6 @@
     <div class="card">
       <div class="chead">
         <template v-if="!sandbox">
-          <span class="step">Lesson {{ cur + 1 }} of {{ concepts.length }}</span>
           <h3 class="ct" v-html="cur + 1 + '. ' + concepts[cur].title"></h3>
           <p class="cd" v-html="concepts[cur].desc"></p>
         </template>
@@ -648,14 +643,9 @@ onMounted(() => {
   --c-com: #8a7f6a;
   margin: 40px 0 8px; font-family: var(--vp-font-family-base);
 }
-.lab-head { text-align: center; margin-bottom: 22px; }
-.lab-mascot { display: block; margin: 0 auto 6px; width: 72px; height: 72px; }
-.kicker { font-family: var(--vp-font-family-mono); font-size: 12px; letter-spacing: .12em; text-transform: uppercase; color: var(--brand); }
-.title { font-size: 1.9rem; font-weight: 750; letter-spacing: -.02em; margin: 8px 0 6px; border: 0; padding: 0; }
-.sub { color: var(--vp-c-text-2); margin: 0; }
+.lab-head { text-align: center; margin-bottom: 16px; }
 .sub-link {
   display: inline-block;
-  margin-top: 10px;
   font-family: var(--vp-font-family-mono);
   font-size: 13px;
   font-weight: 600;

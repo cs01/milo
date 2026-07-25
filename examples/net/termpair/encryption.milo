@@ -33,7 +33,9 @@ pub fn rotationBuffer(): i64 {
     return 104857
 }
 
-pub fn genKey(): string {
+pub fn genKey(): string
+ensures result.len == 16
+{
     var buf: [u8; 16] = [0; 16]
     unsafe {
         randBytes(buf as *u8, 16)
@@ -60,7 +62,9 @@ pub fn ivFromCount(count: i64): string {
 
 // Encrypt `plaintext` under `key` with the IV derived from `count`.
 // Returns base64( IV ‖ ciphertext ‖ tag ).
-pub fn encryptWithKey(key: &string, count: i64, plaintext: &string): Result<string, string> {
+pub fn encryptWithKey(key: &string, count: i64, plaintext: &string): Result<string, string>
+requires key.len == 16
+{
     let iv = ivFromCount(count)
     let r = aesGcm128Encrypt(key, iv, plaintext, "")!
     let wire = iv + r.ciphertext + r.tag
@@ -70,7 +74,9 @@ pub fn encryptWithKey(key: &string, count: i64, plaintext: &string): Result<stri
 // Decrypt a base64( IV(12) ‖ ciphertext ‖ tag(16) ) wire payload under `key`.
 // The IV is embedded in the payload (low 8 bytes = LE counter), so no counter
 // state is tracked here — mirrors aes_keys.decrypt() on the termpair-rs side.
-pub fn decryptWithKey(key: &string, wireB64: &string): Result<string, string> {
+pub fn decryptWithKey(key: &string, wireB64: &string): Result<string, string>
+requires key.len == 16
+{
     let wire = base64Decode(wireB64)
     // 12-byte IV + 16-byte GCM tag is the minimum; reject anything shorter.
     if wire.len < 28 {

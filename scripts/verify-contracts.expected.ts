@@ -23,19 +23,23 @@ export interface Expected {
 }
 
 export const EXPECTED: Record<string, Expected> = {
-  // 0 proven / 30 unknown / 8 errors: this file's contracts are documentation today.
-  // The errors are `unknown constant s_len` — the translator flattens `s.len` into a
-  // symbol it never declares. Fixing that turns errors into real verdicts.
-  "examples/embedded/flightController.milo": { proven: 0, unknown: 30, errors: 8 },
+  // 0 proven / 64 unknown: this file's contracts are documentation today. The unknowns
+  // went UP when translator errors went to zero — an errored VC and a dropped obligation
+  // both used to hide work that is now counted and reported.
+  "examples/embedded/flightController.milo": { proven: 0, unknown: 64, errors: 0 },
   // 3 refuted here are baselined (unbounded-Int model of `setpoint - measured`).
-  "examples/embedded/pidStep.milo": { proven: 7, unknown: 1, errors: 0 },
+  "examples/embedded/pidStep.milo": { proven: 8, unknown: 0, errors: 0 },
+  // Both AES-128 key-length preconditions into std/crypto, proven at the call site.
+  "examples/net/termpair/encryption.milo": { proven: 2, unknown: 4, errors: 0 },
   "std/arena.milo": { proven: 0, unknown: 0, errors: 0 },
   // 0 conditions, and correctly so: this file's contracts are all `requires`, which are
   // discharged at call sites. Nothing in the proved set calls them, so nothing is
-  // checked. A floor of 0 pins that fact rather than hiding it — see MILO_VERIFY_ALL.
+  // checked here. A floor of 0 pins that fact rather than hiding it — the callers that
+  // DO exercise these live in examples/, and MILO_VERIFY_ALL=1 is what reaches them.
   "std/crypto.darwin.milo": { proven: 0, unknown: 0, errors: 0 },
   "std/crypto.windows.milo": { proven: 0, unknown: 0, errors: 0 },
-  "std/inflate.milo": { proven: 18, unknown: 23, errors: 7 },
+  // 2 refuted in `fixed` are baselined (no frame conditions on &mut params).
+  "std/inflate.milo": { proven: 21, unknown: 40, errors: 0 },
   "std/math.milo": { proven: 4, unknown: 1, errors: 0 },
   "std/mem.milo": { proven: 2, unknown: 1, errors: 0 },
   "std/pool.milo": { proven: 6, unknown: 1, errors: 0 },
@@ -44,6 +48,6 @@ export const EXPECTED: Record<string, Expected> = {
   "std/pty.darwin.milo": { proven: 0, unknown: 0, errors: 0 },
   "std/pty.windows.milo": { proven: 0, unknown: 0, errors: 0 },
   "std/sort.milo": { proven: 2, unknown: 0, errors: 0 },
-  "std/string.milo": { proven: 2, unknown: 3, errors: 2 },
+  "std/string.milo": { proven: 8, unknown: 4, errors: 0 },
   "std/sync.milo": { proven: 0, unknown: 0, errors: 0 },
 };

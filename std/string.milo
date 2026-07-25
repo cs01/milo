@@ -25,6 +25,7 @@ pub fn strIndexOf(haystack: &string, needle: &string): i64 {
 // Byte index of the first occurrence of `needle` at or after `pos`, or -1.
 pub fn strIndexOfFrom(haystack: &string, needle: &string, pos: i64): i64
 requires pos >= 0
+ensures result >= -1
 {
     var notFound: i64 = 0
     notFound = notFound - 1
@@ -239,7 +240,12 @@ pub fn strSplit(s: &string, sep: &string): Vec<string> {
         return result
     }
     var pos: i64 = 0
-    while pos <= s.len {
+    // Carries `strIndexOfFrom`'s `requires pos >= 0` across the loop: without it `pos` is
+    // a fresh unknown on the second and later iterations and the call cannot be discharged.
+    while pos <= s.len
+    invariant
+    pos >= 0
+    {
         let idx = strIndexOfFrom(s, sep, pos)
         if idx == notFound {
             result.push(s.substr(pos, s.len))
@@ -321,7 +327,11 @@ pub fn strReplace(s: &string, old: &string, newVal: &string): string {
     notFound = notFound - 1
     var result: string = ""
     var pos: i64 = 0
-    while pos < s.len {
+    // See strSplit: keeps `pos >= 0` available for strIndexOfFrom's precondition.
+    while pos < s.len
+    invariant
+    pos >= 0
+    {
         let idx = strIndexOfFrom(s, old, pos)
         if idx == notFound {
             result = result + s.substr(pos, s.len)

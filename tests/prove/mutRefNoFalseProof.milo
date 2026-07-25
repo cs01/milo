@@ -1,0 +1,30 @@
+// @proven: 0
+// @failed: 1
+// @unknown: 0
+// Soundness: a mutation the symbolic walker cannot see must make the value UNKNOWN,
+// never leave it at its stale pre-call value.
+//
+// The walker builds its environment from `Assign` statements. Passing a variable to a
+// `&mut` parameter mutates it with no assignment anywhere in the caller, so `x` kept the
+// binding `0` across the call to `bump` and this postcondition was reported **proven** —
+// for a function that returns 100. Verified by running it: `milo run` prints 100.
+//
+// Now every name reaching a `&mut`/`*mut` parameter (and every method-call receiver, since
+// resolving `&mut self` needs checker tables this pass doesn't have) is havoced at the
+// call, so `result == 0` is refuted as it should be. The expected verdict here is FAILED,
+// not proven: a counterexample is the correct answer.
+fn bump(n: &mut i64): void {
+    n = n + 100
+}
+
+fn f(): i64
+ensures result == 0
+{
+    var x: i64 = 0
+    bump(x)
+    return x
+}
+
+fn main() {
+    print(f())
+}

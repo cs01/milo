@@ -159,7 +159,13 @@ pub fn distExtra(): [i64; 30] {
 }
 
 // Decode length/literal + distance codes for one compressed block.
-fn codes(st: &mut InfState, src: &string, lencode: &Huff, distcode: &Huff): i64 {
+// Both tables are indexed by code length 1..15 inside `_decode`, so both must carry the
+// full 16-entry count array. Propagated from `_decode`'s own `requires` — without it
+// nothing established the bound at this call site.
+fn codes(st: &mut InfState, src: &string, lencode: &Huff, distcode: &Huff): i64
+requires lencode.count.len >= 16
+requires distcode.count.len >= 16
+{
     let lenBase = lenBase()
     let lenExtra = lenExtra()
     let distBase = distBase()

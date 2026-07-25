@@ -1,6 +1,6 @@
 // Verification condition generator — produces SMT-LIB2 from contract annotations
 // and symbolically executes function bodies to prove postconditions.
-import type { Program, Function, Contract, Expr, Stmt } from "./ast";
+import type { Program, Function, Contract, Expr, Stmt, MiloType } from "./ast";
 
 export interface VerificationCondition {
   fn: string;
@@ -44,7 +44,10 @@ interface CallModel {
   // constant. Two textually identical call sites are deliberately NOT shared — a Milo fn
   // may read mutable state, so assuming f(x) == f(x) across invocations could prove
   // something false.
-  bySite: WeakMap<object, string>;
+  // Keyed by arg strings too: the same site lowered in two different states (loop entry vs
+  // havoced body) must not reuse a constant whose assumption was built from the other
+  // state's arguments — that would assume a fact about the wrong values.
+  bySite: WeakMap<object, Map<string, string>>;
 }
 let CALL_MODEL: CallModel | null = null;
 
@@ -62,21 +65,24 @@ const SMT_BUILTINS = new Set([
 ]);
 
 // Every free symbol in `smt` must already be declared in the enclosing function's query.
-function symbolsResolve(smt: string, ctx: CallModel): boolean {
+// FIELD_REFS counts: it is the set the declaration block is built from, and it is still
+// open at this point — a callee's `ensures result.len == 16` rebases to a fresh
+// `genKey__ret0_len` that gets declared alongside the others.
+function symbolsResolve(smt: string, ctx: CallModel, extra?: string): boolean {
   for (const m of smt.matchAll(/[A-Za-z_][A-Za-z0-9_.]*/g)) {
     const sym = m[0];
     if (SMT_BUILTINS.has(sym)) continue;
     if (ctx.scope.has(sym)) continue;
+    if (FIELD_REFS?.has(sym)) continue;
+    if (sym === extra) continue;
     return false;
   }
   return true;
 }
 
-function modelCall(site: object, name: string, args: Expr[]): string | null {
+function modelCall(site: object, name: string, args: Expr[], env?: Map<string, string>): string | null {
   const ctx = CALL_MODEL;
   if (!ctx) return null;
-  const cached = ctx.bySite.get(site);
-  if (cached) return cached;
   const callee = ctx.ensuresByFn.get(name);
   // No contract to constrain the return value: an unconstrained fresh constant would let
   // the solver "violate" a postcondition using a return value the callee can never
@@ -85,8 +91,15 @@ function modelCall(site: object, name: string, args: Expr[]): string | null {
   const ensures = callee.contracts.filter(c => c.kind === "ensures");
   if (ensures.length === 0) return null;
 
-  const argSmt = args.map(a => exprToSmt(a));
+  // Lowered IN THE CALLER'S ENVIRONMENT. Without it every argument naming a local came out
+  // as a bare undeclared symbol, the whole model was rejected below, and the call degraded
+  // to an unknown — so `let b = clamp(end, len)` left `b` untranslatable and the loop guard
+  // built from it silently vanished from the invariant's preservation query.
+  const argSmt = args.map(a => (env ? exprToSmtWithEnv(a, env) : exprToSmt(a)));
   if (argSmt.some(a => /UNSUPPORTED/.test(a))) return null;
+  const siteKey = argSmt.join(",");
+  const cached = ctx.bySite.get(site)?.get(siteKey);
+  if (cached) return cached;
   // The declaration block is shared by every VC of the enclosing function, but `result`
   // is only declared in postcondition VCs — an assumption mentioning it would leak an
   // undeclared symbol into the precondition ones.
@@ -98,7 +111,7 @@ function modelCall(site: object, name: string, args: Expr[]): string | null {
   callee.params.forEach((p, i) => subst.set(p.name, argSmt[i]!));
   subst.set("result", retName);
   const facts = ensures
-    .map(e => exprToSmtWithEnv(e.expr, subst))
+    .map(e => exprToSmtWithEnv(e.expr, subst, true))
     .filter(s => !/UNSUPPORTED/.test(s));
   if (facts.length === 0) return null;
 
@@ -108,12 +121,19 @@ function modelCall(site: object, name: string, args: Expr[]): string | null {
   // `lo <= result <= hi`, which entails `lo <= hi` — the obligation proves itself.
   const guards = callee.contracts
     .filter(c => c.kind === "requires")
-    .map(c => exprToSmtWithEnv(c.expr, subst));
+    .map(c => exprToSmtWithEnv(c.expr, subst, true));
   // An untranslatable `requires` can't be stated as the implication's antecedent, and
   // dropping it would silently restore the circular form.
   if (guards.some(g => /UNSUPPORTED/.test(g))) return null;
 
-  if (![...facts, ...guards].every(s => symbolsResolve(s, ctx))) return null;
+  // `retName` is declared unconditionally a few lines below, but it is not in ctx.scope
+  // yet — and it is the one symbol a callee's `ensures result ...` is guaranteed to
+  // mention. Checking without it rejected EVERY scalar-returning callee's postcondition,
+  // silently: the model was dropped, the call became an unconstrained unknown, and loop
+  // guards built from it turned into UNSUPPORTED. It is passed as an allowance rather
+  // than added to the scope so that bailing out below cannot leave a scope entry with no
+  // matching declaration.
+  if (![...facts, ...guards].every(s => symbolsResolve(s, ctx, retName))) return null;
 
   const conclusion = facts.length === 1 ? facts[0]! : `(and ${facts.join(" ")})`;
   const antecedent = guards.length === 0
@@ -125,7 +145,9 @@ function modelCall(site: object, name: string, args: Expr[]): string | null {
   if (range) ctx.assumes.push(range);
   ctx.assumes.push(`(assert ${antecedent ? `(=> ${antecedent} ${conclusion})` : conclusion})`);
   ctx.scope.add(retName);   // a later call may take this one's result as an argument
-  ctx.bySite.set(site, retName);
+  const perSite = ctx.bySite.get(site) ?? new Map<string, string>();
+  perSite.set(siteKey, retName);
+  ctx.bySite.set(site, perSite);
   return retName;
 }
 
@@ -289,6 +311,96 @@ function collectCallsInExpr(expr: Expr, conds: string[], env: Map<string, string
   }
 }
 
+// Every function in the program, for looking up a callee's parameter modes. Set once per
+// run alongside GLOBAL_CONST_*.
+let FN_TABLE = new Map<string, Function>();
+
+// Names in the function under analysis that a callee could actually write through: `var`
+// locals and `&mut`/`*mut` parameters. Nothing else is a legal mutation target — `let` is
+// an immutable binding and `&T` is an immutable borrow, both enforced by the checker — so
+// havocing them would only throw away facts. Scoped per function, like FIELD_REFS.
+let MUTABLE_NAMES = new Set<string>();
+
+function collectMutableNames(fn: Function): Set<string> {
+  const out = new Set<string>();
+  for (const p of fn.params) if (p.type?.isRefMut || p.type?.isPtr) out.add(p.name);
+  const scan = (stmts: Stmt[]): void => {
+    for (const s of stmts as any[]) {
+      if (s.kind === "VarDecl") out.add(s.name);
+      for (const key of ["body", "thenBody", "elseBody"]) if (Array.isArray(s[key])) scan(s[key]);
+      if (Array.isArray(s.arms)) for (const arm of s.arms) if (Array.isArray(arm.body)) scan(arm.body);
+    }
+  };
+  scan(fn.body);
+  return out;
+}
+
+// Names a statement can mutate WITHOUT an assignment appearing anywhere in it: passing a
+// variable to a `&mut`/`*mut` parameter, or calling a method that takes `&mut self`.
+//
+// This was a FALSE PROOF, not a missed one. `fn bump(n: &mut i64)` called as `bump(x)`
+// left the walker's binding for `x` at its pre-call value, so `var x = 0; bump(x); return x`
+// PROVED `ensures result == 0` for a function that returns 100. Anything the walker cannot
+// see through has to become an unknown, never a stale known.
+//
+// A method call havocs its receiver unconditionally: resolving which `impl` a method comes
+// from (and whether it takes `&mut self`) needs the checker's tables, which are not
+// available here. Over-havocking costs precision; under-havocking costs correctness.
+function collectMutations(node: any, out: Set<string>, seen = new Set<any>()): void {
+  if (!node || typeof node !== "object" || seen.has(node)) return;
+  seen.add(node);
+  const target = (e: any): string | null => {
+    const n = base(e);
+    return n !== null && MUTABLE_NAMES.has(n) ? n : null;
+  };
+  const base = (e: any): string | null => {
+    if (!e || typeof e !== "object") return null;
+    if (e.kind === "Ident") return e.name;
+    if (e.kind === "FieldAccess") return base(e.object);
+    if (e.kind === "UnaryOp" && (e.op === "&" || e.op === "&mut")) return base(e.operand);
+    return null;
+  };
+  if (node.kind === "Call" && typeof node.func === "string" && Array.isArray(node.args)) {
+    const callee = FN_TABLE.get(node.func);
+    if (callee) {
+      callee.params.forEach((p, i) => {
+        if (!p.type?.isRefMut && !p.type?.isPtr) return;
+        const n = target(node.args[i]);
+        if (n) out.add(n);
+      });
+    } else {
+      // Unknown callee (function pointer, closure, unresolved): assume the worst.
+      for (const a of node.args) { const n = target(a); if (n) out.add(n); }
+    }
+  }
+  if (node.kind === "MethodCall") {
+    const n = target(node.object);
+    if (n) out.add(n);
+  }
+  for (const v of Object.values(node)) {
+    if (Array.isArray(v)) v.forEach(x => collectMutations(x, out, seen));
+    else if (v && typeof v === "object") collectMutations(v, out, seen);
+  }
+}
+
+// The declared type of an unannotated local, as far as its initializer reveals it. Only
+// the SMT SORT matters here, so `bool` vs `i64` is the distinction that counts.
+//
+// Getting this wrong emits an invalid query, not a wrong answer: `var matched = true`
+// havoced to an `Int` produced `(not matched__loop3)`, and z3 rejected the whole VC with
+// "Sort mismatch at argument #1 for function (declare-fun not (Bool) Bool)". Found by
+// running the gate over milojs, whose `jsIndexOf` is written that way.
+function inferLiteralType(value: Expr | undefined): string | null {
+  if (!value) return null;
+  if (value.kind === "BoolLit") return "bool";
+  if (value.kind === "FloatLit") return "f64";
+  if (value.kind === "BinOp" && BOOL_OPS.has(value.op)) return "bool";
+  if (value.kind === "UnaryOp" && value.op === "!") return "bool";
+  return null;
+}
+
+const BOOL_OPS = new Set(["==", "!=", "<", ">", "<=", ">=", "&&", "||"]);
+
 function collectPaths(stmts: Stmt[], env: Map<string, string>, types?: Map<string, string>, context?: SymExecContext): SymExecResult {
   const paths: SymPath[] = [];
   const calls: CallSite[] = [];
@@ -319,6 +431,21 @@ function collectPaths(stmts: Stmt[], env: Map<string, string>, types?: Map<strin
   }
 
 
+  // Replace one name — and every flattened field hanging off it, since `&mut c` may write
+  // any of `c.x`, `c.y` — with fresh unknowns.
+  function havocName(name: string, localEnv: Map<string, string>): void {
+    const targets = [name, ...[...(FIELD_REFS ?? [])].filter(f => f.startsWith(`${name}_`))];
+    for (const target of targets) {
+      const fresh = `${target.replace(/[^A-Za-z0-9_]/g, "_")}__mut${ctx.havocSeq++}`;
+      const typeName = varTypes.get(target) ?? (target === name ? "i64" : "i64");
+      ctx.havocDecls.push(`(declare-const ${fresh} ${miloTypeToSmt(typeName)})`);
+      const range = intRangeAssumption(fresh, typeName);
+      if (range) ctx.havocDecls.push(range);
+      CALL_MODEL?.scope.add(fresh);
+      localEnv.set(target, fresh);
+    }
+  }
+
   // for void functions, we need to capture final env state
   const finalEnvs: { conditions: string[]; env: Map<string, string> }[] = [];
   const breakEnvs: { conditions: string[]; env: Map<string, string> }[] = [];
@@ -336,10 +463,37 @@ function collectPaths(stmts: Stmt[], env: Map<string, string>, types?: Map<strin
         if (st[key] && st[key].kind) collectCallsInExpr(st[key], pathConds, localEnv, calls);
       }
 
+      // What this statement's own expressions mutate out from under the walker. Nested
+      // bodies are excluded — walkCapture reaches those statements itself.
+      const mutated = new Set<string>();
+      for (const key of ["value", "expr", "cond", "subject", "target"]) {
+        if (st[key] && st[key].kind) collectMutations(st[key], mutated);
+      }
+      // Applied AFTER the statement's own env update, so the call's arguments are still
+      // lowered in the pre-call state while everything downstream sees the unknown.
+      const applyMutations = () => {
+        for (const name of mutated) havocName(name, localEnv);
+      };
+
       if (stmt.kind === "LetDecl" || stmt.kind === "VarDecl") {
         if (stmt.type?.name) varTypes.set(stmt.name, stmt.type.name);
-        else if (stmt.value?.kind === "FloatLit") varTypes.set(stmt.name, "f64");
+        else {
+          const inferred = inferLiteralType(stmt.value);
+          if (inferred) varTypes.set(stmt.name, inferred);
+        }
+        // A struct literal binds each field, not just the whole value: `Huff { count:
+        // zeros(16) }` is what connects `zeros`' `ensures result.len == n` to a later
+        // `h.count.len >= 16`. Without it the whole literal lowers to one UNSUPPORTED
+        // marker and every field of it is a free unknown.
+        if (stmt.value?.kind === "StructLit") {
+          for (const f of stmt.value.fields) {
+            const sym = `${stmt.name}_${f.name}`;
+            FIELD_REFS?.add(sym);
+            localEnv.set(sym, exprToSmtWithEnv(f.value, localEnv));
+          }
+        }
         if (stmt.value) localEnv.set(stmt.name, exprToSmtWithEnv(stmt.value, localEnv));
+        applyMutations();
         continue;
       }
       if (stmt.kind === "Assign") {
@@ -349,8 +503,10 @@ function collectPaths(stmts: Stmt[], env: Map<string, string>, types?: Map<strin
           const flat = flattenFieldAccess(stmt.target);
           if (flat) localEnv.set(flat, exprToSmtWithEnv(stmt.value, localEnv));
         }
+        applyMutations();
         continue;
       }
+      applyMutations();
       if (stmt.kind === "Return") {
         const val = stmt.value ? exprToSmtWithEnv(stmt.value, localEnv) : "0";
         paths.push({ conditions: [...pathConds], result: val });
@@ -465,8 +621,48 @@ function collectPaths(stmts: Stmt[], env: Map<string, string>, types?: Map<strin
   return { paths, finalEnvs, breakEnvs, continueEnvs, calls, havocDecls: ctx.havocDecls, loops };
 }
 
+// `x.len` on a string/Vec/array can never be negative, and the solver has no way to know
+// that on its own — without it, `requires key.len == 16` is refuted by a counterexample
+// where the key is -1 bytes long.
+//
+// Deliberately NOT applied to every symbol ending in `_len`: a user struct may have a
+// plain `len: i64` field that legitimately goes negative, and asserting a false fact about
+// it would be a false PROOF, not a missed one. Only bases whose declared type actually
+// carries a length qualify, so an unknown-typed base gets nothing.
+function lengthNonNeg(refs: Set<string>, fn: Function): string[] {
+  const lenBearing = new Set<string>();
+  const consider = (name: string, t: MiloType | null | undefined) => {
+    if (t && (t.name === "string" || t.name === "Vec" || t.isArray)) lenBearing.add(name);
+  };
+  for (const p of fn.params) consider(p.name, p.type);
+  const scan = (stmts: Stmt[]): void => {
+    for (const s of stmts as any[]) {
+      if ((s.kind === "LetDecl" || s.kind === "VarDecl") && s.type) consider(s.name, s.type);
+      for (const key of ["body", "thenBody", "elseBody"]) if (Array.isArray(s[key])) scan(s[key]);
+      if (Array.isArray(s.arms)) for (const arm of s.arms) if (Array.isArray(arm.body)) scan(arm.body);
+    }
+  };
+  scan(fn.body);
+  return [...refs]
+    .filter(r => r.endsWith("_len") && lenBearing.has(r.slice(0, -"_len".length)))
+    .map(r => `(assert (>= ${r} 0))`);
+}
+
+// `x.len()` rewritten as `x.len`, so one code path handles both spellings. Zero-arg and
+// name-checked: `v.len()` is a pure length, `v.pop()` is not.
+function lenMethodAsField(expr: any): Expr | null {
+  if (expr.kind !== "MethodCall" || expr.method !== "len") return null;
+  if (expr.args && expr.args.length > 0) return null;
+  return { kind: "FieldAccess", object: expr.object, field: "len", span: expr.span } as Expr;
+}
+
 function collectFieldRefs(expr: Expr, refs: Set<string>): void {
   if (!expr) return;
+  if (expr.kind === "MethodCall") {
+    const asLen = lenMethodAsField(expr);
+    if (asLen) { collectFieldRefs(asLen, refs); return; }
+    return;
+  }
   if (expr.kind === "FieldAccess") {
     const flat = flattenFieldAccess(expr);
     if (flat && flat.includes("_")) refs.add(flat);
@@ -507,35 +703,95 @@ function flattenFieldAccess(expr: Expr): string | null {
   return null;
 }
 
-function exprToSmtWithEnv(expr: Expr, env: Map<string, string>): string {
+// Substitute a field access through its BASE identifier. At a call site the env maps the
+// callee's parameter (`key`) to the caller's argument, never the flattened `key_len` — so
+// lowering `requires key.len == 16` against the flat name alone emitted the CALLEE's
+// symbol into the CALLER's query, where nothing declares it. Both solvers then reported an
+// error about a constant the user never wrote, and the precondition went unchecked: 13 of
+// the tree's translator errors were this one bug (`key_len`, `iv_len`, `s_len`).
+//
+// Only a base that maps to a plain symbol can be rebased — `f(a + b).len` has no name to
+// hang a field on, and inventing one would silently check a different obligation.
+// Null when the base can't carry a field: not a plain identifier at the root, not
+// substituted, or substituted to an expression rather than a symbol (`let iv =
+// ivFromCount(count)` maps `iv` to a call-model constant or an UNSUPPORTED marker — there
+// is nothing to append `_len` to). The caller decides what null means in its scope.
+function rebaseFieldAccess(expr: Expr, env: Map<string, string>): { kind: "rebased"; name: string } | { kind: "no" } {
+  const fields: string[] = [];
+  let node: Expr = expr;
+  while (node.kind === "FieldAccess") {
+    fields.unshift(node.field);
+    node = node.object;
+  }
+  if (node.kind !== "Ident") return { kind: "no" };
+  // Longest bound prefix wins. `lencode.count.len` has no binding as a whole, but
+  // `lencode_count` does (from the struct literal), and hanging `_len` off that symbol is
+  // what lets `zeros`' postcondition reach this obligation. Falls back to the base itself,
+  // which is the call-site substitution case.
+  for (let take = fields.length; take >= 0; take--) {
+    const key = [node.name, ...fields.slice(0, take)].join("_");
+    const bound = env.get(key);
+    if (bound === undefined || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(bound)) continue;
+    const name = [bound, ...fields.slice(take)].join("_");
+    FIELD_REFS?.add(name);   // the query has to declare what this substitution invented
+    return { kind: "rebased", name };
+  }
+  return { kind: "no" };
+}
+
+// Field symbols invented during lowering, collected so the enclosing function's
+// declaration block can declare them. Scoped to one function's VC build, like CALL_MODEL.
+let FIELD_REFS: Set<string> | null = null;
+
+// `foreign` marks lowering of a CALLEE's contract under a parameter substitution, where
+// every name belongs to the callee's scope, not this query's. There a name the
+// substitution doesn't cover (the callee's own local, a field of its receiver) has no
+// meaning here: emitting it raw puts an undeclared symbol in the query — which both
+// solvers report as an error naming a constant the user never wrote — or, worse, collides
+// with an unrelated caller-side name and checks a different obligation than the one asked.
+// In the caller's own body env the same flat names ARE this scope's, and declared.
+function exprToSmtWithEnv(expr: Expr, env: Map<string, string>, foreign = false): string {
   if (!expr) return "0";
   if (expr.kind === "Ident") {
     const mapped = env.get(expr.name);
     if (mapped) return mapped;
     if (expr.name === "result") return "result";
-    return GLOBAL_CONST_SMT.get(expr.name) ?? expr.name;
+    const konst = GLOBAL_CONST_SMT.get(expr.name);
+    if (konst) return konst;   // module-level const: shared by both scopes
+    return foreign ? `(UNSUPPORTED Ident)` : expr.name;
   }
   if (expr.kind === "FieldAccess") {
     const flat = flattenFieldAccess(expr);
     if (flat) {
       const mapped = env.get(flat);
       if (mapped) return mapped;
-      return flat;
+      const r = rebaseFieldAccess(expr, env);
+      if (r.kind === "rebased") return r.name;
+      return foreign ? `(UNSUPPORTED FieldAccess)` : flat;
     }
   }
   if (expr.kind === "BinOp") {
-    const left = exprToSmtWithEnv(expr.left, env);
+    const left = exprToSmtWithEnv(expr.left, env, foreign);
     const bit = bitOpToSmt(expr.op, left, expr.right);
     if (bit) return bit;
-    const right = exprToSmtWithEnv(expr.right, env);
+    const right = exprToSmtWithEnv(expr.right, env, foreign);
     return `(${binOpToSmt(expr.op)} ${left} ${right})`;
   }
   if (expr.kind === "CastExpr") {
-    return castToSmt(exprToSmtWithEnv(expr.operand, env), expr.targetType?.name ?? "i64");
+    return castToSmt(exprToSmtWithEnv(expr.operand, env, foreign), expr.targetType?.name ?? "i64");
   }
   if (expr.kind === "UnaryOp") {
-    if (expr.op === "!") return `(not ${exprToSmtWithEnv(expr.operand, env)})`;
-    if (expr.op === "-") return `(- ${exprToSmtWithEnv(expr.operand, env)})`;
+    if (expr.op === "!") return `(not ${exprToSmtWithEnv(expr.operand, env, foreign)})`;
+    if (expr.op === "-") return `(- ${exprToSmtWithEnv(expr.operand, env, foreign)})`;
+  }
+  if (expr.kind === "MethodCall") {
+    const asLen = lenMethodAsField(expr);
+    if (asLen) return exprToSmtWithEnv(asLen, env, foreign);
+  }
+  if (expr.kind === "Call" && typeof expr.func === "string") {
+    const modeled = modelCall(expr, expr.func, expr.args, env);
+    if (modeled) return modeled;
+    return `(UNSUPPORTED_CALL ${expr.func})`;
   }
   return exprToSmt(expr);
 }
@@ -582,6 +838,8 @@ export function generateVerificationConditions(program: Program, opts?: { onlyFi
     }
   }
 
+  FN_TABLE = new Map(program.functions.map(f => [f.name, f]));
+
   // Callee preconditions, for the call-site obligations below.
   const requiresByFn = new Map<string, Function>();
   // Callee postconditions, for modelling calls that appear inside a body or contract.
@@ -601,7 +859,7 @@ export function generateVerificationConditions(program: Program, opts?: { onlyFi
     const ensures = fn.contracts.filter(c => c.kind === "ensures");
     contractCount += fn.contracts.length;
 
-    CALL_MODEL = { ensuresByFn, decls: [], assumes: [], n: 0, bySite: new WeakMap(), scope: new Set() };
+    CALL_MODEL = { ensuresByFn, decls: [], assumes: [], n: 0, bySite: new WeakMap<object, Map<string, string>>(), scope: new Set() };
     const vcStart = conditions.length;
 
     const paramDecls = fn.params.map(p => `(declare-const ${p.name} ${miloTypeToSmt(p.type?.name ?? "i64")})`).join("\n");
@@ -614,7 +872,10 @@ export function generateVerificationConditions(program: Program, opts?: { onlyFi
     const fieldRefs = new Set<string>();
     for (const c of fn.contracts) collectFieldRefs(c.expr, fieldRefs);
     collectFieldRefsFromBody(fn.body, fieldRefs);
-    const fieldDecls = [...fieldRefs].map(f => `(declare-const ${f} Int)`).join("\n");
+    // Lowering below (body walk, call-site obligations) invents more of these by
+    // substitution, so the set stays open until the declaration block is assembled.
+    FIELD_REFS = fieldRefs;
+    MUTABLE_NAMES = collectMutableNames(fn);
     // Must be set before any contract or body expression is lowered — that is when call
     // modelling runs and needs to know which symbols this function's query declares.
     CALL_MODEL.scope = new Set([...fn.params.map(p => p.name), ...fieldRefs, "result"]);
@@ -630,45 +891,60 @@ export function generateVerificationConditions(program: Program, opts?: { onlyFi
     }
     const symResult = collectPaths(fn.body, paramEnv, paramTypes);
 
+    // Call-site obligations: the prover proves a callee's `ensures` GIVEN its `requires`,
+    // and nothing proved the caller actually delivers that `requires`. Statically it was
+    // an assumption. (Debug builds do assert it at entry — language-reference.md:267 —
+    // so this closes the *static* half, not an unchecked hole.)
+    //
+    // Lowered BEFORE the declaration block is assembled: substituting the callee's params
+    // for the caller's arguments is what invents symbols like `key_len`, and they have to
+    // reach `fieldRefs` in time to be declared.
+    const callObligations: { callee: string; obligation: string; guard: string }[] = [];
+    for (const call of symResult.calls) {
+      const callee = requiresByFn.get(call.name);
+      if (!callee || callee.name === fn.name) continue;   // self-recursion: needs induction, skip
+      if (call.args.length !== callee.params.length) continue;  // variadic/defaulted: can't map args to params
+      // Substitute the callee's params with the caller's arg expressions.
+      const subst = new Map<string, string>();
+      callee.params.forEach((p, idx) => subst.set(p.name, call.args[idx]!));
+      for (const req of callee.contracts.filter(c => c.kind === "requires")) {
+        const obligation = exprToSmtWithEnv(req.expr, subst, true);
+        // An untranslatable obligation is KEPT, marker and all: the marker makes it report
+        // `unknown` with the reason attached. Dropping it here (what this did before) made
+        // an unchecked precondition indistinguishable from a checked one — the call simply
+        // wasn't in the report, so nothing said the guarantee was resting on nothing.
+        const guard = call.conditions.length > 0 ? `(assert (and ${call.conditions.join(" ")}))` : "";
+        callObligations.push({ callee: callee.name, obligation, guard });
+      }
+    }
+
+    const fieldDecls = [...fieldRefs].map(f => `(declare-const ${f} Int)`).join("\n");
+    const lenFacts = lengthNonNeg(fieldRefs, fn).join("\n");
+    FIELD_REFS = null;
+
     let allDecls = fieldDecls ? `${paramDecls}\n${fieldDecls}` : paramDecls;
     if (paramRanges) allDecls = `${allDecls}\n${paramRanges}`;
+    if (lenFacts) allDecls = `${allDecls}\n${lenFacts}`;
     if (symResult.havocDecls.length > 0) allDecls = `${allDecls}\n${symResult.havocDecls.join("\n")}`;
     allDecls = `${allDecls}\n${CALL_MODEL_SLOT}`;
 
     const preAssumptions = requires.map(r => `(assert ${exprToSmt(r.expr)})`).join("\n");
 
-    // Call-site obligations: the prover proves a callee's `ensures` GIVEN its `requires`,
-    // and nothing proved the caller actually delivers that `requires`. Statically it was
-    // an assumption. (Debug builds do assert it at entry — language-reference.md:267 —
-    // so this closes the *static* half, not an unchecked hole.)
-    {
-      for (const call of symResult.calls) {
-        const callee = requiresByFn.get(call.name);
-        if (!callee || callee.name === fn.name) continue;   // self-recursion: needs induction, skip
-        if (call.args.length !== callee.params.length) continue;  // variadic/defaulted: can't map args to params
-        // Substitute the callee's params with the caller's arg expressions.
-        const subst = new Map<string, string>();
-        callee.params.forEach((p, idx) => subst.set(p.name, call.args[idx]!));
-        for (const req of callee.contracts.filter(c => c.kind === "requires")) {
-          const obligation = exprToSmtWithEnv(req.expr, subst);
-          if (/UNSUPPORTED/.test(obligation)) continue;   // untranslatable: say nothing rather than something wrong
-          const guard = call.conditions.length > 0 ? `(assert (and ${call.conditions.join(" ")}))` : "";
-          conditions.push({
-            fn: fn.name,
-            kind: "precondition",
-            description: `call to ${callee.name} from ${fn.name}: ${obligation}`,
-            smtlib: [
-              `; Call-site precondition proof: ${fn.name} -> ${callee.name}`,
-              `(set-logic ALL)`,
-              allDecls,
-              preAssumptions,
-              guard,
-              `(assert (not ${obligation}))`,
-              `(check-sat)`,
-            ].filter(Boolean).join("\n"),
-          });
-        }
-      }
+    for (const o of callObligations) {
+      conditions.push({
+        fn: fn.name,
+        kind: "precondition",
+        description: `call to ${o.callee} from ${fn.name}: ${o.obligation}`,
+        smtlib: [
+          `; Call-site precondition proof: ${fn.name} -> ${o.callee}`,
+          `(set-logic ALL)`,
+          allDecls,
+          preAssumptions,
+          o.guard,
+          `(assert (not ${o.obligation}))`,
+          `(check-sat)`,
+        ].filter(Boolean).join("\n"),
+      });
     }
 
     // Postconditions: symbolically execute body to build path constraints
@@ -886,10 +1162,15 @@ function exprToSmt(expr: Expr): string {
       if (flat) return flat;
       return `(${exprToSmt(expr.object)}.${expr.field})`;
     }
-    case "MethodCall":
-      // No modular model for methods yet (no receiver encoding), and emitting the bare
-      // application would hand the solver an undeclared symbol.
+    case "MethodCall": {
+      // `.len()` is the same quantity as the `.len` field, just spelled as a call — milo's
+      // own std uses the field, milojs uses the method. Everything else has no modular
+      // model yet (no receiver encoding), and emitting the bare application would hand the
+      // solver an undeclared symbol.
+      const asLen = lenMethodAsField(expr);
+      if (asLen) return exprToSmt(asLen);
       return `(UNSUPPORTED_METHOD ${expr.method})`;
+    }
     default:
       return `(UNSUPPORTED ${expr.kind})`;
   }

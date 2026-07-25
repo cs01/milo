@@ -1,0 +1,32 @@
+// @proven: 1
+// @failed: 1
+// @unknown: 1
+// A callee's `requires` is checked in the CALLER's query, so every name in it has to be
+// translated into the caller's scope. `key.len` used to flatten to the literal string
+// `key_len` — the CALLEE's parameter name — which nothing in the caller declared. Both
+// solvers answered with a parse error about a constant the user never wrote, and the
+// precondition went unchecked. Real instance: 13 of the tree's translator errors were
+// this, including every AES key-length check in std/crypto.
+//
+// `good` passes a parameter it has already constrained: rebasing gives the caller's own
+// `k_len`, and the obligation is discharged. `bad` passes an unconstrained one: refuted,
+// which is the honest answer — nothing establishes that its key is 16 bytes.
+fn needsKey(key: &string): i64
+requires key.len == 16
+{
+    return key.len
+}
+
+fn good(k: &string): i64
+requires k.len == 16
+{
+    return needsKey(k)
+}
+
+fn bad(k: &string): i64 {
+    return needsKey(k)
+}
+
+fn main() {
+    print(good("0123456789abcdef"))
+}

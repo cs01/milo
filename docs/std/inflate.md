@@ -31,6 +31,9 @@ fn codes(st: &mut InfState, src: &string, lencode: &Huff, distcode: &Huff): i64
 ```
 
 Decode length/literal + distance codes for one compressed block.
+Both tables are indexed by code length 1..15 inside `_decode`, so both must carry the
+full 16-entry count array. Propagated from `_decode`'s own `requires` — without it
+nothing established the bound at this call site.
 
 ### `construct`
 

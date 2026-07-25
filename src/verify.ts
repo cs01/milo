@@ -7,6 +7,11 @@ export interface VerificationCondition {
   kind: "precondition" | "postcondition" | "loop-invariant";
   smtlib: string;
   description: string;
+  // Callees whose `ensures` this VC was allowed to ASSUME. Modular verification is
+  // assume-guarantee: a proof here is only as good as those callees' own postcondition
+  // proofs, and if one of them came back `unknown` this "proven" rests on something
+  // nothing checked. Reported rather than silently trusted — see conditionalProofs.
+  assumes?: string[];
 }
 
 export interface VerifyResult {
@@ -48,6 +53,8 @@ interface CallModel {
   // havoced body) must not reuse a constant whose assumption was built from the other
   // state's arguments — that would assume a fact about the wrong values.
   bySite: WeakMap<object, Map<string, string>>;
+  // Callee names whose postconditions were assumed while building this function's VCs.
+  assumed: Set<string>;
 }
 let CALL_MODEL: CallModel | null = null;
 
@@ -144,6 +151,7 @@ function modelCall(site: object, name: string, args: Expr[], env?: Map<string, s
   const range = intRangeAssumption(retName, retType);
   if (range) ctx.assumes.push(range);
   ctx.assumes.push(`(assert ${antecedent ? `(=> ${antecedent} ${conclusion})` : conclusion})`);
+  ctx.assumed.add(name);    // this VC now leans on `name`'s postcondition being true
   ctx.scope.add(retName);   // a later call may take this one's result as an argument
   const perSite = ctx.bySite.get(site) ?? new Map<string, string>();
   perSite.set(siteKey, retName);
@@ -157,10 +165,12 @@ function fillCallModel(conditions: VerificationCondition[], from: number) {
   const ctx = CALL_MODEL;
   if (!ctx) return;
   const block = [...ctx.decls, ...ctx.assumes].join("\n");
+  const assumed = [...ctx.assumed];
   for (let i = from; i < conditions.length; i++) {
     conditions[i]!.smtlib = block
       ? conditions[i]!.smtlib.replace(CALL_MODEL_SLOT, block)
       : conditions[i]!.smtlib.replace(`${CALL_MODEL_SLOT}\n`, "");
+    if (assumed.length) conditions[i]!.assumes = assumed;
   }
 }
 
@@ -213,6 +223,14 @@ function bitOpToSmt(op: string, leftStr: string, rightExpr: Expr): string | null
   if (op === "<<") return `(* ${leftStr} ${numToSmt(1n << c)})`;
   if (op === ">>") return `(div ${leftStr} ${numToSmt(1n << c)})`;
   if (op === "&" && (c & (c + 1n)) === 0n) return `(mod ${leftStr} ${numToSmt(c + 1n)})`;
+  // Single-bit test: `x & 0x80`. Distinct from the mask case above (0x80 is not 2^k-1), and
+  // far more common — every CPU flag check in an emulator is one. Extracting bit k as
+  // `2^k * ((x div 2^k) mod 2)` stays linear, and floor/Euclidean semantics give the right
+  // answer for negative x too, since those are the two's-complement bits.
+  if (op === "&" && c > 0n && (c & (c - 1n)) === 0n) {
+    const p2 = numToSmt(c);
+    return `(* ${p2} (mod (div ${leftStr} ${p2}) 2))`;
+  }
 
   // SMT-LIB `div`/`mod` are EUCLIDEAN — the remainder is never negative, so -7 mod 3 is 2.
   // Milo's `/` and `%` truncate toward zero like C, so -7 % 3 is -1. Lowering one to the
@@ -944,7 +962,7 @@ export function generateVerificationConditions(program: Program, opts?: { onlyFi
     const ensures = fn.contracts.filter(c => c.kind === "ensures");
     contractCount += fn.contracts.length;
 
-    CALL_MODEL = { ensuresByFn, decls: [], assumes: [], n: 0, bySite: new WeakMap<object, Map<string, string>>(), scope: new Set() };
+    CALL_MODEL = { ensuresByFn, decls: [], assumes: [], n: 0, bySite: new WeakMap<object, Map<string, string>>(), scope: new Set(), assumed: new Set() };
     const vcStart = conditions.length;
 
     const paramDecls = fn.params.map(p => `(declare-const ${p.name} ${miloTypeToSmt(p.type?.name ?? "i64")})`).join("\n");
@@ -1128,24 +1146,26 @@ export function generateVerificationConditions(program: Program, opts?: { onlyFi
       const entryCond = loop.entryConds.length > 0 ? `(assert (and true ${loop.entryConds.join(" ")}))` : "";
       for (const inv of loop.invariants) {
         // Establishment: the invariant has to hold on the way in, in the pre-loop state.
+        // Emitted even when it will not translate — the marker makes it report `unknown`
+        // with the reason. Skipping it (what this did before) hid an obligation the same
+        // way the preservation half did, and an invariant whose two halves both vanish is
+        // reported as a clean pass over a loop nothing checked.
         const atEntry = exprToSmtWithEnv(inv.expr, loop.entryEnv);
-        if (!/UNSUPPORTED/.test(atEntry)) {
-          conditions.push({
-            fn: fn.name,
-            kind: "loop-invariant",
-            description: `loop invariant holds on entry in ${fn.name}: ${atEntry}`,
-            smtlib: [
-              `; Loop invariant establishment for ${fn.name}`,
-              `(set-logic ALL)`,
-              allDecls,
-              preAssumptions,
-              entryCond,
-              `(assert (not ${atEntry}))`,
-              `(check-sat)`,
-            ].filter(Boolean).join("\n"),
-          });
-          loopCount++;
-        }
+        conditions.push({
+          fn: fn.name,
+          kind: "loop-invariant",
+          description: `loop invariant holds on entry in ${fn.name}: ${atEntry}`,
+          smtlib: [
+            `; Loop invariant establishment for ${fn.name}`,
+            `(set-logic ALL)`,
+            allDecls,
+            preAssumptions,
+            entryCond,
+            `(assert (not ${atEntry}))`,
+            `(check-sat)`,
+          ].filter(Boolean).join("\n"),
+        });
+        loopCount++;
       }
 
       // Preservation: assuming every invariant and the guard, one pass through the body
@@ -1160,14 +1180,31 @@ export function generateVerificationConditions(program: Program, opts?: { onlyFi
       for (const inv of loop.invariants) {
         const violations: string[] = [];
         const nextIterationEnvs = [...bodyRun.finalEnvs, ...bodyRun.continueEnvs];
-        let translatable = nextIterationEnvs.length > 0;
+        let untranslatable = "";
         for (const fe of nextIterationEnvs) {
           const after = exprToSmtWithEnv(inv.expr, fe.env);
-          if (/UNSUPPORTED/.test(after)) { translatable = false; break; }
+          if (/UNSUPPORTED/.test(after)) { untranslatable = after; break; }
           const conds = fe.conditions.length > 0 ? `(and true ${fe.conditions.join(" ")})` : "true";
           violations.push(`(and ${conds} (not ${after}))`);
         }
-        if (!translatable || violations.length === 0) continue;
+        // A body with no completing path (every route returns or breaks) has nothing to
+        // preserve — vacuous, and correctly silent.
+        if (!untranslatable && nextIterationEnvs.length === 0) continue;
+        // FALSE PROOF otherwise. This used to `continue` when the post-iteration state
+        // wouldn't translate, so the preservation obligation VANISHED and the invariant
+        // was reported `proven` off its establishment VC alone:
+        //
+        //     while i < v.len  invariant total == 0  { total = total + v[i]; i = i + 1 }
+        //
+        // came back "1 condition, proven: 1, unknown: 0" for a loop whose invariant is
+        // false on the first iteration — `v[i]` is an IndexAccess the translator has no
+        // rule for, and the obligation that would have caught it was dropped rather than
+        // reported. Emitting the marker turns it into `unknown` with the reason attached,
+        // which is the same discipline the rest of the translator follows: silence must
+        // never render as a checkmark.
+        const violated = untranslatable
+          ? `(not ${untranslatable})`
+          : (violations.length === 1 ? violations[0] : `(or ${violations.join(" ")})`);
         const guardAssume = /UNSUPPORTED/.test(loop.guard) ? "" : `(assert ${loop.guard})`;
         conditions.push({
           fn: fn.name,
@@ -1180,7 +1217,7 @@ export function generateVerificationConditions(program: Program, opts?: { onlyFi
             preAssumptions,
             ...assumed.map(a => `(assert ${a})`),
             guardAssume,
-            `(assert ${violations.length === 1 ? violations[0] : `(or ${violations.join(" ")})`})`,
+            `(assert ${violated})`,
             `(check-sat)`,
           ].filter(Boolean).join("\n"),
         });
@@ -1367,6 +1404,33 @@ export function untranslatable(smtlib: string): string[] {
   return [...out];
 }
 
+// Which `proven` verdicts are only conditionally proven: they assumed a callee's `ensures`
+// that the same run could not establish. The assumption may still be true — `rd`'s "every
+// read yields a byte" is true but sits behind an IndexAccess the translator cannot model —
+// but a reader deserves to know the difference between a proof and a proof-modulo-an-
+// unchecked-claim. A callee with no postcondition VC at all (not analyzed in this run,
+// e.g. filtered out by --onlyFile) counts as unestablished for the same reason.
+export function conditionalProofs(pr: ProveResult): Map<SolverResult, string[]> {
+  const postconditionsByFn = new Map<string, SolverResult[]>();
+  for (const r of pr.results) {
+    if (r.vc.kind !== "postcondition") continue;
+    const list = postconditionsByFn.get(r.vc.fn) ?? [];
+    list.push(r);
+    postconditionsByFn.set(r.vc.fn, list);
+  }
+  const established = (fn: string) => {
+    const posts = postconditionsByFn.get(fn);
+    return posts !== undefined && posts.length > 0 && posts.every(p => p.status === "proven");
+  };
+  const out = new Map<SolverResult, string[]>();
+  for (const r of pr.results) {
+    if (r.status !== "proven" || !r.vc.assumes?.length) continue;
+    const weak = r.vc.assumes.filter(fn => fn !== r.vc.fn && !established(fn));
+    if (weak.length) out.set(r, weak);
+  }
+  return out;
+}
+
 // Solver diagnostics land in a one-line-per-VC report; a raw multi-line message would
 // interleave with the next verdict.
 function oneLine(s: string): string {
@@ -1438,9 +1502,16 @@ export function formatProveReport(pr: ProveResult): string {
   lines.push(`  proven: ${pr.proven}  failed: ${pr.failed}  unknown: ${pr.unknown}  errors: ${pr.errors}`);
   lines.push("");
 
+  const conditional = conditionalProofs(pr);
   for (const r of pr.results) {
     const icon = r.status === "proven" ? "✓" : r.status === "failed" ? "✗" : "?";
-    lines.push(`  ${icon} [${r.vc.kind}] ${r.vc.fn}: ${r.status}${r.detail ? ` — ${r.detail}` : ""}`);
+    const weak = conditional.get(r);
+    const note = weak ? ` — conditional: assumes ${weak.join(", ")}, whose own postcondition is not established` : "";
+    lines.push(`  ${icon} [${r.vc.kind}] ${r.vc.fn}: ${r.status}${r.detail ? ` — ${r.detail}` : ""}${note}`);
+  }
+  if (conditional.size > 0) {
+    lines.push("");
+    lines.push(`  ${conditional.size} of ${pr.proven} proofs are conditional on an unestablished postcondition.`);
   }
 
   return lines.join("\n");

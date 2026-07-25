@@ -71,7 +71,8 @@ export interface FileResult {
   unknown: number;
   errors: number;
   refutations: Refutation[];
-  noReport: boolean; // prove printed no tally (compile failure etc.)
+  conditional: number; // proofs that assumed a callee postcondition nothing established
+  noReport: boolean;   // prove printed no tally (compile failure etc.)
 }
 
 // Solver for the gate. z3 discharges nonlinear/bitwise contracts the native
@@ -97,11 +98,12 @@ export async function proveFile(miloc: string, file: string, solver = gateSolver
       const fn = fnM ? fnM[1] : "?";
       return { fn, key: `${rel}::${fn}`, line: l.trim() };
     });
-  if (!m) return { file: rel, proven: 0, failed: 0, unknown: 0, errors: 0, refutations, noReport: true };
+  const cond = out.match(/(\d+) of \d+ proofs are conditional/);
+  if (!m) return { file: rel, proven: 0, failed: 0, unknown: 0, errors: 0, refutations, conditional: 0, noReport: true };
   return {
     file: rel,
     proven: +m[1], failed: +m[2], unknown: +m[3], errors: +m[4],
-    refutations, noReport: false,
+    refutations, conditional: cond ? +cond[1] : 0, noReport: false,
   };
 }
 
@@ -156,13 +158,13 @@ function ratchet(r: FileResult, out: { regressions: string[]; gains: string[]; u
 
 export function report(results: FileResult[]): Gate {
   const pad = (s: string, n: number) => s.padEnd(n);
-  let tP = 0, tF = 0, tU = 0, tE = 0;
+  let tP = 0, tF = 0, tU = 0, tE = 0, tC = 0;
   const allRefs: Refutation[] = [];
   const ratch = { regressions: [] as string[], gains: [] as string[], untracked: [] as string[] };
   console.log(`contract gate — solver: ${gateSolver()}\n`);
   console.log(pad("FILE", 44) + "proven  failed  unknown  errors");
   for (const r of results) {
-    tP += r.proven; tF += r.failed; tU += r.unknown; tE += r.errors;
+    tP += r.proven; tF += r.failed; tU += r.unknown; tE += r.errors; tC += r.conditional;
     allRefs.push(...r.refutations);
     ratchet(r, ratch);
     const flag = r.failed > 0 ? " ✗" : r.noReport ? " (no report)" : "";
@@ -186,6 +188,16 @@ export function report(results: FileResult[]): Gate {
     `\n${tP} proven, ${tF} refuted (${allRefs.length - unexpected.length} baselined, ` +
     `${unexpected.length} new), ${tU} unknown (solver limit or untranslatable), ${tE} translator errors.`
   );
+  // Modular verification lets a proof assume its callees' postconditions. When one of those
+  // was never established, the proof is real only if the assumption is — so the headline
+  // "proven" number overstates what is actually settled, and by how much belongs in the
+  // report rather than in a footnote nobody reads.
+  if (tC > 0) {
+    console.log(
+      `${tC} of those ${tP} proofs are CONDITIONAL: they assume a callee's \`ensures\` that ` +
+      `this run could not establish (usually a postcondition sitting behind an untranslatable body).`
+    );
+  }
   if (unexpected.length) {
     console.log("\nNEW refuted contracts (gate FAIL) — the prover found a counterexample:");
     for (const ref of unexpected) console.log("  " + ref.line);

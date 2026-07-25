@@ -125,6 +125,14 @@ pub fn isStmtLeadKeyword(s: &string): bool {
     s == "continue" || s == "unsafe"
 }
 
+// A contract clause introduces an expression, so the statement-boundary reflow must
+// not split the keyword from it. Only `invariant`/`decreases` need this: they sit
+// inside a block (depth > 0) where the reflow fires, while `requires`/`ensures` sit
+// before the body's `{` and never reach it. These lex as plain idents here.
+pub fn isContractLeadKeyword(s: &string): bool {
+    return s == "invariant" || s == "decreases" || s == "requires" || s == "ensures"
+}
+
 // The lexer emits `@` as an Ident with text "@" (unknown-char fallthrough), so an
 // attribute like `@ derive(...)` starts with such a token rather than a dedicated
 // kind.
@@ -945,6 +953,8 @@ pub fn formatSource(src: string): string {
     // Kind of the last emitted real token (skips newlines/comments/dropped ';'),
     // for detecting a statement boundary against the current token.
     var prevKind: TokKind = TokKind.Eof
+    // Text of that same token, so a contract keyword can hold its expression on one line.
+    var prevText: string = ""
     // Tracks whether the last emitted real token was `extern`, so a following
     // `fn` can be glued to it as `extern fn` even if the source split them.
     var lastWasExtern: bool = false
@@ -1123,7 +1133,7 @@ pub fn formatSource(src: string): string {
             prevKind == TokKind.RBracket
             let curStartsStmt = tok.kind == TokKind.Ident ||
             (tok.kind == TokKind.Keyword && isStmtLeadKeyword(tok.text))
-            if prevEndsStmt && curStartsStmt {
+            if prevEndsStmt && curStartsStmt && !isContractLeadKeyword(prevText) {
                 out = out + "\n"
                 atLineStart = true
             }
@@ -1167,6 +1177,7 @@ pub fn formatSource(src: string): string {
         lastWasPub = tok.kind == TokKind.Ident && tok.text == "pub" && depth == 0
         lastWasOwnLineComment = false
         prevKind = tok.kind
+        prevText = tok.text.clone()
         prevWasAt = isAtToken(tok)
         // A top-level `@` opens an attribute that prefixes the next decl: hold
         // afterAttr across the attribute so no blank splits it from the decl, then

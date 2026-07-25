@@ -19,8 +19,7 @@ ensures result >= 0
 {
     var total: i64 = 0
     for i in 0..n
-    invariant
-    total >= 0
+    invariant total >= 0
     {
         total = total + i
     }
@@ -32,8 +31,7 @@ requires n >= 0
 {
     var total: i64 = 0
     for i in 0..n
-    invariant
-    total == 0
+    invariant total == 0
     {
         total = total + 1
     }

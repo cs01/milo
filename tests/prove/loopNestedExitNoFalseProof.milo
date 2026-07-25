@@ -7,8 +7,7 @@ ensures result >= 0
 {
     var x: i64 = 0
     while true
-    invariant
-    x >= 0
+    invariant x >= 0
     {
         unsafe {
             x = -1
@@ -24,8 +23,7 @@ ensures result >= 0
 {
     var x: i64 = 0
     while true
-    invariant
-    x >= 0
+    invariant x >= 0
     {
         match n {
             0 => {

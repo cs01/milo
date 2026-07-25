@@ -243,8 +243,7 @@ pub fn strSplit(s: &string, sep: &string): Vec<string> {
     // Carries `strIndexOfFrom`'s `requires pos >= 0` across the loop: without it `pos` is
     // a fresh unknown on the second and later iterations and the call cannot be discharged.
     while pos <= s.len
-    invariant
-    pos >= 0
+    invariant pos >= 0
     {
         let idx = strIndexOfFrom(s, sep, pos)
         if idx == notFound {
@@ -329,8 +328,7 @@ pub fn strReplace(s: &string, old: &string, newVal: &string): string {
     var pos: i64 = 0
     // See strSplit: keeps `pos >= 0` available for strIndexOfFrom's precondition.
     while pos < s.len
-    invariant
-    pos >= 0
+    invariant pos >= 0
     {
         let idx = strIndexOfFrom(s, old, pos)
         if idx == notFound {

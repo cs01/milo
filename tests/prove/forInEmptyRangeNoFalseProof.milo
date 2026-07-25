@@ -13,8 +13,7 @@ ensures result == 5
 {
     var total: i64 = 0
     for i in 0..0
-    invariant
-    total >= 0
+    invariant total >= 0
     {
         total = total + 1
     }

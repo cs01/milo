@@ -7,13 +7,11 @@ ensures result >= 0
 {
     var x: i64 = 0
     while x < 1
-    invariant
-    x >= 0
+    invariant x >= 0
     {
         var y: i64 = 0
         while y < 1
-        invariant
-        y >= 0
+        invariant y >= 0
         {
             y = y + 1
         }

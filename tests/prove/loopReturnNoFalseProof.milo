@@ -7,8 +7,7 @@ requires n >= 0
 ensures result >= 0
 {
     while n > 0
-    invariant
-    n >= 0
+    invariant n >= 0
     {
         return -1
     }

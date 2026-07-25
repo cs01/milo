@@ -1,0 +1,9 @@
+fun fib(_ n: Int) -> Int {
+  if n < 2 { return n.copy() }
+  return fib(n - 1) + fib(n - 2)
+}
+
+public fun main() {
+  let n = 35
+  print(fib(n))
+}

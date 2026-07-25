@@ -80,6 +80,12 @@ benchmarks/json/json_milo
 benchmarks/json/json_c
 benchmarks/json/json_go
 benchmarks/results-*.md
+benchmarks/*/*_rs
+benchmarks/*/*_zig
+benchmarks/*/*_odin
+benchmarks/*/*_hylo
+benchmarks/*/*.o
+benchmarks/*/*.dSYM/
 docs/site/.vitepress/cache/
 .claude/*
 !.claude/skills/

@@ -18,6 +18,7 @@ import { tmpdir } from "os";
 import { join } from "path";
 import { guardedRun } from "./guard";
 import { BASELINE } from "./verify-contracts.baseline";
+import { EXPECTED, type Expected } from "./verify-contracts.expected";
 
 const ROOT = join(import.meta.dir, "..");
 const CONTRACT_RE = /^[ \t]*(requires|ensures|invariant)\b/m;
@@ -40,12 +41,20 @@ function hostSkip(p: string): boolean {
   return p.includes(other);
 }
 
+// A `requires` is discharged at the CALL SITE, not in the body that declares it — so a
+// file is only as covered as the set of files proved alongside it. The default filter
+// (does this file itself contain a contract?) therefore misses every CALLER: pass a
+// 16-byte key to `aesGcmEncrypt` from an example with no contracts of its own and nothing
+// checks it. MILO_VERIFY_ALL=1 proves every .milo instead, which is what makes call-site
+// coverage real; it costs a full prove run over ~140 files, so CI uses the filter and this
+// is the periodic audit.
 export function contractFiles(): string[] {
   const files: string[] = [];
   for (const r of ["std", "examples"]) walk(join(ROOT, r), files);
+  const all = process.env.MILO_VERIFY_ALL === "1";
   return files
     .filter(p => !hostSkip(p))
-    .filter(p => CONTRACT_RE.test(readFileSync(p, "utf-8")))
+    .filter(p => all || CONTRACT_RE.test(readFileSync(p, "utf-8")))
     .sort();
 }
 
@@ -110,18 +119,47 @@ export interface Gate {
   refuted: number;
   unexpected: Refutation[]; // refutations NOT in the baseline — these fail the gate
   stale: string[];          // baseline keys no longer refuted — should be removed
+  regressions: string[];    // files that lost a proof or gained an unknown/error — these fail the gate
+  gains: string[];          // movement the good way — update EXPECTED to lock it in
+  untracked: string[];      // proved but absent from EXPECTED
   ok: boolean;
+}
+
+// Compare one file's verdicts against its ratchet. Losing a proof and gaining an
+// unknown are both regressions: the contract is still written down either way, so the
+// only thing that changed is whether anything backs it.
+function ratchet(r: FileResult, out: { regressions: string[]; gains: string[]; untracked: string[] }): void {
+  // No tally at all means prove never got as far as a verdict (compile failure, guard
+  // kill). Every count reads 0, which would sail through a 0-floor — the one case where
+  // silence has to be loud.
+  if (r.noReport) {
+    out.regressions.push(`${r.file}: prove produced no report (compile failure or guard kill)`);
+    return;
+  }
+  const e = EXPECTED[r.file];
+  if (!e) {
+    out.untracked.push(r.file);
+    return;
+  }
+  if (r.proven < e.proven) out.regressions.push(`${r.file}: proven ${r.proven} < ${e.proven} — a contract stopped being provable`);
+  if (r.unknown > e.unknown) out.regressions.push(`${r.file}: unknown ${r.unknown} > ${e.unknown} — a contract became undecidable`);
+  if (r.errors > e.errors) out.regressions.push(`${r.file}: errors ${r.errors} > ${e.errors} — new translator/solver error`);
+  if (r.proven > e.proven || r.unknown < e.unknown || r.errors < e.errors) {
+    out.gains.push(`${r.file}: ${e.proven}/${e.unknown}/${e.errors} -> ${r.proven}/${r.unknown}/${r.errors} (proven/unknown/errors)`);
+  }
 }
 
 export function report(results: FileResult[]): Gate {
   const pad = (s: string, n: number) => s.padEnd(n);
   let tP = 0, tF = 0, tU = 0, tE = 0;
   const allRefs: Refutation[] = [];
+  const ratch = { regressions: [] as string[], gains: [] as string[], untracked: [] as string[] };
   console.log(`contract gate — solver: ${gateSolver()}\n`);
   console.log(pad("FILE", 44) + "proven  failed  unknown  errors");
   for (const r of results) {
     tP += r.proven; tF += r.failed; tU += r.unknown; tE += r.errors;
     allRefs.push(...r.refutations);
+    ratchet(r, ratch);
     const flag = r.failed > 0 ? " ✗" : r.noReport ? " (no report)" : "";
     console.log(
       pad(r.file, 44) +
@@ -151,9 +189,34 @@ export function report(results: FileResult[]): Gate {
     console.log("\nStale baseline entries (now provable — remove from verify-contracts.baseline.ts):");
     for (const k of stale) console.log("  " + k);
   }
+  if (ratch.regressions.length) {
+    console.log("\nPROOF REGRESSIONS (gate FAIL) — the contract text is unchanged, what backs it is not:");
+    for (const s of ratch.regressions) console.log("  " + s);
+  }
+  if (ratch.gains.length) {
+    console.log("\nRatchet forward (run with --update to lock these in):");
+    for (const s of ratch.gains) console.log("  " + s);
+  }
+  if (ratch.untracked.length) {
+    console.log("\nNot in the ratchet (add to verify-contracts.expected.ts):");
+    for (const s of ratch.untracked) console.log("  " + s);
+  }
   // Stale entries don't fail the gate (a fix shouldn't go red), but new
   // refutations do. Stale is surfaced loudly so the baseline gets pruned.
-  return { proven: tP, refuted: tF, unexpected, stale, ok: unexpected.length === 0 };
+  return {
+    proven: tP, refuted: tF, unexpected, stale,
+    regressions: ratch.regressions, gains: ratch.gains, untracked: ratch.untracked,
+    ok: unexpected.length === 0 && ratch.regressions.length === 0,
+  };
+}
+
+// Rewrite the ratchet from a run. Comments in the hand-written file are lost, so this
+// prints the block for review rather than clobbering the file.
+function renderExpected(results: FileResult[]): string {
+  const rows = results
+    .filter(r => !r.noReport)
+    .map(r => `  "${r.file}": { proven: ${r.proven}, unknown: ${r.unknown}, errors: ${r.errors} },`);
+  return `export const EXPECTED: Record<string, Expected> = {\n${rows.join("\n")}\n};`;
 }
 
 // Standalone CLI entry.
@@ -164,5 +227,9 @@ if (import.meta.main) {
   execSync(`bun build --compile ${join(ROOT, "src", "main.ts")} --outfile ${miloc}`, { stdio: "inherit" });
   const results = await verifyAll(miloc);
   const gate = report(results);
+  if (process.argv.includes("--update")) {
+    console.log("\n--- verify-contracts.expected.ts ---\n" + renderExpected(results));
+    process.exit(0);
+  }
   process.exit(gate.ok ? 0 : 1);
 }

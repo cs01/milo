@@ -32,4 +32,9 @@ test("no project contract is refuted (compile-time prove gate)", async () => {
   // solver-limitations do not; a stale baseline entry is surfaced but tolerated.
   const detail = gate.unexpected.map(r => r.line).join("\n");
   expect(detail).toBe("");
+
+  // A contract that quietly stops being proven — proof lost, or verdict degraded to
+  // unknown/error — is the failure mode the refutation check above cannot see: nothing
+  // is proven false, there is just no longer anything behind the guarantee.
+  expect(gate.regressions.join("\n")).toBe("");
 }, 600000);

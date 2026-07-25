@@ -271,9 +271,9 @@ let s = identity("hello")  // T inferred as string
 
 ### Contracts
 
-Functions can declare preconditions (`requires`), postconditions (`ensures`), and loop invariants (`invariant`). These are type-checked at compile time — each clause must be a `bool` expression. In `ensures` clauses, `result` refers to the return value.
+Functions can declare preconditions (`requires`), postconditions (`ensures`), loop invariants (`invariant`), and termination measures (`decreases`). These are type-checked at compile time — every clause must be a `bool` expression, except `decreases`, which must be an integer. In `ensures` clauses, `result` refers to the return value and `old(e)` to the value `e` held at entry.
 
-In debug builds (`--debug`), contracts are asserted at runtime: `requires` at function entry, `ensures` at every return, and `invariant` before each loop condition evaluation (loop entry, every iteration, and exit). A violation prints `runtime error: <kind> clause violated at file:line` and exits with code 1. Release builds compile contracts out entirely. Call-site `requires` violations with compile-time-constant arguments are still rejected at compile time.
+In debug builds (`--debug`), contracts are asserted at runtime: `requires` at function entry, `ensures` at every return, and `invariant` at each iteration (for a `while` loop that is the condition block, so entry, every iteration, and exit; a `for` loop checks the top of each iteration). `decreases` has no runtime meaning — it is discharged statically. A violation prints `runtime error: <kind> clause violated at file:line` and exits with code 1. Release builds compile contracts out entirely. Call-site `requires` violations with compile-time-constant arguments are still rejected at compile time.
 
 ```milo
 fn clamp(value: i64, lo: i64, hi: i64): i64
@@ -286,7 +286,7 @@ fn clamp(value: i64, lo: i64, hi: i64): i64
 }
 ```
 
-Loop invariants go between the `while` condition and the loop body:
+Loop invariants go between the loop header and the body — on `while` and on `for in` alike:
 
 ```milo
 let n: i64 = 10
@@ -300,6 +300,83 @@ while i <= n
     i = i + 1
 }
 ```
+
+```milo
+let n: i64 = 10
+var total: i64 = 0
+for i in 0..n
+  invariant total >= 0
+{
+    total = total + i
+}
+```
+
+A `for` loop needs no `invariant i >= 0`: the prover already knows the binding lies in the
+range, and after the loop it knows the invariant holds at the final index.
+
+#### `old` — the value at entry
+
+Inside an `ensures`, `old(e)` is the value `e` held when the function was entered. It is the
+only way to specify a function that writes through a `&mut` parameter, since `ensures` can
+otherwise talk only about `result`:
+
+```milo
+fn bump(n: &mut i64): void
+  ensures n == old(n) + 100
+{
+    n = n + 100
+}
+```
+
+A caller gets to use that: after `bump(x)`, the prover knows `x` is 100 more than it was,
+instead of losing track of it entirely.
+
+`old` is legal only in `ensures`, and only on a scalar (integer, float, or bool) — a
+contract-checking build snapshots the value at entry, and copying a `Vec` or a struct there
+would either alias the caller's buffer or clone on every call. Snapshot a scalar projection
+instead: `old(v.len)`.
+
+#### `decreases` — termination
+
+A self-recursive call is proved by assuming the function's own `ensures`. That is induction,
+and it is only sound if the recursion bottoms out. `decreases` supplies the measure: an
+integer expression — not a boolean claim — that must be non-negative and strictly fall at
+every self-call.
+
+```milo
+fn countdown(n: i64): i64
+  requires n >= 0
+  decreases n
+{
+    if n == 0 { return 0 }
+    return countdown(n - 1)
+}
+```
+
+Without a discharged measure the proof still runs, but is reported as *conditional*: it
+assumes a termination nothing checked. `decreases` also works on a loop, where it buys total
+correctness rather than soundness — a non-terminating loop makes a postcondition vacuously
+true rather than provable from nothing.
+
+#### Struct invariants
+
+A `struct` may carry `invariant` clauses after its closing brace, written over its own field
+names with no receiver. The clause is a property of the *type*:
+
+```milo
+struct Rom {
+    prg: Vec<u8>,
+    mapper: i64,
+}
+invariant prg.len >= 16384
+```
+
+It is **assumed** wherever a value of that type is observed — which is what lets a function
+index `prg` without re-checking a bound the loader already established — and correspondingly
+**owed** at every struct literal and in every function that takes the type by `&mut`. A
+constructor that builds a short `prg` is refuted; a mutator that could break the clause and
+cannot be shown not to is reported as unknown, and every proof that leaned on the invariant
+is then marked conditional.
 
 Use `milo prove file.milo` to discharge contracts against the built-in `std/smt` prover (`--solver=z3` for theories it doesn't model, `--emit-smt` to print the raw SMT-LIB2 conditions instead of solving them). Contracts are not emitted at `-O1`+; `--debug` and `--contract-checks` turn them into runtime asserts. Use `milo safety file.milo --safety=do178c-a` to check against domain-specific safety profiles (DO-178C, ISO 26262, NASA, IEC 61508, IEC 62304).
 

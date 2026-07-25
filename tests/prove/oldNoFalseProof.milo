@@ -1,0 +1,18 @@
+// @proven: 0
+// @failed: 1
+// @unknown: 0
+// Soundness: `old()` must read the ENTRY state, not the current one. If the postcondition
+// and its `old(...)` both lowered against the same symbols, `n == old(n) + 99` would come
+// back proven for a function that adds 100 — the two sides would be identical expressions
+// and the +99 would be compared against nothing. The expected verdict is FAILED.
+fn bumpWrong(n: &mut i64): void
+ensures n == old(n) + 99
+{
+    n = n + 100
+}
+
+fn main() {
+    var x: i64 = 1
+    bumpWrong(x)
+    print(x)
+}

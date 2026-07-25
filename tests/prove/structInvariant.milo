@@ -1,0 +1,56 @@
+// @proven: 3
+// @failed: 1
+// @unknown: 1
+// A struct invariant is a property of the TYPE, so it is in force wherever a value of that
+// type is observed. That is what makes `prg.len >= 16384` usable inside a function that
+// never checks it — and it is why the invariant has to be earned, not just declared.
+//
+// Three obligations, all exercised:
+//   assume  — `readLow` discharges `i < r.prg.len` for i = 100 from the invariant alone
+//   establish — every struct literal must satisfy it. `makeBad` builds a 16-byte table and
+//               is REFUTED, which is the whole reason the assume half is safe.
+// The one `unknown` is `zeros` itself: its body bottoms out in `vecFilled`, which declares
+// no `ensures`. Every proof here is therefore reported CONDITIONAL rather than clean, which
+// is the honest verdict — an invariant assumed at a use site is only as good as the
+// obligations discharged for that type across the run.
+fn zeros(n: i64): Vec<u8>
+requires n >= 0
+ensures result.len == n
+{
+    return vecFilled(n, 0 as u8)
+}
+
+struct Rom {
+    prg: Vec<u8>,
+    mapper: i64,
+}
+invariant prg.len >= 16384
+
+fn readAt(r: &Rom, i: i64): i64
+requires i >= 0
+requires i < r.prg.len
+{
+    return r.prg[i] as i64
+}
+
+// Provable only from the invariant: nothing here bounds prg.len.
+fn readLow(r: &Rom): i64 {
+    return readAt(r, 100)
+}
+
+fn makeRom(): Rom {
+    return Rom {
+        prg: zeros(16384), mapper: 0
+    }
+}
+
+fn makeBad(): Rom {
+    return Rom {
+        prg: zeros(16), mapper: 0
+    }
+}
+
+fn main() {
+    let r = makeRom()
+    print(readLow(r))
+}

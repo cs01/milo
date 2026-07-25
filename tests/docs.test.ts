@@ -83,6 +83,14 @@ function wrapSnippet(code: string): string {
         items.push(lines[i]);
         i++;
       } while (i < lines.length && (depth > 0 || (needsBody && !sawBrace)));
+      // A struct's `invariant` clauses sit AFTER its closing brace, so the brace-depth
+      // loop above has already stopped. Without this they read as loose statements and get
+      // wrapped into a synthetic main, where they are a parse error — the snippet would
+      // have to be marked `skip`, i.e. never checked at all.
+      while (i < lines.length && /^\s*(invariant|decreases)\b/.test(lines[i])) {
+        items.push(lines[i]);
+        i++;
+      }
       // keep a blank line between items for readability in error output
       items.push("");
     } else {

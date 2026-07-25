@@ -108,6 +108,12 @@ requires n >= 0
 requires off + n <= length.len
 requires h.count.len >= 16
 requires h.symbol.len >= n
+// Frame conditions: construct fills the tables in place and never resizes them. Without
+// these the caller loses `count.len == 16` at this call — `&mut` havocs every field of the
+// receiver — and every downstream `requires h.count.len >= 16` is refuted for a table that
+// provably has 16 entries.
+ensures h.count.len == old(h.count.len)
+ensures h.symbol.len == old(h.symbol.len)
 {
     for len in 0..16 {
         h.count[len] = 0

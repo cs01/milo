@@ -37,14 +37,19 @@ See [safety-roadmap.md](safety-roadmap.md) for the enforced-vs-remaining breakdo
 
 ### Contracts & Proving
 
-- `requires` / `ensures` / `invariant` on functions and loops; runtime asserts at `--debug`, forced either way with `--contract-checks` / `--no-contract-checks`
+- `requires` / `ensures` on functions, `invariant` on `while` **and** `for in` loops and on structs, `decreases` termination measures, and `old(e)` for a parameter's entry value; runtime asserts at `--debug`, forced either way with `--contract-checks` / `--no-contract-checks` (`decreases` is static-only — there is nothing for a runtime check to assert)
 - The compiler rejects violations it can see statically
 - **`milo prove`** discharges obligations through **`std/smt`** — a solver written *in Milo* (Fourier-Motzkin over linear scalar arithmetic), dogfooding the language on its own verification. `--solver=z3` swaps in Z3 for non-linear arithmetic; `--emit-smt` prints SMT-LIB2 instead of solving; `--all` includes imported stdlib
-- Loop invariants proved by induction
+- Loop invariants proved by induction, on both loop forms. A `for` loop needs no invariant about its own index: the range supplies `lo <= i < hi` inside the body and the invariant is carried to the final index on exit
+- **Struct invariants** are two-sided — assumed wherever a value of the type is observed, and owed at every struct literal and every `&mut` function that could break one. A use-site proof resting on an invariant this run could not establish everywhere is reported as conditional, not clean
+- **Frame conditions**: `ensures h.count.len == old(h.count.len)` survives across a call. A `&mut` argument is havoced at the call site (keeping the walker sound), and the callee's contract is what puts the information back — without it a mutating callee taught its caller nothing
+- **Termination**: a self-recursive call is modelled by assuming the function's own `ensures`, which is induction; `decreases` discharges the well-foundedness it needs. Without a measure the proof is reported as conditional on a termination nothing checked
 - Callee `ensures` are assumed only under the callee's `requires` (the bare form let a call-site precondition prove itself)
 - `unknown` is reported as unknown, never as proven — an i64 overflow inside the elimination degrades the verdict rather than producing a false proof
 
-Known frontier (tracked in backlog Tier 2 #2/#3): no bitvector theory (`&`, `<<`), no `IndexAccess` reasoning, no `Vec.len` through a builder, and *intermediate* arithmetic carries no range, so derived values can be refuted by inputs no real i32 could produce. `milo verify` remains as a deprecated alias for `prove`.
+This is roughly SPARK's contract vocabulary (`Pre`/`Post`/`Loop_Invariant`/`Type_Invariant`/`Loop_Variant`/`Subprogram_Variant`/`'Old`) and lands at their "silver" level: absence of runtime error, plus termination and simple data invariants — not functional correctness.
+
+Known frontier (tracked in backlog Tier 1 #1–#3 and Tier 2 #2/#3/#12): **no quantifiers** — `forall`/`exists` over container contents is unstateable, so sortedness cannot be specified and binary search cannot be verified; no bitvector theory (`&`, `<<`); no `IndexAccess` reasoning; no `Vec.len` through a builder; and *intermediate* arithmetic carries no range, so derived values can be refuted by inputs no real i32 could produce. `milo verify` remains as a deprecated alias for `prove`.
 
 ### Safety Profiles, WCET, Bare Metal
 

@@ -4,7 +4,7 @@ import type { Program, Function, Contract, Expr, Stmt, MiloType } from "./ast";
 
 export interface VerificationCondition {
   fn: string;
-  kind: "precondition" | "postcondition" | "loop-invariant";
+  kind: "precondition" | "postcondition" | "loop-invariant" | "termination" | "struct-invariant";
   smtlib: string;
   description: string;
   // Callees whose `ensures` this VC was allowed to ASSUME. Modular verification is
@@ -12,6 +12,12 @@ export interface VerificationCondition {
   // proofs, and if one of them came back `unknown` this "proven" rests on something
   // nothing checked. Reported rather than silently trusted — see conditionalProofs.
   assumes?: string[];
+  // Struct types whose `invariant` this VC was allowed to ASSUME, and — on a
+  // struct-invariant VC — the type it is discharging FOR. Same assume-guarantee bookkeeping
+  // as `assumes`: an invariant is in force at every use site, so a use-site proof is only as
+  // good as the construction and maintenance obligations for that type.
+  assumesInvariants?: string[];
+  invariantOf?: string;
 }
 
 export interface VerifyResult {
@@ -97,6 +103,16 @@ function modelCall(site: object, name: string, args: Expr[], env?: Map<string, s
   if (!callee || callee.params.length !== args.length) return null;
   const ensures = callee.contracts.filter(c => c.kind === "ensures");
   if (ensures.length === 0) return null;
+  // A postcondition about what the callee WROTE through a `&mut` cannot be modelled HERE:
+  // the caller's post-call symbol for that argument is minted later, by the havoc. Assuming
+  // it under the pre-call substitution would assert something false — see the note above.
+  // Those clauses are dropped from the return-value model and picked up instead by the frame
+  // assumption emitted at the call statement, which has both states in hand.
+  const mutParams = new Set(callee.params.filter(p => p.type?.isRefMut || p.type?.isPtr).map(p => p.name));
+  const usableEnsures = mutParams.size === 0
+    ? ensures
+    : ensures.filter(e => !mentionsMutParamPostState(e.expr, mutParams));
+  if (usableEnsures.length === 0) return null;
 
   // Lowered IN THE CALLER'S ENVIRONMENT. Without it every argument naming a local came out
   // as a bare undeclared symbol, the whole model was rejected below, and the call degraded
@@ -114,10 +130,10 @@ function modelCall(site: object, name: string, args: Expr[], env?: Map<string, s
 
   const retName = `${name}__ret${ctx.n++}`;
   const retType = callee.retType?.name ?? "i64";
-  const subst = new Map<string, string>();
+  const subst = env ? new Map(fieldBindings(callee.params, args, env)) : new Map<string, string>();
   callee.params.forEach((p, i) => subst.set(p.name, argSmt[i]!));
   subst.set("result", retName);
-  const facts = ensures
+  const facts = usableEnsures
     .map(e => exprToSmtWithEnv(e.expr, subst, true))
     .filter(s => !/UNSUPPORTED/.test(s));
   if (facts.length === 0) return null;
@@ -311,14 +327,31 @@ interface LoopObligation {
   havocEnv: Map<string, string>;    // entry env with modified vars replaced by fresh consts
   guard: string;                    // loop condition, lowered in havocEnv
   invariants: Contract[];
+  variants: Contract[];             // `decreases` measures — termination, not correctness
   body: Stmt[];
   bodyRun: SymExecResult;
+  // A for-in loop has no assignment that advances its binding, so the post-iteration state
+  // is the body's final environment with this patch applied on top (`i` → `i + 1` for a
+  // counted loop). Absent for a while loop, whose body does its own advancing.
+  nextPatch?: Map<string, string>;
 }
 
 // Symbolic path through a function body
 interface SymPath {
   conditions: string[];  // path conditions as SMT expressions
   result: string;        // return value expression
+  // State at the `return`. A postcondition names the state at exit, so `ensures n == 100`
+  // on a `&mut` parameter has to read the value the path left behind, not the one it
+  // started with — and `old(n)` reads the entry environment instead.
+  env: Map<string, string>;
+}
+
+// A struct literal reached during symbolic execution: where its type's `invariant` clauses
+// have to be discharged, since this is the point the value comes into existence.
+interface StructLitSite {
+  struct: string;
+  fields: Map<string, string>;   // field name -> value, lowered in the env at the literal
+  conditions: string[];
 }
 
 // Collect all execution paths through a function body via symbolic execution.
@@ -333,6 +366,7 @@ interface SymExecResult {
   // block — path conditions reference them, so an undeclared one poisons every VC.
   havocDecls: string[];
   loops: LoopObligation[];
+  structLits: StructLitSite[];
 }
 
 interface SymExecContext {
@@ -347,7 +381,26 @@ interface SymExecContext {
 interface CallSite {
   name: string;
   args: string[];        // already lowered to SMT in the caller's environment
+  // Flattened field symbols of any struct argument, in the callee's naming. See fieldBindings.
+  fields: Map<string, string>;
   conditions: string[];
+}
+
+// Every struct literal reachable from an expression. A literal is where a type's invariant
+// stops being an assumption and becomes an obligation: everything downstream gets to assume
+// it, so something has to establish it, and construction is that something.
+function collectStructLitsInExpr(expr: Expr, conds: string[], env: Map<string, string>, out: StructLitSite[]): void {
+  if (!expr || typeof expr !== "object") return;
+  const e = expr as any;
+  if (e.kind === "StructLit" && typeof e.name === "string" && STRUCT_INVARIANTS.has(e.name)) {
+    const fields = new Map<string, string>();
+    for (const f of e.fields ?? []) fields.set(f.name, exprToSmtWithEnv(f.value, env));
+    out.push({ struct: e.name, fields, conditions: [...conds] });
+  }
+  for (const v of Object.values(e)) {
+    if (Array.isArray(v)) v.forEach(x => { if (x && (x as any).kind) collectStructLitsInExpr(x as Expr, conds, env, out); else if (x && (x as any).value?.kind) collectStructLitsInExpr((x as any).value, conds, env, out); });
+    else if (v && typeof v === "object" && (v as any).kind) collectStructLitsInExpr(v as Expr, conds, env, out);
+  }
 }
 
 // Every call reachable from an expression, paired with the conditions in force. Only
@@ -356,7 +409,13 @@ function collectCallsInExpr(expr: Expr, conds: string[], env: Map<string, string
   if (!expr) return;
   const e = expr as any;
   if (e.kind === "Call" && typeof e.func === "string") {
-    out.push({ name: e.func, args: (e.args ?? []).map((a: Expr) => exprToSmtWithEnv(a, env)), conditions: [...conds] });
+    const callee = FN_TABLE.get(e.func);
+    out.push({
+      name: e.func,
+      args: (e.args ?? []).map((a: Expr) => exprToSmtWithEnv(a, env)),
+      fields: callee ? fieldBindings(callee.params, e.args ?? [], env) : new Map(),
+      conditions: [...conds],
+    });
   }
   for (const key of ["left", "right", "operand", "object", "index", "cond", "value", "start", "end", "default"]) {
     if (e[key] && typeof e[key] === "object" && e[key].kind) collectCallsInExpr(e[key], conds, env, out);
@@ -369,6 +428,57 @@ function collectCallsInExpr(expr: Expr, conds: string[], env: Map<string, string
 // Every function in the program, for looking up a callee's parameter modes. Set once per
 // run alongside GLOBAL_CONST_*.
 let FN_TABLE = new Map<string, Function>();
+
+// `invariant` clauses per struct name, and the field list to instantiate them over. Set
+// once per run: an invariant is a property of the TYPE, so it is in force at every use.
+let STRUCT_INVARIANTS = new Map<string, Contract[]>();
+let STRUCT_FIELDS = new Map<string, string[]>();
+
+// The environment as it stood at function entry, which is what `old(e)` reads. Scoped to
+// one function's VC build, like FIELD_REFS.
+let OLD_ENV: Map<string, string> | null = null;
+
+// Does an expression name any of these identifiers? Used to decide whether a loop
+// invariant survives past the loop, where the bindings it named no longer exist.
+function mentionsAnyIdent(expr: Expr, names: Set<string>): boolean {
+  if (!expr || typeof expr !== "object" || names.size === 0) return false;
+  const e = expr as any;
+  if (e.kind === "Ident") return names.has(e.name);
+  for (const v of Object.values(e)) {
+    if (Array.isArray(v)) { if (v.some(x => x && (x as any).kind && mentionsAnyIdent(x as Expr, names))) return true; }
+    else if (v && typeof v === "object" && (v as any).kind && mentionsAnyIdent(v as Expr, names)) return true;
+  }
+  return false;
+}
+
+function isOldCall(expr: any): boolean {
+  return expr && expr.kind === "Call" && expr.func === "old" && Array.isArray(expr.args) && expr.args.length === 1;
+}
+
+// A struct invariant is written over bare field names (`chr.len > 0`). Binding each field
+// name to the symbol standing for that field of a particular value is the whole
+// instantiation: `chr` -> `ppu_chr` makes `chr.len` rebase to `ppu_chr_len`.
+function instantiateInvariant(inv: Contract, fieldEnv: Map<string, string>): string {
+  return exprToSmtWithEnv(inv.expr, fieldEnv, true);
+}
+
+// Does a callee's `ensures` talk about the FINAL value of a parameter it can write through?
+// Such a clause cannot be modelled by substituting the caller's arguments: the arguments are
+// the pre-call values, so `ensures n == 100` on `fn set(n: &mut i64)` would come back as the
+// assumption `<arg> == 100` about the value BEFORE the call. For `set(x)` with `x == 5` that
+// assumption is false, and a false assumption proves every postcondition in the function.
+// `old(n)` is exempt — that is exactly the pre-call value the substitution provides.
+function mentionsMutParamPostState(expr: Expr, mutParams: Set<string>): boolean {
+  if (!expr || typeof expr !== "object") return false;
+  const e = expr as any;
+  if (isOldCall(e)) return false;
+  if (e.kind === "Ident") return mutParams.has(e.name);
+  for (const v of Object.values(e)) {
+    if (Array.isArray(v)) { if (v.some(x => x && (x as any).kind && mentionsMutParamPostState(x as Expr, mutParams))) return true; }
+    else if (v && typeof v === "object" && (v as any).kind && mentionsMutParamPostState(v as Expr, mutParams)) return true;
+  }
+  return false;
+}
 
 // Field names whose declared type is `bool` in EVERY struct that has them. Field symbols
 // are flattened to `recv_field` with no record of which struct the receiver was, so the
@@ -412,6 +522,66 @@ function collectMutableNames(fn: Function): Set<string> {
   return out;
 }
 
+// A call that writes through a `&mut` AND says something about the result in its `ensures`.
+// Havocing the argument is what keeps the walker sound; this is what keeps it useful — the
+// frame condition relating the post-call symbols back to the pre-call ones.
+interface MutatingCall {
+  callee: Function;
+  args: Expr[];
+  // callee parameter name -> caller-side base name it was passed. The frame substitution
+  // needs both: the parameter is the name the contract is written in, the base is where the
+  // post-call symbols live.
+  mutTargets: Map<string, string>;
+}
+
+function collectMutatingCalls(node: any, out: MutatingCall[], seen = new Set<any>()): void {
+  if (!node || typeof node !== "object" || seen.has(node)) return;
+  seen.add(node);
+  if (node.kind === "Call" && typeof node.func === "string" && Array.isArray(node.args)) {
+    const callee = FN_TABLE.get(node.func);
+    if (callee && callee.contracts.some(c => c.kind === "ensures") && callee.params.length === node.args.length) {
+      const mutTargets = new Map<string, string>();
+      callee.params.forEach((p, i) => {
+        if (!p.type?.isRefMut && !p.type?.isPtr) return;
+        const base = mutationBase(node.args[i]);
+        if (base !== null && MUTABLE_NAMES.has(base)) mutTargets.set(p.name, base);
+      });
+      if (mutTargets.size > 0) out.push({ callee, args: node.args, mutTargets });
+    }
+  }
+  for (const v of Object.values(node)) {
+    if (Array.isArray(v)) v.forEach(x => collectMutatingCalls(x, out, seen));
+    else if (v && typeof v === "object") collectMutatingCalls(v, out, seen);
+  }
+}
+
+// A struct argument is not one symbol on the caller side — each field it carries has its
+// own. Binding the callee's flattened field prefixes to the caller's lets a contract written
+// as `h.count.len` rebase onto `lencode_count_len` instead of leaking the callee's name.
+// Without it, a `&Huff` parameter reached the solver as one opaque (often untranslatable)
+// value and every precondition about one of its fields went unknown.
+function fieldBindings(params: { name: string; type?: any }[], args: Expr[], env: Map<string, string>): Map<string, string> {
+  const out = new Map<string, string>();
+  for (let i = 0; i < params.length && i < args.length; i++) {
+    const base = mutationBase(args[i]);
+    if (base === null) continue;
+    for (const f of FIELD_REFS ?? []) {
+      if (!f.startsWith(`${base}_`)) continue;
+      const bound = env.get(f);
+      if (bound && /^[A-Za-z_][A-Za-z0-9_]*$/.test(bound)) out.set(`${params[i]!.name}${f.slice(base.length)}`, bound);
+    }
+  }
+  return out;
+}
+
+function mutationBase(e: any): string | null {
+  if (!e || typeof e !== "object") return null;
+  if (e.kind === "Ident") return e.name;
+  if (e.kind === "FieldAccess") return mutationBase(e.object);
+  if (e.kind === "UnaryOp" && (e.op === "&" || e.op === "&mut")) return mutationBase(e.operand);
+  return null;
+}
+
 // Names a statement can mutate WITHOUT an assignment appearing anywhere in it: passing a
 // variable to a `&mut`/`*mut` parameter, or calling a method that takes `&mut self`.
 //
@@ -437,6 +607,14 @@ function collectMutations(node: any, out: Set<string>, seen = new Set<any>()): v
     if (e.kind === "UnaryOp" && (e.op === "&" || e.op === "&mut")) return base(e.operand);
     return null;
   };
+  // The flattened path (`a_data`) when the receiver is a field of a mutable name; null when
+  // it is not a plain place expression, so the caller can fall back to the whole receiver.
+  const fieldPath = (e: any): string | null => {
+    const root = base(e);
+    if (root === null || !MUTABLE_NAMES.has(root)) return null;
+    const flat = flattenFieldAccess(e as Expr);
+    return flat;
+  };
   if (node.kind === "Call" && typeof node.func === "string" && Array.isArray(node.args)) {
     const callee = FN_TABLE.get(node.func);
     if (callee) {
@@ -451,8 +629,13 @@ function collectMutations(node: any, out: Set<string>, seen = new Set<any>()): v
     }
   }
   if (node.kind === "MethodCall") {
-    const n = target(node.object);
-    if (n) out.add(n);
+    // Havoc the FIELD PATH the method was called on, not the whole receiver: `a.data.push(v)`
+    // cannot touch `a.live`, and wiping every field of `a` made a type invariant about a
+    // sibling field unprovable for every function that pushes to a vec — which is most of
+    // them. The root itself still goes, since the aggregate value did change.
+    const path = fieldPath(node.object);
+    if (path !== null) out.add(path);
+    else { const n = target(node.object); if (n) out.add(n); }
   }
   for (const v of Object.values(node)) {
     if (Array.isArray(v)) v.forEach(x => collectMutations(x, out, seen));
@@ -481,6 +664,7 @@ const BOOL_OPS = new Set(["==", "!=", "<", ">", "<=", ">=", "&&", "||"]);
 function collectPaths(stmts: Stmt[], env: Map<string, string>, types?: Map<string, string>, context?: SymExecContext): SymExecResult {
   const paths: SymPath[] = [];
   const calls: CallSite[] = [];
+  const structLits: StructLitSite[] = [];
   const ctx = context ?? { havocSeq: 0, havocDecls: [] };
   const loops: LoopObligation[] = [];
   const varTypes = new Map(types ?? []);
@@ -511,6 +695,12 @@ function collectPaths(stmts: Stmt[], env: Map<string, string>, types?: Map<strin
   // Replace one name — and every flattened field hanging off it, since `&mut c` may write
   // any of `c.x`, `c.y` — with fresh unknowns.
   function havocName(name: string, localEnv: Map<string, string>): void {
+    // `name` may be a field path (`a_data`), in which case only that field and what hangs
+    // off it moves. The ROOT symbol is deliberately left alone: a field read resolves by
+    // longest bound prefix, so havocing `a` would shadow every sibling — `a.live` would
+    // rebase onto `a__mut2_live` and a type invariant about it becomes unprovable for any
+    // function that merely pushes to a vec field. Leaving `a` stale costs nothing, since a
+    // struct-as-scalar symbol carries no information this encoding can use.
     const targets = [name, ...[...(FIELD_REFS ?? [])].filter(f => f.startsWith(`${name}_`))];
     for (const target of targets) {
       const fresh = `${target.replace(/[^A-Za-z0-9_]/g, "_")}__mut${ctx.havocSeq++}`;
@@ -520,6 +710,58 @@ function collectPaths(stmts: Stmt[], env: Map<string, string>, types?: Map<strin
       if (range) ctx.havocDecls.push(range);
       CALL_MODEL?.scope.add(fresh);
       localEnv.set(target, fresh);
+    }
+  }
+
+  // Relate a mutating call's post-call symbols back to its pre-call ones, using the callee's
+  // own `ensures`. Havocing the argument is what makes the walker sound; without this the
+  // caller learns NOTHING from a `&mut` callee's contract, which is why
+  // `construct(lencode, ...)` used to erase `lencode.count.len == 16` and every downstream
+  // precondition about it was refuted for a table that is provably 16 entries long.
+  //
+  // The clause is lowered twice over: once against the post-call symbols (the contract's own
+  // reading) and once against the pre-call ones (what `old(...)` inside it means). Asserted
+  // as an implication from the callee's `requires`, never bare — the bare form would let an
+  // obligation discharge itself, exactly as in modelCall.
+  function emitFrameFacts(mutCalls: MutatingCall[], preEnv: Map<string, string>, postEnv: Map<string, string>): void {
+    const ctx = CALL_MODEL;
+    if (!ctx) return;
+    for (const mc of mutCalls) {
+      const subst = (env: Map<string, string>): Map<string, string> => {
+        const out = new Map<string, string>();
+        for (let i = 0; i < mc.callee.params.length; i++) {
+          const argSmt = exprToSmtWithEnv(mc.args[i]!, env);
+          // A struct argument often has no whole-value translation — `Huff { .. }` lowers to
+          // an UNSUPPORTED marker — while every FIELD of it does. Leaving the parameter
+          // unbound keeps a clause that names it bare untranslatable (so it is dropped) but
+          // still lets `h.count.len` rebase through the field bindings below, which is the
+          // only part of the frame condition that carries information.
+          if (!/UNSUPPORTED/.test(argSmt)) out.set(mc.callee.params[i]!.name, argSmt);
+        }
+        // A `&mut` struct parameter is written field-wise, and each field has its own symbol
+        // on the caller side. Binding the flattened prefixes is what lets `h.count.len`
+        // rebase onto the caller's `lencode_count` rather than inventing a callee-side name.
+        for (const [k, v] of fieldBindings(mc.callee.params, mc.args, env)) out.set(k, v);
+        return out;
+      };
+      const post = subst(postEnv), pre = subst(preEnv);
+      // `result` has no binding here — a statement-position call discards it, and a call in
+      // value position is modelled separately by modelCall. Clauses naming it are that
+      // model's business, not this one's.
+      const clauses = mc.callee.contracts
+        .filter(c => c.kind === "ensures" && !mentionsAnyIdent(c.expr, new Set(["result"])))
+        .map(c => exprToSmtWithEnv(c.expr, post, true, pre))
+        .filter(smt => !/UNSUPPORTED/.test(smt) && symbolsResolve(smt, ctx));
+      if (clauses.length === 0) continue;
+      const guards = mc.callee.contracts
+        .filter(c => c.kind === "requires")
+        .map(c => exprToSmtWithEnv(c.expr, pre, true));
+      if (guards.some(g => /UNSUPPORTED/.test(g)) || !guards.every(g => symbolsResolve(g, ctx))) continue;
+      const conclusion = clauses.length === 1 ? clauses[0]! : `(and ${clauses.join(" ")})`;
+      const antecedent = guards.length === 0 ? null
+        : guards.length === 1 ? guards[0]! : `(and ${guards.join(" ")})`;
+      ctx.assumes.push(`(assert ${antecedent ? `(=> ${antecedent} ${conclusion})` : conclusion})`);
+      ctx.assumed.add(mc.callee.name);
     }
   }
 
@@ -538,6 +780,7 @@ function collectPaths(stmts: Stmt[], env: Map<string, string>, types?: Map<strin
       const st = stmt as any;
       for (const key of ["value", "expr", "cond", "subject"]) {
         if (st[key] && st[key].kind) collectCallsInExpr(st[key], pathConds, localEnv, calls);
+        if (st[key] && st[key].kind) collectStructLitsInExpr(st[key], pathConds, localEnv, structLits);
       }
 
       // What this statement's own expressions mutate out from under the walker. Nested
@@ -546,10 +789,16 @@ function collectPaths(stmts: Stmt[], env: Map<string, string>, types?: Map<strin
       for (const key of ["value", "expr", "cond", "subject", "target"]) {
         if (st[key] && st[key].kind) collectMutations(st[key], mutated);
       }
+      const mutCalls: MutatingCall[] = [];
+      for (const key of ["value", "expr", "cond", "subject", "target"]) {
+        if (st[key] && st[key].kind) collectMutatingCalls(st[key], mutCalls);
+      }
       // Applied AFTER the statement's own env update, so the call's arguments are still
       // lowered in the pre-call state while everything downstream sees the unknown.
       const applyMutations = () => {
+        const preEnv = mutCalls.length > 0 ? new Map(localEnv) : null;
         for (const name of mutated) havocName(name, localEnv);
+        if (preEnv) emitFrameFacts(mutCalls, preEnv, localEnv);
       };
 
       if (stmt.kind === "LetDecl" || stmt.kind === "VarDecl") {
@@ -586,7 +835,7 @@ function collectPaths(stmts: Stmt[], env: Map<string, string>, types?: Map<strin
       applyMutations();
       if (stmt.kind === "Return") {
         const val = stmt.value ? exprToSmtWithEnv(stmt.value, localEnv) : "0";
-        paths.push({ conditions: [...pathConds], result: val });
+        paths.push({ conditions: [...pathConds], result: val, env: new Map(localEnv) });
         return;
       }
       if (stmt.kind === "BreakStmt") {
@@ -615,16 +864,19 @@ function collectPaths(stmts: Stmt[], env: Map<string, string>, types?: Map<strin
         const havocEnv = havoc(stmt.body, localEnv);
         const guard = exprToSmtWithEnv(stmt.cond, havocEnv);
         const assumed = (stmt.invariants ?? [])
+          .filter(inv => inv.kind === "invariant")
           .map(inv => exprToSmtWithEnv(inv.expr, havocEnv))
           .filter(s => !/UNSUPPORTED/.test(s));
         const bodyRun = collectPaths(stmt.body, havocEnv, varTypes, ctx);
+        structLits.push(...bodyRun.structLits);
         const active = [...pathConds, ...assumed, ...(/UNSUPPORTED/.test(guard) ? [] : [guard])];
         loops.push({
           entryConds: [...pathConds],
           entryEnv: new Map(localEnv),
           havocEnv: new Map(havocEnv),
           guard,
-          invariants: stmt.invariants ?? [],
+          invariants: (stmt.invariants ?? []).filter(c => c.kind === "invariant"),
+          variants: (stmt.invariants ?? []).filter(c => c.kind === "decreases"),
           body: stmt.body,
           bodyRun,
         });
@@ -633,7 +885,7 @@ function collectPaths(stmts: Stmt[], env: Map<string, string>, types?: Map<strin
           entryConds: [...active, ...nested.entryConds],
         })));
         for (const path of bodyRun.paths) {
-          paths.push({ conditions: [...active, ...path.conditions], result: path.result });
+          paths.push({ ...path, conditions: [...active, ...path.conditions] });
         }
         for (const call of bodyRun.calls) {
           calls.push({ ...call, conditions: [...active, ...call.conditions] });
@@ -652,25 +904,107 @@ function collectPaths(stmts: Stmt[], env: Map<string, string>, types?: Map<strin
         return;
       }
       if (stmt.kind === "ForInStmt") {
-        // A for-loop may run any number of times. Analyze one arbitrary iteration to retain
-        // returns and consume its own break/continue exits; state after normal completion is
-        // otherwise havoced because there is no invariant syntax for this loop form.
+        // A for-loop may run any number of times, so like a while loop it is crossed by
+        // induction, not unrolling. What is different is that nothing in the body advances
+        // the binding — the loop form owns that — so the index has to be modelled here:
+        // fresh at an arbitrary iteration, bounded by the range, and bumped by one for the
+        // preservation obligation.
+        const invariants = (stmt.invariants ?? []).filter(c => c.kind === "invariant");
+        const variants = (stmt.invariants ?? []).filter(c => c.kind === "decreases");
         const havocEnv = havoc(stmt.body, localEnv);
+        const entryEnv = new Map(localEnv);
+        const nextPatch = new Map<string, string>();
+        // The membership predicate for the current index. Used exactly as a while loop's
+        // guard is: a path condition on body-derived paths and an assumption in the
+        // preservation query. An empty range makes it unsatisfiable, which is the right
+        // answer — the body never runs, so everything downstream of it is unreachable.
+        let guard = "";
+        const idxName = stmt.varName;
+        const freshIdx = () => {
+          const fresh = `${idxName.replace(/[^A-Za-z0-9_]/g, "_")}__iter${ctx.havocSeq++}`;
+          ctx.havocDecls.push(`(declare-const ${fresh} Int)`);
+          CALL_MODEL?.scope.add(fresh);
+          return fresh;
+        };
+        // Bindings the body introduces that are not assignments: the loop variable, and the
+        // element binding of an indexed `for i, x in v`. Havoced so the body reads an
+        // arbitrary iteration rather than a stale outer value of the same name.
+        for (const extra of [stmt.varName, stmt.varName2].filter(Boolean) as string[]) {
+          havocEnv.set(extra, freshIdx());
+          // Distinct from the iteration symbol: at loop entry the binding has no value yet.
+          // Leaving it unbound would emit the bare source name as an undeclared symbol and
+          // the solver would reject the whole establishment query.
+          entryEnv.set(extra, freshIdx());
+        }
+        let postLoopEnv = new Map(havocEnv);
+        if (stmt.iterable.kind === "RangeExpr") {
+          const lo = exprToSmtWithEnv(stmt.iterable.start, localEnv);
+          const hi = exprToSmtWithEnv(stmt.iterable.end, localEnv);
+          const i0 = havocEnv.get(idxName)!;
+          if (!/UNSUPPORTED/.test(lo) && !/UNSUPPORTED/.test(hi)) {
+            guard = `(and (>= ${i0} ${lo}) (< ${i0} ${hi}))`;
+            entryEnv.set(idxName, lo);
+            nextPatch.set(idxName, `(+ ${i0} 1)`);
+            // After the loop the index sits one past the last one executed — or never moved
+            // at all, if the range was empty. Establishment gives the invariant at `lo` and
+            // preservation carries it up to `hi`, so this `ite` is precisely the index the
+            // induction actually reached, and assuming the invariant there is sound.
+            postLoopEnv.set(idxName, `(ite (> ${hi} ${lo}) ${hi} ${lo})`);
+          }
+        } else if (stmt.varName2 && stmt.iterable.kind === "Ident") {
+          // `for i, x in v` — the index is in range even though the element is opaque.
+          const base = exprToSmtWithEnv(stmt.iterable, localEnv);
+          if (/^[A-Za-z_][A-Za-z0-9_]*$/.test(base)) {
+            const lenSym = `${base}_len`;
+            FIELD_REFS?.add(lenSym);
+            const i0 = havocEnv.get(idxName)!;
+            guard = `(and (>= ${i0} 0) (< ${i0} ${lenSym}))`;
+            entryEnv.set(idxName, "0");
+            nextPatch.set(idxName, `(+ ${i0} 1)`);
+            postLoopEnv.set(idxName, `(ite (> ${lenSym} 0) ${lenSym} 0)`);
+          }
+        }
+        // An invariant naming the loop variable of an UNCOUNTED loop says nothing after the
+        // loop: the next element bears no relation to the last one. Carrying it forward
+        // would assume a fact about a value the induction never established.
+        const boundNames = [stmt.varName, ...(stmt.varName2 ? [stmt.varName2] : [])];
+        const carried = invariants.filter(inv =>
+          nextPatch.size > 0 ? !mentionsAnyIdent(inv.expr, new Set(stmt.varName2 ? [stmt.varName2] : []))
+                             : !mentionsAnyIdent(inv.expr, new Set(boundNames)));
+        const assumed = invariants
+          .map(inv => exprToSmtWithEnv(inv.expr, havocEnv))
+          .filter(s => !/UNSUPPORTED/.test(s));
         const bodyRun = collectPaths(stmt.body, havocEnv, varTypes, ctx);
+        structLits.push(...bodyRun.structLits);
+        const active = [...pathConds, ...assumed, ...(guard && !/UNSUPPORTED/.test(guard) ? [guard] : [])];
+        loops.push({
+          entryConds: [...pathConds],
+          entryEnv,
+          havocEnv: new Map(havocEnv),
+          guard,
+          invariants,
+          variants,
+          body: stmt.body,
+          bodyRun,
+          nextPatch,
+        });
         loops.push(...bodyRun.loops.map(nested => ({
           ...nested,
-          entryConds: [...pathConds, ...nested.entryConds],
+          entryConds: [...active, ...nested.entryConds],
         })));
         for (const path of bodyRun.paths) {
-          paths.push({ conditions: [...pathConds, ...path.conditions], result: path.result });
+          paths.push({ ...path, conditions: [...active, ...path.conditions] });
         }
         for (const call of bodyRun.calls) {
-          calls.push({ ...call, conditions: [...pathConds, ...call.conditions] });
+          calls.push({ ...call, conditions: [...active, ...call.conditions] });
         }
         const remainder = stmts.slice(i + 1);
-        walkCapture(remainder, 0, pathConds, new Map(havocEnv));
+        const exitAssumed = carried
+          .map(inv => exprToSmtWithEnv(inv.expr, postLoopEnv))
+          .filter(s => !/UNSUPPORTED/.test(s));
+        walkCapture(remainder, 0, [...pathConds, ...exitAssumed], new Map(postLoopEnv));
         for (const exit of bodyRun.breakEnvs) {
-          walkCapture(remainder, 0, [...pathConds, ...exit.conditions], new Map(exit.env));
+          walkCapture(remainder, 0, [...active, ...exit.conditions], new Map(exit.env));
         }
         return;
       }
@@ -695,7 +1029,7 @@ function collectPaths(stmts: Stmt[], env: Map<string, string>, types?: Map<strin
   }
 
   walkCapture(stmts, 0, [], new Map(env));
-  return { paths, finalEnvs, breakEnvs, continueEnvs, calls, havocDecls: ctx.havocDecls, loops };
+  return { paths, finalEnvs, breakEnvs, continueEnvs, calls, havocDecls: ctx.havocDecls, loops, structLits };
 }
 
 // `x.len` on a string/Vec/array can never be negative, and the solver has no way to know
@@ -840,8 +1174,18 @@ let FIELD_REFS: Set<string> | null = null;
 // solvers report as an error naming a constant the user never wrote — or, worse, collides
 // with an unrelated caller-side name and checks a different obligation than the one asked.
 // In the caller's own body env the same flat names ARE this scope's, and declared.
-function exprToSmtWithEnv(expr: Expr, env: Map<string, string>, foreign = false): string {
+function exprToSmtWithEnv(expr: Expr, env: Map<string, string>, foreign = false, oldEnv?: Map<string, string>): string {
   if (!expr) return "0";
+  // `old(e)` names the value `e` held at entry. In a FOREIGN lowering the substitution map
+  // usually binds each parameter to the caller's argument as it stood at the call, so there
+  // the pre-state is `env` itself — that is what makes a callee's `ensures result == old(n)
+  // + 1` usable at the call site. The exception is the frame assumption below, where `env`
+  // deliberately binds the POST-call symbols and `oldEnv` carries the pre-call ones.
+  if (isOldCall(expr)) {
+    const pre = oldEnv ?? (foreign ? env : OLD_ENV);
+    if (!pre) return `(UNSUPPORTED old)`;
+    return exprToSmtWithEnv((expr as any).args[0]!, pre, foreign, oldEnv);
+  }
   if (expr.kind === "Ident") {
     const mapped = env.get(expr.name);
     if (mapped) return mapped;
@@ -861,10 +1205,10 @@ function exprToSmtWithEnv(expr: Expr, env: Map<string, string>, foreign = false)
     }
   }
   if (expr.kind === "BinOp") {
-    const left = exprToSmtWithEnv(expr.left, env, foreign);
+    const left = exprToSmtWithEnv(expr.left, env, foreign, oldEnv);
     const bit = bitOpToSmt(expr.op, left, expr.right);
     if (bit) return bit;
-    const right = exprToSmtWithEnv(expr.right, env, foreign);
+    const right = exprToSmtWithEnv(expr.right, env, foreign, oldEnv);
     if (expr.op === "/" || expr.op === "%") {
       const t = truncDivToSmt(expr.op, left, right, resolveConstNum(expr.right));
       if (t) return t;
@@ -872,23 +1216,23 @@ function exprToSmtWithEnv(expr: Expr, env: Map<string, string>, foreign = false)
     return `(${binOpToSmt(expr.op)} ${left} ${right})`;
   }
   if (expr.kind === "CastExpr") {
-    return castToSmt(exprToSmtWithEnv(expr.operand, env, foreign), expr.targetType?.name ?? "i64");
+    return castToSmt(exprToSmtWithEnv(expr.operand, env, foreign, oldEnv), expr.targetType?.name ?? "i64");
   }
   if (expr.kind === "UnaryOp") {
-    if (expr.op === "!") return `(not ${exprToSmtWithEnv(expr.operand, env, foreign)})`;
-    if (expr.op === "-") return `(- ${exprToSmtWithEnv(expr.operand, env, foreign)})`;
+    if (expr.op === "!") return `(not ${exprToSmtWithEnv(expr.operand, env, foreign, oldEnv)})`;
+    if (expr.op === "-") return `(- ${exprToSmtWithEnv(expr.operand, env, foreign, oldEnv)})`;
   }
   if (expr.kind === "IfExpr") {
     const t = ifExprArm(expr.thenBody), e = ifExprArm(expr.elseBody);
     if (t && e) {
-      return `(ite ${exprToSmtWithEnv(expr.cond, env, foreign)} ` +
-             `${exprToSmtWithEnv(t, env, foreign)} ${exprToSmtWithEnv(e, env, foreign)})`;
+      return `(ite ${exprToSmtWithEnv(expr.cond, env, foreign, oldEnv)} ` +
+             `${exprToSmtWithEnv(t, env, foreign, oldEnv)} ${exprToSmtWithEnv(e, env, foreign, oldEnv)})`;
     }
     return `(UNSUPPORTED IfExpr)`;
   }
   if (expr.kind === "MethodCall") {
     const asLen = lenMethodAsField(expr);
-    if (asLen) return exprToSmtWithEnv(asLen, env, foreign);
+    if (asLen) return exprToSmtWithEnv(asLen, env, foreign, oldEnv);
   }
   if (expr.kind === "Call" && typeof expr.func === "string") {
     const modeled = modelCall(expr, expr.func, expr.args, env);
@@ -920,6 +1264,24 @@ function callsAContractedFn(stmts: Stmt[], contracted: Map<string, Function>): b
   return found;
 }
 
+// Whether a body builds a struct that carries an invariant. Such a function owes the
+// establishment obligation even with no contract of its own.
+function constructsInvariantStruct(stmts: Stmt[]): boolean {
+  let found = false;
+  const seen = new Set<any>();
+  const scan = (node: any) => {
+    if (!node || typeof node !== "object" || found || seen.has(node)) return;
+    seen.add(node);
+    if (node.kind === "StructLit" && STRUCT_INVARIANTS.has(node.name)) { found = true; return; }
+    for (const v of Object.values(node)) {
+      if (Array.isArray(v)) v.forEach(scan);
+      else if (v && typeof v === "object") scan(v);
+    }
+  };
+  stmts.forEach(scan);
+  return found;
+}
+
 export function generateVerificationConditions(program: Program, opts?: { onlyFile?: string }): VerifyResult {
   const conditions: VerificationCondition[] = [];
   let contractCount = 0;
@@ -942,6 +1304,13 @@ export function generateVerificationConditions(program: Program, opts?: { onlyFi
 
   FN_TABLE = new Map(program.functions.map(f => [f.name, f]));
   BOOL_FIELDS = collectBoolFields(program);
+  STRUCT_INVARIANTS = new Map();
+  STRUCT_FIELDS = new Map();
+  for (const st of program.structs ?? []) {
+    STRUCT_FIELDS.set(st.name, (st.fields as any[]).map(f => f.name));
+    const invs = (st.invariants ?? []).filter(c => c.kind === "invariant");
+    if (invs.length > 0) STRUCT_INVARIANTS.set(st.name, invs);
+  }
 
   // Callee preconditions, for the call-site obligations below.
   const requiresByFn = new Map<string, Function>();
@@ -956,10 +1325,18 @@ export function generateVerificationConditions(program: Program, opts?: { onlyFi
     if (opts?.onlyFile && fn.sourceFile && fn.sourceFile !== opts.onlyFile) continue;
     // A fn with no contracts of its own still has to honour the ones it calls.
     const callsContracted = callsAContractedFn(fn.body, requiresByFn);
-    if (fn.contracts.length === 0 && !hasLoopInvariants(fn.body) && !callsContracted) continue;
+    // A constructor may carry no contract of its own and still owe one: every reader of the
+    // struct it builds gets to assume that type's invariant. So may a mutator — skipping a
+    // function that can write through a `&mut S` would leave S's invariant assumed
+    // everywhere and maintained nowhere, which is a hole, not a gap in coverage.
+    const touchesInvariantStruct = STRUCT_INVARIANTS.size > 0 &&
+      (constructsInvariantStruct(fn.body) ||
+       fn.params.some(p => (p.type?.isRefMut || p.type?.isPtr) && p.type?.name && STRUCT_INVARIANTS.has(p.type.name)));
+    if (fn.contracts.length === 0 && !hasLoopInvariants(fn.body) && !callsContracted && !touchesInvariantStruct) continue;
 
     const requires = fn.contracts.filter(c => c.kind === "requires");
     const ensures = fn.contracts.filter(c => c.kind === "ensures");
+    const decreases = fn.contracts.filter(c => c.kind === "decreases");
     contractCount += fn.contracts.length;
 
     CALL_MODEL = { ensuresByFn, decls: [], assumes: [], n: 0, bySite: new WeakMap<object, Map<string, string>>(), scope: new Set(), assumed: new Set() };
@@ -992,6 +1369,10 @@ export function generateVerificationConditions(program: Program, opts?: { onlyFi
       paramEnv.set(p.name, p.name);
       if (p.type?.name) paramTypes.set(p.name, p.type.name);
     }
+    // `old(e)` reads this and nothing else. It must be a snapshot: the walker mutates its
+    // own environments in place, and an `old` that followed those edits would be the
+    // current state under another name.
+    OLD_ENV = new Map(paramEnv);
     const symResult = collectPaths(fn.body, paramEnv, paramTypes);
 
     // Call-site obligations: the prover proves a callee's `ensures` GIVEN its `requires`,
@@ -1008,7 +1389,7 @@ export function generateVerificationConditions(program: Program, opts?: { onlyFi
       if (!callee || callee.name === fn.name) continue;   // self-recursion: needs induction, skip
       if (call.args.length !== callee.params.length) continue;  // variadic/defaulted: can't map args to params
       // Substitute the callee's params with the caller's arg expressions.
-      const subst = new Map<string, string>();
+      const subst = new Map<string, string>(call.fields);
       callee.params.forEach((p, idx) => subst.set(p.name, call.args[idx]!));
       for (const req of callee.contracts.filter(c => c.kind === "requires")) {
         const obligation = exprToSmtWithEnv(req.expr, subst, true);
@@ -1018,6 +1399,27 @@ export function generateVerificationConditions(program: Program, opts?: { onlyFi
         // wasn't in the report, so nothing said the guarantee was resting on nothing.
         const guard = call.conditions.length > 0 ? `(assert (and ${call.conditions.join(" ")}))` : "";
         callObligations.push({ callee: callee.name, obligation, guard });
+      }
+    }
+
+    // A struct invariant is a property of the type, so every value of that type satisfies it
+    // wherever it is observed — including a parameter on entry. This is what makes
+    // `prg.len >= 16384` usable inside a function that never checks it: the loader
+    // established it, and the type carries it. What establishes it is the obligation at each
+    // struct literal below; without that half this would be an unchecked assumption.
+    const structAssumptions: string[] = [];
+    const assumedInvariants = new Set<string>();
+    const invariantParams = fn.params.filter(p => p.type?.name && STRUCT_INVARIANTS.has(p.type.name));
+    for (const p of invariantParams) {
+      for (const inv of STRUCT_INVARIANTS.get(p.type!.name)!) {
+        const fieldEnv = new Map<string, string>();
+        for (const f of STRUCT_FIELDS.get(p.type!.name) ?? []) {
+          const sym = `${p.name}_${f}`;
+          fieldRefs.add(sym);
+          fieldEnv.set(f, sym);
+        }
+        const smt = instantiateInvariant(inv, fieldEnv);
+        if (!/UNSUPPORTED/.test(smt)) { structAssumptions.push(`(assert ${smt})`); assumedInvariants.add(p.type!.name); }
       }
     }
 
@@ -1032,7 +1434,10 @@ export function generateVerificationConditions(program: Program, opts?: { onlyFi
     if (symResult.havocDecls.length > 0) allDecls = `${allDecls}\n${symResult.havocDecls.join("\n")}`;
     allDecls = `${allDecls}\n${CALL_MODEL_SLOT}`;
 
-    const preAssumptions = requires.map(r => `(assert ${exprToSmt(r.expr)})`).join("\n");
+    const preAssumptions = [
+      ...requires.map(r => `(assert ${exprToSmt(r.expr)})`),
+      ...structAssumptions,
+    ].join("\n");
 
     for (const o of callObligations) {
       conditions.push({
@@ -1058,18 +1463,30 @@ export function generateVerificationConditions(program: Program, opts?: { onlyFi
       for (const ens of ensures) {
         const postSmt = exprToSmt(ens.expr);
 
-        if (!isVoid && symResult.paths.length > 0) {
-          // returning function: bind result to return value on each path
-          const pathAssertions = symResult.paths.map(path => {
-            const pathCond = path.conditions.length > 0
-              ? (path.conditions.length === 1 ? path.conditions[0] : `(and ${path.conditions.join(" ")})`)
-              : "true";
-            return `(and ${pathCond} (= result ${path.result}))`;
-          });
-          const allPaths = pathAssertions.length === 1
-            ? pathAssertions[0]
-            : `(or ${pathAssertions.join(" ")})`;
+        // A postcondition names the state at EXIT, so it is lowered once per exit, in that
+        // exit's environment — not once against the entry symbols. That is what makes a
+        // clause about a `&mut` parameter mean anything: `ensures n == old(n) + 1` reads the
+        // post-state for `n` and the entry state for `old(n)`, and the two are different
+        // symbols only because the lowering happens here. Binding the flat entry symbol to
+        // the final value instead (what this did before) would also silently overwrite the
+        // struct-invariant assumptions above, which are stated about entry.
+        const exits: { conditions: string[]; env: Map<string, string>; result?: string }[] =
+          !isVoid && symResult.paths.length > 0
+            ? symResult.paths.map(p => ({ conditions: p.conditions, env: p.env, result: p.result }))
+            : isVoid ? symResult.finalEnvs.map(fe => ({ conditions: fe.conditions, env: fe.env }))
+            : [];
 
+        if (exits.length > 0) {
+          const violations = exits.map(exit => {
+            const post = exprToSmtWithEnv(ens.expr, exit.env);
+            const parts = [
+              ...exit.conditions,
+              ...(exit.result !== undefined ? [`(= result ${exit.result})`] : []),
+              `(not ${post})`,
+            ];
+            return `(and true ${parts.join(" ")})`;
+          });
+          const violated = violations.length === 1 ? violations[0] : `(or ${violations.join(" ")})`;
           conditions.push({
             fn: fn.name,
             kind: "postcondition",
@@ -1078,45 +1495,11 @@ export function generateVerificationConditions(program: Program, opts?: { onlyFi
               `; Postcondition proof for ${fn.name}`,
               `(set-logic ALL)`,
               allDecls,
-              `(declare-const result ${miloTypeToSmt(fn.retType.name)})`,
+              ...(isVoid ? [] : [`(declare-const result ${miloTypeToSmt(fn.retType.name)})`]),
               preAssumptions,
-              `(assert ${allPaths})`,
-              `(assert (not ${postSmt}))`,
+              `(assert ${violated})`,
               `(check-sat)`,
-            ].join("\n"),
-          });
-        } else if (isVoid && symResult.finalEnvs.length > 0) {
-          // void function: postcondition references struct fields — use final env to bind them
-          const pathAssertions = symResult.finalEnvs.map(fe => {
-            const bindings: string[] = [];
-            for (const [k, v] of fe.env) {
-              if (k.includes("_")) bindings.push(`(= ${k} ${v})`);
-            }
-            const pathCond = fe.conditions.length > 0
-              ? (fe.conditions.length === 1 ? fe.conditions[0] : `(and ${fe.conditions.join(" ")})`)
-              : "true";
-            if (bindings.length > 0) {
-              return `(and ${pathCond} ${bindings.join(" ")})`;
-            }
-            return pathCond;
-          });
-          const allPaths = pathAssertions.length === 1
-            ? pathAssertions[0]
-            : `(or ${pathAssertions.join(" ")})`;
-
-          conditions.push({
-            fn: fn.name,
-            kind: "postcondition",
-            description: `postcondition of ${fn.name}: ${postSmt}`,
-            smtlib: [
-              `; Postcondition proof for ${fn.name} (void, struct state)`,
-              `(set-logic ALL)`,
-              allDecls,
-              preAssumptions,
-              `(assert ${allPaths})`,
-              `(assert (not ${postSmt}))`,
-              `(check-sat)`,
-            ].join("\n"),
+            ].filter(Boolean).join("\n"),
           });
         } else {
           // no paths extracted — fall back to unconstrained check
@@ -1135,6 +1518,116 @@ export function generateVerificationConditions(program: Program, opts?: { onlyFi
             ].join("\n"),
           });
         }
+      }
+    }
+
+    // Struct invariants, the establishing half. Every use site above gets to ASSUME the
+    // invariant of a value it receives; construction is where that has to be earned.
+    for (const lit of symResult.structLits) {
+      const fieldEnv = new Map(lit.fields);
+      for (const inv of STRUCT_INVARIANTS.get(lit.struct) ?? []) {
+        const smt = instantiateInvariant(inv, fieldEnv);
+        const guard = lit.conditions.length > 0 ? `(assert (and true ${lit.conditions.join(" ")}))` : "";
+        conditions.push({
+          fn: fn.name,
+          kind: "struct-invariant",
+          invariantOf: lit.struct,
+          description: `invariant of ${lit.struct} holds at construction in ${fn.name}: ${exprToSmt(inv.expr)}`,
+          smtlib: [
+            `; Struct invariant establishment: ${lit.struct} built in ${fn.name}`,
+            `(set-logic ALL)`,
+            allDecls,
+            preAssumptions,
+            guard,
+            `(assert (not ${smt}))`,
+            `(check-sat)`,
+          ].filter(Boolean).join("\n"),
+        });
+      }
+    }
+
+    // ...and the maintaining half. A function that can write through a `&mut S` can also
+    // break S's invariant, and every later reader assumes it. Only `&mut` parameters need
+    // this: a by-value parameter is the callee's own copy, and `&S` cannot be written at all.
+    for (const p of invariantParams) {
+      if (!p.type?.isRefMut && !p.type?.isPtr) continue;
+      const fields = STRUCT_FIELDS.get(p.type.name) ?? [];
+      for (const inv of STRUCT_INVARIANTS.get(p.type.name)!) {
+        // Every exit, not just the fall-through ones: a mutator that ends in `return true`
+        // has no final env at all, and reading only those would have silently checked
+        // nothing for exactly the functions most likely to break the invariant.
+        const exits = [
+          ...symResult.paths.map(pt => ({ conditions: pt.conditions, env: pt.env })),
+          ...symResult.finalEnvs,
+        ];
+        const violations: string[] = [];
+        for (const fe of exits) {
+          const fieldEnv = new Map<string, string>();
+          for (const f of fields) fieldEnv.set(f, fe.env.get(`${p.name}_${f}`) ?? `${p.name}_${f}`);
+          const after = instantiateInvariant(inv, fieldEnv);
+          violations.push(`(and true ${[...fe.conditions, `(not ${after})`].join(" ")})`);
+        }
+        if (violations.length === 0) continue;   // no completing path: nothing to maintain
+        conditions.push({
+          fn: fn.name,
+          kind: "struct-invariant",
+          invariantOf: p.type.name,
+          description: `invariant of ${p.type.name} maintained by ${fn.name}: ${exprToSmt(inv.expr)}`,
+          smtlib: [
+            `; Struct invariant maintenance: ${p.name}: &mut ${p.type.name} in ${fn.name}`,
+            `(set-logic ALL)`,
+            allDecls,
+            preAssumptions,
+            `(assert ${violations.length === 1 ? violations[0] : `(or ${violations.join(" ")})`})`,
+            `(check-sat)`,
+          ].filter(Boolean).join("\n"),
+        });
+      }
+    }
+
+    // Termination. A self-recursive call is modelled by ASSUMING this function's own
+    // `ensures` — that is induction, and induction over a recursion that may not terminate
+    // proves anything. `decreases` supplies the well-founded measure the induction needs:
+    // non-negative at entry, and strictly smaller at every self-call.
+    for (const dec of decreases) {
+      const atEntry = exprToSmt(dec.expr);
+      const selfCalls = symResult.calls.filter(c => c.name === fn.name && c.args.length === fn.params.length);
+      for (const call of selfCalls) {
+        const subst = new Map<string, string>();
+        fn.params.forEach((p, idx) => subst.set(p.name, call.args[idx]!));
+        const atCall = exprToSmtWithEnv(dec.expr, subst, true);
+        const guard = call.conditions.length > 0 ? `(assert (and true ${call.conditions.join(" ")}))` : "";
+        conditions.push({
+          fn: fn.name,
+          kind: "termination",
+          description: `recursion of ${fn.name} decreases: ${atCall} < ${atEntry} and ${atEntry} >= 0`,
+          smtlib: [
+            `; Termination measure for the self-call in ${fn.name}`,
+            `(set-logic ALL)`,
+            allDecls,
+            preAssumptions,
+            guard,
+            `(assert (not (and (>= ${atEntry} 0) (< ${atCall} ${atEntry}))))`,
+            `(check-sat)`,
+          ].filter(Boolean).join("\n"),
+        });
+      }
+      // A `decreases` on a function that never calls itself has nothing to discharge. Say so
+      // rather than silently reporting a clause as proven that was never used for anything.
+      if (selfCalls.length === 0) {
+        conditions.push({
+          fn: fn.name,
+          kind: "termination",
+          description: `decreases on ${fn.name} is vacuous: no self-recursive call was found`,
+          smtlib: [
+            `; Vacuous termination measure in ${fn.name}`,
+            `(set-logic ALL)`,
+            allDecls,
+            preAssumptions,
+            `(assert (not (>= ${atEntry} 0)))`,
+            `(check-sat)`,
+          ].filter(Boolean).join("\n"),
+        });
       }
     }
 
@@ -1182,7 +1675,12 @@ export function generateVerificationConditions(program: Program, opts?: { onlyFi
         const nextIterationEnvs = [...bodyRun.finalEnvs, ...bodyRun.continueEnvs];
         let untranslatable = "";
         for (const fe of nextIterationEnvs) {
-          const after = exprToSmtWithEnv(inv.expr, fe.env);
+          // A for-in loop's binding is advanced by the loop form, not by the body, so the
+          // state one iteration on is the body's exit state with that advance patched in.
+          // Without it `invariant i <= n` over `for i in 0..n` would be asked to prove
+          // itself about the SAME index it just assumed, which is trivially true and checks
+          // nothing about the loop moving forward.
+          const after = exprToSmtWithEnv(inv.expr, patched(fe.env, loop.nextPatch));
           if (/UNSUPPORTED/.test(after)) { untranslatable = after; break; }
           const conds = fe.conditions.length > 0 ? `(and true ${fe.conditions.join(" ")})` : "true";
           violations.push(`(and ${conds} (not ${after}))`);
@@ -1205,7 +1703,7 @@ export function generateVerificationConditions(program: Program, opts?: { onlyFi
         const violated = untranslatable
           ? `(not ${untranslatable})`
           : (violations.length === 1 ? violations[0] : `(or ${violations.join(" ")})`);
-        const guardAssume = /UNSUPPORTED/.test(loop.guard) ? "" : `(assert ${loop.guard})`;
+        const guardAssume = !loop.guard || /UNSUPPORTED/.test(loop.guard) ? "" : `(assert ${loop.guard})`;
         conditions.push({
           fn: fn.name,
           kind: "loop-invariant",
@@ -1223,9 +1721,47 @@ export function generateVerificationConditions(program: Program, opts?: { onlyFi
         });
         loopCount++;
       }
+
+      // A loop `decreases` is the same well-founded-measure obligation as the recursive
+      // one: non-negative while the loop is still running, and strictly smaller after one
+      // pass. Unlike the function-level measure this is not needed for soundness — a
+      // non-terminating loop makes the postcondition vacuously true rather than provable
+      // from nothing — so it buys total correctness, not the absence of a false proof.
+      const guardForVariant = !loop.guard || /UNSUPPORTED/.test(loop.guard) ? "" : `(assert ${loop.guard})`;
+      for (const dec of loop.variants) {
+        const before = exprToSmtWithEnv(dec.expr, loop.havocEnv);
+        const nextIterationEnvs = [...bodyRun.finalEnvs, ...bodyRun.continueEnvs];
+        if (nextIterationEnvs.length === 0) continue;
+        const violations = nextIterationEnvs.map(fe => {
+          const after = exprToSmtWithEnv(dec.expr, patched(fe.env, loop.nextPatch));
+          return `(and true ${[...fe.conditions, `(not (and (>= ${before} 0) (< ${after} ${before})))`].join(" ")})`;
+        });
+        conditions.push({
+          fn: fn.name,
+          kind: "termination",
+          description: `loop measure decreases in ${fn.name}: ${exprToSmt(dec.expr)}`,
+          smtlib: [
+            `; Loop termination measure for ${fn.name}`,
+            `(set-logic ALL)`,
+            allDecls,
+            preAssumptions,
+            ...assumed.map(a => `(assert ${a})`),
+            guardForVariant,
+            `(assert ${violations.length === 1 ? violations[0] : `(or ${violations.join(" ")})`})`,
+            `(check-sat)`,
+          ].filter(Boolean).join("\n"),
+        });
+      }
     }
 
     fillCallModel(conditions, vcStart);
+    if (assumedInvariants.size > 0) {
+      for (let i = vcStart; i < conditions.length; i++) {
+        // The type's own obligations are not conditional on themselves.
+        if (conditions[i]!.invariantOf) continue;
+        conditions[i]!.assumesInvariants = [...assumedInvariants];
+      }
+    }
     CALL_MODEL = null;
   }
 
@@ -1239,14 +1775,21 @@ export function generateVerificationConditions(program: Program, opts?: { onlyFi
   };
 }
 
+// An environment with a loop form's own advance applied on top.
+function patched(env: Map<string, string>, patch: Map<string, string> | undefined): Map<string, string> {
+  if (!patch || patch.size === 0) return env;
+  const out = new Map(env);
+  for (const [k, v] of patch) out.set(k, v);
+  return out;
+}
+
 function hasLoopInvariants(stmts: Stmt[]): boolean {
-  for (const stmt of stmts) {
-    if (stmt.kind === "WhileStmt" && stmt.invariants && stmt.invariants.length > 0) return true;
-    if (stmt.kind === "WhileStmt") { if (hasLoopInvariants(stmt.body)) return true; }
-    if (stmt.kind === "IfStmt") {
-      if (hasLoopInvariants(stmt.thenBody)) return true;
-      if (stmt.elseBody && hasLoopInvariants(stmt.elseBody)) return true;
+  for (const stmt of stmts as any[]) {
+    if ((stmt.kind === "WhileStmt" || stmt.kind === "ForInStmt") && stmt.invariants?.length > 0) return true;
+    for (const key of ["body", "thenBody", "elseBody"]) {
+      if (Array.isArray(stmt[key]) && hasLoopInvariants(stmt[key])) return true;
     }
+    if (Array.isArray(stmt.arms) && stmt.arms.some((a: any) => hasLoopInvariants(a.body))) return true;
   }
   return false;
 }
@@ -1277,6 +1820,9 @@ function exprToSmt(expr: Expr): string {
       if (expr.op === "-") return `(- ${exprToSmt(expr.operand)})`;
       return `(UNSUPPORTED_UNARY ${expr.op})`;
     case "Call": {
+      if (isOldCall(expr)) {
+        return OLD_ENV ? exprToSmtWithEnv((expr as any).args[0]!, OLD_ENV) : `(UNSUPPORTED old)`;
+      }
       if (typeof expr.func === "string") {
         const modeled = modelCall(expr, expr.func, expr.args);
         if (modeled) return modeled;
@@ -1422,11 +1968,41 @@ export function conditionalProofs(pr: ProveResult): Map<SolverResult, string[]> 
     const posts = postconditionsByFn.get(fn);
     return posts !== undefined && posts.length > 0 && posts.every(p => p.status === "proven");
   };
+  // A SELF-recursive call is assumed the same way, and there the assumption is induction:
+  // sound only if the recursion bottoms out. That is what `decreases` establishes, so a
+  // proof that leaned on itself without a discharged measure is conditional on termination.
+  const terminationByFn = new Map<string, SolverResult[]>();
+  for (const r of pr.results) {
+    if (r.vc.kind !== "termination") continue;
+    const list = terminationByFn.get(r.vc.fn) ?? [];
+    list.push(r);
+    terminationByFn.set(r.vc.fn, list);
+  }
+  const terminates = (fn: string) => {
+    const t = terminationByFn.get(fn);
+    return t !== undefined && t.length > 0 && t.every(x => x.status === "proven");
+  };
+  // A struct invariant is assumed at every use site, so it is only as good as the
+  // construction/maintenance obligations discharged for that type across this run.
+  const invariantResults = new Map<string, SolverResult[]>();
+  for (const r of pr.results) {
+    if (!r.vc.invariantOf) continue;
+    const list = invariantResults.get(r.vc.invariantOf) ?? [];
+    list.push(r);
+    invariantResults.set(r.vc.invariantOf, list);
+  }
+  const invariantHolds = (name: string) => {
+    const rs = invariantResults.get(name);
+    return rs !== undefined && rs.length > 0 && rs.every(x => x.status === "proven");
+  };
   const out = new Map<SolverResult, string[]>();
   for (const r of pr.results) {
-    if (r.status !== "proven" || !r.vc.assumes?.length) continue;
-    const weak = r.vc.assumes.filter(fn => fn !== r.vc.fn && !established(fn));
-    if (weak.length) out.set(r, weak);
+    if (r.status !== "proven") continue;
+    const weak = (r.vc.assumes ?? []).filter(fn => (fn === r.vc.fn ? !terminates(fn) : !established(fn)));
+    const weakInv = (r.vc.assumesInvariants ?? [])
+      .filter(name => !invariantHolds(name))
+      .map(name => `${name}'s invariant`);
+    if (weak.length || weakInv.length) out.set(r, [...weak, ...weakInv]);
   }
   return out;
 }
@@ -1506,12 +2082,26 @@ export function formatProveReport(pr: ProveResult): string {
   for (const r of pr.results) {
     const icon = r.status === "proven" ? "✓" : r.status === "failed" ? "✗" : "?";
     const weak = conditional.get(r);
-    const note = weak ? ` — conditional: assumes ${weak.join(", ")}, whose own postcondition is not established` : "";
+    const selfAssumed = weak?.includes(r.vc.fn);
+    const invariants = weak?.filter(f => f.endsWith("'s invariant")) ?? [];
+    const others = weak?.filter(f => f !== r.vc.fn && !f.endsWith("'s invariant")) ?? [];
+    // Two different gaps read the same in the tally but not to a reader: a function with no
+    // `decreases` at all was never asked to terminate, while one whose measure came back
+    // unproven was asked and could not answer.
+    const hasMeasure = pr.results.some(x => x.vc.kind === "termination" && x.vc.fn === r.vc.fn);
+    const termNote = hasMeasure
+      ? `that ${r.vc.fn}'s recursion terminates, which its 'decreases' measure did not establish`
+      : `that ${r.vc.fn}'s recursion reaches a base case, which nothing proved (add a 'decreases' clause)`;
+    const parts: string[] = [];
+    if (others.length) parts.push(`${others.join(", ")}, whose own postcondition is not established`);
+    if (selfAssumed) parts.push(termNote);
+    if (invariants.length) parts.push(`${invariants.join(", ")}, which this run did not establish at every construction and mutation`);
+    const note = parts.length === 0 ? "" : ` — conditional: assumes ${parts.join("; and ")}`;
     lines.push(`  ${icon} [${r.vc.kind}] ${r.vc.fn}: ${r.status}${r.detail ? ` — ${r.detail}` : ""}${note}`);
   }
   if (conditional.size > 0) {
     lines.push("");
-    lines.push(`  ${conditional.size} of ${pr.proven} proofs are conditional on an unestablished postcondition.`);
+    lines.push(`  ${conditional.size} of ${pr.proven} proofs are conditional on something this run did not establish.`);
   }
 
   return lines.join("\n");

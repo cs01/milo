@@ -34,6 +34,10 @@ pub struct Arena<T> {
     freeList: Vec<i32>,
     live: i64,
 }
+// free() generation-checks the handle and returns before the decrement, so no valid
+// double-free ever reaches `live = live - 1`. Stating it on the type is what lets
+// arenaLen's `ensures result >= 0` be discharged instead of assumed.
+invariant live >= 0
 
 // Arena creation may happen on Promise.blocking workers, so identity allocation
 // uses the compiler's seq-cst atomic primitive rather than a racy global increment.

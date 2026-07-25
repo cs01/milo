@@ -8,22 +8,6 @@
 //
 // Key format: "<repo-relative-file>::<function>".
 export const BASELINE: Record<string, string> = {
-  "std/arena.milo::arenaLen":
-    "ensures result >= 0 needs the struct invariant `live >= 0`, which prove-milo " +
-    "cannot model yet (roadmap: struct invariants). `live` never actually goes " +
-    "negative — free() generation-checks the handle and returns before the " +
-    "decrement, so no valid double-free reaches `live = live - 1`.",
-
-  "std/inflate.milo::fixed":
-    "call-site preconditions `lencode.count.len >= 16` / `distcode.count.len >= 16` for " +
-    "codes(). Both tables ARE 16 entries — they are built as `Huff { count: zeros(16) }` " +
-    "and `zeros` carries `ensures result.len == n`, which the prover reads. What breaks " +
-    "the chain is `construct(lencode, ...)` in between: it takes `&mut Huff`, so every " +
-    "field of the table becomes a fresh unknown at that call, and there is no way to " +
-    "write 'this &mut parameter preserves count.len' — `ensures` can only talk about " +
-    "`result`. True because construct writes count[0..16] and never resizes it. Retire " +
-    "with post-state contracts on &mut params (frame conditions).",
-
   "examples/embedded/pidStep.milo::pidStep":
     "call-site preconditions for fpMul(kp, error) / fpMul(ki, newIntegral) / " +
     "fpMul(kd, derivative). fpMul requires its args >= i32::MIN, which no i32 can " +

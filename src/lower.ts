@@ -4,7 +4,7 @@
 import type { Program, Function as AstFn, Stmt, Expr, Pattern } from "./ast";
 import { declaredType } from "./ast";
 import type { CheckResult, FnSig, EnumInfo } from "./checker";
-import type { HIRModule, HIRFunction, HIRStmt, HIRExpr, HIRArg, HIRPattern, HIRStruct, HIREnum, HIRGlobal } from "./hir";
+import type { HIRModule, HIRFunction, HIRStmt, HIRExpr, HIRArg, HIRPattern, HIRStruct, HIREnum, HIRGlobal, HIRContract } from "./hir";
 import type { TypeKind } from "./types";
 import { typeFromAst } from "./types";
 import { readFileSync, existsSync, statSync } from "fs";
@@ -20,6 +20,9 @@ export function lower(program: Program, checked: CheckResult, sourceDir?: string
 
 class LowerCtx {
   private currentRetType: TypeKind = { tag: "void" };
+  // Non-null only while lowering one function's contracts: collects the `old(e)` snapshots
+  // that clause references. Outside that window an `old(...)` call is an ordinary call.
+  private oldSlots: { name: string; value: HIRExpr }[] | null = null;
   constructor(private c: CheckResult, private sourceDir: string, private targetOs: string) {}
 
   // Evaluate a lowered condition to a compile-time boolean when it rests entirely on
@@ -195,20 +198,37 @@ class LowerCtx {
     };
   }
 
+  // A loop's `decreases` measure is an integer, not a claim, so there is nothing for a
+  // runtime check to assert — it is discharged statically by `milo prove` and dropped here.
+  private lowerInvariants(contracts: import("./ast").Contract[]): HIRContract[] {
+    return contracts
+      .filter(c => c.kind === "invariant")
+      .map(c => ({ kind: c.kind as "invariant", expr: this.lowerExpr(c.expr), span: c.span }));
+  }
+
   private lowerFn(fn: AstFn): HIRFunction {
     const sig = this.c.functions.get(fn.name);
     const retType = sig?.ret ?? typeFromAst(fn.retType);
     this.currentRetType = retType;
-    // invariants are attached to their while loops, not the function
+    // invariants are attached to their while loops, not the function; `decreases` is a
+    // static termination measure with no runtime meaning, so it never reaches codegen.
+    this.oldSlots = [];
     const contracts = fn.contracts
-      .filter(c => c.kind !== "invariant")
-      .map(c => ({ kind: c.kind, expr: this.lowerExpr(c.expr), span: c.span }));
+      .filter(c => c.kind !== "invariant" && c.kind !== "decreases")
+      .map(c => ({ kind: c.kind as "requires" | "ensures", expr: this.lowerExpr(c.expr), span: c.span }));
+    // `old(e)` in an `ensures` reads the value `e` had at entry, so a debug build has to
+    // snapshot it there — by the time the clause runs, the state it named is gone.
+    const oldSnapshots = this.oldSlots.map(s => ({
+      kind: "Let" as const, name: s.name, type: s.value.type, value: s.value, mutable: false,
+    }));
+    this.oldSlots = null;
     return {
       name: fn.name,
       params: fn.params.map((p, i) => this.lowerParam(p, sig, i)),
       retType,
       body: fn.body.map(s => this.lowerStmt(s, retType)),
       ...(contracts.length > 0 && { contracts }),
+      ...(oldSnapshots.length > 0 && { oldSnapshots }),
       isExtern: false,
       isVariadic: fn.isVariadic,
       ...(fn.isPub && { isPub: true }),
@@ -268,7 +288,7 @@ class LowerCtx {
         };
       }
       case "WhileStmt": {
-        const invariants = stmt.invariants.map(c => ({ kind: c.kind, expr: this.lowerExpr(c.expr), span: c.span }));
+        const invariants = this.lowerInvariants(stmt.invariants);
         return {
           kind: "While",
           cond: this.lowerExpr(stmt.cond),
@@ -369,6 +389,7 @@ class LowerCtx {
         };
       }
       case "ForInStmt": {
+        const forInvariants = this.lowerInvariants(stmt.invariants ?? []);
         if (stmt.iterable.kind === "RangeExpr") {
           const rangeType = this.typeOf(stmt.iterable) ?? { tag: "int" as const, bits: 64, signed: true };
           return {
@@ -378,6 +399,7 @@ class LowerCtx {
             start: this.lowerExpr(stmt.iterable.start),
             end: this.lowerExpr(stmt.iterable.end),
             body: stmt.body.map(s => this.lowerStmt(s, fnRetType)),
+            ...(forInvariants.length > 0 && { invariants: forInvariants }),
             span: stmt.span,
           };
         }
@@ -391,6 +413,7 @@ class LowerCtx {
             nextMethod: iterInfo.nextMethod,
             optionEnumName: iterInfo.optionEnumName,
             body: stmt.body.map(s => this.lowerStmt(s, fnRetType)),
+            ...(forInvariants.length > 0 && { invariants: forInvariants }),
             span: stmt.span,
           };
         }
@@ -446,6 +469,7 @@ class LowerCtx {
           iterable: this.lowerExpr(stmt.iterable),
           iterableKind,
           body: stmt.body.map(s => this.lowerStmt(s, fnRetType)),
+          ...(forInvariants.length > 0 && { invariants: forInvariants }),
           span: stmt.span,
         };
       }
@@ -470,6 +494,15 @@ class LowerCtx {
   }
 
   private lowerExpr(expr: Expr): HIRExpr {
+    // `old(e)` is only reachable while lowering an `ensures` (the checker rejects it
+    // anywhere else). It becomes a read of an entry-time snapshot local; lowerFn emits the
+    // matching `let` and codegen materializes it only in a contract-checking build.
+    if (this.oldSlots && expr.kind === "Call" && expr.func === "old" && expr.args.length === 1) {
+      const value = this.lowerExpr(expr.args[0]!);
+      const name = `__old${this.oldSlots.length}`;
+      this.oldSlots.push({ name, value });
+      return { kind: "Ident", name, type: value.type, span: expr.span };
+    }
     const type = this.typeOf(expr) ?? { tag: "unknown" as const };
 
     // T → Option<T> auto-wrapping: wrap value in Some(value)

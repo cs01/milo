@@ -349,7 +349,11 @@ export class Parser {
       this.match(TokenKind.Comma);
     }
     this.expect(TokenKind.RBrace);
-    return { kind: "StructDecl", name, typeParams, fields };
+    // Trailing `invariant`/`decreases` clauses — the same position a fn's contracts occupy
+    // relative to its signature. `decreases` is meaningless on a type; the checker rejects it
+    // rather than the grammar, so the error names the clause instead of the token.
+    const invariants = this.parseContracts();
+    return { kind: "StructDecl", name, typeParams, fields, ...(invariants.length > 0 && { invariants }) };
   }
 
   // ── Enum ──
@@ -463,9 +467,10 @@ export class Parser {
 
   private parseContracts(): import("./ast").Contract[] {
     const contracts: import("./ast").Contract[] = [];
-    while (this.at(TokenKind.Requires) || this.at(TokenKind.Ensures) || this.at(TokenKind.Invariant)) {
+    while (this.at(TokenKind.Requires) || this.at(TokenKind.Ensures)
+        || this.at(TokenKind.Invariant) || this.at(TokenKind.Decreases)) {
       const s = this.span(this.peek());
-      const kind = this.advance().value as "requires" | "ensures" | "invariant";
+      const kind = this.advance().value as "requires" | "ensures" | "invariant" | "decreases";
       const expr = this.parseExpr();
       contracts.push({ kind, expr, span: s });
     }
@@ -840,7 +845,7 @@ export class Parser {
       const pattern = this.parsePattern();
       this.expect(TokenKind.Eq);
       const subject = this.parseExpr();
-      const invariants = this.parseContracts().filter(c => c.kind === "invariant");
+      const invariants = this.parseContracts().filter(c => c.kind === "invariant" || c.kind === "decreases");
       this.expect(TokenKind.LBrace);
       const body = this.parseStmts();
       this.expect(TokenKind.RBrace);
@@ -851,7 +856,7 @@ export class Parser {
       return { kind: "WhileStmt", cond: { kind: "BoolLit", value: true, span: s }, invariants, body: [ifLet], span: s };
     }
     const cond = this.parseExpr();
-    const invariants = this.parseContracts().filter(c => c.kind === "invariant");
+    const invariants = this.parseContracts().filter(c => c.kind === "invariant" || c.kind === "decreases");
     this.expect(TokenKind.LBrace);
     const body = this.parseStmts();
     this.expect(TokenKind.RBrace);
@@ -875,13 +880,14 @@ export class Parser {
     } else {
       iterable = iterableOrStart;
     }
+    const invariants = this.parseContracts().filter(c => c.kind === "invariant" || c.kind === "decreases");
     this.expect(TokenKind.LBrace);
     const body = this.parseStmts();
     this.expect(TokenKind.RBrace);
     if (iterable.kind === "MethodCall" && iterable.method === "codePoints" && iterable.args.length === 0) {
-      return this.desugarCodePointsLoop(varName, varName2, iterable.object, body, s);
+      return this.desugarCodePointsLoop(varName, varName2, iterable.object, body, s, invariants);
     }
-    return { kind: "ForInStmt", varName, varName2, iterable, body, span: s };
+    return { kind: "ForInStmt", varName, varName2, iterable, invariants, body, span: s };
   }
 
   // `for cp in s.codePoints() { .. }` → a byte-cursor while loop over
@@ -896,6 +902,7 @@ export class Parser {
   // method name — a user type defining one gets this rewrite instead.
   private desugarCodePointsLoop(
     varName: string, varName2: string | null, subject: Expr, body: Stmt[], s: Span | undefined,
+    invariants: import("./ast").Contract[] = [],
   ): Stmt {
     const i64Type: MiloType = { name: "i64", isPtr: false, isRef: false, isRefMut: false, isArray: false, arraySize: null };
     const int = (n: number): Expr => ({ kind: "IntLit", value: BigInt(n), span: s });
@@ -947,7 +954,7 @@ export class Parser {
     pre.push({
       kind: "WhileStmt",
       cond: { kind: "BinOp", op: "<", left: id(cursor), right: { kind: "FieldAccess", object: this.cloneExpr(src), field: "len", span: s }, span: s },
-      invariants: [], body: loopBody, span: s,
+      invariants, body: loopBody, span: s,
     });
     // `if true` is just a scope: it keeps the cursor and any subject temporary
     // from leaking into the enclosing block. There is no bare-block statement.

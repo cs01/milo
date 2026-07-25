@@ -10,7 +10,7 @@ last-verified: 2026-07-24
 
 Milo lets you write down what your functions promise — and then prove it.
 
-- **Contracts** — `requires`, `ensures`, `invariant`: what a function expects, what it guarantees, what stays true in a loop. Type-checked like the rest of your code.
+- **Contracts** — `requires`, `ensures`, `invariant`, `decreases`: what a function expects, what it guarantees, what stays true in a loop or of a type, and why a recursion ends. Type-checked like the rest of your code.
 - **`milo prove`** checks that they hold — for every input, without running the program.
 - **Safety profiles** — DO-178C, ISO 26262, IEC 62304 and friends, enforced as compiler flags.
 
@@ -184,13 +184,137 @@ Delete both and the postcondition itself fails — `result` is simply unknown af
   ✗ [postcondition] sumTo: failed — counterexample: total__loop0 = -1, result = -1
 ```
 
-Invariants are checked at runtime too, on every iteration, under the same rule as the rest of the walkthrough — `--debug`, or `--contract-checks` at any optimization level. And safety profiles use the clause as evidence rather than as a check: `do178c-a` and `nasa-a` require every `while` loop to carry one.
+Invariants are checked at runtime too, on every iteration, under the same rule as the rest of the walkthrough — `--debug`, or `--contract-checks` at any optimization level. And safety profiles use the clause as evidence rather than as a check: `do178c-a` and `nasa-a` require every `while` loop to carry one. (Only `while` — a `for in` is bounded by its range or its container, so it needs no clause to be evidence of termination.)
+
+`for in` takes an invariant in the same place, and needs less help than a `while` does:
+
+```milo
+pub fn sumTo(n: i64): i64
+requires n >= 0
+ensures result >= 0
+{
+    var total: i64 = 0
+    for i in 0..n
+    invariant total >= 0
+    {
+        total = total + i
+    }
+    return total
+}
+```
+
+```
+$ milo prove sumTo.milo
+verification: 3 conditions
+  proven: 3  failed: 0  unknown: 0  errors: 0
+```
+
+No `invariant i >= 0` is needed here, and that is the difference between the two loop forms. In a `while` loop the index is an ordinary variable and you have to say what is true of it; in a `for` loop the range *is* the fact, so the prover already knows `0 <= i < n` inside the body and knows the invariant holds at `n` on the way out.
+
+### `old` — what a function did to a `&mut`
+
+`ensures` can talk about `result`. That is enough for a function that returns something and nothing else — but a function that writes through a `&mut` parameter has no `result` to describe, and without a way to name the *previous* value there is nothing true to say about it. `old(e)` is that name: the value `e` held when the function was entered.
+
+```milo
+fn bump(n: &mut i64): void
+ensures n == old(n) + 100
+{
+    n = n + 100
+}
+```
+
+The payoff is at the call site, not the definition. When the prover walks past `bump(x)` it has to forget everything it knew about `x` — the write happened somewhere it cannot see, and keeping the old value would be a false proof, not a conservative one. `old` puts the information back:
+
+```milo
+fn needsBig(v: i64): i64
+requires v >= 100
+{
+    return v
+}
+
+fn caller(): i64 {
+    var x: i64 = 5
+    bump(x)
+    return needsBig(x)     // proven: x is 105, from bump's contract alone
+}
+```
+
+Without the contract, `needsBig`'s precondition is simply unprovable — `x` is an unknown after the call. This is what made mutating functions unspecifiable, and it is why `std/inflate`'s table builder can now say `ensures h.count.len == old(h.count.len)`: *this function fills the table in place and never resizes it*.
+
+`old` is legal only inside `ensures`, and only on a scalar — an integer, float, or bool. A contract-checking build snapshots the value on entry, and copying a `Vec` or a struct there would either alias the caller's buffer or clone on every call. Snapshot a scalar projection instead: `old(v.len)`.
+
+### `decreases` — why the recursion ends
+
+A recursive function is proved by assuming its own `ensures` at the recursive call. That is induction, and induction over a recursion that might not terminate proves anything at all. `decreases` supplies the missing half — an integer measure, not a boolean claim, that must be non-negative and must strictly fall at every self-call:
+
+```milo
+fn countdown(n: i64): i64
+requires n >= 0
+decreases n
+{
+    if n == 0 { return 0 }
+    return countdown(n - 1)
+}
+```
+
+```
+  ✓ [termination] countdown: proven
+```
+
+Get it wrong and the measure is refuted rather than quietly accepted — `return runaway(n + 1)` reports `✗ [termination] runaway: failed — counterexample: n = 1`.
+
+Leave it off entirely and the proof still runs, but it is no longer clean. It is reported as **conditional**, naming what it rested on:
+
+```
+  ✓ [postcondition] f: proven — conditional: assumes that f's recursion reaches a
+    base case, which nothing proved (add a 'decreases' clause)
+```
+
+`decreases` works on a loop too, where it buys total correctness rather than soundness: a loop that never ends makes a postcondition vacuously true rather than provable from nothing, so the measure is optional there in a way it is not for recursion.
+
+### Struct invariants — a fact the type carries
+
+Some facts belong to a type rather than to any one function. A ROM image's program bank is at least 16KB — the loader guarantees it, every reader depends on it, and re-checking it at each use is noise that also fails to prove anything.
+
+Write it on the struct, after the closing brace, over the field names with no receiver:
+
+```milo
+struct Rom {
+    prg: Vec<u8>,
+    mapper: i64,
+}
+invariant prg.len >= 16384
+```
+
+Now this is provable, with nothing in it bounding `prg.len`:
+
+```milo
+fn readAt(r: &Rom, i: i64): i64
+requires i >= 0
+requires i < r.prg.len
+{
+    return r.prg[i] as i64
+}
+
+fn readLow(r: &Rom): i64 {
+    return readAt(r, 100)     // proven: 100 < prg.len follows from the invariant
+}
+```
+
+An invariant that was only ever *assumed* would be a hole with a keyword in front of it, so it is also **owed** — at every struct literal, and in every function that takes the type by `&mut`:
+
+```milo
+fn makeRom(): Rom { return Rom { prg: zeros(16384), mapper: 0 } }   // ✓ proven
+fn makeBad(): Rom { return Rom { prg: zeros(16), mapper: 0 } }      // ✗ failed
+```
+
+If a mutator's obligation comes back `unknown` — it does something the translator cannot follow — then every proof that leaned on the invariant is downgraded to conditional, naming it. A fact nothing established never renders as a checkmark.
 
 ### Which solver
 
 By default `milo prove` uses `std/smt`, a solver written in Milo and shipped in the standard library, so the walkthrough above needs nothing installed. It is not in Z3's league: it decides linear integer arithmetic — `+`, `-`, comparisons, multiplication by a constant — and returns `unknown` on anything else, `n * n` included. Pass `--solver=z3` to send the same obligations to Z3, which does decide the nonlinear ones, or `--emit-smt` to print them as SMT-LIB2 for another tool.
 
-A recursive function is `unknown` under either solver — the translator has no rule for a call to the function being verified, so nothing about it reaches a solver in the first place. Changing solvers cannot fix that one.
+A recursive function *is* modelled — the self-call is handled by induction, assuming the function's own `ensures` — but that assumption is only sound if the recursion terminates, which is what `decreases` above is for. Whether the resulting obligation is decided is a separate question, and one the solver choice does affect: `std/smt` will report `no integer witness (rational-only)` on some it cannot settle, where Z3 answers.
 
 ## Safety profiles — `milo safety`
 

@@ -1,0 +1,33 @@
+// @proven: 2
+// @failed: 1
+// @unknown: 0
+// A self-recursive call is modelled by ASSUMING this function's own `ensures` — that is
+// induction, and induction over a recursion that may not terminate proves anything. Before
+// `decreases` there was nothing to check that, and verify.ts said so in its own comments.
+//
+// `countdown` supplies the well-founded measure and discharges it. `runaway` supplies one
+// too and is REFUTED: it recurses on `n + 1`, so the measure grows. That refutation is the
+// point — a false `ensures` on a non-terminating function is otherwise provable from nothing.
+fn countdown(n: i64): i64
+requires n >= 0
+decreases n
+{
+    if n == 0 {
+        return 0
+    }
+    return countdown(n - 1)
+}
+
+fn runaway(n: i64): i64
+requires n >= 0
+decreases n
+{
+    if n == 0 {
+        return 0
+    }
+    return runaway(n + 1)
+}
+
+fn main() {
+    print(countdown(3))
+}

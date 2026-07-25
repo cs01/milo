@@ -39,6 +39,7 @@ export enum TokenKind {
   Requires = "requires",
   Ensures = "ensures",
   Invariant = "invariant",
+  Decreases = "decreases",
   // symbols
   LParen = "(",
   RParen = ")",
@@ -112,5 +113,5 @@ export const KEYWORDS = new Set([
   "fn", "extern", "let", "var", "return", "if", "else", "while",
   "true", "false", "struct", "enum", "match", "mut", "import",
   "break", "continue", "as", "trait", "impl", "for", "unsafe", "move", "null", "is", "type", "interface",
-  "requires", "ensures", "invariant",
+  "requires", "ensures", "invariant", "decreases",
 ]);

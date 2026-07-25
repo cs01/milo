@@ -1,6 +1,51 @@
 # Verification Roadmap: From Sealed Safety to Provable Properties
 
-Status: exploratory. Parked for later — captured here so we don't re-derive it.
+Status: Part A done. Part B is partly SHIPPED — see "What shipped" below; the rest of this
+doc is the original exploratory reasoning, kept because the tier argument still holds.
+
+## What shipped
+
+`milo prove` discharges contracts against `std/smt` (native, no external solver) or z3
+(`--solver=z3`). The contract vocabulary is now:
+
+| Clause | Meaning |
+|---|---|
+| `requires` | precondition, proved at every call site |
+| `ensures` | postcondition, proved at every return |
+| `invariant` on a loop | induction across `while` **and** `for in` |
+| `invariant` on a struct | property of the type: assumed at use, owed at construction and at every `&mut` |
+| `decreases` | termination measure, on a function or a loop |
+| `old(e)` | the entry value of a scalar, inside `ensures` |
+
+That set is, near enough, SPARK's — `Pre`, `Post`, `Loop_Invariant`, `Type_Invariant`,
+`Loop_Variant`/`Subprogram_Variant`, `'Old`. Two of SPARK's are absent by choice: `Global`/
+`Depends` (Milo's ownership rules make most of it unnecessary) and quantifiers.
+
+**Where that lands us:** absence of runtime error on scalar and index arithmetic, plus
+termination and simple data invariants — SPARK's "silver" level. NOT functional correctness.
+
+**The one structural gap: quantifiers.** `forall`/`exists` over container contents, and the
+sequence theory to go with them. Without it, sortedness is not merely hard to prove, it is
+*unstateable*, and binary search cannot be specified at all. Deliberately not chased: trigger
+selection is where Dafny/Verus users actually burn their time, and it contradicts this doc's
+own "no annotation burden" principle. `std/smt` is Fourier-Motzkin over linear integers and
+cannot represent quantifiers at all, so adding them would also make the in-box solver
+permanently second-class. Revisit only with a concrete demand that nothing else answers.
+
+**Next, in order of leverage per unit of syntax:**
+
+1. **Range subtypes.** `MiloType` already carries `rangeMin`/`rangeMax` (`i32(0..50000)`).
+   Propagating those into `intRangeAssumption` retires the `pidStep` baseline, whose whole
+   problem is that only *parameters* carry range facts, so `setpoint - measured` escapes to
+   ±2^32 in the unbounded-Int model. Mostly plumbing over an existing representation.
+2. **`assert E` as a proof cut** — prove it there, assume it downstream. The practical
+   substitute for quantifiers: it lets a user hand-decompose a proof the solver cannot do in
+   one shot, with no trigger machinery.
+3. **`@pure`.** `modelCall` deliberately refuses to share a constant between two identical
+   call sites, because a Milo function may read mutable global state. Purity unlocks that.
+4. **`old` at loop entry** (SPARK's `'Loop_Entry`).
+
+Original exploratory notes follow.
 
 Context: comparison against proof-oriented languages (Bend2 et al.) raised the question of how far Milo should go on formal verification. Milo today is a *sealed safety contract* — its checker mechanically proves a fixed property set (memory, null, race, overflow, coercion safety) via sound static analysis. It is not a theorem prover: you cannot state and prove your own program properties.
 
@@ -64,10 +109,20 @@ Refinement discharge is undecidable in general; SMT solvers (Z3) are the proven 
 - **Sequencing:** A fully before B? (Assumed yes.)
 - **B tier:** lock Tier 2? Or ship Tier 1 contracts standalone first as a product in their own right?
 - **SMT integration:** shell out to the `z3` binary, libz3 via FFI (Milo has FFI now), or vendored? Build-time dependency story for users?
-- **Refinement scope:** just bounds/ranges/non-null, or also user-defined struct invariants (`struct Account { balance: i64 } invariant balance >= 0`)?
+- ~~**Refinement scope:** ... also user-defined struct invariants?~~ **Resolved: yes.** Written
+  after the closing brace over bare field names. Two-sided — assumed at every use, owed at
+  every literal and every `&mut` function — because the assume half alone is an unchecked hole.
 - **Dynamic fallback location:** debug builds only, or a `--verify` opt-in? How does `--deny-unsafe` (aircraft-grade) interact — does it imply `--verify`?
-- **`old()` / ghost state:** support `ensures` referencing pre-state? Adds real complexity to the VC generator.
-- **Termination:** do refinements over recursive predicates need a termination checker? (Likely punt — keep predicates non-recursive initially.)
+- ~~**`old()` / ghost state:** support `ensures` referencing pre-state?~~ **Resolved: yes,
+  scalars only.** The VC-generator cost was real but bounded: postconditions had to move from
+  being lowered against entry symbols to being lowered per exit path, and call sites needed a
+  frame assumption relating the post-call havoc symbols back to the pre-call ones. That last
+  piece is what makes it useful to a CALLER rather than only provable at the definition.
+- ~~**Termination:** ... need a termination checker?~~ **Resolved: yes, and it was not
+  optional.** A self-recursive call is modelled by assuming the function's own `ensures`;
+  without a measure that is induction over a possibly-non-terminating recursion, which proves
+  anything. `decreases` supplies it, and a proof that leaned on recursion without a discharged
+  measure is now reported as conditional rather than clean.
 
 ## Non-Goals
 

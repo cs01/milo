@@ -1,0 +1,13 @@
+// @error: decreases clause must be an integer measure
+fn f(n: i64): i64
+decreases n > 0
+{
+    if n == 0 {
+        return 0
+    }
+    return f(n - 1)
+}
+
+fn main() {
+    print(f(2))
+}

@@ -1,0 +1,10 @@
+// @error: old() may only appear in an 'ensures' clause
+fn f(n: i64): i64
+requires old(n) >= 0
+{
+    return n
+}
+
+fn main() {
+    print(f(1))
+}

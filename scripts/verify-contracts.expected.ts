@@ -34,15 +34,20 @@ export const EXPECTED: Record<string, Expected> = {
   "examples/embedded/pidStep.milo": { proven: 8, unknown: 0, errors: 0 },
   // Both AES-128 key-length preconditions into std/crypto, proven at the call site.
   "examples/net/termpair/encryption.milo": { proven: 2, unknown: 4, errors: 0 },
-  "std/arena.milo": { proven: 0, unknown: 0, errors: 0 },
+  // 3 proven / 4 unknown since `Arena` grew `invariant live >= 0`: construction and the
+  // alloc paths discharge it, the free/set/modify paths cannot (they are gated by an
+  // IndexAccess the translator has no rule for), so `arenaLen` reports as a CONDITIONAL
+  // proof rather than a clean one.
+  "std/arena.milo": { proven: 3, unknown: 4, errors: 0 },
   // 0 conditions, and correctly so: this file's contracts are all `requires`, which are
   // discharged at call sites. Nothing in the proved set calls them, so nothing is
   // checked here. A floor of 0 pins that fact rather than hiding it — the callers that
   // DO exercise these live in examples/, and MILO_VERIFY_ALL=1 is what reaches them.
   "std/crypto.darwin.milo": { proven: 0, unknown: 0, errors: 0 },
   "std/crypto.windows.milo": { proven: 0, unknown: 0, errors: 0 },
-  // 2 refuted in `fixed` are baselined (no frame conditions on &mut params).
-  "std/inflate.milo": { proven: 21, unknown: 40, errors: 0 },
+  // `fixed` was refuted here until `construct` grew frame conditions (`ensures h.count.len
+  // == old(h.count.len)`); the +6 proven is that baseline retiring.
+  "std/inflate.milo": { proven: 27, unknown: 38, errors: 0 },
   "std/math.milo": { proven: 4, unknown: 1, errors: 0 },
   "std/mem.milo": { proven: 2, unknown: 1, errors: 0 },
   "std/pool.milo": { proven: 6, unknown: 1, errors: 0 },

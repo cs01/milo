@@ -18,7 +18,17 @@ fn_def      = [ "pub" ] "fn" IDENT [ type_params ] "(" [ param_list ] ")" [ "->"
    import. "pub" is a soft keyword: special only immediately before a declaration, so
    it stays usable as an ordinary IDENT elsewhere. *)
 
-contract    = ( "requires" | "ensures" | "invariant" ) expr ;
+contract    = ( "requires" | "ensures" | "invariant" ) expr
+            | "decreases" expr ;   (* an INTEGER measure, not a boolean claim *)
+
+(* Inside an "ensures", old(e) denotes the value e held on entry. It is not a function:
+   there is no such name to call, and it is rejected in any other clause. e must be a
+   scalar (integer, float, bool) — a contract-checking build snapshots it at entry. *)
+
+(* A struct may carry trailing "invariant" clauses, written after its closing brace over
+   the struct's own field names with no receiver ("invariant chr.len > 0"). The clause is
+   a property of the TYPE: assumed wherever a value of it is observed, and owed at every
+   struct literal and every function taking it by "&mut". *)
 
 param_list  = param { "," param } ;
 param       = [ "&" [ "mut" ] ] IDENT ":" type ;
@@ -45,8 +55,9 @@ var_decl    = "var" IDENT [ ":" type ] "=" expr ;
 assign_stmt = IDENT "=" expr ;
 return_stmt = "return" [ expr ] ;
 if_stmt     = "if" expr block [ "else" ( if_stmt | block ) ] ;
-while_stmt  = "while" expr { "invariant" expr } block ;
-for_stmt    = "for" IDENT "in" expr block ;  (* expr is a range (a..b) or an iterable (Vec, etc.) *)
+while_stmt  = "while" expr { loop_contract } block ;
+for_stmt    = "for" IDENT [ "," IDENT ] "in" expr { loop_contract } block ;  (* expr is a range (a..b) or an iterable (Vec, etc.) *)
+loop_contract = ( "invariant" | "decreases" ) expr ;
 break_stmt  = "break" ;      (* only valid inside a loop body; exits the innermost loop *)
 continue_stmt = "continue" ; (* only valid inside a loop body; jumps to the innermost loop's next iteration *)
 expr_stmt   = expr ;

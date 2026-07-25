@@ -465,6 +465,11 @@ function handleHover(uri: string, line: number, character: number): object | nul
     const primHover = findPrimitiveHover(source, word, line, character);
     if (primHover) return { contents: { kind: "markdown", value: primHover } };
 
+    // Contract clauses. These are the words a reader is most likely to hover, because
+    // nothing about `decreases` or `old` explains itself from context.
+    const contractHover = CONTRACT_HOVERS[word];
+    if (contractHover) return { contents: { kind: "markdown", value: contractHover } };
+
     // Type aliases
     for (const ta of program.typeAliases) {
       if (ta.name === word) {
@@ -798,6 +803,16 @@ function findBuiltinMethodHover(
   const recvName = recv ? formatTypeName(recv) : "Vec<T>";
   return make(recvName, elem);
 }
+
+// Contract vocabulary. `milo prove` discharges these statically; a `--contract-checks`
+// build (the default for `--debug`) also asserts them at runtime.
+const CONTRACT_HOVERS: Record<string, string> = {
+  requires: "```milo\nrequires <bool expr>\n```\nPrecondition. Must hold at every call site — `milo prove` discharges it there, and a contract-checking build asserts it on entry.",
+  ensures: "```milo\nensures <bool expr>\n```\nPostcondition. Holds at every return. `result` names the return value; `old(e)` names what `e` was at entry.",
+  invariant: "```milo\ninvariant <bool expr>\n```\nOn a loop: holds before every iteration. Proved by induction — established on entry, preserved by one pass through the body — and then available to everything after the loop.\n\nOn a `struct` (written after the closing brace, over bare field names): a property of the TYPE. Assumed wherever a value of that type is observed, and owed at every struct literal and every `&mut` function that could break it.",
+  decreases: "```milo\ndecreases <integer expr>\n```\nTermination measure: must be non-negative and strictly fall across every self-recursive call, or every loop iteration.\n\nOn a function this is not optional bookkeeping — a self-recursive call is modelled by assuming that function's own `ensures`, which is induction, and induction over a recursion that may not terminate proves anything. Without a discharged measure such a proof is reported as conditional.",
+  old: "```milo\nold(e): <type of e>\n```\nThe value `e` held at function entry. Legal only inside `ensures`, and only for a scalar (integer, float, bool) — a debug build snapshots it on entry, and copying a Vec or struct there would either alias or clone on every call.\n\nThis is what lets a contract describe a `&mut` parameter:\n```milo\nfn bump(n: &mut i64): void\nensures n == old(n) + 100\n```\nWithout it, `ensures` can only talk about `result`, so a mutating function has no expressible specification — and a caller learns nothing from it.",
+};
 
 // Scalar primitives + the two string types. Keyed by the exact type keyword;
 // the value is the markdown body shown on hover.
@@ -1328,9 +1343,13 @@ function handleCompletion(uri: string, line: number, character: number): object 
   // `embedFile` is compile-time-only and spelled with the `@` sigil. Suggest the
   // sigil form unless the user already typed the '@' (else they'd get '@@embedFile').
   const afterSigil = /@\w*$/.test(prefix);
-  for (const b of ["print", "eprint", "format", "jsonStringify", "embedFile", "targetOs", "flush", "max", "min"]) {
+  for (const b of ["print", "eprint", "format", "jsonStringify", "embedFile", "targetOs", "flush", "max", "min", "old"]) {
     if (b.startsWith(partial) && !seen.has(b)) {
       seen.add(b);
+      if (b === "old") {
+        items.push({ label: b, kind: CIK_FUNCTION, detail: "contract-only: the entry value of a scalar, for `ensures`" });
+        continue;
+      }
       if (b === "embedFile" || b === "targetOs") {
         const text = afterSigil ? b : "@" + b;
         items.push({ label: text, insertText: text, filterText: b, kind: CIK_FUNCTION, detail: "compile-time builtin" });

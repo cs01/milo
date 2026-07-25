@@ -1,0 +1,38 @@
+// @proven: 3
+// @failed: 0
+// @unknown: 0
+// `old(e)` names the value `e` held at function entry, which is what makes a contract about
+// a `&mut` parameter say anything at all: without it `ensures` can only talk about `result`,
+// so every mutating function was a specification black hole.
+//
+// Two halves, both exercised here:
+//   definition side — `bump` proves its own frame condition against its body
+//   call site       — `caller` gets to USE it, because the frame fact relates the post-call
+//                     symbol for `x` back to the pre-call one. Havocing the argument is what
+//                     keeps the walker sound; without the frame fact the caller learned
+//                     nothing whatsoever from a `&mut` callee's contract.
+//
+// Count: bump's ensures + bump's own `requires` at the call + needsBig's `requires`.
+fn bump(n: &mut i64): void
+requires n >= 0
+ensures n == old(n) + 100
+{
+    n = n + 100
+}
+
+fn needsBig(v: i64): i64
+requires v >= 100
+{
+    return v
+}
+
+fn caller(): i64 {
+    var x: i64 = 5
+    // Provable only from the frame condition: 5 is far below 100 on the way in.
+    bump(x)
+    return needsBig(x)
+}
+
+fn main() {
+    print(caller())
+}

@@ -1,0 +1,26 @@
+// @proven: 2
+// @failed: 1
+// @unknown: 0
+// Soundness: an empty range must not make the loop's facts vacuously available.
+//
+// The index bound (`lo <= i < hi`) is stated as a PATH CONDITION on body-derived paths, not
+// as a global assumption. That distinction is the whole fixture: `0..0` makes the predicate
+// unsatisfiable, so the body is correctly unreachable — but asserted globally the same
+// unsatisfiable fact would make EVERY query in the function vacuously unsat, and `result ==
+// 5` would come back proven for a function that returns 0.
+fn emptyLoop(): i64
+ensures result == 5
+{
+    var total: i64 = 0
+    for i in 0..0
+    invariant
+    total >= 0
+    {
+        total = total + 1
+    }
+    return total
+}
+
+fn main() {
+    print(emptyLoop())
+}

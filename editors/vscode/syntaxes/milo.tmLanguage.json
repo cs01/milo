@@ -58,6 +58,10 @@
           "match": "\\b(import)\\b"
         },
         {
+          "name": "keyword.other.contract.milo",
+          "match": "\\b(requires|ensures|invariant|decreases)\\b"
+        },
+        {
           "name": "storage.type.fn.milo",
           "match": "\\b(fn)\\b"
         },

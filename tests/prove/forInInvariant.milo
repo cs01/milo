@@ -1,0 +1,45 @@
+// @proven: 5
+// @failed: 1
+// @unknown: 0
+// Milo's idiomatic loop is `for in`, and until now it could carry no invariant at all —
+// the grammar took one only on `while`, so the language's most-used loop form was
+// unreasonable-about by construction.
+//
+// A counted loop is crossed by induction the same way a while loop is, but nothing in the
+// BODY advances the binding — the loop form owns that — so the index is modelled here:
+// fresh at an arbitrary iteration, bounded by the range, and bumped by one for the
+// preservation half. That range bound is also why `invariant i >= 0` is unnecessary: the
+// membership predicate already supplies it, so `total >= 0` alone is inductive.
+//
+// `broken` is refuted on the preservation half: `total == 0` survives entry and dies on the
+// first iteration.
+fn sumTo(n: i64): i64
+requires n >= 0
+ensures result >= 0
+{
+    var total: i64 = 0
+    for i in 0..n
+    invariant
+    total >= 0
+    {
+        total = total + i
+    }
+    return total
+}
+
+fn broken(n: i64): i64
+requires n >= 0
+{
+    var total: i64 = 0
+    for i in 0..n
+    invariant
+    total == 0
+    {
+        total = total + 1
+    }
+    return total
+}
+
+fn main() {
+    print(sumTo(4))
+}

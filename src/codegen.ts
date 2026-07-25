@@ -1448,6 +1448,14 @@ export class Codegen {
     const allocaInsertPoint = lines.length;
 
     this.currentEnsures = [];
+    if (this.contractChecks && fn.oldSnapshots) {
+      // Before any `requires` runs, and certainly before the body: `old(e)` names the value
+      // at entry, so the snapshot must be taken while that state is still the current one.
+      for (const snap of fn.oldSnapshots) {
+        const [snapLines] = this.genStmt(snap);
+        lines.push(...snapLines);
+      }
+    }
     if (this.contractChecks && fn.contracts) {
       const ensures = fn.contracts.filter(c => c.kind === "ensures");
       if (ensures.length > 0) {
@@ -2006,6 +2014,19 @@ export class Codegen {
     }
   }
 
+  // A for-loop's invariants, asserted at the top of every iteration after the loop variable
+  // is bound. Unlike a while loop — whose invariants sit at the condition block and so also
+  // run on exit — a for loop's iteration count is owned by the lowering, so this checks each
+  // iteration but not the state after the last one. The static prover checks that half.
+  private emitLoopInvariants(lines: string[], invariants: HIRContract[] | undefined) {
+    if (!this.contractChecks || !invariants) return;
+    for (const inv of invariants) {
+      const [invLines, invVal] = this.genExpr(inv.expr);
+      lines.push(...invLines);
+      this.emitContractCheck(lines, invVal, "invariant", inv.span);
+    }
+  }
+
   private emitContractCheck(lines: string[], condVal: string, kind: "requires" | "ensures" | "invariant", span: Span | undefined) {
     this.needsContractCheck = true;
     this.needsPrintf = true;
@@ -2142,6 +2163,7 @@ export class Codegen {
     lines.push(`  br i1 ${cmp}, label %${bodyLabel}, label %${endLabel}`);
     lines.push(`${bodyLabel}:`);
 
+    this.emitLoopInvariants(lines, stmt.invariants);
     let bodyTerminated = false;
     for (const s of stmt.body) {
       const [sl, t] = this.genStmt(s);
@@ -2253,6 +2275,7 @@ export class Codegen {
       lines.push(`  ${elemPtr} = getelementptr ${elemTy}, ptr ${data}, i64 ${idx}`);
       lines.push(`  store ptr ${elemPtr}, ptr ${varAddr}`);
 
+      this.emitLoopInvariants(lines, stmt.invariants);
       let bodyTerminated = false;
       for (const s of stmt.body) {
         const [sl, t] = this.genStmt(s);
@@ -2324,6 +2347,7 @@ export class Codegen {
       lines.push(`  ${byte} = load i8, ptr ${bytePtr}`);
       lines.push(`  store i8 ${byte}, ptr ${varAddr}`);
 
+      this.emitLoopInvariants(lines, stmt.invariants);
       let bodyTerminated = false;
       for (const s of stmt.body) {
         const [sl, t] = this.genStmt(s);
@@ -2390,6 +2414,7 @@ export class Codegen {
       lines.push(`  ${elemPtr} = getelementptr ${iterTy}, ptr ${iterAddr}, i32 0, i32 ${idx}`);
       lines.push(`  store ptr ${elemPtr}, ptr ${varAddr}`);
 
+      this.emitLoopInvariants(lines, stmt.invariants);
       let bodyTerminated = false;
       for (const s of stmt.body) {
         const [sl, t] = this.genStmt(s);
@@ -2486,6 +2511,7 @@ export class Codegen {
         lines.push(`  store ptr ${valPtr}, ptr %${stmt.varName2}.addr`);
       }
 
+      this.emitLoopInvariants(lines, stmt.invariants);
       let bodyTerminated = false;
       for (const s of stmt.body) {
         const [sl, t] = this.genStmt(s);
@@ -2587,6 +2613,7 @@ export class Codegen {
     lines.push(`  ${val} = load ${elemTy}, ptr ${payloadPtr}`);
     lines.push(`  store ${elemTy} ${val}, ptr ${varAddr}`);
 
+    this.emitLoopInvariants(lines, stmt.invariants);
     let bodyTerminated = false;
     for (const s of stmt.body) {
       const [sl, t] = this.genStmt(s);

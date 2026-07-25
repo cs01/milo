@@ -223,8 +223,9 @@ Note that the C checks run when a program is actually built (`milo build`, `milo
 
 ## Not annotations
 
-Contract clauses — `requires`, `ensures`, `invariant` — are ordinary keywords in the
-declaration, not `@` annotations, because they are type-checked expressions rather than
-instructions to the compiler. See [Contracts & Safety](./safety).
+Contract clauses — `requires`, `ensures`, `invariant`, `decreases` — are ordinary keywords in
+the declaration, not `@` annotations, because they are type-checked expressions rather than
+instructions to the compiler. `old(e)`, which names a parameter's entry value inside an
+`ensures`, is contract-only syntax for the same reason. See [Contracts & Safety](./safety).
 
 Next: [C FFI](./ffi)

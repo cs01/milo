@@ -191,6 +191,9 @@ export class TypeChecker {
   private _globalTypes = new Map<string, TypeKind>();
   private functions = new Map<string, FnSig>();
   private fnDecls = new Map<string, Function>();
+  // Which contract clause is being checked, if any. `old()` is legal only inside `ensures`,
+  // and the error for it elsewhere reads better naming the clause it was found in.
+  private contractScope: "requires" | "ensures" | "invariant" | "decreases" | null = null;
   private genericFns = new Map<string, GenericFnInfo>();
   private structs = new Map<string, StructInfo>();
   private enums = new Map<string, EnumInfo>();
@@ -529,6 +532,26 @@ export class TypeChecker {
         const contractSrc = this.contractExprToString(c.expr);
         this.error(`requires clause '${contractSrc}' violated`, callSpan);
       }
+    }
+  }
+
+  // A `decreases` measure is an integer that must fall toward zero, so it is the one clause
+  // that is not a boolean claim.
+  private checkContractClause(c: import("./ast").Contract): void {
+    const prev = this.contractScope;
+    this.contractScope = c.kind;
+    const cType = this.checkExpr(c.expr);
+    this.contractScope = prev;
+    if (cType.tag === "unknown") return;
+    if (c.kind === "decreases") {
+      if (cType.tag !== "int") {
+        this.error(`decreases clause must be an integer measure, got ${typeName(cType)}`, c.span,
+          `it is the quantity that must strictly fall on every recursive call or iteration`);
+      }
+      return;
+    }
+    if (cType.tag !== "bool") {
+      this.error(`${c.kind} clause must be bool, got ${typeName(cType)}`, c.span);
     }
   }
 
@@ -1096,6 +1119,31 @@ export class TypeChecker {
             `extern-struct fields must be scalars, pointers, nested extern structs, or fixed arrays of those`);
         }
       }
+    }
+
+    // Struct invariants name the struct's own fields directly (`chr.len > 0`), so they are
+    // checked in a scope holding exactly those fields. Nothing else is visible: an invariant
+    // reaching for a global or a caller's local would be a claim the type cannot maintain
+    // on its own, which is the only thing that makes it assumable at every use site.
+    for (const s of program.structs) {
+      if (!s.invariants?.length) continue;
+      // Generic structs are allowed: an invariant is discharged against the generic
+      // declaration, before monomorphization, so one clause covers every instantiation. A
+      // clause that reaches into a field of type-parameter type simply won't typecheck.
+      const info = this.structs.get(s.name);
+      if (!info) continue;
+      this.pushScope();
+      for (const f of info.fields) {
+        this.declare(f.name, { type: f.type, mutable: false, moved: false, borrowed: false, read: true });
+      }
+      for (const inv of s.invariants) {
+        if (inv.kind !== "invariant") {
+          this.error(`a struct takes only 'invariant' clauses, not '${inv.kind}'`, inv.span);
+          continue;
+        }
+        this.checkContractClause(inv);
+      }
+      this.popScope();
     }
 
     for (const s of program.structs) {
@@ -2248,12 +2296,7 @@ export class TypeChecker {
       if (hasEnsures && retType.tag !== "void") {
         this.declare("result", { type: retType, mutable: false, moved: false, borrowed: false, read: true });
       }
-      for (const c of fn.contracts) {
-        const cType = this.checkExpr(c.expr);
-        if (cType.tag !== "bool" && cType.tag !== "unknown") {
-          this.error(`${c.kind} clause must be bool, got ${typeName(cType)}`, c.span);
-        }
-      }
+      for (const c of fn.contracts) this.checkContractClause(c);
       this.popScope();
     }
 
@@ -2525,12 +2568,7 @@ export class TypeChecker {
         if (condType.tag !== "bool" && condType.tag !== "unknown") {
           this.error(`while condition must be bool, got ${typeName(condType)}`, sp);
         }
-        for (const inv of stmt.invariants ?? []) {
-          const invType = this.checkExpr(inv.expr);
-          if (invType.tag !== "bool" && invType.tag !== "unknown") {
-            this.error(`loop invariant must be bool, got ${typeName(invType)}`, inv.span);
-          }
-        }
+        for (const inv of stmt.invariants ?? []) this.checkContractClause(inv);
         const preMoves = this.snapshotMoveState();
         this.returnOnlyMovesStack.push(new Set());
         this.pushScope();
@@ -2574,6 +2612,7 @@ export class TypeChecker {
           this.returnOnlyMovesStack.push(new Set());
           this.pushScope();
           this.declare(stmt.varName, { type: varType, mutable: false, moved: false, borrowed: false, read: false });
+          for (const inv of stmt.invariants ?? []) this.checkContractClause(inv);
           this.loopDepth++;
           for (const s of stmt.body) this.checkStmt(s, fnRetType);
           this.loopDepth--;
@@ -2612,6 +2651,7 @@ export class TypeChecker {
             } else {
               this.declare(stmt.varName, { type: elemRef, mutable: false, moved: false, borrowed: false, read: false });
             }
+            for (const inv of stmt.invariants ?? []) this.checkContractClause(inv);
             this.loopDepth++;
             for (const s of stmt.body) this.checkStmt(s, fnRetType);
             this.loopDepth--;
@@ -2638,6 +2678,7 @@ export class TypeChecker {
             } else {
               this.declare(stmt.varName, { type: byteType, mutable: false, moved: false, borrowed: false, read: false });
             }
+            for (const inv of stmt.invariants ?? []) this.checkContractClause(inv);
             this.loopDepth++;
             for (const s of stmt.body) this.checkStmt(s, fnRetType);
             this.loopDepth--;
@@ -2667,6 +2708,7 @@ export class TypeChecker {
             if (stmt.varName2) {
               this.declare(stmt.varName2, { type: valRef, mutable: false, moved: false, borrowed: false, read: false });
             }
+            for (const inv of stmt.invariants ?? []) this.checkContractClause(inv);
             this.loopDepth++;
             for (const s of stmt.body) this.checkStmt(s, fnRetType);
             this.loopDepth--;
@@ -2698,6 +2740,7 @@ export class TypeChecker {
             } else {
               this.declare(stmt.varName, { type: elemRef, mutable: false, moved: false, borrowed: false, read: false });
             }
+            for (const inv of stmt.invariants ?? []) this.checkContractClause(inv);
             this.loopDepth++;
             for (const s of stmt.body) this.checkStmt(s, fnRetType);
             this.loopDepth--;
@@ -2750,6 +2793,7 @@ export class TypeChecker {
                 this.returnOnlyMovesStack.push(new Set());
                 this.pushScope();
                 this.declare(stmt.varName, { type: elemType, mutable: false, moved: false, borrowed: false, read: false });
+                for (const inv of stmt.invariants ?? []) this.checkContractClause(inv);
                 this.loopDepth++;
                 for (const s of stmt.body) this.checkStmt(s, fnRetType);
                 this.loopDepth--;
@@ -3849,6 +3893,27 @@ export class TypeChecker {
         return this.setType(expr, { tag: "unknown" });
       }
       case "Call": {
+        // `old(e)` is contract-only syntax, not a function: it names the value `e` held when
+        // the function was entered. Recognised before the name lookup so a body-local
+        // helper actually called `old` keeps working outside an `ensures`.
+        if (expr.func === "old" && !this.functions.has("old") && this.contractScope === "ensures") {
+          if (expr.args.length !== 1) { this.error(`old() takes exactly one argument`, sp); return this.setType(expr, { tag: "unknown" }); }
+          const inner = this.checkExpr(expr.args[0]!);
+          // A snapshot is a by-value copy taken at entry. Copying a Vec/string/struct there
+          // would either alias the caller's buffer or clone silently on every debug call, so
+          // the pre-state is restricted to what fits in a register — which is also the only
+          // fragment the SMT translator models.
+          if (inner.tag !== "int" && inner.tag !== "float" && inner.tag !== "bool" && inner.tag !== "unknown") {
+            this.error(`old() takes a scalar (integer, float, or bool), got ${typeName(inner)}`, sp,
+              `snapshot a scalar projection instead, e.g. old(v.len)`);
+          }
+          return this.setType(expr, inner);
+        }
+        if (expr.func === "old" && this.contractScope !== "ensures" && !this.functions.has("old")) {
+          this.error(`old() may only appear in an 'ensures' clause`, sp,
+            `there is no pre-state to name in a ${this.contractScope === null ? "function body" : `'${this.contractScope}' clause`}`);
+          return this.setType(expr, { tag: "unknown" });
+        }
         if (expr.func === "sizeOf") {
           if (!expr.typeArgs || expr.typeArgs.length !== 1) { this.error(`sizeOf requires exactly one type argument`, sp); return this.setType(expr, { tag: "unknown" }); }
           if (expr.args.length !== 0) { this.error(`sizeOf takes no value arguments`, sp); return this.setType(expr, { tag: "unknown" }); }

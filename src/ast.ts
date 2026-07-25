@@ -121,7 +121,7 @@ export interface IfLetStmt { kind: "IfLetStmt"; pattern: Pattern; subject: Expr;
 export interface LetElseStmt { kind: "LetElseStmt"; pattern: Pattern; value: Expr; elseBody: Stmt[]; span?: Span }
 
 export interface UnsafeBlock { kind: "UnsafeBlock"; body: Stmt[]; span?: Span }
-export interface ForInStmt { kind: "ForInStmt"; varName: string; varName2: string | null; iterable: Expr; body: Stmt[]; span?: Span }
+export interface ForInStmt { kind: "ForInStmt"; varName: string; varName2: string | null; iterable: Expr; invariants: Contract[]; body: Stmt[]; span?: Span }
 export type Stmt = LetDecl | VarDecl | Assign | Return | IfStmt | WhileStmt | ExprStmt | MatchStmt | BreakStmt | ContinueStmt | IfLetStmt | LetElseStmt | UnsafeBlock | ForInStmt;
 
 // ── Top-level ──
@@ -132,6 +132,10 @@ export interface StructDecl {
   span?: Span; // decl site — lets diagnostics point at the struct, and identifies its file
   typeParams: TypeParam[];
   fields: StructField[];
+  // `invariant <expr>` clauses written after the closing brace. The expression names the
+  // struct's own fields directly (`chr.len > 0`, not `self.chr.len > 0`) — the receiver is
+  // implicit because an invariant has exactly one subject.
+  invariants?: Contract[];
   attributes?: Attribute[];
   isExtern?: boolean;
   isOpaque?: boolean;
@@ -154,7 +158,9 @@ export interface EnumDecl {
 }
 
 export interface Contract {
-  kind: "requires" | "ensures" | "invariant";
+  // `decreases` is a termination measure, not a boolean claim: an integer expression that
+  // must strictly drop (and stay >= 0) across every self-recursive call or loop iteration.
+  kind: "requires" | "ensures" | "invariant" | "decreases";
   expr: Expr;
   span?: Span;
 }

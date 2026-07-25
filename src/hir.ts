@@ -111,9 +111,9 @@ export type HIRStmt =
   | { kind: "ExprStmt"; expr: HIRExpr; span?: Span }
   | { kind: "Match"; subject: HIRExpr; arms: HIRMatchArm[]; enumName: string; subjectIsRef?: boolean; span?: Span }
   | { kind: "UnsafeBlock"; body: HIRStmt[]; span?: Span }
-  | { kind: "ForRange"; varName: string; varType: TypeKind; start: HIRExpr; end: HIRExpr; body: HIRStmt[]; span?: Span }
-  | { kind: "ForEach"; varName: string; varName2: string | null; varType: TypeKind; varType2: TypeKind | null; iterable: HIRExpr; iterableKind: "vec" | "string" | "hashmap" | "array"; body: HIRStmt[]; span?: Span }
-  | { kind: "ForIterator"; varName: string; varType: TypeKind; iterable: HIRExpr; nextMethod: string; optionEnumName: string; body: HIRStmt[]; span?: Span };
+  | { kind: "ForRange"; varName: string; varType: TypeKind; start: HIRExpr; end: HIRExpr; body: HIRStmt[]; invariants?: HIRContract[]; span?: Span }
+  | { kind: "ForEach"; varName: string; varName2: string | null; varType: TypeKind; varType2: TypeKind | null; iterable: HIRExpr; iterableKind: "vec" | "string" | "hashmap" | "array"; body: HIRStmt[]; invariants?: HIRContract[]; span?: Span }
+  | { kind: "ForIterator"; varName: string; varType: TypeKind; iterable: HIRExpr; nextMethod: string; optionEnumName: string; body: HIRStmt[]; invariants?: HIRContract[]; span?: Span };
 
 export interface HIRMatchArm {
   pattern: HIRPattern;
@@ -141,6 +141,10 @@ export interface HIRFunction {
   retType: TypeKind;
   body: HIRStmt[];
   contracts?: HIRContract[];
+  // `let __oldN = <expr>` bindings for every `old(...)` an `ensures` mentions, emitted at
+  // entry ahead of the body — but only in a contract-checking build, so a release binary
+  // pays nothing for a clause it never evaluates.
+  oldSnapshots?: (HIRStmt & { kind: "Let" })[];
   isExtern: boolean;
   isVariadic: boolean;
   // Drives what the generated C header declares: the header is the library's published

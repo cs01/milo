@@ -125,9 +125,15 @@ export interface Gate {
   ok: boolean;
 }
 
-// Compare one file's verdicts against its ratchet. Losing a proof and gaining an
-// unknown are both regressions: the contract is still written down either way, so the
-// only thing that changed is whether anything backs it.
+// Compare one file's verdicts against its ratchet.
+//
+// `proven` is a floor and `errors` a ceiling; both gate. `unknown` is REPORTED ONLY, and
+// that is a deliberate correction: a rising unknown count has two causes that look
+// identical in the tally — a contract that stopped being discharged (bad) and obligations
+// that only just became visible (good, and exactly what fixing the translator does). The
+// first already trips the `proven` floor, because a contract that degrades from proven to
+// unknown takes the proven count down with it. Gating on unknown therefore adds no
+// detection, only false alarms every time coverage improves.
 function ratchet(r: FileResult, out: { regressions: string[]; gains: string[]; untracked: string[] }): void {
   // No tally at all means prove never got as far as a verdict (compile failure, guard
   // kill). Every count reads 0, which would sail through a 0-floor — the one case where
@@ -142,9 +148,8 @@ function ratchet(r: FileResult, out: { regressions: string[]; gains: string[]; u
     return;
   }
   if (r.proven < e.proven) out.regressions.push(`${r.file}: proven ${r.proven} < ${e.proven} — a contract stopped being provable`);
-  if (r.unknown > e.unknown) out.regressions.push(`${r.file}: unknown ${r.unknown} > ${e.unknown} — a contract became undecidable`);
   if (r.errors > e.errors) out.regressions.push(`${r.file}: errors ${r.errors} > ${e.errors} — new translator/solver error`);
-  if (r.proven > e.proven || r.unknown < e.unknown || r.errors < e.errors) {
+  if (r.proven !== e.proven || r.unknown !== e.unknown || r.errors !== e.errors) {
     out.gains.push(`${r.file}: ${e.proven}/${e.unknown}/${e.errors} -> ${r.proven}/${r.unknown}/${r.errors} (proven/unknown/errors)`);
   }
 }
@@ -194,7 +199,7 @@ export function report(results: FileResult[]): Gate {
     for (const s of ratch.regressions) console.log("  " + s);
   }
   if (ratch.gains.length) {
-    console.log("\nRatchet forward (run with --update to lock these in):");
+    console.log("\nVerdict drift (run with --update to lock these in):");
     for (const s of ratch.gains) console.log("  " + s);
   }
   if (ratch.untracked.length) {

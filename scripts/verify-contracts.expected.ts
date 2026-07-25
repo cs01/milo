@@ -7,11 +7,14 @@
 // That is how unproven contracts accumulate as false confidence.
 //
 // Direction of each bound:
-//   proven  — floor.   Losing a proof fails the gate.
-//   unknown — ceiling. A newly-undecidable contract fails the gate.
-//   errors  — ceiling. Same, for translator/solver errors.
-// Movement the good way (more proven, fewer unknown) is reported, not failed, and the
-// numbers here should be updated to lock the gain in: `bun scripts/verify-contracts.ts --update`.
+//   proven  — floor, GATES.   Losing a proof fails the build.
+//   errors  — ceiling, GATES. A translator/solver error means an invalid query, always a bug.
+//   unknown — recorded, does NOT gate. It rises both when a contract stops being
+//             discharged and when previously-invisible obligations start being emitted,
+//             and the tally cannot tell those apart. The first case already trips the
+//             proven floor, so gating here would only punish coverage improvements.
+// Any drift is reported and the numbers should be refreshed to match:
+// `bun scripts/verify-contracts.ts --update`.
 //
 // A file absent from this map is reported but does not fail — a new example must not
 // break CI on arrival. Add it when it lands. Platform variants only appear for the host

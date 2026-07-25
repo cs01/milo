@@ -17,9 +17,25 @@ writeFileSync(MAIN, `fn main() {\n    let y = helper(41)\n}\n`);
 const MAIN_URI = pathToFileURL(MAIN).href;
 const HELPER_URI = pathToFileURL(join(ROOT, "helper.milo")).href;
 
+// A second workspace for cross-file diagnostics. Kept apart from ROOT so its
+// extra files cannot perturb the project-wide reference scan above.
+const DROOT = mkdtempSync(join(tmpdir(), "milo-lsp-diag-"));
+writeFileSync(join(DROOT, "data.txt"), "payload\n");
+// The bare-embedFile warning sits on line 9 — past the end of the 6-line importer,
+// so a diagnostic misattributed to the importer is unmissable.
+const DHELPER = join(DROOT, "helper.milo");
+writeFileSync(DHELPER, `// 1\n// 2\n// 3\n// 4\n// 5\n// 6\n// 7\npub fn getData(): string {\n    return embedFile("data.txt")\n}\n`);
+const DMAIN = join(DROOT, "main.milo");
+// Line 6 (0-indexed 5) carries the importer's OWN copy of the same warning.
+const DMAIN_SRC = `from "./helper" import {\n    getData\n}\n\nfn main() {\n    print(getData() + embedFile("data.txt"))\n}\n`;
+writeFileSync(DMAIN, DMAIN_SRC);
+const DMAIN_URI = pathToFileURL(DMAIN).href;
+
 let proc: Subprocess<"pipe", "pipe", "inherit">;
 let buf = new Uint8Array(0);
 const pending = new Map<number, (v: any) => void>();
+// Latest published diagnostics per document URI (server→client notifications).
+const diagnosticsByUri = new Map<string, any[]>();
 
 function frame(msg: any): Uint8Array {
   const body = JSON.stringify(msg);
@@ -39,6 +55,7 @@ function pump() {
     const msg = JSON.parse(new TextDecoder().decode(buf.slice(start, start + len)));
     buf = buf.slice(start + len);
     if (msg.id !== undefined && pending.has(msg.id)) { pending.get(msg.id)!(msg.result); pending.delete(msg.id); }
+    else if (msg.method === "textDocument/publishDiagnostics") { diagnosticsByUri.set(msg.params.uri, msg.params.diagnostics); }
   }
 }
 function req(id: number, method: string, params: any, timeoutMs = 4000): Promise<any> {
@@ -66,9 +83,14 @@ beforeAll(async () => {
   await send({ jsonrpc: "2.0", method: "initialized", params: {} });
   // Open ONLY main.milo — helper.milo stays on disk, never opened.
   await send({ jsonrpc: "2.0", method: "textDocument/didOpen", params: { textDocument: { uri: MAIN_URI, languageId: "milo", version: 1, text: `fn main() {\n    let y = helper(41)\n}\n` } } });
+  await send({ jsonrpc: "2.0", method: "textDocument/didOpen", params: { textDocument: { uri: DMAIN_URI, languageId: "milo", version: 1, text: DMAIN_SRC } } });
 });
 
-afterAll(() => { proc?.kill(); rmSync(ROOT, { recursive: true, force: true }); });
+afterAll(() => {
+  proc?.kill();
+  rmSync(ROOT, { recursive: true, force: true });
+  rmSync(DROOT, { recursive: true, force: true });
+});
 
 test("references finds occurrences in an unopened on-disk file", async () => {
   // `helper` at its call site in main.milo (line 1, col 12)
@@ -82,4 +104,32 @@ test("rename edits both the open file and the unopened declaration", async () =>
   const edit = await req(11, "textDocument/rename", { textDocument: { uri: MAIN_URI }, position: { line: 1, character: 12 }, newName: "increment" });
   expect(Object.keys(edit.changes)).toContain(HELPER_URI);
   expect(Object.keys(edit.changes)).toContain(MAIN_URI);
+});
+
+// The checker runs over the whole resolved program, so it reports warnings from
+// imported files too. Those spans are line/col in the IMPORTED file; publishing
+// them verbatim under the open document's URI squiggled an unrelated line.
+test("a warning from an imported file is not squiggled on the importer", async () => {
+  // Diagnostics are async notifications published after didOpen — poll briefly.
+  const deadline = Date.now() + 4000;
+  let diags: any[] | undefined;
+  while (Date.now() < deadline) {
+    diags = diagnosticsByUri.get(DMAIN_URI);
+    if (diags && diags.length >= 2) break;
+    await new Promise(r => setTimeout(r, 50));
+  }
+  expect(diags?.length).toBe(2);
+
+  // The importer's own warning keeps its true position: line 6, on `embedFile`.
+  const own = diags!.find(d => !/^in imported file/.test(d.message))!;
+  expect(own.message).toContain("compile-time builtin");
+  expect(own.range.start.line).toBe(5);
+  expect(own.range.start.character).toBe(22);
+
+  // The helper's warning is hoisted to the top with its real location in the
+  // message — never onto line 9, which the 7-line importer does not even have.
+  const imported = diags!.find(d => /^in imported file/.test(d.message))!;
+  expect(imported.message).toContain(`${DHELPER}:9:12`);
+  expect(imported.message).toContain("compile-time builtin");
+  expect(imported.range.start.line).toBe(0);
 });

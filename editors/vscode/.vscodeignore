@@ -1,0 +1,10 @@
+# out/extension.js is a self-contained bundle (bun build --format=cjs), so the
+# vsix ships neither sources nor node_modules — vsce is told --no-dependencies.
+.vscode/**
+src/**
+node_modules/**
+tsconfig.json
+package-lock.json
+out/**/*.map
+**/*.vsix
+bun.lock

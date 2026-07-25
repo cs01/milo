@@ -1,109 +1,163 @@
 import * as path from "path";
 import * as fs from "fs";
 import * as os from "os";
-import { workspace, ExtensionContext, window, commands } from "vscode";
-import { LanguageClient, LanguageClientOptions, ServerOptions, TransportKind } from "vscode-languageclient/node";
+import { workspace, window, commands, type ExtensionContext } from "vscode";
+import { LanguageClient, TransportKind, type LanguageClientOptions, type ServerOptions } from "vscode-languageclient/node";
 
-let client: LanguageClient;
+let client: LanguageClient | undefined;
 
-export function activate(context: ExtensionContext) {
-  const miloRoot = findMiloRoot(context.extensionPath);
-  if (!miloRoot) {
-    window.showWarningMessage("Milo: could not locate compiler root. LSP disabled.");
+// How the language server gets launched. A published install runs the `milo`
+// binary, which is self-contained (the stdlib is embedded, `milo lsp` needs
+// nothing else on disk). The repo fallback exists only so F5 in a checkout
+// exercises uncommitted compiler changes.
+type Server =
+  | { kind: "binary"; command: string; args: string[] }
+  | { kind: "repo"; command: string; args: string[]; root: string };
+
+export async function activate(context: ExtensionContext) {
+  const server = resolveServer(context.extensionPath);
+  if (!server) {
+    window.showErrorMessage(
+      "Milo: `milo` not found. Install it (https://milo-language.github.io/milo/getting-started/installation) " +
+      "or set `milo.path` to the binary.",
+    );
     return;
   }
 
-  const bunPath = findBun();
-  if (!bunPath) {
-    window.showErrorMessage("Milo: could not find `bun` executable. Install Bun or add it to PATH.");
-    return;
-  }
+  await start(server);
 
-  const mainTs = path.join(miloRoot, "src", "main.ts");
+  context.subscriptions.push(
+    commands.registerCommand("milo.restartServer", async () => {
+      await client?.stop();
+      client = undefined;
+      const next = resolveServer(context.extensionPath);
+      if (next) await start(next);
+    }),
+    commands.registerCommand("milo.runFile", () => {
+      const doc = window.activeTextEditor?.document;
+      if (!doc || doc.languageId !== "milo") { window.showWarningMessage("Milo: no .milo file is active."); return; }
+      void doc.save();
+      const terminal = window.createTerminal("Milo Run");
+      terminal.show();
+      terminal.sendText(shellCommand(server, ["run", doc.fileName]));
+    }),
+  );
+}
 
+async function start(server: Server) {
   // `milo.debug` → MILO_LSP_DEBUG so verbose hover/definition tracing can be
   // toggled from settings without relaunching the editor from a shell.
   const debug = workspace.getConfiguration("milo").get<boolean>("debug") ? "1" : "0";
   const serverOptions: ServerOptions = {
-    command: bunPath,
-    args: ["run", mainTs, "lsp"],
+    command: server.command,
+    args: [...server.args, "lsp"],
     transport: TransportKind.stdio,
     options: { env: { ...process.env, MILO_LSP_DEBUG: debug } },
   };
 
   const clientOptions: LanguageClientOptions = {
     documentSelector: [{ scheme: "file", language: "milo" }],
-    synchronize: {
-      fileEvents: workspace.createFileSystemWatcher("**/*.milo"),
-    },
+    synchronize: { fileEvents: workspace.createFileSystemWatcher("**/*.milo") },
   };
 
   client = new LanguageClient("milod", "Milo Language Server", serverOptions, clientOptions);
-  client.start();
-
-  context.subscriptions.push(
-    commands.registerCommand("milo.runFile", (filePath: string) => {
-      const terminal = window.createTerminal("Milo Run");
-      terminal.show();
-      terminal.sendText(`${bunPath} run ${mainTs} run ${filePath}`);
-    }),
-    commands.registerCommand("milo.runTest", (filePath: string) => {
-      const name = path.basename(filePath, ".milo");
-      const terminal = window.createTerminal("Milo Test");
-      terminal.show();
-      terminal.sendText(`${bunPath} test ${path.join(miloRoot, "tests", "run.test.ts")} -t "${name}"`);
-    }),
-  );
+  await client.start();
 }
 
 export function deactivate(): Thenable<void> | undefined {
   return client?.stop();
 }
 
-// VS Code launched from Dock inherits a minimal PATH that often lacks ~/.bun/bin,
-// /opt/homebrew/bin, etc. Probe known install locations before falling back to PATH.
+function shellCommand(server: Server, args: string[]): string {
+  return [server.command, ...server.args, ...args].map(quote).join(" ");
+}
+
+function quote(arg: string): string {
+  return /[\s"']/.test(arg) ? `"${arg.replace(/"/g, '\\"')}"` : arg;
+}
+
+function resolveServer(extensionPath: string): Server | null {
+  const configured = workspace.getConfiguration("milo").get<string>("path")?.trim();
+  if (configured) {
+    if (isExecutable(configured)) return { kind: "binary", command: configured, args: [] };
+    window.showWarningMessage(`Milo: milo.path="${configured}" is not an executable file.`);
+    return null;
+  }
+
+  const binary = findMiloBinary();
+  if (binary) return { kind: "binary", command: binary, args: [] };
+
+  const root = findMiloRepo(extensionPath);
+  const bun = root ? findBun() : null;
+  if (root && bun) return { kind: "repo", command: bun, args: [path.join(root, "src", "main.ts")], root };
+
+  return null;
+}
+
+// VS Code launched from the Dock/Finder inherits a minimal PATH that lacks
+// ~/.local/bin, /opt/homebrew/bin and friends — the exact places milo installs
+// to — so probe them before trusting PATH resolution.
+function findMiloBinary(): string | null {
+  const exe = process.platform === "win32" ? "milo.exe" : "milo";
+  const candidates = [
+    path.join(os.homedir(), ".local", "bin", exe),
+    path.join(os.homedir(), ".milo", "bin", exe),
+    "/opt/homebrew/bin/" + exe,
+    "/usr/local/bin/" + exe,
+  ];
+  for (const c of candidates) if (isExecutable(c)) return c;
+  return onPath(exe);
+}
+
+function isExecutable(p: string): boolean {
+  try {
+    if (!fs.statSync(p).isFile()) return false;
+    fs.accessSync(p, fs.constants.X_OK);
+    return true;
+  } catch { return false; }
+}
+
+function onPath(exe: string): string | null {
+  const sep = process.platform === "win32" ? ";" : ":";
+  for (const dir of (process.env.PATH ?? "").split(sep)) {
+    if (!dir) continue;
+    const p = path.join(dir, exe);
+    if (isExecutable(p)) return p;
+  }
+  return null;
+}
+
 function findBun(): string | null {
   const candidates = [
     path.join(os.homedir(), ".bun", "bin", "bun"),
     "/opt/homebrew/bin/bun",
     "/usr/local/bin/bun",
   ];
-  for (const c of candidates) {
-    try { if (fs.statSync(c).isFile()) return c; } catch {}
-  }
-  return "bun"; // last resort: rely on PATH
+  for (const c of candidates) if (isExecutable(c)) return c;
+  return onPath(process.platform === "win32" ? "bun.exe" : "bun");
 }
 
-function isMiloRoot(dir: string): boolean {
+function isMiloRepo(dir: string): boolean {
   try {
-    const pkg = require(path.join(dir, "package.json"));
-    return pkg.name === "milo" && fs.statSync(path.join(dir, "src", "main.ts")).isFile();
+    return require(path.join(dir, "package.json")).name === "milo"
+      && fs.statSync(path.join(dir, "src", "main.ts")).isFile();
   } catch { return false; }
 }
 
-function findMiloRoot(extensionPath: string): string | null {
-  // Explicit override wins — needed when editing .milo files outside the milo repo.
+// Only consulted when no `milo` binary exists — the dev-checkout path.
+function findMiloRepo(extensionPath: string): string | null {
   const configured = workspace.getConfiguration("milo").get<string>("compilerRoot")?.trim();
   if (configured) {
-    if (isMiloRoot(configured)) return configured;
+    if (isMiloRepo(configured)) return configured;
     window.showWarningMessage(`Milo: milo.compilerRoot="${configured}" is not a Milo repo (no src/main.ts or wrong package name).`);
     return null;
   }
 
-  // Extension lives at <milo>/editors/vscode
-  const candidate = path.resolve(extensionPath, "..", "..");
-  try {
-    const pkg = require(path.join(candidate, "package.json"));
-    if (pkg.name === "milo") return candidate;
-  } catch {}
+  const sibling = path.resolve(extensionPath, "..", "..");  // <milo>/editors/vscode
+  if (isMiloRepo(sibling)) return sibling;
 
-  // Also check workspace folders
   for (const folder of workspace.workspaceFolders ?? []) {
-    try {
-      const pkg = require(path.join(folder.uri.fsPath, "package.json"));
-      if (pkg.name === "milo") return folder.uri.fsPath;
-    } catch {}
+    if (isMiloRepo(folder.uri.fsPath)) return folder.uri.fsPath;
   }
-
   return null;
 }

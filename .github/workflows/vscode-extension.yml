@@ -1,0 +1,66 @@
+name: VS Code Extension
+
+# No `paths` filter on the tag push: path filters apply to tag pushes too, so a
+# vscode-v* tag on a commit that didn't touch editors/vscode would silently never
+# publish. PRs carry the path filter instead.
+on:
+  push:
+    tags: ["vscode-v*"]
+  pull_request:
+    paths: ["editors/vscode/**", ".github/workflows/vscode-extension.yml"]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: editors/vscode
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - run: bun install --frozen-lockfile
+      - run: bun run typecheck
+      - run: bun run build
+      # Packaging is the real gate: vsce rejects a manifest that would fail on the
+      # marketplace (missing icon/license/repository, bad engines range) — catching
+      # that here rather than at publish time, when the tag is already pushed.
+      - run: bunx @vscode/vsce package --no-dependencies -o milo-lang.vsix
+      - uses: actions/upload-artifact@v4
+        with:
+          name: milo-lang-vsix
+          path: editors/vscode/milo-lang.vsix
+
+  publish:
+    if: startsWith(github.ref, 'refs/tags/vscode-v')
+    needs: build
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: editors/vscode
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - run: bun install --frozen-lockfile
+      # The tag names the published version; a mismatch would ship a version nobody
+      # can correlate with the tag, and the marketplace has no unpublish-and-reuse.
+      - name: Tag matches package.json version
+        run: |
+          tagged="${GITHUB_REF_NAME#vscode-v}"
+          manifest=$(bun -e 'console.log(require("./package.json").version)')
+          if [ "$tagged" != "$manifest" ]; then
+            echo "tag $GITHUB_REF_NAME says $tagged, package.json says $manifest" >&2
+            exit 1
+          fi
+      - run: bun run build
+      - run: bunx @vscode/vsce package --no-dependencies -o milo-lang.vsix
+      - name: Publish to VS Code Marketplace
+        run: bunx @vscode/vsce publish --no-dependencies --packagePath milo-lang.vsix -p "$VSCE_PAT"
+        env:
+          VSCE_PAT: ${{ secrets.VSCE_PAT }}
+      # Cursor, VSCodium, Windsurf and Gitpod install from Open VSX, not the
+      # Microsoft marketplace — publishing to only one leaves those users on a
+      # stale build with no signal that anything shipped.
+      - name: Publish to Open VSX
+        run: bunx ovsx publish milo-lang.vsix -p "$OVSX_TOKEN"
+        env:
+          OVSX_TOKEN: ${{ secrets.OVSX_TOKEN }}

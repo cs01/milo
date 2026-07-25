@@ -102,18 +102,62 @@ pub fn gcd2(a: i64, b: i64): i64 {
     return x
 }
 
-// Divide a row by the gcd of its entries — bounds Fourier–Motzkin coefficient
-// growth so i64 doesn't overflow on the small systems contracts produce.
+// ceil(a / b) for b > 0, on top of Milo's truncating division. Truncation already
+// rounds toward zero, which IS the ceiling for a negative numerator; only a positive
+// remainder needs the bump.
+pub fn ceilDiv(a: i64, b: i64): i64 {
+    let q = a / b
+    if a % b > 0 {
+        return q + 1
+    }
+    return q
+}
+
+// Put a row in INTEGER normal form. Two steps, both exact over the integers — the
+// tightened row has the same integer solutions as the original, so this can only sharpen
+// a verdict, never invent one.
+//
+//   1. Strictness goes away. `L < 0` on an integer L is `L + 1 <= 0`, so nothing
+//      downstream has to carry a strict flag.
+//   2. The constant is rounded IN. With g = gcd of the coefficients, `row·x` is always a
+//      multiple of g, so `g*(b·x) <= -konst` is `b·x <= floor(-konst/g)` — a strictly
+//      stronger bound than the rational one whenever g does not divide konst.
+//
+// Step 2 is the whole reason this exists. Fourier-Motzkin decides feasibility over the
+// RATIONALS, so `2x = 3` looks satisfiable (x = 3/2) and the verdict came back `unknown —
+// no integer witness`: the solver could neither refute it nor produce a counterexample an
+// i64 could take. Rounding the bound in turns that same system into `x <= 1` and `x >= 2`,
+// which Fourier-Motzkin then refutes with no notion of integrality at all.
+//
+// The old form divided coefficients AND konst by their common gcd, which is exact over the
+// rationals and therefore threw this away: gcd(2, 3) is 1, so `2x - 3 <= 0` did not move.
+//
+// It also still does the job it was written for — dividing out the gcd bounds
+// Fourier-Motzkin's coefficient growth, which is what keeps i64 from overflowing on the
+// small systems contracts produce.
 pub fn reduceConstraint(c: &Constraint): Constraint {
+    var konst = c.konst
+    if c.strict {
+        konst = konst + 1
+    }
     var g: i64 = 0
     var j: i64 = 0
     while j < c.coeffs.len {
         g = gcd2(g, c.coeffs[j])
         j = j + 1
     }
-    g = gcd2(g, c.konst)
+    // An all-zero row is a bare constant claim: there is no g to divide by, and the
+    // feasibility check reads `konst` directly.
     if g < 1 {
-        g = 1
+        var zc: Vec<i64> = []
+        j = 0
+        while j < c.coeffs.len {
+            zc.push(0)
+            j = j + 1
+        }
+        return Constraint {
+            coeffs: zc, konst: konst, strict: false
+        }
     }
     var nc: Vec<i64> = []
     j = 0
@@ -122,7 +166,7 @@ pub fn reduceConstraint(c: &Constraint): Constraint {
         j = j + 1
     }
     return Constraint {
-        coeffs: nc, konst: c.konst / g, strict: c.strict
+        coeffs: nc, konst: ceilDiv(konst, g), strict: false
     }
 }
 

@@ -10,6 +10,16 @@ pub fn addAtom(p: &mut SmtProblem, row: Vec<i64>, konst: i64, strict: bool): i64
 
 Register an atom  row·x + konst <op> 0 ; returns its atom index.
 
+### `ceilDiv`
+
+```milo
+pub fn ceilDiv(a: i64, b: i64): i64
+```
+
+ceil(a / b) for b > 0, on top of Milo's truncating division. Truncation already
+rounds toward zero, which IS the ceiling for a negative numerator; only a positive
+remainder needs the bump.
+
 ### `cloneRow`
 
 ```milo
@@ -149,8 +159,28 @@ _Undocumented._
 pub fn reduceConstraint(c: &Constraint): Constraint
 ```
 
-Divide a row by the gcd of its entries — bounds Fourier–Motzkin coefficient
-growth so i64 doesn't overflow on the small systems contracts produce.
+Put a row in INTEGER normal form. Two steps, both exact over the integers — the
+tightened row has the same integer solutions as the original, so this can only sharpen
+a verdict, never invent one.
+
+  1. Strictness goes away. `L < 0` on an integer L is `L + 1 <= 0`, so nothing
+     downstream has to carry a strict flag.
+  2. The constant is rounded IN. With g = gcd of the coefficients, `row·x` is always a
+     multiple of g, so `g*(b·x) <= -konst` is `b·x <= floor(-konst/g)` — a strictly
+     stronger bound than the rational one whenever g does not divide konst.
+
+Step 2 is the whole reason this exists. Fourier-Motzkin decides feasibility over the
+RATIONALS, so `2x = 3` looks satisfiable (x = 3/2) and the verdict came back `unknown —
+no integer witness`: the solver could neither refute it nor produce a counterexample an
+i64 could take. Rounding the bound in turns that same system into `x <= 1` and `x >= 2`,
+which Fourier-Motzkin then refutes with no notion of integrality at all.
+
+The old form divided coefficients AND konst by their common gcd, which is exact over the
+rationals and therefore threw this away: gcd(2, 3) is 1, so `2x - 3 <= 0` did not move.
+
+It also still does the job it was written for — dividing out the gcd bounds
+Fourier-Motzkin's coefficient growth, which is what keeps i64 from overflowing on the
+small systems contracts produce.
 
 ### `satisfiesAll`
 

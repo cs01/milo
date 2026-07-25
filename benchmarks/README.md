@@ -53,10 +53,21 @@ Milo is 2% ahead of Rust on matmul, 3.5% behind C on sort, and 5% behind Rust an
 Those hold across batches but are small enough to be compiler-version noise, not a language
 property.
 
-The one real gap is binarytrees, at 1.42x Zig. That benchmark is pure allocation throughput:
-Zig's `smp_allocator` beats libc malloc, which Milo, C, and Odin all go through. C is also 18%
-ahead of Milo there, so roughly 15% is `Heap<T>` overhead on top of malloc and the rest is the
-allocator itself. Allocation throughput is the only number here worth optimizing.
+The one real gap is binarytrees, at 1.42x Zig. Decomposing it by benchmarking C variants that
+change one factor at a time:
+
+| variant                             | time   | delta |
+|-------------------------------------|--------|-------|
+| Zig — 16-byte node, `smp_allocator` | 1.9 ms |       |
+| C — 16-byte node, libc malloc       | 2.2 ms | +15% allocator |
+| C — 24-byte node, libc malloc       | 2.6 ms | +18% node size |
+| Milo — 24-byte node, libc malloc    | 2.7 ms | +4% codegen |
+
+Milo is within 4% of size-matched C, so `Heap<T>` itself is fine. The gap is node size: the enum
+tag makes `Tree` 24 bytes where Rust's is 16, because Rust encodes `Leaf` in the null-pointer
+niche of a `Box` field. Niche optimization for enums whose payload contains a non-null pointer is
+the fix, and it is a type-layout feature, not an allocator problem. The remaining 15% is libc
+malloc, recoverable by linking mimalloc/snmalloc if it ever matters.
 
 Hylo runs only fib: its stdlib has no `Movable` conformance for `Float64`, so `Array<Float64>`
 does not instantiate, and there is no float `print`. The 5.7× on fib is a debug-build `hc`

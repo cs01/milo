@@ -10,7 +10,7 @@ describe("emulator site navigation", () => {
   for (const page of ["index.md", "demos.md"]) {
     test(`${page} bypasses the docs router`, () => {
       const source = readFileSync(join(root, "docs", "site", page), "utf8");
-      const links = [...source.matchAll(/<a\b[^>]*href="\/milo\/(nes|genesis|snes)\/"[^>]*>/g)];
+      const links = [...source.matchAll(/<a\b[^>]*href="\/milo\/emulators\/(nes|genesis|snes)\/"[^>]*>/g)];
 
       expect(links.map((match) => match[1])).toEqual(emulatorPaths);
       // target="_self" is the reliable escape hatch: VitePress only intercepts a link when

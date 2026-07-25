@@ -142,7 +142,7 @@ The negative never reaches `sqrt` now — `raw < 0` returns `0`, a defined resul
 
 ### Loop invariants
 
-`requires` and `ensures` describe a function's boundary. `invariant` describes a loop, and it exists for one reason: **the prover does not unroll loops.** It cannot — the trip count usually isn't known. So on the way out of a loop, everything the loop assigned is an unknown value, and an `invariant` is the only thing that survives to say something about it.
+The prover does not unroll loops — the trip count usually isn't known. Everything a loop assigns is therefore unknown after it, and an `invariant` is what survives to say something about it.
 
 ```milo
 pub fn sumTo(n: i64): i64
@@ -168,52 +168,13 @@ verification: 5 conditions
   proven: 5  failed: 0  unknown: 0  errors: 0
 ```
 
-Five conditions from one loop: the postcondition, plus two per invariant — that it **holds on entry**, and that one pass through the body **re-establishes** it. That second half is why an invariant has to be inductive rather than merely true. Delete `invariant i >= 1` and the remaining one stops being provable:
+Each invariant costs two conditions: it must hold on entry, and one pass through the body must re-establish it. That second half is the catch — being true on every real run isn't enough, the invariant has to prove *itself* from one iteration to the next. Drop `i >= 1` here and `total >= 0` stops being provable: on its own, nothing in it rules out a negative `i`.
 
-```
-  ✗ [loop-invariant] sumTo: failed — counterexample: total__loop0 = 0, i__loop1 = -1
-```
-
-`total >= 0` is true of every run of this function, but it isn't preserved *on its own*: nothing in it rules out a negative `i` dragging the sum below zero. The solver says so with the offending value. Adding `i >= 1` closes it.
-
-Control-flow exits keep their actual state. A `continue` path must preserve the invariant; a `break` path proceeds to the code after the loop without assuming the guard is false; and a `return` path is checked directly against the function's postcondition. Nested loops generate their own establishment and preservation conditions.
-
-Delete both and the postcondition itself fails — `result` is simply unknown after the loop:
-
-```
-  ✗ [postcondition] sumTo: failed — counterexample: total__loop0 = -1, result = -1
-```
-
-Invariants are checked at runtime too, on every iteration, under the same rule as the rest of the walkthrough — `--debug`, or `--contract-checks` at any optimization level. And safety profiles use the clause as evidence rather than as a check: `do178c-a` and `nasa-a` require every `while` loop to carry one. (Only `while` — a `for in` is bounded by its range or its container, so it needs no clause to be evidence of termination.)
-
-`for in` takes an invariant in the same place, and needs less help than a `while` does:
-
-```milo
-pub fn sumTo(n: i64): i64
-requires n >= 0
-ensures result >= 0
-{
-    var total: i64 = 0
-    for i in 0..n
-    invariant total >= 0
-    {
-        total = total + i
-    }
-    return total
-}
-```
-
-```
-$ milo prove sumTo.milo
-verification: 3 conditions
-  proven: 3  failed: 0  unknown: 0  errors: 0
-```
-
-No `invariant i >= 0` is needed here, and that is the difference between the two loop forms. In a `while` loop the index is an ordinary variable and you have to say what is true of it; in a `for` loop the range *is* the fact, so the prover already knows `0 <= i < n` inside the body and knows the invariant holds at `n` on the way out.
+`for in` takes an invariant in the same place and needs less of one: the range is itself a fact, so the prover already knows `0 <= i < n` in the body without being told.
 
 ### `old` — what a function did to a `&mut`
 
-`ensures` can talk about `result`. That is enough for a function that returns something and nothing else — but a function that writes through a `&mut` parameter has no `result` to describe, and without a way to name the *previous* value there is nothing true to say about it. `old(e)` is that name: the value `e` held when the function was entered.
+A function that writes through a `&mut` has no `result` to describe. `old(e)` names the value `e` held on entry, which is what makes such a function specifiable at all.
 
 ```milo
 fn bump(n: &mut i64): void
@@ -223,29 +184,13 @@ ensures n == old(n) + 100
 }
 ```
 
-The payoff is at the call site, not the definition. When the prover walks past `bump(x)` it has to forget everything it knew about `x` — the write happened somewhere it cannot see, and keeping the old value would be a false proof, not a conservative one. `old` puts the information back:
+The payoff is at the call site: past `bump(x)` the prover would otherwise know nothing at all about `x`, and this contract tells it `x` grew by exactly 100.
 
-```milo
-fn needsBig(v: i64): i64
-requires v >= 100
-{
-    return v
-}
-
-fn caller(): i64 {
-    var x: i64 = 5
-    bump(x)
-    return needsBig(x)     // proven: x is 105, from bump's contract alone
-}
-```
-
-Without the contract, `needsBig`'s precondition is simply unprovable — `x` is an unknown after the call. This is what made mutating functions unspecifiable, and it is why `std/inflate`'s table builder can now say `ensures h.count.len == old(h.count.len)`: *this function fills the table in place and never resizes it*.
-
-`old` is legal only inside `ensures`, and only on a scalar — an integer, float, or bool. A contract-checking build snapshots the value on entry, and copying a `Vec` or a struct there would either alias the caller's buffer or clone on every call. Snapshot a scalar projection instead: `old(v.len)`.
+`old` is legal only inside `ensures`, and only on a scalar — snapshotting a `Vec` or struct on entry would alias or clone. Use a scalar projection instead: `old(v.len)`.
 
 ### `decreases` — why the recursion ends
 
-A recursive function is proved by assuming its own `ensures` at the recursive call. That is induction, and induction over a recursion that might not terminate proves anything at all. `decreases` supplies the missing half — an integer measure, not a boolean claim, that must be non-negative and must strictly fall at every self-call:
+`decreases` takes an integer measure that must stay non-negative and get strictly smaller at every recursive call. Without one, a function that recurses forever would prove any `ensures` you wrote.
 
 ```milo
 fn countdown(n: i64): i64
@@ -261,16 +206,7 @@ decreases n
   ✓ [termination] countdown: proven
 ```
 
-Get it wrong and the measure is refuted rather than quietly accepted — `return runaway(n + 1)` reports `✗ [termination] runaway: failed — counterexample: n = 1`.
-
-Leave it off entirely and the proof still runs, but it is no longer clean. It is reported as **conditional**, naming what it rested on:
-
-```
-  ✓ [postcondition] f: proven — conditional: assumes that f's recursion reaches a
-    base case, which nothing proved (add a 'decreases' clause)
-```
-
-`decreases` works on a loop too, where it buys total correctness rather than soundness: a loop that never ends makes a postcondition vacuously true rather than provable from nothing, so the measure is optional there in a way it is not for recursion.
+Loops take a `decreases` too, but there it is optional.
 
 ### Struct invariants — a fact the type carries
 

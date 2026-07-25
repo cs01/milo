@@ -33,7 +33,9 @@ ensures result >= 0
                 break
                 x = 0
             }
-            _ => { break }
+            _ => {
+                break
+            }
         }
     }
     return x

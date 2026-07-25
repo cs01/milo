@@ -35,19 +35,28 @@ Hot spots: grep slurps whole file then scans; hashmap needs probe optimization. 
 
 Same source shape in every language (same algorithm, same stdlib-level containers —
 `Vec`/`Vec`/`ArrayList`/`[dynamic]`), `rustc -O`, `zig -O ReleaseFast`, `odin -o:speed`,
-`clang -O2 -march=native`. Mean of 10 runs, Apple M-series, macOS.
+`clang -O2 -march=native`. Apple M-series, macOS.
+
+Numbers below are the best of 3 *independent* hyperfine batches of 20 runs each. Batch-to-batch
+drift is 0.3–4% and moves every language together, so a single batch will happily report a
+significant 2% win that the next batch reverses. Only gaps that hold across all three batches
+with non-overlapping means are reported as real.
 
 | Benchmark             | Milo    | Rust    | Zig     | Odin    | C       | Hylo    |
 |-----------------------|---------|---------|---------|---------|---------|---------|
-| fib(35)               | 18.4 ms | 17.0 ms | 19.0 ms | 21.9 ms | 17.6 ms | 96.2 ms |
-| matmul 256×256 f64    | 11.6 ms | 11.5 ms | 12.0 ms | 12.2 ms | 12.1 ms | —       |
-| quicksort 500k f64    | 34.0 ms | 33.2 ms | 39.6 ms | 38.7 ms | 36.0 ms | —       |
-| binarytrees depth 15  | 3.1 ms  | 2.6 ms  | 2.0 ms  | 3.0 ms  | 2.3 ms  | —       |
+| fib(35)               | 17.3 ms | 16.4 ms | 18.7 ms | 21.5 ms | 16.7 ms | 96.2 ms |
+| matmul 256×256 f64    | 11.1 ms | 11.3 ms | 11.7 ms | 11.9 ms | 11.8 ms | —       |
+| quicksort 500k f64    | 33.6 ms | 32.6 ms | 33.3 ms | 32.8 ms | 32.4 ms | —       |
+| binarytrees depth 15  | 2.5 ms  | 2.3 ms  | 1.7 ms  | 2.8 ms  | 2.1 ms  | —       |
 
-Milo lands within noise of Rust on the two loop-over-a-buffer benchmarks, ~8% behind on
-fib, and last on binarytrees — that one is pure malloc/free throughput (Zig's `smp_allocator`
-beats libc malloc, which Milo, C, and Odin all go through), and at 2–3 ms it is close enough
-to process startup that the ordering is soft.
+Milo is 2% ahead of Rust on matmul, 3.5% behind C on sort, and 5% behind Rust and C on fib.
+Those hold across batches but are small enough to be compiler-version noise, not a language
+property.
+
+The one real gap is binarytrees, at 1.42x Zig. That benchmark is pure allocation throughput:
+Zig's `smp_allocator` beats libc malloc, which Milo, C, and Odin all go through. C is also 18%
+ahead of Milo there, so roughly 15% is `Heap<T>` overhead on top of malloc and the rest is the
+allocator itself. Allocation throughput is the only number here worth optimizing.
 
 Hylo runs only fib: its stdlib has no `Movable` conformance for `Float64`, so `Array<Float64>`
 does not instantiate, and there is no float `print`. The 5.7× on fib is a debug-build `hc`

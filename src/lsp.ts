@@ -14,6 +14,7 @@ import { dirname, resolve } from "path";
 import { fileURLToPath, pathToFileURL } from "url";
 import { existsSync, readFileSync, readdirSync } from "fs";
 import { STDLIB_DIR, stdExists, readStd, materializeStd } from "./stdlibBundle";
+import { ensureFmtBinary } from "./fmtbin";
 import { spawnSync } from "child_process";
 
 const hostTarget = getHostTarget();
@@ -25,28 +26,25 @@ const LSP_DEBUG = process.env.MILO_LSP_DEBUG === "1";
 function lspDebug(msg: string) { if (LSP_DEBUG) process.stderr.write(`milod[dbg]: ${msg}\n`); }
 
 // ── Formatter ──
-// bin/milo-fmt is the source of truth (same binary `milo fmt` uses); build it on
-// first use rather than silently formatting differently from the CLI. If it can't
-// be built we leave the document untouched — never fall back to a divergent
-// formatter, which would silently rewrite the file (e.g. hex→decimal) on save.
-const lspRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-const fmtBinaryPath = resolve(lspRoot, "bin", "milo-fmt");
-let fmtBinaryReady: boolean | null = null;
+// Shells the same binary `milo fmt` does (src/fmtbin.ts), built on first use, so
+// format-on-save can't drift from the CLI. If it can't be built we leave the
+// document untouched — never fall back to a divergent formatter, which would
+// silently rewrite the file (e.g. hex→decimal) on save.
+let fmtBinaryPath: string | null = null;
+let fmtBinaryChecked = false;
 
 function ensureMiloFmt(): boolean {
-  if (fmtBinaryReady !== null) return fmtBinaryReady;
-  if (existsSync(fmtBinaryPath)) return (fmtBinaryReady = true);
-  const build = spawnSync(process.execPath, [
-    resolve(lspRoot, "src", "main.ts"), "build",
-    resolve(lspRoot, "examples", "cli-tools", "fmt.milo"), "-o", fmtBinaryPath,
-  ], { encoding: "utf-8" });
-  fmtBinaryReady = build.status === 0 && existsSync(fmtBinaryPath);
-  if (!fmtBinaryReady) process.stderr.write("milod: could not build bin/milo-fmt; formatting disabled\n");
-  return fmtBinaryReady;
+  if (!fmtBinaryChecked) {
+    fmtBinaryChecked = true;
+    const resolved = ensureFmtBinary();
+    if ("error" in resolved) process.stderr.write(`milod: could not build the formatter (${resolved.error}); formatting disabled\n`);
+    else fmtBinaryPath = resolved.path;
+  }
+  return fmtBinaryPath !== null;
 }
 
 function formatSource(source: string): string {
-  if (ensureMiloFmt()) {
+  if (ensureMiloFmt() && fmtBinaryPath) {
     const result = spawnSync(fmtBinaryPath, [], { input: source, encoding: "utf-8", timeout: 30000 });
     if (result.status === 0 && result.stdout) return result.stdout;
   }

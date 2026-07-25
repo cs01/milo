@@ -21,6 +21,7 @@ import { parseSafetyLevel, checkSafetyCompliance, formatSafetyReport, listSafety
 import { extractFlowFacts, formatFlowFacts } from "./wcet";
 import { estimateLoopCycles, formatCycleEstimate } from "./wcet-cycles";
 import { PKG_COMMANDS, ensureDepsInstalled } from "./pkgcli";
+import { ensureFmtBinary } from "./fmtbin";
 
 function frontendToHIR(source: string, target: TargetInfo, filePath?: string, warningConfig?: WarningConfig) {
   const sourceDir = filePath ? dirname(resolve(filePath)) : process.cwd();
@@ -404,29 +405,6 @@ function linkIR(llFile: string, outFile: string, optFlag: string, libs: string, 
     } finally {
       try { unlinkSync(tmpObj); } catch {}
     }
-  }
-}
-
-// bin/milo-fmt is a gitignored per-machine cache. It used to be rebuilt only when
-// missing, so editing fmt.milo changed nothing until someone deleted the binary by hand
-// — and a stale one silently reformats source with the OLD rules. That shipped a
-// formatter bug into 16 committed files via the pre-commit hook, which formats staged
-// .milo and re-stages the result, quietly reverting the fix in the same commit.
-// The compiler is an input too: fmt.milo is Milo source, so a codegen change can change
-// its behavior without fmt.milo moving.
-function fmtBinStale(fmtBin: string, fmtSrc: string, root: string): boolean {
-  if (!existsSync(fmtBin)) return true;
-  try {
-    const binTime = statSync(fmtBin).mtimeMs;
-    if (statSync(fmtSrc).mtimeMs > binTime) return true;
-    const srcDir = resolve(root, "src");
-    for (const f of readdirSync(srcDir)) {
-      if (!f.endsWith(".ts")) continue;
-      if (statSync(join(srcDir, f)).mtimeMs > binTime) return true;
-    }
-    return false;
-  } catch {
-    return true; // can't prove it's fresh — rebuild rather than format with unknown rules
   }
 }
 
@@ -1468,20 +1446,15 @@ async function main() {
     const files = fmtArgs.filter(a => a !== "-w");
     if (files.length === 0) { console.error("error: no files to format"); process.exit(1); }
 
-    // bin/milo-fmt (built from examples/cli-tools/fmt.milo) is the sole formatter.
-    // Build it on first use rather than fall back to anything divergent, so
-    // `milo fmt` always produces the same bytes.
-    const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-    const fmtBin = resolve(root, "bin", "milo-fmt");
-    const src = resolve(root, "examples", "cli-tools", "fmt.milo");
-    if (fmtBinStale(fmtBin, src, root)) {
-      mkdirSync(resolve(root, "bin"), { recursive: true });
-      const build = spawnSync(process.execPath, [fileURLToPath(import.meta.url), "build", src, "-o", fmtBin], { encoding: "utf-8" });
-      if (build.status !== 0 || !existsSync(fmtBin)) {
-        console.error(build.stderr || "error: could not build bin/milo-fmt");
-        process.exit(1);
-      }
+    // fmt.milo (built to a binary) is the sole formatter — never fall back to
+    // anything divergent, so `milo fmt` always produces the same bytes as the
+    // editor's format-on-save. src/fmtbin.ts picks the checkout or cache path.
+    const resolved = ensureFmtBinary();
+    if ("error" in resolved) {
+      console.error(`error: could not build the formatter: ${resolved.error}`);
+      process.exit(1);
     }
+    const fmtBin = resolved.path;
 
     let changed = 0;
     for (const f of files) {

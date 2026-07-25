@@ -1,0 +1,45 @@
+// @proven: 3
+// @failed: 0
+// @unknown: 3
+// Soundness: `/` and `%` must be modelled with MILO's semantics, not SMT-LIB's.
+//
+// SMT-LIB `div`/`mod` are Euclidean — the remainder is never negative, so `-7 mod 3` is 2.
+// Milo truncates toward zero like C, so `-7 % 3` is -1. Lowering `%` straight to `mod` was
+// a false proof: `wrong` below came back **proven** for a function that returns -1, which
+// `milo run` shows directly. The same mismatch also REFUTED the two true contracts in
+// `trueRem`/`trueDiv`, so it broke both directions at once.
+//
+// Truncation is now rebuilt from floor division, which agrees with truncation on
+// non-negative operands. A non-constant divisor gets no rule rather than the wrong one.
+//
+// The tallies above are the NATIVE std/smt engine, which this driver runs: the rebuilt
+// form uses `ite`, outside its linear fragment, so all three land on `unknown` — safe, but
+// it does not pin the bug. The z3 verdicts (proven/proven/REFUTED) are asserted in
+// tests/proveSoundness.test.ts, which is where the false proof actually lived.
+fn trueRem(a: i64): i64
+requires a == -7
+ensures result == -1
+{
+    return a % 3
+}
+
+fn trueDiv(a: i64): i64
+requires a == -7
+ensures result == -2
+{
+    return a / 3
+}
+
+// The Euclidean answer. Must be REFUTED — this is the false proof, pinned.
+fn wrong(a: i64): i64
+requires a == -7
+ensures result == 2
+{
+    return a % 3
+}
+
+fn main() {
+    print(trueRem(-7))
+    print(trueDiv(-7))
+    print(wrong(-7))
+}

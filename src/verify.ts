@@ -213,6 +213,26 @@ function bitOpToSmt(op: string, leftStr: string, rightExpr: Expr): string | null
   if (op === "<<") return `(* ${leftStr} ${numToSmt(1n << c)})`;
   if (op === ">>") return `(div ${leftStr} ${numToSmt(1n << c)})`;
   if (op === "&" && (c & (c + 1n)) === 0n) return `(mod ${leftStr} ${numToSmt(c + 1n)})`;
+
+  // SMT-LIB `div`/`mod` are EUCLIDEAN — the remainder is never negative, so -7 mod 3 is 2.
+  // Milo's `/` and `%` truncate toward zero like C, so -7 % 3 is -1. Lowering one to the
+  // other was a FALSE PROOF: `ensures result == 2` on `a % 3` with `a == -7` came back
+  // proven for a function that returns -1.
+  //
+  // Truncation is rebuilt out of floor division, which agrees with truncation on
+  // non-negative operands: trunc(a/b) = a >= 0 ? floor(a/|b|) : -floor(-a/|b|), negated
+  // again when the divisor is negative. The remainder follows from `a - b*q`, which stays
+  // linear because `b` is a literal here. A NON-constant divisor gets no rule at all (see
+  // binOpToSmt) rather than the wrong one — unknown beats a plausible lie.
+  if (op === "/" || op === "%") {
+    if (c === 0n) return null;
+    const mag = numToSmt(c < 0n ? -c : c);
+    const floorPos = `(div ${leftStr} ${mag})`;
+    const floorNeg = `(- (div (- ${leftStr}) ${mag}))`;
+    let q = `(ite (>= ${leftStr} 0) ${floorPos} ${floorNeg})`;
+    if (c < 0n) q = `(- ${q})`;
+    return op === "/" ? q : `(- ${leftStr} (* ${numToSmt(c)} ${q}))`;
+  }
   return null;
 }
 
@@ -1181,8 +1201,12 @@ function binOpToSmt(op: string): string {
     case "+": return "+";
     case "-": return "-";
     case "*": return "*";
-    case "/": return "div";
-    case "%": return "mod";
+    // Only reachable with a non-constant divisor: the constant case is lowered to
+    // truncating semantics in bitOpToSmt above. SMT's div/mod are Euclidean and Milo's
+    // truncate, and with a symbolic divisor there is no linear way to state the
+    // difference — so the honest answer is that there is no rule.
+    case "/": return "UNSUPPORTED_OP_div";
+    case "%": return "UNSUPPORTED_OP_mod";
     case "==": return "=";
     case "!=": return "distinct";
     case "<": return "<";

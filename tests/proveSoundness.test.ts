@@ -16,6 +16,31 @@ import { test, expect } from "bun:test";
 import { execSync } from "child_process";
 import { join } from "path";
 
+function proveZ3(file: string): string {
+  try {
+    return execSync(`bun ${join(import.meta.dir, "..", "src", "main.ts")} prove ${file} --solver=z3`, {
+      encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"],
+    });
+  } catch (e: any) {
+    return (e.stdout ?? "") + (e.stderr ?? "");   // prove exits 1 when a contract is refuted
+  }
+}
+
+// The generated cases above cover the constructs the symbolic walker has to model. This
+// covers a different failure mode entirely: the walker being right and the TRANSLATION
+// being wrong. `-7 % 3` is -1 in Milo and 2 under SMT-LIB's Euclidean `mod`, and lowering
+// one to the other made `ensures result == 2` provable for a function returning -1.
+//
+// Asserted against z3 specifically: the native std/smt engine cannot decide the corrected
+// form (it uses `ite`) and answers `unknown`, which is safe but pins nothing.
+test("`/` and `%` model Milo's truncation, not SMT-LIB's Euclidean division", () => {
+  const out = proveZ3(join(import.meta.dir, "prove", "truncDivNoFalseProof.milo"))
+    .replace(/\x1b\[[0-9;]*m/g, "");
+  expect(out).toMatch(/proven:\s*5\s+failed:\s*1\s+unknown:\s*0\s+errors:\s*0/);
+  // Both true contracts prove and the Euclidean answer is the single refutation.
+  expect(out).toMatch(/✗\s*\[postcondition\]\s*wrong/);
+});
+
 test("no false proofs: a `proven` contract survives execution", () => {
   let out = "";
   let failed = false;

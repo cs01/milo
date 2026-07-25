@@ -102,6 +102,27 @@ const SHAPES: Shape[] = [
     }),
   },
   {
+    // Division and remainder over NEGATIVE operands, where SMT-LIB's Euclidean `div`/`mod`
+    // disagree with Milo's truncation. This shape exists because the original 5 shapes
+    // could not express it, and a false proof lived here the whole time they were passing.
+    name: "trunc-div",
+    helpers: "",
+    body: () => {
+      const d = int(2, 9);
+      const op = pick(["/", "%"]);
+      // The offset drags the dividend negative for small `a`, which is the only region
+      // where Euclidean and truncating semantics differ. It has to appear in BOTH the
+      // emitted code and the model — a model that disagrees with the program fits clauses
+      // to the wrong values and turns the whole harness into noise.
+      const off = int(200, 400);
+      return {
+        code: `    let n = a - ${off}\n    return n ${op} ${d}\n`,
+        // JS `/` with Math.trunc and JS `%` both truncate toward zero, matching Milo.
+        value: (a) => (op === "/" ? Math.trunc((a - off) / d) : (a - off) % d),
+      };
+    },
+  },
+  {
     // Branching, where each path condition has to reach the postcondition intact.
     name: "branch",
     helpers: "",

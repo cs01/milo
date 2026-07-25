@@ -322,35 +322,49 @@ function appendDocAndModule(hover: string, source: string, parsed: Program, sour
 
 // ── Diagnostics ──
 
+// A diagnostic can belong to an imported file rather than the document being
+// validated: the checker runs over the whole resolved program, and a parse error
+// can be thrown from any file the entry pulls in. Its span is a line/col in THAT
+// file, so publishing it verbatim under this document's URI squiggles an
+// unrelated line — often one past the end of a short file. Surface it at the top
+// with the real location in the message instead. The CLI has no such problem; it
+// renders each diagnostic against `span.file` (see formatDiagnostic).
+//
+// `file` overrides the span's own label for ParseError, which carries the failing
+// file on the error rather than in the diagnostic.
+function hoistIfImported(d: Diagnostic, docPath: string, file = d.span?.file): Diagnostic {
+  if (!file || file === docPath) return d;
+  const loc = d.span ? `:${d.span.line}:${d.span.col}` : "";
+  return {
+    severity: d.severity,
+    span: { line: 1, col: 1 },
+    message: `in imported file ${file}${loc}: ${d.message}`,
+    hint: d.hint,
+    code: d.code,
+  };
+}
+
 function validateDocument(uri: string) {
   const source = documents.get(uri);
   if (!source) return;
 
+  const docPath = uri.startsWith("file://") ? fileURLToPath(uri) : uri;
+
   let diagnostics: Diagnostic[] = [];
   try {
     const tokens = new Lexer(source).tokenize();
-    const parsed = new Parser(tokens).parse();
+    // Pass the path so this document's own spans are labelled with it — that label
+    // is what lets hoistIfImported tell them apart from imported-file spans.
+    const parsed = new Parser(tokens, source, docPath).parse();
     const sourceDir = uri.startsWith("file://") ? dirname(fileURLToPath(uri)) : ".";
-    const program = resolveImports(parsed, sourceDir, hostTarget, uri.startsWith("file://") ? fileURLToPath(uri) : uri);
-    diagnostics = new TypeChecker().check(program).diagnostics;
+    const program = resolveImports(parsed, sourceDir, hostTarget, docPath);
+    diagnostics = new TypeChecker().check(program).diagnostics
+      .map(d => hoistIfImported(d, docPath));
     buildSymbolIndex(uri, program);
   } catch (e: any) {
     // Parse errors carry a structured Diagnostic (span + hint) — use it directly.
     if (e instanceof ParseError) {
-      // An error from an imported file has a span in THAT file — don't squiggle an
-      // unrelated line of this document; surface it at the top with the real location.
-      const docPath = uri.startsWith("file://") ? fileURLToPath(uri) : uri;
-      if (e.filePath && e.filePath !== docPath) {
-        const loc = e.diagnostic.span ? `:${e.diagnostic.span.line}:${e.diagnostic.span.col}` : "";
-        diagnostics = [{
-          severity: "error",
-          span: { line: 1, col: 1 },
-          message: `in imported file ${e.filePath}${loc}: ${e.diagnostic.message}`,
-          hint: e.diagnostic.hint,
-        }];
-      } else {
-        diagnostics = [e.diagnostic];
-      }
+      diagnostics = [hoistIfImported(e.diagnostic, docPath, e.filePath)];
     } else {
       // Other lex/parse errors — extract line:col from the message.
       const match = e.message?.match(/(\d+):(\d+):\s*(.+)/);

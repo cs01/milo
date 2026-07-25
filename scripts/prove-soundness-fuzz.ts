@@ -34,6 +34,10 @@ const argOf = (flag: string, dflt: number) => {
 const CASES = argOf("--cases", 60);
 const SEED = argOf("--seed", 1);
 const KEEP = process.argv.includes("--keep");
+// Which engine is under test. Both must be sound — `std/smt` is written in Milo and has
+// had a false proof of its own before (an i64 overflow inside Fourier-Motzkin elimination
+// that reported UNSAT for a satisfiable system), so it gets the same treatment as z3.
+const SOLVER = process.argv.includes("--solver=native") ? "" : " --solver=z3";
 
 // Seeded PRNG so a failure is reproducible from the seed printed in the report.
 let state = SEED >>> 0 || 1;
@@ -191,7 +195,7 @@ for (let i = 0; i < CASES; i++) {
 
   let proveOut = "";
   try {
-    proveOut = execSync(`bun ${join(ROOT, "src", "main.ts")} prove ${file} --solver=z3`, {
+    proveOut = execSync(`bun ${join(ROOT, "src", "main.ts")} prove ${file}${SOLVER}`, {
       encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"], timeout: 60000,
     });
   } catch (e: any) {

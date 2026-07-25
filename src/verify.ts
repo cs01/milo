@@ -224,16 +224,33 @@ function bitOpToSmt(op: string, leftStr: string, rightExpr: Expr): string | null
   // again when the divisor is negative. The remainder follows from `a - b*q`, which stays
   // linear because `b` is a literal here. A NON-constant divisor gets no rule at all (see
   // binOpToSmt) rather than the wrong one — unknown beats a plausible lie.
-  if (op === "/" || op === "%") {
-    if (c === 0n) return null;
-    const mag = numToSmt(c < 0n ? -c : c);
-    const floorPos = `(div ${leftStr} ${mag})`;
-    const floorNeg = `(- (div (- ${leftStr}) ${mag}))`;
-    let q = `(ite (>= ${leftStr} 0) ${floorPos} ${floorNeg})`;
-    if (c < 0n) q = `(- ${q})`;
-    return op === "/" ? q : `(- ${leftStr} (* ${numToSmt(c)} ${q}))`;
-  }
   return null;
+}
+
+// Truncating `/` and `%`, for any divisor. SMT-LIB `div`/`mod` are EUCLIDEAN — the
+// remainder is never negative, so -7 mod 3 is 2 — while Milo truncates toward zero like C
+// and gives -1. Lowering one onto the other was a false proof: `ensures result == 2` on
+// `a % 3` came back proven for a function returning -1.
+//
+// Truncation is rebuilt from floor division, which agrees with truncation whenever the
+// operands are non-negative, so each sign quadrant is handled explicitly. A constant
+// divisor keeps the whole thing linear; a symbolic one leaves `(* b q)` in the remainder,
+// which z3 can often still decide and the native linear solver reports unknown for.
+function truncDivToSmt(op: string, leftStr: string, rightStr: string, rightConst: bigint | null): string | null {
+  if (rightConst === 0n) return null;   // division by zero: no meaning to model
+  const neg = (x: string) => `(- ${x})`;
+  if (rightConst !== null) {
+    const mag = numToSmt(rightConst < 0n ? -rightConst : rightConst);
+    let q = `(ite (>= ${leftStr} 0) (div ${leftStr} ${mag}) ${neg(`(div ${neg(leftStr)} ${mag})`)})`;
+    if (rightConst < 0n) q = neg(q);
+    return op === "/" ? q : `(- ${leftStr} (* ${numToSmt(rightConst)} ${q}))`;
+  }
+  // Symbolic divisor: four quadrants, each reduced to floor division on non-negatives.
+  const q =
+    `(ite (>= ${leftStr} 0)` +
+    ` (ite (> ${rightStr} 0) (div ${leftStr} ${rightStr}) ${neg(`(div ${leftStr} ${neg(rightStr)})`)})` +
+    ` (ite (> ${rightStr} 0) ${neg(`(div ${neg(leftStr)} ${rightStr})`)} (div ${neg(leftStr)} ${neg(rightStr)})))`;
+  return op === "/" ? q : `(- ${leftStr} (* ${rightStr} ${q}))`;
 }
 
 // Every variable a statement list assigns to, including through nested control flow.
@@ -334,6 +351,28 @@ function collectCallsInExpr(expr: Expr, conds: string[], env: Map<string, string
 // Every function in the program, for looking up a callee's parameter modes. Set once per
 // run alongside GLOBAL_CONST_*.
 let FN_TABLE = new Map<string, Function>();
+
+// Field names whose declared type is `bool` in EVERY struct that has them. Field symbols
+// are flattened to `recv_field` with no record of which struct the receiver was, so the
+// sort has to come from the name — and only when it is unambiguous across the program.
+//
+// Getting it wrong emits an invalid query rather than a wrong answer: `ppu.mirrorVertical`
+// declared as `Int` produced `(and ppu_mirrorVertical ...)` and z3 rejected the VC with
+// "Sort mismatch at argument #1 for function (declare-fun and (Bool Bool) Bool)". Same
+// class as an unannotated `var matched = true`, one level out.
+let BOOL_FIELDS = new Set<string>();
+
+function collectBoolFields(program: Program): Set<string> {
+  const boolish = new Set<string>();
+  const other = new Set<string>();
+  for (const st of program.structs ?? []) {
+    for (const f of st.fields as any[]) {
+      (f.type?.name === "bool" && !f.type?.isPtr && !f.type?.isArray ? boolish : other).add(f.name);
+    }
+  }
+  for (const n of other) boolish.delete(n);   // ambiguous across structs: leave it an Int
+  return boolish;
+}
 
 // Names in the function under analysis that a callee could actually write through: `var`
 // locals and `&mut`/`*mut` parameters. Nothing else is a legal mutation target — `let` is
@@ -668,6 +707,19 @@ function lengthNonNeg(refs: Set<string>, fn: Function): string[] {
     .map(r => `(assert (>= ${r} 0))`);
 }
 
+// `if c { a } else { b }` as a VALUE, which is `ite` in SMT. Both arms must be a single
+// expression statement — an arm that computes anything (a `let`, a loop, an early return)
+// has no `ite` translation, and inventing one would state something the code does not do.
+// Milo uses this form constantly, so without a rule whole postconditions went unknown for
+// a construct that maps onto the theory exactly.
+function ifExprArm(body: Stmt[]): Expr | null {
+  if (body.length !== 1) return null;
+  const only = body[0] as any;
+  if (only.kind === "Return" && only.value) return only.value as Expr;
+  if (only.kind === "ExprStmt" && only.expr) return only.expr as Expr;
+  return null;
+}
+
 // `x.len()` rewritten as `x.len`, so one code path handles both spellings. Zero-arg and
 // name-checked: `v.len()` is a pure length, `v.pop()` is not.
 function lenMethodAsField(expr: any): Expr | null {
@@ -795,6 +847,10 @@ function exprToSmtWithEnv(expr: Expr, env: Map<string, string>, foreign = false)
     const bit = bitOpToSmt(expr.op, left, expr.right);
     if (bit) return bit;
     const right = exprToSmtWithEnv(expr.right, env, foreign);
+    if (expr.op === "/" || expr.op === "%") {
+      const t = truncDivToSmt(expr.op, left, right, resolveConstNum(expr.right));
+      if (t) return t;
+    }
     return `(${binOpToSmt(expr.op)} ${left} ${right})`;
   }
   if (expr.kind === "CastExpr") {
@@ -803,6 +859,14 @@ function exprToSmtWithEnv(expr: Expr, env: Map<string, string>, foreign = false)
   if (expr.kind === "UnaryOp") {
     if (expr.op === "!") return `(not ${exprToSmtWithEnv(expr.operand, env, foreign)})`;
     if (expr.op === "-") return `(- ${exprToSmtWithEnv(expr.operand, env, foreign)})`;
+  }
+  if (expr.kind === "IfExpr") {
+    const t = ifExprArm(expr.thenBody), e = ifExprArm(expr.elseBody);
+    if (t && e) {
+      return `(ite ${exprToSmtWithEnv(expr.cond, env, foreign)} ` +
+             `${exprToSmtWithEnv(t, env, foreign)} ${exprToSmtWithEnv(e, env, foreign)})`;
+    }
+    return `(UNSUPPORTED IfExpr)`;
   }
   if (expr.kind === "MethodCall") {
     const asLen = lenMethodAsField(expr);
@@ -859,6 +923,7 @@ export function generateVerificationConditions(program: Program, opts?: { onlyFi
   }
 
   FN_TABLE = new Map(program.functions.map(f => [f.name, f]));
+  BOOL_FIELDS = collectBoolFields(program);
 
   // Callee preconditions, for the call-site obligations below.
   const requiresByFn = new Map<string, Function>();
@@ -938,7 +1003,8 @@ export function generateVerificationConditions(program: Program, opts?: { onlyFi
       }
     }
 
-    const fieldDecls = [...fieldRefs].map(f => `(declare-const ${f} Int)`).join("\n");
+    const fieldSort = (f: string) => (BOOL_FIELDS.has(f.slice(f.lastIndexOf("_") + 1)) ? "Bool" : "Int");
+    const fieldDecls = [...fieldRefs].map(f => `(declare-const ${f} ${fieldSort(f)})`).join("\n");
     const lenFacts = lengthNonNeg(fieldRefs, fn).join("\n");
     FIELD_REFS = null;
 
@@ -1162,6 +1228,10 @@ function exprToSmt(expr: Expr): string {
       const bit = bitOpToSmt(expr.op, left, expr.right);
       if (bit) return bit;
       const right = exprToSmt(expr.right);
+      if (expr.op === "/" || expr.op === "%") {
+        const t = truncDivToSmt(expr.op, left, right, resolveConstNum(expr.right));
+        if (t) return t;
+      }
       const op = binOpToSmt(expr.op);
       return `(${op} ${left} ${right})`;
     }
@@ -1182,6 +1252,11 @@ function exprToSmt(expr: Expr): string {
       if (flat) return flat;
       return `(${exprToSmt(expr.object)}.${expr.field})`;
     }
+    case "IfExpr": {
+      const t = ifExprArm(expr.thenBody), e = ifExprArm(expr.elseBody);
+      if (t && e) return `(ite ${exprToSmt(expr.cond)} ${exprToSmt(t)} ${exprToSmt(e)})`;
+      return `(UNSUPPORTED IfExpr)`;
+    }
     case "MethodCall": {
       // `.len()` is the same quantity as the `.len` field, just spelled as a call — milo's
       // own std uses the field, milojs uses the method. Everything else has no modular
@@ -1201,10 +1276,8 @@ function binOpToSmt(op: string): string {
     case "+": return "+";
     case "-": return "-";
     case "*": return "*";
-    // Only reachable with a non-constant divisor: the constant case is lowered to
-    // truncating semantics in bitOpToSmt above. SMT's div/mod are Euclidean and Milo's
-    // truncate, and with a symbolic divisor there is no linear way to state the
-    // difference — so the honest answer is that there is no rule.
+    // Handled by truncDivToSmt, which needs the operand strings; reaching this arm means
+    // the caller did not route through it.
     case "/": return "UNSUPPORTED_OP_div";
     case "%": return "UNSUPPORTED_OP_mod";
     case "==": return "=";

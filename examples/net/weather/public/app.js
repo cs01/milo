@@ -1,5 +1,4 @@
 var heroEl = document.getElementById("hero");
-var dailyEl = document.getElementById("daily");
 var savedEl = document.getElementById("saved");
 var zipInput = document.getElementById("zip");
 var searchBtn = document.getElementById("search");
@@ -335,7 +334,6 @@ function windCompassSvg(dir, speed) {
 
 function showError(msg) {
   heroEl.innerHTML = "";
-  dailyEl.innerHTML = "";
   errorEl.innerHTML = '<div class="error-msg">' + msg + "</div>";
 }
 
@@ -343,7 +341,6 @@ function fetchWeather(lat, lon, city, saveLoc) {
   currentLat = lat;
   currentLon = lon;
   heroEl.innerHTML = '<div class="loading">Loading\u2026</div>';
-  dailyEl.innerHTML = "";
   errorEl.textContent = "";
   searchBtn.disabled = true;
 
@@ -389,7 +386,6 @@ function fetchWeather(lat, lon, city, saveLoc) {
 function geocodeAndFetch(query) {
   errorEl.textContent = "";
   heroEl.innerHTML = '<div class="loading">Looking up location\u2026</div>';
-  dailyEl.innerHTML = "";
   searchBtn.disabled = true;
 
   var isZip = /^\d{5}$/.test(query.trim());
@@ -654,32 +650,8 @@ function render(city, forecast, hourlyData, grid, timeZone) {
     );
   }
 
-  heroEl.innerHTML =
-    '<div class="wx-card ' + conditionClass(now.shortForecast, now.isDaytime) + '">' +
-    '<div class="wispy-clouds">' +
-    '<div class="wisp wisp-1"></div><div class="wisp wisp-2"></div>' +
-    '<div class="wisp wisp-3"></div><div class="wisp wisp-4"></div>' +
-    "</div>" +
-    '<div class="wx-body">' +
-    hero +
-    '<div class="wx-divider"><div class="wx-section-title">Next 24 hours</div>' + hourly + "</div>" +
-    '<div class="wx-divider"><div class="tiles">' + tiles + "</div></div>" +
-    "</div></div>";
-
-  // wired after innerHTML so the button exists; lat/lon come from the globals
-  // the fetch set, which are what a restored favorite needs to re-query
-  var favBtn = document.getElementById("favBtn");
-  if (favBtn) {
-    favBtn.addEventListener("click", function () {
-      var on = toggleFavorite(city, currentLat, currentLon);
-      favBtn.innerHTML = starSvg(on);
-      favBtn.setAttribute("aria-pressed", on ? "true" : "false");
-      favBtn.title = on ? "Remove from favorites" : "Save to favorites";
-      renderSaved();
-    });
-  }
-
-  // 7-day forecast (neutral list card)
+  // 7-day forecast — a section of the gradient card, not a card of its own, so
+  // it can sit between the hourly strip and the detail tiles.
   var days = [];
   var allLo = 999;
   var allHi = -999;
@@ -700,7 +672,9 @@ function render(city, forecast, hourlyData, grid, timeZone) {
   }
 
   var range = allHi - allLo || 1;
-  var dHtml = '<div class="card"><div class="card-head">' + days.length + "-Day Forecast</div>";
+  var dHtml =
+    '<div class="wx-divider"><div class="wx-section-title">' +
+    days.length + "-Day Forecast</div><div class=\"daily-list\">";
   for (var j = 0; j < days.length; j++) {
     var d = days[j];
     var barLeft = ((d.lo - allLo) / range) * 100;
@@ -716,8 +690,33 @@ function render(city, forecast, hourlyData, grid, timeZone) {
       '<div class="daily-high">' + d.hi + "°</div>" +
       "</div>";
   }
-  dHtml += "</div>";
-  dailyEl.innerHTML = dHtml;
+  dHtml += "</div></div>";
+
+  heroEl.innerHTML =
+    '<div class="wx-card ' + conditionClass(now.shortForecast, now.isDaytime) + '">' +
+    '<div class="wispy-clouds">' +
+    '<div class="wisp wisp-1"></div><div class="wisp wisp-2"></div>' +
+    '<div class="wisp wisp-3"></div><div class="wisp wisp-4"></div>' +
+    "</div>" +
+    '<div class="wx-body">' +
+    hero +
+    '<div class="wx-divider"><div class="wx-section-title">Next 24 hours</div>' + hourly + "</div>" +
+    dHtml +
+    '<div class="wx-divider"><div class="tiles">' + tiles + "</div></div>" +
+    "</div></div>";
+
+  // wired after innerHTML so the button exists; lat/lon come from the globals
+  // the fetch set, which are what a restored favorite needs to re-query
+  var favBtn = document.getElementById("favBtn");
+  if (favBtn) {
+    favBtn.addEventListener("click", function () {
+      var on = toggleFavorite(city, currentLat, currentLon);
+      favBtn.innerHTML = starSvg(on);
+      favBtn.setAttribute("aria-pressed", on ? "true" : "false");
+      favBtn.title = on ? "Remove from favorites" : "Save to favorites";
+      renderSaved();
+    });
+  }
 
   renderSaved();
 }

@@ -794,6 +794,43 @@ svg.sug-icon {
   background: linear-gradient(90deg, #60a5fa, #fbbf24);
 }
 
+/* The 7-day list sits inside the gradient card (between the hourly strip and
+   the detail tiles), so the neutral list colors above have to be re-tinted for
+   white-on-gradient — and again for the pale `.on-light` conditions. */
+
+.wx-card .daily-row {
+  padding: 0.5rem 0;
+  border-top-color: rgba(255, 255, 255, 0.14);
+}
+
+.wx-card .daily-row:hover {
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.wx-card .daily-low {
+  color: rgba(255, 255, 255, 0.7);
+}
+
+.wx-card .daily-bar-wrap {
+  background: rgba(255, 255, 255, 0.2);
+}
+
+.wx-card.on-light .daily-row {
+  border-top-color: rgba(31, 41, 55, 0.12);
+}
+
+.wx-card.on-light .daily-row:hover {
+  background: rgba(255, 255, 255, 0.25);
+}
+
+.wx-card.on-light .daily-low {
+  color: rgba(31, 41, 55, 0.55);
+}
+
+.wx-card.on-light .daily-bar-wrap {
+  background: rgba(31, 41, 55, 0.14);
+}
+
 /* ── Footer ── */
 
 .footer {

@@ -20,7 +20,7 @@ from "std/random" import {
     randBytes
 }
 from "std/base64" import {
-    base64Encode, base64Decode
+    Base64
 }
 
 // 2^20; matches ROTATION_THRESHOLD in termpair-common.
@@ -68,7 +68,7 @@ requires key.len == 16
     let iv = ivFromCount(count)
     let r = aesGcm128Encrypt(key, iv, plaintext, "")!
     let wire = iv + r.ciphertext + r.tag
-    return Result.Ok(base64Encode(wire))
+    return Result.Ok(Base64.encode(wire))
 }
 
 // Decrypt a base64( IV(12) ‖ ciphertext ‖ tag(16) ) wire payload under `key`.
@@ -77,7 +77,7 @@ requires key.len == 16
 pub fn decryptWithKey(key: &string, wireB64: &string): Result<string, string>
 requires key.len == 16
 {
-    let wire = base64Decode(wireB64)
+    let wire = Base64.decode(wireB64)
     // 12-byte IV + 16-byte GCM tag is the minimum; reject anything shorter.
     if wire.len < 28 {
         return Result.Err("ciphertext too short")

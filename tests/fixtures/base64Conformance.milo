@@ -12,19 +12,19 @@
 // @expect: url_fo=Zm8
 
 from "std/base64" import {
-    base64Encode, base64Decode, base64UrlEncode
+    Base64
 }
 
 pub fn main(): i32 {
-    print("empty=[", base64Encode(""), "]")
-    print("f=", base64Encode("f"))
-    print("fo=", base64Encode("fo"))
-    print("foo=", base64Encode("foo"))
-    print("foob=", base64Encode("foob"))
-    print("fooba=", base64Encode("fooba"))
-    print("foobar=", base64Encode("foobar"))
-    print("rt=", base64Decode("Zm9vYmFy"))
-    print("url_foob=", base64UrlEncode("foob"))
-    print("url_fo=", base64UrlEncode("fo"))
+    print("empty=[", Base64.encode(""), "]")
+    print("f=", Base64.encode("f"))
+    print("fo=", Base64.encode("fo"))
+    print("foo=", Base64.encode("foo"))
+    print("foob=", Base64.encode("foob"))
+    print("fooba=", Base64.encode("fooba"))
+    print("foobar=", Base64.encode("foobar"))
+    print("rt=", Base64.decode("Zm9vYmFy"))
+    print("url_foob=", Base64.urlEncode("foob"))
+    print("url_fo=", Base64.urlEncode("fo"))
     return 0
 }

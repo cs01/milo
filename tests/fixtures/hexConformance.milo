@@ -9,15 +9,15 @@
 // @expect: rtUpper=foobar
 
 from "std/hex" import {
-    hexEncode, hexDecode
+    Hex
 }
 
 pub fn main(): i32 {
-    print("empty=[", hexEncode(""), "]")
-    print("f=", hexEncode("f"))
-    print("fo=", hexEncode("fo"))
-    print("foobar=", hexEncode("foobar"))
-    print("rtLower=", hexDecode("666f6f626172"))
-    print("rtUpper=", hexDecode("666F6F626172"))
+    print("empty=[", Hex.encode(""), "]")
+    print("f=", Hex.encode("f"))
+    print("fo=", Hex.encode("fo"))
+    print("foobar=", Hex.encode("foobar"))
+    print("rtLower=", Hex.decode("666f6f626172"))
+    print("rtUpper=", Hex.decode("666F6F626172"))
     return 0
 }

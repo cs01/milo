@@ -51,7 +51,7 @@ from "std/argparse" import {
     newParser
 }
 from "std/base64" import {
-    base64Encode, base64UrlEncode
+    Base64
 }
 from "std/signal" import {
     ignoreSignal, SIGPIPE
@@ -145,7 +145,7 @@ pub fn isoTimestamp(): string {
 
 // Build the plaintext new_output JSON: {"pty_output":"<base64 raw bytes>"}.
 pub fn ptyOutputJson(raw: &string): string {
-    return "{\"pty_output\":\"" + base64Encode(raw) + "\"}"
+    return "{\"pty_output\":\"" + Base64.encode(raw) + "\"}"
 }
 
 // ── Main ──
@@ -313,7 +313,7 @@ pub fn main(): i32 {
         print($"{cBold}{cCyan}termpair{cReset}{cBold} — sharing terminal {cReset}{cDim}(public mode){cReset}")
         print($"{cDim}open in browser:{cReset} {cUnderline}{cGreen}{scheme}://{authority}{base}/s/{terminalId}{cReset}")
     } else {
-        let keyFragment = base64UrlEncode(bootstrapKey)
+        let keyFragment = Base64.urlEncode(bootstrapKey)
         print($"{cBold}{cCyan}termpair{cReset}{cBold} — sharing terminal {cReset}{cDim}(AES-128-GCM, key in URL fragment){cReset}")
         print($"{cDim}open in browser:{cReset} {cUnderline}{cGreen}{scheme}://{authority}{base}/s/{terminalId}#{keyFragment}{cReset}")
     }
@@ -397,7 +397,7 @@ pub fn main(): i32 {
 
                 var payload: string = ""
                 if isPublicA {
-                    payload = base64Encode(plaintext)
+                    payload = Base64.encode(plaintext)
                 } else {
                     msgCount = msgCount + 1
                     match encryptWithKey(unixKeyA, msgCount, plaintext) {

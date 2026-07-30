@@ -27,7 +27,7 @@ from "std/crypto" import {
     sha1Bytes
 }
 from "std/base64" import {
-    base64Encode
+    Base64
 }
 from "std/platform" import {
     SockAddrIn,
@@ -112,7 +112,7 @@ fn wsMagic(): string {
 pub fn computeAcceptKey(clientKey: &string): string {
     let combined = clientKey.clone() + wsMagic()
     let hash = sha1Bytes(combined)
-    return base64Encode(hash)
+    return Base64.encode(hash)
 }
 
 // Check if raw HTTP request bytes contain a WebSocket upgrade request.

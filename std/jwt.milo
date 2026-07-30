@@ -11,7 +11,7 @@ from "std/hmac" import {
     hmacSha256Bytes
 }
 from "std/base64" import {
-    base64UrlEncode
+    Base64
 }
 
 // Fixed compact header for HS256; matches the {"alg":"HS256","typ":"JWT"} that
@@ -22,13 +22,13 @@ fn hs256Header(): string {
 }
 
 fn signingInput(payload: &string): string {
-    return base64UrlEncode(hs256Header()) + "." + base64UrlEncode(payload)
+    return Base64.urlEncode(hs256Header()) + "." + Base64.urlEncode(payload)
 }
 
 // Sign a JSON payload string with HS256, returning a compact JWS.
 pub fn jwtSignHS256(payload: &string, secret: &string): string {
     let si = signingInput(payload)
-    let sig = base64UrlEncode(hmacSha256Bytes(secret, si))
+    let sig = Base64.urlEncode(hmacSha256Bytes(secret, si))
     return si + "." + sig
 }
 
@@ -72,6 +72,6 @@ pub fn jwtVerifyHS256(token: &string, secret: &string): bool {
     for i in (lastDot + 1)..token.len {
         sig.push(token[i])
     }
-    let expected = base64UrlEncode(hmacSha256Bytes(secret, signingInput))
+    let expected = Base64.urlEncode(hmacSha256Bytes(secret, signingInput))
     return constEq(sig, expected)
 }

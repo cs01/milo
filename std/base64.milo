@@ -36,7 +36,7 @@ fn b64DecodeChar(ch: u8): u8 {
 }
 
 // Encode a string to base64.
-pub fn base64Encode(input: &string): string {
+fn base64Encode(input: &string): string {
     var result = ""
     var i: i64 = 0
     while i + 2 < input.len {
@@ -70,7 +70,7 @@ pub fn base64Encode(input: &string): string {
 
 // URL-safe base64, no padding (RFC 4648 §5): '+' → '-', '/' → '_', drop '='.
 // Used for embedding binary data in URL fragments.
-pub fn base64UrlEncode(input: &string): string {
+fn base64UrlEncode(input: &string): string {
     let std = base64Encode(input)
     var result = ""
     for i in 0..std.len {
@@ -87,7 +87,7 @@ pub fn base64UrlEncode(input: &string): string {
 }
 
 // Decode a base64 string.
-pub fn base64Decode(input: &string): string {
+fn base64Decode(input: &string): string {
     var result = ""
     var i: i64 = 0
     while i + 3 < input.len {
@@ -108,4 +108,22 @@ pub fn base64Decode(input: &string): string {
         i = i + 4
     }
     return result
+}
+
+// Base64 namespace — call as Base64.encode(...), Base64.decode(...).
+pub struct Base64 {
+}
+
+impl Base64 {
+    fn encode(input: &string): string {
+        return base64Encode(input)
+    }
+
+    fn urlEncode(input: &string): string {
+        return base64UrlEncode(input)
+    }
+
+    fn decode(input: &string): string {
+        return base64Decode(input)
+    }
 }

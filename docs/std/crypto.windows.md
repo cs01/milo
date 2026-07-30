@@ -73,7 +73,8 @@ _Undocumented._
 fn Crypto.aesGcm128Encrypt(key: &string, iv: &string, plaintext: &string, aad: &string): Result<AesGcmResult, string>
 ```
 
-_Undocumented._
+Preconditions mirror the private free fn: the public namespace API must carry the
+same AES-128 key/iv/tag length guarantees, else callers lose them at the wrapper.
 
 ### `Crypto.aesGcmDecrypt`
 
@@ -89,7 +90,7 @@ _Undocumented._
 fn Crypto.aesGcmEncrypt(key: &string, iv: &string, plaintext: &string, aad: &string): Result<AesGcmResult, string>
 ```
 
-_Undocumented._
+AES-256 lengths (key 32), mirroring the private free fn — see aesGcm128 note below.
 
 ### `Crypto.md5`
 

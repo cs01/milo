@@ -56,7 +56,9 @@ _Undocumented._
 fn Pool.live(self: &Pool): i64
 ```
 
-_Undocumented._
+Restate poolLive's preconditions (Pool has no struct invariant): without them the
+wrapper can't discharge the callee's `requires`, so its own `ensures result >= 0`
+is unbacked — same restating pattern as `free` above.
 
 ### `Pool.reset`
 

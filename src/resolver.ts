@@ -192,6 +192,10 @@ export function resolveImports(program: Program, sourceDir: string, target: Targ
       const absPath = resolved.path;
       if (resolved.pkg !== "" && imp.names) {
         unit.targets.push({ names: imp.names, aliases: imp.aliases, pkg: resolved.pkg });
+      } else if (resolved.pkg === "" && imp.aliases?.some((a, i) => a !== undefined && a !== imp.names[i])) {
+        // A flat-namespace import (std/user code, never mangled) carrying an `as`
+        // alias still needs a binding: the local alias names nothing on its own.
+        unit.targets.push({ names: imp.names, aliases: imp.aliases, pkg: "" });
       }
       if (visited.has(absPath)) continue;
       visited.add(absPath);
@@ -302,18 +306,30 @@ export function resolveImports(program: Program, sourceDir: string, target: Targ
   }
   const packageNames = new Set(pkgDecls.keys());
 
-  if (packageNames.size > 0) {
-    for (const u of units) {
-      const bindings = new Map<string, string>();
-      for (const t of u.targets) {
-        const d = pkgDecls.get(t.pkg);
-        if (!d) continue;
+  for (const u of units) {
+    const bindings = new Map<string, string>();
+    for (const t of u.targets) {
+      if (t.pkg === "") {
+        // Flat-namespace alias: `from "std/math" import { Math as M }` binds the
+        // local `M` to the real, unmangled declared name so `M.clampI64(..)`
+        // resolves. Works for values and types alike (manglePackage's binding map
+        // is consulted by both resolveValue and resolveType).
         for (let i = 0; i < t.names.length; i++) {
-          const n = t.names[i];
-          if (!d.values.has(n) && !d.types.has(n)) continue;
-          bindings.set(t.aliases?.[i] ?? n, `${t.pkg}$${n}`);
+          const a = t.aliases?.[i];
+          if (a !== undefined && a !== t.names[i]) bindings.set(a, t.names[i]);
         }
+        continue;
       }
+      const d = pkgDecls.get(t.pkg);
+      if (!d) continue;
+      for (let i = 0; i < t.names.length; i++) {
+        const n = t.names[i];
+        if (!d.values.has(n) && !d.types.has(n)) continue;
+        bindings.set(t.aliases?.[i] ?? n, `${t.pkg}$${n}`);
+      }
+    }
+    // pkg="" with no bindings is a strict no-op inside manglePackage; skip the call.
+    if (bindings.size > 0 || u.pkg !== "") {
       manglePackage(u.prog, u.pkg, pkgDecls.get(u.pkg) ?? emptyPkgDecls(), bindings);
     }
   }

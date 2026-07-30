@@ -1,0 +1,17 @@
+// `import { X as Y }` on a flat-namespace (stdlib) name binds the local alias to
+// the real declared name — including namespace-object types called as `Y.method()`.
+from "std/math" import {
+    Math as M, Math
+}
+
+fn main() {
+    // aliased namespace-object static call (clamps 99 to 5)
+    print(M.clampI64(99, 0, 5))
+    // @expect: 5
+    // the un-aliased name still works alongside the alias
+    print(Math.absI64(-7))
+    // @expect: 7
+    // alias and original refer to the same thing
+    print(M.absI64(-3))
+    // @expect: 3
+}

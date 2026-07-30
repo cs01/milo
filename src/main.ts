@@ -987,6 +987,8 @@ It uses move semantics and second-class references — no GC, no RC, no lifetime
 bun run src/main.ts run file.milo              # compile + run (no artifacts)
 bun run src/main.ts build file.milo -o myapp   # compile to binary
 bun run src/main.ts emit-ir file.milo          # emit LLVM IR
+bun run src/main.ts emit-ast file.milo         # emit parsed AST as JSON (no types yet)
+bun run src/main.ts emit-hir file.milo         # emit typed HIR as JSON (every expr carries its type)
 bun run src/main.ts build file.milo --release  # -O3 optimized
 \`\`\`
 

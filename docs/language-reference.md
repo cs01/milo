@@ -19,8 +19,10 @@ A memory-safe systems language with simple syntax inspired by TypeScript, Python
 bun run src/main.ts build examples/hello.milo -o hello
 ./hello
 
-# Emit LLVM IR (useful for understanding what the compiler does)
-bun run src/main.ts emit-ir examples/hello.milo
+# Inspect the compiler's intermediate forms (useful for understanding what it does)
+bun run src/main.ts emit-ast examples/hello.milo   # parsed AST as JSON (no types yet)
+bun run src/main.ts emit-hir examples/hello.milo   # typed HIR as JSON (every expr carries its type)
+bun run src/main.ts emit-ir examples/hello.milo    # LLVM IR
 
 # Search the standard library (auto-discovered from std/**/*.milo)
 bun run src/main.ts api time                  # ranked signature search by name + doc

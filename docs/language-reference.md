@@ -79,6 +79,8 @@ or not a `;` follows. A `;` *inside* an expression is still an error.
 | `float` | Alias for `f64` |
 | `byte` | Alias for `u8` |
 
+The float types carry the IEEE special values as namespace constants: `f64.NAN`, `f64.INF`, `f64.NEG_INF` (and the `f32` equivalents). Because `NaN` is not equal to itself, `x == f64.NAN` is always false — the compiler warns on it and points you to `isNan(x)`; `isInf(x)` and `isFinite(x)` live alongside it in `std/math`.
+
 ### Type Aliases
 
 ```milo
@@ -265,9 +267,19 @@ let s = identity("hello")  // T inferred as string
 |----------|-------------|
 | `print(fmt, ...)` | Print formatted text with trailing newline |
 | `exit(code)` | Exit the process |
+| `replace(place, value)` | Store `value` into a mutable `place`, returning its old contents. Move-in/move-out — needs no `clone`, works on non-copyable types |
+| `swap(a, b)` | Exchange two mutable places of the same type. Move-only, no `clone` |
 | `jsonStringify(val)` | Serialize a flat struct (scalar fields only) to JSON string |
 | `@embedFile(path)` | Embed file contents as string at compile time (see [Compile-Time File Embedding](#compile-time-file-embedding)) |
 | `@targetOs()` | Compile-time OS string (`"darwin"`/`"linux"`/`"windows"`); folds `if` branches (see [Compile-Time Target OS](#compile-time-target-os)) |
+
+`replace` and `swap` are the sound way to move a value out of a place you only hold mutably — the move checker forbids a bare `x = someNewValue` from yielding the old `x`, and `x.clone(); x = ...` is a move disguised as a copy. They take the place *bare* (`replace(x, v)`, not `replace(&x, v)`), since [borrows are implicit](#references-second-class).
+
+```milo
+var anchor: string = "hello"
+let old = replace(anchor, "")   // old == "hello", anchor == ""  (no allocation, no clone)
+swap(v[0], v[2])                // exchange two Vec elements in place
+```
 
 ### Contracts
 

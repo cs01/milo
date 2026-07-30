@@ -34,6 +34,31 @@ pub fn clampI64(x: i64, lo: i64, hi: i64): i64
 
 _Undocumented._
 
+### `isFinite`
+
+```milo
+pub fn isFinite(x: f64): bool
+```
+
+_Undocumented._
+
+### `isInf`
+
+```milo
+pub fn isInf(x: f64): bool
+```
+
+_Undocumented._
+
+### `isNan`
+
+```milo
+pub fn isNan(x: f64): bool
+```
+
+NaN is the only value not equal to itself, so this is the one reliable test — `x == f64.NAN`
+is always false (the compiler lints that mistake).
+
 ### `mathAbs`
 
 ```milo

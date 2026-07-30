@@ -103,7 +103,7 @@ print("age: ", u.age)  // u is still valid
 
 ## Isn't this too restrictive?
 
-In practice, the overwhelming majority of references are function arguments — "give me this value briefly, I won't keep it." The rare cases where you'd want to store a reference (iterators, self-referential structs) are handled differently: owned data, Vec indices, or [generational arenas](/stdlib/).
+In practice, the overwhelming majority of references are function arguments — "give me this value briefly, I won't keep it." The rare cases where you'd want to store a reference (iterators, self-referential structs) are handled differently: owned data, Vec indices, or [generational arenas](/stdlib/). [Patterns Without Lifetimes](/language/patterns) has the shape-by-shape translation.
 
 The tradeoff: a much simpler mental model and zero annotation overhead for the 95% case.
 

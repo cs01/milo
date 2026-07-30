@@ -21,8 +21,12 @@ kept as a Milo regression fixture. `unsafe` and FFI are trust boundaries in both
 | Zero-copy view tied to its buffer | compile time | can't express | Rust ahead |
 
 The two Rust-ahead rows are the same trade: no lifetimes, so a view can't be tied
-to the buffer it points into — own the buffer and carry an offset instead. See
-[Ownership](/language/ownership).
+to the buffer it points into — own the buffer and carry an offset instead. That
+cost lands on long-lived borrows into a stable buffer, which is where `'a` earns
+its keep. It does not land on cyclic data: a lifetime can't describe a cycle
+either, so Rust reaches for the same generational handles there, which is why
+that row is even. See [Ownership](/language/ownership) and
+[Patterns Without Lifetimes](/language/patterns) for what to write instead.
 
 Milo's prover decides linear integer arithmetic; bitwise operations, collection
 lengths, and recursion come back `unknown` and fall back to runtime asserts. See

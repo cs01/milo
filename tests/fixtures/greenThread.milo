@@ -25,15 +25,15 @@ pub fn main(): i32 {
     while i < 10 {
         wg.add(1)
         let n = i
+        let wgc = wg.clone()
         Task.spawn(move(): void => {
             print("green " + n.toString())
-            wg.done()
+            wgc.done()
         }
         )
         i = i + 1
     }
     print("spawned")
     wg.wait()
-    wg.destroy()
     return 0
 }

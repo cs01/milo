@@ -27,7 +27,6 @@ pub fn main(): i32 {
     print(counter.load())
     counter.sub(3)
     print(counter.load())
-    counter.destroy()
 
     let flag = AtomicBool.new(false)
     print(flag.load())
@@ -35,7 +34,7 @@ pub fn main(): i32 {
     print(flag.load())
     let _prev = flag.swap(false)
     print(flag.load())
-    flag.destroy()
 
     return 0
+    // counter and flag drop here — freed automatically, no manual destroy
 }

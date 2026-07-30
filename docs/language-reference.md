@@ -2177,13 +2177,14 @@ let wg = WaitGroup.new()
 for i in 0..8 {
     wg.add(1)
     let n = i
+    let wgc = wg.clone()               // share an owning handle with the task
     Task.spawn(move (): void => {
         print(n.toString())
-        wg.done()
+        wgc.done()
     })
 }
 wg.wait()          // returns once all 8 have called done()
-wg.destroy()
+// no destroy: wg and every clone free themselves when their last owner drops
 ```
 
 `Task.join()` must be called before the joined task can complete (i.e. right after `spawn`, before you yield or drive the scheduler) — the cooperative scheduler guarantees the registration lands first. A server that spawns an accept loop and should run forever can drive the scheduler explicitly with `schedulerRunToCompletion()` (runs every spawned task to quiescence, then tears the scheduler down):
@@ -2371,15 +2372,14 @@ counter.add(1)                  // returns old value
 print(counter.load())           // 1
 counter.store(42)
 let old = counter.cas(42, 99)   // compare-and-swap, returns old value
-counter.destroy()
 
 let flag = AtomicBool.new(false)
 flag.store(true)
 let prev = flag.swap(false)     // returns old value
-flag.destroy()
+// no destroy: counter and flag free themselves when their last owner drops
 ```
 
-All atomic operations use sequential consistency (seq_cst). `AtomicI64` and `AtomicBool` use audited `unsafe impl Send` / `Sync` markers because their raw-pointer internals are accessed only through those atomic operations.
+All atomic operations use sequential consistency (seq_cst). `AtomicI64` and `AtomicBool` use audited `unsafe impl Send` / `Sync` markers because their raw-pointer internals are accessed only through those atomic operations. To share one across `Promise.blocking` workers, `.clone()` it — the handle is a reference-counted owner (Arc-style), and the storage frees when the last owner drops. No manual `destroy`.
 
 ### Pitfalls
 
@@ -2387,7 +2387,7 @@ All atomic operations use sequential consistency (seq_cst). `AtomicI64` and `Ato
 2. **Call `Task.join()` immediately after `spawn`.** The registration must land before the task can complete; joining after you've yielded or blocked elsewhere is a lost wakeup.
 3. **The green scheduler is single-threaded and cooperative.** A task that spins on CPU or calls blocking FFI starves every other task — nothing preempts it. Move that work to `Promise.blocking`; long compute loops that must stay on a task should `schedulerYield()` periodically.
 4. **`Promise.blocking` is the only OS thread.** Its closure runs in parallel and its captures must be `Send`; a plain `Promise`/`Task` closure stays on the scheduler and has no such requirement. Use `blocking` only for CPU-bound work or blocking FFI — ordinary I/O already yields on a green task.
-5. **Channels, `WaitGroup`, and atomics are shared handles with manual lifecycle.** Copying one shares the underlying object, so there is no automatic drop — call `.destroy()` exactly once, after every user is done. (`Promise` is the exception: `await` frees it for you.)
+5. **`WaitGroup` and atomics are reference-counted handles — `.clone()` to share, no manual free.** They are move-only owners; cloning gives another owner and the storage frees when the last owner drops (Arc-style). A worker task takes its own `.clone()`. (`Channel` still uses an explicit `.destroy()` after every user is done; `Promise` frees itself on `await`.)
 6. **Channels must be `close()`d** or the consumer's `for val in ch` never ends. `send` on a closed channel returns `Result.Err`, not a panic. Bounded `send` blocking when full is backpressure, not a bug — poll with `trySend`/`tryRecv`.
 7. **Move closures capture copies.** Mutating a captured `var` inside a task or worker is invisible outside. Communicate results through a `Channel`/`Promise`, or share through an atomic — never through captured locals.
 
@@ -2411,13 +2411,14 @@ All atomic operations use sequential consistency (seq_cst). `AtomicI64` and `Ato
 | `ch.destroy()` | Free channel resources |
 | `WaitGroup.new()` | Create a wait group |
 | `wg.add(n)` / `wg.done()` / `wg.wait()` | Track and await a fleet of tasks |
+| `wg.clone()` | Owning handle to share with a task (frees at last drop) |
 | `AtomicI64.new(v)` / `AtomicBool.new(v)` | Create atomic |
 | `a.load()` | Atomic read |
 | `a.store(v)` | Atomic write |
 | `a.add(v)` / `a.sub(v)` | Atomic add/sub (returns old) |
 | `a.cas(exp, des)` | Compare-and-swap (returns old) |
 | `a.swap(v)` | Atomic swap (returns old) |
-| `a.destroy()` | Free atomic |
+| `a.clone()` | Owning handle to share with a worker (frees at last drop) |
 
 ---
 

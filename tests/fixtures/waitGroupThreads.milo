@@ -10,13 +10,15 @@ from "std/sync" import {
 pub fn main(): i32 {
     let wg = WaitGroup.new()
     wg.add(2)
+    let wg1 = wg.clone()
     let t1 = Promise<i64>.blocking(move(): i64 => {
-        wg.done()
+        wg1.done()
         return 0
     }
     )
+    let wg2 = wg.clone()
     let t2 = Promise<i64>.blocking(move(): i64 => {
-        wg.done()
+        wg2.done()
         return 0
     }
     )
@@ -24,6 +26,5 @@ pub fn main(): i32 {
     print("both done")
     t1.await()!
     t2.await()!
-    wg.destroy()
     return 0
 }

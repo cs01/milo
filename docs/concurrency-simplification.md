@@ -88,7 +88,8 @@ that still exist under `Promise.blocking`.
   at `Promise.blocking`), drop Thread/Mutex/RwLock rows from the Thread API table,
   reframe "Thread Safety (Send/Sync)" around the `Promise.blocking` boundary, reword
   the Green-vs-OS-thread comparison table, update Pitfalls #4/#5 (both shrink: cost
-  is declared at creation; only Channel/WaitGroup/atomics still need `destroy`).
+  is declared at creation; WaitGroup/atomics are now refcounted (clone to share,
+  auto-drop), so only Channel still needs `destroy`).
 
 ## Acceptance
 

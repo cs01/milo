@@ -499,13 +499,28 @@ unsafe
 impl Sync for AtomicI64 {
 }
 
+// heap layout (16 bytes): 0 value(i64), 8 refcount(i64). The refcount is inlined
+// into the same allocation as the payload (Arc-style) so a clone/drop is one atomic
+// op and one allocation — never a separate refcount box.
 impl AtomicI64 {
     fn new(initial: i64): AtomicI64 {
         unsafe {
-            let p = malloc(8)
+            let p = malloc(16)
             _atomicStoreI64(p, initial)
+            _atomicStoreI64((p as i64 + 8) as *u8, 1)
             return AtomicI64 {
                 _ptr: p
+            }
+        }
+    }
+
+    // Share this atomic with another owner (e.g. a spawned task). Each clone must be
+    // dropped exactly once; the underlying storage is freed when the last owner drops.
+    fn clone(self: &Self): AtomicI64 {
+        unsafe {
+            _atomicAddI64((self._ptr as i64 + 8) as *u8, 1)
+            return AtomicI64 {
+                _ptr: self._ptr
             }
         }
     }
@@ -529,9 +544,17 @@ impl AtomicI64 {
     fn cas(self: &Self, expected: i64, desired: i64): i64 {
         return _atomicCasI64(self._ptr, expected, desired)
     }
+}
 
-    fn destroy(self: Self): void {
-        free(self._ptr)
+impl Drop for AtomicI64 {
+    // atomicrmw sub returns the OLD value, so old == 1 means this was the last owner.
+    fn drop(self: &mut Self): void {
+        unsafe {
+            let old = _atomicSubI64((self._ptr as i64 + 8) as *u8, 1)
+            if old == 1 {
+                free(self._ptr)
+            }
+        }
     }
 }
 
@@ -551,13 +574,25 @@ unsafe
 impl Sync for AtomicBool {
 }
 
+// heap layout (16 bytes): 0 value(bool), 8 refcount(i64). Refcount inlined; see AtomicI64.
 impl AtomicBool {
     fn new(initial: bool): AtomicBool {
         unsafe {
-            let p = malloc(1)
+            let p = malloc(16)
             _atomicStoreBool(p, initial)
+            _atomicStoreI64((p as i64 + 8) as *u8, 1)
             return AtomicBool {
                 _ptr: p
+            }
+        }
+    }
+
+    // Share this atomic with another owner; freed when the last owner drops.
+    fn clone(self: &Self): AtomicBool {
+        unsafe {
+            _atomicAddI64((self._ptr as i64 + 8) as *u8, 1)
+            return AtomicBool {
+                _ptr: self._ptr
             }
         }
     }
@@ -573,9 +608,16 @@ impl AtomicBool {
     fn swap(self: &Self, val: bool): bool {
         return _atomicSwapBool(self._ptr, val)
     }
+}
 
-    fn destroy(self: Self): void {
-        free(self._ptr)
+impl Drop for AtomicBool {
+    fn drop(self: &mut Self): void {
+        unsafe {
+            let old = _atomicSubI64((self._ptr as i64 + 8) as *u8, 1)
+            if old == 1 {
+                free(self._ptr)
+            }
+        }
     }
 }
 
@@ -591,7 +633,8 @@ impl AtomicBool {
 //   Task.spawn(move (): void => { work(); wg.done() })
 //   wg.wait()
 
-// heap layout (32 bytes): 0 mtx, 8 cond, 16 count (i64), 24 greenWaitHead (*u8)
+// heap layout (40 bytes): 0 mtx, 8 cond, 16 count (i64), 24 greenWaitHead (*u8),
+// 32 refcount (i64, inlined Arc-style)
 pub struct WaitGroup {
     _p: *u8,
 }
@@ -609,16 +652,28 @@ impl Sync for WaitGroup {
 impl WaitGroup {
     fn new(): WaitGroup {
         unsafe {
-            let p = malloc(32)
-            memset(p, 0, 32)
+            let p = malloc(40)
+            memset(p, 0, 40)
             let mtx = malloc(64)
             pthread_mutex_init(mtx, 0 as *u8)
             let cond = malloc(64)
             pthread_cond_init(cond, 0 as *u8)
             nodeStorePtr(p, 0, mtx)
             nodeStorePtr(p, 8, cond)
+            nodeStoreI64(p, 32, 1)
             return WaitGroup {
                 _p: p
+            }
+        }
+    }
+
+    // Share this WaitGroup with another owner (e.g. a worker task); freed when the
+    // last owner drops. add/done/wait take &Self, so most uses need no clone.
+    fn clone(self: &Self): WaitGroup {
+        unsafe {
+            _atomicAddI64((self._p as i64 + 32) as *u8, 1)
+            return WaitGroup {
+                _p: self._p
             }
         }
     }
@@ -690,12 +745,20 @@ impl WaitGroup {
         }
     }
 
-    fn destroy(self: Self): void {
-        let p = self._p
-        pthread_mutex_destroy(nodeLoadPtr(p, 0))
-        free(nodeLoadPtr(p, 0))
-        pthread_cond_destroy(nodeLoadPtr(p, 8))
-        free(nodeLoadPtr(p, 8))
-        free(p)
+}
+
+impl Drop for WaitGroup {
+    fn drop(self: &mut Self): void {
+        unsafe {
+            let old = _atomicSubI64((self._p as i64 + 32) as *u8, 1)
+            if old == 1 {
+                let p = self._p
+                pthread_mutex_destroy(nodeLoadPtr(p, 0))
+                free(nodeLoadPtr(p, 0))
+                pthread_cond_destroy(nodeLoadPtr(p, 8))
+                free(nodeLoadPtr(p, 8))
+                free(p)
+            }
+        }
     }
 }

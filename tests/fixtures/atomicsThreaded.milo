@@ -10,19 +10,23 @@ from "std/runtime" import {
 pub fn main(): i32 {
     let counter = AtomicI64.new(0)
 
+    // Each task needs its own owning handle: the handle is now move-only (Drop-backed
+    // refcount), so clone() to share. The shared storage frees when the last owner drops.
+    let c1 = counter.clone()
     let t1 = Promise<i64>.blocking(move(): i64 => {
         var i: i64 = 0
         while i < 100 {
-            counter.add(1)
+            c1.add(1)
             i = i + 1
         }
         return 0
     }
     )
+    let c2 = counter.clone()
     let t2 = Promise<i64>.blocking(move(): i64 => {
         var i: i64 = 0
         while i < 100 {
-            counter.add(1)
+            c2.add(1)
             i = i + 1
         }
         return 0
@@ -32,6 +36,5 @@ pub fn main(): i32 {
     t1.await()!
     t2.await()!
     print(counter.load())
-    counter.destroy()
     return 0
 }

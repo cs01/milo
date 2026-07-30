@@ -16,15 +16,15 @@ pub fn main(): i32 {
     while i < 3 {
         wg.add(1)
         let n = i
+        let wgc = wg.clone()
         Task.spawn(move(): void => {
             print("done " + n.toString())
-            wg.done()
+            wgc.done()
         }
         )
         i = i + 1
     }
     wg.wait()
     print("all finished")
-    wg.destroy()
     return 0
 }

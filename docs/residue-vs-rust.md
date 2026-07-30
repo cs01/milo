@@ -40,7 +40,9 @@ A wrong index is still a bug. It is a bug that crashes deterministically or retu
 
 **Target:** parsers, CLIs, services, leaf libraries — code where ownership is mostly a tree, references are mostly transient, and the pool/handle/message-passing style is what expert Rust converges on anyway. Milo makes that style primary and deletes the machinery that served the other style.
 
-**Anti-target:** event-loop runtimes with GC-managed FFI, shared-memory data-parallel kernels, systems that must store zero-copy borrows across a buffer's lifetime. Milo can be *used* there, against the grain, but it is not competing to win there.
+**Anti-target:** event-loop runtimes with GC-managed FFI, SMP monoliths and other shared-memory data-parallel workloads, systems that must store zero-copy borrows across a buffer's lifetime. Milo can be *used* there, against the grain, but it is not competing to win there.
+
+Note "kernels" is *not* on this list. Freestanding/no-runtime is shipped, and a single-core RTOS core needs no shared-memory parallelism — interrupt masking is the lock. The anti-target is the *SMP* part, not the bare-metal part. See [kernel-feasibility](kernel-feasibility.md).
 
 ## The pitch, stated correctly
 

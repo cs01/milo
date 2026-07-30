@@ -1,0 +1,38 @@
+// Block-scope drop: an owned value dies at the end of the innermost block that
+// owns it, not at the function epilogue. Here `t` is declared inside an `if` that
+// runs only on iteration 1; it drops at the end of that if-block ("d" lands right
+// after "b", before the trailing "-"). Before block-scope drop it would have lived
+// until the function epilogue, printing "-b--d|end".
+//
+// Total drop count is unchanged (guarded/idempotent) — only the drop's program
+// point moves earlier, which is the whole point.
+// @expect: -bd--|end
+
+pub var gLog: string = ""
+
+pub struct Tracked {
+    id: i64,
+}
+
+impl Drop for Tracked {
+    fn drop(self: &mut Self): void {
+        gLog = gLog + "d"
+    }
+}
+
+pub fn main(): i32 {
+    var i: i64 = 0
+    while i < 3 {
+        if i == 1 {
+            let t = Tracked {
+                id: i,
+            }
+            gLog = gLog + "b"
+        }
+        gLog = gLog + "-"
+        i = i + 1
+    }
+    gLog = gLog + "|end"
+    print(gLog)
+    return 0
+}

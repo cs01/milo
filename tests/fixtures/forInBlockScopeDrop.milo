@@ -1,0 +1,20 @@
+// Block-scope drop must distinguish a for-in element (a borrow — not dropped by
+// the loop; owned by the container) from a body-local owned value (dropped at the
+// end of each iteration). Getting this wrong double-frees the Vec's strings. The
+// sum is just a liveness check; the real assertion is "no double-free" (ASAN).
+// @expect: 31
+
+pub fn main(): i32 {
+    var v: Vec<string> = Vec.new()
+    v.push("alpha")
+    v.push("beta")
+    v.push("gamma")
+    var n: i64 = 0
+    for s in v {
+        n = n + s.len()
+        let tmp = s + "!" // body-local owned String: drops each iteration
+        n = n + tmp.len()
+    }
+    print(n)
+    return 0
+}

@@ -6,9 +6,11 @@
 //  40: next (*u8)         48: closureFn (*u8)   56: closureEnv (*u8)
 //  64: sched (*u8)  — home scheduler, lets a foreign thread unpark this task
 //  72: joiner (*u8) — a green task parked in Task.join, unparked on completion
-//  80: joinCell (*u8) — main-context Task.join done flag (i32 cell, set to 1 on
-//       completion). Joiner/joinCell must be registered before the task can
-//       complete (cooperative-scheduler usage); a late join reads freed memory.
+//  80: joinCell (*u8) — the shared done-signal cell (see taskCellNew), allocated
+//       at spawn and set to done=1 on completion. It lives OUTSIDE this struct so
+//       a late join can read "done" after the struct is reaped/freed — the Task
+//       handle holds the other ref. Joiner is still registered before completion
+//       (cooperative), but a late/double join is now memory-safe, not a UAF.
 //
 // Scheduler layout (80 bytes):
 //   0: context (*u8)       8: runHead (*u8)     16: runTail (*u8)
@@ -313,6 +315,49 @@ pub fn rtWritePtr(base: *u8, off: i64, val: *u8): void {
 
 pub struct Task {
     _ptr: *u8,
+    // Shared done-signal cell (taskCellNew), also stored in the task struct's
+    // joinCell slot. Held here so join() reads completion off the handle, never
+    // the reaped struct.
+    _cell: *u8,
+}
+
+// Task.join done-signal cell — 16 bytes: [0] done flag (0/1), [8] refcount.
+// It lives outside the 88-byte task struct because the scheduler frees that
+// struct the instant the task completes (reapTask), yet a late join must still
+// observe "done" without touching freed memory. Two owners share it — the task
+// (until reapTask) and the Task handle (until it drops) — so reap-before-join
+// and join-before-reap are both safe. Non-atomic: Task is not Send, so both
+// owners live on the spawning thread.
+fn taskCellNew(): *u8 {
+    unsafe {
+        let cell = malloc(16)
+        rtWriteI64(cell, 0, 0)
+        rtWriteI64(cell, 8, 2)
+        return cell
+    }
+}
+
+fn taskCellDecref(cell: *u8): void {
+    unsafe {
+        if cell as i64 == 0 {
+            return
+        }
+        let rc = rtReadI64(cell, 8) - 1
+        rtWriteI64(cell, 8, rc)
+        if rc == 0 {
+            free(cell)
+        }
+    }
+}
+
+impl Drop for Task {
+    // Release the handle's ref on the done-cell. The task struct itself is owned
+    // and freed by the scheduler (reapTask), so there is nothing else to reclaim.
+    fn drop(self: &mut Self): void {
+        unsafe {
+            taskCellDecref(self._cell)
+        }
+    }
 }
 
 // ── scheduler access ──
@@ -399,6 +444,11 @@ impl Task {
             rtWritePtr(task, tClosureEnv(), envPtr)
             rtWritePtr(task, tSched(), sched)
 
+            // Register the done-cell up front so a join issued after the task
+            // has already completed and been reaped still finds it (no UAF).
+            let cell = taskCellNew()
+            rtWritePtr(task, tJoinCell(), cell)
+
             let total = guardPageSize() + stackBytes
             let stackMem = mmap(0 as *u8, total, protRead() | protWrite(), mapPrivate() | mapAnon(), -1, 0 as i64)
             rtWritePtr(task, tStack(), stackMem)
@@ -427,7 +477,8 @@ impl Task {
             rtWriteI64(sched, sNumTasks(), n)
 
             return Task {
-                _ptr: task
+                _ptr: task,
+                _cell: cell
             }
         }
     }
@@ -438,22 +489,28 @@ impl Task {
     // parks; the main thread drives the scheduler until the done cell is set.
     fn join(self: &Self): void {
         unsafe {
-            let task = self._ptr
-            if task as i64 == 0 {
+            let cell = self._cell
+            if cell as i64 == 0 {
+                return
+            }
+            // Late/repeat join: the reap flipped done=1 before freeing the task
+            // struct, so read the cell and return — never the freed struct.
+            if rtReadI64(cell, 0) == 1 {
                 return
             }
             let cur = schedulerCurrent()
             if cur as i64 != 0 {
-                rtWritePtr(task, tJoiner(), cur)
+                // Green caller: not-done was just observed and the cooperative
+                // scheduler cannot advance the target between here and the park,
+                // so self._ptr is still live to register the joiner.
+                rtWritePtr(self._ptr, tJoiner(), cur)
                 schedulerPark()
             } else {
-                let cell = malloc(8)
-                rtWriteI64(cell, 0, 0)
-                rtWritePtr(task, tJoinCell(), cell)
+                // Main caller: drive the scheduler until the reap flips the cell.
+                // Only the cell is touched, so a reap that already ran can't UAF.
                 while rtReadI64(cell, 0) == 0 {
                     schedulerBlockMain()
                 }
-                free(cell)
             }
         }
     }
@@ -1136,6 +1193,9 @@ fn reapTask(sched: *u8, task: *u8): void {
     rtWriteI64(sched, sNumTasks(), rtReadI64(sched, sNumTasks()) - 1)
     if cell as i64 != 0 {
         rtWriteI64(cell, 0, 1)
+        // Release the task's ref; the handle holds the other. Whoever drops last
+        // frees the cell, so a late join (handle still alive) reads a live cell.
+        taskCellDecref(cell)
     }
     if joiner as i64 != 0 {
         schedulerUnpark(joiner)

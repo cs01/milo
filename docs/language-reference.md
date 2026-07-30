@@ -2772,6 +2772,9 @@ Test files use the `*_test.milo` naming convention. Test functions start with `t
 # Run all *_test.milo files in current directory
 milo test
 
+# Run every *_test.milo file under a directory, recursively
+milo test tests
+
 # Run specific test file
 milo test math_test.milo
 ```

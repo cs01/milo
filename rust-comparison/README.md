@@ -16,7 +16,7 @@ Requires `rustc` (release uses `-O`) and the repo's `./milo` wrapper. Set `RUSTC
 | `use_after_move` | compile-error | compile-error | **parity** — moved-value use rejected before codegen |
 | `dangling_ref` | compile-error | compile-error | **parity** — can't return a reference to a local |
 | `oob_index` | runtime-panic | runtime-trap | **parity** — no compile proof here, both trap (no UB) |
-| `overflow` | wrap / debug-panic | wrap / debug-trap | **parity, honestly** — Milo's default matches Rust today |
+| `overflow` | wrap / debug-panic | **trap in every mode** | **Milo ahead** — Rust's release build wraps silently |
 | `stale_handle` | **ran clean → wrong value** | **caught → `None`** | baseline only — raw indices need hardening |
 | `steelman_arena` | **caught → `None`** | **caught → `None`** | **parity** — generational keys close the stale-slot bug |
 | `contract` | runtime-panic (assert) | **compile-error** | **Milo ahead** — contracts proven at compile time |
@@ -34,5 +34,5 @@ in `std/arena`; Rust normally gets it from a crate or a small domain-specific ar
 
 ## Honesty notes
 
-- **`overflow` is deliberately a tie.** Milo's *decided* default is trap-in-all-modes, but as shipped the trap is gated to `--debug`; release wraps, exactly like Rust. We show the real behavior, not the aspiration.
+- **`overflow` used to be a tie.** Milo's trap was gated to `--debug` while release wrapped, exactly like Rust. It now traps in every build mode; `--no-overflow-checks` (or `--fast`) opts back into wrapping, and `@wrapping fn` declares it per function.
 - **Not shown here:** the case where Rust genuinely leads — a struct that *stores a borrow* (`Parser<'a> { input: &'a [u8] }`). Milo can't express it (own the buffer + an index instead). That's the real cost of having no lifetimes; see the site page.

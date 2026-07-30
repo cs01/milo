@@ -1,6 +1,6 @@
 fn main(): i32 {
     var x: i32 = 2147483647
-    x = x + 1 // release: wraps; --debug: traps
+    x = x + 1 // traps in every mode (--no-overflow-checks opts back into wrapping)
     print(x)
     return 0
 }

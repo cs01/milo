@@ -3,14 +3,14 @@ system: memory-safety-vs-rust
 purpose: adversarial retained probes of Milo's safe-language behavior compared with Rust
 key-files: src/checker.ts, src/codegen.ts, std/arena.milo, docs/ownership-model.md
 update-when: a safety check is added/moved between compile-time and runtime, a new threat class is probed, or the overflow default changes
-last-verified: 2026-07-22
+last-verified: 2026-07-30
 -->
 
 # Memory safety: Milo vs Rust, battle-tested
 
 Memory safety is the whole reason a safe systems language exists, so this doc doesn't argue it — it *probes* selected threats with retained regression fixtures and both-sides receipts. The bar is simple: **no silent undefined behavior in safe code.** A threat is handled if it is caught at compile time or trapped at runtime. `unsafe`, FFI declarations, and manual `unsafe impl Send` / `Sync` are explicit trust boundaries, as they are in Rust.
 
-Result of the retained sweep (2026-07-22): **zero silent-UB misses in the tested safe-language cases.** The sweep did find and fix cross-arena handle confusion, which returned the wrong value without memory UB, and it made manual thread-safety overrides explicitly unsafe. Overflow still wraps by default in release; see below.
+Result of the retained sweep (2026-07-22): **zero silent-UB misses in the tested safe-language cases.** The sweep did find and fix cross-arena handle confusion, which returned the wrong value without memory UB, and it made manual thread-safety overrides explicitly unsafe. Overflow now traps in every build mode (finding #1, closed).
 
 ## Threat matrix
 
@@ -32,7 +32,7 @@ Result of the retained sweep (2026-07-22): **zero silent-UB misses in the tested
 | Use-after-free, cyclic (arena handle) | n/a (`&'a` rejected) → runtime | **runtime** | generational `Handle`: stale handle → `get` returns `None` |
 | Divide-by-zero | runtime panic | **runtime (all modes)** | `milo: division by zero` |
 | `INT_MIN / -1` | runtime panic | **runtime (all modes)** | same guard as div-by-zero |
-| Integer overflow | debug panic / **release wrap** | debug trap / **release wrap** | ⚠ see finding — Rust-parity today, not the decided default |
+| Integer overflow | debug panic / **release wrap** | **runtime (all modes)** | `--no-overflow-checks` (or `--fast`) opts back into wrapping |
 | Contract violation (pre/post/invariant) | runtime (unstable) / external tools | **compile-time (SMT) + runtime** | different axis — see below |
 
 The last row is *not* memory safety — it's functional correctness. It's here because it's where Milo pulls decisively ahead, and it's easy to conflate the two.
@@ -76,12 +76,11 @@ fn clamp(x: i32, lo: i32, hi: i32): i32
 
 **Honest frontier.** Milo's prover is not a general verifier. It discharges **linear scalar** arithmetic over integers at call sites and returns; it reports **`unknown`** (not `proven`) for nonlinear/bitwise expressions (`*` of two variables, `&`, `<<`), `Vec.len()` reached through a builder, and struct-field loop invariants. `unknown` ≠ `failed` — it means "not discharged statically," and in `--debug` that clause still holds the line at runtime. The win is real but bounded: simple numeric contracts are proven away for free; richer ones fall back to runtime. See [prover-frontier](design.md) notes.
 
-## Finding #1: overflow wraps in release, docs claim otherwise
+## Finding #1 (closed): overflow wrapped in release
 
-- **Observed:** `2147483647 + 1` at `i32` → `-2147483648` (silent wrap) under `milo run`, default `build` (-O2), and `--release`. Only `--debug` traps (`runtime error: integer overflow`).
-- **Cause:** the checked-arith emission (`llvm.sadd.with.overflow` → abort) is gated behind `this.debugOverflow` in `src/codegen.ts` (~line 3425), set only in debug mode.
-- **Severity:** not a memory-safety hole — wrapping is defined behavior, no UB. It's a **policy/doc mismatch**: design.md's decided default is "trap in all build modes," but the shipped default is Rust-parity (debug trap, release wrap). design.md §Overflow now states the shipped status honestly.
-- **To close:** ungate `emitCheckedArith` to all modes, leaning on range analysis so the release cost stays near zero (the machinery already exists). Div-by-zero and `INT_MIN/-1` are already always-on; overflow is the last case.
+- **Was:** `2147483647 + 1` at `i32` wrapped to `-2147483648` under `milo run`, default `build` (-O2), and `--release`; only `--debug` trapped.
+- **Now:** all three trap (`runtime error: integer overflow`), matching design.md's decided default. The checked-arith emission is decoupled from `-O`; `--no-overflow-checks` and `--fast` opt back into wrapping for a perf-critical build, `@wrapping fn` declares it per function.
+- Wrapping was never UB, so this was a policy gap rather than a memory-safety hole — but it was the one row where Milo claimed more than it shipped.
 
 ## How to extend this battle-test
 

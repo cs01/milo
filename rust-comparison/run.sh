@@ -69,7 +69,7 @@ expected() {
     oob_index:milo:*) echo 'runtime-trap|array index out of bounds' ;;
     overflow:rust:release) echo 'clean|-2147483648' ;;
     overflow:rust:debug) echo 'runtime-panic|attempt to add with overflow' ;;
-    overflow:milo:release) echo 'clean|-2147483648' ;;
+    overflow:milo:release) echo 'runtime-trap|integer overflow' ;;
     overflow:milo:debug) echo 'runtime-trap|integer overflow' ;;
     stale_handle:rust:*) echo 'clean|arena[h] = carol' ;;
     stale_handle:milo:*) echo 'clean|caught: stale handle -> None' ;;

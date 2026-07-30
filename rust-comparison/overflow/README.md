@@ -1,1 +1,1 @@
-overflow: HONEST PARITY - both wrap in release, trap in debug (Milo default matches Rust today)
+overflow: Milo traps in every build mode; Rust traps in debug and wraps in release

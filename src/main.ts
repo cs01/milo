@@ -762,6 +762,23 @@ function compileSourceToBinary(source: string, sourcePath: string, target: Targe
   return out;
 }
 
+// Directories a test sweep should never descend into: dependency/build caches that can
+// hold a copy of someone else's suite.
+const TEST_SCAN_SKIP = new Set(["node_modules", ".git", ".milo", ".selfhost", "target", "dist"]);
+
+function collectTestFiles(dir: string): string[] {
+  const out: string[] = [];
+  for (const e of readdirSync(dir, { withFileTypes: true })) {
+    if (e.isDirectory()) {
+      if (TEST_SCAN_SKIP.has(e.name) || e.name.startsWith(".")) continue;
+      out.push(...collectTestFiles(join(dir, e.name)));
+    } else if (e.name.endsWith("_test.milo")) {
+      out.push(join(dir, e.name));
+    }
+  }
+  return out.sort();
+}
+
 async function runTests(testFiles: string[], target: TargetInfo, optFlag: string, warningConfig?: WarningConfig) {
   let totalPassed = 0;
   let totalFailed = 0;
@@ -1385,7 +1402,7 @@ async function main() {
     console.log("commands:");
     console.log("  run <file> [args]      compile and run (no artifacts left behind)");
     console.log("  build <file> [-o out]  compile to executable");
-    console.log("  test [file...]         run tests (*_test.milo files)");
+    console.log("  test [file|dir...]     run tests (*_test.milo, recursive in a dir; cwd by default)");
     console.log("  emit-ast <file>        emit the parsed AST as JSON (--all imports, --spans keep spans)");
     console.log("  emit-hir <file>        emit the typed HIR as JSON (--all full module, --spans keep spans)");
     console.log("  emit-ir <file>         emit LLVM IR");
@@ -1578,6 +1595,28 @@ async function main() {
     return;
   }
 
+  // Ahead of the source check below: `milo test` takes files OR directories, and a bare
+  // `milo test` (no positional at all) means "this directory".
+  if (cmd === "test") {
+    const testArgs = args.slice(1);
+    const { source: testSource, rest: testRest, optFlag: testOpt, warningConfig: testWc } = parseArgs(testArgs);
+    const roots = [testSource, ...testRest].filter((a): a is string => a != null && !a.startsWith("-"));
+    const files: string[] = [];
+    for (const p of roots.length > 0 ? roots : [process.cwd()]) {
+      if (!existsSync(p)) { console.error(`error: no such file or directory: ${p}`); process.exit(1); }
+      if (statSync(p).isDirectory()) {
+        const found = collectTestFiles(p);
+        if (found.length === 0) { console.error(`no *_test.milo files under ${p}`); process.exit(1); }
+        files.push(...found);
+      } else {
+        files.push(p);
+      }
+    }
+    if (files.length === 0) { console.error("no test files found"); process.exit(1); }
+    await runTests(files, target, testOpt, testWc);
+    return;
+  }
+
   if (!source && cmd !== "--help") { console.error("error: no source file"); process.exit(1); }
 
   // `verify` never verified anything — it prints the obligations `prove` discharges. It
@@ -1655,22 +1694,6 @@ async function main() {
     const violations = checkSafetyCompliance(program, level);
     console.log(formatSafetyReport(violations, level));
     if (violations.some(v => v.severity === "error")) process.exit(1);
-    return;
-  }
-
-  if (cmd === "test") {
-    const testArgs = args.slice(1);
-    const { optFlag: testOpt, warningConfig: testWc } = parseArgs(testArgs);
-    let files: string[];
-    const explicitFiles = testArgs.filter(a => a.endsWith(".milo"));
-    if (explicitFiles.length > 0) {
-      files = explicitFiles;
-    } else {
-      const dir = process.cwd();
-      files = readdirSync(dir).filter(f => f.endsWith("_test.milo")).map(f => join(dir, f));
-    }
-    if (files.length === 0) { console.error("no test files found"); process.exit(1); }
-    await runTests(files, target, testOpt, testWc);
     return;
   }
 

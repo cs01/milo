@@ -447,24 +447,46 @@ svg.sug-icon {
   text-align: center;
 }
 
+/* a bare outline star read as decoration — it's the only control that saves a
+   place, so it gets a filled pill and a word */
 .fav-btn {
   display: inline-flex;
   align-items: center;
-  justify-content: center;
-  padding: 0.2rem;
-  background: none;
-  border: none;
+  gap: 0.3rem;
+  padding: 0.25rem 0.6rem 0.25rem 0.5rem;
+  font-family: inherit;
+  font-size: 0.75rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
   color: inherit;
+  background: rgba(255, 255, 255, 0.2);
+  border: 1px solid rgba(255, 255, 255, 0.35);
+  border-radius: 999px;
   cursor: pointer;
-  opacity: 0.9;
+  text-shadow: none;
   transition:
-    opacity 0.15s,
-    transform 0.15s;
+    background-color 0.15s,
+    border-color 0.15s;
 }
 
 .fav-btn:hover {
-  opacity: 1;
-  transform: scale(1.15);
+  background: rgba(255, 255, 255, 0.32);
+}
+
+.fav-btn.on {
+  border-color: rgba(251, 191, 36, 0.8);
+  background: rgba(251, 191, 36, 0.22);
+}
+
+.on-light .fav-btn {
+  background: rgba(31, 41, 55, 0.1);
+  border-color: rgba(31, 41, 55, 0.2);
+}
+
+.fav-btn .star {
+  width: 0.9rem;
+  height: 0.9rem;
 }
 
 .star {
@@ -826,8 +848,24 @@ svg.sug-icon {
 
 /* ── Tile popover ── */
 
-.tile.tappable {
+.tile.tappable,
+.hourly-item[data-pop],
+.daily-row[data-pop] {
   cursor: pointer;
+}
+
+.hourly-item[data-pop]:focus-visible,
+.daily-row[data-pop]:focus-visible {
+  outline: 2px solid rgba(255, 255, 255, 0.8);
+  outline-offset: 2px;
+  border-radius: var(--radius-btn);
+}
+
+/* the seconds digit changes every tick — proportional figures would make the
+   whole line jitter */
+.countdown {
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
 }
 
 .tile.tappable:hover {
@@ -1145,6 +1183,22 @@ svg.sug-icon {
   text-decoration: underline;
 }
 
+.footer-credits {
+  font-size: 0.9375rem;
+  line-height: 1.6;
+  color: rgba(31, 41, 55, 0.6);
+}
+
+.footer-credits a {
+  color: rgba(31, 41, 55, 0.85);
+  text-decoration: none;
+}
+
+.footer-credits a:hover {
+  color: var(--content);
+  text-decoration: underline;
+}
+
 .footer-legal {
   padding: 0 1.5rem 2rem;
   text-align: center;
@@ -1181,99 +1235,140 @@ svg.sug-icon {
   }
 }
 
-/* ── Saved cities list ── */
+/* ── Your places (favorites + recents) ──
+   A wrapping chip row above the card on narrow screens; a sticky rail beside
+   it once the viewport is wide enough that a single column wastes the space. */
 
-.saved-row {
-  position: relative;
+.places {
   display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 0.75rem;
-  padding: 0.75rem 1rem;
-  border-top: 1px solid rgba(31, 41, 55, 0.06);
-  cursor: pointer;
-  transition: background-color 0.15s;
+  flex-wrap: wrap;
+  gap: 0.4rem;
 }
 
-.saved-row:first-of-type {
-  border-top: none;
+.places:not(.has-places) {
+  display: none;
 }
 
-.saved-row:hover {
-  background: rgba(242, 242, 242, 0.6);
-}
-
-.saved-left {
-  min-width: 0;
-}
-
-.saved-name {
-  font-size: 0.9375rem;
-  font-weight: 600;
-}
-
-.saved-cond {
-  font-size: 0.8125rem;
-  color: rgba(31, 41, 55, 0.6);
-  margin-top: 0.1rem;
-}
-
-.saved-right {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-end;
-  /* leaves room for the remove button, which only appears on hover */
-  margin-right: 1.25rem;
-}
-
-.saved-temp {
-  font-size: 1.5rem;
-  font-weight: 300;
-  letter-spacing: -0.02em;
-  line-height: 1.1;
-  font-variant-numeric: tabular-nums;
-}
-
-.saved-pending {
-  opacity: 0.35;
-}
-
-.saved-hilo {
+.places-head {
+  display: none;
   font-size: 0.75rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
   color: rgba(31, 41, 55, 0.6);
-  font-variant-numeric: tabular-nums;
 }
 
-.saved-remove {
-  position: absolute;
-  top: 50%;
-  right: 0.6rem;
-  transform: translateY(-50%);
-  width: 1.35rem;
-  height: 1.35rem;
-  display: flex;
+.place-chip {
+  display: inline-flex;
   align-items: center;
-  justify-content: center;
-  font-size: 1rem;
-  line-height: 1;
+  gap: 0.4rem;
+  padding: 0.4rem 0.7rem;
   font-family: inherit;
-  color: rgba(31, 41, 55, 0.5);
-  background: none;
-  border: none;
+  font-size: 0.875rem;
+  color: var(--content);
+  background: var(--base-200);
+  border: 1px solid var(--base-300);
   border-radius: 999px;
   cursor: pointer;
-  opacity: 0;
   transition:
-    opacity 0.15s,
-    background-color 0.15s;
+    background-color 0.15s,
+    border-color 0.15s;
 }
 
-.saved-row:hover .saved-remove,
-.saved-remove:focus {
-  opacity: 1;
+.place-chip:hover {
+  background: var(--base-300);
 }
 
-.saved-remove:hover {
-  background: rgba(31, 41, 55, 0.1);
+.place-chip.active {
+  border-color: var(--primary);
+  background: rgba(31, 122, 61, 0.1);
+}
+
+.place-name {
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.place-temp {
+  font-variant-numeric: tabular-nums;
+  color: rgba(31, 41, 55, 0.7);
+}
+
+.place-pending {
+  opacity: 0.45;
+}
+
+.place-chip .star {
+  width: 0.85rem;
+  height: 0.85rem;
+  flex-shrink: 0;
+}
+
+svg.place-icon {
+  width: 0.85rem;
+  height: 0.85rem;
+  flex-shrink: 0;
+  opacity: 0.55;
+}
+
+.place-remove {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.1rem;
+  height: 1.1rem;
+  margin-right: -0.25rem;
+  border-radius: 999px;
+  font-size: 0.95rem;
+  line-height: 1;
+  color: rgba(31, 41, 55, 0.45);
+}
+
+.place-remove:hover {
+  background: rgba(31, 41, 55, 0.12);
   color: var(--content);
+}
+
+@media (min-width: 1100px) {
+  .container {
+    max-width: 74rem;
+    display: grid;
+    grid-template-columns: 15rem minmax(0, 1fr);
+    align-items: start;
+    gap: 1.25rem 1.5rem;
+  }
+  /* the rail spans both rows so the card keeps the full right column */
+  .places.has-places {
+    grid-column: 1;
+    grid-row: 1 / span 2;
+    position: sticky;
+    top: 4.25rem;
+    flex-direction: column;
+    flex-wrap: nowrap;
+    align-items: stretch;
+  }
+  .places-head {
+    display: block;
+    margin-bottom: 0.15rem;
+  }
+  #error,
+  #hero {
+    grid-column: 2;
+  }
+  /* with no places saved the rail collapses and the card takes the full width */
+  .places:not(.has-places) ~ #error,
+  .places:not(.has-places) ~ #hero {
+    grid-column: 1 / -1;
+  }
+  .place-chip {
+    justify-content: space-between;
+    border-radius: var(--radius-btn);
+    padding: 0.5rem 0.7rem;
+  }
+  .place-name {
+    flex: 1;
+    text-align: left;
+  }
 }

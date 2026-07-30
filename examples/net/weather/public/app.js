@@ -1,5 +1,5 @@
 var heroEl = document.getElementById("hero");
-var savedEl = document.getElementById("saved");
+var placesEl = document.getElementById("places");
 var zipInput = document.getElementById("zip");
 var searchBtn = document.getElementById("search");
 var errorEl = document.getElementById("error");
@@ -9,6 +9,7 @@ var defaultLon = "-122.4094";
 var defaultCity = "San Francisco";
 var currentLat = defaultLat;
 var currentLon = defaultLon;
+var currentCityLabel = "";
 
 var icons = {
   Sunny: "\u2600\uFE0F",
@@ -57,6 +58,18 @@ function icon(forecast, daytime) {
 }
 
 var WEEKDAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+
+var WEEKDAYS_FULL = [
+  "Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday",
+];
+
+// "Thursday" for the forecast location's calendar day — past midnight UTC that
+// is not the day the viewer's own browser is on
+function fmtDayLabel(iso, timeZone) {
+  var d = new Date(iso);
+  if (!timeZone) return WEEKDAYS_FULL[d.getDay()];
+  return d.toLocaleDateString("en-US", { timeZone: timeZone, weekday: "long" });
+}
 
 function esc(s) {
   return String(s)
@@ -657,7 +670,8 @@ function showError(msg) {
 function fetchWeather(lat, lon, city, saveLoc) {
   currentLat = lat;
   currentLon = lon;
-  heroEl.innerHTML = '<div class="loading">Loading\u2026</div>';
+  heroEl.innerHTML =
+    '<div class="loading">Loading' + (city ? " " + esc(city) : "") + "\u2026</div>";
   errorEl.textContent = "";
   searchBtn.disabled = true;
 
@@ -703,7 +717,8 @@ function fetchWeather(lat, lon, city, saveLoc) {
 
 function geocodeAndFetch(query) {
   errorEl.textContent = "";
-  heroEl.innerHTML = '<div class="loading">Looking up location\u2026</div>';
+  heroEl.innerHTML =
+    '<div class="loading">Looking up ' + esc(query) + "\u2026</div>";
   searchBtn.disabled = true;
 
   var isZip = /^\d{5}$/.test(query.trim());
@@ -777,7 +792,7 @@ function getGridVal(grid, field) {
 function tile(label, value, sub, extra, detail) {
   return (
     '<div class="tile' + (detail ? " tappable" : "") + '"' +
-    (detail ? ' tabindex="0" role="button"' : "") + ">" +
+    (detail ? ' data-pop tabindex="0" role="button"' : "") + ">" +
     '<div class="tile-label">' + label + "</div>" +
     '<div class="tile-value">' + value + "</div>" +
     (extra || "") +
@@ -809,24 +824,32 @@ function closePopover() {
   popEl = null;
 }
 
-function openPopover(tileEl) {
-  var tpl = tileEl.querySelector(".tile-detail");
+// The header falls back to the tile's own label/value/sub, but an hourly cell
+// or a forecast row has no such structure — those pass their heading in
+// data-pop-* instead.
+function openPopover(el) {
+  var tpl = el.querySelector(".tile-detail");
   if (!tpl) return;
   closePopover();
   var card = heroEl.querySelector(".wx-card");
   var cond = card ? card.className.replace("wx-card", "").trim() : "";
-  var label = tileEl.querySelector(".tile-label");
-  var value = tileEl.querySelector(".tile-value");
-  var sub = tileEl.querySelector(".tile-sub");
+  var pick = function (attr, sel) {
+    if (el.getAttribute(attr) !== null) return el.getAttribute(attr);
+    var node = el.querySelector(sel);
+    return node ? node.innerHTML : "";
+  };
+  var label = pick("data-pop-label", ".tile-label");
+  var value = pick("data-pop-value", ".tile-value");
+  var subText = pick("data-pop-sub", ".tile-sub");
 
   popEl = document.createElement("div");
   popEl.className = "wx-pop-overlay";
   popEl.innerHTML =
     '<div class="wx-pop wx-card ' + cond + '">' +
     '<button class="wx-pop-close" aria-label="Close">✕</button>' +
-    '<div class="tile-label">' + (label ? label.innerHTML : "") + "</div>" +
-    '<div class="wx-pop-value">' + (value ? value.innerHTML : "") + "</div>" +
-    (sub ? '<div class="tile-sub">' + sub.innerHTML + "</div>" : "") +
+    '<div class="tile-label">' + label + "</div>" +
+    '<div class="wx-pop-value">' + value + "</div>" +
+    (subText ? '<div class="tile-sub">' + subText + "</div>" : "") +
     '<div class="wx-pop-body">' + tpl.innerHTML + "</div>" +
     "</div>";
   popEl.addEventListener("click", function (e) {
@@ -841,14 +864,14 @@ document.addEventListener("keydown", function (e) {
 
 // delegated so it survives every re-render of the card
 document.addEventListener("click", function (e) {
-  var t = e.target.closest(".tile.tappable");
+  var t = e.target.closest("[data-pop]");
   if (t && !popEl) openPopover(t);
 });
 
 document.addEventListener("keydown", function (e) {
   if (e.key !== "Enter" && e.key !== " ") return;
   var t = document.activeElement;
-  if (t && t.classList && t.classList.contains("tappable")) {
+  if (t && t.hasAttribute && t.hasAttribute("data-pop")) {
     e.preventDefault();
     openPopover(t);
   }
@@ -915,7 +938,7 @@ function extrasHtml() {
       " most of it back at you." +
       "</div>";
     html += tile(
-      "☀️ UV Index",
+      "UV Index",
       uvNow + " " + uvLabel(e.uv),
       e.uvMax != null ? "Peak today " + Math.round(e.uvMax) : "",
       scaleBarHtml(
@@ -933,7 +956,7 @@ function extrasHtml() {
       (e.pm25 != null ? detailRow("PM2.5", e.pm25 + " µg/m³") : "") +
       '<div class="detail-note">' + aqiMeaning(cat) + "</div>";
     html += tile(
-      "🌫️ Air Quality",
+      "Air Quality",
       e.aqi + " " + cat,
       e.pm25 != null ? "PM2.5 " + e.pm25 + " µg/m³" : "",
       scaleBarHtml(
@@ -962,7 +985,7 @@ function extrasHtml() {
       '<div class="detail-note">Rising pressure usually means improving weather;' +
       " a sharp fall means a storm may be on the way.</div>";
     html += tile(
-      "📊 Pressure",
+      "Pressure",
       inHg.toFixed(2) + '<span class="tile-unit"> inHg</span>',
       trend || "Sea level",
       pressureGaugeSvg(inHg),
@@ -1009,7 +1032,7 @@ function sunArcSvg(sunTimes, timeZone, nowTime) {
   var goldenRise = new Date(sunTimes.sunrise.getTime() + 30 * 60000);
   var goldenSet = new Date(sunTimes.sunset.getTime() - 30 * 60000);
   var tooltipLines = [
-    aboveHorizon ? "☀️ Sun is up" : "🌙 Sun is down",
+    aboveHorizon ? "Sun is up" : "Sun is down",
     "Solar noon: " + fmtTimeInTz(sunTimes.solarNoon, timeZone),
     "Day length: " + dayHrs + "h " + dayMins + "m",
     "Golden hour: " + fmtTimeInTz(goldenRise, timeZone) + ", " + fmtTimeInTz(goldenSet, timeZone),
@@ -1039,7 +1062,55 @@ function sunArcSvg(sunTimes, timeZone, nowTime) {
   );
 }
 
+// Which sun event is actually next: before dawn that's today's sunrise, after
+// dusk it's tomorrow's — "is it before sunset" alone gets the pre-dawn case
+// wrong and counts down to a sunset 14 hours away.
+function nextSunEvent(lat, lon, timeZone, now) {
+  var t = calcSunTimes(lat, lon, now, timeZone);
+  if (now < t.sunrise) return { name: "Sunrise", at: t.sunrise, times: t };
+  if (now < t.sunset) return { name: "Sunset", at: t.sunset, times: t };
+  var tmr = calcSunTimes(lat, lon, new Date(now.getTime() + 86400000), timeZone);
+  return { name: "Sunrise", at: tmr.sunrise, times: t };
+}
+
+function pad2(n) {
+  return (n < 10 ? "0" : "") + n;
+}
+
+function fmtCountdown(ms) {
+  var s = Math.max(0, Math.round(ms / 1000));
+  return Math.floor(s / 3600) + ":" + pad2(Math.floor((s % 3600) / 60)) + ":" + pad2(s % 60);
+}
+
+var sunTimer = null;
+
+// Ticks the countdown in place. Rebinds on every render; when the target time
+// passes, re-renders the tile against the following event rather than sitting
+// at 0:00:00.
+function startSunCountdown(target, onElapsed) {
+  if (sunTimer) clearInterval(sunTimer);
+  var tick = function () {
+    var el = document.getElementById("sunCountdown");
+    if (!el) {
+      clearInterval(sunTimer);
+      sunTimer = null;
+      return;
+    }
+    var left = target.getTime() - Date.now();
+    if (left <= 0) {
+      clearInterval(sunTimer);
+      sunTimer = null;
+      onElapsed();
+      return;
+    }
+    el.textContent = fmtCountdown(left);
+  };
+  tick();
+  sunTimer = setInterval(tick, 1000);
+}
+
 function render(city, forecast, hourlyData, grid, timeZone) {
+  currentCityLabel = city;
   var periods = forecast.properties.periods;
   if (!periods || periods.length === 0) {
     showError("No forecast data");
@@ -1085,12 +1156,12 @@ function render(city, forecast, hourlyData, grid, timeZone) {
   var hero =
     '<div class="hero-city">' +
     esc(city) +
-    '<button class="fav-btn" id="favBtn" data-city="' + esc(city) + '" ' +
-    'title="Save to favorites" ' +
-    'aria-label="Save to favorites" aria-pressed="' +
-    (isFavorite(city) ? "true" : "false") +
-    '">' +
+    '<button class="fav-btn' + (isFavorite(city) ? " on" : "") + '" id="favBtn" ' +
+    'data-city="' + esc(city) + '" ' +
+    'title="' + (isFavorite(city) ? "Remove from favorites" : "Save to favorites") + '" ' +
+    'aria-pressed="' + (isFavorite(city) ? "true" : "false") + '">' +
     starSvg(isFavorite(city)) +
+    '<span class="fav-text">' + (isFavorite(city) ? "Saved" : "Save") + "</span>" +
     "</button>" +
     "</div>" +
     '<div class="hero-temp">' + currentTemp + "°</div>" +
@@ -1103,11 +1174,31 @@ function render(city, forecast, hourlyData, grid, timeZone) {
   var hCount = Math.min(hrs.length, 24);
   for (var i = 0; i < hCount; i++) {
     var h = hrs[i];
+    var hLabel = i === 0 ? "Now" : fmtHour(h.startTime, timeZone);
+    var hPop = h.probabilityOfPrecipitation ? h.probabilityOfPrecipitation.value : null;
+    var hDetail =
+      detailRow("Temperature", h.temperature + "°" + h.temperatureUnit) +
+      detailRow("Conditions", esc(h.shortForecast)) +
+      (hPop !== null ? detailRow("Chance of precipitation", hPop + "%") : "") +
+      (h.relativeHumidity && h.relativeHumidity.value !== null
+        ? detailRow("Humidity", Math.round(h.relativeHumidity.value) + "%")
+        : "") +
+      (h.dewpoint && h.dewpoint.value !== null
+        ? detailRow("Dew point", cToF(h.dewpoint.value) + "°F")
+        : "") +
+      detailRow(
+        "Wind",
+        esc(h.windSpeed) + (h.windDirection ? " from the " + esc(h.windDirection) : ""),
+      );
     hourly +=
-      '<div class="hourly-item">' +
-      '<div class="hourly-time">' + (i === 0 ? "Now" : fmtHour(h.startTime, timeZone)) + "</div>" +
+      '<div class="hourly-item" data-pop tabindex="0" role="button"' +
+      ' data-pop-label="' + esc(fmtDayLabel(h.startTime, timeZone)) + '"' +
+      ' data-pop-value="' + h.temperature + '°"' +
+      ' data-pop-sub="' + esc(fmtHour(h.startTime, timeZone) + " · " + h.shortForecast) + '">' +
+      '<div class="hourly-time">' + hLabel + "</div>" +
       '<div class="hourly-icon">' + icon(h.shortForecast, h.isDaytime) + "</div>" +
       '<div class="hourly-temp">' + h.temperature + "°</div>" +
+      '<template class="tile-detail">' + hDetail + "</template>" +
       "</div>";
   }
   hourly += "</div>";
@@ -1116,15 +1207,16 @@ function render(city, forecast, hourlyData, grid, timeZone) {
   extrasTz = timeZone;
   var nowTime = new Date();
   var sunTimes = calcSunTimes(parseFloat(currentLat), parseFloat(currentLon), nowTime, timeZone);
-  var beforeSunset = nowTime < sunTimes.sunset;
+  var sunNext = nextSunEvent(
+    parseFloat(currentLat), parseFloat(currentLon), timeZone, nowTime,
+  );
   var dayHrs = Math.floor(sunTimes.dayLength / 60);
   var dayMins = Math.round(sunTimes.dayLength % 60);
   var tiles = tile(
-    "🌅 " + (beforeSunset ? "Sunset" : "Sunrise"),
-    fmtTimeInTz(beforeSunset ? sunTimes.sunset : sunTimes.sunrise, timeZone),
-    beforeSunset
-      ? "Sunrise: " + fmtTimeInTz(sunTimes.sunrise, timeZone)
-      : "Sunset: " + fmtTimeInTz(sunTimes.sunset, timeZone),
+    sunNext.name,
+    fmtTimeInTz(sunNext.at, timeZone),
+    'in <span id="sunCountdown" class="countdown">' +
+      fmtCountdown(sunNext.at.getTime() - nowTime.getTime()) + "</span>",
     sunArcSvg(sunTimes, timeZone, nowTime),
     sunArcSvg(sunTimes, timeZone, nowTime) +
       detailRow("Sunrise", fmtTimeInTz(sunTimes.sunrise, timeZone)) +
@@ -1135,7 +1227,7 @@ function render(city, forecast, hourlyData, grid, timeZone) {
   );
 
   tiles += tile(
-    "💨 Wind",
+    "Wind",
     esc(now.windSpeed),
     now.windDirection ? "From the " + esc(now.windDirection) : "",
     windCompassSvg(now.windDirection, now.windSpeed),
@@ -1157,7 +1249,7 @@ function render(city, forecast, hourlyData, grid, timeZone) {
 
   if (humidity !== null) {
     tiles += tile(
-      "💧 Humidity",
+      "Humidity",
       Math.round(humidity) + '<span class="tile-unit">%</span>',
       dewpoint !== null ? "Dew point " + cToF(dewpoint) + "°F" : "",
       scaleBarHtml(humidity, "linear-gradient(90deg,#fcd34d,#7dd3fc,#2563eb)"),
@@ -1171,7 +1263,7 @@ function render(city, forecast, hourlyData, grid, timeZone) {
   }
 
   tiles += tile(
-    "☔ Precipitation",
+    "Precipitation",
     (precip || 0) + '<span class="tile-unit">%</span>',
     "Chance today"
   );
@@ -1179,7 +1271,7 @@ function render(city, forecast, hourlyData, grid, timeZone) {
   if (visibility !== null) {
     var visMi = Math.round(visibility / 1609);
     tiles += tile(
-      "👁️ Visibility",
+      "Visibility",
       visMi + '<span class="tile-unit"> mi</span>',
       visMi >= 10 ? "Clear view" : visMi >= 5 ? "Moderate" : "Low visibility"
     );
@@ -1187,7 +1279,7 @@ function render(city, forecast, hourlyData, grid, timeZone) {
 
   if (feelsLike !== null) {
     tiles += tile(
-      "🌡️ Feels Like",
+      "Feels Like",
       cToF(feelsLike) + "°",
       "Actual " + currentTemp + "°"
     );
@@ -1195,7 +1287,7 @@ function render(city, forecast, hourlyData, grid, timeZone) {
 
   var moon = moonPhase(nowTime);
   tiles += tile(
-    "🌙 Moon",
+    "Moon",
     moon.name,
     moon.illuminationPct + "% lit",
     moonDiscSvg(moon.fraction, "moon-disc"),
@@ -1225,6 +1317,8 @@ function render(city, forecast, hourlyData, grid, timeZone) {
         hi: dp.temperature,
         lo: dayLo,
         forecast: dp.shortForecast,
+        day: dp,
+        night: nightP,
       });
       if (dp.temperature > allHi) allHi = dp.temperature;
       if (dayLo < allLo) allLo = dayLo;
@@ -1240,14 +1334,35 @@ function render(city, forecast, hourlyData, grid, timeZone) {
     var barLeft = ((d.lo - allLo) / range) * 100;
     var barWidth = ((d.hi - d.lo) / range) * 100;
     if (barWidth < 8) barWidth = 8;
+    var dPop = d.day.probabilityOfPrecipitation
+      ? d.day.probabilityOfPrecipitation.value
+      : null;
+    var dDetail =
+      detailRow("High", d.hi + "°") +
+      detailRow("Low", d.lo + "°") +
+      (dPop !== null ? detailRow("Chance of precipitation", dPop + "%") : "") +
+      detailRow(
+        "Wind",
+        esc(d.day.windSpeed) +
+          (d.day.windDirection ? " from the " + esc(d.day.windDirection) : ""),
+      ) +
+      '<div class="detail-note">' + esc(d.day.detailedForecast) + "</div>" +
+      (d.night
+        ? '<div class="detail-note"><strong>' + esc(d.night.name) + ".</strong> " +
+          esc(d.night.detailedForecast) + "</div>"
+        : "");
     dHtml +=
-      '<div class="daily-row">' +
+      '<div class="daily-row" data-pop tabindex="0" role="button"' +
+      ' data-pop-label="' + esc(fmtDayLabel(d.day.startTime, timeZone)) + '"' +
+      ' data-pop-value="' + d.hi + "° / " + d.lo + '°"' +
+      ' data-pop-sub="' + esc(d.forecast) + '">' +
       '<div class="daily-name">' + d.name + "</div>" +
       '<div class="daily-icon">' + icon(d.forecast, true) + "</div>" +
       '<div class="daily-low">' + d.lo + "°</div>" +
       '<div class="daily-bar-wrap"><div class="daily-bar" style="left:' + barLeft +
       "%;width:" + barWidth + '%"></div></div>' +
       '<div class="daily-high">' + d.hi + "°</div>" +
+      '<template class="tile-detail">' + dDetail + "</template>" +
       "</div>";
   }
   dHtml += "</div></div>";
@@ -1265,13 +1380,19 @@ function render(city, forecast, hourlyData, grid, timeZone) {
     '<div class="wx-divider"><div class="tiles">' + tiles + "</div></div>" +
     "</div></div>";
 
+  startSunCountdown(sunNext.at, function () {
+    render(city, forecast, hourlyData, grid, timeZone);
+  });
+
   // wired after innerHTML so the button exists; lat/lon come from the globals
   // the fetch set, which are what a restored favorite needs to re-query
   var favBtn = document.getElementById("favBtn");
   if (favBtn) {
     favBtn.addEventListener("click", function () {
       var on = toggleFavorite(city, currentLat, currentLon);
-      favBtn.innerHTML = starSvg(on);
+      favBtn.innerHTML = starSvg(on) +
+        '<span class="fav-text">' + (on ? "Saved" : "Save") + "</span>";
+      favBtn.classList.toggle("on", on);
       favBtn.setAttribute("aria-pressed", on ? "true" : "false");
       favBtn.title = on ? "Remove from favorites" : "Save to favorites";
       renderSaved();
@@ -1304,25 +1425,9 @@ function loadJson(key) {
 // two weather.gov requests per city.
 var savedWxCache = {};
 
-function savedRowHtml(fav, wx) {
-  var right = wx
-    ? '<div class="saved-temp">' + wx.temp + "\u00B0</div>" +
-      '<div class="saved-hilo">H:' + wx.hi + "\u00B0 L:" + wx.lo + "\u00B0</div>"
-    : '<div class="saved-temp saved-pending">--\u00B0</div>';
-  var cond = wx ? esc(wx.cond) : "Loading\u2026";
-  return (
-    '<div class="saved-row" data-label="' + esc(fav.label) + '">' +
-    '<div class="saved-left">' +
-    '<div class="saved-name">' + esc(fav.label) + "</div>" +
-    '<div class="saved-cond">' + cond + "</div>" +
-    "</div>" +
-    '<div class="saved-right">' + right + "</div>" +
-    '<button class="saved-remove" data-remove="' + esc(fav.label) + '" ' +
-    'title="Remove from favorites" aria-label="Remove from favorites">\u00D7</button>' +
-    "</div>"
-  );
-}
-
+// One current-conditions fetch per saved place, memoised for the session:
+// re-rendering the list (after a star toggle, say) must not refire a
+// weather.gov request for every chip.
 function fetchSavedWx(fav) {
   if (savedWxCache[fav.label]) return Promise.resolve(savedWxCache[fav.label]);
   return fetch("https://api.weather.gov/points/" + fav.lat + "," + fav.lon)
@@ -1338,16 +1443,16 @@ function fetchSavedWx(fav) {
     .then(function (fc) {
       var ps = fc.properties.periods;
       if (!ps || !ps.length) throw new Error("empty");
-      var now = ps[0];
+      var p0 = ps[0];
       var hi, lo;
-      if (now.isDaytime) {
-        hi = now.temperature;
-        lo = ps.length > 1 && !ps[1].isDaytime ? ps[1].temperature : now.temperature;
+      if (p0.isDaytime) {
+        hi = p0.temperature;
+        lo = ps.length > 1 && !ps[1].isDaytime ? ps[1].temperature : p0.temperature;
       } else {
-        lo = now.temperature;
-        hi = ps.length > 1 && ps[1].isDaytime ? ps[1].temperature : now.temperature;
+        lo = p0.temperature;
+        hi = ps.length > 1 && ps[1].isDaytime ? ps[1].temperature : p0.temperature;
       }
-      var wx = { temp: now.temperature, hi: hi, lo: lo, cond: now.shortForecast };
+      var wx = { temp: p0.temperature, hi: hi, lo: lo, cond: p0.shortForecast };
       savedWxCache[fav.label] = wx;
       return wx;
     })
@@ -1356,52 +1461,94 @@ function fetchSavedWx(fav) {
     });
 }
 
-function renderSaved() {
+function clockSvg() {
+  return (
+    '<svg class="place-icon" viewBox="0 0 24 24" aria-hidden="true">' +
+    '<circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" stroke-width="2"/>' +
+    '<path d="M12 7 V12 L15.5 14" fill="none" stroke="currentColor" stroke-width="2" ' +
+    'stroke-linecap="round"/></svg>'
+  );
+}
+
+function placeChipHtml(p, wx, isFav) {
+  var active = p.label === currentCityLabel;
+  return (
+    '<button class="place-chip' + (active ? " active" : "") + '" data-label="' +
+    esc(p.label) + '"' + (active ? ' aria-current="true"' : "") + ">" +
+    (isFav ? starSvg(true) : clockSvg()) +
+    '<span class="place-name">' + esc(p.label) + "</span>" +
+    '<span class="place-temp' + (wx ? "" : " place-pending") + '">' +
+    (wx ? wx.temp + "\u00B0" : "--\u00B0") + "</span>" +
+    (isFav
+      ? '<span class="place-remove" role="button" tabindex="0" data-remove="' +
+        esc(p.label) + '" title="Remove from favorites" ' +
+        'aria-label="Remove ' + esc(p.label) + ' from favorites">\u00D7</span>'
+      : "") +
+    "</button>"
+  );
+}
+
+// Favorites first, then recents that aren't already starred. Rendered as a
+// wrapping chip row on narrow screens and as a sticky rail on wide ones — same
+// markup either way, the layout switch is entirely in CSS.
+function placeList() {
+  var out = [];
+  var seen = {};
   var favs = loadFavorites();
-  if (!favs.length) {
-    savedEl.innerHTML = "";
+  for (var i = 0; i < favs.length; i++) {
+    seen[favs[i].label] = 1;
+    out.push({ p: favs[i], fav: true });
+  }
+  var rec = loadJson("weatherRecents") || [];
+  for (var j = 0; j < rec.length; j++) {
+    if (seen[rec[j].label]) continue;
+    out.push({ p: rec[j], fav: false });
+  }
+  return out;
+}
+
+function renderSaved() {
+  var items = placeList();
+  if (!items.length) {
+    placesEl.innerHTML = "";
+    placesEl.classList.remove("has-places");
     return;
   }
 
   var rows = "";
-  for (var i = 0; i < favs.length; i++) {
-    rows += savedRowHtml(favs[i], savedWxCache[favs[i].label]);
+  for (var i = 0; i < items.length; i++) {
+    rows += placeChipHtml(items[i].p, savedWxCache[items[i].p.label], items[i].fav);
   }
-  savedEl.innerHTML =
-    '<div class="card"><div class="card-head">Saved</div>' + rows + "</div>";
+  placesEl.innerHTML = '<div class="places-head">Your places</div>' + rows;
+  placesEl.classList.add("has-places");
 
-  savedEl.querySelectorAll(".saved-row").forEach(function (row) {
-    row.addEventListener("click", function (e) {
-      if (e.target.hasAttribute("data-remove")) return;
-      var label = row.getAttribute("data-label");
-      for (var j = 0; j < favs.length; j++) {
-        if (favs[j].label === label) {
-          zipInput.value = "";
-          history.replaceState(null, "", "?q=" + encodeURIComponent(label));
-          fetchWeather(favs[j].lat, favs[j].lon, label, true);
-          return;
-        }
+  placesEl.querySelectorAll(".place-chip").forEach(function (chip) {
+    chip.addEventListener("click", function (e) {
+      var label = chip.getAttribute("data-label");
+      if (e.target.hasAttribute("data-remove")) {
+        e.stopPropagation();
+        var kept = loadFavorites().filter(function (x) {
+          return x.label !== label;
+        });
+        localStorage.setItem("weatherFavorites", JSON.stringify(kept));
+        renderSaved();
+        syncFavButton();
+        return;
+      }
+      for (var k = 0; k < items.length; k++) {
+        if (items[k].p.label !== label) continue;
+        zipInput.value = "";
+        history.replaceState(null, "", "?q=" + encodeURIComponent(label));
+        fetchWeather(items[k].p.lat, items[k].p.lon, label, true);
+        return;
       }
     });
   });
 
-  savedEl.querySelectorAll("[data-remove]").forEach(function (btn) {
-    btn.addEventListener("click", function (e) {
-      e.stopPropagation();
-      var label = btn.getAttribute("data-remove");
-      var f = loadFavorites().filter(function (x) {
-        return x.label !== label;
-      });
-      localStorage.setItem("weatherFavorites", JSON.stringify(f));
-      renderSaved();
-      syncFavButton();
-    });
-  });
-
-  // fill in the rows that don't have conditions yet
-  favs.forEach(function (fav) {
-    if (savedWxCache[fav.label]) return;
-    fetchSavedWx(fav).then(function (wx) {
+  // fill in the chips that don't have a temperature yet
+  items.forEach(function (it) {
+    if (savedWxCache[it.p.label]) return;
+    fetchSavedWx(it.p).then(function (wx) {
       if (wx) renderSaved();
     });
   });
@@ -1413,7 +1560,9 @@ function syncFavButton() {
   if (!btn) return;
   var label = btn.getAttribute("data-city") || "";
   var on = isFavorite(label);
-  btn.innerHTML = starSvg(on);
+  btn.innerHTML = starSvg(on) +
+    '<span class="fav-text">' + (on ? "Saved" : "Save") + "</span>";
+  btn.classList.toggle("on", on);
   btn.setAttribute("aria-pressed", on ? "true" : "false");
 }
 
@@ -1799,6 +1948,8 @@ function autoLocateIfPermitted() {
     })
     .catch(loadLastOrDefault);
 }
+
+renderSaved();
 
 var params = new URLSearchParams(window.location.search);
 var urlQuery = params.get("q") || params.get("zip");

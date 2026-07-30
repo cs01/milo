@@ -47,9 +47,9 @@
     </nav>
 
     <main class="container">
+      <div id="places" class="places"></div>
       <div id="error"></div>
       <div id="hero"></div>
-      <div id="saved"></div>
     </main>
 
     <footer class="footer">
@@ -66,20 +66,17 @@
             github.com/milo-language/milo
           </a>
         </div>
+        <!-- Not optional: GeoNames and Open-Meteo are CC BY 4.0 and OpenStreetMap
+             is ODbL, all of which require visible credit. Kept to one line so it
+             reads as a citation rather than an architecture diagram. -->
         <div class="footer-col">
           <div class="footer-title">Data</div>
-          <a class="footer-link" href="https://www.weather.gov" target="_blank" rel="noopener">
-            Forecasts from weather.gov
-          </a>
-          <a class="footer-link" href="https://www.geonames.org" target="_blank" rel="noopener">
-            Place names from GeoNames (CC BY 4.0)
-          </a>
-          <a class="footer-link" href="https://open-meteo.com" target="_blank" rel="noopener">
-            UV, air quality &amp; pressure from Open-Meteo
-          </a>
-          <a class="footer-link" href="https://nominatim.openstreetmap.org" target="_blank" rel="noopener">
-            ZIP lookup by Nominatim
-          </a>
+          <div class="footer-credits">
+            <a href="https://www.weather.gov" target="_blank" rel="noopener">weather.gov</a> ·
+            <a href="https://www.geonames.org" target="_blank" rel="noopener">GeoNames</a> ·
+            <a href="https://open-meteo.com" target="_blank" rel="noopener">Open-Meteo</a> ·
+            <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap</a>
+          </div>
         </div>
       </div>
       <div class="footer-legal">One static binary. No framework, no runtime, no GC.</div>

@@ -28,48 +28,48 @@ pub fn main(): i32 {
     let s = "hello world"
 
     // contains
-    print("contains: ", boolStr(strContains(s, "world")), " ", boolStr(strContains(s, "xyz")), " ", boolStr(strContains(s, "")))
+    print("contains: ", boolStr(s.contains("world")), " ", boolStr(s.contains("xyz")), " ", boolStr(s.contains("")))
 
     // indexOf
-    print("indexOf: ", strIndexOf(s, "world"), " ", strIndexOf(s, "xyz"), " ", strIndexOf(s, "hello"))
+    print("indexOf: ", s.indexOf("world"), " ", s.indexOf("xyz"), " ", s.indexOf("hello"))
 
     // indexOfFrom
     let s2 = "hello world hello"
-    print("indexOfFrom: ", strIndexOfFrom(s2, "llo", 5 as i64), " ", strIndexOfFrom(s2, "xyz", 0 as i64))
+    print("indexOfFrom: ", s2.indexOfFrom("llo", 5 as i64), " ", s2.indexOfFrom("xyz", 0 as i64))
 
     // startsWith
-    print("startsWith: ", boolStr(strStartsWith(s, "hello")), " ", boolStr(strStartsWith(s, "world")))
+    print("startsWith: ", boolStr(s.startsWith("hello")), " ", boolStr(s.startsWith("world")))
 
     // endsWith
-    print("endsWith: ", boolStr(strEndsWith(s, "world")), " ", boolStr(strEndsWith(s, "hello")))
+    print("endsWith: ", boolStr(s.endsWith("world")), " ", boolStr(s.endsWith("hello")))
 
     // toLower / toUpper
-    let lower = strToLower("HELLO WORLD")
+    let lower = "HELLO WORLD".toLower()
     print("toLower: ", lower)
-    let up = strToUpper("hello world")
+    let up = "hello world".toUpper()
     print("toUpper: ", up)
 
     // trim
     let padded = "   hello   "
-    print("trim: [", strTrim(padded), "]")
-    print("trimStart: [", strTrimStart(padded), "]")
-    print("trimEnd: [", strTrimEnd(padded), "]")
+    print("trim: [", padded.trim(), "]")
+    print("trimStart: [", padded.trimStart(), "]")
+    print("trimEnd: [", padded.trimEnd(), "]")
 
     // split
     let csv = "hello,world,foo"
-    let parts = strSplit(csv, ",")
+    let parts = csv.split(",")
     print("split: [", parts[0], "] [", parts[1], "] [", parts[2], "] ", parts.len)
 
     // split by char
     let abc = "a:b:c"
-    let abcParts = strSplit(abc, ":")
+    let abcParts = abc.split(":")
     print("splitChar: [", abcParts[0], "] [", abcParts[1], "] [", abcParts[2], "] ", abcParts.len)
 
     // repeat
-    print("repeat: ", strRepeat("ab", 3))
+    print("repeat: ", "ab".repeat(3))
 
     // replace
-    print("replace: ", strReplace(s, "world", "universe"))
+    print("replace: ", s.replace("world", "universe"))
 
     // is_* functions
     print("isFuncs: ", boolStr(charIsDigit(48)), " ", boolStr(charIsAlpha(65)), " ", boolStr(charIsWhitespace(65)), " ", boolStr(charIsAlphanumeric(57)))

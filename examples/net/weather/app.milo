@@ -34,9 +34,9 @@ pub let MAX_SUGGESTIONS = 8
 // population descending, so a first-match-wins scan is already popularity-ranked.
 pub fn loadCities(): void {
     let raw = @embedFile("data/uscities.tsv")
-    let lines = strSplit(raw, "\n")
+    let lines = raw.split("\n")
     for line in lines {
-        let f = strSplit(line, "\t")
+        let f = line.split("\t")
         if f.len < 4 {
             continue
         }
@@ -45,7 +45,7 @@ pub fn loadCities(): void {
             state: f[1].clone(),
             lat: f[2].clone(),
             lon: f[3].clone(),
-            key: strToLower(f[0]),
+            key: f[0].toLower(),
         }
         )
     }
@@ -70,14 +70,14 @@ pub fn cityMatchesState(c: &City, stateQ: &string): bool {
     if stateQ.len == 0 {
         return true
     }
-    return strToLower(c.state) == stateQ
+    return c.state.toLower() == stateQ
 }
 
 // Typeahead over US place names. Nominatim is a geocoder, not a search index —
 // it can't prefix-match ("red" never reaches Redwood City) — so the lookup that
 // actually drives the search box lives here.
 pub fn citiesHandler(ctx: &mut Context): Response {
-    let raw = strToLower(strTrim(ctx.query("q")))
+    let raw = (ctx.query("q").trim()).toLower()
     if raw.len == 0 {
         return ctx.json("[]")
     }
@@ -86,11 +86,11 @@ pub fn citiesHandler(ctx: &mut Context): Response {
     // a full label ("Santa Rosa, CA"). The app writes the label form into ?q=
     // and into saved favorites, so it has to round-trip — matching the whole
     // label against a bare city name would find nothing.
-    let parts = strSplit(raw, ",")
-    let q = strTrim(parts[0])
+    let parts = raw.split(",")
+    let q = parts[0].trim()
     var stateQ = ""
     if parts.len > 1 {
-        stateQ = strTrim(parts[1])
+        stateQ = parts[1].trim()
     }
     if q.len == 0 {
         return ctx.json("[]")
@@ -103,7 +103,7 @@ pub fn citiesHandler(ctx: &mut Context): Response {
         if out.len >= MAX_SUGGESTIONS {
             break
         }
-        if strStartsWith(c.key, q) && cityMatchesState(c, stateQ) {
+        if c.key.startsWith(q) && cityMatchesState(c, stateQ) {
             out.push(cityJson(c))
         }
     }
@@ -112,7 +112,7 @@ pub fn citiesHandler(ctx: &mut Context): Response {
             if out.len >= MAX_SUGGESTIONS {
                 break
             }
-            if !strStartsWith(c.key, q) && strContains(c.key, q)
+            if !c.key.startsWith(q) && c.key.contains(q)
             && cityMatchesState(c, stateQ) {
                 out.push(cityJson(c))
             }

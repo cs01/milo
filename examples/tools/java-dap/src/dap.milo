@@ -384,7 +384,7 @@ pub fn connectJvm(isLaunch: bool, args: &Json, eventCh: Channel<Packet>): Result
     while !booted {
         match outCh.recv() {
             Result.Ok(chunk) => {
-                if strContains(chunk, "Listening for transport") {
+                if chunk.contains("Listening for transport") {
                     booted = true
                 }
                 let _s = eventCh.send(synthPacket(-2, 0, chunk))
@@ -493,7 +493,7 @@ pub fn baseNameNoExt(path: &string): string {
         i = i + 1
     }
     var end = path.len
-    if strEndsWith(path, ".java") {
+    if path.endsWith(".java") {
         end = path.len - 5
     }
     return path.substr(start, end)
@@ -506,10 +506,10 @@ pub fn classNameForSource(path: &string): string {
     var pkg: string = ""
     match readFile(path) {
         Result.Ok(text) => {
-            let lines = strSplit(text, "\n")
+            let lines = text.split("\n")
             for line in lines {
-                let t = strTrim(line)
-                if strStartsWith(t, "package ") {
+                let t = line.trim()
+                if t.startsWith("package ") {
                     var p = t.substr(8, t.len)
                     // strip trailing ';' and whitespace
                     var end = p.len
@@ -520,8 +520,8 @@ pub fn classNameForSource(path: &string): string {
                     break
                 }
                 // package decl precedes any type decl; stop at one
-                if strStartsWith(t, "public ") || strStartsWith(t, "class ")
-                || strStartsWith(t, "interface ") || strStartsWith(t, "record ") {
+                if t.startsWith("public ") || t.startsWith("class ")
+                || t.startsWith("interface ") || t.startsWith("record ") {
                     break
                 }
             }
@@ -1531,14 +1531,14 @@ impl Sess {
     // compilation — `foo.bar.baz` walks object fields.
     fn onEvaluate(self: &mut Sess, seq: i64, args: Json): void {
         let c: string = "evaluate"
-        let expr = strTrim(args.str("expression") ?? "")
+        let expr = (args.str("expression") ?? "").trim()
         let frameId = args.i64("frameId") ?? (0 as i64)
         let fidx = self.frameByDapId(frameId)
         if expr.len == 0 || fidx < 0 {
             self.out.fail(seq, c, "evaluate needs an expression and a frameId")
             return
         }
-        let parts = strSplit(expr, ".")
+        let parts = expr.split(".")
         let fr = self.frames[fidx]
 
         // resolve head: local, else field of this

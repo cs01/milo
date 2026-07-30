@@ -12,22 +12,22 @@ from "std/string" import {
 }
 
 pub fn main(): i32 {
-    let parts = strSplit("hello,world,foo", ",")
+    let parts = "hello,world,foo".split(",")
     for p in parts {
         print(p)
     }
     print(parts.len)
 
-    let replaced = strReplace("hello-world", "-", " ")
+    let replaced = "hello-world".replace("-", " ")
     print(replaced)
 
-    let r2 = strReplace("a_b_c", "_", "X")
+    let r2 = "a_b_c".replace("_", "X")
     print(r2)
 
-    let repeated = strRepeat("abc", 2)
+    let repeated = "abc".repeat(2)
     print(repeated)
 
-    let idx = strIndexOf("hello world", "world")
+    let idx = "hello world".indexOf("world")
     print(idx)
 
     return 0

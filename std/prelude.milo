@@ -1,5 +1,9 @@
 // std/prelude — auto-imported into every Milo program (suppress with --no-prelude)
+//
+// Common string operations are builtin methods (s.trim(), s.split(","), …) and
+// need no import. Importing from std/string here also activates its `impl string`
+// methods (e.g. indexOfFrom) program-wide.
 
 from "std/string" import {
-    strContains, strIndexOf, strIndexOfFrom, strLastIndexOf, strStartsWith, strEndsWith, strToLower, strToUpper, strTrim, strTrimStart, strTrimEnd, strSplit, strSplitWords, strSplitWhitespace, strRepeat, strReplace, strReplaceFirst, strPadStart, strPadEnd, strIsEmpty, strCharAt, strReverse, strParseInt, charIsWhitespace, charIsDigit, charIsAlpha, charIsAlphanumeric, trim, vecJoin
+    charIsWhitespace, charIsDigit, charIsAlpha, charIsAlphanumeric
 }

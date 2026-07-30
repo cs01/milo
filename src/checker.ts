@@ -5659,6 +5659,15 @@ export class TypeChecker {
             if (argType.tag !== "string" && argType.tag !== "unknown") this.error(`'${expr.method}': expected string, got ${typeName(argType)}`, sp);
             return this.setType(expr, { tag: "int", bits: 64, signed: true });
           }
+          // like indexOf but starts the search at byte offset `from`
+          if (expr.method === "indexOfFrom") {
+            if (expr.args.length !== 2) { this.error(`'indexOfFrom' expects 2 arguments (needle, from), got ${expr.args.length}`, sp); return this.setType(expr, { tag: "int", bits: 64, signed: true }); }
+            const nType = this.checkExpr(expr.args[0]);
+            if (nType.tag !== "string" && nType.tag !== "unknown") this.error(`'indexOfFrom' arg 1: expected string, got ${typeName(nType)}`, sp);
+            const fromType = this.checkExpr(expr.args[1]);
+            if (fromType.tag !== "int" && fromType.tag !== "unknown") this.error(`'indexOfFrom' arg 2: expected integer, got ${typeName(fromType)}`, sp);
+            return this.setType(expr, { tag: "int", bits: 64, signed: true });
+          }
           if (expr.method === "split") {
             if (expr.args.length !== 1) { this.error(`'split' expects 1 argument, got ${expr.args.length}`, sp); return this.setType(expr, { tag: "vec", element: { tag: "string" } }); }
             const argType = this.checkExpr(expr.args[0]);

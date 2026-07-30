@@ -11,12 +11,12 @@ from "std/string" import {
 }
 
 pub fn main(): i32 {
-    print(strToUpper("hello world"))
-    print(strToLower("HELLO WORLD"))
-    print(strTrim("  hello  "))
-    print(strTrimStart("  hello  "))
-    print(strTrimEnd("  hello"))
-    print(strTrim("   ").len)
-    print(strContains("hello world", "world"))
+    print("hello world".toUpper())
+    print("HELLO WORLD".toLower())
+    print("  hello  ".trim())
+    print("  hello  ".trimStart())
+    print("  hello".trimEnd())
+    print("   ".trim().len)
+    print("hello world".contains("world"))
     return 0
 }

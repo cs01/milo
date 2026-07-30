@@ -1214,11 +1214,101 @@ function getLocalMiloFiles(sourceDir: string): string[] {
 
 // LSP CompletionItemKind values
 const CIK_FUNCTION = 3;
+const CIK_METHOD = 2;
 const CIK_STRUCT = 22;
 const CIK_ENUM = 13;
 const CIK_VARIABLE = 6;
 const CIK_MODULE = 9;
 const CIK_INTERFACE = 8; // trait
+
+// Builtin instance methods, by receiver type, for `receiver.<partial>` completion.
+// These are the same method surfaces the checker recognizes (src/checker.ts) and
+// the lowerer maps (src/lower.ts) — keep this list in sync when methods change.
+// String ops live here (not as free functions) so `s.tr` completes to `trim()`.
+const STRING_BUILTIN_METHODS: { name: string; sig: string }[] = [
+  { name: "contains", sig: "(needle: string): bool" },
+  { name: "startsWith", sig: "(prefix: string): bool" },
+  { name: "endsWith", sig: "(suffix: string): bool" },
+  { name: "indexOf", sig: "(needle: string): i64" },
+  { name: "indexOfFrom", sig: "(needle: string, from: i64): i64" },
+  { name: "lastIndexOf", sig: "(needle: string): i64" },
+  { name: "toLower", sig: "(): string" },
+  { name: "toUpper", sig: "(): string" },
+  { name: "trim", sig: "(): string" },
+  { name: "trimStart", sig: "(): string" },
+  { name: "trimEnd", sig: "(): string" },
+  { name: "split", sig: "(sep: string): Vec<string>" },
+  { name: "splitWords", sig: "(): Vec<string>" },
+  { name: "splitWhitespace", sig: "(): Vec<string>" },
+  { name: "repeat", sig: "(n: i64): string" },
+  { name: "padStart", sig: "(targetLen: i64, pad: string): string" },
+  { name: "padEnd", sig: "(targetLen: i64, pad: string): string" },
+  { name: "replace", sig: "(old: string, new: string): string" },
+  { name: "replaceFirst", sig: "(old: string, new: string): string" },
+  { name: "isEmpty", sig: "(): bool" },
+  { name: "charAt", sig: "(i: i64): string" },
+  { name: "reverse", sig: "(): string" },
+  { name: "parseInt", sig: "(): i64" },
+  { name: "parseF64", sig: "(): f64" },
+  { name: "substr", sig: "(start: i64, end: i64): string" },
+  { name: "slice", sig: "(start: i64, end: i64): string" },
+  { name: "clone", sig: "(): string" },
+  { name: "len", sig: ": i64" },
+];
+const VEC_BUILTIN_METHODS: { name: string; sig: string }[] = [
+  { name: "push", sig: "(value: T)" },
+  { name: "pop", sig: "(): Option<T>" },
+  { name: "get", sig: "(index: i64): T" },
+  { name: "insert", sig: "(index: i64, value: T)" },
+  { name: "remove", sig: "(index: i64): T" },
+  { name: "swap", sig: "(a: i64, b: i64)" },
+  { name: "reverse", sig: "()" },
+  { name: "sort", sig: "()" },
+  { name: "sortBy", sig: "(cmp)" },
+  { name: "sortByKey", sig: "(key)" },
+  { name: "contains", sig: "(value: T): bool" },
+  { name: "indexOf", sig: "(value: T): i64" },
+  { name: "join", sig: "(sep: string): string" },
+  { name: "map", sig: "(f): Vec<U>" },
+  { name: "filter", sig: "(pred): Vec<T>" },
+  { name: "len", sig: ": i64" },
+  { name: "isEmpty", sig: "(): bool" },
+  { name: "clone", sig: "(): Vec<T>" },
+];
+const MAP_BUILTIN_METHODS: { name: string; sig: string }[] = [
+  { name: "insert", sig: "(key: K, value: V)" },
+  { name: "get", sig: "(key: K): Option<V>" },
+  { name: "contains", sig: "(key: K): bool" },
+  { name: "remove", sig: "(key: K)" },
+  { name: "len", sig: ": i64" },
+  { name: "isEmpty", sig: "(): bool" },
+  { name: "clone", sig: "(): HashMap<K, V>" },
+];
+
+// Builtin methods available on a receiver of the given type, or null if the
+// type has no builtin method surface (e.g. a plain int, or a user struct whose
+// methods come from impl blocks, handled elsewhere).
+function builtinMethodsForType(tk: import("./types").TypeKind | undefined): { name: string; sig: string }[] | null {
+  if (!tk) return null;
+  if (tk.tag === "string") return STRING_BUILTIN_METHODS;
+  if (tk.tag === "vec" || tk.tag === "array") return VEC_BUILTIN_METHODS;
+  if (tk.tag === "hashmap") return MAP_BUILTIN_METHODS;
+  return null;
+}
+
+// Resolve the type of a bare-identifier receiver by scanning the checker's expr
+// types for an Ident of that name that carries a concrete type. The line being
+// typed (`s.tr`) may itself not parse, so we rely on the variable's other uses /
+// its declaration initializer, which do.
+function receiverTypeForIdent(name: string, exprTypes: Map<Expr, import("./types").TypeKind>): import("./types").TypeKind | undefined {
+  let fallback: import("./types").TypeKind | undefined;
+  for (const [e, tk] of exprTypes) {
+    if (e.kind === "Ident" && (e as import("./ast").Ident).name === name) {
+      if (tk.tag !== "unknown") { if (!fallback) fallback = tk; }
+    }
+  }
+  return fallback;
+}
 
 function completionKind(kind: string): number {
   switch (kind) {
@@ -1272,6 +1362,36 @@ function handleCompletion(uri: string, line: number, character: number): object 
       .filter(e => e.name.startsWith(partial) && !alreadyImported.has(e.name))
       .map(e => ({ label: e.name, kind: completionKind(e.kind) }));
     return { isIncomplete: false, items };
+  }
+
+  // Context 2.5: member access — `receiver.<partial>` → builtin methods of the
+  // receiver's type. String ops are methods now (s.trim()), so this is what makes
+  // `s.tr` complete to `trim()`. Handles a bare-identifier or string-literal
+  // receiver; richer receiver expressions fall through (no suggestion is safer
+  // than a wrong one).
+  const memberMatch = prefix.match(/(?:([A-Za-z_]\w*)|"(?:[^"\\]|\\.)*")\s*\.\s*(\w*)$/);
+  if (memberMatch) {
+    const recvIdent = memberMatch[1]; // undefined when receiver is a string literal
+    const partial = memberMatch[2] ?? "";
+    let methods: { name: string; sig: string }[] | null = null;
+    if (recvIdent === undefined) {
+      methods = STRING_BUILTIN_METHODS; // "literal".<...>
+    } else {
+      try {
+        const tokens = new Lexer(source).tokenize();
+        const parsed = new Parser(tokens).parse();
+        let checkResult: CheckResult | null = null;
+        try { checkResult = new TypeChecker().check(parsed); } catch {}
+        methods = builtinMethodsForType(receiverTypeForIdent(recvIdent, checkResult?.exprTypes ?? new Map()));
+      } catch { methods = null; }
+    }
+    if (methods) {
+      const items = methods
+        .filter(m => m.name.startsWith(partial))
+        .map(m => ({ label: m.name, kind: CIK_METHOD, detail: recvIdent ? undefined : "string", labelDetails: { detail: m.sig } }));
+      return { isIncomplete: false, items };
+    }
+    // no known builtin method surface for this receiver — fall through to general
   }
 
   // Context 3: general code completion — symbols from imports + builtins

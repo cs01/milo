@@ -149,13 +149,13 @@ pub fn fetchProcesses(maxProcs: i64): Vec<ProcInfo> {
     let cmd = $"ps -eo pid,user,%cpu,%mem,time,comm -r 2>/dev/null </dev/null | head -{maxProcs + 1}"
     match capture(cmd) {
         Result.Ok(output) => {
-            let lines = strSplit(output, "\n")
+            let lines = output.split("\n")
             for i in 1..lines.len {
-                let line = strTrim(lines[i])
+                let line = lines[i].trim()
                 if line.len == 0 {
                     continue
                 }
-                let fields = strSplitWhitespace(line)
+                let fields = line.splitWhitespace()
                 if fields.len >= 6 {
                     var cmdName = fields[5].clone()
                     for j in 6..fields.len {

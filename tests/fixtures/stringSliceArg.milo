@@ -12,9 +12,9 @@ from "std/string" import {
 }
 
 pub fn firstField(text: &string): string {
-    for line in strSplit(text, "\n") {
+    for line in text.split("\n") {
         if line.len > 0 {
-            return strTrim(line[0..line.len])
+            return line[0..line.len].trim()
         }
     }
     return ""
@@ -25,12 +25,12 @@ pub fn main() {
 
     // inline slice as an argument — the miscompiled shape
     // @expect: [padded]
-    print($"[{strTrim(s[0..s.len])}]")
+    print($"[{s[0..s.len].trim()}]")
 
     // the same slice via a let — always worked, must still
     let sl = s[0..s.len]
     // @expect: [padded]
-    print($"[{strTrim(sl)}]")
+    print($"[{sl.trim()}]")
 
     // a slice of a borrowed loop variable, returned out of the loop
     // @expect: [MemTotal: 8 kB]
@@ -38,5 +38,5 @@ pub fn main() {
 
     // a sub-slice, so a wrong length would show up as wrong text rather than empty
     // @expect: [dded]
-    print($"[{strTrim(s[4..s.len])}]")
+    print($"[{s[4..s.len].trim()}]")
 }

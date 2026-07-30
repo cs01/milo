@@ -1064,7 +1064,7 @@ class LowerCtx {
           // methods delegated to std/string runtime functions
           const strMethodMap: Record<string, string> = {
             "contains": "strContains", "startsWith": "strStartsWith", "endsWith": "strEndsWith",
-            "indexOf": "strIndexOf", "lastIndexOf": "strLastIndexOf", "split": "strSplit", "trim": "strTrim",
+            "indexOf": "strIndexOf", "indexOfFrom": "strIndexOfFrom", "lastIndexOf": "strLastIndexOf", "split": "strSplit", "trim": "strTrim",
             "trimStart": "strTrimStart", "trimEnd": "strTrimEnd",
             "toLower": "strToLower", "toUpper": "strToUpper", "reverse": "strReverse",
             "replace": "strReplace", "replaceFirst": "strReplaceFirst",
@@ -1078,9 +1078,14 @@ class LowerCtx {
               { expr: this.lowerExpr(expr.object), passByRef: true, refMut: false },
               ...expr.args.map(a => ({ expr: this.lowerExpr(a), passByRef: true, refMut: false })),
             ];
-            // methods with i64 params: pass by value, not by ref
+            // methods with i64 params: pass by value, not by ref.
+            // repeat/padStart/padEnd/charAt take their int as the first user arg (args[1]);
+            // indexOfFrom's int is the `from` offset, its second user arg (args[2]).
             if ((expr.method === "repeat" || expr.method === "padStart" || expr.method === "padEnd" || expr.method === "charAt") && args.length > 1) {
               args[1] = { ...args[1], passByRef: false };
+            }
+            if (expr.method === "indexOfFrom" && args.length > 2) {
+              args[2] = { ...args[2], passByRef: false };
             }
             return { kind: "Call", func: fnName, args, type, variadic: false, span: expr.span };
           }

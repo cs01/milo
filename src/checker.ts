@@ -4322,6 +4322,13 @@ export class TypeChecker {
           const argType = this.checkExprWithHint(expr.args[i], hint);
           if (paramType.tag === "ref") {
             if (argType.tag === "ref" && typeEq(paramType.inner, argType.inner)) {
+              // A `&[T]` slice is a %Vec *value*, not a bare pointer. To match the `ptr`
+              // param ABI it must be passed by reference (its address materialized) —
+              // otherwise a slice rvalue (`f(v[a..b])`, `f(c.view())`) is passed by value
+              // and the callee reads a garbage length. Other refs are already pointers.
+              if (paramType.inner.tag === "array" && paramType.inner.size === null) {
+                this.setAutoBorrowChecked(expr.args[i], paramType.mutable, sp);
+              }
               continue;
             }
             this.setAutoBorrowChecked(expr.args[i], paramType.mutable, sp);

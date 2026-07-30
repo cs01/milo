@@ -1084,10 +1084,8 @@ impl Ring {
 // for x in r.items() { ... }   // iterates the view, borrows each element
 ```
 
-Two current limits:
-
-- Passing a slice **rvalue** straight into a call — `sum(v[1..3])`, `sum(r.items())` — does not work yet; bind it first: `let s = v[1..3]; sum(s)`. Iterating an rvalue view (`for x in r.items()`) is fine.
-- `&mut [T]` (mutable views, `splitMut`) are not yet supported — slices are read-only.
+One current limit: `&mut [T]` (mutable views, `splitMut`) is not yet supported — slices
+are read-only.
 
 ---
 

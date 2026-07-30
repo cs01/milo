@@ -16,7 +16,9 @@ _Undocumented._
 fn Arena.new(capacity: i64): Result<Arena>
 ```
 
-_Undocumented._
+Restate each callee's preconditions on the wrapper (Arena has no struct
+invariant the solver models): without them the wrapper can't discharge the
+free fn's `requires` — same restating pattern as Pool's free/live/available.
 
 ### `Arena.remaining`
 

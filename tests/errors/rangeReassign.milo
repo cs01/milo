@@ -1,0 +1,5 @@
+// Reassigning an out-of-range literal to a ranged var is rejected (was unchecked).
+fn main() {
+  var p: i32(0..100) = 50
+  p = 500  // @error: out of range
+}

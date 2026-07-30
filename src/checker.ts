@@ -436,6 +436,26 @@ export class TypeChecker {
     return null;
   }
 
+  // Enforce a ranged integer target (`i32(0..100)`) against a value flowing into it — at a
+  // let/var, a call argument, a `return`, or a reassignment. A const literal out of range is
+  // a compile error; a value whose propagated range already fits needs no check; otherwise a
+  // runtime range check is emitted (via rangeCheckedExprs). Without this the range was
+  // enforced at declarations only, so `f(500)` into an `i32(0..100)` param silently passed.
+  private enforceRangeInto(valueExpr: Expr, valType: TypeKind, target: TypeKind, sp?: Span) {
+    if (target.tag !== "int" || target.min === undefined || target.max === undefined) return;
+    const litVal = this.constIntValue(valueExpr);
+    if (litVal !== null) {
+      if (litVal < BigInt(target.min) || litVal > BigInt(target.max)) {
+        this.error(`value ${litVal} is out of range for ${typeName(target)} (${target.min}..${target.max})`, sp);
+      }
+    } else if (valType.tag === "int" && valType.min !== undefined && valType.max !== undefined &&
+               valType.min >= target.min && valType.max <= target.max) {
+      // range propagation proved the value fits — no runtime check needed
+    } else {
+      this.rangeCheckedExprs.set(valueExpr, { min: target.min, max: target.max, typeName: typeName(target) });
+    }
+  }
+
   private constFloatValue(expr: import("./ast").Expr): number | null {
     if (expr.kind === "FloatLit") return expr.value;
     if (expr.kind === "UnaryOp" && expr.op === "-" && expr.operand.kind === "FloatLit") return -expr.operand.value;
@@ -2403,19 +2423,7 @@ export class TypeChecker {
           }
         }
         // range checking for ranged integer types
-        if (hint?.tag === "int" && hint.min !== undefined && hint.max !== undefined) {
-          const litVal = this.constIntValue(stmt.value);
-          if (litVal !== null) {
-            if (litVal < hint.min || litVal > hint.max) {
-              this.error(`value ${litVal} is out of range for ${typeName(hint)} (${hint.min}..${hint.max})`, sp);
-            }
-          } else if (valType.tag === "int" && valType.min !== undefined && valType.max !== undefined &&
-                     valType.min >= hint.min && valType.max <= hint.max) {
-            // range propagation proved value fits — no runtime check needed
-          } else {
-            this.rangeCheckedExprs.set(stmt.value, { min: hint.min, max: hint.max, typeName: typeName(hint) });
-          }
-        }
+        if (hint?.tag === "int") this.enforceRangeInto(stmt.value, valType, hint, sp);
         // Borrows the RHS created: a ref binding owns them until its scope pops;
         // any other binding consumed them within the statement (e.g. s[0..n].clone())
         // and must not leak a freeze onto later statements.
@@ -2523,6 +2531,7 @@ export class TypeChecker {
           }
         }
         for (const scope of this.scopes) for (const [, vi] of scope) if (vi.borrowed && !frozenBeforeRhs.has(vi)) vi.borrowed = false;
+        if (targetInfo.type.tag === "int") this.enforceRangeInto(stmt.value, valType, targetInfo.type, sp);
         if (stmt.target.kind === "Ident") {
           const info = this.lookup(stmt.target.name);
           if (info) info.moved = false;
@@ -2546,6 +2555,7 @@ export class TypeChecker {
               this.error(`return type mismatch: expected ${typeName(fnRetType)}, got ${typeName(valType)}`, sp);
             }
           }
+          if (fnRetType.tag === "int") this.enforceRangeInto(stmt.value, valType, fnRetType, sp);
           // A returned closure escapes its defining frame, so it must own its captures:
           // a non-`move` closure captures by reference and would dangle into the dead
           // frame (a use-after-return in safe code). Promote it to `move` — the same
@@ -4381,6 +4391,9 @@ export class TypeChecker {
               }
             }
           }
+          // A ranged-int parameter (`p: i32(0..100)`) enforces its bound on the argument —
+          // statically for a literal, else a runtime range check. Previously unchecked.
+          if (paramType.tag === "int") this.enforceRangeInto(expr.args[i], argType, paramType, expr.args[i].span);
         }
         for (let i = sig.params.length; i < expr.args.length; i++) {
           const vt = this.checkExpr(expr.args[i]);

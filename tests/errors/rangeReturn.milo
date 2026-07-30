@@ -1,0 +1,5 @@
+// A ranged-int return type enforces its bound on the returned value (was unchecked).
+fn get(): i32(0..100) {
+  return 300  // @error: out of range
+}
+fn main() { print(get()) }

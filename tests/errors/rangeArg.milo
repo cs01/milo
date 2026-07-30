@@ -1,0 +1,5 @@
+// A ranged-int parameter enforces its bound on the argument (was unchecked).
+fn setPercent(p: i32(0..100)): void { print(p) }
+fn main() {
+  setPercent(500)  // @error: out of range
+}

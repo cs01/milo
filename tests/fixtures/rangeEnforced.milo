@@ -1,0 +1,15 @@
+// In-range values flow through ranged params/returns/reassignment fine.
+fn clampSet(p: i32(0..100)): i32(0..100) {
+    return p
+}
+
+fn main() {
+    var p: i32(0..100) = 50
+    // @expect: 50
+    print(clampSet(p))
+    p = 99
+    // @expect: 99
+    print(p)
+    // @expect: 0
+    print(clampSet(0))
+}

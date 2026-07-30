@@ -627,6 +627,13 @@ export class Codegen {
         lines.push(...cl);
         return;
       }
+      // A big-agg replace writes its moved-out old value straight into destPtr, same as
+      // an sret call — routed here so the old value never becomes an SSA aggregate.
+      if (expr.kind === "MemReplace") {
+        const [cl] = this.genExpr(expr, destPtr);
+        lines.push(...cl);
+        return;
+      }
       if (expr.kind === "StructLit" && this.structLayouts.has(expr.name)) {
         const layout = this.structLayouts.get(expr.name)!;
         for (const f of expr.fields) {
@@ -3932,6 +3939,47 @@ export class Codegen {
         return this.genPropagate(expr, lines);
       case "DefaultValue":
         return this.genDefaultValue(expr, lines);
+      case "MemReplace": {
+        const [pl, placePtr, placeTy] = this.genLValue(expr.place);
+        lines.push(...pl);
+        if (this.isBigAgg(placeTy)) {
+          // Old value moves out by memcpy — never load a ≥128-byte aggregate as an SSA
+          // value (see isBigAgg). It lands in the caller's slot (bound `let old = ...`
+          // supplies sretDest) or a scratch slot dropped here when the result is discarded.
+          let dest = sretDest;
+          if (!dest) { dest = this.nextTemp(); this.entryAllocas.push(`  ${dest} = alloca ${placeTy}`); }
+          this.emitMemcpy(lines, dest, placePtr, placeTy);
+          this.genStoreInto(lines, placePtr, placeTy, expr.value);   // store new; does NOT drop old
+          if (!sretDest && this.needsDropCg(expr.type)) this.emitDropValue(lines, dest, expr.type);
+          return [lines, dest, placeTy];
+        }
+        const old = this.nextTemp();
+        lines.push(`  ${old} = load ${placeTy}, ptr ${placePtr}`);   // move old out
+        this.genStoreInto(lines, placePtr, placeTy, expr.value);     // store new; old is not dropped
+        return [lines, old, placeTy];
+      }
+      case "MemSwap": {
+        const [al, aPtr, aTy] = this.genLValue(expr.a);
+        lines.push(...al);
+        const [bl, bPtr] = this.genLValue(expr.b);
+        lines.push(...bl);
+        if (this.isBigAgg(aTy)) {
+          const tmp = this.nextTemp();
+          this.entryAllocas.push(`  ${tmp} = alloca ${aTy}`);
+          this.emitMemcpy(lines, tmp, aPtr, aTy);
+          this.emitMemcpy(lines, aPtr, bPtr, aTy);
+          this.emitMemcpy(lines, bPtr, tmp, aTy);
+          return [lines, "", "void"];
+        }
+        // Load both before storing either — the places may alias (swap(v[i], v[j])).
+        const ta = this.nextTemp();
+        lines.push(`  ${ta} = load ${aTy}, ptr ${aPtr}`);
+        const tb = this.nextTemp();
+        lines.push(`  ${tb} = load ${aTy}, ptr ${bPtr}`);
+        lines.push(this.valStore(aTy, tb, aPtr));
+        lines.push(this.valStore(aTy, ta, bPtr));
+        return [lines, "", "void"];
+      }
       case "Cast":
         return this.genCast(expr, lines);
       case "IsCheck": {
@@ -8421,6 +8469,9 @@ export class Codegen {
   // their result would double-free. A call can't hand back a borrow: references are
   // second-class and never returned.
   private isOwnedTempExpr(expr: HIRExpr): boolean {
+    // A discarded small-type `replace(...)` result is dropped here (SSA path). A big-agg
+    // replace drops its own moved-out value inside genExpr, so it must NOT double-drop here.
+    if (expr.kind === "MemReplace") return !this.isBigAgg(this.llvmType(expr.type));
     return expr.kind === "Call" || expr.kind === "ClosureCall" || expr.kind === "InterfaceMethodCall";
   }
 

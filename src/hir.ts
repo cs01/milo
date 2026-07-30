@@ -30,6 +30,11 @@ export type HIRExpr =
   | { kind: "Propagate"; operand: HIRExpr; enumName: string; retType: TypeKind; fromConversion?: { targetEnumName: string; wrapVariant: string; wrapTag: number }; type: TypeKind; span?: Span }
   | { kind: "DefaultValue"; operand: HIRExpr; default: HIRExpr; enumName: string; type: TypeKind; span?: Span }
   | { kind: "Cast"; operand: HIRExpr; targetType: TypeKind; type: TypeKind; span?: Span }
+  // `replace(place, value)`: stores `value` into `place` WITHOUT dropping the old occupant
+  // (it is moved out and returned instead). `type` is the moved-out value's type.
+  | { kind: "MemReplace"; place: HIRExpr; value: HIRExpr; type: TypeKind; span?: Span }
+  // `swap(a, b)`: exchanges two places in place; drops nothing. `type` is void.
+  | { kind: "MemSwap"; a: HIRExpr; b: HIRExpr; type: TypeKind; span?: Span }
   | { kind: "IsCheck"; operand: HIRExpr; tag: number; type: TypeKind; span?: Span }
   | { kind: "HeapCreate"; value: HIRExpr; type: TypeKind; span?: Span }
   | { kind: "HeapDeref"; operand: HIRExpr; type: TypeKind; span?: Span }

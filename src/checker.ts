@@ -3952,6 +3952,37 @@ export class TypeChecker {
           this.sizeOfTypes.set(expr, resolved);
           return this.setType(expr, resolved);
         }
+        // `replace(place, value)` and `swap(a, b)`: memory intrinsics whose bodies cannot be
+        // written in safe Milo (they move a value out of a place and refill it). From the
+        // caller's view the move rules are ordinary — a `&mut` borrow of the place(s) plus a
+        // by-value move of `value` — so they need no exclusivity machinery, only load/store
+        // codegen. Gated on the name being otherwise unbound, so a user fn of the same name wins.
+        if (expr.func === "replace" && !this.functions.has("replace")) {
+          if (expr.args.length !== 2) { this.error(`replace(place, value) takes exactly two arguments`, sp); return this.setType(expr, { tag: "unknown" }); }
+          const place = this.resolveAssignTarget(expr.args[0]);
+          if (!place) return this.setType(expr, { tag: "unknown" });
+          if (!place.mutable) this.error(`cannot replace through an immutable place`, expr.args[0].span, `declare it with 'var'`);
+          // value moves in, old occupant moves out to the caller — the place stays valid,
+          // so it is NOT invalidated here (only the by-value argument is consumed).
+          const vt = this.checkExprWithHint(expr.args[1], place.type);
+          if (vt.tag !== "unknown" && place.type.tag !== "unknown" && !typeEq(vt, place.type)) {
+            this.error(`replace: value type ${typeName(vt)} does not match place type ${typeName(place.type)}`, expr.args[1].span);
+          }
+          this.tryMove(expr.args[1]);
+          return this.setType(expr, place.type);
+        }
+        if (expr.func === "swap" && !this.functions.has("swap")) {
+          if (expr.args.length !== 2) { this.error(`swap(a, b) takes exactly two arguments`, sp); return this.setType(expr, { tag: "void" }); }
+          const a = this.resolveAssignTarget(expr.args[0]);
+          const b = this.resolveAssignTarget(expr.args[1]);
+          if (!a || !b) return this.setType(expr, { tag: "void" });
+          if (!a.mutable) this.error(`cannot swap through an immutable place`, expr.args[0].span, `declare it with 'var'`);
+          if (!b.mutable) this.error(`cannot swap through an immutable place`, expr.args[1].span, `declare it with 'var'`);
+          if (a.type.tag !== "unknown" && b.type.tag !== "unknown" && !typeEq(a.type, b.type)) {
+            this.error(`swap: operands have different types ${typeName(a.type)} and ${typeName(b.type)}`, sp);
+          }
+          return this.setType(expr, { tag: "void" });
+        }
         if (expr.func === "Heap") {
           if (expr.args.length !== 1) { this.error(`Heap() expects 1 argument, got ${expr.args.length}`, sp); return this.setType(expr, { tag: "unknown" }); }
           const argType = this.checkExpr(expr.args[0]);

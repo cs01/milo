@@ -584,6 +584,13 @@ class LowerCtx {
         if (expr.func === "Heap") {
           return { kind: "HeapCreate", value: this.lowerExpr(expr.args[0]), type, span: expr.span };
         }
+        // Memory intrinsics — gated identically to the checker (a user fn of the same name wins).
+        if (expr.func === "replace" && !this.c.functions.has("replace")) {
+          return { kind: "MemReplace", place: this.lowerExpr(expr.args[0]), value: this.lowerExpr(expr.args[1]), type, span: expr.span };
+        }
+        if (expr.func === "swap" && !this.c.functions.has("swap")) {
+          return { kind: "MemSwap", a: this.lowerExpr(expr.args[0]), b: this.lowerExpr(expr.args[1]), type: { tag: "void" }, span: expr.span };
+        }
         if (expr.func === "embedFile") {
           const path = (expr.args[0] as { value: string }).value;
           // Relative to the file containing the call, not the entry file. An

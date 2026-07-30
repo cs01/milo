@@ -1,0 +1,8 @@
+// @error: cannot replace through an immutable place
+//
+// replace's first argument must be an assignable, mutable place (a `var`, field, or element).
+pub fn main(): i32 {
+    let x: i64 = 5
+    let old = replace(x, 9)
+    return 0
+}

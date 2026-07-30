@@ -1,0 +1,9 @@
+// @error: swap: operands have different types
+//
+// swap exchanges two places of the SAME type.
+pub fn main(): i32 {
+    var a: i64 = 1
+    var b: i32 = 2
+    swap(a, b)
+    return 0
+}

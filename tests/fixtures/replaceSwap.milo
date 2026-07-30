@@ -1,0 +1,36 @@
+// @expect: 5
+// @expect: 9
+// @expect: 2
+// @expect: 1
+// @expect: 30
+//
+// replace(place, value) -> old and swap(a, b): move-in/move-out memory intrinsics that need
+// no clone on T (they work on non-copyable types). Bodies can't be written in safe Milo, so
+// they are compiler builtins; from the caller's view the moves are ordinary (a &mut borrow of
+// the place plus a by-value move of value).
+
+pub fn main(): i32 {
+    var a: i64 = 5
+    let old = replace(a, 9) // old = 5, a = 9
+    print(old)
+    print(a)
+
+    var p: i64 = 1
+    var q: i64 = 2
+    swap(p, q)
+    print(p) // 2
+    print(q) // 1
+
+    // swap two Vec elements (places that may alias in general)
+    var v: Vec<i64> = [10, 20, 30]
+    swap(v[0], v[2])
+    print(v[0]) // 30
+
+    // move a non-copyable String out of a struct field and refill it (the yaml pattern)
+    var anchor: string = "hello"
+    let taken = replace(anchor, "")
+    if taken.len != 5 || anchor.len != 0 {
+        return 1
+    }
+    return 0
+}

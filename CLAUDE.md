@@ -59,7 +59,8 @@ Source → Lexer → Parser → AST → Resolver (imports) → AST (merged) → 
 
 - `let` = immutable (SSA register), `var` = mutable (alloca)
 - Move semantics: single owner, use-after-move = compile error
-- Second-class references: `&T` only in function params, never stored/returned
+- Second-class references: `&T`/`&mut T` only in function params, never stored/returned
+- **Borrows are implicit — there is no `&x` expression.** A `&T`/`&mut T` param is fed the value *bare* at the call site (`foo(x)`, not `foo(&x)`); the compiler auto-borrows. `&x` as an expression is a hard error (`checker.ts` UnaryOp `&`). A raw pointer comes from `v.ptr()` / `x.addrOf()` (unsafe), never `&`.
 - User-defined generics: `fn foo<T>`, `struct Pair<A,B>`, `enum Maybe<T>` — monomorphization with type inference
 - No GC, no RC, no pointers in safe code
 - Arenas for cyclic data via `std/arena` (`Arena<T>` + generational `Handle<T>`)

@@ -110,8 +110,11 @@ test("rename edits both the open file and the unopened declaration", async () =>
 // imported files too. Those spans are line/col in the IMPORTED file; publishing
 // them verbatim under the open document's URI squiggled an unrelated line.
 test("a warning from an imported file is not squiggled on the importer", async () => {
-  // Diagnostics are async notifications published after didOpen — poll briefly.
-  const deadline = Date.now() + 4000;
+  // Diagnostics are async notifications published after didOpen — poll until they
+  // settle. The loop breaks the instant both diagnostics land, so a generous ceiling
+  // costs fast machines nothing and only spends real time on a slow CI runner that
+  // would otherwise time out and flake the release gate.
+  const deadline = Date.now() + 30000;
   let diags: any[] | undefined;
   while (Date.now() < deadline) {
     diags = diagnosticsByUri.get(DMAIN_URI);

@@ -49,7 +49,9 @@ fn main(): i32 {
 
 **Handles are cheap.** They contain an arena identity, slot index, and generation. Copy them freely, store them in Vecs, pass them around. They don't own anything — the arena does.
 
-**Stale handles are safe.** Every slot has a generation counter that bumps on free. If you hold a handle from generation 2 but the slot is now on generation 3, `.get()` returns `None` instead of the wrong value.
+**Stale handles are safe.** Every slot has a generation counter that bumps on free. If you hold a handle from generation 2 but the slot is now on generation 3, `.get()` returns `None` instead of the wrong value. A generation that reaches its maximum retires the slot instead of wrapping onto an old handle.
+
+**Live handles can be enumerated.** `a.handles()` returns a snapshot. Freeing or allocating after the call does not change that Vec; each returned handle is still generation-checked when used.
 
 ## Example: a graph with cycles
 
@@ -105,7 +107,7 @@ graph.set(handle, node2)
 
 **Handles are checked against their arena.** A `Handle<string>` from arena A still type-checks against arena B because both have the same element type, but every handle carries an arena identity. Arena B returns `None`/`false` instead of reading a coincidentally matching slot.
 
-**No iteration.** You can't walk all live values in an arena. If you need to visit everything, keep your handles in a `Vec<Handle<T>>` alongside the arena.
+**Enumeration is a snapshot.** `a.handles()` allocates a Vec of the handles that are live at that moment. Later frees make entries stale, and later allocations do not appear in the existing snapshot. Keep your own handle Vec when you need a continuously maintained index.
 
 **Memory grows, doesn't shrink.** Freed slots get recycled by the next `.alloc()`, but the backing storage never shrinks. Fine for most use cases — be aware if you're allocating millions and freeing most of them.
 
@@ -115,6 +117,7 @@ graph.set(handle, node2)
 
 ```milo
 struct Handle<T> {
+    arenaId: i64,
     index: i32,
     generation: i32,
 }
@@ -126,6 +129,7 @@ A ticket to a slot in the arena. The `generation` field increments each time a s
 
 ```milo
 struct Arena<T> {
+    id: i64,
     data: Vec<T>,
     gens: Vec<i32>,
     freeList: Vec<i32>,
@@ -134,6 +138,24 @@ struct Arena<T> {
 ```
 
 Growable container that owns all values. Freed slots go onto the free list and get recycled by the next `.alloc()`.
+
+### .handles
+
+```milo
+fn handles(self: &Self): Vec<Handle<T>>
+```
+
+Return a snapshot of all currently live handles. The snapshot does not keep
+slots alive; every use still checks arena identity and generation state.
+
+### .new
+
+```milo
+fn new(): Arena<T>
+```
+
+Create an empty arena. `Arena<T>.new()` is the preferred spelling; the
+`arenaNew<T>()` free function remains available for compatibility.
 
 ## Methods
 

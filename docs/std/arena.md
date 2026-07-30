@@ -26,6 +26,22 @@ fn Arena.get(self: &Arena, h: Handle<T>): Option<T>
 
 _Undocumented._
 
+### `Arena.handles`
+
+```milo
+fn Arena.handles(self: &Arena): Vec<Handle<T>>
+```
+
+_Undocumented._
+
+### `Arena.len`
+
+```milo
+fn Arena.len(self: &Arena): i64
+```
+
+_Undocumented._
+
 ### `Arena.modify`
 
 ```milo
@@ -38,6 +54,14 @@ _Undocumented._
 
 ```milo
 fn Arena.modifyMut(self: &mut Arena, h: Handle<T>, f: (&mut T) => void): bool
+```
+
+_Undocumented._
+
+### `Arena.new`
+
+```milo
+fn Arena.new(): Arena<T>
 ```
 
 _Undocumented._
@@ -72,7 +96,8 @@ Insert a value and return a handle to it.
 pub fn arenaFree<T>(a: &mut Arena<T>, h: Handle<T>): bool
 ```
 
-Free a slot, bumping its generation so stale handles are detected.
+Free a slot, bumping its generation so stale handles are detected. A slot at
+maximum generation is retired rather than wrapped back onto an old handle.
 
 ### `arenaGet`
 
@@ -83,6 +108,17 @@ pub fn arenaGet<T>(a: &Arena<T>, h: Handle<T>): Option<T>
 Get a copy of the value at a handle. Returns None if the handle is stale.
 Returns by value, not &T, because second-class refs cannot be stored in
 Option<_>. For large T, prefer arenaModify to avoid the copy churn.
+
+### `arenaHandles`
+
+```milo
+pub fn arenaHandles<T>(arena: &Arena<T>): Vec<Handle<T>>
+```
+
+Snapshot every currently live handle. The returned handles remain ordinary
+generational capabilities: later frees invalidate them, while later allocs do
+not appear in this already-produced Vec. This is the safe enumeration shape
+for collectors because no element reference survives into caller code.
 
 ### `arenaLen`
 

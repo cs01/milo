@@ -1,14 +1,14 @@
 // std/arena — generational arena for cyclic and graph data structures.
 //
-// An Arena<T> owns a pool of T values. Start here: create one with arenaNew, then
-// arenaAlloc a value to get back a Handle<T> — a small copyable token (NOT a
+// An Arena<T> owns a pool of T values. Start here: create one with Arena.new,
+// then alloc a value to get back a Handle<T> — a small copyable token (NOT a
 // reference) that you pass to the arena to reach that value later:
 //
-//     var a = arenaNew<Node>()
+//     var a = Arena<Node>.new()
 //     let h = a.alloc(Node { ... })     // Handle<Node> — copy/store it freely
-//     let n = a.get(h)                    // Option<Node>: None once freed
-//     a.modify(h, |n| Node { ... })       // mutate the slot in place
-//     a.free(h)                           // bumps generation → old h now stale
+//     let n = a.get(h)                  // Option<Node>: None once freed
+//     a.modify(h, |n| Node { ... })     // mutate the slot in place
+//     a.free(h)                         // bumps generation → old h now stale
 //
 // Reach for this over &T for graph/cyclic data: handles can live in struct fields
 // and be returned, and each slot's generation counter turns a use-after-free into
@@ -66,6 +66,9 @@ pub fn arenaAlloc<T>(a: &mut Arena<T>, val: T): Handle<T> {
         a.freeList.pop()!
         let idx = fi as i64
         a.data[idx] = val
+        // A negative generation denotes a reusable free slot. Restore its
+        // positive generation before publishing the new handle.
+        a.gens[idx] = -a.gens[idx]
         let gen = a.gens[idx]
         a.live = a.live + 1
         var h: Handle<T> = Handle {
@@ -74,6 +77,9 @@ pub fn arenaAlloc<T>(a: &mut Arena<T>, val: T): Handle<T> {
         return h
     }
     let idx = a.data.len
+    // Handle indices stay compact without allowing a narrowing conversion to
+    // silently manufacture a negative or aliased slot number.
+    assert(idx <= 2147483647, "arena slot capacity exceeded")
     a.data.push(val)
     a.gens.push(1)
     a.live = a.live + 1
@@ -95,10 +101,11 @@ pub fn arenaValid<T>(a: &Arena<T>, h: Handle<T>): bool {
     if idx >= a.data.len {
         return false
     }
-    return a.gens[idx] == h.generation
+    return a.gens[idx] > 0 && a.gens[idx] == h.generation
 }
 
-// Free a slot, bumping its generation so stale handles are detected.
+// Free a slot, bumping its generation so stale handles are detected. A slot at
+// maximum generation is retired rather than wrapped back onto an old handle.
 pub fn arenaFree<T>(a: &mut Arena<T>, h: Handle<T>): bool {
     if h.arenaId != a.id {
         return false
@@ -110,11 +117,18 @@ pub fn arenaFree<T>(a: &mut Arena<T>, h: Handle<T>): bool {
     if idx >= a.data.len {
         return false
     }
-    if a.gens[idx] != h.generation {
+    if a.gens[idx] <= 0 || a.gens[idx] != h.generation {
         return false
     }
-    a.gens[idx] = a.gens[idx] + 1
-    a.freeList.push(h.index)
+    // Never wrap a generation back onto a stale handle. An exhausted slot is
+    // represented by zero and retired permanently. Reusable free generations
+    // are negative so every accessor rejects them without another side table.
+    if a.gens[idx] < 2147483647 {
+        a.gens[idx] = -(a.gens[idx] + 1)
+        a.freeList.push(h.index)
+    } else {
+        a.gens[idx] = 0
+    }
     a.live = a.live - 1
     return true
 }
@@ -133,7 +147,7 @@ pub fn arenaGet<T>(a: &Arena<T>, h: Handle<T>): Option<T> {
     if idx >= a.data.len {
         return Option.None
     }
-    if a.gens[idx] != h.generation {
+    if a.gens[idx] <= 0 || a.gens[idx] != h.generation {
         return Option.None
     }
     return Option.Some(a.data[idx])
@@ -151,7 +165,7 @@ pub fn arenaSet<T>(a: &mut Arena<T>, h: Handle<T>, val: T): bool {
     if idx >= a.data.len {
         return false
     }
-    if a.gens[idx] != h.generation {
+    if a.gens[idx] <= 0 || a.gens[idx] != h.generation {
         return false
     }
     a.data[idx] = val
@@ -172,7 +186,7 @@ pub fn arenaModify<T>(a: &mut Arena<T>, h: Handle<T>, f: (T) => T): bool {
     if idx >= a.data.len {
         return false
     }
-    if a.gens[idx] != h.generation {
+    if a.gens[idx] <= 0 || a.gens[idx] != h.generation {
         return false
     }
     a.data[idx] = f(a.data[idx])
@@ -194,7 +208,7 @@ pub fn arenaWith<T, R>(a: &Arena<T>, h: Handle<T>, f: (&T) => R): Option<R> {
     if idx >= a.data.len {
         return Option.None
     }
-    if a.gens[idx] != h.generation {
+    if a.gens[idx] <= 0 || a.gens[idx] != h.generation {
         return Option.None
     }
     return Option.Some(f(a.data[idx]))
@@ -215,7 +229,7 @@ pub fn arenaModifyMut<T>(a: &mut Arena<T>, h: Handle<T>, f: (&mut T) => void): b
     if idx >= a.data.len {
         return false
     }
-    if a.gens[idx] != h.generation {
+    if a.gens[idx] <= 0 || a.gens[idx] != h.generation {
         return false
     }
     f(a.data[idx])
@@ -229,8 +243,31 @@ ensures result >= 0
     return a.live
 }
 
+// Snapshot every currently live handle. The returned handles remain ordinary
+// generational capabilities: later frees invalidate them, while later allocs do
+// not appear in this already-produced Vec. This is the safe enumeration shape
+// for collectors because no element reference survives into caller code.
+pub fn arenaHandles<T>(arena: &Arena<T>): Vec<Handle<T>> {
+    var result: Vec<Handle<T>> = Vec.withCapacity(arena.live)
+    for i in 0..arena.data.len {
+        if arena.gens[i] > 0 {
+            result.push(Handle {
+                arenaId: arena.id,
+                index: i as i32,
+                generation: arena.gens[i],
+            }
+            )
+        }
+    }
+    return result
+}
+
 // Method API — same functionality, nicer syntax.
 impl Arena<T> {
+    fn new(): Arena<T> {
+        return arenaNew<T>()
+    }
+
     fn alloc(self: &mut Self, val: T): Handle<T> {
         return arenaAlloc(self, val)
     }
@@ -257,5 +294,13 @@ impl Arena<T> {
 
     fn valid(self: &Self, h: Handle<T>): bool {
         return arenaValid(self, h)
+    }
+
+    fn len(self: &Self): i64 {
+        return arenaLen(self)
+    }
+
+    fn handles(self: &Self): Vec<Handle<T>> {
+        return arenaHandles(self)
     }
 }

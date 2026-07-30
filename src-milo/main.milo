@@ -4,17 +4,14 @@
 //        milo emit-ir <file>
 //        milo check <file>
 
-from "std/io" import {
-    readFile
-}
 from "std/fs" import {
-    writeFile, pathExists
+    writeFile, pathExists, readFile
 }
 from "std/path" import {
-    pathDirname, pathJoin
+    Path
 }
 from "std/env" import {
-    getEnv
+    Env
 }
 from "std/process" import {
     run
@@ -70,7 +67,7 @@ pub fn tmpPath(stem: &string, ext: &string): string {
 }
 
 pub fn findStdlibRoot(sourceDir: &string): string {
-    match getEnv("MILO_ROOT") {
+    match Env.get("MILO_ROOT") {
         Option.Some(root) => {
             return root
         }
@@ -80,10 +77,10 @@ pub fn findStdlibRoot(sourceDir: &string): string {
     var dir = sourceDir.clone()
     var depth: i64 = 0
     while depth < 32 {
-        if pathExists(pathJoin(dir, "std/prelude.milo")) {
+        if pathExists(Path.join(dir, "std/prelude.milo")) {
             return dir
         }
-        let parent = pathDirname(dir.clone())
+        let parent = Path.dirname(dir.clone())
         if parent == dir {
             break
         }
@@ -114,7 +111,7 @@ pub fn compile(path: string): string {
 
     // Resolve imports
     let target = getHostTarget()
-    let sourceDir = pathDirname(path.clone())
+    let sourceDir = Path.dirname(path.clone())
     let stdlibDir = findStdlibRoot(sourceDir.clone())
     let resolved = resolveImports(program, sourceDir.clone(), stdlibDir, target.os)
 
@@ -241,7 +238,7 @@ pub fn main() {
         var parser = newParser(tokens)
         let program = parse(parser)
         let target = getHostTarget()
-        let sourceDir = pathDirname(source.clone())
+        let sourceDir = Path.dirname(source.clone())
         let stdlibDir = findStdlibRoot(sourceDir)
         let resolved = resolveImports(program, sourceDir, stdlibDir, target.os)
         var checker = newChecker()

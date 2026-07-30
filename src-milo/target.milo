@@ -18,7 +18,7 @@ pub fn getHostTarget(): TargetInfo {
     var os = ""
     match capture("uname -s") {
         Result.Ok(s) => {
-            os = trim(s)
+            os = s.trim()
         }
         Result.Err(e) => {
         }
@@ -26,7 +26,7 @@ pub fn getHostTarget(): TargetInfo {
     var cpu = ""
     match capture("uname -m") {
         Result.Ok(s) => {
-            cpu = trim(s)
+            cpu = s.trim()
         }
         Result.Err(e) => {
         }

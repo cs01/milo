@@ -3,8 +3,7 @@
 Import modules with `from "std/<name>" import { symbols }`.
 
 Most utilities are **namespaced**: call a static on the namespace (`Path.join`, `Json.parse`,
-`Math.sqrt`) or a method on the value (`s.trim()`, `dt.format()`). See the
-[coherence migration map](/stdlib-coherence-migration) for the old-name → new-name table.
+`Math.sqrt`) or a method on the value (`s.trim()`, `dt.format()`).
 
 ## I/O & Filesystem
 

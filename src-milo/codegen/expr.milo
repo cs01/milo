@@ -1,4 +1,7 @@
 // Expression codegen: literals, binops, unary, calls, field access, enums, casts
+from "std/fs" import {
+    readFile
+}
 from "src-milo/ast.milo" import {
     Expr, Stmt, Pattern, StructLitField, Span, Param, MiloType
 }
@@ -22,9 +25,7 @@ from "src-milo/codegen/drops.milo" import {
 from "src-milo/codegen/abi.milo" import {
     AbiStruct, ArgClass, RetClass, AbiReg, abiStructOf, classifyArg, classifyRet, structFieldOffset
 }
-from "std/io" import {
-    readFile
-}
+
 from "src-milo/codegen/strings.milo" import {
     genStringLit, genStringClone, genStringConcat, genStringEq, genStringCmp,
     genIntToString, genFloatToString, genStringIndex, genStringSlice, emitStringLit, genStringPush
@@ -2724,7 +2725,7 @@ pub fn genMethodCall(cg: &mut Cgen, object: &Expr, method: &string, args: &Vec<H
     }
 
     // String methods are sugar for std/string free functions (`s.trim()` ->
-    // `strTrim(s)`): the name is `str` + Capitalized(method), receiver passed as
+    // `s.trim()`): the name is `str` + Capitalized(method), receiver passed as
     // the first arg. parseInt/toInt alias strParseInt; parseF64 is a strtod call.
     if objTyLl == "%String" {
         if method == "parseF64" || method == "parseFloat" || method == "toFloat" {

@@ -1,3 +1,11 @@
+<!-- doc-meta
+system: kernel-feasibility
+purpose: feasibility map for freestanding, interrupt-safe, and SMP Milo kernels
+key-files: src/target.ts, src/main.ts, std/runtime.milo, docs/roadmap.md
+update-when: bare-metal targets, interrupt rules, shared-memory support, or panic handling change
+last-verified: 2026-07-30
+-->
+
 # Kernel feasibility
 
 "Leaf library, not kernel" was a positioning slogan, not a technical finding. It fused three

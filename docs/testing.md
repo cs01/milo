@@ -3,7 +3,7 @@ system: testing
 purpose: how to write/run tests, what to avoid, and an index of every test file and what it covers
 key-files: tests/run.test.ts, tests/fixtures/, tests/errors/, tests/*.test.ts
 update-when: a test file is added/removed/repurposed, or the fixture protocol changes
-last-verified: 2026-07-11
+last-verified: 2026-07-30
 -->
 
 # Testing
@@ -21,7 +21,7 @@ bun test tests/safety.test.ts                   # one file
 - `tests/fixtures/*.milo` — **compiled + executed.** stdout must match the `// @expect: <line>` annotations, one per expected output line.
 - `tests/errors/*.milo` — **must fail type-check.** Error output must contain the `// @error: <substring>` annotation.
 
-Add a test by dropping a `.milo` file in the right directory with the right annotation. That's it. (339 fixtures, 73 error cases as of last-verified.)
+Add a test by dropping a `.milo` file in the right directory with the right annotation. That's it. (470 fixtures, 141 error cases as of last-verified.)
 
 There's also `tests/runtime-errors/` for programs that compile but must fail at runtime.
 
@@ -60,6 +60,7 @@ When you add or change an example, add a `// @run:` if it can run deterministica
 | `debugInfo.test.ts` | DWARF emission (`-g`) |
 | `wcet.test.ts` / `wcetCycles.test.ts` | worst-case-execution-time analysis |
 | `allocaHoist.test.ts` / `zeroStore.test.ts` | codegen optimizations |
+| `swapCodegen.test.ts` | large-aggregate swap alias-safe lowering |
 | `guard.test.ts` | memory/timeout guard wrapper |
 | `docs.test.ts` / `stdDocs.test.ts` / `apiDocs.test.ts` | doc + stdlib-API-doc consistency |
 | `header.test.ts` | generated C header correctness |

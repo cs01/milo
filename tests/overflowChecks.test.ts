@@ -26,14 +26,22 @@ const SRC = `fn main(): i32 {
 }
 `;
 
+const SUM_SRC = `fn main(): i32 {
+    var values: Vec<i64> = [9223372036854775807, 1]
+    print(values.sum())
+    return 0
+}
+`;
+
 beforeAll(() => {
   dir = mkdtempSync(join(tmpdir(), "milo-ovf-"));
   writeFileSync(join(dir, "ovf.milo"), SRC);
+  writeFileSync(join(dir, "sum.milo"), SUM_SRC);
 });
 afterAll(() => { try { rmSync(dir, { recursive: true, force: true }); } catch {} });
 
-function build(out: string, extra: string[]) {
-  execFileSync("bun", ["run", MAIN, "build", join(dir, "ovf.milo"), "-o", join(dir, out), "--release", ...extra],
+function build(out: string, extra: string[], source = "ovf.milo") {
+  execFileSync("bun", ["run", MAIN, "build", join(dir, source), "-o", join(dir, out), "--release", ...extra],
     { cwd: ROOT, stdio: ["pipe", "pipe", "pipe"] });
 }
 
@@ -59,4 +67,11 @@ test("--no-overflow-checks restores wrapping in a release build", () => {
   const r = run("wrap");
   expect(r.code).toBe(0);
   expect(r.out.trim()).toBe("-9223372036854775808");
+}, 120000);
+
+test("Vec.sum traps on integer overflow in a release build", () => {
+  build("sum-trap", [], "sum.milo");
+  const r = run("sum-trap");
+  expect(r.code).not.toBe(0);
+  expect(r.out).toContain("integer overflow");
 }, 120000);

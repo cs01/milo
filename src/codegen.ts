@@ -4166,9 +4166,17 @@ export class Codegen {
         if (this.isBigAgg(aTy)) {
           const tmp = this.nextTemp();
           this.entryAllocas.push(`  ${tmp} = alloca ${aTy}`);
+          const same = this.nextTemp();
+          const swapLabel = this.nextLabel("swap.copy");
+          const doneLabel = this.nextLabel("swap.done");
+          lines.push(`  ${same} = icmp eq ptr ${aPtr}, ${bPtr}`);
+          lines.push(`  br i1 ${same}, label %${doneLabel}, label %${swapLabel}`);
+          lines.push(`${swapLabel}:`);
           this.emitMemcpy(lines, tmp, aPtr, aTy);
           this.emitMemcpy(lines, aPtr, bPtr, aTy);
           this.emitMemcpy(lines, bPtr, tmp, aTy);
+          lines.push(`  br label %${doneLabel}`);
+          lines.push(`${doneLabel}:`);
           return [lines, "", "void"];
         }
         // Load both before storing either — the places may alias (swap(v[i], v[j])).
@@ -5980,8 +5988,8 @@ export class Codegen {
     return [lines, result, "i1"];
   }
 
-  // v.sum() — accumulate all elements. No callback; wrapping add for ints (matches the
-  // default arithmetic), fadd for floats. Empty vec sums to 0.
+  // v.sum() — accumulate all elements. Integer addition follows the enclosing function's
+  // normal checked/wrapping policy; floats use fadd. Empty vec sums to 0.
   private genVecSum(expr: HIRExpr & { kind: "VecSum" }, lines: string[]): [string[], string, string] {
     this.hasVecType = true;
     const [vl, vv] = this.genExpr(expr.vec);
@@ -6016,8 +6024,13 @@ export class Codegen {
     lines.push(`  ${elem} = load ${elemTy}, ptr ${elemPtr}`);
     const acc = this.nextTemp();
     lines.push(`  ${acc} = load ${elemTy}, ptr ${accAddr}`);
-    const newAcc = this.nextTemp();
-    lines.push(`  ${newAcc} = ${isFloat ? "fadd" : "add"} ${elemTy} ${acc}, ${elem}`);
+    let newAcc: string;
+    if (!isFloat && this.trapOnOverflow && !this.currentFnWrapping) {
+      newAcc = this.emitCheckedArith(lines, "add", this.isUnsigned(expr.elementType), elemTy, acc, elem, expr.span);
+    } else {
+      newAcc = this.nextTemp();
+      lines.push(`  ${newAcc} = ${isFloat ? "fadd" : "add"} ${elemTy} ${acc}, ${elem}`);
+    }
     lines.push(`  store ${elemTy} ${newAcc}, ptr ${accAddr}`);
     const nextIdx = this.nextTemp();
     lines.push(`  ${nextIdx} = add i64 ${idx}, 1`);

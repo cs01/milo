@@ -1,0 +1,4 @@
+// @error: discriminant 2147483648 is out of range for i32
+// Reject before codegen can truncate the tag and silently construct another value.
+enum Bad: i32 { TooLarge = 2147483648 }
+pub fn main(): i32 { return 0 }

@@ -1,0 +1,4 @@
+// @error: integer-repr enum 'Bad' cannot be generic
+// Monomorphization must not silently discard a repr or its discriminants.
+enum Bad<T>: i32 { A, B }
+pub fn main(): i32 { return 0 }

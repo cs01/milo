@@ -1,3 +1,11 @@
+<!-- doc-meta
+system: enum-niche-plan
+purpose: implementation plan for null-pointer niche optimization of eligible enums
+key-files: src/codegen.ts, src/types.ts, src/hir.ts, tests/
+update-when: enum layout, niche eligibility, or the implementation sequence changes
+last-verified: 2026-07-30
+-->
+
 # Enum niche optimization (null-pointer niche) — implementation plan
 
 **Goal.** Shrink `enum` with a fieldless variant + a single non-null-pointer payload variant from 24 B (i32 tag + 4 pad + ptr) to 8 B (just the ptr; `null` encodes the fieldless variant). This is Rust's NPO. Measured to be the *entire* Milo-vs-C gap on `benchmarks/binarytrees` (backlog Tier-2 #15). Payoff is broad: every `Option<Heap<T>>`, `Option<&T>`, pointer-payload enum in std + the self-hosted compiler shrinks.

@@ -1,0 +1,4 @@
+// @error: unsupported representation 'u32'
+// Enum tags currently have an i32 ABI; other repr spellings must fail in the checker.
+enum Bad: u32 { A, B }
+pub fn main(): i32 { return 0 }

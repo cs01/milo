@@ -1185,6 +1185,14 @@ export class TypeChecker {
     // register enums — two passes so generic enums are available when resolving variant fields
     for (const e of program.enums) {
       if (e.typeParams.length > 0) {
+        if (e.reprType) {
+          this.error(`integer-repr enum '${e.name}' cannot be generic`, e.span,
+            `remove the type parameters or remove ': ${e.reprType}'`);
+          if (e.reprType !== "i32") {
+            this.error(`enum '${e.name}' has unsupported representation '${e.reprType}'`, e.span,
+              `integer-repr enums currently require ': i32'`);
+          }
+        }
         const variants = new Map<string, { tag: number; fields: TypeKind[] }>();
         e.variants.forEach((v, i) => {
           variants.set(v.name, { tag: i, fields: v.fields.map(f => typeFromAst(f)) });
@@ -1203,6 +1211,10 @@ export class TypeChecker {
         // Sparse/non-contiguous is allowed and expected (that is why tryFrom is generated).
         let nextDisc = 0;
         const usedDiscs = new Map<number, string>();
+        if (e.reprType && e.reprType !== "i32") {
+          this.error(`enum '${e.name}' has unsupported representation '${e.reprType}'`, e.span,
+            `integer-repr enums currently require ': i32'`);
+        }
         e.variants.forEach((v, i) => {
           const fields = v.fields.map(f => this.resolve(f));
           for (const field of fields) {
@@ -1218,6 +1230,9 @@ export class TypeChecker {
                 `an 'enum ... : ${e.reprType}' is a C-like enum; drop the '(...)' or drop the ': ${e.reprType}'`);
             }
             tag = v.discriminant ?? nextDisc;
+            if (!Number.isInteger(tag) || tag < -2147483648 || tag > 2147483647) {
+              this.error(`discriminant ${tag} is out of range for i32 in enum '${e.name}'`, e.span);
+            }
             const clash = usedDiscs.get(tag);
             if (clash) this.error(`discriminant ${tag} is used by both '${clash}' and '${v.name}' in enum '${e.name}'`, e.span);
             usedDiscs.set(tag, v.name);

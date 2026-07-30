@@ -7904,6 +7904,12 @@ export class Codegen {
   // push their own `unreachable` after this.
   private panicAbort(lines: string[]) {
     this.needsAbort = true;
+    // abort() raises SIGABRT immediately WITHOUT flushing stdio — unlike exit(), which does.
+    // The panic message was just printf'd (block-buffered on a piped stdout, e.g. Linux under
+    // a test harness), so flush it first or it's lost with the process. fflush(NULL) flushes
+    // every open stream.
+    this.needsFflush = true;
+    lines.push(`  call i32 @fflush(ptr null)`);
     lines.push(`  call void @abort()`);
   }
 

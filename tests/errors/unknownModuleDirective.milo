@@ -1,0 +1,3 @@
+// @error: unknown module directive '@!foo'
+@!foo
+pub fn main() {}

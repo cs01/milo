@@ -45,14 +45,19 @@ Wrapping is always **defined** two's-complement (no `nsw`/`nuw`), never UB.
 
 ## The opt-out, scaled by scope — all say one word: `wrapping`
 
-1. **`@wrapping fn foo(...)`** *(ship first)* — whole routine is modular. Fits the existing
+1. **`@wrapping fn foo(...)`** *(shipped)* — whole routine is modular. Fits the existing
    `@`-directive style, zero new grammar. Concentrates the decision at one greppable,
    auditable site; the contracts prover flips to modular-arithmetic theory for the whole
    routine on one annotation.
-2. **`wrapping { ... }` block** *(defer until a real hot-loop case)* — **lexical only**: it
-   changes the semantics of `+ - *` *written* in the block, NOT of calls made from inside
-   it. Dynamic scoping of arithmetic semantics would be spooky-action; lexical-only is the
-   whole rule.
+2. **`@!wrapping`** *(shipped)* — file-level inner attribute (Rust `#![...]` analog): every
+   fn in the file lowers as `@wrapping`, **per-file only** (imported modules keep their
+   checks). The emulator case: `@!wrapping` atop a CPU core (all-modular), while the ROM
+   parser it imports stays checked. Proven on the NES 6502 core: nestest trace byte-
+   identical, 2.0× faster — same recovery as whole-program `--no-overflow-checks`, but
+   scoped, so the parser keeps its traps.
+3. **`wrapping { ... }` block** *(defer until a real inline hot-loop case)* — **lexical
+   only**: changes the semantics of `+ - *` *written* in the block, NOT of calls made from
+   inside it. Dynamic scoping of arithmetic semantics would be spooky-action.
 3. **`.wrappingAdd` / `.saturatingAdd` / `.checkedAdd`** — surgical, single-op, rich return
    (`checked → Option`). For one wrapped op inside an otherwise-checked function.
 4. **`--no-overflow-checks` / `--fast`** — whole-program perf build.
@@ -82,8 +87,9 @@ Wrapping is always **defined** two's-complement (no `nsw`/`nuw`), never UB.
 
 ## Status
 
-- Checked-by-default (trap all modes) + shift/negation traps + `abort()` panics: **DONE**
-  (commit on branch `worktree-float-cast-saturate`).
-- `@wrapping fn` attribute: **in progress** (parser → ast → checker → codegen → formatter →
-  lsp → fixtures → docs; perf-verify the emulator recovers its ~2×).
+- Checked-by-default (trap all modes) + shift/negation traps + `abort()` panics: **DONE**.
+- `@wrapping fn` + `@!wrapping` file directive: **DONE** — codegen gates arith on the
+  fn/module flag; emulator NES core verified byte-identical + 2.0× recovered.
 - `wrapping { }` block, `Wrapping<T>`: deferred.
+- Follow-ups (gated on a milo release that ships this): annotate the emulator CPU/PPU cores
+  with `@!wrapping`; teach the prover to treat `@wrapping` fns as modular wholesale.

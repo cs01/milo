@@ -11,6 +11,7 @@ import type {
 export class Parser {
   private pos = 0;
   private codePointLoopCounter = 0;
+  private moduleWrapping = false; // set by a file-level `@!wrapping` directive
 
   // Builtins that may be written with the `@` sigil in expression position. These
   // are compile-time-only: the compiler, not the runtime, does the work.
@@ -112,11 +113,19 @@ export class Parser {
     while (!this.at(TokenKind.Eof)) {
       // trailing ';' after a top-level decl is a cosmetic no-op (see parseStmts)
       if (this.match(TokenKind.Semicolon)) continue;
-      // collect attributes before struct/enum
+      // collect attributes before struct/enum; `@!wrapping` is an inner (file-level)
+      // directive, not a decl attribute — consume it separately so it never attaches.
       let attrs: Attribute[] | undefined;
       while (this.at(TokenKind.At)) {
+        const a = this.parseAttribute();
+        if (a.inner) {
+          if (a.name !== "wrapping") this.error(`unknown module directive '@!${a.name}' — only '@!wrapping' is supported`, this.peek());
+          else if (a.args.length > 0) this.error(`'@!wrapping' takes no arguments`, this.peek());
+          else this.moduleWrapping = true;
+          continue;
+        }
         if (!attrs) attrs = [];
-        attrs.push(this.parseAttribute());
+        attrs.push(a);
       }
       // `pub` is a soft keyword, not reserved: it only marks visibility when a
       // declaration actually follows, so a variable or fn named `pub` still parses
@@ -196,7 +205,13 @@ export class Parser {
     if (this.codePointLoopCounter > 0 && !imports.some(i => i.path === "std/unicode")) {
       imports.push({ kind: "ImportDecl", path: "std/unicode", names: ["CodePoint", "decodeCodepoint"] });
     }
-    return { structs, enums, functions, imports, traits, impls, typeAliases, interfaces, globals };
+    // A file-level `@!wrapping` stamps every one of this module's own (non-extern) fns so it
+    // lowers as modular. Kept off `attributes` so the formatter reprints the directive once,
+    // not `@wrapping` on every fn. Per-file: only fns parsed here, never imported ones.
+    if (this.moduleWrapping) {
+      for (const f of functions) if (!f.isExtern) f.fromWrappingModule = true;
+    }
+    return { structs, enums, functions, imports, traits, impls, typeAliases, interfaces, globals, ...(this.moduleWrapping && { moduleWrapping: true }) };
   }
 
   private parseImport(): ImportDecl {
@@ -525,12 +540,20 @@ export class Parser {
 
   private parseAttribute(): Attribute {
     const at = this.expect(TokenKind.At);
-    // The name must hug the '@' — `@derive`, not `@ derive`. Whitespace between
+    // `@!name` — an inner attribute (Rust `#![...]` analog) applies to the whole file, not
+    // the next decl. The '!' must hug the '@' just like the name does.
+    let inner = false;
+    if (this.at(TokenKind.Bang) && this.peek().line === at.line && this.peek().col === at.col + 1) {
+      this.advance();
+      inner = true;
+    }
+    // The name must hug the '@' (or the '!') — `@derive`, not `@ derive`. Whitespace between
     // them is a mistake, not insignificant spacing, so reject it up front.
     const nameTok = this.peek();
-    if (nameTok.kind === TokenKind.Ident && (nameTok.line !== at.line || nameTok.col !== at.col + 1)) {
+    const expectedCol = at.col + (inner ? 2 : 1); // '@name' vs '@!name'
+    if (nameTok.kind === TokenKind.Ident && (nameTok.line !== at.line || nameTok.col !== expectedCol)) {
       this.error(
-        `no whitespace allowed between '@' and attribute name — write '@${nameTok.value}'`,
+        `no whitespace allowed between '${inner ? "@!" : "@"}' and attribute name — write '${inner ? "@!" : "@"}${nameTok.value}'`,
         nameTok, undefined, `attributes bind tightly: '@derive(...)', not '@ derive(...)'`,
       );
     }
@@ -544,7 +567,7 @@ export class Parser {
       }
       this.expect(TokenKind.RParen);
     }
-    return { name, args, argKinds };
+    return { name, args, argKinds, ...(inner && { inner: true }) };
   }
 
   private parseAttributeArg(args: string[], argKinds: ("ident" | "string")[]): void {

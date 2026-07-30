@@ -171,6 +171,21 @@ unaffected (conversion is a separate dial).
 way: `.checkedAdd`/`.saturatingAdd` opt a single operation back *into* checking inside a
 `@wrapping` fn, just as `.wrappingAdd` opts one op *out* inside an ordinary (checked) fn.
 
+For a file that is modular throughout — an emulator CPU core, a hash/PRNG module — put the
+directive once at the top as an **inner attribute** (Rust `#![...]` analog):
+
+```milo
+@!wrapping          // every fn in THIS file is @wrapping
+
+fn step(...) { ... }
+fn adc(...)  { ... }
+```
+
+`@!wrapping` applies only to functions defined in that file, not to anything it imports — so
+a CPU core marked `@!wrapping` runs modular while the ROM parser it calls (a separate file)
+keeps its overflow traps. It is equivalent to writing `@wrapping` on every function in the
+file, and the same tier rule holds: bounds and division-by-zero still trap.
+
 > **Non-goal:** there is no `--no-bounds-checks` flag and never will be. `--no-overflow-checks`
 > trades away *overflow* trapping (a correctness property) for speed; bounds checking is a
 > *memory-safety* property and stays on in every build. Opting out of a bounds check is

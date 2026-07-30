@@ -54,6 +54,9 @@ export interface Attribute {
   // `@cLayout("sys/stat.h")` is a string — the values alone can't be told apart,
   // and an attribute that wants a path or a C type name must reject a bare ident.
   argKinds?: ("ident" | "string")[];
+  // `@!name` (inner attribute, Rust `#![...]` analog) applies to the enclosing file/module
+  // rather than the next declaration. Currently only `@!wrapping` uses it.
+  inner?: boolean;
 }
 
 // ── Expressions ──
@@ -179,6 +182,10 @@ export interface Function {
   kind: "Function";
   name: string;
   attributes?: Attribute[]; // `@cSig(...)` on an extern fn; other attrs are rejected by the checker
+  // Set by the parser when the file carries a module-level `@!wrapping` directive, so this
+  // fn lowers as if it had a per-fn `@wrapping` — without polluting `attributes` (which the
+  // formatter reprints). Per-file: only fns parsed from the wrapping module get it.
+  fromWrappingModule?: boolean;
   sourceFile?: string; // set by the resolver; used to diagnose cross-module name collisions
   typeParams: TypeParam[];
   params: Param[];
@@ -283,6 +290,10 @@ export interface Program {
   typeAliases: TypeAlias[];
   interfaces: InterfaceDecl[];
   globals: GlobalDecl[];
+  // File-level `@!wrapping` directive: the whole module is modular arithmetic. The parser
+  // stamps `fromWrappingModule` on the file's own fns; this flag is kept so the formatter
+  // can reprint the directive.
+  moduleWrapping?: boolean;
   declOrigins?: DeclOrigins; // set by the resolver; absent for a bare Parser program
   // Manifest `deps` names whose files were actually loaded, i.e. the set of `$`
   // prefixes per-package mangling put on symbols (see src/mangle.ts). Empty/absent

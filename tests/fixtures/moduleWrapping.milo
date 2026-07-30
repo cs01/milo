@@ -1,0 +1,23 @@
+// @!wrapping is a file-level directive (Rust #![...] analog): every fn in THIS file uses
+// modular arithmetic, as if each carried @wrapping. Bounds and div-by-zero still trap.
+// Motivating case: an emulator CPU core where all arithmetic is modular, while the ROM
+// parser it imports (a separate file) keeps its overflow checks.
+// @expect: -2147483648
+// @expect: 256
+@!wrapping
+
+fn overflowingAdd(): i32 {
+    var a: i32 = 2147483647
+    return a + 1 // wraps -> INT_MIN, no trap
+}
+
+fn overshift(): i32 {
+    var one: i32 = 1
+    var n: i32 = 40
+    return one << n // shift amount masked 40&31=8 -> 256
+}
+
+pub fn main() {
+    print(overflowingAdd())
+    print(overshift())
+}

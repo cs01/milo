@@ -1,0 +1,3 @@
+// @error: '@!wrapping' takes no arguments
+@!wrapping(foo)
+pub fn main() {}

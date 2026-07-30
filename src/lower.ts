@@ -231,7 +231,7 @@ class LowerCtx {
       ...(oldSnapshots.length > 0 && { oldSnapshots }),
       isExtern: false,
       isVariadic: fn.isVariadic,
-      ...(fn.attributes?.some(a => a.name === "wrapping") && { isWrapping: true }),
+      ...((fn.fromWrappingModule || fn.attributes?.some(a => a.name === "wrapping")) && { isWrapping: true }),
       ...(fn.isPub && { isPub: true }),
       ...(fn.sourceFile && { sourceFile: fn.sourceFile }),
       // AST fns carry no span; proxy the decl line with the first body stmt that has one

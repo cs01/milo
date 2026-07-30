@@ -1,0 +1,6 @@
+// @error: references cannot be stored in a collection
+struct Bag { items: Vec<&[u8]> }
+
+fn main() {
+    print("unreachable")
+}

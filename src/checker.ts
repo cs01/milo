@@ -608,6 +608,22 @@ export class TypeChecker {
     }
   }
 
+  // A reference nested inside a container outlives the borrow it came from: the
+  // container survives the scope that owns the borrowed value, and reading it
+  // later is a use-after-free. Struct fields have always been rejected; this is
+  // the same rule for `Vec<&T>`, `HashMap<_, &T>`, `[&T; N]` and `Heap<&T>`,
+  // which used to slip through and produce garbage at runtime.
+  private nestedRef(t: TypeKind): boolean {
+    switch (t.tag) {
+      case "vec": return t.element.tag === "ref" || this.nestedRef(t.element);
+      case "array": return t.element.tag === "ref" || this.nestedRef(t.element);
+      case "heap": return t.inner.tag === "ref" || this.nestedRef(t.inner);
+      case "hashmap":
+        return t.key.tag === "ref" || t.value.tag === "ref" || this.nestedRef(t.key) || this.nestedRef(t.value);
+      default: return false;
+    }
+  }
+
   private resolve(ty: MiloType): TypeKind {
     if (ty.isFn && ty.fnParams && ty.fnRet) {
       const tag = ty.isCFn ? "cfn" as const : "fn" as const;
@@ -1125,6 +1141,8 @@ export class TypeChecker {
         for (const f of fields) {
           if (f.type.tag === "ref") {
             this.error(`struct '${s.name}' field '${f.name}': references cannot be stored in structs`, undefined, `references are second-class — use an owned type instead`);
+          } else if (this.nestedRef(f.type)) {
+            this.error(`struct '${s.name}' field '${f.name}': references cannot be stored in a collection`, undefined, `references are second-class — store owned values instead`);
           }
         }
         this.structs.set(s.name, { fields, isExtern: s.isExtern, isOpaque: s.isOpaque });
@@ -2431,6 +2449,9 @@ export class TypeChecker {
       case "LetDecl": {
         const hint = stmt.type ? this.resolve(stmt.type) : null;
         // refs in locals OK (second-class — can't escape function via return/struct/collection)
+        if (hint && this.nestedRef(hint)) {
+          this.error(`'${stmt.name}': references cannot be stored in a collection`, sp, `references are second-class — store owned values instead`);
+        }
         const frozenBeforeRhs = new Set<VarInfo>();
         for (const scope of this.scopes) for (const [, vi] of scope) if (vi.borrowed) frozenBeforeRhs.add(vi);
         const deferred = !hint ? this.tryDeferVecInfer(stmt.value) : null;
@@ -2476,6 +2497,9 @@ export class TypeChecker {
       }
       case "VarDecl": {
         const hint = stmt.type ? this.resolve(stmt.type) : null;
+        if (hint && this.nestedRef(hint)) {
+          this.error(`'${stmt.name}': references cannot be stored in a collection`, sp, `references are second-class — store owned values instead`);
+        }
         const frozenBeforeRhs = new Set<VarInfo>();
         for (const scope of this.scopes) for (const [, vi] of scope) if (vi.borrowed) frozenBeforeRhs.add(vi);
         const deferred = !hint ? this.tryDeferVecInfer(stmt.value) : null;
@@ -5333,12 +5357,20 @@ export class TypeChecker {
             // binding, its exprType, and every later use all see the real element.
             if (this.inferVecElems.has(objType.element as object)) {
               const argType = this.checkExprWithHint(expr.args[0], null);
+              // A pushed borrow would outlive the scope that owns the borrowed
+              // value — the Vec survives it. Same rule as a struct field.
+              if (argType.tag === "ref") {
+                this.error(`push: cannot store a reference in a Vec`, sp, `references are second-class — push an owned value (clone it if needed)`);
+              }
               this.inferVecElems.delete(objType.element as object);
               Object.assign(objType.element as object, argType);
               this.tryMove(expr.args[0]);
               return this.setType(expr, { tag: "void" });
             }
             const argType = this.checkExprWithHint(expr.args[0], objType.element);
+            if (argType.tag === "ref") {
+              this.error(`push: cannot store a reference in a Vec`, sp, `references are second-class — push an owned value (clone it if needed)`);
+            }
             if (!typeEq(objType.element, argType) && argType.tag !== "unknown") {
               if (!this.tryInterfaceCoercion(expr.args[0], argType, objType.element)) {
                 this.error(`push: expected ${typeName(objType.element)}, got ${typeName(argType)}`, sp);

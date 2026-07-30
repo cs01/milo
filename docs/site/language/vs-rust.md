@@ -28,6 +28,7 @@ Milo's prover decides linear integer arithmetic; bitwise operations, collection
 lengths, and recursion come back `unknown` and fall back to runtime asserts. See
 [Contracts & Safety](/language/safety).
 
-Contracts are cheap to check here because one owner means no aliasing: a write
-can only touch the thing you named, so the prover needs no heap model — unlike C
-or Java, where any write through a pointer might change anything.
+Second-class references — you cannot store one in a struct or a collection, and
+the only thing you can return is a view of a receiver's own data — mean nothing
+in the heap is ever aliased, which keeps both the mental model and the compiler
+drastically simpler.

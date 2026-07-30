@@ -1,0 +1,14 @@
+// @error: cannot store a reference in a Vec
+struct Source { data: Vec<u8> }
+
+impl Source {
+    fn view(self: &Self): &[u8] { return self.data[0..self.data.len] }
+}
+
+fn main() {
+    var src = Source { data: Vec.new() }
+    src.data.push(1 as u8)
+    var toks = Vec.new()
+    toks.push(src.view())
+    print($"{toks.len}")
+}

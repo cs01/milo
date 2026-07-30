@@ -2,13 +2,13 @@
 
 ## std/sync
 
-### `AtomicBool.destroy`
+### `AtomicBool.clone`
 
 ```milo
-fn AtomicBool.destroy(self: AtomicBool): void
+fn AtomicBool.clone(self: &AtomicBool): AtomicBool
 ```
 
-_Undocumented._
+Share this atomic with another owner; freed when the last owner drops.
 
 ### `AtomicBool.load`
 
@@ -58,13 +58,14 @@ fn AtomicI64.cas(self: &AtomicI64, expected: i64, desired: i64): i64
 
 _Undocumented._
 
-### `AtomicI64.destroy`
+### `AtomicI64.clone`
 
 ```milo
-fn AtomicI64.destroy(self: AtomicI64): void
+fn AtomicI64.clone(self: &AtomicI64): AtomicI64
 ```
 
-_Undocumented._
+Share this atomic with another owner (e.g. a spawned task). Each clone must be
+dropped exactly once; the underlying storage is freed when the last owner drops.
 
 ### `AtomicI64.load`
 
@@ -250,6 +251,30 @@ fn chWakeOneSend(inner: *ChannelInner): void
 
 _Undocumented._
 
+### `Drop.drop`
+
+```milo
+fn Drop.drop(self: &mut Drop): void
+```
+
+atomicrmw sub returns the OLD value, so old == 1 means this was the last owner.
+
+### `Drop.drop`
+
+```milo
+fn Drop.drop(self: &mut Drop): void
+```
+
+_Undocumented._
+
+### `Drop.drop`
+
+```milo
+fn Drop.drop(self: &mut Drop): void
+```
+
+_Undocumented._
+
 ### `nodeLoadI64`
 
 ```milo
@@ -300,13 +325,14 @@ fn WaitGroup.add(self: &WaitGroup, n: i64): void
 
 _Undocumented._
 
-### `WaitGroup.destroy`
+### `WaitGroup.clone`
 
 ```milo
-fn WaitGroup.destroy(self: WaitGroup): void
+fn WaitGroup.clone(self: &WaitGroup): WaitGroup
 ```
 
-_Undocumented._
+Share this WaitGroup with another owner (e.g. a worker task); freed when the
+last owner drops. add/done/wait take &Self, so most uses need no clone.
 
 ### `WaitGroup.done`
 

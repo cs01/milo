@@ -153,7 +153,7 @@ Available: `wrappingAdd/Sub/Mul/Neg`, `saturatingAdd/Sub/Mul`, `checkedAdd/Sub/M
 emulator's ALU, a hash mixer, a PRNG — where every `+`/`-`/`*` is meant to wrap and per-op
 methods would be thousands of edits. Annotate the function:
 
-```milo
+```milo skip
 @wrapping
 fn step(cpu: &mut Cpu) {
     cpu.a = cpu.a + operand      // wraps; no trap, no method call
@@ -174,7 +174,7 @@ way: `.checkedAdd`/`.saturatingAdd` opt a single operation back *into* checking 
 For a file that is modular throughout — an emulator CPU core, a hash/PRNG module — put the
 directive once at the top as an **inner attribute** (Rust `#![...]` analog):
 
-```milo
+```milo skip
 @!wrapping          // every fn in THIS file is @wrapping
 
 fn step(...) { ... }
@@ -559,7 +559,7 @@ let q = Point { x, y: 99 }    // shorthand + explicit
 
 A struct with one field is a **newtype**: a zero-cost, distinct type wrapping a value. It compiles to exactly its inner type (the wrapper is elided — same registers, same ABI), but the type checker keeps it separate from the raw type and from every other newtype. This is the idiom for type-safe IDs and indices: give each pool or key space its own newtype and the compiler rejects cross-pool confusion that a bare `i64` would wave through.
 
-```milo
+```milo error
 struct NodeId { idx: i64 }
 struct EdgeId { idx: i64 }
 

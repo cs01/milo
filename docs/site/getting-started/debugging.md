@@ -37,6 +37,18 @@ Without `-g` the compiler emits zero debug metadata, so there is no size or spee
 
 `-g` works with `run`, `build`, and `emit-ir`. Use `emit-ir app.milo -g` to inspect the `!DICompileUnit` / `!DISubprogram` / `!DILocation` nodes directly.
 
+## Inspecting the compiler's intermediate forms
+
+To see how a program looks at each stage of the pipeline (`Source → AST → HIR → LLVM IR`):
+
+| Command | Stage | What it shows |
+|---------|-------|---------------|
+| `emit-ast app.milo` | Parsed AST (JSON) | The parser's output, **before types exist** — a `BinOp` here has no type field. |
+| `emit-hir app.milo` | Typed HIR (JSON) | The lowered form codegen consumes — **every expression carries its `type`**, and sugar (`??`, `?`, string interpolation) is desugared. |
+| `emit-ir app.milo` | LLVM IR | The final text handed to `clang`. |
+
+`emit-ast` and `emit-hir` default to the **entry file only** so the stdlib doesn't drown your code; add `--all` for the full merged module (imports, monomorphized instantiations, structs, enums, globals). Spans are stripped by default — pass `--spans` to keep them. Diffing `emit-ast` against `emit-hir` for the same function is the quickest way to see exactly what type-checking and lowering added.
+
 Prefer `-g --debug` for stepping. At `-O0` every local lives in an `alloca` that the debug metadata binds to by name; at higher optimization levels LLVM promotes those to registers and `frame variable` reports them as unavailable.
 
 ## macOS: the `.dSYM` bundle

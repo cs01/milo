@@ -190,6 +190,80 @@ function compileToIr(sourcePath: string, outputPath: string | null, target: Targ
   }
 }
 
+function emitText(text: string, outputPath: string | null) {
+  if (outputPath) {
+    writeFileSync(outputPath, text);
+    console.log(`wrote ${outputPath}`);
+  } else {
+    process.stdout.write(text);
+  }
+}
+
+// JSON replacer shared by emit-ast/emit-hir. Spans are dropped by default (they dominate
+// the output and rarely matter); Set/Map (dropImpls, userFnNames) and bigint int-literal
+// values are not JSON-native, so serialize them explicitly rather than emit `{}`/throw.
+function dumpReplacer(includeSpans: boolean) {
+  return (key: string, value: any) => {
+    if (!includeSpans && key === "span") return undefined;
+    if (value instanceof Set) return [...value];
+    if (value instanceof Map) return Object.fromEntries(value);
+    if (typeof value === "bigint") return `${value}n`;
+    return value;
+  };
+}
+
+function dumpJson(obj: unknown, spans: boolean): string {
+  try {
+    return JSON.stringify(obj, dumpReplacer(spans), 2) + "\n";
+  } catch (e: any) {
+    console.error(`error: could not serialize dump: ${e.message}`);
+    process.exit(1);
+  }
+}
+
+// Emit the AST as JSON — the parser's output, before types exist. Default: just the entry
+// file (raw parse, no import merge) so the stdlib doesn't drown the user's own code. --all
+// merges imports (and resolves) like a real build. No type-check runs: an AST is meaningful
+// even when the program doesn't type-check, which is exactly when you want to inspect it.
+function emitAst(sourcePath: string, outputPath: string | null, target: TargetInfo, all: boolean, spans: boolean) {
+  const source = readFileSync(sourcePath, "utf-8");
+  let program;
+  try {
+    const tokens = new Lexer(source).tokenize();
+    program = new Parser(tokens, source, sourcePath).parse();
+    if (all) program = resolveImports(program, dirname(resolve(sourcePath)), target, sourcePath);
+  } catch (e: any) {
+    if (e instanceof ParseError) console.error(formatDiagnostic(e.diagnostic, e.source ?? source, e.filePath ?? sourcePath));
+    else console.error(e.message);
+    process.exit(1);
+  }
+  emitText(dumpJson(program, spans), outputPath);
+}
+
+// Emit the typed HIR as JSON — the lowered form codegen consumes, with a TypeKind on every
+// expression. Runs the full frontend (parse + resolve + check + lower), so a type error
+// stops it exactly as a real build would. Default: only functions defined in the entry file
+// (the rest is stdlib + monomorphized instantiations); --all dumps the whole module. Structs/
+// enums/globals carry no source stamp, so they only appear under --all.
+function emitHir(sourcePath: string, outputPath: string | null, target: TargetInfo, all: boolean, spans: boolean, warningConfig?: WarningConfig) {
+  const source = readFileSync(sourcePath, "utf-8");
+  const mod = frontendToHIR(source, target, sourcePath, warningConfig);
+  if (all) {
+    emitText(dumpJson(mod, spans), outputPath);
+    return;
+  }
+  // Entry-file functions are stamped with the entry path by the resolver; injected libc
+  // externs (memchr/memcmp/…) carry no stamp, so require an exact match rather than treating
+  // "unstamped" as "belongs to the entry file".
+  const entry = resolve(sourcePath);
+  const fns = mod.functions.filter(f => f.sourceFile && resolve(f.sourceFile) === entry);
+  const view = { ...mod, functions: fns, structs: [], enums: [], globals: [] };
+  if (!outputPath) {
+    console.error(`hir: ${fns.length} function(s) from ${sourcePath} (use --all for the full module: stdlib + monomorphized instantiations, structs, enums, globals)`);
+  }
+  emitText(dumpJson(view, spans), outputPath);
+}
+
 // detect clang: prefer /usr/bin/clang (Apple) which is more stable, then PATH clang, then llc+cc
 // Two separate LLVM-version requirements, both verified against real toolchains:
 //   14 and below — rejects opaque pointers outright: `declare i32 @memcmp(ptr, ...)`
@@ -830,7 +904,7 @@ function parseHeapSize(s: string): number | null {
   return n * mult;
 }
 
-function parseArgs(args: string[]): { output: string | null; source: string | null; rest: string[]; optFlag: string; warningConfig: WarningConfig; noEntry: boolean; safetyLevel: string | null; sanitize: boolean; targetName: string | null; emitHeader: boolean; emitDebug: boolean; heapSize: number | null; overflowChecks: boolean | null; contractChecks: boolean | null; staticDeps: boolean } {
+function parseArgs(args: string[]): { output: string | null; source: string | null; rest: string[]; optFlag: string; warningConfig: WarningConfig; noEntry: boolean; safetyLevel: string | null; sanitize: boolean; targetName: string | null; emitHeader: boolean; emitDebug: boolean; heapSize: number | null; overflowChecks: boolean | null; contractChecks: boolean | null; staticDeps: boolean; emitAll: boolean; emitSpans: boolean } {
   let output: string | null = null;
   let source: string | null = null;
   let optFlag = "-O2";
@@ -848,6 +922,10 @@ function parseArgs(args: string[]): { output: string | null; source: string | nu
   let maxStackArrayBytes: number | undefined;
   let overflowChecks: boolean | null = null;
   let contractChecks: boolean | null = null;
+  // emit-ast / emit-hir dump controls. Parsed here (not left to fall through) because an
+  // unrecognized `--flag` would otherwise be swallowed as the source-file positional below.
+  let emitAll = false;
+  let emitSpans = false;
   for (let i = 0; i < args.length; i++) {
     if (args[i] === "-o" && i + 1 < args.length) { output = args[++i]; }
     else if (args[i] === "--release") { optFlag = "-O3"; }
@@ -866,6 +944,8 @@ function parseArgs(args: string[]): { output: string | null; source: string | nu
     else if (args[i] === "--contract-checks") { contractChecks = true; }
     else if (args[i] === "--no-contract-checks") { contractChecks = false; }
     else if (args[i] === "--emit-header") { emitHeader = true; }
+    else if (args[i] === "--all") { emitAll = true; }        // emit-ast/emit-hir: include imported modules
+    else if (args[i] === "--spans") { emitSpans = true; }    // emit-ast/emit-hir: keep source spans in the dump
     else if (args[i] === "-O" && i + 1 < args.length) { optFlag = `-O${args[++i]}`; }
     else if (/^-O[0-3sz]$/.test(args[i])) { optFlag = args[i]; }
     else if (args[i] === "--deny-all") { denied.add("*"); }
@@ -893,7 +973,7 @@ function parseArgs(args: string[]): { output: string | null; source: string | nu
     else if (!source) { source = args[i]; }
     else { rest.push(args[i]); }
   }
-  return { output, source, rest, optFlag, warningConfig: { denied, allowed, maxStackArrayBytes }, noEntry, safetyLevel, sanitize, targetName, emitHeader, emitDebug, heapSize, overflowChecks, contractChecks, staticDeps };
+  return { output, source, rest, optFlag, warningConfig: { denied, allowed, maxStackArrayBytes }, noEntry, safetyLevel, sanitize, targetName, emitHeader, emitDebug, heapSize, overflowChecks, contractChecks, staticDeps, emitAll, emitSpans };
 }
 
 const SKILL_TEXT = `# Milo Language Guide
@@ -1304,6 +1384,8 @@ async function main() {
     console.log("  run <file> [args]      compile and run (no artifacts left behind)");
     console.log("  build <file> [-o out]  compile to executable");
     console.log("  test [file...]         run tests (*_test.milo files)");
+    console.log("  emit-ast <file>        emit the parsed AST as JSON (--all imports, --spans keep spans)");
+    console.log("  emit-hir <file>        emit the typed HIR as JSON (--all full module, --spans keep spans)");
     console.log("  emit-ir <file>         emit LLVM IR");
     console.log("  emit-obj <file>        compile to object file (.o)");
     console.log("  build-lib <files...>   compile to static library (.a)");
@@ -1361,7 +1443,7 @@ async function main() {
   // falls through every dispatch branch to the generic "no source file" below.
   const KNOWN_COMMANDS = new Set([
     "skill", "api", "doc", "lsp", "lex", "fmt", "build-lib", "safety", "verify",
-    "wcet", "prove", "test", "run", "build", "emit-ir", "emit-obj", "emit-js",
+    "wcet", "prove", "test", "run", "build", "emit-ast", "emit-hir", "emit-ir", "emit-obj", "emit-js",
     ...PKG_COMMANDS,
   ]);
   if (!KNOWN_COMMANDS.has(cmd) && cmd !== "--help" && cmd !== "-h") {
@@ -1467,7 +1549,7 @@ async function main() {
     return;
   }
 
-  const { output, source, rest, optFlag, warningConfig, noEntry, safetyLevel, sanitize, targetName, emitHeader, emitDebug, heapSize, overflowChecks, contractChecks, staticDeps } = parseArgs(args.slice(1));
+  const { output, source, rest, optFlag, warningConfig, noEntry, safetyLevel, sanitize, targetName, emitHeader, emitDebug, heapSize, overflowChecks, contractChecks, staticDeps, emitAll, emitSpans } = parseArgs(args.slice(1));
   let target = getHostTarget();
   if (targetName) {
     const resolved = resolveTarget(targetName);
@@ -1613,6 +1695,10 @@ async function main() {
     const t0 = Date.now();
     const bin = compileToBinary(source!, output, target, optFlag, warningConfig, rest, sanitize, emitDebug, heapSize, overflowChecks, staticDeps, contractChecks);
     reportCompiled(source!, bin, Date.now() - t0);
+  } else if (cmd === "emit-ast") {
+    emitAst(source!, output, target, emitAll, emitSpans);
+  } else if (cmd === "emit-hir") {
+    emitHir(source!, output, target, emitAll, emitSpans, warningConfig);
   } else if (cmd === "emit-ir") {
     const trapOnOverflow = overflowChecks ?? true;
     const emitContractChecks = contractChecks ?? (optFlag === "-O0");

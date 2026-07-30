@@ -1145,6 +1145,8 @@ export class Codegen {
         1, 0,
         "declare void @llvm.memset.p0.i64(ptr nocapture writeonly, i8, i64, i1 immarg)",
       );
+    for (const decl of this.fpSatIntrinsics)
+      this.output.splice(1, 0, decl);
     if (this.needsGetentropy && !declaredExterns.has("getentropy"))
       this.output.splice(1, 0, this.isWindows
         // BCryptGenRandom(NULL, buf, len, BCRYPT_USE_SYSTEM_PREFERRED_RNG) is the
@@ -5063,8 +5065,15 @@ export class Codegen {
       const op = this.bitWidth(toKind) > this.bitWidth(fromKind) ? "fpext" : "fptrunc";
       lines.push(`  ${tmp} = ${op} ${fromTy} ${ov} to ${toTy}`);
     } else if (fromFloat) {
+      // Raw fptosi/fptoui is poison (UB) when the value doesn't fit the target or is NaN.
+      // Use LLVM's saturating variants instead: out-of-range clamps to the target's
+      // min/max and NaN → 0, so the cast is total and defined for every input (matches
+      // Rust's post-1.45 `as` semantics). fromTy is "float"/"double" → f32/f64 suffix.
       const op = toKind.tag === "int" && !toKind.signed ? "fptoui" : "fptosi";
-      lines.push(`  ${tmp} = ${op} ${fromTy} ${ov} to ${toTy}`);
+      const fpSuffix = fromTy === "double" ? "f64" : "f32";
+      const intrinsic = `@llvm.${op}.sat.${toTy}.${fpSuffix}`;
+      this.fpSatIntrinsics.add(`declare ${toTy} ${intrinsic}(${fromTy})`);
+      lines.push(`  ${tmp} = call ${toTy} ${intrinsic}(${fromTy} ${ov})`);
     } else if (toFloat) {
       const op = fromKind.tag === "int" && !fromKind.signed ? "uitofp" : "sitofp";
       lines.push(`  ${tmp} = ${op} ${fromTy} ${ov} to ${toTy}`);
@@ -7761,6 +7770,8 @@ export class Codegen {
   private needsMemset = false;
   private needsMemsetIntrinsic = false;
   private needsSnprintf = false;
+  // fp→int saturating-cast intrinsic declares needed (each a full `declare ...` line, deduped)
+  private fpSatIntrinsics = new Set<string>();
 
   // Append printf-style format fragments for a value of type `tk`. `val` is the loaded
   // LLVM value, `llvmTy` its LLVM type. Strings, ints, bool, float, ptr inline trivially.

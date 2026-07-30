@@ -1,0 +1,28 @@
+// float→int casts saturate (clamp to target min/max) and map NaN→0, instead of
+// emitting poison on out-of-range like a raw fptosi/fptoui would. Matches Rust's
+// post-1.45 `as` semantics. Values are computed at runtime to defeat const-folding.
+// @expect: 2147483647
+// @expect: -2147483648
+// @expect: 0
+// @expect: 255
+// @expect: 0
+
+pub fn main() {
+    var hi: f64 = 1.0e10
+    hi = hi * hi // 1e20, far above i32::MAX
+    print(hi as i32)
+
+    var lo: f64 = 1.0e10
+    lo = 0.0 - (lo * lo) // -1e20, far below i32::MIN
+    print(lo as i32)
+
+    var z: f64 = 0.0
+    let nan = z / z
+    print(nan as i32)
+
+    print(hi as u8) // saturates to u8 max
+
+    var neg: f64 = 0.0
+    neg = neg - 5.0
+    print(neg as u8) // negative → 0 (unsigned floor)
+}

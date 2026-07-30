@@ -227,6 +227,8 @@ let b: u8 = 200
 let wide = b as i32
 ```
 
+Float→integer casts **saturate**: a value above the target's max clamps to the max, below the min clamps to the min, and `NaN` maps to `0`. The cast is total — every input has a defined result, there is no undefined behavior on overflow (unlike C, and matching Rust's `as`). Integer→integer casts truncate/extend by bit width and wrap silently; use the `checked*`/`saturating*` methods above when you need to detect or clamp overflow instead.
+
 ### Character Literals
 
 Character literals produce `u8` values:

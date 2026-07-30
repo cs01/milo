@@ -1,3 +1,11 @@
+<!-- doc-meta
+system: plan
+purpose: the decided overflow/arithmetic-safety model — checked-by-default (trap all modes), wrapping-by-declaration (@wrapping fn), and the tier rule separating overflow (correctness) from bounds (memory safety)
+key-files: src/codegen.ts, src/checker.ts, src/lower.ts, src/hir.ts, docs/language-reference.md
+update-when: the block form or Wrapping<T> ships, or an operator's default/@wrapping behavior changes
+last-verified: 2026-07-29
+-->
+
 # Overflow & arithmetic-safety semantics
 
 > **Decision procedure for this doc (and the language):**

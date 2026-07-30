@@ -230,10 +230,11 @@ fn main() {
     <h3 class="cat-head">Web &amp; networking</h3>
     <div class="tile-grid">
       <a class="tile" href="https://chadsmith.dev/weather/">
+        <img class="tile-img" src="/showcase/weather.png" alt="The Milo weather app showing current conditions, an hourly strip and a 7-day forecast for Bend, Oregon" loading="lazy">
         <span class="tile-play">▶ VISIT</span>
         <h3>Weather App</h3>
-        <p>A weather website served from a single static binary — live at chadsmith.dev/weather.</p>
-        <div class="tile-tags"><span>HTTP server</span><span>TLS fetch</span><span>JSON</span></div>
+        <p>Forecast, UV index and air quality for any US city, served from a single static binary — live at chadsmith.dev/weather.</p>
+        <div class="tile-tags"><span>HTTP server</span><span>TLS fetch</span><span>JSON</span><span>17k-place index</span></div>
         <span class="tile-copy" role="button" tabindex="0" data-cmd="milo run examples/net/weather/app.milo" title="milo run examples/net/weather/app.milo">⧉ copy run command</span>
       </a>
       <a class="tile" href="https://github.com/milo-language/milo/tree/main/examples/net/termpair">

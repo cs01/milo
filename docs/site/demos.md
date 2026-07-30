@@ -81,7 +81,7 @@ TUIs in [`examples/terminal/`](https://github.com/milo-language/milo/tree/main/e
 | Program | What it is |
 |---------|-----------|
 | [termpair](https://github.com/milo-language/milo/tree/main/examples/net/termpair) | Share your terminal in the browser: WebSocket relay with end-to-end AES encryption, client and server both in Milo |
-| [weather](https://github.com/milo-language/milo/tree/main/examples/net/weather) | weather.gov frontend served from a single static binary |
+| [weather](https://github.com/milo-language/milo/tree/main/examples/net/weather) | weather.gov + Open-Meteo frontend served from a single static binary: forecast, UV index, air quality, 17k-place typeahead |
 | [serve](https://github.com/milo-language/milo/blob/main/examples/net/serve.milo) | Static file server with directory listing |
 | [webserver](https://github.com/milo-language/milo/blob/main/examples/net/webserver.milo) | HTTP server with routing, path params, middleware |
 | [httpClient](https://github.com/milo-language/milo/blob/main/examples/net/httpClient.milo) | HTTP client for fetching URLs |

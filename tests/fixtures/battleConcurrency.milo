@@ -1,5 +1,10 @@
 // Concurrency battle-test — sum-conservation under real multicore contention.
 //
+// This is the GUIDED-CORRECT counterpart to tests/errors/sharedMutAcrossThreads.milo:
+// you cannot hand one mutable counter to many threads (that's a use-after-move), so
+// each worker clone()s its own handle to the shared synchronized cell. The naive
+// racy version simply does not compile.
+//
 // WORKERS OS threads (Promise.blocking, genuine parallelism) each hammer a shared
 // AtomicI64, race a CAS loop, and stream a partial through a Channel. Execution is
 // thoroughly racy; three INDEPENDENT tallies must agree exactly, so a lost atomic

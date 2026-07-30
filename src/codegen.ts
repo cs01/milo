@@ -110,6 +110,9 @@ export class Codegen {
   private needsArgGlobals = false;
   private usesSchedulerGlobal = false;
   private currentFnName = "";
+  // Set for the duration of a `@wrapping` function: + - * -x, div INT_MIN/-1 and over-shifts
+  // use defined modular arithmetic instead of trapping. Div-by-zero, bounds, ranged still trap.
+  private currentFnWrapping = false;
   private itableLayouts = new Map<string, { globalName: string; methodCount: number }>();
 
   private filePath?: string;
@@ -1380,6 +1383,7 @@ export class Codegen {
     this.droppableLocals = [];
     this.entryAllocas = [];
     this.currentFnName = fn.name;
+    this.currentFnWrapping = !!fn.isWrapping;
     const lines: string[] = [];
 
     const params = fn.params.map(p => {
@@ -2002,6 +2006,31 @@ export class Codegen {
     this.panicAbort(lines);
     lines.push(`  unreachable`);
     lines.push(`${okLabel}:`);
+  }
+
+  // @wrapping signed div/rem: division by zero still TRAPS (no modular value), but the one
+  // signed overflow — INT_MIN / -1 — wraps (quotient → INT_MIN, remainder → 0) instead of
+  // trapping. LLVM `sdiv`/`srem` of that exact pair is poison, so we route it around the
+  // instruction with a select rather than feeding it the poison operands.
+  private emitWrappingSignedDivRem(lines: string[], op: string, lv: string, rv: string, llType: string, bits: number, span?: { line: number; col: number }): string {
+    // zero-only trap: pass signed=false so emitDivByZeroCheck skips its INT_MIN/-1 branch.
+    this.emitDivByZeroCheck(lines, rv, lv, llType, false, bits, span);
+    const minVal = (-(BigInt(2) ** BigInt(bits - 1))).toString();
+    const isMin = this.nextTemp();
+    lines.push(`  ${isMin} = icmp eq ${llType} ${lv}, ${minVal}`);
+    const isNeg1 = this.nextTemp();
+    lines.push(`  ${isNeg1} = icmp eq ${llType} ${rv}, -1`);
+    const isOvf = this.nextTemp();
+    lines.push(`  ${isOvf} = and i1 ${isMin}, ${isNeg1}`);
+    // Divide by 1 in the overflow case so the instruction never sees the poison (MIN, -1).
+    const safeDivisor = this.nextTemp();
+    lines.push(`  ${safeDivisor} = select i1 ${isOvf}, ${llType} 1, ${llType} ${rv}`);
+    const raw = this.nextTemp();
+    lines.push(`  ${raw} = ${op === "/" ? "sdiv" : "srem"} ${llType} ${lv}, ${safeDivisor}`);
+    const wrapped = op === "/" ? minVal : "0";
+    const res = this.nextTemp();
+    lines.push(`  ${res} = select i1 ${isOvf}, ${llType} ${wrapped}, ${llType} ${raw}`);
+    return res;
   }
 
   // Pointer to the interned name of the file a check lives in, for its error message.
@@ -3613,21 +3642,35 @@ export class Codegen {
         if (expr.op in intOps) {
           const op = isFloat ? floatOps[expr.op] : intOps[expr.op];
           const checkedOps: Record<string, string> = { "+": "add", "-": "sub", "*": "mul" };
-          if (this.trapOnOverflow && !isFloat && expr.op in checkedOps && expr.span) {
+          // A @wrapping fn skips the overflow trap and takes the plain (defined, two's-
+          // complement) op below. Everything else — div-by-zero, bounds — still traps.
+          if (this.trapOnOverflow && !this.currentFnWrapping && !isFloat && expr.op in checkedOps && expr.span) {
             const val = this.emitCheckedArith(lines, checkedOps[expr.op], unsigned, llt, lv, rv, expr.span);
             return [lines, val, llt];
           }
-          // Integer division/remainder by zero (and signed INT_MIN / -1) is UB —
-          // trap it unconditionally, in debug and release alike.
+          // Integer division/remainder by zero (and signed INT_MIN / -1) is UB — trap it in
+          // every mode. Under @wrapping the INT_MIN/-1 overflow wraps (→ INT_MIN, rem 0), but
+          // division by zero still traps: there is no modular value for x/0.
           if (!isFloat && (expr.op === "/" || expr.op === "%")) {
             const signed = !unsigned;
             const bits = expr.left.type.tag === "int" ? expr.left.type.bits : 32;
+            if (this.currentFnWrapping && signed) {
+              const val = this.emitWrappingSignedDivRem(lines, expr.op, lv, rv, llt, bits, expr.span);
+              return [lines, val, llt];
+            }
             this.emitDivByZeroCheck(lines, rv, lv, llt, signed, bits, expr.span);
           }
-          // A shift by >= the operand's bit width (or a negative amount, which reads as a
-          // huge unsigned) is LLVM poison — UB in every mode. Trap it, like div-by-zero.
+          // A shift by >= the operand's bit width (or a negative amount, huge as unsigned) is
+          // LLVM poison. Default: trap. @wrapping: mask the amount to [0,width) — defined,
+          // matches Rust `wrapping_shl` / C.
           if (!isFloat && (expr.op === "<<" || expr.op === ">>")) {
             const bits = expr.left.type.tag === "int" ? expr.left.type.bits : 32;
+            if (this.currentFnWrapping) {
+              const masked = this.nextTemp();
+              lines.push(`  ${masked} = and ${llt} ${rv}, ${bits - 1}`);
+              lines.push(`  ${tmp} = ${op} ${llt} ${lv}, ${masked}`);
+              return [lines, tmp, llt];
+            }
             this.emitShiftCheck(lines, rv, llt, bits, expr.span);
           }
           lines.push(`  ${tmp} = ${op} ${llt} ${lv}, ${rv}`);
@@ -3659,7 +3702,7 @@ export class Codegen {
         const tmp = this.nextTemp();
         if (expr.op === "-") {
           if (ot === "float" || ot === "double") lines.push(`  ${tmp} = fneg ${ot} ${ov}`);
-          else if (this.trapOnOverflow && expr.span) {
+          else if (this.trapOnOverflow && !this.currentFnWrapping && expr.span) {
             const unsigned = this.isUnsigned(expr.operand.type);
             const val = this.emitCheckedArith(lines, "sub", unsigned, ot, "0", ov, expr.span);
             return [lines, val, ot];

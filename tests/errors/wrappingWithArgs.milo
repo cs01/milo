@@ -1,0 +1,4 @@
+// @error: '@wrapping' takes no arguments
+@wrapping(foo)
+fn f() {}
+pub fn main() {}

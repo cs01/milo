@@ -1,0 +1,4 @@
+// @error: '@wrapping' on extern fn
+@wrapping
+extern fn sqrt(x: f64): f64
+pub fn main() {}

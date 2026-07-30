@@ -1270,8 +1270,22 @@ export class TypeChecker {
               }
             });
           }
+          // @wrapping makes the routine's + - * -x, div INT_MIN/-1, and over-shifts use
+          // defined modular arithmetic (two's-complement wrap / masked shift) instead of
+          // trapping. It is a correctness dial only: div-by-zero, bounds, and ranged
+          // checks still trap, and `as` conversions are unchanged.
+          else if (attr.name === "wrapping") {
+            if (fn.isExtern) {
+              this.error(`'@wrapping' on extern fn '${fn.name}' — an extern is defined elsewhere, so there is no arithmetic here to make modular`, undefined,
+                `drop '@wrapping'`);
+            }
+            if (attr.args.length > 0) {
+              this.error(`'@wrapping' takes no arguments`, undefined,
+                `write '@wrapping fn ${fn.name}(...)'`);
+            }
+          }
           else this.error(`'@${attr.name}' is not supported on functions — '${fn.name}'`, undefined,
-            `only '@cSig', '@export' and '@link' apply to a fn; it would be silently ignored otherwise`);
+            `only '@cSig', '@export', '@link' and '@wrapping' apply to a fn; it would be silently ignored otherwise`);
         }
       }
       this.checkVariadicExtern(fn);

@@ -156,6 +156,10 @@ export interface HIRFunction {
   oldSnapshots?: (HIRStmt & { kind: "Let" })[];
   isExtern: boolean;
   isVariadic: boolean;
+  // @wrapping: the routine's + - * -x, div INT_MIN/-1 and over-shifts use defined modular
+  // arithmetic instead of trapping (see docs/plans/overflow-semantics.md). Correctness dial
+  // only — bounds/div-by-zero/ranged still trap, `as` conversions unchanged.
+  isWrapping?: boolean;
   // Drives what the generated C header declares: the header is the library's published
   // API, so a helper the author never marked `pub` has no business in it.
   isPub?: boolean;

@@ -147,6 +147,33 @@ q.checkedRem(0)      // Option.None — None on divide-by-zero
 Available: `wrappingAdd/Sub/Mul/Neg`, `saturatingAdd/Sub/Mul`, `checkedAdd/Sub/Mul/Div/Rem/Neg`.
 `checkedDiv`/`checkedRem` also return `None` on signed `INT_MIN / -1` overflow; `checkedNeg` returns `None` at signed `INT_MIN`.
 
+**Whole-routine wrapping — `@wrapping`.** Some routines are *inherently* modular — a CPU
+emulator's ALU, a hash mixer, a PRNG — where every `+`/`-`/`*` is meant to wrap and per-op
+methods would be thousands of edits. Annotate the function:
+
+```milo
+@wrapping
+fn step(cpu: &mut Cpu) {
+    cpu.a = cpu.a + operand      // wraps; no trap, no method call
+    cpu.pc = cpu.pc + 1          // 16-bit program counter, modular by design
+}
+```
+
+Inside a `@wrapping` fn, `+ - * -x`, signed `INT_MIN / -1` division, and shift-amount-≥-width
+all use defined modular arithmetic (two's-complement wrap; shift amount masked to `& (width-1)`).
+It is a **correctness dial only** — it does **not** touch memory safety: array/slice bounds,
+ranged-type bounds, and division **by zero** still trap inside a `@wrapping` fn. `as` casts are
+unaffected (conversion is a separate dial).
+
+`@wrapping` sets the routine's *default*, not a lock — the per-op methods override it either
+way: `.checkedAdd`/`.saturatingAdd` opt a single operation back *into* checking inside a
+`@wrapping` fn, just as `.wrappingAdd` opts one op *out* inside an ordinary (checked) fn.
+
+> **Non-goal:** there is no `--no-bounds-checks` flag and never will be. `--no-overflow-checks`
+> trades away *overflow* trapping (a correctness property) for speed; bounds checking is a
+> *memory-safety* property and stays on in every build. Opting out of a bounds check is
+> possible only per-site, inside `unsafe`. This keeps "memory-safe in release" unconditional.
+
 Bit intrinsics: `countOnes`, `leadingZeros`, `trailingZeros` return an `i64` count (LLVM `ctpop`/`ctlz`/`cttz`; zero-count equals the type's bit width). `rotateLeft(n)`/`rotateRight(n)` (funnel shift, `n` taken mod bit-width) and `reverseBits()` return the same width as the receiver.
 
 ### Ranged Integer Types

@@ -1951,8 +1951,12 @@ export class TypeChecker {
         this.error(`'addrOf' is a reserved method name — it is the built-in raw address-of operator ('x.addrOf(): *T'). Rename this method.`, m.span ?? impl.span);
     }
 
-    // generic impl — store as template, instantiate per monomorphization
-    if (impl.typeParams && impl.typeParams.length > 0 && !impl.traitName) {
+    // generic impl — store as template, instantiate per monomorphization. Trait impls
+    // included: a generic trait impl with a body (e.g. `impl Drop for Foo<T>`) can't be
+    // checked against the base name (not a concrete struct); deferring to per-mono means
+    // the body is checked, and the trait registered (dropImpls etc.), against the real
+    // mangled struct — see monomorphizeStruct, which preserves traitName when instantiating.
+    if (impl.typeParams && impl.typeParams.length > 0) {
       const existing = this.genericImpls.get(typeName) || [];
       if (!existing.some(e => e.impl === impl)) {
         existing.push({ impl, program });

@@ -1,0 +1,30 @@
+// @expect: made
+// @expect: drop 5
+// @expect: drop 9
+
+// A generic trait impl WITH a body — `impl Drop for Boxed<T>`. This used to fail with
+// "unknown struct 'Boxed'": the body was checked eagerly against the base name (not a
+// concrete struct). Generic trait impls now defer to per-monomorphization like inherent
+// ones, so the body checks against Boxed_i64 and Drop is registered there.
+// (Drops run in declaration order at scope exit — a and b give 5 then 9.)
+
+struct Boxed<T> {
+    v: T,
+}
+
+impl Drop for Boxed<T> {
+    fn drop(self: &mut Self): void {
+        print("drop ", self.v)
+    }
+}
+
+pub fn main(): i32 {
+    let a = Boxed {
+        v: 5
+    }
+    let b = Boxed {
+        v: 9
+    }
+    print("made")
+    return 0
+}

@@ -1873,6 +1873,39 @@ export class Codegen {
     lines.push(`${okLabel}:`);
   }
 
+  // Runtime exclusivity guard for by-ref arguments. The static call-site check
+  // (checker.ts checkCallSiteExclusivity) rejects aliasing it can prove, but two index
+  // borrows off one container — `f(v[i], v[j])` — alias only when i==j, which is
+  // undecidable until runtime. Two live `&mut` to one address break value semantics and
+  // would make `noalias` on those params a miscompile, so compare the borrow addresses
+  // pairwise and abort if an at-risk pair coincides. Only pairs with >=1 mutable ref
+  // matter: two shared borrows of the same place are legal. Identical SSA operands are
+  // the same static place (already a compile error) and are skipped. One `icmp eq ptr`
+  // per pair; a call with <2 by-ref args emits nothing.
+  private emitAliasGuards(lines: string[], refs: { ptr: string; mut: boolean }[], span?: { line: number; col: number }): void {
+    for (let i = 0; i < refs.length; i++) {
+      for (let j = i + 1; j < refs.length; j++) {
+        if (!refs[i].mut && !refs[j].mut) continue;
+        if (refs[i].ptr === refs[j].ptr) continue;
+        this.needsPrintf = true;
+        this.needsExit = true;
+        const eq = this.nextTemp();
+        const bad = this.nextLabel("alias.bad");
+        const ok = this.nextLabel("alias.ok");
+        lines.push(`  ${eq} = icmp eq ptr ${refs[i].ptr}, ${refs[j].ptr}`);
+        lines.push(`  br i1 ${eq}, label %${bad}, label %${ok}`);
+        lines.push(`${bad}:`);
+        const s = this.addString(`milo: aliasing '&mut' arguments at ${span?.line ?? 0}:${span?.col ?? 0} (two mutable borrows of the same value in one call)\n`);
+        const errPtr = this.nextTemp();
+        lines.push(`  ${errPtr} = getelementptr [${s.length} x i8], ptr ${s.label}, i32 0, i32 0`);
+        lines.push(`  call i32 (ptr, ...) @printf(ptr ${errPtr})`);
+        lines.push(`  call void @exit(i32 1)`);
+        lines.push(`  unreachable`);
+        lines.push(`${ok}:`);
+      }
+    }
+  }
+
   // Trap if a collection length/capacity is negative. `len`/`cap` are i64 fields and
   // every index bounds check is an UNSIGNED compare, so a negative count (e.g. from a
   // literal -1 or a wrapped overflow) would sail through as a huge unsigned bound and
@@ -3606,12 +3639,14 @@ export class Codegen {
         }
         const sig = this.fnSigs.get(expr.func);
         const argVals: { val: string; type: string }[] = [];
+        const refPtrs: { ptr: string; mut: boolean }[] = [];
         for (let i = 0; i < expr.args.length; i++) {
           const arg = expr.args[i];
           if (arg.passByRef) {
             const [al, aPtr] = this.genLValueForArg(arg.expr);
             lines.push(...al);
             argVals.push({ val: aPtr, type: "ptr" });
+            refPtrs.push({ ptr: aPtr, mut: arg.refMut });
           } else {
             // [T; N] → *T decay: pass the array's address as a ptr
             const argTk = arg.expr.type;
@@ -3660,6 +3695,7 @@ export class Codegen {
             }
           }
         }
+        this.emitAliasGuards(lines, refPtrs, expr.span);
         // extern fns passing/returning a struct by value need native-ABI lowering:
         // coerce args into registers, byval/indirect big ones, sret the return.
         if (this.externAbi.has(expr.func)) {
@@ -4469,17 +4505,20 @@ export class Codegen {
 
         // evaluate args
         const argVals: { val: string; type: string }[] = [{ val: envPtr, type: "ptr" }];
+        const refPtrs: { ptr: string; mut: boolean }[] = [];
         for (const arg of expr.args) {
           if (arg.passByRef) {
             const [al, aPtr] = this.genLValueForArg(arg.expr);
             lines.push(...al);
             argVals.push({ val: aPtr, type: "ptr" });
+            refPtrs.push({ ptr: aPtr, mut: arg.refMut });
           } else {
             const [al, av, at] = this.genExpr(arg.expr);
             lines.push(...al);
             argVals.push({ val: av, type: at });
           }
         }
+        this.emitAliasGuards(lines, refPtrs, expr.span);
 
         const argsStr = argVals.map(a => `${a.type} ${a.val}`).join(", ");
         const retTy = this.llvmType(expr.type);
@@ -4635,17 +4674,20 @@ export class Codegen {
 
         // build args: data ptr as self, then user args
         const argVals: { val: string; type: string }[] = [{ val: dataPtr, type: "ptr" }];
+        const refPtrs: { ptr: string; mut: boolean }[] = [];
         for (const arg of expr.args) {
           if (arg.passByRef) {
             const [al, aPtr] = this.genLValueForArg(arg.expr);
             lines.push(...al);
             argVals.push({ val: aPtr, type: "ptr" });
+            refPtrs.push({ ptr: aPtr, mut: arg.refMut });
           } else {
             const [al, av, at] = this.genExpr(arg.expr);
             lines.push(...al);
             argVals.push({ val: av, type: at });
           }
         }
+        this.emitAliasGuards(lines, refPtrs, expr.span);
 
         const argsStr = argVals.map(a => `${a.type} ${a.val}`).join(", ");
         const retTy = this.llvmType(expr.type);

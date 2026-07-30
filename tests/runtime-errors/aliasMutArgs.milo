@@ -1,0 +1,19 @@
+// @runtime-error: aliasing
+
+// Two `&mut` borrows of the same element via equal indices alias at runtime.
+// The static call-site check can't see i == j, so a runtime guard must trap it —
+// otherwise the callee holds two live `&mut` to one place (value-semantics violation).
+
+fn twiddle(a: &mut i64, b: &mut i64): void {
+    a = 10
+    b = 20
+}
+
+pub fn main(): i32 {
+    var v = [1, 2, 3]
+    let i = 0
+    let j = 0
+    twiddle(v[i], v[j])
+    print(v[0])
+    return 0
+}

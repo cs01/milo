@@ -223,6 +223,9 @@ export function resolveImports(program: Program, sourceDir: string, target: Targ
       }
       // merge everything — named imports validate but don't restrict (flat compilation)
       for (const f of imported.functions) f.sourceFile = absPath;
+      // Impl methods carry origin too, so the verifier can attribute a method's VCs to its
+      // file (e.g. std/math.milo) exactly as it does for free functions.
+      for (const im of imported.impls) for (const m of im.methods) m.sourceFile = absPath;
       const child: Unit = { prog: imported, file: absPath, pkg: resolved.pkg, targets: [] };
       units.push(child);
       processImports(imported, dirname(absPath), resolved.pkg, child);
@@ -236,6 +239,7 @@ export function resolveImports(program: Program, sourceDir: string, target: Targ
     const src = readSource(preludePath);
     const prelude = new Parser(new Lexer(src).tokenize(), src, preludePath).parse();
     for (const f of prelude.functions) f.sourceFile = preludePath;
+    for (const im of prelude.impls) for (const m of im.methods) m.sourceFile = preludePath;
     const preludeUnit: Unit = { prog: prelude, file: preludePath, pkg: "", targets: [] };
     units.push(preludeUnit);
     processImports(prelude, dirname(preludePath), "", preludeUnit);
@@ -247,6 +251,7 @@ export function resolveImports(program: Program, sourceDir: string, target: Targ
 
   // user code comes after prelude
   for (const f of program.functions) f.sourceFile = entryFile ?? "(entry module)";
+  for (const im of program.impls) for (const m of im.methods) m.sourceFile = entryFile ?? "(entry module)";
   const entryUnit: Unit = { prog: program, file: entryFile ?? "(entry module)", pkg: "", targets: [] };
   units.push(entryUnit);
 

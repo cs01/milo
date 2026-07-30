@@ -161,7 +161,12 @@ impl Pool {
         poolFree(self, block)
     }
 
+    // Restate poolLive's preconditions (Pool has no struct invariant): without them the
+    // wrapper can't discharge the callee's `requires`, so its own `ensures result >= 0`
+    // is unbacked — same restating pattern as `free` above.
     fn live(self: &Self): i64
+    requires self.liveCount >= 0
+    requires self.liveCount <= self.blockCount
     ensures
     result >= 0
     {
@@ -169,6 +174,8 @@ impl Pool {
     }
 
     fn available(self: &Self): i64
+    requires self.liveCount >= 0
+    requires self.liveCount <= self.blockCount
     ensures
     result >= 0
     {

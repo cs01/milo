@@ -490,6 +490,34 @@ function collectCallsInExpr(expr: Expr, conds: string[], env: Map<string, string
   }
 }
 
+// A static/associated method call `Type.method(args)` parses as an EnumLit (the parser
+// can't tell `Math.clampI64(..)` from an enum construction). The whole VC machinery keys
+// off `Call` nodes with a string `func`, so rewrite every EnumLit that names a known impl
+// method into `Call{func:"Type.method"}` in place — after this pass a namespaced stdlib
+// call is indistinguishable from the free function it replaced, and call collection,
+// call-site obligations, and postcondition modelling all work unchanged. `implKeys` is the
+// set of `${typeName}.${method}`; enum-variant keys are excluded by the caller so a real
+// construction that happens to share a name is never rewritten.
+function rewriteStaticCalls(node: any, implKeys: Set<string>): void {
+  if (!node || typeof node !== "object") return;
+  if (Array.isArray(node)) { for (const x of node) rewriteStaticCalls(x, implKeys); return; }
+  if (node.kind === "EnumLit" && typeof node.enumName === "string" && typeof node.variant === "string"
+      && implKeys.has(`${node.enumName}.${node.variant}`)) {
+    const func = `${node.enumName}.${node.variant}`;
+    const args = node.args ?? [];
+    for (const k of Object.keys(node)) delete node[k];
+    node.kind = "Call";
+    node.func = func;
+    node.args = args;
+    rewriteStaticCalls(args, implKeys);
+    return;
+  }
+  for (const k of Object.keys(node)) {
+    if (k === "span") continue;
+    rewriteStaticCalls(node[k], implKeys);
+  }
+}
+
 // Every function in the program, for looking up a callee's parameter modes. Set once per
 // run alongside GLOBAL_CONST_*.
 let FN_TABLE = new Map<string, Function>();
@@ -1382,7 +1410,28 @@ export function generateVerificationConditions(program: Program, opts?: { onlyFi
     }
   }
 
-  FN_TABLE = new Map(program.functions.map(f => [f.name, f]));
+  // Impl methods are verified like free functions, under their qualified `Type.method`
+  // name — the same key `rewriteStaticCalls` produces for their call sites. The stdlib
+  // reorg moved contracts (e.g. std/math's `requires x >= 0`) onto `impl` methods; without
+  // this they'd carry no VCs and every caller's `Math.foo()` would havoc.
+  const implMethods: Function[] = [];
+  for (const im of program.impls ?? []) {
+    for (const m of im.methods) implMethods.push({ ...m, name: `${im.typeName}.${m.name}` });
+  }
+  const allFns = [...program.functions, ...implMethods];
+
+  // Rewrite `Type.method(..)` EnumLits to Calls across every body and contract, excluding
+  // any key that is actually an enum variant (a real construction must not be rewritten).
+  const implKeys = new Set(implMethods.map(m => m.name));
+  const enumVariantKeys = new Set<string>();
+  for (const en of program.enums ?? []) for (const v of en.variants) enumVariantKeys.add(`${en.name}.${v.name}`);
+  for (const k of enumVariantKeys) implKeys.delete(k);
+  for (const fn of allFns) {
+    rewriteStaticCalls(fn.body, implKeys);
+    for (const c of fn.contracts) rewriteStaticCalls(c.expr, implKeys);
+  }
+
+  FN_TABLE = new Map(allFns.map(f => [f.name, f]));
   BOOL_FIELDS = collectBoolFields(program);
   FLOAT_FIELDS = collectFloatFields(program);
   STRUCT_INVARIANTS = new Map();
@@ -1397,12 +1446,12 @@ export function generateVerificationConditions(program: Program, opts?: { onlyFi
   const requiresByFn = new Map<string, Function>();
   // Callee postconditions, for modelling calls that appear inside a body or contract.
   const ensuresByFn = new Map<string, Function>();
-  for (const fn of program.functions) {
+  for (const fn of allFns) {
     if (fn.contracts.some(c => c.kind === "requires")) requiresByFn.set(fn.name, fn);
     if (fn.contracts.some(c => c.kind === "ensures")) ensuresByFn.set(fn.name, fn);
   }
 
-  for (const fn of program.functions) {
+  for (const fn of allFns) {
     if (opts?.onlyFile && fn.sourceFile && fn.sourceFile !== opts.onlyFile) continue;
     // A fn with no contracts of its own still has to honour the ones it calls.
     const callsContracted = callsAContractedFn(fn.body, requiresByFn);
@@ -1865,7 +1914,7 @@ export function generateVerificationConditions(program: Program, opts?: { onlyFi
   return {
     conditions,
     stats: {
-      functions: program.functions.filter(f => f.contracts.length > 0 || hasLoopInvariants(f.body)).length,
+      functions: allFns.filter(f => f.contracts.length > 0 || hasLoopInvariants(f.body)).length,
       contracts: contractCount,
       loops: loopCount,
     },

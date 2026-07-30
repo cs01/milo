@@ -31,35 +31,33 @@ export const EXPECTED: Record<string, Expected> = {
   // carrying `invariant outMin < outMax`, the contracts are checked rather than decorative.
   // The remaining unknowns are `readKey`/`clampF64` postconditions this run cannot see
   // (they live in std, outside the entry file), not a solver limit.
-  // COHERENCE REGRESSION (restore via prover work): math ops became `Math.method()`
-  // static calls, which prove-milo havocs (it modeled the old free `clampI64`/`mathSqrt`);
-  // callers of math lost those proofs. Contracts unchanged — this is a prover-frontier
-  // gap, not a broken guarantee. See [[project_prover_frontier]] / docs/verification-roadmap.md.
-  "examples/embedded/flightController.milo": { proven: 6, unknown: 49, errors: 0 },
+  "examples/embedded/flightController.milo": { proven: 11, unknown: 55, errors: 0 },
   // 3 refuted here are baselined (unbounded-Int model of `setpoint - measured`).
   "examples/embedded/pidStep.milo": { proven: 8, unknown: 0, errors: 0 },
   // Both AES-128 key-length preconditions into std/crypto, proven at the call site.
-  // COHERENCE REGRESSION (restore via prover work): see flightController note above.
-  "examples/net/termpair/encryption.milo": { proven: 0, unknown: 1, errors: 0 },
+  "examples/net/termpair/encryption.milo": { proven: 2, unknown: 4, errors: 0 },
   // 3 proven / 4 unknown since `Arena` grew `invariant live >= 0`: construction and the
   // alloc paths discharge it, the free/set/modify paths cannot (they are gated by an
   // IndexAccess the translator has no rule for), so `arenaLen` reports as a CONDITIONAL
   // proof rather than a clean one.
   "std/arena.milo": { proven: 3, unknown: 4, errors: 0 },
-  // 0 conditions, and correctly so: this file's contracts are all `requires`, which are
-  // discharged at call sites. Nothing in the proved set calls them, so nothing is
-  // checked here. A floor of 0 pins that fact rather than hiding it — the callers that
-  // DO exercise these live in examples/, and MILO_VERIFY_ALL=1 is what reaches them.
-  "std/crypto.darwin.milo": { proven: 0, unknown: 0, errors: 0 },
-  "std/crypto.windows.milo": { proven: 0, unknown: 0, errors: 0 },
+  // The `impl Crypto` namespace wrappers restate the AES key/iv/tag-length `requires` of
+  // the private free fns they forward to, so each wrapper's call into the free fn proves
+  // its precondition at the wrapper's own call site (10 = 2 aesGcm + 2 aesGcm128 wrappers'
+  // encrypt/decrypt obligations across the length checks).
+  "std/crypto.darwin.milo": { proven: 10, unknown: 0, errors: 0 },
+  "std/crypto.windows.milo": { proven: 10, unknown: 0, errors: 0 },
   // `fixed` was refuted here until `construct` grew frame conditions (`ensures h.count.len
   // == old(h.count.len)`); the +6 proven is that baseline retiring.
   "std/inflate.milo": { proven: 27, unknown: 38, errors: 0 },
-  // COHERENCE REGRESSION (restore via prover work): math's own `requires` are now on
-  // `impl Math` static methods, which prove-milo does not enumerate/model yet (was free fns).
-  "std/math.milo": { proven: 0, unknown: 0, errors: 0 },
+  // `impl Math` static-method postconditions (abs/clamp `ensures result >= ...`); a
+  // `Type.method()` call is normalized to a plain Call so the method's contracts verify
+  // exactly as the free fns they replaced did.
+  "std/math.milo": { proven: 4, unknown: 1, errors: 0 },
   "std/mem.milo": { proven: 2, unknown: 1, errors: 0 },
-  "std/pool.milo": { proven: 6, unknown: 1, errors: 0 },
+  // 15 = free-fn VCs plus the `impl Pool` wrappers, which restate poolLive/poolAvailable's
+  // liveCount preconditions (Pool has no struct invariant to supply them).
+  "std/pool.milo": { proven: 15, unknown: 1, errors: 0 },
   "std/process.milo": { proven: 0, unknown: 0, errors: 0 },
   "std/process.windows.milo": { proven: 0, unknown: 0, errors: 0 },
   "std/pty.darwin.milo": { proven: 0, unknown: 0, errors: 0 },

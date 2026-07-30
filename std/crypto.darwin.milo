@@ -287,16 +287,33 @@ impl Crypto {
     fn md5(input: &string): string {
         return md5(input)
     }
-    fn aesGcmEncrypt(key: &string, iv: &string, plaintext: &string, aad: &string): Result<AesGcmResult, string> {
+    // AES-256 lengths (key 32), mirroring the private free fn — see aesGcm128 note below.
+    fn aesGcmEncrypt(key: &string, iv: &string, plaintext: &string, aad: &string): Result<AesGcmResult, string>
+    requires key.len == 32
+    requires iv.len == 12
+    {
         return aesGcmEncrypt(key, iv, plaintext, aad)
     }
-    fn aesGcmDecrypt(key: &string, iv: &string, ciphertext: &string, tag: &string, aad: &string): Result<string, string> {
+    fn aesGcmDecrypt(key: &string, iv: &string, ciphertext: &string, tag: &string, aad: &string): Result<string, string>
+    requires key.len == 32
+    requires iv.len == 12
+    requires tag.len == 16
+    {
         return aesGcmDecrypt(key, iv, ciphertext, tag, aad)
     }
-    fn aesGcm128Encrypt(key: &string, iv: &string, plaintext: &string, aad: &string): Result<AesGcmResult, string> {
+    // Preconditions mirror the private free fn: the public namespace API must carry the
+    // same AES-128 key/iv/tag length guarantees, else callers lose them at the wrapper.
+    fn aesGcm128Encrypt(key: &string, iv: &string, plaintext: &string, aad: &string): Result<AesGcmResult, string>
+    requires key.len == 16
+    requires iv.len == 12
+    {
         return aesGcm128Encrypt(key, iv, plaintext, aad)
     }
-    fn aesGcm128Decrypt(key: &string, iv: &string, ciphertext: &string, tag: &string, aad: &string): Result<string, string> {
+    fn aesGcm128Decrypt(key: &string, iv: &string, ciphertext: &string, tag: &string, aad: &string): Result<string, string>
+    requires key.len == 16
+    requires iv.len == 12
+    requires tag.len == 16
+    {
         return aesGcm128Decrypt(key, iv, ciphertext, tag, aad)
     }
 }

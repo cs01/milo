@@ -182,7 +182,7 @@ pub fn dapServe(): i64 {
             let args = req.get("arguments") ?? jsonParse("{}")!
             program = args.str("program") ?? ""
             sourceRoots = strArray(args, "sourceRoots")
-            match connectJvm(cmd == "launch", args, eventCh) {
+            match connectJvm(cmd == "launch", args, eventCh.clone()) {
                 Result.Ok(j) => {
                     io = Option.Some(j)
                     launched = cmd == "launch"
@@ -362,11 +362,12 @@ pub fn connectJvm(isLaunch: bool, args: &Json, eventCh: Channel<Packet>): Result
     // signal, so nothing else needs the handle.
     let outCh = child.stdout()
     let errCh = child.stderr()
+    let errFwd = eventCh.clone() // stderr forwarder task's owner
     Task.spawn(move(): void => {
         while true {
             match errCh.recv() {
                 Result.Ok(chunk) => {
-                    let _s = eventCh.send(synthPacket(-3, 0, chunk))
+                    let _s = errFwd.send(synthPacket(-3, 0, chunk))
                 }
                 Result.Err(_e) => {
                     break
@@ -397,11 +398,12 @@ pub fn connectJvm(isLaunch: bool, args: &Json, eventCh: Channel<Packet>): Result
     // detected by this pipe's EOF: Child.wait is a BLOCKING waitpid, which
     // would freeze the whole green scheduler if a task called it while the
     // JVM still runs — after EOF the child is dead and the reap is instant.
+    let outFwd = eventCh.clone() // stdout+exit forwarder task's owner
     Task.spawn(move(): void => {
         while true {
             match outCh.recv() {
                 Result.Ok(chunk) => {
-                    let _s = eventCh.send(synthPacket(-2, 0, chunk))
+                    let _s = outFwd.send(synthPacket(-2, 0, chunk))
                 }
                 Result.Err(_e) => {
                     break
@@ -412,14 +414,14 @@ pub fn connectJvm(isLaunch: bool, args: &Json, eventCh: Channel<Packet>): Result
         if let Result.Ok(c) = child.wait() {
             code = c as i64
         }
-        let _s = eventCh.send(synthPacket(-4, code, ""))
+        let _s = outFwd.send(synthPacket(-4, code, ""))
     }
     )
 
     let host: string = "127.0.0.1"
     var tries: i64 = 0
     while tries < 20 {
-        match jdwpAttach(host, port as u16, eventCh) {
+        match jdwpAttach(host, port as u16, eventCh.clone()) {
             Result.Ok(io) => {
                 return Result.Ok(io)
             }

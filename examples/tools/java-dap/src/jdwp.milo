@@ -380,6 +380,7 @@ pub fn jdwpAttach(host: &string, port: u16, eventCh: Channel<Packet>): Result<Jd
     }
 
     let replyCh = Channel<Packet>.new(8)!
+    let replyChReader = replyCh.clone() // reader task's owner; JdwpIo keeps `replyCh`
     // FdReader is unbuffered (1-byte read syscalls), so attaching a fresh
     // reader inside the task loses nothing. Capture the raw fd, not the boot
     // FdReader struct.
@@ -389,7 +390,7 @@ pub fn jdwpAttach(host: &string, port: u16, eventCh: Channel<Packet>): Result<Jd
             match readPacketFrom(taskReader) {
                 Result.Ok(pkt) => {
                     if pkt.isReply {
-                        match replyCh.send(pkt) {
+                        match replyChReader.send(pkt) {
                             Result.Ok(_v) => {
                             }
                             Result.Err(_e) => {

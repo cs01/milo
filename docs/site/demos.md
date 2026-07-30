@@ -8,7 +8,7 @@ last-verified: 2026-07-15
 
 # Built with Milo
 
-Real programs written in Milo. Most are a single `.milo` file in [`examples/`](https://github.com/milo-language/milo/tree/main/examples); the bigger ones — the [emulators](https://github.com/milo-language/emulators) and [milojs](https://github.com/milo-language/milojs) — have their own repos. [Run or build any of them yourself](#run-these-yourself) with the `./milo` wrapper. They double as integration tests for the standard library.
+Real programs written in Milo. Most are a single `.milo` file in [`examples/`](https://github.com/milo-language/milo/tree/main/examples); the bigger ones — the [emulators](https://github.com/milo-language/milo-emulators) and [milojs](https://github.com/milo-language/milojs) — have their own repos. [Run or build any of them yourself](#run-these-yourself) with the `./milo` wrapper. They double as integration tests for the standard library.
 
 ## What do you want to build today?
 
@@ -46,7 +46,7 @@ Motorola 68000 + Z80 dual-CPU core with the VDP graphics processor and FM/PSG au
 
 ![Super Mario World running on the Milo SNES emulator](/showcase/snes.png)
 
-> All three live in [milo-language/emulators](https://github.com/milo-language/emulators) and run natively too: `./arcade.sh <rom>` builds the right core with SDL video, audio, and input. [`retro/`](https://github.com/milo-language/emulators/tree/main/retro) turns them into a Raspberry Pi couch console with a gamepad-driven menu.
+> All three live in [milo-language/emulators](https://github.com/milo-language/milo-emulators) and run natively too: `./arcade.sh <rom>` builds the right core with SDL video, audio, and input. [`retro/`](https://github.com/milo-language/milo-emulators/tree/main/retro) turns them into a Raspberry Pi couch console with a gamepad-driven menu.
 
 ## Debugger
 
@@ -74,7 +74,7 @@ TUIs in [`examples/terminal/`](https://github.com/milo-language/milo/tree/main/e
 | [chihuahua](https://github.com/milo-language/milo/blob/main/examples/graphics/chihuahua.milo) | DVD-logo-style bouncing screensaver with a shaded pixel-art sprite |
 | [splitPty](https://github.com/milo-language/milo/blob/main/examples/terminal/splitPty.milo) | Two commands side-by-side in real PTYs; a mini tmux |
 | [flightController](https://github.com/milo-language/milo/blob/main/examples/embedded/flightController.milo) | Single-axis PID altitude controller with an interactive TUI |
-| [menu](https://github.com/milo-language/emulators/blob/main/menu.milo) | Fullscreen SDL retro-console front-end with a gamepad/keyboard ROM picker |
+| [menu](https://github.com/milo-language/milo-emulators/blob/main/menu.milo) | Fullscreen SDL retro-console front-end with a gamepad/keyboard ROM picker |
 
 ## Servers & network apps
 
@@ -132,7 +132,7 @@ Clone the repo and run or build any of the `examples/` programs with the `./milo
 The emulators and milojs live in their own repos; clone them next to an installed `milo` and run them the same way:
 
 ```bash
-git clone https://github.com/milo-language/emulators && emulators/arcade.sh <rom>
+git clone https://github.com/milo-language/milo-emulators && emulators/arcade.sh <rom>
 git clone https://github.com/milo-language/milojs && milo run milojs/milojs.milo app.js
 ```
 

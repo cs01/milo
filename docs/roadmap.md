@@ -121,7 +121,7 @@ Reproduce: `sh scripts/selfhost.sh` (builds stage1 via the oracle — required; 
 - **LSP**: diagnostics, hover, go-to-definition, completions, code lens, document symbols, workspace symbols, code actions, signature help, inlay hints, references, document highlight, rename, formatting
 - **VS Code extension**: syntax highlighting + LSP client
 - **Formatter**: `milo fmt` — written in Milo (`fmt.milo` is the only implementation)
-- **Package manager**: `milo init/new/add/remove/install/update/tree/why/vendor/publish` plus `tool install/uninstall/list/run`, git-based cache with a lockfile, GitHub repos as the registry, per-package name mangling. Folded into the one `milo` binary. First published package: [milo-language/yaml](https://github.com/milo-language/yaml). See [plans/package-manager.md](plans/package-manager.md)
+- **Package manager**: `milo init/new/add/remove/install/update/tree/why/vendor/publish` plus `tool install/uninstall/list/run`, git-based cache with a lockfile, GitHub repos as the registry, per-package name mangling. Folded into the one `milo` binary. First published package: [milo-language/yaml](https://github.com/milo-language/milo-yaml). See [plans/package-manager.md](plans/package-manager.md)
 - **Docs from source**: `milo doc <file|dir>` generates reference markdown from doc-comments; `milo api <terms>` searches std signatures
 - **Test framework**: `@expect:`/`@error:` annotations, `milo test` runner — 441 fixtures, 120 error fixtures, 10 prove fixtures
 - **Benchmarks**: `benchmarks/run.sh` with per-benchmark `results-*.md` (fib, binarytrees, grep, json, matmul, maplookup)
@@ -199,7 +199,7 @@ Phases 1–3a are done (see Type System & Safety). Remaining, from [safety-roadm
 ## Retired / Not Planned
 
 - **`node-milo`** (the Node.js fork) — **frozen 2026-07-22, abandoned.** It was the runtime stress test that shaped the FFI and binary-data ordering above; that role now belongs to **milojs**, our own JS engine and runtime, which lives in [milo-language/milojs](https://github.com/milo-language/milojs) with its own roadmap and backlog. The V8-C-API-wrapper plan died with the fork. `docs/node-milo.md` is kept as the retrospective (the kqueue connect-failure and IPv6 gotchas generalize to any Milo runtime)
-- **Emulators (NES/SNES/Genesis), milojs, and the DAP debugger** moved out of this repo 2026-07-24 — [milo-language/emulators](https://github.com/milo-language/emulators), [milo-language/milojs](https://github.com/milo-language/milojs), [milo-language/dapweb](https://github.com/milo-language/dapweb). The docs site builds the browser emulator cores from the emulators repo
+- **Emulators (NES/SNES/Genesis), milojs, and the DAP debugger** moved out of this repo 2026-07-24 — [milo-language/emulators](https://github.com/milo-language/milo-emulators), [milo-language/milojs](https://github.com/milo-language/milojs), [milo-language/dapweb](https://github.com/milo-language/dapweb). The docs site builds the browser emulator cores from the emulators repo
 - **`Thread`/`Mutex`/`RwLock`/`parallel`** — removed 2026-07-10 in favour of the green tier; re-add on demand
 - **Lazy / fusing iterator adapters** — laziness buys performance only through aggressive inlining and would pull associated types into the trait system (Graydon review decision #2). Eager `Vec`-returning stages stay
 - **Dependent types + proof terms** — Tier 3 in [verification-roadmap.md](verification-roadmap.md); a different language identity. Milo's lane is SMT-discharged contracts with no proof terms

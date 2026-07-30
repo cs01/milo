@@ -29,7 +29,7 @@ jobs:
       # main — nothing emulator-shaped lives in this one.
       - uses: actions/checkout@v4
         with:
-          repository: milo-language/emulators
+          repository: milo-language/milo-emulators
           path: .emulators
 
       # Compile the Milo emulator cores to JS and stage each demo under the

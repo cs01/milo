@@ -22,6 +22,6 @@ Runnable Milo programs. They double as integration smoke tests for the standard 
 Network examples need an internet connection.
 
 The three biggest Milo programs outgrew this directory and have their own repos:
-[emulators](https://github.com/milo-language/emulators) (NES/SNES/Genesis),
+[emulators](https://github.com/milo-language/milo-emulators) (NES/SNES/Genesis),
 [milojs](https://github.com/milo-language/milojs) (JS engine + runtime), and
 [dapweb](https://github.com/milo-language/dapweb) (DAP debugger with a web UI).

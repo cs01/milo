@@ -28,7 +28,7 @@ fn bcryptHash(algHandle: i64, input: &string, outLen: i64): string {
     return raw
 }
 
-pub fn bytesToHex(raw: &string, n: i64): string {
+fn bytesToHex(raw: &string, n: i64): string {
     var result = ""
     for i in 0..n {
         let b = raw[i]
@@ -49,25 +49,25 @@ pub fn bytesToHex(raw: &string, n: i64): string {
 }
 
 // Compute SHA-256 hash of a string. Returns 64-char lowercase hex string.
-pub fn sha256(input: &string): string {
+fn sha256(input: &string): string {
     let raw = bcryptHash(65, input, 32)
     return bytesToHex(raw, 32)
 }
 
 // Compute MD5 hash of a string. Returns 32-char lowercase hex string.
-pub fn md5(input: &string): string {
+fn md5(input: &string): string {
     let raw = bcryptHash(33, input, 16)
     return bytesToHex(raw, 16)
 }
 
 // Compute SHA-1 hash. Returns 40-char lowercase hex string.
-pub fn sha1(input: &string): string {
+fn sha1(input: &string): string {
     let raw = bcryptHash(49, input, 20)
     return bytesToHex(raw, 20)
 }
 
 // Raw 20-byte SHA-1 digest as a string (for WebSocket handshake, HMAC, etc.)
-pub fn sha1Bytes(input: &string): string {
+fn sha1Bytes(input: &string): string {
     return bcryptHash(49, input, 20)
 }
 
@@ -84,14 +84,14 @@ fn aesUnsupported(): Result<AesGcmResult, string> {
     return Result.Err("std/crypto AES-GCM is not implemented on windows yet (CNG BCryptEncrypt path pending) — see docs/roadmap.md")
 }
 
-pub fn aesGcmEncrypt(_key: &string, _iv: &string, _plaintext: &string, _aad: &string): Result<AesGcmResult, string>
+fn aesGcmEncrypt(_key: &string, _iv: &string, _plaintext: &string, _aad: &string): Result<AesGcmResult, string>
 requires _key.len == 32
 requires _iv.len == 12
 {
     return aesUnsupported()
 }
 
-pub fn aesGcmDecrypt(_key: &string, _iv: &string, _ciphertext: &string, _tag: &string, _aad: &string): Result<string, string>
+fn aesGcmDecrypt(_key: &string, _iv: &string, _ciphertext: &string, _tag: &string, _aad: &string): Result<string, string>
 requires _key.len == 32
 requires _iv.len == 12
 requires _tag.len == 16
@@ -99,17 +99,48 @@ requires _tag.len == 16
     return Result.Err("std/crypto AES-GCM is not implemented on windows yet (CNG BCryptEncrypt path pending) — see docs/roadmap.md")
 }
 
-pub fn aesGcm128Encrypt(_key: &string, _iv: &string, _plaintext: &string, _aad: &string): Result<AesGcmResult, string>
+fn aesGcm128Encrypt(_key: &string, _iv: &string, _plaintext: &string, _aad: &string): Result<AesGcmResult, string>
 requires _key.len == 16
 requires _iv.len == 12
 {
     return aesUnsupported()
 }
 
-pub fn aesGcm128Decrypt(_key: &string, _iv: &string, _ciphertext: &string, _tag: &string, _aad: &string): Result<string, string>
+fn aesGcm128Decrypt(_key: &string, _iv: &string, _ciphertext: &string, _tag: &string, _aad: &string): Result<string, string>
 requires _key.len == 16
 requires _iv.len == 12
 requires _tag.len == 16
 {
     return Result.Err("std/crypto AES-GCM is not implemented on windows yet (CNG BCryptEncrypt path pending) — see docs/roadmap.md")
+}
+
+// Crypto namespace — Crypto.sha256/sha1/sha1Bytes/md5 (platform crypto lib) + AES-GCM.
+pub struct Crypto {
+}
+
+impl Crypto {
+    fn sha256(input: &string): string {
+        return sha256(input)
+    }
+    fn sha1(input: &string): string {
+        return sha1(input)
+    }
+    fn sha1Bytes(input: &string): string {
+        return sha1Bytes(input)
+    }
+    fn md5(input: &string): string {
+        return md5(input)
+    }
+    fn aesGcmEncrypt(key: &string, iv: &string, plaintext: &string, aad: &string): Result<AesGcmResult, string> {
+        return aesGcmEncrypt(key, iv, plaintext, aad)
+    }
+    fn aesGcmDecrypt(key: &string, iv: &string, ciphertext: &string, tag: &string, aad: &string): Result<string, string> {
+        return aesGcmDecrypt(key, iv, ciphertext, tag, aad)
+    }
+    fn aesGcm128Encrypt(key: &string, iv: &string, plaintext: &string, aad: &string): Result<AesGcmResult, string> {
+        return aesGcm128Encrypt(key, iv, plaintext, aad)
+    }
+    fn aesGcm128Decrypt(key: &string, iv: &string, ciphertext: &string, tag: &string, aad: &string): Result<string, string> {
+        return aesGcm128Decrypt(key, iv, ciphertext, tag, aad)
+    }
 }

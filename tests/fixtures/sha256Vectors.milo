@@ -3,19 +3,19 @@
 // @expect: 248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1
 // @expect: cdc76e5c9914fb9281a1c7e284d73e67f1809a48a497200e046d39ccc7112cd0
 from "std/sha256" import {
-    sha256
+    Sha256
 }
 
 // FIPS 180-4 example vectors + the classic million-'a' vector, checked against
 // the system `shasum -a 256`.
 pub fn main(): i32 {
-    print(sha256(""))
-    print(sha256("abc"))
-    print(sha256("abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq"))
+    print(Sha256.hash(""))
+    print(Sha256.hash("abc"))
+    print(Sha256.hash("abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq"))
     var m = ""
     for _i in 0..1000000 {
         m.push(97 as u8)
     }
-    print(sha256(m))
+    print(Sha256.hash(m))
     return 0
 }

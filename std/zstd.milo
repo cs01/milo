@@ -19,7 +19,7 @@
 // a borrowed &string input, an owned output string, integer status on the hot path.
 
 from "std/xxhash" import {
-    xxh64
+    Xxhash
 }
 
 // Read a little-endian unsigned integer of `n` bytes (n in 1..8) at `pos`.
@@ -962,7 +962,7 @@ pub fn zstdDecompress(src: &string): Result<string, string> {
             return Result.Err("zstd: truncated checksum")
         }
         let want = leN(src, pos, 4)
-        let got = (xxh64(out, 0) & 0xffffffff) as i64
+        let got = (Xxhash.hash64(out, 0) & 0xffffffff) as i64
         if got != want {
             return Result.Err("zstd: content checksum mismatch")
         }
@@ -1023,7 +1023,7 @@ pub fn zstdCompressRaw(src: &string): string {
         }
         pos = pos + bsize
     }
-    enc32LE(out, (xxh64(src, 0) & 0xffffffff) as i64)
+    enc32LE(out, (Xxhash.hash64(src, 0) & 0xffffffff) as i64)
     return out
 }
 
@@ -1909,7 +1909,7 @@ pub fn zstdCompress(src: &string): string {
     enc32LE(out, src.len)
     if src.len == 0 {
         encRawBlockHeader(out, 0, true)
-        enc32LE(out, (xxh64(src, 0) & 0xffffffff) as i64)
+        enc32LE(out, (Xxhash.hash64(src, 0) & 0xffffffff) as i64)
         return out
     }
     let maxBlock: i64 = 131072
@@ -1936,6 +1936,6 @@ pub fn zstdCompress(src: &string): string {
         }
         pos = pos + bsize
     }
-    enc32LE(out, (xxh64(src, 0) & 0xffffffff) as i64)
+    enc32LE(out, (Xxhash.hash64(src, 0) & 0xffffffff) as i64)
     return out
 }

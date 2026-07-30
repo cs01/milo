@@ -7,7 +7,7 @@
 // @expect: roundtrip ok
 
 from "std/crypto" import {
-    aesGcmEncrypt, aesGcmDecrypt
+    Crypto
 }
 
 pub fn main(): i32 {
@@ -17,11 +17,11 @@ pub fn main(): i32 {
     let plaintext = "hello world"
     let aad = ""
 
-    match aesGcmEncrypt(key, iv, plaintext, aad) {
+    match Crypto.aesGcmEncrypt(key, iv, plaintext, aad) {
         Result.Ok(result) => {
             print($"encrypted {result.ciphertext.len} bytes")
 
-            match aesGcmDecrypt(key, iv, result.ciphertext, result.tag, aad) {
+            match Crypto.aesGcmDecrypt(key, iv, result.ciphertext, result.tag, aad) {
                 Result.Ok(decrypted) => {
                     print($"decrypted: {decrypted}")
                     if decrypted == plaintext {

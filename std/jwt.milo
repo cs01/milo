@@ -8,7 +8,7 @@
 // compares constant-time; alg is pinned to HS256 (no "alg":"none" downgrade).
 
 from "std/hmac" import {
-    hmacSha256Bytes
+    Hmac
 }
 from "std/base64" import {
     Base64
@@ -26,9 +26,9 @@ fn signingInput(payload: &string): string {
 }
 
 // Sign a JSON payload string with HS256, returning a compact JWS.
-pub fn jwtSignHS256(payload: &string, secret: &string): string {
+fn jwtSignHS256(payload: &string, secret: &string): string {
     let si = signingInput(payload)
-    let sig = Base64.urlEncode(hmacSha256Bytes(secret, si))
+    let sig = Base64.urlEncode(Hmac.sha256Bytes(secret, si))
     return si + "." + sig
 }
 
@@ -47,7 +47,7 @@ fn constEq(a: &string, b: &string): bool {
 
 // Verify a compact HS256 JWS against the secret. Returns true iff the token has the
 // exact header.payload.signature shape and the signature matches.
-pub fn jwtVerifyHS256(token: &string, secret: &string): bool {
+fn jwtVerifyHS256(token: &string, secret: &string): bool {
     // Locate the two dots; reject anything that isn't exactly three segments.
     var firstDot: i64 = -1
     var lastDot: i64 = -1
@@ -72,6 +72,19 @@ pub fn jwtVerifyHS256(token: &string, secret: &string): bool {
     for i in (lastDot + 1)..token.len {
         sig.push(token[i])
     }
-    let expected = Base64.urlEncode(hmacSha256Bytes(secret, signingInput))
+    let expected = Base64.urlEncode(Hmac.sha256Bytes(secret, signingInput))
     return constEq(sig, expected)
+}
+
+// Jwt namespace — Jwt.signHS256(payload,secret), Jwt.verifyHS256(token,secret).
+pub struct Jwt {
+}
+
+impl Jwt {
+    fn signHS256(payload: &string, secret: &string): string {
+        return jwtSignHS256(payload, secret)
+    }
+    fn verifyHS256(token: &string, secret: &string): bool {
+        return jwtVerifyHS256(token, secret)
+    }
 }

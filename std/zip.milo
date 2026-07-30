@@ -10,7 +10,7 @@ from "std/inflate" import {
     inflate
 }
 from "std/checksum" import {
-    crc32
+    Checksum
 }
 
 pub struct ZipEntry {
@@ -97,7 +97,7 @@ pub fn zipRead(src: &string): Result<Vec<ZipEntry>, string> {
         if data.len != uncompSize {
             return Result.Err($"zip: size mismatch for {name}")
         }
-        if crc32(data) != wantCrc {
+        if Checksum.crc32(data) != wantCrc {
             return Result.Err($"zip: CRC-32 mismatch for {name}")
         }
 

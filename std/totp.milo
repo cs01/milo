@@ -10,7 +10,7 @@
 // clock dependency, which also makes it deterministic to test.
 
 from "std/hmac" import {
-    hmacSha1Bytes
+    Hmac
 }
 
 fn pow10(n: i64): i64 {
@@ -46,13 +46,13 @@ fn _zeroPad(value: i64, width: i64): string {
 }
 
 // HOTP value for a moving counter (RFC 4226 §5.3), `digits` long (6–8 typical).
-pub fn hotp(secret: &string, counter: i64, digits: i64): string {
+fn hotp(secret: &string, counter: i64, digits: i64): string {
     // 8-byte big-endian counter is the HMAC message.
     var msg = ""
     for i in 0..8 {
         msg.push(((counter >> ((7 - i) * 8)) & 0xff) as u8)
     }
-    let h = hmacSha1Bytes(secret, msg)
+    let h = Hmac.sha1Bytes(secret, msg)
     // Dynamic truncation: low nibble of the last byte selects a 4-byte window.
     let offset = (h[19] as i64) & 0x0f
     let bin = (((h[offset] as i64) & 0x7f) << 24)
@@ -63,6 +63,19 @@ pub fn hotp(secret: &string, counter: i64, digits: i64): string {
 }
 
 // TOTP value for a Unix timestamp (RFC 6238): HOTP over floor(time / step).
-pub fn totp(secret: &string, unixTime: i64, step: i64, digits: i64): string {
+fn totp(secret: &string, unixTime: i64, step: i64, digits: i64): string {
     return hotp(secret, unixTime / step, digits)
+}
+
+// Totp namespace — Totp.hotp(secret,counter,digits), Totp.generate(secret,unixTime,step,digits).
+pub struct Totp {
+}
+
+impl Totp {
+    fn hotp(secret: &string, counter: i64, digits: i64): string {
+        return hotp(secret, counter, digits)
+    }
+    fn generate(secret: &string, unixTime: i64, step: i64, digits: i64): string {
+        return totp(secret, unixTime, step, digits)
+    }
 }

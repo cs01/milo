@@ -4,7 +4,7 @@ from "std/png" import {
     decodePng
 }
 from "std/sha256" import {
-    sha256
+    Sha256
 }
 
 // PNG written by python with a different filter on each scanline (row % 5), so all
@@ -19,7 +19,7 @@ pub fn main(): i32 {
     match decodePng(src) {
         Result.Ok(img) => {
             print($"{img.width}x{img.height}x{img.channels}")
-            print(sha256(img.pixels))
+            print(Sha256.hash(img.pixels))
         }
         Result.Err(e) => {
             print(e)

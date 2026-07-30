@@ -10,7 +10,7 @@
 // codes go MSB-first. The writer exposes both (_putBits vs _putCode).
 
 from "std/checksum" import {
-    crc32, adler32
+    Checksum
 }
 
 pub let WINDOW: i64 = 32768
@@ -230,7 +230,7 @@ pub fn gzipCompress(src: &string): string {
     for i in 0..body.len {
         out.push(body[i])
     }
-    push32LE(out, crc32(src))
+    push32LE(out, Checksum.crc32(src))
     push32LE(out, src.len & 0xffffffff)
     return out
 }
@@ -244,6 +244,6 @@ pub fn zlibCompress(src: &string): string {
     for i in 0..body.len {
         out.push(body[i])
     }
-    push32BE(out, adler32(src))
+    push32BE(out, Checksum.adler32(src))
     return out
 }

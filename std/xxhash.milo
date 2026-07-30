@@ -26,7 +26,7 @@ fn p5(): u64 {
     return 0x27D4EB2F165667C5
 }
 
-pub fn rotl(x: u64, r: u64): u64 {
+fn rotl(x: u64, r: u64): u64 {
     return (x << r) | (x >> (64 - r))
 }
 
@@ -60,7 +60,7 @@ fn read32(src: &string, p: i64): u64 {
 }
 
 // XXH64 digest of `src` with the given seed. `xxhsum -H64` uses seed 0.
-pub fn xxh64(src: &string, seed: u64): u64 {
+fn xxh64(src: &string, seed: u64): u64 {
     let len = src.len
     var acc: u64 = 0
     var p: i64 = 0
@@ -116,7 +116,7 @@ pub fn xxh64(src: &string, seed: u64): u64 {
     return acc
 }
 
-pub fn _hexNibble(n: u64): u8 {
+fn _hexNibble(n: u64): u8 {
     if n < 10 {
         return ('0' as u64 + n) as u8
     }
@@ -124,7 +124,7 @@ pub fn _hexNibble(n: u64): u8 {
 }
 
 // 16-char lowercase hex of the digest, matching `xxhsum -H64` output.
-pub fn xxh64Hex(src: &string, seed: u64): string {
+fn xxh64Hex(src: &string, seed: u64): string {
     let h = xxh64(src, seed)
     var out = ""
     var i: i64 = 15
@@ -134,4 +134,17 @@ pub fn xxh64Hex(src: &string, seed: u64): string {
         i = i - 1
     }
     return out
+}
+
+// Xxhash namespace — Xxhash.hash64(src, seed) u64, Xxhash.hex64(src, seed) hex string.
+pub struct Xxhash {
+}
+
+impl Xxhash {
+    fn hash64(src: &string, seed: u64): u64 {
+        return xxh64(src, seed)
+    }
+    fn hex64(src: &string, seed: u64): string {
+        return xxh64Hex(src, seed)
+    }
 }

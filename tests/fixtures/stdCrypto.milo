@@ -3,12 +3,12 @@
 // @expect: 5d41402abc4b2a76b9719d911017c592
 
 from "std/crypto" import {
-    md5, sha256
+    Crypto
 }
 
 pub fn main(): i32 {
-    print(sha256("hello"))
-    print(sha256(""))
-    print(md5("hello"))
+    print(Crypto.sha256("hello"))
+    print(Crypto.sha256(""))
+    print(Crypto.md5("hello"))
     return 0
 }

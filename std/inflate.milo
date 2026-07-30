@@ -10,7 +10,7 @@
 // threading Result through the hot path; the public entry points map that to Result.
 
 from "std/checksum" import {
-    crc32, adler32
+    Checksum
 }
 
 pub let MAXBITS: i64 = 15
@@ -444,7 +444,7 @@ pub fn gzipDecompress(src: &string): Result<string, string> {
     let out = inflate(body)?
     let wantCrc = le32(src, src.len - 8)
     let wantSize = le32(src, src.len - 4)
-    if crc32(out) != wantCrc {
+    if Checksum.crc32(out) != wantCrc {
         return Result.Err("gzip: CRC-32 mismatch")
     }
     if (out.len & 0xffffffff) != wantSize {
@@ -478,7 +478,7 @@ pub fn zlibDecompress(src: &string): Result<string, string> {
     }
     let out = inflate(body)?
     let wantAdler = le32BE(src, src.len - 4)
-    if adler32(out) != wantAdler {
+    if Checksum.adler32(out) != wantAdler {
         return Result.Err("zlib: Adler-32 mismatch")
     }
     return Result.Ok(out)

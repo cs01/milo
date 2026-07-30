@@ -13,7 +13,7 @@
 // All lanes are held in i64 masked to 32 bits (MASK32) rather than u32: the mask
 // makes the mod-2^32 wrap explicit and keeps shifts off Milo's u32 edge cases.
 
-pub let MASK32: i64 = 0xffffffff
+let MASK32: i64 = 0xffffffff
 
 fn rotr(x: i64, n: i64): i64 {
     return ((x >> n) | (x << (32 - n))) & MASK32
@@ -29,7 +29,7 @@ fn roundK(): [i64; 64] {
 
 // Pad per FIPS 180-4 §5.1.1: append 0x80, zero-fill to 56 mod 64, then the 64-bit
 // big-endian bit length. Result length is always a multiple of 64.
-pub fn _pad(input: &string): string {
+fn _pad(input: &string): string {
     var m = ""
     for i in 0..input.len {
         m.push(input[i])
@@ -48,7 +48,7 @@ pub fn _pad(input: &string): string {
     return m
 }
 
-pub fn _hexNibble(v: i64): u8 {
+fn _hexNibble(v: i64): u8 {
     if v < 10 {
         return (v + 48) as u8
     }
@@ -58,7 +58,7 @@ pub fn _hexNibble(v: i64): u8 {
 // Compute the SHA-256 digest of a byte buffer, returned as 32 raw bytes.
 // Use this when the digest feeds further bytes (HMAC, key derivation); `sha256`
 // wraps it for the common hex-string case.
-pub fn sha256Bytes(input: &string): string {
+fn sha256Bytes(input: &string): string {
     let m = _pad(input)
     var h = initH()
     let k = roundK()
@@ -133,7 +133,7 @@ pub fn sha256Bytes(input: &string): string {
 }
 
 // Compute the SHA-256 digest of a byte buffer, returned as 64-char lowercase hex.
-pub fn sha256(input: &string): string {
+fn sha256(input: &string): string {
     let digest = sha256Bytes(input)
     var out = ""
     for i in 0..digest.len {
@@ -142,4 +142,17 @@ pub fn sha256(input: &string): string {
         out.push(_hexNibble(byte & 0xf))
     }
     return out
+}
+
+// Sha256 namespace — Sha256.hash(input) hex digest, Sha256.bytes(input) raw 32-byte digest.
+pub struct Sha256 {
+}
+
+impl Sha256 {
+    fn hash(input: &string): string {
+        return sha256(input)
+    }
+    fn bytes(input: &string): string {
+        return sha256Bytes(input)
+    }
 }

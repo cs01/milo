@@ -7,7 +7,7 @@ from "std/random" import {
     randBytes
 }
 
-pub fn hexChar(n: u8): u8 {
+fn hexChar(n: u8): u8 {
     if n < 10 {
         return '0' + n
     }
@@ -22,7 +22,7 @@ fn _byteToHex(b: u8): string {
 }
 
 // Generate a random UUID v4 string (e.g. "550e8400-e29b-41d4-a716-446655440000").
-pub fn uuidV4(): string {
+fn uuidV4(): string {
     var buf: [u8; 16] = [0 as u8; 16]
     unsafe {
         randBytes(buf as *u8, 16)
@@ -45,4 +45,14 @@ pub fn uuidV4(): string {
     s = s + _byteToHex(buf[10]) + _byteToHex(buf[11]) + _byteToHex(buf[12])
     s = s + _byteToHex(buf[13]) + _byteToHex(buf[14]) + _byteToHex(buf[15])
     return s
+}
+
+// Uuid namespace — Uuid.v4() random UUID string.
+pub struct Uuid {
+}
+
+impl Uuid {
+    fn v4(): string {
+        return uuidV4()
+    }
 }

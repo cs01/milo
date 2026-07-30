@@ -14,7 +14,7 @@
 // keys they need, with no shared mutable state (no rotation in read-only mode).
 
 from "std/crypto" import {
-    aesGcm128Encrypt, aesGcm128Decrypt
+    Crypto
 }
 from "std/random" import {
     randBytes
@@ -66,7 +66,7 @@ pub fn encryptWithKey(key: &string, count: i64, plaintext: &string): Result<stri
 requires key.len == 16
 {
     let iv = ivFromCount(count)
-    let r = aesGcm128Encrypt(key, iv, plaintext, "")!
+    let r = Crypto.aesGcm128Encrypt(key, iv, plaintext, "")!
     let wire = iv + r.ciphertext + r.tag
     return Result.Ok(Base64.encode(wire))
 }
@@ -95,7 +95,7 @@ requires key.len == 16
     for i in ctEnd..wire.len {
         tag.push(wire[i])
     }
-    return aesGcm128Decrypt(key, iv, ct, tag, "")
+    return Crypto.aesGcm128Decrypt(key, iv, ct, tag, "")
 }
 
 // Build the `aes_keys` handshake for a newly connected browser. `encUnix` and

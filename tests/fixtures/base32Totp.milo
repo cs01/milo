@@ -5,7 +5,7 @@ from "std/base32" import {
     Base32
 }
 from "std/totp" import {
-    hotp
+    Totp
 }
 
 // End-to-end 2FA chain: the RFC 4226 seed base32-encodes to the string you paste
@@ -16,7 +16,7 @@ pub fn main(): i32 {
     let b32 = Base32.encode(seed)
     print(b32)
     let secret = Base32.decode(b32)
-    print(hotp(secret, 0, 6))
-    print(hotp(secret, 1, 6))
+    print(Totp.hotp(secret, 0, 6))
+    print(Totp.hotp(secret, 1, 6))
     return 0
 }

@@ -15,7 +15,7 @@ pub extern fn CCCryptorGCMOneshotEncrypt(_alg: i32, _key: *u8, _keyLen: i64, _iv
 
 pub extern fn CCCryptorGCMOneshotDecrypt(_alg: i32, _key: *u8, _keyLen: i64, _iv: *u8, _ivLen: i64, _aad: *u8, _aadLen: i64, _cipherIn: *u8, _cipherInLen: i64, _plainOut: *u8, _tagIn: *u8, _tagLen: i64): i32
 
-pub fn bytesToHex(buf: &[u8; 32], n: i64): string {
+fn bytesToHex(buf: &[u8; 32], n: i64): string {
     var result = ""
     for i in 0..n {
         let b = buf[i]
@@ -36,7 +36,7 @@ pub fn bytesToHex(buf: &[u8; 32], n: i64): string {
 }
 
 // Compute SHA-256 hash of a string. Returns 64-char lowercase hex string.
-pub fn sha256(input: &string): string {
+fn sha256(input: &string): string {
     var hash: [u8; 32] = [0; 32]
     unsafe {
         CC_SHA256(input, input.len as u32, hash)
@@ -45,7 +45,7 @@ pub fn sha256(input: &string): string {
 }
 
 // Compute MD5 hash of a string. Returns 32-char lowercase hex string.
-pub fn md5(input: &string): string {
+fn md5(input: &string): string {
     var hash: [u8; 32] = [0; 32]
     unsafe {
         CC_MD5(input, input.len as u32, hash)
@@ -54,7 +54,7 @@ pub fn md5(input: &string): string {
 }
 
 // Compute SHA-1 hash. Returns 40-char lowercase hex string.
-pub fn sha1(input: &string): string {
+fn sha1(input: &string): string {
     var hash: [u8; 32] = [0; 32]
     unsafe {
         CC_SHA1(input, input.len as u32, hash)
@@ -63,7 +63,7 @@ pub fn sha1(input: &string): string {
 }
 
 // Raw 20-byte SHA-1 digest as a string (for WebSocket handshake, HMAC, etc.)
-pub fn sha1Bytes(input: &string): string {
+fn sha1Bytes(input: &string): string {
     var hash: [u8; 32] = [0; 32]
     unsafe {
         CC_SHA1(input, input.len as u32, hash)
@@ -83,7 +83,7 @@ pub struct AesGcmResult {
 }
 
 // Encrypt with AES-256-GCM. Key must be 32 bytes, IV should be 12 bytes.
-pub fn aesGcmEncrypt(key: &string, iv: &string, plaintext: &string, aad: &string): Result<AesGcmResult, string>
+fn aesGcmEncrypt(key: &string, iv: &string, plaintext: &string, aad: &string): Result<AesGcmResult, string>
 requires key.len == 32
 requires iv.len == 12
 {
@@ -135,7 +135,7 @@ requires iv.len == 12
 }
 
 // Decrypt with AES-256-GCM. Key must be 32 bytes, IV 12 bytes, tag 16 bytes.
-pub fn aesGcmDecrypt(key: &string, iv: &string, ciphertext: &string, tag: &string, aad: &string): Result<string, string>
+fn aesGcmDecrypt(key: &string, iv: &string, ciphertext: &string, tag: &string, aad: &string): Result<string, string>
 requires key.len == 32
 requires iv.len == 12
 requires tag.len == 16
@@ -177,7 +177,7 @@ requires tag.len == 16
 }
 
 // Encrypt with AES-128-GCM. Key must be 16 bytes, IV 12 bytes. (termpair uses AES-128.)
-pub fn aesGcm128Encrypt(key: &string, iv: &string, plaintext: &string, aad: &string): Result<AesGcmResult, string>
+fn aesGcm128Encrypt(key: &string, iv: &string, plaintext: &string, aad: &string): Result<AesGcmResult, string>
 requires key.len == 16
 requires iv.len == 12
 {
@@ -229,7 +229,7 @@ requires iv.len == 12
 }
 
 // Decrypt with AES-128-GCM. Key 16 bytes, IV 12 bytes, tag 16 bytes.
-pub fn aesGcm128Decrypt(key: &string, iv: &string, ciphertext: &string, tag: &string, aad: &string): Result<string, string>
+fn aesGcm128Decrypt(key: &string, iv: &string, ciphertext: &string, tag: &string, aad: &string): Result<string, string>
 requires key.len == 16
 requires iv.len == 12
 requires tag.len == 16
@@ -267,5 +267,36 @@ requires tag.len == 16
             free(ptBuf)
         }
         return Result.Ok(plaintext)
+    }
+}
+
+// Crypto namespace — Crypto.sha256/sha1/sha1Bytes/md5 (platform crypto lib) + AES-GCM.
+pub struct Crypto {
+}
+
+impl Crypto {
+    fn sha256(input: &string): string {
+        return sha256(input)
+    }
+    fn sha1(input: &string): string {
+        return sha1(input)
+    }
+    fn sha1Bytes(input: &string): string {
+        return sha1Bytes(input)
+    }
+    fn md5(input: &string): string {
+        return md5(input)
+    }
+    fn aesGcmEncrypt(key: &string, iv: &string, plaintext: &string, aad: &string): Result<AesGcmResult, string> {
+        return aesGcmEncrypt(key, iv, plaintext, aad)
+    }
+    fn aesGcmDecrypt(key: &string, iv: &string, ciphertext: &string, tag: &string, aad: &string): Result<string, string> {
+        return aesGcmDecrypt(key, iv, ciphertext, tag, aad)
+    }
+    fn aesGcm128Encrypt(key: &string, iv: &string, plaintext: &string, aad: &string): Result<AesGcmResult, string> {
+        return aesGcm128Encrypt(key, iv, plaintext, aad)
+    }
+    fn aesGcm128Decrypt(key: &string, iv: &string, ciphertext: &string, tag: &string, aad: &string): Result<string, string> {
+        return aesGcm128Decrypt(key, iv, ciphertext, tag, aad)
     }
 }

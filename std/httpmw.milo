@@ -9,7 +9,7 @@ from "std/http" import {
     Context, Response, eqIgnoreCase
 }
 from "std/jwt" import {
-    jwtVerifyHS256
+    Jwt
 }
 from "std/deflate" import {
     gzipCompress
@@ -46,7 +46,7 @@ pub fn verifyBearer(ctx: &Context, secret: &string): bool {
     if token.len == 0 {
         return false
     }
-    return jwtVerifyHS256(token, secret)
+    return Jwt.verifyHS256(token, secret)
 }
 
 // No `jwtGuard(secret)` factory: a middleware that captures `secret` would have to

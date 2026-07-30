@@ -8,7 +8,7 @@ from "std/httpmw" import {
     verifyBearer, gzip
 }
 from "std/jwt" import {
-    jwtSignHS256
+    Jwt
 }
 from "std/inflate" import {
     gzipDecompress
@@ -51,7 +51,7 @@ pub fn guardStatus(ctx: &mut Context, secret: &string): i32 {
 
 pub fn main() {
     let secret = "s3cr3t"
-    let token = jwtSignHS256("{\"sub\":\"alice\"}", secret)
+    let token = Jwt.signHS256("{\"sub\":\"alice\"}", secret)
 
     // verifyBearer: valid / tampered / missing
     let ctxOk = mkCtx(authHeader("Bearer " + token))

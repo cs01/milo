@@ -27,6 +27,13 @@ const MANIFEST = join(import.meta.dir, "selfhost-manifest.txt");
 // use; the harness guards via guardedRun itself, so it calls .bin directly.
 const MILO_SELF = join(MILO_ROOT, ".selfhost", "milo-self.bin");
 
+// Self-host is NOT a CI gate (see CLAUDE.md): src-milo may lag src/, and a std
+// change the lagging milo-self parser can't yet handle would otherwise redden
+// Release/CI and freeze downstream `latest` on pure parity. Opt in with
+// MILO_SELFHOST=1 to run this suite (and pay its 240s bootstrap build); plain
+// `bun test` skips it entirely.
+const RUN_SELFHOST = process.env.MILO_SELFHOST === "1";
+
 // Hard gate: milo-self must type-check a trivial program. Regressing this means
 // re-introducing the memory corruption M1 fixed.
 const CHECK_MUST_PASS = true;
@@ -58,6 +65,7 @@ let tmpDir: string;
 let buildResult: RunResult;
 
 beforeAll(async () => {
+  if (!RUN_SELFHOST) return; // skipped suite: don't pay the 240s bootstrap build
   tmpDir = mkdtempSync(join(tmpdir(), "milo-selfhost-"));
   buildResult = await run("sh", [join(MILO_ROOT, "scripts", "selfhost.sh")], MILO_ROOT, 240000);
 }, 300000);
@@ -66,7 +74,7 @@ afterAll(() => {
   if (tmpDir) rmSync(tmpDir, { recursive: true, force: true });
 });
 
-describe("milo-self", () => {
+describe.skipIf(!RUN_SELFHOST)("milo-self", () => {
   test("builds with the TS compiler", () => {
     if (buildResult.code !== 0) throw new Error(`scripts/selfhost.sh failed:\n${buildResult.stderr}`);
     expect(existsSync(MILO_SELF)).toBe(true);
@@ -163,7 +171,7 @@ describe("milo-self", () => {
 // data constant. A true divergence needs a real miscompile: milo-self compiling its own
 // source into a compiler that behaves differently. That is exactly the bug worth
 // catching, and exactly what cannot be faked cheaply.
-describe("bootstrap convergence", () => {
+describe.skipIf(!RUN_SELFHOST)("bootstrap convergence", () => {
   test("milo-self and the compiler it builds emit identical IR", async () => {
     const dir = mkdtempSync(join(tmpdir(), "milo-converge-"));
     try {

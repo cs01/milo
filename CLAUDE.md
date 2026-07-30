@@ -68,6 +68,8 @@ Source → Lexer → Parser → AST → Resolver (imports) → AST (merged) → 
 
 ## Key Rules
 
+- **Self-host is NOT a gate.** `src-milo/` (the self-hosted compiler) may lag the TS compiler in `src/`. Do NOT run selfhost checks (`scripts/selfhost.sh`, `tests/selfhost.test.ts`, `selfhost-sweep.ts`) or block a change on self-host parity — it's a tar pit and we move fast on `src/`. New language/stdlib features land in `src/` + `bun test tests/run.test.ts` only. (The memory-guard rules below still stand — they're OS-safety, not self-host.)
+
 - **Memory guards (macOS enforces no rlimits — a runaway allocation crashes the OS):**
   - `.selfhost/milo-self` is a self-guarding wrapper (RSS/timeout watchdog built in);
     the real binary is `.selfhost/milo-self.bin` — **NEVER run the `.bin` bare**, and

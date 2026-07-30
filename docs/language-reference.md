@@ -408,8 +408,9 @@ a non-owning fat pointer over the backing store) and iterate that: `for x in c.v
 satisfies an `<I: Iterator>` bound and can be named in a prover contract over "any
 iterator". It is a marker: the `next` contract above is what the `for` loop actually
 requires and is checked at each iteration site (Milo has no associated types, so the
-element type is not named in the trait). Writing generic code that *iterates* a bare
-`<I: Iterator>` parameter is not supported yet — take a concrete type or a `&[T]` view.
+element type is not named in the trait). A generic function may iterate a bounded
+parameter — `fn sum<I: Iterator>(it: I) { for x in it { ... } }` — and `next` is resolved
+when the function is monomorphized to a concrete type.
 
 #### `old` — the value at entry
 

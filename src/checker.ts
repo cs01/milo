@@ -2794,7 +2794,24 @@ export class TypeChecker {
           } else if (iterType.tag === "struct" || iterType.tag === "enum") {
             // iterator protocol: type has next(&mut Self): Option<T>
             const resolved = this.resolveMethod(iterType.name, "next");
-            if (!resolved) {
+            // A generic type parameter (`for x in it`, `it: I` where `I: Iterator`) is not a
+            // registered struct/enum, so `next` can't resolve until this function is
+            // monomorphized to a concrete type. Defer: check the body with the element type
+            // unknown; the per-instantiation re-check binds the real type and sets up the
+            // iteration. A real type that simply lacks `next` still errors.
+            if (!resolved && !this.structs.has(iterType.name) && !this.enums.has(iterType.name)) {
+              if (stmt.iterable.kind === "Ident") {
+                const info = this.lookup(stmt.iterable.name);
+                if (info) info.borrowed = true;
+              }
+              this.pushScope();
+              this.declare(stmt.varName, { type: { tag: "unknown" }, mutable: false, moved: false, borrowed: false, read: false });
+              for (const inv of stmt.invariants ?? []) this.checkContractClause(inv);
+              this.loopDepth++;
+              for (const s of stmt.body) this.checkStmt(s, fnRetType);
+              this.loopDepth--;
+              this.popScope();
+            } else if (!resolved) {
               this.error(`cannot iterate over type '${typeName(iterType)}': no 'next' method found`, sp);
             } else {
               const retType = resolved.sig.ret;

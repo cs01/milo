@@ -1,0 +1,51 @@
+// A generic function bounded by Iterator can iterate its parameter with `for x in it`.
+// The for-loop defers `next` resolution to monomorphization, where the concrete type's
+// next(&mut Self): Option<T> is found.
+struct Counter {
+    n: i64, max: i64
+}
+
+impl Counter {
+    fn next(self: &mut Self): Option<i64> {
+        if self.n >= self.max {
+            return Option.None
+        }
+        let v = self.n
+        self.n = self.n + 1
+        return Option.Some(v)
+    }
+}
+
+impl Iterator for Counter {
+}
+
+fn sumIter < I: Iterator > (it: I): i64 {
+    var s = 0
+    var iter = it
+    for x in iter {
+        s = s + x
+    }
+    return s
+}
+
+fn countIter < I: Iterator > (it: I): i64 {
+    var c = 0
+    var iter = it
+    for x in iter {
+        c = c + 1
+    }
+    return c
+}
+
+fn main() {
+    var a = Counter {
+        n: 0, max: 5
+    }
+    // @expect: 10
+    print(sumIter(a)) // 0+1+2+3+4
+    var b = Counter {
+        n: 0, max: 5
+    }
+    // @expect: 5
+    print(countIter(b))
+}

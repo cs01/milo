@@ -2,7 +2,7 @@
 
 - **Slug / tag:** `ws/lifecycle-drop`
 - **Started:** 2026-07-30
-- **Status:** in-progress
+- **Status:** done
 - **Related:** docs/plans/tier2-3-plan.md §Drop, §Tier-3 (Task.join footgun, move-on-last-use)
 - **Worktree:** `.claude/worktrees/lifecycle-drop` (branch `lifecycle-drop`)
 
@@ -49,9 +49,19 @@ F1 merged to main + CI green (CI/Release/Deploy all pass). New branch for F2.
 ## Blockers / open questions
 -
 
+## Outcome
+Both shipped to main + CI green (CI/Release/Deploy all pass on 945ef302).
+- **F1 Task.join** (5f8dc7ae): refcounted handle-owned done-cell; late/double/never join memory-safe; Task now non-Copy.
+- **F2 block-scope drop** (945ef302): owned locals drop at innermost-owning-block end (if/while/for), generalizing the match-arm drop; additive+guarded, counts unchanged.
+- **Concurrency demo** (38fe64ac): naive shared-mut-counter-across-threads is a use-after-move; battleConcurrency is the guided-correct counterpart.
+
+**move-on-last-use DEFERRED (not shipped)** — the finer flow-sensitive move-promotion consumer. Block-scope drop (scope-containment, no liveness needed) delivered the drop-timing win; move-on-last-use needs true backward last-use liveness + has subtler semantics (drop at last borrow site) and less clear value. Separable; documented, not silently dropped.
+
 ## Verification
-- [ ] targeted tests:
-- [ ] ran the app / fixture:
-- [ ] full `bun test`:
-- [ ] agent review:
-- [ ] docs updated (last-verified bumped):
+- [x] targeted tests: drop/move/loop/for/match subset 82/82; new fixtures pass
+- [x] ran the app / fixture: late/double/green join, block-scope timing, for-in-vec, battle-test (multicore) — all correct
+- [x] full `bun test`: F1 1306/0; F2 1308/0; final post-cleanup 1309/0
+- [x] agent review: adversarial reviewer — no bug, sound (7 scenarios SAFE + extra ASAN-clean checks)
+- [x] ASAN: clean across drop-heavy fixtures + 8-thread battle-test
+- [x] examples gate: 47 compiled, 23 ran, 0 failed
+- [x] docs updated: docs/std/runtime.md regenerated

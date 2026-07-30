@@ -3,12 +3,12 @@
 // @expect: conformance fails=0
 
 from "std/json" import {
-    jsonParse
+    Json
 }
 
 pub fn ck(input: string, want: bool, name: string): i64 {
     var got: bool = false
-    match jsonParse(input) {
+    match Json.parse(input) {
         Result.Ok(j) => {
             got = true
         }

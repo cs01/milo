@@ -6,11 +6,11 @@
 // the parsed doc (no per-access deep clone of source + nodes like get/at), and
 // only curStr materializes a single leaf string.
 from "std/json" import {
-    jsonParse
+    Json
 }
 
 pub fn main(): i32 {
-    let doc = match jsonParse("{\"users\":[{\"name\":\"alice\",\"age\":30},{\"name\":\"bob\",\"age\":25}]}") {
+    let doc = match Json.parse("{\"users\":[{\"name\":\"alice\",\"age\":30},{\"name\":\"bob\",\"age\":25}]}") {
         Result.Ok(j) => j
         Result.Err(e) => {
             print("parse fail")

@@ -1,7 +1,7 @@
 // protocol — termpair message types and JSON serialization
 
 from "std/json" import {
-    Json, jsonParse
+    Json
 }
 
 // ── JSON message builder ──
@@ -112,24 +112,24 @@ pub fn makeNumClients(n: i64): string {
 // ── parse helpers ──
 
 pub fn parseEvent(raw: &string): string {
-    let j = jsonParse(raw.clone())!
+    let j = Json.parse(raw.clone())!
     return j.str("event") ?? ""
 }
 
 // Read a top-level string field (decrypted command payload is {"data":..,"salt":..}).
 pub fn parseField(raw: &string, field: &string): string {
-    let j = jsonParse(raw.clone())!
+    let j = Json.parse(raw.clone())!
     return j.str(field) ?? ""
 }
 
 pub fn parsePayloadStr(raw: &string, field: &string): string {
-    let j = jsonParse(raw.clone())!
+    let j = Json.parse(raw.clone())!
     let payload = j.get("payload")!
     return payload.str(field) ?? ""
 }
 
 pub fn parsePayloadI64(raw: &string, field: &string): i64 {
-    let j = jsonParse(raw.clone())!
+    let j = Json.parse(raw.clone())!
     let payload = j.get("payload")!
     return payload.i64(field) ?? 0
 }

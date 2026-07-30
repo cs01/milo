@@ -42,7 +42,7 @@ from "std/argparse" import {
     newParser
 }
 from "std/json" import {
-    jsonParse
+    Json
 }
 from "std/signal" import {
     ignoreSignal, SIGPIPE
@@ -216,7 +216,7 @@ pub fn handleTerminalWs(ws: WsConn): void {
         }
     }
 
-    let j = jsonParse(initPayload.clone())!
+    let j = Json.parse(initPayload.clone())!
     let rows = j.i64("rows") ?? 24
     let cols = j.i64("cols") ?? 80
     let command = j.str("command") ?? "bash"

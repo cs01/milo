@@ -194,6 +194,16 @@ const MEMBER_SRC = `fn main() {
 `;
 const MEMBER_URI = "file:///tmp/milo-lsp-member.milo";
 
+// Namespace completion: `Json.pa` must offer the static methods parse/parseJsonc
+// (imported namespace-object API). Proves `Crypto.`, `Math.` etc. will complete too.
+const NS_SRC = `from "std/json" import { Json }
+
+fn main() {
+    let d = Json.pa
+}
+`;
+const NS_URI = "file:///tmp/milo-lsp-ns.milo";
+
 let proc: Subprocess<"pipe", "pipe", "inherit">;
 let buf = new Uint8Array(0);
 const pending = new Map<number, (v: any) => void>();
@@ -247,7 +257,7 @@ beforeAll(async () => {
   })();
   await req(1, "initialize", { capabilities: {} });
   await send({ jsonrpc: "2.0", method: "initialized", params: {} });
-  for (const [uri, text] of [[STDLIB_URI, STDLIB_SRC], [RICH_URI, RICH_SRC], [MATCH_URI, MATCH_SRC], [BUILTIN_URI, BUILTIN_SRC], [PRIM_URI, PRIM_SRC], [GLOBAL_URI, GLOBAL_SRC], [IMPL_URI, IMPL_SRC], [ENUM_URI, ENUM_SRC], [METHOD_URI, METHOD_SRC], [SCOPE_URI, SCOPE_SRC], [SHADOW_URI, SHADOW_SRC], [ARRAY_URI, ARRAY_SRC], [EMBED_URI, EMBED_SRC], [MEMBER_URI, MEMBER_SRC]] as const) {
+  for (const [uri, text] of [[STDLIB_URI, STDLIB_SRC], [RICH_URI, RICH_SRC], [MATCH_URI, MATCH_SRC], [BUILTIN_URI, BUILTIN_SRC], [PRIM_URI, PRIM_SRC], [GLOBAL_URI, GLOBAL_SRC], [IMPL_URI, IMPL_SRC], [ENUM_URI, ENUM_SRC], [METHOD_URI, METHOD_SRC], [SCOPE_URI, SCOPE_SRC], [SHADOW_URI, SHADOW_SRC], [ARRAY_URI, ARRAY_SRC], [EMBED_URI, EMBED_SRC], [MEMBER_URI, MEMBER_SRC], [NS_URI, NS_SRC]] as const) {
     await send({ jsonrpc: "2.0", method: "textDocument/didOpen", params: { textDocument: { uri, languageId: "milo", version: 1, text } } });
   }
 });
@@ -486,4 +496,17 @@ test("member completion offers builtin string methods (s.tr → trim)", async ()
   // partial "tr" must filter out unrelated methods
   expect(labels).not.toContain("split");
   expect(labels.every((l: string) => l.startsWith("tr"))).toBe(true);
+});
+
+test("namespace completion offers a type's static methods (Json.pa → parse)", async () => {
+  // Cursor after `Json.pa` on `    let d = Json.pa` (0-based line 3, char 19).
+  const res = await req(51, "textDocument/completion", {
+    textDocument: { uri: NS_URI }, position: { line: 3, character: 19 },
+  });
+  const labels = res.items.map((i: any) => i.label);
+  expect(labels).toContain("parse");
+  expect(labels).toContain("parseJsonc");
+  // filtered by "pa" — obj/arr must not appear
+  expect(labels).not.toContain("obj");
+  expect(labels.every((l: string) => l.startsWith("pa"))).toBe(true);
 });

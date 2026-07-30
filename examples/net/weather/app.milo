@@ -11,7 +11,7 @@ from "std/string" import {
     strSplit, strStartsWith, strToLower, strTrim, strContains
 }
 from "std/json" import {
-    jsonEscapeStr
+    Json, jsonEscapeStr
 }
 
 pub struct City {

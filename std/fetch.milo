@@ -27,7 +27,7 @@ from "std/platform" import {
     makeSockaddr, close, ensureNetInit
 }
 from "std/json" import {
-    Json, jsonParse
+    Json
 }
 from "std/sync" import {
     Channel
@@ -236,7 +236,7 @@ impl Response {
 
     // Parse the response body as JSON.
     fn json(self: &Self): Json {
-        return jsonParse(self.body.clone())!
+        return Json.parse(self.body.clone())!
     }
 
     // Return true if the status code is 2xx (success).

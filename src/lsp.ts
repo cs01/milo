@@ -1204,6 +1204,51 @@ function getModuleExports(modulePath: string, sourceDir: string): { name: string
   return (moduleHasPub ? all.filter(e => e.pub) : all).map(({ name, kind }) => ({ name, kind }));
 }
 
+// Static ("namespace") methods of a type defined in another module — an `impl
+// <Type> { fn name(...) }` where the first param is NOT `self`. Powers
+// `Json.<partial>` / `Crypto.<partial>` completion of the namespace-object API.
+// Regex-scans the module the way getModuleExports does (no full parse needed).
+function getTypeStaticMethods(typeName: string, modulePath: string, sourceDir: string): string[] {
+  const absPath = resolveImportPath(sourceDir, modulePath);
+  if (!absPath) return [];
+  const src = readStd(absPath);
+  if (src === null) return [];
+  // find each `impl <typeName>` block and scan its brace-balanced body for static fns
+  const out: string[] = [];
+  const implRe = new RegExp(`impl\\s+${typeName}\\b[^{]*\\{`, "g");
+  let m: RegExpExecArray | null;
+  while ((m = implRe.exec(src)) !== null) {
+    let depth = 1, i = m.index + m[0].length;
+    const bodyStart = i;
+    while (i < src.length && depth > 0) {
+      const c = src[i];
+      if (c === "{") depth++;
+      else if (c === "}") depth--;
+      i++;
+    }
+    const body = src.slice(bodyStart, i - 1);
+    const fnRe = /\bfn\s+(\w+)\s*\(\s*([^),]*)/g;
+    let f: RegExpExecArray | null;
+    while ((f = fnRe.exec(body)) !== null) {
+      const firstParam = f[2].trim();
+      // static method: no `self` receiver
+      if (!/^self\b/.test(firstParam) && !f[1].startsWith("_")) out.push(f[1]);
+    }
+  }
+  return [...new Set(out)];
+}
+
+// The module a name is imported from in this document, or null.
+function importModuleOf(name: string, source: string): string | null {
+  const re = /from\s+"([^"]+)"\s+import\s+\{([^}]*)\}/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(source)) !== null) {
+    const names = m[2].split(",").map(s => s.trim());
+    if (names.includes(name)) return m[1];
+  }
+  return null;
+}
+
 function getLocalMiloFiles(sourceDir: string): string[] {
   try {
     return readdirSync(sourceDir)
@@ -1391,7 +1436,21 @@ function handleCompletion(uri: string, line: number, character: number): object 
         .map(m => ({ label: m.name, kind: CIK_METHOD, detail: recvIdent ? undefined : "string", labelDetails: { detail: m.sig } }));
       return { isIncomplete: false, items };
     }
-    // no known builtin method surface for this receiver — fall through to general
+    // Namespace/static call — `Json.parse`, `Crypto.sha256`. The receiver is a
+    // TYPE name (capitalized, imported); offer that type's static impl methods.
+    if (recvIdent && /^[A-Z]/.test(recvIdent)) {
+      const mod = importModuleOf(recvIdent, source);
+      if (mod) {
+        const statics = getTypeStaticMethods(recvIdent, mod, sourceDir);
+        if (statics.length) {
+          const items = statics
+            .filter(n => n.startsWith(partial))
+            .map(n => ({ label: n, kind: CIK_METHOD, detail: recvIdent }));
+          return { isIncomplete: false, items };
+        }
+      }
+    }
+    // no known method surface for this receiver — fall through to general
   }
 
   // Context 3: general code completion — symbols from imports + builtins

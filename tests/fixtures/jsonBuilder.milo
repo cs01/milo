@@ -1,11 +1,11 @@
 // std/json serialization: fluent builders, escaping, nesting, round-trip
 from "std/json" import {
-    jsonObj, jsonArr, jsonParse, JsonVal, jsonSer
+    Json, JsonVal, jsonSer
 }
 
 pub fn main(): i32 {
     // flat object with escaping
-    let doc = jsonObj()
+    let doc = Json.obj()
         .str("type", "capabilities")
         .str("raw", "a\"b\nc")
         .int("count", 42)
@@ -15,9 +15,9 @@ pub fn main(): i32 {
     // @expect: {"type":"capabilities","raw":"a\"b\nc","count":42,"ok":true,"pad":null}
 
     // nesting: obj in obj, arr of mixed
-    let nested = jsonObj()
-        .obj("inner", jsonObj().int("x", 1).float("y", 2.5))
-        .arr("items", jsonArr().str("a").int(2).bool(false).obj(jsonObj().str("k", "v")))
+    let nested = Json.obj()
+        .obj("inner", Json.obj().int("x", 1).float("y", 2.5))
+        .arr("items", Json.arr().str("a").int(2).bool(false).obj(Json.obj().str("k", "v")))
     print(nested.build())
     // @expect: {"inner":{"x":1,"y":2.5},"items":["a",2,false,{"k":"v"}]}
 
@@ -29,18 +29,18 @@ pub fn main(): i32 {
     // control chars must be escaped (RFC 8259) — terminal streams contain ESC
     var ctl: string = "esc:"
     ctl.push(27 as u8)
-    print(jsonObj().str("t", ctl).build())
+    print(Json.obj().str("t", ctl).build())
     // @expect: {"t":"esc:\u001b"}
 
     // raw splice: pre-serialized fragments pass through verbatim
-    let frag = jsonArr().int(1).int(2).build()
-    print(jsonObj().str("type", "x").raw("items", frag).build())
+    let frag = Json.arr().int(1).int(2).build()
+    print(Json.obj().str("type", "x").raw("items", frag).build())
     // @expect: {"type":"x","items":[1,2]}
-    print(jsonArr().raw("{\"a\":1}").int(9).build())
+    print(Json.arr().raw("{\"a\":1}").int(9).build())
     // @expect: [{"a":1},9]
 
     // round-trip: builder output parses clean
-    match jsonParse(nested.build()) {
+    match Json.parse(nested.build()) {
         Result.Ok(parsed) => {
             print(parsed.get("inner")!.i64("x")!.toString())
             // @expect: 1

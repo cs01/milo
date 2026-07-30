@@ -5,11 +5,11 @@
 // @expect: 169
 // @expect: 4
 from "std/json" import {
-    jsonParse
+    Json
 }
 
 pub fn main(): i32 {
-    let j = jsonParse("{\"d\":\"\\u0041\\u0003\\u00e9\"}")!
+    let j = Json.parse("{\"d\":\"\\u0041\\u0003\\u00e9\"}")!
     let s = j.str("d") ?? ""
     print((s[0] as i64).toString()) // 'A'
     print((s[1] as i64).toString()) // ctrl-c (0x03)

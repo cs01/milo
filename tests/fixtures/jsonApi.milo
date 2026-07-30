@@ -11,11 +11,11 @@
 // @expect: bare=hello
 
 from "std/json" import {
-    jsonParse
+    Json
 }
 
 pub fn main(): i32 {
-    let j = jsonParse("{\"name\": \"milo\", \"version\": 1, \"pi\": 3.14, \"active\": true, \"nothing\": null, \"tags\": [\"alpha\", \"beta\", \"gamma\"], \"addr\": {\"city\": \"SF\"}}")!
+    let j = Json.parse("{\"name\": \"milo\", \"version\": 1, \"pi\": 3.14, \"active\": true, \"nothing\": null, \"tags\": [\"alpha\", \"beta\", \"gamma\"], \"addr\": {\"city\": \"SF\"}}")!
 
     // Keyed accessors
     print("name=", j.str("name")!)
@@ -52,7 +52,7 @@ pub fn main(): i32 {
     }
 
     // Bare value extraction
-    let raw = jsonParse("\"hello\"")!
+    let raw = Json.parse("\"hello\"")!
     print("bare=", raw.asStr()!)
 
     return 0

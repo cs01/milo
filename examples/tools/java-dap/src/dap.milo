@@ -30,7 +30,7 @@ from "std/select" import {
     Select, selectRecv
 }
 from "std/json" import {
-    Json, jsonParse, jsonObj, jsonArr
+    Json
 }
 from "std/string" import {
     strSplit, strTrim, strEndsWith, strStartsWith, strContains
@@ -70,14 +70,14 @@ impl DapOut {
 
     fn event(self: &mut DapOut, name: &string, body: &string): void {
         self.seq = self.seq + 1
-        let msg = jsonObj().int("seq", self.seq).str("type", "event")
+        let msg = Json.obj().int("seq", self.seq).str("type", "event")
             .str("event", name.clone()).raw("body", body.clone()).build()
         self.sendRaw(msg)
     }
 
     fn respond(self: &mut DapOut, reqSeq: i64, command: &string, body: &string): void {
         self.seq = self.seq + 1
-        let msg = jsonObj().int("seq", self.seq).str("type", "response")
+        let msg = Json.obj().int("seq", self.seq).str("type", "response")
             .int("request_seq", reqSeq).bool("success", true)
             .str("command", command.clone()).raw("body", body.clone()).build()
         self.sendRaw(msg)
@@ -85,7 +85,7 @@ impl DapOut {
 
     fn fail(self: &mut DapOut, reqSeq: i64, command: &string, message: &string): void {
         self.seq = self.seq + 1
-        let msg = jsonObj().int("seq", self.seq).str("type", "response")
+        let msg = Json.obj().int("seq", self.seq).str("type", "response")
             .int("request_seq", reqSeq).bool("success", false)
             .str("command", command.clone()).str("message", message.clone()).build()
         self.sendRaw(msg)
@@ -171,7 +171,7 @@ pub fn dapServe(): i64 {
             eprint("client hung up before attach")
             return 0
         }
-        let Result.Ok(req) = jsonParse(raw) else {
+        let Result.Ok(req) = Json.parse(raw) else {
             continue
         }
         let cmd = req.str("command") ?? ""
@@ -179,7 +179,7 @@ pub fn dapServe(): i64 {
         if cmd == "initialize" {
             out.respond(seq, cmd, capabilitiesJson())
         } else if cmd == "launch" || cmd == "attach" {
-            let args = req.get("arguments") ?? jsonParse("{}")!
+            let args = req.get("arguments") ?? Json.parse("{}")!
             program = args.str("program") ?? ""
             sourceRoots = strArray(args, "sourceRoots")
             match connectJvm(cmd == "launch", args, eventCh.clone()) {
@@ -248,7 +248,7 @@ pub fn dapServe(): i64 {
 }
 
 pub fn capabilitiesJson(): string {
-    return jsonObj()
+    return Json.obj()
         .bool("supportsConfigurationDoneRequest", true)
         .bool("supportsTerminateRequest", true)
         .bool("supportsEvaluateForHovers", false)
@@ -256,7 +256,7 @@ pub fn capabilitiesJson(): string {
         .bool("supportsFunctionBreakpoints", false)
         .bool("supportsDelayedStackTraceLoading", false)
         .bool("supportsExceptionInfoRequest", true)
-        .raw("exceptionBreakpointFilters", jsonArr().raw(jsonObj().str("filter", "uncaught").str("label", "Uncaught Exceptions").bool("default", true).build()).raw(jsonObj().str("filter", "caught").str("label", "Caught Exceptions").bool("default", false).build()).build())
+        .raw("exceptionBreakpointFilters", Json.arr().raw(Json.obj().str("filter", "uncaught").str("label", "Uncaught Exceptions").bool("default", true).build()).raw(Json.obj().str("filter", "caught").str("label", "Caught Exceptions").bool("default", false).build()).build())
         .build()
 }
 
@@ -681,12 +681,12 @@ pub fn signExtend(v: i64, bits: i64): i64 {
 impl Sess {
     // returns true when the adapter should exit (disconnect/terminate handled).
     fn dispatch(self: &mut Sess, raw: string): bool {
-        let Result.Ok(req) = jsonParse(raw) else {
+        let Result.Ok(req) = Json.parse(raw) else {
             return false
         }
         let cmd = req.str("command") ?? ""
         let seq = req.i64("seq") ?? (0 as i64)
-        let args = req.get("arguments") ?? jsonParse("{}")!
+        let args = req.get("arguments") ?? Json.parse("{}")!
 
         if cmd == "setBreakpoints" {
             self.onSetBreakpoints(seq, args)
@@ -785,17 +785,17 @@ impl Sess {
                 return
             }
         }
-        var arr = jsonArr()
+        var arr = Json.arr()
         for t in ids {
             let dapId = self.dapThreadId(t)
             var name: string = "thread-" + dapId.toString()
             if let Result.Ok(n) = self.io.threadName(t) {
                 name = n
             }
-            arr = arr.raw(jsonObj().int("id", dapId).str("name", name).build())
+            arr = arr.raw(Json.obj().int("id", dapId).str("name", name).build())
         }
         let c: string = "threads"
-        self.out.respond(seq, c, jsonObj().raw("threads", arr.build()).build())
+        self.out.respond(seq, c, Json.obj().raw("threads", arr.build()).build())
     }
 
     // ── breakpoints ──
@@ -886,13 +886,13 @@ impl Sess {
                     self.bps[idx].prepReqId = rid
                 }
             }
-            var arr = jsonArr()
+            var arr = Json.arr()
             for l in lines {
-                arr = arr.raw(jsonObj().bool("verified", false).int("line", l).str("message", "class " + className.clone() + " not loaded yet").build())
+                arr = arr.raw(Json.obj().bool("verified", false).int("line", l).str("message", "class " + className.clone() + " not loaded yet").build())
             }
             results = arr.build()
         }
-        self.out.respond(seq, cmdName, jsonObj().raw("breakpoints", results).build())
+        self.out.respond(seq, cmdName, Json.obj().raw("breakpoints", results).build())
     }
 
     // Set JDWP breakpoints for every requested line of bps[idx] (class loaded).
@@ -903,7 +903,7 @@ impl Sess {
         if let Result.Ok(m) = self.classMethods(classId) {
             methods = m
         }
-        var arr = jsonArr()
+        var arr = Json.arr()
         var lineIdx: i64 = 0
         while lineIdx < self.bps[idx].lines.len {
             let want = self.bps[idx].lines[lineIdx]
@@ -933,7 +933,7 @@ impl Sess {
                     break
                 }
             }
-            arr = arr.raw(jsonObj().bool("verified", planted).int("line", want).build())
+            arr = arr.raw(Json.obj().bool("verified", planted).int("line", want).build())
             lineIdx = lineIdx + 1
         }
         return arr.build()
@@ -978,7 +978,7 @@ impl Sess {
         }
         self.out.respond(seq, c, "{}")
         let dapTid = args.i64("threadId") ?? (1 as i64)
-        self.out.event("stopped", jsonObj().str("reason", "pause").int("threadId", dapTid).bool("allThreadsStopped", true).build())
+        self.out.event("stopped", Json.obj().str("reason", "pause").int("threadId", dapTid).bool("allThreadsStopped", true).build())
     }
 
     // ── exception breakpoints ──
@@ -1084,11 +1084,11 @@ impl Sess {
         if msg.len > 0 {
             description = typeName.clone() + ": " + msg.clone()
         }
-        let body = jsonObj()
+        let body = Json.obj()
             .str("exceptionId", typeName.clone())
             .str("description", description)
             .str("breakMode", breakMode)
-            .raw("details", jsonObj().str("message", msg.clone()).str("typeName", typeName.clone()).build())
+            .raw("details", Json.obj().str("message", msg.clone()).str("typeName", typeName.clone()).build())
             .build()
         self.out.respond(seq, cmdName, body)
     }
@@ -1253,7 +1253,7 @@ impl Sess {
                 return
             }
         }
-        var arr = jsonArr()
+        var arr = Json.arr()
         var fi: i64 = 0
         while fi < entries.len {
             let fr = entries[fi]
@@ -1269,16 +1269,16 @@ impl Sess {
             let mname = self.methodNameOf(fr.loc.classId, fr.loc.methodId)
             let line = self.lineForIndex(fr.loc.classId, fr.loc.methodId, fr.loc.index)
             let srcPath = self.sourcePathFor(fr.loc.classId, sig)
-            var b = jsonObj().int("id", dapFrameId)
+            var b = Json.obj().int("id", dapFrameId)
                 .str("name", simpleName(cls) + "." + mname)
                 .int("line", line).int("column", 1)
             if srcPath.len > 0 {
-                b = b.raw("source", jsonObj().str("name", baseNameNoExt(srcPath) + ".java").str("path", srcPath).build())
+                b = b.raw("source", Json.obj().str("name", baseNameNoExt(srcPath) + ".java").str("path", srcPath).build())
             }
             arr = arr.raw(b.build())
             fi = fi + 1
         }
-        self.out.respond(seq, c, jsonObj().raw("stackFrames", arr.build()).int("totalFrames", entries.len).build())
+        self.out.respond(seq, c, Json.obj().raw("stackFrames", arr.build()).int("totalFrames", entries.len).build())
     }
 
     fn frameByDapId(self: &Sess, dapId: i64): i64 {
@@ -1309,16 +1309,16 @@ impl Sess {
             return
         }
         let localsRef = self.newVarRef(1, fidx)
-        var arr = jsonArr().raw(jsonObj().str("name", "Locals").int("variablesReference", localsRef).bool("expensive", false).build())
+        var arr = Json.arr().raw(Json.obj().str("name", "Locals").int("variablesReference", localsRef).bool("expensive", false).build())
         // "This" scope only when the frame has a this object (static methods don't)
         let fr = self.frames[fidx]
         if let Result.Ok(v) = self.io.frameThisObject(fr.threadId, fr.frameId) {
             if v.num != 0 {
                 let thisRef = self.newVarRef(2, v.num)
-                arr = arr.raw(jsonObj().str("name", "This").int("variablesReference", thisRef).bool("expensive", false).build())
+                arr = arr.raw(Json.obj().str("name", "This").int("variablesReference", thisRef).bool("expensive", false).build())
             }
         }
-        self.out.respond(seq, c, jsonObj().raw("scopes", arr.build()).build())
+        self.out.respond(seq, c, Json.obj().raw("scopes", arr.build()).build())
     }
 
     // Render one JDWP value → DAP variable JSON (named `name`).
@@ -1411,7 +1411,7 @@ impl Sess {
         } else {
             value = "<tag " + tag.toString() + ">"
         }
-        return jsonObj().str("name", name.clone()).str("value", value)
+        return Json.obj().str("name", name.clone()).str("value", value)
             .str("type", typeName).int("variablesReference", ref).build()
     }
 
@@ -1423,7 +1423,7 @@ impl Sess {
             return
         }
         let vr = self.varRefs[ref - 1]
-        var arr = jsonArr()
+        var arr = Json.arr()
 
         if vr.kind == 1 {
             // locals of a cached frame, filtered to slots live at the frame's pc
@@ -1524,7 +1524,7 @@ impl Sess {
                 }
             }
         }
-        self.out.respond(seq, c, jsonObj().raw("variables", arr.build()).build())
+        self.out.respond(seq, c, Json.obj().raw("variables", arr.build()).build())
     }
 
     // evaluate: dotted-path lookup over locals, then `this` fields. No
@@ -1595,14 +1595,14 @@ impl Sess {
         let nm: string = "result"
         let rendered = self.renderVariable(nm, cur)
         // reshape the variable JSON into an evaluate response
-        let Result.Ok(d) = jsonParse(rendered) else {
+        let Result.Ok(d) = Json.parse(rendered) else {
             self.out.fail(seq, c, "internal render error")
             return
         }
         let value = d.str("value") ?? ""
         let ref = d.i64("variablesReference") ?? (0 as i64)
         let ty = d.str("type") ?? ""
-        self.out.respond(seq, c, jsonObj().str("result", value).str("type", ty).int("variablesReference", ref).build())
+        self.out.respond(seq, c, Json.obj().str("result", value).str("type", ty).int("variablesReference", ref).build())
     }
 
     fn fieldOf(self: &mut Sess, objectId: i64, name: &string): Option<JValue> {
@@ -1640,15 +1640,15 @@ impl Sess {
             return
         }
         if pkt.cmdSet == -2 {
-            self.out.event("output", jsonObj().str("category", "stdout").str("output", pkt.body.clone()).build())
+            self.out.event("output", Json.obj().str("category", "stdout").str("output", pkt.body.clone()).build())
             return
         }
         if pkt.cmdSet == -3 {
-            self.out.event("output", jsonObj().str("category", "stderr").str("output", pkt.body.clone()).build())
+            self.out.event("output", Json.obj().str("category", "stderr").str("output", pkt.body.clone()).build())
             return
         }
         if pkt.cmdSet == -4 {
-            self.out.event("exited", jsonObj().int("exitCode", pkt.errorCode).build())
+            self.out.event("exited", Json.obj().int("exitCode", pkt.errorCode).build())
             self.emitTerminated()
             return
         }
@@ -1667,7 +1667,7 @@ impl Sess {
             // BREAKPOINT
             self.invalidateStop()
             let dapTid = self.dapThreadId(ev.thread)
-            self.out.event("stopped", jsonObj().str("reason", "breakpoint").int("threadId", dapTid).bool("allThreadsStopped", true).build())
+            self.out.event("stopped", Json.obj().str("reason", "breakpoint").int("threadId", dapTid).bool("allThreadsStopped", true).build())
         } else if ev.kind == 4 {
             // EXCEPTION
             self.invalidateStop()
@@ -1678,7 +1678,7 @@ impl Sess {
             if let Result.Ok(classId) = self.io.objectType(ev.exception) {
                 typeName = prettyTypeName(self.classSignature(classId))
             }
-            self.out.event("stopped", jsonObj().str("reason", "exception").str("description", "Paused on exception").str("text", typeName).int("threadId", dapTid).bool("allThreadsStopped", true).build())
+            self.out.event("stopped", Json.obj().str("reason", "exception").str("description", "Paused on exception").str("text", typeName).int("threadId", dapTid).bool("allThreadsStopped", true).build())
         } else if ev.kind == 1 {
             // SINGLE_STEP (Count=1 → expired; clear bookkeeping regardless)
             if self.stepReqId != 0 {
@@ -1687,7 +1687,7 @@ impl Sess {
             }
             self.invalidateStop()
             let dapTid = self.dapThreadId(ev.thread)
-            self.out.event("stopped", jsonObj().str("reason", "step").int("threadId", dapTid).bool("allThreadsStopped", true).build())
+            self.out.event("stopped", Json.obj().str("reason", "step").int("threadId", dapTid).bool("allThreadsStopped", true).build())
         } else if ev.kind == 8 {
             // CLASS_PREPARE: plant deferred breakpoints, then let the thread go
             var i: i64 = 0
@@ -1696,14 +1696,14 @@ impl Sess {
                     self.bps[i].classId = ev.typeId
                     let results = self.plantBreakpoints(i)
                     // re-announce each breakpoint's new verified state
-                    match jsonParse(results) {
+                    match Json.parse(results) {
                         Result.Ok(arr) => {
                             let n = arr.len()
                             var j: i64 = 0
                             while j < n {
                                 match arr.at(j) {
                                     Option.Some(bp) => {
-                                        self.out.event("breakpoint", jsonObj().str("reason", "changed").raw("breakpoint", bp.rawStr()).build())
+                                        self.out.event("breakpoint", Json.obj().str("reason", "changed").raw("breakpoint", bp.rawStr()).build())
                                     }
                                     Option.None => {
                                     }
@@ -1724,10 +1724,10 @@ impl Sess {
             let _r = self.io.threadResume(ev.thread)
         } else if ev.kind == 6 {
             let dapTid = self.dapThreadId(ev.thread)
-            self.out.event("thread", jsonObj().str("reason", "started").int("threadId", dapTid).build())
+            self.out.event("thread", Json.obj().str("reason", "started").int("threadId", dapTid).build())
         } else if ev.kind == 7 {
             let dapTid = self.dapThreadId(ev.thread)
-            self.out.event("thread", jsonObj().str("reason", "exited").int("threadId", dapTid).build())
+            self.out.event("thread", Json.obj().str("reason", "exited").int("threadId", dapTid).build())
         } else if ev.kind == 99 {
             self.emitTerminated()
         }

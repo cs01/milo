@@ -1,7 +1,7 @@
 // @expect: {"name":"milo","stars":42}
 
 from "std/json" import {
-    jsonObj
+    Json
 }
 
 pub fn main(): i32 {
@@ -11,7 +11,7 @@ pub fn main(): i32 {
     let rating: Option<f64> = Option.None
 
     // present fields land in the chain; None fields are silently skipped
-    let out = jsonObj()
+    let out = Json.obj()
         .strOpt("name", name)
         .strOpt("skip", missing)
         .intOpt("stars", stars)

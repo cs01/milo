@@ -14,7 +14,7 @@
 // @expect: END
 
 from "std/json" import {
-    jsonPull, JsonEvent
+    Json, jsonPull, JsonEvent
 }
 
 // Streaming pull parser: walk the event stream without building a tree.

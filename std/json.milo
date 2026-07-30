@@ -168,6 +168,28 @@ pub fn jsonMaterializeStr(source: &string, start: i64, len: i64): string {
 }
 
 impl Json {
+    // ── Namespace entry points (static) ──
+
+    // Parse strict RFC 8259 JSON. Propagate failures with `?` or match on the error.
+    fn parse(s: string): Result<Json> {
+        return jsonParse(s)
+    }
+
+    // Parse JSON with JSONC extensions (comments, trailing commas).
+    fn parseJsonc(s: string): Result<Json> {
+        return jsoncParse(s)
+    }
+
+    // New empty object builder: Json.obj().set("k", ...).build().
+    fn obj(): JsonObj {
+        return jsonObj()
+    }
+
+    // New empty array builder.
+    fn arr(): JsonArr {
+        return jsonArr()
+    }
+
     // ── Object field accessors ──
 
     fn get(self: &Self, key: &string): Option<Json> {
@@ -818,7 +840,7 @@ pub fn jsonExtractSubtree(src: &Json, nodeIdx: i64): Json {
 
 // ── Parser ──
 
-pub fn jsonParse(s: string): Result<Json> {
+fn jsonParse(s: string): Result<Json> {
     if s.len == 0 {
         return Result.Err("empty input")
     }
@@ -934,7 +956,7 @@ pub fn jsonStripJsonc(s: &string): string {
     return out
 }
 
-pub fn jsoncParse(s: string): Result<Json> {
+fn jsoncParse(s: string): Result<Json> {
     let stripped = jsonStripJsonc(s)
     return jsonParse(stripped)
 }
@@ -1402,7 +1424,7 @@ pub struct JsonObj {
     members: Vec<JsonMember>
 }
 
-pub fn jsonObj(): JsonObj {
+fn jsonObj(): JsonObj {
     return JsonObj {
         members: Vec.new()
     }
@@ -1559,7 +1581,7 @@ pub struct JsonArr {
     items: Vec<JsonVal>
 }
 
-pub fn jsonArr(): JsonArr {
+fn jsonArr(): JsonArr {
     return JsonArr {
         items: Vec.new()
     }

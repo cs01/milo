@@ -4,17 +4,17 @@
 // @expect: propagated=none
 
 from "std/json" import {
-    jsonParse
+    Json
 }
 
 pub fn tryParse(s: string): Result<string> {
-    let j = jsonParse(s)?
+    let j = Json.parse(s)?
     return Result.Ok(j.str("name")!)
 }
 
 pub fn main(): i32 {
     // Valid parse
-    let r1 = jsonParse("{\"x\": 1}")
+    let r1 = Json.parse("{\"x\": 1}")
     match r1 {
         Result.Ok(j) => {
             print("ok=true")
@@ -25,7 +25,7 @@ pub fn main(): i32 {
     }
 
     // Empty input
-    let r2 = jsonParse("")
+    let r2 = Json.parse("")
     match r2 {
         Result.Ok(j) => {
             print("empty=false")
@@ -36,7 +36,7 @@ pub fn main(): i32 {
     }
 
     // Trailing content
-    let r3 = jsonParse("42 abc")
+    let r3 = Json.parse("42 abc")
     match r3 {
         Result.Ok(j) => {
             print("trailing=false")

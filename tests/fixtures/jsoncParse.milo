@@ -5,21 +5,21 @@
 // @expect: urlIntact=http://x.io//path
 
 from "std/json" import {
-    jsonParse, jsoncParse
+    Json
 }
 
 pub fn main(): i32 {
     // line comments, a block comment, and trailing commas in both object and array
     let src = "{\n  // the app name\n  \"name\": \"milo\",\n  \"port\": 8080, /* default */\n  \"tags\": [\"a\", \"b\", \"c\",],\n  \"url\": \"http://x.io//path\",\n}"
 
-    let j = jsoncParse(src.clone())!
+    let j = Json.parseJsonc(src.clone())!
     print("name=", j.str("name")!)
     print("port=", j.i64("port")!)
     print("count=", j.get("tags")!.len())
 
     // strict parser must still reject comments
     var rejected: bool = false
-    match jsonParse(src) {
+    match Json.parse(src) {
         Result.Ok(x) => {
             rejected = false
         }

@@ -552,10 +552,8 @@ s.substr(0, 5)          // "Hello" (owned copy)
 ### String Utility Functions (std/string)
 
 ```milo
-from "std/string" import { strSplitWords, strSplitWhitespace }
-
-let words = strSplitWords("Hello, World!")       // ["hello", "world"] (lowercased, alpha-only)
-let tokens = strSplitWhitespace("a  b\tc")       // ["a", "b", "c"]
+let words = "Hello, World!".splitWords()         // ["hello", "world"] (lowercased, alpha-only)
+let tokens = "a  b\tc".splitWhitespace()         // ["a", "b", "c"]
 ```
 
 Strings auto-coerce to `*u8` when passed to FFI functions.
@@ -1925,18 +1923,18 @@ let json = jsonStringify(user)
 For nested objects, arrays, or JSON built up dynamically, use the fluent builders in `std/json`:
 
 ```milo
-from "std/json" import { jsonObj, jsonArr }
+from "std/json" import { Json }
 
-let doc = jsonObj()
+let doc = Json.obj()
     .str("type", "capabilities")
     .int("seq", 3)
-    .obj("inner", jsonObj().bool("ok", true))
-    .arr("tags", jsonArr().str("a").str("b"))
+    .obj("inner", Json.obj().bool("ok", true))
+    .arr("tags", Json.arr().str("a").str("b"))
     .build()
 // {"type":"capabilities","seq":3,"inner":{"ok":true},"tags":["a","b"]}
 ```
 
-Builder methods: `.str/.int/.float/.bool/.nil/.obj/.arr/.val` (chainable, consume and return the builder; string values are escaped). `jsonArr()` has the same set minus keys.
+Builder methods: `.str/.int/.float/.bool/.nil/.obj/.arr/.val` (chainable, consume and return the builder; string values are escaped). `Json.arr()` has the same set minus keys.
 
 ---
 
@@ -2840,22 +2838,22 @@ dbFinalize(stmt)
 ### Terminal Colors (std/color)
 
 ```milo
-from "std/color" import { red, green, blue, bold }
+from "std/color" import { Color }
 
-print(red("error: something failed"))
-print(green("success!"))
-print(bold(blue("important")))
-print(yellow("warning: "), dim("details"))
+print(Color.red("error: something failed"))
+print(Color.green("success!"))
+print(Color.bold(Color.blue("important")))
+print(Color.yellow("warning: "), Color.dim("details"))
 ```
 
-Available: `red`, `green`, `yellow`, `blue`, `magenta`, `cyan`, `white`, `gray`, `bold`, `dim`, `italic`, `underline`, `strikethrough`, `bgRed`, `bgGreen`, `bgYellow`, `bgBlue`.
+Available (all on `Color.`): `red`, `green`, `yellow`, `blue`, `magenta`, `cyan`, `white`, `gray`, `bold`, `dim`, `italic`, `underline`, `strikethrough`, `bgRed`, `bgGreen`, `bgYellow`, `bgBlue`.
 
 ### UUID Generation (std/uuid)
 
 ```milo
-from "std/uuid" import { uuidV4 }
+from "std/uuid" import { Uuid }
 
-let id = uuidV4()   // "550e8400-e29b-41d4-a716-446655440000"
+let id = Uuid.v4()   // "550e8400-e29b-41d4-a716-446655440000"
 ```
 
 ---

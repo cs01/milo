@@ -26,10 +26,12 @@ export interface Expected {
 }
 
 export const EXPECTED: Record<string, Expected> = {
-  // 0 proven / 64 unknown: this file's contracts are documentation today. The unknowns
-  // went UP when translator errors went to zero — an errored VC and a dropped obligation
-  // both used to hide work that is now counted and reported.
-  "examples/embedded/flightController.milo": { proven: 0, unknown: 64, errors: 0 },
+  // Was 0 proven / 64 unknown — every VC in the file died on the first float literal,
+  // which the SMT translator had no rule for. With `FloatLit` translating and `Pid`
+  // carrying `invariant outMin < outMax`, the contracts are checked rather than decorative.
+  // The remaining unknowns are `readKey`/`clampF64` postconditions this run cannot see
+  // (they live in std, outside the entry file), not a solver limit.
+  "examples/embedded/flightController.milo": { proven: 11, unknown: 55, errors: 0 },
   // 3 refuted here are baselined (unbounded-Int model of `setpoint - measured`).
   "examples/embedded/pidStep.milo": { proven: 8, unknown: 0, errors: 0 },
   // Both AES-128 key-length preconditions into std/crypto, proven at the call site.

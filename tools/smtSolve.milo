@@ -8,6 +8,7 @@
 //   P                                  number of problems
 //   repeat P times:
 //     nvars natoms
+//     repeat nvars: isInt                               (1 = integer variable, 0 = real)
 //     repeat natoms: strict c0 .. c(nvars-1) konst      (atom: row·x + konst <op> 0)
 //     nnodes
 //     repeat nnodes, in creation order (children first):
@@ -22,7 +23,7 @@ from "std/io" import {
     readStdin
 }
 from "std/smt" import {
-    Verdict, newProblem, addAtom, nAtom, nNot, nAnd, nOr, decide
+    Verdict, newProblemMixed, addAtom, nAtom, nNot, nAnd, nOr, decide
 }
 
 fn main(): i32 {
@@ -39,7 +40,14 @@ fn main(): i32 {
         pos = pos + 1
         let natoms = strParseInt(toks[pos])
         pos = pos + 1
-        var p = newProblem(nvars)
+        var flags: Vec<bool> = []
+        var f: i64 = 0
+        while f < nvars {
+            flags.push(strParseInt(toks[pos]) == 1)
+            pos = pos + 1
+            f = f + 1
+        }
+        var p = newProblemMixed(nvars, flags)
 
         var a: i64 = 0
         while a < natoms {

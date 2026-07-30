@@ -32,6 +32,29 @@ own "no annotation burden" principle. `std/smt` is Fourier-Motzkin over linear i
 cannot represent quantifiers at all, so adding them would also make the in-box solver
 permanently second-class. Revisit only with a concrete demand that nothing else answers.
 
+**Floats (2026-07-25).** `f32`/`f64` were declared as SMT `Real` all along, but `exprToSmt`
+had no `FloatLit` case, so the first constant in a float contract turned the whole VC into
+`(UNSUPPORTED FloatLit)` — 28 of the tree's unknowns, and the reason
+`examples/embedded/flightController.milo` scored 0 proven / 64 unknown. It is 11 / 55 now
+(the 55 are std postconditions outside the entry file, not solver limits), and the two
+failures the fix surfaced were real: `pidNew` checked `outMin < outMax` and `pidUpdate` had
+no way to know it, which is what `invariant outMin < outMax` on the struct now carries.
+
+Translating floats meant `std/smt` finally saw a `Real`, and that exposed a **false proof**
+that had been reachable the whole time through a plain `f64` parameter. Its two integer
+tightenings — folding `L < 0` into `L + 1 <= 0`, and rounding a bound in by the coefficient
+gcd — are exact over Z and nonsense over R. Applied to `requires x > 0.0 && x < 1.0` they
+produced `x >= 1 && x <= 0`, the system went infeasible, and infeasible is how this solver
+spells *proven*: every postcondition of such a function verified, z3 refuting them all the
+while. `SmtProblem` now carries a `varIsInt` flag per variable and the tightenings are
+skipped for any row mentioning a real. Regression: `tests/prove/floatNoFalseProof.milo`.
+
+Capability did not have to be given up for it. Fourier-Motzkin is a *relaxation* only when
+integers are involved; on an all-real system it decides satisfiability exactly, so those
+now come back `failed` with a real counterexample instead of `unknown`. Rational
+coefficients reach the i64 rows by per-atom scaling (multiplying an inequality by a
+positive constant preserves its solution set).
+
 **Next, in order of leverage per unit of syntax:**
 
 1. **Range subtypes.** `MiloType` already carries `rangeMin`/`rangeMax` (`i32(0..50000)`).

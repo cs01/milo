@@ -30,6 +30,9 @@ from "std/term" import {
 
 // ── PID controller ──
 
+// The actuator range is a property of the controller, not of one call: `pidNew` checks it
+// once and every `&mut Pid` owes it back, which is what lets `pidUpdate` prove its output
+// is in range without restating the bound as a precondition.
 pub struct Pid {
     kp: f64,
     ki: f64,
@@ -39,6 +42,7 @@ pub struct Pid {
     outMin: f64,
     outMax: f64,
 }
+invariant outMin < outMax
 
 pub fn pidNew(kp: f64, ki: f64, kd: f64, outMin: f64, outMax: f64): Pid
 requires kp >= 0.0

@@ -71,6 +71,10 @@ function addLin(a: Lin, b: Lin, scale: number): Lin {
 function linTerm(e: Sexp, vars: Set<string>): Lin | null {
   if (typeof e === "string") {
     if (/^-?\d+$/.test(e)) return { coeffs: new Map(), konst: parseInt(e, 10) };
+    // A decimal literal stays a fraction all the way through; serialize() clears the
+    // denominators per atom, which is exact because scaling an inequality by a positive
+    // constant preserves its solution set.
+    if (/^-?\d+\.\d+$/.test(e)) return { coeffs: new Map(), konst: parseFloat(e) };
     if (vars.has(e)) return { coeffs: new Map([[e, 1]]), konst: 0 };
     return null;
   }
@@ -92,6 +96,19 @@ function linTerm(e: Sexp, vars: Set<string>): Lin | null {
       acc = addLin(acc, t, -1);
     }
     return acc;
+  }
+  // An i64 widened to a float is the same number, so the cast is transparent to the linear
+  // form — and the variable keeps its Int declaration, so integer tightening still applies
+  // to any row that mentions only it.
+  if (head === "to_real" && e.length === 2) return linTerm(e[1], vars);
+  // Real division by a constant is multiplication by its reciprocal, which stays linear.
+  // Integer `div` is not, and is deliberately still rejected below.
+  if (head === "/" && e.length === 3) {
+    const num = linTerm(e[1], vars), den = linTerm(e[2], vars);
+    if (!num || !den || den.coeffs.size !== 0 || den.konst === 0) return null;
+    const coeffs = new Map<string, number>();
+    for (const [k, v] of num.coeffs) coeffs.set(k, v / den.konst);
+    return { coeffs, konst: num.konst / den.konst };
   }
   if (head === "*") {
     // product is linear only if at most one factor carries a variable
@@ -165,26 +182,62 @@ function linFormula(e: Sexp, vars: Set<string>): FNode | null {
 
 // Parse one VC's SMT-LIB into (ordered vars, root formula), or null if any part
 // is outside the linear fragment.
-function vcToFormula(smtlib: string): { vars: string[]; root: FNode } | null {
+function vcToFormula(smtlib: string): { vars: string[]; isInt: boolean[]; root: FNode } | null {
   let forms: Sexp[];
   try { forms = parseAll(tokenize(smtlib)); } catch { return null; }
   const vars: string[] = [];
+  const isInt: boolean[] = [];
   const varSet = new Set<string>();
   const asserts: Sexp[] = [];
   for (const f of forms) {
     if (!Array.isArray(f)) continue;
-    if (f[0] === "declare-const" && typeof f[1] === "string") { vars.push(f[1]); varSet.add(f[1]); }
+    // The declared SORT has to travel with the variable: std/smt's integer tightenings are
+    // a false proof when applied to a `Real`, so anything that is not `Int` is passed
+    // through as real-valued. Bool consts never reach a linear atom (linFormula rejects a
+    // bare symbol), so their flag is irrelevant either way.
+    if (f[0] === "declare-const" && typeof f[1] === "string") {
+      vars.push(f[1]);
+      isInt.push(f[2] === "Int");
+      varSet.add(f[1]);
+    }
     else if (f[0] === "assert") asserts.push(f[1]);
   }
   const ks: FNode[] = [];
   for (const a of asserts) { const fn = linFormula(a, varSet); if (!fn) return null; ks.push(fn); }
   const root: FNode = ks.length === 1 ? ks[0] : { op: "and", ks };
-  return { vars, root };
+  return { vars, isInt, root };
 }
 
 // ---- DSL serialization (see tools/smtSolve.milo for the grammar) ----
 
 interface SNode { kind: 0 | 1 | 2 | 3; atom?: number; kids?: number[]; }
+
+// std/smt rows are i64. A row that came from float literals is rational, so clear the
+// denominators by scaling the whole atom — valid for any inequality because the multiplier
+// is positive, and it leaves integer rows untouched (d = 0). Null when no power of ten
+// lands every value on an integer inside i64, so the VC degrades to `unknown` rather than
+// being decided from a rounded-off row.
+const SCALE_LIMIT = 2 ** 53;
+
+function scaleToIntegers(values: number[]): number[] | null {
+  // An already-integer row goes through untouched. It must not meet the 2^53 ceiling
+  // below: rows built from i64 bounds legitimately reach 2^62, and std/smt has its own
+  // overflow guard for what happens to them during elimination.
+  if (values.every(Number.isInteger)) return values;
+  for (let d = 1, mul = 10; d <= 12; d++, mul *= 10) {
+    const scaled = values.map(v => v * mul);
+    if (scaled.some(v => !Number.isFinite(v) || Math.abs(v) > SCALE_LIMIT)) return null;
+    // Tolerance is relative: 0.1 * 10 is 1.0000000000000002 in binary floating point, and
+    // demanding exactness here would reject the most ordinary literal there is.
+    if (scaled.every(v => Math.abs(v - Math.round(v)) <= 1e-9 * Math.max(1, Math.abs(v)))) {
+      return scaled.map(Math.round);
+    }
+  }
+  return null;
+}
+
+// Thrown out of serialize() when an atom has no integer scaling; caught in encodeProblem.
+class UnscalableAtom extends Error {}
 
 // Flatten a formula into (atoms, nodes) in creation order — children before
 // parents, matching how std/smt assigns node indices. Returns the root index.
@@ -194,8 +247,10 @@ function serialize(f: FNode, idx: Map<string, number>, nvars: number, atoms: str
   if (f.op === "atom") {
     const row = new Array(nvars).fill(0);
     for (const [k, v] of f.lin.coeffs) row[idx.get(k)!] = v;
+    const scaled = scaleToIntegers([...row, f.lin.konst]);
+    if (!scaled) throw new UnscalableAtom();
     const ai = atoms.length;
-    atoms.push(`${f.strict ? 1 : 0} ${row.join(" ")} ${f.lin.konst}`);
+    atoms.push(`${f.strict ? 1 : 0} ${scaled.slice(0, nvars).join(" ")} ${scaled[nvars]}`);
     nodes.push({ kind: 0, atom: ai });
     return nodes.length - 1;
   }
@@ -209,13 +264,19 @@ function serialize(f: FNode, idx: Map<string, number>, nvars: number, atoms: str
   return nodes.length - 1;
 }
 
-function encodeProblem(vars: string[], root: FNode): string {
+function encodeProblem(vars: string[], isInt: boolean[], root: FNode): string | null {
   const idx = new Map<string, number>();
   vars.forEach((v, i) => idx.set(v, i));
   const atoms: string[] = [];
   const nodes: SNode[] = [];
-  const rootIdx = serialize(root, idx, vars.length, atoms, nodes);
-  const lines = [`${vars.length} ${atoms.length}`, ...atoms, `${nodes.length}`];
+  let rootIdx: number;
+  try {
+    rootIdx = serialize(root, idx, vars.length, atoms, nodes);
+  } catch (e) {
+    if (e instanceof UnscalableAtom) return null;
+    throw e;
+  }
+  const lines = [`${vars.length} ${atoms.length}`, vars.map((_, i) => isInt[i] ? 1 : 0).join(" "), ...atoms, `${nodes.length}`];
   for (const n of nodes) {
     if (n.kind === 0) lines.push(`0 ${n.atom}`);
     else if (n.kind === 1) lines.push(`1 ${n.kids![0]}`);
@@ -280,7 +341,7 @@ function counterexampleDetail(vars: string[], witness: number[]): string {
 // Discharge all VCs via std/smt. Mirrors proveWithZ3's ProveResult shape.
 export function proveWithMilo(result: VerifyResult): ProveResult {
   const results: SolverResult[] = new Array(result.conditions.length);
-  const prepared: { index: number; vars: string[]; root: FNode }[] = [];
+  let prepared: { index: number; vars: string[]; isInt: boolean[]; root: FNode }[] = [];
 
   result.conditions.forEach((vc, i) => {
     // "outside linear fragment" is the catch-all for anything the parser rejects, which
@@ -291,7 +352,7 @@ export function proveWithMilo(result: VerifyResult): ProveResult {
     if (!f) {
       results[i] = { vc, status: "unknown", detail: cant.length ? untranslatableDetail(cant) : "outside linear fragment (std/smt)" };
     } else {
-      prepared.push({ index: i, vars: f.vars, root: f.root });
+      prepared.push({ index: i, vars: f.vars, isInt: f.isInt, root: f.root });
     }
   });
 
@@ -300,8 +361,16 @@ export function proveWithMilo(result: VerifyResult): ProveResult {
     if (!bin) {
       for (const p of prepared) results[p.index] = { vc: result.conditions[p.index], status: "error", detail: "could not build std/smt solver binary" };
     } else {
+      // Encoding can still fail on a rational row no power of ten fits into i64; drop
+      // those to `unknown` before numbering the problems, so the verdict indices the
+      // solver prints still line up with what was sent.
+      const encoded = prepared.map(p => ({ p, dsl: encodeProblem(p.vars, p.isInt, p.root) }));
+      for (const { p, dsl } of encoded) {
+        if (dsl === null) results[p.index] = { vc: result.conditions[p.index], status: "unknown", detail: "rational coefficients outside i64 (std/smt)" };
+      }
+      prepared = encoded.filter(e => e.dsl !== null).map(e => e.p);
       // One problem per prepared VC, in order; smtSolve prints "<k> <verdict>".
-      const dsl = [`${prepared.length}`, ...prepared.map(p => encodeProblem(p.vars, p.root))].join("\n") + "\n";
+      const dsl = [`${prepared.length}`, ...encoded.filter(e => e.dsl !== null).map(e => e.dsl)].join("\n") + "\n";
       const proc = spawnSync(bin, [], { input: dsl, encoding: "utf-8", timeout: 60000 });
       // "<k> proven" | "<k> unknown" | "<k> violated <w0> <w1> ..." (witness in
       // variable-declaration order).

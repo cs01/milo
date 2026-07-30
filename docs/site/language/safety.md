@@ -246,9 +246,22 @@ fn makeBad(): Rom { return Rom { prg: zeros(16), mapper: 0 } }      // ✗ faile
 
 If a mutator's obligation comes back `unknown` — it does something the translator cannot follow — then every proof that leaned on the invariant is downgraded to conditional, naming it. A fact nothing established never renders as a checkmark.
 
+### Floats
+
+`f32`/`f64` contracts are proved the same way, over the reals rather than the integers. Write the literals with a decimal point — `0.0`, not `0` — since that is what tells the solver the value is not an integer:
+
+```milo
+fn halve(x: f64): f64
+requires x >= 0.0 && x <= 10.0
+ensures result >= 0.0 && result <= 5.0
+{
+    return x * 0.5
+}
+```
+
 ### Which solver
 
-By default `milo prove` uses `std/smt`, a solver written in Milo and shipped in the standard library, so the walkthrough above needs nothing installed. It is not in Z3's league: it decides linear integer arithmetic — `+`, `-`, comparisons, multiplication by a constant — and returns `unknown` on anything else, `n * n` included. Pass `--solver=z3` to send the same obligations to Z3, which does decide the nonlinear ones, or `--emit-smt` to print them as SMT-LIB2 for another tool.
+By default `milo prove` uses `std/smt`, a solver written in Milo and shipped in the standard library, so the walkthrough above needs nothing installed. It is not in Z3's league: it decides linear arithmetic over integers and reals — `+`, `-`, comparisons, multiplication by a constant — and returns `unknown` on anything else, `n * n` included. Pass `--solver=z3` to send the same obligations to Z3, which does decide the nonlinear ones, or `--emit-smt` to print them as SMT-LIB2 for another tool.
 
 A recursive function *is* modelled — the self-call is handled by induction, assuming the function's own `ensures` — but that assumption is only sound if the recursion terminates, which is what `decreases` above is for. Whether the resulting obligation is decided is a separate question, and one the solver choice does affect: `std/smt` will report `no integer witness (rational-only)` on some it cannot settle, where Z3 answers.
 

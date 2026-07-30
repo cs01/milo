@@ -1,0 +1,42 @@
+// @proven: 2
+// @failed: 1
+// @unknown: 0
+//
+// Float literals in contracts and bodies, decided by the native solver.
+//
+// `miloTypeToSmt` has always mapped f32/f64 to the SMT sort `Real`, but `exprToSmt` had no
+// `FloatLit` case, so the first constant in a float contract turned the whole verification
+// condition into `(UNSUPPORTED FloatLit)`. That is why examples/embedded/flightController
+// scored zero: not a missing theory, a missing switch arm.
+//
+// Getting them to std/smt needs one more step. Its rows are i64, so a rational row is
+// scaled by the power of ten that clears the denominators — exact, because multiplying an
+// inequality by a positive constant preserves its solution set.
+
+pub fn halve(x: f64): f64
+requires x >= 0.0 && x <= 10.0
+ensures result >= 0.0 && result <= 5.0
+{
+    return x * 0.5
+}
+
+// The bound is off by one tenth at the top of the range: x = 10.0 gives exactly 5.0.
+pub fn halveTooTight(x: f64): f64
+requires x >= 0.0 && x <= 10.0
+ensures result < 4.9
+{
+    return x * 0.5
+}
+
+// An integer widened to a float is the same number, so the cast is transparent to the
+// linear form and the parameter keeps its integer range.
+pub fn widen(n: i32): f64
+requires n >= 0 && n <= 100
+ensures result >= 0.0
+{
+    return n as f64
+}
+
+pub fn main(): i32 {
+    return 0
+}

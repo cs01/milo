@@ -1,0 +1,41 @@
+// @proven: 1
+// @failed: 1
+// @unknown: 0
+//
+// A real-valued variable must not be reasoned about as an integer.
+//
+// std/smt is Fourier-Motzkin plus two INTEGER tightenings — strictness folding (`L < 0`
+// becomes `L + 1 <= 0`) and rounding a bound in by the coefficient gcd. Both are exact
+// over Z and both are nonsense over R. Applied to `bogus` they turned `0 < x && x < 1`
+// into `x >= 1 && x <= 0`, the system went infeasible, and infeasible is how this solver
+// spells *proven* — so an obviously false postcondition came back with a checkmark while
+// z3 refuted it. `varIsInt` is what keeps the tightenings off a row that mentions a float.
+//
+// `honest` is the other half: the fix must not cost real proofs. A conjunction of linear
+// bounds over the reals is decided exactly by the same elimination, with no tightening
+// needed at any point.
+
+// x is strictly inside (0, 1), so this ensures is false for every admissible input.
+pub fn bogus(x: f64): f64
+requires x > 0.0 && x < 1.0
+ensures result > 100.0
+{
+    return x
+}
+
+pub fn honest(x: f64, lo: f64, hi: f64): f64
+requires lo <= hi
+ensures result >= lo && result <= hi
+{
+    if x < lo {
+        return lo
+    }
+    if x > hi {
+        return hi
+    }
+    return x
+}
+
+pub fn main(): i32 {
+    return 0
+}

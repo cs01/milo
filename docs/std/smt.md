@@ -10,6 +10,17 @@ pub fn addAtom(p: &mut SmtProblem, row: Vec<i64>, konst: i64, strict: bool): i64
 
 Register an atom  row·x + konst <op> 0 ; returns its atom index.
 
+### `allReal`
+
+```milo
+pub fn allReal(varIsInt: &Vec<bool>, nvars: i64): bool
+```
+
+Does every variable this row actually constrains range over the integers? A zero
+coefficient contributes nothing, so a real variable the row does not mention cannot
+block the tightening.
+No integer variable anywhere in the problem, so nothing is a relaxation.
+
 ### `ceilDiv`
 
 ```milo
@@ -31,7 +42,7 @@ _Undocumented._
 ### `combine`
 
 ```milo
-pub fn combine(p: &Constraint, n: &Constraint, k: i64): Option<Constraint>
+pub fn combine(p: &Constraint, n: &Constraint, k: i64, varIsInt: &Vec<bool>): Option<Constraint>
 ```
 
 Combine upper row p (coeff +a on x_k) with lower row n (coeff -b): b*p + a*n.
@@ -62,7 +73,7 @@ _Undocumented._
 ### `eliminateVar`
 
 ```milo
-pub fn eliminateVar(cs: &Vec<Constraint>, k: i64): Option<Vec<Constraint>>
+pub fn eliminateVar(cs: &Vec<Constraint>, k: i64, varIsInt: &Vec<bool>): Option<Vec<Constraint>>
 ```
 
 None when any combine overflows — the caller must not read that as infeasible.
@@ -78,7 +89,7 @@ _Undocumented._
 ### `feasibleRational`
 
 ```milo
-pub fn feasibleRational(cs0: &Vec<Constraint>, nvars: i64): Option<bool>
+pub fn feasibleRational(cs0: &Vec<Constraint>, nvars: i64, varIsInt: &Vec<bool>): Option<bool>
 ```
 
 Feasible over the rationals? Eliminate every variable; a surviving constant
@@ -135,7 +146,17 @@ _Undocumented._
 pub fn newProblem(nvars: i64): SmtProblem
 ```
 
-_Undocumented._
+Every variable an integer — the QF_LIA case this solver was written for.
+
+### `newProblemMixed`
+
+```milo
+pub fn newProblemMixed(nvars: i64, varIsInt: Vec<bool>): SmtProblem
+```
+
+varIsInt[j] = false marks x_j as ranging over the reals, which disables the integer
+tightenings for every row that mentions it. Feasibility, and therefore a `Proven`
+verdict, is decided over the rationals either way, so this only ever loses precision.
 
 ### `nNot`
 
@@ -156,7 +177,7 @@ _Undocumented._
 ### `reduceConstraint`
 
 ```milo
-pub fn reduceConstraint(c: &Constraint): Constraint
+pub fn reduceConstraint(c: &Constraint, allInt: bool): Constraint
 ```
 
 Put a row in INTEGER normal form. Two steps, both exact over the integers — the
@@ -182,6 +203,32 @@ It also still does the job it was written for — dividing out the gcd bounds
 Fourier-Motzkin's coefficient growth, which is what keeps i64 from overflowing on the
 small systems contracts produce.
 
+Both steps assume every variable the row mentions is an integer, which is what `allInt`
+asserts. When it is false the row is only normalized in ways that hold over the reals:
+strictness is preserved, and the gcd is divided out only when it divides the constant
+exactly. See the SmtProblem comment for the false proof the guard prevents.
+
+### `reduceRational`
+
+```milo
+pub fn reduceRational(c: &Constraint): Constraint
+```
+
+Normalize a row that mentions at least one real-valued variable. Dividing an inequality
+through by a positive constant is exact over the rationals, so the gcd division survives
+— but only when g divides konst too, since a fractional constant has nowhere to live in
+an i64 row. Strictness is carried, not folded away: `L < 0` says nothing about `L + 1`
+when L is real. When the gcd does not divide the constant the row is returned unchanged,
+which costs some of Fourier-Motzkin's coefficient-growth headroom and nothing else.
+
+### `rowAllInt`
+
+```milo
+pub fn rowAllInt(coeffs: &Vec<i64>, varIsInt: &Vec<bool>): bool
+```
+
+_Undocumented._
+
 ### `satisfiesAll`
 
 ```milo
@@ -202,6 +249,11 @@ Decide SAT of the formula rooted at `root`. In a proof obligation the root is
   Violated(w) = SAT with a concrete integer counterexample w
   Unknown     = rational-feasible but no integer witness in the search box
                 (the QF_LIA integer gap this Tier-1 core doesn't close)
+
+The witness search enumerates integer points even for a real-valued variable. That is
+sound in the direction it matters — an integer point is a real point, so a witness it
+finds is a genuine counterexample — but incomplete: `0 < x && x < 1` is satisfiable over
+the reals with no integer point at all, so the verdict is Unknown rather than Violated.
 
 ### `witnessBound`
 

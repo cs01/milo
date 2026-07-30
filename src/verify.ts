@@ -163,7 +163,7 @@ function modelCall(site: object, name: string, args: Expr[], env?: Map<string, s
     ? null
     : guards.length === 1 ? guards[0]! : `(and ${guards.join(" ")})`;
 
-  ctx.decls.push(`(declare-const ${retName} ${miloTypeToSmt(retType)})`);
+  ctx.decls.push(declareConst(retName, retType));
   const range = intRangeAssumption(retName, retType);
   if (range) ctx.assumes.push(range);
   ctx.assumes.push(`(assert ${antecedent ? `(=> ${antecedent} ${conclusion})` : conclusion})`);
@@ -221,12 +221,77 @@ function numToSmt(n: bigint): string {
 // An integer cast: unsigned narrowing is exact modular truncation; widening and
 // i64/u64 are value-preserving in our unbounded-Int model, so identity.
 function castToSmt(operandStr: string, targetName: string): string {
-  switch (targetName) {
-    case "u8": return `(mod ${operandStr} 256)`;
-    case "u16": return `(mod ${operandStr} 65536)`;
-    case "u32": return `(mod ${operandStr} 4294967296)`;
-    default: return operandStr;
+  const toFloat = targetName === "f32" || targetName === "f64";
+  if (toFloat) {
+    // Widening an integer is exact, so the cast is just a sort change. Float-to-float is
+    // a no-op in this model (no rounding notion), which is why f32 narrowing is not
+    // distinguished — the same unbounded-precision assumption the Int model already makes.
+    return isRealSmt(operandStr) ? operandStr : `(to_real ${operandStr})`;
   }
+  // The reverse direction is not a sort change to paper over: Milo's float-to-int cast
+  // truncates toward zero and SMT-LIB's `to_int` is a floor, so they disagree on every
+  // negative value. Truncation IS floor on the magnitude, so spell it that way rather than
+  // emitting a `to_int` that models a cast the program does not perform.
+  const intOperand = isRealSmt(operandStr)
+    ? `(ite (>= ${operandStr} 0.0) (to_int ${operandStr}) (- (to_int (- ${operandStr}))))`
+    : operandStr;
+  switch (targetName) {
+    case "u8": return `(mod ${intOperand} 256)`;
+    case "u16": return `(mod ${intOperand} 65536)`;
+    case "u32": return `(mod ${intOperand} 4294967296)`;
+    default: return intOperand;
+  }
+}
+
+// SMT symbols this function's query declares with sort Real. Reset per function, because
+// the same Milo name is an i64 in one function and an f64 in the next, and misreading the
+// sort picks the wrong division operator.
+let REAL_SYMS = new Set<string>();
+let NONREAL_SYMS = new Set<string>();
+
+function declareConst(name: string, typeName: string | undefined): string {
+  const sort = miloTypeToSmt(typeName ?? "i64");
+  (sort === "Real" ? REAL_SYMS : NONREAL_SYMS).add(name);
+  return `(declare-const ${name} ${sort})`;
+}
+
+// Is an already-emitted term real-sorted? Only the leaves matter: every arithmetic operator
+// here is sort-preserving, so a term is Real exactly when it mentions a Real symbol or a
+// decimal literal.
+//
+// A declared sort always wins. The FLOAT_FIELDS fallback is for the field paths lowering
+// invents after the declaration block is assembled (`c__mut2_vx` and friends) — same rule
+// fieldSort will apply to them, applied early. It is gated on the symbol looking like a
+// flattened path at all, so an ordinary parameter cannot be mistaken for a struct field
+// that happens to share its name.
+function isRealSmt(s: string): boolean {
+  for (const t of s.split(/[\s()]+/)) {
+    if (!t) continue;
+    if (/^\d+\.\d+$/.test(t)) return true;
+    if (NONREAL_SYMS.has(t)) continue;
+    if (REAL_SYMS.has(t)) return true;
+    if (t.includes("_") && FLOAT_FIELDS.has(t.slice(t.lastIndexOf("_") + 1))) return true;
+  }
+  return false;
+}
+
+// A float literal as an SMT-LIB decimal. Anything JS renders in exponent form (1e21, and
+// the infinities/NaN a constant fold could produce) has no decimal spelling, so it stays
+// untranslated rather than being emitted as something the solver would read differently.
+function floatLitToSmt(v: number): string {
+  if (!Number.isFinite(v)) return `(UNSUPPORTED FloatLit)`;
+  const mag = Math.abs(v);
+  const s = Number.isInteger(mag) ? mag.toFixed(1) : String(mag);
+  if (!/^\d+\.\d+$/.test(s)) return `(UNSUPPORTED FloatLit)`;
+  return v < 0 ? `(- ${s})` : s;
+}
+
+// `/` is truncating integer division on ints and exact division on floats — one Milo
+// operator, two SMT operators, told apart by the operand sorts.
+function realDivToSmt(op: string, left: string, right: string): string | null {
+  if (op !== "/") return null;
+  if (!isRealSmt(left) && !isRealSmt(right)) return null;
+  return `(/ ${left} ${right})`;
 }
 
 // Bitwise/shift with a constant operand lowered to linear/nonlinear integer
@@ -490,16 +555,29 @@ function mentionsMutParamPostState(expr: Expr, mutParams: Set<string>): boolean 
 // class as an unannotated `var matched = true`, one level out.
 let BOOL_FIELDS = new Set<string>();
 
-function collectBoolFields(program: Program): Set<string> {
-  const boolish = new Set<string>();
+// Same idea one sort over, and it is a soundness guard rather than a validity one: a float
+// field left as `Int` is not rejected by z3 — it silently coerces — and std/smt would then
+// apply its integer tightenings to a value that can sit between two integers. That is the
+// false proof the SmtProblem comment describes, reached through a struct field instead of a
+// parameter. It only became reachable when float literals started translating.
+let FLOAT_FIELDS = new Set<string>();
+
+function collectFieldsOfSort(program: Program, isSort: (t: any) => boolean): Set<string> {
+  const matching = new Set<string>();
   const other = new Set<string>();
-  for (const st of program.structs ?? []) {
-    for (const f of st.fields as any[]) {
-      (f.type?.name === "bool" && !f.type?.isPtr && !f.type?.isArray ? boolish : other).add(f.name);
-    }
+  for (const f of (program.structs ?? []).flatMap(st => st.fields as any[])) {
+    (isSort(f.type) && !f.type?.isPtr && !f.type?.isArray ? matching : other).add(f.name);
   }
-  for (const n of other) boolish.delete(n);   // ambiguous across structs: leave it an Int
-  return boolish;
+  for (const n of other) matching.delete(n);   // ambiguous across structs: leave it an Int
+  return matching;
+}
+
+function collectBoolFields(program: Program): Set<string> {
+  return collectFieldsOfSort(program, t => t?.name === "bool");
+}
+
+function collectFloatFields(program: Program): Set<string> {
+  return collectFieldsOfSort(program, t => t?.name === "f32" || t?.name === "f64");
 }
 
 // Names in the function under analysis that a callee could actually write through: `var`
@@ -682,7 +760,7 @@ function collectPaths(stmts: Stmt[], env: Map<string, string>, types?: Map<strin
       // of this file treats an unknown type. A float local would be modelled as an integer
       // here, which is why floatish() also looks at the initializer.
       const typeName = varTypes.get(name) ?? "i64";
-      ctx.havocDecls.push(`(declare-const ${fresh} ${miloTypeToSmt(typeName)})`);
+      ctx.havocDecls.push(declareConst(fresh, typeName));
       const range = intRangeAssumption(fresh, typeName);
       if (range) ctx.havocDecls.push(range);
       CALL_MODEL?.scope.add(fresh);
@@ -705,7 +783,7 @@ function collectPaths(stmts: Stmt[], env: Map<string, string>, types?: Map<strin
     for (const target of targets) {
       const fresh = `${target.replace(/[^A-Za-z0-9_]/g, "_")}__mut${ctx.havocSeq++}`;
       const typeName = varTypes.get(target) ?? (target === name ? "i64" : "i64");
-      ctx.havocDecls.push(`(declare-const ${fresh} ${miloTypeToSmt(typeName)})`);
+      ctx.havocDecls.push(declareConst(fresh, typeName));
       const range = intRangeAssumption(fresh, typeName);
       if (range) ctx.havocDecls.push(range);
       CALL_MODEL?.scope.add(fresh);
@@ -1209,6 +1287,8 @@ function exprToSmtWithEnv(expr: Expr, env: Map<string, string>, foreign = false,
     const bit = bitOpToSmt(expr.op, left, expr.right);
     if (bit) return bit;
     const right = exprToSmtWithEnv(expr.right, env, foreign, oldEnv);
+    const rdiv = realDivToSmt(expr.op, left, right);
+    if (rdiv) return rdiv;
     if (expr.op === "/" || expr.op === "%") {
       const t = truncDivToSmt(expr.op, left, right, resolveConstNum(expr.right));
       if (t) return t;
@@ -1304,6 +1384,7 @@ export function generateVerificationConditions(program: Program, opts?: { onlyFi
 
   FN_TABLE = new Map(program.functions.map(f => [f.name, f]));
   BOOL_FIELDS = collectBoolFields(program);
+  FLOAT_FIELDS = collectFloatFields(program);
   STRUCT_INVARIANTS = new Map();
   STRUCT_FIELDS = new Map();
   for (const st of program.structs ?? []) {
@@ -1342,7 +1423,14 @@ export function generateVerificationConditions(program: Program, opts?: { onlyFi
     CALL_MODEL = { ensuresByFn, decls: [], assumes: [], n: 0, bySite: new WeakMap<object, Map<string, string>>(), scope: new Set(), assumed: new Set() };
     const vcStart = conditions.length;
 
-    const paramDecls = fn.params.map(p => `(declare-const ${p.name} ${miloTypeToSmt(p.type?.name ?? "i64")})`).join("\n");
+    // Sorts are per-function: the same Milo name is an i64 here and an f64 in the next
+    // function. `result` is seeded rather than left to its own declaration further down,
+    // because `ensures` is lowered before that point and lowering is what needs the sort.
+    REAL_SYMS = new Set();
+    NONREAL_SYMS = new Set();
+    if (fn.retType?.name) (miloTypeToSmt(fn.retType.name) === "Real" ? REAL_SYMS : NONREAL_SYMS).add("result");
+
+    const paramDecls = fn.params.map(p => declareConst(p.name, p.type?.name ?? "i64")).join("\n");
     // What the type already guarantees. Without it the solver invents out-of-range inputs.
     const paramRanges = fn.params
       .map(p => intRangeAssumption(p.name, p.type?.name))
@@ -1423,8 +1511,17 @@ export function generateVerificationConditions(program: Program, opts?: { onlyFi
       }
     }
 
-    const fieldSort = (f: string) => (BOOL_FIELDS.has(f.slice(f.lastIndexOf("_") + 1)) ? "Bool" : "Int");
-    const fieldDecls = [...fieldRefs].map(f => `(declare-const ${f} ${fieldSort(f)})`).join("\n");
+    const fieldSort = (f: string) => {
+      const leaf = f.slice(f.lastIndexOf("_") + 1);
+      if (BOOL_FIELDS.has(leaf)) return "Bool";
+      if (FLOAT_FIELDS.has(leaf)) return "Real";
+      return "Int";
+    };
+    const fieldDecls = [...fieldRefs].map(f => {
+      const sort = fieldSort(f);
+      if (sort === "Real") REAL_SYMS.add(f);
+      return `(declare-const ${f} ${sort})`;
+    }).join("\n");
     const lenFacts = lengthNonNeg(fieldRefs, fn).join("\n");
     FIELD_REFS = null;
 
@@ -1495,7 +1592,7 @@ export function generateVerificationConditions(program: Program, opts?: { onlyFi
               `; Postcondition proof for ${fn.name}`,
               `(set-logic ALL)`,
               allDecls,
-              ...(isVoid ? [] : [`(declare-const result ${miloTypeToSmt(fn.retType.name)})`]),
+              ...(isVoid ? [] : [declareConst("result", fn.retType.name)]),
               preAssumptions,
               `(assert ${violated})`,
               `(check-sat)`,
@@ -1511,7 +1608,7 @@ export function generateVerificationConditions(program: Program, opts?: { onlyFi
               `; Postcondition check for ${fn.name} (no body analysis)`,
               `(set-logic ALL)`,
               allDecls,
-              `(declare-const result ${miloTypeToSmt(fn.retType.name)})`,
+              declareConst("result", fn.retType.name),
               preAssumptions,
               `(assert (not ${postSmt}))`,
               `(check-sat)`,
@@ -1797,6 +1894,7 @@ function hasLoopInvariants(stmts: Stmt[]): boolean {
 function exprToSmt(expr: Expr): string {
   switch (expr.kind) {
     case "IntLit": return expr.value.toString();
+    case "FloatLit": return floatLitToSmt(expr.value);
     case "BoolLit": return expr.value ? "true" : "false";
     case "Ident":
       if (expr.name === "result") return "result";
@@ -1808,6 +1906,8 @@ function exprToSmt(expr: Expr): string {
       const bit = bitOpToSmt(expr.op, left, expr.right);
       if (bit) return bit;
       const right = exprToSmt(expr.right);
+      const rdiv = realDivToSmt(expr.op, left, right);
+      if (rdiv) return rdiv;
       if (expr.op === "/" || expr.op === "%") {
         const t = truncDivToSmt(expr.op, left, right, resolveConstNum(expr.right));
         if (t) return t;

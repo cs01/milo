@@ -1,0 +1,22 @@
+// A generic struct with a `Vec<T>` field infers T from a `Vec<i64>` argument at
+// construction (nested-generic inference, not just a bare `T` field). Also pins that
+// moving an owned Vec into a generic struct field records the move — no double-free
+// of the buffer at scope exit.
+struct Bag<T> {
+    items: Vec<T>
+}
+
+fn main() {
+    var v: Vec<i64> = Vec.new()
+    v.push(10)
+    v.push(20)
+    let b = Bag {
+        items: v
+    } // T inferred = i64 from Vec<i64>
+    // @expect: 2
+    print(b.items.len)
+    // @expect: 10
+    print(b.items[0])
+    // @expect: 20
+    print(b.items[1])
+}

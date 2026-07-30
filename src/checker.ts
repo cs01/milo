@@ -3088,20 +3088,34 @@ export class TypeChecker {
   // Match a generic fn return type (MiloType) against a concrete hint (TypeKind) to infer type params.
   // e.g. retType=Arena<T>, hint={tag:"struct",name:"Arena_i32"} → T=i32
   private inferTypeParamsFromHint(retType: MiloType, hint: TypeKind, typeParams: string[], typeMap: Map<string, TypeKind>) {
-    if (typeParams.includes(retType.name)) {
-      typeMap.set(retType.name, hint);
+    // A bare type parameter (`T`, no further args) binds directly to the hint. First
+    // binding wins; a later conflicting one surfaces as a field/arg type mismatch in the
+    // caller's per-field re-check, so we don't need to diagnose it here.
+    if (typeParams.includes(retType.name) && !retType.typeArgs?.length) {
+      if (!typeMap.has(retType.name)) typeMap.set(retType.name, hint);
       return;
     }
+    // Recurse through the built-in generic containers so `Vec<T>` / `[T]` fields infer T
+    // from a `Vec<i64>` / `[i64]` argument — the case that made `for x in myVec` over a
+    // user `MyVec<T>` fail to construct.
+    if (retType.typeArgs?.length && (retType.name === "Vec" || retType.name === "Array") && hint.tag === "vec") {
+      this.inferTypeParamsFromHint(retType.typeArgs[0], hint.element, typeParams, typeMap);
+      return;
+    }
+    if (retType.isArray && hint.tag === "array") {
+      // the element MiloType is the decl stripped of its array-ness
+      this.inferTypeParamsFromHint({ ...retType, isArray: false, arraySize: null }, hint.element, typeParams, typeMap);
+      return;
+    }
+    // Nested generic struct: `Arena<T>` field vs a concrete `Arena_i32` hint — recurse on
+    // each type-arg position so parameters nested arbitrarily deep still resolve.
     if (hint.tag === "struct" && retType.typeArgs) {
       const info = this.structs.get(hint.name);
       if (info?.baseName === retType.name && info.typeArgs) {
         const gs = this.genericStructs.get(retType.name);
         if (gs) {
-          for (let i = 0; i < retType.typeArgs.length && i < gs.typeParams.length; i++) {
-            const ta = retType.typeArgs[i];
-            if (typeParams.includes(ta.name) && i < info.typeArgs.length) {
-              typeMap.set(ta.name, info.typeArgs[i]);
-            }
+          for (let i = 0; i < retType.typeArgs.length && i < info.typeArgs.length; i++) {
+            this.inferTypeParamsFromHint(retType.typeArgs[i], info.typeArgs[i], typeParams, typeMap);
           }
         }
       }
@@ -4422,17 +4436,13 @@ export class TypeChecker {
         if (genericInfo) {
           const typeMap = new Map<string, TypeKind>();
           for (const f of expr.fields) {
-            const fieldDef = genericInfo.fields.find(d => d.name === f.name);
-            if (!fieldDef) { this.error(`struct '${expr.name}' has no field '${f.name}'`, sp); continue; }
+            const declField = genericInfo.decl.fields.find(d => d.name === f.name);
+            if (!declField) { this.error(`struct '${expr.name}' has no field '${f.name}'`, sp); continue; }
             const valType = this.checkExpr(f.value);
-            if (fieldDef.type.tag === "struct" && genericInfo.typeParams.includes(fieldDef.type.name)) {
-              const existing = typeMap.get(fieldDef.type.name);
-              if (existing && !typeEq(existing, valType)) {
-                this.error(`conflicting inference for type parameter '${fieldDef.type.name}'`, sp);
-              } else {
-                typeMap.set(fieldDef.type.name, valType);
-              }
-            }
+            // Infer type params from the field's declared (unsubstituted) type against the
+            // argument's concrete type — recursively, so `Vec<T>`/`[T]`/nested generics
+            // resolve, not just a bare `T` field.
+            this.inferTypeParamsFromHint(declField.type, valType, genericInfo.typeParams, typeMap);
           }
           const missing = genericInfo.typeParams.filter(p => !typeMap.has(p));
           if (missing.length > 0) {
@@ -4450,6 +4460,11 @@ export class TypeChecker {
             if (!typeEq(fieldDef.type, valType) && valType.tag !== "unknown") {
               this.error(`field '${f.name}' of '${expr.name}': expected ${typeName(fieldDef.type)}, got ${typeName(valType)}`, sp);
             }
+            // Record the move of the field value out of its source. Without this a non-Copy
+            // value (Vec/String/…) moved into a *generic* struct field was never marked moved,
+            // so its source kept its alive-flag and was dropped again at scope exit — a
+            // double-free. The non-generic and anonymous branches already do this.
+            this.tryMove(f.value);
           }
           for (const d of info.fields) {
             if (!expr.fields.find(f => f.name === d.name)) {

@@ -1,0 +1,35 @@
+// A user-defined generic iterator over a Vec-backed container, driven by `for x in`.
+// Exercises three things at once: nested-generic inference (the `Vec<T>` field),
+// the move of the Vec into the generic struct (no double-free), and the iterator
+// protocol (next(&mut Self): Option<T>). A regression in the move handling turned
+// the freed buffer's len into garbage and the loop ran away.
+struct VecIter<T> {
+    items: Vec<T>, i: i64
+}
+
+impl VecIter<T> {
+    fn next(self: &mut Self): Option<T> {
+        if self.i >= self.items.len {
+            return Option.None
+        }
+        let v = self.items[self.i]
+        self.i = self.i + 1
+        return Option.Some(v)
+    }
+}
+
+fn main() {
+    var v: Vec<i64> = Vec.new()
+    v.push(10)
+    v.push(20)
+    v.push(30)
+    var it = VecIter {
+        items: v, i: 0
+    }
+    var sum = 0
+    for x in it {
+        sum = sum + x
+    }
+    // @expect: 60
+    print(sum)
+}

@@ -2173,12 +2173,15 @@ export class Codegen {
     lines.push(`  br i1 ${condVal}, label %${thenLabel}, label %${elseLabel}`);
     lines.push(`${thenLabel}:`);
     let thenTerminated = false;
+    const thenStart = this.droppableLocals.length;
     for (const s of stmt.thenBody) { const [sl, t] = this.genStmt(s); lines.push(...sl); if (t) thenTerminated = true; }
-    if (!thenTerminated) lines.push(`  br label %${endLabel}`);
+    // Block-scope drop: locals owned by this arm die at its end, not the fn epilogue.
+    if (!thenTerminated) { this.emitScopeDrops(lines, thenStart); lines.push(`  br label %${endLabel}`); }
     lines.push(`${elseLabel}:`);
     let elseTerminated = false;
+    const elseStart = this.droppableLocals.length;
     if (stmt.elseBody) { for (const s of stmt.elseBody) { const [sl, t] = this.genStmt(s); lines.push(...sl); if (t) elseTerminated = true; } }
-    if (!elseTerminated) lines.push(`  br label %${endLabel}`);
+    if (!elseTerminated) { this.emitScopeDrops(lines, elseStart); lines.push(`  br label %${endLabel}`); }
     lines.push(`${endLabel}:`);
     // when both arms return/diverge, the merge block is unreachable; LLVM still requires a terminator
     if (thenTerminated && elseTerminated) lines.push(`  unreachable`);
@@ -2216,7 +2219,12 @@ export class Codegen {
       lines.push(...sl);
       if (t) { bodyTerminated = true; break; }
     }
-    if (!bodyTerminated) lines.push(`  br label %${condLabel}`);
+    if (!bodyTerminated) {
+      // Block-scope drop: body locals die at the end of each iteration, not at the
+      // function epilogue. (break/continue drop the same window via emitLoopDropGlue.)
+      this.emitScopeDrops(lines, this.loopDropStart);
+      lines.push(`  br label %${condLabel}`);
+    }
     lines.push(`${endLabel}:`);
     this.loopHeader = prevHeader;
     this.loopExit = prevExit;
@@ -2281,7 +2289,7 @@ export class Codegen {
       lines.push(...sl);
       if (t) { bodyTerminated = true; break; }
     }
-    if (!bodyTerminated) lines.push(`  br label %${incrLabel}`);
+    if (!bodyTerminated) { this.emitScopeDrops(lines, this.loopDropStart); lines.push(`  br label %${incrLabel}`); }
 
     lines.push(`${incrLabel}:`);
     const cur2 = this.nextTemp();
@@ -2393,7 +2401,7 @@ export class Codegen {
         lines.push(...sl);
         if (t) { bodyTerminated = true; break; }
       }
-      if (!bodyTerminated) lines.push(`  br label %${incrLabel}`);
+      if (!bodyTerminated) { this.emitScopeDrops(lines, this.loopDropStart); lines.push(`  br label %${incrLabel}`); }
 
       lines.push(`${incrLabel}:`);
       const nextIdx = this.nextTemp();
@@ -2465,7 +2473,7 @@ export class Codegen {
         lines.push(...sl);
         if (t) { bodyTerminated = true; break; }
       }
-      if (!bodyTerminated) lines.push(`  br label %${incrLabel}`);
+      if (!bodyTerminated) { this.emitScopeDrops(lines, this.loopDropStart); lines.push(`  br label %${incrLabel}`); }
 
       lines.push(`${incrLabel}:`);
       const nextIdx = this.nextTemp();
@@ -2532,7 +2540,7 @@ export class Codegen {
         lines.push(...sl);
         if (t) { bodyTerminated = true; break; }
       }
-      if (!bodyTerminated) lines.push(`  br label %${incrLabel}`);
+      if (!bodyTerminated) { this.emitScopeDrops(lines, this.loopDropStart); lines.push(`  br label %${incrLabel}`); }
 
       lines.push(`${incrLabel}:`);
       const curIdx = this.nextTemp();
@@ -2629,7 +2637,7 @@ export class Codegen {
         lines.push(...sl);
         if (t) { bodyTerminated = true; break; }
       }
-      if (!bodyTerminated) lines.push(`  br label %${nextLabel}`);
+      if (!bodyTerminated) { this.emitScopeDrops(lines, this.loopDropStart); lines.push(`  br label %${nextLabel}`); }
 
       lines.push(`${nextLabel}:`);
       const nextIdx = this.nextTemp();
@@ -2731,7 +2739,7 @@ export class Codegen {
       lines.push(...sl);
       if (t) { bodyTerminated = true; break; }
     }
-    if (!bodyTerminated) lines.push(`  br label %${condLabel}`);
+    if (!bodyTerminated) { this.emitScopeDrops(lines, this.loopDropStart); lines.push(`  br label %${condLabel}`); }
 
     lines.push(`${endLabel}:`);
     this.loopHeader = prevHeader;
@@ -9836,6 +9844,21 @@ export class Codegen {
   private emitDropGlue(lines: string[]) {
     for (const local of this.droppableLocals) {
       this.emitGuardedDrop(lines, local);
+    }
+  }
+
+  // Block-scope drop: drop the droppable locals declared in [start, end) at the
+  // end of the innermost block that owns them, instead of waiting for the whole
+  // function's epilogue. `start` is captured as droppableLocals.length at block
+  // entry; everything pushed since then is a local of this block. Additive and
+  // idempotent — emitGuardedDrop clears the alive flag and zeroes the slot, so the
+  // enclosing/epilogue drops (and a loop body's next-iteration re-init) see a dead
+  // slot and no-op. A value moved out of the block was already zeroed at the move,
+  // so its block-end drop is a no-op too. This is exactly the mechanism genMatch
+  // already uses for match-arm bindings, generalized to if/loop/unsafe blocks.
+  private emitScopeDrops(lines: string[], start: number) {
+    for (let d = start; d < this.droppableLocals.length; d++) {
+      this.emitGuardedDrop(lines, this.droppableLocals[d]);
     }
   }
 

@@ -23,6 +23,13 @@ Refcounted done-cell owned by the Task handle (not the reaped struct):
 ### F2 block-scope / last-use drop dataflow pass (NEXT)
 One last-use liveness pass, two consumers: block-scope drop placement + move-on-last-use. Risky (decides where frees go) → conservative, heavily tested. Design in progress.
 
+## F2 progress (2026-07-30, branch block-scope-drop)
+F1 merged to main + CI green (CI/Release/Deploy all pass). New branch for F2.
+- Added `emitScopeDrops(lines, start)` in codegen (mirrors match-arm drop, generalized).
+- Wired: genWhile (iteration-end), genIf then/else, genForRange, genForEach (×4 variants), genForIterator. Match arms already did it. SKIPPED UnsafeBlock (unclear if it scopes locals — low value, avoids risk) and IfExpr/MatchExpr (result moved out; keep fn-epilogue drop = current safe behavior).
+- Additive + guarded: counts preserved, only drop *program point* moves earlier. blockScopeDrop.milo fixture pins `-bd--|end` (t drops at if-block end). ASAN-clean across drop-heavy fixtures + battle-test. drop/move/loop/for/match subset 82/82. Full suite running.
+- Also spotted (user): `unsafe\n\nimpl` split form in std (sync×10, runtime×2) — cosmetic; fmt preserves it instead of normalizing. Plan: normalize source to compact `unsafe impl`.
+
 ## Current state
 **F1 code complete + verifying full suite.** Making Task non-Copy (via impl Drop) surfaced one fixture relying on Task being Copy (asyncCallOrdering `taskPtr(t: Task)` → moved `child`); fixed to borrow `&Task` — this is correct: a Copy Task would break the refcount. Regen'd docs/std/runtime.md. Added battleConcurrency.milo (8 OS threads, atomic+CAS+channel, 3 conservation invariants agree, ASAN-clean). F2 not started.
 

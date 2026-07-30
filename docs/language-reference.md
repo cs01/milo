@@ -550,6 +550,29 @@ enum Shape {
 let s = Shape.Circle(3.14)
 ```
 
+### Integer-Repr Enums
+
+A C-like enum with an explicit integer representation — `enum Name: i32 { ... }` — carries no payloads and maps each variant to an integer discriminant. Discriminants auto-assign from `0`, or you set them explicitly with `= N` (sparse and out-of-order is fine; counting resumes after an explicit value):
+
+```milo
+enum Opcode: i32 {
+    LDA = 169,
+    STA = 141,
+    NOP,            // 142 — resumes after the previous value
+}
+```
+
+The forward conversion `op as i32` is **always defined** — every variant has a discriminant. The reverse is partial (most integers are not a variant), so it is spelled `Opcode.tryFrom(n): Option<Opcode>` — `Some(variant)` for a known discriminant, `None` otherwise:
+
+```milo
+let raw = readByte()                          // some i32 off the wire
+let Opcode.Some(op) = Opcode.tryFrom(raw) else {
+    return handleUnknownOpcode(raw)
+}
+```
+
+`tryFrom` is generated from the same discriminant list as the cast, so the round-trip law `Opcode.tryFrom(k as i32) == Some(k)` holds for every variant `k` by construction — there is no hand-maintained table to drift. Prefer `tryFrom` over a trapping conversion: on untrusted input (a parser, a decoder) a trap is a denial-of-service, and `Opcode.tryFrom(n)!` gives you the trap in one character when you truly want it.
+
 ### Pattern Matching
 
 `match` is exhaustive — the compiler requires you to handle every variant.

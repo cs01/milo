@@ -1836,7 +1836,12 @@ export class Codegen {
         lines.push(`  ${gep} = getelementptr ${elemTy}, ptr ${objVal}, i64 ${idxVal}`);
         return [lines, gep, elemTy];
       }
-      if (expr.object.type.tag === "vec") {
+      // A Vec or a slice (`&[T]`/`&mut [T]`, tag "array" size null) shares the %Vec
+      // {ptr,len,cap} layout — index through the bounds-checked Vec path. Deref the ref a
+      // slice param carries. Mirrors the read-side dispatch; without this, writing through
+      // a slice (`xs[i] = v`) fell to the fixed-array path and stored through a null ptr.
+      const effObj = expr.object.type.tag === "ref" ? expr.object.type.inner : expr.object.type;
+      if (effObj.tag === "vec" || (effObj.tag === "array" && effObj.size === null)) {
         return this.genVecBoundsCheckedPtr(expr, lines);
       }
       return this.genBoundsCheckedPtr(expr, lines);

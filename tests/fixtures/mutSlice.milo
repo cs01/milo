@@ -1,0 +1,33 @@
+// Mutable slices: `&mut [T]` is an exclusive, non-owning view. A `var` Vec coerces to it;
+// writes through the slice land in the backing store. The source is frozen for the
+// borrow's life, and an immutable `let` source is rejected (see errors/mutSliceImmutable).
+fn double(xs: &mut [i64]): void {
+    var i = 0
+    while i < xs.len {
+        xs[i] = xs[i] * 2
+        i = i + 1
+    }
+}
+
+fn setAt(xs: &mut [i64], idx: i64, val: i64): void {
+    xs[idx] = val
+}
+
+fn main() {
+    var v: Vec<i64> = Vec.new()
+    v.push(1)
+    v.push(2)
+    v.push(3)
+
+    double(v)
+    // @expect: 2
+    print(v[0])
+    // @expect: 4
+    print(v[1])
+    // @expect: 6
+    print(v[2])
+
+    setAt(v, 1, 40)
+    // @expect: 40
+    print(v[1])
+}

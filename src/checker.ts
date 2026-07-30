@@ -4332,9 +4332,10 @@ export class TypeChecker {
               continue;
             }
             this.setAutoBorrowChecked(expr.args[i], paramType.mutable, sp);
-            // Vec<T> auto-coerces to &[T] (same {ptr,len,cap} layout; callee ignores cap).
-            // Immutable only — &mut [T] in-place views aren't supported yet.
-            if (paramType.inner.tag === "array" && paramType.inner.size === null && !paramType.mutable
+            // Vec<T> auto-coerces to &[T] / &mut [T] (same {ptr,len,cap} layout; callee
+            // ignores cap). For &mut the setAutoBorrowChecked above already rejected an
+            // immutable source and froze the Vec exclusively for the borrow's life.
+            if (paramType.inner.tag === "array" && paramType.inner.size === null
                 && argType.tag === "vec" && typeEq(paramType.inner.element, argType.element)) {
               continue;
             }

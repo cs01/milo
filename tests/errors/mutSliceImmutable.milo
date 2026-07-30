@@ -1,0 +1,8 @@
+// An immutable `let` Vec cannot be handed to a `&mut [T]` param — the mutable view
+// would let the callee mutate a value the caller declared immutable.
+fn setFirst(xs: &mut [i64]): void { xs[0] = 99 }
+
+fn main() {
+  let v: Vec<i64> = Vec.new()
+  setFirst(v)  // @error: cannot pass immutable
+}

@@ -118,22 +118,24 @@ let x: i8 = 200              // error: integer literal 200 overflows i8 (range -
 let y: i32 = 2147483647 + 1  // error: constant expression overflows i32
 ```
 
-**Runtime (debug builds)** — arithmetic traps on overflow with source location:
+**Runtime** — arithmetic traps on overflow, in **every build mode**, with source location:
 
 ```milo
 let x: i32 = 2147483647
-let y = x + 1     // runtime error: integer overflow at main.milo:2
+let y = x + 1     // runtime error: integer overflow at main.milo:2  (aborts)
 ```
 
-Build with `--debug` to enable overflow traps. Default (`-O2`) and `--release` (`-O3`) builds use wrapping arithmetic for performance. Add `-g` for DWARF debug info (source-level `lldb`/`gdb` stepping and variable inspection) — see `docs/site/getting-started/debugging.md`.
+The rule is uniform: **every operation is total — it produces the correct value or it traps; nothing is silently wrong.** There is no debug-vs-release difference in meaning (Milo does not follow Rust's debug-trap/release-wrap split). A trap calls `abort()` — `SIGABRT`, so a supervisor sees an abnormal exit, the OS can drop a core dump, and `lldb`/`gdb` break at the fault. Add `-g` for DWARF debug info (source-level stepping) — see `docs/site/getting-started/debugging.md`.
 
-Checked operations: `+`, `-`, `*`, and unary negation (`-x`) on all integer types.
+Checked operations: `+`, `-`, `*`, unary negation (`-x`), integer division/remainder (`/` `%`, including signed `INT_MIN / -1`), and shift-by-out-of-range (`<<`/`>>` with an amount ≥ the operand's bit width). Array/slice bounds and ranged-type bounds trap the same way.
 
-**Explicit overflow control** — methods for when you need specific overflow behavior:
+For a perf-critical build that cannot afford the checks on `+ - *`, `--no-overflow-checks` (or `--fast`) restores silent two's-complement wrapping; `--overflow-checks` forces trapping. These change *only* the plain `+ - *` operators — everything else stays total. The cost is near-zero in practice: the compiler proves most operations safe and emits no check.
+
+**Explicit overflow control** — wrapping is otherwise reached only by *naming* it, per operation:
 
 ```milo
 let a: u8 = 255
-a.wrappingAdd(1)     // 0 — wraps, even in debug builds
+a.wrappingAdd(1)     // 0 — two's-complement wrap
 a.saturatingAdd(1)   // 255 — clamps to max
 let r = a.checkedAdd(1)  // Option.None — returns None on overflow
 

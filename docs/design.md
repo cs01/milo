@@ -199,7 +199,7 @@ Frontend: TypeScript (Bun). Backend: LLVM. Self-hosted port in progress ([self-h
 | Memory safety | Yes (moves + second-class refs) | Yes (lifetimes + borrow checker) | No | Partial |
 | Null safety | Yes (Option\<T\>) | Yes (Option\<T\>) | No | No |
 | Race safety | Yes (Send/Sync, compile-time) | Yes (Send/Sync, compile-time) | No | No |
-| Overflow safety | Yes (compile-time + debug traps) | Yes (compile-time + debug panics) | No (UB) | Yes (always trap) |
+| Overflow safety | Yes (compile-time + all-mode traps) | Yes (compile-time + debug panics) | No (UB) | Yes (always trap) |
 | Coercion safety | Yes (no implicit coercions) | Yes | No | Yes |
 | Cyclic data | Index-based or arenas | Painful | Easy (unsafe) | Manual |
 | Lifetime annotations | None | Required | N/A | None |
@@ -217,7 +217,7 @@ The C++ pitfalls LLMs hit constantly, and what Milo does instead:
 3. **Dangling references** — the most common C++ CVE pattern; LLMs routinely return refs to locals. Milo: impossible by construction.
 4. **Null deref** — LLMs forget null checks; C++ can't enforce them. Milo: `Option<T>` with exhaustive match.
 5. **Data races** — LLMs share mutable state across threads freely. Milo: non-Send captures rejected at compile time.
-6. **Integer overflow** — signed overflow is UB; C++ compilers delete overflow checks based on it. Milo: compile-time checks for constants, debug traps, explicit `wrappingAdd`/`saturatingAdd`.
+6. **Integer overflow** — signed overflow is UB; C++ compilers delete overflow checks based on it. Milo: compile-time checks for constants, all-mode runtime traps (debug *and* release), explicit `wrappingAdd`/`saturatingAdd` to opt into wrapping.
 
 Two examples of the pattern:
 
@@ -274,21 +274,20 @@ this file and that one can't drift.
 
 One decision that split from his answer *and* from Rust-as-shipped: **integer
 overflow.** He wanted auto-bignum (off-ethos — unpredictable allocation in a
-safety lane); Rust traps in debug and wraps in release. The **decided** end state
-for Milo is trap in *all* build modes (principle #1 — a wrapped value is a silent
-footgun), with `--no-overflow-checks` and the explicit
-`wrappingAdd`/`saturatingAdd`/`checkedAdd` methods as the opt-outs, and range
-analysis deleting checks where it can prove them safe.
+safety lane); Rust traps in debug and wraps in release. The end state for Milo is
+trap in *all* build modes (principle #1 — a wrapped value is a silent footgun), with
+`--no-overflow-checks` and the explicit `wrappingAdd`/`saturatingAdd`/`checkedAdd`
+methods as the opt-outs, and range analysis deleting checks where it can prove them
+safe.
 
-**Shipped status (as of 2026-07-22): not yet reached.** The runtime overflow trap
-(`llvm.sadd.with.overflow` → abort) is gated behind `--debug`; `milo run`, the
-default `build` (-O2), and `--release` currently **wrap silently** — i.e. today's
-behavior is Rust-parity, not the decided default. Wrapping is memory-*safe* (defined,
-no UB), so this is a policy gap, not a soundness hole, but the docs above describe the
-target, not the current default. Closing it = ungating the check to all modes (with
-range analysis so the release cost stays near zero). Div-by-zero and `INT_MIN / -1`
-already trap in every mode; overflow is the remaining case. Tracked in
-[memory-safety-vs-rust.md](memory-safety-vs-rust.md).
+**Shipped status: reached.** `+ - * -x` trap on overflow in every build mode
+(`llvm.sadd.with.overflow` → `abort()`), joining div-by-zero, signed `INT_MIN / -1`,
+shift-amount-out-of-range, array/slice bounds, and ranged-type bounds — all total in
+all modes. The single remaining opt-out is by name: `--no-overflow-checks`/`--fast`
+restore wrapping for `+ - *` only, and `.wrappingAdd`/`.saturatingAdd`/`.checkedAdd`
+name it per operation. Traps `abort()` (SIGABRT) rather than `exit()`, so a supervisor
+can distinguish an invariant violation from a handled error and get a core dump. The
+model is now Swift/Zig-safe (one uniform rule), not Rust's mode-dependent split.
 
 ## Open Questions
 

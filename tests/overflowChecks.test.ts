@@ -1,12 +1,13 @@
-// `--overflow-checks`: arithmetic traps at ANY optimization level.
-//
-// Without it, `+ - *` trap at -O0 but silently WRAP at -O2/-O3 — `i64::MAX + 1` quietly
-// becomes `i64::MIN` in a release build. That is Rust's wart; Swift traps in every mode.
+// Overflow is a trap in EVERY build mode — the language law is "every op is total;
+// wrapping is opt-in." `+ - *` trap at -O0 AND at -O2/-O3; `i64::MAX + 1` aborts rather
+// than quietly becoming `i64::MIN`. (Swift/Zig-safe model, not Rust's debug-trap/release-
+// wrap.) `--no-overflow-checks` (and `--fast`) is the escape hatch that restores wrapping
+// for a perf-critical release build.
 //
 // This lives here rather than in tests/runtime-errors/ on purpose: that harness compiles
-// at --debug, where overflow already traps, so a fixture there would pass whether or not
-// the flag did anything. The whole point is the RELEASE build, so both halves are asserted
-// against `--release` — the wrap without the flag, the trap with it.
+// at --debug, so it can't distinguish the default from the flag. The whole point is the
+// RELEASE build, so both halves are asserted against `--release` — the trap by default,
+// the wrap only when explicitly opted out.
 import { test, expect, beforeAll, afterAll } from "bun:test";
 import { execFileSync } from "child_process";
 import { mkdtempSync, rmSync, writeFileSync } from "fs";
@@ -44,18 +45,18 @@ function run(bin: string): { out: string; code: number } {
   }
 }
 
-// The footgun, pinned so a future change to the default is a deliberate act that breaks
-// this test rather than a silent behaviour swap.
-test("release build wraps on overflow by default", () => {
-  build("wrap", []);
-  const r = run("wrap");
-  expect(r.code).toBe(0);
-  expect(r.out.trim()).toBe("-9223372036854775808");
-}, 120000);
-
-test("--overflow-checks traps in a release build", () => {
-  build("trap", ["--overflow-checks"]);
+// The law, pinned: a release build traps by default. A future change back to silent
+// wrapping is then a deliberate act that breaks this test, not a quiet regression.
+test("release build traps on overflow by default", () => {
+  build("trap", []);
   const r = run("trap");
   expect(r.code).not.toBe(0);
   expect(r.out).toContain("integer overflow");
+}, 120000);
+
+test("--no-overflow-checks restores wrapping in a release build", () => {
+  build("wrap", ["--no-overflow-checks"]);
+  const r = run("wrap");
+  expect(r.code).toBe(0);
+  expect(r.out.trim()).toBe("-9223372036854775808");
 }, 120000);

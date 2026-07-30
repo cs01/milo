@@ -10,7 +10,7 @@ last-verified: 2026-07-22
 
 Goal: approach Rust's safe-code guarantees with a smaller reference model. Static analysis first; always-on dynamic checks where the chosen arena/bounds model requires them. No lifetime annotations.
 
-Enforced today: moves, second-class references, bounds checks, `Option`, structural Send/Sync, explicit unsafe manual Send/Sync implementations, debug overflow traps (or all-mode `--overflow-checks`), coercion checks, intraprocedural borrow invalidation, call-site exclusivity, and arena identity/generation validation. Remaining work is concentrated at explicit trust boundaries (FFI and audited unsafe implementations), richer interprocedural reasoning, and making overflow traps the release default.
+Enforced today: moves, second-class references, bounds checks, `Option`, structural Send/Sync, explicit unsafe manual Send/Sync implementations, all-mode overflow traps (`--no-overflow-checks` to opt out), coercion checks, intraprocedural borrow invalidation, call-site exclusivity, and arena identity/generation validation. Remaining work is concentrated at explicit trust boundaries (FFI and audited unsafe implementations) and richer interprocedural reasoning.
 
 ## Phase 1: `unsafe` Blocks + Safe FFI Surface — DONE
 

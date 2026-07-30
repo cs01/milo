@@ -25,7 +25,7 @@ Primitive types, `let`/`var`, if/else, while/for, functions, structs, enums with
 - **Ownership**: single-owner moves, compiler-tracked drops, no GC, no RC
 - **Null safety**: `Option<T>` — no null in safe code
 - **Race safety**: structural `Send`/`Sync`, checked at `spawn()`/`Promise.blocking` boundaries
-- **Overflow safety**: compile-time range proof + traps at `--debug`; `--overflow-checks` / `--no-overflow-checks` force either behaviour at any `-O` (release still wraps by default — see In Progress)
+- **Overflow safety**: compile-time range proof + runtime traps on `+ - * -x` (and shift-out-of-range, div-by-zero, `INT_MIN / -1`) in **all** build modes; `--no-overflow-checks` / `--fast` opt back into wrapping for `+ - *`, `.wrappingAdd`/`.saturatingAdd`/`.checkedAdd` name it per op
 - **`unsafe` blocks**: required for deref, pointer indexing, address-of, pointer casts, `zeroed<T>()`, unsafe-signature extern calls; unused-`unsafe` lint on by default
 - **Borrow invalidation**: ref-while-frozen and use-after-invalidate for built-in borrows; call-site exclusivity (`f(&mut v, &v[0])` rejected)
 - **Arena safety**: identity + generation validation at runtime for `Arena<T>`/`Handle<T>`
@@ -143,9 +143,9 @@ Reproduce: `sh scripts/selfhost.sh` (builds stage1 via the oracle — required; 
 - [ ] **fd width** — `socket`/`accept` return `SOCKET` (`UINT_PTR`) but `std/os` declares `i32`; the audit script correctly flags it and stays off the Windows CI job until the fd layer goes i64
 - [ ] Unskip `tcpIpv6` / `tcpGreenConnectRefused` once real Windows confirms them (they link; Wine can't emulate `AF_INET6` or a refused `FD_CONNECT`)
 
-### Overflow Traps by Default
+### Overflow Traps by Default — DONE
 
-Direction is **decided** — trap by default in release (Ethos #1; silent release wrap is the one inherited footgun), with `wrappingAdd`/`saturatingAdd`/`checkedAdd` for intentional wrap. What is owed is the measurement, not the decision: the compiler proves most arithmetic safe and emits no check at all (`matmul` emits zero traps even with the flag on), while arithmetic-dominated code with unprovable operand ranges measured **~+8%** (0.37s → 0.40s over 400M iterations). Real benchmarks are sub-0.3s and need a quiet machine. Do it with the emulators as the stress case, then flip.
+`+ - * -x` trap on overflow in **every** build mode (Ethos #1; the silent release wrap was the one inherited footgun). `--no-overflow-checks`/`--fast` opt back into wrapping; `wrappingAdd`/`saturatingAdd`/`checkedAdd` name it per op. The compiler proves most arithmetic safe and emits no check at all (`matmul` emits zero traps even with checks on); arithmetic-dominated code with unprovable operand ranges measured **~+8%** worst case (0.37s → 0.40s over 400M iterations), near-zero on real sub-0.3s benchmarks. Traps `abort()` (SIGABRT) for a supervisor-visible abnormal exit + core dump. Shipped alongside all-mode shift-out-of-range traps and float→int saturating casts.
 
 ---
 

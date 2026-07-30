@@ -64,8 +64,8 @@ function frontendToHIR(source: string, target: TargetInfo, filePath?: string, wa
   return lower(program, result, sourceDir, target.os);
 }
 
-function compile(source: string, target: TargetInfo, filePath?: string, warningConfig?: WarningConfig, debugOverflow = false, emitDebug = false, contractChecks = false): string {
-  return compileWithGuards(source, target, filePath, warningConfig, debugOverflow, emitDebug, contractChecks).ir;
+function compile(source: string, target: TargetInfo, filePath?: string, warningConfig?: WarningConfig, trapOnOverflow = false, emitDebug = false, contractChecks = false): string {
+  return compileWithGuards(source, target, filePath, warningConfig, trapOnOverflow, emitDebug, contractChecks).ir;
 }
 
 // Parse + resolve imports + type-check, rendering ParseErrors as clean Elm-style
@@ -93,9 +93,9 @@ function parseCheckProgram(src: string, target: TargetInfo, filePath: string, wa
 // `cGuards` is the `@cLayout`/`@cSig` verification TU (null when the program declares
 // neither) — see Codegen.cDeclGuards. It rides alongside the IR because only codegen
 // knows the field offsets and return widths it asserts.
-function compileWithGuards(source: string, target: TargetInfo, filePath?: string, warningConfig?: WarningConfig, debugOverflow = false, emitDebug = false, contractChecks = false): { ir: string; cGuards: string | null; linkLibs: string[] } {
+function compileWithGuards(source: string, target: TargetInfo, filePath?: string, warningConfig?: WarningConfig, trapOnOverflow = false, emitDebug = false, contractChecks = false): { ir: string; cGuards: string | null; linkLibs: string[] } {
   const hirModule = frontendToHIR(source, target, filePath, warningConfig);
-  const cg = new Codegen(target, filePath, debugOverflow, emitDebug, contractChecks);
+  const cg = new Codegen(target, filePath, trapOnOverflow, emitDebug, contractChecks);
   const ir = cg.generate(hirModule);
   return { ir, cGuards: cg.cDeclGuards(), linkLibs: hirModule.linkLibs ?? [] };
 }
@@ -179,9 +179,9 @@ function compileToJS(source: string, target: TargetInfo, filePath?: string, warn
   return new CodegenJS().generate(hirModule);
 }
 
-function compileToIr(sourcePath: string, outputPath: string | null, target: TargetInfo, warningConfig?: WarningConfig, debugOverflow = false, emitDebug = false, contractChecks = false) {
+function compileToIr(sourcePath: string, outputPath: string | null, target: TargetInfo, warningConfig?: WarningConfig, trapOnOverflow = false, emitDebug = false, contractChecks = false) {
   const source = readFileSync(sourcePath, "utf-8");
-  const ir = compile(source, target, sourcePath, warningConfig, debugOverflow, emitDebug, contractChecks);
+  const ir = compile(source, target, sourcePath, warningConfig, trapOnOverflow, emitDebug, contractChecks);
   if (outputPath) {
     writeFileSync(outputPath, ir);
     console.log(`wrote ${outputPath}`);
@@ -410,9 +410,9 @@ function linkIR(llFile: string, outFile: string, optFlag: string, libs: string, 
 
 function compileToObj(sourcePath: string, outputPath: string | null, target: TargetInfo, optFlag: string = "", warningConfig?: WarningConfig, noEntry = false, forceOverflowChecks: boolean | null = null, forceContractChecks: boolean | null = null): string {
   const source = readFileSync(sourcePath, "utf-8");
-  const debugOverflow = forceOverflowChecks ?? (optFlag === "-O0");
+  const trapOnOverflow = forceOverflowChecks ?? true;
   const contractChecks = forceContractChecks ?? (optFlag === "-O0");
-  const { ir, cGuards } = compileWithGuards(source, target, sourcePath, warningConfig, debugOverflow, false, contractChecks);
+  const { ir, cGuards } = compileWithGuards(source, target, sourcePath, warningConfig, trapOnOverflow, false, contractChecks);
   verifyCDecls(cGuards, target);
 
   const base = basename(sourcePath).replace(/\.milo$/, "");
@@ -607,13 +607,12 @@ function detectLibs(ir: string, target: TargetInfo, staticDeps = false): string 
 
 function compileToBinary(sourcePath: string, outputPath: string | null, target: TargetInfo, optFlag: string = "", warningConfig?: WarningConfig, extraLinkFlags: string[] = [], sanitize: boolean = false, emitDebug = false, heapSize: number | null = null, forceOverflowChecks: boolean | null = null, staticDeps = false, forceContractChecks: boolean | null = null): string {
   const source = readFileSync(sourcePath, "utf-8");
-  // Arithmetic traps at -O0 but silently WRAPS at -O2/-O3 — the one real footgun left
-  // (Rust's wart; Swift traps in every mode). Checks are only *defaulted* from -O, never
-  // welded to it: `--overflow-checks` forces them on at any -O and `--no-overflow-checks`
-  // forces them off, so -O0's fast build is usable without also changing arithmetic
-  // semantics. Both directions matter — the cost has to be measurable before the default
-  // can be flipped.
-  const debugOverflow = forceOverflowChecks ?? (optFlag === "-O0");
+  // Arithmetic (+ - * -x) traps on overflow in EVERY build mode — the language law is
+  // "every op is total; wrapping is opt-in" (Swift/Zig-safe model, not Rust's mode-flip).
+  // The default is decoupled from -O: `--no-overflow-checks` (and `--fast`) force wrapping
+  // back on for the rare perf-critical build, `--overflow-checks` forces trapping. Wrapping
+  // is otherwise reached only by naming it: `.wrappingAdd`/`.saturatingAdd`/`.checkedAdd`.
+  const trapOnOverflow = forceOverflowChecks ?? true;
   // Contract asserts default the same way but are a separate switch: overflow is about
   // what the machine does to your arithmetic, a contract is a claim you wrote down. A
   // release build that keeps its `requires` checks is a normal thing to want, and so is
@@ -622,7 +621,7 @@ function compileToBinary(sourcePath: string, outputPath: string | null, target: 
   // DWARF is gated on -g alone (compose `-g --debug` for -O0 + line info). Keeping it
   // off --debug leaves the -O0 path — used by the runtime-error test harness — byte
   // -identical and free of per-build dsymutil / .dSYM litter.
-  const { ir, cGuards, linkLibs } = compileWithGuards(source, target, sourcePath, warningConfig, debugOverflow, emitDebug, contractChecks);
+  const { ir, cGuards, linkLibs } = compileWithGuards(source, target, sourcePath, warningConfig, trapOnOverflow, emitDebug, contractChecks);
   verifyCDecls(cGuards, target);
   const base = basename(sourcePath).replace(/\.milo$/, "");
   const id = crypto.randomUUID().slice(0, 8);
@@ -1340,8 +1339,8 @@ async function main() {
     console.log("  -O<level>              clang opt level: 0,1,2,3,s,z (default: -O2)");
     console.log("  --sanitize             link with AddressSanitizer (requires clang)");
     console.log("  --static-deps          static-link native deps (openssl/sqlite) for a portable binary");
-    console.log("  --overflow-checks     trap on +/-/* overflow at any -O (default: only --debug)");
-    console.log("  --no-overflow-checks  wrap on +/-/* overflow at any -O (e.g. fast -O0 builds)");
+    console.log("  --overflow-checks     trap on +/-/* overflow at any -O (on by default in every mode)");
+    console.log("  --no-overflow-checks  wrap on +/-/* overflow at any -O (opt out of the default traps)");
     console.log("  --contract-checks     assert requires/ensures/invariant at any -O (default: only --debug)");
     console.log("  --no-contract-checks  drop those asserts at any -O (e.g. fast -O0 builds)");
     console.log("  --fast                quick edit-loop build: -O0, wrapping (~2x faster compile)");
@@ -1615,9 +1614,9 @@ async function main() {
     const bin = compileToBinary(source!, output, target, optFlag, warningConfig, rest, sanitize, emitDebug, heapSize, overflowChecks, staticDeps, contractChecks);
     reportCompiled(source!, bin, Date.now() - t0);
   } else if (cmd === "emit-ir") {
-    const debugOverflow = overflowChecks ?? (optFlag === "-O0");
+    const trapOnOverflow = overflowChecks ?? true;
     const emitContractChecks = contractChecks ?? (optFlag === "-O0");
-    compileToIr(source!, output, target, warningConfig, debugOverflow, emitDebug, emitContractChecks);
+    compileToIr(source!, output, target, warningConfig, trapOnOverflow, emitDebug, emitContractChecks);
   } else if (cmd === "emit-obj") {
     const t0 = Date.now();
     const obj = compileToObj(source!, output, target, optFlag, warningConfig, noEntry, overflowChecks, contractChecks);

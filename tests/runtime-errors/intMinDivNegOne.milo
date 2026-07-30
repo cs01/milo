@@ -1,4 +1,4 @@
-// @runtime-error: integer overflow
+// @runtime-error: division overflow
 
 pub fn negativeOne(): i32 {
     return -1

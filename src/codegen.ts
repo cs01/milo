@@ -64,8 +64,8 @@ export class Codegen {
   private needsContractCheck = false;
   // ensures clauses of the function being generated; checked at every return site
   private currentEnsures: HIRContract[] = [];
-  private debugOverflow = false;
-  // Independent of debugOverflow: `requires`/`ensures`/`invariant` become runtime
+  private trapOnOverflow = false;
+  // Independent of trapOnOverflow: `requires`/`ensures`/`invariant` become runtime
   // asserts. Both default on at -O0 and off above it, but they answer different
   // questions, so `--contract-checks` / `--overflow-checks` set them separately.
   private contractChecks = false;
@@ -146,10 +146,10 @@ export class Codegen {
   private usedDbgDeclare = false;
   private diTypes = new Map<string, number>();
 
-  constructor(target: TargetInfo, filePath?: string, debugOverflow = false, emitDebug = false, contractChecks = false) {
+  constructor(target: TargetInfo, filePath?: string, trapOnOverflow = false, emitDebug = false, contractChecks = false) {
     this.target = target;
     this.filePath = filePath;
-    this.debugOverflow = debugOverflow;
+    this.trapOnOverflow = trapOnOverflow;
     this.emitDebug = emitDebug;
     this.contractChecks = contractChecks;
   }
@@ -1166,6 +1166,8 @@ export class Codegen {
       this.output.splice(1, 0, "declare ptr @malloc(i64)");
     if (this.needsExit && !declaredExterns.has("exit"))
       this.output.splice(1, 0, "declare void @exit(i32) noreturn");
+    if (this.needsAbort && !declaredExterns.has("abort"))
+      this.output.splice(1, 0, "declare void @abort() noreturn");
     if (this.usesSchedulerGlobal && !declaredExterns.has("_exit"))
       this.output.splice(1, 0, "declare void @_exit(i32) noreturn");
     if (this.needsPutchar && !declaredExterns.has("putchar"))
@@ -1870,7 +1872,7 @@ export class Codegen {
     const fmtPtr = this.nextTemp();
     lines.push(`  ${fmtPtr} = getelementptr [40 x i8], ptr @.bounds_err, i32 0, i32 0`);
     lines.push(`  call i32 (ptr, ...) @printf(ptr ${fmtPtr}, i32 ${idx}, i32 ${size})`);
-    lines.push(`  call void @exit(i32 1)`);
+    this.panicAbort(lines);
     lines.push(`  unreachable`);
     lines.push(`${okLabel}:`);
   }
@@ -1901,7 +1903,7 @@ export class Codegen {
         const errPtr = this.nextTemp();
         lines.push(`  ${errPtr} = getelementptr [${s.length} x i8], ptr ${s.label}, i32 0, i32 0`);
         lines.push(`  call i32 (ptr, ...) @printf(ptr ${errPtr})`);
-        lines.push(`  call void @exit(i32 1)`);
+        this.panicAbort(lines);
         lines.push(`  unreachable`);
         lines.push(`${ok}:`);
       }
@@ -1932,7 +1934,7 @@ export class Codegen {
     const nfmtPtr = this.nextTemp();
     lines.push(`  ${nfmtPtr} = getelementptr [${nfmt.length} x i8], ptr ${nfmt.label}, i32 0, i32 0`);
     lines.push(`  call i32 (ptr, ...) @printf(ptr ${nfmtPtr}, i64 ${val})`);
-    lines.push(`  call void @exit(i32 1)`);
+    this.panicAbort(lines);
     lines.push(`  unreachable`);
     lines.push(`${okLabel}:`);
   }
@@ -1956,7 +1958,7 @@ export class Codegen {
       const errPtr = this.nextTemp();
       lines.push(`  ${errPtr} = getelementptr [${s.length} x i8], ptr ${s.label}, i32 0, i32 0`);
       lines.push(`  call i32 (ptr, ...) @printf(ptr ${errPtr})`);
-      lines.push(`  call void @exit(i32 1)`);
+      this.panicAbort(lines);
       lines.push(`  unreachable`);
     };
 
@@ -1980,6 +1982,25 @@ export class Codegen {
       lines.push(`  br i1 ${isZero}, label %${zeroFail}, label %${okLabel}`);
     }
     abort(zeroFail, `milo: division by zero at ${at}`);
+    lines.push(`${okLabel}:`);
+  }
+
+  private emitShiftCheck(lines: string[], amount: string, llType: string, bits: number, span?: { line: number; col: number }) {
+    this.needsPrintf = true;
+    const at = `${span?.line ?? 0}:${span?.col ?? 0}`;
+    const okLabel = this.nextLabel("shift.ok");
+    const failLabel = this.nextLabel("shift.oob");
+    // Unsigned compare so a negative amount (huge as unsigned) fails the same way.
+    const bad = this.nextTemp();
+    lines.push(`  ${bad} = icmp uge ${llType} ${amount}, ${bits}`);
+    lines.push(`  br i1 ${bad}, label %${failLabel}, label %${okLabel}`);
+    lines.push(`${failLabel}:`);
+    const s = this.addString(`milo: shift amount out of range (>= ${bits}) at ${at}\n`);
+    const errPtr = this.nextTemp();
+    lines.push(`  ${errPtr} = getelementptr [${s.length} x i8], ptr ${s.label}, i32 0, i32 0`);
+    lines.push(`  call i32 (ptr, ...) @printf(ptr ${errPtr})`);
+    this.panicAbort(lines);
+    lines.push(`  unreachable`);
     lines.push(`${okLabel}:`);
   }
 
@@ -2017,7 +2038,7 @@ export class Codegen {
     lines.push(`  ${fmtPtr} = getelementptr [46 x i8], ptr @.overflow_err, i32 0, i32 0`);
     const filePtr = this.emitCheckFilePtr(lines, span);
     lines.push(`  call i32 (ptr, ...) @printf(ptr ${fmtPtr}, ptr ${filePtr}, i32 ${span?.line ?? 0})`);
-    lines.push(`  call void @exit(i32 1)`);
+    this.panicAbort(lines);
     lines.push(`  unreachable`);
     lines.push(`${okLabel}:`);
     return val;
@@ -2043,7 +2064,7 @@ export class Codegen {
     lines.push(`  ${fmtPtr} = getelementptr [44 x i8], ptr @.range_err, i32 0, i32 0`);
     const filePtr = this.emitCheckFilePtr(lines, span);
     lines.push(`  call i32 (ptr, ...) @printf(ptr ${fmtPtr}, ptr ${filePtr}, i32 ${span?.line ?? 0})`);
-    lines.push(`  call void @exit(i32 1)`);
+    this.panicAbort(lines);
     lines.push(`  unreachable`);
     lines.push(`${okLabel}:`);
   }
@@ -2083,7 +2104,7 @@ export class Codegen {
     lines.push(`  ${kindPtr} = getelementptr [${kind.length + 1} x i8], ptr @.contract_kind_${kind}, i32 0, i32 0`);
     const filePtr = this.emitCheckFilePtr(lines, span);
     lines.push(`  call i32 (ptr, ...) @printf(ptr ${fmtPtr}, ptr ${kindPtr}, ptr ${filePtr}, i32 ${span?.line ?? 0})`);
-    lines.push(`  call void @exit(i32 1)`);
+    this.panicAbort(lines);
     lines.push(`  unreachable`);
     lines.push(`${okLabel}:`);
   }
@@ -3182,7 +3203,7 @@ export class Codegen {
         const fmtStr = this.addString(`assertion failed at ${file}:${line}:${col}\n`);
         this.emitFdPrintf(lines, 2, fmtStr.label, "");
       }
-      lines.push(`  call void @exit(i32 1)`);
+      this.panicAbort(lines);
       lines.push(`  unreachable`);
       lines.push(`${okLabel}:`);
       return [lines, "void", "void"];
@@ -3592,7 +3613,7 @@ export class Codegen {
         if (expr.op in intOps) {
           const op = isFloat ? floatOps[expr.op] : intOps[expr.op];
           const checkedOps: Record<string, string> = { "+": "add", "-": "sub", "*": "mul" };
-          if (this.debugOverflow && !isFloat && expr.op in checkedOps && expr.span) {
+          if (this.trapOnOverflow && !isFloat && expr.op in checkedOps && expr.span) {
             const val = this.emitCheckedArith(lines, checkedOps[expr.op], unsigned, llt, lv, rv, expr.span);
             return [lines, val, llt];
           }
@@ -3602,6 +3623,12 @@ export class Codegen {
             const signed = !unsigned;
             const bits = expr.left.type.tag === "int" ? expr.left.type.bits : 32;
             this.emitDivByZeroCheck(lines, rv, lv, llt, signed, bits, expr.span);
+          }
+          // A shift by >= the operand's bit width (or a negative amount, which reads as a
+          // huge unsigned) is LLVM poison — UB in every mode. Trap it, like div-by-zero.
+          if (!isFloat && (expr.op === "<<" || expr.op === ">>")) {
+            const bits = expr.left.type.tag === "int" ? expr.left.type.bits : 32;
+            this.emitShiftCheck(lines, rv, llt, bits, expr.span);
           }
           lines.push(`  ${tmp} = ${op} ${llt} ${lv}, ${rv}`);
           return [lines, tmp, llt];
@@ -3619,12 +3646,20 @@ export class Codegen {
           lines.push(...al);
           return [lines, addr, "ptr"];
         }
+        // Negating an integer literal is a compile-time constant — fold it. Without this,
+        // a legitimate negative literal like i32 INT_MIN (-2147483648, lexed as the unary
+        // minus of 2147483648) would emit a runtime checked-neg and trap on the INT_MIN
+        // overflow now that overflow checks are on in every build.
+        if (expr.op === "-" && expr.operand.kind === "IntLit"
+            && expr.operand.type.tag === "int" && expr.operand.type.signed) {
+          return [lines, (-(expr.operand.value as bigint)).toString(), this.llvmType(expr.operand.type)];
+        }
         const [ol, ov, ot] = this.genExpr(expr.operand);
         lines.push(...ol);
         const tmp = this.nextTemp();
         if (expr.op === "-") {
           if (ot === "float" || ot === "double") lines.push(`  ${tmp} = fneg ${ot} ${ov}`);
-          else if (this.debugOverflow && expr.span) {
+          else if (this.trapOnOverflow && expr.span) {
             const unsigned = this.isUnsigned(expr.operand.type);
             const val = this.emitCheckedArith(lines, "sub", unsigned, ot, "0", ov, expr.span);
             return [lines, val, ot];
@@ -4765,7 +4800,7 @@ export class Codegen {
     }
     lines.push(`  call i32 @putchar(i32 10)`);
     this.needsPutchar = true;
-    lines.push(`  call void @exit(i32 1)`);
+    this.panicAbort(lines);
     lines.push(`  unreachable`);
 
     // ok branch — extract payload and zero source to prevent double-free
@@ -6051,7 +6086,7 @@ export class Codegen {
     lines.push(`  ${errPtr} = getelementptr [${errLen} x i8], ptr ${errLabel}, i32 0, i32 0`);
     lines.push(`  call i32 (ptr, ...) @printf(ptr ${errPtr})`);
     lines.push(`  call i32 @putchar(i32 10)`);
-    lines.push(`  call void @exit(i32 1)`);
+    this.panicAbort(lines);
     lines.push(`  unreachable`);
 
     // grow if len >= cap (we are adding one element) — identical policy to push
@@ -6151,7 +6186,7 @@ export class Codegen {
     lines.push(`  ${errPtr} = getelementptr [${errLen} x i8], ptr ${errLabel}, i32 0, i32 0`);
     lines.push(`  call i32 (ptr, ...) @printf(ptr ${errPtr})`);
     lines.push(`  call i32 @putchar(i32 10)`);
-    lines.push(`  call void @exit(i32 1)`);
+    this.panicAbort(lines);
     lines.push(`  unreachable`);
 
     lines.push(`${okLabel}:`);
@@ -6513,7 +6548,7 @@ export class Codegen {
     const errPtr = this.nextTemp();
     lines.push(`  ${errPtr} = getelementptr [${errLen} x i8], ptr ${errLabel}, i32 0, i32 0`);
     lines.push(`  call i32 (ptr, ...) @printf(ptr ${errPtr}, i64 ${startVal}, i64 ${endVal}, i64 ${lenVal})`);
-    lines.push(`  call void @exit(i32 1)`);
+    this.panicAbort(lines);
     lines.push(`  unreachable`);
     lines.push(`${okLabel}:`);
   }
@@ -6646,7 +6681,7 @@ export class Codegen {
     const errPtr = this.nextTemp();
     lines.push(`  ${errPtr} = getelementptr [${errLen} x i8], ptr ${errLabel}, i32 0, i32 0`);
     lines.push(`  call i32 (ptr, ...) @printf(ptr ${errPtr}, i64 ${startVal}, i64 ${endVal}, i64 ${lenVal})`);
-    lines.push(`  call void @exit(i32 1)`);
+    this.panicAbort(lines);
     lines.push(`  unreachable`);
     lines.push(`${okLabel}:`);
 
@@ -6700,7 +6735,7 @@ export class Codegen {
     const errPtr = this.nextTemp();
     lines.push(`  ${errPtr} = getelementptr [${errLen} x i8], ptr ${errLabel}, i32 0, i32 0`);
     lines.push(`  call i32 (ptr, ...) @printf(ptr ${errPtr}, i64 ${startVal}, i64 ${endVal})`);
-    lines.push(`  call void @exit(i32 1)`);
+    this.panicAbort(lines);
     lines.push(`  unreachable`);
     lines.push(`${okLabel}:`);
 
@@ -7770,8 +7805,19 @@ export class Codegen {
   private needsMemset = false;
   private needsMemsetIntrinsic = false;
   private needsSnprintf = false;
+  private needsAbort = false;
   // fp→int saturating-cast intrinsic declares needed (each a full `declare ...` line, deduped)
   private fpSatIntrinsics = new Set<string>();
+
+  // A panic (overflow/bounds/div/range/shift trap) terminates via abort() — SIGABRT — not
+  // exit(1). abort gives a supervisor an abnormal-exit signal it can distinguish from an
+  // ordinary error, lets the OS drop a core dump, and makes lldb/gdb break at the fault.
+  // Kept distinct from a user's exit(status) call, which stays a plain exit. Callers still
+  // push their own `unreachable` after this.
+  private panicAbort(lines: string[]) {
+    this.needsAbort = true;
+    lines.push(`  call void @abort()`);
+  }
 
   // Append printf-style format fragments for a value of type `tk`. `val` is the loaded
   // LLVM value, `llvmTy` its LLVM type. Strings, ints, bool, float, ptr inline trivially.

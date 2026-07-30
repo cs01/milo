@@ -1,0 +1,13 @@
+// INT_MIN written as a literal must compile and print, not trap — the unary minus of the
+// literal is folded at compile time (else -(2147483648) would overflow-trap on negation).
+// @expect: -2147483648
+// @expect: -128
+// @expect: -9223372036854775808
+pub fn main() {
+    let a: i32 = -2147483648
+    print(a)
+    let b: i8 = -128
+    print(b)
+    let c: i64 = -9223372036854775808
+    print(c)
+}

@@ -1,0 +1,49 @@
+// Zero-copy iteration over a custom container: the container hands out a `&[T]` view
+// of its backing store (a non-owning fat pointer, no clone), and the caller iterates
+// that. This is the Milo idiom for "iterate a custom collection" — a slice view, not a
+// by-value copy of each element.
+struct IntSet {
+    data: Vec<i64>
+}
+
+impl IntSet {
+    fn add(self: &mut Self, x: i64): void {
+        self.data.push(x)
+    }
+    fn view(self: &Self): &[i64] {
+        return self.data[0..self.data.len]
+    }
+}
+
+fn total(xs: &[i64]): i64 {
+    var s = 0
+    for x in xs {
+        s = s + x
+    }
+    return s
+}
+
+fn main() {
+    var set = IntSet {
+        data: Vec.new()
+    }
+    set.add(10)
+    set.add(20)
+    set.add(30)
+
+    // iterate the view directly (rvalue slice)
+    var s = 0
+    for x in set.view() {
+        s = s + x
+    }
+    // @expect: 60
+    print(s)
+
+    // pass the view to another fn — still zero-copy
+    // @expect: 60
+    print(total(set.view()))
+
+    // sub-view of the view's source
+    // @expect: 50
+    print(total(set.data[1..3]))
+}

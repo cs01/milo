@@ -496,6 +496,11 @@ export class Codegen {
       case "hashmap": this.hasHashMapType = true; return "%HashMap";
       case "ref":
         if (t.inner.tag === "interface") return "{ ptr, ptr }";
+        // `&[T]` is a slice: a non-owning fat pointer carried by value, not an opaque
+        // pointer. It shares the Vec's %Vec layout, so a `&[T]` param/return lowers to
+        // %Vec — the same value the slice expression already produces. (Other `&T` stay
+        // pointer-passed.)
+        if (t.inner.tag === "array" && t.inner.size === null) { this.hasVecType = true; return "%Vec"; }
         return "ptr";
       case "interface": return "{ ptr, ptr }";
       case "struct": return `%${t.name}`;

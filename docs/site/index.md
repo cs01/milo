@@ -3,7 +3,7 @@ layout: home
 hero:
   name: Milo
   text: "A memory-safe systems language that guides you to correct, readable programs."
-  tagline: "Contracts and formal verification built in. Ship correct code with confidence."
+  tagline: "Contracts and formal verification are built into the language to help you ship correct code with confidence."
   image:
     src: /logo.svg
     alt: Milo
@@ -11,12 +11,6 @@ hero:
     - theme: brand
       text: Get Started
       link: /getting-started/installation
-    - theme: alt
-      text: Learn the Language
-      link: /language/
-    - theme: alt
-      text: ▶ Try it live
-      link: /playground
 ---
 
 <div class="intro">
@@ -115,7 +109,7 @@ fn main() {
 <div class="showcase">
   <div class="showcase-head">
     <h2>Built with Milo</h2>
-    <p>Milo is young — still a puppy 🐶 — but we have built a lot with it already. Real programs are how we find out what actually works, and every rough edge we hit goes back into the language.</p>
+    <p>Milo is young (still a puppy 🐶) but we have built a lot with it already! We dogfood the language by writing a variety of realy world programs to prove the language works. If we run into expressiveness, correctness, or ergonomics issues, we modify the langauge to continue on our mission of correct, readable programs.</p>
   </div>
   <div class="cat cat-emu">
     <h3 class="cat-head">Emulators</h3>

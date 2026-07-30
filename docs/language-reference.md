@@ -1052,6 +1052,43 @@ let found = recordLookup(st, st.keys.clone())   // ok — the callee gets its ow
 
 `clone()` is unavailable on `Vec<SomeInterface>` (the concrete type is erased and the itable carries no clone slot) and on Vec of closures.
 
+### Slices — `&[T]`
+
+A slice is a **non-owning view** over a contiguous run of elements — a fat pointer (`{ptr, len}`) into a `Vec`'s (or array's) backing store. It copies no elements and owns nothing; the source stays alive for the slice's life (the borrow is tracked).
+
+```milo
+fn sum(xs: &[i64]): i64 {
+    var s = 0
+    for x in xs { s = s + x }   // iterate a view — no copy
+    return s
+}
+
+var v: Vec<i64> = Vec.new()
+v.push(10); v.push(20); v.push(30)
+
+print(sum(v))          // a whole Vec coerces to &[i64]
+let mid = v[1..3]      // sub-view [20, 30]
+print(mid.len)         // 2
+print(mid[0])          // 20 — indexed, bounds-checked
+print(sum(mid))        // 50
+```
+
+A function may **return** a `&[T]` view of data it was given — the idiom for exposing a
+container's storage for zero-copy iteration:
+
+```milo
+struct Ring { data: Vec<i64> }
+impl Ring {
+    fn items(self: &Self): &[i64] { return self.data[0..self.data.len] }
+}
+// for x in r.items() { ... }   // iterates the view, borrows each element
+```
+
+Two current limits:
+
+- Passing a slice **rvalue** straight into a call — `sum(v[1..3])`, `sum(r.items())` — does not work yet; bind it first: `let s = v[1..3]; sum(s)`. Iterating an rvalue view (`for x in r.items()`) is fine.
+- `&mut [T]` (mutable views, `splitMut`) are not yet supported — slices are read-only.
+
 ---
 
 ## HashMap\<K, V\>

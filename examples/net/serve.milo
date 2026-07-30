@@ -5,11 +5,9 @@ from "std/http" import {
 from "std/argparse" import {
     newParser
 }
-from "std/io" import {
-    readFile
-}
+
 from "std/fs" import {
-    fileInfo, isDir, isFile, readDir
+    fileInfo, isDir, isFile, readDir, readFile
 }
 from "std/path" import {
     pathJoin

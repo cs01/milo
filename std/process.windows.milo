@@ -12,6 +12,9 @@
 // so the child cannot hold a pipe open and defeat EOF, and CreateProcess is told to
 // inherit handles. read/write then work on the parent-side fds unchanged.
 
+from "std/fs" import {
+    readFile
+}
 from "std/platform" import {
     close,
     read,
@@ -19,7 +22,7 @@ from "std/platform" import {
     exePathInto
 }
 from "std/io" import {
-    readFile, fdChannel
+    fdChannel
 }
 from "std/sync" import {
     Channel

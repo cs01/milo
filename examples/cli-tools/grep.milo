@@ -4,10 +4,10 @@ from "std/argparse" import {
     newParser
 }
 from "std/io" import {
-    readFile, writeStdout
+    writeStdout
 }
 from "std/fs" import {
-    isDir, isFile, readDir
+    isDir, isFile, readDir, readFile
 }
 from "std/path" import {
     pathJoin

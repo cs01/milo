@@ -1,3 +1,6 @@
+from "std/fs" import {
+    splitLines
+}
 // @expect: hello
 // @expect: world
 // @expect: foo
@@ -5,10 +8,6 @@
 // @expect: a
 // @expect: b
 // @expect: 2
-
-from "std/io" import {
-    splitLines
-}
 
 pub fn main(): i32 {
     let lines = splitLines("hello\nworld\nfoo")

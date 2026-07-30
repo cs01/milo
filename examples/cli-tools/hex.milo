@@ -1,10 +1,10 @@
 // @run: examples/hello.milo
 // hex — hex dump viewer
+from "std/fs" import {
+    readFile
+}
 from "std/argparse" import {
     newParser
-}
-from "std/io" import {
-    readFile
 }
 
 pub fn byteToHex(b: u8): string {

@@ -173,6 +173,39 @@ pub fn readDir(path: &string): Vec<DirEntry> {
     return entries
 }
 
+// Read an entire file into a string. Returns an IoError (NotFound, permission,
+// etc.) rather than throwing; propagate with `?` or match on it.
+pub fn readFile(path: &string): Result<string, IoError> {
+    let f = File.openRead(path)?
+    return f.readAll()
+}
+
+// Split a string into lines on newline boundaries.
+pub fn splitLines(content: &string): Vec<string> {
+    var result: Vec<string> = Vec.new()
+    var cur = ""
+    for byte in content {
+        if byte == 10 {
+            result.push(cur)
+            cur = ""
+        } else {
+            if byte != 13 {
+                cur.push(byte)
+            }
+        }
+    }
+    if cur.len > 0 {
+        result.push(cur)
+    }
+    return result
+}
+
+// Read a file and return its contents as a Vec of lines.
+pub fn readLines(path: &string): Result<Vec<string>, IoError> {
+    let content = readFile(path)?
+    return Result.Ok(splitLines(content))
+}
+
 // Write a string to a file, creating or truncating it.
 pub fn writeFile(path: &string, data: &string): Result<i64, IoError> {
     let f = File.openWrite(path)?

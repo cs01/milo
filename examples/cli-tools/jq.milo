@@ -1,11 +1,14 @@
 // @run: .
 // @stdin: {"a":1}
 // jq — minimal JSON query tool (field access, array iteration, array indexing)
+from "std/fs" import {
+    readFile
+}
 from "std/argparse" import {
     newParser
 }
 from "std/io" import {
-    readFile, readStdin
+    readStdin
 }
 
 pub fn skipWs(s: &string, start: i64): i64 {

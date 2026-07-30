@@ -323,49 +323,11 @@ impl File {
     }
 }
 
-// Read an entire file into a string. Returns an IoError (NotFound, permission,
-// etc.) rather than throwing; propagate with `?` or match on it.
-pub fn readFile(path: &string): Result<string, IoError> {
-    let f = File.openRead(path)?
-    return f.readAll()
-}
-
-// Write a string to stdout without a trailing newline.
-pub fn writeStr(s: &string): void {
-    writeFd(1, s, s.len)
-}
-
 // Write a single byte to stdout.
 pub fn putChar(ch: u8): void {
     var _pcBuf: [u8; 1] = [0; 1]
     _pcBuf[0] = ch
     writeFd(1, _pcBuf, 1)
-}
-
-// Split a string into lines on newline boundaries.
-pub fn splitLines(content: &string): Vec<string> {
-    var result: Vec<string> = Vec.new()
-    var cur = ""
-    for byte in content {
-        if byte == 10 {
-            result.push(cur)
-            cur = ""
-        } else {
-            if byte != 13 {
-                cur.push(byte)
-            }
-        }
-    }
-    if cur.len > 0 {
-        result.push(cur)
-    }
-    return result
-}
-
-// Read a file and return its contents as a Vec of lines.
-pub fn readLines(path: &string): Result<Vec<string>, IoError> {
-    let content = readFile(path)?
-    return Result.Ok(splitLines(content))
 }
 
 // Read a single line from a file descriptor (reads byte-by-byte until newline or EOF).

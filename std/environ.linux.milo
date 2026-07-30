@@ -1,3 +1,6 @@
+from "std/fs" import {
+    readFile
+}
 // std/environ — enumerate the whole process environment.
 //
 // getEnv reads one variable by name; this lists every variable, which is what a
@@ -5,10 +8,6 @@
 //
 // Linux exposes the environment as NUL-separated NAME=VALUE records in
 // /proc/self/environ, which avoids needing the `environ` global symbol.
-
-from "std/io" import {
-    readFile
-}
 
 pub struct EnvEntry {
     name: string,

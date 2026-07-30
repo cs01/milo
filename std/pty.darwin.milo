@@ -185,7 +185,7 @@ impl Pty {
         return writeFd(self.masterFd, buf, len)
     }
 
-    fn writeStr(self: &Self, s: &string): i64 {
+    fn writeStdout(self: &Self, s: &string): i64 {
         unsafe {
             return writeFd(self.masterFd, s as *u8, s.len)
         }

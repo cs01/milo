@@ -1,7 +1,7 @@
 // A type alias must expand behind `&` / `&mut` / `*` too — the ptr/ref flags
 // belong to the use site, not to the alias body.
 from "std/io" import {
-    writeStr
+    writeStdout
 }
 
 pub type Board = [i32; 4]
@@ -27,11 +27,11 @@ pub fn double(n: &Count): i64 {
 pub fn main() {
     var b: Board = [1, 2, 3, 4]
     bump(b)
-    writeStr(sum(b).toString())
-    writeStr("\n")
+    writeStdout(sum(b).toString())
+    writeStdout("\n")
     let c: Count = 21
-    writeStr(double(c).toString())
-    writeStr("\n")
+    writeStdout(double(c).toString())
+    writeStdout("\n")
 }
 // @expect: 20
 // @expect: 42

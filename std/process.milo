@@ -1,5 +1,8 @@
 // std/process — command execution and process control
 
+from "std/fs" import {
+    readFile
+}
 from "std/platform" import {
     pipe,
     close,
@@ -21,7 +24,7 @@ from "std/os" import {
     waitpid
 }
 from "std/io" import {
-    readFile, fdChannel
+    fdChannel
 }
 from "std/sync" import {
     Channel

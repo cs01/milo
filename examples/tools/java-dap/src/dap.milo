@@ -9,13 +9,13 @@
 // All diagnostics go to stderr: stdout carries DAP frames only.
 
 from "std/io" import {
-    FdReader, fdReaderAttach, readFile
+    FdReader, fdReaderAttach
 }
 from "std/os" import {
     exit
 }
 from "std/fs" import {
-    pathExists
+    pathExists, readFile
 }
 from "std/env" import {
     getEnvOr

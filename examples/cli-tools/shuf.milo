@@ -1,11 +1,14 @@
 // @run:
 // @stdin: 1 2 3
 // shuf — shuffle lines from stdin or a file
+from "std/fs" import {
+    readFile
+}
 from "std/argparse" import {
     newParser
 }
 from "std/io" import {
-    readFile, readStdin, writeStdout
+    readStdin, writeStdout
 }
 from "std/random" import {
     randRange

@@ -26,7 +26,7 @@ from "./tmuxVt" import {
     Term, newTerm, renderTerm
 }
 from "std/io" import {
-    writeStdout, flush, readFile
+    writeStdout, flush
 }
 from "std/term" import {
     enableRawMode, restoreTerminal
@@ -41,7 +41,7 @@ from "std/env" import {
     getEnvOr
 }
 from "std/fs" import {
-    writeFile
+    writeFile, readFile
 }
 from "std/os" import {
     ioctl
@@ -710,9 +710,9 @@ pub fn main(): void {
                                         var s = ""
                                         s.push(PREFIX)
                                         if focus == 0 {
-                                            pty0.writeStr(s)
+                                            pty0.writeStdout(s)
                                         } else {
-                                            pty1.writeStr(s)
+                                            pty1.writeStdout(s)
                                         }
                                     }
                                 } else if b == PREFIX {
@@ -728,9 +728,9 @@ pub fn main(): void {
                                     var s = ""
                                     s.push(fwd)
                                     if focus == 0 {
-                                        pty0.writeStr(s)
+                                        pty0.writeStdout(s)
                                     } else {
-                                        pty1.writeStr(s)
+                                        pty1.writeStdout(s)
                                     }
                                 }
                                 k = k + 1

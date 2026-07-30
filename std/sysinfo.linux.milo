@@ -5,7 +5,7 @@
 // degrades to the same zero/empty value macOS returns on failure, so a caller never has
 // to know which platform it's on.
 
-from "std/io" import {
+from "std/fs" import {
     readFile
 }
 from "std/string" import {

@@ -1,0 +1,71 @@
+// @expect: true
+// @expect: true
+// @expect: true
+// @expect: true
+//
+// `Kind.tryFrom(n): Option<Kind>` — the partial reverse of `k as i32`. Some(variant) when n is
+// a discriminant, None otherwise. It is DERIVED from the same discriminant list as the cast, so
+// the round-trip law `tryFrom(k as i32) == Some(k)` holds by construction — there is no
+// hand-written table to drift out of sync (the classic rot in sparse enums).
+
+enum Op: i32 {
+    LDA = 169, STA = 141, NOP
+} // sparse: 169, 141, 142
+
+enum Signed: i32 {
+    Neg = -1, Zero, Pos
+} // negative discriminant
+
+fn roundTrips(): bool {
+    // ∀ variant k: tryFrom(k as i32) == Some(k)
+    let vs: Vec<Op> = [Op.LDA, Op.STA, Op.NOP]
+    var i: i64 = 0
+    while i < vs.len {
+        let Option.Some(back) = Op.tryFrom(vs[i] as i32) else {
+            return false
+        }
+        if (back as i32) != (vs[i] as i32) {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+fn rejectsGaps(): bool {
+    // gap values in a sparse enum are None
+    match Op.tryFrom(168) {
+        Option.Some(_) => {
+            return false
+        }
+        Option.None => {
+        }
+    }
+    match Op.tryFrom(0) {
+        Option.Some(_) => {
+            return false
+        }
+        Option.None => {
+        }
+    }
+    return true
+}
+
+pub fn main(): i32 {
+    print(roundTrips()) // true
+    print(rejectsGaps()) // true
+    // negative discriminant round-trips too
+    let Option.Some(n) = Signed.tryFrom(-1) else {
+        return 1
+    }
+    print((n as i32) == -1) // true
+    match Signed.tryFrom(2) {
+        Option.Some(_) => {
+            return 2
+        }
+        Option.None => {
+        }
+    }
+    print(true) // reached only if 2 was rejected
+    return 0
+}

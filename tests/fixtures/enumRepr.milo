@@ -1,0 +1,38 @@
+// @expect: 2
+// @expect: 169
+// @expect: 142
+// @expect: -1
+//
+// Integer-repr'd (C-like) enums: `enum Kind: i32 { ... }`. `k as i32` is always defined and
+// yields the variant's discriminant — auto-assigned from 0, or explicit `= N` (sparse, and it
+// resumes counting after an explicit value). Payload-free by construction; match still works.
+enum Kind: i32 {
+    Null, Bool, Int
+} // 0, 1, 2
+
+enum Op: i32 {
+    LDA = 169, STA = 141, NOP
+} // 169, 141, 142 (explicit, then resume)
+
+enum Signed: i32 {
+    Neg = -1, Zero, Pos
+} // -1, 0, 1
+
+pub fn main(): i32 {
+    print(Kind.Int as i32) // 2
+    print(Op.LDA as i32) // 169
+    print(Op.NOP as i32) // 142 — resumed after STA = 141
+    print(Signed.Neg as i32) // -1
+
+    match Op.STA {
+        Op.LDA => {
+            return 1
+        }
+        Op.STA => {
+        }
+        Op.NOP => {
+            return 2
+        }
+    }
+    return 0
+}

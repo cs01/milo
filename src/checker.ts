@@ -88,6 +88,7 @@ export interface CSig {
 export interface EnumInfo {
   baseName?: string;
   variants: Map<string, { tag: number; fields: TypeKind[] }>;
+  reprType?: string; // set for `enum Kind: i32 { ... }` — the tag IS the integer value
 }
 
 export interface CheckResult {
@@ -1175,6 +1176,10 @@ export class TypeChecker {
         // pre-register so self-referential fields (Heap<Self>) resolve correctly
         this.enums.set(e.name, { variants: new Map() });
         const variants = new Map<string, { tag: number; fields: TypeKind[] }>();
+        // A repr'd enum's tag IS its integer value: explicit `= N`, else previous + 1 from 0.
+        // Sparse/non-contiguous is allowed and expected (that is why tryFrom is generated).
+        let nextDisc = 0;
+        const usedDiscs = new Map<number, string>();
         e.variants.forEach((v, i) => {
           const fields = v.fields.map(f => this.resolve(f));
           for (const field of fields) {
@@ -1183,9 +1188,21 @@ export class TypeChecker {
                 `wrap the recursive field in Heap<${e.name}> for heap allocation`);
             }
           }
-          variants.set(v.name, { tag: i, fields });
+          let tag = i;
+          if (e.reprType) {
+            if (fields.length > 0) {
+              this.error(`variant '${v.name}' of repr'd enum '${e.name}' cannot carry a payload`, e.span,
+                `an 'enum ... : ${e.reprType}' is a C-like enum; drop the '(...)' or drop the ': ${e.reprType}'`);
+            }
+            tag = v.discriminant ?? nextDisc;
+            const clash = usedDiscs.get(tag);
+            if (clash) this.error(`discriminant ${tag} is used by both '${clash}' and '${v.name}' in enum '${e.name}'`, e.span);
+            usedDiscs.set(tag, v.name);
+            nextDisc = tag + 1;
+          }
+          variants.set(v.name, { tag, fields });
         });
-        this.enums.set(e.name, { variants });
+        this.enums.set(e.name, { variants, ...(e.reprType && { reprType: e.reprType }) });
       }
     }
 
@@ -4575,6 +4592,17 @@ export class TypeChecker {
             }
           }
         }
+        // `Kind.tryFrom(n)` on a repr'd enum → Option<Kind>. The partial reverse of `k as i32`;
+        // most integers are not a variant, so the honest signature is Option, not a trap.
+        {
+          const reprInfo = this.enums.get(expr.enumName);
+          if (expr.variant === "tryFrom" && reprInfo?.reprType) {
+            if (expr.args.length !== 1) { this.error(`'${expr.enumName}.tryFrom' expects 1 argument, got ${expr.args.length}`, sp); return this.setType(expr, { tag: "unknown" }); }
+            const argType = this.checkExpr(expr.args[0]);
+            if (argType.tag !== "int" && argType.tag !== "unknown") this.error(`'${expr.enumName}.tryFrom': expected an integer, got ${typeName(argType)}`, sp);
+            return this.setType(expr, this.resolveOptionForValue({ tag: "enum", name: expr.enumName }, sp));
+          }
+        }
         if (expr.enumName === "String" && expr.variant === "withCapacity") {
           if (expr.args.length !== 1) { this.error(`'String.withCapacity' expects 1 argument, got ${expr.args.length}`, sp); return this.setType(expr, { tag: "unknown" }); }
           const argType = this.checkExpr(expr.args[0]);
@@ -4841,7 +4869,13 @@ export class TypeChecker {
       case "CastExpr": {
         const fromType = this.checkExpr(expr.operand);
         const toType = this.resolve(expr.targetType);
-        const fromOk = isNumeric(fromType) || fromType.tag === "bool" || fromType.tag === "ptr" || fromType.tag === "array" || fromType.tag === "fn" || fromType.tag === "cfn" || fromType.tag === "string" || fromType.tag === "unknown";
+        // A repr'd (C-like) enum casts to its integer value — always defined, since every
+        // variant has a discriminant. Only to an integer type: `Kind.tryFrom` is the reverse.
+        const fromReprEnum = fromType.tag === "enum" && !!this.enums.get(fromType.name)?.reprType;
+        if (fromReprEnum && toType.tag !== "int") {
+          this.error(`enum '${fromType.name}' casts only to an integer type, not ${typeName(toType)}`, sp);
+        }
+        const fromOk = isNumeric(fromType) || fromType.tag === "bool" || fromType.tag === "ptr" || fromType.tag === "array" || fromType.tag === "fn" || fromType.tag === "cfn" || fromType.tag === "string" || fromType.tag === "unknown" || fromReprEnum;
         // ptr -> cfn is how a dlsym result becomes callable; cfn -> ptr passes one back out
         const toOk = isNumeric(toType) || toType.tag === "ptr" || toType.tag === "cfn";
         if (!fromOk) {

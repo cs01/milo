@@ -1,0 +1,8 @@
+// @error: casts only to an integer type
+//
+// A repr'd enum casts to its integer discriminant, not to a float.
+enum Kind: i32 { A, B }
+pub fn main(): i32 {
+    let x = Kind.B as f64
+    return 0
+}

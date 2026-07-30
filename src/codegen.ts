@@ -3958,6 +3958,56 @@ export class Codegen {
         this.genStoreInto(lines, placePtr, placeTy, expr.value);     // store new; old is not dropped
         return [lines, old, placeTy];
       }
+      case "EnumTryFrom": {
+        const [vl, nv, nTy] = this.genExpr(expr.value);
+        lines.push(...vl);
+        // Compare in i64 (every discriminant fits). Sign-extend a signed source, zero-extend
+        // an unsigned one, so e.g. a u8 200 matches discriminant 200 instead of wrapping.
+        let n64 = nv;
+        if (nTy !== "i64") {
+          const signed = expr.value.type.tag === "int" ? expr.value.type.signed : true;
+          n64 = this.nextTemp();
+          lines.push(`  ${n64} = ${signed ? "sext" : "zext"} ${nTy} ${nv} to i64`);
+        }
+        let valid = "0";   // i1 false when the enum somehow has no variants
+        for (const d of expr.discriminants) {
+          const eq = this.nextTemp();
+          lines.push(`  ${eq} = icmp eq i64 ${n64}, ${d}`);
+          if (valid === "0") { valid = eq; }
+          else { const o = this.nextTemp(); lines.push(`  ${o} = or i1 ${valid}, ${eq}`); valid = o; }
+        }
+        const optTy = `%${expr.optionEnumName}`;
+        const optLayout = this.enumLayouts.get(expr.optionEnumName)!;
+        const someTag = optLayout.variants.get("Some")!.tag;
+        const noneTag = optLayout.variants.get("None")!.tag;
+        const res = this.nextTemp();
+        lines.push(`  ${res} = alloca ${optTy}`);
+        const someBB = this.nextLabel("tryfrom.some");
+        const noneBB = this.nextLabel("tryfrom.none");
+        const doneBB = this.nextLabel("tryfrom.done");
+        lines.push(`  br i1 ${valid}, label %${someBB}, label %${noneBB}`);
+        lines.push(`${someBB}:`);
+        const sTagPtr = this.nextTemp();
+        lines.push(`  ${sTagPtr} = getelementptr ${optTy}, ptr ${res}, i32 0, i32 0`);
+        lines.push(`  store i32 ${someTag}, ptr ${sTagPtr}`);
+        // Payload IS the matched variant: a fieldless enum's value is its i32 tag, and here
+        // the tag equals the matched integer. Written as the payload's leading i32.
+        const n32 = this.nextTemp();
+        lines.push(`  ${n32} = trunc i64 ${n64} to i32`);
+        const payloadPtr = this.nextTemp();
+        lines.push(`  ${payloadPtr} = getelementptr ${optTy}, ptr ${res}, i32 0, i32 1`);
+        lines.push(`  store i32 ${n32}, ptr ${payloadPtr}`);
+        lines.push(`  br label %${doneBB}`);
+        lines.push(`${noneBB}:`);
+        const nTagPtr = this.nextTemp();
+        lines.push(`  ${nTagPtr} = getelementptr ${optTy}, ptr ${res}, i32 0, i32 0`);
+        lines.push(`  store i32 ${noneTag}, ptr ${nTagPtr}`);
+        lines.push(`  br label %${doneBB}`);
+        lines.push(`${doneBB}:`);
+        const out = this.nextTemp();
+        lines.push(`  ${out} = load ${optTy}, ptr ${res}`);
+        return [lines, out, optTy];
+      }
       case "MemSwap": {
         const [al, aPtr, aTy] = this.genLValue(expr.a);
         lines.push(...al);
@@ -4926,6 +4976,18 @@ export class Codegen {
       const tmp = this.nextTemp();
       lines.push(`  ${tmp} = extractvalue { ptr, ptr } ${ov}, 0`);
       return [lines, tmp, "ptr"];
+    }
+    // repr'd enum → integer: the value is its discriminant, held in the tag field.
+    if (fromKind.tag === "enum" && toKind.tag === "int") {
+      const [ol, ov] = this.genExpr(expr.operand);
+      lines.push(...ol);
+      const tag = this.nextTemp();
+      lines.push(`  ${tag} = extractvalue ${this.llvmType(fromKind)} ${ov}, 0`);
+      if (toKind.bits === 32) return [lines, tag, "i32"];
+      const out = this.nextTemp();
+      // tag is a signed i32 — sext to a wider target (carries negative discriminants), trunc to a narrower one.
+      lines.push(`  ${out} = ${toKind.bits > 32 ? "sext" : "trunc"} i32 ${tag} to ${toTy}`);
+      return [lines, out, toTy];
     }
     // aggregate types (arrays, structs) can't participate in scalar casts
     if (fromKind.tag === "array" || fromKind.tag === "struct") {

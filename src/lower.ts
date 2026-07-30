@@ -735,6 +735,12 @@ class LowerCtx {
         if (expr.enumName === "HashMap" && expr.variant === "new" && type.tag === "hashmap") {
           return { kind: "HashMapNew", keyType: type.key, valueType: type.value, type, span: expr.span };
         }
+        // `Kind.tryFrom(n)` → Option<Kind>. `type` is the Option enum the checker inferred.
+        const reprInfo = this.c.enums.get(expr.enumName);
+        if (expr.variant === "tryFrom" && reprInfo?.reprType && type.tag === "enum") {
+          const discriminants = [...reprInfo.variants.values()].map(v => v.tag);
+          return { kind: "EnumTryFrom", enumName: expr.enumName, optionEnumName: type.name, value: this.lowerExpr(expr.args[0]), discriminants, type, span: expr.span };
+        }
         const rewrittenCall = this.c.rewrittenCalls.get(expr as any);
         if (rewrittenCall) {
           const sig = this.c.functions.get(rewrittenCall);

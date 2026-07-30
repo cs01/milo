@@ -35,6 +35,10 @@ export type HIRExpr =
   | { kind: "MemReplace"; place: HIRExpr; value: HIRExpr; type: TypeKind; span?: Span }
   // `swap(a, b)`: exchanges two places in place; drops nothing. `type` is void.
   | { kind: "MemSwap"; a: HIRExpr; b: HIRExpr; type: TypeKind; span?: Span }
+  // `Kind.tryFrom(n)` on a repr'd enum → Option<Kind>. `Some(variant)` when `value` equals
+  // one of `discriminants`, else `None`. A fieldless enum's value IS its tag, so the matched
+  // integer reconstructs the variant directly. `type` is the Option enum.
+  | { kind: "EnumTryFrom"; enumName: string; optionEnumName: string; value: HIRExpr; discriminants: number[]; type: TypeKind; span?: Span }
   | { kind: "IsCheck"; operand: HIRExpr; tag: number; type: TypeKind; span?: Span }
   | { kind: "HeapCreate"; value: HIRExpr; type: TypeKind; span?: Span }
   | { kind: "HeapDeref"; operand: HIRExpr; type: TypeKind; span?: Span }

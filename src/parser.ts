@@ -363,6 +363,10 @@ export class Parser {
     const nameTok = this.expect(TokenKind.Ident);
     const name = nameTok.value;
     const typeParams = this.parseTypeParams();
+    // `enum Kind: i32 { ... }` — an integer-repr'd (C-like) enum. The repr type is an int
+    // sort name; the checker rejects payload-carrying variants on such an enum.
+    let reprType: string | undefined;
+    if (this.match(TokenKind.Colon)) reprType = this.expect(TokenKind.Ident).value;
     this.expect(TokenKind.LBrace);
     const variants: EnumVariant[] = [];
     while (!this.at(TokenKind.RBrace)) {
@@ -375,11 +379,19 @@ export class Parser {
         }
         this.expect(TokenKind.RParen);
       }
-      variants.push({ name: variantName, fields });
+      // Optional explicit discriminant `= N` (repr'd enums only; enforced in the checker).
+      // Supports sparse/non-contiguous values (`LDA = 169`), which is why tryFrom is generated.
+      let discriminant: number | undefined;
+      if (this.match(TokenKind.Eq)) {
+        const neg = !!this.match(TokenKind.Minus);
+        const numTok = this.expect(TokenKind.Int);
+        discriminant = (neg ? -1 : 1) * parseInt(numTok.value.replace(/_/g, ""), 10);
+      }
+      variants.push({ name: variantName, fields, ...(discriminant !== undefined && { discriminant }) });
       this.match(TokenKind.Comma);
     }
     this.expect(TokenKind.RBrace);
-    return { kind: "EnumDecl", name, typeParams, variants, span: { line: nameTok.line, col: nameTok.col, file: this.filePath } };
+    return { kind: "EnumDecl", name, typeParams, variants, ...(reprType && { reprType }), span: { line: nameTok.line, col: nameTok.col, file: this.filePath } };
   }
 
   // ── Functions ──

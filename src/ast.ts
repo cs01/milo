@@ -157,6 +157,7 @@ export interface StructDecl {
 export interface EnumVariant {
   name: string;
   fields: MiloType[];
+  discriminant?: number; // explicit `= N` on a repr'd (C-like) enum; absent = prev + 1
 }
 
 export interface EnumDecl {
@@ -167,6 +168,7 @@ export interface EnumDecl {
   variants: EnumVariant[];
   attributes?: Attribute[];
   isPub?: boolean;
+  reprType?: string; // `enum Kind: i32 { ... }` — a C-like enum with an integer representation
 }
 
 export interface Contract {

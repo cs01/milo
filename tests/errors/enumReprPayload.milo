@@ -1,0 +1,5 @@
+// @error: cannot carry a payload
+//
+// A repr'd (C-like) enum is integer-valued; its variants can't hold data.
+enum Bad: i32 { A, B(i64) }
+pub fn main(): i32 { return 0 }

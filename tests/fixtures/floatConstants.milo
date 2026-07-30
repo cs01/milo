@@ -1,0 +1,17 @@
+// @expect: true
+// @expect: true
+// @expect: true
+// @expect: false
+//
+// f64.NAN / f64.INF / f64.NEG_INF namespace constants and the std/math predicates.
+from "std/math" import {
+    isNan, isInf, isFinite
+}
+
+pub fn main(): i32 {
+    print(isNan(f64.NAN)) // NaN != NaN
+    print(isInf(f64.INF))
+    print(isInf(f64.NEG_INF))
+    print(isFinite(f64.INF))
+    return 0
+}

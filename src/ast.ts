@@ -78,6 +78,18 @@ export interface UnaryOp { kind: "UnaryOp"; op: string; operand: Expr; span?: Sp
 export interface Call { kind: "Call"; func: string; args: Expr[]; typeArgs?: MiloType[]; sigil?: boolean; span?: Span }
 export interface StructLit { kind: "StructLit"; name: string; fields: { name: string; value: Expr }[]; span?: Span }
 export interface FieldAccess { kind: "FieldAccess"; object: Expr; field: string; span?: Span }
+
+// `f64.NAN` / `f64.INF` / `f64.NEG_INF` (and f32) parse as a FieldAccess whose object is a
+// type name, not a variable. Recognize that shape once so the checker types it and the
+// lowering rewrites it to the literal — the two must agree on the exact value. Returns the
+// float width and the IEEE value, or null for any other field access.
+export function floatNamespaceConst(e: FieldAccess): { bits: number; value: number } | null {
+  if (e.object.kind !== "Ident") return null;
+  const bits = e.object.name === "f64" ? 64 : e.object.name === "f32" ? 32 : 0;
+  if (bits === 0) return null;
+  const value = e.field === "NAN" ? NaN : e.field === "INF" ? Infinity : e.field === "NEG_INF" ? -Infinity : null;
+  return value === null ? null : { bits, value };
+}
 export interface ArrayLit { kind: "ArrayLit"; elements: Expr[]; span?: Span }
 export interface ArrayRepeat { kind: "ArrayRepeat"; value: Expr; count: number; span?: Span }
 export interface IndexAccess { kind: "IndexAccess"; object: Expr; index: Expr; span?: Span }

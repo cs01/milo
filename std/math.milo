@@ -167,6 +167,20 @@ pub fn maxF64(a: f64, b: f64): f64 {
     return b
 }
 
+// NaN is the only value not equal to itself, so this is the one reliable test — `x == f64.NAN`
+// is always false (the compiler lints that mistake).
+pub fn isNan(x: f64): bool {
+    return x != x
+}
+
+pub fn isInf(x: f64): bool {
+    return x == f64.INF || x == f64.NEG_INF
+}
+
+pub fn isFinite(x: f64): bool {
+    return x == x && x != f64.INF && x != f64.NEG_INF
+}
+
 pub fn clampI64(x: i64, lo: i64, hi: i64): i64
 requires lo <= hi
 ensures result >= lo && result <= hi

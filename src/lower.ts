@@ -2,7 +2,7 @@
 // Attaches resolved types from checker to every HIR node.
 
 import type { Program, Function as AstFn, Stmt, Expr, Pattern } from "./ast";
-import { declaredType } from "./ast";
+import { declaredType, floatNamespaceConst } from "./ast";
 import type { CheckResult, FnSig, EnumInfo } from "./checker";
 import type { HIRModule, HIRFunction, HIRStmt, HIRExpr, HIRArg, HIRPattern, HIRStruct, HIREnum, HIRGlobal, HIRContract } from "./hir";
 import type { TypeKind } from "./types";
@@ -681,6 +681,10 @@ class LowerCtx {
         };
       }
       case "FieldAccess": {
+        // `f64.NAN` and friends: rewrite to the literal codegen already emits by raw IEEE
+        // bits, so NaN/±Inf need no special path downstream.
+        const fnc = floatNamespaceConst(expr);
+        if (fnc) return { kind: "FloatLit", value: fnc.value, type, span: expr.span };
         const rawObjType = this.typeOf(expr.object);
         // auto-deref `&T` so .len works on slices
         const objType = rawObjType?.tag === "ref" ? rawObjType.inner : rawObjType;

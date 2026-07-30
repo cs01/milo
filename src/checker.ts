@@ -1,5 +1,5 @@
 import type { Program, Function, Stmt, Expr, MiloType, StructDecl, Pattern, Span, TraitDecl, MatchArm, Attribute } from "./ast";
-import { simpleType, declaredType } from "./ast";
+import { simpleType, declaredType, floatNamespaceConst } from "./ast";
 import type { TypeKind } from "./types";
 import { typeFromAst, typeEq, typeName, isNumeric, isCopy, isScalar } from "./types";
 import type { Diagnostic, WarningConfig } from "./diagnostics";
@@ -3754,6 +3754,15 @@ export class TypeChecker {
         }
         let lt = this.checkExpr(expr.left);
         let rt = this.checkExpr(expr.right);
+        // `x == f64.NAN` / `!=` is a dead comparison: NaN equals nothing, itself included,
+        // so the branch is unreachable (==) or always taken (!=). Steer to isNan.
+        if (expr.op === "==" || expr.op === "!=") {
+          const nanSide = [expr.left, expr.right].some(
+            e => e.kind === "FieldAccess" && floatNamespaceConst(e)?.value !== undefined && Number.isNaN(floatNamespaceConst(e)!.value));
+          if (nanSide) this.warn("nan-comparison",
+            `comparison with NaN is always ${expr.op === "==" ? "false" : "true"}`, sp,
+            "NaN is never equal to any value; use isNan(x) from std/math");
+        }
         // Integer constant coercion: a constant-int operand (a literal, or an
         // all-literal subexpression like `1 << 5` or `(a + 1)`) defaults to i32
         // but should adopt the other operand's int width. Retype the constant
@@ -4425,6 +4434,10 @@ export class TypeChecker {
         return this.setType(expr, { tag: "struct", name: expr.name });
       }
       case "FieldAccess": {
+        // Float namespace constants resolve before the object is checked: `f64` is a type,
+        // not a variable, so checkExpr(object) would report it undefined.
+        const fnc = floatNamespaceConst(expr);
+        if (fnc) return this.setType(expr, { tag: "float", bits: fnc.bits });
         let objType = this.checkExpr(expr.object);
         // auto-deref through references for field access
         if (objType.tag === "ref") objType = objType.inner;

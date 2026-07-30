@@ -50,10 +50,15 @@ ensures n == old(n) + by
 }
 
 fn main(): i32 {
-    var a: i64 = randRange(1, 2)
+    // randRange(1, 1) is deterministically 1 yet still opaque to the prover (an
+    // arc4random call it can't see through), so the ensures becomes a runtime check
+    // rather than a compile-time proof — and the printed value is stable. randRange is
+    // an INCLUSIVE [min, max] range, so randRange(1, 2) would be 1 or 2 and this test
+    // would flake between printing 11 and 12.
+    var a: i64 = randRange(1, 1)
     bump(a, 10)
     print(a)
-    var b: i64 = randRange(1, 2)
+    var b: i64 = randRange(1, 1)
     drift(b, 10)
     print(b)
     return 0

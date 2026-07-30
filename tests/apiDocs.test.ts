@@ -29,9 +29,9 @@ test("undocumented APIs are marked, not silently blank", () => {
 // its free fns all sit after `impl File`.
 test("free fns after an impl block are not impl-prefixed", () => {
   const out = api("--module std/io");
-  expect(out).toContain("fn splitLines(");
+  // readStdin is a free fn declared after `impl File`; it must not gain a File. prefix.
+  // (splitLines moved io->fs in the stdlib coherence overhaul, so it's no longer here.)
   expect(out).toContain("fn readStdin(");
-  expect(out).not.toContain("File.splitLines");
   expect(out).not.toContain("File.readStdin");
   // methods genuinely inside `impl File` keep their prefix
   expect(out).toContain("fn File.readAll(");

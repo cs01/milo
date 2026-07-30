@@ -1153,16 +1153,20 @@ function render(city, forecast, hourlyData, grid, timeZone) {
       '<div class="stat-value">' + precip + "%</div></div>";
   }
 
-  var hero =
-    '<div class="hero-city">' +
-    esc(city) +
+  // The save control is pinned to the card's top corner rather than trailing the
+  // city name — inline, it split the centered title line and read as part of it.
+  var favBtnHtml =
     '<button class="fav-btn' + (isFavorite(city) ? " on" : "") + '" id="favBtn" ' +
     'data-city="' + esc(city) + '" ' +
     'title="' + (isFavorite(city) ? "Remove from favorites" : "Save to favorites") + '" ' +
     'aria-pressed="' + (isFavorite(city) ? "true" : "false") + '">' +
     starSvg(isFavorite(city)) +
     '<span class="fav-text">' + (isFavorite(city) ? "Saved" : "Save") + "</span>" +
-    "</button>" +
+    "</button>";
+
+  var hero =
+    '<div class="hero-city">' +
+    esc(city) +
     "</div>" +
     '<div class="hero-temp">' + currentTemp + "°</div>" +
     '<div class="hero-condition">' + esc(now.shortForecast) + "</div>" +
@@ -1374,6 +1378,7 @@ function render(city, forecast, hourlyData, grid, timeZone) {
     '<div class="wisp wisp-3"></div><div class="wisp wisp-4"></div>' +
     "</div>" +
     '<div class="wx-body">' +
+    favBtnHtml +
     hero +
     '<div class="wx-divider"><div class="wx-section-title">Next 24 hours</div>' + hourly + "</div>" +
     dHtml +
@@ -1651,7 +1656,52 @@ function pickSuggestion(item) {
   fetchWeather(item.lat, item.lon, item.label, true);
 }
 
-function renderSuggestions(items) {
+// Bold the run of characters the query actually matched, so a list of eight
+// near-identical place names shows *why* each row is in it. Every slice goes
+// through esc() individually — the query is user text and the label is server
+// text, and neither can be trusted into innerHTML.
+function markMatch(label, query) {
+  var q = (query || "").trim();
+  if (!q) return esc(label);
+  var lower = label.toLowerCase();
+  var runs = [];
+  var at = lower.indexOf(q.toLowerCase());
+  if (at !== -1) {
+    runs.push([at, q.length]);
+  } else {
+    // Whole-query match misses when spacing or punctuation differs
+    // ("springfield,il" vs "Springfield, IL"), so fall back to matching each
+    // comma part in order, left to right. Searching from `cursor` keeps the
+    // runs non-overlapping and ascending, which the splice loop below assumes.
+    var parts = q.split(",");
+    var cursor = 0;
+    for (var i = 0; i < parts.length; i++) {
+      var p = parts[i].trim();
+      if (!p) continue;
+      var hit = lower.indexOf(p.toLowerCase(), cursor);
+      if (hit === -1) continue;
+      runs.push([hit, p.length]);
+      cursor = hit + p.length;
+    }
+  }
+  if (runs.length === 0) return esc(label);
+
+  var out = "";
+  var pos = 0;
+  for (var r = 0; r < runs.length; r++) {
+    var start = runs[r][0];
+    var end = start + runs[r][1];
+    out +=
+      esc(label.slice(pos, start)) +
+      '<strong class="sug-hit">' +
+      esc(label.slice(start, end)) +
+      "</strong>";
+    pos = end;
+  }
+  return out + esc(label.slice(pos));
+}
+
+function renderSuggestions(items, query) {
   sugEl.innerHTML = "";
   // "Use my location" is pinned to every list, so it stays reachable without
   // having to clear whatever you've already typed.
@@ -1675,7 +1725,7 @@ function renderSuggestions(items) {
     div.innerHTML =
       '<span class="sug-city">' +
       icon +
-      esc(item.label) +
+      (item.kind === "locate" ? esc(item.label) : markMatch(item.label, query)) +
       '</span><span class="sug-region">' +
       esc(item.sub || "") +
       "</span>";
@@ -1764,7 +1814,7 @@ function fetchSuggestions(q) {
       })
       .then(function (data) {
         if (zipInput.value.trim() !== q) return;
-        renderSuggestions(cityApiToItems(data));
+        renderSuggestions(cityApiToItems(data), q);
       })
       .catch(function () {});
     return;

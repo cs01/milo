@@ -247,6 +247,12 @@ svg.sug-icon {
   font-weight: 500;
 }
 
+/* the matched run of a typeahead result — weight alone, no colour, so the row
+   still reads as one place name rather than two fragments */
+.sug-hit {
+  font-weight: 800;
+}
+
 .sug-region {
   font-size: 0.75rem;
   color: rgba(31, 41, 55, 0.6);
@@ -435,21 +441,24 @@ svg.sug-icon {
 /* ── Hero block ── */
 
 .hero-city {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 0.4rem;
   font-size: 0.875rem;
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.025em;
   opacity: 0.92;
   text-align: center;
+  /* keeps a long centered name clear of the corner save pill */
+  padding: 0 5.5rem;
 }
 
 /* a bare outline star read as decoration — it's the only control that saves a
-   place, so it gets a filled pill and a word */
+   place, so it gets a filled pill and a word. Pinned to the card corner: inline
+   after the city name it broke up the title line. */
 .fav-btn {
+  position: absolute;
+  top: 0;
+  right: 0;
+  z-index: 3;
   display: inline-flex;
   align-items: center;
   gap: 0.3rem;
@@ -1223,6 +1232,17 @@ svg.sug-icon {
   }
   .hero-stats {
     gap: 0.5rem 1.25rem;
+  }
+  /* narrow cards can't spare 5.5rem of gutter for a worded pill — the star
+     alone still reads as the save control once it's the only corner element */
+  .fav-btn .fav-text {
+    display: none;
+  }
+  .fav-btn {
+    padding: 0.3rem 0.4rem;
+  }
+  .hero-city {
+    padding: 0 2.25rem;
   }
   .daily-name {
     width: 2.5rem;

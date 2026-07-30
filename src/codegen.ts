@@ -6944,8 +6944,13 @@ export class Codegen {
     this.hasVecType = true;
     this.needsBoundsCheck = true;
 
-    const vecType = expr.object.type;
-    if (vecType.tag !== "vec") throw new Error("Vec index on non-vec type");
+    // A slice (`&[T]` / unsized `[T]`, tag "array" with size null) shares the Vec's
+    // {ptr,len,cap} runtime layout, so it indexes through the same path. Deref the ref a
+    // `&[T]` param carries, then accept either a Vec or a slice.
+    const vecType = expr.object.type.tag === "ref" ? expr.object.type.inner : expr.object.type;
+    if (vecType.tag !== "vec" && !(vecType.tag === "array" && vecType.size === null)) {
+      throw new Error("Vec index on non-vec type");
+    }
     const elemTy = this.llvmType(vecType.element);
 
     const [vecPtrLines, vecPtr] = this.genLValue(expr.object);

@@ -1,0 +1,38 @@
+// Slices (&[T]) are zero-copy views over a Vec's backing store: same {ptr,len,cap}
+// runtime layout, non-owning. A whole Vec coerces to &[T]; `v[a..b]` is a sub-view.
+fn sum(xs: &[i64]): i64 {
+    var s = 0
+    for x in xs {
+        s = s + x
+    }
+    return s
+}
+
+fn firstOf(xs: &[i64]): i64 {
+    return xs[0]
+}
+
+fn main() {
+    var v: Vec<i64> = Vec.new()
+    v.push(10)
+    v.push(20)
+    v.push(30)
+    v.push(40)
+
+    // whole Vec as a slice: index + sum
+    // @expect: 10
+    print(firstOf(v))
+    // @expect: 100
+    print(sum(v))
+
+    // sub-slice v[1..3] = [20, 30]: len, index, iterate
+    let sub = v[1..3]
+    // @expect: 2
+    print(sub.len)
+    // @expect: 20
+    print(sub[0])
+    // @expect: 30
+    print(sub[1])
+    // @expect: 50
+    print(sum(sub))
+}

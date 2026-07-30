@@ -148,7 +148,10 @@ ensures p.liveCount == 0
 }
 
 impl Pool {
-    fn new(size: i64, count: i64): Result<Pool> {
+    fn new(size: i64, count: i64): Result<Pool>
+    requires size >= 8
+    requires count > 0
+    {
         return poolNew(size, count)
     }
 

@@ -94,7 +94,9 @@ export async function proveFile(miloc: string, file: string, solver = gateSolver
   const refutations: Refutation[] = out.split("\n")
     .filter(l => /✗.*failed/.test(l))
     .map(l => {
-      const fnM = l.match(/✗\s*\[[^\]]+\]\s*([A-Za-z0-9_]+)\s*:/);
+      // Include '.' so method contracts like `Arena.remaining` capture in full;
+      // without it the regex fails outright on the dot and the key degrades to '?'.
+      const fnM = l.match(/✗\s*\[[^\]]+\]\s*([A-Za-z0-9_.]+)\s*:/);
       const fn = fnM ? fnM[1] : "?";
       return { fn, key: `${rel}::${fn}`, line: l.trim() };
     });

@@ -25,6 +25,7 @@ fn strIndexOf(haystack: &string, needle: &string): i64 {
 // Raw search helper. String.indexOfFrom wraps the -1 sentinel as None.
 fn strIndexOfFrom(haystack: &string, needle: &string, pos: i64): i64
 requires pos >= 0
+ensures result >= -1
 {
     if needle.len == 0 {
         return pos

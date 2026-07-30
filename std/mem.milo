@@ -132,10 +132,17 @@ ensures result >= 0
 }
 
 impl Arena {
-    fn new(capacity: i64): Result<Arena> {
+    // Restate each callee's preconditions on the wrapper (Arena has no struct
+    // invariant the solver models): without them the wrapper can't discharge the
+    // free fn's `requires` — same restating pattern as Pool's free/live/available.
+    fn new(capacity: i64): Result<Arena>
+    requires capacity > 0
+    {
         return arenaNew(capacity)
     }
-    fn alloc(self: &mut Self, size: i64): Result<i64> {
+    fn alloc(self: &mut Self, size: i64): Result<i64>
+    requires size > 0
+    {
         return arenaAlloc(self, size)
     }
     fn reset(self: &mut Self): void {

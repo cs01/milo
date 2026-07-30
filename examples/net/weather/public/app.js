@@ -678,6 +678,7 @@ function fetchWeather(lat, lon, city, saveLoc) {
   var gridUrl = "";
   var locationTz = "";
   loadExtras(lat, lon);
+  loadAlerts(lat, lon);
 
   fetch("https://api.weather.gov/points/" + lat + "," + lon)
     .then(function (res) {
@@ -785,6 +786,66 @@ function getGridVal(grid, field) {
     if (start > now) return i > 0 ? v[i - 1].value : v[0].value;
   }
   return v[v.length - 1].value;
+}
+
+// weather.gov stamps every gridpoint value "<ISO start>/<ISO 8601 duration>".
+// The duration is what makes an accumulation field like snowfallAmount
+// summable, so it gets parsed rather than dropped.
+function isoDurationHours(d) {
+  var m = /^P(?:(\d+)D)?(?:T(?:(\d+)H)?(?:(\d+)M)?)?$/.exec(d || "");
+  if (!m) return 1;
+  return +(m[1] || 0) * 24 + +(m[2] || 0) + +(m[3] || 0) / 60;
+}
+
+// Every non-null value whose interval overlaps the next `hours`. Intervals are
+// irregular (1h near-term, 6h out) — hence overlap rather than index math.
+function gridWindow(grid, field, hours) {
+  if (!grid || !grid.properties || !grid.properties[field]) return [];
+  var vals = grid.properties[field].values || [];
+  var now = Date.now();
+  var until = now + hours * 3600000;
+  var out = [];
+  for (var i = 0; i < vals.length; i++) {
+    if (vals[i].value === null || vals[i].value === undefined) continue;
+    var parts = vals[i].validTime.split("/");
+    var start = new Date(parts[0]).getTime();
+    var end = start + isoDurationHours(parts[1]) * 3600000;
+    if (end <= now || start >= until) continue;
+    out.push(vals[i].value);
+  }
+  return out;
+}
+
+function gridPeak(grid, field, hours) {
+  var v = gridWindow(grid, field, hours);
+  return v.length ? Math.max.apply(null, v) : null;
+}
+
+function gridSum(grid, field, hours) {
+  var v = gridWindow(grid, field, hours);
+  if (!v.length) return null;
+  var s = 0;
+  for (var i = 0; i < v.length; i++) s += v[i];
+  return s;
+}
+
+// elevation is a bare scalar, not a values[] series like the rest of the grid
+function gridElevationM(grid) {
+  if (!grid || !grid.properties || !grid.properties.elevation) return null;
+  var v = grid.properties.elevation.value;
+  return typeof v === "number" ? v : null;
+}
+
+function kmhToMph(k) {
+  return Math.round(k * 0.621371);
+}
+
+function mToFt(m) {
+  return Math.round(m * 3.28084);
+}
+
+function fmtNum(n) {
+  return Math.round(n).toLocaleString("en-US");
 }
 
 // `detail` rides along in a <template>: inert until a tap clones it into the
@@ -1001,6 +1062,111 @@ function renderExtras() {
   if (slot) slot.innerHTML = extrasHtml();
 }
 
+// ── Active NWS alerts ──
+// A warning the app knows about but doesn't show is worse than no app, so this
+// renders above the card. It loads on its own clock like the extras do — a
+// slow or down alerts endpoint must never hold back the forecast.
+
+var alertsSeq = 0;
+var alertsData = null;
+var alertsTz = "";
+
+var ALERT_SEVERITY_RANK = { Extreme: 0, Severe: 1, Moderate: 2, Minor: 3, Unknown: 4 };
+
+function loadAlerts(lat, lon) {
+  var seq = ++alertsSeq;
+  alertsData = null;
+  jsonOrNull("https://api.weather.gov/alerts/active?point=" + lat + "," + lon).then(function (d) {
+    if (seq !== alertsSeq) return;
+    alertsData = d && d.features ? d.features : [];
+    renderAlerts();
+  });
+}
+
+// Only Extreme/Severe earn the red treatment. An Air Quality Alert and a
+// Tornado Warning rendered identically would train people to ignore both.
+function alertClass(sev) {
+  if (sev === "Extreme" || sev === "Severe") return "alert-row sev-high";
+  if (sev === "Moderate") return "alert-row sev-mid";
+  return "alert-row sev-low";
+}
+
+function alertWhen(p) {
+  var end = p.ends || p.expires;
+  if (!end) return "";
+  var d = new Date(end);
+  if (isNaN(d.getTime())) return "";
+  var sameDay =
+    fmtDayLabel(end, alertsTz) === fmtDayLabel(new Date().toISOString(), alertsTz);
+  return (
+    "until " +
+    fmtTimeInTz(d, alertsTz) +
+    (sameDay ? "" : " " + fmtDayLabel(end, alertsTz))
+  );
+}
+
+// NWS alert bodies are hard-wrapped to ~68 columns for teletype, which reflows
+// as ragged mid-sentence breaks in a phone-width popover. Single newlines are
+// the wrap; blank lines are real paragraph breaks, so only the former go.
+function unwrapNwsText(s) {
+  return String(s)
+    .replace(/\r/g, "")
+    .replace(/([^\n])\n(?!\n)/g, "$1 ")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+function alertsHtml() {
+  var f = alertsData;
+  if (!f || f.length === 0) return "";
+
+  var sorted = f.slice().sort(function (a, b) {
+    var ra = ALERT_SEVERITY_RANK[a.properties.severity];
+    var rb = ALERT_SEVERITY_RANK[b.properties.severity];
+    return (ra === undefined ? 4 : ra) - (rb === undefined ? 4 : rb);
+  });
+
+  var html = "";
+  for (var i = 0; i < Math.min(sorted.length, 4); i++) {
+    var p = sorted[i].properties;
+    var when = alertWhen(p);
+    var detail =
+      (p.headline ? '<div class="alert-headline">' + esc(p.headline) + "</div>" : "") +
+      detailRow("Severity", esc(p.severity || "Unknown")) +
+      detailRow("Urgency", esc(p.urgency || "Unknown")) +
+      // areaDesc is a semicolon-joined list of every zone in the alert — far too
+      // long for a right-aligned detail row
+      (p.areaDesc
+        ? '<div class="alert-text"><strong>Area.</strong> ' + esc(p.areaDesc) + "</div>"
+        : "") +
+      (p.description
+        ? '<div class="alert-text">' + esc(unwrapNwsText(p.description)) + "</div>"
+        : "") +
+      (p.instruction
+        ? '<div class="alert-text alert-instruction">' +
+          esc(unwrapNwsText(p.instruction)) + "</div>"
+        : "");
+    html +=
+      '<div class="' + alertClass(p.severity) + '" data-pop tabindex="0" role="button" ' +
+      'data-pop-label="Weather alert" ' +
+      'data-pop-value="' + esc(p.event || "Alert") + '" ' +
+      'data-pop-sub="' + esc(when) + '">' +
+      '<svg class="alert-icon" viewBox="0 0 24 24" aria-hidden="true">' +
+      '<path d="M12 3 L22 20 L2 20 Z"/><path d="M12 9 L12 14"/><path d="M12 17 L12 17.5"/></svg>' +
+      '<span class="alert-event">' + esc(p.event || "Alert") + "</span>" +
+      (when ? '<span class="alert-when">' + esc(when) + "</span>" : "") +
+      '<span class="alert-more">Details</span>' +
+      '<template class="tile-detail">' + detail + "</template>" +
+      "</div>";
+  }
+  return html;
+}
+
+function renderAlerts() {
+  var slot = document.getElementById("alertSlot");
+  if (slot) slot.innerHTML = alertsHtml();
+}
+
 // Sun position arc for the sunrise/sunset tile, plus a hover tooltip of the
 // derived solar facts. Coordinates are in the 100x38 viewBox, not pixels.
 function sunArcSvg(sunTimes, timeZone, nowTime) {
@@ -1209,6 +1375,7 @@ function render(city, forecast, hourlyData, grid, timeZone) {
 
   // Detail tiles
   extrasTz = timeZone;
+  alertsTz = timeZone;
   var nowTime = new Date();
   var sunTimes = calcSunTimes(parseFloat(currentLat), parseFloat(currentLon), nowTime, timeZone);
   var sunNext = nextSunEvent(
@@ -1230,13 +1397,22 @@ function render(city, forecast, hourlyData, grid, timeZone) {
       detailRow("Sun declination", sunTimes.declination.toFixed(1) + "°")
   );
 
+  // grid gusts are km/h; the forecast periods' windSpeed is already "N mph"
+  var gustKmh = gridPeak(grid, "windGust", 12);
+  var gustMph = gustKmh !== null ? kmhToMph(gustKmh) : null;
+  var windSub = now.windDirection ? "From the " + esc(now.windDirection) : "";
+  if (gustMph !== null && gustMph > 0) {
+    windSub = (windSub ? windSub + " · " : "") + "gusts " + gustMph + " mph";
+  }
+
   tiles += tile(
     "Wind",
     esc(now.windSpeed),
-    now.windDirection ? "From the " + esc(now.windDirection) : "",
+    windSub,
     windCompassSvg(now.windDirection, now.windSpeed),
     windCompassSvg(now.windDirection, now.windSpeed) +
       detailRow("Speed", esc(now.windSpeed)) +
+      (gustMph !== null ? detailRow("Peak gust (next 12 h)", gustMph + " mph") : "") +
       (now.windDirection
         ? detailRow(
             "Direction",
@@ -1272,6 +1448,39 @@ function render(city, forecast, hourlyData, grid, timeZone) {
     "Chance today"
   );
 
+  // Thunder and snow are conditional by design: a 0% thunder tile every day of
+  // the year is noise, and it's the appearing that carries the signal.
+  // 10% is the floor for the tile to be worth its square: weather.gov emits 1-4%
+  // over huge areas on days nobody would call stormy.
+  var thunder = gridPeak(grid, "probabilityOfThunder", 24);
+  if (thunder !== null && thunder >= 10) {
+    tiles += tile(
+      "Thunder",
+      Math.round(thunder) + '<span class="tile-unit">%</span>',
+      "Peak chance, next 24 h",
+      scaleBarHtml(thunder, "linear-gradient(90deg,#a7f3d0,#fcd34d,#f97316,#dc2626)"),
+      detailRow("Peak chance (next 24 h)", Math.round(thunder) + "%") +
+        detailRow("Next 6 h", Math.round(gridPeak(grid, "probabilityOfThunder", 6) || 0) + "%") +
+        '<div class="detail-note">weather.gov issues this as the chance of a ' +
+        "thunderstorm somewhere in this forecast grid box, not overhead.</div>"
+    );
+  }
+
+  var snowMm = gridSum(grid, "snowfallAmount", 24);
+  if (snowMm !== null && snowMm > 0) {
+    var snowIn = snowMm / 25.4;
+    var snowLvlM = getGridVal(grid, "snowLevel");
+    tiles += tile(
+      "Snow",
+      (snowIn < 1 ? snowIn.toFixed(1) : Math.round(snowIn)) + '<span class="tile-unit"> in</span>',
+      "Next 24 hours",
+      "",
+      detailRow("Accumulation (next 24 h)", snowIn.toFixed(1) + " in") +
+        detailRow("Next 6 h", ((gridSum(grid, "snowfallAmount", 6) || 0) / 25.4).toFixed(1) + " in") +
+        (snowLvlM !== null ? detailRow("Snow level", fmtNum(mToFt(snowLvlM)) + " ft") : "")
+    );
+  }
+
   if (visibility !== null) {
     var visMi = Math.round(visibility / 1609);
     tiles += tile(
@@ -1286,6 +1495,46 @@ function render(city, forecast, hourlyData, grid, timeZone) {
       "Feels Like",
       cToF(feelsLike) + "°",
       "Actual " + currentTemp + "°"
+    );
+  }
+
+  var elevM = gridElevationM(grid);
+  if (elevM !== null) {
+    var elevFt = mToFt(elevM);
+    var elevSnowLvl = getGridVal(grid, "snowLevel");
+    // Only worth printing when the freezing level is near enough to this place
+    // to mean anything — in July it sits thousands of feet overhead.
+    var snowLvlNote =
+      elevSnowLvl !== null && Math.abs(elevSnowLvl - elevM) < 1500
+        ? detailRow(
+            "Snow level",
+            fmtNum(mToFt(elevSnowLvl)) + " ft (" +
+              (elevSnowLvl > elevM
+                ? fmtNum(mToFt(elevSnowLvl - elevM)) + " ft above you"
+                : fmtNum(mToFt(elevM - elevSnowLvl)) + " ft below you") + ")",
+          )
+        : "";
+    // Barometric formula for the pressure ratio; boiling point falls ~1 °C per
+    // 285 m. Both are trivia below a few hundred metres, so they stay hidden.
+    var thinAir = "";
+    if (elevM > 300) {
+      var pRatio = Math.pow(1 - 2.25577e-5 * elevM, 5.25588);
+      var boilC = 100 - elevM / 285;
+      thinAir =
+        detailRow("Air pressure", Math.round(pRatio * 100) + "% of sea level") +
+        detailRow("Water boils at", Math.round(boilC * 1.8 + 32) + "°F");
+    }
+    tiles += tile(
+      "Elevation",
+      fmtNum(elevFt) + '<span class="tile-unit"> ft</span>',
+      fmtNum(elevM) + " m",
+      "",
+      detailRow("Elevation", fmtNum(elevFt) + " ft / " + fmtNum(elevM) + " m") +
+        snowLvlNote +
+        thinAir +
+        '<div class="detail-note">weather.gov reports the elevation of the ' +
+        "forecast grid box, which can differ from a specific street address in " +
+        "steep terrain.</div>"
     );
   }
 
@@ -1372,6 +1621,7 @@ function render(city, forecast, hourlyData, grid, timeZone) {
   dHtml += "</div></div>";
 
   heroEl.innerHTML =
+    '<div id="alertSlot" class="alerts">' + alertsHtml() + "</div>" +
     '<div class="wx-card ' + conditionClass(now.shortForecast, now.isDaytime) + '">' +
     '<div class="wispy-clouds">' +
     '<div class="wisp wisp-1"></div><div class="wisp wisp-2"></div>' +

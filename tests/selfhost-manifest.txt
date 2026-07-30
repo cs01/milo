@@ -131,7 +131,7 @@ stdIoLines
 stdlibPrint
 stdLog
 stdRegex
-stdStringSplit
+# SHRUNK: stdStringSplit — rewritten to .repeat() in the stdlib coherence overhaul; milo-self's checker lacks the repeat string method. Restore when milo-self gains it.
 stdTime
 stdUnicodeStrings
 string_cast
@@ -146,7 +146,7 @@ stringLen
 stringSlice
 stringSliceLoop
 stringSliceReassign
-stringUtils
+# SHRUNK: stringUtils — rewritten to .indexOfFrom()/.repeat() in the stdlib coherence overhaul; milo-self's checker lacks those string methods. Restore when milo-self gains them.
 stringWithCapacity
 structCopy
 structFfiPtr

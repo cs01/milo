@@ -2381,7 +2381,9 @@ export class TypeChecker {
     // Lint: unused variables
     const scope = this.scopes[this.scopes.length - 1];
     for (const [name, info] of scope) {
-      if (info.read || name.startsWith("_")) continue;
+      // `self` is the method receiver — never lint it unused (matches Rust). A Drop
+      // impl or any method that ignores its receiver shouldn't have to write `_self`.
+      if (info.read || name.startsWith("_") || name === "self") continue;
       this.warn("unused-variable", `unused variable '${name}'`, info.span,
         `prefix with underscore to silence: '_${name}'`);
     }

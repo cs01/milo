@@ -28,22 +28,22 @@ from "std/smt" import {
 
 fn main(): i32 {
     let s = readStdin()
-    let toks = strSplitWhitespace(s)
+    let toks = s.splitWhitespace()
     var pos: i64 = 0
 
-    let nprob = strParseInt(toks[pos])
+    let nprob = toks[pos].parseInt()
     pos = pos + 1
 
     var pi: i64 = 0
     while pi < nprob {
-        let nvars = strParseInt(toks[pos])
+        let nvars = toks[pos].parseInt()
         pos = pos + 1
-        let natoms = strParseInt(toks[pos])
+        let natoms = toks[pos].parseInt()
         pos = pos + 1
         var flags: Vec<bool> = []
         var f: i64 = 0
         while f < nvars {
-            flags.push(strParseInt(toks[pos]) == 1)
+            flags.push(toks[pos].parseInt() == 1)
             pos = pos + 1
             f = f + 1
         }
@@ -51,43 +51,43 @@ fn main(): i32 {
 
         var a: i64 = 0
         while a < natoms {
-            let strict = strParseInt(toks[pos])
+            let strict = toks[pos].parseInt()
             pos = pos + 1
             var row: Vec<i64> = []
             var c: i64 = 0
             while c < nvars {
-                row.push(strParseInt(toks[pos]))
+                row.push(toks[pos].parseInt())
                 pos = pos + 1
                 c = c + 1
             }
-            let konst = strParseInt(toks[pos])
+            let konst = toks[pos].parseInt()
             pos = pos + 1
             // atoms are created in order, so atom index == a
             let _ai = addAtom(p, row, konst, strict == 1)
             a = a + 1
         }
 
-        let nnodes = strParseInt(toks[pos])
+        let nnodes = toks[pos].parseInt()
         pos = pos + 1
         var nd: i64 = 0
         while nd < nnodes {
-            let kind = strParseInt(toks[pos])
+            let kind = toks[pos].parseInt()
             pos = pos + 1
             if kind == 0 {
-                let ai = strParseInt(toks[pos])
+                let ai = toks[pos].parseInt()
                 pos = pos + 1
                 let _n = nAtom(p, ai)
             } else if kind == 1 {
-                let ch = strParseInt(toks[pos])
+                let ch = toks[pos].parseInt()
                 pos = pos + 1
                 let _n = nNot(p, ch)
             } else {
-                let nk = strParseInt(toks[pos])
+                let nk = toks[pos].parseInt()
                 pos = pos + 1
                 var kids: Vec<i64> = []
                 var kk: i64 = 0
                 while kk < nk {
-                    kids.push(strParseInt(toks[pos]))
+                    kids.push(toks[pos].parseInt())
                     pos = pos + 1
                     kk = kk + 1
                 }
@@ -100,7 +100,7 @@ fn main(): i32 {
             nd = nd + 1
         }
 
-        let root = strParseInt(toks[pos])
+        let root = toks[pos].parseInt()
         pos = pos + 1
         // A violated verdict carries a witness — emit the concrete values (one
         // per variable, in declaration order) so the caller can report the

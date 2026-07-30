@@ -278,7 +278,8 @@ let s = identity("hello")  // T inferred as string
 ```milo
 var anchor: string = "hello"
 let old = replace(anchor, "")   // old == "hello", anchor == ""  (no allocation, no clone)
-swap(v[0], v[2])                // exchange two Vec elements in place
+var v = [10, 20, 30]
+swap(v[0], v[2])                // v == [30, 20, 10] — exchange two elements in place
 ```
 
 ### Contracts
@@ -564,7 +565,7 @@ enum Opcode: i32 {
 
 The forward conversion `op as i32` is **always defined** — every variant has a discriminant. The reverse is partial (most integers are not a variant), so it is spelled `Opcode.tryFrom(n): Option<Opcode>` — `Some(variant)` for a known discriminant, `None` otherwise:
 
-```milo
+```milo skip
 let raw = readByte()                          // some i32 off the wire
 let Opcode.Some(op) = Opcode.tryFrom(raw) else {
     return handleUnknownOpcode(raw)

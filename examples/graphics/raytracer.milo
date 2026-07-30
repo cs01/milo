@@ -12,7 +12,7 @@
 //   milo build examples/graphics/raytracer.milo -o /tmp/raytracer
 
 from "std/math" import {
-    mathSqrt, mathSin, mathCos
+    Math
 }
 
 // ---- SDL2 FFI (mirrors examples/emulators/nes/sdlSmoke.milo) --------------------
@@ -103,7 +103,7 @@ pub fn vdot(a: Vec3, b: Vec3): f64 {
 }
 
 pub fn vlen(a: Vec3): f64 {
-    return mathSqrt(vdot(a, a))
+    return Math.sqrt(vdot(a, a))
 }
 
 pub fn vnorm(a: Vec3): Vec3 {
@@ -179,7 +179,7 @@ pub fn hitSphere(sp: Sphere, ro: Vec3, rd: Vec3, tmin: f64, tmax: f64): f64 {
     if disc < 0.0 {
         return -1.0
     }
-    let sq = mathSqrt(disc)
+    let sq = Math.sqrt(disc)
     var t = (-halfB - sq) / a
     if t < tmin || t > tmax {
         t = (-halfB + sq) / a
@@ -305,7 +305,7 @@ pub fn main(): i32 {
     let vfov = 45.0
     let aspect = (W as f64) / (H as f64)
     let theta = vfov * 3.14159265 / 180.0
-    let halfH = mathSin(theta * 0.5) / mathCos(theta * 0.5) // tan
+    let halfH = Math.sin(theta * 0.5) / Math.cos(theta * 0.5) // tan
     let halfW = aspect * halfH
 
     // Raw C-pointer handles live for the whole run; null-pointer casts and scalar
@@ -384,7 +384,7 @@ pub fn main(): i32 {
 
         // camera orbits on a ring around the look-at point
         let radius = 3.2
-        let eye = v3(mathSin(camAngle) * radius, 1.0, mathCos(camAngle) * radius - 0.4)
+        let eye = v3(Math.sin(camAngle) * radius, 1.0, Math.cos(camAngle) * radius - 0.4)
         let wv = vnorm(vsub(eye, lookAt))
         let up = v3(0.0, 1.0, 0.0)
         let uv = vnorm(vcross(up, wv))
@@ -424,9 +424,9 @@ pub fn main(): i32 {
             r = r / (1.0 + r)
             g = g / (1.0 + g)
             b = b / (1.0 + b)
-            let ri = (clamp01(mathSqrt(r)) * 255.0) as u32
-            let gi = (clamp01(mathSqrt(g)) * 255.0) as u32
-            let bi = (clamp01(mathSqrt(b)) * 255.0) as u32
+            let ri = (clamp01(Math.sqrt(r)) * 255.0) as u32
+            let gi = (clamp01(Math.sqrt(g)) * 255.0) as u32
+            let bi = (clamp01(Math.sqrt(b)) * 255.0) as u32
             fb[p] = ri | (gi << 8) | (bi << 16) | (0xFF << 24)
             p = p + 1
         }

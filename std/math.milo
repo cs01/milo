@@ -1,222 +1,227 @@
-// std/math — mathematical functions (wraps libm)
+// std/math — the Math namespace (wraps libm). Call as Math.sqrt(x), Math.pi(), Math.clampI64(...).
 
-// ── libm bindings ──
+// ── libm bindings (private backend; call via Math.* ) ──
 
-pub extern fn sqrt(x: f64): f64
+extern fn sqrt(x: f64): f64
 
-pub extern fn pow(base: f64, exp: f64): f64
+extern fn pow(base: f64, exp: f64): f64
 
-pub extern fn sin(x: f64): f64
+extern fn sin(x: f64): f64
 
-pub extern fn cos(x: f64): f64
+extern fn cos(x: f64): f64
 
-pub extern fn tan(x: f64): f64
+extern fn tan(x: f64): f64
 
-pub extern fn atan2(y: f64, x: f64): f64
+extern fn atan2(y: f64, x: f64): f64
 
-pub extern fn floor(x: f64): f64
+extern fn floor(x: f64): f64
 
-pub extern fn ceil(x: f64): f64
+extern fn ceil(x: f64): f64
 
-pub extern fn round(x: f64): f64
+extern fn round(x: f64): f64
 
-pub extern fn fabs(x: f64): f64
+extern fn fabs(x: f64): f64
 
-pub extern fn fmod(x: f64, y: f64): f64
+extern fn fmod(x: f64, y: f64): f64
 
-pub extern fn log(x: f64): f64
+extern fn log(x: f64): f64
 
-pub extern fn log2(x: f64): f64
+extern fn log2(x: f64): f64
 
-pub extern fn log10(x: f64): f64
+extern fn log10(x: f64): f64
 
-pub extern fn exp(x: f64): f64
+extern fn exp(x: f64): f64
 
-// ── safe wrappers ──
-
-pub fn mathSqrt(x: f64): f64
-requires x >= 0.0
-ensures result >= 0.0
-{
-    return sqrt(x)
+pub struct Math {
 }
 
-pub fn mathPow(base: f64, exponent: f64): f64 {
-    return pow(base, exponent)
-}
+impl Math {
+    // ── floating-point (libm) ──
 
-pub fn mathSin(x: f64): f64 {
-    return sin(x)
-}
-
-pub fn mathCos(x: f64): f64 {
-    return cos(x)
-}
-
-pub fn mathTan(x: f64): f64 {
-    return tan(x)
-}
-
-pub fn mathAtan2(y: f64, x: f64): f64 {
-    return atan2(y, x)
-}
-
-pub fn mathFloor(x: f64): f64 {
-    return floor(x)
-}
-
-pub fn mathCeil(x: f64): f64 {
-    return ceil(x)
-}
-
-pub fn mathRound(x: f64): f64 {
-    return round(x)
-}
-
-pub fn mathAbs(x: f64): f64 {
-    return fabs(x)
-}
-
-pub fn mathMod(x: f64, y: f64): f64
-requires y != 0.0
-{
-    return fmod(x, y)
-}
-
-pub fn mathLog(x: f64): f64
-requires x > 0.0
-{
-    return log(x)
-}
-
-pub fn mathLog2(x: f64): f64
-requires x > 0.0
-{
-    return log2(x)
-}
-
-pub fn mathLog10(x: f64): f64
-requires x > 0.0
-{
-    return log10(x)
-}
-
-pub fn mathExp(x: f64): f64 {
-    return exp(x)
-}
-
-// ── integer helpers ──
-
-pub fn absI64(x: i64): i64
-ensures result >= 0
-{
-    if x < 0 {
-        return 0 - x
+    fn sqrt(x: f64): f64
+    requires x >= 0.0
+    ensures result >= 0.0
+    {
+        return sqrt(x)
     }
-    return x
-}
 
-pub fn absI32(x: i32): i32
-ensures result >= 0 as i32
-{
-    if x < 0 as i32 {
-        return 0 as i32 - x
+    fn pow(base: f64, exponent: f64): f64 {
+        return pow(base, exponent)
     }
-    return x
-}
 
-pub fn minI64(a: i64, b: i64): i64 {
-    if a < b {
-        return a
+    fn sin(x: f64): f64 {
+        return sin(x)
     }
-    return b
-}
 
-pub fn maxI64(a: i64, b: i64): i64 {
-    if a > b {
-        return a
+    fn cos(x: f64): f64 {
+        return cos(x)
     }
-    return b
-}
 
-pub fn minI32(a: i32, b: i32): i32 {
-    if a < b {
-        return a
+    fn tan(x: f64): f64 {
+        return tan(x)
     }
-    return b
-}
 
-pub fn maxI32(a: i32, b: i32): i32 {
-    if a > b {
-        return a
+    fn atan2(y: f64, x: f64): f64 {
+        return atan2(y, x)
     }
-    return b
-}
 
-pub fn minF64(a: f64, b: f64): f64 {
-    if a < b {
-        return a
+    fn floor(x: f64): f64 {
+        return floor(x)
     }
-    return b
-}
 
-pub fn maxF64(a: f64, b: f64): f64 {
-    if a > b {
-        return a
+    fn ceil(x: f64): f64 {
+        return ceil(x)
     }
-    return b
-}
 
-// NaN is the only value not equal to itself, so this is the one reliable test — `x == f64.NAN`
-// is always false (the compiler lints that mistake).
-pub fn isNan(x: f64): bool {
-    return x != x
-}
-
-pub fn isInf(x: f64): bool {
-    return x == f64.INF || x == f64.NEG_INF
-}
-
-pub fn isFinite(x: f64): bool {
-    return x == x && x != f64.INF && x != f64.NEG_INF
-}
-
-pub fn clampI64(x: i64, lo: i64, hi: i64): i64
-requires lo <= hi
-ensures result >= lo && result <= hi
-{
-    if x < lo {
-        return lo
+    fn round(x: f64): f64 {
+        return round(x)
     }
-    if x > hi {
-        return hi
+
+    fn abs(x: f64): f64 {
+        return fabs(x)
     }
-    return x
-}
 
-pub fn clampF64(x: f64, lo: f64, hi: f64): f64
-requires lo <= hi
-ensures result >= lo && result <= hi
-{
-    if x < lo {
-        return lo
+    fn mod(x: f64, y: f64): f64
+    requires y != 0.0
+    {
+        return fmod(x, y)
     }
-    if x > hi {
-        return hi
+
+    fn log(x: f64): f64
+    requires x > 0.0
+    {
+        return log(x)
     }
-    return x
-}
 
-// ── constants ──
+    fn log2(x: f64): f64
+    requires x > 0.0
+    {
+        return log2(x)
+    }
 
-pub fn mathPi(): f64 {
-    return 3.14159265358979323846
-}
+    fn log10(x: f64): f64
+    requires x > 0.0
+    {
+        return log10(x)
+    }
 
-pub fn mathE(): f64 {
-    return 2.71828182845904523536
-}
+    fn exp(x: f64): f64 {
+        return exp(x)
+    }
 
-pub fn mathInf(): f64 {
-    return 1.0 / 0.0
+    // ── integer / typed helpers ──
+
+    fn absI64(x: i64): i64
+    ensures result >= 0
+    {
+        if x < 0 {
+            return 0 - x
+        }
+        return x
+    }
+
+    fn absI32(x: i32): i32
+    ensures result >= 0 as i32
+    {
+        if x < 0 as i32 {
+            return 0 as i32 - x
+        }
+        return x
+    }
+
+    fn minI64(a: i64, b: i64): i64 {
+        if a < b {
+            return a
+        }
+        return b
+    }
+
+    fn maxI64(a: i64, b: i64): i64 {
+        if a > b {
+            return a
+        }
+        return b
+    }
+
+    fn minI32(a: i32, b: i32): i32 {
+        if a < b {
+            return a
+        }
+        return b
+    }
+
+    fn maxI32(a: i32, b: i32): i32 {
+        if a > b {
+            return a
+        }
+        return b
+    }
+
+    fn minF64(a: f64, b: f64): f64 {
+        if a < b {
+            return a
+        }
+        return b
+    }
+
+    fn maxF64(a: f64, b: f64): f64 {
+        if a > b {
+            return a
+        }
+        return b
+    }
+
+    // NaN is the only value not equal to itself, so this is the one reliable test — `x == f64.NAN`
+    // is always false (the compiler lints that mistake).
+    fn isNan(x: f64): bool {
+        return x != x
+    }
+
+    fn isInf(x: f64): bool {
+        return x == f64.INF || x == f64.NEG_INF
+    }
+
+    fn isFinite(x: f64): bool {
+        return x == x && x != f64.INF && x != f64.NEG_INF
+    }
+
+    fn clampI64(x: i64, lo: i64, hi: i64): i64
+    requires lo <= hi
+    ensures result >= lo && result <= hi
+    {
+        if x < lo {
+            return lo
+        }
+        if x > hi {
+            return hi
+        }
+        return x
+    }
+
+    fn clampF64(x: f64, lo: f64, hi: f64): f64
+    requires lo <= hi
+    ensures result >= lo && result <= hi
+    {
+        if x < lo {
+            return lo
+        }
+        if x > hi {
+            return hi
+        }
+        return x
+    }
+
+    // ── constants ──
+
+    fn pi(): f64 {
+        return 3.14159265358979323846
+    }
+
+    fn e(): f64 {
+        return 2.71828182845904523536
+    }
+
+    fn inf(): f64 {
+        return 1.0 / 0.0
+    }
 }

@@ -17,7 +17,7 @@ from "std/time" import {
     epochMillis, sleepMs
 }
 from "std/math" import {
-    mathSin, mathCos
+    Math
 }
 from "std/strconv" import {
     formatFloat
@@ -68,10 +68,10 @@ pub fn computeFrame(zbuf: &mut [f64; 3520], lum: &mut [f64; 3520], a: f64, b: f6
         zbuf[i] = 0.0
         lum[i] = -1.0
     }
-    let cA = mathCos(a)
-    let sA = mathSin(a)
-    let cB = mathCos(b)
-    let sB = mathSin(b)
+    let cA = Math.cos(a)
+    let sA = Math.sin(a)
+    let cB = Math.cos(b)
+    let sB = Math.sin(b)
     let cx = (PW as f64) / 2.0
     let cy = (PH as f64) / 2.0
     let k2 = 5.0
@@ -79,16 +79,16 @@ pub fn computeFrame(zbuf: &mut [f64; 3520], lum: &mut [f64; 3520], a: f64, b: f6
 
     var theta = 0.0
     while theta < 6.2832 {
-        let ct = mathCos(theta)
-        let st = mathSin(theta)
+        let ct = Math.cos(theta)
+        let st = Math.sin(theta)
         // circle of the tube: R2=2 (ring radius), R1=1 (tube radius)
         let circleX = 2.0 + ct
         let circleY = st
 
         var phi = 0.0
         while phi < 6.2832 {
-            let cp = mathCos(phi)
-            let sp = mathSin(phi)
+            let cp = Math.cos(phi)
+            let sp = Math.sin(phi)
 
             let x = circleX * (cB * cp + sA * sB * sp) - circleY * cA * sB
             let y = circleX * (sB * cp - sA * cB * sp) + circleY * cA * cB

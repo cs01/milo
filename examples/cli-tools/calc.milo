@@ -6,7 +6,7 @@ from "std/argparse" import {
     newParser
 }
 from "std/math" import {
-    exp, mathMod, mathPow
+    Math, exp
 }
 
 // Tokenizer
@@ -169,7 +169,7 @@ pub fn parseTerm(p: &mut Parser): f64 {
         } else if op.kind == CalcTok.Slash {
             left = left / right
         } else {
-            left = mathMod(left, right)
+            left = Math.mod(left, right)
         }
     }
     return left
@@ -180,7 +180,7 @@ pub fn parsePower(p: &mut Parser): f64 {
     if peek(p) == CalcTok.StarStar {
         advance(p)
         let exp = parsePower(p)
-        return mathPow(base, exp)
+        return Math.pow(base, exp)
     }
     return base
 }

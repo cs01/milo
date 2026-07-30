@@ -37,7 +37,7 @@ from "std/pty" import {
     WinSize
 }
 from "std/math" import {
-    clampF64
+    Math
 }
 
 // ── terminal size ──
@@ -201,7 +201,7 @@ pub fn renderHeader(buf: &mut string, cols: i64): void {
 pub fn renderCpuBar(buf: &mut string, row: i64, cols: i64): void {
     let load = loadAvg()
     let nCpus = cpuCount()
-    let pct = clampF64(load[0] / nCpus as f64 * 100.0, 0.0, 100.0)
+    let pct = Math.clampF64(load[0] / nCpus as f64 * 100.0, 0.0, 100.0)
     let barWidth = cols - 32
     if barWidth < 10 {
         return
@@ -236,7 +236,7 @@ pub fn renderMemBar(buf: &mut string, row: i64, cols: i64): void {
     let total = totalMem()
     let free = freeMem()
     let used = total - free
-    let pct = clampF64(used as f64 / total as f64 * 100.0, 0.0, 100.0)
+    let pct = Math.clampF64(used as f64 / total as f64 * 100.0, 0.0, 100.0)
     let barWidth = cols - 32
     if barWidth < 10 {
         return

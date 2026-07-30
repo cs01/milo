@@ -13,7 +13,7 @@ from "std/smt" import {
     SmtProblem, Verdict, newProblem, addAtom, nAtom, nNot, nAnd, nOr, decide
 }
 from "std/math" import {
-    absI64
+    Math
 }
 
 pub fn reportVerdict(label: &string, v: &Verdict) {
@@ -44,7 +44,7 @@ pub fn i64ToString(n: i64): string {
         return "0"
     }
     let neg: bool = n < 0
-    var m = absI64(n)
+    var m = Math.absI64(n)
     var digits: string = ""
     while m > 0 {
         digits = digitChar(m % 10) + digits

@@ -62,6 +62,9 @@ export interface FnSig {
   ret: TypeKind;
   variadic: boolean;
   isExtern?: boolean;
+  // carried for impl methods so call-site precondition checking (constant-arg
+  // `requires`) works on `Type.method(...)` calls too, not just free functions.
+  contracts?: import("./ast").Contract[];
 }
 
 export interface StructInfo {
@@ -2110,7 +2113,7 @@ export class TypeChecker {
           const params = concreteFn.params.map(p => ({ type: this.resolve(declaredType(p)), name: p.name }));
           const ret = this.resolve(concreteFn.retType);
           this.functions.set(mangled, { params, ret, variadic: false });
-          existing.methods.set(m.name, { params, ret, variadic: false });
+          existing.methods.set(m.name, { params, ret, variadic: false, contracts: m.contracts });
           this.monomorphizedFns.push(concreteFn);
           implFnsToCheck.push(concreteFn);
         }
@@ -2127,7 +2130,7 @@ export class TypeChecker {
           const params = concreteFn.params.map(p => ({ type: this.resolve(declaredType(p)), name: p.name }));
           const ret = this.resolve(concreteFn.retType);
           this.functions.set(mangled, { params, ret, variadic: false });
-          methods.set(m.name, { params, ret, variadic: false });
+          methods.set(m.name, { params, ret, variadic: false, contracts: m.contracts });
           this.monomorphizedFns.push(concreteFn);
           implFnsToCheck.push(concreteFn);
         }
@@ -4825,6 +4828,12 @@ export class TypeChecker {
                 if (paramType.tag !== "ref") this.tryMove(expr.args[i]);
               }
               this.staticCalls.set(expr, mangled);
+              // Precondition checking on a static method call (Math.sqrt(-1.0) etc).
+              // Only when there is no `self` param, so args align 1:1 with the sig's
+              // params the way checkCallSiteContracts expects.
+              if (paramOffset === 0 && sig.contracts && sig.contracts.length > 0) {
+                this.checkCallSiteContracts({ params: sig.params, contracts: sig.contracts } as any, expr.args, sp);
+              }
               // Send enforcement: Thread.spawn() requires all closure captures to be Send
               if (expr.enumName === "Thread" && expr.variant === "spawn" && expr.args.length === 1 && expr.args[0].kind === "Closure") {
                 const captures = this.closureCaptures.get(expr.args[0]);

@@ -13,7 +13,7 @@
 // integer witness, decide() honestly returns Unknown rather than guessing.
 
 from "std/math" import {
-    absI64
+    Math
 }
 
 // A row asserts  (sum coeffs[j]*x_j) + konst  <op>  0, strict picking < vs <=.
@@ -145,8 +145,8 @@ pub fn nOr(p: &mut SmtProblem, kids: Vec<i64>): i64 {
 }
 
 pub fn gcd2(a: i64, b: i64): i64 {
-    var x = absI64(a)
-    var y = absI64(b)
+    var x = Math.absI64(a)
+    var y = Math.absI64(b)
     while y != 0 {
         let t = x % y
         x = y

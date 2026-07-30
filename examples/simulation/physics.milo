@@ -18,7 +18,7 @@
 //   milo build examples/simulation/physics.milo -o /tmp/physics
 
 from "std/math" import {
-    mathSqrt
+    Math
 }
 
 @link("SDL2")
@@ -149,7 +149,7 @@ pub fn fillCircle(fb: &mut [u32; 76800], cx: f64, cy: f64, rad: f64, col: u32) {
                 if x >= 0 && x < W {
                     let dx = (x as f64) - cx
                     let dy = (y as f64) - cy
-                    let d = mathSqrt(dx * dx + dy * dy)
+                    let d = Math.sqrt(dx * dx + dy * dy)
                     // signed distance inside the disc; +0.5 centers the 1px ramp on the edge
                     var cov = r - d + 0.5
                     if cov > 1.0 {
@@ -216,7 +216,7 @@ pub fn stepSim(balls: &mut Vec<Ball>, gx: f64, gy: f64, sdt: f64, restitution: f
             let distSq = dx * dx + dy * dy
             let rsum = bi.r + bj.r
             if distSq < rsum * rsum && distSq > 0.000001 {
-                let dist = mathSqrt(distSq)
+                let dist = Math.sqrt(distSq)
                 let nx = dx / dist
                 let ny = dy / dist
                 // positional correction (split by inverse mass)

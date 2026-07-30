@@ -13,7 +13,7 @@
 //   milo build examples/graphics/raytrace3d.milo -o /tmp/rt3d --release   (release = smoother)
 
 from "std/math" import {
-    mathSqrt, mathSin, mathCos, mathFloor, mathPow
+    Math
 }
 
 @link("SDL2")
@@ -107,7 +107,7 @@ pub fn vdot(a: Vec3, b: Vec3): f64 {
 }
 
 pub fn vlen(a: Vec3): f64 {
-    return mathSqrt(vdot(a, a))
+    return Math.sqrt(vdot(a, a))
 }
 
 pub fn vnorm(a: Vec3): Vec3 {
@@ -183,7 +183,7 @@ pub fn hitSpheres(scene: &Vec<Ball>, ro: Vec3, rd: Vec3): SphereHit {
         let c = vdot(oc, oc) - b.r * b.r
         let disc = halfB * halfB - c // (rd is unit, so a = 1)
         if disc >= 0.0 {
-            let sq = mathSqrt(disc)
+            let sq = Math.sqrt(disc)
             var t = -halfB - sq
             if t < 0.001 {
                 t = -halfB + sq
@@ -214,7 +214,7 @@ pub fn inShadow(scene: &Vec<Ball>, p: Vec3): bool {
         let c = vdot(oc, oc) - b.r * b.r
         let disc = halfB * halfB - c
         if disc >= 0.0 {
-            let sq = mathSqrt(disc)
+            let sq = Math.sqrt(disc)
             let t = -halfB - sq
             if t > 0.001 && t < dist {
                 return true
@@ -240,7 +240,7 @@ pub fn shade(scene: &Vec<Ball>, p: Vec3, n: Vec3, base: Vec3, viewDir: Vec3): Ve
         let h = vnorm(vadd(l, viewDir))
         let sp = vdot(n, h)
         if sp > 0.0 {
-            let s = mathPow(sp, 48.0)
+            let s = Math.pow(sp, 48.0)
             lit = vadd(lit, v3(s * 0.9, s * 0.9, s * 0.9))
         }
     }
@@ -277,8 +277,8 @@ pub fn trace(scene: &Vec<Ball>, ro: Vec3, rd: Vec3, depth: i64): Vec3 {
         }
         let n = v3(0.0, 1.0, 0.0)
         // checkerboard albedo
-        let cx = mathFloor(p.x) as i64
-        let cz = mathFloor(p.z) as i64
+        let cx = Math.floor(p.x) as i64
+        let cz = Math.floor(p.z) as i64
         var base = v3(0.22, 0.15, 0.10) // dark walnut
         if ((cx + cz) & 1) == 0 {
             base = v3(0.74, 0.62, 0.45)
@@ -353,7 +353,7 @@ pub fn stepPhysics(scene: &mut Vec<Ball>, sdt: f64, gravity: f64, restitution: f
             let distSq = vdot(d, d)
             let rsum = bi.r + bj.r
             if distSq < rsum * rsum && distSq > 0.000001 {
-                let dist = mathSqrt(distSq)
+                let dist = Math.sqrt(distSq)
                 let nrm = vscale(d, 1.0 / dist)
                 // soften positional correction (0.8) so deep overlaps don't snap apart
                 let overlap = (rsum - dist) * 0.8
@@ -389,9 +389,9 @@ pub fn clamp01(x: f64): f64 {
 
 pub fn packColor(c: Vec3): u32 {
     // gamma 2.0 + clamp
-    let ri = (mathSqrt(clamp01(c.x)) * 255.0) as u32
-    let gi = (mathSqrt(clamp01(c.y)) * 255.0) as u32
-    let bi = (mathSqrt(clamp01(c.z)) * 255.0) as u32
+    let ri = (Math.sqrt(clamp01(c.x)) * 255.0) as u32
+    let gi = (Math.sqrt(clamp01(c.y)) * 255.0) as u32
+    let bi = (Math.sqrt(clamp01(c.z)) * 255.0) as u32
     return ri | (gi << 8) | (bi << 16) | (0xFF << 24)
 }
 
@@ -504,7 +504,7 @@ pub fn main(): i32 {
 
         // ---- camera basis (orbit around lookAt) ----
         let radius = 7.0
-        let eye = v3(mathSin(camAngle) * radius, camHeight, mathCos(camAngle) * radius)
+        let eye = v3(Math.sin(camAngle) * radius, camHeight, Math.cos(camAngle) * radius)
         let fwd = vnorm(vsub(lookAt, eye))
         let right = vnorm(vcross(fwd, v3(0.0, 1.0, 0.0)))
         let up = vcross(right, fwd)

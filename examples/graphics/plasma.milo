@@ -21,7 +21,7 @@ from "std/time" import {
     epochMillis
 }
 from "std/math" import {
-    mathSin, mathSqrt, mathPi
+    Math
 }
 from "std/strconv" import {
     formatFloat
@@ -71,20 +71,20 @@ pub fn emit(buf: &mut string, s: &string): void {
 // Sum of a few travelling sine waves + a centered radial ripple, mapped to an
 // RGB rainbow via three phase-shifted sines (120° apart). out is r,g,b in 0–255.
 pub fn plasmaRGB(px: f64, py: f64, cx: f64, cy: f64, t: f64, out: &mut [i64; 3]): void {
-    var v = mathSin(px * 0.055 + t)
-    v = v + mathSin(py * 0.085 + t * 0.7)
-    v = v + mathSin((px + py) * 0.045 + t * 1.3)
+    var v = Math.sin(px * 0.055 + t)
+    v = v + Math.sin(py * 0.085 + t * 0.7)
+    v = v + Math.sin((px + py) * 0.045 + t * 1.3)
     let dx = px - cx
     let dy = py - cy
-    let d = mathSqrt(dx * dx + dy * dy)
-    v = v + mathSin(d * 0.075 - t * 1.1)
+    let d = Math.sqrt(dx * dx + dy * dy)
+    v = v + Math.sin(d * 0.075 - t * 1.1)
 
     // v spans about [-4,4]; fan it out across the color wheel
-    let phase = v * mathPi() * 0.25
-    let third = mathPi() * 2.0 / 3.0
-    out[0] = ((mathSin(phase) * 0.5 + 0.5) * 255.0) as i64
-    out[1] = ((mathSin(phase + third) * 0.5 + 0.5) * 255.0) as i64
-    out[2] = ((mathSin(phase + third * 2.0) * 0.5 + 0.5) * 255.0) as i64
+    let phase = v * Math.pi() * 0.25
+    let third = Math.pi() * 2.0 / 3.0
+    out[0] = ((Math.sin(phase) * 0.5 + 0.5) * 255.0) as i64
+    out[1] = ((Math.sin(phase + third) * 0.5 + 0.5) * 255.0) as i64
+    out[2] = ((Math.sin(phase + third * 2.0) * 0.5 + 0.5) * 255.0) as i64
 }
 
 // Draw one full plasma frame (rows 2..) into buf. Returns the frame's byte size.

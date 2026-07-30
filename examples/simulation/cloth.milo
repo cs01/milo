@@ -18,7 +18,7 @@
 //   milo run examples/simulation/cloth.milo --release   (-O3, smoother)
 
 from "std/math" import {
-    mathSqrt, mathFloor, mathAbs
+    Math
 }
 
 @link("SDL2")
@@ -114,7 +114,7 @@ pub fn drawLineAA(fb: &mut [u32; 172800], x0f: f64, y0f: f64, x1f: f64, y1f: f64
     var y0 = y0f
     var x1 = x1f
     var y1 = y1f
-    let steep = mathAbs(y1 - y0) > mathAbs(x1 - x0)
+    let steep = Math.abs(y1 - y0) > Math.abs(x1 - x0)
     if steep {
         let tx = x0
         x0 = y0
@@ -140,7 +140,7 @@ pub fn drawLineAA(fb: &mut [u32; 172800], x0f: f64, y0f: f64, x1f: f64, y1f: f64
     let xe = x1 as i64
     while xi <= xe {
         let y = y0 + grad * ((xi as f64) - x0)
-        let yf = mathFloor(y)
+        let yf = Math.floor(y)
         let fr = y - yf
         let iy = yf as i64
         if steep {
@@ -164,7 +164,7 @@ pub fn fillDot(fb: &mut [u32; 172800], cx: f64, cy: f64, rad: f64, col: u32) {
         while x <= xend {
             let dx = (x as f64) - cx
             let dy = (y as f64) - cy
-            var cov = r - mathSqrt(dx * dx + dy * dy) + 0.5
+            var cov = r - Math.sqrt(dx * dx + dy * dy) + 0.5
             if cov > 1.0 {
                 cov = 1.0
             }
@@ -200,7 +200,7 @@ pub fn addCon(nodes: &Vec<Node>, cons: &mut Vec<Con>, a: i64, b: i64, stiff: f64
     let dx = nb.px - na.px
     let dy = nb.py - na.py
     cons.push(Con {
-        a: a, b: b, rest: mathSqrt(dx * dx + dy * dy), stiff: stiff, draw: draw
+        a: a, b: b, rest: Math.sqrt(dx * dx + dy * dy), stiff: stiff, draw: draw
     }
     )
 }
@@ -263,7 +263,7 @@ pub fn solve(nodes: &mut Vec<Node>, cons: &Vec<Con>, grabbed: i64) {
         let nb = nodes[con.b]
         let dx = nb.px - na.px
         let dy = nb.py - na.py
-        var d = mathSqrt(dx * dx + dy * dy)
+        var d = Math.sqrt(dx * dx + dy * dy)
         if d < 0.0001 {
             d = 0.0001
         }
@@ -470,8 +470,8 @@ pub fn main(): i32 {
             if con.draw {
                 let na = nodes[con.a]
                 let nb = nodes[con.b]
-                let sa = mathSqrt((na.px - na.ppx) * (na.px - na.ppx) + (na.py - na.ppy) * (na.py - na.ppy))
-                let sb = mathSqrt((nb.px - nb.ppx) * (nb.px - nb.ppx) + (nb.py - nb.ppy) * (nb.py - nb.ppy))
+                let sa = Math.sqrt((na.px - na.ppx) * (na.px - na.ppx) + (na.py - na.ppy) * (na.py - na.ppy))
+                let sb = Math.sqrt((nb.px - nb.ppx) * (nb.px - nb.ppx) + (nb.py - nb.ppy) * (nb.py - nb.ppy))
                 drawLineAA(fb, na.px, na.py, nb.px, nb.py, motionColor((sa + sb) * 0.5))
             }
             di = di + 1

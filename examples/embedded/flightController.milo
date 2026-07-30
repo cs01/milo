@@ -13,7 +13,7 @@
 //   milo safety examples/embedded/flightController.milo --safety=do178
 
 from "std/math" import {
-    clampF64
+    Math
 }
 from "std/io" import {
     writeStdout
@@ -69,7 +69,7 @@ ensures result >= pid.outMin && result <= pid.outMax
     let derivative = (error - pid.prevError) / dt
     pid.prevError = error
     let output = pid.kp * error + pid.ki * pid.integral + pid.kd * derivative
-    return clampF64(output, pid.outMin, pid.outMax)
+    return Math.clampF64(output, pid.outMin, pid.outMax)
 }
 
 // ── 1D altitude physics ──
@@ -128,8 +128,8 @@ requires tick >= 0
     // 16-row vertical gauge: row 0 = 30m, row 15 = 0m
     let maxAlt = 30.0
     let rows = 16
-    let currentRow = clampF64((maxAlt - alt) / 2.0, 0.0, 15.0) as i32
-    let targetRow = clampF64((maxAlt - target) / 2.0, 0.0, 15.0) as i32
+    let currentRow = Math.clampF64((maxAlt - alt) / 2.0, 0.0, 15.0) as i32
+    let targetRow = Math.clampF64((maxAlt - target) / 2.0, 0.0, 15.0) as i32
 
     for row in 0..rows {
         let rowAlt = 30 - row * 2
@@ -178,7 +178,7 @@ requires tick >= 0
 
     // thrust bar
     writeStdout("  thrust  ")
-    let filled = clampF64(thrust * 30.0, 0.0, 30.0) as i64
+    let filled = Math.clampF64(thrust * 30.0, 0.0, 30.0) as i64
     for i in 0..30 {
         if i < filled {
             writeStdout("\x1b[42m \x1b[0m")
@@ -218,14 +218,14 @@ pub fn main(): i32 {
             break
         }
         if key == KEY_UP {
-            target = clampF64(target + 1.0, 0.0, 30.0)
+            target = Math.clampF64(target + 1.0, 0.0, 30.0)
         }
         if key == KEY_DOWN {
-            target = clampF64(target - 1.0, 0.0, 30.0)
+            target = Math.clampF64(target - 1.0, 0.0, 30.0)
         }
 
         let error = target - state.altitude
-        thrust = clampF64(0.5 + pidUpdate(pid, error, dt), 0.0, 1.0)
+        thrust = Math.clampF64(0.5 + pidUpdate(pid, error, dt), 0.0, 1.0)
         physicsTick(state, thrust, dt)
 
         renderFrame(state.altitude, state.velocity, target, thrust, tick as i64)

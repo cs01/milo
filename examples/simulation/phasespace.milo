@@ -21,7 +21,7 @@
 //   milo run examples/simulation/phasespace.milo --release   (-O3 strongly recommended)
 
 from "std/math" import {
-    mathSqrt, mathSin, mathPow, mathFloor, mathAbs
+    Math
 }
 from "std/strconv" import {
     formatFloat
@@ -108,7 +108,7 @@ pub fn minmod(a: f64, b: f64): f64 {
     if a * b <= 0.0 {
         return 0.0
     }
-    if mathAbs(a) < mathAbs(b) {
+    if Math.abs(a) < Math.abs(b) {
         return a
     }
     return b
@@ -351,11 +351,11 @@ pub fn massOf(f: &Vec<f64>, dx: f64, dv: f64): f64 {
 }
 
 pub fn initF(f: &mut Vec<f64>, dv: f64) {
-    let norm = 1.0 / mathSqrt(2.0 * 3.14159265358979)
+    let norm = 1.0 / Math.sqrt(2.0 * 3.14159265358979)
     var j = 0
     while j < NV {
         let v = cellV(j, dv)
-        let fv = norm * mathPow(E_CONST, 0.0 - 0.5 * v * v) // zero-drift Maxwellian, uniform in x
+        let fv = norm * Math.pow(E_CONST, 0.0 - 0.5 * v * v) // zero-drift Maxwellian, uniform in x
         var i = 0
         while i < NX {
             f[j * NX + i] = fv
@@ -415,7 +415,7 @@ pub fn main(): i32 {
     var evec: Vec<f64> = Vec.new()
     var ie = 0
     while ie < NX {
-        evec.push(2.0 * AWELL * mathSin(2.0 * cellX(ie, dx)))
+        evec.push(2.0 * AWELL * Math.sin(2.0 * cellX(ie, dx)))
         ie = ie + 1
     }
 
@@ -501,7 +501,7 @@ pub fn main(): i32 {
                             let ddx = (ii - mx) as f64
                             let ddy = (jj - gj) as f64
                             let r2 = ddx * ddx + ddy * ddy
-                            f[jj * NX + ii] = f[jj * NX + ii] + 0.16 * mathPow(E_CONST, 0.0 - r2 / 14.0)
+                            f[jj * NX + ii] = f[jj * NX + ii] + 0.16 * Math.pow(E_CONST, 0.0 - r2 / 14.0)
                         }
                         ii = ii + 1
                     }
@@ -585,7 +585,7 @@ pub fn main(): i32 {
                 c = c + 1
             }
             mass = mass * dx * dv
-            let relErr = mathAbs(mass - mass0) / mass0
+            let relErr = Math.abs(mass - mass0) / mass0
             print("t=" + formatFloat(t, 2) + "  massRelErr=" + formatFloat(relErr, 8) + "  min(f)=" + formatFloat(minf, 6))
         }
         frame = frame + 1

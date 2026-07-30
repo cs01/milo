@@ -1,10 +1,8 @@
 // @error: requires clause 'x >= 0.0' violated
 
-from "std/math" import {
-    mathSqrt
-}
+from "std/math" import { Math }
 
 fn main(): i32 {
-    let r = mathSqrt(-1.0)
+    let r = Math.sqrt(-1.0)
     return 0
 }

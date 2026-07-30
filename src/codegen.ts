@@ -4319,6 +4319,8 @@ export class Codegen {
         return this.genVecFind(expr, lines);
       case "VecAny":
         return this.genVecAny(expr, lines);
+      case "VecSum":
+        return this.genVecSum(expr, lines);
       case "VecAll":
         return this.genVecAll(expr, lines);
       case "VecIsEmpty": {
@@ -5968,6 +5970,55 @@ export class Codegen {
     const result = this.nextTemp();
     lines.push(`  ${result} = load i1, ptr ${resultAddr}`);
     return [lines, result, "i1"];
+  }
+
+  // v.sum() — accumulate all elements. No callback; wrapping add for ints (matches the
+  // default arithmetic), fadd for floats. Empty vec sums to 0.
+  private genVecSum(expr: HIRExpr & { kind: "VecSum" }, lines: string[]): [string[], string, string] {
+    this.hasVecType = true;
+    const [vl, vv] = this.genExpr(expr.vec);
+    lines.push(...vl);
+    const data = this.nextTemp();
+    lines.push(`  ${data} = extractvalue %Vec ${vv}, 0`);
+    const len = this.nextTemp();
+    lines.push(`  ${len} = extractvalue %Vec ${vv}, 1`);
+    const elemTy = this.llvmType(expr.elementType);
+    const isFloat = expr.elementType.tag === "float";
+    const accAddr = `%__sum_acc.${this.scopeCounter++}.addr`;
+    this.entryAllocas.push(`  ${accAddr} = alloca ${elemTy}`);
+    lines.push(`  store ${elemTy} ${isFloat ? "0.0" : "0"}, ptr ${accAddr}`);
+    const idxAddr = `%__sum_idx.${this.scopeCounter++}.addr`;
+    this.entryAllocas.push(`  ${idxAddr} = alloca i64`);
+    lines.push(`  store i64 0, ptr ${idxAddr}`);
+
+    const condLabel = this.nextLabel("sum.cond");
+    const bodyLabel = this.nextLabel("sum.body");
+    const endLabel = this.nextLabel("sum.end");
+    lines.push(`  br label %${condLabel}`);
+    lines.push(`${condLabel}:`);
+    const idx = this.nextTemp();
+    lines.push(`  ${idx} = load i64, ptr ${idxAddr}`);
+    const cmp = this.nextTemp();
+    lines.push(`  ${cmp} = icmp ult i64 ${idx}, ${len}`);
+    lines.push(`  br i1 ${cmp}, label %${bodyLabel}, label %${endLabel}`);
+    lines.push(`${bodyLabel}:`);
+    const elemPtr = this.nextTemp();
+    lines.push(`  ${elemPtr} = getelementptr ${elemTy}, ptr ${data}, i64 ${idx}`);
+    const elem = this.nextTemp();
+    lines.push(`  ${elem} = load ${elemTy}, ptr ${elemPtr}`);
+    const acc = this.nextTemp();
+    lines.push(`  ${acc} = load ${elemTy}, ptr ${accAddr}`);
+    const newAcc = this.nextTemp();
+    lines.push(`  ${newAcc} = ${isFloat ? "fadd" : "add"} ${elemTy} ${acc}, ${elem}`);
+    lines.push(`  store ${elemTy} ${newAcc}, ptr ${accAddr}`);
+    const nextIdx = this.nextTemp();
+    lines.push(`  ${nextIdx} = add i64 ${idx}, 1`);
+    lines.push(`  store i64 ${nextIdx}, ptr ${idxAddr}`);
+    lines.push(`  br label %${condLabel}`);
+    lines.push(`${endLabel}:`);
+    const result = this.nextTemp();
+    lines.push(`  ${result} = load ${elemTy}, ptr ${accAddr}`);
+    return [lines, result, elemTy];
   }
 
   private genVecAll(expr: HIRExpr & { kind: "VecAll" }, lines: string[]): [string[], string, string] {

@@ -969,6 +969,9 @@ class LowerCtx {
           if (expr.method === "all") {
             return { kind: "VecAll", vec: this.lowerExpr(expr.object), callback: this.lowerExpr(expr.args[0]), elementType: objType.element, type, span: expr.span };
           }
+          if (expr.method === "sum") {
+            return { kind: "VecSum", vec: this.lowerExpr(expr.object), elementType: objType.element, type, span: expr.span };
+          }
           if (expr.method === "join") {
             const args: HIRArg[] = [
               { expr: this.lowerExpr(expr.object), passByRef: true, refMut: false },

@@ -1,0 +1,27 @@
+// Vec.sum() — accumulate all elements (int or float), no callback; chains after
+// map/filter, empty sums to 0.
+fn main() {
+    var v: Vec<i64> = Vec.new()
+    v.push(10)
+    v.push(20)
+    v.push(30)
+    // @expect: 60
+    print(v.sum())
+
+    // chains with a combinator
+    // @expect: 50
+    print(v.filter((x: &i64) => x > 15).sum())
+
+    // @expect: 90
+    print(v.map((x: &i64) => x + 10).sum())
+
+    var f: Vec<f64> = Vec.new()
+    f.push(1.5)
+    f.push(2.5)
+    // @expect: 4
+    print(f.sum())
+
+    var e: Vec<i64> = Vec.new()
+    // @expect: 0
+    print(e.sum())
+}

@@ -81,6 +81,7 @@ export type HIRExpr =
   | { kind: "VecEach"; vec: HIRExpr; callback: HIRExpr; elementType: TypeKind; type: TypeKind; span?: Span }
   | { kind: "VecFind"; vec: HIRExpr; callback: HIRExpr; elementType: TypeKind; optionEnumName: string; type: TypeKind; span?: Span }
   | { kind: "VecAny"; vec: HIRExpr; callback: HIRExpr; elementType: TypeKind; type: TypeKind; span?: Span }
+  | { kind: "VecSum"; vec: HIRExpr; elementType: TypeKind; type: TypeKind; span?: Span }
   | { kind: "VecAll"; vec: HIRExpr; callback: HIRExpr; elementType: TypeKind; type: TypeKind; span?: Span }
   | { kind: "VecIsEmpty"; object: HIRExpr; type: TypeKind; span?: Span }
   | { kind: "VecEnumerate"; vec: HIRExpr; callback: HIRExpr; elementType: TypeKind; type: TypeKind; span?: Span }

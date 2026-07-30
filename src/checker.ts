@@ -5403,6 +5403,14 @@ export class TypeChecker {
             if (expr.args.length !== 0) { this.error(`'isEmpty' takes no arguments`, sp); }
             return this.setType(expr, { tag: "bool" });
           }
+          if (expr.method === "sum") {
+            if (expr.args.length !== 0) { this.error(`'sum' takes no arguments`, sp); }
+            if (objType.element.tag !== "int" && objType.element.tag !== "float") {
+              this.error(`'sum' requires a Vec of integers or floats, got Vec<${typeName(objType.element)}>`, sp);
+              return this.setType(expr, { tag: "unknown" });
+            }
+            return this.setType(expr, objType.element);
+          }
           if (expr.method === "contains") {
             if (expr.args.length !== 1) { this.error(`'contains' expects 1 argument`, sp); return this.setType(expr, { tag: "bool" }); }
             const argType = this.checkExprWithHint(expr.args[0], objType.element);

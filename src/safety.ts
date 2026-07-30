@@ -237,10 +237,6 @@ export function parseSafetyLevel(s: string): SafetyLevel | null {
   return null;
 }
 
-export function getSafetyConstraints(level: SafetyLevel): SafetyConstraints {
-  return PROFILES[level];
-}
-
 export function checkSafetyCompliance(program: Program, level: SafetyLevel): SafetyViolation[] {
   const constraints = PROFILES[level];
   const violations: SafetyViolation[] = [];

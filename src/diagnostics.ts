@@ -87,11 +87,3 @@ export function formatDiagnostic(
 
   return lines.join("\n");
 }
-
-export function formatDiagnosticPlain(d: Diagnostic, filePath?: string): string {
-  const file = filePath ?? "<input>";
-  if (d.span) {
-    return `${d.severity}[${file}:${d.span.line}:${d.span.col}]: ${d.message}`;
-  }
-  return `${d.severity}: ${d.message}`;
-}

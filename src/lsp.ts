@@ -105,63 +105,6 @@ function buildSymbolIndex(uri: string, program: Program) {
   symbolIndex = symbols;
 }
 
-// ── Type info for hover ──
-
-interface TypeInfo {
-  line: number;
-  col: number;
-  endCol: number;
-  text: string;
-}
-
-function collectTypeInfo(program: Program): TypeInfo[] {
-  const infos: TypeInfo[] = [];
-
-  for (const fn of program.functions) {
-    if (fn.isExtern) continue;
-    for (const stmt of fn.body) collectStmtTypeInfo(stmt, fn, infos);
-  }
-  return infos;
-}
-
-function collectStmtTypeInfo(stmt: Stmt, fn: Function, infos: TypeInfo[]) {
-  switch (stmt.kind) {
-    case "LetDecl":
-    case "VarDecl":
-      if (stmt.span) {
-        const declType = (stmt.type ? formatMiloType(stmt.type) : null) ?? inferLiteralType(stmt.value);
-        if (declType) {
-          // span points to 'let'/'var', name starts after that + space
-          infos.push({
-            line: stmt.span.line,
-            col: stmt.span.col,
-            endCol: stmt.span.col + (stmt.kind === "LetDecl" ? 3 : 3) + 1 + stmt.name.length,
-            text: `${stmt.kind === "LetDecl" ? "let" : "var"} ${stmt.name}: ${declType}`,
-          });
-        }
-      }
-      break;
-    case "IfStmt":
-      for (const s of stmt.thenBody) collectStmtTypeInfo(s, fn, infos);
-      if (stmt.elseBody) for (const s of stmt.elseBody) collectStmtTypeInfo(s, fn, infos);
-      break;
-    case "WhileStmt":
-      for (const s of stmt.body) collectStmtTypeInfo(s, fn, infos);
-      break;
-    case "MatchStmt":
-      for (const arm of stmt.arms) {
-        for (const s of arm.body) collectStmtTypeInfo(s, fn, infos);
-      }
-      break;
-    case "ForInStmt":
-      for (const s of stmt.body) collectStmtTypeInfo(s, fn, infos);
-      break;
-    case "UnsafeBlock":
-      for (const s of stmt.body) collectStmtTypeInfo(s, fn, infos);
-      break;
-  }
-}
-
 function inferLiteralType(expr: Expr): string | null {
   switch (expr.kind) {
     case "IntLit": return "i64";  // context-free int literals default to i64
@@ -1467,11 +1410,6 @@ function nameRangeOnLine(source: string, line: number, name: string): object {
   const text = source.split("\n")[line] ?? "";
   const col = Math.max(0, text.indexOf(name));
   return { start: { line, character: col }, end: { line, character: col + name.length } };
-}
-
-function fullLineRange(source: string, line: number): object {
-  const text = source.split("\n")[line] ?? "";
-  return { start: { line, character: 0 }, end: { line, character: text.length } };
 }
 
 function posToOffset(source: string, line: number, character: number): number {

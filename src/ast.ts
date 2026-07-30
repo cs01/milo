@@ -21,10 +21,6 @@ export function simpleType(name: string): MiloType {
   return { name, isPtr: false, isRef: false, isRefMut: false, isArray: false, arraySize: null };
 }
 
-export function ptrType(name: string): MiloType {
-  return { name, isPtr: true, isRef: false, isRefMut: false, isArray: false, arraySize: null };
-}
-
 export interface Param {
   name: string;
   type: MiloType | null;
@@ -152,6 +148,9 @@ export interface StructDecl {
   isExtern?: boolean;
   isOpaque?: boolean;
   isPub?: boolean;
+  // Tuple struct / newtype: `struct NodeId(i64)`. Fields are synthesized with positional
+  // names "0","1",… — construction is call-form (`NodeId(5)`), access is `.0`.
+  isTuple?: boolean;
 }
 
 export interface EnumVariant {
@@ -253,8 +252,6 @@ export interface TypeAlias {
   span?: Span;
   isPub?: boolean;
 }
-
-export type TopLevel = StructDecl | EnumDecl | Function | ImportDecl | TraitDecl | ImplDecl | TypeAlias | InterfaceDecl;
 
 export interface GlobalDecl {
   kind: "GlobalDecl";

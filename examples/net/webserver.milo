@@ -3,7 +3,7 @@ from "std/http" import {
     Context, Response, Router, serveRouter
 }
 from "std/argparse" import {
-    newParser
+    ArgParser
 }
 from "std/strconv" import {
     parseInt
@@ -151,7 +151,7 @@ pub fn logMiddleware(ctx: &mut Context, next: (&mut Context) => Response): Respo
 // ── Main ──
 
 pub fn main(): i32 {
-    var parser = newParser("webserver", "Router-based HTTP server")
+    var parser = ArgParser.new("webserver", "Router-based HTTP server")
     parser.addI64("port", "p", "Port to listen on", 8080)
     let args = parser.parse()
 

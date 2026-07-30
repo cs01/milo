@@ -11,10 +11,10 @@ import { join } from "path";
 
 const COMPILER = join(import.meta.dir, "..", "src", "main.ts");
 
-const STDLIB_SRC = `from "std/string" import { charIsDigit }
+const STDLIB_SRC = `from "std/string" import { asciiIsDigit }
 
 fn main() {
-    let ok = charIsDigit(104)
+    let ok = asciiIsDigit(104)
 }
 `;
 const STDLIB_URI = "file:///tmp/milo-lsp-regression.milo";
@@ -78,9 +78,9 @@ const BUILTIN_SRC = `fn main() {
 `;
 const BUILTIN_URI = "file:///tmp/milo-lsp-builtin.milo";
 
-// A user fn shadowing a prelude/std fn (charIsDigit) with a different signature.
+// A user fn shadowing a prelude/std fn (asciiIsDigit) with a different signature.
 // Must surface as a diagnostic squiggled on the fn name, not a dead file.
-const SHADOW_SRC = `fn charIsDigit(ch: u8, extra: i64): bool {
+const SHADOW_SRC = `fn asciiIsDigit(ch: u8, extra: i64): bool {
     return extra > 0
 }
 `;
@@ -264,12 +264,12 @@ beforeAll(async () => {
 
 afterAll(() => { proc?.kill(); });
 
-// charIsDigit is on line 4 (0-based 3), column 13.
+// asciiIsDigit is on line 4 (0-based 3), column 13.
 const STDLIB_POS = { line: 3, character: 13 };
 
 test("hover on imported stdlib symbol returns without hanging", async () => {
   const hover = await req(2, "textDocument/hover", { textDocument: { uri: STDLIB_URI }, position: STDLIB_POS });
-  expect(hover?.contents?.value).toContain("charIsDigit");
+  expect(hover?.contents?.value).toContain("asciiIsDigit");
   expect(hover?.contents?.value).toContain("std/string");
 });
 

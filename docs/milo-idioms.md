@@ -77,7 +77,9 @@ out.push(byte)      // single u8
 
 `s[a..b]` and `s.slice(a, b)` produce a `&string` **view** with no allocation. The checker marks the source borrowed for the view's lifetime, so it can't be mutated or moved out from under you. `s.substr(a, b)` is the owning counterpart — use it only when the result must outlive the source.
 
-Note `indexOf`/`lastIndexOf` return a plain `i64` and use `-1` for "not found", not `Option<i64>`.
+`indexOf`/`indexOfFrom`/`lastIndexOf` return `Option<i64>` byte offsets. Match,
+use `!` when a preceding check proves the substring exists, or use `??` when a
+fallback offset is genuinely meaningful.
 
 ## Ownership
 

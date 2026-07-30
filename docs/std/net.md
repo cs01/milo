@@ -2,22 +2,6 @@
 
 ## std/net
 
-### `Drop.drop`
-
-```milo
-fn Drop.drop(self: &mut Drop): void
-```
-
-_Undocumented._
-
-### `Drop.drop`
-
-```milo
-fn Drop.drop(self: &mut Drop): void
-```
-
-_Undocumented._
-
 ### `ignoreSigpipe`
 
 ```milo

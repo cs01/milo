@@ -2,50 +2,42 @@
 
 ## std/regex.linux
 
-### `readMatchI32`
+### `Regex.compile`
 
 ```milo
-fn readMatchI32(buf: &[u8; 80], off: i64): i32
+fn Regex.compile(pattern: string): Result<Regex>
 ```
 
-read i32 from byte buffer at given offset
+_Undocumented._
 
-### `regexFind`
+### `Regex.compileFlags`
 
 ```milo
-pub fn regexFind(re: &Regex, input: &string): Option<RegexMatch>
+fn Regex.compileFlags(pattern: string, flags: i32): Result<Regex>
 ```
 
-Find the first match in a string. Returns None if no match.
+_Undocumented._
 
-### `regexFindAll`
+### `Regex.find`
 
 ```milo
-pub fn regexFindAll(re: &Regex, input: &string): Vec<RegexMatch>
+fn Regex.find(self: &Regex, input: &string): Option<RegexMatch>
 ```
 
-Find all non-overlapping matches in a string.
+_Undocumented._
 
-### `regexMatch`
+### `Regex.findAll`
 
 ```milo
-pub fn regexMatch(re: &Regex, input: &string): bool
+fn Regex.findAll(self: &Regex, input: &string): Vec<RegexMatch>
 ```
 
-Test if a string matches the pattern.
+_Undocumented._
 
-### `regexNew`
+### `Regex.isMatch`
 
 ```milo
-pub fn regexNew(pattern: string): Option<Regex>
+fn Regex.isMatch(self: &Regex, input: &string): bool
 ```
 
-Compile a POSIX extended regular expression. Returns None on invalid pattern.
-
-### `regexNewFlags`
-
-```milo
-pub fn regexNewFlags(pattern: string, cflags: i32): Option<Regex>
-```
-
-Compile a POSIX extended regex with explicit cflags. REG_EXTENDED=1, REG_ICASE=2.
+_Undocumented._

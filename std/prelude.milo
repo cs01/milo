@@ -5,5 +5,13 @@
 // methods (e.g. indexOfFrom) program-wide.
 
 from "std/string" import {
-    charIsWhitespace, charIsDigit, charIsAlpha, charIsAlphanumeric
+    asciiIsWhitespace, asciiIsDigit, asciiIsAlpha, asciiIsAlphanumeric,
+    asciiIsLower, asciiIsUpper, asciiIsPunctuation, asciiIsHexDigit,
+    asciiIsPrintable, asciiIsControl, asciiToLower, asciiToUpper
+}
+
+// The single success value for operations that return no data. Use
+// Result<Unit, E> for fallible commands; `void` is a function return type, not a
+// value that can inhabit Result.
+pub struct Unit {
 }

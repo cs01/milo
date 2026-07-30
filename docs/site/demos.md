@@ -139,11 +139,11 @@ git clone https://github.com/milo-language/milojs && milo run milojs/milojs.milo
 ### A taste: grep in Milo
 
 ```milo
-from "std/argparse" import { newParser }
+from "std/argparse" import { ArgParser }
 from "std/io" import { readFile }
 
 fn main(): i32 {
-    var parser = newParser("grep", "search for a string pattern in files")
+    var parser = ArgParser.new("grep", "search for a string pattern in files")
     parser.addPositional("pattern", "string pattern to search for")
     parser.addPositional("file", "file to search")
     parser.addBool("ignore-case", "i", "case-insensitive search")

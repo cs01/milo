@@ -295,7 +295,7 @@ pub fn main(): void {
 
                                         // right pane loops: on refresh marker, keep only latest
                                         if out2.contains("---REFRESH---") {
-                                            let idx = out2.lastIndexOf("---REFRESH---")
+                                            let idx = out2.lastIndexOf("---REFRESH---")!
                                             out2 = out2.substr(idx + 14, out2.len)
                                         }
 

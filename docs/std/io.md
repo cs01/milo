@@ -2,14 +2,6 @@
 
 ## std/io
 
-### `Drop.drop`
-
-```milo
-fn Drop.drop(self: &mut Drop): void
-```
-
-_Undocumented._
-
 ### `fdChannel`
 
 ```milo
@@ -125,14 +117,6 @@ pub fn readLine(): Option<string>
 ```
 
 Read a single line from stdin. Returns None at EOF.
-
-### `readLineFd`
-
-```milo
-fn readLineFd(fd: i32): Option<string>
-```
-
-Read a single line from a file descriptor (reads byte-by-byte until newline or EOF).
 
 ### `readStdin`
 

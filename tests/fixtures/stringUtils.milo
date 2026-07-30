@@ -1,6 +1,7 @@
 // @expect: contains: true false true
 // @expect: indexOf: 6 -1 0
 // @expect: indexOfFrom: 14 -1
+// @expect: lastIndexOf: 12 -1
 // @expect: startsWith: true false
 // @expect: endsWith: true false
 // @expect: toLower: hello world
@@ -14,7 +15,7 @@
 // @expect: replace: hello universe
 // @expect: isFuncs: true true false true
 from "std/string" import {
-    charIsAlpha, charIsAlphanumeric, charIsDigit, charIsWhitespace, strContains, strEndsWith, strIndexOf, strIndexOfFrom, strRepeat, strReplace, strSplit, strStartsWith, strToLower, strToUpper, strTrim, strTrimEnd, strTrimStart, trim
+    asciiIsAlpha, asciiIsAlphanumeric, asciiIsDigit, asciiIsWhitespace, strContains, strEndsWith, strIndexOf, strIndexOfFrom, strRepeat, strReplace, strSplit, strStartsWith, strToLower, strToUpper, strTrim, strTrimEnd, strTrimStart, trim
 }
 
 pub fn boolStr(b: bool): string {
@@ -31,11 +32,12 @@ pub fn main(): i32 {
     print("contains: ", boolStr(s.contains("world")), " ", boolStr(s.contains("xyz")), " ", boolStr(s.contains("")))
 
     // indexOf
-    print("indexOf: ", s.indexOf("world"), " ", s.indexOf("xyz"), " ", s.indexOf("hello"))
+    print("indexOf: ", s.indexOf("world") ?? -1, " ", s.indexOf("xyz") ?? -1, " ", s.indexOf("hello") ?? -1)
 
     // indexOfFrom
     let s2 = "hello world hello"
-    print("indexOfFrom: ", s2.indexOfFrom("llo", 5 as i64), " ", s2.indexOfFrom("xyz", 0 as i64))
+    print("indexOfFrom: ", s2.indexOfFrom("llo", 5 as i64) ?? -1, " ", s2.indexOfFrom("xyz", 0 as i64) ?? -1)
+    print("lastIndexOf: ", s2.lastIndexOf("hello") ?? -1, " ", s2.lastIndexOf("xyz") ?? -1)
 
     // startsWith
     print("startsWith: ", boolStr(s.startsWith("hello")), " ", boolStr(s.startsWith("world")))
@@ -72,7 +74,7 @@ pub fn main(): i32 {
     print("replace: ", s.replace("world", "universe"))
 
     // is_* functions
-    print("isFuncs: ", boolStr(charIsDigit(48)), " ", boolStr(charIsAlpha(65)), " ", boolStr(charIsWhitespace(65)), " ", boolStr(charIsAlphanumeric(57)))
+    print("isFuncs: ", boolStr(asciiIsDigit(48)), " ", boolStr(asciiIsAlpha(65)), " ", boolStr(asciiIsWhitespace(65)), " ", boolStr(asciiIsAlphanumeric(57)))
 
     return 0
 }

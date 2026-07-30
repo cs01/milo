@@ -1,6 +1,6 @@
 // http — simple HTTP client for fetching URLs
 from "std/argparse" import {
-    newParser
+    ArgParser
 }
 from "std/fetch" import {
     fetch
@@ -155,7 +155,7 @@ pub fn prettyJson(input: &string): string {
 }
 
 pub fn main(): i32 {
-    var parser = newParser("http", "simple HTTP client")
+    var parser = ArgParser.new("http", "simple HTTP client")
     parser.addPositional("url", "URL to fetch")
     parser.addString("output", "o", "save response body to file", "")
     parser.addBool("verbose", "v", "show method and URL before request")

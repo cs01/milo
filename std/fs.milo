@@ -54,17 +54,15 @@ pub fn devNull(): string {
 pub struct FileInfo {
     size: i64,
     mode: i32,
-    exists: bool,
 }
 
-// Get file metadata. Returns FileInfo with exists=false if path doesn't exist.
-pub fn fileInfo(path: &string): FileInfo {
+// Get file metadata, or None when the path cannot be inspected. Use read/open
+// operations when the failure reason matters.
+pub fn fileInfo(path: &string): Option<FileInfo> {
     var buf: [u8; 144] = [0; 144]
     let r = stat(path, buf)
     if r != 0 {
-        return FileInfo {
-            size: 0 as i64, mode: 0, exists: false
-        }
+        return Option.None
     }
     let modeOff = statModeOffset()
     let sizeOff = statSizeOffset()
@@ -78,12 +76,13 @@ pub fn fileInfo(path: &string): FileInfo {
         let off = i as i64
         size = size | ((buf[sizeOff + off] as i64) << (off * 8))
     }
-    return FileInfo {
-        size: size, mode: mode, exists: true
+    return Option.Some(FileInfo {
+        size: size, mode: mode
     }
+    )
 }
 
-// Check if a path exists.
+// Check whether a path is visible to this process.
 pub fn pathExists(path: &string): bool {
     return access(path, 0) == 0
 }
@@ -113,19 +112,21 @@ pub fn isFile(path: &string): bool {
     return pathExists(path) && !isDir(path)
 }
 
-// Get file size in bytes. Returns -1 if file doesn't exist.
-pub fn fileSizePath(path: &string): i64 {
+// Get file size in bytes.
+pub fn fileSizePath(path: &string): Option<i64> {
     // Size via open + lseek(SEEK_END), not the struct-stat st_size field: that
     // offset is arch-specific (like st_mode; see isDir) and was wrong on arm64
     // Linux. lseek is arch/libc-independent. -1 if the file can't be opened.
-    var negOne: i64 = 0
-    negOne = negOne - 1
     match File.openRead(path) {
         Result.Ok(f) => {
-            return f.size()
+            let size = f.size()
+            if size < 0 {
+                return Option.None
+            }
+            return Option.Some(size)
         }
         Result.Err(_e) => {
-            return negOne
+            return Option.None
         }
     }
 }
@@ -137,13 +138,13 @@ pub struct DirEntry {
     isFile: bool,
 }
 
-// List directory contents. Returns empty vec on error.
-pub fn readDir(path: &string): Vec<DirEntry> {
+// List directory contents. An empty directory is distinct from a failed read.
+pub fn readDir(path: &string): Result<Vec<DirEntry>, IoError> {
     var entries: Vec<DirEntry> = Vec.new()
     unsafe {
         let dir = opendir(path)
         if dir as i64 == 0 as i64 {
-            return entries
+            return Result.Err(ioError(path))
         }
         let nameOff = direntNameOffset()
         let typeOff = direntTypeOffset()
@@ -170,7 +171,7 @@ pub fn readDir(path: &string): Vec<DirEntry> {
         }
         closedir(dir)
     }
-    return entries
+    return Result.Ok(entries)
 }
 
 // Read an entire file into a string. Returns an IoError (NotFound, permission,
@@ -219,55 +220,57 @@ pub fn appendFile(path: &string, data: &string): Result<i64, IoError> {
 }
 
 // ── Safe wrappers around POSIX fs operations ──
-// Return Result<bool, IoError> for operations with no meaningful return value.
-pub fn ok(): Result<bool, IoError> {
-    return Result.Ok(true)
+// Commands return Unit because success carries no additional information.
+fn ok(): Result<Unit, IoError> {
+    return Result.Ok(Unit {
+    }
+    )
 }
 
-fn errPath(path: &string): Result<bool, IoError> {
+fn errPath(path: &string): Result<Unit, IoError> {
     return Result.Err(ioError(path))
 }
 
-fn errFd(msg: &string): Result<bool, IoError> {
+fn errFd(msg: &string): Result<Unit, IoError> {
     return Result.Err(IoError.Other(msg.clone()))
 }
 
-pub fn removeFile(path: &string): Result<bool, IoError> {
+pub fn removeFile(path: &string): Result<Unit, IoError> {
     if unlink(path) != 0 {
         return errPath(path)
     }
     return ok()
 }
 
-pub fn makeDir(path: &string, mode: i32): Result<bool, IoError> {
+pub fn makeDir(path: &string, mode: i32): Result<Unit, IoError> {
     if mkdir(path, mode as u32) != 0 {
         return errPath(path)
     }
     return ok()
 }
 
-pub fn removeDir(path: &string): Result<bool, IoError> {
+pub fn removeDir(path: &string): Result<Unit, IoError> {
     if rmdir(path) != 0 {
         return errPath(path)
     }
     return ok()
 }
 
-pub fn renameFile(oldPath: &string, newPath: &string): Result<bool, IoError> {
+pub fn renameFile(oldPath: &string, newPath: &string): Result<Unit, IoError> {
     if rename(oldPath, newPath) != 0 {
         return errPath(oldPath)
     }
     return ok()
 }
 
-pub fn hardLink(existing: &string, newPath: &string): Result<bool, IoError> {
+pub fn hardLink(existing: &string, newPath: &string): Result<Unit, IoError> {
     if link(existing, newPath) != 0 {
         return errPath(existing)
     }
     return ok()
 }
 
-pub fn softLink(target: &string, path: &string): Result<bool, IoError> {
+pub fn softLink(target: &string, path: &string): Result<Unit, IoError> {
     if symlink(target, path) != 0 {
         return errPath(path)
     }
@@ -277,7 +280,7 @@ pub fn softLink(target: &string, path: &string): Result<bool, IoError> {
 pub fn readLink(path: &string): Result<string, IoError> {
     var buf: [u8; 4096] = [0; 4096]
     unsafe {
-        let n = readlink(path, buf as *u8, 4096)
+        let n = readlink(path, buf as *u8, 4095)
         if n < 0 {
             return Result.Err(ioError(path))
         }
@@ -297,63 +300,63 @@ pub fn realPath(path: &string): Result<string, IoError> {
     }
 }
 
-pub fn setMode(path: &string, mode: i32): Result<bool, IoError> {
+pub fn setMode(path: &string, mode: i32): Result<Unit, IoError> {
     if chmod(path, mode as u32) != 0 {
         return errPath(path)
     }
     return ok()
 }
 
-pub fn setFdMode(fd: i32, mode: i32): Result<bool, IoError> {
+pub fn setFdMode(fd: i32, mode: i32): Result<Unit, IoError> {
     if fchmod(fd, mode as u32) != 0 {
         return errFd("fchmod failed")
     }
     return ok()
 }
 
-pub fn setOwner(path: &string, uid: u32, gid: u32): Result<bool, IoError> {
+pub fn setOwner(path: &string, uid: u32, gid: u32): Result<Unit, IoError> {
     if chown(path, uid, gid) != 0 {
         return errPath(path)
     }
     return ok()
 }
 
-pub fn setFdOwner(fd: i32, uid: u32, gid: u32): Result<bool, IoError> {
+pub fn setFdOwner(fd: i32, uid: u32, gid: u32): Result<Unit, IoError> {
     if fchown(fd, uid, gid) != 0 {
         return errFd("fchown failed")
     }
     return ok()
 }
 
-pub fn setLinkOwner(path: &string, uid: u32, gid: u32): Result<bool, IoError> {
+pub fn setLinkOwner(path: &string, uid: u32, gid: u32): Result<Unit, IoError> {
     if lchown(path, uid, gid) != 0 {
         return errPath(path)
     }
     return ok()
 }
 
-pub fn truncateFile(path: &string, length: i64): Result<bool, IoError> {
+pub fn truncateFile(path: &string, length: i64): Result<Unit, IoError> {
     if truncate(path, length) != 0 {
         return errPath(path)
     }
     return ok()
 }
 
-pub fn truncateFd(fd: i32, length: i64): Result<bool, IoError> {
+pub fn truncateFd(fd: i32, length: i64): Result<Unit, IoError> {
     if ftruncate(fd, length) != 0 {
         return errFd("ftruncate failed")
     }
     return ok()
 }
 
-pub fn syncFd(fd: i32): Result<bool, IoError> {
+pub fn syncFd(fd: i32): Result<Unit, IoError> {
     if fsync(fd) != 0 {
         return errFd("fsync failed")
     }
     return ok()
 }
 
-pub fn dataSyncFd(fd: i32): Result<bool, IoError> {
+pub fn dataSyncFd(fd: i32): Result<Unit, IoError> {
     if fdatasync(fd) != 0 {
         return errFd("fdatasync failed")
     }
@@ -364,6 +367,9 @@ pub fn makeTempDir(prefix: &string): Result<string, IoError> {
     // mkdtemp modifies template in place — copy into mutable buffer
     var buf: [u8; 4096] = [0; 4096]
     let tmpl = prefix + "XXXXXX"
+    if tmpl.len >= 4096 {
+        return Result.Err(IoError.Other("temporary directory prefix is too long"))
+    }
     unsafe {
         for i in 0..tmpl.len {
             buf[i] = tmpl[i]
@@ -388,20 +394,18 @@ pub fn currentDir(): Result<string, IoError> {
     }
 }
 
-pub fn changeDir(path: &string): Result<bool, IoError> {
+pub fn changeDir(path: &string): Result<Unit, IoError> {
     if chdir(path) != 0 {
         return errPath(path)
     }
     return ok()
 }
 
-pub fn lstatInfo(path: &string): FileInfo {
+pub fn lstatInfo(path: &string): Option<FileInfo> {
     var buf: [u8; 144] = [0; 144]
     let r = lstat(path, buf)
     if r != 0 {
-        return FileInfo {
-            size: 0 as i64, mode: 0, exists: false
-        }
+        return Option.None
     }
     let modeOff = statModeOffset()
     let sizeOff = statSizeOffset()
@@ -413,14 +417,14 @@ pub fn lstatInfo(path: &string): FileInfo {
         let off = i as i64
         size = size | ((buf[sizeOff + off] as i64) << (off * 8))
     }
-    return FileInfo {
-        size: size, mode: mode, exists: true
+    return Option.Some(FileInfo {
+        size: size, mode: mode
     }
+    )
 }
 
 pub fn isSymlink(path: &string): bool {
-    let info = lstatInfo(path)
-    if !info.exists {
+    let Option.Some(info) = lstatInfo(path) else {
         return false
     }
     // S_IFLNK = 0xA000 = 40960

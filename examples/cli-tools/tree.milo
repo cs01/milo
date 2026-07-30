@@ -1,7 +1,7 @@
 // @run: examples/embedded
 // tree — display directory tree
 from "std/argparse" import {
-    newParser
+    ArgParser
 }
 from "std/fs" import {
     isDir, readDir
@@ -20,7 +20,7 @@ pub fn printTree(dirPath: &string, prefix: &string, depth: i64, maxLevel: i64, c
         return
     }
 
-    let entries = readDir(dirPath)
+    let entries = readDir(dirPath)!
     for idx in 0..entries.len {
         let name = entries[idx].name.clone()
         let entryIsDir = entries[idx].isDir
@@ -51,7 +51,7 @@ pub fn printTree(dirPath: &string, prefix: &string, depth: i64, maxLevel: i64, c
 }
 
 pub fn main(): i32 {
-    var parser = newParser("tree", "display directory tree")
+    var parser = ArgParser.new("tree", "display directory tree")
     parser.addOptionalPositional("dir", "directory to display (default: .)")
     parser.addI64("level", "L", "max display depth", 0)
     let args = parser.parse()

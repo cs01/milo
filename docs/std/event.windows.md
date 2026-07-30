@@ -18,6 +18,14 @@ pub fn eventDeregister(el: &EventLoop, fd: i32, forWrite: bool): i32
 
 _Undocumented._
 
+### `EventLoop.new`
+
+```milo
+fn EventLoop.new(): Result<EventLoop, string>
+```
+
+_Undocumented._
+
 ### `eventLoopClose`
 
 ```milo
@@ -67,14 +75,6 @@ pub fn eventLoopInitWakeup(el: &EventLoop): i32
 Auto-reset Event, initially non-signaled. Auto-reset means a single wait consumes the
 signal and there is nothing to drain; multiple notifies before a wait coalesce into one
 wakeup, which is exactly right — a wakeup only means "re-check runnable state".
-
-### `eventLoopNew`
-
-```milo
-pub fn eventLoopNew(): Result<EventLoop, string>
-```
-
-_Undocumented._
 
 ### `eventLoopNotify`
 
@@ -160,14 +160,6 @@ pub fn wakeupIdentBase(): i32
 ident chosen far above any real fd so eventPoll consumers can tell a wakeup apart from fd
 readiness in the same readyFds array (matches the darwin/linux convention).
 
-### `winLoopAt`
-
-```milo
-fn winLoopAt(slot: i32): *u8
-```
-
-_Undocumented._
-
 ### `winLoopTableCap`
 
 ```milo
@@ -176,14 +168,6 @@ pub fn winLoopTableCap(): i32
 
 16 concurrent scheduler loops is far beyond any real program.
 
-### `winLoopTableInit`
-
-```milo
-fn winLoopTableInit(): void
-```
-
-_Undocumented._
-
 ### `wlCap`
 
 ```milo
@@ -191,14 +175,6 @@ pub fn wlCap(): i64
 ```
 
 _Undocumented._
-
-### `wlFind`
-
-```milo
-fn wlFind(st: *u8, fd: i32): i64
-```
-
-Find fd in the interest set, or -1.
 
 ### `wlGet`
 
@@ -215,15 +191,6 @@ pub fn wlMaskIdx(i: i64): i64
 ```
 
 _Undocumented._
-
-### `wlRegister`
-
-```milo
-fn wlRegister(st: *u8, fd: i32, bit: i32): i32
-```
-
-Add the given interest bit to fd, creating its WSAEVENT on first registration, and (re)arm
-WSAEventSelect with the combined mask.
 
 ### `wlSet`
 

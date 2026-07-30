@@ -108,24 +108,6 @@ fn Child.writeStdinStr(self: &Child, s: &string): i64
 
 _Undocumented._
 
-### `createProcess`
-
-```milo
-fn createProcess(program: &string, args: &Vec<string>, childIn: i32, childOut: i32, childErr: i32): Result<Process>
-```
-
-Core CreateProcess wrapper. childIn/Out/Err are child-side CRT fds already marked
-inheritable, or -1 to leave that stream at the parent's (inherited console). Returns a
-Process holding dwProcessId and the process HANDLE.
-
-### `cstrCopy`
-
-```milo
-fn cstrCopy(s: &string): *u8
-```
-
-Copy a milo string into a fresh malloc'd NUL-terminated C buffer.
-
 ### `exePath`
 
 ```milo
@@ -135,32 +117,6 @@ pub fn exePath(): Result<string>
 Absolute path of the running executable (mirror of the posix arm in std/process.milo;
 this file replaces std/process.milo wholesale on Windows, so the surface must match).
 `_exePathInto` resolves to GetModuleFileNameA in std/platform.windows.
-
-### `handleFlagInherit`
-
-```milo
-fn handleFlagInherit(): u32
-```
-
-HANDLE_FLAG_INHERIT.
-
-### `makeInheritable`
-
-```milo
-fn makeInheritable(fd: i32): void
-```
-
-_Undocumented._
-
-### `pipeFlags`
-
-```milo
-fn pipeFlags(): i32
-```
-
-_O_BINARY (0x8000) so the CRT does not rewrite \n through the pipe, _O_NOINHERIT
-(0x0080) so neither end is inheritable until we opt the child's end in by hand.
-0x8080 = 32896; any other bit makes _pipe trip the CRT invalid-parameter fastfail.
 
 ### `Process.signal`
 
@@ -201,19 +157,3 @@ pub fn run(cmd: &string): Result<i32>
 ```
 
 Execute a shell command and return its exit code.
-
-### `startfUseStdHandles`
-
-```milo
-fn startfUseStdHandles(): u32
-```
-
-STARTF_USESTDHANDLES — honour the hStdInput/Output/Error fields we set below.
-
-### `waitHandle`
-
-```milo
-fn waitHandle(handle: i64): Result<i32>
-```
-
-Block on a process HANDLE and read its exit code. INFINITE = 0xFFFFFFFF.

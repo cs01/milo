@@ -41,6 +41,7 @@ const warns: Issue[] = [];
 let fixedCount = 0;
 
 const isTs = (f: string) => f.endsWith(".ts");
+const isMilo = (f: string) => f.endsWith(".milo");
 const isTest = (f: string) => f.endsWith(".test.ts") || f.includes("/tests/");
 const isSh = (f: string) => f.endsWith(".sh");
 const isDoc = (f: string) =>
@@ -130,6 +131,18 @@ for (const f of fileList()) {
     if (!/<!--\s*doc-meta/.test(text.slice(0, 400))) {
       warns.push({ file: f, line: 1, msg: "missing <!-- doc-meta --> header (see docs/doc-standards.md)", fixable: false });
     }
+  }
+
+  // R7: stdlib API coherence rules that are mechanical enough to enforce.
+  if (isMilo(f) && f.startsWith("std/")) {
+    lines.forEach((ln, i) => {
+      if (/\bResult\s*<\s*void\b/.test(ln)) {
+        errors.push({ file: f, line: i + 1, msg: "Result<void, E> has no success value — use Result<Unit, E>", fixable: false });
+      }
+      if (/^\s*pub\s+fn\s+(charIs|isDigit|isAlpha|isWhitespace|toLowerChar|toUpperChar)\b/.test(ln)) {
+        errors.push({ file: f, line: i + 1, msg: "ASCII-byte API must say `ascii` in its name", fixable: false });
+      }
+    });
   }
 
   let out = lines.join("\n");

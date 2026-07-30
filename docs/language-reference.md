@@ -535,8 +535,8 @@ s.split(",")        // Vec<string>: ["Hello", " World!"]
 s.contains("World") // true
 s.startsWith("He")  // true
 s.endsWith("!")     // true
-s.indexOf("World")      // 7 (-1 if not found)
-s.lastIndexOf("l")      // 10 (-1 if not found)
+s.indexOf("World")      // Some(7), or None if not found
+s.lastIndexOf("l")      // Some(10), or None if not found
 s.replace("World", "Milo")  // "Hello, Milo!"
 s.padStart(15, " ")     // "  Hello, World!"
 s.padEnd(15, ".")       // "Hello, World!.."
@@ -855,6 +855,16 @@ short-circuit path forwards the receiver's error verbatim, so there is no conver
 available.
 
 `!`, `?` and `??` also work with `Result`. Writing `Result<T>` with one type argument defaults the error type to `string` — `Result<i32>` is `Result<i32, string>`:
+
+Fallible commands with no success data return `Result<Unit, E>`. `Unit` is the
+single-value type from the prelude; construct it as `Unit {}`. `void` describes
+a function that returns no value and therefore cannot be stored inside `Result`.
+
+```milo
+fn finish(): Result<Unit, string> {
+    return Result.Ok(Unit {})
+}
+```
 
 ```milo
 fn validate(x: i32): Result<i32> {
@@ -2863,10 +2873,10 @@ let id = Uuid.v4()   // "550e8400-e29b-41d4-a716-446655440000"
 The `std/argparse` module provides a declarative CLI argument parser with auto-generated help.
 
 ```milo
-from "std/argparse" import { newParser }
+from "std/argparse" import { ArgParser }
 
 fn main(): i32 {
-    var parser = newParser("mytool", "a helpful description")
+    var parser = ArgParser.new("mytool", "a helpful description")
     parser.addPositional("file", "input file to process")
     parser.addOptionalPositional("output", "output path")
     parser.addString("format", "f", "output format", "json")

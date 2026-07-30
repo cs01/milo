@@ -3,7 +3,7 @@ from "std/http" import {
     Request, Response, serve
 }
 from "std/argparse" import {
-    newParser
+    ArgParser
 }
 
 from "std/fs" import {
@@ -75,7 +75,7 @@ pub fn formatSize(size: i64): string {
 }
 
 pub fn dirListing(dirPath: &string, urlPath: &string): string {
-    let entries = readDir(dirPath)
+    let entries = readDir(dirPath)!
     var html: string = "<!DOCTYPE html><html><head><title>Index of " + urlPath + "</title>"
     html = html + "<style>body{font-family:monospace;margin:2em}a{text-decoration:none;color:#0366d6}"
     html = html + "a:hover{text-decoration:underline}table{border-collapse:collapse}"
@@ -95,7 +95,7 @@ pub fn dirListing(dirPath: &string, urlPath: &string): string {
                 html = html + "<tr><td><a href=\"" + name.clone() + "/\">" + name + "/</a></td><td>-</td></tr>"
             } else {
                 let entryPath = Path.join(dirPath, name.clone())
-                let info = fileInfo(entryPath)
+                let info = fileInfo(entryPath)!
                 html = html + "<tr><td><a href=\"" + name.clone() + "\">" + name + "</a></td><td>" + formatSize(info.size) + "</td></tr>"
             }
         }
@@ -157,7 +157,7 @@ pub fn handleRequest(req: &Request, root: &string, quiet: bool): Response {
 }
 
 pub fn main(): i32 {
-    var parser = newParser("serve", "static file server")
+    var parser = ArgParser.new("serve", "static file server")
     parser.addOptionalPositional("dir", "directory to serve (default: .)")
     parser.addI64("port", "p", "port to listen on", 8080)
     parser.addBool("quiet", "q", "suppress request logging")

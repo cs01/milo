@@ -13,7 +13,7 @@ from "std/platform" import {
     close
 }
 from "std/event" import {
-    eventLoopNew, eventLoopClose, setNonblocking, eventRegisterRead, eventPoll
+    EventLoop, eventLoopClose, setNonblocking, eventRegisterRead, eventPoll
 }
 
 pub fn main(): i32 {
@@ -23,7 +23,7 @@ pub fn main(): i32 {
         let readFd = (fds as *i32) [0]
         let writeFd = (fds as *i32) [1]
 
-        let el = eventLoopNew()!
+        let el = EventLoop.new()!
         setNonblocking(readFd)
         eventRegisterRead(el, readFd)
 

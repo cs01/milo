@@ -109,8 +109,8 @@ Pad to `targetLen` on the start (end).
 ## Character helpers
 
 ```milo
-from "std/string" import { charIsWhitespace, charIsDigit, charIsAlpha, charIsAlphanumeric }
+from "std/string" import { asciiIsWhitespace, asciiIsDigit, asciiIsAlpha, asciiIsAlphanumeric }
 ```
 
-Each takes a `u8` byte and returns `bool`: `charIsWhitespace(c)`, `charIsDigit(c)`,
-`charIsAlpha(c)`, `charIsAlphanumeric(c)`.
+Each takes a `u8` byte and returns `bool`: `asciiIsWhitespace(c)`, `asciiIsDigit(c)`,
+`asciiIsAlpha(c)`, `asciiIsAlphanumeric(c)`.

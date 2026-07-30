@@ -4399,6 +4399,8 @@ export class Codegen {
         return this.genVecSlice(expr, lines);
       case "StringParseF64":
         return this.genStringParseF64(expr, lines);
+      case "StringFind":
+        return this.genStringFind(expr, lines);
       case "StringClone":
         return this.genStringClone(expr, lines);
       case "NumberToString":
@@ -7025,6 +7027,60 @@ export class Codegen {
     const result = this.nextTemp();
     lines.push(`  ${result} = call double @strtod(ptr ${dataPtr}, ptr null)`);
     return [lines, result, "double"];
+  }
+
+  private genStringFind(expr: HIRExpr & { kind: "StringFind" }, lines: string[]): [string[], string, string] {
+    const enumTy = `%${expr.optionEnumName}`;
+    const layout = this.enumLayouts.get(expr.optionEnumName);
+    const noneVariant = layout?.variants.get("None");
+    const someVariant = layout?.variants.get("Some");
+    if (!layout || !noneVariant || !someVariant) throw new Error("Option enum missing Some/None variants");
+
+    const [strLines, strValue] = this.genExpr(expr.str);
+    const [needleLines, needleValue] = this.genExpr(expr.needle);
+    lines.push(...strLines);
+    const strPtr = `%__string_find_haystack.${this.scopeCounter++}.addr`;
+    this.entryAllocas.push(`  ${strPtr} = alloca %String`);
+    lines.push(`  store %String ${strValue}, ptr ${strPtr}`);
+    lines.push(...needleLines);
+    const needlePtr = `%__string_find_needle.${this.scopeCounter++}.addr`;
+    this.entryAllocas.push(`  ${needlePtr} = alloca %String`);
+    lines.push(`  store %String ${needleValue}, ptr ${needlePtr}`);
+    let fn = expr.reverse ? "strLastIndexOf" : "strIndexOf";
+    let args = `ptr ${strPtr}, ptr ${needlePtr}`;
+    if (expr.from) {
+      const [fromLines, fromValue, fromTy] = this.genExpr(expr.from);
+      lines.push(...fromLines);
+      fn = "strIndexOfFrom";
+      args += `, ${fromTy} ${fromValue}`;
+    }
+    const index = this.nextTemp();
+    lines.push(`  ${index} = call i64 @${fn}(${args})`);
+
+    const resultAddr = `%__string_find_result.${this.scopeCounter++}.addr`;
+    this.entryAllocas.push(`  ${resultAddr} = alloca ${enumTy}`);
+    lines.push(`  store ${enumTy} zeroinitializer, ptr ${resultAddr}`);
+    const tagPtr = this.nextTemp();
+    lines.push(`  ${tagPtr} = getelementptr ${enumTy}, ptr ${resultAddr}, i32 0, i32 0`);
+    const found = this.nextTemp();
+    lines.push(`  ${found} = icmp sge i64 ${index}, 0`);
+    const someLabel = this.nextLabel("string.find.some");
+    const noneLabel = this.nextLabel("string.find.none");
+    const endLabel = this.nextLabel("string.find.end");
+    lines.push(`  br i1 ${found}, label %${someLabel}, label %${noneLabel}`);
+    lines.push(`${noneLabel}:`);
+    lines.push(`  store i32 ${noneVariant.tag}, ptr ${tagPtr}`);
+    lines.push(`  br label %${endLabel}`);
+    lines.push(`${someLabel}:`);
+    lines.push(`  store i32 ${someVariant.tag}, ptr ${tagPtr}`);
+    const payloadPtr = this.nextTemp();
+    lines.push(`  ${payloadPtr} = getelementptr ${enumTy}, ptr ${resultAddr}, i32 0, i32 1`);
+    lines.push(`  store i64 ${index}, ptr ${payloadPtr}`);
+    lines.push(`  br label %${endLabel}`);
+    lines.push(`${endLabel}:`);
+    const result = this.nextTemp();
+    lines.push(`  ${result} = load ${enumTy}, ptr ${resultAddr}`);
+    return [lines, result, enumTy];
   }
 
   private genVecBoundsCheckedPtr(expr: HIRExpr & { kind: "IndexAccess" }, lines: string[]): [string[], string, string] {

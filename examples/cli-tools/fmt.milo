@@ -8,7 +8,7 @@ from "std/fs" import {
     writeFile, readFile
 }
 from "std/argparse" import {
-    newParser
+    ArgParser
 }
 
 // ── Token types ──
@@ -70,7 +70,7 @@ pub struct Token {
 // ── Keywords ──
 
 pub fn charIsHexDigit(c: u8): bool {
-    return charIsDigit(c) || (c >= 97 && c <= 102) || (c >= 65 && c <= 70)
+    return asciiIsDigit(c) || (c >= 97 && c <= 102) || (c >= 65 && c <= 70)
 }
 
 pub fn isKeyword(s: &string): bool {
@@ -277,13 +277,13 @@ impl Lexer {
                 return s
             }
         }
-        while self.pos < self.src.len && (charIsDigit(self.peek()) || self.peek() == 95) {
+        while self.pos < self.src.len && (asciiIsDigit(self.peek()) || self.peek() == 95) {
             s.push(self.advance())
         }
         // decimal point only if followed by a digit (not .. range)
-        if self.peek() == 46 && self.peekAt(1) != 46 && charIsDigit(self.peekAt(1)) {
+        if self.peek() == 46 && self.peekAt(1) != 46 && asciiIsDigit(self.peekAt(1)) {
             s.push(self.advance())
-            while self.pos < self.src.len && (charIsDigit(self.peek()) || self.peek() == 95) {
+            while self.pos < self.src.len && (asciiIsDigit(self.peek()) || self.peek() == 95) {
                 s.push(self.advance())
             }
         }
@@ -295,12 +295,12 @@ impl Lexer {
             if self.peekAt(1) == 43 || self.peekAt(1) == 45 {
                 k = 2
             }
-            if charIsDigit(self.peekAt(k)) {
+            if asciiIsDigit(self.peekAt(k)) {
                 s.push(self.advance())
                 if self.peek() == 43 || self.peek() == 45 {
                     s.push(self.advance())
                 }
-                while self.pos < self.src.len && (charIsDigit(self.peek()) || self.peek() == 95) {
+                while self.pos < self.src.len && (asciiIsDigit(self.peek()) || self.peek() == 95) {
                     s.push(self.advance())
                 }
             }
@@ -310,7 +310,7 @@ impl Lexer {
 
     fn lexIdent(self: &mut Self): string {
         var s: string = ""
-        while self.pos < self.src.len && (charIsAlphanumeric(self.peek()) || self.peek() == 95) {
+        while self.pos < self.src.len && (asciiIsAlphanumeric(self.peek()) || self.peek() == 95) {
             s.push(self.advance())
         }
         return s
@@ -378,7 +378,7 @@ impl Lexer {
         }
 
         // Number
-        if charIsDigit(ch) {
+        if asciiIsDigit(ch) {
             let text = self.lexNumber()
             if text.contains(".") {
                 return Token {
@@ -391,7 +391,7 @@ impl Lexer {
         }
 
         // Ident / keyword
-        if charIsAlpha(ch) || ch == 95 {
+        if asciiIsAlpha(ch) || ch == 95 {
             let text = self.lexIdent()
             if isKeyword(text) {
                 return Token {
@@ -1269,7 +1269,7 @@ pub fn formatSource(src: string): string {
 // ── Entry point ──
 
 pub fn main(): i32 {
-    var parser = newParser("fmt", "format Milo source files")
+    var parser = ArgParser.new("fmt", "format Milo source files")
     parser.addBool("write", "w", "write result back to file")
     parser.addOptionalPositional("file", "source file to format (stdin if omitted)")
     let args = parser.parse()

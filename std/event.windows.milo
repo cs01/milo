@@ -191,6 +191,7 @@ pub struct EventLoop {
     slot: i32,
 }
 
+// @internal
 pub fn eventLoopNew(): Result<EventLoop, string> {
     winLoopTableInit()
     unsafe {
@@ -212,6 +213,12 @@ pub fn eventLoopNew(): Result<EventLoop, string> {
             slot: slot
         }
         )
+    }
+}
+
+impl EventLoop {
+    fn new(): Result<EventLoop, string> {
+        return eventLoopNew()
     }
 }
 

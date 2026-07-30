@@ -36,3 +36,31 @@ test("free fns after an impl block are not impl-prefixed", () => {
   // methods genuinely inside `impl File` keep their prefix
   expect(out).toContain("fn File.readAll(");
 });
+
+test("default API discovery hides file-private helpers", () => {
+  const supported = api("--module std/string");
+  expect(supported).toContain("pub fn asciiIsAlpha(");
+  expect(supported).not.toContain("fn strContains(");
+});
+
+test("@internal keeps cross-file plumbing out of the supported surface", () => {
+  const supported = api("--module std/sync");
+  expect(supported).not.toContain("channelArmRecv");
+});
+
+test("public types and their methods are both discoverable", () => {
+  const out = api("--module std/regex");
+  expect(out).toContain("pub struct Regex");
+  expect(out).toContain("fn Regex.compile(");
+  expect(out).not.toContain("regexNew(");
+});
+
+test("coherence migrations leave one supported spelling", () => {
+  const path = api("--module std/path");
+  expect(path).toContain("fn Path.join(");
+  expect(path).not.toContain("fn pathJoin(");
+
+  const env = api("--module std/env");
+  expect(env).toContain("fn Env.get(");
+  expect(env).not.toContain("fn getEnv(");
+});

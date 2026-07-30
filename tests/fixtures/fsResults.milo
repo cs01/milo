@@ -1,0 +1,52 @@
+// @expect: exists
+// @expect: missing
+// @expect: metadata
+// @expect: directory
+// @expect: read-error
+// @expect: changed
+from "std/fs" import {
+    changeDir, fileInfo, isDir, pathExists, readDir
+}
+
+pub fn main(): i32 {
+    if pathExists(".") {
+        print("exists")
+    } else {
+        print("bad exists")
+    }
+    if !pathExists("/__milo_definitely_missing__") {
+        print("missing")
+    } else {
+        print("bad missing")
+    }
+    match fileInfo(".") {
+        Option.Some(_info) => {
+            print("metadata")
+        }
+        Option.None => {
+            print("bad metadata")
+        }
+    }
+    if isDir(".") {
+        print("directory")
+    } else {
+        print("bad directory")
+    }
+    match readDir("/__milo_definitely_missing__") {
+        Result.Err(_e) => {
+            print("read-error")
+        }
+        Result.Ok(_entries) => {
+            print("bad read")
+        }
+    }
+    match changeDir(".") {
+        Result.Ok(_unit) => {
+            print("changed")
+        }
+        Result.Err(_e) => {
+            print("bad change")
+        }
+    }
+    return 0
+}

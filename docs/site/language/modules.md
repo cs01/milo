@@ -18,7 +18,7 @@ No wildcard imports, no bare `import "path"`. The LSP autocompletes both module 
 from "std/io" import { readFile, writeFile }
 from "std/fs" import { readDir, fileInfo }
 from "std/fetch" import { fetch }
-from "std/argparse" import { newParser }
+from "std/argparse" import { ArgParser }
 ```
 
 ## How it works

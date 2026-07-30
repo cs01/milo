@@ -399,8 +399,7 @@ pub fn termSize(): WinSize {
 
 // basename of a path, e.g. "/bin/zsh" → "zsh"
 pub fn baseName(path: &string): string {
-    let i = path.lastIndexOf("/")
-    if i < 0 {
+    let Option.Some(i) = path.lastIndexOf("/") else {
         return path.clone()
     }
     return path.substr(i + 1, path.len)

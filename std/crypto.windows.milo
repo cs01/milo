@@ -131,7 +131,7 @@ impl Crypto {
     fn md5(input: &string): string {
         return md5(input)
     }
-    // AES-256 lengths (key 32), mirroring the private free fn — see aesGcm128 note below.
+    // Encrypt with AES-256-GCM. The key is 32 bytes and the IV is 12 bytes.
     fn aesGcmEncrypt(key: &string, iv: &string, plaintext: &string, aad: &string): Result<AesGcmResult, string>
     requires key.len == 32
     requires iv.len == 12
@@ -145,8 +145,7 @@ impl Crypto {
     {
         return aesGcmDecrypt(key, iv, ciphertext, tag, aad)
     }
-    // Preconditions mirror the private free fn: the public namespace API must carry the
-    // same AES-128 key/iv/tag length guarantees, else callers lose them at the wrapper.
+    // Encrypt with AES-128-GCM. The key is 16 bytes and the IV is 12 bytes.
     fn aesGcm128Encrypt(key: &string, iv: &string, plaintext: &string, aad: &string): Result<AesGcmResult, string>
     requires key.len == 16
     requires iv.len == 12

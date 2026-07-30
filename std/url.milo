@@ -61,7 +61,7 @@ fn urlParse(s: string): Result<Url> {
         if colonPos > 0 {
             host = auth[0..colonPos].clone()
             let portStr = auth[colonPos + 1..auth.len]
-            port = _parsePort(portStr)
+            port = _parsePort(portStr)?
         } else {
             host = auth.clone()
         }
@@ -108,18 +108,24 @@ fn urlParse(s: string): Result<Url> {
     )
 }
 
-fn _parsePort(s: &string): i32 {
-    var result: i32 = 0
+fn _parsePort(s: &string): Result<i32> {
+    if s.len == 0 {
+        return Result.Err("empty URL port")
+    }
+    var result: i64 = 0
     var i: i64 = 0
     while i < s.len {
         let c = s[i]
         if c < '0' || c > '9' {
-            return 0
+            return Result.Err("invalid URL port at byte " + i.toString())
         }
-        result = result * 10 + (c as i32 - 48)
+        result = result * 10 + (c as i64 - 48)
+        if result > 65535 {
+            return Result.Err("URL port is out of range")
+        }
         i = i + 1
     }
-    return result
+    return Result.Ok(result as i32)
 }
 
 fn urlQueryGet(u: &Url, key: &string): Option<string> {

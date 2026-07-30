@@ -74,14 +74,6 @@ pub fn loadAvg(): [f64; 3]
 
 _Undocumented._
 
-### `meminfoBytes`
-
-```milo
-fn meminfoBytes(key: &string): i64
-```
-
-"MemTotal:  16311236 kB" -> bytes. /proc/meminfo is kB-suffixed throughout.
-
 ### `osRelease`
 
 ```milo
@@ -105,15 +97,6 @@ pub fn ppid(): i32
 ```
 
 _Undocumented._
-
-### `procField`
-
-```milo
-fn procField(path: string, key: &string): string
-```
-
-Value after the first ':' on the first line whose text starts with `key`, trimmed.
-Both /proc/cpuinfo ("model name\t: X") and /proc/meminfo ("MemTotal:  N kB") use it.
 
 ### `setCwd`
 

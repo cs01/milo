@@ -5,7 +5,7 @@
 // self-test: connect to a JDWP agent, print VM version + threads, exit.
 
 from "std/argparse" import {
-    newParser, ArgParser
+    ArgParser
 }
 from "std/os" import {
     exit
@@ -25,7 +25,7 @@ from "dap" import {
 
 pub fn main(): void {
     let VERSION = "0.1.0"
-    var p = newParser("java-dap", "DAP debug adapter for the JVM (speaks JDWP to the java process)\n\n" + "default mode: DAP server on stdio (spawn me from a DAP client)\n\n" + "smoke test against a live JDWP agent:\n" + "  java -agentlib:jdwp=transport=dt_socket,server=y,suspend=y,address=5005 Main &\n" + "  java-dap --attach localhost:5005 --smoke")
+    var p = ArgParser.new("java-dap", "DAP debug adapter for the JVM (speaks JDWP to the java process)\n\n" + "default mode: DAP server on stdio (spawn me from a DAP client)\n\n" + "smoke test against a live JDWP agent:\n" + "  java -agentlib:jdwp=transport=dt_socket,server=y,suspend=y,address=5005 Main &\n" + "  java-dap --attach localhost:5005 --smoke")
     p.addString("attach", "a", "host:port of a listening JDWP agent (with --smoke)", "")
     p.addBool("smoke", "s", "connect, print VM version + threads, exit")
     let args = p.parse()

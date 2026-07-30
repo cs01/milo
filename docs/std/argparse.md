@@ -2,22 +2,6 @@
 
 ## std/argparse
 
-### `argparseIsNumeric`
-
-```milo
-fn argparseIsNumeric(s: &string): bool
-```
-
-_Undocumented._
-
-### `argparseParseI64`
-
-```milo
-fn argparseParseI64(s: &string): i64
-```
-
-_Undocumented._
-
 ### `ArgParser.addBool`
 
 ```milo
@@ -92,6 +76,14 @@ fn ArgParser.helpText(self: &ArgParser): string
 
 Generate formatted help text for all registered flags.
 
+### `ArgParser.new`
+
+```milo
+fn ArgParser.new(name: string, description: string): ArgParser
+```
+
+Create a parser with a program name and description.
+
 ### `ArgParser.parse`
 
 ```milo
@@ -110,14 +102,6 @@ fn ArgParser.parseFrom(self: &ArgParser, argv: Vec<string>): ParsedArgs
 Parse from a provided argument list instead of process args.
 argv[0] is treated as the program name (skipped during parsing).
 Like Python's parse_args(args=[...]).
-
-### `newParser`
-
-```milo
-pub fn newParser(name: string, description: string): ArgParser
-```
-
-Create a new argument parser with a program name and description.
 
 ### `ParsedArgs.getBool`
 

@@ -3,7 +3,7 @@ system: agent-router
 purpose: entry point that routes any agent to the right skill, doc, script, or convention
 key-files: AGENT_WORKFLOW.md, CONVENTIONS.md, CLAUDE.md, docs/, scripts/, docs/worksheets/
 update-when: a new skill/doc/script/convention is added, or a routing entry goes stale
-last-verified: 2026-07-23
+last-verified: 2026-07-30
 -->
 
 # AGENTS.md — Router
@@ -41,6 +41,7 @@ Every doc in this repo starts with a 7-line `<!-- doc-meta ... -->` block. To fi
 | What's planned / allowed to build | [docs/roadmap.md](docs/roadmap.md) — check before proposing features |
 | Move or rename a public stdlib name | record it in [docs/breaking-changes.md](docs/breaking-changes.md) — the flat namespace makes compat shims impossible, so the doc is the only migration path users get |
 | Find an stdlib API | `bun run src/main.ts api <terms>` |
+| Design or review a public stdlib API | [docs/stdlib-design.md](docs/stdlib-design.md) |
 
 ## Org layout (`milo-language`)
 

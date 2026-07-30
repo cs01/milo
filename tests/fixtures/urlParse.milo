@@ -15,6 +15,9 @@ pub fn main(): i32 {
     print(simple.host)
     print(simple.port)
     print(simple.path)
+    if let Result.Err(_e) = Url.parse("https://example.com:notaport/") {
+        print("invalid")
+    }
     return 0
 }
 // @expect: https
@@ -26,3 +29,4 @@ pub fn main(): i32 {
 // @expect: localhost
 // @expect: 80
 // @expect: /index.html
+// @expect: invalid

@@ -27,7 +27,7 @@ pub fn main(): i32 {
     let repeated = "abc".repeat(2)
     print(repeated)
 
-    let idx = "hello world".indexOf("world")
+    let idx = "hello world".indexOf("world")!
     print(idx)
 
     return 0

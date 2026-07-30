@@ -4,7 +4,7 @@ from "std/fs" import {
     readFile
 }
 from "std/argparse" import {
-    newParser
+    ArgParser
 }
 
 pub fn byteToHex(b: u8): string {
@@ -35,7 +35,7 @@ pub fn isPrintable(b: u8): bool {
 }
 
 pub fn main(): i32 {
-    var parser = newParser("hex", "hex dump viewer")
+    var parser = ArgParser.new("hex", "hex dump viewer")
     parser.addPositional("file", "file to dump")
     parser.addI64("length", "n", "number of bytes to display", 0)
     parser.addI64("skip", "s", "skip N bytes from start", 0)

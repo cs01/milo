@@ -842,7 +842,7 @@ fn jsonExtractSubtree(src: &Json, nodeIdx: i64): Json {
 
 fn jsonParse(s: string): Result<Json> {
     if s.len == 0 {
-        return Result.Err("empty input")
+        return Result.Err("empty json input at byte 0")
     }
     var nodes: Vec<JsonNode> = Vec.new()
     var childIdx: Vec<i64> = Vec.new()
@@ -856,15 +856,15 @@ fn jsonParse(s: string): Result<Json> {
     var err: bool = false
     jsonSkipWs(s, pos)
     if pos >= s.len {
-        return Result.Err("empty input")
+        return Result.Err("empty json input at byte " + pos.toString())
     }
     let rootIdx = jsonParseValue(s, pos, nodes, childIdx, keyOffsets, keyLens, scratch, scratchLen, err)
     if err {
-        return Result.Err("malformed json")
+        return Result.Err("malformed json at byte " + pos.toString())
     }
     jsonSkipWs(s, pos)
     if pos != s.len {
-        return Result.Err("trailing content")
+        return Result.Err("trailing json content at byte " + pos.toString())
     }
     return Result.Ok(Json {
         source: s, nodes: nodes, childIdx: childIdx, keyOffsets: keyOffsets, keyLens: keyLens, root: rootIdx

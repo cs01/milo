@@ -26,14 +26,6 @@ pub fn logInfo(msg: string): void
 
 _Undocumented._
 
-### `logMsg`
-
-```milo
-fn logMsg(tag: string, msg: string): void
-```
-
-_Undocumented._
-
 ### `logWarn`
 
 ```milo

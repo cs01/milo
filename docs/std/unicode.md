@@ -86,22 +86,6 @@ pub fn highSurrogate(cp: i32): i32
 
 _Undocumented._
 
-### `isAlpha`
-
-```milo
-pub fn isAlpha(ch: u8): bool
-```
-
-_Undocumented._
-
-### `isAlphanumeric`
-
-```milo
-pub fn isAlphanumeric(ch: u8): bool
-```
-
-_Undocumented._
-
 ### `isAlphaStr`
 
 ```milo
@@ -109,14 +93,6 @@ pub fn isAlphaStr(s: &string): bool
 ```
 
 Check if an entire string is alphabetic.
-
-### `isAscii`
-
-```milo
-pub fn isAscii(ch: u8): bool
-```
-
-Classify ASCII bytes.
 
 ### `isCombining`
 
@@ -126,38 +102,6 @@ pub fn isCombining(cp: i32): bool
 
 Marks that attach to a preceding base character and advance no column.
 
-### `isControl`
-
-```milo
-pub fn isControl(ch: u8): bool
-```
-
-_Undocumented._
-
-### `isDigit`
-
-```milo
-pub fn isDigit(ch: u8): bool
-```
-
-_Undocumented._
-
-### `isHexDigit`
-
-```milo
-pub fn isHexDigit(ch: u8): bool
-```
-
-_Undocumented._
-
-### `isLower`
-
-```milo
-pub fn isLower(ch: u8): bool
-```
-
-_Undocumented._
-
 ### `isNumeric`
 
 ```milo
@@ -165,22 +109,6 @@ pub fn isNumeric(s: &string): bool
 ```
 
 Check if an entire string is numeric (all digits).
-
-### `isPrintable`
-
-```milo
-pub fn isPrintable(ch: u8): bool
-```
-
-_Undocumented._
-
-### `isPunctuation`
-
-```milo
-pub fn isPunctuation(ch: u8): bool
-```
-
-_Undocumented._
 
 ### `isRegionalIndicator`
 
@@ -208,22 +136,6 @@ UTF-16 conversion. A codepoint above the BMP is a single codepoint but TWO
 UTF-16 code units, encoded as a surrogate pair — so a byte- or
 codepoint-oriented count is not a UTF-16 index. Needed by anything crossing a
 UTF-16 boundary (Windows wide-char APIs, JVM strings).
-
-### `isUpper`
-
-```milo
-pub fn isUpper(ch: u8): bool
-```
-
-_Undocumented._
-
-### `isWhitespace`
-
-```milo
-pub fn isWhitespace(ch: u8): bool
-```
-
-_Undocumented._
 
 ### `isWide`
 
@@ -256,22 +168,6 @@ pub fn nextCodepointBoundary(s: &string, at: i64): i64
 ```
 
 Byte offset of the next codepoint boundary at or after `at`.
-
-### `toLowerChar`
-
-```milo
-pub fn toLowerChar(ch: u8): u8
-```
-
-Case conversion for ASCII bytes.
-
-### `toUpperChar`
-
-```milo
-pub fn toUpperChar(ch: u8): u8
-```
-
-_Undocumented._
 
 ### `truncateToWidth`
 

@@ -7,20 +7,20 @@
 // @expect: 3
 
 from "std/regex" import {
-    regexFind, regexFindAll, regexMatch, regexNew
+    Regex
 }
 
 pub fn main(): i32 {
-    match regexNew("[0-9]+") {
-        Option.Some(re) => {
-            if regexMatch(re, "hello 123") {
+    match Regex.compile("[0-9]+") {
+        Result.Ok(re) => {
+            if re.isMatch("hello 123") {
                 print("match")
             }
-            if !regexMatch(re, "no digits") {
+            if !re.isMatch("no digits") {
                 print("no match")
             }
 
-            match regexFind(re, "abc 42 def 99") {
+            match re.find("abc 42 def 99") {
                 Option.Some(m) => {
                     let input = "abc 42 def 99"
                     print(input[m.start..m.end])
@@ -30,10 +30,10 @@ pub fn main(): i32 {
                 }
             }
 
-            let all = regexFindAll(re, "abc 42 def 99 ghi 7")
+            let all = re.findAll("abc 42 def 99 ghi 7")
             print(all.len.toString())
         }
-        Option.None => {
+        Result.Err(_e) => {
             print("compile fail")
         }
     }

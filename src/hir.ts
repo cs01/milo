@@ -68,6 +68,7 @@ export type HIRExpr =
   | { kind: "StringSlice"; str: HIRExpr; start: HIRExpr; end: HIRExpr; type: TypeKind; span?: Span }
   | { kind: "VecSlice"; vec: HIRExpr; start: HIRExpr; end: HIRExpr; elementType: TypeKind; type: TypeKind; span?: Span }
   | { kind: "StringParseF64"; str: HIRExpr; type: TypeKind; span?: Span }
+  | { kind: "StringFind"; str: HIRExpr; needle: HIRExpr; from?: HIRExpr; reverse: boolean; optionEnumName: string; type: TypeKind; span?: Span }
   | { kind: "StringClone"; str: HIRExpr; type: TypeKind; span?: Span }
   | { kind: "NumberToString"; value: HIRExpr; valueType: TypeKind; type: TypeKind; span?: Span }
   | { kind: "BoolToString"; value: HIRExpr; type: TypeKind; span?: Span }

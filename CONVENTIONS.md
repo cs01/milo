@@ -3,7 +3,7 @@ system: coding-conventions
 purpose: the specific code conventions review agents enforce (beyond what the linter catches)
 key-files: scripts/lint.ts, docs/agent-review.md, .githooks/pre-commit
 update-when: a convention is added/changed, or a review keeps flagging the same un-documented thing
-last-verified: 2026-07-11
+last-verified: 2026-07-30
 -->
 
 # Coding Conventions
@@ -16,7 +16,7 @@ The rules reviewers check by hand. Anything mechanically checkable lives in `scr
 - Move semantics: single owner. Don't clone to dodge a borrow error — understand the ownership first, clone only when a real copy is intended. Equally, don't strip a clone without checking: moving out of a container zeroes the source slot silently.
 - Iterate with `for` (it binds by reference); a manual `while i < x.len` cursor is a smell. Strings iterate as bytes; use `s.codePoints()` when the value is text. See [docs/milo-idioms.md](docs/milo-idioms.md).
 - Build strings with `pushStr`/`push`, not `s = s + t` in a loop — the latter reallocates the whole accumulator per concat.
-- Prefer existing stdlib. Run `milo api <terms>` before adding an API. New APIs land *alongside* old ones (e.g. `greenSpawn` next to `spawn`) — don't change semantics of a shipped API to add a capability.
+- Prefer existing stdlib. Run `milo api <terms>` before adding an API. A new capability lands *alongside* an existing API (e.g. `greenSpawn` next to `spawn`) rather than silently changing its contract. Deliberate pre-1.0 coherence migrations follow [docs/stdlib-design.md](docs/stdlib-design.md): migrate the whole domain, document the break, and do not retain permanent aliases for one operation.
 - Errors are `Result<T,E>` with typed variants and auto-`From` wrapping; don't reach for panics/aborts in library code.
 - Don't market Milo as "like TypeScript" in docs/comments — it's a Rust+TS blend.
 

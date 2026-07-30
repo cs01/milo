@@ -11,6 +11,67 @@ last-verified: 2026-07-23
 Source-level breaks, newest first. Milo is pre-1.0 and does not promise
 compatibility, but every break belongs here with the migration spelled out.
 
+## Stdlib API coherence migrations (2026-07-30)
+
+Several APIs now have one supported spelling that follows the standard-library
+design rules:
+
+| Before | After |
+|---|---|
+| `newParser(name, description)` | `ArgParser.new(name, description)` |
+| `regexNew(pattern)` | `Regex.compile(pattern)` |
+| `regexNewFlags(pattern, flags)` | `Regex.compileFlags(pattern, flags)` |
+| `regexMatch(re, input)` | `re.isMatch(input)` |
+| `regexFind(re, input)` | `re.find(input)` |
+| `regexFindAll(re, input)` | `re.findAll(input)` |
+| `arenaNew(capacity)` from `std/mem` | `Arena.new(capacity)` |
+| `poolNew(size, count)` | `Pool.new(size, count)` |
+| `charIsDigit`, `charIsAlpha`, and related byte helpers | `asciiIsDigit`, `asciiIsAlpha`, and the `asciiIs*` family |
+| `toLowerChar`, `toUpperChar` | `asciiToLower`, `asciiToUpper` |
+
+String `indexOf`, `indexOfFrom`, and `lastIndexOf` now return `Option<i64>`
+rather than the `-1` sentinel. Use `if let Option.Some(index)`, `!` when presence
+is already established, or `??` for an intentional fallback.
+
+Regex compilation now returns `Result<Regex>` rather than `Option<Regex>`;
+`Option<RegexMatch>` remains the ordinary no-match result. This separates an
+invalid expression from a valid expression that happens not to match.
+
+The old aliases were removed rather than retaining two permanent ways to spell
+one operation. `milo api` now shows public types and their methods, excludes
+file-private and `@internal` plumbing, and resolves the host platform arm under
+the importable module name (for example, `std/regex` rather than
+`std/regex.linux`).
+
+## Filesystem operations report failures consistently (2026-07-30)
+
+**What changed.** `std/fs` no longer encodes failed metadata and size probes as
+zero-filled records or `-1`: `fileInfo`, `lstatInfo`, and `fileSizePath` return
+`Option`. `readDir` returns `Result<Vec<DirEntry>, IoError>`, so a failed read is
+distinct from a successful empty directory. Convenience predicates remain
+simple booleans. Commands such as `removeFile`, `makeDir`,
+`renameFile`, `setMode`, `syncFd`, and `changeDir` now return
+`Result<Unit, IoError>` instead of a success boolean that was always true.
+
+`Unit` is auto-imported from the prelude and has one value, `Unit {}`. It is the
+success payload for a fallible command that produces no data.
+
+**Migration.** Handle or propagate filesystem errors explicitly:
+
+```milo
+let entries = readDir(path)!
+if isDir(path) { ... }
+removeFile(path)?
+```
+
+Code that matched `Result.Ok(true)` from a command now matches
+`Result.Ok(_unit)`. Use `fileInfo(path)` when absence is meaningful and an
+open/read operation when the exact failure reason matters.
+
+**Why there is no compatibility shim.** The old return values erased the exact
+information the new contract preserves. Keeping differently named lossy copies
+would leave two filesystem mental models permanently.
+
 ## Private by default, `pub` to export (2026-07-23)
 
 **What changed.** Top-level declarations are now **file-private by default**.

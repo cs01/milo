@@ -26,27 +26,45 @@ fn unsupported(): void {
     exit(1)
 }
 
-pub fn regexNewFlags(_pattern: string, _cflags: i32): Option<Regex> {
+fn regexNewFlags(_pattern: string, _cflags: i32): Result<Regex> {
     unsupported()
-    return Option.None
+    return Result.Err("regular expressions are unavailable on windows")
 }
 
-pub fn regexNew(_pattern: string): Option<Regex> {
+fn regexNew(_pattern: string): Result<Regex> {
     unsupported()
-    return Option.None
+    return Result.Err("regular expressions are unavailable on windows")
 }
 
-pub fn regexMatch(_re: &Regex, _input: &string): bool {
+fn regexMatch(_re: &Regex, _input: &string): bool {
     unsupported()
     return false
 }
 
-pub fn regexFind(_re: &Regex, _input: &string): Option<RegexMatch> {
+fn regexFind(_re: &Regex, _input: &string): Option<RegexMatch> {
     unsupported()
     return Option.None
 }
 
-pub fn regexFindAll(_re: &Regex, _input: &string): Vec<RegexMatch> {
+fn regexFindAll(_re: &Regex, _input: &string): Vec<RegexMatch> {
     unsupported()
     return Vec.new()
+}
+
+impl Regex {
+    fn compile(pattern: string): Result<Regex> {
+        return regexNew(pattern)
+    }
+    fn compileFlags(pattern: string, flags: i32): Result<Regex> {
+        return regexNewFlags(pattern, flags)
+    }
+    fn isMatch(self: &Self, input: &string): bool {
+        return regexMatch(self, input)
+    }
+    fn find(self: &Self, input: &string): Option<RegexMatch> {
+        return regexFind(self, input)
+    }
+    fn findAll(self: &Self, input: &string): Vec<RegexMatch> {
+        return regexFindAll(self, input)
+    }
 }

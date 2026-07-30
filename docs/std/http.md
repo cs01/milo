@@ -2,22 +2,6 @@
 
 ## std/http
 
-### `bufToStr`
-
-```milo
-pub fn bufToStr(buf: &[u8; 8192], start: i64, end: i64): string
-```
-
-_Undocumented._
-
-### `bufToStrFromString`
-
-```milo
-pub fn bufToStrFromString(s: &string, start: i64, end: i64): string
-```
-
-_Undocumented._
-
 ### `Context.cookie`
 
 ```milo
@@ -122,78 +106,6 @@ fn Context.text(self: &Context, body: string): Response
 
 _Undocumented._
 
-### `Drop.drop`
-
-```milo
-fn Drop.drop(self: &mut Drop): void
-```
-
-_Undocumented._
-
-### `eqIgnoreCase`
-
-```milo
-pub fn eqIgnoreCase(a: &string, b: &string): bool
-```
-
-_Undocumented._
-
-### `extractParamNames`
-
-```milo
-pub fn extractParamNames(pattern: &string): Vec<string>
-```
-
-_Undocumented._
-
-### `hexNibble`
-
-```milo
-pub fn hexNibble(ch: u8): i32
-```
-
-Value of a single hex digit, or -1 if the byte isn't one.
-
-### `matchRoute`
-
-```milo
-pub fn matchRoute(pattern: &string, paramNames: &Vec<string>, path: &string): Option<Vec<Param>>
-```
-
-_Undocumented._
-
-### `parseContentLength`
-
-```milo
-pub fn parseContentLength(s: &string): i64
-```
-
-_Undocumented._
-
-### `parseCookieValue`
-
-```milo
-pub fn parseCookieValue(cookieHeader: string, name: &string): string
-```
-
-_Undocumented._
-
-### `parseQueryString`
-
-```milo
-pub fn parseQueryString(qs: &string): Vec<Param>
-```
-
-_Undocumented._
-
-### `parseRequest`
-
-```milo
-pub fn parseRequest(buf: &[u8; 8192], n: i64): Request
-```
-
-_Undocumented._
-
 ### `Router.addRoute`
 
 ```milo
@@ -266,26 +178,10 @@ fn Router.use(self: &mut Router, mw: (&mut Context, (&mut Context) => Response) 
 
 _Undocumented._
 
-### `sendRaw`
-
-```milo
-pub fn sendRaw(fd: i32, status: i32, contentType: string, body: string, extraHeaders: &Vec<Param>): void
-```
-
-_Undocumented._
-
-### `sendResponse`
-
-```milo
-pub fn sendResponse(fd: i32, response: Response, headers: &Vec<Param>): void
-```
-
-_Undocumented._
-
 ### `serve`
 
 ```milo
-pub fn serve(port: u16?, handler: (&Request) => Response): Result<void>
+pub fn serve(port: u16?, handler: (&Request) => Response): Result<Unit>
 ```
 
 _Undocumented._
@@ -293,18 +189,10 @@ _Undocumented._
 ### `serveRouter`
 
 ```milo
-pub fn serveRouter(port: u16?, router: &Router): Result<void>
+pub fn serveRouter(port: u16?, router: &Router): Result<Unit>
 ```
 
 Start an HTTP server using a Router (headers from Context are sent on the wire).
-
-### `splitPath`
-
-```milo
-pub fn splitPath(path: &string): Vec<string>
-```
-
-_Undocumented._
 
 ### `statusText`
 
@@ -313,21 +201,3 @@ pub fn statusText(status: i32): string
 ```
 
 _Undocumented._
-
-### `toLower`
-
-```milo
-pub fn toLower(ch: u8): u8
-```
-
-_Undocumented._
-
-### `urlDecode`
-
-```milo
-pub fn urlDecode(s: &string): string
-```
-
-Percent-decode a query component. '+' means space (form-urlencoded) and %XX
-is a raw byte. A malformed escape is passed through literally rather than
-dropped, so a stray '%' in user input can't truncate the value.

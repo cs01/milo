@@ -859,6 +859,7 @@ fn drainXfer(sched: *u8): void {
 
 // Allocate a SelectState (mutex-guarded claim record). Caller frees via
 // _selectStateFree once the select and all its arms are torn down.
+// @internal
 pub fn selectStateNew(): *u8 {
     unsafe {
         let st = malloc(selectStateSize())

@@ -2,51 +2,34 @@
 
 ## std/mem
 
-### `arenaAlloc`
+### `Arena.alloc`
 
 ```milo
-pub fn arenaAlloc(a: &mut Arena, size: i64): Result<i64>
-```
-
-Allocate size bytes from the arena (8-byte aligned).
-Returns Err if the arena doesn't have enough space.
-
-### `arenaNew`
-
-```milo
-pub fn arenaNew(capacity: i64): Result<Arena>
-```
-
-Create a new arena with the given capacity in bytes.
-
-### `arenaRemaining`
-
-```milo
-pub fn arenaRemaining(a: &Arena): i64
+fn Arena.alloc(self: &mut Arena, size: i64): Result<i64>
 ```
 
 _Undocumented._
 
-### `arenaReset`
+### `Arena.new`
 
 ```milo
-pub fn arenaReset(a: &mut Arena): void
-```
-
-Reset the arena, making all previously allocated memory available for reuse.
-
-### `Drop.drop`
-
-```milo
-fn Drop.drop(self: &mut Drop): void
+fn Arena.new(capacity: i64): Result<Arena>
 ```
 
 _Undocumented._
 
-### `Drop.drop`
+### `Arena.remaining`
 
 ```milo
-fn Drop.drop(self: &mut Drop): void
+fn Arena.remaining(self: &Arena): i64
+```
+
+_Undocumented._
+
+### `Arena.reset`
+
+```milo
+fn Arena.reset(self: &mut Arena): void
 ```
 
 _Undocumented._

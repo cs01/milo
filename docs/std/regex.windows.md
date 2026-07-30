@@ -2,50 +2,42 @@
 
 ## std/regex.windows
 
-### `regexFind`
+### `Regex.compile`
 
 ```milo
-pub fn regexFind(_re: &Regex, _input: &string): Option<RegexMatch>
+fn Regex.compile(pattern: string): Result<Regex>
 ```
 
 _Undocumented._
 
-### `regexFindAll`
+### `Regex.compileFlags`
 
 ```milo
-pub fn regexFindAll(_re: &Regex, _input: &string): Vec<RegexMatch>
+fn Regex.compileFlags(pattern: string, flags: i32): Result<Regex>
 ```
 
 _Undocumented._
 
-### `regexMatch`
+### `Regex.find`
 
 ```milo
-pub fn regexMatch(_re: &Regex, _input: &string): bool
+fn Regex.find(self: &Regex, input: &string): Option<RegexMatch>
 ```
 
 _Undocumented._
 
-### `regexNew`
+### `Regex.findAll`
 
 ```milo
-pub fn regexNew(_pattern: string): Option<Regex>
+fn Regex.findAll(self: &Regex, input: &string): Vec<RegexMatch>
 ```
 
 _Undocumented._
 
-### `regexNewFlags`
+### `Regex.isMatch`
 
 ```milo
-pub fn regexNewFlags(_pattern: string, _cflags: i32): Option<Regex>
-```
-
-_Undocumented._
-
-### `unsupported`
-
-```milo
-fn unsupported(): void
+fn Regex.isMatch(self: &Regex, input: &string): bool
 ```
 
 _Undocumented._

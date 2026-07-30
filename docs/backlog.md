@@ -3,7 +3,7 @@ system: planning
 purpose: ROI/difficulty-ranked lens over outstanding work; a prioritization view, NOT the source of truth for status
 key-files: docs/roadmap.md (canonical status), docs/safety-roadmap.md
 update-when: an item ships (flip in roadmap.md, then DELETE it here) or a new item is triaged
-last-verified: 2026-07-25 (prover items re-ranked against a re-measured unknown distribution after float support landed)
+last-verified: 2026-07-30 (stdlib coherence track ranked; prover ordering retained from 2026-07-25 audit)
 -->
 
 # Backlog — prioritized

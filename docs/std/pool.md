@@ -2,14 +2,6 @@
 
 ## std/pool
 
-### `Drop.drop`
-
-```milo
-fn Drop.drop(self: &mut Drop): void
-```
-
-_Undocumented._
-
 ### `Pool.alloc`
 
 ```milo
@@ -60,6 +52,14 @@ Restate poolLive's preconditions (Pool has no struct invariant): without them th
 wrapper can't discharge the callee's `requires`, so its own `ensures result >= 0`
 is unbacked — same restating pattern as `free` above.
 
+### `Pool.new`
+
+```milo
+fn Pool.new(size: i64, count: i64): Result<Pool>
+```
+
+_Undocumented._
+
 ### `Pool.reset`
 
 ```milo
@@ -67,70 +67,3 @@ fn Pool.reset(self: &mut Pool): void
 ```
 
 _Undocumented._
-
-### `poolAlloc`
-
-```milo
-pub fn poolAlloc(p: &mut Pool): Result<i64>
-```
-
-Allocate one block. O(1). Returns Err when pool is exhausted.
-
-### `poolAvailable`
-
-```milo
-pub fn poolAvailable(p: &Pool): i64
-```
-
-Number of blocks available.
-
-### `poolEmpty`
-
-```milo
-pub fn poolEmpty(p: &Pool): bool
-```
-
-Check if pool has no live allocations.
-
-### `poolFree`
-
-```milo
-pub fn poolFree(p: &mut Pool, block: i64): void
-```
-
-Free one block back to pool. O(1).
-Caller must pass a pointer previously returned by poolAlloc.
-
-### `poolFull`
-
-```milo
-pub fn poolFull(p: &Pool): bool
-```
-
-Check if pool is fully exhausted.
-
-### `poolLive`
-
-```milo
-pub fn poolLive(p: &Pool): i64
-```
-
-Number of blocks currently in use.
-
-### `poolNew`
-
-```milo
-pub fn poolNew(size: i64, count: i64): Result<Pool>
-```
-
-Create a pool of `count` blocks, each `size` bytes (minimum 8 for free-list pointer).
-Single malloc at init — no further heap allocation.
-
-### `poolReset`
-
-```milo
-pub fn poolReset(p: &mut Pool): void
-```
-
-Reset pool to initial state — all blocks free.
-Existing pointers become invalid.

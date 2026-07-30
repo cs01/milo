@@ -3,16 +3,16 @@
 CLI argument parsing with typed flags, positional args, and auto-generated help text.
 
 ```milo
-from "std/argparse" import { ArgParser, ParsedArgs, newParser }
+from "std/argparse" import { ArgParser, ParsedArgs }
 ```
 
 ## Quick start
 
 ```milo
-from "std/argparse" import { newParser, ArgParser, ParsedArgs }
+from "std/argparse" import { ArgParser, ParsedArgs }
 
 fn main(): i32 {
-    var parser = newParser("greet", "A greeting tool")
+    var parser = ArgParser.new("greet", "A greeting tool")
     parser.addRequired("name", "n", "Name to greet")
     parser.addBool("loud", "l", "Shout the greeting")
     parser.addOptionalPositional("title", "Optional title prefix")
@@ -156,7 +156,7 @@ Stop flag parsing after the first positional argument. All remaining arguments a
 The `--` separator is always supported regardless of this setting — arguments after `--` are never parsed as flags.
 
 ```milo
-var parser = newParser("node-milo", "JS runtime")
+var parser = ArgParser.new("node-milo", "JS runtime")
 parser.addBool("version", "v", "Print version")
 parser.addOptionalPositional("script", "Script to run")
 parser.enableTrailingArgs()
@@ -232,11 +232,10 @@ Check whether a key exists in the parsed results.
 
 ## Functions
 
-### newParser
+### ArgParser.new
 
 ```milo
-fn newParser(name: string, description: string): ArgParser
+fn ArgParser.new(name: string, description: string): ArgParser
 ```
 
 Create a new argument parser with the given program name and description.
-

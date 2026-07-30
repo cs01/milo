@@ -44,6 +44,14 @@ pub fn eventDeregister(el: &EventLoop, fd: i32, _forWrite: bool): i32
 
 _Undocumented._
 
+### `EventLoop.new`
+
+```milo
+fn EventLoop.new(): Result<EventLoop, string>
+```
+
+_Undocumented._
+
 ### `eventLoopClose`
 
 ```milo
@@ -89,14 +97,6 @@ _Undocumented._
 
 ```milo
 pub fn eventLoopInitWakeup(el: &EventLoop): i32
-```
-
-_Undocumented._
-
-### `eventLoopNew`
-
-```milo
-pub fn eventLoopNew(): Result<EventLoop, string>
 ```
 
 _Undocumented._

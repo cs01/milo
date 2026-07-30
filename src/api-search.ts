@@ -1,6 +1,6 @@
 // `milo api <query>` — signature search over the std library for humans and
-// LLMs. Grep-backed (no compile): scans std/**/*.milo, extracts every function
-// and method signature with its leading doc-comment, and ranks by a lexical
+// LLMs. Grep-backed (no compile): scans std/**/*.milo, extracts supported public
+// functions and methods with their leading doc-comment, and ranks by a lexical
 // score over the name, parameters, and doc text. Prints one signature per line,
 // module-tagged, so the output is greppable and token-cheap.
 //
@@ -13,11 +13,19 @@ import { resolve, dirname, relative, join } from "path";
 import { STDLIB_DIR, readStd, bundledStdPaths } from "./stdlibBundle";
 
 interface Entry {
+  kind: "function" | "type";
   module: string;    // "std/string"
   signature: string; // "fn strPadStart(s: &string, targetLen: i64, padStr: &string): string"
   doc: string;       // first line of the leading doc-comment, "" if none
   docFull: string;   // the whole leading doc-comment (all lines), "" if none
   name: string;      // "strPadStart" or "String.split"
+}
+
+const HOST_STD_SUFFIX = process.platform === "win32" ? "windows" : process.platform;
+
+function platformStem(path: string): { base: string; platform: string } | null {
+  const m = path.replace(/\\/g, "/").match(/^(.*)\.(darwin|linux|windows)\.milo$/);
+  return m ? { base: m[1], platform: m[2] } : null;
 }
 
 function walkMilo(dir: string, out: string[]): void {
@@ -55,7 +63,7 @@ function fnName(sig: string): string {
 
 // Collect the contiguous `//` doc-comment lines immediately above `idx`.
 // A section-divider comment (── … ──) is a boundary, not doc — stop there.
-function leadingDoc(lines: string[], idx: number): { first: string; full: string } {
+function leadingDoc(lines: string[], idx: number): { first: string; full: string; internal: boolean } {
   let i = idx - 1;
   const buf: string[] = [];
   while (i >= 0) {
@@ -63,7 +71,9 @@ function leadingDoc(lines: string[], idx: number): { first: string; full: string
     if (t.startsWith("//") && !t.includes("──")) { buf.unshift(t.replace(/^\/\/\s?/, "")); i--; }
     else break;
   }
-  return { first: buf.length ? buf[0] : "", full: buf.join("\n") };
+  const internal = buf.some(line => line.trim() === "@internal");
+  const visible = buf.filter(line => line.trim() !== "@internal");
+  return { first: visible.length ? visible[0] : "", full: visible.join("\n"), internal };
 }
 
 // `root` names an arbitrary project directory: the module is then its path relative
@@ -78,6 +88,13 @@ function parseModule(file: string, root?: string): Entry[] {
   if (src === null) return [];
   const lines = src.split("\n");
   const entries: Entry[] = [];
+  // Methods have no separate visibility modifier: methods on a public nominal
+  // type are importable, while methods on a file-private type are not.
+  const publicTypes = new Set<string>();
+  for (const line of lines) {
+    const m = line.trim().match(/^pub\s+(?:struct|enum|interface|trait|type)\s+([A-Za-z_][A-Za-z0-9_]*)/);
+    if (m) publicTypes.add(m[1]);
+  }
   // Track the enclosing `impl Type` so methods print as Type.method.
   const implStack: { type: string; depth: number }[] = [];
   let depth = 0;
@@ -87,6 +104,15 @@ function parseModule(file: string, root?: string): Entry[] {
     const line = lines[i];
     const trimmed = line.trim();
     if (trimmed === "extern") { externMode = true; continue; }
+    const typeMatch = trimmed.match(/^pub\s+(struct|enum|interface|trait|type)\s+([A-Za-z_][A-Za-z0-9_]*)/);
+    if (typeMatch) {
+      const ld = leadingDoc(lines, i);
+      if (!ld.internal) {
+        const brace = trimmed.indexOf("{");
+        const signature = (brace >= 0 ? trimmed.slice(0, brace) : trimmed).trim();
+        entries.push({ kind: "type", module, signature, doc: ld.first, docFull: ld.full, name: typeMatch[2] });
+      }
+    }
     const implMatch = trimmed.match(/^impl\s+([A-Za-z_][A-Za-z0-9_]*)/);
     if (implMatch) implStack.push({ type: implMatch[1], depth });
     // Brace bookkeeping (approximate; good enough to scope impl blocks).
@@ -107,7 +133,10 @@ function parseModule(file: string, root?: string): Entry[] {
         ? sig.replace(/\bSelf\b/g, inImpl).replace(/^fn\s+/, `fn ${inImpl}.`)
         : sig;
       const ld = leadingDoc(lines, i);
-      entries.push({ module, signature: shown, doc: ld.first, docFull: ld.full, name });
+      const supported = inImpl ? publicTypes.has(inImpl) : /^pub\s+fn\s/.test(sig);
+      if (supported && !ld.internal) {
+        entries.push({ kind: "function", module, signature: shown, doc: ld.first, docFull: ld.full, name });
+      }
       i = end;
     } else if (trimmed.length > 0 && !trimmed.startsWith("//")) {
       externMode = false;
@@ -121,7 +150,9 @@ function parseModule(file: string, root?: string): Entry[] {
 // is the source of truth for the rendered docs page — see scripts/gen-std-docs.
 export function stdDocsByModule(): Map<string, string> {
   const byMod = new Map<string, Entry[]>();
-  for (const e of loadAll()) (byMod.get(e.module) ?? byMod.set(e.module, []).get(e.module)!).push(e);
+  for (const e of loadAll(true)) {
+    if (e.kind === "function") (byMod.get(e.module) ?? byMod.set(e.module, []).get(e.module)!).push(e);
+  }
   const out = new Map<string, string>();
   for (const [module, entries] of byMod) {
     const stem = module.replace(/^std\//, "");
@@ -141,20 +172,30 @@ export function docsByModuleForPath(target: string): Map<string, string> {
 
   const byMod = new Map<string, Entry[]>();
   for (const f of files) {
-    for (const e of parseModule(f, root)) (byMod.get(e.module) ?? byMod.set(e.module, []).get(e.module)!).push(e);
+    for (const e of parseModule(f, root)) {
+      if (e.kind === "function") (byMod.get(e.module) ?? byMod.set(e.module, []).get(e.module)!).push(e);
+    }
   }
   const out = new Map<string, string>();
   for (const [module, entries] of byMod) out.set(module, renderMarkdown(entries));
   return out;
 }
 
-function loadAll(): Entry[] {
+function loadAll(allPlatforms = false): Entry[] {
   const stdDir = resolve(STDLIB_DIR, "std");
   // Disk when present; otherwise enumerate the embedded bundle (shipped binary).
   const files: string[] = existsSync(stdDir) ? [] : bundledStdPaths();
   if (existsSync(stdDir)) walkMilo(stdDir, files);
   const all: Entry[] = [];
-  for (const f of files) all.push(...parseModule(f));
+  for (const f of files) {
+    const split = platformStem(f);
+    if (!allPlatforms && split && split.platform !== HOST_STD_SUFFIX) continue;
+    const entries = parseModule(f);
+    if (!allPlatforms && split) {
+      for (const entry of entries) entry.module = entry.module.replace(/\.(darwin|linux|windows)$/, "");
+    }
+    all.push(...entries);
+  }
   return all;
 }
 

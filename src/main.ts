@@ -1145,7 +1145,7 @@ Import with \`from "std/<name>" import { ... }\`. Key modules:
 | \`std/fs\` | Filesystem ops | \`isFile\`, \`isDir\`, \`readDir\`, \`mkdir\`, \`remove\`, \`rename\`, \`chmod\`, \`symlink\` |
 | \`std/path\` | Path manipulation | \`pathJoin\`, \`pathDir\`, \`pathBase\`, \`pathExt\`, \`pathResolve\` |
 | \`std/args\` | Raw CLI arguments | \`args()\` → \`Vec<string>\`, \`getFlag(name)\`, \`hasFlag(name)\` |
-| \`std/argparse\` | Declarative arg parser | \`newParser\`, \`ArgParser\`, \`ParsedArgs\` (see detailed section below) |
+| \`std/argparse\` | Declarative arg parser | \`ArgParser.new\`, \`ParsedArgs\` (see detailed section below) |
 | \`std/env\` | Environment vars | \`getEnv\`, \`setEnv\`, \`allEnv\` |
 | \`std/json\` | JSON parse/serialize | \`jsonParse\`, \`jsonStringify\`, \`JsonValue\` |
 | \`std/toml\` | TOML parser | \`tomlParse\`, \`TomlValue\` |
@@ -1155,7 +1155,7 @@ Import with \`from "std/<name>" import { ... }\`. Key modules:
 | \`std/crypto\` | Cryptographic hashes | \`sha256\`, \`md5\` |
 | \`std/base64\` | Base64 encoding | \`base64Encode\`, \`base64Decode\` |
 | \`std/hex\` | Hex encoding | \`hexEncode\`, \`hexDecode\` |
-| \`std/regex\` | Regular expressions | \`regexMatch\`, \`regexFind\`, \`regexReplace\` |
+| \`std/regex\` | Regular expressions | \`Regex.compile\`, \`.isMatch\`, \`.find\`, \`.findAll\` |
 | \`std/datetime\` | Date and time | \`now\`, \`formatTime\`, \`DateTime\` |
 | \`std/time\` | Timing | \`sleep\`, \`clockMs\` |
 | \`std/random\` | Random numbers | \`randomI64\`, \`randomF64\`, \`randomRange\` |
@@ -1177,7 +1177,7 @@ Import with \`from "std/<name>" import { ... }\`. Key modules:
 | \`std/mem\` | Memory utilities | \`sizeOf\`, \`alignOf\` |
 | \`std/cstr\` | C string interop | \`toCStr\`, \`fromCStr\` |
 | \`std/sqlite\` | SQLite database | \`sqliteOpen\`, \`sqliteExec\`, \`sqliteQuery\` |
-| \`std/unicode\` | Unicode utilities | \`isAlpha\`, \`isDigit\`, \`toUpper\`, \`toLower\` |
+| \`std/unicode\` | Unicode utilities | \`codepoints\`, \`displayWidth\`, \`isAlphaStr\`, \`isNumeric\` |
 | \`std/os\` | OS information | \`platform\`, \`arch\`, \`hostname\` |
 | \`std/runtime\` | Runtime internals | (internal use) |
 | \`std/testing\` | Test assertions | \`assert\`, \`assertEqual\`, \`assertNe\` |
@@ -1192,12 +1192,12 @@ Prelude types (\`Vec\`, \`HashMap\`, \`Option\`, \`Result\`, \`Heap\`, \`print\`
 This is the recommended way to build CLI tools. Full working example:
 
 \`\`\`milo
-from "std/argparse" import { newParser }
+from "std/argparse" import { ArgParser }
 from "std/io" import { readFile }
 
 fn main(): i32 {
     // 1. Create parser
-    var parser = newParser("mytool", "process text files")
+    var parser = ArgParser.new("mytool", "process text files")
 
     // 2. Define arguments
     parser.addPositional("file", "input file to process")

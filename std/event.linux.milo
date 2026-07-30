@@ -32,6 +32,7 @@ pub struct EventLoop {
     epfd: i32,
 }
 
+// @internal
 pub fn eventLoopNew(): Result<EventLoop, string> {
     unsafe {
         let fd = epoll_create1(0)
@@ -42,6 +43,12 @@ pub fn eventLoopNew(): Result<EventLoop, string> {
             epfd: fd
         }
         )
+    }
+}
+
+impl EventLoop {
+    fn new(): Result<EventLoop, string> {
+        return eventLoopNew()
     }
 }
 

@@ -31,6 +31,7 @@ pub struct EventLoop {
     kqfd: i32,
 }
 
+// @internal
 pub fn eventLoopNew(): Result<EventLoop, string> {
     let fd = kqueue()
     if fd < 0 {
@@ -40,6 +41,12 @@ pub fn eventLoopNew(): Result<EventLoop, string> {
         kqfd: fd
     }
     )
+}
+
+impl EventLoop {
+    fn new(): Result<EventLoop, string> {
+        return eventLoopNew()
+    }
 }
 
 pub fn setNonblocking(fd: i32): i32 {

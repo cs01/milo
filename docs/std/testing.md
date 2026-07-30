@@ -49,11 +49,3 @@ pub fn assertStrEqual(got: &string, expected: &string): void
 ```
 
 _Undocumented._
-
-### `testFail`
-
-```milo
-fn testFail(): void
-```
-
-_Undocumented._

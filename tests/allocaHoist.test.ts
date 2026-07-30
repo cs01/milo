@@ -25,7 +25,7 @@ fn main(): void {
     while i < 10 {
         var nl = s.indexOfFrom("f", 0)
         let sub = s[0..10]
-        if sub.contains("cde") && nl >= 0 { count = count + 1 }
+        if sub.contains("cde") && nl.isSome() { count = count + 1 }
         match pick(i) {
             Option.Some(v) => { count = count + v }
             Option.None => {}

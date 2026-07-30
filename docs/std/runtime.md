@@ -10,55 +10,6 @@ pub fn defaultStackSize(): i64
 
 _Undocumented._
 
-### `dequeueRun`
-
-```milo
-fn dequeueRun(sched: *u8): *u8
-```
-
-_Undocumented._
-
-### `drainXfer`
-
-```milo
-fn drainXfer(sched: *u8): void
-```
-
-move cross-thread unparked tasks onto the run queue (scheduler thread only)
-
-### `Drop.drop`
-
-```milo
-fn Drop.drop(self: &mut Drop): void
-```
-
-Release the handle's ref on the done-cell. The task struct itself is owned
-and freed by the scheduler (reapTask), so there is nothing else to reclaim.
-
-### `enqueueRun`
-
-```milo
-fn enqueueRun(sched: *u8, task: *u8): void
-```
-
-_Undocumented._
-
-### `enqueueWait`
-
-```milo
-fn enqueueWait(sched: *u8, task: *u8): void
-```
-
-_Undocumented._
-
-### `getSched`
-
-```milo
-fn getSched(): *u8
-```
-
-_Undocumented._
-
 ### `guardPageSize`
 
 ```milo
@@ -174,23 +125,6 @@ pub fn nodeSize(): i64
 
 _Undocumented._
 
-### `osThreadTrampoline`
-
-```milo
-fn osThreadTrampoline(arg: *u8): *u8
-```
-
-pthread entry: unpacks { fnPtr, envPtr }, runs the void closure, frees both.
-
-### `pollAndWake`
-
-```milo
-fn pollAndWake(sched: *u8, timeoutMs: i32): void
-```
-
-poll the event loop once and make everything runnable that became ready:
-io-waiting tasks whose fd fired, and cross-thread unparks via the wakeup event
-
 ### `Promise.await`
 
 ```milo
@@ -256,44 +190,10 @@ pub fn promiseRace<T>(promises: Vec<Promise<T>>): Promise<T>
 
 _Undocumented._
 
-### `reapTask`
-
-```milo
-fn reapTask(sched: *u8, task: *u8): void
-```
-
-Free a completed task and wake anyone joining it. Reads the join fields
-before freeing the struct (they point outside it). numTasks is decremented
-here so the reap is accounted regardless of drain vs tick vs block caller.
-
-### `rtReadI32`
-
-```milo
-fn rtReadI32(base: *u8, off: i64): i32
-```
-
-_Undocumented._
-
 ### `rtReadI64`
 
 ```milo
 pub fn rtReadI64(base: *u8, off: i64): i64
-```
-
-_Undocumented._
-
-### `rtReadPtr`
-
-```milo
-fn rtReadPtr(base: *u8, off: i64): *u8
-```
-
-_Undocumented._
-
-### `rtWriteI32`
-
-```milo
-fn rtWriteI32(base: *u8, off: i64, val: i32): void
 ```
 
 _Undocumented._
@@ -384,36 +284,6 @@ timeout keeps the scheduler advancing while letting the caller re-check its
 own condition (the channel buffer) between ticks — forward progress with at
 most a few ms of latency and no busy-spin.
 
-### `schedulerPollMainSelect`
-
-```milo
-fn schedulerPollMainSelect(): void
-```
-
-Select's main-context wait needs a different poll from a channel's.
-
-_schedulerRunOnce returns EARLY when numTasks == 0 — and even past that guard it only
-polls the event loop when tasks remain. Select arms don't live on the task list: fd and
-timer arms hang off sSelFdHead and are claimed by _pollAndWake (_wakeSelectFds /
-_wakeSelectTimers). So once the last green task finishes, _schedulerPollMain becomes a
-no-op and a main-context select waiting on a timer would spin on it forever. That is a
-real hang — `Task.spawn` a short task, then select on a timeout, and the task is gone by
-the time the timer matters.
-
-Poll the event loop directly when there is nothing runnable. _pollAndWake is safe with
-zero tasks and _selMinTimeout already bounds the sleep by the nearest arm deadline, so
-this blocks rather than busy-spins.
-
-### `schedulerRunOnce`
-
-```milo
-fn schedulerRunOnce(timeoutMs: i32): void
-```
-
-Run one batch of ready tasks, then poll events once with `timeoutMs`
-(-1 blocks until an fd/wakeup/timer fires — used by the main-context
-blocking driver; 100 is the cooperative tick used by legacy spin loops).
-
 ### `schedulerRunToCompletion`
 
 ```milo
@@ -503,15 +373,6 @@ pub fn selectStateFree(st: *u8): void
 
 _Undocumented._
 
-### `selectStateNew`
-
-```milo
-pub fn selectStateNew(): *u8
-```
-
-Allocate a SelectState (mutex-guarded claim record). Caller frees via
-_selectStateFree once the select and all its arms are torn down.
-
 ### `selectStateSize`
 
 ```milo
@@ -564,23 +425,6 @@ claim. Parking there, or driving the poll from inside the lock, is what hangs.
 
 ```milo
 pub fn sElFd(): i64
-```
-
-_Undocumented._
-
-### `selMinTimeout`
-
-```milo
-fn selMinTimeout(sched: *u8, cap: i32): i32
-```
-
-Smallest timer deadline remaining (ms), clamped to `cap`. Lets the poll block
-only until the next select timeout instead of the default tick interval.
-
-### `setSched`
-
-```milo
-fn setSched(s: *u8): void
 ```
 
 _Undocumented._
@@ -743,40 +587,10 @@ running it on a green task needs a comparable stack. The mapping is
 anonymous and lazily committed, so a larger reservation costs address
 space rather than resident memory.
 
-### `taskCellDecref`
-
-```milo
-fn taskCellDecref(cell: *u8): void
-```
-
-_Undocumented._
-
-### `taskCellNew`
-
-```milo
-fn taskCellNew(): *u8
-```
-
-Task.join done-signal cell — 16 bytes: [0] done flag (0/1), [8] refcount.
-It lives outside the 88-byte task struct because the scheduler frees that
-struct the instant the task completes (reapTask), yet a late join must still
-observe "done" without touching freed memory. Two owners share it — the task
-(until reapTask) and the Task handle (until it drops) — so reap-before-join
-and join-before-reap are both safe. Non-atomic: Task is not Send, so both
-owners live on the spawning thread.
-
 ### `taskDone`
 
 ```milo
 pub fn taskDone(): i32
-```
-
-_Undocumented._
-
-### `taskEntry`
-
-```milo
-fn taskEntry(): void
 ```
 
 _Undocumented._
@@ -917,27 +731,3 @@ pub fn tWaitWrite(): i64
 ```
 
 _Undocumented._
-
-### `wakeReadyTasks`
-
-```milo
-fn wakeReadyTasks(sched: *u8, readyFds: *i32, count: i32): void
-```
-
-wake waiting tasks whose fd is in the ready set
-
-### `wakeSelectFds`
-
-```milo
-fn wakeSelectFds(sched: *u8, readyFds: *i32, count: i32): void
-```
-
-Claim select fd arms whose fd fired this poll.
-
-### `wakeSelectTimers`
-
-```milo
-fn wakeSelectTimers(sched: *u8): void
-```
-
-Claim select timer arms whose deadline has passed.

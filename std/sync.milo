@@ -209,6 +209,7 @@ fn chWakeOneSend(inner: *ChannelInner): void {
 // Arm a Select recv on this channel. Returns true if recv would proceed right
 // now (buffer non-empty or closed) — the caller claims immediately and does not
 // link. Otherwise links `node` (kind sel-recv) and returns false.
+// @internal
 pub fn channelArmRecv(ptr: *u8, node: *u8): bool {
     unsafe {
         let inner = ptr as *ChannelInner
@@ -226,6 +227,7 @@ pub fn channelArmRecv(ptr: *u8, node: *u8): bool {
 
 // Arm a Select send. Ready if the buffer has room or the channel is closed
 // (a send on a closed channel returns Err rather than blocking).
+// @internal
 pub fn channelArmSend(ptr: *u8, node: *u8): bool {
     unsafe {
         let inner = ptr as *ChannelInner
@@ -241,6 +243,7 @@ pub fn channelArmSend(ptr: *u8, node: *u8): bool {
     }
 }
 
+// @internal
 pub fn channelUnarmRecv(ptr: *u8, node: *u8): void {
     unsafe {
         let inner = ptr as *ChannelInner
@@ -250,6 +253,7 @@ pub fn channelUnarmRecv(ptr: *u8, node: *u8): void {
     }
 }
 
+// @internal
 pub fn channelUnarmSend(ptr: *u8, node: *u8): void {
     unsafe {
         let inner = ptr as *ChannelInner

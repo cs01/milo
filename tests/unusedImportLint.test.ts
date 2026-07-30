@@ -32,13 +32,13 @@ function lint(src: string, deny = true): string[] {
 }
 
 test("flags a named import the file never mentions", () => {
-  const out = lint(`from "std/string" import { charIsDigit, charIsAlpha }\n\nfn main() { print(charIsDigit(48)) }\n`);
+  const out = lint(`from "std/string" import { asciiIsDigit, asciiIsAlpha }\n\nfn main() { print(asciiIsDigit(48)) }\n`);
   expect(out.length).toBe(1);
-  expect(out[0]).toContain("'charIsAlpha'");
+  expect(out[0]).toContain("'asciiIsAlpha'");
 });
 
 test("does not flag an import that IS used", () => {
-  const out = lint(`from "std/string" import { charIsDigit }\n\nfn main() { print(charIsDigit(48)) }\n`);
+  const out = lint(`from "std/string" import { asciiIsDigit }\n\nfn main() { print(asciiIsDigit(48)) }\n`);
   expect(out).toEqual([]);
 });
 
@@ -53,7 +53,7 @@ test("does not flag a name used only as a return type", () => {
 });
 
 test("off unless denied — link-only imports must not nag by default", () => {
-  const out = lint(`from "std/string" import { charIsDigit, charIsAlpha }\n\nfn main() { print(charIsDigit(48)) }\n`, false);
+  const out = lint(`from "std/string" import { asciiIsDigit, asciiIsAlpha }\n\nfn main() { print(asciiIsDigit(48)) }\n`, false);
   expect(out).toEqual([]);
 });
 

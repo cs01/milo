@@ -3,7 +3,7 @@ system: planning
 purpose: canonical status — what shipped, what is in flight, what is planned, what was retired
 key-files: docs/backlog.md (ROI ordering over the open items), docs/safety-roadmap.md, docs/self-hosting.md, docs/verification-roadmap.md
 update-when: a feature ships, a track is abandoned, or a new track opens
-last-verified: 2026-07-24 (audited against the CLI surface, std/, src-milo/, tests/, examples/, .github/workflows/)
+last-verified: 2026-07-30 (stdlib planning track reconciled; prior full audit 2026-07-24)
 -->
 
 # Milo Roadmap
@@ -80,6 +80,11 @@ Crypto & auth: `crypto`, `sha256`, `sha1`, `hmac`, `jwt`, `totp`, `checksum`, `x
 Concurrency: `runtime`, `sync`, `select`, `event`
 Strings: `string`, `fmt`, `strconv`, `unicode`, `regex`, `cstr`
 Math & verification: `math`, `random`, `sort`, `smt`
+
+The supported surface follows [the stdlib design](stdlib-design.md): `milo api`
+hides private/internal plumbing, commands use `Result<Unit>`, ordinary absence
+uses `Option`, constructors and receiver operations have one discoverable shape,
+and ASCII byte APIs state their representation.
 CLI: `argparse`, `color`, `log`
 Time: `time`, `datetime`, `uuid`
 Testing: `testing`

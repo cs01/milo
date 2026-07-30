@@ -106,8 +106,7 @@ fn procField(path: string, key: &string): string {
     }
     for line in text.split("\n") {
         if line.startsWith(key) {
-            let idx = line.indexOf(":")
-            if idx < 0 {
+            let Option.Some(idx) = line.indexOf(":") else {
                 return ""
             }
             return (line[idx + 1..line.len]).trim()

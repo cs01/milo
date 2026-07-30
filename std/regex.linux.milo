@@ -15,22 +15,22 @@ pub struct Regex {
 }
 
 // Compile a POSIX extended regex with explicit cflags. REG_EXTENDED=1, REG_ICASE=2.
-pub fn regexNewFlags(pattern: string, cflags: i32): Option<Regex> {
+fn regexNewFlags(pattern: string, cflags: i32): Result<Regex> {
     var r = Regex {
         _preg: [0; 64], _valid: false
     }
     unsafe {
         let rc = regcomp(r._preg, pattern, cflags)
         if rc != 0 {
-            return Option.None
+            return Result.Err("invalid regular expression")
         }
     }
     r._valid = true
-    return Option.Some(r)
+    return Result.Ok(r)
 }
 
-// Compile a POSIX extended regular expression. Returns None on invalid pattern.
-pub fn regexNew(pattern: string): Option<Regex> {
+// Compile a POSIX extended regular expression.
+fn regexNew(pattern: string): Result<Regex> {
     return regexNewFlags(pattern, 1)
 }
 
@@ -46,7 +46,7 @@ fn readMatchI32(buf: &[u8; 80], off: i64): i32 {
 }
 
 // Test if a string matches the pattern.
-pub fn regexMatch(re: &Regex, input: &string): bool {
+fn regexMatch(re: &Regex, input: &string): bool {
     unsafe {
         return regexec(re._preg, input, 0, 0 as *u8, 0) == 0
     }
@@ -59,7 +59,7 @@ pub struct RegexMatch {
 }
 
 // Find the first match in a string. Returns None if no match.
-pub fn regexFind(re: &Regex, input: &string): Option<RegexMatch> {
+fn regexFind(re: &Regex, input: &string): Option<RegexMatch> {
     // regmatch_t on Linux: {rm_so: i32, rm_eo: i32} = 8 bytes each
     var pmatch: [u8; 80] = [0; 80]
     unsafe {
@@ -77,7 +77,7 @@ pub fn regexFind(re: &Regex, input: &string): Option<RegexMatch> {
 }
 
 // Find all non-overlapping matches in a string.
-pub fn regexFindAll(re: &Regex, input: &string): Vec<RegexMatch> {
+fn regexFindAll(re: &Regex, input: &string): Vec<RegexMatch> {
     var matches: Vec<RegexMatch> = Vec.new()
     var offset: i64 = 0
     var pmatch: [u8; 80] = [0; 80]
@@ -101,4 +101,22 @@ pub fn regexFindAll(re: &Regex, input: &string): Vec<RegexMatch> {
         }
     }
     return matches
+}
+
+impl Regex {
+    fn compile(pattern: string): Result<Regex> {
+        return regexNew(pattern)
+    }
+    fn compileFlags(pattern: string, flags: i32): Result<Regex> {
+        return regexNewFlags(pattern, flags)
+    }
+    fn isMatch(self: &Self, input: &string): bool {
+        return regexMatch(self, input)
+    }
+    fn find(self: &Self, input: &string): Option<RegexMatch> {
+        return regexFind(self, input)
+    }
+    fn findAll(self: &Self, input: &string): Vec<RegexMatch> {
+        return regexFindAll(self, input)
+    }
 }

@@ -18,14 +18,6 @@ pub fn doFetch(url: string, opts: FetchOptions): Result<Response, NetError>
 
 _Undocumented._
 
-### `Drop.drop`
-
-```milo
-fn Drop.drop(self: &mut Drop): void
-```
-
-_Undocumented._
-
 ### `fetch`
 
 ```milo

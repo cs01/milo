@@ -5,7 +5,7 @@ from "std/fs" import {
     readFile
 }
 from "std/argparse" import {
-    newParser
+    ArgParser
 }
 from "std/io" import {
     readStdin, writeStdout
@@ -24,7 +24,7 @@ pub fn shuffleLines(lines: &mut Vec<string>): void {
 }
 
 pub fn main(): i32 {
-    var parser = newParser("shuf", "shuffle lines of input")
+    var parser = ArgParser.new("shuf", "shuffle lines of input")
     parser.addOptionalPositional("file", "file to shuffle (default: stdin)")
     parser.addI64("head", "n", "output only the first N lines", 0)
     parser.addBool("zero-terminated", "z", "use NUL as line delimiter instead of newline")

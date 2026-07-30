@@ -14,7 +14,7 @@
 // @expect: false
 
 from "std/unicode" import {
-    isAlpha, isAlphaStr, isDigit, isHexDigit, isNumeric, isPunctuation, isWhitespace, toLowerChar, toUpperChar
+    isAlphaStr, isNumeric
 }
 
 pub fn boolStr(b: bool): string {
@@ -25,16 +25,16 @@ pub fn boolStr(b: bool): string {
 }
 
 pub fn main(): i32 {
-    print(boolStr(isDigit(48)))
-    print(boolStr(isDigit(65)))
-    print(boolStr(isAlpha(65)))
-    print(boolStr(isAlpha(48)))
-    print(boolStr(isWhitespace(32)))
-    print(boolStr(isPunctuation(33)))
-    print(boolStr(isHexDigit(102)))
-    print(boolStr(isHexDigit(103)))
-    print(toLowerChar(65).toString())
-    print(toUpperChar(97).toString())
+    print(boolStr(asciiIsDigit(48)))
+    print(boolStr(asciiIsDigit(65)))
+    print(boolStr(asciiIsAlpha(65)))
+    print(boolStr(asciiIsAlpha(48)))
+    print(boolStr(asciiIsWhitespace(32)))
+    print(boolStr(asciiIsPunctuation(33)))
+    print(boolStr(asciiIsHexDigit(102)))
+    print(boolStr(asciiIsHexDigit(103)))
+    print(asciiToLower(65).toString())
+    print(asciiToUpper(97).toString())
     print(boolStr(isNumeric("12345")))
     print(boolStr(isNumeric("123a5")))
     print(boolStr(isAlphaStr("hello")))

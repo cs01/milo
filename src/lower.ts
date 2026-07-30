@@ -1061,10 +1061,23 @@ class LowerCtx {
           if (expr.method === "cstr") {
             return { kind: "StringCstr", object: this.lowerExpr(expr.object), type, span: expr.span };
           }
+          if (expr.method === "indexOf" || expr.method === "indexOfFrom" || expr.method === "lastIndexOf") {
+            if (type.tag !== "enum") throw new Error(`${expr.method} must return Option<i64>`);
+            return {
+              kind: "StringFind",
+              str: this.lowerExpr(expr.object),
+              needle: this.lowerExpr(expr.args[0]),
+              from: expr.method === "indexOfFrom" ? this.lowerExpr(expr.args[1]) : undefined,
+              reverse: expr.method === "lastIndexOf",
+              optionEnumName: type.name,
+              type,
+              span: expr.span,
+            };
+          }
           // methods delegated to std/string runtime functions
           const strMethodMap: Record<string, string> = {
             "contains": "strContains", "startsWith": "strStartsWith", "endsWith": "strEndsWith",
-            "indexOf": "strIndexOf", "indexOfFrom": "strIndexOfFrom", "lastIndexOf": "strLastIndexOf", "split": "strSplit", "trim": "strTrim",
+            "split": "strSplit", "trim": "strTrim",
             "trimStart": "strTrimStart", "trimEnd": "strTrimEnd",
             "toLower": "strToLower", "toUpper": "strToUpper", "reverse": "strReverse",
             "replace": "strReplace", "replaceFirst": "strReplaceFirst",

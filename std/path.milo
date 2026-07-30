@@ -102,7 +102,7 @@ fn pathStem(path: &string): string {
     return base
 }
 
-// Path namespace — Path.ext/basename/dirname/join/stem.
+// Stateless path operations grouped for discoverability.
 pub struct Path {
 }
 

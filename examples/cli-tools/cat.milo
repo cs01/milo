@@ -4,7 +4,7 @@ from "std/fs" import {
     readFile
 }
 from "std/argparse" import {
-    newParser
+    ArgParser
 }
 
 from "std/path" import {
@@ -242,7 +242,7 @@ pub fn highlightLine(line: &string, lang: &string, kwList: &Vec<string>): string
 }
 
 pub fn main(): i32 {
-    var parser = newParser("cat", "view files with line numbers and syntax highlighting")
+    var parser = ArgParser.new("cat", "view files with line numbers and syntax highlighting")
     parser.addPositional("file", "file to display")
     parser.addBool("plain", "p", "plain output, no decorations")
     parser.addBool("no-color", "C", "disable syntax highlighting")
@@ -279,8 +279,7 @@ pub fn main(): i32 {
     var startLine: i64 = 1
     var endLine: i64 = lines.len
     if rangeStr.len > 0 {
-        let colon = rangeStr.indexOf(":")
-        if colon >= 0 {
+        if let Option.Some(colon) = rangeStr.indexOf(":") {
             let s1 = rangeStr.substr(0 as i64, colon)
             let s2 = rangeStr.substr(colon + 1, rangeStr.len)
             if s1.len > 0 {

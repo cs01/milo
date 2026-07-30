@@ -13,30 +13,27 @@ fn strContains(haystack: &string, needle: &string): bool {
     return strIndexOfFrom(haystack, needle, 0) >= 0
 }
 
-// Find first occurrence of needle in haystack. Returns -1 if not found.
+// Find first occurrence of needle in haystack.
 
-// Byte index of the first occurrence of `needle`, or -1 if not found.
+// Raw search helper. String.indexOf wraps the -1 sentinel as None.
 fn strIndexOf(haystack: &string, needle: &string): i64 {
     return strIndexOfFrom(haystack, needle, 0)
 }
 
-// Find first occurrence of needle starting at pos. Returns -1 if not found.
+// Find first occurrence of needle starting at pos.
 
-// Byte index of the first occurrence of `needle` at or after `pos`, or -1.
+// Raw search helper. String.indexOfFrom wraps the -1 sentinel as None.
 fn strIndexOfFrom(haystack: &string, needle: &string, pos: i64): i64
 requires pos >= 0
-ensures result >= -1
 {
-    var notFound: i64 = 0
-    notFound = notFound - 1
     if needle.len == 0 {
         return pos
     }
     if pos < 0 as i64 {
-        return notFound
+        return -1
     }
     if pos + needle.len > haystack.len {
-        return notFound
+        return -1
     }
     // memchr skips to each candidate first byte (SIMD in libc), memcmp
     // verifies the rest — ~5x faster than a byte-at-a-time loop on big inputs
@@ -52,7 +49,7 @@ ensures result >= -1
             hit = p as i64
         }
         if hit == 0 {
-            return notFound
+            return -1
         }
         i = hit - base
         var cmp: i32 = 0
@@ -64,20 +61,18 @@ ensures result >= -1
         }
         i = i + 1
     }
-    return notFound
+    return -1
 }
 
-// Find last occurrence of needle. Returns -1 if not found.
+// Find last occurrence of needle.
 
-// Byte index of the last occurrence of `needle`, or -1 if not found.
+// Raw search helper. String.lastIndexOf wraps the -1 sentinel as None.
 fn strLastIndexOf(haystack: &string, needle: &string): i64 {
-    var notFound: i64 = 0
-    notFound = notFound - 1
     if needle.len == 0 {
         return haystack.len
     }
     if needle.len > haystack.len {
-        return notFound
+        return -1
     }
     var i: i64 = haystack.len - needle.len
     while i >= 0 as i64 {
@@ -93,7 +88,7 @@ fn strLastIndexOf(haystack: &string, needle: &string): i64 {
         }
         i = i - 1
     }
-    return notFound
+    return -1
 }
 
 // Check if string starts with prefix.
@@ -231,8 +226,6 @@ fn strTrimEnd(s: &string): string {
 // separators yield empty pieces; keeps them, unlike strSplitWhitespace).
 fn strSplit(s: &string, sep: &string): Vec<string> {
     var result: Vec<string> = Vec.new()
-    var notFound: i64 = 0
-    notFound = notFound - 1
     if sep.len == 0 {
         for i in 0..s.len {
             result.push(s.substr(i, i + 1))
@@ -245,11 +238,12 @@ fn strSplit(s: &string, sep: &string): Vec<string> {
     while pos <= s.len
     invariant pos >= 0
     {
-        let idx = strIndexOfFrom(s, sep, pos)
-        if idx == notFound {
+        let found = strIndexOfFrom(s, sep, pos)
+        if found < 0 {
             result.push(s.substr(pos, s.len))
             break
         }
+        let idx = found
         result.push(s.substr(pos, idx))
         pos = idx + sep.len
     }
@@ -322,19 +316,18 @@ fn strReplace(s: &string, old: &string, newVal: &string): string {
     if old.len == 0 {
         return s.clone()
     }
-    var notFound: i64 = 0
-    notFound = notFound - 1
     var result: string = ""
     var pos: i64 = 0
     // See strSplit: keeps `pos >= 0` available for strIndexOfFrom's precondition.
     while pos < s.len
     invariant pos >= 0
     {
-        let idx = strIndexOfFrom(s, old, pos)
-        if idx == notFound {
+        let found = strIndexOfFrom(s, old, pos)
+        if found < 0 {
             result = result + s.substr(pos, s.len)
             break
         }
+        let idx = found
         if idx > pos {
             result = result + s.substr(pos, idx)
         }
@@ -345,23 +338,61 @@ fn strReplace(s: &string, old: &string, newVal: &string): string {
 }
 
 // Check if a byte is ASCII whitespace.
-pub fn charIsWhitespace(ch: u8): bool {
+pub fn asciiIsWhitespace(ch: u8): bool {
     return ch == 32 || ch == 9 || ch == 10 || ch == 13
 }
 
 // Check if a byte is an ASCII digit.
-pub fn charIsDigit(ch: u8): bool {
+pub fn asciiIsDigit(ch: u8): bool {
     return ch >= 48 && ch <= 57
 }
 
 // Check if a byte is an ASCII letter.
-pub fn charIsAlpha(ch: u8): bool {
+pub fn asciiIsAlpha(ch: u8): bool {
     return (ch >= 65 && ch <= 90) || (ch >= 97 && ch <= 122)
 }
 
 // Check if a byte is an ASCII letter or digit.
-pub fn charIsAlphanumeric(ch: u8): bool {
-    return charIsAlpha(ch) || charIsDigit(ch)
+pub fn asciiIsAlphanumeric(ch: u8): bool {
+    return asciiIsAlpha(ch) || asciiIsDigit(ch)
+}
+
+pub fn asciiIsLower(ch: u8): bool {
+    return ch >= 'a' && ch <= 'z'
+}
+
+pub fn asciiIsUpper(ch: u8): bool {
+    return ch >= 'A' && ch <= 'Z'
+}
+
+pub fn asciiIsPunctuation(ch: u8): bool {
+    return (ch >= 33 && ch <= 47) || (ch >= 58 && ch <= 64) || (ch >= 91 && ch <= 96) || (ch >= 123 && ch <= 126)
+}
+
+pub fn asciiIsHexDigit(ch: u8): bool {
+    return asciiIsDigit(ch) || (ch >= 'a' && ch <= 'f') || (ch >= 'A' && ch <= 'F')
+}
+
+pub fn asciiIsPrintable(ch: u8): bool {
+    return ch >= 32 && ch < 127
+}
+
+pub fn asciiIsControl(ch: u8): bool {
+    return ch < 32 || ch == 127
+}
+
+pub fn asciiToLower(ch: u8): u8 {
+    if asciiIsUpper(ch) {
+        return ch + 32
+    }
+    return ch
+}
+
+pub fn asciiToUpper(ch: u8): u8 {
+    if asciiIsLower(ch) {
+        return ch - 32
+    }
+    return ch
 }
 
 // Split string into words (contiguous alphabetic sequences), lowercased.
@@ -373,7 +404,7 @@ fn strSplitWords(s: &string): Vec<string> {
     var word: string = ""
     for i in 0..s.len {
         let ch = s[i]
-        if charIsAlpha(ch) {
+        if asciiIsAlpha(ch) {
             if ch >= 65 && ch <= 90 {
                 word.push(ch + 32)
             } else {
@@ -401,7 +432,7 @@ fn strSplitWhitespace(s: &string): Vec<string> {
     var token: string = ""
     for i in 0..s.len {
         let ch = s[i]
-        if charIsWhitespace(ch) {
+        if asciiIsWhitespace(ch) {
             if token.len > 0 {
                 result.push(token)
                 token = ""
@@ -489,11 +520,10 @@ fn strParseInt(s: &string): i64 {
 
 // Copy of `s` with only the first occurrence of `old` replaced by `newVal`.
 fn strReplaceFirst(s: &string, old: &string, newVal: &string): string {
-    let idx = strIndexOf(s, old)
-    var notFound: i64 = 0
-    notFound = notFound - 1
-    if idx == notFound {
+    let found = strIndexOf(s, old)
+    if found < 0 {
         return s.clone()
     }
+    let idx = found
     return s.substr(0, idx) + newVal + s.substr(idx + old.len, s.len)
 }

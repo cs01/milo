@@ -8,11 +8,11 @@
 // @expect: true
 
 from "std/pool" import {
-    Pool, poolNew, poolAlloc, poolFree, poolLive, poolAvailable, poolFull, poolEmpty, poolReset
+    Pool
 }
 
 pub fn main(): i32 {
-    var pool = poolNew(16, 3)!
+    var pool = Pool.new(16, 3)!
 
     print(pool.live())
     let a = pool.alloc()!

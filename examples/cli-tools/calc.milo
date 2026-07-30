@@ -3,7 +3,7 @@
 // Supports: + - * / % ** () with standard precedence, unary minus, floats
 
 from "std/argparse" import {
-    newParser
+    ArgParser
 }
 from "std/math" import {
     Math, exp
@@ -245,7 +245,7 @@ pub fn formatResult(n: f64): string {
 }
 
 pub fn main(): i32 {
-    var parser = newParser("calc", "evaluate arithmetic expressions")
+    var parser = ArgParser.new("calc", "evaluate arithmetic expressions")
     parser.addPositional("expression", "expression to evaluate (use quotes)")
     let args = parser.parse()
     let input = args.getString("expression")

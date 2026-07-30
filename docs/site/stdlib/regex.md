@@ -1,139 +1,32 @@
-# std/regex
-
-POSIX regular expressions.
+# Regular Expressions (`std/regex`)
 
 ```milo
-from "std/regex" import { Regex, RegexMatch, regexNew, regexMatch, regexFind, regexFindAll }
+from "std/regex" import { Regex, RegexMatch }
 ```
 
-## Types
+`Regex` is a compiled regular expression. Compilation is fallible; searching a
+valid expression may simply find no match. Keeping those outcomes separate is
+the module's error model.
 
-### Regex
+## API
 
 ```milo
-struct Regex {
-    _preg: [u8; 128],
-    _valid: bool,
+fn Regex.compile(pattern: string): Result<Regex>
+fn Regex.compileFlags(pattern: string, flags: i32): Result<Regex>
+fn Regex.isMatch(self: &Regex, input: &string): bool
+fn Regex.find(self: &Regex, input: &string): Option<RegexMatch>
+fn Regex.findAll(self: &Regex, input: &string): Vec<RegexMatch>
+```
+
+`RegexMatch.start` and `.end` are byte offsets into the input string.
+
+```milo
+let re = Regex.compile("[0-9]+")?
+if re.isMatch("abc123") {
+    let first = re.find("abc123")!
+    print("abc123"[first.start..first.end])
 }
 ```
 
-A compiled regular expression. Create via `regexNew`.
-
-### RegexMatch
-
-```milo
-struct RegexMatch {
-    start: i64,
-    end: i64,
-}
-```
-
-A match result with byte offsets into the input string.
-
-## Functions
-
-### regexNew
-
-```milo
-fn regexNew(pattern: string): Option<Regex>
-```
-
-Compiles a regex pattern. Returns `None` if the pattern is invalid.
-
-### regexMatch
-
-```milo
-fn regexMatch(re: &mut Regex, input: &string): bool
-```
-
-Returns `true` if the input matches the pattern.
-
-### regexFind
-
-```milo
-fn regexFind(re: &mut Regex, input: &string): Option<RegexMatch>
-```
-
-Finds the first match in the input.
-
-### regexFindAll
-
-```milo
-fn regexFindAll(re: &mut Regex, input: &string): Vec<RegexMatch>
-```
-
-Finds all non-overlapping matches in the input.
-
-## Examples
-
-### Check if a string matches a pattern
-
-```milo
-match regexNew("[0-9]+") {
-    Some(re) => {
-        var r = re
-        if regexMatch(&mut r, "abc123def") {
-            print("found digits")
-        }
-    }
-    None => print("bad pattern")
-}
-```
-
-### Extract matches with byte offsets
-
-```milo
-match regexNew("[a-z]+") {
-    Some(re) => {
-        var r = re
-        let m = regexFind(&mut r, "123hello456")
-        match m {
-            Some(hit) => {
-                let word = "123hello456".substr(hit.start, hit.end)
-                print(word)  // hello
-            }
-            None => print("no match")
-        }
-    }
-    None => print("bad pattern")
-}
-```
-
-### Find all matches
-
-```milo
-match regexNew("[0-9]+") {
-    Some(re) => {
-        var r = re
-        let input = "12 apples and 34 oranges"
-        let matches = regexFindAll(&mut r, input)
-        var i: i64 = 0
-        while i < matches.len {
-            print(input.substr(matches[i].start, matches[i].end))
-            i = i + 1
-        }
-        // prints: 12, 34
-    }
-    None => print("bad pattern")
-}
-```
-
-### Validate input format
-
-```milo
-fn isEmail(s: &string): bool {
-    match regexNew("^[a-zA-Z0-9.]+@[a-zA-Z0-9]+\\.[a-zA-Z]+$") {
-        Some(re) => {
-            var r = re
-            return regexMatch(&mut r, s)
-        }
-        None => return false
-    }
-}
-```
-
-## Notes
-
-- Uses POSIX extended regular expressions (ERE) via the system `regex.h`.
-- `RegexMatch.start` and `RegexMatch.end` are byte offsets, not codepoint offsets.
-- Compile the regex once and reuse it — `regexNew` is expensive relative to `regexMatch`/`regexFind`.
+Compile once and reuse the value. Windows currently fails loudly because the
+pure-Milo regex engine remains planned; macOS and Linux use POSIX regex.

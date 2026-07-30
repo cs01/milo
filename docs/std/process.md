@@ -2,16 +2,6 @@
 
 ## std/process
 
-### `buildArgv`
-
-```milo
-fn buildArgv(program: &string, args: &Vec<string>): *u8
-```
-
-Build a NULL-terminated argv: argv[0]=program, argv[1..n]=args, argv[n+1]=NULL.
-Each string is copied into its own NUL-terminated C buffer so it stays valid
-across fork/exec. Caller frees with _freeArgv(argv, args.len + 2).
-
 ### `capture`
 
 ```milo

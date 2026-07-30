@@ -76,7 +76,7 @@ Most utilities are **namespaced**: call a static on the namespace (`Path.join`, 
 | [`std/string`](string) | String **methods** — `s.contains`, `s.split`, `s.replace`, `s.trim`, case conversion |
 | [`std/fmt`](fmt) | Template formatting (`fmt1`–`fmt4`), `padLeft`/`padRight`, `join` |
 | [`std/strconv`](strconv) | `parseInt`, `parseFloat`, radix conversions, `formatFloat` |
-| [`std/unicode`](unicode) | Character classification — `isDigit`, `isAlpha`, `toLowerChar` |
+| [`std/unicode`](unicode) | Character classification — `asciiIsDigit`, `asciiIsAlpha`, `asciiToLower` |
 
 ## Math & Random
 
@@ -90,7 +90,7 @@ Most utilities are **namespaced**: call a static on the namespace (`Path.join`, 
 | Module | What it provides |
 |--------|-----------------|
 | [`std/color`](color) | SGR text styling — `Color.red`, `Color.green`, `Color.bold`, etc. |
-| [`std/regex`](regex) | Regular expression matching — `regexNew`, `regexMatch`, `regexFind` |
+| [`std/regex`](regex) | Regular expression matching — `Regex.compile`, `.isMatch`, `.find` |
 | [`std/sort`](sort) | Sorting for Vec — `sortI32`, `sortI64`, `sortStrings` |
 | [`std/testing`](testing) | `assert`, `assertEqual`, `assertStrEqual` |
 | [`std/log`](log) | Leveled logging to stderr — `logDebug`, `logInfo`, `logWarn`, `logError` |

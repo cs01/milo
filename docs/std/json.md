@@ -347,14 +347,6 @@ fn Json.strAt(self: &Json, index: i64, key: &string): Option<string>
 
 _Undocumented._
 
-### `jsonArr`
-
-```milo
-fn jsonArr(): JsonArr
-```
-
-_Undocumented._
-
 ### `JsonArr.arr`
 
 ```milo
@@ -435,82 +427,10 @@ fn JsonArr.val(self: JsonArr, val: JsonVal): JsonArr
 
 _Undocumented._
 
-### `jsonClone`
-
-```milo
-fn jsonClone(src: &Json): Json
-```
-
-_Undocumented._
-
-### `jsoncParse`
-
-```milo
-fn jsoncParse(s: string): Result<Json>
-```
-
-_Undocumented._
-
 ### `jsonEscapeStr`
 
 ```milo
 pub fn jsonEscapeStr(s: &string): string
-```
-
-_Undocumented._
-
-### `jsonExtractSubtree`
-
-```milo
-fn jsonExtractSubtree(src: &Json, nodeIdx: i64): Json
-```
-
-_Undocumented._
-
-### `jsonHexVal`
-
-```milo
-fn jsonHexVal(c: u8): i64
-```
-
-_Undocumented._
-
-### `jsonKeyEq`
-
-```milo
-fn jsonKeyEq(source: &string, off: i64, klen: i64, target: &string): bool
-```
-
-_Undocumented._
-
-### `jsonMaterializeStr`
-
-```milo
-fn jsonMaterializeStr(source: &string, start: i64, len: i64): string
-```
-
-_Undocumented._
-
-### `jsonNodeRawStr`
-
-```milo
-fn jsonNodeRawStr(doc: &Json, nodeIdx: i64): string
-```
-
-_Undocumented._
-
-### `jsonNull`
-
-```milo
-fn jsonNull(): Json
-```
-
-_Undocumented._
-
-### `jsonObj`
-
-```milo
-fn jsonObj(): JsonObj
 ```
 
 _Undocumented._
@@ -629,57 +549,6 @@ fn JsonObj.val(self: JsonObj, key: string, val: JsonVal): JsonObj
 
 _Undocumented._
 
-### `jsonParse`
-
-```milo
-fn jsonParse(s: string): Result<Json>
-```
-
-_Undocumented._
-
-### `jsonParseArray`
-
-```milo
-fn jsonParseArray(s: &string, pos: &mut i64, nodes: &mut Vec<JsonNode>, childIdx: &mut Vec<i64>, keyOffsets: &mut Vec<i64>, keyLens: &mut Vec<i64>, scratch: &mut Vec<i64>, scratchLen: &mut i64, err: &mut bool): i64
-```
-
-Container children must be contiguous in childIdx, but grandchildren are discovered
-interleaved while a container is still open. Children park on the scratch stack until
-the container closes, then commit as one contiguous block — this replaced a pre-counting
-scan to the matching close bracket that re-read every container body (73% of parse time).
-
-### `jsonParseNumber`
-
-```milo
-fn jsonParseNumber(s: &string, pos: &mut i64, nodes: &mut Vec<JsonNode>, _err: &mut bool): i64
-```
-
-_Undocumented._
-
-### `jsonParseObject`
-
-```milo
-fn jsonParseObject(s: &string, pos: &mut i64, nodes: &mut Vec<JsonNode>, childIdx: &mut Vec<i64>, keyOffsets: &mut Vec<i64>, keyLens: &mut Vec<i64>, scratch: &mut Vec<i64>, scratchLen: &mut i64, err: &mut bool): i64
-```
-
-_Undocumented._
-
-### `jsonParseString`
-
-```milo
-fn jsonParseString(s: &string, pos: &mut i64, nodes: &mut Vec<JsonNode>, err: &mut bool): i64
-```
-
-_Undocumented._
-
-### `jsonParseValue`
-
-```milo
-fn jsonParseValue(s: &string, pos: &mut i64, nodes: &mut Vec<JsonNode>, childIdx: &mut Vec<i64>, keyOffsets: &mut Vec<i64>, keyLens: &mut Vec<i64>, scratch: &mut Vec<i64>, scratchLen: &mut i64, err: &mut bool): i64
-```
-
-_Undocumented._
-
 ### `jsonPull`
 
 ```milo
@@ -696,76 +565,10 @@ fn JsonPull.next(self: &mut JsonPull): JsonToken
 
 _Undocumented._
 
-### `jsonPullNumber`
-
-```milo
-fn jsonPullNumber(s: &string, pos: &mut i64): f64
-```
-
-Standalone number → f64 (int . frac e exp), advancing pos past the literal.
-The flat-pool parser's jsonParseNumber is node-coupled, so the scan is inlined.
-
-### `jsonScanString`
-
-```milo
-fn jsonScanString(s: &string, pos: &mut i64, _err: &mut bool)
-```
-
-RFC 8259 §7: a string char is any Unicode scalar except '"', '\' and the C0 controls (< 0x20),
-which must be escaped. Valid escapes are " \ / b f n r t and \uXXXX. We validate the escape
-letter but not the 4 hex digits (no fail case exercises bad \u, and over-checking risks false
-positives on valid \u sequences).
-
-### `jsonScanStringRange`
-
-```milo
-fn jsonScanStringRange(s: &string, pos: &mut i64, start: &mut i64, _slen: &mut i64, err: &mut bool)
-```
-
-_Undocumented._
-
-### `jsonScratchPush`
-
-```milo
-fn jsonScratchPush(scratch: &mut Vec<i64>, scratchLen: &mut i64, v: i64)
-```
-
-Push onto the scratch stack reusing already-grown capacity: scratchLen is the logical
-length, scratch.len() the high-water mark — entries above scratchLen are stale and
-overwritten in place, so repeated container parses cost zero allocations.
-
 ### `jsonSer`
 
 ```milo
 pub fn jsonSer(v: &JsonVal): string
-```
-
-_Undocumented._
-
-### `jsonSkipWs`
-
-```milo
-fn jsonSkipWs(s: &string, pos: &mut i64)
-```
-
-_Undocumented._
-
-### `jsonStripJsonc`
-
-```milo
-fn jsonStripJsonc(s: &string): string
-```
-
-JSONC (Microsoft/VS Code flavor): JSON plus // and /* */ comments and trailing commas.
-No formal spec exists; this matches the de-facto jsonc-parser behavior. Implemented as a
-string-aware preprocessor that emits strict JSON, so everything else inherits jsonParse's
-exact RFC-8259 validation — JSONC is strictly a superset of comments + trailing commas, not
-a second, looser parser.
-
-### `jsonTok`
-
-```milo
-fn jsonTok(k: JsonEvent): JsonToken
 ```
 
 _Undocumented._

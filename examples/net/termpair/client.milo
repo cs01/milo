@@ -48,7 +48,7 @@ from "std/time" import {
     epochSecs, sleepMs
 }
 from "std/argparse" import {
-    newParser
+    ArgParser
 }
 from "std/base64" import {
     Base64
@@ -155,7 +155,7 @@ pub fn main(): i32 {
     // already handle the resulting error and shut down cleanly.
     ignoreSignal(SIGPIPE)
 
-    var parser = newParser("termpair", "share your terminal")
+    var parser = ArgParser.new("termpair", "share your terminal")
     parser.addString("host", "h", "server host", "chadsmith.dev")
     parser.addI64("port", "p", "server port", 443)
     parser.addString("base", "", "server URL path prefix", "/termpair")

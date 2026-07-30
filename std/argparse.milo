@@ -20,7 +20,7 @@ pub struct PositionalDef {
 }
 
 // Declarative command-line argument parser with auto-generated --help.
-// Create with newParser(), add flags with addString/addBool/addRequired,
+// Create with ArgParser.new(), add flags with addString/addBool/addRequired,
 // then call .parse() to get a ParsedArgs.
 pub struct ArgParser {
     name: string,
@@ -48,7 +48,7 @@ pub struct ArgEntry {
 }
 
 // Create a new argument parser with a program name and description.
-pub fn newParser(name: string, description: string): ArgParser {
+fn newParser(name: string, description: string): ArgParser {
     return ArgParser {
         name: name,
         description: description,
@@ -61,6 +61,11 @@ pub fn newParser(name: string, description: string): ArgParser {
 }
 
 impl ArgParser {
+    // Create a parser with a program name and description.
+    fn new(name: string, description: string): ArgParser {
+        return newParser(name, description)
+    }
+
     // Add a string flag with long name, short alias, help text, and default.
     // Example: parser.addString("output", "o", "Output file", "out.txt")
     fn addString(self: &mut Self, long: string, short: string, help: string, defaultVal: string): void {

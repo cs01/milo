@@ -375,6 +375,42 @@ for i in 0..n
 A `for` loop needs no `invariant i >= 0`: the prover already knows the binding lies in the
 range, and after the loop it knows the invariant holds at the final index.
 
+#### Iterating your own types
+
+`for x in c` works over any value whose type has a `next(self: &mut Self): Option<T>`
+method: the loop calls `next` and binds each `Some(x)` until the first `None`.
+
+```milo
+struct Countdown { n: i64 }
+impl Countdown {
+    fn next(self: &mut Self): Option<i64> {
+        if self.n == 0 { return Option.None }
+        self.n = self.n - 1
+        return Option.Some(self.n)
+    }
+}
+
+var c = Countdown { n: 3 }
+for x in c { print(x) }   // 2, 1, 0
+```
+
+**Protocol laws.** The loop calls `next` repeatedly until the first `None`, then stops — it
+does **not** call `next` again after that, and it does **not** call `next` after a `break`.
+Whether `next` keeps returning `None` once exhausted is up to the iterator, but
+implementations **should** be fused (stay `None`); the standard library's are. Hash values
+and iteration are unrelated here — this is purely the stop condition.
+
+To iterate a custom *container* without copying each element, hand out a slice view (`&[T]`,
+a non-owning fat pointer over the backing store) and iterate that: `for x in c.view()` where
+`fn view(self: &Self): &[T]`. The elements are borrowed, not cloned.
+
+**The `Iterator` marker trait.** `impl Iterator for X {}` marks `X` as iterable so it
+satisfies an `<I: Iterator>` bound and can be named in a prover contract over "any
+iterator". It is a marker: the `next` contract above is what the `for` loop actually
+requires and is checked at each iteration site (Milo has no associated types, so the
+element type is not named in the trait). Writing generic code that *iterates* a bare
+`<I: Iterator>` parameter is not supported yet — take a concrete type or a `&[T]` view.
+
 #### `old` — the value at entry
 
 Inside an `ensures`, `old(e)` is the value `e` held when the function was entered. It is the

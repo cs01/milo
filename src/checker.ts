@@ -1640,6 +1640,13 @@ export class TypeChecker {
       ]),
     });
 
+    // Iterator marker trait. Milo has no associated types, so the element type can't be
+    // named in the trait method — instead the iteration contract (`next(&mut Self):
+    // Option<T>`) is checked structurally at each `for x in it` site (duck-typed on the
+    // method). `impl Iterator for X {}` marks X as iterable so it satisfies an
+    // `<I: Iterator>` bound and is nameable in prover contracts over "any iterator".
+    this.traits.set("Iterator", { name: "Iterator", supertraits: [], methods: new Map() });
+
     // Operator traits
     const selfType: TypeKind = { tag: "struct", name: "Self" };
     for (const [traitName, methodName] of [["Add", "add"], ["Sub", "sub"], ["Mul", "mul"], ["Div", "div"]] as const) {

@@ -1,0 +1,42 @@
+// The `Iterator` marker trait: `impl Iterator for X {}` marks X as iterable so it
+// satisfies an `<I: Iterator>` bound (and is nameable in prover contracts over "any
+// iterator"). The iteration contract itself — `next(&mut Self): Option<T>` — is checked
+// where `for x in it` appears, so the trait needs no associated type.
+struct Counter {
+    n: i64, max: i64
+}
+
+impl Counter {
+    fn next(self: &mut Self): Option<i64> {
+        if self.n >= self.max {
+            return Option.None
+        }
+        let v = self.n
+        self.n = self.n + 1
+        return Option.Some(v)
+    }
+}
+
+impl Iterator for Counter {
+}
+
+fn describe < I: Iterator > (it: I): i64 {
+    return 1
+}
+
+fn main() {
+    var c = Counter {
+        n: 0, max: 4
+    }
+    // the <I: Iterator> bound is satisfied
+    // @expect: 1
+    print(describe(c))
+
+    // and it iterates
+    var s = 0
+    for x in c {
+        s = s + x
+    }
+    // @expect: 6
+    print(s)
+}

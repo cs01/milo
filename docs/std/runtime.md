@@ -26,6 +26,15 @@ fn drainXfer(sched: *u8): void
 
 move cross-thread unparked tasks onto the run queue (scheduler thread only)
 
+### `Drop.drop`
+
+```milo
+fn Drop.drop(self: &mut Drop): void
+```
+
+Release the handle's ref on the done-cell. The task struct itself is owned
+and freed by the scheduler (reapTask), so there is nothing else to reclaim.
+
 ### `enqueueRun`
 
 ```milo
@@ -733,6 +742,28 @@ budgets its JS call depth against the 8 MB the OS main thread gets, so
 running it on a green task needs a comparable stack. The mapping is
 anonymous and lazily committed, so a larger reservation costs address
 space rather than resident memory.
+
+### `taskCellDecref`
+
+```milo
+fn taskCellDecref(cell: *u8): void
+```
+
+_Undocumented._
+
+### `taskCellNew`
+
+```milo
+fn taskCellNew(): *u8
+```
+
+Task.join done-signal cell — 16 bytes: [0] done flag (0/1), [8] refcount.
+It lives outside the 88-byte task struct because the scheduler frees that
+struct the instant the task completes (reapTask), yet a late join must still
+observe "done" without touching freed memory. Two owners share it — the task
+(until reapTask) and the Task handle (until it drops) — so reap-before-join
+and join-before-reap are both safe. Non-atomic: Task is not Send, so both
+owners live on the spawning thread.
 
 ### `taskDone`
 

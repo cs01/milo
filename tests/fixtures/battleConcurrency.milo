@@ -1,0 +1,118 @@
+// Concurrency battle-test — sum-conservation under real multicore contention.
+//
+// WORKERS OS threads (Promise.blocking, genuine parallelism) each hammer a shared
+// AtomicI64, race a CAS loop, and stream a partial through a Channel. Execution is
+// thoroughly racy; three INDEPENDENT tallies must agree exactly, so a lost atomic
+// update, dropped/duplicated message, cross-thread UAF, or double-free of a shared
+// refcounted cell breaks the invariant instead of passing silently.
+// @expect: 80000
+// @expect: 80000
+// @expect: 80000
+// @expect: 7
+// @expect: ok
+
+from "std/sync" import {
+    AtomicI64, Channel
+}
+from "std/runtime" import {
+    Promise
+}
+
+fn workers(): i64 {
+    return 8
+}
+
+fn iters(): i64 {
+    return 10000
+}
+
+// contended atomic RMW: n increments on a shared counter
+fn hammer(counter: &AtomicI64, n: i64): void {
+    var i: i64 = 0
+    while i < n {
+        counter.add(1)
+        i = i + 1
+    }
+}
+
+// CAS loop: raise `slot` to `id` if it is currently lower, retrying on contention
+fn raiseMax(slot: &AtomicI64, id: i64): void {
+    var cur: i64 = slot.load()
+    while id > cur {
+        let prev = slot.cas(cur, id)
+        if prev == cur {
+            cur = id // won the race
+        } else {
+            cur = prev // lost; retry against the newer value
+        }
+    }
+}
+
+// One worker's body. Takes its cloned handles by value (owns them, drops at exit).
+fn runWorker(id: i64, total: AtomicI64, maxId: AtomicI64, ch: Channel<i64>): i64 {
+    hammer(total, iters())
+    raiseMax(maxId, id)
+    ch.send(iters())!
+    return iters()
+}
+
+fn spawnWorkers(total: &AtomicI64, maxId: &AtomicI64, ch: &Channel<i64>): Vec<Promise<i64>> {
+    var proms: Vec<Promise<i64>> = Vec.new()
+    var w: i64 = 0
+    while w < workers() {
+        let t = total.clone()
+        let mx = maxId.clone()
+        let c = ch.clone()
+        let id = w
+        proms.push(Promise<i64>.blocking(move(): i64 => {
+            return runWorker(id, t, mx, c)
+        }
+        ))
+        w = w + 1
+    }
+    return proms
+}
+
+// Await every worker, summing the results delivered over each Promise's channel.
+fn sumAwait(proms: &Vec<Promise<i64>>): i64 {
+    var sum: i64 = 0
+    var a: i64 = 0
+    while a < workers() {
+        sum = sum + proms[a].await()!
+        a = a + 1
+    }
+    return sum
+}
+
+// Drain the explicit channel; all partials are buffered once workers finish.
+fn drainChannel(ch: &Channel<i64>): i64 {
+    var sum: i64 = 0
+    var d: i64 = 0
+    while d < workers() {
+        sum = sum + ch.recv()!
+        d = d + 1
+    }
+    return sum
+}
+
+pub fn main(): i32 {
+    let total = AtomicI64.new(0)
+    let maxId = AtomicI64.new(0)
+    let ch = Channel<i64>.new(8)! // capacity == workers: every partial fits, no send blocks
+
+    let proms = spawnWorkers(total, maxId, ch)
+    let awaited = sumAwait(proms)
+    let chSum = drainChannel(ch)
+    let expected = workers() * iters()
+
+    print(total.load())
+    print(chSum)
+    print(awaited)
+    print(maxId.load())
+    if total.load() == expected && chSum == expected && awaited == expected && maxId.load() == workers() - 1 {
+        print("ok")
+    } else {
+        print("FAIL")
+    }
+    return 0
+}

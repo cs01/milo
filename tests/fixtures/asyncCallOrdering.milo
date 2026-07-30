@@ -20,7 +20,9 @@ pub fn note(s: string): void {
     gLog = gLog + s + " "
 }
 
-pub fn taskPtr(t: Task): *u8 {
+// Borrow, don't consume: Task owns a refcounted join-cell now (impl Drop), so it
+// is non-Copy — a by-value param would move `child` and break the join below.
+pub fn taskPtr(t: &Task): *u8 {
     return t._ptr
 }
 

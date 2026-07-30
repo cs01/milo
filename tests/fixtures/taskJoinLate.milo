@@ -1,0 +1,28 @@
+// Late/double join must be memory-safe. Before the done-cell moved into the Task
+// handle, joining a task that had already completed + been reaped was a UAF write
+// into freed heap followed by a forever-hang. Here t1 is reaped while t2.join()
+// drives the scheduler, so t1.join() is a late join; the second t1.join() is a
+// double join. Both must return cleanly.
+// @expect: t1
+// @expect: t2
+// @expect: done
+
+from "std/runtime" import {
+    Task
+}
+
+pub fn main(): i32 {
+    let t1 = Task.spawn(move(): void => {
+        print("t1")
+    }
+    )
+    let t2 = Task.spawn(move(): void => {
+        print("t2")
+    }
+    )
+    t2.join() // drives the scheduler: both t1 and t2 run + reap in this batch
+    t1.join() // late join on an already-reaped task
+    t1.join() // double join
+    print("done")
+    return 0
+}

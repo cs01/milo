@@ -37,13 +37,17 @@ Standing lane (parallel, not post-Tier-2): safety evidence — ASAN, checker fuz
 
 ## Tier 2 — core language
 
-### Drop (first)
-Deterministic destruction at last-owner death. Two co-designed interactions:
+### Drop — CORE ALREADY SHIPPED; two gaps remain
+**Do not rebuild this.** `impl Drop for T` compiles, type-checks (rejects builtins/non-aggregates), and runs today. Drops are emitted at function exit, early `return`, `break`/`continue` (loop-scoped), match-arm fall-through, reassignment (drop-old-before-overwrite), and discarded owned temps; move-out zeroes the source + clears a per-local `alive: i1` flag so no double-free. `needsDropCg` is transitive over struct fields / enum payloads / fixed arrays. std already dogfoods it: `File`, `TcpStream`, `TcpListener`, `TlsStream`, `Socket`. Regression pins: `dropAccounting.milo` (exact counts), `dropEarlyReturn`, `dropMatchBinding`, `loopBreakDrop`, `structFieldMoveDrop`. (Codegen: `emitDropValue` ~8592, `emitGuardedDrop` ~9607, `emitDropGlue` ~9595.)
 
-- **Drop × move-on-last-use — one dataflow pass, two consumers.** Last-use analysis decides *when* the last owner dies = *when* Drop fires *and* when `body = s` moves. Build the pass once; both features read it. Do not ship move-inference first and retrofit Drop.
-- **Drop × coroutine frames.** A `for x in c` frame holds values mid-iteration; early `break` must run pending drops for the partially-consumed container. Design Drop's scope-exit semantics with the coroutine lowering in view.
+Two real gaps, in priority order:
 
-Migration payoff = acceptance signal: move Channel / WaitGroup / Atomic onto Drop, delete the "call `.destroy()` exactly once" pitfall entries.
+1. **Std migration (near-term, high-value, feasible NOW).** `Channel<T>`, `AtomicI64/Bool`, `WaitGroup` in `std/sync.milo` still ship a manual `fn destroy(...)` and have NO `impl Drop`. Migrate them onto Drop and delete the "call `.destroy()` exactly once" pitfall entries — the plan's acceptance signal, and unblocked because `impl Drop` already works. Watch: these hold pthread primitives / heap buffers freed in `destroy`; the Drop body is the same code, but check move semantics (a moved-from Channel must not double-free — the `alive` flag path already covers this, verify with a fixture).
+
+2. **Lexical block-scope / last-use drop (the real semantic gap).** Locals are function-scoped, not block-scoped: a value dies at function/loop epilogue, not at the end of the innermost block where it's last owned. No explicit loop-iteration-end drop (only via redecl overwrite). No static per-branch move tracking — conditional/in-loop move correctness rests entirely on the runtime `alive` flag. Closing this = insert drops at end of innermost owning block, driven by last-use analysis.
+   - **Drop × move-on-last-use — one dataflow pass, two consumers.** The same last-use analysis decides *when* the last owner dies (= where the block-scope drop goes) *and* when `body = s` moves. Build the pass once; both read it. Do not ship move-inference first and retrofit.
+   - **Drop × coroutine frames.** A `for x in c` frame holds values mid-iteration; early `break` must run pending drops for the partially-consumed container. Design scope-exit semantics with the coroutine lowering in view.
+   - Edge to fix while here: a heap-field-less `Drop` struct can't be move-detected by the struct drop helper's null-sentinel (`codegen.ts:8890-8903`) — it leans wholly on the local flag.
 
 ### Interior iteration — by-value first
 Non-escaping stack coroutine; frame provably non-escaping. **Yield by value first** (over `i64`/small PODs). Enough to answer Borretti's objection and derisks the coroutine lowering *alone* — do not chain the two hardest items. Must support user-defined iterators over custom containers. Upgrade to yield `&T` once views land.

@@ -2,14 +2,18 @@
 
 Import modules with `from "std/<name>" import { symbols }`.
 
+Most utilities are **namespaced**: call a static on the namespace (`Path.join`, `Json.parse`,
+`Math.sqrt`) or a method on the value (`s.trim()`, `dt.format()`). See the
+[coherence migration map](/stdlib-coherence-migration) for the old-name → new-name table.
+
 ## I/O & Filesystem
 
 | Module | What it provides |
 |--------|-----------------|
-| [`std/io`](io) | `readFile`, `readStdin`, `File.openRead`/`.openWrite`/`.openAppend`, `f.readAll()`, `f.writeAll()`, RAII file handles |
-| [`std/fs`](fs) | `readDir`, `fileInfo`, `isDir`/`isFile`, `pathExists`, `writeFile` |
-| [`std/path`](path) | `pathJoin`, `pathBasename`, `pathDirname`, `pathExt`, `pathStem` |
-| [`std/env`](env) | `getEnv`, `getEnvOr` |
+| [`std/io`](io) | `readStdin`, `writeStdout`, `File.openRead`/`.openWrite`/`.openAppend`, `f.readAll()`, `f.writeAll()`, RAII file handles |
+| [`std/fs`](fs) | `readFile`, `readLines`, `readDir`, `fileInfo`, `isDir`/`isFile`, `pathExists`, `writeFile` |
+| [`std/path`](path) | `Path.join`, `Path.basename`, `Path.dirname`, `Path.ext`, `Path.stem` |
+| [`std/env`](env) | `Env.get`, `Env.getOr` |
 
 ## Networking
 
@@ -22,9 +26,9 @@ Import modules with `from "std/<name>" import { symbols }`.
 
 | Module | What it provides |
 |--------|-----------------|
-| [`std/json`](json) | Zero-copy JSON parser — `jsonParse`, keyed accessors (`.str()`, `.i64()`, `.f64()`, `.bool()`), `jsonStringify` |
+| [`std/json`](json) | Zero-copy JSON parser — `Json.parse`, keyed accessors (`.str()`, `.i64()`, `.f64()`, `.bool()`), `Json.stringify` |
 | [`std/arena`](arena) | Generational arena for cyclic/graph data with safe `Handle<T>` |
-| [`std/set`](set) | `HashSet<T>` — add, contains, remove |
+| [`std/set`](set) | `HashSet<T>` — `s.add`, `s.contains`, `s.remove` |
 
 ## CLI & System
 
@@ -39,18 +43,18 @@ Import modules with `from "std/<name>" import { symbols }`.
 
 | Module | What it provides |
 |--------|-----------------|
-| [`std/csv`](csv) | CSV parsing with header support |
-| [`std/toml`](toml) | TOML config parsing — `tomlParse`, `.str()`, `.i64()`, `.table()` |
-| [`std/base64`](base64) | Base64 encode/decode |
-| [`std/hex`](hex) | Hex encode/decode |
+| [`std/csv`](csv) | CSV parsing with header support — `Csv.parse`, `Csv.stringify` |
+| [`std/toml`](toml) | TOML config parsing — `Toml.parse`, then `.str()`, `.i64()`, `.table()` |
+| [`std/base64`](base64) | Base64 encode/decode — `Base64.encode`, `Base64.decode` |
+| [`std/hex`](hex) | Hex encode/decode — `Hex.encode`, `Hex.decode` |
 
 ## Date, Time & IDs
 
 | Module | What it provides |
 |--------|-----------------|
 | [`std/time`](time) | Wall clock, monotonic timing, sleep |
-| [`std/datetime`](datetime) | Date/time from epoch — `dateTimeNow`, `dateTimeFormat`, `weekdayName` |
-| [`std/uuid`](uuid) | UUID v4 generation |
+| [`std/datetime`](datetime) | Date/time — `DateTime.now`/`.fromEpoch`, then `dt.format()`, `weekdayName` |
+| [`std/uuid`](uuid) | UUID v4 generation — `Uuid.v4` |
 
 ## Concurrency
 
@@ -64,13 +68,13 @@ Import modules with `from "std/<name>" import { symbols }`.
 | Module | What it provides |
 |--------|-----------------|
 | [`std/sqlite`](sqlite) | SQLite3 bindings — `dbOpen`, `dbQuery`, `dbExec`, prepared statements |
-| [`std/url`](url) | URL parsing — `urlParse`, `urlQueryGet` |
+| [`std/url`](url) | URL parsing — `Url.parse`, then `u.queryGet`, `u.toString` |
 
 ## Strings & Formatting
 
 | Module | What it provides |
 |--------|-----------------|
-| [`std/string`](string) | `strContains`, `strSplit`, `strReplace`, `strTrim`, case conversion |
+| [`std/string`](string) | String **methods** — `s.contains`, `s.split`, `s.replace`, `s.trim`, case conversion |
 | [`std/fmt`](fmt) | Template formatting (`fmt1`–`fmt4`), `padLeft`/`padRight`, `join` |
 | [`std/strconv`](strconv) | `parseInt`, `parseFloat`, radix conversions, `formatFloat` |
 | [`std/unicode`](unicode) | Character classification — `isDigit`, `isAlpha`, `toLowerChar` |
@@ -79,14 +83,14 @@ Import modules with `from "std/<name>" import { symbols }`.
 
 | Module | What it provides |
 |--------|-----------------|
-| [`std/math`](math) | `abs`, `min`, `max`, `pow`, `sqrt`, `log`, trig functions |
-| [`std/random`](random) | `randInt`, `randFloat`, `randRange`, `shuffleI64` |
+| [`std/math`](math) | `Math.abs`, `Math.min`, `Math.max`, `Math.pow`, `Math.sqrt`, `Math.log`, trig |
+| [`std/random`](random) | `Random.int`, `Random.float`, `Random.range`, `Random.shuffleI64` |
 
 ## Utilities
 
 | Module | What it provides |
 |--------|-----------------|
-| [`std/color`](color) | ANSI terminal colors — `red`, `green`, `bold`, etc. |
+| [`std/color`](color) | SGR text styling — `Color.red`, `Color.green`, `Color.bold`, etc. |
 | [`std/regex`](regex) | Regular expression matching — `regexNew`, `regexMatch`, `regexFind` |
 | [`std/sort`](sort) | Sorting for Vec — `sortI32`, `sortI64`, `sortStrings` |
 | [`std/testing`](testing) | `assert`, `assertEqual`, `assertStrEqual` |
@@ -99,13 +103,13 @@ OpenSSL-backed hashing plus pure-Milo hashing, MAC, and token modules (no C code
 
 | Module | What it provides |
 |--------|-----------------|
-| [`std/crypto`](crypto) | `sha256`, `sha1`, `md5`, and `aesGcmEncrypt`/`aesGcmDecrypt` (128/256-bit AES-GCM) |
-| [`std/sha256`](sha256) | Pure-Milo SHA-256 — `sha256`, `sha256Bytes` |
-| [`std/sha1`](sha1) | Pure-Milo SHA-1 — `sha1`, `sha1Bytes` |
-| [`std/hmac`](hmac) | HMAC-SHA256 / HMAC-SHA1 — `hmacSha256`, `hmacSha1Bytes` |
-| [`std/jwt`](jwt) | JWT sign/verify (HS256) — `jwtSignHS256`, `jwtVerifyHS256` |
-| [`std/totp`](totp) | RFC 6238 TOTP / RFC 4226 HOTP one-time passwords — `totp`, `hotp` |
-| [`std/base32`](base32) | Base32 encode/decode (RFC 4648) — `base32Encode`, `base32Decode` |
+| [`std/crypto`](crypto) | `Crypto.sha256`, `Crypto.sha1`, `Crypto.md5`, and `Crypto.aesGcmEncrypt`/`.aesGcmDecrypt` (128/256-bit AES-GCM) |
+| [`std/sha256`](sha256) | Pure-Milo SHA-256 — `Sha256.hash`, `Sha256.bytes` |
+| [`std/sha1`](sha1) | Pure-Milo SHA-1 — `Sha1.hash`, `Sha1.bytes` |
+| [`std/hmac`](hmac) | HMAC-SHA256 / HMAC-SHA1 — `Hmac.sha256`, `Hmac.sha1Bytes` |
+| [`std/jwt`](jwt) | JWT sign/verify (HS256) — `Jwt.signHS256`, `Jwt.verifyHS256` |
+| [`std/totp`](totp) | RFC 6238 TOTP / RFC 4226 HOTP one-time passwords — `Totp.generate`, `Totp.hotp` |
+| [`std/base32`](base32) | Base32 encode/decode (RFC 4648) — `Base32.encode`, `Base32.decode` |
 
 ## Compression
 
@@ -113,9 +117,9 @@ Pure-Milo DEFLATE (RFC 1951) and the gzip / zlib / zip containers built on it.
 
 | Module | What it provides |
 |--------|-----------------|
-| [`std/deflate`](deflate) | Compress — raw DEFLATE, `gzipCompress`, `zlibCompress` |
-| [`std/inflate`](inflate) | Decompress — `inflate`, `gzipDecompress`, `zlibDecompress` |
-| [`std/zip`](zip) | Read ZIP archives — `zipRead` (`.zip`/`.jar`/`.epub`/`.docx`) |
+| [`std/deflate`](deflate) | Compress — `Deflate.raw`, `Deflate.gzip`, `Deflate.zlib` |
+| [`std/inflate`](inflate) | Decompress — `Inflate.raw`, `Inflate.gzip`, `Inflate.zlib` |
+| [`std/zip`](zip) | Read ZIP archives — `Zip.read` (`.zip`/`.jar`/`.epub`/`.docx`) |
 
 ## HTTP Server Example
 

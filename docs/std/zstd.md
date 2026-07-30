@@ -475,7 +475,7 @@ Forward little-endian bit read of `numBits` bits at bit-offset `offset`.
 ### `slice`
 
 ```milo
-pub fn slice(src: &string, from: i64, to: i64): string
+fn slice(src: &string, from: i64, to: i64): string
 ```
 
 Extract src[from .. to) into an owned string.
@@ -497,10 +497,34 @@ fn zeroVec(n: i64): Vec<i64>
 
 _Undocumented._
 
+### `Zstd.compress`
+
+```milo
+fn Zstd.compress(src: &string): string
+```
+
+_Undocumented._
+
+### `Zstd.compressRaw`
+
+```milo
+fn Zstd.compressRaw(src: &string): string
+```
+
+_Undocumented._
+
+### `Zstd.decompress`
+
+```milo
+fn Zstd.decompress(src: &string): Result<string, string>
+```
+
+_Undocumented._
+
 ### `zstdCompress`
 
 ```milo
-pub fn zstdCompress(src: &string): string
+fn zstdCompress(src: &string): string
 ```
 
 Compress `src` to a real zstd frame: greedy LZ77 + FSE-coded sequences (Predefined or
@@ -512,7 +536,7 @@ appended XXH64 content checksum — decodable by `zstdDecompress` above and refe
 ### `zstdCompressRaw`
 
 ```milo
-pub fn zstdCompressRaw(src: &string): string
+fn zstdCompressRaw(src: &string): string
 ```
 
 Encode `src` as a zstd frame of Raw blocks (RFC 8878). No entropy stage — this is
@@ -523,7 +547,7 @@ the content size, and an XXH64 content checksum is appended.
 ### `zstdDecompress`
 
 ```milo
-pub fn zstdDecompress(src: &string): Result<string, string>
+fn zstdDecompress(src: &string): Result<string, string>
 ```
 
 Decompress a single zstd frame. Multi-frame concatenation is not handled — one

@@ -69,7 +69,7 @@ _Undocumented._
 ### `rotl`
 
 ```milo
-pub fn rotl(x: u64, r: u64): u64
+fn rotl(x: u64, r: u64): u64
 ```
 
 _Undocumented._
@@ -77,7 +77,7 @@ _Undocumented._
 ### `xxh64`
 
 ```milo
-pub fn xxh64(src: &string, seed: u64): u64
+fn xxh64(src: &string, seed: u64): u64
 ```
 
 XXH64 digest of `src` with the given seed. `xxhsum -H64` uses seed 0.
@@ -85,7 +85,23 @@ XXH64 digest of `src` with the given seed. `xxhsum -H64` uses seed 0.
 ### `xxh64Hex`
 
 ```milo
-pub fn xxh64Hex(src: &string, seed: u64): string
+fn xxh64Hex(src: &string, seed: u64): string
 ```
 
 16-char lowercase hex of the digest, matching `xxhsum -H64` output.
+
+### `Xxhash.hash64`
+
+```milo
+fn Xxhash.hash64(src: &string, seed: u64): u64
+```
+
+_Undocumented._
+
+### `Xxhash.hex64`
+
+```milo
+fn Xxhash.hex64(src: &string, seed: u64): string
+```
+
+_Undocumented._

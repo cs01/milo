@@ -2,251 +2,251 @@
 
 ## std/math
 
-### `absI32`
+### `Math.abs`
 
 ```milo
-pub fn absI32(x: i32): i32
+fn Math.abs(x: f64): f64
 ```
 
 _Undocumented._
 
-### `absI64`
+### `Math.absI32`
 
 ```milo
-pub fn absI64(x: i64): i64
+fn Math.absI32(x: i32): i32
 ```
 
 _Undocumented._
 
-### `clampF64`
+### `Math.absI64`
 
 ```milo
-pub fn clampF64(x: f64, lo: f64, hi: f64): f64
+fn Math.absI64(x: i64): i64
 ```
 
 _Undocumented._
 
-### `clampI64`
+### `Math.atan2`
 
 ```milo
-pub fn clampI64(x: i64, lo: i64, hi: i64): i64
+fn Math.atan2(y: f64, x: f64): f64
 ```
 
 _Undocumented._
 
-### `isFinite`
+### `Math.ceil`
 
 ```milo
-pub fn isFinite(x: f64): bool
+fn Math.ceil(x: f64): f64
 ```
 
 _Undocumented._
 
-### `isInf`
+### `Math.clampF64`
 
 ```milo
-pub fn isInf(x: f64): bool
+fn Math.clampF64(x: f64, lo: f64, hi: f64): f64
 ```
 
 _Undocumented._
 
-### `isNan`
+### `Math.clampI64`
 
 ```milo
-pub fn isNan(x: f64): bool
+fn Math.clampI64(x: i64, lo: i64, hi: i64): i64
+```
+
+_Undocumented._
+
+### `Math.cos`
+
+```milo
+fn Math.cos(x: f64): f64
+```
+
+_Undocumented._
+
+### `Math.e`
+
+```milo
+fn Math.e(): f64
+```
+
+_Undocumented._
+
+### `Math.exp`
+
+```milo
+fn Math.exp(x: f64): f64
+```
+
+_Undocumented._
+
+### `Math.floor`
+
+```milo
+fn Math.floor(x: f64): f64
+```
+
+_Undocumented._
+
+### `Math.inf`
+
+```milo
+fn Math.inf(): f64
+```
+
+_Undocumented._
+
+### `Math.isFinite`
+
+```milo
+fn Math.isFinite(x: f64): bool
+```
+
+_Undocumented._
+
+### `Math.isInf`
+
+```milo
+fn Math.isInf(x: f64): bool
+```
+
+_Undocumented._
+
+### `Math.isNan`
+
+```milo
+fn Math.isNan(x: f64): bool
 ```
 
 NaN is the only value not equal to itself, so this is the one reliable test — `x == f64.NAN`
 is always false (the compiler lints that mistake).
 
-### `mathAbs`
+### `Math.log`
 
 ```milo
-pub fn mathAbs(x: f64): f64
+fn Math.log(x: f64): f64
 ```
 
 _Undocumented._
 
-### `mathAtan2`
+### `Math.log10`
 
 ```milo
-pub fn mathAtan2(y: f64, x: f64): f64
+fn Math.log10(x: f64): f64
 ```
 
 _Undocumented._
 
-### `mathCeil`
+### `Math.log2`
 
 ```milo
-pub fn mathCeil(x: f64): f64
+fn Math.log2(x: f64): f64
 ```
 
 _Undocumented._
 
-### `mathCos`
+### `Math.maxF64`
 
 ```milo
-pub fn mathCos(x: f64): f64
+fn Math.maxF64(a: f64, b: f64): f64
 ```
 
 _Undocumented._
 
-### `mathE`
+### `Math.maxI32`
 
 ```milo
-pub fn mathE(): f64
+fn Math.maxI32(a: i32, b: i32): i32
 ```
 
 _Undocumented._
 
-### `mathExp`
+### `Math.maxI64`
 
 ```milo
-pub fn mathExp(x: f64): f64
+fn Math.maxI64(a: i64, b: i64): i64
 ```
 
 _Undocumented._
 
-### `mathFloor`
+### `Math.minF64`
 
 ```milo
-pub fn mathFloor(x: f64): f64
+fn Math.minF64(a: f64, b: f64): f64
 ```
 
 _Undocumented._
 
-### `mathInf`
+### `Math.minI32`
 
 ```milo
-pub fn mathInf(): f64
+fn Math.minI32(a: i32, b: i32): i32
 ```
 
 _Undocumented._
 
-### `mathLog`
+### `Math.minI64`
 
 ```milo
-pub fn mathLog(x: f64): f64
+fn Math.minI64(a: i64, b: i64): i64
 ```
 
 _Undocumented._
 
-### `mathLog10`
+### `Math.mod`
 
 ```milo
-pub fn mathLog10(x: f64): f64
+fn Math.mod(x: f64, y: f64): f64
 ```
 
 _Undocumented._
 
-### `mathLog2`
+### `Math.pi`
 
 ```milo
-pub fn mathLog2(x: f64): f64
+fn Math.pi(): f64
 ```
 
 _Undocumented._
 
-### `mathMod`
+### `Math.pow`
 
 ```milo
-pub fn mathMod(x: f64, y: f64): f64
+fn Math.pow(base: f64, exponent: f64): f64
 ```
 
 _Undocumented._
 
-### `mathPi`
+### `Math.round`
 
 ```milo
-pub fn mathPi(): f64
+fn Math.round(x: f64): f64
 ```
 
 _Undocumented._
 
-### `mathPow`
+### `Math.sin`
 
 ```milo
-pub fn mathPow(base: f64, exponent: f64): f64
+fn Math.sin(x: f64): f64
 ```
 
 _Undocumented._
 
-### `mathRound`
+### `Math.sqrt`
 
 ```milo
-pub fn mathRound(x: f64): f64
+fn Math.sqrt(x: f64): f64
 ```
 
 _Undocumented._
 
-### `mathSin`
+### `Math.tan`
 
 ```milo
-pub fn mathSin(x: f64): f64
-```
-
-_Undocumented._
-
-### `mathSqrt`
-
-```milo
-pub fn mathSqrt(x: f64): f64
-```
-
-_Undocumented._
-
-### `mathTan`
-
-```milo
-pub fn mathTan(x: f64): f64
-```
-
-_Undocumented._
-
-### `maxF64`
-
-```milo
-pub fn maxF64(a: f64, b: f64): f64
-```
-
-_Undocumented._
-
-### `maxI32`
-
-```milo
-pub fn maxI32(a: i32, b: i32): i32
-```
-
-_Undocumented._
-
-### `maxI64`
-
-```milo
-pub fn maxI64(a: i64, b: i64): i64
-```
-
-_Undocumented._
-
-### `minF64`
-
-```milo
-pub fn minF64(a: f64, b: f64): f64
-```
-
-_Undocumented._
-
-### `minI32`
-
-```milo
-pub fn minI32(a: i32, b: i32): i32
-```
-
-_Undocumented._
-
-### `minI64`
-
-```milo
-pub fn minI64(a: i64, b: i64): i64
+fn Math.tan(x: f64): f64
 ```
 
 _Undocumented._

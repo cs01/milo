@@ -118,15 +118,6 @@ pub fn putChar(ch: u8): void
 
 Write a single byte to stdout.
 
-### `readFile`
-
-```milo
-pub fn readFile(path: &string): Result<string, IoError>
-```
-
-Read an entire file into a string. Returns an IoError (NotFound, permission,
-etc.) rather than throwing; propagate with `?` or match on it.
-
 ### `readLine`
 
 ```milo
@@ -143,14 +134,6 @@ fn readLineFd(fd: i32): Option<string>
 
 Read a single line from a file descriptor (reads byte-by-byte until newline or EOF).
 
-### `readLines`
-
-```milo
-pub fn readLines(path: &string): Result<Vec<string>, IoError>
-```
-
-Read a file and return its contents as a Vec of lines.
-
 ### `readStdin`
 
 ```milo
@@ -159,14 +142,6 @@ pub fn readStdin(): string
 
 Read all of stdin into a string (blocks to EOF). Prefer `stdinChannel()` for
 streaming/incremental consumption.
-
-### `splitLines`
-
-```milo
-pub fn splitLines(content: &string): Vec<string>
-```
-
-Split a string into lines on newline boundaries.
 
 ### `stdinChannel`
 
@@ -187,11 +162,3 @@ pub fn writeStdout(s: &string): void
 ```
 
 Write a string to stdout without appending a newline.
-
-### `writeStr`
-
-```milo
-pub fn writeStr(s: &string): void
-```
-
-Write a string to stdout without a trailing newline.

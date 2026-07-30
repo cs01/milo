@@ -1,40 +1,40 @@
-# std/deflate
+# std/Deflate.raw
 
 Pure-Milo DEFLATE compression (RFC 1951) plus the gzip (RFC 1952) and zlib (RFC 1950) container framings. No external codec dependency. Decompress with [`std/inflate`](inflate).
 
 ```milo
-from "std/deflate" import { deflate, gzipCompress, zlibCompress }
+from "std/Deflate.raw" import { Deflate }
 ```
 
 ## Functions
 
-### deflate
+### Deflate.raw
 
 ```milo
-fn deflate(src: &string): string
+fn Deflate.raw(src: &string): string
 ```
 
 Compresses raw bytes to a single fixed-Huffman DEFLATE stream (no container header).
 
-### gzipCompress
+### Deflate.gzip
 
 ```milo
-fn gzipCompress(src: &string): string
+fn Deflate.gzip(src: &string): string
 ```
 
 Compresses to a gzip stream: 10-byte header, DEFLATE body, CRC-32 + length trailer.
 
-### zlibCompress
+### Deflate.zlib
 
 ```milo
-fn zlibCompress(src: &string): string
+fn Deflate.zlib(src: &string): string
 ```
 
 Compresses to a zlib stream: 2-byte header, DEFLATE body, Adler-32 trailer.
 
 ```milo
-from "std/inflate" import { gzipDecompress }
+from "std/inflate" import { Inflate }
 
-let gz = gzipCompress(&"hello, hello, hello")
-let back = gzipDecompress(&gz)!   // "hello, hello, hello"
+let gz = Deflate.gzip(&"hello, hello, hello")
+let back = Inflate.gzip(&gz)!   // "hello, hello, hello"
 ```

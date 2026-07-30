@@ -1,9 +1,9 @@
 # std/fs
 
-Filesystem metadata and directory listing.
+Filesystem metadata, directory listing, and read-by-path helpers.
 
 ```milo
-from "std/fs" import { fileInfo, readDir, pathExists, writeFile }
+from "std/fs" import { readFile, readLines, readDir, fileInfo, pathExists, writeFile }
 ```
 
 ## Types
@@ -29,6 +29,34 @@ struct DirEntry {
 ```
 
 ## Functions
+
+### readFile
+
+```milo
+fn readFile(path: &string): Result<string, IoError>
+```
+
+Read an entire file by path.
+
+```milo
+let contents = readFile("config.txt")!
+```
+
+### readLines
+
+```milo
+fn readLines(path: &string): Result<Vec<string>, IoError>
+```
+
+Read a file and split it into lines.
+
+### splitLines
+
+```milo
+fn splitLines(content: &string): Vec<string>
+```
+
+Split a string on newlines.
 
 ### fileInfo
 
@@ -83,7 +111,7 @@ let entries = readDir(".")
 for entry in entries {
     if entry.isFile {
         writeStdout(&entry.name)
-        writeStr("\n")
+        writeStdout("\n")
     }
 }
 ```

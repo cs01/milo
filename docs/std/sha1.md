@@ -13,7 +13,7 @@ _Undocumented._
 ### `rotl`
 
 ```milo
-pub fn rotl(x: i64, n: i64): i64
+fn rotl(x: i64, n: i64): i64
 ```
 
 _Undocumented._
@@ -21,15 +21,31 @@ _Undocumented._
 ### `sha1`
 
 ```milo
-pub fn sha1(input: &string): string
+fn sha1(input: &string): string
 ```
 
 SHA-1 as a 40-char lowercase hex string.
 
+### `Sha1.bytes`
+
+```milo
+fn Sha1.bytes(input: &string): string
+```
+
+_Undocumented._
+
+### `Sha1.hash`
+
+```milo
+fn Sha1.hash(input: &string): string
+```
+
+_Undocumented._
+
 ### `sha1Bytes`
 
 ```milo
-pub fn sha1Bytes(input: &string): string
+fn sha1Bytes(input: &string): string
 ```
 
 SHA-1 digest as 20 raw bytes.

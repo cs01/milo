@@ -3,67 +3,67 @@
 Path manipulation utilities.
 
 ```milo
-from "std/path" import { pathJoin, pathBasename, pathDirname, pathExt, pathStem }
+from "std/path" import { Path }
 ```
 
 ## Functions
 
-### pathExt
+### Path.ext
 
 ```milo
-fn pathExt(path: &string): string
+fn Path.ext(path: &string): string
 ```
 
 Extract the file extension including the dot. Returns `""` if none.
 
 ```milo
-pathExt("archive.tar.gz")  // ".gz"
+Path.ext("archive.tar.gz")  // ".gz"
 ```
 
-### pathBasename
+### Path.basename
 
 ```milo
-fn pathBasename(path: &string): string
+fn Path.basename(path: &string): string
 ```
 
 Extract the final component of a path.
 
 ```milo
-pathBasename("/home/user/file.txt")  // "file.txt"
+Path.basename("/home/user/file.txt")  // "file.txt"
 ```
 
-### pathDirname
+### Path.dirname
 
 ```milo
-fn pathDirname(path: &string): string
+fn Path.dirname(path: &string): string
 ```
 
 Extract the directory portion of a path.
 
 ```milo
-pathDirname("/home/user/file.txt")  // "/home/user"
+Path.dirname("/home/user/file.txt")  // "/home/user"
 ```
 
-### pathJoin
+### Path.join
 
 ```milo
-fn pathJoin(a: &string, b: &string): string
+fn Path.join(a: &string, b: &string): string
 ```
 
 Join two path segments with a separator.
 
 ```milo
-pathJoin("/home/user", "docs")  // "/home/user/docs"
+Path.join("/home/user", "docs")  // "/home/user/docs"
 ```
 
-### pathStem
+### Path.stem
 
 ```milo
-fn pathStem(path: &string): string
+fn Path.stem(path: &string): string
 ```
 
 Extract the filename without its extension.
 
 ```milo
-pathStem("report.pdf")  // "report"
+Path.stem("report.pdf")  // "report"
 ```

@@ -3,30 +3,30 @@
 Hex encoding and decoding.
 
 ```milo
-from "std/hex" import { hexEncode, hexDecode }
+from "std/hex" import { Hex }
 ```
 
 ## Functions
 
-### hexEncode
+### Hex.encode
 
 ```milo
-fn hexEncode(input: &string): string
+fn Hex.encode(input: &string): string
 ```
 
 Encodes a string as hexadecimal.
 
-### hexDecode
+### Hex.decode
 
 ```milo
-fn hexDecode(input: &string): string
+fn Hex.decode(input: &string): string
 ```
 
 Decodes a hex string back to its original form.
 
 ```milo
-let encoded = hexEncode(&"hello")
+let encoded = Hex.encode(&"hello")
 print(encoded)  // 68656c6c6f
-let decoded = hexDecode(&encoded)
+let decoded = Hex.decode(&encoded)
 print(decoded)  // hello
 ```

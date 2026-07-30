@@ -1,158 +1,116 @@
 # std/string
 
-String manipulation utilities for searching, transforming, and inspecting strings.
+String search, transform, and inspect operations are **methods** on any `string` value —
+no import needed. The character-class helpers below are free functions imported from `std/string`.
 
 ```milo
-from "std/string" import { strContains, strSplit, strReplace, strTrim, strToLower }
+let name = "  Alice  "
+let clean = name.trim().toLower()   // "alice"
 ```
 
-## Functions
+## String methods
 
-### strContains
+### `s.contains`
 
 ```milo
-fn strContains(haystack: &string, needle: &string): bool
+fn contains(self: &string, needle: &string): bool
 ```
 
-Returns true if `haystack` contains `needle`.
+True if `s` contains `needle`.
 
-### strIndexOf
+### `s.indexOf` / `s.lastIndexOf`
 
 ```milo
-fn strIndexOf(haystack: &string, needle: &string): i64
+fn indexOf(self: &string, needle: &string): i64
 ```
 
-Returns the index of the first occurrence of `needle`, or -1 if not found.
+Byte index of the first (last) occurrence of `needle`, or `-1`.
 
-### strIndexOfFrom
+### `s.indexOfFrom`
 
 ```milo
-fn strIndexOfFrom(haystack: &string, needle: &string, start: i64): i64
+fn indexOfFrom(self: &string, needle: &string, start: i64): i64
 ```
 
-Like `strIndexOf`, but begins searching from byte offset `start`.
+Like `indexOf`, but begins searching from byte offset `start`.
 
-### strStartsWith
+### `s.startsWith` / `s.endsWith`
 
 ```milo
-fn strStartsWith(s: &string, prefix: &string): bool
+fn startsWith(self: &string, prefix: &string): bool
 ```
 
-Returns true if `s` starts with `prefix`.
+True if `s` starts with `prefix` (ends with `suffix`).
 
-### strEndsWith
+### `s.toLower` / `s.toUpper`
 
 ```milo
-fn strEndsWith(s: &string, suffix: &string): bool
+fn toLower(self: &string): string
 ```
 
-Returns true if `s` ends with `suffix`.
+New string with all ASCII characters lower- (upper-) cased.
 
-### strToLower
+### `s.trim` / `s.trimStart` / `s.trimEnd`
 
 ```milo
-fn strToLower(s: &string): string
+fn trim(self: &string): string
 ```
 
-Returns a new string with all ASCII characters lowercased.
+New string with whitespace removed from both ends (start, end).
 
-### strToUpper
+### `s.split`
 
 ```milo
-fn strToUpper(s: &string): string
+fn split(self: &string, delimiter: &string): Vec<string>
 ```
 
-Returns a new string with all ASCII characters uppercased.
-
-### strTrim
+Split by `delimiter`.
 
 ```milo
-fn strTrim(s: &string): string
+let parts = "a,b,c".split(",")   // ["a", "b", "c"]
 ```
 
-Returns a new string with leading and trailing whitespace removed.
-
-### strTrimStart
+### `s.splitWords` / `s.splitWhitespace`
 
 ```milo
-fn strTrimStart(s: &string): string
+fn splitWhitespace(self: &string): Vec<string>
 ```
 
-Returns a new string with leading whitespace removed.
+Split on runs of ASCII whitespace.
 
-### strTrimEnd
+### `s.replace` / `s.replaceFirst`
 
 ```milo
-fn strTrimEnd(s: &string): string
+fn replace(self: &string, old: &string, new: &string): string
 ```
 
-Returns a new string with trailing whitespace removed.
+Replace all (or the first) occurrence of `old` with `new`.
 
-### strSplit
+### `s.repeat`
 
 ```milo
-fn strSplit(s: &string, delimiter: &string): Vec<string>
+fn repeat(self: &string, count: i64): string
 ```
 
-Splits `s` by `delimiter` and returns the parts.
+`s` repeated `count` times.
+
+### `s.padStart` / `s.padEnd`
 
 ```milo
-let parts = strSplit(&"a,b,c", &",")
-// parts == ["a", "b", "c"]
+fn padStart(self: &string, targetLen: i64, pad: &string): string
 ```
 
-### strRepeat
+Pad to `targetLen` on the start (end).
+
+### Other
+
+`s.len()`, `s.isEmpty()`, `s.charAt(i)`, `s.reverse()`, `s.substr(start, end)`, `s.slice(start, end)`.
+
+## Character helpers
 
 ```milo
-fn strRepeat(s: &string, count: i64): string
+from "std/string" import { charIsWhitespace, charIsDigit, charIsAlpha, charIsAlphanumeric }
 ```
 
-Returns `s` repeated `count` times.
-
-### strReplace
-
-```milo
-fn strReplace(s: &string, old: &string, new: &string): string
-```
-
-Replaces all occurrences of `old` with `new` in `s`.
-
-### charIsWhitespace
-
-```milo
-fn charIsWhitespace(c: u8): bool
-```
-
-Returns true if `c` is an ASCII whitespace character.
-
-### charIsDigit
-
-```milo
-fn charIsDigit(c: u8): bool
-```
-
-Returns true if `c` is an ASCII digit (0-9).
-
-### charIsAlpha
-
-```milo
-fn charIsAlpha(c: u8): bool
-```
-
-Returns true if `c` is an ASCII letter (a-z, A-Z).
-
-### charIsAlphanumeric
-
-```milo
-fn charIsAlphanumeric(c: u8): bool
-```
-
-Returns true if `c` is an ASCII letter or digit.
-
-### trim
-
-```milo
-fn trim(s: &string): string
-```
-
-Alias for `strTrim`. Returns a new string with leading and trailing whitespace removed.
+Each takes a `u8` byte and returns `bool`: `charIsWhitespace(c)`, `charIsDigit(c)`,
+`charIsAlpha(c)`, `charIsAlphanumeric(c)`.

@@ -3,34 +3,34 @@
 Environment variable access.
 
 ```milo
-from "std/env" import { getEnv, getEnvOr }
+from "std/env" import { Env }
 ```
 
 ## Functions
 
-### getEnv
+### Env.get
 
 ```milo
-fn getEnv(name: string): Option<string>
+fn Env.get(name: string): Option<string>
 ```
 
 Look up an environment variable. Returns `None` if unset.
 
 ```milo
-match getEnv("HOME") {
+match Env.get("HOME") {
     Some(home) => writeStdout(&home),
     None => writeStdout("HOME not set"),
 }
 ```
 
-### getEnvOr
+### Env.getOr
 
 ```milo
-fn getEnvOr(name: string, fallback: string): string
+fn Env.getOr(name: string, fallback: string): string
 ```
 
 Look up an environment variable with a default.
 
 ```milo
-let port = getEnvOr("PORT", "8080")
+let port = Env.getOr("PORT", "8080")
 ```

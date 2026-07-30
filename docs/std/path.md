@@ -2,10 +2,50 @@
 
 ## std/path
 
+### `Path.basename`
+
+```milo
+fn Path.basename(path: &string): string
+```
+
+_Undocumented._
+
+### `Path.dirname`
+
+```milo
+fn Path.dirname(path: &string): string
+```
+
+_Undocumented._
+
+### `Path.ext`
+
+```milo
+fn Path.ext(path: &string): string
+```
+
+_Undocumented._
+
+### `Path.join`
+
+```milo
+fn Path.join(a: &string, b: &string): string
+```
+
+_Undocumented._
+
+### `Path.stem`
+
+```milo
+fn Path.stem(path: &string): string
+```
+
+_Undocumented._
+
 ### `pathBasename`
 
 ```milo
-pub fn pathBasename(path: &string): string
+fn pathBasename(path: &string): string
 ```
 
 Final component of the path (the file name), directories stripped.
@@ -13,7 +53,7 @@ Final component of the path (the file name), directories stripped.
 ### `pathDirname`
 
 ```milo
-pub fn pathDirname(path: &string): string
+fn pathDirname(path: &string): string
 ```
 
 Directory portion of the path (everything before the final component).
@@ -21,7 +61,7 @@ Directory portion of the path (everything before the final component).
 ### `pathExt`
 
 ```milo
-pub fn pathExt(path: &string): string
+fn pathExt(path: &string): string
 ```
 
 File extension including the leading dot (e.g. ".txt"); empty if none.
@@ -29,7 +69,7 @@ File extension including the leading dot (e.g. ".txt"); empty if none.
 ### `pathJoin`
 
 ```milo
-pub fn pathJoin(a: &string, b: &string): string
+fn pathJoin(a: &string, b: &string): string
 ```
 
 Join two segments with a single "/" separator (avoids doubling an existing one).
@@ -37,7 +77,7 @@ Join two segments with a single "/" separator (avoids doubling an existing one).
 ### `pathStem`
 
 ```milo
-pub fn pathStem(path: &string): string
+fn pathStem(path: &string): string
 ```
 
 File name without its extension (basename minus pathExt).

@@ -724,7 +724,7 @@ parks; the main thread drives the scheduler until the done cell is set.
 fn Task.spawn(f: () => void): Task
 ```
 
-Spawn a green (M:N) task that runs `f` on the cooperative scheduler, and
+Spawn a Color.green (M:N) task that runs `f` on the cooperative scheduler, and
 return a handle to it. Returns immediately — the task does not run until
 the scheduler is driven (by a blocking IO op, `schedulerYield`, or a
 `join`). Each task gets its own guard-paged stack. Await completion with

@@ -23,7 +23,15 @@ _Undocumented._
 ### `le32`
 
 ```milo
-pub fn le32(src: &string, p: i64): i64
+fn le32(src: &string, p: i64): i64
+```
+
+_Undocumented._
+
+### `Zip.read`
+
+```milo
+fn Zip.read(src: &string): Result<Vec<ZipEntry>, string>
 ```
 
 _Undocumented._
@@ -31,7 +39,7 @@ _Undocumented._
 ### `zipRead`
 
 ```milo
-pub fn zipRead(src: &string): Result<Vec<ZipEntry>, string>
+fn zipRead(src: &string): Result<Vec<ZipEntry>, string>
 ```
 
 Read every entry, decompressing and CRC-checking each.

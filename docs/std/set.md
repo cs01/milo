@@ -2,42 +2,42 @@
 
 ## std/set
 
-### `setAdd`
+### `HashSet.add`
 
 ```milo
-pub fn setAdd<T>(s: &mut HashSet<T>, val: T): void
+fn HashSet.add(self: &mut HashSet<T>, val: T): void
 ```
 
 Add a value to the set.
 
-### `setContains`
+### `HashSet.contains`
 
 ```milo
-pub fn setContains<T>(s: &HashSet<T>, val: T): bool
+fn HashSet.contains(self: &HashSet<T>, val: T): bool
 ```
 
 Check if the set contains a value.
 
-### `setLen`
+### `HashSet.len`
 
 ```milo
-pub fn setLen<T>(s: &HashSet<T>): i64
+fn HashSet.len(self: &HashSet<T>): i64
 ```
 
 Number of elements in the set.
 
-### `setNew`
+### `HashSet.new`
 
 ```milo
-pub fn setNew<T>(): HashSet<T>
+fn HashSet.new(): HashSet<T>
 ```
 
 Create an empty HashSet.
 
-### `setRemove`
+### `HashSet.remove`
 
 ```milo
-pub fn setRemove<T>(s: &mut HashSet<T>, val: T): void
+fn HashSet.remove(self: &mut HashSet<T>, val: T): void
 ```
 
 Remove a value from the set.

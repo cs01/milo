@@ -5,7 +5,7 @@
 ### `bgBlue`
 
 ```milo
-pub fn bgBlue(s: &string): string
+fn bgBlue(s: &string): string
 ```
 
 _Undocumented._
@@ -13,7 +13,7 @@ _Undocumented._
 ### `bgGreen`
 
 ```milo
-pub fn bgGreen(s: &string): string
+fn bgGreen(s: &string): string
 ```
 
 _Undocumented._
@@ -21,7 +21,7 @@ _Undocumented._
 ### `bgRed`
 
 ```milo
-pub fn bgRed(s: &string): string
+fn bgRed(s: &string): string
 ```
 
 _Undocumented._
@@ -29,7 +29,7 @@ _Undocumented._
 ### `bgYellow`
 
 ```milo
-pub fn bgYellow(s: &string): string
+fn bgYellow(s: &string): string
 ```
 
 _Undocumented._
@@ -37,7 +37,7 @@ _Undocumented._
 ### `blue`
 
 ```milo
-pub fn blue(s: &string): string
+fn blue(s: &string): string
 ```
 
 _Undocumented._
@@ -45,7 +45,143 @@ _Undocumented._
 ### `bold`
 
 ```milo
-pub fn bold(s: &string): string
+fn bold(s: &string): string
+```
+
+_Undocumented._
+
+### `Color.bgBlue`
+
+```milo
+fn Color.bgBlue(s: &string): string
+```
+
+_Undocumented._
+
+### `Color.bgGreen`
+
+```milo
+fn Color.bgGreen(s: &string): string
+```
+
+_Undocumented._
+
+### `Color.bgRed`
+
+```milo
+fn Color.bgRed(s: &string): string
+```
+
+_Undocumented._
+
+### `Color.bgYellow`
+
+```milo
+fn Color.bgYellow(s: &string): string
+```
+
+_Undocumented._
+
+### `Color.blue`
+
+```milo
+fn Color.blue(s: &string): string
+```
+
+_Undocumented._
+
+### `Color.bold`
+
+```milo
+fn Color.bold(s: &string): string
+```
+
+_Undocumented._
+
+### `Color.cyan`
+
+```milo
+fn Color.cyan(s: &string): string
+```
+
+_Undocumented._
+
+### `Color.dim`
+
+```milo
+fn Color.dim(s: &string): string
+```
+
+_Undocumented._
+
+### `Color.gray`
+
+```milo
+fn Color.gray(s: &string): string
+```
+
+_Undocumented._
+
+### `Color.green`
+
+```milo
+fn Color.green(s: &string): string
+```
+
+_Undocumented._
+
+### `Color.italic`
+
+```milo
+fn Color.italic(s: &string): string
+```
+
+_Undocumented._
+
+### `Color.magenta`
+
+```milo
+fn Color.magenta(s: &string): string
+```
+
+_Undocumented._
+
+### `Color.red`
+
+```milo
+fn Color.red(s: &string): string
+```
+
+_Undocumented._
+
+### `Color.strikethrough`
+
+```milo
+fn Color.strikethrough(s: &string): string
+```
+
+_Undocumented._
+
+### `Color.underline`
+
+```milo
+fn Color.underline(s: &string): string
+```
+
+_Undocumented._
+
+### `Color.white`
+
+```milo
+fn Color.white(s: &string): string
+```
+
+_Undocumented._
+
+### `Color.yellow`
+
+```milo
+fn Color.yellow(s: &string): string
 ```
 
 _Undocumented._
@@ -53,7 +189,7 @@ _Undocumented._
 ### `cyan`
 
 ```milo
-pub fn cyan(s: &string): string
+fn cyan(s: &string): string
 ```
 
 _Undocumented._
@@ -61,7 +197,7 @@ _Undocumented._
 ### `dim`
 
 ```milo
-pub fn dim(s: &string): string
+fn dim(s: &string): string
 ```
 
 _Undocumented._
@@ -69,7 +205,7 @@ _Undocumented._
 ### `gray`
 
 ```milo
-pub fn gray(s: &string): string
+fn gray(s: &string): string
 ```
 
 _Undocumented._
@@ -77,7 +213,7 @@ _Undocumented._
 ### `green`
 
 ```milo
-pub fn green(s: &string): string
+fn green(s: &string): string
 ```
 
 _Undocumented._
@@ -85,7 +221,7 @@ _Undocumented._
 ### `italic`
 
 ```milo
-pub fn italic(s: &string): string
+fn italic(s: &string): string
 ```
 
 _Undocumented._
@@ -93,7 +229,7 @@ _Undocumented._
 ### `magenta`
 
 ```milo
-pub fn magenta(s: &string): string
+fn magenta(s: &string): string
 ```
 
 _Undocumented._
@@ -101,7 +237,7 @@ _Undocumented._
 ### `red`
 
 ```milo
-pub fn red(s: &string): string
+fn red(s: &string): string
 ```
 
 _Undocumented._
@@ -109,7 +245,7 @@ _Undocumented._
 ### `strikethrough`
 
 ```milo
-pub fn strikethrough(s: &string): string
+fn strikethrough(s: &string): string
 ```
 
 _Undocumented._
@@ -117,7 +253,7 @@ _Undocumented._
 ### `underline`
 
 ```milo
-pub fn underline(s: &string): string
+fn underline(s: &string): string
 ```
 
 _Undocumented._
@@ -125,7 +261,7 @@ _Undocumented._
 ### `white`
 
 ```milo
-pub fn white(s: &string): string
+fn white(s: &string): string
 ```
 
 _Undocumented._
@@ -133,7 +269,7 @@ _Undocumented._
 ### `yellow`
 
 ```milo
-pub fn yellow(s: &string): string
+fn yellow(s: &string): string
 ```
 
 _Undocumented._

@@ -3,29 +3,29 @@
 Base64 encoding and decoding.
 
 ```milo
-from "std/base64" import { base64Encode, base64Decode }
+from "std/base64" import { Base64 }
 ```
 
 ## Functions
 
-### base64Encode
+### Base64.encode
 
 ```milo
-fn base64Encode(input: &string): string
+fn Base64.encode(input: &string): string
 ```
 
 Encodes a string to Base64.
 
-### base64Decode
+### Base64.decode
 
 ```milo
-fn base64Decode(input: &string): string
+fn Base64.decode(input: &string): string
 ```
 
 Decodes a Base64 string back to its original form.
 
 ```milo
-let encoded = base64Encode(&"hello world")
-let decoded = base64Decode(&encoded)
+let encoded = Base64.encode(&"hello world")
+let decoded = Base64.decode(&encoded)
 print(decoded)  // hello world
 ```

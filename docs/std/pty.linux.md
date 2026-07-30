@@ -121,10 +121,10 @@ fn Pty.write(self: &Pty, buf: *u8, len: i64): i64
 
 _Undocumented._
 
-### `Pty.writeStr`
+### `Pty.writeStdout`
 
 ```milo
-fn Pty.writeStr(self: &Pty, s: &string): i64
+fn Pty.writeStdout(self: &Pty, s: &string): i64
 ```
 
 _Undocumented._

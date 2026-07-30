@@ -1,9 +1,10 @@
 # std/io
 
-File I/O, stdin/stdout, and line reading.
+Stdin/stdout and owned file handles. (Read-by-path helpers — `readFile`, `readLines`,
+`splitLines` — live in [`std/fs`](fs).)
 
 ```milo
-from "std/io" import { File, readFile, writeStdout, splitLines }
+from "std/io" import { File, writeStdout }
 ```
 
 ## Types
@@ -39,14 +40,6 @@ fn writeStdout(s: &string)
 ```
 
 Write a string to stdout.
-
-### writeStr
-
-```milo
-fn writeStr(s: &string)
-```
-
-Write a string to stdout (alias).
 
 ### putChar
 
@@ -119,37 +112,3 @@ fn writeAll(self: &File, data: &string): Result<i64, IoError>
 ```
 
 Write a string to an open file. Returns bytes written.
-
-### readFile
-
-```milo
-fn readFile(path: &string): Result<string, IoError>
-```
-
-Read an entire file by path. Convenience wrapper around `File.openRead` + `f.readAll()`.
-
-```milo
-let contents = readFile("config.txt")!
-writeStdout(&contents)
-```
-
-### readLines
-
-```milo
-fn readLines(path: &string): Result<Vec<string>, IoError>
-```
-
-Read a file and split into lines.
-
-### splitLines
-
-```milo
-fn splitLines(s: &string): Vec<string>
-```
-
-Split a string on newlines.
-
-```milo
-let lines = splitLines(&"one\ntwo\nthree")
-// lines[0] == "one", lines[1] == "two", lines[2] == "three"
-```

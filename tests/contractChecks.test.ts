@@ -18,7 +18,7 @@ let dir = "";
 
 // randRange keeps the argument out of reach of constant folding — a literal -1 is a
 // compile error at every -O, which would test the checker instead of the codegen gate.
-const SRC = `from "std/random" import { randRange }
+const SRC = `from "std/random" import { Random }
 
 pub fn takesNonNegative(n: i64): i64
 requires n >= 0
@@ -27,7 +27,7 @@ requires n >= 0
 }
 
 fn main(): i32 {
-    print(takesNonNegative(-1 * randRange(1, 2)))
+    print(takesNonNegative(-1 * Random.range(1, 2)))
     return 0
 }
 `;
@@ -35,7 +35,7 @@ fn main(): i32 {
 // `old(e)` reads a value that no longer exists by the time the clause runs, so a debug
 // build has to snapshot it at entry. Separate file: this one must RUN, not abort, so the
 // pass/fail signal isn't confused with the `requires` violation above.
-const OLD_SRC = `from "std/random" import { randRange }
+const OLD_SRC = `from "std/random" import { Random }
 
 fn bump(n: &mut i64, by: i64): void
 ensures n == old(n) + by
@@ -50,15 +50,15 @@ ensures n == old(n) + by
 }
 
 fn main(): i32 {
-    // randRange(1, 1) is deterministically 1 yet still opaque to the prover (an
+    // Random.range(1, 1) is deterministically 1 yet still opaque to the prover (an
     // arc4random call it can't see through), so the ensures becomes a runtime check
     // rather than a compile-time proof — and the printed value is stable. randRange is
-    // an INCLUSIVE [min, max] range, so randRange(1, 2) would be 1 or 2 and this test
+    // an INCLUSIVE [min, max] range, so Random.range(1, 2) would be 1 or 2 and this test
     // would flake between printing 11 and 12.
-    var a: i64 = randRange(1, 1)
+    var a: i64 = Random.range(1, 1)
     bump(a, 10)
     print(a)
-    var b: i64 = randRange(1, 1)
+    var b: i64 = Random.range(1, 1)
     drift(b, 10)
     print(b)
     return 0
@@ -68,11 +68,11 @@ fn main(): i32 {
 // A for-in invariant asserts at the top of every iteration. Nothing else in the suite
 // exercises the for-loop arm of emitLoopInvariants, and the while arm is a different
 // code path in codegen.
-const FORIN_SRC = `from "std/random" import { randRange }
+const FORIN_SRC = `from "std/random" import { Random }
 
 fn main(): i32 {
     var total: i64 = 0
-    for i in 0..randRange(3, 4)
+    for i in 0..Random.range(3, 4)
     invariant total < 2
     {
         total = total + 1

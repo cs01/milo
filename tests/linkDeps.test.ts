@@ -37,7 +37,7 @@ function build(name: string, src: string, flags = ""): string {
 // Must import std/io, not just use prelude print: std/io is what drags in std/os and
 // therefore the TLS extern declarations. A prelude-only program never triggers the bug,
 // so testing one would pass whether or not the fix is present.
-const PLAIN = `from "std/io" import { readFile }
+const PLAIN = `from "std/fs" import { readFile }
 fn main(): i32 {
     print("hi")
     return 0

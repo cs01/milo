@@ -159,6 +159,23 @@ pub fn readDir(path: &string): Vec<DirEntry>
 
 List directory contents. Returns empty vec on error.
 
+### `readFile`
+
+```milo
+pub fn readFile(path: &string): Result<string, IoError>
+```
+
+Read an entire file into a string. Returns an IoError (NotFound, permission,
+etc.) rather than throwing; propagate with `?` or match on it.
+
+### `readLines`
+
+```milo
+pub fn readLines(path: &string): Result<Vec<string>, IoError>
+```
+
+Read a file and return its contents as a Vec of lines.
+
 ### `readLink`
 
 ```milo
@@ -246,6 +263,14 @@ pub fn softLink(target: &string, path: &string): Result<bool, IoError>
 ```
 
 _Undocumented._
+
+### `splitLines`
+
+```milo
+pub fn splitLines(content: &string): Vec<string>
+```
+
+Split a string into lines on newline boundaries.
 
 ### `syncFd`
 

@@ -60,6 +60,6 @@ test("off unless denied — link-only imports must not nag by default", () => {
 test("a name used only as an enum variant qualifier is not flagged", () => {
   // `Result.Ok(...)` names Result but never "calls" it — a naive is-it-called check
   // would report this import as dead and break the file.
-  const out = lint(`from "std/io" import { readFile }\n\nfn main() {\n  match readFile("/etc/hostname") {\n    Result.Ok(_t) => { print(1) }\n    Result.Err(_e) => { print(0) }\n  }\n}\n`);
+  const out = lint(`from "std/fs" import { readFile }\n\nfn main() {\n  match readFile("/etc/hostname") {\n    Result.Ok(_t) => { print(1) }\n    Result.Err(_e) => { print(0) }\n  }\n}\n`);
   expect(out).toEqual([]);
 });

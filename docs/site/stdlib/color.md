@@ -3,7 +3,7 @@
 ANSI terminal color and style formatting.
 
 ```milo
-from "std/color" import { red, green, yellow, blue, bold, dim, underline }
+from "std/color" import { Color }
 ```
 
 ## Functions
@@ -11,38 +11,38 @@ from "std/color" import { red, green, yellow, blue, bold, dim, underline }
 ### Text Colors
 
 ```milo
-fn red(s: &string): string
-fn green(s: &string): string
-fn yellow(s: &string): string
-fn blue(s: &string): string
-fn magenta(s: &string): string
-fn cyan(s: &string): string
-fn white(s: &string): string
-fn gray(s: &string): string
+fn Color.red(s: &string): string
+fn Color.green(s: &string): string
+fn Color.yellow(s: &string): string
+fn Color.blue(s: &string): string
+fn Color.magenta(s: &string): string
+fn Color.cyan(s: &string): string
+fn Color.white(s: &string): string
+fn Color.gray(s: &string): string
 ```
 
 ### Background Colors
 
 ```milo
-fn bgRed(s: &string): string
-fn bgGreen(s: &string): string
-fn bgYellow(s: &string): string
-fn bgBlue(s: &string): string
+fn Color.bgRed(s: &string): string
+fn Color.bgGreen(s: &string): string
+fn Color.bgYellow(s: &string): string
+fn Color.bgBlue(s: &string): string
 ```
 
 ### Styles
 
 ```milo
-fn bold(s: &string): string
-fn dim(s: &string): string
-fn italic(s: &string): string
-fn underline(s: &string): string
-fn strikethrough(s: &string): string
+fn Color.bold(s: &string): string
+fn Color.dim(s: &string): string
+fn Color.italic(s: &string): string
+fn Color.underline(s: &string): string
+fn Color.strikethrough(s: &string): string
 ```
 
 ## Example
 
 ```milo
-print(bold(&red(&"error:")) + " something went wrong")
-print(green(&"ok") + " " + dim(&"(3 tests passed)"))
+print(Color.bold(&Color.red(&"error:")) + " something went wrong")
+print(Color.green(&"ok") + " " + Color.dim(&"(3 tests passed)"))
 ```

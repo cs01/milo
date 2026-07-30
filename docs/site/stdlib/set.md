@@ -1,9 +1,9 @@
 # std/set
 
-Hash set collection for unique values.
+Hash set collection for unique values. Method-based on the `HashSet<T>` value.
 
 ```milo
-from "std/set" import { HashSet, setNew, setAdd, setContains, setRemove, setLen }
+from "std/set" import { HashSet }
 ```
 
 ## Types
@@ -16,52 +16,56 @@ struct HashSet<T>
 
 An unordered collection of unique values.
 
-## Functions
+## Constructor
 
-### setNew
+### `HashSet<T>.new`
 
 ```milo
-fn setNew<T>(): HashSet<T>
+fn new(): HashSet<T>
 ```
 
-Creates an empty hash set.
+Empty hash set. Generic statics take a turbofish: `HashSet<string>.new()`.
 
-### setAdd
+## Methods
+
+### `s.add`
 
 ```milo
-fn setAdd<T>(set: &mut HashSet<T>, value: T)
+fn add(self: &mut HashSet<T>, val: T): void
 ```
 
-Inserts `value` into the set. No-op if already present.
+Inserts `val`. No-op if already present.
 
-### setContains
+### `s.contains`
 
 ```milo
-fn setContains<T>(set: &HashSet<T>, value: T): bool
+fn contains(self: &HashSet<T>, val: T): bool
 ```
 
-Returns true if the set contains `value`.
+True if the set contains `val`.
 
-### setRemove
+### `s.remove`
 
 ```milo
-fn setRemove<T>(set: &mut HashSet<T>, value: T)
+fn remove(self: &mut HashSet<T>, val: T): void
 ```
 
-Removes `value` from the set if present.
+Removes `val` if present.
 
-### setLen
+### `s.len`
 
 ```milo
-fn setLen<T>(set: &HashSet<T>): i64
+fn len(self: &HashSet<T>): i64
 ```
 
-Returns the number of elements in the set.
+Number of elements.
+
+## Example
 
 ```milo
-var seen = setNew<string>()
-setAdd(&mut seen, "alice")
-setAdd(&mut seen, "bob")
-setAdd(&mut seen, "alice")  // no-op
-print(intToString(setLen(&seen)))  // 2
+var seen = HashSet<string>.new()
+seen.add("alice")
+seen.add("bob")
+seen.add("alice")  // no-op
+print(intToString(seen.len()))  // 2
 ```

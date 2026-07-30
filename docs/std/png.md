@@ -13,7 +13,7 @@ _Undocumented._
 ### `decodePng`
 
 ```milo
-pub fn decodePng(src: &string): Result<PngImage, string>
+fn decodePng(src: &string): Result<PngImage, string>
 ```
 
 _Undocumented._
@@ -26,3 +26,11 @@ fn paeth(a: i64, b: i64, c: i64): i64
 
 Paeth predictor (RFC 2083 §6.6): pick whichever of a/b/c the initial estimate
 a+b-c is closest to.
+
+### `Png.decode`
+
+```milo
+fn Png.decode(src: &string): Result<PngImage, string>
+```
+
+_Undocumented._

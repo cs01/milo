@@ -37,7 +37,7 @@ test("a directory writes one .md per module", () => {
   const r = doc([join(ROOT, "std"), "-o", out]);
   expect(r.code).toBe(0);
   expect(existsSync(join(out, "json.md"))).toBe(true);
-  expect(readFileSync(join(out, "json.md"), "utf-8")).toContain("jsonParse");
+  expect(readFileSync(join(out, "json.md"), "utf-8")).toContain("Json.parse");
 });
 
 // Nested dirs must keep their path as the module name, not collapse to a basename.

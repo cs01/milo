@@ -3,7 +3,7 @@
 TOML config file parsing.
 
 ```milo
-from "std/toml" import { Toml, tomlParse }
+from "std/toml" import { Toml }
 ```
 
 ## Types
@@ -32,10 +32,10 @@ fn table(&self, key: &string): Option<Toml>
 
 ## Functions
 
-### tomlParse
+### Toml.parse
 
 ```milo
-fn tomlParse(input: string): Result<Toml>
+fn Toml.parse(input: string): Result<Toml>
 ```
 
 Parses a TOML string into a `Toml` value.
@@ -43,11 +43,11 @@ Parses a TOML string into a `Toml` value.
 ## Example
 
 ```milo
-from "std/toml" import { tomlParse }
+from "std/toml" import { Toml }
 from "std/fs" import { readFile }
 
 let text = readFile("config.toml")!
-let config = tomlParse(text)!
+let config = Toml.parse(text)!
 
 let title = config.str(&"title")
 let port = config.i64(&"port")

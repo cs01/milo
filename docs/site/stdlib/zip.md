@@ -5,7 +5,7 @@ Read PKZIP archives (APPNOTE.TXT), pure Milo over [`std/inflate`](inflate). Read
 Read-only and whole-archive (no streaming, no zip64, no encryption) — enough to open `.zip` / `.jar` / `.epub` / `.docx`.
 
 ```milo
-from "std/zip" import { zipRead, ZipEntry }
+from "std/zip" import { Zip }
 ```
 
 ## Types
@@ -19,10 +19,10 @@ struct ZipEntry {
 
 ## Functions
 
-### zipRead
+### Zip.read
 
 ```milo
-fn zipRead(src: &string): Result<Vec<ZipEntry>, string>
+fn Zip.read(src: &string): Result<Vec<ZipEntry>, string>
 ```
 
 Reads every entry, decompressing and CRC-checking each. Returns an error on a malformed archive, an unsupported method, or a CRC mismatch.
@@ -31,7 +31,7 @@ Reads every entry, decompressing and CRC-checking each. Returns an error on a ma
 from "std/io" import { readFile }
 
 let bytes = readFile("archive.zip")!
-for entry in zipRead(&bytes)! {
+for entry in Zip.read(&bytes)! {
     print($"{entry.name}: {entry.data.len} bytes")
 }
 ```

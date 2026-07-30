@@ -1,9 +1,9 @@
 # std/datetime
 
-Date and time formatting from epoch timestamps.
+Date and time from epoch timestamps. Construct with a `DateTime` static; format with a method.
 
 ```milo
-from "std/datetime" import { DateTime, dateTimeNow, dateTimeFormat, weekdayName, monthName }
+from "std/datetime" import { DateTime, weekdayName, monthName }
 ```
 
 ## Types
@@ -24,47 +24,67 @@ struct DateTime {
 
 A broken-down calendar date and time.
 
+## Constructors (statics)
+
+### `DateTime.now`
+
+```milo
+fn DateTime.now(): DateTime
+```
+
+Current UTC date and time.
+
+### `DateTime.localNow`
+
+```milo
+fn DateTime.localNow(): DateTime
+```
+
+Current date and time in the local timezone.
+
+### `DateTime.fromEpoch`
+
+```milo
+fn DateTime.fromEpoch(epochSec: i64): DateTime
+```
+
+UTC `DateTime` for a Unix epoch timestamp (seconds).
+
+### `DateTime.fromEpochLocal`
+
+```milo
+fn DateTime.fromEpochLocal(epochSec: i64): DateTime
+```
+
+Local `DateTime` for a Unix epoch timestamp (seconds).
+
+## Formatting (methods)
+
+### `dt.format`
+
+```milo
+fn format(self: &DateTime): string
+```
+
+Full date-time string (e.g. `"2026-05-15 10:30:00"`).
+
+### `dt.formatDate`
+
+```milo
+fn formatDate(self: &DateTime): string
+```
+
+Date portion only (e.g. `"2026-05-15"`).
+
+### `dt.formatTime`
+
+```milo
+fn formatTime(self: &DateTime): string
+```
+
+Time portion only (e.g. `"10:30:00"`).
+
 ## Functions
-
-### dateTimeFromEpoch
-
-```milo
-fn dateTimeFromEpoch(epoch: i64): DateTime
-```
-
-Converts a Unix epoch timestamp (seconds) into a `DateTime`.
-
-### dateTimeNow
-
-```milo
-fn dateTimeNow(): DateTime
-```
-
-Returns the current date and time.
-
-### dateTimeFormat
-
-```milo
-fn dateTimeFormat(dt: &DateTime): string
-```
-
-Formats as a full date-time string (e.g. `"2026-05-15 10:30:00"`).
-
-### dateTimeFormatDate
-
-```milo
-fn dateTimeFormatDate(dt: &DateTime): string
-```
-
-Formats the date portion only (e.g. `"2026-05-15"`).
-
-### dateTimeFormatTime
-
-```milo
-fn dateTimeFormatTime(dt: &DateTime): string
-```
-
-Formats the time portion only (e.g. `"10:30:00"`).
 
 ### weekdayName
 
@@ -72,7 +92,7 @@ Formats the time portion only (e.g. `"10:30:00"`).
 fn weekdayName(weekday: i32): string
 ```
 
-Returns the English name for a weekday (0 = Sunday).
+English name for a weekday (0 = Sunday).
 
 ### monthName
 
@@ -80,12 +100,12 @@ Returns the English name for a weekday (0 = Sunday).
 fn monthName(month: i32): string
 ```
 
-Returns the English name for a month (1 = January).
+English name for a month (1 = January).
 
 ## Example
 
 ```milo
-let dt = dateTimeNow()
-print(dateTimeFormat(&dt))
+let dt = DateTime.now()
+print(dt.format())
 print(weekdayName(dt.weekday) + ", " + monthName(dt.month))
 ```

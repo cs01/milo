@@ -3,15 +3,15 @@
 UUID generation.
 
 ```milo
-from "std/uuid" import { uuidV4 }
+from "std/uuid" import { Uuid }
 ```
 
 ## Functions
 
-### uuidV4
+### Uuid.v4
 
 ```milo
-fn uuidV4(): string
+fn Uuid.v4(): string
 ```
 
 Generates a random UUID v4 string (e.g. `"550e8400-e29b-41d4-a716-446655440000"`).

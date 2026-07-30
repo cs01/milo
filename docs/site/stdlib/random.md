@@ -3,71 +3,71 @@
 Random number generation.
 
 ```milo
-from "std/random" import { randInt, randRange, randFloat, randBool, shuffleI64 }
+from "std/random" import { Random }
 ```
 
 ## Functions
 
-### randU32
+### Random.u32
 
 ```milo
-fn randU32(): u32
+fn Random.u32(): u32
 ```
 
 Returns a random 32-bit unsigned integer.
 
-### randInt
+### Random.int
 
 ```milo
-fn randInt(max: i64): i64
+fn Random.int(max: i64): i64
 ```
 
 Returns a random integer in `[0, max)`.
 
-### randRange
+### Random.range
 
 ```milo
-fn randRange(min: i64, max: i64): i64
+fn Random.range(min: i64, max: i64): i64
 ```
 
 Returns a random integer in `[min, max)`.
 
-### randFloat
+### Random.float
 
 ```milo
-fn randFloat(): f64
+fn Random.float(): f64
 ```
 
 Returns a random float in `[0.0, 1.0)`.
 
-### randFloatRange
+### Random.floatRange
 
 ```milo
-fn randFloatRange(min: f64, max: f64): f64
+fn Random.floatRange(min: f64, max: f64): f64
 ```
 
 Returns a random float in `[min, max)`.
 
-### randBool
+### Random.bool
 
 ```milo
-fn randBool(): bool
+fn Random.bool(): bool
 ```
 
 Returns `true` or `false` with equal probability.
 
-### shuffleI64
+### Random.shuffleI64
 
 ```milo
-fn shuffleI64(v: &mut Vec<i64>, len: i64)
+fn Random.shuffleI64(v: &mut Vec<i64>, len: i64)
 ```
 
 Shuffles the first `len` elements of a vector in-place.
 
-### randBytes
+### Random.bytes
 
 ```milo
-fn randBytes(buf: *u8, len: i64)
+fn Random.bytes(buf: *u8, len: i64)
 ```
 
 Fills a buffer with `len` random bytes.

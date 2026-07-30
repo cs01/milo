@@ -3,7 +3,7 @@
 Zero-copy JSON parser with typed accessors.
 
 ```milo
-from "std/json" import { Json, jsonParse }
+from "std/json" import { Json }
 ```
 
 ## Types
@@ -162,10 +162,10 @@ List all keys of an object.
 
 ## Functions
 
-### jsonParse
+### Json.parse
 
 ```milo
-fn jsonParse(s: string): Result<Json>
+fn Json.parse(s: string): Result<Json>
 ```
 
 Parse a JSON string. The returned `Json` borrows the input.
@@ -173,11 +173,11 @@ Parse a JSON string. The returned `Json` borrows the input.
 ## Example
 
 ```milo
-from "std/json" import { Json, jsonParse }
+from "std/json" import { Json }
 from "std/io" import { writeStdout }
 
 fn main(): i32 {
-    let data = jsonParse("{\"name\": \"milo\", \"version\": 1, \"tags\": [\"fast\", \"safe\"]}")!
+    let data = Json.parse("{\"name\": \"milo\", \"version\": 1, \"tags\": [\"fast\", \"safe\"]}")!
 
     match data.str("name") {
         Some(name) => writeStdout(&name),

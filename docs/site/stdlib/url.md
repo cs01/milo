@@ -3,7 +3,7 @@
 URL parsing and manipulation.
 
 ```milo
-from "std/url" import { Url, urlParse, urlQueryGet, urlString }
+from "std/url" import { Url }
 ```
 
 ## Types
@@ -26,10 +26,10 @@ A parsed URL with its components.
 
 ## Functions
 
-### urlParse
+### Url.parse
 
 ```milo
-fn urlParse(input: string): Result<Url>
+fn Url.parse(input: string): Result<Url>
 ```
 
 Parses a URL string into its components.
@@ -53,7 +53,7 @@ Reconstructs the URL as a string.
 ## Example
 
 ```milo
-let url = urlParse("https://example.com:8080/api?name=milo&v=1#top")!
+let url = Url.parse("https://example.com:8080/api?name=milo&v=1#top")!
 print(url.scheme)  // https
 print(url.host)    // example.com
 print(url.port)    // 8080

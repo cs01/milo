@@ -34,6 +34,14 @@ fn Toml.i64(self: &Toml, key: &string): Option<i64>
 
 _Undocumented._
 
+### `Toml.parse`
+
+```milo
+fn Toml.parse(s: string): Result<Toml>
+```
+
+Parse a TOML document. Access values via t.str/i64/f64/bool/table.
+
 ### `Toml.str`
 
 ```milo
@@ -61,7 +69,7 @@ _Undocumented._
 ### `tomlGetBool`
 
 ```milo
-pub fn tomlGetBool(s: &string, start: i64, end: i64, key: &string): Option<bool>
+fn tomlGetBool(s: &string, start: i64, end: i64, key: &string): Option<bool>
 ```
 
 _Undocumented._
@@ -69,7 +77,7 @@ _Undocumented._
 ### `tomlGetF64`
 
 ```milo
-pub fn tomlGetF64(s: &string, start: i64, end: i64, key: &string): Option<f64>
+fn tomlGetF64(s: &string, start: i64, end: i64, key: &string): Option<f64>
 ```
 
 _Undocumented._
@@ -77,7 +85,7 @@ _Undocumented._
 ### `tomlGetI64`
 
 ```milo
-pub fn tomlGetI64(s: &string, start: i64, end: i64, key: &string): Option<i64>
+fn tomlGetI64(s: &string, start: i64, end: i64, key: &string): Option<i64>
 ```
 
 _Undocumented._
@@ -85,7 +93,7 @@ _Undocumented._
 ### `tomlGetStr`
 
 ```milo
-pub fn tomlGetStr(s: &string, start: i64, end: i64, key: &string): Option<string>
+fn tomlGetStr(s: &string, start: i64, end: i64, key: &string): Option<string>
 ```
 
 _Undocumented._
@@ -93,7 +101,7 @@ _Undocumented._
 ### `tomlGetTable`
 
 ```milo
-pub fn tomlGetTable(s: &string, start: i64, end: i64, key: &string): Option<Toml>
+fn tomlGetTable(s: &string, start: i64, end: i64, key: &string): Option<Toml>
 ```
 
 _Undocumented._
@@ -109,7 +117,7 @@ _Undocumented._
 ### `tomlParse`
 
 ```milo
-pub fn tomlParse(s: string): Result<Toml>
+fn tomlParse(s: string): Result<Toml>
 ```
 
 _Undocumented._

@@ -5,15 +5,39 @@
 ### `deflate`
 
 ```milo
-pub fn deflate(src: &string): string
+fn deflate(src: &string): string
 ```
 
 Compress raw bytes to a single fixed-Huffman DEFLATE stream.
 
+### `Deflate.gzip`
+
+```milo
+fn Deflate.gzip(src: &string): string
+```
+
+_Undocumented._
+
+### `Deflate.raw`
+
+```milo
+fn Deflate.raw(src: &string): string
+```
+
+_Undocumented._
+
+### `Deflate.zlib`
+
+```milo
+fn Deflate.zlib(src: &string): string
+```
+
+_Undocumented._
+
 ### `distBase`
 
 ```milo
-pub fn distBase(): [i64; 30]
+fn distBase(): [i64; 30]
 ```
 
 _Undocumented._
@@ -21,7 +45,7 @@ _Undocumented._
 ### `distExtra`
 
 ```milo
-pub fn distExtra(): [i64; 30]
+fn distExtra(): [i64; 30]
 ```
 
 _Undocumented._
@@ -53,7 +77,7 @@ Pad the final partial byte with zero bits and flush it.
 ### `gzipCompress`
 
 ```milo
-pub fn gzipCompress(src: &string): string
+fn gzipCompress(src: &string): string
 ```
 
 Compress to a gzip stream (RFC 1952): fixed 10-byte header, DEFLATE body,
@@ -70,7 +94,7 @@ Hash of the 3 bytes at position p (p+2 must be in range).
 ### `lenBase`
 
 ```milo
-pub fn lenBase(): [i64; 29]
+fn lenBase(): [i64; 29]
 ```
 
 _Undocumented._
@@ -78,7 +102,7 @@ _Undocumented._
 ### `lenExtra`
 
 ```milo
-pub fn lenExtra(): [i64; 29]
+fn lenExtra(): [i64; 29]
 ```
 
 _Undocumented._
@@ -134,7 +158,7 @@ MSB-first: bit (n-1) of code first. Used for Huffman codes (RFC 1951 §3.1.1).
 ### `zlibCompress`
 
 ```milo
-pub fn zlibCompress(src: &string): string
+fn zlibCompress(src: &string): string
 ```
 
 Compress to a zlib stream (RFC 1950): 2-byte header, DEFLATE body, Adler-32.

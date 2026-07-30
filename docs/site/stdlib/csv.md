@@ -3,21 +3,21 @@
 CSV parsing and stringification.
 
 ```milo
-from "std/csv" import { csvParse, csvStringify }
+from "std/csv" import { Csv }
 ```
 
 ## Functions
 
-### csvParse
+### Csv.parse
 
 ```milo
-fn csvParse(input: &string): Vec<Vec<string>>
+fn Csv.parse(input: &string): Vec<Vec<string>>
 ```
 
 Parses a CSV string into a 2D vector of strings (rows of fields).
 
 ```milo
-let rows = csvParse(&data)
+let rows = Csv.parse(&data)
 for row in rows {
     let name = row[0]
     let age = row[1]
@@ -25,10 +25,10 @@ for row in rows {
 }
 ```
 
-### csvStringify
+### Csv.stringify
 
 ```milo
-fn csvStringify(rows: &Vec<Vec<string>>): string
+fn Csv.stringify(rows: &Vec<Vec<string>>): string
 ```
 
 Serializes a 2D vector of strings back into CSV format.

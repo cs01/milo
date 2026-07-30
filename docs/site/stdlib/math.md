@@ -3,7 +3,7 @@
 Mathematical functions and constants.
 
 ```milo
-from "std/math" import { mathSqrt, mathPow, mathPi, minI64, maxI64, clampF64 }
+from "std/math" import { Math }
 ```
 
 ## Functions
@@ -11,21 +11,21 @@ from "std/math" import { mathSqrt, mathPow, mathPi, minI64, maxI64, clampF64 }
 ### Floating-Point Math
 
 ```milo
-fn mathSqrt(x: f64): f64
-fn mathPow(base: f64, exp: f64): f64
-fn mathSin(x: f64): f64
-fn mathCos(x: f64): f64
-fn mathTan(x: f64): f64
-fn mathAtan2(y: f64, x: f64): f64
-fn mathFloor(x: f64): f64
-fn mathCeil(x: f64): f64
-fn mathRound(x: f64): f64
-fn mathAbs(x: f64): f64
-fn mathMod(x: f64, y: f64): f64
-fn mathLog(x: f64): f64
-fn mathLog2(x: f64): f64
-fn mathLog10(x: f64): f64
-fn mathExp(x: f64): f64
+fn Math.sqrt(x: f64): f64
+fn Math.pow(base: f64, exp: f64): f64
+fn Math.sin(x: f64): f64
+fn Math.cos(x: f64): f64
+fn Math.tan(x: f64): f64
+fn Math.atan2(y: f64, x: f64): f64
+fn Math.floor(x: f64): f64
+fn Math.ceil(x: f64): f64
+fn Math.round(x: f64): f64
+fn Math.abs(x: f64): f64
+fn Math.mod(x: f64, y: f64): f64
+fn Math.log(x: f64): f64
+fn Math.log2(x: f64): f64
+fn Math.log10(x: f64): f64
+fn Math.exp(x: f64): f64
 ```
 
 ### Integer Math

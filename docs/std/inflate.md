@@ -48,7 +48,7 @@ Returns 0 for a complete code, >0 for an incomplete (under-subscribed) code,
 ### `distBase`
 
 ```milo
-pub fn distBase(): [i64; 30]
+fn distBase(): [i64; 30]
 ```
 
 _Undocumented._
@@ -56,7 +56,7 @@ _Undocumented._
 ### `distExtra`
 
 ```milo
-pub fn distExtra(): [i64; 30]
+fn distExtra(): [i64; 30]
 ```
 
 _Undocumented._
@@ -80,7 +80,7 @@ Fixed Huffman block (RFC 1951 §3.2.6): lengths are defined by the spec.
 ### `gzipDecompress`
 
 ```milo
-pub fn gzipDecompress(src: &string): Result<string, string>
+fn gzipDecompress(src: &string): Result<string, string>
 ```
 
 Inflate a gzip stream (RFC 1952): 10-byte header, optional extra/name/comment/
@@ -89,15 +89,39 @@ hcrc fields, DEFLATE body, then CRC-32 + ISIZE trailer. Both are verified.
 ### `inflate`
 
 ```milo
-pub fn inflate(src: &string): Result<string, string>
+fn inflate(src: &string): Result<string, string>
 ```
 
 Inflate a raw DEFLATE stream (no gzip/zlib wrapper).
 
+### `Inflate.gzip`
+
+```milo
+fn Inflate.gzip(src: &string): Result<string, string>
+```
+
+_Undocumented._
+
+### `Inflate.raw`
+
+```milo
+fn Inflate.raw(src: &string): Result<string, string>
+```
+
+_Undocumented._
+
+### `Inflate.zlib`
+
+```milo
+fn Inflate.zlib(src: &string): Result<string, string>
+```
+
+_Undocumented._
+
 ### `le32`
 
 ```milo
-pub fn le32(src: &string, p: i64): i64
+fn le32(src: &string, p: i64): i64
 ```
 
 Little-endian 32-bit read at offset `p`, as a value in [0, 2^32).
@@ -113,7 +137,7 @@ zlib's Adler trailer is big-endian, unlike gzip's little-endian fields.
 ### `lenBase`
 
 ```milo
-pub fn lenBase(): [i64; 29]
+fn lenBase(): [i64; 29]
 ```
 
 Length base + extra-bit tables for length symbols 257..285.
@@ -121,7 +145,7 @@ Length base + extra-bit tables for length symbols 257..285.
 ### `lenExtra`
 
 ```milo
-pub fn lenExtra(): [i64; 29]
+fn lenExtra(): [i64; 29]
 ```
 
 _Undocumented._
@@ -145,7 +169,7 @@ _Undocumented._
 ### `zlibDecompress`
 
 ```milo
-pub fn zlibDecompress(src: &string): Result<string, string>
+fn zlibDecompress(src: &string): Result<string, string>
 ```
 
 Inflate a zlib stream (RFC 1950): 2-byte header, DEFLATE body, Adler-32 trailer.

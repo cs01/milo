@@ -2,65 +2,65 @@
 
 ## std/datetime
 
-### `dateTimeFormat`
+### `DateTime.format`
 
 ```milo
-pub fn dateTimeFormat(dt: &DateTime): string
+fn DateTime.format(self: &DateTime): string
+```
+
+ISO 8601: 2024-03-15T14:30:00
+
+### `DateTime.formatDate`
+
+```milo
+fn DateTime.formatDate(self: &DateTime): string
 ```
 
 _Undocumented._
 
-### `dateTimeFormatDate`
+### `DateTime.formatTime`
 
 ```milo
-pub fn dateTimeFormatDate(dt: &DateTime): string
+fn DateTime.formatTime(self: &DateTime): string
 ```
 
 _Undocumented._
 
-### `dateTimeFormatTime`
+### `DateTime.fromEpoch`
 
 ```milo
-pub fn dateTimeFormatTime(dt: &DateTime): string
+fn DateTime.fromEpoch(epochSec: i64): DateTime
 ```
 
-_Undocumented._
+Components in UTC for the given epoch seconds.
 
-### `dateTimeFromEpoch`
+### `DateTime.fromEpochLocal`
 
 ```milo
-pub fn dateTimeFromEpoch(epochSec: i64): DateTime
+fn DateTime.fromEpochLocal(epochSec: i64): DateTime
 ```
 
-_Undocumented._
-
-### `dateTimeFromEpochLocal`
-
-```milo
-pub fn dateTimeFromEpochLocal(epochSec: i64): DateTime
-```
-
-Same components as dateTimeFromEpoch but in the host timezone (TZ env /
+Same components as fromEpoch but in the host timezone (TZ env /
 /etc/localtime). struct tm leads with nine consecutive ints
 (tm_sec, tm_min, tm_hour, tm_mday, tm_mon, tm_year, tm_wday, tm_yday,
 tm_isdst) on both macOS and glibc — only those leading fields are read, so
 the trailing platform differences (tm_gmtoff/tm_zone) don't matter.
 
-### `dateTimeLocalNow`
+### `DateTime.localNow`
 
 ```milo
-pub fn dateTimeLocalNow(): DateTime
+fn DateTime.localNow(): DateTime
 ```
 
-_Undocumented._
+Current time in the host timezone.
 
-### `dateTimeNow`
+### `DateTime.now`
 
 ```milo
-pub fn dateTimeNow(): DateTime
+fn DateTime.now(): DateTime
 ```
 
-_Undocumented._
+Current UTC time.
 
 ### `monthName`
 

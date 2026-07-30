@@ -1,5 +1,5 @@
 // std/datetime — date/time components and formatting from epoch seconds
-// (UTC by default; dateTimeFromEpochLocal/dateTimeLocalNow apply the host TZ)
+// (UTC by default; DateTime.fromEpochLocal / DateTime.localNow apply the host TZ)
 
 from "std/time" import {
     epochSecs, since
@@ -19,70 +19,105 @@ pub struct DateTime {
     weekday: i32,
 }
 
-pub fn dateTimeFromEpoch(epochSec: i64): DateTime {
-    // days since 1970-01-01
-    var secs = epochSec
-    let totalDays = secs / 86400
-    let daySeconds = secs - totalDays * 86400
+impl DateTime {
+    // Components in UTC for the given epoch seconds.
+    fn fromEpoch(epochSec: i64): DateTime {
+        // days since 1970-01-01
+        var secs = epochSec
+        let totalDays = secs / 86400
+        let daySeconds = secs - totalDays * 86400
 
-    let hour = (daySeconds / 3600) as i32
-    let minute = ((daySeconds - (hour as i64) * 3600) / 60) as i32
-    let second = (daySeconds - (hour as i64) * 3600 - (minute as i64) * 60) as i32
+        let hour = (daySeconds / 3600) as i32
+        let minute = ((daySeconds - (hour as i64) * 3600) / 60) as i32
+        let second = (daySeconds - (hour as i64) * 3600 - (minute as i64) * 60) as i32
 
-    // weekday: 1970-01-01 was Thursday (4)
-    var wd = ((totalDays + 4) % 7) as i32
-    if wd < 0 {
-        wd = wd + 7
+        // weekday: 1970-01-01 was Thursday (4)
+        var wd = ((totalDays + 4) % 7) as i32
+        if wd < 0 {
+            wd = wd + 7
+        }
+
+        // civil date from day count (Hinnant algorithm)
+        var z = totalDays + 719468
+        var eraInput = z
+        if z < 0 {
+            eraInput = z - 146096
+        }
+        let era = eraInput / 146097
+        let doe = z - era * 146097
+        let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365
+        let y = yoe + era * 400
+        let doy = doe - (365 * yoe + yoe / 4 - yoe / 100)
+        let mp = (5 * doy + 2) / 153
+        let d = doy - (153 * mp + 2) / 5 + 1
+        var m = mp + 3
+        if mp >= 10 {
+            m = mp - 9
+        }
+        var yr = y
+        if m <= 2 {
+            yr = y + 1
+        }
+
+        return DateTime {
+            year: yr as i32, month: m as i32, day: d as i32,
+            hour: hour, minute: minute, second: second,
+            weekday: wd,
+        }
     }
 
-    // civil date from day count (Hinnant algorithm)
-    var z = totalDays + 719468
-    var eraInput = z
-    if z < 0 {
-        eraInput = z - 146096
-    }
-    let era = eraInput / 146097
-    let doe = z - era * 146097
-    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365
-    let y = yoe + era * 400
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100)
-    let mp = (5 * doy + 2) / 153
-    let d = doy - (153 * mp + 2) / 5 + 1
-    var m = mp + 3
-    if mp >= 10 {
-        m = mp - 9
-    }
-    var yr = y
-    if m <= 2 {
-        yr = y + 1
+    // Current UTC time.
+    fn now(): DateTime {
+        return DateTime.fromEpoch(epochSecs())
     }
 
-    return DateTime {
-        year: yr as i32, month: m as i32, day: d as i32,
-        hour: hour, minute: minute, second: second,
-        weekday: wd,
+    // Same components as fromEpoch but in the host timezone (TZ env /
+    // /etc/localtime). struct tm leads with nine consecutive ints
+    // (tm_sec, tm_min, tm_hour, tm_mday, tm_mon, tm_year, tm_wday, tm_yday,
+    // tm_isdst) on both macOS and glibc — only those leading fields are read, so
+    // the trailing platform differences (tm_gmtoff/tm_zone) don't matter.
+    fn fromEpochLocal(epochSec: i64): DateTime {
+        // POSIX doesn't require localtime_r to imply tzset(); call it so TZ
+        // changes (and the first call) always take effect.
+        tzset()
+        var t: [i64; 1] = [0; 1]
+        t[0] = epochSec
+        var tm: [u8; 128] = [0; 128]
+        unsafe {
+            let _r = localtime_r(t as *u8, tm as *u8)
+        }
+        return DateTime {
+            year: tmI32(tm, 20) + 1900,
+            month: tmI32(tm, 16) + 1,
+            day: tmI32(tm, 12),
+            hour: tmI32(tm, 8),
+            minute: tmI32(tm, 4),
+            second: tmI32(tm, 0),
+            weekday: tmI32(tm, 24),
+        }
     }
-}
 
-pub fn dateTimeNow(): DateTime {
-    return dateTimeFromEpoch(epochSecs())
-}
+    // Current time in the host timezone.
+    fn localNow(): DateTime {
+        return DateTime.fromEpochLocal(epochSecs())
+    }
 
-pub fn dateTimeFormat(dt: &DateTime): string {
     // ISO 8601: 2024-03-15T14:30:00
-    var result: string = ""
-    result = result + padI32(dt.year, 4) + "-" + padI32(dt.month, 2) + "-" + padI32(dt.day, 2)
-    result = result + "T"
-    result = result + padI32(dt.hour, 2) + ":" + padI32(dt.minute, 2) + ":" + padI32(dt.second, 2)
-    return result
-}
+    fn format(self: &DateTime): string {
+        var result: string = ""
+        result = result + padI32(self.year, 4) + "-" + padI32(self.month, 2) + "-" + padI32(self.day, 2)
+        result = result + "T"
+        result = result + padI32(self.hour, 2) + ":" + padI32(self.minute, 2) + ":" + padI32(self.second, 2)
+        return result
+    }
 
-pub fn dateTimeFormatDate(dt: &DateTime): string {
-    return padI32(dt.year, 4) + "-" + padI32(dt.month, 2) + "-" + padI32(dt.day, 2)
-}
+    fn formatDate(self: &DateTime): string {
+        return padI32(self.year, 4) + "-" + padI32(self.month, 2) + "-" + padI32(self.day, 2)
+    }
 
-pub fn dateTimeFormatTime(dt: &DateTime): string {
-    return padI32(dt.hour, 2) + ":" + padI32(dt.minute, 2) + ":" + padI32(dt.second, 2)
+    fn formatTime(self: &DateTime): string {
+        return padI32(self.hour, 2) + ":" + padI32(self.minute, 2) + ":" + padI32(self.second, 2)
+    }
 }
 
 pub fn weekdayName(wd: i32): string {
@@ -158,8 +193,6 @@ fn padI32(val: i32, width: i32): string {
     return s
 }
 
-// ── local time (host timezone) ──
-
 // Little-endian i32 read out of the struct tm buffer.
 fn tmI32(buf: &[u8; 128], off: i64): i32 {
     var v: i64 = 0
@@ -169,34 +202,4 @@ fn tmI32(buf: &[u8; 128], off: i64): i32 {
         i = i - 1
     }
     return v as i32
-}
-
-// Same components as dateTimeFromEpoch but in the host timezone (TZ env /
-// /etc/localtime). struct tm leads with nine consecutive ints
-// (tm_sec, tm_min, tm_hour, tm_mday, tm_mon, tm_year, tm_wday, tm_yday,
-// tm_isdst) on both macOS and glibc — only those leading fields are read, so
-// the trailing platform differences (tm_gmtoff/tm_zone) don't matter.
-pub fn dateTimeFromEpochLocal(epochSec: i64): DateTime {
-    // POSIX doesn't require localtime_r to imply tzset(); call it so TZ
-    // changes (and the first call) always take effect.
-    tzset()
-    var t: [i64; 1] = [0; 1]
-    t[0] = epochSec
-    var tm: [u8; 128] = [0; 128]
-    unsafe {
-        let _r = localtime_r(t as *u8, tm as *u8)
-    }
-    return DateTime {
-        year: tmI32(tm, 20) + 1900,
-        month: tmI32(tm, 16) + 1,
-        day: tmI32(tm, 12),
-        hour: tmI32(tm, 8),
-        minute: tmI32(tm, 4),
-        second: tmI32(tm, 0),
-        weekday: tmI32(tm, 24),
-    }
-}
-
-pub fn dateTimeLocalNow(): DateTime {
-    return dateTimeFromEpochLocal(epochSecs())
 }

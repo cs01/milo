@@ -51,14 +51,16 @@ Two real gaps, in priority order:
    - **Drop × coroutine frames.** A `for x in c` frame holds values mid-iteration; early `break` must run pending drops for the partially-consumed container. Design scope-exit semantics with the coroutine lowering in view.
    - Edge to fix while here: a heap-field-less `Drop` struct can't be move-detected by the struct drop helper's null-sentinel (`codegen.ts:8890-8903`) — it leans wholly on the local flag.
 
-### Interior iteration — by-value first
-Non-escaping stack coroutine; frame provably non-escaping. **Yield by value first** (over `i64`/small PODs). Enough to answer Borretti's objection and derisks the coroutine lowering *alone* — do not chain the two hardest items. Must support user-defined iterators over custom containers. Upgrade to yield `&T` once views land.
+> **Test-first re-audit 2026-07-30.** This plan was written against a stale model of the compiler. Three rows below were mostly already shipped; the real work was smaller than written (a theme: Drop, newtypes, iteration all "mostly shipped, gaps smaller than planned"). Audit remaining rows by *testing first*, not designing.
 
-### Views (`&str`, `&[T]`)
-Same second-class rules as existing refs + hardcoded elision (return a view only when exactly one ref param to derive from — Rust's rule, zero syntax). Lower risk: mostly a checker extension. Kills transient clones and the yaml line-rewrite hack. Deletes residue #3's *transient* half; stored zero-copy stays offsets.
+### Interior iteration — MOSTLY SHIPPED (no coroutine needed)
+External iteration already works today: `for x in container` where the container has `next(&mut Self): Option<T>` (duck-typed on the method name, checker.ts ~2789). Concrete *and* generic containers verified. Zero-copy over custom containers works via **slice views** (below), not coroutines: a container returns a `&[T]` view of its store and the caller iterates it — Milo's answer to Borretti, no `yield` transform. Remaining: (a) a **formal `Iterator` trait** — small, do it for the *prover* (a nameable thing to specify contracts over "any iterator") + bounds; while formalizing, pin the laws duck-typing left open: `for` stops at first `None` and never calls `next` after `break`; post-`None` SHOULD be fused. (b) `yield`-style generators (the multi-week state-machine) are **backlogged** — the protocol already covers the by-value case; defer until a workload demands hand-writing state machines hurts. Fixed en route: a generic `Vec`-backed iterator double-freed its store (generic struct-lit skipped `tryMove`).
 
-### Newtypes (`struct NodeId(i64)`)
-Zero-cost wrapper. Cheapest item, biggest safety-per-line — bare-`i64` cross-pool indexing is the live hole. Gates SlotMap typed keys.
+### Views (`&str`, `&[T]`) — SHIPPED (core)
+`&str` slicing worked already. `&[T]` slices now work: whole-`Vec`→`&[T]` coercion, `v[a..b]` sub-view, `.len`, indexing, `for-in`, **and returning a `&[T]` view from a fn** (the zero-copy container idiom). Fixes: `genVecBoundsCheckedPtr` accepts slice types (be83f5e5); `&[T]` lowers to the `%Vec` value type, not opaque `ptr` (3f93eac5). Remaining: (a) passing a **slice rvalue** (`f(v[a..b])`) directly as an arg hangs — PRE-EXISTING, workaround = let-bind; root is auto-borrow taking the lvalue-address of an rvalue, when a slice arg should pass `%Vec` by value. (b) `&mut [T]` + `splitMut` (backlog T2 #9 — the parallel-over-one-array primitive).
+
+### Newtypes — SHIPPED (as structural derives, not a keyword)
+No new syntax: a **single-field named struct** is the newtype (`struct NodeId { idx: i64 }`). Cross-type safety, zero-cost layout (proven `ret`-only at -O2), and auto-`==` already worked. The real gap was **struct HashMap keys**: shipped structural hash + eq from one field recursion (coherence law `a==b ⟹ hash(a)==hash(b)` by construction; hashes NOT stable across versions/runs). `Ord` deliberately NOT auto-derived — ordering embeds an opinion (field rank); it's opt-in `@derive(Ord)` (future), `sortBy` is the better follow-up. Gates SlotMap typed keys. Nested-generic inference fix (`Vec<T>` field infers at construction) also lands here — gates `SlotMap<NodeId,T>` ergonomics.
 
 ## Tier 3 — stdlib doctrine
 

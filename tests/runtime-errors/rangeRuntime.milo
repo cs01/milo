@@ -1,0 +1,12 @@
+// A non-literal value out of a ranged param's bound traps at runtime (the check rides
+// the argument expression now, so it fires at call sites, not only at let/var).
+// @runtime-error: value out of range
+fn setPercent(p: i32(0..100)): void {
+    print(p)
+}
+
+fn main() {
+    var x: i32 = 50
+    x = x + 200 // 250 — not a literal at the call
+    setPercent(x)
+}

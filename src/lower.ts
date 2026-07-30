@@ -249,14 +249,14 @@ class LowerCtx {
         const value = this.lowerExpr(stmt.value);
         // Use auto-wrapped type (Option<T>) when value was wrapped, otherwise expression type
         const valType = value.type ?? this.typeOf(stmt.value) ?? { tag: "unknown" as const };
-        const rangeCheck = this.c.rangeCheckedExprs.get(stmt.value);
+        // Range checking now rides the value expression (see lowerExpr) so every position
+        // enforces it — no statement-attached rangeCheck needed.
         return {
           kind: "Let",
           name: stmt.name,
           type: valType,
           value,
           mutable: stmt.kind === "VarDecl",
-          ...(rangeCheck && { rangeCheck }),
           span: stmt.span,
         };
       }
@@ -495,6 +495,17 @@ class LowerCtx {
   }
 
   private lowerExpr(expr: Expr): HIRExpr {
+    const lowered = this.lowerExprInner(expr);
+    // A value flowing into a ranged-int target (`i32(0..100)`) that the checker couldn't
+    // prove in-range carries a runtime range check. Wrapping the expression (not the
+    // statement) means every position — let/var, call arg, return, reassignment — enforces
+    // it uniformly.
+    const rc = this.c.rangeCheckedExprs.get(expr);
+    if (rc) return { kind: "RangeCheck", value: lowered, min: rc.min, max: rc.max, typeName: rc.typeName, type: lowered.type, span: expr.span };
+    return lowered;
+  }
+
+  private lowerExprInner(expr: Expr): HIRExpr {
     // `old(e)` is only reachable while lowering an `ensures` (the checker rejects it
     // anywhere else). It becomes a read of an entry-time snapshot local; lowerFn emits the
     // matching `let` and codegen materializes it only in a contract-checking build.

@@ -1577,7 +1577,9 @@ export class Codegen {
         const storedTypeKind = isRefLocal ? (stmt.type as Extract<TypeKind, {tag: "ref"}>).inner : stmt.type;
         const declTy = this.llvmType(storedTypeKind);
         const addrName = this.locals.has(stmt.name) ? `%${stmt.name}.${this.scopeCounter++}.addr` : `%${stmt.name}.addr`;
-        const bigAgg = !isRefLocal && !stmt.rangeCheck && this.isBigAgg(declTy);
+        // A ranged int is never a big aggregate, so the range check (now on the value
+        // expression) doesn't interact with this path.
+        const bigAgg = !isRefLocal && this.isBigAgg(declTy);
         let val = "";
         let bigTmp: string | null = null;
         if (bigAgg) {
@@ -1628,10 +1630,6 @@ export class Codegen {
         else if (!bigAgg) lines.push(this.valStore(declTy, val, addrName));
         // Describe the value actually stored: for `&T` locals that's the inner value.
         this.dbgDeclare(lines, stmt.name, addrName, storedTypeKind, stmt.span?.line ?? 0, 0);
-        if (stmt.rangeCheck) {
-          const signed = stmt.type.tag === "int" && stmt.type.signed;
-          this.emitRangeCheck(lines, val, declTy, signed, stmt.rangeCheck.min, stmt.rangeCheck.max, stmt.span);
-        }
         // Locals that borrow from a ref are a shallow copy — data owned elsewhere.
         if (declDroppable) {
           lines.push(`  store i1 1, ptr ${declAliveFlag}`);
@@ -3482,6 +3480,13 @@ export class Codegen {
     const lt = this.llvmType(expr.type);
 
     switch (expr.kind) {
+      case "RangeCheck": {
+        const [vl, val, vt] = this.genExpr(expr.value);
+        lines.push(...vl);
+        const signed = expr.type.tag === "int" && expr.type.signed;
+        this.emitRangeCheck(lines, val, vt, signed, expr.min, expr.max, expr.span);
+        return [lines, val, vt];
+      }
       case "IntLit":
         return [lines, String(expr.value), lt];
       case "FloatLit": {

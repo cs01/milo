@@ -217,10 +217,11 @@ The result channel, so a Promise can be armed in a Select:
 This is the bridge from a Promise.blocking OS-thread result into an event-driven
 wait — previously the two tiers couldn't compose, and an event-driven `timeout`
 wanted exactly this. Await still owns the fetch: when the arm wins, `await()` does
-the recv and the destroy, so don't recv off this handle yourself.
+the recv, so don't recv off this handle yourself.
 
-Handing out the channel is safe because Channel<T> is a single *u8 and therefore an
-implicitly Copy handle — this is an alias, not a transfer of ownership.
+Returns a reference-counted clone that shares the underlying queue; the Select
+arms on its raw pointer. The clone frees itself when it drops — the channel is
+torn down once this clone and the Promise's own handle are both gone.
 
 ### `Promise.run`
 

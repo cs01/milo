@@ -26,10 +26,11 @@ from "std/time" import {
 
 pub fn main(): i32 {
     let ch = Channel<i64>.new(1)!
+    let chSend = ch.clone()
 
     Task.spawn(move(): void => {
         sleepMs(30)
-        let _ = ch.send(99)
+        let _ = chSend.send(99)
     }
     )
 

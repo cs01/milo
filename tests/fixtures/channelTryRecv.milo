@@ -39,6 +39,5 @@ pub fn main(): i32 {
     // len after drain
     print(ch.len())
 
-    ch.destroy()
     return 0
 }

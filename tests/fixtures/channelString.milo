@@ -12,10 +12,11 @@ from "std/sync" import {
 pub fn main(): i32 {
     let ch = Channel<string>.new(8)!
 
+    let chW = ch.clone()
     let t = Promise<i64>.blocking(move(): i64 => {
-        ch.send("hello")!
-        ch.send("world")!
-        ch.send("")!
+        chW.send("hello")!
+        chW.send("world")!
+        chW.send("")!
         return 0
     }
     )
@@ -29,7 +30,6 @@ pub fn main(): i32 {
     }
 
     t.await()!
-    ch.destroy()
     print("done")
     return 0
 }

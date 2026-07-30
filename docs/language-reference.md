@@ -2317,18 +2317,19 @@ Awaiting inside a green task is the normal case and keeps the scheduler running.
 
 Bounded FIFO channels for streaming values between threads. Use channels when a producer sends many values over time — for one-shot results, prefer Promise.
 
-Channel is a handle type — safe to capture in move closures without `unsafe`.
+Channel is a reference-counted handle — `.clone()` to give another owner (a worker) its own handle; the queue frees itself when the last owner drops. Safe to capture in move closures without `unsafe`.
 
 ```milo
 from "std/runtime" import { Promise }
 from "std/sync" import { Channel }
 
 var ch = Channel<i64>.new(8)!
+let chW = ch.clone()              // the worker's owning handle
 
 let producer = Promise<i64>.blocking(move (): i64 => {
-    ch.send(10)!
-    ch.send(20)!
-    ch.close()
+    chW.send(10)!
+    chW.send(20)!
+    chW.close()
     return 0
 })
 
@@ -2336,7 +2337,7 @@ for val in ch {   // main consumes as the worker produces
     print(val)
 }
 producer.await()!
-ch.destroy()
+// no destroy: ch and chW free the queue when the last of them drops
 ```
 
 Here the producer is a `Promise.blocking` worker so it runs while `main` consumes. Between two green tasks the same channel works with no thread — but a green producer only runs when the scheduler is driven, so don't block `main` on a channel that only a green task fills (await inside a task, or drive with `schedulerRunToCompletion`).
@@ -2389,7 +2390,7 @@ All atomic operations use sequential consistency (seq_cst). `AtomicI64` and `Ato
 2. **Call `Task.join()` immediately after `spawn`.** The registration must land before the task can complete; joining after you've yielded or blocked elsewhere is a lost wakeup.
 3. **The green scheduler is single-threaded and cooperative.** A task that spins on CPU or calls blocking FFI starves every other task — nothing preempts it. Move that work to `Promise.blocking`; long compute loops that must stay on a task should `schedulerYield()` periodically.
 4. **`Promise.blocking` is the only OS thread.** Its closure runs in parallel and its captures must be `Send`; a plain `Promise`/`Task` closure stays on the scheduler and has no such requirement. Use `blocking` only for CPU-bound work or blocking FFI — ordinary I/O already yields on a green task.
-5. **`WaitGroup` and atomics are reference-counted handles — `.clone()` to share, no manual free.** They are move-only owners; cloning gives another owner and the storage frees when the last owner drops (Arc-style). A worker task takes its own `.clone()`. (`Channel` still uses an explicit `.destroy()` after every user is done; `Promise` frees itself on `await`.)
+5. **`Channel`, `WaitGroup`, and atomics are reference-counted handles — `.clone()` to share, no manual free.** They are move-only owners; cloning gives another owner and the storage frees when the last owner drops (Arc-style). A worker task takes its own `.clone()`. (`Promise` also frees itself on `await` — nothing to clone or destroy.)
 6. **Channels must be `close()`d** or the consumer's `for val in ch` never ends. `send` on a closed channel returns `Result.Err`, not a panic. Bounded `send` blocking when full is backpressure, not a bug — poll with `trySend`/`tryRecv`.
 7. **Move closures capture copies.** Mutating a captured `var` inside a task or worker is invisible outside. Communicate results through a `Channel`/`Promise`, or share through an atomic — never through captured locals.
 
@@ -2410,7 +2411,7 @@ All atomic operations use sequential consistency (seq_cst). `AtomicI64` and `Ato
 | `ch.tryRecv()` | Non-blocking receive, returns `Option<T>` |
 | `ch.close()` | Signal no more values |
 | `ch.len()` | Current items in channel |
-| `ch.destroy()` | Free channel resources |
+| `ch.clone()` | Owning handle to share with a task (frees at last drop) |
 | `WaitGroup.new()` | Create a wait group |
 | `wg.add(n)` / `wg.done()` / `wg.wait()` | Track and await a fleet of tasks |
 | `wg.clone()` | Owning handle to share with a task (frees at last drop) |

@@ -14,8 +14,9 @@ pub fn main(): i32 {
     var i: i64 = 0
     while i < 4 {
         let val = (i + 1) * 10
+        let chW = ch.clone()
         let t = Promise<i64>.blocking(move(): i64 => {
-            ch.send(val)!
+            chW.send(val)!
             return 0
         }
         )
@@ -37,7 +38,6 @@ pub fn main(): i32 {
         i = i + 1
     }
 
-    ch.destroy()
     print("sum ", sum)
     return 0
 }

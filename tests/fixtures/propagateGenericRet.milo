@@ -25,6 +25,5 @@ pub fn main(): i32 {
             print("err")
         }
     }
-    ch.destroy()
     return 0
 }

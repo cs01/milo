@@ -14,6 +14,7 @@ pub struct Worker {
 
 pub fn main(): i32 {
     let ch = Channel<string>.new(8)!
+    let chMain = ch.clone()
     let w = Worker {
         ch: ch
     }
@@ -24,10 +25,9 @@ pub fn main(): i32 {
     }
     )
 
-    let msg = w.ch.recv()!
+    let msg = chMain.recv()!
     print(msg)
     t.await()!
-    w.ch.destroy()
     print("done")
     return 0
 }

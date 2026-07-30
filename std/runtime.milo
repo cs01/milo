@@ -536,19 +536,21 @@ impl Promise<T> {
     // This is the bridge from a Promise.blocking OS-thread result into an event-driven
     // wait — previously the two tiers couldn't compose, and an event-driven `timeout`
     // wanted exactly this. Await still owns the fetch: when the arm wins, `await()` does
-    // the recv and the destroy, so don't recv off this handle yourself.
+    // the recv, so don't recv off this handle yourself.
     //
-    // Handing out the channel is safe because Channel<T> is a single *u8 and therefore an
-    // implicitly Copy handle — this is an alias, not a transfer of ownership.
+    // Returns a reference-counted clone that shares the underlying queue; the Select
+    // arms on its raw pointer. The clone frees itself when it drops — the channel is
+    // torn down once this clone and the Promise's own handle are both gone.
     fn channel(self: &Self): Channel<T> {
-        return self._ch
+        return self._ch.clone()
     }
 
     fn run(f: () => T): Promise<T> {
         let ch = Channel<T>.new(1)!
+        let chSend = ch.clone() // worker's owning handle
         Task.spawn(move(): void => {
             let result: T = f()
-            ch.send(result)!
+            chSend.send(result)!
         }
         )
         return Promise {
@@ -564,9 +566,10 @@ impl Promise<T> {
     // pushing several Promise.blocking handles into Promise.all.
     fn blocking(f: () => T): Promise<T> {
         let ch = Channel<T>.new(1)!
+        let chSend = ch.clone() // worker thread's owning handle
         spawnOsThreadDetached(move(): void => {
             let result: T = f()
-            ch.send(result)!
+            chSend.send(result)!
         }
         )
         return Promise {
@@ -581,7 +584,6 @@ impl Promise<T> {
         // channel's cross-thread unpark path.
         if schedulerCurrent() as i64 != 0 {
             let val = self._ch.recv()?
-            self._ch.destroy()
             return Result.Ok(val)
         }
         // main thread, foreign-thread result: block on the channel condvar,
@@ -589,7 +591,6 @@ impl Promise<T> {
         // (the worker is not a green task) and a -1 poll could stall.
         if self._blocking {
             let val = self._ch.recv()?
-            self._ch.destroy()
             return Result.Ok(val)
         }
         // main thread, green-task result: drive the scheduler, blocking the poll
@@ -598,7 +599,6 @@ impl Promise<T> {
             let maybe = self._ch.tryRecv()
             match maybe {
                 Option.Some(val) => {
-                    self._ch.destroy()
                     return Result.Ok(val)
                 }
                 Option.None => {
@@ -617,13 +617,14 @@ impl Promise<T> {
 // standalone generic functions to avoid recursive struct monomorphization
 pub fn promiseAll<T>(promises: Vec<Promise<T>>): Promise<Vec<T>> {
     let ch = Channel<Vec<T>>.new(1)!
+    let chW = ch.clone()
     Task.spawn(move(): void => {
         var results: Vec<T> = Vec.new()
         for i in 0..promises.len {
             let val = promises[i].await()!
             results.push(val)
         }
-        ch.send(results)!
+        chW.send(results)!
     }
     )
     return Promise<Vec<T>>._fromChannel(ch)
@@ -631,6 +632,7 @@ pub fn promiseAll<T>(promises: Vec<Promise<T>>): Promise<Vec<T>> {
 
 pub fn promiseRace<T>(promises: Vec<Promise<T>>): Promise<T> {
     let ch = Channel<T>.new(1)!
+    let chW = ch.clone()
     Task.spawn(move(): void => {
         while true {
             var i: i64 = 0
@@ -638,10 +640,9 @@ pub fn promiseRace<T>(promises: Vec<Promise<T>>): Promise<T> {
                 let maybe = promises[i]._ch.tryRecv()
                 match maybe {
                     Option.Some(val) => {
-                        for j in 0..promises.len {
-                            promises[j]._ch.destroy()
-                        }
-                        ch.send(val)!
+                        // the remaining promises' channels are torn down when `promises`
+                        // (moved into this task) drops at return.
+                        chW.send(val)!
                         return
                     }
                     Option.None => {

@@ -14,6 +14,7 @@ from "std/sync" import {
 
 pub fn main(): i32 {
     var ch = Channel<i64>.new(2)!
+    let chProd = ch.clone()
 
     Task.spawn(move(): void => {
         for v in ch {
@@ -24,10 +25,10 @@ pub fn main(): i32 {
     )
 
     Task.spawn(move(): void => {
-        ch.send(1)!
-        ch.send(2)!
-        ch.send(3)!
-        ch.close()
+        chProd.send(1)!
+        chProd.send(2)!
+        chProd.send(3)!
+        chProd.close()
     }
     )
 

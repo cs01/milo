@@ -15,6 +15,7 @@ from "std/select" import {
 
 pub fn raceOnce(withSend: bool): void {
     let ch = Channel<i64>.new(1)!
+    let chSend = ch.clone()
     Task.spawn(move(): void => {
         var sel = Select.new()
         selectRecv(sel, ch)
@@ -35,7 +36,7 @@ pub fn raceOnce(withSend: bool): void {
     )
     if withSend {
         Task.spawn(move(): void => {
-            ch.send(42)!
+            chSend.send(42)!
         }
         )
     }

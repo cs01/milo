@@ -75,6 +75,7 @@ pub fn writeStdout(s: &string): void {
 // forever), and for a TLS source would read freed SSL state.
 pub fn fdChannel(fd: i32): Channel<string> {
     let ch = Channel<string>.new(256)!
+    let chPump = ch.clone() // pump task's owning handle; caller keeps `ch`
     setNonblocking(fd)
     Task.spawn(move(): void => {
         var buf: [u8; 4096] = [0; 4096]
@@ -92,11 +93,11 @@ pub fn fdChannel(fd: i32): Channel<string> {
                 data.push(buf[i])
             }
             // if-let, not .isErr(): keep std in milo-self's subset (no isErr builtin)
-            if let Result.Err(_) = ch.send(data) {
+            if let Result.Err(_) = chPump.send(data) {
                 break
             }
         }
-        ch.close()
+        chPump.close()
     }
     )
     return ch

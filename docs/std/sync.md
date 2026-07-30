@@ -99,6 +99,17 @@ fn AtomicI64.sub(self: &AtomicI64, val: i64): i64
 
 _Undocumented._
 
+### `Channel.clone`
+
+```milo
+fn Channel.clone(self: &Channel): Channel<T>
+```
+
+Share this channel with another owner (a spawned producer/consumer). Each clone
+must be dropped exactly once; the queue is torn down when the last owner drops.
+send/recv take &Self, so a handle only needs cloning when moved into a task while
+the parent still uses it.
+
 ### `Channel.close`
 
 ```milo
@@ -106,14 +117,6 @@ fn Channel.close(self: &Channel): void
 ```
 
 Signal no more values will be sent. Pending items are still delivered.
-
-### `Channel.destroy`
-
-```milo
-fn Channel.destroy(self: &Channel): void
-```
-
-_Undocumented._
 
 ### `Channel.len`
 
@@ -200,6 +203,14 @@ pub fn channelArmSend(ptr: *u8, node: *u8): bool
 Arm a Select send. Ready if the buffer has room or the channel is closed
 (a send on a closed channel returns Err rather than blocking).
 
+### `ChannelHandle.retain`
+
+```milo
+fn ChannelHandle.retain(self: &ChannelHandle): ChannelHandle
+```
+
+_Undocumented._
+
 ### `channelUnarmRecv`
 
 ```milo
@@ -247,6 +258,14 @@ _Undocumented._
 
 ```milo
 fn chWakeOneSend(inner: *ChannelInner): void
+```
+
+_Undocumented._
+
+### `Drop.drop`
+
+```milo
+fn Drop.drop(self: &mut Drop): void
 ```
 
 _Undocumented._

@@ -12,16 +12,18 @@ from "std/runtime" import {
 
 // ── Channel<T> ──
 // Bounded FIFO channel for safe message passing between threads.
-// Channel is a handle type — copying it shares the underlying queue.
+// Channel is a reference-counted handle — `.clone()` to share it with another owner
+// (a task/worker); the queue frees itself when the last owner drops. No manual destroy.
 //
 //   let ch = Channel<i64>.new(16)!
+//   let chW = ch.clone()
 //   let p = Promise<i64>.blocking(move (): i64 => {
-//       ch.send(42)!
+//       chW.send(42)!
 //       return 0
 //   })
 //   let val = ch.recv()!
 //   p.await()!
-//   ch.destroy()
+//   // ch (and chW, dropped by the worker) free the queue automatically
 pub struct ChannelInner {
     mtx: *u8,
     condNotEmpty: *u8,
@@ -36,6 +38,56 @@ pub struct ChannelInner {
     // stack: [0..8) task ptr, [8..16) next ptr. pthread waiters use the conds.
     recvWaitHead: *u8,
     sendWaitHead: *u8,
+    // inlined Arc-style refcount; the non-generic ChannelHandle owns it so a generic
+    // `impl Drop for Channel<T>` (unsupported: generic trait impls have no body yet)
+    // is not needed — Channel<T> drops transitively through its ChannelHandle field.
+    refcount: i64,
+}
+
+// Non-generic reference-counted owner of a ChannelInner. Channel<T> holds one of these
+// and inherits its Drop, so the refcount/free logic lives here once, free of T.
+pub struct ChannelHandle {
+    _ptr: *u8,
+}
+
+unsafe
+
+impl Send for ChannelHandle {
+}
+unsafe
+
+impl Sync for ChannelHandle {
+}
+
+impl ChannelHandle {
+    fn retain(self: &Self): ChannelHandle {
+        unsafe {
+            let inner = self._ptr as *ChannelInner
+            _atomicAddI64(((*inner).refcount).addrOf() as *u8, 1)
+            return ChannelHandle {
+                _ptr: self._ptr
+            }
+        }
+    }
+}
+
+impl Drop for ChannelHandle {
+    fn drop(self: &mut Self): void {
+        unsafe {
+            let inner = self._ptr as *ChannelInner
+            let old = _atomicSubI64(((*inner).refcount).addrOf() as *u8, 1)
+            if old == 1 {
+                pthread_mutex_destroy((*inner).mtx)
+                pthread_cond_destroy((*inner).condNotEmpty)
+                pthread_cond_destroy((*inner).condNotFull)
+                free((*inner).mtx)
+                free((*inner).condNotEmpty)
+                free((*inner).condNotFull)
+                free((*inner).buf)
+                free(self._ptr)
+            }
+        }
+    }
 }
 
 // Waiter nodes use the unified 48-byte runtime layout (see std/runtime): plain
@@ -208,7 +260,7 @@ pub fn channelUnarmSend(ptr: *u8, node: *u8): void {
 }
 
 pub struct Channel<T> {
-    _ptr: *u8,
+    h: ChannelHandle,
 }
 
 // Safety: every access to ChannelInner is serialized by its pthread mutex; values
@@ -228,7 +280,7 @@ impl Channel<T> {
     capacity > 0
     {
         unsafe {
-            let raw = malloc(88)
+            let raw = malloc(96)
             let inner = raw as *ChannelInner
 
             let mtx = malloc(64)
@@ -267,9 +319,12 @@ impl Channel<T> {
             (*inner).closed = 0
             (*inner).recvWaitHead = 0 as *u8
             (*inner).sendWaitHead = 0 as *u8
+            (*inner).refcount = 1
 
             return Result.Ok(Channel {
-                _ptr: raw
+                h: ChannelHandle {
+                    _ptr: raw
+                }
             }
             )
         }
@@ -278,7 +333,7 @@ impl Channel<T> {
     fn send(self: &Self, val: T): Result<i32> {
         var v: T = val
         unsafe {
-            let inner = self._ptr as *ChannelInner
+            let inner = self.h._ptr as *ChannelInner
             let mtx = (*inner).mtx
             let cap = (*inner).capacity
 
@@ -328,7 +383,7 @@ impl Channel<T> {
     fn recv(self: &Self): Result<T> {
         unsafe {
             var val: T = zeroed<T>()
-            let inner = self._ptr as *ChannelInner
+            let inner = self.h._ptr as *ChannelInner
             let mtx = (*inner).mtx
             let cap = (*inner).capacity
 
@@ -370,7 +425,7 @@ impl Channel<T> {
     fn trySend(self: &Self, val: T): bool {
         var v: T = val
         unsafe {
-            let inner = self._ptr as *ChannelInner
+            let inner = self.h._ptr as *ChannelInner
             let mtx = (*inner).mtx
 
             pthread_mutex_lock(mtx)
@@ -396,7 +451,7 @@ impl Channel<T> {
     fn tryRecv(self: &Self): Option<T> {
         unsafe {
             var val: T = zeroed<T>()
-            let inner = self._ptr as *ChannelInner
+            let inner = self.h._ptr as *ChannelInner
             let mtx = (*inner).mtx
 
             pthread_mutex_lock(mtx)
@@ -420,7 +475,7 @@ impl Channel<T> {
 
     fn len(self: &Self): i64 {
         unsafe {
-            let inner = self._ptr as *ChannelInner
+            let inner = self.h._ptr as *ChannelInner
             let mtx = (*inner).mtx
             pthread_mutex_lock(mtx)
             let n: i64 = (*inner).len
@@ -431,13 +486,23 @@ impl Channel<T> {
 
     // Raw ChannelInner pointer, for std/select arm hooks (channelArm*).
     fn rawPtr(self: &Self): *u8 {
-        return self._ptr
+        return self.h._ptr
+    }
+
+    // Share this channel with another owner (a spawned producer/consumer). Each clone
+    // must be dropped exactly once; the queue is torn down when the last owner drops.
+    // send/recv take &Self, so a handle only needs cloning when moved into a task while
+    // the parent still uses it.
+    fn clone(self: &Self): Channel<T> {
+        return Channel {
+            h: self.h.retain()
+        }
     }
 
     // Signal no more values will be sent. Pending items are still delivered.
     fn close(self: &Self): void {
         unsafe {
-            let inner = self._ptr as *ChannelInner
+            let inner = self.h._ptr as *ChannelInner
             let mtx = (*inner).mtx
             pthread_mutex_lock(mtx)
             (*inner).closed = 1
@@ -468,19 +533,6 @@ impl Channel<T> {
         }
     }
 
-    fn destroy(self: &Self): void {
-        unsafe {
-            let inner = self._ptr as *ChannelInner
-            pthread_mutex_destroy((*inner).mtx)
-            pthread_cond_destroy((*inner).condNotEmpty)
-            pthread_cond_destroy((*inner).condNotFull)
-            free((*inner).mtx)
-            free((*inner).condNotEmpty)
-            free((*inner).condNotFull)
-            free((*inner).buf)
-            free(self._ptr)
-        }
-    }
 }
 
 // ── AtomicI64 ──

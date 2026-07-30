@@ -1,3 +1,7 @@
+// @skip-os: win32
+// std/fs reaches directories through POSIX opendir/readdir and chdir, which the
+// MSVC CRT does not export (_chdir / FindFirstFile are the Windows spellings).
+// Unskip once std/fs grows a Windows arm for readDir/changeDir.
 // @expect: exists
 // @expect: missing
 // @expect: metadata

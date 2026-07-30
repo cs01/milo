@@ -27,3 +27,13 @@ to the buffer it points into — own the buffer and carry an offset instead. See
 Milo's prover decides linear integer arithmetic; bitwise operations, collection
 lengths, and recursion come back `unknown` and fall back to runtime asserts. See
 [Contracts & Safety](/language/safety).
+
+The contract half of that table is cheap for a reason. Safe Milo has no aliasing:
+one owner per value, `&mut` is exclusive, references are never stored, and there
+is no `Rc` or `RefCell`. Mutating one variable therefore cannot change a fact
+about another, so the verifier needs no heap model and no separation logic —
+locals are plain SMT constants and framing is syntactic. Rust's verifiers lean on
+ownership the same way, but still have lifetimes and interior mutability to
+model. The limits here are coarse rather than deep: a call through `&mut` havocs
+the whole receiver, so what it preserves must be restated with `ensures old(…)`,
+and two arena handles can name one slot, which the prover does not model.

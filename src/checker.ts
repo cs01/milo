@@ -1555,7 +1555,11 @@ export class TypeChecker {
 
     // synthesize: fn eq(self: &Self, other: &Self): bool { return self.f1 == other.f1 && self.f2 == other.f2 && ... }
     const selfParam: import("./ast").Param = { name: "self", type: { name: "Self", isPtr: false, isRef: true, isRefMut: false, isArray: false, arraySize: null } };
-    const otherParam: import("./ast").Param = { name: "other", type: { name: "Self", isPtr: false, isRef: true, isRefMut: false, isArray: false, arraySize: null } };
+    // A field-less struct's synthesized body is `return true`, so `other` is never
+    // read. Name it `_other` to suppress the unused-variable lint — the user can't
+    // edit generated code to silence it, and the warning carries no span (the
+    // synthesized param has none) so it prints without a location.
+    const otherParam: import("./ast").Param = { name: s.fields.length === 0 ? "_other" : "other", type: { name: "Self", isPtr: false, isRef: true, isRefMut: false, isArray: false, arraySize: null } };
 
     let body: Expr;
     if (s.fields.length === 0) {

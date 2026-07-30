@@ -7,7 +7,7 @@
 // (no streaming, no zip64, no encryption) — enough to open .zip/.jar/.epub/.docx.
 
 from "std/inflate" import {
-    inflate
+    Inflate
 }
 from "std/checksum" import {
     Checksum
@@ -22,7 +22,7 @@ fn le16(src: &string, p: i64): i64 {
     return (src[p] as i64) | ((src[p + 1] as i64) << 8)
 }
 
-pub fn le32(src: &string, p: i64): i64 {
+fn le32(src: &string, p: i64): i64 {
     return (src[p] as i64) | ((src[p + 1] as i64) << 8) | ((src[p + 2] as i64) << 16) | ((src[p + 3] as i64) << 24)
 }
 
@@ -44,7 +44,7 @@ fn findEocd(src: &string): i64 {
 }
 
 // Read every entry, decompressing and CRC-checking each.
-pub fn zipRead(src: &string): Result<Vec<ZipEntry>, string> {
+fn zipRead(src: &string): Result<Vec<ZipEntry>, string> {
     let eocd = findEocd(src)
     if eocd < 0 {
         return Result.Err("zip: no end-of-central-directory record")
@@ -89,7 +89,7 @@ pub fn zipRead(src: &string): Result<Vec<ZipEntry>, string> {
         if method == 0 {
             data = comp
         } else if method == 8 {
-            data = inflate(comp)?
+            data = Inflate.raw(comp)?
         } else {
             return Result.Err($"zip: unsupported compression method {method}")
         }
@@ -108,4 +108,14 @@ pub fn zipRead(src: &string): Result<Vec<ZipEntry>, string> {
         cd = cd + 46 + nameLen + extraLen + commentLen
     }
     return Result.Ok(entries)
+}
+
+// Zip namespace — Zip.read(src) parses a PKZIP archive into entries.
+pub struct Zip {
+}
+
+impl Zip {
+    fn read(src: &string): Result<Vec<ZipEntry>, string> {
+        return zipRead(src)
+    }
 }

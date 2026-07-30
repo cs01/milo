@@ -1,7 +1,7 @@
 // @expect: 16x8x3
 // @expect: 1bed20a7275954e59f2ea9bc93e2ab1520cba2341cf32c081d94db569d89f1fc
 from "std/png" import {
-    decodePng
+    Png
 }
 from "std/sha256" import {
     Sha256
@@ -16,7 +16,7 @@ pub fn main(): i32 {
     for i in 0..198 {
         src.push(bytes[i] as u8)
     }
-    match decodePng(src) {
+    match Png.decode(src) {
         Result.Ok(img) => {
             print($"{img.width}x{img.height}x{img.channels}")
             print(Sha256.hash(img.pixels))

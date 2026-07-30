@@ -23,10 +23,10 @@ from "std/strconv" import {
     formatFloat
 }
 from "std/ansi" import {
-    cursorTo, pushFg24, pushBg24, ansiReset, clearScreen, cursorHome, hideCursor, showCursor
+    Ansi
 }
 from "std/color" import {
-    bold, gray
+    Color
 }
 from "std/args" import {
     hasFlag
@@ -124,7 +124,7 @@ pub fn renderColor(buf: &mut string, lum: &[f64; 3520]): void {
     var top: [i64; 3] = [0; 3]
     var bot: [i64; 3] = [0; 3]
     for r in 0..hc {
-        emit(buf, cursorTo(r + 2, 1))
+        emit(buf, Ansi.cursorTo(r + 2, 1))
         for c in 0..PW {
             let lt = lum[(r * 2) * PW + c]
             let lb = lum[(r * 2 + 1) * PW + c]
@@ -133,18 +133,18 @@ pub fn renderColor(buf: &mut string, lum: &[f64; 3520]): void {
             if topOn && botOn {
                 lumColor(lt, top)
                 lumColor(lb, bot)
-                pushFg24(buf, top[0], top[1], top[2])
-                pushBg24(buf, bot[0], bot[1], bot[2])
+                Ansi.pushFg24(buf, top[0], top[1], top[2])
+                Ansi.pushBg24(buf, bot[0], bot[1], bot[2])
                 emit(buf, "▀")
             } else if topOn {
                 lumColor(lt, top)
                 emit(buf, "\x1b[49m")
-                pushFg24(buf, top[0], top[1], top[2])
+                Ansi.pushFg24(buf, top[0], top[1], top[2])
                 emit(buf, "▀")
             } else if botOn {
                 lumColor(lb, bot)
                 emit(buf, "\x1b[49m")
-                pushFg24(buf, bot[0], bot[1], bot[2])
+                Ansi.pushFg24(buf, bot[0], bot[1], bot[2])
                 emit(buf, "▄")
             } else {
                 emit(buf, "\x1b[49m")
@@ -181,7 +181,7 @@ pub fn printAscii(): void {
 
 pub fn runInteractive(): void {
     let termState = enableRawMode()
-    writeStdout(hideCursor() + clearScreen())
+    writeStdout(Ansi.hideCursor() + Ansi.clearScreen())
 
     var zbuf: [f64; 3520] = [0.0; 3520]
     var lum: [f64; 3520] = [0.0; 3520]
@@ -197,10 +197,10 @@ pub fn runInteractive(): void {
         computeFrame(zbuf, lum, a, b)
         var buf = String.withCapacity(65536)
         renderColor(buf, lum)
-        emit(buf, ansiReset())
-        emit(buf, cursorTo(1, 1))
-        emit(buf, bold(" milo donut "))
-        emit(buf, gray($"  {formatFloat(fps, 0)} fps  ·  q quit "))
+        emit(buf, Ansi.reset())
+        emit(buf, Ansi.cursorTo(1, 1))
+        emit(buf, Color.bold(" milo donut "))
+        emit(buf, Color.gray($"  {formatFloat(fps, 0)} fps  ·  q quit "))
         writeStdout(buf)
 
         a = a + 0.045
@@ -223,7 +223,7 @@ pub fn runInteractive(): void {
         }
     }
 
-    writeStdout(showCursor() + clearScreen() + cursorHome() + ansiReset())
+    writeStdout(Ansi.showCursor() + Ansi.clearScreen() + Ansi.cursorHome() + Ansi.reset())
     restoreTerminal(termState)
     print("milo donut — https://milo-language.github.io/milo/")
 }

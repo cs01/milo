@@ -4,7 +4,7 @@
 // block that must be rejected cleanly.
 
 from "std/zstd" import {
-    zstdDecompress
+    Zstd
 }
 from "std/xxhash" import {
     Xxhash
@@ -34,7 +34,7 @@ pub fn fromHex(h: &string): string {
 
 pub fn decode(hex: string): string {
     let bytes = fromHex(hex)
-    match zstdDecompress(bytes) {
+    match Zstd.decompress(bytes) {
         Result.Ok(s) => {
             return s
         }

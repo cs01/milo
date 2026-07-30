@@ -1,7 +1,7 @@
 // @expect: greet.txt=36
 // @expect: nums.txt=44
 from "std/zip" import {
-    zipRead
+    Zip
 }
 
 // A real deflate-compressed PKZIP archive (written by python zipfile). Exercises
@@ -13,7 +13,7 @@ pub fn main(): i32 {
     for i in 0..243 {
         arc.push(bytes[i] as u8)
     }
-    match zipRead(arc) {
+    match Zip.read(arc) {
         Result.Ok(entries) => {
             for i in 0..entries.len {
                 let en = entries[i]

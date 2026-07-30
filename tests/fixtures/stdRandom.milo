@@ -4,13 +4,13 @@
 // @expect: done
 
 from "std/random" import {
-    randFloat, randRange, shuffleI64
+    Random
 }
 
 pub fn main(): i32 {
     var i = 0
     while i < 10 {
-        let r = randRange(1, 6)
+        let r = Random.range(1, 6)
         if r < 1 {
             print("FAIL: below range")
         }
@@ -23,7 +23,7 @@ pub fn main(): i32 {
 
     var j = 0
     while j < 10 {
-        let f = randFloat()
+        let f = Random.float()
         if f < 0.0 {
             print("FAIL: negative float")
         }
@@ -40,7 +40,7 @@ pub fn main(): i32 {
     v.push(3)
     v.push(4)
     v.push(5)
-    shuffleI64(v, v.len)
+    Random.shuffleI64(v, v.len)
     print(v.len.toString())
     print("done")
     return 0

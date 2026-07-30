@@ -35,7 +35,7 @@ from "std/platform" import {
     close
 }
 from "std/random" import {
-    randBytes
+    Random
 }
 
 // ── Frame opcodes ──
@@ -328,7 +328,7 @@ impl WsConn {
         var mask: [u8; 4] = [0; 4]
         if self._isClient {
             unsafe {
-                randBytes(mask as *u8, 4)
+                Random.bytes(mask as *u8, 4)
             }
         }
 

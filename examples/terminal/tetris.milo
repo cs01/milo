@@ -22,7 +22,7 @@ from "std/time" import {
     epochMillis
 }
 from "std/random" import {
-    randInt
+    Random
 }
 from "std/runtime" import {
     Task
@@ -31,10 +31,10 @@ from "std/select" import {
     Select
 }
 from "std/ansi" import {
-    cursorTo, fg256, ansiReset, clearScreen, cursorHome, hideCursor, showCursor
+    Ansi
 }
 from "std/color" import {
-    gray, cyan, bold, red, yellow
+    Color
 }
 
 pub let W: i64 = 10
@@ -79,12 +79,12 @@ pub fn emit(buf: &mut string, s: &string): void {
 }
 
 pub fn cursor(buf: &mut string, row: i64, col: i64): void {
-    emit(buf, cursorTo(row, col))
+    emit(buf, Ansi.cursorTo(row, col))
 }
 
 // a solid 2-wide cell in the piece's color
 pub fn blockStr(code: i64): string {
-    return fg256(code) + "██" + ansiReset()
+    return Ansi.fg256(code) + "██" + Ansi.reset()
 }
 
 // ── tetromino geometry ──
@@ -311,9 +311,9 @@ pub fn render(buf: &mut string, board: &Board, kind: i64, rot: i64, px: i64, py:
     bottom = bottom + "┘"
 
     cursor(buf, 1, 2)
-    emit(buf, gray(top))
+    emit(buf, Color.gray(top))
 
-    let bar = gray("│")
+    let bar = Color.gray("│")
     for y in 0..H {
         cursor(buf, 2 + y, 2)
         emit(buf, bar)
@@ -338,43 +338,43 @@ pub fn render(buf: &mut string, board: &Board, kind: i64, rot: i64, px: i64, py:
     }
 
     cursor(buf, 2 + H, 2)
-    emit(buf, gray(bottom))
+    emit(buf, Color.gray(bottom))
 
     // sidebar
     let sx = 2 + W * 2 + 5
     cursor(buf, 1, sx)
-    emit(buf, bold(cyan("MILO TETRIS")))
+    emit(buf, Color.bold(Color.cyan("MILO TETRIS")))
     cursor(buf, 2, sx)
-    emit(buf, gray("a tetris written in Milo"))
+    emit(buf, Color.gray("a tetris written in Milo"))
     cursor(buf, 3, sx)
-    emit(buf, "score  " + bold($"{score}") + "   ")
+    emit(buf, "score  " + Color.bold($"{score}") + "   ")
     cursor(buf, 4, sx)
-    emit(buf, "lines  " + bold($"{lines}") + "   ")
+    emit(buf, "lines  " + Color.bold($"{lines}") + "   ")
     cursor(buf, 6, sx)
     emit(buf, "next")
     renderNext(buf, nextKind, 7, sx)
     cursor(buf, 11, sx)
-    emit(buf, gray("<- ->  move"))
+    emit(buf, Color.gray("<- ->  move"))
     cursor(buf, 12, sx)
-    emit(buf, gray("  ^    rotate"))
+    emit(buf, Color.gray("  ^    rotate"))
     cursor(buf, 13, sx)
-    emit(buf, gray("  v    soft drop"))
+    emit(buf, Color.gray("  v    soft drop"))
     cursor(buf, 14, sx)
-    emit(buf, gray("space  hard drop"))
+    emit(buf, Color.gray("space  hard drop"))
     cursor(buf, 15, sx)
-    emit(buf, gray("q/^C   quit"))
+    emit(buf, Color.gray("q/^C   quit"))
 
     // pitch: this is a real program in a real systems language, not a toy
     cursor(buf, 18, sx)
-    emit(buf, bold(cyan("memory-safe systems lang")))
+    emit(buf, Color.bold(Color.cyan("memory-safe systems lang")))
     cursor(buf, 19, sx)
-    emit(buf, gray("native via LLVM · no GC · no"))
+    emit(buf, Color.gray("native via LLVM · no GC · no"))
     cursor(buf, 20, sx)
-    emit(buf, gray("polling — one green task on"))
+    emit(buf, Color.gray("polling — one green task on"))
     cursor(buf, 21, sx)
-    emit(buf, gray("select(keys, gravity timer)"))
+    emit(buf, Color.gray("select(keys, gravity timer)"))
     cursor(buf, 23, sx)
-    emit(buf, bold(yellow("★ github.com/milo-language/milo")))
+    emit(buf, Color.bold(Color.yellow("★ github.com/milo-language/milo")))
 }
 
 pub fn drawFrame(board: &Board, kind: i64, rot: i64, px: i64, py: i64, score: i64, lines: i64, nextKind: i64): void {
@@ -403,8 +403,8 @@ pub fn waitForQuit(): void {
 
 pub fn runGame(): void {
     var board: Board = [0; 200]
-    var kind = randInt(NUM_KINDS)
-    var nextKind = randInt(NUM_KINDS)
+    var kind = Random.int(NUM_KINDS)
+    var nextKind = Random.int(NUM_KINDS)
     var rot: i64 = 0
     var px: i64 = SPAWN_X
     var py: i64 = 0
@@ -492,7 +492,7 @@ pub fn runGame(): void {
             lines = lines + cleared
             score = score + scoreFor(cleared)
             kind = nextKind
-            nextKind = randInt(NUM_KINDS)
+            nextKind = Random.int(NUM_KINDS)
             rot = 0
             px = SPAWN_X
             py = 0
@@ -508,11 +508,11 @@ pub fn runGame(): void {
     if gameOver {
         var buf = ""
         cursor(buf, 10, 6)
-        emit(buf, bold(red(" GAME OVER ")))
+        emit(buf, Color.bold(Color.red(" GAME OVER ")))
         cursor(buf, 11, 6)
-        emit(buf, bold($" score {score} "))
+        emit(buf, Color.bold($" score {score} "))
         cursor(buf, 12, 6)
-        emit(buf, gray(" press q "))
+        emit(buf, Color.gray(" press q "))
         writeStdout(buf)
         waitForQuit()
     }
@@ -520,14 +520,14 @@ pub fn runGame(): void {
 
 pub fn main(): i32 {
     let termState = enableRawMode()
-    writeStdout(hideCursor() + clearScreen())
+    writeStdout(Ansi.hideCursor() + Ansi.clearScreen())
 
     // select() needs the green scheduler, so the game runs as a task; join()
     // blocks main here and drives the scheduler until it finishes. (Go-style:
     // like `go run()` + wait — no manual scheduler pumping.)
     Task.spawn(runGame).join()
 
-    writeStdout(showCursor() + clearScreen() + cursorHome() + ansiReset())
+    writeStdout(Ansi.showCursor() + Ansi.clearScreen() + Ansi.cursorHome() + Ansi.reset())
     restoreTerminal(termState)
     print("thanks for playing milo tetris ♥")
     print("built with milo — docs & playground: https://milo-language.github.io/milo/")

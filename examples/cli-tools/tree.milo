@@ -7,7 +7,7 @@ from "std/fs" import {
     isDir, readDir
 }
 from "std/path" import {
-    pathJoin
+    Path
 }
 
 pub struct Counts {
@@ -41,7 +41,7 @@ pub fn printTree(dirPath: &string, prefix: &string, depth: i64, maxLevel: i64, c
 
         if entryIsDir {
             counts.dirs = counts.dirs + 1
-            let childPath = pathJoin(dirPath, name)
+            let childPath = Path.join(dirPath, name)
             let childPrefix = prefix + extension
             printTree(childPath, childPrefix, depth + 1, maxLevel, counts)
         } else {

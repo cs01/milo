@@ -10,7 +10,7 @@ from "std/fs" import {
     fileInfo, isDir, isFile, readDir, readFile
 }
 from "std/path" import {
-    pathJoin
+    Path
 }
 
 pub fn getMime(path: &string): string {
@@ -94,7 +94,7 @@ pub fn dirListing(dirPath: &string, urlPath: &string): string {
             if entryIsDir {
                 html = html + "<tr><td><a href=\"" + name.clone() + "/\">" + name + "/</a></td><td>-</td></tr>"
             } else {
-                let entryPath = pathJoin(dirPath, name.clone())
+                let entryPath = Path.join(dirPath, name.clone())
                 let info = fileInfo(entryPath)
                 html = html + "<tr><td><a href=\"" + name.clone() + "\">" + name + "</a></td><td>" + formatSize(info.size) + "</td></tr>"
             }
@@ -115,7 +115,7 @@ pub fn handleRequest(req: &Request, root: &string, quiet: bool): Response {
 
     if isDir(filePath) {
         // try index.html first
-        let indexPath = pathJoin(filePath, "index.html")
+        let indexPath = Path.join(filePath, "index.html")
         if isFile(indexPath) {
             if let Result.Ok(content) = readFile(indexPath) {
                 if !quiet {

@@ -3,7 +3,7 @@
 // @expect: milo pure-milo inflate
 // @expect: hello world hello world hello world
 from "std/inflate" import {
-    gzipDecompress
+    Inflate
 }
 
 // Decodes a real gzip stream produced by the system gzip encoder — pins the
@@ -14,7 +14,7 @@ pub fn main(): i32 {
     for i in 0..60 {
         src.push(gz[i] as u8)
     }
-    match gzipDecompress(src) {
+    match Inflate.gzip(src) {
         Result.Ok(out) => {
             print(out)
         }

@@ -1,69 +1,127 @@
 // std/color — ANSI terminal colors and styles
 
-pub fn red(s: &string): string {
+fn red(s: &string): string {
     return "\x1b[31m" + s + "\x1b[0m"
 }
 
-pub fn green(s: &string): string {
+fn green(s: &string): string {
     return "\x1b[32m" + s + "\x1b[0m"
 }
 
-pub fn yellow(s: &string): string {
+fn yellow(s: &string): string {
     return "\x1b[33m" + s + "\x1b[0m"
 }
 
-pub fn blue(s: &string): string {
+fn blue(s: &string): string {
     return "\x1b[34m" + s + "\x1b[0m"
 }
 
-pub fn magenta(s: &string): string {
+fn magenta(s: &string): string {
     return "\x1b[35m" + s + "\x1b[0m"
 }
 
-pub fn cyan(s: &string): string {
+fn cyan(s: &string): string {
     return "\x1b[36m" + s + "\x1b[0m"
 }
 
-pub fn white(s: &string): string {
+fn white(s: &string): string {
     return "\x1b[37m" + s + "\x1b[0m"
 }
 
-pub fn gray(s: &string): string {
+fn gray(s: &string): string {
     return "\x1b[90m" + s + "\x1b[0m"
 }
 
-pub fn bold(s: &string): string {
+fn bold(s: &string): string {
     return "\x1b[1m" + s + "\x1b[0m"
 }
 
-pub fn dim(s: &string): string {
+fn dim(s: &string): string {
     return "\x1b[2m" + s + "\x1b[0m"
 }
 
-pub fn italic(s: &string): string {
+fn italic(s: &string): string {
     return "\x1b[3m" + s + "\x1b[0m"
 }
 
-pub fn underline(s: &string): string {
+fn underline(s: &string): string {
     return "\x1b[4m" + s + "\x1b[0m"
 }
 
-pub fn strikethrough(s: &string): string {
+fn strikethrough(s: &string): string {
     return "\x1b[9m" + s + "\x1b[0m"
 }
 
-pub fn bgRed(s: &string): string {
+fn bgRed(s: &string): string {
     return "\x1b[41m" + s + "\x1b[0m"
 }
 
-pub fn bgGreen(s: &string): string {
+fn bgGreen(s: &string): string {
     return "\x1b[42m" + s + "\x1b[0m"
 }
 
-pub fn bgYellow(s: &string): string {
+fn bgYellow(s: &string): string {
     return "\x1b[43m" + s + "\x1b[0m"
 }
 
-pub fn bgBlue(s: &string): string {
+fn bgBlue(s: &string): string {
     return "\x1b[44m" + s + "\x1b[0m"
+}
+
+// Color namespace — SGR text styling (Color.red(s), Color.bold(s), ...).
+pub struct Color {
+}
+
+impl Color {
+    fn red(s: &string): string {
+        return red(s)
+    }
+    fn green(s: &string): string {
+        return green(s)
+    }
+    fn yellow(s: &string): string {
+        return yellow(s)
+    }
+    fn blue(s: &string): string {
+        return blue(s)
+    }
+    fn magenta(s: &string): string {
+        return magenta(s)
+    }
+    fn cyan(s: &string): string {
+        return cyan(s)
+    }
+    fn white(s: &string): string {
+        return white(s)
+    }
+    fn gray(s: &string): string {
+        return gray(s)
+    }
+    fn bold(s: &string): string {
+        return bold(s)
+    }
+    fn dim(s: &string): string {
+        return dim(s)
+    }
+    fn italic(s: &string): string {
+        return italic(s)
+    }
+    fn underline(s: &string): string {
+        return underline(s)
+    }
+    fn strikethrough(s: &string): string {
+        return strikethrough(s)
+    }
+    fn bgRed(s: &string): string {
+        return bgRed(s)
+    }
+    fn bgGreen(s: &string): string {
+        return bgGreen(s)
+    }
+    fn bgYellow(s: &string): string {
+        return bgYellow(s)
+    }
+    fn bgBlue(s: &string): string {
+        return bgBlue(s)
+    }
 }

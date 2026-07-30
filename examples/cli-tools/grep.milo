@@ -10,7 +10,7 @@ from "std/fs" import {
     isDir, isFile, readDir, readFile
 }
 from "std/path" import {
-    pathJoin
+    Path
 }
 
 pub fn makeColor(code: &string): string {
@@ -178,7 +178,7 @@ pub fn grepRecursive(dirPath: &string, opts: &mut GrepOpts): void {
         let entryIsDir = entries[i].isDir
         let entryIsFile = entries[i].isFile
         if name[0] != 46 {
-            let fullPath = pathJoin(dirPath, name)
+            let fullPath = Path.join(dirPath, name)
             if entryIsDir {
                 grepRecursive(fullPath, opts)
             } else if entryIsFile {

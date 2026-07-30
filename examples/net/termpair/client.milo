@@ -57,7 +57,7 @@ from "std/signal" import {
     ignoreSignal, SIGPIPE
 }
 from "std/env" import {
-    getEnvOr
+    Env
 }
 
 from "./protocol" import {
@@ -160,7 +160,7 @@ pub fn main(): i32 {
     parser.addI64("port", "p", "server port", 443)
     parser.addString("base", "", "server URL path prefix", "/termpair")
     // Default to the user's login shell, not /bin/bash — matches what they expect.
-    parser.addString("shell", "s", "shell to spawn", getEnvOr("SHELL", "/bin/bash"))
+    parser.addString("shell", "s", "shell to spawn", Env.getOr("SHELL", "/bin/bash"))
     parser.addBool("public", "", "public session (no encryption)")
     parser.addBool("read-only", "", "disable browser→shell input")
     parser.addBool("plain", "", "use plain ws:// instead of wss:// (local servers)")

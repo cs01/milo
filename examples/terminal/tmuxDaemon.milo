@@ -47,7 +47,7 @@ from "std/args" import {
     args
 }
 from "std/env" import {
-    getEnvOr
+    Env
 }
 from "std/os" import {
     acceptFd,
@@ -588,7 +588,7 @@ pub fn runServe(): void {
     match TcpListener.bind(PORT) {
         Result.Ok(listener) => {
             setNonblock(listener.fd)
-            let shell = getEnvOr("SHELL", "/bin/sh")
+            let shell = Env.getOr("SHELL", "/bin/sh")
             print($"tmuxd: serving on 127.0.0.1:{PORT} (attach with: tmuxdaemon attach)")
             serveMulti(listener.fd, shell, 24, 80)
             print("tmuxd: stopped")

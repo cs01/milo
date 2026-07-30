@@ -7,12 +7,12 @@
 // @expect: d"e
 
 from "std/csv" import {
-    csvParse
+    Csv
 }
 
 pub fn main(): i32 {
     let data = "name,age,city\nAlice,30,NYC\nBob,25,SF\n"
-    let rows = csvParse(data)
+    let rows = Csv.parse(data)
     print(rows.len.toString())
 
     var ri: i64 = 0
@@ -31,7 +31,7 @@ pub fn main(): i32 {
     }
 
     let quoted = "a,\"b,c\",\"d\"\"e\"\n"
-    let qrows = csvParse(quoted)
+    let qrows = Csv.parse(quoted)
     var qi: i64 = 0
     while qi < qrows[0].len {
         print(qrows[0][qi])

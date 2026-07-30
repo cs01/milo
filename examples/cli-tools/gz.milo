@@ -15,10 +15,10 @@ from "std/io" import {
     readStdin, writeStdout
 }
 from "std/deflate" import {
-    gzipCompress
+    Deflate
 }
 from "std/inflate" import {
-    gzipDecompress
+    Inflate
 }
 
 pub fn main(): i32 {
@@ -28,7 +28,7 @@ pub fn main(): i32 {
 
     let input = readStdin()
     if args.getBool("decompress") {
-        match gzipDecompress(input) {
+        match Inflate.gzip(input) {
             Result.Ok(out) => {
                 writeStdout(out)
             }
@@ -38,7 +38,7 @@ pub fn main(): i32 {
             }
         }
     } else {
-        writeStdout(gzipCompress(input))
+        writeStdout(Deflate.gzip(input))
     }
     return 0
 }

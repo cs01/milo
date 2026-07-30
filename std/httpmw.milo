@@ -12,7 +12,7 @@ from "std/jwt" import {
     Jwt
 }
 from "std/deflate" import {
-    gzipCompress
+    Deflate
 }
 
 // ── JWT bearer auth ──
@@ -120,7 +120,7 @@ pub fn gzip(ctx: &mut Context, next: (&mut Context) => Response): Response {
     if body.len < GZIP_MIN {
         return Response.Status(code, ct, body)
     }
-    let compressed = gzipCompress(body)
+    let compressed = Deflate.gzip(body)
     ctx.setHeader("Content-Encoding", "gzip")
     return Response.Status(code, ct, compressed)
 }

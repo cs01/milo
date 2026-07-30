@@ -6,32 +6,32 @@
 // emit; build a frame in one buffer and write it once to avoid flicker.
 
 // Move the cursor to a 1-based (row, col).
-pub fn cursorTo(row: i64, col: i64): string {
+fn cursorTo(row: i64, col: i64): string {
     return $"\x1b[{row};{col}H"
 }
 
 // Cursor to home (row 1, col 1).
-pub fn cursorHome(): string {
+fn cursorHome(): string {
     return "\x1b[H"
 }
 
 // xterm-256 foreground select-graphic-rendition for a palette index (0–255).
-pub fn fg256(code: i64): string {
+fn fg256(code: i64): string {
     return $"\x1b[38;5;{code}m"
 }
 
 // xterm-256 background SGR.
-pub fn bg256(code: i64): string {
+fn bg256(code: i64): string {
     return $"\x1b[48;5;{code}m"
 }
 
 // Truecolor (24-bit) foreground / background — smooth gradients on terminals
 // that support it (most modern ones). r/g/b are 0–255.
-pub fn fg24(r: i64, g: i64, b: i64): string {
+fn fg24(r: i64, g: i64, b: i64): string {
     return $"\x1b[38;2;{r};{g};{b}m"
 }
 
-pub fn bg24(r: i64, g: i64, b: i64): string {
+fn bg24(r: i64, g: i64, b: i64): string {
     return $"\x1b[48;2;{r};{g};{b}m"
 }
 
@@ -74,94 +74,176 @@ fn ansiPush24(buf: &mut string, lead: &string, r: i64, g: i64, b: i64): void {
 }
 
 // Append a 24-bit foreground / background SGR directly into buf (no allocation).
-pub fn pushFg24(buf: &mut string, r: i64, g: i64, b: i64): void {
+fn pushFg24(buf: &mut string, r: i64, g: i64, b: i64): void {
     ansiPush24(buf, "\x1b[38;2;", r, g, b)
 }
 
-pub fn pushBg24(buf: &mut string, r: i64, g: i64, b: i64): void {
+fn pushBg24(buf: &mut string, r: i64, g: i64, b: i64): void {
     ansiPush24(buf, "\x1b[48;2;", r, g, b)
 }
 
 // Reset all attributes to the terminal default.
-pub fn ansiReset(): string {
+fn ansiReset(): string {
     return "\x1b[0m"
 }
 
 // Erase the entire screen.
-pub fn clearScreen(): string {
+fn clearScreen(): string {
     return "\x1b[2J"
 }
 
 // Erase from the cursor to the end of the line.
-pub fn clearLine(): string {
+fn clearLine(): string {
     return "\x1b[K"
 }
 
 // Hide / show the cursor — hide while drawing a full-screen UI, show on exit.
-pub fn hideCursor(): string {
+fn hideCursor(): string {
     return "\x1b[?25l"
 }
 
-pub fn showCursor(): string {
+fn showCursor(): string {
     return "\x1b[?25h"
 }
 
 // Alternate screen buffer: a full-screen app switches to it on start and back
 // on exit, so the user's scrollback and prompt are restored untouched rather
 // than overwritten by the app's output.
-pub fn enterAltScreen(): string {
+fn enterAltScreen(): string {
     return "\x1b[?1049h"
 }
 
-pub fn exitAltScreen(): string {
+fn exitAltScreen(): string {
     return "\x1b[?1049l"
 }
 
 // Cursor position save/restore, for writing outside the live region (a log
 // line, a status write) and returning without recomputing coordinates.
-pub fn saveCursor(): string {
+fn saveCursor(): string {
     return "\x1b7"
 }
 
-pub fn restoreCursor(): string {
+fn restoreCursor(): string {
     return "\x1b8"
 }
 
 // Relative cursor motion. A frame renderer moving between nearby cells emits
 // far fewer bytes with these than by re-addressing absolutely via cursorTo.
-pub fn cursorUp(n: i64): string {
+fn cursorUp(n: i64): string {
     return $"\x1b[{n}A"
 }
 
-pub fn cursorDown(n: i64): string {
+fn cursorDown(n: i64): string {
     return $"\x1b[{n}B"
 }
 
-pub fn cursorRight(n: i64): string {
+fn cursorRight(n: i64): string {
     return $"\x1b[{n}C"
 }
 
-pub fn cursorLeft(n: i64): string {
+fn cursorLeft(n: i64): string {
     return $"\x1b[{n}D"
 }
 
 // Move to column `col` on the current row (1-based).
-pub fn cursorColumn(col: i64): string {
+fn cursorColumn(col: i64): string {
     return $"\x1b[{col}G"
 }
 
 // Erase from the cursor to the end of the screen — used to clear a shrinking
 // live region without repainting rows that are already correct.
-pub fn clearToEnd(): string {
+fn clearToEnd(): string {
     return "\x1b[0J"
 }
 
 // Bracketed paste: with this on, pasted text arrives wrapped in
 // ESC[200~ / ESC[201~ so it is never mistaken for typed key chords.
-pub fn enableBracketedPaste(): string {
+fn enableBracketedPaste(): string {
     return "\x1b[?2004h"
 }
 
-pub fn disableBracketedPaste(): string {
+fn disableBracketedPaste(): string {
     return "\x1b[?2004l"
+}
+
+// Ansi namespace — terminal escape sequences (Ansi.cursorTo, Ansi.reset, ...).
+pub struct Ansi {
+}
+
+impl Ansi {
+    fn cursorTo(row: i64, col: i64): string {
+        return cursorTo(row, col)
+    }
+    fn cursorHome(): string {
+        return cursorHome()
+    }
+    fn fg256(code: i64): string {
+        return fg256(code)
+    }
+    fn bg256(code: i64): string {
+        return bg256(code)
+    }
+    fn fg24(r: i64, g: i64, b: i64): string {
+        return fg24(r, g, b)
+    }
+    fn bg24(r: i64, g: i64, b: i64): string {
+        return bg24(r, g, b)
+    }
+    fn pushFg24(buf: &mut string, r: i64, g: i64, b: i64): void {
+        pushFg24(buf, r, g, b)
+    }
+    fn pushBg24(buf: &mut string, r: i64, g: i64, b: i64): void {
+        pushBg24(buf, r, g, b)
+    }
+    fn reset(): string {
+        return ansiReset()
+    }
+    fn clearScreen(): string {
+        return clearScreen()
+    }
+    fn clearLine(): string {
+        return clearLine()
+    }
+    fn hideCursor(): string {
+        return hideCursor()
+    }
+    fn showCursor(): string {
+        return showCursor()
+    }
+    fn enterAltScreen(): string {
+        return enterAltScreen()
+    }
+    fn exitAltScreen(): string {
+        return exitAltScreen()
+    }
+    fn saveCursor(): string {
+        return saveCursor()
+    }
+    fn restoreCursor(): string {
+        return restoreCursor()
+    }
+    fn cursorUp(n: i64): string {
+        return cursorUp(n)
+    }
+    fn cursorDown(n: i64): string {
+        return cursorDown(n)
+    }
+    fn cursorRight(n: i64): string {
+        return cursorRight(n)
+    }
+    fn cursorLeft(n: i64): string {
+        return cursorLeft(n)
+    }
+    fn cursorColumn(col: i64): string {
+        return cursorColumn(col)
+    }
+    fn clearToEnd(): string {
+        return clearToEnd()
+    }
+    fn enableBracketedPaste(): string {
+        return enableBracketedPaste()
+    }
+    fn disableBracketedPaste(): string {
+        return disableBracketedPaste()
+    }
 }

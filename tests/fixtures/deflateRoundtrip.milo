@@ -1,9 +1,9 @@
 // @expect: roundtrip ok
 from "std/deflate" import {
-    gzipCompress, zlibCompress
+    Deflate
 }
 from "std/inflate" import {
-    gzipDecompress, zlibDecompress
+    Inflate
 }
 
 // Compress then decompress through both container formats; the payload has enough
@@ -16,11 +16,11 @@ pub fn main(): i32 {
             s.push(base[j])
         }
     }
-    let gz = gzipCompress(s)
-    let zl = zlibCompress(s)
+    let gz = Deflate.gzip(s)
+    let zl = Deflate.zlib(s)
     var okg = false
     var okz = false
-    match gzipDecompress(gz) {
+    match Inflate.gzip(gz) {
         Result.Ok(o) => {
             okg = o.len == s.len
         }
@@ -28,7 +28,7 @@ pub fn main(): i32 {
             okg = false
         }
     }
-    match zlibDecompress(zl) {
+    match Inflate.zlib(zl) {
         Result.Ok(o) => {
             okz = o.len == s.len
         }

@@ -458,7 +458,7 @@ fn fseDecompressInterleaved2(t: &FseTable, stream: &string): Vec<i64> {
 }
 
 // Extract src[from .. to) into an owned string.
-pub fn slice(src: &string, from: i64, to: i64): string {
+fn slice(src: &string, from: i64, to: i64): string {
     var s = ""
     for i in from..to {
         s.push(src[i])
@@ -834,7 +834,7 @@ pub struct ZstdHeader {
     hasChecksum: bool,
 }
 
-pub let ZSTD_MAGIC: i64 = 0xFD2FB528
+let ZSTD_MAGIC: i64 = 0xFD2FB528
 
 // Parse the frame header. Returns headerLen < 0 on malformed input.
 fn parseHeader(src: &string): ZstdHeader {
@@ -895,7 +895,7 @@ fn parseHeader(src: &string): ZstdHeader {
 
 // Decompress a single zstd frame. Multi-frame concatenation is not handled — one
 // frame per call, like `zstd`'s default single-frame output.
-pub fn zstdDecompress(src: &string): Result<string, string> {
+fn zstdDecompress(src: &string): Result<string, string> {
     let hdr = parseHeader(src)
     if hdr.headerLen < 0 {
         return Result.Err("zstd: bad frame header")
@@ -995,7 +995,7 @@ fn encRawBlockHeader(out: &mut string, size: i64, last: bool) {
 // valid, `zstd -d`-decodable output at zero compression; the compressing path (LZ77 +
 // FSE-coded sequences) builds on this frame scaffolding. Single-segment header carries
 // the content size, and an XXH64 content checksum is appended.
-pub fn zstdCompressRaw(src: &string): string {
+fn zstdCompressRaw(src: &string): string {
     let maxBlock: i64 = 131072 // 128 KiB, the zstd block cap
     var out = ""
     out.push(0x28 as u8)
@@ -1899,7 +1899,7 @@ fn compressBlock(block: &string): BlockResult {
 // coded literals (litType 2, ASCII/text; Raw for wider alphabets), with a per-block Raw
 // fallback so output never expands. Single-segment header with a 4-byte content size and an
 // appended XXH64 content checksum — decodable by `zstdDecompress` above and reference `zstd -d`.
-pub fn zstdCompress(src: &string): string {
+fn zstdCompress(src: &string): string {
     var out = ""
     out.push(0x28 as u8)
     out.push(0xb5 as u8)
@@ -1938,4 +1938,20 @@ pub fn zstdCompress(src: &string): string {
     }
     enc32LE(out, (Xxhash.hash64(src, 0) & 0xffffffff) as i64)
     return out
+}
+
+// Zstd namespace — Zstd.compress/.decompress (framed), .compressRaw (raw block).
+pub struct Zstd {
+}
+
+impl Zstd {
+    fn compress(src: &string): string {
+        return zstdCompress(src)
+    }
+    fn compressRaw(src: &string): string {
+        return zstdCompressRaw(src)
+    }
+    fn decompress(src: &string): Result<string, string> {
+        return zstdDecompress(src)
+    }
 }

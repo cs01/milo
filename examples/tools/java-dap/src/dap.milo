@@ -18,7 +18,7 @@ from "std/fs" import {
     pathExists, readFile
 }
 from "std/env" import {
-    getEnvOr
+    Env
 }
 from "std/sync" import {
     Channel
@@ -438,7 +438,7 @@ pub fn findJava(explicit: string): string {
     if explicit.len > 0 {
         return explicit
     }
-    let home = getEnvOr("JAVA_HOME", "")
+    let home = Env.getOr("JAVA_HOME", "")
     if home.len > 0 && pathExists(home + "/bin/java") {
         return home + "/bin/java"
     }

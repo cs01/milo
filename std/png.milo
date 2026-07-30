@@ -8,7 +8,7 @@
 // case. Palette, <8-bit, 16-bit, and Adam7 interlace are out of scope for now.
 
 from "std/inflate" import {
-    zlibDecompress
+    Inflate
 }
 
 pub struct PngImage {
@@ -47,7 +47,7 @@ fn paeth(a: i64, b: i64, c: i64): i64 {
     return c
 }
 
-pub fn decodePng(src: &string): Result<PngImage, string> {
+fn decodePng(src: &string): Result<PngImage, string> {
     if src.len < 8 {
         return Result.Err("png: too short")
     }
@@ -106,7 +106,7 @@ pub fn decodePng(src: &string): Result<PngImage, string> {
         return Result.Err("png: missing IHDR")
     }
 
-    let raw = zlibDecompress(idat)?
+    let raw = Inflate.zlib(idat)?
     let bpp = channels
     let stride = width * bpp
     // Each scanline is prefixed by a 1-byte filter type.
@@ -153,4 +153,14 @@ pub fn decodePng(src: &string): Result<PngImage, string> {
         width: width, height: height, channels: channels, pixels: out
     }
     )
+}
+
+// Png namespace — Png.decode(src) decodes a PNG into a PngImage.
+pub struct Png {
+}
+
+impl Png {
+    fn decode(src: &string): Result<PngImage, string> {
+        return decodePng(src)
+    }
 }

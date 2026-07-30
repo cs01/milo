@@ -38,7 +38,7 @@ from "std/signal" import {
     installSignalPipe, drainSignalFd, SIGWINCH
 }
 from "std/env" import {
-    getEnvOr
+    Env
 }
 from "std/fs" import {
     writeFile, readFile
@@ -113,7 +113,7 @@ pub fn themeChord(t: i64): string {
 }
 
 pub fn themePath(): string {
-    return getEnvOr("HOME", "/tmp") + "/.tmuxclone-theme"
+    return Env.getOr("HOME", "/tmp") + "/.tmuxclone-theme"
 }
 
 pub fn loadTheme(): void {
@@ -567,7 +567,7 @@ pub fn main(): void {
         Result.Ok(pty0) => {
             match Pty.open() {
                 Result.Ok(pty1) => {
-                    let shell = getEnvOr("SHELL", "/bin/sh")
+                    let shell = Env.getOr("SHELL", "/bin/sh")
                     let shellName = baseName(shell)
                     // resize before spawn — child inherits winsize via slave fd
                     pty0.resize(paneRows as u16, paneCols as u16)

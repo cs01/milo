@@ -8,10 +8,10 @@ from "std/argparse" import {
 }
 
 from "std/path" import {
-    pathExt
+    Path
 }
 from "std/color" import {
-    red, green, blue, magenta, cyan, gray, bold, dim
+    Color
 }
 
 pub fn parseI64(s: string): i64 {
@@ -174,7 +174,7 @@ pub fn highlightLine(line: &string, lang: &string, kwList: &Vec<string>): string
 
         // line comment — color rest of line gray
         if isLineComment(lang, line, pos) {
-            result = result + gray(line.substr(pos, line.len))
+            result = result + Color.gray(line.substr(pos, line.len))
             return result
         }
 
@@ -193,7 +193,7 @@ pub fn highlightLine(line: &string, lang: &string, kwList: &Vec<string>): string
                 }
                 end = end + 1
             }
-            result = result + green(line.substr(pos, end))
+            result = result + Color.green(line.substr(pos, end))
             pos = end
             continue
         }
@@ -204,7 +204,7 @@ pub fn highlightLine(line: &string, lang: &string, kwList: &Vec<string>): string
             while end < line.len && ((line[end] >= 48 && line[end] <= 57) || line[end] == 46) {
                 end = end + 1
             }
-            result = result + magenta(line.substr(pos, end))
+            result = result + Color.magenta(line.substr(pos, end))
             pos = end
             continue
         }
@@ -217,13 +217,13 @@ pub fn highlightLine(line: &string, lang: &string, kwList: &Vec<string>): string
             }
             let word = line.substr(pos, end)
             if isKeyword(word, kwList) {
-                result = result + red(word)
+                result = result + Color.red(word)
             } else if end < line.len && line[end] == 40 {
                 // function call
-                result = result + blue(word)
+                result = result + Color.blue(word)
             } else if word[0] >= 65 && word[0] <= 90 {
                 // capitalized = type name
-                result = result + cyan(word)
+                result = result + Color.cyan(word)
             } else {
                 result = result + word
             }
@@ -271,7 +271,7 @@ pub fn main(): i32 {
     if forceLang.len > 0 {
         lang = forceLang
     } else {
-        let ext = pathExt(filePath)
+        let ext = Path.ext(filePath)
         lang = detectLang(ext)
     }
 
@@ -313,9 +313,9 @@ pub fn main(): i32 {
             print($" File: {filePath}{langLabel}")
             print(separator)
         } else {
-            print(dim(separator))
-            print($" {bold($"File: {filePath}")}{gray(langLabel)}")
-            print(dim(separator))
+            print(Color.dim(separator))
+            print($" {Color.bold($"File: {filePath}")}{Color.gray(langLabel)}")
+            print(Color.dim(separator))
         }
     }
 
@@ -334,7 +334,7 @@ pub fn main(): i32 {
             if noColor {
                 print($" {padNum(idx + 1, width)} | {displayLine}")
             } else {
-                print($" {gray($"{padNum(idx + 1, width)} |")} {displayLine}")
+                print($" {Color.gray($"{padNum(idx + 1, width)} |")} {displayLine}")
             }
         }
         idx = idx + 1
@@ -345,7 +345,7 @@ pub fn main(): i32 {
         if noColor {
             print(separator)
         } else {
-            print(dim(separator))
+            print(Color.dim(separator))
         }
     }
 

@@ -17,6 +17,11 @@ pub struct Toml {
 }
 
 impl Toml {
+    // Parse a TOML document. Access values via t.str/i64/f64/bool/table.
+    fn parse(s: string): Result<Toml> {
+        return tomlParse(s)
+    }
+
     fn str(self: &Self, key: &string): Option<string> {
         return tomlGetStr(self.raw, self.start, self.end, key)
     }
@@ -38,7 +43,7 @@ impl Toml {
     }
 }
 
-pub fn tomlParse(s: string): Result<Toml> {
+fn tomlParse(s: string): Result<Toml> {
     if s.len == 0 {
         return Result.Err("empty input")
     }
@@ -200,7 +205,7 @@ fn tomlFindKey(s: &string, start: i64, end: i64, key: &string): Option<Toml> {
     return Option.None
 }
 
-pub fn tomlGetStr(s: &string, start: i64, end: i64, key: &string): Option<string> {
+fn tomlGetStr(s: &string, start: i64, end: i64, key: &string): Option<string> {
     let v = tomlFindKey(s, start, end, key)
     if let Option.Some(t) = v {
         if t.start < t.end && (t.raw[t.start] == '"' || t.raw[t.start] == '\'') {
@@ -242,7 +247,7 @@ pub fn tomlGetStr(s: &string, start: i64, end: i64, key: &string): Option<string
     return Option.None
 }
 
-pub fn tomlGetI64(s: &string, start: i64, end: i64, key: &string): Option<i64> {
+fn tomlGetI64(s: &string, start: i64, end: i64, key: &string): Option<i64> {
     let v = tomlFindKey(s, start, end, key)
     if let Option.Some(t) = v {
         var result: i64 = 0
@@ -267,7 +272,7 @@ pub fn tomlGetI64(s: &string, start: i64, end: i64, key: &string): Option<i64> {
     return Option.None
 }
 
-pub fn tomlGetF64(s: &string, start: i64, end: i64, key: &string): Option<f64> {
+fn tomlGetF64(s: &string, start: i64, end: i64, key: &string): Option<f64> {
     let v = tomlFindKey(s, start, end, key)
     if let Option.Some(t) = v {
         var result: f64 = 0.0
@@ -301,7 +306,7 @@ pub fn tomlGetF64(s: &string, start: i64, end: i64, key: &string): Option<f64> {
     return Option.None
 }
 
-pub fn tomlGetBool(s: &string, start: i64, end: i64, key: &string): Option<bool> {
+fn tomlGetBool(s: &string, start: i64, end: i64, key: &string): Option<bool> {
     let v = tomlFindKey(s, start, end, key)
     if let Option.Some(t) = v {
         if t.end - t.start == 4 && t.raw[t.start] == 't' {
@@ -314,7 +319,7 @@ pub fn tomlGetBool(s: &string, start: i64, end: i64, key: &string): Option<bool>
     return Option.None
 }
 
-pub fn tomlGetTable(s: &string, start: i64, end: i64, key: &string): Option<Toml> {
+fn tomlGetTable(s: &string, start: i64, end: i64, key: &string): Option<Toml> {
     // search for [key] header
     var i = start
     while i < end {

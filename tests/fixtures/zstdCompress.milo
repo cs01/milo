@@ -4,12 +4,12 @@
 // checked to actually shrink compressible input while never expanding.
 
 from "std/zstd" import {
-    zstdCompress, zstdDecompress
+    Zstd
 }
 
 pub fn roundtrips(src: &string): bool {
-    let framed = zstdCompress(src)
-    match zstdDecompress(framed) {
+    let framed = Zstd.compress(src)
+    match Zstd.decompress(framed) {
         Result.Ok(s) => {
             return s == src
         }
@@ -20,7 +20,7 @@ pub fn roundtrips(src: &string): bool {
 }
 
 pub fn compressedLen(src: &string): i64 {
-    return zstdCompress(src).len
+    return Zstd.compress(src).len
 }
 
 pub fn main() {

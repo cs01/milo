@@ -17,7 +17,7 @@ from "std/crypto" import {
     Crypto
 }
 from "std/random" import {
-    randBytes
+    Random
 }
 from "std/base64" import {
     Base64
@@ -38,7 +38,7 @@ ensures result.len == 16
 {
     var buf: [u8; 16] = [0; 16]
     unsafe {
-        randBytes(buf as *u8, 16)
+        Random.bytes(buf as *u8, 16)
     }
     var s: string = ""
     for i in 0..16 {

@@ -18,10 +18,10 @@ from "std/time" import {
     sleepMs
 }
 from "std/ansi" import {
-    cursorTo, pushFg24, pushBg24, ansiReset, clearScreen, cursorHome, hideCursor, showCursor
+    Ansi
 }
 from "std/color" import {
-    bold, gray
+    Color
 }
 from "std/os" import {
     ioctl
@@ -148,7 +148,7 @@ pub fn drawSprite(buf: &mut string, row0: i64, col0: i64): void {
     var tcol: [i64; 4] = [0; 4]
     var bcol: [i64; 4] = [0; 4]
     for tr in 0..hc {
-        emit(buf, cursorTo(row0 + tr, col0))
+        emit(buf, Ansi.cursorTo(row0 + tr, col0))
         let rowTop = spriteRow(tr * 2)
         let rowBot = spriteRow(tr * 2 + 1)
         for c in 0..SPR_W {
@@ -157,16 +157,16 @@ pub fn drawSprite(buf: &mut string, row0: i64, col0: i64): void {
             let topOp = tcol[3] == 1
             let botOp = bcol[3] == 1
             if topOp && botOp {
-                pushFg24(buf, tcol[0], tcol[1], tcol[2])
-                pushBg24(buf, bcol[0], bcol[1], bcol[2])
+                Ansi.pushFg24(buf, tcol[0], tcol[1], tcol[2])
+                Ansi.pushBg24(buf, bcol[0], bcol[1], bcol[2])
                 emit(buf, "▀")
             } else if topOp {
                 emit(buf, "\x1b[49m") // default bg for the empty lower half
-                pushFg24(buf, tcol[0], tcol[1], tcol[2])
+                Ansi.pushFg24(buf, tcol[0], tcol[1], tcol[2])
                 emit(buf, "▀")
             } else if botOp {
                 emit(buf, "\x1b[49m")
-                pushFg24(buf, bcol[0], bcol[1], bcol[2])
+                Ansi.pushFg24(buf, bcol[0], bcol[1], bcol[2])
                 emit(buf, "▄")
             } else {
                 emit(buf, "\x1b[49m")
@@ -177,9 +177,9 @@ pub fn drawSprite(buf: &mut string, row0: i64, col0: i64): void {
 }
 
 pub fn eraseRect(buf: &mut string, row0: i64, col0: i64, w: i64, h: i64): void {
-    emit(buf, ansiReset())
+    emit(buf, Ansi.reset())
     for r in 0..h {
-        emit(buf, cursorTo(row0 + r, col0))
+        emit(buf, Ansi.cursorTo(row0 + r, col0))
         for c in 0..w {
             buf.push(32 as u8)
         }
@@ -188,7 +188,7 @@ pub fn eraseRect(buf: &mut string, row0: i64, col0: i64, w: i64, h: i64): void {
 
 pub fn main(): i32 {
     let termState = enableRawMode()
-    writeStdout(hideCursor() + clearScreen())
+    writeStdout(Ansi.hideCursor() + Ansi.clearScreen())
 
     var size: [i64; 2] = [0; 2]
     termSize(size)
@@ -240,15 +240,15 @@ pub fn main(): i32 {
         var buf = String.withCapacity(16384)
         eraseRect(buf, prevY + playTop, prevX + 1, SPR_W, sprH)
         drawSprite(buf, y + playTop, x + 1)
-        emit(buf, ansiReset())
+        emit(buf, Ansi.reset())
 
-        emit(buf, cursorTo(1, 1))
-        emit(buf, bold(" chihuahua "))
-        emit(buf, gray($" bounces: {bounces}  "))
+        emit(buf, Ansi.cursorTo(1, 1))
+        emit(buf, Color.bold(" chihuahua "))
+        emit(buf, Color.gray($" bounces: {bounces}  "))
         if corner {
-            emit(buf, bold("★ CORNER! ★"))
+            emit(buf, Color.bold("★ CORNER! ★"))
         }
-        emit(buf, gray("  ·  q quit          "))
+        emit(buf, Color.gray("  ·  q quit          "))
 
         writeStdout(buf)
         prevX = x
@@ -265,7 +265,7 @@ pub fn main(): i32 {
         }
     }
 
-    writeStdout(showCursor() + clearScreen() + cursorHome() + ansiReset())
+    writeStdout(Ansi.showCursor() + Ansi.clearScreen() + Ansi.cursorHome() + Ansi.reset())
     restoreTerminal(termState)
     print("bye from the milo chihuahua ♥  https://milo-language.github.io/milo/")
     return 0

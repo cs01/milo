@@ -10,7 +10,7 @@ pub struct Url {
     raw: string,
 }
 
-pub fn urlParse(s: string): Result<Url> {
+fn urlParse(s: string): Result<Url> {
     var scheme: string = ""
     var host: string = ""
     var port: i32 = 0
@@ -108,7 +108,7 @@ pub fn urlParse(s: string): Result<Url> {
     )
 }
 
-pub fn _parsePort(s: &string): i32 {
+fn _parsePort(s: &string): i32 {
     var result: i32 = 0
     var i: i64 = 0
     while i < s.len {
@@ -122,7 +122,7 @@ pub fn _parsePort(s: &string): i32 {
     return result
 }
 
-pub fn urlQueryGet(u: &Url, key: &string): Option<string> {
+fn urlQueryGet(u: &Url, key: &string): Option<string> {
     if u.query.len == 0 {
         return Option.None
     }
@@ -166,7 +166,7 @@ fn strEqUrl(a: &string, b: &string): bool {
     return true
 }
 
-pub fn urlString(u: &Url): string {
+fn urlString(u: &Url): string {
     var result: string = ""
     if u.scheme.len > 0 {
         result = result + u.scheme + "://"
@@ -183,4 +183,17 @@ pub fn urlString(u: &Url): string {
         result = result + "#" + u.fragment
     }
     return result
+}
+
+// Url instance/static API — Url.parse(s), u.queryGet(key), u.toString().
+impl Url {
+    fn parse(s: string): Result<Url> {
+        return urlParse(s)
+    }
+    fn queryGet(self: &Self, key: &string): Option<string> {
+        return urlQueryGet(self, key)
+    }
+    fn toString(self: &Self): string {
+        return urlString(self)
+    }
 }

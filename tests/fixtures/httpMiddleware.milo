@@ -11,7 +11,7 @@ from "std/jwt" import {
     Jwt
 }
 from "std/inflate" import {
-    gzipDecompress
+    Inflate
 }
 
 pub fn mkCtx(headers: Vec<Param>): Context {
@@ -92,7 +92,7 @@ pub fn main() {
         Response.Status(code, ct, cbody) => {
             // @expect: true
             print(cbody.len < origLen)
-            match gzipDecompress(cbody) {
+            match Inflate.gzip(cbody) {
                 Result.Ok(dec) => {
                     // @expect: true
                     print(dec.len == origLen)

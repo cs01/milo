@@ -540,6 +540,24 @@ let p = Point { x, y }        // same as Point { x: x, y: y }
 let q = Point { x, y: 99 }    // shorthand + explicit
 ```
 
+### Newtypes — distinct type from a single field
+
+A struct with one field is a **newtype**: a zero-cost, distinct type wrapping a value. It compiles to exactly its inner type (the wrapper is elided — same registers, same ABI), but the type checker keeps it separate from the raw type and from every other newtype. This is the idiom for type-safe IDs and indices: give each pool or key space its own newtype and the compiler rejects cross-pool confusion that a bare `i64` would wave through.
+
+```milo
+struct NodeId { idx: i64 }
+struct EdgeId { idx: i64 }
+
+fn nodeAt(nodes: Vec<Node>, id: NodeId): Node {
+    return nodes.get(id.idx)
+}
+
+let e = EdgeId { idx: 3 }
+nodeAt(nodes, e)   // compile error: expected NodeId, got EdgeId
+```
+
+There is no special newtype syntax — it is just a single-field struct, so it inherits everything structs already have: auto-derived equality, use as a HashMap key (see below), methods via `impl`, and move semantics. Equality and hashing of a newtype are exactly the equality and hashing of the value it wraps.
+
 ### Generic Structs
 
 ```milo
@@ -1009,6 +1027,23 @@ let v = m.getOrDefault("hello", 0)  // returns i32 directly (0 if missing)
 
 m.remove("hello")
 ```
+
+### Keys
+
+A key type must be **hashable**: an integer, `bool`, `string`, or a **struct all of whose fields are hashable** (recursively). Struct keys are hashed and compared *structurally* — field by field — so newtypes and small value types work as keys with no boilerplate:
+
+```milo
+struct Point { x: i64, y: i64 }
+var grid: HashMap<Point, string> = HashMap.new()
+grid.insert(Point { x: 1, y: 2 }, "wall")
+grid.get(Point { x: 1, y: 2 })   // Some("wall")
+```
+
+Two guarantees, and one non-guarantee:
+
+- **Equality and hashing agree.** Both derive from the same field recursion, so `a == b` implies `hash(a) == hash(b)` by construction — the coherence law a hand-written hash could violate.
+- **Ordering is not automatic.** Equality and hashing are structural *facts* and are derived for you; ordering embeds an *opinion* (which field ranks first) and is not. There is no `<` on structs and no `sort()` on a `Vec` of them unless you opt in — sort by an explicit key with `sortBy` instead.
+- **Hash values are not stable** across compiler versions or program runs. Do not persist them, hash across a wire, or otherwise depend on a specific value — they are for in-memory lookup only.
 
 ---
 

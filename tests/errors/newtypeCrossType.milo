@@ -1,0 +1,11 @@
+// Newtypes are distinct types: passing one where another is expected must fail,
+// even though both wrap i64. This is the cross-pool/mixed-ID guard.
+struct NodeId { idx: i64 }
+struct EdgeId { idx: i64 }
+
+fn takesNode(n: NodeId): i64 { return n.idx }
+
+fn main() {
+  let e = EdgeId { idx: 5 }
+  print(takesNode(e))  // @error: expected NodeId, got EdgeId
+}

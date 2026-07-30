@@ -1,0 +1,61 @@
+// Newtype idiom: a single-field named struct is a zero-cost, distinct type. It
+// wraps one value, compiles to exactly its inner type, and the compiler keeps it
+// separate from the raw type and from other newtypes — killing cross-pool /
+// mixed-ID bugs. No dedicated syntax: it's just a struct.
+struct NodeId {
+    idx: i64
+}
+
+struct EdgeId {
+    idx: i64
+}
+
+fn bumpNode(id: NodeId): NodeId {
+    return NodeId {
+        idx: id.idx + 1
+    }
+}
+
+fn main() {
+    let n = NodeId {
+        idx: 5
+    }
+    // @expect: 5
+    print(n.idx)
+    let n2 = bumpNode(n)
+    // @expect: 6
+    print(n2.idx)
+
+    // whole-struct equality is auto-derived
+    // @expect: true
+    print(n == NodeId {
+        idx: 5
+    }
+    )
+
+    // newtypes are usable as HashMap keys (structural hash)
+    var m: HashMap<NodeId, i64> = HashMap.new()
+    m.insert(NodeId {
+        idx: 7
+    }
+    , 100)
+    m.insert(NodeId {
+        idx: 8
+    }
+    , 200)
+    // @expect: 100
+    print(m.get(NodeId {
+        idx: 7
+    }
+    )!)
+    // @expect: 200
+    print(m.get(NodeId {
+        idx: 8
+    }
+    )!)
+    // @expect: false
+    print(m.contains(NodeId {
+        idx: 9
+    }
+    ))
+}

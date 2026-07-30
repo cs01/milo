@@ -6985,36 +6985,45 @@ export class Codegen {
   }
 
   private emitFnvHash(lines: string[], keyVal: string, keyType: TypeKind, seedReg: string): string {
-    // FNV-1a: hash = offset_basis ^ seed; for each byte: hash ^= byte; hash *= prime
+    // FNV-1a: hash = offset_basis ^ seed; then fold the key's bytes in.
     const offsetBasis = "14695981039346656037";
-    const prime = "1099511628211";
     const h0 = this.nextTemp();
     lines.push(`  ${h0} = xor i64 ${offsetBasis}, ${seedReg}`);
+    return this.emitHashInto(lines, h0, keyVal, keyType);
+  }
 
-    if (keyType.tag === "bool") {
+  // Fold `val`'s bytes into the running FNV-1a accumulator `acc`, returning the new
+  // accumulator. Structs recurse field-by-field over the *same* recursion that derives
+  // equality — so `a == b ⟹ hash(a) == hash(b)` holds by construction (the eq–hash
+  // coherence law). Hash values are NOT stable across compiler versions or runs (the
+  // table seed varies): never persist them or put them on the wire.
+  private emitHashInto(lines: string[], acc: string, val: string, type: TypeKind): string {
+    const prime = "1099511628211";
+
+    if (type.tag === "bool") {
       const byte = this.nextTemp();
-      lines.push(`  ${byte} = zext i1 ${keyVal} to i64`);
+      lines.push(`  ${byte} = zext i1 ${val} to i64`);
       const x = this.nextTemp();
-      lines.push(`  ${x} = xor i64 ${h0}, ${byte}`);
+      lines.push(`  ${x} = xor i64 ${acc}, ${byte}`);
       const result = this.nextTemp();
       lines.push(`  ${result} = mul i64 ${x}, ${prime}`);
       return result;
     }
 
-    if (keyType.tag === "int") {
+    if (type.tag === "int") {
       let val64: string;
-      if (keyType.bits === 64) {
-        val64 = keyVal;
+      if (type.bits === 64) {
+        val64 = val;
       } else {
         val64 = this.nextTemp();
-        if (keyType.signed) {
-          lines.push(`  ${val64} = sext i${keyType.bits} ${keyVal} to i64`);
+        if (type.signed) {
+          lines.push(`  ${val64} = sext i${type.bits} ${val} to i64`);
         } else {
-          lines.push(`  ${val64} = zext i${keyType.bits} ${keyVal} to i64`);
+          lines.push(`  ${val64} = zext i${type.bits} ${val} to i64`);
         }
       }
       // unrolled 8-byte FNV-1a
-      let hash = h0;
+      let hash = acc;
       for (let i = 0; i < 8; i++) {
         const shifted = this.nextTemp();
         lines.push(`  ${shifted} = lshr i64 ${val64}, ${i * 8}`);
@@ -7028,18 +7037,18 @@ export class Codegen {
       return hash;
     }
 
-    if (keyType.tag === "string") {
+    if (type.tag === "string") {
       this.hasStringType = true;
       const strData = this.nextTemp();
-      lines.push(`  ${strData} = extractvalue %String ${keyVal}, 0`);
+      lines.push(`  ${strData} = extractvalue %String ${val}, 0`);
       const strLen = this.nextTemp();
-      lines.push(`  ${strLen} = extractvalue %String ${keyVal}, 1`);
+      lines.push(`  ${strLen} = extractvalue %String ${val}, 1`);
       const iAddr = this.nextTemp();
       lines.push(`  ${iAddr} = alloca i64`);
       lines.push(`  store i64 0, ptr ${iAddr}`);
       const hAddr = this.nextTemp();
       lines.push(`  ${hAddr} = alloca i64`);
-      lines.push(`  store i64 ${h0}, ptr ${hAddr}`);
+      lines.push(`  store i64 ${acc}, ptr ${hAddr}`);
       const condLabel = this.nextLabel("fnv.cond");
       const bodyLabel = this.nextLabel("fnv.body");
       const endLabel = this.nextLabel("fnv.end");
@@ -7074,7 +7083,20 @@ export class Codegen {
       return result;
     }
 
-    throw new Error(`unhashable key type: ${keyType.tag}`);
+    if (type.tag === "struct") {
+      const layout = this.structLayouts.get(type.name);
+      if (!layout) throw new Error(`hash: unknown struct layout '${type.name}'`);
+      const structTy = this.llvmType(type);
+      let hash = acc;
+      for (let i = 0; i < layout.fields.length; i++) {
+        const fieldVal = this.nextTemp();
+        lines.push(`  ${fieldVal} = extractvalue ${structTy} ${val}, ${i}`);
+        hash = this.emitHashInto(lines, hash, fieldVal, layout.fields[i].typeKind);
+      }
+      return hash;
+    }
+
+    throw new Error(`unhashable key type: ${type.tag}`);
   }
 
   private emitKeyCompare(lines: string[], k1: string, k2: string, keyType: TypeKind): string {
@@ -7111,6 +7133,29 @@ export class Codegen {
       const result = this.nextTemp();
       lines.push(`  ${result} = phi i1 [${dataEq}, %${cmpDataLabel}], [false, %${cmpFalseLabel}]`);
       return result;
+    }
+    if (keyType.tag === "struct") {
+      // Structural equality — the same field recursion that hashing folds over, so the
+      // eq–hash coherence law holds by construction.
+      const layout = this.structLayouts.get(keyType.name);
+      if (!layout) throw new Error(`compare: unknown struct layout '${keyType.name}'`);
+      const structTy = this.llvmType(keyType);
+      let acc: string | null = null;
+      for (let i = 0; i < layout.fields.length; i++) {
+        const f1 = this.nextTemp();
+        lines.push(`  ${f1} = extractvalue ${structTy} ${k1}, ${i}`);
+        const f2 = this.nextTemp();
+        lines.push(`  ${f2} = extractvalue ${structTy} ${k2}, ${i}`);
+        const fieldEq = this.emitKeyCompare(lines, f1, f2, layout.fields[i].typeKind);
+        if (acc === null) {
+          acc = fieldEq;
+        } else {
+          const a = this.nextTemp();
+          lines.push(`  ${a} = and i1 ${acc}, ${fieldEq}`);
+          acc = a;
+        }
+      }
+      return acc ?? "true"; // a fieldless struct compares equal vacuously
     }
     throw new Error(`uncomparable key type: ${keyType.tag}`);
   }

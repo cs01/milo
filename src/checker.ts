@@ -1681,12 +1681,6 @@ export class TypeChecker {
     }
   }
 
-  private resolveTypeNameForImpl(name: string): string {
-    if (this.structs.has(name) || this.genericStructs.has(name)) return name;
-    if (this.enums.has(name) || this.genericEnums.has(name)) return name;
-    return name;
-  }
-
   private substituteSelfInMiloType(ty: MiloType, concreteName: string): MiloType {
     if (ty.name === "Self") return { ...ty, name: concreteName };
     if (ty.typeArgs) return { ...ty, typeArgs: ty.typeArgs.map(a => this.substituteSelfInMiloType(a, concreteName)) };
@@ -3052,13 +3046,6 @@ export class TypeChecker {
     return false;
   }
 
-  private isPayloadFreeEnum(name: string): boolean {
-    const info = this.enums.get(name);
-    if (!info) return false;
-    for (const [, v] of info.variants) if (v.fields.length > 0) return false;
-    return true;
-  }
-
   private allCopyEnumCache = new Map<string, boolean>();
   private isAllCopyEnum(name: string): boolean {
     const cached = this.allCopyEnumCache.get(name);
@@ -3386,12 +3373,6 @@ export class TypeChecker {
       }
       this.retypeConstInt(e.operand, t); this.exprTypes.set(e, t); return;
     }
-  }
-
-  private rootVarOf(e: Expr): string | null {
-    let cur = e;
-    while (cur.kind === "FieldAccess" || cur.kind === "IndexAccess") cur = cur.object;
-    return cur.kind === "Ident" ? cur.name : null;
   }
 
   // Phase 3a (call-site exclusivity): a variable must not appear at one call as
@@ -6219,10 +6200,25 @@ export class TypeChecker {
     return info?.flexInt ? info : null;
   }
 
+  // A key type is hashable iff it is a scalar/string, or a struct whose every field is
+  // hashable. Structural hashing derives from the same field recursion as structural
+  // equality, so eq–hash coherence (a == b ⟹ hash(a) == hash(b)) holds by construction.
+  private isHashable(t: TypeKind, seen: Set<string> = new Set()): boolean {
+    if (t.tag === "int" || t.tag === "bool" || t.tag === "string") return true;
+    if (t.tag === "struct") {
+      if (seen.has(t.name)) return true; // cycle guard (structs can't nest by value anyway)
+      seen.add(t.name);
+      const info = this.structs.get(t.name);
+      if (!info) return false;
+      return info.fields.every(f => this.isHashable(f.type, seen));
+    }
+    return false;
+  }
+
   private validateHashableKey(t: TypeKind, span?: Span) {
-    if (t.tag === "int" || t.tag === "bool" || t.tag === "string") return;
+    if (this.isHashable(t)) return;
     if (t.tag !== "unknown") {
-      this.error(`type '${typeName(t)}' is not hashable — only integer, bool, and string keys are supported`, span);
+      this.error(`type '${typeName(t)}' is not hashable — keys must be integer, bool, string, or a struct of hashable fields`, span);
     }
   }
 

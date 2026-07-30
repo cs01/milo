@@ -1,10 +1,13 @@
 // @error: not hashable
 
-struct Point {
-    x: i32, y: i32
+// A struct is hashable only if every field is. A Vec field is not, so a struct
+// containing one cannot be a key. (A struct of scalar fields, like Point, IS a
+// valid key — see fixtures/hashmapStructKey.milo.)
+struct Bag {
+    items: Vec<i32>
 }
 
 fn main(): i32 {
-    var m: HashMap<Point, i32> = HashMap.new()
+    var m: HashMap<Bag, i32> = HashMap.new()
     return 0
 }

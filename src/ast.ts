@@ -148,9 +148,6 @@ export interface StructDecl {
   isExtern?: boolean;
   isOpaque?: boolean;
   isPub?: boolean;
-  // Tuple struct / newtype: `struct NodeId(i64)`. Fields are synthesized with positional
-  // names "0","1",… — construction is call-form (`NodeId(5)`), access is `.0`.
-  isTuple?: boolean;
 }
 
 export interface EnumVariant {

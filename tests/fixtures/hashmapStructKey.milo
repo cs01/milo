@@ -1,0 +1,58 @@
+// Structs of hashable fields are usable as HashMap keys (structural hash + eq,
+// derived from the same field recursion — so a == b implies hash(a) == hash(b)).
+struct Point {
+    x: i64, y: i64
+}
+
+struct Named {
+    id: i64, tag: string
+}
+
+fn main() {
+    var m: HashMap<Point, string> = HashMap.new()
+    let a = Point {
+        x: 1, y: 2
+    }
+    let b = Point {
+        x: 2, y: 1
+    }
+    m.insert(a, "a")
+    m.insert(b, "b")
+    // field order is significant: (1,2) and (2,1) are distinct keys
+    // @expect: a
+    print(m.get(Point {
+        x: 1, y: 2
+    }
+    )!)
+    // @expect: b
+    print(m.get(Point {
+        x: 2, y: 1
+    }
+    )!)
+    // @expect: false
+    print(m.contains(Point {
+        x: 9, y: 9
+    }
+    ))
+
+    // a string field participates in the structural hash
+    var n: HashMap<Named, i64> = HashMap.new()
+    let nx = Named {
+        id: 1, tag: "x"
+    }
+    let ny = Named {
+        id: 1, tag: "y"
+    }
+    n.insert(nx, 10)
+    n.insert(ny, 20)
+    // @expect: 10
+    print(n.get(Named {
+        id: 1, tag: "x"
+    }
+    )!)
+    // @expect: 20
+    print(n.get(Named {
+        id: 1, tag: "y"
+    }
+    )!)
+}

@@ -7919,6 +7919,14 @@ export class Codegen {
   // Kept distinct from a user's exit(status) call, which stays a plain exit. Callers still
   // push their own `unreachable` after this.
   private panicAbort(lines: string[]) {
+    // Bare-metal/freestanding (os "none"): there is no libc, so abort()/fflush() are
+    // undefined symbols. The embedded runtime provides exit (semihosting SYS_EXIT) and there
+    // is no buffered stdio to flush — terminate exactly as the pre-abort panic did there.
+    if (this.target.os === "none") {
+      this.needsExit = true;
+      lines.push(`  call void @exit(i32 1)`);
+      return;
+    }
     this.needsAbort = true;
     // abort() raises SIGABRT immediately WITHOUT flushing stdio — unlike exit(), which does.
     // The panic message was just printf'd (block-buffered on a piped stdout, e.g. Linux under

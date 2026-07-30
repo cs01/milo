@@ -515,8 +515,10 @@ export class Codegen {
     return t.tag === "int" && !t.signed;
   }
 
-  private addString(value: string): { label: string; length: number } {
-    const label = `@.str.${this.strCounter++}`;
+  // Escape a JS string into an LLVM `c"..."` body plus its exact byte length (no null
+  // terminator). Backslash MUST become \5C — a raw '\' from e.g. a Windows path (`D:\a\...`)
+  // would otherwise be read by LLVM as an escape and desync the declared array size.
+  private escapeCString(value: string): { escaped: string; byteLen: number } {
     let escaped = "";
     let byteLen = 0;
     for (const ch of value) {
@@ -538,9 +540,15 @@ export class Codegen {
         }
       }
     }
-    byteLen += 1; // null terminator
-    this.strings.push({ label, escaped, length: byteLen });
-    return { label, length: byteLen };
+    return { escaped, byteLen };
+  }
+
+  private addString(value: string): { label: string; length: number } {
+    const label = `@.str.${this.strCounter++}`;
+    const { escaped, byteLen } = this.escapeCString(value);
+    const length = byteLen + 1; // null terminator
+    this.strings.push({ label, escaped, length });
+    return { label, length };
   }
 
   private typeSize(ty: string): number {
@@ -1199,7 +1207,10 @@ export class Codegen {
     if (this.needsBoundsCheck)
       this.output.splice(1, 0, `@.bounds_err = private unnamed_addr constant [40 x i8] c"milo: array index out of bounds: %d/%d\\0A\\00"`);
     for (const [file, name] of this.checkFileConstants) {
-      this.output.splice(1, 0, `${name} = private unnamed_addr constant [${file.length + 1} x i8] c"${file}\\00"`);
+      // Escape the path (Windows backslashes especially) so the declared array length
+      // matches the actual bytes — a raw '\' desyncs LLVM's size check.
+      const { escaped, byteLen } = this.escapeCString(file);
+      this.output.splice(1, 0, `${name} = private unnamed_addr constant [${byteLen + 1} x i8] c"${escaped}\\00"`);
     }
     if (this.needsContractCheck) {
       const msg = "runtime error: %s clause violated at %s:%d";

@@ -1731,7 +1731,7 @@ fn updateWaves(w: &mut World, dt: f64) {
 }
 
 pub fn offerPerks(w: &mut World) {
-    w.perkChoices = Vec.new()
+    w.perkChoices.clear()
     var tries: i64 = 0
     while w.perkChoices.len < 3 && tries < 60 {
         tries = tries + 1
@@ -1828,14 +1828,16 @@ pub fn worldUpdate(w: &mut World, dtIn: f64, mx: f64, my: f64, aim: f64, fire: b
 }
 
 pub fn worldReset(w: &mut World) {
-    w.ents = Vec.new()
-    w.free = Vec.new()
-    w.bullets = Vec.new()
-    w.parts = Vec.new()
-    w.arcs = Vec.new()
-    w.perks = Vec.new()
-    w.perkChoices = Vec.new()
-    w.hashNext = Vec.new()
+    // clear() keeps the storage a run has already grown into, so a restart does
+    // not re-allocate everything from scratch mid-session.
+    w.ents.clear()
+    w.free.clear()
+    w.bullets.clear()
+    w.parts.clear()
+    w.arcs.clear()
+    w.perks.clear()
+    w.perkChoices.clear()
+    w.hashNext.clear()
     w.player.x = w.w * 0.5
     w.player.y = w.h * 0.5
     w.player.vx = 0.0

@@ -39,19 +39,16 @@ fn writePpm(path: &string, c: &Canvas) {
         rgb[i * 3 + 1] = ((px >> 8) & 0xFF) as u8
         rgb[i * 3 + 2] = ((px >> 16) & 0xFF) as u8
     }
-    // Bind first: `W.toString()` on a module-level `let` parses as enum access.
-    let ww = W
-    let hh = H
-    let header = "P6\n" + ww.toString() + " " + hh.toString() + "\n255\n"
+    let header = "P6\n" + W.toString() + " " + H.toString() + "\n255\n"
     unsafe {
         let f = fopen(path.cstr(), "wb".cstr())
         if (f as i64) == 0 {
             print("cannot open " + path)
             return
         }
-        let _n0 = fwrite(header.cstr(), 1, header.len, f)
-        let _n1 = fwrite(rgb.ptr() as *u8, 1, W * H * 3, f)
-        let _n2 = fclose(f)
+        let _ = fwrite(header.cstr(), 1, header.len, f)
+        let _ = fwrite(rgb.ptr() as *u8, 1, W * H * 3, f)
+        let _ = fclose(f)
     }
 }
 
@@ -97,9 +94,9 @@ pub fn main(): i32 {
             for i in 0..4 {
                 let _ = spawn(world, makeEnemy(Kind.Weaver, 200.0 + (i as f64) * 60.0, 620.0))
             }
-            let _s0 = spawn(world, makeEnemy(Kind.Splitter, 1050.0, 560.0))
-            let _s1 = spawn(world, makeEnemy(Kind.Healer, 900.0, 620.0))
-            let _s2 = spawn(world, makeEnemy(Kind.BlackHole, 330.0, 470.0))
+            let _ = spawn(world, makeEnemy(Kind.Splitter, 1050.0, 560.0))
+            let _ = spawn(world, makeEnemy(Kind.Healer, 900.0, 620.0))
+            let _ = spawn(world, makeEnemy(Kind.BlackHole, 330.0, 470.0))
         }
         if frame == 140 {
             spawnBoss(world, 980.0, 320.0)
@@ -144,7 +141,7 @@ pub fn main(): i32 {
 
 // The perk screen normally drives this; the capture tool grants perks directly.
 fn choosePerk2(w: &mut World, p: Perk) {
-    w.perkChoices = Vec.new()
+    w.perkChoices.clear()
     w.perkChoices.push(p)
     w.perkPick = true
     choosePerk(w, 0)

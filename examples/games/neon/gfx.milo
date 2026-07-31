@@ -404,8 +404,6 @@ fn tone(x: f64): f64 {
     return x / (1.0 + x)
 }
 
-pub let ONE_F32: f32 = 1.0
-
 pub let TONE_STEPS: i64 = 2048 // covers linear 0..8, past which the curve is saturated
 
 fn encodeSlow(v: f64): u32 {
@@ -446,11 +444,9 @@ pub fn present(c: &mut Canvas, bloomGain: f64, exposure: f64) {
         for x in 0..c.w {
             let bx = c.ux0[x] * 3
             let tx = c.utx[x]
-            // ONE_F32, not the literal 1.0: a float literal in a binary op is f64
-            // and will not narrow to the f32 operand.
-            let w00: f32 = (ONE_F32 - tx) * (ONE_F32 - ty)
-            let w01: f32 = tx * (ONE_F32 - ty)
-            let w10: f32 = (ONE_F32 - tx) * ty
+            let w00: f32 = (1.0 - tx) * (1.0 - ty)
+            let w01: f32 = tx * (1.0 - ty)
+            let w10: f32 = (1.0 - tx) * ty
             let w11: f32 = tx * ty
             let i00 = row0 + bx
             let i10 = row1 + bx

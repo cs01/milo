@@ -142,12 +142,14 @@ Papercuts found while writing this, none of them about references. All five were
 real, and all five are now fixed in the compiler:
 
 - `Vec` had no `clear()` or `truncate()` — the grid rebuild popped in a loop.
-  Both now exist and run drop glue on the discarded elements.
+  Both now exist and run drop glue on the discarded elements. The game uses
+  `clear()` in `worldReset` so a restart reuses the storage the run grew into.
 - `let _ = f()` twice in one scope errored with *"variable '_' already declared"*.
   `_` is a discard, so it now rebinds.
 - A float literal in a binary expression stayed `f64` and would not narrow to an
   `f32` operand, so `1.0 - someF32` failed and needed a named `ONE_F32` constant.
-  Float literals now adopt the other operand's width, like integer literals.
+  Float literals now adopt the other operand's width, like integer literals, and
+  `gfx.milo` no longer carries the workaround constant.
 - `W.toString()` where `W` is a module-level `pub let` parsed as a static call on a
   type named `W`. It now falls back to a method call on the variable.
 - `match opt { Some(x) => … }` required writing `Option.Some`. The enum name may now

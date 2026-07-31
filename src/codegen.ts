@@ -1362,6 +1362,15 @@ export class Codegen {
       for (const line of body) this.emit(line);
     }
 
+    if (this.needsBoundsCheck) {
+      this.emit("");
+      for (const line of this.boundsFailHelper()) this.emit(line);
+    }
+    if (this.needsOverflowCheck) {
+      this.emit("");
+      for (const line of this.overflowFailHelper()) this.emit(line);
+    }
+
     // append drop helper functions
     for (const body of this.dropHelperBodies) {
       this.emit("");
@@ -1942,6 +1951,13 @@ export class Codegen {
     return [lines, "null", "i32"];
   }
 
+  // The failure path is ONE out-of-line `cold noreturn` call, not the printf +
+  // fflush + abort sequence spelled out at every subscript. Inline, those three
+  // calls appear once per access — the flyby rasteriser's pixel loop carried 24 of
+  // each — and a call in a loop body is something LLVM's vectoriser refuses to
+  // look past ("call instruction cannot be vectorized"), quite apart from what it
+  // does to inlining budgets and I-cache. `cold` also tells LLVM which way the
+  // branch goes, so the check falls through in the common case.
   private emitBoundsCheck(lines: string[], idx: string, size: string) {
     this.needsBoundsCheck = true;
     const cmpTmp = this.nextTemp();
@@ -1951,12 +1967,34 @@ export class Codegen {
     lines.push(`  ${cmpTmp} = icmp ult i32 ${idx}, ${size}`);
     lines.push(`  br i1 ${cmpTmp}, label %${okLabel}, label %${failLabel}`);
     lines.push(`${failLabel}:`);
-    const fmtPtr = this.nextTemp();
-    lines.push(`  ${fmtPtr} = getelementptr [40 x i8], ptr @.bounds_err, i32 0, i32 0`);
-    lines.push(`  call i32 (ptr, ...) @printf(ptr ${fmtPtr}, i32 ${idx}, i32 ${size})`);
-    this.panicAbort(lines);
+    lines.push(`  call void @__milo_bounds_fail(i32 ${idx}, i32 ${size})`);
     lines.push(`  unreachable`);
     lines.push(`${okLabel}:`);
+  }
+
+  private overflowFailHelper(): string[] {
+    const lines: string[] = [];
+    lines.push(`define internal void @__milo_overflow_fail(ptr %file, i32 %line) noreturn cold noinline {`);
+    lines.push(`entry.bb:`);
+    lines.push(`  %fmt = getelementptr [46 x i8], ptr @.overflow_err, i32 0, i32 0`);
+    lines.push(`  call i32 (ptr, ...) @printf(ptr %fmt, ptr %file, i32 %line)`);
+    this.panicAbort(lines);
+    lines.push(`  unreachable`);
+    lines.push(`}`);
+    return lines;
+  }
+
+  // Body of the out-of-line handler above. Emitted once per module.
+  private boundsFailHelper(): string[] {
+    const lines: string[] = [];
+    lines.push(`define internal void @__milo_bounds_fail(i32 %idx, i32 %len) noreturn cold noinline {`);
+    lines.push(`entry.bb:`);
+    lines.push(`  %fmt = getelementptr [40 x i8], ptr @.bounds_err, i32 0, i32 0`);
+    lines.push(`  call i32 (ptr, ...) @printf(ptr %fmt, i32 %idx, i32 %len)`);
+    this.panicAbort(lines);
+    lines.push(`  unreachable`);
+    lines.push(`}`);
+    return lines;
   }
 
   // Runtime exclusivity guard for by-ref arguments. The static call-site check
@@ -2141,11 +2179,11 @@ export class Codegen {
     lines.push(`  ${flag} = extractvalue {${llType}, i1} ${result}, 1`);
     lines.push(`  br i1 ${flag}, label %${failLabel}, label %${okLabel}`);
     lines.push(`${failLabel}:`);
-    const fmtPtr = this.nextTemp();
-    lines.push(`  ${fmtPtr} = getelementptr [46 x i8], ptr @.overflow_err, i32 0, i32 0`);
+    // Same reasoning as emitBoundsCheck: one cold out-of-line call, not three
+    // inline ones. Index arithmetic is checked too, so these land in the same hot
+    // loops the subscripts do.
     const filePtr = this.emitCheckFilePtr(lines, span);
-    lines.push(`  call i32 (ptr, ...) @printf(ptr ${fmtPtr}, ptr ${filePtr}, i32 ${span?.line ?? 0})`);
-    this.panicAbort(lines);
+    lines.push(`  call void @__milo_overflow_fail(ptr ${filePtr}, i32 ${span?.line ?? 0})`);
     lines.push(`  unreachable`);
     lines.push(`${okLabel}:`);
     return val;

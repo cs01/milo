@@ -18,6 +18,14 @@ export interface VerificationCondition {
   // good as the construction and maintenance obligations for that type.
   assumesInvariants?: string[];
   invariantOf?: string;
+  // Callees modelled by an INVENTED value: a `@pure` fn with no `ensures` gets a symbol
+  // that says only "this call has one fixed value per argument list". That is sound to
+  // assume, but the solver is free to pick any value for it, so a counterexample built on
+  // one is not reproducible — `Math.sqrt`'s `ensures result >= 0.0` was "refuted" by a
+  // negative sqrt. A VC carrying these can be PROVEN (nothing false was assumed) but must
+  // never be REFUTED; the verdict degrades to `unknown`, which is what the model actually
+  // knows. Same rule the pre-`@pure` code enforced by refusing to model the call at all.
+  opaqueCalls?: string[];
 }
 
 export interface VerifyResult {
@@ -65,6 +73,8 @@ interface CallModel {
   byPureKey: Map<string, string>;
   // Callee names whose postconditions were assumed while building this function's VCs.
   assumed: Set<string>;
+  // Callee names modelled by an unconstrained shared symbol — see `opaqueCalls`.
+  opaque: Set<string>;
 }
 
 // Scalar sorts the SMT translation models exactly. `miloTypeToSmt` falls back to `Int` for
@@ -166,6 +176,7 @@ function modelCall(site: object, name: string, args: Expr[], env?: Map<string, s
     if (r) ctx.assumes.push(r);
     ctx.scope.add(retName);
     ctx.byPureKey.set(pureKey, retName);
+    ctx.opaque.add(name);
     return retName;
   }
 
@@ -214,11 +225,13 @@ function fillCallModel(conditions: VerificationCondition[], from: number) {
   if (!ctx) return;
   const block = [...ctx.decls, ...ctx.assumes].join("\n");
   const assumed = [...ctx.assumed];
+  const opaque = [...ctx.opaque];
   for (let i = from; i < conditions.length; i++) {
     conditions[i]!.smtlib = block
       ? conditions[i]!.smtlib.replace(CALL_MODEL_SLOT, block)
       : conditions[i]!.smtlib.replace(`${CALL_MODEL_SLOT}\n`, "");
     if (assumed.length) conditions[i]!.assumes = assumed;
+    if (opaque.length) conditions[i]!.opaqueCalls = opaque;
   }
 }
 
@@ -1528,7 +1541,7 @@ export function generateVerificationConditions(program: Program, opts?: { onlyFi
     const decreases = fn.contracts.filter(c => c.kind === "decreases");
     contractCount += fn.contracts.length;
 
-    CALL_MODEL = { ensuresByFn, decls: [], assumes: [], n: 0, bySite: new WeakMap<object, Map<string, string>>(), byPureKey: new Map(), scope: new Set(), assumed: new Set() };
+    CALL_MODEL = { ensuresByFn, decls: [], assumes: [], n: 0, bySite: new WeakMap<object, Map<string, string>>(), byPureKey: new Map(), scope: new Set(), assumed: new Set(), opaque: new Set() };
     const vcStart = conditions.length;
 
     // Sorts are per-function: the same Milo name is an i64 here and an f64 in the next
@@ -2262,8 +2275,14 @@ export function proveWithZ3(result: VerifyResult): ProveResult {
       // negation is unsat → contract always holds
       results.push({ vc, status: "proven" });
     } else if (output === "sat") {
-      // negation is sat → contract can be violated
-      results.push({ vc, status: "failed", detail: "counterexample exists" });
+      // negation is sat → contract can be violated. Unless the model invented a call's
+      // value: then the witness may be a return the callee never produces, and `unknown`
+      // is the honest verdict (see `opaqueCalls`). Mirrors the std/smt path.
+      if (vc.opaqueCalls?.length) {
+        results.push({ vc, status: "unknown", detail: `the value of ${vc.opaqueCalls.map(n => `'${n}'`).join(", ")} is unconstrained — it is @pure but declares no 'ensures', so any counterexample here is not reproducible` });
+      } else {
+        results.push({ vc, status: "failed", detail: "counterexample exists" });
+      }
     } else if (output === "unknown") {
       results.push({ vc, status: "unknown", detail: "solver could not decide" });
     } else {

@@ -120,8 +120,7 @@ _Undocumented._
 fn Math.isNan(x: f64): bool
 ```
 
-NaN is the only value not equal to itself, so this is the one reliable test — `x == f64.NAN`
-is always false (the compiler lints that mistake).
+_Undocumented._
 
 ### `Math.log`
 

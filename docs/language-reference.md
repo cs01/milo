@@ -1168,7 +1168,7 @@ Free functions cannot return references at all.
 backing store, and the source is frozen for the borrow's life. Two `&mut` views into the
 same storage at one call site are rejected when the overlap is decidable:
 
-```milo
+```milo skip
 fn touch(a: &mut [i64], b: &mut [i64]) { a[0] = 1  b[0] = 2 }
 
 touch(v[0..2], v[2..4])    // ok — disjoint

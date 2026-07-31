@@ -386,6 +386,12 @@ export function proveWithMilo(result: VerifyResult): ProveResult {
         const vc = result.conditions[p.index];
         const v = verdicts.get(k);
         if (v?.verdict === "proven") results[p.index] = { vc, status: "proven" };
+        // A counterexample that leans on an invented call value is not reproducible — the
+        // solver chose a return the callee may never produce. Report what is actually
+        // known instead of a refutation nobody can act on (see `opaqueCalls`).
+        else if (v?.verdict === "violated" && vc.opaqueCalls?.length) {
+          results[p.index] = { vc, status: "unknown", detail: `the value of ${vc.opaqueCalls.map(n => `'${n}'`).join(", ")} is unconstrained — it is @pure but declares no 'ensures', so any counterexample here is not reproducible` };
+        }
         else if (v?.verdict === "violated") results[p.index] = { vc, status: "failed", detail: counterexampleDetail(p.vars, v.witness) };
         else if (v?.verdict === "unknown") results[p.index] = { vc, status: "unknown", detail: "no integer witness (rational-only)" };
         else results[p.index] = { vc, status: "error", detail: (proc.stderr || "std/smt solver produced no verdict").split("\n")[0] };

@@ -141,6 +141,27 @@ pub fn isPlainLiteral(pat: &string): bool {
     return true
 }
 
+// Every occurrence of a literal in a line, as match spans. Length-bounded, so it
+// is safe on a `&string` view; `Regex` is not (see searchFile).
+pub fn literalMatches(line: &string, pat: &string): Vec<RegexMatch> {
+    var out: Vec<RegexMatch> = Vec.new()
+    if pat.len == 0 {
+        return out
+    }
+    var from: i64 = 0
+    while from + pat.len <= line.len {
+        let Option.Some(at) = line.indexOfFrom(pat, from) else {
+            break
+        }
+        out.push(RegexMatch {
+            start: at, end: at + pat.len
+        }
+        )
+        from = at + pat.len
+    }
+    return out
+}
+
 pub fn getMatches(re: &mut Regex, line: &string, wordBound: bool): Vec<RegexMatch> {
     if wordBound {
         return filterWordBounds(line, re.findAll(line))
@@ -215,6 +236,63 @@ pub fn searchFile(filePath: &string, re: &mut Regex, opts: &mut RgOpts, multiFil
     // it anywhere, there is nothing to split, allocate or scan line by line. One
     // memchr pass over the buffer replaces N regex runs.
     if opts.literal && !opts.invert && !content.contains(opts.pattern) {
+        return
+    }
+
+    // `split` hands back an owned copy of every line — a second copy of the whole
+    // file, plus one allocation per line, before a single byte has been matched.
+    // With no context to print, nothing needs to look backwards, so the lines can
+    // be borrowed straight out of the buffer instead. `lines()` yields `&string`
+    // views, which is why this path allocates nothing per line.
+    // Literal pattern, no context to print: the lines can be borrowed straight out
+    // of the file buffer instead of copied.
+    //
+    // Restricted to the literal matcher on purpose. `lines()` yields `&string`
+    // VIEWS, which are not NUL-terminated — they point into the middle of the
+    // buffer. `Regex.findAll` reaches C through `.cstr()`, so handed a view it
+    // happily matches on past the view's end and reports offsets from the rest of
+    // the file. `contains`/`indexOfFrom` are length-bounded (memchr + memcmp) and
+    // are safe on a view.
+    if opts.literal && !opts.invert && opts.beforeCtx == 0 && opts.afterCtx == 0 && !opts.filesOnly {
+        var matchCountF: i64 = 0
+        var headerPrintedF: bool = false
+        var lineNo: i64 = 0
+        for line in content.lines() {
+            let matchesF = literalMatches(line, opts.pattern)
+            let isMatchF = matchesF.len > 0
+            if isMatchF {
+                matchCountF = matchCountF + 1
+                if !opts.countOnly {
+                    if !headerPrintedF && multiFile && !opts.noHeading {
+                        if opts.needsSeparator {
+                            print("")
+                        }
+                        if opts.noColor {
+                            print(filePath)
+                        } else {
+                            print(Color.magenta(filePath))
+                        }
+                        headerPrintedF = true
+                        opts.needsSeparator = true
+                    }
+                    let hlF = highlightLine(line, matchesF, opts.noColor || opts.invert)
+                    print(formatLine(hlF, lineNo, true, filePath, multiFile, opts))
+                }
+                if opts.maxCount > 0 && matchCountF >= opts.maxCount {
+                    lineNo = lineNo + 1
+                    break
+                }
+            }
+            lineNo = lineNo + 1
+        }
+        if opts.countOnly && matchCountF > 0 {
+            if multiFile {
+                print(filePath + ":" + matchCountF.toString())
+            } else {
+                print(matchCountF.toString())
+            }
+        }
+        opts.totalMatches = opts.totalMatches + matchCountF
         return
     }
 

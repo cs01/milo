@@ -147,7 +147,7 @@ export class Codegen {
   private closureCounter = 0;
   public scopeCounter = 0;
   public entryAllocas: string[] = [];
-  private static BUILTINS = new Set(["print", "eprint", "format", "flush", "exit", "assert", "max", "min", "_miloArgCount", "_miloArgAt", "_cstrToString", "_strDataPtr", "_loadU8", "_loadI32", "_callClosureVoid", "_atomicLoadI64", "_atomicStoreI64", "_atomicAddI64", "_atomicSubI64", "_atomicCasI64", "_atomicLoadBool", "_atomicStoreBool", "_atomicSwapBool", "_schedulerGet", "_schedulerSet"]);
+  private static BUILTINS = new Set(["print", "eprint", "format", "flush", "exit", "assert", "max", "min", "_miloArgCount", "_miloArgAt", "_cstrToString", "_bytesToString", "_strDataPtr", "_loadU8", "_loadI32", "_callClosureVoid", "_atomicLoadI64", "_atomicStoreI64", "_atomicAddI64", "_atomicSubI64", "_atomicCasI64", "_atomicLoadBool", "_atomicStoreBool", "_atomicSwapBool", "_schedulerGet", "_schedulerSet"]);
   private needsArgGlobals = false;
   private usesSchedulerGlobal = false;
   private currentFnName = "";
@@ -3925,6 +3925,32 @@ export class Codegen {
       const val = this.nextTemp();
       lines.push(`  ${val} = load i32, ptr ${pv}`);
       return [lines, val, "i32"];
+    }
+    if (expr.func === "_bytesToString") {
+      this.needsMalloc = true;
+      this.needsMemcpy = true;
+      this.hasStringType = true;
+      const [al, pv] = this.genExpr(expr.args[0].expr);
+      lines.push(...al);
+      const [ll, lv] = this.genExpr(expr.args[1].expr);
+      lines.push(...ll);
+      // len+1 with a trailing NUL, matching _cstrToString's layout so the result
+      // can still be handed to C without another copy.
+      const cap = this.nextTemp();
+      lines.push(`  ${cap} = add i64 ${lv}, 1`);
+      const buf = this.nextTemp();
+      lines.push(`  ${buf} = call ptr @malloc(i64 ${cap})`);
+      lines.push(`  call ptr @memcpy(ptr ${buf}, ptr ${pv}, i64 ${lv})`);
+      const nulPtr = this.nextTemp();
+      lines.push(`  ${nulPtr} = getelementptr i8, ptr ${buf}, i64 ${lv}`);
+      lines.push(`  store i8 0, ptr ${nulPtr}`);
+      const b1 = this.nextTemp();
+      lines.push(`  ${b1} = insertvalue %String zeroinitializer, ptr ${buf}, 0`);
+      const b2 = this.nextTemp();
+      lines.push(`  ${b2} = insertvalue %String ${b1}, i64 ${lv}, 1`);
+      const b3 = this.nextTemp();
+      lines.push(`  ${b3} = insertvalue %String ${b2}, i64 ${cap}, 2`);
+      return [lines, b3, "%String"];
     }
     if (expr.func === "_cstrToString") {
       this.needsMalloc = true;

@@ -120,8 +120,8 @@ pub fn worldNew(): World {
 pub fn layCoin(w: &mut World) {
     w.pathT = w.pathT + 1.0
     let t = w.pathT
-    let heading = Math.sin(t * 0.045) * 1.5 + Math.sin(t * 0.011) * 2.4
-    let step = 62.0
+    let heading = Math.sin(t * 0.030) * 0.9 + Math.sin(t * 0.008) * 2.0
+    let step = 74.0
     let nx = w.trailX + Math.sin(heading) * step
     let nz = w.trailZ + Math.cos(heading) * step
     w.trailX = nx
@@ -158,11 +158,11 @@ pub fn worldUpdate(w: &mut World, dt: f64, inRoll: f64, inPitch: f64, boost: boo
 
     // Arcade flight: roll banks the aircraft, and a banked aircraft turns. Pitch
     // is direct. Both self-centre, so letting go levels you out.
-    w.plane.roll = w.plane.roll + (inRoll * 1.5 - w.plane.roll * 2.2) * dt
+    w.plane.roll = w.plane.roll + (inRoll * 2.1 - w.plane.roll * 2.6) * dt
     w.plane.roll = Math.clampF64(w.plane.roll, 0.0 - 1.1, 1.1)
-    w.plane.pitch = w.plane.pitch + (inPitch * 0.85 - w.plane.pitch * 2.0) * dt
+    w.plane.pitch = w.plane.pitch + (inPitch * 1.05 - w.plane.pitch * 2.2) * dt
     w.plane.pitch = Math.clampF64(w.plane.pitch, 0.0 - 0.75, 0.75)
-    w.plane.yaw = w.plane.yaw - w.plane.roll * 0.95 * dt
+    w.plane.yaw = w.plane.yaw - w.plane.roll * 1.35 * dt
 
     var target = 190.0
     if boost {
@@ -214,7 +214,7 @@ fn collectCoins(w: &mut World, dt: f64) {
             let dx = w.coins[i].x - w.plane.x
             let dy = w.coins[i].y - w.plane.y
             let dz = w.coins[i].z - w.plane.z
-            if dx * dx + dy * dy + dz * dz < 34.0 * 34.0 {
+            if dx * dx + dy * dy + dz * dz < 52.0 * 52.0 {
                 w.coins[i].alive = false
                 w.coins[i].pop = 1.0
                 w.combo = w.combo + 1

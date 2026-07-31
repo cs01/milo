@@ -177,10 +177,10 @@ pub fn drawWorld(c: &mut Canvas, s: &mut Scene, w: &World) {
 fn drawCoins(c: &mut Canvas, s: &mut Scene, w: &World, v: &View) {
     let segs = 12
     for i in 0..w.coins.len {
-        var rad = 7.5
+        var rad = 11.0
         var br = 1.0
         if !w.coins[i].alive {
-            rad = 7.5 + (1.0 - w.coins[i].pop) * 30.0
+            rad = 11.0 + (1.0 - w.coins[i].pop) * 34.0
             br = w.coins[i].pop * 1.8
             if br <= 0.02 {
                 continue
@@ -213,7 +213,8 @@ fn drawCoins(c: &mut Canvas, s: &mut Scene, w: &World, v: &View) {
     }
 }
 
-// The aircraft: a delta wing built from four triangles, rolled with the plane.
+// The aircraft. Body-space points are given as (forward, right, up) offsets and
+// transformed once, so the shape is easy to read and to change.
 fn drawPlane(c: &mut Canvas, s: &mut Scene, w: &World, v: &View) {
     let yaw = w.plane.yaw
     let pitch = w.plane.pitch
@@ -224,42 +225,138 @@ fn drawPlane(c: &mut Canvas, s: &mut Scene, w: &World, v: &View) {
     let sp = Math.sin(pitch)
     let cr = Math.cos(roll)
     let sr = Math.sin(roll)
-    // body axes
     let fx = sy * cp
     let fy = sp
     let fz = cy * cp
-    var rx = cy * cr
-    var ry = 0.0 - sr
-    var rz = 0.0 - sy * cr
+    let rx = cy * cr
+    let ry = 0.0 - sr
+    let rz = 0.0 - sy * cr
     let ux = fy * rz - fz * ry
     let uy = fz * rx - fx * rz
     let uz = fx * ry - fy * rx
 
-    let px = w.plane.x
-    let py = w.plane.y
-    let pz = w.plane.z
-    // nose, tail, wingtips, fin
-    let nx = px + fx * 20.0
-    let ny = py + fy * 20.0
-    let nz = pz + fz * 20.0
-    let tx = px - fx * 12.0
-    let ty = py - fy * 12.0
-    let tz = pz - fz * 12.0
-    let lx = px - fx * 6.0 - rx * 17.0
-    let ly = py - fy * 6.0 - ry * 17.0
-    let lz = pz - fz * 6.0 - rz * 17.0
-    let r2x = px - fx * 6.0 + rx * 17.0
-    let r2y = py - fy * 6.0 + ry * 17.0
-    let r2z = pz - fz * 6.0 + rz * 17.0
-    let finx = tx + ux * 9.0
-    let finy = ty + uy * 9.0
-    let finz = tz + uz * 9.0
+    var px: Vec<f64> = Vec.new()
+    var py: Vec<f64> = Vec.new()
+    var pz: Vec<f64> = Vec.new()
+    // nose, cockpit, mid, tail, wing roots and tips, tailplane, fin
+    addPt(px, py, pz, w, fx, fy, fz, rx, ry, rz, ux, uy, uz, 24.0, 0.0, 0.0) // 0 nose
+    addPt(px, py, pz, w, fx, fy, fz, rx, ry, rz, ux, uy, uz, 8.0, 0.0, 4.0) // 1 canopy top
+    addPt(px, py, pz, w, fx, fy, fz, rx, ry, rz, ux, uy, uz, 6.0, 4.0, 0.0) // 2 mid right
+    addPt(px, py, pz, w, fx, fy, fz, rx, ry, rz, ux, uy, uz, 6.0, 0.0 - 4.0, 0.0) // 3 mid left
+    addPt(px, py, pz, w, fx, fy, fz, rx, ry, rz, ux, uy, uz, 8.0, 0.0, 0.0 - 3.0) // 4 belly
+    addPt(px, py, pz, w, fx, fy, fz, rx, ry, rz, ux, uy, uz, 0.0 - 16.0, 0.0, 0.0) // 5 tail
+    addPt(px, py, pz, w, fx, fy, fz, rx, ry, rz, ux, uy, uz, 0.0 - 4.0, 22.0, 0.0) // 6 right tip
+    addPt(px, py, pz, w, fx, fy, fz, rx, ry, rz, ux, uy, uz, 0.0 - 4.0, 0.0 - 22.0, 0.0) // 7 left tip
+    addPt(px, py, pz, w, fx, fy, fz, rx, ry, rz, ux, uy, uz, 0.0 - 14.0, 10.0, 1.0) // 8 right tailplane
+    addPt(px, py, pz, w, fx, fy, fz, rx, ry, rz, ux, uy, uz, 0.0 - 14.0, 0.0 - 10.0, 1.0) // 9 left tailplane
+    addPt(px, py, pz, w, fx, fy, fz, rx, ry, rz, ux, uy, uz, 0.0 - 15.0, 0.0, 11.0) // 10 fin top
 
-    triangle(c, s, v, nx, ny, nz, lx, ly, lz, tx, ty, tz, 0.86, 0.88, 0.94)
-    triangle(c, s, v, nx, ny, nz, tx, ty, tz, r2x, r2y, r2z, 0.70, 0.72, 0.80)
-    triangle(c, s, v, nx, ny, nz, tx, ty, tz, lx, ly, lz, 0.62, 0.64, 0.72)
-    triangle(c, s, v, nx, ny, nz, r2x, r2y, r2z, tx, ty, tz, 0.78, 0.80, 0.88)
-    triangle(c, s, v, tx, ty, tz, finx, finy, finz, nx, ny, nz, 0.95, 0.55, 0.30)
+    // fuselage: top and bottom shells, both windings so it is solid from any angle
+    tri(c, s, v, px, py, pz, 0, 2, 1, 0.90, 0.92, 0.96)
+    tri(c, s, v, px, py, pz, 0, 1, 3, 0.82, 0.84, 0.90)
+    tri(c, s, v, px, py, pz, 1, 2, 5, 0.74, 0.76, 0.84)
+    tri(c, s, v, px, py, pz, 1, 5, 3, 0.68, 0.70, 0.78)
+    tri(c, s, v, px, py, pz, 0, 4, 2, 0.56, 0.58, 0.64)
+    tri(c, s, v, px, py, pz, 0, 3, 4, 0.52, 0.54, 0.60)
+    tri(c, s, v, px, py, pz, 4, 5, 2, 0.48, 0.50, 0.56)
+    tri(c, s, v, px, py, pz, 4, 3, 5, 0.46, 0.48, 0.54)
+    // swept wings, drawn from both sides
+    tri(c, s, v, px, py, pz, 2, 6, 5, 0.86, 0.88, 0.93)
+    tri(c, s, v, px, py, pz, 2, 5, 6, 0.60, 0.62, 0.70)
+    tri(c, s, v, px, py, pz, 3, 5, 7, 0.86, 0.88, 0.93)
+    tri(c, s, v, px, py, pz, 3, 7, 5, 0.60, 0.62, 0.70)
+    // tailplane
+    tri(c, s, v, px, py, pz, 5, 8, 9, 0.78, 0.80, 0.86)
+    tri(c, s, v, px, py, pz, 5, 9, 8, 0.58, 0.60, 0.66)
+    // fin, in the accent colour
+    tri(c, s, v, px, py, pz, 5, 10, 0, 1.10, 0.42, 0.22)
+    tri(c, s, v, px, py, pz, 5, 0, 10, 0.85, 0.32, 0.18)
+    // canopy glass
+    tri(c, s, v, px, py, pz, 1, 0, 2, 0.20, 0.42, 0.62)
+
+    // engine glow behind the tail, brighter under throttle
+    let ex = w.plane.x - fx * 18.0
+    let ey = w.plane.y - fy * 18.0
+    let ez = w.plane.z - fz * 18.0
+    let ep = toCamera(v, ex, ey, ez)
+    if ep.z > 1.0 {
+        let sx = v.cx + ep.x * v.scale / ep.z
+        let sy2 = v.cy - ep.y * v.scale / ep.z
+        let k = (w.plane.speed - 180.0) / 140.0
+        let sz = 6.0 + k * 10.0
+        spot(c, sx, sy2, sz * v.scale / ep.z * 0.02 + 4.0, 1.4 + k, 0.55 + k * 0.5, 0.18)
+    }
+}
+
+fn addPt(px: &mut Vec<f64>, py: &mut Vec<f64>, pz: &mut Vec<f64>, w: &World, fx: f64, fy: f64, fz: f64, rx: f64, ry: f64, rz: f64, ux: f64, uy: f64, uz: f64, f: f64, r: f64, u: f64) {
+    px.push(w.plane.x + fx * f + rx * r + ux * u)
+    py.push(w.plane.y + fy * f + ry * r + uy * u)
+    pz.push(w.plane.z + fz * f + rz * r + uz * u)
+}
+
+fn tri(c: &mut Canvas, s: &mut Scene, v: &View, px: &Vec<f64>, py: &Vec<f64>, pz: &Vec<f64>, a: i64, b: i64, d: i64, r: f64, g: f64, bl: f64) {
+    triangle(c, s, v, px[a], py[a], pz[a], px[b], py[b], pz[b], px[d], py[d], pz[d], r, g, bl)
+}
+
+// A reticle on the next coin, and an edge arrow when it is off screen. Without
+// this the trail is easy to lose the moment you overshoot one.
+pub fn drawGuide(c: &mut Canvas, w: &World, s: &Scene) {
+    let v = viewOf(w.cam, c.w, c.h)
+    // nearest live coin ahead
+    var bi = 0 - 1
+    var bd = 1.0e18
+    for i in 0..w.coins.len {
+        if w.coins[i].alive {
+            let dx = w.coins[i].x - w.plane.x
+            let dy = w.coins[i].y - w.plane.y
+            let dz = w.coins[i].z - w.plane.z
+            let d = dx * dx + dy * dy + dz * dz
+            if d < bd {
+                bd = d
+                bi = i
+            }
+        }
+    }
+    if bi < 0 {
+        return
+    }
+    let p = toCamera(v, w.coins[bi].x, w.coins[bi].y, w.coins[bi].z)
+    let pulse = 0.65 + 0.35 * Math.sin(w.time * 6.0)
+    if p.z > 1.0 {
+        let sx = v.cx + p.x * v.scale / p.z
+        let sy = v.cy - p.y * v.scale / p.z
+        if sx > 8.0 && sx < (c.w as f64) - 8.0 && sy > 8.0 && sy < (c.h as f64) - 8.0 {
+            let r = Math.clampF64(900.0 / p.z, 16.0, 90.0)
+            let a = 0.30 * r
+            // four corner brackets
+            line(c, sx - r, sy - r + a, sx - r, sy - r, 0.4 * pulse, 1.2 * pulse, 0.5 * pulse)
+            line(c, sx - r, sy - r, sx - r + a, sy - r, 0.4 * pulse, 1.2 * pulse, 0.5 * pulse)
+            line(c, sx + r, sy - r + a, sx + r, sy - r, 0.4 * pulse, 1.2 * pulse, 0.5 * pulse)
+            line(c, sx + r, sy - r, sx + r - a, sy - r, 0.4 * pulse, 1.2 * pulse, 0.5 * pulse)
+            line(c, sx - r, sy + r - a, sx - r, sy + r, 0.4 * pulse, 1.2 * pulse, 0.5 * pulse)
+            line(c, sx - r, sy + r, sx - r + a, sy + r, 0.4 * pulse, 1.2 * pulse, 0.5 * pulse)
+            line(c, sx + r, sy + r - a, sx + r, sy + r, 0.4 * pulse, 1.2 * pulse, 0.5 * pulse)
+            line(c, sx + r, sy + r, sx + r - a, sy + r, 0.4 * pulse, 1.2 * pulse, 0.5 * pulse)
+            return
+        }
+    }
+    // off screen (or behind): pin an arrow on the edge pointing the way to turn
+    var dirX = p.x
+    var dirY = 0.0 - p.y
+    if p.z <= 1.0 {
+        dirY = 0.0
+    }
+    let l = Math.sqrt(dirX * dirX + dirY * dirY) + 0.001
+    dirX = dirX / l
+    dirY = dirY / l
+    let rad = Math.minF64((c.w as f64), (c.h as f64)) * 0.36
+    let ax = v.cx + dirX * rad
+    let ay = v.cy + dirY * rad
+    let px2 = 0.0 - dirY
+    let py2 = dirX
+    line(c, ax + dirX * 20.0, ay + dirY * 20.0, ax + px2 * 12.0, ay + py2 * 12.0, 0.5 * pulse, 1.3 * pulse, 0.6 * pulse)
+    line(c, ax + dirX * 20.0, ay + dirY * 20.0, ax - px2 * 12.0, ay - py2 * 12.0, 0.5 * pulse, 1.3 * pulse, 0.6 * pulse)
+    line(c, ax - px2 * 12.0, ay - py2 * 12.0, ax + px2 * 12.0, ay + py2 * 12.0, 0.4 * pulse, 1.0 * pulse, 0.5 * pulse)
 }
 
 pub fn drawHud(c: &mut Canvas, w: &World, s: &Scene, fps: i64) {
@@ -297,6 +394,6 @@ pub fn drawHud(c: &mut Canvas, w: &World, s: &Scene, fps: i64) {
             f = w.hint
         }
         textCentered(c, c.w / 2, c.h - 130, "LEFT RIGHT TO BANK    UP DOWN TO CLIMB AND DIVE", 2, 0.45 * f, 0.5 * f, 0.6 * f)
-        textCentered(c, c.w / 2, c.h - 106, "HOLD SPACE FOR SPEED — YOU CANNOT CRASH", 2, 0.4 * f, 0.44 * f, 0.5 * f)
+        textCentered(c, c.w / 2, c.h - 106, "FOLLOW THE GREEN BRACKETS — YOU CANNOT CRASH", 2, 0.4 * f, 0.44 * f, 0.5 * f)
     }
 }

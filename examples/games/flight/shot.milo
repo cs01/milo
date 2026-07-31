@@ -20,7 +20,7 @@ from "./world3d" import {
     World, worldNew, worldUpdate
 }
 from "./render3d" import {
-    drawWorld, drawHud
+    drawWorld, drawHud, drawGuide
 }
 
 pub extern fn fopen(path: *u8, mode: *u8): *u8
@@ -125,6 +125,7 @@ pub fn main(): i32 {
         if want {
             let t0 = epochMillis()
             drawWorld(c, s, w)
+            drawGuide(c, w, s)
             drawHud(c, w, s, 60)
             present(c, 0.35, 1.0)
             renderMs = renderMs + (epochMillis() - t0)

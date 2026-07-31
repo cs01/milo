@@ -11,10 +11,11 @@ milo build examples/games/flight/main.milo -o /tmp/flyby --release && /tmp/flyby
 | space | throttle up |
 | ESC | quit |
 
-Fly through the coins. The trail wanders over ridges and down valleys, and every
-coin you take lays another further along, so it never runs out. Taking them in
-quick succession builds a multiplier. **You cannot crash** — dive at the ground and
-it pushes you back up.
+Fly through the coins. **Green brackets mark the next one**, and an arrow pins to
+the edge of the screen pointing the way to turn when it is behind you — the trail
+is easy to lose the moment you overshoot. Every coin you take lays another further
+along, so it never runs out, and taking them in quick succession builds a
+multiplier. **You cannot crash** — dive at the ground and it pushes you back up.
 
 ## This is a real 3D pipeline
 
@@ -32,7 +33,9 @@ Not a raycaster and not billboards. `gfx3d.milo` is about 260 lines and contains
 
 The terrain is a three-octave value-noise heightmap turned into quads on the fly.
 Coins are 12-gon discs spinning about their vertical axis, drawn from both sides so
-they never disappear edge-on. The aircraft is five triangles.
+they never disappear edge-on. The aircraft is 17 triangles — fuselage shells, swept wings, tailplane, fin and
+canopy — built from body-space `(forward, right, up)` offsets so the shape is easy
+to read and to change.
 
 Everything renders on the CPU into the same HDR float canvas the 2D games use; SDL
 only blits the finished frame. **1280×720 at ~50 fps**, around 1,200 triangles a

@@ -35,7 +35,7 @@ from "./world3d" import {
     World, worldNew, worldUpdate
 }
 from "./render3d" import {
-    drawWorld, drawHud
+    drawWorld, drawHud, drawGuide
 }
 
 pub let W: i64 = 1280
@@ -98,6 +98,7 @@ pub fn main(): i32 {
             fpsAccum = 0.0
             fpsFrames = 0
         }
+        drawGuide(c, w, s)
         drawHud(c, w, s, fpsShown)
 
         var exposure = 1.0

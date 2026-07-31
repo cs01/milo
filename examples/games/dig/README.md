@@ -16,9 +16,13 @@ top of the shaft. The mascot is lifted pixel-for-pixel out of
 **There is no timer, nothing chases you, and you cannot lose.** Hold a direction
 and the drill bites; softer ground gives way faster than stone.
 
-Each level runs **west to east**: fill the value bar, which opens a lit shaft at the
-far right, then dig your way over to it. Every level seeds a fresh stretch of ground
-with more bedrock in the way, so the later ones are mazes rather than open dirt.
+Each level runs **west to east**: fill the value bar, which unlocks the gate on the
+right, then dig over to it. The gate glows from anywhere on the map and an edge
+marker gives its distance, so "head east" always has something to aim at.
+
+Level 1 is a single screen wide and needs 90 in value — a couple of minutes. Levels
+grow mostly *downward* from there, with a bigger quota and more bedrock in the way,
+so later ones are mazes rather than open dirt.
 
 Three upgrades are buried in the earth, pulsing brighter than ore so you can spot
 them: **a faster drill**, a **wide drill** that takes the tiles either side of the
@@ -39,9 +43,14 @@ drag; debris has gravity and almost none. Same particle struct, different number
 
 ## The world
 
-220 × 90 tiles, generated from smooth value noise with a fixed hash, so the map is
-the same every run — a good seam is somewhere you can go back to. Depth drives
-everything: harder rock, rarer ore, bedrock pillars that give the deep mine shape.
+The playable box grows with the level, from one screen wide up to 96 × 110 tiles.
+It is generated from smooth value noise with a fixed hash offset by the level
+number, so a given level is the same every run — a good seam is somewhere you can go
+back to. Depth drives everything: harder rock, rarer ore, bedrock pillars.
+
+Ore does not go straight into the counter. Breaking a seam throws nuggets that
+scatter, hang for a beat, then home in on the satchel with a rising acceleration;
+the counter ticks and the total punches larger when one actually lands.
 
 Only the tiles inside the view are ever touched, and each is lit by distance from
 the lamp. The darkness is what makes a tunnel feel like a tunnel instead of a grid

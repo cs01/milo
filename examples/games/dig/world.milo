@@ -126,6 +126,11 @@ pub struct Mine {
     exitX: i64,
     exitOpen: bool,
     gateY: i64,
+    // The playable box grows with the level. MAP_W/MAP_H are only the allocation;
+    // everything past worldW/worldH is filled with bedrock so a level 1 map is a
+    // small room rather than an intimidating continent.
+    worldW: i64,
+    worldH: i64,
     cleared: f64,
     wideDig: bool,
     lampLevel: i64,
@@ -171,7 +176,19 @@ pub fn setTile(m: &mut Mine, x: i64, y: i64, t: i64) {
 
 pub let SURFACE: i64 = 16
 
+// How big this level's box is, and what it costs to open the gate.
+fn sizeForLevel(m: &mut Mine) {
+    // At least a screen wide (1280 / 18 = 72 tiles) or you can see past the edge
+    // of the world. Levels grow mostly downward, which is where the value is.
+    m.worldW = Math.minI64(MAP_W, 74 + m.level * 4)
+    m.worldH = Math.minI64(MAP_H, SURFACE + 22 + m.level * 11)
+    m.exitX = m.worldW - 3
+    m.gateY = SURFACE + 4 + Math.minI64(m.level, 6)
+    m.quota = 90 + (m.level - 1) * 130
+}
+
 fn generate(m: &mut Mine) {
+    sizeForLevel(m)
     // The level number offsets every noise field, so each level is a different
     // stretch of ground rather than the same map re-tuned.
     let seed = (m.level as f64) * 137.0
@@ -182,10 +199,10 @@ fn generate(m: &mut Mine) {
             var t = T_DIRT
             if y < SURFACE {
                 t = T_SKY
-            } else if y >= MAP_H - 1 || x == 0 || x >= MAP_W - 1 {
+            } else if y >= m.worldH - 1 || x == 0 || x >= m.worldW - 1 || x >= MAP_W - 1 || y >= MAP_H - 1 {
                 t = T_BEDROCK
             } else {
-                let depth = (y as f64) / (MAP_H as f64)
+                let depth = ((y - SURFACE) as f64) / ((m.worldH - SURFACE) as f64)
                 // Deeper ground is harder ground.
                 let hardness = smoothNoise((x as f64) * 0.09 + seed, (y as f64) * 0.09 + seed)
                 if depth > 0.30 && hardness > 0.62 - depth * 0.25 {
@@ -244,7 +261,7 @@ fn generate(m: &mut Mine) {
     // The way out: a bedrock-cased shaft down the right-hand edge with a gate
     // across it. The gate glows from anywhere on the map, so "head east" always
     // has something to aim at. You dig LEFT TO RIGHT to reach it.
-    for y in SURFACE..MAP_H - 2 {
+    for y in SURFACE..m.worldH - 2 {
         m.tiles[y * MAP_W + m.exitX] = T_SKY as u8
         m.tiles[y * MAP_W + m.exitX - 1] = T_BEDROCK as u8
         m.tiles[y * MAP_W + m.exitX + 1] = T_BEDROCK as u8
@@ -285,11 +302,13 @@ pub fn mineNew(): Mine {
         banner: 3.0,
         hint: 6.0,
         level: 1,
-        quota: 200,
+        quota: 90,
         levelValue: 0,
         exitX: MAP_W - 6,
         exitOpen: false,
-        gateY: SURFACE + 6,
+        gateY: SURFACE + 5,
+        worldW: 0,
+        worldH: 0,
         cleared: 0.0,
         wideDig: false,
         lampLevel: 0,
@@ -302,7 +321,6 @@ pub fn mineNew(): Mine {
 // Fresh ground, one level further along the seam.
 pub fn nextLevel(m: &mut Mine) {
     m.level = m.level + 1
-    m.quota = 200 + m.level * 170
     m.levelValue = 0
     m.exitOpen = false
     m.wideDig = false
@@ -778,8 +796,8 @@ pub fn mineUpdate(m: &mut Mine, dt: f64, inX: f64, inY: f64, viewW: f64, viewH: 
         m.digX = 0 - 1
         m.digProgress = 0.0
     }
-    m.px = Math.clampF64(m.px, TILE, (MAP_W as f64) * TILE - TILE)
-    m.py = Math.clampF64(m.py, TILE * 0.5, (MAP_H as f64) * TILE - TILE)
+    m.px = Math.clampF64(m.px, TILE, (m.worldW as f64) * TILE - TILE)
+    m.py = Math.clampF64(m.py, TILE * 0.5, (m.worldH as f64) * TILE - TILE)
 
     // reaching the lit shaft on the right ends the level
     if m.cleared > 0.0 {
@@ -797,8 +815,10 @@ pub fn mineUpdate(m: &mut Mine, dt: f64, inX: f64, inY: f64, viewW: f64, viewH: 
     }
 
     // camera eases toward the player and stops at the world edges
-    let wantX = Math.clampF64(m.px - viewW * 0.5, 0.0, (MAP_W as f64) * TILE - viewW)
-    let wantY = Math.clampF64(m.py - viewH * 0.5, 0.0, (MAP_H as f64) * TILE - viewH)
+    let wx = Math.maxF64((m.worldW as f64) * TILE - viewW, 0.0)
+    let wy = Math.maxF64((m.worldH as f64) * TILE - viewH, 0.0)
+    let wantX = Math.clampF64(m.px - viewW * 0.5, 0.0, wx)
+    let wantY = Math.clampF64(m.py - viewH * 0.5, 0.0, wy)
     m.camX = m.camX + (wantX - m.camX) * Math.minF64(1.0, dt * 4.0)
     m.camY = m.camY + (wantY - m.camY) * Math.minF64(1.0, dt * 4.0)
 

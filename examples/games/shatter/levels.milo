@@ -1,0 +1,117 @@
+// Level layouts, 15 columns wide. Recognisable shapes, not random fields — the
+// pattern is most of what makes a board feel like a place rather than a grid.
+//
+//   .  empty        1 2 3  brick, that many hits
+//   X  indestructible       E  explodes, taking its neighbours
+//   P  always drops a power-up
+
+pub fn levelCount(): i64 {
+    return 8
+}
+
+pub fn levelName(n: i64): string {
+    if n == 0 {
+        return "WARM UP"
+    }
+    if n == 1 {
+        return "ARROWHEAD"
+    }
+    if n == 2 {
+        return "INVADER"
+    }
+    if n == 3 {
+        return "THE WALL"
+    }
+    if n == 4 {
+        return "HEART"
+    }
+    if n == 5 {
+        return "TUNNELS"
+    }
+    if n == 6 {
+        return "CHECKERS"
+    }
+    return "M I L O"
+}
+
+pub fn levelRows(n: i64): Vec<string> {
+    var v: Vec<string> = Vec.new()
+    if n == 0 {
+        // A short first board: the first clear should arrive fast.
+        v.push("..22222222222..")
+        v.push("..1111P1P1111..")
+        v.push("..11111111111..")
+        return v
+    }
+    if n == 1 {
+        v.push(".......2.......")
+        v.push("......222......")
+        v.push(".....22P22.....")
+        v.push("....2222222....")
+        v.push("...222...222...")
+        v.push("..22.......22..")
+        return v
+    }
+    if n == 2 {
+        v.push("..3.........3..")
+        v.push("...3.......3...")
+        v.push("..33333333333..")
+        v.push(".333.33333.333.")
+        v.push("3333333333333333")
+        v.push("3.33333P33333.3")
+        v.push("3.3.........3.3")
+        v.push("...33.....33...")
+        return v
+    }
+    if n == 3 {
+        v.push("XXXXXXXXXXXXXXX")
+        v.push("22222222222222.")
+        v.push(".2222P22222222.")
+        v.push("222222222222222")
+        v.push("XX.XX.XXX.XX.XX")
+        v.push("111111111111111")
+        return v
+    }
+    if n == 4 {
+        v.push("..333.....333..")
+        v.push(".33333...33333.")
+        v.push("3333333.3333333")
+        v.push("333333333333333")
+        v.push(".3333333P33333.")
+        v.push("..333333333333.")
+        v.push("...3333333333..")
+        v.push(".....333333....")
+        v.push("......3333.....")
+        v.push(".......33......")
+        return v
+    }
+    if n == 5 {
+        v.push("XX111111111111X")
+        v.push("X.............X")
+        v.push("X1111111111111X")
+        v.push("X.....E.......X")
+        v.push("X2222222222222X")
+        v.push("X.......P.....X")
+        v.push("X3333333333333X")
+        return v
+    }
+    if n == 6 {
+        v.push("2.2.2.2.2.2.2.2")
+        v.push(".3.3.3.3.3.3.3.")
+        v.push("2.2.2.E.2.2.2.2")
+        v.push(".3.3.3.3.3.3.3.")
+        v.push("2.2.2.P.2.2.2.2")
+        v.push(".1.1.1.1.1.1.1.")
+        v.push("1.1.1.1.1.1.1.1")
+        return v
+    }
+    v.push("3...3.222.3...3")
+    v.push("33.33.2.2.3...3")
+    v.push("3.3.3.2.2.3...3")
+    v.push("3...3.2.2.3...3")
+    v.push("3...3.222.333.3")
+    v.push("...............")
+    v.push("..1111111P1111.")
+    v.push("..1111111111111")
+    return v
+}

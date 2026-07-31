@@ -1,0 +1,796 @@
+// SHATTER — simulation. One control, a forgiving fail state, and a combo that
+// rewards long rallies. All of it safe Milo: no raw pointers, no `unsafe`.
+
+from "std/math" import {
+    Math
+}
+from "std/random" import {
+    Random
+}
+from "./grid" import {
+    Grid, gridNew, gridUpdate, gridImpulse, gridReset
+}
+from "./levels" import {
+    levelRows, levelCount, levelName
+}
+
+pub let COLS: i64 = 15
+
+pub let BRICK_W: f64 = 76.0
+
+pub let BRICK_H: f64 = 26.0
+
+pub let PITCH_X: f64 = 80.0
+
+pub let PITCH_Y: f64 = 30.0
+
+pub let ORIGIN_X: f64 = 40.0
+
+pub let ORIGIN_Y: f64 = 240.0
+
+// power-up kinds
+pub let PUP_MULTI: i64 = 0
+
+pub let PUP_WIDE: i64 = 1
+
+pub let PUP_SLOW: i64 = 2
+
+pub let PUP_LIFE: i64 = 3
+
+pub let PUP_STICKY: i64 = 4
+
+pub struct Brick {
+    alive: bool,
+    hp: i64,
+    maxHp: i64,
+    kind: i64, // 0 normal, 1 indestructible, 2 explosive
+    x: f64,
+    y: f64,
+    flash: f64,
+    drops: bool,
+}
+
+pub struct Ball {
+    x: f64,
+    y: f64,
+    px: f64,
+    py: f64,
+    vx: f64,
+    vy: f64,
+    r: f64,
+    alive: bool,
+    held: bool, // resting on the paddle, waiting to launch
+}
+
+pub struct Pup {
+    x: f64,
+    y: f64,
+    vy: f64,
+    kind: i64,
+    spin: f64,
+    alive: bool,
+}
+
+pub struct Part {
+    x: f64,
+    y: f64,
+    vx: f64,
+    vy: f64,
+    life: f64,
+    maxLife: f64,
+    size: f64,
+    cr: f64,
+    cg: f64,
+    cb: f64,
+}
+
+// A score number that floats up where a brick died.
+pub struct Pop {
+    x: f64,
+    y: f64,
+    life: f64,
+    value: i64,
+    cr: f64,
+    cg: f64,
+    cb: f64,
+}
+
+pub struct Game {
+    bricks: Vec<Brick>,
+    balls: Vec<Ball>,
+    pups: Vec<Pup>,
+    parts: Vec<Part>,
+    pops: Vec<Pop>,
+    grid: Grid,
+    w: f64,
+    h: f64,
+    padX: f64,
+    padW: f64,
+    padWWant: f64,
+    padY: f64,
+    lives: i64,
+    score: i64,
+    best: i64,
+    level: i64,
+    combo: i64,
+    bestCombo: i64,
+    speed: f64,
+    sticky: f64,
+    slow: f64,
+    shake: f64,
+    flash: f64,
+    banner: f64,
+    time: f64,
+    clearedTimer: f64,
+    gameOver: bool,
+    won: bool,
+}
+
+pub fn gameNew(w: f64, h: f64): Game {
+    var g = Game {
+        bricks: Vec.new(),
+        balls: Vec.new(),
+        pups: Vec.new(),
+        parts: Vec.new(),
+        pops: Vec.new(),
+        grid: gridNew(w, h, 48.0),
+        w: w,
+        h: h,
+        padX: w * 0.5,
+        padW: 150.0,
+        padWWant: 150.0,
+        padY: h - 60.0,
+        lives: 5,
+        score: 0,
+        best: 0,
+        level: 0,
+        combo: 0,
+        bestCombo: 0,
+        speed: 560.0,
+        sticky: 0.0,
+        slow: 0.0,
+        shake: 0.0,
+        flash: 0.0,
+        banner: 2.4,
+        time: 0.0,
+        clearedTimer: 0.0,
+        gameOver: false,
+        won: false,
+    }
+    loadLevel(g, 0)
+    return g
+}
+
+pub struct Col {
+    r: f64,
+    g: f64,
+    b: f64,
+}
+
+// Colour carries the information: green dies in one hit, cyan in two, violet in
+// three, grey never, orange explodes.
+pub fn brickColor(hp: i64, kind: i64): Col {
+    if kind == 1 {
+        return Col {
+            r: 0.42, g: 0.46, b: 0.56
+        }
+    }
+    if kind == 2 {
+        return Col {
+            r: 1.70, g: 0.50, b: 0.06
+        }
+    }
+    if hp >= 3 {
+        return Col {
+            r: 0.95, g: 0.22, b: 1.35
+        }
+    }
+    if hp == 2 {
+        return Col {
+            r: 0.12, g: 0.85, b: 1.40
+        }
+    }
+    return Col {
+        r: 0.22, g: 1.30, b: 0.50
+    }
+}
+
+pub fn loadLevel(g: &mut Game, n: i64) {
+    g.bricks.clear()
+    g.balls.clear()
+    g.pups.clear()
+    g.parts.clear()
+    g.pops.clear()
+    g.level = n
+    g.combo = 0
+    g.padW = 150.0
+    g.padWWant = 150.0
+    g.sticky = 0.0
+    g.slow = 0.0
+    g.speed = 560.0 + (n as f64) * 20.0
+    g.banner = 2.4
+    gridReset(g.grid)
+
+    let rows = levelRows(n)
+    for r in 0..rows.len {
+        let line = rows[r]
+        var c: i64 = 0
+        while c < COLS && c < line.len {
+            let ch = line[c] as i64
+            if ch != 46 {
+                var hp: i64 = 1
+                var kind: i64 = 0
+                var drops = false
+                if ch == 49 {
+                    hp = 1
+                }
+                if ch == 50 {
+                    hp = 2
+                }
+                if ch == 51 {
+                    hp = 3
+                }
+                if ch == 88 {
+                    kind = 1
+                } // 'X'
+                if ch == 69 {
+                    kind = 2 // 'E'
+                    hp = 1
+                }
+                if ch == 80 {
+                    drops = true // 'P'
+                    hp = 1
+                }
+                g.bricks.push(Brick {
+                    alive: true,
+                    hp: hp,
+                    maxHp: hp,
+                    kind: kind,
+                    x: ORIGIN_X + (c as f64) * PITCH_X,
+                    y: ORIGIN_Y + (r as f64) * PITCH_Y,
+                    flash: 0.0,
+                    drops: drops,
+                }
+                )
+            }
+            c = c + 1
+        }
+    }
+    resetBall(g)
+}
+
+pub fn resetBall(g: &mut Game) {
+    g.balls.clear()
+    g.balls.push(Ball {
+        x: g.padX,
+        y: g.padY - 16.0,
+        px: g.padX,
+        py: g.padY - 16.0,
+        vx: 0.0,
+        vy: 0.0,
+        r: 8.0,
+        alive: true,
+        held: true,
+    }
+    )
+}
+
+pub fn bricksLeft(g: &Game): i64 {
+    var n: i64 = 0
+    for i in 0..g.bricks.len {
+        if g.bricks[i].alive && g.bricks[i].kind != 1 {
+            n = n + 1
+        }
+    }
+    return n
+}
+
+pub fn burst(g: &mut Game, x: f64, y: f64, n: i64, speed: f64, cr: f64, cg: f64, cb: f64) {
+    for i in 0..n {
+        let a = Random.floatRange(0.0, 6.283185307179586)
+        let s = Random.floatRange(speed * 0.2, speed)
+        let life = Random.floatRange(0.25, 0.75)
+        g.parts.push(Part {
+            x: x,
+            y: y,
+            vx: Math.cos(a) * s,
+            vy: Math.sin(a) * s,
+            life: life,
+            maxLife: life,
+            size: Random.floatRange(1.6, 3.4),
+            cr: cr,
+            cg: cg,
+            cb: cb,
+        }
+        )
+    }
+}
+
+pub fn addPop(g: &mut Game, x: f64, y: f64, value: i64, c: &Col) {
+    g.pops.push(Pop {
+        x: x, y: y, life: 0.9, value: value, cr: c.r, cg: c.g, cb: c.b
+    }
+    )
+}
+
+// ── destroying bricks ─────────────────────────────────────────────────────────
+
+fn killBrick(g: &mut Game, i: i64) {
+    if !g.bricks[i].alive || g.bricks[i].kind == 1 {
+        return
+    }
+    let bx = g.bricks[i].x + BRICK_W * 0.5
+    let by = g.bricks[i].y + BRICK_H * 0.5
+    let col = brickColor(g.bricks[i].hp, g.bricks[i].kind)
+    let explosive = g.bricks[i].kind == 2
+    let drops = g.bricks[i].drops
+    g.bricks[i].alive = false
+
+    g.combo = g.combo + 1
+    if g.combo > g.bestCombo {
+        g.bestCombo = g.combo
+    }
+    // Every brick in a rally is worth more than the last. This is the loop that
+    // makes you want one more go.
+    let value = 25 * Math.minI64(g.combo, 20)
+    g.score = g.score + value
+    if g.score > g.best {
+        g.best = g.score
+    }
+    addPop(g, bx, by, value, col)
+    burst(g, bx, by, 16, 260.0, col.r, col.g, col.b)
+    gridImpulse(g.grid, bx, by, 150.0, 34.0)
+    g.shake = Math.maxF64(g.shake, 2.0)
+
+    if drops || Random.range(0, 9) == 0 {
+        g.pups.push(Pup {
+            x: bx,
+            y: by,
+            vy: 130.0,
+            kind: Random.range(0, 5),
+            spin: 0.0,
+            alive: true,
+        }
+        )
+    }
+
+    if explosive {
+        g.shake = Math.maxF64(g.shake, 9.0)
+        burst(g, bx, by, 60, 520.0, 1.7, 0.7, 0.12)
+        gridImpulse(g.grid, bx, by, 320.0, 130.0)
+        for k in 0..g.bricks.len {
+            if g.bricks[k].alive && k != i {
+                let dx = g.bricks[k].x - g.bricks[i].x
+                let dy = g.bricks[k].y - g.bricks[i].y
+                if dx * dx + dy * dy < 130.0 * 130.0 {
+                    killBrick(g, k)
+                }
+            }
+        }
+    }
+}
+
+fn hitBrick(g: &mut Game, i: i64) {
+    if g.bricks[i].kind == 1 {
+        g.bricks[i].flash = 0.16
+        let bx = g.bricks[i].x + BRICK_W * 0.5
+        let by = g.bricks[i].y + BRICK_H * 0.5
+        burst(g, bx, by, 5, 150.0, 0.7, 0.75, 0.85)
+        return
+    }
+    g.bricks[i].hp = g.bricks[i].hp - 1
+    g.bricks[i].flash = 0.18
+    if g.bricks[i].hp <= 0 {
+        killBrick(g, i)
+    } else {
+        let bx = g.bricks[i].x + BRICK_W * 0.5
+        let by = g.bricks[i].y + BRICK_H * 0.5
+        let col = brickColor(g.bricks[i].hp, g.bricks[i].kind)
+        burst(g, bx, by, 6, 170.0, col.r, col.g, col.b)
+    }
+}
+
+// ── power-ups ─────────────────────────────────────────────────────────────────
+
+pub fn pupName(kind: i64): string {
+    if kind == PUP_MULTI {
+        return "MULTIBALL"
+    }
+    if kind == PUP_WIDE {
+        return "WIDE PADDLE"
+    }
+    if kind == PUP_SLOW {
+        return "SLOW MOTION"
+    }
+    if kind == PUP_LIFE {
+        return "EXTRA BALL"
+    }
+    return "STICKY PADDLE"
+}
+
+pub fn pupColor(kind: i64): Col {
+    if kind == PUP_MULTI {
+        return Col {
+            r: 1.5, g: 1.2, b: 0.2
+        }
+    }
+    if kind == PUP_WIDE {
+        return Col {
+            r: 0.2, g: 1.3, b: 0.6
+        }
+    }
+    if kind == PUP_SLOW {
+        return Col {
+            r: 0.3, g: 0.8, b: 1.6
+        }
+    }
+    if kind == PUP_LIFE {
+        return Col {
+            r: 1.6, g: 0.35, b: 0.5
+        }
+    }
+    return Col {
+        r: 1.1, g: 0.5, b: 1.6
+    }
+}
+
+fn applyPup(g: &mut Game, kind: i64) {
+    g.flash = 0.45
+    if kind == PUP_MULTI {
+        // split every live ball in two
+        let n = g.balls.len
+        for i in 0..n {
+            if g.balls[i].alive && !g.balls[i].held {
+                let a = Math.atan2(g.balls[i].vy, g.balls[i].vx)
+                let sp = Math.sqrt(g.balls[i].vx * g.balls[i].vx + g.balls[i].vy * g.balls[i].vy)
+                for k in 0..2 {
+                    let na = a + ((k as f64) - 0.5) * 0.7
+                    g.balls.push(Ball {
+                        x: g.balls[i].x,
+                        y: g.balls[i].y,
+                        px: g.balls[i].x,
+                        py: g.balls[i].y,
+                        vx: Math.cos(na) * sp,
+                        vy: Math.sin(na) * sp,
+                        r: g.balls[i].r,
+                        alive: true,
+                        held: false,
+                    }
+                    )
+                }
+            }
+        }
+    } else if kind == PUP_WIDE {
+        g.padWWant = Math.minF64(g.padWWant + 60.0, 300.0)
+    } else if kind == PUP_SLOW {
+        g.slow = 6.0
+    } else if kind == PUP_LIFE {
+        g.lives = g.lives + 1
+    } else {
+        g.sticky = 12.0
+    }
+}
+
+// ── the tick ──────────────────────────────────────────────────────────────────
+
+fn bounceOffPaddle(g: &mut Game, i: i64) {
+    // Where the ball lands on the paddle sets the outgoing angle. That is the
+    // whole skill of the game, and it is entirely under the player's control.
+    let off = Math.clampF64((g.balls[i].x - g.padX) / (g.padW * 0.5), 0.0 - 1.0, 1.0)
+    // The jitter matters: a dead-centre hit returns the ball perfectly vertical,
+    // and once it has punched a column out of the wall it will climb the same gap
+    // forever. A hair of noise makes that impossible without being felt.
+    let ang = 0.0 - 1.5707963267948966 + off * 1.05 + Random.floatRange(0.0 - 0.05, 0.05)
+    let sp = g.speed
+    g.balls[i].vx = Math.cos(ang) * sp
+    g.balls[i].vy = Math.sin(ang) * sp
+    g.balls[i].y = g.padY - g.balls[i].r - 1.0
+    g.combo = 0
+    gridImpulse(g.grid, g.balls[i].x, g.padY, 130.0, 26.0)
+    burst(g, g.balls[i].x, g.padY - 6.0, 6, 120.0, 0.5, 1.0, 1.5)
+    if g.sticky > 0.0 {
+        g.balls[i].held = true
+    }
+}
+
+// Which brick, if any, the ball overlaps — and push it back out along the
+// shallower axis so it reflects off the face it actually struck.
+fn collideBricks(g: &mut Game, i: i64) {
+    for k in 0..g.bricks.len {
+        if !g.bricks[k].alive {
+            continue
+        }
+        let bx0 = g.bricks[k].x
+        let by0 = g.bricks[k].y
+        let bx1 = bx0 + BRICK_W
+        let by1 = by0 + BRICK_H
+        let r = g.balls[i].r
+        if g.balls[i].x + r < bx0 || g.balls[i].x - r > bx1 {
+            continue
+        }
+        if g.balls[i].y + r < by0 || g.balls[i].y - r > by1 {
+            continue
+        }
+        let overlapL = g.balls[i].x + r - bx0
+        let overlapR = bx1 - (g.balls[i].x - r)
+        let overlapT = g.balls[i].y + r - by0
+        let overlapB = by1 - (g.balls[i].y - r)
+        var minOv = overlapL
+        var axis = 0 // 0 left, 1 right, 2 top, 3 bottom
+        if overlapR < minOv {
+            minOv = overlapR
+            axis = 1
+        }
+        if overlapT < minOv {
+            minOv = overlapT
+            axis = 2
+        }
+        if overlapB < minOv {
+            minOv = overlapB
+            axis = 3
+        }
+        if axis == 0 {
+            g.balls[i].x = bx0 - r
+            g.balls[i].vx = 0.0 - Math.abs(g.balls[i].vx)
+        } else if axis == 1 {
+            g.balls[i].x = bx1 + r
+            g.balls[i].vx = Math.abs(g.balls[i].vx)
+        } else if axis == 2 {
+            g.balls[i].y = by0 - r
+            g.balls[i].vy = 0.0 - Math.abs(g.balls[i].vy)
+        } else {
+            g.balls[i].y = by1 + r
+            g.balls[i].vy = Math.abs(g.balls[i].vy)
+        }
+        hitBrick(g, k)
+        return
+    }
+}
+
+pub fn launch(g: &mut Game) {
+    for i in 0..g.balls.len {
+        if g.balls[i].alive && g.balls[i].held {
+            g.balls[i].held = false
+            let off = Math.clampF64((g.balls[i].x - g.padX) / (g.padW * 0.5), 0.0 - 0.8, 0.8)
+            let ang = 0.0 - 1.5707963267948966 + off * 0.9 + Random.floatRange(0.0 - 0.12, 0.12)
+            g.balls[i].vx = Math.cos(ang) * g.speed
+            g.balls[i].vy = Math.sin(ang) * g.speed
+        }
+    }
+}
+
+pub fn gameUpdate(g: &mut Game, dtIn: f64, wantX: f64, launchHeld: bool) {
+    var dt = dtIn
+    if g.slow > 0.0 {
+        g.slow = g.slow - dtIn
+        dt = dtIn * 0.55
+    }
+    g.time = g.time + dt
+    if g.shake > 0.0 {
+        g.shake = g.shake * Math.pow(0.02, dt)
+    }
+    if g.flash > 0.0 {
+        g.flash = g.flash - dt * 2.0
+    }
+    if g.banner > 0.0 {
+        g.banner = g.banner - dt
+    }
+    if g.sticky > 0.0 {
+        g.sticky = g.sticky - dt
+    }
+
+    if g.gameOver || g.won {
+        for i in 0..g.parts.len {
+            g.parts[i].life = g.parts[i].life - dt
+        }
+        gridUpdate(g.grid, dt)
+        compactParts(g)
+        return
+    }
+
+    // level cleared: pause, then advance
+    if g.clearedTimer > 0.0 {
+        g.clearedTimer = g.clearedTimer - dt
+        gridUpdate(g.grid, dt)
+        updateParticles(g, dt)
+        if g.clearedTimer <= 0.0 {
+            if g.level + 1 >= levelCount() {
+                g.won = true
+            } else {
+                loadLevel(g, g.level + 1)
+            }
+        }
+        return
+    }
+
+    // paddle: eased toward the requested position so it never feels twitchy
+    g.padW = g.padW + (g.padWWant - g.padW) * Math.minF64(1.0, dt * 6.0)
+    let half = g.padW * 0.5
+    let want = Math.clampF64(wantX, half, g.w - half)
+    g.padX = g.padX + (want - g.padX) * Math.minF64(1.0, dt * 22.0)
+
+    if launchHeld {
+        launch(g)
+    }
+
+    for i in 0..g.balls.len {
+        if !g.balls[i].alive {
+            continue
+        }
+        if g.balls[i].held {
+            g.balls[i].x = g.padX
+            g.balls[i].y = g.padY - g.balls[i].r - 8.0
+            g.balls[i].px = g.balls[i].x
+            g.balls[i].py = g.balls[i].y
+            continue
+        }
+        g.balls[i].px = g.balls[i].x
+        g.balls[i].py = g.balls[i].y
+
+        // Substepped so a fast ball cannot tunnel through a brick.
+        let steps = 4
+        let sdt = dt / (steps as f64)
+        for s in 0..steps {
+            g.balls[i].x = g.balls[i].x + g.balls[i].vx * sdt
+            g.balls[i].y = g.balls[i].y + g.balls[i].vy * sdt
+            let r = g.balls[i].r
+            if g.balls[i].x < r {
+                g.balls[i].x = r
+                g.balls[i].vx = Math.abs(g.balls[i].vx)
+                gridImpulse(g.grid, 0.0, g.balls[i].y, 120.0, 22.0)
+            }
+            if g.balls[i].x > g.w - r {
+                g.balls[i].x = g.w - r
+                g.balls[i].vx = 0.0 - Math.abs(g.balls[i].vx)
+                gridImpulse(g.grid, g.w, g.balls[i].y, 120.0, 22.0)
+            }
+            if g.balls[i].y < r {
+                g.balls[i].y = r
+                g.balls[i].vy = Math.abs(g.balls[i].vy)
+                gridImpulse(g.grid, g.balls[i].x, 0.0, 120.0, 22.0)
+            }
+            if g.balls[i].vy > 0.0 && g.balls[i].y + r >= g.padY && g.balls[i].y - r <= g.padY + 18.0 {
+                if Math.abs(g.balls[i].x - g.padX) <= g.padW * 0.5 + r {
+                    bounceOffPaddle(g, i)
+                }
+            }
+            collideBricks(g, i)
+        }
+
+        // A near-horizontal ball is a stalled rally, so tilt it back to work.
+        let sp = Math.sqrt(g.balls[i].vx * g.balls[i].vx + g.balls[i].vy * g.balls[i].vy)
+        if sp > 1.0 {
+            if Math.abs(g.balls[i].vy) < g.speed * 0.28 {
+                let sign = if g.balls[i].vy >= 0.0 {
+                    1.0
+                } else {
+                    0.0 - 1.0
+                }
+                g.balls[i].vy = sign * g.speed * 0.28
+            }
+            let sp2 = Math.sqrt(g.balls[i].vx * g.balls[i].vx + g.balls[i].vy * g.balls[i].vy)
+            g.balls[i].vx = g.balls[i].vx * g.speed / sp2
+            g.balls[i].vy = g.balls[i].vy * g.speed / sp2
+        }
+
+        if g.balls[i].y - g.balls[i].r > g.h {
+            g.balls[i].alive = false
+            burst(g, g.balls[i].x, g.h - 4.0, 20, 260.0, 1.5, 0.4, 0.4)
+        }
+    }
+
+    // compact balls
+    var b: i64 = 0
+    while b < g.balls.len {
+        if g.balls[b].alive {
+            b = b + 1
+        } else {
+            let last = g.balls.len - 1
+            g.balls[b] = g.balls[last]
+            let _ = g.balls.pop()
+        }
+    }
+
+    if g.balls.len == 0 {
+        g.lives = g.lives - 1
+        g.combo = 0
+        g.shake = 12.0
+        g.flash = 0.5
+        g.padWWant = 150.0
+        if g.lives <= 0 {
+            g.gameOver = true
+        } else {
+            resetBall(g)
+        }
+    }
+
+    updatePups(g, dt)
+    updateParticles(g, dt)
+    for i in 0..g.bricks.len {
+        if g.bricks[i].flash > 0.0 {
+            g.bricks[i].flash = g.bricks[i].flash - dt
+        }
+    }
+    gridUpdate(g.grid, dt)
+
+    if bricksLeft(g) == 0 {
+        g.clearedTimer = 2.0
+        g.flash = 0.7
+        g.shake = 14.0
+    }
+}
+
+fn updatePups(g: &mut Game, dt: f64) {
+    var i: i64 = 0
+    while i < g.pups.len {
+        g.pups[i].y = g.pups[i].y + g.pups[i].vy * dt
+        g.pups[i].spin = g.pups[i].spin + dt * 3.0
+        var gone = false
+        if g.pups[i].y > g.h + 20.0 {
+            gone = true
+        }
+        if !gone && g.pups[i].y > g.padY - 14.0 && g.pups[i].y < g.padY + 20.0 {
+            if Math.abs(g.pups[i].x - g.padX) < g.padW * 0.5 + 16.0 {
+                applyPup(g, g.pups[i].kind)
+                let c = pupColor(g.pups[i].kind)
+                burst(g, g.pups[i].x, g.pups[i].y, 26, 240.0, c.r, c.g, c.b)
+                addPop(g, g.pups[i].x, g.pups[i].y - 20.0, 0, c)
+                gone = true
+            }
+        }
+        if gone {
+            let last = g.pups.len - 1
+            g.pups[i] = g.pups[last]
+            let _ = g.pups.pop()
+        } else {
+            i = i + 1
+        }
+    }
+}
+
+fn compactParts(g: &mut Game) {
+    var i: i64 = 0
+    while i < g.parts.len {
+        if g.parts[i].life <= 0.0 {
+            let last = g.parts.len - 1
+            g.parts[i] = g.parts[last]
+            let _ = g.parts.pop()
+        } else {
+            i = i + 1
+        }
+    }
+}
+
+fn updateParticles(g: &mut Game, dt: f64) {
+    for i in 0..g.parts.len {
+        g.parts[i].life = g.parts[i].life - dt
+        g.parts[i].vy = g.parts[i].vy + 420.0 * dt
+        let d = Math.pow(0.35, dt)
+        g.parts[i].vx = g.parts[i].vx * d
+        g.parts[i].x = g.parts[i].x + g.parts[i].vx * dt
+        g.parts[i].y = g.parts[i].y + g.parts[i].vy * dt
+    }
+    compactParts(g)
+    var p: i64 = 0
+    while p < g.pops.len {
+        g.pops[p].life = g.pops[p].life - dt
+        g.pops[p].y = g.pops[p].y - 34.0 * dt
+        if g.pops[p].life <= 0.0 {
+            let last = g.pops.len - 1
+            g.pops[p] = g.pops[last]
+            let _ = g.pops.pop()
+        } else {
+            p = p + 1
+        }
+    }
+}
+
+pub fn gameReset(g: &mut Game) {
+    g.lives = 5
+    g.score = 0
+    g.combo = 0
+    g.gameOver = false
+    g.won = false
+    g.clearedTimer = 0.0
+    loadLevel(g, 0)
+}

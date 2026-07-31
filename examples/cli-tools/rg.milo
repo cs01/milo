@@ -83,6 +83,10 @@ pub struct RgOpts {
     fileType: string,
     totalMatches: i64,
     needsSeparator: bool,
+    // The pattern, plus whether it is a plain substring. Kept on the options so
+    // the whole-file reject below does not recompute it per file.
+    pattern: string,
+    literal: bool,
 }
 
 // ── match helpers ──
@@ -109,6 +113,32 @@ pub fn filterWordBounds(line: &string, matches: Vec<RegexMatch>): Vec<RegexMatch
         }
     }
     return result
+}
+
+// A pattern with no regex metacharacters is just a substring search, and
+// `contains` bottoms out in memchr + memcmp. Running the regex engine over every
+// line of every file to find "uint256" is most of what made a tree-wide search
+// slow — ripgrep's equivalent is its literal prefilter.
+pub fn isPlainLiteral(pat: &string): bool {
+    if pat.len == 0 {
+        return false
+    }
+    for byte in pat {
+        // . * + ? [ ] ( ) { } | ^ $ \
+        if byte == 46 || byte == 42 || byte == 43 || byte == 63 {
+            return false
+        }
+        if byte == 91 || byte == 93 || byte == 40 || byte == 41 {
+            return false
+        }
+        if byte == 123 || byte == 125 || byte == 124 || byte == 94 {
+            return false
+        }
+        if byte == 36 || byte == 92 {
+            return false
+        }
+    }
+    return true
 }
 
 pub fn getMatches(re: &mut Regex, line: &string, wordBound: bool): Vec<RegexMatch> {
@@ -179,6 +209,13 @@ pub fn searchFile(filePath: &string, re: &mut Regex, opts: &mut RgOpts, multiFil
         Result.Err(_) => {
             return
         }
+    }
+
+    // Whole-file reject: if the pattern is a literal and the file does not contain
+    // it anywhere, there is nothing to split, allocate or scan line by line. One
+    // memchr pass over the buffer replaces N regex runs.
+    if opts.literal && !opts.invert && !content.contains(opts.pattern) {
+        return
     }
 
     let lines = content.split("\n")
@@ -369,6 +406,8 @@ pub fn main(): i32 {
         fileType: args.getString("type"),
         totalMatches: 0,
         needsSeparator: false,
+        pattern: pattern.clone(),
+        literal: isPlainLiteral(pattern) && !args.getBool("word-regexp"),
     }
 
     var target = args.getString("path")

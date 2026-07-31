@@ -1,5 +1,5 @@
 // minimal grep -c implementation for benchmarking
-from "std/io" import {
+from "std/fs" import {
     readFile
 }
 
@@ -25,9 +25,9 @@ fn main(): i32 {
     var count: i64 = 0
     var lineStart: i64 = 0
     while lineStart <= content.len {
-        var nl = strIndexOfFrom(content, "\n", lineStart)
-        if nl < 0 {
-            nl = content.len
+        var nl = content.len
+        if let Option.Some(hit) = content.indexOfFrom("\n", lineStart) {
+            nl = hit
         }
         // zero-copy &string slice — C/Go scan in place too, keep it fair
         let line = content[lineStart..nl]

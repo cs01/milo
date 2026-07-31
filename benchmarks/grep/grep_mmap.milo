@@ -1,0 +1,76 @@
+// grep -c the way ripgrep does it: mmap the file and scan the mapping in place.
+// No 67MB copy into a String, no per-byte append — the bytes are never moved.
+// The scan itself calls libc memchr, which is already vectorised.
+from "std/io" import {
+    File
+}
+from "std/mem" import {
+    mmapFile
+}
+
+extern fn memchr(s: *u8, c: i32, n: i64): *u8
+
+extern fn memcmp(s1: *u8, s2: *u8, n: i64): i32
+
+fn main(): i32 {
+    if _miloArgCount() < 3 {
+        print("usage: grep_mmap <pattern> <file>")
+        return 2
+    }
+    let pat = _miloArgAt(1)
+    let path = _miloArgAt(2)
+
+    let f = match File.openRead(path) {
+        Result.Ok(h) => h,
+        Result.Err(e) => {
+            print("grep: cannot open")
+            return 1
+        }
+    }
+    let size = f.size()
+    if size <= 0 {
+        print(0)
+        return 1
+    }
+    let m = match mmapFile(f.fd, size) {
+        Result.Ok(mm) => mm,
+        Result.Err(e) => {
+            print("grep: mmap failed")
+            return 1
+        }
+    }
+
+    var count: i64 = 0
+    unsafe {
+        let base = m.ptr
+        let np = pat.cstr()
+        let plen = pat.len
+        let c0 = pat[0] as i32
+        var pos: i64 = 0
+        while pos + plen <= size {
+            // skip to the next candidate first byte, then verify the rest
+            let hit = memchr((base + pos) as *u8, c0, size - pos - plen + 1) as i64
+            if hit == 0 {
+                break
+            }
+            let idx = hit - base
+            if memcmp((base + idx) as *u8, np, plen) == 0 {
+                count = count + 1
+                // one match per line: jump past this line's newline
+                let nl = memchr((base + idx) as *u8, 10, size - idx) as i64
+                if nl == 0 {
+                    break
+                }
+                pos = nl - base + 1
+            } else {
+                pos = idx + 1
+            }
+        }
+    }
+
+    print(count)
+    if count == 0 {
+        return 1
+    }
+    return 0
+}

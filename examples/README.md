@@ -12,6 +12,7 @@ Runnable Milo programs. They double as integration smoke tests for the standard 
 | [`hello.milo`](hello.milo) | The canonical first program |
 | [`basics/`](basics) | Language and stdlib fundamentals: fib, fizzbuzz, json, arenas, a small interpreter |
 | [`cli-tools/`](cli-tools) | Coreutils-style tools, one `.milo` file each: grep, jq, tree, fmt |
+| [`games/`](games) | [`neon/`](games/neon) — a twin-stick arena shooter, and the worked answer to "second-class references can't do gameplay code" |
 | [`graphics/`](graphics) | Truecolor terminal rendering: donut, plasma, aquarium, raytracers |
 | [`simulation/`](simulation) | Physics and numerical simulation: cloth, rigid bodies, phase space |
 | [`terminal/`](terminal) | TUIs and PTY work: tetris, sysmon, a mini tmux |

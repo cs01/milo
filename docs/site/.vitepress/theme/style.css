@@ -118,6 +118,22 @@
 
 /* ---- home page sections ---- */
 
+/* The install command, directly under the hero. Tightened up from a normal code
+   block: it is a one-line call to action, not a sample to read. */
+.install-line {
+  margin: 0 0 2rem;
+}
+.install-line div[class*='language-'] {
+  margin: 0;
+  border-radius: 8px;
+}
+.install-line div[class*='language-'] pre {
+  padding: 0.9rem 1.2rem;
+}
+.install-line code {
+  font-size: 0.95rem;
+}
+
 .intro {
   /* no box of its own: the parent .vp-doc.container already carries the same
      max-width + responsive padding as VPHero, so inheriting them is what puts

@@ -47,8 +47,17 @@ jobs:
       - uses: actions/checkout@v4
       - uses: oven-sh/setup-bun@v2
       - run: bun run scripts/bundle-stdlib.ts
+      # Must run before --compile: the stamp is frozen into the binary, so `milo
+      # --version` on a release build names the commit instead of saying "dev".
+      - run: bun run scripts/stamp-version.ts
       - run: bun build --compile --target=${{ matrix.buntarget }} src/main.ts --outfile milo
-      - run: tar czf milo-${{ matrix.target }}.tar.gz milo
+      # The archive wraps the binary in a directory. A flat archive dumps a bare
+      # `milo` into whatever directory it was extracted in, which is hostile for
+      # anyone who downloads it from the browser instead of using install.sh.
+      - run: |
+          mkdir -p milo-${{ matrix.target }}
+          mv milo milo-${{ matrix.target }}/milo
+          tar czf milo-${{ matrix.target }}.tar.gz milo-${{ matrix.target }}
       - uses: actions/upload-artifact@v4
         with:
           name: milo-${{ matrix.target }}
@@ -69,7 +78,19 @@ jobs:
           body: |
             Rolling release from the latest passing commit on main.
             Built from ${{ github.sha }}.
-          prerelease: true
+
+            ## Install
+
+            ```sh
+            curl -fsSL https://milo-language.github.io/milo/install.sh | sh
+            ```
+
+            Or grab a tarball below. macOS quarantines anything downloaded through a
+            browser and will refuse to run it — use the installer, or `curl -L` the
+            tarball directly, or clear it with `xattr -d com.apple.quarantine milo`.
+          # NOT a prerelease: GitHub hides prereleases from the repo landing page, so
+          # marking this one cost us the only visible "download Milo" affordance.
+          prerelease: false
           make_latest: true
           files: milo-*.tar.gz
         env:

@@ -8,7 +8,13 @@ last-verified: 2026-07-23
 
 # The Milo Language Guide
 
-A memory-safe systems language with simple syntax inspired by TypeScript, Python, and Rust. Compiles to native code via LLVM.
+A memory-safe systems language with simple syntax — Rust's semantics with a lighter, more TypeScript-like surface. Compiles to native code via LLVM.
+
+> **This file is the authoritative reference.** It is the exhaustive spec, kept in step with
+> `src/parser.ts` and `src/checker.ts`, and it is what agents and contributors should read.
+> The published [Language Overview](https://milo-language.github.io/milo/language/) is the
+> teaching version of the same material — shorter, example-led, and aimed at newcomers. When
+> the two disagree, this file is right and the site page needs updating.
 
 ## Getting Started
 
@@ -1082,8 +1088,8 @@ print(mid[0])          // 20 — indexed, bounds-checked
 print(sum(mid))        // 50
 ```
 
-A function may **return** a `&[T]` view of data it was given — the idiom for exposing a
-container's storage for zero-copy iteration:
+A **method** may return a `&[T]` view of its own receiver's storage — the idiom for
+exposing a container for zero-copy iteration:
 
 ```milo
 struct Ring { data: Vec<i64> }
@@ -1092,6 +1098,14 @@ impl Ring {
 }
 // for x in r.items() { ... }   // iterates the view, borrows each element
 ```
+
+This is the one place a reference leaves a function, and it is bounded on both ends. The
+view must be of storage reachable through `self` — a view of a method-local, or of another
+`&` parameter, is rejected, since neither survives the freeze the caller takes. And the
+call freezes the receiver for the life of the binding, exactly as an inline `r.data[0..n]`
+would: while the view is alive, `r` cannot be pushed to, reassigned, moved, or dropped.
+A view also cannot be captured by a closure, stored in a struct, or put in a collection.
+Free functions cannot return references at all.
 
 One current limit: `&mut [T]` (mutable views, `splitMut`) is not yet supported — slices
 are read-only.

@@ -1,8 +1,9 @@
 # Welcome to Milo!
 
-A memory-safe systems language with simple syntax inspired by TypeScript, Python, and Rust. Compiles to native code via LLVM.
+A memory-safe systems language with simple syntax — Rust's semantics with a lighter, more TypeScript-like surface. Compiles to native code via LLVM.
 
-This page walks through every major concept with runnable examples. [Open the Playground](/playground) to try them as you go.
+This page walks through every major concept with runnable examples. [Open the Playground](/playground) to try them as you go. For the exhaustive spec rather than the tour, read
+[the language reference](https://github.com/milo-language/milo/blob/main/docs/language-reference.md).
 
 ## Philosophy
 

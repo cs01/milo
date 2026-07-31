@@ -13,6 +13,14 @@ hero:
       link: /getting-started/installation
 ---
 
+<div class="install-line">
+
+```sh
+curl -fsSL https://milo-language.github.io/milo/install.sh | sh
+```
+
+</div>
+
 <div class="intro">
 
 - [**Run Milo in your browser**](/playground)
@@ -109,7 +117,7 @@ fn main() {
 <div class="showcase">
   <div class="showcase-head">
     <h2>Built with Milo</h2>
-    <p>Milo is young (still a puppy 🐶) but we have built a lot with it already! We dogfood the language by writing a variety of realy world programs to prove the language works. If we run into expressiveness, correctness, or ergonomics issues, we modify the langauge to continue on our mission of correct, readable programs.</p>
+    <p>Milo is young (still a puppy 🐶) but we have built a lot with it already. We dogfood the language by writing a variety of real-world programs to prove it works. When we run into expressiveness, correctness, or ergonomics problems, we change the language — that is how we stay on the mission of correct, readable programs.</p>
   </div>
   <div class="cat cat-emu">
     <h3 class="cat-head">Emulators</h3>
@@ -286,7 +294,10 @@ fn main() {
   <a class="cta-secondary" href="/milo/stdlib/">Standard library</a>
   <a class="cta-secondary" href="/milo/playground">Playground</a>
   <a class="cta-secondary" href="/milo/getting-started/installation">Get Started</a>
+  <a class="cta-secondary" href="/milo/blog/">Blog</a>
   <a class="cta-secondary" href="https://github.com/milo-language/milo">GitHub</a>
 </div>
+
+<Subscribe blurb="New posts, releases, and things people have built with Milo. No more than once a month. Unsubscribe in one click." />
 
 </div>

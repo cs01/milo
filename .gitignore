@@ -97,3 +97,6 @@ tmp/
 .selfhost/
 roms/
 .test-suite.lock
+
+# Staged from the repo-root install.sh by the docs build; not a source file.
+docs/site/public/install.sh

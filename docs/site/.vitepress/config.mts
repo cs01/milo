@@ -1,10 +1,54 @@
-import { defineConfig } from 'vitepress'
+import { defineConfig, createContentLoader, type SiteConfig } from 'vitepress'
+import { Feed } from 'feed'
 import fs from 'node:fs'
 import path from 'node:path'
+import { toDate } from './postdate'
 
 const miloGrammar = JSON.parse(
   fs.readFileSync(path.resolve(__dirname, 'milo.tmLanguage.json'), 'utf-8')
 )
+
+const SITE = 'https://milo-language.github.io/milo'
+
+// RSS is the feed most of this audience actually reads, and it has to be generated
+// at buildEnd because that's the only hook where the rendered post HTML exists.
+async function generateFeed(config: SiteConfig) {
+  const feed = new Feed({
+    title: 'Milo',
+    description: 'Notes from building Milo — a memory-safe systems language.',
+    id: SITE,
+    link: SITE,
+    language: 'en',
+    image: `${SITE}/logo.svg`,
+    favicon: `${SITE}/logo.svg`,
+    copyright: `Copyright © ${new Date().getFullYear()} the Milo authors`,
+    feedLinks: { rss: `${SITE}/feed.rss`, atom: `${SITE}/feed.atom` },
+  })
+
+  const posts = (await createContentLoader('blog/posts/*.md', { render: true }).load())
+    .map((p) => ({ ...p, published: toDate(p.frontmatter.date) }))
+    .filter((p) => p.published !== null)
+    .sort((a, b) => +b.published! - +a.published!)
+
+  if (!posts.length) return   // Feed.atom1() throws on a feed with no updated date
+
+  feed.options.updated = posts[0].published!
+
+  for (const post of posts) {
+    feed.addItem({
+      title: post.frontmatter.title,
+      id: `${SITE}${post.url}`,
+      link: `${SITE}${post.url}`,
+      description: post.frontmatter.description,
+      content: post.html,
+      author: [{ name: post.frontmatter.author ?? 'The Milo team' }],
+      date: post.published!,
+    })
+  }
+
+  fs.writeFileSync(path.join(config.outDir, 'feed.rss'), feed.rss2())
+  fs.writeFileSync(path.join(config.outDir, 'feed.atom'), feed.atom1())
+}
 
 export default defineConfig({
   title: 'Milo',
@@ -16,6 +60,7 @@ export default defineConfig({
   head: [
     ['link', { rel: 'icon', type: 'image/svg+xml', href: '/milo/logo.svg' }],
     ['link', { rel: 'preload', as: 'font', type: 'font/woff2', href: '/milo/fonts/DepartureMono-Regular.woff2', crossorigin: '' }],
+    ['link', { rel: 'alternate', type: 'application/rss+xml', title: 'Milo', href: '/milo/feed.rss' }],
   ],
 
   markdown: {
@@ -35,6 +80,7 @@ export default defineConfig({
       { text: 'Language', link: '/language/' },
       { text: 'Playground', link: '/playground' },
       { text: 'Built with Milo', link: '/demos' },
+      { text: 'Blog', link: '/blog/', activeMatch: '/blog/' },
       {
         text: 'More',
         items: [
@@ -46,6 +92,9 @@ export default defineConfig({
     ],
 
     sidebar: {
+      // Blog pages get no sidebar — the docs tree is irrelevant while reading a post.
+      '/blog/': [],
+
       '/': [
         {
           text: 'Getting Started',
@@ -228,5 +277,7 @@ export default defineConfig({
     socialLinks: [
       { icon: 'github', link: 'https://github.com/milo-language/milo' }
     ],
-  }
+  },
+
+  buildEnd: generateFeed,
 })

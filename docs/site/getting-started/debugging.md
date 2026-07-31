@@ -7,7 +7,7 @@ Milo emits standard DWARF debug info, so any DWARF-aware debugger — `lldb`, `g
 [dapweb](https://github.com/milo-language/dapweb) is a web + AI debugger written in Milo itself. It drives any DAP backend (`lldb-dap`, `debugpy`, `delve`), so it debugs Milo binaries directly — same DWARF, no plugin.
 
 ```bash
-./milo build app.milo -o app -g --debug     # DWARF at -O0
+milo build app.milo -o app -g --debug     # DWARF at -O0
 dapweb ./app                                 # opens the UI in your browser
 ```
 
@@ -20,7 +20,7 @@ dapweb ./app                                 # opens the UI in your browser
 Pass `-g`:
 
 ```bash
-./milo build app.milo -o app -g --debug
+milo build app.milo -o app -g --debug
 lldb ./app
 ```
 
@@ -65,7 +65,7 @@ app.dSYM/
 ## Breakpoints and variables
 
 ```
-$ ./milo build compute.milo -o compute -g --debug
+$ milo build compute.milo -o compute -g --debug
 $ lldb ./compute
 (lldb) b compute.milo:6
 Breakpoint 1: where = compute`compute + 148 at compute.milo:6:5, address = 0x1000062e0
@@ -112,8 +112,8 @@ Current gaps:
 Runtime bug hunting, before you reach for a debugger:
 
 ```bash
-./milo build app.milo -o app --debug     # -O0 traps on integer overflow
-./milo build app.milo -o app --sanitize  # link with AddressSanitizer (clang only)
+milo build app.milo -o app --debug     # -O0 traps on integer overflow
+milo build app.milo -o app --sanitize  # link with AddressSanitizer (clang only)
 ```
 
 `--debug` (`-O0`) enables overflow traps; the default `-O2` and `--release` builds use wrapping arithmetic. See [Warnings & Errors](/language/warnings-and-errors) for compile-time diagnostics.

@@ -18,6 +18,7 @@ import { type TargetInfo, getHostTarget, resolveTarget, listTargets, Unsupported
 import { generateVerificationConditions, formatVerifyReport, proveWithZ3, formatProveReport } from "./verify";
 import { proveWithMilo } from "./prove-milo";
 import { parseSafetyLevel, checkSafetyCompliance, formatSafetyReport, listSafetyLevels } from "./safety";
+import { versionString } from "./version";
 import { extractFlowFacts, formatFlowFacts } from "./wcet";
 import { estimateLoopCycles, formatCycleEstimate } from "./wcet-cycles";
 import { PKG_COMMANDS, ensureDepsInstalled } from "./pkgcli";
@@ -1397,6 +1398,15 @@ function reportCompiled(source: string, out: string, elapsedMs: number) {
 
 async function main() {
   const args = process.argv.slice(2);
+
+  // Handled before the usage banner and the unknown-command guard: `--version` is
+  // the first thing anyone types after installing, and it should never print a
+  // 60-line help screen or an error.
+  if (args[0] === "--version" || args[0] === "-V" || args[0] === "version") {
+    console.log(versionString());
+    process.exit(0);
+  }
+
   if (args.length < 1) {
     console.log("usage: milo <command> [options] <file>");
     console.log("commands:");
@@ -1453,6 +1463,7 @@ async function main() {
     console.log("  --safety=<level>       enforce safety profile (e.g. --safety=do178)");
     console.log("  --target=<name>        cross-compile target (e.g. cortex-m3)");
     console.log("  --heap-size=<N>        bare-metal heap cap in bytes or k/m (e.g. 64k); default: all free RAM");
+    console.log("  --version              print the compiler version and exit");
     process.exit(1);
   }
 

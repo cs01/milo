@@ -14,7 +14,7 @@ Every Milo program starts at `main`, which returns an `i32` exit code.
 ## Run it
 
 ```bash
-./milo run hello.milo
+milo run hello.milo
 ```
 
 The `run` command compiles and executes in one step — no artifacts left behind.
@@ -22,7 +22,7 @@ The `run` command compiles and executes in one step — no artifacts left behind
 ## Build a binary
 
 ```bash
-./milo build hello.milo -o hello
+milo build hello.milo -o hello
 ./hello
 ```
 
@@ -31,10 +31,10 @@ The binary is standalone — no runtime needed. Typically under 300KB.
 ## Build modes
 
 ```bash
-./milo build app.milo -o app            # default: -O2
-./milo build app.milo -o app --release   # -O3
-./milo build app.milo -o app --debug     # -O0
-./milo build app.milo -o app -g --debug  # -O0 + DWARF, for lldb
+milo build app.milo -o app            # default: -O2
+milo build app.milo -o app --release   # -O3
+milo build app.milo -o app --debug     # -O0
+milo build app.milo -o app -g --debug  # -O0 + DWARF, for lldb
 ```
 
 `-g` emits DWARF debug info and composes with any optimization level. See [Debugging](/getting-started/debugging).
@@ -50,7 +50,7 @@ fixes without a rebuild — but they then need OpenSSL installed wherever they r
 of those to a machine that may not have it:
 
 ```bash
-./milo build app.milo -o app --static-deps   # bakes in openssl/sqlite; libc-only binary
+milo build app.milo -o app --static-deps   # bakes in openssl/sqlite; libc-only binary
 ```
 
 The tradeoff is size (roughly +5MB) and losing system security updates for the baked-in
@@ -60,9 +60,9 @@ neither the flag nor the thought.
 ## See the compiler's intermediate forms
 
 ```bash
-./milo emit-ast hello.milo   # parsed AST as JSON — before types exist
-./milo emit-hir hello.milo   # typed HIR as JSON — every expression carries its type
-./milo emit-ir  hello.milo   # LLVM IR
+milo emit-ast hello.milo   # parsed AST as JSON — before types exist
+milo emit-hir hello.milo   # typed HIR as JSON — every expression carries its type
+milo emit-ir  hello.milo   # LLVM IR
 ```
 
 Useful for understanding what the compiler generates at each stage. `emit-ast`/`emit-hir`
@@ -97,7 +97,7 @@ fn main(): i32 {
 ```
 
 ```bash
-$ ./milo run greet.milo
+$ milo run greet.milo
 hi, Alice!
 age: 30
 ```

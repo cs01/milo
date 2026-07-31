@@ -3626,6 +3626,18 @@ export class TypeChecker {
       for (let j = i + 1; j < args.length; j++) {
         const a = mutSteps[i], b = mutSteps[j];
         if (!a || !b || a.root !== b.root) continue;
+        const ra = this.constSliceRange(args[i]), rb = this.constSliceRange(args[j]);
+        if (ra && rb && a.steps.length === b.steps.length) {
+          // Two `&mut` windows into one buffer with literal bounds: disjointness is
+          // decidable right here, so overlap is a rejectable aliasing violation rather
+          // than the "may be distinct elements" case aliasesByContainment lets pass.
+          // Non-literal bounds stay permissive — that split needs the prover.
+          if (ra.lo < rb.hi && rb.lo < ra.hi) {
+            this.error(`'${a.root}' is borrowed mutably twice in the same call`, args[i].span ?? args[j].span ?? undefined,
+              `the ranges ${ra.lo}..${ra.hi} and ${rb.lo}..${rb.hi} overlap, so both arguments are '&mut' views of the same elements — make the windows disjoint or split the call into two statements`);
+          }
+          continue;
+        }
         if (this.aliasesByContainment(a.steps, b.steps)) {
           const sp = args[i].span ?? args[j].span ?? undefined;
           this.error(`'${a.root}' is borrowed mutably twice in the same call`, sp,
@@ -3633,6 +3645,17 @@ export class TypeChecker {
         }
       }
     }
+  }
+
+  // The literal bounds of `v[lo..hi]` (which parses as `v.slice(lo, hi)`), or null when
+  // either bound is anything but an integer literal. Only the literal case is decidable
+  // without the prover, and only equal `hi`/`lo` ordering is assumed — a reversed range
+  // is a runtime bounds error, not this check's business.
+  private constSliceRange(e: Expr): { lo: bigint; hi: bigint } | null {
+    if (e.kind !== "MethodCall" || e.method !== "slice" || e.args.length !== 2) return null;
+    const [lo, hi] = e.args;
+    if (lo.kind !== "IntLit" || hi.kind !== "IntLit") return null;
+    return { lo: lo.value, hi: hi.value };
   }
 
   // How a call argument borrows its root, for the exclusivity checks. Most args are

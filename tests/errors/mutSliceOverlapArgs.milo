@@ -1,0 +1,13 @@
+// two &mut windows into one buffer with literal bounds: disjointness is decidable,
+// so overlap is a rejectable aliasing violation rather than the "may be distinct
+// elements" case that sibling index args fall under
+fn f(a: &mut [i32], b: &mut [i32]): void {
+    a[0] = 1
+    b[0] = 2
+}
+fn main(): i32 {
+    var v: Vec<i32> = [1, 2, 3, 4]
+    f(v[0..2], v[1..3])
+    return 0
+}
+// @error: the ranges 0..2 and 1..3 overlap

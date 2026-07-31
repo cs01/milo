@@ -2616,12 +2616,19 @@ export class TypeChecker {
         }
         this.markCaptureMutated(stmt.target);
         // reject reassignment while a borrow (slice, iteration ref) is live
-        // but allow closures to mutate their own captured variables
-        if (stmt.target.kind === "Ident") {
-          const info = this.lookup(stmt.target.name);
-          const isCapturedMutation = this.closureScopeDepth !== null && this.currentClosureCaptures?.has(stmt.target.name);
+        // but allow closures to mutate their own captured variables.
+        // Whole-place assignment (`x = ...`, `x.f = ...`) drops the old value and frees
+        // its buffer, so a live view into it would dangle. An index step is exempt: an
+        // in-place element write never reallocates, so views stay valid and see it
+        // (tests/fixtures/viewFreezeRelease.milo).
+        const assignPath = this.accessSteps(stmt.target);
+        if (assignPath && !assignPath.steps.some((s) => s === "[]" || s === "*")) {
+          const info = this.lookup(assignPath.root);
+          const isCapturedMutation = this.closureScopeDepth !== null && this.currentClosureCaptures?.has(assignPath.root);
           if (info?.borrowed && !isCapturedMutation) {
-            this.error(`cannot assign to '${stmt.target.name}' because it is borrowed`, sp,
+            const place = this.describeExpr(stmt.target);
+            const why = place === assignPath.root ? "it is borrowed" : `'${assignPath.root}' is borrowed`;
+            this.error(`cannot assign to '${place}' because ${why}`, sp,
               `a reference or slice into this variable is still live — the assignment would invalidate it`);
             break;
           }
@@ -5853,9 +5860,13 @@ export class TypeChecker {
             const endType = this.checkExpr(expr.args[1]);
             if (startType.tag !== "int" && startType.tag !== "unknown") this.error(`slice start: expected integer, got ${typeName(startType)}`, sp);
             if (endType.tag !== "int" && endType.tag !== "unknown") this.error(`slice end: expected integer, got ${typeName(endType)}`, sp);
-            // mark source as borrowed — prevents mutation/move while slice is live
-            if (expr.object.kind === "Ident") {
-              const info = this.lookup(expr.object.name);
+            // mark source as borrowed — prevents mutation/move while slice is live.
+            // Walk to the root variable: `buf.data[a..b]` views storage owned by `buf`,
+            // so replacing any part of `buf` can free what this points into.
+            let strRoot: Expr = expr.object;
+            while (strRoot.kind === "FieldAccess" || strRoot.kind === "IndexAccess") strRoot = strRoot.object;
+            if (strRoot.kind === "Ident") {
+              const info = this.lookup(strRoot.name);
               if (info) info.borrowed = true;
             }
             this.borrowedExprs.add(expr);

@@ -160,13 +160,6 @@ fn buildMusic(): Vec<i16> {
     return buf
 }
 
-fn silence(out: &mut Vec<i16>, secs: f64) {
-    let n = (secs * (RATE as f64)) as i64
-    for i in 0..n {
-        out.push(0)
-    }
-}
-
 // Filtered noise — used for the afterburner rush.
 fn rush(out: &mut Vec<i16>, secs: f64, amp: f64) {
     let n = (secs * (RATE as f64)) as i64

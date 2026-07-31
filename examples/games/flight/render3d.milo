@@ -6,15 +6,9 @@ from "std/math" import {
 from "./gfx" import {
     Canvas, fillRect, spot, line, darkLine, text, textCentered, textWidth
 }
-// Small by-value carriers. Returning Vec<f64>/Vec<i64> from these allocated once
-// per terrain quad per frame — a few thousand mallocs a frame, and most of the
+// Small by-value carrier. Returning a Vec<i64> from this allocated once per
+// terrain quad per frame — a few thousand mallocs a frame, and most of the
 // frame time.
-pub struct Rgb {
-    r: f64,
-    g: f64,
-    b: f64,
-}
-
 pub struct Off {
     x: i64,
     z: i64,
@@ -150,121 +144,74 @@ pub fn themeName(t: i64): string {
     return "CITY"
 }
 
-// Sky and fog per theme, so a new stretch of country reads instantly.
-fn themeFog(t: i64): Rgb {
+// The atmosphere of one region: what the fog is made of, how far you can see
+// through it, and where the sun sits. This used to be three functions — one for
+// fog colour, one for fog distance, one for colour AND sun — which meant the
+// same four fog colours were typed out twice and the distances rode in an `Rgb`
+// with `r`=start, `g`=end and `b` carrying nothing. Worse, only the fog
+// crossfaded between regions; the sun jumped, because the function that set it
+// was called first and then overwritten.
+pub struct Weather {
+    fogR: f64,
+    fogG: f64,
+    fogB: f64,
+    // Fog distance is the weather: the coast is hazy, the desert is glass-clear,
+    // the forest sits in the middle, the city is smogged in.
+    fogStart: f64,
+    fogEnd: f64,
+    sunX: f64,
+    sunY: f64,
+    sunZ: f64,
+}
+
+fn weatherOf(t: i64): Weather {
     if t == 1 {
-        return Rgb {
-            r: 0.60, g: 0.46, b: 0.30
+        return Weather { // desert: see forever
+            fogR: 0.60, fogG: 0.46, fogB: 0.30,
+            fogStart: 1100.0, fogEnd: 3200.0,
+            sunX: 0.30, sunY: 0.90, sunZ: 0.30,
         }
     }
     if t == 2 {
-        return Rgb {
-            r: 0.26, g: 0.38, b: 0.40
+        return Weather { // forest: some haze
+            fogR: 0.26, fogG: 0.38, fogB: 0.40,
+            fogStart: 620.0, fogEnd: 1900.0,
+            sunX: 0.50, sunY: 0.72, sunZ: 0.48,
         }
     }
     if t == 3 {
-        return Rgb {
-            r: 0.38, g: 0.40, b: 0.46
+        return Weather { // city: smog
+            fogR: 0.38, fogG: 0.40, fogB: 0.46,
+            fogStart: 380.0, fogEnd: 1300.0,
+            sunX: 0.40, sunY: 0.84, sunZ: 0.36,
         }
     }
-    return Rgb {
-        r: 0.30, g: 0.42, b: 0.62
+    return Weather { // coast: sea haze
+        fogR: 0.30, fogG: 0.42, fogB: 0.62,
+        fogStart: 560.0, fogEnd: 1700.0,
+        sunX: 0.44, sunY: 0.78, sunZ: 0.44,
     }
 }
 
-// Crossfade the atmosphere between the outgoing and incoming region.
-// Fog distance per region — this is the weather. The coast is hazy, the desert is
-// glass-clear, the forest sits in the middle, the city is smogged in.
-fn themeFogRange(t: i64): Rgb {
-    if t == 1 {
-        return Rgb {
-            r: 1100.0, g: 3200.0, b: 0.0
-        } // desert: see forever
-    }
-    if t == 2 {
-        return Rgb {
-            r: 620.0, g: 1900.0, b: 2.0
-        } // forest: some haze
-    }
-    if t == 3 {
-        return Rgb {
-            r: 380.0, g: 1300.0, b: 5.0
-        } // city: smog
-    }
-    return Rgb {
-        r: 560.0, g: 1700.0, b: 4.0
-    } // coast: sea haze
-}
-
-pub fn themeSkyMix(s: &mut Scene, a: i64, b: i64, mix: f64) {
-    let ra = themeFogRange(a)
-    let rb = themeFogRange(b)
-    s.fogStart = rb.r + (ra.r - rb.r) * mix
-    s.fogEnd = rb.g + (ra.g - rb.g) * mix
-    let ca = themeFog(a)
-    let cb = themeFog(b)
-    s.fogR = cb.r + (ca.r - cb.r) * mix
-    s.fogG = cb.g + (ca.g - cb.g) * mix
-    s.fogB = cb.b + (ca.b - cb.b) * mix
-}
-
-pub fn themeSky(s: &mut Scene, t: i64) {
-    if t == 1 {
-        s.fogR = 0.60
-        s.fogG = 0.46
-        s.fogB = 0.30
-        s.sunX = 0.30
-        s.sunY = 0.90
-        s.sunZ = 0.30
-    } else if t == 2 {
-        s.fogR = 0.26
-        s.fogG = 0.38
-        s.fogB = 0.40
-        s.sunX = 0.50
-        s.sunY = 0.72
-        s.sunZ = 0.48
-    } else if t == 3 {
-        s.fogR = 0.38
-        s.fogG = 0.40
-        s.fogB = 0.46
-        s.sunX = 0.40
-        s.sunY = 0.84
-        s.sunZ = 0.36
-    } else {
-        s.fogR = 0.30
-        s.fogG = 0.42
-        s.fogB = 0.62
-        s.sunX = 0.44
-        s.sunY = 0.78
-        s.sunZ = 0.44
-    }
-}
-
-fn terrainColor(h: f64, slope: f64): Rgb {
-    // water, sand, grass, rock, snow by height, with rock taking over on slopes
-    if h < 0.0 {
-        return Rgb {
-            r: 0.06, g: 0.26, b: 0.46
-        }
-    }
-    if h < 16.0 {
-        return Rgb {
-            r: 0.62, g: 0.55, b: 0.34
-        }
-    }
-    if h > 168.0 {
-        return Rgb {
-            r: 0.82, g: 0.86, b: 0.92
-        }
-    }
-    if slope > 0.62 || h > 130.0 {
-        return Rgb {
-            r: 0.34, g: 0.31, b: 0.30
-        }
-    }
-    return Rgb {
-        r: 0.16, g: 0.36, b: 0.14
-    }
+// Cross the whole atmosphere from region `a` to region `b` as one value, so
+// nothing can be left behind mid-fade. `mix` is 1 at the old region, 0 at the new.
+pub fn applyWeather(s: &mut Scene, a: i64, b: i64, mix: f64) {
+    let wa = weatherOf(a)
+    let wb = weatherOf(b)
+    s.fogR = wb.fogR + (wa.fogR - wb.fogR) * mix
+    s.fogG = wb.fogG + (wa.fogG - wb.fogG) * mix
+    s.fogB = wb.fogB + (wa.fogB - wb.fogB) * mix
+    s.fogStart = wb.fogStart + (wa.fogStart - wb.fogStart) * mix
+    s.fogEnd = wb.fogEnd + (wa.fogEnd - wb.fogEnd) * mix
+    // The sun is a direction, so it has to come back off the lerp normalised —
+    // a shortened sun vector is a dimmer sun, which is not what a crossfade means.
+    let sx = wb.sunX + (wa.sunX - wb.sunX) * mix
+    let sy = wb.sunY + (wa.sunY - wb.sunY) * mix
+    let sz = wb.sunZ + (wa.sunZ - wb.sunZ) * mix
+    let l = Math.sqrt(sx * sx + sy * sy + sz * sz) + 0.000001
+    s.sunX = sx / l
+    s.sunY = sy / l
+    s.sunZ = sz / l
 }
 
 // How many tiles are on the perimeter of ring `r` (ring 0 is the single centre).
@@ -305,64 +252,6 @@ fn ringOffset(r: i64, i: i64): Off {
     }
 }
 
-fn themedColor(theme: i64, h: f64, slope: f64): Rgb {
-    if h < 0.0 {
-        // water everywhere except the city, which gets tarmac
-        if theme == 3 {
-            return Rgb {
-                r: 0.16, g: 0.16, b: 0.18
-            }
-        }
-        return Rgb {
-            r: 0.06, g: 0.26, b: 0.46
-        }
-    }
-    if theme == 1 {
-        // desert: sand, with red rock on the steep faces
-        if slope > 0.55 {
-            return Rgb {
-                r: 0.46, g: 0.24, b: 0.14
-            }
-        }
-        return Rgb {
-            r: 0.72, g: 0.58, b: 0.32
-        }
-    }
-    if theme == 2 {
-        // forest: deep greens, rock on the steep parts, no snow
-        if slope > 0.60 {
-            return Rgb {
-                r: 0.26, g: 0.24, b: 0.22
-            }
-        }
-        if h > 150.0 {
-            return Rgb {
-                r: 0.16, g: 0.30, b: 0.16
-            }
-        }
-        return Rgb {
-            r: 0.09, g: 0.26, b: 0.10
-        }
-    }
-    if theme == 3 {
-        // city: concrete, grey-green parks
-        if slope > 0.5 {
-            return Rgb {
-                r: 0.24, g: 0.24, b: 0.26
-            }
-        }
-        if h > 90.0 {
-            return Rgb {
-                r: 0.34, g: 0.34, b: 0.36
-            }
-        }
-        return Rgb {
-            r: 0.22, g: 0.26, b: 0.22
-        }
-    }
-    return terrainColor(h, slope)
-}
-
 // ── smooth terrain colour ─────────────────────────────────────────────────────
 //
 // Every one of these is a CONTINUOUS function of world position. That is the
@@ -382,20 +271,6 @@ fn smoothstep(e0: f64, e1: f64, x: f64): f64 {
         t = 1.0
     }
     return t * t * (3.0 - 2.0 * t)
-}
-
-fn mixRgb(a: Rgb, b: Rgb, t: f64): Rgb {
-    return Rgb {
-        r: a.r + (b.r - a.r) * t,
-        g: a.g + (b.g - a.g) * t,
-        b: a.b + (b.b - a.b) * t,
-    }
-}
-
-fn rgb(r: f64, g: f64, b: f64): Rgb {
-    return Rgb {
-        r: r, g: g, b: b
-    }
 }
 
 // Value noise on the integer lattice, smoothstep-interpolated. `propHash` alone
@@ -673,8 +548,7 @@ fn normalAt(x: f64, z: f64, t: f64): Vec3 {
 }
 
 pub fn drawWorld(c: &mut Canvas, s: &mut Scene, w: &World, ground: &Texture, skin: &Texture) {
-    themeSky(s, w.theme)
-    themeSkyMix(s, w.prevTheme, w.theme, w.themeMix)
+    applyWeather(s, w.prevTheme, w.theme, w.themeMix)
     let v = viewOf(w.cam, c.w, c.h)
     sceneClear(s)
     drawSky(c, s, w, v)
@@ -707,7 +581,7 @@ pub fn drawWorld(c: &mut Canvas, s: &mut Scene, w: &World, ground: &Texture, ski
                 continue
             }
             let d2 = mx * mx + mz * mz
-            let reach = (VIEW_TILES as f64) * TILE
+            let reach = v.far
             if d2 > reach * reach {
                 continue
             }
@@ -763,37 +637,77 @@ fn propHash(x: i64, z: i64): f64 {
     return v - Math.floor(v)
 }
 
-fn box3(c: &mut Canvas, s: &mut Scene, v: &View, cx: f64, y0: f64, y1: f64, cz: f64, hw: f64, r: f64, g: f64, b: f64) {
+// An axis-aligned box, given as its base centre, height and half-width. Faces
+// carry their own shade so a block reads as lit without a normal per triangle.
+fn box3(c: &mut Canvas, s: &mut Scene, v: &View, cx: f64, y0: f64, y1: f64, cz: f64, hw: f64, col: &Rgb) {
     let x0 = cx - hw
     let x1 = cx + hw
     let z0 = cz - hw
     let z1 = cz + hw
+    // eight corners: 0..3 bottom, 4..7 top, both counter-clockwise from -x-z
+    let b00 = v3(x0, y0, z0)
+    let b10 = v3(x1, y0, z0)
+    let b11 = v3(x1, y0, z1)
+    let b01 = v3(x0, y0, z1)
+    let t00 = v3(x0, y1, z0)
+    let t10 = v3(x1, y1, z0)
+    let t11 = v3(x1, y1, z1)
+    let t01 = v3(x0, y1, z1)
     // four walls, brighter on the sunward pair, plus a cap
-    triangle(c, s, v, x0, y0, z0, x0, y1, z0, x1, y1, z0, r, g, b)
-    triangle(c, s, v, x0, y0, z0, x1, y1, z0, x1, y0, z0, r, g, b)
-    triangle(c, s, v, x1, y0, z1, x1, y1, z1, x0, y1, z1, r * 0.7, g * 0.7, b * 0.7)
-    triangle(c, s, v, x1, y0, z1, x0, y1, z1, x0, y0, z1, r * 0.7, g * 0.7, b * 0.7)
-    triangle(c, s, v, x1, y0, z0, x1, y1, z0, x1, y1, z1, r * 0.85, g * 0.85, b * 0.85)
-    triangle(c, s, v, x1, y0, z0, x1, y1, z1, x1, y0, z1, r * 0.85, g * 0.85, b * 0.85)
-    triangle(c, s, v, x0, y0, z1, x0, y1, z1, x0, y1, z0, r * 0.55, g * 0.55, b * 0.55)
-    triangle(c, s, v, x0, y0, z1, x0, y1, z0, x0, y0, z0, r * 0.55, g * 0.55, b * 0.55)
-    triangle(c, s, v, x0, y1, z0, x0, y1, z1, x1, y1, z1, r * 1.15, g * 1.15, b * 1.15)
-    triangle(c, s, v, x0, y1, z0, x1, y1, z1, x1, y1, z0, r * 1.15, g * 1.15, b * 1.15)
+    let north = col
+    let south = col.scale(0.7)
+    let east = col.scale(0.85)
+    let west = col.scale(0.55)
+    let top = col.scale(1.15)
+    triangle(c, s, v, b00, t00, t10, north)
+    triangle(c, s, v, b00, t10, b10, north)
+    triangle(c, s, v, b11, t11, t01, south)
+    triangle(c, s, v, b11, t01, b01, south)
+    triangle(c, s, v, b10, t10, t11, east)
+    triangle(c, s, v, b10, t11, b11, east)
+    triangle(c, s, v, b01, t01, t00, west)
+    triangle(c, s, v, b01, t00, b00, west)
+    triangle(c, s, v, t00, t01, t11, top)
+    triangle(c, s, v, t00, t11, t10, top)
 }
 
-fn cone3(c: &mut Canvas, s: &mut Scene, v: &View, cx: f64, y0: f64, y1: f64, cz: f64, rad: f64, r: f64, g: f64, b: f64) {
+fn cone3(c: &mut Canvas, s: &mut Scene, v: &View, cx: f64, y0: f64, y1: f64, cz: f64, rad: f64, col: &Rgb) {
     let segs = 6
     let step = 6.283185307179586 / (segs as f64)
+    let apex = v3(cx, y1, cz)
     for k in 0..segs {
         let a0 = (k as f64) * step
         let a1 = ((k + 1) as f64) * step
-        let p0x = cx + Math.cos(a0) * rad
-        let p0z = cz + Math.sin(a0) * rad
-        let p1x = cx + Math.cos(a1) * rad
-        let p1z = cz + Math.sin(a1) * rad
+        let p0 = v3(cx + Math.cos(a0) * rad, y0, cz + Math.sin(a0) * rad)
+        let p1 = v3(cx + Math.cos(a1) * rad, y0, cz + Math.sin(a1) * rad)
         let sh = 0.65 + 0.35 * Math.cos(a0)
-        triangle(c, s, v, p0x, y0, p0z, cx, y1, cz, p1x, y0, p1z, r * sh, g * sh, b * sh)
-        triangle(c, s, v, p1x, y0, p1z, cx, y1, cz, p0x, y0, p0z, r * sh * 0.7, g * sh * 0.7, b * sh * 0.7)
+        triangle(c, s, v, p0, apex, p1, col.scale(sh))
+        triangle(c, s, v, p1, apex, p0, col.scale(sh * 0.7))
+    }
+}
+
+// A palm crown: fronds radiating from one point and drooping away from it.
+//
+// This was two stacked `cone3` calls, which is a fir — apex up, rim below, the
+// same silhouette the FOREST region grows. The tree shape is most of what tells
+// a coast from a forest at a glance, so the coast was quietly wearing the wrong
+// biome. Fronds are single triangles, emitted in both windings because the
+// rasteriser backface-culls and a frond has to be visible from underneath.
+// Twelve triangles a palm, half what the two cones cost.
+fn palmCrown(c: &mut Canvas, s: &mut Scene, v: &View, crown: &Vec3, reach: f64, droop: f64, col: &Rgb) {
+    let fronds = 6
+    let step = 6.283185307179586 / (fronds as f64)
+    for k in 0..fronds {
+        let a = (k as f64) * step
+        let dir = v3(Math.cos(a), 0.0, Math.sin(a))
+        let tip = crown + dir.scale(reach) - v3(0.0, droop, 0.0)
+        // the frond has width at its base, tapering to the tip
+        let wing = v3(0.0 - dir.z, 0.0, dir.x).scale(reach * 0.22)
+        let sh = 0.72 + 0.28 * Math.cos(a)
+        let l = crown + wing
+        let r = crown - wing
+        triangle(c, s, v, l, tip, r, col.scale(sh))
+        triangle(c, s, v, r, tip, l, col.scale(sh * 0.75))
     }
 }
 
@@ -819,24 +733,20 @@ fn drawProps(c: &mut Canvas, s: &mut Scene, w: &World, v: &View, baseX: i64, bas
             let scale = 0.7 + h * 3.0
             if w.theme == 1 {
                 // cactus: a trunk and one arm
-                box3(c, s, v, x, g0, g0 + 16.0 * scale, z, 2.2, 0.16, 0.34, 0.14)
-                box3(c, s, v, x + 3.0, g0 + 7.0 * scale, g0 + 13.0 * scale, z, 1.4, 0.14, 0.30, 0.12)
+                box3(c, s, v, x, g0, g0 + 16.0 * scale, z, 2.2, rgb(0.16, 0.34, 0.14))
+                box3(c, s, v, x + 3.0, g0 + 7.0 * scale, g0 + 13.0 * scale, z, 1.4, rgb(0.14, 0.30, 0.12))
             } else if w.theme == 2 {
                 // conifer
-                box3(c, s, v, x, g0, g0 + 7.0 * scale, z, 1.4, 0.20, 0.12, 0.06)
-                cone3(c, s, v, x, g0 + 5.0 * scale, g0 + 30.0 * scale, z, 7.0 * scale, 0.07, 0.26, 0.10)
+                box3(c, s, v, x, g0, g0 + 7.0 * scale, z, 1.4, rgb(0.20, 0.12, 0.06))
+                cone3(c, s, v, x, g0 + 5.0 * scale, g0 + 30.0 * scale, z, 7.0 * scale, rgb(0.07, 0.26, 0.10))
             } else if w.theme == 3 {
                 // tower block, height keyed off the same hash so a district varies
                 let tall = 22.0 + propHash(tz, tx) * 90.0
-                box3(c, s, v, x, g0, g0 + tall, z, 6.0 + h * 12.0, 0.30, 0.31, 0.34)
+                box3(c, s, v, x, g0, g0 + tall, z, 6.0 + h * 12.0, rgb(0.30, 0.31, 0.34))
             } else {
-                // palm: bare trunk, splayed fronds
-                box3(c, s, v, x, g0, g0 + 15.0 * scale, z, 1.2, 0.26, 0.18, 0.09)
-                // A palm canopy droops: the apex sits just above the trunk and the
-                // rim spreads out BELOW it. Apex-up gives a fir; rim-up gives a
-                // funnel. Both were wrong.
-                cone3(c, s, v, x, g0 + 13.0 * scale, g0 + 18.0 * scale, z, 10.0 * scale, 0.11, 0.34, 0.13)
-                cone3(c, s, v, x, g0 + 16.5 * scale, g0 + 19.5 * scale, z, 6.0 * scale, 0.13, 0.38, 0.15)
+                // palm: bare trunk, fronds drooping off the top of it
+                box3(c, s, v, x, g0, g0 + 15.0 * scale, z, 1.2, rgb(0.26, 0.18, 0.09))
+                palmCrown(c, s, v, v3(x, g0 + 15.0 * scale, z), 11.0 * scale, 6.0 * scale, rgb(0.11, 0.34, 0.13))
             }
         }
     }
@@ -1193,10 +1103,6 @@ fn addPt(px: &mut Vec<f64>, py: &mut Vec<f64>, pz: &mut Vec<f64>, w: &World, fx:
 // wears, so panel lines and the spine stripe land where they should.
 fn triT(c: &mut Canvas, s: &mut Scene, v: &View, t: &Texture, px: &Vec<f64>, py: &Vec<f64>, pz: &Vec<f64>, a: i64, b: i64, d: i64, ua: f64, va: f64, ub: f64, vb: f64, ud: f64, vd: f64, r: f64, g: f64, bl: f64) {
     triangleTex(c, s, v, t, px[a], py[a], pz[a], ua, va, px[b], py[b], pz[b], ub, vb, px[d], py[d], pz[d], ud, vd, r, g, bl)
-}
-
-fn tri(c: &mut Canvas, s: &mut Scene, v: &View, px: &Vec<f64>, py: &Vec<f64>, pz: &Vec<f64>, a: i64, b: i64, d: i64, r: f64, g: f64, bl: f64) {
-    triangle(c, s, v, px[a], py[a], pz[a], px[b], py[b], pz[b], px[d], py[d], pz[d], r, g, bl)
 }
 
 // A reticle on the next coin, and an edge arrow when it is off screen. Without

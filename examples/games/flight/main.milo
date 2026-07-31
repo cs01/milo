@@ -4,8 +4,7 @@
 //
 //   LEFT / RIGHT   bank (a banked aircraft turns)
 //   UP / DOWN      climb and dive
-//   SPACE          throttle up (afterburner, on a budget)
-//   M              mute / unmute the music
+//   SPACE          throttle up
 //   ESC            quit
 //
 // Real 3D: a perspective camera, near-plane clipping and a depth-buffered
@@ -14,33 +13,31 @@
 //
 // You cannot crash. The ground pushes you up if you dive into it.
 
-from "std/math" import {
-    Math
-}
 from "./sdl" import {
     SDL_Init, SDL_CreateWindow, SDL_CreateRenderer, SDL_CreateTexture,
     SDL_UpdateTexture, SDL_RenderClear, SDL_RenderCopy, SDL_RenderPresent,
-    SDL_ShowCursor, SDL_GetTicks, SDL_DestroyWindow, SDL_Quit,
+    SDL_ShowCursor, SDL_GetTicks, SDL_DestroyTexture, SDL_DestroyRenderer,
+    SDL_DestroyWindow, SDL_Quit,
     SDL_INIT_VIDEO, SDL_INIT_AUDIO, SDL_WINDOWPOS_CENTERED, SDL_WINDOW_SHOWN,
     SDL_TEXTUREACCESS_STREAMING, SDL_PIXELFORMAT_ABGR8888,
     SDL_RENDERER_ACCELERATED, SDL_RENDERER_PRESENTVSYNC,
-    Input, inputNew, pollInput
+    inputNew, pollInput
 }
 from "./gfx" import {
-    Canvas, canvasNew, present
+    canvasNew, present
 }
 from "./gfx3d" import {
-    Scene, sceneNew
+    sceneNew
 }
 from "./sound" import {
-    Sound, soundNew, playRing, playRingBonus, playRegion, playBoost, playMiss,
+    soundNew, playRing, playRingBonus, playRegion, playBoost, playMiss,
     musicTick, musicToggle
 }
 from "./textures" import {
     groundTexture, planeTexture
 }
 from "./world3d" import {
-    World, worldNew, worldUpdate
+    worldNew, worldUpdate
 }
 from "./render3d" import {
     drawWorld, drawHud, drawGuide, drawSpeedLines
@@ -97,14 +94,14 @@ pub fn main(): i32 {
         if dt < 0.0005 {
             dt = 0.0005
         }
-        pollInput(inp, ev, 1.0)
+        pollInput(inp, ev)
 
         if inp.mute {
             musicToggle(snd)
         }
         musicTick(snd)
 
-        worldUpdate(w, dt, inp.moveX, inp.moveY, inp.bomb)
+        worldUpdate(w, dt, inp.moveX, inp.moveY, inp.boost)
         drawWorld(c, s, w, groundTex, skinTex)
 
         fpsAccum = fpsAccum + dt
@@ -146,6 +143,10 @@ pub fn main(): i32 {
             SDL_RenderPresent(ren)
         }
     }
+    // Tear down in creation order's reverse. SDL_Quit would reclaim all of it
+    // anyway, but a leak an example teaches is a leak someone copies.
+    SDL_DestroyTexture(tex)
+    SDL_DestroyRenderer(ren)
     SDL_DestroyWindow(win)
     SDL_Quit()
     return 0

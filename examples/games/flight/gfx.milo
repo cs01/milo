@@ -88,13 +88,6 @@ pub fn canvasNew(w: i64, h: i64): Canvas {
     }
 }
 
-pub fn clear(c: &mut Canvas) {
-    let n = c.w * c.h * 3
-    for i in 0..n {
-        c.hdr[i] = 0.0
-    }
-}
-
 // ── primitives ────────────────────────────────────────────────────────────────
 
 pub fn addPix(c: &mut Canvas, x: i64, y: i64, r: f64, g: f64, b: f64) {
@@ -273,40 +266,6 @@ pub fn line(c: &mut Canvas, x0i: f64, y0i: f64, x1i: f64, y1i: f64, r: f64, g: f
         }
         yv = yv + grad
         x = x + 1
-    }
-}
-
-// A closed polygon given as flat x,y pairs in model space, transformed by
-// position / rotation / scale. Every enemy in the game is one of these.
-pub fn poly(c: &mut Canvas, pts: &Vec<f64>, cx: f64, cy: f64, ang: f64, scale: f64, r: f64, g: f64, b: f64) {
-    let n = pts.len / 2
-    if n < 2 {
-        return
-    }
-    let ca = Math.cos(ang) * scale
-    let sa = Math.sin(ang) * scale
-    var px = cx + pts[(n - 1) * 2] * ca - pts[(n - 1) * 2 + 1] * sa
-    var py = cy + pts[(n - 1) * 2] * sa + pts[(n - 1) * 2 + 1] * ca
-    for i in 0..n {
-        let qx = cx + pts[i * 2] * ca - pts[i * 2 + 1] * sa
-        let qy = cy + pts[i * 2] * sa + pts[i * 2 + 1] * ca
-        line(c, px, py, qx, qy, r, g, b)
-        px = qx
-        py = qy
-    }
-}
-
-pub fn circle(c: &mut Canvas, cx: f64, cy: f64, rad: f64, segs: i64, r: f64, g: f64, b: f64) {
-    let step = 6.283185307179586 / (segs as f64)
-    var px = cx + rad
-    var py = cy
-    for i in 1..segs + 1 {
-        let a = (i as f64) * step
-        let qx = cx + Math.cos(a) * rad
-        let qy = cy + Math.sin(a) * rad
-        line(c, px, py, qx, qy, r, g, b)
-        px = qx
-        py = qy
     }
 }
 
@@ -570,98 +529,6 @@ pub fn fillRect(c: &mut Canvas, x0: f64, y0: f64, x1: f64, y1: f64, r: f64, g: f
             c.hdr[i] = c.hdr[i] + (r as f32)
             c.hdr[i + 1] = c.hdr[i + 1] + (g as f32)
             c.hdr[i + 2] = c.hdr[i + 2] + (b as f32)
-            x = x + 1
-        }
-        y = y + 1
-    }
-}
-
-// Solid body, vertically shaded from `top` down to `top * botScale`, with a
-// one-pixel highlight along the top edge and a darker seam at the bottom.
-pub fn brickFill(c: &mut Canvas, x0: f64, y0: f64, x1: f64, y1: f64, r: f64, g: f64, b: f64, botScale: f64) {
-    var ix0 = x0 as i64
-    var iy0 = y0 as i64
-    var ix1 = x1 as i64
-    var iy1 = y1 as i64
-    if ix0 < 0 {
-        ix0 = 0
-    }
-    if iy0 < 0 {
-        iy0 = 0
-    }
-    if ix1 > c.w {
-        ix1 = c.w
-    }
-    if iy1 > c.h {
-        iy1 = c.h
-    }
-    let h = (iy1 - iy0) as f64
-    if h <= 0.0 {
-        return
-    }
-    var y = iy0
-    while y < iy1 {
-        let t = ((y - iy0) as f64) / h
-        var k = 1.0 - t * (1.0 - botScale)
-        // top highlight, bottom seam
-        if y == iy0 {
-            k = k * 1.9
-        }
-        if y == iy1 - 1 {
-            k = k * 0.45
-        }
-        let rr = r * k
-        let gg = g * k
-        let bb = b * k
-        var x = ix0
-        while x < ix1 {
-            let i = (y * c.w + x) * 3
-            c.hdr[i] = c.hdr[i] + (rr as f32)
-            c.hdr[i + 1] = c.hdr[i + 1] + (gg as f32)
-            c.hdr[i + 2] = c.hdr[i + 2] + (bb as f32)
-            x = x + 1
-        }
-        y = y + 1
-    }
-}
-
-// A horizontal capsule: solid core with rounded ends. Used for the paddle.
-pub fn capsule(c: &mut Canvas, cx: f64, cy: f64, halfW: f64, halfH: f64, r: f64, g: f64, b: f64) {
-    let x0 = cx - halfW
-    let x1 = cx + halfW
-    brickFill(c, x0 + halfH, cy - halfH, x1 - halfH, cy + halfH, r, g, b, 0.45)
-    spot(c, x0 + halfH, cy, halfH * 1.15, r * 0.9, g * 0.9, b * 0.9)
-    spot(c, x1 - halfH, cy, halfH * 1.15, r * 0.9, g * 0.9, b * 0.9)
-}
-
-// Opaque write, not an add. Everything else in this renderer accumulates light,
-// which is right for glow but wrong for a sprite drawn over a bright sky — it
-// comes out washed to white. This replaces the pixels instead.
-pub fn setRect(c: &mut Canvas, x0: f64, y0: f64, x1: f64, y1: f64, r: f64, g: f64, b: f64) {
-    var ix0 = x0 as i64
-    var iy0 = y0 as i64
-    var ix1 = x1 as i64
-    var iy1 = y1 as i64
-    if ix0 < 0 {
-        ix0 = 0
-    }
-    if iy0 < 0 {
-        iy0 = 0
-    }
-    if ix1 > c.w {
-        ix1 = c.w
-    }
-    if iy1 > c.h {
-        iy1 = c.h
-    }
-    var y = iy0
-    while y < iy1 {
-        var x = ix0
-        while x < ix1 {
-            let i = (y * c.w + x) * 3
-            c.hdr[i] = r as f32
-            c.hdr[i + 1] = g as f32
-            c.hdr[i + 2] = b as f32
             x = x + 1
         }
         y = y + 1

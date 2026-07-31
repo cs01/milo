@@ -1,7 +1,8 @@
-// SDL2 bindings + input state for the neon shooter.
+// SDL2 bindings and one frame of input, for FLYBY.
 //
-// This is the only place raw pointers appear. Everything above it — simulation,
-// collision, rendering into the framebuffer — is safe Milo.
+// Raw pointers live here and in sound.milo (the audio device queue) and nowhere
+// else. Everything above — flight model, terrain, rasteriser, framebuffer — is
+// safe Milo.
 
 @link("SDL2")
 pub extern fn SDL_Init(flags: u32): i32
@@ -24,13 +25,15 @@ pub extern fn SDL_PollEvent(event: *u8): i32
 
 pub extern fn SDL_GetKeyboardState(numkeys: *i32): *u8
 
-pub extern fn SDL_GetMouseState(x: *i32, y: *i32): u32
-
 pub extern fn SDL_ShowCursor(toggle: i32): i32
 
 pub extern fn SDL_GetTicks(): u32
 
 pub extern fn SDL_Delay(ms: u32): void
+
+pub extern fn SDL_DestroyTexture(tex: *u8): void
+
+pub extern fn SDL_DestroyRenderer(ren: *u8): void
 
 pub extern fn SDL_DestroyWindow(win: *u8): void
 
@@ -65,21 +68,13 @@ pub let SC_D: i64 = 7
 
 pub let SC_M: i64 = 16
 
-pub let SC_P: i64 = 19
-
-pub let SC_R: i64 = 21
-
 pub let SC_S: i64 = 22
 
 pub let SC_W: i64 = 26
 
-pub let SC_ENTER: i64 = 40
-
 pub let SC_ESC: i64 = 41
 
 pub let SC_SPACE: i64 = 44
-
-pub let SC_1: i64 = 30
 
 pub let SC_RIGHT: i64 = 79
 
@@ -92,38 +87,25 @@ pub let SC_UP: i64 = 82
 // One frame of input, snapshotted out of SDL so the rest of the game never
 // touches a pointer.
 pub struct Input {
-    moveX: f64,
-    moveY: f64,
-    mouseX: f64,
-    mouseY: f64,
-    fire: bool,
-    bomb: bool,
-    restart: bool,
-    pause: bool,
+    moveX: f64, // bank: -1 left, +1 right
+    moveY: f64, // pitch: +1 climb, -1 dive
+    boost: bool,
     quit: bool,
-    pick: i64, // 1..3 on the upgrade screen, 0 for nothing
     mute: bool, // edge-triggered: true only on the frame M goes down
     muteHeld: bool,
 }
 
 pub fn inputNew(): Input {
     return Input {
-        moveX: 0.0, moveY: 0.0,
-        mouseX: 0.0, mouseY: 0.0,
-        fire: false, bomb: false, restart: false, pause: false, quit: false, pick: 0,
-        mute: false, muteHeld: false,
+        moveX: 0.0, moveY: 0.0, boost: false, quit: false, mute: false, muteHeld: false,
     }
 }
 
-// Poll SDL and fill `inp`. `scale` converts window pixels to canvas pixels.
-pub fn pollInput(inp: &mut Input, ev: &mut [u8; 64], scale: f64) {
+// Poll SDL and fill `inp`.
+pub fn pollInput(inp: &mut Input, ev: &mut [u8; 64]) {
     inp.moveX = 0.0
     inp.moveY = 0.0
-    inp.fire = false
-    inp.bomb = false
-    inp.restart = false
-    inp.pause = false
-    inp.pick = 0
+    inp.boost = false
     inp.mute = false
 
     unsafe {
@@ -137,7 +119,7 @@ pub fn pollInput(inp: &mut Input, ev: &mut [u8; 64], scale: f64) {
         if ks[SC_ESC] != 0 {
             inp.quit = true
         }
-        // Edge-triggered, or holding M would toggle mute every frame.
+        // Edge-triggered, or holding M would toggle the music every frame.
         let mDown = ks[SC_M] != 0
         if mDown && !inp.muteHeld {
             inp.mute = true
@@ -150,50 +132,29 @@ pub fn pollInput(inp: &mut Input, ev: &mut [u8; 64], scale: f64) {
             inp.moveX = inp.moveX + 1.0
         }
         if ks[SC_W] != 0 {
-            inp.moveY = inp.moveY - 1.0
-        }
-        if ks[SC_S] != 0 {
             inp.moveY = inp.moveY + 1.0
         }
-        // Arrows move too. Aiming is the mouse's job only — a second keyboard
-        // stick reads as a puzzle, not a control scheme.
+        if ks[SC_S] != 0 {
+            inp.moveY = inp.moveY - 1.0
+        }
+        // Arrows do the same thing as WASD.
         if ks[SC_LEFT] != 0 {
             inp.moveX = inp.moveX - 1.0
         }
         if ks[SC_RIGHT] != 0 {
             inp.moveX = inp.moveX + 1.0
         }
+        // UP climbs. `moveY` is a pitch rate, not a screen direction — the
+        // README and the on-screen hint both promise up = climb, and feeding
+        // screen-space (down-is-positive) straight into pitch inverted it.
         if ks[SC_UP] != 0 {
-            inp.moveY = inp.moveY - 1.0
-        }
-        if ks[SC_DOWN] != 0 {
             inp.moveY = inp.moveY + 1.0
         }
+        if ks[SC_DOWN] != 0 {
+            inp.moveY = inp.moveY - 1.0
+        }
         if ks[SC_SPACE] != 0 {
-            inp.bomb = true
-        }
-        if ks[SC_R] != 0 {
-            inp.restart = true
-        }
-        if ks[SC_P] != 0 {
-            inp.pause = true
-        }
-        if ks[SC_ENTER] != 0 {
-            inp.restart = true
-        }
-        for k in 0..3 {
-            if ks[SC_1 + k] != 0 {
-                inp.pick = k + 1
-            }
-        }
-
-        var mpos: [i32; 2] = [0; 2]
-        let btn = SDL_GetMouseState(mpos[0].addrOf() as *i32, mpos[1].addrOf() as *i32)
-        inp.mouseX = (mpos[0] as f64) * scale
-        inp.mouseY = (mpos[1] as f64) * scale
-        if (btn & 1) != 0 {
-            inp.fire = true
+            inp.boost = true
         }
     }
-
 }

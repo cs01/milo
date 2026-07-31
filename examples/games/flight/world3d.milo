@@ -4,8 +4,8 @@
 from "std/math" import {
     Math
 }
-from "std/random" import {
-    Random
+from "std/rng" import {
+    Rng
 }
 from "./gfx3d" import {
     Camera, Scene, Vec3
@@ -78,6 +78,11 @@ pub struct Plane {
 }
 
 pub struct World {
+    // The world owns its generator rather than reaching for the global CSPRNG in
+    // std/random. Seeded, so a run replays exactly: the same seed lays the same
+    // course, spawns the same flocks and throws the same sparks. That is what
+    // makes shot.milo a regression test instead of a screenshot.
+    rng: Rng,
     plane: Plane,
     cam: Camera,
     rings: Vec<Ring>,
@@ -160,14 +165,23 @@ pub fn heightAt(x: f64, z: f64): f64 {
     return a + b + c - 120.0
 }
 
+pub let SEED: i64 = 20260731
+
 pub fn worldNew(): World {
+    return worldSeeded(SEED)
+}
+
+pub fn worldSeeded(seed: i64): World {
     var w = World {
+        rng: Rng.new(seed),
         plane: Plane {
             x: 0.0, y: 160.0, z: 0.0, yaw: 0.0, pitch: 0.0, roll: 0.0, speed: 190.0
         }
         ,
         cam: Camera {
-            x: 0.0, y: 0.0, z: 0.0, yaw: 0.0, pitch: 0.0, roll: 0.0, fov: 1.15, near: 0.6, far: 1400.0
+            // `far` IS the terrain draw distance — render3d culls tiles against it,
+            // so the grid radius and the camera agree by construction.
+            x: 0.0, y: 0.0, z: 0.0, yaw: 0.0, pitch: 0.0, roll: 0.0, fov: 1.15, near: 0.6, far: (VIEW_TILES as f64) * TILE
         }
         ,
         rings: Vec.new(),
@@ -233,7 +247,7 @@ pub fn layRing(w: &mut World) {
     let ride = 90.0 + 60.0 * (0.5 + 0.5 * Math.sin(t * 0.13))
     // Roughly one in four is a blue bonus hoop: tighter, and worth four times as
     // much, so there is a reason to take the harder line.
-    let bonus = Random.range(0, 4) == 0
+    let bonus = w.rng.range(0, 3) == 0
     var rad = 62.0
     if bonus {
         rad = 40.0
@@ -453,14 +467,14 @@ pub fn worldUpdate(w: &mut World, dt: f64, inRoll: f64, inPitch: f64, boost: boo
 fn updateFlocks(w: &mut World, dt: f64) {
     w.flockTimer = w.flockTimer - dt
     if w.flockTimer <= 0.0 {
-        w.flockTimer = 11.0 + (Random.range(0, 1400) as f64) * 0.01
+        w.flockTimer = 11.0 + w.rng.floatRange(0.0, 14.0)
         // Spawn ahead and off to one side, crossing the flight path rather than
         // running parallel with it — a flock you overtake from behind is barely
         // visible, one that cuts across the nose reads immediately.
-        let ahead = 620.0 + (Random.range(0, 500) as f64)
-        var side = 520.0 + (Random.range(0, 420) as f64)
+        let ahead = 620.0 + w.rng.floatRange(0.0, 500.0)
+        var side = 520.0 + w.rng.floatRange(0.0, 420.0)
         var dir = 1.0
-        if Random.range(0, 2) == 0 {
+        if w.rng.bool() {
             side = 0.0 - side
             dir = 0.0 - 1.0
         }
@@ -472,16 +486,16 @@ fn updateFlocks(w: &mut World, dt: f64) {
         let px = w.plane.x + fx * ahead + rx * side
         let pz = w.plane.z + fz * ahead + rz * side
         let ground = heightAt(px, pz)
-        let sp = 26.0 + (Random.range(0, 22) as f64)
+        let sp = 26.0 + w.rng.floatRange(0.0, 22.0)
         w.flocks.push(Flock {
             x: px,
-            y: Math.maxF64(ground + 60.0, w.plane.y + (Random.range(0, 120) as f64) - 40.0),
+            y: Math.maxF64(ground + 60.0, w.plane.y + w.rng.floatRange(0.0 - 40.0, 80.0)),
             z: pz,
             // fly across the nose, back toward the course line
             vx: 0.0 - rx * dir * sp,
             vz: 0.0 - rz * dir * sp,
-            n: 5 + Random.range(0, 9),
-            seed: (Random.range(0, 1000) as f64) * 0.01,
+            n: 5 + w.rng.range(0, 8),
+            seed: w.rng.floatRange(0.0, 10.0),
             life: 44.0,
         }
         )
@@ -624,24 +638,24 @@ fn clearRing(w: &mut World, i: i64) {
     let tx = nz
     let tz = 0.0 - nx
     for k in 0..44 {
-        let a = Random.floatRange(0.0, 6.283185307179586)
-        let sp = Random.floatRange(30.0, 130.0)
+        let a = w.rng.floatRange(0.0, 6.283185307179586)
+        let sp = w.rng.floatRange(30.0, 130.0)
         let rr = w.rings[i].r
         let ox = tx * Math.cos(a) * rr
         let oy = Math.sin(a) * rr
         let oz = tz * Math.cos(a) * rr
-        let life = Random.floatRange(0.5, 1.3)
+        let life = w.rng.floatRange(0.5, 1.3)
         w.sparks.push(Spark {
             x: w.rings[i].x + ox,
             y: w.rings[i].y + oy,
             z: w.rings[i].z + oz,
-            vx: tx * Math.cos(a) * sp + Random.floatRange(0.0 - 20.0, 20.0),
+            vx: tx * Math.cos(a) * sp + w.rng.floatRange(0.0 - 20.0, 20.0),
             vy: Math.sin(a) * sp + 40.0,
-            vz: tz * Math.cos(a) * sp + Random.floatRange(0.0 - 20.0, 20.0),
+            vz: tz * Math.cos(a) * sp + w.rng.floatRange(0.0 - 20.0, 20.0),
             life: life,
             maxLife: life,
             cr: 1.7,
-            cg: 1.25 + Random.floatRange(0.0, 0.4),
+            cg: 1.25 + w.rng.floatRange(0.0, 0.4),
             cb: 0.30,
         }
         )

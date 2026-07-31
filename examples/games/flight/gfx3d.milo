@@ -17,6 +17,137 @@ pub struct Vec3 {
     z: f64,
 }
 
+// Vector math as operators and methods, not as loose scalars.
+//
+// Everything below used to be written out one component at a time, and the cost
+// was not typing: a cross product spelled three times in three files is three
+// chances to transpose an index, which is exactly what happened while this file
+// was being written. `Vec3` is Copy, passed in registers, and every one of these
+// inlines to the same code the by-hand version emitted — the safety is free.
+impl Add for Vec3 {
+    fn add(self: &Self, o: &Self): Self {
+        return Vec3 {
+            x: self.x + o.x, y: self.y + o.y, z: self.z + o.z
+        }
+    }
+}
+
+impl Sub for Vec3 {
+    fn sub(self: &Self, o: &Self): Self {
+        return Vec3 {
+            x: self.x - o.x, y: self.y - o.y, z: self.z - o.z
+        }
+    }
+}
+
+// Componentwise, which is what `Mul` means for a vector type. Scaling by a
+// scalar is `.scale(k)` — Milo's `Mul` trait fixes the right-hand side to `Self`,
+// so `v * 2.0` is not expressible today (see docs/backlog.md, operator RHS).
+impl Mul for Vec3 {
+    fn mul(self: &Self, o: &Self): Self {
+        return Vec3 {
+            x: self.x * o.x, y: self.y * o.y, z: self.z * o.z
+        }
+    }
+}
+
+impl Vec3 {
+    fn scale(self: &Self, k: f64): Vec3 {
+        return Vec3 {
+            x: self.x * k, y: self.y * k, z: self.z * k
+        }
+    }
+
+    fn dot(self: &Self, o: &Vec3): f64 {
+        return self.x * o.x + self.y * o.y + self.z * o.z
+    }
+
+    fn cross(self: &Self, o: &Vec3): Vec3 {
+        return Vec3 {
+            x: self.y * o.z - self.z * o.y,
+            y: self.z * o.x - self.x * o.z,
+            z: self.x * o.y - self.y * o.x,
+        }
+    }
+
+    fn len(self: &Self): f64 {
+        return Math.sqrt(self.dot(self))
+    }
+
+    // Guarded: a zero-length direction is a bug upstream, but returning NaN from
+    // it turns that bug into a whole frame of black pixels a long way from the
+    // cause.
+    fn norm(self: &Self): Vec3 {
+        let l = self.len()
+        if l <= 0.0 {
+            return Vec3 {
+                x: 0.0, y: 0.0, z: 0.0
+            }
+        }
+        return self.scale(1.0 / l)
+    }
+
+    fn lerp(self: &Self, o: &Vec3, t: f64): Vec3 {
+        return Vec3 {
+            x: self.x + (o.x - self.x) * t,
+            y: self.y + (o.y - self.y) * t,
+            z: self.z + (o.z - self.z) * t,
+        }
+    }
+}
+
+pub fn v3(x: f64, y: f64, z: f64): Vec3 {
+    return Vec3 {
+        x: x, y: y, z: z
+    }
+}
+
+// A linear-light colour. Same story as Vec3: three loose f64 parameters at the
+// end of every drawing call, in an order nothing but convention enforced.
+pub struct Rgb {
+    r: f64,
+    g: f64,
+    b: f64,
+}
+
+impl Add for Rgb {
+    fn add(self: &Self, o: &Self): Self {
+        return Rgb {
+            r: self.r + o.r, g: self.g + o.g, b: self.b + o.b
+        }
+    }
+}
+
+impl Mul for Rgb {
+    fn mul(self: &Self, o: &Self): Self {
+        return Rgb {
+            r: self.r * o.r, g: self.g * o.g, b: self.b * o.b
+        }
+    }
+}
+
+impl Rgb {
+    fn scale(self: &Self, k: f64): Rgb {
+        return Rgb {
+            r: self.r * k, g: self.g * k, b: self.b * k
+        }
+    }
+
+    fn lerp(self: &Self, o: &Rgb, t: f64): Rgb {
+        return Rgb {
+            r: self.r + (o.r - self.r) * t,
+            g: self.g + (o.g - self.g) * t,
+            b: self.b + (o.b - self.b) * t,
+        }
+    }
+}
+
+pub fn rgb(r: f64, g: f64, b: f64): Rgb {
+    return Rgb {
+        r: r, g: g, b: b
+    }
+}
+
 pub struct Camera {
     x: f64,
     y: f64,
@@ -72,92 +203,96 @@ pub fn sceneClear(s: &mut Scene) {
 
 // ── camera transform ──────────────────────────────────────────────────────────
 
+// An orientation as three axes. The trig block that builds these was written out
+// three times — camera, aircraft model, wingtip contrails — and the three copies
+// had drifted: two of them rolled about a slightly different axis than the
+// camera did, so a banked, pitched aircraft was drawn tilted a few degrees off
+// the frame it was actually flying in.
+pub struct Frame {
+    fwd: Vec3,
+    right: Vec3,
+    up: Vec3,
+}
+
+pub fn frameOf(yaw: f64, pitch: f64, roll: f64): Frame {
+    let cy = Math.cos(yaw)
+    let sy = Math.sin(yaw)
+    let cp = Math.cos(pitch)
+    let sp = Math.sin(pitch)
+    let cr = Math.cos(roll)
+    let sr = Math.sin(roll)
+    let fwd = v3(sy * cp, sp, cy * cp)
+    // right = the world-up-crossed heading; up follows from the other two
+    let right = v3(cy, 0.0, 0.0 - sy)
+    let up = fwd.cross(right)
+    // roll rotates right and up about forward, leaving forward alone
+    return Frame {
+        fwd: fwd,
+        right: right.scale(cr) + up.scale(sr),
+        up: up.scale(cr) - right.scale(sr),
+    }
+}
+
 pub struct View {
-    // rows of the world→camera rotation, precomputed once per frame
-    rx: f64,
-    ry: f64,
-    rz: f64,
-    ux: f64,
-    uy: f64,
-    uz: f64,
-    fx: f64,
-    fy: f64,
-    fz: f64,
-    px: f64,
-    py: f64,
-    pz: f64,
+    // Rows of the world→camera rotation, precomputed once per frame. These were
+    // twelve loose f64 fields (rx, ry, rz, ux, …) — the same three vectors, spelled
+    // so that no function could take "the right vector" as one thing.
+    right: Vec3,
+    up: Vec3,
+    fwd: Vec3,
+    eye: Vec3,
     scale: f64, // vertical projection scale in pixels
     cx: f64,
     cy: f64,
+    // Carried from the Camera rather than read off a global: the clip plane and
+    // the draw distance are properties of the camera looking at the scene, and
+    // a second camera (a mirror, a map inset) would need its own.
+    near: f64,
+    far: f64,
 }
 
 pub fn viewOf(c: &Camera, w: i64, h: i64): View {
-    let cy = Math.cos(c.yaw)
-    let sy = Math.sin(c.yaw)
-    let cp = Math.cos(c.pitch)
-    let sp = Math.sin(c.pitch)
-    let cr = Math.cos(c.roll)
-    let sr = Math.sin(c.roll)
-
-    // forward, then right and up derived from it, then roll about forward
-    let fx = sy * cp
-    let fy = sp
-    let fz = cy * cp
-    // right = normalise(cross(worldUp, forward))
-    var rx = cy
-    var ry = 0.0
-    var rz = 0.0 - sy
-    // up = cross(forward, right)
-    var ux = fy * rz - fz * ry
-    var uy = fz * rx - fx * rz
-    var uz = fx * ry - fy * rx
-    // apply roll: rotate right/up about forward
-    let rx2 = rx * cr + ux * sr
-    let ry2 = ry * cr + uy * sr
-    let rz2 = rz * cr + uz * sr
-    let ux2 = ux * cr - rx * sr
-    let uy2 = uy * cr - ry * sr
-    let uz2 = uz * cr - rz * sr
-
+    let f = frameOf(c.yaw, c.pitch, c.roll)
     let scale = (h as f64) * 0.5 / Math.tan(c.fov * 0.5)
     return View {
-        rx: rx2, ry: ry2, rz: rz2,
-        ux: ux2, uy: uy2, uz: uz2,
-        fx: fx, fy: fy, fz: fz,
-        px: c.x, py: c.y, pz: c.z,
+        right: f.right,
+        up: f.up,
+        fwd: f.fwd,
+        eye: v3(c.x, c.y, c.z),
         scale: scale,
         cx: (w as f64) * 0.5,
         cy: (h as f64) * 0.5,
+        near: c.near,
+        far: c.far,
     }
 }
 
-// World point → camera space. z is depth along the view direction.
+// World point → camera space. z is depth along the view direction. Three dot
+// products, which is what this always was under the twelve field names.
+pub fn toCameraV(v: &View, p: &Vec3): Vec3 {
+    let d = p - v.eye
+    return v3(d.dot(v.right), d.dot(v.up), d.dot(v.fwd))
+}
+
 pub fn toCamera(v: &View, x: f64, y: f64, z: f64): Vec3 {
-    let dx = x - v.px
-    let dy = y - v.py
-    let dz = z - v.pz
-    return Vec3 {
-        x: dx * v.rx + dy * v.ry + dz * v.rz,
-        y: dx * v.ux + dy * v.uy + dz * v.uz,
-        z: dx * v.fx + dy * v.fy + dz * v.fz,
-    }
+    return toCameraV(v, v3(x, y, z))
 }
 
 // ── rasteriser ────────────────────────────────────────────────────────────────
 
 // Depth-buffered flat-shaded triangle in CAMERA space. Depth-tests on 1/z, which
 // interpolates linearly in screen space — the reason the buffer stores 1/z.
-fn rasterCam(c: &mut Canvas, s: &mut Scene, v: &View, ax: f64, ay: f64, az: f64, bx: f64, by: f64, bz: f64, cx2: f64, cy2: f64, cz2: f64, r: f64, g: f64, b: f64) {
+fn rasterCam(c: &mut Canvas, s: &mut Scene, v: &View, a: &Vec3, b: &Vec3, d: &Vec3, col: &Rgb) {
     // project
-    let iaz = 1.0 / az
-    let ibz = 1.0 / bz
-    let icz = 1.0 / cz2
-    let x0 = v.cx + ax * v.scale * iaz
-    let y0 = v.cy - ay * v.scale * iaz
-    let x1 = v.cx + bx * v.scale * ibz
-    let y1 = v.cy - by * v.scale * ibz
-    let x2 = v.cx + cx2 * v.scale * icz
-    let y2 = v.cy - cy2 * v.scale * icz
+    let iaz = 1.0 / a.z
+    let ibz = 1.0 / b.z
+    let icz = 1.0 / d.z
+    let x0 = v.cx + a.x * v.scale * iaz
+    let y0 = v.cy - a.y * v.scale * iaz
+    let x1 = v.cx + b.x * v.scale * ibz
+    let y1 = v.cy - b.y * v.scale * ibz
+    let x2 = v.cx + d.x * v.scale * icz
+    let y2 = v.cy - d.y * v.scale * icz
 
     // backface / degenerate cull via signed area
     let area = (x1 - x0) * (y2 - y0) - (x2 - x0) * (y1 - y0)
@@ -226,9 +361,9 @@ fn rasterCam(c: &mut Canvas, s: &mut Scene, v: &View, ax: f64, ay: f64, az: f64,
                     f = 1.0
                 }
                 let o = idx * 3
-                c.hdr[o] = (r * (1.0 - f) + s.fogR * f) as f32
-                c.hdr[o + 1] = (g * (1.0 - f) + s.fogG * f) as f32
-                c.hdr[o + 2] = (b * (1.0 - f) + s.fogB * f) as f32
+                c.hdr[o] = (col.r * (1.0 - f) + s.fogR * f) as f32
+                c.hdr[o + 1] = (col.g * (1.0 - f) + s.fogG * f) as f32
+                c.hdr[o + 2] = (col.b * (1.0 - f) + s.fogB * f) as f32
             }
             px = px + 1
         }
@@ -236,19 +371,17 @@ fn rasterCam(c: &mut Canvas, s: &mut Scene, v: &View, ax: f64, ay: f64, az: f64,
     }
 }
 
-pub let NEAR: f64 = 0.6
-
 // A world-space triangle, clipped against the near plane and then rasterised.
 // Clipping matters: a triangle straddling the camera plane projects to garbage,
 // and terrain directly under a low-flying plane does exactly that.
-pub fn triangle(c: &mut Canvas, s: &mut Scene, v: &View, wax: f64, way: f64, waz: f64, wbx: f64, wby: f64, wbz: f64, wcx: f64, wcy: f64, wcz: f64, r: f64, g: f64, b: f64) {
-    let a = toCamera(v, wax, way, waz)
-    let bb = toCamera(v, wbx, wby, wbz)
-    let cc = toCamera(v, wcx, wcy, wcz)
+pub fn triangle(c: &mut Canvas, s: &mut Scene, v: &View, wa: &Vec3, wb: &Vec3, wd: &Vec3, col: &Rgb) {
+    let a = toCameraV(v, wa)
+    let b = toCameraV(v, wb)
+    let d = toCameraV(v, wd)
 
-    let ina = a.z > NEAR
-    let inb = bb.z > NEAR
-    let inc = cc.z > NEAR
+    let ina = a.z > v.near
+    let inb = b.z > v.near
+    let inc = d.z > v.near
     var n = 0
     if ina {
         n = n + 1
@@ -263,37 +396,34 @@ pub fn triangle(c: &mut Canvas, s: &mut Scene, v: &View, wax: f64, way: f64, waz
         return
     }
     if n == 3 {
-        rasterCam(c, s, v, a.x, a.y, a.z, bb.x, bb.y, bb.z, cc.x, cc.y, cc.z, r, g, b)
+        rasterCam(c, s, v, a, b, d, col)
         return
     }
     // Sutherland–Hodgman against the single near plane, producing 3 or 4 points.
-    var px: Vec<f64> = Vec.new()
-    var py: Vec<f64> = Vec.new()
-    var pz: Vec<f64> = Vec.new()
-    clipEdge(px, py, pz, a, bb)
-    clipEdge(px, py, pz, bb, cc)
-    clipEdge(px, py, pz, cc, a)
-    if px.len < 3 {
+    // One Vec of points, not three parallel Vecs of coordinates: the parallel
+    // form let a push land in two of the three and nothing would say so.
+    var poly: Vec<Vec3> = Vec.new()
+    clipEdge(poly, a, b, v.near)
+    clipEdge(poly, b, d, v.near)
+    clipEdge(poly, d, a, v.near)
+    if poly.len < 3 {
         return
     }
-    for i in 1..px.len - 1 {
-        rasterCam(c, s, v, px[0], py[0], pz[0], px[i], py[i], pz[i], px[i + 1], py[i + 1], pz[i + 1], r, g, b)
+    for i in 1..poly.len - 1 {
+        rasterCam(c, s, v, poly[0], poly[i], poly[i + 1], col)
     }
 }
 
-fn clipEdge(px: &mut Vec<f64>, py: &mut Vec<f64>, pz: &mut Vec<f64>, a: &Vec3, b: &Vec3) {
-    let ina = a.z > NEAR
-    let inb = b.z > NEAR
+fn clipEdge(out: &mut Vec<Vec3>, a: &Vec3, b: &Vec3, near: f64) {
+    let ina = a.z > near
+    let inb = b.z > near
     if ina {
-        px.push(a.x)
-        py.push(a.y)
-        pz.push(a.z)
+        out.push(a)
     }
     if ina != inb {
-        let t = (NEAR - a.z) / (b.z - a.z)
-        px.push(a.x + (b.x - a.x) * t)
-        py.push(a.y + (b.y - a.y) * t)
-        pz.push(NEAR)
+        let t = (near - a.z) / (b.z - a.z)
+        let p = a.lerp(b, t)
+        out.push(v3(p.x, p.y, near))
     }
 }
 
@@ -301,10 +431,6 @@ fn clipEdge(px: &mut Vec<f64>, py: &mut Vec<f64>, pz: &mut Vec<f64>, a: &Vec3, b
 // loose coordinates keep working.
 pub fn triangleTex(c: &mut Canvas, s: &mut Scene, view: &View, t: &Texture, wax: f64, way: f64, waz: f64, au: f64, av: f64, wbx: f64, wby: f64, wbz: f64, bu: f64, bv: f64, wcx: f64, wcy: f64, wcz: f64, cu: f64, cv: f64, tr: f64, tg: f64, tb: f64) {
     triangleV(c, s, view, t, vtx(wax, way, waz, au, av, 1.0), vtx(wbx, wby, wbz, bu, bv, 1.0), vtx(wcx, wcy, wcz, cu, cv, 1.0), tr, tg, tb)
-}
-
-pub fn triangleTexLit(c: &mut Canvas, s: &mut Scene, view: &View, t: &Texture, wax: f64, way: f64, waz: f64, au: f64, av: f64, asr: f64, wbx: f64, wby: f64, wbz: f64, bu: f64, bv: f64, bsr: f64, wcx: f64, wcy: f64, wcz: f64, cu: f64, cv: f64, csr: f64, tr: f64, tg: f64, tb: f64) {
-    triangleV(c, s, view, t, vtx(wax, way, waz, au, av, asr), vtx(wbx, wby, wbz, bu, bv, bsr), vtx(wcx, wcy, wcz, cu, cv, csr), tr, tg, tb)
 }
 
 // Lambert term for a triangle whose world-space normal is (nx,ny,nz).
@@ -515,17 +641,17 @@ pub fn triangleV(c: &mut Canvas, s: &mut Scene, view: &View, t: &Texture, wa: &V
     let a = vtxC(ca.x, ca.y, ca.z, wa.u, wa.v, wa.light, wa.r, wa.g, wa.b, wa.tw)
     let b = vtxC(cb.x, cb.y, cb.z, wb.u, wb.v, wb.light, wb.r, wb.g, wb.b, wb.tw)
     let d = vtxC(cd.x, cd.y, cd.z, wd.u, wd.v, wd.light, wd.r, wd.g, wd.b, wd.tw)
-    if a.z > NEAR && b.z > NEAR && d.z > NEAR {
+    if a.z > view.near && b.z > view.near && d.z > view.near {
         rasterCamTex(c, s, view, t, a, b, d, tr, tg, tb)
         return
     }
-    if a.z <= NEAR && b.z <= NEAR && d.z <= NEAR {
+    if a.z <= view.near && b.z <= view.near && d.z <= view.near {
         return
     }
     var poly: Vec<Vtx> = Vec.new()
-    clipV(poly, a, b)
-    clipV(poly, b, d)
-    clipV(poly, d, a)
+    clipV(poly, a, b, view.near)
+    clipV(poly, b, d, view.near)
+    clipV(poly, d, a, view.near)
     if poly.len < 3 {
         return
     }
@@ -534,15 +660,15 @@ pub fn triangleV(c: &mut Canvas, s: &mut Scene, view: &View, t: &Texture, wa: &V
     }
 }
 
-fn clipV(out: &mut Vec<Vtx>, a: &Vtx, b: &Vtx) {
-    let ina = a.z > NEAR
-    let inb = b.z > NEAR
+fn clipV(out: &mut Vec<Vtx>, a: &Vtx, b: &Vtx, near: f64) {
+    let ina = a.z > near
+    let inb = b.z > near
     if ina {
         out.push(vtxC(a.x, a.y, a.z, a.u, a.v, a.light, a.r, a.g, a.b, a.tw))
     }
     if ina != inb {
-        let t = (NEAR - a.z) / (b.z - a.z)
-        out.push(vtxC(a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t, NEAR, a.u + (b.u - a.u) * t, a.v + (b.v - a.v) * t, a.light + (b.light - a.light) * t, a.r + (b.r - a.r) * t, a.g + (b.g - a.g) * t, a.b + (b.b - a.b) * t, a.tw + (b.tw - a.tw) * t))
+        let t = (near - a.z) / (b.z - a.z)
+        out.push(vtxC(a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t, near, a.u + (b.u - a.u) * t, a.v + (b.v - a.v) * t, a.light + (b.light - a.light) * t, a.r + (b.r - a.r) * t, a.g + (b.g - a.g) * t, a.b + (b.b - a.b) * t, a.tw + (b.tw - a.tw) * t))
     }
 }
 
@@ -655,17 +781,17 @@ pub fn triangleG(c: &mut Canvas, s: &mut Scene, view: &View, wa: &Vtx, wb: &Vtx,
     let a = vtxC(ca.x, ca.y, ca.z, wa.u, wa.v, wa.light, wa.r, wa.g, wa.b, wa.tw)
     let b = vtxC(cb.x, cb.y, cb.z, wb.u, wb.v, wb.light, wb.r, wb.g, wb.b, wb.tw)
     let d = vtxC(cd.x, cd.y, cd.z, wd.u, wd.v, wd.light, wd.r, wd.g, wd.b, wd.tw)
-    if a.z > NEAR && b.z > NEAR && d.z > NEAR {
+    if a.z > view.near && b.z > view.near && d.z > view.near {
         rasterCamG(c, s, view, a, b, d, tr, tg, tb)
         return
     }
-    if a.z <= NEAR && b.z <= NEAR && d.z <= NEAR {
+    if a.z <= view.near && b.z <= view.near && d.z <= view.near {
         return
     }
     var poly: Vec<Vtx> = Vec.new()
-    clipV(poly, a, b)
-    clipV(poly, b, d)
-    clipV(poly, d, a)
+    clipV(poly, a, b, view.near)
+    clipV(poly, b, d, view.near)
+    clipV(poly, d, a, view.near)
     if poly.len < 3 {
         return
     }

@@ -1,0 +1,95 @@
+// std/rng — seedable, reproducible pseudo-random numbers.
+//
+// `std/random` is a CSPRNG (arc4random and friends): unpredictable by design and
+// impossible to replay. That is the right default for tokens and nonces and the
+// wrong one for anything you need to run twice — a simulation, a procedural
+// world, a property test, a golden-frame render harness. This is the other half:
+// a small deterministic generator you seed yourself, so the same seed gives the
+// same stream on every platform and every run.
+//
+// SplitMix64 — the same generator Java's SplittableRandom and Go's runtime use to
+// seed themselves. One 64-bit state word, no lookup tables, passes BigCrush. It
+// is NOT cryptographically secure: given a couple of outputs the state is
+// recoverable. Use `std/random` when that matters.
+
+// The mixing constants are supposed to overflow — that is what makes them mix.
+// Milo traps on overflow by default, so the arithmetic is declared wrapping.
+@wrapping
+fn mix(state: u64): u64 {
+    var z = state
+    z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9
+    z = (z ^ (z >> 27)) * 0x94D049BB133111EB
+    return z ^ (z >> 31)
+}
+
+@wrapping
+fn bump(state: u64): u64 {
+    return state + 0x9E3779B97F4A7C15
+}
+
+pub struct Rng {
+    state: u64,
+}
+
+impl Rng {
+    // A generator seeded by value. Same seed, same stream — that is the whole
+    // point of this module.
+    fn new(seed: i64): Rng {
+        return Rng {
+            state: seed as u64,
+        }
+    }
+
+    // Raw 64 bits, uniform.
+    fn next(self: &mut Self): u64 {
+        self.state = bump(self.state)
+        return mix(self.state)
+    }
+
+    // Uniform in [0, max). Returns 0 when max <= 0 rather than trapping, so a
+    // caller looping over an empty range degrades instead of aborting.
+    //
+    // Modulo, not rejection sampling: the bias is 2^-64 per unit of max, which is
+    // unmeasurable for any max a program actually passes, and rejection would
+    // make the stream length input-dependent — which breaks replay.
+    fn int(self: &mut Self, max: i64): i64 {
+        if max <= 0 {
+            return 0
+        }
+        return ((self.next() % (max as u64)) as i64)
+    }
+
+    // Uniform in [min, max], inclusive of both ends — matching `Random.range`.
+    fn range(self: &mut Self, min: i64, max: i64): i64 {
+        if min >= max {
+            return min
+        }
+        return min + self.int(max - min + 1)
+    }
+
+    // Uniform in [0, 1). 53 bits of mantissa, which is every f64 value the
+    // interval can hold.
+    fn float(self: &mut Self): f64 {
+        return ((self.next() >> 11) as f64) * (1.0 / 9007199254740992.0)
+    }
+
+    fn floatRange(self: &mut Self, min: f64, max: f64): f64 {
+        return min + self.float() * (max - min)
+    }
+
+    fn bool(self: &mut Self): bool {
+        return (self.next() >> 63) == 1
+    }
+
+    // Fisher-Yates over the first `n` entries.
+    fn shuffleI64(self: &mut Self, v: &mut Vec<i64>, n: i64) {
+        var i = n - 1
+        while i > 0 {
+            let j = self.int(i + 1)
+            let t = v[i]
+            v[i] = v[j]
+            v[j] = t
+            i = i - 1
+        }
+    }
+}

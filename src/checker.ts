@@ -623,13 +623,26 @@ export class TypeChecker {
   // later is a use-after-free. Struct fields have always been rejected; this is
   // the same rule for `Vec<&T>`, `HashMap<_, &T>`, `[&T; N]` and `Heap<&T>`,
   // which used to slip through and produce garbage at runtime.
-  private nestedRef(t: TypeKind): boolean {
+  private nestedRef(t: TypeKind, seen = new Set<string>()): boolean {
     switch (t.tag) {
-      case "vec": return t.element.tag === "ref" || this.nestedRef(t.element);
-      case "array": return t.element.tag === "ref" || this.nestedRef(t.element);
-      case "heap": return t.inner.tag === "ref" || this.nestedRef(t.inner);
+      case "vec": return t.element.tag === "ref" || this.nestedRef(t.element, seen);
+      case "array": return t.element.tag === "ref" || this.nestedRef(t.element, seen);
+      case "heap": return t.inner.tag === "ref" || this.nestedRef(t.inner, seen);
       case "hashmap":
-        return t.key.tag === "ref" || t.value.tag === "ref" || this.nestedRef(t.key) || this.nestedRef(t.value);
+        return t.key.tag === "ref" || t.value.tag === "ref" || this.nestedRef(t.key, seen) || this.nestedRef(t.value, seen);
+      // An enum payload is storage like any other: `Option<&[T]>` let a view outlive the
+      // freeze taken for it, which is the same escape `Vec<&T>` had. `seen` guards the
+      // recursive enums (a list variant holding its own type) this walk would loop on.
+      case "enum": {
+        if (seen.has(t.name)) return false;
+        seen.add(t.name);
+        const info = this.enums.get(t.name);
+        if (!info) return false;
+        for (const v of info.variants.values()) {
+          for (const f of v.fields) if (f.tag === "ref" || this.nestedRef(f, seen)) return true;
+        }
+        return false;
+      }
       default: return false;
     }
   }
@@ -2513,6 +2526,15 @@ export class TypeChecker {
   }
 
   private errorIfRefReturn(fn: Function, ret: TypeKind) {
+    if (ret.tag !== "ref" && this.nestedRef(ret) && !this.refReturnReported.has(fn)) {
+      // `Option<&[T]>` hands the view back inside storage, where it outlives the freeze
+      // the call site took for it — the second-class rule has to hold through a payload.
+      this.refReturnReported.add(fn);
+      const outer = ret.tag === "enum" ? (this.enums.get(ret.name)?.baseName ?? ret.name) : typeName(ret);
+      this.error(`function '${fn.name}': cannot return a reference stored inside '${outer}'`, fn.span,
+        `references are second-class — return an owned value, or return the view directly and let the caller match on emptiness another way`);
+      return;
+    }
     if (ret.tag !== "ref" || this.refReturnReported.has(fn)) return;
     if (this.isViewReturn(ret) && this.hasSelfReceiver(fn)) return;
     this.refReturnReported.add(fn);

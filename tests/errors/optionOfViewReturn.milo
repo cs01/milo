@@ -1,0 +1,9 @@
+// A view handed back inside an enum payload outlives the freeze the call site took for
+// it: `Vec<&T>` was already rejected for this, enum payloads were not, and the view
+// below survived five reallocating pushes and still read the old buffer.
+struct Hay { data: Vec<i64> }
+impl Hay {
+    fn find(self: &Self): Option<&[i64]> { return Option.Some(self.data[0..1]) }
+}
+fn main(): i32 { return 0 }
+// @error: cannot return a reference stored inside 'Option'

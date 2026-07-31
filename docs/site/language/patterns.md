@@ -1,7 +1,8 @@
 # Patterns Without Lifetimes
 
-What to write when the Rust shape you know reaches for `<'a>`, `Box`, or
-`Rc<RefCell>`. Every example links to a program in the repo that compiles today.
+This page shows what to write when the Rust shape you know would reach for
+`<'a>`, `Box`, or `Rc<RefCell>`. Every linked example is a program in the repo
+that compiles today.
 
 | Problem | Rust | Milo |
 |---|---|---|
@@ -21,15 +22,18 @@ What to write when the Rust shape you know reaches for `<'a>`, `Box`, or
 
 ## When a slice has to outlive the call
 
-That last row is the one real gap, and it shows up as "I want a token that
-points into the source." It is the case Rust's `'a` exists for — an acyclic
-borrow into stable storage — so it is the case where you have to choose. Three
-answers, strongest guarantee first:
+That last row is the one real gap, and it shows up as "I want a token that points
+into the source." This is the shape Rust's `'a` exists for — an acyclic borrow
+into stable storage — so it is the one place where you have to make a choice.
 
-**1. Hand back a view, not an offset.** The view *is* the bytes, so there is no
-span that can be paired with the wrong buffer. Compile-time safe and zero-copy —
-but a view cannot be stored in a struct or a collection, so this works when the
-caller consumes it before moving on.
+Here are three answers. Use the first one you can, and drop to the next only when
+the one above it does not fit, because each step down trades away some of the
+compile-time guarantee.
+
+**1. Hand back a view instead of an offset.** The view is the bytes themselves,
+so there is no separate span that could be paired with the wrong buffer. This is
+zero-copy and checked at compile time. A view cannot be stored in a struct or a
+collection, so it fits when the caller reads it before moving on.
 
 ```milo
 impl Source {
@@ -37,13 +41,14 @@ impl Source {
 }
 ```
 
-**2. Own the text.** `substr` copies. Boring, always correct, costs an
-allocation per token.
+**2. Own the text.** Calling `substr` copies the bytes out, which is always
+correct and needs no checks at all. You pay one allocation per token.
 
-**3. Brand the offset.** When tokens must outlive the call — a `Vec<Token>` —
-carry the identity of the buffer they were cut from, the same way `Handle`
-carries the identity of its arena. A span from another buffer then reads as
-absent instead of silently slicing the wrong bytes:
+**3. Brand the offset.** When the tokens have to outlive the call — when you are
+building a `Vec<Token>`, say — have each span carry the identity of the buffer it
+was cut from, the same way a `Handle` carries the identity of its arena. A span
+from another buffer then reads as absent rather than silently slicing the wrong
+bytes.
 
 ```milo
 fn slice(self: &Source, s: Span): Option<string> {
@@ -53,18 +58,19 @@ fn slice(self: &Source, s: Span): Option<string> {
 }
 ```
 
-The third is a runtime check where Rust's `'a` would be a compile error. That is
-the trade, stated plainly — see [Memory Safety vs Rust](/language/vs-rust).
+The third answer is a runtime check in a place where Rust's `'a` would have given
+you a compile error, and that is the trade this language makes. See
+[Memory Safety vs Rust](/language/vs-rust).
 
 ## Handles are not raw indices
 
-A bare `Vec` index is the failure mode people expect from this model: free a
+A bare `Vec` index is the failure mode people expect from this model: you free a
 slot, allocate another, and the old index now reads someone else's value. A
-generational `Handle` from `std/arena` carries the arena's identity and the
-slot's generation, so a stale one reads `None` and a double free is refused.
-Use `Handle` wherever slots are recycled; a plain index is fine only for
-append-only storage that never frees.
+generational `Handle` from `std/arena` carries both the arena's identity and the
+slot's generation, so a stale handle reads as `None` and a double free is
+refused. Use a `Handle` wherever slots are recycled. A plain index is fine only
+for append-only storage that never frees anything.
 
-Give each arena's key its own type when a program has several — an `ExprId` that
-cannot be passed where a `StmtId` belongs is a compile error, and costs nothing
-at runtime.
+When a program has several arenas, give each one's key its own type. An `ExprId`
+that cannot be passed where a `StmtId` belongs is a compile error, and it costs
+nothing at runtime.

@@ -12,11 +12,11 @@ that compiles today.
 | Doubly-linked list | `Rc<RefCell<Node>>` or `unsafe` | arena + `Option<Handle<Node>>` — [linkedList.milo](https://github.com/milo-language/milo/blob/main/examples/basics/linkedList.milo) |
 | Cyclic graph, cross-references | `petgraph`, arena + indices, or `Rc` | `Arena<Node>` + `Vec<Handle<Node>>` for edges — [depgraph.milo](https://github.com/milo-language/milo/blob/main/examples/basics/depgraph.milo) |
 | Tree with parent pointers (DOM) | `Rc<RefCell>` or an arena crate | `Arena<Node>`, parent and children as handles — [domArena.milo](https://github.com/milo-language/milo/blob/main/examples/basics/domArena.milo) |
-| Long-lived state across tasks | `Arc<Mutex<T>>` | module-scope `var pool: Arena<T>`, pass handles |
+| Long-lived state across tasks | `Arc<Mutex<T>>` | one owner holds the `Arena<T>` and passes handles — a *module-scope* `var pool: Arena<T>` does not compile yet ([gap](#module-scope-arena)) |
 | Shared mutable state between workers | `Arc<Mutex<T>>` | one task owns it; the others `send` to it over a `Channel<T>` |
 | Spawn and join | `thread::spawn` + `handle.join()` | `Task.spawn` + `Task.join`, or a `WaitGroup` for a fleet |
 | Wait on first of several sources | `tokio::select!` | `std/select` |
-| Parallel map over one array | `rayon` `par_iter_mut` | not yet — `&mut [T]` views and `splitMut` are unimplemented |
+| Parallel map over one array | `rayon` `par_iter_mut` | partly — `&mut [T]` param views work; `splitMut` (N disjoint windows at once) does not exist yet |
 | Cursor or iterator holding a borrow | `struct Cur<'a> { buf: &'a [u8] }` | own the buffer, carry an integer `pos`, slice on demand |
 | **Struct that stores a borrow** | `struct Parser<'a> { src: &'a str }` | **no equivalent** — [hand back a view](#when-a-slice-has-to-outlive-the-call), own the text, or brand the offset |
 
@@ -139,3 +139,34 @@ exprAt(s)
 ```
 
 Both types are one integer wide at runtime, so the check is free.
+
+## Module-scope arena {#module-scope-arena}
+
+A single arena owned at module scope — the shape you would reach for to keep a
+pool alive for the whole program — does not compile today:
+
+```milo
+var pool: Arena<Node> = Arena.new()
+// error: unknown enum 'Arena'
+
+var pool: Arena<Node> = Arena<Node>.new()
+// error: undefined variable 'nextArenaId'  (in std/arena.milo)
+```
+
+Two separate gaps stack up here. The first is that a static method on a *generic*
+struct needs its type arguments spelled out (`Arena<Node>.new()`); bare
+`Arena.new()` is parsed as an enum variant. The second is that a global's
+initializer cannot reach another module's globals, so `Arena.new()` — which bumps
+a shared counter — fails at module-init time.
+
+Until both are fixed, give the arena an owner: create it in `main` (or in the task
+that owns the data) and pass `&mut Arena<Node>` down, or hand out handles. Inside
+a function the same code works:
+
+```milo
+pub fn main() {
+    var pool: Arena<Node> = Arena<Node>.new()
+    let h = pool.alloc(Node { v: 1 })
+    print(pool.get(h)!.v)          // 1
+}
+```

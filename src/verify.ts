@@ -522,6 +522,20 @@ function rewriteStaticCalls(node: any, implKeys: Set<string>): void {
 // run alongside GLOBAL_CONST_*.
 let FN_TABLE = new Map<string, Function>();
 
+// Functions that provably mutate nothing: `@pure` (checker-enforced — no globals, no
+// unsafe, no I/O, no impure callee) AND no `&mut`/pointer parameter to write through.
+// A call to one cannot invalidate anything the walker knows, so it needs no havoc.
+// `PURE_METHOD_NAMES` is keyed by the bare method name because a `MethodCall` node
+// carries no receiver type here; a name is admitted only when EVERY impl method with
+// that name qualifies, so an impure `Foo.reset` keeps `bar.reset()` conservative.
+let PURE_FN_NAMES = new Set<string>();
+let PURE_METHOD_NAMES = new Set<string>();
+
+function mutatesNothing(f: Function): boolean {
+  return !!f.attributes?.some(a => a.name === "pure")
+    && !f.params.some(p => (p.type as any)?.isRefMut || (p.type as any)?.isPtr);
+}
+
 // `invariant` clauses per struct name, and the field list to instantiate them over. Set
 // once per run: an invariant is a property of the TYPE, so it is in force at every use.
 let STRUCT_INVARIANTS = new Map<string, Contract[]>();
@@ -723,7 +737,10 @@ function collectMutations(node: any, out: Set<string>, seen = new Set<any>()): v
   };
   if (node.kind === "Call" && typeof node.func === "string" && Array.isArray(node.args)) {
     const callee = FN_TABLE.get(node.func);
-    if (callee) {
+    if (PURE_FN_NAMES.has(node.func)) {
+      // Nothing to havoc — but keep walking the arguments, which may themselves contain
+      // calls that do mutate.
+    } else if (callee) {
       callee.params.forEach((p, i) => {
         if (!p.type?.isRefMut && !p.type?.isPtr) return;
         const n = target(node.args[i]);
@@ -734,7 +751,7 @@ function collectMutations(node: any, out: Set<string>, seen = new Set<any>()): v
       for (const a of node.args) { const n = target(a); if (n) out.add(n); }
     }
   }
-  if (node.kind === "MethodCall") {
+  if (node.kind === "MethodCall" && !PURE_METHOD_NAMES.has(node.method)) {
     // Havoc the FIELD PATH the method was called on, not the whole receiver: `a.data.push(v)`
     // cannot touch `a.live`, and wiping every field of `a` made a type invariant about a
     // sibling field unprovable for every function that pushes to a vec — which is most of
@@ -1432,6 +1449,16 @@ export function generateVerificationConditions(program: Program, opts?: { onlyFi
   }
 
   FN_TABLE = new Map(allFns.map(f => [f.name, f]));
+  PURE_FN_NAMES = new Set(allFns.filter(mutatesNothing).map(f => f.name));
+  PURE_METHOD_NAMES = new Set<string>();
+  {
+    const byBareName = new Map<string, Function[]>();
+    for (const m of implMethods) {
+      const bare = m.name.slice(m.name.indexOf(".") + 1);
+      (byBareName.get(bare) ?? byBareName.set(bare, []).get(bare)!).push(m);
+    }
+    for (const [bare, ms] of byBareName) if (ms.every(mutatesNothing)) PURE_METHOD_NAMES.add(bare);
+  }
   BOOL_FIELDS = collectBoolFields(program);
   FLOAT_FIELDS = collectFloatFields(program);
   STRUCT_INVARIANTS = new Map();

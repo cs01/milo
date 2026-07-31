@@ -1,0 +1,13 @@
+// @error: is @pure but calls 'helper', which is not
+fn helper(x: i64): i64 {
+    return x + 1
+}
+
+@pure
+fn wrap(x: i64): i64 {
+    return helper(x)
+}
+
+pub fn main() {
+    print(wrap(1))
+}

@@ -11,6 +11,72 @@ Every language has a **precision floor** — the minimum level of detail a progr
 - **Rust:** High floor, differently. The borrow checker rejects correct-in-spirit code that violates lifetime rules. LLMs spend iterations fighting the compiler instead of shipping features.
 - **Milo:** Low floor for a systems language. Get the types and ownership right and the compiler handles the rest. No implicit conversions, no UB, no lifetime annotations, no header files.
 
+## Local reasoning
+
+The precision floor is about how often a model gets rejected. The more useful
+property is how much of a program it has to hold in mind to be *right*.
+
+Because references are second-class — never stored, never returned except as a view
+of a receiver's own data — nothing in the heap is aliased. That has a direct
+consequence for reading code: **the state a function can touch is its parameter
+list.** There is no other pointer into that data, so a mutation here cannot change
+something over there. Verifying a function means reading that function.
+
+This is the failure mode that makes C++ and Rust-with-`Rc<RefCell>` expensive for a
+model to write correctly: not that the syntax is hard, but that correctness depends
+on facts established somewhere else in the program. Whole classes of bug — a
+callback mutating a container someone else is iterating, a `&mut` handed out twice,
+a struct outliving the buffer it points into — are questions about global state.
+Milo makes them unwritable rather than answerable.
+
+The same locality shows up in the error messages. A borrow-checker error often
+requires a global fix: restructure ownership three call frames up. Milo's aliasing
+errors are call-site-local, because the rule they enforce is call-site-local:
+
+```
+error: 'v[0..2]' and 'v[1..3]' overlap and are both borrowed mutably
+  hint: the ranges share element 1 — use disjoint ranges, or split the call
+        into two statements
+```
+
+### What a signature does not tell you
+
+Aliasing is only half of it. A signature says what a function may mutate; it does
+not say whether the function printed, read a file, opened a socket, or touched
+module state. `@pure` closes that for the functions that opt in:
+
+```milo
+@pure
+fn hypot(a: f64, b: f64): f64 {
+    return Math.sqrt(a * a + b * b)     // the whole Math namespace is @pure
+}
+
+@pure
+fn logged(x: i64): i64 {
+    print(x)                            // error: 'logged' is @pure but calls
+    return x                            //        'print', which is not
+}
+```
+
+A `@pure` function reads and writes only its parameters and its own locals: no I/O,
+no module state, no raw memory, and no calls that could reach any of those. It can
+still trap — purity is not totality.
+
+For generated code that changes what a reviewer has to do. A `@pure` signature whose
+parameters are all by-value or `&T` is a compiler-checked claim that the call is safe
+to skip, reorder, cache, or retry, so scrutiny concentrates on the effectful code. And
+a model that writes I/O where the type says it cannot gets a compile error instead of a
+silent behavioral difference.
+
+The honest caveat: verbose, machine-checkable signatures were always a hard sell to
+humans, and the traditional objection to effect tracking is that it is boilerplate.
+That objection weakens when the code is mostly written by a model and mostly read by a
+person auditing it — writing it is nearly free, checking it is not. But the
+training-data problem cuts the other way: a design that is easier to *verify* is not
+automatically easier to *generate*. See
+[Effects and capabilities](https://github.com/milo-language/milo/blob/main/docs/effects-and-capabilities.md)
+for what is shipped and what is only proposed.
+
 ## Built-in LLM support
 
 ```bash
@@ -136,5 +202,6 @@ For the full threat-by-threat breakdown — what Milo catches at compile time vs
 | Lifetime annotations | N/A | Required, complex | None, ever | No borrow checker fights |
 | Thread safety | Nothing enforced | Send/Sync | Send/Sync | Data races can't compile (both) |
 | Error handling | Exceptions (invisible) | `Result<T,E>` + `?` | `Result<T,E>` + `?` | Error paths can't be ignored (both) |
+| Effects visible in the signature | Nothing | `&mut` and `unsafe` | `&mut`, `unsafe`, and `@pure` | A `@pure` call needs no review |
 | Build complexity | Headers, includes, ODR | Cargo (good) | Single files, simple imports | Less surface area for confusion |
 | Precision floor | Very high | High (lifetimes) | Low (for a systems lang) | Fewer LLM↔compiler iteration loops |

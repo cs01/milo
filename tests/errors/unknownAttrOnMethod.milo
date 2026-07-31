@@ -1,0 +1,16 @@
+// @error: '@derive' is not supported on methods
+struct Pt {
+    x: i64
+}
+
+impl Pt {
+    @derive(Clone)
+    fn get(self: &Pt): i64 {
+        return self.x
+    }
+}
+
+pub fn main() {
+    let p = Pt { x: 1 }
+    print(p.get())
+}

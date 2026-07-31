@@ -2,34 +2,49 @@
 
 // ── libm bindings (private backend; call via Math.* ) ──
 
+@pure
 extern fn sqrt(x: f64): f64
 
+@pure
 extern fn pow(base: f64, exp: f64): f64
 
+@pure
 extern fn sin(x: f64): f64
 
+@pure
 extern fn cos(x: f64): f64
 
+@pure
 extern fn tan(x: f64): f64
 
+@pure
 extern fn atan2(y: f64, x: f64): f64
 
+@pure
 extern fn floor(x: f64): f64
 
+@pure
 extern fn ceil(x: f64): f64
 
+@pure
 extern fn round(x: f64): f64
 
+@pure
 extern fn fabs(x: f64): f64
 
+@pure
 extern fn fmod(x: f64, y: f64): f64
 
+@pure
 extern fn log(x: f64): f64
 
+@pure
 extern fn log2(x: f64): f64
 
+@pure
 extern fn log10(x: f64): f64
 
+@pure
 extern fn exp(x: f64): f64
 
 pub struct Math {
@@ -38,6 +53,7 @@ pub struct Math {
 impl Math {
     // ── floating-point (libm) ──
 
+    @pure
     fn sqrt(x: f64): f64
     requires x >= 0.0
     ensures result >= 0.0
@@ -45,72 +61,87 @@ impl Math {
         return sqrt(x)
     }
 
+    @pure
     fn pow(base: f64, exponent: f64): f64 {
         return pow(base, exponent)
     }
 
+    @pure
     fn sin(x: f64): f64 {
         return sin(x)
     }
 
+    @pure
     fn cos(x: f64): f64 {
         return cos(x)
     }
 
+    @pure
     fn tan(x: f64): f64 {
         return tan(x)
     }
 
+    @pure
     fn atan2(y: f64, x: f64): f64 {
         return atan2(y, x)
     }
 
+    @pure
     fn floor(x: f64): f64 {
         return floor(x)
     }
 
+    @pure
     fn ceil(x: f64): f64 {
         return ceil(x)
     }
 
+    @pure
     fn round(x: f64): f64 {
         return round(x)
     }
 
+    @pure
     fn abs(x: f64): f64 {
         return fabs(x)
     }
 
+    @pure
     fn mod(x: f64, y: f64): f64
     requires y != 0.0
     {
         return fmod(x, y)
     }
 
+    @pure
     fn log(x: f64): f64
     requires x > 0.0
     {
         return log(x)
     }
 
+    @pure
     fn log2(x: f64): f64
     requires x > 0.0
     {
         return log2(x)
     }
 
+    @pure
     fn log10(x: f64): f64
     requires x > 0.0
     {
         return log10(x)
     }
 
+    @pure
     fn exp(x: f64): f64 {
         return exp(x)
     }
 
     // ── integer / typed helpers ──
 
+    @pure
     fn absI64(x: i64): i64
     ensures result >= 0
     {
@@ -120,6 +151,7 @@ impl Math {
         return x
     }
 
+    @pure
     fn absI32(x: i32): i32
     ensures result >= 0 as i32
     {
@@ -129,6 +161,7 @@ impl Math {
         return x
     }
 
+    @pure
     fn minI64(a: i64, b: i64): i64 {
         if a < b {
             return a
@@ -136,6 +169,7 @@ impl Math {
         return b
     }
 
+    @pure
     fn maxI64(a: i64, b: i64): i64 {
         if a > b {
             return a
@@ -143,6 +177,7 @@ impl Math {
         return b
     }
 
+    @pure
     fn minI32(a: i32, b: i32): i32 {
         if a < b {
             return a
@@ -150,6 +185,7 @@ impl Math {
         return b
     }
 
+    @pure
     fn maxI32(a: i32, b: i32): i32 {
         if a > b {
             return a
@@ -157,6 +193,7 @@ impl Math {
         return b
     }
 
+    @pure
     fn minF64(a: f64, b: f64): f64 {
         if a < b {
             return a
@@ -164,6 +201,7 @@ impl Math {
         return b
     }
 
+    @pure
     fn maxF64(a: f64, b: f64): f64 {
         if a > b {
             return a
@@ -173,18 +211,22 @@ impl Math {
 
     // NaN is the only value not equal to itself, so this is the one reliable test — `x == f64.NAN`
     // is always false (the compiler lints that mistake).
+    @pure
     fn isNan(x: f64): bool {
         return x != x
     }
 
+    @pure
     fn isInf(x: f64): bool {
         return x == f64.INF || x == f64.NEG_INF
     }
 
+    @pure
     fn isFinite(x: f64): bool {
         return x == x && x != f64.INF && x != f64.NEG_INF
     }
 
+    @pure
     fn clampI64(x: i64, lo: i64, hi: i64): i64
     requires lo <= hi
     ensures result >= lo && result <= hi
@@ -198,6 +240,7 @@ impl Math {
         return x
     }
 
+    @pure
     fn clampF64(x: f64, lo: f64, hi: f64): f64
     requires lo <= hi
     ensures result >= lo && result <= hi
@@ -213,14 +256,17 @@ impl Math {
 
     // ── constants ──
 
+    @pure
     fn pi(): f64 {
         return 3.14159265358979323846
     }
 
+    @pure
     fn e(): f64 {
         return 2.71828182845904523536
     }
 
+    @pure
     fn inf(): f64 {
         return 1.0 / 0.0
     }

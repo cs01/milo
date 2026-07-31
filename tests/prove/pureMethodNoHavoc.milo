@@ -1,0 +1,29 @@
+// @proven: 1
+// @failed: 0
+// @unknown: 0
+// A method call havocs its receiver by default: `collectMutations` cannot resolve which
+// impl a method came from, so it must assume `&mut self`. That is sound but wipes every
+// fact about `c`, and this postcondition is refuted with `c_n = 0` when `get` is not
+// marked. `@pure` (plus no `&mut`/pointer parameter) is exactly the missing fact — the
+// checker guarantees the body touches nothing but its own parameters and locals — so the
+// call needs no havoc and `c.n` survives it.
+struct Counter {
+    n: i64
+}
+
+impl Counter {
+    @pure
+    fn get(self: &Counter): i64 {
+        return self.n
+    }
+}
+
+pub fn build(): i64
+ensures result > 0
+{
+    var c = Counter {
+        n: 5
+    }
+    let a = c.get()
+    return c.n
+}

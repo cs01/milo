@@ -484,6 +484,63 @@ is then marked conditional.
 
 Use `milo prove file.milo` to discharge contracts against the built-in `std/smt` prover (`--solver=z3` for theories it doesn't model, `--emit-smt` to print the raw SMT-LIB2 conditions instead of solving them). Contracts are not emitted at `-O1`+; `--debug` and `--contract-checks` turn them into runtime asserts. Use `milo safety file.milo --safety=do178c-a` to check against domain-specific safety profiles (DO-178C, ISO 26262, NASA, IEC 61508, IEC 62304).
 
+### Purity — `@pure`
+
+A signature already tells you what a function may *mutate*: only what it was passed,
+and only through a `&mut` parameter, because references are second-class and nothing
+is aliased. It does not tell you whether the function printed, read a file, or touched
+module state. `@pure` closes that gap for the functions that opt in.
+
+```milo
+@pure
+fn sumSquares(v: &Vec<i64>): i64 {
+    var total = 0
+    for x in v { total = total + x * x }
+    return total
+}
+```
+
+A `@pure` function reads and writes only its parameters and its own locals. It may not
+
+- call a function that is not itself `@pure`;
+- call an `extern`, unless that extern is declared `@pure`;
+- call through a function value, a fn-typed field, or an interface method (purity is not
+  part of a fn type yet, so the compiler cannot see what such a call does);
+- read or write a mutable module-level `var`;
+- contain an `unsafe` block.
+
+It **may** mutate through a `&mut` parameter — that effect is in the signature, so it is
+not ambient — and it may allocate. `@pure` works on free functions, on methods in an
+`impl`, and on generic functions (every instantiation is checked separately).
+
+**`@pure` is not totality.** A pure function can still trap (overflow, a failed bounds
+check, a violated contract) or loop forever. Trapping is a refusal to continue, not an
+observable effect. The strong reading — safe to cache, reorder, or retry — holds for a
+`@pure` function whose parameters are all by-value or `&T`.
+
+On an `extern`, `@pure` is an *assertion*, not a check: there is no body here to inspect.
+This is the FFI trust boundary, stated at the declaration rather than assumed.
+
+```milo
+@pure extern fn sqrt(x: f64): f64
+```
+
+`std/math` is annotated throughout on this basis, so numeric code can be pure:
+
+```milo
+from "std/math" import { Math }
+
+@pure
+fn hypot(a: f64, b: f64): f64 {
+    return Math.sqrt(a * a + b * b)
+}
+```
+
+Purity and contracts are designed to meet: a `@pure` function has no frame conditions to
+encode and no hidden state between calls, which is exactly the shape `milo prove` reasons
+about best. See [docs/effects-and-capabilities.md](effects-and-capabilities.md) for the
+wider design — what is shipped, and what capability-passing would add.
+
 ---
 
 ## Strings
@@ -1107,8 +1164,21 @@ would: while the view is alive, `r` cannot be pushed to, reassigned, moved, or d
 A view also cannot be captured by a closure, stored in a struct, or put in a collection.
 Free functions cannot return references at all.
 
-One current limit: `&mut [T]` (mutable views, `splitMut`) is not yet supported — slices
-are read-only.
+`&mut [T]` works as a *parameter* view: a `var` Vec coerces to it, writes land in the
+backing store, and the source is frozen for the borrow's life. Two `&mut` views into the
+same storage at one call site are rejected when the overlap is decidable:
+
+```milo
+fn touch(a: &mut [i64], b: &mut [i64]) { a[0] = 1  b[0] = 2 }
+
+touch(v[0..2], v[2..4])    // ok — disjoint
+touch(v[0..2], v[1..3])    // error: ranges overlap and are both borrowed mutably
+```
+
+One current limit: the bounds have to be literals for that check to fire, and there is no
+`splitMut` — no way to hand N workers N disjoint windows into one buffer in a single call.
+Range disjointness is linear scalar arithmetic, which `milo prove` already discharges, so
+the dynamic case is a planned extension rather than a hole in the model.
 
 ---
 

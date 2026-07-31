@@ -1,0 +1,13 @@
+// @error: is @pure but contains an 'unsafe' block
+@pure
+fn peek(x: i64): i64 {
+    var y = x
+    unsafe {
+        let p = y.addrOf()
+    }
+    return y
+}
+
+pub fn main() {
+    print(peek(1))
+}

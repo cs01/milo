@@ -1,0 +1,9 @@
+// @error: is @pure but calls the function value 'f'
+@pure
+fn apply(f: (i64) => i64, x: i64): i64 {
+    return f(x)
+}
+
+pub fn main() {
+    print(apply((n: i64) => n + 1, 1))
+}

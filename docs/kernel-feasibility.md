@@ -23,6 +23,9 @@ problem, co-equal with (C), and it is the actual near-term kernel-killer.
 **(C) SMP shared mutable memory across cores.** The far-term tension with value semantics.
 Answered by an audited `unsafe` hatch — the same way every kernel in every language lives.
 
+**(D) The kernel object model is refcounted.** Not one of the original three; it showed up
+when the kernel's Rust was actually counted (below). It bites on a single core too.
+
 The green-task runtime is *not* load-bearing for any of this; freestanding drops it. Conceding
 that was the whole point of splitting (A) out.
 
@@ -68,6 +71,54 @@ piece is the blessed type and its rules. This is how Rust kernels live — safe 
 `Shared<T>` is shared by (B) and (C); the difference is only what makes access sound — masking on
 unicore, atomics/locks on SMP.
 
+## (D) The object model is refcounted, and that fights value semantics hardest
+
+Counted directly against the kernel's own Rust tree (`rust/`, torvalds/linux at
+`master`, 2026-07-30, 152,140 LOC):
+
+| | count |
+|---|---|
+| types carrying a lifetime param | 119 |
+| `Arc<` | 144 |
+| `ARef<` (the kernel's refcount wrapper) | 123 |
+| `unsafe` | 3,453 |
+| `-> Option<...>` returns | 395 |
+
+Lifetimes are the *least* of it — 119 types across 152k lines, about the same
+per-line density as a large userspace Rust codebase (Bun's `src/`: 767 in 1.04M).
+What is dense is shared ownership: 267 refcounted handles, roughly eleven times
+Bun's per-line rate, because kernel objects — files, inodes, devices — are
+refcounted by design in the C this code mirrors, and Rust has to mirror it back.
+
+That, not lifetimes, is the deepest tension with value semantics. It does not have
+an answer yet beyond (C)'s `Shared<T>` hatch, and it should be ranked alongside (B)
+rather than filed under "SMP later": a driver model built on `ARef`-style refcounts
+is a *unicore* problem too.
+
+## Runtime checks are kernel idiom, not a concession
+
+The standing objection — "a kernel can't afford runtime-checked lookups" — is
+backwards, and the kernel's own Rust says so:
+
+```rust
+// rust/kernel/fs/file.rs
+pub fn fget(fd: u32) -> Result<ARef<LocalFile>, BadFdError>
+```
+
+A file descriptor *is* an integer index into a per-process table, validated on
+every use, returning an error for a stale or bogus one. That is a generational
+handle lookup with different spelling. There are 395 `-> Option<...>` returns in
+the tree, plus `XArray` and `IDR` — the kernel's own index-to-object maps.
+
+What kernels actually forbid is *unrecoverable* failure. Rust-for-Linux's hardest
+rule is no panics: every allocation is fallible, every lookup returns
+`Option`/`Result`, and the caller handles it. Milo's `arena.get(h) -> Option<&T>`
+returning `None` on a dead handle is precisely that idiom; Rust's *panicking* `Vec`
+index is the thing the kernel had to ban.
+
+So the feasibility question is not "can a checked language work at ring 0" — the
+checks were never the obstacle. It is (B) interrupts and (D) refcounted objects.
+
 ## Panic strategy at ring 0
 
 A bounds check, generational-handle miss, or contract assert cannot unwind into an OS at ring 0.
@@ -98,10 +149,13 @@ path (2). Graceful degradation, not all-or-nothing.
 4. **Panic handler hook** at the freestanding entry (halt/reset/ring-buffer).
 5. **Interrupt ABI + Milo vector tables** (naked fns, `@section`/link-section, EABI interrupt
    convention). Today `startup.c` covers entry; a pure-Milo kernel wants these.
-6. **SMP-only (C): per-CPU data, `unsafe` `Send`/`Sync` for cross-core `Shared<T>`.** Deferred
+6. **Refcounted driver objects (D).** An `ARef`-shaped answer, or a driver object model that
+   does not need one. Unicore problem, no design yet — the one open question with no sketch.
+7. **SMP-only (C): per-CPU data, `unsafe` `Send`/`Sync` for cross-core `Shared<T>`.** Deferred
    until after a unicore demo.
 
-Items 1–4 are the unicore prerequisite set. 5 is pure-Milo polish. 6 is a later decision.
+Items 1–4 are the unicore prerequisite set. 5 is pure-Milo polish. 6 is unsequenced because it
+is unanswered. 7 is a later decision.
 
 ## Comparative claim (stated carefully)
 

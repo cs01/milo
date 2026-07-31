@@ -1,0 +1,81 @@
+// `@pure` narrows a fn's effects to what its signature already shows: parameters and
+// locals, nothing ambient. Mutation through a `&mut` param is still allowed — it is in
+// the signature — and so is trapping, so this is not a totality claim.
+// @expect: 25
+// @expect: 25
+// @expect: 5
+// @expect: 30
+// @expect: 7
+from "std/math" import {
+    Math
+}
+
+@pure
+fn square(x: i64): i64 {
+    return x * x
+}
+
+// Generic: the attribute is carried onto every instantiation, so each one is checked.
+@pure
+fn twiceOf<T>(x: T): T {
+    return x
+}
+
+@pure
+fn sumSquares(v: &Vec<i64>): i64 {
+    var total = 0
+    for x in v {
+        total = total + square(x)
+    }
+    return total
+}
+
+// The whole Math namespace is @pure, including the libm externs behind it.
+@pure
+fn hypot(a: f64, b: f64): f64 {
+    return Math.sqrt(a * a + b * b)
+}
+
+// A `&mut` param is a declared effect, not an ambient one.
+@pure
+fn scaleAll(v: &mut Vec<i64>, k: i64) {
+    var i = 0
+    while i < v.len() {
+        v[i] = v[i] * k
+        i = i + 1
+    }
+}
+
+struct Pt {
+    x: i64
+    y: i64
+}
+
+impl Pt {
+    @pure
+    fn norm2(self: &Pt): i64 {
+        return square(self.x) + square(self.y)
+    }
+}
+
+pub fn main() {
+    var v: Vec<i64> = Vec.new()
+    v.push(3)
+    v.push(4)
+    print(sumSquares(v))
+
+    let p = Pt {
+        x: 3, y: 4
+    }
+    print(p.norm2())
+
+    print(hypot(3.0, 4.0))
+
+    var w: Vec<i64> = Vec.new()
+    w.push(5)
+    w.push(10)
+    scaleAll(w, 2)
+    print(w[0] + w[1])
+
+    print(twiceOf(7))
+}

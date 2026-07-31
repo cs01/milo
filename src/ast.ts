@@ -187,6 +187,10 @@ export interface Function {
   // formatter reprints). Per-file: only fns parsed from the wrapping module get it.
   fromWrappingModule?: boolean;
   sourceFile?: string; // set by the resolver; used to diagnose cross-module name collisions
+  // The name as written, when `name` is a compiler-generated one. A monomorphized
+  // instance is called `foo_i64`, which nobody typed — diagnostics about the generic's
+  // body should say `foo`.
+  sourceName?: string;
   typeParams: TypeParam[];
   params: Param[];
   retType: MiloType;

@@ -1,0 +1,19 @@
+// @error: overlap and are both borrowed mutably
+// Two `&mut` views into the same Vec whose literal ranges intersect. The generic
+// mut-twice check treats an index step as "maybe distinct elements" (right for
+// v[i]/v[j]), so this case needs the range comparison. See mutSliceDisjoint for
+// the accepted form.
+fn touch(a: &mut [i64], b: &mut [i64]) {
+    a[0] = 99
+    b[0] = 7
+}
+
+pub fn main() {
+    var v: Vec<i64> = Vec.new()
+    v.push(1)
+    v.push(2)
+    v.push(3)
+    v.push(4)
+    touch(v[0..2], v[1..3])
+    print(v[0])
+}

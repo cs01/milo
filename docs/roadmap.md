@@ -158,7 +158,9 @@ Reproduce: `sh scripts/selfhost.sh` (builds stage1 via the oracle — required; 
 
 ### Language
 
-- [ ] **`&mut [T]` views + checked disjoint split** — slices are immutable-only today, so no workload can hand N workers N non-overlapping mutable windows into one buffer. Range disjointness is linear scalar arithmetic, which `milo prove` already discharges — so `splitMut` should need no `unsafe` (backlog Tier 2 #9)
+- [x] **`@pure`** — a function may read and write only its parameters and its own locals: no I/O, no module state, no raw memory, no impure callee. Works on fns, methods, generics, and (as an unchecked assertion) on `extern`. `std/math` is annotated throughout. The prover uses it for framing — a `@pure` call with no `&mut` parameter needs no havoc — which turns refutations into proofs (`tests/prove/pureMethodNoHavoc.milo`). Design and the unbuilt capability stage: [effects-and-capabilities.md](effects-and-capabilities.md)
+- [ ] **`splitMut` — N disjoint mutable windows** — `&mut [T]` param views ship, and overlapping literal ranges at one call site are rejected; what's missing is handing N workers N windows in one call, and disjointness for *dynamic* ranges. Range disjointness is linear scalar arithmetic, which `milo prove` already discharges — so it should need no `unsafe` (backlog Tier 2 #9)
+- [ ] **Capability parameters** — remove ambient authority: a function does I/O only if handed a capability, and second-class refs already prevent one from leaking into a struct, closure, or global. Proposed only; the breaking-change cost across `std` is the open question ([effects-and-capabilities.md](effects-and-capabilities.md))
 - [ ] **Borrowed byte views** — `Buffer`/`ArrayBuffer`-shaped interop and zero-copy protocol parsing; gates the zero-copy form of the JSON byte-feed
 - [ ] **Named enum-variant fields** — `ForEach { varName: string, … }` instead of an 8-slot positional payload. Greenlit as a language feature; hits the self-hosted compiler hardest. Parser + checker + formatter + LSP
 - [ ] **Tuple binding in for-in** — `for (i, x) in vec.enumerate()`; converts most `while i < len()` loops. match already destructures tuples

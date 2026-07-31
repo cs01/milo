@@ -1,0 +1,11 @@
+// @error: is @pure but calls extern fn 'cbrt'
+extern fn cbrt(x: f64): f64
+
+@pure
+fn root(x: f64): f64 {
+    return cbrt(x)
+}
+
+pub fn main() {
+    print(root(8.0))
+}

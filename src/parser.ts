@@ -644,7 +644,23 @@ export class Parser {
     this.expect(TokenKind.LBrace);
     const methods: Function[] = [];
     while (!this.at(TokenKind.RBrace) && !this.at(TokenKind.Eof)) {
-      methods.push(this.parseFn());
+      // Methods take the same attributes as free fns (`@pure`, `@wrapping`). An `@!`
+      // directive is file-scoped and has no meaning here, so reject it rather than
+      // silently attaching it to the method.
+      let attrs: Attribute[] | undefined;
+      while (this.at(TokenKind.At)) {
+        const a = this.parseAttribute();
+        if (a.inner) {
+          this.error(`'@!${a.name}' is a module directive — it applies to a whole file, not a method`, this.peek(),
+            undefined, `move it to the top of the file`);
+          continue;
+        }
+        if (!attrs) attrs = [];
+        attrs.push(a);
+      }
+      const m = this.parseFn();
+      if (attrs) m.attributes = attrs;
+      methods.push(m);
     }
     this.expect(TokenKind.RBrace);
     return { kind: "ImplDecl", traitName, typeName, typeParams, methods, isUnsafe, span: this.span(tok) };

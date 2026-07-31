@@ -1,0 +1,12 @@
+// @error: is @pure but touches the mutable global 'counter'
+var counter: i64 = 0
+
+@pure
+fn bump(): i64 {
+    counter = counter + 1
+    return counter
+}
+
+pub fn main() {
+    print(bump())
+}

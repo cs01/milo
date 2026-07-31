@@ -147,6 +147,18 @@ function visibilityNote(isPub?: boolean): string {
   return isPub ? "" : "\n\n*private — file-local; not importable from other files*";
 }
 
+// `@pure` is the whole reason to hover a function you're about to call from pure code,
+// so it leads the signature the way `pub` does — and gets a gloss, because the guarantee
+// (no ambient effect) is narrower than the word suggests (it can still trap).
+function attrPrefix(fn: { attributes?: { name: string }[] }): string {
+  return fn.attributes?.some(a => a.name === "pure") ? "@pure " : "";
+}
+function purityNote(fn: { attributes?: { name: string }[] }): string {
+  return fn.attributes?.some(a => a.name === "pure")
+    ? "\n\n*`@pure` — reads and writes only its parameters and locals; no I/O, no module state, no raw memory. It can still trap.*"
+    : "";
+}
+
 // Byte width of the scalar primitives, for spelling out `[T; N]` in plain terms.
 const SCALAR_BYTES: Record<string, number> = {
   i8: 1, u8: 1, i16: 2, u16: 2, i32: 4, u32: 4, i64: 8, u64: 8, f32: 4, f64: 8, bool: 1,
@@ -369,8 +381,8 @@ function handleHover(uri: string, line: number, character: number): object | nul
     const f = program.functions.find(fn => fn.name === word && !fn.isExtern);
     if (f) {
       const params = f.params.map(p => `${p.name}: ${formatMiloType(declaredType(p))}`).join(", ");
-      const sig = `${pubPrefix(f.isPub)}fn ${f.name}(${params}): ${formatMiloType(f.retType)}`;
-      let hover = `\`\`\`milo\n${sig}\n\`\`\`${visibilityNote(f.isPub)}`;
+      const sig = `${attrPrefix(f)}${pubPrefix(f.isPub)}fn ${f.name}(${params}): ${formatMiloType(f.retType)}`;
+      let hover = `\`\`\`milo\n${sig}\n\`\`\`${visibilityNote(f.isPub)}${purityNote(f)}`;
       hover = appendDocAndModule(hover, source, parsed, sourceDir, word, "fn");
       return { contents: { kind: "markdown", value: hover } };
     }
@@ -382,8 +394,8 @@ function handleHover(uri: string, line: number, character: number): object | nul
           const params = method.params
             .filter(p => p.name !== "self")
             .map(p => `${p.name}: ${formatMiloType(declaredType(p))}`).join(", ");
-          const sig = `fn ${impl.typeName}.${method.name}(${params}): ${formatMiloType(method.retType)}`;
-          let hover = `\`\`\`milo\n${sig}\n\`\`\``;
+          const sig = `${attrPrefix(method)}fn ${impl.typeName}.${method.name}(${params}): ${formatMiloType(method.retType)}`;
+          let hover = `\`\`\`milo\n${sig}\n\`\`\`${purityNote(method)}`;
           hover = appendDocAndModule(hover, source, parsed, sourceDir, word, "fn");
           return { contents: { kind: "markdown", value: hover } };
         }

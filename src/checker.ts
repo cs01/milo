@@ -954,6 +954,7 @@ export class TypeChecker {
     const concreteDecl: Function = {
       kind: "Function",
       name: mangled,
+      sourceName: baseName,
       typeParams: [],
       params: generic.decl.params.map(p => ({
         name: p.name,
@@ -964,6 +965,11 @@ export class TypeChecker {
       body: this.substituteBody(generic.decl.body, generic.typeParams, typeArgs),
       isExtern: false,
       isVariadic: false,
+      // Attributes are behavioral (`@wrapping` changes arithmetic, `@pure` is checked
+      // per-instance), so an instance that dropped them would silently differ from the
+      // generic that declared them.
+      ...(generic.decl.attributes && { attributes: generic.decl.attributes }),
+      ...(generic.decl.fromWrappingModule && { fromWrappingModule: true }),
     };
     this.monomorphizedFns.push(concreteDecl);
 
@@ -1343,8 +1349,18 @@ export class TypeChecker {
                 `write '@wrapping fn ${fn.name}(...)'`);
             }
           }
+          // @pure declares the function has no effect the signature doesn't already show:
+          // it reads and writes only its parameters and its own locals. On a Milo body that
+          // is checked (see checkPurity); on an `extern` it is an assertion, because there
+          // is no body here to inspect — the same trust hole every effect system has at the
+          // FFI boundary.
+          else if (attr.name === "pure") {
+            if (attr.args.length > 0) {
+              this.error(`'@pure' takes no arguments`, undefined, `write '@pure fn ${fn.name}(...)'`);
+            }
+          }
           else this.error(`'@${attr.name}' is not supported on functions — '${fn.name}'`, undefined,
-            `only '@cSig', '@export', '@link' and '@wrapping' apply to a fn; it would be silently ignored otherwise`);
+            `only '@cSig', '@export', '@link', '@pure' and '@wrapping' apply to a fn; it would be silently ignored otherwise`);
         }
       }
       this.checkVariadicExtern(fn);
@@ -1391,6 +1407,17 @@ export class TypeChecker {
     // type-check module-level globals — push a module scope so declare() works
     this.pushScope();
     const globalTypes = new Map<string, TypeKind>();
+    // Pre-declare every annotated global BEFORE checking any initializer. An initializer
+    // can call a function whose body reads a global declared later in the merged program —
+    // `var pool: Arena<T> = Arena<T>.new()` reaches `Arena.new`, which reads std/arena's
+    // `nextArenaId` — and declaring only as the loop advanced made that an "undefined
+    // variable" pointing into the standard library, for code that compiles fine inside a
+    // function. Unannotated globals are skipped: their type is whatever their initializer
+    // turns out to be, which is not known yet.
+    for (const g of program.globals) {
+      if (!g.type) continue;
+      this.declare(g.name, { type: this.resolve(g.type), mutable: g.mutable, moved: false, borrowed: false, read: true, span: g.span });
+    }
     for (const g of program.globals) {
       const hint = g.type ? this.resolve(g.type) : null;
       const valType = this.checkExprWithHint(g.value, hint);
@@ -1413,7 +1440,11 @@ export class TypeChecker {
           g.span,
         );
       }
-      this.declare(g.name, { type: finalType, mutable: g.mutable, moved: false, borrowed: false, read: true, span: g.span });
+      // Annotated globals were declared in the pre-pass above; only the inferred ones are
+      // new here. Re-declaring would trip the duplicate-name check.
+      if (!g.type) {
+        this.declare(g.name, { type: finalType, mutable: g.mutable, moved: false, borrowed: false, read: true, span: g.span });
+      }
     }
     this._globalTypes = globalTypes;
 
@@ -1441,6 +1472,10 @@ export class TypeChecker {
         this.error(`cannot infer Vec element type — no 'push' found to infer from; add a type annotation: 'let v: Vec<T> = Vec.new()'`, p.span);
       }
     }
+
+    // `@pure` needs the finished call-resolution maps and the full set of
+    // monomorphized instances, so it runs after everything else has been checked.
+    this.checkPurity(program);
 
     // File-level `pub` visibility: a reference to a non-`pub` decl defined in
     // another file is an error. Run last so it never masks a more basic type error.
@@ -1799,6 +1834,213 @@ export class TypeChecker {
     this.cSigs.set(f.name, { header, sig });
   }
 
+  // ── @pure ──────────────────────────────────────────────────────────────────────
+  //
+  // `@pure` narrows a function's effects to the ones its signature already shows: it
+  // reads and writes its parameters and its own locals, and nothing else. It is not a
+  // totality claim — a pure function can still trap (overflow, bounds, a failed
+  // contract) or loop forever, the same way a bounds check can. What it rules out is
+  // *ambient* effect: I/O, mutable module state, raw memory, and any call that could
+  // reach one of those.
+  //
+  // Run as a post-pass rather than inside type checking because it needs the finished
+  // call-resolution maps (`staticCalls`, `resolvedMethods`, the monomorphized
+  // instances) to know what a given call site actually targets.
+
+  // Built-in free functions with no ambient effect. An allowlist, not a denylist: a new
+  // intrinsic has to be judged pure deliberately rather than inheriting it by default.
+  // `assert` is here because trapping is not an effect under this definition.
+  private static readonly PURE_BUILTINS = new Set(["format", "max", "min", "assert"]);
+
+  private checkPurity(program: Program): void {
+    const pureNames = new Set<string>();
+    const bodies: Function[] = [];
+    // monomorphizedFns holds impl methods (mangled `Type$method`, `Type$Trait$method`)
+    // and generic instances; program.functions holds free fns. A generic declaration is
+    // registered as pure but not walked — its instances are what call sites resolved to,
+    // and they are the copies whose expressions carry resolution data.
+    for (const f of [...program.functions, ...this.monomorphizedFns]) {
+      if (!f.attributes?.some(a => a.name === "pure")) continue;
+      pureNames.add(f.name);
+      if (!f.isExtern && f.typeParams.length === 0) bodies.push(f);
+    }
+    if (bodies.length === 0) return;
+
+    const mutableGlobals = new Set(program.globals.filter(g => g.mutable).map(g => g.name));
+    // Every instance of a pure generic walks the same source span, so the same violation
+    // would be reported once per instantiation.
+    const seen = new Set<string>();
+    // `Type$method` reads as `Type.method`; a monomorphized `foo_i64` reads as `foo`.
+    const asWritten = new Map<string, string>();
+    for (const f of this.monomorphizedFns) if (f.sourceName) asWritten.set(f.name, f.sourceName);
+    const pretty = (n: string) => asWritten.get(n) ?? n.replace(/\$/g, ".");
+
+    for (const fn of bodies) {
+      const who = fn.sourceName ?? pretty(fn.name);
+      const fail = (msg: string, span: Span | undefined, hint: string, key?: string) => {
+        const k = key ?? `${span?.line ?? 0}:${span?.col ?? 0}:${msg}`;
+        if (seen.has(k)) return;
+        seen.add(k);
+        this.error(msg, span, hint);
+      };
+
+      const callTarget = (e: Expr, fallback: string): string =>
+        this.rewrittenCalls.get(e) ?? this.staticCalls.get(e) ?? fallback;
+
+      const checkCall = (e: Expr, target: string, span: Span | undefined) => {
+        if (pureNames.has(target) || TypeChecker.PURE_BUILTINS.has(target)) return;
+        const sig = this.functions.get(target);
+        if (!sig) {
+          // No registered signature: a compiler builtin (`Vec.new`, `v.len()`). Those act
+          // only on the data handed to them, so they are pure by construction — the ones
+          // that are not (`print`, `exit`, the `_milo*`/`_atomic*` intrinsics) do have a
+          // registered signature and fall through to the impure branch below.
+          return;
+        }
+        if (sig.isExtern) {
+          fail(`'${who}' is @pure but calls extern fn '${pretty(target)}'`, span,
+            `an extern's body is compiled elsewhere, so nothing here can check it — write '@pure extern fn ${target}(...)' to assert it has no effects, or drop '@pure' from '${who}'`);
+          return;
+        }
+        fail(`'${who}' is @pure but calls '${pretty(target)}', which is not`, span,
+          `purity is transitive — mark '${pretty(target)}' '@pure' too, or drop '@pure' from '${who}'`);
+      };
+
+      const ex = (e: Expr | null | undefined, bound: Set<string>): void => {
+        if (!e) return;
+        switch (e.kind) {
+          case "Ident":
+            if (mutableGlobals.has(e.name) && !bound.has(e.name)) {
+              // One report per global per function: `g = g + 1` is a read and a write of
+              // the same mistake, and repeating it per mention buries the fix.
+              fail(`'${who}' is @pure but touches the mutable global '${e.name}'`, e.span,
+                `a @pure fn reads and writes only its parameters and its own locals — pass '${e.name}' in as a parameter, or make it a 'let'`,
+                `${fn.name}|global|${e.name}`);
+            }
+            break;
+          case "Call":
+            // A call through a value (closure, fn-typed param, C function pointer) has no
+            // static target, and purity is not part of a fn type yet.
+            if (this.closureCalls.has(e) || this.cfnCalls.has(e)) {
+              fail(`'${who}' is @pure but calls the function value '${e.func}'`, e.span,
+                `purity is not part of a fn type, so the compiler cannot see what this call does — call a named @pure fn instead`);
+            } else {
+              checkCall(e, callTarget(e, e.func), e.span);
+            }
+            e.args.forEach(a => ex(a, bound));
+            break;
+          case "EnumLit": {
+            // Static method calls (`Math.sqrt(x)`) parse as EnumLit and are resolved into
+            // staticCalls; without an entry this is ordinary enum construction.
+            const target = this.staticCalls.get(e);
+            if (target) checkCall(e, target, e.span);
+            e.args.forEach(a => ex(a, bound));
+            break;
+          }
+          case "MethodCall": {
+            const iface = this.interfaceMethodCalls.get(e);
+            if (iface) {
+              fail(`'${who}' is @pure but calls '${e.method}' through the interface '${iface.ifaceName}'`, e.span,
+                `dynamic dispatch hides which body runs, and purity is not part of an interface method's signature`);
+            } else if (this.fnFieldCalls.has(e)) {
+              fail(`'${who}' is @pure but calls the fn-typed field '${e.method}'`, e.span,
+                `purity is not part of a fn type, so the compiler cannot see what this call does`);
+            } else {
+              const target = this.resolvedMethods.get(e);
+              if (target) checkCall(e, target, e.span);
+            }
+            ex(e.object, bound);
+            e.args.forEach(a => ex(a, bound));
+            break;
+          }
+          case "BinOp": ex(e.left, bound); ex(e.right, bound); break;
+          case "UnaryOp": ex(e.operand, bound); break;
+          case "FieldAccess": ex(e.object, bound); break;
+          case "IndexAccess": ex(e.object, bound); ex(e.index, bound); break;
+          case "StructLit": e.fields.forEach(f => ex(f.value, bound)); break;
+          case "ArrayLit": e.elements.forEach(el => ex(el, bound)); break;
+          case "ArrayRepeat": ex(e.value, bound); break;
+          case "Unwrap": case "Propagate": ex(e.operand, bound); break;
+          case "DefaultValue": ex(e.operand, bound); ex(e.default, bound); break;
+          case "CastExpr": ex(e.operand, bound); break;
+          case "Closure": {
+            // The body runs inside this fn, so its effects are this fn's effects.
+            const inner = new Set(bound);
+            for (const p of e.params) inner.add(p.name);
+            st(e.body, inner);
+            break;
+          }
+          case "RangeExpr": ex(e.start, bound); ex(e.end, bound); break;
+          case "IsExpr": ex(e.operand, bound); break;
+          case "IfExpr": ex(e.cond, bound); st(e.thenBody, new Set(bound)); st(e.elseBody, new Set(bound)); break;
+          case "MatchExpr": ex(e.subject, bound); e.arms.forEach(a => st(a.body, bindPattern(a.pattern, bound))); break;
+          case "IntLit": case "FloatLit": case "BoolLit": case "StringLit": case "CharLit":
+            break;
+          default: {
+            // A missing arm would silently skip a whole subtree — the same failure mode
+            // that let the safety walker report "pass" on code it never looked at.
+            const _exhaustive: never = e;
+            void _exhaustive;
+          }
+        }
+      };
+
+      const bindPattern = (p: import("./ast").Pattern, bound: Set<string>): Set<string> => {
+        const inner = new Set(bound);
+        if (p.kind === "EnumPattern") for (const b of p.bindings) inner.add(b);
+        return inner;
+      };
+
+      const st = (list: Stmt[], outer: Set<string>): void => {
+        const bound = new Set(outer);
+        for (const s of list) {
+          switch (s.kind) {
+            // Walk the initializer before binding the name: in `let x = x + 1` the
+            // right-hand `x` is still whatever `x` meant outside.
+            case "LetDecl": case "VarDecl": ex(s.value, bound); bound.add(s.name); break;
+            case "Assign": ex(s.target, bound); ex(s.value, bound); break;
+            case "Return": ex(s.value, bound); break;
+            case "ExprStmt": ex(s.expr, bound); break;
+            case "IfStmt": ex(s.cond, bound); st(s.thenBody, bound); if (s.elseBody) st(s.elseBody, bound); break;
+            case "WhileStmt": ex(s.cond, bound); st(s.body, bound); break;
+            case "ForInStmt": {
+              ex(s.iterable, bound);
+              const inner = new Set(bound);
+              inner.add(s.varName);
+              if (s.varName2) inner.add(s.varName2);
+              st(s.body, inner);
+              break;
+            }
+            case "MatchStmt": ex(s.subject, bound); s.arms.forEach(a => st(a.body, bindPattern(a.pattern, bound))); break;
+            case "IfLetStmt":
+              ex(s.subject, bound);
+              st(s.thenBody, bindPattern(s.pattern, bound));
+              if (s.elseBody) st(s.elseBody, bound);
+              break;
+            case "LetElseStmt":
+              ex(s.value, bound);
+              st(s.elseBody, bound);
+              // The bind escapes into the enclosing scope — that is the point of let-else.
+              if (s.pattern.kind === "EnumPattern") for (const b of s.pattern.bindings) bound.add(b);
+              break;
+            case "UnsafeBlock":
+              fail(`'${who}' is @pure but contains an 'unsafe' block`, s.span,
+                `raw memory access is exactly the ambient effect '@pure' rules out`);
+              st(s.body, bound);
+              break;
+            case "BreakStmt": case "ContinueStmt": break;
+            default: {
+              const _exhaustive: never = s;
+              void _exhaustive;
+            }
+          }
+        }
+      };
+
+      st(fn.body, new Set(fn.params.map(p => p.name)));
+    }
+  }
+
   private validateAttributes(declName: string, attrs: Attribute[] | undefined, target: "struct" | "enum"): void {
     if (!attrs) return;
     const known = TypeChecker.KNOWN_ATTRS.map(a => `@${a}`).join(", ");
@@ -2025,6 +2267,17 @@ export class TypeChecker {
     for (const m of impl.methods) {
       if (m.name === "addrOf")
         this.error(`'addrOf' is a reserved method name — it is the built-in raw address-of operator ('x.addrOf(): *T'). Rename this method.`, m.span ?? impl.span);
+      // Method attributes were silently dropped before they could be parsed at all;
+      // reject the unknown ones here so a typo can't look like it took effect.
+      for (const attr of m.attributes ?? []) {
+        if (attr.name !== "pure" && attr.name !== "wrapping") {
+          this.error(`'@${attr.name}' is not supported on methods — '${typeName}.${m.name}'`, m.span ?? impl.span,
+            `only '@pure' and '@wrapping' apply to a method`);
+        } else if (attr.args.length > 0) {
+          this.error(`'@${attr.name}' takes no arguments`, m.span ?? impl.span,
+            `write '@${attr.name}' on the line above 'fn ${m.name}'`);
+        }
+      }
     }
 
     // generic impl — store as template, instantiate per monomorphization. Trait impls
@@ -3489,6 +3742,12 @@ export class TypeChecker {
       case "StructLit":
         return e.fields.every((f) => this.isConstGlobalInit(f.value));
       case "EnumLit":
+        // A static method call (`Arena<T>.new()`) parses as an EnumLit and is recorded in
+        // `staticCalls` — it is a real call, not a variant construction, and folding it
+        // into a constant is the exact silent-zero this guard exists to stop. Two
+        // module-scope `Arena<T>.new()` globals both took id 0 that way, so a handle from
+        // one resolved in the other. Only genuine construction is const.
+        if (this.staticCalls.has(e)) return false;
         return e.args.every((a) => this.isConstGlobalInit(a));
       default:
         return false;
@@ -3587,9 +3846,36 @@ export class TypeChecker {
           const sp = args[i].span ?? args[j].span ?? undefined;
           this.error(`'${a.root}' is borrowed mutably twice in the same call`, sp,
             `one argument is a container and the other borrows into it (or they are the same place) — a mutation through one (e.g. a 'push' that reallocates) could invalidate the other; split the call into two statements or clone one argument`);
+          continue;
+        }
+        // Two `&mut` range views off the same place — `f(v[0..2], v[1..3])`. The check
+        // above deliberately treats an index step as "maybe distinct elements", which is
+        // right for `v[i]`/`v[j]` but lets two overlapping ranges through, and two live
+        // `&mut` into the same element is exactly what exclusivity forbids. When both
+        // ranges are literal the overlap is decidable here; a dynamic range is not, and
+        // is left to the prover (docs/backlog.md, checked disjoint split).
+        const ra = this.constRangeOf(args[i]), rb = this.constRangeOf(args[j]);
+        if (ra && rb && a.steps.length === b.steps.length && ra.lo < rb.hi && rb.lo < ra.hi) {
+          const sp = args[i].span ?? args[j].span ?? undefined;
+          this.error(`'${a.root}[${ra.lo}..${ra.hi}]' and '${a.root}[${rb.lo}..${rb.hi}]' overlap and are both borrowed mutably`, sp,
+            `the ranges share element ${ra.lo > rb.lo ? ra.lo : rb.lo}, so both arguments would be live '&mut' to the same storage — use disjoint ranges, or split the call into two statements`);
         }
       }
     }
+  }
+
+  // Literal bounds of a range view (`v[0..2]`, parsed as `.slice(0, 2)`), or null when
+  // either bound isn't a literal. Half-open: `hi` is exclusive, matching the syntax.
+  private constRangeOf(e: Expr): { lo: bigint; hi: bigint } | null {
+    if (e.kind !== "MethodCall" || e.method !== "slice" || e.args.length !== 2) return null;
+    const lit = (x: Expr): bigint | null => {
+      if (x.kind === "IntLit") return x.value;
+      // `v[-1..n]` is nonsense, but fold the sign anyway rather than silently bailing.
+      if (x.kind === "UnaryOp" && x.op === "-") { const v = lit(x.operand); return v === null ? null : -v; }
+      return null;
+    };
+    const lo = lit(e.args[0]), hi = lit(e.args[1]);
+    return lo === null || hi === null || hi <= lo ? null : { lo, hi };
   }
 
   // How a call argument borrows its root, for the exclusivity checks. Most args are

@@ -1,0 +1,18 @@
+// Two `&mut` windows into one Vec are fine when the literal ranges don't intersect —
+// the counterpart to errors/mutSliceOverlap. This is the shape a `splitMut` would
+// generalize to N windows.
+// @expect: 106
+fn touch(a: &mut [i64], b: &mut [i64]) {
+    a[0] = 99
+    b[0] = 7
+}
+
+pub fn main() {
+    var v: Vec<i64> = Vec.new()
+    v.push(1)
+    v.push(2)
+    v.push(3)
+    v.push(4)
+    touch(v[0..2], v[2..4])
+    print(v[0] + v[2])
+}

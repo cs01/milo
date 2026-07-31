@@ -1,0 +1,517 @@
+// PROSPECT — the mine.
+//
+// A side-on tile world you tunnel through. There is no timer, nothing chases you,
+// and you cannot die: the whole loop is dig, find, collect. Depth is the only
+// pressure, and it is entirely self-imposed.
+
+from "std/math" import {
+    Math
+}
+from "std/random" import {
+    Random
+}
+
+pub let TILE: f64 = 30.0
+
+pub let MAP_W: i64 = 220
+
+pub let MAP_H: i64 = 90
+
+// tile kinds
+pub let T_SKY: i64 = 0
+
+pub let T_DIRT: i64 = 1
+
+pub let T_CLAY: i64 = 2
+
+pub let T_STONE: i64 = 3
+
+pub let T_BEDROCK: i64 = 4
+
+pub let T_GOLD: i64 = 5
+
+pub let T_GEM: i64 = 6
+
+pub let T_CRYSTAL: i64 = 7
+
+pub let T_WATER: i64 = 8
+
+pub struct Col {
+    r: f64,
+    g: f64,
+    b: f64,
+}
+
+pub struct Part {
+    x: f64,
+    y: f64,
+    vx: f64,
+    vy: f64,
+    life: f64,
+    maxLife: f64,
+    size: f64,
+    cr: f64,
+    cg: f64,
+    cb: f64,
+}
+
+// A value that floats up from where something was collected.
+pub struct Pop {
+    x: f64,
+    y: f64,
+    life: f64,
+    text: string,
+    cr: f64,
+    cg: f64,
+    cb: f64,
+}
+
+pub struct Mine {
+    tiles: Vec<u8>,
+    // How far the current tile has been drilled, 0..1. Only the tile under the
+    // drill is ever non-zero, so one scalar is enough.
+    digX: i64,
+    digY: i64,
+    digProgress: f64,
+    px: f64, // player position, in pixels
+    py: f64,
+    faceX: f64, // last facing direction, for the drill sprite
+    faceY: f64,
+    camX: f64,
+    camY: f64,
+    gold: i64,
+    gems: i64,
+    crystals: i64,
+    score: i64,
+    deepest: i64,
+    drillRate: f64,
+    lampRadius: f64,
+    parts: Vec<Part>,
+    pops: Vec<Pop>,
+    shake: f64,
+    flash: f64,
+    time: f64,
+    banner: f64,
+    hint: f64,
+}
+
+// Deterministic value noise — no allocation, no state, same map every run so a
+// good seam is somewhere you can go back to.
+fn hash2(x: i64, y: i64): f64 {
+    let v = Math.sin((x as f64) * 127.1 + (y as f64) * 311.7) * 43758.5453
+    return v - Math.floor(v)
+}
+
+fn smoothNoise(x: f64, y: f64): f64 {
+    let x0 = Math.floor(x) as i64
+    let y0 = Math.floor(y) as i64
+    let fx = x - (x0 as f64)
+    let fy = y - (y0 as f64)
+    let sx = fx * fx * (3.0 - 2.0 * fx)
+    let sy = fy * fy * (3.0 - 2.0 * fy)
+    let n00 = hash2(x0, y0)
+    let n10 = hash2(x0 + 1, y0)
+    let n01 = hash2(x0, y0 + 1)
+    let n11 = hash2(x0 + 1, y0 + 1)
+    let a = n00 + (n10 - n00) * sx
+    let b = n01 + (n11 - n01) * sx
+    return a + (b - a) * sy
+}
+
+pub fn tileAt(m: &Mine, x: i64, y: i64): i64 {
+    if x < 0 || y < 0 || x >= MAP_W || y >= MAP_H {
+        return T_BEDROCK
+    }
+    return m.tiles[y * MAP_W + x] as i64
+}
+
+pub fn setTile(m: &mut Mine, x: i64, y: i64, t: i64) {
+    if x < 0 || y < 0 || x >= MAP_W || y >= MAP_H {
+        return
+    }
+    m.tiles[y * MAP_W + x] = t as u8
+}
+
+pub let SURFACE: i64 = 10
+
+fn generate(m: &mut Mine) {
+    for y in 0..MAP_H {
+        for x in 0..MAP_W {
+            var t = T_DIRT
+            if y < SURFACE {
+                t = T_SKY
+            } else if y >= MAP_H - 1 || x == 0 || x >= MAP_W - 1 {
+                t = T_BEDROCK
+            } else {
+                let depth = (y as f64) / (MAP_H as f64)
+                // Deeper ground is harder ground.
+                let hardness = smoothNoise((x as f64) * 0.09, (y as f64) * 0.09)
+                if depth > 0.30 && hardness > 0.62 - depth * 0.25 {
+                    t = T_CLAY
+                }
+                if depth > 0.55 && hardness > 0.70 - depth * 0.20 {
+                    t = T_STONE
+                }
+                // Scattered bedrock pillars below the halfway mark, so the deep
+                // mine has shape instead of being an open field.
+                if depth > 0.5 && smoothNoise((x as f64) * 0.21 + 40.0, (y as f64) * 0.21) > 0.86 {
+                    t = T_BEDROCK
+                }
+                // Ore veins: a separate noise field, thresholded tighter the more
+                // valuable the ore, and each one only appears past its own depth.
+                let vein = smoothNoise((x as f64) * 0.17 + 11.0, (y as f64) * 0.17 + 7.0)
+                if depth > 0.10 && vein > 0.885 {
+                    t = T_GOLD
+                }
+                let vein2 = smoothNoise((x as f64) * 0.20 + 91.0, (y as f64) * 0.20 + 51.0)
+                if depth > 0.38 && vein2 > 0.930 {
+                    t = T_GEM
+                }
+                let vein3 = smoothNoise((x as f64) * 0.26 + 5.0, (y as f64) * 0.26 + 77.0)
+                if depth > 0.62 && vein3 > 0.958 {
+                    t = T_CRYSTAL
+                }
+                // Flooded pockets. Broad, smooth noise so they come out as
+                // caverns rather than speckle.
+                let wet = smoothNoise((x as f64) * 0.055 + 300.0, (y as f64) * 0.10 + 120.0)
+                if depth > 0.22 && depth < 0.92 && wet > 0.845 {
+                    t = T_WATER
+                }
+            }
+            m.tiles[y * MAP_W + x] = t as u8
+        }
+    }
+    // An open mouth to start in, so the first move is obvious.
+    for y in SURFACE..SURFACE + 2 {
+        for x in 2..7 {
+            m.tiles[y * MAP_W + x] = T_SKY as u8
+        }
+    }
+}
+
+pub fn mineNew(): Mine {
+    var m = Mine {
+        tiles: Vec.filled(MAP_W * MAP_H, 0),
+        digX: 0 - 1,
+        digY: 0 - 1,
+        digProgress: 0.0,
+        px: 4.0 * TILE + TILE * 0.5,
+        py: (SURFACE as f64) * TILE + TILE * 0.5,
+        faceX: 1.0,
+        faceY: 0.0,
+        camX: 0.0,
+        camY: 0.0,
+        gold: 0,
+        gems: 0,
+        crystals: 0,
+        score: 0,
+        deepest: SURFACE,
+        drillRate: 2.6,
+        lampRadius: 300.0,
+        parts: Vec.new(),
+        pops: Vec.new(),
+        shake: 0.0,
+        flash: 0.0,
+        time: 0.0,
+        banner: 3.0,
+        hint: 6.0,
+    }
+    generate(m)
+    return m
+}
+
+pub fn tileColor(t: i64): Col {
+    if t == T_DIRT {
+        return Col {
+            r: 0.42, g: 0.26, b: 0.14
+        }
+    }
+    if t == T_CLAY {
+        return Col {
+            r: 0.52, g: 0.30, b: 0.20
+        }
+    }
+    if t == T_STONE {
+        return Col {
+            r: 0.34, g: 0.33, b: 0.36
+        }
+    }
+    if t == T_BEDROCK {
+        return Col {
+            r: 0.17, g: 0.16, b: 0.19
+        }
+    }
+    if t == T_GOLD {
+        return Col {
+            r: 1.40, g: 0.90, b: 0.18
+        }
+    }
+    if t == T_GEM {
+        return Col {
+            r: 0.25, g: 1.15, b: 1.30
+        }
+    }
+    if t == T_CRYSTAL {
+        return Col {
+            r: 1.10, g: 0.35, b: 1.45
+        }
+    }
+    if t == T_WATER {
+        return Col {
+            r: 0.10, g: 0.55, b: 1.10
+        }
+    }
+    return Col {
+        r: 0.0, g: 0.0, b: 0.0
+    }
+}
+
+// How many seconds of drilling a tile costs.
+pub fn tileToughness(t: i64): f64 {
+    if t == T_DIRT {
+        return 0.34
+    }
+    if t == T_CLAY {
+        return 0.62
+    }
+    if t == T_STONE {
+        return 1.05
+    }
+    if t == T_GOLD {
+        return 0.55
+    }
+    if t == T_GEM {
+        return 0.80
+    }
+    if t == T_CRYSTAL {
+        return 1.10
+    }
+    return 0.0 // bedrock: never
+}
+
+pub fn tileValue(t: i64): i64 {
+    if t == T_GOLD {
+        return 25
+    }
+    if t == T_GEM {
+        return 120
+    }
+    if t == T_CRYSTAL {
+        return 500
+    }
+    return 0
+}
+
+pub fn tileName(t: i64): string {
+    if t == T_GOLD {
+        return "GOLD"
+    }
+    if t == T_GEM {
+        return "EMERALD"
+    }
+    if t == T_CRYSTAL {
+        return "CRYSTAL"
+    }
+    return ""
+}
+
+pub fn isSolid(t: i64): bool {
+    return t != T_SKY && t != T_WATER
+}
+
+// ── effects ───────────────────────────────────────────────────────────────────
+
+pub fn burst(m: &mut Mine, x: f64, y: f64, n: i64, speed: f64, c: &Col) {
+    for i in 0..n {
+        let a = Random.floatRange(0.0, 6.283185307179586)
+        let s = Random.floatRange(speed * 0.2, speed)
+        let life = Random.floatRange(0.3, 0.9)
+        m.parts.push(Part {
+            x: x,
+            y: y,
+            vx: Math.cos(a) * s,
+            vy: Math.sin(a) * s - 40.0,
+            life: life,
+            maxLife: life,
+            size: Random.floatRange(1.6, 3.6),
+            cr: c.r,
+            cg: c.g,
+            cb: c.b,
+        }
+        )
+    }
+}
+
+pub fn addPop(m: &mut Mine, x: f64, y: f64, t: string, c: &Col) {
+    m.pops.push(Pop {
+        x: x, y: y, life: 1.3, text: t, cr: c.r, cg: c.g, cb: c.b
+    }
+    )
+}
+
+// ── digging ───────────────────────────────────────────────────────────────────
+
+fn collect(m: &mut Mine, t: i64, x: f64, y: f64) {
+    let v = tileValue(t)
+    if v == 0 {
+        return
+    }
+    m.score = m.score + v
+    if t == T_GOLD {
+        m.gold = m.gold + 1
+    } else if t == T_GEM {
+        m.gems = m.gems + 1
+    } else {
+        m.crystals = m.crystals + 1
+    }
+    let col = tileColor(t)
+    burst(m, x, y, 26, 240.0, col)
+    addPop(m, x, y - 10.0, tileName(t) + " +" + v.toString(), col)
+    m.flash = Math.maxF64(m.flash, 0.18)
+    m.shake = Math.maxF64(m.shake, 3.0)
+}
+
+// Advance the drill against whatever tile the player is pushing into. Returns
+// true while a tile is actively being dug, so the renderer can show the bite.
+fn drill(m: &mut Mine, tx: i64, ty: i64, dt: f64): bool {
+    let t = tileAt(m, tx, ty)
+    if t == T_SKY || t == T_BEDROCK {
+        m.digX = 0 - 1
+        m.digProgress = 0.0
+        return false
+    }
+    if tx != m.digX || ty != m.digY {
+        m.digX = tx
+        m.digY = ty
+        m.digProgress = 0.0
+    }
+    m.digProgress = m.digProgress + dt * m.drillRate / tileToughness(t)
+    // crumbs while the bit is turning
+    if Random.range(0, 3) == 0 {
+        let col = tileColor(t)
+        let cx = (tx as f64) * TILE + TILE * 0.5
+        let cy = (ty as f64) * TILE + TILE * 0.5
+        m.parts.push(Part {
+            x: cx + Random.floatRange(0.0 - 10.0, 10.0),
+            y: cy + Random.floatRange(0.0 - 10.0, 10.0),
+            vx: Random.floatRange(0.0 - 40.0, 40.0),
+            vy: Random.floatRange(0.0 - 70.0, 0.0 - 10.0),
+            life: 0.35,
+            maxLife: 0.35,
+            size: 2.0,
+            cr: col.r,
+            cg: col.g,
+            cb: col.b,
+        }
+        )
+    }
+    if m.digProgress >= 1.0 {
+        let cx = (tx as f64) * TILE + TILE * 0.5
+        let cy = (ty as f64) * TILE + TILE * 0.5
+        setTile(m, tx, ty, T_SKY)
+        let col = tileColor(t)
+        burst(m, cx, cy, 14, 170.0, col)
+        collect(m, t, cx, cy)
+        m.digX = 0 - 1
+        m.digProgress = 0.0
+        if ty > m.deepest {
+            m.deepest = ty
+        }
+    }
+    return true
+}
+
+pub fn mineUpdate(m: &mut Mine, dt: f64, inX: f64, inY: f64, viewW: f64, viewH: f64) {
+    m.time = m.time + dt
+    if m.shake > 0.0 {
+        m.shake = m.shake * Math.pow(0.02, dt)
+    }
+    if m.flash > 0.0 {
+        m.flash = m.flash - dt * 1.6
+    }
+    if m.banner > 0.0 {
+        m.banner = m.banner - dt
+    }
+    if m.hint > 0.0 && (inX != 0.0 || inY != 0.0) {
+        m.hint = m.hint - dt
+    }
+
+    if inX != 0.0 || inY != 0.0 {
+        m.faceX = inX
+        m.faceY = inY
+    }
+
+    // Move freely through open ground; push into solid ground and the drill bites.
+    // No gravity and no fall damage — this is a game about choosing where to go.
+    let speed = 190.0
+    var moved = false
+    if inX != 0.0 {
+        let nx = m.px + inX * speed * dt
+        let tx = ((nx + inX * TILE * 0.42) / TILE) as i64
+        let ty = (m.py / TILE) as i64
+        if !isSolid(tileAt(m, tx, ty)) {
+            m.px = nx
+            moved = true
+        } else {
+            let _ = drill(m, tx, ty, dt)
+            moved = true
+        }
+    }
+    if inY != 0.0 {
+        let ny = m.py + inY * speed * dt
+        let tx = (m.px / TILE) as i64
+        let ty = ((ny + inY * TILE * 0.42) / TILE) as i64
+        if !isSolid(tileAt(m, tx, ty)) {
+            m.py = ny
+            moved = true
+        } else {
+            let _ = drill(m, tx, ty, dt)
+            moved = true
+        }
+    }
+    if !moved {
+        m.digX = 0 - 1
+        m.digProgress = 0.0
+    }
+    m.px = Math.clampF64(m.px, TILE, (MAP_W as f64) * TILE - TILE)
+    m.py = Math.clampF64(m.py, TILE * 0.5, (MAP_H as f64) * TILE - TILE)
+
+    // camera eases toward the player and stops at the world edges
+    let wantX = Math.clampF64(m.px - viewW * 0.5, 0.0, (MAP_W as f64) * TILE - viewW)
+    let wantY = Math.clampF64(m.py - viewH * 0.5, 0.0, (MAP_H as f64) * TILE - viewH)
+    m.camX = m.camX + (wantX - m.camX) * Math.minF64(1.0, dt * 4.0)
+    m.camY = m.camY + (wantY - m.camY) * Math.minF64(1.0, dt * 4.0)
+
+    updateParts(m, dt)
+}
+
+fn updateParts(m: &mut Mine, dt: f64) {
+    var i: i64 = 0
+    while i < m.parts.len {
+        m.parts[i].life = m.parts[i].life - dt
+        if m.parts[i].life <= 0.0 {
+            let last = m.parts.len - 1
+            m.parts[i] = m.parts[last]
+            let _ = m.parts.pop()
+        } else {
+            m.parts[i].vy = m.parts[i].vy + 380.0 * dt
+            let d = Math.pow(0.25, dt)
+            m.parts[i].vx = m.parts[i].vx * d
+            m.parts[i].x = m.parts[i].x + m.parts[i].vx * dt
+            m.parts[i].y = m.parts[i].y + m.parts[i].vy * dt
+            i = i + 1
+        }
+    }
+    var p: i64 = 0
+    while p < m.pops.len {
+        m.pops[p].life = m.pops[p].life - dt
+        m.pops[p].y = m.pops[p].y - 26.0 * dt
+        if m.pops[p].life <= 0.0 {
+            let last = m.pops.len - 1
+            m.pops[p] = m.pops[last]
+            let _ = m.pops.pop()
+        } else {
+            p = p + 1
+        }
+    }
+}

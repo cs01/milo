@@ -1,0 +1,130 @@
+// PROSPECT — a digging game written in Milo.
+//
+//   milo build examples/games/dig/main.milo -o /tmp/prospect --release && /tmp/prospect
+//
+//   ARROW KEYS / WASD   dig — hold a direction and the drill bites
+//   ESC                 quit
+//
+// No timer, no enemies, no fail state. You cannot lose; you can only decide how
+// deep to go. Ore glows faintly at the edge of the lamp, which is the whole hook.
+
+from "std/math" import {
+    Math
+}
+from "./sdl" import {
+    SDL_Init, SDL_CreateWindow, SDL_CreateRenderer, SDL_CreateTexture,
+    SDL_UpdateTexture, SDL_RenderClear, SDL_RenderCopy, SDL_RenderPresent,
+    SDL_ShowCursor, SDL_GetTicks, SDL_DestroyWindow, SDL_Quit,
+    SDL_INIT_VIDEO, SDL_WINDOWPOS_CENTERED, SDL_WINDOW_SHOWN,
+    SDL_TEXTUREACCESS_STREAMING, SDL_PIXELFORMAT_ABGR8888,
+    SDL_RENDERER_ACCELERATED, SDL_RENDERER_PRESENTVSYNC,
+    Input, inputNew, pollInput
+}
+from "./gfx" import {
+    Canvas, canvasNew, present, text, textWidth
+}
+from "./world" import {
+    Mine, mineNew, mineUpdate
+}
+from "./render" import {
+    drawMine, drawHud
+}
+from "std/random" import {
+    Random
+}
+
+pub let W: i64 = 1280
+
+pub let H: i64 = 720
+
+pub fn main(): i32 {
+    if SDL_Init(SDL_INIT_VIDEO) != 0 {
+        print("SDL_Init failed")
+        return 1
+    }
+    var win: *u8 = 0 as *u8
+    var ren: *u8 = 0 as *u8
+    var tex: *u8 = 0 as *u8
+    var ok = true
+    unsafe {
+        let title = "PROSPECT — written in Milo"
+        win = SDL_CreateWindow(title, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, W as i32, H as i32, SDL_WINDOW_SHOWN)
+        ren = SDL_CreateRenderer(win, 0 - 1, SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC)
+        tex = SDL_CreateTexture(ren, SDL_PIXELFORMAT_ABGR8888, SDL_TEXTUREACCESS_STREAMING, W as i32, H as i32)
+        if (win as i64) == 0 || (ren as i64) == 0 || (tex as i64) == 0 {
+            ok = false
+        }
+        let _ = SDL_ShowCursor(0)
+    }
+    if !ok {
+        print("SDL setup failed")
+        return 2
+    }
+
+    var c = canvasNew(W, H)
+    var m = mineNew()
+    var inp = inputNew()
+    var ev: [u8; 64] = [0; 64]
+    var last = SDL_GetTicks()
+    var fpsAccum: f64 = 0.0
+    var fpsFrames: i64 = 0
+    var fpsShown: i64 = 0
+
+    while !inp.quit {
+        let now = SDL_GetTicks()
+        var dt = ((now - last) as f64) / 1000.0
+        last = now
+        if dt > 0.05 {
+            dt = 0.05
+        }
+        if dt < 0.0005 {
+            dt = 0.0005
+        }
+        pollInput(inp, ev, 1.0)
+
+        // One axis at a time: diagonal drilling would let you cut corners through
+        // solid ground, and it makes the tunnels messy.
+        var ix = inp.moveX
+        var iy = inp.moveY
+        if ix != 0.0 && iy != 0.0 {
+            iy = 0.0
+        }
+        mineUpdate(m, dt, ix, iy, W as f64, H as f64)
+
+        var ox = 0.0
+        var oy = 0.0
+        if m.shake > 0.2 {
+            ox = Random.floatRange(0.0 - m.shake, m.shake)
+            oy = Random.floatRange(0.0 - m.shake, m.shake)
+        }
+        drawMine(c, m, ox, oy)
+        drawHud(c, m)
+
+        fpsAccum = fpsAccum + dt
+        fpsFrames = fpsFrames + 1
+        if fpsAccum > 0.5 {
+            fpsShown = ((fpsFrames as f64) / fpsAccum) as i64
+            fpsAccum = 0.0
+            fpsFrames = 0
+        }
+        text(c, 24, H - 30, fpsShown.toString() + " FPS", 2, 0.16, 0.20, 0.24)
+        let help = "HOLD A DIRECTION TO DIG    ESC QUITS"
+        text(c, W - 24 - textWidth(help, 2), H - 30, help, 2, 0.16, 0.20, 0.24)
+
+        var exposure = 1.0
+        if m.flash > 0.0 {
+            exposure = 1.0 + m.flash * 1.2
+        }
+        present(c, 0.5, exposure)
+
+        unsafe {
+            SDL_UpdateTexture(tex, 0 as *u8, c.fb[0].addrOf() as *u8, (W * 4) as i32)
+            SDL_RenderClear(ren)
+            SDL_RenderCopy(ren, tex, 0 as *u8, 0 as *u8)
+            SDL_RenderPresent(ren)
+        }
+    }
+    SDL_DestroyWindow(win)
+    SDL_Quit()
+    return 0
+}

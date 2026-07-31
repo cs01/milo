@@ -13,22 +13,54 @@ pub let TEX_SIZE: i64 = 128
 
 pub let TEX_SHIFT: i64 = 7
 
-// Value noise on a torus: sampling a circle in each axis makes the field wrap, so
-// the texture tiles with no seam.
-fn wrapNoise(u: f64, v: f64, freq: f64, seed: f64): f64 {
-    let a = u * 6.283185307179586
-    let b = v * 6.283185307179586
-    var acc = 0.0
-    acc = acc + Math.sin(Math.cos(a) * freq + seed) * Math.cos(Math.sin(b) * freq + seed * 1.7)
-    acc = acc + Math.sin(Math.sin(a) * freq * 1.7 + seed * 2.3) * Math.cos(Math.cos(b) * freq * 1.3 + seed)
-    return acc * 0.25 + 0.5
+// Proper lattice value noise that WRAPS: the integer lattice is taken modulo the
+// period, so octave N tiles exactly and the texture has no seam. The previous
+// version was sin-of-sin, which is smooth mush — it produced an almost uniform
+// field, so the only thing visible on screen was the quad tessellation.
+// Wrapping by declaration: a bit-mixing hash is *supposed* to overflow, and Milo
+// traps on overflow by default. This is the one place in the game where wrapping
+// is the intent rather than a bug.
+@wrapping
+fn hashi(x: i64, y: i64, seed: i64): f64 {
+    var h = x * 374761393 + y * 668265263 + seed * 1442695040
+    h = (h ^ (h >> 13)) * 1274126177
+    h = h ^ (h >> 16)
+    var m = h % 4096
+    if m < 0 {
+        m = 0 - m
+    }
+    return (m as f64) / 4096.0
+}
+
+fn lattice(u: f64, v: f64, period: i64, seed: i64): f64 {
+    let fx = u * (period as f64)
+    let fy = v * (period as f64)
+    let x0 = Math.floor(fx) as i64
+    let y0 = Math.floor(fy) as i64
+    let tx = fx - (x0 as f64)
+    let ty = fy - (y0 as f64)
+    let sx = tx * tx * (3.0 - 2.0 * tx)
+    let sy = ty * ty * (3.0 - 2.0 * ty)
+    let xa = ((x0 % period) + period) % period
+    let ya = ((y0 % period) + period) % period
+    let xb = (xa + 1) % period
+    let yb = (ya + 1) % period
+    let n00 = hashi(xa, ya, seed)
+    let n10 = hashi(xb, ya, seed)
+    let n01 = hashi(xa, yb, seed)
+    let n11 = hashi(xb, yb, seed)
+    let a = n00 + (n10 - n00) * sx
+    let b = n01 + (n11 - n01) * sx
+    return a + (b - a) * sy
 }
 
 fn fbm(u: f64, v: f64, seed: f64): f64 {
+    let sd = seed as i64
     var t = 0.0
-    t = t + wrapNoise(u, v, 3.0, seed) * 0.55
-    t = t + wrapNoise(u, v, 7.0, seed + 11.0) * 0.28
-    t = t + wrapNoise(u, v, 15.0, seed + 23.0) * 0.17
+    t = t + lattice(u, v, 4, sd) * 0.42
+    t = t + lattice(u, v, 8, sd + 7) * 0.26
+    t = t + lattice(u, v, 16, sd + 19) * 0.18
+    t = t + lattice(u, v, 32, sd + 41) * 0.14
     return t
 }
 
@@ -41,18 +73,20 @@ pub fn groundTexture(): Texture {
         for x in 0..TEX_SIZE {
             let u = (x as f64) / (TEX_SIZE as f64)
             let v = (y as f64) / (TEX_SIZE as f64)
-            let n = fbm(u, v, 1.0)
-            // speckle: a sparse scatter of darker and lighter grains
-            let g = Math.sin((x as f64) * 12.9898 + (y as f64) * 78.233) * 43758.5453
-            let grain = g - Math.floor(g)
-            var k = 0.80 + n * 0.42
-            if grain > 0.965 {
-                k = k * 1.22
-            } else if grain < 0.035 {
-                k = k * 0.78
+            // Clumps at two scales plus a hard speckle. Contrast is deliberately
+            // strong — this multiplies the terrain colour, and a subtle multiplier
+            // is indistinguishable from no texture at all.
+            let clump = fbm(u, v, 1.0)
+            let fine = lattice(u, v, 64, 91)
+            var k = 0.58 + clump * 0.78 + fine * 0.18
+            let grain = hashi(x, y, 5)
+            if grain > 0.92 {
+                k = k * 1.30
+            } else if grain < 0.10 {
+                k = k * 0.72
             }
-            // a faint warm/cool tilt so the mottling is not pure luminance
-            texSet(t, x, y, k * 1.02, k, k * 0.97)
+            // slight warm/cool tilt so the mottling is not pure luminance
+            texSet(t, x, y, k * 1.04, k, k * 0.94)
         }
     }
     return t

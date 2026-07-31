@@ -361,13 +361,20 @@ pub fn drawWorld(c: &mut Canvas, s: &mut Scene, w: &World, ground: &Texture, ski
 
             // UVs are world position over a fixed period, so the detail texture
             // tiles across the terrain with no per-quad seams.
-            let uvs = 1.0 / 130.0
+            let uvs = 1.0 / 34.0
             let u0 = x0 * uvs
             let v0 = z0 * uvs
             let u1 = x1 * uvs
             let v1 = z1 * uvs
-            triangleTex(c, s, v, ground, x0, h00, z0, u0, v0, x0, h01, z1, u0, v1, x1, h10, z0, u1, v0, r, g, b)
-            triangleTex(c, s, v, ground, x1, h10, z0, u1, v0, x0, h01, z1, u0, v1, x1, h11, z1, u1, v1, r, g, b)
+            // Texture only what is close enough to see. Distant quads are many,
+            // small, and deep in fog — they take the cheap flat path.
+            if ring < 11 {
+                triangleTex(c, s, v, ground, x0, h00, z0, u0, v0, x0, h01, z1, u0, v1, x1, h10, z0, u1, v0, r, g, b)
+                triangleTex(c, s, v, ground, x1, h10, z0, u1, v0, x0, h01, z1, u0, v1, x1, h11, z1, u1, v1, r, g, b)
+            } else {
+                triangle(c, s, v, x0, h00, z0, x0, h01, z1, x1, h10, z0, r, g, b)
+                triangle(c, s, v, x1, h10, z0, x0, h01, z1, x1, h11, z1, r, g, b)
+            }
         }
     }
 
@@ -456,7 +463,11 @@ fn drawProps(c: &mut Canvas, s: &mut Scene, w: &World, v: &View, baseX: i64, bas
             } else {
                 // palm: bare trunk, splayed fronds
                 box3(c, s, v, x, g0, g0 + 15.0 * scale, z, 1.2, 0.26, 0.18, 0.09)
-                cone3(c, s, v, x, g0 + 20.0 * scale, g0 + 13.0 * scale, z, 9.0 * scale, 0.10, 0.32, 0.12)
+                // A palm canopy droops: the apex sits just above the trunk and the
+                // rim spreads out BELOW it. Apex-up gives a fir; rim-up gives a
+                // funnel. Both were wrong.
+                cone3(c, s, v, x, g0 + 13.0 * scale, g0 + 18.0 * scale, z, 10.0 * scale, 0.11, 0.34, 0.13)
+                cone3(c, s, v, x, g0 + 16.5 * scale, g0 + 19.5 * scale, z, 6.0 * scale, 0.13, 0.38, 0.15)
             }
         }
     }
@@ -651,6 +662,12 @@ fn drawPlane(c: &mut Canvas, s: &mut Scene, w: &World, v: &View, skin: &Texture)
     quadT(c, s, v, skin, px, py, pz, 6, 17, 13, 15, 0.12, 0.45, 0.95, 0.45, 0.95, 0.12, 0.12, 0.12, 0.60, 0.62, 0.70)
     quadT(c, s, v, skin, px, py, pz, 16, 8, 18, 14, 0.12, 0.55, 0.12, 0.88, 0.95, 0.88, 0.95, 0.55, 1.00, 1.02, 1.06)
     quadT(c, s, v, skin, px, py, pz, 14, 18, 8, 16, 0.95, 0.55, 0.95, 0.88, 0.12, 0.88, 0.12, 0.55, 0.60, 0.62, 0.70)
+    // close the wing tip edges so the aerofoil is not a hollow sheet
+    triT(c, s, v, skin, px, py, pz, 13, 17, 6, 0.95, 0.12, 0.95, 0.45, 0.12, 0.45, 0.70, 0.72, 0.78)
+    triT(c, s, v, skin, px, py, pz, 6, 17, 13, 0.12, 0.45, 0.95, 0.45, 0.95, 0.12, 0.70, 0.72, 0.78)
+    triT(c, s, v, skin, px, py, pz, 14, 8, 18, 0.95, 0.55, 0.12, 0.55, 0.95, 0.88, 0.70, 0.72, 0.78)
+    triT(c, s, v, skin, px, py, pz, 18, 8, 14, 0.95, 0.88, 0.12, 0.55, 0.95, 0.55, 0.70, 0.72, 0.78)
+
     // tailplanes
     triT(c, s, v, skin, px, py, pz, 10, 21, 9, 0.20, 0.20, 0.95, 0.20, 0.20, 0.45, 0.92, 0.94, 0.98)
     triT(c, s, v, skin, px, py, pz, 9, 21, 10, 0.20, 0.45, 0.95, 0.20, 0.20, 0.20, 0.58, 0.60, 0.66)
@@ -667,6 +684,32 @@ fn drawPlane(c: &mut Canvas, s: &mut Scene, w: &World, v: &View, skin: &Texture)
     triT(c, s, v, skin, px, py, pz, 23, 5, 2, 0.5, 0.45, 0.5, 0.60, 0.9, 0.40, 0.18, 0.34, 0.50)
     triT(c, s, v, skin, px, py, pz, 23, 4, 5, 0.5, 0.45, 0.1, 0.40, 0.5, 0.60, 0.20, 0.38, 0.54)
 
+    // Cap the tail ring. Without this you look straight down the inside of the
+    // fuselage from behind — the rings were built but never closed.
+    quadT(c, s, v, skin, px, py, pz, 12, 11, 10, 9, 0.10, 0.10, 0.10, 0.30, 0.30, 0.30, 0.30, 0.10, 0.26, 0.27, 0.30)
+    // recessed engine bay ring inside the cap
+    let bayF = 0.0 - 19.0
+    for k in 0..2 {
+        var off2 = 4.0
+        if k == 1 {
+            off2 = 0.0 - 4.0
+        }
+        var qx: Vec<f64> = Vec.new()
+        var qy: Vec<f64> = Vec.new()
+        var qz: Vec<f64> = Vec.new()
+        let segs2 = 8
+        let stepA = 6.283185307179586 / (segs2 as f64)
+        for j in 0..segs2 {
+            let a0 = (j as f64) * stepA
+            addPt(qx, qy, qz, w, fx, fy, fz, rx, ry, rz, ux, uy, uz, bayF, off2 + Math.cos(a0) * 3.0, Math.sin(a0) * 3.0)
+        }
+        addPt(qx, qy, qz, w, fx, fy, fz, rx, ry, rz, ux, uy, uz, bayF - 3.0, off2, 0.0)
+        for j in 0..segs2 {
+            let j2 = (j + 1) % segs2
+            triangle(c, s, v, qx[j], qy[j], qz[j], qx[segs2], qy[segs2], qz[segs2], qx[j2], qy[j2], qz[j2], 0.14, 0.10, 0.09)
+        }
+    }
+
     // twin nozzles, glowing with throttle
     let k = (w.plane.speed - 170.0) / 170.0
     for side in 0..2 {
@@ -682,8 +725,9 @@ fn drawPlane(c: &mut Canvas, s: &mut Scene, w: &World, v: &View, skin: &Texture)
             let sx = v.cx + ep.x * v.scale / ep.z
             let sy2 = v.cy - ep.y * v.scale / ep.z
             let px2 = Math.clampF64(v.scale * 3.2 / ep.z, 2.0, 26.0)
-            spot(c, sx, sy2, px2 * (1.4 + k), 0.9 + k * 1.2, 0.32 + k * 0.5, 0.10)
-            spot(c, sx, sy2, px2 * 0.55, 1.8 + k, 1.2 + k, 0.7)
+            let ab = w.boostBlend
+            spot(c, sx, sy2, px2 * (1.4 + k + ab * 3.4), 0.9 + k * 1.2 + ab * 1.6, 0.32 + k * 0.5 + ab * 0.5, 0.10)
+            spot(c, sx, sy2, px2 * (0.55 + ab * 1.1), 1.8 + k + ab * 1.5, 1.2 + k + ab, 0.7 + ab * 0.6)
         }
     }
 }
@@ -778,6 +822,38 @@ pub fn drawGuide(c: &mut Canvas, w: &World, _s: &Scene) {
     line(c, ax - px2 * 12.0, ay - py2 * 12.0, ax + px2 * 12.0, ay + py2 * 12.0, 0.4 * pulse, 1.0 * pulse, 0.5 * pulse)
 }
 
+// Speed lines: short streaks flying outward from the centre of the screen. The
+// single most legible "you are going fast" cue there is, and it costs nothing.
+pub fn drawSpeedLines(c: &mut Canvas, w: &World) {
+    if w.boostBlend < 0.02 {
+        return
+    }
+    let k = w.boostBlend
+    let cx = (c.w as f64) * 0.5
+    let cy = (c.h as f64) * 0.5
+    let n = (46.0 * k) as i64
+    for i in 0..n {
+        let fi = i as f64
+        // each streak keeps a stable angle and radius, animated outward by time
+        let a = fi * 2.399963
+        let phase = Math.mod(w.time * (1.6 + Math.mod(fi, 5.0) * 0.35) + fi * 0.137, 1.0)
+        let r0 = 90.0 + phase * 760.0
+        let len = (26.0 + phase * 150.0) * k
+        let dx = Math.cos(a)
+        let dy = Math.sin(a)
+        // fade in from the centre, out at the edge
+        var f = phase * 2.4
+        if f > 1.0 {
+            f = 1.0 - (phase - 0.42) * 1.2
+        }
+        if f < 0.0 {
+            continue
+        }
+        let b = f * k * 0.5
+        line(c, cx + dx * r0, cy + dy * r0, cx + dx * (r0 + len), cy + dy * (r0 + len), b * 0.8, b * 0.9, b)
+    }
+}
+
 pub fn drawHud(c: &mut Canvas, w: &World, s: &Scene, fps: i64) {
     text(c, 24, 22, "SCORE " + w.score.toString(), 3, 0.95, 0.80, 0.30)
     let alt = ((w.plane.y - heightAt(w.plane.x, w.plane.z)) as i64)
@@ -786,14 +862,21 @@ pub fn drawHud(c: &mut Canvas, w: &World, s: &Scene, fps: i64) {
     let bx = 24.0
     let by = (c.h as f64) - 92.0
     fillRect(c, bx, by, bx + 220.0, by + 9.0, 0.05, 0.05, 0.06)
-    var brr = 0.9
-    var bgg = 0.45
-    if w.afterburner > 0.35 {
-        brr = 0.35
-        bgg = 0.85
+    var brr = 0.35
+    var bgg = 0.85
+    var label = "AFTERBURNER"
+    if w.abLocked {
+        // recharging: red, and named as such, so the lockout is not a mystery
+        let pulse = 0.6 + 0.4 * Math.sin(w.time * 7.0)
+        brr = 0.95 * pulse
+        bgg = 0.30 * pulse
+        label = "RECHARGING"
+    } else if w.afterburner < 0.35 {
+        brr = 0.9
+        bgg = 0.45
     }
     fillRect(c, bx, by, bx + 220.0 * w.afterburner, by + 9.0, brr, bgg, 0.25)
-    text(c, 24, (by as i64) - 22, "AFTERBURNER", 2, 0.30, 0.32, 0.34)
+    text(c, 24, (by as i64) - 22, label, 2, brr * 0.5 + 0.15, bgg * 0.5 + 0.15, 0.34)
 
     let ts = "TRIS " + s.tris.toString() + "   " + fps.toString() + " FPS"
     text(c, c.w - 24 - textWidth(ts, 2), 22, ts, 2, 0.28, 0.36, 0.44)

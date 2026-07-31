@@ -72,6 +72,8 @@ pub struct World {
     trailTick: f64,
     boosting: bool,
     afterburner: f64, // 0..1, drains while boosting and refills when you let off
+    boostBlend: f64, // eased 0..1, drives every visual speed cue
+    abLocked: bool, // true from the moment it empties until it is full again
     theme: i64,
     prevTheme: i64,
     themeMix: f64, // 1 → fully the previous region, 0 → fully the new one
@@ -142,6 +144,8 @@ pub fn worldNew(): World {
         trailTick: 0.0,
         boosting: false,
         afterburner: 1.0,
+        boostBlend: 0.0,
+        abLocked: false,
         theme: 0,
         prevTheme: 0,
         themeMix: 0.0,
@@ -239,24 +243,36 @@ pub fn worldUpdate(w: &mut World, dt: f64, inRoll: f64, inPitch: f64, boost: boo
     // was static before — nothing was driving it but the boost key.
     // Afterburner is a budget, not a switch: it drains in about four seconds and
     // takes eight to come back, so a boost is a decision rather than a held key.
+    // Run it dry and it locks out until it is FULL again — otherwise you can
+    // stutter the key and hold a permanent part-boost.
     var burning = false
-    if boost && w.afterburner > 0.0 {
+    if boost && !w.abLocked && w.afterburner > 0.0 {
         burning = true
         w.afterburner = w.afterburner - dt * 0.25
-        if w.afterburner < 0.0 {
+        if w.afterburner <= 0.0 {
             w.afterburner = 0.0
+            w.abLocked = true
         }
     } else {
         w.afterburner = Math.minF64(1.0, w.afterburner + dt * 0.125)
+        if w.afterburner >= 1.0 {
+            w.abLocked = false
+        }
     }
     w.boosting = burning
+    // Every speed cue rides this one eased value, so they all arrive together.
+    var bt = 0.0
+    if burning {
+        bt = 1.0
+    }
+    w.boostBlend = w.boostBlend + (bt - w.boostBlend) * Math.minF64(1.0, dt * 5.0)
     var target = 175.0
     if burning {
         target = 320.0
     }
     w.plane.speed = w.plane.speed + (target - w.plane.speed) * Math.minF64(1.0, dt * 0.9)
-    w.plane.speed = w.plane.speed - Math.sin(w.plane.pitch) * 190.0 * dt
-    w.plane.speed = Math.clampF64(w.plane.speed, 95.0, 430.0)
+    w.plane.speed = w.plane.speed - Math.sin(w.plane.pitch) * 140.0 * dt
+    w.plane.speed = Math.clampF64(w.plane.speed, 130.0, 430.0)
 
     let cp = Math.cos(w.plane.pitch)
     w.plane.x = w.plane.x + Math.sin(w.plane.yaw) * cp * w.plane.speed * dt
@@ -277,11 +293,13 @@ pub fn worldUpdate(w: &mut World, dt: f64, inRoll: f64, inPitch: f64, boost: boo
     }
 
     // chase camera, trailing and slightly above
-    let backX = 0.0 - Math.sin(w.plane.yaw) * 58.0
-    let backZ = 0.0 - Math.cos(w.plane.yaw) * 58.0
+    let back = 58.0 + w.boostBlend * 22.0
+    let backX = 0.0 - Math.sin(w.plane.yaw) * back
+    let backZ = 0.0 - Math.cos(w.plane.yaw) * back
     w.cam.x = w.cam.x + (w.plane.x + backX - w.cam.x) * Math.minF64(1.0, dt * 6.0)
     w.cam.y = w.cam.y + (w.plane.y + 20.0 - w.cam.y) * Math.minF64(1.0, dt * 6.0)
     w.cam.z = w.cam.z + (w.plane.z + backZ - w.cam.z) * Math.minF64(1.0, dt * 6.0)
+    w.cam.fov = 1.15 + w.boostBlend * 0.30
     w.cam.yaw = w.plane.yaw
     w.cam.pitch = w.plane.pitch * 0.55 - 0.06
     w.cam.roll = w.cam.roll + (w.plane.roll * 0.5 - w.cam.roll) * Math.minF64(1.0, dt * 5.0)

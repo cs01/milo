@@ -38,7 +38,7 @@ from "./world3d" import {
     World, worldNew, worldUpdate
 }
 from "./render3d" import {
-    drawWorld, drawHud, drawGuide
+    drawWorld, drawHud, drawGuide, drawSpeedLines
 }
 
 pub let W: i64 = 1280
@@ -103,6 +103,7 @@ pub fn main(): i32 {
             fpsAccum = 0.0
             fpsFrames = 0
         }
+        drawSpeedLines(c, w)
         drawGuide(c, w, s)
         drawHud(c, w, s, fpsShown)
 

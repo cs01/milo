@@ -66,6 +66,19 @@ pub struct Part {
     cb: f64,
 }
 
+// A nugget in flight between the seam it came out of and the satchel. It drifts
+// out first, hangs for a beat, then homes in and accelerates — the counter only
+// ticks when it actually lands, which is what makes collecting feel like collecting.
+pub struct Fly {
+    x: f64,
+    y: f64,
+    vx: f64,
+    vy: f64,
+    age: f64,
+    kind: i64,
+    value: i64,
+}
+
 // A value that floats up from where something was collected.
 pub struct Pop {
     x: f64,
@@ -99,6 +112,9 @@ pub struct Mine {
     lampRadius: f64,
     parts: Vec<Part>,
     pops: Vec<Pop>,
+    flies: Vec<Fly>,
+    satchelPulse: f64,
+    goldPulse: f64,
     shake: f64,
     flash: f64,
     time: f64,
@@ -219,11 +235,11 @@ fn generate(m: &mut Mine) {
             m.tiles[y * MAP_W + x] = t as u8
         }
     }
-    // An open mouth to start in, so the first move is obvious.
-    for y in SURFACE..SURFACE + 2 {
-        for x in 2..7 {
-            m.tiles[y * MAP_W + x] = T_SKY as u8
-        }
+    // A narrow shaft head to start in, rather than a wide pit — a 5x2 hole read
+    // as a bathtub with the dog sitting in it.
+    for y in SURFACE..SURFACE + 5 {
+        m.tiles[y * MAP_W + 4] = T_SKY as u8
+        m.tiles[y * MAP_W + 5] = T_SKY as u8
     }
     // The way out: a bedrock-cased shaft down the right-hand edge with a gate
     // across it. The gate glows from anywhere on the map, so "head east" always
@@ -245,8 +261,8 @@ pub fn mineNew(): Mine {
         digX: 0 - 1,
         digY: 0 - 1,
         digProgress: 0.0,
-        px: 4.0 * TILE + TILE * 0.5,
-        py: (SURFACE as f64) * TILE + TILE * 0.5,
+        px: 5.0 * TILE,
+        py: (SURFACE as f64) * TILE - TILE * 0.5,
         faceX: 1.0,
         faceY: 0.0,
         camX: 0.0,
@@ -260,6 +276,9 @@ pub fn mineNew(): Mine {
         lampRadius: 190.0,
         parts: Vec.new(),
         pops: Vec.new(),
+        flies: Vec.new(),
+        satchelPulse: 0.0,
+        goldPulse: 0.0,
         shake: 0.0,
         flash: 0.0,
         time: 0.0,
@@ -288,13 +307,14 @@ pub fn nextLevel(m: &mut Mine) {
     m.exitOpen = false
     m.wideDig = false
     m.banner = 2.6
-    m.px = 4.0 * TILE + TILE * 0.5
-    m.py = (SURFACE as f64) * TILE + TILE * 0.5
+    m.px = 5.0 * TILE
+    m.py = (SURFACE as f64) * TILE - TILE * 0.5
     m.camX = 0.0
     m.camY = 0.0
     m.deepest = SURFACE
     m.digX = 0 - 1
     m.digProgress = 0.0
+    m.flies.clear()
     generate(m)
 }
 
@@ -494,28 +514,112 @@ fn collect(m: &mut Mine, t: i64, x: f64, y: f64) {
     if v == 0 {
         return
     }
-    m.score = m.score + v
-    m.levelValue = m.levelValue + v
+    let col = tileColor(t)
+    burst(m, x, y, 22, 240.0, col)
+    m.flash = Math.maxF64(m.flash, 0.14)
+    m.shake = Math.maxF64(m.shake, 2.5)
+    // Split the tile's worth across a handful of nuggets, so a gold seam sprays
+    // and a crystal pours. Nothing is banked here — that happens on arrival.
+    var n = 3
+    if v >= 120 {
+        n = 5
+    }
+    if v >= 500 {
+        n = 9
+    }
+    let each = v / n
+    for i in 0..n {
+        let a = Random.floatRange(0.0, 6.283185307179586)
+        let sp = Random.floatRange(60.0, 180.0)
+        m.flies.push(Fly {
+            x: x,
+            y: y,
+            vx: Math.cos(a) * sp,
+            vy: Math.sin(a) * sp - 60.0,
+            age: 0.0 - Random.floatRange(0.0, 0.08),
+            kind: t,
+            value: each,
+        }
+        )
+    }
+}
+
+// Where the satchel rides on the digger.
+pub fn satchelX(m: &Mine): f64 {
+    return m.px - m.faceX * 9.0
+}
+
+pub fn satchelY(m: &Mine): f64 {
+    return m.py + 7.0
+}
+
+fn bank(m: &mut Mine, kind: i64, value: i64) {
+    m.score = m.score + value
+    m.levelValue = m.levelValue + value
+    m.satchelPulse = 0.30
+    m.goldPulse = 0.30
+    if kind == T_GOLD {
+        m.gold = m.gold + 1
+    } else if kind == T_GEM {
+        m.gems = m.gems + 1
+    } else if kind == T_CRYSTAL {
+        m.crystals = m.crystals + 1
+    }
     if m.levelValue >= m.quota && !m.exitOpen {
         m.exitOpen = true
-        m.flash = 0.7
-        addPop(m, x, y - 30.0, "THE WAY OUT IS OPEN", Col {
+        m.flash = 0.8
+        addPop(m, m.px, m.py - 34.0, "THE WAY OUT IS OPEN", Col {
             r: 0.4, g: 1.4, b: 0.6
         }
         )
     }
-    if t == T_GOLD {
-        m.gold = m.gold + 1
-    } else if t == T_GEM {
-        m.gems = m.gems + 1
-    } else {
-        m.crystals = m.crystals + 1
+}
+
+// Nuggets scatter out of the seam, hang for a beat, then home in on the satchel
+// with an acceleration that keeps rising. The counter ticks when one lands.
+fn updateFlies(m: &mut Mine, dt: f64) {
+    let tx = satchelX(m)
+    let ty = satchelY(m)
+    var i: i64 = 0
+    while i < m.flies.len {
+        m.flies[i].age = m.flies[i].age + dt
+        if m.flies[i].age < 0.0 {
+            i = i + 1
+            continue
+        }
+        if m.flies[i].age < 0.22 {
+            let d = Math.pow(0.02, dt)
+            m.flies[i].vx = m.flies[i].vx * d
+            m.flies[i].vy = m.flies[i].vy * d + 260.0 * dt
+        } else {
+            let dx = tx - m.flies[i].x
+            let dy = ty - m.flies[i].y
+            let dist = Math.sqrt(dx * dx + dy * dy) + 0.001
+            let pull = 1500.0 + (m.flies[i].age - 0.22) * 5200.0
+            m.flies[i].vx = m.flies[i].vx + dx / dist * pull * dt
+            m.flies[i].vy = m.flies[i].vy + dy / dist * pull * dt
+            let damp = Math.pow(0.18, dt)
+            m.flies[i].vx = m.flies[i].vx * damp
+            m.flies[i].vy = m.flies[i].vy * damp
+        }
+        m.flies[i].x = m.flies[i].x + m.flies[i].vx * dt
+        m.flies[i].y = m.flies[i].y + m.flies[i].vy * dt
+
+        let dx2 = tx - m.flies[i].x
+        let dy2 = ty - m.flies[i].y
+        if dx2 * dx2 + dy2 * dy2 < 100.0 && m.flies[i].age > 0.22 {
+            let col = tileColor(m.flies[i].kind)
+            let k = m.flies[i].kind
+            let v2 = m.flies[i].value
+            let last = m.flies.len - 1
+            m.flies[i] = m.flies[last]
+            let _ = m.flies.pop()
+            bank(m, k, v2)
+            burst(m, tx, ty, 4, 90.0, col)
+        } else {
+            i = i + 1
+        }
     }
-    let col = tileColor(t)
-    burst(m, x, y, 26, 240.0, col)
-    addPop(m, x, y - 10.0, tileName(t) + " +" + v.toString(), col)
-    m.flash = Math.maxF64(m.flash, 0.18)
-    m.shake = Math.maxF64(m.shake, 3.0)
 }
 
 fn breakTile(m: &mut Mine, tx: i64, ty: i64, t: i64) {
@@ -699,6 +803,13 @@ pub fn mineUpdate(m: &mut Mine, dt: f64, inX: f64, inY: f64, viewW: f64, viewH: 
     m.camY = m.camY + (wantY - m.camY) * Math.minF64(1.0, dt * 4.0)
 
     updateParts(m, dt)
+    updateFlies(m, dt)
+    if m.satchelPulse > 0.0 {
+        m.satchelPulse = m.satchelPulse - dt
+    }
+    if m.goldPulse > 0.0 {
+        m.goldPulse = m.goldPulse - dt
+    }
 }
 
 fn updateParts(m: &mut Mine, dt: f64) {

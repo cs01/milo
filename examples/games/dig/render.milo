@@ -12,6 +12,7 @@ from "./mascot" import {
     Sprite, spriteMilo
 }
 from "./world" import {
+    satchelX, satchelY,
     Mine, Col, TILE, MAP_W, MAP_H, SURFACE, tileAt, tileColor, isSolid,
     T_SKY, T_GOLD, T_GEM, T_CRYSTAL, T_BEDROCK, T_WATER, T_GATE, isUpgrade
 }
@@ -75,13 +76,11 @@ fn drawSurface(c: &mut Canvas, m: &Mine, camX: f64, camY: f64) {
     setRect(c, treeX - 22.0, ty0 - 204.0, treeX + 26.0, ty0 - 180.0, 0.07, 0.38, 0.10)
     setRect(c, treeX - 62.0, ty0 - 116.0, treeX - 30.0, ty0 - 104.0, 0.04, 0.26, 0.07)
     setRect(c, treeX + 30.0, ty0 - 118.0, treeX + 62.0, ty0 - 104.0, 0.04, 0.26, 0.07)
-    // A low spoil heap either side of the shaft mouth, so the entrance reads as a
-    // dig rather than a hole. No headframe and no second Milo — you ARE the dog.
-    let mx = 4.5 * TILE - camX
-    setRect(c, mx - 46.0, ty0 - 7.0, mx - 18.0, ty0, 0.16, 0.10, 0.05)
-    setRect(c, mx - 38.0, ty0 - 12.0, mx - 26.0, ty0 - 7.0, 0.18, 0.11, 0.05)
-    setRect(c, mx + 18.0, ty0 - 7.0, mx + 46.0, ty0, 0.16, 0.10, 0.05)
-    setRect(c, mx + 26.0, ty0 - 12.0, mx + 38.0, ty0 - 7.0, 0.18, 0.11, 0.05)
+    // Two low spoil heaps flanking the shaft head. Small, so the entrance reads
+    // as a dig rather than a sunken box.
+    let mx = 5.0 * TILE - camX
+    setRect(c, mx - 34.0, ty0 - 5.0, mx - 20.0, ty0, 0.16, 0.10, 0.05)
+    setRect(c, mx + 20.0, ty0 - 5.0, mx + 34.0, ty0, 0.16, 0.10, 0.05)
 }
 
 // Blit a palette-indexed sprite, scaled, with 0 as transparent.
@@ -287,6 +286,29 @@ pub fn drawMine(c: &mut Canvas, m: &Mine, ox: f64, oy: f64) {
     // headlamp beam pointing the way
     spot(c, px + m.faceX * 26.0, py + m.faceY * 26.0, 22.0, 0.22, 0.18, 0.08)
 
+    // the satchel, which swells for a moment each time something lands in it
+    let stx = satchelX(m) - camX
+    let sty = satchelY(m) - camY
+    var sw = 6.0
+    if m.satchelPulse > 0.0 {
+        sw = 6.0 + m.satchelPulse * 14.0
+        spot(c, stx, sty, sw * 2.0, 0.6, 0.45, 0.12)
+    }
+    setRect(c, stx - sw, sty - sw * 0.75, stx + sw, sty + sw * 0.75, 0.30, 0.17, 0.07)
+    setRect(c, stx - sw, sty - sw * 0.75, stx + sw, sty - sw * 0.4, 0.40, 0.24, 0.10)
+
+    // nuggets in flight
+    for i in 0..m.flies.len {
+        if m.flies[i].age < 0.0 {
+            continue
+        }
+        let col = tileColor(m.flies[i].kind)
+        let fx = m.flies[i].x - camX
+        let fy = m.flies[i].y - camY
+        spot(c, fx, fy, 6.0, col.r * 0.30, col.g * 0.30, col.b * 0.30)
+        spot(c, fx, fy, 2.6, col.r * 1.2, col.g * 1.2, col.b * 1.2)
+    }
+
     // floating labels
     for i in 0..m.pops.len {
         let f = Math.minF64(1.0, m.pops[i].life)
@@ -295,7 +317,13 @@ pub fn drawMine(c: &mut Canvas, m: &Mine, ox: f64, oy: f64) {
 }
 
 pub fn drawHud(c: &mut Canvas, m: &Mine) {
-    text(c, 24, 22, "VALUE " + m.score.toString(), 3, 0.85, 0.70, 0.22)
+    var vs = 3
+    var vb = 1.0
+    if m.goldPulse > 0.0 {
+        vs = 4
+        vb = 1.0 + m.goldPulse * 2.4
+    }
+    text(c, 24, 22, "VALUE " + m.score.toString(), vs, 0.85 * vb, 0.70 * vb, 0.22 * vb)
     let g = "GOLD " + m.gold.toString() + "   EMERALD " + m.gems.toString() + "   CRYSTAL " + m.crystals.toString()
     text(c, 24, 58, g, 2, 0.30, 0.30, 0.34)
     let d = "DEPTH " + (m.deepest - SURFACE).toString() + " M"

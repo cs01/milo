@@ -53,6 +53,20 @@ pub struct Spark {
     cb: f64,
 }
 
+// A flock of birds crossing the course. Kept as world state rather than hashed
+// off position like the clouds and trees: birds are an EVENT — they arrive, pass
+// and leave — and an event needs a lifetime, which a stateless hash cannot have.
+pub struct Flock {
+    x: f64,
+    y: f64,
+    z: f64,
+    vx: f64,
+    vz: f64,
+    n: i64,
+    seed: f64,
+    life: f64,
+}
+
 pub struct Plane {
     x: f64,
     y: f64,
@@ -68,6 +82,8 @@ pub struct World {
     cam: Camera,
     rings: Vec<Ring>,
     sparks: Vec<Spark>,
+    flocks: Vec<Flock>,
+    flockTimer: f64,
     trailL: Vec<Trail>,
     trailR: Vec<Trail>,
     trailTick: f64,
@@ -96,14 +112,21 @@ pub struct World {
     trailX: f64,
     trailZ: f64,
     score: i64,
+    // The streak only ever grows by flying through a hoop, and only ever resets
+    // by missing one. It used to also expire on a hidden 6s timer, which made it
+    // read as random — the number you are playing for must never move for a
+    // reason the screen did not show you.
     combo: i64,
-    comboTimer: f64,
+    comboPop: f64, // 1 → a ring was just cleared, decays; drives the HUD punch
+    gain: i64, // points from the last ring, shown as a flyup
+    gainPop: f64,
     best: i64,
     time: f64,
     flash: f64,
     shake: f64,
     banner: f64,
     hint: f64,
+    offCourse: f64, // 0 on the course line, 1 at the corridor wall
 }
 
 // Smooth value noise — the same hash-based field the mining game uses, so the
@@ -149,6 +172,8 @@ pub fn worldNew(): World {
         ,
         rings: Vec.new(),
         sparks: Vec.new(),
+        flocks: Vec.new(),
+        flockTimer: 6.0,
         trailL: Vec.new(),
         trailR: Vec.new(),
         trailTick: 0.0,
@@ -174,13 +199,16 @@ pub fn worldNew(): World {
         trailZ: 0.0,
         score: 0,
         combo: 0,
-        comboTimer: 0.0,
+        comboPop: 0.0,
+        gain: 0,
+        gainPop: 0.0,
         best: 0,
         time: 0.0,
         flash: 0.0,
         shake: 0.0,
         banner: 3.0,
         hint: 8.0,
+        offCourse: 0.0,
     }
     w.plane.y = heightAt(0.0, 0.0) + 150.0
     for i in 0..10 {
@@ -224,6 +252,75 @@ pub fn layRing(w: &mut World) {
     )
 }
 
+// Keeps the aircraft on the course. The world is infinite procedural terrain, so
+// flying off the route is not a fail state — it is just nothing, forever, and a
+// player who wanders has no way to tell they have left. Two layers, both scaled
+// so that flying the rings never touches either:
+//   - a turn assist that starts at the corridor edge and ramps in, banking you
+//     back toward the course rather than snatching the controls
+//   - a hard wall well outside it, which slides you along instead of stopping
+// Both are measured to the nearest live ring. Consecutive rings are 300 apart, so
+// a player exactly on the line is never more than ~150 out — well inside SOFT.
+fn corridor(w: &mut World, dt: f64) {
+    let SOFT = 420.0
+    let HARD = 950.0
+    var bi = 0 - 1
+    var bd = 1.0e18
+    for i in 0..w.rings.len {
+        if w.rings[i].alive {
+            let rx = w.rings[i].x - w.plane.x
+            let rz = w.rings[i].z - w.plane.z
+            let d2 = rx * rx + rz * rz
+            if d2 < bd {
+                bd = d2
+                bi = i
+            }
+        }
+    }
+    if bi < 0 {
+        w.offCourse = 0.0
+        return
+    }
+    let cx = w.rings[bi].x
+    let cz = w.rings[bi].z
+    let dx = w.plane.x - cx
+    let dz = w.plane.z - cz
+    let d = Math.sqrt(dx * dx + dz * dz)
+    var k = (d - SOFT) / (HARD - SOFT)
+    if k < 0.0 {
+        k = 0.0
+    }
+    if k > 1.0 {
+        k = 1.0
+    }
+    w.offCourse = k
+    if k <= 0.0 {
+        return
+    }
+    // shortest signed turn back toward the course
+    let want = Math.atan2(cx - w.plane.x, cz - w.plane.z)
+    var diff = want - w.plane.yaw
+    while diff > 3.14159265358979 {
+        diff = diff - 6.28318530717959
+    }
+    while diff < 0.0 - 3.14159265358979 {
+        diff = diff + 6.28318530717959
+    }
+    // Quadratic, so the first touch of the corridor is barely perceptible and it
+    // only becomes a real force once you are clearly leaving.
+    let assist = k * k
+    w.plane.yaw = w.plane.yaw + diff * assist * 1.5 * dt
+    // bank into the correction, so the assist is visible as flying rather than
+    // as the world rotating underneath you
+    w.plane.roll = w.plane.roll + Math.clampF64(diff, 0.0 - 1.0, 1.0) * assist * 2.2 * dt
+    w.plane.roll = Math.clampF64(w.plane.roll, 0.0 - 1.25, 1.25)
+    if d > HARD {
+        let pull = HARD / d
+        w.plane.x = cx + dx * pull
+        w.plane.z = cz + dz * pull
+    }
+}
+
 pub fn worldUpdate(w: &mut World, dt: f64, inRoll: f64, inPitch: f64, boost: bool) {
     w.evRing = false
     w.evBonus = false
@@ -252,11 +349,11 @@ pub fn worldUpdate(w: &mut World, dt: f64, inRoll: f64, inPitch: f64, boost: boo
     if w.hint > 0.0 && (inRoll != 0.0 || inPitch != 0.0) {
         w.hint = w.hint - dt
     }
-    if w.comboTimer > 0.0 {
-        w.comboTimer = w.comboTimer - dt
-        if w.comboTimer <= 0.0 {
-            w.combo = 0
-        }
+    if w.comboPop > 0.0 {
+        w.comboPop = w.comboPop - dt * 2.2
+    }
+    if w.gainPop > 0.0 {
+        w.gainPop = w.gainPop - dt * 0.8
     }
 
     // Arcade flight: roll banks the aircraft, and a banked aircraft turns. Pitch
@@ -315,6 +412,8 @@ pub fn worldUpdate(w: &mut World, dt: f64, inRoll: f64, inPitch: f64, boost: boo
     w.plane.z = w.plane.z + Math.cos(w.plane.yaw) * cp * w.plane.speed * dt
     w.plane.y = w.plane.y + Math.sin(w.plane.pitch) * w.plane.speed * dt
 
+    corridor(w, dt)
+
     // You cannot crash: the ground pushes you up and the sky pushes you down.
     let ground = heightAt(w.plane.x, w.plane.z)
     let floorY = ground + 26.0
@@ -342,11 +441,71 @@ pub fn worldUpdate(w: &mut World, dt: f64, inRoll: f64, inPitch: f64, boost: boo
 
     updateRings(w, dt)
     updateTrails(w, dt)
+    updateFlocks(w, dt)
 }
 
 // Ring passing: watch which side of the ring's plane the aircraft is on. When
 // that flips and it happened inside the hoop, it counts. Distance-based tests
 // miss at speed; a plane crossing cannot.
+// Birds. A flock spawns off to one side every so often, crosses ahead of the
+// aircraft and leaves. They are scenery with a lifetime, not obstacles — nothing
+// collides with them.
+fn updateFlocks(w: &mut World, dt: f64) {
+    w.flockTimer = w.flockTimer - dt
+    if w.flockTimer <= 0.0 {
+        w.flockTimer = 11.0 + (Random.range(0, 1400) as f64) * 0.01
+        // Spawn ahead and off to one side, crossing the flight path rather than
+        // running parallel with it — a flock you overtake from behind is barely
+        // visible, one that cuts across the nose reads immediately.
+        let ahead = 620.0 + (Random.range(0, 500) as f64)
+        var side = 520.0 + (Random.range(0, 420) as f64)
+        var dir = 1.0
+        if Random.range(0, 2) == 0 {
+            side = 0.0 - side
+            dir = 0.0 - 1.0
+        }
+        let fx = Math.sin(w.plane.yaw)
+        let fz = Math.cos(w.plane.yaw)
+        // right vector is the forward vector turned 90 degrees
+        let rx = fz
+        let rz = 0.0 - fx
+        let px = w.plane.x + fx * ahead + rx * side
+        let pz = w.plane.z + fz * ahead + rz * side
+        let ground = heightAt(px, pz)
+        let sp = 26.0 + (Random.range(0, 22) as f64)
+        w.flocks.push(Flock {
+            x: px,
+            y: Math.maxF64(ground + 60.0, w.plane.y + (Random.range(0, 120) as f64) - 40.0),
+            z: pz,
+            // fly across the nose, back toward the course line
+            vx: 0.0 - rx * dir * sp,
+            vz: 0.0 - rz * dir * sp,
+            n: 5 + Random.range(0, 9),
+            seed: (Random.range(0, 1000) as f64) * 0.01,
+            life: 44.0,
+        }
+        )
+    }
+    var i: i64 = 0
+    while i < w.flocks.len {
+        w.flocks[i].x = w.flocks[i].x + w.flocks[i].vx * dt
+        w.flocks[i].z = w.flocks[i].z + w.flocks[i].vz * dt
+        // drift gently up and down as they glide
+        w.flocks[i].y = w.flocks[i].y + Math.sin(w.time * 0.5 + w.flocks[i].seed) * 4.0 * dt
+        w.flocks[i].life = w.flocks[i].life - dt
+        let dx = w.flocks[i].x - w.plane.x
+        let dz = w.flocks[i].z - w.plane.z
+        let gone = w.flocks[i].life <= 0.0 || dx * dx + dz * dz > 3200.0 * 3200.0
+        if gone {
+            let last = w.flocks.len - 1
+            w.flocks[i] = w.flocks[last]
+            let _ = w.flocks.pop()
+        } else {
+            i = i + 1
+        }
+    }
+}
+
 fn updateRings(w: &mut World, dt: f64) {
     var toLay: i64 = 0
     var i: i64 = 0
@@ -372,6 +531,15 @@ fn updateRings(w: &mut World, dt: f64) {
                 if rad < w.rings[i].r {
                     clearRing(w, i)
                     toLay = toLay + 1
+                } else {
+                    // Judged the moment you pass the hoop's plane, not when the
+                    // hoop is finally far enough behind to be culled. That cull
+                    // is 420 units back — over two seconds at speed — by which
+                    // time you have flown the NEXT ring, and the late break then
+                    // wipes a streak you had already rebuilt. The player sees a
+                    // streak reset two rings after the ring they actually fluffed.
+                    missRing(w, i)
+                    toLay = toLay + 1
                 }
             }
         }
@@ -381,18 +549,11 @@ fn updateRings(w: &mut World, dt: f64) {
         let bx = w.rings[i].x - w.plane.x
         let bz = w.rings[i].z - w.plane.z
         if bx * Math.sin(w.plane.yaw) + bz * Math.cos(w.plane.yaw) < 0.0 - 420.0 {
+            // Still live this far behind means the hoop's plane was never
+            // crossed at all — flown around rather than fluffed. Same penalty.
             if w.rings[i].alive {
-                // Missed it. Breaking the streak has to be felt, or the streak
-                // means nothing — this is the whole tension of the mode.
+                missRing(w, i)
                 toLay = toLay + 1
-                if w.combo > w.bestCombo {
-                    w.bestCombo = w.combo
-                }
-                if w.combo > 2 {
-                    w.evMiss = true
-                    w.missFlash = 1.0
-                }
-                w.combo = 0
             }
             drop = true
         }
@@ -410,11 +571,30 @@ fn updateRings(w: &mut World, dt: f64) {
     updateSparks(w, dt)
 }
 
+// Breaking the streak has to be felt, or the streak means nothing — this is the
+// whole tension of the mode.
+fn missRing(w: &mut World, i: i64) {
+    w.rings[i].alive = false
+    w.rings[i].pop = 0.0
+    if w.combo > w.bestCombo {
+        w.bestCombo = w.combo
+    }
+    // Any live streak breaking gets announced. Only telling the player above x3
+    // meant the rule looked inconsistent from below.
+    if w.combo > 0 {
+        w.evMiss = true
+        w.missFlash = 1.0
+    }
+    w.combo = 0
+    w.comboPop = 0.0
+    w.gainPop = 0.0
+}
+
 fn clearRing(w: &mut World, i: i64) {
     w.rings[i].alive = false
     w.rings[i].pop = 1.0
     w.combo = w.combo + 1
-    w.comboTimer = 6.0
+    w.comboPop = 1.0
     w.cleared = w.cleared + 1
     if w.combo > w.bestCombo {
         w.bestCombo = w.combo
@@ -423,7 +603,10 @@ fn clearRing(w: &mut World, i: i64) {
     if w.rings[i].bonus {
         worth = 200
     }
-    w.score = w.score + worth * Math.minI64(w.combo, 20)
+    let gained = worth * Math.minI64(w.combo, 20)
+    w.score = w.score + gained
+    w.gain = gained
+    w.gainPop = 1.0
     if w.score > w.best {
         w.best = w.score
     }

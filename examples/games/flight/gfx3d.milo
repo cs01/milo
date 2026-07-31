@@ -363,11 +363,30 @@ pub struct Vtx {
     u: f64,
     v: f64,
     light: f64,
+    // Per-vertex tint, multiplied with the triangle's base colour. Terrain needs
+    // this: with one colour per quad, any surface whose colour varies with height
+    // or slope draws its own tile grid, because neighbouring quads snap to
+    // different values along an edge they share.
+    r: f64,
+    g: f64,
+    b: f64,
+    // How much of the detail texture to apply, 0..1. Terrain and water share one
+    // draw call per quad, and the ground grain painted over water is the single
+    // loudest cue that a surface is NOT water — static speckle cannot be moving
+    // liquid. Fading it out per vertex keeps the shoreline seamless, which a
+    // per-quad "is this a water tile" choice could not.
+    tw: f64,
 }
 
 pub fn vtx(x: f64, y: f64, z: f64, u: f64, v: f64, light: f64): Vtx {
     return Vtx {
-        x: x, y: y, z: z, u: u, v: v, light: light
+        x: x, y: y, z: z, u: u, v: v, light: light, r: 1.0, g: 1.0, b: 1.0, tw: 1.0
+    }
+}
+
+pub fn vtxC(x: f64, y: f64, z: f64, u: f64, v: f64, light: f64, r: f64, g: f64, b: f64, tw: f64): Vtx {
+    return Vtx {
+        x: x, y: y, z: z, u: u, v: v, light: light, r: r, g: g, b: b, tw: tw
     }
 }
 
@@ -452,6 +471,9 @@ fn rasterCamTex(c: &mut Canvas, s: &mut Scene, view: &View, t: &Texture, a: &Vtx
                 // Smooth shading: the light term is per vertex and interpolated,
                 // so a curved surface stops looking like a stack of flat facets.
                 let sh = l0 * a.light + l1 * b.light + l2 * d.light
+                let vr = l0 * a.r + l1 * b.r + l2 * d.r
+                let vg = l0 * a.g + l1 * b.g + l2 * d.g
+                let vb = l0 * a.b + l1 * b.b + l2 * d.b
                 var tx2 = ((uu * (t.w as f64)) as i64) & t.mask
                 var ty2 = ((vv * (t.h as f64)) as i64) & t.mask
                 if tx2 < 0 {
@@ -461,6 +483,8 @@ fn rasterCamTex(c: &mut Canvas, s: &mut Scene, view: &View, t: &Texture, a: &Vtx
                     ty2 = 0
                 }
                 let ti = ((ty2 << t.shift) + tx2) * 3
+                // texel faded toward 1 (no-op) where tw is low
+                let tw = l0 * a.tw + l1 * b.tw + l2 * d.tw
                 var f = (zz - s.fogStart) / (s.fogEnd - s.fogStart)
                 if f < 0.0 {
                     f = 0.0
@@ -469,9 +493,9 @@ fn rasterCamTex(c: &mut Canvas, s: &mut Scene, view: &View, t: &Texture, a: &Vtx
                     f = 1.0
                 }
                 let o = idx * 3
-                let rr = tr * sh * (t.px[ti] as f64)
-                let gg = tg * sh * (t.px[ti + 1] as f64)
-                let bb = tb * sh * (t.px[ti + 2] as f64)
+                let rr = tr * vr * sh * (1.0 + ((t.px[ti] as f64) - 1.0) * tw)
+                let gg = tg * vg * sh * (1.0 + ((t.px[ti + 1] as f64) - 1.0) * tw)
+                let bb = tb * vb * sh * (1.0 + ((t.px[ti + 2] as f64) - 1.0) * tw)
                 c.hdr[o] = (rr * (1.0 - f) + s.fogR * f) as f32
                 c.hdr[o + 1] = (gg * (1.0 - f) + s.fogG * f) as f32
                 c.hdr[o + 2] = (bb * (1.0 - f) + s.fogB * f) as f32
@@ -488,9 +512,9 @@ pub fn triangleV(c: &mut Canvas, s: &mut Scene, view: &View, t: &Texture, wa: &V
     let ca = toCamera(view, wa.x, wa.y, wa.z)
     let cb = toCamera(view, wb.x, wb.y, wb.z)
     let cd = toCamera(view, wd.x, wd.y, wd.z)
-    let a = vtx(ca.x, ca.y, ca.z, wa.u, wa.v, wa.light)
-    let b = vtx(cb.x, cb.y, cb.z, wb.u, wb.v, wb.light)
-    let d = vtx(cd.x, cd.y, cd.z, wd.u, wd.v, wd.light)
+    let a = vtxC(ca.x, ca.y, ca.z, wa.u, wa.v, wa.light, wa.r, wa.g, wa.b, wa.tw)
+    let b = vtxC(cb.x, cb.y, cb.z, wb.u, wb.v, wb.light, wb.r, wb.g, wb.b, wb.tw)
+    let d = vtxC(cd.x, cd.y, cd.z, wd.u, wd.v, wd.light, wd.r, wd.g, wd.b, wd.tw)
     if a.z > NEAR && b.z > NEAR && d.z > NEAR {
         rasterCamTex(c, s, view, t, a, b, d, tr, tg, tb)
         return
@@ -514,54 +538,138 @@ fn clipV(out: &mut Vec<Vtx>, a: &Vtx, b: &Vtx) {
     let ina = a.z > NEAR
     let inb = b.z > NEAR
     if ina {
-        out.push(vtx(a.x, a.y, a.z, a.u, a.v, a.light))
+        out.push(vtxC(a.x, a.y, a.z, a.u, a.v, a.light, a.r, a.g, a.b, a.tw))
     }
     if ina != inb {
         let t = (NEAR - a.z) / (b.z - a.z)
-        out.push(vtx(a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t, NEAR, a.u + (b.u - a.u) * t, a.v + (b.v - a.v) * t, a.light + (b.light - a.light) * t))
+        out.push(vtxC(a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t, NEAR, a.u + (b.u - a.u) * t, a.v + (b.v - a.v) * t, a.light + (b.light - a.light) * t, a.r + (b.r - a.r) * t, a.g + (b.g - a.g) * t, a.b + (b.b - a.b) * t, a.tw + (b.tw - a.tw) * t))
     }
 }
 
-// Lambert term for a triangle whose world-space normal is (nx,ny,nz).
-pub fn shade(s: &Scene, nx: f64, ny: f64, nz: f64, ambient: f64): f64 {
-    var d = nx * s.sunX + ny * s.sunY + nz * s.sunZ
-    if d < 0.0 {
-        d = 0.0
+// Gouraud-shaded, untextured triangle in CAMERA space. Same interpolation as the
+// textured path minus the texel fetch: distant terrain is most of the triangle
+// count, and it does not need a texture, but it does need the per-vertex colour —
+// without it the far field is a checkerboard of flat quads.
+fn rasterCamG(c: &mut Canvas, s: &mut Scene, v: &View, a: &Vtx, b: &Vtx, d: &Vtx, tr: f64, tg: f64, tb: f64) {
+    let iaz = 1.0 / a.z
+    let ibz = 1.0 / b.z
+    let icz = 1.0 / d.z
+    let x0 = v.cx + a.x * v.scale * iaz
+    let y0 = v.cy - a.y * v.scale * iaz
+    let x1 = v.cx + b.x * v.scale * ibz
+    let y1 = v.cy - b.y * v.scale * ibz
+    let x2 = v.cx + d.x * v.scale * icz
+    let y2 = v.cy - d.y * v.scale * icz
+
+    let area = (x1 - x0) * (y2 - y0) - (x2 - x0) * (y1 - y0)
+    if area <= 0.0 {
+        return
     }
-    return ambient + (1.0 - ambient) * d
-}
+    var minX = Math.floor(Math.minF64(x0, Math.minF64(x1, x2))) as i64
+    var maxX = Math.ceil(Math.maxF64(x0, Math.maxF64(x1, x2))) as i64
+    var minY = Math.floor(Math.minF64(y0, Math.minF64(y1, y2))) as i64
+    var maxY = Math.ceil(Math.maxF64(y0, Math.maxF64(y1, y2))) as i64
+    if minX < 0 {
+        minX = 0
+    }
+    if minY < 0 {
+        minY = 0
+    }
+    if maxX > s.w {
+        maxX = s.w
+    }
+    if maxY > s.h {
+        maxY = s.h
+    }
+    if minX >= maxX || minY >= maxY {
+        return
+    }
+    s.tris = s.tris + 1
+    let invArea = 1.0 / area
+    // colour already folded with the vertex light, so the inner loop is 3 lerps
+    let ar = a.r * a.light * tr
+    let ag = a.g * a.light * tg
+    let ab = a.b * a.light * tb
+    let br = b.r * b.light * tr
+    let bg = b.g * b.light * tg
+    let bb2 = b.b * b.light * tb
+    let dr = d.r * d.light * tr
+    let dg = d.g * d.light * tg
+    let db = d.b * d.light * tb
 
-// ── textures ──────────────────────────────────────────────────────────────────
-//
-// Power-of-two RGB textures sampled with wrap, generated procedurally at startup
-// — there is no asset pipeline here, and none is needed for surface detail.
-
-pub struct Texture {
-    w: i64,
-    h: i64,
-    mask: i64, // w-1, w is a power of two
-    shift: i64, // log2(w), for the row stride
-    px: Vec<f32>, // 3 floats per texel
-}
-
-pub fn texNew(size: i64, shift: i64): Texture {
-    return Texture {
-        w: size,
-        h: size,
-        mask: size - 1,
-        shift: shift,
-        px: Vec.filled(size * size * 3, 0.0),
+    var py = minY
+    while py < maxY {
+        let fy = (py as f64) + 0.5
+        var px = minX
+        while px < maxX {
+            let fx = (px as f64) + 0.5
+            let w0 = (x2 - x1) * (fy - y1) - (y2 - y1) * (fx - x1)
+            if w0 < 0.0 {
+                px = px + 1
+                continue
+            }
+            let w1 = (x0 - x2) * (fy - y2) - (y0 - y2) * (fx - x2)
+            if w1 < 0.0 {
+                px = px + 1
+                continue
+            }
+            let w2 = (x1 - x0) * (fy - y0) - (y1 - y0) * (fx - x0)
+            if w2 < 0.0 {
+                px = px + 1
+                continue
+            }
+            let l0 = w0 * invArea
+            let l1 = w1 * invArea
+            let l2 = w2 * invArea
+            let invZ = l0 * iaz + l1 * ibz + l2 * icz
+            let idx = py * s.w + px
+            if (s.zbuf[idx] as f64) < invZ {
+                s.zbuf[idx] = invZ as f32
+                let depth = 1.0 / invZ
+                var f = (depth - s.fogStart) / (s.fogEnd - s.fogStart)
+                if f < 0.0 {
+                    f = 0.0
+                }
+                if f > 1.0 {
+                    f = 1.0
+                }
+                let rr = l0 * ar + l1 * br + l2 * dr
+                let gg = l0 * ag + l1 * bg + l2 * dg
+                let bbv = l0 * ab + l1 * bb2 + l2 * db
+                let o = idx * 3
+                c.hdr[o] = (rr * (1.0 - f) + s.fogR * f) as f32
+                c.hdr[o + 1] = (gg * (1.0 - f) + s.fogG * f) as f32
+                c.hdr[o + 2] = (bbv * (1.0 - f) + s.fogB * f) as f32
+            }
+            px = px + 1
+        }
+        py = py + 1
     }
 }
 
-pub fn texSet(t: &mut Texture, x: i64, y: i64, r: f64, g: f64, b: f64) {
-    let i = ((y << t.shift) + x) * 3
-    t.px[i] = r as f32
-    t.px[i + 1] = g as f32
-    t.px[i + 2] = b as f32
+// World-space Gouraud triangle, near-clipped. u/v on the vertices are ignored.
+pub fn triangleG(c: &mut Canvas, s: &mut Scene, view: &View, wa: &Vtx, wb: &Vtx, wd: &Vtx, tr: f64, tg: f64, tb: f64) {
+    let ca = toCamera(view, wa.x, wa.y, wa.z)
+    let cb = toCamera(view, wb.x, wb.y, wb.z)
+    let cd = toCamera(view, wd.x, wd.y, wd.z)
+    let a = vtxC(ca.x, ca.y, ca.z, wa.u, wa.v, wa.light, wa.r, wa.g, wa.b, wa.tw)
+    let b = vtxC(cb.x, cb.y, cb.z, wb.u, wb.v, wb.light, wb.r, wb.g, wb.b, wb.tw)
+    let d = vtxC(cd.x, cd.y, cd.z, wd.u, wd.v, wd.light, wd.r, wd.g, wd.b, wd.tw)
+    if a.z > NEAR && b.z > NEAR && d.z > NEAR {
+        rasterCamG(c, s, view, a, b, d, tr, tg, tb)
+        return
+    }
+    if a.z <= NEAR && b.z <= NEAR && d.z <= NEAR {
+        return
+    }
+    var poly: Vec<Vtx> = Vec.new()
+    clipV(poly, a, b)
+    clipV(poly, b, d)
+    clipV(poly, d, a)
+    if poly.len < 3 {
+        return
+    }
+    for i in 1..poly.len - 1 {
+        rasterCamG(c, s, view, poly[0], poly[i], poly[i + 1], tr, tg, tb)
+    }
 }
-
-// Perspective-correct textured triangle. The extra work over the flat path is
-// interpolating u/z and v/z alongside 1/z and dividing per pixel — which is what
-// "perspective-correct" means: interpolating u,v directly in screen space slides
-// the texture around as the surface tilts away.

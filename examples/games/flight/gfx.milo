@@ -107,6 +107,59 @@ pub fn addPix(c: &mut Canvas, x: i64, y: i64, r: f64, g: f64, b: f64) {
     c.hdr[i + 2] = c.hdr[i + 2] + (b as f32)
 }
 
+// Darken a pixel toward black by `k` (0 = untouched, 1 = black), with coverage
+// for antialiasing. Everything else in this file draws ADDITIVELY, which suits
+// glow, sparks and HUD strokes — but an additive primitive can only brighten,
+// so it cannot draw a dark silhouette against a bright sky. Birds need this.
+pub fn darkPix(c: &mut Canvas, x: i64, y: i64, k: f64) {
+    if x < 0 || y < 0 || x >= c.w || y >= c.h {
+        return
+    }
+    if k <= 0.0 {
+        return
+    }
+    var f = 1.0 - k
+    if f < 0.0 {
+        f = 0.0
+    }
+    let i = (y * c.w + x) * 3
+    c.hdr[i] = c.hdr[i] * (f as f32)
+    c.hdr[i + 1] = c.hdr[i + 1] * (f as f32)
+    c.hdr[i + 2] = c.hdr[i + 2] * (f as f32)
+}
+
+// A dark line, for silhouettes. Same DDA walk as `line`, darkening instead of
+// adding.
+pub fn darkLine(c: &mut Canvas, x0: f64, y0: f64, x1: f64, y1: f64, k: f64) {
+    let dx = x1 - x0
+    let dy = y1 - y0
+    var steps = (Math.abs(dx)) as i64
+    let sy = (Math.abs(dy)) as i64
+    if sy > steps {
+        steps = sy
+    }
+    if steps < 1 {
+        steps = 1
+    }
+    let ix = dx / (steps as f64)
+    let iy = dy / (steps as f64)
+    var px = x0
+    var py = y0
+    for i in 0..steps + 1 {
+        // 2x2 coverage so a one-pixel bird does not shimmer as it moves
+        let fx = px - Math.floor(px)
+        let fy = py - Math.floor(py)
+        let bx = Math.floor(px) as i64
+        let by = Math.floor(py) as i64
+        darkPix(c, bx, by, k * (1.0 - fx) * (1.0 - fy))
+        darkPix(c, bx + 1, by, k * fx * (1.0 - fy))
+        darkPix(c, bx, by + 1, k * (1.0 - fx) * fy)
+        darkPix(c, bx + 1, by + 1, k * fx * fy)
+        px = px + ix
+        py = py + iy
+    }
+}
+
 // A soft radial blob — the workhorse for particles, muzzle flashes and cores.
 pub fn spot(c: &mut Canvas, cx: f64, cy: f64, rad: f64, r: f64, g: f64, b: f64) {
     if rad <= 0.0 {

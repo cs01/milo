@@ -26,6 +26,14 @@ pub let AUDIO_S16LSB: i64 = 0x8010
 pub struct Sound {
     dev: u32,
     ok: bool,
+    // Music runs on its OWN device. SDL_QueueAudio appends to a single stream —
+    // it does not mix — so music and effects sharing one device would serialise:
+    // every chime would wait behind the rest of the queued music loop before it
+    // was audible. Two devices lets the OS mixer do the mixing.
+    musicDev: u32,
+    musicOk: bool,
+    musicOn: bool,
+    music: Vec<i16>,
     ring: Vec<i16>,
     ringBig: Vec<i16>,
     region: Vec<i16>,
@@ -55,6 +63,101 @@ fn toneWave(out: &mut Vec<i16>, freq0: f64, freq1: f64, secs: f64, amp: f64, har
         let s = v * env * amp * 9000.0
         out.push(Math.clampF64(s, 0.0 - 32000.0, 32000.0) as i16)
     }
+}
+
+// Mix one note INTO an existing buffer at a sample offset, wrapping at the end.
+// Wrapping is what makes the loop seamless: a note whose tail runs past the last
+// sample continues at the start, where the same progression begins again.
+fn addNote(out: &mut Vec<i16>, start: i64, freq: f64, secs: f64, amp: f64, harm: f64, tail: f64) {
+    let n = out.len
+    if n <= 0 {
+        return
+    }
+    let dur = (secs * (RATE as f64)) as i64
+    var phase = 0.0
+    let step = freq * 6.283185307179586 / (RATE as f64)
+    for i in 0..dur {
+        let t = (i as f64) / (dur as f64)
+        phase = phase + step
+        // exponential decay to `tail`, with a short attack so it does not click
+        var env = Math.pow(tail, t)
+        if t < 0.02 {
+            env = env * (t / 0.02)
+        }
+        if t > 0.94 {
+            env = env * ((1.0 - t) / 0.06)
+        }
+        var v = Math.sin(phase)
+        if harm > 0.0 {
+            v = v + Math.sin(phase * 2.0) * harm + Math.sin(phase * 3.0) * harm * 0.35
+        }
+        var idx = start + i
+        idx = idx % n
+        let mixed = (out[idx] as f64) + v * env * amp * 9000.0
+        out[idx] = Math.clampF64(mixed, 0.0 - 32000.0, 32000.0) as i16
+    }
+}
+
+// A calm four-chord loop: I - V - vi - IV in C, the friendliest progression
+// there is. Bass root, a soft pad, and an arpeggio picking out the chord tones.
+// Generated once at startup like everything else here — no asset pipeline.
+fn buildMusic(): Vec<i16> {
+    let CHORD = 2.4 // seconds per chord
+    let bars = 4
+    let n = ((CHORD * (bars as f64)) * (RATE as f64)) as i64
+    var buf: Vec<i16> = Vec.filled(n, 0)
+
+    // chord tones, one row per chord
+    var roots: Vec<f64> = Vec.new()
+    roots.push(130.81) // C3
+    roots.push(98.00) // G2
+    roots.push(110.00) // A2
+    roots.push(87.31) // F2
+    var t1: Vec<f64> = Vec.new()
+    t1.push(261.63)
+    t1.push(196.00)
+    t1.push(220.00)
+    t1.push(174.61)
+    var t2: Vec<f64> = Vec.new()
+    t2.push(329.63)
+    t2.push(246.94)
+    t2.push(261.63)
+    t2.push(220.00)
+    var t3: Vec<f64> = Vec.new()
+    t3.push(392.00)
+    t3.push(293.66)
+    t3.push(329.63)
+    t3.push(261.63)
+
+    let spc = (CHORD * (RATE as f64)) as i64
+    for c in 0..bars {
+        let base = (c as i64) * spc
+        // bass: one long root per chord
+        addNote(buf, base, roots[c], CHORD * 0.95, 0.30, 0.05, 0.30)
+        // pad: the triad, quiet and sustained
+        addNote(buf, base, t1[c], CHORD * 0.92, 0.085, 0.0, 0.55)
+        addNote(buf, base, t2[c], CHORD * 0.92, 0.075, 0.0, 0.55)
+        addNote(buf, base, t3[c], CHORD * 0.92, 0.065, 0.0, 0.55)
+        // arpeggio: eighth notes up and back down, an octave above the pad
+        let eighth = CHORD / 8.0
+        let es = (eighth * (RATE as f64)) as i64
+        for k in 0..8 {
+            var f = t1[c]
+            let m = k % 6
+            if m == 1 || m == 5 {
+                f = t2[c]
+            }
+            if m == 2 || m == 4 {
+                f = t3[c]
+            }
+            if m == 3 {
+                f = t1[c] * 2.0
+            }
+            // let the last note of the bar ring into the next
+            addNote(buf, base + (k as i64) * es, f * 2.0, eighth * 1.8, 0.10, 0.10, 0.010)
+        }
+    }
+    return buf
 }
 
 fn silence(out: &mut Vec<i16>, secs: f64) {
@@ -97,10 +200,15 @@ pub fn soundNew(): Sound {
     spec[9] = 8
 
     var dev: u32 = 0
+    var mdev: u32 = 0
     unsafe {
         dev = SDL_OpenAudioDevice(0 as *u8, 0, spec[0].addrOf() as *u8, 0 as *u8, 0)
         if dev != 0 {
             SDL_PauseAudioDevice(dev, 0)
+        }
+        mdev = SDL_OpenAudioDevice(0 as *u8, 0, spec[0].addrOf() as *u8, 0 as *u8, 0)
+        if mdev != 0 {
+            SDL_PauseAudioDevice(mdev, 0)
         }
     }
 
@@ -131,7 +239,37 @@ pub fn soundNew(): Sound {
     toneWave(miss, 262.0, 220.0, 0.40, 0.5, 0.08)
 
     return Sound {
-        dev: dev, ok: dev != 0, ring: ring, ringBig: ringBig, region: region, boost: boost, miss: miss
+        dev: dev, ok: dev != 0,
+        musicDev: mdev, musicOk: mdev != 0, musicOn: true, music: buildMusic(),
+        ring: ring, ringBig: ringBig, region: region, boost: boost, miss: miss
+    }
+}
+
+// Top up the music queue. Called every frame: SDL drains the queue in real time,
+// so the loop is kept a couple of seconds ahead and re-queued as it plays out.
+pub fn musicTick(s: &Sound) {
+    if !s.musicOk || !s.musicOn {
+        return
+    }
+    var queued: u32 = 0
+    unsafe {
+        queued = SDL_GetQueuedAudioSize(s.musicDev)
+    }
+    // two seconds of stereo-free 16-bit mono is RATE*2 bytes per second
+    if (queued as i64) > RATE * 2 {
+        return
+    }
+    unsafe {
+        let _ = SDL_QueueAudio(s.musicDev, s.music.ptr() as *u8, (s.music.len * 2) as u32)
+    }
+}
+
+pub fn musicToggle(s: &mut Sound) {
+    s.musicOn = !s.musicOn
+    if !s.musicOn {
+        unsafe {
+            SDL_ClearQueuedAudio(s.musicDev)
+        }
     }
 }
 

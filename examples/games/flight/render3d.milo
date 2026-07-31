@@ -1,0 +1,302 @@
+// Drawing the flight world: sky, terrain, coins, the aircraft, and the HUD.
+
+from "std/math" import {
+    Math
+}
+from "./gfx" import {
+    Canvas, fillRect, spot, line, text, textCentered, textWidth
+}
+from "./gfx3d" import {
+    Scene, View, Camera, viewOf, sceneClear, triangle, shade, toCamera
+}
+from "./world3d" import {
+    World, heightAt, TILE, VIEW_TILES
+}
+
+// Sky gradient plus a sun disc, painted before anything else. There is no depth
+// test here — the terrain simply draws over it.
+fn drawSky(c: &mut Canvas, s: &Scene, w: &World, v: &View) {
+    for y in 0..c.h {
+        let t = (y as f64) / (c.h as f64)
+        let k = 1.0 - t
+        let r = 0.10 + 0.34 * k * k + s.fogR * t * 0.55
+        let g = 0.22 + 0.36 * k * k + s.fogG * t * 0.55
+        let b = 0.52 + 0.34 * k * k + s.fogB * t * 0.40
+        fillRect(c, 0.0, y as f64, c.w as f64, (y + 1) as f64, r * 0.42, g * 0.42, b * 0.45)
+    }
+    // sun projected from its direction, so it sits correctly as you turn
+    let far = 6000.0
+    let sp = toCamera(v, w.cam.x + s.sunX * far, w.cam.y + s.sunY * far, w.cam.z + s.sunZ * far)
+    if sp.z > 1.0 {
+        let sx = v.cx + sp.x * v.scale / sp.z
+        let sy = v.cy - sp.y * v.scale / sp.z
+        spot(c, sx, sy, 190.0, 0.16, 0.13, 0.07)
+        spot(c, sx, sy, 62.0, 0.9, 0.78, 0.42)
+        spot(c, sx, sy, 30.0, 1.9, 1.7, 1.2)
+    }
+}
+
+fn terrainColor(h: f64, slope: f64): Vec<f64> {
+    var v: Vec<f64> = Vec.new()
+    // water, sand, grass, rock, snow by height, with rock taking over on slopes
+    if h < 0.0 {
+        v.push(0.06)
+        v.push(0.26)
+        v.push(0.46)
+        return v
+    }
+    if h < 16.0 {
+        v.push(0.62)
+        v.push(0.55)
+        v.push(0.34)
+        return v
+    }
+    if h > 168.0 {
+        v.push(0.82)
+        v.push(0.86)
+        v.push(0.92)
+        return v
+    }
+    if slope > 0.62 || h > 130.0 {
+        v.push(0.34)
+        v.push(0.31)
+        v.push(0.30)
+        return v
+    }
+    v.push(0.16)
+    v.push(0.36)
+    v.push(0.14)
+    return v
+}
+
+// How many tiles are on the perimeter of ring `r` (ring 0 is the single centre).
+fn ringCount(r: i64): i64 {
+    if r == 0 {
+        return 1
+    }
+    return 8 * r
+}
+
+// The `i`th tile offset around ring `r`, walking the square perimeter.
+fn ringOffset(r: i64, i: i64): Vec<i64> {
+    var v: Vec<i64> = Vec.new()
+    if r == 0 {
+        v.push(0)
+        v.push(0)
+        return v
+    }
+    let side = 2 * r
+    let seg = i / side
+    let k = i % side
+    if seg == 0 {
+        v.push(0 - r + k)
+        v.push(0 - r)
+    } else if seg == 1 {
+        v.push(r)
+        v.push(0 - r + k)
+    } else if seg == 2 {
+        v.push(r - k)
+        v.push(r)
+    } else {
+        v.push(0 - r)
+        v.push(r - k)
+    }
+    return v
+}
+
+pub fn drawWorld(c: &mut Canvas, s: &mut Scene, w: &World) {
+    let v = viewOf(w.cam, c.w, c.h)
+    sceneClear(s)
+    drawSky(c, s, w, v)
+
+    // Walk a grid of quads centred on the aircraft. Anything behind the camera is
+    // rejected before any per-vertex work.
+    let baseX = Math.floor(w.cam.x / TILE) as i64
+    let baseZ = Math.floor(w.cam.z / TILE) as i64
+    let fwdX = Math.sin(w.cam.yaw)
+    let fwdZ = Math.cos(w.cam.yaw)
+
+    // Front to back, in rings out from the camera tile. The z-buffer then rejects
+    // hidden pixels with a single compare instead of shading them — near terrain
+    // covers the screen several times over, so this is most of the frame budget.
+    for ring in 0..VIEW_TILES {
+        for step in 0..ringCount(ring) {
+            let off = ringOffset(ring, step)
+            let tx = baseX + off[0]
+            let tz = baseZ + off[1]
+            let x0 = (tx as f64) * TILE
+            let z0 = (tz as f64) * TILE
+            let x1 = x0 + TILE
+            let z1 = z0 + TILE
+            // cheap frustum reject: quad centre must be in front of the camera
+            let mx = x0 + TILE * 0.5 - w.cam.x
+            let mz = z0 + TILE * 0.5 - w.cam.z
+            if mx * fwdX + mz * fwdZ < 0.0 - TILE {
+                continue
+            }
+            let d2 = mx * mx + mz * mz
+            let reach = (VIEW_TILES as f64) * TILE
+            if d2 > reach * reach {
+                continue
+            }
+
+            let h00 = heightAt(x0, z0)
+            let h10 = heightAt(x1, z0)
+            let h01 = heightAt(x0, z1)
+            let h11 = heightAt(x1, z1)
+
+            // face normal from the diagonal, good enough for flat shading
+            let nx = (h00 - h10) * TILE
+            let nz = (h00 - h01) * TILE
+            let ny = TILE * TILE
+            let nl = Math.sqrt(nx * nx + ny * ny + nz * nz)
+            let ux = nx / nl
+            let uy = ny / nl
+            let uz = nz / nl
+            let slope = 1.0 - uy
+            let hAvg = (h00 + h10 + h01 + h11) * 0.25
+            let col = terrainColor(hAvg, slope)
+            let lit = shade(s, ux, uy, uz, 0.34)
+            // a little banding by height so ridges read
+            let band = 0.94 + 0.12 * Math.sin(hAvg * 0.09)
+            let r = col[0] * lit * band
+            let g = col[1] * lit * band
+            let b = col[2] * lit * band
+
+            triangle(c, s, v, x0, h00, z0, x0, h01, z1, x1, h10, z0, r, g, b)
+            triangle(c, s, v, x1, h10, z0, x0, h01, z1, x1, h11, z1, r, g, b)
+        }
+    }
+
+    drawCoins(c, s, w, v)
+    drawPlane(c, s, w, v)
+}
+
+// A coin is a flat 12-gon spinning about its vertical axis, drawn from both
+// sides so it never vanishes when it turns edge-on.
+fn drawCoins(c: &mut Canvas, s: &mut Scene, w: &World, v: &View) {
+    let segs = 12
+    for i in 0..w.coins.len {
+        var rad = 7.5
+        var br = 1.0
+        if !w.coins[i].alive {
+            rad = 7.5 + (1.0 - w.coins[i].pop) * 30.0
+            br = w.coins[i].pop * 1.8
+            if br <= 0.02 {
+                continue
+            }
+        }
+        let cx = w.coins[i].x
+        let cy = w.coins[i].y + Math.sin(w.time * 1.6 + (i as f64)) * 3.0
+        let cz = w.coins[i].z
+        let a = w.coins[i].spin
+        // the coin's plane: axis u spins, v is straight up
+        let ux = Math.cos(a)
+        let uz = Math.sin(a)
+        let step = 6.283185307179586 / (segs as f64)
+        for k in 0..segs {
+            let a0 = (k as f64) * step
+            let a1 = ((k + 1) as f64) * step
+            let p0x = cx + ux * Math.cos(a0) * rad
+            let p0y = cy + Math.sin(a0) * rad
+            let p0z = cz + uz * Math.cos(a0) * rad
+            let p1x = cx + ux * Math.cos(a1) * rad
+            let p1y = cy + Math.sin(a1) * rad
+            let p1z = cz + uz * Math.cos(a1) * rad
+            let sh = 0.65 + 0.35 * Math.cos(a - w.cam.yaw)
+            let r = 1.55 * sh * br
+            let g = 1.15 * sh * br
+            let b = 0.20 * sh * br
+            triangle(c, s, v, cx, cy, cz, p0x, p0y, p0z, p1x, p1y, p1z, r, g, b)
+            triangle(c, s, v, cx, cy, cz, p1x, p1y, p1z, p0x, p0y, p0z, r * 0.7, g * 0.7, b * 0.7)
+        }
+    }
+}
+
+// The aircraft: a delta wing built from four triangles, rolled with the plane.
+fn drawPlane(c: &mut Canvas, s: &mut Scene, w: &World, v: &View) {
+    let yaw = w.plane.yaw
+    let pitch = w.plane.pitch
+    let roll = w.plane.roll
+    let cy = Math.cos(yaw)
+    let sy = Math.sin(yaw)
+    let cp = Math.cos(pitch)
+    let sp = Math.sin(pitch)
+    let cr = Math.cos(roll)
+    let sr = Math.sin(roll)
+    // body axes
+    let fx = sy * cp
+    let fy = sp
+    let fz = cy * cp
+    var rx = cy * cr
+    var ry = 0.0 - sr
+    var rz = 0.0 - sy * cr
+    let ux = fy * rz - fz * ry
+    let uy = fz * rx - fx * rz
+    let uz = fx * ry - fy * rx
+
+    let px = w.plane.x
+    let py = w.plane.y
+    let pz = w.plane.z
+    // nose, tail, wingtips, fin
+    let nx = px + fx * 20.0
+    let ny = py + fy * 20.0
+    let nz = pz + fz * 20.0
+    let tx = px - fx * 12.0
+    let ty = py - fy * 12.0
+    let tz = pz - fz * 12.0
+    let lx = px - fx * 6.0 - rx * 17.0
+    let ly = py - fy * 6.0 - ry * 17.0
+    let lz = pz - fz * 6.0 - rz * 17.0
+    let r2x = px - fx * 6.0 + rx * 17.0
+    let r2y = py - fy * 6.0 + ry * 17.0
+    let r2z = pz - fz * 6.0 + rz * 17.0
+    let finx = tx + ux * 9.0
+    let finy = ty + uy * 9.0
+    let finz = tz + uz * 9.0
+
+    triangle(c, s, v, nx, ny, nz, lx, ly, lz, tx, ty, tz, 0.86, 0.88, 0.94)
+    triangle(c, s, v, nx, ny, nz, tx, ty, tz, r2x, r2y, r2z, 0.70, 0.72, 0.80)
+    triangle(c, s, v, nx, ny, nz, tx, ty, tz, lx, ly, lz, 0.62, 0.64, 0.72)
+    triangle(c, s, v, nx, ny, nz, r2x, r2y, r2z, tx, ty, tz, 0.78, 0.80, 0.88)
+    triangle(c, s, v, tx, ty, tz, finx, finy, finz, nx, ny, nz, 0.95, 0.55, 0.30)
+}
+
+pub fn drawHud(c: &mut Canvas, w: &World, s: &Scene, fps: i64) {
+    text(c, 24, 22, "SCORE " + w.score.toString(), 3, 0.95, 0.80, 0.30)
+    let alt = ((w.plane.y - heightAt(w.plane.x, w.plane.z)) as i64)
+    text(c, 24, 58, "ALT " + alt.toString() + "   SPD " + (w.plane.speed as i64).toString(), 2, 0.35, 0.45, 0.55)
+    let ts = "TRIS " + s.tris.toString() + "   " + fps.toString() + " FPS"
+    text(c, c.w - 24 - textWidth(ts, 2), 22, ts, 2, 0.28, 0.36, 0.44)
+
+    if w.combo > 1 {
+        let f = Math.minF64(1.8, 0.7 + (w.combo as f64) * 0.07)
+        textCentered(c, c.w / 2, 64, "x" + w.combo.toString(), 4, 1.5 * f, 1.1 * f, 0.25 * f)
+    }
+
+    // artificial horizon: a short line that rolls with the aircraft
+    let hx = (c.w as f64) * 0.5
+    let hy = (c.h as f64) - 74.0
+    let ca = Math.cos(0.0 - w.plane.roll)
+    let sa = Math.sin(0.0 - w.plane.roll)
+    line(c, hx - ca * 70.0, hy - sa * 70.0, hx - ca * 22.0, hy - sa * 22.0, 0.3, 0.9, 0.5)
+    line(c, hx + ca * 22.0, hy + sa * 22.0, hx + ca * 70.0, hy + sa * 70.0, 0.3, 0.9, 0.5)
+    spot(c, hx, hy, 3.0, 0.4, 1.0, 0.6)
+
+    if w.banner > 0.0 {
+        var f = 1.0
+        if w.banner < 1.0 {
+            f = w.banner
+        }
+        textCentered(c, c.w / 2, 150, "FLYBY", 9, 1.3 * f, 1.0 * f, 0.35 * f)
+        textCentered(c, c.w / 2, 240, "FLY THROUGH THE COINS", 2, 0.5 * f, 0.6 * f, 0.7 * f)
+    }
+    if w.hint > 0.0 {
+        var f = 1.0
+        if w.hint < 1.0 {
+            f = w.hint
+        }
+        textCentered(c, c.w / 2, c.h - 130, "LEFT RIGHT TO BANK    UP DOWN TO CLIMB AND DIVE", 2, 0.45 * f, 0.5 * f, 0.6 * f)
+        textCentered(c, c.w / 2, c.h - 106, "HOLD SPACE FOR SPEED — YOU CANNOT CRASH", 2, 0.4 * f, 0.44 * f, 0.5 * f)
+    }
+}

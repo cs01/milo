@@ -1,0 +1,254 @@
+// FLYBY — the world: a noise heightmap, a wandering trail of coins, and an
+// arcade flight model. No fail state; you cannot crash, only skim.
+
+from "std/math" import {
+    Math
+}
+from "./gfx3d" import {
+    Camera, Scene, Vec3
+}
+
+pub let TILE: f64 = 44.0 // world units per terrain quad
+
+pub let VIEW_TILES: i64 = 24 // radius of the drawn terrain grid
+
+pub struct Coin {
+    x: f64,
+    y: f64,
+    z: f64,
+    spin: f64,
+    alive: bool,
+    pop: f64, // grows briefly when taken
+}
+
+pub struct Plane {
+    x: f64,
+    y: f64,
+    z: f64,
+    yaw: f64,
+    pitch: f64,
+    roll: f64,
+    speed: f64,
+}
+
+pub struct World {
+    plane: Plane,
+    cam: Camera,
+    coins: Vec<Coin>,
+    pathT: f64, // how far along the coin trail we have laid track
+    // The head of the trail is kept here, NOT read back off the end of `coins`:
+    // that Vec is swap-removed, so its last element is not the newest coin, and
+    // laying from it could place a coin behind the aircraft — which was then
+    // dropped, laying another, forever.
+    trailX: f64,
+    trailZ: f64,
+    score: i64,
+    combo: i64,
+    comboTimer: f64,
+    best: i64,
+    time: f64,
+    flash: f64,
+    shake: f64,
+    banner: f64,
+    hint: f64,
+}
+
+// Smooth value noise — the same hash-based field the mining game uses, so the
+// terrain is identical every run.
+fn hash2(x: i64, y: i64): f64 {
+    let v = Math.sin((x as f64) * 127.1 + (y as f64) * 311.7) * 43758.5453
+    return v - Math.floor(v)
+}
+
+fn noise(x: f64, y: f64): f64 {
+    let x0 = Math.floor(x) as i64
+    let y0 = Math.floor(y) as i64
+    let fx = x - (x0 as f64)
+    let fy = y - (y0 as f64)
+    let sx = fx * fx * (3.0 - 2.0 * fx)
+    let sy = fy * fy * (3.0 - 2.0 * fy)
+    let n00 = hash2(x0, y0)
+    let n10 = hash2(x0 + 1, y0)
+    let n01 = hash2(x0, y0 + 1)
+    let n11 = hash2(x0 + 1, y0 + 1)
+    let a = n00 + (n10 - n00) * sx
+    let b = n01 + (n11 - n01) * sx
+    return a + (b - a) * sy
+}
+
+// Three octaves: broad ranges, ridges, then a little roughness.
+pub fn heightAt(x: f64, z: f64): f64 {
+    let a = noise(x * 0.0032, z * 0.0032) * 210.0
+    let b = noise(x * 0.0090, z * 0.0090) * 74.0
+    let c = noise(x * 0.0280, z * 0.0280) * 17.0
+    return a + b + c - 120.0
+}
+
+pub fn worldNew(): World {
+    var w = World {
+        plane: Plane {
+            x: 0.0, y: 160.0, z: 0.0, yaw: 0.0, pitch: 0.0, roll: 0.0, speed: 190.0
+        }
+        ,
+        cam: Camera {
+            x: 0.0, y: 0.0, z: 0.0, yaw: 0.0, pitch: 0.0, roll: 0.0, fov: 1.15, near: 0.6, far: 1400.0
+        }
+        ,
+        coins: Vec.new(),
+        pathT: 0.0,
+        trailX: 0.0,
+        trailZ: 0.0,
+        score: 0,
+        combo: 0,
+        comboTimer: 0.0,
+        best: 0,
+        time: 0.0,
+        flash: 0.0,
+        shake: 0.0,
+        banner: 3.0,
+        hint: 8.0,
+    }
+    w.plane.y = heightAt(0.0, 0.0) + 150.0
+    for i in 0..70 {
+        layCoin(w)
+    }
+    return w
+}
+
+// The coin trail wanders as a slow sine in heading, so it curls through valleys
+// and over ridges instead of running dead straight.
+pub fn layCoin(w: &mut World) {
+    w.pathT = w.pathT + 1.0
+    let t = w.pathT
+    let heading = Math.sin(t * 0.045) * 1.5 + Math.sin(t * 0.011) * 2.4
+    let step = 62.0
+    let nx = w.trailX + Math.sin(heading) * step
+    let nz = w.trailZ + Math.cos(heading) * step
+    w.trailX = nx
+    w.trailZ = nz
+    let ground = heightAt(nx, nz)
+    // ride 60–130 above the ground, bobbing, so the trail follows the terrain
+    let ride = 60.0 + 70.0 * (0.5 + 0.5 * Math.sin(t * 0.13))
+    w.coins.push(Coin {
+        x: nx, y: ground + ride, z: nz, spin: t * 0.7, alive: true, pop: 0.0
+    }
+    )
+}
+
+pub fn worldUpdate(w: &mut World, dt: f64, inRoll: f64, inPitch: f64, boost: bool) {
+    w.time = w.time + dt
+    if w.flash > 0.0 {
+        w.flash = w.flash - dt * 1.8
+    }
+    if w.shake > 0.0 {
+        w.shake = w.shake * Math.pow(0.02, dt)
+    }
+    if w.banner > 0.0 {
+        w.banner = w.banner - dt
+    }
+    if w.hint > 0.0 && (inRoll != 0.0 || inPitch != 0.0) {
+        w.hint = w.hint - dt
+    }
+    if w.comboTimer > 0.0 {
+        w.comboTimer = w.comboTimer - dt
+        if w.comboTimer <= 0.0 {
+            w.combo = 0
+        }
+    }
+
+    // Arcade flight: roll banks the aircraft, and a banked aircraft turns. Pitch
+    // is direct. Both self-centre, so letting go levels you out.
+    w.plane.roll = w.plane.roll + (inRoll * 1.5 - w.plane.roll * 2.2) * dt
+    w.plane.roll = Math.clampF64(w.plane.roll, 0.0 - 1.1, 1.1)
+    w.plane.pitch = w.plane.pitch + (inPitch * 0.85 - w.plane.pitch * 2.0) * dt
+    w.plane.pitch = Math.clampF64(w.plane.pitch, 0.0 - 0.75, 0.75)
+    w.plane.yaw = w.plane.yaw - w.plane.roll * 0.95 * dt
+
+    var target = 190.0
+    if boost {
+        target = 320.0
+    }
+    w.plane.speed = w.plane.speed + (target - w.plane.speed) * Math.minF64(1.0, dt * 1.6)
+
+    let cp = Math.cos(w.plane.pitch)
+    w.plane.x = w.plane.x + Math.sin(w.plane.yaw) * cp * w.plane.speed * dt
+    w.plane.z = w.plane.z + Math.cos(w.plane.yaw) * cp * w.plane.speed * dt
+    w.plane.y = w.plane.y + Math.sin(w.plane.pitch) * w.plane.speed * dt
+
+    // You cannot crash: the ground pushes you up and the sky pushes you down.
+    let ground = heightAt(w.plane.x, w.plane.z)
+    let floorY = ground + 26.0
+    if w.plane.y < floorY {
+        w.plane.y = w.plane.y + (floorY - w.plane.y) * Math.minF64(1.0, dt * 7.0)
+        if w.plane.pitch < 0.0 {
+            w.plane.pitch = w.plane.pitch * 0.85
+        }
+    }
+    if w.plane.y > ground + 900.0 {
+        w.plane.y = ground + 900.0
+    }
+
+    // chase camera, trailing and slightly above
+    let backX = 0.0 - Math.sin(w.plane.yaw) * 58.0
+    let backZ = 0.0 - Math.cos(w.plane.yaw) * 58.0
+    w.cam.x = w.cam.x + (w.plane.x + backX - w.cam.x) * Math.minF64(1.0, dt * 6.0)
+    w.cam.y = w.cam.y + (w.plane.y + 20.0 - w.cam.y) * Math.minF64(1.0, dt * 6.0)
+    w.cam.z = w.cam.z + (w.plane.z + backZ - w.cam.z) * Math.minF64(1.0, dt * 6.0)
+    w.cam.yaw = w.plane.yaw
+    w.cam.pitch = w.plane.pitch * 0.55 - 0.06
+    w.cam.roll = w.cam.roll + (w.plane.roll * 0.5 - w.cam.roll) * Math.minF64(1.0, dt * 5.0)
+
+    collectCoins(w, dt)
+}
+
+fn collectCoins(w: &mut World, dt: f64) {
+    var toLay: i64 = 0
+    var i: i64 = 0
+    while i < w.coins.len {
+        w.coins[i].spin = w.coins[i].spin + dt * 2.4
+        if w.coins[i].pop > 0.0 {
+            w.coins[i].pop = w.coins[i].pop - dt * 2.6
+        }
+        var drop = false
+        if w.coins[i].alive {
+            let dx = w.coins[i].x - w.plane.x
+            let dy = w.coins[i].y - w.plane.y
+            let dz = w.coins[i].z - w.plane.z
+            if dx * dx + dy * dy + dz * dz < 34.0 * 34.0 {
+                w.coins[i].alive = false
+                w.coins[i].pop = 1.0
+                w.combo = w.combo + 1
+                w.comboTimer = 3.2
+                w.score = w.score + 10 * Math.minI64(w.combo, 20)
+                if w.score > w.best {
+                    w.best = w.score
+                }
+                w.flash = Math.maxF64(w.flash, 0.35)
+                w.shake = Math.maxF64(w.shake, 3.0)
+                toLay = toLay + 1
+            }
+        }
+        if !w.coins[i].alive && w.coins[i].pop <= 0.0 {
+            drop = true
+        }
+        // drop anything that ends up well behind the aircraft
+        let bx = w.coins[i].x - w.plane.x
+        let bz = w.coins[i].z - w.plane.z
+        if bx * Math.sin(w.plane.yaw) + bz * Math.cos(w.plane.yaw) < 0.0 - 260.0 {
+            drop = true
+            if w.coins[i].alive {
+                toLay = toLay + 1
+            }
+        }
+        if drop {
+            let last = w.coins.len - 1
+            w.coins[i] = w.coins[last]
+            let _ = w.coins.pop()
+        } else {
+            i = i + 1
+        }
+    }
+    for k in 0..toLay {
+        layCoin(w)
+    }
+}

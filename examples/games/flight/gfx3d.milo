@@ -1,0 +1,307 @@
+// A small 3D pipeline on top of the 2D HDR canvas: perspective camera, near-plane
+// clipping, and a depth-buffered triangle rasteriser with flat shading and fog.
+//
+// Everything is safe Milo — the z-buffer is a Vec<f32>, the vertex lists are
+// Vec<f64>, and no raw pointer appears anywhere in this file.
+
+from "std/math" import {
+    Math
+}
+from "./gfx" import {
+    Canvas
+}
+
+pub struct Vec3 {
+    x: f64,
+    y: f64,
+    z: f64,
+}
+
+pub struct Camera {
+    x: f64,
+    y: f64,
+    z: f64,
+    yaw: f64, // heading, radians
+    pitch: f64,
+    roll: f64,
+    fov: f64, // vertical field of view, radians
+    near: f64,
+    far: f64,
+}
+
+pub struct Scene {
+    zbuf: Vec<f32>,
+    w: i64,
+    h: i64,
+    // sun direction, normalised, pointing FROM the surface TOWARD the light
+    sunX: f64,
+    sunY: f64,
+    sunZ: f64,
+    fogR: f64,
+    fogG: f64,
+    fogB: f64,
+    fogStart: f64,
+    fogEnd: f64,
+    tris: i64, // triangles actually rasterised this frame
+}
+
+pub fn sceneNew(w: i64, h: i64): Scene {
+    return Scene {
+        zbuf: Vec.filled(w * h, 0.0),
+        w: w,
+        h: h,
+        sunX: 0.44,
+        sunY: 0.78,
+        sunZ: 0.44,
+        fogR: 0.30,
+        fogG: 0.42,
+        fogB: 0.62,
+        fogStart: 420.0,
+        fogEnd: 1500.0,
+        tris: 0,
+    }
+}
+
+pub fn sceneClear(s: &mut Scene) {
+    let n = s.w * s.h
+    for i in 0..n {
+        s.zbuf[i] = 0.0 // storing 1/z, so 0 is infinitely far
+    }
+    s.tris = 0
+}
+
+// ── camera transform ──────────────────────────────────────────────────────────
+
+pub struct View {
+    // rows of the world→camera rotation, precomputed once per frame
+    rx: f64,
+    ry: f64,
+    rz: f64,
+    ux: f64,
+    uy: f64,
+    uz: f64,
+    fx: f64,
+    fy: f64,
+    fz: f64,
+    px: f64,
+    py: f64,
+    pz: f64,
+    scale: f64, // vertical projection scale in pixels
+    cx: f64,
+    cy: f64,
+}
+
+pub fn viewOf(c: &Camera, w: i64, h: i64): View {
+    let cy = Math.cos(c.yaw)
+    let sy = Math.sin(c.yaw)
+    let cp = Math.cos(c.pitch)
+    let sp = Math.sin(c.pitch)
+    let cr = Math.cos(c.roll)
+    let sr = Math.sin(c.roll)
+
+    // forward, then right and up derived from it, then roll about forward
+    let fx = sy * cp
+    let fy = sp
+    let fz = cy * cp
+    // right = normalise(cross(worldUp, forward))
+    var rx = cy
+    var ry = 0.0
+    var rz = 0.0 - sy
+    // up = cross(forward, right)
+    var ux = fy * rz - fz * ry
+    var uy = fz * rx - fx * rz
+    var uz = fx * ry - fy * rx
+    // apply roll: rotate right/up about forward
+    let rx2 = rx * cr + ux * sr
+    let ry2 = ry * cr + uy * sr
+    let rz2 = rz * cr + uz * sr
+    let ux2 = ux * cr - rx * sr
+    let uy2 = uy * cr - ry * sr
+    let uz2 = uz * cr - rz * sr
+
+    let scale = (h as f64) * 0.5 / Math.tan(c.fov * 0.5)
+    return View {
+        rx: rx2, ry: ry2, rz: rz2,
+        ux: ux2, uy: uy2, uz: uz2,
+        fx: fx, fy: fy, fz: fz,
+        px: c.x, py: c.y, pz: c.z,
+        scale: scale,
+        cx: (w as f64) * 0.5,
+        cy: (h as f64) * 0.5,
+    }
+}
+
+// World point → camera space. z is depth along the view direction.
+pub fn toCamera(v: &View, x: f64, y: f64, z: f64): Vec3 {
+    let dx = x - v.px
+    let dy = y - v.py
+    let dz = z - v.pz
+    return Vec3 {
+        x: dx * v.rx + dy * v.ry + dz * v.rz,
+        y: dx * v.ux + dy * v.uy + dz * v.uz,
+        z: dx * v.fx + dy * v.fy + dz * v.fz,
+    }
+}
+
+// ── rasteriser ────────────────────────────────────────────────────────────────
+
+// Depth-buffered flat-shaded triangle in CAMERA space. Depth-tests on 1/z, which
+// interpolates linearly in screen space — the reason the buffer stores 1/z.
+fn rasterCam(c: &mut Canvas, s: &mut Scene, v: &View, ax: f64, ay: f64, az: f64, bx: f64, by: f64, bz: f64, cx2: f64, cy2: f64, cz2: f64, r: f64, g: f64, b: f64) {
+    // project
+    let iaz = 1.0 / az
+    let ibz = 1.0 / bz
+    let icz = 1.0 / cz2
+    let x0 = v.cx + ax * v.scale * iaz
+    let y0 = v.cy - ay * v.scale * iaz
+    let x1 = v.cx + bx * v.scale * ibz
+    let y1 = v.cy - by * v.scale * ibz
+    let x2 = v.cx + cx2 * v.scale * icz
+    let y2 = v.cy - cy2 * v.scale * icz
+
+    // backface / degenerate cull via signed area
+    let area = (x1 - x0) * (y2 - y0) - (x2 - x0) * (y1 - y0)
+    if area <= 0.0 {
+        return
+    }
+
+    var minX = Math.floor(Math.minF64(x0, Math.minF64(x1, x2))) as i64
+    var maxX = Math.ceil(Math.maxF64(x0, Math.maxF64(x1, x2))) as i64
+    var minY = Math.floor(Math.minF64(y0, Math.minF64(y1, y2))) as i64
+    var maxY = Math.ceil(Math.maxF64(y0, Math.maxF64(y1, y2))) as i64
+    if minX < 0 {
+        minX = 0
+    }
+    if minY < 0 {
+        minY = 0
+    }
+    if maxX > s.w {
+        maxX = s.w
+    }
+    if maxY > s.h {
+        maxY = s.h
+    }
+    if minX >= maxX || minY >= maxY {
+        return
+    }
+
+    s.tris = s.tris + 1
+    let invArea = 1.0 / area
+    var py = minY
+    while py < maxY {
+        let fy = (py as f64) + 0.5
+        var px = minX
+        while px < maxX {
+            let fx = (px as f64) + 0.5
+            // edge functions; all non-negative means inside
+            let w0 = (x2 - x1) * (fy - y1) - (y2 - y1) * (fx - x1)
+            if w0 < 0.0 {
+                px = px + 1
+                continue
+            }
+            let w1 = (x0 - x2) * (fy - y2) - (y0 - y2) * (fx - x2)
+            if w1 < 0.0 {
+                px = px + 1
+                continue
+            }
+            let w2 = (x1 - x0) * (fy - y0) - (y1 - y0) * (fx - x0)
+            if w2 < 0.0 {
+                px = px + 1
+                continue
+            }
+            let l0 = w0 * invArea
+            let l1 = w1 * invArea
+            let l2 = w2 * invArea
+            let invZ = l0 * iaz + l1 * ibz + l2 * icz
+            let idx = py * s.w + px
+            if (s.zbuf[idx] as f64) < invZ {
+                s.zbuf[idx] = invZ as f32
+                let depth = 1.0 / invZ
+                // linear fog toward the sky colour
+                var f = (depth - s.fogStart) / (s.fogEnd - s.fogStart)
+                if f < 0.0 {
+                    f = 0.0
+                }
+                if f > 1.0 {
+                    f = 1.0
+                }
+                let o = idx * 3
+                c.hdr[o] = (r * (1.0 - f) + s.fogR * f) as f32
+                c.hdr[o + 1] = (g * (1.0 - f) + s.fogG * f) as f32
+                c.hdr[o + 2] = (b * (1.0 - f) + s.fogB * f) as f32
+            }
+            px = px + 1
+        }
+        py = py + 1
+    }
+}
+
+pub let NEAR: f64 = 0.6
+
+// A world-space triangle, clipped against the near plane and then rasterised.
+// Clipping matters: a triangle straddling the camera plane projects to garbage,
+// and terrain directly under a low-flying plane does exactly that.
+pub fn triangle(c: &mut Canvas, s: &mut Scene, v: &View, wax: f64, way: f64, waz: f64, wbx: f64, wby: f64, wbz: f64, wcx: f64, wcy: f64, wcz: f64, r: f64, g: f64, b: f64) {
+    let a = toCamera(v, wax, way, waz)
+    let bb = toCamera(v, wbx, wby, wbz)
+    let cc = toCamera(v, wcx, wcy, wcz)
+
+    let ina = a.z > NEAR
+    let inb = bb.z > NEAR
+    let inc = cc.z > NEAR
+    var n = 0
+    if ina {
+        n = n + 1
+    }
+    if inb {
+        n = n + 1
+    }
+    if inc {
+        n = n + 1
+    }
+    if n == 0 {
+        return
+    }
+    if n == 3 {
+        rasterCam(c, s, v, a.x, a.y, a.z, bb.x, bb.y, bb.z, cc.x, cc.y, cc.z, r, g, b)
+        return
+    }
+    // Sutherland–Hodgman against the single near plane, producing 3 or 4 points.
+    var px: Vec<f64> = Vec.new()
+    var py: Vec<f64> = Vec.new()
+    var pz: Vec<f64> = Vec.new()
+    clipEdge(px, py, pz, a, bb)
+    clipEdge(px, py, pz, bb, cc)
+    clipEdge(px, py, pz, cc, a)
+    if px.len < 3 {
+        return
+    }
+    for i in 1..px.len - 1 {
+        rasterCam(c, s, v, px[0], py[0], pz[0], px[i], py[i], pz[i], px[i + 1], py[i + 1], pz[i + 1], r, g, b)
+    }
+}
+
+fn clipEdge(px: &mut Vec<f64>, py: &mut Vec<f64>, pz: &mut Vec<f64>, a: &Vec3, b: &Vec3) {
+    let ina = a.z > NEAR
+    let inb = b.z > NEAR
+    if ina {
+        px.push(a.x)
+        py.push(a.y)
+        pz.push(a.z)
+    }
+    if ina != inb {
+        let t = (NEAR - a.z) / (b.z - a.z)
+        px.push(a.x + (b.x - a.x) * t)
+        py.push(a.y + (b.y - a.y) * t)
+        pz.push(NEAR)
+    }
+}
+
+// Lambert term for a triangle whose world-space normal is (nx,ny,nz).
+pub fn shade(s: &Scene, nx: f64, ny: f64, nz: f64, ambient: f64): f64 {
+    var d = nx * s.sunX + ny * s.sunY + nz * s.sunZ
+    if d < 0.0 {
+        d = 0.0
+    }
+    return ambient + (1.0 - ambient) * d
+}

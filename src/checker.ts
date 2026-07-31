@@ -1395,6 +1395,18 @@ export class TypeChecker {
     // type-check module-level globals — push a module scope so declare() works
     this.pushScope();
     const globalTypes = new Map<string, TypeKind>();
+    const hasMain = program.functions.some(f => f.name === "main" && !f.isExtern);
+    // Declare annotated globals up front. Checking one global's initializer can
+    // monomorphize a function whose body reads a global declared further down the
+    // list (a `var g: Arena<T> = arenaNew<T>()` reaches std/arena's `nextArenaId`),
+    // and checking them strictly in order reported that as an undefined variable
+    // inside a std file. Unannotated globals still wait for their inferred type.
+    for (const g of program.globals) {
+      if (!g.type) continue;
+      const t = this.resolve(g.type);
+      globalTypes.set(g.name, t);
+      this.declare(g.name, { type: t, mutable: g.mutable, moved: false, borrowed: false, read: true, span: g.span });
+    }
     for (const g of program.globals) {
       const hint = g.type ? this.resolve(g.type) : null;
       const valType = this.checkExprWithHint(g.value, hint);
@@ -1403,21 +1415,18 @@ export class TypeChecker {
         this.error(`global '${g.name}': type mismatch: expected ${typeName(hint)}, got ${typeName(valType)}`, g.span);
       }
       globalTypes.set(g.name, finalType);
-      // A non-empty Vec/HashMap literal is const-shaped but needs heap
-      // allocation, so it's just as silently-zeroed as a runtime call.
-      const heapLit =
-        (finalType.tag === "vec" || finalType.tag === "hashmap") &&
-        !(g.value.kind === "ArrayLit" && g.value.elements.length === 0);
-      if (!this.isConstGlobalInit(g.value) || heapLit) {
-        // Codegen emits globals via LLVM constant initializers only; anything
-        // runtime-evaluated used to silently become zeroinitializer ("" / 0 /
-        // empty), which repeatedly masqueraded as deadlocks downstream.
+      // Non-constant initializers used to be rejected outright, because codegen emitted
+      // globals as LLVM constants only and a runtime-evaluated one silently became
+      // zeroinitializer ("" / 0 / empty). They now run in a generated routine that main
+      // calls before its body, in declaration order — so this is a real initializer, and
+      // the only remaining rule is that it can't run before main exists.
+      if (!this.isConstGlobalInit(g.value) && !hasMain) {
         this.error(
-          `global '${g.name}': initializer is not a compile-time constant — module-scope runtime initialization is not supported, so this would silently become zero/empty at runtime. Assign it at the start of main() instead (declare it as '= ""', '= 0', '= []', ...)`,
+          `global '${g.name}': initializer is not a compile-time constant, and this module has no main() to run it before — give it a constant initializer ('= ""', '= 0', '= []') and assign the real value at the start of your entry point`,
           g.span,
         );
       }
-      this.declare(g.name, { type: finalType, mutable: g.mutable, moved: false, borrowed: false, read: true, span: g.span });
+      if (!g.type) this.declare(g.name, { type: finalType, mutable: g.mutable, moved: false, borrowed: false, read: true, span: g.span });
     }
     this._globalTypes = globalTypes;
 

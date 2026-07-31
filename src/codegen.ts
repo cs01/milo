@@ -6,6 +6,9 @@ import { genVecSort, genVecSortBy, genVecSortByKey } from "./codegen-vec";
 import { classifyArg, classifyRet, AbiError, type ArgClass, type RetClass, type AbiStruct, type AbiLeaf } from "./abi";
 import { resolve, dirname, basename } from "path";
 
+// `.` can't appear in a Milo identifier, so this never collides with a user function.
+const GLOBAL_INIT_FN = "__milo.global_init";
+
 interface ExternAbiInfo {
   args: (ArgClass | null)[]; // per fixed param; null = direct (scalar/ptr/ref — no rewrite)
   ret: RetClass;
@@ -59,6 +62,7 @@ export class Codegen {
   private enumLayouts = new Map<string, EnumLayout>();
   private userDeclaredFns = new Set<string>();
   private needsBoundsCheck = false;
+  private needsGlobalInit = false;
   private needsOverflowCheck = false;
   private needsRangeCheck = false;
   private needsContractCheck = false;
@@ -1147,9 +1151,29 @@ export class Codegen {
       this.globalVars.set(g.name, { type: ty, typeKind: g.type });
     }
 
+    // A global whose initializer needs to run code (an arena, a populated Vec) is emitted
+    // zeroed and filled in by a generated routine that main calls before its own body.
+    // Evaluation is declaration order, and the resolver puts imported modules ahead of the
+    // importer, so a global may read anything declared above it and nothing below.
+    const runtimeInitGlobals = module.globals.filter(g => !this.isFullyConstInit(g));
+    this.needsGlobalInit = runtimeInitGlobals.length > 0;
+    const initFn: HIRFunction | null = runtimeInitGlobals.length === 0 ? null : {
+      name: GLOBAL_INIT_FN,
+      params: [],
+      retType: { tag: "void" },
+      body: runtimeInitGlobals.map(g => ({
+        kind: "Assign" as const,
+        target: { kind: "Ident" as const, name: g.name, type: g.type },
+        value: g.value,
+      })),
+      isExtern: false,
+      isVariadic: false,
+    };
+
     // generate function bodies first (collects string constants, sets needsBoundsCheck)
     const fnBodies: string[][] = [];
     for (const fn of functions) fnBodies.push(this.genFunction(fn));
+    if (initFn) fnBodies.push(this.genFunction(initFn));
 
     // auto-declare C functions needed by built-ins and bounds checks
     const declaredExterns = new Set(externs.map(e => e.name));
@@ -1443,6 +1467,8 @@ export class Codegen {
     if (fn.name === "main") {
       lines.push("  store i32 %_milo_argc, ptr @_milo_argc_global");
       lines.push("  store ptr %_milo_argv, ptr @_milo_argv_global");
+      // after argc/argv: a global initializer may read them (argparse-style defaults)
+      if (this.needsGlobalInit) lines.push(`  call void @${GLOBAL_INIT_FN}()`);
     }
 
     const paramSpillStart = lines.length;
@@ -10051,6 +10077,23 @@ export class Codegen {
       default:
         return null;
     }
+  }
+
+  // Whether the LLVM constant initializer captures the whole value. A struct literal
+  // with a non-const field lowers to a *partial* constant (that field zeroed), so it
+  // still needs the runtime pass — this is the check that decides which globals go in
+  // @__milo_global_init, and answering "yes" for a partial init is how a field silently
+  // stays empty.
+  private isFullyConstInit(g: import("./hir").HIRGlobal): boolean {
+    if (this.tryConstantExpr(g.value) !== null) return true;
+    if (g.value?.kind !== "StructLit") return false;
+    const layout = this.structLayouts.get(g.type.tag === "struct" ? g.type.name : "");
+    if (!layout) return false;
+    const byName = new Map(g.value.fields.map(f => [f.name, f.value]));
+    return layout.fields.every(f => {
+      const e = byName.get(f.name);
+      return !e || this.tryConstantExpr(e) !== null;
+    });
   }
 
   private getConstantInitializer(g: import("./hir").HIRGlobal): string {

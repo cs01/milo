@@ -1,0 +1,36 @@
+// Module-scope globals may now run real initializers: a generated routine evaluates
+// them in declaration order and main calls it before its body. Previously anything
+// non-constant was rejected, because codegen emitted globals as LLVM constants only
+// and a runtime value silently became zeroinitializer.
+from "std/arena" import {
+    Arena, arenaNew
+}
+
+struct Node {
+    val: i64
+}
+
+var greeting: string = "hello"
+var names: Vec<string> = ["alpha", "beta"]
+var pool: Arena<Node> = arenaNew<Node>()
+
+pub fn main(): i32 {
+    // @expect: hello
+    print(greeting)
+    // @expect: beta
+    print(names[1])
+    let h = pool.alloc(Node {
+        val: 9
+    }
+    )
+    match pool.get(h) {
+        Some(n) => {
+            // @expect: 9
+            print(n.val)
+        }
+        None => {
+            print(-1)
+        }
+    }
+    return 0
+}

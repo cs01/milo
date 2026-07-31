@@ -13,7 +13,7 @@ from "./mascot" import {
 }
 from "./world" import {
     Mine, Col, TILE, MAP_W, MAP_H, SURFACE, tileAt, tileColor, isSolid,
-    T_SKY, T_GOLD, T_GEM, T_CRYSTAL, T_BEDROCK, T_WATER, isUpgrade
+    T_SKY, T_GOLD, T_GEM, T_CRYSTAL, T_BEDROCK, T_WATER, T_GATE, isUpgrade
 }
 
 // Stable per-tile pseudo-random in 0..1.
@@ -201,6 +201,14 @@ pub fn drawMine(c: &mut Canvas, m: &Mine, ox: f64, oy: f64) {
             if t == T_BEDROCK {
                 ambient = 0.13
             }
+            if t == T_GATE {
+                // Visible from anywhere: this is the thing "head east" means.
+                if m.exitOpen {
+                    ambient = 1.10 + 0.45 * Math.sin(m.time * 5.0)
+                } else {
+                    ambient = 0.34 + 0.10 * Math.sin(m.time * 2.0)
+                }
+            }
             if t == T_GOLD || t == T_GEM || t == T_CRYSTAL {
                 ambient = 0.20 + 0.07 * Math.sin(m.time * 3.0 + (tx as f64) + (ty as f64))
             }
@@ -310,6 +318,32 @@ pub fn drawHud(c: &mut Canvas, m: &Mine) {
         }
         fillRect(c, bx, by, bx + 380.0 * frac, by + 10.0, 0.50, 0.40, 0.10)
         textCentered(c, c.w / 2, 50, m.levelValue.toString() + " / " + m.quota.toString() + " TO OPEN THE WAY OUT", 2, 0.34, 0.30, 0.22)
+    }
+
+    // Where the gate is, and how far — you should never have to wonder.
+    let gateWorldX = ((m.exitX - 1) as f64) * TILE
+    let gateWorldY = ((m.gateY + 1) as f64) * TILE
+    let sxg = gateWorldX - m.camX
+    let syg = gateWorldY - m.camY
+    let metres = ((gateWorldX - m.px) / TILE) as i64
+    if sxg > (c.w as f64) - 30.0 || syg < 0.0 || syg > (c.h as f64) {
+        // off screen: pin an arrow to the edge in its direction
+        let ey = Math.clampF64(syg, 60.0, (c.h as f64) - 60.0)
+        var col = 0.55
+        var cg2 = 0.45
+        if m.exitOpen {
+            col = 0.4
+            cg2 = 1.4
+        }
+        let pulse = 0.7 + 0.3 * Math.sin(m.time * 4.0)
+        line(c, (c.w as f64) - 40.0, ey - 12.0, (c.w as f64) - 22.0, ey, col * pulse, cg2 * pulse, 0.5 * pulse)
+        line(c, (c.w as f64) - 40.0, ey + 12.0, (c.w as f64) - 22.0, ey, col * pulse, cg2 * pulse, 0.5 * pulse)
+        line(c, (c.w as f64) - 62.0, ey, (c.w as f64) - 22.0, ey, col * pulse, cg2 * pulse, 0.5 * pulse)
+        var lbl = "GATE " + metres.toString() + "M"
+        if !m.exitOpen {
+            lbl = "LOCKED " + metres.toString() + "M"
+        }
+        text(c, c.w - 62 - textWidth(lbl, 2), (ey as i64) + 16, lbl, 2, col * 0.7, cg2 * 0.7, 0.4)
     }
 
     if m.cleared > 0.0 {

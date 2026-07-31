@@ -13,9 +13,9 @@ from "std/random" import {
 
 pub let TILE: f64 = 18.0
 
-pub let MAP_W: i64 = 340
+pub let MAP_W: i64 = 96
 
-pub let MAP_H: i64 = 150
+pub let MAP_H: i64 = 110
 
 // tile kinds
 pub let T_SKY: i64 = 0
@@ -41,6 +41,8 @@ pub let T_PWR_DRILL: i64 = 9
 pub let T_PWR_WIDE: i64 = 10
 
 pub let T_PWR_LAMP: i64 = 11
+
+pub let T_GATE: i64 = 12
 
 pub struct Col {
     r: f64,
@@ -107,6 +109,7 @@ pub struct Mine {
     levelValue: i64,
     exitX: i64,
     exitOpen: bool,
+    gateY: i64,
     cleared: f64,
     wideDig: bool,
     lampLevel: i64,
@@ -222,13 +225,17 @@ fn generate(m: &mut Mine) {
             m.tiles[y * MAP_W + x] = T_SKY as u8
         }
     }
-    // The way out: a clear shaft at the right edge, cased in bedrock so it reads
-    // as a made thing rather than a hole you happened to dig. You dig LEFT TO
-    // RIGHT to reach it.
+    // The way out: a bedrock-cased shaft down the right-hand edge with a gate
+    // across it. The gate glows from anywhere on the map, so "head east" always
+    // has something to aim at. You dig LEFT TO RIGHT to reach it.
     for y in SURFACE..MAP_H - 2 {
         m.tiles[y * MAP_W + m.exitX] = T_SKY as u8
         m.tiles[y * MAP_W + m.exitX - 1] = T_BEDROCK as u8
         m.tiles[y * MAP_W + m.exitX + 1] = T_BEDROCK as u8
+    }
+    // Three gate tiles at a comfortable depth, so you do not have to guess a row.
+    for y in m.gateY..m.gateY + 3 {
+        m.tiles[y * MAP_W + m.exitX - 1] = T_GATE as u8
     }
 }
 
@@ -259,10 +266,11 @@ pub fn mineNew(): Mine {
         banner: 3.0,
         hint: 6.0,
         level: 1,
-        quota: 300,
+        quota: 200,
         levelValue: 0,
-        exitX: MAP_W - 4,
+        exitX: MAP_W - 6,
         exitOpen: false,
+        gateY: SURFACE + 6,
         cleared: 0.0,
         wideDig: false,
         lampLevel: 0,
@@ -275,7 +283,7 @@ pub fn mineNew(): Mine {
 // Fresh ground, one level further along the seam.
 pub fn nextLevel(m: &mut Mine) {
     m.level = m.level + 1
-    m.quota = 300 + m.level * 280
+    m.quota = 200 + m.level * 170
     m.levelValue = 0
     m.exitOpen = false
     m.wideDig = false
@@ -391,6 +399,11 @@ pub fn tileName(t: i64): string {
 
 pub fn isSolid(t: i64): bool {
     return t != T_SKY && t != T_WATER
+}
+
+// The gate blocks the way until the quota is met; after that you walk straight in.
+pub fn gateBlocks(m: &Mine, t: i64): bool {
+    return t == T_GATE && !m.exitOpen
 }
 
 // ── effects ───────────────────────────────────────────────────────────────────
@@ -555,7 +568,7 @@ fn applyUpgrade(m: &mut Mine, t: i64, x: f64, y: f64) {
 // true while a tile is actively being dug, so the renderer can show the bite.
 fn drill(m: &mut Mine, tx: i64, ty: i64, dt: f64): bool {
     let t = tileAt(m, tx, ty)
-    if t == T_SKY || t == T_BEDROCK {
+    if t == T_SKY || t == T_BEDROCK || t == T_GATE {
         m.digX = 0 - 1
         m.digProgress = 0.0
         return false
@@ -635,7 +648,8 @@ pub fn mineUpdate(m: &mut Mine, dt: f64, inX: f64, inY: f64, viewW: f64, viewH: 
         let nx = m.px + inX * speed * dt
         let tx = ((nx + inX * TILE * 0.42) / TILE) as i64
         let ty = (m.py / TILE) as i64
-        if !isSolid(tileAt(m, tx, ty)) {
+        let tt = tileAt(m, tx, ty)
+        if !isSolid(tt) || (tt == T_GATE && m.exitOpen) {
             m.px = nx
             moved = true
         } else {
@@ -647,7 +661,8 @@ pub fn mineUpdate(m: &mut Mine, dt: f64, inX: f64, inY: f64, viewW: f64, viewH: 
         let ny = m.py + inY * speed * dt
         let tx = (m.px / TILE) as i64
         let ty = ((ny + inY * TILE * 0.42) / TILE) as i64
-        if !isSolid(tileAt(m, tx, ty)) {
+        let tt = tileAt(m, tx, ty)
+        if !isSolid(tt) || (tt == T_GATE && m.exitOpen) {
             m.py = ny
             moved = true
         } else {
@@ -670,7 +685,7 @@ pub fn mineUpdate(m: &mut Mine, dt: f64, inX: f64, inY: f64, viewW: f64, viewH: 
         }
     } else if m.exitOpen {
         let ex = (m.exitX as f64) * TILE + TILE * 0.5
-        if Math.abs(m.px - ex) < TILE {
+        if m.px > ex - TILE * 2.0 {
             m.cleared = 2.6
             m.flash = 0.9
             m.shake = 10.0

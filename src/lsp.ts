@@ -1283,6 +1283,9 @@ const STRING_BUILTIN_METHODS: { name: string; sig: string }[] = [
   { name: "trimStart", sig: "(): string" },
   { name: "trimEnd", sig: "(): string" },
   { name: "split", sig: "(sep: string): Vec<string>" },
+  // for-in only: both yield &string views into the receiver, never owned copies
+  { name: "lines", sig: "(): &string pieces — 'for line in s.lines()'" },
+  { name: "splitView", sig: "(sep: string): &string pieces — 'for f in s.splitView(sep)'" },
   { name: "splitWords", sig: "(): Vec<string>" },
   { name: "splitWhitespace", sig: "(): Vec<string>" },
   { name: "repeat", sig: "(n: i64): string" },

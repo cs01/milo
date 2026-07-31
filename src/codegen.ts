@@ -106,6 +106,8 @@ export class Codegen {
   private generatedJsonEscapeHelper = false;
   private generatedStructDropHelpers = new Set<string>();
   private dropHelperBodies: string[][] = [];
+  private helperFnBodies: string[][] = [];
+  private emittedStrFind = false;
   private closureBodies: string[][] = [];
   private closureCounter = 0;
   public scopeCounter = 0;
@@ -1357,6 +1359,12 @@ export class Codegen {
       for (const line of body) this.emit(line);
     }
 
+    // append shared runtime helpers (substring search, ...)
+    for (const body of this.helperFnBodies) {
+      this.emit("");
+      for (const line of body) this.emit(line);
+    }
+
     // append closure function bodies
     for (const body of this.closureBodies) {
       this.emit("");
@@ -1820,6 +1828,8 @@ export class Codegen {
         return this.genForEach(stmt);
       case "ForIterator":
         return this.genForIterator(stmt);
+      case "ForStrView":
+        return this.genForStrView(stmt);
     }
   }
 
@@ -2693,6 +2703,228 @@ export class Codegen {
       this.loopDropStart = prevDropStart;
       return [lines, false];
     }
+  }
+
+  // Naive substring search shared by every `splitView`/`lines` loop: returns the byte
+  // offset of `n` in `h` at or after `from`, or -1. Emitted once per module; a Milo-level
+  // `strIndexOfFrom` can't be used here because codegen cannot assume std/string is
+  // imported by the program being compiled.
+  private strFindFn(): string {
+    if (!this.emittedStrFind) {
+      this.emittedStrFind = true;
+      this.needsMemcmp = true;
+      this.helperFnBodies.push([
+        "define internal i64 @milo.strfind(ptr %h, i64 %hlen, ptr %n, i64 %nlen, i64 %from) {",
+        "entry:",
+        // negative when the needle is longer than the haystack, which makes the first
+        // comparison below fail and the search miss without a special case
+        "  %limit = sub i64 %hlen, %nlen",
+        "  br label %loop",
+        "loop:",
+        "  %i = phi i64 [ %from, %entry ], [ %inext, %next ]",
+        "  %past = icmp sgt i64 %i, %limit",
+        "  br i1 %past, label %miss, label %cmp",
+        "cmp:",
+        "  %p = getelementptr i8, ptr %h, i64 %i",
+        "  %c = call i32 @memcmp(ptr %p, ptr %n, i64 %nlen)",
+        "  %eq = icmp eq i32 %c, 0",
+        "  br i1 %eq, label %hit, label %next",
+        "next:",
+        "  %inext = add i64 %i, 1",
+        "  br label %loop",
+        "hit:",
+        "  ret i64 %i",
+        "miss:",
+        "  ret i64 -1",
+        "}",
+      ]);
+    }
+    return "@milo.strfind";
+  }
+
+  // `for line in text.lines()` / `for f in text.splitView(sep)`. Each iteration stores a
+  // non-owning %String (cap 0, so drop glue skips it) pointing into the receiver's buffer,
+  // which the checker has frozen for the whole loop.
+  private genForStrView(stmt: HIRStmt & { kind: "ForStrView" }): [string[], boolean] {
+    const lines: string[] = [];
+    this.hasStringType = true;
+
+    const [srcLines, srcAddr] = this.genForEachIterableAddr(stmt.src);
+    lines.push(...srcLines);
+    const dataPtr = this.nextTemp();
+    const data = this.nextTemp();
+    const lenPtr = this.nextTemp();
+    const len = this.nextTemp();
+    lines.push(`  ${dataPtr} = getelementptr %String, ptr ${srcAddr}, i32 0, i32 0`);
+    lines.push(`  ${data} = load ptr, ptr ${dataPtr}`);
+    lines.push(`  ${lenPtr} = getelementptr %String, ptr ${srcAddr}, i32 0, i32 1`);
+    lines.push(`  ${len} = load i64, ptr ${lenPtr}`);
+
+    // the separator: an explicit argument for splitView, a literal newline for lines
+    let sepPtr: string;
+    let sepLen: string;
+    if (stmt.mode === "split" && stmt.sep) {
+      const [sepLines, sepVal] = this.genExpr(stmt.sep);
+      lines.push(...sepLines);
+      sepPtr = this.nextTemp();
+      sepLen = this.nextTemp();
+      lines.push(`  ${sepPtr} = extractvalue %String ${sepVal}, 0`);
+      lines.push(`  ${sepLen} = extractvalue %String ${sepVal}, 1`);
+    } else {
+      const { label, length } = this.addString("\n");
+      sepPtr = this.nextTemp();
+      lines.push(`  ${sepPtr} = getelementptr [${length} x i8], ptr ${label}, i32 0, i32 0`);
+      sepLen = "1";
+    }
+    const findFn = this.strFindFn();
+
+    const posAddr = `%__strview_pos.${this.scopeCounter++}.addr`;
+    const nextAddr = `%__strview_next.${this.scopeCounter++}.addr`;
+    this.entryAllocas.push(`  ${posAddr} = alloca i64`);
+    this.entryAllocas.push(`  ${nextAddr} = alloca i64`);
+    lines.push(`  store i64 0, ptr ${posAddr}`);
+
+    // enumerate form: `for i, line in text.lines()` binds the piece to the second name
+    const viewName = stmt.varName2 ?? stmt.varName;
+    const varAddr = this.locals.has(viewName) ? `%${viewName}.${this.scopeCounter++}.addr` : `%${viewName}.addr`;
+    this.entryAllocas.push(`  ${varAddr} = alloca %String`);
+    this.locals.set(viewName, { type: "%String", typeKind: stmt.varType, mutable: false, isRef: false, addr: varAddr });
+    let idxAddr: string | null = null;
+    if (stmt.varName2) {
+      idxAddr = `%__strview_idx.${this.scopeCounter++}.addr`;
+      this.entryAllocas.push(`  ${idxAddr} = alloca i64`);
+      lines.push(`  store i64 0, ptr ${idxAddr}`);
+      this.locals.set(stmt.varName, { type: "i64", typeKind: { tag: "int", bits: 64, signed: true }, mutable: false, isRef: false, addr: idxAddr });
+    }
+
+    const condLabel = this.nextLabel("strview.cond");
+    const bodyLabel = this.nextLabel("strview.body");
+    const incrLabel = this.nextLabel("strview.incr");
+    const endLabel = this.nextLabel("strview.end");
+    const prevHeader = this.loopHeader;
+    const prevExit = this.loopExit;
+    const prevDropStart = this.loopDropStart;
+    this.loopHeader = incrLabel;
+    this.loopExit = endLabel;
+    this.loopDropStart = this.droppableLocals.length;
+
+    lines.push(`  br label %${condLabel}`);
+    lines.push(`${condLabel}:`);
+    const pos = this.nextTemp();
+    lines.push(`  ${pos} = load i64, ptr ${posAddr}`);
+    const more = this.nextTemp();
+    if (stmt.mode === "lines") {
+      // a trailing newline ends the last line, it does not start an empty one
+      lines.push(`  ${more} = icmp slt i64 ${pos}, ${len}`);
+    } else {
+      // `pos == len` still yields the piece after a trailing separator ("a," -> "a", "")
+      const inRange = this.nextTemp();
+      const sepEmpty = this.nextTemp();
+      const emptyDone = this.nextTemp();
+      const notEmptyDone = this.nextTemp();
+      lines.push(`  ${inRange} = icmp sle i64 ${pos}, ${len}`);
+      // an empty separator splits into single bytes, which run out one step earlier
+      lines.push(`  ${sepEmpty} = icmp eq i64 ${sepLen}, 0`);
+      lines.push(`  ${emptyDone} = icmp sge i64 ${pos}, ${len}`);
+      lines.push(`  ${notEmptyDone} = xor i1 ${emptyDone}, true`);
+      const okEmpty = this.nextTemp();
+      lines.push(`  ${okEmpty} = select i1 ${sepEmpty}, i1 ${notEmptyDone}, i1 true`);
+      lines.push(`  ${more} = and i1 ${inRange}, ${okEmpty}`);
+    }
+    lines.push(`  br i1 ${more}, label %${bodyLabel}, label %${endLabel}`);
+
+    lines.push(`${bodyLabel}:`);
+    const found = this.nextTemp();
+    lines.push(`  ${found} = call i64 ${findFn}(ptr ${data}, i64 ${len}, ptr ${sepPtr}, i64 ${sepLen}, i64 ${pos})`);
+    let sepIdx = found;
+    if (stmt.mode === "split") {
+      // an empty needle matches at `pos` and would never advance; treat the next byte
+      // boundary as the separator instead, which is what strSplit("") yields
+      const sepEmpty2 = this.nextTemp();
+      const posPlus1 = this.nextTemp();
+      const chosen = this.nextTemp();
+      lines.push(`  ${sepEmpty2} = icmp eq i64 ${sepLen}, 0`);
+      lines.push(`  ${posPlus1} = add i64 ${pos}, 1`);
+      lines.push(`  ${chosen} = select i1 ${sepEmpty2}, i64 ${posPlus1}, i64 ${found}`);
+      sepIdx = chosen;
+    }
+    const hasSep = this.nextTemp();
+    const pieceEnd = this.nextTemp();
+    lines.push(`  ${hasSep} = icmp sge i64 ${sepIdx}, 0`);
+    lines.push(`  ${pieceEnd} = select i1 ${hasSep}, i64 ${sepIdx}, i64 ${len}`);
+
+    let viewEnd = pieceEnd;
+    if (stmt.mode === "lines") {
+      // CRLF: the '\r' belongs to the line ending, not to the line
+      const nonEmpty = this.nextTemp();
+      const prevIdx = this.nextTemp();
+      const probeIdx = this.nextTemp();
+      const probePtr = this.nextTemp();
+      const probe = this.nextTemp();
+      const isCR = this.nextTemp();
+      const strip = this.nextTemp();
+      const stripped = this.nextTemp();
+      lines.push(`  ${nonEmpty} = icmp sgt i64 ${pieceEnd}, ${pos}`);
+      lines.push(`  ${prevIdx} = sub i64 ${pieceEnd}, 1`);
+      // clamped so the load stays inside the buffer when the line is empty
+      lines.push(`  ${probeIdx} = select i1 ${nonEmpty}, i64 ${prevIdx}, i64 ${pos}`);
+      lines.push(`  ${probePtr} = getelementptr i8, ptr ${data}, i64 ${probeIdx}`);
+      lines.push(`  ${probe} = load i8, ptr ${probePtr}`);
+      lines.push(`  ${isCR} = icmp eq i8 ${probe}, 13`);
+      lines.push(`  ${strip} = and i1 ${nonEmpty}, ${isCR}`);
+      lines.push(`  ${stripped} = select i1 ${strip}, i64 ${prevIdx}, i64 ${pieceEnd}`);
+      viewEnd = stripped;
+    }
+
+    const viewPtr = this.nextTemp();
+    const viewLen = this.nextTemp();
+    lines.push(`  ${viewPtr} = getelementptr i8, ptr ${data}, i64 ${pos}`);
+    lines.push(`  ${viewLen} = sub i64 ${viewEnd}, ${pos}`);
+    const v0 = this.nextTemp();
+    const v1 = this.nextTemp();
+    const v2 = this.nextTemp();
+    lines.push(`  ${v0} = insertvalue %String undef, ptr ${viewPtr}, 0`);
+    lines.push(`  ${v1} = insertvalue %String ${v0}, i64 ${viewLen}, 1`);
+    lines.push(`  ${v2} = insertvalue %String ${v1}, i64 0, 2`);
+    lines.push(`  store %String ${v2}, ptr ${varAddr}`);
+
+    // Computed here, where the search result is live, and read back in the increment
+    // block — which `continue` can also reach, from blocks that do not see these values.
+    const afterSep = this.nextTemp();
+    const past = this.nextTemp();
+    const nextPos = this.nextTemp();
+    lines.push(`  ${afterSep} = add i64 ${pieceEnd}, ${sepLen}`);
+    lines.push(`  ${past} = add i64 ${len}, 1`);
+    lines.push(`  ${nextPos} = select i1 ${hasSep}, i64 ${afterSep}, i64 ${past}`);
+    lines.push(`  store i64 ${nextPos}, ptr ${nextAddr}`);
+
+    this.emitLoopInvariants(lines, stmt.invariants);
+    let bodyTerminated = false;
+    for (const s of stmt.body) {
+      const [sl, t] = this.genStmt(s);
+      lines.push(...sl);
+      if (t) { bodyTerminated = true; break; }
+    }
+    if (!bodyTerminated) { this.emitScopeDrops(lines, this.loopDropStart); lines.push(`  br label %${incrLabel}`); }
+
+    lines.push(`${incrLabel}:`);
+    const advanced = this.nextTemp();
+    lines.push(`  ${advanced} = load i64, ptr ${nextAddr}`);
+    lines.push(`  store i64 ${advanced}, ptr ${posAddr}`);
+    if (idxAddr) {
+      const curIdx = this.nextTemp();
+      const nextIdx = this.nextTemp();
+      lines.push(`  ${curIdx} = load i64, ptr ${idxAddr}`);
+      lines.push(`  ${nextIdx} = add i64 ${curIdx}, 1`);
+      lines.push(`  store i64 ${nextIdx}, ptr ${idxAddr}`);
+    }
+    lines.push(`  br label %${condLabel}`);
+
+    lines.push(`${endLabel}:`);
+    this.loopHeader = prevHeader;
+    this.loopExit = prevExit;
+    this.loopDropStart = prevDropStart;
+    return [lines, false];
   }
 
   private genForIterator(stmt: HIRStmt & { kind: "ForIterator" }): [string[], boolean] {

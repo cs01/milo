@@ -521,6 +521,13 @@ print(hello)                    // auto-deref: methods/print/indexing all work
 var view = message[0..3]
 view = message[3..5]            // reassignable, just updates the pointer
 
+// Iterating views — a whole text pass with no allocation
+for line in message.lines() {        // line: &string, one per '\n' ('\r\n' handled)
+    for field in line.splitView("\t") {   // field: &string, one per separator
+        print(field)
+    }
+}
+
 // Owned copy — when you need a string that outlives the source
 let owned = message.substr(0, 5)  // allocates new string
 
@@ -565,6 +572,31 @@ s.repeat(3)             // "Hello, World!Hello, World!Hello, World!"
 "42".parseInt()         // 42 (i64)
 s.substr(0, 5)          // "Hello" (owned copy)
 ```
+
+#### Iterating views — `lines()` and `splitView()`
+
+`split` copies: every piece is an owned `string` in a fresh `Vec`. `lines()` and
+`splitView(sep)` copy nothing — each piece is a `&string` view into the receiver:
+
+```milo
+let text = "a,b\nc,d\n"
+for line in text.lines() {                // line: &string, no allocation
+    for field in line.splitView(",") {    // field: &string, no allocation
+        print(field)
+    }
+}
+```
+
+Both take the enumerate form too: `for i, line in text.lines()` binds a 0-based index.
+
+Both are **loop forms, not expressions**: `let parts = s.splitView(",")` is an error,
+because a view has nowhere to live outside the loop that borrowed the receiver for it.
+The receiver is frozen for the loop — it cannot be mutated, moved or reassigned while
+pieces of it are live — and a piece cannot escape (`.clone()` it to keep one).
+
+`splitView` matches `split` piece for piece, empty pieces and all (`"a,,b,"` yields
+`"a"`, `""`, `"b"`, `""`). `lines()` splits on `'\n'`, drops a trailing `'\r'`, and does
+not yield an empty final line after a trailing newline.
 
 ### String Utility Functions (std/string)
 

@@ -1,0 +1,8 @@
+// The pieces are views into `t`, so there is nowhere to keep them: the loop that freezes
+// the receiver is the only place they are valid.
+pub fn main(): i32 {
+    let t = "a,b"
+    let _parts = t.splitView(",")
+    return 0
+}
+// @error: only valid as the iterable of a 'for ... in' loop

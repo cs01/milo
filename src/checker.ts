@@ -142,6 +142,7 @@ export interface CheckResult {
   anonStructs: { name: string; fields: { name: string; type: TypeKind }[] }[];
   globalTypes?: Map<string, TypeKind>;
   iteratorForIns: Map<Stmt, { nextMethod: string; elemType: TypeKind; optionEnumName: string }>;
+  stringViewForIns: Map<Stmt, { mode: "lines" | "split" }>;
 }
 
 interface GenericEnumInfo {
@@ -286,6 +287,7 @@ export class TypeChecker {
   private resolvedMethods = new Map<Expr, string>();
   private heapMethodReceivers = new Set<Expr>();
   private iteratorForIns = new Map<Stmt, { nextMethod: string; elemType: TypeKind; optionEnumName: string }>();
+  private stringViewForIns = new Map<Stmt, { mode: "lines" | "split" }>();
   private resolvedOperators = new Map<Expr, string>();
   private fnFieldCalls = new Set<Expr>();
   private propagateConversions = new Map<Expr, { targetEnumName: string; wrapVariant: string; wrapTag: number }>();
@@ -1564,6 +1566,7 @@ export class TypeChecker {
       anonStructs: this.anonStructs,
       globalTypes: this._globalTypes,
       iteratorForIns: this.iteratorForIns,
+      stringViewForIns: this.stringViewForIns,
     };
   }
 
@@ -2482,6 +2485,97 @@ export class TypeChecker {
     this.borrowedExprs.add(obj);
   }
 
+  // `s.lines()` / `s.splitView(sep)` are loop forms, not expressions: the receiver type has
+  // to be known *before* the call is checked as an expression, because checking it that way
+  // reports the misuse error. Only paths (`text`, `self.src`) are recognized — any other
+  // receiver falls through to the normal path and gets that error, which is the right
+  // answer anyway for a temporary the view would outlive.
+  private stringViewIterMode(iterable: Expr): "lines" | "split" | null {
+    if (iterable.kind !== "MethodCall") return null;
+    const mode = iterable.method === "lines" ? "lines" : iterable.method === "splitView" ? "split" : null;
+    if (!mode) return null;
+    let t = this.peekPathType(iterable.object);
+    if (t?.tag === "ref") t = t.inner;
+    return t?.tag === "string" ? mode : null;
+  }
+
+  // Side-effect-free type of a variable/field path. Deliberately partial: a null answer
+  // means "ask the real checker", never "no type".
+  private peekPathType(e: Expr): TypeKind | null {
+    // A literal's bytes are a module constant, so views of it outlive any loop
+    if (e.kind === "StringLit") return { tag: "string" };
+    if (e.kind === "Ident") return this.lookup(e.name)?.type ?? this._globalTypes.get(e.name) ?? null;
+    if (e.kind === "FieldAccess") {
+      let base = this.peekPathType(e.object);
+      if (base?.tag === "ref" || base?.tag === "heap") base = base.inner;
+      if (base?.tag !== "struct") return null;
+      return this.structs.get(base.name)?.fields.find(f => f.name === e.field)?.type ?? null;
+    }
+    // `rows[i].lines()` — an element read, so the freeze on the root container still covers
+    // the storage the pieces point into
+    if (e.kind === "IndexAccess") {
+      let base = this.peekPathType(e.object);
+      if (base?.tag === "ref" || base?.tag === "heap") base = base.inner;
+      if (base?.tag === "vec" || base?.tag === "array") return base.element;
+      if (base?.tag === "hashmap") return base.value;
+      return null;
+    }
+    return null;
+  }
+
+  private checkStringViewForIn(stmt: Stmt & { kind: "ForInStmt" }, mode: "lines" | "split", fnRetType: TypeKind) {
+    const call = stmt.iterable as import("./ast").MethodCall;
+    const sp = stmt.span;
+    this.checkExpr(call.object);
+    if (mode === "split") {
+      if (call.args.length !== 1) {
+        this.error(`'splitView' expects 1 argument, got ${call.args.length}`, sp);
+      } else {
+        const sepType = this.checkExpr(call.args[0]);
+        if (sepType.tag !== "string" && sepType.tag !== "unknown") {
+          this.error(`'splitView': expected string, got ${typeName(sepType)}`, sp);
+        }
+      }
+    } else if (call.args.length !== 0) {
+      this.error(`'lines' takes no arguments`, sp);
+    }
+    // Same freeze a slice takes: every piece points into the receiver's buffer, so it must
+    // not be mutated, moved or reallocated for the whole loop.
+    let root: Expr = call.object;
+    while (root.kind === "FieldAccess" || root.kind === "IndexAccess") root = root.object;
+    const rootInfo = root.kind === "Ident" ? this.lookup(root.name) : null;
+    if (rootInfo) this.freeze(rootInfo, call.object);
+    this.borrowedExprs.add(call.object);
+    this.stringViewForIns.set(stmt, { mode });
+
+    const viewType: TypeKind = { tag: "ref", inner: { tag: "string" }, mutable: false };
+    const preMoves = this.snapshotMoveState();
+    this.returnOnlyMovesStack.push(new Set());
+    this.pushScope();
+    if (stmt.varName2) {
+      // enumerate: `for i, line in text.lines()`
+      this.declare(stmt.varName, { type: { tag: "int", bits: 64, signed: true }, mutable: false, moved: false, borrowed: false, read: false });
+      this.declare(stmt.varName2, { type: viewType, mutable: false, moved: false, borrowed: false, read: false });
+    } else {
+      this.declare(stmt.varName, { type: viewType, mutable: false, moved: false, borrowed: false, read: false });
+    }
+    for (const inv of stmt.invariants ?? []) this.checkContractClause(inv);
+    this.loopDepth++;
+    for (const s of stmt.body) this.checkStmt(s, fnRetType);
+    this.loopDepth--;
+    this.popScope();
+    if (rootInfo) this.unfreeze(rootInfo);
+    const returnMoves = this.returnOnlyMovesStack.pop()!;
+    for (const scope of this.scopes) {
+      for (const [name, info] of scope) {
+        if (preMoves.get(info) === false && info.moved) {
+          if (returnMoves.has(info)) { info.moved = false; }
+          else { this.error(`cannot move '${name}' out of a loop`, sp); }
+        }
+      }
+    }
+  }
+
   // The call site freezes the receiver and nothing else, so a returned view must point
   // into storage reachable from `self`. A view of a method-local dies at the return; a
   // view of another `&` param outlives a freeze that was never taken for it.
@@ -2908,6 +3002,12 @@ export class TypeChecker {
             }
           }
         } else {
+          // `for line in text.lines()` / `for f in text.splitView(",")` — a text pass that
+          // allocates nothing. Handled here and nowhere else: the yielded `&string` views
+          // cannot travel through the `next(): Option<T>` iterator protocol, because a
+          // reference inside an enum payload is a rejected return (see errorIfRefReturn).
+          const viewMode = this.stringViewIterMode(stmt.iterable);
+          if (viewMode) { this.checkStringViewForIn(stmt, viewMode, fnRetType); return; }
           let iterType = this.checkExpr(stmt.iterable);
           // iterating a slice (&[T]) or &Vec: deref — the loop borrows the view, not a copy
           if (iterType.tag === "ref" && (iterType.inner.tag === "array" || iterType.inner.tag === "vec")) {
@@ -6057,6 +6157,15 @@ export class TypeChecker {
           if (expr.method === "isEmpty") {
             if (expr.args.length !== 0) { this.error(`'isEmpty' takes no arguments`, sp); }
             return this.setType(expr, { tag: "bool" });
+          }
+          // Loop-only: each piece is a `&string` view into the receiver, and a view has no
+          // storage to live in outside the loop that freezes the receiver for it.
+          if (expr.method === "lines" || expr.method === "splitView") {
+            const owned = expr.method === "lines" ? `split("\\n")` : `split(sep)`;
+            const call = expr.method === "lines" ? `lines()` : `splitView(sep)`;
+            this.error(`'${expr.method}' is only valid as the iterable of a 'for ... in' loop over a named string`, sp,
+              `it yields borrowed views, which cannot be stored — bind the string first ('let text = ...') and write 'for piece in text.${call}', or use '${owned}' for owned copies`);
+            return this.setType(expr, { tag: "unknown" });
           }
           if (expr.method === "splitWords" || expr.method === "splitWhitespace") {
             if (expr.args.length !== 0) { this.error(`'${expr.method}' takes no arguments`, sp); }

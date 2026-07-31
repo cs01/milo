@@ -404,6 +404,21 @@ class LowerCtx {
             span: stmt.span,
           };
         }
+        const viewInfo = this.c.stringViewForIns?.get(stmt);
+        if (viewInfo && stmt.iterable.kind === "MethodCall") {
+          return {
+            kind: "ForStrView",
+            varName: stmt.varName,
+            varName2: stmt.varName2,
+            varType: { tag: "ref", inner: { tag: "string" }, mutable: false },
+            src: this.lowerExpr(stmt.iterable.object),
+            sep: viewInfo.mode === "split" && stmt.iterable.args[0] ? this.lowerExpr(stmt.iterable.args[0]) : null,
+            mode: viewInfo.mode,
+            body: stmt.body.map(s => this.lowerStmt(s, fnRetType)),
+            ...(forInvariants.length > 0 && { invariants: forInvariants }),
+            span: stmt.span,
+          };
+        }
         const iterInfo = this.c.iteratorForIns?.get(stmt);
         if (iterInfo) {
           return {

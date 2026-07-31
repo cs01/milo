@@ -340,6 +340,25 @@ export class CodegenJS {
         this.emit("}");
         break;
       }
+      case "ForStrView": {
+        // No views in JS — the pieces are substrings. Same sequence, same emptiness rules;
+        // only the zero-copy part is lost, which JS strings cannot express anyway.
+        const sv = this.nextTemp();
+        const parts = this.nextTemp();
+        this.emit(`const ${sv} = ${this.genExpr(stmt.src)};`);
+        if (stmt.mode === "lines") {
+          this.emit(`const ${parts} = ${sv}.length === 0 ? [] : ${sv}.replace(/\\n$/, "").split("\\n").map(l => l.endsWith("\\r") ? l.slice(0, -1) : l);`);
+        } else {
+          this.emit(`const ${parts} = ${sv}.split(${this.genExpr(stmt.sep!)});`);
+        }
+        if (stmt.varName2) this.emit(`for (const [${stmt.varName}, ${stmt.varName2}] of ${parts}.entries()) {`);
+        else this.emit(`for (const ${stmt.varName} of ${parts}) {`);
+        this.indent++;
+        for (const s of stmt.body) this.genStmt(s);
+        this.indent--;
+        this.emit("}");
+        break;
+      }
       case "UnsafeBlock": {
         for (const s of stmt.body) this.genStmt(s);
         break;

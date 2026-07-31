@@ -10,8 +10,8 @@ milo run examples/games/neon/main.milo --release
 
 | | |
 |---|---|
-| WASD / arrows | move |
-| mouse, or arrow keys | aim — firing is automatic while aiming |
+| arrow keys, or WASD | move |
+| mouse | aim — the gun fires by itself, there is no fire button |
 | SPACE | bomb |
 | 1 2 3 | pick an upgrade between waves |
 | ENTER | restart |

@@ -194,6 +194,8 @@ pub struct World {
     slowmo: f64,
     flash: f64,
     gameOver: bool,
+    banner: f64, // countdown on the big centred wave title
+    hurt: f64, // red edge vignette after taking a hit
     perkPick: bool, // gameplay is paused while a perk is chosen
     perkChoices: Vec<Perk>,
     turretCount: i64,
@@ -237,6 +239,8 @@ pub fn worldNew(w: f64, h: f64): World {
         slowmo: 0.0,
         flash: 0.0,
         gameOver: false,
+        banner: 0.0,
+        hurt: 0.0,
         perkPick: false,
         perkChoices: Vec.new(),
         turretCount: 0,
@@ -474,7 +478,7 @@ pub fn makeEnemy(kind: Kind, x: f64, y: f64): Ent {
     e.kind = kind
     e.x = x
     e.y = y
-    e.spawnT = 0.7
+    e.spawnT = 0.85
     e.phase = Random.floatRange(0.0, 6.283185307179586)
     match kind {
         Kind.Seeker => {
@@ -494,9 +498,9 @@ pub fn makeEnemy(kind: Kind, x: f64, y: f64): Ent {
             let a = Random.floatRange(0.0, 6.283185307179586)
             e.vx = Math.cos(a) * 90.0
             e.vy = Math.sin(a) * 90.0
-            e.cr = 0.03
-            e.cg = 1.7
-            e.cb = 2.0
+            e.cr = 0.05
+            e.cg = 0.75
+            e.cb = 2.4
         }
         Kind.Weaver => {
             e.radius = 12.0
@@ -522,17 +526,17 @@ pub fn makeEnemy(kind: Kind, x: f64, y: f64): Ent {
             e.hp = 6.0
             e.value = 60
             e.spin = 0.0
-            e.cr = 0.2
-            e.cg = 1.6
-            e.cb = 0.5
+            e.cr = 1.5
+            e.cg = 1.9
+            e.cb = 0.05
         }
         Kind.SnakeSeg => {
             e.radius = 10.0
             e.hp = 3.0
             e.value = 15
-            e.cr = 0.15
-            e.cg = 1.2
-            e.cb = 0.4
+            e.cr = 1.1
+            e.cg = 1.5
+            e.cb = 0.03
         }
         Kind.BlackHole => {
             e.radius = 18.0
@@ -548,9 +552,9 @@ pub fn makeEnemy(kind: Kind, x: f64, y: f64): Ent {
             e.hp = 5.0
             e.value = 80
             e.spin = 1.1
-            e.cr = 0.4
-            e.cg = 1.7
-            e.cb = 1.1
+            e.cr = 0.15
+            e.cg = 1.5
+            e.cb = 1.6
         }
         Kind.Turret => {
             e.radius = 10.0
@@ -587,9 +591,9 @@ pub fn makeEnemy(kind: Kind, x: f64, y: f64): Ent {
             e.hp = 1.0
             e.value = 0
             e.spin = 2.6
-            e.cr = 0.25
-            e.cg = 1.7
-            e.cb = 0.7
+            e.cr = 0.1
+            e.cg = 2.4
+            e.cb = 0.45
         }
     }
     e.maxHp = e.hp
@@ -802,9 +806,9 @@ fn spliceChain(w: &mut World, slot: i64) {
         w.ents[fo.slot].leader = ld
         if !alive(w, ld) {
             w.ents[fo.slot].kind = Kind.SnakeHead
-            w.ents[fo.slot].cr = 0.2
-            w.ents[fo.slot].cg = 1.6
-            w.ents[fo.slot].cb = 0.5
+            w.ents[fo.slot].cr = 1.5
+            w.ents[fo.slot].cg = 1.9
+            w.ents[fo.slot].cb = 0.05
             w.ents[fo.slot].value = 40
         }
     }
@@ -1496,6 +1500,7 @@ fn killPlayer(w: &mut World) {
         return
     }
     w.player.alive = false
+    w.hurt = 1.2
     w.player.lives = w.player.lives - 1
     w.player.respawn = 1.8
     w.shake = 34.0
@@ -1691,6 +1696,7 @@ fn spawnForWave(w: &mut World) {
 
 fn startWave(w: &mut World) {
     w.wave = w.wave + 1
+    w.banner = 2.2
     if w.wave % 6 == 0 {
         w.pending = 0
         let p = randomEdge(w)
@@ -1786,6 +1792,12 @@ pub fn worldUpdate(w: &mut World, dtIn: f64, mx: f64, my: f64, aim: f64, fire: b
     if w.flash > 0.0 {
         w.flash = w.flash - dt * 2.2
     }
+    if w.banner > 0.0 {
+        w.banner = w.banner - dt
+    }
+    if w.hurt > 0.0 {
+        w.hurt = w.hurt - dt
+    }
     if w.multTimer > 0.0 {
         w.multTimer = w.multTimer - dt
         if w.multTimer <= 0.0 && w.mult > 1 {
@@ -1843,6 +1855,8 @@ pub fn worldReset(w: &mut World) {
     w.flash = 0.0
     w.slowmo = 0.0
     w.gameOver = false
+    w.banner = 0.0
+    w.hurt = 0.0
     w.perkPick = false
     w.turretCount = 0
     gridReset(w.grid)

@@ -3,12 +3,12 @@
 // Build and play:
 //   milo run examples/games/neon/main.milo --release
 //
-//   WASD / arrows   move
-//   MOUSE or arrows aim (hold to fire; firing is automatic while aiming)
-//   SPACE           bomb
-//   1 2 3           pick an upgrade between waves
-//   ENTER           restart after a game over
-//   ESC             quit
+//   ARROW KEYS / WASD   move
+//   MOUSE               aim — the gun fires by itself, there is no fire button
+//   SPACE               bomb
+//   1 2 3               pick an upgrade between waves
+//   ENTER               restart after a game over
+//   ESC                 quit
 //
 // The point of this example is the code, not the score: see README.md for what
 // each system is meant to prove about second-class references.
@@ -26,13 +26,13 @@ from "./sdl" import {
     Input, inputNew, pollInput
 }
 from "./gfx" import {
-    Canvas, canvasNew, present, text, textCentered
+    Canvas, canvasNew, present, text, textCentered, textWidth
 }
 from "./world" import {
     World, worldNew, worldUpdate, worldReset, choosePerk
 }
 from "./render" import {
-    Shapes, shapesNew, drawWorld, drawHud
+    Shapes, shapesNew, drawWorld, drawHud, drawAim
 }
 from "std/random" import {
     Random
@@ -76,7 +76,7 @@ pub fn main(): i32 {
     var fpsAccum: f64 = 0.0
     var fpsFrames: i64 = 0
     var fpsShown: i64 = 0
-    var titleTimer = 3.4
+    var titleTimer = 6.0
     var restartHeld = false
     var pickHeld = false
 
@@ -93,18 +93,16 @@ pub fn main(): i32 {
 
         pollInput(inp, ev, 1.0)
 
-        // aim: mouse by default, arrow keys override
+        // Aim is the mouse, full stop.
         var aim = world.player.ang
-        if inp.aiming {
-            aim = Math.atan2(inp.aimY, inp.aimX)
-        } else {
-            let dx = inp.mouseX - world.player.x
-            let dy = inp.mouseY - world.player.y
-            if dx * dx + dy * dy > 4.0 {
-                aim = Math.atan2(dy, dx)
-            }
+        let adx = inp.mouseX - world.player.x
+        let ady = inp.mouseY - world.player.y
+        if adx * adx + ady * ady > 4.0 {
+            aim = Math.atan2(ady, adx)
         }
-        let wantFire = inp.fire
+        // Always firing. Holding a button to shoot adds nothing here, and it hid
+        // the fact that mouse-aim was working at all.
+        let wantFire = true
 
         if world.perkPick {
             if inp.pick > 0 && !pickHeld {
@@ -130,6 +128,7 @@ pub fn main(): i32 {
         }
 
         drawWorld(c, world, shapes, ox, oy)
+        drawAim(c, world, inp.mouseX, inp.mouseY, aim)
         drawHud(c, world)
 
         fpsAccum = fpsAccum + dt
@@ -139,7 +138,11 @@ pub fn main(): i32 {
             fpsAccum = 0.0
             fpsFrames = 0
         }
-        text(c, 24, H - 30, fpsShown.toString() + " FPS", 2, 0.22, 0.38, 0.48)
+        text(c, 24, H - 30, fpsShown.toString() + " FPS", 2, 0.18, 0.30, 0.38)
+        // Control strip stays up permanently — cheap, and there is nowhere else to
+        // find this out.
+        let help = "ARROWS MOVE    MOUSE AIMS    SPACE BOMB    ESC QUIT"
+        text(c, W - 24 - textWidth(help, 2), H - 30, help, 2, 0.18, 0.30, 0.38)
 
         if titleTimer > 0.0 {
             titleTimer = titleTimer - dt
@@ -149,7 +152,8 @@ pub fn main(): i32 {
             }
             textCentered(c, W / 2, H / 2 - 90, "NEON", 12, 0.6 * f, 1.4 * f, 2.0 * f)
             textCentered(c, W / 2, H / 2 + 10, "WRITTEN IN MILO", 3, 1.4 * f, 1.0 * f, 0.4 * f)
-            textCentered(c, W / 2, H / 2 + 60, "WASD MOVE   MOUSE AIM   SPACE BOMB", 2, 0.7 * f, 0.9 * f, 1.2 * f)
+            textCentered(c, W / 2, H / 2 + 60, "ARROW KEYS MOVE      MOUSE AIMS AND FIRES", 2, 0.7 * f, 0.9 * f, 1.2 * f)
+            textCentered(c, W / 2, H / 2 + 88, "SPACE BOMB      1 2 3 UPGRADES      ESC QUIT", 2, 0.5 * f, 0.7 * f, 0.9 * f)
         }
 
         var exposure = 1.0

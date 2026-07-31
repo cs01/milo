@@ -264,6 +264,9 @@ export class TypeChecker {
   private cSigs = new Map<string, CSig>();
   private offsetOfFields = new Map<Expr, string>();
   private closureScopeDepth: number | null = null;
+  // Nesting depth of closure bodies currently being checked. Only the move-out-
+  // of-a-borrow rule reads it; see the FieldAccess branch of tryMove.
+  private closureBodyDepth = 0;
   private currentClosureCaptures: Map<string, CaptureInfo> | null = null;
   private closureParamHints: TypeKind[] | null = null;
   // The expected RETURN type of a closure being checked against a fn-typed hint. Without
@@ -3493,21 +3496,47 @@ export class TypeChecker {
     }
     // Mark `s.field` as a move-out when a non-Copy field is consumed in a move
     // position. Codegen zeroes the source field so the struct's own drop glue
-    // doesn't free a buffer now owned by the moved value (double-free). Don't
-    // move out of a struct held behind a `&T` ref.
+    // doesn't free a buffer now owned by the moved value (double-free).
+    //
+    // Behind a `&T` neither half of that is available: zeroing would mutate
+    // through a shared borrow, and *not* zeroing hands the caller a second owner
+    // of the same heap buffer. `fn describe(d: &Doc): string { return d.text }`
+    // used to compile and hand back a String aliasing a pointee the caller was
+    // about to drop — printing freed bytes, then double-freeing. It is the same
+    // hazard `tryMove` already rejects for a whole `&T` binding, so it gets the
+    // same answer: clone to own.
+    //
+    // Closure bodies are exempt. `users.sortByKey((u: &User) => u.name)` is the
+    // documented way to sort by a string field, and it is sound because the
+    // sort builtins read the extracted key and never drop it — the alias never
+    // outlives the call. Deciding that in general needs the callee's contract,
+    // which the checker does not have here, so the narrow rule is: reject the
+    // escape out of a named function, where the caller really does become a
+    // second owner.
     if (expr.kind === "FieldAccess") {
       const fieldType = this.exprTypes.get(expr);
       if (fieldType && !isCopy(fieldType, (n) => this.isAllCopyEnum(n), (n) => this.isAllCopyStruct(n))) {
-        let objectIsRef = false;
-        if (expr.object.kind === "Ident") {
-          const info = this.lookup(expr.object.name);
-          if (info && info.type.tag === "ref") objectIsRef = true;
-        }
-        if (!objectIsRef) {
+        const base = this.closureBodyDepth === 0 ? this.borrowBaseName(expr) : null;
+        if (base !== null) {
+          this.error(`cannot move the borrowed value out of '${base}'`, expr.span,
+            `'${base}' is a reference — call .clone() to take an owned copy`);
+        } else {
           this.movedExprs.add(expr);
         }
       }
     }
+  }
+
+  // Walks `a.b.c` and `v[i].f` down to the variable the read ultimately comes
+  // out of, and names it when that variable is a `&T`/`&mut T` binding. The old
+  // check only looked one level up (`expr.object.kind === "Ident"`), so a nested
+  // `d.inner.text` slipped past it entirely.
+  private borrowBaseName(expr: Expr): string | null {
+    let cur: Expr = expr;
+    while (cur.kind === "FieldAccess" || cur.kind === "IndexAccess") cur = cur.object;
+    if (cur.kind !== "Ident") return null;
+    const info = this.lookup(cur.name);
+    return info && info.type.tag === "ref" ? cur.name : null;
   }
 
   private resolveAssignTarget(expr: Expr): { type: TypeKind; mutable: boolean } | null {
@@ -5322,7 +5351,9 @@ export class TypeChecker {
           : (retHint && retHint.tag !== "unknown" ? retHint : { tag: "unknown" });
         const savedRetType = this.currentFnRetType;
         this.currentFnRetType = inferredRet;
+        this.closureBodyDepth++;
         for (const s of expr.body) this.checkStmt(s, inferredRet);
+        this.closureBodyDepth--;
         if (inferredRet.tag === "unknown" && expr.body.length > 0) {
           const lastStmt = expr.body[expr.body.length - 1];
           if (lastStmt.kind === "Return" && lastStmt.value) {
@@ -6227,6 +6258,15 @@ export class TypeChecker {
               return this.setType(expr, fnType.ret);
             }
           }
+        }
+
+        // `.clone()` on a Copy scalar is the identity. It exists so generic code
+        // can be written once: `fn get<T>(w: &Wrapper<T>): T { return w.val.clone() }`
+        // has to compile for T = i64 as well as T = string, and the move-out-of-
+        // a-borrow rule leaves clone as the only way to spell it.
+        if (expr.method === "clone" && expr.args.length === 0 &&
+            isCopy(objType, (n) => this.isAllCopyEnum(n), (n) => this.isAllCopyStruct(n))) {
+          return this.setType(expr, objType);
         }
 
         this.error(`type '${typeName(objType)}' has no method '${expr.method}'`, sp);

@@ -1172,6 +1172,11 @@ class LowerCtx {
           });
           return { kind: "ClosureCall", callee, args, type, span: expr.span };
         }
+        // `.clone()` on a Copy scalar is the identity — the checker admits it so
+        // generic code has one spelling that works for Copy and non-Copy alike.
+        if (expr.method === "clone" && expr.args.length === 0) {
+          return this.lowerExpr(expr.object);
+        }
         throw new Error(`unsupported method call: ${expr.method}`);
       }
       case "Closure": {

@@ -14,8 +14,15 @@ top of the shaft. The mascot is lifted pixel-for-pixel out of
 `docs/site/public/logo.svg`, so he is the same 18×18 dog that is on the homepage.
 
 **There is no timer, nothing chases you, and you cannot lose.** Hold a direction
-and the drill bites; softer ground gives way faster than stone. The only question
-the game ever asks is where to go next.
+and the drill bites; softer ground gives way faster than stone.
+
+Each level runs **west to east**: fill the value bar, which opens a lit shaft at the
+far right, then dig your way over to it. Every level seeds a fresh stretch of ground
+with more bedrock in the way, so the later ones are mazes rather than open dirt.
+
+Three upgrades are buried in the earth, pulsing brighter than ore so you can spot
+them: **a faster drill**, a **wide drill** that takes the tiles either side of the
+bit, and a **brighter lamp**. They last for the level.
 
 Ore glows faintly on its own, so a seam shows up at the edge of the lamp before you
 can see what it is — which is the entire hook. Gold is common near the surface,
@@ -23,7 +30,12 @@ emerald sits deeper, and crystal only appears in the bottom third.
 
 Flooded caverns open up in the mid depths. You swim straight through them; the
 surface is two travelling sine waves with a lit crest and caustic banding
-underneath.
+underneath. The water does not drain when you breach it — a flooded cavern stays
+flooded, and is a shortcut rather than a hazard.
+
+Breaking a tile throws a dust cloud that swells and thins out in about a third of a
+second, plus solid chunks that arc away and fall. Dust drifts upward and has heavy
+drag; debris has gravity and almost none. Same particle struct, different numbers.
 
 ## The world
 

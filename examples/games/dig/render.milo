@@ -13,7 +13,7 @@ from "./mascot" import {
 }
 from "./world" import {
     Mine, Col, TILE, MAP_W, MAP_H, SURFACE, tileAt, tileColor, isSolid,
-    T_SKY, T_GOLD, T_GEM, T_CRYSTAL, T_BEDROCK, T_WATER
+    T_SKY, T_GOLD, T_GEM, T_CRYSTAL, T_BEDROCK, T_WATER, isUpgrade
 }
 
 // Stable per-tile pseudo-random in 0..1.
@@ -88,9 +88,17 @@ fn drawSurface(c: &mut Canvas, m: &Mine, camX: f64, camY: f64) {
 
 // Blit a palette-indexed sprite, scaled, with 0 as transparent.
 fn drawSprite(c: &mut Canvas, s: Sprite, x: f64, y: f64, scale: f64, bright: f64) {
+    drawSpriteFlip(c, s, x, y, scale, bright, 1.0)
+}
+
+fn drawSpriteFlip(c: &mut Canvas, s: Sprite, x: f64, y: f64, scale: f64, bright: f64, flip: f64) {
     for py in 0..s.h {
         for px in 0..s.w {
-            let idx = s.px[py * s.w + px] as i64
+            var sx2 = px
+            if flip < 0.0 {
+                sx2 = s.w - 1 - px
+            }
+            let idx = s.px[py * s.w + sx2] as i64
             if idx == 0 {
                 continue
             }
@@ -171,11 +179,14 @@ pub fn drawMine(c: &mut Canvas, m: &Mine, ox: f64, oy: f64) {
             }
             // Ore glows faintly on its own, so a seam is visible at the edge of the
             // lamp — which is the thing that makes you keep going.
-            var ambient = 0.055
+            var ambient = 0.035
             if t == T_GOLD || t == T_GEM || t == T_CRYSTAL {
                 ambient = 0.20 + 0.07 * Math.sin(m.time * 3.0 + (tx as f64) + (ty as f64))
             }
-            let k = ambient + lit * lit * 0.95
+            if isUpgrade(t) {
+                ambient = 0.45 + 0.25 * Math.sin(m.time * 6.0 + (tx as f64))
+            }
+            let k = ambient + lit * lit * 1.25
             let col = tileColor(t)
             // Every tile gets its own shade. A uniform fill with a lit top edge is
             // what made this read as stacked blocks instead of ground.
@@ -216,21 +227,36 @@ pub fn drawMine(c: &mut Canvas, m: &Mine, ox: f64, oy: f64) {
     for i in 0..m.parts.len {
         let t = m.parts[i].life / m.parts[i].maxLife
         let f = t * t
-        spot(c, m.parts[i].x - camX, m.parts[i].y - camY, m.parts[i].size * (0.6 + t), m.parts[i].cr * f, m.parts[i].cg * f, m.parts[i].cb * f)
+        // Dust swells as it thins out; debris just shrinks.
+        let sz = m.parts[i].size * (1.0 + m.parts[i].grow * (1.0 - t))
+        spot(c, m.parts[i].x - camX, m.parts[i].y - camY, sz, m.parts[i].cr * f, m.parts[i].cg * f, m.parts[i].cb * f)
     }
 
     // the digger: a lamp, a body, and a drill bit pointing where you last moved
     let px = m.px - camX
     let py = m.py - camY
-    spot(c, px, py, m.lampRadius * 0.30, 0.20, 0.15, 0.07)
-    spot(c, px, py, 26.0, 0.35, 0.26, 0.12)
-    brickFill(c, px - 9.0, py - 9.0, px + 9.0, py + 9.0, 0.55, 0.60, 0.72, 0.5)
-    line(c, px - 9.0, py - 9.0, px + 9.0, py - 9.0, 1.3, 1.4, 1.6)
-    spot(c, px, py - 2.0, 5.0, 1.5, 1.3, 0.6)
-    let bx = px + m.faceX * 16.0
-    let by = py + m.faceY * 16.0
-    line(c, px, py, bx, by, 1.4, 1.2, 0.7)
-    spot(c, bx, by, 4.0, 1.6, 1.3, 0.5)
+    // No big additive halo here: the tiles are already lit by distance from the
+    // lamp, so a second glow drawn over them double-lights everything and, worse,
+    // spills straight through solid rock. Just the lamp itself.
+    spot(c, px, py, 20.0, 0.30, 0.22, 0.10)
+    // The digger is Milo himself, facing the way you last moved.
+    let flip = if m.faceX < 0.0 {
+        0.0 - 1.0
+    } else {
+        1.0
+    }
+    drawSpriteFlip(c, spriteMilo(), px - 13.0, py - 15.0, 1.55, 1.0, flip)
+    // drill bit, spinning while it bites
+    let bx = px + m.faceX * 15.0
+    let by = py + m.faceY * 15.0
+    var wob = 0.0
+    if m.digProgress > 0.0 {
+        wob = Math.sin(m.time * 40.0) * 2.0
+    }
+    line(c, px, py + 2.0, bx + m.faceY * wob, by + m.faceX * wob, 1.5, 1.3, 0.8)
+    spot(c, bx, by, 3.4, 1.7, 1.4, 0.6)
+    // headlamp beam pointing the way
+    spot(c, px + m.faceX * 26.0, py + m.faceY * 26.0, 22.0, 0.22, 0.18, 0.08)
 
     // floating labels
     for i in 0..m.pops.len {
@@ -245,6 +271,30 @@ pub fn drawHud(c: &mut Canvas, m: &Mine) {
     text(c, 24, 58, g, 2, 0.30, 0.30, 0.34)
     let d = "DEPTH " + (m.deepest - SURFACE).toString() + " M"
     text(c, c.w - 24 - textWidth(d, 3), 22, d, 3, 0.40, 0.55, 0.70)
+    let lv = "LEVEL " + m.level.toString()
+    text(c, c.w - 24 - textWidth(lv, 2), 58, lv, 2, 0.30, 0.30, 0.34)
+
+    // quota bar: how much more is needed before the way out opens
+    let bx = (c.w as f64) * 0.5 - 190.0
+    let by = 34.0
+    fillRect(c, bx, by, bx + 380.0, by + 10.0, 0.04, 0.04, 0.05)
+    if m.exitOpen {
+        let pulse = 0.7 + 0.3 * Math.sin(m.time * 5.0)
+        fillRect(c, bx, by, bx + 380.0, by + 10.0, 0.06 * pulse, 0.42 * pulse, 0.14 * pulse)
+        textCentered(c, c.w / 2, 50, "HEAD RIGHT — THE WAY OUT IS OPEN", 2, 0.4 * pulse, 1.1 * pulse, 0.5 * pulse)
+    } else {
+        var frac = (m.levelValue as f64) / (m.quota as f64)
+        if frac > 1.0 {
+            frac = 1.0
+        }
+        fillRect(c, bx, by, bx + 380.0 * frac, by + 10.0, 0.50, 0.40, 0.10)
+        textCentered(c, c.w / 2, 50, m.levelValue.toString() + " / " + m.quota.toString() + " TO OPEN THE WAY OUT", 2, 0.34, 0.30, 0.22)
+    }
+
+    if m.cleared > 0.0 {
+        textCentered(c, c.w / 2, c.h / 2 - 40, "LEVEL " + m.level.toString() + " CLEAR", 7, 0.6, 1.3, 0.7)
+        textCentered(c, c.w / 2, c.h / 2 + 30, "VALUE " + m.score.toString(), 3, 1.2, 1.0, 0.3)
+    }
 
     if m.banner > 0.0 {
         var f = 1.0
@@ -252,7 +302,7 @@ pub fn drawHud(c: &mut Canvas, m: &Mine) {
             f = m.banner
         }
         textCentered(c, c.w / 2, 150, "PROSPECT", 8, 1.2 * f, 0.9 * f, 0.3 * f)
-        textCentered(c, c.w / 2, 230, "DIG WHEREVER YOU LIKE", 2, 0.5 * f, 0.45 * f, 0.35 * f)
+        textCentered(c, c.w / 2, 230, "DIG EAST TO THE WAY OUT — FILL THE BAR FIRST", 2, 0.5 * f, 0.45 * f, 0.35 * f)
     }
     if m.hint > 0.0 {
         var f = 1.0

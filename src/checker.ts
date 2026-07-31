@@ -199,6 +199,9 @@ export class TypeChecker {
   // and the error for it elsewhere reads better naming the clause it was found in.
   private contractScope: "requires" | "ensures" | "invariant" | "decreases" | null = null;
   private genericFns = new Map<string, GenericFnInfo>();
+  // fns already flagged for a reference return — the declaration scan and checkFunction
+  // both see plain fns, and only the second sees impl methods
+  private refReturnReported = new Set<Function>();
   private structs = new Map<string, StructInfo>();
   private enums = new Map<string, EnumInfo>();
   private genericEnums = new Map<string, GenericEnumInfo>();
@@ -1351,9 +1354,7 @@ export class TypeChecker {
       }
       const params = fn.params.map(p => ({ type: this.resolve(declaredType(p)), name: p.name }));
       const ret = this.resolve(fn.retType);
-      if (ret.tag === "ref") {
-        this.error(`function '${fn.name}': cannot return a reference`, undefined, `references are second-class — return an owned value instead`);
-      }
+      this.errorIfRefReturn(fn, ret);
       // main lowers to a C `int main`; codegen forces its LLVM return to i32, so
       // any other return type emits a mismatched `ret` and fails at the LLVM
       // stage instead of here. Catch it in the checker.
@@ -2367,6 +2368,63 @@ export class TypeChecker {
     }
   }
 
+  // A method may hand back a `&[T]` view of its receiver's own storage (the documented
+  // zero-copy container idiom). Every other reference return stays banned. The view is
+  // only sound because the call site freezes the receiver for the result binding's life
+  // (see freezeViewSource) and the body may only derive it from `self` — without both,
+  // `let s = b.view(); b.push(x)` reallocs and frees the buffer `s` points at.
+  private isViewReturn(ret: TypeKind): boolean {
+    return ret.tag === "ref" && ret.inner.tag === "array" && ret.inner.size === null;
+  }
+
+  private hasSelfReceiver(fn: Function): boolean {
+    return fn.params.length > 0 && fn.params[0].name === "self";
+  }
+
+  // `let s = b.view()` borrows b's storage exactly as `let s = b.data[0..n]` does, so the
+  // receiver has to be frozen the same way. The let/for-in paths already transfer any
+  // freeze taken while checking the RHS onto the binding (VarInfo.freezes), released when
+  // its scope pops — this only has to mark the root.
+  private freezeViewSource(obj: Expr, sp?: Span) {
+    let root = obj;
+    while (root.kind === "FieldAccess" || root.kind === "IndexAccess") root = root.object;
+    if (root.kind !== "Ident") {
+      // No binding to freeze: `makeRing().items()` views storage owned by a temporary.
+      // That only survives today because temporaries are never dropped (they leak) —
+      // it becomes a use-after-free the moment they get drop glue.
+      this.error(`cannot take a view of a temporary`, sp,
+        `the '&[T]' would outlive the value it points into — bind the receiver first ('let r = makeRing()') and take the view from that`);
+      return;
+    }
+    const info = this.lookup(root.name);
+    if (info) info.borrowed = true;
+    this.borrowedExprs.add(obj);
+  }
+
+  // The call site freezes the receiver and nothing else, so a returned view must point
+  // into storage reachable from `self`. A view of a method-local dies at the return; a
+  // view of another `&` param outlives a freeze that was never taken for it.
+  private checkViewProvenance(value: Expr, sp?: Span) {
+    let root = value;
+    while (root.kind === "FieldAccess" || root.kind === "IndexAccess" || root.kind === "MethodCall") {
+      root = root.kind === "MethodCall" ? root.object : root.object;
+    }
+    if (root.kind === "Ident" && root.name === "self") return;
+    if (root.kind !== "Ident") return; // not a place expression — the type check already rejects it
+    this.error(`cannot return a view of '${root.name}'`, sp,
+      `a returned '&[T]' may only view the receiver's own storage ('self...') — the call site freezes the receiver, so any other source could be moved or reallocated while the view is live`);
+  }
+
+  private errorIfRefReturn(fn: Function, ret: TypeKind) {
+    if (ret.tag !== "ref" || this.refReturnReported.has(fn)) return;
+    if (this.isViewReturn(ret) && this.hasSelfReceiver(fn)) return;
+    this.refReturnReported.add(fn);
+    this.error(`function '${fn.name}': cannot return a reference`, fn.span,
+      this.isViewReturn(ret)
+        ? `only a method can return a '&[T]' view, and only of its own receiver's storage — take the slice at the call site ('v[a..b]') or return an owned Vec`
+        : `references are second-class — return an owned value instead`);
+  }
+
   private checkFunction(fn: Function) {
     // save/restore: monomorphization can re-enter checkFunction mid-expression.
     // currentFnRetType MUST be saved too — resolving/checking a generic in this
@@ -2378,6 +2436,8 @@ export class TypeChecker {
     this.currentFnIsUser = this.fnIsUserCode(fn.name);
     this.pushScope();
     const retType = this.resolve(fn.retType);
+    // impl methods and generic instantiations never pass the declaration-level scan
+    this.errorIfRefReturn(fn, retType);
     this.currentFnRetType = retType;
 
     for (const p of fn.params) {
@@ -2618,6 +2678,7 @@ export class TypeChecker {
             const bound = this.lookup(stmt.value.name)?.boundClosure;
             if (bound && !(bound as any).isMove) (bound as any).isMove = true;
           }
+          if (this.isViewReturn(fnRetType)) this.checkViewProvenance(stmt.value, sp);
           this.tryMove(stmt.value);
           this.inReturnInLoop = prev;
         }
@@ -3246,7 +3307,10 @@ export class TypeChecker {
       }
       if (info && !isCopy(info.type, (n) => this.isAllCopyEnum(n), (n) => this.isAllCopyStruct(n))) {
         if (info.borrowed) {
-          this.error(`cannot move '${expr.name}' because it is captured by a closure`, expr.span);
+          // `borrowed` covers closure capture *and* a live slice/view/iteration borrow —
+          // naming only closures misdiagnosed `let s = b.view(); consume(b)`.
+          this.error(`cannot move '${expr.name}' because it is borrowed`, expr.span,
+            `a closure capture, or a live view or loop over this variable, still points into it — moving it would leave that borrow dangling`);
           return;
         }
         info.moved = true;
@@ -3481,7 +3545,7 @@ export class TypeChecker {
     const muts: { root: string; fields: string[] | null; span: Span | undefined }[] = [];
     const shared: { root: string; fields: string[] | null }[] = [];
     for (const arg of args) {
-      const ab = this.autoBorrowed.get(arg);
+      const ab = this.borrowModeOf(arg);
       if (!ab) continue;
       const p = this.accessPath(arg);
       if (!p) continue;
@@ -3514,7 +3578,7 @@ export class TypeChecker {
     // pair (flagged) from two siblings like `v[i]`/`v[j]` (a legitimate two-element
     // borrow, not flagged). Identical non-indexed places (`v` twice) are two `&mut`
     // to the same object and are flagged as well.
-    const mutSteps = args.map(a => (this.autoBorrowed.get(a)?.mutable ? this.accessSteps(a) : null));
+    const mutSteps = args.map(a => (this.borrowModeOf(a)?.mutable ? this.accessSteps(a) : null));
     for (let i = 0; i < args.length; i++) {
       for (let j = i + 1; j < args.length; j++) {
         const a = mutSteps[i], b = mutSteps[j];
@@ -3526,6 +3590,19 @@ export class TypeChecker {
         }
       }
     }
+  }
+
+  // How a call argument borrows its root, for the exclusivity checks. Most args are
+  // auto-borrowed (bare value → `&T`/`&mut T` param), but a slice expression is ALREADY
+  // a reference — `f(v, v[0..2])` never enters `autoBorrowed`, so before this the
+  // container arg and a view into it slipped past both checks and the callee's `push`
+  // freed the storage the view pointed into (use-after-free in safe code). Any arg whose
+  // checked type is a ref counts as a borrow of its access path, whatever produced it.
+  private borrowModeOf(arg: Expr): { mutable: boolean } | null {
+    const ab = this.autoBorrowed.get(arg);
+    if (ab) return ab;
+    const t = this.exprTypes.get(arg);
+    return t?.tag === "ref" ? { mutable: t.mutable } : null;
   }
 
   // Index-aware access path: each step is a field name (".f") or an opaque index
@@ -3544,6 +3621,14 @@ export class TypeChecker {
     if (e.kind === "UnaryOp" && e.op === "*") {
       const base = this.accessSteps(e.operand);
       return base ? { root: base.root, steps: [...base.steps, "*"] } : null;
+    }
+    // A method returning a view (`v[a..b]`, which desugars to `.slice(a,b)`, or a
+    // user method returning `&[T]`) points into its receiver's storage — provenance
+    // is enforced at the definition (checkViewProvenance), so the receiver is the
+    // root and the view is a descendant of it.
+    if (e.kind === "MethodCall" && this.exprTypes.get(e)?.tag === "ref") {
+      const base = this.accessSteps(e.object);
+      return base ? { root: base.root, steps: [...base.steps, "[]"] } : null;
     }
     return null;
   }
@@ -3576,6 +3661,10 @@ export class TypeChecker {
     }
     if (e.kind === "UnaryOp" && e.op === "*") {
       const base = this.accessPath(e.operand);
+      return base ? { root: base.root, fields: null } : null;
+    }
+    if (e.kind === "MethodCall" && this.exprTypes.get(e)?.tag === "ref") {
+      const base = this.accessPath(e.object);
       return base ? { root: base.root, fields: null } : null;
     }
     return null;
@@ -5055,7 +5144,17 @@ export class TypeChecker {
         for (const cap of captures) {
           for (let i = this.scopes.length - 1; i >= 0; i--) {
             const info = this.scopes[i].get(cap.name);
-            if (info) { info.borrowed = true; break; }
+            if (info) {
+              // A closure env is storage, and references are second-class. Capturing a
+              // view outlived its source once the closure escaped the frame that owned
+              // the Vec — `let s = v[0..2]; return move () => s[0]` read freed memory.
+              if (info.type.tag === "ref") {
+                this.error(`cannot capture '${cap.name}' in a closure`, expr.span,
+                  `'${cap.name}' is a reference — a closure stores its captures, and a closure can outlive the storage this points into; capture an owned value (.clone() it) instead`);
+              }
+              info.borrowed = true;
+              break;
+            }
           }
         }
         this.closureScopeDepth = savedClosureScopeDepth;
@@ -5877,6 +5976,7 @@ export class TypeChecker {
             }
           }
           this.resolvedMethods.set(expr, mangled);
+          if (this.isViewReturn(sig.ret)) this.freezeViewSource(expr.object, sp);
           return this.setType(expr, sig.ret);
         }
 

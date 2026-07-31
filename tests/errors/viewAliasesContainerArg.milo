@@ -1,0 +1,17 @@
+// A container and a view into it cannot be arguments to the same call: the callee's
+// `push` reallocates and frees the storage the view points at. The exclusivity check
+// only saw auto-borrowed args, and a slice expression is already a `&[T]`, so this
+// pair used to compile and read freed memory.
+fn grow(v: &mut Vec<i64>, s: &[i64]): void {
+  var i = 0
+  while i < 4096 {
+    v.push(999)
+    i = i + 1
+  }
+  print(s[0])
+}
+
+fn main() {
+  var v: Vec<i64> = [11, 22, 33]
+  grow(v, v[0..2])  // @error: is borrowed mutably and shared in the same call
+}

@@ -1,0 +1,17 @@
+// a view of a temporary receiver has no binding the call site can freeze; the temporary
+// only outlives the view today because temporaries are never dropped (they leak)
+struct Ring { data: Vec<i64> }
+impl Ring {
+    fn items(self: &Self): &[i64] { return self.data[0..self.data.len] }
+}
+fn makeRing(): Ring {
+    var r = Ring { data: Vec.new() }
+    r.data.push(7)
+    return r
+}
+fn main(): i32 {
+    let s = makeRing().items()
+    print(s[0])
+    return 0
+}
+// @error: cannot take a view of a temporary

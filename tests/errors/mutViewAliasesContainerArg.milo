@@ -1,0 +1,15 @@
+// Same hazard with both sides mutable: `&mut Vec` plus a `&mut [T]` window into it.
+// The write through the stale view landed in freed memory and was silently lost.
+fn grow(v: &mut Vec<i64>, s: &mut [i64]): void {
+  var i = 0
+  while i < 4096 {
+    v.push(9)
+    i = i + 1
+  }
+  s[0] = 7
+}
+
+fn main() {
+  var v: Vec<i64> = [1, 2, 3]
+  grow(v, v[0..2])  // @error: is borrowed mutably twice in the same call
+}

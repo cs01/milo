@@ -1,0 +1,17 @@
+// A method-returned view borrows the receiver's storage, so growing the receiver while
+// the view is live must be rejected: push reallocs and frees the buffer the view points
+// into. This compiled once and segfaulted on glibc (silent garbage on macOS).
+struct Buf { data: Vec<i64> }
+impl Buf {
+    fn add(self: &mut Self, x: i64): void { self.data.push(x) }
+    fn view(self: &Self): &[i64] { return self.data[0..self.data.len] }
+}
+fn main(): i32 {
+    var b = Buf { data: Vec.new() }
+    b.add(1)
+    let s = b.view()
+    b.add(2)
+    print(s[0])
+    return 0
+}
+// @error: cannot call 'add' on 'b' because it is borrowed

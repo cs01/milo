@@ -1,0 +1,15 @@
+// moving the receiver away while its view is live drops the storage the view points into
+struct Buf { data: Vec<i64> }
+impl Buf {
+    fn view(self: &Self): &[i64] { return self.data[0..self.data.len] }
+}
+fn consume(x: Buf): void { print(x.data.len) }
+fn main(): i32 {
+    var b = Buf { data: Vec.new() }
+    b.data.push(1)
+    let s = b.view()
+    consume(b)
+    print(s[0])
+    return 0
+}
+// @error: cannot move 'b' because it is borrowed

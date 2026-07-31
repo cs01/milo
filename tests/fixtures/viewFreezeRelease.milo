@@ -1,0 +1,32 @@
+// The receiver's freeze ends with the view's scope: once the view is dead the container
+// is mutable again. In-place element writes stay legal while the view is live — they
+// never realloc, so the view cannot dangle, and it sees them (same storage).
+struct Ring {
+    data: Vec<i64>
+}
+
+impl Ring {
+    fn items(self: &Self): &[i64] {
+        return self.data[0..self.data.len]
+    }
+}
+
+pub fn main(): i32 {
+    var r = Ring {
+        data: Vec.new()
+    }
+    r.data.push(10)
+    r.data.push(20)
+    if true {
+        let s = r.items()
+        // @expect: 2
+        print(s.len)
+        r.data[0] = 99
+        // @expect: 99
+        print(s[0])
+    }
+    r.data.push(30)
+    // @expect: 3
+    print(r.data.len)
+    return 0
+}

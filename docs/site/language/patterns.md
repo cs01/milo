@@ -7,7 +7,7 @@ that compiles today.
 | Problem | Rust | Milo |
 |---|---|---|
 | Zero-copy view inside a scope | `&s[6..11]` | `s[6..11]` — a `&string` view, no allocation |
-| Zero-copy view returned to a caller | `fn items(&self) -> &[T]` | same — a method may return a view of its receiver's own storage |
+| Zero-copy view returned to a caller | `fn items(&self) -> &[T]` | same — a method may return a view of its receiver's own storage; the receiver is frozen while the view lives |
 | Recursive data (tree, AST) | `Box<Expr>` | `Heap<Expr>`, dereferenced with `*l` |
 | Doubly-linked list | `Rc<RefCell<Node>>` or `unsafe` | arena + `Option<Handle<Node>>` — [linkedList.milo](https://github.com/milo-language/milo/blob/main/examples/basics/linkedList.milo) |
 | Cyclic graph, cross-references | `petgraph`, arena + indices, or `Rc` | `Arena<Node>` + `Vec<Handle<Node>>` for edges — [depgraph.milo](https://github.com/milo-language/milo/blob/main/examples/basics/depgraph.milo) |
@@ -36,6 +36,12 @@ zero-copy and checked at compile time. The catch is that the caller has to read
 the view where it stands, because a view cannot be stored in a struct or a
 collection.
 
+Two rules make this sound, and the compiler enforces both. A method may only
+return a view of storage reachable through `self` — not of a local, and not of
+another `&` parameter. And a call that returns a view **freezes the receiver**
+for as long as the binding lives, exactly as `cfg.data[0..n]` written inline
+would: while `k` is alive, `cfg` cannot be grown, reassigned, moved, or dropped.
+
 ```milo
 struct Source { data: Vec<u8>, keyEnd: i64 }
 
@@ -54,6 +60,8 @@ fn main() {
 
     // var saved: Vec<&[u8]> = Vec.new()
     // saved.push(cfg.key())          // rejected: references cannot be stored in a collection
+    // cfg.data.push(65 as u8)        // rejected: cfg is borrowed while k is alive
+    // let f = move (): i64 => k.len  // rejected: a closure cannot capture a reference
 }
 ```
 

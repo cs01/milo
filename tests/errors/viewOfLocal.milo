@@ -1,0 +1,12 @@
+// a returned view must point into the receiver's storage — a method-local's buffer is
+// freed at the return, and the caller's freeze on the receiver would not cover it
+struct Buf { data: Vec<i64> }
+impl Buf {
+    fn bad(self: &Self): &[i64] {
+        var tmp: Vec<i64> = Vec.new()
+        tmp.push(1)
+        return tmp[0..1]
+    }
+}
+fn main(): i32 { return 0 }
+// @error: cannot return a view of 'tmp'

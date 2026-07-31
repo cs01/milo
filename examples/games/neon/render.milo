@@ -460,8 +460,33 @@ fn enemyCount(w: &World): i64 {
     return n + w.pending
 }
 
-// Crosshair + a short tracer from the nose, so the aim direction is never in doubt
-// (the OS cursor is hidden while playing).
+// The auto-aim marker: brackets around the locked target plus a tracer, so it is
+// always obvious what the gun has picked.
+pub fn drawLock(c: &mut Canvas, w: &World, tx: f64, ty: f64, ang: f64, t: f64) {
+    if !w.player.alive {
+        return
+    }
+    let px = w.player.x
+    let py = w.player.y
+    for k in 1..7 {
+        let d = (k as f64) * 26.0
+        let f = 0.30 - (k as f64) * 0.04
+        spot(c, px + Math.cos(ang) * (30.0 + d), py + Math.sin(ang) * (30.0 + d), 1.5, 0.25 * f, 0.6 * f, 0.8 * f)
+    }
+    let r = 22.0 + Math.sin(t * 7.0) * 2.0
+    let a = 8.0
+    // four corner brackets
+    line(c, tx - r, ty - r + a, tx - r, ty - r, 1.2, 1.6, 0.5)
+    line(c, tx - r, ty - r, tx - r + a, ty - r, 1.2, 1.6, 0.5)
+    line(c, tx + r, ty - r + a, tx + r, ty - r, 1.2, 1.6, 0.5)
+    line(c, tx + r, ty - r, tx + r - a, ty - r, 1.2, 1.6, 0.5)
+    line(c, tx - r, ty + r - a, tx - r, ty + r, 1.2, 1.6, 0.5)
+    line(c, tx - r, ty + r, tx - r + a, ty + r, 1.2, 1.6, 0.5)
+    line(c, tx + r, ty + r - a, tx + r, ty + r, 1.2, 1.6, 0.5)
+    line(c, tx + r, ty + r, tx + r - a, ty + r, 1.2, 1.6, 0.5)
+}
+
+// Crosshair + a short tracer from the nose, for when the mouse is driving.
 pub fn drawAim(c: &mut Canvas, w: &World, aimX: f64, aimY: f64, ang: f64) {
     if !w.player.alive {
         return

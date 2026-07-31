@@ -3,8 +3,9 @@
 // Build and play:
 //   milo run examples/games/neon/main.milo --release
 //
-//   ARROW KEYS / WASD   move
-//   MOUSE               aim — the gun fires by itself, there is no fire button
+//   ARROW KEYS / WASD   move — this is the only control you need
+//   MOUSE               optional: takes over aiming while you move it
+//                       (otherwise the gun locks the nearest threat by itself)
 //   SPACE               bomb
 //   1 2 3               pick an upgrade between waves
 //   ENTER               restart after a game over
@@ -29,10 +30,10 @@ from "./gfx" import {
     Canvas, canvasNew, present, text, textCentered, textWidth
 }
 from "./world" import {
-    World, worldNew, worldUpdate, worldReset, choosePerk
+    World, worldNew, worldUpdate, worldReset, choosePerk, nearestEnemy, alive
 }
 from "./render" import {
-    Shapes, shapesNew, drawWorld, drawHud, drawAim
+    Shapes, shapesNew, drawWorld, drawHud, drawAim, drawLock
 }
 from "std/random" import {
     Random
@@ -73,6 +74,9 @@ pub fn main(): i32 {
     var ev: [u8; 64] = [0; 64]
 
     var last = SDL_GetTicks()
+    var lastMouseX: f64 = 0.0
+    var lastMouseY: f64 = 0.0
+    var mouseIdle: f64 = 99.0 // start in auto-aim; the mouse claims it when moved
     var fpsAccum: f64 = 0.0
     var fpsFrames: i64 = 0
     var fpsShown: i64 = 0
@@ -93,15 +97,51 @@ pub fn main(): i32 {
 
         pollInput(inp, ev, 1.0)
 
-        // Aim is the mouse, full stop.
-        var aim = world.player.ang
-        let adx = inp.mouseX - world.player.x
-        let ady = inp.mouseY - world.player.y
-        if adx * adx + ady * ady > 4.0 {
-            aim = Math.atan2(ady, adx)
+        // Aim: locks onto the nearest threat by default, so the whole game is
+        // playable one-handed on the arrow keys. Touching the mouse hands aiming
+        // back to the mouse until it goes still again — no mode to discover, and
+        // no second stick to learn.
+        let mdx = inp.mouseX - lastMouseX
+        let mdy = inp.mouseY - lastMouseY
+        if mdx * mdx + mdy * mdy > 4.0 {
+            mouseIdle = 0.0
+        } else {
+            mouseIdle = mouseIdle + dt
         }
-        // Always firing. Holding a button to shoot adds nothing here, and it hid
-        // the fact that mouse-aim was working at all.
+        lastMouseX = inp.mouseX
+        lastMouseY = inp.mouseY
+        let usingMouse = mouseIdle < 2.0
+
+        var aim = world.player.ang
+        var lockX = 0.0
+        var lockY = 0.0
+        var locked = false
+        if usingMouse {
+            let adx = inp.mouseX - world.player.x
+            let ady = inp.mouseY - world.player.y
+            if adx * adx + ady * ady > 4.0 {
+                aim = Math.atan2(ady, adx)
+            }
+        } else {
+            let h = nearestEnemy(world, world.player.x, world.player.y, 4000.0, 0 - 1)
+            if alive(world, h) {
+                lockX = world.ents[h.slot].x
+                lockY = world.ents[h.slot].y
+                locked = true
+                let tgt = Math.atan2(lockY - world.player.y, lockX - world.player.x)
+                // Turn toward the mark instead of snapping, so a target dying does
+                // not teleport the gun across the screen.
+                var d = tgt - aim
+                while d > 3.14159265358979 {
+                    d = d - 6.28318530717959
+                }
+                while d < 0.0 - 3.14159265358979 {
+                    d = d + 6.28318530717959
+                }
+                aim = aim + d * Math.minF64(1.0, dt * 14.0)
+            }
+        }
+        // Always firing. Holding a button to shoot adds nothing here.
         let wantFire = true
 
         if world.perkPick {
@@ -128,7 +168,11 @@ pub fn main(): i32 {
         }
 
         drawWorld(c, world, shapes, ox, oy)
-        drawAim(c, world, inp.mouseX, inp.mouseY, aim)
+        if usingMouse {
+            drawAim(c, world, inp.mouseX, inp.mouseY, aim)
+        } else if locked {
+            drawLock(c, world, lockX, lockY, aim, world.time)
+        }
         drawHud(c, world)
 
         fpsAccum = fpsAccum + dt
@@ -141,7 +185,7 @@ pub fn main(): i32 {
         text(c, 24, H - 30, fpsShown.toString() + " FPS", 2, 0.18, 0.30, 0.38)
         // Control strip stays up permanently — cheap, and there is nowhere else to
         // find this out.
-        let help = "ARROWS MOVE    MOUSE AIMS    SPACE BOMB    ESC QUIT"
+        let help = "ARROWS MOVE    AUTO-AIM (MOUSE OVERRIDES)    SPACE BOMB    ESC QUIT"
         text(c, W - 24 - textWidth(help, 2), H - 30, help, 2, 0.18, 0.30, 0.38)
 
         if titleTimer > 0.0 {
@@ -152,7 +196,7 @@ pub fn main(): i32 {
             }
             textCentered(c, W / 2, H / 2 - 90, "NEON", 12, 0.6 * f, 1.4 * f, 2.0 * f)
             textCentered(c, W / 2, H / 2 + 10, "WRITTEN IN MILO", 3, 1.4 * f, 1.0 * f, 0.4 * f)
-            textCentered(c, W / 2, H / 2 + 60, "ARROW KEYS MOVE      MOUSE AIMS AND FIRES", 2, 0.7 * f, 0.9 * f, 1.2 * f)
+            textCentered(c, W / 2, H / 2 + 60, "ARROW KEYS MOVE — THE GUN AIMS ITSELF", 2, 0.7 * f, 0.9 * f, 1.2 * f)
             textCentered(c, W / 2, H / 2 + 88, "SPACE BOMB      1 2 3 UPGRADES      ESC QUIT", 2, 0.5 * f, 0.7 * f, 0.9 * f)
         }
 

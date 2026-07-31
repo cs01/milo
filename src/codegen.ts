@@ -9023,6 +9023,14 @@ export class Codegen {
       case "BinOp":
         // string `+` only — the comparisons return bool
         return expr.type.tag === "string";
+      case "IndexAccess": {
+        // `v[i]` on a non-Copy element auto-clones so the Vec stays intact (see the
+        // IndexAccess case), which makes the result a fresh allocation with no
+        // owner unless it is bound. `print(v[0])` leaked one copy per call.
+        const obj = expr.object.type.tag === "ref" ? expr.object.type.inner : expr.object.type;
+        const isDynamic = obj.tag === "vec" || (obj.tag === "array" && obj.size === null);
+        return isDynamic && this.needsDropCg(expr.type);
+      }
       default:
         return false;
     }

@@ -138,15 +138,31 @@ that Rust would not have asked for, and on a bigger shape table it would want a
 `Vec<Vec<f64>>` indexed by an id instead. It is a real constraint, not a free lunch.
 It cost about ten minutes and one function.
 
-Papercuts found while writing this, none of them about references:
+Papercuts found while writing this, none of them about references. All five were
+real, and all five are now fixed in the compiler:
 
-- `Vec` has no `clear()` or `truncate()` — the grid rebuild pops in a loop.
-- `let _ = f()` twice in one scope is *"variable '_' already declared"*. `_` should be
-  a fresh binding every time; it is the conventional discard.
-- A float literal in a binary expression stays `f64` and will not narrow to an `f32`
-  operand, so `1.0 - someF32` fails. Needed a module-level `ONE_F32` (`gfx.milo`).
-- `W.toString()` where `W` is a module-level `pub let` parses as enum access. Binding
-  it to a local first works.
+- `Vec` had no `clear()` or `truncate()` — the grid rebuild popped in a loop.
+  Both now exist and run drop glue on the discarded elements.
+- `let _ = f()` twice in one scope errored with *"variable '_' already declared"*.
+  `_` is a discard, so it now rebinds.
+- A float literal in a binary expression stayed `f64` and would not narrow to an
+  `f32` operand, so `1.0 - someF32` failed and needed a named `ONE_F32` constant.
+  Float literals now adopt the other operand's width, like integer literals.
+- `W.toString()` where `W` is a module-level `pub let` parsed as a static call on a
+  type named `W`. It now falls back to a method call on the variable.
+- `match opt { Some(x) => … }` required writing `Option.Some`. The enum name may now
+  be elided wherever the subject's type fixes it.
+
+A sixth — "no generic `sortBy` in `std/sort`" — turned out to be wrong: `sortBy` and
+`sortByKey` are builtin `Vec` methods and cover the generic case. `std/sort` only
+holds concrete helpers.
+
+Writing the game also turned up a **memory leak in the compiler**, unrelated to any
+of the above and much more consequential: an owned `string` produced by a call and
+consumed without being stored — `"SCORE " + n.toString()`, `print(n.toString())`,
+`take(n.toString())` on a `&string` parameter, `n.toString().len` — was never freed.
+The HUD in this game leaked one string per label per frame. Fixed; `shot.milo` now
+runs 300 frames with zero leaks (23 before).
 
 ## Files
 

@@ -1,0 +1,71 @@
+// A match arm may name the variant alone when the enum is clear from the subject.
+enum Shape {
+    Dot,
+    Line(i64),
+    Box(i64, i64),
+}
+
+fn area(s: Shape): i64 {
+    match s {
+        Dot => {
+            return 0
+        }
+        Line(n) => {
+            return n
+        }
+        Box(w, h) => {
+            return w * h
+        }
+    }
+}
+
+fn first(v: &mut Vec<i64>): i64 {
+    let head = v.pop()
+    match head {
+        Some(n) => {
+            return n
+        }
+        None => {
+            return 0 - 1
+        }
+    }
+}
+
+fn main(): i32 {
+    // @expect: 0
+    print(area(Shape.Dot))
+    // @expect: 7
+    print(area(Shape.Line(7)))
+    // @expect: 12
+    print(area(Shape.Box(3, 4)))
+
+    var v: Vec<i64> = Vec.new()
+    // @expect: -1
+    print(first(v))
+    v.push(9)
+    // @expect: 9
+    print(first(v))
+
+    // qualified form still works, and mixing is fine
+    let s = Shape.Line(2)
+    match s {
+        Shape.Dot => {
+            print("dot")
+        }
+        Line(n) => {
+            // @expect: 2
+            print(n)
+        }
+        _ => {
+            print("other")
+        }
+    }
+
+    // if let with a bare variant
+    let o: i64? = Option.Some(5)
+    if let Some(n) = o {
+        // @expect: 5
+        print(n)
+    }
+    return 0
+}

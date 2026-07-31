@@ -1,0 +1,47 @@
+// Owned temporaries in non-owning consumers used to leak: a call result fed to
+// `+`, to a by-reference parameter, to print/format, or to `.len`. This exercises
+// every one of those shapes and must neither leak nor double-free.
+fn take(s: &string): i64 {
+    return s.len
+}
+
+fn mk(i: i64): string {
+    return "value-" + i.toString()
+}
+
+fn main(): i32 {
+    var total: i64 = 0
+    for i in 0..200 {
+        total = total + take(i.toString())
+        total = total + ("x" + i.toString()).len
+        total = total + i.toString().len
+        total = total + mk(i).len
+        let s = "a" + i.toString() + "b" + (i * 2).toString()
+        total = total + s.len
+        let f = format("{}-{}", i.toString(), mk(i))
+        total = total + f.len
+    }
+    // @expect: 7975
+    print(total)
+
+    // a named local is NOT a temporary — it must survive every use
+    let kept = mk(7)
+    let a = take(kept)
+    let b = kept.len
+    print(kept)
+    // @expect: value-7
+    // @expect: 7
+    print(a - b + 7)
+
+    // moving a temp into a container transfers ownership, no double free
+    var v: Vec<string> = Vec.new()
+    for i in 0..50 {
+        v.push(i.toString())
+    }
+    // @expect: 50
+    print(v.len)
+    v.clear()
+    // @expect: 0
+    print(v.len)
+    return 0
+}

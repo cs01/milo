@@ -44,6 +44,7 @@ export interface VarInfo {
 // element ops are intentionally absent.
 const MUTATING_COLLECTION_METHODS = new Set([
   "push", "pushStr", "pop", "insert", "remove", "reverse", "swap", "sort", "sortBy", "sortByKey",
+  "clear", "truncate",
 ]);
 
 export interface CaptureInfo {
@@ -1022,7 +1023,10 @@ export class TypeChecker {
 
   private declare(name: string, info: VarInfo) {
     const scope = this.scopes[this.scopes.length - 1];
-    if (scope.has(name)) { this.error(`variable '${name}' already declared in this scope`); return; }
+    // `_` is a discard, not a name: `let _ = f()` twice in one scope is the
+    // conventional way to ignore two results, so each one rebinds rather than
+    // colliding. Everything else still gets the shadowing error.
+    if (name !== "_" && scope.has(name)) { this.error(`variable '${name}' already declared in this scope`); return; }
     scope.set(name, info);
   }
 
@@ -3013,6 +3017,7 @@ export class TypeChecker {
       case "IfLetStmt": {
         const rawSubjType = this.checkExpr(stmt.subject);
         const { subjType, subjBorrows } = this.enumSubjectBorrow(stmt.subject, rawSubjType);
+        this.bindElidedPattern(stmt.pattern, subjType);
         if (subjType.tag !== "enum" && subjType.tag !== "unknown") {
           this.error(`if let subject must be an enum, got ${typeName(subjType)}`, sp);
           break;
@@ -3072,6 +3077,7 @@ export class TypeChecker {
       case "LetElseStmt": {
         const rawSubjType = this.checkExpr(stmt.value);
         const { subjType, subjBorrows } = this.enumSubjectBorrow(stmt.value, rawSubjType);
+        this.bindElidedPattern(stmt.pattern, subjType);
         if (subjType.tag !== "enum" && subjType.tag !== "unknown") {
           this.error(`let-else value must be an enum (Option/Result/…), got ${typeName(subjType)}`, sp);
           break;
@@ -3497,6 +3503,25 @@ export class TypeChecker {
 
   // An integer expression composed entirely of literals (and arithmetic on
   // them) — its width is unconstrained and can adopt a context type.
+  // The float mirror of isConstIntExpr/retypeConstInt. A float literal defaults to
+  // f64, so `1.0 - someF32` used to be a hard type error with no way to write the
+  // literal as f32 — you needed a named f32 constant. A constant-float subtree now
+  // adopts the other operand's width, exactly like the integer case.
+  private isConstFloatExpr(e: Expr): boolean {
+    if (e.kind === "FloatLit") return true;
+    if (e.kind === "BinOp") return this.isConstFloatExpr(e.left) && this.isConstFloatExpr(e.right);
+    if (e.kind === "UnaryOp") return this.isConstFloatExpr(e.operand);
+    return false;
+  }
+
+  private retypeConstFloat(e: Expr, t: TypeKind) {
+    if (e.kind === "FloatLit") { this.exprTypes.set(e, t); return; }
+    if (e.kind === "BinOp") {
+      this.retypeConstFloat(e.left, t); this.retypeConstFloat(e.right, t); this.exprTypes.set(e, t); return;
+    }
+    if (e.kind === "UnaryOp") { this.retypeConstFloat(e.operand, t); this.exprTypes.set(e, t); return; }
+  }
+
   private isConstIntExpr(e: Expr): boolean {
     if (e.kind === "IntLit" || e.kind === "CharLit") return true;
     if (e.kind === "BinOp") return this.isConstIntExpr(e.left) && this.isConstIntExpr(e.right);
@@ -3891,6 +3916,11 @@ export class TypeChecker {
       this.retypeConstInt(expr, hint);
       return hint;
     }
+    if (hint?.tag === "float" && result.tag === "float" && !typeEq(hint, result) &&
+        (expr.kind === "UnaryOp" || expr.kind === "BinOp") && this.isConstFloatExpr(expr)) {
+      this.retypeConstFloat(expr, hint);
+      return hint;
+    }
     return result;
   }
 
@@ -3983,6 +4013,17 @@ export class TypeChecker {
             const lInfo = this.flexIntBinding(expr.left);
             if (rInfo && this.resolveFlexInt(rInfo, lt, expr.right)) rt = lt;
             else if (lInfo && this.resolveFlexInt(lInfo, rt, expr.left)) lt = rt;
+          }
+        }
+        // Same treatment for float widths: `1.0 - f32val` retypes the literal to
+        // f32 rather than demanding an annotated constant.
+        if (lt.tag === "float" && rt.tag === "float" && !typeEq(lt, rt)) {
+          if (this.isConstFloatExpr(expr.right)) {
+            this.retypeConstFloat(expr.right, lt);
+            rt = lt;
+          } else if (this.isConstFloatExpr(expr.left)) {
+            this.retypeConstFloat(expr.left, rt);
+            lt = rt;
           }
         }
         const arithOps = ["+", "-", "*", "/", "%"];
@@ -4924,6 +4965,8 @@ export class TypeChecker {
               return this.setType(expr, sig.ret);
             }
           }
+          const asMethod2 = this.staticCallOnVariable(expr, sp);
+          if (asMethod2) return asMethod2;
           this.error(`'${expr.enumName}<...>' has no static method '${expr.variant}'`, sp);
           return this.setType(expr, { tag: "unknown" });
         }
@@ -4986,6 +5029,8 @@ export class TypeChecker {
               return this.setType(expr, sig.ret);
             }
           }
+          const asMethod = this.staticCallOnVariable(expr, sp);
+          if (asMethod) return asMethod;
           this.error(`unknown enum '${expr.enumName}'`, sp); return this.setType(expr, { tag: "unknown" });
         }
         const variant = info.variants.get(expr.variant);
@@ -5476,6 +5521,23 @@ export class TypeChecker {
               }
             }
             this.tryMove(expr.args[0]);
+            return this.setType(expr, { tag: "void" });
+          }
+          if (expr.method === "clear" || expr.method === "truncate") {
+            // truncate(n) drops everything at index >= n; clear() is truncate(0).
+            const want = expr.method === "clear" ? 0 : 1;
+            if (expr.args.length !== want) {
+              this.error(`'${expr.method}' expects ${want} argument${want === 1 ? "" : "s"}, got ${expr.args.length}`, sp);
+            }
+            if (want === 1 && expr.args.length === 1) {
+              const nType = this.checkExpr(expr.args[0]);
+              if (nType.tag !== "int" && nType.tag !== "unknown") {
+                this.error(`'truncate': expected an integer length, got ${typeName(nType)}`, sp);
+              }
+            }
+            if (!this.isRootMutable(expr.object)) {
+              this.error(`cannot ${expr.method} an immutable Vec`, sp, `declare with 'var' to make it mutable`);
+            }
             return this.setType(expr, { tag: "void" });
           }
           if (expr.method === "pop") {
@@ -6020,6 +6082,7 @@ export class TypeChecker {
         return this.setType(expr, { tag: "unknown" });
       case "IsExpr": {
         const opType = this.checkExpr(expr.operand);
+        this.bindElidedPattern(expr.pattern, opType.tag === "ref" ? opType.inner : opType);
         if (expr.pattern.kind === "EnumPattern") {
           if (opType.tag !== "enum" && opType.tag !== "unknown") {
             this.error(`'is' pattern requires an enum type, got ${typeName(opType)}`, sp);
@@ -6194,9 +6257,22 @@ export class TypeChecker {
   // pattern validation, payload binding (borrow vs by-value), move merging, and
   // exhaustiveness. Returns each arm's block value type in arm order (used by
   // MatchExpr to unify; MatchStmt ignores it).
+  // `Some(x)` written without the `Option.` prefix: fill the enum name in from the
+  // subject's type. Only ever fills a BLANK name, so an explicitly written prefix
+  // that disagrees with the subject still produces its mismatch error.
+  private bindElidedPattern(pattern: Pattern | undefined | null, subjType: TypeKind) {
+    if (!pattern || pattern.kind !== "EnumPattern" || pattern.enumName !== "") return;
+    if (subjType.tag !== "enum") return;
+    pattern.enumName = subjType.name;
+  }
+
   private checkMatchLike(subject: Expr, arms: MatchArm[], sp: Span | undefined, fnRetType: TypeKind): TypeKind[] {
     const armTypes: TypeKind[] = [];
     const rawSubjType = this.checkExpr(subject);
+    {
+      const t = rawSubjType.tag === "ref" ? rawSubjType.inner : rawSubjType;
+      for (const arm of arms) this.bindElidedPattern(arm.pattern, t);
+    }
     // Matching on a borrowed enum (`&Enum`) reads the pointee without moving
     // it. Payload bindings become borrows (see below), so nothing is consumed.
     // Reading a ref Ident auto-derefs, so also consult its declared type.
@@ -6395,6 +6471,39 @@ export class TypeChecker {
   // the expr itself if it's an all-literal int subexpr, or every arm tail of an
   // if/match expression (recursively). Null if any part isn't a const-int leaf,
   // meaning the value isn't width-adaptable.
+  // `Name.thing(...)` where `Name` starts with a capital is parsed as a static
+  // call on a type, because the parser cannot know what `Name` is. When no enum,
+  // struct or interface by that name exists but a *variable* does, the only
+  // sensible reading is a method call or field access on that variable — which is
+  // what a module-level `pub let W: i64 = 1280` then `W.toString()` means.
+  //
+  // Called only from the two "no such static" error paths, so anything that
+  // resolves as a static call today keeps resolving that way.
+  private staticCallOnVariable(expr: any, sp?: Span): TypeKind | null {
+    const info = this.lookup(expr.enumName);
+    if (!info) return null;
+    const obj = { kind: "Ident", name: expr.enumName, span: expr.span } as unknown as Expr;
+    let ty = info.type;
+    if (ty.tag === "ref") ty = ty.inner;
+    const isField = ty.tag === "struct" && !!this.structs.get(ty.name)?.fields.some(f => f.name === expr.variant);
+    const node = expr as any;
+    const args: Expr[] = expr.args ?? [];
+    if (isField && args.length === 0) {
+      node.kind = "FieldAccess";
+      node.object = obj;
+      node.field = expr.variant;
+    } else {
+      node.kind = "MethodCall";
+      node.object = obj;
+      node.method = expr.variant;
+      node.args = args;
+    }
+    delete node.enumName;
+    delete node.variant;
+    delete node.typeArgs;
+    return this.checkExpr(node as Expr);
+  }
+
   private flexIntLeaves(e: Expr): Expr[] | null {
     if (this.isConstIntExpr(e)) return [e];
     if (e.kind === "IfExpr") {

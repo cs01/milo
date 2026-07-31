@@ -1,0 +1,26 @@
+// A capitalized *variable* followed by `.method()` parses as a static call on a
+// type; when no such type exists it must fall back to a method call on the value.
+pub let W: i64 = 1280
+
+pub let Scale: f64 = 2.5
+
+struct Cfg {
+    width: i64,
+}
+
+fn main(): i32 {
+    // @expect: 1280
+    print(W.toString())
+    // @expect: 2
+    print(Scale as i64)
+    let Grid = Cfg {
+        width: 7
+    }
+    // @expect: 7
+    print(Grid.width)
+    var Names: Vec<string> = Vec.new()
+    Names.push("ok")
+    // @expect: ok
+    print(Names[0])
+    return 0
+}

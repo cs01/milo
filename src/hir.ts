@@ -90,6 +90,7 @@ export type HIRExpr =
   | { kind: "VecSwap"; object: HIRExpr; indexA: HIRExpr; indexB: HIRExpr; elementType: TypeKind; type: TypeKind; span?: Span }
   | { kind: "VecInsert"; object: HIRExpr; index: HIRExpr; value: HIRExpr; elementType: TypeKind; type: TypeKind; span?: Span }
   | { kind: "VecRemove"; object: HIRExpr; index: HIRExpr; elementType: TypeKind; type: TypeKind; span?: Span }
+  | { kind: "VecTruncate"; object: HIRExpr; length: HIRExpr; elementType: TypeKind; type: TypeKind; span?: Span }
   | { kind: "VecContains"; vec: HIRExpr; value: HIRExpr; elementType: TypeKind; type: TypeKind; span?: Span }
   | { kind: "VecSort"; object: HIRExpr; elementType: TypeKind; type: TypeKind; span?: Span }
   | { kind: "VecSortBy"; object: HIRExpr; callback: HIRExpr; elementType: TypeKind; type: TypeKind; span?: Span }

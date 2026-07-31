@@ -3134,9 +3134,11 @@ export class Codegen {
         const partFmts: string[] = [];
         const partArgs: { val: string; type: string }[] = [];
         const tempBufs: string[] = [];
+        const fmtTemps: { val: string; ty: string; expr: HIRExpr }[] = [];
         for (const arg of expr.args) {
           const [al, av, at] = this.genExpr(arg.expr);
           lines.push(...al);
+          fmtTemps.push({ val: av, ty: at, expr: arg.expr });
           this.emitDisplayPart(arg.expr.type, av, at, lines, partFmts, partArgs, tempBufs);
         }
         const fmtStr = this.addString(partFmts.join(""));
@@ -3154,6 +3156,7 @@ export class Codegen {
         lines.push(`  ${buf} = call ptr @malloc(i64 ${bufSize})`);
         lines.push(`  call i32 (ptr, i64, ptr, ...) @snprintf(ptr ${buf}, i64 ${bufSize}, ptr ${fmtStr.label}${argsStr})`);
         for (const tb of tempBufs) lines.push(`  call void @free(ptr ${tb})`);
+        for (const t of fmtTemps) this.dropOwnedTemp(lines, t.val, t.ty, t.expr);
         const s0 = this.nextTemp();
         lines.push(`  ${s0} = insertvalue %String undef, ptr ${buf}, 0`);
         const s1 = this.nextTemp();
@@ -3183,9 +3186,13 @@ export class Codegen {
         partFmts = [];
         partArgs = [];
       };
+      // An owned temporary printed directly (`print(n.toString())`) has no owner
+      // once it has been written, so free it after the batch is flushed.
+      const printTemps: { val: string; ty: string; expr: HIRExpr }[] = [];
       for (const arg of expr.args) {
         const [al, av, at] = this.genExpr(arg.expr);
         lines.push(...al);
+        printTemps.push({ val: av, ty: at, expr: arg.expr });
         let dt: any = arg.expr.type;
         while (dt && dt.tag === "ref") dt = dt.inner;
         if (dt && dt.tag === "string") {
@@ -3204,6 +3211,7 @@ export class Codegen {
       flushBatch();
       lines.push(`  call i32 @putchar(i32 10)`);
       for (const tb of tempBufs) lines.push(`  call void @free(ptr ${tb})`);
+      for (const t of printTemps) this.dropOwnedTemp(lines, t.val, t.ty, t.expr);
       return [lines, "void", "void"];
     }
     if (expr.func === "eprint") {
@@ -3212,9 +3220,11 @@ export class Codegen {
       const partFmts: string[] = [];
       const partArgs: { val: string; type: string }[] = [];
       const tempBufs: string[] = [];
+      const eprintTemps: { val: string; ty: string; expr: HIRExpr }[] = [];
       for (const arg of expr.args) {
         const [al, av, at] = this.genExpr(arg.expr);
         lines.push(...al);
+        eprintTemps.push({ val: av, ty: at, expr: arg.expr });
         this.emitDisplayPart(arg.expr.type, av, at, lines, partFmts, partArgs, tempBufs);
       }
       const fullFmt = partFmts.join("") + "\n";
@@ -3222,6 +3232,7 @@ export class Codegen {
       const argsStr = partArgs.map(a => `, ${a.type} ${a.val}`).join("");
       this.emitFdPrintf(lines, 2, fmtStr.label, argsStr);
       for (const tb of tempBufs) lines.push(`  call void @free(ptr ${tb})`);
+      for (const t of eprintTemps) this.dropOwnedTemp(lines, t.val, t.ty, t.expr);
       return [lines, "void", "void"];
     }
     if (expr.func === "flush") {
@@ -3752,6 +3763,7 @@ export class Codegen {
           return this.genBuiltinCall(expr, lines);
         }
         const sig = this.fnSigs.get(expr.func);
+        const tempMark = this.argTempDrops.length;
         const argVals: { val: string; type: string }[] = [];
         const refPtrs: { ptr: string; mut: boolean }[] = [];
         for (let i = 0; i < expr.args.length; i++) {
@@ -3813,7 +3825,9 @@ export class Codegen {
         // extern fns passing/returning a struct by value need native-ABI lowering:
         // coerce args into registers, byval/indirect big ones, sret the return.
         if (this.externAbi.has(expr.func)) {
-          return this.emitExternAbiCall(expr, argVals, lines);
+          const r = this.emitExternAbiCall(expr, argVals, lines);
+          this.flushArgTempDrops(r[0], tempMark);
+          return r;
         }
         const argsStr = argVals.map(a => `${a.type} ${a.val}`).join(", ");
         const retTy = sig?.retType ?? "i32";
@@ -3821,6 +3835,7 @@ export class Codegen {
           const dest = sretDest ?? this.nextTemp();
           if (!sretDest) lines.push(`  ${dest} = alloca ${retTy}`);
           lines.push(`  call void @${expr.func}(${argsStr ? `ptr ${dest}, ${argsStr}` : `ptr ${dest}`})`);
+          this.flushArgTempDrops(lines, tempMark);
           if (sretDest) return [lines, "undef", retTy];
           // no direct destination: fall back to a first-class value for generic
           // consumers (rare — slower to compile at -O2, but correct)
@@ -3835,10 +3850,12 @@ export class Codegen {
         }
         if (retTy === "void") {
           lines.push(`  call ${callPrefix} @${expr.func}(${argsStr})`);
+          this.flushArgTempDrops(lines, tempMark);
           return [lines, "void", "void"];
         }
         const tmp = this.nextTemp();
         lines.push(`  ${tmp} = call ${callPrefix} @${expr.func}(${argsStr})`);
+        this.flushArgTempDrops(lines, tempMark);
         return [lines, tmp, retTy];
       }
       case "StructLit": {
@@ -3890,6 +3907,8 @@ export class Codegen {
         lines.push(...ol);
         const len = this.nextTemp();
         lines.push(`  ${len} = extractvalue %String ${ov}, 1`);
+        // `n.toString().len` reads a length out of a string nobody owns.
+        this.dropOwnedTemp(lines, ov, "%String", expr.object);
         return [lines, len, "i64"];
       }
       case "StringCstr": {
@@ -4357,6 +4376,8 @@ export class Codegen {
         return this.genVecInsert(expr, lines);
       case "VecRemove":
         return this.genVecRemove(expr, lines);
+      case "VecTruncate":
+        return this.genVecTruncate(expr, lines);
       case "VecContains":
         return this.genVecContains(expr, lines);
       case "VecEnumerate":
@@ -4598,6 +4619,7 @@ export class Codegen {
         // a bare C function pointer: call it directly, with no env prepended
         const [calLines, calVal] = this.genExpr(expr.callee);
         lines.push(...calLines);
+        const cTempMark = this.argTempDrops.length;
         const argVals: { val: string; type: string }[] = [];
         for (const arg of expr.args) {
           if (arg.passByRef) {
@@ -4614,10 +4636,12 @@ export class Codegen {
         const cRetTy = this.llvmType(expr.type);
         if (cRetTy === "void") {
           lines.push(`  call void ${calVal}(${cArgsStr})`);
+          this.flushArgTempDrops(lines, cTempMark);
           return [lines, "void", "void"];
         }
         const cResult = this.nextTemp();
         lines.push(`  ${cResult} = call ${cRetTy} ${calVal}(${cArgsStr})`);
+        this.flushArgTempDrops(lines, cTempMark);
         return [lines, cResult, cRetTy];
       }
       case "ClosureCall": {
@@ -4630,6 +4654,7 @@ export class Codegen {
         lines.push(`  ${envPtr} = extractvalue { ptr, ptr } ${calVal}, 1`);
 
         // evaluate args
+        const clTempMark = this.argTempDrops.length;
         const argVals: { val: string; type: string }[] = [{ val: envPtr, type: "ptr" }];
         const refPtrs: { ptr: string; mut: boolean }[] = [];
         for (const arg of expr.args) {
@@ -4650,10 +4675,12 @@ export class Codegen {
         const retTy = this.llvmType(expr.type);
         if (retTy === "void") {
           lines.push(`  call void ${fnPtr}(${argsStr})`);
+          this.flushArgTempDrops(lines, clTempMark);
           return [lines, "void", "void"];
         }
         const result = this.nextTemp();
         lines.push(`  ${result} = call ${retTy} ${fnPtr}(${argsStr})`);
+        this.flushArgTempDrops(lines, clTempMark);
         return [lines, result, retTy];
       }
       case "InterfaceCoerce": {
@@ -4799,6 +4826,7 @@ export class Codegen {
         lines.push(`  ${fnPtr} = load ptr, ptr ${fnSlot}`);
 
         // build args: data ptr as self, then user args
+        const imTempMark = this.argTempDrops.length;
         const argVals: { val: string; type: string }[] = [{ val: dataPtr, type: "ptr" }];
         const refPtrs: { ptr: string; mut: boolean }[] = [];
         for (const arg of expr.args) {
@@ -4819,10 +4847,12 @@ export class Codegen {
         const retTy = this.llvmType(expr.type);
         if (retTy === "void") {
           lines.push(`  call void ${fnPtr}(${argsStr})`);
+          this.flushArgTempDrops(lines, imTempMark);
           return [lines, "void", "void"];
         }
         const result = this.nextTemp();
         lines.push(`  ${result} = call ${retTy} ${fnPtr}(${argsStr})`);
+        this.flushArgTempDrops(lines, imTempMark);
         return [lines, result, retTy];
       }
     }
@@ -5532,6 +5562,9 @@ export class Codegen {
     const tmp = this.nextTemp();
     lines.push(`  ${tmp} = alloca ${et}`);
     lines.push(`  store ${et} ${ev}, ptr ${tmp}`);
+    if (this.isOwnedTempExpr(expr) && this.needsDropCg(expr.type)) {
+      this.argTempDrops.push({ addr: tmp, type: expr.type });
+    }
     return [lines, tmp];
   }
 
@@ -6150,6 +6183,79 @@ export class Codegen {
     lines.push(`  br label %${condLabel}`);
 
     lines.push(`${endLabel}:`);
+    return [lines, "void", "void"];
+  }
+
+  // `v.truncate(n)` / `v.clear()`. Elements at index >= n are OWNED by the Vec, so
+  // shortening the length without running their drop glue would leak every string,
+  // nested Vec or Drop-implementing struct above the cut. The counter lives in an
+  // alloca rather than a phi because emitDropValue splits the block.
+  private genVecTruncate(expr: HIRExpr & { kind: "VecTruncate" }, lines: string[]): [string[], string, string] {
+    this.hasVecType = true;
+    const elemType = expr.elementType;
+    const elemTy = this.llvmType(elemType);
+
+    const [vecPtrLines, vecPtr] = this.genLValue(expr.object);
+    lines.push(...vecPtrLines);
+    const [nLines, nRaw] = this.genExpr(expr.length);
+    lines.push(...nLines);
+
+    // A negative length means empty; a length past the end is a no-op, never a grow.
+    const isNeg = this.nextTemp();
+    lines.push(`  ${isNeg} = icmp slt i64 ${nRaw}, 0`);
+    const n = this.nextTemp();
+    lines.push(`  ${n} = select i1 ${isNeg}, i64 0, i64 ${nRaw}`);
+
+    const lenPtr = this.nextTemp();
+    lines.push(`  ${lenPtr} = getelementptr %Vec, ptr ${vecPtr}, i32 0, i32 1`);
+    const len = this.nextTemp();
+    lines.push(`  ${len} = load i64, ptr ${lenPtr}`);
+
+    const doneLabel = this.nextLabel("vec.trunc.done");
+    const startLabel = this.nextLabel("vec.trunc.start");
+    const noop = this.nextTemp();
+    lines.push(`  ${noop} = icmp uge i64 ${n}, ${len}`);
+    lines.push(`  br i1 ${noop}, label %${doneLabel}, label %${startLabel}`);
+    lines.push(`${startLabel}:`);
+
+    if (this.needsDropCg(elemType)) {
+      const dataPtr = this.nextTemp();
+      lines.push(`  ${dataPtr} = getelementptr %Vec, ptr ${vecPtr}, i32 0, i32 0`);
+      const data = this.nextTemp();
+      lines.push(`  ${data} = load ptr, ptr ${dataPtr}`);
+
+      const iAddr = `%__trunc_i.${this.scopeCounter++}.addr`;
+      this.entryAllocas.push(`  ${iAddr} = alloca i64`);
+      lines.push(`  store i64 ${n}, ptr ${iAddr}`);
+
+      const condLabel = this.nextLabel("vec.trunc.cond");
+      const bodyLabel = this.nextLabel("vec.trunc.body");
+      const finLabel = this.nextLabel("vec.trunc.fin");
+      lines.push(`  br label %${condLabel}`);
+      lines.push(`${condLabel}:`);
+      const i = this.nextTemp();
+      lines.push(`  ${i} = load i64, ptr ${iAddr}`);
+      const cont = this.nextTemp();
+      lines.push(`  ${cont} = icmp ult i64 ${i}, ${len}`);
+      lines.push(`  br i1 ${cont}, label %${bodyLabel}, label %${finLabel}`);
+
+      lines.push(`${bodyLabel}:`);
+      const elemPtr = this.nextTemp();
+      lines.push(`  ${elemPtr} = getelementptr ${elemTy}, ptr ${data}, i64 ${i}`);
+      this.emitDropValue(lines, elemPtr, elemType);
+      const iNow = this.nextTemp();
+      lines.push(`  ${iNow} = load i64, ptr ${iAddr}`);
+      const iNext = this.nextTemp();
+      lines.push(`  ${iNext} = add i64 ${iNow}, 1`);
+      lines.push(`  store i64 ${iNext}, ptr ${iAddr}`);
+      lines.push(`  br label %${condLabel}`);
+
+      lines.push(`${finLabel}:`);
+    }
+
+    lines.push(`  store i64 ${n}, ptr ${lenPtr}`);
+    lines.push(`  br label %${doneLabel}`);
+    lines.push(`${doneLabel}:`);
     return [lines, "void", "void"];
   }
 
@@ -8894,7 +9000,46 @@ export class Codegen {
     // A discarded small-type `replace(...)` result is dropped here (SSA path). A big-agg
     // replace drops its own moved-out value inside genExpr, so it must NOT double-drop here.
     if (expr.kind === "MemReplace") return !this.isBigAgg(this.llvmType(expr.type));
-    return expr.kind === "Call" || expr.kind === "ClosureCall" || expr.kind === "InterfaceMethodCall";
+    if (expr.kind === "Call" || expr.kind === "ClosureCall" || expr.kind === "InterfaceMethodCall") return true;
+    // Builtins that allocate a fresh String/Vec are temporaries too. `i.toString()`
+    // lowers to NumberToString, not Call, so `"n=" + i.toString()` used to leak the
+    // converted string on every evaluation — which in a render loop is per frame.
+    // A nested concat (`a + b + c`) is the same: the inner BinOp's result is owned
+    // by nobody once the outer one has read it.
+    switch (expr.kind) {
+      case "NumberToString":
+      case "BoolToString":
+      case "JsonStringify":
+      case "StringClone":
+      case "StringSubstr":
+      case "StringWithCapacity":
+      case "VecClone":
+      case "VecNew":
+      case "VecWithCapacity":
+      case "VecFilled":
+      case "VecMap":
+      case "VecFilter":
+        return true;
+      case "BinOp":
+        // string `+` only — the comparisons return bool
+        return expr.type.tag === "string";
+      default:
+        return false;
+    }
+  }
+
+  // Owned temporaries materialised into an alloca so they could be passed by
+  // reference (`take(i.toString())`, `print(n.toString())`). The callee cannot keep
+  // the borrow — references are second-class — so the temp is dead the moment the
+  // call returns, and nothing else will ever free it. Recorded here by
+  // genLValueForArg and flushed by the call site that consumed them.
+  private argTempDrops: { addr: string; type: TypeKind }[] = [];
+
+  private flushArgTempDrops(lines: string[], mark: number) {
+    while (this.argTempDrops.length > mark) {
+      const t = this.argTempDrops.pop()!;
+      this.emitDropValue(lines, t.addr, t.type);
+    }
   }
 
   // Free a value that was produced by a call and then consumed in-place by an

@@ -1,0 +1,60 @@
+// clear()/truncate(n) must run drop glue on the discarded elements, not just move
+// the length — otherwise every owned element above the cut leaks.
+struct Row {
+    name: string,
+    tags: Vec<string>,
+}
+
+fn main(): i32 {
+    var nums: Vec<i64> = [1, 2, 3, 4, 5]
+    nums.truncate(2)
+    // @expect: 2
+    print(nums.len)
+    // @expect: 1
+    print(nums[0])
+    nums.clear()
+    // @expect: 0
+    print(nums.len)
+    nums.push(9)
+    // @expect: 9
+    print(nums[0])
+
+    // truncate past the end is a no-op, and never grows
+    var s: Vec<string> = ["a", "b", "c"]
+    s.truncate(10)
+    // @expect: 3
+    print(s.len)
+    s.truncate(1)
+    // @expect: 1
+    print(s.len)
+    // @expect: a
+    print(s[0])
+
+    // a negative length empties it
+    var t: Vec<i64> = [7, 8]
+    t.truncate(0 - 3)
+    // @expect: 0
+    print(t.len)
+
+    // owned, nested elements
+    var rows: Vec<Row> = Vec.new()
+    for i in 0..40 {
+        var tags: Vec<string> = Vec.new()
+        tags.push("alpha")
+        tags.push("beta")
+        rows.push(Row {
+            name: "row", tags: tags
+        }
+        )
+    }
+    rows.clear()
+    // @expect: 0
+    print(rows.len)
+    rows.push(Row {
+        name: "again", tags: Vec.new()
+    }
+    )
+    // @expect: again
+    print(rows[0].name)
+    return 0
+}

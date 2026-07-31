@@ -60,6 +60,8 @@ var count: i32 = 0     // mutable — can be reassigned
 count = count + 1
 
 let name = "Milo"      // type inference works
+
+let _ = mightFail()    // `_` discards a result; it may be repeated in one scope
 ```
 
 Under the hood, `let` maps to an SSA register and `var` maps to a stack allocation.
@@ -113,6 +115,15 @@ payload — the literal adopts that type instead:
 let a = 5             // i64 (no context)
 let b: i32 = 5        // i32 (annotation drives the width)
 let c = a + 1         // i64  — `1` takes `a`'s width
+```
+
+Float literals work the same way. A bare `1.0` is `f64`, but in an expression with
+an `f32` it narrows to `f32` rather than forcing a cast or a named constant:
+
+```milo
+fn lerp(a: f32, b: f32, t: f32): f32 {
+    return a * (1.0 - t) + b * t     // `1.0` is f32 here
+}
 ```
 
 ### Integer Overflow Safety
@@ -701,6 +712,30 @@ fn area(s: Shape): f64 {
 }
 ```
 
+The enum name may be left off when the subject's type already fixes it, which is
+usually the case. Both forms are accepted, and they can be mixed:
+
+```milo
+fn area(s: Shape): f64 {
+    match s {
+        Circle(r) => { return 3.14159 * r * r }
+        Rect(w, h) => { return w * h }
+        Point => { return 0.0 }
+    }
+}
+
+let head = v.pop()
+match head {
+    Some(n) => { print(n) }
+    None => { print("empty") }
+}
+
+if let Some(n) = head { print(n) }
+```
+
+A written-out prefix that disagrees with the subject is still an error — eliding is
+not the same as ignoring the type.
+
 Use `_` as a wildcard to match remaining variants:
 
 ```milo
@@ -1033,6 +1068,16 @@ users.sortBy((a: &User, b: &User) => a.age - b.age)  // full control
 users.sortByKey((u: &User) => u.age)                  // simpler
 users.sortByKey((u: &User) => u.name)                 // works with strings too
 ```
+
+```milo
+var v: Vec<string> = ["a", "b", "c"]
+v.truncate(1)             // ["a"] — elements at index >= 1 are dropped
+v.clear()                 // [] — same thing with 0
+```
+
+`truncate(n)` runs each discarded element's drop glue, so owned elements (strings,
+nested `Vec`s, `Drop` types) are freed rather than leaked. A length at or past the
+end is a no-op — it never grows the Vec — and a negative length empties it.
 
 `sort` works on Vec of int, float, string, or bool. `sortBy` and `sortByKey` work on any type. All require `var`.
 

@@ -501,6 +501,11 @@ export class Codegen {
         // %Vec — the same value the slice expression already produces. (Other `&T` stay
         // pointer-passed.)
         if (t.inner.tag === "array" && t.inner.size === null) { this.hasVecType = true; return "%Vec"; }
+        // A returned `&string` is the same non-owning fat pointer a slice expression
+        // already produces (data + len, no ownership), so it travels by value as
+        // %String. Params are unaffected: the isRef path passes a pointer to the
+        // pointee and never asks for the lowering of the ref type itself.
+        if (t.inner.tag === "string") { this.hasStringType = true; return "%String"; }
         return "ptr";
       case "interface": return "{ ptr, ptr }";
       case "struct": return `%${t.name}`;
@@ -4490,7 +4495,12 @@ export class Codegen {
 
         // generate closure function: @__closure_N(ptr %env, params...)
         const closureBody: string[] = [];
-        const closureParams = [`ptr %env`, ...expr.params.map(p => `${this.llvmType(p.type)} %${p.name}`)].join(", ");
+        // Closure params carry the full type (top-level fns split it into inner + isRef),
+        // and the prologue below spills every ref param as a pointer. `&string` lowers to
+        // %String by value in return position, so ask for the pointer explicitly here.
+        const closureParamTy = (t: TypeKind) =>
+          t.tag === "ref" && t.inner.tag === "string" ? "ptr" : this.llvmType(t);
+        const closureParams = [`ptr %env`, ...expr.params.map(p => `${closureParamTy(p.type)} %${p.name}`)].join(", ");
         closureBody.push(`define ${retTy} @${closureName}(${closureParams}) {`);
         closureBody.push("entry.bb:");
 

@@ -1,0 +1,15 @@
+// holding a returned &string view freezes its receiver: growing the buffer would
+// realloc the bytes the view points into
+struct Lexer { src: string }
+impl Lexer {
+    fn word(self: &Self, a: i64, b: i64): &string { return self.src[a..b] }
+    fn feed(self: &mut Self, more: &string): void { self.src = self.src + more }
+}
+fn main(): i32 {
+    var lx = Lexer { src: "alpha beta" }
+    let w = lx.word(0, 5)
+    lx.feed("!!")
+    print(w)
+    return 0
+}
+// @error: cannot call 'feed' on 'lx' because it is borrowed

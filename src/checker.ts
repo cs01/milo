@@ -2377,8 +2377,13 @@ export class TypeChecker {
   // only sound because the call site freezes the receiver for the result binding's life
   // (see freezeViewSource) and the body may only derive it from `self` — without both,
   // `let s = b.view(); b.push(x)` reallocs and frees the buffer `s` points at.
+  // `&[T]` and `&string` are both non-owning views into a receiver's storage and carry
+  // the same provenance rule. A string view is what any zero-copy text pass needs (a
+  // tokenizer handing back the span it just matched), so it must not be second-class
+  // where the slice view is not.
   private isViewReturn(ret: TypeKind): boolean {
-    return ret.tag === "ref" && ret.inner.tag === "array" && ret.inner.size === null;
+    if (ret.tag !== "ref") return false;
+    return (ret.inner.tag === "array" && ret.inner.size === null) || ret.inner.tag === "string";
   }
 
   private hasSelfReceiver(fn: Function): boolean {
@@ -2416,7 +2421,7 @@ export class TypeChecker {
     if (root.kind === "Ident" && root.name === "self") return;
     if (root.kind !== "Ident") return; // not a place expression — the type check already rejects it
     this.error(`cannot return a view of '${root.name}'`, sp,
-      `a returned '&[T]' may only view the receiver's own storage ('self...') — the call site freezes the receiver, so any other source could be moved or reallocated while the view is live`);
+      `a returned view may only point into the receiver's own storage ('self...') — the call site freezes the receiver, so any other source could be moved or reallocated while the view is live`);
   }
 
   private errorIfRefReturn(fn: Function, ret: TypeKind) {
@@ -2425,7 +2430,7 @@ export class TypeChecker {
     this.refReturnReported.add(fn);
     this.error(`function '${fn.name}': cannot return a reference`, fn.span,
       this.isViewReturn(ret)
-        ? `only a method can return a '&[T]' view, and only of its own receiver's storage — take the slice at the call site ('v[a..b]') or return an owned Vec`
+        ? `only a method can return a '${typeName(ret)}' view, and only of its own receiver's storage — take the slice at the call site ('v[a..b]') or return an owned value`
         : `references are second-class — return an owned value instead`);
   }
 
@@ -3005,7 +3010,13 @@ export class TypeChecker {
         if (this.loopDepth === 0) this.error("'continue' outside of loop", sp);
         break;
       case "ExprStmt": {
+        // A view produced by a discarded expression (`print(lx.word(0, 5))`) has no
+        // binding to outlive the statement, so its freeze must not survive it either —
+        // same reasoning as the RHS snapshot in Assign, which this mirrors.
+        const frozenBefore = new Set<VarInfo>();
+        for (const scope of this.scopes) for (const [, vi] of scope) if (vi.borrowed) frozenBefore.add(vi);
         const exprType = this.checkExpr(stmt.expr);
+        for (const scope of this.scopes) for (const [, vi] of scope) if (vi.borrowed && !frozenBefore.has(vi)) vi.borrowed = false;
         if (exprType.tag === "enum") {
           const enumInfo = this.enums.get(exprType.name);
           const base = enumInfo?.baseName;

@@ -1,0 +1,8 @@
+// a returned &string view may only point into the receiver's storage: the call site
+// freezes the receiver and nothing else, so any other source could be freed under it
+struct Lexer { src: string }
+impl Lexer {
+    fn bad(self: &Self, other: &string): &string { return other[0..1] }
+}
+fn main(): i32 { return 0 }
+// @error: cannot return a view of 'other'

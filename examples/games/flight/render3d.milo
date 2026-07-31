@@ -300,23 +300,23 @@ fn themedSmooth(theme: i64, h: f64, slope: f64): Rgb {
         // desert: sand, red rock on the steep faces
         let sand = rgb(0.72, 0.58, 0.32)
         let rock = rgb(0.46, 0.24, 0.14)
-        return mixRgb(sand, rock, smoothstep(0.44, 0.64, slope))
+        return sand.lerp(rock, smoothstep(0.44, 0.64, slope))
     }
     if theme == 2 {
         // forest: deep greens, rock on the steep parts, no snow
         let low = rgb(0.09, 0.26, 0.10)
         let high = rgb(0.16, 0.30, 0.16)
         let rock = rgb(0.26, 0.24, 0.22)
-        var col = mixRgb(low, high, smoothstep(130.0, 172.0, h))
-        return mixRgb(col, rock, smoothstep(0.50, 0.70, slope))
+        var col = low.lerp(high, smoothstep(130.0, 172.0, h))
+        return col.lerp(rock, smoothstep(0.50, 0.70, slope))
     }
     if theme == 3 {
         // city: concrete, grey-green parks, tarmac in place of water
         let park = rgb(0.22, 0.26, 0.22)
         let slab = rgb(0.34, 0.34, 0.36)
         let wall = rgb(0.24, 0.24, 0.26)
-        var col = mixRgb(park, slab, smoothstep(70.0, 110.0, h))
-        return mixRgb(col, wall, smoothstep(0.40, 0.60, slope))
+        var col = park.lerp(slab, smoothstep(70.0, 110.0, h))
+        return col.lerp(wall, smoothstep(0.40, 0.60, slope))
     }
     // coastline: sand, grass, rock, snow. Water is not in here — it is shaded
     // separately in `cornerAt`, because it needs the view direction.
@@ -324,11 +324,11 @@ fn themedSmooth(theme: i64, h: f64, slope: f64): Rgb {
     let grass = rgb(0.16, 0.36, 0.14)
     let rock = rgb(0.34, 0.31, 0.30)
     let snow = rgb(0.82, 0.86, 0.92)
-    var col = mixRgb(sand, grass, smoothstep(9.0, 26.0, h))
+    var col = sand.lerp(grass, smoothstep(9.0, 26.0, h))
     // rock takes over on the steep parts, and with altitude
     let rocky = Math.maxF64(smoothstep(0.50, 0.70, slope), smoothstep(112.0, 146.0, h))
-    col = mixRgb(col, rock, rocky)
-    return mixRgb(col, snow, smoothstep(150.0, 182.0, h))
+    col = col.lerp(rock, rocky)
+    return col.lerp(snow, smoothstep(150.0, 182.0, h))
 }
 
 // Gradient magnitude of the seabed, ignoring the wave train — how steeply the
@@ -393,7 +393,7 @@ fn cornerAt(cc: &mut Corners, s: &Scene, w: &World, ix: i64, iz: i64): Corner {
         let slope = 1.0 - nrm.y
         var col = themedSmooth(w.theme, h, slope)
         if w.themeMix > 0.0 {
-            col = mixRgb(col, themedSmooth(w.prevTheme, h, slope), w.themeMix)
+            col = col.lerp(themedSmooth(w.prevTheme, h, slope), w.themeMix)
         }
         // Two low-frequency fields break up the flat wash. Both are smooth in
         // world space, so neither can reintroduce a tile edge.
@@ -421,7 +421,7 @@ fn cornerAt(cc: &mut Corners, s: &Scene, w: &World, ix: i64, iz: i64): Corner {
             let deep = rgb(0.004, 0.03, 0.13)
             // depth is measured against the seabed, not the animated surface
             let bed = heightAt(x, z)
-            let body = mixRgb(shallow, deep, smoothstep(-2.0, -46.0, bed))
+            let body = shallow.lerp(deep, smoothstep(-2.0, -46.0, bed))
 
             // view direction from the eye to this point
             var vx = x - w.cam.x
@@ -761,66 +761,46 @@ fn drawRings(c: &mut Canvas, s: &mut Scene, w: &World, v: &View) {
     for i in 0..w.rings.len {
         var rad = w.rings[i].r
         var br = 1.0
-        var cr = 1.5
-        var cg = 1.15
-        var cb = 0.25
+        var col = rgb(1.5, 1.15, 0.25)
         if w.rings[i].bonus {
-            cr = 0.30
-            cg = 1.05
-            cb = 1.75
+            col = rgb(0.30, 1.05, 1.75)
         }
         if !w.rings[i].alive {
             rad = w.rings[i].r * (1.0 + (1.0 - w.rings[i].pop) * 1.2)
             br = w.rings[i].pop
-            cr = 0.5
-            cg = 1.7
-            cb = 0.7
+            col = rgb(0.5, 1.7, 0.7)
             if br <= 0.03 {
                 continue
             }
         }
-        let cx = w.rings[i].x
-        let cy = w.rings[i].y
-        let cz = w.rings[i].z
-        // ring plane: normal along `face`, so the hoop stands across the course
-        let nx = Math.sin(w.rings[i].face)
-        let nz = Math.cos(w.rings[i].face)
-        let tx = nz
-        let tz = 0.0 - nx
+        let centre = v3(w.rings[i].x, w.rings[i].y, w.rings[i].z)
+        // The hoop stands across the course: its normal points along `face`, and
+        // the tube is swept around the two axes perpendicular to that.
+        let across = v3(Math.cos(w.rings[i].face), 0.0, 0.0 - Math.sin(w.rings[i].face))
+        let upward = v3(0.0, 1.0, 0.0)
         let step = 6.283185307179586 / (segs as f64)
         for k in 0..segs {
             let a0 = (k as f64) * step
             let a1 = ((k + 1) as f64) * step
-            let c0 = Math.cos(a0)
-            let s0 = Math.sin(a0)
-            let c1 = Math.cos(a1)
-            let s1 = Math.sin(a1)
-            // inner and outer edge of the tube at both ends of this segment
-            let o0x = cx + tx * c0 * (rad + tube)
-            let o0y = cy + s0 * (rad + tube)
-            let o0z = cz + tz * c0 * (rad + tube)
-            let i0x = cx + tx * c0 * (rad - tube)
-            let i0y = cy + s0 * (rad - tube)
-            let i0z = cz + tz * c0 * (rad - tube)
-            let o1x = cx + tx * c1 * (rad + tube)
-            let o1y = cy + s1 * (rad + tube)
-            let o1z = cz + tz * c1 * (rad + tube)
-            let i1x = cx + tx * c1 * (rad - tube)
-            let i1y = cy + s1 * (rad - tube)
-            let i1z = cz + tz * c1 * (rad - tube)
+            // one radial direction per segment end, in the hoop's own plane
+            let d0 = across.scale(Math.cos(a0)) + upward.scale(Math.sin(a0))
+            let d1 = across.scale(Math.cos(a1)) + upward.scale(Math.sin(a1))
+            let outer0 = centre + d0.scale(rad + tube)
+            let inner0 = centre + d0.scale(rad - tube)
+            let outer1 = centre + d1.scale(rad + tube)
+            let inner1 = centre + d1.scale(rad - tube)
             // banded colour so the hoop reads as a solid object, not a circle
             var band = 1.0
             if k % 2 == 0 {
                 band = 0.72
             }
-            let r = cr * band * br
-            let g = cg * band * br
-            let b = cb * band * br
+            let front = col.scale(band * br)
+            let back = front.scale(0.6)
             // both faces, so the ring is solid from either side
-            triangle(c, s, v, o0x, o0y, o0z, o1x, o1y, o1z, i0x, i0y, i0z, r, g, b)
-            triangle(c, s, v, i0x, i0y, i0z, o1x, o1y, o1z, i1x, i1y, i1z, r, g, b)
-            triangle(c, s, v, o1x, o1y, o1z, o0x, o0y, o0z, i0x, i0y, i0z, r * 0.6, g * 0.6, b * 0.6)
-            triangle(c, s, v, o1x, o1y, o1z, i0x, i0y, i0z, i1x, i1y, i1z, r * 0.6, g * 0.6, b * 0.6)
+            triangle(c, s, v, outer0, outer1, inner0, front)
+            triangle(c, s, v, inner0, outer1, inner1, front)
+            triangle(c, s, v, outer1, outer0, inner0, back)
+            triangle(c, s, v, outer1, inner0, inner1, back)
         }
     }
 }
@@ -943,105 +923,92 @@ fn drawBirds(c: &mut Canvas, s: &Scene, w: &World, v: &View) {
 // belly, LERX strakes into swept wings, twin tailfins and two engine nozzles.
 // Body-space points are (forward, right, up) offsets, transformed once.
 fn drawPlane(c: &mut Canvas, s: &mut Scene, w: &World, v: &View, skin: &Texture) {
-    let yaw = w.plane.yaw
-    let pitch = w.plane.pitch
-    let roll = w.plane.roll
-    let cy = Math.cos(yaw)
-    let sy = Math.sin(yaw)
-    let cp = Math.cos(pitch)
-    let sp = Math.sin(pitch)
-    let cr = Math.cos(roll)
-    let sr = Math.sin(roll)
-    let fx = sy * cp
-    let fy = sp
-    let fz = cy * cp
-    let rx = cy * cr
-    let ry = 0.0 - sr
-    let rz = 0.0 - sy * cr
-    let ux = fy * rz - fz * ry
-    let uy = fz * rx - fx * rz
-    let uz = fx * ry - fy * rx
+    // The aircraft's own axes. This used to be its own copy of the camera's trig
+    // block, and the copy had drifted — it rolled about a slightly different axis
+    // than the camera did, which tilts the model against the world it is flying
+    // through once you are both banked and pitched.
+    let f = frameOf(w.plane.yaw, w.plane.pitch, w.plane.roll)
+    let origin = v3(w.plane.x, w.plane.y, w.plane.z)
 
-    var px: Vec<f64> = Vec.new()
-    var py: Vec<f64> = Vec.new()
-    var pz: Vec<f64> = Vec.new()
+    // One list of points, not three lists of coordinates.
+    var p: Vec<Vec3> = Vec.new()
     // 0 nose tip
-    addPt(px, py, pz, w, fx, fy, fz, rx, ry, rz, ux, uy, uz, 30.0, 0.0, 0.0)
+    bodyPt(p, origin, f, 30.0, 0.0, 0.0)
     // 1..4 forward fuselage ring (top, right, bottom, left)
-    addPt(px, py, pz, w, fx, fy, fz, rx, ry, rz, ux, uy, uz, 14.0, 0.0, 3.6)
-    addPt(px, py, pz, w, fx, fy, fz, rx, ry, rz, ux, uy, uz, 14.0, 3.4, 0.4)
-    addPt(px, py, pz, w, fx, fy, fz, rx, ry, rz, ux, uy, uz, 14.0, 0.0, 0.0 - 3.0)
-    addPt(px, py, pz, w, fx, fy, fz, rx, ry, rz, ux, uy, uz, 14.0, 0.0 - 3.4, 0.4)
+    bodyPt(p, origin, f, 14.0, 0.0, 3.6)
+    bodyPt(p, origin, f, 14.0, 3.4, 0.4)
+    bodyPt(p, origin, f, 14.0, 0.0, 0.0 - 3.0)
+    bodyPt(p, origin, f, 14.0, 0.0 - 3.4, 0.4)
     // 5..8 mid fuselage ring, fatter
-    addPt(px, py, pz, w, fx, fy, fz, rx, ry, rz, ux, uy, uz, 0.0 - 2.0, 0.0, 5.2)
-    addPt(px, py, pz, w, fx, fy, fz, rx, ry, rz, ux, uy, uz, 0.0 - 2.0, 5.0, 0.6)
-    addPt(px, py, pz, w, fx, fy, fz, rx, ry, rz, ux, uy, uz, 0.0 - 2.0, 0.0, 0.0 - 4.4)
-    addPt(px, py, pz, w, fx, fy, fz, rx, ry, rz, ux, uy, uz, 0.0 - 2.0, 0.0 - 5.0, 0.6)
+    bodyPt(p, origin, f, 0.0 - 2.0, 0.0, 5.2)
+    bodyPt(p, origin, f, 0.0 - 2.0, 5.0, 0.6)
+    bodyPt(p, origin, f, 0.0 - 2.0, 0.0, 0.0 - 4.4)
+    bodyPt(p, origin, f, 0.0 - 2.0, 0.0 - 5.0, 0.6)
     // 9..12 tail ring
-    addPt(px, py, pz, w, fx, fy, fz, rx, ry, rz, ux, uy, uz, 0.0 - 20.0, 0.0, 3.6)
-    addPt(px, py, pz, w, fx, fy, fz, rx, ry, rz, ux, uy, uz, 0.0 - 20.0, 4.0, 0.4)
-    addPt(px, py, pz, w, fx, fy, fz, rx, ry, rz, ux, uy, uz, 0.0 - 20.0, 0.0, 0.0 - 3.4)
-    addPt(px, py, pz, w, fx, fy, fz, rx, ry, rz, ux, uy, uz, 0.0 - 20.0, 0.0 - 4.0, 0.4)
+    bodyPt(p, origin, f, 0.0 - 20.0, 0.0, 3.6)
+    bodyPt(p, origin, f, 0.0 - 20.0, 4.0, 0.4)
+    bodyPt(p, origin, f, 0.0 - 20.0, 0.0, 0.0 - 3.4)
+    bodyPt(p, origin, f, 0.0 - 20.0, 0.0 - 4.0, 0.4)
     // 13,14 wing tips  15,16 strake roots  17,18 wing trailing roots
-    addPt(px, py, pz, w, fx, fy, fz, rx, ry, rz, ux, uy, uz, 0.0 - 12.0, 26.0, 0.6)
-    addPt(px, py, pz, w, fx, fy, fz, rx, ry, rz, ux, uy, uz, 0.0 - 12.0, 0.0 - 26.0, 0.6)
-    addPt(px, py, pz, w, fx, fy, fz, rx, ry, rz, ux, uy, uz, 12.0, 3.6, 0.6)
-    addPt(px, py, pz, w, fx, fy, fz, rx, ry, rz, ux, uy, uz, 12.0, 0.0 - 3.6, 0.6)
-    addPt(px, py, pz, w, fx, fy, fz, rx, ry, rz, ux, uy, uz, 0.0 - 18.0, 4.4, 0.6)
-    addPt(px, py, pz, w, fx, fy, fz, rx, ry, rz, ux, uy, uz, 0.0 - 18.0, 0.0 - 4.4, 0.6)
+    bodyPt(p, origin, f, 0.0 - 12.0, 26.0, 0.6)
+    bodyPt(p, origin, f, 0.0 - 12.0, 0.0 - 26.0, 0.6)
+    bodyPt(p, origin, f, 12.0, 3.6, 0.6)
+    bodyPt(p, origin, f, 12.0, 0.0 - 3.6, 0.6)
+    bodyPt(p, origin, f, 0.0 - 18.0, 4.4, 0.6)
+    bodyPt(p, origin, f, 0.0 - 18.0, 0.0 - 4.4, 0.6)
     // 19,20 canted fin tips   21,22 tailplane tips
-    addPt(px, py, pz, w, fx, fy, fz, rx, ry, rz, ux, uy, uz, 0.0 - 22.0, 7.0, 13.0)
-    addPt(px, py, pz, w, fx, fy, fz, rx, ry, rz, ux, uy, uz, 0.0 - 22.0, 0.0 - 7.0, 13.0)
-    addPt(px, py, pz, w, fx, fy, fz, rx, ry, rz, ux, uy, uz, 0.0 - 24.0, 13.0, 0.0)
-    addPt(px, py, pz, w, fx, fy, fz, rx, ry, rz, ux, uy, uz, 0.0 - 24.0, 0.0 - 13.0, 0.0)
+    bodyPt(p, origin, f, 0.0 - 22.0, 7.0, 13.0)
+    bodyPt(p, origin, f, 0.0 - 22.0, 0.0 - 7.0, 13.0)
+    bodyPt(p, origin, f, 0.0 - 24.0, 13.0, 0.0)
+    bodyPt(p, origin, f, 0.0 - 24.0, 0.0 - 13.0, 0.0)
     // 23 canopy apex
-    addPt(px, py, pz, w, fx, fy, fz, rx, ry, rz, ux, uy, uz, 9.0, 0.0, 6.4)
+    bodyPt(p, origin, f, 9.0, 0.0, 6.4)
 
     // nose cone — four facets
-    triT(c, s, v, skin, px, py, pz, 0, 1, 2, 0.5, 0.05, 0.5, 0.30, 0.9, 0.30, 1.02, 1.04, 1.08)
-    triT(c, s, v, skin, px, py, pz, 0, 2, 3, 0.5, 0.05, 0.9, 0.30, 0.5, 0.30, 0.88, 0.90, 0.95)
-    triT(c, s, v, skin, px, py, pz, 0, 3, 4, 0.5, 0.05, 0.5, 0.30, 0.1, 0.30, 0.72, 0.74, 0.80)
-    triT(c, s, v, skin, px, py, pz, 0, 4, 1, 0.5, 0.05, 0.1, 0.30, 0.5, 0.30, 0.95, 0.97, 1.01)
+    triT(c, s, v, skin, p, 0, 1, 2, 0.5, 0.05, 0.5, 0.30, 0.9, 0.30, rgb(1.02, 1.04, 1.08))
+    triT(c, s, v, skin, p, 0, 2, 3, 0.5, 0.05, 0.9, 0.30, 0.5, 0.30, rgb(0.88, 0.90, 0.95))
+    triT(c, s, v, skin, p, 0, 3, 4, 0.5, 0.05, 0.5, 0.30, 0.1, 0.30, rgb(0.72, 0.74, 0.80))
+    triT(c, s, v, skin, p, 0, 4, 1, 0.5, 0.05, 0.1, 0.30, 0.5, 0.30, rgb(0.95, 0.97, 1.01))
     // forward → mid, four quads
-    quadT(c, s, v, skin, px, py, pz, 1, 2, 6, 5, 0.50, 0.30, 0.90, 0.30, 0.90, 0.55, 0.50, 0.55, 1.00, 1.02, 1.06)
-    quadT(c, s, v, skin, px, py, pz, 2, 3, 7, 6, 0.90, 0.30, 0.50, 0.30, 0.50, 0.55, 0.90, 0.55, 0.80, 0.82, 0.88)
-    quadT(c, s, v, skin, px, py, pz, 3, 4, 8, 7, 0.50, 0.30, 0.10, 0.30, 0.10, 0.55, 0.50, 0.55, 0.66, 0.68, 0.74)
-    quadT(c, s, v, skin, px, py, pz, 4, 1, 5, 8, 0.10, 0.30, 0.50, 0.30, 0.50, 0.55, 0.10, 0.55, 0.90, 0.92, 0.96)
+    quadT(c, s, v, skin, p, 1, 2, 6, 5, 0.50, 0.30, 0.90, 0.30, 0.90, 0.55, 0.50, 0.55, rgb(1.00, 1.02, 1.06))
+    quadT(c, s, v, skin, p, 2, 3, 7, 6, 0.90, 0.30, 0.50, 0.30, 0.50, 0.55, 0.90, 0.55, rgb(0.80, 0.82, 0.88))
+    quadT(c, s, v, skin, p, 3, 4, 8, 7, 0.50, 0.30, 0.10, 0.30, 0.10, 0.55, 0.50, 0.55, rgb(0.66, 0.68, 0.74))
+    quadT(c, s, v, skin, p, 4, 1, 5, 8, 0.10, 0.30, 0.50, 0.30, 0.50, 0.55, 0.10, 0.55, rgb(0.90, 0.92, 0.96))
     // mid → tail
-    quadT(c, s, v, skin, px, py, pz, 5, 6, 10, 9, 0.50, 0.55, 0.90, 0.55, 0.90, 0.95, 0.50, 0.95, 0.96, 0.98, 1.02)
-    quadT(c, s, v, skin, px, py, pz, 6, 7, 11, 10, 0.90, 0.55, 0.50, 0.55, 0.50, 0.95, 0.90, 0.95, 0.78, 0.80, 0.86)
-    quadT(c, s, v, skin, px, py, pz, 7, 8, 12, 11, 0.50, 0.55, 0.10, 0.55, 0.10, 0.95, 0.50, 0.95, 0.64, 0.66, 0.72)
-    quadT(c, s, v, skin, px, py, pz, 8, 5, 9, 12, 0.10, 0.55, 0.50, 0.55, 0.50, 0.95, 0.10, 0.95, 0.88, 0.90, 0.94)
+    quadT(c, s, v, skin, p, 5, 6, 10, 9, 0.50, 0.55, 0.90, 0.55, 0.90, 0.95, 0.50, 0.95, rgb(0.96, 0.98, 1.02))
+    quadT(c, s, v, skin, p, 6, 7, 11, 10, 0.90, 0.55, 0.50, 0.55, 0.50, 0.95, 0.90, 0.95, rgb(0.78, 0.80, 0.86))
+    quadT(c, s, v, skin, p, 7, 8, 12, 11, 0.50, 0.55, 0.10, 0.55, 0.10, 0.95, 0.50, 0.95, rgb(0.64, 0.66, 0.72))
+    quadT(c, s, v, skin, p, 8, 5, 9, 12, 0.10, 0.55, 0.50, 0.55, 0.50, 0.95, 0.10, 0.95, rgb(0.88, 0.90, 0.94))
     // strake + wing, upper then lower
-    quadT(c, s, v, skin, px, py, pz, 15, 13, 17, 6, 0.12, 0.12, 0.95, 0.12, 0.95, 0.45, 0.12, 0.45, 1.00, 1.02, 1.06)
-    quadT(c, s, v, skin, px, py, pz, 6, 17, 13, 15, 0.12, 0.45, 0.95, 0.45, 0.95, 0.12, 0.12, 0.12, 0.60, 0.62, 0.70)
-    quadT(c, s, v, skin, px, py, pz, 16, 8, 18, 14, 0.12, 0.55, 0.12, 0.88, 0.95, 0.88, 0.95, 0.55, 1.00, 1.02, 1.06)
-    quadT(c, s, v, skin, px, py, pz, 14, 18, 8, 16, 0.95, 0.55, 0.95, 0.88, 0.12, 0.88, 0.12, 0.55, 0.60, 0.62, 0.70)
+    quadT(c, s, v, skin, p, 15, 13, 17, 6, 0.12, 0.12, 0.95, 0.12, 0.95, 0.45, 0.12, 0.45, rgb(1.00, 1.02, 1.06))
+    quadT(c, s, v, skin, p, 6, 17, 13, 15, 0.12, 0.45, 0.95, 0.45, 0.95, 0.12, 0.12, 0.12, rgb(0.60, 0.62, 0.70))
+    quadT(c, s, v, skin, p, 16, 8, 18, 14, 0.12, 0.55, 0.12, 0.88, 0.95, 0.88, 0.95, 0.55, rgb(1.00, 1.02, 1.06))
+    quadT(c, s, v, skin, p, 14, 18, 8, 16, 0.95, 0.55, 0.95, 0.88, 0.12, 0.88, 0.12, 0.55, rgb(0.60, 0.62, 0.70))
     // close the wing tip edges so the aerofoil is not a hollow sheet
-    triT(c, s, v, skin, px, py, pz, 13, 17, 6, 0.95, 0.12, 0.95, 0.45, 0.12, 0.45, 0.70, 0.72, 0.78)
-    triT(c, s, v, skin, px, py, pz, 6, 17, 13, 0.12, 0.45, 0.95, 0.45, 0.95, 0.12, 0.70, 0.72, 0.78)
-    triT(c, s, v, skin, px, py, pz, 14, 8, 18, 0.95, 0.55, 0.12, 0.55, 0.95, 0.88, 0.70, 0.72, 0.78)
-    triT(c, s, v, skin, px, py, pz, 18, 8, 14, 0.95, 0.88, 0.12, 0.55, 0.95, 0.55, 0.70, 0.72, 0.78)
+    triT(c, s, v, skin, p, 13, 17, 6, 0.95, 0.12, 0.95, 0.45, 0.12, 0.45, rgb(0.70, 0.72, 0.78))
+    triT(c, s, v, skin, p, 6, 17, 13, 0.12, 0.45, 0.95, 0.45, 0.95, 0.12, rgb(0.70, 0.72, 0.78))
+    triT(c, s, v, skin, p, 14, 8, 18, 0.95, 0.55, 0.12, 0.55, 0.95, 0.88, rgb(0.70, 0.72, 0.78))
+    triT(c, s, v, skin, p, 18, 8, 14, 0.95, 0.88, 0.12, 0.55, 0.95, 0.55, rgb(0.70, 0.72, 0.78))
 
     // tailplanes
-    triT(c, s, v, skin, px, py, pz, 10, 21, 9, 0.20, 0.20, 0.95, 0.20, 0.20, 0.45, 0.92, 0.94, 0.98)
-    triT(c, s, v, skin, px, py, pz, 9, 21, 10, 0.20, 0.45, 0.95, 0.20, 0.20, 0.20, 0.58, 0.60, 0.66)
-    triT(c, s, v, skin, px, py, pz, 12, 9, 22, 0.20, 0.20, 0.20, 0.45, 0.95, 0.20, 0.92, 0.94, 0.98)
-    triT(c, s, v, skin, px, py, pz, 22, 9, 12, 0.95, 0.20, 0.20, 0.45, 0.20, 0.20, 0.58, 0.60, 0.66)
+    triT(c, s, v, skin, p, 10, 21, 9, 0.20, 0.20, 0.95, 0.20, 0.20, 0.45, rgb(0.92, 0.94, 0.98))
+    triT(c, s, v, skin, p, 9, 21, 10, 0.20, 0.45, 0.95, 0.20, 0.20, 0.20, rgb(0.58, 0.60, 0.66))
+    triT(c, s, v, skin, p, 12, 9, 22, 0.20, 0.20, 0.20, 0.45, 0.95, 0.20, rgb(0.92, 0.94, 0.98))
+    triT(c, s, v, skin, p, 22, 9, 12, 0.95, 0.20, 0.20, 0.45, 0.20, 0.20, rgb(0.58, 0.60, 0.66))
     // canted twin fins, in the accent stripe band of the sheet
-    triT(c, s, v, skin, px, py, pz, 9, 19, 10, 0.30, 0.50, 0.80, 0.50, 0.30, 0.66, 1.15, 0.48, 0.26)
-    triT(c, s, v, skin, px, py, pz, 10, 19, 9, 0.30, 0.66, 0.80, 0.50, 0.30, 0.50, 0.85, 0.34, 0.18)
-    triT(c, s, v, skin, px, py, pz, 12, 20, 9, 0.30, 0.50, 0.80, 0.50, 0.30, 0.66, 1.15, 0.48, 0.26)
-    triT(c, s, v, skin, px, py, pz, 9, 20, 12, 0.30, 0.66, 0.80, 0.50, 0.30, 0.50, 0.85, 0.34, 0.18)
+    triT(c, s, v, skin, p, 9, 19, 10, 0.30, 0.50, 0.80, 0.50, 0.30, 0.66, rgb(1.15, 0.48, 0.26))
+    triT(c, s, v, skin, p, 10, 19, 9, 0.30, 0.66, 0.80, 0.50, 0.30, 0.50, rgb(0.85, 0.34, 0.18))
+    triT(c, s, v, skin, p, 12, 20, 9, 0.30, 0.50, 0.80, 0.50, 0.30, 0.66, rgb(1.15, 0.48, 0.26))
+    triT(c, s, v, skin, p, 9, 20, 12, 0.30, 0.66, 0.80, 0.50, 0.30, 0.50, rgb(0.85, 0.34, 0.18))
     // canopy: dark glass over the spine
-    triT(c, s, v, skin, px, py, pz, 1, 23, 2, 0.5, 0.30, 0.5, 0.45, 0.9, 0.40, 0.22, 0.40, 0.58)
-    triT(c, s, v, skin, px, py, pz, 1, 4, 23, 0.5, 0.30, 0.1, 0.40, 0.5, 0.45, 0.26, 0.46, 0.66)
-    triT(c, s, v, skin, px, py, pz, 23, 5, 2, 0.5, 0.45, 0.5, 0.60, 0.9, 0.40, 0.18, 0.34, 0.50)
-    triT(c, s, v, skin, px, py, pz, 23, 4, 5, 0.5, 0.45, 0.1, 0.40, 0.5, 0.60, 0.20, 0.38, 0.54)
+    triT(c, s, v, skin, p, 1, 23, 2, 0.5, 0.30, 0.5, 0.45, 0.9, 0.40, rgb(0.22, 0.40, 0.58))
+    triT(c, s, v, skin, p, 1, 4, 23, 0.5, 0.30, 0.1, 0.40, 0.5, 0.45, rgb(0.26, 0.46, 0.66))
+    triT(c, s, v, skin, p, 23, 5, 2, 0.5, 0.45, 0.5, 0.60, 0.9, 0.40, rgb(0.18, 0.34, 0.50))
+    triT(c, s, v, skin, p, 23, 4, 5, 0.5, 0.45, 0.1, 0.40, 0.5, 0.60, rgb(0.20, 0.38, 0.54))
 
     // Cap the tail ring. Without this you look straight down the inside of the
     // fuselage from behind — the rings were built but never closed.
-    quadT(c, s, v, skin, px, py, pz, 12, 11, 10, 9, 0.10, 0.10, 0.10, 0.30, 0.30, 0.30, 0.30, 0.10, 0.26, 0.27, 0.30)
+    quadT(c, s, v, skin, p, 12, 11, 10, 9, 0.10, 0.10, 0.10, 0.30, 0.30, 0.30, 0.30, 0.10, rgb(0.26, 0.27, 0.30))
     // recessed engine bay ring inside the cap
     let bayF = 0.0 - 19.0
     for k in 0..2 {
@@ -1049,19 +1016,17 @@ fn drawPlane(c: &mut Canvas, s: &mut Scene, w: &World, v: &View, skin: &Texture)
         if k == 1 {
             off2 = 0.0 - 4.0
         }
-        var qx: Vec<f64> = Vec.new()
-        var qy: Vec<f64> = Vec.new()
-        var qz: Vec<f64> = Vec.new()
+        var bay: Vec<Vec3> = Vec.new()
         let segs2 = 8
         let stepA = 6.283185307179586 / (segs2 as f64)
         for j in 0..segs2 {
             let a0 = (j as f64) * stepA
-            addPt(qx, qy, qz, w, fx, fy, fz, rx, ry, rz, ux, uy, uz, bayF, off2 + Math.cos(a0) * 3.0, Math.sin(a0) * 3.0)
+            bodyPt(bay, origin, f, bayF, off2 + Math.cos(a0) * 3.0, Math.sin(a0) * 3.0)
         }
-        addPt(qx, qy, qz, w, fx, fy, fz, rx, ry, rz, ux, uy, uz, bayF - 3.0, off2, 0.0)
+        bodyPt(bay, origin, f, bayF - 3.0, off2, 0.0)
         for j in 0..segs2 {
             let j2 = (j + 1) % segs2
-            triangle(c, s, v, qx[j], qy[j], qz[j], qx[segs2], qy[segs2], qz[segs2], qx[j2], qy[j2], qz[j2], 0.14, 0.10, 0.09)
+            triangle(c, s, v, bay[j], bay[segs2], bay[j2], rgb(0.14, 0.10, 0.09))
         }
     }
 
@@ -1072,10 +1037,8 @@ fn drawPlane(c: &mut Canvas, s: &mut Scene, w: &World, v: &View, skin: &Texture)
         if side == 1 {
             off = 0.0 - 4.0
         }
-        let ex = w.plane.x - fx * 21.0 + rx * off
-        let ey = w.plane.y - fy * 21.0 + ry * off
-        let ez = w.plane.z - fz * 21.0 + rz * off
-        let ep = toCamera(v, ex, ey, ez)
+        let nozzle = origin - f.fwd.scale(21.0) + f.right.scale(off)
+        let ep = toCameraV(v, nozzle)
         if ep.z > 1.0 {
             let sx = v.cx + ep.x * v.scale / ep.z
             let sy2 = v.cy - ep.y * v.scale / ep.z
@@ -1088,21 +1051,21 @@ fn drawPlane(c: &mut Canvas, s: &mut Scene, w: &World, v: &View, skin: &Texture)
 }
 
 // Two triangles from four corner indices, sharing the diagonal.
-fn quadT(c: &mut Canvas, s: &mut Scene, v: &View, t: &Texture, px: &Vec<f64>, py: &Vec<f64>, pz: &Vec<f64>, a: i64, b: i64, d: i64, e: i64, ua: f64, va: f64, ub: f64, vb: f64, ud: f64, vd: f64, ue: f64, ve: f64, r: f64, g: f64, bl: f64) {
-    triT(c, s, v, t, px, py, pz, a, b, d, ua, va, ub, vb, ud, vd, r, g, bl)
-    triT(c, s, v, t, px, py, pz, a, d, e, ua, va, ud, vd, ue, ve, r, g, bl)
+fn quadT(c: &mut Canvas, s: &mut Scene, v: &View, t: &Texture, p: &Vec<Vec3>, a: i64, b: i64, d: i64, e: i64, ua: f64, va: f64, ub: f64, vb: f64, ud: f64, vd: f64, ue: f64, ve: f64, col: &Rgb) {
+    triT(c, s, v, t, p, a, b, d, ua, va, ub, vb, ud, vd, col)
+    triT(c, s, v, t, p, a, d, e, ua, va, ud, vd, ue, ve, col)
 }
 
-fn addPt(px: &mut Vec<f64>, py: &mut Vec<f64>, pz: &mut Vec<f64>, w: &World, fx: f64, fy: f64, fz: f64, rx: f64, ry: f64, rz: f64, ux: f64, uy: f64, uz: f64, f: f64, r: f64, u: f64) {
-    px.push(w.plane.x + fx * f + rx * r + ux * u)
-    py.push(w.plane.y + fy * f + ry * r + uy * u)
-    pz.push(w.plane.z + fz * f + rz * r + uz * u)
+// A point on the aircraft, given as an offset along its own axes: how far
+// forward, how far right, how far up. Sixteen parameters became four.
+fn bodyPt(p: &mut Vec<Vec3>, origin: &Vec3, f: &Frame, fwd: f64, right: f64, up: f64) {
+    p.push(origin + f.fwd.scale(fwd) + f.right.scale(right) + f.up.scale(up))
 }
 
 // Textured variant: the three UVs pick which patch of the skin sheet this facet
 // wears, so panel lines and the spine stripe land where they should.
-fn triT(c: &mut Canvas, s: &mut Scene, v: &View, t: &Texture, px: &Vec<f64>, py: &Vec<f64>, pz: &Vec<f64>, a: i64, b: i64, d: i64, ua: f64, va: f64, ub: f64, vb: f64, ud: f64, vd: f64, r: f64, g: f64, bl: f64) {
-    triangleTex(c, s, v, t, px[a], py[a], pz[a], ua, va, px[b], py[b], pz[b], ub, vb, px[d], py[d], pz[d], ud, vd, r, g, bl)
+fn triT(c: &mut Canvas, s: &mut Scene, v: &View, t: &Texture, p: &Vec<Vec3>, a: i64, b: i64, d: i64, ua: f64, va: f64, ub: f64, vb: f64, ud: f64, vd: f64, col: &Rgb) {
+    triangleV(c, s, v, t, vtx(p[a].x, p[a].y, p[a].z, ua, va, 1.0), vtx(p[b].x, p[b].y, p[b].z, ub, vb, 1.0), vtx(p[d].x, p[d].y, p[d].z, ud, vd, 1.0), col.r, col.g, col.b)
 }
 
 // A reticle on the next coin, and an edge arrow when it is off screen. Without

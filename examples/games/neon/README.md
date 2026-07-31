@@ -163,8 +163,14 @@ Writing the game also turned up a **memory leak in the compiler**, unrelated to 
 of the above and much more consequential: an owned `string` produced by a call and
 consumed without being stored — `"SCORE " + n.toString()`, `print(n.toString())`,
 `take(n.toString())` on a `&string` parameter, `n.toString().len` — was never freed.
-The HUD in this game leaked one string per label per frame. Fixed; `shot.milo` now
-runs 300 frames with zero leaks (23 before).
+The HUD in this game leaked one string per label per frame, and indexing a
+`Vec<string>` leaked a copy per read (`v[i]` auto-clones so the Vec stays intact).
+Both fixed; `shot.milo` now runs 400 frames with zero leaks (23 before).
+
+One related leak is still open and predates all of this: an element bound out of a
+Vec reached through a `&Vec<T>` **parameter** gets no drop glue, which is why
+`v.join(sep)` over heap strings still leaks. Narrowed to ref-param + loop +
+let-binding; the same shape on an owned local Vec is clean.
 
 ## Files
 

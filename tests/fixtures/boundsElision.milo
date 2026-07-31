@@ -1,0 +1,87 @@
+// `for i in 0..v.len` elides its bounds check (codegen.ts pushProvenInRange).
+// These cases lock the SEMANTICS, not the optimisation: every one of them must
+// behave exactly as it did when every subscript was checked.
+pub fn sumAll(v: &Vec<i64>): i64 {
+    var s: i64 = 0
+    for i in 0..v.len {
+        s = s + v[i]
+    }
+    return s
+}
+
+// Shrinking inside the loop: the check must survive, and the program must abort
+// rather than read past the end. (Aborting is covered by tests/errors — here we
+// only prove the loop that does NOT shrink still gets the right answer.)
+pub fn sumWhileGrowing(): i64 {
+    var v: Vec<i64> = Vec.filled(4, 2)
+    var s: i64 = 0
+    for i in 0..v.len {
+        s = s + v[i]
+    }
+    return s
+}
+
+struct Grid {
+    cells: Vec<i64>,
+    w: i64,
+}
+
+// One field hop is the deepest path the elision understands.
+fn gridSum(g: &Grid): i64 {
+    var s: i64 = 0
+    for i in 0..g.cells.len {
+        s = s + g.cells[i]
+    }
+    return s
+}
+
+// An index that is not the loop variable keeps its check and its meaning.
+fn shifted(v: &Vec<i64>): i64 {
+    var s: i64 = 0
+    for i in 0..v.len - 1 {
+        s = s + v[i + 1]
+    }
+    return s
+}
+
+pub fn main(): i32 {
+    var v: Vec<i64> = Vec.new()
+    for i in 0..6 {
+        v.push(i)
+    }
+    print(sumAll(v).toString())
+    // @expect: 15
+    print(sumWhileGrowing().toString())
+    // @expect: 8
+    let g = Grid {
+        cells: v.clone(), w: 3
+    }
+    print(gridSum(g).toString())
+    // @expect: 15
+    print(shifted(v).toString())
+    // @expect: 15
+
+    // Empty container: the loop body must not run at all.
+    var e: Vec<i64> = Vec.new()
+    print(sumAll(e).toString())
+    // @expect: 0
+
+    // A loop that writes through the same index it reads.
+    var w: Vec<i64> = Vec.filled(5, 3)
+    for i in 0..w.len {
+        w[i] = w[i] * 2
+    }
+    print(sumAll(w).toString())
+    // @expect: 30
+
+    // Nested loops over two different containers, each proving its own index.
+    var total: i64 = 0
+    for i in 0..v.len {
+        for j in 0..w.len {
+            total = total + v[i] * w[j]
+        }
+    }
+    print(total.toString())
+    // @expect: 450
+    return 0
+}

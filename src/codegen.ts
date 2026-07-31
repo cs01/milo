@@ -97,6 +97,21 @@ export class Codegen {
   private loopHeader: string | null = null;
   private loopExit: string | null = null;
   private loopDropStart: number = 0;
+
+  // Bounds-check elision, narrow and provable.
+  //
+  // `for i in 0..v.len { ... v[i] ... }` cannot go out of range: the loop bound IS
+  // the length being checked against. Recording those (loop variable, container)
+  // pairs lets the subscript skip its check — the ONLY way this is unsound is if
+  // the container's length changes inside the loop, which `loopBodyMutates` below
+  // rejects conservatively.
+  //
+  // This is deliberately not a range analysis. It fires on the exact shape above
+  // and nothing else — an index of `i + 1`, a bound that merely happens to equal
+  // the length, or a container reached through anything but a name or one field
+  // hop all keep their check. Widening it to affine indices is docs/plans/
+  // bounds-check-elision.md, and wants a range lattice rather than a pattern.
+  private provenInRange: { loopVar: string; container: string }[] = [];
   private globalVars = new Map<string, { type: string; typeKind: TypeKind }>();
   private userFnNames = new Set<string>();
   // Droppable locals are identified by their slot ADDRESS. A function can hold
@@ -1984,6 +1999,163 @@ export class Codegen {
     return lines;
   }
 
+  // Returns true (and pushes a scope) when this loop proves its index in range.
+  private pushProvenInRange(stmt: HIRStmt & { kind: "ForRange" }): boolean {
+    if (!(stmt.start.kind === "IntLit" && Number(stmt.start.value) === 0)) return false;
+    if (stmt.end.kind !== "VecLen") return false;
+    const key = this.containerKey(stmt.end.object);
+    if (key === null) return false;
+    // A global could be resized by any callee; only locals and params qualify.
+    if (this.globalVars.has(this.rootOf(key))) return false;
+    if (this.loopBodyMutates(stmt.body, key)) return false;
+    this.provenInRange.push({ loopVar: stmt.varName, container: key });
+    return true;
+  }
+
+  // A stable name for the container a subscript reads, or null if it is reached
+  // by anything more complicated than a local or one field hop (`v`, `self.px`).
+  // Deliberately shallow: two spellings must never collide, and a longer path is
+  // more chances for something in between to be reassigned.
+  private containerKey(e: HIRExpr): string | null {
+    if (e.kind === "Ident") return e.name;
+    if (e.kind === "FieldAccess" && e.object.kind === "Ident") return `${e.object.name}.${e.field}`;
+    return null;
+  }
+
+  private rootOf(key: string): string {
+    const dot = key.indexOf(".");
+    return dot < 0 ? key : key.slice(0, dot);
+  }
+
+  // Could anything in `body` change the length of the container named by `key`?
+  // Answers "maybe" for everything it does not positively understand — a wrong
+  // "no" here is an out-of-bounds write, so the bar is proof, not likelihood.
+  private loopBodyMutates(body: HIRStmt[], key: string): boolean {
+    const root = this.rootOf(key);
+    let mutates = false;
+
+    // Any function that can see the root can resize through it, and a HIR call
+    // does not record which parameters are `&mut`. Passing the root anywhere at
+    // all — as an argument, as a receiver, inside a bigger expression — ends the
+    // analysis.
+    const mentionsRoot = (e: HIRExpr): boolean => {
+      let found = false;
+      this.walkExpr(e, (x) => {
+        if (x.kind === "Ident" && x.name === root) found = true;
+      });
+      return found;
+    };
+
+    const checkExpr = (e: HIRExpr) => {
+      this.walkExpr(e, (x) => {
+        if (mutates) return;
+        switch (x.kind) {
+          case "VecPush":
+            if (mentionsRoot(x.vec)) mutates = true;
+            break;
+          case "VecPop":
+            if (mentionsRoot(x.vec)) mutates = true;
+            break;
+          case "Call":
+            if (x.args.some(a => mentionsRoot(a.expr))) mutates = true;
+            break;
+          case "CFnCall":
+            mutates = true; // opaque to us, and it can hold a raw pointer
+            break;
+          case "Closure":
+          case "MatchExpr":
+            // A closure's captures and a match arm's body are statement lists this
+            // walk does not descend into. Assume the worst.
+            mutates = true;
+            break;
+          default:
+            break;
+        }
+      });
+    };
+
+    const walkStmts = (stmts: HIRStmt[]) => {
+      for (const s of stmts) {
+        if (mutates) return;
+        switch (s.kind) {
+          case "Assign": {
+            // Reassigning the container itself, or anything on its path, swaps the
+            // buffer out from under the loop.
+            const t = this.containerKey(s.target);
+            if (t !== null && (t === key || t === root || this.rootOf(t) === root)) mutates = true;
+            checkExpr(s.target);
+            checkExpr(s.value);
+            break;
+          }
+          case "ExprStmt":
+            checkExpr(s.expr);
+            break;
+          case "Let":
+            checkExpr(s.value);
+            break;
+          case "Return":
+            if (s.value) checkExpr(s.value);
+            break;
+          case "If":
+            checkExpr(s.cond);
+            walkStmts(s.thenBody);
+            if (s.elseBody) walkStmts(s.elseBody);
+            break;
+          case "While":
+            checkExpr(s.cond);
+            walkStmts(s.body);
+            break;
+          case "ForRange":
+            checkExpr(s.start);
+            checkExpr(s.end);
+            walkStmts(s.body);
+            break;
+          case "UnsafeBlock":
+            walkStmts(s.body);
+            break;
+          case "Match":
+            checkExpr(s.subject);
+            for (const arm of s.arms) walkStmts(arm.body);
+            break;
+          case "Break":
+          case "Continue":
+            break;
+          default:
+            // Anything not understood (match arms, iterator loops, defer, …) is
+            // assumed to mutate. Elision is an optimisation; giving up is free.
+            mutates = true;
+            break;
+        }
+        if (mutates) return;
+      }
+    };
+
+    walkStmts(body);
+    return mutates;
+  }
+
+  // Shallow generic walk over an expression's sub-expressions.
+  private walkExpr(e: HIRExpr, visit: (x: HIRExpr) => void): void {
+    visit(e);
+    const anyE = e as unknown as Record<string, unknown>;
+    for (const k of Object.keys(anyE)) {
+      const v = anyE[k];
+      if (Array.isArray(v)) {
+        for (const item of v) {
+          if (item && typeof item === "object") {
+            const cand = ("value" in item && item.value && typeof item.value === "object" && "kind" in item.value)
+              ? item.value as HIRExpr : item as HIRExpr;
+            if ("kind" in cand) this.walkExpr(cand, visit);
+          }
+        }
+      } else if (v && typeof v === "object" && "kind" in (v as object)) {
+        const cand = v as HIRExpr;
+        // statements carry `kind` too; only recurse into expression shapes
+        if (typeof (cand as { kind: string }).kind === "string") this.walkExpr(cand, visit);
+      }
+    }
+  }
+
   // Body of the out-of-line handler above. Emitted once per module.
   private boundsFailHelper(): string[] {
     const lines: string[] = [];
@@ -2380,12 +2552,19 @@ export class Codegen {
     lines.push(`${bodyLabel}:`);
 
     this.emitLoopInvariants(lines, stmt.invariants);
+
+    // `for i in 0..v.len` proves `i < v.len` for the whole body — provided the
+    // start is a literal 0 (a negative or dynamic start proves nothing) and
+    // nothing in the body can resize the container.
+    const provenPushed = this.pushProvenInRange(stmt);
+
     let bodyTerminated = false;
     for (const s of stmt.body) {
       const [sl, t] = this.genStmt(s);
       lines.push(...sl);
       if (t) { bodyTerminated = true; break; }
     }
+    if (provenPushed) this.provenInRange.pop();
     if (!bodyTerminated) { this.emitScopeDrops(lines, this.loopDropStart); lines.push(`  br label %${incrLabel}`); }
 
     lines.push(`${incrLabel}:`);
@@ -2946,6 +3125,7 @@ export class Codegen {
     lines.push(`  store i64 ${nextPos}, ptr ${nextAddr}`);
 
     this.emitLoopInvariants(lines, stmt.invariants);
+
     let bodyTerminated = false;
     for (const s of stmt.body) {
       const [sl, t] = this.genStmt(s);
@@ -7514,9 +7694,20 @@ export class Codegen {
     return [lines, result, enumTy];
   }
 
+  // True when an enclosing `for i in 0..v.len` already proves this exact
+  // subscript in range: same loop variable as the index, same container.
+  private indexIsProven(expr: HIRExpr & { kind: "IndexAccess" }): boolean {
+    if (expr.index.kind !== "Ident") return false;
+    const key = this.containerKey(expr.object);
+    if (key === null) return false;
+    for (const p of this.provenInRange) {
+      if (p.loopVar === expr.index.name && p.container === key) return true;
+    }
+    return false;
+  }
+
   private genVecBoundsCheckedPtr(expr: HIRExpr & { kind: "IndexAccess" }, lines: string[]): [string[], string, string] {
     this.hasVecType = true;
-    this.needsBoundsCheck = true;
 
     // A slice (`&[T]` / unsized `[T]`, tag "array" with size null) shares the Vec's
     // {ptr,len,cap} runtime layout, so it indexes through the same path. Deref the ref a
@@ -7532,23 +7723,25 @@ export class Codegen {
     const [idxLines, idxVal, idxTy] = this.genExpr(expr.index);
     lines.push(...idxLines);
 
-    // load len for bounds check
-    const lenPtr = this.nextTemp();
-    lines.push(`  ${lenPtr} = getelementptr %Vec, ptr ${vecPtr}, i32 0, i32 1`);
-    const len = this.nextTemp();
-    lines.push(`  ${len} = load i64, ptr ${lenPtr}`);
-    const len32 = this.nextTemp();
-    lines.push(`  ${len32} = trunc i64 ${len} to i32`);
-
-    // bounds check
-    let idx32: string;
-    if (idxTy === "i64") {
-      idx32 = this.nextTemp();
-      lines.push(`  ${idx32} = trunc i64 ${idxVal} to i32`);
-    } else {
-      idx32 = idxVal;
+    // The check, unless an enclosing loop already proved this index in range —
+    // in which case the length load goes too, which is most of the cost.
+    if (!this.indexIsProven(expr)) {
+      this.needsBoundsCheck = true;
+      const lenPtr = this.nextTemp();
+      lines.push(`  ${lenPtr} = getelementptr %Vec, ptr ${vecPtr}, i32 0, i32 1`);
+      const len = this.nextTemp();
+      lines.push(`  ${len} = load i64, ptr ${lenPtr}`);
+      const len32 = this.nextTemp();
+      lines.push(`  ${len32} = trunc i64 ${len} to i32`);
+      let idx32: string;
+      if (idxTy === "i64") {
+        idx32 = this.nextTemp();
+        lines.push(`  ${idx32} = trunc i64 ${idxVal} to i32`);
+      } else {
+        idx32 = idxVal;
+      }
+      this.emitBoundsCheck(lines, idx32, len32);
     }
-    this.emitBoundsCheck(lines, idx32, len32);
 
     // load data pointer and GEP to element
     const dataPtr = this.nextTemp();

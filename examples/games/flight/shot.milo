@@ -16,6 +16,9 @@ from "./gfx" import {
 from "./gfx3d" import {
     Scene, sceneNew
 }
+from "./textures" import {
+    groundTexture, planeTexture
+}
 from "./world3d" import {
     World, worldNew, worldUpdate
 }
@@ -76,6 +79,8 @@ pub fn main(): i32 {
     var c = canvasNew(W, H)
     var s = sceneNew(W, H)
     var w = worldNew()
+    let groundTex = groundTexture()
+    let skinTex = planeTexture()
     let dt = 1.0 / 60.0
     var renderMs: i64 = 0
     var rendered: i64 = 0
@@ -124,7 +129,7 @@ pub fn main(): i32 {
         }
         if want {
             let t0 = epochMillis()
-            drawWorld(c, s, w)
+            drawWorld(c, s, w, groundTex, skinTex)
             drawGuide(c, w, s)
             drawHud(c, w, s, 60)
             present(c, 0.35, 1.0)

@@ -31,6 +31,9 @@ from "./gfx" import {
 from "./gfx3d" import {
     Scene, sceneNew
 }
+from "./textures" import {
+    groundTexture, planeTexture
+}
 from "./world3d" import {
     World, worldNew, worldUpdate
 }
@@ -69,6 +72,8 @@ pub fn main(): i32 {
     var c = canvasNew(W, H)
     var s = sceneNew(W, H)
     var w = worldNew()
+    let groundTex = groundTexture()
+    let skinTex = planeTexture()
     var inp = inputNew()
     var ev: [u8; 64] = [0; 64]
     var last = SDL_GetTicks()
@@ -89,7 +94,7 @@ pub fn main(): i32 {
         pollInput(inp, ev, 1.0)
 
         worldUpdate(w, dt, inp.moveX, inp.moveY, inp.bomb)
-        drawWorld(c, s, w)
+        drawWorld(c, s, w, groundTex, skinTex)
 
         fpsAccum = fpsAccum + dt
         fpsFrames = fpsFrames + 1

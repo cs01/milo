@@ -21,10 +21,13 @@ pub struct Off {
 }
 
 from "./gfx3d" import {
-    Scene, View, Camera, viewOf, sceneClear, triangle, shade, toCamera
+    Scene, View, Camera, viewOf, sceneClear, triangle, triangleTex, Texture, shade, toCamera
+}
+from "./textures" import {
+    groundTexture, planeTexture
 }
 from "./world3d" import {
-    World, heightAt, TILE, VIEW_TILES
+    World, Trail, heightAt, TILE, VIEW_TILES
 }
 
 // Sky gradient plus a sun disc, painted before anything else. There is no depth
@@ -86,7 +89,34 @@ fn themeFog(t: i64): Rgb {
 }
 
 // Crossfade the atmosphere between the outgoing and incoming region.
+// Fog distance per region — this is the weather. The coast is hazy, the desert is
+// glass-clear, the forest sits in the middle, the city is smogged in.
+fn themeFogRange(t: i64): Rgb {
+    if t == 1 {
+        return Rgb {
+            r: 800.0, g: 2600.0, b: 0.0
+        } // desert: see forever
+    }
+    if t == 2 {
+        return Rgb {
+            r: 380.0, g: 1400.0, b: 2.0
+        } // forest: some haze
+    }
+    if t == 3 {
+        return Rgb {
+            r: 220.0, g: 900.0, b: 5.0
+        } // city: smog
+    }
+    return Rgb {
+        r: 300.0, g: 1150.0, b: 4.0
+    } // coast: sea haze
+}
+
 pub fn themeSkyMix(s: &mut Scene, a: i64, b: i64, mix: f64) {
+    let ra = themeFogRange(a)
+    let rb = themeFogRange(b)
+    s.fogStart = rb.r + (ra.r - rb.r) * mix
+    s.fogEnd = rb.g + (ra.g - rb.g) * mix
     let ca = themeFog(a)
     let cb = themeFog(b)
     s.fogR = cb.r + (ca.r - cb.r) * mix
@@ -249,7 +279,7 @@ fn themedColor(theme: i64, h: f64, slope: f64): Rgb {
     return terrainColor(h, slope)
 }
 
-pub fn drawWorld(c: &mut Canvas, s: &mut Scene, w: &World) {
+pub fn drawWorld(c: &mut Canvas, s: &mut Scene, w: &World, ground: &Texture, skin: &Texture) {
     themeSky(s, w.theme)
     themeSkyMix(s, w.prevTheme, w.theme, w.themeMix)
     let v = viewOf(w.cam, c.w, c.h)
@@ -329,14 +359,22 @@ pub fn drawWorld(c: &mut Canvas, s: &mut Scene, w: &World) {
                 b = b + spec * 1.0
             }
 
-            triangle(c, s, v, x0, h00, z0, x0, h01, z1, x1, h10, z0, r, g, b)
-            triangle(c, s, v, x1, h10, z0, x0, h01, z1, x1, h11, z1, r, g, b)
+            // UVs are world position over a fixed period, so the detail texture
+            // tiles across the terrain with no per-quad seams.
+            let uvs = 1.0 / 130.0
+            let u0 = x0 * uvs
+            let v0 = z0 * uvs
+            let u1 = x1 * uvs
+            let v1 = z1 * uvs
+            triangleTex(c, s, v, ground, x0, h00, z0, u0, v0, x0, h01, z1, u0, v1, x1, h10, z0, u1, v0, r, g, b)
+            triangleTex(c, s, v, ground, x1, h10, z0, u1, v0, x0, h01, z1, u0, v1, x1, h11, z1, u1, v1, r, g, b)
         }
     }
 
     drawProps(c, s, w, v, baseX, baseZ)
+    drawTrails(c, w, v)
     drawRings(c, s, w, v)
-    drawPlane(c, s, w, v)
+    drawPlane(c, s, w, v, skin)
     drawSparks(c, s, w, v)
 }
 
@@ -492,6 +530,32 @@ fn drawRings(c: &mut Canvas, s: &mut Scene, w: &World, v: &View) {
     }
 }
 
+// Contrails: project each stored point and join consecutive ones. Drawn without
+// depth test, which is fine — they are thin, bright, and always near the camera.
+fn drawTrails(c: &mut Canvas, w: &World, v: &View) {
+    drawOneTrail(c, w.trailL, v)
+    drawOneTrail(c, w.trailR, v)
+}
+
+fn drawOneTrail(c: &mut Canvas, t: &Vec<Trail>, v: &View) {
+    if t.len < 2 {
+        return
+    }
+    for i in 0..t.len - 1 {
+        let a = toCamera(v, t[i].x, t[i].y, t[i].z)
+        let b = toCamera(v, t[i + 1].x, t[i + 1].y, t[i + 1].z)
+        if a.z < 1.0 || b.z < 1.0 {
+            continue
+        }
+        let ax = v.cx + a.x * v.scale / a.z
+        let ay = v.cy - a.y * v.scale / a.z
+        let bx = v.cx + b.x * v.scale / b.z
+        let by = v.cy - b.y * v.scale / b.z
+        let f = Math.minF64(t[i].life, 1.0) * 0.55
+        line(c, ax, ay, bx, by, f, f * 1.05, f * 1.15)
+    }
+}
+
 // Sparks are camera-facing quads, so they stay visible whatever angle you clear
 // the ring at.
 fn drawSparks(c: &mut Canvas, _s: &mut Scene, w: &World, v: &View) {
@@ -509,9 +573,10 @@ fn drawSparks(c: &mut Canvas, _s: &mut Scene, w: &World, v: &View) {
     }
 }
 
-// The aircraft. Body-space points are given as (forward, right, up) offsets and
-// transformed once, so the shape is easy to read and to change.
-fn drawPlane(c: &mut Canvas, s: &mut Scene, w: &World, v: &View) {
+// The aircraft: a fighter with real volume — a faceted nose, a raised spine, a
+// belly, LERX strakes into swept wings, twin tailfins and two engine nozzles.
+// Body-space points are (forward, right, up) offsets, transformed once.
+fn drawPlane(c: &mut Canvas, s: &mut Scene, w: &World, v: &View, skin: &Texture) {
     let yaw = w.plane.yaw
     let pitch = w.plane.pitch
     let roll = w.plane.roll
@@ -534,60 +599,111 @@ fn drawPlane(c: &mut Canvas, s: &mut Scene, w: &World, v: &View) {
     var px: Vec<f64> = Vec.new()
     var py: Vec<f64> = Vec.new()
     var pz: Vec<f64> = Vec.new()
-    // nose, cockpit, mid, tail, wing roots and tips, tailplane, fin
-    addPt(px, py, pz, w, fx, fy, fz, rx, ry, rz, ux, uy, uz, 24.0, 0.0, 0.0) // 0 nose
-    addPt(px, py, pz, w, fx, fy, fz, rx, ry, rz, ux, uy, uz, 8.0, 0.0, 4.0) // 1 canopy top
-    addPt(px, py, pz, w, fx, fy, fz, rx, ry, rz, ux, uy, uz, 6.0, 4.0, 0.0) // 2 mid right
-    addPt(px, py, pz, w, fx, fy, fz, rx, ry, rz, ux, uy, uz, 6.0, 0.0 - 4.0, 0.0) // 3 mid left
-    addPt(px, py, pz, w, fx, fy, fz, rx, ry, rz, ux, uy, uz, 8.0, 0.0, 0.0 - 3.0) // 4 belly
-    addPt(px, py, pz, w, fx, fy, fz, rx, ry, rz, ux, uy, uz, 0.0 - 16.0, 0.0, 0.0) // 5 tail
-    addPt(px, py, pz, w, fx, fy, fz, rx, ry, rz, ux, uy, uz, 0.0 - 4.0, 22.0, 0.0) // 6 right tip
-    addPt(px, py, pz, w, fx, fy, fz, rx, ry, rz, ux, uy, uz, 0.0 - 4.0, 0.0 - 22.0, 0.0) // 7 left tip
-    addPt(px, py, pz, w, fx, fy, fz, rx, ry, rz, ux, uy, uz, 0.0 - 14.0, 10.0, 1.0) // 8 right tailplane
-    addPt(px, py, pz, w, fx, fy, fz, rx, ry, rz, ux, uy, uz, 0.0 - 14.0, 0.0 - 10.0, 1.0) // 9 left tailplane
-    addPt(px, py, pz, w, fx, fy, fz, rx, ry, rz, ux, uy, uz, 0.0 - 15.0, 0.0, 11.0) // 10 fin top
+    // 0 nose tip
+    addPt(px, py, pz, w, fx, fy, fz, rx, ry, rz, ux, uy, uz, 30.0, 0.0, 0.0)
+    // 1..4 forward fuselage ring (top, right, bottom, left)
+    addPt(px, py, pz, w, fx, fy, fz, rx, ry, rz, ux, uy, uz, 14.0, 0.0, 3.6)
+    addPt(px, py, pz, w, fx, fy, fz, rx, ry, rz, ux, uy, uz, 14.0, 3.4, 0.4)
+    addPt(px, py, pz, w, fx, fy, fz, rx, ry, rz, ux, uy, uz, 14.0, 0.0, 0.0 - 3.0)
+    addPt(px, py, pz, w, fx, fy, fz, rx, ry, rz, ux, uy, uz, 14.0, 0.0 - 3.4, 0.4)
+    // 5..8 mid fuselage ring, fatter
+    addPt(px, py, pz, w, fx, fy, fz, rx, ry, rz, ux, uy, uz, 0.0 - 2.0, 0.0, 5.2)
+    addPt(px, py, pz, w, fx, fy, fz, rx, ry, rz, ux, uy, uz, 0.0 - 2.0, 5.0, 0.6)
+    addPt(px, py, pz, w, fx, fy, fz, rx, ry, rz, ux, uy, uz, 0.0 - 2.0, 0.0, 0.0 - 4.4)
+    addPt(px, py, pz, w, fx, fy, fz, rx, ry, rz, ux, uy, uz, 0.0 - 2.0, 0.0 - 5.0, 0.6)
+    // 9..12 tail ring
+    addPt(px, py, pz, w, fx, fy, fz, rx, ry, rz, ux, uy, uz, 0.0 - 20.0, 0.0, 3.6)
+    addPt(px, py, pz, w, fx, fy, fz, rx, ry, rz, ux, uy, uz, 0.0 - 20.0, 4.0, 0.4)
+    addPt(px, py, pz, w, fx, fy, fz, rx, ry, rz, ux, uy, uz, 0.0 - 20.0, 0.0, 0.0 - 3.4)
+    addPt(px, py, pz, w, fx, fy, fz, rx, ry, rz, ux, uy, uz, 0.0 - 20.0, 0.0 - 4.0, 0.4)
+    // 13,14 wing tips  15,16 strake roots  17,18 wing trailing roots
+    addPt(px, py, pz, w, fx, fy, fz, rx, ry, rz, ux, uy, uz, 0.0 - 12.0, 26.0, 0.6)
+    addPt(px, py, pz, w, fx, fy, fz, rx, ry, rz, ux, uy, uz, 0.0 - 12.0, 0.0 - 26.0, 0.6)
+    addPt(px, py, pz, w, fx, fy, fz, rx, ry, rz, ux, uy, uz, 12.0, 3.6, 0.6)
+    addPt(px, py, pz, w, fx, fy, fz, rx, ry, rz, ux, uy, uz, 12.0, 0.0 - 3.6, 0.6)
+    addPt(px, py, pz, w, fx, fy, fz, rx, ry, rz, ux, uy, uz, 0.0 - 18.0, 4.4, 0.6)
+    addPt(px, py, pz, w, fx, fy, fz, rx, ry, rz, ux, uy, uz, 0.0 - 18.0, 0.0 - 4.4, 0.6)
+    // 19,20 canted fin tips   21,22 tailplane tips
+    addPt(px, py, pz, w, fx, fy, fz, rx, ry, rz, ux, uy, uz, 0.0 - 22.0, 7.0, 13.0)
+    addPt(px, py, pz, w, fx, fy, fz, rx, ry, rz, ux, uy, uz, 0.0 - 22.0, 0.0 - 7.0, 13.0)
+    addPt(px, py, pz, w, fx, fy, fz, rx, ry, rz, ux, uy, uz, 0.0 - 24.0, 13.0, 0.0)
+    addPt(px, py, pz, w, fx, fy, fz, rx, ry, rz, ux, uy, uz, 0.0 - 24.0, 0.0 - 13.0, 0.0)
+    // 23 canopy apex
+    addPt(px, py, pz, w, fx, fy, fz, rx, ry, rz, ux, uy, uz, 9.0, 0.0, 6.4)
 
-    // fuselage: top and bottom shells, both windings so it is solid from any angle
-    tri(c, s, v, px, py, pz, 0, 2, 1, 0.90, 0.92, 0.96)
-    tri(c, s, v, px, py, pz, 0, 1, 3, 0.82, 0.84, 0.90)
-    tri(c, s, v, px, py, pz, 1, 2, 5, 0.74, 0.76, 0.84)
-    tri(c, s, v, px, py, pz, 1, 5, 3, 0.68, 0.70, 0.78)
-    tri(c, s, v, px, py, pz, 0, 4, 2, 0.56, 0.58, 0.64)
-    tri(c, s, v, px, py, pz, 0, 3, 4, 0.52, 0.54, 0.60)
-    tri(c, s, v, px, py, pz, 4, 5, 2, 0.48, 0.50, 0.56)
-    tri(c, s, v, px, py, pz, 4, 3, 5, 0.46, 0.48, 0.54)
-    // swept wings, drawn from both sides
-    tri(c, s, v, px, py, pz, 2, 6, 5, 0.86, 0.88, 0.93)
-    tri(c, s, v, px, py, pz, 2, 5, 6, 0.60, 0.62, 0.70)
-    tri(c, s, v, px, py, pz, 3, 5, 7, 0.86, 0.88, 0.93)
-    tri(c, s, v, px, py, pz, 3, 7, 5, 0.60, 0.62, 0.70)
-    // tailplane
-    tri(c, s, v, px, py, pz, 5, 8, 9, 0.78, 0.80, 0.86)
-    tri(c, s, v, px, py, pz, 5, 9, 8, 0.58, 0.60, 0.66)
-    // fin, in the accent colour
-    tri(c, s, v, px, py, pz, 5, 10, 0, 1.10, 0.42, 0.22)
-    tri(c, s, v, px, py, pz, 5, 0, 10, 0.85, 0.32, 0.18)
-    // canopy glass
-    tri(c, s, v, px, py, pz, 1, 0, 2, 0.20, 0.42, 0.62)
+    // nose cone — four facets
+    triT(c, s, v, skin, px, py, pz, 0, 1, 2, 0.5, 0.05, 0.5, 0.30, 0.9, 0.30, 1.02, 1.04, 1.08)
+    triT(c, s, v, skin, px, py, pz, 0, 2, 3, 0.5, 0.05, 0.9, 0.30, 0.5, 0.30, 0.88, 0.90, 0.95)
+    triT(c, s, v, skin, px, py, pz, 0, 3, 4, 0.5, 0.05, 0.5, 0.30, 0.1, 0.30, 0.72, 0.74, 0.80)
+    triT(c, s, v, skin, px, py, pz, 0, 4, 1, 0.5, 0.05, 0.1, 0.30, 0.5, 0.30, 0.95, 0.97, 1.01)
+    // forward → mid, four quads
+    quadT(c, s, v, skin, px, py, pz, 1, 2, 6, 5, 0.50, 0.30, 0.90, 0.30, 0.90, 0.55, 0.50, 0.55, 1.00, 1.02, 1.06)
+    quadT(c, s, v, skin, px, py, pz, 2, 3, 7, 6, 0.90, 0.30, 0.50, 0.30, 0.50, 0.55, 0.90, 0.55, 0.80, 0.82, 0.88)
+    quadT(c, s, v, skin, px, py, pz, 3, 4, 8, 7, 0.50, 0.30, 0.10, 0.30, 0.10, 0.55, 0.50, 0.55, 0.66, 0.68, 0.74)
+    quadT(c, s, v, skin, px, py, pz, 4, 1, 5, 8, 0.10, 0.30, 0.50, 0.30, 0.50, 0.55, 0.10, 0.55, 0.90, 0.92, 0.96)
+    // mid → tail
+    quadT(c, s, v, skin, px, py, pz, 5, 6, 10, 9, 0.50, 0.55, 0.90, 0.55, 0.90, 0.95, 0.50, 0.95, 0.96, 0.98, 1.02)
+    quadT(c, s, v, skin, px, py, pz, 6, 7, 11, 10, 0.90, 0.55, 0.50, 0.55, 0.50, 0.95, 0.90, 0.95, 0.78, 0.80, 0.86)
+    quadT(c, s, v, skin, px, py, pz, 7, 8, 12, 11, 0.50, 0.55, 0.10, 0.55, 0.10, 0.95, 0.50, 0.95, 0.64, 0.66, 0.72)
+    quadT(c, s, v, skin, px, py, pz, 8, 5, 9, 12, 0.10, 0.55, 0.50, 0.55, 0.50, 0.95, 0.10, 0.95, 0.88, 0.90, 0.94)
+    // strake + wing, upper then lower
+    quadT(c, s, v, skin, px, py, pz, 15, 13, 17, 6, 0.12, 0.12, 0.95, 0.12, 0.95, 0.45, 0.12, 0.45, 1.00, 1.02, 1.06)
+    quadT(c, s, v, skin, px, py, pz, 6, 17, 13, 15, 0.12, 0.45, 0.95, 0.45, 0.95, 0.12, 0.12, 0.12, 0.60, 0.62, 0.70)
+    quadT(c, s, v, skin, px, py, pz, 16, 8, 18, 14, 0.12, 0.55, 0.12, 0.88, 0.95, 0.88, 0.95, 0.55, 1.00, 1.02, 1.06)
+    quadT(c, s, v, skin, px, py, pz, 14, 18, 8, 16, 0.95, 0.55, 0.95, 0.88, 0.12, 0.88, 0.12, 0.55, 0.60, 0.62, 0.70)
+    // tailplanes
+    triT(c, s, v, skin, px, py, pz, 10, 21, 9, 0.20, 0.20, 0.95, 0.20, 0.20, 0.45, 0.92, 0.94, 0.98)
+    triT(c, s, v, skin, px, py, pz, 9, 21, 10, 0.20, 0.45, 0.95, 0.20, 0.20, 0.20, 0.58, 0.60, 0.66)
+    triT(c, s, v, skin, px, py, pz, 12, 9, 22, 0.20, 0.20, 0.20, 0.45, 0.95, 0.20, 0.92, 0.94, 0.98)
+    triT(c, s, v, skin, px, py, pz, 22, 9, 12, 0.95, 0.20, 0.20, 0.45, 0.20, 0.20, 0.58, 0.60, 0.66)
+    // canted twin fins, in the accent stripe band of the sheet
+    triT(c, s, v, skin, px, py, pz, 9, 19, 10, 0.30, 0.50, 0.80, 0.50, 0.30, 0.66, 1.15, 0.48, 0.26)
+    triT(c, s, v, skin, px, py, pz, 10, 19, 9, 0.30, 0.66, 0.80, 0.50, 0.30, 0.50, 0.85, 0.34, 0.18)
+    triT(c, s, v, skin, px, py, pz, 12, 20, 9, 0.30, 0.50, 0.80, 0.50, 0.30, 0.66, 1.15, 0.48, 0.26)
+    triT(c, s, v, skin, px, py, pz, 9, 20, 12, 0.30, 0.66, 0.80, 0.50, 0.30, 0.50, 0.85, 0.34, 0.18)
+    // canopy: dark glass over the spine
+    triT(c, s, v, skin, px, py, pz, 1, 23, 2, 0.5, 0.30, 0.5, 0.45, 0.9, 0.40, 0.22, 0.40, 0.58)
+    triT(c, s, v, skin, px, py, pz, 1, 4, 23, 0.5, 0.30, 0.1, 0.40, 0.5, 0.45, 0.26, 0.46, 0.66)
+    triT(c, s, v, skin, px, py, pz, 23, 5, 2, 0.5, 0.45, 0.5, 0.60, 0.9, 0.40, 0.18, 0.34, 0.50)
+    triT(c, s, v, skin, px, py, pz, 23, 4, 5, 0.5, 0.45, 0.1, 0.40, 0.5, 0.60, 0.20, 0.38, 0.54)
 
-    // engine glow behind the tail, brighter under throttle
-    let ex = w.plane.x - fx * 18.0
-    let ey = w.plane.y - fy * 18.0
-    let ez = w.plane.z - fz * 18.0
-    let ep = toCamera(v, ex, ey, ez)
-    if ep.z > 1.0 {
-        let sx = v.cx + ep.x * v.scale / ep.z
-        let sy2 = v.cy - ep.y * v.scale / ep.z
-        let k = (w.plane.speed - 180.0) / 140.0
-        let sz = 6.0 + k * 10.0
-        spot(c, sx, sy2, sz * v.scale / ep.z * 0.02 + 4.0, 1.4 + k, 0.55 + k * 0.5, 0.18)
+    // twin nozzles, glowing with throttle
+    let k = (w.plane.speed - 170.0) / 170.0
+    for side in 0..2 {
+        var off = 4.0
+        if side == 1 {
+            off = 0.0 - 4.0
+        }
+        let ex = w.plane.x - fx * 21.0 + rx * off
+        let ey = w.plane.y - fy * 21.0 + ry * off
+        let ez = w.plane.z - fz * 21.0 + rz * off
+        let ep = toCamera(v, ex, ey, ez)
+        if ep.z > 1.0 {
+            let sx = v.cx + ep.x * v.scale / ep.z
+            let sy2 = v.cy - ep.y * v.scale / ep.z
+            let px2 = Math.clampF64(v.scale * 3.2 / ep.z, 2.0, 26.0)
+            spot(c, sx, sy2, px2 * (1.4 + k), 0.9 + k * 1.2, 0.32 + k * 0.5, 0.10)
+            spot(c, sx, sy2, px2 * 0.55, 1.8 + k, 1.2 + k, 0.7)
+        }
     }
+}
+
+// Two triangles from four corner indices, sharing the diagonal.
+fn quadT(c: &mut Canvas, s: &mut Scene, v: &View, t: &Texture, px: &Vec<f64>, py: &Vec<f64>, pz: &Vec<f64>, a: i64, b: i64, d: i64, e: i64, ua: f64, va: f64, ub: f64, vb: f64, ud: f64, vd: f64, ue: f64, ve: f64, r: f64, g: f64, bl: f64) {
+    triT(c, s, v, t, px, py, pz, a, b, d, ua, va, ub, vb, ud, vd, r, g, bl)
+    triT(c, s, v, t, px, py, pz, a, d, e, ua, va, ud, vd, ue, ve, r, g, bl)
 }
 
 fn addPt(px: &mut Vec<f64>, py: &mut Vec<f64>, pz: &mut Vec<f64>, w: &World, fx: f64, fy: f64, fz: f64, rx: f64, ry: f64, rz: f64, ux: f64, uy: f64, uz: f64, f: f64, r: f64, u: f64) {
     px.push(w.plane.x + fx * f + rx * r + ux * u)
     py.push(w.plane.y + fy * f + ry * r + uy * u)
     pz.push(w.plane.z + fz * f + rz * r + uz * u)
+}
+
+// Textured variant: the three UVs pick which patch of the skin sheet this facet
+// wears, so panel lines and the spine stripe land where they should.
+fn triT(c: &mut Canvas, s: &mut Scene, v: &View, t: &Texture, px: &Vec<f64>, py: &Vec<f64>, pz: &Vec<f64>, a: i64, b: i64, d: i64, ua: f64, va: f64, ub: f64, vb: f64, ud: f64, vd: f64, r: f64, g: f64, bl: f64) {
+    triangleTex(c, s, v, t, px[a], py[a], pz[a], ua, va, px[b], py[b], pz[b], ub, vb, px[d], py[d], pz[d], ud, vd, r, g, bl)
 }
 
 fn tri(c: &mut Canvas, s: &mut Scene, v: &View, px: &Vec<f64>, py: &Vec<f64>, pz: &Vec<f64>, a: i64, b: i64, d: i64, r: f64, g: f64, bl: f64) {
@@ -601,11 +717,18 @@ pub fn drawGuide(c: &mut Canvas, w: &World, _s: &Scene) {
     // nearest live coin ahead
     var bi = 0 - 1
     var bd = 1.0e18
+    let fwdX = Math.sin(w.plane.yaw)
+    let fwdZ = Math.cos(w.plane.yaw)
     for i in 0..w.rings.len {
         if w.rings[i].alive {
             let dx = w.rings[i].x - w.plane.x
             let dy = w.rings[i].y - w.plane.y
             let dz = w.rings[i].z - w.plane.z
+            // Only rings still in front. Nearest-by-distance alone will happily
+            // pick one you have already flown past and point you backwards.
+            if dx * fwdX + dz * fwdZ < 0.0 - 40.0 {
+                continue
+            }
             let d = dx * dx + dy * dy + dz * dz
             if d < bd {
                 bd = d
@@ -659,6 +782,19 @@ pub fn drawHud(c: &mut Canvas, w: &World, s: &Scene, fps: i64) {
     text(c, 24, 22, "SCORE " + w.score.toString(), 3, 0.95, 0.80, 0.30)
     let alt = ((w.plane.y - heightAt(w.plane.x, w.plane.z)) as i64)
     text(c, 24, 58, "ALT " + alt.toString() + "   SPD " + (w.plane.speed as i64).toString(), 2, 0.35, 0.45, 0.55)
+    // afterburner budget
+    let bx = 24.0
+    let by = (c.h as f64) - 92.0
+    fillRect(c, bx, by, bx + 220.0, by + 9.0, 0.05, 0.05, 0.06)
+    var brr = 0.9
+    var bgg = 0.45
+    if w.afterburner > 0.35 {
+        brr = 0.35
+        bgg = 0.85
+    }
+    fillRect(c, bx, by, bx + 220.0 * w.afterburner, by + 9.0, brr, bgg, 0.25)
+    text(c, 24, (by as i64) - 22, "AFTERBURNER", 2, 0.30, 0.32, 0.34)
+
     let ts = "TRIS " + s.tris.toString() + "   " + fps.toString() + " FPS"
     text(c, c.w - 24 - textWidth(ts, 2), 22, ts, 2, 0.28, 0.36, 0.44)
 
@@ -666,15 +802,6 @@ pub fn drawHud(c: &mut Canvas, w: &World, s: &Scene, fps: i64) {
         let f = Math.minF64(1.8, 0.7 + (w.combo as f64) * 0.07)
         textCentered(c, c.w / 2, 64, "x" + w.combo.toString(), 4, 1.5 * f, 1.1 * f, 0.25 * f)
     }
-
-    // artificial horizon: a short line that rolls with the aircraft
-    let hx = (c.w as f64) * 0.5
-    let hy = (c.h as f64) - 74.0
-    let ca = Math.cos(0.0 - w.plane.roll)
-    let sa = Math.sin(0.0 - w.plane.roll)
-    line(c, hx - ca * 70.0, hy - sa * 70.0, hx - ca * 22.0, hy - sa * 22.0, 0.3, 0.9, 0.5)
-    line(c, hx + ca * 22.0, hy + sa * 22.0, hx + ca * 70.0, hy + sa * 70.0, 0.3, 0.9, 0.5)
-    spot(c, hx, hy, 3.0, 0.4, 1.0, 0.6)
 
     // Where you are, and how far to the next region.
     text(c, 24, c.h - 58, themeName(w.theme), 3, 0.75, 0.72, 0.55)

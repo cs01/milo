@@ -305,3 +305,194 @@ pub fn shade(s: &Scene, nx: f64, ny: f64, nz: f64, ambient: f64): f64 {
     }
     return ambient + (1.0 - ambient) * d
 }
+
+// ── textures ──────────────────────────────────────────────────────────────────
+//
+// Power-of-two RGB textures sampled with wrap, generated procedurally at startup
+// — there is no asset pipeline here, and none is needed for surface detail.
+
+pub struct Texture {
+    w: i64,
+    h: i64,
+    mask: i64, // w-1, w is a power of two
+    shift: i64, // log2(w), for the row stride
+    px: Vec<f32>, // 3 floats per texel
+}
+
+pub fn texNew(size: i64, shift: i64): Texture {
+    return Texture {
+        w: size,
+        h: size,
+        mask: size - 1,
+        shift: shift,
+        px: Vec.filled(size * size * 3, 0.0),
+    }
+}
+
+pub fn texSet(t: &mut Texture, x: i64, y: i64, r: f64, g: f64, b: f64) {
+    let i = ((y << t.shift) + x) * 3
+    t.px[i] = r as f32
+    t.px[i + 1] = g as f32
+    t.px[i + 2] = b as f32
+}
+
+// Perspective-correct textured triangle. The extra work over the flat path is
+// interpolating u/z and v/z alongside 1/z and dividing per pixel — which is what
+// "perspective-correct" means: interpolating u,v directly in screen space slides
+// the texture around as the surface tilts away.
+fn rasterCamTex(c: &mut Canvas, s: &mut Scene, v: &View, t: &Texture, ax: f64, ay: f64, az: f64, au: f64, av: f64, bx: f64, by: f64, bz: f64, bu: f64, bv: f64, cx2: f64, cy2: f64, cz2: f64, cu: f64, cv: f64, tr: f64, tg: f64, tb: f64) {
+    let iaz = 1.0 / az
+    let ibz = 1.0 / bz
+    let icz = 1.0 / cz2
+    let x0 = v.cx + ax * v.scale * iaz
+    let y0 = v.cy - ay * v.scale * iaz
+    let x1 = v.cx + bx * v.scale * ibz
+    let y1 = v.cy - by * v.scale * ibz
+    let x2 = v.cx + cx2 * v.scale * icz
+    let y2 = v.cy - cy2 * v.scale * icz
+
+    let area = (x1 - x0) * (y2 - y0) - (x2 - x0) * (y1 - y0)
+    if area <= 0.0 {
+        return
+    }
+    var minX = Math.floor(Math.minF64(x0, Math.minF64(x1, x2))) as i64
+    var maxX = Math.ceil(Math.maxF64(x0, Math.maxF64(x1, x2))) as i64
+    var minY = Math.floor(Math.minF64(y0, Math.minF64(y1, y2))) as i64
+    var maxY = Math.ceil(Math.maxF64(y0, Math.maxF64(y1, y2))) as i64
+    if minX < 0 {
+        minX = 0
+    }
+    if minY < 0 {
+        minY = 0
+    }
+    if maxX > s.w {
+        maxX = s.w
+    }
+    if maxY > s.h {
+        maxY = s.h
+    }
+    if minX >= maxX || minY >= maxY {
+        return
+    }
+    s.tris = s.tris + 1
+    let invArea = 1.0 / area
+    // u,v carried divided by z, so they interpolate linearly in screen space
+    let au2 = au * iaz
+    let av2 = av * iaz
+    let bu2 = bu * ibz
+    let bv2 = bv * ibz
+    let cu2 = cu * icz
+    let cv2 = cv * icz
+
+    var py = minY
+    while py < maxY {
+        let fy = (py as f64) + 0.5
+        var px = minX
+        while px < maxX {
+            let fx = (px as f64) + 0.5
+            let w0 = (x2 - x1) * (fy - y1) - (y2 - y1) * (fx - x1)
+            if w0 < 0.0 {
+                px = px + 1
+                continue
+            }
+            let w1 = (x0 - x2) * (fy - y2) - (y0 - y2) * (fx - x2)
+            if w1 < 0.0 {
+                px = px + 1
+                continue
+            }
+            let w2 = (x1 - x0) * (fy - y0) - (y1 - y0) * (fx - x0)
+            if w2 < 0.0 {
+                px = px + 1
+                continue
+            }
+            let l0 = w0 * invArea
+            let l1 = w1 * invArea
+            let l2 = w2 * invArea
+            let invZ = l0 * iaz + l1 * ibz + l2 * icz
+            let idx = py * s.w + px
+            if (s.zbuf[idx] as f64) < invZ {
+                s.zbuf[idx] = invZ as f32
+                let zz = 1.0 / invZ
+                let uu = (l0 * au2 + l1 * bu2 + l2 * cu2) * zz
+                let vv = (l0 * av2 + l1 * bv2 + l2 * cv2) * zz
+                var tx2 = (uu * (t.w as f64)) as i64
+                var ty2 = (vv * (t.h as f64)) as i64
+                tx2 = tx2 & t.mask
+                ty2 = ty2 & t.mask
+                if tx2 < 0 {
+                    tx2 = 0
+                }
+                if ty2 < 0 {
+                    ty2 = 0
+                }
+                let ti = ((ty2 << t.shift) + tx2) * 3
+                var f = (zz - s.fogStart) / (s.fogEnd - s.fogStart)
+                if f < 0.0 {
+                    f = 0.0
+                }
+                if f > 1.0 {
+                    f = 1.0
+                }
+                let o = idx * 3
+                let rr = tr * (t.px[ti] as f64)
+                let gg = tg * (t.px[ti + 1] as f64)
+                let bb = tb * (t.px[ti + 2] as f64)
+                c.hdr[o] = (rr * (1.0 - f) + s.fogR * f) as f32
+                c.hdr[o + 1] = (gg * (1.0 - f) + s.fogG * f) as f32
+                c.hdr[o + 2] = (bb * (1.0 - f) + s.fogB * f) as f32
+            }
+            px = px + 1
+        }
+        py = py + 1
+    }
+}
+
+// World-space textured triangle, near-clipped like the flat one. UVs are carried
+// through the clip by the same parameter as the position.
+pub fn triangleTex(c: &mut Canvas, s: &mut Scene, v: &View, t: &Texture, wax: f64, way: f64, waz: f64, au: f64, av: f64, wbx: f64, wby: f64, wbz: f64, bu: f64, bv: f64, wcx: f64, wcy: f64, wcz: f64, cu: f64, cv: f64, tr: f64, tg: f64, tb: f64) {
+    let a = toCamera(v, wax, way, waz)
+    let bb = toCamera(v, wbx, wby, wbz)
+    let cc = toCamera(v, wcx, wcy, wcz)
+    if a.z > NEAR && bb.z > NEAR && cc.z > NEAR {
+        rasterCamTex(c, s, v, t, a.x, a.y, a.z, au, av, bb.x, bb.y, bb.z, bu, bv, cc.x, cc.y, cc.z, cu, cv, tr, tg, tb)
+        return
+    }
+    if a.z <= NEAR && bb.z <= NEAR && cc.z <= NEAR {
+        return
+    }
+    // clip, carrying uv
+    var px: Vec<f64> = Vec.new()
+    var py: Vec<f64> = Vec.new()
+    var pz: Vec<f64> = Vec.new()
+    var pu: Vec<f64> = Vec.new()
+    var pv: Vec<f64> = Vec.new()
+    clipEdgeUV(px, py, pz, pu, pv, a, au, av, bb, bu, bv)
+    clipEdgeUV(px, py, pz, pu, pv, bb, bu, bv, cc, cu, cv)
+    clipEdgeUV(px, py, pz, pu, pv, cc, cu, cv, a, au, av)
+    if px.len < 3 {
+        return
+    }
+    for i in 1..px.len - 1 {
+        rasterCamTex(c, s, v, t, px[0], py[0], pz[0], pu[0], pv[0], px[i], py[i], pz[i], pu[i], pv[i], px[i + 1], py[i + 1], pz[i + 1], pu[i + 1], pv[i + 1], tr, tg, tb)
+    }
+}
+
+fn clipEdgeUV(px: &mut Vec<f64>, py: &mut Vec<f64>, pz: &mut Vec<f64>, pu: &mut Vec<f64>, pv: &mut Vec<f64>, a: &Vec3, au: f64, av: f64, b: &Vec3, bu: f64, bv: f64) {
+    let ina = a.z > NEAR
+    let inb = b.z > NEAR
+    if ina {
+        px.push(a.x)
+        py.push(a.y)
+        pz.push(a.z)
+        pu.push(au)
+        pv.push(av)
+    }
+    if ina != inb {
+        let t = (NEAR - a.z) / (b.z - a.z)
+        px.push(a.x + (b.x - a.x) * t)
+        py.push(a.y + (b.y - a.y) * t)
+        pz.push(NEAR)
+        pu.push(au + (bu - au) * t)
+        pv.push(av + (bv - av) * t)
+    }
+}

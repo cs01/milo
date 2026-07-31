@@ -1,0 +1,100 @@
+// Procedural textures, built once at startup. There is no asset pipeline in this
+// example and none is needed: surface detail is cheaper to generate than to ship,
+// and it tiles seamlessly by construction because the noise wraps.
+
+from "std/math" import {
+    Math
+}
+from "./gfx3d" import {
+    Texture, texNew, texSet
+}
+
+pub let TEX_SIZE: i64 = 128
+
+pub let TEX_SHIFT: i64 = 7
+
+// Value noise on a torus: sampling a circle in each axis makes the field wrap, so
+// the texture tiles with no seam.
+fn wrapNoise(u: f64, v: f64, freq: f64, seed: f64): f64 {
+    let a = u * 6.283185307179586
+    let b = v * 6.283185307179586
+    var acc = 0.0
+    acc = acc + Math.sin(Math.cos(a) * freq + seed) * Math.cos(Math.sin(b) * freq + seed * 1.7)
+    acc = acc + Math.sin(Math.sin(a) * freq * 1.7 + seed * 2.3) * Math.cos(Math.cos(b) * freq * 1.3 + seed)
+    return acc * 0.25 + 0.5
+}
+
+fn fbm(u: f64, v: f64, seed: f64): f64 {
+    var t = 0.0
+    t = t + wrapNoise(u, v, 3.0, seed) * 0.55
+    t = t + wrapNoise(u, v, 7.0, seed + 11.0) * 0.28
+    t = t + wrapNoise(u, v, 15.0, seed + 23.0) * 0.17
+    return t
+}
+
+// Ground detail: a broad mottle plus fine grain, kept near 1.0 because it is a
+// MULTIPLIER over the terrain's themed colour rather than a colour of its own.
+// One texture serves every region for exactly that reason.
+pub fn groundTexture(): Texture {
+    var t = texNew(TEX_SIZE, TEX_SHIFT)
+    for y in 0..TEX_SIZE {
+        for x in 0..TEX_SIZE {
+            let u = (x as f64) / (TEX_SIZE as f64)
+            let v = (y as f64) / (TEX_SIZE as f64)
+            let n = fbm(u, v, 1.0)
+            // speckle: a sparse scatter of darker and lighter grains
+            let g = Math.sin((x as f64) * 12.9898 + (y as f64) * 78.233) * 43758.5453
+            let grain = g - Math.floor(g)
+            var k = 0.80 + n * 0.42
+            if grain > 0.965 {
+                k = k * 1.22
+            } else if grain < 0.035 {
+                k = k * 0.78
+            }
+            // a faint warm/cool tilt so the mottling is not pure luminance
+            texSet(t, x, y, k * 1.02, k, k * 0.97)
+        }
+    }
+    return t
+}
+
+// Aircraft skin: light panels with darker seam lines, a coloured spine stripe and
+// a few rivet rows. Laid out in UV so the whole airframe indexes into one sheet.
+pub fn planeTexture(): Texture {
+    var t = texNew(TEX_SIZE, TEX_SHIFT)
+    for y in 0..TEX_SIZE {
+        for x in 0..TEX_SIZE {
+            var r = 0.86
+            var g = 0.88
+            var b = 0.92
+            // panel seams every 32 texels
+            if x % 32 == 0 || y % 32 == 0 {
+                r = 0.52
+                g = 0.54
+                b = 0.60
+            }
+            // rivets along the seams
+            if x % 32 == 0 && y % 8 == 4 {
+                r = 0.38
+                g = 0.40
+                b = 0.46
+            }
+            // spine stripe down the middle of the sheet
+            if y > 54 && y < 74 {
+                r = 1.05
+                g = 0.40
+                b = 0.22
+                if y == 55 || y == 73 {
+                    r = 0.70
+                    g = 0.26
+                    b = 0.14
+                }
+            }
+            // a subtle wash so the metal is not perfectly flat
+            let n = fbm((x as f64) / (TEX_SIZE as f64), (y as f64) / (TEX_SIZE as f64), 5.0)
+            let k = 0.94 + n * 0.12
+            texSet(t, x, y, r * k, g * k, b * k)
+        }
+    }
+    return t
+}

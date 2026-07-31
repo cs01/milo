@@ -21,7 +21,8 @@ pub struct Off {
 }
 
 from "./gfx3d" import {
-    Scene, View, Camera, viewOf, sceneClear, triangle, triangleTex, Texture, shade, toCamera
+    Vec3,
+    Scene, View, Camera, viewOf, sceneClear, triangle, triangleTex, triangleTexLit, Texture, shade, toCamera
 }
 from "./textures" import {
     groundTexture, planeTexture
@@ -279,6 +280,33 @@ fn themedColor(theme: i64, h: f64, slope: f64): Rgb {
     return terrainColor(h, slope)
 }
 
+// Height including moving water. Land is the heightmap; anything below sea level
+// gets a travelling wave train so the sea has a surface instead of being a flat
+// blue plate.
+fn surfaceAt(x: f64, z: f64, t: f64): f64 {
+    let h = heightAt(x, z)
+    if h >= 0.0 {
+        return h
+    }
+    let wave = Math.sin(x * 0.020 + t * 1.5) * 2.4 + Math.sin(z * 0.031 - t * 1.1) * 1.8 + Math.sin((x + z) * 0.012 + t * 0.7) * 3.0
+    return wave
+}
+
+// The surface normal at a point, from central differences. Sampling this at each
+// corner and interpolating is what removes the faceting.
+fn normalAt(x: f64, z: f64, t: f64): Vec3 {
+    let e = 7.0
+    let hx = surfaceAt(x + e, z, t) - surfaceAt(x - e, z, t)
+    let hz = surfaceAt(x, z + e, t) - surfaceAt(x, z - e, t)
+    let nx = 0.0 - hx
+    let nz = 0.0 - hz
+    let ny = 2.0 * e
+    let l = Math.sqrt(nx * nx + ny * ny + nz * nz)
+    return Vec3 {
+        x: nx / l, y: ny / l, z: nz / l
+    }
+}
+
 pub fn drawWorld(c: &mut Canvas, s: &mut Scene, w: &World, ground: &Texture, skin: &Texture) {
     themeSky(s, w.theme)
     themeSkyMix(s, w.prevTheme, w.theme, w.themeMix)
@@ -317,10 +345,10 @@ pub fn drawWorld(c: &mut Canvas, s: &mut Scene, w: &World, ground: &Texture, ski
                 continue
             }
 
-            let h00 = heightAt(x0, z0)
-            let h10 = heightAt(x1, z0)
-            let h01 = heightAt(x0, z1)
-            let h11 = heightAt(x1, z1)
+            let h00 = surfaceAt(x0, z0, w.time)
+            let h10 = surfaceAt(x1, z0, w.time)
+            let h01 = surfaceAt(x0, z1, w.time)
+            let h11 = surfaceAt(x1, z1, w.time)
 
             // face normal from the diagonal, good enough for flat shading
             let nx = (h00 - h10) * TILE
@@ -369,8 +397,18 @@ pub fn drawWorld(c: &mut Canvas, s: &mut Scene, w: &World, ground: &Texture, ski
             // Texture only what is close enough to see. Distant quads are many,
             // small, and deep in fog — they take the cheap flat path.
             if ring < 11 {
-                triangleTex(c, s, v, ground, x0, h00, z0, u0, v0, x0, h01, z1, u0, v1, x1, h10, z0, u1, v0, r, g, b)
-                triangleTex(c, s, v, ground, x1, h10, z0, u1, v0, x0, h01, z1, u0, v1, x1, h11, z1, u1, v1, r, g, b)
+                // Per-corner normals → per-corner light → interpolated across the
+                // triangle. Same triangle count, no more facets.
+                let n00 = normalAt(x0, z0, w.time)
+                let n10 = normalAt(x1, z0, w.time)
+                let n01 = normalAt(x0, z1, w.time)
+                let n11 = normalAt(x1, z1, w.time)
+                let s00 = shade(s, n00.x, n00.y, n00.z, 0.34) / lit
+                let s10 = shade(s, n10.x, n10.y, n10.z, 0.34) / lit
+                let s01 = shade(s, n01.x, n01.y, n01.z, 0.34) / lit
+                let s11 = shade(s, n11.x, n11.y, n11.z, 0.34) / lit
+                triangleTexLit(c, s, v, ground, x0, h00, z0, u0, v0, s00, x0, h01, z1, u0, v1, s01, x1, h10, z0, u1, v0, s10, r, g, b)
+                triangleTexLit(c, s, v, ground, x1, h10, z0, u1, v0, s10, x0, h01, z1, u0, v1, s01, x1, h11, z1, u1, v1, s11, r, g, b)
             } else {
                 triangle(c, s, v, x0, h00, z0, x0, h01, z1, x1, h10, z0, r, g, b)
                 triangle(c, s, v, x1, h10, z0, x0, h01, z1, x1, h11, z1, r, g, b)
@@ -485,6 +523,11 @@ fn drawRings(c: &mut Canvas, s: &mut Scene, w: &World, v: &View) {
         var cr = 1.5
         var cg = 1.15
         var cb = 0.25
+        if w.rings[i].bonus {
+            cr = 0.30
+            cg = 1.05
+            cb = 1.75
+        }
         if !w.rings[i].alive {
             rad = w.rings[i].r * (1.0 + (1.0 - w.rings[i].pop) * 1.2)
             br = w.rings[i].pop
@@ -881,9 +924,63 @@ pub fn drawHud(c: &mut Canvas, w: &World, s: &Scene, fps: i64) {
     let ts = "TRIS " + s.tris.toString() + "   " + fps.toString() + " FPS"
     text(c, c.w - 24 - textWidth(ts, 2), 22, ts, 2, 0.28, 0.36, 0.44)
 
+    // The streak: grows, pulses harder the longer it runs, and changes colour as
+    // it climbs. This is the number you are actually playing for.
     if w.combo > 1 {
-        let f = Math.minF64(1.8, 0.7 + (w.combo as f64) * 0.07)
-        textCentered(c, c.w / 2, 64, "x" + w.combo.toString(), 4, 1.5 * f, 1.1 * f, 0.25 * f)
+        let n = w.combo as f64
+        let f = Math.minF64(2.6, 0.7 + n * 0.10)
+        let beat = 1.0 + 0.16 * Math.sin(w.time * (5.0 + n * 0.6))
+        var size = 4
+        if w.combo >= 5 {
+            size = 5
+        }
+        if w.combo >= 10 {
+            size = 6
+        }
+        if w.combo >= 20 {
+            size = 7
+        }
+        var cr2 = 1.5
+        var cg2 = 1.1
+        var cb2 = 0.25
+        if w.combo >= 10 {
+            cr2 = 1.7
+            cg2 = 0.65
+            cb2 = 0.20
+        }
+        if w.combo >= 20 {
+            cr2 = 0.5
+            cg2 = 1.2
+            cb2 = 1.9
+        }
+        textCentered(c, c.w / 2, 60, "x" + w.combo.toString(), size, cr2 * f * beat, cg2 * f * beat, cb2 * f * beat)
+        if w.combo >= 5 {
+            textCentered(c, c.w / 2, 60 + size * 9, "STREAK", 2, cr2 * 0.4, cg2 * 0.4, cb2 * 0.4)
+        }
+        // a bar that fills toward the next tier, so the streak always has a goal
+        var tier = 5.0
+        if w.combo >= 5 {
+            tier = 10.0
+        }
+        if w.combo >= 10 {
+            tier = 20.0
+        }
+        if w.combo >= 20 {
+            tier = 20.0
+        }
+        let frac = Math.minF64(1.0, n / tier)
+        let bw2 = 190.0
+        let bx2 = (c.w as f64) * 0.5 - bw2 * 0.5
+        fillRect(c, bx2, 44.0, bx2 + bw2 * frac, 48.0, cr2 * 0.5, cg2 * 0.5, cb2 * 0.5)
+    }
+
+    // streak broken
+    if w.missFlash > 0.0 {
+        let f = w.missFlash
+        textCentered(c, c.w / 2, 64, "STREAK LOST", 5, 1.6 * f, 0.25 * f, 0.30 * f)
+        if w.bestCombo > 1 {
+            textCentered(c, c.w / 2, 110, "BEST x" + w.bestCombo.toString(), 2, 0.8 * f, 0.5 * f, 0.4 * f)
+        }
     }
 
     // Where you are, and how far to the next region.

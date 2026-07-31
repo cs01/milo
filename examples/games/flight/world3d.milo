@@ -26,6 +26,7 @@ pub struct Ring {
     alive: bool,
     pop: f64, // expands and fades once flown through
     side: f64, // signed distance of the aircraft last frame, for crossing detection
+    bonus: bool, // blue: smaller, worth four times as much
 }
 
 // A point on a wingtip contrail. Trails are ring buffers of world points, drawn
@@ -74,6 +75,15 @@ pub struct World {
     afterburner: f64, // 0..1, drains while boosting and refills when you let off
     boostBlend: f64, // eased 0..1, drives every visual speed cue
     abLocked: bool, // true from the moment it empties until it is full again
+    // One-frame event flags, drained by the main loop to fire sounds. Keeps the
+    // simulation free of any dependency on audio.
+    evRing: bool,
+    evBonus: bool,
+    evRegion: bool,
+    evBoost: bool,
+    evMiss: bool,
+    missFlash: f64,
+    bestCombo: i64,
     theme: i64,
     prevTheme: i64,
     themeMix: f64, // 1 → fully the previous region, 0 → fully the new one
@@ -146,6 +156,13 @@ pub fn worldNew(): World {
         afterburner: 1.0,
         boostBlend: 0.0,
         abLocked: false,
+        evRing: false,
+        evBonus: false,
+        evRegion: false,
+        evBoost: false,
+        evMiss: false,
+        missFlash: 0.0,
+        bestCombo: 0,
         theme: 0,
         prevTheme: 0,
         themeMix: 0.0,
@@ -186,21 +203,37 @@ pub fn layRing(w: &mut World) {
     w.trailZ = nz
     let ground = heightAt(nx, nz)
     let ride = 90.0 + 60.0 * (0.5 + 0.5 * Math.sin(t * 0.13))
+    // Roughly one in four is a blue bonus hoop: tighter, and worth four times as
+    // much, so there is a reason to take the harder line.
+    let bonus = Random.range(0, 4) == 0
+    var rad = 62.0
+    if bonus {
+        rad = 40.0
+    }
     w.rings.push(Ring {
         x: nx,
         y: ground + ride,
         z: nz,
         face: heading,
-        r: 62.0,
+        r: rad,
         alive: true,
         pop: 0.0,
         side: 0.0 - 1.0,
+        bonus: bonus,
     }
     )
 }
 
 pub fn worldUpdate(w: &mut World, dt: f64, inRoll: f64, inPitch: f64, boost: bool) {
+    w.evRing = false
+    w.evBonus = false
+    w.evRegion = false
+    w.evBoost = false
+    w.evMiss = false
     w.time = w.time + dt
+    if w.missFlash > 0.0 {
+        w.missFlash = w.missFlash - dt * 1.4
+    }
     if w.flash > 0.0 {
         w.flash = w.flash - dt * 1.8
     }
@@ -258,6 +291,9 @@ pub fn worldUpdate(w: &mut World, dt: f64, inRoll: f64, inPitch: f64, boost: boo
         if w.afterburner >= 1.0 {
             w.abLocked = false
         }
+    }
+    if burning && !w.boosting {
+        w.evBoost = true
     }
     w.boosting = burning
     // Every speed cue rides this one eased value, so they all arrive together.
@@ -346,7 +382,16 @@ fn updateRings(w: &mut World, dt: f64) {
         let bz = w.rings[i].z - w.plane.z
         if bx * Math.sin(w.plane.yaw) + bz * Math.cos(w.plane.yaw) < 0.0 - 420.0 {
             if w.rings[i].alive {
+                // Missed it. Breaking the streak has to be felt, or the streak
+                // means nothing — this is the whole tension of the mode.
                 toLay = toLay + 1
+                if w.combo > w.bestCombo {
+                    w.bestCombo = w.combo
+                }
+                if w.combo > 2 {
+                    w.evMiss = true
+                    w.missFlash = 1.0
+                }
                 w.combo = 0
             }
             drop = true
@@ -371,12 +416,24 @@ fn clearRing(w: &mut World, i: i64) {
     w.combo = w.combo + 1
     w.comboTimer = 6.0
     w.cleared = w.cleared + 1
-    w.score = w.score + 50 * Math.minI64(w.combo, 20)
+    if w.combo > w.bestCombo {
+        w.bestCombo = w.combo
+    }
+    var worth = 50
+    if w.rings[i].bonus {
+        worth = 200
+    }
+    w.score = w.score + worth * Math.minI64(w.combo, 20)
     if w.score > w.best {
         w.best = w.score
     }
     w.flash = Math.maxF64(w.flash, 0.45)
     w.shake = Math.maxF64(w.shake, 4.0)
+    if w.rings[i].bonus {
+        w.evBonus = true
+    } else {
+        w.evRing = true
+    }
     // A burst of sparks around the hoop, thrown outward in its plane and given
     // gravity, so the reward is something you fly through rather than a number.
     let nx = Math.sin(w.rings[i].face)
@@ -418,6 +475,7 @@ fn clearRing(w: &mut World, i: i64) {
         w.banner = 3.4
         w.flash = 1.0
         w.shake = 9.0
+        w.evRegion = true
     }
 }
 

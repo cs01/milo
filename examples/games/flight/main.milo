@@ -31,6 +31,9 @@ from "./gfx" import {
 from "./gfx3d" import {
     Scene, sceneNew
 }
+from "./sound" import {
+    Sound, soundNew, playRing, playRingBonus, playRegion, playBoost, playMiss
+}
 from "./textures" import {
     groundTexture, planeTexture
 }
@@ -74,6 +77,7 @@ pub fn main(): i32 {
     var w = worldNew()
     let groundTex = groundTexture()
     let skinTex = planeTexture()
+    let snd = soundNew()
     var inp = inputNew()
     var ev: [u8; 64] = [0; 64]
     var last = SDL_GetTicks()
@@ -102,6 +106,21 @@ pub fn main(): i32 {
             fpsShown = ((fpsFrames as f64) / fpsAccum) as i64
             fpsAccum = 0.0
             fpsFrames = 0
+        }
+        if w.evRing {
+            playRing(snd)
+        }
+        if w.evBonus {
+            playRingBonus(snd)
+        }
+        if w.evRegion {
+            playRegion(snd)
+        }
+        if w.evBoost {
+            playBoost(snd)
+        }
+        if w.evMiss {
+            playMiss(snd)
         }
         drawSpeedLines(c, w)
         drawGuide(c, w, s)

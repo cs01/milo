@@ -52,7 +52,31 @@ Everything renders on the CPU into the same HDR float canvas the 2D games use; S
 only blits the finished frame. **1280×720 at ~50 fps**, around 1,200 triangles a
 frame after culling.
 
+## Sound
+
+`sound.milo` opens an SDL audio device and pushes generated PCM at it — no assets,
+no callback thread. Every sound is a decaying sine with optional pitch slide, built
+once at startup: a two-note chime for a ring, a brighter three-note one for a blue
+bonus hoop, a rising fanfare when the country changes, filtered noise for the
+afterburner, and a falling minor third when a streak breaks.
+
+The simulation never mentions audio. It sets one-frame event flags (`evRing`,
+`evRegion`, `evMiss`) and the main loop turns those into sounds, so the game logic
+stays testable headless.
+
 ## Two things worth pointing at
+
+**Vertices are a struct, not 25 loose parameters.** The textured rasteriser
+originally took position, UV and light as separate `f64` arguments — 25 of them —
+and transposing two was a mistake made three separate times while writing this
+file. `Vtx` costs nothing at runtime and makes it unrepresentable. A map keyed by
+name would fix it too, and would put a hash lookup in the innermost loop of the
+program.
+
+**Smooth shading is why it stopped looking like squares.** Normals are sampled per
+terrain corner by central difference and the light term is interpolated across each
+triangle, so a curved hill reads as curved at the same triangle count. Flat shading
+was the whole reason the ground looked tiled.
 
 **Front-to-back drawing.** Terrain quads are visited in rings outward from the
 camera tile rather than in row order. Near ground covers the screen several times

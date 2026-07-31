@@ -16,6 +16,9 @@ from "./gfx" import {
 from "./gfx3d" import {
     Scene, sceneNew
 }
+from "./sound" import {
+    Sound, soundNew, playRing, playRingBonus, playRegion, playBoost, playMiss
+}
 from "./textures" import {
     groundTexture, planeTexture
 }
@@ -81,6 +84,7 @@ pub fn main(): i32 {
     var w = worldNew()
     let groundTex = groundTexture()
     let skinTex = planeTexture()
+    let snd = soundNew()
     let dt = 1.0 / 60.0
     var renderMs: i64 = 0
     var rendered: i64 = 0
@@ -130,6 +134,21 @@ pub fn main(): i32 {
         if want {
             let t0 = epochMillis()
             drawWorld(c, s, w, groundTex, skinTex)
+            if w.evRing {
+                playRing(snd)
+            }
+            if w.evBonus {
+                playRingBonus(snd)
+            }
+            if w.evRegion {
+                playRegion(snd)
+            }
+            if w.evBoost {
+                playBoost(snd)
+            }
+            if w.evMiss {
+                playMiss(snd)
+            }
             drawSpeedLines(c, w)
             drawGuide(c, w, s)
             drawHud(c, w, s, 60)

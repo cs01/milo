@@ -297,6 +297,16 @@ fn clipEdge(px: &mut Vec<f64>, py: &mut Vec<f64>, pz: &mut Vec<f64>, a: &Vec3, b
     }
 }
 
+// Compatibility wrappers over the struct-based path, so call sites that pass
+// loose coordinates keep working.
+pub fn triangleTex(c: &mut Canvas, s: &mut Scene, view: &View, t: &Texture, wax: f64, way: f64, waz: f64, au: f64, av: f64, wbx: f64, wby: f64, wbz: f64, bu: f64, bv: f64, wcx: f64, wcy: f64, wcz: f64, cu: f64, cv: f64, tr: f64, tg: f64, tb: f64) {
+    triangleV(c, s, view, t, vtx(wax, way, waz, au, av, 1.0), vtx(wbx, wby, wbz, bu, bv, 1.0), vtx(wcx, wcy, wcz, cu, cv, 1.0), tr, tg, tb)
+}
+
+pub fn triangleTexLit(c: &mut Canvas, s: &mut Scene, view: &View, t: &Texture, wax: f64, way: f64, waz: f64, au: f64, av: f64, asr: f64, wbx: f64, wby: f64, wbz: f64, bu: f64, bv: f64, bsr: f64, wcx: f64, wcy: f64, wcz: f64, cu: f64, cv: f64, csr: f64, tr: f64, tg: f64, tb: f64) {
+    triangleV(c, s, view, t, vtx(wax, way, waz, au, av, asr), vtx(wbx, wby, wbz, bu, bv, bsr), vtx(wcx, wcy, wcz, cu, cv, csr), tr, tg, tb)
+}
+
 // Lambert term for a triangle whose world-space normal is (nx,ny,nz).
 pub fn shade(s: &Scene, nx: f64, ny: f64, nz: f64, ambient: f64): f64 {
     var d = nx * s.sunX + ny * s.sunY + nz * s.sunZ
@@ -340,16 +350,41 @@ pub fn texSet(t: &mut Texture, x: i64, y: i64, r: f64, g: f64, b: f64) {
 // interpolating u/z and v/z alongside 1/z and dividing per pixel — which is what
 // "perspective-correct" means: interpolating u,v directly in screen space slides
 // the texture around as the surface tilts away.
-fn rasterCamTex(c: &mut Canvas, s: &mut Scene, v: &View, t: &Texture, ax: f64, ay: f64, az: f64, au: f64, av: f64, bx: f64, by: f64, bz: f64, bu: f64, bv: f64, cx2: f64, cy2: f64, cz2: f64, cu: f64, cv: f64, tr: f64, tg: f64, tb: f64) {
-    let iaz = 1.0 / az
-    let ibz = 1.0 / bz
-    let icz = 1.0 / cz2
-    let x0 = v.cx + ax * v.scale * iaz
-    let y0 = v.cy - ay * v.scale * iaz
-    let x1 = v.cx + bx * v.scale * ibz
-    let y1 = v.cy - by * v.scale * ibz
-    let x2 = v.cx + cx2 * v.scale * icz
-    let y2 = v.cy - cy2 * v.scale * icz
+// A vertex: position, texture coordinate, and its own light term. Passing these
+// as 25 loose f64 parameters was a standing invitation to transpose two of them —
+// which happened three times while this file was being written. A struct costs
+// nothing at runtime (same registers, no indirection) and makes the mistake
+// unrepresentable. A map keyed by name would also fix it, and would put a hash
+// lookup in the innermost loop of the program.
+pub struct Vtx {
+    x: f64,
+    y: f64,
+    z: f64,
+    u: f64,
+    v: f64,
+    light: f64,
+}
+
+pub fn vtx(x: f64, y: f64, z: f64, u: f64, v: f64, light: f64): Vtx {
+    return Vtx {
+        x: x, y: y, z: z, u: u, v: v, light: light
+    }
+}
+
+// Perspective-correct textured triangle in CAMERA space. u/z, v/z and the light
+// term interpolate linearly in screen space; dividing by the interpolated 1/z at
+// each pixel recovers the true value. That division is what "perspective-correct"
+// buys — interpolating u,v directly makes the texture slide as a surface tilts.
+fn rasterCamTex(c: &mut Canvas, s: &mut Scene, view: &View, t: &Texture, a: &Vtx, b: &Vtx, d: &Vtx, tr: f64, tg: f64, tb: f64) {
+    let iaz = 1.0 / a.z
+    let ibz = 1.0 / b.z
+    let icz = 1.0 / d.z
+    let x0 = view.cx + a.x * view.scale * iaz
+    let y0 = view.cy - a.y * view.scale * iaz
+    let x1 = view.cx + b.x * view.scale * ibz
+    let y1 = view.cy - b.y * view.scale * ibz
+    let x2 = view.cx + d.x * view.scale * icz
+    let y2 = view.cy - d.y * view.scale * icz
 
     let area = (x1 - x0) * (y2 - y0) - (x2 - x0) * (y1 - y0)
     if area <= 0.0 {
@@ -376,13 +411,12 @@ fn rasterCamTex(c: &mut Canvas, s: &mut Scene, v: &View, t: &Texture, ax: f64, a
     }
     s.tris = s.tris + 1
     let invArea = 1.0 / area
-    // u,v carried divided by z, so they interpolate linearly in screen space
-    let au2 = au * iaz
-    let av2 = av * iaz
-    let bu2 = bu * ibz
-    let bv2 = bv * ibz
-    let cu2 = cu * icz
-    let cv2 = cv * icz
+    let au = a.u * iaz
+    let av = a.v * iaz
+    let bu = b.u * ibz
+    let bv = b.v * ibz
+    let du = d.u * icz
+    let dv = d.v * icz
 
     var py = minY
     while py < maxY {
@@ -413,12 +447,13 @@ fn rasterCamTex(c: &mut Canvas, s: &mut Scene, v: &View, t: &Texture, ax: f64, a
             if (s.zbuf[idx] as f64) < invZ {
                 s.zbuf[idx] = invZ as f32
                 let zz = 1.0 / invZ
-                let uu = (l0 * au2 + l1 * bu2 + l2 * cu2) * zz
-                let vv = (l0 * av2 + l1 * bv2 + l2 * cv2) * zz
-                var tx2 = (uu * (t.w as f64)) as i64
-                var ty2 = (vv * (t.h as f64)) as i64
-                tx2 = tx2 & t.mask
-                ty2 = ty2 & t.mask
+                let uu = (l0 * au + l1 * bu + l2 * du) * zz
+                let vv = (l0 * av + l1 * bv + l2 * dv) * zz
+                // Smooth shading: the light term is per vertex and interpolated,
+                // so a curved surface stops looking like a stack of flat facets.
+                let sh = l0 * a.light + l1 * b.light + l2 * d.light
+                var tx2 = ((uu * (t.w as f64)) as i64) & t.mask
+                var ty2 = ((vv * (t.h as f64)) as i64) & t.mask
                 if tx2 < 0 {
                     tx2 = 0
                 }
@@ -434,9 +469,9 @@ fn rasterCamTex(c: &mut Canvas, s: &mut Scene, v: &View, t: &Texture, ax: f64, a
                     f = 1.0
                 }
                 let o = idx * 3
-                let rr = tr * (t.px[ti] as f64)
-                let gg = tg * (t.px[ti + 1] as f64)
-                let bb = tb * (t.px[ti + 2] as f64)
+                let rr = tr * sh * (t.px[ti] as f64)
+                let gg = tg * sh * (t.px[ti + 1] as f64)
+                let bb = tb * sh * (t.px[ti + 2] as f64)
                 c.hdr[o] = (rr * (1.0 - f) + s.fogR * f) as f32
                 c.hdr[o + 1] = (gg * (1.0 - f) + s.fogG * f) as f32
                 c.hdr[o + 2] = (bb * (1.0 - f) + s.fogB * f) as f32
@@ -447,52 +482,86 @@ fn rasterCamTex(c: &mut Canvas, s: &mut Scene, v: &View, t: &Texture, ax: f64, a
     }
 }
 
-// World-space textured triangle, near-clipped like the flat one. UVs are carried
-// through the clip by the same parameter as the position.
-pub fn triangleTex(c: &mut Canvas, s: &mut Scene, v: &View, t: &Texture, wax: f64, way: f64, waz: f64, au: f64, av: f64, wbx: f64, wby: f64, wbz: f64, bu: f64, bv: f64, wcx: f64, wcy: f64, wcz: f64, cu: f64, cv: f64, tr: f64, tg: f64, tb: f64) {
-    let a = toCamera(v, wax, way, waz)
-    let bb = toCamera(v, wbx, wby, wbz)
-    let cc = toCamera(v, wcx, wcy, wcz)
-    if a.z > NEAR && bb.z > NEAR && cc.z > NEAR {
-        rasterCamTex(c, s, v, t, a.x, a.y, a.z, au, av, bb.x, bb.y, bb.z, bu, bv, cc.x, cc.y, cc.z, cu, cv, tr, tg, tb)
+// World-space textured triangle, near-clipped. The clip carries every vertex
+// attribute by the same parameter, which a struct makes automatic.
+pub fn triangleV(c: &mut Canvas, s: &mut Scene, view: &View, t: &Texture, wa: &Vtx, wb: &Vtx, wd: &Vtx, tr: f64, tg: f64, tb: f64) {
+    let ca = toCamera(view, wa.x, wa.y, wa.z)
+    let cb = toCamera(view, wb.x, wb.y, wb.z)
+    let cd = toCamera(view, wd.x, wd.y, wd.z)
+    let a = vtx(ca.x, ca.y, ca.z, wa.u, wa.v, wa.light)
+    let b = vtx(cb.x, cb.y, cb.z, wb.u, wb.v, wb.light)
+    let d = vtx(cd.x, cd.y, cd.z, wd.u, wd.v, wd.light)
+    if a.z > NEAR && b.z > NEAR && d.z > NEAR {
+        rasterCamTex(c, s, view, t, a, b, d, tr, tg, tb)
         return
     }
-    if a.z <= NEAR && bb.z <= NEAR && cc.z <= NEAR {
+    if a.z <= NEAR && b.z <= NEAR && d.z <= NEAR {
         return
     }
-    // clip, carrying uv
-    var px: Vec<f64> = Vec.new()
-    var py: Vec<f64> = Vec.new()
-    var pz: Vec<f64> = Vec.new()
-    var pu: Vec<f64> = Vec.new()
-    var pv: Vec<f64> = Vec.new()
-    clipEdgeUV(px, py, pz, pu, pv, a, au, av, bb, bu, bv)
-    clipEdgeUV(px, py, pz, pu, pv, bb, bu, bv, cc, cu, cv)
-    clipEdgeUV(px, py, pz, pu, pv, cc, cu, cv, a, au, av)
-    if px.len < 3 {
+    var poly: Vec<Vtx> = Vec.new()
+    clipV(poly, a, b)
+    clipV(poly, b, d)
+    clipV(poly, d, a)
+    if poly.len < 3 {
         return
     }
-    for i in 1..px.len - 1 {
-        rasterCamTex(c, s, v, t, px[0], py[0], pz[0], pu[0], pv[0], px[i], py[i], pz[i], pu[i], pv[i], px[i + 1], py[i + 1], pz[i + 1], pu[i + 1], pv[i + 1], tr, tg, tb)
+    for i in 1..poly.len - 1 {
+        rasterCamTex(c, s, view, t, poly[0], poly[i], poly[i + 1], tr, tg, tb)
     }
 }
 
-fn clipEdgeUV(px: &mut Vec<f64>, py: &mut Vec<f64>, pz: &mut Vec<f64>, pu: &mut Vec<f64>, pv: &mut Vec<f64>, a: &Vec3, au: f64, av: f64, b: &Vec3, bu: f64, bv: f64) {
+fn clipV(out: &mut Vec<Vtx>, a: &Vtx, b: &Vtx) {
     let ina = a.z > NEAR
     let inb = b.z > NEAR
     if ina {
-        px.push(a.x)
-        py.push(a.y)
-        pz.push(a.z)
-        pu.push(au)
-        pv.push(av)
+        out.push(vtx(a.x, a.y, a.z, a.u, a.v, a.light))
     }
     if ina != inb {
         let t = (NEAR - a.z) / (b.z - a.z)
-        px.push(a.x + (b.x - a.x) * t)
-        py.push(a.y + (b.y - a.y) * t)
-        pz.push(NEAR)
-        pu.push(au + (bu - au) * t)
-        pv.push(av + (bv - av) * t)
+        out.push(vtx(a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t, NEAR, a.u + (b.u - a.u) * t, a.v + (b.v - a.v) * t, a.light + (b.light - a.light) * t))
     }
 }
+
+// Lambert term for a triangle whose world-space normal is (nx,ny,nz).
+pub fn shade(s: &Scene, nx: f64, ny: f64, nz: f64, ambient: f64): f64 {
+    var d = nx * s.sunX + ny * s.sunY + nz * s.sunZ
+    if d < 0.0 {
+        d = 0.0
+    }
+    return ambient + (1.0 - ambient) * d
+}
+
+// ── textures ──────────────────────────────────────────────────────────────────
+//
+// Power-of-two RGB textures sampled with wrap, generated procedurally at startup
+// — there is no asset pipeline here, and none is needed for surface detail.
+
+pub struct Texture {
+    w: i64,
+    h: i64,
+    mask: i64, // w-1, w is a power of two
+    shift: i64, // log2(w), for the row stride
+    px: Vec<f32>, // 3 floats per texel
+}
+
+pub fn texNew(size: i64, shift: i64): Texture {
+    return Texture {
+        w: size,
+        h: size,
+        mask: size - 1,
+        shift: shift,
+        px: Vec.filled(size * size * 3, 0.0),
+    }
+}
+
+pub fn texSet(t: &mut Texture, x: i64, y: i64, r: f64, g: f64, b: f64) {
+    let i = ((y << t.shift) + x) * 3
+    t.px[i] = r as f32
+    t.px[i + 1] = g as f32
+    t.px[i + 2] = b as f32
+}
+
+// Perspective-correct textured triangle. The extra work over the flat path is
+// interpolating u/z and v/z alongside 1/z and dividing per pixel — which is what
+// "perspective-correct" means: interpolating u,v directly in screen space slides
+// the texture around as the surface tilts away.

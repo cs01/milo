@@ -22,10 +22,10 @@ kept as a Milo regression fixture. `unsafe` and FFI are trust boundaries in both
 
 The two Rust-ahead rows are the same trade: no lifetimes, so a view can't be tied
 to the buffer it points into — own the buffer and carry an offset instead. That
-cost lands on long-lived borrows into a stable buffer, which is where `'a` earns
-its keep. It does not land on cyclic data: a lifetime can't describe a cycle
-either, so Rust reaches for the same generational handles there, which is why
-that row is even. See [Ownership](/language/ownership) and
+cost lands on one shape only — an acyclic borrow into stable storage, which is
+exactly what `'a` exists for. It does not land on cyclic data: a lifetime cannot
+describe a cycle either, so Rust reaches for the same generational handles
+there, which is why that row is even. See [Ownership](/language/ownership) and
 [Patterns Without Lifetimes](/language/patterns) for what to write instead.
 
 Milo's prover decides linear integer arithmetic; bitwise operations, collection

@@ -1,0 +1,38 @@
+// A view freezes the field it points into, not the whole object. `items()` returns a
+// view of `self.a`, so `b` stays writable while it is live — the freeze used to be
+// per-variable, which made any container with two collections unusable behind a view.
+// Mutating the *viewed* field is still rejected (errors/viewSameFieldFrozen.milo).
+struct Two {
+    a: Vec<i64>,
+    b: Vec<i64>
+}
+
+impl Two {
+    fn items(self: &Self): &[i64] {
+        return self.a[0..self.a.len]
+    }
+}
+
+pub fn main(): i32 {
+    var t = Two {
+        a: Vec.new(),
+        b: Vec.new()
+    }
+    t.a.push(1)
+
+    let v = t.items()
+    t.b.push(9)
+    // @expect: 1
+    print(v[0])
+    // @expect: 9
+    print(t.b[0])
+
+    // direct field slices carry the same precision
+    let w = t.a[0..1]
+    t.b.push(10)
+    // @expect: 1
+    print(w[0])
+    // @expect: 2
+    print(t.b.len)
+    return 0
+}

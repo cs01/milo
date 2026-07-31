@@ -23,6 +23,12 @@ export interface VarInfo {
   // Released (borrowed=false) when the binding's scope pops, so a slice in an
   // inner block doesn't freeze its source for the rest of the function.
   freezes?: VarInfo[];
+  // Which places inside this variable the live borrows point into, as field chains off
+  // the root (`["a"]` for a view of `x.a`, `[]` for the whole variable). A `null` entry
+  // means the borrow's path could not be determined and the whole variable is frozen.
+  // Absent while `borrowed` is true is read the same as `[null]`. Only mutations whose
+  // own path overlaps a frozen one are rejected, so a view of `x.a` leaves `x.b` writable.
+  borrowedPaths?: (string[] | null)[];
   // An unannotated `let x = <const-int-value>` whose width is still adaptable:
   // its value is built entirely from integer literals (directly, or as the arm
   // tails of an if/match expression), so it can be re-typed to a wider int on
@@ -1004,7 +1010,7 @@ export class TypeChecker {
     const scope = this.scopes.pop();
     if (scope) {
       for (const [, vi] of scope) {
-        if (vi.freezes) for (const src of vi.freezes) src.borrowed = false;
+        if (vi.freezes) for (const src of vi.freezes) this.unfreeze(src);
       }
     }
   }
@@ -1028,6 +1034,37 @@ export class TypeChecker {
     // colliding. Everything else still gets the shadowing error.
     if (name !== "_" && scope.has(name)) { this.error(`variable '${name}' already declared in this scope`); return; }
     scope.set(name, info);
+  }
+
+  // Freeze `info` for a borrow of `place`. The path is recorded so a later mutation of a
+  // provably different field isn't rejected; pass null when the borrowed place is unknown.
+  private freeze(info: VarInfo, place: Expr | null) {
+    info.borrowed = true;
+    const path = place ? this.accessPath(place) : null;
+    (info.borrowedPaths ??= []).push(path ? path.fields : null);
+  }
+
+  private unfreeze(info: VarInfo) {
+    info.borrowed = false;
+    info.borrowedPaths = undefined;
+  }
+
+  // Whether a mutation of `target` collides with a live borrow of `info`. Two chains off
+  // one root can alias only when neither diverges from the other at a named field; an
+  // unknown path on either side (an index or deref step) is treated as a collision.
+  private frozenAgainst(info: VarInfo, target: Expr | null): boolean {
+    if (!info.borrowed) return false;
+    const paths = info.borrowedPaths;
+    if (!paths || paths.length === 0) return true;
+    const mut = target ? this.accessPath(target) : null;
+    const mutFields = mut ? mut.fields : null;
+    if (mutFields === null) return true;
+    return paths.some(p => {
+      if (p === null) return true;
+      const n = Math.min(p.length, mutFields.length);
+      for (let i = 0; i < n; i++) if (p[i] !== mutFields[i]) return false;
+      return true;
+    });
   }
 
   private lookup(name: string): VarInfo | null {
@@ -1391,6 +1428,12 @@ export class TypeChecker {
     for (const impl of [...program.impls, ...derivedImpls]) {
       this.registerImpl(impl, program, implFnsToCheck);
     }
+    // Record which field of the receiver each view-returning method points into, before
+    // any body is checked — a call site freezes the receiver, and without this it has to
+    // freeze the whole object, so a view of `self.a` would block writes to `self.b`.
+    // Done as a pre-pass rather than during checkFunction so the answer does not depend
+    // on whether the method happens to be checked before its first call site.
+    for (const fn of implFnsToCheck) this.recordViewProvenance(fn);
 
     // type-check module-level globals — push a module scope so declare() works
     this.pushScope();
@@ -2403,7 +2446,7 @@ export class TypeChecker {
   // receiver has to be frozen the same way. The let/for-in paths already transfer any
   // freeze taken while checking the RHS onto the binding (VarInfo.freezes), released when
   // its scope pops — this only has to mark the root.
-  private freezeViewSource(obj: Expr, sp?: Span) {
+  private freezeViewSource(obj: Expr, sp?: Span, viewFields?: string[]) {
     let root = obj;
     while (root.kind === "FieldAccess" || root.kind === "IndexAccess") root = root.object;
     if (root.kind !== "Ident") {
@@ -2415,13 +2458,49 @@ export class TypeChecker {
       return;
     }
     const info = this.lookup(root.name);
-    if (info) info.borrowed = true;
+    if (info) {
+      // freeze the receiver path extended by the field the method views, so a view of
+      // `r.items()` that returns `self.data[..]` blocks writes to `r.data` and nothing else
+      const base = this.accessPath(obj);
+      const path = base && base.fields && viewFields ? [...base.fields, ...viewFields] : null;
+      info.borrowed = true;
+      (info.borrowedPaths ??= []).push(path);
+    }
     this.borrowedExprs.add(obj);
   }
 
   // The call site freezes the receiver and nothing else, so a returned view must point
   // into storage reachable from `self`. A view of a method-local dies at the return; a
   // view of another `&` param outlives a freeze that was never taken for it.
+  // The receiver field chain a view-returning method's result points into: `["a"]` for
+  // `return self.a[0..n]`, `[]` when the view is of the whole receiver. Absent means
+  // "unknown" and the call site falls back to freezing the entire receiver — which is
+  // what happens for a return nested inside control flow, or several returns disagreeing.
+  private viewReturnFields = new Map<string, string[]>();
+
+  private recordViewProvenance(fn: Function) {
+    const ret = fn.retType ? this.resolve(fn.retType) : null;
+    if (!ret || !this.isViewReturn(ret) || !this.hasSelfReceiver(fn)) return;
+    // Walks the AST directly rather than through accessSteps: this runs before any body
+    // is checked, so expression types aren't known yet and a `.slice(a, b)` call can't be
+    // recognized as a view by its type.
+    const chain = (e: Expr): string[] | null => {
+      if (e.kind === "Ident") return e.name === "self" ? [] : null;
+      if (e.kind === "FieldAccess") { const b = chain(e.object); return b && [...b, e.field]; }
+      if (e.kind === "IndexAccess" || e.kind === "MethodCall") return chain(e.object);
+      return null;
+    };
+    let fields: string[] | null = null;
+    for (const stmt of fn.body ?? []) {
+      if (stmt.kind !== "Return" || !stmt.value) continue;
+      const named = chain(stmt.value);
+      if (!named) return;
+      if (fields !== null && (fields.length !== named.length || fields.some((f, i) => f !== named[i]))) return;
+      fields = named;
+    }
+    if (fields !== null) this.viewReturnFields.set(fn.name, fields);
+  }
+
   private checkViewProvenance(value: Expr, sp?: Span) {
     let root = value;
     while (root.kind === "FieldAccess" || root.kind === "IndexAccess" || root.kind === "MethodCall") {
@@ -2553,7 +2632,7 @@ export class TypeChecker {
         const newlyFrozen: VarInfo[] = [];
         for (const scope of this.scopes) for (const [, vi] of scope) if (vi.borrowed && !frozenBeforeRhs.has(vi)) newlyFrozen.push(vi);
         const bindingType = hint ?? valType;
-        if (bindingType.tag !== "ref") for (const vi of newlyFrozen) vi.borrowed = false;
+        if (bindingType.tag !== "ref") for (const vi of newlyFrozen) this.unfreeze(vi);
         this.declare(stmt.name, { type: bindingType, mutable: false, moved: false, borrowed: false, read: false, span: sp, ...(bindingType.tag === "ref" && newlyFrozen.length > 0 && { freezes: newlyFrozen }) });
         // An unannotated `let x = <const-int-value>` stays width-adaptable until
         // its first use (see VarInfo.flexInt): its default i32 can widen to an
@@ -2610,7 +2689,7 @@ export class TypeChecker {
           const newlyFrozen: VarInfo[] = [];
           for (const scope of this.scopes) for (const [, vi] of scope) if (vi.borrowed && !frozenBeforeRhs.has(vi)) newlyFrozen.push(vi);
           const bindingType = hint ?? valType;
-          if (bindingType.tag !== "ref") for (const vi of newlyFrozen) vi.borrowed = false;
+          if (bindingType.tag !== "ref") for (const vi of newlyFrozen) this.unfreeze(vi);
           this.declare(stmt.name, { type: bindingType, mutable: true, moved: false, borrowed: false, read: false, span: sp, ...(bindingType.tag === "ref" && newlyFrozen.length > 0 && { freezes: newlyFrozen }) });
           if (bindingType.tag === "array") this.lintStackArray(stmt.name, bindingType, sp);
         }
@@ -2639,7 +2718,7 @@ export class TypeChecker {
         if (assignPath && !assignPath.steps.some((s) => s === "[]" || s === "*")) {
           const info = this.lookup(assignPath.root);
           const isCapturedMutation = this.closureScopeDepth !== null && this.currentClosureCaptures?.has(assignPath.root);
-          if (info?.borrowed && !isCapturedMutation) {
+          if (info && !isCapturedMutation && this.frozenAgainst(info, stmt.target)) {
             const place = this.describeExpr(stmt.target);
             const why = place === assignPath.root ? "it is borrowed" : `'${assignPath.root}' is borrowed`;
             this.error(`cannot assign to '${place}' because ${why}`, sp,
@@ -2663,7 +2742,7 @@ export class TypeChecker {
             this.error(`type mismatch: cannot assign ${typeName(valType)} to ${typeName(targetInfo.type)}`, sp);
           }
         }
-        for (const scope of this.scopes) for (const [, vi] of scope) if (vi.borrowed && !frozenBeforeRhs.has(vi)) vi.borrowed = false;
+        for (const scope of this.scopes) for (const [, vi] of scope) if (vi.borrowed && !frozenBeforeRhs.has(vi)) this.unfreeze(vi);
         if (targetInfo.type.tag === "int") this.enforceRangeInto(stmt.value, valType, targetInfo.type, sp);
         if (stmt.target.kind === "Ident") {
           const info = this.lookup(stmt.target.name);
@@ -2818,7 +2897,7 @@ export class TypeChecker {
             let vecBorrowInfo: import("./checker").VarInfo | null = null;
             if (stmt.iterable.kind === "Ident") {
               const info = this.lookup(stmt.iterable.name);
-              if (info) { vecBorrowInfo = info; info.borrowed = true; }
+              if (info) { vecBorrowInfo = info; this.freeze(info, stmt.iterable); }
             }
             const preMoves = this.snapshotMoveState();
             this.returnOnlyMovesStack.push(new Set());
@@ -2836,7 +2915,7 @@ export class TypeChecker {
             for (const s of stmt.body) this.checkStmt(s, fnRetType);
             this.loopDepth--;
             this.popScope();
-            if (vecBorrowInfo) vecBorrowInfo.borrowed = false;
+            if (vecBorrowInfo) this.unfreeze(vecBorrowInfo);
             const returnMoves = this.returnOnlyMovesStack.pop()!;
             for (const scope of this.scopes) {
               for (const [name, info] of scope) {
@@ -2879,7 +2958,7 @@ export class TypeChecker {
             let mapBorrowInfo: import("./checker").VarInfo | null = null;
             if (stmt.iterable.kind === "Ident") {
               const info = this.lookup(stmt.iterable.name);
-              if (info) { mapBorrowInfo = info; info.borrowed = true; }
+              if (info) { mapBorrowInfo = info; this.freeze(info, stmt.iterable); }
             }
             const preMoves = this.snapshotMoveState();
             this.returnOnlyMovesStack.push(new Set());
@@ -2893,7 +2972,7 @@ export class TypeChecker {
             for (const s of stmt.body) this.checkStmt(s, fnRetType);
             this.loopDepth--;
             this.popScope();
-            if (mapBorrowInfo) mapBorrowInfo.borrowed = false;
+            if (mapBorrowInfo) this.unfreeze(mapBorrowInfo);
             const returnMoves4 = this.returnOnlyMovesStack.pop()!;
             for (const scope of this.scopes) {
               for (const [name, info] of scope) {
@@ -2908,7 +2987,7 @@ export class TypeChecker {
             let arrBorrowInfo: import("./checker").VarInfo | null = null;
             if (stmt.iterable.kind === "Ident") {
               const info = this.lookup(stmt.iterable.name);
-              if (info) { arrBorrowInfo = info; info.borrowed = true; }
+              if (info) { arrBorrowInfo = info; this.freeze(info, stmt.iterable); }
             }
             const preMoves = this.snapshotMoveState();
             this.returnOnlyMovesStack.push(new Set());
@@ -2925,7 +3004,7 @@ export class TypeChecker {
             for (const s of stmt.body) this.checkStmt(s, fnRetType);
             this.loopDepth--;
             this.popScope();
-            if (arrBorrowInfo) arrBorrowInfo.borrowed = false;
+            if (arrBorrowInfo) this.unfreeze(arrBorrowInfo);
             const returnMoves5 = this.returnOnlyMovesStack.pop()!;
             for (const scope of this.scopes) {
               for (const [name, info] of scope) {
@@ -2946,7 +3025,7 @@ export class TypeChecker {
             if (!resolved && !this.structs.has(iterType.name) && !this.enums.has(iterType.name)) {
               if (stmt.iterable.kind === "Ident") {
                 const info = this.lookup(stmt.iterable.name);
-                if (info) info.borrowed = true;
+                if (info) this.freeze(info, stmt.iterable);
               }
               this.pushScope();
               this.declare(stmt.varName, { type: { tag: "unknown" }, mutable: false, moved: false, borrowed: false, read: false });
@@ -2980,7 +3059,7 @@ export class TypeChecker {
                   if (info && !info.mutable) {
                     this.error(`cannot iterate: '${stmt.iterable.name}' must be 'var' (iterator mutates via next())`, sp);
                   }
-                  if (info) info.borrowed = true;
+                  if (info) this.freeze(info, stmt.iterable);
                 }
                 if (stmt.varName2) {
                   this.error("iterator for loop takes one binding, not two", sp);
@@ -3025,7 +3104,7 @@ export class TypeChecker {
         const frozenBefore = new Set<VarInfo>();
         for (const scope of this.scopes) for (const [, vi] of scope) if (vi.borrowed) frozenBefore.add(vi);
         const exprType = this.checkExpr(stmt.expr);
-        for (const scope of this.scopes) for (const [, vi] of scope) if (vi.borrowed && !frozenBefore.has(vi)) vi.borrowed = false;
+        for (const scope of this.scopes) for (const [, vi] of scope) if (vi.borrowed && !frozenBefore.has(vi)) this.unfreeze(vi);
         if (exprType.tag === "enum") {
           const enumInfo = this.enums.get(exprType.name);
           const base = enumInfo?.baseName;
@@ -3367,7 +3446,7 @@ export class TypeChecker {
           const info = this.lookup(cap.name);
           if (info) {
             info.moved = true;
-            info.borrowed = false;
+            this.unfreeze(info);
           }
         }
       }
@@ -3768,7 +3847,7 @@ export class TypeChecker {
     while (e.kind === "FieldAccess" || e.kind === "IndexAccess") e = e.object;
     if (e.kind !== "Ident") return;
     const info = this.lookup(e.name);
-    if (info?.borrowed) {
+    if (info && this.frozenAgainst(info, obj)) {
       this.error(`cannot ${action} '${e.name}' because it is borrowed`, sp,
         `a slice or loop iteration over this variable is still live — mutating it could move memory the borrow points into`);
     }
@@ -3807,7 +3886,7 @@ export class TypeChecker {
     if (e.kind !== "Ident") return null;
     const info = this.lookup(e.name);
     if (!info || info.borrowed) return null;
-    info.borrowed = true;
+    this.freeze(info, obj);
     return info;
   }
 
@@ -5247,7 +5326,7 @@ export class TypeChecker {
                 this.error(`cannot capture '${cap.name}' in a closure`, expr.span,
                   `'${cap.name}' is a reference — a closure stores its captures, and a closure can outlive the storage this points into; capture an owned value (.clone() it) instead`);
               }
-              info.borrowed = true;
+              this.freeze(info, null);
               break;
             }
           }
@@ -5531,7 +5610,7 @@ export class TypeChecker {
           while (root.kind === "FieldAccess" || root.kind === "IndexAccess") root = root.object;
           if (root.kind === "Ident") {
             const info = this.lookup(root.name);
-            if (info) info.borrowed = true;
+            if (info) this.freeze(info, expr.object);
           }
           this.borrowedExprs.add(expr);
           return this.setType(expr, refSlice);
@@ -5605,7 +5684,7 @@ export class TypeChecker {
             const cbHint: TypeKind = { tag: "fn", params: [elemRef], ret: { tag: "unknown" } };
             const cbBorrow = this.borrowDuringCallback(expr.object);
             const cbType = this.checkExprWithHint(expr.args[0], cbHint);
-            if (cbBorrow) cbBorrow.borrowed = false;
+            if (cbBorrow) this.unfreeze(cbBorrow);
             if (cbType.tag !== "fn") { this.error(`'map' argument must be a function`, sp); return this.setType(expr, { tag: "unknown" }); }
             return this.setType(expr, { tag: "vec", element: cbType.ret });
           }
@@ -5615,7 +5694,7 @@ export class TypeChecker {
             const cbHint: TypeKind = { tag: "fn", params: [elemRef], ret: { tag: "bool" } };
             const cbBorrow = this.borrowDuringCallback(expr.object);
             const cbType = this.checkExprWithHint(expr.args[0], cbHint);
-            if (cbBorrow) cbBorrow.borrowed = false;
+            if (cbBorrow) this.unfreeze(cbBorrow);
             if (cbType.tag !== "fn") { this.error(`'filter' argument must be a function`, sp); return this.setType(expr, { tag: "unknown" }); }
             return this.setType(expr, { tag: "vec", element: objType.element });
           }
@@ -5625,7 +5704,7 @@ export class TypeChecker {
             const cbHint: TypeKind = { tag: "fn", params: [elemRef], ret: { tag: "void" } };
             const cbBorrow = this.borrowDuringCallback(expr.object);
             this.checkExprWithHint(expr.args[0], cbHint);
-            if (cbBorrow) cbBorrow.borrowed = false;
+            if (cbBorrow) this.unfreeze(cbBorrow);
             return this.setType(expr, { tag: "void" });
           }
           if (expr.method === "enumerate") {
@@ -5634,7 +5713,7 @@ export class TypeChecker {
             const cbHint: TypeKind = { tag: "fn", params: [{ tag: "int", bits: 64, signed: true }, elemRef], ret: { tag: "void" } };
             const cbBorrow = this.borrowDuringCallback(expr.object);
             this.checkExprWithHint(expr.args[0], cbHint);
-            if (cbBorrow) cbBorrow.borrowed = false;
+            if (cbBorrow) this.unfreeze(cbBorrow);
             return this.setType(expr, { tag: "void" });
           }
           if (expr.method === "find") {
@@ -5643,7 +5722,7 @@ export class TypeChecker {
             const cbHint: TypeKind = { tag: "fn", params: [elemRef], ret: { tag: "bool" } };
             const cbBorrow = this.borrowDuringCallback(expr.object);
             const cbType = this.checkExprWithHint(expr.args[0], cbHint);
-            if (cbBorrow) cbBorrow.borrowed = false;
+            if (cbBorrow) this.unfreeze(cbBorrow);
             if (cbType.tag !== "fn") { this.error(`'find' argument must be a function`, sp); return this.setType(expr, { tag: "unknown" }); }
             return this.setType(expr, this.resolveOptionForValue(objType.element, sp));
           }
@@ -5653,7 +5732,7 @@ export class TypeChecker {
             const cbHint: TypeKind = { tag: "fn", params: [elemRef], ret: { tag: "bool" } };
             const cbBorrow = this.borrowDuringCallback(expr.object);
             this.checkExprWithHint(expr.args[0], cbHint);
-            if (cbBorrow) cbBorrow.borrowed = false;
+            if (cbBorrow) this.unfreeze(cbBorrow);
             return this.setType(expr, { tag: "bool" });
           }
           if (expr.method === "all") {
@@ -5662,7 +5741,7 @@ export class TypeChecker {
             const cbHint: TypeKind = { tag: "fn", params: [elemRef], ret: { tag: "bool" } };
             const cbBorrow = this.borrowDuringCallback(expr.object);
             this.checkExprWithHint(expr.args[0], cbHint);
-            if (cbBorrow) cbBorrow.borrowed = false;
+            if (cbBorrow) this.unfreeze(cbBorrow);
             return this.setType(expr, { tag: "bool" });
           }
           if (expr.method === "join") {
@@ -5753,7 +5832,7 @@ export class TypeChecker {
             const cbHint: TypeKind = { tag: "fn", params: [elemRef, elemRef], ret: { tag: "int", bits: 32, signed: true } };
             const cbBorrow = this.borrowDuringCallback(expr.object);
             const cbType = this.checkExprWithHint(expr.args[0], cbHint);
-            if (cbBorrow) cbBorrow.borrowed = false;
+            if (cbBorrow) this.unfreeze(cbBorrow);
             if (cbType.tag !== "fn") { this.error(`'sortBy' argument must be a comparator function`, sp); }
             return this.setType(expr, { tag: "void" });
           }
@@ -5766,7 +5845,7 @@ export class TypeChecker {
             const cbHint: TypeKind = { tag: "fn", params: [elemRef], ret: { tag: "unknown" } };
             const cbBorrow = this.borrowDuringCallback(expr.object);
             const cbType = this.checkExprWithHint(expr.args[0], cbHint);
-            if (cbBorrow) cbBorrow.borrowed = false;
+            if (cbBorrow) this.unfreeze(cbBorrow);
             if (cbType.tag !== "fn") { this.error(`'sortByKey' argument must be a function`, sp); return this.setType(expr, { tag: "void" }); }
             const keyType = cbType.ret;
             if (keyType.tag !== "int" && keyType.tag !== "float" && keyType.tag !== "string" && keyType.tag !== "bool") {
@@ -5910,7 +5989,7 @@ export class TypeChecker {
             while (strRoot.kind === "FieldAccess" || strRoot.kind === "IndexAccess") strRoot = strRoot.object;
             if (strRoot.kind === "Ident") {
               const info = this.lookup(strRoot.name);
-              if (info) info.borrowed = true;
+              if (info) this.freeze(info, expr.object);
             }
             this.borrowedExprs.add(expr);
             return this.setType(expr, refStr);
@@ -6092,7 +6171,7 @@ export class TypeChecker {
             }
           }
           this.resolvedMethods.set(expr, mangled);
-          if (this.isViewReturn(sig.ret)) this.freezeViewSource(expr.object, sp);
+          if (this.isViewReturn(sig.ret)) this.freezeViewSource(expr.object, sp, this.viewReturnFields.get(mangled));
           return this.setType(expr, sig.ret);
         }
 

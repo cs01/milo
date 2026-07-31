@@ -1,0 +1,15 @@
+// the precise freeze still catches a write to the viewed field: pushing to `a` can
+// realloc the storage the returned view points into
+struct Two { a: Vec<i64>, b: Vec<i64> }
+impl Two {
+    fn items(self: &Self): &[i64] { return self.a[0..self.a.len] }
+}
+fn main(): i32 {
+    var t = Two { a: Vec.new(), b: Vec.new() }
+    t.a.push(1)
+    let v = t.items()
+    t.a.push(2)
+    print(v[0])
+    return 0
+}
+// @error: cannot call 'push' on 't' because it is borrowed

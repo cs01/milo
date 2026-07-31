@@ -112,6 +112,19 @@ export class Codegen {
   // hop all keep their check. Widening it to affine indices is docs/plans/
   // bounds-check-elision.md, and wants a range lattice rather than a pattern.
   private provenInRange: { loopVar: string; container: string }[] = [];
+
+  // Loop-invariant lengths, hoisted into the preheader.
+  //
+  // Every subscript reloads the container's length to check against. LLVM cannot
+  // hoist that load out of a loop on its own: a store to `v[i]` and a load of
+  // `v.len` are both reached through plain `ptr`s with no type information, so it
+  // has to assume the store might have clobbered the length. Nothing in safe Milo
+  // can — a length only moves through push/pop/clear or a whole-container
+  // assignment, all of which `loopBodyMutates` rejects. So when the body cannot
+  // resize a container, the length is loaded ONCE before the loop and every check
+  // inside compares against that value. The check still happens; it just stops
+  // paying for a memory round trip per element.
+  private hoistedLens: Map<string, string>[] = [];
   private globalVars = new Map<string, { type: string; typeKind: TypeKind }>();
   private userFnNames = new Set<string>();
   // Droppable locals are identified by their slot ADDRESS. A function can hold
@@ -1999,6 +2012,76 @@ export class Codegen {
     return lines;
   }
 
+  // Collect the containers a loop body subscripts, keyed by the shallow path name.
+  private indexedContainers(body: HIRStmt[]): Map<string, HIRExpr> {
+    const found = new Map<string, HIRExpr>();
+    const visitExpr = (e: HIRExpr) => {
+      this.walkExpr(e, (x) => {
+        if (x.kind !== "IndexAccess") return;
+        const vecType = x.object.type.tag === "ref" ? x.object.type.inner : x.object.type;
+        if (vecType.tag !== "vec") return;
+        const key = this.containerKey(x.object);
+        if (key !== null && !found.has(key)) found.set(key, x.object);
+      });
+    };
+    const walk = (stmts: HIRStmt[]) => {
+      for (const st of stmts) {
+        switch (st.kind) {
+          case "Let": visitExpr(st.value); break;
+          case "Assign": visitExpr(st.target); visitExpr(st.value); break;
+          case "ExprStmt": visitExpr(st.expr); break;
+          case "Return": if (st.value) visitExpr(st.value); break;
+          case "If": visitExpr(st.cond); walk(st.thenBody); if (st.elseBody) walk(st.elseBody); break;
+          case "While": visitExpr(st.cond); walk(st.body); break;
+          case "ForRange": visitExpr(st.start); visitExpr(st.end); walk(st.body); break;
+          case "UnsafeBlock": walk(st.body); break;
+          case "Match": visitExpr(st.subject); for (const arm of st.arms) walk(arm.body); break;
+          default: break;
+        }
+      }
+    };
+    walk(body);
+    return found;
+  }
+
+  // Emit the once-per-loop length loads. Returns true if a scope was pushed.
+  private pushHoistedLens(lines: string[], body: HIRStmt[]): boolean {
+    const scope = new Map<string, string>();
+    for (const [key, objExpr] of this.indexedContainers(body)) {
+      const root = this.rootOf(key);
+      // must already exist outside the loop, and must not be resizable inside it
+      if (!this.locals.has(root) && !this.globalVars.has(root)) continue;
+      if (this.globalVars.has(root)) continue;
+      if (this.loopBodyMutates(body, key)) continue;
+      try {
+        const [ptrLines, vecPtr] = this.genLValue(objExpr);
+        const lenPtr = this.nextTemp();
+        const len = this.nextTemp();
+        const len32 = this.nextTemp();
+        lines.push(...ptrLines);
+        lines.push(`  ${lenPtr} = getelementptr %Vec, ptr ${vecPtr}, i32 0, i32 1`);
+        lines.push(`  ${len} = load i64, ptr ${lenPtr}`);
+        lines.push(`  ${len32} = trunc i64 ${len} to i32`);
+        scope.set(key, len32);
+      } catch {
+        // an object shape genLValue cannot address: skip it, keep the per-access load
+      }
+    }
+    if (scope.size === 0) return false;
+    this.hoistedLens.push(scope);
+    return true;
+  }
+
+  private hoistedLenFor(expr: HIRExpr): string | null {
+    const key = this.containerKey(expr);
+    if (key === null) return null;
+    for (let i = this.hoistedLens.length - 1; i >= 0; i--) {
+      const v = this.hoistedLens[i].get(key);
+      if (v !== undefined) return v;
+    }
+    return null;
+  }
+
   // Returns true (and pushes a scope) when this loop proves its index in range.
   private pushProvenInRange(stmt: HIRStmt & { kind: "ForRange" }): boolean {
     if (!(stmt.start.kind === "IntLit" && Number(stmt.start.value) === 0)) return false;
@@ -2468,6 +2551,8 @@ export class Codegen {
     this.loopHeader = condLabel;
     this.loopExit = endLabel;
     this.loopDropStart = this.droppableLocals.length;
+    const lensPushed = this.pushHoistedLens(lines, stmt.body);
+
     lines.push(`  br label %${condLabel}`);
     lines.push(`${condLabel}:`);
     // invariant must hold before every condition eval: loop entry, each back-edge, and exit
@@ -2495,6 +2580,7 @@ export class Codegen {
       lines.push(`  br label %${condLabel}`);
     }
     lines.push(`${endLabel}:`);
+    if (lensPushed) this.hoistedLens.pop();
     this.loopHeader = prevHeader;
     this.loopExit = prevExit;
     this.loopDropStart = prevDropStart;
@@ -2541,6 +2627,8 @@ export class Codegen {
     this.loopExit = endLabel;
     this.loopDropStart = this.droppableLocals.length;
 
+    const lensPushed = this.pushHoistedLens(lines, stmt.body);
+
     lines.push(`  br label %${condLabel}`);
     lines.push(`${condLabel}:`);
     const cur = this.nextTemp();
@@ -2565,6 +2653,7 @@ export class Codegen {
       if (t) { bodyTerminated = true; break; }
     }
     if (provenPushed) this.provenInRange.pop();
+    if (lensPushed) this.hoistedLens.pop();
     if (!bodyTerminated) { this.emitScopeDrops(lines, this.loopDropStart); lines.push(`  br label %${incrLabel}`); }
 
     lines.push(`${incrLabel}:`);
@@ -7727,12 +7816,16 @@ export class Codegen {
     // in which case the length load goes too, which is most of the cost.
     if (!this.indexIsProven(expr)) {
       this.needsBoundsCheck = true;
-      const lenPtr = this.nextTemp();
-      lines.push(`  ${lenPtr} = getelementptr %Vec, ptr ${vecPtr}, i32 0, i32 1`);
-      const len = this.nextTemp();
-      lines.push(`  ${len} = load i64, ptr ${lenPtr}`);
-      const len32 = this.nextTemp();
-      lines.push(`  ${len32} = trunc i64 ${len} to i32`);
+      let len32 = this.hoistedLenFor(expr.object);
+      if (len32 === null) {
+        const lenPtr = this.nextTemp();
+        lines.push(`  ${lenPtr} = getelementptr %Vec, ptr ${vecPtr}, i32 0, i32 1`);
+        const len = this.nextTemp();
+        lines.push(`  ${len} = load i64, ptr ${lenPtr}`);
+        const t32 = this.nextTemp();
+        lines.push(`  ${t32} = trunc i64 ${len} to i32`);
+        len32 = t32;
+      }
       let idx32: string;
       if (idxTy === "i64") {
         idx32 = this.nextTemp();

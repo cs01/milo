@@ -6,6 +6,20 @@ from "std/math" import {
 from "./gfx" import {
     Canvas, fillRect, spot, line, text, textCentered, textWidth
 }
+// Small by-value carriers. Returning Vec<f64>/Vec<i64> from these allocated once
+// per terrain quad per frame — a few thousand mallocs a frame, and most of the
+// frame time.
+pub struct Rgb {
+    r: f64,
+    g: f64,
+    b: f64,
+}
+
+pub struct Off {
+    x: i64,
+    z: i64,
+}
+
 from "./gfx3d" import {
     Scene, View, Camera, viewOf, sceneClear, triangle, shade, toCamera
 }
@@ -50,6 +64,36 @@ pub fn themeName(t: i64): string {
 }
 
 // Sky and fog per theme, so a new stretch of country reads instantly.
+fn themeFog(t: i64): Rgb {
+    if t == 1 {
+        return Rgb {
+            r: 0.60, g: 0.46, b: 0.30
+        }
+    }
+    if t == 2 {
+        return Rgb {
+            r: 0.26, g: 0.38, b: 0.40
+        }
+    }
+    if t == 3 {
+        return Rgb {
+            r: 0.38, g: 0.40, b: 0.46
+        }
+    }
+    return Rgb {
+        r: 0.30, g: 0.42, b: 0.62
+    }
+}
+
+// Crossfade the atmosphere between the outgoing and incoming region.
+pub fn themeSkyMix(s: &mut Scene, a: i64, b: i64, mix: f64) {
+    let ca = themeFog(a)
+    let cb = themeFog(b)
+    s.fogR = cb.r + (ca.r - cb.r) * mix
+    s.fogG = cb.g + (ca.g - cb.g) * mix
+    s.fogB = cb.b + (ca.b - cb.b) * mix
+}
+
 pub fn themeSky(s: &mut Scene, t: i64) {
     if t == 1 {
         s.fogR = 0.60
@@ -82,37 +126,31 @@ pub fn themeSky(s: &mut Scene, t: i64) {
     }
 }
 
-fn terrainColor(h: f64, slope: f64): Vec<f64> {
-    var v: Vec<f64> = Vec.new()
+fn terrainColor(h: f64, slope: f64): Rgb {
     // water, sand, grass, rock, snow by height, with rock taking over on slopes
     if h < 0.0 {
-        v.push(0.06)
-        v.push(0.26)
-        v.push(0.46)
-        return v
+        return Rgb {
+            r: 0.06, g: 0.26, b: 0.46
+        }
     }
     if h < 16.0 {
-        v.push(0.62)
-        v.push(0.55)
-        v.push(0.34)
-        return v
+        return Rgb {
+            r: 0.62, g: 0.55, b: 0.34
+        }
     }
     if h > 168.0 {
-        v.push(0.82)
-        v.push(0.86)
-        v.push(0.92)
-        return v
+        return Rgb {
+            r: 0.82, g: 0.86, b: 0.92
+        }
     }
     if slope > 0.62 || h > 130.0 {
-        v.push(0.34)
-        v.push(0.31)
-        v.push(0.30)
-        return v
+        return Rgb {
+            r: 0.34, g: 0.31, b: 0.30
+        }
     }
-    v.push(0.16)
-    v.push(0.36)
-    v.push(0.14)
-    return v
+    return Rgb {
+        r: 0.16, g: 0.36, b: 0.14
+    }
 }
 
 // How many tiles are on the perimeter of ring `r` (ring 0 is the single centre).
@@ -124,99 +162,96 @@ fn ringCount(r: i64): i64 {
 }
 
 // The `i`th tile offset around ring `r`, walking the square perimeter.
-fn ringOffset(r: i64, i: i64): Vec<i64> {
-    var v: Vec<i64> = Vec.new()
+fn ringOffset(r: i64, i: i64): Off {
     if r == 0 {
-        v.push(0)
-        v.push(0)
-        return v
+        return Off {
+            x: 0, z: 0
+        }
     }
     let side = 2 * r
     let seg = i / side
     let k = i % side
     if seg == 0 {
-        v.push(0 - r + k)
-        v.push(0 - r)
-    } else if seg == 1 {
-        v.push(r)
-        v.push(0 - r + k)
-    } else if seg == 2 {
-        v.push(r - k)
-        v.push(r)
-    } else {
-        v.push(0 - r)
-        v.push(r - k)
+        return Off {
+            x: 0 - r + k, z: 0 - r
+        }
     }
-    return v
+    if seg == 1 {
+        return Off {
+            x: r, z: 0 - r + k
+        }
+    }
+    if seg == 2 {
+        return Off {
+            x: r - k, z: r
+        }
+    }
+    return Off {
+        x: 0 - r, z: r - k
+    }
 }
 
-fn themedColor(theme: i64, h: f64, slope: f64): Vec<f64> {
-    var v: Vec<f64> = Vec.new()
+fn themedColor(theme: i64, h: f64, slope: f64): Rgb {
     if h < 0.0 {
         // water everywhere except the city, which gets tarmac
         if theme == 3 {
-            v.push(0.16)
-            v.push(0.16)
-            v.push(0.18)
-        } else {
-            v.push(0.06)
-            v.push(0.26)
-            v.push(0.46)
+            return Rgb {
+                r: 0.16, g: 0.16, b: 0.18
+            }
         }
-        return v
+        return Rgb {
+            r: 0.06, g: 0.26, b: 0.46
+        }
     }
     if theme == 1 {
-        // desert: sand, dune shadow, red rock
+        // desert: sand, with red rock on the steep faces
         if slope > 0.55 {
-            v.push(0.46)
-            v.push(0.24)
-            v.push(0.14)
-        } else {
-            v.push(0.72)
-            v.push(0.58)
-            v.push(0.32)
+            return Rgb {
+                r: 0.46, g: 0.24, b: 0.14
+            }
         }
-        return v
+        return Rgb {
+            r: 0.72, g: 0.58, b: 0.32
+        }
     }
     if theme == 2 {
         // forest: deep greens, rock on the steep parts, no snow
         if slope > 0.60 {
-            v.push(0.26)
-            v.push(0.24)
-            v.push(0.22)
-        } else if h > 150.0 {
-            v.push(0.16)
-            v.push(0.30)
-            v.push(0.16)
-        } else {
-            v.push(0.09)
-            v.push(0.26)
-            v.push(0.10)
+            return Rgb {
+                r: 0.26, g: 0.24, b: 0.22
+            }
         }
-        return v
+        if h > 150.0 {
+            return Rgb {
+                r: 0.16, g: 0.30, b: 0.16
+            }
+        }
+        return Rgb {
+            r: 0.09, g: 0.26, b: 0.10
+        }
     }
     if theme == 3 {
         // city: concrete, grey-green parks
         if slope > 0.5 {
-            v.push(0.24)
-            v.push(0.24)
-            v.push(0.26)
-        } else if h > 90.0 {
-            v.push(0.34)
-            v.push(0.34)
-            v.push(0.36)
-        } else {
-            v.push(0.22)
-            v.push(0.26)
-            v.push(0.22)
+            return Rgb {
+                r: 0.24, g: 0.24, b: 0.26
+            }
         }
-        return v
+        if h > 90.0 {
+            return Rgb {
+                r: 0.34, g: 0.34, b: 0.36
+            }
+        }
+        return Rgb {
+            r: 0.22, g: 0.26, b: 0.22
+        }
     }
     return terrainColor(h, slope)
 }
 
 pub fn drawWorld(c: &mut Canvas, s: &mut Scene, w: &World) {
     themeSky(s, w.theme)
+    themeSkyMix(s, w.prevTheme, w.theme, w.themeMix)
     let v = viewOf(w.cam, c.w, c.h)
     sceneClear(s)
     drawSky(c, s, w, v)
@@ -234,8 +269,8 @@ pub fn drawWorld(c: &mut Canvas, s: &mut Scene, w: &World) {
     for ring in 0..VIEW_TILES {
         for step in 0..ringCount(ring) {
             let off = ringOffset(ring, step)
-            let tx = baseX + off[0]
-            let tz = baseZ + off[1]
+            let tx = baseX + off.x
+            let tz = baseZ + off.z
             let x0 = (tx as f64) * TILE
             let z0 = (tz as f64) * TILE
             let x1 = x0 + TILE
@@ -267,13 +302,32 @@ pub fn drawWorld(c: &mut Canvas, s: &mut Scene, w: &World) {
             let uz = nz / nl
             let slope = 1.0 - uy
             let hAvg = (h00 + h10 + h01 + h11) * 0.25
-            let col = themedColor(w.theme, hAvg, slope)
+            var col = themedColor(w.theme, hAvg, slope)
+            if w.themeMix > 0.0 {
+                let old = themedColor(w.prevTheme, hAvg, slope)
+                col.r = col.r + (old.r - col.r) * w.themeMix
+                col.g = col.g + (old.g - col.g) * w.themeMix
+                col.b = col.b + (old.b - col.b) * w.themeMix
+            }
+            // A second, finer noise field breaks up the flat facets — the single
+            // cheapest thing that stops terrain reading as coloured cardboard.
+            let det = 0.88 + 0.24 * propHash(tx * 3 + 11, tz * 3 + 7)
             let lit = shade(s, ux, uy, uz, 0.34)
             // a little banding by height so ridges read
             let band = 0.94 + 0.12 * Math.sin(hAvg * 0.09)
-            let r = col[0] * lit * band
-            let g = col[1] * lit * band
-            let b = col[2] * lit * band
+            var r = col.r * lit * band * det
+            var g = col.g * lit * band * det
+            var b = col.b * lit * band * det
+            // Water catches the sun: a broad specular lobe off the flat surface,
+            // which is most of what makes water look wet.
+            if hAvg < 0.0 {
+                // Weak and blue-biased: a flat-shaded surface has no view vector
+                // to work with, so a strong lobe just turns the sea into ice.
+                let spec = Math.pow(Math.maxF64(uy, 0.0), 26.0) * 0.20
+                r = r + spec * 0.55
+                g = g + spec * 0.80
+                b = b + spec * 1.0
+            }
 
             triangle(c, s, v, x0, h00, z0, x0, h01, z1, x1, h10, z0, r, g, b)
             triangle(c, s, v, x1, h10, z0, x0, h01, z1, x1, h11, z1, r, g, b)
@@ -622,13 +676,35 @@ pub fn drawHud(c: &mut Canvas, w: &World, s: &Scene, fps: i64) {
     line(c, hx + ca * 22.0, hy + sa * 22.0, hx + ca * 70.0, hy + sa * 70.0, 0.3, 0.9, 0.5)
     spot(c, hx, hy, 3.0, 0.4, 1.0, 0.6)
 
+    // Where you are, and how far to the next region.
+    text(c, 24, c.h - 58, themeName(w.theme), 3, 0.75, 0.72, 0.55)
+    let rem = "NEXT REGION IN " + w.toNext.toString()
+    text(c, 24, c.h - 26, rem, 2, 0.32, 0.34, 0.38)
+
+    // Telegraph: name the country you are about to enter, louder as it nears.
+    if w.toNext <= 3 && w.banner <= 0.0 {
+        let next = themeName((w.theme + 1) % 4)
+        let urgency = (4.0 - (w.toNext as f64)) / 3.0
+        let pulse = 0.55 + 0.45 * Math.sin(w.time * (4.0 + urgency * 6.0))
+        let k = (0.35 + urgency * 0.85) * pulse
+        textCentered(c, c.w / 2, 116, "APPROACHING", 2, k * 0.8, k * 0.8, k * 0.6)
+        textCentered(c, c.w / 2, 142, next, 5, k * 1.5, k * 1.2, k * 0.4)
+    }
+
     if w.banner > 0.0 {
         var f = 1.0
-        if w.banner < 1.0 {
-            f = w.banner
+        if w.banner < 1.2 {
+            f = w.banner / 1.2
         }
-        textCentered(c, c.w / 2, 150, "FLYBY", 9, 1.3 * f, 1.0 * f, 0.35 * f)
-        textCentered(c, c.w / 2, 240, "FLY THROUGH THE COINS", 2, 0.5 * f, 0.6 * f, 0.7 * f)
+        if w.level > 1 {
+            // arriving somewhere new
+            textCentered(c, c.w / 2, 130, "ENTERING", 3, 0.7 * f, 0.7 * f, 0.55 * f)
+            textCentered(c, c.w / 2, 176, themeName(w.theme), 9, 1.4 * f, 1.15 * f, 0.45 * f)
+            textCentered(c, c.w / 2, 268, "REGION " + w.level.toString(), 2, 0.5 * f, 0.55 * f, 0.6 * f)
+        } else {
+            textCentered(c, c.w / 2, 150, "FLYBY", 9, 1.3 * f, 1.0 * f, 0.35 * f)
+            textCentered(c, c.w / 2, 240, "FLY THROUGH THE RINGS", 2, 0.5 * f, 0.6 * f, 0.7 * f)
+        }
     }
     if w.hint > 0.0 {
         var f = 1.0

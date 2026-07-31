@@ -59,8 +59,11 @@ pub struct World {
     rings: Vec<Ring>,
     sparks: Vec<Spark>,
     theme: i64,
+    prevTheme: i64,
+    themeMix: f64, // 1 → fully the previous region, 0 → fully the new one
     level: i64,
-    cleared: i64, // rings cleared on this level
+    cleared: i64, // rings cleared in total
+    toNext: i64, // rings remaining before the country changes
     pathT: f64, // how far along the coin trail we have laid track
     // Trail head. Kept here rather than read off the end of `rings`, which is
     // swap-removed and so does not hold the newest ring last.
@@ -121,8 +124,11 @@ pub fn worldNew(): World {
         rings: Vec.new(),
         sparks: Vec.new(),
         theme: 0,
+        prevTheme: 0,
+        themeMix: 0.0,
         level: 1,
         cleared: 0,
+        toNext: 10,
         pathT: 0.0,
         trailX: 0.0,
         trailZ: 0.0,
@@ -180,6 +186,12 @@ pub fn worldUpdate(w: &mut World, dt: f64, inRoll: f64, inPitch: f64, boost: boo
     }
     if w.banner > 0.0 {
         w.banner = w.banner - dt
+    }
+    if w.themeMix > 0.0 {
+        w.themeMix = w.themeMix - dt * 0.55
+        if w.themeMix < 0.0 {
+            w.themeMix = 0.0
+        }
     }
     if w.hint > 0.0 && (inRoll != 0.0 || inPitch != 0.0) {
         w.hint = w.hint - dt
@@ -334,12 +346,18 @@ fn clearRing(w: &mut World, i: i64) {
         }
         )
     }
-    // every ten rings, a new stretch of country
-    if w.cleared % 10 == 0 {
+    // every ten rings, a new stretch of country — announced beforehand and
+    // crossfaded rather than snapped, so it reads as flying somewhere new
+    w.toNext = w.toNext - 1
+    if w.toNext <= 0 {
+        w.toNext = 10
         w.level = w.level + 1
+        w.prevTheme = w.theme
         w.theme = (w.theme + 1) % 4
-        w.banner = 2.6
-        w.flash = 0.8
+        w.themeMix = 1.0
+        w.banner = 3.4
+        w.flash = 1.0
+        w.shake = 9.0
     }
 }
 

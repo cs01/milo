@@ -18,7 +18,7 @@ that compiles today.
 | Wait on first of several sources | `tokio::select!` | `std/select` |
 | Parallel map over one array | `rayon` `par_iter_mut` | not yet — `&mut [T]` views and `splitMut` are unimplemented |
 | Cursor or iterator holding a borrow | `struct Cur<'a> { buf: &'a [u8] }` | own the buffer, carry an integer `pos`, slice on demand |
-| **Struct that stores a borrow** | `struct Parser<'a> { src: &'a str }` | **no equivalent** — own the buffer, or index into one you own |
+| **Struct that stores a borrow** | `struct Parser<'a> { src: &'a str }` | **no equivalent** — [hand back a view](#when-a-slice-has-to-outlive-the-call), own the text, or brand the offset |
 
 ## When a slice has to outlive the call
 
@@ -32,14 +32,33 @@ compile-time guarantee.
 
 **1. Hand back a view instead of an offset.** The view is the bytes themselves,
 so there is no separate span that could be paired with the wrong buffer. This is
-zero-copy and checked at compile time. A view cannot be stored in a struct or a
-collection, so it fits when the caller reads it before moving on.
+zero-copy and checked at compile time. The catch is that the caller has to read
+the view where it stands, because a view cannot be stored in a struct or a
+collection.
 
 ```milo
+struct Source { data: Vec<u8>, keyEnd: i64 }
+
 impl Source {
     fn key(self: &Self): &[u8] { return self.data[0..self.keyEnd] }
 }
+
+fn main() {
+    let cfg = load("database_url: postgres")
+
+    let k = cfg.key()                 // borrowed from cfg, not copied
+    print($"{k.len} bytes")
+
+    var total: i64 = 0
+    for b in cfg.key() { total = total + (b as i64) }
+
+    // var saved: Vec<&[u8]> = Vec.new()
+    // saved.push(cfg.key())          // rejected: references cannot be stored in a collection
+}
 ```
+
+The commented-out lines are the boundary: `k` is only usable while `cfg` is alive
+and in scope, which is what makes it safe without any annotation.
 
 **2. Own the text.** Calling `substr` copies the bytes out, which is always
 correct and needs no checks at all. You pay one allocation per token.
@@ -64,13 +83,48 @@ you a compile error, and that is the trade this language makes. See
 
 ## Handles are not raw indices
 
-A bare `Vec` index is the failure mode people expect from this model: you free a
-slot, allocate another, and the old index now reads someone else's value. A
+A bare `Vec` index is the failure mode people expect from this model. You free a
+slot, something else allocates, and the old index quietly reads the new value. A
 generational `Handle` from `std/arena` carries both the arena's identity and the
-slot's generation, so a stale handle reads as `None` and a double free is
-refused. Use a `Handle` wherever slots are recycled. A plain index is fine only
-for append-only storage that never frees anything.
+slot's generation, so the same sequence is caught instead.
 
-When a program has several arenas, give each one's key its own type. An `ExprId`
-that cannot be passed where a `StmtId` belongs is a compile error, and it costs
-nothing at runtime.
+```milo
+// raw index into a Vec
+var slots: Vec<string> = Vec.new()
+slots.push("alice")
+let idx = slots.len - 1
+slots.remove(idx)
+slots.push("carol")
+print($"raw index: {slots[idx]}")            // raw index: carol
+
+// the same thing with a generational handle
+var arena = arenaNew<Session>()
+let h = arenaAlloc(arena, Session { user: "alice" })
+arenaFree(arena, h)
+let carol = arenaAlloc(arena, Session { user: "carol" })
+match arenaGet(arena, h) {
+    Option.Some(s) => { print($"handle: {s.user}") }
+    Option.None => { print("handle: None") }   // handle: None
+}
+print($"second free refused: {!arenaFree(arena, h)}")   // second free refused: true
+```
+
+The raw index reads `carol` with no complaint — a wrong answer rather than a
+crash, which is the hardest kind of bug to find. Use a `Handle` wherever slots
+are recycled; a plain index is fine only for append-only storage.
+
+When a program has several arenas, give each one's key its own type, so that
+mixing them up is a compile error rather than a lookup in the wrong pool.
+
+```milo
+struct ExprId { index: i64 }
+struct StmtId { index: i64 }
+
+fn exprAt(id: ExprId): i64 { return id.index }
+
+let s = StmtId { index: 3 }
+exprAt(s)
+// error: argument 1 of 'exprAt': expected ExprId, got StmtId
+```
+
+Both types are one integer wide at runtime, so the check is free.

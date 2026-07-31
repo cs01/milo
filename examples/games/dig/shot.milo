@@ -92,7 +92,7 @@ pub fn main(): i32 {
         if want {
             drawMine(c, m, 0.0, 0.0)
             drawHud(c, m)
-            present(c, 0.5, 1.0)
+            present(c, 0.18, 1.0)
             writePpm(prefix + "-" + frame.toString() + ".ppm", c)
             print("wrote " + prefix + "-" + frame.toString() + ".ppm")
         }

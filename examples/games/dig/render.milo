@@ -75,15 +75,13 @@ fn drawSurface(c: &mut Canvas, m: &Mine, camX: f64, camY: f64) {
     setRect(c, treeX - 22.0, ty0 - 204.0, treeX + 26.0, ty0 - 180.0, 0.07, 0.38, 0.10)
     setRect(c, treeX - 62.0, ty0 - 116.0, treeX - 30.0, ty0 - 104.0, 0.04, 0.26, 0.07)
     setRect(c, treeX + 30.0, ty0 - 118.0, treeX + 62.0, ty0 - 104.0, 0.04, 0.26, 0.07)
-    // pit-head frame over the shaft
+    // A low spoil heap either side of the shaft mouth, so the entrance reads as a
+    // dig rather than a hole. No headframe and no second Milo — you ARE the dog.
     let mx = 4.5 * TILE - camX
-    setRect(c, mx - 36.0, ty0 - 76.0, mx - 26.0, ty0, 0.24, 0.15, 0.07)
-    setRect(c, mx + 26.0, ty0 - 76.0, mx + 36.0, ty0, 0.24, 0.15, 0.07)
-    setRect(c, mx - 36.0, ty0 - 86.0, mx + 36.0, ty0 - 76.0, 0.26, 0.17, 0.08)
-    setRect(c, mx - 5.0, ty0 - 76.0, mx + 5.0, ty0 - 40.0, 0.18, 0.12, 0.06)
-    circle(c, mx, ty0 - 100.0, 13.0, 14, 0.55, 0.42, 0.20)
-    // Milo, waiting at the top of the shaft
-    drawSprite(c, spriteMilo(), mx + 66.0, ty0 - 76.0, 4.0, 1.0)
+    setRect(c, mx - 46.0, ty0 - 7.0, mx - 18.0, ty0, 0.16, 0.10, 0.05)
+    setRect(c, mx - 38.0, ty0 - 12.0, mx - 26.0, ty0 - 7.0, 0.18, 0.11, 0.05)
+    setRect(c, mx + 18.0, ty0 - 7.0, mx + 46.0, ty0, 0.16, 0.10, 0.05)
+    setRect(c, mx + 26.0, ty0 - 12.0, mx + 38.0, ty0 - 7.0, 0.18, 0.11, 0.05)
 }
 
 // Blit a palette-indexed sprite, scaled, with 0 as transparent.
@@ -167,26 +165,49 @@ pub fn drawMine(c: &mut Canvas, m: &Mine, ox: f64, oy: f64) {
             if t == T_SKY {
                 continue // sky is painted by drawSurface; below ground it is void
             }
-            // lamp falloff
+            // Lamp falloff — but only on tiles the light could actually reach.
+            // A tile with no open neighbour is buried inside the rock, and lighting
+            // it is what turned the lamp into a brown bubble shining through solid
+            // ground. Exposed faces catch the light; the interior stays dark.
             let cx = sx + TILE * 0.5
             let cy = sy + TILE * 0.5
             let dx = cx - (m.px - camX)
             let dy = cy - (m.py - camY)
             let d = Math.sqrt(dx * dx + dy * dy)
-            var lit = 1.0 - d / m.lampRadius
+            var exposed = false
+            if !isSolid(tileAt(m, tx - 1, ty)) || !isSolid(tileAt(m, tx + 1, ty)) {
+                exposed = true
+            }
+            if !isSolid(tileAt(m, tx, ty - 1)) || !isSolid(tileAt(m, tx, ty + 1)) {
+                exposed = true
+            }
+            // A slightly ragged radius, so the reach of the lamp is not a circle.
+            let jitter = 0.86 + 0.28 * tileNoise(tx * 2, ty * 2)
+            var lit = 1.0 - d / (m.lampRadius * jitter)
             if lit < 0.0 {
                 lit = 0.0
             }
+            // smoothstep instead of a hard linear edge
+            lit = lit * lit * (3.0 - 2.0 * lit)
+            if !exposed {
+                lit = lit * 0.05
+            }
             // Ore glows faintly on its own, so a seam is visible at the edge of the
             // lamp — which is the thing that makes you keep going.
+            // Bedrock keeps a floor of its own light: you cannot dig it, so you
+            // need to see where it is even outside the lamp, or you walk into a
+            // wall you had no way of knowing about.
             var ambient = 0.035
+            if t == T_BEDROCK {
+                ambient = 0.13
+            }
             if t == T_GOLD || t == T_GEM || t == T_CRYSTAL {
                 ambient = 0.20 + 0.07 * Math.sin(m.time * 3.0 + (tx as f64) + (ty as f64))
             }
             if isUpgrade(t) {
                 ambient = 0.45 + 0.25 * Math.sin(m.time * 6.0 + (tx as f64))
             }
-            let k = ambient + lit * lit * 1.25
+            let k = ambient + lit * 0.95
             let col = tileColor(t)
             // Every tile gets its own shade. A uniform fill with a lit top edge is
             // what made this read as stacked blocks instead of ground.

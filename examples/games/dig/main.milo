@@ -115,7 +115,7 @@ pub fn main(): i32 {
         if m.flash > 0.0 {
             exposure = 1.0 + m.flash * 1.2
         }
-        present(c, 0.5, exposure)
+        present(c, 0.18, exposure)
 
         unsafe {
             SDL_UpdateTexture(tex, 0 as *u8, c.fb[0].addrOf() as *u8, (W * 4) as i32)

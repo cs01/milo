@@ -4,6 +4,9 @@
 from "std/math" import {
     Math
 }
+from "std/random" import {
+    Random
+}
 from "./gfx3d" import {
     Camera, Scene, Vec3
 }
@@ -12,13 +15,32 @@ pub let TILE: f64 = 44.0 // world units per terrain quad
 
 pub let VIEW_TILES: i64 = 24 // radius of the drawn terrain grid
 
-pub struct Coin {
+// A ring you fly THROUGH, Pilotwings-style: far easier to read at speed than a
+// coin you have to touch, and it tells you which way to be pointing.
+pub struct Ring {
     x: f64,
     y: f64,
     z: f64,
-    spin: f64,
+    face: f64, // heading the ring faces along, radians
+    r: f64,
     alive: bool,
-    pop: f64, // grows briefly when taken
+    pop: f64, // expands and fades once flown through
+    side: f64, // signed distance of the aircraft last frame, for crossing detection
+}
+
+// A 3D spark thrown out when a ring is cleared.
+pub struct Spark {
+    x: f64,
+    y: f64,
+    z: f64,
+    vx: f64,
+    vy: f64,
+    vz: f64,
+    life: f64,
+    maxLife: f64,
+    cr: f64,
+    cg: f64,
+    cb: f64,
 }
 
 pub struct Plane {
@@ -34,12 +56,14 @@ pub struct Plane {
 pub struct World {
     plane: Plane,
     cam: Camera,
-    coins: Vec<Coin>,
+    rings: Vec<Ring>,
+    sparks: Vec<Spark>,
+    theme: i64,
+    level: i64,
+    cleared: i64, // rings cleared on this level
     pathT: f64, // how far along the coin trail we have laid track
-    // The head of the trail is kept here, NOT read back off the end of `coins`:
-    // that Vec is swap-removed, so its last element is not the newest coin, and
-    // laying from it could place a coin behind the aircraft — which was then
-    // dropped, laying another, forever.
+    // Trail head. Kept here rather than read off the end of `rings`, which is
+    // swap-removed and so does not hold the newest ring last.
     trailX: f64,
     trailZ: f64,
     score: i64,
@@ -94,7 +118,11 @@ pub fn worldNew(): World {
             x: 0.0, y: 0.0, z: 0.0, yaw: 0.0, pitch: 0.0, roll: 0.0, fov: 1.15, near: 0.6, far: 1400.0
         }
         ,
-        coins: Vec.new(),
+        rings: Vec.new(),
+        sparks: Vec.new(),
+        theme: 0,
+        level: 1,
+        cleared: 0,
         pathT: 0.0,
         trailX: 0.0,
         trailZ: 0.0,
@@ -109,28 +137,35 @@ pub fn worldNew(): World {
         hint: 8.0,
     }
     w.plane.y = heightAt(0.0, 0.0) + 150.0
-    for i in 0..70 {
-        layCoin(w)
+    for i in 0..10 {
+        layRing(w)
     }
     return w
 }
 
-// The coin trail wanders as a slow sine in heading, so it curls through valleys
-// and over ridges instead of running dead straight.
-pub fn layCoin(w: &mut World) {
+// The course wanders as a slow sine in heading, so it curls through valleys and
+// over ridges instead of running dead straight.
+pub fn layRing(w: &mut World) {
     w.pathT = w.pathT + 1.0
     let t = w.pathT
     let heading = Math.sin(t * 0.030) * 0.9 + Math.sin(t * 0.008) * 2.0
-    let step = 74.0
+    // Far apart: a hoop you have to line up needs room to line up in.
+    let step = 300.0
     let nx = w.trailX + Math.sin(heading) * step
     let nz = w.trailZ + Math.cos(heading) * step
     w.trailX = nx
     w.trailZ = nz
     let ground = heightAt(nx, nz)
-    // ride 60–130 above the ground, bobbing, so the trail follows the terrain
-    let ride = 60.0 + 70.0 * (0.5 + 0.5 * Math.sin(t * 0.13))
-    w.coins.push(Coin {
-        x: nx, y: ground + ride, z: nz, spin: t * 0.7, alive: true, pop: 0.0
+    let ride = 90.0 + 60.0 * (0.5 + 0.5 * Math.sin(t * 0.13))
+    w.rings.push(Ring {
+        x: nx,
+        y: ground + ride,
+        z: nz,
+        face: heading,
+        r: 46.0,
+        alive: true,
+        pop: 0.0,
+        side: 0.0 - 1.0,
     }
     )
 }
@@ -162,7 +197,7 @@ pub fn worldUpdate(w: &mut World, dt: f64, inRoll: f64, inPitch: f64, boost: boo
     w.plane.roll = Math.clampF64(w.plane.roll, 0.0 - 1.1, 1.1)
     w.plane.pitch = w.plane.pitch + (inPitch * 1.05 - w.plane.pitch * 2.2) * dt
     w.plane.pitch = Math.clampF64(w.plane.pitch, 0.0 - 0.75, 0.75)
-    w.plane.yaw = w.plane.yaw - w.plane.roll * 1.35 * dt
+    w.plane.yaw = w.plane.yaw + w.plane.roll * 1.35 * dt
 
     var target = 190.0
     if boost {
@@ -198,57 +233,133 @@ pub fn worldUpdate(w: &mut World, dt: f64, inRoll: f64, inPitch: f64, boost: boo
     w.cam.pitch = w.plane.pitch * 0.55 - 0.06
     w.cam.roll = w.cam.roll + (w.plane.roll * 0.5 - w.cam.roll) * Math.minF64(1.0, dt * 5.0)
 
-    collectCoins(w, dt)
+    updateRings(w, dt)
 }
 
-fn collectCoins(w: &mut World, dt: f64) {
+// Ring passing: watch which side of the ring's plane the aircraft is on. When
+// that flips and it happened inside the hoop, it counts. Distance-based tests
+// miss at speed; a plane crossing cannot.
+fn updateRings(w: &mut World, dt: f64) {
     var toLay: i64 = 0
     var i: i64 = 0
-    while i < w.coins.len {
-        w.coins[i].spin = w.coins[i].spin + dt * 2.4
-        if w.coins[i].pop > 0.0 {
-            w.coins[i].pop = w.coins[i].pop - dt * 2.6
+    while i < w.rings.len {
+        if w.rings[i].pop > 0.0 {
+            w.rings[i].pop = w.rings[i].pop - dt * 1.6
         }
         var drop = false
-        if w.coins[i].alive {
-            let dx = w.coins[i].x - w.plane.x
-            let dy = w.coins[i].y - w.plane.y
-            let dz = w.coins[i].z - w.plane.z
-            if dx * dx + dy * dy + dz * dz < 52.0 * 52.0 {
-                w.coins[i].alive = false
-                w.coins[i].pop = 1.0
-                w.combo = w.combo + 1
-                w.comboTimer = 3.2
-                w.score = w.score + 10 * Math.minI64(w.combo, 20)
-                if w.score > w.best {
-                    w.best = w.score
+        if w.rings[i].alive {
+            let nx = Math.sin(w.rings[i].face)
+            let nz = Math.cos(w.rings[i].face)
+            let dx = w.plane.x - w.rings[i].x
+            let dy = w.plane.y - w.rings[i].y
+            let dz = w.plane.z - w.rings[i].z
+            let sideNow = dx * nx + dz * nz
+            let prev = w.rings[i].side
+            w.rings[i].side = sideNow
+            if prev < 0.0 && sideNow >= 0.0 {
+                // radial offset within the ring's plane
+                let px2 = dx - nx * sideNow
+                let pz2 = dz - nz * sideNow
+                let rad = Math.sqrt(px2 * px2 + dy * dy + pz2 * pz2)
+                if rad < w.rings[i].r {
+                    clearRing(w, i)
+                    toLay = toLay + 1
                 }
-                w.flash = Math.maxF64(w.flash, 0.35)
-                w.shake = Math.maxF64(w.shake, 3.0)
-                toLay = toLay + 1
             }
         }
-        if !w.coins[i].alive && w.coins[i].pop <= 0.0 {
+        if !w.rings[i].alive && w.rings[i].pop <= 0.0 {
             drop = true
         }
-        // drop anything that ends up well behind the aircraft
-        let bx = w.coins[i].x - w.plane.x
-        let bz = w.coins[i].z - w.plane.z
-        if bx * Math.sin(w.plane.yaw) + bz * Math.cos(w.plane.yaw) < 0.0 - 260.0 {
-            drop = true
-            if w.coins[i].alive {
+        let bx = w.rings[i].x - w.plane.x
+        let bz = w.rings[i].z - w.plane.z
+        if bx * Math.sin(w.plane.yaw) + bz * Math.cos(w.plane.yaw) < 0.0 - 420.0 {
+            if w.rings[i].alive {
                 toLay = toLay + 1
+                w.combo = 0
             }
+            drop = true
         }
         if drop {
-            let last = w.coins.len - 1
-            w.coins[i] = w.coins[last]
-            let _ = w.coins.pop()
+            let last = w.rings.len - 1
+            w.rings[i] = w.rings[last]
+            let _ = w.rings.pop()
         } else {
             i = i + 1
         }
     }
     for k in 0..toLay {
-        layCoin(w)
+        layRing(w)
+    }
+    updateSparks(w, dt)
+}
+
+fn clearRing(w: &mut World, i: i64) {
+    w.rings[i].alive = false
+    w.rings[i].pop = 1.0
+    w.combo = w.combo + 1
+    w.comboTimer = 6.0
+    w.cleared = w.cleared + 1
+    w.score = w.score + 50 * Math.minI64(w.combo, 20)
+    if w.score > w.best {
+        w.best = w.score
+    }
+    w.flash = Math.maxF64(w.flash, 0.45)
+    w.shake = Math.maxF64(w.shake, 4.0)
+    // A burst of sparks around the hoop, thrown outward in its plane and given
+    // gravity, so the reward is something you fly through rather than a number.
+    let nx = Math.sin(w.rings[i].face)
+    let nz = Math.cos(w.rings[i].face)
+    let tx = nz
+    let tz = 0.0 - nx
+    for k in 0..44 {
+        let a = Random.floatRange(0.0, 6.283185307179586)
+        let sp = Random.floatRange(30.0, 130.0)
+        let rr = w.rings[i].r
+        let ox = tx * Math.cos(a) * rr
+        let oy = Math.sin(a) * rr
+        let oz = tz * Math.cos(a) * rr
+        let life = Random.floatRange(0.5, 1.3)
+        w.sparks.push(Spark {
+            x: w.rings[i].x + ox,
+            y: w.rings[i].y + oy,
+            z: w.rings[i].z + oz,
+            vx: tx * Math.cos(a) * sp + Random.floatRange(0.0 - 20.0, 20.0),
+            vy: Math.sin(a) * sp + 40.0,
+            vz: tz * Math.cos(a) * sp + Random.floatRange(0.0 - 20.0, 20.0),
+            life: life,
+            maxLife: life,
+            cr: 1.7,
+            cg: 1.25 + Random.floatRange(0.0, 0.4),
+            cb: 0.30,
+        }
+        )
+    }
+    // every ten rings, a new stretch of country
+    if w.cleared % 10 == 0 {
+        w.level = w.level + 1
+        w.theme = (w.theme + 1) % 4
+        w.banner = 2.6
+        w.flash = 0.8
+    }
+}
+
+fn updateSparks(w: &mut World, dt: f64) {
+    var i: i64 = 0
+    while i < w.sparks.len {
+        w.sparks[i].life = w.sparks[i].life - dt
+        if w.sparks[i].life <= 0.0 {
+            let last = w.sparks.len - 1
+            w.sparks[i] = w.sparks[last]
+            let _ = w.sparks.pop()
+        } else {
+            w.sparks[i].vy = w.sparks[i].vy - 150.0 * dt
+            let d = Math.pow(0.5, dt)
+            w.sparks[i].vx = w.sparks[i].vx * d
+            w.sparks[i].vz = w.sparks[i].vz * d
+            w.sparks[i].x = w.sparks[i].x + w.sparks[i].vx * dt
+            w.sparks[i].y = w.sparks[i].y + w.sparks[i].vy * dt
+            w.sparks[i].z = w.sparks[i].z + w.sparks[i].vz * dt
+            i = i + 1
+        }
     }
 }

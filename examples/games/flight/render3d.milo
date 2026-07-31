@@ -36,6 +36,52 @@ fn drawSky(c: &mut Canvas, s: &Scene, w: &World, v: &View) {
     }
 }
 
+pub fn themeName(t: i64): string {
+    if t == 0 {
+        return "COASTLINE"
+    }
+    if t == 1 {
+        return "DESERT"
+    }
+    if t == 2 {
+        return "FOREST"
+    }
+    return "CITY"
+}
+
+// Sky and fog per theme, so a new stretch of country reads instantly.
+pub fn themeSky(s: &mut Scene, t: i64) {
+    if t == 1 {
+        s.fogR = 0.60
+        s.fogG = 0.46
+        s.fogB = 0.30
+        s.sunX = 0.30
+        s.sunY = 0.90
+        s.sunZ = 0.30
+    } else if t == 2 {
+        s.fogR = 0.26
+        s.fogG = 0.38
+        s.fogB = 0.40
+        s.sunX = 0.50
+        s.sunY = 0.72
+        s.sunZ = 0.48
+    } else if t == 3 {
+        s.fogR = 0.38
+        s.fogG = 0.40
+        s.fogB = 0.46
+        s.sunX = 0.40
+        s.sunY = 0.84
+        s.sunZ = 0.36
+    } else {
+        s.fogR = 0.30
+        s.fogG = 0.42
+        s.fogB = 0.62
+        s.sunX = 0.44
+        s.sunY = 0.78
+        s.sunZ = 0.44
+    }
+}
+
 fn terrainColor(h: f64, slope: f64): Vec<f64> {
     var v: Vec<f64> = Vec.new()
     // water, sand, grass, rock, snow by height, with rock taking over on slopes
@@ -104,7 +150,73 @@ fn ringOffset(r: i64, i: i64): Vec<i64> {
     return v
 }
 
+fn themedColor(theme: i64, h: f64, slope: f64): Vec<f64> {
+    var v: Vec<f64> = Vec.new()
+    if h < 0.0 {
+        // water everywhere except the city, which gets tarmac
+        if theme == 3 {
+            v.push(0.16)
+            v.push(0.16)
+            v.push(0.18)
+        } else {
+            v.push(0.06)
+            v.push(0.26)
+            v.push(0.46)
+        }
+        return v
+    }
+    if theme == 1 {
+        // desert: sand, dune shadow, red rock
+        if slope > 0.55 {
+            v.push(0.46)
+            v.push(0.24)
+            v.push(0.14)
+        } else {
+            v.push(0.72)
+            v.push(0.58)
+            v.push(0.32)
+        }
+        return v
+    }
+    if theme == 2 {
+        // forest: deep greens, rock on the steep parts, no snow
+        if slope > 0.60 {
+            v.push(0.26)
+            v.push(0.24)
+            v.push(0.22)
+        } else if h > 150.0 {
+            v.push(0.16)
+            v.push(0.30)
+            v.push(0.16)
+        } else {
+            v.push(0.09)
+            v.push(0.26)
+            v.push(0.10)
+        }
+        return v
+    }
+    if theme == 3 {
+        // city: concrete, grey-green parks
+        if slope > 0.5 {
+            v.push(0.24)
+            v.push(0.24)
+            v.push(0.26)
+        } else if h > 90.0 {
+            v.push(0.34)
+            v.push(0.34)
+            v.push(0.36)
+        } else {
+            v.push(0.22)
+            v.push(0.26)
+            v.push(0.22)
+        }
+        return v
+    }
+    return terrainColor(h, slope)
+}
+
 pub fn drawWorld(c: &mut Canvas, s: &mut Scene, w: &World) {
+    themeSky(s, w.theme)
     let v = viewOf(w.cam, c.w, c.h)
     sceneClear(s)
     drawSky(c, s, w, v)
@@ -155,7 +267,7 @@ pub fn drawWorld(c: &mut Canvas, s: &mut Scene, w: &World) {
             let uz = nz / nl
             let slope = 1.0 - uy
             let hAvg = (h00 + h10 + h01 + h11) * 0.25
-            let col = terrainColor(hAvg, slope)
+            let col = themedColor(w.theme, hAvg, slope)
             let lit = shade(s, ux, uy, uz, 0.34)
             // a little banding by height so ridges read
             let band = 0.94 + 0.12 * Math.sin(hAvg * 0.09)
@@ -168,48 +280,178 @@ pub fn drawWorld(c: &mut Canvas, s: &mut Scene, w: &World) {
         }
     }
 
-    drawCoins(c, s, w, v)
+    drawProps(c, s, w, v, baseX, baseZ)
+    drawRings(c, s, w, v)
     drawPlane(c, s, w, v)
+    drawSparks(c, s, w, v)
 }
 
-// A coin is a flat 12-gon spinning about its vertical axis, drawn from both
-// sides so it never vanishes when it turns edge-on.
-fn drawCoins(c: &mut Canvas, s: &mut Scene, w: &World, v: &View) {
-    let segs = 12
-    for i in 0..w.coins.len {
-        var rad = 11.0
+// Ground detail. Each terrain tile near the aircraft may carry one prop, placed
+// and sized from a stable hash so the scenery does not crawl as you fly. The kind
+// follows the theme: palms on the coast, cactus in the desert, conifers in the
+// forest, towers in the city.
+fn propHash(x: i64, z: i64): f64 {
+    let v = Math.sin((x as f64) * 271.9 + (z as f64) * 133.7) * 27183.1234
+    return v - Math.floor(v)
+}
+
+fn box3(c: &mut Canvas, s: &mut Scene, v: &View, cx: f64, y0: f64, y1: f64, cz: f64, hw: f64, r: f64, g: f64, b: f64) {
+    let x0 = cx - hw
+    let x1 = cx + hw
+    let z0 = cz - hw
+    let z1 = cz + hw
+    // four walls, brighter on the sunward pair, plus a cap
+    triangle(c, s, v, x0, y0, z0, x0, y1, z0, x1, y1, z0, r, g, b)
+    triangle(c, s, v, x0, y0, z0, x1, y1, z0, x1, y0, z0, r, g, b)
+    triangle(c, s, v, x1, y0, z1, x1, y1, z1, x0, y1, z1, r * 0.7, g * 0.7, b * 0.7)
+    triangle(c, s, v, x1, y0, z1, x0, y1, z1, x0, y0, z1, r * 0.7, g * 0.7, b * 0.7)
+    triangle(c, s, v, x1, y0, z0, x1, y1, z0, x1, y1, z1, r * 0.85, g * 0.85, b * 0.85)
+    triangle(c, s, v, x1, y0, z0, x1, y1, z1, x1, y0, z1, r * 0.85, g * 0.85, b * 0.85)
+    triangle(c, s, v, x0, y0, z1, x0, y1, z1, x0, y1, z0, r * 0.55, g * 0.55, b * 0.55)
+    triangle(c, s, v, x0, y0, z1, x0, y1, z0, x0, y0, z0, r * 0.55, g * 0.55, b * 0.55)
+    triangle(c, s, v, x0, y1, z0, x0, y1, z1, x1, y1, z1, r * 1.15, g * 1.15, b * 1.15)
+    triangle(c, s, v, x0, y1, z0, x1, y1, z1, x1, y1, z0, r * 1.15, g * 1.15, b * 1.15)
+}
+
+fn cone3(c: &mut Canvas, s: &mut Scene, v: &View, cx: f64, y0: f64, y1: f64, cz: f64, rad: f64, r: f64, g: f64, b: f64) {
+    let segs = 6
+    let step = 6.283185307179586 / (segs as f64)
+    for k in 0..segs {
+        let a0 = (k as f64) * step
+        let a1 = ((k + 1) as f64) * step
+        let p0x = cx + Math.cos(a0) * rad
+        let p0z = cz + Math.sin(a0) * rad
+        let p1x = cx + Math.cos(a1) * rad
+        let p1z = cz + Math.sin(a1) * rad
+        let sh = 0.65 + 0.35 * Math.cos(a0)
+        triangle(c, s, v, p0x, y0, p0z, cx, y1, cz, p1x, y0, p1z, r * sh, g * sh, b * sh)
+        triangle(c, s, v, p1x, y0, p1z, cx, y1, cz, p0x, y0, p0z, r * sh * 0.7, g * sh * 0.7, b * sh * 0.7)
+    }
+}
+
+pub let PROP_TILES: i64 = 9
+
+fn drawProps(c: &mut Canvas, s: &mut Scene, w: &World, v: &View, baseX: i64, baseZ: i64) {
+    for gz in 0 - PROP_TILES..PROP_TILES {
+        for gx in 0 - PROP_TILES..PROP_TILES {
+            let tx = baseX + gx
+            let tz = baseZ + gz
+            let h = propHash(tx, tz)
+            if h > 0.30 {
+                continue // most tiles are empty
+            }
+            let jx = propHash(tx + 7919, tz) - 0.5
+            let jz = propHash(tx, tz + 6271) - 0.5
+            let x = (tx as f64) * TILE + TILE * (0.5 + jx * 0.7)
+            let z = (tz as f64) * TILE + TILE * (0.5 + jz * 0.7)
+            let g0 = heightAt(x, z)
+            if g0 < 4.0 {
+                continue // nothing grows in the water
+            }
+            let scale = 0.7 + h * 3.0
+            if w.theme == 1 {
+                // cactus: a trunk and one arm
+                box3(c, s, v, x, g0, g0 + 16.0 * scale, z, 2.2, 0.16, 0.34, 0.14)
+                box3(c, s, v, x + 3.0, g0 + 7.0 * scale, g0 + 13.0 * scale, z, 1.4, 0.14, 0.30, 0.12)
+            } else if w.theme == 2 {
+                // conifer
+                box3(c, s, v, x, g0, g0 + 7.0 * scale, z, 1.4, 0.20, 0.12, 0.06)
+                cone3(c, s, v, x, g0 + 5.0 * scale, g0 + 30.0 * scale, z, 7.0 * scale, 0.07, 0.26, 0.10)
+            } else if w.theme == 3 {
+                // tower block, height keyed off the same hash so a district varies
+                let tall = 22.0 + propHash(tz, tx) * 90.0
+                box3(c, s, v, x, g0, g0 + tall, z, 6.0 + h * 12.0, 0.30, 0.31, 0.34)
+            } else {
+                // palm: bare trunk, splayed fronds
+                box3(c, s, v, x, g0, g0 + 15.0 * scale, z, 1.2, 0.26, 0.18, 0.09)
+                cone3(c, s, v, x, g0 + 20.0 * scale, g0 + 13.0 * scale, z, 9.0 * scale, 0.10, 0.32, 0.12)
+            }
+        }
+    }
+}
+
+// A ring: a tube of quads swept around a circle, standing across the course so
+// you can see which way to be pointing when you reach it. Cleared rings expand
+// and fade instead of vanishing.
+fn drawRings(c: &mut Canvas, s: &mut Scene, w: &World, v: &View) {
+    let segs = 14
+    let tube = 5.0
+    for i in 0..w.rings.len {
+        var rad = w.rings[i].r
         var br = 1.0
-        if !w.coins[i].alive {
-            rad = 11.0 + (1.0 - w.coins[i].pop) * 34.0
-            br = w.coins[i].pop * 1.8
-            if br <= 0.02 {
+        var cr = 1.5
+        var cg = 1.15
+        var cb = 0.25
+        if !w.rings[i].alive {
+            rad = w.rings[i].r * (1.0 + (1.0 - w.rings[i].pop) * 1.2)
+            br = w.rings[i].pop
+            cr = 0.5
+            cg = 1.7
+            cb = 0.7
+            if br <= 0.03 {
                 continue
             }
         }
-        let cx = w.coins[i].x
-        let cy = w.coins[i].y + Math.sin(w.time * 1.6 + (i as f64)) * 3.0
-        let cz = w.coins[i].z
-        let a = w.coins[i].spin
-        // the coin's plane: axis u spins, v is straight up
-        let ux = Math.cos(a)
-        let uz = Math.sin(a)
+        let cx = w.rings[i].x
+        let cy = w.rings[i].y
+        let cz = w.rings[i].z
+        // ring plane: normal along `face`, so the hoop stands across the course
+        let nx = Math.sin(w.rings[i].face)
+        let nz = Math.cos(w.rings[i].face)
+        let tx = nz
+        let tz = 0.0 - nx
         let step = 6.283185307179586 / (segs as f64)
         for k in 0..segs {
             let a0 = (k as f64) * step
             let a1 = ((k + 1) as f64) * step
-            let p0x = cx + ux * Math.cos(a0) * rad
-            let p0y = cy + Math.sin(a0) * rad
-            let p0z = cz + uz * Math.cos(a0) * rad
-            let p1x = cx + ux * Math.cos(a1) * rad
-            let p1y = cy + Math.sin(a1) * rad
-            let p1z = cz + uz * Math.cos(a1) * rad
-            let sh = 0.65 + 0.35 * Math.cos(a - w.cam.yaw)
-            let r = 1.55 * sh * br
-            let g = 1.15 * sh * br
-            let b = 0.20 * sh * br
-            triangle(c, s, v, cx, cy, cz, p0x, p0y, p0z, p1x, p1y, p1z, r, g, b)
-            triangle(c, s, v, cx, cy, cz, p1x, p1y, p1z, p0x, p0y, p0z, r * 0.7, g * 0.7, b * 0.7)
+            let c0 = Math.cos(a0)
+            let s0 = Math.sin(a0)
+            let c1 = Math.cos(a1)
+            let s1 = Math.sin(a1)
+            // inner and outer edge of the tube at both ends of this segment
+            let o0x = cx + tx * c0 * (rad + tube)
+            let o0y = cy + s0 * (rad + tube)
+            let o0z = cz + tz * c0 * (rad + tube)
+            let i0x = cx + tx * c0 * (rad - tube)
+            let i0y = cy + s0 * (rad - tube)
+            let i0z = cz + tz * c0 * (rad - tube)
+            let o1x = cx + tx * c1 * (rad + tube)
+            let o1y = cy + s1 * (rad + tube)
+            let o1z = cz + tz * c1 * (rad + tube)
+            let i1x = cx + tx * c1 * (rad - tube)
+            let i1y = cy + s1 * (rad - tube)
+            let i1z = cz + tz * c1 * (rad - tube)
+            // banded colour so the hoop reads as a solid object, not a circle
+            var band = 1.0
+            if k % 2 == 0 {
+                band = 0.72
+            }
+            let r = cr * band * br
+            let g = cg * band * br
+            let b = cb * band * br
+            // both faces, so the ring is solid from either side
+            triangle(c, s, v, o0x, o0y, o0z, o1x, o1y, o1z, i0x, i0y, i0z, r, g, b)
+            triangle(c, s, v, i0x, i0y, i0z, o1x, o1y, o1z, i1x, i1y, i1z, r, g, b)
+            triangle(c, s, v, o1x, o1y, o1z, o0x, o0y, o0z, i0x, i0y, i0z, r * 0.6, g * 0.6, b * 0.6)
+            triangle(c, s, v, o1x, o1y, o1z, i0x, i0y, i0z, i1x, i1y, i1z, r * 0.6, g * 0.6, b * 0.6)
         }
+    }
+}
+
+// Sparks are camera-facing quads, so they stay visible whatever angle you clear
+// the ring at.
+fn drawSparks(c: &mut Canvas, _s: &mut Scene, w: &World, v: &View) {
+    for i in 0..w.sparks.len {
+        let p = toCamera(v, w.sparks[i].x, w.sparks[i].y, w.sparks[i].z)
+        if p.z < 1.0 {
+            continue
+        }
+        let sx = v.cx + p.x * v.scale / p.z
+        let sy = v.cy - p.y * v.scale / p.z
+        let t = w.sparks[i].life / w.sparks[i].maxLife
+        let size = Math.clampF64(v.scale * 1.6 / p.z, 1.2, 14.0) * (0.4 + t)
+        let f = t * t
+        spot(c, sx, sy, size, w.sparks[i].cr * f, w.sparks[i].cg * f, w.sparks[i].cb * f)
     }
 }
 
@@ -300,16 +542,16 @@ fn tri(c: &mut Canvas, s: &mut Scene, v: &View, px: &Vec<f64>, py: &Vec<f64>, pz
 
 // A reticle on the next coin, and an edge arrow when it is off screen. Without
 // this the trail is easy to lose the moment you overshoot one.
-pub fn drawGuide(c: &mut Canvas, w: &World, s: &Scene) {
+pub fn drawGuide(c: &mut Canvas, w: &World, _s: &Scene) {
     let v = viewOf(w.cam, c.w, c.h)
     // nearest live coin ahead
     var bi = 0 - 1
     var bd = 1.0e18
-    for i in 0..w.coins.len {
-        if w.coins[i].alive {
-            let dx = w.coins[i].x - w.plane.x
-            let dy = w.coins[i].y - w.plane.y
-            let dz = w.coins[i].z - w.plane.z
+    for i in 0..w.rings.len {
+        if w.rings[i].alive {
+            let dx = w.rings[i].x - w.plane.x
+            let dy = w.rings[i].y - w.plane.y
+            let dz = w.rings[i].z - w.plane.z
             let d = dx * dx + dy * dy + dz * dz
             if d < bd {
                 bd = d
@@ -320,7 +562,7 @@ pub fn drawGuide(c: &mut Canvas, w: &World, s: &Scene) {
     if bi < 0 {
         return
     }
-    let p = toCamera(v, w.coins[bi].x, w.coins[bi].y, w.coins[bi].z)
+    let p = toCamera(v, w.rings[bi].x, w.rings[bi].y, w.rings[bi].z)
     let pulse = 0.65 + 0.35 * Math.sin(w.time * 6.0)
     if p.z > 1.0 {
         let sx = v.cx + p.x * v.scale / p.z

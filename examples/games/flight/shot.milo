@@ -84,13 +84,13 @@ pub fn main(): i32 {
         // steer toward the nearest live coin, so the capture flies the trail
         var roll = 0.0
         var pitch = 0.0
-        if w.coins.len > 0 {
+        if w.rings.len > 0 {
             var bi = 0 - 1
             var bd = 1.0e18
-            for i in 0..w.coins.len {
-                if w.coins[i].alive {
-                    let dx = w.coins[i].x - w.plane.x
-                    let dz = w.coins[i].z - w.plane.z
+            for i in 0..w.rings.len {
+                if w.rings[i].alive {
+                    let dx = w.rings[i].x - w.plane.x
+                    let dz = w.rings[i].z - w.plane.z
                     let d = dx * dx + dz * dz
                     if d < bd {
                         bd = d
@@ -99,9 +99,9 @@ pub fn main(): i32 {
                 }
             }
             if bi >= 0 {
-                let dx = w.coins[bi].x - w.plane.x
-                let dy = w.coins[bi].y - w.plane.y
-                let dz = w.coins[bi].z - w.plane.z
+                let dx = w.rings[bi].x - w.plane.x
+                let dy = w.rings[bi].y - w.plane.y
+                let dz = w.rings[bi].z - w.plane.z
                 var want = Math.atan2(dx, dz)
                 var diff = want - w.plane.yaw
                 while diff > 3.14159265358979 {
@@ -110,8 +110,8 @@ pub fn main(): i32 {
                 while diff < 0.0 - 3.14159265358979 {
                     diff = diff + 6.28318530717959
                 }
-                roll = Math.clampF64(0.0 - diff * 2.0, 0.0 - 1.0, 1.0)
-                pitch = Math.clampF64(dy * 0.02, 0.0 - 1.0, 1.0)
+                roll = Math.clampF64(diff * 2.2, 0.0 - 1.0, 1.0)
+                pitch = Math.clampF64(dy * 0.03, 0.0 - 1.0, 1.0)
             }
         }
         worldUpdate(w, dt, roll, pitch, false)
@@ -137,6 +137,6 @@ pub fn main(): i32 {
     if rendered > 0 {
         print("render ms/frame: " + (renderMs / rendered).toString())
     }
-    print("score " + w.score.toString() + " coins left " + w.coins.len.toString())
+    print("score " + w.score.toString() + " rings " + w.rings.len.toString() + " level " + w.level.toString())
     return 0
 }

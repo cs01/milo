@@ -11,11 +11,21 @@ milo build examples/games/flight/main.milo -o /tmp/flyby --release && /tmp/flyby
 | space | throttle up |
 | ESC | quit |
 
-Fly through the coins. **Green brackets mark the next one**, and an arrow pins to
-the edge of the screen pointing the way to turn when it is behind you — the trail
-is easy to lose the moment you overshoot. Every coin you take lays another further
-along, so it never runs out, and taking them in quick succession builds a
-multiplier. **You cannot crash** — dive at the ground and it pushes you back up.
+Fly **through the rings**, Pilotwings-style. A hoop standing across the course
+tells you which way to be pointing when you reach it, which a coin never could.
+Green brackets mark the next one, and an arrow pins to the screen edge pointing
+the way to turn when it is behind you.
+
+Clearing a ring throws a burst of sparks out around the hoop — thrown outward in
+the ring's own plane, given gravity, and drawn as camera-facing billboards so they
+read from any angle. Rings are laid ahead endlessly, and clearing them in
+succession builds a multiplier.
+
+**Every ten rings the country changes**: coastline, desert, forest, city. Each
+theme reskins the terrain palette, the sky, the sun angle and the scenery —
+palms, cactus, conifers, tower blocks.
+
+**You cannot crash** — dive at the ground and it pushes you back up.
 
 ## This is a real 3D pipeline
 
@@ -32,8 +42,9 @@ Not a raycaster and not billboards. `gfx3d.milo` is about 260 lines and contains
   toward the sky colour
 
 The terrain is a three-octave value-noise heightmap turned into quads on the fly.
-Coins are 12-gon discs spinning about their vertical axis, drawn from both sides so
-they never disappear edge-on. The aircraft is 17 triangles — fuselage shells, swept wings, tailplane, fin and
+Rings are tubes of quads swept around a circle, drawn from both faces. Scenery is
+placed one prop per terrain tile from a stable hash, so it does not crawl as you
+fly, and built from two primitives — a box and a cone. The aircraft is 17 triangles — fuselage shells, swept wings, tailplane, fin and
 canopy — built from body-space `(forward, right, up)` offsets so the shape is easy
 to read and to change.
 
@@ -48,12 +59,22 @@ camera tile rather than in row order. Near ground covers the screen several time
 over, and with the near geometry laid down first the z-buffer rejects hidden pixels
 with a single compare instead of shading them. That is most of the frame budget.
 
-**A bug the headless harness caught.** `layCoin` originally placed each new coin
-relative to the last element of the coin `Vec`. But that Vec is swap-removed, so its
-last element is not the newest coin — laying from it could place a coin *behind* the
+**Ring passing is a plane crossing, not a distance test.** The sign of
+`dot(plane − ring, ringNormal)` is tracked per ring; when it flips and the radial
+offset was inside the hoop, it counts. A distance test misses at 190 units/second.
+
+**A bug the headless harness caught.** `layRing` originally placed each new ring
+relative to the last element of the ring `Vec`. But that Vec is swap-removed, so its
+last element is not the newest ring — laying from it could place one *behind* the
 aircraft, which was then dropped for being behind, which laid another. An infinite
-loop on frame one. The trail head is now kept as its own field, and coins are laid
-after the sweep rather than during it.
+loop on frame one. The trail head is now its own field, and rings are laid after the
+sweep rather than during it.
+
+Worth being clear about what that bug was: the memory was valid, owned and alive
+throughout. It was the wrong *element*, not a dangling reference. Lifetimes would
+not have caught it, and neither would generational handles — nothing was being held
+across the removal. It is a domain invariant, and the fix was to stop asking the
+container a question it could not answer.
 
 ## Safety
 

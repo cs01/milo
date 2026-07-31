@@ -20,7 +20,7 @@
 // wall-to-wall span is exactly nx by ny lattice units. y=0 is the bottom row.
 
 from "std/math" import {
-    mathSqrt, mathAbs, mathFloor
+    Math
 }
 
 pub let Q: i64 = 9
@@ -415,7 +415,7 @@ pub fn lbmMaxDelta(ux: &Vec<f64>, uy: &Vec<f64>, pux: &Vec<f64>, puy: &Vec<f64>,
     while i < ux.len() {
         let dx = ux[i] - pux[i]
         let dy = uy[i] - puy[i]
-        let d = mathSqrt(dx * dx + dy * dy) / uref
+        let d = Math.sqrt(dx * dx + dy * dy) / uref
         if d > worst {
             worst = d
         }
@@ -438,8 +438,8 @@ pub fn lbmSample(field: &Vec<f64>, nx: i64, ny: i64, fx: f64, fy: f64): f64 {
     if gy < 0.0 {
         gy = 0.0
     }
-    var i0 = mathFloor(gx) as i64
-    var j0 = mathFloor(gy) as i64
+    var i0 = Math.floor(gx) as i64
+    var j0 = Math.floor(gy) as i64
     if i0 > nx - 2 {
         i0 = nx - 2
     }

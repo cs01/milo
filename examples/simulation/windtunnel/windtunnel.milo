@@ -19,7 +19,7 @@
 // -O3 matters: the debug build will not hold 60fps.
 
 from "std/math" import {
-    mathSqrt, mathAbs, mathSin, mathCos, mathFloor, mathPi
+    Math
 }
 from "std/strconv" import {
     formatFloat
@@ -107,7 +107,7 @@ pub fn nacaThickness(xc: f64, t: f64): f64 {
     if xc < 0.0 || xc > 1.0 {
         return 0.0
     }
-    return 5.0 * t * (0.2969 * mathSqrt(xc) - 0.1260 * xc - 0.3516 * xc * xc + 0.2843 * xc * xc * xc - 0.1015 * xc * xc * xc * xc)
+    return 5.0 * t * (0.2969 * Math.sqrt(xc) - 0.1260 * xc - 0.3516 * xc * xc + 0.2843 * xc * xc * xc - 0.1015 * xc * xc * xc * xc)
 }
 
 // Rebuild the obstacle mask. Lattice y points up, x points downstream; the airfoil
@@ -116,9 +116,9 @@ pub fn nacaThickness(xc: f64, t: f64): f64 {
 pub fn buildSolid(solid: &mut Vec<bool>, shape: i64, aoaDeg: f64) {
     let cxo = (NX as f64) * 0.28
     let cyo = (NY as f64) * 0.5
-    let a = aoaDeg * mathPi() / 180.0
-    let ca = mathCos(a)
-    let sa = mathSin(a)
+    let a = aoaDeg * Math.pi() / 180.0
+    let ca = Math.cos(a)
+    let sa = Math.sin(a)
     let chord = D_CHAR * 2.2
     let radius = D_CHAR * 0.5
 
@@ -143,7 +143,7 @@ pub fn buildSolid(solid: &mut Vec<bool>, shape: i64, aoaDeg: f64) {
                 let xc = xr / chord + 0.25
                 if xc >= 0.0 && xc <= 1.0 {
                     let half = nacaThickness(xc, 0.12) * chord
-                    hit = mathAbs(yr) <= half
+                    hit = Math.abs(yr) <= half
                 }
             }
             solid[c] = hit
@@ -159,7 +159,7 @@ pub fn buildSolid(solid: &mut Vec<bool>, shape: i64, aoaDeg: f64) {
 // airfoil it separates hard off the tail, so the wake is wide and unsteady.
 pub fn carTop(xc: f64): f64 {
     if xc < 0.10 {
-        return 0.16 * mathSqrt(xc / 0.10)
+        return 0.16 * Math.sqrt(xc / 0.10)
     }
     if xc < 0.30 {
         return 0.16 + 0.04 * (xc - 0.10) / 0.20
@@ -223,7 +223,7 @@ pub fn rgb(r: f64, g: f64, b: f64): u32 {
 // Diverging map for signed fields: counter-clockwise vorticity warm, clockwise
 // cool, near-zero near-black so the wake structure reads against the background.
 pub fn diverging(t: f64): u32 {
-    let v = clamp01(mathAbs(t))
+    let v = clamp01(Math.abs(t))
     if t >= 0.0 {
         return rgb(0.06 + 0.94 * v, 0.06 + 0.38 * v * v, 0.10 + 0.05 * v)
     }
@@ -566,7 +566,7 @@ pub fn main(): i32 {
                         fb[dst] = diverging(vort[cell] / (U_IN * vScale))
                     } else {
                         if view == VIEW_SPEED {
-                            let sp = mathSqrt(ux[cell] * ux[cell] + uy[cell] * uy[cell])
+                            let sp = Math.sqrt(ux[cell] * ux[cell] + uy[cell] * uy[cell])
                             fb[dst] = sequential(sp / (U_IN * 1.8))
                         } else {
                             fb[dst] = sequential(0.5 + (rho[cell] - 1.0) * 12.0)

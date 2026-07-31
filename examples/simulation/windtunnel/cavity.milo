@@ -25,7 +25,7 @@
 // @run:
 
 from "std/math" import {
-    mathAbs, mathSqrt
+    Math
 }
 from "std/strconv" import {
     formatFloat, parseInt
@@ -192,7 +192,7 @@ pub fn runCavity(re: i64, n: i64, tolSteady: f64, maxIters: i64, verbose: bool):
         if !skipU(k) {
             let got = lbmSample(ux, n, n, 0.5, ghiaY(k)) / uLid
             let want = ghiaU(re, k)
-            let e = mathAbs(got - want)
+            let e = Math.abs(got - want)
             if e > maxErrU {
                 maxErrU = e
             }
@@ -213,7 +213,7 @@ pub fn runCavity(re: i64, n: i64, tolSteady: f64, maxIters: i64, verbose: bool):
         if !skipV(re, k) {
             let got = lbmSample(uy, n, n, ghiaX(k), 0.5) / uLid
             let want = ghiaV(re, k)
-            let e = mathAbs(got - want)
+            let e = Math.abs(got - want)
             if e > maxErrV {
                 maxErrV = e
             }
@@ -226,7 +226,7 @@ pub fn runCavity(re: i64, n: i64, tolSteady: f64, maxIters: i64, verbose: bool):
         k = k + 1
     }
 
-    let rms = mathSqrt(sumSq / (count as f64))
+    let rms = Math.sqrt(sumSq / (count as f64))
     return CavityResult {
         re: re, n: n, iters: iters, maxErrU: maxErrU, maxErrV: maxErrV, rmsErr: rms, converged: converged
     }

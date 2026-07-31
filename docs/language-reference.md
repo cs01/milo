@@ -3,7 +3,7 @@ system: language-reference
 purpose: the syntax-and-semantics reference for Milo — types, control flow, ownership, slices, Heap, arenas, generics
 key-files: src/parser.ts, src/checker.ts, docs/grammar.ebnf, std/arena.milo
 update-when: surface syntax or a language feature changes, or a stdlib type gets first-class reference docs
-last-verified: 2026-07-23
+last-verified: 2026-07-31 (every snippet compiles; float printing + move-out-of-borrow sections added)
 -->
 
 # The Milo Language Guide
@@ -55,6 +55,8 @@ Every Milo program starts at `main`, which returns an `i32` exit code.
 `let` declares an immutable binding. `var` declares a mutable one.
 
 ```milo
+fn mightFail(): i32 { return 0 }
+
 let x: i32 = 42       // immutable — cannot be reassigned
 var count: i32 = 0     // mutable — can be reassigned
 count = count + 1
@@ -274,6 +276,21 @@ let s = n.toString()          // "42"
 let pi: f64 = 3.14
 let t = pi.toString()         // "3.14"
 ```
+
+A float prints as the **shortest decimal that reads back as the same value**, so
+`toString`, string interpolation, struct display and `jsonStringify` all round-trip:
+
+```milo
+print((1.0 / 3.0).toString())     // 0.3333333333333333
+print((0.1 + 0.2).toString())     // 0.30000000000000004
+print((100.0).toString())         // 100      — not 1e+02
+print((1e21).toString())          // 1e+21    — exponent form only when fixed would be absurd
+```
+
+An `f32` round-trips at `f32` precision (`(1.0 / 3.0) as f32` prints `0.33333334`, not the
+promoted double's digits). Non-finite values print as `inf`, `-inf` and `nan` — note those
+are not legal JSON, so a `NaN` reaching `jsonStringify` produces output no parser will
+accept.
 
 ### Type Casts
 
@@ -716,6 +733,12 @@ The enum name may be left off when the subject's type already fixes it, which is
 usually the case. Both forms are accepted, and they can be mixed:
 
 ```milo
+enum Shape {
+    Circle(f64),
+    Rect(f64, f64),
+    Point,
+}
+
 fn area(s: Shape): f64 {
     match s {
         Circle(r) => { return 3.14159 * r * r }
@@ -724,13 +747,15 @@ fn area(s: Shape): f64 {
     }
 }
 
-let head = v.pop()
-match head {
-    Some(n) => { print(n) }
+var v: Vec<i64> = Vec.new()
+v.push(1)
+
+match v.pop() {
+    Some(n) => { print(n.toString()) }
     None => { print("empty") }
 }
 
-if let Some(n) = head { print(n) }
+if let Some(n) = v.pop() { print(n.toString()) }
 ```
 
 A written-out prefix that disagrees with the subject is still an error — eliding is
@@ -1332,6 +1357,27 @@ fn bad(s: &string): &string {     // COMPILE ERROR: can't return a reference
 ```milo error
 struct Bad { r: &string }         // COMPILE ERROR: can't store a reference
 ```
+
+You also cannot move a non-`Copy` value *out* of a reference — not the whole pointee, and
+not one of its fields. Both would shallow-copy a heap buffer the borrow does not own, leaving
+two owners and a double free:
+
+```milo error
+struct Doc { text: string }
+
+fn describe(d: &Doc): string {
+    return d.text                 // COMPILE ERROR: cannot move the borrowed value out of 'd'
+}
+```
+
+Write `return d.text.clone()` to take an owned copy. `clone()` exists on every type for this
+reason, including `Copy` scalars where it is the identity — so a generic
+`fn get<T>(w: &Wrapper<T>): T { return w.val.clone() }` compiles for `T = i64` and
+`T = string` alike.
+
+Closure bodies are exempt, because the sort builtins read an extracted key without ever
+dropping it: `users.sortByKey((u: &User) => u.name)` is the supported way to sort by a
+string field.
 
 This is Milo's key insight: by restricting where references can live, you get
 memory safety without a borrow checker or lifetime annotations.

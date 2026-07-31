@@ -101,12 +101,27 @@ fn clamp(x: i32, lo: i32, hi: i32): i32
 - **Now:** both are `cannot move the borrowed value out of '<base>'`, with a hint to `clone()`.
   `borrowBaseName` walks the whole `a.b.c` / `v[i].f` chain to the root binding.
   `tests/errors/moveFieldOutOfBorrow.milo` retains it.
-- **The carve-out that remains:** closure bodies are exempt, because
-  `users.sortByKey((u: &User) => u.name)` is the documented way to sort by a string field and
-  is sound only because the sort builtins read the extracted key and never drop it. Deciding
-  that in general needs the callee's contract, which the checker does not have at that point.
-  So a closure that returns a borrowed field to a *user* function that does drop it is still
-  a live hole — narrower than what was fixed, and the next thing to probe here.
+- **The carve-out, and the second bug it hid.** The first fix exempted *closure bodies* in
+  general, on the reasoning that `users.sortByKey((u: &User) => u.name)` is the documented way
+  to sort by a string field and is sound because the sort reads the key without dropping it.
+  That reasoning was empirical, and it was wrong for `map`, which **retains** what its closure
+  returns: `users.map((u: &User) => u.name)` compiled, built a `Vec<string>` aliasing the
+  source elements' buffers, and double-freed on drop — a live abort (exit 133), reachable from
+  a one-line idiom. The exemption is now keyed to `sortByKey` alone and is **fail-closed**: a
+  new combinator is subject to the rule until someone proves it does not retain the value.
+  `tests/errors/mapMoveFieldOutOfBorrow.milo` pins it.
+- **A second lesson, about the fix rather than the bug.** The exemption's first form did not
+  just fail to error — it fell through to the ordinary move path, marking the field moved, so
+  codegen *zeroed the source field inside the container being sorted*. Every name came back
+  empty, silently, with the sort still reporting success and the whole suite green, because no
+  fixture covered a string key. `tests/fixtures/sortByKeyString.milo` covers it now. Not
+  erroring and not move-marking are two separate obligations here, and only one of them is
+  visible in the diagnostic.
+- **What is still open:** a closure that returns a borrowed field to a *user-defined* higher
+  order function is now rejected along with `map`, so the known hole is closed — but the
+  soundness of `sortByKey` rests on reading `codegen-vec.ts`, not on anything the type system
+  enforces. Making the key extractor's contract explicit (a borrow-returning closure type) is
+  the real fix, and it is blocked on second-class refs banning `&T` returns.
 - Found while chasing an unrelated failing test (`tests/mangle.test.ts`, red on main for this
   reason), which is the honest lesson: the red test was the signal, not the sweep.
 

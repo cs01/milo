@@ -1407,9 +1407,11 @@ reason, including `Copy` scalars where it is the identity — so a generic
 `fn get<T>(w: &Wrapper<T>): T { return w.val.clone() }` compiles for `T = i64` and
 `T = string` alike.
 
-Closure bodies are exempt, because the sort builtins read an extracted key without ever
-dropping it: `users.sortByKey((u: &User) => u.name)` is the supported way to sort by a
-string field.
+`sortByKey`'s key extractor is the one exemption: the sort reads the key to compare it and
+never stores or drops it, so `users.sortByKey((u: &User) => u.name)` is the supported way to
+sort by a string field. Every other closure is subject to the rule, `map` included — it
+*keeps* what the closure returns, so `users.map((u: &User) => u.name.clone())` needs the
+clone, and the allocation it costs is meant to be visible.
 
 This is Milo's key insight: by restricting where references can live, you get
 memory safety without a borrow checker or lifetime annotations.

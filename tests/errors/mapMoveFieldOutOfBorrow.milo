@@ -1,0 +1,24 @@
+// @error: cannot move the borrowed value out of 'u'
+//
+// `map` RETAINS what its closure returns, so a closure handing back a field of its borrowed
+// parameter built a Vec<string> aliasing the source elements' buffers, and both freed them:
+// a live double-free abort (exit 133), not a hypothetical one.
+//
+// This is why the move-out-of-a-borrow exemption is keyed to `sortByKey` alone rather than
+// to closures in general — sortByKey reads the key to compare it and never stores or drops
+// it, and that property has to be proved per callee, not assumed. Write
+// `u.name.clone()` here.
+
+struct User {
+    name: string,
+    age: i32,
+}
+
+fn main() {
+    var users: Vec<User> = [User {
+        name: "Alice", age: 30,
+    }
+    ,]
+    let names = users.map((u: &User) => u.name)
+    print(names[0])
+}

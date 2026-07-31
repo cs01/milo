@@ -265,9 +265,10 @@ export class TypeChecker {
   private cSigs = new Map<string, CSig>();
   private offsetOfFields = new Map<Expr, string>();
   private closureScopeDepth: number | null = null;
-  // Nesting depth of closure bodies currently being checked. Only the move-out-
-  // of-a-borrow rule reads it; see the FieldAccess branch of tryMove.
-  private closureBodyDepth = 0;
+  // Nesting depth of a `sortByKey` key-extractor body currently being checked — the one
+  // callee known to read a returned field without retaining or dropping it. Only the
+  // move-out-of-a-borrow rule reads it; see the FieldAccess branch of tryMove.
+  private keyExtractorDepth = 0;
   private currentClosureCaptures: Map<string, CaptureInfo> | null = null;
   private closureParamHints: TypeKind[] | null = null;
   // The expected RETURN type of a closure being checked against a fn-typed hint. Without
@@ -3619,14 +3620,20 @@ export class TypeChecker {
         const base = this.borrowBaseName(expr);
         if (base === null) {
           this.movedExprs.add(expr);
-        } else if (this.closureBodyDepth === 0) {
+        } else if (this.keyExtractorDepth === 0) {
           this.error(`cannot move the borrowed value out of '${base}'`, expr.span,
             `'${base}' is a reference — call .clone() to take an owned copy`);
         }
-        // Inside a closure: neither error nor move-mark. Marking it moved would make
-        // codegen zero the source field, and for a key extractor that field lives in the
-        // container being sorted — `sortByKey((u: &User) => u.name)` silently emptied every
-        // name. Leaving it unmarked is the pre-existing behavior the sort builtins rely on.
+        // Inside a sortByKey extractor: neither error nor move-mark. Not marking it moved
+        // matters as much as not erroring — marking it makes codegen zero the source field,
+        // and that field lives in the container being sorted, which silently emptied every
+        // name (tests/fixtures/sortByKeyString.milo).
+        //
+        // The exemption is deliberately keyed to sortByKey alone, and fail-closed: a new
+        // combinator is subject to the rule until someone proves it does not retain the
+        // value. Exempting *closures* generally was unsound — `map` retains what its closure
+        // returns, so `users.map((u: &User) => u.name)` built a Vec<string> aliasing the
+        // users' buffers and double-freed on drop (a live abort, exit 133).
       }
     }
   }
@@ -5455,9 +5462,7 @@ export class TypeChecker {
           : (retHint && retHint.tag !== "unknown" ? retHint : { tag: "unknown" });
         const savedRetType = this.currentFnRetType;
         this.currentFnRetType = inferredRet;
-        this.closureBodyDepth++;
         for (const s of expr.body) this.checkStmt(s, inferredRet);
-        this.closureBodyDepth--;
         if (inferredRet.tag === "unknown" && expr.body.length > 0) {
           const lastStmt = expr.body[expr.body.length - 1];
           if (lastStmt.kind === "Return" && lastStmt.value) {
@@ -6001,7 +6006,11 @@ export class TypeChecker {
             const elemRef: TypeKind = { tag: "ref", inner: objType.element, mutable: false };
             const cbHint: TypeKind = { tag: "fn", params: [elemRef], ret: { tag: "unknown" } };
             const cbBorrow = this.borrowDuringCallback(expr.object);
+            // The one position where a closure may hand back a field of its borrowed
+            // parameter: the sort reads the key to compare it and never stores or drops it.
+            this.keyExtractorDepth++;
             const cbType = this.checkExprWithHint(expr.args[0], cbHint);
+            this.keyExtractorDepth--;
             if (cbBorrow) this.unfreeze(cbBorrow);
             if (cbType.tag !== "fn") { this.error(`'sortByKey' argument must be a function`, sp); return this.setType(expr, { tag: "void" }); }
             const keyType = cbType.ret;

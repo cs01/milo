@@ -3616,13 +3616,17 @@ export class TypeChecker {
     if (expr.kind === "FieldAccess") {
       const fieldType = this.exprTypes.get(expr);
       if (fieldType && !isCopy(fieldType, (n) => this.isAllCopyEnum(n), (n) => this.isAllCopyStruct(n))) {
-        const base = this.closureBodyDepth === 0 ? this.borrowBaseName(expr) : null;
-        if (base !== null) {
+        const base = this.borrowBaseName(expr);
+        if (base === null) {
+          this.movedExprs.add(expr);
+        } else if (this.closureBodyDepth === 0) {
           this.error(`cannot move the borrowed value out of '${base}'`, expr.span,
             `'${base}' is a reference — call .clone() to take an owned copy`);
-        } else {
-          this.movedExprs.add(expr);
         }
+        // Inside a closure: neither error nor move-mark. Marking it moved would make
+        // codegen zero the source field, and for a key extractor that field lives in the
+        // container being sorted — `sortByKey((u: &User) => u.name)` silently emptied every
+        // name. Leaving it unmarked is the pre-existing behavior the sort builtins rely on.
       }
     }
   }

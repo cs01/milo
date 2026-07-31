@@ -1,0 +1,40 @@
+// A key extractor reading a string field must leave the container intact.
+//
+// The move-out-of-a-borrow rule exempts closure bodies, because the sort builtins read the
+// extracted key and never drop it. The first version of that exemption fell through to the
+// ordinary move path, which marks the field as moved — so codegen zeroed `u.name` *in the
+// Vec being sorted* and every name came back empty, silently, with the sort still "working".
+// No fixture covered a string key, so the whole suite stayed green.
+
+struct User {
+    name: string,
+    age: i32,
+}
+
+fn main() {
+    var users: Vec<User> = [User {
+        name: "Carol", age: 41,
+    }
+    , User {
+        name: "Alice", age: 30,
+    }
+    , User {
+        name: "Bob", age: 25,
+    }
+    ,]
+
+    users.sortByKey((u: &User) => u.name)
+    var i: i64 = 0
+    while i < users.len {
+        // @expect: Alice
+        // @expect: Bob
+        // @expect: Carol
+        print(users[i].name)
+        i = i + 1
+    }
+
+    // the elements must still be whole, not just the keys
+    users.sortByKey((u: &User) => u.age)
+    // @expect: Bob 25
+    print($"{users[0].name} {users[0].age}")
+}

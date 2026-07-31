@@ -1,4 +1,4 @@
-// @error: cannot move the borrowed value out of 'self'
+// @error: cannot move 'self.inner.s' out of the borrowed 'self'
 //
 // The same hazard through a field chain and through `self`: with only the
 // one-level check, `self.inner.s` slipped past and the callee zeroed the

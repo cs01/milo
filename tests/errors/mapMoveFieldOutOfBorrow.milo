@@ -1,4 +1,4 @@
-// @error: cannot move the borrowed value out of 'u'
+// @error: cannot move 'u.name' out of the borrowed 'u'
 //
 // `map` RETAINS what its closure returns, so a closure handing back a field of its borrowed
 // parameter built a Vec<string> aliasing the source elements' buffers, and both freed them:

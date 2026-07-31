@@ -1,4 +1,4 @@
-// @error: cannot move the borrowed value out of 'd'
+// @error: cannot move 'd.text' out of the borrowed 'd'
 //
 // Returning a non-Copy field out of a `&T` used to compile, and produced a
 // String that aliased a pointee the caller was about to drop: the value printed

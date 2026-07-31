@@ -1,0 +1,26 @@
+// The escape hatch the move-out-of-a-borrow diagnostic points at for `&mut`.
+//
+// `return d.text` through a `&mut Doc` is rejected like any other move out of a borrow, but
+// unlike the shared-`&` case there is a zero-copy answer: swap something in. `replace` moves
+// the field out and leaves the replacement behind, so the owner is still whole and nothing is
+// aliased or freed twice. The hint only offers this for `&mut` — through a shared `&` there
+// is no write access and cloning is the only honest option.
+
+struct Doc {
+    text: string,
+}
+
+fn take(d: &mut Doc): string {
+    return replace(d.text, "")
+}
+
+fn main() {
+    var doc = Doc {
+        text: "hello",
+    }
+    // @expect: hello
+    print(take(doc))
+    // the field is left holding the replacement, not freed memory
+    // @expect: []
+    print($"[{doc.text}]")
+}

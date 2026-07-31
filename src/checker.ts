@@ -3607,22 +3607,21 @@ export class TypeChecker {
     // hazard `tryMove` already rejects for a whole `&T` binding, so it gets the
     // same answer: clone to own.
     //
-    // Closure bodies are exempt. `users.sortByKey((u: &User) => u.name)` is the
-    // documented way to sort by a string field, and it is sound because the
-    // sort builtins read the extracted key and never drop it — the alias never
-    // outlives the call. Deciding that in general needs the callee's contract,
-    // which the checker does not have here, so the narrow rule is: reject the
-    // escape out of a named function, where the caller really does become a
-    // second owner.
+    // `sortByKey`'s key extractor is the sole exemption; see the note below.
     if (expr.kind === "FieldAccess") {
       const fieldType = this.exprTypes.get(expr);
       if (fieldType && !isCopy(fieldType, (n) => this.isAllCopyEnum(n), (n) => this.isAllCopyStruct(n))) {
-        const base = this.borrowBaseName(expr);
+        const base = this.borrowBasePath(expr);
         if (base === null) {
           this.movedExprs.add(expr);
         } else if (this.keyExtractorDepth === 0) {
-          this.error(`cannot move the borrowed value out of '${base}'`, expr.span,
-            `'${base}' is a reference — call .clone() to take an owned copy`);
+          // `replace` is only offered for `&mut`: it swaps something in, which needs write
+          // access. Through a shared `&` the only honest answer is to clone.
+          const swap = base.mutable
+            ? `, or 'replace(${base.root}${base.path}, ...)' to take the field and leave something in its place`
+            : "";
+          this.error(`cannot move '${base.root}${base.path}' out of the borrowed '${base.root}'`, expr.span,
+            `'${base.root}' is a reference — call .clone() to take an owned copy${swap}`);
         }
         // Inside a sortByKey extractor: neither error nor move-mark. Not marking it moved
         // matters as much as not erroring — marking it makes codegen zero the source field,
@@ -3639,15 +3638,25 @@ export class TypeChecker {
   }
 
   // Walks `a.b.c` and `v[i].f` down to the variable the read ultimately comes
-  // out of, and names it when that variable is a `&T`/`&mut T` binding. The old
+  // out of, and reports it when that variable is a `&T`/`&mut T` binding. The old
   // check only looked one level up (`expr.object.kind === "Ident"`), so a nested
   // `d.inner.text` slipped past it entirely.
-  private borrowBaseName(expr: Expr): string | null {
+  //
+  // Returns the whole accessor path too, so the diagnostic can say which field is being
+  // moved rather than only which variable it came from. An index becomes `[…]` — the
+  // subscript is not re-evaluated for the message, and naming the exact element would
+  // imply a precision the check does not have.
+  private borrowBasePath(expr: Expr): { root: string; path: string; mutable: boolean } | null {
+    const segments: string[] = [];
     let cur: Expr = expr;
-    while (cur.kind === "FieldAccess" || cur.kind === "IndexAccess") cur = cur.object;
+    while (cur.kind === "FieldAccess" || cur.kind === "IndexAccess") {
+      segments.unshift(cur.kind === "FieldAccess" ? `.${cur.field}` : "[…]");
+      cur = cur.object;
+    }
     if (cur.kind !== "Ident") return null;
     const info = this.lookup(cur.name);
-    return info && info.type.tag === "ref" ? cur.name : null;
+    if (!info || info.type.tag !== "ref") return null;
+    return { root: cur.name, path: segments.join(""), mutable: info.type.mutable };
   }
 
   private resolveAssignTarget(expr: Expr): { type: TypeKind; mutable: boolean } | null {

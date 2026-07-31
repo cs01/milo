@@ -1,0 +1,21 @@
+// @error: cannot move the borrowed value out of 'd'
+//
+// Returning a non-Copy field out of a `&T` used to compile, and produced a
+// String that aliased a pointee the caller was about to drop: the value printed
+// as freed bytes and then double-freed. A whole `&T` binding was already
+// rejected here; the field read is the same hazard one level down.
+
+struct Doc {
+    text: string,
+}
+
+fn describe(d: &Doc): string {
+    return d.text
+}
+
+fn main() {
+    let doc = Doc {
+        text: "hi",
+    }
+    print(describe(doc))
+}

@@ -63,7 +63,7 @@ pub fn parse(s: string): Doc {
 }
 
 pub fn describe(d: &Doc): string {
-    return d.text
+    return d.text.clone()
 }
 
 fn main(): void {

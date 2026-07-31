@@ -1,6 +1,6 @@
-// @expect: 78.5397
+// @expect: 78.53975
 // @expect: 16
-// @expect: 28.2745
+// @expect: 28.274499999999996
 
 pub interface Shape {
     fn area(self: &Self): f64

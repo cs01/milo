@@ -9,6 +9,10 @@ import { resolve, dirname, basename } from "path";
 // `.` can't appear in a Milo identifier, so this never collides with a user function.
 const GLOBAL_INIT_FN = "__milo.global_init";
 
+// Scratch size for one formatted f64. Worst case at 17 significant digits is
+// "-1.2345678901234567e-308" — 24 bytes plus the NUL.
+const F64_BUF = 32;
+
 interface ExternAbiInfo {
   args: (ArgClass | null)[]; // per fixed param; null = direct (scalar/ptr/ref — no rewrite)
   ret: RetClass;
@@ -104,6 +108,9 @@ export class Codegen {
   private structDropCache = new Map<string, boolean>();
   private generatedDropHelpers = new Set<string>();
   private generatedJsonEscapeHelper = false;
+  private generatedF64FormatHelper = false;
+  private generatedF32FormatHelper = false;
+  private needsStrtof = false;
   private generatedStructDropHelpers = new Set<string>();
   private dropHelperBodies: string[][] = [];
   private helperFnBodies: string[][] = [];
@@ -1185,6 +1192,8 @@ export class Codegen {
       this.output.splice(1, 0, "declare i32 @snprintf(ptr, i64, ptr, ...)");
     if (this.needsStrtod && !declaredExterns.has("strtod"))
       this.output.splice(1, 0, "declare double @strtod(ptr, ptr)");
+    if (this.needsStrtof && !declaredExterns.has("strtof"))
+      this.output.splice(1, 0, "declare float @strtof(ptr, ptr)");
     if (this.needsMemset && !declaredExterns.has("memset"))
       this.output.splice(1, 0, "declare ptr @memset(ptr, i32, i64)");
     if (this.needsMemsetIntrinsic)
@@ -3780,13 +3789,8 @@ export class Codegen {
       }
       case "IntLit":
         return [lines, String(expr.value), lt];
-      case "FloatLit": {
-        // LLVM needs hex float for exact representation
-        const buf = new ArrayBuffer(8);
-        new Float64Array(buf)[0] = expr.value;
-        const hex = [...new Uint8Array(buf)].reverse().map(b => b.toString(16).padStart(2, "0")).join("");
-        return [lines, `0x${hex.toUpperCase()}`, lt];
-      }
+      case "FloatLit":
+        return [lines, this.formatFloatBits(expr.value, lt), lt];
       case "BoolLit":
         return [lines, expr.value ? "1" : "0", "i1"];
       case "StringLit": {
@@ -7311,14 +7315,17 @@ export class Codegen {
         fmtStr = vt.signed ? "%lld" : "%llu";
       }
     } else {
-      // float — promote f32 to double
-      if (vt.tag === "float" && vt.bits === 32) {
-        const promoted = this.nextTemp();
-        lines.push(`  ${promoted} = fpext float ${vVal} to double`);
-        argVal = promoted;
-      }
-      argType = "double";
-      fmtStr = "%g";
+      // Floats don't go through snprintf directly — they need the round-trip
+      // search in @milo.fmt.f64, which already writes an owned buffer we can
+      // hand straight to %String.
+      const { buf, len } = this.emitFloatToBuf(vVal, vt.tag === "float" ? vt.bits : 64, lines);
+      const f0 = this.nextTemp();
+      lines.push(`  ${f0} = insertvalue %String undef, ptr ${buf}, 0`);
+      const f1 = this.nextTemp();
+      lines.push(`  ${f1} = insertvalue %String ${f0}, i64 ${len}, 1`);
+      const f2 = this.nextTemp();
+      lines.push(`  ${f2} = insertvalue %String ${f1}, i64 ${F64_BUF}, 2`);
+      return [lines, f2, "%String"];
     }
 
     const fmt = this.addString(fmtStr);
@@ -8520,14 +8527,10 @@ export class Codegen {
       return;
     }
     if (tk.tag === "float") {
-      if (tk.bits === 32) {
-        const promoted = this.nextTemp();
-        lines.push(`  ${promoted} = fpext float ${val} to double`);
-        partArgs.push({ val: promoted, type: "double" });
-      } else {
-        partArgs.push({ val: val, type: "double" });
-      }
-      partFmts.push("%g");
+      const { buf } = this.emitFloatToBuf(val, tk.bits, lines);
+      partFmts.push("%s");
+      partArgs.push({ val: buf, type: "ptr" });
+      tempBufs.push(buf);
       return;
     }
     if (tk.tag === "struct") {
@@ -8777,14 +8780,10 @@ export class Codegen {
         formatParts.push(fk.bits <= 32 ? (fk.signed ? "%d" : "%u") : (fk.signed ? "%lld" : "%llu"));
         snprintfArgs.push({ val: passVal, type: passType });
       } else if (fk.tag === "float") {
-        if (fk.bits === 32) {
-          const promoted = this.nextTemp();
-          lines.push(`  ${promoted} = fpext float ${fieldVal} to double`);
-          snprintfArgs.push({ val: promoted, type: "double" });
-        } else {
-          snprintfArgs.push({ val: fieldVal, type: "double" });
-        }
-        formatParts.push("%g");
+        const { buf } = this.emitFloatToBuf(fieldVal, fk.bits, lines);
+        formatParts.push("%s");
+        snprintfArgs.push({ val: buf, type: "ptr" });
+        escapeBufs.push(buf);
       }
     }
 
@@ -8823,6 +8822,93 @@ export class Codegen {
   // std/json's jsonEscapeStr — ", \, \n, \t, \r as 2-byte escapes, all other
   // control chars (<0x20) as \u00XX. NUL-terminated so the result's data ptr
   // can feed snprintf %s. Worst case every byte escapes to \u00XX: 6x + NUL.
+  // milo.fmt.f{32,64}(v, buf) -> length: the shortest decimal string that reads
+  // back as the bit-identical value. Plain "%g" is 6 significant digits, which
+  // silently destroys data — 1.0/3.0 printed as `0.333333` and 123456789.123456
+  // as `1.23457e+08`.
+  //
+  // Two loops. The first counts integer digits by walking powers of ten, and the
+  // second raises "%.*g" precision until the text parses back equal. Precision
+  // has to *start* at the integer-digit count, not at 1: %g switches to exponent
+  // form once the exponent reaches the precision, so `%.1g` of 100.0 is the
+  // round-tripping but unreadable "1e+02". Starting at 3 gives "100".
+  //
+  // The digit walk uses only comparisons and a multiply, so there is no libm
+  // dependency (log10 would need -lm on Linux). NaN makes every fcmp false, so
+  // it takes dig=1, never compares equal, and falls out of the second loop at
+  // the cap as "nan"; infinity saturates the walk and prints "inf". Both match
+  // the old %g output. `buf` must be at least F64_BUF bytes.
+  private ensureFloatFormatHelper(bits: 32 | 64) {
+    if (bits === 32) {
+      if (this.generatedF32FormatHelper) return;
+      this.generatedF32FormatHelper = true;
+      this.needsStrtof = true;
+    } else {
+      if (this.generatedF64FormatHelper) return;
+      this.generatedF64FormatHelper = true;
+      this.needsStrtod = true;
+    }
+    this.needsSnprintf = true;
+    const fmt = this.addString("%.*g");
+    // A float needs at most 9 significant digits to round-trip, a double 17.
+    const cap = bits === 32 ? 9 : 17;
+    const ty = bits === 32 ? "float" : "double";
+    const parse = bits === 32 ? "@strtof" : "@strtod";
+    // The digit walk and snprintf both want a double; f32 is promoted once.
+    const widen = bits === 32
+      ? [`  %d = fpext float %v to double`]
+      : [`  %d = fadd double %v, 0.000000e+00`];
+    this.dropHelperBodies.push([
+      `define private i64 @milo.fmt.f${bits}(${ty} %v, ptr %buf) {`,
+      `entry.bb:`,
+      ...widen,
+      `  %isneg = fcmp olt double %d, 0.000000e+00`,
+      `  %negd = fneg double %d`,
+      `  %av = select i1 %isneg, double %negd, double %d`,
+      `  br label %dloop`,
+      `dloop:`,
+      `  %dig = phi i32 [ 1, %entry.bb ], [ %dignext, %dnext ]`,
+      `  %pow = phi double [ 1.000000e+01, %entry.bb ], [ %pownext, %dnext ]`,
+      `  %room = icmp slt i32 %dig, ${cap}`,
+      `  %over = fcmp oge double %av, %pow`,
+      `  %grow = and i1 %room, %over`,
+      `  br i1 %grow, label %dnext, label %ploop`,
+      `dnext:`,
+      `  %dignext = add i32 %dig, 1`,
+      `  %pownext = fmul double %pow, 1.000000e+01`,
+      `  br label %dloop`,
+      `ploop:`,
+      `  %p = phi i32 [ %dig, %dloop ], [ %pnext, %again ]`,
+      `  %n = call i32 (ptr, i64, ptr, ...) @snprintf(ptr %buf, i64 ${F64_BUF}, ptr ${fmt.label}, i32 %p, double %d)`,
+      `  %back = call ${ty} ${parse}(ptr %buf, ptr null)`,
+      `  %exact = fcmp oeq ${ty} %back, %v`,
+      `  %last = icmp sge i32 %p, ${cap}`,
+      `  %stop = or i1 %exact, %last`,
+      `  br i1 %stop, label %fin, label %again`,
+      `again:`,
+      `  %pnext = add i32 %p, 1`,
+      `  br label %ploop`,
+      `fin:`,
+      `  %n64 = sext i32 %n to i64`,
+      `  ret i64 %n64`,
+      `}`,
+      ``,
+    ]);
+  }
+
+  // Formats a float into a fresh malloc'd buffer and returns it. Callers own the
+  // buffer — free it, or hand it to a temp-buf list that frees it.
+  private emitFloatToBuf(val: string, bits: number, lines: string[]): { buf: string; len: string } {
+    const w = bits === 32 ? 32 : 64;
+    this.ensureFloatFormatHelper(w);
+    this.needsMalloc = true;
+    const buf = this.nextTemp();
+    lines.push(`  ${buf} = call ptr @malloc(i64 ${F64_BUF})`);
+    const len = this.nextTemp();
+    lines.push(`  ${len} = call i64 @milo.fmt.f${w}(${w === 32 ? "float" : "double"} ${val}, ptr ${buf})`);
+    return { buf, len };
+  }
+
   private ensureJsonEscapeHelper() {
     if (this.generatedJsonEscapeHelper) return;
     this.generatedJsonEscapeHelper = true;
@@ -10184,10 +10270,14 @@ export class Codegen {
 
   private usedSatIntrinsics?: Set<string>;
 
-  // LLVM encodes a double constant as its raw 64-bit hex pattern.
-  private formatFloatBits(v: number): string {
+  // LLVM encodes a float or double constant as a raw 64-bit hex pattern, but a
+  // `float` operand only accepts a pattern that is exactly representable in
+  // single precision. Emitting the double bits of 0.1 for an f32 field is a hard
+  // LLVM error ("floating point constant invalid for type"), so round through
+  // f32 first when that is the operand type.
+  private formatFloatBits(v: number, llvmTy = "double"): string {
     const buf = new ArrayBuffer(8);
-    new Float64Array(buf)[0] = v;
+    new Float64Array(buf)[0] = llvmTy === "float" ? Math.fround(v) : v;
     const bits = new BigUint64Array(buf)[0];
     return `0x${bits.toString(16).toUpperCase().padStart(16, "0")}`;
   }

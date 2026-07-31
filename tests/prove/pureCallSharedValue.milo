@@ -1,0 +1,20 @@
+// @proven: 1
+// @failed: 0
+// @unknown: 0
+// `score` declares no `ensures`, so a call in value position used to be untranslatable —
+// "no rule for calls to 'score'" — and the postcondition went unknown. `@pure` with no
+// `&mut` parameter makes the call a function of its arguments alone, so both sites share
+// one symbol and `score(a) - score(a) == 0` falls out. Note what is NOT claimed: nothing
+// about the VALUE (see pureCallValueUnknown) — only that it is the same value twice.
+@pure
+fn score(x: i64): i64 {
+    return x * 3
+}
+
+pub fn stable(a: i64): i64
+ensures result == 0
+{
+    let p = score(a)
+    let q = score(a)
+    return p - q
+}

@@ -1,8 +1,8 @@
 <!-- doc-meta
 system: effects-and-capabilities
-purpose: what a Milo signature does and does not promise, and the staged plan to widen it
+purpose: what a Milo signature does and does not promise; @pure's rules, and why capabilities and effect rows were rejected
 key-files: src/checker.ts (checkPurity), std/math.milo, docs/design.md
-update-when: @pure's rules change, a capability or effect stage ships, or std gains a gated module
+update-when: @pure's rules change, or the capability/effect-row rejection is revisited
 last-verified: 2026-07-30
 -->
 
@@ -31,7 +31,7 @@ The consequence is concrete: you cannot look at a call site and know whether it 
 safe to skip, reorder, cache, retry, or run in parallel. Nor can a reviewer — human
 or model — bound what a function did without reading its whole call graph.
 
-## Stage 1 — `@pure` (shipped)
+## `@pure` (shipped)
 
 `@pure` narrows a function's effects to the ones its signature already shows.
 
@@ -94,11 +94,11 @@ function: no frame conditions to encode, no hidden state to havoc between calls.
 Purity and contracts were designed to meet — `requires`/`ensures` on a `@pure`
 function is a total specification of what it does.
 
-## Stage 2 — capabilities (proposed, not built)
+## Capabilities — considered, NOT planned
 
-The natural next step is not more effect labels but removing the ambient authority
-that makes them necessary. Under a capability discipline, a function can do I/O only
-if it was *handed* something that does I/O:
+This is the idea `@pure` most obviously suggests, which is exactly why it needs an
+explicit decision rather than an open "someday". Under a capability discipline, a
+function can do I/O only if it was *handed* something that does I/O:
 
 ```milo
 // sketch — not implemented
@@ -115,26 +115,39 @@ never captured by a closure, never parked in a global — and the compiler alrea
 guarantees authority cannot leak. Rust needs an effect-polymorphism story to get the
 same property; Milo would get it from a rule it already enforces for other reasons.
 
-The cost is honest and large:
+**The decision is no, and it is a straight reading of the [Ethos](design.md#ethos):**
 
-- Every `std` module that touches the outside world changes shape, and every program
-  that calls one changes with it. This is the biggest breaking change on the table.
-- `main` grows a parameter, and the "hello world" gets longer.
-- Effect polymorphism reappears in a new form: a generic `map` over a callback that
-  might do I/O needs to say so, or lose the capability.
+- **Principle 2 — the correct path is the default path.** `main` grows a parameter and
+  every program that prints has to thread one. The effortless path stops being the
+  correct one; it becomes the one you opt into.
+- **Principle 3 — the language stays small.** Effect polymorphism comes with it: a
+  generic `map` over a callback that might do I/O has to say so, or lose the
+  capability. That is the same shape as associated types, which principle 3 rejects by
+  name. And every `std` module that touches the world changes signature — the largest
+  breaking change on the table, bought with locality Milo mostly already has from
+  second-class references.
+- What it would genuinely add over `@pure` is *enforcement for code that did not opt
+  in*. Real, but not worth the other two.
 
-That last point is the one to solve before committing. Prior art: Scala's
-[caprese](https://github.com/lampepfl/dotty/issues/13657), the E language lineage,
-and WASI's handle-passing model, which is a capability system in production without
-calling itself one.
+Recorded here so it is not re-pitched. If it ever returns, the thing that would change
+the maths is a way to make capabilities inferred rather than written — and nobody has
+one that stays simple. Prior art if that day comes: Scala's
+[caprese](https://github.com/lampepfl/dotty/issues/13657), the E language lineage, and
+WASI's handle-passing model, a capability system in production that avoids the name.
 
-## Stage 3 — effect rows (probably not)
+## Effect rows — also no
 
 Full algebraic effects — Koka's `<console, exn, div>` on every signature, with
 handlers as a control construct — buy expressiveness Milo has not needed and cost
 readability it cannot afford. `Result<T, E>` already covers recoverable failure, and
-green tasks already cover the resumption cases handlers are usually sold for. This
-is recorded as a considered non-goal, not an unexplored option.
+green tasks already cover the resumption cases handlers are usually sold for. A
+considered non-goal, not an unexplored option.
+
+So the whole of this document is one shipped attribute and two recorded rejections.
+That is deliberate: `@pure` is worth its keep because it is opt-in, invisible to code
+that ignores it, and pays for itself in the prover today (Ethos #6). The two stages
+"after" it are where an effect system turns into a second language, and Milo does not
+go there.
 
 ## Why this matters more for generated code than for people
 
@@ -160,5 +173,5 @@ there is enough of it to learn from.
 | `@pure` on fns, methods, externs | shipped; `std/math` annotated |
 | Purity in fn types (so a `@pure` fn can take a `@pure` callback) | not started — today any call through a function value is rejected |
 | Purity on interface methods | not started — dynamic dispatch is rejected |
-| Capability parameters, non-ambient `std` | proposed, stage 2 above |
-| Effect rows / handlers | considered non-goal |
+| Capability parameters, non-ambient `std` | **considered and rejected** — Ethos #2 and #3, see above |
+| Effect rows / handlers | **considered and rejected** — `Result` and green tasks already cover the demand |

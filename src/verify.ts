@@ -59,9 +59,19 @@ interface CallModel {
   // havoced body) must not reuse a constant whose assumption was built from the other
   // state's arguments — that would assume a fact about the wrong values.
   bySite: WeakMap<object, Map<string, string>>;
+  // The exception to the no-sharing rule above: a `@pure` callee with no `&mut` parameter
+  // is a function of its arguments alone, so `f(x)` denotes one value no matter how many
+  // times it is written. Keyed by name + argument terms, and *not* by site.
+  byPureKey: Map<string, string>;
   // Callee names whose postconditions were assumed while building this function's VCs.
   assumed: Set<string>;
 }
+
+// Scalar sorts the SMT translation models exactly. `miloTypeToSmt` falls back to `Int` for
+// anything else, which is fine for a symbol constrained by an `ensures` (the constraint is
+// what carries meaning) but not for an unconstrained one invented purely to be shared —
+// an `Int` standing in for a struct would let the solver equate values that are not equal.
+const SCALAR_RET = new Set(["i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64", "f32", "f64", "bool"]);
 let CALL_MODEL: CallModel | null = null;
 
 // Placeholder line in a VC's SMT-LIB, replaced with this function's accumulated call
@@ -96,13 +106,18 @@ function symbolsResolve(smt: string, ctx: CallModel, extra?: string): boolean {
 function modelCall(site: object, name: string, args: Expr[], env?: Map<string, string>): string | null {
   const ctx = CALL_MODEL;
   if (!ctx) return null;
-  const callee = ctx.ensuresByFn.get(name);
-  // No contract to constrain the return value: an unconstrained fresh constant would let
-  // the solver "violate" a postcondition using a return value the callee can never
-  // produce. Report unknown rather than a counterexample the user can't reproduce.
+  // A `@pure` callee with no `&mut` parameter depends on nothing but its arguments, so a
+  // shared unconstrained constant is sound even with no contract to describe it: it says
+  // only "this call has some fixed value", which is true. That is what lets `f(x) == f(x)`
+  // be assumed, and it is why the bail-outs below are relaxed for such a callee.
+  const functional = PURE_FN_NAMES.has(name) && SCALAR_RET.has(FN_TABLE.get(name)?.retType?.name ?? "");
+  const callee = ctx.ensuresByFn.get(name) ?? (functional ? FN_TABLE.get(name) : undefined);
+  // No contract to constrain the return value: for an impure callee an unconstrained fresh
+  // constant would let the solver "violate" a postcondition using a return value the callee
+  // can never produce. Report unknown rather than a counterexample the user can't reproduce.
   if (!callee || callee.params.length !== args.length) return null;
   const ensures = callee.contracts.filter(c => c.kind === "ensures");
-  if (ensures.length === 0) return null;
+  if (ensures.length === 0 && !functional) return null;
   // A postcondition about what the callee WROTE through a `&mut` cannot be modelled HERE:
   // the caller's post-call symbol for that argument is minted later, by the havoc. Assuming
   // it under the pre-call substitution would assert something false — see the note above.
@@ -112,7 +127,7 @@ function modelCall(site: object, name: string, args: Expr[], env?: Map<string, s
   const usableEnsures = mutParams.size === 0
     ? ensures
     : ensures.filter(e => !mentionsMutParamPostState(e.expr, mutParams));
-  if (usableEnsures.length === 0) return null;
+  if (usableEnsures.length === 0 && !functional) return null;
 
   // Lowered IN THE CALLER'S ENVIRONMENT. Without it every argument naming a local came out
   // as a bare undeclared symbol, the whole model was rejected below, and the call degraded
@@ -121,6 +136,11 @@ function modelCall(site: object, name: string, args: Expr[], env?: Map<string, s
   const argSmt = args.map(a => (env ? exprToSmtWithEnv(a, env) : exprToSmt(a)));
   if (argSmt.some(a => /UNSUPPORTED/.test(a))) return null;
   const siteKey = argSmt.join(",");
+  const pureKey = functional ? `${name}(${siteKey})` : null;
+  if (pureKey) {
+    const shared = ctx.byPureKey.get(pureKey);
+    if (shared) return shared;
+  }
   const cached = ctx.bySite.get(site)?.get(siteKey);
   if (cached) return cached;
   // The declaration block is shared by every VC of the enclosing function, but `result`
@@ -136,7 +156,18 @@ function modelCall(site: object, name: string, args: Expr[], env?: Map<string, s
   const facts = usableEnsures
     .map(e => exprToSmtWithEnv(e.expr, subst, true))
     .filter(s => !/UNSUPPORTED/.test(s));
-  if (facts.length === 0) return null;
+  // Nothing sayable about the value. For a functional callee that is still worth a symbol —
+  // shared across sites, it carries `f(x) == f(x)` and nothing else, which is exactly the
+  // guarantee `@pure` provides. For anyone else it is the unconstrained-unknown trap.
+  if (facts.length === 0) {
+    if (!pureKey) return null;
+    ctx.decls.push(declareConst(retName, retType));
+    const r = intRangeAssumption(retName, retType);
+    if (r) ctx.assumes.push(r);
+    ctx.scope.add(retName);
+    ctx.byPureKey.set(pureKey, retName);
+    return retName;
+  }
 
   // A callee only guarantees its `ensures` when its `requires` were met, so what may be
   // assumed here is the implication, never the bare postcondition. Assuming the bare form
@@ -172,6 +203,7 @@ function modelCall(site: object, name: string, args: Expr[], env?: Map<string, s
   const perSite = ctx.bySite.get(site) ?? new Map<string, string>();
   perSite.set(siteKey, retName);
   ctx.bySite.set(site, perSite);
+  if (pureKey) ctx.byPureKey.set(pureKey, retName);
   return retName;
 }
 
@@ -1496,7 +1528,7 @@ export function generateVerificationConditions(program: Program, opts?: { onlyFi
     const decreases = fn.contracts.filter(c => c.kind === "decreases");
     contractCount += fn.contracts.length;
 
-    CALL_MODEL = { ensuresByFn, decls: [], assumes: [], n: 0, bySite: new WeakMap<object, Map<string, string>>(), scope: new Set(), assumed: new Set() };
+    CALL_MODEL = { ensuresByFn, decls: [], assumes: [], n: 0, bySite: new WeakMap<object, Map<string, string>>(), byPureKey: new Map(), scope: new Set(), assumed: new Set() };
     const vcStart = conditions.length;
 
     // Sorts are per-function: the same Milo name is an i64 here and an f64 in the next

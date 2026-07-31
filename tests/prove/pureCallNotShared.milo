@@ -1,0 +1,22 @@
+// @proven: 0
+// @failed: 1
+// @unknown: 0
+// The soundness guard on pureCallSharedValue. Both calls are written `double(v)`, but `v`
+// changed between them, so they must NOT collapse to one symbol — the real answer is -8,
+// and a proof of `result == 0` here would be a false proof produced by reading the wrong
+// state. Sharing is keyed on the lowered ARGUMENT TERMS, not on the call's text, and the
+// reassignment renames `v`, so the two calls key differently and this is refuted.
+@pure
+fn double(x: i64): i64 {
+    return x * 2
+}
+
+pub fn drift(): i64
+ensures result == 0
+{
+    var v = 1
+    let a = double(v)
+    v = 5
+    let b = double(v)
+    return a - b
+}

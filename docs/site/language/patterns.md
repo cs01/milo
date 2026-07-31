@@ -81,12 +81,15 @@ The third answer is a runtime check in a place where Rust's `'a` would have give
 you a compile error, and that is the trade this language makes. See
 [Memory Safety vs Rust](/language/vs-rust).
 
-## Handles are not raw indices
+## Use a handle, not an array index
 
-A bare `Vec` index is the failure mode people expect from this model. You free a
-slot, something else allocates, and the old index quietly reads the new value. A
-generational `Handle` from `std/arena` carries both the arena's identity and the
-slot's generation, so the same sequence is caught instead.
+Several rows above say "arena plus handles", so here is what that means. When
+data points at itself — a graph, a tree with parent links, an interpreter's
+heap — you put the values in one pool and refer to them by key instead of by
+pointer. The obvious key is the value's position in a `Vec`, and that is the
+trap: positions get reused. `std/arena` gives you a `Handle` instead, which is
+that position plus a record of which arena it came from and which occupant of
+the slot it was issued for.
 
 ```milo
 // raw index into a Vec

@@ -43,5 +43,36 @@ fn main(): i32 {
     v.clear()
     // @expect: 0
     print(v.len)
+
+    // an element read out of a Vec reached through a REFERENCE is cloned too, and
+    // the clone is owned by whoever consumes it — bound, concatenated, or pushed
+    var words: Vec<string> = Vec.new()
+    for i in 0..40 {
+        words.push("w" + i.toString())
+    }
+    // @expect: 479
+    print(joinLen(words) + bindLen(words) + pushLen(words))
     return 0
+}
+
+fn joinLen(parts: &Vec<string>): i64 {
+    return parts.join("-").len
+}
+
+fn bindLen(parts: &Vec<string>): i64 {
+    var n: i64 = 0
+    for i in 0..parts.len {
+        let p = parts[i]
+        n = n + p.len
+    }
+    return n
+}
+
+fn pushLen(parts: &Vec<string>): i64 {
+    var acc: string = ""
+    for i in 0..parts.len {
+        acc.pushStr(parts[i])
+        acc = acc + parts[i]
+    }
+    return acc.len
 }

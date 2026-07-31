@@ -195,6 +195,8 @@ pub struct World {
     flash: f64,
     gameOver: bool,
     banner: f64, // countdown on the big centred wave title
+    newKind: Kind, // enemy type introduced this wave, named on screen
+    newKindTimer: f64,
     hurt: f64, // red edge vignette after taking a hit
     perkPick: bool, // gameplay is paused while a perk is chosen
     perkChoices: Vec<Perk>,
@@ -221,8 +223,8 @@ pub fn worldNew(w: f64, h: f64): World {
         grid: gridNew(w, h, 42.0),
         player: Player {
             x: w * 0.5, y: h * 0.5, vx: 0.0, vy: 0.0, ang: 0.0,
-            alive: true, hp: 1.0, lives: 3, respawn: 0.0, invuln: 2.0,
-            cooldown: 0.0, bombs: 3, bombFlash: 0.0,
+            alive: true, hp: 1.0, lives: 5, respawn: 0.0, invuln: 3.0,
+            cooldown: 0.0, bombs: 4, bombFlash: 0.0,
         }
         ,
         perks: Vec.new(),
@@ -240,6 +242,8 @@ pub fn worldNew(w: f64, h: f64): World {
         flash: 0.0,
         gameOver: false,
         banner: 0.0,
+        newKind: Kind.Seeker,
+        newKindTimer: 0.0,
         hurt: 0.0,
         perkPick: false,
         perkChoices: Vec.new(),
@@ -482,7 +486,7 @@ pub fn makeEnemy(kind: Kind, x: f64, y: f64): Ent {
     e.phase = Random.floatRange(0.0, 6.283185307179586)
     match kind {
         Kind.Seeker => {
-            e.radius = 11.0
+            e.radius = 15.0
             e.hp = 2.0
             e.value = 20
             e.spin = 2.2
@@ -491,19 +495,19 @@ pub fn makeEnemy(kind: Kind, x: f64, y: f64): Ent {
             e.cb = 0.85
         }
         Kind.Wanderer => {
-            e.radius = 13.0
+            e.radius = 17.0
             e.hp = 2.0
             e.value = 15
             e.spin = 0.9
             let a = Random.floatRange(0.0, 6.283185307179586)
-            e.vx = Math.cos(a) * 90.0
-            e.vy = Math.sin(a) * 90.0
+            e.vx = Math.cos(a) * 62.0
+            e.vy = Math.sin(a) * 62.0
             e.cr = 0.05
             e.cg = 0.75
             e.cb = 2.4
         }
         Kind.Weaver => {
-            e.radius = 12.0
+            e.radius = 16.0
             e.hp = 3.0
             e.value = 30
             e.spin = 3.4
@@ -512,7 +516,7 @@ pub fn makeEnemy(kind: Kind, x: f64, y: f64): Ent {
             e.cb = 0.02
         }
         Kind.Splitter => {
-            e.radius = 16.0
+            e.radius = 20.0
             e.hp = 4.0
             e.value = 25
             e.spin = 1.4
@@ -561,9 +565,9 @@ pub fn makeEnemy(kind: Kind, x: f64, y: f64): Ent {
             e.hp = 6.0
             e.value = 0
             e.spin = 0.0
-            e.cr = 0.5
-            e.cg = 1.4
-            e.cb = 1.8
+            e.cr = 0.95
+            e.cg = 0.35
+            e.cb = 1.9
             e.spawnT = 0.25
         }
         Kind.Sentinel => {
@@ -1081,7 +1085,7 @@ fn updateEnts(w: &mut World, dt: f64) {
 
         match w.ents[i].kind {
             Kind.Seeker => {
-                steer(w, i, px, py, 780.0, 260.0, sdt)
+                steer(w, i, px, py, 430.0, 165.0, sdt)
             }
             Kind.Wanderer => {
                 w.ents[i].phase = w.ents[i].phase + sdt * 1.4
@@ -1093,20 +1097,20 @@ fn updateEnts(w: &mut World, dt: f64) {
                 let dx = px - w.ents[i].x
                 let dy = py - w.ents[i].y
                 let d = Math.sqrt(dx * dx + dy * dy) + 0.0001
-                let s = Math.sin(w.ents[i].age * 5.0) * 320.0
-                w.ents[i].vx = w.ents[i].vx + (dx / d * 620.0 - dy / d * s) * sdt
-                w.ents[i].vy = w.ents[i].vy + (dy / d * 620.0 + dx / d * s) * sdt
+                let s = Math.sin(w.ents[i].age * 3.4) * 190.0
+                w.ents[i].vx = w.ents[i].vx + (dx / d * 380.0 - dy / d * s) * sdt
+                w.ents[i].vy = w.ents[i].vy + (dy / d * 380.0 + dx / d * s) * sdt
                 let sp = Math.sqrt(w.ents[i].vx * w.ents[i].vx + w.ents[i].vy * w.ents[i].vy)
-                if sp > 320.0 {
-                    w.ents[i].vx = w.ents[i].vx * 320.0 / sp
-                    w.ents[i].vy = w.ents[i].vy * 320.0 / sp
+                if sp > 200.0 {
+                    w.ents[i].vx = w.ents[i].vx * 200.0 / sp
+                    w.ents[i].vy = w.ents[i].vy * 200.0 / sp
                 }
             }
             Kind.Splitter => {
-                steer(w, i, px, py, 190.0, 150.0, sdt)
+                steer(w, i, px, py, 140.0, 105.0, sdt)
             }
             Kind.SnakeHead => {
-                steer(w, i, px, py, 620.0, 235.0, sdt)
+                steer(w, i, px, py, 360.0, 150.0, sdt)
             }
             Kind.SnakeSeg => {
                 // Read the segment ahead, write myself. The leader may have died
@@ -1125,7 +1129,7 @@ fn updateEnts(w: &mut World, dt: f64) {
                     w.ents[i].vy = dy / d * pull
                     w.ents[i].ang = Math.atan2(dy, dx)
                 } else {
-                    steer(w, i, px, py, 420.0, 190.0, sdt)
+                    steer(w, i, px, py, 300.0, 140.0, sdt)
                 }
             }
             Kind.BlackHole => {
@@ -1170,7 +1174,7 @@ fn updateEnts(w: &mut World, dt: f64) {
                 if alive(w, t2) {
                     let tx = w.ents[t2.slot].x
                     let ty = w.ents[t2.slot].y
-                    steer(w, i, tx, ty, 420.0, 200.0, sdt)
+                    steer(w, i, tx, ty, 300.0, 150.0, sdt)
                     let dx = tx - w.ents[i].x
                     let dy = ty - w.ents[i].y
                     if dx * dx + dy * dy < 300.0 * 300.0 {
@@ -1179,7 +1183,7 @@ fn updateEnts(w: &mut World, dt: f64) {
                         w.ents[t2.slot].slow = 0.0
                     }
                 } else {
-                    steer(w, i, px, py, 260.0, 150.0, sdt)
+                    steer(w, i, px, py, 190.0, 120.0, sdt)
                 }
             }
             Kind.Turret => {
@@ -1207,7 +1211,7 @@ fn updateEnts(w: &mut World, dt: f64) {
             }
             Kind.Sentinel => {
                 w.ents[i].phase = w.ents[i].phase + sdt
-                steer(w, i, px, py, 210.0, 120.0, sdt)
+                steer(w, i, px, py, 150.0, 92.0, sdt)
                 if w.ents[i].phase > 2.6 {
                     w.ents[i].phase = 0.0
                     for k in 0..3 {
@@ -1231,7 +1235,7 @@ fn updateEnts(w: &mut World, dt: f64) {
                     w.ents[i].vx = 0.0
                     w.ents[i].vy = 0.0
                 } else {
-                    steer(w, i, px, py, 260.0, 180.0, sdt)
+                    steer(w, i, px, py, 190.0, 130.0, sdt)
                 }
             }
             Kind.Gem => {
@@ -1532,7 +1536,7 @@ fn updatePlayer(w: &mut World, dt: f64, mx: f64, my: f64, aim: f64, wantFire: bo
             w.player.y = w.h * 0.5
             w.player.vx = 0.0
             w.player.vy = 0.0
-            w.player.invuln = 2.4
+            w.player.invuln = 3.2
             gridImpulse(w.grid, w.player.x, w.player.y, 420.0, 120.0)
         }
         return
@@ -1605,7 +1609,7 @@ fn updatePlayer(w: &mut World, dt: f64, mx: f64, my: f64, aim: f64, wantFire: bo
             match w.ents[i].kind {
                 Kind.Gem => {
                     w.mult = Math.minI64(w.mult + 1, 99)
-                    w.multTimer = 6.0
+                    w.multTimer = 9.0
                     w.score = w.score + 5
                     burst(w, w.ents[i].x, w.ents[i].y, 8, 200.0, 0.3, 1.7, 0.8, 1.8)
                     kill(w, i)
@@ -1665,47 +1669,135 @@ pub fn enemiesAlive(w: &World): i64 {
     return n
 }
 
+// One new enemy type per wave, in a fixed order, so the roster is learned rather
+// than dumped. `unlocked` is how many kinds this wave may draw from.
+fn unlockedKinds(wave: i64): i64 {
+    if wave <= 1 {
+        return 1
+    }
+    if wave <= 2 {
+        return 2
+    }
+    if wave <= 3 {
+        return 3
+    }
+    if wave <= 4 {
+        return 4
+    }
+    if wave <= 6 {
+        return 5
+    }
+    if wave <= 9 {
+        return 6
+    }
+    return 7
+}
+
+pub fn kindForSlot(slot: i64): Kind {
+    if slot == 0 {
+        return Kind.Seeker
+    }
+    if slot == 1 {
+        return Kind.Wanderer
+    }
+    if slot == 2 {
+        return Kind.Weaver
+    }
+    if slot == 3 {
+        return Kind.Splitter
+    }
+    if slot == 4 {
+        return Kind.SnakeHead
+    }
+    if slot == 5 {
+        return Kind.Healer
+    }
+    return Kind.BlackHole
+}
+
+pub fn kindName(k: Kind): string {
+    match k {
+        Seeker => {
+            return "SEEKER — CHASES YOU"
+        }
+        Wanderer => {
+            return "DRIFTER — IGNORES YOU"
+        }
+        Weaver => {
+            return "WEAVER — STRAFES IN"
+        }
+        Splitter => {
+            return "SPLITTER — BREAKS APART"
+        }
+        SnakeHead => {
+            return "SNAKE — SHOOT THE CHAIN"
+        }
+        SnakeSeg => {
+            return "SNAKE"
+        }
+        Healer => {
+            return "MEDIC — REPAIRS OTHERS"
+        }
+        BlackHole => {
+            return "SINGULARITY — PULLS EVERYTHING"
+        }
+        Sentinel => {
+            return "SENTINEL — BREAK THE PLATES"
+        }
+        Armor => {
+            return "ARMOUR PLATE"
+        }
+        Turret => {
+            return "YOUR TURRET"
+        }
+        Gem => {
+            return "PICKUP"
+        }
+    }
+}
+
 fn spawnForWave(w: &mut World) {
     let p = randomEdge(w)
     let wv = w.wave
-    var roll = Random.range(0, 100)
-    // unlock the roster gradually
-    if wv < 2 {
-        roll = Random.range(0, 40)
-    } else if wv < 4 {
-        roll = Random.range(0, 62)
-    } else if wv < 7 {
-        roll = Random.range(0, 82)
+    let n = unlockedKinds(wv)
+    // The newest kind is rarer than the staples, so a wave still reads mostly
+    // like the one before it.
+    var slot = Random.range(0, n)
+    if n > 1 && slot == n - 1 && Random.range(0, 3) != 0 {
+        slot = Random.range(0, n - 1)
     }
-    if roll < 34 {
-        let _ = spawn(w, makeEnemy(Kind.Seeker, p.x, p.y))
-    } else if roll < 52 {
-        let _ = spawn(w, makeEnemy(Kind.Wanderer, p.x, p.y))
-    } else if roll < 68 {
-        let _ = spawn(w, makeEnemy(Kind.Weaver, p.x, p.y))
-    } else if roll < 82 {
-        let _ = spawn(w, makeEnemy(Kind.Splitter, p.x, p.y))
-    } else if roll < 90 {
-        spawnSnake(w, p.x, p.y, 5 + Math.minI64(wv / 2, 7))
-    } else if roll < 96 {
-        let _ = spawn(w, makeEnemy(Kind.Healer, p.x, p.y))
-    } else {
-        let _ = spawn(w, makeEnemy(Kind.BlackHole, p.x, p.y))
+    let k = kindForSlot(slot)
+    match k {
+        SnakeHead => {
+            spawnSnake(w, p.x, p.y, 4 + Math.minI64(wv / 3, 5))
+        }
+        _ => {
+            let _ = spawn(w, makeEnemy(k, p.x, p.y))
+        }
     }
 }
 
 fn startWave(w: &mut World) {
     w.wave = w.wave + 1
     w.banner = 2.2
-    if w.wave % 6 == 0 {
+    // A kind that becomes available this wave gets named on screen.
+    let before = unlockedKinds(w.wave - 1)
+    let now = unlockedKinds(w.wave)
+    if now > before && w.wave > 1 {
+        w.newKind = kindForSlot(now - 1)
+        w.newKindTimer = 4.0
+    }
+    if w.wave % 8 == 0 {
         w.pending = 0
         let p = randomEdge(w)
         spawnBoss(w, p.x, p.y)
         w.shake = 12.0
     } else {
-        w.pending = 5 + w.wave * 2
-        if w.pending > 34 {
-            w.pending = 34
+        // Gentler ramp: the old one reached 34 simultaneous enemies by wave 15,
+        // which is where it stopped being readable.
+        w.pending = 3 + w.wave
+        if w.pending > 18 {
+            w.pending = 18
         }
     }
     w.waveTimer = 0.0
@@ -1717,7 +1809,7 @@ fn updateWaves(w: &mut World, dt: f64) {
         if w.waveTimer <= 0.0 {
             spawnForWave(w)
             w.pending = w.pending - 1
-            w.waveTimer = Math.maxF64(0.16, 0.7 - (w.wave as f64) * 0.03)
+            w.waveTimer = Math.maxF64(0.42, 1.15 - (w.wave as f64) * 0.03)
         }
         return
     }
@@ -1795,6 +1887,9 @@ pub fn worldUpdate(w: &mut World, dtIn: f64, mx: f64, my: f64, aim: f64, fire: b
     if w.banner > 0.0 {
         w.banner = w.banner - dt
     }
+    if w.newKindTimer > 0.0 {
+        w.newKindTimer = w.newKindTimer - dt
+    }
     if w.hurt > 0.0 {
         w.hurt = w.hurt - dt
     }
@@ -1802,7 +1897,7 @@ pub fn worldUpdate(w: &mut World, dtIn: f64, mx: f64, my: f64, aim: f64, fire: b
         w.multTimer = w.multTimer - dt
         if w.multTimer <= 0.0 && w.mult > 1 {
             w.mult = w.mult - 1
-            w.multTimer = 2.4
+            w.multTimer = 3.6
         }
     }
 
@@ -1843,9 +1938,9 @@ pub fn worldReset(w: &mut World) {
     w.player.vx = 0.0
     w.player.vy = 0.0
     w.player.alive = true
-    w.player.lives = 3
-    w.player.bombs = 3
-    w.player.invuln = 2.0
+    w.player.lives = 5
+    w.player.bombs = 4
+    w.player.invuln = 3.0
     w.player.respawn = 0.0
     w.score = 0
     w.mult = 1
@@ -1858,6 +1953,7 @@ pub fn worldReset(w: &mut World) {
     w.slowmo = 0.0
     w.gameOver = false
     w.banner = 0.0
+    w.newKindTimer = 0.0
     w.hurt = 0.0
     w.perkPick = false
     w.turretCount = 0

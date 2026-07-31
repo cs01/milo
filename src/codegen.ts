@@ -1605,8 +1605,12 @@ export class Codegen {
         // Alive flag is allocated up front so the loop's overwrite-drop below can
         // be guarded by it.
         const declAliveFlag = `${addrName}.alive`;
+        // A borrowed index is a shallow view of data someone else owns — EXCEPT
+        // when the element needs drop, where the IndexAccess path clones it. The
+        // clone has no other owner, so excluding it from drop glue leaked the copy
+        // on every iteration (this is what made `v.join(sep)` leak).
         const declDroppable = !isRefLocal && this.needsDropCg(stmt.type) &&
-          !(stmt.value.kind === "IndexAccess" && stmt.value.isBorrowed);
+          !(stmt.value.kind === "IndexAccess" && stmt.value.isBorrowed && !this.indexAccessClones(stmt.value));
         if (declDroppable) {
           this.entryAllocas.push(`  ${declAliveFlag} = alloca i1`);
           this.entryAllocas.push(`  store i1 0, ptr ${declAliveFlag}`);
@@ -1656,6 +1660,11 @@ export class Codegen {
           const [tgtLines, tgtPtr] = this.genLValue(stmt.target);
           lines.push(...tgtLines);
           this.emitStringAppendInPlace(lines, tgtPtr, rhsVal);
+          // The append copies the bytes out of the rhs; an rhs that was a
+          // temporary (a call result, or the clone `v[i]` produces) has no owner
+          // afterwards. The generic concat path drops its operands — this fast
+          // path has to as well, or `r = r + v[i]` leaks a copy per iteration.
+          this.dropOwnedTemp(lines, rhsVal, "%String", stmt.value.right);
           return [lines, false];
         }
         const assignLlTy = this.llvmType(stmt.target.type);
@@ -6759,6 +6768,9 @@ export class Codegen {
     lines.push(`  ${nullPtr} = getelementptr i8, ptr ${curData}, i64 ${newLen}`);
     lines.push(`  store i8 0, ptr ${nullPtr}`);
 
+    // pushStr copies the bytes in; a temporary source (a call result, or the
+    // clone `v[i]` produces) is dead afterwards and nothing else frees it.
+    this.dropOwnedTemp(lines, otherVal, "%String", expr.other);
     return [lines, "void", "void"];
   }
 
@@ -8996,6 +9008,16 @@ export class Codegen {
   // (Ident/FieldAccess/IndexAccess) name storage owned by someone else, so freeing
   // their result would double-free. A call can't hand back a borrow: references are
   // second-class and never returned.
+  // True when codegen's IndexAccess path auto-clones the element (vec / unsized
+  // array with a drop-needing element type) rather than loading it in place. The
+  // result is then a fresh allocation, whoever consumes it.
+  private indexAccessClones(expr: HIRExpr): boolean {
+    if (expr.kind !== "IndexAccess") return false;
+    const obj = expr.object.type.tag === "ref" ? expr.object.type.inner : expr.object.type;
+    const isDynamic = obj.tag === "vec" || (obj.tag === "array" && obj.size === null);
+    return isDynamic && this.needsDropCg(expr.type);
+  }
+
   private isOwnedTempExpr(expr: HIRExpr): boolean {
     // A discarded small-type `replace(...)` result is dropped here (SSA path). A big-agg
     // replace drops its own moved-out value inside genExpr, so it must NOT double-drop here.

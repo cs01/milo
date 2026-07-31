@@ -11,7 +11,7 @@ from "./grid" import {
     gridDraw
 }
 from "./world" import {
-    World, Ent, Kind, Perk, alive, isEnemy, perkName, perkBlurb, handleIsNull
+    World, Ent, Kind, Perk, alive, isEnemy, perkName, perkBlurb, handleIsNull, kindName
 }
 
 pub struct Shapes {
@@ -48,15 +48,17 @@ pub fn shapesNew(): Shapes {
     ship.push(0.0 - 0.75)
     ship.push(0.85)
 
+    // Deliberately NOT triangular: a triangle plus a ring read as a second player
+    // ship, which was the most confusing thing on screen.
     var turret: Vec<f64> = Vec.new()
-    turret.push(1.5)
-    turret.push(0.0 - 0.22)
-    turret.push(1.5)
-    turret.push(0.22)
-    turret.push(0.0 - 0.9)
-    turret.push(0.9)
-    turret.push(0.0 - 0.9)
-    turret.push(0.0 - 0.9)
+    turret.push(0.0 - 0.85)
+    turret.push(0.0 - 0.85)
+    turret.push(0.85)
+    turret.push(0.0 - 0.85)
+    turret.push(0.85)
+    turret.push(0.85)
+    turret.push(0.0 - 0.85)
+    turret.push(0.85)
 
     var plate: Vec<f64> = Vec.new()
     plate.push(1.0)
@@ -296,8 +298,13 @@ pub fn drawWorld(c: &mut Canvas, w: &World, s: &Shapes, ox: f64, oy: f64) {
                 spot(c, x, y, 4.5, 0.2, 1.2, 0.5)
             }
             Kind.Turret => {
+                // barrel pointing at its mark, plus a battery bar — no ring
+                let bx = x + Math.cos(e.ang) * e.radius * 1.9
+                let by = y + Math.sin(e.ang) * e.radius * 1.9
+                line(c, x, y, bx, by, cr, cg, cb)
                 let frac = Math.maxF64(e.hp / e.maxHp, 0.0)
-                circle(c, x, y, e.radius + 5.0, 16, 0.15 + frac * 0.4, 0.4 * frac, 0.6 * frac)
+                let bw = e.radius * 2.0
+                line(c, x - bw * 0.5, y + e.radius + 7.0, x - bw * 0.5 + bw * frac, y + e.radius + 7.0, 0.2, 0.9, 1.2)
             }
             _ => {
             }
@@ -396,6 +403,16 @@ pub fn drawHud(c: &mut Canvas, w: &World) {
         }
     }
 
+    // a newly unlocked enemy type is named, so the roster is learned not guessed
+    if w.newKindTimer > 0.0 && !w.perkPick && !w.gameOver {
+        var f = 1.0
+        if w.newKindTimer < 1.0 {
+            f = w.newKindTimer
+        }
+        textCentered(c, c.w / 2, 120, "NEW ENEMY", 2, 1.2 * f, 0.5 * f, 0.5 * f)
+        textCentered(c, c.w / 2, 146, kindName(w.newKind), 3, 1.5 * f, 1.0 * f, 0.3 * f)
+    }
+
     // big centred wave title
     if w.banner > 0.0 && !w.perkPick && !w.gameOver {
         var f = 1.0
@@ -407,8 +424,9 @@ pub fn drawHud(c: &mut Canvas, w: &World) {
         }
         textCentered(c, c.w / 2, c.h / 2 - 40, "WAVE " + w.wave.toString(), 8, 0.7 * f, 0.5 * f, 1.4 * f)
         if w.wave == 1 {
-            textCentered(c, c.w / 2, c.h / 2 + 40, "GREEN DIAMONDS RAISE YOUR MULTIPLIER", 2, 0.4 * f, 0.9 * f, 0.5 * f)
-            textCentered(c, c.w / 2, c.h / 2 + 64, "EVERYTHING ELSE KILLS YOU ON CONTACT", 2, 0.9 * f, 0.3 * f, 0.35 * f)
+            textCentered(c, c.w / 2, c.h / 2 + 40, "MOUSE AIMS AND FIRES BY ITSELF", 2, 0.5 * f, 0.9 * f, 1.1 * f)
+            textCentered(c, c.w / 2, c.h / 2 + 64, "GREEN DIAMONDS RAISE YOUR MULTIPLIER", 2, 0.4 * f, 0.9 * f, 0.5 * f)
+            textCentered(c, c.w / 2, c.h / 2 + 88, "EVERYTHING ELSE KILLS YOU ON CONTACT", 2, 0.9 * f, 0.3 * f, 0.35 * f)
         }
     }
 

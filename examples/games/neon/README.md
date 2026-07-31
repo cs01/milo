@@ -20,6 +20,11 @@ milo run examples/games/neon/main.milo --release
 No GPU work beyond a texture blit: the frame is drawn by loops over `Vec<f32>` and
 tone-mapped on the CPU. 1280×720 at 60 fps, ~9 ms of that in the renderer.
 
+Enemy types unlock one per wave and each is named on screen the first time it
+appears, so the roster is learned rather than dumped. Waves cap at 18 enemies, not
+34 — past that the screen stopped being readable, which is a difficulty setting
+masquerading as a design.
+
 ---
 
 ## What this is arguing about

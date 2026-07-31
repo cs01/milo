@@ -1,0 +1,59 @@
+// A `&string` view is not NUL-terminated — it points into the middle of a bigger
+// buffer. Before REG_STARTEND, regexec ran off the end of the view and reported
+// matches from the REST of the buffer, silently. This locks that shut.
+from "std/regex" import {
+    Regex
+}
+
+pub fn main(): i32 {
+    let Result.Ok(compiled) = Regex.compile("a+b") else {
+        print("compile failed")
+        return 1
+    }
+    var re = compiled
+
+    // Views: a line with no match must report none, even though the text AFTER
+    // it in the same buffer matches.
+    let text = "aab\nzzz\naaab\nqqq\n"
+    for line in text.lines() {
+        print(line + " " + re.findAll(line).len.toString())
+    }
+    // @expect: aab 1
+    // @expect: zzz 0
+    // @expect: aaab 1
+    // @expect: qqq 0
+
+    // isMatch is bounded the same way.
+    for line in text.lines() {
+        print(re.isMatch(line).toString())
+    }
+    // @expect: true
+    // @expect: false
+    // @expect: true
+    // @expect: false
+
+    // Whole strings still behave: offsets are absolute, matches non-overlapping.
+    let hay = "xxaabyyabzzaaab"
+    let ms = re.findAll(hay)
+    print(ms.len.toString())
+    // @expect: 3
+    for i in 0..ms.len {
+        print(ms[i].start.toString() + ".." + ms[i].end.toString())
+    }
+    // @expect: 2..5
+    // @expect: 7..9
+    // @expect: 11..15
+
+    // `^` must anchor to the real start of the input, not to wherever the search
+    // window happens to resume after a match.
+    let Result.Ok(anchored) = Regex.compile("^x") else {
+        print("compile failed")
+        return 1
+    }
+    var re2 = anchored
+    print(re2.findAll("xax").len.toString())
+    // @expect: 1
+    print(re2.findAll("axa").len.toString())
+    // @expect: 0
+    return 0
+}

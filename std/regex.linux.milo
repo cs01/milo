@@ -35,6 +35,21 @@ fn regexNew(pattern: string): Result<Regex> {
 }
 
 // read i32 from byte buffer at given offset
+// REG_STARTEND: hand regexec an explicit byte range in pmatch[0] rather than
+// letting it scan to a NUL. Required for correctness on a `&string` VIEW, whose
+// end is not NUL-terminated — without it the engine runs past the view into the
+// rest of the buffer and reports matches that are not in the view. Verified
+// present in glibc (REG_STARTEND=4, regmatch_t = two i32).
+pub let REG_STARTEND: i32 = 4
+
+fn writeMatchI32(buf: &mut [u8; 80], off: i64, val: i64) {
+    var k: i64 = 0
+    while k < 4 {
+        buf[off + k] = ((val >> (k * 8)) & 255) as u8
+        k = k + 1
+    }
+}
+
 fn readMatchI32(buf: &[u8; 80], off: i64): i32 {
     var val: i32 = 0
     var k: i64 = 0
@@ -47,8 +62,11 @@ fn readMatchI32(buf: &[u8; 80], off: i64): i32 {
 
 // Test if a string matches the pattern.
 fn regexMatch(re: &Regex, input: &string): bool {
+    var pmatch: [u8; 80] = [0; 80]
+    writeMatchI32(pmatch, 0, 0)
+    writeMatchI32(pmatch, 4, input.len)
     unsafe {
-        return regexec(re._preg, input, 0, 0 as *u8, 0) == 0
+        return regexec(re._preg, input, 1, pmatch, REG_STARTEND) == 0
     }
 }
 
@@ -62,8 +80,10 @@ pub struct RegexMatch {
 fn regexFind(re: &Regex, input: &string): Option<RegexMatch> {
     // regmatch_t on Linux: {rm_so: i32, rm_eo: i32} = 8 bytes each
     var pmatch: [u8; 80] = [0; 80]
+    writeMatchI32(pmatch, 0, 0)
+    writeMatchI32(pmatch, 4, input.len)
     unsafe {
-        let rc = regexec(re._preg, input, 1, pmatch, 0)
+        let rc = regexec(re._preg, input, 1, pmatch, REG_STARTEND)
         if rc != 0 {
             return Option.None
         }
@@ -82,9 +102,16 @@ fn regexFindAll(re: &Regex, input: &string): Vec<RegexMatch> {
     var offset: i64 = 0
     var pmatch: [u8; 80] = [0; 80]
     while offset < input.len {
-        let tail = input[offset..input.len]
+        // search window [offset, len) — no slicing, no copy of the tail
+        writeMatchI32(pmatch, 0, offset)
+        writeMatchI32(pmatch, 4, input.len)
+        // REG_NOTBOL past the first byte, or `^` matches at every window start
+        var eflags = REG_STARTEND
+        if offset > 0 {
+            eflags = REG_STARTEND | 1
+        }
         unsafe {
-            let rc = regexec(re._preg, tail, 1, pmatch, 0)
+            let rc = regexec(re._preg, input, 1, pmatch, eflags)
             if rc != 0 {
                 break
             }
@@ -92,10 +119,10 @@ fn regexFindAll(re: &Regex, input: &string): Vec<RegexMatch> {
         let so = readMatchI32(pmatch, 0) as i64
         let eo = readMatchI32(pmatch, 4) as i64
         matches.push(RegexMatch {
-            start: offset + so, end: offset + eo
+            start: so, end: eo
         }
         )
-        offset = offset + eo
+        offset = eo
         if so == eo {
             offset = offset + 1
         }

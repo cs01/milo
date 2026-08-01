@@ -26,7 +26,10 @@ from "./world3d" import {
     World, worldIn, worldUpdate, wrapPi, SEED
 }
 from "./city" import {
-    City, cityLoad, cityEmpty
+    City, cityLoad, cityEmpty, cityAttachOrtho
+}
+from "std/fs" import {
+    readFile, isFile
 }
 from "./render3d" import {
     drawWorld, drawHud, drawGuide, drawMarkGuide, drawSpeedLines
@@ -79,6 +82,28 @@ pub fn main(): i32 {
                 Result.Ok(loaded) => {
                     print("flying " + loaded.name.clone() + " — " + loaded.bCount.toString() + " buildings")
                     city = loaded
+                    // The game always drapes an aerial photograph over the terrain
+                    // (main.milo embeds one per place), and the drape is what makes
+                    // the textured raster path dominant. A benchmark run without it
+                    // measures a pipeline nobody plays.
+                    let orthoPath = argv[i + 1].replace(".city", ".ortho.png")
+                    if isFile(orthoPath) {
+                        match readFile(orthoPath) {
+                            Result.Ok(png) => {
+                                match cityAttachOrtho(city, png) {
+                                    Result.Ok(_) => {
+                                        print("draped " + orthoPath)
+                                    }
+                                    Result.Err(e) => {
+                                        print("bad ortho: " + e)
+                                    }
+                                }
+                            }
+                            Result.Err(e) => {
+                                print("cannot read ortho")
+                            }
+                        }
+                    }
                 }
                 Result.Err(e) => {
                     print("could not load city: " + e)
@@ -115,6 +140,9 @@ pub fn main(): i32 {
     let snd = soundNew()
     let dt = 1.0 / 60.0
     var renderMs: i64 = 0
+    var worldMs: i64 = 0
+    var presentMs: i64 = 0
+    var flushMs: i64 = 0
     var rendered: i64 = 0
 
     for frame in 0..maxFrame + 1 {
@@ -157,6 +185,9 @@ pub fn main(): i32 {
             let t0 = epochMillis()
             let view = viewOf(w.cam, c.w, c.h)
             drawWorld(c, s, w, groundTex, skinTex, facadeTex, view)
+            worldMs = worldMs + (epochMillis() - t0)
+            flushMs = flushMs + s.flushMs
+            let tp = epochMillis()
             if w.evRing {
                 playRing(snd)
             }
@@ -177,6 +208,7 @@ pub fn main(): i32 {
             drawMarkGuide(c, w, view)
             drawHud(c, w, s, 60)
             present(c, 0.35, 1.0)
+            presentMs = presentMs + (epochMillis() - tp)
             renderMs = renderMs + (epochMillis() - t0)
             rendered = rendered + 1
             writePpm(prefix + "-" + frame.toString() + ".ppm", c)
@@ -184,7 +216,7 @@ pub fn main(): i32 {
         }
     }
     if rendered > 0 {
-        print("render ms/frame: " + (renderMs / rendered).toString())
+        print("render ms/frame: " + (renderMs / rendered).toString() + "  (world " + (worldMs / rendered).toString() + ", present " + (presentMs / rendered).toString() + ", flush " + (flushMs / rendered).toString() + ")")
     }
     print("score " + w.score.toString() + " rings " + w.rings.len.toString() + " level " + w.level.toString())
     return 0

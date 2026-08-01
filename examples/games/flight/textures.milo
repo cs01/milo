@@ -5,7 +5,7 @@
 from "std/math" import {
     Math
 }
-from "./gfx3d" import {
+from "./raster" import {
     Texture, texNew, texSet
 }
 

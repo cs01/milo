@@ -24,7 +24,10 @@ from "std/png" import {
     Png
 }
 from "./gfx3d" import {
-    Texture, texNew, Rgb, rgb
+    Rgb, rgb
+}
+from "./raster" import {
+    Texture, texNew
 }
 
 pub let COVER_URBAN: u8 = 0 as u8

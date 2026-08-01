@@ -1,14 +1,32 @@
 // A small 3D pipeline on top of the 2D HDR canvas: perspective camera, near-plane
 // clipping, and a depth-buffered triangle rasteriser with flat shading and fog.
 //
-// Everything is safe Milo — the z-buffer is a Vec<f32>, the vertex lists are
-// Vec<f64>, and no raw pointer appears anywhere in this file.
+// This file is the SAFE half. Nothing here writes a pixel: a `triangle*` call
+// transforms into camera space, clips against the near plane, sets the triangle
+// up, and RECORDS it. `rasterFlush` then hands the recorded list to N OS threads,
+// one per horizontal band of the frame. The scanline loops themselves — and the
+// only unsafe code in the renderer — live in raster.milo.
+//
+// Recording rather than drawing immediately is what makes the split possible: a
+// worker cannot be handed the World, the City or a Texture (all of them own
+// heap), so everything a scanline needs has to be flattened into plain data
+// first. It costs one pass over a ~20k-entry command list per frame and buys
+// every core in the machine.
 
 from "std/math" import {
     Math
 }
+from "std/runtime" import {
+    Promise
+}
+from "std/time" import {
+    epochMillis
+}
 from "./gfx" import {
     Canvas
+}
+from "./raster" import {
+    Cmd, Job, TexRef, Texture, Tri, Vtx, bandRaster, bandsFor, texRef, texRefNone, triSetup, vtxC
 }
 
 pub struct Vec3 {
@@ -174,9 +192,31 @@ pub struct Scene {
     fogStart: f64,
     fogEnd: f64,
     tris: i64, // triangles actually rasterised this frame
+    // ── the recorded frame ──
+    //
+    // `cmds` and `bins` are grown, never shrunk: a frame's command list is the
+    // same size as the last one to within a few percent, so after the first
+    // second of flying every frame reuses the same allocation and the renderer
+    // does no heap work at all. `cmdN` and `binN` are the live lengths.
+    cmds: Vec<Cmd>,
+    cmdN: i64,
+    bins: Vec<Vec<i64>>, // per band: indices into cmds, in record order
+    binN: Vec<i64>,
+    // How many horizontal bands the frame is cut into, which is how many OS
+    // threads a flush uses. One means "rasterise inline on this thread" — the
+    // serial path, kept for A/B measurement and for machines that report a
+    // single core.
+    bands: i64,
+    flushMs: i64,
 }
 
 pub fn sceneNew(w: i64, h: i64): Scene {
+    let bands = bandsFor(h)
+    var bins: Vec<Vec<i64>> = Vec.new()
+    for _ in 0..bands {
+        let empty: Vec<i64> = Vec.new()
+        bins.push(empty)
+    }
     return Scene {
         zbuf: Vec.filled(w * h, 0.0),
         w: w,
@@ -190,6 +230,12 @@ pub fn sceneNew(w: i64, h: i64): Scene {
         fogStart: 420.0,
         fogEnd: 1500.0,
         tris: 0,
+        cmds: Vec.new(),
+        cmdN: 0,
+        bins: bins,
+        binN: Vec.filled(bands, 0),
+        bands: bands,
+        flushMs: 0,
     }
 }
 
@@ -199,6 +245,15 @@ pub fn sceneClear(s: &mut Scene) {
         s.zbuf[i] = 0.0 // storing 1/z, so 0 is infinitely far
     }
     s.tris = 0
+    s.flushMs = 0
+    resetRecord(s)
+}
+
+fn resetRecord(s: &mut Scene) {
+    s.cmdN = 0
+    for k in 0..s.bands {
+        s.binN[k] = 0
+    }
 }
 
 // ── camera transform ──────────────────────────────────────────────────────────
@@ -282,430 +337,171 @@ pub fn toCamera(v: &View, x: f64, y: f64, z: f64): Vec3 {
     return toCameraV(v, v3(x, y, z))
 }
 
-// ── rasteriser ────────────────────────────────────────────────────────────────
+// ── recording ─────────────────────────────────────────────────────────────────
 
-// Depth-buffered flat-shaded triangle in CAMERA space. Depth-tests on 1/z, which
-// interpolates linearly in screen space — the reason the buffer stores 1/z.
-// The setup all three rasterisers share: project to screen, cull backfaces and
-// degenerates, and clamp the bounding box to the viewport. It was copied out
-// three times, which is where an asymmetric bug hides — a fix to one copy's
-// clamp is a bug in the other two.
-pub struct Tri {
-    x0: f64,
-    y0: f64,
-    x1: f64,
-    y1: f64,
-    x2: f64,
-    y2: f64,
-    iaz: f64,
-    ibz: f64,
-    icz: f64,
-    invArea: f64,
-    // How each edge function changes for one pixel of x. The inner loop steps
-    // by these instead of evaluating the edges: same values, three adds instead
-    // of nine multiply-adds, on the order of a million pixels a frame.
-    e0x: f64,
-    e1x: f64,
-    e2x: f64,
-    minX: i64,
-    maxX: i64,
-    minY: i64,
-    maxY: i64,
-    ok: bool, // false: culled, off-screen or degenerate — draw nothing
-}
-
-fn triSetup(s: &Scene, v: &View, a: &Vec3, b: &Vec3, d: &Vec3): Tri {
-    let iaz = 1.0 / a.z
-    let ibz = 1.0 / b.z
-    let icz = 1.0 / d.z
-    let x0 = v.cx + a.x * v.scale * iaz
-    let y0 = v.cy - a.y * v.scale * iaz
-    let x1 = v.cx + b.x * v.scale * ibz
-    let y1 = v.cy - b.y * v.scale * ibz
-    let x2 = v.cx + d.x * v.scale * icz
-    let y2 = v.cy - d.y * v.scale * icz
-    var t = Tri {
-        x0: x0, y0: y0, x1: x1, y1: y1, x2: x2, y2: y2,
-        iaz: iaz, ibz: ibz, icz: icz,
-        invArea: 0.0,
-        e0x: 0.0 - (y2 - y1), e1x: 0.0 - (y0 - y2), e2x: 0.0 - (y1 - y0),
-        minX: 0, maxX: 0, minY: 0, maxY: 0,
-        ok: false,
-    }
-    // backface / degenerate cull via signed area
-    let area = (x1 - x0) * (y2 - y0) - (x2 - x0) * (y1 - y0)
-    if area <= 0.0 {
-        return t
-    }
-    t.invArea = 1.0 / area
-    var minX = Math.floor(Math.minF64(x0, Math.minF64(x1, x2))) as i64
-    var maxX = Math.ceil(Math.maxF64(x0, Math.maxF64(x1, x2))) as i64
-    var minY = Math.floor(Math.minF64(y0, Math.minF64(y1, y2))) as i64
-    var maxY = Math.ceil(Math.maxF64(y0, Math.maxF64(y1, y2))) as i64
-    if minX < 0 {
-        minX = 0
-    }
-    if minY < 0 {
-        minY = 0
-    }
-    if maxX > s.w {
-        maxX = s.w
-    }
-    if maxY > s.h {
-        maxY = s.h
-    }
-    if minX >= maxX || minY >= maxY {
-        return t
-    }
-    t.minX = minX
-    t.maxX = maxX
-    t.minY = minY
-    t.maxY = maxY
-    t.ok = true
-    return t
-}
-
-// Edge function values at the first pixel of row `py`. Non-negative in all three
-// means the pixel is inside.
-fn rowEdge0(t: &Tri, fy: f64, fx: f64): f64 {
-    return (t.x2 - t.x1) * (fy - t.y1) - (t.y2 - t.y1) * (fx - t.x1)
-}
-
-fn rowEdge1(t: &Tri, fy: f64, fx: f64): f64 {
-    return (t.x0 - t.x2) * (fy - t.y2) - (t.y0 - t.y2) * (fx - t.x2)
-}
-
-fn rowEdge2(t: &Tri, fy: f64, fx: f64): f64 {
-    return (t.x1 - t.x0) * (fy - t.y0) - (t.y1 - t.y0) * (fx - t.x0)
-}
-
-fn rasterCam(c: &mut Canvas, s: &mut Scene, v: &View, a: &Vec3, b: &Vec3, d: &Vec3, col: &Rgb) {
-    let t = triSetup(s, v, a, b, d)
-    if !t.ok {
+// Append a set-up triangle to the frame's command list and file it under every
+// band its bounding box touches.
+//
+// The list is written in place over the previous frame's, growing only when a
+// frame is busier than any before it. `bins` is the reason a worker does not
+// walk the whole list: with 16 bands and a typical triangle a few dozen pixels
+// tall, a band's bin holds a small fraction of the frame, and the alternative
+// (every worker testing every triangle's bounding box) put the same 20k-entry
+// scan on all 16 threads.
+fn record(s: &mut Scene, cmd: Cmd) {
+    if !cmd.t.ok {
         return
     }
+    let idx = s.cmdN
+    if idx < s.cmds.len {
+        s.cmds[idx] = cmd
+    } else {
+        s.cmds.push(cmd)
+    }
+    s.cmdN = idx + 1
     s.tris = s.tris + 1
-    let fx0 = (t.minX as f64) + 0.5
-    var py = t.minY
-    while py < t.maxY {
-        let fy = (py as f64) + 0.5
-        var w0 = rowEdge0(t, fy, fx0)
-        var w1 = rowEdge1(t, fy, fx0)
-        var w2 = rowEdge2(t, fy, fx0)
-        var idx = py * s.w + t.minX
-        var px = t.minX
-        while px < t.maxX {
-            if w0 >= 0.0 && w1 >= 0.0 && w2 >= 0.0 {
-                let l0 = w0 * t.invArea
-                let l1 = w1 * t.invArea
-                let l2 = w2 * t.invArea
-                let invZ = l0 * t.iaz + l1 * t.ibz + l2 * t.icz
-                if (s.zbuf[idx] as f64) < invZ {
-                    s.zbuf[idx] = invZ as f32
-                    let depth = 1.0 / invZ
-                    // linear fog toward the sky colour
-                    var f = (depth - s.fogStart) / (s.fogEnd - s.fogStart)
-                    if f < 0.0 {
-                        f = 0.0
-                    }
-                    if f > 1.0 {
-                        f = 1.0
-                    }
-                    let o = idx * 3
-                    c.hdr[o] = (col.r * (1.0 - f) + s.fogR * f) as f32
-                    c.hdr[o + 1] = (col.g * (1.0 - f) + s.fogG * f) as f32
-                    c.hdr[o + 2] = (col.b * (1.0 - f) + s.fogB * f) as f32
-                }
-            }
-            w0 = w0 + t.e0x
-            w1 = w1 + t.e1x
-            w2 = w2 + t.e2x
-            idx = idx + 1
-            px = px + 1
+    // `y * bands / h` is the band owning row y, given bands tiled as
+    // [k*h/bands, (k+1)*h/bands). Integer division makes the two agree exactly,
+    // which is the whole disjointness argument in raster.bandRaster.
+    let lo = cmd.t.minY * s.bands / s.h
+    let hi = (cmd.t.maxY - 1) * s.bands / s.h
+    for band in lo..hi + 1 {
+        let n = s.binN[band]
+        if n < s.bins[band].len {
+            s.bins[band][n] = idx
+        } else {
+            s.bins[band].push(idx)
         }
-        py = py + 1
+        s.binN[band] = n + 1
     }
 }
 
-// A world-space triangle, clipped against the near plane and then rasterised.
+fn cmdOf(s: &Scene, view: &View, a: &Vtx, b: &Vtx, d: &Vtx, tr: f64, tg: f64, tb: f64, tex: TexRef, textured: bool): Cmd {
+    let t = triSetup(s.w, s.h, view.scale, view.cx, view.cy, a.x, a.y, a.z, b.x, b.y, b.z, d.x, d.y, d.z)
+    return Cmd {
+        t: t,
+        ar: a.r, ag: a.g, ab: a.b,
+        br: b.r, bg: b.g, bb: b.b,
+        dr: d.r, dg: d.g, db: d.b,
+        al: a.light, bl: b.light, dl: d.light,
+        au: a.u * t.iaz, av: a.v * t.iaz,
+        bu: b.u * t.ibz, bv: b.v * t.ibz,
+        du: d.u * t.icz, dv: d.v * t.icz,
+        atw: a.tw, btw: b.tw, dtw: d.tw,
+        tr: tr, tg: tg, tb: tb,
+        tex: tex,
+        textured: textured,
+    }
+}
+
+// ── flush ─────────────────────────────────────────────────────────────────────
+
+// Rasterise everything recorded since the last flush, then reset the list.
+//
+// One flush is one fan-out: `bands` OS threads, each owning a contiguous, disjoint
+// range of rows of the canvas and the depth buffer, all of them reading the same
+// command list. The caller does not touch either buffer until every worker has
+// been awaited, which is what makes the shared base addresses in `Job` sound.
+//
+// This has to be called before anything that writes the canvas OUTSIDE the
+// z-buffered pipeline — the 2D contrails, sparks and afterburner glow — because
+// those draw in the order they are called and deferred triangles would otherwise
+// land on top of them. render3d.drawWorld marks those points.
+pub fn rasterFlush(c: &mut Canvas, s: &mut Scene) {
+    if s.cmdN == 0 {
+        return
+    }
+    let _t0 = epochMillis()
+    let cmdBase = s.cmds.ptr() as i64
+    let hdrBase = c.hdr.ptr() as i64
+    let zBase = s.zbuf.ptr() as i64
+    var ps: Vec<Promise<i64>> = Vec.new()
+    for k in 0..s.bands {
+        let n = s.binN[k]
+        if n == 0 {
+            continue
+        }
+        let job = Job {
+            cmdBase: cmdBase,
+            binBase: s.bins[k].ptr() as i64,
+            binLen: n,
+            hdrBase: hdrBase,
+            zBase: zBase,
+            w: s.w,
+            y0: k * s.h / s.bands,
+            y1: (k + 1) * s.h / s.bands,
+            fogR: s.fogR,
+            fogG: s.fogG,
+            fogB: s.fogB,
+            fogStart: s.fogStart,
+            fogEnd: s.fogEnd,
+        }
+        if s.bands == 1 {
+            let _ = bandRaster(job)
+        } else {
+            ps.push(Promise<i64>.blocking(move(): i64 => {
+                return bandRaster(job)
+            }
+            ))
+        }
+    }
+    if ps.len > 0 {
+        let _ = Promise.all(ps).await()!
+    }
+    s.flushMs = s.flushMs + (epochMillis() - _t0)
+    resetRecord(s)
+}
+
+// ── triangle entry points ─────────────────────────────────────────────────────
+
+// A world-space triangle, clipped against the near plane and then recorded.
 // Clipping matters: a triangle straddling the camera plane projects to garbage,
 // and terrain directly under a low-flying plane does exactly that.
-pub fn triangle(c: &mut Canvas, s: &mut Scene, v: &View, wa: &Vec3, wb: &Vec3, wd: &Vec3, col: &Rgb) {
-    let a = toCameraV(v, wa)
-    let b = toCameraV(v, wb)
-    let d = toCameraV(v, wd)
-
-    let ina = a.z > v.near
-    let inb = b.z > v.near
-    let inc = d.z > v.near
-    var n = 0
-    if ina {
-        n = n + 1
-    }
-    if inb {
-        n = n + 1
-    }
-    if inc {
-        n = n + 1
-    }
-    if n == 0 {
-        return
-    }
-    if n == 3 {
-        rasterCam(c, s, v, a, b, d, col)
-        return
-    }
-    // Sutherland–Hodgman against the single near plane, producing 3 or 4 points.
-    // One Vec of points, not three parallel Vecs of coordinates: the parallel
-    // form let a push land in two of the three and nothing would say so.
-    var poly: Vec<Vec3> = Vec.new()
-    clipEdge(poly, a, b, v.near)
-    clipEdge(poly, b, d, v.near)
-    clipEdge(poly, d, a, v.near)
-    if poly.len < 3 {
-        return
-    }
-    for i in 1..poly.len - 1 {
-        rasterCam(c, s, v, poly[0], poly[i], poly[i + 1], col)
-    }
-}
-
-fn clipEdge(out: &mut Vec<Vec3>, a: &Vec3, b: &Vec3, near: f64) {
-    let ina = a.z > near
-    let inb = b.z > near
-    if ina {
-        out.push(a)
-    }
-    if ina != inb {
-        let t = (near - a.z) / (b.z - a.z)
-        let p = a.lerp(b, t)
-        out.push(v3(p.x, p.y, near))
-    }
-}
-
-// Lambert term for a triangle whose world-space normal is (nx,ny,nz).
-pub fn shade(s: &Scene, nx: f64, ny: f64, nz: f64, ambient: f64): f64 {
-    var d = nx * s.sunX + ny * s.sunY + nz * s.sunZ
-    if d < 0.0 {
-        d = 0.0
-    }
-    return ambient + (1.0 - ambient) * d
-}
-
-// ── textures ──────────────────────────────────────────────────────────────────
 //
-// Power-of-two RGB textures sampled with wrap, generated procedurally at startup
-// — there is no asset pipeline here, and none is needed for surface detail.
-
-pub struct Texture {
-    w: i64,
-    h: i64,
-    mask: i64, // w-1, w is a power of two
-    // Aerial drapes keep their texels as the sRGB bytes that came off the wire,
-    // decoded through `lut` at sample time. As f32 triples a 2048-square drape is
-    // 50 MB, and four places preloaded at startup came to 200 MB of imagery —
-    // enough to get the process killed by the memory guard. The bytes are a
-    // quarter of that and the LUT makes the conversion exact anyway.
-    pxu: Vec<u8>,
-    lut: Vec<f32>, // 256 entries, sRGB byte -> linear
-    byteSrc: bool,
-    // Mirrored-repeat addressing instead of wrap. The detail textures tile, so
-    // wrap is right for them. An ortho drape is a photograph of a finite place,
-    // and the world REFLECTS at the map edge (see world3d.foldIn) — so the
-    // imagery has to reflect on exactly the same period or the picture and the
-    // terrain under it disagree at every seam.
-    mirror: bool,
-    shift: i64, // log2(w), for the row stride
-    px: Vec<f32>, // 3 floats per texel
-}
-
-pub fn texNew(size: i64, shift: i64): Texture {
-    return Texture {
-        w: size,
-        h: size,
-        mask: size - 1,
-        pxu: Vec.new(),
-        lut: Vec.new(),
-        byteSrc: false,
-        mirror: false,
-        shift: shift,
-        px: Vec.filled(size * size * 3, 0.0),
-    }
-}
-
-pub fn texSet(t: &mut Texture, x: i64, y: i64, r: f64, g: f64, b: f64) {
-    let i = ((y << t.shift) + x) * 3
-    t.px[i] = r as f32
-    t.px[i + 1] = g as f32
-    t.px[i + 2] = b as f32
-}
-
-// Perspective-correct textured triangle. The extra work over the flat path is
-// interpolating u/z and v/z alongside 1/z and dividing per pixel — which is what
-// "perspective-correct" means: interpolating u,v directly in screen space slides
-// the texture around as the surface tilts away.
-// A vertex: position, texture coordinate, and its own light term. Passing these
-// as 25 loose f64 parameters was a standing invitation to transpose two of them —
-// which happened three times while this file was being written. A struct costs
-// nothing at runtime (same registers, no indirection) and makes the mistake
-// unrepresentable. A map keyed by name would also fix it, and would put a hash
-// lookup in the innermost loop of the program.
-pub struct Vtx {
-    x: f64,
-    y: f64,
-    z: f64,
-    u: f64,
-    v: f64,
-    light: f64,
-    // Per-vertex tint, multiplied with the triangle's base colour. Terrain needs
-    // this: with one colour per quad, any surface whose colour varies with height
-    // or slope draws its own tile grid, because neighbouring quads snap to
-    // different values along an edge they share.
-    r: f64,
-    g: f64,
-    b: f64,
-    // How much of the detail texture to apply, 0..1. Terrain and water share one
-    // draw call per quad, and the ground grain painted over water is the single
-    // loudest cue that a surface is NOT water — static speckle cannot be moving
-    // liquid. Fading it out per vertex keeps the shoreline seamless, which a
-    // per-quad "is this a water tile" choice could not.
-    tw: f64,
-}
-
-pub fn vtx(x: f64, y: f64, z: f64, u: f64, v: f64, light: f64): Vtx {
-    return Vtx {
-        x: x, y: y, z: z, u: u, v: v, light: light, r: 1.0, g: 1.0, b: 1.0, tw: 1.0
-    }
-}
-
-pub fn vtxC(x: f64, y: f64, z: f64, u: f64, v: f64, light: f64, r: f64, g: f64, b: f64, tw: f64): Vtx {
-    return Vtx {
-        x: x, y: y, z: z, u: u, v: v, light: light, r: r, g: g, b: b, tw: tw
-    }
-}
-
-// Perspective-correct textured triangle in CAMERA space. u/z, v/z and the light
-// term interpolate linearly in screen space; dividing by the interpolated 1/z at
-// each pixel recovers the true value. That division is what "perspective-correct"
-// buys — interpolating u,v directly makes the texture slide as a surface tilts.
-fn rasterCamTex(c: &mut Canvas, s: &mut Scene, view: &View, tex: &Texture, a: &Vtx, b: &Vtx, d: &Vtx, tr: f64, tg: f64, tb: f64) {
-    let t = triSetup(s, view, v3(a.x, a.y, a.z), v3(b.x, b.y, b.z), v3(d.x, d.y, d.z))
-    if !t.ok {
-        return
-    }
-    s.tris = s.tris + 1
-    // Texture coordinates carried divided by z, which is what interpolates
-    // linearly in screen space; the multiply back by z is per pixel.
-    let au = a.u * t.iaz
-    let av = a.v * t.iaz
-    let bu = b.u * t.ibz
-    let bv = b.v * t.ibz
-    let du = d.u * t.icz
-    let dv = d.v * t.icz
-
-    let fx0 = (t.minX as f64) + 0.5
-    var py = t.minY
-    while py < t.maxY {
-        let fy = (py as f64) + 0.5
-        var w0 = rowEdge0(t, fy, fx0)
-        var w1 = rowEdge1(t, fy, fx0)
-        var w2 = rowEdge2(t, fy, fx0)
-        var idx = py * s.w + t.minX
-        var px = t.minX
-        while px < t.maxX {
-            if w0 >= 0.0 && w1 >= 0.0 && w2 >= 0.0 {
-                let l0 = w0 * t.invArea
-                let l1 = w1 * t.invArea
-                let l2 = w2 * t.invArea
-                let invZ = l0 * t.iaz + l1 * t.ibz + l2 * t.icz
-                if (s.zbuf[idx] as f64) < invZ {
-                    s.zbuf[idx] = invZ as f32
-                    let zz = 1.0 / invZ
-                    let uu = (l0 * au + l1 * bu + l2 * du) * zz
-                    let vv = (l0 * av + l1 * bv + l2 * dv) * zz
-                    // Smooth shading: the light term is per vertex and interpolated,
-                    // so a curved surface stops looking like a stack of flat facets.
-                    let sh = l0 * a.light + l1 * b.light + l2 * d.light
-                    let vr = l0 * a.r + l1 * b.r + l2 * d.r
-                    let vg = l0 * a.g + l1 * b.g + l2 * d.g
-                    let vb = l0 * a.b + l1 * b.b + l2 * d.b
-                    var tx2 = 0
-                    var ty2 = 0
-                    if tex.mirror {
-                        // Fold onto a 2w period, then reflect the upper half.
-                        // Masking by 2w-1 is what makes this correct for
-                        // negative world coordinates too, which is most of the
-                        // map: two's complement gives the positive residue.
-                        tx2 = ((uu * (tex.w as f64)) as i64) & (tex.w * 2 - 1)
-                        ty2 = ((vv * (tex.h as f64)) as i64) & (tex.h * 2 - 1)
-                        if tx2 >= tex.w {
-                            tx2 = tex.w * 2 - 1 - tx2
-                        }
-                        if ty2 >= tex.h {
-                            ty2 = tex.h * 2 - 1 - ty2
-                        }
-                    } else {
-                        tx2 = ((uu * (tex.w as f64)) as i64) & tex.mask
-                        ty2 = ((vv * (tex.h as f64)) as i64) & tex.mask
-                        if tx2 < 0 {
-                            tx2 = 0
-                        }
-                        if ty2 < 0 {
-                            ty2 = 0
-                        }
-                    }
-                    let ti = ((ty2 << tex.shift) + tx2) * 3
-                    var tex0 = 0.0
-                    var tex1 = 0.0
-                    var tex2 = 0.0
-                    if tex.byteSrc {
-                        tex0 = tex.lut[tex.pxu[ti] as i64] as f64
-                        tex1 = tex.lut[tex.pxu[ti + 1] as i64] as f64
-                        tex2 = tex.lut[tex.pxu[ti + 2] as i64] as f64
-                    } else {
-                        tex0 = tex.px[ti] as f64
-                        tex1 = tex.px[ti + 1] as f64
-                        tex2 = tex.px[ti + 2] as f64
-                    }
-                    // texel faded toward 1 (no-op) where tw is low
-                    let tw = l0 * a.tw + l1 * b.tw + l2 * d.tw
-                    var f = (zz - s.fogStart) / (s.fogEnd - s.fogStart)
-                    if f < 0.0 {
-                        f = 0.0
-                    }
-                    if f > 1.0 {
-                        f = 1.0
-                    }
-                    let o = idx * 3
-                    let rr = tr * vr * sh * (1.0 + (tex0 - 1.0) * tw)
-                    let gg = tg * vg * sh * (1.0 + (tex1 - 1.0) * tw)
-                    let bb = tb * vb * sh * (1.0 + (tex2 - 1.0) * tw)
-                    c.hdr[o] = (rr * (1.0 - f) + s.fogR * f) as f32
-                    c.hdr[o + 1] = (gg * (1.0 - f) + s.fogG * f) as f32
-                    c.hdr[o + 2] = (bb * (1.0 - f) + s.fogB * f) as f32
-                }
-            }
-            w0 = w0 + t.e0x
-            w1 = w1 + t.e1x
-            w2 = w2 + t.e2x
-            idx = idx + 1
-            px = px + 1
-        }
-        py = py + 1
-    }
+// The flat-shaded case is the Gouraud case with one colour on all three vertices
+// and no light term: the interpolation then reproduces that colour exactly, and
+// there is one scanline loop to maintain instead of two.
+pub fn triangle(s: &mut Scene, v: &View, wa: &Vec3, wb: &Vec3, wd: &Vec3, col: &Rgb) {
+    triangleG(s, v, vtxC(wa.x, wa.y, wa.z, 0.0, 0.0, 1.0, col.r, col.g, col.b, 0.0), vtxC(wb.x, wb.y, wb.z, 0.0, 0.0, 1.0, col.r, col.g, col.b, 0.0), vtxC(wd.x, wd.y, wd.z, 0.0, 0.0, 1.0, col.r, col.g, col.b, 0.0), 1.0, 1.0, 1.0)
 }
 
 // World-space textured triangle, near-clipped. The clip carries every vertex
 // attribute by the same parameter, which a struct makes automatic.
-pub fn triangleV(c: &mut Canvas, s: &mut Scene, view: &View, t: &Texture, wa: &Vtx, wb: &Vtx, wd: &Vtx, tr: f64, tg: f64, tb: f64) {
-    let ca = toCamera(view, wa.x, wa.y, wa.z)
-    let cb = toCamera(view, wb.x, wb.y, wb.z)
-    let cd = toCamera(view, wd.x, wd.y, wd.z)
-    let a = vtxC(ca.x, ca.y, ca.z, wa.u, wa.v, wa.light, wa.r, wa.g, wa.b, wa.tw)
-    let b = vtxC(cb.x, cb.y, cb.z, wb.u, wb.v, wb.light, wb.r, wb.g, wb.b, wb.tw)
-    let d = vtxC(cd.x, cd.y, cd.z, wd.u, wd.v, wd.light, wd.r, wd.g, wd.b, wd.tw)
+pub fn triangleV(s: &mut Scene, view: &View, t: &Texture, wa: &Vtx, wb: &Vtx, wd: &Vtx, tr: f64, tg: f64, tb: f64) {
+    let a = toCamVtx(view, wa)
+    let b = toCamVtx(view, wb)
+    let d = toCamVtx(view, wd)
+    let tex = texRef(t)
     if a.z > view.near && b.z > view.near && d.z > view.near {
-        rasterCamTex(c, s, view, t, a, b, d, tr, tg, tb)
+        record(s, cmdOf(s, view, a, b, d, tr, tg, tb, tex, true))
+        return
+    }
+    if a.z <= view.near && b.z <= view.near && d.z <= view.near {
+        return
+    }
+    // Sutherland–Hodgman against the single near plane, producing 3 or 4 points.
+    // One Vec of vertices, not several parallel Vecs of coordinates: the parallel
+    // form let a push land in two of the three and nothing would say so.
+    var poly: Vec<Vtx> = Vec.new()
+    clipV(poly, a, b, view.near)
+    clipV(poly, b, d, view.near)
+    clipV(poly, d, a, view.near)
+    if poly.len < 3 {
+        return
+    }
+    for i in 1..poly.len - 1 {
+        record(s, cmdOf(s, view, poly[0], poly[i], poly[i + 1], tr, tg, tb, tex, true))
+    }
+}
+
+// World-space Gouraud triangle, near-clipped. u/v on the vertices are ignored.
+pub fn triangleG(s: &mut Scene, view: &View, wa: &Vtx, wb: &Vtx, wd: &Vtx, tr: f64, tg: f64, tb: f64) {
+    let a = toCamVtx(view, wa)
+    let b = toCamVtx(view, wb)
+    let d = toCamVtx(view, wd)
+    let none = texRefNone()
+    if a.z > view.near && b.z > view.near && d.z > view.near {
+        record(s, cmdOf(s, view, a, b, d, tr, tg, tb, none, false))
         return
     }
     if a.z <= view.near && b.z <= view.near && d.z <= view.near {
@@ -719,8 +515,13 @@ pub fn triangleV(c: &mut Canvas, s: &mut Scene, view: &View, t: &Texture, wa: &V
         return
     }
     for i in 1..poly.len - 1 {
-        rasterCamTex(c, s, view, t, poly[0], poly[i], poly[i + 1], tr, tg, tb)
+        record(s, cmdOf(s, view, poly[0], poly[i], poly[i + 1], tr, tg, tb, none, false))
     }
+}
+
+fn toCamVtx(view: &View, w: &Vtx): Vtx {
+    let p = toCamera(view, w.x, w.y, w.z)
+    return vtxC(p.x, p.y, p.z, w.u, w.v, w.light, w.r, w.g, w.b, w.tw)
 }
 
 fn clipV(out: &mut Vec<Vtx>, a: &Vtx, b: &Vtx, near: f64) {
@@ -735,94 +536,11 @@ fn clipV(out: &mut Vec<Vtx>, a: &Vtx, b: &Vtx, near: f64) {
     }
 }
 
-// Gouraud-shaded, untextured triangle in CAMERA space. Same interpolation as the
-// textured path minus the texel fetch: distant terrain is most of the triangle
-// count, and it does not need a texture, but it does need the per-vertex colour —
-// without it the far field is a checkerboard of flat quads.
-fn rasterCamG(c: &mut Canvas, s: &mut Scene, v: &View, a: &Vtx, b: &Vtx, d: &Vtx, tr: f64, tg: f64, tb: f64) {
-    let t = triSetup(s, v, v3(a.x, a.y, a.z), v3(b.x, b.y, b.z), v3(d.x, d.y, d.z))
-    if !t.ok {
-        return
+// Lambert term for a triangle whose world-space normal is (nx,ny,nz).
+pub fn shade(s: &Scene, nx: f64, ny: f64, nz: f64, ambient: f64): f64 {
+    var d = nx * s.sunX + ny * s.sunY + nz * s.sunZ
+    if d < 0.0 {
+        d = 0.0
     }
-    s.tris = s.tris + 1
-    // colour already folded with the vertex light, so the inner loop is 3 lerps
-    let ar = a.r * a.light * tr
-    let ag = a.g * a.light * tg
-    let ab = a.b * a.light * tb
-    let br = b.r * b.light * tr
-    let bg = b.g * b.light * tg
-    let bb2 = b.b * b.light * tb
-    let dr = d.r * d.light * tr
-    let dg = d.g * d.light * tg
-    let db = d.b * d.light * tb
-
-    let fx0 = (t.minX as f64) + 0.5
-    var py = t.minY
-    while py < t.maxY {
-        let fy = (py as f64) + 0.5
-        var w0 = rowEdge0(t, fy, fx0)
-        var w1 = rowEdge1(t, fy, fx0)
-        var w2 = rowEdge2(t, fy, fx0)
-        var idx = py * s.w + t.minX
-        var px = t.minX
-        while px < t.maxX {
-            if w0 >= 0.0 && w1 >= 0.0 && w2 >= 0.0 {
-                let l0 = w0 * t.invArea
-                let l1 = w1 * t.invArea
-                let l2 = w2 * t.invArea
-                let invZ = l0 * t.iaz + l1 * t.ibz + l2 * t.icz
-                if (s.zbuf[idx] as f64) < invZ {
-                    s.zbuf[idx] = invZ as f32
-                    let depth = 1.0 / invZ
-                    var f = (depth - s.fogStart) / (s.fogEnd - s.fogStart)
-                    if f < 0.0 {
-                        f = 0.0
-                    }
-                    if f > 1.0 {
-                        f = 1.0
-                    }
-                    let rr = l0 * ar + l1 * br + l2 * dr
-                    let gg = l0 * ag + l1 * bg + l2 * dg
-                    let bbv = l0 * ab + l1 * bb2 + l2 * db
-                    let o = idx * 3
-                    c.hdr[o] = (rr * (1.0 - f) + s.fogR * f) as f32
-                    c.hdr[o + 1] = (gg * (1.0 - f) + s.fogG * f) as f32
-                    c.hdr[o + 2] = (bbv * (1.0 - f) + s.fogB * f) as f32
-                }
-            }
-            w0 = w0 + t.e0x
-            w1 = w1 + t.e1x
-            w2 = w2 + t.e2x
-            idx = idx + 1
-            px = px + 1
-        }
-        py = py + 1
-    }
-}
-
-// World-space Gouraud triangle, near-clipped. u/v on the vertices are ignored.
-pub fn triangleG(c: &mut Canvas, s: &mut Scene, view: &View, wa: &Vtx, wb: &Vtx, wd: &Vtx, tr: f64, tg: f64, tb: f64) {
-    let ca = toCamera(view, wa.x, wa.y, wa.z)
-    let cb = toCamera(view, wb.x, wb.y, wb.z)
-    let cd = toCamera(view, wd.x, wd.y, wd.z)
-    let a = vtxC(ca.x, ca.y, ca.z, wa.u, wa.v, wa.light, wa.r, wa.g, wa.b, wa.tw)
-    let b = vtxC(cb.x, cb.y, cb.z, wb.u, wb.v, wb.light, wb.r, wb.g, wb.b, wb.tw)
-    let d = vtxC(cd.x, cd.y, cd.z, wd.u, wd.v, wd.light, wd.r, wd.g, wd.b, wd.tw)
-    if a.z > view.near && b.z > view.near && d.z > view.near {
-        rasterCamG(c, s, view, a, b, d, tr, tg, tb)
-        return
-    }
-    if a.z <= view.near && b.z <= view.near && d.z <= view.near {
-        return
-    }
-    var poly: Vec<Vtx> = Vec.new()
-    clipV(poly, a, b, view.near)
-    clipV(poly, b, d, view.near)
-    clipV(poly, d, a, view.near)
-    if poly.len < 3 {
-        return
-    }
-    for i in 1..poly.len - 1 {
-        rasterCamG(c, s, view, poly[0], poly[i], poly[i + 1], tr, tg, tb)
-    }
+    return ambient + (1.0 - ambient) * d
 }

@@ -10,8 +10,14 @@
 from "std/math" import {
     Math
 }
+from "std/runtime" import {
+    Promise
+}
 from "./font" import {
     fontTable
+}
+from "./raster" import {
+    bandsFor
 }
 
 pub struct Canvas {
@@ -31,6 +37,7 @@ pub struct Canvas {
     utx: Vec<f32>, //                 horizontal lerp weight
     uy0: Vec<i64>,
     uty: Vec<f32>,
+    bands: i64, // horizontal bands the composite pass fans out over
 }
 
 pub fn canvasNew(w: i64, h: i64): Canvas {
@@ -85,6 +92,7 @@ pub fn canvasNew(w: i64, h: i64): Canvas {
         utx: utx,
         uy0: uy0,
         uty: uty,
+        bands: bandsFor(h),
     }
 }
 
@@ -449,60 +457,143 @@ pub fn present(c: &mut Canvas, bloomGain: f64, exposure: f64) {
     blurPass(c, 4)
     blurPass(c, 8) // without the widest pass the halo has a visible square edge
 
-    let bw = c.bw
-    let gain = (bloomGain * exposure) as f32
-    let expo = (exposure * 256.0) as f32
-    let maxIdx = TONE_STEPS
-    for y in 0..c.h {
-        let by0 = c.uy0[y]
-        let ty = c.uty[y]
-        let row0 = by0 * bw * 3
-        let row1 = (by0 + 1) * bw * 3
-        var s = y * c.w * 3
-        var o = y * c.w
-        for x in 0..c.w {
-            let bx = c.ux0[x] * 3
-            let tx = c.utx[x]
-            let w00: f32 = (1.0 - tx) * (1.0 - ty)
-            let w01: f32 = tx * (1.0 - ty)
-            let w10: f32 = (1.0 - tx) * ty
-            let w11: f32 = tx * ty
-            let i00 = row0 + bx
-            let i10 = row1 + bx
+    // The composite is the expensive half — a million pixels against 57k for the
+    // whole bloom chain above — and it is the only pass with no cross-row reads
+    // on the buffer it writes, so it parallelises with a single fan-out. The
+    // bloom chain would need a barrier between each of its nine passes and is
+    // left alone: nine thread spawns cost more than the passes do.
+    compositeAll(c, bloomGain, exposure)
+}
 
-            var v0 = (c.hdr[s] + (c.b0[i00] * w00 + c.b0[i00 + 3] * w01 + c.b0[i10] * w10 + c.b0[i10 + 3] * w11) * gain) * expo
-            var v1 = (c.hdr[s + 1] + (c.b0[i00 + 1] * w00 + c.b0[i00 + 4] * w01 + c.b0[i10 + 1] * w10 + c.b0[i10 + 4] * w11) * gain) * expo
-            var v2 = (c.hdr[s + 2] + (c.b0[i00 + 2] * w00 + c.b0[i00 + 5] * w01 + c.b0[i10 + 2] * w10 + c.b0[i10 + 5] * w11) * gain) * expo
-            c.hdr[s] = 0.0
-            c.hdr[s + 1] = 0.0
-            c.hdr[s + 2] = 0.0
+// Per-band arguments for the composite pass. Same shape and same rules as
+// raster.Job — every field a scalar, the buffers as base addresses, and each
+// band owning a disjoint half-open range of rows. See the SAFETY note on
+// raster.bandRaster; the argument is identical.
+pub struct PresentJob {
+    hdr: i64, // *f32, read then zeroed — this band's rows only
+    b0: i64, // *f32, read-only (the blurred bloom, quarter res)
+    fb: i64, // *u32, written — this band's rows only
+    ux0: i64, // *i64
+    utx: i64, // *f32
+    uy0: i64, // *i64
+    uty: i64, // *f32
+    tonelut: i64, // *u32
+    w: i64,
+    bw: i64,
+    y0: i64,
+    y1: i64,
+    gain: f32,
+    expo: f32,
+    maxIdx: i64,
+}
 
-            var n0 = v0 as i64
-            var n1 = v1 as i64
-            var n2 = v2 as i64
-            if n0 < 0 {
-                n0 = 0
+fn compositeAll(c: &mut Canvas, bloomGain: f64, exposure: f64) {
+    var job = PresentJob {
+        hdr: c.hdr.ptr() as i64,
+        b0: c.b0.ptr() as i64,
+        fb: c.fb.ptr() as i64,
+        ux0: c.ux0.ptr() as i64,
+        utx: c.utx.ptr() as i64,
+        uy0: c.uy0.ptr() as i64,
+        uty: c.uty.ptr() as i64,
+        tonelut: c.tonelut.ptr() as i64,
+        w: c.w,
+        bw: c.bw,
+        y0: 0,
+        y1: c.h,
+        gain: (bloomGain * exposure) as f32,
+        expo: (exposure * 256.0) as f32,
+        maxIdx: TONE_STEPS,
+    }
+    if c.bands <= 1 {
+        compositeBand(job)
+        return
+    }
+    var ps: Vec<Promise<i64>> = Vec.new()
+    for k in 0..c.bands {
+        var j = job
+        j.y0 = k * c.h / c.bands
+        j.y1 = (k + 1) * c.h / c.bands
+        ps.push(Promise<i64>.blocking(move(): i64 => {
+            return compositeBand(j)
+        }
+        ))
+    }
+    let _ = Promise.all(ps).await()!
+}
+
+// Composite, tone-map and pack rows [y0,y1) into the ABGR framebuffer. Also
+// zeroes those rows of the HDR buffer, so the next frame needs no clear pass.
+pub fn compositeBand(job: PresentJob): i64 {
+    unsafe {
+        let hdr = job.hdr as *f32
+        let b0 = job.b0 as *f32
+        let fb = job.fb as *u32
+        let ux0 = job.ux0 as *i64
+        let utx = job.utx as *f32
+        let uy0 = job.uy0 as *i64
+        let uty = job.uty as *f32
+        let tonelut = job.tonelut as *u32
+        let bw = job.bw
+        let gain = job.gain
+        let expo = job.expo
+        let maxIdx = job.maxIdx
+        var y = job.y0
+        while y < job.y1 {
+            let by0 = uy0[y]
+            let ty = uty[y]
+            let row0 = by0 * bw * 3
+            let row1 = (by0 + 1) * bw * 3
+            var s = y * job.w * 3
+            var o = y * job.w
+            var x = 0
+            while x < job.w {
+                let bx = ux0[x] * 3
+                let tx = utx[x]
+                let w00: f32 = (1.0 - tx) * (1.0 - ty)
+                let w01: f32 = tx * (1.0 - ty)
+                let w10: f32 = (1.0 - tx) * ty
+                let w11: f32 = tx * ty
+                let i00 = row0 + bx
+                let i10 = row1 + bx
+
+                let v0 = (hdr[s] + (b0[i00] * w00 + b0[i00 + 3] * w01 + b0[i10] * w10 + b0[i10 + 3] * w11) * gain) * expo
+                let v1 = (hdr[s + 1] + (b0[i00 + 1] * w00 + b0[i00 + 4] * w01 + b0[i10 + 1] * w10 + b0[i10 + 4] * w11) * gain) * expo
+                let v2 = (hdr[s + 2] + (b0[i00 + 2] * w00 + b0[i00 + 5] * w01 + b0[i10 + 2] * w10 + b0[i10 + 5] * w11) * gain) * expo
+                hdr[s] = 0.0
+                hdr[s + 1] = 0.0
+                hdr[s + 2] = 0.0
+
+                var n0 = v0 as i64
+                var n1 = v1 as i64
+                var n2 = v2 as i64
+                if n0 < 0 {
+                    n0 = 0
+                }
+                if n1 < 0 {
+                    n1 = 0
+                }
+                if n2 < 0 {
+                    n2 = 0
+                }
+                if n0 > maxIdx {
+                    n0 = maxIdx
+                }
+                if n1 > maxIdx {
+                    n1 = maxIdx
+                }
+                if n2 > maxIdx {
+                    n2 = maxIdx
+                }
+                fb[o] = 0xFF000000 | (tonelut[n2] << 16) | (tonelut[n1] << 8) | tonelut[n0]
+                s = s + 3
+                o = o + 1
+                x = x + 1
             }
-            if n1 < 0 {
-                n1 = 0
-            }
-            if n2 < 0 {
-                n2 = 0
-            }
-            if n0 > maxIdx {
-                n0 = maxIdx
-            }
-            if n1 > maxIdx {
-                n1 = maxIdx
-            }
-            if n2 > maxIdx {
-                n2 = maxIdx
-            }
-            c.fb[o] = 0xFF000000 | (c.tonelut[n2] << 16) | (c.tonelut[n1] << 8) | c.tonelut[n0]
-            s = s + 3
-            o = o + 1
+            y = y + 1
         }
     }
+    return job.y1 - job.y0
 }
 
 // ── filled shapes ─────────────────────────────────────────────────────────────

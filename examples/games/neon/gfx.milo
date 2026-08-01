@@ -1,0 +1,487 @@
+// Software HDR renderer for the neon shooter.
+//
+// Everything is drawn additively into a linear-light float buffer, then
+// bright-passed, blurred at quarter resolution and composited back with an
+// ACES-style tone curve. That is what makes overlapping neon strokes bloom into
+// each other instead of clipping to flat white.
+//
+// No GPU, no shaders — plain loops over Vec<f32>.
+
+from "std/math" import {
+    Math
+}
+from "./font" import {
+    fontTable
+}
+
+pub struct Canvas {
+    w: i64,
+    h: i64,
+    hdr: Vec<f32>, // 3 floats per pixel, linear light, unbounded above 1.0
+    bw: i64,
+    bh: i64,
+    b0: Vec<f32>, // bright-pass / ping
+    b1: Vec<f32>, // pong
+    fb: Vec<u32>, // ABGR8888 output handed to SDL
+    font: Vec<i64>,
+    // Precomputed so the composite pass does no float coordinate math and no
+    // pow() per channel — those two alone were 31 of 32 ms/frame at 720p.
+    tonelut: Vec<u32>,
+    ux0: Vec<i64>, // bloom bilinear: left source column per output x
+    utx: Vec<f32>, //                 horizontal lerp weight
+    uy0: Vec<i64>,
+    uty: Vec<f32>,
+}
+
+pub fn canvasNew(w: i64, h: i64): Canvas {
+    let bw = w / 4
+    let bh = h / 4
+    var lut: Vec<u32> = Vec.filled(TONE_STEPS + 1, 0)
+    for i in 0..TONE_STEPS + 1 {
+        lut[i] = encodeSlow((i as f64) / 256.0)
+    }
+    var ux0: Vec<i64> = Vec.filled(w, 0)
+    var utx: Vec<f32> = Vec.filled(w, 0.0)
+    for x in 0..w {
+        let fx = ((x as f64) + 0.5) * 0.25 - 0.5
+        var i0 = Math.floor(fx) as i64
+        let t = fx - (i0 as f64)
+        if i0 < 0 {
+            i0 = 0
+        }
+        if i0 > bw - 2 {
+            i0 = bw - 2
+        }
+        ux0[x] = i0
+        utx[x] = (t as f32)
+    }
+    var uy0: Vec<i64> = Vec.filled(h, 0)
+    var uty: Vec<f32> = Vec.filled(h, 0.0)
+    for y in 0..h {
+        let fy = ((y as f64) + 0.5) * 0.25 - 0.5
+        var i0 = Math.floor(fy) as i64
+        let t = fy - (i0 as f64)
+        if i0 < 0 {
+            i0 = 0
+        }
+        if i0 > bh - 2 {
+            i0 = bh - 2
+        }
+        uy0[y] = i0
+        uty[y] = (t as f32)
+    }
+    return Canvas {
+        w: w,
+        h: h,
+        hdr: Vec.filled(w * h * 3, 0.0),
+        bw: bw,
+        bh: bh,
+        b0: Vec.filled(bw * bh * 3, 0.0),
+        b1: Vec.filled(bw * bh * 3, 0.0),
+        fb: Vec.filled(w * h, 0),
+        font: fontTable(),
+        tonelut: lut,
+        ux0: ux0,
+        utx: utx,
+        uy0: uy0,
+        uty: uty,
+    }
+}
+
+pub fn clear(c: &mut Canvas) {
+    let n = c.w * c.h * 3
+    for i in 0..n {
+        c.hdr[i] = 0.0
+    }
+}
+
+// ── primitives ────────────────────────────────────────────────────────────────
+
+pub fn addPix(c: &mut Canvas, x: i64, y: i64, r: f64, g: f64, b: f64) {
+    if x < 0 || y < 0 || x >= c.w || y >= c.h {
+        return
+    }
+    let i = (y * c.w + x) * 3
+    c.hdr[i] = c.hdr[i] + (r as f32)
+    c.hdr[i + 1] = c.hdr[i + 1] + (g as f32)
+    c.hdr[i + 2] = c.hdr[i + 2] + (b as f32)
+}
+
+// A soft radial blob — the workhorse for particles, muzzle flashes and cores.
+pub fn spot(c: &mut Canvas, cx: f64, cy: f64, rad: f64, r: f64, g: f64, b: f64) {
+    if rad <= 0.0 {
+        return
+    }
+    var x0 = (cx - rad) as i64
+    var x1 = (cx + rad) as i64 + 1
+    var y0 = (cy - rad) as i64
+    var y1 = (cy + rad) as i64 + 1
+    if x0 < 0 {
+        x0 = 0
+    }
+    if y0 < 0 {
+        y0 = 0
+    }
+    if x1 > c.w {
+        x1 = c.w
+    }
+    if y1 > c.h {
+        y1 = c.h
+    }
+    let inv = 1.0 / (rad * rad)
+    var y = y0
+    while y < y1 {
+        let dy = (y as f64) + 0.5 - cy
+        var x = x0
+        while x < x1 {
+            let dx = (x as f64) + 0.5 - cx
+            let t = 1.0 - (dx * dx + dy * dy) * inv
+            if t > 0.0 {
+                let f = t * t
+                let i = (y * c.w + x) * 3
+                c.hdr[i] = c.hdr[i] + ((r * f) as f32)
+                c.hdr[i + 1] = c.hdr[i + 1] + ((g * f) as f32)
+                c.hdr[i + 2] = c.hdr[i + 2] + ((b * f) as f32)
+            }
+            x = x + 1
+        }
+        y = y + 1
+    }
+}
+
+fn plot(c: &mut Canvas, x: i64, y: i64, cov: f64, r: f64, g: f64, b: f64) {
+    if cov <= 0.0 {
+        return
+    }
+    addPix(c, x, y, r * cov, g * cov, b * cov)
+}
+
+// Xiaolin Wu antialiased line, drawn additively. Thin and bright — the bloom
+// pass supplies the halo, which is far cheaper than drawing a wide soft stroke.
+pub fn line(c: &mut Canvas, x0i: f64, y0i: f64, x1i: f64, y1i: f64, r: f64, g: f64, b: f64) {
+    var x0 = x0i
+    var y0 = y0i
+    var x1 = x1i
+    var y1 = y1i
+    var steep = false
+    if Math.abs(y1 - y0) > Math.abs(x1 - x0) {
+        steep = true
+        var t = x0
+        x0 = y0
+        y0 = t
+        t = x1
+        x1 = y1
+        y1 = t
+    }
+    if x0 > x1 {
+        var t = x0
+        x0 = x1
+        x1 = t
+        t = y0
+        y0 = y1
+        y1 = t
+    }
+    let dx = x1 - x0
+    let dy = y1 - y0
+    var grad = 1.0
+    if dx != 0.0 {
+        grad = dy / dx
+    }
+    // Long strokes off-screen cost nothing: clip the x range up front.
+    var xs = Math.floor(x0 + 0.5) as i64
+    var xe = Math.floor(x1 + 0.5) as i64
+    let limit = if steep {
+        c.h
+    } else {
+        c.w
+    }
+    if xe < 0 || xs > limit {
+        return
+    }
+    var yv = y0 + grad * ((xs as f64) + 0.5 - x0)
+    if xs < -1 {
+        yv = yv + grad * ((-1 - xs) as f64)
+        xs = -1
+    }
+    if xe > limit {
+        xe = limit
+    }
+    var x = xs
+    while x <= xe {
+        let fy = Math.floor(yv)
+        let frac = yv - fy
+        let iy = fy as i64
+        if steep {
+            plot(c, iy, x, 1.0 - frac, r, g, b)
+            plot(c, iy + 1, x, frac, r, g, b)
+        } else {
+            plot(c, x, iy, 1.0 - frac, r, g, b)
+            plot(c, x, iy + 1, frac, r, g, b)
+        }
+        yv = yv + grad
+        x = x + 1
+    }
+}
+
+// A closed polygon given as flat x,y pairs in model space, transformed by
+// position / rotation / scale. Every enemy in the game is one of these.
+pub fn poly(c: &mut Canvas, pts: &Vec<f64>, cx: f64, cy: f64, ang: f64, scale: f64, r: f64, g: f64, b: f64) {
+    let n = pts.len / 2
+    if n < 2 {
+        return
+    }
+    let ca = Math.cos(ang) * scale
+    let sa = Math.sin(ang) * scale
+    var px = cx + pts[(n - 1) * 2] * ca - pts[(n - 1) * 2 + 1] * sa
+    var py = cy + pts[(n - 1) * 2] * sa + pts[(n - 1) * 2 + 1] * ca
+    for i in 0..n {
+        let qx = cx + pts[i * 2] * ca - pts[i * 2 + 1] * sa
+        let qy = cy + pts[i * 2] * sa + pts[i * 2 + 1] * ca
+        line(c, px, py, qx, qy, r, g, b)
+        px = qx
+        py = qy
+    }
+}
+
+pub fn circle(c: &mut Canvas, cx: f64, cy: f64, rad: f64, segs: i64, r: f64, g: f64, b: f64) {
+    let step = 6.283185307179586 / (segs as f64)
+    var px = cx + rad
+    var py = cy
+    for i in 1..segs + 1 {
+        let a = (i as f64) * step
+        let qx = cx + Math.cos(a) * rad
+        let qy = cy + Math.sin(a) * rad
+        line(c, px, py, qx, qy, r, g, b)
+        px = qx
+        py = qy
+    }
+}
+
+// ── text ──────────────────────────────────────────────────────────────────────
+
+pub fn textWidth(s: &string, scale: i64): i64 {
+    return s.len * 6 * scale
+}
+
+pub fn text(c: &mut Canvas, x: i64, y: i64, s: &string, scale: i64, r: f64, g: f64, b: f64) {
+    var pen = x
+    for k in 0..s.len {
+        var code = s[k] as i64
+        if code >= 97 && code <= 122 && code != 120 {
+            code = code - 32 // the table is uppercase-only, apart from 'x'
+        }
+        if code >= 0 && code < 128 {
+            let bits = c.font[code]
+            if bits != 0 {
+                for row in 0..7 {
+                    for col in 0..5 {
+                        if ((bits >> (row * 5 + col)) & 1) == 1 {
+                            let px = pen + col * scale
+                            let py = y + row * scale
+                            for sy in 0..scale {
+                                for sx in 0..scale {
+                                    addPix(c, px + sx, py + sy, r, g, b)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        pen = pen + 6 * scale
+    }
+}
+
+pub fn textCentered(c: &mut Canvas, cx: i64, y: i64, s: &string, scale: i64, r: f64, g: f64, b: f64) {
+    text(c, cx - textWidth(s, scale) / 2, y, s, scale, r, g, b)
+}
+
+// ── bloom + tone mapping ──────────────────────────────────────────────────────
+
+fn brightPass(c: &mut Canvas, threshold: f64) {
+    let bw = c.bw
+    let bh = c.bh
+    for by in 0..bh {
+        for bx in 0..bw {
+            var sr = 0.0
+            var sg = 0.0
+            var sb = 0.0
+            let sy0 = by * 4
+            let sx0 = bx * 4
+            for dy in 0..4 {
+                let rowBase = ((sy0 + dy) * c.w + sx0) * 3
+                for dx in 0..4 {
+                    let i = rowBase + dx * 3
+                    sr = sr + (c.hdr[i] as f64)
+                    sg = sg + (c.hdr[i + 1] as f64)
+                    sb = sb + (c.hdr[i + 2] as f64)
+                }
+            }
+            sr = sr * 0.0625
+            sg = sg * 0.0625
+            sb = sb * 0.0625
+            let lum = sr * 0.299 + sg * 0.587 + sb * 0.114
+            var keep = 0.0
+            if lum > threshold {
+                keep = (lum - threshold) / lum
+            }
+            let o = (by * bw + bx) * 3
+            c.b0[o] = ((sr * keep) as f32)
+            c.b0[o + 1] = ((sg * keep) as f32)
+            c.b0[o + 2] = ((sb * keep) as f32)
+        }
+    }
+}
+
+// Separable [1,4,6,4,1]/16 blur with a tap stride, so a couple of passes at
+// different strides give a wide halo for very few samples.
+fn blurPass(c: &mut Canvas, stride: i64) {
+    let bw = c.bw
+    let bh = c.bh
+    // horizontal: b0 -> b1
+    for y in 0..bh {
+        for x in 0..bw {
+            var sr = 0.0
+            var sg = 0.0
+            var sb = 0.0
+            for k in 0..5 {
+                var sx = x + (k - 2) * stride
+                if sx < 0 {
+                    sx = 0
+                }
+                if sx >= bw {
+                    sx = bw - 1
+                }
+                let wgt = KERNEL[k]
+                let i = (y * bw + sx) * 3
+                sr = sr + (c.b0[i] as f64) * wgt
+                sg = sg + (c.b0[i + 1] as f64) * wgt
+                sb = sb + (c.b0[i + 2] as f64) * wgt
+            }
+            let o = (y * bw + x) * 3
+            c.b1[o] = (sr as f32)
+            c.b1[o + 1] = (sg as f32)
+            c.b1[o + 2] = (sb as f32)
+        }
+    }
+    // vertical: b1 -> b0
+    for y in 0..bh {
+        for x in 0..bw {
+            var sr = 0.0
+            var sg = 0.0
+            var sb = 0.0
+            for k in 0..5 {
+                var sy = y + (k - 2) * stride
+                if sy < 0 {
+                    sy = 0
+                }
+                if sy >= bh {
+                    sy = bh - 1
+                }
+                let wgt = KERNEL[k]
+                let i = (sy * bw + x) * 3
+                sr = sr + (c.b1[i] as f64) * wgt
+                sg = sg + (c.b1[i + 1] as f64) * wgt
+                sb = sb + (c.b1[i + 2] as f64) * wgt
+            }
+            let o = (y * bw + x) * 3
+            c.b0[o] = (sr as f32)
+            c.b0[o + 1] = (sg as f32)
+            c.b0[o + 2] = (sb as f32)
+        }
+    }
+}
+
+pub let KERNEL: [f64; 5] = [0.0625, 0.25, 0.375, 0.25, 0.0625]
+
+// Reinhard, not ACES. The filmic curve lifts the low end so hard that a stroke at
+// 0.5 already reads as 80% white, which flattens every neon colour into paper.
+// x/(1+x) keeps the shadows dark and lets the colour survive up to the core.
+fn tone(x: f64): f64 {
+    if x <= 0.0 {
+        return 0.0
+    }
+    return x / (1.0 + x)
+}
+
+pub let TONE_STEPS: i64 = 2048 // covers linear 0..8, past which the curve is saturated
+
+fn encodeSlow(v: f64): u32 {
+    // gamma 1/2.2 into 8-bit
+    let s = Math.pow(tone(v), 0.4545454545)
+    var n = (s * 255.0 + 0.5) as i64
+    if n < 0 {
+        n = 0
+    }
+    if n > 255 {
+        n = 255
+    }
+    return n as u32
+}
+
+// Bloom, composite, tone-map and pack into the ABGR framebuffer. Also zeroes the
+// HDR buffer as it goes, so the next frame needs no separate clear pass.
+pub fn present(c: &mut Canvas, bloomGain: f64, exposure: f64) {
+    // A 1px antialiased line averages to ~1/16 after the 4x downsample, so the
+    // threshold has to sit well under 1.0 or thin strokes never bloom at all.
+    brightPass(c, 0.16)
+    blurPass(c, 1)
+    blurPass(c, 2)
+    blurPass(c, 4)
+    blurPass(c, 8) // without the widest pass the halo has a visible square edge
+
+    let bw = c.bw
+    let gain = (bloomGain * exposure) as f32
+    let expo = (exposure * 256.0) as f32
+    let maxIdx = TONE_STEPS
+    for y in 0..c.h {
+        let by0 = c.uy0[y]
+        let ty = c.uty[y]
+        let row0 = by0 * bw * 3
+        let row1 = (by0 + 1) * bw * 3
+        var s = y * c.w * 3
+        var o = y * c.w
+        for x in 0..c.w {
+            let bx = c.ux0[x] * 3
+            let tx = c.utx[x]
+            let w00: f32 = (1.0 - tx) * (1.0 - ty)
+            let w01: f32 = tx * (1.0 - ty)
+            let w10: f32 = (1.0 - tx) * ty
+            let w11: f32 = tx * ty
+            let i00 = row0 + bx
+            let i10 = row1 + bx
+
+            var v0 = (c.hdr[s] + (c.b0[i00] * w00 + c.b0[i00 + 3] * w01 + c.b0[i10] * w10 + c.b0[i10 + 3] * w11) * gain) * expo
+            var v1 = (c.hdr[s + 1] + (c.b0[i00 + 1] * w00 + c.b0[i00 + 4] * w01 + c.b0[i10 + 1] * w10 + c.b0[i10 + 4] * w11) * gain) * expo
+            var v2 = (c.hdr[s + 2] + (c.b0[i00 + 2] * w00 + c.b0[i00 + 5] * w01 + c.b0[i10 + 2] * w10 + c.b0[i10 + 5] * w11) * gain) * expo
+            c.hdr[s] = 0.0
+            c.hdr[s + 1] = 0.0
+            c.hdr[s + 2] = 0.0
+
+            var n0 = v0 as i64
+            var n1 = v1 as i64
+            var n2 = v2 as i64
+            if n0 < 0 {
+                n0 = 0
+            }
+            if n1 < 0 {
+                n1 = 0
+            }
+            if n2 < 0 {
+                n2 = 0
+            }
+            if n0 > maxIdx {
+                n0 = maxIdx
+            }
+            if n1 > maxIdx {
+                n1 = maxIdx
+            }
+            if n2 > maxIdx {
+                n2 = maxIdx
+            }
+            c.fb[o] = 0xFF000000 | (c.tonelut[n2] << 16) | (c.tonelut[n1] << 8) | c.tonelut[n0]
+            s = s + 3
+            o = o + 1
+        }
+    }
+}

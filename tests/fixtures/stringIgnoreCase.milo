@@ -1,0 +1,60 @@
+// strIndexOfFromIgnoreCase picks its memchr anchor byte and may run one or two
+// passes depending on the needle, so the cases that matter are: a needle holding a
+// non-letter (anchors there, one pass), a needle that is all letters (anchors on
+// byte 0, two passes), and candidates that fail the verify before a real match.
+from "std/string" import {
+    strContainsIgnoreCase, strIndexOfFromIgnoreCase
+}
+
+fn main(): i32 {
+    let hay = "xxUiNt256yy uint256 zz"
+
+    // Anchors on '2' — the first non-letter — so one memchr pass finds both.
+    print(strIndexOfFromIgnoreCase(hay, "UINT256", 0))
+    // @expect: 2
+    print(strIndexOfFromIgnoreCase(hay, "uint256", 3))
+    // @expect: 12
+
+    // All-letters needle: two passes over the anchor byte, one per case.
+    print(strIndexOfFromIgnoreCase("aaaBcd", "bCd", 0))
+    // @expect: 3
+    print(strIndexOfFromIgnoreCase("BBBb", "b", 2))
+    // @expect: 2
+
+    // Near-misses ahead of the real match must not stop the scan. Every "ab" here
+    // is a candidate that fails on the third byte.
+    print(strIndexOfFromIgnoreCase("ab ab ab aBc", "abc", 0))
+    // @expect: 9
+
+    // Absent, and present only in the part before `pos`.
+    print(strIndexOfFromIgnoreCase(hay, "nope", 0))
+    // @expect: -1
+    print(strIndexOfFromIgnoreCase(hay, "UINT256", 13))
+    // @expect: -1
+
+    // Degenerate needles: empty returns pos, over-long returns -1.
+    print(strIndexOfFromIgnoreCase(hay, "", 4))
+    // @expect: 4
+    print(strIndexOfFromIgnoreCase("ab", "abc", 0))
+    // @expect: -1
+
+    // Match flush against each end of the haystack.
+    print(strIndexOfFromIgnoreCase("ABc", "abc", 0))
+    // @expect: 0
+    print(strIndexOfFromIgnoreCase("zzABC", "aBc", 0))
+    // @expect: 2
+
+    // Non-letters are compared exactly — folding must not touch them. '[' is 0x5B,
+    // one past 'Z', so a careless +32 fold would make it equal '{'.
+    print(strContainsIgnoreCase("a{b", "a[b").toString())
+    // @expect: false
+    print(strContainsIgnoreCase("A[B", "a[b").toString())
+    // @expect: true
+
+    // The contains wrapper agrees with the index form.
+    print(strContainsIgnoreCase(hay, "UiNt256").toString())
+    // @expect: true
+    print(strContainsIgnoreCase(hay, "absent").toString())
+    // @expect: false
+    return 0
+}

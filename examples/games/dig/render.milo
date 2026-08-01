@@ -1,0 +1,398 @@
+// Drawing the mine. Only the tiles inside the view are touched, and each one is
+// lit by distance from the lamp — the darkness is what makes a tunnel feel like a
+// tunnel rather than a grid of brown squares.
+
+from "std/math" import {
+    Math
+}
+from "./gfx" import {
+    Canvas, line, spot, circle, text, textCentered, textWidth, brickFill, fillRect, setRect
+}
+from "./mascot" import {
+    Sprite, spriteMilo
+}
+from "./world" import {
+    satchelX, satchelY,
+    Mine, Col, TILE, MAP_W, MAP_H, SURFACE, tileAt, tileColor, isSolid,
+    T_SKY, T_GOLD, T_GEM, T_CRYSTAL, T_BEDROCK, T_WATER, T_GATE, isUpgrade
+}
+
+// Stable per-tile pseudo-random in 0..1.
+fn tileNoise(x: i64, y: i64): f64 {
+    let v = Math.sin((x as f64) * 12.9898 + (y as f64) * 78.233) * 43758.5453
+    return v - Math.floor(v)
+}
+
+// Everything above the dig site: sky gradient, sun, clouds, hills, a tree, and
+// Milo sitting by the mine mouth. It is the first thing you see, so it should look
+// like somewhere rather than like a grid of empty cells.
+fn drawSurface(c: &mut Canvas, m: &Mine, camX: f64, camY: f64) {
+    let groundY = (SURFACE as f64) * TILE - camY
+    if groundY < 0.0 - 40.0 {
+        return
+    }
+    // sky
+    var y: i64 = 0
+    let gy = groundY as i64
+    while y < gy && y < c.h {
+        if y >= 0 {
+            let t = (y as f64) / Math.maxF64(groundY, 1.0)
+            let r = 0.10 + 0.32 * t
+            let g = 0.16 + 0.34 * t
+            let b = 0.34 + 0.22 * t
+            fillRect(c, 0.0, y as f64, c.w as f64, (y + 1) as f64, r, g, b)
+        }
+        y = y + 1
+    }
+    // sun, fixed in the sky rather than pinned to the world
+    let sunX = (c.w as f64) * 0.78
+    let sunY = groundY - 190.0
+    spot(c, sunX, sunY, 120.0, 0.35, 0.28, 0.10)
+    spot(c, sunX, sunY, 46.0, 1.5, 1.25, 0.55)
+    spot(c, sunX, sunY, 26.0, 2.2, 2.0, 1.3)
+    // clouds drifting
+    for i in 0..4 {
+        let base = Math.mod((i as f64) * 340.0 + m.time * 9.0 - camX * 0.25, (c.w as f64) + 400.0) - 200.0
+        let cy = groundY - 250.0 + (i as f64) * 34.0
+        spot(c, base, cy, 46.0, 0.30, 0.32, 0.38)
+        spot(c, base + 40.0, cy + 6.0, 34.0, 0.28, 0.30, 0.36)
+        spot(c, base - 36.0, cy + 8.0, 28.0, 0.26, 0.28, 0.34)
+    }
+    // grass strip along the top of the ground
+    fillRect(c, 0.0, groundY - 6.0, c.w as f64, groundY, 0.10, 0.34, 0.12)
+    var gx = 0.0 - Math.mod(camX, 9.0)
+    while gx < (c.w as f64) {
+        let hh = 5.0 + tileNoise((gx as i64), 3) * 6.0
+        line(c, gx, groundY, gx + 1.5, groundY - hh, 0.12, 0.42, 0.14)
+        gx = gx + 9.0
+    }
+    // a tree just left of the mine mouth
+    let treeX = 11.0 * TILE - camX
+    let ty0 = groundY
+    setRect(c, treeX - 9.0, ty0 - 100.0, treeX + 9.0, ty0, 0.20, 0.11, 0.05)
+    // canopy as a few solid clumps — same blocky language as the ground
+    setRect(c, treeX - 62.0, ty0 - 150.0, treeX + 62.0, ty0 - 104.0, 0.05, 0.30, 0.08)
+    setRect(c, treeX - 44.0, ty0 - 182.0, treeX + 44.0, ty0 - 148.0, 0.06, 0.34, 0.09)
+    setRect(c, treeX - 22.0, ty0 - 204.0, treeX + 26.0, ty0 - 180.0, 0.07, 0.38, 0.10)
+    setRect(c, treeX - 62.0, ty0 - 116.0, treeX - 30.0, ty0 - 104.0, 0.04, 0.26, 0.07)
+    setRect(c, treeX + 30.0, ty0 - 118.0, treeX + 62.0, ty0 - 104.0, 0.04, 0.26, 0.07)
+    // Two low spoil heaps flanking the shaft head. Small, so the entrance reads
+    // as a dig rather than a sunken box.
+    let mx = 5.0 * TILE - camX
+    setRect(c, mx - 34.0, ty0 - 5.0, mx - 20.0, ty0, 0.16, 0.10, 0.05)
+    setRect(c, mx + 20.0, ty0 - 5.0, mx + 34.0, ty0, 0.16, 0.10, 0.05)
+}
+
+// Blit a palette-indexed sprite, scaled, with 0 as transparent.
+fn drawSprite(c: &mut Canvas, s: Sprite, x: f64, y: f64, scale: f64, bright: f64) {
+    drawSpriteFlip(c, s, x, y, scale, bright, 1.0)
+}
+
+fn drawSpriteFlip(c: &mut Canvas, s: Sprite, x: f64, y: f64, scale: f64, bright: f64, flip: f64) {
+    for py in 0..s.h {
+        for px in 0..s.w {
+            var sx2 = px
+            if flip < 0.0 {
+                sx2 = s.w - 1 - px
+            }
+            let idx = s.px[py * s.w + sx2] as i64
+            if idx == 0 {
+                continue
+            }
+            let rgb = s.pal[idx]
+            let r = ((rgb >> 16) & 0xFF) as f64 / 255.0 * bright
+            let g = ((rgb >> 8) & 0xFF) as f64 / 255.0 * bright
+            let b = (rgb & 0xFF) as f64 / 255.0 * bright
+            let x0 = x + (px as f64) * scale
+            let y0 = y + (py as f64) * scale
+            setRect(c, x0, y0, x0 + scale, y0 + scale, r, g, b)
+        }
+    }
+}
+
+pub fn drawMine(c: &mut Canvas, m: &Mine, ox: f64, oy: f64) {
+    let camX = m.camX + ox
+    let camY = m.camY + oy
+    let x0 = ((camX / TILE) as i64) - 1
+    let y0 = ((camY / TILE) as i64) - 1
+    let x1 = x0 + ((c.w as f64) / TILE) as i64 + 3
+    let y1 = y0 + ((c.h as f64) / TILE) as i64 + 3
+
+    drawSurface(c, m, camX, camY)
+
+    for ty in y0..y1 {
+        for tx in x0..x1 {
+            let t = tileAt(m, tx, ty)
+            let sx = (tx as f64) * TILE - camX
+            let sy = (ty as f64) * TILE - camY
+            if t == T_WATER {
+                // Animated water: two travelling sine waves set the surface
+                // height inside the tile, everything under it is tinted body
+                // water, and the crest gets a bright line. Cheap, and it reads as
+                // liquid immediately because it moves.
+                let openAbove = tileAt(m, tx, ty - 1) != T_WATER
+                let cx = sx + TILE * 0.5
+                let cyw = sy + TILE * 0.5
+                let dxw = cx - (m.px - camX)
+                let dyw = cyw - (m.py - camY)
+                let dw = Math.sqrt(dxw * dxw + dyw * dyw)
+                var litw = 1.0 - dw / (m.lampRadius * 1.25)
+                if litw < 0.0 {
+                    litw = 0.0
+                }
+                let kw = 0.16 + litw * litw * 0.85
+                var top = sy
+                if openAbove {
+                    let wob = Math.sin(m.time * 2.2 + (tx as f64) * 0.7) * 2.6
+                    + Math.sin(m.time * 3.7 + (tx as f64) * 1.9) * 1.4
+                    top = sy + 4.0 + wob
+                }
+                fillRect(c, sx, top, sx + TILE, sy + TILE, 0.05 * kw, 0.30 * kw, 0.70 * kw)
+                // depth shading toward the bottom of the tile
+                fillRect(c, sx, sy + TILE * 0.6, sx + TILE, sy + TILE, 0.0, 0.05 * kw, 0.18 * kw)
+                if openAbove {
+                    line(c, sx, top, sx + TILE, top, 0.5 * kw + 0.15, 1.4 * kw + 0.2, 1.9 * kw + 0.3)
+                    // a glint riding along the crest
+                    let g = 0.5 + 0.5 * Math.sin(m.time * 2.6 + (tx as f64) * 0.55)
+                    spot(c, sx + TILE * g, top, 3.4, 0.5 * kw, 1.1 * kw, 1.6 * kw)
+                }
+                // caustic banding under the surface
+                let cau = 0.5 + 0.5 * Math.sin(m.time * 1.9 + (tx as f64) * 1.3 + (ty as f64) * 0.8)
+                spot(c, cx, cyw + TILE * 0.2, TILE * 0.42, 0.02 * cau * kw, 0.16 * cau * kw, 0.30 * cau * kw)
+                continue
+            }
+            if t == T_SKY {
+                continue // sky is painted by drawSurface; below ground it is void
+            }
+            // Lamp falloff — but only on tiles the light could actually reach.
+            // A tile with no open neighbour is buried inside the rock, and lighting
+            // it is what turned the lamp into a brown bubble shining through solid
+            // ground. Exposed faces catch the light; the interior stays dark.
+            let cx = sx + TILE * 0.5
+            let cy = sy + TILE * 0.5
+            let dx = cx - (m.px - camX)
+            let dy = cy - (m.py - camY)
+            let d = Math.sqrt(dx * dx + dy * dy)
+            var exposed = false
+            if !isSolid(tileAt(m, tx - 1, ty)) || !isSolid(tileAt(m, tx + 1, ty)) {
+                exposed = true
+            }
+            if !isSolid(tileAt(m, tx, ty - 1)) || !isSolid(tileAt(m, tx, ty + 1)) {
+                exposed = true
+            }
+            // A slightly ragged radius, so the reach of the lamp is not a circle.
+            let jitter = 0.86 + 0.28 * tileNoise(tx * 2, ty * 2)
+            var lit = 1.0 - d / (m.lampRadius * jitter)
+            if lit < 0.0 {
+                lit = 0.0
+            }
+            // smoothstep instead of a hard linear edge
+            lit = lit * lit * (3.0 - 2.0 * lit)
+            if !exposed {
+                lit = lit * 0.05
+            }
+            // Ore glows faintly on its own, so a seam is visible at the edge of the
+            // lamp — which is the thing that makes you keep going.
+            // Bedrock keeps a floor of its own light: you cannot dig it, so you
+            // need to see where it is even outside the lamp, or you walk into a
+            // wall you had no way of knowing about.
+            var ambient = 0.035
+            if t == T_BEDROCK {
+                ambient = 0.13
+            }
+            if t == T_GATE {
+                // Visible from anywhere: this is the thing "head east" means.
+                if m.exitOpen {
+                    ambient = 1.10 + 0.45 * Math.sin(m.time * 5.0)
+                } else {
+                    ambient = 0.34 + 0.10 * Math.sin(m.time * 2.0)
+                }
+            }
+            if t == T_GOLD || t == T_GEM || t == T_CRYSTAL {
+                ambient = 0.20 + 0.07 * Math.sin(m.time * 3.0 + (tx as f64) + (ty as f64))
+            }
+            if isUpgrade(t) {
+                ambient = 0.45 + 0.25 * Math.sin(m.time * 6.0 + (tx as f64))
+            }
+            let k = ambient + lit * 0.95
+            let col = tileColor(t)
+            // Every tile gets its own shade. A uniform fill with a lit top edge is
+            // what made this read as stacked blocks instead of ground.
+            let grain = 0.93 + 0.14 * tileNoise(tx, ty)
+            let kk = k * grain
+            fillRect(c, sx, sy, sx + TILE, sy + TILE, col.r * kk * 0.5, col.g * kk * 0.5, col.b * kk * 0.5)
+            // Only draw a seam where the neighbour is a DIFFERENT material, so a
+            // solid mass of dirt looks like a mass rather than a grid.
+            if tileAt(m, tx, ty - 1) != t {
+                line(c, sx, sy, sx + TILE, sy, col.r * kk * 0.75, col.g * kk * 0.75, col.b * kk * 0.75)
+            }
+            if tileAt(m, tx - 1, ty) != t {
+                line(c, sx, sy, sx, sy + TILE, col.r * kk * 0.5, col.g * kk * 0.5, col.b * kk * 0.5)
+            }
+            if t == T_GOLD || t == T_GEM || t == T_CRYSTAL {
+                // irregular nuggets, not a grid of studs
+                let n = 3
+                for q in 0..n {
+                    let a = tileNoise(tx * 5 + q, ty * 11 + q) * 6.2831853
+                    let rr = 0.16 + 0.16 * tileNoise(tx + q * 13, ty + q * 7)
+                    spot(c, cx + Math.cos(a) * TILE * rr, cy + Math.sin(a) * TILE * rr, TILE * 0.20, col.r * kk * 0.85, col.g * kk * 0.85, col.b * kk * 0.85)
+                }
+            }
+        }
+    }
+
+    // the bite being taken out of the tile under the drill
+    if m.digX >= 0 && m.digProgress > 0.0 {
+        let sx = (m.digX as f64) * TILE - camX
+        let sy = (m.digY as f64) * TILE - camY
+        let p = Math.minF64(m.digProgress, 1.0)
+        let r = TILE * 0.55 * p
+        circle(c, sx + TILE * 0.5, sy + TILE * 0.5, r, 12, 1.3, 1.0, 0.4)
+        spot(c, sx + TILE * 0.5, sy + TILE * 0.5, r * 0.7, 0.7 * p, 0.5 * p, 0.15 * p)
+    }
+
+    // particles
+    for i in 0..m.parts.len {
+        let t = m.parts[i].life / m.parts[i].maxLife
+        let f = t * t
+        // Dust swells as it thins out; debris just shrinks.
+        let sz = m.parts[i].size * (1.0 + m.parts[i].grow * (1.0 - t))
+        spot(c, m.parts[i].x - camX, m.parts[i].y - camY, sz, m.parts[i].cr * f, m.parts[i].cg * f, m.parts[i].cb * f)
+    }
+
+    // the digger: a lamp, a body, and a drill bit pointing where you last moved
+    let px = m.px - camX
+    let py = m.py - camY
+    // No big additive halo here: the tiles are already lit by distance from the
+    // lamp, so a second glow drawn over them double-lights everything and, worse,
+    // spills straight through solid rock. Just the lamp itself.
+    spot(c, px, py, 20.0, 0.30, 0.22, 0.10)
+    // The digger is Milo himself, facing the way you last moved.
+    let flip = if m.faceX < 0.0 {
+        0.0 - 1.0
+    } else {
+        1.0
+    }
+    drawSpriteFlip(c, spriteMilo(), px - 13.0, py - 15.0, 1.55, 1.0, flip)
+    // drill bit, spinning while it bites
+    let bx = px + m.faceX * 15.0
+    let by = py + m.faceY * 15.0
+    var wob = 0.0
+    if m.digProgress > 0.0 {
+        wob = Math.sin(m.time * 40.0) * 2.0
+    }
+    line(c, px, py + 2.0, bx + m.faceY * wob, by + m.faceX * wob, 1.5, 1.3, 0.8)
+    spot(c, bx, by, 3.4, 1.7, 1.4, 0.6)
+    // headlamp beam pointing the way
+    spot(c, px + m.faceX * 26.0, py + m.faceY * 26.0, 22.0, 0.22, 0.18, 0.08)
+
+    // the satchel, which swells for a moment each time something lands in it
+    let stx = satchelX(m) - camX
+    let sty = satchelY(m) - camY
+    var sw = 6.0
+    if m.satchelPulse > 0.0 {
+        sw = 6.0 + m.satchelPulse * 14.0
+        spot(c, stx, sty, sw * 2.0, 0.6, 0.45, 0.12)
+    }
+    setRect(c, stx - sw, sty - sw * 0.75, stx + sw, sty + sw * 0.75, 0.30, 0.17, 0.07)
+    setRect(c, stx - sw, sty - sw * 0.75, stx + sw, sty - sw * 0.4, 0.40, 0.24, 0.10)
+
+    // nuggets in flight
+    for i in 0..m.flies.len {
+        if m.flies[i].age < 0.0 {
+            continue
+        }
+        let col = tileColor(m.flies[i].kind)
+        let fx = m.flies[i].x - camX
+        let fy = m.flies[i].y - camY
+        spot(c, fx, fy, 6.0, col.r * 0.30, col.g * 0.30, col.b * 0.30)
+        spot(c, fx, fy, 2.6, col.r * 1.2, col.g * 1.2, col.b * 1.2)
+    }
+
+    // floating labels
+    for i in 0..m.pops.len {
+        let f = Math.minF64(1.0, m.pops[i].life)
+        textCentered(c, (m.pops[i].x - camX) as i64, (m.pops[i].y - camY) as i64, m.pops[i].text, 2, m.pops[i].cr * f, m.pops[i].cg * f, m.pops[i].cb * f)
+    }
+}
+
+pub fn drawHud(c: &mut Canvas, m: &Mine) {
+    var vs = 3
+    var vb = 1.0
+    if m.goldPulse > 0.0 {
+        vs = 4
+        vb = 1.0 + m.goldPulse * 2.4
+    }
+    text(c, 24, 22, "VALUE " + m.score.toString(), vs, 0.85 * vb, 0.70 * vb, 0.22 * vb)
+    let g = "GOLD " + m.gold.toString() + "   EMERALD " + m.gems.toString() + "   CRYSTAL " + m.crystals.toString()
+    text(c, 24, 58, g, 2, 0.30, 0.30, 0.34)
+    let d = "DEPTH " + (m.deepest - SURFACE).toString() + " M"
+    text(c, c.w - 24 - textWidth(d, 3), 22, d, 3, 0.40, 0.55, 0.70)
+    let lv = "LEVEL " + m.level.toString()
+    text(c, c.w - 24 - textWidth(lv, 2), 58, lv, 2, 0.30, 0.30, 0.34)
+
+    // quota bar: how much more is needed before the way out opens
+    let bx = (c.w as f64) * 0.5 - 190.0
+    let by = 34.0
+    fillRect(c, bx, by, bx + 380.0, by + 10.0, 0.04, 0.04, 0.05)
+    if m.exitOpen {
+        let pulse = 0.7 + 0.3 * Math.sin(m.time * 5.0)
+        fillRect(c, bx, by, bx + 380.0, by + 10.0, 0.06 * pulse, 0.42 * pulse, 0.14 * pulse)
+        textCentered(c, c.w / 2, 50, "HEAD RIGHT — THE WAY OUT IS OPEN", 2, 0.4 * pulse, 1.1 * pulse, 0.5 * pulse)
+    } else {
+        var frac = (m.levelValue as f64) / (m.quota as f64)
+        if frac > 1.0 {
+            frac = 1.0
+        }
+        fillRect(c, bx, by, bx + 380.0 * frac, by + 10.0, 0.50, 0.40, 0.10)
+        textCentered(c, c.w / 2, 50, m.levelValue.toString() + " / " + m.quota.toString() + " TO OPEN THE WAY OUT", 2, 0.34, 0.30, 0.22)
+    }
+
+    // Where the gate is, and how far — you should never have to wonder.
+    let gateWorldX = ((m.exitX - 1) as f64) * TILE
+    let gateWorldY = ((m.gateY + 1) as f64) * TILE
+    let sxg = gateWorldX - m.camX
+    let syg = gateWorldY - m.camY
+    let metres = ((gateWorldX - m.px) / TILE) as i64
+    if sxg > (c.w as f64) - 30.0 || syg < 0.0 || syg > (c.h as f64) {
+        // off screen: pin an arrow to the edge in its direction
+        let ey = Math.clampF64(syg, 60.0, (c.h as f64) - 60.0)
+        var col = 0.55
+        var cg2 = 0.45
+        if m.exitOpen {
+            col = 0.4
+            cg2 = 1.4
+        }
+        let pulse = 0.7 + 0.3 * Math.sin(m.time * 4.0)
+        line(c, (c.w as f64) - 40.0, ey - 12.0, (c.w as f64) - 22.0, ey, col * pulse, cg2 * pulse, 0.5 * pulse)
+        line(c, (c.w as f64) - 40.0, ey + 12.0, (c.w as f64) - 22.0, ey, col * pulse, cg2 * pulse, 0.5 * pulse)
+        line(c, (c.w as f64) - 62.0, ey, (c.w as f64) - 22.0, ey, col * pulse, cg2 * pulse, 0.5 * pulse)
+        var lbl = "GATE " + metres.toString() + "M"
+        if !m.exitOpen {
+            lbl = "LOCKED " + metres.toString() + "M"
+        }
+        text(c, c.w - 62 - textWidth(lbl, 2), (ey as i64) + 16, lbl, 2, col * 0.7, cg2 * 0.7, 0.4)
+    }
+
+    if m.cleared > 0.0 {
+        textCentered(c, c.w / 2, c.h / 2 - 40, "LEVEL " + m.level.toString() + " CLEAR", 7, 0.6, 1.3, 0.7)
+        textCentered(c, c.w / 2, c.h / 2 + 30, "VALUE " + m.score.toString(), 3, 1.2, 1.0, 0.3)
+    }
+
+    if m.banner > 0.0 {
+        var f = 1.0
+        if m.banner < 1.0 {
+            f = m.banner
+        }
+        textCentered(c, c.w / 2, 150, "PROSPECT", 8, 1.2 * f, 0.9 * f, 0.3 * f)
+        textCentered(c, c.w / 2, 230, "DIG EAST TO THE WAY OUT — FILL THE BAR FIRST", 2, 0.5 * f, 0.45 * f, 0.35 * f)
+    }
+    if m.hint > 0.0 {
+        var f = 1.0
+        if m.hint < 1.0 {
+            f = m.hint
+        }
+        textCentered(c, c.w / 2, c.h - 96, "ARROW KEYS OR WASD TO DIG — HOLD A DIRECTION", 2, 0.45 * f, 0.42 * f, 0.36 * f)
+        textCentered(c, c.w / 2, c.h - 70, "GLOWING SEAMS ARE WORTH MONEY. THERE IS NO TIMER.", 2, 0.35 * f, 0.33 * f, 0.28 * f)
+    }
+}

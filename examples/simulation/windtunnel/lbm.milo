@@ -1,0 +1,462 @@
+// D2Q9 lattice-Boltzmann solver core — the numerics only, zero FFI. Keeping this
+// file free of `extern` is what lets the same solver drive the headless validator
+// (cavity.milo), the SDL2 wind tunnel, and a browser build with no changes.
+//
+// BGK single-relaxation collision + halfway bounce-back walls. State is a plain
+// Vec<f64> of nx*ny*9 populations rather than a struct of grids, because streaming
+// reads every neighbour while writing the destination: a single fused buffer would
+// alias. The caller ping-pongs two buffers instead (see lbmStep), which also keeps
+// the whole solver free of any &mut aliasing question.
+//
+// Lattice layout, D2Q9:
+//     6   2   5          y
+//      \  |  /           ^
+//   3 -- 0 -- 1          |
+//      /  |  \           +---> x
+//     7   4   8
+//
+// Node (x,y) sits at physical coordinate ((x+0.5)/nx, (y+0.5)/ny); the walls lie
+// halfway between the outermost fluid nodes and their ghost neighbours, so the
+// wall-to-wall span is exactly nx by ny lattice units. y=0 is the bottom row.
+
+from "std/math" import {
+    Math
+}
+
+pub let Q: i64 = 9
+
+// Lattice constants. Returned by function rather than stored in a global array so
+// the optimiser can constant-fold them into each unrolled direction.
+pub fn lbmCx(i: i64): f64 {
+    if i == 1 {
+        return 1.0
+    }
+    if i == 3 {
+        return -1.0
+    }
+    if i == 5 {
+        return 1.0
+    }
+    if i == 6 {
+        return -1.0
+    }
+    if i == 7 {
+        return -1.0
+    }
+    if i == 8 {
+        return 1.0
+    }
+    return 0.0
+}
+
+pub fn lbmCy(i: i64): f64 {
+    if i == 2 {
+        return 1.0
+    }
+    if i == 4 {
+        return -1.0
+    }
+    if i == 5 {
+        return 1.0
+    }
+    if i == 6 {
+        return 1.0
+    }
+    if i == 7 {
+        return -1.0
+    }
+    if i == 8 {
+        return -1.0
+    }
+    return 0.0
+}
+
+pub fn lbmW(i: i64): f64 {
+    if i == 0 {
+        return 4.0 / 9.0
+    }
+    if i < 5 {
+        return 1.0 / 9.0
+    }
+    return 1.0 / 36.0
+}
+
+// Index of the direction pointing opposite to i.
+pub fn lbmOpp(i: i64): i64 {
+    if i == 0 {
+        return 0
+    }
+    if i == 1 {
+        return 3
+    }
+    if i == 2 {
+        return 4
+    }
+    if i == 3 {
+        return 1
+    }
+    if i == 4 {
+        return 2
+    }
+    if i == 5 {
+        return 7
+    }
+    if i == 6 {
+        return 8
+    }
+    if i == 7 {
+        return 5
+    }
+    return 6
+}
+
+pub fn lbmIdx(x: i64, y: i64, i: i64, nx: i64): i64 {
+    return (y * nx + x) * 9 + i
+}
+
+// Relaxation time from the target Reynolds number. `lchar` is the characteristic
+// length in lattice units (the cavity height, or the obstacle diameter for a
+// tunnel); `uref` is the reference velocity in lattice units.
+//
+// uref must stay well under the lattice sound speed 1/sqrt(3) ~ 0.577 or the
+// weakly-compressible error swamps the answer; 0.1 is the usual choice. tau must
+// stay above 0.5 or the scheme goes unstable — the caller should check.
+pub fn lbmTau(re: f64, uref: f64, lchar: f64): f64 {
+    let nu = uref * lchar / re
+    return 3.0 * nu + 0.5
+}
+
+// Fill f with the rest state: rho=1, u=0, so f_i = w_i. Accepts either an empty
+// Vec (grows it) or one already at full size (overwrites in place), so a renderer
+// can reset the flow without reallocating the grid every time.
+pub fn lbmInit(f: &mut Vec<f64>, nx: i64, ny: i64) {
+    let want = nx * ny * 9
+    if f.len() == want {
+        var k = 0
+        while k < want {
+            f[k] = lbmW(k % 9)
+            k = k + 1
+        }
+        return
+    }
+    var n = 0
+    while n < nx * ny {
+        var i = 0
+        while i < 9 {
+            f.push(lbmW(i))
+            i = i + 1
+        }
+        n = n + 1
+    }
+}
+
+pub fn lbmEquilibrium(i: i64, rho: f64, ux: f64, uy: f64): f64 {
+    let cu = 3.0 * (lbmCx(i) * ux + lbmCy(i) * uy)
+    let usq = 1.5 * (ux * ux + uy * uy)
+    return lbmW(i) * rho * (1.0 + cu + 0.5 * cu * cu - usq)
+}
+
+// One fused collide-and-stream from src into dst.
+//
+// Walls: every lattice link leaving the domain (or entering a solid node) is
+// reflected back into the source node along the opposite direction — halfway
+// bounce-back. A link hitting the top row additionally picks up the moving-wall
+// momentum term -6*w_i*rho*(c_i . u_wall), which is what drives the lid in the
+// cavity benchmark. Pass uTop=0.0 for a stationary lid.
+//
+// dst is fully overwritten for every fluid node, so it needs no clearing; solid
+// nodes are skipped and their dst populations are left stale (never read).
+//
+// openX=true suppresses the bounce-back on the left and right edges: populations
+// leaving through them are simply dropped, and the caller is expected to reimpose
+// them with lbmInlet/lbmOutlet. That turns the closed box into a channel.
+//
+// force accumulates the momentum exchanged with SOLID nodes only (not the domain
+// walls) as [fx, fy]. For a static wall each bounced link transfers 2*c_i*f_i^post,
+// which summed over the obstacle surface is the drag/lift force in lattice units.
+// Pass a 2-element Vec; it is zeroed on entry.
+// Mark the nodes that can stream without any checking: fluid, not touching the
+// domain edge, and with all eight neighbours fluid. On a typical obstacle grid
+// that is well over 95% of the lattice, and giving those nodes a branch-free path
+// is the single biggest win in the solver. Recompute whenever `solid` changes.
+pub fn lbmBuildInterior(solid: &Vec<bool>, nx: i64, ny: i64, interior: &mut Vec<bool>) {
+    var y = 0
+    while y < ny {
+        var x = 0
+        while x < nx {
+            let c = y * nx + x
+            var ok = !solid[c] && x > 0 && x < nx - 1 && y > 0 && y < ny - 1
+            if ok {
+                var dy = -1
+                while dy <= 1 {
+                    var dx = -1
+                    while dx <= 1 {
+                        if solid[c + dy * nx + dx] {
+                            ok = false
+                        }
+                        dx = dx + 1
+                    }
+                    dy = dy + 1
+                }
+            }
+            interior[c] = ok
+            x = x + 1
+        }
+        y = y + 1
+    }
+}
+
+pub fn lbmStep(src: &Vec<f64>, dst: &mut Vec<f64>, solid: &Vec<bool>, interior: &Vec<bool>, nx: i64, ny: i64, tau: f64, uTop: f64, openX: bool, force: &mut Vec<f64>) {
+    let omega = 1.0 / tau
+    force[0] = 0.0
+    force[1] = 0.0
+
+    // Hoisted lattice tables. The lbmCx/lbmCy/lbmW/lbmOpp functions are branch
+    // chains; calling them 9 times per node per step dominated the profile, and
+    // indexing a local array instead is a large win in the innermost loop.
+    let cxT: [f64; 9] = [0.0, 1.0, 0.0, -1.0, 0.0, 1.0, -1.0, -1.0, 1.0]
+    let cyT: [f64; 9] = [0.0, 0.0, 1.0, 0.0, -1.0, 1.0, 1.0, -1.0, -1.0]
+    let wT: [f64; 9] = [4.0 / 9.0, 1.0 / 9.0, 1.0 / 9.0, 1.0 / 9.0, 1.0 / 9.0, 1.0 / 36.0, 1.0 / 36.0, 1.0 / 36.0, 1.0 / 36.0]
+    let oppT: [i64; 9] = [0, 3, 4, 1, 2, 7, 8, 5, 6]
+    let dxT: [i64; 9] = [0, 1, 0, -1, 0, 1, -1, -1, 1]
+    let dyT: [i64; 9] = [0, 0, 1, 0, -1, 1, 1, -1, -1]
+
+    var y = 0
+    while y < ny {
+        var x = 0
+        while x < nx {
+            let cell = y * nx + x
+            if solid[cell] {
+                x = x + 1
+                continue
+            }
+            let base = cell * 9
+
+            // Macroscopic moments at this node.
+            var rho = 0.0
+            var mx = 0.0
+            var my = 0.0
+            var i = 0
+            while i < 9 {
+                let fi = src[base + i]
+                rho = rho + fi
+                mx = mx + fi * cxT[i]
+                my = my + fi * cyT[i]
+                i = i + 1
+            }
+            let ux = mx / rho
+            let uy = my / rho
+            let usq = 1.5 * (ux * ux + uy * uy)
+
+            // Fast path: no bounds test, no solid test, no opposite-direction
+            // lookup. The destination is base + a fixed per-direction offset.
+            if interior[cell] {
+                i = 0
+                while i < 9 {
+                    let fi = src[base + i]
+                    let cu = 3.0 * (cxT[i] * ux + cyT[i] * uy)
+                    let feq = wT[i] * rho * (1.0 + cu + 0.5 * cu * cu - usq)
+                    dst[base + (dyT[i] * nx + dxT[i]) * 9 + i] = fi - omega * (fi - feq)
+                    i = i + 1
+                }
+                x = x + 1
+                continue
+            }
+
+            i = 0
+            while i < 9 {
+                let fi = src[base + i]
+                let cu = 3.0 * (cxT[i] * ux + cyT[i] * uy)
+                let feq = wT[i] * rho * (1.0 + cu + 0.5 * cu * cu - usq)
+                let post = fi - omega * (fi - feq)
+                let xd = x + dxT[i]
+                let yd = y + dyT[i]
+
+                var offGrid = xd < 0 || xd >= nx || yd < 0 || yd >= ny
+                var hitSolid = false
+                if !offGrid {
+                    hitSolid = solid[yd * nx + xd]
+                }
+
+                if offGrid && openX && (xd < 0 || xd >= nx) {
+                    // Open channel end: let it leave. lbmInlet/lbmOutlet reimpose.
+                    i = i + 1
+                    continue
+                }
+
+                if offGrid || hitSolid {
+                    // Reflect into the source node. Only the top wall moves; the
+                    // momentum term is zero for every other boundary.
+                    var corr = 0.0
+                    if yd >= ny {
+                        corr = 6.0 * wT[i] * rho * (cxT[i] * uTop)
+                    }
+                    dst[base + oppT[i]] = post - corr
+                    if hitSolid {
+                        force[0] = force[0] + 2.0 * cxT[i] * post
+                        force[1] = force[1] + 2.0 * cyT[i] * post
+                    }
+                } else {
+                    dst[lbmIdx(xd, yd, i, nx)] = post
+                }
+                i = i + 1
+            }
+            x = x + 1
+        }
+        y = y + 1
+    }
+}
+
+// Inflow at x=0: overwrite the column with the equilibrium for a uniform stream.
+// Density is taken from the neighbouring column rather than pinned to 1 so a
+// pressure wave reaching the inlet is partly absorbed instead of fully reflected.
+// v is the transverse component: normally 0, but a brief non-zero pulse is how the
+// caller breaks the top/bottom symmetry of the initial condition. Without that
+// nudge a perfectly symmetric setup never sheds — the wake instability is real but
+// has no asymmetry to amplify, so the solver sits on the unstable steady solution
+// forever and silently shows the wrong physics.
+pub fn lbmInlet(f: &mut Vec<f64>, nx: i64, ny: i64, u: f64, v: f64) {
+    var y = 0
+    while y < ny {
+        let inner = (y * nx + 1) * 9
+        var rho = 0.0
+        var i = 0
+        while i < 9 {
+            rho = rho + f[inner + i]
+            i = i + 1
+        }
+        let base = (y * nx) * 9
+        i = 0
+        while i < 9 {
+            f[base + i] = lbmEquilibrium(i, rho, u, v)
+            i = i + 1
+        }
+        y = y + 1
+    }
+}
+
+// Outflow at x=nx-1: zero-gradient copy of the penultimate column. Crude but
+// stable, and it lets vortices leave without visibly reflecting back upstream.
+pub fn lbmOutlet(f: &mut Vec<f64>, nx: i64, ny: i64) {
+    var y = 0
+    while y < ny {
+        let edge = (y * nx + nx - 1) * 9
+        let inner = (y * nx + nx - 2) * 9
+        var i = 0
+        while i < 9 {
+            f[edge + i] = f[inner + i]
+            i = i + 1
+        }
+        y = y + 1
+    }
+}
+
+// z-vorticity dv/dx - du/dy by central differences, one-sided at the edges.
+// Solid nodes and their neighbours are left at zero — the bounce-back surface is
+// not a smooth field and differencing across it produces meaningless spikes.
+pub fn lbmVorticity(ux: &Vec<f64>, uy: &Vec<f64>, solid: &Vec<bool>, nx: i64, ny: i64, out: &mut Vec<f64>) {
+    var y = 0
+    while y < ny {
+        var x = 0
+        while x < nx {
+            let c = y * nx + x
+            if solid[c] || x == 0 || x == nx - 1 || y == 0 || y == ny - 1 {
+                out[c] = 0.0
+                x = x + 1
+                continue
+            }
+            if solid[c + 1] || solid[c - 1] || solid[c + nx] || solid[c - nx] {
+                out[c] = 0.0
+                x = x + 1
+                continue
+            }
+            out[c] = 0.5 * (uy[c + 1] - uy[c - 1]) - 0.5 * (ux[c + nx] - ux[c - nx])
+            x = x + 1
+        }
+        y = y + 1
+    }
+}
+
+// Macroscopic fields from populations. Solid nodes are reported as zero so the
+// renderer and the error metric never pick up stale interior values.
+pub fn lbmMacro(f: &Vec<f64>, solid: &Vec<bool>, nx: i64, ny: i64, rho: &mut Vec<f64>, ux: &mut Vec<f64>, uy: &mut Vec<f64>) {
+    var cell = 0
+    while cell < nx * ny {
+        if solid[cell] {
+            rho[cell] = 1.0
+            ux[cell] = 0.0
+            uy[cell] = 0.0
+            cell = cell + 1
+            continue
+        }
+        let base = cell * 9
+        var r = 0.0
+        var mx = 0.0
+        var my = 0.0
+        var i = 0
+        while i < 9 {
+            let fi = f[base + i]
+            r = r + fi
+            mx = mx + fi * lbmCx(i)
+            my = my + fi * lbmCy(i)
+            i = i + 1
+        }
+        rho[cell] = r
+        ux[cell] = mx / r
+        uy[cell] = my / r
+        cell = cell + 1
+    }
+}
+
+// Largest |u - uPrev| over the grid, normalised by uref — the steady-state monitor.
+pub fn lbmMaxDelta(ux: &Vec<f64>, uy: &Vec<f64>, pux: &Vec<f64>, puy: &Vec<f64>, uref: f64): f64 {
+    var worst = 0.0
+    var i = 0
+    while i < ux.len() {
+        let dx = ux[i] - pux[i]
+        let dy = uy[i] - puy[i]
+        let d = Math.sqrt(dx * dx + dy * dy) / uref
+        if d > worst {
+            worst = d
+        }
+        i = i + 1
+    }
+    return worst
+}
+
+// Bilinear sample of a node-centred field at normalised coordinates (fx, fy) in
+// [0,1]^2. Node (i,j) is centred at ((i+0.5)/nx, (j+0.5)/ny), so a target on the
+// domain edge falls outside the node-centre lattice; those samples clamp to the
+// outermost cell, which is why the validator skips the two wall endpoints rather
+// than comparing against a clamped value.
+pub fn lbmSample(field: &Vec<f64>, nx: i64, ny: i64, fx: f64, fy: f64): f64 {
+    var gx = fx * (nx as f64) - 0.5
+    var gy = fy * (ny as f64) - 0.5
+    if gx < 0.0 {
+        gx = 0.0
+    }
+    if gy < 0.0 {
+        gy = 0.0
+    }
+    var i0 = Math.floor(gx) as i64
+    var j0 = Math.floor(gy) as i64
+    if i0 > nx - 2 {
+        i0 = nx - 2
+    }
+    if j0 > ny - 2 {
+        j0 = ny - 2
+    }
+    if i0 < 0 {
+        i0 = 0
+    }
+    if j0 < 0 {
+        j0 = 0
+    }
+    let tx = gx - (i0 as f64)
+    let ty = gy - (j0 as f64)
+    let a = field[j0 * nx + i0]
+    let b = field[j0 * nx + i0 + 1]
+    let c = field[(j0 + 1) * nx + i0]
+    let d = field[(j0 + 1) * nx + i0 + 1]
+    return a * (1.0 - tx) * (1.0 - ty) + b * tx * (1.0 - ty) + c * (1.0 - tx) * ty + d * tx * ty
+}

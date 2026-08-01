@@ -1,0 +1,148 @@
+// Headless capture tool: runs the game with a scripted pilot and dumps frames as
+// binary PPM. Used to check the look without a display, and as a deterministic
+// smoke test for the whole simulation.
+//
+//   milo run examples/games/neon/shot.milo --release -- /tmp/neon 240 60 120 180
+
+from "std/math" import {
+    Math
+}
+from "std/args" import {
+    args
+}
+from "./gfx" import {
+    Canvas, canvasNew, present
+}
+from "./world" import {
+    World, worldNew, worldUpdate, spawnSnake, spawnBoss, makeEnemy, spawn, Kind,
+    choosePerk, offerPerks, nearestEnemy, alive, Perk
+}
+from "./render" import {
+    Shapes, shapesNew, drawWorld, drawHud
+}
+
+pub extern fn fopen(path: *u8, mode: *u8): *u8
+
+pub extern fn fwrite(ptr: *u8, size: i64, count: i64, stream: *u8): i64
+
+pub extern fn fclose(stream: *u8): i32
+
+pub let W: i64 = 1280
+
+pub let H: i64 = 720
+
+fn writePpm(path: &string, c: &Canvas) {
+    var rgb: Vec<u8> = Vec.filled(W * H * 3, 0)
+    for i in 0..W * H {
+        let px = c.fb[i]
+        rgb[i * 3] = (px & 0xFF) as u8
+        rgb[i * 3 + 1] = ((px >> 8) & 0xFF) as u8
+        rgb[i * 3 + 2] = ((px >> 16) & 0xFF) as u8
+    }
+    let header = "P6\n" + W.toString() + " " + H.toString() + "\n255\n"
+    unsafe {
+        let f = fopen(path.cstr(), "wb".cstr())
+        if (f as i64) == 0 {
+            print("cannot open " + path)
+            return
+        }
+        let _ = fwrite(header.cstr(), 1, header.len, f)
+        let _ = fwrite(rgb.ptr() as *u8, 1, W * H * 3, f)
+        let _ = fclose(f)
+    }
+}
+
+pub fn main(): i32 {
+    let argv = args()
+    var prefix = "/tmp/neon"
+    if argv.len > 1 {
+        prefix = argv[1]
+    }
+    var shots: Vec<i64> = Vec.new()
+    for i in 2..argv.len {
+        shots.push(argv[i].parseInt())
+    }
+    if shots.len == 0 {
+        shots.push(120)
+        shots.push(300)
+        shots.push(600)
+    }
+    var maxFrame: i64 = 0
+    for i in 0..shots.len {
+        maxFrame = Math.maxI64(maxFrame, shots[i])
+    }
+
+    var c = canvasNew(W, H)
+    var world = worldNew(W as f64, H as f64)
+    let shapes = shapesNew()
+
+    // stack the deck so a capture shows every system at once
+    choosePerk2(world, Perk.Spread)
+    choosePerk2(world, Perk.Chain)
+    choosePerk2(world, Perk.Burn)
+    choosePerk2(world, Perk.Homing)
+    choosePerk2(world, Perk.Turrets)
+    choosePerk2(world, Perk.Slowfield)
+
+    let dt = 1.0 / 60.0
+    for frame in 0..maxFrame + 1 {
+        if frame == 20 {
+            spawnSnake(world, 260.0, 180.0, 9)
+            for i in 0..7 {
+                let _ = spawn(world, makeEnemy(Kind.Seeker, 980.0 + (i as f64) * 22.0, 140.0 + (i as f64) * 30.0))
+            }
+            for i in 0..4 {
+                let _ = spawn(world, makeEnemy(Kind.Weaver, 200.0 + (i as f64) * 60.0, 620.0))
+            }
+            let _ = spawn(world, makeEnemy(Kind.Splitter, 1050.0, 560.0))
+            let _ = spawn(world, makeEnemy(Kind.Healer, 900.0, 620.0))
+            let _ = spawn(world, makeEnemy(Kind.BlackHole, 330.0, 470.0))
+        }
+        if frame == 140 {
+            spawnBoss(world, 980.0, 320.0)
+        }
+
+        // scripted pilot: orbit the middle, shoot whatever is closest
+        let t = (frame as f64) * dt
+        var mvx = Math.cos(t * 1.7) * 0.6 + ((W as f64) * 0.5 - world.player.x) * 0.004
+        var mvy = Math.sin(t * 2.3) * 0.6 + ((H as f64) * 0.5 - world.player.y) * 0.004
+        var aim = t * 0.9
+        let h = nearestEnemy(world, world.player.x, world.player.y, 3000.0, 0 - 1)
+        if alive(world, h) {
+            let ddx = world.ents[h.slot].x - world.player.x
+            let ddy = world.ents[h.slot].y - world.player.y
+            aim = Math.atan2(ddy, ddx)
+            let d = Math.sqrt(ddx * ddx + ddy * ddy) + 0.001
+            if d < 240.0 {
+                mvx = mvx - ddx / d * 1.4
+                mvy = mvy - ddy / d * 1.4
+            }
+        }
+        worldUpdate(world, dt, mvx, mvy, aim, true, false)
+
+        var want = false
+        for i in 0..shots.len {
+            if shots[i] == frame {
+                want = true
+            }
+        }
+        if want {
+            drawWorld(c, world, shapes, 0.0, 0.0)
+            drawHud(c, world)
+            present(c, 1.0, 1.0)
+            writePpm(prefix + "-" + frame.toString() + ".ppm", c)
+            print("wrote " + prefix + "-" + frame.toString() + ".ppm")
+        }
+    }
+    print("entities alive at end: " + world.ents.len.toString())
+    print("score: " + world.score.toString())
+    return 0
+}
+
+// The perk screen normally drives this; the capture tool grants perks directly.
+fn choosePerk2(w: &mut World, p: Perk) {
+    w.perkChoices.clear()
+    w.perkChoices.push(p)
+    w.perkPick = true
+    choosePerk(w, 0)
+}

@@ -1,0 +1,11 @@
+// Appending can reallocate the buffer every piece points into, so the receiver stays
+// frozen for the whole loop — the same rule a `s[a..b]` slice already carries.
+pub fn main(): i32 {
+    var t: string = "a\nb"
+    for line in t.lines() {
+        t.push(67)
+        print(line)
+    }
+    return 0
+}
+// @error: cannot call 'push' on 't' because it is borrowed

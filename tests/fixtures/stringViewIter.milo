@@ -1,0 +1,73 @@
+// @expect: alpha
+// @expect: beta
+// @expect: gamma
+// @expect: 3
+// @expect: a
+// @expect: b
+// @expect:
+// @expect: c
+// @expect: 4
+// @expect: 2
+// @expect: one
+// @expect: two
+// @expect: 6
+// @expect: crlf
+// @expect: kept
+// @expect: 0
+// @expect: 0:p
+// @expect: 1:q
+
+pub fn main(): i32 {
+    let text = "alpha\nbeta\ngamma\n"
+    var lineCount: i64 = 0
+    for line in text.lines() {
+        print(line)
+        lineCount = lineCount + 1
+    }
+    print(lineCount)
+
+    // empty pieces are kept, exactly as split() does
+    let csv = "a|b||c"
+    var fields: i64 = 0
+    for field in csv.splitView("|") {
+        print(field)
+        fields = fields + 1
+    }
+    print(fields)
+
+    // a trailing separator still yields the empty piece after it
+    var tail: i64 = 0
+    let trailing = "x,"
+    for piece in trailing.splitView(",") {
+        tail = tail + 1
+    }
+    print(tail)
+
+    // multi-byte separator
+    let doc = "one::two"
+    var total: i64 = 0
+    for part in doc.splitView("::") {
+        print(part)
+        total = total + part.len
+    }
+    print(total)
+
+    let crlf = "crlf\r\nkept\r\n"
+    for line in crlf.lines() {
+        print(line)
+    }
+
+    // no lines in an empty string
+    let empty = ""
+    var emptyLines: i64 = 0
+    for line in empty.lines() {
+        emptyLines = emptyLines + 1
+    }
+    print(emptyLines)
+
+    // enumerate form, over a literal receiver
+    for i, part in "p\nq".lines() {
+        print($"{i}:{part}")
+    }
+    return 0
+}

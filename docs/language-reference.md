@@ -3,7 +3,7 @@ system: language-reference
 purpose: the syntax-and-semantics reference for Milo — types, control flow, ownership, slices, Heap, arenas, generics
 key-files: src/parser.ts, src/checker.ts, docs/grammar.ebnf, std/arena.milo
 update-when: surface syntax or a language feature changes, or a stdlib type gets first-class reference docs
-last-verified: 2026-07-23
+last-verified: 2026-07-31 (every snippet compiles; float printing + move-out-of-borrow sections added)
 -->
 
 # The Milo Language Guide
@@ -55,11 +55,15 @@ Every Milo program starts at `main`, which returns an `i32` exit code.
 `let` declares an immutable binding. `var` declares a mutable one.
 
 ```milo
+fn mightFail(): i32 { return 0 }
+
 let x: i32 = 42       // immutable — cannot be reassigned
 var count: i32 = 0     // mutable — can be reassigned
 count = count + 1
 
 let name = "Milo"      // type inference works
+
+let _ = mightFail()    // `_` discards a result; it may be repeated in one scope
 ```
 
 Under the hood, `let` maps to an SSA register and `var` maps to a stack allocation.
@@ -113,6 +117,15 @@ payload — the literal adopts that type instead:
 let a = 5             // i64 (no context)
 let b: i32 = 5        // i32 (annotation drives the width)
 let c = a + 1         // i64  — `1` takes `a`'s width
+```
+
+Float literals work the same way. A bare `1.0` is `f64`, but in an expression with
+an `f32` it narrows to `f32` rather than forcing a cast or a named constant:
+
+```milo
+fn lerp(a: f32, b: f32, t: f32): f32 {
+    return a * (1.0 - t) + b * t     // `1.0` is f32 here
+}
 ```
 
 ### Integer Overflow Safety
@@ -263,6 +276,21 @@ let s = n.toString()          // "42"
 let pi: f64 = 3.14
 let t = pi.toString()         // "3.14"
 ```
+
+A float prints as the **shortest decimal that reads back as the same value**, so
+`toString`, string interpolation, struct display and `jsonStringify` all round-trip:
+
+```milo
+print((1.0 / 3.0).toString())     // 0.3333333333333333
+print((0.1 + 0.2).toString())     // 0.30000000000000004
+print((100.0).toString())         // 100      — not 1e+02
+print((1e21).toString())          // 1e+21    — exponent form only when fixed would be absurd
+```
+
+An `f32` round-trips at `f32` precision (`(1.0 / 3.0) as f32` prints `0.33333334`, not the
+promoted double's digits). Non-finite values print as `inf`, `-inf` and `nan` — note those
+are not legal JSON, so a `NaN` reaching `jsonStringify` produces output no parser will
+accept.
 
 ### Type Casts
 
@@ -567,6 +595,13 @@ print(hello)                    // auto-deref: methods/print/indexing all work
 var view = message[0..3]
 view = message[3..5]            // reassignable, just updates the pointer
 
+// Iterating views — a whole text pass with no allocation
+for line in message.lines() {        // line: &string, one per '\n' ('\r\n' handled)
+    for field in line.splitView("\t") {   // field: &string, one per separator
+        print(field)
+    }
+}
+
 // Owned copy — when you need a string that outlives the source
 let owned = message.substr(0, 5)  // allocates new string
 
@@ -611,6 +646,31 @@ s.repeat(3)             // "Hello, World!Hello, World!Hello, World!"
 "42".parseInt()         // 42 (i64)
 s.substr(0, 5)          // "Hello" (owned copy)
 ```
+
+#### Iterating views — `lines()` and `splitView()`
+
+`split` copies: every piece is an owned `string` in a fresh `Vec`. `lines()` and
+`splitView(sep)` copy nothing — each piece is a `&string` view into the receiver:
+
+```milo
+let text = "a,b\nc,d\n"
+for line in text.lines() {                // line: &string, no allocation
+    for field in line.splitView(",") {    // field: &string, no allocation
+        print(field)
+    }
+}
+```
+
+Both take the enumerate form too: `for i, line in text.lines()` binds a 0-based index.
+
+Both are **loop forms, not expressions**: `let parts = s.splitView(",")` is an error,
+because a view has nowhere to live outside the loop that borrowed the receiver for it.
+The receiver is frozen for the loop — it cannot be mutated, moved or reassigned while
+pieces of it are live — and a piece cannot escape (`.clone()` it to keep one).
+
+`splitView` matches `split` piece for piece, empty pieces and all (`"a,,b,"` yields
+`"a"`, `""`, `"b"`, `""`). `lines()` splits on `'\n'`, drops a trailing `'\r'`, and does
+not yield an empty final line after a trailing newline.
 
 ### String Utility Functions (std/string)
 
@@ -757,6 +817,38 @@ fn area(s: Shape): f64 {
     }
 }
 ```
+
+The enum name may be left off when the subject's type already fixes it, which is
+usually the case. Both forms are accepted, and they can be mixed:
+
+```milo
+enum Shape {
+    Circle(f64),
+    Rect(f64, f64),
+    Point,
+}
+
+fn area(s: Shape): f64 {
+    match s {
+        Circle(r) => { return 3.14159 * r * r }
+        Rect(w, h) => { return w * h }
+        Point => { return 0.0 }
+    }
+}
+
+var v: Vec<i64> = Vec.new()
+v.push(1)
+
+match v.pop() {
+    Some(n) => { print(n.toString()) }
+    None => { print("empty") }
+}
+
+if let Some(n) = v.pop() { print(n.toString()) }
+```
+
+A written-out prefix that disagrees with the subject is still an error — eliding is
+not the same as ignoring the type.
 
 Use `_` as a wildcard to match remaining variants:
 
@@ -1091,6 +1183,16 @@ users.sortByKey((u: &User) => u.age)                  // simpler
 users.sortByKey((u: &User) => u.name)                 // works with strings too
 ```
 
+```milo
+var v: Vec<string> = ["a", "b", "c"]
+v.truncate(1)             // ["a"] — elements at index >= 1 are dropped
+v.clear()                 // [] — same thing with 0
+```
+
+`truncate(n)` runs each discarded element's drop glue, so owned elements (strings,
+nested `Vec`s, `Drop` types) are freed rather than leaked. A length at or past the
+end is a no-op — it never grows the Vec — and a negative length empties it.
+
 `sort` works on Vec of int, float, string, or bool. `sortBy` and `sortByKey` work on any type. All require `var`.
 
 ### clone
@@ -1357,6 +1459,29 @@ fn bad(s: &string): &string {     // COMPILE ERROR: can't return a reference
 ```milo error
 struct Bad { r: &string }         // COMPILE ERROR: can't store a reference
 ```
+
+You also cannot move a non-`Copy` value *out* of a reference — not the whole pointee, and
+not one of its fields. Both would shallow-copy a heap buffer the borrow does not own, leaving
+two owners and a double free:
+
+```milo error
+struct Doc { text: string }
+
+fn describe(d: &Doc): string {
+    return d.text                 // COMPILE ERROR: cannot move the borrowed value out of 'd'
+}
+```
+
+Write `return d.text.clone()` to take an owned copy. `clone()` exists on every type for this
+reason, including `Copy` scalars where it is the identity — so a generic
+`fn get<T>(w: &Wrapper<T>): T { return w.val.clone() }` compiles for `T = i64` and
+`T = string` alike.
+
+`sortByKey`'s key extractor is the one exemption: the sort reads the key to compare it and
+never stores or drops it, so `users.sortByKey((u: &User) => u.name)` is the supported way to
+sort by a string field. Every other closure is subject to the rule, `map` included — it
+*keeps* what the closure returns, so `users.map((u: &User) => u.name.clone())` needs the
+clone, and the allocation it costs is meant to be visible.
 
 This is Milo's key insight: by restricting where references can live, you get
 memory safety without a borrow checker or lifetime annotations.

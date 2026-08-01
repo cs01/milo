@@ -1,0 +1,15 @@
+// A string slice off a *field* has to freeze the root, the way the array/vec slice
+// path already did. It only froze `expr.object` when that was an identifier, so
+// slicing `lb.buf` recorded no borrow at all and the reassignment below freed the
+// bytes `w` points into. This is ripgrep's LineBuffer shape: a match view held
+// across a fill that rolls the buffer.
+struct LineBuf { buf: string }
+
+fn main(): i32 {
+    var lb = LineBuf { buf: "aaaa.needle.bbbb" }
+    let w = lb.buf[5..11]
+    lb.buf = lb.buf + "...more"
+    print(w)
+    return 0
+}
+// @error: cannot assign to 'lb.buf' because 'lb' is borrowed

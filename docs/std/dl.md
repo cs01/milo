@@ -27,8 +27,8 @@ pub fn dlSelf(): Result<Lib, string>
 ```
 
 A handle to the running program itself, for looking up symbols the executable
-exports. Requires linking with `-Wl,-export_dynamic`, same as letting a loaded
-library resolve against the host.
+exports. Requires the host's symbols to be exported, same as letting a loaded
+library resolve against the host — see the note at the top of this file.
 
 ### `Lib.close`
 

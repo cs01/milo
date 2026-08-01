@@ -1,0 +1,26 @@
+// An f32 initialized from a literal used to emit the literal's *double* bit
+// pattern, which LLVM rejects outright for a `float` operand:
+//   error: floating point constant invalid for type
+//   store float 0x3FB999999999999A, ptr %t1
+// So `struct P { y: f32 }` plus `P { y: 0.1 }` failed to compile at all. The
+// constant now rounds through f32 before it is written out.
+
+struct P {
+    y: f32, z: f64
+}
+
+fn main() {
+    let p = P {
+        y: 0.1, z: 0.1
+    }
+    // @expect: P { y: 0.1, z: 0.1 }
+    print($"{p}")
+
+    var v: f32 = 3.14159
+    // @expect: 3.14159
+    print(v.toString())
+
+    let arr: [f32; 3] = [0.1, 0.2, 0.3]
+    // @expect: 0.2
+    print(arr[1].toString())
+}

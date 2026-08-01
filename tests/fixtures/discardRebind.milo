@@ -1,0 +1,13 @@
+// `let _ = ...` is a discard, not a binding — repeating it in one scope is legal.
+fn one(): i64 {
+    return 1
+}
+
+fn main(): i32 {
+    let _ = one()
+    let _ = one()
+    let _ = one()
+    // @expect: 3
+    print(3)
+    return 0
+}

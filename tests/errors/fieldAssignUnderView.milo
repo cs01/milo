@@ -1,0 +1,16 @@
+// Assigning a whole field frees its buffer; a live view into it would dangle.
+// The borrow check used to fire only when the assignment target was a bare
+// identifier, so `h.data = ...` slipped through and `w[0]` read freed memory.
+struct Holder { data: Vec<i64> }
+
+fn main(): i32 {
+    var h = Holder { data: Vec.new() }
+    h.data.push(10)
+    h.data.push(20)
+    h.data.push(30)
+    let w = h.data[0..2]
+    h.data = Vec.new()
+    print(w[0])
+    return 0
+}
+// @error: cannot assign to 'h.data' because 'h' is borrowed

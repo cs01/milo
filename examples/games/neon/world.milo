@@ -1,0 +1,1961 @@
+// Game state: entities, weapons, the perk system, and everything that mutates
+// everything else.
+//
+// This file exists to answer one objection: "handles are fine for data-oriented
+// numeric systems, show me messy gameplay code." So the interactions here are
+// deliberately tangled — objects hold links to other objects that can die
+// underneath them, deaths mutate their killer and their neighbours, and a perk
+// list rewrites what firing and hitting mean at runtime.
+//
+// The rule Milo enforces is that no `&T` is ever stored. Every cross-object link
+// is a generational `Handle`, so a link to a dead object reads back as "gone"
+// instead of a dangling pointer. Nothing here needs a lifetime annotation and
+// nothing here is `unsafe`.
+
+from "std/math" import {
+    Math
+}
+from "std/random" import {
+    Random
+}
+from "./grid" import {
+    Grid, gridNew, gridUpdate, gridImpulse, gridVortex, gridReset
+}
+
+// ── handles ───────────────────────────────────────────────────────────────────
+
+// A generational index. Copy, storable anywhere, and never dangling: the slot's
+// generation is bumped on death, so an old handle simply stops resolving.
+pub struct Handle {
+    slot: i64,
+    gen: i64,
+}
+
+pub fn nullHandle(): Handle {
+    return Handle {
+        slot: 0 - 1, gen: 0
+    }
+}
+
+pub fn handleIsNull(h: &Handle): bool {
+    return h.slot < 0
+}
+
+// ── entities ──────────────────────────────────────────────────────────────────
+
+pub enum Kind {
+    Seeker, // homes in on the player
+    Wanderer, // drifts and bounces, ignores you
+    Weaver, // strafes in on a sine wave
+    Splitter, // breaks into two smaller copies, twice
+    SnakeHead, // leads a chain of segments
+    SnakeSeg, // follows the segment ahead of it
+    BlackHole, // pulls the world in; eats bullets and enemies, then detonates
+    Healer, // repairs a nearby enemy over a visible beam
+    Turret, // player-owned, acquires and shoots targets
+    Sentinel, // boss core
+    Armor, // boss part, orbits its parent
+    Gem, // multiplier pickup
+}
+
+pub struct Ent {
+    alive: bool,
+    gen: i64,
+    kind: Kind,
+    x: f64,
+    y: f64,
+    vx: f64,
+    vy: f64,
+    ang: f64,
+    spin: f64,
+    radius: f64,
+    hp: f64,
+    maxHp: f64,
+    age: f64,
+    phase: f64,
+    spawnT: f64, // >0 while materialising: no collision, drawn as a warning ring
+    tier: i64, // splitter depth / black hole charge / armour index
+    value: i64, // score
+    cr: f64,
+    cg: f64,
+    cb: f64,
+    // status effects — set by one system, ticked by another, read by the renderer
+    burn: f64,
+    slow: f64,
+    flash: f64,
+    // cross-entity links. These are the whole point of the file.
+    leader: Handle, // segment ahead of me / my boss core
+    follower: Handle, // segment behind me
+    target: Handle, // healer's patient, turret's mark
+}
+
+fn blankEnt(): Ent {
+    return Ent {
+        alive: false, gen: 0, kind: Kind.Gem,
+        x: 0.0, y: 0.0, vx: 0.0, vy: 0.0, ang: 0.0, spin: 0.0,
+        radius: 8.0, hp: 1.0, maxHp: 1.0, age: 0.0, phase: 0.0, spawnT: 0.0,
+        tier: 0, value: 0, cr: 1.0, cg: 1.0, cb: 1.0,
+        burn: 0.0, slow: 0.0, flash: 0.0,
+        leader: nullHandle(), follower: nullHandle(), target: nullHandle(),
+    }
+}
+
+pub struct Bullet {
+    alive: bool,
+    x: f64,
+    y: f64,
+    vx: f64,
+    vy: f64,
+    px: f64, // previous position — bullets are drawn as streaks
+    py: f64,
+    life: f64,
+    dmg: f64,
+    pierce: i64,
+    bounces: i64,
+    homing: f64,
+    target: Handle, // may die mid-flight; the missile re-acquires
+    cr: f64,
+    cg: f64,
+    cb: f64,
+    fromTurret: bool,
+}
+
+pub struct Particle {
+    x: f64,
+    y: f64,
+    vx: f64,
+    vy: f64,
+    life: f64,
+    maxLife: f64,
+    drag: f64,
+    size: f64,
+    cr: f64,
+    cg: f64,
+    cb: f64,
+}
+
+// A lightning arc, queued by the chain-hit perk and drawn for a few frames.
+pub struct Arc {
+    x0: f64,
+    y0: f64,
+    x1: f64,
+    y1: f64,
+    life: f64,
+    seed: i64,
+}
+
+pub enum Perk {
+    Spread, // +2 barrels
+    Pierce, // bullets pass through
+    Chain, // hits arc to nearby enemies
+    Burn, // hits leave a burn that ticks
+    Homing, // bullets steer toward a target
+    Turrets, // drop an autonomous turret
+    Vampire, // kills heal you
+    Bounce, // bullets bounce off walls
+    Slowfield, // your wake slows enemies
+}
+
+pub struct Player {
+    x: f64,
+    y: f64,
+    vx: f64,
+    vy: f64,
+    ang: f64,
+    alive: bool,
+    hp: f64,
+    lives: i64,
+    respawn: f64,
+    invuln: f64,
+    cooldown: f64,
+    bombs: i64,
+    bombFlash: f64,
+}
+
+pub struct World {
+    ents: Vec<Ent>,
+    free: Vec<i64>,
+    bullets: Vec<Bullet>,
+    parts: Vec<Particle>,
+    arcs: Vec<Arc>,
+    grid: Grid,
+    player: Player,
+    perks: Vec<Perk>,
+    w: f64,
+    h: f64,
+    time: f64,
+    score: i64,
+    mult: i64,
+    multTimer: f64,
+    wave: i64,
+    waveTimer: f64,
+    pending: i64, // enemies still to spawn this wave
+    shake: f64,
+    slowmo: f64,
+    flash: f64,
+    gameOver: bool,
+    banner: f64, // countdown on the big centred wave title
+    newKind: Kind, // enemy type introduced this wave, named on screen
+    newKindTimer: f64,
+    hurt: f64, // red edge vignette after taking a hit
+    perkPick: bool, // gameplay is paused while a perk is chosen
+    perkChoices: Vec<Perk>,
+    turretCount: i64,
+    // uniform spatial hash over enemies, rebuilt each frame:
+    // `hashHead[cell]` is the first entity index, `hashNext[i]` the next one.
+    hashHead: Vec<i64>,
+    hashNext: Vec<i64>,
+    hashCols: i64,
+    hashRows: i64,
+}
+
+pub let CELL: f64 = 96.0
+
+pub fn worldNew(w: f64, h: f64): World {
+    let cols = (w / CELL) as i64 + 1
+    let rows = (h / CELL) as i64 + 1
+    return World {
+        ents: Vec.new(),
+        free: Vec.new(),
+        bullets: Vec.new(),
+        parts: Vec.new(),
+        arcs: Vec.new(),
+        grid: gridNew(w, h, 42.0),
+        player: Player {
+            x: w * 0.5, y: h * 0.5, vx: 0.0, vy: 0.0, ang: 0.0,
+            alive: true, hp: 1.0, lives: 5, respawn: 0.0, invuln: 3.0,
+            cooldown: 0.0, bombs: 4, bombFlash: 0.0,
+        }
+        ,
+        perks: Vec.new(),
+        w: w,
+        h: h,
+        time: 0.0,
+        score: 0,
+        mult: 1,
+        multTimer: 0.0,
+        wave: 0,
+        waveTimer: 1.5,
+        pending: 0,
+        shake: 0.0,
+        slowmo: 0.0,
+        flash: 0.0,
+        gameOver: false,
+        banner: 0.0,
+        newKind: Kind.Seeker,
+        newKindTimer: 0.0,
+        hurt: 0.0,
+        perkPick: false,
+        perkChoices: Vec.new(),
+        turretCount: 0,
+        hashHead: Vec.filled(cols * rows, 0 - 1),
+        hashNext: Vec.new(),
+        hashCols: cols,
+        hashRows: rows,
+    }
+}
+
+// ── slot table ────────────────────────────────────────────────────────────────
+
+pub fn spawn(w: &mut World, e: Ent): Handle {
+    var slot: i64 = 0 - 1
+    if w.free.len > 0 {
+        slot = w.free.pop() ?? (0 - 1)
+    }
+    if slot < 0 {
+        slot = w.ents.len
+        var fresh = e
+        fresh.alive = true
+        fresh.gen = 1
+        w.ents.push(fresh)
+        w.hashNext.push(0 - 1)
+        return Handle {
+            slot: slot, gen: 1
+        }
+    }
+    let g = w.ents[slot].gen + 1
+    var fresh = e
+    fresh.alive = true
+    fresh.gen = g
+    w.ents[slot] = fresh
+    return Handle {
+        slot: slot, gen: g
+    }
+}
+
+// Bumping the generation is what makes every outstanding handle to this slot go
+// stale. No other system has to be told the entity died.
+pub fn kill(w: &mut World, slot: i64) {
+    if slot < 0 || slot >= w.ents.len {
+        return
+    }
+    if !w.ents[slot].alive {
+        return
+    }
+    w.ents[slot].alive = false
+    w.ents[slot].gen = w.ents[slot].gen + 1
+    w.free.push(slot)
+}
+
+pub fn alive(w: &World, h: &Handle): bool {
+    if h.slot < 0 || h.slot >= w.ents.len {
+        return false
+    }
+    return w.ents[h.slot].alive && w.ents[h.slot].gen == h.gen
+}
+
+// ── effects ───────────────────────────────────────────────────────────────────
+
+pub fn burst(w: &mut World, x: f64, y: f64, n: i64, speed: f64, cr: f64, cg: f64, cb: f64, size: f64) {
+    for i in 0..n {
+        let a = Random.floatRange(0.0, 6.283185307179586)
+        let s = Random.floatRange(speed * 0.15, speed)
+        let life = Random.floatRange(0.35, 1.1)
+        w.parts.push(Particle {
+            x: x, y: y,
+            vx: Math.cos(a) * s, vy: Math.sin(a) * s,
+            life: life, maxLife: life, drag: 1.9, size: size,
+            cr: cr, cg: cg, cb: cb,
+        }
+        )
+    }
+}
+
+pub fn addArc(w: &mut World, x0: f64, y0: f64, x1: f64, y1: f64) {
+    w.arcs.push(Arc {
+        x0: x0, y0: y0, x1: x1, y1: y1, life: 0.14, seed: Random.range(0, 100000)
+    }
+    )
+}
+
+pub fn hasPerk(w: &World, p: Perk): bool {
+    for i in 0..w.perks.len {
+        if perkEq(w.perks[i], p) {
+            return true
+        }
+    }
+    return false
+}
+
+pub fn perkCount(w: &World, p: Perk): i64 {
+    var n: i64 = 0
+    for i in 0..w.perks.len {
+        if perkEq(w.perks[i], p) {
+            n = n + 1
+        }
+    }
+    return n
+}
+
+pub fn perkEq(a: Perk, b: Perk): bool {
+    return perkId(a) == perkId(b)
+}
+
+pub fn perkId(p: Perk): i64 {
+    match p {
+        Perk.Spread => {
+            return 0
+        }
+        Perk.Pierce => {
+            return 1
+        }
+        Perk.Chain => {
+            return 2
+        }
+        Perk.Burn => {
+            return 3
+        }
+        Perk.Homing => {
+            return 4
+        }
+        Perk.Turrets => {
+            return 5
+        }
+        Perk.Vampire => {
+            return 6
+        }
+        Perk.Bounce => {
+            return 7
+        }
+        Perk.Slowfield => {
+            return 8
+        }
+    }
+}
+
+pub fn perkName(p: Perk): string {
+    match p {
+        Perk.Spread => {
+            return "SPREAD"
+        }
+        Perk.Pierce => {
+            return "PIERCE"
+        }
+        Perk.Chain => {
+            return "CHAIN LIGHTNING"
+        }
+        Perk.Burn => {
+            return "INCENDIARY"
+        }
+        Perk.Homing => {
+            return "HOMING"
+        }
+        Perk.Turrets => {
+            return "AUTO TURRET"
+        }
+        Perk.Vampire => {
+            return "VAMPIRE"
+        }
+        Perk.Bounce => {
+            return "RICOCHET"
+        }
+        Perk.Slowfield => {
+            return "SLOW FIELD"
+        }
+    }
+}
+
+pub fn perkBlurb(p: Perk): string {
+    match p {
+        Perk.Spread => {
+            return "TWO MORE BARRELS"
+        }
+        Perk.Pierce => {
+            return "SHOTS PUNCH THROUGH"
+        }
+        Perk.Chain => {
+            return "HITS ARC TO NEARBY FOES"
+        }
+        Perk.Burn => {
+            return "HITS SET TARGETS ALIGHT"
+        }
+        Perk.Homing => {
+            return "SHOTS STEER AND RETARGET"
+        }
+        Perk.Turrets => {
+            return "DROPS AN AUTONOMOUS GUN"
+        }
+        Perk.Vampire => {
+            return "KILLS REFUND A BOMB"
+        }
+        Perk.Bounce => {
+            return "SHOTS RICOCHET OFF WALLS"
+        }
+        Perk.Slowfield => {
+            return "YOUR WAKE SLOWS ENEMIES"
+        }
+    }
+}
+
+pub fn perkFromId(i: i64): Perk {
+    if i == 0 {
+        return Perk.Spread
+    }
+    if i == 1 {
+        return Perk.Pierce
+    }
+    if i == 2 {
+        return Perk.Chain
+    }
+    if i == 3 {
+        return Perk.Burn
+    }
+    if i == 4 {
+        return Perk.Homing
+    }
+    if i == 5 {
+        return Perk.Turrets
+    }
+    if i == 6 {
+        return Perk.Vampire
+    }
+    if i == 7 {
+        return Perk.Bounce
+    }
+    return Perk.Slowfield
+}
+
+// ── spawning ──────────────────────────────────────────────────────────────────
+
+pub fn makeEnemy(kind: Kind, x: f64, y: f64): Ent {
+    var e = blankEnt()
+    e.kind = kind
+    e.x = x
+    e.y = y
+    e.spawnT = 0.85
+    e.phase = Random.floatRange(0.0, 6.283185307179586)
+    match kind {
+        Kind.Seeker => {
+            e.radius = 15.0
+            e.hp = 2.0
+            e.value = 20
+            e.spin = 2.2
+            e.cr = 2.2
+            e.cg = 0.04
+            e.cb = 0.85
+        }
+        Kind.Wanderer => {
+            e.radius = 17.0
+            e.hp = 2.0
+            e.value = 15
+            e.spin = 0.9
+            let a = Random.floatRange(0.0, 6.283185307179586)
+            e.vx = Math.cos(a) * 62.0
+            e.vy = Math.sin(a) * 62.0
+            e.cr = 0.05
+            e.cg = 0.75
+            e.cb = 2.4
+        }
+        Kind.Weaver => {
+            e.radius = 16.0
+            e.hp = 3.0
+            e.value = 30
+            e.spin = 3.4
+            e.cr = 2.2
+            e.cg = 1.5
+            e.cb = 0.02
+        }
+        Kind.Splitter => {
+            e.radius = 20.0
+            e.hp = 4.0
+            e.value = 25
+            e.spin = 1.4
+            e.tier = 2
+            e.cr = 2.3
+            e.cg = 0.55
+            e.cb = 0.01
+        }
+        Kind.SnakeHead => {
+            e.radius = 13.0
+            e.hp = 6.0
+            e.value = 60
+            e.spin = 0.0
+            e.cr = 1.5
+            e.cg = 1.9
+            e.cb = 0.05
+        }
+        Kind.SnakeSeg => {
+            e.radius = 10.0
+            e.hp = 3.0
+            e.value = 15
+            e.cr = 1.1
+            e.cg = 1.5
+            e.cb = 0.03
+        }
+        Kind.BlackHole => {
+            e.radius = 18.0
+            e.hp = 22.0
+            e.value = 150
+            e.spin = 0.6
+            e.cr = 1.1
+            e.cg = 0.25
+            e.cb = 1.7
+        }
+        Kind.Healer => {
+            e.radius = 12.0
+            e.hp = 5.0
+            e.value = 80
+            e.spin = 1.1
+            e.cr = 0.15
+            e.cg = 1.5
+            e.cb = 1.6
+        }
+        Kind.Turret => {
+            e.radius = 10.0
+            e.hp = 6.0
+            e.value = 0
+            e.spin = 0.0
+            e.cr = 0.95
+            e.cg = 0.35
+            e.cb = 1.9
+            e.spawnT = 0.25
+        }
+        Kind.Sentinel => {
+            e.radius = 34.0
+            e.hp = 90.0
+            e.value = 1000
+            e.spin = 0.35
+            e.cr = 1.8
+            e.cg = 0.5
+            e.cb = 0.15
+            e.spawnT = 1.6
+        }
+        Kind.Armor => {
+            e.radius = 15.0
+            e.hp = 16.0
+            e.value = 120
+            e.spin = 2.0
+            e.cr = 1.8
+            e.cg = 0.9
+            e.cb = 0.2
+            e.spawnT = 1.6
+        }
+        Kind.Gem => {
+            e.radius = 9.0
+            e.hp = 1.0
+            e.value = 0
+            e.spin = 2.6
+            e.cr = 0.1
+            e.cg = 2.4
+            e.cb = 0.45
+        }
+    }
+    e.maxHp = e.hp
+    return e
+}
+
+// A snake is a doubly linked chain of entities. Killing a middle segment has to
+// splice the chain back together — the link surgery in `damage` below.
+pub fn spawnSnake(w: &mut World, x: f64, y: f64, len: i64) {
+    let head = spawn(w, makeEnemy(Kind.SnakeHead, x, y))
+    var prev = head
+    for i in 0..len {
+        var seg = makeEnemy(Kind.SnakeSeg, x, y + (i as f64 + 1.0) * 16.0)
+        seg.leader = prev
+        seg.radius = 11.0 - (i as f64) * 0.25
+        let h = spawn(w, seg)
+        w.ents[prev.slot].follower = h
+        prev = h
+    }
+}
+
+// The boss carries four armour plates that orbit it. Each plate holds a handle
+// to the core and the core holds handles to the plates; a plate's death mutates
+// the core, and the core's death takes the plates with it.
+pub fn spawnBoss(w: &mut World, x: f64, y: f64) {
+    let core = spawn(w, makeEnemy(Kind.Sentinel, x, y))
+    for i in 0..4 {
+        var a = makeEnemy(Kind.Armor, x, y)
+        a.leader = core
+        a.tier = i
+        a.phase = (i as f64) * 1.5707963267948966
+        let h = spawn(w, a)
+        if i == 0 {
+            w.ents[core.slot].follower = h // any surviving plate, for the shield check
+        }
+    }
+    w.ents[core.slot].tier = 4 // plates remaining
+}
+
+pub struct P2 {
+    x: f64,
+    y: f64,
+}
+
+pub fn randomEdge(w: &World): P2 {
+    let side = Random.range(0, 4)
+    let m = 70.0
+    if side == 0 {
+        return P2 {
+            x: Random.floatRange(m, w.w - m), y: m
+        }
+    }
+    if side == 1 {
+        return P2 {
+            x: Random.floatRange(m, w.w - m), y: w.h - m
+        }
+    }
+    if side == 2 {
+        return P2 {
+            x: m, y: Random.floatRange(m, w.h - m)
+        }
+    }
+    return P2 {
+        x: w.w - m, y: Random.floatRange(m, w.h - m)
+    }
+}
+
+// ── damage and death ──────────────────────────────────────────────────────────
+
+pub fn addScore(w: &mut World, n: i64) {
+    w.score = w.score + n * w.mult
+}
+
+// Deaths are where the tangle lives: one entity dying rewrites its neighbours'
+// links, mutates its parent, spawns children that inherit its state, and pushes
+// on the background grid — all through handles, none of it holding a reference.
+pub fn onDeath(w: &mut World, slot: i64, byPlayer: bool) {
+    let e = w.ents[slot]
+    let kind = e.kind
+
+    burst(w, e.x, e.y, 26, 320.0, e.cr, e.cg, e.cb, 2.4)
+    gridImpulse(w.grid, e.x, e.y, 240.0, 90.0)
+    w.shake = Math.maxF64(w.shake, 4.0)
+
+    if byPlayer {
+        addScore(w, e.value)
+    }
+
+    match kind {
+        Kind.Splitter => {
+            if e.tier > 0 {
+                for i in 0..2 {
+                    var c = makeEnemy(Kind.Splitter, e.x, e.y)
+                    c.tier = e.tier - 1
+                    c.radius = e.radius * 0.62
+                    c.hp = 2.0
+                    c.maxHp = 2.0
+                    c.value = 15
+                    c.spawnT = 0.0
+                    let a = Random.floatRange(0.0, 6.283185307179586)
+                    c.vx = Math.cos(a) * 190.0
+                    c.vy = Math.sin(a) * 190.0
+                    let _ = spawn(w, c)
+                }
+            }
+        }
+        Kind.SnakeHead => {
+            spliceChain(w, slot)
+        }
+        Kind.SnakeSeg => {
+            spliceChain(w, slot)
+        }
+        Kind.BlackHole => {
+            // Detonation: shove the grid, hurt everything nearby, and seed the
+            // arena with the seekers it had swallowed.
+            gridImpulse(w.grid, e.x, e.y, 460.0, 150.0)
+            burst(w, e.x, e.y, 150, 620.0, 1.4, 0.4, 1.8, 3.0)
+            w.shake = 22.0
+            w.flash = 0.5
+            for i in 0..w.ents.len {
+                if w.ents[i].alive && i != slot {
+                    let dx = w.ents[i].x - e.x
+                    let dy = w.ents[i].y - e.y
+                    if dx * dx + dy * dy < 260.0 * 260.0 {
+                        damage(w, i, 6.0, false)
+                    }
+                }
+            }
+            let n = 3 + e.tier / 2
+            for i in 0..n {
+                let a = Random.floatRange(0.0, 6.283185307179586)
+                var s = makeEnemy(Kind.Seeker, e.x + Math.cos(a) * 40.0, e.y + Math.sin(a) * 40.0)
+                s.spawnT = 0.35
+                let _ = spawn(w, s)
+            }
+        }
+        Kind.Armor => {
+            // Tell the core it lost a plate. The core may already be gone, in
+            // which case the handle simply does not resolve.
+            let core = e.leader
+            if alive(w, core) {
+                w.ents[core.slot].tier = w.ents[core.slot].tier - 1
+                w.ents[core.slot].spin = w.ents[core.slot].spin * 1.35
+                w.ents[core.slot].flash = 0.3
+            }
+        }
+        Kind.Sentinel => {
+            // Core dies, plates go with it.
+            for i in 0..w.ents.len {
+                if w.ents[i].alive {
+                    match w.ents[i].kind {
+                        Kind.Armor => {
+                            if w.ents[i].leader.slot == slot {
+                                w.ents[i].hp = 0.0
+                                kill(w, i)
+                                burst(w, w.ents[i].x, w.ents[i].y, 40, 420.0, 1.8, 0.9, 0.2, 2.6)
+                            }
+                        }
+                        _ => {
+                        }
+                    }
+                }
+            }
+            burst(w, e.x, e.y, 260, 780.0, 1.9, 0.6, 0.15, 3.4)
+            gridImpulse(w.grid, e.x, e.y, 620.0, 230.0)
+            w.shake = 30.0
+            w.flash = 0.8
+        }
+        Kind.Turret => {
+            w.turretCount = w.turretCount - 1
+        }
+        _ => {
+        }
+    }
+
+    // Enemies drop multiplier gems; pickups and player-owned things do not.
+    if byPlayer && isEnemy(kind) {
+        var n = 1
+        if e.value >= 60 {
+            n = 3
+        }
+        if e.value >= 500 {
+            n = 12
+        }
+        for i in 0..n {
+            var g = makeEnemy(Kind.Gem, e.x, e.y)
+            g.spawnT = 0.0
+            let a = Random.floatRange(0.0, 6.283185307179586)
+            g.vx = Math.cos(a) * 130.0
+            g.vy = Math.sin(a) * 130.0
+            let _ = spawn(w, g)
+        }
+        if hasPerk(w, Perk.Vampire) && Random.range(0, 24) == 0 {
+            w.player.bombs = Math.minI64(w.player.bombs + 1, 5)
+        }
+    }
+
+    kill(w, slot)
+}
+
+// Splice a dead link out of a snake, in both directions. If the head died, the
+// next segment is promoted.
+fn spliceChain(w: &mut World, slot: i64) {
+    let ld = w.ents[slot].leader
+    let fo = w.ents[slot].follower
+    if alive(w, ld) {
+        w.ents[ld.slot].follower = fo
+    }
+    if alive(w, fo) {
+        w.ents[fo.slot].leader = ld
+        if !alive(w, ld) {
+            w.ents[fo.slot].kind = Kind.SnakeHead
+            w.ents[fo.slot].cr = 1.5
+            w.ents[fo.slot].cg = 1.9
+            w.ents[fo.slot].cb = 0.05
+            w.ents[fo.slot].value = 40
+        }
+    }
+}
+
+pub fn isEnemy(k: Kind): bool {
+    match k {
+        Kind.Gem => {
+            return false
+        }
+        Kind.Turret => {
+            return false
+        }
+        _ => {
+            return true
+        }
+    }
+}
+
+pub fn damage(w: &mut World, slot: i64, dmg: f64, byPlayer: bool) {
+    if slot < 0 || slot >= w.ents.len {
+        return
+    }
+    if !w.ents[slot].alive || w.ents[slot].spawnT > 0.0 {
+        return
+    }
+    // An armoured core is invulnerable while any plate survives.
+    match w.ents[slot].kind {
+        Kind.Sentinel => {
+            if w.ents[slot].tier > 0 {
+                w.ents[slot].flash = 0.12
+                return
+            }
+        }
+        _ => {
+        }
+    }
+    w.ents[slot].hp = w.ents[slot].hp - dmg
+    w.ents[slot].flash = 0.18
+    if w.ents[slot].hp <= 0.0 {
+        onDeath(w, slot, byPlayer)
+    }
+}
+
+// ── spatial hash ──────────────────────────────────────────────────────────────
+//
+// Rebuilt every frame as an intrusive singly-linked list per cell, stored as two
+// parallel index arrays. No node allocation, no references — `hashNext[i]` is the
+// next entity index in the same cell, or -1.
+
+fn cellOf(w: &World, x: f64, y: f64): i64 {
+    var cx = (x / CELL) as i64
+    var cy = (y / CELL) as i64
+    cx = Math.clampI64(cx, 0, w.hashCols - 1)
+    cy = Math.clampI64(cy, 0, w.hashRows - 1)
+    return cy * w.hashCols + cx
+}
+
+fn rehash(w: &mut World) {
+    for i in 0..w.hashHead.len {
+        w.hashHead[i] = 0 - 1
+    }
+    while w.hashNext.len < w.ents.len {
+        w.hashNext.push(0 - 1)
+    }
+    for i in 0..w.ents.len {
+        w.hashNext[i] = 0 - 1
+        if w.ents[i].alive && w.ents[i].spawnT <= 0.0 && isEnemy(w.ents[i].kind) {
+            let c = cellOf(w, w.ents[i].x, w.ents[i].y)
+            w.hashNext[i] = w.hashHead[c]
+            w.hashHead[c] = i
+        }
+    }
+}
+
+// ── targeting helpers ─────────────────────────────────────────────────────────
+
+pub fn nearestEnemy(w: &World, x: f64, y: f64, maxDist: f64, skip: i64): Handle {
+    var best: i64 = 0 - 1
+    var bestD = maxDist * maxDist
+    for i in 0..w.ents.len {
+        if w.ents[i].alive && i != skip && w.ents[i].spawnT <= 0.0 && isEnemy(w.ents[i].kind) {
+            let dx = w.ents[i].x - x
+            let dy = w.ents[i].y - y
+            let d2 = dx * dx + dy * dy
+            if d2 < bestD {
+                bestD = d2
+                best = i
+            }
+        }
+    }
+    if best < 0 {
+        return nullHandle()
+    }
+    return Handle {
+        slot: best, gen: w.ents[best].gen
+    }
+}
+
+// ── weapons ───────────────────────────────────────────────────────────────────
+
+fn fireBullet(w: &mut World, x: f64, y: f64, ang: f64, speed: f64, fromTurret: bool) {
+    var b = Bullet {
+        alive: true,
+        x: x, y: y,
+        vx: Math.cos(ang) * speed, vy: Math.sin(ang) * speed,
+        px: x, py: y,
+        life: 1.7, dmg: 1.0,
+        pierce: perkCount(w, Perk.Pierce),
+        bounces: 0,
+        homing: 0.0,
+        target: nullHandle(),
+        cr: 1.4, cg: 1.1, cb: 0.35,
+        fromTurret: fromTurret,
+    }
+    if hasPerk(w, Perk.Bounce) {
+        b.bounces = 2
+    }
+    if hasPerk(w, Perk.Homing) {
+        b.homing = 5.5
+        b.target = nearestEnemy(w, x, y, 460.0, 0 - 1)
+        b.cr = 0.6
+        b.cg = 1.5
+        b.cb = 1.6
+    }
+    if fromTurret {
+        b.cr = 0.5
+        b.cg = 1.3
+        b.cb = 1.8
+        b.dmg = 0.8
+    }
+    w.bullets.push(b)
+}
+
+fn playerFire(w: &mut World, aim: f64) {
+    let barrels = 1 + 2 * perkCount(w, Perk.Spread)
+    let spread = 0.13
+    let px = w.player.x
+    let py = w.player.y
+    for i in 0..barrels {
+        let off = ((i as f64) - ((barrels - 1) as f64) * 0.5) * spread
+        let a = aim + off + Random.floatRange(0.0 - 0.02, 0.02)
+        fireBullet(w, px + Math.cos(a) * 16.0, py + Math.sin(a) * 16.0, a, 980.0, false)
+    }
+    w.player.vx = w.player.vx - Math.cos(aim) * 22.0
+    w.player.vy = w.player.vy - Math.sin(aim) * 22.0
+    gridImpulse(w.grid, px, py, 90.0, 16.0)
+}
+
+// A hit runs the whole perk chain: burn, chain lightning, pierce bookkeeping.
+fn onBulletHit(w: &mut World, bi: i64, slot: i64) {
+    let bx = w.bullets[bi].x
+    let by = w.bullets[bi].y
+    let dmg = w.bullets[bi].dmg
+
+    if hasPerk(w, Perk.Burn) {
+        w.ents[slot].burn = Math.maxF64(w.ents[slot].burn, 1.6)
+    }
+    burst(w, bx, by, 5, 190.0, w.bullets[bi].cr, w.bullets[bi].cg, w.bullets[bi].cb, 1.6)
+
+    if hasPerk(w, Perk.Chain) {
+        // Walk from the struck enemy to nearby ones, damaging each. Every hop is
+        // resolved through the slot table, so an enemy that died earlier in this
+        // same frame is simply skipped.
+        let hops = 1 + perkCount(w, Perk.Chain)
+        var fromX = w.ents[slot].x
+        var fromY = w.ents[slot].y
+        var prev = slot
+        for k in 0..hops {
+            let h = nearestEnemy(w, fromX, fromY, 210.0, prev)
+            if handleIsNull(h) {
+                break
+            }
+            let tx = w.ents[h.slot].x
+            let ty = w.ents[h.slot].y
+            addArc(w, fromX, fromY, tx, ty)
+            prev = h.slot
+            fromX = tx
+            fromY = ty
+            damage(w, h.slot, dmg * 0.7, true)
+        }
+    }
+
+    damage(w, slot, dmg, true)
+    w.bullets[bi].pierce = w.bullets[bi].pierce - 1
+    if w.bullets[bi].pierce < 0 {
+        w.bullets[bi].alive = false
+    }
+}
+
+pub fn detonateBomb(w: &mut World) {
+    if w.player.bombs <= 0 || !w.player.alive {
+        return
+    }
+    w.player.bombs = w.player.bombs - 1
+    w.player.bombFlash = 0.55
+    w.shake = 26.0
+    w.flash = 0.7
+    gridImpulse(w.grid, w.player.x, w.player.y, 900.0, 260.0)
+    burst(w, w.player.x, w.player.y, 220, 700.0, 1.2, 1.6, 1.9, 3.0)
+    for i in 0..w.bullets.len {
+        w.bullets[i].alive = false
+    }
+    for i in 0..w.ents.len {
+        if w.ents[i].alive && isEnemy(w.ents[i].kind) {
+            damage(w, i, 14.0, true)
+        }
+    }
+}
+
+// ── entity behaviour ──────────────────────────────────────────────────────────
+
+fn steer(w: &mut World, i: i64, tx: f64, ty: f64, accel: f64, maxSpeed: f64, dt: f64) {
+    let dx = tx - w.ents[i].x
+    let dy = ty - w.ents[i].y
+    let d = Math.sqrt(dx * dx + dy * dy) + 0.0001
+    w.ents[i].vx = w.ents[i].vx + dx / d * accel * dt
+    w.ents[i].vy = w.ents[i].vy + dy / d * accel * dt
+    let sp = Math.sqrt(w.ents[i].vx * w.ents[i].vx + w.ents[i].vy * w.ents[i].vy)
+    if sp > maxSpeed {
+        let k = maxSpeed / sp
+        w.ents[i].vx = w.ents[i].vx * k
+        w.ents[i].vy = w.ents[i].vy * k
+    }
+}
+
+fn updateEnts(w: &mut World, dt: f64) {
+    let px = w.player.x
+    let py = w.player.y
+    let n = w.ents.len
+    for i in 0..n {
+        if !w.ents[i].alive {
+            continue
+        }
+        w.ents[i].age = w.ents[i].age + dt
+        if w.ents[i].spawnT > 0.0 {
+            w.ents[i].spawnT = w.ents[i].spawnT - dt
+            continue
+        }
+        if w.ents[i].flash > 0.0 {
+            w.ents[i].flash = w.ents[i].flash - dt
+        }
+        // Burn ticks damage over time; it was applied by a completely different
+        // system (the bullet-hit path) and can kill without anything shooting.
+        if w.ents[i].burn > 0.0 {
+            w.ents[i].burn = w.ents[i].burn - dt
+            damage(w, i, 2.4 * dt, true)
+            if !w.ents[i].alive {
+                continue
+            }
+            if Random.range(0, 3) == 0 {
+                w.parts.push(Particle {
+                    x: w.ents[i].x + Random.floatRange(0.0 - 8.0, 8.0),
+                    y: w.ents[i].y + Random.floatRange(0.0 - 8.0, 8.0),
+                    vx: Random.floatRange(0.0 - 30.0, 30.0), vy: Random.floatRange(0.0 - 90.0, 0.0 - 20.0),
+                    life: 0.4, maxLife: 0.4, drag: 1.4, size: 1.8,
+                    cr: 1.8, cg: 0.7, cb: 0.1,
+                }
+                )
+            }
+        }
+        var slowK = 1.0
+        if w.ents[i].slow > 0.0 {
+            w.ents[i].slow = w.ents[i].slow - dt
+            slowK = 0.42
+        }
+        let sdt = dt * slowK
+
+        w.ents[i].ang = w.ents[i].ang + w.ents[i].spin * sdt
+
+        match w.ents[i].kind {
+            Kind.Seeker => {
+                steer(w, i, px, py, 430.0, 165.0, sdt)
+            }
+            Kind.Wanderer => {
+                w.ents[i].phase = w.ents[i].phase + sdt * 1.4
+                let a = w.ents[i].phase
+                w.ents[i].vx = w.ents[i].vx + Math.cos(a) * 60.0 * sdt
+                w.ents[i].vy = w.ents[i].vy + Math.sin(a * 1.3) * 60.0 * sdt
+            }
+            Kind.Weaver => {
+                let dx = px - w.ents[i].x
+                let dy = py - w.ents[i].y
+                let d = Math.sqrt(dx * dx + dy * dy) + 0.0001
+                let s = Math.sin(w.ents[i].age * 3.4) * 190.0
+                w.ents[i].vx = w.ents[i].vx + (dx / d * 380.0 - dy / d * s) * sdt
+                w.ents[i].vy = w.ents[i].vy + (dy / d * 380.0 + dx / d * s) * sdt
+                let sp = Math.sqrt(w.ents[i].vx * w.ents[i].vx + w.ents[i].vy * w.ents[i].vy)
+                if sp > 200.0 {
+                    w.ents[i].vx = w.ents[i].vx * 200.0 / sp
+                    w.ents[i].vy = w.ents[i].vy * 200.0 / sp
+                }
+            }
+            Kind.Splitter => {
+                steer(w, i, px, py, 140.0, 105.0, sdt)
+            }
+            Kind.SnakeHead => {
+                steer(w, i, px, py, 360.0, 150.0, sdt)
+            }
+            Kind.SnakeSeg => {
+                // Read the segment ahead, write myself. The leader may have died
+                // this very frame; `alive` says so and the chain was already
+                // spliced, so the handle now points at whoever is ahead.
+                let ld = w.ents[i].leader
+                if alive(w, ld) {
+                    let lx = w.ents[ld.slot].x
+                    let ly = w.ents[ld.slot].y
+                    let dx = lx - w.ents[i].x
+                    let dy = ly - w.ents[i].y
+                    let d = Math.sqrt(dx * dx + dy * dy) + 0.0001
+                    let want = w.ents[i].radius + w.ents[ld.slot].radius + 3.0
+                    let pull = (d - want) * 16.0
+                    w.ents[i].vx = dx / d * pull
+                    w.ents[i].vy = dy / d * pull
+                    w.ents[i].ang = Math.atan2(dy, dx)
+                } else {
+                    steer(w, i, px, py, 300.0, 140.0, sdt)
+                }
+            }
+            Kind.BlackHole => {
+                w.ents[i].phase = w.ents[i].phase + sdt
+                let reach = 300.0 + (w.ents[i].tier as f64) * 8.0
+                gridVortex(w.grid, w.ents[i].x, w.ents[i].y, reach * 1.6, 2600.0, 1500.0, sdt)
+                let bx = w.ents[i].x
+                let by = w.ents[i].y
+                // Pulls the player, every other enemy, every particle and every
+                // bullet — one entity reaching into four unrelated containers.
+                pullPlayer(w, bx, by, reach, 640.0, sdt)
+                pullEnts(w, i, bx, by, reach, 520.0, sdt)
+                pullParticles(w, bx, by, reach * 1.4, 900.0, sdt)
+                pullBullets(w, i, bx, by, reach * 0.7, 700.0, sdt)
+                if Random.range(0, 2) == 0 {
+                    let a = Random.floatRange(0.0, 6.283185307179586)
+                    let r = Random.floatRange(reach * 0.5, reach)
+                    w.parts.push(Particle {
+                        x: bx + Math.cos(a) * r, y: by + Math.sin(a) * r,
+                        vx: 0.0, vy: 0.0, life: 0.9, maxLife: 0.9, drag: 0.1, size: 1.7,
+                        cr: 1.3, cg: 0.3, cb: 1.8,
+                    }
+                    )
+                }
+                w.ents[i].vx = w.ents[i].vx * 0.9
+                w.ents[i].vy = w.ents[i].vy * 0.9
+            }
+            Kind.Healer => {
+                // Pick a patient, keep station near it, mend it. When it dies the
+                // handle stops resolving and the healer picks someone else.
+                let t = w.ents[i].target
+                var haveTarget = alive(w, t)
+                if haveTarget {
+                    if w.ents[t.slot].hp >= w.ents[t.slot].maxHp || t.slot == i {
+                        haveTarget = false
+                    }
+                }
+                if !haveTarget {
+                    w.ents[i].target = pickPatient(w, i)
+                }
+                let t2 = w.ents[i].target
+                if alive(w, t2) {
+                    let tx = w.ents[t2.slot].x
+                    let ty = w.ents[t2.slot].y
+                    steer(w, i, tx, ty, 300.0, 150.0, sdt)
+                    let dx = tx - w.ents[i].x
+                    let dy = ty - w.ents[i].y
+                    if dx * dx + dy * dy < 300.0 * 300.0 {
+                        let mx = w.ents[t2.slot].maxHp
+                        w.ents[t2.slot].hp = Math.minF64(w.ents[t2.slot].hp + 2.2 * sdt, mx)
+                        w.ents[t2.slot].slow = 0.0
+                    }
+                } else {
+                    steer(w, i, px, py, 190.0, 120.0, sdt)
+                }
+            }
+            Kind.Turret => {
+                w.ents[i].hp = w.ents[i].hp - sdt * 0.42 // batteries run down
+                if w.ents[i].hp <= 0.0 {
+                    onDeath(w, i, false)
+                    continue
+                }
+                let t = w.ents[i].target
+                if !alive(w, t) {
+                    w.ents[i].target = nearestEnemy(w, w.ents[i].x, w.ents[i].y, 520.0, i)
+                }
+                let t2 = w.ents[i].target
+                if alive(w, t2) {
+                    let a = Math.atan2(w.ents[t2.slot].y - w.ents[i].y, w.ents[t2.slot].x - w.ents[i].x)
+                    w.ents[i].ang = a
+                    w.ents[i].phase = w.ents[i].phase - sdt
+                    if w.ents[i].phase <= 0.0 {
+                        w.ents[i].phase = 0.16
+                        fireBullet(w, w.ents[i].x, w.ents[i].y, a, 820.0, true)
+                    }
+                }
+                w.ents[i].vx = w.ents[i].vx * 0.86
+                w.ents[i].vy = w.ents[i].vy * 0.86
+            }
+            Kind.Sentinel => {
+                w.ents[i].phase = w.ents[i].phase + sdt
+                steer(w, i, px, py, 150.0, 92.0, sdt)
+                if w.ents[i].phase > 2.6 {
+                    w.ents[i].phase = 0.0
+                    for k in 0..3 {
+                        let a = Random.floatRange(0.0, 6.283185307179586)
+                        var s = makeEnemy(Kind.Seeker, w.ents[i].x + Math.cos(a) * 50.0, w.ents[i].y + Math.sin(a) * 50.0)
+                        s.spawnT = 0.4
+                        let _ = spawn(w, s)
+                    }
+                    w.ents[i].flash = 0.25
+                }
+            }
+            Kind.Armor => {
+                // Position is derived from the core every frame — a parent-child
+                // attachment with no stored pointer either way.
+                let core = w.ents[i].leader
+                if alive(w, core) {
+                    w.ents[i].phase = w.ents[i].phase + sdt * 1.5
+                    let orbit = w.ents[core.slot].radius + 26.0
+                    w.ents[i].x = w.ents[core.slot].x + Math.cos(w.ents[i].phase) * orbit
+                    w.ents[i].y = w.ents[core.slot].y + Math.sin(w.ents[i].phase) * orbit
+                    w.ents[i].vx = 0.0
+                    w.ents[i].vy = 0.0
+                } else {
+                    steer(w, i, px, py, 190.0, 130.0, sdt)
+                }
+            }
+            Kind.Gem => {
+                let dx = px - w.ents[i].x
+                let dy = py - w.ents[i].y
+                let d2 = dx * dx + dy * dy
+                if d2 < 190.0 * 190.0 && w.player.alive {
+                    let d = Math.sqrt(d2) + 0.0001
+                    w.ents[i].vx = w.ents[i].vx + dx / d * 1500.0 * sdt
+                    w.ents[i].vy = w.ents[i].vy + dy / d * 1500.0 * sdt
+                }
+                w.ents[i].vx = w.ents[i].vx * 0.94
+                w.ents[i].vy = w.ents[i].vy * 0.94
+                if w.ents[i].age > 11.0 {
+                    kill(w, i)
+                    continue
+                }
+            }
+        }
+
+        w.ents[i].x = w.ents[i].x + w.ents[i].vx * sdt
+        w.ents[i].y = w.ents[i].y + w.ents[i].vy * sdt
+
+        // walls
+        let r = w.ents[i].radius
+        if w.ents[i].x < r {
+            w.ents[i].x = r
+            w.ents[i].vx = Math.abs(w.ents[i].vx)
+        }
+        if w.ents[i].x > w.w - r {
+            w.ents[i].x = w.w - r
+            w.ents[i].vx = 0.0 - Math.abs(w.ents[i].vx)
+        }
+        if w.ents[i].y < r {
+            w.ents[i].y = r
+            w.ents[i].vy = Math.abs(w.ents[i].vy)
+        }
+        if w.ents[i].y > w.h - r {
+            w.ents[i].y = w.h - r
+            w.ents[i].vy = 0.0 - Math.abs(w.ents[i].vy)
+        }
+
+        if isEnemy(w.ents[i].kind) {
+            gridImpulse(w.grid, w.ents[i].x, w.ents[i].y, r * 4.5, 0.0 - 14.0)
+        }
+    }
+}
+
+fn pickPatient(w: &World, self: i64): Handle {
+    var best: i64 = 0 - 1
+    var bestScore = 0.0
+    for i in 0..w.ents.len {
+        if w.ents[i].alive && i != self && isEnemy(w.ents[i].kind) && w.ents[i].spawnT <= 0.0 {
+            let missing = w.ents[i].maxHp - w.ents[i].hp
+            if missing > 0.05 {
+                let dx = w.ents[i].x - w.ents[self].x
+                let dy = w.ents[i].y - w.ents[self].y
+                let s = missing * 4000.0 / (dx * dx + dy * dy + 100.0)
+                if s > bestScore {
+                    bestScore = s
+                    best = i
+                }
+            }
+        }
+    }
+    if best < 0 {
+        return nullHandle()
+    }
+    return Handle {
+        slot: best, gen: w.ents[best].gen
+    }
+}
+
+fn pullPlayer(w: &mut World, x: f64, y: f64, reach: f64, str: f64, dt: f64) {
+    if !w.player.alive {
+        return
+    }
+    let dx = x - w.player.x
+    let dy = y - w.player.y
+    let d2 = dx * dx + dy * dy
+    if d2 < reach * reach && d2 > 1.0 {
+        let d = Math.sqrt(d2)
+        let f = str * (1.0 - d / reach) * dt / d
+        w.player.vx = w.player.vx + dx * f
+        w.player.vy = w.player.vy + dy * f
+    }
+}
+
+fn pullEnts(w: &mut World, self: i64, x: f64, y: f64, reach: f64, str: f64, dt: f64) {
+    for i in 0..w.ents.len {
+        if w.ents[i].alive && i != self && w.ents[i].spawnT <= 0.0 {
+            match w.ents[i].kind {
+                Kind.BlackHole => {
+                    continue
+                }
+                Kind.Armor => {
+                    continue
+                }
+                _ => {
+                }
+            }
+            let dx = x - w.ents[i].x
+            let dy = y - w.ents[i].y
+            let d2 = dx * dx + dy * dy
+            if d2 < reach * reach && d2 > 1.0 {
+                let d = Math.sqrt(d2)
+                let f = str * (1.0 - d / reach) * dt / d
+                w.ents[i].vx = w.ents[i].vx + dx * f
+                w.ents[i].vy = w.ents[i].vy + dy * f
+                if d < 26.0 && isEnemy(w.ents[i].kind) {
+                    // swallowed: the hole grows and charges toward detonation
+                    w.ents[self].tier = w.ents[self].tier + 1
+                    w.ents[self].radius = Math.minF64(w.ents[self].radius + 0.7, 40.0)
+                    burst(w, w.ents[i].x, w.ents[i].y, 12, 220.0, 1.3, 0.4, 1.8, 2.0)
+                    kill(w, i)
+                }
+            }
+        }
+    }
+}
+
+fn pullParticles(w: &mut World, x: f64, y: f64, reach: f64, str: f64, dt: f64) {
+    for i in 0..w.parts.len {
+        let dx = x - w.parts[i].x
+        let dy = y - w.parts[i].y
+        let d2 = dx * dx + dy * dy
+        if d2 < reach * reach && d2 > 4.0 {
+            let d = Math.sqrt(d2)
+            let f = str * dt / d
+            w.parts[i].vx = w.parts[i].vx + dx * f
+            w.parts[i].vy = w.parts[i].vy + dy * f
+        }
+    }
+}
+
+fn pullBullets(w: &mut World, self: i64, x: f64, y: f64, reach: f64, str: f64, dt: f64) {
+    for i in 0..w.bullets.len {
+        if !w.bullets[i].alive {
+            continue
+        }
+        let dx = x - w.bullets[i].x
+        let dy = y - w.bullets[i].y
+        let d2 = dx * dx + dy * dy
+        if d2 < reach * reach {
+            let d = Math.sqrt(d2) + 0.0001
+            let f = str * dt / d
+            w.bullets[i].vx = w.bullets[i].vx + dx * f
+            w.bullets[i].vy = w.bullets[i].vy + dy * f
+        }
+    }
+}
+
+// ── bullets ───────────────────────────────────────────────────────────────────
+
+fn updateBullets(w: &mut World, dt: f64) {
+    let n = w.bullets.len
+    for i in 0..n {
+        if !w.bullets[i].alive {
+            continue
+        }
+        w.bullets[i].life = w.bullets[i].life - dt
+        if w.bullets[i].life <= 0.0 {
+            w.bullets[i].alive = false
+            continue
+        }
+        if w.bullets[i].homing > 0.0 {
+            let t = w.bullets[i].target
+            if !alive(w, t) {
+                // The mark died; find a new one. This is the case that a raw
+                // pointer would get wrong and a generational handle gets right.
+                w.bullets[i].target = nearestEnemy(w, w.bullets[i].x, w.bullets[i].y, 420.0, 0 - 1)
+            }
+            let t2 = w.bullets[i].target
+            if alive(w, t2) {
+                let dx = w.ents[t2.slot].x - w.bullets[i].x
+                let dy = w.ents[t2.slot].y - w.bullets[i].y
+                let d = Math.sqrt(dx * dx + dy * dy) + 0.0001
+                let sp = Math.sqrt(w.bullets[i].vx * w.bullets[i].vx + w.bullets[i].vy * w.bullets[i].vy)
+                w.bullets[i].vx = w.bullets[i].vx + dx / d * sp * w.bullets[i].homing * dt
+                w.bullets[i].vy = w.bullets[i].vy + dy / d * sp * w.bullets[i].homing * dt
+                let s2 = Math.sqrt(w.bullets[i].vx * w.bullets[i].vx + w.bullets[i].vy * w.bullets[i].vy)
+                w.bullets[i].vx = w.bullets[i].vx * sp / s2
+                w.bullets[i].vy = w.bullets[i].vy * sp / s2
+            }
+        }
+        w.bullets[i].px = w.bullets[i].x
+        w.bullets[i].py = w.bullets[i].y
+        w.bullets[i].x = w.bullets[i].x + w.bullets[i].vx * dt
+        w.bullets[i].y = w.bullets[i].y + w.bullets[i].vy * dt
+
+        var out = false
+        if w.bullets[i].x < 2.0 || w.bullets[i].x > w.w - 2.0 {
+            if w.bullets[i].bounces > 0 {
+                w.bullets[i].bounces = w.bullets[i].bounces - 1
+                w.bullets[i].vx = 0.0 - w.bullets[i].vx
+                w.bullets[i].x = Math.clampF64(w.bullets[i].x, 2.0, w.w - 2.0)
+                gridImpulse(w.grid, w.bullets[i].x, w.bullets[i].y, 90.0, 12.0)
+            } else {
+                out = true
+            }
+        }
+        if w.bullets[i].y < 2.0 || w.bullets[i].y > w.h - 2.0 {
+            if w.bullets[i].bounces > 0 {
+                w.bullets[i].bounces = w.bullets[i].bounces - 1
+                w.bullets[i].vy = 0.0 - w.bullets[i].vy
+                w.bullets[i].y = Math.clampF64(w.bullets[i].y, 2.0, w.h - 2.0)
+                gridImpulse(w.grid, w.bullets[i].x, w.bullets[i].y, 90.0, 12.0)
+            } else {
+                out = true
+            }
+        }
+        if out {
+            gridImpulse(w.grid, w.bullets[i].x, w.bullets[i].y, 70.0, 9.0)
+            w.bullets[i].alive = false
+            continue
+        }
+
+        gridImpulse(w.grid, w.bullets[i].x, w.bullets[i].y, 58.0, 7.0)
+
+        // hash lookup: own cell plus the eight around it
+        let bx = w.bullets[i].x
+        let by = w.bullets[i].y
+        var cx = (bx / CELL) as i64
+        var cy = (by / CELL) as i64
+        for oy in 0 - 1..2 {
+            for ox in 0 - 1..2 {
+                let gx = cx + ox
+                let gy = cy + oy
+                if gx < 0 || gy < 0 || gx >= w.hashCols || gy >= w.hashRows {
+                    continue
+                }
+                var e = w.hashHead[gy * w.hashCols + gx]
+                while e >= 0 {
+                    let nxt = w.hashNext[e]
+                    if w.ents[e].alive && w.bullets[i].alive {
+                        let dx = w.ents[e].x - bx
+                        let dy = w.ents[e].y - by
+                        let rr = w.ents[e].radius + 4.0
+                        if dx * dx + dy * dy < rr * rr {
+                            onBulletHit(w, i, e)
+                        }
+                    }
+                    e = nxt
+                }
+            }
+        }
+    }
+
+    // compact
+    var k: i64 = 0
+    while k < w.bullets.len {
+        if w.bullets[k].alive {
+            k = k + 1
+        } else {
+            let last = w.bullets.len - 1
+            w.bullets[k] = w.bullets[last]
+            let _ = w.bullets.pop()
+        }
+    }
+}
+
+// ── player ────────────────────────────────────────────────────────────────────
+
+fn killPlayer(w: &mut World) {
+    if !w.player.alive || w.player.invuln > 0.0 {
+        return
+    }
+    w.player.alive = false
+    w.hurt = 1.2
+    w.player.lives = w.player.lives - 1
+    w.player.respawn = 1.8
+    w.shake = 34.0
+    w.flash = 0.9
+    w.slowmo = 0.9
+    w.mult = 1
+    burst(w, w.player.x, w.player.y, 300, 760.0, 1.6, 1.6, 1.9, 3.2)
+    gridImpulse(w.grid, w.player.x, w.player.y, 700.0, 300.0)
+    for i in 0..w.ents.len {
+        if w.ents[i].alive && isEnemy(w.ents[i].kind) {
+            let dx = w.ents[i].x - w.player.x
+            let dy = w.ents[i].y - w.player.y
+            if dx * dx + dy * dy < 340.0 * 340.0 {
+                damage(w, i, 20.0, false)
+            }
+        }
+    }
+    if w.player.lives <= 0 {
+        w.gameOver = true
+    }
+}
+
+fn updatePlayer(w: &mut World, dt: f64, mx: f64, my: f64, aim: f64, wantFire: bool) {
+    if !w.player.alive {
+        w.player.respawn = w.player.respawn - dt
+        if w.player.respawn <= 0.0 && !w.gameOver {
+            w.player.alive = true
+            w.player.x = w.w * 0.5
+            w.player.y = w.h * 0.5
+            w.player.vx = 0.0
+            w.player.vy = 0.0
+            w.player.invuln = 3.2
+            gridImpulse(w.grid, w.player.x, w.player.y, 420.0, 120.0)
+        }
+        return
+    }
+    if w.player.invuln > 0.0 {
+        w.player.invuln = w.player.invuln - dt
+    }
+    if w.player.bombFlash > 0.0 {
+        w.player.bombFlash = w.player.bombFlash - dt
+    }
+
+    let accel = 3000.0
+    var dx = mx
+    var dy = my
+    let m = Math.sqrt(dx * dx + dy * dy)
+    if m > 0.0001 {
+        dx = dx / m
+        dy = dy / m
+        w.player.vx = w.player.vx + dx * accel * dt
+        w.player.vy = w.player.vy + dy * accel * dt
+        // thruster
+        let a = Math.atan2(0.0 - dy, 0.0 - dx) + Random.floatRange(0.0 - 0.35, 0.35)
+        w.parts.push(Particle {
+            x: w.player.x - dx * 14.0, y: w.player.y - dy * 14.0,
+            vx: Math.cos(a) * 260.0 + w.player.vx * 0.3, vy: Math.sin(a) * 260.0 + w.player.vy * 0.3,
+            life: 0.32, maxLife: 0.32, drag: 3.0, size: 2.2,
+            cr: 0.5, cg: 1.2, cb: 1.9,
+        }
+        )
+    }
+    let drag = Math.pow(0.0016, dt)
+    w.player.vx = w.player.vx * drag
+    w.player.vy = w.player.vy * drag
+    w.player.x = w.player.x + w.player.vx * dt
+    w.player.y = w.player.y + w.player.vy * dt
+    w.player.x = Math.clampF64(w.player.x, 16.0, w.w - 16.0)
+    w.player.y = Math.clampF64(w.player.y, 16.0, w.h - 16.0)
+    w.player.ang = aim
+
+    gridImpulse(w.grid, w.player.x, w.player.y, 150.0, 0.0 - 34.0)
+
+    if hasPerk(w, Perk.Slowfield) {
+        let reach = 150.0 + 40.0 * (perkCount(w, Perk.Slowfield) as f64)
+        for i in 0..w.ents.len {
+            if w.ents[i].alive && isEnemy(w.ents[i].kind) {
+                let ddx = w.ents[i].x - w.player.x
+                let ddy = w.ents[i].y - w.player.y
+                if ddx * ddx + ddy * ddy < reach * reach {
+                    w.ents[i].slow = 0.35
+                }
+            }
+        }
+    }
+
+    w.player.cooldown = w.player.cooldown - dt
+    if wantFire && w.player.cooldown <= 0.0 {
+        w.player.cooldown = 0.085
+        playerFire(w, aim)
+    }
+
+    // touch: enemies kill, gems collect
+    for i in 0..w.ents.len {
+        if !w.ents[i].alive || w.ents[i].spawnT > 0.0 {
+            continue
+        }
+        let ddx = w.ents[i].x - w.player.x
+        let ddy = w.ents[i].y - w.player.y
+        let rr = w.ents[i].radius + 11.0
+        if ddx * ddx + ddy * ddy < rr * rr {
+            match w.ents[i].kind {
+                Kind.Gem => {
+                    w.mult = Math.minI64(w.mult + 1, 99)
+                    w.multTimer = 9.0
+                    w.score = w.score + 5
+                    burst(w, w.ents[i].x, w.ents[i].y, 8, 200.0, 0.3, 1.7, 0.8, 1.8)
+                    kill(w, i)
+                }
+                Kind.Turret => {
+                }
+                _ => {
+                    killPlayer(w)
+                    return
+                }
+            }
+        }
+    }
+}
+
+// ── particles, arcs ───────────────────────────────────────────────────────────
+
+fn updateParticles(w: &mut World, dt: f64) {
+    var k: i64 = 0
+    while k < w.parts.len {
+        w.parts[k].life = w.parts[k].life - dt
+        if w.parts[k].life <= 0.0 {
+            let last = w.parts.len - 1
+            w.parts[k] = w.parts[last]
+            let _ = w.parts.pop()
+        } else {
+            let d = Math.pow(0.0001, w.parts[k].drag * dt)
+            w.parts[k].vx = w.parts[k].vx * d
+            w.parts[k].vy = w.parts[k].vy * d
+            w.parts[k].x = w.parts[k].x + w.parts[k].vx * dt
+            w.parts[k].y = w.parts[k].y + w.parts[k].vy * dt
+            k = k + 1
+        }
+    }
+    var a: i64 = 0
+    while a < w.arcs.len {
+        w.arcs[a].life = w.arcs[a].life - dt
+        if w.arcs[a].life <= 0.0 {
+            let last = w.arcs.len - 1
+            w.arcs[a] = w.arcs[last]
+            let _ = w.arcs.pop()
+        } else {
+            a = a + 1
+        }
+    }
+}
+
+// ── waves ─────────────────────────────────────────────────────────────────────
+
+pub fn enemiesAlive(w: &World): i64 {
+    var n: i64 = 0
+    for i in 0..w.ents.len {
+        if w.ents[i].alive && isEnemy(w.ents[i].kind) {
+            n = n + 1
+        }
+    }
+    return n
+}
+
+// One new enemy type per wave, in a fixed order, so the roster is learned rather
+// than dumped. `unlocked` is how many kinds this wave may draw from.
+fn unlockedKinds(wave: i64): i64 {
+    if wave <= 1 {
+        return 1
+    }
+    if wave <= 2 {
+        return 2
+    }
+    if wave <= 3 {
+        return 3
+    }
+    if wave <= 4 {
+        return 4
+    }
+    if wave <= 6 {
+        return 5
+    }
+    if wave <= 9 {
+        return 6
+    }
+    return 7
+}
+
+pub fn kindForSlot(slot: i64): Kind {
+    if slot == 0 {
+        return Kind.Seeker
+    }
+    if slot == 1 {
+        return Kind.Wanderer
+    }
+    if slot == 2 {
+        return Kind.Weaver
+    }
+    if slot == 3 {
+        return Kind.Splitter
+    }
+    if slot == 4 {
+        return Kind.SnakeHead
+    }
+    if slot == 5 {
+        return Kind.Healer
+    }
+    return Kind.BlackHole
+}
+
+pub fn kindName(k: Kind): string {
+    match k {
+        Seeker => {
+            return "SEEKER — CHASES YOU"
+        }
+        Wanderer => {
+            return "DRIFTER — IGNORES YOU"
+        }
+        Weaver => {
+            return "WEAVER — STRAFES IN"
+        }
+        Splitter => {
+            return "SPLITTER — BREAKS APART"
+        }
+        SnakeHead => {
+            return "SNAKE — SHOOT THE CHAIN"
+        }
+        SnakeSeg => {
+            return "SNAKE"
+        }
+        Healer => {
+            return "MEDIC — REPAIRS OTHERS"
+        }
+        BlackHole => {
+            return "SINGULARITY — PULLS EVERYTHING"
+        }
+        Sentinel => {
+            return "SENTINEL — BREAK THE PLATES"
+        }
+        Armor => {
+            return "ARMOUR PLATE"
+        }
+        Turret => {
+            return "YOUR TURRET"
+        }
+        Gem => {
+            return "PICKUP"
+        }
+    }
+}
+
+fn spawnForWave(w: &mut World) {
+    let p = randomEdge(w)
+    let wv = w.wave
+    let n = unlockedKinds(wv)
+    // The newest kind is rarer than the staples, so a wave still reads mostly
+    // like the one before it.
+    var slot = Random.range(0, n)
+    if n > 1 && slot == n - 1 && Random.range(0, 3) != 0 {
+        slot = Random.range(0, n - 1)
+    }
+    let k = kindForSlot(slot)
+    match k {
+        SnakeHead => {
+            spawnSnake(w, p.x, p.y, 4 + Math.minI64(wv / 3, 5))
+        }
+        _ => {
+            let _ = spawn(w, makeEnemy(k, p.x, p.y))
+        }
+    }
+}
+
+fn startWave(w: &mut World) {
+    w.wave = w.wave + 1
+    w.banner = 2.2
+    // A kind that becomes available this wave gets named on screen.
+    let before = unlockedKinds(w.wave - 1)
+    let now = unlockedKinds(w.wave)
+    if now > before && w.wave > 1 {
+        w.newKind = kindForSlot(now - 1)
+        w.newKindTimer = 4.0
+    }
+    if w.wave % 8 == 0 {
+        w.pending = 0
+        let p = randomEdge(w)
+        spawnBoss(w, p.x, p.y)
+        w.shake = 12.0
+    } else {
+        // Gentler ramp: the old one reached 34 simultaneous enemies by wave 15,
+        // which is where it stopped being readable.
+        w.pending = 3 + w.wave
+        if w.pending > 18 {
+            w.pending = 18
+        }
+    }
+    w.waveTimer = 0.0
+}
+
+fn updateWaves(w: &mut World, dt: f64) {
+    w.waveTimer = w.waveTimer - dt
+    if w.pending > 0 {
+        if w.waveTimer <= 0.0 {
+            spawnForWave(w)
+            w.pending = w.pending - 1
+            w.waveTimer = Math.maxF64(0.42, 1.15 - (w.wave as f64) * 0.03)
+        }
+        return
+    }
+    if enemiesAlive(w) == 0 && w.waveTimer <= 0.0 {
+        if w.wave > 0 && w.wave % 2 == 0 && w.perks.len < 12 {
+            offerPerks(w)
+        }
+        startWave(w)
+        w.waveTimer = 1.1
+    }
+}
+
+pub fn offerPerks(w: &mut World) {
+    w.perkChoices.clear()
+    var tries: i64 = 0
+    while w.perkChoices.len < 3 && tries < 60 {
+        tries = tries + 1
+        let p = perkFromId(Random.range(0, 9))
+        var dup = false
+        for i in 0..w.perkChoices.len {
+            if perkEq(w.perkChoices[i], p) {
+                dup = true
+            }
+        }
+        if !dup {
+            w.perkChoices.push(p)
+        }
+    }
+    w.perkPick = true
+}
+
+pub fn choosePerk(w: &mut World, idx: i64) {
+    if idx < 0 || idx >= w.perkChoices.len {
+        return
+    }
+    let p = w.perkChoices[idx]
+    w.perks.push(p)
+    w.perkPick = false
+    w.flash = 0.35
+    gridImpulse(w.grid, w.player.x, w.player.y, 500.0, 120.0)
+    // Turrets take effect immediately: two autonomous guns that pick their own
+    // targets and outlive the perk screen.
+    match p {
+        Perk.Turrets => {
+            for i in 0..2 {
+                let a = (i as f64) * 3.14159265 + 0.7
+                var t = makeEnemy(Kind.Turret, w.player.x + Math.cos(a) * 70.0, w.player.y + Math.sin(a) * 70.0)
+                t.hp = 26.0
+                t.maxHp = 26.0
+                let _ = spawn(w, t)
+                w.turretCount = w.turretCount + 1
+            }
+        }
+        _ => {
+        }
+    }
+}
+
+// ── top-level tick ────────────────────────────────────────────────────────────
+
+pub fn worldUpdate(w: &mut World, dtIn: f64, mx: f64, my: f64, aim: f64, fire: bool, bomb: bool) {
+    var dt = dtIn
+    if w.slowmo > 0.0 {
+        w.slowmo = w.slowmo - dtIn
+        dt = dtIn * 0.32
+    }
+    w.time = w.time + dt
+
+    if w.shake > 0.0 {
+        w.shake = w.shake * Math.pow(0.02, dt)
+    }
+    if w.flash > 0.0 {
+        w.flash = w.flash - dt * 2.2
+    }
+    if w.banner > 0.0 {
+        w.banner = w.banner - dt
+    }
+    if w.newKindTimer > 0.0 {
+        w.newKindTimer = w.newKindTimer - dt
+    }
+    if w.hurt > 0.0 {
+        w.hurt = w.hurt - dt
+    }
+    if w.multTimer > 0.0 {
+        w.multTimer = w.multTimer - dt
+        if w.multTimer <= 0.0 && w.mult > 1 {
+            w.mult = w.mult - 1
+            w.multTimer = 3.6
+        }
+    }
+
+    // The perk screen and the game-over screen freeze gameplay but keep the
+    // background alive, so the grid keeps rippling behind the menu.
+    if w.perkPick || w.gameOver {
+        updateParticles(w, dt)
+        gridUpdate(w.grid, dt)
+        return
+    }
+
+    if bomb {
+        detonateBomb(w)
+    }
+
+    rehash(w)
+    updatePlayer(w, dt, mx, my, aim, fire)
+    updateEnts(w, dt)
+    updateBullets(w, dt)
+    updateParticles(w, dt)
+    updateWaves(w, dt)
+    gridUpdate(w.grid, dt)
+}
+
+pub fn worldReset(w: &mut World) {
+    // clear() keeps the storage a run has already grown into, so a restart does
+    // not re-allocate everything from scratch mid-session.
+    w.ents.clear()
+    w.free.clear()
+    w.bullets.clear()
+    w.parts.clear()
+    w.arcs.clear()
+    w.perks.clear()
+    w.perkChoices.clear()
+    w.hashNext.clear()
+    w.player.x = w.w * 0.5
+    w.player.y = w.h * 0.5
+    w.player.vx = 0.0
+    w.player.vy = 0.0
+    w.player.alive = true
+    w.player.lives = 5
+    w.player.bombs = 4
+    w.player.invuln = 3.0
+    w.player.respawn = 0.0
+    w.score = 0
+    w.mult = 1
+    w.multTimer = 0.0
+    w.wave = 0
+    w.waveTimer = 1.2
+    w.pending = 0
+    w.shake = 0.0
+    w.flash = 0.0
+    w.slowmo = 0.0
+    w.gameOver = false
+    w.banner = 0.0
+    w.newKindTimer = 0.0
+    w.hurt = 0.0
+    w.perkPick = false
+    w.turretCount = 0
+    gridReset(w.grid)
+}

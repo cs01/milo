@@ -1,6 +1,7 @@
 // std/io — file and directory I/O with automatic cleanup
 
 from "std/os" import {
+    fflush,
     readFd,
     strerror,
     writeFd
@@ -57,7 +58,14 @@ pub fn ioError(path: &string): IoError {
 }
 
 // Write a string to stdout without appending a newline.
+//
+// `print` goes through stdio's buffer; this goes straight at the fd. Drain the
+// buffer first or the two interleave in the wrong order. fflush on an already-empty
+// buffer is not a syscall, so a program that only ever uses this pays nothing.
 pub fn writeStdout(s: &string): void {
+    unsafe {
+        fflush(0 as *u8)
+    }
     writeFd(1, s, s.len)
 }
 
@@ -286,29 +294,43 @@ impl File {
         // A negative size means lseek couldn't measure this fd — NOT that the read must
         // fail. procfs seq_files (/proc/uptime, /proc/meminfo, /proc/cpuinfo), pipes and
         // char devices all report -1 for SEEK_END, and every one of them reads fine.
-        // Erroring here made `readFile` unable to read any of them. The size is only a
-        // presize hint, so fall back to a page and let the push loop grow as needed.
-        var capacity: i64 = 4096
+        // Those take the growing path below.
+        //
         // Cap the presize: opening a DIRECTORY (or some char devices) and asking
         // lseek(SEEK_END) yields a garbage, near-INT64_MAX "size", and `size + 1`
-        // then overflowed to INT64_MIN — a negative-capacity crash. No real file
-        // is this large; a genuine huge file just falls back to the growing push
-        // loop. 1 GiB is a generous ceiling that also bounds a hostile presize.
+        // then overflowed to INT64_MIN — a negative-capacity crash. 1 GiB is a
+        // generous ceiling that also bounds a hostile presize.
         if size > 0 && size <= 1073741824 {
-            // Presize to the stat'd size (+1 for the NUL) so the push loop never reallocs;
-            // push still grows safely if the file grew between size() and read().
-            capacity = size + 1
             lseek(self.fd, 0, 0)
+            // One malloc, one read per 64 KiB, one memcpy at the end. The previous
+            // version appended the read buffer to a String ONE BYTE AT A TIME, which
+            // cost more than the read syscalls themselves — 33ms of a 47ms grep over
+            // a 67 MB file was this loop, not the I/O.
+            var raw: Vec<u8> = Vec.filled(size, 0)
+            var got: i64 = 0
+            unsafe {
+                let base = raw.ptr() as i64
+                while got < size {
+                    let n = readFd(self.fd, (base + got) as *u8, size - got)
+                    if n <= 0 {
+                        break
+                    }
+                    got = got + n
+                }
+                return Result.Ok(_bytesToString(base as *u8, got))
+            }
         }
-        var result: string = String.withCapacity(capacity)
+
+        // Unmeasurable fd (pipe, procfs, char device): grow as the reads come in.
+        var result: string = ""
         var buf: [u8; 65536] = [0; 65536]
         while true {
             let n = readFd(self.fd, buf, 65536)
             if n <= 0 {
                 break
             }
-            for i in 0..n {
-                result.push(buf[i])
+            unsafe {
+                result.pushStr(_bytesToString(buf[0].addrOf() as *u8, n))
             }
         }
         return Result.Ok(result)
@@ -324,10 +346,12 @@ impl File {
 }
 
 // Write a single byte to stdout.
+//
+// Goes onto the same stdio buffer `print` writes to — one syscall per byte would be
+// absurd for a per-character API, and a raw fd write would also land ahead of any
+// buffered `print` output.
 pub fn putChar(ch: u8): void {
-    var _pcBuf: [u8; 1] = [0; 1]
-    _pcBuf[0] = ch
-    writeFd(1, _pcBuf, 1)
+    _putByte(ch)
 }
 
 // Read a single line from a file descriptor (reads byte-by-byte until newline or EOF).

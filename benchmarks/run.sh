@@ -45,8 +45,16 @@ fi
 $MILO build grep.milo -o grep_milo > /dev/null
 $CC $CFLAGS grep.c -o grep_c
 go build $GOFLAGS -o grep_go grep.go
+$MILO build grep_mmap.milo -o grep_mmap > /dev/null
+# grep.milo/grep.c/grep.go are the same line-at-a-time algorithm, so they measure
+# the language. grep_mmap.milo is the algorithm ripgrep actually uses (mmap the
+# file, memchr for candidates) and is here to measure the ceiling, not the
+# language — ripgrep is doing strictly more work (regex, unicode, binary
+# detection), so this row is "same job, same strategy", not a like-for-like tool
+# comparison.
 hyperfine -N --warmup $WARMUP --runs $RUNS --export-markdown "$DIR/results-grep.md" \
   -n "milo"      "./grep_milo fox $INPUT" \
+  -n "milo mmap" "./grep_mmap fox $INPUT" \
   -n "c"         "./grep_c fox $INPUT" \
   -n "go"        "./grep_go fox $INPUT" \
   -n "sys grep"  "grep -c fox $INPUT"

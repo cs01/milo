@@ -3,7 +3,7 @@ system: memory-safety-vs-rust
 purpose: adversarial retained probes of Milo's safe-language behavior compared with Rust
 key-files: src/checker.ts, src/codegen.ts, std/arena.milo, docs/ownership-model.md
 update-when: a safety check is added/moved between compile-time and runtime, a new threat class is probed, or the overflow default changes
-last-verified: 2026-07-30
+last-verified: 2026-07-31 (finding #2 added: move-out-of-borrow UAF)
 -->
 
 # Memory safety: Milo vs Rust, battle-tested
@@ -11,6 +11,8 @@ last-verified: 2026-07-30
 Memory safety is the whole reason a safe systems language exists, so this doc doesn't argue it — it *probes* selected threats with retained regression fixtures and both-sides receipts. The bar is simple: **no silent undefined behavior in safe code.** A threat is handled if it is caught at compile time or trapped at runtime. `unsafe`, FFI declarations, and manual `unsafe impl Send` / `Sync` are explicit trust boundaries, as they are in Rust.
 
 Result of the retained sweep (2026-07-22): **zero silent-UB misses in the tested safe-language cases.** The sweep did find and fix cross-arena handle confusion, which returned the wrong value without memory UB, and it made manual thread-safety overrides explicitly unsafe. Overflow now traps in every build mode (finding #1, closed).
+
+**That claim is scoped to the probes listed here, and it has since been broken once.** Finding #2 (below) was a real use-after-free in safe code that none of these probes covered — it was found by chasing an unrelated red test, not by the sweep. Read the sweep as "these threat classes are held", never as "safe Milo has no UB left."
 
 ## Threat matrix
 
@@ -81,6 +83,47 @@ fn clamp(x: i32, lo: i32, hi: i32): i32
 - **Was:** `2147483647 + 1` at `i32` wrapped to `-2147483648` under `milo run`, default `build` (-O2), and `--release`; only `--debug` trapped.
 - **Now:** all three trap (`runtime error: integer overflow`), matching design.md's decided default. The checked-arith emission is decoupled from `-O`; `--no-overflow-checks` and `--fast` opt back into wrapping for a perf-critical build, `@wrapping fn` declares it per function.
 - Wrapping was never UB, so this was a policy gap rather than a memory-safety hole — but it was the one row where Milo claimed more than it shipped.
+
+## Finding #2 (closed): a non-Copy field could be moved out of a `&T`
+
+- **Was:** `fn describe(d: &Doc): string { return d.text }` compiled. It shallow-copied the
+  `String` header out of a borrow, so the caller and the real owner both owned the same heap
+  buffer. With a temporary owner — `describe(parse("x"))` — the pointee was freed before the
+  read, and the program printed 19 NUL bytes and was killed; with a live owner it double-freed
+  at scope end. Safe code, no `unsafe`, no FFI.
+- **Why the probes missed it:** the checker already rejected moving a whole `&T` binding
+  (`cannot move the borrowed value out of 'x'`), and the field case was written as a
+  deliberate carve-out — `tryMove`'s FieldAccess arm skipped the move-out marking when the
+  base was a ref, which avoided zeroing the source but let the value escape as owned. The
+  matrix tested the binding, not the field one level down. A nested `d.inner.text` was worse
+  still: the one-level `expr.object.kind === "Ident"` test did not see it at all, so it was
+  marked as a move and zeroed a field *through a shared borrow*.
+- **Now:** both are `cannot move the borrowed value out of '<base>'`, with a hint to `clone()`.
+  `borrowBaseName` walks the whole `a.b.c` / `v[i].f` chain to the root binding.
+  `tests/errors/moveFieldOutOfBorrow.milo` retains it.
+- **The carve-out, and the second bug it hid.** The first fix exempted *closure bodies* in
+  general, on the reasoning that `users.sortByKey((u: &User) => u.name)` is the documented way
+  to sort by a string field and is sound because the sort reads the key without dropping it.
+  That reasoning was empirical, and it was wrong for `map`, which **retains** what its closure
+  returns: `users.map((u: &User) => u.name)` compiled, built a `Vec<string>` aliasing the
+  source elements' buffers, and double-freed on drop — a live abort (exit 133), reachable from
+  a one-line idiom. The exemption is now keyed to `sortByKey` alone and is **fail-closed**: a
+  new combinator is subject to the rule until someone proves it does not retain the value.
+  `tests/errors/mapMoveFieldOutOfBorrow.milo` pins it.
+- **A second lesson, about the fix rather than the bug.** The exemption's first form did not
+  just fail to error — it fell through to the ordinary move path, marking the field moved, so
+  codegen *zeroed the source field inside the container being sorted*. Every name came back
+  empty, silently, with the sort still reporting success and the whole suite green, because no
+  fixture covered a string key. `tests/fixtures/sortByKeyString.milo` covers it now. Not
+  erroring and not move-marking are two separate obligations here, and only one of them is
+  visible in the diagnostic.
+- **What is still open:** a closure that returns a borrowed field to a *user-defined* higher
+  order function is now rejected along with `map`, so the known hole is closed — but the
+  soundness of `sortByKey` rests on reading `codegen-vec.ts`, not on anything the type system
+  enforces. Making the key extractor's contract explicit (a borrow-returning closure type) is
+  the real fix, and it is blocked on second-class refs banning `&T` returns.
+- Found while chasing an unrelated failing test (`tests/mangle.test.ts`, red on main for this
+  reason), which is the honest lesson: the red test was the signal, not the sweep.
 
 ## How to extend this battle-test
 

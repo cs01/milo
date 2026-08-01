@@ -71,7 +71,8 @@ async function mapPool<T>(items: T[], limit: number, fn: (item: T) => Promise<vo
 // Keep workers × guard cap below half of RAM (CLAUDE.md). Large CI/dev hosts can
 // report 72+ cores; subtracting two would launch enough clang processes to trip
 // the global guard and return empty, signal-killed build results.
-const COMPILE_JOBS = Math.min(8, Math.max(2, (navigator.hardwareConcurrency ?? 8) - 2));
+const COMPILE_JOBS = Number(process.env.MILO_TEST_JOBS)
+  || Math.min(8, Math.max(2, (navigator.hardwareConcurrency ?? 8) - 2));
 
 const binaries: string[] = [];
 afterAll(() => {

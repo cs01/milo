@@ -3,7 +3,7 @@ system: planning
 purpose: canonical status — what shipped, what is in flight, what is planned, what was retired
 key-files: docs/backlog.md (ROI ordering over the open items), docs/safety-roadmap.md, docs/self-hosting.md, docs/verification-roadmap.md
 update-when: a feature ships, a track is abandoned, or a new track opens
-last-verified: 2026-07-30 (stdlib planning track reconciled; prior full audit 2026-07-24)
+last-verified: 2026-07-31 (probe audit of the open language/stdlib gaps; counts, examples and the slice entry refreshed)
 -->
 
 # Milo Roadmap
@@ -70,7 +70,7 @@ Green-tier concurrency with one OS-thread escape hatch:
 - **No async/await** — blocking-shaped code yields automatically in green context
 - Public `Thread`/`Mutex`/`RwLock`/`parallel` were **removed** 2026-07-10 (green tier only — see [concurrency-simplification.md](concurrency-simplification.md))
 
-### Standard Library (69 modules)
+### Standard Library (70 modules)
 
 I/O & system: `io`, `fs`, `path`, `env`, `environ`, `args`, `process`, `signal`, `dl`, `sysinfo`, `mem`, `os`, `platform`, `term`, `pty`, `keys`, `ansi`
 Networking: `net` (TCP + DNS), `unix` (AF_UNIX), `fetch` (HTTPS client + TLS), `http`, `httpmw`, `ws`, `url`
@@ -90,7 +90,7 @@ Time: `time`, `datetime`, `uuid`
 Testing: `testing`
 Prelude: `prelude`
 
-(88 files — several modules are platform splits.) Discover signatures with `milo api <terms>`; dump a module with `milo api --module std/<name>`.
+(89 files — several modules are platform splits.) Discover signatures with `milo api <terms>`; dump a module with `milo api --module std/<name>`.
 
 TLS clients verify certificates (`SSL_VERIFY_PEER` + hostname binding); JSON parsing is RFC 8259-strict with a lenient `jsonParseJsonc` and a `jsonPull` streaming tokenizer.
 
@@ -123,11 +123,11 @@ Reproduce: `sh scripts/selfhost.sh` (builds stage1 via the oracle — required; 
 - **Formatter**: `milo fmt` — written in Milo (`fmt.milo` is the only implementation)
 - **Package manager**: `milo init/new/add/remove/install/update/tree/why/vendor/publish` plus `tool install/uninstall/list/run`, git-based cache with a lockfile, GitHub repos as the registry, per-package name mangling. Folded into the one `milo` binary. First published package: [milo-language/yaml](https://github.com/milo-language/milo-yaml). See [plans/package-manager.md](plans/package-manager.md)
 - **Docs from source**: `milo doc <file|dir>` generates reference markdown from doc-comments; `milo api <terms>` searches std signatures
-- **Test framework**: `@expect:`/`@error:` annotations, `milo test` runner — 441 fixtures, 120 error fixtures, 10 prove fixtures
+- **Test framework**: `@expect:`/`@error:` annotations, `milo test` runner — 494 fixtures, 167 error fixtures, 26 prove fixtures
 - **Benchmarks**: `benchmarks/run.sh` with per-benchmark `results-*.md` (fib, binarytrees, grep, json, matmul, maplookup)
 - **JS target**: `milo emit-js` — the playground on the docs site runs the compiler output in-browser
 - **CI**: build + test on push/PR across macOS, Linux and Windows; release pipeline with `--static-deps` static linking (built on ubuntu-22.04 runners for glibc compatibility, never musl)
-- **Examples**: `basics/` (9), `cli-tools/` (13), `net/` (4), `graphics/` (6), `simulation/` (3), `terminal/` (6), `embedded/` (2), `tools/java-dap`. Treated as integration smoke tests for stdlib changes
+- **Examples**: `basics/` (9), `cli-tools/` (13), `net/` (7), `graphics/` (6), `games/` (4), `simulation/` (4), `terminal/` (6), `embedded/` (4), `tools/java-dap`. Treated as integration smoke tests for stdlib changes
 - **Debugging**: `-g` emits DWARF that composes with any `-O`; the DAP debugger lives in [milo-language/dapweb](https://github.com/milo-language/dapweb)
 
 ---
@@ -159,11 +159,11 @@ Reproduce: `sh scripts/selfhost.sh` (builds stage1 via the oracle — required; 
 ### Language
 
 - [x] **`@pure`** — a function may read and write only its parameters and its own locals: no I/O, no module state, no raw memory, no impure callee. Works on fns, methods, generics, and (as an unchecked assertion) on `extern`. `std/math` is annotated throughout. The prover uses it for framing — a `@pure` call with no `&mut` parameter needs no havoc — which turns refutations into proofs (`tests/prove/pureMethodNoHavoc.milo`). Design and the unbuilt capability stage: [effects-and-capabilities.md](effects-and-capabilities.md)
-- [ ] **`splitMut` — N disjoint mutable windows** — `&mut [T]` param views ship, and overlapping literal ranges at one call site are rejected; what's missing is handing N workers N windows in one call, and disjointness for *dynamic* ranges. Range disjointness is linear scalar arithmetic, which `milo prove` already discharges — so it should need no `unsafe` (backlog Tier 2 #9)
+- [ ] **Dynamic `splitMut`** — `&mut [T]` param views and *literal-range* disjoint windows shipped (`two(v[0..2], v[2..4])` works; an overlapping pair is rejected). What remains is the runtime-`n` split, which second-class refs can't return as a tuple and so wants a callback form plus prover-discharged disjointness (backlog Tier 2 #9)
 - [ ] **Borrowed byte views** — `Buffer`/`ArrayBuffer`-shaped interop and zero-copy protocol parsing; gates the zero-copy form of the JSON byte-feed
 - [ ] **Named enum-variant fields** — `ForEach { varName: string, … }` instead of an 8-slot positional payload. Greenlit as a language feature; hits the self-hosted compiler hardest. Parser + checker + formatter + LSP
 - [ ] **Tuple binding in for-in** — `for (i, x) in vec.enumerate()`; converts most `while i < len()` loops. match already destructures tuples
-- [ ] **Iterator breadth** — `map`/`filter`/`each`/`enumerate`/`find`/`any`/`all` ship on `Vec`; missing `fold`/`reduce`/`sum`/`take`/`skip`/`zip`, and the combinators are gated on `Vec` so arrays/maps/user types are excluded. Lazy/fusing adapters are deliberately out
+- [ ] **Iterator breadth** — `map`/`filter`/`each`/`enumerate`/`find`/`any`/`all`/`sum` ship on `Vec`; missing `fold`/`reduce`/`take`/`skip`/`zip`, and the combinators are gated on `Vec` so arrays/maps/user types are excluded. Lazy/fusing adapters are deliberately out
 - [ ] **`Heap<Interface>`** — heterogeneous collections (`Vec<Heap<Shape>>`)
 - [ ] **Error boxing** — the `?` half of error conversion shipped; `anyhow`-style boxing wants `Heap<Interface>`
 - [ ] **Ranged integers L3** — branch narrowing: after `if x < 50`, `x` is `(min..49)` in the then-branch
@@ -194,6 +194,7 @@ Phases 1–3a are done (see Type System & Safety). Remaining, from [safety-roadm
 - [ ] **3b — purity inference** for safe overlap at call sites
 - [ ] **4a — debug ref counting** for patterns static analysis can't reach (`--sanitize` already links ASAN)
 - [ ] **`unsafe fn` declarations** and `--deny-unsafe` for user code; `unsafe` visibility in the LSP
+- [ ] **Indirect closure escape** — a closure stored into a struct/Vec that is then returned still dangles into the dead frame (audit C3's open tail; the direct-return forms are auto-promoted to `move`). Decided fix is a conservative reject, replacing the silent promotion (backlog Tier 1 #4)
 
 ---
 

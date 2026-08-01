@@ -6,6 +6,13 @@ import { genVecSort, genVecSortBy, genVecSortByKey } from "./codegen-vec";
 import { classifyArg, classifyRet, AbiError, type ArgClass, type RetClass, type AbiStruct, type AbiLeaf } from "./abi";
 import { resolve, dirname, basename } from "path";
 
+// `.` can't appear in a Milo identifier, so this never collides with a user function.
+const GLOBAL_INIT_FN = "__milo.global_init";
+
+// Scratch size for one formatted f64. Worst case at 17 significant digits is
+// "-1.2345678901234567e-308" — 24 bytes plus the NUL.
+const F64_BUF = 32;
+
 interface ExternAbiInfo {
   args: (ArgClass | null)[]; // per fixed param; null = direct (scalar/ptr/ref — no rewrite)
   ret: RetClass;
@@ -59,6 +66,7 @@ export class Codegen {
   private enumLayouts = new Map<string, EnumLayout>();
   private userDeclaredFns = new Set<string>();
   private needsBoundsCheck = false;
+  private needsGlobalInit = false;
   private needsOverflowCheck = false;
   private needsRangeCheck = false;
   private needsContractCheck = false;
@@ -75,6 +83,8 @@ export class Codegen {
   private needsFflush = false;
   private needsWrite = false;
   private needsPutchar = false;
+  private needsFwrite = false;
+  private needsIob = false;
   private needsExit = false;
   private needsMalloc = false;
   private needsFree = false;
@@ -89,6 +99,34 @@ export class Codegen {
   private loopHeader: string | null = null;
   private loopExit: string | null = null;
   private loopDropStart: number = 0;
+
+  // Bounds-check elision, narrow and provable.
+  //
+  // `for i in 0..v.len { ... v[i] ... }` cannot go out of range: the loop bound IS
+  // the length being checked against. Recording those (loop variable, container)
+  // pairs lets the subscript skip its check — the ONLY way this is unsound is if
+  // the container's length changes inside the loop, which `loopBodyMutates` below
+  // rejects conservatively.
+  //
+  // This is deliberately not a range analysis. It fires on the exact shape above
+  // and nothing else — an index of `i + 1`, a bound that merely happens to equal
+  // the length, or a container reached through anything but a name or one field
+  // hop all keep their check. Widening it to affine indices is docs/plans/
+  // bounds-check-elision.md, and wants a range lattice rather than a pattern.
+  private provenInRange: { loopVar: string; container: string }[] = [];
+
+  // Loop-invariant lengths, hoisted into the preheader.
+  //
+  // Every subscript reloads the container's length to check against. LLVM cannot
+  // hoist that load out of a loop on its own: a store to `v[i]` and a load of
+  // `v.len` are both reached through plain `ptr`s with no type information, so it
+  // has to assume the store might have clobbered the length. Nothing in safe Milo
+  // can — a length only moves through push/pop/clear or a whole-container
+  // assignment, all of which `loopBodyMutates` rejects. So when the body cannot
+  // resize a container, the length is loaded ONCE before the loop and every check
+  // inside compares against that value. The check still happens; it just stops
+  // paying for a memory round trip per element.
+  private hoistedLens: Map<string, string>[] = [];
   private globalVars = new Map<string, { type: string; typeKind: TypeKind }>();
   private userFnNames = new Set<string>();
   // Droppable locals are identified by their slot ADDRESS. A function can hold
@@ -100,13 +138,18 @@ export class Codegen {
   private structDropCache = new Map<string, boolean>();
   private generatedDropHelpers = new Set<string>();
   private generatedJsonEscapeHelper = false;
+  private generatedF64FormatHelper = false;
+  private generatedF32FormatHelper = false;
+  private needsStrtof = false;
   private generatedStructDropHelpers = new Set<string>();
   private dropHelperBodies: string[][] = [];
+  private helperFnBodies: string[][] = [];
+  private emittedStrFind = false;
   private closureBodies: string[][] = [];
   private closureCounter = 0;
   public scopeCounter = 0;
   public entryAllocas: string[] = [];
-  private static BUILTINS = new Set(["print", "eprint", "format", "flush", "exit", "assert", "max", "min", "_miloArgCount", "_miloArgAt", "_cstrToString", "_strDataPtr", "_loadU8", "_loadI32", "_callClosureVoid", "_atomicLoadI64", "_atomicStoreI64", "_atomicAddI64", "_atomicSubI64", "_atomicCasI64", "_atomicLoadBool", "_atomicStoreBool", "_atomicSwapBool", "_schedulerGet", "_schedulerSet"]);
+  private static BUILTINS = new Set(["print", "eprint", "format", "flush", "exit", "assert", "max", "min", "_miloArgCount", "_miloArgAt", "_cstrToString", "_bytesToString", "_strDataPtr", "_putByte", "_loadU8", "_loadI32", "_callClosureVoid", "_atomicLoadI64", "_atomicStoreI64", "_atomicAddI64", "_atomicSubI64", "_atomicCasI64", "_atomicLoadBool", "_atomicStoreBool", "_atomicSwapBool", "_schedulerGet", "_schedulerSet"]);
   private needsArgGlobals = false;
   private usesSchedulerGlobal = false;
   private currentFnName = "";
@@ -177,6 +220,32 @@ export class Codegen {
     lines.push(`  ${n32} = trunc i64 ${lenVal} to i32`);
     lines.push(`  call i32 @_write(i32 ${fd}, ptr ${dataPtr}, i32 ${n32})`);
   }
+
+  // Byte-exact write of a Milo string to stdout, through stdio's own buffer.
+  //
+  // print() used to fflush + write(2) per call, which is two syscalls per line — on a
+  // piped stdout that dominated any loop that prints. fwrite is length-counted, so it
+  // is just as NUL-correct as write(), and because it shares stdout's buffer with
+  // printf there is nothing left to order by hand: the fflush goes away with it.
+  // Buffering matches C's: line-buffered on a TTY, block-buffered on a pipe, and
+  // drained by exit() (and by the explicit fflush in panicAbort).
+  //
+  // Getting at stdout is the only non-portable part — it is a data symbol whose name
+  // differs per libc, and a function call on MSVC.
+  private emitStdoutWrite(lines: string[], dataPtr: string, lenVal: string): void {
+    this.needsFwrite = true;
+    const handle = this.nextTemp();
+    if (this.isWindows) {
+      this.needsIob = true;
+      lines.push(`  ${handle} = call ptr @__acrt_iob_func(i32 1)`);
+    } else {
+      lines.push(`  ${handle} = load ptr, ptr @${this.stdoutSymbol}`);
+    }
+    lines.push(`  call i64 @fwrite(ptr ${dataPtr}, i64 1, i64 ${lenVal}, ptr ${handle})`);
+  }
+
+  // Apple's libc exposes stdout as `__stdoutp`; glibc/musl as `stdout`.
+  private get stdoutSymbol(): string { return this.target.os === "darwin" ? "__stdoutp" : "stdout"; }
 
   // dprintf(fd, fmt, ...) has no UCRT equivalent. stderr is not a linkable data symbol
   // on MSVC either — it is the macro `__acrt_iob_func(2)` — so eprint lowers to an
@@ -501,6 +570,11 @@ export class Codegen {
         // %Vec — the same value the slice expression already produces. (Other `&T` stay
         // pointer-passed.)
         if (t.inner.tag === "array" && t.inner.size === null) { this.hasVecType = true; return "%Vec"; }
+        // A returned `&string` is the same non-owning fat pointer a slice expression
+        // already produces (data + len, no ownership), so it travels by value as
+        // %String. Params are unaffected: the isRef path passes a pointer to the
+        // pointee and never asks for the lowering of the ref type itself.
+        if (t.inner.tag === "string") { this.hasStringType = true; return "%String"; }
         return "ptr";
       case "interface": return "{ ptr, ptr }";
       case "struct": return `%${t.name}`;
@@ -1142,9 +1216,29 @@ export class Codegen {
       this.globalVars.set(g.name, { type: ty, typeKind: g.type });
     }
 
+    // A global whose initializer needs to run code (an arena, a populated Vec) is emitted
+    // zeroed and filled in by a generated routine that main calls before its own body.
+    // Evaluation is declaration order, and the resolver puts imported modules ahead of the
+    // importer, so a global may read anything declared above it and nothing below.
+    const runtimeInitGlobals = module.globals.filter(g => !this.isFullyConstInit(g));
+    this.needsGlobalInit = runtimeInitGlobals.length > 0;
+    const initFn: HIRFunction | null = runtimeInitGlobals.length === 0 ? null : {
+      name: GLOBAL_INIT_FN,
+      params: [],
+      retType: { tag: "void" },
+      body: runtimeInitGlobals.map(g => ({
+        kind: "Assign" as const,
+        target: { kind: "Ident" as const, name: g.name, type: g.type },
+        value: g.value,
+      })),
+      isExtern: false,
+      isVariadic: false,
+    };
+
     // generate function bodies first (collects string constants, sets needsBoundsCheck)
     const fnBodies: string[][] = [];
     for (const fn of functions) fnBodies.push(this.genFunction(fn));
+    if (initFn) fnBodies.push(this.genFunction(initFn));
 
     // auto-declare C functions needed by built-ins and bounds checks
     const declaredExterns = new Set(externs.map(e => e.name));
@@ -1154,6 +1248,8 @@ export class Codegen {
       this.output.splice(1, 0, "declare i32 @snprintf(ptr, i64, ptr, ...)");
     if (this.needsStrtod && !declaredExterns.has("strtod"))
       this.output.splice(1, 0, "declare double @strtod(ptr, ptr)");
+    if (this.needsStrtof && !declaredExterns.has("strtof"))
+      this.output.splice(1, 0, "declare float @strtof(ptr, ptr)");
     if (this.needsMemset && !declaredExterns.has("memset"))
       this.output.splice(1, 0, "declare ptr @memset(ptr, i32, i64)");
     if (this.needsMemsetIntrinsic)
@@ -1199,12 +1295,23 @@ export class Codegen {
         : `declare i64 @write(i32, ptr, i64)`);
     if (this.needsDprintf && !declaredExterns.has("dprintf")) {
       if (this.isWindows) {
-        this.output.splice(1, 0, `declare ptr @__acrt_iob_func(i32)`);
+        this.needsIob = true;
         this.output.splice(1, 0, `declare i32 @fprintf(ptr, ptr, ...)`);
       } else {
         this.output.splice(1, 0, `declare i32 @dprintf(i32, ptr, ...)`);
       }
     }
+    if (this.needsFwrite && !declaredExterns.has("fwrite"))
+      this.output.splice(1, 0, `declare i64 @fwrite(ptr, i64, i64, ptr)`);
+    // The stdout data symbol is ours regardless of who declared fwrite. Nesting
+    // it under that guard meant a program declaring its own `extern fn fwrite`
+    // — writing a file, say — got print's `load ptr @__stdoutp` with nothing
+    // declaring @__stdoutp, and failed to link.
+    if (this.needsFwrite && !this.isWindows && !declaredExterns.has(this.stdoutSymbol))
+      this.output.splice(1, 0, `@${this.stdoutSymbol} = external global ptr`);
+    // Both eprint and print-to-stdout need it on MSVC; declaring it twice is an LLVM error.
+    if (this.needsIob && !declaredExterns.has("__acrt_iob_func"))
+      this.output.splice(1, 0, `declare ptr @__acrt_iob_func(i32)`);
     if (this.needsPrintf && !declaredExterns.has("printf"))
       this.output.splice(1, 0, `declare i32 @printf(ptr, ...)`);
     if (this.usedDbgDeclare)
@@ -1322,8 +1429,23 @@ export class Codegen {
       for (const line of body) this.emit(line);
     }
 
+    if (this.needsBoundsCheck) {
+      this.emit("");
+      for (const line of this.boundsFailHelper()) this.emit(line);
+    }
+    if (this.needsOverflowCheck) {
+      this.emit("");
+      for (const line of this.overflowFailHelper()) this.emit(line);
+    }
+
     // append drop helper functions
     for (const body of this.dropHelperBodies) {
+      this.emit("");
+      for (const line of body) this.emit(line);
+    }
+
+    // append shared runtime helpers (substring search, ...)
+    for (const body of this.helperFnBodies) {
       this.emit("");
       for (const line of body) this.emit(line);
     }
@@ -1438,6 +1560,8 @@ export class Codegen {
     if (fn.name === "main") {
       lines.push("  store i32 %_milo_argc, ptr @_milo_argc_global");
       lines.push("  store ptr %_milo_argv, ptr @_milo_argv_global");
+      // after argc/argv: a global initializer may read them (argparse-style defaults)
+      if (this.needsGlobalInit) lines.push(`  call void @${GLOBAL_INIT_FN}()`);
     }
 
     const paramSpillStart = lines.length;
@@ -1605,8 +1729,12 @@ export class Codegen {
         // Alive flag is allocated up front so the loop's overwrite-drop below can
         // be guarded by it.
         const declAliveFlag = `${addrName}.alive`;
+        // A borrowed index is a shallow view of data someone else owns — EXCEPT
+        // when the element needs drop, where the IndexAccess path clones it. The
+        // clone has no other owner, so excluding it from drop glue leaked the copy
+        // on every iteration (this is what made `v.join(sep)` leak).
         const declDroppable = !isRefLocal && this.needsDropCg(stmt.type) &&
-          !(stmt.value.kind === "IndexAccess" && stmt.value.isBorrowed);
+          !(stmt.value.kind === "IndexAccess" && stmt.value.isBorrowed && !this.indexAccessClones(stmt.value));
         if (declDroppable) {
           this.entryAllocas.push(`  ${declAliveFlag} = alloca i1`);
           this.entryAllocas.push(`  store i1 0, ptr ${declAliveFlag}`);
@@ -1656,6 +1784,11 @@ export class Codegen {
           const [tgtLines, tgtPtr] = this.genLValue(stmt.target);
           lines.push(...tgtLines);
           this.emitStringAppendInPlace(lines, tgtPtr, rhsVal);
+          // The append copies the bytes out of the rhs; an rhs that was a
+          // temporary (a call result, or the clone `v[i]` produces) has no owner
+          // afterwards. The generic concat path drops its operands — this fast
+          // path has to as well, or `r = r + v[i]` leaks a copy per iteration.
+          this.dropOwnedTemp(lines, rhsVal, "%String", stmt.value.right);
           return [lines, false];
         }
         const assignLlTy = this.llvmType(stmt.target.type);
@@ -1780,6 +1913,8 @@ export class Codegen {
         return this.genForEach(stmt);
       case "ForIterator":
         return this.genForIterator(stmt);
+      case "ForStrView":
+        return this.genForStrView(stmt);
     }
   }
 
@@ -1883,6 +2018,13 @@ export class Codegen {
     return [lines, "null", "i32"];
   }
 
+  // The failure path is ONE out-of-line `cold noreturn` call, not the printf +
+  // fflush + abort sequence spelled out at every subscript. Inline, those three
+  // calls appear once per access — the flyby rasteriser's pixel loop carried 24 of
+  // each — and a call in a loop body is something LLVM's vectoriser refuses to
+  // look past ("call instruction cannot be vectorized"), quite apart from what it
+  // does to inlining budgets and I-cache. `cold` also tells LLVM which way the
+  // branch goes, so the check falls through in the common case.
   private emitBoundsCheck(lines: string[], idx: string, size: string) {
     this.needsBoundsCheck = true;
     const cmpTmp = this.nextTemp();
@@ -1892,12 +2034,261 @@ export class Codegen {
     lines.push(`  ${cmpTmp} = icmp ult i32 ${idx}, ${size}`);
     lines.push(`  br i1 ${cmpTmp}, label %${okLabel}, label %${failLabel}`);
     lines.push(`${failLabel}:`);
-    const fmtPtr = this.nextTemp();
-    lines.push(`  ${fmtPtr} = getelementptr [40 x i8], ptr @.bounds_err, i32 0, i32 0`);
-    lines.push(`  call i32 (ptr, ...) @printf(ptr ${fmtPtr}, i32 ${idx}, i32 ${size})`);
-    this.panicAbort(lines);
+    lines.push(`  call void @__milo_bounds_fail(i32 ${idx}, i32 ${size})`);
     lines.push(`  unreachable`);
     lines.push(`${okLabel}:`);
+  }
+
+  private overflowFailHelper(): string[] {
+    const lines: string[] = [];
+    lines.push(`define internal void @__milo_overflow_fail(ptr %file, i32 %line) noreturn cold noinline {`);
+    lines.push(`entry.bb:`);
+    lines.push(`  %fmt = getelementptr [46 x i8], ptr @.overflow_err, i32 0, i32 0`);
+    lines.push(`  call i32 (ptr, ...) @printf(ptr %fmt, ptr %file, i32 %line)`);
+    this.panicAbort(lines);
+    lines.push(`  unreachable`);
+    lines.push(`}`);
+    return lines;
+  }
+
+  // Collect the containers a loop body subscripts, keyed by the shallow path name.
+  private indexedContainers(body: HIRStmt[]): Map<string, HIRExpr> {
+    const found = new Map<string, HIRExpr>();
+    const visitExpr = (e: HIRExpr) => {
+      this.walkExpr(e, (x) => {
+        if (x.kind !== "IndexAccess") return;
+        const vecType = x.object.type.tag === "ref" ? x.object.type.inner : x.object.type;
+        if (vecType.tag !== "vec") return;
+        const key = this.containerKey(x.object);
+        if (key !== null && !found.has(key)) found.set(key, x.object);
+      });
+    };
+    const walk = (stmts: HIRStmt[]) => {
+      for (const st of stmts) {
+        switch (st.kind) {
+          case "Let": visitExpr(st.value); break;
+          case "Assign": visitExpr(st.target); visitExpr(st.value); break;
+          case "ExprStmt": visitExpr(st.expr); break;
+          case "Return": if (st.value) visitExpr(st.value); break;
+          case "If": visitExpr(st.cond); walk(st.thenBody); if (st.elseBody) walk(st.elseBody); break;
+          case "While": visitExpr(st.cond); walk(st.body); break;
+          case "ForRange": visitExpr(st.start); visitExpr(st.end); walk(st.body); break;
+          case "UnsafeBlock": walk(st.body); break;
+          case "Match": visitExpr(st.subject); for (const arm of st.arms) walk(arm.body); break;
+          default: break;
+        }
+      }
+    };
+    walk(body);
+    return found;
+  }
+
+  // Emit the once-per-loop length loads. Returns true if a scope was pushed.
+  private pushHoistedLens(lines: string[], body: HIRStmt[]): boolean {
+    const scope = new Map<string, string>();
+    for (const [key, objExpr] of this.indexedContainers(body)) {
+      const root = this.rootOf(key);
+      // must already exist outside the loop, and must not be resizable inside it
+      if (!this.locals.has(root) && !this.globalVars.has(root)) continue;
+      if (this.globalVars.has(root)) continue;
+      if (this.loopBodyMutates(body, key)) continue;
+      try {
+        const [ptrLines, vecPtr] = this.genLValue(objExpr);
+        const lenPtr = this.nextTemp();
+        const len = this.nextTemp();
+        const len32 = this.nextTemp();
+        lines.push(...ptrLines);
+        lines.push(`  ${lenPtr} = getelementptr %Vec, ptr ${vecPtr}, i32 0, i32 1`);
+        lines.push(`  ${len} = load i64, ptr ${lenPtr}`);
+        lines.push(`  ${len32} = trunc i64 ${len} to i32`);
+        scope.set(key, len32);
+      } catch {
+        // an object shape genLValue cannot address: skip it, keep the per-access load
+      }
+    }
+    if (scope.size === 0) return false;
+    this.hoistedLens.push(scope);
+    return true;
+  }
+
+  private hoistedLenFor(expr: HIRExpr): string | null {
+    const key = this.containerKey(expr);
+    if (key === null) return null;
+    for (let i = this.hoistedLens.length - 1; i >= 0; i--) {
+      const v = this.hoistedLens[i].get(key);
+      if (v !== undefined) return v;
+    }
+    return null;
+  }
+
+  // Returns true (and pushes a scope) when this loop proves its index in range.
+  private pushProvenInRange(stmt: HIRStmt & { kind: "ForRange" }): boolean {
+    if (!(stmt.start.kind === "IntLit" && Number(stmt.start.value) === 0)) return false;
+    if (stmt.end.kind !== "VecLen") return false;
+    const key = this.containerKey(stmt.end.object);
+    if (key === null) return false;
+    // A global could be resized by any callee; only locals and params qualify.
+    if (this.globalVars.has(this.rootOf(key))) return false;
+    if (this.loopBodyMutates(stmt.body, key)) return false;
+    this.provenInRange.push({ loopVar: stmt.varName, container: key });
+    return true;
+  }
+
+  // A stable name for the container a subscript reads, or null if it is reached
+  // by anything more complicated than a local or one field hop (`v`, `self.px`).
+  // Deliberately shallow: two spellings must never collide, and a longer path is
+  // more chances for something in between to be reassigned.
+  private containerKey(e: HIRExpr): string | null {
+    if (e.kind === "Ident") return e.name;
+    if (e.kind === "FieldAccess" && e.object.kind === "Ident") return `${e.object.name}.${e.field}`;
+    return null;
+  }
+
+  private rootOf(key: string): string {
+    const dot = key.indexOf(".");
+    return dot < 0 ? key : key.slice(0, dot);
+  }
+
+  // Could anything in `body` change the length of the container named by `key`?
+  // Answers "maybe" for everything it does not positively understand — a wrong
+  // "no" here is an out-of-bounds write, so the bar is proof, not likelihood.
+  private loopBodyMutates(body: HIRStmt[], key: string): boolean {
+    const root = this.rootOf(key);
+    let mutates = false;
+
+    // Any function that can see the root can resize through it, and a HIR call
+    // does not record which parameters are `&mut`. Passing the root anywhere at
+    // all — as an argument, as a receiver, inside a bigger expression — ends the
+    // analysis.
+    const mentionsRoot = (e: HIRExpr): boolean => {
+      let found = false;
+      this.walkExpr(e, (x) => {
+        if (x.kind === "Ident" && x.name === root) found = true;
+      });
+      return found;
+    };
+
+    const checkExpr = (e: HIRExpr) => {
+      this.walkExpr(e, (x) => {
+        if (mutates) return;
+        switch (x.kind) {
+          case "VecPush":
+            if (mentionsRoot(x.vec)) mutates = true;
+            break;
+          case "VecPop":
+            if (mentionsRoot(x.vec)) mutates = true;
+            break;
+          case "Call":
+            if (x.args.some(a => mentionsRoot(a.expr))) mutates = true;
+            break;
+          case "CFnCall":
+            mutates = true; // opaque to us, and it can hold a raw pointer
+            break;
+          case "Closure":
+          case "MatchExpr":
+            // A closure's captures and a match arm's body are statement lists this
+            // walk does not descend into. Assume the worst.
+            mutates = true;
+            break;
+          default:
+            break;
+        }
+      });
+    };
+
+    const walkStmts = (stmts: HIRStmt[]) => {
+      for (const s of stmts) {
+        if (mutates) return;
+        switch (s.kind) {
+          case "Assign": {
+            // Reassigning the container itself, or anything on its path, swaps the
+            // buffer out from under the loop.
+            const t = this.containerKey(s.target);
+            if (t !== null && (t === key || t === root || this.rootOf(t) === root)) mutates = true;
+            checkExpr(s.target);
+            checkExpr(s.value);
+            break;
+          }
+          case "ExprStmt":
+            checkExpr(s.expr);
+            break;
+          case "Let":
+            checkExpr(s.value);
+            break;
+          case "Return":
+            if (s.value) checkExpr(s.value);
+            break;
+          case "If":
+            checkExpr(s.cond);
+            walkStmts(s.thenBody);
+            if (s.elseBody) walkStmts(s.elseBody);
+            break;
+          case "While":
+            checkExpr(s.cond);
+            walkStmts(s.body);
+            break;
+          case "ForRange":
+            checkExpr(s.start);
+            checkExpr(s.end);
+            walkStmts(s.body);
+            break;
+          case "UnsafeBlock":
+            walkStmts(s.body);
+            break;
+          case "Match":
+            checkExpr(s.subject);
+            for (const arm of s.arms) walkStmts(arm.body);
+            break;
+          case "Break":
+          case "Continue":
+            break;
+          default:
+            // Anything not understood (match arms, iterator loops, defer, …) is
+            // assumed to mutate. Elision is an optimisation; giving up is free.
+            mutates = true;
+            break;
+        }
+        if (mutates) return;
+      }
+    };
+
+    walkStmts(body);
+    return mutates;
+  }
+
+  // Shallow generic walk over an expression's sub-expressions.
+  private walkExpr(e: HIRExpr, visit: (x: HIRExpr) => void): void {
+    visit(e);
+    const anyE = e as unknown as Record<string, unknown>;
+    for (const k of Object.keys(anyE)) {
+      const v = anyE[k];
+      if (Array.isArray(v)) {
+        for (const item of v) {
+          if (item && typeof item === "object") {
+            const cand = ("value" in item && item.value && typeof item.value === "object" && "kind" in item.value)
+              ? item.value as HIRExpr : item as HIRExpr;
+            if ("kind" in cand) this.walkExpr(cand, visit);
+          }
+        }
+      } else if (v && typeof v === "object" && "kind" in (v as object)) {
+        const cand = v as HIRExpr;
+        // statements carry `kind` too; only recurse into expression shapes
+        if (typeof (cand as { kind: string }).kind === "string") this.walkExpr(cand, visit);
+      }
+    }
+  }
+
+  // Body of the out-of-line handler above. Emitted once per module.
+  private boundsFailHelper(): string[] {
+    const lines: string[] = [];
+    lines.push(`define internal void @__milo_bounds_fail(i32 %idx, i32 %len) noreturn cold noinline {`);
+    lines.push(`entry.bb:`);
+    lines.push(`  %fmt = getelementptr [40 x i8], ptr @.bounds_err, i32 0, i32 0`);
+    lines.push(`  call i32 (ptr, ...) @printf(ptr %fmt, i32 %idx, i32 %len)`);
+    this.panicAbort(lines);
+    lines.push(`  unreachable`);
+    lines.push(`}`);
+    return lines;
   }
 
   // Runtime exclusivity guard for by-ref arguments. The static call-site check
@@ -2082,11 +2473,11 @@ export class Codegen {
     lines.push(`  ${flag} = extractvalue {${llType}, i1} ${result}, 1`);
     lines.push(`  br i1 ${flag}, label %${failLabel}, label %${okLabel}`);
     lines.push(`${failLabel}:`);
-    const fmtPtr = this.nextTemp();
-    lines.push(`  ${fmtPtr} = getelementptr [46 x i8], ptr @.overflow_err, i32 0, i32 0`);
+    // Same reasoning as emitBoundsCheck: one cold out-of-line call, not three
+    // inline ones. Index arithmetic is checked too, so these land in the same hot
+    // loops the subscripts do.
     const filePtr = this.emitCheckFilePtr(lines, span);
-    lines.push(`  call i32 (ptr, ...) @printf(ptr ${fmtPtr}, ptr ${filePtr}, i32 ${span?.line ?? 0})`);
-    this.panicAbort(lines);
+    lines.push(`  call void @__milo_overflow_fail(ptr ${filePtr}, i32 ${span?.line ?? 0})`);
     lines.push(`  unreachable`);
     lines.push(`${okLabel}:`);
     return val;
@@ -2199,6 +2590,8 @@ export class Codegen {
     this.loopHeader = condLabel;
     this.loopExit = endLabel;
     this.loopDropStart = this.droppableLocals.length;
+    const lensPushed = this.pushHoistedLens(lines, stmt.body);
+
     lines.push(`  br label %${condLabel}`);
     lines.push(`${condLabel}:`);
     // invariant must hold before every condition eval: loop entry, each back-edge, and exit
@@ -2226,6 +2619,7 @@ export class Codegen {
       lines.push(`  br label %${condLabel}`);
     }
     lines.push(`${endLabel}:`);
+    if (lensPushed) this.hoistedLens.pop();
     this.loopHeader = prevHeader;
     this.loopExit = prevExit;
     this.loopDropStart = prevDropStart;
@@ -2272,6 +2666,8 @@ export class Codegen {
     this.loopExit = endLabel;
     this.loopDropStart = this.droppableLocals.length;
 
+    const lensPushed = this.pushHoistedLens(lines, stmt.body);
+
     lines.push(`  br label %${condLabel}`);
     lines.push(`${condLabel}:`);
     const cur = this.nextTemp();
@@ -2283,12 +2679,20 @@ export class Codegen {
     lines.push(`${bodyLabel}:`);
 
     this.emitLoopInvariants(lines, stmt.invariants);
+
+    // `for i in 0..v.len` proves `i < v.len` for the whole body — provided the
+    // start is a literal 0 (a negative or dynamic start proves nothing) and
+    // nothing in the body can resize the container.
+    const provenPushed = this.pushProvenInRange(stmt);
+
     let bodyTerminated = false;
     for (const s of stmt.body) {
       const [sl, t] = this.genStmt(s);
       lines.push(...sl);
       if (t) { bodyTerminated = true; break; }
     }
+    if (provenPushed) this.provenInRange.pop();
+    if (lensPushed) this.hoistedLens.pop();
     if (!bodyTerminated) { this.emitScopeDrops(lines, this.loopDropStart); lines.push(`  br label %${incrLabel}`); }
 
     lines.push(`${incrLabel}:`);
@@ -2653,6 +3057,229 @@ export class Codegen {
       this.loopDropStart = prevDropStart;
       return [lines, false];
     }
+  }
+
+  // Naive substring search shared by every `splitView`/`lines` loop: returns the byte
+  // offset of `n` in `h` at or after `from`, or -1. Emitted once per module; a Milo-level
+  // `strIndexOfFrom` can't be used here because codegen cannot assume std/string is
+  // imported by the program being compiled.
+  private strFindFn(): string {
+    if (!this.emittedStrFind) {
+      this.emittedStrFind = true;
+      this.needsMemcmp = true;
+      this.helperFnBodies.push([
+        "define internal i64 @milo.strfind(ptr %h, i64 %hlen, ptr %n, i64 %nlen, i64 %from) {",
+        "entry:",
+        // negative when the needle is longer than the haystack, which makes the first
+        // comparison below fail and the search miss without a special case
+        "  %limit = sub i64 %hlen, %nlen",
+        "  br label %loop",
+        "loop:",
+        "  %i = phi i64 [ %from, %entry ], [ %inext, %next ]",
+        "  %past = icmp sgt i64 %i, %limit",
+        "  br i1 %past, label %miss, label %cmp",
+        "cmp:",
+        "  %p = getelementptr i8, ptr %h, i64 %i",
+        "  %c = call i32 @memcmp(ptr %p, ptr %n, i64 %nlen)",
+        "  %eq = icmp eq i32 %c, 0",
+        "  br i1 %eq, label %hit, label %next",
+        "next:",
+        "  %inext = add i64 %i, 1",
+        "  br label %loop",
+        "hit:",
+        "  ret i64 %i",
+        "miss:",
+        "  ret i64 -1",
+        "}",
+      ]);
+    }
+    return "@milo.strfind";
+  }
+
+  // `for line in text.lines()` / `for f in text.splitView(sep)`. Each iteration stores a
+  // non-owning %String (cap 0, so drop glue skips it) pointing into the receiver's buffer,
+  // which the checker has frozen for the whole loop.
+  private genForStrView(stmt: HIRStmt & { kind: "ForStrView" }): [string[], boolean] {
+    const lines: string[] = [];
+    this.hasStringType = true;
+
+    const [srcLines, srcAddr] = this.genForEachIterableAddr(stmt.src);
+    lines.push(...srcLines);
+    const dataPtr = this.nextTemp();
+    const data = this.nextTemp();
+    const lenPtr = this.nextTemp();
+    const len = this.nextTemp();
+    lines.push(`  ${dataPtr} = getelementptr %String, ptr ${srcAddr}, i32 0, i32 0`);
+    lines.push(`  ${data} = load ptr, ptr ${dataPtr}`);
+    lines.push(`  ${lenPtr} = getelementptr %String, ptr ${srcAddr}, i32 0, i32 1`);
+    lines.push(`  ${len} = load i64, ptr ${lenPtr}`);
+
+    // the separator: an explicit argument for splitView, a literal newline for lines
+    let sepPtr: string;
+    let sepLen: string;
+    if (stmt.mode === "split" && stmt.sep) {
+      const [sepLines, sepVal] = this.genExpr(stmt.sep);
+      lines.push(...sepLines);
+      sepPtr = this.nextTemp();
+      sepLen = this.nextTemp();
+      lines.push(`  ${sepPtr} = extractvalue %String ${sepVal}, 0`);
+      lines.push(`  ${sepLen} = extractvalue %String ${sepVal}, 1`);
+    } else {
+      const { label, length } = this.addString("\n");
+      sepPtr = this.nextTemp();
+      lines.push(`  ${sepPtr} = getelementptr [${length} x i8], ptr ${label}, i32 0, i32 0`);
+      sepLen = "1";
+    }
+    const findFn = this.strFindFn();
+
+    const posAddr = `%__strview_pos.${this.scopeCounter++}.addr`;
+    const nextAddr = `%__strview_next.${this.scopeCounter++}.addr`;
+    this.entryAllocas.push(`  ${posAddr} = alloca i64`);
+    this.entryAllocas.push(`  ${nextAddr} = alloca i64`);
+    lines.push(`  store i64 0, ptr ${posAddr}`);
+
+    // enumerate form: `for i, line in text.lines()` binds the piece to the second name
+    const viewName = stmt.varName2 ?? stmt.varName;
+    const varAddr = this.locals.has(viewName) ? `%${viewName}.${this.scopeCounter++}.addr` : `%${viewName}.addr`;
+    this.entryAllocas.push(`  ${varAddr} = alloca %String`);
+    this.locals.set(viewName, { type: "%String", typeKind: stmt.varType, mutable: false, isRef: false, addr: varAddr });
+    let idxAddr: string | null = null;
+    if (stmt.varName2) {
+      idxAddr = `%__strview_idx.${this.scopeCounter++}.addr`;
+      this.entryAllocas.push(`  ${idxAddr} = alloca i64`);
+      lines.push(`  store i64 0, ptr ${idxAddr}`);
+      this.locals.set(stmt.varName, { type: "i64", typeKind: { tag: "int", bits: 64, signed: true }, mutable: false, isRef: false, addr: idxAddr });
+    }
+
+    const condLabel = this.nextLabel("strview.cond");
+    const bodyLabel = this.nextLabel("strview.body");
+    const incrLabel = this.nextLabel("strview.incr");
+    const endLabel = this.nextLabel("strview.end");
+    const prevHeader = this.loopHeader;
+    const prevExit = this.loopExit;
+    const prevDropStart = this.loopDropStart;
+    this.loopHeader = incrLabel;
+    this.loopExit = endLabel;
+    this.loopDropStart = this.droppableLocals.length;
+
+    lines.push(`  br label %${condLabel}`);
+    lines.push(`${condLabel}:`);
+    const pos = this.nextTemp();
+    lines.push(`  ${pos} = load i64, ptr ${posAddr}`);
+    const more = this.nextTemp();
+    if (stmt.mode === "lines") {
+      // a trailing newline ends the last line, it does not start an empty one
+      lines.push(`  ${more} = icmp slt i64 ${pos}, ${len}`);
+    } else {
+      // `pos == len` still yields the piece after a trailing separator ("a," -> "a", "")
+      const inRange = this.nextTemp();
+      const sepEmpty = this.nextTemp();
+      const emptyDone = this.nextTemp();
+      const notEmptyDone = this.nextTemp();
+      lines.push(`  ${inRange} = icmp sle i64 ${pos}, ${len}`);
+      // an empty separator splits into single bytes, which run out one step earlier
+      lines.push(`  ${sepEmpty} = icmp eq i64 ${sepLen}, 0`);
+      lines.push(`  ${emptyDone} = icmp sge i64 ${pos}, ${len}`);
+      lines.push(`  ${notEmptyDone} = xor i1 ${emptyDone}, true`);
+      const okEmpty = this.nextTemp();
+      lines.push(`  ${okEmpty} = select i1 ${sepEmpty}, i1 ${notEmptyDone}, i1 true`);
+      lines.push(`  ${more} = and i1 ${inRange}, ${okEmpty}`);
+    }
+    lines.push(`  br i1 ${more}, label %${bodyLabel}, label %${endLabel}`);
+
+    lines.push(`${bodyLabel}:`);
+    const found = this.nextTemp();
+    lines.push(`  ${found} = call i64 ${findFn}(ptr ${data}, i64 ${len}, ptr ${sepPtr}, i64 ${sepLen}, i64 ${pos})`);
+    let sepIdx = found;
+    if (stmt.mode === "split") {
+      // an empty needle matches at `pos` and would never advance; treat the next byte
+      // boundary as the separator instead, which is what strSplit("") yields
+      const sepEmpty2 = this.nextTemp();
+      const posPlus1 = this.nextTemp();
+      const chosen = this.nextTemp();
+      lines.push(`  ${sepEmpty2} = icmp eq i64 ${sepLen}, 0`);
+      lines.push(`  ${posPlus1} = add i64 ${pos}, 1`);
+      lines.push(`  ${chosen} = select i1 ${sepEmpty2}, i64 ${posPlus1}, i64 ${found}`);
+      sepIdx = chosen;
+    }
+    const hasSep = this.nextTemp();
+    const pieceEnd = this.nextTemp();
+    lines.push(`  ${hasSep} = icmp sge i64 ${sepIdx}, 0`);
+    lines.push(`  ${pieceEnd} = select i1 ${hasSep}, i64 ${sepIdx}, i64 ${len}`);
+
+    let viewEnd = pieceEnd;
+    if (stmt.mode === "lines") {
+      // CRLF: the '\r' belongs to the line ending, not to the line
+      const nonEmpty = this.nextTemp();
+      const prevIdx = this.nextTemp();
+      const probeIdx = this.nextTemp();
+      const probePtr = this.nextTemp();
+      const probe = this.nextTemp();
+      const isCR = this.nextTemp();
+      const strip = this.nextTemp();
+      const stripped = this.nextTemp();
+      lines.push(`  ${nonEmpty} = icmp sgt i64 ${pieceEnd}, ${pos}`);
+      lines.push(`  ${prevIdx} = sub i64 ${pieceEnd}, 1`);
+      // clamped so the load stays inside the buffer when the line is empty
+      lines.push(`  ${probeIdx} = select i1 ${nonEmpty}, i64 ${prevIdx}, i64 ${pos}`);
+      lines.push(`  ${probePtr} = getelementptr i8, ptr ${data}, i64 ${probeIdx}`);
+      lines.push(`  ${probe} = load i8, ptr ${probePtr}`);
+      lines.push(`  ${isCR} = icmp eq i8 ${probe}, 13`);
+      lines.push(`  ${strip} = and i1 ${nonEmpty}, ${isCR}`);
+      lines.push(`  ${stripped} = select i1 ${strip}, i64 ${prevIdx}, i64 ${pieceEnd}`);
+      viewEnd = stripped;
+    }
+
+    const viewPtr = this.nextTemp();
+    const viewLen = this.nextTemp();
+    lines.push(`  ${viewPtr} = getelementptr i8, ptr ${data}, i64 ${pos}`);
+    lines.push(`  ${viewLen} = sub i64 ${viewEnd}, ${pos}`);
+    const v0 = this.nextTemp();
+    const v1 = this.nextTemp();
+    const v2 = this.nextTemp();
+    lines.push(`  ${v0} = insertvalue %String undef, ptr ${viewPtr}, 0`);
+    lines.push(`  ${v1} = insertvalue %String ${v0}, i64 ${viewLen}, 1`);
+    lines.push(`  ${v2} = insertvalue %String ${v1}, i64 0, 2`);
+    lines.push(`  store %String ${v2}, ptr ${varAddr}`);
+
+    // Computed here, where the search result is live, and read back in the increment
+    // block — which `continue` can also reach, from blocks that do not see these values.
+    const afterSep = this.nextTemp();
+    const past = this.nextTemp();
+    const nextPos = this.nextTemp();
+    lines.push(`  ${afterSep} = add i64 ${pieceEnd}, ${sepLen}`);
+    lines.push(`  ${past} = add i64 ${len}, 1`);
+    lines.push(`  ${nextPos} = select i1 ${hasSep}, i64 ${afterSep}, i64 ${past}`);
+    lines.push(`  store i64 ${nextPos}, ptr ${nextAddr}`);
+
+    this.emitLoopInvariants(lines, stmt.invariants);
+
+    let bodyTerminated = false;
+    for (const s of stmt.body) {
+      const [sl, t] = this.genStmt(s);
+      lines.push(...sl);
+      if (t) { bodyTerminated = true; break; }
+    }
+    if (!bodyTerminated) { this.emitScopeDrops(lines, this.loopDropStart); lines.push(`  br label %${incrLabel}`); }
+
+    lines.push(`${incrLabel}:`);
+    const advanced = this.nextTemp();
+    lines.push(`  ${advanced} = load i64, ptr ${nextAddr}`);
+    lines.push(`  store i64 ${advanced}, ptr ${posAddr}`);
+    if (idxAddr) {
+      const curIdx = this.nextTemp();
+      const nextIdx = this.nextTemp();
+      lines.push(`  ${curIdx} = load i64, ptr ${idxAddr}`);
+      lines.push(`  ${nextIdx} = add i64 ${curIdx}, 1`);
+      lines.push(`  store i64 ${nextIdx}, ptr ${idxAddr}`);
+    }
+    lines.push(`  br label %${condLabel}`);
+
+    lines.push(`${endLabel}:`);
+    this.loopHeader = prevHeader;
+    this.loopExit = prevExit;
+    this.loopDropStart = prevDropStart;
+    return [lines, false];
   }
 
   private genForIterator(stmt: HIRStmt & { kind: "ForIterator" }): [string[], boolean] {
@@ -3134,9 +3761,11 @@ export class Codegen {
         const partFmts: string[] = [];
         const partArgs: { val: string; type: string }[] = [];
         const tempBufs: string[] = [];
+        const fmtTemps: { val: string; ty: string; expr: HIRExpr }[] = [];
         for (const arg of expr.args) {
           const [al, av, at] = this.genExpr(arg.expr);
           lines.push(...al);
+          fmtTemps.push({ val: av, ty: at, expr: arg.expr });
           this.emitDisplayPart(arg.expr.type, av, at, lines, partFmts, partArgs, tempBufs);
         }
         const fmtStr = this.addString(partFmts.join(""));
@@ -3154,6 +3783,7 @@ export class Codegen {
         lines.push(`  ${buf} = call ptr @malloc(i64 ${bufSize})`);
         lines.push(`  call i32 (ptr, i64, ptr, ...) @snprintf(ptr ${buf}, i64 ${bufSize}, ptr ${fmtStr.label}${argsStr})`);
         for (const tb of tempBufs) lines.push(`  call void @free(ptr ${tb})`);
+        for (const t of fmtTemps) this.dropOwnedTemp(lines, t.val, t.ty, t.expr);
         const s0 = this.nextTemp();
         lines.push(`  ${s0} = insertvalue %String undef, ptr ${buf}, 0`);
         const s1 = this.nextTemp();
@@ -3183,9 +3813,13 @@ export class Codegen {
         partFmts = [];
         partArgs = [];
       };
+      // An owned temporary printed directly (`print(n.toString())`) has no owner
+      // once it has been written, so free it after the batch is flushed.
+      const printTemps: { val: string; ty: string; expr: HIRExpr }[] = [];
       for (const arg of expr.args) {
         const [al, av, at] = this.genExpr(arg.expr);
         lines.push(...al);
+        printTemps.push({ val: av, ty: at, expr: arg.expr });
         let dt: any = arg.expr.type;
         while (dt && dt.tag === "ref") dt = dt.inner;
         if (dt && dt.tag === "string") {
@@ -3195,8 +3829,13 @@ export class Codegen {
           lines.push(`  ${dataPtr} = extractvalue %String ${av}, 0`);
           const lenVal = this.nextTemp();
           lines.push(`  ${lenVal} = extractvalue %String ${av}, 1`);
-          lines.push(`  call i32 @fflush(ptr null)`);
-          this.emitFdWrite(lines, 1, dataPtr, lenVal);
+          if (this.target.os === "none") {
+            // Freestanding: no stdio, so no shared buffer to write into.
+            lines.push(`  call i32 @fflush(ptr null)`);
+            this.emitFdWrite(lines, 1, dataPtr, lenVal);
+          } else {
+            this.emitStdoutWrite(lines, dataPtr, lenVal);
+          }
         } else {
           this.emitDisplayPart(arg.expr.type, av, at, lines, partFmts, partArgs, tempBufs);
         }
@@ -3204,6 +3843,7 @@ export class Codegen {
       flushBatch();
       lines.push(`  call i32 @putchar(i32 10)`);
       for (const tb of tempBufs) lines.push(`  call void @free(ptr ${tb})`);
+      for (const t of printTemps) this.dropOwnedTemp(lines, t.val, t.ty, t.expr);
       return [lines, "void", "void"];
     }
     if (expr.func === "eprint") {
@@ -3212,9 +3852,11 @@ export class Codegen {
       const partFmts: string[] = [];
       const partArgs: { val: string; type: string }[] = [];
       const tempBufs: string[] = [];
+      const eprintTemps: { val: string; ty: string; expr: HIRExpr }[] = [];
       for (const arg of expr.args) {
         const [al, av, at] = this.genExpr(arg.expr);
         lines.push(...al);
+        eprintTemps.push({ val: av, ty: at, expr: arg.expr });
         this.emitDisplayPart(arg.expr.type, av, at, lines, partFmts, partArgs, tempBufs);
       }
       const fullFmt = partFmts.join("") + "\n";
@@ -3222,6 +3864,7 @@ export class Codegen {
       const argsStr = partArgs.map(a => `, ${a.type} ${a.val}`).join("");
       this.emitFdPrintf(lines, 2, fmtStr.label, argsStr);
       for (const tb of tempBufs) lines.push(`  call void @free(ptr ${tb})`);
+      for (const t of eprintTemps) this.dropOwnedTemp(lines, t.val, t.ty, t.expr);
       return [lines, "void", "void"];
     }
     if (expr.func === "flush") {
@@ -3313,6 +3956,17 @@ export class Codegen {
       lines.push(`  store ptr ${pv}, ptr @_milo_scheduler`);
       return [lines, "0", "void"];
     }
+    if (expr.func === "_putByte") {
+      // Bare metal has no stdio; there putchar is whatever the freestanding runtime
+      // provides, and the declare below covers both.
+      this.needsPutchar = true;
+      const [al, bv] = this.genExpr(expr.args[0].expr);
+      lines.push(...al);
+      const ext = this.nextTemp();
+      lines.push(`  ${ext} = zext i8 ${bv} to i32`);
+      lines.push(`  call i32 @putchar(i32 ${ext})`);
+      return [lines, "void", "void"];
+    }
     if (expr.func === "_loadU8") {
       const [al, pv] = this.genExpr(expr.args[0].expr);
       lines.push(...al);
@@ -3326,6 +3980,32 @@ export class Codegen {
       const val = this.nextTemp();
       lines.push(`  ${val} = load i32, ptr ${pv}`);
       return [lines, val, "i32"];
+    }
+    if (expr.func === "_bytesToString") {
+      this.needsMalloc = true;
+      this.needsMemcpy = true;
+      this.hasStringType = true;
+      const [al, pv] = this.genExpr(expr.args[0].expr);
+      lines.push(...al);
+      const [ll, lv] = this.genExpr(expr.args[1].expr);
+      lines.push(...ll);
+      // len+1 with a trailing NUL, matching _cstrToString's layout so the result
+      // can still be handed to C without another copy.
+      const cap = this.nextTemp();
+      lines.push(`  ${cap} = add i64 ${lv}, 1`);
+      const buf = this.nextTemp();
+      lines.push(`  ${buf} = call ptr @malloc(i64 ${cap})`);
+      lines.push(`  call ptr @memcpy(ptr ${buf}, ptr ${pv}, i64 ${lv})`);
+      const nulPtr = this.nextTemp();
+      lines.push(`  ${nulPtr} = getelementptr i8, ptr ${buf}, i64 ${lv}`);
+      lines.push(`  store i8 0, ptr ${nulPtr}`);
+      const b1 = this.nextTemp();
+      lines.push(`  ${b1} = insertvalue %String zeroinitializer, ptr ${buf}, 0`);
+      const b2 = this.nextTemp();
+      lines.push(`  ${b2} = insertvalue %String ${b1}, i64 ${lv}, 1`);
+      const b3 = this.nextTemp();
+      lines.push(`  ${b3} = insertvalue %String ${b2}, i64 ${cap}, 2`);
+      return [lines, b3, "%String"];
     }
     if (expr.func === "_cstrToString") {
       this.needsMalloc = true;
@@ -3497,13 +4177,8 @@ export class Codegen {
       }
       case "IntLit":
         return [lines, String(expr.value), lt];
-      case "FloatLit": {
-        // LLVM needs hex float for exact representation
-        const buf = new ArrayBuffer(8);
-        new Float64Array(buf)[0] = expr.value;
-        const hex = [...new Uint8Array(buf)].reverse().map(b => b.toString(16).padStart(2, "0")).join("");
-        return [lines, `0x${hex.toUpperCase()}`, lt];
-      }
+      case "FloatLit":
+        return [lines, this.formatFloatBits(expr.value, lt), lt];
       case "BoolLit":
         return [lines, expr.value ? "1" : "0", "i1"];
       case "StringLit": {
@@ -3752,6 +4427,7 @@ export class Codegen {
           return this.genBuiltinCall(expr, lines);
         }
         const sig = this.fnSigs.get(expr.func);
+        const tempMark = this.argTempDrops.length;
         const argVals: { val: string; type: string }[] = [];
         const refPtrs: { ptr: string; mut: boolean }[] = [];
         for (let i = 0; i < expr.args.length; i++) {
@@ -3813,7 +4489,9 @@ export class Codegen {
         // extern fns passing/returning a struct by value need native-ABI lowering:
         // coerce args into registers, byval/indirect big ones, sret the return.
         if (this.externAbi.has(expr.func)) {
-          return this.emitExternAbiCall(expr, argVals, lines);
+          const r = this.emitExternAbiCall(expr, argVals, lines);
+          this.flushArgTempDrops(r[0], tempMark);
+          return r;
         }
         const argsStr = argVals.map(a => `${a.type} ${a.val}`).join(", ");
         const retTy = sig?.retType ?? "i32";
@@ -3821,6 +4499,7 @@ export class Codegen {
           const dest = sretDest ?? this.nextTemp();
           if (!sretDest) lines.push(`  ${dest} = alloca ${retTy}`);
           lines.push(`  call void @${expr.func}(${argsStr ? `ptr ${dest}, ${argsStr}` : `ptr ${dest}`})`);
+          this.flushArgTempDrops(lines, tempMark);
           if (sretDest) return [lines, "undef", retTy];
           // no direct destination: fall back to a first-class value for generic
           // consumers (rare — slower to compile at -O2, but correct)
@@ -3835,10 +4514,12 @@ export class Codegen {
         }
         if (retTy === "void") {
           lines.push(`  call ${callPrefix} @${expr.func}(${argsStr})`);
+          this.flushArgTempDrops(lines, tempMark);
           return [lines, "void", "void"];
         }
         const tmp = this.nextTemp();
         lines.push(`  ${tmp} = call ${callPrefix} @${expr.func}(${argsStr})`);
+        this.flushArgTempDrops(lines, tempMark);
         return [lines, tmp, retTy];
       }
       case "StructLit": {
@@ -3890,6 +4571,8 @@ export class Codegen {
         lines.push(...ol);
         const len = this.nextTemp();
         lines.push(`  ${len} = extractvalue %String ${ov}, 1`);
+        // `n.toString().len` reads a length out of a string nobody owns.
+        this.dropOwnedTemp(lines, ov, "%String", expr.object);
         return [lines, len, "i64"];
       }
       case "StringCstr": {
@@ -4357,6 +5040,8 @@ export class Codegen {
         return this.genVecInsert(expr, lines);
       case "VecRemove":
         return this.genVecRemove(expr, lines);
+      case "VecTruncate":
+        return this.genVecTruncate(expr, lines);
       case "VecContains":
         return this.genVecContains(expr, lines);
       case "VecEnumerate":
@@ -4460,7 +5145,12 @@ export class Codegen {
 
         // generate closure function: @__closure_N(ptr %env, params...)
         const closureBody: string[] = [];
-        const closureParams = [`ptr %env`, ...expr.params.map(p => `${this.llvmType(p.type)} %${p.name}`)].join(", ");
+        // Closure params carry the full type (top-level fns split it into inner + isRef),
+        // and the prologue below spills every ref param as a pointer. `&string` lowers to
+        // %String by value in return position, so ask for the pointer explicitly here.
+        const closureParamTy = (t: TypeKind) =>
+          t.tag === "ref" && t.inner.tag === "string" ? "ptr" : this.llvmType(t);
+        const closureParams = [`ptr %env`, ...expr.params.map(p => `${closureParamTy(p.type)} %${p.name}`)].join(", ");
         closureBody.push(`define ${retTy} @${closureName}(${closureParams}) {`);
         closureBody.push("entry.bb:");
 
@@ -4598,6 +5288,7 @@ export class Codegen {
         // a bare C function pointer: call it directly, with no env prepended
         const [calLines, calVal] = this.genExpr(expr.callee);
         lines.push(...calLines);
+        const cTempMark = this.argTempDrops.length;
         const argVals: { val: string; type: string }[] = [];
         for (const arg of expr.args) {
           if (arg.passByRef) {
@@ -4614,10 +5305,12 @@ export class Codegen {
         const cRetTy = this.llvmType(expr.type);
         if (cRetTy === "void") {
           lines.push(`  call void ${calVal}(${cArgsStr})`);
+          this.flushArgTempDrops(lines, cTempMark);
           return [lines, "void", "void"];
         }
         const cResult = this.nextTemp();
         lines.push(`  ${cResult} = call ${cRetTy} ${calVal}(${cArgsStr})`);
+        this.flushArgTempDrops(lines, cTempMark);
         return [lines, cResult, cRetTy];
       }
       case "ClosureCall": {
@@ -4630,6 +5323,7 @@ export class Codegen {
         lines.push(`  ${envPtr} = extractvalue { ptr, ptr } ${calVal}, 1`);
 
         // evaluate args
+        const clTempMark = this.argTempDrops.length;
         const argVals: { val: string; type: string }[] = [{ val: envPtr, type: "ptr" }];
         const refPtrs: { ptr: string; mut: boolean }[] = [];
         for (const arg of expr.args) {
@@ -4650,10 +5344,12 @@ export class Codegen {
         const retTy = this.llvmType(expr.type);
         if (retTy === "void") {
           lines.push(`  call void ${fnPtr}(${argsStr})`);
+          this.flushArgTempDrops(lines, clTempMark);
           return [lines, "void", "void"];
         }
         const result = this.nextTemp();
         lines.push(`  ${result} = call ${retTy} ${fnPtr}(${argsStr})`);
+        this.flushArgTempDrops(lines, clTempMark);
         return [lines, result, retTy];
       }
       case "InterfaceCoerce": {
@@ -4799,6 +5495,7 @@ export class Codegen {
         lines.push(`  ${fnPtr} = load ptr, ptr ${fnSlot}`);
 
         // build args: data ptr as self, then user args
+        const imTempMark = this.argTempDrops.length;
         const argVals: { val: string; type: string }[] = [{ val: dataPtr, type: "ptr" }];
         const refPtrs: { ptr: string; mut: boolean }[] = [];
         for (const arg of expr.args) {
@@ -4819,10 +5516,12 @@ export class Codegen {
         const retTy = this.llvmType(expr.type);
         if (retTy === "void") {
           lines.push(`  call void ${fnPtr}(${argsStr})`);
+          this.flushArgTempDrops(lines, imTempMark);
           return [lines, "void", "void"];
         }
         const result = this.nextTemp();
         lines.push(`  ${result} = call ${retTy} ${fnPtr}(${argsStr})`);
+        this.flushArgTempDrops(lines, imTempMark);
         return [lines, result, retTy];
       }
     }
@@ -5532,6 +6231,9 @@ export class Codegen {
     const tmp = this.nextTemp();
     lines.push(`  ${tmp} = alloca ${et}`);
     lines.push(`  store ${et} ${ev}, ptr ${tmp}`);
+    if (this.isOwnedTempExpr(expr) && this.needsDropCg(expr.type)) {
+      this.argTempDrops.push({ addr: tmp, type: expr.type });
+    }
     return [lines, tmp];
   }
 
@@ -6153,6 +6855,79 @@ export class Codegen {
     return [lines, "void", "void"];
   }
 
+  // `v.truncate(n)` / `v.clear()`. Elements at index >= n are OWNED by the Vec, so
+  // shortening the length without running their drop glue would leak every string,
+  // nested Vec or Drop-implementing struct above the cut. The counter lives in an
+  // alloca rather than a phi because emitDropValue splits the block.
+  private genVecTruncate(expr: HIRExpr & { kind: "VecTruncate" }, lines: string[]): [string[], string, string] {
+    this.hasVecType = true;
+    const elemType = expr.elementType;
+    const elemTy = this.llvmType(elemType);
+
+    const [vecPtrLines, vecPtr] = this.genLValue(expr.object);
+    lines.push(...vecPtrLines);
+    const [nLines, nRaw] = this.genExpr(expr.length);
+    lines.push(...nLines);
+
+    // A negative length means empty; a length past the end is a no-op, never a grow.
+    const isNeg = this.nextTemp();
+    lines.push(`  ${isNeg} = icmp slt i64 ${nRaw}, 0`);
+    const n = this.nextTemp();
+    lines.push(`  ${n} = select i1 ${isNeg}, i64 0, i64 ${nRaw}`);
+
+    const lenPtr = this.nextTemp();
+    lines.push(`  ${lenPtr} = getelementptr %Vec, ptr ${vecPtr}, i32 0, i32 1`);
+    const len = this.nextTemp();
+    lines.push(`  ${len} = load i64, ptr ${lenPtr}`);
+
+    const doneLabel = this.nextLabel("vec.trunc.done");
+    const startLabel = this.nextLabel("vec.trunc.start");
+    const noop = this.nextTemp();
+    lines.push(`  ${noop} = icmp uge i64 ${n}, ${len}`);
+    lines.push(`  br i1 ${noop}, label %${doneLabel}, label %${startLabel}`);
+    lines.push(`${startLabel}:`);
+
+    if (this.needsDropCg(elemType)) {
+      const dataPtr = this.nextTemp();
+      lines.push(`  ${dataPtr} = getelementptr %Vec, ptr ${vecPtr}, i32 0, i32 0`);
+      const data = this.nextTemp();
+      lines.push(`  ${data} = load ptr, ptr ${dataPtr}`);
+
+      const iAddr = `%__trunc_i.${this.scopeCounter++}.addr`;
+      this.entryAllocas.push(`  ${iAddr} = alloca i64`);
+      lines.push(`  store i64 ${n}, ptr ${iAddr}`);
+
+      const condLabel = this.nextLabel("vec.trunc.cond");
+      const bodyLabel = this.nextLabel("vec.trunc.body");
+      const finLabel = this.nextLabel("vec.trunc.fin");
+      lines.push(`  br label %${condLabel}`);
+      lines.push(`${condLabel}:`);
+      const i = this.nextTemp();
+      lines.push(`  ${i} = load i64, ptr ${iAddr}`);
+      const cont = this.nextTemp();
+      lines.push(`  ${cont} = icmp ult i64 ${i}, ${len}`);
+      lines.push(`  br i1 ${cont}, label %${bodyLabel}, label %${finLabel}`);
+
+      lines.push(`${bodyLabel}:`);
+      const elemPtr = this.nextTemp();
+      lines.push(`  ${elemPtr} = getelementptr ${elemTy}, ptr ${data}, i64 ${i}`);
+      this.emitDropValue(lines, elemPtr, elemType);
+      const iNow = this.nextTemp();
+      lines.push(`  ${iNow} = load i64, ptr ${iAddr}`);
+      const iNext = this.nextTemp();
+      lines.push(`  ${iNext} = add i64 ${iNow}, 1`);
+      lines.push(`  store i64 ${iNext}, ptr ${iAddr}`);
+      lines.push(`  br label %${condLabel}`);
+
+      lines.push(`${finLabel}:`);
+    }
+
+    lines.push(`  store i64 ${n}, ptr ${lenPtr}`);
+    lines.push(`  br label %${doneLabel}`);
+    lines.push(`${doneLabel}:`);
+    return [lines, "void", "void"];
+  }
+
   private genVecSwap(expr: HIRExpr & { kind: "VecSwap" }, lines: string[]): [string[], string, string] {
     this.hasVecType = true;
     this.needsMemcpy = true;
@@ -6653,6 +7428,9 @@ export class Codegen {
     lines.push(`  ${nullPtr} = getelementptr i8, ptr ${curData}, i64 ${newLen}`);
     lines.push(`  store i8 0, ptr ${nullPtr}`);
 
+    // pushStr copies the bytes in; a temporary source (a call result, or the
+    // clone `v[i]` produces) is dead afterwards and nothing else frees it.
+    this.dropOwnedTemp(lines, otherVal, "%String", expr.other);
     return [lines, "void", "void"];
   }
 
@@ -6925,14 +7703,17 @@ export class Codegen {
         fmtStr = vt.signed ? "%lld" : "%llu";
       }
     } else {
-      // float — promote f32 to double
-      if (vt.tag === "float" && vt.bits === 32) {
-        const promoted = this.nextTemp();
-        lines.push(`  ${promoted} = fpext float ${vVal} to double`);
-        argVal = promoted;
-      }
-      argType = "double";
-      fmtStr = "%g";
+      // Floats don't go through snprintf directly — they need the round-trip
+      // search in @milo.fmt.f64, which already writes an owned buffer we can
+      // hand straight to %String.
+      const { buf, len } = this.emitFloatToBuf(vVal, vt.tag === "float" ? vt.bits : 64, lines);
+      const f0 = this.nextTemp();
+      lines.push(`  ${f0} = insertvalue %String undef, ptr ${buf}, 0`);
+      const f1 = this.nextTemp();
+      lines.push(`  ${f1} = insertvalue %String ${f0}, i64 ${len}, 1`);
+      const f2 = this.nextTemp();
+      lines.push(`  ${f2} = insertvalue %String ${f1}, i64 ${F64_BUF}, 2`);
+      return [lines, f2, "%String"];
     }
 
     const fmt = this.addString(fmtStr);
@@ -7083,9 +7864,20 @@ export class Codegen {
     return [lines, result, enumTy];
   }
 
+  // True when an enclosing `for i in 0..v.len` already proves this exact
+  // subscript in range: same loop variable as the index, same container.
+  private indexIsProven(expr: HIRExpr & { kind: "IndexAccess" }): boolean {
+    if (expr.index.kind !== "Ident") return false;
+    const key = this.containerKey(expr.object);
+    if (key === null) return false;
+    for (const p of this.provenInRange) {
+      if (p.loopVar === expr.index.name && p.container === key) return true;
+    }
+    return false;
+  }
+
   private genVecBoundsCheckedPtr(expr: HIRExpr & { kind: "IndexAccess" }, lines: string[]): [string[], string, string] {
     this.hasVecType = true;
-    this.needsBoundsCheck = true;
 
     // A slice (`&[T]` / unsized `[T]`, tag "array" with size null) shares the Vec's
     // {ptr,len,cap} runtime layout, so it indexes through the same path. Deref the ref a
@@ -7101,23 +7893,29 @@ export class Codegen {
     const [idxLines, idxVal, idxTy] = this.genExpr(expr.index);
     lines.push(...idxLines);
 
-    // load len for bounds check
-    const lenPtr = this.nextTemp();
-    lines.push(`  ${lenPtr} = getelementptr %Vec, ptr ${vecPtr}, i32 0, i32 1`);
-    const len = this.nextTemp();
-    lines.push(`  ${len} = load i64, ptr ${lenPtr}`);
-    const len32 = this.nextTemp();
-    lines.push(`  ${len32} = trunc i64 ${len} to i32`);
-
-    // bounds check
-    let idx32: string;
-    if (idxTy === "i64") {
-      idx32 = this.nextTemp();
-      lines.push(`  ${idx32} = trunc i64 ${idxVal} to i32`);
-    } else {
-      idx32 = idxVal;
+    // The check, unless an enclosing loop already proved this index in range —
+    // in which case the length load goes too, which is most of the cost.
+    if (!this.indexIsProven(expr)) {
+      this.needsBoundsCheck = true;
+      let len32 = this.hoistedLenFor(expr.object);
+      if (len32 === null) {
+        const lenPtr = this.nextTemp();
+        lines.push(`  ${lenPtr} = getelementptr %Vec, ptr ${vecPtr}, i32 0, i32 1`);
+        const len = this.nextTemp();
+        lines.push(`  ${len} = load i64, ptr ${lenPtr}`);
+        const t32 = this.nextTemp();
+        lines.push(`  ${t32} = trunc i64 ${len} to i32`);
+        len32 = t32;
+      }
+      let idx32: string;
+      if (idxTy === "i64") {
+        idx32 = this.nextTemp();
+        lines.push(`  ${idx32} = trunc i64 ${idxVal} to i32`);
+      } else {
+        idx32 = idxVal;
+      }
+      this.emitBoundsCheck(lines, idx32, len32);
     }
-    this.emitBoundsCheck(lines, idx32, len32);
 
     // load data pointer and GEP to element
     const dataPtr = this.nextTemp();
@@ -8134,14 +8932,10 @@ export class Codegen {
       return;
     }
     if (tk.tag === "float") {
-      if (tk.bits === 32) {
-        const promoted = this.nextTemp();
-        lines.push(`  ${promoted} = fpext float ${val} to double`);
-        partArgs.push({ val: promoted, type: "double" });
-      } else {
-        partArgs.push({ val: val, type: "double" });
-      }
-      partFmts.push("%g");
+      const { buf } = this.emitFloatToBuf(val, tk.bits, lines);
+      partFmts.push("%s");
+      partArgs.push({ val: buf, type: "ptr" });
+      tempBufs.push(buf);
       return;
     }
     if (tk.tag === "struct") {
@@ -8391,14 +9185,10 @@ export class Codegen {
         formatParts.push(fk.bits <= 32 ? (fk.signed ? "%d" : "%u") : (fk.signed ? "%lld" : "%llu"));
         snprintfArgs.push({ val: passVal, type: passType });
       } else if (fk.tag === "float") {
-        if (fk.bits === 32) {
-          const promoted = this.nextTemp();
-          lines.push(`  ${promoted} = fpext float ${fieldVal} to double`);
-          snprintfArgs.push({ val: promoted, type: "double" });
-        } else {
-          snprintfArgs.push({ val: fieldVal, type: "double" });
-        }
-        formatParts.push("%g");
+        const { buf } = this.emitFloatToBuf(fieldVal, fk.bits, lines);
+        formatParts.push("%s");
+        snprintfArgs.push({ val: buf, type: "ptr" });
+        escapeBufs.push(buf);
       }
     }
 
@@ -8437,6 +9227,93 @@ export class Codegen {
   // std/json's jsonEscapeStr — ", \, \n, \t, \r as 2-byte escapes, all other
   // control chars (<0x20) as \u00XX. NUL-terminated so the result's data ptr
   // can feed snprintf %s. Worst case every byte escapes to \u00XX: 6x + NUL.
+  // milo.fmt.f{32,64}(v, buf) -> length: the shortest decimal string that reads
+  // back as the bit-identical value. Plain "%g" is 6 significant digits, which
+  // silently destroys data — 1.0/3.0 printed as `0.333333` and 123456789.123456
+  // as `1.23457e+08`.
+  //
+  // Two loops. The first counts integer digits by walking powers of ten, and the
+  // second raises "%.*g" precision until the text parses back equal. Precision
+  // has to *start* at the integer-digit count, not at 1: %g switches to exponent
+  // form once the exponent reaches the precision, so `%.1g` of 100.0 is the
+  // round-tripping but unreadable "1e+02". Starting at 3 gives "100".
+  //
+  // The digit walk uses only comparisons and a multiply, so there is no libm
+  // dependency (log10 would need -lm on Linux). NaN makes every fcmp false, so
+  // it takes dig=1, never compares equal, and falls out of the second loop at
+  // the cap as "nan"; infinity saturates the walk and prints "inf". Both match
+  // the old %g output. `buf` must be at least F64_BUF bytes.
+  private ensureFloatFormatHelper(bits: 32 | 64) {
+    if (bits === 32) {
+      if (this.generatedF32FormatHelper) return;
+      this.generatedF32FormatHelper = true;
+      this.needsStrtof = true;
+    } else {
+      if (this.generatedF64FormatHelper) return;
+      this.generatedF64FormatHelper = true;
+      this.needsStrtod = true;
+    }
+    this.needsSnprintf = true;
+    const fmt = this.addString("%.*g");
+    // A float needs at most 9 significant digits to round-trip, a double 17.
+    const cap = bits === 32 ? 9 : 17;
+    const ty = bits === 32 ? "float" : "double";
+    const parse = bits === 32 ? "@strtof" : "@strtod";
+    // The digit walk and snprintf both want a double; f32 is promoted once.
+    const widen = bits === 32
+      ? [`  %d = fpext float %v to double`]
+      : [`  %d = fadd double %v, 0.000000e+00`];
+    this.dropHelperBodies.push([
+      `define private i64 @milo.fmt.f${bits}(${ty} %v, ptr %buf) {`,
+      `entry.bb:`,
+      ...widen,
+      `  %isneg = fcmp olt double %d, 0.000000e+00`,
+      `  %negd = fneg double %d`,
+      `  %av = select i1 %isneg, double %negd, double %d`,
+      `  br label %dloop`,
+      `dloop:`,
+      `  %dig = phi i32 [ 1, %entry.bb ], [ %dignext, %dnext ]`,
+      `  %pow = phi double [ 1.000000e+01, %entry.bb ], [ %pownext, %dnext ]`,
+      `  %room = icmp slt i32 %dig, ${cap}`,
+      `  %over = fcmp oge double %av, %pow`,
+      `  %grow = and i1 %room, %over`,
+      `  br i1 %grow, label %dnext, label %ploop`,
+      `dnext:`,
+      `  %dignext = add i32 %dig, 1`,
+      `  %pownext = fmul double %pow, 1.000000e+01`,
+      `  br label %dloop`,
+      `ploop:`,
+      `  %p = phi i32 [ %dig, %dloop ], [ %pnext, %again ]`,
+      `  %n = call i32 (ptr, i64, ptr, ...) @snprintf(ptr %buf, i64 ${F64_BUF}, ptr ${fmt.label}, i32 %p, double %d)`,
+      `  %back = call ${ty} ${parse}(ptr %buf, ptr null)`,
+      `  %exact = fcmp oeq ${ty} %back, %v`,
+      `  %last = icmp sge i32 %p, ${cap}`,
+      `  %stop = or i1 %exact, %last`,
+      `  br i1 %stop, label %fin, label %again`,
+      `again:`,
+      `  %pnext = add i32 %p, 1`,
+      `  br label %ploop`,
+      `fin:`,
+      `  %n64 = sext i32 %n to i64`,
+      `  ret i64 %n64`,
+      `}`,
+      ``,
+    ]);
+  }
+
+  // Formats a float into a fresh malloc'd buffer and returns it. Callers own the
+  // buffer — free it, or hand it to a temp-buf list that frees it.
+  private emitFloatToBuf(val: string, bits: number, lines: string[]): { buf: string; len: string } {
+    const w = bits === 32 ? 32 : 64;
+    this.ensureFloatFormatHelper(w);
+    this.needsMalloc = true;
+    const buf = this.nextTemp();
+    lines.push(`  ${buf} = call ptr @malloc(i64 ${F64_BUF})`);
+    const len = this.nextTemp();
+    lines.push(`  ${len} = call i64 @milo.fmt.f${w}(${w === 32 ? "float" : "double"} ${val}, ptr ${buf})`);
+    return { buf, len };
+  }
+
   private ensureJsonEscapeHelper() {
     if (this.generatedJsonEscapeHelper) return;
     this.generatedJsonEscapeHelper = true;
@@ -8890,11 +9767,68 @@ export class Codegen {
   // (Ident/FieldAccess/IndexAccess) name storage owned by someone else, so freeing
   // their result would double-free. A call can't hand back a borrow: references are
   // second-class and never returned.
+  // True when codegen's IndexAccess path auto-clones the element (vec / unsized
+  // array with a drop-needing element type) rather than loading it in place. The
+  // result is then a fresh allocation, whoever consumes it.
+  private indexAccessClones(expr: HIRExpr): boolean {
+    if (expr.kind !== "IndexAccess") return false;
+    const obj = expr.object.type.tag === "ref" ? expr.object.type.inner : expr.object.type;
+    const isDynamic = obj.tag === "vec" || (obj.tag === "array" && obj.size === null);
+    return isDynamic && this.needsDropCg(expr.type);
+  }
+
   private isOwnedTempExpr(expr: HIRExpr): boolean {
     // A discarded small-type `replace(...)` result is dropped here (SSA path). A big-agg
     // replace drops its own moved-out value inside genExpr, so it must NOT double-drop here.
     if (expr.kind === "MemReplace") return !this.isBigAgg(this.llvmType(expr.type));
-    return expr.kind === "Call" || expr.kind === "ClosureCall" || expr.kind === "InterfaceMethodCall";
+    if (expr.kind === "Call" || expr.kind === "ClosureCall" || expr.kind === "InterfaceMethodCall") return true;
+    // Builtins that allocate a fresh String/Vec are temporaries too. `i.toString()`
+    // lowers to NumberToString, not Call, so `"n=" + i.toString()` used to leak the
+    // converted string on every evaluation — which in a render loop is per frame.
+    // A nested concat (`a + b + c`) is the same: the inner BinOp's result is owned
+    // by nobody once the outer one has read it.
+    switch (expr.kind) {
+      case "NumberToString":
+      case "BoolToString":
+      case "JsonStringify":
+      case "StringClone":
+      case "StringSubstr":
+      case "StringWithCapacity":
+      case "VecClone":
+      case "VecNew":
+      case "VecWithCapacity":
+      case "VecFilled":
+      case "VecMap":
+      case "VecFilter":
+        return true;
+      case "BinOp":
+        // string `+` only — the comparisons return bool
+        return expr.type.tag === "string";
+      case "IndexAccess": {
+        // `v[i]` on a non-Copy element auto-clones so the Vec stays intact (see the
+        // IndexAccess case), which makes the result a fresh allocation with no
+        // owner unless it is bound. `print(v[0])` leaked one copy per call.
+        const obj = expr.object.type.tag === "ref" ? expr.object.type.inner : expr.object.type;
+        const isDynamic = obj.tag === "vec" || (obj.tag === "array" && obj.size === null);
+        return isDynamic && this.needsDropCg(expr.type);
+      }
+      default:
+        return false;
+    }
+  }
+
+  // Owned temporaries materialised into an alloca so they could be passed by
+  // reference (`take(i.toString())`, `print(n.toString())`). The callee cannot keep
+  // the borrow — references are second-class — so the temp is dead the moment the
+  // call returns, and nothing else will ever free it. Recorded here by
+  // genLValueForArg and flushed by the call site that consumed them.
+  private argTempDrops: { addr: string; type: TypeKind }[] = [];
+
+  private flushArgTempDrops(lines: string[], mark: number) {
+    while (this.argTempDrops.length > mark) {
+      const t = this.argTempDrops.pop()!;
+      this.emitDropValue(lines, t.addr, t.type);
+    }
   }
 
   // Free a value that was produced by a call and then consumed in-place by an
@@ -9741,10 +10675,14 @@ export class Codegen {
 
   private usedSatIntrinsics?: Set<string>;
 
-  // LLVM encodes a double constant as its raw 64-bit hex pattern.
-  private formatFloatBits(v: number): string {
+  // LLVM encodes a float or double constant as a raw 64-bit hex pattern, but a
+  // `float` operand only accepts a pattern that is exactly representable in
+  // single precision. Emitting the double bits of 0.1 for an f32 field is a hard
+  // LLVM error ("floating point constant invalid for type"), so round through
+  // f32 first when that is the operand type.
+  private formatFloatBits(v: number, llvmTy = "double"): string {
     const buf = new ArrayBuffer(8);
-    new Float64Array(buf)[0] = v;
+    new Float64Array(buf)[0] = llvmTy === "float" ? Math.fround(v) : v;
     const bits = new BigUint64Array(buf)[0];
     return `0x${bits.toString(16).toUpperCase().padStart(16, "0")}`;
   }
@@ -9866,6 +10804,23 @@ export class Codegen {
       default:
         return null;
     }
+  }
+
+  // Whether the LLVM constant initializer captures the whole value. A struct literal
+  // with a non-const field lowers to a *partial* constant (that field zeroed), so it
+  // still needs the runtime pass — this is the check that decides which globals go in
+  // @__milo_global_init, and answering "yes" for a partial init is how a field silently
+  // stays empty.
+  private isFullyConstInit(g: import("./hir").HIRGlobal): boolean {
+    if (this.tryConstantExpr(g.value) !== null) return true;
+    if (g.value?.kind !== "StructLit") return false;
+    const layout = this.structLayouts.get(g.type.tag === "struct" ? g.type.name : "");
+    if (!layout) return false;
+    const byName = new Map(g.value.fields.map(f => [f.name, f.value]));
+    return layout.fields.every(f => {
+      const e = byName.get(f.name);
+      return !e || this.tryConstantExpr(e) !== null;
+    });
   }
 
   private getConstantInitializer(g: import("./hir").HIRGlobal): string {

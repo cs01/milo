@@ -1,0 +1,189 @@
+// The warping background lattice.
+//
+// A mass-spring grid: every node is tied to its rest position by a soft spring
+// and to its four neighbours by stiffer ones. Explosions, black holes, bullets
+// and the player's wake all push on it, and the ripples travel through the
+// springs. It is the piece of state every other system in the game writes to.
+
+from "std/math" import {
+    Math
+}
+from "./gfx" import {
+    Canvas, line
+}
+
+pub struct Node {
+    x: f64,
+    y: f64,
+    vx: f64,
+    vy: f64,
+    ax: f64, // anchor (rest) position
+    ay: f64,
+    invMass: f64, // 0 pins the node — the border is pinned so the sheet has edges
+}
+
+pub struct Grid {
+    nodes: Vec<Node>,
+    cols: i64,
+    rows: i64,
+    spacing: f64,
+}
+
+pub fn gridNew(w: f64, h: f64, spacing: f64): Grid {
+    let cols = (w / spacing) as i64 + 1
+    let rows = (h / spacing) as i64 + 1
+    var nodes: Vec<Node> = Vec.new()
+    for r in 0..rows {
+        for c in 0..cols {
+            let x = (c as f64) * spacing
+            let y = (r as f64) * spacing
+            var im = 1.0
+            if c == 0 || r == 0 || c == cols - 1 || r == rows - 1 {
+                im = 0.0
+            }
+            nodes.push(Node {
+                x: x, y: y, vx: 0.0, vy: 0.0, ax: x, ay: y, invMass: im
+            }
+            )
+        }
+    }
+    return Grid {
+        nodes: nodes, cols: cols, rows: rows, spacing: spacing
+    }
+}
+
+pub fn gridReset(g: &mut Grid) {
+    for i in 0..g.nodes.len {
+        g.nodes[i].x = g.nodes[i].ax
+        g.nodes[i].y = g.nodes[i].ay
+        g.nodes[i].vx = 0.0
+        g.nodes[i].vy = 0.0
+    }
+}
+
+// One neighbour spring, applying equal and opposite impulses to two nodes of the
+// same Vec. Indices, not two `&mut` into one container — which is exactly how a
+// second-class-reference language wants you to write it.
+fn springPair(g: &mut Grid, a: i64, b: i64, rest: f64, k: f64, dt: f64) {
+    let dx = g.nodes[b].x - g.nodes[a].x
+    let dy = g.nodes[b].y - g.nodes[a].y
+    let d2 = dx * dx + dy * dy
+    if d2 < 0.0001 {
+        return
+    }
+    let d = Math.sqrt(d2)
+    let f = (d - rest) * k * dt / d
+    let ima = g.nodes[a].invMass
+    let imb = g.nodes[b].invMass
+    g.nodes[a].vx = g.nodes[a].vx + dx * f * ima
+    g.nodes[a].vy = g.nodes[a].vy + dy * f * ima
+    g.nodes[b].vx = g.nodes[b].vx - dx * f * imb
+    g.nodes[b].vy = g.nodes[b].vy - dy * f * imb
+}
+
+pub fn gridUpdate(g: &mut Grid, dt: f64) {
+    let k = 300.0 // neighbour stiffness
+    let anchorK = 9.0 // pull back to rest
+    let damp = 0.965
+    let rest = g.spacing
+    let cols = g.cols
+    let rows = g.rows
+
+    for r in 0..rows {
+        for c in 0..cols {
+            let i = r * cols + c
+            if c + 1 < cols {
+                springPair(g, i, i + 1, rest, k, dt)
+            }
+            if r + 1 < rows {
+                springPair(g, i, i + cols, rest, k, dt)
+            }
+        }
+    }
+
+    for i in 0..g.nodes.len {
+        if g.nodes[i].invMass > 0.0 {
+            let dx = g.nodes[i].ax - g.nodes[i].x
+            let dy = g.nodes[i].ay - g.nodes[i].y
+            g.nodes[i].vx = (g.nodes[i].vx + dx * anchorK * dt) * damp
+            g.nodes[i].vy = (g.nodes[i].vy + dy * anchorK * dt) * damp
+            g.nodes[i].x = g.nodes[i].x + g.nodes[i].vx * dt
+            g.nodes[i].y = g.nodes[i].y + g.nodes[i].vy * dt
+        }
+    }
+}
+
+// Radial impulse — positive `strength` shoves outward, negative sucks inward.
+pub fn gridImpulse(g: &mut Grid, cx: f64, cy: f64, radius: f64, strength: f64) {
+    let r2 = radius * radius
+    for i in 0..g.nodes.len {
+        if g.nodes[i].invMass > 0.0 {
+            let dx = g.nodes[i].x - cx
+            let dy = g.nodes[i].y - cy
+            let d2 = dx * dx + dy * dy
+            if d2 < r2 && d2 > 0.01 {
+                let d = Math.sqrt(d2)
+                let fall = 1.0 - d / radius
+                let f = strength * fall * fall / d
+                g.nodes[i].vx = g.nodes[i].vx + dx * f
+                g.nodes[i].vy = g.nodes[i].vy + dy * f
+            }
+        }
+    }
+}
+
+// Continuous inward pull with a swirl component — black holes drag the sheet
+// into a visible vortex.
+pub fn gridVortex(g: &mut Grid, cx: f64, cy: f64, radius: f64, pull: f64, swirl: f64, dt: f64) {
+    let r2 = radius * radius
+    for i in 0..g.nodes.len {
+        if g.nodes[i].invMass > 0.0 {
+            let dx = g.nodes[i].x - cx
+            let dy = g.nodes[i].y - cy
+            let d2 = dx * dx + dy * dy
+            if d2 < r2 && d2 > 4.0 {
+                let d = Math.sqrt(d2)
+                let fall = 1.0 - d / radius
+                let f = pull * fall * dt / d
+                let sw = swirl * fall * dt / d
+                g.nodes[i].vx = g.nodes[i].vx - dx * f - dy * sw
+                g.nodes[i].vy = g.nodes[i].vy - dy * f + dx * sw
+            }
+        }
+    }
+}
+
+pub fn gridDraw(c: &mut Canvas, g: &Grid, r: f64, gg: f64, b: f64) {
+    let cols = g.cols
+    let rows = g.rows
+    for row in 0..rows {
+        for col in 0..cols {
+            let i = row * cols + col
+            // Stretched springs glow hot; a slack grid is nearly invisible.
+            if col + 1 < cols {
+                let j = i + 1
+                let dx = g.nodes[j].x - g.nodes[i].x
+                let dy = g.nodes[j].y - g.nodes[i].y
+                let d = Math.sqrt(dx * dx + dy * dy)
+                var t = Math.abs(d - g.spacing) * 0.16
+                if t > 3.0 {
+                    t = 3.0
+                }
+                let m = 0.42 + t * 11.0
+                line(c, g.nodes[i].x, g.nodes[i].y, g.nodes[j].x, g.nodes[j].y, r * m, gg * m + t * 0.18, b * m + t * 0.55)
+            }
+            if row + 1 < rows {
+                let j = i + cols
+                let dx = g.nodes[j].x - g.nodes[i].x
+                let dy = g.nodes[j].y - g.nodes[i].y
+                let d = Math.sqrt(dx * dx + dy * dy)
+                var t = Math.abs(d - g.spacing) * 0.16
+                if t > 3.0 {
+                    t = 3.0
+                }
+                let m = 0.42 + t * 11.0
+                line(c, g.nodes[i].x, g.nodes[i].y, g.nodes[j].x, g.nodes[j].y, r * m, gg * m + t * 0.18, b * m + t * 0.55)
+            }
+        }
+    }
+}

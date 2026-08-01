@@ -17,6 +17,12 @@ from "std/regex" import {
 from "std/color" import {
     Color
 }
+from "std/runtime" import {
+    Promise
+}
+from "std/string" import {
+    strContainsIgnoreCase, strIndexOfFromIgnoreCase
+}
 
 // ── helpers ──
 
@@ -83,6 +89,37 @@ pub struct RgOpts {
     fileType: string,
     totalMatches: i64,
     needsSeparator: bool,
+    // The pattern, plus whether it is a plain substring. Kept on the options so
+    // the whole-file reject below does not recompute it per file.
+    pattern: string,
+    literal: bool,
+    // -i has to reach the literal matcher, not just the regex flags. It used to stop
+    // at the flags, so `rg -i foo` prefiltered case-SENSITIVELY and silently dropped
+    // every match that differed in case — a wrong answer, not a slow one.
+    //
+    // Folding happens inside the search (std/string's case-insensitive memchr
+    // scan), not by lowercasing a copy of every file — that copy cost more than the
+    // search it fed.
+    ignoreCase: bool,
+}
+
+// Next occurrence of the literal at or after `from`, honouring -i.
+pub fn literalFrom(content: &string, opts: &RgOpts, from: i64): Option<i64> {
+    if opts.ignoreCase {
+        let at = strIndexOfFromIgnoreCase(content, opts.pattern, from)
+        if at < 0 {
+            return Option.None
+        }
+        return Option.Some(at)
+    }
+    return content.indexOfFrom(opts.pattern, from)
+}
+
+pub fn literalIn(content: &string, needle: &string, ci: bool): bool {
+    if ci {
+        return strContainsIgnoreCase(content, needle)
+    }
+    return content.contains(needle)
 }
 
 // ── match helpers ──
@@ -109,6 +146,38 @@ pub fn filterWordBounds(line: &string, matches: Vec<RegexMatch>): Vec<RegexMatch
         }
     }
     return result
+}
+
+// A pattern with no regex metacharacters is just a substring search, and
+// `contains` bottoms out in memchr + memcmp. Running the regex engine over every
+// line of every file to find "uint256" is most of what made a tree-wide search
+// slow — ripgrep's equivalent is its literal prefilter.
+pub fn isPlainLiteral(pat: &string): bool {
+    if pat.len == 0 {
+        return false
+    }
+    for byte in pat {
+        // . * + ? [ ] ( ) { } | ^ $ \
+        if byte == 46 || byte == 42 || byte == 43 || byte == 63 {
+            return false
+        }
+        if byte == 91 || byte == 93 || byte == 40 || byte == 41 {
+            return false
+        }
+        if byte == 123 || byte == 125 || byte == 124 || byte == 94 {
+            return false
+        }
+        if byte == 36 || byte == 92 {
+            return false
+        }
+        // A newline in the pattern would let a whole-buffer match straddle two lines,
+        // which the literal path's "one match per line" bookkeeping cannot express.
+        // The regex path cannot match it either — it searches line by line.
+        if byte == 10 {
+            return false
+        }
+    }
+    return true
 }
 
 pub fn getMatches(re: &mut Regex, line: &string, wordBound: bool): Vec<RegexMatch> {
@@ -179,6 +248,118 @@ pub fn searchFile(filePath: &string, re: &mut Regex, opts: &mut RgOpts, multiFil
         Result.Err(_) => {
             return
         }
+    }
+    searchContent(content, filePath, re, opts, multiFile, false)
+}
+
+// `knownMatch` is set by the parallel path, which already proved the literal is in
+// this buffer — re-running the whole-file reject there would scan every matching
+// file twice for an answer it has.
+pub fn searchContent(content: &string, filePath: &string, re: &mut Regex, opts: &mut RgOpts, multiFile: bool, knownMatch: bool): void {
+    // Whole-file reject: if the pattern is a literal and the file does not contain
+    // it anywhere, there is nothing to split, allocate or scan line by line. One
+    // memchr pass over the buffer replaces N regex runs.
+    if !knownMatch && opts.literal && !opts.invert && !literalIn(content, opts.pattern, opts.ignoreCase) {
+        return
+    }
+
+    // Literal pattern, no context to print: search the file buffer, not its lines.
+    //
+    // Visiting every line to ask "does it match" costs a scan and a `Vec` per line —
+    // 200k of each on this tree — to reject ~99% of them. Searching the whole buffer
+    // instead means one memchr walk that lands directly on the next match and never
+    // touches the bytes of a line that has none. Lines are only reconstructed around
+    // the matches that survive, which is what makes this a scan of the ~1% rather
+    // than a scan of everything.
+    //
+    // `isPlainLiteral` rejects a pattern containing a newline, so a match is always
+    // contained in one line and `lineEnd` below is always past it.
+    if opts.literal && !opts.invert && opts.beforeCtx == 0 && opts.afterCtx == 0 && !opts.filesOnly {
+        var matchCountF: i64 = 0
+        var headerPrintedF: bool = false
+        // The newline walk is what locates the start of the matching line, so it is
+        // needed by anything that prints the line — but -c prints only a tally, and
+        // skips it entirely.
+        let needLineNo = !opts.countOnly
+        var lineNo: i64 = 0
+        var lineStart: i64 = 0
+        var pos: i64 = 0
+        let plen = opts.pattern.len
+        while true {
+            let Option.Some(at) = literalFrom(content, opts, pos) else {
+                break
+            }
+            // Walk forward to the line holding this match. lineStart never moves
+            // backwards, so across the whole file this visits each newline once.
+            if needLineNo {
+                while true {
+                    let Option.Some(nl) = content.indexOfFrom("\n", lineStart) else {
+                        break
+                    }
+                    if nl >= at {
+                        break
+                    }
+                    lineStart = nl + 1
+                    lineNo = lineNo + 1
+                }
+            }
+            var lineEnd = content.len
+            if let Option.Some(nl) = content.indexOfFrom("\n", at) {
+                lineEnd = nl
+            }
+
+            matchCountF = matchCountF + 1
+            if !opts.countOnly {
+                if !headerPrintedF && multiFile && !opts.noHeading {
+                    if opts.needsSeparator {
+                        print("")
+                    }
+                    if opts.noColor {
+                        print(filePath)
+                    } else {
+                        print(Color.magenta(filePath))
+                    }
+                    headerPrintedF = true
+                    opts.needsSeparator = true
+                }
+                // Every occurrence on this line, as offsets within the line.
+                var lineMatches: Vec<RegexMatch> = Vec.new()
+                var m = at
+                while m + plen <= lineEnd {
+                    let Option.Some(mm) = literalFrom(content, opts, m) else {
+                        break
+                    }
+                    if mm + plen > lineEnd {
+                        break
+                    }
+                    lineMatches.push(RegexMatch {
+                        start: mm - lineStart, end: mm + plen - lineStart
+                    }
+                    )
+                    m = mm + plen
+                }
+                let lineText = content.substr(lineStart, lineEnd)
+                let hlF = highlightLine(lineText, lineMatches, opts.noColor || opts.invert)
+                print(formatLine(hlF, lineNo, true, filePath, multiFile, opts))
+            }
+            if opts.maxCount > 0 && matchCountF >= opts.maxCount {
+                break
+            }
+            // One match per line: resume past this line entirely.
+            pos = lineEnd + 1
+            if pos > content.len {
+                break
+            }
+        }
+        if opts.countOnly && matchCountF > 0 {
+            if multiFile {
+                print(filePath + ":" + matchCountF.toString())
+            } else {
+                print(matchCountF.toString())
+            }
+        }
+        opts.totalMatches = opts.totalMatches + matchCountF
+        return
     }
 
     let lines = content.split("\n")
@@ -268,6 +449,132 @@ pub fn searchFile(filePath: &string, re: &mut Regex, opts: &mut RgOpts, multiFil
 
 // ── directory search ──
 
+// Walk the tree once, collecting file paths. Same skip rules as searchDir.
+pub fn collectFiles(dirPath: &string, opts: &RgOpts, out: &mut Vec<string>): void {
+    let entries = readDir(dirPath)!
+    for i in 0..entries.len {
+        let name = entries[i].name.clone()
+        let entryIsDir = entries[i].isDir
+        let entryIsFile = entries[i].isFile
+        if !opts.searchHidden && name.len > 0 && name[0] == 46 {
+            continue
+        }
+        let fullPath = Path.join(dirPath, name)
+        if entryIsDir {
+            if !shouldSkipDir(name) {
+                collectFiles(fullPath, opts, out)
+            }
+        } else if entryIsFile {
+            // Apply -t here, not in searchFile: a file the type filter rejects must
+            // never reach the prescan, or the threads read it for nothing.
+            if matchesType(fullPath, opts.fileType) {
+                out.push(fullPath)
+            }
+        }
+    }
+}
+
+// A file that survived the prescan, carrying the bytes the prescan already read.
+pub struct Hit {
+    path: string,
+    content: string,
+}
+
+// Which of these files contain the literal at all? Read-only, no output, no shared
+// state — which is what makes it safe to run on a pool of OS threads.
+//
+// The surviving file's buffer comes back with it. Answering the boolean requires
+// reading the whole file anyway, and dropping the buffer only to have the printing
+// pass open and read the same file a second time was pure waste — on a tree where
+// ~15% of files match, that second read is the entire serial tail.
+// The prescan and the matcher must agree on case, or the prescan silently drops
+// files the matcher would have printed — so both go through literalIn/literalFrom.
+pub fn scanChunk(paths: Vec<string>, needle: string, ci: bool): Vec<Hit> {
+    var hits: Vec<Hit> = Vec.new()
+    for i in 0..paths.len {
+        match readFile(paths[i]) {
+            Result.Ok(data) => {
+                if literalIn(data, needle, ci) {
+                    hits.push(Hit {
+                        path: paths[i].clone(), content: data
+                    }
+                    )
+                }
+            }
+            Result.Err(_) => {
+            }
+        }
+    }
+    return hits
+}
+
+// Literal search over a directory, in parallel.
+//
+// Only the "which files contain this at all" pass is parallel — it is the whole
+// cost on a tree (most files do not match) and it produces no output, so there is
+// nothing to order. Printing then happens sequentially over the surviving files,
+// in walk order, so the output is byte-identical to the serial path. Threads that
+// print interleave; threads that answer a boolean do not.
+pub fn searchDirParallel(dirPath: &string, re: &mut Regex, opts: &mut RgOpts): void {
+    var files: Vec<string> = Vec.new()
+    collectFiles(dirPath, opts, files)
+
+    let workers: i64 = 8
+    if files.len < workers * 4 {
+        // too few files to be worth the threads
+        for i in 0..files.len {
+            searchFile(files[i], re, opts, true)
+        }
+        return
+    }
+
+    // Round-robin, not contiguous blocks. Big files cluster in a tree (one deep
+    // subdirectory of generated headers), and a contiguous split hands that whole
+    // subdirectory to one worker while the rest finish early. Striding interleaves
+    // any such run across all of them. Order is still recoverable — see below.
+    var ps: Vec<Promise<Vec<Hit>>> = Vec.new()
+    for w in 0..workers {
+        var chunk: Vec<string> = Vec.new()
+        var i = w
+        while i < files.len {
+            chunk.push(files[i].clone())
+            i = i + workers
+        }
+        // Even an empty chunk is submitted: the merge below indexes parts by
+        // `idx % workers`, so the list must stay exactly `workers` long.
+        let needle = opts.pattern.clone()
+        let ci = opts.ignoreCase
+        ps.push(Promise<Vec<Hit>>.blocking(move(): Vec<Hit> => {
+            return scanChunk(chunk, needle, ci)
+        }
+        ))
+    }
+    let parts = Promise.all(ps).await()!
+    // Each worker's hits are in walk order among themselves, and worker w held
+    // indices w, w+8, w+16… — so a merge across the 8 lists by original index
+    // reproduces exact walk order. Tracking the index explicitly would need a field
+    // on Hit; instead, walk the file list and pop from the worker that owned each
+    // index, which is the same merge without the bookkeeping.
+    var cursors: Vec<i64> = Vec.new()
+    for _ in 0..parts.len {
+        cursors.push(0)
+    }
+    for idx in 0..files.len {
+        let w = idx % parts.len
+        let c = cursors[w]
+        if c >= parts[w].len {
+            continue
+        }
+        // Its owner skipped this index (no match, or unreadable) if the head of that
+        // worker's hit list is some later file.
+        if parts[w][c].path != files[idx] {
+            continue
+        }
+        cursors[w] = c + 1
+        searchContent(parts[w][c].content, files[idx], re, opts, true, true)
+    }
+}
+
 pub fn searchDir(dirPath: &string, re: &mut Regex, opts: &mut RgOpts): void {
     let entries = readDir(dirPath)!
     for i in 0..entries.len {
@@ -292,7 +599,11 @@ pub fn searchDir(dirPath: &string, re: &mut Regex, opts: &mut RgOpts): void {
 
 pub fn searchPath(path: &string, re: &mut Regex, opts: &mut RgOpts): void {
     if isDir(path) {
-        searchDir(path, re, opts)
+        if opts.literal && !opts.invert {
+            searchDirParallel(path, re, opts)
+        } else {
+            searchDir(path, re, opts)
+        }
     } else if isFile(path) {
         searchFile(path, re, opts, false)
     } else {
@@ -369,6 +680,9 @@ pub fn main(): i32 {
         fileType: args.getString("type"),
         totalMatches: 0,
         needsSeparator: false,
+        pattern: pattern.clone(),
+        literal: isPlainLiteral(pattern) && !args.getBool("word-regexp"),
+        ignoreCase: ignoreCase,
     }
 
     var target = args.getString("path")

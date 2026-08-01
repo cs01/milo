@@ -90,6 +90,7 @@ export type HIRExpr =
   | { kind: "VecSwap"; object: HIRExpr; indexA: HIRExpr; indexB: HIRExpr; elementType: TypeKind; type: TypeKind; span?: Span }
   | { kind: "VecInsert"; object: HIRExpr; index: HIRExpr; value: HIRExpr; elementType: TypeKind; type: TypeKind; span?: Span }
   | { kind: "VecRemove"; object: HIRExpr; index: HIRExpr; elementType: TypeKind; type: TypeKind; span?: Span }
+  | { kind: "VecTruncate"; object: HIRExpr; length: HIRExpr; elementType: TypeKind; type: TypeKind; span?: Span }
   | { kind: "VecContains"; vec: HIRExpr; value: HIRExpr; elementType: TypeKind; type: TypeKind; span?: Span }
   | { kind: "VecSort"; object: HIRExpr; elementType: TypeKind; type: TypeKind; span?: Span }
   | { kind: "VecSortBy"; object: HIRExpr; callback: HIRExpr; elementType: TypeKind; type: TypeKind; span?: Span }
@@ -127,7 +128,10 @@ export type HIRStmt =
   | { kind: "UnsafeBlock"; body: HIRStmt[]; span?: Span }
   | { kind: "ForRange"; varName: string; varType: TypeKind; start: HIRExpr; end: HIRExpr; body: HIRStmt[]; invariants?: HIRContract[]; span?: Span }
   | { kind: "ForEach"; varName: string; varName2: string | null; varType: TypeKind; varType2: TypeKind | null; iterable: HIRExpr; iterableKind: "vec" | "string" | "hashmap" | "array"; body: HIRStmt[]; invariants?: HIRContract[]; span?: Span }
-  | { kind: "ForIterator"; varName: string; varType: TypeKind; iterable: HIRExpr; nextMethod: string; optionEnumName: string; body: HIRStmt[]; invariants?: HIRContract[]; span?: Span };
+  | { kind: "ForIterator"; varName: string; varType: TypeKind; iterable: HIRExpr; nextMethod: string; optionEnumName: string; body: HIRStmt[]; invariants?: HIRContract[]; span?: Span }
+  // `for line in text.lines()` / `for f in text.splitView(sep)`: the loop variable is a
+  // `&string` view into `src`, so no piece is ever copied or allocated.
+  | { kind: "ForStrView"; varName: string; varName2: string | null; varType: TypeKind; src: HIRExpr; sep: HIRExpr | null; mode: "lines" | "split"; body: HIRStmt[]; invariants?: HIRContract[]; span?: Span };
 
 export interface HIRMatchArm {
   pattern: HIRPattern;

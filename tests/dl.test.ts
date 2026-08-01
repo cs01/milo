@@ -11,8 +11,14 @@ import { join } from "path";
 //   - library -> host: the loaded object resolving ITS undefined symbols against
 //     the executable, which is what makes a Node-API addon loadable at all
 //
-// Both need -Wl,-export_dynamic on the host, so this test builds its own binaries
-// rather than relying on the fixture runner's flags.
+// Both need the host's symbols in the dynamic table, so this test builds its own
+// binaries rather than relying on the fixture runner's flags.
+//
+// The flag is macOS-only. GNU ld has no `-export_dynamic`: it parses that as
+// `-e xport_dynamic`, drops the real entry symbol, warns, and picks whatever
+// address .text starts at — which ran fine by luck until a codegen change moved
+// the first function, and then the binary crashed with no hint as to why. Linux
+// needs nothing here; the driver already adds -rdynamic for every Linux link.
 
 const COMPILER = join(import.meta.dir, "..", "src", "main.ts");
 const dir = mkdtempSync(join(tmpdir(), "milo-dl-"));
@@ -38,7 +44,8 @@ function buildMilo(name: string, source: string): string {
   const src = join(dir, `${name}.milo`);
   const bin = join(dir, name);
   writeFileSync(src, source);
-  sh("bun", ["run", COMPILER, "build", src, "-o", bin, "-Wl,-export_dynamic"]);
+  const exportFlags = process.platform === "darwin" ? ["-Wl,-export_dynamic"] : [];
+  sh("bun", ["run", COMPILER, "build", src, "-o", bin, ...exportFlags]);
   return bin;
 }
 

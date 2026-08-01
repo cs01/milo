@@ -404,6 +404,21 @@ class LowerCtx {
             span: stmt.span,
           };
         }
+        const viewInfo = this.c.stringViewForIns?.get(stmt);
+        if (viewInfo && stmt.iterable.kind === "MethodCall") {
+          return {
+            kind: "ForStrView",
+            varName: stmt.varName,
+            varName2: stmt.varName2,
+            varType: { tag: "ref", inner: { tag: "string" }, mutable: false },
+            src: this.lowerExpr(stmt.iterable.object),
+            sep: viewInfo.mode === "split" && stmt.iterable.args[0] ? this.lowerExpr(stmt.iterable.args[0]) : null,
+            mode: viewInfo.mode,
+            body: stmt.body.map(s => this.lowerStmt(s, fnRetType)),
+            ...(forInvariants.length > 0 && { invariants: forInvariants }),
+            span: stmt.span,
+          };
+        }
         const iterInfo = this.c.iteratorForIns?.get(stmt);
         if (iterInfo) {
           return {
@@ -997,6 +1012,12 @@ class LowerCtx {
           if (expr.method === "remove") {
             return { kind: "VecRemove", object: this.lowerExpr(expr.object), index: this.lowerExpr(expr.args[0]), elementType: objType.element, type, span: expr.span };
           }
+          if (expr.method === "clear" || expr.method === "truncate") {
+            const lenExpr: import("./hir").HIRExpr = expr.method === "clear"
+              ? { kind: "IntLit", value: 0n, type: { tag: "int", bits: 64, signed: true }, span: expr.span }
+              : this.lowerExpr(expr.args[0]);
+            return { kind: "VecTruncate", object: this.lowerExpr(expr.object), length: lenExpr, elementType: objType.element, type, span: expr.span };
+          }
           if (expr.method === "sort") {
             return { kind: "VecSort", object: this.lowerExpr(expr.object), elementType: objType.element, type, span: expr.span };
           }
@@ -1165,6 +1186,11 @@ class LowerCtx {
             return { expr: this.lowerExpr(a), passByRef: !!borrowed, refMut: borrowed?.mutable ?? false };
           });
           return { kind: "ClosureCall", callee, args, type, span: expr.span };
+        }
+        // `.clone()` on a Copy scalar is the identity — the checker admits it so
+        // generic code has one spelling that works for Copy and non-Copy alike.
+        if (expr.method === "clone" && expr.args.length === 0) {
+          return this.lowerExpr(expr.object);
         }
         throw new Error(`unsupported method call: ${expr.method}`);
       }

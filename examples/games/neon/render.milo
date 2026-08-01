@@ -1,0 +1,507 @@
+// Draws the world. Reads game state, writes pixels — it never mutates either the
+// world or anything it points at, which is why every parameter here is `&`.
+
+from "std/math" import {
+    Math
+}
+from "./gfx" import {
+    Canvas, line, spot, poly, circle, text, textCentered, textWidth
+}
+from "./grid" import {
+    gridDraw
+}
+from "./world" import {
+    World, Ent, Kind, Perk, alive, isEnemy, perkName, perkBlurb, handleIsNull, kindName
+}
+
+pub struct Shapes {
+    ship: Vec<f64>,
+    diamond: Vec<f64>,
+    hexagon: Vec<f64>,
+    square: Vec<f64>,
+    triangle: Vec<f64>,
+    gem: Vec<f64>,
+    turret: Vec<f64>,
+    plate: Vec<f64>,
+    core: Vec<f64>,
+}
+
+fn ngon(n: i64, rot: f64): Vec<f64> {
+    var v: Vec<f64> = Vec.new()
+    let step = 6.283185307179586 / (n as f64)
+    for i in 0..n {
+        let a = rot + (i as f64) * step
+        v.push(Math.cos(a))
+        v.push(Math.sin(a))
+    }
+    return v
+}
+
+pub fn shapesNew(): Shapes {
+    var ship: Vec<f64> = Vec.new()
+    ship.push(1.35)
+    ship.push(0.0)
+    ship.push(0.0 - 0.75)
+    ship.push(0.0 - 0.85)
+    ship.push(0.0 - 0.35)
+    ship.push(0.0)
+    ship.push(0.0 - 0.75)
+    ship.push(0.85)
+
+    // Deliberately NOT triangular: a triangle plus a ring read as a second player
+    // ship, which was the most confusing thing on screen.
+    var turret: Vec<f64> = Vec.new()
+    turret.push(0.0 - 0.85)
+    turret.push(0.0 - 0.85)
+    turret.push(0.85)
+    turret.push(0.0 - 0.85)
+    turret.push(0.85)
+    turret.push(0.85)
+    turret.push(0.0 - 0.85)
+    turret.push(0.85)
+
+    var plate: Vec<f64> = Vec.new()
+    plate.push(1.0)
+    plate.push(0.0 - 0.55)
+    plate.push(1.35)
+    plate.push(0.0)
+    plate.push(1.0)
+    plate.push(0.55)
+    plate.push(0.0 - 0.9)
+    plate.push(0.75)
+    plate.push(0.0 - 0.9)
+    plate.push(0.0 - 0.75)
+
+    return Shapes {
+        ship: ship,
+        diamond: ngon(4, 0.0),
+        hexagon: ngon(6, 0.0),
+        square: ngon(4, 0.7853981633974483),
+        triangle: ngon(3, 0.0),
+        gem: ngon(4, 0.0),
+        turret: turret,
+        plate: plate,
+        core: ngon(8, 0.0),
+    }
+}
+
+// Returning `&Vec<f64>` here would be a compile error — references are
+// second-class, so a lookup hands back the drawing itself rather than a borrow
+// into the shape table.
+fn drawShape(c: &mut Canvas, s: &Shapes, k: Kind, x: f64, y: f64, ang: f64, sc: f64, r: f64, g: f64, b: f64) {
+    match k {
+        Kind.Seeker => {
+            poly(c, s.diamond, x, y, ang, sc, r, g, b)
+        }
+        Kind.Wanderer => {
+            poly(c, s.hexagon, x, y, ang, sc, r, g, b)
+        }
+        Kind.Weaver => {
+            poly(c, s.square, x, y, ang, sc, r, g, b)
+        }
+        Kind.Splitter => {
+            poly(c, s.triangle, x, y, ang, sc, r, g, b)
+        }
+        Kind.SnakeHead => {
+            poly(c, s.triangle, x, y, ang, sc, r, g, b)
+        }
+        Kind.SnakeSeg => {
+            poly(c, s.diamond, x, y, ang, sc, r, g, b)
+        }
+        Kind.BlackHole => {
+            poly(c, s.core, x, y, ang, sc, r, g, b)
+        }
+        Kind.Healer => {
+            poly(c, s.hexagon, x, y, ang, sc, r, g, b)
+        }
+        Kind.Turret => {
+            poly(c, s.turret, x, y, ang, sc, r, g, b)
+        }
+        Kind.Sentinel => {
+            poly(c, s.core, x, y, ang, sc, r, g, b)
+        }
+        Kind.Armor => {
+            poly(c, s.plate, x, y, ang, sc, r, g, b)
+        }
+        Kind.Gem => {
+            poly(c, s.gem, x, y, ang, sc, r, g, b)
+        }
+    }
+}
+
+// Deterministic hash — lightning has to look random but stay stable for the few
+// frames an arc is alive.
+fn hashf(seed: i64, i: i64): f64 {
+    let v = Math.sin((seed as f64) * 12.9898 + (i as f64) * 78.233) * 43758.5453
+    return (v - Math.floor(v)) * 2.0 - 1.0
+}
+
+pub fn drawWorld(c: &mut Canvas, w: &World, s: &Shapes, ox: f64, oy: f64) {
+    gridDraw(c, w.grid, 0.006, 0.020, 0.080)
+
+    // black-hole event horizons sit under everything
+    for i in 0..w.ents.len {
+        if w.ents[i].alive {
+            match w.ents[i].kind {
+                Kind.BlackHole => {
+                    let x = w.ents[i].x + ox
+                    let y = w.ents[i].y + oy
+                    let r = w.ents[i].radius
+                    for k in 0..3 {
+                        let rr = r * (1.6 + (k as f64) * 0.9) + Math.sin(w.time * 3.0 + (k as f64)) * 4.0
+                        let f = 0.5 - (k as f64) * 0.13
+                        circle(c, x, y, rr, 26, 1.1 * f, 0.2 * f, 1.8 * f)
+                    }
+                }
+                _ => {
+                }
+            }
+        }
+    }
+
+    // healer beams and boss tethers — links drawn straight from the handles
+    for i in 0..w.ents.len {
+        if !w.ents[i].alive || w.ents[i].spawnT > 0.0 {
+            continue
+        }
+        match w.ents[i].kind {
+            Kind.Healer => {
+                let t = w.ents[i].target
+                if alive(w, t) {
+                    let x0 = w.ents[i].x + ox
+                    let y0 = w.ents[i].y + oy
+                    let x1 = w.ents[t.slot].x + ox
+                    let y1 = w.ents[t.slot].y + oy
+                    let pulse = 0.6 + 0.4 * Math.sin(w.time * 14.0)
+                    line(c, x0, y0, x1, y1, 0.15 * pulse, 1.5 * pulse, 0.7 * pulse)
+                    spot(c, x1, y1, 9.0, 0.1, 0.9, 0.4)
+                }
+            }
+            Kind.Armor => {
+                let core = w.ents[i].leader
+                if alive(w, core) {
+                    line(c, w.ents[i].x + ox, w.ents[i].y + oy, w.ents[core.slot].x + ox, w.ents[core.slot].y + oy, 0.5, 0.2, 0.05)
+                }
+            }
+            Kind.SnakeSeg => {
+                let ld = w.ents[i].leader
+                if alive(w, ld) {
+                    line(c, w.ents[i].x + ox, w.ents[i].y + oy, w.ents[ld.slot].x + ox, w.ents[ld.slot].y + oy, 0.1, 0.9, 0.3)
+                }
+            }
+            Kind.Turret => {
+                let t = w.ents[i].target
+                if alive(w, t) {
+                    let x0 = w.ents[i].x + ox
+                    let y0 = w.ents[i].y + oy
+                    let x1 = w.ents[t.slot].x + ox
+                    let y1 = w.ents[t.slot].y + oy
+                    // faint targeting laser
+                    line(c, x0, y0, x0 + (x1 - x0) * 0.35, y0 + (y1 - y0) * 0.35, 0.25, 0.5, 0.7)
+                }
+            }
+            _ => {
+            }
+        }
+    }
+
+    // particles
+    for i in 0..w.parts.len {
+        let t = w.parts[i].life / w.parts[i].maxLife
+        let f = t * t
+        spot(c, w.parts[i].x + ox, w.parts[i].y + oy, w.parts[i].size * (0.5 + t), w.parts[i].cr * f, w.parts[i].cg * f, w.parts[i].cb * f)
+    }
+
+    // lightning arcs
+    for i in 0..w.arcs.len {
+        let a = w.arcs[i]
+        let f = a.life / 0.14
+        let segs = 7
+        var px = a.x0 + ox
+        var py = a.y0 + oy
+        let dx = a.x1 - a.x0
+        let dy = a.y1 - a.y0
+        for k in 1..segs + 1 {
+            let t = (k as f64) / (segs as f64)
+            var qx = a.x0 + dx * t + ox
+            var qy = a.y0 + dy * t + oy
+            if k < segs {
+                qx = qx + hashf(a.seed, k) * 16.0
+                qy = qy + hashf(a.seed, k + 99) * 16.0
+            }
+            line(c, px, py, qx, qy, 1.4 * f, 1.6 * f, 2.2 * f)
+            px = qx
+            py = qy
+        }
+    }
+
+    // bullets as motion streaks
+    for i in 0..w.bullets.len {
+        let b = w.bullets[i]
+        line(c, b.px + ox, b.py + oy, b.x + ox, b.y + oy, b.cr * 1.6, b.cg * 1.6, b.cb * 1.6)
+        spot(c, b.x + ox, b.y + oy, 3.4, b.cr, b.cg, b.cb)
+        spot(c, b.x + ox, b.y + oy, 2.0, 1.4, 1.3, 1.1)
+    }
+
+    // entities
+    for i in 0..w.ents.len {
+        if !w.ents[i].alive {
+            continue
+        }
+        let e = w.ents[i]
+        let x = e.x + ox
+        let y = e.y + oy
+        if e.spawnT > 0.0 {
+            // materialising: a shrinking warning ring, no collision yet
+            let t = e.spawnT
+            let r = e.radius * (1.0 + t * 5.0)
+            let f = 0.5 + 0.5 * Math.sin(t * 40.0)
+            circle(c, x, y, r, 24, e.cr * f, e.cg * f, e.cb * f)
+            circle(c, x, y, e.radius * 1.15, 20, e.cr * 0.5, e.cg * 0.5, e.cb * 0.5)
+            spot(c, x, y, e.radius * 0.7 * f, e.cr * 0.35, e.cg * 0.35, e.cb * 0.35)
+            continue
+        }
+        var cr = e.cr
+        var cg = e.cg
+        var cb = e.cb
+        if e.flash > 0.0 {
+            let f = e.flash * 5.0
+            cr = cr + 2.2 * f
+            cg = cg + 2.2 * f
+            cb = cb + 2.2 * f
+        }
+        if e.burn > 0.0 {
+            cr = cr + 0.9
+            cg = cg + 0.25
+        }
+        if e.slow > 0.0 {
+            cb = cb + 0.9
+        }
+        drawShape(c, s, e.kind, x, y, e.ang, e.radius, cr, cg, cb)
+        drawShape(c, s, e.kind, x, y, e.ang, e.radius * 0.52, cr * 0.5, cg * 0.5, cb * 0.5)
+        spot(c, x, y, e.radius * 0.8, cr * 0.16, cg * 0.16, cb * 0.16)
+        match e.kind {
+            Kind.Gem => {
+                spot(c, x, y, 5.0, cr * 0.6, cg * 0.6, cb * 0.6)
+            }
+            Kind.Sentinel => {
+                circle(c, x, y, e.radius * 1.5, 30, cr * 0.4, cg * 0.4, cb * 0.4)
+                if e.tier <= 0 {
+                    spot(c, x, y, e.radius * 0.9, 1.6, 0.4, 0.1)
+                }
+                // health bar
+                let frac = Math.maxF64(e.hp / e.maxHp, 0.0)
+                let bw = 120.0
+                line(c, x - bw * 0.5, y - e.radius - 22.0, x - bw * 0.5 + bw * frac, y - e.radius - 22.0, 1.8, 0.3, 0.1)
+            }
+            Kind.Healer => {
+                spot(c, x, y, 4.5, 0.2, 1.2, 0.5)
+            }
+            Kind.Turret => {
+                // barrel pointing at its mark, plus a battery bar — no ring
+                let bx = x + Math.cos(e.ang) * e.radius * 1.9
+                let by = y + Math.sin(e.ang) * e.radius * 1.9
+                line(c, x, y, bx, by, cr, cg, cb)
+                let frac = Math.maxF64(e.hp / e.maxHp, 0.0)
+                let bw = e.radius * 2.0
+                line(c, x - bw * 0.5, y + e.radius + 7.0, x - bw * 0.5 + bw * frac, y + e.radius + 7.0, 0.2, 0.9, 1.2)
+            }
+            _ => {
+            }
+        }
+    }
+
+    // player
+    if w.player.alive {
+        var f = 1.0
+        if w.player.invuln > 0.0 {
+            f = 0.35 + 0.65 * (0.5 + 0.5 * Math.sin(w.time * 34.0))
+        }
+        let x = w.player.x + ox
+        let y = w.player.y + oy
+        // A ring that is always there: in a busy frame the ship itself is small,
+        // and "where am I" must never be a question.
+        circle(c, x, y, 27.0, 24, 0.18 * f, 0.38 * f, 0.5 * f)
+        poly(c, s.ship, x, y, w.player.ang, 18.0, 0.7 * f, 2.6 * f, 3.2 * f)
+        poly(c, s.ship, x, y, w.player.ang, 11.0, 1.2 * f, 2.0 * f, 2.6 * f)
+        spot(c, x, y, 11.0, 0.45 * f, 0.95 * f, 1.4 * f)
+        spot(c, x, y, 3.6, 2.0 * f, 2.2 * f, 2.4 * f)
+        if w.player.bombFlash > 0.0 {
+            let r = (0.55 - w.player.bombFlash) * 2400.0
+            circle(c, x, y, r, 64, 1.2, 1.6, 2.0)
+            circle(c, x, y, r * 0.86, 64, 0.6, 0.9, 1.4)
+        }
+        if hasSlowfield(w) {
+            circle(c, x, y, 150.0, 40, 0.08, 0.16, 0.4)
+        }
+    }
+}
+
+fn hasSlowfield(w: &World): bool {
+    for i in 0..w.perks.len {
+        match w.perks[i] {
+            Perk.Slowfield => {
+                return true
+            }
+            _ => {
+            }
+        }
+    }
+    return false
+}
+
+// ── HUD ───────────────────────────────────────────────────────────────────────
+
+pub fn drawHud(c: &mut Canvas, w: &World) {
+    text(c, 24, 22, "SCORE " + w.score.toString(), 3, 0.32, 0.62, 0.82)
+    // The multiplier drains on a timer, so show how much of it is left.
+    let mstr = "x" + w.mult.toString()
+    text(c, 24, 60, mstr, 3, 0.85, 0.62, 0.14)
+    if w.mult > 1 {
+        let frac = Math.clampF64(w.multTimer / 6.0, 0.0, 1.0)
+        let x0 = 24.0 + (textWidth(mstr, 3) as f64) + 10.0
+        line(c, x0, 76.0, x0 + 90.0 * frac, 76.0, 0.85, 0.62, 0.14)
+    }
+    let wstr = "WAVE " + w.wave.toString()
+    text(c, c.w - 24 - textWidth(wstr, 3), 22, wstr, 3, 0.55, 0.24, 0.68)
+
+    text(c, 24, 100, "LIVES", 2, 0.22, 0.38, 0.48)
+    for i in 0..w.player.lives {
+        let x = 96 + i * 22
+        spot(c, (x as f64), 106.0, 6.0, 0.3, 1.2, 1.7)
+    }
+    text(c, 24, 126, "BOMBS", 2, 0.22, 0.38, 0.48)
+    for i in 0..w.player.bombs {
+        let x = 96 + i * 22
+        circle(c, (x as f64), 132.0, 6.0, 12, 1.4, 1.2, 0.4)
+    }
+
+    var y: i64 = 166
+    for i in 0..w.perks.len {
+        text(c, 24, y, perkName(w.perks[i]), 2, 0.22, 0.38, 0.48)
+        y = y + 20
+    }
+
+    // enemies left in the wave, so the pacing is legible
+    let left = enemyCount(w)
+    if left > 0 && !w.perkPick && !w.gameOver {
+        let estr = left.toString() + " LEFT"
+        text(c, c.w - 24 - textWidth(estr, 2), 62, estr, 2, 0.3, 0.24, 0.4)
+    }
+
+    // taking a hit stains the screen edges red for a moment
+    if w.hurt > 0.0 {
+        let f = w.hurt * 0.55
+        for i in 0..40 {
+            let t = (i as f64) / 39.0
+            let xx = t * (c.w as f64)
+            let yy = t * (c.h as f64)
+            spot(c, xx, 6.0, 90.0, f, 0.0, 0.0)
+            spot(c, xx, (c.h as f64) - 6.0, 90.0, f, 0.0, 0.0)
+            spot(c, 6.0, yy, 90.0, f, 0.0, 0.0)
+            spot(c, (c.w as f64) - 6.0, yy, 90.0, f, 0.0, 0.0)
+        }
+    }
+
+    // a newly unlocked enemy type is named, so the roster is learned not guessed
+    if w.newKindTimer > 0.0 && !w.perkPick && !w.gameOver {
+        var f = 1.0
+        if w.newKindTimer < 1.0 {
+            f = w.newKindTimer
+        }
+        textCentered(c, c.w / 2, 120, "NEW ENEMY", 2, 1.2 * f, 0.5 * f, 0.5 * f)
+        textCentered(c, c.w / 2, 146, kindName(w.newKind), 3, 1.5 * f, 1.0 * f, 0.3 * f)
+    }
+
+    // big centred wave title
+    if w.banner > 0.0 && !w.perkPick && !w.gameOver {
+        var f = 1.0
+        if w.banner < 0.7 {
+            f = w.banner / 0.7
+        }
+        if w.banner > 1.9 {
+            f = (2.2 - w.banner) / 0.3
+        }
+        textCentered(c, c.w / 2, c.h / 2 - 40, "WAVE " + w.wave.toString(), 8, 0.7 * f, 0.5 * f, 1.4 * f)
+        if w.wave == 1 {
+            textCentered(c, c.w / 2, c.h / 2 + 40, "MOUSE AIMS AND FIRES BY ITSELF", 2, 0.5 * f, 0.9 * f, 1.1 * f)
+            textCentered(c, c.w / 2, c.h / 2 + 64, "GREEN DIAMONDS RAISE YOUR MULTIPLIER", 2, 0.4 * f, 0.9 * f, 0.5 * f)
+            textCentered(c, c.w / 2, c.h / 2 + 88, "EVERYTHING ELSE KILLS YOU ON CONTACT", 2, 0.9 * f, 0.3 * f, 0.35 * f)
+        }
+    }
+
+    if w.perkPick {
+        let cx = c.w / 2
+        textCentered(c, cx, c.h / 2 - 150, "WAVE CLEARED", 5, 1.6, 1.4, 0.4)
+        textCentered(c, cx, c.h / 2 - 100, "CHOOSE AN UPGRADE   PRESS 1 2 OR 3", 2, 0.7, 1.2, 1.5)
+        for i in 0..w.perkChoices.len {
+            let yy = c.h / 2 - 40 + i * 62
+            let label = (i + 1).toString() + "  " + perkName(w.perkChoices[i])
+            textCentered(c, cx, yy, label, 4, 1.5, 1.1, 1.9)
+            textCentered(c, cx, yy + 32, perkBlurb(w.perkChoices[i]), 2, 0.5, 0.9, 1.1)
+        }
+    }
+
+    if w.gameOver {
+        let cx = c.w / 2
+        textCentered(c, cx, c.h / 2 - 60, "GAME OVER", 7, 1.9, 0.3, 0.4)
+        textCentered(c, cx, c.h / 2 + 20, "SCORE " + w.score.toString(), 4, 1.4, 1.4, 1.8)
+        textCentered(c, cx, c.h / 2 + 70, "PRESS ENTER TO RESTART", 2, 0.8, 1.0, 1.3)
+    }
+}
+
+fn enemyCount(w: &World): i64 {
+    var n: i64 = 0
+    for i in 0..w.ents.len {
+        if w.ents[i].alive && isEnemy(w.ents[i].kind) {
+            n = n + 1
+        }
+    }
+    return n + w.pending
+}
+
+// The auto-aim marker: brackets around the locked target plus a tracer, so it is
+// always obvious what the gun has picked.
+pub fn drawLock(c: &mut Canvas, w: &World, tx: f64, ty: f64, ang: f64, t: f64) {
+    if !w.player.alive {
+        return
+    }
+    let px = w.player.x
+    let py = w.player.y
+    for k in 1..7 {
+        let d = (k as f64) * 26.0
+        let f = 0.30 - (k as f64) * 0.04
+        spot(c, px + Math.cos(ang) * (30.0 + d), py + Math.sin(ang) * (30.0 + d), 1.5, 0.25 * f, 0.6 * f, 0.8 * f)
+    }
+    let r = 22.0 + Math.sin(t * 7.0) * 2.0
+    let a = 8.0
+    // four corner brackets
+    line(c, tx - r, ty - r + a, tx - r, ty - r, 1.2, 1.6, 0.5)
+    line(c, tx - r, ty - r, tx - r + a, ty - r, 1.2, 1.6, 0.5)
+    line(c, tx + r, ty - r + a, tx + r, ty - r, 1.2, 1.6, 0.5)
+    line(c, tx + r, ty - r, tx + r - a, ty - r, 1.2, 1.6, 0.5)
+    line(c, tx - r, ty + r - a, tx - r, ty + r, 1.2, 1.6, 0.5)
+    line(c, tx - r, ty + r, tx - r + a, ty + r, 1.2, 1.6, 0.5)
+    line(c, tx + r, ty + r - a, tx + r, ty + r, 1.2, 1.6, 0.5)
+    line(c, tx + r, ty + r, tx + r - a, ty + r, 1.2, 1.6, 0.5)
+}
+
+// Crosshair + a short tracer from the nose, for when the mouse is driving.
+pub fn drawAim(c: &mut Canvas, w: &World, aimX: f64, aimY: f64, ang: f64) {
+    if !w.player.alive {
+        return
+    }
+    let px = w.player.x
+    let py = w.player.y
+    for k in 1..7 {
+        let t = (k as f64) * 26.0
+        let f = 0.30 - (k as f64) * 0.04
+        spot(c, px + Math.cos(ang) * (30.0 + t), py + Math.sin(ang) * (30.0 + t), 1.5, 0.25 * f, 0.6 * f, 0.8 * f)
+    }
+    circle(c, aimX, aimY, 15.0, 20, 1.1, 1.7, 2.0)
+    circle(c, aimX, aimY, 4.0, 10, 1.4, 2.0, 2.4)
+    line(c, aimX - 26.0, aimY, aimX - 16.0, aimY, 1.1, 1.7, 2.0)
+    line(c, aimX + 16.0, aimY, aimX + 26.0, aimY, 1.1, 1.7, 2.0)
+    line(c, aimX, aimY - 26.0, aimX, aimY - 16.0, 1.1, 1.7, 2.0)
+    line(c, aimX, aimY + 16.0, aimX, aimY + 26.0, 1.1, 1.7, 2.0)
+}

@@ -1,0 +1,63 @@
+// Floats must print the shortest decimal that reads back as the same value.
+// Before this, every float went through printf "%g" — 6 significant digits — so
+// 1.0/3.0 printed as 0.333333 and 123456789.123456 as 1.23457e+08, silently
+// losing data on the way into logs, jsonStringify and toString.
+//
+// The magnitude cases (100.0, 1e16) guard the other half: picking the shortest
+// *precision* alone would render 100.0 as the round-tripping but unreadable
+// "1e+02", because %g goes exponential once the exponent reaches the precision.
+
+struct Point {
+    x: f64, y: f64
+}
+
+fn main() {
+    // @expect: 0.3333333333333333
+    print((1.0 / 3.0).toString())
+    // @expect: 0.30000000000000004
+    print((0.1 + 0.2).toString())
+    // @expect: 123456789.123456
+    print((123456789.123456).toString())
+
+    // shortest-but-readable: fixed notation while the magnitude is modest
+    // @expect: 5
+    print((5.0).toString())
+    // @expect: 100
+    print((100.0).toString())
+    // @expect: 0
+    print((0.0).toString())
+    // @expect: -123.456
+    print((0.0 - 123.456).toString())
+    // @expect: 10000000000000000
+    print((1e16).toString())
+    // @expect: 0.0001
+    print((0.0001).toString())
+
+    // exponent form once fixed notation would be absurd
+    // @expect: 1e+21
+    print((1e21).toString())
+    // @expect: 1e-07
+    print((1e-7).toString())
+
+    // non-finite keeps the historical spelling
+    // @expect: inf
+    print((1.0 / 0.0).toString())
+    // @expect: nan
+    print((0.0 / 0.0).toString())
+
+    // f32 round-trips at f32 precision, not at the promoted double's
+    let f: f32 = 1.0 / 3.0
+    // @expect: 0.33333334
+    print(f.toString())
+
+    // the same formatting has to reach interpolation, struct display and json
+    let p = Point {
+        x: 1.0 / 3.0, y: 100.0
+    }
+    // @expect: 0.3333333333333333 100
+    print($"{p.x} {p.y}")
+    // @expect: Point { x: 0.3333333333333333, y: 100 }
+    print($"{p}")
+    // @expect: {"x":0.3333333333333333,"y":100}
+    print(jsonStringify(p))
+}

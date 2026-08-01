@@ -34,8 +34,8 @@ pub let MAX_SUGGESTIONS = 8
 // population descending, so a first-match-wins scan is already popularity-ranked.
 pub fn loadCities(): void {
     let raw = @embedFile("data/uscities.tsv")
-    let lines = raw.split("\n")
-    for line in lines {
+    // lines() views into the embedded blob — splitting it would copy every row first
+    for line in raw.lines() {
         let f = line.split("\t")
         if f.len < 4 {
             continue

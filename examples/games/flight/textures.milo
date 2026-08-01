@@ -1,0 +1,134 @@
+// Procedural textures, built once at startup. There is no asset pipeline in this
+// example and none is needed: surface detail is cheaper to generate than to ship,
+// and it tiles seamlessly by construction because the noise wraps.
+
+from "std/math" import {
+    Math
+}
+from "./gfx3d" import {
+    Texture, texNew, texSet
+}
+
+pub let TEX_SIZE: i64 = 128
+
+pub let TEX_SHIFT: i64 = 7
+
+// Proper lattice value noise that WRAPS: the integer lattice is taken modulo the
+// period, so octave N tiles exactly and the texture has no seam. The previous
+// version was sin-of-sin, which is smooth mush — it produced an almost uniform
+// field, so the only thing visible on screen was the quad tessellation.
+// Wrapping by declaration: a bit-mixing hash is *supposed* to overflow, and Milo
+// traps on overflow by default. This is the one place in the game where wrapping
+// is the intent rather than a bug.
+@wrapping
+fn hashi(x: i64, y: i64, seed: i64): f64 {
+    var h = x * 374761393 + y * 668265263 + seed * 1442695040
+    h = (h ^ (h >> 13)) * 1274126177
+    h = h ^ (h >> 16)
+    var m = h % 4096
+    if m < 0 {
+        m = 0 - m
+    }
+    return (m as f64) / 4096.0
+}
+
+fn lattice(u: f64, v: f64, period: i64, seed: i64): f64 {
+    let fx = u * (period as f64)
+    let fy = v * (period as f64)
+    let x0 = Math.floor(fx) as i64
+    let y0 = Math.floor(fy) as i64
+    let tx = fx - (x0 as f64)
+    let ty = fy - (y0 as f64)
+    let sx = tx * tx * (3.0 - 2.0 * tx)
+    let sy = ty * ty * (3.0 - 2.0 * ty)
+    let xa = ((x0 % period) + period) % period
+    let ya = ((y0 % period) + period) % period
+    let xb = (xa + 1) % period
+    let yb = (ya + 1) % period
+    let n00 = hashi(xa, ya, seed)
+    let n10 = hashi(xb, ya, seed)
+    let n01 = hashi(xa, yb, seed)
+    let n11 = hashi(xb, yb, seed)
+    let a = n00 + (n10 - n00) * sx
+    let b = n01 + (n11 - n01) * sx
+    return a + (b - a) * sy
+}
+
+fn fbm(u: f64, v: f64, seed: f64): f64 {
+    let sd = seed as i64
+    var t = 0.0
+    t = t + lattice(u, v, 4, sd) * 0.42
+    t = t + lattice(u, v, 8, sd + 7) * 0.26
+    t = t + lattice(u, v, 16, sd + 19) * 0.18
+    t = t + lattice(u, v, 32, sd + 41) * 0.14
+    return t
+}
+
+// Ground detail: a broad mottle plus fine grain, kept near 1.0 because it is a
+// MULTIPLIER over the terrain's themed colour rather than a colour of its own.
+// One texture serves every region for exactly that reason.
+pub fn groundTexture(): Texture {
+    var t = texNew(TEX_SIZE, TEX_SHIFT)
+    for y in 0..TEX_SIZE {
+        for x in 0..TEX_SIZE {
+            let u = (x as f64) / (TEX_SIZE as f64)
+            let v = (y as f64) / (TEX_SIZE as f64)
+            // Clumps at two scales plus a hard speckle. Contrast is deliberately
+            // strong — this multiplies the terrain colour, and a subtle multiplier
+            // is indistinguishable from no texture at all.
+            let clump = fbm(u, v, 1.0)
+            let fine = lattice(u, v, 64, 91)
+            var k = 0.58 + clump * 0.78 + fine * 0.18
+            let grain = hashi(x, y, 5)
+            if grain > 0.92 {
+                k = k * 1.30
+            } else if grain < 0.10 {
+                k = k * 0.72
+            }
+            // slight warm/cool tilt so the mottling is not pure luminance
+            texSet(t, x, y, k * 1.04, k, k * 0.94)
+        }
+    }
+    return t
+}
+
+// Aircraft skin: light panels with darker seam lines, a coloured spine stripe and
+// a few rivet rows. Laid out in UV so the whole airframe indexes into one sheet.
+pub fn planeTexture(): Texture {
+    var t = texNew(TEX_SIZE, TEX_SHIFT)
+    for y in 0..TEX_SIZE {
+        for x in 0..TEX_SIZE {
+            var r = 0.86
+            var g = 0.88
+            var b = 0.92
+            // panel seams every 32 texels
+            if x % 32 == 0 || y % 32 == 0 {
+                r = 0.52
+                g = 0.54
+                b = 0.60
+            }
+            // rivets along the seams
+            if x % 32 == 0 && y % 8 == 4 {
+                r = 0.38
+                g = 0.40
+                b = 0.46
+            }
+            // spine stripe down the middle of the sheet
+            if y > 54 && y < 74 {
+                r = 1.05
+                g = 0.40
+                b = 0.22
+                if y == 55 || y == 73 {
+                    r = 0.70
+                    g = 0.26
+                    b = 0.14
+                }
+            }
+            // a subtle wash so the metal is not perfectly flat
+            let n = fbm((x as f64) / (TEX_SIZE as f64), (y as f64) / (TEX_SIZE as f64), 5.0)
+            let k = 0.94 + n * 0.12
+            texSet(t, x, y, r * k, g * k, b * k)
+        }
+    }
+    return t
+}

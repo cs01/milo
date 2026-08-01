@@ -104,7 +104,7 @@ fn procField(path: string, key: &string): string {
     let Result.Ok(text) = readFile(path) else {
         return ""
     }
-    for line in text.split("\n") {
+    for line in text.lines() {
         if line.startsWith(key) {
             let Option.Some(idx) = line.indexOf(":") else {
                 return ""

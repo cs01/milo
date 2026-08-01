@@ -1,0 +1,425 @@
+// FLYBY — real-world city data.
+//
+// A `.city` asset is a real place: a terrain grid resampled from NASA SRTM, a
+// land-cover grid and a set of building footprints from OpenStreetMap, all
+// projected into the game's metre-per-unit world space. `tools/fetchcity.milo`
+// builds one; this file loads it and answers the two questions the renderer asks
+// about any point on the map — how high is the ground, and what is on it.
+//
+// Google's map data is not usable here: its terms forbid bulk download and
+// redistribution, and there is no public elevation/footprint bulk endpoint. SRTM
+// (public domain) plus OSM (ODbL) is the stack that is actually legal to ship,
+// and it is the same data most "3D city" renderers are built on.
+//
+// Sea level is the DEM's own zero, so the coastline you fly over is the real
+// one — SRTM writes 0 over water, and the engine already treats h <= 0 as sea.
+
+from "std/fs" import {
+    readFile
+}
+from "std/math" import {
+    Math
+}
+
+pub let COVER_URBAN: u8 = 0 as u8
+
+pub let COVER_PARK: u8 = 1 as u8
+
+pub let COVER_SAND: u8 = 2 as u8
+
+pub let COVER_WATER: u8 = 3 as u8
+
+// Footprints are stored flat rather than as Vec<Vec<..>>: one contiguous point
+// array plus per-building offsets. A city is tens of thousands of buildings and
+// the draw loop touches them in spatial order every frame.
+pub struct City {
+    loaded: bool,
+    name: string,
+    originLat: f64,
+    originLon: f64,
+
+    demN: i64,
+    demStep: f64,
+    demX0: f64,
+    demZ0: f64,
+    dem: Vec<f64>,
+
+    coverN: i64,
+    coverStep: f64,
+    coverX0: f64,
+    coverZ0: f64,
+    cover: Vec<u8>,
+
+    bCount: i64,
+    bHeight: Vec<f64>,
+    bMinX: Vec<f64>,
+    bMinZ: Vec<f64>,
+    bMaxX: Vec<f64>,
+    bMaxZ: Vec<f64>,
+    bStart: Vec<i64>,
+    bLen: Vec<i64>,
+    bPtX: Vec<f64>,
+    bPtZ: Vec<f64>,
+
+    // Uniform-grid index over the footprints, in CSR form: cellStart[i]..
+    // cellStart[i+1] are slots in cellItems holding building ids overlapping
+    // cell i. Built at load, never mutated.
+    gridN: i64,
+    gridStep: f64,
+    gridX0: f64,
+    gridZ0: f64,
+    cellStart: Vec<i64>,
+    cellItems: Vec<i64>,
+
+    // Half-extent of the mapped area. Beyond this the ground fades to open sea,
+    // which is the only honest thing to draw: there is no data out there.
+    reach: f64,
+}
+
+pub fn cityEmpty(): City {
+    return City {
+        loaded: false,
+        name: "",
+        originLat: 0.0,
+        originLon: 0.0,
+        demN: 0,
+        demStep: 1.0,
+        demX0: 0.0,
+        demZ0: 0.0,
+        dem: Vec.new(),
+        coverN: 0,
+        coverStep: 1.0,
+        coverX0: 0.0,
+        coverZ0: 0.0,
+        cover: Vec.new(),
+        bCount: 0,
+        bHeight: Vec.new(),
+        bMinX: Vec.new(),
+        bMinZ: Vec.new(),
+        bMaxX: Vec.new(),
+        bMaxZ: Vec.new(),
+        bStart: Vec.new(),
+        bLen: Vec.new(),
+        bPtX: Vec.new(),
+        bPtZ: Vec.new(),
+        gridN: 0,
+        gridStep: 128.0,
+        gridX0: 0.0,
+        gridZ0: 0.0,
+        cellStart: Vec.new(),
+        cellItems: Vec.new(),
+        reach: 0.0,
+    }
+}
+
+// ---------------------------------------------------------------- byte codec
+
+// Everything on disk is a little-endian i32. Lengths are counts, coordinates and
+// heights are centimetres — a fixed point rather than a float, so the format has
+// no endianness or bit-layout question to get wrong and stays exact through a
+// round trip.
+pub fn putI32(out: &mut string, v: i64) {
+    out.push((v & 0xff) as u8)
+    out.push(((v >> 8) & 0xff) as u8)
+    out.push(((v >> 16) & 0xff) as u8)
+    out.push(((v >> 24) & 0xff) as u8)
+}
+
+pub fn getI32(src: &string, off: i64): i64 {
+    var v = (src[off] as i64) | ((src[off + 1] as i64) << 8) | ((src[off + 2] as i64) << 16) | ((src[off + 3] as i64) << 24)
+    if v >= 2147483648 {
+        v = v - 4294967296
+    }
+    return v
+}
+
+pub fn putCm(out: &mut string, v: f64) {
+    putI32(out, Math.round(v * 100.0) as i64)
+}
+
+pub let MAGIC: string = "MILOCITY"
+
+pub let VERSION: i64 = 1
+
+// ------------------------------------------------------------------- loading
+
+pub fn cityLoad(path: &string): Result<City, string> {
+    let Result.Ok(src) = readFile(path) else {
+        return Result.Err("cannot read " + path)
+    }
+    if src.len < 16 {
+        return Result.Err("truncated city file")
+    }
+    for i in 0..8 {
+        if src[i] != MAGIC[i] {
+            return Result.Err(path + " is not a .city file")
+        }
+    }
+    var p = 8
+    let ver = getI32(src, p)
+    p = p + 4
+    if ver != VERSION {
+        return Result.Err("city file version " + ver.toString() + ", expected " + VERSION.toString())
+    }
+
+    let nameLen = getI32(src, p)
+    p = p + 4
+    var name = ""
+    for i in 0..nameLen {
+        name.push(src[p + i])
+    }
+    p = p + nameLen
+
+    var c = cityEmpty()
+    c.name = name
+    c.originLat = (getI32(src, p) as f64) / 10000000.0
+    p = p + 4
+    c.originLon = (getI32(src, p) as f64) / 10000000.0
+    p = p + 4
+    c.reach = (getI32(src, p) as f64) / 100.0
+    p = p + 4
+
+    c.demN = getI32(src, p)
+    p = p + 4
+    c.demStep = (getI32(src, p) as f64) / 100.0
+    p = p + 4
+    c.demX0 = (getI32(src, p) as f64) / 100.0
+    p = p + 4
+    c.demZ0 = (getI32(src, p) as f64) / 100.0
+    p = p + 4
+    let demCount = c.demN * c.demN
+    c.dem = Vec.filled(demCount, 0.0)
+    for i in 0..demCount {
+        c.dem[i] = (getI32(src, p) as f64) / 100.0
+        p = p + 4
+    }
+
+    c.coverN = getI32(src, p)
+    p = p + 4
+    c.coverStep = (getI32(src, p) as f64) / 100.0
+    p = p + 4
+    c.coverX0 = (getI32(src, p) as f64) / 100.0
+    p = p + 4
+    c.coverZ0 = (getI32(src, p) as f64) / 100.0
+    p = p + 4
+    let coverCount = c.coverN * c.coverN
+    c.cover = Vec.filled(coverCount, 0 as u8)
+    for i in 0..coverCount {
+        c.cover[i] = src[p + i]
+    }
+    p = p + coverCount
+
+    let nb = getI32(src, p)
+    p = p + 4
+    c.bCount = nb
+    for i in 0..nb {
+        let h = (getI32(src, p) as f64) / 100.0
+        p = p + 4
+        let n = getI32(src, p)
+        p = p + 4
+        var minX = 1000000000.0
+        var minZ = 1000000000.0
+        var maxX = 0.0 - 1000000000.0
+        var maxZ = 0.0 - 1000000000.0
+        c.bHeight.push(h)
+        c.bStart.push(c.bPtX.len)
+        c.bLen.push(n)
+        for k in 0..n {
+            let x = (getI32(src, p) as f64) / 100.0
+            p = p + 4
+            let z = (getI32(src, p) as f64) / 100.0
+            p = p + 4
+            c.bPtX.push(x)
+            c.bPtZ.push(z)
+            if x < minX {
+                minX = x
+            }
+            if x > maxX {
+                maxX = x
+            }
+            if z < minZ {
+                minZ = z
+            }
+            if z > maxZ {
+                maxZ = z
+            }
+        }
+        c.bMinX.push(minX)
+        c.bMinZ.push(minZ)
+        c.bMaxX.push(maxX)
+        c.bMaxZ.push(maxZ)
+
+        // Normalise the winding once, here, rather than testing it per frame.
+        // OSM does not guarantee an orientation for a closed way, and the
+        // rasteriser backface-culls: a clockwise footprint extrudes into a
+        // building whose walls are all facing inwards, i.e. an invisible one.
+        let start = c.bStart[i]
+        var area = 0.0
+        for k in 0..n {
+            var k1 = k + 1
+            if k1 == n {
+                k1 = 0
+            }
+            area = area + c.bPtX[start + k] * c.bPtZ[start + k1] - c.bPtX[start + k1] * c.bPtZ[start + k]
+        }
+        if area < 0.0 {
+            var lo = 0
+            var hi = n - 1
+            while lo < hi {
+                let tx = c.bPtX[start + lo]
+                let tz = c.bPtZ[start + lo]
+                c.bPtX[start + lo] = c.bPtX[start + hi]
+                c.bPtZ[start + lo] = c.bPtZ[start + hi]
+                c.bPtX[start + hi] = tx
+                c.bPtZ[start + hi] = tz
+                lo = lo + 1
+                hi = hi - 1
+            }
+        }
+    }
+
+    c.loaded = true
+    buildIndex(c)
+    return Result.Ok(c)
+}
+
+// Two passes over the buildings: count per cell, prefix-sum, then scatter. No
+// per-cell Vec, so the index is two flat arrays regardless of how uneven the
+// density is — and downtown against parkland is very uneven.
+//
+// A building is filed under the cell holding its CENTRE, not under every cell
+// its bounding box touches. Filing it once means the draw loop never has to
+// remember what it has already emitted — no per-frame "seen" set over fifteen
+// thousand buildings — at the cost of searching one ring of cells wider, which
+// is what BUILDING_MARGIN below is for.
+fn buildIndex(c: &mut City) {
+    let span = c.reach * 2.0 + c.gridStep * 2.0
+    var n = (span / c.gridStep) as i64 + 1
+    if n < 1 {
+        n = 1
+    }
+    c.gridN = n
+    c.gridX0 = 0.0 - c.reach - c.gridStep
+    c.gridZ0 = 0.0 - c.reach - c.gridStep
+    let cells = n * n
+    var counts: Vec<i64> = Vec.filled(cells + 1, 0)
+
+    for b in 0..c.bCount {
+        let ci = cellIdxZ(c, (c.bMinZ[b] + c.bMaxZ[b]) * 0.5) * n + cellIdx(c, (c.bMinX[b] + c.bMaxX[b]) * 0.5)
+        counts[ci] = counts[ci] + 1
+    }
+    c.cellStart = Vec.filled(cells + 1, 0)
+    var acc = 0
+    for i in 0..cells {
+        c.cellStart[i] = acc
+        acc = acc + counts[i]
+    }
+    c.cellStart[cells] = acc
+    c.cellItems = Vec.filled(acc, 0)
+    var cursor: Vec<i64> = Vec.filled(cells, 0)
+    for i in 0..cells {
+        cursor[i] = c.cellStart[i]
+    }
+    for b in 0..c.bCount {
+        let ci = cellIdxZ(c, (c.bMinZ[b] + c.bMaxZ[b]) * 0.5) * n + cellIdx(c, (c.bMinX[b] + c.bMaxX[b]) * 0.5)
+        c.cellItems[cursor[ci]] = b
+        cursor[ci] = cursor[ci] + 1
+    }
+}
+
+// How far outside the query rectangle to search, in metres. A footprint filed by
+// its centre can still reach this far past it — a city block long enough to be
+// one OSM way is about this size.
+pub let BUILDING_MARGIN: f64 = 260.0
+
+pub fn cityCellX(c: &City, x: f64): i64 {
+    return cellIdx(c, x)
+}
+
+pub fn cityCellZ(c: &City, z: f64): i64 {
+    return cellIdxZ(c, z)
+}
+
+fn cellIdx(c: &City, x: f64): i64 {
+    var i = Math.floor((x - c.gridX0) / c.gridStep) as i64
+    if i < 0 {
+        i = 0
+    }
+    if i >= c.gridN {
+        i = c.gridN - 1
+    }
+    return i
+}
+
+fn cellIdxZ(c: &City, z: f64): i64 {
+    var i = Math.floor((z - c.gridZ0) / c.gridStep) as i64
+    if i < 0 {
+        i = 0
+    }
+    if i >= c.gridN {
+        i = c.gridN - 1
+    }
+    return i
+}
+
+// ------------------------------------------------------------------ sampling
+
+// Bilinear over the DEM. Past the mapped edge the ground fades to sea level over
+// one grid step rather than smearing the boundary row out to the horizon — flying
+// off the edge of the data should look like leaving the coast, not like a glitch.
+pub fn cityHeightAt(c: &City, x: f64, z: f64): f64 {
+    let fx = (x - c.demX0) / c.demStep
+    let fz = (z - c.demZ0) / c.demStep
+    let n = c.demN
+    if fx < 0.0 || fz < 0.0 || fx > (n - 1) as f64 || fz > (n - 1) as f64 {
+        return 0.0 - 6.0
+    }
+    let ix = Math.floor(fx) as i64
+    let iz = Math.floor(fz) as i64
+    var ix1 = ix + 1
+    var iz1 = iz + 1
+    if ix1 > n - 1 {
+        ix1 = n - 1
+    }
+    if iz1 > n - 1 {
+        iz1 = n - 1
+    }
+    let tx = fx - (ix as f64)
+    let tz = fz - (iz as f64)
+    let h00 = c.dem[iz * n + ix]
+    let h10 = c.dem[iz * n + ix1]
+    let h01 = c.dem[iz1 * n + ix]
+    let h11 = c.dem[iz1 * n + ix1]
+    let a = h00 + (h10 - h00) * tx
+    let b = h01 + (h11 - h01) * tx
+    let h = a + (b - a) * tz
+
+    // Ease the last 400 m of the map down into the sea so the border is a shore.
+    let edge = c.reach - 400.0
+    let dx = Math.abs(x)
+    let dz = Math.abs(z)
+    var d = dx
+    if dz > d {
+        d = dz
+    }
+    if d > edge {
+        var t = (d - edge) / 400.0
+        if t > 1.0 {
+            t = 1.0
+        }
+        return h * (1.0 - t) - 6.0 * t
+    }
+    return h
+}
+
+pub fn cityCoverAt(c: &City, x: f64, z: f64): u8 {
+    if c.coverN == 0 {
+        return COVER_URBAN
+    }
+    let ix = Math.floor((x - c.coverX0) / c.coverStep) as i64
+    let iz = Math.floor((z - c.coverZ0) / c.coverStep) as i64
+    if ix < 0 || iz < 0 || ix >= c.coverN || iz >= c.coverN {
+        return COVER_URBAN
+    }
+    return c.cover[iz * c.coverN + ix]
+}

@@ -1,0 +1,192 @@
+// Headless capture: flies a scripted path and dumps PPM frames. Also a
+// deterministic smoke test for the whole 3D pipeline.
+
+from "std/math" import {
+    Math
+}
+from "std/args" import {
+    args
+}
+from "std/time" import {
+    epochMillis
+}
+from "./gfx" import {
+    Canvas, canvasNew, present
+}
+from "./gfx3d" import {
+    Scene, sceneNew
+}
+from "./sound" import {
+    Sound, soundNew, playRing, playRingBonus, playRegion, playBoost, playMiss
+}
+from "./textures" import {
+    groundTexture, planeTexture
+}
+from "./world3d" import {
+    World, worldIn, worldUpdate, SEED
+}
+from "./city" import {
+    City, cityLoad, cityEmpty
+}
+from "./render3d" import {
+    drawWorld, drawHud, drawGuide, drawSpeedLines
+}
+
+pub extern fn fopen(path: *u8, mode: *u8): *u8
+
+pub extern fn fwrite(ptr: *u8, size: i64, count: i64, stream: *u8): i64
+
+pub extern fn fclose(stream: *u8): i32
+
+pub let W: i64 = 1280
+
+pub let H: i64 = 720
+
+fn writePpm(path: &string, c: &Canvas) {
+    var rgb: Vec<u8> = Vec.filled(W * H * 3, 0)
+    for i in 0..W * H {
+        let px = c.fb[i]
+        rgb[i * 3] = (px & 0xFF) as u8
+        rgb[i * 3 + 1] = ((px >> 8) & 0xFF) as u8
+        rgb[i * 3 + 2] = ((px >> 16) & 0xFF) as u8
+    }
+    let header = "P6\n" + W.toString() + " " + H.toString() + "\n255\n"
+    unsafe {
+        let f = fopen(path.cstr(), "wb".cstr())
+        if (f as i64) == 0 {
+            print("cannot open " + path)
+            return
+        }
+        let _ = fwrite(header.cstr(), 1, header.len, f)
+        let _ = fwrite(rgb.ptr() as *u8, 1, W * H * 3, f)
+        let _ = fclose(f)
+    }
+}
+
+pub fn main(): i32 {
+    let argv = args()
+    var prefix = "/tmp/flyby"
+    if argv.len > 1 {
+        prefix = argv[1]
+    }
+    var city = cityEmpty()
+    var easy = false
+    var shots: Vec<i64> = Vec.new()
+    var i = 2
+    while i < argv.len {
+        if argv[i] == "--city" && i + 1 < argv.len {
+            match cityLoad(argv[i + 1]) {
+                Result.Ok(loaded) => {
+                    print("flying " + loaded.name.clone() + " — " + loaded.bCount.toString() + " buildings")
+                    city = loaded
+                }
+                Result.Err(e) => {
+                    print("could not load city: " + e)
+                }
+            }
+            i = i + 2
+            continue
+        }
+        if argv[i] == "--easy" {
+            easy = true
+            i = i + 1
+            continue
+        }
+        shots.push(argv[i].parseInt())
+        i = i + 1
+    }
+    if shots.len == 0 {
+        shots.push(120)
+        shots.push(600)
+    }
+    var maxFrame: i64 = 0
+    for i in 0..shots.len {
+        maxFrame = Math.maxI64(maxFrame, shots[i])
+    }
+
+    var c = canvasNew(W, H)
+    var s = sceneNew(W, H)
+    var w = worldIn(SEED, city, easy)
+    let groundTex = groundTexture()
+    let skinTex = planeTexture()
+    let snd = soundNew()
+    let dt = 1.0 / 60.0
+    var renderMs: i64 = 0
+    var rendered: i64 = 0
+
+    for frame in 0..maxFrame + 1 {
+        // steer toward the nearest live coin, so the capture flies the trail
+        var roll = 0.0
+        var pitch = 0.0
+        if w.rings.len > 0 {
+            var bi = 0 - 1
+            var bd = 1.0e18
+            for i in 0..w.rings.len {
+                if w.rings[i].alive {
+                    let dx = w.rings[i].x - w.plane.x
+                    let dz = w.rings[i].z - w.plane.z
+                    let d = dx * dx + dz * dz
+                    if d < bd {
+                        bd = d
+                        bi = i
+                    }
+                }
+            }
+            if bi >= 0 {
+                let dx = w.rings[bi].x - w.plane.x
+                let dy = w.rings[bi].y - w.plane.y
+                let dz = w.rings[bi].z - w.plane.z
+                var want = Math.atan2(dx, dz)
+                var diff = want - w.plane.yaw
+                while diff > 3.14159265358979 {
+                    diff = diff - 6.28318530717959
+                }
+                while diff < 0.0 - 3.14159265358979 {
+                    diff = diff + 6.28318530717959
+                }
+                roll = Math.clampF64(diff * 2.2, 0.0 - 1.0, 1.0)
+                pitch = Math.clampF64(dy * 0.03, 0.0 - 1.0, 1.0)
+            }
+        }
+        worldUpdate(w, dt, roll, pitch, false)
+
+        var want = false
+        for i in 0..shots.len {
+            if shots[i] == frame {
+                want = true
+            }
+        }
+        if want {
+            let t0 = epochMillis()
+            drawWorld(c, s, w, groundTex, skinTex)
+            if w.evRing {
+                playRing(snd)
+            }
+            if w.evBonus {
+                playRingBonus(snd)
+            }
+            if w.evRegion {
+                playRegion(snd)
+            }
+            if w.evBoost {
+                playBoost(snd)
+            }
+            if w.evMiss {
+                playMiss(snd)
+            }
+            drawSpeedLines(c, w)
+            drawGuide(c, w, s)
+            drawHud(c, w, s, 60)
+            present(c, 0.35, 1.0)
+            renderMs = renderMs + (epochMillis() - t0)
+            rendered = rendered + 1
+            writePpm(prefix + "-" + frame.toString() + ".ppm", c)
+            print("wrote " + prefix + "-" + frame.toString() + ".ppm  tris=" + s.tris.toString())
+        }
+    }
+    if rendered > 0 {
+        print("render ms/frame: " + (renderMs / rendered).toString())
+    }
+    print("score " + w.score.toString() + " rings " + w.rings.len.toString() + " level " + w.level.toString())
+    return 0
+}

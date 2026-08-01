@@ -31,6 +31,23 @@ fn regexNew(pattern: string): Result<Regex> {
     return regexNewFlags(pattern, 1)
 }
 
+// REG_STARTEND: hand regexec an explicit byte range in pmatch[0] instead of
+// letting it scan to a NUL. This is what makes the engine safe on a `&string`
+// VIEW — a view points into the middle of a larger buffer and its end is NOT
+// NUL-terminated, so a plain regexec runs off the end of the view and matches
+// the rest of the file. That produced silently wrong counts (6713 instead of
+// 191) in examples/cli-tools/rg.milo before this was fixed.
+//
+// It is also faster: the previous code re-sliced the input on every iteration to
+// advance past a match, which copied the tail each time.
+pub let REG_STARTEND: i32 = 4
+
+fn writeMatchI64(buf: &mut [u8; 160], off: i32, val: i64) {
+    for k in 0..8 {
+        buf[off as i64 + k] = ((val >> (k * 8)) & 255) as u8
+    }
+}
+
 fn readMatchI64(buf: &[u8; 160], off: i32): i64 {
     var val: i64 = 0
     for k in 0..8 {
@@ -41,7 +58,10 @@ fn readMatchI64(buf: &[u8; 160], off: i32): i64 {
 
 // Test if a string matches the pattern.
 fn regexMatch(re: &Regex, input: &string): bool {
-    return regexec(re._preg, input, 0, 0 as *u8, 0) == 0
+    var pmatch: [u8; 160] = [0; 160]
+    writeMatchI64(pmatch, 0, 0)
+    writeMatchI64(pmatch, 8, input.len)
+    return regexec(re._preg, input, 1, pmatch, REG_STARTEND) == 0
 }
 
 // Match result: start and end byte offsets.
@@ -53,7 +73,9 @@ pub struct RegexMatch {
 // Find the first match in a string. Returns None if no match.
 fn regexFind(re: &Regex, input: &string): Option<RegexMatch> {
     var pmatch: [u8; 160] = [0; 160]
-    let rc = regexec(re._preg, input, 1, pmatch, 0)
+    writeMatchI64(pmatch, 0, 0)
+    writeMatchI64(pmatch, 8, input.len)
+    let rc = regexec(re._preg, input, 1, pmatch, REG_STARTEND)
     if rc != 0 {
         return Option.None
     }
@@ -71,18 +93,26 @@ fn regexFindAll(re: &Regex, input: &string): Vec<RegexMatch> {
     var offset: i64 = 0
     var pmatch: [u8; 160] = [0; 160]
     while offset < input.len {
-        let tail = input[offset..input.len]
-        let rc = regexec(re._preg, tail, 1, pmatch, 0)
+        // the search window is [offset, len) — no slicing, no copy
+        writeMatchI64(pmatch, 0, offset)
+        writeMatchI64(pmatch, 8, input.len)
+        // REG_NOTBOL past the first byte: `^` must not match mid-string just
+        // because the window happens to start there.
+        var eflags = REG_STARTEND
+        if offset > 0 {
+            eflags = REG_STARTEND | 1
+        }
+        let rc = regexec(re._preg, input, 1, pmatch, eflags)
         if rc != 0 {
             break
         }
         let so = readMatchI64(pmatch, 0)
         let eo = readMatchI64(pmatch, 8)
         matches.push(RegexMatch {
-            start: offset + so, end: offset + eo
+            start: so, end: eo
         }
         )
-        offset = offset + eo
+        offset = eo
         if so == eo {
             offset = offset + 1
         }

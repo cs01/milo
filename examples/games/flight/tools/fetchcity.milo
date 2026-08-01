@@ -1,0 +1,693 @@
+// Builds a FLYBY `.city` asset for a real place.
+//
+//   milo run examples/games/flight/tools/fetchcity.milo -- \
+//       --name "San Francisco" --lat 37.7897 --lon -122.4000 --radius 3000 \
+//       -o examples/games/flight/cities/sf.city
+//
+// Two public sources, both free of an API key and both legal to redistribute:
+//
+//   terrain    NASA SRTM 1-arcsecond, via the AWS Open Data "terrain tiles"
+//              bucket in Skadi layout (raw big-endian int16, 3601x3601 per
+//              1-degree tile). Public domain.
+//   buildings  OpenStreetMap via Overpass. Footprint geometry plus `height` /
+//              `building:levels`. ODbL — attribution required, see cities/README.
+//   land cover OSM parks, woods, beaches and inland water, rasterised into a
+//              grid the renderer samples per terrain vertex.
+//
+// Google's data is deliberately not used: their terms forbid bulk download and
+// redistribution of map, imagery or elevation data, so a checked-in asset built
+// from it could not ship. SRTM+OSM is what real 3D city renderers use anyway.
+//
+// Downloads are cached under .cache/city/, so re-running to tweak the extent
+// costs nothing but the reprojection.
+
+from "std/math" import {
+    Math
+}
+from "std/fs" import {
+    readFile, writeFile, pathExists, makeDir
+}
+from "std/fetch" import {
+    fetchForm, urlEncode, fetch
+}
+from "std/inflate" import {
+    Inflate
+}
+from "std/json" import {
+    Json
+}
+from "std/strconv" import {
+    parseFloat
+}
+from "std/args" import {
+    args
+}
+from "std/time" import {
+    sleepSecs
+}
+from "../city" import {
+    putI32, putCm, MAGIC, VERSION, COVER_URBAN, COVER_PARK, COVER_SAND, COVER_WATER
+}
+
+let M_PER_DEG_LAT: f64 = 111320.0
+
+let CACHE: string = ".cache/city"
+
+// One arcsecond ~ 30 m, so resampling the DEM any finer than this invents
+// detail that is not in the source.
+let DEM_STEP: f64 = 30.0
+
+let COVER_STEP: f64 = 20.0
+
+let SRTM_N: i64 = 3601
+
+// ------------------------------------------------------------------- SRTM
+
+pub struct Tiles {
+    names: Vec<string>,
+    data: Vec<string>,
+}
+
+fn tileName(latDeg: i64, lonDeg: i64): string {
+    var s = ""
+    if latDeg >= 0 {
+        s = s + "N" + pad2(latDeg)
+    } else {
+        s = s + "S" + pad2(0 - latDeg)
+    }
+    if lonDeg >= 0 {
+        s = s + "E" + pad3(lonDeg)
+    } else {
+        s = s + "W" + pad3(0 - lonDeg)
+    }
+    return s
+}
+
+fn pad2(v: i64): string {
+    if v < 10 {
+        return "0" + v.toString()
+    }
+    return v.toString()
+}
+
+fn pad3(v: i64): string {
+    if v < 10 {
+        return "00" + v.toString()
+    }
+    if v < 100 {
+        return "0" + v.toString()
+    }
+    return v.toString()
+}
+
+// Returns the index of the tile in the cache, or -1 if it could not be had. A
+// missing tile is not fatal: SRTM has no coverage above 60 degrees north, and
+// ocean-only tiles are simply absent from the bucket.
+fn tileFor(t: &mut Tiles, latDeg: i64, lonDeg: i64): i64 {
+    let name = tileName(latDeg, lonDeg)
+    for i in 0..t.names.len {
+        if t.names[i] == name {
+            return i
+        }
+    }
+    let latDir = if latDeg >= 0 {
+        "N" + pad2(latDeg)
+    } else {
+        "S" + pad2(0 - latDeg)
+    }
+    let gzPath = CACHE + "/" + name.clone() + ".hgt.gz"
+    var gz = ""
+    if pathExists(gzPath) {
+        let Result.Ok(b) = readFile(gzPath) else {
+            print("  cache read failed for " + name.clone())
+            return -1
+        }
+        gz = b
+    } else {
+        let url = "https://s3.amazonaws.com/elevation-tiles-prod/skadi/" + latDir + "/" + name.clone() + ".hgt.gz"
+        print("  downloading " + name.clone() + " ...")
+        let Result.Ok(resp) = fetch(url) else {
+            print("  no SRTM tile " + name.clone() + " (treated as sea)")
+            t.names.push(name.clone())
+            t.data.push("")
+            return t.names.len - 1
+        }
+        if !resp.ok() {
+            print("  no SRTM tile " + name.clone() + " (treated as sea)")
+            t.names.push(name.clone())
+            t.data.push("")
+            return t.names.len - 1
+        }
+        gz = resp.text()
+        let _ = writeFile(gzPath, gz)
+    }
+    let Result.Ok(raw) = Inflate.gzip(gz) else {
+        print("  corrupt SRTM tile " + name.clone())
+        return -1
+    }
+    if raw.len < SRTM_N * SRTM_N * 2 {
+        print("  short SRTM tile " + name.clone())
+        return -1
+    }
+    t.names.push(name.clone())
+    t.data.push(raw)
+    return t.names.len - 1
+}
+
+// Bilinear sample of the SRTM grid. Row 0 is the NORTH edge of the tile, which
+// is the one detail that silently flips a city upside down if you get it wrong.
+fn srtmAt(t: &mut Tiles, lat: f64, lon: f64): f64 {
+    let latDeg = Math.floor(lat) as i64
+    let lonDeg = Math.floor(lon) as i64
+    let ti = tileFor(t, latDeg, lonDeg)
+    if ti < 0 {
+        return 0.0
+    }
+    if t.data[ti].len == 0 {
+        return 0.0
+    }
+    let fr = ((latDeg + 1) as f64 - lat) * 3600.0
+    let fc = (lon - (lonDeg as f64)) * 3600.0
+    var r0 = Math.floor(fr) as i64
+    var c0 = Math.floor(fc) as i64
+    if r0 < 0 {
+        r0 = 0
+    }
+    if c0 < 0 {
+        c0 = 0
+    }
+    if r0 > SRTM_N - 2 {
+        r0 = SRTM_N - 2
+    }
+    if c0 > SRTM_N - 2 {
+        c0 = SRTM_N - 2
+    }
+    let tr = fr - (r0 as f64)
+    let tc = fc - (c0 as f64)
+    let h00 = srtmRaw(t.data[ti], r0, c0)
+    let h01 = srtmRaw(t.data[ti], r0, c0 + 1)
+    let h10 = srtmRaw(t.data[ti], r0 + 1, c0)
+    let h11 = srtmRaw(t.data[ti], r0 + 1, c0 + 1)
+    let a = h00 + (h01 - h00) * tc
+    let b = h10 + (h11 - h10) * tc
+    return a + (b - a) * tr
+}
+
+fn srtmRaw(d: &string, r: i64, c: i64): f64 {
+    let off = (r * SRTM_N + c) * 2
+    var v = ((d[off] as i64) << 8) | (d[off + 1] as i64)
+    if v >= 32768 {
+        v = v - 65536
+    }
+    // -32768 is SRTM's void marker, and it is what sits over open water.
+    if v < -1000 {
+        return 0.0
+    }
+    return v as f64
+}
+
+// ---------------------------------------------------------------- Overpass
+
+fn overpass(query: &string, cacheKey: &string): Result<string, string> {
+    let path = CACHE + "/" + cacheKey + ".json"
+    if pathExists(path) {
+        let Result.Ok(b) = readFile(path) else {
+            return Result.Err("cache read failed")
+        }
+        print("  using cached " + cacheKey.clone() + " (" + (b.len / 1024).toString() + " KiB)")
+        return Result.Ok(b)
+    }
+    print("  querying Overpass for " + cacheKey + " ...")
+    // Overpass only accepts the query form-encoded.
+    let encoded = "data=" + urlEncode(query)
+
+    // The public instances shed load by refusing requests outright, and which
+    // one is busy changes minute to minute. Rotate over the mirrors and back off
+    // rather than failing the whole build on one crowded server.
+    var mirrors: Vec<string> = Vec.new()
+    mirrors.push("https://overpass-api.de/api/interpreter")
+    mirrors.push("https://overpass.kumi.systems/api/interpreter")
+    mirrors.push("https://overpass.private.coffee/api/interpreter")
+
+    var attempt = 0
+    while attempt < 6 {
+        let url = mirrors[attempt % mirrors.len].clone()
+        match fetchForm(url, encoded) {
+            Result.Ok(resp) => {
+                let body = resp.text()
+                if resp.ok() {
+                    print("  got " + (body.len / 1024).toString() + " KiB")
+                    let _ = writeFile(path, body)
+                    return Result.Ok(body)
+                }
+                print("  mirror " + (attempt % mirrors.len).toString() + " returned " + resp.status.toString())
+            }
+            Result.Err(_e) => {
+                print("  mirror " + (attempt % mirrors.len).toString() + " unreachable")
+            }
+        }
+        attempt = attempt + 1
+        if attempt < 6 {
+            sleepSecs(4)
+        }
+    }
+    return Result.Err("every Overpass mirror refused the query")
+}
+
+fn bboxStr(latMin: f64, lonMin: f64, latMax: f64, lonMax: f64): string {
+    return "(" + fmt7(latMin) + "," + fmt7(lonMin) + "," + fmt7(latMax) + "," + fmt7(lonMax) + ")"
+}
+
+// Overpass wants plain decimal; the default float formatting would happily emit
+// an exponent for a small longitude and the server rejects that.
+fn fmt7(v: f64): string {
+    var x = v
+    var sign = ""
+    if x < 0.0 {
+        sign = "-"
+        x = 0.0 - x
+    }
+    let whole = Math.floor(x) as i64
+    let frac = Math.round((x - (whole as f64)) * 10000000.0) as i64
+    var fs = frac.toString()
+    while fs.len < 7 {
+        fs = "0" + fs
+    }
+    return sign + whole.toString() + "." + fs
+}
+
+// ------------------------------------------------------------------ polygons
+
+// A scanline fill in cover-grid space. OSM polygons are closed ways in
+// lat/lon order; after projection they are just rings in metres, and a
+// crossing-parity fill is enough — self-intersecting rings do exist in OSM but
+// they only mis-shade a few square metres of park.
+fn fillPoly(cover: &mut Vec<u8>, n: i64, x0: f64, z0: f64, step: f64, px: &Vec<f64>, pz: &Vec<f64>, code: u8) {
+    let m = px.len
+    if m < 3 {
+        return
+    }
+    var minZ = pz[0]
+    var maxZ = pz[0]
+    for i in 1..m {
+        if pz[i] < minZ {
+            minZ = pz[i]
+        }
+        if pz[i] > maxZ {
+            maxZ = pz[i]
+        }
+    }
+    var iz0 = Math.floor((minZ - z0) / step) as i64
+    var iz1 = Math.ceil((maxZ - z0) / step) as i64
+    if iz0 < 0 {
+        iz0 = 0
+    }
+    if iz1 > n - 1 {
+        iz1 = n - 1
+    }
+    var xs: Vec<f64> = Vec.new()
+    for iz in iz0..(iz1 + 1) {
+        let zc = z0 + (iz as f64) * step
+        xs.clear()
+        var j = m - 1
+        for i in 0..m {
+            let zi = pz[i]
+            let zj = pz[j]
+            if (zi > zc) != (zj > zc) {
+                let t = (zc - zi) / (zj - zi)
+                xs.push(px[i] + (px[j] - px[i]) * t)
+            }
+            j = i
+        }
+        if xs.len < 2 {
+            continue
+        }
+        // insertion sort: a scanline through a building or a park crosses a
+        // handful of edges, never enough to want anything cleverer
+        for a in 1..xs.len {
+            let v = xs[a]
+            var b = a - 1
+            while b >= 0 && xs[b] > v {
+                xs[b + 1] = xs[b]
+                b = b - 1
+            }
+            xs[b + 1] = v
+        }
+        var k = 0
+        while k + 1 < xs.len {
+            var ix0 = Math.ceil((xs[k] - x0) / step) as i64
+            var ix1 = Math.floor((xs[k + 1] - x0) / step) as i64
+            if ix0 < 0 {
+                ix0 = 0
+            }
+            if ix1 > n - 1 {
+                ix1 = n - 1
+            }
+            for ix in ix0..(ix1 + 1) {
+                cover[iz * n + ix] = code
+            }
+            k = k + 2
+        }
+    }
+}
+
+// --------------------------------------------------------------------- tags
+
+fn tagStr(doc: &Json, tags: i64, key: &string): string {
+    let c = doc.curField(tags, key)
+    match doc.curStr(c) {
+        Option.Some(s) => {
+            return s
+        }
+        Option.None => {
+            return ""
+        }
+    }
+}
+
+// OSM height values are metres but arrive as free text: "52", "52.5 m",
+// "173'" and worse. Take the leading number and ignore the rest.
+fn leadingNum(s: &string): f64 {
+    var i = 0
+    while i < s.len && (s[i] == 32 as u8) {
+        i = i + 1
+    }
+    var out = ""
+    while i < s.len {
+        let ch = s[i]
+        if (ch >= 48 as u8 && ch <= 57 as u8) || ch == 46 as u8 {
+            out.push(ch)
+            i = i + 1
+        } else {
+            break
+        }
+    }
+    match parseFloat(out) {
+        Option.Some(v) => {
+            return v
+        }
+        Option.None => {
+            return 0.0
+        }
+    }
+}
+
+let LEVEL_HEIGHT: f64 = 3.2
+
+fn buildingHeight(doc: &Json, tags: i64): f64 {
+    let h = leadingNum(tagStr(doc, tags, "height"))
+    if h > 0.5 {
+        return h
+    }
+    let lv = leadingNum(tagStr(doc, tags, "building:levels"))
+    if lv > 0.0 {
+        return lv * LEVEL_HEIGHT + 1.5
+    }
+    // Unlabelled buildings are overwhelmingly houses and low-rise shopfronts.
+    return 7.0
+}
+
+fn coverCodeFor(doc: &Json, tags: i64): u8 {
+    let leisure = tagStr(doc, tags, "leisure")
+    if leisure == "park" || leisure == "garden" || leisure == "golf_course" || leisure == "pitch" {
+        return COVER_PARK
+    }
+    let landuse = tagStr(doc, tags, "landuse")
+    if landuse == "forest" || landuse == "grass" || landuse == "meadow" || landuse == "cemetery" || landuse == "recreation_ground" || landuse == "village_green" || landuse == "allotments" {
+        return COVER_PARK
+    }
+    let natural = tagStr(doc, tags, "natural")
+    if natural == "wood" || natural == "scrub" || natural == "grassland" || natural == "heath" {
+        return COVER_PARK
+    }
+    if natural == "beach" || natural == "sand" {
+        return COVER_SAND
+    }
+    if natural == "water" || natural == "wetland" {
+        return COVER_WATER
+    }
+    if tagStr(doc, tags, "waterway") == "riverbank" {
+        return COVER_WATER
+    }
+    return COVER_URBAN
+}
+
+// --------------------------------------------------------------------- main
+
+fn flagOf(a: &Vec<string>, name: &string, dflt: string): string {
+    for i in 0..a.len {
+        if a[i] == name && i + 1 < a.len {
+            return a[i + 1].clone()
+        }
+    }
+    return dflt
+}
+
+fn main() {
+    let a = args()
+    let name = flagOf(a, "--name", "City")
+    let lat = leadingNumSigned(flagOf(a, "--lat", "37.7897"))
+    let lon = leadingNumSigned(flagOf(a, "--lon", "-122.4000"))
+    let radius = leadingNumSigned(flagOf(a, "--radius", "3000"))
+    let out = flagOf(a, "-o", "examples/games/flight/cities/city.city")
+
+    // .cache is a two-level path and makeDir is not recursive.
+    let _ = makeDir(".cache", 493)
+    let _ = makeDir(CACHE, 493)
+
+    let mPerLon = M_PER_DEG_LAT * Math.cos(lat * 3.14159265358979 / 180.0)
+    let latMin = lat - radius / M_PER_DEG_LAT
+    let latMax = lat + radius / M_PER_DEG_LAT
+    let lonMin = lon - radius / mPerLon
+    let lonMax = lon + radius / mPerLon
+
+    print(name + ": " + fmt7(lat) + ", " + fmt7(lon) + "  radius " + (radius as i64).toString() + " m")
+
+    // ── terrain ──
+    var tiles = Tiles {
+        names: Vec.new(), data: Vec.new()
+    }
+    let demN = (2.0 * radius / DEM_STEP) as i64 + 1
+    let demX0 = 0.0 - radius
+    let demZ0 = 0.0 - radius
+    print("terrain: " + demN.toString() + "x" + demN.toString() + " @ " + (DEM_STEP as i64).toString() + " m")
+    var dem: Vec<f64> = Vec.filled(demN * demN, 0.0)
+    var peak = 0.0
+    for iz in 0..demN {
+        let z = demZ0 + (iz as f64) * DEM_STEP
+        let sLat = lat + z / M_PER_DEG_LAT
+        for ix in 0..demN {
+            let x = demX0 + (ix as f64) * DEM_STEP
+            let sLon = lon + x / mPerLon
+            let h = srtmAt(tiles, sLat, sLon)
+            dem[iz * demN + ix] = h
+            if h > peak {
+                peak = h
+            }
+        }
+    }
+    print("  highest point " + (peak as i64).toString() + " m")
+
+    // ── land cover ──
+    let coverN = (2.0 * radius / COVER_STEP) as i64 + 1
+    let coverX0 = 0.0 - radius
+    let coverZ0 = 0.0 - radius
+    var cover: Vec<u8> = Vec.filled(coverN * coverN, COVER_URBAN)
+
+    let bbox = bboxStr(latMin, lonMin, latMax, lonMax)
+    // Narrow filters, not a bare key match: `way["natural"]` over a city bbox
+    // drags in every tree and rock as its own way, and the public instances
+    // shed that query rather than run it.
+    let coverQ = "[out:json][timeout:180];(way[\"leisure\"~\"^(park|garden|golf_course|pitch|nature_reserve)$\"]" + bbox.clone() + ";way[\"landuse\"~\"^(forest|grass|meadow|cemetery|recreation_ground|village_green|allotments)$\"]" + bbox.clone() + ";way[\"natural\"~\"^(wood|scrub|grassland|heath|beach|sand|water|wetland)$\"]" + bbox.clone() + ";way[\"waterway\"=\"riverbank\"]" + bbox.clone() + ";);out tags geom;"
+    var greens = 0
+    match overpass(coverQ, "cover") {
+        Ok(body) => {
+            match Json.parse(body) {
+                Ok(doc) => {
+                    let els = doc.curField(doc.curRoot(), "elements")
+                    let n = doc.curLen(els)
+                    print("  " + n.toString() + " land-cover ways")
+                    var px: Vec<f64> = Vec.new()
+                    var pz: Vec<f64> = Vec.new()
+                    for i in 0..n {
+                        let el = doc.curChild(els, i)
+                        let code = coverCodeFor(doc, doc.curField(el, "tags"))
+                        if code == COVER_URBAN {
+                            continue
+                        }
+                        let geom = doc.curField(el, "geometry")
+                        let gn = doc.curLen(geom)
+                        if gn < 3 {
+                            continue
+                        }
+                        px.clear()
+                        pz.clear()
+                        for k in 0..gn {
+                            let p = doc.curChild(geom, k)
+                            let plat = floatOf(doc, doc.curField(p, "lat"))
+                            let plon = floatOf(doc, doc.curField(p, "lon"))
+                            px.push((plon - lon) * mPerLon)
+                            pz.push((plat - lat) * M_PER_DEG_LAT)
+                        }
+                        fillPoly(cover, coverN, coverX0, coverZ0, COVER_STEP, px, pz, code)
+                        greens = greens + 1
+                    }
+                }
+                Err(_e) => {
+                    print("  land-cover JSON parse failed")
+                }
+            }
+        }
+        Err(e) => {
+            print("  " + e)
+        }
+    }
+    print("  filled " + greens.toString() + " cover polygons")
+
+    // ── buildings ──
+    let bQ = "[out:json][timeout:180];way[\"building\"]" + bbox.clone() + ";out tags geom;"
+    var bH: Vec<f64> = Vec.new()
+    var bStart: Vec<i64> = Vec.new()
+    var bLen: Vec<i64> = Vec.new()
+    var bPtX: Vec<f64> = Vec.new()
+    var bPtZ: Vec<f64> = Vec.new()
+    var tallest = 0.0
+    match overpass(bQ, "buildings") {
+        Ok(body) => {
+            match Json.parse(body) {
+                Ok(doc) => {
+                    let els = doc.curField(doc.curRoot(), "elements")
+                    let n = doc.curLen(els)
+                    print("  " + n.toString() + " building ways")
+                    for i in 0..n {
+                        let el = doc.curChild(els, i)
+                        let geom = doc.curField(el, "geometry")
+                        var gn = doc.curLen(geom)
+                        if gn < 4 {
+                            continue
+                        }
+                        // A closed way repeats its first node last.
+                        gn = gn - 1
+                        // Footprints with dozens of nodes are curved facades and
+                        // bay windows; at 150 m up and 190 m/s they are a
+                        // rectangle. Decimate rather than drop.
+                        var stride = 1
+                        while gn / stride > 14 {
+                            stride = stride + 1
+                        }
+                        let h = buildingHeight(doc, doc.curField(el, "tags"))
+                        if h > tallest {
+                            tallest = h
+                        }
+                        let start = bPtX.len
+                        var count = 0
+                        var k = 0
+                        while k < gn {
+                            let p = doc.curChild(geom, k)
+                            let plat = floatOf(doc, doc.curField(p, "lat"))
+                            let plon = floatOf(doc, doc.curField(p, "lon"))
+                            bPtX.push((plon - lon) * mPerLon)
+                            bPtZ.push((plat - lat) * M_PER_DEG_LAT)
+                            count = count + 1
+                            k = k + stride
+                        }
+                        if count < 3 {
+                            bPtX.truncate(start)
+                            bPtZ.truncate(start)
+                            continue
+                        }
+                        bH.push(h)
+                        bStart.push(start)
+                        bLen.push(count)
+                    }
+                }
+                Err(_e) => {
+                    print("  building JSON parse failed")
+                }
+            }
+        }
+        Err(e) => {
+            print("  " + e)
+        }
+    }
+    print("  kept " + bH.len.toString() + " buildings, tallest " + (tallest as i64).toString() + " m")
+
+    // ── serialise ──
+    var buf = ""
+    for i in 0..8 {
+        buf.push(MAGIC[i])
+    }
+    putI32(buf, VERSION)
+    putI32(buf, name.len)
+    for i in 0..name.len {
+        buf.push(name[i])
+    }
+    putI32(buf, Math.round(lat * 10000000.0) as i64)
+    putI32(buf, Math.round(lon * 10000000.0) as i64)
+    putCm(buf, radius)
+
+    putI32(buf, demN)
+    putCm(buf, DEM_STEP)
+    putCm(buf, demX0)
+    putCm(buf, demZ0)
+    for i in 0..(demN * demN) {
+        putCm(buf, dem[i])
+    }
+
+    putI32(buf, coverN)
+    putCm(buf, COVER_STEP)
+    putCm(buf, coverX0)
+    putCm(buf, coverZ0)
+    for i in 0..(coverN * coverN) {
+        buf.push(cover[i])
+    }
+
+    putI32(buf, bH.len)
+    for i in 0..bH.len {
+        putCm(buf, bH[i])
+        putI32(buf, bLen[i])
+        let s = bStart[i]
+        for k in 0..bLen[i] {
+            putCm(buf, bPtX[s + k])
+            putCm(buf, bPtZ[s + k])
+        }
+    }
+
+    match writeFile(out, buf) {
+        Ok(nbytes) => {
+            print("wrote " + out + " (" + (nbytes / 1024).toString() + " KiB)")
+        }
+        Err(_e) => {
+            print("could not write " + out)
+        }
+    }
+}
+
+fn floatOf(doc: &Json, cur: i64): f64 {
+    match doc.curFloat(cur) {
+        Option.Some(v) => {
+            return v
+        }
+        Option.None => {
+            return 0.0
+        }
+    }
+}
+
+fn leadingNumSigned(s: string): f64 {
+    var neg = false
+    var body = s.clone()
+    if body.len > 0 && body[0] == 45 as u8 {
+        neg = true
+        var t = ""
+        for i in 1..body.len {
+            t.push(body[i])
+        }
+        body = t
+    }
+    let v = leadingNum(body)
+    if neg {
+        return 0.0 - v
+    }
+    return v
+}

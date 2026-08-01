@@ -30,9 +30,10 @@ async function generateFeed(config: SiteConfig) {
     .filter((p) => p.published !== null)
     .sort((a, b) => +b.published! - +a.published!)
 
-  if (!posts.length) return   // Feed.atom1() throws on a feed with no updated date
-
-  feed.options.updated = posts[0].published!
+  // Always emitted, even with zero posts: the <head> alternate link and the
+  // subscribe box both point at /feed.rss, and a 404 there is worse than an empty
+  // channel. Feed.atom1() throws without `updated`, so it always gets a date.
+  feed.options.updated = posts[0]?.published ?? new Date()
 
   for (const post of posts) {
     feed.addItem({

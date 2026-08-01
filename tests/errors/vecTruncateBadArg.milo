@@ -1,0 +1,6 @@
+// @error: expected an integer length
+fn main(): i32 {
+    var v: Vec<i64> = [1, 2, 3]
+    v.truncate("two")
+    return 0
+}

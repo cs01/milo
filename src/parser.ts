@@ -1102,9 +1102,16 @@ export class Parser {
         return { kind: "LiteralPattern", value: -Number(numTok.value), literalKind: lk, span: s };
       }
     }
-    const enumName = this.expect(TokenKind.Ident).value;
-    this.expect(TokenKind.Dot);
-    const variant = this.expect(TokenKind.Ident).value;
+    // `Enum.Variant` or, when the enum is obvious from the subject, bare `Variant`.
+    // An elided name is left blank here and filled in by the checker from the
+    // subject's type — the parser has no types to resolve it with.
+    const first = this.expect(TokenKind.Ident).value;
+    let enumName = "";
+    let variant = first;
+    if (this.match(TokenKind.Dot)) {
+      enumName = first;
+      variant = this.expect(TokenKind.Ident).value;
+    }
     const bindings: string[] = [];
     if (this.match(TokenKind.LParen)) {
       while (!this.at(TokenKind.RParen)) {

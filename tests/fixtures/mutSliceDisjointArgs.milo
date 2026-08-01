@@ -1,0 +1,17 @@
+// Disjoint literal windows into one buffer are two independent &mut views — the
+// split-at-mut shape, with no unsafe and no runtime check. Overlap is rejected
+// (see errors/mutSliceOverlapArgs.milo).
+fn fill(a: &mut [i64], b: &mut [i64]): void {
+    a[0] = 10
+    b[0] = 20
+}
+
+pub fn main(): i32 {
+    var v: Vec<i64> = [1, 2, 3, 4]
+    fill(v[0..2], v[2..4])
+    // @expect: 10
+    print(v[0])
+    // @expect: 20
+    print(v[2])
+    return 0
+}

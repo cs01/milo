@@ -1,0 +1,106 @@
+// Headless capture: plays itself with a perfect paddle and dumps PPM frames.
+// Doubles as a deterministic smoke test for the whole simulation.
+//
+//   milo run examples/games/shatter/shot.milo --release -- /tmp/shatter 120 400 900
+
+from "std/math" import {
+    Math
+}
+from "std/args" import {
+    args
+}
+from "./gfx" import {
+    Canvas, canvasNew, present
+}
+from "./game" import {
+    Game, gameNew, gameUpdate, loadLevel
+}
+from "./render" import {
+    drawGame, drawHud
+}
+
+pub extern fn fopen(path: *u8, mode: *u8): *u8
+
+pub extern fn fwrite(ptr: *u8, size: i64, count: i64, stream: *u8): i64
+
+pub extern fn fclose(stream: *u8): i32
+
+pub let W: i64 = 1280
+
+pub let H: i64 = 720
+
+fn writePpm(path: &string, c: &Canvas) {
+    var rgb: Vec<u8> = Vec.filled(W * H * 3, 0)
+    for i in 0..W * H {
+        let px = c.fb[i]
+        rgb[i * 3] = (px & 0xFF) as u8
+        rgb[i * 3 + 1] = ((px >> 8) & 0xFF) as u8
+        rgb[i * 3 + 2] = ((px >> 16) & 0xFF) as u8
+    }
+    let header = "P6\n" + W.toString() + " " + H.toString() + "\n255\n"
+    unsafe {
+        let f = fopen(path.cstr(), "wb".cstr())
+        if (f as i64) == 0 {
+            print("cannot open " + path)
+            return
+        }
+        let _ = fwrite(header.cstr(), 1, header.len, f)
+        let _ = fwrite(rgb.ptr() as *u8, 1, W * H * 3, f)
+        let _ = fclose(f)
+    }
+}
+
+pub fn main(): i32 {
+    let argv = args()
+    var prefix = "/tmp/shatter"
+    if argv.len > 1 {
+        prefix = argv[1]
+    }
+    var shots: Vec<i64> = Vec.new()
+    for i in 2..argv.len {
+        shots.push(argv[i].parseInt())
+    }
+    if shots.len == 0 {
+        shots.push(120)
+        shots.push(400)
+    }
+    var maxFrame: i64 = 0
+    for i in 0..shots.len {
+        maxFrame = Math.maxI64(maxFrame, shots[i])
+    }
+
+    var c = canvasNew(W, H)
+    var g = gameNew(W as f64, H as f64)
+    let dt = 1.0 / 60.0
+
+    for frame in 0..maxFrame + 1 {
+        // a perfect paddle: track the lowest descending ball
+        var target = g.padX
+        var bestY = 0.0 - 1.0
+        for i in 0..g.balls.len {
+            if g.balls[i].y > bestY {
+                bestY = g.balls[i].y
+                target = g.balls[i].x
+            }
+        }
+        // Deliberately imperfect: a paddle that tracks exactly returns every ball
+        // dead centre, which is not what a capture should show.
+        gameUpdate(g, dt, target + Math.sin((frame as f64) * 0.11) * 26.0, true)
+
+        var want = false
+        for i in 0..shots.len {
+            if shots[i] == frame {
+                want = true
+            }
+        }
+        if want {
+            drawGame(c, g, 0.0, 0.0)
+            drawHud(c, g)
+            present(c, 0.6, 1.0)
+            writePpm(prefix + "-" + frame.toString() + ".ppm", c)
+            print("wrote " + prefix + "-" + frame.toString() + ".ppm")
+        }
+    }
+    print("level " + g.level.toString() + " score " + g.score.toString() + " balls " + g.lives.toString())
+    return 0
+}

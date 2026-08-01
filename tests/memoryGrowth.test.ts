@@ -106,6 +106,30 @@ fn main() {
 }`,
     capMb: 60,
   },
+  {
+    // Shortest-round-trip float printing formats into a malloc'd scratch buffer
+    // rather than straight into snprintf, so every float that reaches print,
+    // interpolation, struct display or jsonStringify now owns an allocation that
+    // something has to free. Three different code paths hand that buffer to
+    // three different free-lists; this is the only test that would notice one of
+    // them forgetting.
+    name: "floatFormatBuffers",
+    body: `
+struct Pt { x: f64, y: f64 }
+
+fn main() {
+    var i: i64 = 0
+    var total: i64 = 0
+    while i < 200000 {
+        let v: f64 = (i as f64) / 7.0
+        let p = Pt { x: v, y: v }
+        total = total + v.toString().len() + $"{v} {p}".len() + jsonStringify(p).len()
+        i = i + 1
+    }
+    writeStdout("done\\n")
+}`,
+    capMb: 60,
+  },
 ];
 
 describe("peak RSS stays flat when allocations are not retained", () => {

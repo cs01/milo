@@ -1,0 +1,47 @@
+// Zero-copy text: a method hands back a `&string` view of its own buffer, no copy.
+// `&[T]` could already do this; string could not, which left every tokenizer and
+// scanner carrying bare (start, len) offsets with nothing tying them to the buffer.
+// Same rules as the slice view: the call site freezes the receiver, and a view of
+// anything but `self` is rejected (see errors/stringViewOfOtherParam.milo).
+struct Lexer {
+    src: string,
+    pos: i64
+}
+
+impl Lexer {
+    fn word(self: &Self, start: i64, end: i64): &string {
+        return self.src[start..end]
+    }
+    fn rest(self: &Self): &string {
+        return self.src[self.pos..self.src.len]
+    }
+}
+
+fn width(s: &string): i64 {
+    return s.len
+}
+
+pub fn main(): i32 {
+    var lx = Lexer {
+        src: "alpha beta gamma",
+        pos: 6
+    }
+    // @expect: alpha
+    print(lx.word(0, 5))
+    // @expect: beta gamma
+    print(lx.rest())
+    // pass a returned view straight into a &string param
+    // @expect: 4
+    print(width(lx.word(6, 10)))
+
+    // the freeze ends with the view's scope
+    if true {
+        let w = lx.word(0, 5)
+        // @expect: 5
+        print(w.len)
+    }
+    lx.src = lx.src + "!"
+    // @expect: 17
+    print(lx.src.len)
+    return 0
+}

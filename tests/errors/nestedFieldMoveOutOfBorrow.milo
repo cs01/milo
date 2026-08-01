@@ -1,0 +1,28 @@
+// @error: cannot move 'self.inner.s' out of the borrowed 'self'
+//
+// The same hazard through a field chain and through `self`: with only the
+// one-level check, `self.inner.s` slipped past and the callee zeroed the
+// caller's field, so the caller read an empty string afterwards.
+
+struct Inner {
+    s: string,
+}
+
+struct Outer {
+    inner: Inner,
+}
+
+impl Outer {
+    fn take(self: &Self): string {
+        return self.inner.s
+    }
+}
+
+fn main() {
+    let o = Outer {
+        inner: Inner {
+            s: "hi",
+        },
+    }
+    print(o.take())
+}

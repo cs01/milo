@@ -1,0 +1,6 @@
+// @error: cannot clear an immutable Vec
+fn main(): i32 {
+    let v: Vec<i64> = [1, 2, 3]
+    v.clear()
+    return 0
+}

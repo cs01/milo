@@ -1,0 +1,1640 @@
+// Drawing the flight world: sky, terrain, coins, the aircraft, and the HUD.
+
+from "std/math" import {
+    Math
+}
+from "./gfx" import {
+    Canvas, fillRect, spot, line, darkLine, text, textCentered, textWidth
+}
+// Small by-value carrier. Returning a Vec<i64> from this allocated once per
+// terrain quad per frame — a few thousand mallocs a frame, and most of the
+// frame time.
+pub struct Off {
+    x: i64,
+    z: i64,
+}
+
+from "./gfx3d" import {
+    Vec3,
+    Scene, View, Camera, viewOf, sceneClear, triangle, triangleTex, triangleTexLit, Texture, shade, toCamera,
+    Vtx, vtxC, triangleV, triangleG
+}
+from "./textures" import {
+    groundTexture, planeTexture
+}
+from "./world3d" import {
+    World, Trail, heightAt, coverAt, blockOf, foldIn, unfold, TILE, VIEW_TILES
+}
+from "./city" import {
+    City, COVER_URBAN, COVER_PARK, COVER_SAND, COVER_WATER, BUILDING_MARGIN, cityCellX, cityCellZ
+}
+
+// Sky gradient plus a sun disc, painted before anything else. There is no depth
+// test here — the terrain simply draws over it.
+fn drawSky(c: &mut Canvas, s: &Scene, w: &World, v: &View) {
+    for y in 0..c.h {
+        let t = (y as f64) / (c.h as f64)
+        let k = 1.0 - t
+        let r = 0.10 + 0.34 * k * k + s.fogR * t * 0.55
+        let g = 0.22 + 0.36 * k * k + s.fogG * t * 0.55
+        let b = 0.52 + 0.34 * k * k + s.fogB * t * 0.40
+        fillRect(c, 0.0, y as f64, c.w as f64, (y + 1) as f64, r * 0.42, g * 0.42, b * 0.45)
+    }
+    // sun projected from its direction, so it sits correctly as you turn
+    let far = 6000.0
+    let sp = toCamera(v, w.cam.x + s.sunX * far, w.cam.y + s.sunY * far, w.cam.z + s.sunZ * far)
+    if sp.z > 1.0 {
+        let sx = v.cx + sp.x * v.scale / sp.z
+        let sy = v.cy - sp.y * v.scale / sp.z
+        spot(c, sx, sy, 190.0, 0.16, 0.13, 0.07)
+        spot(c, sx, sy, 62.0, 0.9, 0.78, 0.42)
+        spot(c, sx, sy, 30.0, 1.9, 1.7, 1.2)
+    }
+}
+
+// Clouds: billboard puffs on a scrolling world grid, drawn after the sky and
+// before the terrain, so a ridge in front of a cloud simply paints over it. They
+// are additive spots rather than geometry — a cloud has no silhouette worth
+// rasterising, and at this distance a soft blob is the whole effect.
+//
+// Placement is hashed off the cell index, so clouds are stationary in the world
+// and slide past as you fly instead of swimming with the camera.
+fn drawClouds(c: &mut Canvas, s: &Scene, w: &World, v: &View) {
+    let CELL = 900.0
+    let REACH = 9
+    let CLOUD_FADE = 9000.0
+    let baseX = Math.floor(w.cam.x / CELL) as i64
+    let baseZ = Math.floor(w.cam.z / CELL) as i64
+    // clouds drift slowly downwind, the same direction for every cell
+    let driftX = w.time * 5.5
+    let driftZ = w.time * 2.0
+    // Clouds tinted toward the region's own haze, so a desert sky and a coast
+    // sky do not share the same white.
+    let tr = 0.72 + s.fogR * 0.42
+    let tg = 0.74 + s.fogG * 0.36
+    let tb = 0.80 + s.fogB * 0.30
+    for gx in 0 - REACH..REACH + 1 {
+        for gz in 0 - REACH..REACH + 1 {
+            let cxi = baseX + gx
+            let czi = baseZ + gz
+            // A low-frequency cover field over the CELL grid, so cloud lives in
+            // banks with open sky between them. Deciding per cell independently
+            // scatters one puff-ball per cell evenly across the whole sky, which
+            // reads as a lattice — real cloud clumps.
+            let cover = noise2((cxi as f64) * 0.34, (czi as f64) * 0.34)
+            // Thinner cover over a real city: the overcast that suits an
+            // invented coastline hides the thing you loaded the map to see.
+            var minCover = 0.42
+            if w.city.loaded {
+                minCover = 0.66
+            }
+            if cover < minCover {
+                continue
+            }
+            // denser banks carry more individual clouds
+            let clump = 1 + ((cover - minCover) * 5.0) as i64
+            for q in 0..clump {
+                let jx = propHash(cxi * 31 + q * 13 + 1, czi * 17 + q * 7 + 9)
+                let jz = propHash(cxi * 11 + q * 5 + 4, czi * 23 + q * 19 + 2)
+                let wx = ((cxi as f64) + jx) * CELL + driftX
+                let wz = ((czi as f64) + jz) * CELL + driftZ
+                let wy = 500.0 + propHash(cxi * 5 + q * 3 + 6, czi * 3 + q * 11 + 8) * 460.0
+                let p = toCamera(v, wx, wy, wz)
+                if p.z < 60.0 {
+                    continue
+                }
+                let inv = 1.0 / p.z
+                let sx = v.cx + p.x * v.scale * inv
+                let sy = v.cy - p.y * v.scale * inv
+                let rad = (220.0 + cover * 260.0) * v.scale * inv
+                if rad < 3.0 {
+                    continue
+                }
+                if sx < 0.0 - rad * 3.0 || sx > (c.w as f64) + rad * 3.0 {
+                    continue
+                }
+                // Clouds get their own distance fade, NOT the terrain fog range.
+                // Terrain fog is tuned to bury the far edge of a 1000-unit tile
+                // grid; applied to the sky it culls every cloud that is not
+                // directly overhead, which is to say all the ones you would see.
+                var far = 1.0 - p.z / CLOUD_FADE
+                if far < 0.0 {
+                    continue
+                }
+                let lit = (0.30 + 0.58 * far * far) * (0.7 + 0.5 * cover)
+                // A handful of overlapping puffs of different sizes: one circle
+                // reads as a ball, several read as a cloud.
+                let n = 5 + ((propHash(cxi + 77 + q * 3, czi + 31 + q * 9) * 5.0) as i64)
+                for k in 0..n {
+                    let hk = propHash(cxi * 101 + k * 7 + q, czi * 53 + k * 3 + q * 5)
+                    let hk2 = propHash(cxi * 47 + k * 11 + q * 7, czi * 89 + k * 5 + q)
+                    let ox = (hk - 0.5) * rad * 2.8
+                    let oy = (hk2 - 0.5) * rad * 0.6
+                    let pr = rad * (0.40 + hk2 * 0.48)
+                    // brighter on top, shaded underneath
+                    let up = 1.0 + 0.38 * (0.5 - hk2)
+                    spot(c, sx + ox, sy + oy, pr, lit * tr * 0.50 * up, lit * tg * 0.52 * up, lit * tb * 0.58 * up)
+                }
+            }
+        }
+    }
+}
+
+pub fn themeName(t: i64): string {
+    if t == 0 {
+        return "COASTLINE"
+    }
+    if t == 1 {
+        return "DESERT"
+    }
+    if t == 2 {
+        return "FOREST"
+    }
+    return "CITY"
+}
+
+// The atmosphere of one region: what the fog is made of, how far you can see
+// through it, and where the sun sits. This used to be three functions — one for
+// fog colour, one for fog distance, one for colour AND sun — which meant the
+// same four fog colours were typed out twice and the distances rode in an `Rgb`
+// with `r`=start, `g`=end and `b` carrying nothing. Worse, only the fog
+// crossfaded between regions; the sun jumped, because the function that set it
+// was called first and then overwritten.
+pub struct Weather {
+    fogR: f64,
+    fogG: f64,
+    fogB: f64,
+    // Fog distance is the weather: the coast is hazy, the desert is glass-clear,
+    // the forest sits in the middle, the city is smogged in.
+    fogStart: f64,
+    fogEnd: f64,
+    sunX: f64,
+    sunY: f64,
+    sunZ: f64,
+}
+
+fn weatherOf(t: i64): Weather {
+    if t == 1 {
+        return Weather { // desert: see forever
+            fogR: 0.60, fogG: 0.46, fogB: 0.30,
+            fogStart: 1100.0, fogEnd: 3200.0,
+            sunX: 0.30, sunY: 0.90, sunZ: 0.30,
+        }
+    }
+    if t == 2 {
+        return Weather { // forest: some haze
+            fogR: 0.26, fogG: 0.38, fogB: 0.40,
+            fogStart: 620.0, fogEnd: 1900.0,
+            sunX: 0.50, sunY: 0.72, sunZ: 0.48,
+        }
+    }
+    if t == 3 {
+        return Weather { // city: smog
+            fogR: 0.38, fogG: 0.40, fogB: 0.46,
+            fogStart: 380.0, fogEnd: 1300.0,
+            sunX: 0.40, sunY: 0.84, sunZ: 0.36,
+        }
+    }
+    return Weather { // coast: sea haze
+        fogR: 0.30, fogG: 0.42, fogB: 0.62,
+        fogStart: 560.0, fogEnd: 1700.0,
+        sunX: 0.44, sunY: 0.78, sunZ: 0.44,
+    }
+}
+
+// Cross the whole atmosphere from region `a` to region `b` as one value, so
+// nothing can be left behind mid-fade. `mix` is 1 at the old region, 0 at the new.
+pub fn applyWeather(s: &mut Scene, a: i64, b: i64, mix: f64) {
+    let wa = weatherOf(a)
+    let wb = weatherOf(b)
+    s.fogR = wb.fogR + (wa.fogR - wb.fogR) * mix
+    s.fogG = wb.fogG + (wa.fogG - wb.fogG) * mix
+    s.fogB = wb.fogB + (wa.fogB - wb.fogB) * mix
+    s.fogStart = wb.fogStart + (wa.fogStart - wb.fogStart) * mix
+    s.fogEnd = wb.fogEnd + (wa.fogEnd - wb.fogEnd) * mix
+    // The sun is a direction, so it has to come back off the lerp normalised —
+    // a shortened sun vector is a dimmer sun, which is not what a crossfade means.
+    let sx = wb.sunX + (wa.sunX - wb.sunX) * mix
+    let sy = wb.sunY + (wa.sunY - wb.sunY) * mix
+    let sz = wb.sunZ + (wa.sunZ - wb.sunZ) * mix
+    let l = Math.sqrt(sx * sx + sy * sy + sz * sz) + 0.000001
+    s.sunX = sx / l
+    s.sunY = sy / l
+    s.sunZ = sz / l
+}
+
+// How many tiles are on the perimeter of ring `r` (ring 0 is the single centre).
+fn ringCount(r: i64): i64 {
+    if r == 0 {
+        return 1
+    }
+    return 8 * r
+}
+
+// The `i`th tile offset around ring `r`, walking the square perimeter.
+fn ringOffset(r: i64, i: i64): Off {
+    if r == 0 {
+        return Off {
+            x: 0, z: 0
+        }
+    }
+    let side = 2 * r
+    let seg = i / side
+    let k = i % side
+    if seg == 0 {
+        return Off {
+            x: 0 - r + k, z: 0 - r
+        }
+    }
+    if seg == 1 {
+        return Off {
+            x: r, z: 0 - r + k
+        }
+    }
+    if seg == 2 {
+        return Off {
+            x: r - k, z: r
+        }
+    }
+    return Off {
+        x: 0 - r, z: r - k
+    }
+}
+
+// ── smooth terrain colour ─────────────────────────────────────────────────────
+//
+// Every one of these is a CONTINUOUS function of world position. That is the
+// whole point: terrain colour used to be evaluated once per quad from the quad's
+// average height, so two quads sharing an edge could land on opposite sides of a
+// "sand vs grass" threshold and the seam between them drew a hard 44-unit line.
+// Enough of those and the landscape is a checkerboard. Sampling per *corner* is
+// only half the fix — the function being sampled has to be smooth too, or the
+// step just moves from the quad edge to the middle of the quad.
+
+fn smoothstep(e0: f64, e1: f64, x: f64): f64 {
+    var t = (x - e0) / (e1 - e0)
+    if t < 0.0 {
+        t = 0.0
+    }
+    if t > 1.0 {
+        t = 1.0
+    }
+    return t * t * (3.0 - 2.0 * t)
+}
+
+// Value noise on the integer lattice, smoothstep-interpolated. `propHash` alone
+// is white noise — used per tile it paints the grid it is meant to hide.
+fn noise2(x: f64, z: f64): f64 {
+    let xi = Math.floor(x)
+    let zi = Math.floor(z)
+    let fx = x - xi
+    let fz = z - zi
+    let ix = xi as i64
+    let iz = zi as i64
+    let ux = fx * fx * (3.0 - 2.0 * fx)
+    let uz = fz * fz * (3.0 - 2.0 * fz)
+    let n00 = propHash(ix, iz)
+    let n10 = propHash(ix + 1, iz)
+    let n01 = propHash(ix, iz + 1)
+    let n11 = propHash(ix + 1, iz + 1)
+    let a = n00 + (n10 - n00) * ux
+    let b = n01 + (n11 - n01) * ux
+    return a + (b - a) * uz
+}
+
+// The same palette as `themedColor`, with every hard threshold replaced by a
+// blend band. Widths are chosen so a transition spans several quads.
+fn themedSmooth(theme: i64, h: f64, slope: f64): Rgb {
+    if theme == 1 {
+        // desert: sand, red rock on the steep faces
+        let sand = rgb(0.72, 0.58, 0.32)
+        let rock = rgb(0.46, 0.24, 0.14)
+        return sand.lerp(rock, smoothstep(0.44, 0.64, slope))
+    }
+    if theme == 2 {
+        // forest: deep greens, rock on the steep parts, no snow
+        let low = rgb(0.09, 0.26, 0.10)
+        let high = rgb(0.16, 0.30, 0.16)
+        let rock = rgb(0.26, 0.24, 0.22)
+        var col = low.lerp(high, smoothstep(130.0, 172.0, h))
+        return col.lerp(rock, smoothstep(0.50, 0.70, slope))
+    }
+    if theme == 3 {
+        // city: concrete, grey-green parks, tarmac in place of water
+        let park = rgb(0.22, 0.26, 0.22)
+        let slab = rgb(0.34, 0.34, 0.36)
+        let wall = rgb(0.24, 0.24, 0.26)
+        var col = park.lerp(slab, smoothstep(70.0, 110.0, h))
+        return col.lerp(wall, smoothstep(0.40, 0.60, slope))
+    }
+    // coastline: sand, grass, rock, snow. Water is not in here — it is shaded
+    // separately in `cornerAt`, because it needs the view direction.
+    let sand = rgb(0.62, 0.55, 0.34)
+    let grass = rgb(0.16, 0.36, 0.14)
+    let rock = rgb(0.34, 0.31, 0.30)
+    let snow = rgb(0.82, 0.86, 0.92)
+    var col = sand.lerp(grass, smoothstep(9.0, 26.0, h))
+    // rock takes over on the steep parts, and with altitude
+    let rocky = Math.maxF64(smoothstep(0.50, 0.70, slope), smoothstep(112.0, 146.0, h))
+    col = col.lerp(rock, rocky)
+    return col.lerp(snow, smoothstep(150.0, 182.0, h))
+}
+
+// Gradient magnitude of the seabed, ignoring the wave train — how steeply the
+// land goes under. Used to tell a beach from a flat shallow pan.
+fn bedSlope(cc: &City, x: f64, z: f64): f64 {
+    let e = 9.0
+    let dx = heightAt(cc, x + e, z) - heightAt(cc, x - e, z)
+    let dz = heightAt(cc, x, z + e) - heightAt(cc, x, z - e)
+    return Math.sqrt(dx * dx + dz * dz) / (2.0 * e)
+}
+
+// Ground colour over a real city. The land-cover grid decides, not the height:
+// a park and the block next to it sit at the same elevation, so the
+// height-banded palette that reads a coastline correctly paints Golden Gate
+// Park as beach. Slope still gets a say — SF's hills are steep enough that the
+// scarps want to read as rock however they are zoned.
+fn cityGround(w: &World, x: f64, z: f64, slope: f64): Rgb {
+    let cv = coverAt(w.city, x, z)
+    var base = rgb(0.30, 0.29, 0.28)
+    if cv == COVER_PARK {
+        base = rgb(0.11, 0.29, 0.11)
+    } else if cv == COVER_SAND {
+        base = rgb(0.62, 0.56, 0.40)
+    } else if cv == COVER_WATER {
+        base = rgb(0.05, 0.20, 0.30)
+    } else {
+        // Built ground is not one grey. A slow field mottles it into districts,
+        // which is what stops a whole city from looking like poured concrete.
+        let m = noise2(x * 0.004, z * 0.004)
+        base = rgb(0.20, 0.20, 0.22).lerp(rgb(0.29, 0.29, 0.30), m)
+    }
+    let rock = smoothstep(0.42, 0.85, slope)
+    return base.lerp(rgb(0.31, 0.29, 0.27), rock)
+}
+
+// One terrain grid corner: height, its own light term, and its own colour. The
+// tile loop reads four of these per quad and hands them to the rasteriser as
+// vertex attributes, so a shared edge is shaded identically from both sides.
+pub struct Corner {
+    h: f64,
+    lt: f64,
+    r: f64,
+    g: f64,
+    b: f64,
+    tw: f64, // detail-texture weight: 1 on land, 0 on open water
+}
+
+// Memo over the visible corner grid. Four quads meet at every interior corner,
+// so without this the surface is evaluated four times per corner per frame.
+pub struct Corners {
+    n: i64,
+    baseX: i64,
+    baseZ: i64,
+    ok: Vec<bool>,
+    h: Vec<f64>,
+    lt: Vec<f64>,
+    r: Vec<f64>,
+    g: Vec<f64>,
+    b: Vec<f64>,
+    tw: Vec<f64>,
+}
+
+fn cornersNew(baseX: i64, baseZ: i64): Corners {
+    let n = 2 * VIEW_TILES + 2
+    return Corners {
+        n: n,
+        baseX: baseX,
+        baseZ: baseZ,
+        ok: Vec.filled(n * n, false),
+        h: Vec.filled(n * n, 0.0),
+        lt: Vec.filled(n * n, 0.0),
+        r: Vec.filled(n * n, 0.0),
+        g: Vec.filled(n * n, 0.0),
+        b: Vec.filled(n * n, 0.0),
+        tw: Vec.filled(n * n, 1.0),
+    }
+}
+
+fn cornerAt(cc: &mut Corners, s: &Scene, w: &World, ix: i64, iz: i64): Corner {
+    let i = iz * cc.n + ix
+    if !cc.ok[i] {
+        let x = ((cc.baseX + ix - VIEW_TILES) as f64) * TILE
+        let z = ((cc.baseZ + iz - VIEW_TILES) as f64) * TILE
+        let h = surfaceAt(w.city, x, z, w.time)
+        let nrm = normalAt(w.city, x, z, w.time)
+        let slope = 1.0 - nrm.y
+        var col = themedSmooth(w.theme, h, slope)
+        if w.city.loaded {
+            col = cityGround(w, x, z, slope)
+        } else if w.themeMix > 0.0 {
+            col = col.lerp(themedSmooth(w.prevTheme, h, slope), w.themeMix)
+        }
+        // Two low-frequency fields break up the flat wash. Both are smooth in
+        // world space, so neither can reintroduce a tile edge.
+        let det = 0.86 + 0.28 * noise2(x * 0.013, z * 0.013)
+        let band = 0.94 + 0.12 * Math.sin(h * 0.09)
+        var lt = shade(s, nrm.x, nrm.y, nrm.z, 0.34)
+        var tw = 1.0
+        if w.city.loaded {
+            tw = 0.45
+        }
+        var rr = col.r * det * band
+        var gg = col.g * det * band
+        var bb = col.b * det * band
+
+        // Water. Three things make a surface read as liquid, and a height
+        // threshold on a blue polygon delivers none of them:
+        //   depth      — shallows are bright and green, deep water is near-black
+        //   reflection — at a grazing angle water is a mirror and takes the sky;
+        //                that is the Fresnel term, and it is most of the effect
+        //                when flying low across a bay
+        //   motion     — a broad sun sheen sliding over the wave train
+        // Blended in over a narrow band around sea level, with a foam line right
+        // at the waterline, so the shore is an edge you can see rather than a
+        // colour change you infer.
+        let wet = smoothstep(1.5, -2.5, h)
+        if wet > 0.0 {
+            var shallow = rgb(0.06, 0.40, 0.42)
+            var deep = rgb(0.004, 0.03, 0.13)
+            if w.city.loaded {
+                // A tropical shallow-water green is exactly wrong for a cold,
+                // silty northern bay, and SRTM puts nearly all of one at 0 m —
+                // so that green would be the WHOLE bay.
+                shallow = rgb(0.055, 0.150, 0.175)
+                deep = rgb(0.010, 0.045, 0.085)
+            }
+            // depth is measured against the seabed, not the animated surface
+            let bed = heightAt(w.city, x, z)
+            let body = shallow.lerp(deep, smoothstep(-2.0, -46.0, bed))
+
+            // view direction from the eye to this point
+            var vx = x - w.cam.x
+            var vy = h - w.cam.y
+            var vz = z - w.cam.z
+            let vl = Math.sqrt(vx * vx + vy * vy + vz * vz) + 0.0001
+            vx = vx / vl
+            vy = vy / vl
+            vz = vz / vl
+            // Schlick, but capped. Physically the term goes to 1 at a grazing
+            // angle; taken literally, a chase camera looking flat across a bay
+            // turns the whole bay into sky colour and the water vanishes into
+            // haze. Holding it well under 1 keeps the sea reading as sea.
+            var cosI = 0.0 - (vx * nrm.x + vy * nrm.y + vz * nrm.z)
+            if cosI < 0.0 {
+                cosI = 0.0
+            }
+            let m = 1.0 - cosI
+            let m2 = m * m
+            let fres = 0.02 + 0.42 * m2 * m2 * m
+            // reflected sky, not fog: fog is desaturated by design, and water
+            // that reflects it comes out grey
+            let skyR = s.fogR * 0.22 + 0.02
+            let skyG = s.fogG * 0.42 + 0.08
+            let skyB = s.fogB * 0.70 + 0.20
+            var wr = body.r + (skyR - body.r) * fres
+            var wg = body.g + (skyG - body.g) * fres
+            var wb = body.b + (skyB - body.b) * fres
+
+            // Sun glitter off the wave normals, via the half vector. Getting the
+            // exponent right here is the whole difference between sea and haze:
+            // open water is nearly flat, so the half-vector term sits close to 1
+            // over huge areas, and anything broad (an exponent of 20, say) does
+            // not light a glitter path — it washes the entire sea to pale grey.
+            // Tight lobe for the actual sun streak, plus a very weak wide term
+            // for sheen, which is all a 44-unit vertex spacing can carry.
+            let hx = s.sunX - vx
+            let hy = s.sunY - vy
+            let hz = s.sunZ - vz
+            let hl = Math.sqrt(hx * hx + hy * hy + hz * hz) + 0.0001
+            var nh = (hx / hl) * nrm.x + (hy / hl) * nrm.y + (hz / hl) * nrm.z
+            if nh < 0.0 {
+                nh = 0.0
+            }
+            // Very tight, so it only fires on crests actually angled at the sun.
+            let sheen = Math.pow(nh, 300.0) * 0.9
+            wr = wr + sheen * 1.0
+            wg = wg + sheen * 0.97
+            wb = wb + sheen * 0.85
+
+            // A travelling ripple field, brightening and darkening the surface.
+            // With vertices 44 units apart a specular lobe cannot paint a glitter
+            // path — but a moving low-frequency field can, and unlike a static
+            // blanket of glare it actually reads as a surface in motion.
+            // Wavelength has to stay well above the 44-unit vertex spacing. At
+            // 130 units it is sampled under three times per wave, and instead of
+            // a ripple you get a coarse lumpy pattern crawling over the surface.
+            // ~480 units gives eleven samples per wave, which interpolates clean.
+            let rip = Math.sin(x * 0.013 + w.time * 0.9) * Math.sin(z * 0.011 - w.time * 0.7)
+            let ripK = 1.0 + 0.10 * rip
+            wr = wr * ripK
+            wg = wg * ripK
+            wb = wb * ripK
+
+            // Foam at the waterline. The wave train moves the surface up and
+            // down through sea level, so this band crawls up and down the beach
+            // on its own — the cheapest surf there is. Gated on the seabed
+            // actually sloping: a broad flat shelf sitting a metre under water
+            // satisfies "near sea level" across acres and turns into one huge
+            // white sheet, which is what a plain height test gives you.
+            let shoreSlope = smoothstep(0.010, 0.075, bedSlope(w.city, x, z))
+            let foam = smoothstep(1.6, 0.15, Math.abs(h)) * shoreSlope
+            wr = wr + foam * 0.55
+            wg = wg + foam * 0.62
+            wb = wb + foam * 0.62
+
+            // Water carries its own shading; flat Lambert would fight the Fresnel
+            // term, and the land grain does not belong on it at all.
+            rr = rr + (wr - rr) * wet
+            gg = gg + (wg - gg) * wet
+            bb = bb + (wb - bb) * wet
+            lt = lt + (1.0 - lt) * wet
+            tw = tw - tw * wet
+        }
+
+        cc.h[i] = h
+        cc.lt[i] = lt
+        cc.r[i] = rr
+        cc.g[i] = gg
+        cc.b[i] = bb
+        cc.tw[i] = tw
+        cc.ok[i] = true
+    }
+    return Corner {
+        h: cc.h[i], lt: cc.lt[i], r: cc.r[i], g: cc.g[i], b: cc.b[i], tw: cc.tw[i]
+    }
+}
+
+// Height including moving water. Land is the heightmap; anything below sea level
+// gets a travelling wave train so the sea has a surface instead of being a flat
+// blue plate.
+fn surfaceAt(cc: &City, x: f64, z: f64, t: f64): f64 {
+    let h = heightAt(cc, x, z)
+    if h >= 0.0 {
+        return h
+    }
+    let wave = Math.sin(x * 0.020 + t * 1.5) * 2.4 + Math.sin(z * 0.031 - t * 1.1) * 1.8 + Math.sin((x + z) * 0.012 + t * 0.7) * 3.0
+    return wave
+}
+
+// The surface normal at a point, from central differences. Sampling this at each
+// corner and interpolating is what removes the faceting.
+fn normalAt(cc: &City, x: f64, z: f64, t: f64): Vec3 {
+    let e = 7.0
+    let hx = surfaceAt(cc, x + e, z, t) - surfaceAt(cc, x - e, z, t)
+    let hz = surfaceAt(cc, x, z + e, t) - surfaceAt(cc, x, z - e, t)
+    let nx = 0.0 - hx
+    let nz = 0.0 - hz
+    let ny = 2.0 * e
+    let l = Math.sqrt(nx * nx + ny * ny + nz * nz)
+    return Vec3 {
+        x: nx / l, y: ny / l, z: nz / l
+    }
+}
+
+pub fn drawWorld(c: &mut Canvas, s: &mut Scene, w: &World, ground: &Texture, skin: &Texture) {
+    if w.city.loaded {
+        // The region weather table is a set of moods for invented places. Over a
+        // real city the point is to SEE it, so: clear air, fog only far enough
+        // out to hide the edge of the data.
+        s.fogR = 0.60
+        s.fogG = 0.68
+        s.fogB = 0.80
+        s.fogStart = 1500.0
+        s.fogEnd = 4200.0
+        s.sunX = 0.38
+        s.sunY = 0.86
+        s.sunZ = 0.34
+    } else {
+        applyWeather(s, w.prevTheme, w.theme, w.themeMix)
+    }
+    let v = viewOf(w.cam, c.w, c.h)
+    sceneClear(s)
+    drawSky(c, s, w, v)
+    drawClouds(c, s, w, v)
+
+    // Walk a grid of quads centred on the aircraft. Anything behind the camera is
+    // rejected before any per-vertex work.
+    let baseX = Math.floor(w.cam.x / TILE) as i64
+    let baseZ = Math.floor(w.cam.z / TILE) as i64
+    let fwdX = Math.sin(w.cam.yaw)
+    let fwdZ = Math.cos(w.cam.yaw)
+    var cc = cornersNew(baseX, baseZ)
+
+    // Front to back, in rings out from the camera tile. The z-buffer then rejects
+    // hidden pixels with a single compare instead of shading them — near terrain
+    // covers the screen several times over, so this is most of the frame budget.
+    for ring in 0..VIEW_TILES {
+        for step in 0..ringCount(ring) {
+            let off = ringOffset(ring, step)
+            let tx = baseX + off.x
+            let tz = baseZ + off.z
+            let x0 = (tx as f64) * TILE
+            let z0 = (tz as f64) * TILE
+            let x1 = x0 + TILE
+            let z1 = z0 + TILE
+            // cheap frustum reject: quad centre must be in front of the camera
+            let mx = x0 + TILE * 0.5 - w.cam.x
+            let mz = z0 + TILE * 0.5 - w.cam.z
+            if mx * fwdX + mz * fwdZ < 0.0 - TILE {
+                continue
+            }
+            let d2 = mx * mx + mz * mz
+            let reach = v.far
+            if d2 > reach * reach {
+                continue
+            }
+
+            // Four shared grid corners, each carrying its own height, light and
+            // colour. Neighbouring quads read the SAME corner, so no attribute
+            // can jump across a quad edge — this is what removes the grid.
+            let ix = tx - baseX + VIEW_TILES
+            let iz = tz - baseZ + VIEW_TILES
+            let k00 = cornerAt(cc, s, w, ix, iz)
+            let k10 = cornerAt(cc, s, w, ix + 1, iz)
+            let k01 = cornerAt(cc, s, w, ix, iz + 1)
+            let k11 = cornerAt(cc, s, w, ix + 1, iz + 1)
+
+            // UVs are world position over a fixed period, so the detail texture
+            // tiles across the terrain with no per-quad seams.
+            let uvs = 1.0 / 34.0
+            let u0 = x0 * uvs
+            let v0 = z0 * uvs
+            let u1 = x1 * uvs
+            let v1 = z1 * uvs
+            let a = vtxC(x0, k00.h, z0, u0, v0, k00.lt, k00.r, k00.g, k00.b, k00.tw)
+            let b = vtxC(x1, k10.h, z0, u1, v0, k10.lt, k10.r, k10.g, k10.b, k10.tw)
+            let d = vtxC(x0, k01.h, z1, u0, v1, k01.lt, k01.r, k01.g, k01.b, k01.tw)
+            let e = vtxC(x1, k11.h, z1, u1, v1, k11.lt, k11.r, k11.g, k11.b, k11.tw)
+            // Texture only what is close enough to see. Distant quads are many,
+            // small, and deep in fog — they take the cheaper untextured path,
+            // which still interpolates colour so the far field stays smooth.
+            if ring < 11 {
+                triangleV(c, s, v, ground, a, d, b, 1.0, 1.0, 1.0)
+                triangleV(c, s, v, ground, b, d, e, 1.0, 1.0, 1.0)
+            } else {
+                triangleG(c, s, v, a, d, b, 1.0, 1.0, 1.0)
+                triangleG(c, s, v, b, d, e, 1.0, 1.0, 1.0)
+            }
+        }
+    }
+
+    if w.city.loaded {
+        drawCity(c, s, w, v)
+    } else {
+        drawProps(c, s, w, v, baseX, baseZ)
+    }
+    drawTrails(c, w, v)
+    drawRings(c, s, w, v)
+    drawPlane(c, s, w, v, skin)
+    drawBirds(c, s, w, v)
+    drawSparks(c, s, w, v)
+}
+
+// Ground detail. Each terrain tile near the aircraft may carry one prop, placed
+// and sized from a stable hash so the scenery does not crawl as you fly. The kind
+// follows the theme: palms on the coast, cactus in the desert, conifers in the
+// forest, towers in the city.
+fn propHash(x: i64, z: i64): f64 {
+    let v = Math.sin((x as f64) * 271.9 + (z as f64) * 133.7) * 27183.1234
+    return v - Math.floor(v)
+}
+
+// An axis-aligned box, given as its base centre, height and half-width. Faces
+// carry their own shade so a block reads as lit without a normal per triangle.
+fn box3(c: &mut Canvas, s: &mut Scene, v: &View, cx: f64, y0: f64, y1: f64, cz: f64, hw: f64, col: &Rgb) {
+    let x0 = cx - hw
+    let x1 = cx + hw
+    let z0 = cz - hw
+    let z1 = cz + hw
+    // eight corners: 0..3 bottom, 4..7 top, both counter-clockwise from -x-z
+    let b00 = v3(x0, y0, z0)
+    let b10 = v3(x1, y0, z0)
+    let b11 = v3(x1, y0, z1)
+    let b01 = v3(x0, y0, z1)
+    let t00 = v3(x0, y1, z0)
+    let t10 = v3(x1, y1, z0)
+    let t11 = v3(x1, y1, z1)
+    let t01 = v3(x0, y1, z1)
+    // four walls, brighter on the sunward pair, plus a cap
+    let north = col
+    let south = col.scale(0.7)
+    let east = col.scale(0.85)
+    let west = col.scale(0.55)
+    let top = col.scale(1.15)
+    triangle(c, s, v, b00, t00, t10, north)
+    triangle(c, s, v, b00, t10, b10, north)
+    triangle(c, s, v, b11, t11, t01, south)
+    triangle(c, s, v, b11, t01, b01, south)
+    triangle(c, s, v, b10, t10, t11, east)
+    triangle(c, s, v, b10, t11, b11, east)
+    triangle(c, s, v, b01, t01, t00, west)
+    triangle(c, s, v, b01, t00, b00, west)
+    triangle(c, s, v, t00, t01, t11, top)
+    triangle(c, s, v, t00, t11, t10, top)
+}
+
+fn cone3(c: &mut Canvas, s: &mut Scene, v: &View, cx: f64, y0: f64, y1: f64, cz: f64, rad: f64, col: &Rgb) {
+    let segs = 6
+    let step = 6.283185307179586 / (segs as f64)
+    let apex = v3(cx, y1, cz)
+    for k in 0..segs {
+        let a0 = (k as f64) * step
+        let a1 = ((k + 1) as f64) * step
+        let p0 = v3(cx + Math.cos(a0) * rad, y0, cz + Math.sin(a0) * rad)
+        let p1 = v3(cx + Math.cos(a1) * rad, y0, cz + Math.sin(a1) * rad)
+        let sh = 0.65 + 0.35 * Math.cos(a0)
+        triangle(c, s, v, p0, apex, p1, col.scale(sh))
+        triangle(c, s, v, p1, apex, p0, col.scale(sh * 0.7))
+    }
+}
+
+// A palm crown: fronds radiating from one point and drooping away from it.
+//
+// This was two stacked `cone3` calls, which is a fir — apex up, rim below, the
+// same silhouette the FOREST region grows. The tree shape is most of what tells
+// a coast from a forest at a glance, so the coast was quietly wearing the wrong
+// biome. Fronds are single triangles, emitted in both windings because the
+// rasteriser backface-culls and a frond has to be visible from underneath.
+// Twelve triangles a palm, half what the two cones cost.
+fn palmCrown(c: &mut Canvas, s: &mut Scene, v: &View, crown: &Vec3, reach: f64, droop: f64, col: &Rgb) {
+    let fronds = 6
+    let step = 6.283185307179586 / (fronds as f64)
+    for k in 0..fronds {
+        let a = (k as f64) * step
+        let dir = v3(Math.cos(a), 0.0, Math.sin(a))
+        let tip = crown + dir.scale(reach) - v3(0.0, droop, 0.0)
+        // the frond has width at its base, tapering to the tip
+        let wing = v3(0.0 - dir.z, 0.0, dir.x).scale(reach * 0.22)
+        let sh = 0.72 + 0.28 * Math.cos(a)
+        let l = crown + wing
+        let r = crown - wing
+        triangle(c, s, v, l, tip, r, col.scale(sh))
+        triangle(c, s, v, r, tip, l, col.scale(sh * 0.75))
+    }
+}
+
+pub let PROP_TILES: i64 = 9
+
+fn drawProps(c: &mut Canvas, s: &mut Scene, w: &World, v: &View, baseX: i64, baseZ: i64) {
+    for gz in 0 - PROP_TILES..PROP_TILES {
+        for gx in 0 - PROP_TILES..PROP_TILES {
+            let tx = baseX + gx
+            let tz = baseZ + gz
+            let h = propHash(tx, tz)
+            if h > 0.30 {
+                continue // most tiles are empty
+            }
+            let jx = propHash(tx + 7919, tz) - 0.5
+            let jz = propHash(tx, tz + 6271) - 0.5
+            let x = (tx as f64) * TILE + TILE * (0.5 + jx * 0.7)
+            let z = (tz as f64) * TILE + TILE * (0.5 + jz * 0.7)
+            let g0 = heightAt(w.city, x, z)
+            if g0 < 4.0 {
+                continue // nothing grows in the water
+            }
+            let scale = 0.7 + h * 3.0
+            if w.theme == 1 {
+                // cactus: a trunk and one arm
+                box3(c, s, v, x, g0, g0 + 16.0 * scale, z, 2.2, rgb(0.16, 0.34, 0.14))
+                box3(c, s, v, x + 3.0, g0 + 7.0 * scale, g0 + 13.0 * scale, z, 1.4, rgb(0.14, 0.30, 0.12))
+            } else if w.theme == 2 {
+                // conifer
+                box3(c, s, v, x, g0, g0 + 7.0 * scale, z, 1.4, rgb(0.20, 0.12, 0.06))
+                cone3(c, s, v, x, g0 + 5.0 * scale, g0 + 30.0 * scale, z, 7.0 * scale, rgb(0.07, 0.26, 0.10))
+            } else if w.theme == 3 {
+                // tower block, height keyed off the same hash so a district varies
+                let tall = 22.0 + propHash(tz, tx) * 90.0
+                box3(c, s, v, x, g0, g0 + tall, z, 6.0 + h * 12.0, rgb(0.30, 0.31, 0.34))
+            } else {
+                // palm: bare trunk, fronds drooping off the top of it
+                box3(c, s, v, x, g0, g0 + 15.0 * scale, z, 1.2, rgb(0.26, 0.18, 0.09))
+                palmCrown(c, s, v, v3(x, g0 + 15.0 * scale, z), 11.0 * scale, 6.0 * scale, rgb(0.11, 0.34, 0.13))
+            }
+        }
+    }
+}
+
+// Real buildings: every visible OSM footprint extruded to its real height.
+//
+// The map is finite and reflected (see world3d.foldIn), so this walks the
+// reflected copies that overlap the draw radius and emits each one's buildings
+// transformed into world space. A copy mirrored on exactly one axis has its
+// polygon winding flipped, and the rasteriser backface-culls — so those copies
+// walk their footprints backwards, which flips the winding back.
+fn drawCity(c: &mut Canvas, s: &mut Scene, w: &World, v: &View) {
+    if !w.city.loaded {
+        return
+    }
+    let reach = w.city.reach
+    let far = v.far
+    let fwdX = Math.sin(w.cam.yaw)
+    let fwdZ = Math.cos(w.cam.yaw)
+    let kx0 = blockOf(w.cam.x - far, reach)
+    let kx1 = blockOf(w.cam.x + far, reach)
+    let kz0 = blockOf(w.cam.z - far, reach)
+    let kz1 = blockOf(w.cam.z + far, reach)
+
+    for kz in kz0..(kz1 + 1) {
+        for kx in kx0..(kx1 + 1) {
+            // The slice of this copy that the camera can actually see, in the
+            // copy's own local coordinates.
+            let ax = localOf(kx, w.cam.x - far, reach)
+            let bx = localOf(kx, w.cam.x + far, reach)
+            let az = localOf(kz, w.cam.z - far, reach)
+            let bz = localOf(kz, w.cam.z + far, reach)
+            let loX = Math.minF64(ax, bx) - BUILDING_MARGIN
+            let hiX = Math.maxF64(ax, bx) + BUILDING_MARGIN
+            let loZ = Math.minF64(az, bz) - BUILDING_MARGIN
+            let hiZ = Math.maxF64(az, bz) + BUILDING_MARGIN
+            let cellX0 = cityCellX(w.city, loX)
+            let cellX1 = cityCellX(w.city, hiX)
+            let cellZ0 = cityCellZ(w.city, loZ)
+            let cellZ1 = cityCellZ(w.city, hiZ)
+            let reversed = (kx % 2 != 0) != (kz % 2 != 0)
+
+            // One scratch pair of point buffers for the whole copy. A Vec per
+            // building was two allocations per building per frame, and downtown
+            // is two thousand buildings.
+            var px: Vec<f64> = Vec.new()
+            var pz: Vec<f64> = Vec.new()
+
+            // Front to back, in rings out from the cell under the camera —
+            // the same order the terrain is drawn in, and for the same reason:
+            // a city block is drawn over several times, and the z-buffer can
+            // reject a hidden pixel with one compare if the near geometry got
+            // there first. Grid order would shade every one of those pixels.
+            let camCellX = cityCellX(w.city, localOf(kx, w.cam.x, reach))
+            let camCellZ = cityCellZ(w.city, localOf(kz, w.cam.z, reach))
+            var maxRing = Math.maxI64(camCellX - cellX0, cellX1 - camCellX)
+            maxRing = Math.maxI64(maxRing, Math.maxI64(camCellZ - cellZ0, cellZ1 - camCellZ))
+
+            for ring in 0..(maxRing + 1) {
+                for step in 0..ringCount(ring) {
+                    let ro = ringOffset(ring, step)
+                    let cx = camCellX + ro.x
+                    let cz = camCellZ + ro.z
+                    if cx < cellX0 || cx > cellX1 || cz < cellZ0 || cz > cellZ1 {
+                        continue
+                    }
+                    // Reject the whole cell before touching its contents. Half
+                    // the searched square is behind the camera, and a cell is
+                    // sixteen buildings.
+                    let cellMidX = unfold(kx, w.city.gridX0 + ((cx as f64) + 0.5) * w.city.gridStep, reach)
+                    let cellMidZ = unfold(kz, w.city.gridZ0 + ((cz as f64) + 0.5) * w.city.gridStep, reach)
+                    let cdx = cellMidX - w.cam.x
+                    let cdz = cellMidZ - w.cam.z
+                    if cdx * fwdX + cdz * fwdZ < 0.0 - (BUILDING_MARGIN + w.city.gridStep) {
+                        continue
+                    }
+                    let creach = far + BUILDING_MARGIN + w.city.gridStep
+                    if cdx * cdx + cdz * cdz > creach * creach {
+                        continue
+                    }
+                    let ci = cz * w.city.gridN + cx
+                    for slot in w.city.cellStart[ci]..w.city.cellStart[ci + 1] {
+                        let b = w.city.cellItems[slot]
+                        let midX = unfold(kx, (w.city.bMinX[b] + w.city.bMaxX[b]) * 0.5, reach)
+                        let midZ = unfold(kz, (w.city.bMinZ[b] + w.city.bMaxZ[b]) * 0.5, reach)
+                        let dx = midX - w.cam.x
+                        let dz = midZ - w.cam.z
+                        if dx * fwdX + dz * fwdZ < 0.0 - 200.0 {
+                            continue
+                        }
+                        let d2 = dx * dx + dz * dz
+                        if d2 > far * far {
+                            continue
+                        }
+                        // Drop what would be smaller than a pixel or two. A city
+                        // is mostly two-storey houses, and at a kilometre out
+                        // they cost as much as the towers and show nothing.
+                        let hgt = w.city.bHeight[b]
+                        let d = Math.sqrt(d2) + 1.0
+                        if hgt / d < 0.011 {
+                            continue
+                        }
+                        prism(c, s, w, v, px, pz, b, kx, kz, reach, reversed, midX, midZ, d > 420.0)
+                    }
+                }
+            }
+        }
+    }
+}
+
+// World position of local coordinate `u`'s inverse: given a world coordinate,
+// where it sits inside reflected copy k.
+fn localOf(k: i64, world: f64, reach: f64): f64 {
+    let base = (k as f64) * reach * 2.0
+    if k % 2 == 0 {
+        return world - base
+    }
+    return base - world
+}
+
+fn pushPt(px: &mut Vec<f64>, pz: &mut Vec<f64>, kx: i64, kz: i64, reach: f64, x: f64, z: f64) {
+    px.push(unfold(kx, x, reach))
+    pz.push(unfold(kz, z, reach))
+}
+
+fn prism(c: &mut Canvas, s: &mut Scene, w: &World, v: &View, px: &mut Vec<f64>, pz: &mut Vec<f64>, b: i64, kx: i64, kz: i64, reach: f64, reversed: bool, midX: f64, midZ: f64, lod: bool) {
+    let n = w.city.bLen[b]
+    if n < 3 {
+        return
+    }
+    let start = w.city.bStart[b]
+    // One ground height for the whole footprint. Sampling per corner would sink
+    // a corner of every building on a San Francisco hill into the road.
+    let y0 = heightAt(w.city, midX, midZ) - 2.0
+    let y1 = y0 + w.city.bHeight[b] + 2.0
+
+    // Concrete, brick and glass, picked off the building id so a given building
+    // is always the same colour and a street is not uniform.
+    let tint = propHash(b, b * 31 + 7)
+    var col = rgb(0.36, 0.36, 0.37).lerp(rgb(0.52, 0.50, 0.47), tint)
+    if w.city.bHeight[b] > 45.0 {
+        // Towers are glass: darker, bluer, and they take more of the sky.
+        col = rgb(0.20, 0.25, 0.31).lerp(rgb(0.30, 0.37, 0.44), tint)
+    }
+
+    px.clear()
+    pz.clear()
+    // Far enough away, a fourteen-sided footprint and its bounding box are the
+    // same handful of pixels. Past that distance the real outline is spent on
+    // nothing, and a city is mostly far away — so swap in the box and keep the
+    // saved triangles for the skyline, which is what you can actually see.
+    if lod {
+        let x0 = w.city.bMinX[b]
+        let x1 = w.city.bMaxX[b]
+        let z0 = w.city.bMinZ[b]
+        let z1 = w.city.bMaxZ[b]
+        pushPt(px, pz, kx, kz, reach, x0, z0)
+        pushPt(px, pz, kx, kz, reach, x1, z0)
+        pushPt(px, pz, kx, kz, reach, x1, z1)
+        pushPt(px, pz, kx, kz, reach, x0, z1)
+    } else {
+        for i in 0..n {
+            pushPt(px, pz, kx, kz, reach, w.city.bPtX[start + i], w.city.bPtZ[start + i])
+        }
+    }
+    // A mirrored copy flips the winding, and the rasteriser backface-culls, so
+    // reverse the ring to flip it back. Done once here rather than per face.
+    if reversed {
+        var lo = 0
+        var hi = px.len - 1
+        while lo < hi {
+            let tx = px[lo]
+            let tz = pz[lo]
+            px[lo] = px[hi]
+            pz[lo] = pz[hi]
+            px[hi] = tx
+            pz[hi] = tz
+            lo = lo + 1
+            hi = hi - 1
+        }
+    }
+    let m = px.len
+
+    for i in 0..m {
+        var j = i + 1
+        if j == m {
+            j = 0
+        }
+        let ex = px[j] - px[i]
+        let ez = pz[j] - pz[i]
+        let el = Math.sqrt(ex * ex + ez * ez)
+        if el < 0.4 {
+            continue
+        }
+        // Outward normal of a counter-clockwise ring, in the xz plane.
+        let nx = ez / el
+        let nz = 0.0 - ex / el
+        let lt = shade(s, nx, 0.0, nz, 0.42)
+        let wall = col.scale(lt)
+        let p0b = v3(px[i], y0, pz[i])
+        let p1b = v3(px[j], y0, pz[j])
+        let p0t = v3(px[i], y1, pz[i])
+        let p1t = v3(px[j], y1, pz[j])
+        triangle(c, s, v, p0b, p0t, p1t, wall)
+        triangle(c, s, v, p0b, p1t, p1b, wall)
+    }
+
+    // Roof, as a fan. Wound the opposite way round from the base ring, which is
+    // what makes it face up rather than down.
+    let roof = col.scale(shade(s, 0.0, 1.0, 0.0, 0.42) * 1.06)
+    let a = v3(px[0], y1, pz[0])
+    for i in 1..(m - 1) {
+        triangle(c, s, v, a, v3(px[i + 1], y1, pz[i + 1]), v3(px[i], y1, pz[i]), roof)
+    }
+}
+
+// A ring: a tube of quads swept around a circle, standing across the course so
+// you can see which way to be pointing when you reach it. Cleared rings expand
+// and fade instead of vanishing.
+fn drawRings(c: &mut Canvas, s: &mut Scene, w: &World, v: &View) {
+    let segs = 14
+    let tube = 5.0
+    for i in 0..w.rings.len {
+        var rad = w.rings[i].r
+        var br = 1.0
+        var col = rgb(1.5, 1.15, 0.25)
+        if w.rings[i].bonus {
+            col = rgb(0.30, 1.05, 1.75)
+        }
+        if !w.rings[i].alive {
+            rad = w.rings[i].r * (1.0 + (1.0 - w.rings[i].pop) * 1.2)
+            br = w.rings[i].pop
+            col = rgb(0.5, 1.7, 0.7)
+            if br <= 0.03 {
+                continue
+            }
+        }
+        let centre = v3(w.rings[i].x, w.rings[i].y, w.rings[i].z)
+        // The hoop stands across the course: its normal points along `face`, and
+        // the tube is swept around the two axes perpendicular to that.
+        let across = v3(Math.cos(w.rings[i].face), 0.0, 0.0 - Math.sin(w.rings[i].face))
+        let upward = v3(0.0, 1.0, 0.0)
+        let step = 6.283185307179586 / (segs as f64)
+        for k in 0..segs {
+            let a0 = (k as f64) * step
+            let a1 = ((k + 1) as f64) * step
+            // one radial direction per segment end, in the hoop's own plane
+            let d0 = across.scale(Math.cos(a0)) + upward.scale(Math.sin(a0))
+            let d1 = across.scale(Math.cos(a1)) + upward.scale(Math.sin(a1))
+            let outer0 = centre + d0.scale(rad + tube)
+            let inner0 = centre + d0.scale(rad - tube)
+            let outer1 = centre + d1.scale(rad + tube)
+            let inner1 = centre + d1.scale(rad - tube)
+            // banded colour so the hoop reads as a solid object, not a circle
+            var band = 1.0
+            if k % 2 == 0 {
+                band = 0.72
+            }
+            let front = col.scale(band * br)
+            let back = front.scale(0.6)
+            // both faces, so the ring is solid from either side
+            triangle(c, s, v, outer0, outer1, inner0, front)
+            triangle(c, s, v, inner0, outer1, inner1, front)
+            triangle(c, s, v, outer1, outer0, inner0, back)
+            triangle(c, s, v, outer1, inner0, inner1, back)
+        }
+    }
+}
+
+// Contrails: project each stored point and join consecutive ones. Drawn without
+// depth test, which is fine — they are thin, bright, and always near the camera.
+fn drawTrails(c: &mut Canvas, w: &World, v: &View) {
+    drawOneTrail(c, w.trailL, v)
+    drawOneTrail(c, w.trailR, v)
+}
+
+fn drawOneTrail(c: &mut Canvas, t: &Vec<Trail>, v: &View) {
+    if t.len < 2 {
+        return
+    }
+    for i in 0..t.len - 1 {
+        let a = toCamera(v, t[i].x, t[i].y, t[i].z)
+        let b = toCamera(v, t[i + 1].x, t[i + 1].y, t[i + 1].z)
+        if a.z < 1.0 || b.z < 1.0 {
+            continue
+        }
+        let ax = v.cx + a.x * v.scale / a.z
+        let ay = v.cy - a.y * v.scale / a.z
+        let bx = v.cx + b.x * v.scale / b.z
+        let by = v.cy - b.y * v.scale / b.z
+        let f = Math.minF64(t[i].life, 1.0) * 0.55
+        line(c, ax, ay, bx, by, f, f * 1.05, f * 1.15)
+    }
+}
+
+// Sparks are camera-facing quads, so they stay visible whatever angle you clear
+// the ring at.
+fn drawSparks(c: &mut Canvas, _s: &mut Scene, w: &World, v: &View) {
+    for i in 0..w.sparks.len {
+        let p = toCamera(v, w.sparks[i].x, w.sparks[i].y, w.sparks[i].z)
+        if p.z < 1.0 {
+            continue
+        }
+        let sx = v.cx + p.x * v.scale / p.z
+        let sy = v.cy - p.y * v.scale / p.z
+        let t = w.sparks[i].life / w.sparks[i].maxLife
+        let size = Math.clampF64(v.scale * 1.6 / p.z, 1.2, 14.0) * (0.4 + t)
+        let f = t * t
+        spot(c, sx, sy, size, w.sparks[i].cr * f, w.sparks[i].cg * f, w.sparks[i].cb * f)
+    }
+}
+
+// Birds: a flapping V per bird, drawn as two short lines in screen space. At the
+// distance these appear, a silhouette is all there is to see — geometry would be
+// invisible detail at a real cost.
+//
+// Depth-tested by hand against the z-buffer, because `line` writes straight to
+// the canvas. Without the test a flock behind a ridge draws over the ridge.
+fn drawBirds(c: &mut Canvas, s: &Scene, w: &World, v: &View) {
+    for i in 0..w.flocks.len {
+        let f = w.flocks[i]
+        // fade in and out so a flock does not blink into existence
+        var vis = 1.0
+        if f.life < 2.0 {
+            vis = f.life / 2.0
+        }
+        if f.life > 42.5 {
+            vis = (44.0 - f.life) / 1.5
+        }
+        if vis <= 0.0 {
+            continue
+        }
+        // heading, so the V points the way the flock is going
+        let sp = Math.sqrt(f.vx * f.vx + f.vz * f.vz) + 0.0001
+        for k in 0..f.n {
+            // A rough echelon: each bird trails behind and to the side of the
+            // one before it, which is the shape a flock actually flies in.
+            let kk = k as f64
+            let row = kk * 0.5
+            let lat = (kk - (f.n as f64) * 0.5) * 13.0
+            let bx = f.x - (f.vx / sp) * row * 17.0 + (0.0 - f.vz / sp) * lat
+            let bz = f.z - (f.vz / sp) * row * 17.0 + (f.vx / sp) * lat
+            let by = f.y + Math.sin(w.time * 1.3 + kk * 0.9 + f.seed) * 5.0
+            let p = toCamera(v, bx, by, bz)
+            if p.z < 4.0 {
+                continue
+            }
+            let inv = 1.0 / p.z
+            let sx = v.cx + p.x * v.scale * inv
+            let sy = v.cy - p.y * v.scale * inv
+            if sx < 0.0 || sy < 0.0 || sx >= (c.w as f64) || sy >= (c.h as f64) {
+                continue
+            }
+            // occlusion: the z-buffer holds 1/z, larger is nearer
+            let zi = ((sy as i64) * s.w) + (sx as i64)
+            if (s.zbuf[zi] as f64) > inv {
+                continue
+            }
+            // wingspan in pixels; below a pixel there is nothing to draw
+            let span = v.scale * 4.6 * inv
+            if span < 0.7 {
+                continue
+            }
+            // each bird flaps on its own phase
+            let flap = Math.sin(w.time * 7.5 + kk * 1.7 + f.seed * 6.0)
+            let dy = 0.0 - span * 0.45 * flap
+            // Darkening, not additive: a bird is a silhouette against the sky.
+            // Fades with distance so far birds are specks rather than dots.
+            // Strong: the 2x2 coverage in darkLine spreads each step over four
+            // pixels and the bloom pass then lifts them back toward the sky, so a
+            // gentle value disappears entirely. Doubled up a pixel down for
+            // thickness once the bird is big enough to warrant it.
+            let dark = 0.92 * vis * Math.minF64(1.0, span * 0.7)
+            darkLine(c, sx - span, sy + dy, sx, sy, dark)
+            darkLine(c, sx, sy, sx + span, sy + dy, dark)
+            if span > 3.0 {
+                darkLine(c, sx - span, sy + dy + 1.0, sx, sy + 1.0, dark * 0.8)
+                darkLine(c, sx, sy + 1.0, sx + span, sy + dy + 1.0, dark * 0.8)
+            }
+        }
+    }
+}
+
+// The aircraft: a fighter with real volume — a faceted nose, a raised spine, a
+// belly, LERX strakes into swept wings, twin tailfins and two engine nozzles.
+// Body-space points are (forward, right, up) offsets, transformed once.
+fn drawPlane(c: &mut Canvas, s: &mut Scene, w: &World, v: &View, skin: &Texture) {
+    // The aircraft's own axes. This used to be its own copy of the camera's trig
+    // block, and the copy had drifted — it rolled about a slightly different axis
+    // than the camera did, which tilts the model against the world it is flying
+    // through once you are both banked and pitched.
+    let f = frameOf(w.plane.yaw, w.plane.pitch, w.plane.roll)
+    let origin = v3(w.plane.x, w.plane.y, w.plane.z)
+
+    // One list of points, not three lists of coordinates.
+    var p: Vec<Vec3> = Vec.new()
+    // 0 nose tip
+    bodyPt(p, origin, f, 30.0, 0.0, 0.0)
+    // 1..4 forward fuselage ring (top, right, bottom, left)
+    bodyPt(p, origin, f, 14.0, 0.0, 3.6)
+    bodyPt(p, origin, f, 14.0, 3.4, 0.4)
+    bodyPt(p, origin, f, 14.0, 0.0, 0.0 - 3.0)
+    bodyPt(p, origin, f, 14.0, 0.0 - 3.4, 0.4)
+    // 5..8 mid fuselage ring, fatter
+    bodyPt(p, origin, f, 0.0 - 2.0, 0.0, 5.2)
+    bodyPt(p, origin, f, 0.0 - 2.0, 5.0, 0.6)
+    bodyPt(p, origin, f, 0.0 - 2.0, 0.0, 0.0 - 4.4)
+    bodyPt(p, origin, f, 0.0 - 2.0, 0.0 - 5.0, 0.6)
+    // 9..12 tail ring
+    bodyPt(p, origin, f, 0.0 - 20.0, 0.0, 3.6)
+    bodyPt(p, origin, f, 0.0 - 20.0, 4.0, 0.4)
+    bodyPt(p, origin, f, 0.0 - 20.0, 0.0, 0.0 - 3.4)
+    bodyPt(p, origin, f, 0.0 - 20.0, 0.0 - 4.0, 0.4)
+    // 13,14 wing tips  15,16 strake roots  17,18 wing trailing roots
+    bodyPt(p, origin, f, 0.0 - 12.0, 26.0, 0.6)
+    bodyPt(p, origin, f, 0.0 - 12.0, 0.0 - 26.0, 0.6)
+    bodyPt(p, origin, f, 12.0, 3.6, 0.6)
+    bodyPt(p, origin, f, 12.0, 0.0 - 3.6, 0.6)
+    bodyPt(p, origin, f, 0.0 - 18.0, 4.4, 0.6)
+    bodyPt(p, origin, f, 0.0 - 18.0, 0.0 - 4.4, 0.6)
+    // 19,20 canted fin tips   21,22 tailplane tips
+    bodyPt(p, origin, f, 0.0 - 22.0, 7.0, 13.0)
+    bodyPt(p, origin, f, 0.0 - 22.0, 0.0 - 7.0, 13.0)
+    bodyPt(p, origin, f, 0.0 - 24.0, 13.0, 0.0)
+    bodyPt(p, origin, f, 0.0 - 24.0, 0.0 - 13.0, 0.0)
+    // 23 canopy apex
+    bodyPt(p, origin, f, 9.0, 0.0, 6.4)
+
+    // nose cone — four facets
+    triT(c, s, v, skin, p, 0, 1, 2, 0.5, 0.05, 0.5, 0.30, 0.9, 0.30, rgb(1.02, 1.04, 1.08))
+    triT(c, s, v, skin, p, 0, 2, 3, 0.5, 0.05, 0.9, 0.30, 0.5, 0.30, rgb(0.88, 0.90, 0.95))
+    triT(c, s, v, skin, p, 0, 3, 4, 0.5, 0.05, 0.5, 0.30, 0.1, 0.30, rgb(0.72, 0.74, 0.80))
+    triT(c, s, v, skin, p, 0, 4, 1, 0.5, 0.05, 0.1, 0.30, 0.5, 0.30, rgb(0.95, 0.97, 1.01))
+    // forward → mid, four quads
+    quadT(c, s, v, skin, p, 1, 2, 6, 5, 0.50, 0.30, 0.90, 0.30, 0.90, 0.55, 0.50, 0.55, rgb(1.00, 1.02, 1.06))
+    quadT(c, s, v, skin, p, 2, 3, 7, 6, 0.90, 0.30, 0.50, 0.30, 0.50, 0.55, 0.90, 0.55, rgb(0.80, 0.82, 0.88))
+    quadT(c, s, v, skin, p, 3, 4, 8, 7, 0.50, 0.30, 0.10, 0.30, 0.10, 0.55, 0.50, 0.55, rgb(0.66, 0.68, 0.74))
+    quadT(c, s, v, skin, p, 4, 1, 5, 8, 0.10, 0.30, 0.50, 0.30, 0.50, 0.55, 0.10, 0.55, rgb(0.90, 0.92, 0.96))
+    // mid → tail
+    quadT(c, s, v, skin, p, 5, 6, 10, 9, 0.50, 0.55, 0.90, 0.55, 0.90, 0.95, 0.50, 0.95, rgb(0.96, 0.98, 1.02))
+    quadT(c, s, v, skin, p, 6, 7, 11, 10, 0.90, 0.55, 0.50, 0.55, 0.50, 0.95, 0.90, 0.95, rgb(0.78, 0.80, 0.86))
+    quadT(c, s, v, skin, p, 7, 8, 12, 11, 0.50, 0.55, 0.10, 0.55, 0.10, 0.95, 0.50, 0.95, rgb(0.64, 0.66, 0.72))
+    quadT(c, s, v, skin, p, 8, 5, 9, 12, 0.10, 0.55, 0.50, 0.55, 0.50, 0.95, 0.10, 0.95, rgb(0.88, 0.90, 0.94))
+    // strake + wing, upper then lower
+    quadT(c, s, v, skin, p, 15, 13, 17, 6, 0.12, 0.12, 0.95, 0.12, 0.95, 0.45, 0.12, 0.45, rgb(1.00, 1.02, 1.06))
+    quadT(c, s, v, skin, p, 6, 17, 13, 15, 0.12, 0.45, 0.95, 0.45, 0.95, 0.12, 0.12, 0.12, rgb(0.60, 0.62, 0.70))
+    quadT(c, s, v, skin, p, 16, 8, 18, 14, 0.12, 0.55, 0.12, 0.88, 0.95, 0.88, 0.95, 0.55, rgb(1.00, 1.02, 1.06))
+    quadT(c, s, v, skin, p, 14, 18, 8, 16, 0.95, 0.55, 0.95, 0.88, 0.12, 0.88, 0.12, 0.55, rgb(0.60, 0.62, 0.70))
+    // close the wing tip edges so the aerofoil is not a hollow sheet
+    triT(c, s, v, skin, p, 13, 17, 6, 0.95, 0.12, 0.95, 0.45, 0.12, 0.45, rgb(0.70, 0.72, 0.78))
+    triT(c, s, v, skin, p, 6, 17, 13, 0.12, 0.45, 0.95, 0.45, 0.95, 0.12, rgb(0.70, 0.72, 0.78))
+    triT(c, s, v, skin, p, 14, 8, 18, 0.95, 0.55, 0.12, 0.55, 0.95, 0.88, rgb(0.70, 0.72, 0.78))
+    triT(c, s, v, skin, p, 18, 8, 14, 0.95, 0.88, 0.12, 0.55, 0.95, 0.55, rgb(0.70, 0.72, 0.78))
+
+    // tailplanes
+    triT(c, s, v, skin, p, 10, 21, 9, 0.20, 0.20, 0.95, 0.20, 0.20, 0.45, rgb(0.92, 0.94, 0.98))
+    triT(c, s, v, skin, p, 9, 21, 10, 0.20, 0.45, 0.95, 0.20, 0.20, 0.20, rgb(0.58, 0.60, 0.66))
+    triT(c, s, v, skin, p, 12, 9, 22, 0.20, 0.20, 0.20, 0.45, 0.95, 0.20, rgb(0.92, 0.94, 0.98))
+    triT(c, s, v, skin, p, 22, 9, 12, 0.95, 0.20, 0.20, 0.45, 0.20, 0.20, rgb(0.58, 0.60, 0.66))
+    // canted twin fins, in the accent stripe band of the sheet
+    triT(c, s, v, skin, p, 9, 19, 10, 0.30, 0.50, 0.80, 0.50, 0.30, 0.66, rgb(1.15, 0.48, 0.26))
+    triT(c, s, v, skin, p, 10, 19, 9, 0.30, 0.66, 0.80, 0.50, 0.30, 0.50, rgb(0.85, 0.34, 0.18))
+    triT(c, s, v, skin, p, 12, 20, 9, 0.30, 0.50, 0.80, 0.50, 0.30, 0.66, rgb(1.15, 0.48, 0.26))
+    triT(c, s, v, skin, p, 9, 20, 12, 0.30, 0.66, 0.80, 0.50, 0.30, 0.50, rgb(0.85, 0.34, 0.18))
+    // canopy: dark glass over the spine
+    triT(c, s, v, skin, p, 1, 23, 2, 0.5, 0.30, 0.5, 0.45, 0.9, 0.40, rgb(0.22, 0.40, 0.58))
+    triT(c, s, v, skin, p, 1, 4, 23, 0.5, 0.30, 0.1, 0.40, 0.5, 0.45, rgb(0.26, 0.46, 0.66))
+    triT(c, s, v, skin, p, 23, 5, 2, 0.5, 0.45, 0.5, 0.60, 0.9, 0.40, rgb(0.18, 0.34, 0.50))
+    triT(c, s, v, skin, p, 23, 4, 5, 0.5, 0.45, 0.1, 0.40, 0.5, 0.60, rgb(0.20, 0.38, 0.54))
+
+    // Cap the tail ring. Without this you look straight down the inside of the
+    // fuselage from behind — the rings were built but never closed.
+    quadT(c, s, v, skin, p, 12, 11, 10, 9, 0.10, 0.10, 0.10, 0.30, 0.30, 0.30, 0.30, 0.10, rgb(0.26, 0.27, 0.30))
+    // recessed engine bay ring inside the cap
+    let bayF = 0.0 - 19.0
+    for k in 0..2 {
+        var off2 = 4.0
+        if k == 1 {
+            off2 = 0.0 - 4.0
+        }
+        var bay: Vec<Vec3> = Vec.new()
+        let segs2 = 8
+        let stepA = 6.283185307179586 / (segs2 as f64)
+        for j in 0..segs2 {
+            let a0 = (j as f64) * stepA
+            bodyPt(bay, origin, f, bayF, off2 + Math.cos(a0) * 3.0, Math.sin(a0) * 3.0)
+        }
+        bodyPt(bay, origin, f, bayF - 3.0, off2, 0.0)
+        for j in 0..segs2 {
+            let j2 = (j + 1) % segs2
+            triangle(c, s, v, bay[j], bay[segs2], bay[j2], rgb(0.14, 0.10, 0.09))
+        }
+    }
+
+    // twin nozzles, glowing with throttle
+    let k = (w.plane.speed - 170.0) / 170.0
+    for side in 0..2 {
+        var off = 4.0
+        if side == 1 {
+            off = 0.0 - 4.0
+        }
+        let nozzle = origin - f.fwd.scale(21.0) + f.right.scale(off)
+        let ep = toCameraV(v, nozzle)
+        if ep.z > 1.0 {
+            let sx = v.cx + ep.x * v.scale / ep.z
+            let sy2 = v.cy - ep.y * v.scale / ep.z
+            let px2 = Math.clampF64(v.scale * 3.2 / ep.z, 2.0, 26.0)
+            let ab = w.boostBlend
+            spot(c, sx, sy2, px2 * (1.4 + k + ab * 3.4), 0.9 + k * 1.2 + ab * 1.6, 0.32 + k * 0.5 + ab * 0.5, 0.10)
+            spot(c, sx, sy2, px2 * (0.55 + ab * 1.1), 1.8 + k + ab * 1.5, 1.2 + k + ab, 0.7 + ab * 0.6)
+        }
+    }
+}
+
+// Two triangles from four corner indices, sharing the diagonal.
+fn quadT(c: &mut Canvas, s: &mut Scene, v: &View, t: &Texture, p: &Vec<Vec3>, a: i64, b: i64, d: i64, e: i64, ua: f64, va: f64, ub: f64, vb: f64, ud: f64, vd: f64, ue: f64, ve: f64, col: &Rgb) {
+    triT(c, s, v, t, p, a, b, d, ua, va, ub, vb, ud, vd, col)
+    triT(c, s, v, t, p, a, d, e, ua, va, ud, vd, ue, ve, col)
+}
+
+// A point on the aircraft, given as an offset along its own axes: how far
+// forward, how far right, how far up. Sixteen parameters became four.
+fn bodyPt(p: &mut Vec<Vec3>, origin: &Vec3, f: &Frame, fwd: f64, right: f64, up: f64) {
+    p.push(origin + f.fwd.scale(fwd) + f.right.scale(right) + f.up.scale(up))
+}
+
+// Textured variant: the three UVs pick which patch of the skin sheet this facet
+// wears, so panel lines and the spine stripe land where they should.
+fn triT(c: &mut Canvas, s: &mut Scene, v: &View, t: &Texture, p: &Vec<Vec3>, a: i64, b: i64, d: i64, ua: f64, va: f64, ub: f64, vb: f64, ud: f64, vd: f64, col: &Rgb) {
+    triangleV(c, s, v, t, vtx(p[a].x, p[a].y, p[a].z, ua, va, 1.0), vtx(p[b].x, p[b].y, p[b].z, ub, vb, 1.0), vtx(p[d].x, p[d].y, p[d].z, ud, vd, 1.0), col.r, col.g, col.b)
+}
+
+// A reticle on the next coin, and an edge arrow when it is off screen. Without
+// this the trail is easy to lose the moment you overshoot one.
+pub fn drawGuide(c: &mut Canvas, w: &World, _s: &Scene) {
+    let v = viewOf(w.cam, c.w, c.h)
+    // nearest live coin ahead
+    var bi = 0 - 1
+    var bd = 1.0e18
+    let fwdX = Math.sin(w.plane.yaw)
+    let fwdZ = Math.cos(w.plane.yaw)
+    for i in 0..w.rings.len {
+        if w.rings[i].alive {
+            let dx = w.rings[i].x - w.plane.x
+            let dy = w.rings[i].y - w.plane.y
+            let dz = w.rings[i].z - w.plane.z
+            // Only rings still in front. Nearest-by-distance alone will happily
+            // pick one you have already flown past and point you backwards.
+            if dx * fwdX + dz * fwdZ < 0.0 - 40.0 {
+                continue
+            }
+            let d = dx * dx + dy * dy + dz * dz
+            if d < bd {
+                bd = d
+                bi = i
+            }
+        }
+    }
+    if bi < 0 {
+        return
+    }
+    let p = toCamera(v, w.rings[bi].x, w.rings[bi].y, w.rings[bi].z)
+    let pulse = 0.65 + 0.35 * Math.sin(w.time * 6.0)
+    if p.z > 1.0 {
+        let sx = v.cx + p.x * v.scale / p.z
+        let sy = v.cy - p.y * v.scale / p.z
+        if sx > 8.0 && sx < (c.w as f64) - 8.0 && sy > 8.0 && sy < (c.h as f64) - 8.0 {
+            let r = Math.clampF64(900.0 / p.z, 16.0, 90.0)
+            let a = 0.30 * r
+            // four corner brackets
+            line(c, sx - r, sy - r + a, sx - r, sy - r, 0.4 * pulse, 1.2 * pulse, 0.5 * pulse)
+            line(c, sx - r, sy - r, sx - r + a, sy - r, 0.4 * pulse, 1.2 * pulse, 0.5 * pulse)
+            line(c, sx + r, sy - r + a, sx + r, sy - r, 0.4 * pulse, 1.2 * pulse, 0.5 * pulse)
+            line(c, sx + r, sy - r, sx + r - a, sy - r, 0.4 * pulse, 1.2 * pulse, 0.5 * pulse)
+            line(c, sx - r, sy + r - a, sx - r, sy + r, 0.4 * pulse, 1.2 * pulse, 0.5 * pulse)
+            line(c, sx - r, sy + r, sx - r + a, sy + r, 0.4 * pulse, 1.2 * pulse, 0.5 * pulse)
+            line(c, sx + r, sy + r - a, sx + r, sy + r, 0.4 * pulse, 1.2 * pulse, 0.5 * pulse)
+            line(c, sx + r, sy + r, sx + r - a, sy + r, 0.4 * pulse, 1.2 * pulse, 0.5 * pulse)
+            return
+        }
+    }
+    // off screen (or behind): pin an arrow on the edge pointing the way to turn
+    var dirX = p.x
+    var dirY = 0.0 - p.y
+    if p.z <= 1.0 {
+        dirY = 0.0
+    }
+    let l = Math.sqrt(dirX * dirX + dirY * dirY) + 0.001
+    dirX = dirX / l
+    dirY = dirY / l
+    let rad = Math.minF64((c.w as f64), (c.h as f64)) * 0.36
+    let ax = v.cx + dirX * rad
+    let ay = v.cy + dirY * rad
+    let px2 = 0.0 - dirY
+    let py2 = dirX
+    line(c, ax + dirX * 20.0, ay + dirY * 20.0, ax + px2 * 12.0, ay + py2 * 12.0, 0.5 * pulse, 1.3 * pulse, 0.6 * pulse)
+    line(c, ax + dirX * 20.0, ay + dirY * 20.0, ax - px2 * 12.0, ay - py2 * 12.0, 0.5 * pulse, 1.3 * pulse, 0.6 * pulse)
+    line(c, ax - px2 * 12.0, ay - py2 * 12.0, ax + px2 * 12.0, ay + py2 * 12.0, 0.4 * pulse, 1.0 * pulse, 0.5 * pulse)
+}
+
+// Speed lines: short streaks flying outward from the centre of the screen. The
+// single most legible "you are going fast" cue there is, and it costs nothing.
+pub fn drawSpeedLines(c: &mut Canvas, w: &World) {
+    if w.boostBlend < 0.02 {
+        return
+    }
+    let k = w.boostBlend
+    let cx = (c.w as f64) * 0.5
+    let cy = (c.h as f64) * 0.5
+    let n = (46.0 * k) as i64
+    for i in 0..n {
+        let fi = i as f64
+        // each streak keeps a stable angle and radius, animated outward by time
+        let a = fi * 2.399963
+        let phase = Math.mod(w.time * (1.6 + Math.mod(fi, 5.0) * 0.35) + fi * 0.137, 1.0)
+        let r0 = 90.0 + phase * 760.0
+        let len = (26.0 + phase * 150.0) * k
+        let dx = Math.cos(a)
+        let dy = Math.sin(a)
+        // fade in from the centre, out at the edge
+        var f = phase * 2.4
+        if f > 1.0 {
+            f = 1.0 - (phase - 0.42) * 1.2
+        }
+        if f < 0.0 {
+            continue
+        }
+        let b = f * k * 0.5
+        line(c, cx + dx * r0, cy + dy * r0, cx + dx * (r0 + len), cy + dy * (r0 + len), b * 0.8, b * 0.9, b)
+    }
+}
+
+// The centre column is shared by several transient messages, and before these
+// were pinned to fixed slots a ring pickup, a region telegraph and a streak break
+// could all land on the same pixels at once. Ordered top to bottom, non-
+// overlapping, with the tier bar just above the streak number.
+pub let STREAK_Y: i64 = 62
+
+pub let GAIN_Y: i64 = 176
+
+pub let TELEGRAPH_Y: i64 = 236
+
+pub fn drawHud(c: &mut Canvas, w: &World, s: &Scene, fps: i64) {
+    text(c, 24, 22, "SCORE " + w.score.toString(), 3, 0.95, 0.80, 0.30)
+    let alt = ((w.plane.y - heightAt(w.city, w.plane.x, w.plane.z)) as i64)
+    text(c, 24, 58, "ALT " + alt.toString() + "   SPD " + (w.plane.speed as i64).toString(), 2, 0.35, 0.45, 0.55)
+    // afterburner budget
+    let bx = 24.0
+    let by = (c.h as f64) - 92.0
+    fillRect(c, bx, by, bx + 220.0, by + 9.0, 0.05, 0.05, 0.06)
+    var brr = 0.35
+    var bgg = 0.85
+    var label = "AFTERBURNER"
+    if w.abLocked {
+        // recharging: red, and named as such, so the lockout is not a mystery
+        let pulse = 0.6 + 0.4 * Math.sin(w.time * 7.0)
+        brr = 0.95 * pulse
+        bgg = 0.30 * pulse
+        label = "RECHARGING"
+    } else if w.afterburner < 0.35 {
+        brr = 0.9
+        bgg = 0.45
+    }
+    fillRect(c, bx, by, bx + 220.0 * w.afterburner, by + 9.0, brr, bgg, 0.25)
+    text(c, 24, (by as i64) - 22, label, 2, brr * 0.5 + 0.15, bgg * 0.5 + 0.15, 0.34)
+
+    let ts = "TRIS " + s.tris.toString() + "   " + fps.toString() + " FPS"
+    text(c, c.w - 24 - textWidth(ts, 2), 22, ts, 2, 0.28, 0.36, 0.44)
+
+    // The streak. Shown from the very first ring — the count is the thing the
+    // player is accumulating, so it has to appear the moment it starts existing
+    // rather than materialising at x2 as if from nowhere. It ticks up by one per
+    // hoop, punches on each one, and only ever resets on a miss.
+    if w.combo > 0 {
+        let n = w.combo as f64
+        let f = Math.minF64(2.6, 0.7 + n * 0.10)
+        let beat = 1.0 + 0.16 * Math.sin(w.time * (5.0 + n * 0.6))
+        // the punch: each ring kicks the number bigger, then it settles back
+        var pop = 0.0
+        if w.comboPop > 0.0 {
+            pop = w.comboPop * w.comboPop
+        }
+        var size = 4
+        if w.combo >= 5 {
+            size = 5
+        }
+        if w.combo >= 10 {
+            size = 6
+        }
+        if w.combo >= 20 {
+            size = 7
+        }
+        if pop > 0.45 {
+            size = size + 1
+        }
+        var cr2 = 1.5
+        var cg2 = 1.1
+        var cb2 = 0.25
+        if w.combo >= 10 {
+            cr2 = 1.7
+            cg2 = 0.65
+            cb2 = 0.20
+        }
+        if w.combo >= 20 {
+            cr2 = 0.5
+            cg2 = 1.2
+            cb2 = 1.9
+        }
+        let k = f * beat * (1.0 + pop * 0.8)
+        textCentered(c, c.w / 2, STREAK_Y, "x" + w.combo.toString(), size, cr2 * k, cg2 * k, cb2 * k)
+        // Always labelled. An unexplained growing number is not a mechanic.
+        textCentered(c, c.w / 2, STREAK_Y + size * 9 + 4, "RING STREAK", 2, cr2 * 0.45, cg2 * 0.45, cb2 * 0.45)
+        // a bar that fills toward the next tier, so the streak always has a goal
+        var tier = 5.0
+        if w.combo >= 5 {
+            tier = 10.0
+        }
+        if w.combo >= 10 {
+            tier = 20.0
+        }
+        if w.combo >= 20 {
+            tier = 20.0
+        }
+        let frac = Math.minF64(1.0, n / tier)
+        let bw2 = 190.0
+        let bx2 = (c.w as f64) * 0.5 - bw2 * 0.5
+        let by2 = (STREAK_Y as f64) - 16.0
+        fillRect(c, bx2, by2, bx2 + bw2 * frac, by2 + 4.0, cr2 * 0.5, cg2 * 0.5, cb2 * 0.5)
+    }
+
+    // What the last ring was actually worth, rising and fading where the streak
+    // number sits. This is the line that connects "streak went up" to "score went
+    // up by a bigger number than last time".
+    if w.gainPop > 0.0 && w.combo > 0 {
+        let f = w.gainPop
+        let rise = (1.0 - f) * 30.0
+        let mult = Math.minI64(w.combo, 20)
+        var s2 = "+" + w.gain.toString()
+        if mult > 1 {
+            s2 = s2 + "  (x" + mult.toString() + ")"
+        }
+        textCentered(c, c.w / 2, GAIN_Y - (rise as i64), s2, 3, 1.5 * f, 1.25 * f, 0.5 * f)
+    }
+
+    // streak broken
+    // Occupies the streak's own slot: the streak is necessarily zero here, so
+    // the two can never be on screen together.
+    if w.missFlash > 0.0 {
+        let f = w.missFlash
+        textCentered(c, c.w / 2, STREAK_Y + 4, "STREAK LOST", 5, 1.6 * f, 0.25 * f, 0.30 * f)
+        if w.bestCombo > 1 {
+            textCentered(c, c.w / 2, STREAK_Y + 52, "BEST x" + w.bestCombo.toString(), 2, 0.8 * f, 0.5 * f, 0.4 * f)
+        }
+    }
+
+    // Leaving the course. The corridor turn assist is silent by design, so this
+    // is the only thing telling the player why the aircraft is easing back —
+    // an input that fights you without explanation reads as a broken control.
+    if w.offCourse > 0.02 {
+        let k = w.offCourse
+        let pulse = 0.6 + 0.4 * Math.sin(w.time * 8.0)
+        let a = k * pulse
+        // red edge vignette, thickening as you go
+        let t2 = 3.0 + 26.0 * k
+        fillRect(c, 0.0, 0.0, c.w as f64, t2, 0.9 * a, 0.10 * a, 0.12 * a)
+        fillRect(c, 0.0, (c.h as f64) - t2, c.w as f64, c.h as f64, 0.9 * a, 0.10 * a, 0.12 * a)
+        fillRect(c, 0.0, 0.0, t2, c.h as f64, 0.9 * a, 0.10 * a, 0.12 * a)
+        fillRect(c, (c.w as f64) - t2, 0.0, c.w as f64, c.h as f64, 0.9 * a, 0.10 * a, 0.12 * a)
+        if k > 0.15 {
+            textCentered(c, c.w / 2, c.h / 2 - 150, "LEAVING THE COURSE", 3, 1.5 * a, 0.35 * a, 0.30 * a)
+            textCentered(c, c.w / 2, c.h / 2 - 118, "TURN BACK TO THE RINGS", 2, 0.9 * a, 0.4 * a, 0.35 * a)
+        }
+    }
+
+    // Where you are, and how far to the next region.
+    if w.city.loaded {
+        text(c, 24, c.h - 58, w.city.name, 3, 0.75, 0.72, 0.55)
+        text(c, 24, c.h - 26, "OPENSTREETMAP + NASA SRTM", 2, 0.32, 0.34, 0.38)
+    } else {
+        text(c, 24, c.h - 58, themeName(w.theme), 3, 0.75, 0.72, 0.55)
+        let rem = "NEXT REGION IN " + w.toNext.toString()
+        text(c, 24, c.h - 26, rem, 2, 0.32, 0.34, 0.38)
+    }
+
+    // Telegraph: name the country you are about to enter, louder as it nears.
+    if w.toNext <= 3 && w.banner <= 0.0 && !w.city.loaded {
+        let next = themeName((w.theme + 1) % 4)
+        let urgency = (4.0 - (w.toNext as f64)) / 3.0
+        let pulse = 0.55 + 0.45 * Math.sin(w.time * (4.0 + urgency * 6.0))
+        let k = (0.35 + urgency * 0.85) * pulse
+        textCentered(c, c.w / 2, TELEGRAPH_Y, "APPROACHING", 2, k * 0.8, k * 0.8, k * 0.6)
+        textCentered(c, c.w / 2, TELEGRAPH_Y + 26, next, 5, k * 1.5, k * 1.2, k * 0.4)
+    }
+
+    if w.banner > 0.0 {
+        var f = 1.0
+        if w.banner < 1.2 {
+            f = w.banner / 1.2
+        }
+        if w.level > 1 && !w.city.loaded {
+            // arriving somewhere new
+            textCentered(c, c.w / 2, 130, "ENTERING", 3, 0.7 * f, 0.7 * f, 0.55 * f)
+            textCentered(c, c.w / 2, 176, themeName(w.theme), 9, 1.4 * f, 1.15 * f, 0.45 * f)
+            textCentered(c, c.w / 2, 268, "REGION " + w.level.toString(), 2, 0.5 * f, 0.55 * f, 0.6 * f)
+        } else {
+            textCentered(c, c.w / 2, 150, "FLYBY", 9, 1.3 * f, 1.0 * f, 0.35 * f)
+            if w.city.loaded {
+                textCentered(c, c.w / 2, 240, w.city.name, 3, 0.6 * f, 0.7 * f, 0.8 * f)
+            } else {
+                textCentered(c, c.w / 2, 240, "FLY THROUGH THE RINGS", 2, 0.5 * f, 0.6 * f, 0.7 * f)
+            }
+        }
+    }
+    if w.hint > 0.0 {
+        var f = 1.0
+        if w.hint < 1.0 {
+            f = w.hint
+        }
+        if w.easy {
+            textCentered(c, c.w / 2, c.h - 130, "UP AND DOWN TO FLY THROUGH THE RINGS", 2, 0.45 * f, 0.5 * f, 0.6 * f)
+            textCentered(c, c.w / 2, c.h - 106, "THE PLANE STEERS ITSELF — YOU CANNOT CRASH", 2, 0.4 * f, 0.44 * f, 0.5 * f)
+        } else {
+            textCentered(c, c.w / 2, c.h - 130, "LEFT RIGHT TO BANK    UP DOWN TO CLIMB AND DIVE", 2, 0.45 * f, 0.5 * f, 0.6 * f)
+            textCentered(c, c.w / 2, c.h - 106, "FOLLOW THE GREEN BRACKETS — YOU CANNOT CRASH", 2, 0.4 * f, 0.44 * f, 0.5 * f)
+        }
+    }
+}

@@ -125,10 +125,14 @@ export class CodegenJS {
     this.emit("function __print(s) { __out.push(String(s)); }");
     this.emit("function __flush() { if (__out.length === 0) return; const text = __out.join(''); __out.length = 0; if (typeof process !== 'undefined') process.stdout.write(text); else if (typeof console !== 'undefined') console.log(text); }");
     this.emit("function __assert(cond, msg) { if (!cond) throw new Error('assertion failed: ' + msg); }");
-    // C printf %g: 6 significant digits, trailing zeros trimmed, exponent when
-    // exp < -4 or >= 6 — matches native's float print (which uses %g), so playground
-    // output equals the compiled binary's.
-    this.emit("function __fmtG(x) { if (!isFinite(x)) return String(x); if (x === 0) return '0'; let s = x.toPrecision(6); if (s.indexOf('e') >= 0) { s = Number(s).toExponential(); return s.replace(/e([+-])(\\d)$/, 'e$10$2'); } if (s.indexOf('.') >= 0) s = s.replace(/0+$/, '').replace(/\\.$/, ''); return s; }");
+    // Mirrors @milo.fmt.f64 in codegen.ts so playground output equals the
+    // compiled binary's: walk the integer-digit count up by powers of ten, then
+    // raise %g precision until the text parses back to the same double. __gfmt
+    // is C's "%.*g" — exponent form when exp < -4 or exp >= precision, trailing
+    // zeros trimmed. Native prints f32 at f32 precision; JS has no f32, so a
+    // literal typed f32 is the one case where the two backends can disagree.
+    this.emit("function __gfmt(x, p) { if (x === 0) return Object.is(x, -0) ? '-0' : '0'; const es = x.toExponential(p - 1); const ei = es.indexOf('e'); const e = Number(es.slice(ei + 1)); if (e < -4 || e >= p) { let m = es.slice(0, ei); if (m.indexOf('.') >= 0) m = m.replace(/0+$/, '').replace(/\\.$/, ''); let ea = String(Math.abs(e)); if (ea.length < 2) ea = '0' + ea; return m + 'e' + (e < 0 ? '-' : '+') + ea; } let s = x.toFixed(Math.max(0, p - 1 - e)); if (s.indexOf('.') >= 0) s = s.replace(/0+$/, '').replace(/\\.$/, ''); return s; }");
+    this.emit("function __fmtG(x) { if (Number.isNaN(x)) return 'nan'; if (!isFinite(x)) return x > 0 ? 'inf' : '-inf'; let dig = 1, pow = 10; const av = Math.abs(x); while (dig < 17 && av >= pow) { dig++; pow *= 10; } for (let p = dig; p < 17; p++) { const s = __gfmt(x, p); if (Number(s) === x) return s; } return __gfmt(x, 17); }");
     this.emit("function __propagate(r) { if (r.tag !== 0) throw { __milo_prop: r }; return r.data[0]; }");
     this.emit("function __eprint(s) { if (typeof process !== 'undefined' && process.stderr) process.stderr.write(s); else if (typeof console !== 'undefined') console.error(s); }");
     // Display formatting to match native: structs as `Name { f: v, … }`, enums as
@@ -340,6 +344,25 @@ export class CodegenJS {
         this.emit("}");
         break;
       }
+      case "ForStrView": {
+        // No views in JS — the pieces are substrings. Same sequence, same emptiness rules;
+        // only the zero-copy part is lost, which JS strings cannot express anyway.
+        const sv = this.nextTemp();
+        const parts = this.nextTemp();
+        this.emit(`const ${sv} = ${this.genExpr(stmt.src)};`);
+        if (stmt.mode === "lines") {
+          this.emit(`const ${parts} = ${sv}.length === 0 ? [] : ${sv}.replace(/\\n$/, "").split("\\n").map(l => l.endsWith("\\r") ? l.slice(0, -1) : l);`);
+        } else {
+          this.emit(`const ${parts} = ${sv}.split(${this.genExpr(stmt.sep!)});`);
+        }
+        if (stmt.varName2) this.emit(`for (const [${stmt.varName}, ${stmt.varName2}] of ${parts}.entries()) {`);
+        else this.emit(`for (const ${stmt.varName} of ${parts}) {`);
+        this.indent++;
+        for (const s of stmt.body) this.genStmt(s);
+        this.indent--;
+        this.emit("}");
+        break;
+      }
       case "UnsafeBlock": {
         for (const s of stmt.body) this.genStmt(s);
         break;
@@ -535,7 +558,12 @@ export class CodegenJS {
         // capacity is a native allocation hint; JS strings need none.
         return `""`;
       case "NumberToString":
-        return `String(${this.genExpr(expr.value)})`;
+        // Floats take __fmtG, not String(): both are shortest-round-trip, but
+        // they disagree on presentation (JS says "1e-7", C's %g "1e-07"), and
+        // the native backend is the reference.
+        return expr.value.type.tag === "float"
+          ? `__fmtG(${this.genExpr(expr.value)})`
+          : `String(${this.genExpr(expr.value)})`;
       case "JsonStringify":
         return `JSON.stringify(${this.genExpr(expr.value)})`;
       case "Closure":

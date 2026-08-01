@@ -1,0 +1,66 @@
+// @skip-os: win32
+// std/fetch request serialization and form encoding, exercised without a socket.
+// Windows is skipped because importing std/fetch links OpenSSL, which the xwin
+// sysroot does not ship.
+
+from "std/fetch" import {
+    FetchOptions, FormField, buildRequest, formEncode, hasHeader, urlEncode
+}
+
+fn get(headers: string): FetchOptions {
+    return FetchOptions {
+        method: "GET", headers: headers, body: ""
+    }
+}
+
+fn main(): void {
+    // Servers like Overpass 406 a request with no Accept, so one is always sent.
+    let plain = buildRequest("example.com", "/x", get(""))
+    // @expect: default accept true
+    print("default accept " + hasHeader(plain, "Accept").toString())
+    // @expect: default ua true
+    print("default ua " + hasHeader(plain, "User-Agent").toString())
+
+    // A caller-supplied header must not be duplicated by the default.
+    let custom = buildRequest("example.com", "/x", get("Accept: application/json"))
+    var accepts: i64 = 0
+    var i: i64 = 0
+    while i + 7 < custom.len {
+        if (i == 0 || custom[i - 1] == '\n') && custom.substr(i, i + 7) == "Accept:" {
+            accepts = accepts + 1
+        }
+        i = i + 1
+    }
+    // @expect: accept count 1
+    print("accept count " + accepts.toString())
+
+    // A header block with an empty value still counts as present.
+    // @expect: empty value present true
+    print("empty value present " + hasHeader("Accept:", "Accept").toString())
+    // @expect: absent false
+    print("absent " + hasHeader("Accept: */*", "Authorization").toString())
+
+    var withBody = FetchOptions {
+        method: "POST",
+        headers: "Content-Type: application/x-www-form-urlencoded",
+        body: "data=1",
+    }
+    let post = buildRequest("example.com", "/api", withBody)
+    // @expect: content length true
+    print("content length " + hasHeader(post, "Content-Length").toString())
+
+    // @expect: a%20b%2Bc%2Fd~e
+    print(urlEncode("a b+c/d~e"))
+
+    var fields: Vec<FormField> = []
+    fields.push(FormField {
+        name: "data", value: "way[\"natural\"]"
+    }
+    )
+    fields.push(FormField {
+        name: "n", value: "1&2"
+    }
+    )
+    // @expect: data=way%5B%22natural%22%5D&n=1%262
+    print(formEncode(fields))
+}

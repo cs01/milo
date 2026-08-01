@@ -1,0 +1,91 @@
+// std/rng: the same seed must give the same stream, forever and on every
+// platform. These are golden values — if they change, replayability broke.
+from "std/rng" import {
+    Rng
+}
+
+pub fn main(): i32 {
+    var r = Rng.new(2026)
+    for i in 0..4 {
+        print(r.next().toString())
+    }
+    // @expect: 15824617304438902051
+    // @expect: 8699989649721214301
+    // @expect: 12310341597754734734
+    // @expect: 7097835237234771186
+
+    var f = Rng.new(2026)
+    for i in 0..3 {
+        print(f.float().toString())
+    }
+    // @expect: 0.8578542230112182
+    // @expect: 0.4716273839414571
+    // @expect: 0.667344955216218
+
+    var g = Rng.new(9)
+    print(g.range(10, 20).toString())
+    // @expect: 12
+    print(g.int(100).toString())
+    // @expect: 6
+    print(g.bool().toString())
+    // @expect: false
+
+    var v: Vec<i64> = Vec.new()
+    for i in 0..6 {
+        v.push(i)
+    }
+    var s = Rng.new(3)
+    s.shuffleI64(v, 6)
+    var out = ""
+    for i in 0..6 {
+        out = out + v[i].toString()
+    }
+    print(out)
+    // @expect: 502413
+
+    // Two generators seeded alike stay in lockstep; that is the whole contract.
+    var a = Rng.new(77)
+    var b = Rng.new(77)
+    var same = true
+    for i in 0..64 {
+        if a.next() != b.next() {
+            same = false
+        }
+    }
+    print(same.toString())
+    // @expect: true
+
+    // Different seeds must not collide on the first draw.
+    var c = Rng.new(1)
+    var d = Rng.new(2)
+    print((c.next() != d.next()).toString())
+    // @expect: true
+
+    // Bounds hold: int(n) stays in [0,n), range(lo,hi) in [lo,hi].
+    var e = Rng.new(5)
+    var ok = true
+    for i in 0..2000 {
+        let x = e.int(7)
+        if x < 0 || x > 6 {
+            ok = false
+        }
+        let y = e.range(0 - 3, 3)
+        if y < 0 - 3 || y > 3 {
+            ok = false
+        }
+        let z = e.float()
+        if z < 0.0 || z >= 1.0 {
+            ok = false
+        }
+    }
+    print(ok.toString())
+    // @expect: true
+
+    // Degenerate inputs degrade instead of trapping.
+    var h = Rng.new(11)
+    print(h.int(0).toString())
+    // @expect: 0
+    print(h.range(4, 4).toString())
+    // @expect: 4
+    return 0
+}

@@ -1,0 +1,57 @@
+// @expect: failures=0
+
+// splitView must agree with split, piece for piece, on every shape of input.
+fn check(text: &string, sep: &string): bool {
+    let owned = text.split(sep)
+    var i: i64 = 0
+    var ok = true
+    for piece in text.splitView(sep) {
+        if i >= owned.len {
+            ok = false
+        } else {
+            if piece != owned[i] {
+                ok = false
+            }
+        }
+        i = i + 1
+    }
+    if i != owned.len {
+        ok = false
+    }
+    return ok
+}
+
+pub fn main(): i32 {
+    var texts: Vec<string> = Vec.new()
+    texts.push("")
+    texts.push("a")
+    texts.push(",")
+    texts.push(",,")
+    texts.push("a,b")
+    texts.push(",a")
+    texts.push("a,")
+    texts.push("a,,b")
+    texts.push("abcabc")
+    texts.push("aaa")
+    texts.push("xxabxxabxx")
+    var seps: Vec<string> = Vec.new()
+    seps.push(",")
+    seps.push("")
+    seps.push("a")
+    seps.push("ab")
+    seps.push("xx")
+    seps.push("abcabc")
+    seps.push("zzzz")
+
+    var failures: i64 = 0
+    for t in texts {
+        for s in seps {
+            if !check(t, s) {
+                failures = failures + 1
+                print($"mismatch: text={t} sep={s}")
+            }
+        }
+    }
+    print($"failures={failures}")
+    return 0
+}

@@ -11,6 +11,9 @@ hero:
     - theme: brand
       text: Get Started
       link: /getting-started/installation
+    - theme: alt
+      text: GitHub
+      link: https://github.com/milo-language/milo
 ---
 
 <div class="install-line">

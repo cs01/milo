@@ -132,3 +132,46 @@ pub fn planeTexture(): Texture {
     }
     return t
 }
+
+// A building facade: floor bands with window openings, as a multiplier around
+// 1.0 (the rasteriser applies a texel as `1 + (texel-1)*tw`, so 1.0 is "leave
+// the wall colour alone"). Sampled with UVs in METRES divided by the storey
+// height, so a window is the same size on a two-storey house and on a tower —
+// normalised UVs would stretch one window over sixty floors.
+pub fn facadeTexture(): Texture {
+    var t = texNew(TEX_SIZE, TEX_SHIFT)
+    // 8 storeys and 8 window bays across the tile, so the tile repeats on a
+    // whole storey and the bands cannot drift out of alignment when it wraps.
+    let cells = 8
+    let cell = TEX_SIZE / cells
+    for y in 0..TEX_SIZE {
+        for x in 0..TEX_SIZE {
+            let cx = x / cell
+            let cy = y / cell
+            let fx = (x % cell) as f64 / (cell as f64)
+            let fy = (y % cell) as f64 / (cell as f64)
+            // Window occupies the middle of each cell; the rest is spandrel and
+            // mullion, which is what actually reads as a facade at distance —
+            // the dark/light rhythm, not the glass.
+            let inWin = fx > 0.18 && fx < 0.82 && fy > 0.22 && fy < 0.78
+            var k = 1.16 // wall between windows, slightly brighter than base
+            if inWin {
+                // Glass varies pane to pane: some reflecting sky, some dark.
+                let r = hashi(cx, cy, 17)
+                k = 0.42 + r * 0.5
+                // a brighter top edge on each pane reads as a reflection
+                if fy < 0.34 {
+                    k = k + 0.22
+                }
+            }
+            // Storey line: a darker course at every floor slab.
+            if fy < 0.06 {
+                k = k * 0.72
+            }
+            // Vertical grime streaks, very low contrast, breaks the perfect grid
+            k = k * (0.96 + lattice((x as f64) / (TEX_SIZE as f64), 0.0, 32, 3) * 0.08)
+            texSet(t, x, y, k, k, k * 1.02)
+        }
+    }
+    return t
+}

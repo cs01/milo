@@ -33,7 +33,7 @@ from "./sound" import {
     musicTick, musicToggle
 }
 from "./textures" import {
-    groundTexture, planeTexture
+    groundTexture, planeTexture, facadeTexture
 }
 from "./world3d" import {
     worldIn, worldUpdate, worldSetPlace, SEED
@@ -281,6 +281,7 @@ pub fn main(): i32 {
     var w = worldIn(SEED, places, easy)
     let groundTex = groundTexture()
     let skinTex = planeTexture()
+    let facadeTex = facadeTexture()
     var snd = soundNew()
     var inp = inputNew(invert)
     var ev: [u8; 64] = [0; 64]
@@ -314,7 +315,7 @@ pub fn main(): i32 {
 
         worldUpdate(w, dt, inp.moveX, inp.moveY, inp.boost)
         let view = viewOf(w.cam, c.w, c.h)
-        drawWorld(c, s, w, groundTex, skinTex, view)
+        drawWorld(c, s, w, groundTex, skinTex, facadeTex, view)
 
         fpsAccum = fpsAccum + dt
         fpsFrames = fpsFrames + 1

@@ -20,7 +20,7 @@ from "./sound" import {
     Sound, soundNew, playRing, playRingBonus, playRegion, playBoost, playMiss
 }
 from "./textures" import {
-    groundTexture, planeTexture
+    groundTexture, planeTexture, facadeTexture
 }
 from "./world3d" import {
     World, worldIn, worldUpdate, wrapPi, SEED
@@ -111,6 +111,7 @@ pub fn main(): i32 {
     var w = worldIn(SEED, places, easy)
     let groundTex = groundTexture()
     let skinTex = planeTexture()
+    let facadeTex = facadeTexture()
     let snd = soundNew()
     let dt = 1.0 / 60.0
     var renderMs: i64 = 0
@@ -155,7 +156,7 @@ pub fn main(): i32 {
         if want {
             let t0 = epochMillis()
             let view = viewOf(w.cam, c.w, c.h)
-            drawWorld(c, s, w, groundTex, skinTex, view)
+            drawWorld(c, s, w, groundTex, skinTex, facadeTex, view)
             if w.evRing {
                 playRing(snd)
             }

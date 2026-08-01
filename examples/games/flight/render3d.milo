@@ -20,7 +20,7 @@ from "./gfx3d" import {
     Vtx, vtxC, triangleV, triangleG
 }
 from "./textures" import {
-    groundTexture, planeTexture
+    groundTexture, planeTexture, facadeTexture
 }
 from "./world3d" import {
     World, Trail, Theme, nextTheme, heightAt, coverAt, blockOf, foldIn, unfold, TILE, VIEW_TILES, TAU
@@ -622,7 +622,7 @@ fn normalAt(cc: &City, x: f64, z: f64, t: f64): Vec3 {
     }
 }
 
-pub fn drawWorld(c: &mut Canvas, s: &mut Scene, w: &World, ground: &Texture, skin: &Texture, v: &View) {
+pub fn drawWorld(c: &mut Canvas, s: &mut Scene, w: &World, ground: &Texture, skin: &Texture, facade: &Texture, v: &View) {
     if w.city.loaded {
         // The region weather table is a set of moods for invented places. Over a
         // real city the point is to SEE it, so: clear air, fog only far enough
@@ -774,7 +774,7 @@ pub fn drawWorld(c: &mut Canvas, s: &mut Scene, w: &World, ground: &Texture, ski
     }
 
     if w.city.loaded {
-        drawCity(c, s, w, v)
+        drawCity(c, s, w, v, facade)
     } else {
         drawProps(c, s, w, v, baseX, baseZ)
     }
@@ -916,7 +916,7 @@ fn drawProps(c: &mut Canvas, s: &mut Scene, w: &World, v: &View, baseX: i64, bas
 // transformed into world space. A copy mirrored on exactly one axis has its
 // polygon winding flipped, and the rasteriser backface-culls — so those copies
 // walk their footprints backwards, which flips the winding back.
-fn drawCity(c: &mut Canvas, s: &mut Scene, w: &World, v: &View) {
+fn drawCity(c: &mut Canvas, s: &mut Scene, w: &World, v: &View, facade: &Texture) {
     if !w.city.loaded {
         return
     }
@@ -1007,7 +1007,7 @@ fn drawCity(c: &mut Canvas, s: &mut Scene, w: &World, v: &View) {
                         if hgt / d < 0.0055 {
                             continue
                         }
-                        prism(c, s, w, v, px, pz, b, kx, kz, reach, reversed, midX, midZ, d > 780.0)
+                        prism(c, s, w, v, facade, px, pz, b, kx, kz, reach, reversed, midX, midZ, d > 780.0)
                     }
                 }
             }
@@ -1030,7 +1030,7 @@ fn pushPt(px: &mut Vec<f64>, pz: &mut Vec<f64>, kx: i64, kz: i64, reach: f64, x:
     pz.push(unfold(kz, z, reach))
 }
 
-fn prism(c: &mut Canvas, s: &mut Scene, w: &World, v: &View, px: &mut Vec<f64>, pz: &mut Vec<f64>, b: i64, kx: i64, kz: i64, reach: f64, reversed: bool, midX: f64, midZ: f64, lod: bool) {
+fn prism(c: &mut Canvas, s: &mut Scene, w: &World, v: &View, facade: &Texture, px: &mut Vec<f64>, pz: &mut Vec<f64>, b: i64, kx: i64, kz: i64, reach: f64, reversed: bool, midX: f64, midZ: f64, lod: bool) {
     let n = w.city.bLen[b]
     if n < 3 {
         return
@@ -1115,13 +1115,22 @@ fn prism(c: &mut Canvas, s: &mut Scene, w: &World, v: &View, px: &mut Vec<f64>, 
         let nx = ez / el
         let nz = 0.0 - ex / el
         let lt = shade(s, nx, 0.0, nz, 0.42)
-        let wall = col.scale(lt)
-        let p0b = v3(px[i], y0, pz[i])
-        let p1b = v3(px[j], y0, pz[j])
-        let p0t = v3(px[i], y1, pz[i])
-        let p1t = v3(px[j], y1, pz[j])
-        triangle(c, s, v, p0b, p0t, p1t, wall)
-        triangle(c, s, v, p0b, p1t, p1b, wall)
+        // UVs in metres over a storey height, so windows keep their real size
+        // whatever the building is. STOREY also sets the texture's repeat, and
+        // the tile holds 8 storeys, so a wall always breaks on a floor line.
+        let STOREY = 3.6
+        let fu = el / STOREY / 8.0
+        let fv = (y1 - y0) / STOREY / 8.0
+        // Street-level darkening. Real streets are canyons and the bottom of a
+        // wall sees almost no sky; without it every building looks like it is
+        // floating a little off the ground.
+        let ao = lt * 0.45
+        let a0 = vtxC(px[i], y0, pz[i], 0.0, 0.0, ao, 1.0, 1.0, 1.0, 1.0)
+        let a1 = vtxC(px[i], y1, pz[i], 0.0, fv, lt, 1.0, 1.0, 1.0, 1.0)
+        let b1 = vtxC(px[j], y1, pz[j], fu, fv, lt, 1.0, 1.0, 1.0, 1.0)
+        let b0 = vtxC(px[j], y0, pz[j], fu, 0.0, ao, 1.0, 1.0, 1.0, 1.0)
+        triangleV(c, s, v, facade, a0, a1, b1, col.r, col.g, col.b)
+        triangleV(c, s, v, facade, a0, b1, b0, col.r, col.g, col.b)
     }
 
     // Roof, as a fan. Wound the opposite way round from the base ring, which is

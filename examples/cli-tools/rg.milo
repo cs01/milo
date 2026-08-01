@@ -234,11 +234,17 @@ pub fn searchFile(filePath: &string, re: &mut Regex, opts: &mut RgOpts, multiFil
             return
         }
     }
+    searchContent(content, filePath, re, opts, multiFile, false)
+}
 
+// `knownMatch` is set by the parallel path, which already proved the literal is in
+// this buffer — re-running the whole-file reject there would scan every matching
+// file twice for an answer it has.
+pub fn searchContent(content: &string, filePath: &string, re: &mut Regex, opts: &mut RgOpts, multiFile: bool, knownMatch: bool): void {
     // Whole-file reject: if the pattern is a literal and the file does not contain
     // it anywhere, there is nothing to split, allocate or scan line by line. One
     // memchr pass over the buffer replaces N regex runs.
-    if opts.literal && !opts.invert && !content.contains(opts.pattern) {
+    if !knownMatch && opts.literal && !opts.invert && !content.contains(opts.pattern) {
         return
     }
 
@@ -402,29 +408,42 @@ pub fn collectFiles(dirPath: &string, opts: &RgOpts, out: &mut Vec<string>): voi
                 collectFiles(fullPath, opts, out)
             }
         } else if entryIsFile {
-            out.push(fullPath)
+            // Apply -t here, not in searchFile: a file the type filter rejects must
+            // never reach the prescan, or the threads read it for nothing.
+            if matchesType(fullPath, opts.fileType) {
+                out.push(fullPath)
+            }
         }
     }
 }
 
-// Does this file contain the literal anywhere? Read-only, no output, no shared
+// A file that survived the prescan, carrying the bytes the prescan already read.
+pub struct Hit {
+    path: string,
+    content: string,
+}
+
+// Which of these files contain the literal at all? Read-only, no output, no shared
 // state — which is what makes it safe to run on a pool of OS threads.
-pub fn fileHasLiteral(path: &string, pat: &string): bool {
-    match readFile(path) {
-        Result.Ok(data) => {
-            return data.contains(pat)
-        }
-        Result.Err(_) => {
-            return false
-        }
-    }
-}
-
-pub fn scanChunk(paths: Vec<string>, pat: string): Vec<string> {
-    var hits: Vec<string> = Vec.new()
+//
+// The surviving file's buffer comes back with it. Answering the boolean requires
+// reading the whole file anyway, and dropping the buffer only to have the printing
+// pass open and read the same file a second time was pure waste — on a tree where
+// ~15% of files match, that second read is the entire serial tail.
+pub fn scanChunk(paths: Vec<string>, pat: string): Vec<Hit> {
+    var hits: Vec<Hit> = Vec.new()
     for i in 0..paths.len {
-        if fileHasLiteral(paths[i], pat) {
-            hits.push(paths[i].clone())
+        match readFile(paths[i]) {
+            Result.Ok(data) => {
+                if data.contains(pat) {
+                    hits.push(Hit {
+                        path: paths[i].clone(), content: data
+                    }
+                    )
+                }
+            }
+            Result.Err(_) => {
+            }
         }
     }
     return hits
@@ -450,33 +469,49 @@ pub fn searchDirParallel(dirPath: &string, re: &mut Regex, opts: &mut RgOpts): v
         return
     }
 
-    let per = (files.len + workers - 1) / workers
-    var ps: Vec<Promise<Vec<string>>> = Vec.new()
+    // Round-robin, not contiguous blocks. Big files cluster in a tree (one deep
+    // subdirectory of generated headers), and a contiguous split hands that whole
+    // subdirectory to one worker while the rest finish early. Striding interleaves
+    // any such run across all of them. Order is still recoverable — see below.
+    var ps: Vec<Promise<Vec<Hit>>> = Vec.new()
     for w in 0..workers {
-        let lo = w * per
-        var hi = lo + per
-        if hi > files.len {
-            hi = files.len
-        }
-        if lo >= hi {
-            continue
-        }
         var chunk: Vec<string> = Vec.new()
-        for i in lo..hi {
+        var i = w
+        while i < files.len {
             chunk.push(files[i].clone())
+            i = i + workers
         }
+        // Even an empty chunk is submitted: the merge below indexes parts by
+        // `idx % workers`, so the list must stay exactly `workers` long.
         let pat = opts.pattern.clone()
-        ps.push(Promise<Vec<string>>.blocking(move(): Vec<string> => {
+        ps.push(Promise<Vec<Hit>>.blocking(move(): Vec<Hit> => {
             return scanChunk(chunk, pat)
         }
         ))
     }
     let parts = Promise.all(ps).await()!
-    // chunks come back in submission order, which is walk order
-    for part in parts {
-        for i in 0..part.len {
-            searchFile(part[i], re, opts, true)
+    // Each worker's hits are in walk order among themselves, and worker w held
+    // indices w, w+8, w+16… — so a merge across the 8 lists by original index
+    // reproduces exact walk order. Tracking the index explicitly would need a field
+    // on Hit; instead, walk the file list and pop from the worker that owned each
+    // index, which is the same merge without the bookkeeping.
+    var cursors: Vec<i64> = Vec.new()
+    for _ in 0..parts.len {
+        cursors.push(0)
+    }
+    for idx in 0..files.len {
+        let w = idx % parts.len
+        let c = cursors[w]
+        if c >= parts[w].len {
+            continue
         }
+        // Its owner skipped this index (no match, or unreadable) if the head of that
+        // worker's hit list is some later file.
+        if parts[w][c].path != files[idx] {
+            continue
+        }
+        cursors[w] = c + 1
+        searchContent(parts[w][c].content, files[idx], re, opts, true, true)
     }
 }
 

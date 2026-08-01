@@ -1,0 +1,12 @@
+// @error: infinite size
+
+// A struct that contains itself by value has no finite layout. It used to compile
+// into a broken type; it must be rejected. (Indirection via Heap/Vec is the fix.)
+struct Node {
+    value: i32
+    next: Node
+}
+
+fn main(): i32 {
+    return 0
+}

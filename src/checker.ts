@@ -1,4 +1,4 @@
-import type { Program, Function, Stmt, Expr, MiloType, StructDecl, Pattern, Span, TraitDecl, MatchArm, Attribute } from "./ast";
+import type { Program, Function, Stmt, Expr, MiloType, StructDecl, Pattern, Span, TraitDecl, MatchArm, Attribute, GlobalDecl } from "./ast";
 import { simpleType, declaredType, floatNamespaceConst } from "./ast";
 import type { TypeKind } from "./types";
 import { typeFromAst, typeEq, typeName, isNumeric, isCopy, isScalar } from "./types";
@@ -95,6 +95,15 @@ export interface CSig {
   sig: string;
 }
 
+// From `@cValue("SDL_INIT_VIDEO", "SDL2/SDL.h")` on a global: the C macro/enumerator
+// this constant claims to mirror. `@cSig` and `@cLayout` verify functions and structs;
+// a bare constant has no such anchor, so a wrong scancode or pixel format is a runtime
+// bug (a dead key, a garbled frame) with no link error and no diagnostic.
+export interface CValue {
+  cName: string;
+  header: string;
+}
+
 export interface EnumInfo {
   baseName?: string;
   variants: Map<string, { tag: number; fields: TypeKind[] }>;
@@ -134,6 +143,7 @@ export interface CheckResult {
   rangeCheckedExprs: Map<Expr, { min: number; max: number; typeName: string }>;
   sizeOfTypes: Map<Expr, TypeKind>;
   cSigs: Map<string, CSig>;
+  cValues: Map<string, CValue>;
   offsetOfFields: Map<Expr, string>;
   interfaces: Map<string, InterfaceInfo>;
   interfaceCoercions: Map<Expr, { fromType: string; ifaceName: string }>;
@@ -263,6 +273,7 @@ export class TypeChecker {
   private cfnCalls = new Map<Expr, TypeKind>();
   private sizeOfTypes = new Map<Expr, TypeKind>();
   private cSigs = new Map<string, CSig>();
+  private cValues = new Map<string, CValue>();
   private offsetOfFields = new Map<Expr, string>();
   private closureScopeDepth: number | null = null;
   // Nesting depth of a `sortByKey` key-extractor body currently being checked — the one
@@ -1538,6 +1549,16 @@ export class TypeChecker {
         );
       }
       if (!g.type) this.declare(g.name, { type: finalType, mutable: g.mutable, moved: false, borrowed: false, read: true, span: g.span });
+      for (const attr of g.attributes ?? []) {
+        if (attr.name === "cValue") this.checkCValue(g, attr, finalType);
+        else {
+          // Attributes on globals parsed but were silently discarded before @cValue
+          // existed, so an unknown one here is a no-op the author believes is doing
+          // something. Reject rather than inherit that.
+          this.error(`'@${attr.name}' is not an attribute a global can carry`, g.span,
+            `only '@cValue(...)' applies to a global`);
+        }
+      }
     }
     this._globalTypes = globalTypes;
 
@@ -1619,6 +1640,7 @@ export class TypeChecker {
       rangeCheckedExprs: this.rangeCheckedExprs,
       sizeOfTypes: this.sizeOfTypes,
       cSigs: this.cSigs,
+      cValues: this.cValues,
       offsetOfFields: this.offsetOfFields,
       interfaces: this.interfaces,
       interfaceCoercions: this.interfaceCoercions,
@@ -1932,6 +1954,49 @@ export class TypeChecker {
     this.cSigs.set(f.name, { header, sig });
   }
 
+  // `@cValue("SDL_PIXELFORMAT_ABGR8888", "SDL2/SDL.h")` pins a Milo constant to the C
+  // macro or enumerator it transcribes. The guard TU compares the two, so the value has
+  // to survive into generated C as a literal — hence the integer-literal restriction.
+  private checkCValue(g: GlobalDecl, attr: Attribute, type: TypeKind): void {
+    if (attr.args.length !== 2 || attr.argKinds?.some(k => k !== "string")) {
+      this.error(`@cValue on '${g.name}': expected two string arguments`, g.span,
+        `write '@cValue("${g.name}", "SDL2/SDL.h")' — the C name, then the header that defines it`);
+      return;
+    }
+    const cName = attr.args[0]!, header = attr.args[1]!;
+    if (!TypeChecker.C_IDENT_RE.test(cName)) {
+      this.error(`@cValue on '${g.name}': '${cName}' is not a C identifier`, g.span,
+        `expected the macro or enumerator name as C spells it — e.g. 'SDL_INIT_VIDEO'`);
+      return;
+    }
+    if (!TypeChecker.C_HEADER_RE.test(header)) {
+      this.error(`@cValue on '${g.name}': '${header}' is not a C header path`, g.span,
+        `expected a header ending in '.h', as written inside '#include <...>' — e.g. 'SDL2/SDL.h'`);
+      return;
+    }
+    if (g.mutable) {
+      this.error(`@cValue on '${g.name}': a 'var' is not a constant, so there is nothing fixed to compare against C`, g.span,
+        `declare it with 'let'`);
+      return;
+    }
+    if (type.tag !== "int") {
+      this.error(`@cValue on '${g.name}': only an integer constant can be checked against a C macro, got ${typeName(type)}`, g.span,
+        `the guard compares the two with '==' in C, which needs an integer on both sides`);
+      return;
+    }
+    // A computed initializer would have to be re-derived in C to compare it. Folding it
+    // here instead would compare Milo's arithmetic against itself, which proves nothing
+    // about the header — so require the literal the author actually transcribed.
+    const v = g.value;
+    const isIntLit = v.kind === "IntLit" || (v.kind === "UnaryOp" && v.op === "-" && v.operand.kind === "IntLit");
+    if (!isIntLit) {
+      this.error(`@cValue on '${g.name}': the initializer must be an integer literal`, g.span,
+        `@cValue checks a transcribed constant against its header; an expression has nothing to transcribe`);
+      return;
+    }
+    this.cValues.set(g.name, { cName, header });
+  }
+
   // ── @pure ──────────────────────────────────────────────────────────────────────
   //
   // `@pure` narrows a function's effects to the ones its signature already shows: it
@@ -2225,6 +2290,7 @@ export class TypeChecker {
   // so they're constrained to a charset that can't escape the `#include <...>` or the
   // type position and inject arbitrary C.
   private static readonly C_TYPE_RE = /^(struct |union |enum )?[A-Za-z_][A-Za-z0-9_]*$/;
+  private static readonly C_IDENT_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
   private static readonly C_HEADER_RE = /^[A-Za-z0-9_][A-Za-z0-9_./+-]*\.h$/;
   // A C function signature, pasted verbatim into a generated TU — so it's held to a
   // charset that can't close the assert and inject statements. Allows what real decls

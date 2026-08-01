@@ -270,6 +270,7 @@ export interface GlobalDecl {
   threadLocal?: boolean;
   span?: Span;
   isPub?: boolean;
+  attributes?: Attribute[];
 }
 
 // Where each top-level name was declared, recorded per file BEFORE the flat

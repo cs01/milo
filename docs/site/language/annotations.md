@@ -21,6 +21,7 @@ is one of the eight constructs below.
 | `@export` | `fn` | Forces external linkage |
 | `@cSig(header, sig)` | `extern fn` | Verifies the signature against a C header |
 | `@cLayout(cType, header)` | `extern struct` | Verifies field offsets against a C header |
+| `@cValue(cName, header)` | global `let` | Verifies an integer constant against a C macro |
 | `@cOpaque` | struct field | Marks filler with no C counterpart, so `@cLayout` skips it |
 
 Two of these are **builtins** — they appear where a value does, and evaluate while

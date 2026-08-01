@@ -1,0 +1,9 @@
+// @error: is not a C identifier
+// The C name is pasted into a generated TU, so it is held to a charset that cannot close
+// the assert and inject statements — the same rule @cSig applies to its signature.
+@cValue("SEEK_END), 1); int evil(void", "stdio.h")
+let SEEK_END: i64 = 2
+
+fn main() {
+    print(SEEK_END)
+}

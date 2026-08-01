@@ -152,6 +152,23 @@ class LowerCtx {
       const fn = functions.find(f => f.name === fnName);
       return fn ? [{ fnName, header: s.header, sig: s.sig, retType: fn.retType }] : [];
     });
+    // @cValue carries the literal through to codegen as text. The checker already
+    // rejected anything that isn't an integer literal (optionally negated), so the
+    // spelling here is exactly what the author transcribed from the header.
+    const cValues = [...this.c.cValues.entries()].flatMap(([name, cv]) => {
+      const g = program.globals.find(x => x.name === name);
+      if (!g) return [];
+      const neg = g.value.kind === "UnaryOp";
+      const lit = (neg ? (g.value as { operand: { value: bigint } }).operand : g.value as { value: bigint }).value;
+      const type = this.c.globalTypes?.get(name);
+      return [{
+        global: name,
+        cName: cv.cName,
+        header: cv.header,
+        value: `${neg ? "-" : ""}${lit}`,
+        signed: type?.tag === "int" ? type.signed : true,
+      }];
+    });
     // @export joins the entry program's functions in getting external linkage.
     // Imported-module fns are `internal` by default, which is right for dead-code
     // elimination but makes them invisible to a dlopen'd library that must resolve
@@ -170,7 +187,7 @@ class LowerCtx {
         }
       }
     }
-    return { structs, enums, functions, globals, dropImpls: this.c.dropImpls, itables, userFnNames: exported, opaqueTypes, cSigs, linkLibs };
+    return { structs, enums, functions, globals, dropImpls: this.c.dropImpls, itables, userFnNames: exported, opaqueTypes, cSigs, cValues, linkLibs };
   }
 
   private lowerParam(p: import("./ast").Param, sig: import("./checker").FnSig | undefined, i: number) {

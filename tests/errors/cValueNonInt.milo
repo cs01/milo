@@ -1,0 +1,9 @@
+// @error: only an integer constant can be checked
+// The guard compares the two sides with '==' in C. A string has no such comparison, so
+// the attribute cannot mean anything here.
+@cValue("SDL_HINT_RENDER_DRIVER", "stdio.h")
+let RENDER_DRIVER: string = "metal"
+
+fn main() {
+    print(RENDER_DRIVER)
+}

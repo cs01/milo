@@ -94,9 +94,40 @@ Every field is checked for both its offset and its own size — offsets alone mi
 
 Declaring only a **prefix** of a C struct is supported and common: total size is checked with `>=`, not `==`, so you can stop early and ignore trailing platform fields. Field *order* must still match from the start. Mark a field `@cOpaque` to exclude it — filler with no C counterpart.
 
+### `@cValue` — check a constant
+
+An FFI surface is not only functions and structs. Every `#define` you bind gets retyped as a Milo literal, and that transcription has no anchor at all: a wrong pixel format or scancode links fine and runs, producing a garbled frame or a key that does nothing. `@cValue(cName, header)` asserts the constant against the macro it claims to mirror:
+
+```milo
+@cValue("SDL_PIXELFORMAT_ABGR8888", "SDL2/SDL.h")
+pub let SDL_PIXELFORMAT_ABGR8888: u32 = 0x16762004
+```
+
+```
+error[c-decl]: a declaration does not match the C header it claims to describe
+  SDL_INIT_VIDEO: Milo says 33, SDL2/SDL.h defines SDL_INIT_VIDEO as something else
+```
+
+It goes on an immutable global whose initializer is an **integer literal**. A computed initializer is rejected: folding it here and asserting the result would compare Milo's arithmetic against itself, which says nothing about the header. The point is to check a hand-transcribed number, so there has to be a transcription.
+
+Both sides are cast to one 64-bit type before comparing, so C's usual arithmetic conversions can't decide the result on a bit pattern instead of a value.
+
+### Third-party headers
+
+The compiler links `@link` libraries by name and never needs their headers to build — so nothing else in a Milo build carries an `-I`. The guard TU does, and gets it from `pkg-config --cflags` for each `@link`ed library (trying the name as written, then lowercased: `@link("SDL2")` finds `sdl2.pc`).
+
+If the header isn't installed — a machine with `libSDL2` but not `libsdl2-dev` — the guards are **skipped with a warning**, not failed:
+
+```
+warning: @cLayout/@cSig/@cValue guards skipped — 'SDL2/SDL.h' is not installed,
+so there is no header to check these declarations against
+```
+
+Failing would make every consumer of an annotated package install dev headers to build something that links fine without them. Skipping silently would be worse than no guard at all, so it is always announced.
+
 ### Finding what isn't verified
 
-Both annotations are opt-in, so an unannotated `extern struct` looks exactly like a verified one. `--deny=unverified-extern` turns that into an error:
+These annotations are opt-in, so an unannotated `extern struct` looks exactly like a verified one. `--deny=unverified-extern` turns that into an error:
 
 ```
 error: extern struct 'Stat' has no @cLayout — its layout is an unverified claim about C
@@ -104,7 +135,7 @@ error: extern struct 'Stat' has no @cLayout — its layout is an unverified clai
 
 It's off by default on purpose: an `extern struct` paired with a local `.c` file has no header to name, a legitimate shape `@cLayout` can't express. Turn it on for a project where every layout should be pinned to a real header. It only reports structs in the file being compiled — a struct inside a library you imported isn't yours to annotate.
 
-Both checks are skipped for bare-metal targets, which are freestanding and cross-compiled — the host's headers aren't the ones the program runs against. On a cross-compile with a sysroot (`MILO_WINDOWS_SDK`), they *do* run, against the target's headers.
+All three checks are skipped for bare-metal targets, which are freestanding and cross-compiled — the host's headers aren't the ones the program runs against. On a cross-compile with a sysroot (`MILO_WINDOWS_SDK`), they *do* run, against the target's headers.
 
 ## Platform-specific declarations
 

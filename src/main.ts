@@ -103,7 +103,27 @@ function compileWithGuards(source: string, target: TargetInfo, filePath?: string
 
 // Compile the @cLayout/@cSig guard TU against the real system headers and fail the build
 // if any _Static_assert trips.
-function verifyCDecls(cGuards: string | null, target: TargetInfo): void {
+// Include flags for the guard TU's third-party headers. The compiler links `@link` libs
+// by name and never needs their headers to build, so nothing else in the build carries an
+// -I; a `@cSig("SDL2/SDL.h", ...)` would otherwise fail with "file not found" on any
+// Homebrew Mac. pkg-config is what knows the prefix, and it answers the same on apt.
+function pkgConfigCflags(linkLibs: string[]): string {
+  const flags: string[] = [];
+  for (const lib of linkLibs) {
+    // `@link("SDL2")` is the -l name; pkg-config's module is `sdl2`. Try the name as
+    // written first so a lib whose .pc really is capitalised still resolves.
+    for (const mod of [lib, lib.toLowerCase()]) {
+      try {
+        const out = execSync(`pkg-config --cflags ${mod}`, { stdio: ["pipe", "pipe", "pipe"] }).toString().trim();
+        if (out) flags.push(out);
+        break;
+      } catch { /* no .pc for this spelling — try the next, then give up quietly */ }
+    }
+  }
+  return flags.join(" ");
+}
+
+function verifyCDecls(cGuards: string | null, target: TargetInfo, linkLibs: string[] = []): void {
   if (!cGuards) return;
   // The guard TU is compiled with the host cc against the host's headers, so it only
   // says anything true when the target IS the host. Bare-metal is freestanding; a
@@ -134,12 +154,24 @@ function verifyCDecls(cGuards: string | null, target: TargetInfo): void {
   const tc = detectToolchain();
   const cc = tc.kind === "clang" ? tc.path : "cc";
   const crossFlags = crossWindows ? `--target=${target.triple} ${windowsIncludeFlags()}` : "";
+  const libFlags = pkgConfigCflags(linkLibs);
   const tmpC = join(tmpdir(), `milo_cdecl_${crypto.randomUUID().slice(0, 8)}.c`);
   try {
     writeFileSync(tmpC, cGuards);
-    execSync(`${cc} -fsyntax-only ${crossFlags} "${tmpC}"`, { stdio: ["pipe", "pipe", "pipe"] });
+    execSync(`${cc} -fsyntax-only ${crossFlags} ${libFlags} "${tmpC}"`, { stdio: ["pipe", "pipe", "pipe"] });
   } catch (e: any) {
     const stderr = e.stderr?.toString() ?? e.message ?? "";
+    // A header the preprocessor can't open aborts the TU before any assert is evaluated,
+    // so nothing here was checked. That is a missing dev package, not a wrong declaration
+    // — the third-party case (SDL headers absent while libSDL2 is installed and links
+    // fine) is routine, and failing the build over it would make @cSig a hard dependency
+    // on every consumer having -dev installed. Skip, but say so: an unverified guard must
+    // never look like a verified one.
+    const missing = stderr.match(/fatal error: '([^']+)' file not found/);
+    if (missing) {
+      console.error(`warning: @cLayout/@cSig/@cValue guards skipped — '${missing[1]}' is not installed, so there is no header to check these declarations against`);
+      return;
+    }
     // Pull our own message out of each failing assert and drop the rest: the raw text
     // names a temp .c file the user never wrote and can't open, which is worse than
     // useless in a diagnostic. clang says `failed due to requirement '<expr>': <msg>`,
@@ -487,8 +519,8 @@ function compileToObj(sourcePath: string, outputPath: string | null, target: Tar
   const source = readFileSync(sourcePath, "utf-8");
   const trapOnOverflow = forceOverflowChecks ?? true;
   const contractChecks = forceContractChecks ?? (optFlag === "-O0");
-  const { ir, cGuards } = compileWithGuards(source, target, sourcePath, warningConfig, trapOnOverflow, false, contractChecks);
-  verifyCDecls(cGuards, target);
+  const { ir, cGuards, linkLibs } = compileWithGuards(source, target, sourcePath, warningConfig, trapOnOverflow, false, contractChecks);
+  verifyCDecls(cGuards, target, linkLibs);
 
   const base = basename(sourcePath).replace(/\.milo$/, "");
   const out = outputPath ?? base + ".o";
@@ -697,7 +729,7 @@ function compileToBinary(sourcePath: string, outputPath: string | null, target: 
   // off --debug leaves the -O0 path — used by the runtime-error test harness — byte
   // -identical and free of per-build dsymutil / .dSYM litter.
   const { ir, cGuards, linkLibs } = compileWithGuards(source, target, sourcePath, warningConfig, trapOnOverflow, emitDebug, contractChecks);
-  verifyCDecls(cGuards, target);
+  verifyCDecls(cGuards, target, linkLibs);
   const base = basename(sourcePath).replace(/\.milo$/, "");
   const id = crypto.randomUUID().slice(0, 8);
   // Windows won't execute a file without the .exe suffix, and lld-link appends it
@@ -746,7 +778,7 @@ function compileToBinary(sourcePath: string, outputPath: string | null, target: 
 
 function compileSourceToBinary(source: string, sourcePath: string, target: TargetInfo, optFlag: string = "", warningConfig?: WarningConfig): string {
   const { ir, cGuards, linkLibs } = compileWithGuards(source, target, sourcePath, warningConfig);
-  verifyCDecls(cGuards, target);
+  verifyCDecls(cGuards, target, linkLibs);
   const base = basename(sourcePath).replace(/\.milo$/, "");
   const id = crypto.randomUUID().slice(0, 8);
   const out = join(tmpdir(), `milo_${base}_${id}`);

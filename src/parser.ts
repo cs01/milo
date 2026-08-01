@@ -189,10 +189,12 @@ export class Parser {
         interfaces.push(i);
       } else if (this.at(TokenKind.Let) || this.at(TokenKind.Var)) {
         const g = this.parseGlobalDecl();
+        if (attrs) g.attributes = attrs;
         g.isPub = !!pubTok;
         globals.push(g);
       } else if (this.at(TokenKind.Ident) && this.peek().value === "thread_local") {
         const g = this.parseGlobalDecl();
+        if (attrs) g.attributes = attrs;
         g.isPub = !!pubTok;
         globals.push(g);
       } else {

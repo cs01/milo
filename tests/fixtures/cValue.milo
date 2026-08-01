@@ -1,0 +1,33 @@
+// @cValue verifies an integer constant against the C macro it transcribes. @cSig covers
+// functions and @cLayout covers structs; a bare constant had no anchor at all, so a wrong
+// scancode or pixel format was a runtime bug — a dead key, a garbled frame — with no link
+// error and no diagnostic. Mismatch cases live in tests/errors/cValue*.milo.
+//
+// These use libc headers so the guard is real on every CI platform. The motivating case
+// is a third-party lib (SDL's SDL_PIXELFORMAT_ABGR8888 = 0x16762004, transcribed by hand
+// in a dozen places), which needs pkg-config to find its headers.
+@cValue("SEEK_END", "stdio.h")
+pub let SEEK_END: i64 = 2
+
+@cValue("SEEK_SET", "stdio.h")
+pub let SEEK_SET: i64 = 0
+
+// Negative literals are the case that catches a sign error rather than a value error.
+@cValue("EOF", "stdio.h")
+pub let EOF: i32 = -1
+
+// Unsigned: both sides are cast to one 64-bit type before comparing, so C's usual
+// arithmetic conversions can't decide the result on a bit pattern instead of a value.
+@cValue("EXIT_SUCCESS", "stdlib.h")
+pub let EXIT_SUCCESS: u32 = 0
+
+pub fn main() {
+    // @expect: true
+    print(SEEK_END == 2 && SEEK_SET == 0)
+
+    // @expect: true
+    print(EOF == -1)
+
+    // @expect: true
+    print(EXIT_SUCCESS == 0)
+}

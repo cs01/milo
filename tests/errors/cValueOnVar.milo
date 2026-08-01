@@ -1,0 +1,9 @@
+// @error: is not a constant
+// A `var` can be reassigned at runtime, so there is no fixed value for the guard to
+// compare against the header — the assert would describe only the initializer.
+@cValue("SEEK_END", "stdio.h")
+var SEEK_END: i64 = 2
+
+fn main() {
+    print(SEEK_END)
+}

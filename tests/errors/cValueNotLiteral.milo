@@ -1,0 +1,10 @@
+// @error: must be an integer literal
+// Folding this in the compiler and asserting the result would compare Milo's arithmetic
+// against itself — it proves nothing about what the header says. The point of @cValue is
+// to check a hand-transcribed constant, so there has to be a transcription to check.
+@cValue("SEEK_END", "stdio.h")
+let SEEK_END: i64 = 1 + 1
+
+fn main() {
+    print(SEEK_END)
+}

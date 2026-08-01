@@ -28,7 +28,7 @@ from "std/fs" import {
     readFile, writeFile, pathExists, makeDir
 }
 from "std/fetch" import {
-    fetchWith, FetchOptions, fetch
+    fetchForm, urlEncode, fetch
 }
 from "std/inflate" import {
     Inflate
@@ -218,9 +218,7 @@ fn overpass(query: &string, cacheKey: &string): Result<string, string> {
         return Result.Ok(b)
     }
     print("  querying Overpass for " + cacheKey + " ...")
-    // Overpass wants the query form-encoded, and the Apache in front of it
-    // answers 406 to a request with no Accept header at all — which is what you
-    // get by default, since HTTP does not require one.
+    // Overpass only accepts the query form-encoded.
     let encoded = "data=" + urlEncode(query)
 
     // The public instances shed load by refusing requests outright, and which
@@ -234,12 +232,7 @@ fn overpass(query: &string, cacheKey: &string): Result<string, string> {
     var attempt = 0
     while attempt < 6 {
         let url = mirrors[attempt % mirrors.len].clone()
-        var opts = FetchOptions {
-            method: "POST",
-            headers: "Content-Type: application/x-www-form-urlencoded\r\nAccept: */*\r\nUser-Agent: milo-flyby-fetchcity",
-            body: encoded.clone(),
-        }
-        match fetchWith(url, opts) {
+        match fetchForm(url, encoded) {
             Result.Ok(resp) => {
                 let body = resp.text()
                 if resp.ok() {
@@ -259,23 +252,6 @@ fn overpass(query: &string, cacheKey: &string): Result<string, string> {
         }
     }
     return Result.Err("every Overpass mirror refused the query")
-}
-
-fn urlEncode(s: &string): string {
-    var out = ""
-    let hex = "0123456789ABCDEF"
-    for i in 0..s.len {
-        let ch = s[i]
-        let unreserved = (ch >= 48 as u8 && ch <= 57 as u8) || (ch >= 65 as u8 && ch <= 90 as u8) || (ch >= 97 as u8 && ch <= 122 as u8) || ch == 45 as u8 || ch == 46 as u8 || ch == 95 as u8 || ch == 126 as u8
-        if unreserved {
-            out.push(ch)
-        } else {
-            out.push(37 as u8)
-            out.push(hex[(ch as i64) >> 4])
-            out.push(hex[(ch as i64) & 15])
-        }
-    }
-    return out
 }
 
 fn bboxStr(latMin: f64, lonMin: f64, latMax: f64, lonMax: f64): string {

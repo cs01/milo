@@ -1,13 +1,34 @@
 name: Release
 
+# Two kinds of run share this workflow:
+#   * push to main  — rebuilds the rolling `latest` release, nothing else
+#   * push of a v* tag — cuts an immutable versioned release, and only then publishes
+#     to npm and bumps the Homebrew tap
+# Package managers need a URL whose bytes never change, which `latest` is not, so
+# everything downstream of GitHub Releases is gated on the tag.
 on:
   push:
     branches: [main]
+    tags: ["v*"]
 
 permissions:
   contents: write
 
 jobs:
+  meta:
+    runs-on: ubuntu-latest
+    outputs:
+      # Empty on a main push. Non-empty means "this is a real release".
+      version: ${{ steps.v.outputs.version }}
+    steps:
+      - id: v
+        run: |
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+            echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=" >> "$GITHUB_OUTPUT"
+          fi
+
   test:
     runs-on: macos-latest
     steps:
@@ -48,7 +69,9 @@ jobs:
       - uses: oven-sh/setup-bun@v2
       - run: bun run scripts/bundle-stdlib.ts
       # Must run before --compile: the stamp is frozen into the binary, so `milo
-      # --version` on a release build names the commit instead of saying "dev".
+      # --version` on a release build names the commit instead of saying "dev". On a
+      # tag it also fails the build when src/version.ts disagrees with the tag, which
+      # is the only thing keeping `milo --version` honest against the package version.
       - run: bun run scripts/stamp-version.ts
       - run: bun build --compile --target=${{ matrix.buntarget }} src/main.ts --outfile milo
       # The archive wraps the binary in a directory. A flat archive dumps a bare
@@ -63,15 +86,62 @@ jobs:
           name: milo-${{ matrix.target }}
           path: milo-${{ matrix.target }}.tar.gz
 
+  # .deb/.rpm are built from the tarballs the matrix already produced, so the bytes in
+  # the package are the same bytes the tarball serves.
+  linux-packages:
+    needs: [meta, build]
+    if: needs.meta.outputs.version != ''
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+      - run: |
+          curl -fsSL -o nfpm.deb https://github.com/goreleaser/nfpm/releases/download/v2.41.1/nfpm_2.41.1_amd64.deb
+          sudo dpkg -i nfpm.deb
+      - name: Build deb + rpm for both arches
+        env:
+          MILO_VERSION: ${{ needs.meta.outputs.version }}
+        run: |
+          set -euo pipefail
+          build() {
+            target=$1 arch=$2
+            tar xzf "milo-${target}.tar.gz"
+            MILO_DEB_ARCH="$arch" MILO_BIN="milo-${target}/milo" \
+              nfpm package -f packaging/nfpm.yaml -p deb -t "milo_${MILO_VERSION}_${arch}.deb"
+            MILO_DEB_ARCH="$arch" MILO_BIN="milo-${target}/milo" \
+              nfpm package -f packaging/nfpm.yaml -p rpm -t "milo-${MILO_VERSION}.${arch}.rpm"
+          }
+          build linux-x64 amd64
+          build linux-arm64 arm64
+          ls -lh ./*.deb ./*.rpm
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-packages
+          path: |
+            *.deb
+            *.rpm
+
   release:
-    needs: build
+    needs: [meta, build, linux-packages]
+    # linux-packages is skipped on a main push; without always() that skip would
+    # cascade and the rolling release would stop updating.
+    if: always() && needs.build.result == 'success'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
         with:
           merge-multiple: true
-      - run: ls -lh milo-*.tar.gz
-      - uses: softprops/action-gh-release@v2
+      # Checksums are what a Homebrew formula, a distro package, and a careful human
+      # all verify against. Generated over whatever artifacts exist for this run.
+      - run: |
+          ls -lh milo-*.tar.gz
+          sha256sum milo-*.tar.gz *.deb *.rpm 2>/dev/null | tee SHA256SUMS
+
+      - name: Rolling release
+        if: needs.meta.outputs.version == ''
+        uses: softprops/action-gh-release@v2
         with:
           tag_name: latest
           name: Latest Build
@@ -79,19 +149,116 @@ jobs:
             Rolling release from the latest passing commit on main.
             Built from ${{ github.sha }}.
 
+            For a stable, checksummed build, use a versioned release instead — these
+            bytes are replaced on every push to main.
+
             ## Install
 
             ```sh
-            curl -fsSL https://milo-language.github.io/milo/install.sh | sh
+            brew install milo-language/tap/milo     # macOS / Linuxbrew
+            npm  install -g @milo-lang/cli          # anywhere with node
             ```
 
             Or grab a tarball below. macOS quarantines anything downloaded through a
-            browser and will refuse to run it — use the installer, or `curl -L` the
+            browser and will refuse to run it — use a package manager, or `curl -L` the
             tarball directly, or clear it with `xattr -d com.apple.quarantine milo`.
           # NOT a prerelease: GitHub hides prereleases from the repo landing page, so
           # marking this one cost us the only visible "download Milo" affordance.
           prerelease: false
           make_latest: true
-          files: milo-*.tar.gz
+          files: |
+            milo-*.tar.gz
+            SHA256SUMS
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Versioned release
+        if: needs.meta.outputs.version != ''
+        uses: softprops/action-gh-release@v2
+        with:
+          name: milo ${{ needs.meta.outputs.version }}
+          body: |
+            ## Install
+
+            ```sh
+            brew install milo-language/tap/milo     # macOS / Linuxbrew
+            npm  install -g @milo-lang/cli          # anywhere with node
+            ```
+
+            Debian/Ubuntu and Fedora/RHEL packages are attached below
+            (`sudo dpkg -i milo_*.deb`, `sudo rpm -i milo-*.rpm`), as are plain
+            tarballs and `SHA256SUMS`.
+
+            macOS quarantines anything downloaded through a browser and will refuse to
+            run it — install with a package manager, `curl -L` the tarball directly, or
+            clear the flag with `xattr -d com.apple.quarantine milo`.
+          prerelease: false
+          make_latest: true
+          files: |
+            milo-*.tar.gz
+            *.deb
+            *.rpm
+            SHA256SUMS
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  npm:
+    needs: [meta, release]
+    if: needs.meta.outputs.version != ''
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+          path: artifacts
+      - run: bun scripts/build-npm.ts "${{ needs.meta.outputs.version }}" artifacts npm-dist
+      # Platform packages first: publishing the wrapper before its optional deps exist
+      # leaves a window where `npm i -g @milo-lang/cli` installs no binary at all.
+      - name: Publish
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          set -euo pipefail
+          for d in npm-dist/*/; do
+            [ "$d" = npm-dist/cli/ ] && continue
+            npm publish "$d" --access public
+          done
+          npm publish npm-dist/cli --access public
+
+  homebrew:
+    needs: [meta, release]
+    if: needs.meta.outputs.version != ''
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+          path: artifacts
+      - name: Render and push the formula
+        env:
+          # A PAT with contents:write on milo-language/homebrew-tap. The default
+          # GITHUB_TOKEN is scoped to this repo only and cannot push to the tap.
+          TAP_TOKEN: ${{ secrets.TAP_TOKEN }}
+          VERSION: ${{ needs.meta.outputs.version }}
+        run: |
+          set -euo pipefail
+          bun scripts/render-formula.ts "$VERSION" artifacts > milo.rb
+          git clone --depth 1 \
+            "https://x-access-token:${TAP_TOKEN}@github.com/milo-language/homebrew-tap.git" tap
+          mkdir -p tap/Formula
+          mv milo.rb tap/Formula/milo.rb
+          cd tap
+          git config user.name "milo-release"
+          git config user.email "chadsmith.software@gmail.com"
+          git add Formula/milo.rb
+          # Re-running a release with identical artifacts is a no-op, not a failure.
+          git diff --cached --quiet || git commit -m "milo ${VERSION}"
+          git push

@@ -1,0 +1,39 @@
+# nfpm config for the .deb and .rpm release artifacts (https://nfpm.goreleaser.com).
+#
+# One config for both formats and both Linux arches — nfpm expands ${VAR} from the
+# environment, and release.yml sets MILO_VERSION / MILO_DEB_ARCH / MILO_BIN per run.
+#
+# These packages are attached to the GitHub release for `dpkg -i` / `rpm -i`. There is
+# deliberately no apt or yum repository behind them: a real one means a signing key,
+# pool layout, and a host to keep alive, which is a lot of upkeep for a young toolchain.
+
+name: milo
+arch: ${MILO_DEB_ARCH}
+version: ${MILO_VERSION}
+section: devel
+priority: optional
+maintainer: Chad Smith <chadsmith.software@gmail.com>
+description: |
+  A memory-safe systems language that compiles to LLVM IR.
+  Milo gives Rust's memory-safety guarantees without lifetime annotations:
+  single-owner move semantics, second-class references, no GC and no
+  reference counting.
+vendor: milo-language
+homepage: https://milo-language.github.io/milo/
+license: MIT
+
+contents:
+  - src: ${MILO_BIN}
+    dst: /usr/bin/milo
+    file_info:
+      mode: 0755
+
+# clang links the object files milo emits, so a package without it installs fine and
+# then fails on the first build. Recommends rather than Depends: `milo emit-ir`,
+# `emit-ast`, and the LSP all work without a linker.
+recommends:
+  - clang
+
+rpm:
+  # rpmbuild otherwise picks its own compression per host and the artifact name drifts.
+  compression: gzip

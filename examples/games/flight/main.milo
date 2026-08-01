@@ -137,6 +137,12 @@ fn orthoBytes(name: &string): string {
     if name == "sf" {
         return @embedFile("cities/sf.ortho.png")
     }
+    if name == "canyon" {
+        return @embedFile("cities/canyon.ortho.png")
+    }
+    // Hong Kong and Rio have none: NAIP is a USDA survey and stops at the US
+    // border, and the open global alternative (Sentinel-2 via EOX) serves JPEG,
+    // which nothing here can decode. They fall back to the land-cover palette.
     return ""
 }
 

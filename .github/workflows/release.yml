@@ -105,12 +105,16 @@ jobs:
           MILO_VERSION: ${{ needs.meta.outputs.version }}
         run: |
           set -euo pipefail
+          export MILO_RELEASE="g${GITHUB_SHA:0:7}"
           build() {
             target=$1 arch=$2
             tar xzf "milo-${target}.tar.gz"
-            MILO_DEB_ARCH="$arch" MILO_BIN="milo-${target}/milo" \
+            # nfpm resolves contents.src as a glob before env expansion, so the path
+            # can't be a variable — stage each arch at the one path the config names.
+            mkdir -p dist && cp "milo-${target}/milo" dist/milo
+            MILO_DEB_ARCH="$arch" \
               nfpm package -f packaging/nfpm.yaml -p deb -t "milo_${MILO_VERSION}_${arch}.deb"
-            MILO_DEB_ARCH="$arch" MILO_BIN="milo-${target}/milo" \
+            MILO_DEB_ARCH="$arch" \
               nfpm package -f packaging/nfpm.yaml -p rpm -t "milo-${MILO_VERSION}.${arch}.rpm"
           }
           build linux-x64 amd64
@@ -219,7 +223,7 @@ jobs:
           VERSION: ${{ needs.meta.outputs.version }}
         run: |
           set -euo pipefail
-          bun scripts/render-formula.ts "$VERSION" artifacts > milo.rb
+          bun scripts/render-formula.ts "$VERSION" artifacts "$GITHUB_SHA" > milo.rb
           git clone --depth 1 \
             "https://x-access-token:${TAP_TOKEN}@github.com/milo-language/homebrew-tap.git" tap
           mkdir -p tap/Formula

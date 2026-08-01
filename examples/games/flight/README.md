@@ -74,7 +74,7 @@ palms, cactus, conifers, tower blocks.
 
 ## This is a real 3D pipeline
 
-Not a raycaster and not billboards. `gfx3d.milo` is about 260 lines and contains:
+Not a raycaster and not billboards. `gfx3d.milo` and `raster.milo` contain:
 
 - a **perspective camera** with yaw, pitch and roll, built into a view basis once
   per frame
@@ -94,9 +94,82 @@ canopy — built from body-space `(forward, right, up)` offsets so the shape is 
 to read and to change.
 
 Everything renders on the CPU into the same HDR float canvas the 2D games use; SDL
-only blits the finished frame. **1280×720 at 30–50 fps** over a real city —
-~12,000 triangles a frame after culling, and about 900,000 pixels shaded, which is
-where the time actually goes. One core: the rasteriser is not threaded yet.
+only blits the finished frame. ~22,000 triangles a frame after culling over a real
+city, and about 900,000 pixels shaded, which is where the time actually goes.
+
+## Every core, by scanline band
+
+A scanline rasteriser is embarrassingly parallel — cut the frame into horizontal
+bands and no two threads ever touch the same pixel — so it runs on all of them.
+
+The frame is drawn in two halves. `gfx3d.milo` transforms, near-clips and sets each
+triangle up, then **records** it into a command list and files it under every band
+its bounding box touches. `rasterFlush` hands the list to one `Promise.blocking` OS
+thread per band. Nothing above that line changes: a `triangleV` call still looks
+like a draw call.
+
+Recording is what makes the split possible at all. A worker cannot be handed the
+World, the City or a `Texture` — they own heap, and Milo's second-class `&mut [f32]`
+cannot cross a thread boundary either — so a draw command is flattened to plain
+scalars first, and the buffers are passed as base addresses. That is the only
+`unsafe` in the renderer, about thirty lines of it, with the disjointness argument
+written out at `raster.bandRaster`. The runtime-`n` `splitMut` that would let this
+be written safely is still unbuilt (`docs/roadmap.md`); when it lands, this is the
+shape it has to replace.
+
+The composite pass — a million pixels of bloom, tone curve and pack — fans out the
+same way. The bloom chain above it does not: it is nine passes over 57k pixels and
+nine thread spawns cost more than the passes do.
+
+On an M4 (10 cores), 1280×720 over San Francisco:
+
+| | before | after |
+|---|---|---|
+| raster kernel | 12 ms | 3 ms |
+| composite | 8 ms | 4 ms |
+| **whole frame** | **25 ms** | **13 ms** |
+
+Output is bit-identical: six captured frames, 2.7 MB each, zero differing bytes
+against the single-threaded renderer. That is the test that matters — a band split
+that is even slightly wrong shows up as a seam, and a seam is a handful of pixels.
+
+## Bridges
+
+A bridge is the one thing in a city that is not on the ground, and the terrain grid
+does not know it is there: SRTM samples the *water* under the Golden Gate, not the
+deck over it. Two of San Francisco's nine landmarks are bridges, and both used to be
+a hoop over open water.
+
+OSM knows a bridge exists and knows nothing about how high it is — `layer=1` means
+"above the thing it crosses", not "67 metres above the sea". So the deck height is a
+heuristic, computed at load from the city's own terrain, and its only real input is
+how much water the way crosses:
+
+```
+deck(t) = land(t)·(1−a) + max(land(t), clearance)·a,   a = sin(πt)
+clearance = 5 + 1.9·(√span − √60), capped at 70 m
+```
+
+A square root, not a straight line: clearance is set by the ships that pass
+underneath, and ships stop getting taller long before crossings stop getting wider.
+The Brooklyn Bridge comes out at 39 m against a real 41, the Golden Gate at 68
+against 67.
+
+Two things in the OSM data had to be handled before any of that worked:
+
+- **The main span has no nodes.** OSM digitises a bridge the way a surveyor walks
+  it, so the Golden Gate's approach viaducts carry a node every fifteen metres and
+  its 2.3 km main span carries none — one segment between two points on dry land.
+  Every sampled point was on the ground, the height pass found no water, and the
+  bridge came out flat. Ways are resampled at even spacing before anything reads
+  them.
+- **A dual carriageway is two ways.** Eight metres apart, each fourteen metres wide,
+  z-fighting into a dashed line. They are merged into one deck wide enough to cover
+  both — 30 m for the Golden Gate against a real 27.
+
+Colour and structure come from the tags rather than from a table of famous bridges:
+the Golden Gate carries `colour=orange` and `bridge:structure=suspension` in OSM,
+which is why it is International Orange and has towers.
 
 ## Sound
 
@@ -148,9 +221,13 @@ container a question it could not answer.
 
 ## Safety
 
-`unsafe` appears twice, both FFI: the SDL calls in `sdl.milo` and the texture upload
-in `main.milo`. The rasteriser, the clipper, the z-buffer and the flight model
-contain none — the depth buffer is a `Vec<f32>` and every access is bounds-checked.
+`unsafe` appears in three places. Two are FFI: the SDL calls in `sdl.milo` and
+`sound.milo`, and the texture upload in `main.milo`. The third is the band split in
+`raster.milo` and the composite pass in `gfx.milo`, where a worker thread re-derives
+a typed pointer from a buffer's base address — see "Every core" above for why, and
+`raster.bandRaster` for the argument that it is sound.
+
+The clipper, the triangle setup, the geometry and the flight model contain none.
 
 ## Headless
 
@@ -159,4 +236,13 @@ reporting triangle count and render time:
 
 ```bash
 milo run examples/games/flight/shot.milo --release -- /tmp/flyby 120 600
+```
+
+`--at <x> <z> <altitude> <yawDegrees>` points the camera at a fixed spot instead of
+wherever the scripted flight ended up, which is how you review one landmark without
+flying to it:
+
+```bash
+milo run examples/games/flight/shot.milo --release -- /tmp/gg \
+    --city examples/games/flight/cities/sf.city --at -4600 3300 300 300 40
 ```

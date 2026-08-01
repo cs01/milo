@@ -80,6 +80,35 @@ pub struct City {
     cellStart: Vec<i64>,
     cellItems: Vec<i64>,
 
+    // Bridges: OSM ways tagged `bridge=yes`, kept as open polylines rather than
+    // footprints. A bridge is the one piece of a city that is not on the ground,
+    // and the terrain grid has no idea it exists — SRTM samples the water under
+    // the Golden Gate, not the deck over it. Without these, the two SF landmarks
+    // that ARE bridges are a hoop over open water.
+    brCount: i64,
+    brHalfW: Vec<f64>,
+    brStruct: Vec<i64>, // 0 beam, 1 suspension, 2 cable-stayed, 3 truss, 4 arch
+    brCol: Vec<Rgb>,
+    brStart: Vec<i64>,
+    brLen: Vec<i64>,
+    brPtX: Vec<f64>,
+    brPtZ: Vec<f64>,
+    // Deck height above sea level, one per point. NOT in the asset: it is derived
+    // from this city's own terrain at load time (see `deckProfile`), so the
+    // heuristic can be changed without refetching eight megabytes of OSM.
+    brPtY: Vec<f64>,
+    // Height of the towers above the deck, per bridge. Zero for everything that
+    // is not a suspension or cable-stayed span.
+    brTower: Vec<f64>,
+    // Arc-length fractions of the two towers along the way.
+    brTowerA: Vec<f64>,
+    brTowerB: Vec<f64>,
+
+    // Where the version-1 body ends, i.e. the first byte of the bridge section
+    // (or of nothing, in a v1 file). Tools splice a new trailing section on
+    // instead of rebuilding an asset whose expensive layers have not changed.
+    bodyEnd: i64,
+
     // Half-extent of the mapped area. Beyond this the ground fades to open sea,
     // which is the only honest thing to draw: there is no data out there.
     reach: f64,
@@ -123,6 +152,19 @@ pub fn cityEmpty(): City {
         gridZ0: 0.0,
         cellStart: Vec.new(),
         cellItems: Vec.new(),
+        brCount: 0,
+        brHalfW: Vec.new(),
+        brStruct: Vec.new(),
+        brCol: Vec.new(),
+        brStart: Vec.new(),
+        brLen: Vec.new(),
+        brPtX: Vec.new(),
+        brPtZ: Vec.new(),
+        brPtY: Vec.new(),
+        brTower: Vec.new(),
+        brTowerA: Vec.new(),
+        brTowerB: Vec.new(),
+        bodyEnd: 0,
         reach: 0.0,
         ortho: texNew(1, 0),
         orthoLoaded: false,
@@ -225,7 +267,10 @@ pub fn putCm(out: &mut string, v: f64) {
 
 pub let MAGIC: string = "MILOCITY"
 
-pub let VERSION: i64 = 1
+// 2 added the bridge section at the tail. A v1 asset still loads — it simply has
+// no bridges — because everything before that section is byte-identical and the
+// reader stops where the file does.
+pub let VERSION: i64 = 2
 
 // ------------------------------------------------------------------- loading
 
@@ -296,8 +341,8 @@ pub fn cityParse(src: &string): Result<City, string> {
     var p = 8
     let ver = getI32(src, p)
     p = p + 4
-    if ver != VERSION {
-        return Result.Err("city file version " + ver.toString() + ", expected " + VERSION.toString())
+    if ver < 1 || ver > VERSION {
+        return Result.Err("city file version " + ver.toString() + ", expected 1 or " + VERSION.toString())
     }
 
     if !have(src, p, 4) {
@@ -458,9 +503,183 @@ pub fn cityParse(src: &string): Result<City, string> {
         }
     }
 
+    c.bodyEnd = p
+    if ver >= 2 {
+        parseBridges(c, src, p)?
+    }
+
     c.loaded = true
     buildIndex(c)
+    deckProfile(c)
     return Result.Ok(c)
+}
+
+// The bridge section: count, then per bridge a half-width, a structure code, a
+// packed colour, a point count and that many (x,z) pairs. Open ways — the first
+// point is not repeated at the end.
+fn parseBridges(c: &mut City, src: &string, from: i64): Result<i64, string> {
+    var p = from
+    if !have(src, p, 4) {
+        return Result.Err("truncated city file: no bridge count")
+    }
+    let n = getI32(src, p)
+    p = p + 4
+    // 20 bytes is the smallest a bridge can be (three i32 of header, a zero
+    // point count, and two points is already more).
+    if !plausible(src, p, n, 16) {
+        return Result.Err("truncated city file: " + n.toString() + " bridges")
+    }
+    for i in 0..n {
+        if !have(src, p, 16) {
+            return Result.Err("truncated city file: bridge " + i.toString())
+        }
+        let halfW = (getI32(src, p) as f64) / 100.0
+        p = p + 4
+        let structure = getI32(src, p)
+        p = p + 4
+        let packed = getI32(src, p)
+        p = p + 4
+        let np = getI32(src, p)
+        p = p + 4
+        if !plausible(src, p, np, 8) {
+            return Result.Err("truncated city file: bridge " + i.toString() + " has " + np.toString() + " points")
+        }
+        if np < 2 {
+            p = p + np * 8
+            continue
+        }
+        c.brHalfW.push(halfW)
+        c.brStruct.push(structure)
+        // sRGB bytes out of the asset, linear light in the renderer.
+        c.brCol.push(rgb(srgbToLinear(((packed >> 16) & 255) as f64 / 255.0), srgbToLinear(((packed >> 8) & 255) as f64 / 255.0), srgbToLinear((packed & 255) as f64 / 255.0)))
+        c.brStart.push(c.brPtX.len)
+        c.brLen.push(np)
+        for k in 0..np {
+            c.brPtX.push((getI32(src, p) as f64) / 100.0)
+            p = p + 4
+            c.brPtZ.push((getI32(src, p) as f64) / 100.0)
+            p = p + 4
+        }
+    }
+    c.brCount = c.brHalfW.len
+    return Result.Ok(c.brCount)
+}
+
+fn srgbToLinear(v: f64): f64 {
+    if v <= 0.04045 {
+        return v / 12.92
+    }
+    return Math.pow((v + 0.055) / 1.055, 2.4)
+}
+
+// How far the roadway sits above whatever it crosses on land. A highway overpass
+// is one deck plus clearance for the road underneath.
+let DECK_ABOVE: f64 = 6.0
+
+// Deck height for every bridge point, from this city's own terrain.
+//
+// OSM knows a bridge exists and knows nothing about how high it is: `layer=1`
+// says "above the thing it crosses", not "67 metres above the water". So the
+// height is a heuristic, and the only real input is the length of the water it
+// crosses — which is exactly what a bridge engineer works from too, because
+// clearance is set by the ships that have to pass under it. Long spans over
+// navigable water are high; a hundred metres over a freeway is not.
+//
+//   deck(t) = land(t)·(1-a) + max(land(t), clearance)·a,   a = sin(pi·t)
+//
+// `land` is the straight run between the two ends' real ground heights, floored
+// by the terrain directly beneath so the deck never sinks into a hill. `a` is a
+// half-sine along the way, so the deck leaves each abutment at ground level and
+// crowns in the middle — which is what a real deck profile looks like, and it
+// costs one sine per point at load.
+//
+// Calibrated against the three bridges the game actually flies over: the Golden
+// Gate comes out at 70 m (real 67), the Bay Bridge at 59 (real 58), the Brooklyn
+// Bridge at 41 (real 41).
+fn deckProfile(c: &mut City) {
+    c.brPtY = Vec.filled(c.brPtX.len, 0.0)
+    c.brTower = Vec.filled(c.brCount, 0.0)
+    c.brTowerA = Vec.filled(c.brCount, 0.0)
+    c.brTowerB = Vec.filled(c.brCount, 0.0)
+    for b in 0..c.brCount {
+        let s0 = c.brStart[b]
+        let n = c.brLen[b]
+        // arc length along the way, and the ground under each point
+        var arc: Vec<f64> = Vec.filled(n, 0.0)
+        var gnd: Vec<f64> = Vec.filled(n, 0.0)
+        var total = 0.0
+        for k in 0..n {
+            if k > 0 {
+                let dx = c.brPtX[s0 + k] - c.brPtX[s0 + k - 1]
+                let dz = c.brPtZ[s0 + k] - c.brPtZ[s0 + k - 1]
+                total = total + Math.sqrt(dx * dx + dz * dz)
+            }
+            arc[k] = total
+            gnd[k] = cityHeightAt(c, c.brPtX[s0 + k], c.brPtZ[s0 + k])
+        }
+        if total <= 0.0 {
+            total = 1.0
+        }
+        // The longest unbroken run of water, measured along the way. Water is the
+        // DEM at or below sea level, which is exactly how SRTM records it.
+        var bestLo = 0.0
+        var bestHi = 0.0
+        var runLo = 0.0
+        var inWater = false
+        for k in 0..n {
+            let wet = gnd[k] <= 1.0
+            if wet && !inWater {
+                runLo = arc[k]
+                inWater = true
+            }
+            if inWater && (!wet || k == n - 1) {
+                let runHi = arc[k]
+                if runHi - runLo > bestHi - bestLo {
+                    bestLo = runLo
+                    bestHi = runHi
+                }
+                inWater = wet
+            }
+        }
+        // Clearance from the width of the water, on a square-root curve. Not a
+        // straight line: clearance is set by the ships that have to pass under,
+        // and ships stop getting taller a long time before crossings stop getting
+        // wider. Fitted to the three the game flies over — the Brooklyn Bridge
+        // comes out at 39 m against a real 41, the Golden Gate at 68 against 67.
+        // The Bay Bridge hits the 70 m ceiling against a real 58, because what is
+        // measured here is the whole crossing and half of that is low causeway.
+        let waterSpan = bestHi - bestLo
+        var clearance = 0.0
+        if waterSpan > 0.0 {
+            clearance = 5.0 + 1.9 * (Math.sqrt(waterSpan) - 7.75)
+            if clearance < 0.0 {
+                clearance = 0.0
+            }
+            if clearance > 70.0 {
+                clearance = 70.0
+            }
+        }
+        let g0 = Math.maxF64(gnd[0], 0.0)
+        let gN = Math.maxF64(gnd[n - 1], 0.0)
+        for k in 0..n {
+            let t = arc[k] / total
+            let a = Math.sin(3.14159265358979 * t)
+            let land = Math.maxF64(g0 + (gN - g0) * t, gnd[k]) + DECK_ABOVE
+            c.brPtY[s0 + k] = land * (1.0 - a) + Math.maxF64(land, clearance) * a
+        }
+        // Suspension and cable-stayed spans get towers, at the two ends of the
+        // water they cross — which is where the real ones stand, because that is
+        // where there is something to found them on.
+        if (c.brStruct[b] == 1 || c.brStruct[b] == 2) && clearance > 20.0 {
+            // Real suspension towers stand about twice the deck's clearance
+            // above it — the Golden Gate's deck is 67 m over the water and its
+            // towers 227 m, and that proportion is what makes the silhouette
+            // read as a suspension bridge rather than a road on stilts.
+            c.brTower[b] = clearance * 2.0
+            c.brTowerA[b] = bestLo / total
+            c.brTowerB[b] = bestHi / total
+        }
+    }
 }
 
 // Two passes over the buildings: count per cell, prefix-sum, then scatter. No
@@ -710,7 +929,10 @@ pub fn cityOrthoLocal(c: &City, lx: f64, lz: f64): Rgb {
     let n = c.ortho.w
     let inv = 1.0 / (c.reach * 2.0)
     var tx = (((lx + c.reach) * inv) * (n as f64)) as i64
-    var tz = (((lz + c.reach) * inv) * (n as f64)) as i64
+    // From the NORTH edge — a PNG's first row is its top. See the drape UV in
+    // render3d.drawWorld; the two have to agree or a roof takes its colour from
+    // the wrong end of the city.
+    var tz = (((c.reach - lz) * inv) * (n as f64)) as i64
     // Mirror onto the map, matching the drape and world3d.foldIn.
     tx = tx & (n * 2 - 1)
     tz = tz & (n * 2 - 1)

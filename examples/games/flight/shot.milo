@@ -7,6 +7,9 @@ from "std/math" import {
 from "std/args" import {
     args
 }
+from "std/strconv" import {
+    parseFloat
+}
 from "std/time" import {
     epochMillis
 }
@@ -23,7 +26,7 @@ from "./textures" import {
     groundTexture, planeTexture, facadeTexture
 }
 from "./world3d" import {
-    World, worldIn, worldUpdate, wrapPi, SEED
+    World, worldIn, worldUpdate, wrapPi, heightAt, SEED
 }
 from "./city" import {
     City, cityLoad, cityEmpty, cityAttachOrtho
@@ -66,6 +69,17 @@ fn writePpm(path: &string, c: &Canvas) {
     }
 }
 
+fn parseF(s: &string): f64 {
+    match parseFloat(s.clone()) {
+        Option.Some(v) => {
+            return v
+        }
+        Option.None => {
+            return 0.0
+        }
+    }
+}
+
 pub fn main(): i32 {
     let argv = args()
     var prefix = "/tmp/flyby"
@@ -74,6 +88,11 @@ pub fn main(): i32 {
     }
     var city = cityEmpty()
     var easy = false
+    var atX = 0.0
+    var atZ = 0.0
+    var atAlt = 0.0
+    var atYaw = 0.0
+    var atSet = false
     var shots: Vec<i64> = Vec.new()
     var i = 2
     while i < argv.len {
@@ -110,6 +129,17 @@ pub fn main(): i32 {
                 }
             }
             i = i + 2
+            continue
+        }
+        // Point the camera at a fixed spot instead of wherever the scripted
+        // flight ended up. Reviewing one landmark should not mean flying to it.
+        if argv[i] == "--at" && i + 4 < argv.len {
+            atX = parseF(argv[i + 1])
+            atZ = parseF(argv[i + 2])
+            atAlt = parseF(argv[i + 3])
+            atYaw = parseF(argv[i + 4])
+            atSet = true
+            i = i + 5
             continue
         }
         if argv[i] == "--easy" {
@@ -182,6 +212,28 @@ pub fn main(): i32 {
             }
         }
         if want {
+            if atSet {
+                // Park the aircraft behind the camera. It is drawn in world
+                // space like everything else, and a capture of a landmark should
+                // not be half fuselage.
+                let yawRad = atYaw * 3.14159265358979 / 180.0
+                let camY = heightAt(w.city, atX, atZ) + atAlt
+                w.plane.x = atX - Math.sin(yawRad) * 500.0
+                w.plane.z = atZ - Math.cos(yawRad) * 500.0
+                w.plane.y = camY
+                w.plane.yaw = yawRad
+                w.plane.pitch = 0.0
+                w.plane.roll = 0.0
+                w.cam.x = atX
+                w.cam.z = atZ
+                w.cam.y = camY
+                w.cam.yaw = yawRad
+                w.cam.pitch = 0.0 - 0.10
+                w.cam.roll = 0.0
+            }
+            if atSet {
+                print("  camera " + (w.cam.x as i64).toString() + "," + (w.cam.y as i64).toString() + "," + (w.cam.z as i64).toString() + " yaw " + ((w.cam.yaw * 180.0 / 3.14159265358979) as i64).toString())
+            }
             let t0 = epochMillis()
             let view = viewOf(w.cam, c.w, c.h)
             drawWorld(c, s, w, groundTex, skinTex, facadeTex, view)

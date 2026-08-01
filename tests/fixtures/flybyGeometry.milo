@@ -124,6 +124,17 @@ fn tinyCity(): string {
     putCm(out, 0.0)
     putCm(out, 0.0)
     putCm(out, 10.0)
+    // one bridge: a two-point deck, so the truncation sweep below covers the
+    // version-2 section too
+    putI32(out, 1)
+    putCm(out, 6.0) // half-width
+    putI32(out, 1) // suspension
+    putI32(out, 0xC0552A) // International Orange
+    putI32(out, 2) // two points
+    putCm(out, 0.0)
+    putCm(out, 0.0)
+    putCm(out, 0.0)
+    putCm(out, 120.0)
     return out
 }
 
@@ -143,7 +154,7 @@ pub fn main(): i32 {
     let full = tinyCity()
     match cityParse(full) {
         Result.Ok(c) => {
-            print("parsed " + c.name.clone() + " " + c.bCount.toString() + " building")
+            print("parsed " + c.name.clone() + " " + c.bCount.toString() + " building " + c.brCount.toString() + " bridge")
         }
         Result.Err(e) => {
             print("parse FAILED: " + e)
@@ -208,7 +219,7 @@ pub fn main(): i32 {
 // @expect: fold roundtrip ok
 // @expect: wrapPi ok
 // @expect: ring walk ok
-// @expect: parsed Town 1 building
-// @expect: truncations rejected 105/105
+// @expect: parsed Town 1 building 1 bridge
+// @expect: truncations rejected 141/141
 // @expect: bad magic rejected
 // @expect: huge grid rejected

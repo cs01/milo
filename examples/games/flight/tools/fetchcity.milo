@@ -13,6 +13,14 @@
 //              `building:levels`. ODbL — attribution required, see cities/README.
 //   land cover OSM parks, woods, beaches and inland water, rasterised into a
 //              grid the renderer samples per terrain vertex.
+//   bridges    OSM ways tagged `bridge=yes`, kept as open polylines. The terrain
+//              grid cannot carry them — SRTM samples the water under a bridge,
+//              not the deck over it — so they are their own layer.
+//
+// `--update <file.city>` refetches ONLY the bridge layer and splices it onto an
+// existing asset. Terrain, land cover and a hundred thousand building footprints
+// are minutes of Overpass time and do not change between runs; a new trailing
+// section does not need any of them re-downloaded.
 //
 // Google's data is deliberately not used: their terms forbid bulk download and
 // redistribution of map, imagery or elevation data, so a checked-in asset built
@@ -46,7 +54,7 @@ from "std/time" import {
     sleepSecs
 }
 from "../city" import {
-    putI32, putCm, MAGIC, VERSION, COVER_URBAN, COVER_PARK, COVER_SAND, COVER_WATER
+    putI32, putCm, MAGIC, VERSION, COVER_URBAN, COVER_PARK, COVER_SAND, COVER_WATER, cityParse
 }
 
 let M_PER_DEG_LAT: f64 = 111320.0
@@ -440,6 +448,303 @@ fn coverCodeFor(doc: &Json, tags: i64): u8 {
     return COVER_URBAN
 }
 
+// ------------------------------------------------------------------ bridges
+
+// Everything the asset carries about one city's bridges, flat like the building
+// arrays and for the same reason.
+pub struct Bridges {
+    halfW: Vec<f64>,
+    structure: Vec<i64>,
+    colour: Vec<i64>, // packed 0xRRGGBB, sRGB
+    start: Vec<i64>,
+    len: Vec<i64>,
+    ptX: Vec<f64>,
+    ptZ: Vec<f64>,
+}
+
+pub fn bridgesEmpty(): Bridges {
+    return Bridges {
+        halfW: Vec.new(), structure: Vec.new(), colour: Vec.new(),
+        start: Vec.new(), len: Vec.new(), ptX: Vec.new(), ptZ: Vec.new(),
+    }
+}
+
+// Which carriageways get a deck. Footways and cycleways are excluded on purpose:
+// the Golden Gate is four parallel OSM ways — two motorway carriageways and two
+// sidewalks — and drawing all four gives a bridge with four separate decks.
+// Service roads and tracks are excluded because a city has hundreds of them and
+// they are all four-metre culverts.
+fn bridgeLanes(highway: &string, lanesTag: &string): f64 {
+    let n = leadingNum(lanesTag.clone())
+    if n >= 1.0 {
+        return n
+    }
+    if highway == "motorway" || highway == "trunk" {
+        return 3.0
+    }
+    if highway == "primary" || highway == "secondary" {
+        return 2.0
+    }
+    return 2.0
+}
+
+fn bridgeKeep(highway: &string): bool {
+    return highway == "motorway" || highway == "trunk" || highway == "primary"
+    || highway == "secondary" || highway == "tertiary" || highway == "residential"
+    || highway == "unclassified" || highway == "motorway_link" || highway == "trunk_link"
+    || highway == "primary_link" || highway == "secondary_link"
+}
+
+fn structureCode(v: &string): i64 {
+    if v == "suspension" {
+        return 1
+    }
+    if v == "cable-stayed" {
+        return 2
+    }
+    if v == "truss" {
+        return 3
+    }
+    if v == "arch" || v == "tied-arch" || v == "arch-bridge" {
+        return 4
+    }
+    return 0
+}
+
+fn hexNibble(ch: u8): i64 {
+    let c = ch as i64
+    if c >= 48 && c <= 57 {
+        return c - 48
+    }
+    if c >= 97 && c <= 102 {
+        return c - 87
+    }
+    if c >= 65 && c <= 70 {
+        return c - 55
+    }
+    return 0 - 1
+}
+
+// OSM's `colour` is either a CSS name or a #rrggbb. Both appear on real bridges —
+// the Golden Gate carries `colour=orange`, which is the whole reason the asset
+// stores a colour at all instead of painting every deck concrete grey.
+fn parseColour(v: &string): i64 {
+    if v.len == 7 && v[0] == 35 as u8 {
+        var acc = 0
+        var ok = true
+        for i in 1..7 {
+            let d = hexNibble(v[i])
+            if d < 0 {
+                ok = false
+            } else {
+                acc = acc * 16 + d
+            }
+        }
+        if ok {
+            return acc
+        }
+    }
+    if v == "orange" {
+        return 0xC0552A // International Orange, which is what "orange" means here
+    }
+    if v == "red" {
+        return 0xA33028
+    }
+    if v == "green" {
+        return 0x3F6B4A
+    }
+    if v == "blue" {
+        return 0x3A5A80
+    }
+    if v == "white" {
+        return 0xD8D8D2
+    }
+    if v == "black" {
+        return 0x3A3A3A
+    }
+    if v == "yellow" {
+        return 0xC8AE3E
+    }
+    if v == "silver" || v == "grey" || v == "gray" {
+        return 0x9A9A96
+    }
+    return 0x9A9A96 // weathered concrete
+}
+
+// Bridge ways in the bbox. Short ones are dropped: a city has hundreds of
+// forty-metre culvert decks, none of which is visible from a plane, and each one
+// costs eight triangles a frame forever.
+fn fetchBridges(bbox: &string, lat: f64, lon: f64, mPerLon: f64, cacheKey: &string): Bridges {
+    var br = bridgesEmpty()
+    let q = "[out:json][timeout:180];way[\"bridge\"][\"highway\"]" + bbox.clone() + ";out tags geom;"
+    match overpass(q, cacheKey.clone()) {
+        Ok(body) => {
+            match Json.parse(body) {
+                Ok(doc) => {
+                    let els = doc.curField(doc.curRoot(), "elements")
+                    let n = doc.curLen(els)
+                    print("  " + n.toString() + " bridge ways")
+                    for i in 0..n {
+                        let el = doc.curChild(els, i)
+                        let tags = doc.curField(el, "tags")
+                        let highway = tagStr(doc, tags, "highway")
+                        if !bridgeKeep(highway) {
+                            continue
+                        }
+                        let geom = doc.curField(el, "geometry")
+                        let gn = doc.curLen(geom)
+                        if gn < 2 {
+                            continue
+                        }
+                        // project first, so the length test is in metres
+                        var wx: Vec<f64> = Vec.new()
+                        var wz: Vec<f64> = Vec.new()
+                        for k in 0..gn {
+                            let p = doc.curChild(geom, k)
+                            wx.push((floatOf(doc, doc.curField(p, "lon")) - lon) * mPerLon)
+                            wz.push((floatOf(doc, doc.curField(p, "lat")) - lat) * M_PER_DEG_LAT)
+                        }
+                        var length = 0.0
+                        for k in 1..gn {
+                            let dx = wx[k] - wx[k - 1]
+                            let dz = wz[k] - wz[k - 1]
+                            length = length + Math.sqrt(dx * dx + dz * dz)
+                        }
+                        if length < 55.0 {
+                            continue
+                        }
+                        // Resample at a uniform spacing rather than keeping the
+                        // OSM nodes. This is not tidying: OSM digitises a bridge
+                        // the way a surveyor walks it, so the Golden Gate's
+                        // approach viaducts carry a node every fifteen metres and
+                        // its 2.3 km main span carries NONE — the whole strait is
+                        // one segment between two points on land. Every sampled
+                        // point was therefore on dry ground, the deck-height pass
+                        // found no water to clear, and the most famous bridge in
+                        // the world came out as a flat road six metres above the
+                        // sea. Even spacing puts points in the water, which is
+                        // what the height heuristic reads, and gives the deck an
+                        // even tessellation while it is there.
+                        var spacing = 45.0
+                        if length / spacing > 120.0 {
+                            spacing = length / 120.0
+                        }
+                        let lanes = bridgeLanes(highway, tagStr(doc, tags, "lanes"))
+                        let start = br.ptX.len
+                        var count = 0
+                        var walked = 0.0 // arc length of the next point to emit
+                        var acc = 0.0 // arc length at wx[k-1]
+                        var k = 1
+                        br.ptX.push(wx[0])
+                        br.ptZ.push(wz[0])
+                        count = 1
+                        walked = spacing
+                        while k < gn {
+                            let dx = wx[k] - wx[k - 1]
+                            let dz = wz[k] - wz[k - 1]
+                            let seg = Math.sqrt(dx * dx + dz * dz)
+                            while seg > 0.0 && walked <= acc + seg {
+                                let t = (walked - acc) / seg
+                                br.ptX.push(wx[k - 1] + dx * t)
+                                br.ptZ.push(wz[k - 1] + dz * t)
+                                count = count + 1
+                                walked = walked + spacing
+                            }
+                            acc = acc + seg
+                            k = k + 1
+                        }
+                        // The last node always survives: a resampling that stops
+                        // short leaves a gap at the abutment.
+                        if walked - spacing < length - 0.5 {
+                            br.ptX.push(wx[gn - 1])
+                            br.ptZ.push(wz[gn - 1])
+                            count = count + 1
+                        }
+                        // Half the carriageway plus a parapet.
+                        var halfW = lanes * 3.65 * 0.5 + 1.5
+                        // A dual carriageway is TWO OSM ways eight metres apart,
+                        // and two overlapping decks at almost the same height
+                        // z-fight into a dashed line. One deck wide enough to
+                        // cover both is what the bridge actually looks like: the
+                        // Golden Gate's two carriageways come out as one 22 m
+                        // deck against a real 27 m.
+                        let dup = twinOf(br, wx[0], wz[0], wx[gn - 1], wz[gn - 1])
+                        if dup >= 0 {
+                            let sep = midGap(br, dup, wx[0], wz[0], wx[gn - 1], wz[gn - 1])
+                            br.halfW[dup] = Math.maxF64(br.halfW[dup], sep * 0.5 + halfW)
+                            br.ptX.truncate(start)
+                            br.ptZ.truncate(start)
+                            continue
+                        }
+                        br.halfW.push(halfW)
+                        br.structure.push(structureCode(tagStr(doc, tags, "bridge:structure")))
+                        br.colour.push(parseColour(tagStr(doc, tags, "colour")))
+                        br.start.push(start)
+                        br.len.push(count)
+                    }
+                }
+                Err(_e) => {
+                    print("  bridge JSON parse failed")
+                }
+            }
+        }
+        Err(e) => {
+            print("  " + e)
+        }
+    }
+    print("  kept " + br.halfW.len.toString() + " bridges")
+    return br
+}
+
+// The already-kept way this one is the other carriageway of, or -1. Same place,
+// same length, either direction — which is exactly how OSM stores a divided road.
+fn twinOf(br: &Bridges, ax: f64, az: f64, bx: f64, bz: f64): i64 {
+    let mx = (ax + bx) * 0.5
+    let mz = (az + bz) * 0.5
+    for i in 0..br.halfW.len {
+        let s = br.start[i]
+        let e = s + br.len[i] - 1
+        let omx = (br.ptX[s] + br.ptX[e]) * 0.5
+        let omz = (br.ptZ[s] + br.ptZ[e]) * 0.5
+        let dx = mx - omx
+        let dz = mz - omz
+        if dx * dx + dz * dz > 900.0 {
+            continue
+        }
+        let ox = br.ptX[e] - br.ptX[s]
+        let oz = br.ptZ[e] - br.ptZ[s]
+        let olen = Math.sqrt(ox * ox + oz * oz)
+        let span = Math.sqrt((bx - ax) * (bx - ax) + (bz - az) * (bz - az))
+        if Math.abs(olen - span) < span * 0.25 + 20.0 {
+            return i
+        }
+    }
+    return 0 - 1
+}
+
+fn midGap(br: &Bridges, i: i64, ax: f64, az: f64, bx: f64, bz: f64): f64 {
+    let s = br.start[i]
+    let e = s + br.len[i] - 1
+    let dx = (ax + bx) * 0.5 - (br.ptX[s] + br.ptX[e]) * 0.5
+    let dz = (az + bz) * 0.5 - (br.ptZ[s] + br.ptZ[e]) * 0.5
+    return Math.sqrt(dx * dx + dz * dz)
+}
+
+fn putBridges(buf: &mut string, br: &Bridges) {
+    putI32(buf, br.halfW.len)
+    for i in 0..br.halfW.len {
+        putCm(buf, br.halfW[i])
+        putI32(buf, br.structure[i])
+        putI32(buf, br.colour[i])
+        putI32(buf, br.len[i])
+        let s = br.start[i]
+        for k in 0..br.len[i] {
+            putCm(buf, br.ptX[s + k])
+            putCm(buf, br.ptZ[s + k])
+        }
+    }
+}
+
 // --------------------------------------------------------------------- main
 
 fn flagOf(a: &Vec<string>, name: &string, dflt: string): string {
@@ -453,6 +758,11 @@ fn flagOf(a: &Vec<string>, name: &string, dflt: string): string {
 
 fn main() {
     let a = args()
+    let update = flagOf(a, "--update", "")
+    if update != "" {
+        updateBridges(update)
+        return
+    }
     let name = flagOf(a, "--name", "City")
     let lat = leadingNumSigned(flagOf(a, "--lat", "37.7897"))
     let lon = leadingNumSigned(flagOf(a, "--lon", "-122.4000"))
@@ -620,6 +930,9 @@ fn main() {
     }
     print("  kept " + bH.len.toString() + " buildings, tallest " + (tallest as i64).toString() + " m")
 
+    // ── bridges ──
+    let br = fetchBridges(bbox, lat, lon, mPerLon, cacheName("bridges", latMin, lonMin, latMax, lonMax))
+
     // ── serialise ──
     var buf = ""
     for i in 0..8 {
@@ -661,12 +974,60 @@ fn main() {
         }
     }
 
+    putBridges(buf, br)
+
     match writeFile(out, buf) {
         Ok(nbytes) => {
             print("wrote " + out + " (" + (nbytes / 1024).toString() + " KiB)")
         }
         Err(_e) => {
             print("could not write " + out)
+        }
+    }
+}
+
+// Refetch only the bridge layer and splice it onto an existing asset.
+//
+// Everything before the bridge section is byte-for-byte what it was, so the
+// terrain, the land cover and the hundred thousand footprints are copied
+// straight across — no Overpass call, no reprojection, and no chance of the
+// expensive layers coming back subtly different because OSM moved underneath.
+fn updateBridges(path: string) {
+    let Result.Ok(src) = readFile(path) else {
+        print("cannot read " + path)
+        return
+    }
+    let Result.Ok(c) = cityParse(src) else {
+        print("cannot parse " + path)
+        return
+    }
+    print(c.name.clone() + ": " + fmt7(c.originLat) + ", " + fmt7(c.originLon) + "  radius " + (c.reach as i64).toString() + " m")
+
+    let _ = makeDir(".cache", 493)
+    let _ = makeDir(CACHE, 493)
+    let mPerLon = M_PER_DEG_LAT * Math.cos(c.originLat * 3.14159265358979 / 180.0)
+    let latMin = c.originLat - c.reach / M_PER_DEG_LAT
+    let latMax = c.originLat + c.reach / M_PER_DEG_LAT
+    let lonMin = c.originLon - c.reach / mPerLon
+    let lonMax = c.originLon + c.reach / mPerLon
+    let bbox = bboxStr(latMin, lonMin, latMax, lonMax)
+    let br = fetchBridges(bbox, c.originLat, c.originLon, mPerLon, cacheName("bridges", latMin, lonMin, latMax, lonMax))
+
+    var buf = ""
+    for i in 0..8 {
+        buf.push(MAGIC[i])
+    }
+    putI32(buf, VERSION)
+    for i in 12..c.bodyEnd {
+        buf.push(src[i])
+    }
+    putBridges(buf, br)
+    match writeFile(path, buf) {
+        Ok(nbytes) => {
+            print("rewrote " + path + " (" + (nbytes / 1024).toString() + " KiB, version " + VERSION.toString() + ")")
+        }
+        Err(_e) => {
+            print("could not write " + path)
         }
     }
 }

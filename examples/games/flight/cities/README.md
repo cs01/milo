@@ -11,6 +11,11 @@ once at startup:
   `building:levels` tags, extruded to their real heights.
 - **land cover** — OSM parks, woods, beaches and inland water, rasterised into a
   grid the terrain shader samples per vertex.
+- **bridges** — OSM ways tagged `bridge=yes`, kept as open polylines with their
+  width, colour and structure. Their own layer because the terrain grid cannot
+  carry them: SRTM samples the water under a bridge, not the deck over it. Deck
+  height is derived from the terrain at load time, not stored — see the flight
+  README for the heuristic.
 
 Sea level is the DEM's own zero, so the coastline is the real one.
 
@@ -48,6 +53,16 @@ there by construction.
 milo run examples/games/flight/tools/fetchcity.milo -- \
     --name "San Francisco" --lat 37.7860 --lon -122.4100 --radius 2000 \
     -o examples/games/flight/cities/sf.city
+```
+
+Adding a layer to an asset you already have does not mean refetching it. `--update`
+queries only the bridge layer and splices it onto the existing file; everything
+before that section is copied across byte for byte, so a hundred thousand building
+footprints and a terrain grid stay exactly what they were:
+
+```bash
+milo run examples/games/flight/tools/fetchcity.milo -- \
+    --update examples/games/flight/cities/sf.city
 ```
 
 `--radius` is in metres, measured from the centre to the edge of the square. It

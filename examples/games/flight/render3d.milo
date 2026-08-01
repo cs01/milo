@@ -732,11 +732,19 @@ pub fn drawWorld(c: &mut Canvas, s: &mut Scene, w: &World, ground: &Texture, ski
                 //
                 // UV runs 0..1 across the mapped span; outside it the sampler's
                 // mirrored addressing folds on the same period as the terrain.
+                //
+                // v is measured from the NORTH edge, because a PNG's first row is
+                // its top and +z is north. Running it from -reach upward hung the
+                // photograph on the terrain upside down: the map still read as a
+                // city, hills still had relief (that comes from the DEM), and the
+                // only place the flip was visible was the water — which is how
+                // San Francisco ended up with the Sunset District's street grid
+                // painted across the Golden Gate strait.
                 let os = 1.0 / (w.city.reach * 2.0)
                 let ou0 = (x0 + w.city.reach) * os
-                let ov0 = (z0 + w.city.reach) * os
+                let ov0 = (w.city.reach - z0) * os
                 let ou1 = (x1 + w.city.reach) * os
-                let ov1 = (z1 + w.city.reach) * os
+                let ov1 = (w.city.reach - z1) * os
                 // Mostly flat light. An aerial photograph already contains the
                 // sun that lit it, shadows included; a second Lambert term on
                 // top shades everything twice and the hills go to mud. A little
@@ -778,6 +786,7 @@ pub fn drawWorld(c: &mut Canvas, s: &mut Scene, w: &World, ground: &Texture, ski
 
     if w.city.loaded {
         drawCity(s, w, v, facade)
+        drawBridges(s, w, v)
     } else {
         drawProps(s, w, v, baseX, baseZ)
     }
@@ -791,6 +800,202 @@ pub fn drawWorld(c: &mut Canvas, s: &mut Scene, w: &World, ground: &Texture, ski
     drawPlane(c, s, w, v, skin)
     drawBirds(c, s, w, v)
     drawSparks(c, w, v)
+}
+
+// ── bridges ───────────────────────────────────────────────────────────────────
+
+// A bridge is the one thing in a city that is not on the ground, and the terrain
+// grid does not know it is there: SRTM samples the water under the Golden Gate,
+// so without this the two San Francisco landmarks that ARE bridges were a hoop
+// over open water and nothing else.
+//
+// Decks are drawn as a ribbon of boxes rather than as flat quads. A deck seen
+// from a plane is usually seen from ABOVE and from the SIDE at the same time, and
+// a zero-thickness ribbon vanishes edge-on at exactly the angle you approach one.
+fn drawBridges(s: &mut Scene, w: &World, v: &View) {
+    if !w.city.loaded || w.city.brCount == 0 {
+        return
+    }
+    let reach = w.city.reach
+    let far = v.far
+    let fwdX = Math.sin(w.cam.yaw)
+    let fwdZ = Math.cos(w.cam.yaw)
+    let kx0 = blockOf(w.cam.x - far, reach)
+    let kx1 = blockOf(w.cam.x + far, reach)
+    let kz0 = blockOf(w.cam.z - far, reach)
+    let kz1 = blockOf(w.cam.z + far, reach)
+    for kz in kz0..(kz1 + 1) {
+        for kx in kx0..(kx1 + 1) {
+            for b in 0..w.city.brCount {
+                bridgeSpan(s, w, v, b, kx, kz, reach, far, fwdX, fwdZ)
+            }
+        }
+    }
+}
+
+fn bridgeSpan(s: &mut Scene, w: &World, v: &View, b: i64, kx: i64, kz: i64, reach: f64, far: f64, fwdX: f64, fwdZ: f64) {
+    let n = w.city.brLen[b]
+    if n < 2 {
+        return
+    }
+    let start = w.city.brStart[b]
+    let midX = unfold(kx, (w.city.brPtX[start] + w.city.brPtX[start + n - 1]) * 0.5, reach)
+    let midZ = unfold(kz, (w.city.brPtZ[start] + w.city.brPtZ[start + n - 1]) * 0.5, reach)
+    let dx = midX - w.cam.x
+    let dz = midZ - w.cam.z
+    let d2 = dx * dx + dz * dz
+    // Half the way's own length as slack, so a two-kilometre span is not culled
+    // by its midpoint while one of its towers is filling the screen.
+    let slack = far + 1400.0
+    if d2 > slack * slack {
+        return
+    }
+    if dx * fwdX + dz * fwdZ < 0.0 - 1400.0 {
+        return
+    }
+    let col = w.city.brCol[b]
+    let hw = w.city.brHalfW[b]
+    // Girder depth. Real box girders run about a fifteenth of the span they
+    // carry; this only has to be thick enough not to disappear edge-on.
+    let deep = Math.clampF64(hw * 0.55, 1.6, 5.0)
+    let far2 = far * far
+    for i in 0..n - 1 {
+        let ia = start + i
+        let ib = start + i + 1
+        let ax = unfold(kx, w.city.brPtX[ia], reach)
+        let az = unfold(kz, w.city.brPtZ[ia], reach)
+        let bx = unfold(kx, w.city.brPtX[ib], reach)
+        let bz = unfold(kz, w.city.brPtZ[ib], reach)
+        let ay = w.city.brPtY[ia]
+        let by = w.city.brPtY[ib]
+        let sdx = (ax + bx) * 0.5 - w.cam.x
+        let sdz = (az + bz) * 0.5 - w.cam.z
+        let sd2 = sdx * sdx + sdz * sdz
+        if sd2 > far2 {
+            continue
+        }
+        deckSegment(s, v, ax, ay, az, bx, by, bz, hw, deep, col, sd2 > 640000.0)
+    }
+    // Towers stand at the two ends of the water the way crosses, which is where
+    // the real ones are founded.
+    if w.city.brTower[b] > 0.0 {
+        bridgeTower(s, w, v, b, kx, kz, reach, w.city.brTowerA[b], col)
+        bridgeTower(s, w, v, b, kx, kz, reach, w.city.brTowerB[b], col)
+    }
+}
+
+// One length of deck as a box: road surface on top, two flanks, and a soffit.
+// `lod` drops everything but the road once the segment is far enough that the
+// flanks are under a pixel.
+fn deckSegment(s: &mut Scene, v: &View, ax: f64, ay: f64, az: f64, bx: f64, by: f64, bz: f64, hw: f64, deep: f64, col: &Rgb, lod: bool) {
+    var ex = bx - ax
+    var ez = bz - az
+    let el = Math.sqrt(ex * ex + ez * ez)
+    if el < 0.01 {
+        return
+    }
+    ex = ex / el
+    ez = ez / el
+    // Perpendicular in the ground plane. The deck stays level across its width —
+    // real ones are crowned by centimetres, which is nothing from a cockpit.
+    let px = 0.0 - ez * hw
+    let pz = ex * hw
+    let a0 = v3(ax - px, ay, az - pz)
+    let a1 = v3(ax + px, ay, az + pz)
+    let b0 = v3(bx - px, by, bz - pz)
+    let b1 = v3(bx + px, by, bz + pz)
+    // Windings follow the same rule as box3: (v1-v0) x (v2-v0) points along the
+    // face's outward normal, and `p x e` is +y for any edge direction, so a deck
+    // box built from its own local frame comes out correctly wound on a mirrored
+    // copy of the map too — there is no winding to flip because none was stored.
+    let top = col.scale(1.06)
+    triangle(s, v, a0, a1, b1, top)
+    triangle(s, v, a0, b1, b0, top)
+    if lod {
+        return
+    }
+    let c0 = v3(a0.x, ay - deep, a0.z)
+    let c1 = v3(a1.x, ay - deep, a1.z)
+    let d0 = v3(b0.x, by - deep, b0.z)
+    let d1 = v3(b1.x, by - deep, b1.z)
+    // Flanks: the side a driver sees as a parapet and a pilot sees as the girder.
+    let side = col.scale(0.62)
+    triangle(s, v, a0, b0, d0, side)
+    triangle(s, v, a0, d0, c0, side)
+    triangle(s, v, a1, d1, b1, side)
+    triangle(s, v, a1, c1, d1, side)
+    // Soffit, in shadow — nothing lights the underside of a bridge but the water.
+    let under = col.scale(0.30)
+    triangle(s, v, c0, d0, d1, under)
+    triangle(s, v, c0, d1, c1, under)
+}
+
+// A tapered tower rising from the water to well above the deck. No cables: a
+// suspension cable is a metre thick and two kilometres long, which is a shape
+// this rasteriser would spend a thousand triangles on and still show as a line.
+fn bridgeTower(s: &mut Scene, w: &World, v: &View, b: i64, kx: i64, kz: i64, reach: f64, t: f64, col: &Rgb) {
+    let n = w.city.brLen[b]
+    let start = w.city.brStart[b]
+    // Walk the way to the arc-length fraction `t`.
+    var total = 0.0
+    for k in 1..n {
+        let ddx = w.city.brPtX[start + k] - w.city.brPtX[start + k - 1]
+        let ddz = w.city.brPtZ[start + k] - w.city.brPtZ[start + k - 1]
+        total = total + Math.sqrt(ddx * ddx + ddz * ddz)
+    }
+    let want = total * t
+    var acc = 0.0
+    var idx = 0
+    var frac = 0.0
+    for k in 1..n {
+        let ddx = w.city.brPtX[start + k] - w.city.brPtX[start + k - 1]
+        let ddz = w.city.brPtZ[start + k] - w.city.brPtZ[start + k - 1]
+        let seg = Math.sqrt(ddx * ddx + ddz * ddz)
+        if acc + seg >= want || k == n - 1 {
+            idx = k - 1
+            if seg > 0.0 {
+                frac = (want - acc) / seg
+            }
+            break
+        }
+        acc = acc + seg
+    }
+    if frac < 0.0 {
+        frac = 0.0
+    }
+    if frac > 1.0 {
+        frac = 1.0
+    }
+    let lx = w.city.brPtX[start + idx] + (w.city.brPtX[start + idx + 1] - w.city.brPtX[start + idx]) * frac
+    let lz = w.city.brPtZ[start + idx] + (w.city.brPtZ[start + idx + 1] - w.city.brPtZ[start + idx]) * frac
+    let dy = w.city.brPtY[start + idx] + (w.city.brPtY[start + idx + 1] - w.city.brPtY[start + idx]) * frac
+    let x = unfold(kx, lx, reach)
+    let z = unfold(kz, lz, reach)
+    let dxc = x - w.cam.x
+    let dzc = z - w.cam.z
+    if dxc * dxc + dzc * dzc > v.far * v.far {
+        return
+    }
+    let hw = w.city.brHalfW[b]
+    let top = dy + w.city.brTower[b]
+    // Founded at the water line, not on the deck: a tower that starts where the
+    // road does is a post balanced on a ribbon.
+    let base = Math.minF64(0.0, heightAt(w.city, x, z))
+    // Two legs, one either side of the roadway, which is what carries the cables.
+    let ex = w.city.brPtX[start + idx + 1] - w.city.brPtX[start + idx]
+    let ez = w.city.brPtZ[start + idx + 1] - w.city.brPtZ[start + idx]
+    let el = Math.sqrt(ex * ex + ez * ez)
+    if el < 0.01 {
+        return
+    }
+    let ox = 0.0 - (ez / el) * hw * 0.86
+    let oz = (ex / el) * hw * 0.86
+    let leg = Math.maxF64(hw * 0.28, 3.2)
+    box3(s, v, x + ox, base, top, z + oz, leg, col.scale(0.9))
+    box3(s, v, x - ox, base, top, z - oz, leg, col.scale(0.9))
+    // The cross brace above the roadway, which is the shape that says "tower"
+    // from a distance rather than "two posts".
+    box3(s, v, x, top - leg * 2.4, top, z, hw * 1.05, col.scale(0.82))
 }
 
 // Ground detail. Each terrain tile near the aircraft may carry one prop, placed

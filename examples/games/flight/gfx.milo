@@ -434,9 +434,16 @@ fn encodeSlow(v: f64): u32 {
 // Bloom, composite, tone-map and pack into the ABGR framebuffer. Also zeroes the
 // HDR buffer as it goes, so the next frame needs no separate clear pass.
 pub fn present(c: &mut Canvas, bloomGain: f64, exposure: f64) {
-    // A 1px antialiased line averages to ~1/16 after the 4x downsample, so the
-    // threshold has to sit well under 1.0 or thin strokes never bloom at all.
-    brightPass(c, 0.16)
+    // Only things brighter than white bloom: the sun, the ring hoops, the engine
+    // nozzles, the sparks — all of which are authored at 1.5 and up.
+    //
+    // This was 0.16, chosen so a 1px antialiased stroke (which averages to ~1/16
+    // through the 4x downsample) would still halo. That holds for a dark scene
+    // with a few bright lines on it. It does not survive an aerial photograph
+    // filling the frame: mid-grey in linear light is about 0.21, so the entire
+    // ground sat above the threshold and the whole picture bloomed into haze.
+    // Thin overlay strokes lose their halo; the ground stops being milk.
+    brightPass(c, 0.90)
     blurPass(c, 1)
     blurPass(c, 2)
     blurPass(c, 4)

@@ -24,7 +24,7 @@ from "std/png" import {
     Png
 }
 from "./gfx3d" import {
-    Texture, texNew
+    Texture, texNew, Rgb, rgb
 }
 
 pub let COVER_URBAN: u8 = 0 as u8
@@ -689,4 +689,28 @@ pub fn cityCoverAt(c: &City, x: f64, z: f64): u8 {
         return COVER_URBAN
     }
     return c.cover[iz * c.coverN + ix]
+}
+
+// The aerial photograph sampled at a point, in the map's own local coordinates.
+// Nearest texel: this feeds per-building colour, not per-pixel shading, so the
+// bilinear tap would cost four fetches to move a roof's colour by nothing.
+pub fn cityOrthoLocal(c: &City, lx: f64, lz: f64): Rgb {
+    if !c.orthoLoaded {
+        return rgb(0.5, 0.5, 0.5)
+    }
+    let n = c.ortho.w
+    let inv = 1.0 / (c.reach * 2.0)
+    var tx = (((lx + c.reach) * inv) * (n as f64)) as i64
+    var tz = (((lz + c.reach) * inv) * (n as f64)) as i64
+    // Mirror onto the map, matching the drape and world3d.foldIn.
+    tx = tx & (n * 2 - 1)
+    tz = tz & (n * 2 - 1)
+    if tx >= n {
+        tx = n * 2 - 1 - tx
+    }
+    if tz >= n {
+        tz = n * 2 - 1 - tz
+    }
+    let i = ((tz << c.ortho.shift) + tx) * 3
+    return rgb(c.ortho.px[i] as f64, c.ortho.px[i + 1] as f64, c.ortho.px[i + 2] as f64)
 }

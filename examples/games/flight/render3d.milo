@@ -26,7 +26,7 @@ from "./world3d" import {
     World, Trail, Theme, nextTheme, heightAt, coverAt, blockOf, foldIn, unfold, TILE, VIEW_TILES, TAU
 }
 from "./city" import {
-    City, COVER_URBAN, COVER_PARK, COVER_SAND, COVER_WATER, BUILDING_MARGIN, cityCellX, cityCellZ
+    City, COVER_URBAN, COVER_PARK, COVER_SAND, COVER_WATER, BUILDING_MARGIN, cityCellX, cityCellZ, cityOrthoLocal
 }
 
 // Sky gradient plus a sun disc, painted before anything else. There is no depth
@@ -1048,6 +1048,18 @@ fn prism(c: &mut Canvas, s: &mut Scene, w: &World, v: &View, px: &mut Vec<f64>, 
     if w.city.bHeight[b] > 45.0 {
         // Towers are glass: darker, bluer, and they take more of the sky.
         col = rgb(0.20, 0.25, 0.31).lerp(rgb(0.30, 0.37, 0.44), tint)
+    }
+    if w.city.orthoLoaded {
+        // The photograph is looking straight down at this roof, so it already
+        // knows what colour it is. Painting fifteen thousand roofs one invented
+        // grey was most of what made a real city read as polystyrene — the drape
+        // underneath was varied and the boxes standing on it were not.
+        let lmx = (w.city.bMinX[b] + w.city.bMaxX[b]) * 0.5
+        let lmz = (w.city.bMinZ[b] + w.city.bMaxZ[b]) * 0.5
+        let roofCol = cityOrthoLocal(w.city, lmx, lmz)
+        // Lifted off the raw sample: the texel already carries the sun that lit
+        // it, and it is about to be multiplied by a wall's shading term too.
+        col = roofCol.scale(1.35)
     }
 
     px.clear()

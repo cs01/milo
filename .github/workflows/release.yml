@@ -215,17 +215,20 @@ jobs:
         with:
           merge-multiple: true
           path: artifacts
+      # A write deploy key on milo-language/homebrew-tap, private half in TAP_DEPLOY_KEY.
+      # The default GITHUB_TOKEN is scoped to this repo and cannot push to the tap; a
+      # deploy key is the narrowest alternative — unlike a PAT it reaches exactly one
+      # repo, so a leak from this workflow can't touch anything else in the org.
+      - uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.TAP_DEPLOY_KEY }}
       - name: Render and push the formula
         env:
-          # A PAT with contents:write on milo-language/homebrew-tap. The default
-          # GITHUB_TOKEN is scoped to this repo only and cannot push to the tap.
-          TAP_TOKEN: ${{ secrets.TAP_TOKEN }}
           VERSION: ${{ needs.meta.outputs.version }}
         run: |
           set -euo pipefail
           bun scripts/render-formula.ts "$VERSION" artifacts "$GITHUB_SHA" > milo.rb
-          git clone --depth 1 \
-            "https://x-access-token:${TAP_TOKEN}@github.com/milo-language/homebrew-tap.git" tap
+          git clone --depth 1 git@github.com:milo-language/homebrew-tap.git tap
           mkdir -p tap/Formula
           mv milo.rb tap/Formula/milo.rb
           cd tap

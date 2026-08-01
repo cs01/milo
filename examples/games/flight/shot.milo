@@ -14,7 +14,7 @@ from "./gfx" import {
     Canvas, canvasNew, present
 }
 from "./gfx3d" import {
-    Scene, sceneNew
+    Scene, sceneNew, viewOf
 }
 from "./sound" import {
     Sound, soundNew, playRing, playRingBonus, playRegion, playBoost, playMiss
@@ -154,7 +154,8 @@ pub fn main(): i32 {
         }
         if want {
             let t0 = epochMillis()
-            drawWorld(c, s, w, groundTex, skinTex)
+            let view = viewOf(w.cam, c.w, c.h)
+            drawWorld(c, s, w, groundTex, skinTex, view)
             if w.evRing {
                 playRing(snd)
             }
@@ -171,7 +172,7 @@ pub fn main(): i32 {
                 playMiss(snd)
             }
             drawSpeedLines(c, w)
-            drawGuide(c, w, s)
+            drawGuide(c, w, view)
             drawHud(c, w, s, 60)
             present(c, 0.35, 1.0)
             renderMs = renderMs + (epochMillis() - t0)

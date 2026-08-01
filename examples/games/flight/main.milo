@@ -26,7 +26,7 @@ from "./gfx" import {
     canvasNew, present
 }
 from "./gfx3d" import {
-    sceneNew
+    sceneNew, viewOf
 }
 from "./sound" import {
     soundNew, playRing, playRingBonus, playRegion, playBoost, playMiss,
@@ -256,7 +256,8 @@ pub fn main(): i32 {
         musicTick(snd)
 
         worldUpdate(w, dt, inp.moveX, inp.moveY, inp.boost)
-        drawWorld(c, s, w, groundTex, skinTex)
+        let view = viewOf(w.cam, c.w, c.h)
+        drawWorld(c, s, w, groundTex, skinTex, view)
 
         fpsAccum = fpsAccum + dt
         fpsFrames = fpsFrames + 1
@@ -281,7 +282,7 @@ pub fn main(): i32 {
             playMiss(snd)
         }
         drawSpeedLines(c, w)
-        drawGuide(c, w, s)
+        drawGuide(c, w, view)
         drawHud(c, w, s, fpsShown)
 
         var exposure = 1.0

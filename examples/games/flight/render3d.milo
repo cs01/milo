@@ -622,7 +622,7 @@ fn normalAt(cc: &City, x: f64, z: f64, t: f64): Vec3 {
     }
 }
 
-pub fn drawWorld(c: &mut Canvas, s: &mut Scene, w: &World, ground: &Texture, skin: &Texture) {
+pub fn drawWorld(c: &mut Canvas, s: &mut Scene, w: &World, ground: &Texture, skin: &Texture, v: &View) {
     if w.city.loaded {
         // The region weather table is a set of moods for invented places. Over a
         // real city the point is to SEE it, so: clear air, fog only far enough
@@ -656,7 +656,6 @@ pub fn drawWorld(c: &mut Canvas, s: &mut Scene, w: &World, ground: &Texture, ski
     if s.fogStart < s.fogEnd * 0.66 {
         s.fogStart = s.fogEnd * 0.66
     }
-    let v = viewOf(w.cam, c.w, c.h)
     sceneClear(s)
     drawSky(c, s, w, v)
     drawClouds(c, s, w, v)
@@ -751,7 +750,7 @@ pub fn drawWorld(c: &mut Canvas, s: &mut Scene, w: &World, ground: &Texture, ski
     drawRings(c, s, w, v)
     drawPlane(c, s, w, v, skin)
     drawBirds(c, s, w, v)
-    drawSparks(c, s, w, v)
+    drawSparks(c, w, v)
 }
 
 // Ground detail. Each terrain tile near the aircraft may carry one prop, placed
@@ -1171,7 +1170,7 @@ fn drawOneTrail(c: &mut Canvas, t: &Vec<Trail>, v: &View) {
 
 // Sparks are camera-facing quads, so they stay visible whatever angle you clear
 // the ring at.
-fn drawSparks(c: &mut Canvas, _s: &mut Scene, w: &World, v: &View) {
+fn drawSparks(c: &mut Canvas, w: &World, v: &View) {
     for i in 0..w.sparks.len {
         let p = toCamera(v, w.sparks[i].x, w.sparks[i].y, w.sparks[i].z)
         if p.z < 1.0 {
@@ -1408,8 +1407,7 @@ fn triT(c: &mut Canvas, s: &mut Scene, v: &View, t: &Texture, p: &Vec<Vec3>, a: 
 
 // A reticle on the next coin, and an edge arrow when it is off screen. Without
 // this the trail is easy to lose the moment you overshoot one.
-pub fn drawGuide(c: &mut Canvas, w: &World, _s: &Scene) {
-    let v = viewOf(w.cam, c.w, c.h)
+pub fn drawGuide(c: &mut Canvas, w: &World, v: &View) {
     // nearest live coin ahead
     var bi = 0 - 1
     var bd = 1.0e18

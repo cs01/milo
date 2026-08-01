@@ -152,18 +152,6 @@ pub struct World {
     level: i64,
     cleared: i64, // rings cleared in total
     toNext: i64, // rings remaining before the country changes
-    // Bumpless transfer for the autopilot. The hoop it aims at changes the
-    // instant one is cleared, so the raw bearing STEPS, and that step went
-    // straight into the yaw rate as a twitch. `aimOff` absorbs the step and
-    // decays it away; `aimPrev` is last frame's raw bearing, which is how the
-    // step is detected without needing a stable identity for a hoop in a
-    // swap-removed Vec.
-    //
-    // An offset that decays, NOT a filter on the target: putting a lag in front
-    // of the controller adds a second pole to a loop that already has one, and
-    // the aircraft hunts left and right the whole way to the hoop.
-    aimOff: f64,
-    aimPrev: f64,
     pathT: f64, // how far along the coin trail we have laid track
     // Trail head. Kept here rather than read off the end of `rings`, which is
     // swap-removed and so does not hold the newest ring last.
@@ -355,8 +343,6 @@ pub fn worldIn(seed: i64, places: Vec<City>, easy: bool): World {
         level: 1,
         cleared: 0,
         toNext: 10,
-        aimOff: 0.0,
-        aimPrev: 0.0,
         pathT: 0.0,
         trailX: 0.0,
         trailZ: 0.0,
@@ -519,17 +505,16 @@ fn autoSteer(w: &mut World, dt: f64) {
         return
     }
     let want = Math.atan2(w.rings[bi].x - w.plane.x, w.rings[bi].z - w.plane.z)
-    // A jump in the bearing means the target changed; roll it into the offset so
-    // the controller's input stays continuous. Ordinary closing motion is a
-    // fraction of a degree per frame and passes straight through, so between
-    // hoops this is exactly the plain proportional controller it always was.
-    let step = wrapPi(want - w.aimPrev)
-    if Math.abs(step) > 0.12 {
-        w.aimOff = wrapPi(w.aimOff - step)
-    }
-    w.aimPrev = want
-    w.aimOff = w.aimOff * Math.pow(0.04, dt)
-    var diff = wrapPi(want + w.aimOff - w.plane.yaw)
+    // Straight proportional control on the raw bearing. There was a "bumpless
+    // transfer" here that absorbed the bearing step at a target change into a
+    // decaying offset, to stop the switch reading as a twitch. It was the twitch:
+    // for the ~0.3s the offset took to decay it told the controller the hoop was
+    // on the side it was NOT on, so the aircraft banked away from every new
+    // target before turning back. Bearing error held at 30-40 degrees the whole
+    // way in and the bank oscillated up to 45 degrees on a four-second period,
+    // growing. The yaw rate is already clamped, so the step it defended against
+    // was never able to become a twitch in the first place.
+    var diff = wrapPi(want - w.plane.yaw)
     w.plane.yaw = w.plane.yaw + Math.clampF64(diff * 1.6, 0.0 - 1.1, 1.1) * dt
     let bank = Math.clampF64(diff * 1.4, 0.0 - 1.1, 1.1)
     w.plane.roll = w.plane.roll + (bank - w.plane.roll) * Math.minF64(1.0, dt * 2.4)
@@ -983,19 +968,26 @@ fn updateTrails(w: &mut World, dt: f64) {
     ageTrail(w.trailR, dt)
 }
 
+// A trail is a path, so it cannot be swap-removed — order IS the data. Compact
+// the survivors forward in one pass instead: removing in place shifted the whole
+// tail down per expiry, and since points expire in roughly the order they were
+// laid, that was very nearly the whole buffer every frame.
+//
+// Not simply dropping a prefix: `life` varies with how hard the aircraft was
+// pulling when the point was laid, so a later point can outlive an earlier one.
 fn ageTrail(t: &mut Vec<Trail>, dt: f64) {
-    var i: i64 = 0
-    while i < t.len {
+    var keep: i64 = 0
+    for i in 0..t.len {
         t[i].life = t[i].life - dt
-        if t[i].life <= 0.0 {
-            // ordered removal: a trail is a path, so it cannot be swap-removed
-            for k in i..t.len - 1 {
-                t[k] = t[k + 1]
+        if t[i].life > 0.0 {
+            if keep != i {
+                t[keep] = t[i]
             }
-            let _ = t.pop()
-        } else {
-            i = i + 1
+            keep = keep + 1
         }
+    }
+    while t.len > keep {
+        let _ = t.pop()
     }
 }
 

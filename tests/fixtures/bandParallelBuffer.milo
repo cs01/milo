@@ -1,0 +1,83 @@
+// Band-parallel writes into ONE shared buffer, which is how a software rasteriser
+// uses more than one core (examples/games/flight/raster.milo).
+//
+// The shape under test: N OS threads each own a disjoint, contiguous range of rows
+// of a single Vec<f32>. A worker cannot be handed a `&mut [f32]` window — second-
+// class references do not cross a thread boundary, and the runtime-`n` `splitMut`
+// that would carve one buffer into `n` of them is unbuilt (docs/roadmap.md) — so
+// the base address rides across as an i64 and the worker re-derives the pointer.
+//
+// The check is the one that matters for a band split: the parallel result must be
+// BIT-IDENTICAL to the serial one. A band boundary that is off by a row shows up
+// as a handful of wrong pixels, which a tolerance-based comparison would pass.
+// @expect: rows 64
+// @expect: identical true
+// @expect: sum 16773120
+
+from "std/runtime" import {
+    Promise
+}
+
+pub let W: i64 = 64
+
+pub let H: i64 = 64
+
+// Position-dependent, so a worker writing the wrong row is a wrong value and not
+// a coincidence.
+fn cell(x: i64, y: i64): f32 {
+    return ((y * W + x) * 2) as f32
+}
+
+fn fillBand(base: i64, y0: i64, y1: i64): i64 {
+    unsafe {
+        let p = base as *f32
+        var y = y0
+        while y < y1 {
+            var x = 0
+            while x < W {
+                p[y * W + x] = cell(x, y)
+                x = x + 1
+            }
+            y = y + 1
+        }
+    }
+    return y1 - y0
+}
+
+pub fn main(): i32 {
+    var serial: Vec<f32> = Vec.filled(W * H, 0.0)
+    let _ = fillBand(serial.ptr() as i64, 0, H)
+
+    var par: Vec<f32> = Vec.filled(W * H, 0.0)
+    let bands: i64 = 8
+    let base = par.ptr() as i64
+    var ps: Vec<Promise<i64>> = Vec.new()
+    for k in 0..bands {
+        // Half-open bands tiling [0,H) exactly: `k*H/bands` is also the band that
+        // owns row y under `y*bands/H`, which is what makes them disjoint.
+        let y0 = k * H / bands
+        let y1 = (k + 1) * H / bands
+        ps.push(Promise<i64>.blocking(move(): i64 => {
+            return fillBand(base, y0, y1)
+        }
+        ))
+    }
+    let counts = Promise.all(ps).await()!
+    var rows = 0
+    for c in counts {
+        rows = rows + c
+    }
+    print("rows " + rows.toString())
+
+    var same = true
+    var total: i64 = 0
+    for i in 0..W * H {
+        if par[i] != serial[i] {
+            same = false
+        }
+        total = total + (par[i] as i64)
+    }
+    print("identical " + same.toString())
+    print("sum " + total.toString())
+    return 0
+}

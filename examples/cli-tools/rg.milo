@@ -20,6 +20,16 @@ from "std/color" import {
 from "std/runtime" import {
     Promise
 }
+from "std/io" import {
+    File
+}
+from "std/os" import {
+    readFd
+}
+
+extern fn memchr(s: *u8, c: i32, n: i64): *u8
+
+extern fn memcmp(s1: *u8, s2: *u8, n: i64): i32
 
 // ── helpers ──
 
@@ -457,23 +467,71 @@ pub struct Hit {
 // reading the whole file anyway, and dropping the buffer only to have the printing
 // pass open and read the same file a second time was pure waste — on a tree where
 // ~15% of files match, that second read is the entire serial tail.
+//
+// Files are read into one buffer that lives for the whole chunk. `readFile` would
+// allocate per file, and its buffer is zero-filled before the read overwrites it —
+// on a 44 MB tree that is 44 MB of memset plus 44 MB of fresh pages to fault in,
+// all to hold bytes for the length of one memchr. A `string` is only built for the
+// files that actually match.
 pub fn scanChunk(paths: Vec<string>, pat: string): Vec<Hit> {
     var hits: Vec<Hit> = Vec.new()
+    var buf: Vec<u8> = Vec.filled(262144, 0)
     for i in 0..paths.len {
-        match readFile(paths[i]) {
-            Result.Ok(data) => {
-                if data.contains(pat) {
-                    hits.push(Hit {
-                        path: paths[i].clone(), content: data
-                    }
-                    )
+        let Result.Ok(f) = File.openRead(paths[i]) else {
+            continue
+        }
+        let size = f.size()
+        if size < pat.len || size > 1073741824 {
+            continue
+        }
+        if size > buf.len {
+            buf = Vec.filled(size, 0)
+        }
+        var got: i64 = 0
+        unsafe {
+            let base = buf.ptr() as i64
+            while got < size {
+                let n = readFd(f.fd, (base + got) as *u8, size - got)
+                if n <= 0 {
+                    break
                 }
+                got = got + n
             }
-            Result.Err(_) => {
+            if memmemHit(base, got, pat) {
+                hits.push(Hit {
+                    path: paths[i].clone(), content: _bytesToString(base as *u8, got)
+                }
+                )
             }
         }
     }
     return hits
+}
+
+// memchr for the first byte, memcmp to verify the rest — the shape of ripgrep's
+// fallback prefilter, and both calls are the platform's vectorised libc ones.
+pub fn memmemHit(base: i64, size: i64, pat: &string): bool {
+    let plen = pat.len
+    if plen == 0 {
+        return true
+    }
+    unsafe {
+        let np = pat.cstr()
+        let c0 = pat[0] as i32
+        var pos: i64 = 0
+        while pos + plen <= size {
+            let hit = memchr((base + pos) as *u8, c0, size - pos - plen + 1) as i64
+            if hit == 0 {
+                return false
+            }
+            let idx = hit - base
+            if memcmp((base + idx) as *u8, np, plen) == 0 {
+                return true
+            }
+            pos = idx + 1
+        }
+    }
+    return false
 }
 
 // Literal search over a directory, in parallel.

@@ -140,29 +140,14 @@ pub fn isPlainLiteral(pat: &string): bool {
         if byte == 36 || byte == 92 {
             return false
         }
+        // A newline in the pattern would let a whole-buffer match straddle two lines,
+        // which the literal path's "one match per line" bookkeeping cannot express.
+        // The regex path cannot match it either — it searches line by line.
+        if byte == 10 {
+            return false
+        }
     }
     return true
-}
-
-// Every occurrence of a literal in a line, as match spans. Length-bounded, so it
-// is safe on a `&string` view; `Regex` is not (see searchFile).
-pub fn literalMatches(line: &string, pat: &string): Vec<RegexMatch> {
-    var out: Vec<RegexMatch> = Vec.new()
-    if pat.len == 0 {
-        return out
-    }
-    var from: i64 = 0
-    while from + pat.len <= line.len {
-        let Option.Some(at) = line.indexOfFrom(pat, from) else {
-            break
-        }
-        out.push(RegexMatch {
-            start: at, end: at + pat.len
-        }
-        )
-        from = at + pat.len
-    }
-    return out
 }
 
 pub fn getMatches(re: &mut Regex, line: &string, wordBound: bool): Vec<RegexMatch> {
@@ -248,51 +233,93 @@ pub fn searchContent(content: &string, filePath: &string, re: &mut Regex, opts: 
         return
     }
 
-    // `split` hands back an owned copy of every line — a second copy of the whole
-    // file, plus one allocation per line, before a single byte has been matched.
-    // With no context to print, nothing needs to look backwards, so the lines can
-    // be borrowed straight out of the buffer instead. `lines()` yields `&string`
-    // views, which is why this path allocates nothing per line.
-    // Literal pattern, no context to print: the lines can be borrowed straight out
-    // of the file buffer instead of copied.
+    // Literal pattern, no context to print: search the file buffer, not its lines.
     //
-    // Restricted to the literal matcher on purpose. `lines()` yields `&string`
-    // VIEWS, which are not NUL-terminated — they point into the middle of the
-    // buffer. `Regex.findAll` reaches C through `.cstr()`, so handed a view it
-    // happily matches on past the view's end and reports offsets from the rest of
-    // the file. `contains`/`indexOfFrom` are length-bounded (memchr + memcmp) and
-    // are safe on a view.
+    // Visiting every line to ask "does it match" costs a scan and a `Vec` per line —
+    // 200k of each on this tree — to reject ~99% of them. Searching the whole buffer
+    // instead means one memchr walk that lands directly on the next match and never
+    // touches the bytes of a line that has none. Lines are only reconstructed around
+    // the matches that survive, which is what makes this a scan of the ~1% rather
+    // than a scan of everything.
+    //
+    // `isPlainLiteral` rejects a pattern containing a newline, so a match is always
+    // contained in one line and `lineEnd` below is always past it.
     if opts.literal && !opts.invert && opts.beforeCtx == 0 && opts.afterCtx == 0 && !opts.filesOnly {
         var matchCountF: i64 = 0
         var headerPrintedF: bool = false
+        // The newline walk is what locates the start of the matching line, so it is
+        // needed by anything that prints the line — but -c prints only a tally, and
+        // skips it entirely.
+        let needLineNo = !opts.countOnly
         var lineNo: i64 = 0
-        for line in content.lines() {
-            let matchesF = literalMatches(line, opts.pattern)
-            let isMatchF = matchesF.len > 0
-            if isMatchF {
-                matchCountF = matchCountF + 1
-                if !opts.countOnly {
-                    if !headerPrintedF && multiFile && !opts.noHeading {
-                        if opts.needsSeparator {
-                            print("")
-                        }
-                        if opts.noColor {
-                            print(filePath)
-                        } else {
-                            print(Color.magenta(filePath))
-                        }
-                        headerPrintedF = true
-                        opts.needsSeparator = true
+        var lineStart: i64 = 0
+        var pos: i64 = 0
+        let plen = opts.pattern.len
+        while true {
+            let Option.Some(at) = content.indexOfFrom(opts.pattern, pos) else {
+                break
+            }
+            // Walk forward to the line holding this match. lineStart never moves
+            // backwards, so across the whole file this visits each newline once.
+            if needLineNo {
+                while true {
+                    let Option.Some(nl) = content.indexOfFrom("\n", lineStart) else {
+                        break
                     }
-                    let hlF = highlightLine(line, matchesF, opts.noColor || opts.invert)
-                    print(formatLine(hlF, lineNo, true, filePath, multiFile, opts))
-                }
-                if opts.maxCount > 0 && matchCountF >= opts.maxCount {
+                    if nl >= at {
+                        break
+                    }
+                    lineStart = nl + 1
                     lineNo = lineNo + 1
-                    break
                 }
             }
-            lineNo = lineNo + 1
+            var lineEnd = content.len
+            if let Option.Some(nl) = content.indexOfFrom("\n", at) {
+                lineEnd = nl
+            }
+
+            matchCountF = matchCountF + 1
+            if !opts.countOnly {
+                if !headerPrintedF && multiFile && !opts.noHeading {
+                    if opts.needsSeparator {
+                        print("")
+                    }
+                    if opts.noColor {
+                        print(filePath)
+                    } else {
+                        print(Color.magenta(filePath))
+                    }
+                    headerPrintedF = true
+                    opts.needsSeparator = true
+                }
+                // Every occurrence on this line, as offsets within the line.
+                var lineMatches: Vec<RegexMatch> = Vec.new()
+                var m = at
+                while m + plen <= lineEnd {
+                    let Option.Some(mm) = content.indexOfFrom(opts.pattern, m) else {
+                        break
+                    }
+                    if mm + plen > lineEnd {
+                        break
+                    }
+                    lineMatches.push(RegexMatch {
+                        start: mm - lineStart, end: mm + plen - lineStart
+                    }
+                    )
+                    m = mm + plen
+                }
+                let lineText = content.substr(lineStart, lineEnd)
+                let hlF = highlightLine(lineText, lineMatches, opts.noColor || opts.invert)
+                print(formatLine(hlF, lineNo, true, filePath, multiFile, opts))
+            }
+            if opts.maxCount > 0 && matchCountF >= opts.maxCount {
+                break
+            }
+            // One match per line: resume past this line entirely.
+            pos = lineEnd + 1
+            if pos > content.len {
+                break
+            }
         }
         if opts.countOnly && matchCountF > 0 {
             if multiFile {

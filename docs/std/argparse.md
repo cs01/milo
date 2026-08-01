@@ -103,6 +103,15 @@ Parse from a provided argument list instead of process args.
 argv[0] is treated as the program name (skipped during parsing).
 Like Python's parse_args(args=[...]).
 
+### `ArgParser.setEpilog`
+
+```milo
+fn ArgParser.setEpilog(self: &mut ArgParser, text: string): void
+```
+
+Text printed at the end of --help, after the options.
+Example: parser.setEpilog("controls:\n  UP / DOWN   pitch")
+
 ### `ParsedArgs.getBool`
 
 ```milo

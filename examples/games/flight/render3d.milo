@@ -710,13 +710,28 @@ pub fn drawWorld(c: &mut Canvas, s: &mut Scene, w: &World, ground: &Texture, ski
             let v0 = z0 * uvs
             let u1 = x1 * uvs
             let v1 = z1 * uvs
-            let a = vtxC(x0, k00.h, z0, u0, v0, k00.lt, k00.r, k00.g, k00.b, k00.tw)
-            let b = vtxC(x1, k10.h, z0, u1, v0, k10.lt, k10.r, k10.g, k10.b, k10.tw)
-            let d = vtxC(x0, k01.h, z1, u0, v1, k01.lt, k01.r, k01.g, k01.b, k01.tw)
-            let e = vtxC(x1, k11.h, z1, u1, v1, k11.lt, k11.r, k11.g, k11.b, k11.tw)
+            // The detail texture dissolves over the last rings before the draw
+            // switches to the untextured path, so by the time it switches the
+            // texture is contributing nothing and there is nothing to see. It
+            // used to stop dead, drawing a line across the ground at a fixed
+            // distance — the texture cutoff was visible as a texture cutoff.
+            var texFade = 1.0
+            if ring >= 7 {
+                texFade = (11.0 - (ring as f64)) / 4.0
+                if texFade < 0.0 {
+                    texFade = 0.0
+                }
+            }
+            let a = vtxC(x0, k00.h, z0, u0, v0, k00.lt, k00.r, k00.g, k00.b, k00.tw * texFade)
+            let b = vtxC(x1, k10.h, z0, u1, v0, k10.lt, k10.r, k10.g, k10.b, k10.tw * texFade)
+            let d = vtxC(x0, k01.h, z1, u0, v1, k01.lt, k01.r, k01.g, k01.b, k01.tw * texFade)
+            let e = vtxC(x1, k11.h, z1, u1, v1, k11.lt, k11.r, k11.g, k11.b, k11.tw * texFade)
             // Texture only what is close enough to see. Distant quads are many,
             // small, and deep in fog — they take the cheaper untextured path,
             // which still interpolates colour so the far field stays smooth.
+            // The cutoff sits past where the fog has taken most of the contrast
+            // out; nearer than that it was a visible line across the ground
+            // where the detail simply stopped.
             if ring < 11 {
                 triangleV(c, s, v, ground, a, d, b, 1.0, 1.0, 1.0)
                 triangleV(c, s, v, ground, b, d, e, 1.0, 1.0, 1.0)
@@ -783,7 +798,7 @@ fn box3(c: &mut Canvas, s: &mut Scene, v: &View, cx: f64, y0: f64, y1: f64, cz: 
 }
 
 fn cone3(c: &mut Canvas, s: &mut Scene, v: &View, cx: f64, y0: f64, y1: f64, cz: f64, rad: f64, col: &Rgb) {
-    let segs = 6
+    let segs = 10
     let step = TAU / (segs as f64)
     let apex = v3(cx, y1, cz)
     for k in 0..segs {
@@ -806,7 +821,7 @@ fn cone3(c: &mut Canvas, s: &mut Scene, v: &View, cx: f64, y0: f64, y1: f64, cz:
 // rasteriser backface-culls and a frond has to be visible from underneath.
 // Twelve triangles a palm, half what the two cones cost.
 fn palmCrown(c: &mut Canvas, s: &mut Scene, v: &View, crown: &Vec3, reach: f64, droop: f64, col: &Rgb) {
-    let fronds = 6
+    let fronds = 9
     let step = TAU / (fronds as f64)
     for k in 0..fronds {
         let a = (k as f64) * step
@@ -958,10 +973,10 @@ fn drawCity(c: &mut Canvas, s: &mut Scene, w: &World, v: &View) {
                         // they cost as much as the towers and show nothing.
                         let hgt = w.city.bHeight[b]
                         let d = Math.sqrt(d2) + 1.0
-                        if hgt / d < 0.011 {
+                        if hgt / d < 0.0055 {
                             continue
                         }
-                        prism(c, s, w, v, px, pz, b, kx, kz, reach, reversed, midX, midZ, d > 420.0)
+                        prism(c, s, w, v, px, pz, b, kx, kz, reach, reversed, midX, midZ, d > 780.0)
                     }
                 }
             }
@@ -1079,7 +1094,7 @@ fn prism(c: &mut Canvas, s: &mut Scene, w: &World, v: &View, px: &mut Vec<f64>, 
 // you can see which way to be pointing when you reach it. Cleared rings expand
 // and fade instead of vanishing.
 fn drawRings(c: &mut Canvas, s: &mut Scene, w: &World, v: &View) {
-    let segs = 14
+    let segs = 22
     let tube = 5.0
     for i in 0..w.rings.len {
         var rad = w.rings[i].r
@@ -1340,7 +1355,7 @@ fn drawPlane(c: &mut Canvas, s: &mut Scene, w: &World, v: &View, skin: &Texture)
             off2 = 0.0 - 4.0
         }
         var bay: Vec<Vec3> = Vec.new()
-        let segs2 = 8
+        let segs2 = 12
         let stepA = TAU / (segs2 as f64)
         for j in 0..segs2 {
             let a0 = (j as f64) * stepA

@@ -94,8 +94,9 @@ canopy — built from body-space `(forward, right, up)` offsets so the shape is 
 to read and to change.
 
 Everything renders on the CPU into the same HDR float canvas the 2D games use; SDL
-only blits the finished frame. **1280×720 at ~50 fps**, around 1,200 triangles a
-frame after culling.
+only blits the finished frame. **1280×720 at 30–50 fps** over a real city —
+~12,000 triangles a frame after culling, and about 900,000 pixels shaded, which is
+where the time actually goes. One core: the rasteriser is not threaded yet.
 
 ## Sound
 

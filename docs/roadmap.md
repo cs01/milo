@@ -33,7 +33,7 @@ Primitive types, `let`/`var`, if/else, while/for, functions, structs, enums with
 - **Ranged integers (L1+L2)**: `type Altitude = i32(0..50000)`, range propagation through arithmetic
 - **Off-by-default warnings** promotable with `--deny=`: `unused-move`, `unused-import`, `unverified-extern`, `large-stack-array`
 
-See [safety-roadmap.md](safety-roadmap.md) for the enforced-vs-remaining breakdown and the explicit trust boundaries; [memory-safety-vs-rust.md](memory-safety-vs-rust.md) for the 13-probe battle test (0 UB misses **on those probes** — that is the scope of the claim, not a general one; one hole is open outside them, the indirect closure escape under Safety Hardening below).
+See [safety-roadmap.md](safety-roadmap.md) for the enforced-vs-remaining breakdown and the explicit trust boundaries; [memory-safety-vs-rust.md](memory-safety-vs-rust.md) for the 13-probe battle test (0 UB misses **on those probes** — that is the scope of the claim, not a general one; one narrow hole is open outside them, the arg-then-stored closure escape under Safety Hardening below).
 
 ### Contracts & Proving
 
@@ -194,7 +194,8 @@ Phases 1–3a are done (see Type System & Safety). Remaining, from [safety-roadm
 - [ ] **3b — purity inference** for safe overlap at call sites
 - [ ] **4a — debug ref counting** for patterns static analysis can't reach (`--sanitize` already links ASAN)
 - [ ] **`unsafe fn` declarations** and `--deny-unsafe` for user code; `unsafe` visibility in the LSP
-- [ ] **Indirect closure escape — the one known UB hole reachable without `unsafe`.** A closure stored into a struct/Vec that is then returned reads the dead frame: silent garbage at `--debug`, a hang at `-O2`/`--release`, and ASAN misses it on macOS (dead *stack* frame). The direct-return forms are auto-promoted to `move` and are correct. Audit C3's open tail; decided fix is a conservative reject replacing the silent promotion (backlog Tier 1 #4)
+- [x] **Closure escape — the direct store.** A non-`move` closure with captures can no longer be written into a struct literal, an array literal, or `push`/`insert`/`set` on a collection; `move` heap-owns the captures and is what the diagnostic points at. Closes the use-after-return that read a dead stack frame (silent garbage at `--debug`, a hang at `-O2`, invisible to ASAN)
+- [ ] **Closure escape — the arg-then-stored residual.** `let f = <closure>; wrap(f)` where the callee stores `f` still dangles: a closure *literal* passed to an owned `fn` param is auto-`move`d, an Ident is not. Needs a callee-retains property rather than a wider promotion (backlog Tier 1 #4)
 
 ---
 

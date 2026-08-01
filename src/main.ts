@@ -65,8 +65,8 @@ function frontendToHIR(source: string, target: TargetInfo, filePath?: string, wa
   return lower(program, result, sourceDir, target.os);
 }
 
-function compile(source: string, target: TargetInfo, filePath?: string, warningConfig?: WarningConfig, trapOnOverflow = false, emitDebug = false, contractChecks = false): string {
-  return compileWithGuards(source, target, filePath, warningConfig, trapOnOverflow, emitDebug, contractChecks).ir;
+function compile(source: string, target: TargetInfo, filePath?: string, warningConfig?: WarningConfig, trapOnOverflow = false, emitDebug = false, contractChecks = false, stripPanicLocations = false): string {
+  return compileWithGuards(source, target, filePath, warningConfig, trapOnOverflow, emitDebug, contractChecks, stripPanicLocations).ir;
 }
 
 // Parse + resolve imports + type-check, rendering ParseErrors as clean Elm-style
@@ -94,9 +94,9 @@ function parseCheckProgram(src: string, target: TargetInfo, filePath: string, wa
 // `cGuards` is the `@cLayout`/`@cSig` verification TU (null when the program declares
 // neither) — see Codegen.cDeclGuards. It rides alongside the IR because only codegen
 // knows the field offsets and return widths it asserts.
-function compileWithGuards(source: string, target: TargetInfo, filePath?: string, warningConfig?: WarningConfig, trapOnOverflow = false, emitDebug = false, contractChecks = false): { ir: string; cGuards: string | null; linkLibs: string[] } {
+function compileWithGuards(source: string, target: TargetInfo, filePath?: string, warningConfig?: WarningConfig, trapOnOverflow = false, emitDebug = false, contractChecks = false, stripPanicLocations = false): { ir: string; cGuards: string | null; linkLibs: string[] } {
   const hirModule = frontendToHIR(source, target, filePath, warningConfig);
-  const cg = new Codegen(target, filePath, trapOnOverflow, emitDebug, contractChecks);
+  const cg = new Codegen(target, filePath, trapOnOverflow, emitDebug, contractChecks, stripPanicLocations);
   const ir = cg.generate(hirModule);
   return { ir, cGuards: cg.cDeclGuards(), linkLibs: hirModule.linkLibs ?? [] };
 }
@@ -212,9 +212,9 @@ function compileToJS(source: string, target: TargetInfo, filePath?: string, warn
   return new CodegenJS().generate(hirModule);
 }
 
-function compileToIr(sourcePath: string, outputPath: string | null, target: TargetInfo, warningConfig?: WarningConfig, trapOnOverflow = false, emitDebug = false, contractChecks = false) {
+function compileToIr(sourcePath: string, outputPath: string | null, target: TargetInfo, warningConfig?: WarningConfig, trapOnOverflow = false, emitDebug = false, contractChecks = false, stripPanicLocations = false) {
   const source = readFileSync(sourcePath, "utf-8");
-  const ir = compile(source, target, sourcePath, warningConfig, trapOnOverflow, emitDebug, contractChecks);
+  const ir = compile(source, target, sourcePath, warningConfig, trapOnOverflow, emitDebug, contractChecks, stripPanicLocations);
   if (outputPath) {
     writeFileSync(outputPath, ir);
     console.log(`wrote ${outputPath}`);
@@ -712,7 +712,7 @@ function detectLibs(ir: string, target: TargetInfo, staticDeps = false): string 
   return libs;
 }
 
-function compileToBinary(sourcePath: string, outputPath: string | null, target: TargetInfo, optFlag: string = "", warningConfig?: WarningConfig, extraLinkFlags: string[] = [], sanitize: boolean = false, emitDebug = false, heapSize: number | null = null, forceOverflowChecks: boolean | null = null, staticDeps = false, forceContractChecks: boolean | null = null): string {
+function compileToBinary(sourcePath: string, outputPath: string | null, target: TargetInfo, optFlag: string = "", warningConfig?: WarningConfig, extraLinkFlags: string[] = [], sanitize: boolean = false, emitDebug = false, heapSize: number | null = null, forceOverflowChecks: boolean | null = null, staticDeps = false, forceContractChecks: boolean | null = null, stripPanicLocations = false): string {
   const source = readFileSync(sourcePath, "utf-8");
   // Arithmetic (+ - * -x) traps on overflow in EVERY build mode — the language law is
   // "every op is total; wrapping is opt-in" (Swift/Zig-safe model, not Rust's mode-flip).
@@ -728,7 +728,7 @@ function compileToBinary(sourcePath: string, outputPath: string | null, target: 
   // DWARF is gated on -g alone (compose `-g --debug` for -O0 + line info). Keeping it
   // off --debug leaves the -O0 path — used by the runtime-error test harness — byte
   // -identical and free of per-build dsymutil / .dSYM litter.
-  const { ir, cGuards, linkLibs } = compileWithGuards(source, target, sourcePath, warningConfig, trapOnOverflow, emitDebug, contractChecks);
+  const { ir, cGuards, linkLibs } = compileWithGuards(source, target, sourcePath, warningConfig, trapOnOverflow, emitDebug, contractChecks, stripPanicLocations);
   verifyCDecls(cGuards, target, linkLibs);
   const base = basename(sourcePath).replace(/\.milo$/, "");
   const id = crypto.randomUUID().slice(0, 8);
@@ -954,7 +954,7 @@ function parseHeapSize(s: string): number | null {
   return n * mult;
 }
 
-function parseArgs(args: string[]): { output: string | null; source: string | null; rest: string[]; optFlag: string; warningConfig: WarningConfig; noEntry: boolean; safetyLevel: string | null; sanitize: boolean; targetName: string | null; emitHeader: boolean; emitDebug: boolean; heapSize: number | null; overflowChecks: boolean | null; contractChecks: boolean | null; staticDeps: boolean; emitAll: boolean; emitSpans: boolean } {
+function parseArgs(args: string[]): { output: string | null; source: string | null; rest: string[]; optFlag: string; warningConfig: WarningConfig; noEntry: boolean; safetyLevel: string | null; sanitize: boolean; targetName: string | null; emitHeader: boolean; emitDebug: boolean; heapSize: number | null; overflowChecks: boolean | null; contractChecks: boolean | null; staticDeps: boolean; emitAll: boolean; emitSpans: boolean; stripPanicLocations: boolean } {
   let output: string | null = null;
   let source: string | null = null;
   let optFlag = "-O2";
@@ -972,6 +972,7 @@ function parseArgs(args: string[]): { output: string | null; source: string | nu
   let maxStackArrayBytes: number | undefined;
   let overflowChecks: boolean | null = null;
   let contractChecks: boolean | null = null;
+  let stripPanicLocations = false;
   // emit-ast / emit-hir dump controls. Parsed here (not left to fall through) because an
   // unrecognized `--flag` would otherwise be swallowed as the source-file positional below.
   let emitAll = false;
@@ -991,6 +992,7 @@ function parseArgs(args: string[]): { output: string | null; source: string | nu
     else if (args[i] === "--static-deps") { staticDeps = true; }
     else if (args[i] === "--overflow-checks") { overflowChecks = true; }
     else if (args[i] === "--no-overflow-checks") { overflowChecks = false; }
+    else if (args[i] === "--strip-panic-locations") { stripPanicLocations = true; }
     else if (args[i] === "--contract-checks") { contractChecks = true; }
     else if (args[i] === "--no-contract-checks") { contractChecks = false; }
     else if (args[i] === "--emit-header") { emitHeader = true; }
@@ -1023,7 +1025,7 @@ function parseArgs(args: string[]): { output: string | null; source: string | nu
     else if (!source) { source = args[i]; }
     else { rest.push(args[i]); }
   }
-  return { output, source, rest, optFlag, warningConfig: { denied, allowed, maxStackArrayBytes }, noEntry, safetyLevel, sanitize, targetName, emitHeader, emitDebug, heapSize, overflowChecks, contractChecks, staticDeps, emitAll, emitSpans };
+  return { output, source, rest, optFlag, warningConfig: { denied, allowed, maxStackArrayBytes }, noEntry, safetyLevel, sanitize, targetName, emitHeader, emitDebug, heapSize, overflowChecks, contractChecks, staticDeps, emitAll, emitSpans, stripPanicLocations };
 }
 
 const SKILL_TEXT = `# Milo Language Guide
@@ -1486,6 +1488,7 @@ async function main() {
     console.log("  --no-overflow-checks  wrap on +/-/* overflow at any -O (opt out of the default traps)");
     console.log("  --contract-checks     assert requires/ensures/invariant at any -O (default: only --debug)");
     console.log("  --no-contract-checks  drop those asserts at any -O (e.g. fast -O0 builds)");
+    console.log("  --strip-panic-locations  blank source paths out of runtime panic messages (-g still embeds them)");
     console.log("  --fast                quick edit-loop build: -O0, wrapping (~2x faster compile)");
     console.log("  --deny=<warning>       treat warning as error (e.g. --deny=unused-variable)");
     console.log("  --allow=<warning>      suppress warning (e.g. --allow=unused-result)");
@@ -1611,7 +1614,7 @@ async function main() {
     return;
   }
 
-  const { output, source, rest, optFlag, warningConfig, noEntry, safetyLevel, sanitize, targetName, emitHeader, emitDebug, heapSize, overflowChecks, contractChecks, staticDeps, emitAll, emitSpans } = parseArgs(args.slice(1));
+  const { output, source, rest, optFlag, warningConfig, noEntry, safetyLevel, sanitize, targetName, emitHeader, emitDebug, heapSize, overflowChecks, contractChecks, staticDeps, emitAll, emitSpans, stripPanicLocations } = parseArgs(args.slice(1));
   let target = getHostTarget();
   if (targetName) {
     const resolved = resolveTarget(targetName);
@@ -1761,7 +1764,7 @@ async function main() {
     await runFile(source!, rest, target, optFlag, warningConfig, sanitize, emitDebug, heapSize, overflowChecks, contractChecks);
   } else if (cmd === "build") {
     const t0 = Date.now();
-    const bin = compileToBinary(source!, output, target, optFlag, warningConfig, rest, sanitize, emitDebug, heapSize, overflowChecks, staticDeps, contractChecks);
+    const bin = compileToBinary(source!, output, target, optFlag, warningConfig, rest, sanitize, emitDebug, heapSize, overflowChecks, staticDeps, contractChecks, stripPanicLocations);
     reportCompiled(source!, bin, Date.now() - t0);
   } else if (cmd === "emit-ast") {
     emitAst(source!, output, target, emitAll, emitSpans);
@@ -1770,7 +1773,7 @@ async function main() {
   } else if (cmd === "emit-ir") {
     const trapOnOverflow = overflowChecks ?? true;
     const emitContractChecks = contractChecks ?? (optFlag === "-O0");
-    compileToIr(source!, output, target, warningConfig, trapOnOverflow, emitDebug, emitContractChecks);
+    compileToIr(source!, output, target, warningConfig, trapOnOverflow, emitDebug, emitContractChecks, stripPanicLocations);
   } else if (cmd === "emit-obj") {
     const t0 = Date.now();
     const obj = compileToObj(source!, output, target, optFlag, warningConfig, noEntry, overflowChecks, contractChecks);

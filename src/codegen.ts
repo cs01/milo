@@ -195,17 +195,23 @@ export class Codegen {
   // DILocalVariables of the function being emitted; null while a closure/trampoline
   // body is generated so its locals are never mis-scoped (the final pass also strips
   // any dbg.declare that lands in a subprogram-less function as a backstop).
+  // Blank the source path out of every runtime panic message. In a binary shipped to
+  // people who will never hold the source, the path describes the build machine's
+  // filesystem and nothing else. Line numbers stay: alone they identify nothing, and
+  // they are all that is left to correlate a user-reported panic against.
+  private stripPanicLocations = false;
   private currentSubprogramId: number | null = null;
   private currentSubprogramFileId = 0;
   private usedDbgDeclare = false;
   private diTypes = new Map<string, number>();
 
-  constructor(target: TargetInfo, filePath?: string, trapOnOverflow = false, emitDebug = false, contractChecks = false) {
+  constructor(target: TargetInfo, filePath?: string, trapOnOverflow = false, emitDebug = false, contractChecks = false, stripPanicLocations = false) {
     this.target = target;
     this.filePath = filePath;
     this.trapOnOverflow = trapOnOverflow;
     this.emitDebug = emitDebug;
     this.contractChecks = contractChecks;
+    this.stripPanicLocations = stripPanicLocations;
   }
 
   // The MSVC CRT is not POSIX: the byte-level I/O the print builtins lower to has
@@ -2495,6 +2501,7 @@ export class Codegen {
   // the way the author would type it: relative to the working directory, or `std/x.milo`
   // for a stdlib file. DWARF paths are deliberately left absolute; a debugger needs those.
   private displayPath(file: string): string {
+    if (this.stripPanicLocations) return "<stripped>";
     if (!isAbsolute(file)) return file;
     for (const base of [process.cwd(), STDLIB_DIR]) {
       const rel = relative(base, file);

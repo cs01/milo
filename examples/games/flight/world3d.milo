@@ -119,45 +119,145 @@ pub struct Mark {
 // between every pair of hoops.
 pub fn marksFor(cityName: &string): Vec<Mark> {
     var m: Vec<Mark> = Vec.new()
-    if cityName != "San Francisco" {
+    if cityName == "San Francisco" {
+        m.push(Mark {
+            name: "SALESFORCE TOWER", x: 1126.0, z: 412.0
+        }
+        )
+        m.push(Mark {
+            name: "ORACLE PARK", x: 1821.0, z: 0.0 - 824.0
+        }
+        )
+        m.push(Mark {
+            name: "BAY BRIDGE", x: 2833.0, z: 1369.0
+        }
+        )
+        m.push(Mark {
+            name: "TRANSAMERICA PYRAMID", x: 633.0, z: 1024.0
+        }
+        )
+        m.push(Mark {
+            name: "COIT TOWER", x: 370.0, z: 1826.0
+        }
+        )
+        m.push(Mark {
+            name: "ALCATRAZ", x: 0.0 - 1144.0, z: 4564.0
+        }
+        )
+        m.push(Mark {
+            name: "GOLDEN GATE BRIDGE", x: 0.0 - 6009.0, z: 3774.0
+        }
+        )
+        m.push(Mark {
+            name: "PALACE OF FINE ARTS", x: 0.0 - 3378.0, z: 1881.0
+        }
+        )
+        m.push(Mark {
+            name: "TWIN PEAKS", x: 0.0 - 3317.0, z: 0.0 - 3518.0
+        }
+        )
         return m
     }
-    m.push(Mark {
-        name: "SALESFORCE TOWER", x: 1126.0, z: 412.0
+    if cityName == "Manhattan" {
+        m.push(Mark {
+            name: "CENTRAL PARK", x: 1062.0, z: 2772.0
+        }
+        )
+        m.push(Mark {
+            name: "ROCKEFELLER CENTER", x: 0.0 - 59.0, z: 78.0
+        }
+        )
+        m.push(Mark {
+            name: "TIMES SQUARE", x: 0.0 - 632.0, z: 0.0
+        }
+        )
+        m.push(Mark {
+            name: "CHRYSLER BUILDING", x: 211.0, z: 0.0 - 712.0
+        }
+        )
+        m.push(Mark {
+            name: "EMPIRE STATE BUILDING", x: 0.0 - 649.0, z: 0.0 - 1069.0
+        }
+        )
+        m.push(Mark {
+            name: "FLATIRON BUILDING", x: 0.0 - 987.0, z: 0.0 - 1881.0
+        }
+        )
+        m.push(Mark {
+            name: "ONE WORLD TRADE", x: 0.0 - 2985.0, z: 0.0 - 5043.0
+        }
+        )
+        m.push(Mark {
+            name: "BROOKLYN BRIDGE", x: 0.0 - 1594.0, z: 0.0 - 5778.0
+        }
+        )
+        return m
     }
-    )
-    m.push(Mark {
-        name: "ORACLE PARK", x: 1821.0, z: 0.0 - 824.0
+    // Natural country works exactly the same way: a landmark is a named thing
+    // you go and look at, and a granite dome is a better subject than most
+    // buildings. Only the nouns change.
+    if cityName == "Yosemite Valley" {
+        m.push(Mark {
+            name: "YOSEMITE FALLS", x: 0.0 - 343.0, z: 1291.0
+        }
+        )
+        m.push(Mark {
+            name: "NORTH DOME", x: 3389.0, z: 1981.0
+        }
+        )
+        m.push(Mark {
+            name: "HALF DOME", x: 5264.0, z: 111.0
+        }
+        )
+        m.push(Mark {
+            name: "GLACIER POINT", x: 1769.0, z: 0.0 - 1948.0
+        }
+        )
+        m.push(Mark {
+            name: "SENTINEL DOME", x: 572.0, z: 0.0 - 2438.0
+        }
+        )
+        m.push(Mark {
+            name: "CATHEDRAL ROCKS", x: 0.0 - 3565.0, z: 0.0 - 2905.0
+        }
+        )
+        m.push(Mark {
+            name: "BRIDALVEIL FALL", x: 0.0 - 4745.0, z: 0.0 - 3161.0
+        }
+        )
+        m.push(Mark {
+            name: "EL CAPITAN", x: 0.0 - 3952.0, z: 0.0 - 1225.0
+        }
+        )
+        return m
     }
-    )
-    m.push(Mark {
-        name: "BAY BRIDGE", x: 2833.0, z: 1369.0
+    if cityName == "Grand Canyon" {
+        m.push(Mark {
+            name: "MATHER POINT", x: 603.0, z: 0.0 - 935.0
+        }
+        )
+        m.push(Mark {
+            name: "YAVAPAI POINT", x: 0.0 - 423.0, z: 0.0 - 401.0
+        }
+        )
+        m.push(Mark {
+            name: "INDIAN GARDEN", x: 0.0 - 2564.0, z: 668.0
+        }
+        )
+        m.push(Mark {
+            name: "PLATEAU POINT", x: 0.0 - 2429.0, z: 1625.0
+        }
+        )
+        m.push(Mark {
+            name: "BRIGHT ANGEL TRAILHEAD", x: 0.0 - 2573.0, z: 0.0 - 1403.0
+        }
+        )
+        m.push(Mark {
+            name: "GRAND CANYON VILLAGE", x: 0.0 - 2258.0, z: 0.0 - 1737.0
+        }
+        )
+        return m
     }
-    )
-    m.push(Mark {
-        name: "TRANSAMERICA PYRAMID", x: 633.0, z: 1024.0
-    }
-    )
-    m.push(Mark {
-        name: "COIT TOWER", x: 370.0, z: 1826.0
-    }
-    )
-    m.push(Mark {
-        name: "ALCATRAZ", x: 0.0 - 1144.0, z: 4564.0
-    }
-    )
-    m.push(Mark {
-        name: "GOLDEN GATE BRIDGE", x: 0.0 - 6009.0, z: 3774.0
-    }
-    )
-    m.push(Mark {
-        name: "PALACE OF FINE ARTS", x: 0.0 - 3378.0, z: 1881.0
-    }
-    )
-    m.push(Mark {
-        name: "TWIN PEAKS", x: 0.0 - 3317.0, z: 0.0 - 3518.0
-    }
-    )
     return m
 }
 
@@ -221,7 +321,9 @@ pub struct World {
     // with no landmarks, which puts layRing back on the wandering sine.
     marks: Vec<Mark>,
     markIdx: i64,
-    markName: string, // what the course is heading for, for the HUD
+    markName: string, // the landmark currently being sought
+    markDist: f64, // metres to it, for the HUD
+    markFound: i64, // how many have been reached this visit
     pathT: f64, // how far along the coin trail we have laid track
     // Trail head. Kept here rather than read off the end of `rings`, which is
     // swap-removed and so does not hold the newest ring last.
@@ -416,6 +518,8 @@ pub fn worldIn(seed: i64, places: Vec<City>, easy: bool): World {
         marks: Vec.new(),
         markIdx: 0,
         markName: "",
+        markDist: 0.0,
+        markFound: 0,
         pathT: 0.0,
         trailX: 0.0,
         trailZ: 0.0,
@@ -763,20 +867,23 @@ pub fn worldUpdate(w: &mut World, dt: f64, inRoll: f64, inPitch: f64, boost: boo
     // Arcade flight: roll banks the aircraft, and a banked aircraft turns. Pitch
     // is direct. Both self-centre, so letting go levels you out.
     // Roll is rate-controlled and self-centres, so letting go rolls wings-level.
-    if w.easy {
-        autoSteer(w, dt)
-    } else {
-        w.plane.roll = w.plane.roll + (inRoll * 3.0 - w.plane.roll * 3.0) * dt
-        w.plane.roll = Math.clampF64(w.plane.roll, 0.0 - 1.25, 1.25)
-    }
+    // Free flight. The autopilot flew the course for you, which made sense when
+    // the course WAS the game; over a real city the point is to go and look at
+    // something, and being steered is the opposite of that.
+    //
+    // Gentler than the old --pro numbers: roll builds over about a second rather
+    // than a third of one, and tops out at 40 degrees instead of 72. Fast enough
+    // to turn onto a landmark, slow enough that the horizon never swings.
+    w.plane.roll = w.plane.roll + (inRoll * 1.2 - w.plane.roll * 1.6) * dt
+    w.plane.roll = Math.clampF64(w.plane.roll, 0.0 - 0.70, 0.70)
     // Pitch HOLDS where you put it, with only a weak return to level. Springing
     // back to zero the instant you let go is what made the vertical axis feel
     // wrong — you could never settle into a climb.
-    w.plane.pitch = w.plane.pitch + (inPitch * 1.5 - w.plane.pitch * 0.5) * dt
-    w.plane.pitch = Math.clampF64(w.plane.pitch, 0.0 - 0.85, 0.85)
-    if !w.easy {
-        w.plane.yaw = w.plane.yaw + w.plane.roll * 1.55 * dt
-    }
+    w.plane.pitch = w.plane.pitch + (inPitch * 1.1 - w.plane.pitch * 0.5) * dt
+    w.plane.pitch = Math.clampF64(w.plane.pitch, 0.0 - 0.55, 0.55)
+    // A banked aircraft turns. This is the only way to change heading, which is
+    // what makes it feel like flying rather than driving.
+    w.plane.yaw = w.plane.yaw + w.plane.roll * 1.30 * dt
 
     // Energy, not a constant: a dive trades height for speed and a climb trades
     // it back. Throttle shifts the whole band. This is why the number on the HUD
@@ -822,7 +929,9 @@ pub fn worldUpdate(w: &mut World, dt: f64, inRoll: f64, inPitch: f64, boost: boo
     w.plane.z = w.plane.z + Math.cos(w.plane.yaw) * cp * w.plane.speed * dt
     w.plane.y = w.plane.y + Math.sin(w.plane.pitch) * w.plane.speed * dt
 
-    corridor(w, dt)
+    // No corridor. It existed to keep the player on the ring course by turning
+    // the aircraft for them; with nowhere you are supposed to be, an invisible
+    // hand on the stick is just a bug you cannot see the cause of.
 
     // You cannot crash: the ground pushes you up and the sky pushes you down.
     // Roofs push too — flying THROUGH a tower is worse than being bumped over
@@ -856,6 +965,23 @@ pub fn worldUpdate(w: &mut World, dt: f64, inRoll: f64, inPitch: f64, boost: boo
     // which is what turns a gentle turn into something you feel in your stomach.
     w.cam.roll = w.cam.roll + (w.plane.roll * 0.18 - w.cam.roll) * Math.minF64(1.0, dt * 2.5)
 
+    // The tour used to advance as hoops were laid ahead of the player. In free
+    // flight nothing is laid, so it advances when the aircraft actually gets
+    // there — which is the only definition that means anything now.
+    if w.marks.len > 0 {
+        let dx = w.marks[w.markIdx].x - w.plane.x
+        let dz = w.marks[w.markIdx].z - w.plane.z
+        let d = Math.sqrt(dx * dx + dz * dz)
+        w.markDist = d
+        w.markName = w.marks[w.markIdx].name.clone()
+        if d < 700.0 {
+            w.markIdx = (w.markIdx + 1) % w.marks.len
+            w.markFound = w.markFound + 1
+            w.flash = Math.maxF64(w.flash, 0.5)
+            w.banner = 1.8
+            w.evRegion = true
+        }
+    }
     updateRings(w, dt)
     updateTrails(w, dt)
     updateFlocks(w, dt)

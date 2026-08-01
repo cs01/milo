@@ -45,7 +45,7 @@ from "std/argparse" import {
     ArgParser, ParsedArgs
 }
 from "./render3d" import {
-    drawWorld, drawHud, drawGuide, drawSpeedLines
+    drawWorld, drawHud, drawGuide, drawMarkGuide, drawSpeedLines
 }
 
 pub let W: i64 = 1280
@@ -341,6 +341,7 @@ pub fn main(): i32 {
         }
         drawSpeedLines(c, w)
         drawGuide(c, w, view)
+        drawMarkGuide(c, w, view)
         drawHud(c, w, s, fpsShown)
 
         var exposure = 1.0

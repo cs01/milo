@@ -1525,6 +1525,62 @@ pub fn drawGuide(c: &mut Canvas, w: &World, v: &View) {
     line(c, ax - px2 * 12.0, ay - py2 * 12.0, ax + px2 * 12.0, ay + py2 * 12.0, 0.4 * pulse, 1.0 * pulse, 0.5 * pulse)
 }
 
+// Where the next landmark is. Brackets over it when it is in view, an arrow
+// pinned to the screen edge pointing the way to turn when it is not — without
+// this the HUD names a place and gives no clue which way to look, which is worse
+// than saying nothing.
+pub fn drawMarkGuide(c: &mut Canvas, w: &World, v: &View) {
+    if w.marks.len == 0 || !w.city.loaded {
+        return
+    }
+    let mx = w.marks[w.markIdx].x
+    let mz = w.marks[w.markIdx].z
+    // Framed a little above the ground: these are things you look AT, and a
+    // marker pinned to the dirt at the base of Coit Tower points at a car park.
+    let my = heightAt(w.city, mx, mz) + 180.0
+    let p = toCamera(v, mx, my, mz)
+    let pulse = 0.72 + 0.28 * Math.sin(w.time * 3.0)
+    let cr = 0.45 * pulse
+    let cg = 1.15 * pulse
+    let cb = 0.85 * pulse
+    if p.z > 1.0 {
+        let sx = v.cx + p.x * v.scale / p.z
+        let sy = v.cy - p.y * v.scale / p.z
+        if sx > 30.0 && sx < (c.w as f64) - 30.0 && sy > 30.0 && sy < (c.h as f64) - 30.0 {
+            // A diamond rather than the ring reticle, so a landmark never reads
+            // as something to fly through.
+            let r = Math.clampF64(26000.0 / p.z, 14.0, 54.0)
+            line(c, sx, sy - r, sx + r, sy, cr, cg, cb)
+            line(c, sx + r, sy, sx, sy + r, cr, cg, cb)
+            line(c, sx, sy + r, sx - r, sy, cr, cg, cb)
+            line(c, sx - r, sy, sx, sy - r, cr, cg, cb)
+            textCentered(c, sx as i64, (sy + r + 10.0) as i64, w.markName, 2, cr, cg, cb)
+            return
+        }
+    }
+    // Off screen or behind: an arrow on a circle around the centre.
+    var dirX = p.x
+    var dirY = 0.0 - p.y
+    if p.z <= 1.0 {
+        // Behind the aircraft: only the left/right sense is meaningful, and the
+        // vertical component of a point behind you points the wrong way.
+        dirY = 0.0
+        dirX = p.x
+    }
+    let l = Math.sqrt(dirX * dirX + dirY * dirY) + 0.001
+    dirX = dirX / l
+    dirY = dirY / l
+    let rad = Math.minF64(c.w as f64, c.h as f64) * 0.30
+    let ax = v.cx + dirX * rad
+    let ay = v.cy + dirY * rad
+    let nx = 0.0 - dirY
+    let ny = dirX
+    line(c, ax + dirX * 24.0, ay + dirY * 24.0, ax + nx * 13.0, ay + ny * 13.0, cr, cg, cb)
+    line(c, ax + dirX * 24.0, ay + dirY * 24.0, ax - nx * 13.0, ay - ny * 13.0, cr, cg, cb)
+    line(c, ax - nx * 13.0, ay - ny * 13.0, ax + nx * 13.0, ay + ny * 13.0, cr * 0.8, cg * 0.8, cb * 0.8)
+    textCentered(c, (ax - dirX * 26.0) as i64, (ay - dirY * 26.0) as i64, w.markName, 2, cr * 0.9, cg * 0.9, cb * 0.9)
+}
+
 // Speed lines: short streaks flying outward from the centre of the screen. The
 // single most legible "you are going fast" cue there is, and it costs nothing.
 pub fn drawSpeedLines(c: &mut Canvas, w: &World) {
@@ -1708,7 +1764,8 @@ pub fn drawHud(c: &mut Canvas, w: &World, s: &Scene, fps: i64) {
         // the aircraft passes the Golden Gate and nothing says that is what it
         // was, which is most of the point of routing over it.
         if w.markName != "" {
-            text(c, 24, c.h - 26, "HEADING FOR " + w.markName, 2, 0.55, 0.62, 0.48)
+            let km = (w.markDist / 100.0) as i64
+            text(c, 24, c.h - 26, w.markName + "   " + ((km as f64) / 10.0).toString() + " KM", 2, 0.55, 0.62, 0.48)
         } else {
             let togo = "NEXT PLACE IN " + w.toNext.toString()
             text(c, 24, c.h - 26, togo, 2, 0.32, 0.34, 0.38)

@@ -3738,6 +3738,14 @@ export class TypeChecker {
       this.error(`cannot dereference type '${typeName(ot)}' for assignment`, sp);
       return null;
     }
+    // `STORE.field = x` where STORE is a capitalized *variable* (typically a
+    // module-level `var`) parses as an EnumLit — the parser can't know STORE
+    // isn't a type. checkExpr already recovers this for reads; without the same
+    // recovery here, a mutable global struct was writable field-by-field
+    // nowhere, which reads as "Milo has no mutable globals".
+    if (expr.kind === "EnumLit" && this.rewriteStaticToMember(expr)) {
+      return this.resolveAssignTarget(expr);
+    }
     this.error("invalid assignment target", sp);
     return null;
   }
@@ -6813,8 +6821,17 @@ export class TypeChecker {
   // Called only from the two "no such static" error paths, so anything that
   // resolves as a static call today keeps resolving that way.
   private staticCallOnVariable(expr: any, sp?: Span): TypeKind | null {
+    if (!this.rewriteStaticToMember(expr)) return null;
+    return this.checkExpr(expr as Expr);
+  }
+
+  // The rewrite half of staticCallOnVariable, without the re-check: mutates the
+  // EnumLit node into a FieldAccess/MethodCall on the same-named variable and
+  // reports whether it did. Assignment targets need the rewrite but must not
+  // re-enter checkExpr — that would type the node as an rvalue read (and move it).
+  private rewriteStaticToMember(expr: any): boolean {
     const info = this.lookup(expr.enumName);
-    if (!info) return null;
+    if (!info) return false;
     const obj = { kind: "Ident", name: expr.enumName, span: expr.span } as unknown as Expr;
     let ty = info.type;
     if (ty.tag === "ref") ty = ty.inner;
@@ -6834,7 +6851,7 @@ export class TypeChecker {
     delete node.enumName;
     delete node.variant;
     delete node.typeArgs;
-    return this.checkExpr(node as Expr);
+    return true;
   }
 
   private flexIntLeaves(e: Expr): Expr[] | null {

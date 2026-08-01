@@ -1,0 +1,42 @@
+// A capitalized global parses as a type name, so `STORE.field = x` arrives at the
+// checker as an EnumLit; without the variable fallback on the assignment path,
+// mutable module-level structs were readable but not writable.
+struct Inner {
+    n: i32,
+}
+
+struct Store {
+    inner: Inner,
+    name: string,
+    items: Vec<i32>,
+}
+
+var STORE: Store = Store {
+    inner: Inner {
+        n: 0
+    }
+    , name: "", items: []
+}
+var COUNTER: i32 = 0
+
+fn setup(): void {
+    STORE.inner.n = 41
+    STORE.name = "milo"
+    STORE.items.push(7)
+    STORE.items.push(9)
+    COUNTER = COUNTER + 1
+}
+
+fn main(): void {
+    setup()
+    STORE.inner.n = STORE.inner.n + 1
+    STORE.items[0] = 5
+    COUNTER += 2
+
+    // @expect: milo 42
+    print(STORE.name + " " + STORE.inner.n.toString())
+    // @expect: 5 9 2
+    print(STORE.items[0].toString() + " " + STORE.items[1].toString() + " " + STORE.items.len.toString())
+    // @expect: counter 3
+    print("counter " + COUNTER.toString())
+}

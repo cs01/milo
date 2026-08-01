@@ -296,6 +296,22 @@ pub fn findHeader(headers: &string, name: &string): string {
     return ""
 }
 
+// Is `name` present as a header in a CRLF-joined header block? Unlike findHeader
+// this distinguishes "absent" from "present but empty", which is what the
+// default-header logic in buildRequest needs.
+pub fn hasHeader(headers: &string, name: &string): bool {
+    var i: i64 = 0
+    while i + name.len < headers.len {
+        if i == 0 || headers[i - 1] == '\n' {
+            if strEqNocase(headers, i, name, name.len) && headers[i + name.len] == ':' {
+                return true
+            }
+        }
+        i = i + 1
+    }
+    return false
+}
+
 pub fn startsWith(s: &string, prefix: &string): bool {
     if s.len < prefix.len {
         return false
@@ -473,6 +489,52 @@ pub fn parsePath(url: &string): string {
     return url.substr(i, url.len)
 }
 
+// ── Form encoding ──
+
+// Percent-encode one component of a URL query or an
+// application/x-www-form-urlencoded body. Everything outside RFC 3986's
+// unreserved set becomes %XX, space included: `%20` decodes back to a space in
+// both a query string and a form body, whereas `+` only does in the latter.
+pub fn urlEncode(s: &string): string {
+    let hex: string = "0123456789ABCDEF"
+    var out: string = ""
+    var i: i64 = 0
+    while i < s.len {
+        let c = s[i]
+        if (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-' || c == '_' || c == '.' || c == '~' {
+            out.push(c)
+        } else {
+            out.push('%')
+            out.push(hex[(c as i64) / 16])
+            out.push(hex[(c as i64) % 16])
+        }
+        i = i + 1
+    }
+    return out
+}
+
+// One key/value pair of a form body.
+pub struct FormField {
+    name: string,
+    value: string,
+}
+
+// Build an application/x-www-form-urlencoded body. Both halves of every pair are
+// percent-encoded, so a value containing '&' or '=' can't split the body into
+// extra fields.
+pub fn formEncode(fields: &Vec<FormField>): string {
+    var out: string = ""
+    var i: i64 = 0
+    while i < fields.len {
+        if i > 0 {
+            out.push('&')
+        }
+        out = out + urlEncode(fields[i].name) + "=" + urlEncode(fields[i].value)
+        i = i + 1
+    }
+    return out
+}
+
 // ── FetchOptions ──
 
 // HTTP request configuration: method, headers, and body.
@@ -484,34 +546,39 @@ pub struct FetchOptions {
 
 // ── HTTP client ──
 
-pub fn httpDo(ip: u32, port: u16, host: string, path: string, opts: &FetchOptions): Result<Response, NetError> {
-    let stream = TcpStream.connect(ip, port)?
-    var req: string = opts.method.clone() + " " + path + " HTTP/1.1\r\nHost: " + host + "\r\nConnection: close\r\n"
+// Serialize a request. HTTP does not require Accept or User-Agent, but real
+// servers reject requests without them: Overpass 406s an Accept-less client, and
+// several public APIs 403 an anonymous one. Both are only supplied when the
+// caller has not set their own, so an explicit header always wins.
+pub fn buildRequest(host: &string, path: &string, opts: &FetchOptions): string {
+    var req: string = opts.method.clone() + " " + path.clone() + " HTTP/1.1\r\nHost: " + host.clone() + "\r\nConnection: close\r\n"
     if opts.headers.len > 0 {
         req = req + opts.headers.clone() + "\r\n"
+    }
+    if !hasHeader(opts.headers, "Accept") {
+        req = req + "Accept: */*\r\n"
+    }
+    if !hasHeader(opts.headers, "User-Agent") {
+        req = req + "User-Agent: milo/0.1\r\n"
     }
     if opts.body.len > 0 {
         req = req + "Content-Length: " + opts.body.len.toString() + "\r\n\r\n" + opts.body.clone()
     } else {
         req = req + "\r\n"
     }
-    stream.send(req)?
+    return req
+}
+
+pub fn httpDo(ip: u32, port: u16, host: string, path: string, opts: &FetchOptions): Result<Response, NetError> {
+    let stream = TcpStream.connect(ip, port)?
+    stream.send(buildRequest(host, path, opts))?
     let raw = stream.recv()?
     return Result.Ok(parseResponse(raw))
 }
 
 pub fn httpsDo(ip: u32, port: u16, host: string, path: string, opts: &FetchOptions): Result<Response, NetError> {
     let stream = TlsStream.connect(ip, port, host)?
-    var req: string = opts.method.clone() + " " + path + " HTTP/1.1\r\nHost: " + host + "\r\nConnection: close\r\n"
-    if opts.headers.len > 0 {
-        req = req + opts.headers.clone() + "\r\n"
-    }
-    if opts.body.len > 0 {
-        req = req + "Content-Length: " + opts.body.len.toString() + "\r\n\r\n" + opts.body.clone()
-    } else {
-        req = req + "\r\n"
-    }
-    stream.send(req)?
+    stream.send(buildRequest(host, path, opts))?
     let raw = stream.recv()?
     return Result.Ok(parseResponse(raw))
 }
@@ -568,6 +635,18 @@ pub fn fetchPost(url: &string, body: &string): Result<Response, NetError> {
     var opts = FetchOptions {
         method: "POST",
         headers: "Content-Type: application/json",
+        body: body.clone(),
+    }
+    return doFetch(url.clone(), opts)
+}
+
+// POST an application/x-www-form-urlencoded body — build it with formEncode, or
+// hand-roll it with urlEncode. Several APIs that nominally accept a raw body
+// (Overpass, most OAuth token endpoints) only accept this content type.
+pub fn fetchForm(url: &string, body: &string): Result<Response, NetError> {
+    var opts = FetchOptions {
+        method: "POST",
+        headers: "Content-Type: application/x-www-form-urlencoded",
         body: body.clone(),
     }
     return doFetch(url.clone(), opts)

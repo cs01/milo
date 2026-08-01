@@ -2,6 +2,17 @@
 
 ## std/fetch
 
+### `buildRequest`
+
+```milo
+pub fn buildRequest(host: &string, path: &string, opts: &FetchOptions): string
+```
+
+Serialize a request. HTTP does not require Accept or User-Agent, but real
+servers reject requests without them: Overpass 406s an Accept-less client, and
+several public APIs 403 an anonymous one. Both are only supplied when the
+caller has not set their own, so an explicit header always wins.
+
 ### `decodeChunked`
 
 ```milo
@@ -33,6 +44,16 @@ pub fn fetchDelete(url: &string): Result<Response, NetError>
 ```
 
 _Undocumented._
+
+### `fetchForm`
+
+```milo
+pub fn fetchForm(url: &string, body: &string): Result<Response, NetError>
+```
+
+POST an application/x-www-form-urlencoded body — build it with formEncode, or
+hand-roll it with urlEncode. Several APIs that nominally accept a raw body
+(Overpass, most OAuth token endpoints) only accept this content type.
 
 ### `fetchPatch`
 
@@ -73,6 +94,26 @@ pub fn findHeader(headers: &string, name: &string): string
 ```
 
 _Undocumented._
+
+### `formEncode`
+
+```milo
+pub fn formEncode(fields: &Vec<FormField>): string
+```
+
+Build an application/x-www-form-urlencoded body. Both halves of every pair are
+percent-encoded, so a value containing '&' or '=' can't split the body into
+extra fields.
+
+### `hasHeader`
+
+```milo
+pub fn hasHeader(headers: &string, name: &string): bool
+```
+
+Is `name` present as a header in a CRLF-joined header block? Unlike findHeader
+this distinguishes "absent" from "present but empty", which is what the
+default-header logic in buildRequest needs.
 
 ### `hexDigit`
 
@@ -255,3 +296,14 @@ fn TlsStream.send(self: &TlsStream, data: &string): Result<i64, NetError>
 ```
 
 _Undocumented._
+
+### `urlEncode`
+
+```milo
+pub fn urlEncode(s: &string): string
+```
+
+Percent-encode one component of a URL query or an
+application/x-www-form-urlencoded body. Everything outside RFC 3986's
+unreserved set becomes %XX, space included: `%20` decodes back to a space in
+both a query string and a form body, whereas `+` only does in the latter.

@@ -1,0 +1,16 @@
+// @error: cannot assign to immutable variable 'STORE.n'
+
+// The EnumLit-to-field fallback on the assignment path must not smuggle a `let`
+// global past the mutability check — it only fixes *which* target this is, not
+// whether the target is writable.
+struct Store {
+    n: i32,
+}
+
+let STORE: Store = Store {
+    n: 0
+}
+
+fn main(): void {
+    STORE.n = 1
+}

@@ -1570,6 +1570,10 @@ export class TypeChecker {
     // monomorphized instances, so it runs after everything else has been checked.
     this.checkPurity(program);
 
+    // Also needs the finished maps: `closureCaptures` is filled as each closure body is
+    // checked, and the auto-`move` promotions have all settled by now.
+    this.checkStoredClosures(program);
+
     // File-level `pub` visibility: a reference to a non-`pub` decl defined in
     // another file is an error. Run last so it never masks a more basic type error.
     for (const v of checkVisibility(program)) {
@@ -1945,6 +1949,74 @@ export class TypeChecker {
   // intrinsic has to be judged pure deliberately rather than inheriting it by default.
   // `assert` is here because trapping is not an effect under this definition.
   private static readonly PURE_BUILTINS = new Set(["format", "max", "min", "assert"]);
+
+  // A closure without `move` captures its environment BY REFERENCE, so it is only
+  // meaningful while the frame owning those locals is alive. Returning one is already
+  // handled — the Return path promotes it to `move` so the captures become heap-owned.
+  // But a closure stashed inside a struct or a collection escapes by a side door that
+  // check never sees: the AGGREGATE is what leaves the function, and the closure rides
+  // along still pointing at the dead frame. That was a real use-after-return in safe
+  // code (silent garbage at -O0, a hang at -O2, invisible to ASAN because the capture
+  // lives on the stack).
+  //
+  // Rejecting the STORE needs no escape analysis, which is the whole point: we cannot
+  // tell whether the aggregate escapes, so we assume it does. `move` is the escape
+  // hatch and is what the diagnostic points at.
+  private checkStoredClosures(program: Program): void {
+    const seen = new Set<string>();
+    // Approximate scoping on purpose: one flat map per body, so a closure bound by
+    // `let f = …` is still recognized when `f` is stored later. Shadowing can only make
+    // this reject something it would otherwise allow, never the reverse.
+    const check = (value: Expr, bound: Map<string, Expr>, what: string) => {
+      let c: Expr | null = null;
+      if (value.kind === "Closure") c = value;
+      else if (value.kind === "Ident") c = bound.get(value.name) ?? null;
+      if (!c || (c as Extract<Expr, { kind: "Closure" }>).isMove) return;
+      const caps = this.closureCaptures.get(c);
+      if (!caps || caps.length === 0) return;
+      const span = value.span ?? c.span;
+      const key = `${span?.line ?? 0}:${span?.col ?? 0}`;
+      if (seen.has(key)) return;
+      seen.add(key);
+      const names = caps.map(c => `'${c.name}'`).join(", ");
+      this.error(`cannot store a closure that captures ${names} by reference`, span,
+        `this closure points at locals in the current frame, and the ${what} holding it can outlive them — write 'move ${caps.length === 1 ? "" : ""}(…) => …' so the closure owns its captures instead`);
+    };
+    // Structural walk rather than a per-node switch: a missing arm here would silently
+    // skip a whole subtree, which is exactly the class of bug this pass exists to close.
+    const visit = (node: unknown, bound: Map<string, Expr>) => {
+      if (!node || typeof node !== "object") return;
+      if (Array.isArray(node)) { for (const n of node) visit(n, bound); return; }
+      const n = node as Record<string, unknown> & { kind?: string };
+      switch (n.kind) {
+        case "LetDecl": case "VarDecl":
+          if ((n.value as Expr | undefined)?.kind === "Closure") bound.set(n.name as string, n.value as Expr);
+          break;
+        case "StructLit":
+          for (const f of n.fields as { name: string; value: Expr }[]) check(f.value, bound, "struct");
+          break;
+        case "ArrayLit":
+          for (const el of n.elements as Expr[]) check(el, bound, "array");
+          break;
+        case "ArrayRepeat":
+          check(n.value as Expr, bound, "array");
+          break;
+        case "MethodCall":
+          // The collection-storing methods. A closure passed to `map`/`each`/`sortBy` is
+          // called and dropped within the call, so those stay legal — that is the common
+          // case and rejecting it would gut the combinators.
+          if (["push", "insert", "set"].includes(n.method as string)) {
+            for (const a of n.args as Expr[]) check(a, bound, "collection");
+          }
+          break;
+      }
+      for (const k of Object.keys(n)) { if (k !== "span" && k !== "type") visit(n[k], bound); }
+    };
+    for (const fn of [...program.functions, ...this.monomorphizedFns]) {
+      if (fn.isExtern || !fn.body) continue;
+      visit(fn.body, new Map<string, Expr>());
+    }
+  }
 
   private checkPurity(program: Program): void {
     const pureNames = new Set<string>();

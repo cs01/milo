@@ -1,0 +1,18 @@
+// The collection form of the same escape: pushing a by-reference closure into a Vec that
+// then leaves the function. Rejected at the push — whether the Vec escapes is exactly what
+// the checker cannot know without escape analysis, so it assumes it does.
+// @error: cannot store a closure that captures 'n' by reference
+
+pub fn make(): Vec<(i64) => i64> {
+    let n = 5
+    var v: Vec<(i64) => i64> = Vec.new()
+    v.push((x: i64) => x + n)
+    return v
+}
+
+pub fn main(): i32 {
+    let v = make()
+    let g = v[0]
+    print(g(1))
+    return 0
+}

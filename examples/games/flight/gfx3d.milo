@@ -286,8 +286,35 @@ pub fn toCamera(v: &View, x: f64, y: f64, z: f64): Vec3 {
 
 // Depth-buffered flat-shaded triangle in CAMERA space. Depth-tests on 1/z, which
 // interpolates linearly in screen space — the reason the buffer stores 1/z.
-fn rasterCam(c: &mut Canvas, s: &mut Scene, v: &View, a: &Vec3, b: &Vec3, d: &Vec3, col: &Rgb) {
-    // project
+// The setup all three rasterisers share: project to screen, cull backfaces and
+// degenerates, and clamp the bounding box to the viewport. It was copied out
+// three times, which is where an asymmetric bug hides — a fix to one copy's
+// clamp is a bug in the other two.
+pub struct Tri {
+    x0: f64,
+    y0: f64,
+    x1: f64,
+    y1: f64,
+    x2: f64,
+    y2: f64,
+    iaz: f64,
+    ibz: f64,
+    icz: f64,
+    invArea: f64,
+    // How each edge function changes for one pixel of x. The inner loop steps
+    // by these instead of evaluating the edges: same values, three adds instead
+    // of nine multiply-adds, on the order of a million pixels a frame.
+    e0x: f64,
+    e1x: f64,
+    e2x: f64,
+    minX: i64,
+    maxX: i64,
+    minY: i64,
+    maxY: i64,
+    ok: bool, // false: culled, off-screen or degenerate — draw nothing
+}
+
+fn triSetup(s: &Scene, v: &View, a: &Vec3, b: &Vec3, d: &Vec3): Tri {
     let iaz = 1.0 / a.z
     let ibz = 1.0 / b.z
     let icz = 1.0 / d.z
@@ -297,13 +324,20 @@ fn rasterCam(c: &mut Canvas, s: &mut Scene, v: &View, a: &Vec3, b: &Vec3, d: &Ve
     let y1 = v.cy - b.y * v.scale * ibz
     let x2 = v.cx + d.x * v.scale * icz
     let y2 = v.cy - d.y * v.scale * icz
-
+    var t = Tri {
+        x0: x0, y0: y0, x1: x1, y1: y1, x2: x2, y2: y2,
+        iaz: iaz, ibz: ibz, icz: icz,
+        invArea: 0.0,
+        e0x: 0.0 - (y2 - y1), e1x: 0.0 - (y0 - y2), e2x: 0.0 - (y1 - y0),
+        minX: 0, maxX: 0, minY: 0, maxY: 0,
+        ok: false,
+    }
     // backface / degenerate cull via signed area
     let area = (x1 - x0) * (y2 - y0) - (x2 - x0) * (y1 - y0)
     if area <= 0.0 {
-        return
+        return t
     }
-
+    t.invArea = 1.0 / area
     var minX = Math.floor(Math.minF64(x0, Math.minF64(x1, x2))) as i64
     var maxX = Math.ceil(Math.maxF64(x0, Math.maxF64(x1, x2))) as i64
     var minY = Math.floor(Math.minF64(y0, Math.minF64(y1, y2))) as i64
@@ -321,54 +355,72 @@ fn rasterCam(c: &mut Canvas, s: &mut Scene, v: &View, a: &Vec3, b: &Vec3, d: &Ve
         maxY = s.h
     }
     if minX >= maxX || minY >= maxY {
+        return t
+    }
+    t.minX = minX
+    t.maxX = maxX
+    t.minY = minY
+    t.maxY = maxY
+    t.ok = true
+    return t
+}
+
+// Edge function values at the first pixel of row `py`. Non-negative in all three
+// means the pixel is inside.
+fn rowEdge0(t: &Tri, fy: f64, fx: f64): f64 {
+    return (t.x2 - t.x1) * (fy - t.y1) - (t.y2 - t.y1) * (fx - t.x1)
+}
+
+fn rowEdge1(t: &Tri, fy: f64, fx: f64): f64 {
+    return (t.x0 - t.x2) * (fy - t.y2) - (t.y0 - t.y2) * (fx - t.x2)
+}
+
+fn rowEdge2(t: &Tri, fy: f64, fx: f64): f64 {
+    return (t.x1 - t.x0) * (fy - t.y0) - (t.y1 - t.y0) * (fx - t.x0)
+}
+
+fn rasterCam(c: &mut Canvas, s: &mut Scene, v: &View, a: &Vec3, b: &Vec3, d: &Vec3, col: &Rgb) {
+    let t = triSetup(s, v, a, b, d)
+    if !t.ok {
         return
     }
-
     s.tris = s.tris + 1
-    let invArea = 1.0 / area
-    var py = minY
-    while py < maxY {
+    let fx0 = (t.minX as f64) + 0.5
+    var py = t.minY
+    while py < t.maxY {
         let fy = (py as f64) + 0.5
-        var px = minX
-        while px < maxX {
-            let fx = (px as f64) + 0.5
-            // edge functions; all non-negative means inside
-            let w0 = (x2 - x1) * (fy - y1) - (y2 - y1) * (fx - x1)
-            if w0 < 0.0 {
-                px = px + 1
-                continue
-            }
-            let w1 = (x0 - x2) * (fy - y2) - (y0 - y2) * (fx - x2)
-            if w1 < 0.0 {
-                px = px + 1
-                continue
-            }
-            let w2 = (x1 - x0) * (fy - y0) - (y1 - y0) * (fx - x0)
-            if w2 < 0.0 {
-                px = px + 1
-                continue
-            }
-            let l0 = w0 * invArea
-            let l1 = w1 * invArea
-            let l2 = w2 * invArea
-            let invZ = l0 * iaz + l1 * ibz + l2 * icz
-            let idx = py * s.w + px
-            if (s.zbuf[idx] as f64) < invZ {
-                s.zbuf[idx] = invZ as f32
-                let depth = 1.0 / invZ
-                // linear fog toward the sky colour
-                var f = (depth - s.fogStart) / (s.fogEnd - s.fogStart)
-                if f < 0.0 {
-                    f = 0.0
+        var w0 = rowEdge0(t, fy, fx0)
+        var w1 = rowEdge1(t, fy, fx0)
+        var w2 = rowEdge2(t, fy, fx0)
+        var idx = py * s.w + t.minX
+        var px = t.minX
+        while px < t.maxX {
+            if w0 >= 0.0 && w1 >= 0.0 && w2 >= 0.0 {
+                let l0 = w0 * t.invArea
+                let l1 = w1 * t.invArea
+                let l2 = w2 * t.invArea
+                let invZ = l0 * t.iaz + l1 * t.ibz + l2 * t.icz
+                if (s.zbuf[idx] as f64) < invZ {
+                    s.zbuf[idx] = invZ as f32
+                    let depth = 1.0 / invZ
+                    // linear fog toward the sky colour
+                    var f = (depth - s.fogStart) / (s.fogEnd - s.fogStart)
+                    if f < 0.0 {
+                        f = 0.0
+                    }
+                    if f > 1.0 {
+                        f = 1.0
+                    }
+                    let o = idx * 3
+                    c.hdr[o] = (col.r * (1.0 - f) + s.fogR * f) as f32
+                    c.hdr[o + 1] = (col.g * (1.0 - f) + s.fogG * f) as f32
+                    c.hdr[o + 2] = (col.b * (1.0 - f) + s.fogB * f) as f32
                 }
-                if f > 1.0 {
-                    f = 1.0
-                }
-                let o = idx * 3
-                c.hdr[o] = (col.r * (1.0 - f) + s.fogR * f) as f32
-                c.hdr[o + 1] = (col.g * (1.0 - f) + s.fogG * f) as f32
-                c.hdr[o + 2] = (col.b * (1.0 - f) + s.fogB * f) as f32
             }
+            w0 = w0 + t.e0x
+            w1 = w1 + t.e1x
+            w2 = w2 + t.e2x
+            idx = idx + 1
             px = px + 1
         }
         py = py + 1
@@ -518,112 +570,78 @@ pub fn vtxC(x: f64, y: f64, z: f64, u: f64, v: f64, light: f64, r: f64, g: f64, 
 // term interpolate linearly in screen space; dividing by the interpolated 1/z at
 // each pixel recovers the true value. That division is what "perspective-correct"
 // buys — interpolating u,v directly makes the texture slide as a surface tilts.
-fn rasterCamTex(c: &mut Canvas, s: &mut Scene, view: &View, t: &Texture, a: &Vtx, b: &Vtx, d: &Vtx, tr: f64, tg: f64, tb: f64) {
-    let iaz = 1.0 / a.z
-    let ibz = 1.0 / b.z
-    let icz = 1.0 / d.z
-    let x0 = view.cx + a.x * view.scale * iaz
-    let y0 = view.cy - a.y * view.scale * iaz
-    let x1 = view.cx + b.x * view.scale * ibz
-    let y1 = view.cy - b.y * view.scale * ibz
-    let x2 = view.cx + d.x * view.scale * icz
-    let y2 = view.cy - d.y * view.scale * icz
-
-    let area = (x1 - x0) * (y2 - y0) - (x2 - x0) * (y1 - y0)
-    if area <= 0.0 {
-        return
-    }
-    var minX = Math.floor(Math.minF64(x0, Math.minF64(x1, x2))) as i64
-    var maxX = Math.ceil(Math.maxF64(x0, Math.maxF64(x1, x2))) as i64
-    var minY = Math.floor(Math.minF64(y0, Math.minF64(y1, y2))) as i64
-    var maxY = Math.ceil(Math.maxF64(y0, Math.maxF64(y1, y2))) as i64
-    if minX < 0 {
-        minX = 0
-    }
-    if minY < 0 {
-        minY = 0
-    }
-    if maxX > s.w {
-        maxX = s.w
-    }
-    if maxY > s.h {
-        maxY = s.h
-    }
-    if minX >= maxX || minY >= maxY {
+fn rasterCamTex(c: &mut Canvas, s: &mut Scene, view: &View, tex: &Texture, a: &Vtx, b: &Vtx, d: &Vtx, tr: f64, tg: f64, tb: f64) {
+    let t = triSetup(s, view, v3(a.x, a.y, a.z), v3(b.x, b.y, b.z), v3(d.x, d.y, d.z))
+    if !t.ok {
         return
     }
     s.tris = s.tris + 1
-    let invArea = 1.0 / area
-    let au = a.u * iaz
-    let av = a.v * iaz
-    let bu = b.u * ibz
-    let bv = b.v * ibz
-    let du = d.u * icz
-    let dv = d.v * icz
+    // Texture coordinates carried divided by z, which is what interpolates
+    // linearly in screen space; the multiply back by z is per pixel.
+    let au = a.u * t.iaz
+    let av = a.v * t.iaz
+    let bu = b.u * t.ibz
+    let bv = b.v * t.ibz
+    let du = d.u * t.icz
+    let dv = d.v * t.icz
 
-    var py = minY
-    while py < maxY {
+    let fx0 = (t.minX as f64) + 0.5
+    var py = t.minY
+    while py < t.maxY {
         let fy = (py as f64) + 0.5
-        var px = minX
-        while px < maxX {
-            let fx = (px as f64) + 0.5
-            let w0 = (x2 - x1) * (fy - y1) - (y2 - y1) * (fx - x1)
-            if w0 < 0.0 {
-                px = px + 1
-                continue
-            }
-            let w1 = (x0 - x2) * (fy - y2) - (y0 - y2) * (fx - x2)
-            if w1 < 0.0 {
-                px = px + 1
-                continue
-            }
-            let w2 = (x1 - x0) * (fy - y0) - (y1 - y0) * (fx - x0)
-            if w2 < 0.0 {
-                px = px + 1
-                continue
-            }
-            let l0 = w0 * invArea
-            let l1 = w1 * invArea
-            let l2 = w2 * invArea
-            let invZ = l0 * iaz + l1 * ibz + l2 * icz
-            let idx = py * s.w + px
-            if (s.zbuf[idx] as f64) < invZ {
-                s.zbuf[idx] = invZ as f32
-                let zz = 1.0 / invZ
-                let uu = (l0 * au + l1 * bu + l2 * du) * zz
-                let vv = (l0 * av + l1 * bv + l2 * dv) * zz
-                // Smooth shading: the light term is per vertex and interpolated,
-                // so a curved surface stops looking like a stack of flat facets.
-                let sh = l0 * a.light + l1 * b.light + l2 * d.light
-                let vr = l0 * a.r + l1 * b.r + l2 * d.r
-                let vg = l0 * a.g + l1 * b.g + l2 * d.g
-                let vb = l0 * a.b + l1 * b.b + l2 * d.b
-                var tx2 = ((uu * (t.w as f64)) as i64) & t.mask
-                var ty2 = ((vv * (t.h as f64)) as i64) & t.mask
-                if tx2 < 0 {
-                    tx2 = 0
+        var w0 = rowEdge0(t, fy, fx0)
+        var w1 = rowEdge1(t, fy, fx0)
+        var w2 = rowEdge2(t, fy, fx0)
+        var idx = py * s.w + t.minX
+        var px = t.minX
+        while px < t.maxX {
+            if w0 >= 0.0 && w1 >= 0.0 && w2 >= 0.0 {
+                let l0 = w0 * t.invArea
+                let l1 = w1 * t.invArea
+                let l2 = w2 * t.invArea
+                let invZ = l0 * t.iaz + l1 * t.ibz + l2 * t.icz
+                if (s.zbuf[idx] as f64) < invZ {
+                    s.zbuf[idx] = invZ as f32
+                    let zz = 1.0 / invZ
+                    let uu = (l0 * au + l1 * bu + l2 * du) * zz
+                    let vv = (l0 * av + l1 * bv + l2 * dv) * zz
+                    // Smooth shading: the light term is per vertex and interpolated,
+                    // so a curved surface stops looking like a stack of flat facets.
+                    let sh = l0 * a.light + l1 * b.light + l2 * d.light
+                    let vr = l0 * a.r + l1 * b.r + l2 * d.r
+                    let vg = l0 * a.g + l1 * b.g + l2 * d.g
+                    let vb = l0 * a.b + l1 * b.b + l2 * d.b
+                    var tx2 = ((uu * (tex.w as f64)) as i64) & tex.mask
+                    var ty2 = ((vv * (tex.h as f64)) as i64) & tex.mask
+                    if tx2 < 0 {
+                        tx2 = 0
+                    }
+                    if ty2 < 0 {
+                        ty2 = 0
+                    }
+                    let ti = ((ty2 << tex.shift) + tx2) * 3
+                    // texel faded toward 1 (no-op) where tw is low
+                    let tw = l0 * a.tw + l1 * b.tw + l2 * d.tw
+                    var f = (zz - s.fogStart) / (s.fogEnd - s.fogStart)
+                    if f < 0.0 {
+                        f = 0.0
+                    }
+                    if f > 1.0 {
+                        f = 1.0
+                    }
+                    let o = idx * 3
+                    let rr = tr * vr * sh * (1.0 + ((tex.px[ti] as f64) - 1.0) * tw)
+                    let gg = tg * vg * sh * (1.0 + ((tex.px[ti + 1] as f64) - 1.0) * tw)
+                    let bb = tb * vb * sh * (1.0 + ((tex.px[ti + 2] as f64) - 1.0) * tw)
+                    c.hdr[o] = (rr * (1.0 - f) + s.fogR * f) as f32
+                    c.hdr[o + 1] = (gg * (1.0 - f) + s.fogG * f) as f32
+                    c.hdr[o + 2] = (bb * (1.0 - f) + s.fogB * f) as f32
                 }
-                if ty2 < 0 {
-                    ty2 = 0
-                }
-                let ti = ((ty2 << t.shift) + tx2) * 3
-                // texel faded toward 1 (no-op) where tw is low
-                let tw = l0 * a.tw + l1 * b.tw + l2 * d.tw
-                var f = (zz - s.fogStart) / (s.fogEnd - s.fogStart)
-                if f < 0.0 {
-                    f = 0.0
-                }
-                if f > 1.0 {
-                    f = 1.0
-                }
-                let o = idx * 3
-                let rr = tr * vr * sh * (1.0 + ((t.px[ti] as f64) - 1.0) * tw)
-                let gg = tg * vg * sh * (1.0 + ((t.px[ti + 1] as f64) - 1.0) * tw)
-                let bb = tb * vb * sh * (1.0 + ((t.px[ti + 2] as f64) - 1.0) * tw)
-                c.hdr[o] = (rr * (1.0 - f) + s.fogR * f) as f32
-                c.hdr[o + 1] = (gg * (1.0 - f) + s.fogG * f) as f32
-                c.hdr[o + 2] = (bb * (1.0 - f) + s.fogB * f) as f32
             }
+            w0 = w0 + t.e0x
+            w1 = w1 + t.e1x
+            w2 = w2 + t.e2x
+            idx = idx + 1
             px = px + 1
         }
         py = py + 1
@@ -675,41 +693,11 @@ fn clipV(out: &mut Vec<Vtx>, a: &Vtx, b: &Vtx, near: f64) {
 // count, and it does not need a texture, but it does need the per-vertex colour —
 // without it the far field is a checkerboard of flat quads.
 fn rasterCamG(c: &mut Canvas, s: &mut Scene, v: &View, a: &Vtx, b: &Vtx, d: &Vtx, tr: f64, tg: f64, tb: f64) {
-    let iaz = 1.0 / a.z
-    let ibz = 1.0 / b.z
-    let icz = 1.0 / d.z
-    let x0 = v.cx + a.x * v.scale * iaz
-    let y0 = v.cy - a.y * v.scale * iaz
-    let x1 = v.cx + b.x * v.scale * ibz
-    let y1 = v.cy - b.y * v.scale * ibz
-    let x2 = v.cx + d.x * v.scale * icz
-    let y2 = v.cy - d.y * v.scale * icz
-
-    let area = (x1 - x0) * (y2 - y0) - (x2 - x0) * (y1 - y0)
-    if area <= 0.0 {
-        return
-    }
-    var minX = Math.floor(Math.minF64(x0, Math.minF64(x1, x2))) as i64
-    var maxX = Math.ceil(Math.maxF64(x0, Math.maxF64(x1, x2))) as i64
-    var minY = Math.floor(Math.minF64(y0, Math.minF64(y1, y2))) as i64
-    var maxY = Math.ceil(Math.maxF64(y0, Math.maxF64(y1, y2))) as i64
-    if minX < 0 {
-        minX = 0
-    }
-    if minY < 0 {
-        minY = 0
-    }
-    if maxX > s.w {
-        maxX = s.w
-    }
-    if maxY > s.h {
-        maxY = s.h
-    }
-    if minX >= maxX || minY >= maxY {
+    let t = triSetup(s, v, v3(a.x, a.y, a.z), v3(b.x, b.y, b.z), v3(d.x, d.y, d.z))
+    if !t.ok {
         return
     }
     s.tris = s.tris + 1
-    let invArea = 1.0 / area
     // colour already folded with the vertex light, so the inner loop is 3 lerps
     let ar = a.r * a.light * tr
     let ag = a.g * a.light * tg
@@ -721,50 +709,44 @@ fn rasterCamG(c: &mut Canvas, s: &mut Scene, v: &View, a: &Vtx, b: &Vtx, d: &Vtx
     let dg = d.g * d.light * tg
     let db = d.b * d.light * tb
 
-    var py = minY
-    while py < maxY {
+    let fx0 = (t.minX as f64) + 0.5
+    var py = t.minY
+    while py < t.maxY {
         let fy = (py as f64) + 0.5
-        var px = minX
-        while px < maxX {
-            let fx = (px as f64) + 0.5
-            let w0 = (x2 - x1) * (fy - y1) - (y2 - y1) * (fx - x1)
-            if w0 < 0.0 {
-                px = px + 1
-                continue
-            }
-            let w1 = (x0 - x2) * (fy - y2) - (y0 - y2) * (fx - x2)
-            if w1 < 0.0 {
-                px = px + 1
-                continue
-            }
-            let w2 = (x1 - x0) * (fy - y0) - (y1 - y0) * (fx - x0)
-            if w2 < 0.0 {
-                px = px + 1
-                continue
-            }
-            let l0 = w0 * invArea
-            let l1 = w1 * invArea
-            let l2 = w2 * invArea
-            let invZ = l0 * iaz + l1 * ibz + l2 * icz
-            let idx = py * s.w + px
-            if (s.zbuf[idx] as f64) < invZ {
-                s.zbuf[idx] = invZ as f32
-                let depth = 1.0 / invZ
-                var f = (depth - s.fogStart) / (s.fogEnd - s.fogStart)
-                if f < 0.0 {
-                    f = 0.0
+        var w0 = rowEdge0(t, fy, fx0)
+        var w1 = rowEdge1(t, fy, fx0)
+        var w2 = rowEdge2(t, fy, fx0)
+        var idx = py * s.w + t.minX
+        var px = t.minX
+        while px < t.maxX {
+            if w0 >= 0.0 && w1 >= 0.0 && w2 >= 0.0 {
+                let l0 = w0 * t.invArea
+                let l1 = w1 * t.invArea
+                let l2 = w2 * t.invArea
+                let invZ = l0 * t.iaz + l1 * t.ibz + l2 * t.icz
+                if (s.zbuf[idx] as f64) < invZ {
+                    s.zbuf[idx] = invZ as f32
+                    let depth = 1.0 / invZ
+                    var f = (depth - s.fogStart) / (s.fogEnd - s.fogStart)
+                    if f < 0.0 {
+                        f = 0.0
+                    }
+                    if f > 1.0 {
+                        f = 1.0
+                    }
+                    let rr = l0 * ar + l1 * br + l2 * dr
+                    let gg = l0 * ag + l1 * bg + l2 * dg
+                    let bbv = l0 * ab + l1 * bb2 + l2 * db
+                    let o = idx * 3
+                    c.hdr[o] = (rr * (1.0 - f) + s.fogR * f) as f32
+                    c.hdr[o + 1] = (gg * (1.0 - f) + s.fogG * f) as f32
+                    c.hdr[o + 2] = (bbv * (1.0 - f) + s.fogB * f) as f32
                 }
-                if f > 1.0 {
-                    f = 1.0
-                }
-                let rr = l0 * ar + l1 * br + l2 * dr
-                let gg = l0 * ag + l1 * bg + l2 * dg
-                let bbv = l0 * ab + l1 * bb2 + l2 * db
-                let o = idx * 3
-                c.hdr[o] = (rr * (1.0 - f) + s.fogR * f) as f32
-                c.hdr[o + 1] = (gg * (1.0 - f) + s.fogG * f) as f32
-                c.hdr[o + 2] = (bbv * (1.0 - f) + s.fogB * f) as f32
             }
+            w0 = w0 + t.e0x
+            w1 = w1 + t.e1x
+            w2 = w2 + t.e2x
+            idx = idx + 1
             px = px + 1
         }
         py = py + 1

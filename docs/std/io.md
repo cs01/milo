@@ -110,6 +110,10 @@ pub fn putChar(ch: u8): void
 
 Write a single byte to stdout.
 
+Goes onto the same stdio buffer `print` writes to — one syscall per byte would be
+absurd for a per-character API, and a raw fd write would also land ahead of any
+buffered `print` output.
+
 ### `readLine`
 
 ```milo
@@ -146,3 +150,7 @@ pub fn writeStdout(s: &string): void
 ```
 
 Write a string to stdout without appending a newline.
+
+`print` goes through stdio's buffer; this goes straight at the fd. Drain the
+buffer first or the two interleave in the wrong order. fflush on an already-empty
+buffer is not a syscall, so a program that only ever uses this pays nothing.

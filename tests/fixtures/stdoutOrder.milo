@@ -1,0 +1,20 @@
+// print() writes through stdio's buffer; writeStdout() writes straight at fd 1.
+// Both orderings below would still "work" byte-for-byte if the buffer were flushed
+// on every print — this locks that they stay ordered once it is not.
+from "std/io" import {
+    writeStdout
+}
+
+fn main(): i32 {
+    print("one")
+    writeStdout("two-")
+    print("three")
+    writeStdout("four-")
+    writeStdout("five")
+    print("")
+    return 0
+}
+
+// @expect: one
+// @expect: two-three
+// @expect: four-five

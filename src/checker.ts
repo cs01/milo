@@ -1137,6 +1137,9 @@ export class TypeChecker {
     // time, which cost more than the read itself on any large file.
     this.functions.set("_bytesToString", { params: [{ type: { tag: "ptr", inner: { tag: "int", bits: 8, signed: false } }, name: "ptr" }, { type: { tag: "int", bits: 64, signed: true }, name: "len" }], ret: { tag: "string" }, variadic: false });
     this.functions.set("_strDataPtr", { params: [{ type: { tag: "ref", inner: { tag: "string" }, mutable: false }, name: "s" }], ret: { tag: "ptr", inner: { tag: "int", bits: 8, signed: false } }, variadic: false });
+    // One byte onto stdout's stdio buffer. `putChar` used to write(2) per byte, which
+    // is a syscall each and also raced ahead of `print`'s buffered output.
+    this.functions.set("_putByte", { params: [{ type: { tag: "int", bits: 8, signed: false }, name: "b" }], ret: { tag: "void" }, variadic: false });
     this.functions.set("_loadU8", { params: [{ type: { tag: "ptr", inner: { tag: "int", bits: 8, signed: false } }, name: "ptr" }], ret: { tag: "int", bits: 8, signed: false }, variadic: false });
     this.functions.set("_loadI32", { params: [{ type: { tag: "ptr", inner: { tag: "int", bits: 8, signed: false } }, name: "ptr" }], ret: { tag: "int", bits: 32, signed: true }, variadic: false });
     this.functions.set("_callClosureVoid", { params: [{ type: { tag: "ptr", inner: { tag: "int", bits: 8, signed: false } }, name: "fn" }, { type: { tag: "ptr", inner: { tag: "int", bits: 8, signed: false } }, name: "env" }], ret: { tag: "void" }, variadic: false });

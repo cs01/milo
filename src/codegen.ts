@@ -83,6 +83,8 @@ export class Codegen {
   private needsFflush = false;
   private needsWrite = false;
   private needsPutchar = false;
+  private needsFwrite = false;
+  private needsIob = false;
   private needsExit = false;
   private needsMalloc = false;
   private needsFree = false;
@@ -147,7 +149,7 @@ export class Codegen {
   private closureCounter = 0;
   public scopeCounter = 0;
   public entryAllocas: string[] = [];
-  private static BUILTINS = new Set(["print", "eprint", "format", "flush", "exit", "assert", "max", "min", "_miloArgCount", "_miloArgAt", "_cstrToString", "_bytesToString", "_strDataPtr", "_loadU8", "_loadI32", "_callClosureVoid", "_atomicLoadI64", "_atomicStoreI64", "_atomicAddI64", "_atomicSubI64", "_atomicCasI64", "_atomicLoadBool", "_atomicStoreBool", "_atomicSwapBool", "_schedulerGet", "_schedulerSet"]);
+  private static BUILTINS = new Set(["print", "eprint", "format", "flush", "exit", "assert", "max", "min", "_miloArgCount", "_miloArgAt", "_cstrToString", "_bytesToString", "_strDataPtr", "_putByte", "_loadU8", "_loadI32", "_callClosureVoid", "_atomicLoadI64", "_atomicStoreI64", "_atomicAddI64", "_atomicSubI64", "_atomicCasI64", "_atomicLoadBool", "_atomicStoreBool", "_atomicSwapBool", "_schedulerGet", "_schedulerSet"]);
   private needsArgGlobals = false;
   private usesSchedulerGlobal = false;
   private currentFnName = "";
@@ -218,6 +220,32 @@ export class Codegen {
     lines.push(`  ${n32} = trunc i64 ${lenVal} to i32`);
     lines.push(`  call i32 @_write(i32 ${fd}, ptr ${dataPtr}, i32 ${n32})`);
   }
+
+  // Byte-exact write of a Milo string to stdout, through stdio's own buffer.
+  //
+  // print() used to fflush + write(2) per call, which is two syscalls per line — on a
+  // piped stdout that dominated any loop that prints. fwrite is length-counted, so it
+  // is just as NUL-correct as write(), and because it shares stdout's buffer with
+  // printf there is nothing left to order by hand: the fflush goes away with it.
+  // Buffering matches C's: line-buffered on a TTY, block-buffered on a pipe, and
+  // drained by exit() (and by the explicit fflush in panicAbort).
+  //
+  // Getting at stdout is the only non-portable part — it is a data symbol whose name
+  // differs per libc, and a function call on MSVC.
+  private emitStdoutWrite(lines: string[], dataPtr: string, lenVal: string): void {
+    this.needsFwrite = true;
+    const handle = this.nextTemp();
+    if (this.isWindows) {
+      this.needsIob = true;
+      lines.push(`  ${handle} = call ptr @__acrt_iob_func(i32 1)`);
+    } else {
+      lines.push(`  ${handle} = load ptr, ptr @${this.stdoutSymbol}`);
+    }
+    lines.push(`  call i64 @fwrite(ptr ${dataPtr}, i64 1, i64 ${lenVal}, ptr ${handle})`);
+  }
+
+  // Apple's libc exposes stdout as `__stdoutp`; glibc/musl as `stdout`.
+  private get stdoutSymbol(): string { return this.target.os === "darwin" ? "__stdoutp" : "stdout"; }
 
   // dprintf(fd, fmt, ...) has no UCRT equivalent. stderr is not a linkable data symbol
   // on MSVC either — it is the macro `__acrt_iob_func(2)` — so eprint lowers to an
@@ -1267,12 +1295,19 @@ export class Codegen {
         : `declare i64 @write(i32, ptr, i64)`);
     if (this.needsDprintf && !declaredExterns.has("dprintf")) {
       if (this.isWindows) {
-        this.output.splice(1, 0, `declare ptr @__acrt_iob_func(i32)`);
+        this.needsIob = true;
         this.output.splice(1, 0, `declare i32 @fprintf(ptr, ptr, ...)`);
       } else {
         this.output.splice(1, 0, `declare i32 @dprintf(i32, ptr, ...)`);
       }
     }
+    if (this.needsFwrite && !declaredExterns.has("fwrite")) {
+      this.output.splice(1, 0, `declare i64 @fwrite(ptr, i64, i64, ptr)`);
+      if (!this.isWindows) this.output.splice(1, 0, `@${this.stdoutSymbol} = external global ptr`);
+    }
+    // Both eprint and print-to-stdout need it on MSVC; declaring it twice is an LLVM error.
+    if (this.needsIob && !declaredExterns.has("__acrt_iob_func"))
+      this.output.splice(1, 0, `declare ptr @__acrt_iob_func(i32)`);
     if (this.needsPrintf && !declaredExterns.has("printf"))
       this.output.splice(1, 0, `declare i32 @printf(ptr, ...)`);
     if (this.usedDbgDeclare)
@@ -3790,8 +3825,13 @@ export class Codegen {
           lines.push(`  ${dataPtr} = extractvalue %String ${av}, 0`);
           const lenVal = this.nextTemp();
           lines.push(`  ${lenVal} = extractvalue %String ${av}, 1`);
-          lines.push(`  call i32 @fflush(ptr null)`);
-          this.emitFdWrite(lines, 1, dataPtr, lenVal);
+          if (this.target.os === "none") {
+            // Freestanding: no stdio, so no shared buffer to write into.
+            lines.push(`  call i32 @fflush(ptr null)`);
+            this.emitFdWrite(lines, 1, dataPtr, lenVal);
+          } else {
+            this.emitStdoutWrite(lines, dataPtr, lenVal);
+          }
         } else {
           this.emitDisplayPart(arg.expr.type, av, at, lines, partFmts, partArgs, tempBufs);
         }
@@ -3911,6 +3951,17 @@ export class Codegen {
       lines.push(...al);
       lines.push(`  store ptr ${pv}, ptr @_milo_scheduler`);
       return [lines, "0", "void"];
+    }
+    if (expr.func === "_putByte") {
+      // Bare metal has no stdio; there putchar is whatever the freestanding runtime
+      // provides, and the declare below covers both.
+      this.needsPutchar = true;
+      const [al, bv] = this.genExpr(expr.args[0].expr);
+      lines.push(...al);
+      const ext = this.nextTemp();
+      lines.push(`  ${ext} = zext i8 ${bv} to i32`);
+      lines.push(`  call i32 @putchar(i32 ${ext})`);
+      return [lines, "void", "void"];
     }
     if (expr.func === "_loadU8") {
       const [al, pv] = this.genExpr(expr.args[0].expr);

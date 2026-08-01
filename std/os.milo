@@ -291,6 +291,11 @@ pub extern fn unlockpt(fd: i32): i32
 
 pub extern fn ptsname(fd: i32): *u8
 
+// Drain stdio's buffers. NULL means every open stream. Named explicitly rather than
+// via the `flush` builtin because the builtin's bare name collides with any
+// module-private `flush` in the flat namespace (std/deflate has one).
+pub extern fn fflush(stream: *u8): i32
+
 // ── Process ──
 
 pub extern fn exit(status: i32): void

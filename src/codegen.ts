@@ -4777,6 +4777,14 @@ export class Codegen {
           return [lines, val, elemTy];
         }
         const [ptrLines, ptr, elemTy] = this.genBoundsCheckedPtr(expr, lines);
+        // Sized arrays clone non-Copy elements for the same reason Vec does: a
+        // bare load hands out a second owner of the same buffer, and both free
+        // it at scope exit. `fn peek(a: &[string; 2]) { return a[0] }` aborted
+        // on a double free.
+        if (effObj.tag === "array" && this.needsDropCg(expr.type)) {
+          const cloned = this.emitDeepCloneFromPtr(lines, ptr, expr.type);
+          return [lines, cloned, elemTy];
+        }
         const val = this.nextTemp();
         lines.push(`  ${val} = load ${elemTy}, ptr ${ptr}`);
         return [lines, val, elemTy];
@@ -9836,8 +9844,18 @@ export class Codegen {
   private indexAccessClones(expr: HIRExpr): boolean {
     if (expr.kind !== "IndexAccess") return false;
     const obj = expr.object.type.tag === "ref" ? expr.object.type.inner : expr.object.type;
-    const isDynamic = obj.tag === "vec" || (obj.tag === "array" && obj.size === null);
-    return isDynamic && this.needsDropCg(expr.type);
+    const isIndexable = obj.tag === "vec" || obj.tag === "array";
+    return isIndexable && this.needsDropCg(expr.type);
+  }
+
+  // `opt!` / `res?` hand back a payload nobody else will free: a temp operand dies
+  // with the expression, and an Ident operand has its slot zeroed in the ok branch
+  // (see genUnwrap/genPropagate) precisely because the payload moved out. A place
+  // operand that is NOT zeroed — a struct field — still owns its payload, so
+  // freeing the result there would double-free.
+  private unwrapMovesPayload(expr: HIRExpr & { kind: "Unwrap" | "Propagate" }): boolean {
+    if (this.isOwnedTempExpr(expr.operand)) return true;
+    return this.needsDropCg(expr.type) && expr.operand.kind === "Ident";
   }
 
   private isOwnedTempExpr(expr: HIRExpr): boolean {
@@ -9867,14 +9885,14 @@ export class Codegen {
       case "BinOp":
         // string `+` only — the comparisons return bool
         return expr.type.tag === "string";
-      case "IndexAccess": {
-        // `v[i]` on a non-Copy element auto-clones so the Vec stays intact (see the
-        // IndexAccess case), which makes the result a fresh allocation with no
-        // owner unless it is bound. `print(v[0])` leaked one copy per call.
-        const obj = expr.object.type.tag === "ref" ? expr.object.type.inner : expr.object.type;
-        const isDynamic = obj.tag === "vec" || (obj.tag === "array" && obj.size === null);
-        return isDynamic && this.needsDropCg(expr.type);
-      }
+      case "IndexAccess":
+        // `v[i]` on a non-Copy element auto-clones so the container stays intact
+        // (see the IndexAccess case), which makes the result a fresh allocation
+        // with no owner unless it is bound. `print(v[0])` leaked one copy per call.
+        return this.indexAccessClones(expr);
+      case "Unwrap":
+      case "Propagate":
+        return this.unwrapMovesPayload(expr);
       default:
         return false;
     }

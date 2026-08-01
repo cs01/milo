@@ -1,0 +1,42 @@
+// arena.clear() drops every value, frees the backing storage, and invalidates
+// every outstanding handle (the arena takes a fresh identity, so a pre-clear
+// handle can never alias a slot handed out after the clear).
+from "std/arena" import {
+    Arena
+}
+
+fn main(): i32 {
+    var a: Arena<string> = Arena<string>.new()
+    let h1 = a.alloc($"first heap string {1}")
+    let h2 = a.alloc($"second heap string {2}")
+    print($"{a.len()}")
+    // @expect: 2
+    print($"{a.valid(h1)}")
+    // @expect: true
+
+    a.clear()
+    print($"{a.len()}")
+    // @expect: 0
+    print($"{a.valid(h1)}")
+    // @expect: false
+    print($"{a.valid(h2)}")
+    // @expect: false
+    print($"{a.get(h1).isNone()}")
+    // @expect: true
+    print($"{a.free(h2)}")
+    // @expect: false
+
+    // A fresh slot after the clear reuses index 0 and generation 1, which is
+    // exactly what the old handles carried — the identity bump is what keeps
+    // them stale.
+    let h3 = a.alloc($"post-clear string {3}")
+    print($"{a.valid(h1)}")
+    // @expect: false
+    print(a.get(h3)!)
+    // @expect: post-clear string 3
+
+    a.clear()
+    print($"{a.len()}")
+    // @expect: 0
+    return 0
+}

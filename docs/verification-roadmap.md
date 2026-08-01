@@ -115,7 +115,7 @@ Goal: let users state properties (bounds, ranges, invariants) and have the compi
    fn get(v: &Vec<T>, i: usize{i < v.len()}) -> &T
    fn divide(a: i32, b: i32{b != 0}) -> i32
 
-   fn push(v: &var Vec<T>, x: T)
+   fn push(v: &mut Vec<T>, x: T)
        ensures v.len() == old(v.len()) + 1
    ```
 2. **Dynamic-first.** Lower predicates to debug-mode `assert` traps. Ships value immediately with no solver. Mirrors the existing overflow-safety pattern (compile-time where possible, debug traps otherwise).

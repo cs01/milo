@@ -1,0 +1,49 @@
+// `opt!` / `res?` move the payload out of the enum, so an unwrapped value that is
+// consumed in place (never bound) has no owner left to free it. This leaked one
+// heap buffer per evaluation — `print(arena.get(h)!)` in a loop leaked forever.
+// Correctness here is a leaks-run, not stdout; the fixture pins the shape so the
+// codegen path keeps being exercised, and asserts nothing double-frees.
+from "std/arena" import {
+    Arena
+}
+
+fn mkOpt(i: i64): Option<string> {
+    return Option.Some($"heap option {i} padded out")
+}
+
+fn mkRes(i: i64): Result<string, string> {
+    return Result.Ok($"heap result {i} padded out")
+}
+
+fn viaPropagate(): Result<i32, string> {
+    print(mkRes(1)?)
+    return Result.Ok(0)
+}
+
+fn main(): i32 {
+    print(mkOpt(1)!)
+    // @expect: heap option 1 padded out
+
+    // Ident operand: the ok branch zeroes the source slot, so the payload is
+    // owned by the consumer here too.
+    let o = mkOpt(2)
+    print(o!)
+    // @expect: heap option 2 padded out
+
+    viaPropagate()!
+    // @expect: heap result 1 padded out
+
+    var a: Arena<string> = Arena<string>.new()
+    let h = a.alloc($"arena string {4} padded out")
+    // Repeated because the leak was per-evaluation; a double-free regression
+    // trips inside the loop rather than in a single-shot call.
+    var total = 0
+    var i = 0
+    while i < 50 {
+        total = total + a.get(h)!.len
+        i = i + 1
+    }
+    print($"{total}")
+    // @expect: 1250
+    return 0
+}

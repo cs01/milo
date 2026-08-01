@@ -14,7 +14,7 @@ Enforced today: moves, second-class references, bounds checks, `Option`, structu
 
 ## Phase 1: `unsafe` Blocks + Safe FFI Surface — DONE
 
-`unsafe { }` is required for: pointer deref (`*ptr`), pointer indexing (`ptr[i]`), address-of (`&var x`), casting to pointer types (except the null literal `0 as *T`), `zeroed<T>()`, and extern calls with unsafe signatures.
+`unsafe { }` is required for: pointer deref (`*ptr`), pointer indexing (`ptr[i]`), address-of (`x.addrOf()`), casting to pointer types (except the null literal `0 as *T`), `zeroed<T>()`, and extern calls with unsafe signatures.
 
 Implemented:
 
@@ -31,7 +31,7 @@ Remaining: `unsafe fn` declarations (callers must wrap), `unsafe` visibility in 
 
 Same dataflow framework as the move checker: track which variables are "borrowed from" and reject mutation while borrows are live. Intraprocedural only.
 
-Done: mutating builtins (push/pop/insert/remove/reverse/swap/sort\*) and `&var self` methods are rejected on a receiver with a live borrow — a string-slice binding or an active for-in iteration. Frozen vars are also rejected as `&mut` args at any call site, and callback receivers are frozen during the callback check (`v.each(fn(x){ v.push(x) })` errors). Slice bindings release their freeze at scope pop; for-in at loop end; non-ref bindings (`let x = s[0..n].clone()`) release immediately. In-place element assignment (`v[i] = x`) stays legal — never reallocs.
+Done: mutating builtins (push/pop/insert/remove/reverse/swap/sort\*) and `&mut self` methods are rejected on a receiver with a live borrow — a string-slice binding or an active for-in iteration. Frozen vars are also rejected as `&mut` args at any call site, and callback receivers are frozen during the callback check (`v.each(fn(x){ v.push(x) })` errors). Slice bindings release their freeze at scope pop; for-in at loop end; non-ref bindings (`let x = s[0..n].clone()`) release immediately. In-place element assignment (`v[i] = x`) stays legal — never reallocs.
 
 Arena handles use always-on identity and generation checks, so stale or wrong-arena access returns `None`/`false` without checker-specific tainting.
 
@@ -40,10 +40,9 @@ Arena handles use always-on identity and generation checks, so stale or wrong-ar
 While a ref into a collection is live, the collection is frozen — mutation is a compile error until the ref goes out of scope.
 
 ```
-var items: Vec<string> = Vec.new()
-items.push("hello")
-let r: &string = &items[0]
-items.push("world")   // COMPILE ERROR: items is frozen while r is live
+var text: string = "hello world"
+let r = text[0..5]    // &string view — borrows are implicit, there is no `&x`
+text.push('!')        // COMPILE ERROR: cannot call 'push' on 'text' because it is borrowed
 print(r)
 ```
 
@@ -52,22 +51,27 @@ print(r)
 Use of a ref after its source was potentially modified (`.clear()`, `.push()` may realloc, reassignment, anything marked `@invalidates_refs`) is an error. Reuses the move checker's tainted-variable infrastructure — a ref taints like a variable after a move.
 
 ```
-var items: Vec<string> = Vec.new()
-let r: &string = &items[0]
-items.clear()          // invalidates all refs into items
-print(r)               // COMPILE ERROR: r invalidated by items.clear()
+var items: Vec<i64> = [1, 2, 3]
+let r = items[0..2]    // &[i64] view into items
+items.clear()          // invalidates all views into items
+print(r[0])            // COMPILE ERROR: r invalidated by items.clear()
 ```
 
 ### 2c: Arena Scope Tainting — superseded by dynamic identity/generation checks
 
-After `arena.clear()`/`arena.destroy()`, handles derived from that arena are tainted on that control-flow path. Handles tracked like refs; the arena is the source.
+After `arena.clear()`, handles derived from that arena are tainted on that control-flow path. Handles tracked like refs; the arena is the source.
 
 ```
-var a: Arena<Node> = Arena.new()
+var a: Arena<Node> = Arena<Node>.new()
 let handle = a.alloc(Node { value: 42 })
 a.clear()              // invalidates all handles from a
 a.get(handle)          // COMPILE ERROR: handle invalidated by a.clear()
 ```
+
+Shipped instead as a dynamic check: `clear()` takes a fresh arena identity, so
+`a.get(handle)` returns `None` rather than aliasing a slot allocated after the
+clear. There is no `destroy()` — an arena is an ordinary owned value and its
+scope exit frees everything it holds.
 
 ### Scope decisions
 
@@ -82,28 +86,34 @@ a.get(handle)          // COMPILE ERROR: handle invalidated by a.clear()
 At any call site, a variable cannot appear as both a `&var` argument and the source of a `&` argument. No interprocedural dataflow needed — just argument-origin tracking.
 
 ```
-fn update(items: &var Vec<string>, first: &string) {
-    items.push("boom")   // would invalidate first
+fn grow(v: &mut Vec<i64>, s: &[i64]) {
+    v.push(999)          // reallocates — would invalidate s
+    print(s[0])
 }
-update(&var items, &items[0])  // COMPILE ERROR: items as both &var and & source
+grow(v, v[0..2])         // COMPILE ERROR: v is borrowed mutably and shared in the same call
 ```
 
 ### 3b: Purity Inference for Safe Overlap
 
-3a is conservative — it rejects `fn read(items: &Vec<string>, first: &string)` even though `read` can't mutate. If a function takes only `&T` params, overlapping refs are provably safe. For `&var` params, infer whether the function actually mutates; if proven non-mutating, allow the overlap.
+3a is conservative — it rejects `fn read(items: &Vec<string>, first: &string)` even though `read` can't mutate. If a function takes only `&T` params, overlapping refs are provably safe. For `&mut` params, infer whether the function actually mutates; if proven non-mutating, allow the overlap.
 
 ### 3c: Arena Lifetime Scoping — not required for memory safety today
 
-Any call passing `&var Arena<T>` invalidates all handles derived from that arena before the call — the callee could `.clear()` it. Sound, no annotations, some false positives; users restructure to create handles after the call.
+Any call passing `&mut Arena<T>` invalidates all handles derived from that arena before the call — the callee could `.clear()` it. Sound, no annotations, some false positives; users restructure to create handles after the call.
 
 ```
-fn resetArena(a: &var Arena<Node>) { a.clear() }
+fn resetArena(a: &mut Arena<Node>) { a.clear() }
 
-var a = Arena.new()
+var a: Arena<Node> = Arena<Node>.new()
 let h = a.alloc(Node { value: 42 })
-resetArena(&var a)
-a.get(h)               // COMPILE ERROR: h invalidated (a passed as &var after h created)
+resetArena(a)
+a.get(h)               // COMPILE ERROR: h invalidated (a passed as &mut after h created)
 ```
+
+Not shipped, and not load-bearing: `clear()` gives the arena a fresh identity, so a
+pre-clear handle fails the identity check and reads `None` at runtime rather than
+aliasing a recycled slot. This phase would move that from a runtime `None` to a
+compile error.
 
 ## Phase 4: Dynamic Safety (Fallback Layer) — partial
 

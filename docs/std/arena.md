@@ -10,6 +10,14 @@ fn Arena.alloc(self: &mut Arena, val: T): Handle<T>
 
 _Undocumented._
 
+### `Arena.clear`
+
+```milo
+fn Arena.clear(self: &mut Arena)
+```
+
+_Undocumented._
+
 ### `Arena.free`
 
 ```milo
@@ -89,6 +97,20 @@ pub fn arenaAlloc<T>(a: &mut Arena<T>, val: T): Handle<T>
 ```
 
 Insert a value and return a handle to it.
+
+### `arenaClear`
+
+```milo
+pub fn arenaClear<T>(a: &mut Arena<T>)
+```
+
+Drop every value and release the backing storage in one go. Per-slot free()
+recycles a slot but never shrinks the arena, so a long-lived arena sits at its
+peak footprint forever; clear is the bulk-reset escape from that.
+
+Every outstanding handle goes stale because the arena takes a fresh identity —
+a pre-clear handle fails the arenaId check outright. Restarting generations at
+1 on a recycled Vec would otherwise let an old handle alias a new value.
 
 ### `arenaFree`
 

@@ -1,0 +1,30 @@
+// Indexing a SIZED array of non-Copy elements clones, exactly like Vec does. A
+// bare load handed out a second owner of the same buffer and both freed it at
+// scope exit — `fn peek(a: &[string; 2]) { return a[0] }` aborted on a double
+// free, with no unsafe anywhere in the program.
+
+fn peek(a: &[string; 2]): string {
+    return a[0]
+}
+
+fn main(): i32 {
+    var arr: [string; 2] = [$"heap zero {0}", $"heap one {1}"]
+
+    let s = peek(arr)
+    print(s)
+    // @expect: heap zero 0
+    print(arr[0])
+    // @expect: heap zero 0
+
+    // The clone is independent: mutating the array does not disturb the copy.
+    arr[0] = $"replaced {9}"
+    print(s)
+    // @expect: heap zero 0
+    print(arr[0])
+    // @expect: replaced 9
+
+    // Consumed in place (never bound) — the temp must still be freed, not leaked.
+    print(arr[1].len)
+    // @expect: 10
+    return 0
+}

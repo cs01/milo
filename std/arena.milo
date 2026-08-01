@@ -9,6 +9,8 @@
 //     let n = a.get(h)                  // Option<Node>: None once freed
 //     a.modify(h, |n| Node { ... })     // mutate the slot in place
 //     a.free(h)                         // bumps generation → old h now stale
+//     a.clear()                          // drops everything, frees storage,
+//                                        // invalidates every outstanding handle
 //
 // Reach for this over &T for graph/cyclic data: handles can live in struct fields
 // and be returned, and each slot's generation counter turns a use-after-free into
@@ -243,6 +245,25 @@ ensures result >= 0
     return a.live
 }
 
+// Drop every value and release the backing storage in one go. Per-slot free()
+// recycles a slot but never shrinks the arena, so a long-lived arena sits at its
+// peak footprint forever; clear is the bulk-reset escape from that.
+//
+// Every outstanding handle goes stale because the arena takes a fresh identity —
+// a pre-clear handle fails the arenaId check outright. Restarting generations at
+// 1 on a recycled Vec would otherwise let an old handle alias a new value.
+pub fn arenaClear<T>(a: &mut Arena<T>) {
+    var id: i64 = 0
+    unsafe {
+        id = _atomicAddI64((nextArenaId.addrOf()) as *u8, 1)
+    }
+    a.id = id
+    a.data = Vec.new()
+    a.gens = Vec.new()
+    a.freeList = Vec.new()
+    a.live = 0
+}
+
 // Snapshot every currently live handle. The returned handles remain ordinary
 // generational capabilities: later frees invalidate them, while later allocs do
 // not appear in this already-produced Vec. This is the safe enumeration shape
@@ -290,6 +311,10 @@ impl Arena<T> {
 
     fn free(self: &mut Self, h: Handle<T>): bool {
         return arenaFree(self, h)
+    }
+
+    fn clear(self: &mut Self) {
+        arenaClear(self)
     }
 
     fn valid(self: &Self, h: Handle<T>): bool {

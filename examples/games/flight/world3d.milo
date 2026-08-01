@@ -101,6 +101,66 @@ pub struct Flock {
     life: f64,
 }
 
+// A place worth flying over. The course is laid THROUGH these rather than along
+// a sine wander, because a wander over a real city is a wander over whichever
+// four blocks it happened to pick — and the reason to fly San Francisco is the
+// Golden Gate, not an arbitrary stretch of the Richmond.
+//
+// Local metres from the asset origin. They belong to the map, not to the world,
+// so a place with no tour laid out for it falls back to the wander.
+pub struct Mark {
+    name: string,
+    x: f64,
+    z: f64,
+}
+
+// Ordered as a route, not by importance: consecutive entries are near each
+// other, so the aircraft tours the city instead of crossing it end to end
+// between every pair of hoops.
+pub fn marksFor(cityName: &string): Vec<Mark> {
+    var m: Vec<Mark> = Vec.new()
+    if cityName != "San Francisco" {
+        return m
+    }
+    m.push(Mark {
+        name: "SALESFORCE TOWER", x: 1126.0, z: 412.0
+    }
+    )
+    m.push(Mark {
+        name: "ORACLE PARK", x: 1821.0, z: 0.0 - 824.0
+    }
+    )
+    m.push(Mark {
+        name: "BAY BRIDGE", x: 2833.0, z: 1369.0
+    }
+    )
+    m.push(Mark {
+        name: "TRANSAMERICA PYRAMID", x: 633.0, z: 1024.0
+    }
+    )
+    m.push(Mark {
+        name: "COIT TOWER", x: 370.0, z: 1826.0
+    }
+    )
+    m.push(Mark {
+        name: "ALCATRAZ", x: 0.0 - 1144.0, z: 4564.0
+    }
+    )
+    m.push(Mark {
+        name: "GOLDEN GATE BRIDGE", x: 0.0 - 6009.0, z: 3774.0
+    }
+    )
+    m.push(Mark {
+        name: "PALACE OF FINE ARTS", x: 0.0 - 3378.0, z: 1881.0
+    }
+    )
+    m.push(Mark {
+        name: "TWIN PEAKS", x: 0.0 - 3317.0, z: 0.0 - 3518.0
+    }
+    )
+    return m
+}
+
 pub struct Plane {
     x: f64,
     y: f64,
@@ -157,6 +217,11 @@ pub struct World {
     level: i64,
     cleared: i64, // rings cleared in total
     toNext: i64, // rings remaining before the country changes
+    // The tour, and how far along it the course has been laid. Empty for a place
+    // with no landmarks, which puts layRing back on the wandering sine.
+    marks: Vec<Mark>,
+    markIdx: i64,
+    markName: string, // what the course is heading for, for the HUD
     pathT: f64, // how far along the coin trail we have laid track
     // Trail head. Kept here rather than read off the end of `rings`, which is
     // swap-removed and so does not hold the newest ring last.
@@ -348,6 +413,9 @@ pub fn worldIn(seed: i64, places: Vec<City>, easy: bool): World {
         level: 1,
         cleared: 0,
         toNext: 10,
+        marks: Vec.new(),
+        markIdx: 0,
+        markName: "",
         pathT: 0.0,
         trailX: 0.0,
         trailZ: 0.0,
@@ -364,6 +432,7 @@ pub fn worldIn(seed: i64, places: Vec<City>, easy: bool): World {
         hint: 8.0,
         offCourse: 0.0,
     }
+    w.marks = marksFor(w.city.name)
     w.plane.y = heightAt(w.city, 0.0, 0.0) + 150.0
     for i in 0..10 {
         layRing(w)
@@ -393,15 +462,37 @@ fn roofUnderRing(c: &City, x: f64, z: f64, heading: f64, rad: f64): f64 {
 // new one — and the hoops already laid ahead are lifted clear of whatever is
 // now under them.
 fn rotatePlace(w: &mut World) {
+    stepPlace(w, 1)
+}
+
+// Step the rotation by one, either way. `dir` < 0 walks it backwards, which is
+// the exact inverse: forward consumes slot `nextIdx` and leaves the outgoing
+// place there, so backward reclaims slot `nextIdx - 1` and rewinds the cursor
+// onto it. Bound to LEFT / RIGHT so a place can be looked at on demand instead
+// of only arriving every tenth hoop.
+pub fn stepPlace(w: &mut World, dir: i64) {
     if w.next.len == 0 {
         return
     }
-    let k = w.nextIdx % w.next.len
+    var k = w.nextIdx % w.next.len
+    if dir < 0 {
+        k = (w.nextIdx - 1 + w.next.len) % w.next.len
+    }
     // Two moves through a hole: the slot the incoming place came out of is
     // where the outgoing one is parked, so the queue keeps cycling.
     let incoming = replace(w.next[k], cityEmpty())
     w.next[k] = replace(w.city, incoming)
-    w.nextIdx = (k + 1) % w.next.len
+    if dir < 0 {
+        w.nextIdx = k
+    } else {
+        w.nextIdx = (k + 1) % w.next.len
+    }
+    // The tour belongs to the place, so it is rebuilt whenever the place moves.
+    w.marks = marksFor(w.city.name)
+    w.markIdx = 0
+    w.markName = ""
+    w.banner = 2.2
+    w.evRegion = true
     for i in 0..w.rings.len {
         if w.rings[i].alive {
             let low = roofUnderRing(w.city, w.rings[i].x, w.rings[i].z, w.rings[i].face, w.rings[i].r) + w.rings[i].r + 34.0
@@ -417,7 +508,25 @@ fn rotatePlace(w: &mut World) {
 pub fn layRing(w: &mut World) {
     w.pathT = w.pathT + 1.0
     let t = w.pathT
-    let heading = Math.sin(t * 0.030) * 0.9 + Math.sin(t * 0.008) * 2.0
+    // No tour for this place: the original wander, which is the right shape for
+    // invented country where one heading is as good as another.
+    var heading = Math.sin(t * 0.030) * 0.9 + Math.sin(t * 0.008) * 2.0
+    if w.marks.len > 0 {
+        // Lay toward the landmark the tour is currently on, and step to the next
+        // once the track has reached it. The hoops keep their spacing, so a
+        // distant landmark simply takes more of them to arrive at.
+        var dx = w.marks[w.markIdx].x - w.trailX
+        var dz = w.marks[w.markIdx].z - w.trailZ
+        if Math.sqrt(dx * dx + dz * dz) < 420.0 {
+            w.markIdx = (w.markIdx + 1) % w.marks.len
+            dx = w.marks[w.markIdx].x - w.trailX
+            dz = w.marks[w.markIdx].z - w.trailZ
+        }
+        // A slow weave across the bearing. Dead-straight runs between landmarks
+        // fly themselves and there is nothing to do between hoops.
+        heading = Math.atan2(dx, dz) + Math.sin(t * 0.22) * 0.20
+        w.markName = w.marks[w.markIdx].name.clone()
+    }
     // Far apart: a hoop you have to line up needs room to line up in.
     let step = 300.0
     let nx = w.trailX + Math.sin(heading) * step
@@ -920,8 +1029,15 @@ fn clearRing(w: &mut World, i: i64) {
         }
         )
     }
-    // every ten rings, a new stretch of country — announced beforehand and
-    // crossfaded rather than snapped, so it reads as flying somewhere new
+    // Over a real place the course is a tour of that place and the aircraft
+    // stays put. Being yanked to another city ten hoops into the Golden Gate run
+    // is not progression, it is an interruption — LEFT / RIGHT move the place
+    // now, so leaving is the player's call.
+    if w.city.loaded {
+        return
+    }
+    // Invented country still cycles: there, the region change IS the
+    // progression, announced beforehand and crossfaded rather than snapped.
     w.toNext = w.toNext - 1
     if w.toNext <= 0 {
         w.toNext = 10

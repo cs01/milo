@@ -93,6 +93,12 @@ pub struct Input {
     quit: bool,
     mute: bool, // edge-triggered: true only on the frame M goes down
     muteHeld: bool,
+    // Step to the next / previous place, edge-triggered. In the default
+    // one-axis mode the aircraft steers itself, so LEFT and RIGHT carry no
+    // control input and are free to do this. `--pro` takes the bank axis back
+    // and these go quiet, because there the same keys are flying the aeroplane.
+    placeStep: i64,
+    placeHeld: bool,
     // Stick, not camera: the key you press is where you push the nose, so UP
     // dives and DOWN climbs. This is how every flight sim maps a stick and it
     // is the default here; `--natural` flips it back to UP-climbs.
@@ -102,6 +108,7 @@ pub struct Input {
 pub fn inputNew(invert: bool): Input {
     return Input {
         moveX: 0.0, moveY: 0.0, boost: false, quit: false, mute: false, muteHeld: false,
+        placeStep: 0, placeHeld: false,
         invert: invert,
     }
 }
@@ -112,6 +119,7 @@ pub fn pollInput(inp: &mut Input, ev: &mut [u8; 64]) {
     inp.moveY = 0.0
     inp.boost = false
     inp.mute = false
+    inp.placeStep = 0
 
     unsafe {
         while SDL_PollEvent(ev) != 0 {
@@ -160,6 +168,17 @@ pub fn pollInput(inp: &mut Input, ev: &mut [u8; 64]) {
         if inp.invert {
             inp.moveY = 0.0 - inp.moveY
         }
+        // Edge-triggered like M: held down, this would rip through every place
+        // in the rotation in a fraction of a second.
+        let stepDown = ks[SC_LEFT] != 0 || ks[SC_RIGHT] != 0
+        if stepDown && !inp.placeHeld {
+            if ks[SC_RIGHT] != 0 {
+                inp.placeStep = 1
+            } else {
+                inp.placeStep = 0 - 1
+            }
+        }
+        inp.placeHeld = stepDown
         if ks[SC_SPACE] != 0 {
             inp.boost = true
         }

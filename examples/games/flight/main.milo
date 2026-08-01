@@ -36,7 +36,7 @@ from "./textures" import {
     groundTexture, planeTexture
 }
 from "./world3d" import {
-    worldIn, worldUpdate, SEED
+    worldIn, worldUpdate, stepPlace, SEED
 }
 from "./city" import {
     City, cityLoad, cityParse, cityEmpty, cityAttachOrtho
@@ -282,6 +282,11 @@ pub fn main(): i32 {
 
         if inp.mute {
             musicToggle(snd)
+        }
+        // Only in one-axis mode: with `--pro` these same keys are the bank axis
+        // and stepping the world every time the player turned would be absurd.
+        if easy && inp.placeStep != 0 {
+            stepPlace(w, inp.placeStep)
         }
         musicTick(snd)
 

@@ -1695,8 +1695,15 @@ pub fn drawHud(c: &mut Canvas, w: &World, s: &Scene, fps: i64) {
     // frame, so it lives in --help and in cities/README.md.
     if w.city.loaded {
         text(c, 24, c.h - 58, w.city.name, 3, 0.75, 0.72, 0.55)
-        let togo = "NEXT PLACE IN " + w.toNext.toString()
-        text(c, 24, c.h - 26, togo, 2, 0.32, 0.34, 0.38)
+        // What the course is flying at. Without this the tour is invisible —
+        // the aircraft passes the Golden Gate and nothing says that is what it
+        // was, which is most of the point of routing over it.
+        if w.markName != "" {
+            text(c, 24, c.h - 26, "HEADING FOR " + w.markName, 2, 0.55, 0.62, 0.48)
+        } else {
+            let togo = "NEXT PLACE IN " + w.toNext.toString()
+            text(c, 24, c.h - 26, togo, 2, 0.32, 0.34, 0.38)
+        }
     } else {
         text(c, 24, c.h - 58, themeName(w.theme), 3, 0.75, 0.72, 0.55)
         let rem = "NEXT REGION IN " + w.toNext.toString()

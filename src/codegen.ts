@@ -4,7 +4,8 @@ import type { TargetInfo } from "./target";
 import type { Span } from "./ast";
 import { genVecSort, genVecSortBy, genVecSortByKey } from "./codegen-vec";
 import { classifyArg, classifyRet, AbiError, type ArgClass, type RetClass, type AbiStruct, type AbiLeaf } from "./abi";
-import { resolve, dirname, basename } from "path";
+import { resolve, dirname, basename, relative, isAbsolute } from "path";
+import { STDLIB_DIR } from "./stdlibBundle";
 
 // `.` can't appear in a Milo identifier, so this never collides with a user function.
 const GLOBAL_INIT_FN = "__milo.global_init";
@@ -12,6 +13,12 @@ const GLOBAL_INIT_FN = "__milo.global_init";
 // Scratch size for one formatted f64. Worst case at 17 significant digits is
 // "-1.2345678901234567e-308" — 24 bytes plus the NUL.
 const F64_BUF = 32;
+
+// The bounds-check message is one module-wide global, so the literal and the array length
+// in its declaration have to stay in lockstep — a mismatch is an LLVM verifier error.
+const BOUNDS_ERR_MSG = "milo: array index out of bounds: %d/%d at %s:%d\n";
+const BOUNDS_ERR_IR = BOUNDS_ERR_MSG.replace(/\n/g, "\\0A") + "\\00";
+const BOUNDS_ERR_LEN = BOUNDS_ERR_MSG.length + 1;
 
 interface ExternAbiInfo {
   args: (ArgClass | null)[]; // per fixed param; null = direct (scalar/ptr/ref — no rewrite)
@@ -251,6 +258,14 @@ export class Codegen {
   // on MSVC either — it is the macro `__acrt_iob_func(2)` — so eprint lowers to an
   // fprintf onto that handle.
   private emitFdPrintf(lines: string[], fd: number, fmtLabel: string, argsStr: string): void {
+    // Freestanding targets have one output sink — whatever printf the embedded runtime
+    // provides. There are no fds to write to, so a panic goes out the same channel as
+    // everything else rather than referencing a dprintf nothing defines.
+    if (this.target.os === "none") {
+      this.needsPrintf = true;
+      lines.push(`  call i32 (ptr, ...) @printf(ptr ${fmtLabel}${argsStr})`);
+      return;
+    }
     this.needsDprintf = true;
     if (!this.isWindows) {
       lines.push(`  call i32 (i32, ptr, ...) @dprintf(i32 ${fd}, ptr ${fmtLabel}${argsStr})`);
@@ -1242,8 +1257,12 @@ export class Codegen {
 
     // auto-declare C functions needed by built-ins and bounds checks
     const declaredExterns = new Set(externs.map(e => e.name));
-    if (this.needsBoundsCheck) { this.needsPrintf = true; this.needsExit = true; }
-    if (this.needsOverflowCheck) { this.needsPrintf = true; this.needsExit = true; }
+    // The bounds/overflow handler bodies are emitted after this point, so whichever
+    // printf emitFdPrintf will pick has to be declared here — by the time it sets the
+    // flag itself, the declares are already out.
+    const panicPrintf = () => { if (this.target.os === "none") this.needsPrintf = true; else this.needsDprintf = true; };
+    if (this.needsBoundsCheck) { panicPrintf(); this.needsExit = true; }
+    if (this.needsOverflowCheck) { panicPrintf(); this.needsExit = true; }
     if (this.needsSnprintf && !declaredExterns.has("snprintf"))
       this.output.splice(1, 0, "declare i32 @snprintf(ptr, i64, ptr, ...)");
     if (this.needsStrtod && !declaredExterns.has("strtod"))
@@ -1317,7 +1336,7 @@ export class Codegen {
     if (this.usedDbgDeclare)
       this.output.splice(1, 0, `declare void @llvm.dbg.declare(metadata, metadata, metadata)`);
     if (this.needsBoundsCheck)
-      this.output.splice(1, 0, `@.bounds_err = private unnamed_addr constant [40 x i8] c"milo: array index out of bounds: %d/%d\\0A\\00"`);
+      this.output.splice(1, 0, `@.bounds_err = private unnamed_addr constant [${BOUNDS_ERR_LEN} x i8] c"${BOUNDS_ERR_IR}"`);
     for (const [file, name] of this.checkFileConstants) {
       // Escape the path (Windows backslashes especially) so the declared array length
       // matches the actual bytes — a raw '\' desyncs LLVM's size check.
@@ -2010,7 +2029,7 @@ export class Codegen {
         idx32 = this.nextTemp();
         lines.push(`  ${idx32} = trunc i64 ${idxVal} to i32`);
       }
-      this.emitBoundsCheck(lines, idx32, String(size));
+      this.emitBoundsCheck(lines, idx32, String(size), expr.span);
       const ptr = this.nextTemp();
       lines.push(`  ${ptr} = getelementptr ${objTy}, ptr ${objPtr}, i32 0, i32 ${idx32}`);
       return [lines, ptr, elemTy];
@@ -2025,7 +2044,7 @@ export class Codegen {
   // look past ("call instruction cannot be vectorized"), quite apart from what it
   // does to inlining budgets and I-cache. `cold` also tells LLVM which way the
   // branch goes, so the check falls through in the common case.
-  private emitBoundsCheck(lines: string[], idx: string, size: string) {
+  private emitBoundsCheck(lines: string[], idx: string, size: string, span?: Span) {
     this.needsBoundsCheck = true;
     const cmpTmp = this.nextTemp();
     const okLabel = this.nextLabel("bounds.ok");
@@ -2034,7 +2053,11 @@ export class Codegen {
     lines.push(`  ${cmpTmp} = icmp ult i32 ${idx}, ${size}`);
     lines.push(`  br i1 ${cmpTmp}, label %${okLabel}, label %${failLabel}`);
     lines.push(`${failLabel}:`);
-    lines.push(`  call void @__milo_bounds_fail(i32 ${idx}, i32 ${size})`);
+    // The location rides into the out-of-line handler as arguments, the way the overflow
+    // check already does — keeping it out of the hot block, which is the whole point of
+    // the handler being out of line.
+    const filePtr = this.emitCheckFilePtr(lines, span);
+    lines.push(`  call void @__milo_bounds_fail(i32 ${idx}, i32 ${size}, ptr ${filePtr}, i32 ${span?.line ?? 0})`);
     lines.push(`  unreachable`);
     lines.push(`${okLabel}:`);
   }
@@ -2044,7 +2067,7 @@ export class Codegen {
     lines.push(`define internal void @__milo_overflow_fail(ptr %file, i32 %line) noreturn cold noinline {`);
     lines.push(`entry.bb:`);
     lines.push(`  %fmt = getelementptr [46 x i8], ptr @.overflow_err, i32 0, i32 0`);
-    lines.push(`  call i32 (ptr, ...) @printf(ptr %fmt, ptr %file, i32 %line)`);
+    this.emitFdPrintf(lines, 2, "%fmt", `, ptr %file, i32 %line`);
     this.panicAbort(lines);
     lines.push(`  unreachable`);
     lines.push(`}`);
@@ -2281,10 +2304,10 @@ export class Codegen {
   // Body of the out-of-line handler above. Emitted once per module.
   private boundsFailHelper(): string[] {
     const lines: string[] = [];
-    lines.push(`define internal void @__milo_bounds_fail(i32 %idx, i32 %len) noreturn cold noinline {`);
+    lines.push(`define internal void @__milo_bounds_fail(i32 %idx, i32 %len, ptr %file, i32 %line) noreturn cold noinline {`);
     lines.push(`entry.bb:`);
-    lines.push(`  %fmt = getelementptr [40 x i8], ptr @.bounds_err, i32 0, i32 0`);
-    lines.push(`  call i32 (ptr, ...) @printf(ptr %fmt, i32 %idx, i32 %len)`);
+    lines.push(`  %fmt = getelementptr [${BOUNDS_ERR_LEN} x i8], ptr @.bounds_err, i32 0, i32 0`);
+    this.emitFdPrintf(lines, 2, "%fmt", `, i32 %idx, i32 %len, ptr %file, i32 %line`);
     this.panicAbort(lines);
     lines.push(`  unreachable`);
     lines.push(`}`);
@@ -2313,10 +2336,10 @@ export class Codegen {
         lines.push(`  ${eq} = icmp eq ptr ${refs[i].ptr}, ${refs[j].ptr}`);
         lines.push(`  br i1 ${eq}, label %${bad}, label %${ok}`);
         lines.push(`${bad}:`);
-        const s = this.addString(`milo: aliasing '&mut' arguments at ${span?.line ?? 0}:${span?.col ?? 0} (two mutable borrows of the same value in one call)\n`);
+        const s = this.addString(`milo: aliasing '&mut' arguments at ${this.panicAt(span)} (two mutable borrows of the same value in one call)\n`);
         const errPtr = this.nextTemp();
         lines.push(`  ${errPtr} = getelementptr [${s.length} x i8], ptr ${s.label}, i32 0, i32 0`);
-        lines.push(`  call i32 (ptr, ...) @printf(ptr ${errPtr})`);
+        this.emitFdPrintf(lines, 2, errPtr, "");
         this.panicAbort(lines);
         lines.push(`  unreachable`);
         lines.push(`${ok}:`);
@@ -2340,14 +2363,14 @@ export class Codegen {
     lines.push(`  ${neg} = icmp slt i64 ${val}, 0`);
     lines.push(`  br i1 ${neg}, label %${failLabel}, label %${okLabel}`);
     lines.push(`${failLabel}:`);
-    const { label: errLabel, length: errLen } = this.addString(`milo: negative ${what} at ${span?.line ?? 0}:${span?.col ?? 0}: `);
+    const { label: errLabel, length: errLen } = this.addString(`milo: negative ${what} at ${this.panicAt(span)}: `);
     const errPtr = this.nextTemp();
     lines.push(`  ${errPtr} = getelementptr [${errLen} x i8], ptr ${errLabel}, i32 0, i32 0`);
-    lines.push(`  call i32 (ptr, ...) @printf(ptr ${errPtr})`);
+    this.emitFdPrintf(lines, 2, errPtr, "");
     const nfmt = this.addString("%lld\n");
     const nfmtPtr = this.nextTemp();
     lines.push(`  ${nfmtPtr} = getelementptr [${nfmt.length} x i8], ptr ${nfmt.label}, i32 0, i32 0`);
-    lines.push(`  call i32 (ptr, ...) @printf(ptr ${nfmtPtr}, i64 ${val})`);
+    this.emitFdPrintf(lines, 2, nfmtPtr, `, i64 ${val}`);
     this.panicAbort(lines);
     lines.push(`  unreachable`);
     lines.push(`${okLabel}:`);
@@ -2360,7 +2383,7 @@ export class Codegen {
   private emitDivByZeroCheck(lines: string[], divisor: string, dividend: string, llType: string, signed: boolean, bits: number, span?: { line: number; col: number }) {
     this.needsPrintf = true;
     this.needsExit = true;
-    const at = `${span?.line ?? 0}:${span?.col ?? 0}`;
+    const at = this.panicAt(span);
     const okLabel = this.nextLabel("divz.ok");
     const zeroFail = this.nextLabel("divz.zero");
 
@@ -2371,7 +2394,7 @@ export class Codegen {
       const s = this.addString(`${msg}\n`);
       const errPtr = this.nextTemp();
       lines.push(`  ${errPtr} = getelementptr [${s.length} x i8], ptr ${s.label}, i32 0, i32 0`);
-      lines.push(`  call i32 (ptr, ...) @printf(ptr ${errPtr})`);
+      this.emitFdPrintf(lines, 2, errPtr, "");
       this.panicAbort(lines);
       lines.push(`  unreachable`);
     };
@@ -2401,7 +2424,7 @@ export class Codegen {
 
   private emitShiftCheck(lines: string[], amount: string, llType: string, bits: number, span?: { line: number; col: number }) {
     this.needsPrintf = true;
-    const at = `${span?.line ?? 0}:${span?.col ?? 0}`;
+    const at = this.panicAt(span);
     const okLabel = this.nextLabel("shift.ok");
     const failLabel = this.nextLabel("shift.oob");
     // Unsigned compare so a negative amount (huge as unsigned) fails the same way.
@@ -2412,7 +2435,7 @@ export class Codegen {
     const s = this.addString(`milo: shift amount out of range (>= ${bits}) at ${at}\n`);
     const errPtr = this.nextTemp();
     lines.push(`  ${errPtr} = getelementptr [${s.length} x i8], ptr ${s.label}, i32 0, i32 0`);
-    lines.push(`  call i32 (ptr, ...) @printf(ptr ${errPtr})`);
+    this.emitFdPrintf(lines, 2, errPtr, "");
     this.panicAbort(lines);
     lines.push(`  unreachable`);
     lines.push(`${okLabel}:`);
@@ -2443,9 +2466,30 @@ export class Codegen {
     return res;
   }
 
+  // `file:line:col` stamp baked into a runtime panic message. Prefer the span's own file
+  // over the file being compiled: a panic can fire inside an imported module (a `!` in
+  // std/fs), and blaming the entry file sends the reader to the wrong source line.
+  private panicAt(span?: Span): string {
+    const file = span?.file ?? this.filePath;
+    return `${file ? `${this.displayPath(file)}:` : ""}${span?.line ?? 0}:${span?.col ?? 0}`;
+  }
+
+  // The path a panic message shows. An absolute one bakes the *compiling* machine's
+  // directory layout — and its username — into every binary that ships, so print the path
+  // the way the author would type it: relative to the working directory, or `std/x.milo`
+  // for a stdlib file. DWARF paths are deliberately left absolute; a debugger needs those.
+  private displayPath(file: string): string {
+    if (!isAbsolute(file)) return file;
+    for (const base of [process.cwd(), STDLIB_DIR]) {
+      const rel = relative(base, file);
+      if (rel && !rel.startsWith("..") && !isAbsolute(rel)) return rel.replace(/\\/g, "/");
+    }
+    return file;
+  }
+
   // Pointer to the interned name of the file a check lives in, for its error message.
   private emitCheckFilePtr(lines: string[], span?: Span): string {
-    const file = span?.file ?? this.filePath ?? "<unknown>";
+    const file = this.displayPath(span?.file ?? this.filePath ?? "<unknown>");
     let global = this.checkFileConstants.get(file);
     if (!global) {
       global = `@.check_file_${this.checkFileConstants.size}`;
@@ -2502,7 +2546,7 @@ export class Codegen {
     const fmtPtr = this.nextTemp();
     lines.push(`  ${fmtPtr} = getelementptr [44 x i8], ptr @.range_err, i32 0, i32 0`);
     const filePtr = this.emitCheckFilePtr(lines, span);
-    lines.push(`  call i32 (ptr, ...) @printf(ptr ${fmtPtr}, ptr ${filePtr}, i32 ${span?.line ?? 0})`);
+    this.emitFdPrintf(lines, 2, fmtPtr, `, ptr ${filePtr}, i32 ${span?.line ?? 0}`);
     this.panicAbort(lines);
     lines.push(`  unreachable`);
     lines.push(`${okLabel}:`);
@@ -2542,7 +2586,7 @@ export class Codegen {
     const kindPtr = this.nextTemp();
     lines.push(`  ${kindPtr} = getelementptr [${kind.length + 1} x i8], ptr @.contract_kind_${kind}, i32 0, i32 0`);
     const filePtr = this.emitCheckFilePtr(lines, span);
-    lines.push(`  call i32 (ptr, ...) @printf(ptr ${fmtPtr}, ptr ${kindPtr}, ptr ${filePtr}, i32 ${span?.line ?? 0})`);
+    this.emitFdPrintf(lines, 2, fmtPtr, `, ptr ${kindPtr}, ptr ${filePtr}, i32 ${span?.line ?? 0}`);
     this.panicAbort(lines);
     lines.push(`  unreachable`);
     lines.push(`${okLabel}:`);
@@ -3888,18 +3932,16 @@ export class Codegen {
       const failLabel = this.nextLabel("assert.fail");
       lines.push(`  br i1 ${condVal}, label %${okLabel}, label %${failLabel}`);
       lines.push(`${failLabel}:`);
-      const file = this.filePath ?? "<unknown>";
-      const line = expr.span?.line ?? 0;
-      const col = expr.span?.col ?? 0;
+      const at = this.panicAt(expr.span);
       if (expr.args.length >= 2) {
         const [al2, msgVal] = this.genExpr(expr.args[1].expr);
         lines.push(...al2);
         const msgPtr = this.nextTemp();
         lines.push(`  ${msgPtr} = extractvalue %String ${msgVal}, 0`);
-        const fmtStr = this.addString(`assertion failed at ${file}:${line}:${col}: %s\n`);
+        const fmtStr = this.addString(`assertion failed at ${at}: %s\n`);
         this.emitFdPrintf(lines, 2, fmtStr.label, `, ptr ${msgPtr}`);
       } else {
-        const fmtStr = this.addString(`assertion failed at ${file}:${line}:${col}\n`);
+        const fmtStr = this.addString(`assertion failed at ${at}\n`);
         this.emitFdPrintf(lines, 2, fmtStr.label, "");
       }
       this.panicAbort(lines);
@@ -5559,6 +5601,10 @@ export class Codegen {
     const isResult = expr.enumName.startsWith("Result_");
     const errVariant = isResult ? layout.variants.get("Err") : null;
     const errIsString = errVariant && errVariant.fieldTypes.length === 1 && errVariant.fieldTypes[0] === "%String";
+    // Panics go to stderr, not stdout: a tool whose stdout is being piped must not have
+    // its own death message land in the consumer's data stream.
+    const errPayloadTy = errVariant?.fieldTypes.length === 1 ? errVariant.fieldTypes[0] : null;
+    const errPayloadEnum = errPayloadTy?.startsWith("%") ? errPayloadTy.slice(1) : null;
     if (isResult && errIsString) {
       // Err(string) — extract and print the message
       const errPayloadPtr = this.nextTemp();
@@ -5567,27 +5613,25 @@ export class Codegen {
       lines.push(`  ${errStr} = load %String, ptr ${errPayloadPtr}`);
       const errDataPtr = this.nextTemp();
       lines.push(`  ${errDataPtr} = extractvalue %String ${errStr}, 0`);
-      const fmtMsg = `error at ${span?.line ?? 0}:${span?.col ?? 0}: %s`;
-      const { label: fmtLabel, length: fmtLen } = this.addString(fmtMsg);
-      const fmtPtr = this.nextTemp();
-      lines.push(`  ${fmtPtr} = getelementptr [${fmtLen} x i8], ptr ${fmtLabel}, i32 0, i32 0`);
-      lines.push(`  call i32 (ptr, ...) @printf(ptr ${fmtPtr}, ptr ${errDataPtr})`);
+      const fmt = this.addString(`error at ${this.panicAt(span)}: %s\n`);
+      this.emitFdPrintf(lines, 2, fmt.label, `, ptr ${errDataPtr}`);
+    } else if (isResult && errPayloadEnum && this.enumLayouts.has(errPayloadEnum)) {
+      // Err(SomeEnum) — say *which* error. "unwrap called on Err" alone tells the reader
+      // nothing they can act on; `Err(IoError.PermissionDenied)` is the whole diagnosis.
+      const errPayloadPtr = this.nextTemp();
+      lines.push(`  ${errPayloadPtr} = getelementptr ${enumTy}, ptr ${enumAddr}, i32 0, i32 1`);
+      const errVal = this.nextTemp();
+      lines.push(`  ${errVal} = load ${errPayloadTy}, ptr ${errPayloadPtr}`);
+      const desc = this.emitEnumDisplay(errPayloadEnum, errVal, lines);
+      const fmt = this.addString(`error at ${this.panicAt(span)}: unwrap called on Err(%s)\n`);
+      this.emitFdPrintf(lines, 2, fmt.label, `, ptr ${desc}`);
     } else if (isResult) {
-      // Err(non-string) — print generic message with enum type name
-      const errMsg = `error at ${span?.line ?? 0}:${span?.col ?? 0}: unwrap called on Err`;
-      const { label: errLabel, length: errLen } = this.addString(errMsg);
-      const errPtr = this.nextTemp();
-      lines.push(`  ${errPtr} = getelementptr [${errLen} x i8], ptr ${errLabel}, i32 0, i32 0`);
-      lines.push(`  call i32 (ptr, ...) @printf(ptr ${errPtr})`);
+      const fmt = this.addString(`error at ${this.panicAt(span)}: unwrap called on Err\n`);
+      this.emitFdPrintf(lines, 2, fmt.label, "");
     } else {
-      const errMsg = `error at ${span?.line ?? 0}:${span?.col ?? 0}: unwrap called on None`;
-      const { label: errLabel, length: errLen } = this.addString(errMsg);
-      const errPtr = this.nextTemp();
-      lines.push(`  ${errPtr} = getelementptr [${errLen} x i8], ptr ${errLabel}, i32 0, i32 0`);
-      lines.push(`  call i32 (ptr, ...) @printf(ptr ${errPtr})`);
+      const fmt = this.addString(`error at ${this.panicAt(span)}: unwrap called on None\n`);
+      this.emitFdPrintf(lines, 2, fmt.label, "");
     }
-    lines.push(`  call i32 @putchar(i32 10)`);
-    this.needsPutchar = true;
     this.panicAbort(lines);
     lines.push(`  unreachable`);
 
@@ -6136,9 +6180,9 @@ export class Codegen {
     if (idxTy === "i64") {
       const idx32 = this.nextTemp();
       lines.push(`  ${idx32} = trunc i64 ${iv} to i32`);
-      this.emitBoundsCheck(lines, idx32, len32);
+      this.emitBoundsCheck(lines, idx32, len32, expr.span);
     } else {
-      this.emitBoundsCheck(lines, iv, len32);
+      this.emitBoundsCheck(lines, iv, len32, expr.span);
     }
     const data = this.nextTemp();
     lines.push(`  ${data} = extractvalue %String ${ov}, 0`);
@@ -6967,9 +7011,8 @@ export class Codegen {
     this.needsMalloc = true;
     this.needsFree = true;
     this.needsMemcpy = true;
-    this.needsPrintf = true;
+    this.needsDprintf = true;
     this.needsExit = true;
-    this.needsPutchar = true;
 
     const elemSize = this.typeSizeOf(expr.elementType);
     const elemTy = this.llvmType(expr.elementType);
@@ -6999,11 +7042,10 @@ export class Codegen {
 
     lines.push(`${panicLabel}:`);
     const span = expr.span;
-    const { label: errLabel, length: errLen } = this.addString(`insert index out of bounds at ${span?.line ?? 0}:${span?.col ?? 0}`);
+    const { label: errLabel, length: errLen } = this.addString(`insert index out of bounds at ${this.panicAt(span)}\n`);
     const errPtr = this.nextTemp();
     lines.push(`  ${errPtr} = getelementptr [${errLen} x i8], ptr ${errLabel}, i32 0, i32 0`);
-    lines.push(`  call i32 (ptr, ...) @printf(ptr ${errPtr})`);
-    lines.push(`  call i32 @putchar(i32 10)`);
+    this.emitFdPrintf(lines, 2, errPtr, "");
     this.panicAbort(lines);
     lines.push(`  unreachable`);
 
@@ -7073,9 +7115,8 @@ export class Codegen {
 
   private genVecRemove(expr: HIRExpr & { kind: "VecRemove" }, lines: string[]): [string[], string, string] {
     this.hasVecType = true;
-    this.needsPrintf = true;
+    this.needsDprintf = true;
     this.needsExit = true;
-    this.needsPutchar = true;
 
     const elemSize = this.typeSizeOf(expr.elementType);
     const elemTy = this.llvmType(expr.elementType);
@@ -7099,11 +7140,10 @@ export class Codegen {
 
     lines.push(`${panicLabel}:`);
     const span = expr.span;
-    const { label: errLabel, length: errLen } = this.addString(`remove index out of bounds at ${span?.line ?? 0}:${span?.col ?? 0}`);
+    const { label: errLabel, length: errLen } = this.addString(`remove index out of bounds at ${this.panicAt(span)}\n`);
     const errPtr = this.nextTemp();
     lines.push(`  ${errPtr} = getelementptr [${errLen} x i8], ptr ${errLabel}, i32 0, i32 0`);
-    lines.push(`  call i32 (ptr, ...) @printf(ptr ${errPtr})`);
-    lines.push(`  call i32 @putchar(i32 10)`);
+    this.emitFdPrintf(lines, 2, errPtr, "");
     this.panicAbort(lines);
     lines.push(`  unreachable`);
 
@@ -7464,11 +7504,11 @@ export class Codegen {
     lines.push(`  br i1 ${bad}, label %${panicLabel}, label %${okLabel}`);
     lines.push(`${panicLabel}:`);
     const { label: errLabel, length: errLen } = this.addString(
-      `milo: ${what} range out of bounds: %lld..%lld (len %lld) at ${span?.line ?? 0}:${span?.col ?? 0}\n`,
+      `milo: ${what} range out of bounds: %lld..%lld (len %lld) at ${this.panicAt(span)}\n`,
     );
     const errPtr = this.nextTemp();
     lines.push(`  ${errPtr} = getelementptr [${errLen} x i8], ptr ${errLabel}, i32 0, i32 0`);
-    lines.push(`  call i32 (ptr, ...) @printf(ptr ${errPtr}, i64 ${startVal}, i64 ${endVal}, i64 ${lenVal})`);
+    this.emitFdPrintf(lines, 2, errPtr, `, i64 ${startVal}, i64 ${endVal}, i64 ${lenVal}`);
     this.panicAbort(lines);
     lines.push(`  unreachable`);
     lines.push(`${okLabel}:`);
@@ -7597,11 +7637,11 @@ export class Codegen {
     lines.push(`  br i1 ${bad}, label %${panicLabel}, label %${okLabel}`);
     lines.push(`${panicLabel}:`);
     const { label: errLabel, length: errLen } = this.addString(
-      `milo: slice range out of bounds: %lld..%lld (len %lld) at ${expr.span?.line ?? 0}:${expr.span?.col ?? 0}\n`,
+      `milo: slice range out of bounds: %lld..%lld (len %lld) at ${this.panicAt(expr.span)}\n`,
     );
     const errPtr = this.nextTemp();
     lines.push(`  ${errPtr} = getelementptr [${errLen} x i8], ptr ${errLabel}, i32 0, i32 0`);
-    lines.push(`  call i32 (ptr, ...) @printf(ptr ${errPtr}, i64 ${startVal}, i64 ${endVal}, i64 ${lenVal})`);
+    this.emitFdPrintf(lines, 2, errPtr, `, i64 ${startVal}, i64 ${endVal}, i64 ${lenVal}`);
     this.panicAbort(lines);
     lines.push(`  unreachable`);
     lines.push(`${okLabel}:`);
@@ -7651,11 +7691,11 @@ export class Codegen {
     lines.push(`  br i1 ${bad}, label %${panicLabel}, label %${okLabel}`);
     lines.push(`${panicLabel}:`);
     const { label: errLabel, length: errLen } = this.addString(
-      `milo: slice range out of bounds: %lld..%lld (len ${size}) at ${expr.span?.line ?? 0}:${expr.span?.col ?? 0}\n`,
+      `milo: slice range out of bounds: %lld..%lld (len ${size}) at ${this.panicAt(expr.span)}\n`,
     );
     const errPtr = this.nextTemp();
     lines.push(`  ${errPtr} = getelementptr [${errLen} x i8], ptr ${errLabel}, i32 0, i32 0`);
-    lines.push(`  call i32 (ptr, ...) @printf(ptr ${errPtr}, i64 ${startVal}, i64 ${endVal})`);
+    this.emitFdPrintf(lines, 2, errPtr, `, i64 ${startVal}, i64 ${endVal}`);
     this.panicAbort(lines);
     lines.push(`  unreachable`);
     lines.push(`${okLabel}:`);
@@ -7914,7 +7954,7 @@ export class Codegen {
       } else {
         idx32 = idxVal;
       }
-      this.emitBoundsCheck(lines, idx32, len32);
+      this.emitBoundsCheck(lines, idx32, len32, expr.span);
     }
 
     // load data pointer and GEP to element

@@ -1301,10 +1301,14 @@ export class Codegen {
         this.output.splice(1, 0, `declare i32 @dprintf(i32, ptr, ...)`);
       }
     }
-    if (this.needsFwrite && !declaredExterns.has("fwrite")) {
+    if (this.needsFwrite && !declaredExterns.has("fwrite"))
       this.output.splice(1, 0, `declare i64 @fwrite(ptr, i64, i64, ptr)`);
-      if (!this.isWindows) this.output.splice(1, 0, `@${this.stdoutSymbol} = external global ptr`);
-    }
+    // The stdout data symbol is ours regardless of who declared fwrite. Nesting
+    // it under that guard meant a program declaring its own `extern fn fwrite`
+    // — writing a file, say — got print's `load ptr @__stdoutp` with nothing
+    // declaring @__stdoutp, and failed to link.
+    if (this.needsFwrite && !this.isWindows && !declaredExterns.has(this.stdoutSymbol))
+      this.output.splice(1, 0, `@${this.stdoutSymbol} = external global ptr`);
     // Both eprint and print-to-stdout need it on MSVC; declaring it twice is an LLVM error.
     if (this.needsIob && !declaredExterns.has("__acrt_iob_func"))
       this.output.splice(1, 0, `declare ptr @__acrt_iob_func(i32)`);

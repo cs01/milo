@@ -1,0 +1,14 @@
+// print() goes through stdout's own FILE*, which needs the libc stdout data
+// symbol declared. That declaration used to be emitted only when codegen also
+// declared fwrite — so a program declaring its own `extern fn fwrite`, as any
+// file writer does, took print's load of @__stdoutp with nothing declaring it
+// and failed to link.
+
+pub extern fn fwrite(ptr: *u8, size: i64, count: i64, stream: *u8): i64
+
+fn main(): i32 {
+    print("linked")
+    return 0
+}
+
+// @expect: linked

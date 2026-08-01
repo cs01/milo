@@ -40,9 +40,14 @@ pub fn nextTheme(t: Theme): Theme {
     }
 }
 
-pub let TILE: f64 = 44.0 // world units per terrain quad
+// Terrain quads are coarse on purpose now. Before the aerial drape the quad WAS
+// the detail — colour was per-corner, so a big quad meant a visibly blocky
+// ground. With a photograph sampled per pixel the geometry only has to carry the
+// silhouette, which lets the same triangle budget reach several kilometres
+// instead of one. A city you can see across is worth more than a smooth hill.
+pub let TILE: f64 = 110.0 // world units per terrain quad
 
-pub let VIEW_TILES: i64 = 24 // radius of the drawn terrain grid
+pub let VIEW_TILES: i64 = 40 // radius of the drawn terrain grid -> 4.4 km
 
 // A ring you fly THROUGH, Pilotwings-style: far easier to read at speed than a
 // coin you have to touch, and it tells you which way to be pointing.

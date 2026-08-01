@@ -26,6 +26,12 @@ from "std/math" import {
 from "std/sysinfo" import {
     cpuCount
 }
+from "std/env" import {
+    Env
+}
+from "std/strconv" import {
+    parseInt
+}
 
 // How many horizontal bands a frame is cut into, which is how many OS threads a
 // fan-out uses: one per core, but never so many that a band is a sliver. Below
@@ -34,6 +40,19 @@ from "std/sysinfo" import {
 // on this thread" — the serial path, kept for A/B measurement and for machines
 // that report a single core.
 pub fn bandsFor(h: i64): i64 {
+    // FLYBY_BANDS=1 is the serial renderer. The band split has to be exact, not
+    // approximately exact — an off-by-one boundary is a handful of wrong pixels —
+    // so the way to check it is to capture the same frames both ways and diff the
+    // files. That needs a switch, and a switch nobody can reach is not one.
+    match parseInt(Env.getOr("FLYBY_BANDS", "")) {
+        Option.Some(v) => {
+            if v >= 1 {
+                return v
+            }
+        }
+        Option.None => {
+        }
+    }
     var n = cpuCount()
     if n < 1 {
         n = 1

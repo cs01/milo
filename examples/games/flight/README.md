@@ -121,17 +121,24 @@ The composite pass — a million pixels of bloom, tone curve and pack — fans o
 same way. The bloom chain above it does not: it is nine passes over 57k pixels and
 nine thread spawns cost more than the passes do.
 
-On an M4 (10 cores), 1280×720 over San Francisco:
+`FLYBY_BANDS` overrides the band count; `FLYBY_BANDS=1` is the serial renderer.
+On an M4 (10 cores), 1280×720 over San Francisco, same binary:
 
-| | before | after |
+| | `FLYBY_BANDS=1` | default (10) |
 |---|---|---|
-| raster kernel | 12 ms | 3 ms |
-| composite | 8 ms | 4 ms |
-| **whole frame** | **25 ms** | **13 ms** |
+| raster kernel | 14 ms | 3 ms |
+| bloom + composite | 7 ms | 4 ms |
+| **whole frame** | **26 ms** | **13 ms** |
 
-Output is bit-identical: six captured frames, 2.7 MB each, zero differing bytes
-against the single-threaded renderer. That is the test that matters — a band split
-that is even slightly wrong shows up as a seam, and a seam is a handful of pixels.
+Output is bit-identical: six captured frames, 2.7 MB each, zero differing bytes at
+1, 3 and 10 bands. That is the test that matters — a band boundary that is off by a
+row is a handful of wrong pixels, and a tolerance would pass it.
+
+```bash
+FLYBY_BANDS=1 ./shot /tmp/a --city cities/sf.city 200 320 440
+              ./shot /tmp/b --city cities/sf.city 200 320 440
+cmp /tmp/a-200.ppm /tmp/b-200.ppm
+```
 
 ## Bridges
 

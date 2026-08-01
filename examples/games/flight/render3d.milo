@@ -23,7 +23,10 @@ from "./textures" import {
     groundTexture, planeTexture
 }
 from "./world3d" import {
-    World, Trail, heightAt, TILE, VIEW_TILES
+    World, Trail, heightAt, coverAt, blockOf, foldIn, unfold, TILE, VIEW_TILES
+}
+from "./city" import {
+    City, COVER_URBAN, COVER_PARK, COVER_SAND, COVER_WATER, BUILDING_MARGIN, cityCellX, cityCellZ
 }
 
 // Sky gradient plus a sun disc, painted before anything else. There is no depth
@@ -79,11 +82,17 @@ fn drawClouds(c: &mut Canvas, s: &Scene, w: &World, v: &View) {
             // scatters one puff-ball per cell evenly across the whole sky, which
             // reads as a lattice — real cloud clumps.
             let cover = noise2((cxi as f64) * 0.34, (czi as f64) * 0.34)
-            if cover < 0.42 {
+            // Thinner cover over a real city: the overcast that suits an
+            // invented coastline hides the thing you loaded the map to see.
+            var minCover = 0.42
+            if w.city.loaded {
+                minCover = 0.66
+            }
+            if cover < minCover {
                 continue
             }
             // denser banks carry more individual clouds
-            let clump = 1 + ((cover - 0.42) * 5.0) as i64
+            let clump = 1 + ((cover - minCover) * 5.0) as i64
             for q in 0..clump {
                 let jx = propHash(cxi * 31 + q * 13 + 1, czi * 17 + q * 7 + 9)
                 let jz = propHash(cxi * 11 + q * 5 + 4, czi * 23 + q * 19 + 2)
@@ -333,11 +342,35 @@ fn themedSmooth(theme: i64, h: f64, slope: f64): Rgb {
 
 // Gradient magnitude of the seabed, ignoring the wave train — how steeply the
 // land goes under. Used to tell a beach from a flat shallow pan.
-fn bedSlope(x: f64, z: f64): f64 {
+fn bedSlope(cc: &City, x: f64, z: f64): f64 {
     let e = 9.0
-    let dx = heightAt(x + e, z) - heightAt(x - e, z)
-    let dz = heightAt(x, z + e) - heightAt(x, z - e)
+    let dx = heightAt(cc, x + e, z) - heightAt(cc, x - e, z)
+    let dz = heightAt(cc, x, z + e) - heightAt(cc, x, z - e)
     return Math.sqrt(dx * dx + dz * dz) / (2.0 * e)
+}
+
+// Ground colour over a real city. The land-cover grid decides, not the height:
+// a park and the block next to it sit at the same elevation, so the
+// height-banded palette that reads a coastline correctly paints Golden Gate
+// Park as beach. Slope still gets a say — SF's hills are steep enough that the
+// scarps want to read as rock however they are zoned.
+fn cityGround(w: &World, x: f64, z: f64, slope: f64): Rgb {
+    let cv = coverAt(w.city, x, z)
+    var base = rgb(0.30, 0.29, 0.28)
+    if cv == COVER_PARK {
+        base = rgb(0.11, 0.29, 0.11)
+    } else if cv == COVER_SAND {
+        base = rgb(0.62, 0.56, 0.40)
+    } else if cv == COVER_WATER {
+        base = rgb(0.05, 0.20, 0.30)
+    } else {
+        // Built ground is not one grey. A slow field mottles it into districts,
+        // which is what stops a whole city from looking like poured concrete.
+        let m = noise2(x * 0.004, z * 0.004)
+        base = rgb(0.20, 0.20, 0.22).lerp(rgb(0.29, 0.29, 0.30), m)
+    }
+    let rock = smoothstep(0.42, 0.85, slope)
+    return base.lerp(rgb(0.31, 0.29, 0.27), rock)
 }
 
 // One terrain grid corner: height, its own light term, and its own colour. The
@@ -388,11 +421,13 @@ fn cornerAt(cc: &mut Corners, s: &Scene, w: &World, ix: i64, iz: i64): Corner {
     if !cc.ok[i] {
         let x = ((cc.baseX + ix - VIEW_TILES) as f64) * TILE
         let z = ((cc.baseZ + iz - VIEW_TILES) as f64) * TILE
-        let h = surfaceAt(x, z, w.time)
-        let nrm = normalAt(x, z, w.time)
+        let h = surfaceAt(w.city, x, z, w.time)
+        let nrm = normalAt(w.city, x, z, w.time)
         let slope = 1.0 - nrm.y
         var col = themedSmooth(w.theme, h, slope)
-        if w.themeMix > 0.0 {
+        if w.city.loaded {
+            col = cityGround(w, x, z, slope)
+        } else if w.themeMix > 0.0 {
             col = col.lerp(themedSmooth(w.prevTheme, h, slope), w.themeMix)
         }
         // Two low-frequency fields break up the flat wash. Both are smooth in
@@ -401,6 +436,9 @@ fn cornerAt(cc: &mut Corners, s: &Scene, w: &World, ix: i64, iz: i64): Corner {
         let band = 0.94 + 0.12 * Math.sin(h * 0.09)
         var lt = shade(s, nrm.x, nrm.y, nrm.z, 0.34)
         var tw = 1.0
+        if w.city.loaded {
+            tw = 0.45
+        }
         var rr = col.r * det * band
         var gg = col.g * det * band
         var bb = col.b * det * band
@@ -417,10 +455,17 @@ fn cornerAt(cc: &mut Corners, s: &Scene, w: &World, ix: i64, iz: i64): Corner {
         // colour change you infer.
         let wet = smoothstep(1.5, -2.5, h)
         if wet > 0.0 {
-            let shallow = rgb(0.06, 0.40, 0.42)
-            let deep = rgb(0.004, 0.03, 0.13)
+            var shallow = rgb(0.06, 0.40, 0.42)
+            var deep = rgb(0.004, 0.03, 0.13)
+            if w.city.loaded {
+                // A tropical shallow-water green is exactly wrong for a cold,
+                // silty northern bay, and SRTM puts nearly all of one at 0 m —
+                // so that green would be the WHOLE bay.
+                shallow = rgb(0.055, 0.150, 0.175)
+                deep = rgb(0.010, 0.045, 0.085)
+            }
             // depth is measured against the seabed, not the animated surface
-            let bed = heightAt(x, z)
+            let bed = heightAt(w.city, x, z)
             let body = shallow.lerp(deep, smoothstep(-2.0, -46.0, bed))
 
             // view direction from the eye to this point
@@ -492,7 +537,7 @@ fn cornerAt(cc: &mut Corners, s: &Scene, w: &World, ix: i64, iz: i64): Corner {
             // actually sloping: a broad flat shelf sitting a metre under water
             // satisfies "near sea level" across acres and turns into one huge
             // white sheet, which is what a plain height test gives you.
-            let shoreSlope = smoothstep(0.010, 0.075, bedSlope(x, z))
+            let shoreSlope = smoothstep(0.010, 0.075, bedSlope(w.city, x, z))
             let foam = smoothstep(1.6, 0.15, Math.abs(h)) * shoreSlope
             wr = wr + foam * 0.55
             wg = wg + foam * 0.62
@@ -523,8 +568,8 @@ fn cornerAt(cc: &mut Corners, s: &Scene, w: &World, ix: i64, iz: i64): Corner {
 // Height including moving water. Land is the heightmap; anything below sea level
 // gets a travelling wave train so the sea has a surface instead of being a flat
 // blue plate.
-fn surfaceAt(x: f64, z: f64, t: f64): f64 {
-    let h = heightAt(x, z)
+fn surfaceAt(cc: &City, x: f64, z: f64, t: f64): f64 {
+    let h = heightAt(cc, x, z)
     if h >= 0.0 {
         return h
     }
@@ -534,10 +579,10 @@ fn surfaceAt(x: f64, z: f64, t: f64): f64 {
 
 // The surface normal at a point, from central differences. Sampling this at each
 // corner and interpolating is what removes the faceting.
-fn normalAt(x: f64, z: f64, t: f64): Vec3 {
+fn normalAt(cc: &City, x: f64, z: f64, t: f64): Vec3 {
     let e = 7.0
-    let hx = surfaceAt(x + e, z, t) - surfaceAt(x - e, z, t)
-    let hz = surfaceAt(x, z + e, t) - surfaceAt(x, z - e, t)
+    let hx = surfaceAt(cc, x + e, z, t) - surfaceAt(cc, x - e, z, t)
+    let hz = surfaceAt(cc, x, z + e, t) - surfaceAt(cc, x, z - e, t)
     let nx = 0.0 - hx
     let nz = 0.0 - hz
     let ny = 2.0 * e
@@ -548,7 +593,21 @@ fn normalAt(x: f64, z: f64, t: f64): Vec3 {
 }
 
 pub fn drawWorld(c: &mut Canvas, s: &mut Scene, w: &World, ground: &Texture, skin: &Texture) {
-    applyWeather(s, w.prevTheme, w.theme, w.themeMix)
+    if w.city.loaded {
+        // The region weather table is a set of moods for invented places. Over a
+        // real city the point is to SEE it, so: clear air, fog only far enough
+        // out to hide the edge of the data.
+        s.fogR = 0.60
+        s.fogG = 0.68
+        s.fogB = 0.80
+        s.fogStart = 1500.0
+        s.fogEnd = 4200.0
+        s.sunX = 0.38
+        s.sunY = 0.86
+        s.sunZ = 0.34
+    } else {
+        applyWeather(s, w.prevTheme, w.theme, w.themeMix)
+    }
     let v = viewOf(w.cam, c.w, c.h)
     sceneClear(s)
     drawSky(c, s, w, v)
@@ -620,7 +679,11 @@ pub fn drawWorld(c: &mut Canvas, s: &mut Scene, w: &World, ground: &Texture, ski
         }
     }
 
-    drawProps(c, s, w, v, baseX, baseZ)
+    if w.city.loaded {
+        drawCity(c, s, w, v)
+    } else {
+        drawProps(c, s, w, v, baseX, baseZ)
+    }
     drawTrails(c, w, v)
     drawRings(c, s, w, v)
     drawPlane(c, s, w, v, skin)
@@ -726,7 +789,7 @@ fn drawProps(c: &mut Canvas, s: &mut Scene, w: &World, v: &View, baseX: i64, bas
             let jz = propHash(tx, tz + 6271) - 0.5
             let x = (tx as f64) * TILE + TILE * (0.5 + jx * 0.7)
             let z = (tz as f64) * TILE + TILE * (0.5 + jz * 0.7)
-            let g0 = heightAt(x, z)
+            let g0 = heightAt(w.city, x, z)
             if g0 < 4.0 {
                 continue // nothing grows in the water
             }
@@ -749,6 +812,218 @@ fn drawProps(c: &mut Canvas, s: &mut Scene, w: &World, v: &View, baseX: i64, bas
                 palmCrown(c, s, v, v3(x, g0 + 15.0 * scale, z), 11.0 * scale, 6.0 * scale, rgb(0.11, 0.34, 0.13))
             }
         }
+    }
+}
+
+// Real buildings: every visible OSM footprint extruded to its real height.
+//
+// The map is finite and reflected (see world3d.foldIn), so this walks the
+// reflected copies that overlap the draw radius and emits each one's buildings
+// transformed into world space. A copy mirrored on exactly one axis has its
+// polygon winding flipped, and the rasteriser backface-culls — so those copies
+// walk their footprints backwards, which flips the winding back.
+fn drawCity(c: &mut Canvas, s: &mut Scene, w: &World, v: &View) {
+    if !w.city.loaded {
+        return
+    }
+    let reach = w.city.reach
+    let far = v.far
+    let fwdX = Math.sin(w.cam.yaw)
+    let fwdZ = Math.cos(w.cam.yaw)
+    let kx0 = blockOf(w.cam.x - far, reach)
+    let kx1 = blockOf(w.cam.x + far, reach)
+    let kz0 = blockOf(w.cam.z - far, reach)
+    let kz1 = blockOf(w.cam.z + far, reach)
+
+    for kz in kz0..(kz1 + 1) {
+        for kx in kx0..(kx1 + 1) {
+            // The slice of this copy that the camera can actually see, in the
+            // copy's own local coordinates.
+            let ax = localOf(kx, w.cam.x - far, reach)
+            let bx = localOf(kx, w.cam.x + far, reach)
+            let az = localOf(kz, w.cam.z - far, reach)
+            let bz = localOf(kz, w.cam.z + far, reach)
+            let loX = Math.minF64(ax, bx) - BUILDING_MARGIN
+            let hiX = Math.maxF64(ax, bx) + BUILDING_MARGIN
+            let loZ = Math.minF64(az, bz) - BUILDING_MARGIN
+            let hiZ = Math.maxF64(az, bz) + BUILDING_MARGIN
+            let cellX0 = cityCellX(w.city, loX)
+            let cellX1 = cityCellX(w.city, hiX)
+            let cellZ0 = cityCellZ(w.city, loZ)
+            let cellZ1 = cityCellZ(w.city, hiZ)
+            let reversed = (kx % 2 != 0) != (kz % 2 != 0)
+
+            // One scratch pair of point buffers for the whole copy. A Vec per
+            // building was two allocations per building per frame, and downtown
+            // is two thousand buildings.
+            var px: Vec<f64> = Vec.new()
+            var pz: Vec<f64> = Vec.new()
+
+            // Front to back, in rings out from the cell under the camera —
+            // the same order the terrain is drawn in, and for the same reason:
+            // a city block is drawn over several times, and the z-buffer can
+            // reject a hidden pixel with one compare if the near geometry got
+            // there first. Grid order would shade every one of those pixels.
+            let camCellX = cityCellX(w.city, localOf(kx, w.cam.x, reach))
+            let camCellZ = cityCellZ(w.city, localOf(kz, w.cam.z, reach))
+            var maxRing = Math.maxI64(camCellX - cellX0, cellX1 - camCellX)
+            maxRing = Math.maxI64(maxRing, Math.maxI64(camCellZ - cellZ0, cellZ1 - camCellZ))
+
+            for ring in 0..(maxRing + 1) {
+                for step in 0..ringCount(ring) {
+                    let ro = ringOffset(ring, step)
+                    let cx = camCellX + ro.x
+                    let cz = camCellZ + ro.z
+                    if cx < cellX0 || cx > cellX1 || cz < cellZ0 || cz > cellZ1 {
+                        continue
+                    }
+                    // Reject the whole cell before touching its contents. Half
+                    // the searched square is behind the camera, and a cell is
+                    // sixteen buildings.
+                    let cellMidX = unfold(kx, w.city.gridX0 + ((cx as f64) + 0.5) * w.city.gridStep, reach)
+                    let cellMidZ = unfold(kz, w.city.gridZ0 + ((cz as f64) + 0.5) * w.city.gridStep, reach)
+                    let cdx = cellMidX - w.cam.x
+                    let cdz = cellMidZ - w.cam.z
+                    if cdx * fwdX + cdz * fwdZ < 0.0 - (BUILDING_MARGIN + w.city.gridStep) {
+                        continue
+                    }
+                    let creach = far + BUILDING_MARGIN + w.city.gridStep
+                    if cdx * cdx + cdz * cdz > creach * creach {
+                        continue
+                    }
+                    let ci = cz * w.city.gridN + cx
+                    for slot in w.city.cellStart[ci]..w.city.cellStart[ci + 1] {
+                        let b = w.city.cellItems[slot]
+                        let midX = unfold(kx, (w.city.bMinX[b] + w.city.bMaxX[b]) * 0.5, reach)
+                        let midZ = unfold(kz, (w.city.bMinZ[b] + w.city.bMaxZ[b]) * 0.5, reach)
+                        let dx = midX - w.cam.x
+                        let dz = midZ - w.cam.z
+                        if dx * fwdX + dz * fwdZ < 0.0 - 200.0 {
+                            continue
+                        }
+                        let d2 = dx * dx + dz * dz
+                        if d2 > far * far {
+                            continue
+                        }
+                        // Drop what would be smaller than a pixel or two. A city
+                        // is mostly two-storey houses, and at a kilometre out
+                        // they cost as much as the towers and show nothing.
+                        let hgt = w.city.bHeight[b]
+                        let d = Math.sqrt(d2) + 1.0
+                        if hgt / d < 0.011 {
+                            continue
+                        }
+                        prism(c, s, w, v, px, pz, b, kx, kz, reach, reversed, midX, midZ, d > 420.0)
+                    }
+                }
+            }
+        }
+    }
+}
+
+// World position of local coordinate `u`'s inverse: given a world coordinate,
+// where it sits inside reflected copy k.
+fn localOf(k: i64, world: f64, reach: f64): f64 {
+    let base = (k as f64) * reach * 2.0
+    if k % 2 == 0 {
+        return world - base
+    }
+    return base - world
+}
+
+fn pushPt(px: &mut Vec<f64>, pz: &mut Vec<f64>, kx: i64, kz: i64, reach: f64, x: f64, z: f64) {
+    px.push(unfold(kx, x, reach))
+    pz.push(unfold(kz, z, reach))
+}
+
+fn prism(c: &mut Canvas, s: &mut Scene, w: &World, v: &View, px: &mut Vec<f64>, pz: &mut Vec<f64>, b: i64, kx: i64, kz: i64, reach: f64, reversed: bool, midX: f64, midZ: f64, lod: bool) {
+    let n = w.city.bLen[b]
+    if n < 3 {
+        return
+    }
+    let start = w.city.bStart[b]
+    // One ground height for the whole footprint. Sampling per corner would sink
+    // a corner of every building on a San Francisco hill into the road.
+    let y0 = heightAt(w.city, midX, midZ) - 2.0
+    let y1 = y0 + w.city.bHeight[b] + 2.0
+
+    // Concrete, brick and glass, picked off the building id so a given building
+    // is always the same colour and a street is not uniform.
+    let tint = propHash(b, b * 31 + 7)
+    var col = rgb(0.36, 0.36, 0.37).lerp(rgb(0.52, 0.50, 0.47), tint)
+    if w.city.bHeight[b] > 45.0 {
+        // Towers are glass: darker, bluer, and they take more of the sky.
+        col = rgb(0.20, 0.25, 0.31).lerp(rgb(0.30, 0.37, 0.44), tint)
+    }
+
+    px.clear()
+    pz.clear()
+    // Far enough away, a fourteen-sided footprint and its bounding box are the
+    // same handful of pixels. Past that distance the real outline is spent on
+    // nothing, and a city is mostly far away — so swap in the box and keep the
+    // saved triangles for the skyline, which is what you can actually see.
+    if lod {
+        let x0 = w.city.bMinX[b]
+        let x1 = w.city.bMaxX[b]
+        let z0 = w.city.bMinZ[b]
+        let z1 = w.city.bMaxZ[b]
+        pushPt(px, pz, kx, kz, reach, x0, z0)
+        pushPt(px, pz, kx, kz, reach, x1, z0)
+        pushPt(px, pz, kx, kz, reach, x1, z1)
+        pushPt(px, pz, kx, kz, reach, x0, z1)
+    } else {
+        for i in 0..n {
+            pushPt(px, pz, kx, kz, reach, w.city.bPtX[start + i], w.city.bPtZ[start + i])
+        }
+    }
+    // A mirrored copy flips the winding, and the rasteriser backface-culls, so
+    // reverse the ring to flip it back. Done once here rather than per face.
+    if reversed {
+        var lo = 0
+        var hi = px.len - 1
+        while lo < hi {
+            let tx = px[lo]
+            let tz = pz[lo]
+            px[lo] = px[hi]
+            pz[lo] = pz[hi]
+            px[hi] = tx
+            pz[hi] = tz
+            lo = lo + 1
+            hi = hi - 1
+        }
+    }
+    let m = px.len
+
+    for i in 0..m {
+        var j = i + 1
+        if j == m {
+            j = 0
+        }
+        let ex = px[j] - px[i]
+        let ez = pz[j] - pz[i]
+        let el = Math.sqrt(ex * ex + ez * ez)
+        if el < 0.4 {
+            continue
+        }
+        // Outward normal of a counter-clockwise ring, in the xz plane.
+        let nx = ez / el
+        let nz = 0.0 - ex / el
+        let lt = shade(s, nx, 0.0, nz, 0.42)
+        let wall = col.scale(lt)
+        let p0b = v3(px[i], y0, pz[i])
+        let p1b = v3(px[j], y0, pz[j])
+        let p0t = v3(px[i], y1, pz[i])
+        let p1t = v3(px[j], y1, pz[j])
+        triangle(c, s, v, p0b, p0t, p1t, wall)
+        triangle(c, s, v, p0b, p1t, p1b, wall)
+    }
+
+    // Roof, as a fan. Wound the opposite way round from the base ring, which is
+    // what makes it face up rather than down.
+    let roof = col.scale(shade(s, 0.0, 1.0, 0.0, 0.42) * 1.06)
+    let a = v3(px[0], y1, pz[0])
+    for i in 1..(m - 1) {
+        triangle(c, s, v, a, v3(px[i + 1], y1, pz[i + 1]), v3(px[i], y1, pz[i]), roof)
     }
 }
 
@@ -1180,7 +1455,7 @@ pub let TELEGRAPH_Y: i64 = 236
 
 pub fn drawHud(c: &mut Canvas, w: &World, s: &Scene, fps: i64) {
     text(c, 24, 22, "SCORE " + w.score.toString(), 3, 0.95, 0.80, 0.30)
-    let alt = ((w.plane.y - heightAt(w.plane.x, w.plane.z)) as i64)
+    let alt = ((w.plane.y - heightAt(w.city, w.plane.x, w.plane.z)) as i64)
     text(c, 24, 58, "ALT " + alt.toString() + "   SPD " + (w.plane.speed as i64).toString(), 2, 0.35, 0.45, 0.55)
     // afterburner budget
     let bx = 24.0
@@ -1311,12 +1586,17 @@ pub fn drawHud(c: &mut Canvas, w: &World, s: &Scene, fps: i64) {
     }
 
     // Where you are, and how far to the next region.
-    text(c, 24, c.h - 58, themeName(w.theme), 3, 0.75, 0.72, 0.55)
-    let rem = "NEXT REGION IN " + w.toNext.toString()
-    text(c, 24, c.h - 26, rem, 2, 0.32, 0.34, 0.38)
+    if w.city.loaded {
+        text(c, 24, c.h - 58, w.city.name, 3, 0.75, 0.72, 0.55)
+        text(c, 24, c.h - 26, "OPENSTREETMAP + NASA SRTM", 2, 0.32, 0.34, 0.38)
+    } else {
+        text(c, 24, c.h - 58, themeName(w.theme), 3, 0.75, 0.72, 0.55)
+        let rem = "NEXT REGION IN " + w.toNext.toString()
+        text(c, 24, c.h - 26, rem, 2, 0.32, 0.34, 0.38)
+    }
 
     // Telegraph: name the country you are about to enter, louder as it nears.
-    if w.toNext <= 3 && w.banner <= 0.0 {
+    if w.toNext <= 3 && w.banner <= 0.0 && !w.city.loaded {
         let next = themeName((w.theme + 1) % 4)
         let urgency = (4.0 - (w.toNext as f64)) / 3.0
         let pulse = 0.55 + 0.45 * Math.sin(w.time * (4.0 + urgency * 6.0))
@@ -1330,14 +1610,18 @@ pub fn drawHud(c: &mut Canvas, w: &World, s: &Scene, fps: i64) {
         if w.banner < 1.2 {
             f = w.banner / 1.2
         }
-        if w.level > 1 {
+        if w.level > 1 && !w.city.loaded {
             // arriving somewhere new
             textCentered(c, c.w / 2, 130, "ENTERING", 3, 0.7 * f, 0.7 * f, 0.55 * f)
             textCentered(c, c.w / 2, 176, themeName(w.theme), 9, 1.4 * f, 1.15 * f, 0.45 * f)
             textCentered(c, c.w / 2, 268, "REGION " + w.level.toString(), 2, 0.5 * f, 0.55 * f, 0.6 * f)
         } else {
             textCentered(c, c.w / 2, 150, "FLYBY", 9, 1.3 * f, 1.0 * f, 0.35 * f)
-            textCentered(c, c.w / 2, 240, "FLY THROUGH THE RINGS", 2, 0.5 * f, 0.6 * f, 0.7 * f)
+            if w.city.loaded {
+                textCentered(c, c.w / 2, 240, w.city.name, 3, 0.6 * f, 0.7 * f, 0.8 * f)
+            } else {
+                textCentered(c, c.w / 2, 240, "FLY THROUGH THE RINGS", 2, 0.5 * f, 0.6 * f, 0.7 * f)
+            }
         }
     }
     if w.hint > 0.0 {
@@ -1345,7 +1629,12 @@ pub fn drawHud(c: &mut Canvas, w: &World, s: &Scene, fps: i64) {
         if w.hint < 1.0 {
             f = w.hint
         }
-        textCentered(c, c.w / 2, c.h - 130, "LEFT RIGHT TO BANK    UP DOWN TO CLIMB AND DIVE", 2, 0.45 * f, 0.5 * f, 0.6 * f)
-        textCentered(c, c.w / 2, c.h - 106, "FOLLOW THE GREEN BRACKETS — YOU CANNOT CRASH", 2, 0.4 * f, 0.44 * f, 0.5 * f)
+        if w.easy {
+            textCentered(c, c.w / 2, c.h - 130, "UP AND DOWN TO FLY THROUGH THE RINGS", 2, 0.45 * f, 0.5 * f, 0.6 * f)
+            textCentered(c, c.w / 2, c.h - 106, "THE PLANE STEERS ITSELF — YOU CANNOT CRASH", 2, 0.4 * f, 0.44 * f, 0.5 * f)
+        } else {
+            textCentered(c, c.w / 2, c.h - 130, "LEFT RIGHT TO BANK    UP DOWN TO CLIMB AND DIVE", 2, 0.45 * f, 0.5 * f, 0.6 * f)
+            textCentered(c, c.w / 2, c.h - 106, "FOLLOW THE GREEN BRACKETS — YOU CANNOT CRASH", 2, 0.4 * f, 0.44 * f, 0.5 * f)
+        }
     }
 }

@@ -1,11 +1,13 @@
 // FLYBY — a 3D flying game written in Milo.
 //
 //   milo build examples/games/flight/main.milo -o /tmp/flyby --release && /tmp/flyby
+//   /tmp/flyby --city examples/games/flight/cities/sf.city
 //
-//   LEFT / RIGHT   bank (a banked aircraft turns)
-//   UP / DOWN      climb and dive
+//   UP / DOWN      climb and dive — the only axis; the aircraft steers itself
 //   SPACE          throttle up
 //   ESC            quit
+//   --pro          give back the bank axis on LEFT / RIGHT
+//   --city <file>  fly a real place instead of the procedural world
 //
 // Real 3D: a perspective camera, near-plane clipping and a depth-buffered
 // triangle rasteriser, all on the CPU in safe Milo (see gfx3d.milo). There is no
@@ -37,7 +39,13 @@ from "./textures" import {
     groundTexture, planeTexture
 }
 from "./world3d" import {
-    worldNew, worldUpdate
+    worldIn, worldUpdate, SEED
+}
+from "./city" import {
+    City, cityLoad, cityEmpty
+}
+from "std/args" import {
+    args
 }
 from "./render3d" import {
     drawWorld, drawHud, drawGuide, drawSpeedLines
@@ -47,7 +55,41 @@ pub let W: i64 = 1280
 
 pub let H: i64 = 720
 
+// `--city <file>` flies a real place instead of the procedural world, and
+// `--pro` gives back the bank axis. The asset is read once, here, before the
+// window even opens: nothing is fetched, decoded or streamed while flying.
+fn loadCity(): City {
+    let a = args()
+    for i in 0..a.len {
+        if a[i] == "--city" && i + 1 < a.len {
+            match cityLoad(a[i + 1]) {
+                Result.Ok(city) => {
+                    print("flying " + city.name.clone() + " — " + city.bCount.toString() + " buildings")
+                    return city
+                }
+                Result.Err(e) => {
+                    print("could not load city: " + e)
+                    return cityEmpty()
+                }
+            }
+        }
+    }
+    return cityEmpty()
+}
+
+fn proMode(): bool {
+    let a = args()
+    for i in 0..a.len {
+        if a[i] == "--pro" {
+            return true
+        }
+    }
+    return false
+}
+
 pub fn main(): i32 {
+    let city = loadCity()
+    let easy = !proMode()
     if SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO) != 0 {
         print("SDL_Init failed")
         return 1
@@ -73,7 +115,7 @@ pub fn main(): i32 {
 
     var c = canvasNew(W, H)
     var s = sceneNew(W, H)
-    var w = worldNew()
+    var w = worldIn(SEED, city, easy)
     let groundTex = groundTexture()
     let skinTex = planeTexture()
     var snd = soundNew()

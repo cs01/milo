@@ -23,7 +23,10 @@ from "./textures" import {
     groundTexture, planeTexture
 }
 from "./world3d" import {
-    World, worldNew, worldUpdate
+    World, worldIn, worldUpdate, SEED
+}
+from "./city" import {
+    City, cityLoad, cityEmpty
 }
 from "./render3d" import {
     drawWorld, drawHud, drawGuide, drawSpeedLines
@@ -66,9 +69,31 @@ pub fn main(): i32 {
     if argv.len > 1 {
         prefix = argv[1]
     }
+    var city = cityEmpty()
+    var easy = false
     var shots: Vec<i64> = Vec.new()
-    for i in 2..argv.len {
+    var i = 2
+    while i < argv.len {
+        if argv[i] == "--city" && i + 1 < argv.len {
+            match cityLoad(argv[i + 1]) {
+                Result.Ok(loaded) => {
+                    print("flying " + loaded.name.clone() + " — " + loaded.bCount.toString() + " buildings")
+                    city = loaded
+                }
+                Result.Err(e) => {
+                    print("could not load city: " + e)
+                }
+            }
+            i = i + 2
+            continue
+        }
+        if argv[i] == "--easy" {
+            easy = true
+            i = i + 1
+            continue
+        }
         shots.push(argv[i].parseInt())
+        i = i + 1
     }
     if shots.len == 0 {
         shots.push(120)
@@ -81,7 +106,7 @@ pub fn main(): i32 {
 
     var c = canvasNew(W, H)
     var s = sceneNew(W, H)
-    var w = worldNew()
+    var w = worldIn(SEED, city, easy)
     let groundTex = groundTexture()
     let skinTex = planeTexture()
     let snd = soundNew()

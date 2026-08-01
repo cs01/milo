@@ -10,6 +10,9 @@ from "std/rng" import {
 from "./gfx3d" import {
     Camera, Scene, Vec3
 }
+from "./city" import {
+    City, cityEmpty, cityHeightAt, cityCoverAt, COVER_URBAN
+}
 
 pub let TILE: f64 = 44.0 // world units per terrain quad
 
@@ -83,6 +86,12 @@ pub struct World {
     // course, spawns the same flocks and throws the same sparks. That is what
     // makes shot.milo a regression test instead of a screenshot.
     rng: Rng,
+    // Empty unless a .city asset was loaded. Loaded once at startup and never
+    // touched again — there is no fetching, decoding or streaming during play.
+    city: City,
+    // One-axis mode: the player only climbs and dives, and the aircraft steers
+    // itself along the course. Default on; `--pro` gives back the bank axis.
+    easy: bool,
     plane: Plane,
     cam: Camera,
     rings: Vec<Ring>,
@@ -158,11 +167,63 @@ fn noise(x: f64, y: f64): f64 {
 }
 
 // Three octaves: broad ranges, ridges, then a little roughness.
-pub fn heightAt(x: f64, z: f64): f64 {
+fn proceduralHeight(x: f64, z: f64): f64 {
     let a = noise(x * 0.0032, z * 0.0032) * 210.0
     let b = noise(x * 0.0090, z * 0.0090) * 74.0
     let c = noise(x * 0.0280, z * 0.0280) * 17.0
     return a + b + c - 120.0
+}
+
+// A real city is a finite square; the flight is not. Rather than fence the
+// player in or let them fly off into blank sea, the map REFLECTS: cross the
+// eastern edge and you come back over the same city travelling west.
+//
+// A reflection, not a modulo. Taking coordinates modulo the map joins the far
+// edge to the near one, and since the two do not match you get a cliff and a
+// visible seam every span. A reflection is continuous at the join by
+// construction — the height, the coastline and the streets all line up, because
+// on both sides of the seam they are the same points.
+//
+// blockOf/foldIn are the two halves of that map: which reflected copy of the
+// city a coordinate lands in, and where inside the city it lands.
+pub fn blockOf(v: f64, reach: f64): i64 {
+    return Math.floor((v + reach) / (reach * 2.0)) as i64
+}
+
+pub fn foldIn(v: f64, reach: f64): f64 {
+    let period = reach * 2.0
+    let k = blockOf(v, reach)
+    let r = v + reach - (k as f64) * period
+    if k % 2 == 0 {
+        return r - reach
+    }
+    return reach - r
+}
+
+// The inverse: where local coordinate u inside reflected copy k sits in the
+// world. Odd copies are mirrored, which also flips polygon winding — the
+// building draw has to reverse its point order to match, or every facade in
+// every other copy is backface-culled away.
+pub fn unfold(k: i64, u: f64, reach: f64): f64 {
+    let base = (k as f64) * reach * 2.0
+    if k % 2 == 0 {
+        return base + u
+    }
+    return base - u
+}
+
+pub fn heightAt(c: &City, x: f64, z: f64): f64 {
+    if c.loaded {
+        return cityHeightAt(c, foldIn(x, c.reach), foldIn(z, c.reach))
+    }
+    return proceduralHeight(x, z)
+}
+
+pub fn coverAt(c: &City, x: f64, z: f64): u8 {
+    if c.loaded {
+        return cityCoverAt(c, foldIn(x, c.reach), foldIn(z, c.reach))
+    }
+    return COVER_URBAN
 }
 
 pub let SEED: i64 = 20260731
@@ -172,8 +233,14 @@ pub fn worldNew(): World {
 }
 
 pub fn worldSeeded(seed: i64): World {
+    return worldIn(seed, cityEmpty(), true)
+}
+
+pub fn worldIn(seed: i64, city: City, easy: bool): World {
     var w = World {
         rng: Rng.new(seed),
+        city: city,
+        easy: easy,
         plane: Plane {
             x: 0.0, y: 160.0, z: 0.0, yaw: 0.0, pitch: 0.0, roll: 0.0, speed: 190.0
         }
@@ -224,7 +291,7 @@ pub fn worldSeeded(seed: i64): World {
         hint: 8.0,
         offCourse: 0.0,
     }
-    w.plane.y = heightAt(0.0, 0.0) + 150.0
+    w.plane.y = heightAt(w.city, 0.0, 0.0) + 150.0
     for i in 0..10 {
         layRing(w)
     }
@@ -243,7 +310,7 @@ pub fn layRing(w: &mut World) {
     let nz = w.trailZ + Math.cos(heading) * step
     w.trailX = nx
     w.trailZ = nz
-    let ground = heightAt(nx, nz)
+    let ground = heightAt(w.city, nx, nz)
     let ride = 90.0 + 60.0 * (0.5 + 0.5 * Math.sin(t * 0.13))
     // Roughly one in four is a blue bonus hoop: tighter, and worth four times as
     // much, so there is a reason to take the harder line.
@@ -275,7 +342,58 @@ pub fn layRing(w: &mut World) {
 //   - a hard wall well outside it, which slides you along instead of stopping
 // Both are measured to the nearest live ring. Consecutive rings are 300 apart, so
 // a player exactly on the line is never more than ~150 out — well inside SOFT.
+// One-axis mode. The aircraft flies the course on its own: it aims at the next
+// hoop AHEAD of it and banks into the turn, so the bank still reads as flying
+// rather than as the world swivelling. The player is left with climb and dive,
+// which is the whole game — every hoop is placed at a different height.
+//
+// "Ahead" matters. Targeting the nearest live hoop makes the aircraft turn
+// around and go back for one it has just passed, which is the single worst thing
+// an autopilot can do to a six-year-old.
+fn autoSteer(w: &mut World, dt: f64) {
+    let fwdX = Math.sin(w.plane.yaw)
+    let fwdZ = Math.cos(w.plane.yaw)
+    var bi = 0 - 1
+    var bd = 1.0e18
+    for i in 0..w.rings.len {
+        if w.rings[i].alive {
+            let rx = w.rings[i].x - w.plane.x
+            let rz = w.rings[i].z - w.plane.z
+            if rx * fwdX + rz * fwdZ <= 0.0 {
+                continue
+            }
+            let d2 = rx * rx + rz * rz
+            if d2 < bd {
+                bd = d2
+                bi = i
+            }
+        }
+    }
+    if bi < 0 {
+        // Nothing ahead: hold the heading and roll level rather than snapping.
+        w.plane.roll = w.plane.roll - w.plane.roll * Math.minF64(1.0, dt * 2.0)
+        return
+    }
+    let want = Math.atan2(w.rings[bi].x - w.plane.x, w.rings[bi].z - w.plane.z)
+    var diff = want - w.plane.yaw
+    while diff > 3.14159265358979 {
+        diff = diff - 6.28318530717959
+    }
+    while diff < 0.0 - 3.14159265358979 {
+        diff = diff + 6.28318530717959
+    }
+    w.plane.yaw = w.plane.yaw + Math.clampF64(diff * 1.6, 0.0 - 1.1, 1.1) * dt
+    let bank = Math.clampF64(diff * 1.4, 0.0 - 1.1, 1.1)
+    w.plane.roll = w.plane.roll + (bank - w.plane.roll) * Math.minF64(1.0, dt * 2.4)
+}
+
 fn corridor(w: &mut World, dt: f64) {
+    // The autopilot already keeps the aircraft on the line; a second steering
+    // force fighting it would only make the turns wobble.
+    if w.easy {
+        w.offCourse = 0.0
+        return
+    }
     let SOFT = 420.0
     let HARD = 950.0
     var bi = 0 - 1
@@ -373,14 +491,20 @@ pub fn worldUpdate(w: &mut World, dt: f64, inRoll: f64, inPitch: f64, boost: boo
     // Arcade flight: roll banks the aircraft, and a banked aircraft turns. Pitch
     // is direct. Both self-centre, so letting go levels you out.
     // Roll is rate-controlled and self-centres, so letting go rolls wings-level.
-    w.plane.roll = w.plane.roll + (inRoll * 3.0 - w.plane.roll * 3.0) * dt
-    w.plane.roll = Math.clampF64(w.plane.roll, 0.0 - 1.25, 1.25)
+    if w.easy {
+        autoSteer(w, dt)
+    } else {
+        w.plane.roll = w.plane.roll + (inRoll * 3.0 - w.plane.roll * 3.0) * dt
+        w.plane.roll = Math.clampF64(w.plane.roll, 0.0 - 1.25, 1.25)
+    }
     // Pitch HOLDS where you put it, with only a weak return to level. Springing
     // back to zero the instant you let go is what made the vertical axis feel
     // wrong — you could never settle into a climb.
     w.plane.pitch = w.plane.pitch + (inPitch * 1.5 - w.plane.pitch * 0.5) * dt
     w.plane.pitch = Math.clampF64(w.plane.pitch, 0.0 - 0.85, 0.85)
-    w.plane.yaw = w.plane.yaw + w.plane.roll * 1.55 * dt
+    if !w.easy {
+        w.plane.yaw = w.plane.yaw + w.plane.roll * 1.55 * dt
+    }
 
     // Energy, not a constant: a dive trades height for speed and a climb trades
     // it back. Throttle shifts the whole band. This is why the number on the HUD
@@ -429,7 +553,7 @@ pub fn worldUpdate(w: &mut World, dt: f64, inRoll: f64, inPitch: f64, boost: boo
     corridor(w, dt)
 
     // You cannot crash: the ground pushes you up and the sky pushes you down.
-    let ground = heightAt(w.plane.x, w.plane.z)
+    let ground = heightAt(w.city, w.plane.x, w.plane.z)
     let floorY = ground + 26.0
     if w.plane.y < floorY {
         w.plane.y = w.plane.y + (floorY - w.plane.y) * Math.minF64(1.0, dt * 7.0)
@@ -485,7 +609,7 @@ fn updateFlocks(w: &mut World, dt: f64) {
         let rz = 0.0 - fx
         let px = w.plane.x + fx * ahead + rx * side
         let pz = w.plane.z + fz * ahead + rz * side
-        let ground = heightAt(px, pz)
+        let ground = heightAt(w.city, px, pz)
         let sp = 26.0 + w.rng.floatRange(0.0, 22.0)
         w.flocks.push(Flock {
             x: px,

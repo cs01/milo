@@ -6,10 +6,28 @@ milo build examples/games/flight/main.milo -o /tmp/flyby --release && /tmp/flyby
 
 | | |
 |---|---|
-| left / right | bank — a banked aircraft turns |
 | up / down | climb and dive |
 | space | throttle up |
 | ESC | quit |
+
+**One axis.** Up and down is the whole control scheme — the aircraft banks and
+steers itself onto the next hoop, so a small child can fly it. `--pro` gives back
+the bank axis on left / right.
+
+## Fly over a real city
+
+```bash
+/tmp/flyby --city examples/games/flight/cities/sf.city
+```
+
+Real San Francisco: NASA SRTM terrain, 15,600 OpenStreetMap building footprints
+extruded to their real heights, real parks and a real coastline. The map is
+finite and the flight is not, so the world reflects at the edges rather than
+wrapping — a mirror is continuous at the seam, a wrap is a cliff.
+
+Nothing is fetched while flying; the asset is read once before the window opens.
+See [`cities/README.md`](cities/README.md) for attribution and for how to build
+an asset for anywhere else.
 
 Fly **through the rings**, Pilotwings-style. A hoop standing across the course
 tells you which way to be pointing when you reach it, which a coin never could.

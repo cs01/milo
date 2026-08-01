@@ -12,6 +12,13 @@ Goal: approach Rust's safe-code guarantees with a smaller reference model. Stati
 
 Enforced today: moves, second-class references, bounds checks, `Option`, structural Send/Sync, explicit unsafe manual Send/Sync implementations, all-mode overflow traps (`--no-overflow-checks` to opt out), coercion checks, intraprocedural borrow invalidation, call-site exclusivity, and arena identity/generation validation. Remaining work is concentrated at explicit trust boundaries (FFI and audited unsafe implementations) and richer interprocedural reasoning.
 
+Where a rule is enforced by more than one mechanism it drifts. "Cannot move a
+non-Copy element out of a borrow" lived in `checker.ts` for fields and in
+`codegen.ts` for indices, and the two disagreed until a sized array of strings
+double-freed in safe code (fixed 2026-08-01). `tests/aliasing-matrix.golden.md`
+pins one cell per container × operation so the next divergence shows up as a
+diff instead of as a crash.
+
 ## Phase 1: `unsafe` Blocks + Safe FFI Surface — DONE
 
 `unsafe { }` is required for: pointer deref (`*ptr`), pointer indexing (`ptr[i]`), address-of (`x.addrOf()`), casting to pointer types (except the null literal `0 as *T`), `zeroed<T>()`, and extern calls with unsafe signatures.

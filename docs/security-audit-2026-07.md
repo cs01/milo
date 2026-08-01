@@ -56,18 +56,24 @@ gracefully.
     current fix silently boxes. Adopting it means replacing the silent-promotion behavior,
     not just extending it. Needs a call before implementing.
 
-- [ ] **H1 — `f()(x)` / `arr[i](x)` callee never invoked.** Call-result / index callee is
-  mis-codegen'd: closure computed then discarded, arg printed raw with wrong format
-  (`<unprintable>`). Only plain-variable and struct-field callees work.
+- [ ] **H1 — `f()(x)` / `arr[i](x)` callee never invoked.** DEFERRED (needs an AST change,
+  not an isolated fix). Root cause: the AST `Call` node keys off `func: string` (a name),
+  so a callee that is itself an expression can't be represented; the checker's `closureCalls`
+  map only recognizes an `Ident` callee. Supporting it means adding a general callee
+  expression (or an `IndirectCall` node) threaded through parser→checker→lower→codegen —
+  high regression risk for an uncommon pattern with an easy workaround (`let g = f(); g(x)`).
+  Minimum safe interim: reject the un-lowerable callee form with a clean error instead of
+  the current silent `<unprintable>` miscompile.
 
 - [x] **M1 — i32 slice bounds emit invalid IR.** `s[a..b]` with `i32` a/b → `icmp slt i64`
   on an i32 value. Checker accepts i32; codegen must widen bounds to i64.
 
-- [ ] **M2 — deep nested `match` emits invalid GEP.** `getelementptr i64, ptr, i32 0, i32 0`.
+- [x] **M2 — deep nested `match` emits invalid GEP.** `getelementptr i64, ptr, i32 0, i32 0`.
 
-- [x] **M3 — unchecked non-arithmetic UB.** div/mod by zero, `INT_MIN / -1`, shift ≥ width,
-  float→int out-of-range never trap; garbage at `--release`. Trap div0 (and design shift/
-  fptosi: mask vs trap vs `llvm.fptosi.sat`).
+- [x] **M3 (partial) — unchecked non-arithmetic UB.** Integer div/mod by zero and signed
+  `INT_MIN / -1` now trap in every mode. STILL OPEN: shift ≥ bit-width and float→int
+  out-of-range (`fptosi`) remain UB — those need a design call (mask vs trap vs
+  `llvm.fptosi.sat` / `llvm.fshl`), tracked separately.
 
 - [x] **D1 — parser stack overflow.** No recursion-depth guard; ~4000-deep nesting →
   `RangeError: Maximum call stack`. Add a depth limit with a clean diagnostic.
@@ -80,9 +86,18 @@ gracefully.
 
 - [ ] **L1 — self-referential struct by value** (`struct Node { next: Node }`, infinite size)
   compiles with no error.
-- [ ] **L2 — duplicate `fn` definitions** — no redefinition error.
+- [ ] **L2 — duplicate `fn` definitions** — no redefinition error. ATTEMPTED, REVERTED.
+  A same-module different-body check false-positives on diamond imports: the resolver merges
+  the same file reached by two import paths, and those re-merged copies compare as distinct
+  bodies (milojs fixtures tripped it). Needs file-level import dedup (skip a re-merged absPath)
+  before a same-file redefinition check is safe. Cross-module different-body is already caught.
 - [ ] **L3 — huge stack array** (`[i32; 10000000]`) silently compiles → runtime SIGSEGV.
+  DEFERRED — a footgun Rust shares (large stack arrays overflow); wants a size-threshold
+  diagnostic, but the threshold is a policy call. Not a soundness bug.
 - [ ] **L4 — UTF-8 mid-codepoint byte-slice** → silent invalid UTF-8 (no char-boundary check).
+  DEFERRED — adding a boundary check changes byte-slicing semantics (sometimes intended);
+  a design decision, not a clear fix.
 - [ ] **L5 — moved struct-field use** accepted statically (runtime-masked; static gap only).
+  DEFERRED — runtime slot-zeroing makes it memory-safe today; a checker-soundness cleanup.
 - [ ] **L6 — monomorph name collision** (`struct Box_i64` vs `Box<i64>`) → spurious field
   errors (fail-closed).

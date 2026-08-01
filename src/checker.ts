@@ -1219,6 +1219,32 @@ export class TypeChecker {
       }
     }
 
+    // Reject a struct that embeds itself by value (directly or through other by-value
+    // structs / fixed arrays) — it has infinite size and can't be laid out, yet used
+    // to compile and produce a broken type. Vec/Heap/pointer/ref indirection breaks
+    // the chain (those are pointer-sized regardless of pointee), so only value-struct
+    // and fixed-array-of-struct fields continue the walk.
+    const embedsSelf = (name: string, stack: Set<string>): boolean => {
+      if (stack.has(name)) return true;
+      const info = this.structs.get(name);
+      if (!info) return false;
+      stack.add(name);
+      for (const f of info.fields) {
+        let t = f.type;
+        while (t.tag === "array") t = t.element;
+        if (t.tag === "struct" && embedsSelf(t.name, stack)) { stack.delete(name); return true; }
+      }
+      stack.delete(name);
+      return false;
+    };
+    for (const s of program.structs) {
+      if (s.typeParams.length > 0) continue;
+      if (embedsSelf(s.name, new Set())) {
+        this.error(`struct '${s.name}' is recursive by value and has infinite size`, s.span,
+          `a struct cannot contain itself by value — put the recursive field behind an indirection (e.g. 'Heap<${s.name}>' or 'Vec<${s.name}>')`);
+      }
+    }
+
     // validate extern-struct fields once all structs are registered (nested extern
     // structs may be declared in any order). Non-extern structs are unrestricted.
     for (const s of program.structs) {

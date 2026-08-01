@@ -1,0 +1,214 @@
+// Locks the pure geometry and the asset decoder the FLYBY example is built on.
+// The example's own harness (examples/games/flight/shot.milo) renders frames but
+// asserts nothing, so none of this was covered: a mirrored-map bug, a ring-walk
+// that skips a tile, or a decoder that aborts on a short file all used to be
+// invisible until something looked wrong on screen.
+
+from "../../examples/games/flight/world3d" import {
+    foldIn, unfold, blockOf, wrapPi, PI, TAU
+}
+from "../../examples/games/flight/render3d" import {
+    ringCount, ringOffset
+}
+from "../../examples/games/flight/city" import {
+    cityParse, putI32, putCm, MAGIC, VERSION
+}
+from "std/math" import {
+    Math
+}
+
+// The map is mirrored, not wrapped: every world coordinate has to land back on
+// itself through fold-then-unfold, including well outside the mapped square and
+// on the seams themselves.
+fn foldRoundTrip(): bool {
+    let reach = 2000.0
+    var v = 0.0 - 9000.0
+    while v <= 9000.0 {
+        let k = blockOf(v, reach)
+        let back = unfold(k, foldIn(v, reach), reach)
+        if Math.abs(back - v) > 0.000001 {
+            print("fold roundtrip FAILED at " + v.toString())
+            return false
+        }
+        // Inside the mapped square by construction — that is what "folded in"
+        // means, and the height sampler indexes on it.
+        let u = foldIn(v, reach)
+        if u < 0.0 - reach - 0.000001 || u > reach + 0.000001 {
+            print("foldIn out of range at " + v.toString())
+            return false
+        }
+        v = v + 37.5
+    }
+    return true
+}
+
+fn wrapChecks(): bool {
+    if Math.abs(wrapPi(0.25) - 0.25) > 0.000000001 {
+        return false
+    }
+    if Math.abs(wrapPi(TAU + 0.25) - 0.25) > 0.000000001 {
+        return false
+    }
+    if Math.abs(wrapPi(0.0 - TAU - 0.25) + 0.25) > 0.000000001 {
+        return false
+    }
+    // Three turns and a bit still has to come back as the small correction.
+    if Math.abs(wrapPi(3.0 * TAU + 0.5) - 0.5) > 0.000000001 {
+        return false
+    }
+    if wrapPi(PI * 0.999) <= 0.0 {
+        return false
+    }
+    return true
+}
+
+// The terrain and the city draw walk out in square rings from the tile under the
+// camera. Every tile of a square of side 2r+1 must be visited exactly once
+// across rings 0..r — a gap is a hole in the world, a repeat is drawing it twice.
+fn ringWalkCovers(): bool {
+    let r = 4
+    let side = 2 * r + 1
+    var seen: Vec<i64> = Vec.filled(side * side, 0)
+    for ring in 0..(r + 1) {
+        for step in 0..ringCount(ring) {
+            let o = ringOffset(ring, step)
+            if o.x < 0 - r || o.x > r || o.z < 0 - r || o.z > r {
+                print("ring offset out of square")
+                return false
+            }
+            let idx = (o.z + r) * side + (o.x + r)
+            seen[idx] = seen[idx] + 1
+        }
+    }
+    for i in 0..(side * side) {
+        if seen[i] != 1 {
+            print("ring walk visits cell " + i.toString() + " " + seen[i].toString() + " times")
+            return false
+        }
+    }
+    return true
+}
+
+// The smallest asset the decoder accepts: one terrain post, one cover cell, one
+// three-sided building.
+fn tinyCity(): string {
+    var out = ""
+    for i in 0..8 {
+        out.push(MAGIC[i])
+    }
+    putI32(out, VERSION)
+    putI32(out, 4)
+    out.push(84 as u8) // T
+    out.push(111 as u8) // o
+    out.push(119 as u8) // w
+    out.push(110 as u8) // n
+    putI32(out, 377897000) // origin lat, 1e-7 degrees
+    putI32(out, 0 - 1224000000) // origin lon
+    putCm(out, 500.0) // reach
+    putI32(out, 1) // demN
+    putCm(out, 30.0) // demStep
+    putCm(out, 0.0 - 500.0) // demX0
+    putCm(out, 0.0 - 500.0) // demZ0
+    putCm(out, 12.0) // the one terrain post
+    putI32(out, 1) // coverN
+    putCm(out, 20.0)
+    putCm(out, 0.0 - 500.0)
+    putCm(out, 0.0 - 500.0)
+    out.push(0 as u8) // one cover cell: urban
+    putI32(out, 1) // one building
+    putCm(out, 24.0) // its height
+    putI32(out, 3) // three points
+    putCm(out, 0.0)
+    putCm(out, 0.0)
+    putCm(out, 10.0)
+    putCm(out, 0.0)
+    putCm(out, 0.0)
+    putCm(out, 10.0)
+    return out
+}
+
+pub fn main(): i32 {
+    if foldRoundTrip() {
+        print("fold roundtrip ok")
+    }
+    if wrapChecks() {
+        print("wrapPi ok")
+    } else {
+        print("wrapPi FAILED")
+    }
+    if ringWalkCovers() {
+        print("ring walk ok")
+    }
+
+    let full = tinyCity()
+    match cityParse(full) {
+        Result.Ok(c) => {
+            print("parsed " + c.name.clone() + " " + c.bCount.toString() + " building")
+        }
+        Result.Err(e) => {
+            print("parse FAILED: " + e)
+        }
+    }
+
+    // Every short read has to come back as Result.Err. This is the one untrusted
+    // input the game has (`--city <file>`), and before the length checks a
+    // truncated asset indexed straight past the end of the buffer and took the
+    // process down — memory-safe, but a Result-returning parser that aborts is
+    // lying about its own signature.
+    var rejected = 0
+    for n in 0..full.len {
+        var prefix = ""
+        for i in 0..n {
+            prefix.push(full[i])
+        }
+        match cityParse(prefix) {
+            Result.Ok(c) => {
+                print("truncation at " + n.toString() + " parsed as " + c.bCount.toString() + " buildings")
+            }
+            Result.Err(_) => {
+                rejected = rejected + 1
+            }
+        }
+    }
+    print("truncations rejected " + rejected.toString() + "/" + full.len.toString())
+
+    // A file that is not one of ours, and one whose header claims a grid far
+    // bigger than the bytes behind it.
+    match cityParse("NOTACITYFILE-------------------------") {
+        Result.Ok(_) => {
+            print("magic check FAILED")
+        }
+        Result.Err(_) => {
+            print("bad magic rejected")
+        }
+    }
+    var lying = ""
+    for i in 0..8 {
+        lying.push(MAGIC[i])
+    }
+    putI32(lying, VERSION)
+    putI32(lying, 0)
+    putI32(lying, 0)
+    putI32(lying, 0)
+    putCm(lying, 500.0)
+    putI32(lying, 30000) // 900 million terrain posts, in 40 bytes
+    putCm(lying, 30.0)
+    putCm(lying, 0.0)
+    putCm(lying, 0.0)
+    match cityParse(lying) {
+        Result.Ok(_) => {
+            print("huge grid FAILED")
+        }
+        Result.Err(_) => {
+            print("huge grid rejected")
+        }
+    }
+    return 0
+}
+// @expect: fold roundtrip ok
+// @expect: wrapPi ok
+// @expect: ring walk ok
+// @expect: parsed Town 1 building
+// @expect: truncations rejected 105/105
+// @expect: bad magic rejected
+// @expect: huge grid rejected

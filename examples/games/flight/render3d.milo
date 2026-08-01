@@ -16,14 +16,14 @@ pub struct Off {
 
 from "./gfx3d" import {
     Vec3,
-    Scene, View, Camera, viewOf, sceneClear, triangle, triangleTex, triangleTexLit, Texture, shade, toCamera,
+    Scene, View, Camera, viewOf, sceneClear, triangle, Texture, shade, toCamera,
     Vtx, vtxC, triangleV, triangleG
 }
 from "./textures" import {
     groundTexture, planeTexture
 }
 from "./world3d" import {
-    World, Trail, heightAt, coverAt, blockOf, foldIn, unfold, TILE, VIEW_TILES
+    World, Trail, Theme, nextTheme, heightAt, coverAt, blockOf, foldIn, unfold, TILE, VIEW_TILES, TAU
 }
 from "./city" import {
     City, COVER_URBAN, COVER_PARK, COVER_SAND, COVER_WATER, BUILDING_MARGIN, cityCellX, cityCellZ
@@ -166,17 +166,21 @@ fn drawClouds(c: &mut Canvas, s: &Scene, w: &World, v: &View) {
     }
 }
 
-pub fn themeName(t: i64): string {
-    if t == 0 {
-        return "COASTLINE"
+pub fn themeName(t: Theme): string {
+    match t {
+        Theme.Coast => {
+            return "COASTLINE"
+        }
+        Theme.Desert => {
+            return "DESERT"
+        }
+        Theme.Forest => {
+            return "FOREST"
+        }
+        Theme.City => {
+            return "CITY"
+        }
     }
-    if t == 1 {
-        return "DESERT"
-    }
-    if t == 2 {
-        return "FOREST"
-    }
-    return "CITY"
 }
 
 // The atmosphere of one region: what the fog is made of, how far you can see
@@ -199,22 +203,22 @@ pub struct Weather {
     sunZ: f64,
 }
 
-fn weatherOf(t: i64): Weather {
-    if t == 1 {
+fn weatherOf(t: Theme): Weather {
+    if (t as i32) == (Theme.Desert as i32) {
         return Weather { // desert: see forever
             fogR: 0.60, fogG: 0.46, fogB: 0.30,
             fogStart: 1100.0, fogEnd: 3200.0,
             sunX: 0.30, sunY: 0.90, sunZ: 0.30,
         }
     }
-    if t == 2 {
+    if (t as i32) == (Theme.Forest as i32) {
         return Weather { // forest: some haze
             fogR: 0.26, fogG: 0.38, fogB: 0.40,
             fogStart: 620.0, fogEnd: 1900.0,
             sunX: 0.50, sunY: 0.72, sunZ: 0.48,
         }
     }
-    if t == 3 {
+    if (t as i32) == (Theme.City as i32) {
         return Weather { // city: smog
             fogR: 0.38, fogG: 0.40, fogB: 0.46,
             fogStart: 380.0, fogEnd: 1300.0,
@@ -230,7 +234,7 @@ fn weatherOf(t: i64): Weather {
 
 // Cross the whole atmosphere from region `a` to region `b` as one value, so
 // nothing can be left behind mid-fade. `mix` is 1 at the old region, 0 at the new.
-pub fn applyWeather(s: &mut Scene, a: i64, b: i64, mix: f64) {
+pub fn applyWeather(s: &mut Scene, a: Theme, b: Theme, mix: f64) {
     let wa = weatherOf(a)
     let wb = weatherOf(b)
     s.fogR = wb.fogR + (wa.fogR - wb.fogR) * mix
@@ -250,7 +254,7 @@ pub fn applyWeather(s: &mut Scene, a: i64, b: i64, mix: f64) {
 }
 
 // How many tiles are on the perimeter of ring `r` (ring 0 is the single centre).
-fn ringCount(r: i64): i64 {
+pub fn ringCount(r: i64): i64 {
     if r == 0 {
         return 1
     }
@@ -258,7 +262,7 @@ fn ringCount(r: i64): i64 {
 }
 
 // The `i`th tile offset around ring `r`, walking the square perimeter.
-fn ringOffset(r: i64, i: i64): Off {
+pub fn ringOffset(r: i64, i: i64): Off {
     if r == 0 {
         return Off {
             x: 0, z: 0
@@ -330,14 +334,14 @@ fn noise2(x: f64, z: f64): f64 {
 
 // The same palette as `themedColor`, with every hard threshold replaced by a
 // blend band. Widths are chosen so a transition spans several quads.
-fn themedSmooth(theme: i64, h: f64, slope: f64): Rgb {
-    if theme == 1 {
+fn themedSmooth(theme: Theme, h: f64, slope: f64): Rgb {
+    if (theme as i32) == (Theme.Desert as i32) {
         // desert: sand, red rock on the steep faces
         let sand = rgb(0.72, 0.58, 0.32)
         let rock = rgb(0.46, 0.24, 0.14)
         return sand.lerp(rock, smoothstep(0.44, 0.64, slope))
     }
-    if theme == 2 {
+    if (theme as i32) == (Theme.Forest as i32) {
         // forest: deep greens, rock on the steep parts, no snow
         let low = rgb(0.09, 0.26, 0.10)
         let high = rgb(0.16, 0.30, 0.16)
@@ -345,7 +349,7 @@ fn themedSmooth(theme: i64, h: f64, slope: f64): Rgb {
         var col = low.lerp(high, smoothstep(130.0, 172.0, h))
         return col.lerp(rock, smoothstep(0.50, 0.70, slope))
     }
-    if theme == 3 {
+    if (theme as i32) == (Theme.City as i32) {
         // city: concrete, grey-green parks, tarmac in place of water
         let park = rgb(0.22, 0.26, 0.22)
         let slab = rgb(0.34, 0.34, 0.36)
@@ -780,7 +784,7 @@ fn box3(c: &mut Canvas, s: &mut Scene, v: &View, cx: f64, y0: f64, y1: f64, cz: 
 
 fn cone3(c: &mut Canvas, s: &mut Scene, v: &View, cx: f64, y0: f64, y1: f64, cz: f64, rad: f64, col: &Rgb) {
     let segs = 6
-    let step = 6.283185307179586 / (segs as f64)
+    let step = TAU / (segs as f64)
     let apex = v3(cx, y1, cz)
     for k in 0..segs {
         let a0 = (k as f64) * step
@@ -803,7 +807,7 @@ fn cone3(c: &mut Canvas, s: &mut Scene, v: &View, cx: f64, y0: f64, y1: f64, cz:
 // Twelve triangles a palm, half what the two cones cost.
 fn palmCrown(c: &mut Canvas, s: &mut Scene, v: &View, crown: &Vec3, reach: f64, droop: f64, col: &Rgb) {
     let fronds = 6
-    let step = 6.283185307179586 / (fronds as f64)
+    let step = TAU / (fronds as f64)
     for k in 0..fronds {
         let a = (k as f64) * step
         let dir = v3(Math.cos(a), 0.0, Math.sin(a))
@@ -838,15 +842,15 @@ fn drawProps(c: &mut Canvas, s: &mut Scene, w: &World, v: &View, baseX: i64, bas
                 continue // nothing grows in the water
             }
             let scale = 0.7 + h * 3.0
-            if w.theme == 1 {
+            if (w.theme as i32) == (Theme.Desert as i32) {
                 // cactus: a trunk and one arm
                 box3(c, s, v, x, g0, g0 + 16.0 * scale, z, 2.2, rgb(0.16, 0.34, 0.14))
                 box3(c, s, v, x + 3.0, g0 + 7.0 * scale, g0 + 13.0 * scale, z, 1.4, rgb(0.14, 0.30, 0.12))
-            } else if w.theme == 2 {
+            } else if (w.theme as i32) == (Theme.Forest as i32) {
                 // conifer
                 box3(c, s, v, x, g0, g0 + 7.0 * scale, z, 1.4, rgb(0.20, 0.12, 0.06))
                 cone3(c, s, v, x, g0 + 5.0 * scale, g0 + 30.0 * scale, z, 7.0 * scale, rgb(0.07, 0.26, 0.10))
-            } else if w.theme == 3 {
+            } else if (w.theme as i32) == (Theme.City as i32) {
                 // tower block, height keyed off the same hash so a district varies
                 let tall = 22.0 + propHash(tz, tx) * 90.0
                 box3(c, s, v, x, g0, g0 + tall, z, 6.0 + h * 12.0, rgb(0.30, 0.31, 0.34))
@@ -1097,7 +1101,7 @@ fn drawRings(c: &mut Canvas, s: &mut Scene, w: &World, v: &View) {
         // the tube is swept around the two axes perpendicular to that.
         let across = v3(Math.cos(w.rings[i].face), 0.0, 0.0 - Math.sin(w.rings[i].face))
         let upward = v3(0.0, 1.0, 0.0)
-        let step = 6.283185307179586 / (segs as f64)
+        let step = TAU / (segs as f64)
         for k in 0..segs {
             let a0 = (k as f64) * step
             let a1 = ((k + 1) as f64) * step
@@ -1337,7 +1341,7 @@ fn drawPlane(c: &mut Canvas, s: &mut Scene, w: &World, v: &View, skin: &Texture)
         }
         var bay: Vec<Vec3> = Vec.new()
         let segs2 = 8
-        let stepA = 6.283185307179586 / (segs2 as f64)
+        let stepA = TAU / (segs2 as f64)
         for j in 0..segs2 {
             let a0 = (j as f64) * stepA
             bodyPt(bay, origin, f, bayF, off2 + Math.cos(a0) * 3.0, Math.sin(a0) * 3.0)
@@ -1644,7 +1648,7 @@ pub fn drawHud(c: &mut Canvas, w: &World, s: &Scene, fps: i64) {
 
     // Telegraph: name the country you are about to enter, louder as it nears.
     if w.toNext <= 3 && w.banner <= 0.0 && !w.city.loaded {
-        let next = themeName((w.theme + 1) % 4)
+        let next = themeName(nextTheme(w.theme))
         let urgency = (4.0 - (w.toNext as f64)) / 3.0
         let pulse = 0.55 + 0.45 * Math.sin(w.time * (4.0 + urgency * 6.0))
         let k = (0.35 + urgency * 0.85) * pulse

@@ -14,6 +14,32 @@ from "./city" import {
     City, cityEmpty, cityHeightAt, cityCoverAt, cityRoofAt, COVER_URBAN
 }
 
+// One turn and half a turn. Both were open-coded at every use, and in two
+// different truncations — 6.28318530717959 in the steering code,
+// 6.283185307179586 everywhere else.
+pub let TAU: f64 = 6.283185307179586
+
+pub let PI: f64 = 3.141592653589793
+
+// The stretches of invented country the procedural world cycles through. An
+// enum rather than a bare i64: `theme` was compared against 0..3 in five places
+// and advanced with a hand-written `% 4`, so adding a fifth region meant finding
+// every one of them. `nextTheme` gets the wrap from tryFrom instead.
+pub enum Theme: i32 {
+    Coast, Desert, Forest, City
+}
+
+pub fn nextTheme(t: Theme): Theme {
+    match Theme.tryFrom((t as i32) + 1) {
+        Option.Some(n) => {
+            return n
+        }
+        Option.None => {
+            return Theme.Coast
+        }
+    }
+}
+
 pub let TILE: f64 = 44.0 // world units per terrain quad
 
 pub let VIEW_TILES: i64 = 24 // radius of the drawn terrain grid
@@ -120,8 +146,8 @@ pub struct World {
     evMiss: bool,
     missFlash: f64,
     bestCombo: i64,
-    theme: i64,
-    prevTheme: i64,
+    theme: Theme,
+    prevTheme: Theme,
     themeMix: f64, // 1 → fully the previous region, 0 → fully the new one
     level: i64,
     cleared: i64, // rings cleared in total
@@ -323,8 +349,8 @@ pub fn worldIn(seed: i64, places: Vec<City>, easy: bool): World {
         evMiss: false,
         missFlash: 0.0,
         bestCombo: 0,
-        theme: 0,
-        prevTheme: 0,
+        theme: Theme.Coast,
+        prevTheme: Theme.Coast,
         themeMix: 0.0,
         level: 1,
         cleared: 0,
@@ -457,13 +483,13 @@ pub fn layRing(w: &mut World) {
 // an autopilot can do to a six-year-old.
 // An angle difference folded into -pi..pi, so a heading either side of due
 // north is a small correction rather than most of a circle.
-fn wrapPi(a: f64): f64 {
+pub fn wrapPi(a: f64): f64 {
     var d = a
-    while d > 3.14159265358979 {
-        d = d - 6.28318530717959
+    while d > PI {
+        d = d - TAU
     }
-    while d < 0.0 - 3.14159265358979 {
-        d = d + 6.28318530717959
+    while d < 0.0 - PI {
+        d = d + TAU
     }
     return d
 }
@@ -553,13 +579,7 @@ fn corridor(w: &mut World, dt: f64) {
     }
     // shortest signed turn back toward the course
     let want = Math.atan2(cx - w.plane.x, cz - w.plane.z)
-    var diff = want - w.plane.yaw
-    while diff > 3.14159265358979 {
-        diff = diff - 6.28318530717959
-    }
-    while diff < 0.0 - 3.14159265358979 {
-        diff = diff + 6.28318530717959
-    }
+    let diff = wrapPi(want - w.plane.yaw)
     // Quadratic, so the first touch of the corridor is barely perceptible and it
     // only becomes a real force once you are clearly leaving.
     let assist = k * k
@@ -888,7 +908,7 @@ fn clearRing(w: &mut World, i: i64) {
     let tx = nz
     let tz = 0.0 - nx
     for k in 0..44 {
-        let a = w.rng.floatRange(0.0, 6.283185307179586)
+        let a = w.rng.floatRange(0.0, TAU)
         let sp = w.rng.floatRange(30.0, 130.0)
         let rr = w.rings[i].r
         let ox = tx * Math.cos(a) * rr
@@ -917,7 +937,7 @@ fn clearRing(w: &mut World, i: i64) {
         w.toNext = 10
         w.level = w.level + 1
         w.prevTheme = w.theme
-        w.theme = (w.theme + 1) % 4
+        w.theme = nextTheme(w.theme)
         w.themeMix = 1.0
         rotatePlace(w)
         w.banner = 3.4

@@ -431,12 +431,6 @@ fn clipEdge(out: &mut Vec<Vec3>, a: &Vec3, b: &Vec3, near: f64) {
     }
 }
 
-// Compatibility wrappers over the struct-based path, so call sites that pass
-// loose coordinates keep working.
-pub fn triangleTex(c: &mut Canvas, s: &mut Scene, view: &View, t: &Texture, wax: f64, way: f64, waz: f64, au: f64, av: f64, wbx: f64, wby: f64, wbz: f64, bu: f64, bv: f64, wcx: f64, wcy: f64, wcz: f64, cu: f64, cv: f64, tr: f64, tg: f64, tb: f64) {
-    triangleV(c, s, view, t, vtx(wax, way, waz, au, av, 1.0), vtx(wbx, wby, wbz, bu, bv, 1.0), vtx(wcx, wcy, wcz, cu, cv, 1.0), tr, tg, tb)
-}
-
 // Lambert term for a triangle whose world-space normal is (nx,ny,nz).
 pub fn shade(s: &Scene, nx: f64, ny: f64, nz: f64, ambient: f64): f64 {
     var d = nx * s.sunX + ny * s.sunY + nz * s.sunZ

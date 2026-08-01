@@ -173,15 +173,21 @@ pub fn cityAttachOrtho(c: &mut City, png: &string): Result<i64, string> {
     let n = img.width
     var t = texNew(n, shift)
     t.mirror = true
-    let lut = srgbTable()
+    // Byte-backed: the texels stay as the sRGB bytes that came out of the PNG
+    // and the LUT converts at sample time. Holding them as f32 triples cost four
+    // times the memory for no more information than the bytes already carry.
+    t.byteSrc = true
+    t.lut = srgbTable()
+    t.px = Vec.new()
+    t.pxu = Vec.filled(n * n * 3, 0 as u8)
     let ch = img.channels
     for y in 0..n {
         for x in 0..n {
             let src = (y * n + x) * ch
             let dst = (y * n + x) * 3
-            t.px[dst] = lut[img.pixels[src] as i64]
-            t.px[dst + 1] = lut[img.pixels[src + 1] as i64]
-            t.px[dst + 2] = lut[img.pixels[src + 2] as i64]
+            t.pxu[dst] = img.pixels[src]
+            t.pxu[dst + 1] = img.pixels[src + 1]
+            t.pxu[dst + 2] = img.pixels[src + 2]
         }
     }
     c.ortho = t
@@ -712,5 +718,5 @@ pub fn cityOrthoLocal(c: &City, lx: f64, lz: f64): Rgb {
         tz = n * 2 - 1 - tz
     }
     let i = ((tz << c.ortho.shift) + tx) * 3
-    return rgb(c.ortho.px[i] as f64, c.ortho.px[i + 1] as f64, c.ortho.px[i + 2] as f64)
+    return rgb(c.ortho.lut[c.ortho.pxu[i] as i64] as f64, c.ortho.lut[c.ortho.pxu[i + 1] as i64] as f64, c.ortho.lut[c.ortho.pxu[i + 2] as i64] as f64)
 }

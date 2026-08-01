@@ -36,7 +36,7 @@ from "./textures" import {
     groundTexture, planeTexture
 }
 from "./world3d" import {
-    worldIn, worldUpdate, stepPlace, SEED
+    worldIn, worldUpdate, worldSetPlace, SEED
 }
 from "./city" import {
     City, cityLoad, cityParse, cityEmpty, cityAttachOrtho
@@ -53,15 +53,16 @@ pub let W: i64 = 1280
 pub let H: i64 = 720
 
 pub let EPILOG: string = "built-in places (--place):
-  sf          San Francisco — hills, bay, downtown towers
-  hongkong    Hong Kong — harbour, peaks straight out of the water
-  rio         Rio de Janeiro — Sugarloaf, Corcovado, the beaches
+  sf          San Francisco — the Golden Gate, the bay, downtown
+  manhattan   Manhattan — the densest skyline there is
+  yosemite    Yosemite Valley — El Capitan, Half Dome, granite
   canyon      the Grand Canyon — no buildings at all, just the rock
 
 controls:
   UP / DOWN                   pitch — the only axis; the plane steers itself
   LEFT / RIGHT                bank (--pro only)
   SPACE                       afterburner
+  ENTER                       fly somewhere else
   M                           music on / off
   ESC                         quit
 
@@ -86,7 +87,7 @@ fn parseOpts(): ParsedArgs {
     return p.parse()
 }
 
-pub let PLACES: string = "sf hongkong rio canyon"
+pub let PLACES: string = "sf manhattan yosemite canyon"
 
 // Every place is an @embedFile of the same bytes `--city` would read off disk,
 // so the decoder cannot tell the difference. They cost about 3 MB of binary
@@ -96,11 +97,11 @@ pub let PLACES: string = "sf hongkong rio canyon"
 // All four are embedded whichever this returns: @embedFile is resolved at
 // compile time, so the branch picks bytes that are already in the binary.
 fn placeBytes(name: &string): string {
-    if name == "hongkong" {
-        return @embedFile("cities/hongkong.city")
+    if name == "manhattan" {
+        return @embedFile("cities/manhattan.city")
     }
-    if name == "rio" {
-        return @embedFile("cities/rio.city")
+    if name == "yosemite" {
+        return @embedFile("cities/yosemite.city")
     }
     if name == "canyon" {
         return @embedFile("cities/canyon.city")
@@ -110,10 +111,10 @@ fn placeBytes(name: &string): string {
 
 fn placeName(i: i64): string {
     if i == 1 {
-        return "hongkong"
+        return "manhattan"
     }
     if i == 2 {
-        return "rio"
+        return "yosemite"
     }
     if i == 3 {
         return "canyon"
@@ -133,17 +134,21 @@ fn placeIndex(name: &string): i64 {
 // The aerial photograph for a built-in place, or "" if it has none yet. Same
 // @embedFile story as the .city itself — resolved at compile time, so every arm
 // is in the binary whichever this returns.
+// Every place has one. That is why all four are in the United States: NAIP is a
+// USDA survey and stops at the border, and the open global alternative
+// (Sentinel-2 via EOX) serves JPEG, which nothing here can decode. Hong Kong and
+// Rio were dropped rather than left as the only two flat-shaded places.
 fn orthoBytes(name: &string): string {
-    if name == "sf" {
-        return @embedFile("cities/sf.ortho.png")
+    if name == "manhattan" {
+        return @embedFile("cities/manhattan.ortho.png")
+    }
+    if name == "yosemite" {
+        return @embedFile("cities/yosemite.ortho.png")
     }
     if name == "canyon" {
         return @embedFile("cities/canyon.ortho.png")
     }
-    // Hong Kong and Rio have none: NAIP is a USDA survey and stops at the US
-    // border, and the open global alternative (Sentinel-2 via EOX) serves JPEG,
-    // which nothing here can decode. They fall back to the land-cover palette.
-    return ""
+    return @embedFile("cities/sf.ortho.png")
 }
 
 fn parsePlace(name: &string): City {
@@ -197,6 +202,31 @@ fn loadFile(path: &string): City {
     }
 }
 
+// Which built-in place to open on, or -1 for "not a built-in place at all"
+// (--procedural, or a --city asset from disk).
+fn startIndex(o: &ParsedArgs): i64 {
+    if o.getBool("procedural") {
+        return 0 - 1
+    }
+    if o.getString("city") != "" {
+        return 0 - 1
+    }
+    let want = o.getString("place")
+    if want == "" {
+        // Open on San Francisco: it is the one with a landmark tour laid out.
+        return placeIndex("sf")
+    }
+    let idx = placeIndex(want)
+    if idx < 0 {
+        print("no built-in place called '" + want + "' — try: " + PLACES)
+        return 0 - 1
+    }
+    return idx
+}
+
+// Exactly one place is decoded at a time. Preloading all four held ~290 MB of
+// parsed footprints and imagery and got the process killed by the run guard;
+// decoding on the key press costs a beat and nothing else.
 fn placesFor(o: &ParsedArgs): Vec<City> {
     var v: Vec<City> = Vec.new()
     if o.getBool("procedural") {
@@ -208,27 +238,18 @@ fn placesFor(o: &ParsedArgs): Vec<City> {
         v.push(loadFile(path))
         return v
     }
-    let want = o.getString("place")
-    if want == "" {
-        // Start on the place that has an aerial photograph, so the first thing
-        // anyone sees on a bare `milo run` is the drape rather than the palette.
-        // The rotation still carries the other three in behind it.
-        return allPlaces(placeIndex("sf"))
-    }
-    let idx = placeIndex(want)
+    let idx = startIndex(o)
     if idx < 0 {
-        print("no built-in place called '" + want + "' — try: " + PLACES)
         v.push(cityEmpty())
         return v
     }
-    // An explicit --place is a request to fly THAT place, so nothing rotates in
-    // behind it.
-    v.push(parsePlace(want))
+    v.push(parsePlace(placeName(idx)))
     return v
 }
 
 pub fn main(): i32 {
     let o = parseOpts()
+    var placeIdx = startIndex(o)
     var places = placesFor(o)
     let easy = !o.getBool("pro")
     let invert = !o.getBool("natural")
@@ -285,8 +306,9 @@ pub fn main(): i32 {
         }
         // Only in one-axis mode: with `--pro` these same keys are the bank axis
         // and stepping the world every time the player turned would be absurd.
-        if easy && inp.placeStep != 0 {
-            stepPlace(w, inp.placeStep)
+        if easy && inp.placeStep != 0 && placeIdx >= 0 {
+            placeIdx = (placeIdx + inp.placeStep + 4) % 4
+            worldSetPlace(w, parsePlace(placeName(placeIdx)))
         }
         musicTick(snd)
 

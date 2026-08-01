@@ -501,6 +501,14 @@ pub struct Texture {
     w: i64,
     h: i64,
     mask: i64, // w-1, w is a power of two
+    // Aerial drapes keep their texels as the sRGB bytes that came off the wire,
+    // decoded through `lut` at sample time. As f32 triples a 2048-square drape is
+    // 50 MB, and four places preloaded at startup came to 200 MB of imagery —
+    // enough to get the process killed by the memory guard. The bytes are a
+    // quarter of that and the LUT makes the conversion exact anyway.
+    pxu: Vec<u8>,
+    lut: Vec<f32>, // 256 entries, sRGB byte -> linear
+    byteSrc: bool,
     // Mirrored-repeat addressing instead of wrap. The detail textures tile, so
     // wrap is right for them. An ortho drape is a photograph of a finite place,
     // and the world REFLECTS at the map edge (see world3d.foldIn) — so the
@@ -516,6 +524,9 @@ pub fn texNew(size: i64, shift: i64): Texture {
         w: size,
         h: size,
         mask: size - 1,
+        pxu: Vec.new(),
+        lut: Vec.new(),
+        byteSrc: false,
         mirror: false,
         shift: shift,
         px: Vec.filled(size * size * 3, 0.0),
@@ -644,6 +655,18 @@ fn rasterCamTex(c: &mut Canvas, s: &mut Scene, view: &View, tex: &Texture, a: &V
                         }
                     }
                     let ti = ((ty2 << tex.shift) + tx2) * 3
+                    var tex0 = 0.0
+                    var tex1 = 0.0
+                    var tex2 = 0.0
+                    if tex.byteSrc {
+                        tex0 = tex.lut[tex.pxu[ti] as i64] as f64
+                        tex1 = tex.lut[tex.pxu[ti + 1] as i64] as f64
+                        tex2 = tex.lut[tex.pxu[ti + 2] as i64] as f64
+                    } else {
+                        tex0 = tex.px[ti] as f64
+                        tex1 = tex.px[ti + 1] as f64
+                        tex2 = tex.px[ti + 2] as f64
+                    }
                     // texel faded toward 1 (no-op) where tw is low
                     let tw = l0 * a.tw + l1 * b.tw + l2 * d.tw
                     var f = (zz - s.fogStart) / (s.fogEnd - s.fogStart)
@@ -654,9 +677,9 @@ fn rasterCamTex(c: &mut Canvas, s: &mut Scene, view: &View, tex: &Texture, a: &V
                         f = 1.0
                     }
                     let o = idx * 3
-                    let rr = tr * vr * sh * (1.0 + ((tex.px[ti] as f64) - 1.0) * tw)
-                    let gg = tg * vg * sh * (1.0 + ((tex.px[ti + 1] as f64) - 1.0) * tw)
-                    let bb = tb * vb * sh * (1.0 + ((tex.px[ti + 2] as f64) - 1.0) * tw)
+                    let rr = tr * vr * sh * (1.0 + (tex0 - 1.0) * tw)
+                    let gg = tg * vg * sh * (1.0 + (tex1 - 1.0) * tw)
+                    let bb = tb * vb * sh * (1.0 + (tex2 - 1.0) * tw)
                     c.hdr[o] = (rr * (1.0 - f) + s.fogR * f) as f32
                     c.hdr[o + 1] = (gg * (1.0 - f) + s.fogG * f) as f32
                     c.hdr[o + 2] = (bb * (1.0 - f) + s.fogB * f) as f32

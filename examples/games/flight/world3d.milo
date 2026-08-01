@@ -465,6 +465,29 @@ fn rotatePlace(w: &mut World) {
     stepPlace(w, 1)
 }
 
+// Swap in a place that the caller has just decoded. Kept separate from the
+// preloaded `next` queue because holding four decoded cities at once cost about
+// 290 MB — a 16 km asset is ~60 MB of footprints once parsed, plus its drape —
+// and the memory guard killed the process for it. One place is resident at a
+// time; the caller decodes the next on demand.
+pub fn worldSetPlace(w: &mut World, c: City) {
+    w.city = c
+    w.marks = marksFor(w.city.name)
+    w.markIdx = 0
+    w.markName = ""
+    // Hoops already laid may now be inside something: lift them clear.
+    for i in 0..w.rings.len {
+        if w.rings[i].alive {
+            let low = roofUnderRing(w.city, w.rings[i].x, w.rings[i].z, w.rings[i].face, w.rings[i].r) + w.rings[i].r + 34.0
+            if w.rings[i].y < low {
+                w.rings[i].y = low
+            }
+        }
+    }
+    w.banner = 2.2
+    w.evRegion = true
+}
+
 // Step the rotation by one, either way. `dir` < 0 walks it backwards, which is
 // the exact inverse: forward consumes slot `nextIdx` and leaves the outgoing
 // place there, so backward reclaims slot `nextIdx - 1` and rewinds the cursor
@@ -522,9 +545,11 @@ pub fn layRing(w: &mut World) {
             dx = w.marks[w.markIdx].x - w.trailX
             dz = w.marks[w.markIdx].z - w.trailZ
         }
-        // A slow weave across the bearing. Dead-straight runs between landmarks
-        // fly themselves and there is nothing to do between hoops.
-        heading = Math.atan2(dx, dz) + Math.sin(t * 0.22) * 0.20
+        // Straight at it. There was a slow weave across this bearing to give the
+        // player something to do between hoops; flown for real it is a constant
+        // shallow S with the horizon rolling under you, which is exactly the
+        // recipe for motion sickness. The view is the thing to look at.
+        heading = Math.atan2(dx, dz)
         w.markName = w.marks[w.markIdx].name.clone()
     }
     // Far apart: a hoop you have to line up needs room to line up in.
@@ -534,7 +559,11 @@ pub fn layRing(w: &mut World) {
     w.trailX = nx
     w.trailZ = nz
     let ground = heightAt(w.city, nx, nz)
-    let ride = 90.0 + 60.0 * (0.5 + 0.5 * Math.sin(t * 0.13))
+    // High and nearly level. Low hoops put the aircraft in among the towers
+    // where the frame is all parallax and no view; from up here the city reads
+    // as a city, and the height barely changes hoop to hoop so the flight path
+    // stops being a rollercoaster.
+    let ride = 330.0 + 70.0 * (0.5 + 0.5 * Math.sin(t * 0.13))
     // Roughly one in four is a blue bonus hoop: tighter, and worth four times as
     // much, so there is a reason to take the harder line.
     let bonus = w.rng.range(0, 3) == 0
@@ -629,9 +658,11 @@ fn autoSteer(w: &mut World, dt: f64) {
     // growing. The yaw rate is already clamped, so the step it defended against
     // was never able to become a twitch in the first place.
     var diff = wrapPi(want - w.plane.yaw)
-    w.plane.yaw = w.plane.yaw + Math.clampF64(diff * 1.6, 0.0 - 1.1, 1.1) * dt
-    let bank = Math.clampF64(diff * 1.4, 0.0 - 1.1, 1.1)
-    w.plane.roll = w.plane.roll + (bank - w.plane.roll) * Math.minF64(1.0, dt * 2.4)
+    w.plane.yaw = w.plane.yaw + Math.clampF64(diff * 1.1, 0.0 - 0.6, 0.6) * dt
+    // Shallower bank, eased in more slowly. A 60-degree wing-over reads as
+    // aerobatics; this is meant to read as an airliner turning onto final.
+    let bank = Math.clampF64(diff * 0.8, 0.0 - 0.6, 0.6)
+    w.plane.roll = w.plane.roll + (bank - w.plane.roll) * Math.minF64(1.0, dt * 1.4)
 }
 
 fn corridor(w: &mut World, dt: f64) {
@@ -820,7 +851,10 @@ pub fn worldUpdate(w: &mut World, dt: f64, inRoll: f64, inPitch: f64, boost: boo
     w.cam.fov = 1.15 + w.boostBlend * 0.30
     w.cam.yaw = w.plane.yaw
     w.cam.pitch = w.plane.pitch * 0.55 - 0.06
-    w.cam.roll = w.cam.roll + (w.plane.roll * 0.5 - w.cam.roll) * Math.minF64(1.0, dt * 5.0)
+    // The camera keeps the horizon much closer to level than the aircraft. A
+    // chase camera that rolls with the wings puts the whole world on a pivot,
+    // which is what turns a gentle turn into something you feel in your stomach.
+    w.cam.roll = w.cam.roll + (w.plane.roll * 0.18 - w.cam.roll) * Math.minF64(1.0, dt * 2.5)
 
     updateRings(w, dt)
     updateTrails(w, dt)

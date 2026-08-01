@@ -65,6 +65,125 @@ ensures result >= -1
     return -1
 }
 
+// First occurrence of `needle` in `haystack` at or after `pos`, comparing ASCII
+// letters case-insensitively, or -1.
+//
+// Same memchr skip as strIndexOfFrom, with two differences that both come from case
+// folding:
+//
+//   - The scan anchors on the first byte of the needle that is NOT a letter. That
+//     byte has one spelling, so memchr runs once instead of once per case, and a
+//     digit or punctuation byte is rarer in text than a letter, so each call rejects
+//     far more. Searching "uint256" case-insensitively anchors on '2', not 'u'.
+//     A needle that is all letters falls back to the two-pass scan on byte 0.
+//   - When two passes ARE running, only the one whose hit was just consumed is
+//     re-run. Refreshing both after every failed verify re-scans the rest of the
+//     buffer per candidate, which is quadratic in candidate count.
+//
+// The verify is a byte loop rather than strncasecmp: the MSVC CRT spells that
+// `_strnicmp`, and this file is in the prelude of every program on every platform.
+// It only runs on candidate positions, which memchr has already made rare.
+pub fn strIndexOfFromIgnoreCase(haystack: &string, needle: &string, pos: i64): i64
+requires pos >= 0
+ensures result >= -1
+{
+    if needle.len == 0 {
+        return pos
+    }
+    if pos + needle.len > haystack.len {
+        return -1
+    }
+    let base = haystack.cstr() as i64
+    let last = haystack.len - needle.len
+
+    var anchor: i64 = 0
+    var k: i64 = 0
+    while k < needle.len {
+        if !asciiIsAlpha(needle[k]) {
+            anchor = k
+            break
+        }
+        k = k + 1
+    }
+    let ab = needle[anchor]
+    let c1 = asciiToLower(ab) as i32
+    var c2 = c1
+    if asciiIsAlpha(ab) {
+        c2 = asciiToUpper(ab) as i32
+    }
+
+    // Hit positions of the anchor byte in each case. -1 = must re-scan, -2 = no
+    // further occurrence.
+    var h1: i64 = -1
+    var h2: i64 = -1
+    if c2 == c1 {
+        h2 = -2
+    }
+    var s: i64 = pos
+    while s <= last
+    invariant s >= 0
+    {
+        if h1 == -1 {
+            var p: i64 = 0
+            unsafe {
+                p = memchr((base + s + anchor) as *u8, c1, last - s + 1) as i64
+            }
+            if p == 0 {
+                h1 = -2
+            } else {
+                h1 = p - base
+            }
+        }
+        if h2 == -1 {
+            var p: i64 = 0
+            unsafe {
+                p = memchr((base + s + anchor) as *u8, c2, last - s + 1) as i64
+            }
+            if p == 0 {
+                h2 = -2
+            } else {
+                h2 = p - base
+            }
+        }
+        var h: i64 = -2
+        if h1 >= 0 {
+            h = h1
+        }
+        if h2 >= 0 && (h < 0 || h2 < h) {
+            h = h2
+        }
+        if h < 0 {
+            return -1
+        }
+        let start = h - anchor
+        var j: i64 = 0
+        while j < needle.len {
+            if asciiToLower(haystack[start + j]) != asciiToLower(needle[j]) {
+                break
+            }
+            j = j + 1
+        }
+        if j == needle.len {
+            return start
+        }
+        // Only the consumed hit is stale; the other one is past `h`, so it is still
+        // at or after the new cursor.
+        if h1 == h {
+            h1 = -1
+        }
+        if h2 == h {
+            h2 = -1
+        }
+        s = start + 1
+    }
+    return -1
+}
+
+// True if `needle` occurs anywhere in `haystack`, ignoring ASCII case.
+pub fn strContainsIgnoreCase(haystack: &string, needle: &string): bool {
+    return strIndexOfFromIgnoreCase(haystack, needle, 0) >= 0
+}
+
 // Find last occurrence of needle.
 
 // Raw search helper. String.lastIndexOf wraps the -1 sentinel as None.

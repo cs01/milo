@@ -20,16 +20,9 @@ from "std/color" import {
 from "std/runtime" import {
     Promise
 }
-from "std/io" import {
-    File
+from "std/string" import {
+    strContainsIgnoreCase, strIndexOfFromIgnoreCase
 }
-from "std/os" import {
-    readFd
-}
-
-extern fn memchr(s: *u8, c: i32, n: i64): *u8
-
-extern fn memcmp(s1: *u8, s2: *u8, n: i64): i32
 
 // ── helpers ──
 
@@ -100,6 +93,33 @@ pub struct RgOpts {
     // the whole-file reject below does not recompute it per file.
     pattern: string,
     literal: bool,
+    // -i has to reach the literal matcher, not just the regex flags. It used to stop
+    // at the flags, so `rg -i foo` prefiltered case-SENSITIVELY and silently dropped
+    // every match that differed in case — a wrong answer, not a slow one.
+    //
+    // Folding happens inside the search (std/string's case-insensitive memchr
+    // scan), not by lowercasing a copy of every file — that copy cost more than the
+    // search it fed.
+    ignoreCase: bool,
+}
+
+// Next occurrence of the literal at or after `from`, honouring -i.
+pub fn literalFrom(content: &string, opts: &RgOpts, from: i64): Option<i64> {
+    if opts.ignoreCase {
+        let at = strIndexOfFromIgnoreCase(content, opts.pattern, from)
+        if at < 0 {
+            return Option.None
+        }
+        return Option.Some(at)
+    }
+    return content.indexOfFrom(opts.pattern, from)
+}
+
+pub fn literalIn(content: &string, needle: &string, ci: bool): bool {
+    if ci {
+        return strContainsIgnoreCase(content, needle)
+    }
+    return content.contains(needle)
 }
 
 // ── match helpers ──
@@ -239,7 +259,7 @@ pub fn searchContent(content: &string, filePath: &string, re: &mut Regex, opts: 
     // Whole-file reject: if the pattern is a literal and the file does not contain
     // it anywhere, there is nothing to split, allocate or scan line by line. One
     // memchr pass over the buffer replaces N regex runs.
-    if !knownMatch && opts.literal && !opts.invert && !content.contains(opts.pattern) {
+    if !knownMatch && opts.literal && !opts.invert && !literalIn(content, opts.pattern, opts.ignoreCase) {
         return
     }
 
@@ -266,7 +286,7 @@ pub fn searchContent(content: &string, filePath: &string, re: &mut Regex, opts: 
         var pos: i64 = 0
         let plen = opts.pattern.len
         while true {
-            let Option.Some(at) = content.indexOfFrom(opts.pattern, pos) else {
+            let Option.Some(at) = literalFrom(content, opts, pos) else {
                 break
             }
             // Walk forward to the line holding this match. lineStart never moves
@@ -306,7 +326,7 @@ pub fn searchContent(content: &string, filePath: &string, re: &mut Regex, opts: 
                 var lineMatches: Vec<RegexMatch> = Vec.new()
                 var m = at
                 while m + plen <= lineEnd {
-                    let Option.Some(mm) = content.indexOfFrom(opts.pattern, m) else {
+                    let Option.Some(mm) = literalFrom(content, opts, m) else {
                         break
                     }
                     if mm + plen > lineEnd {
@@ -467,71 +487,25 @@ pub struct Hit {
 // reading the whole file anyway, and dropping the buffer only to have the printing
 // pass open and read the same file a second time was pure waste — on a tree where
 // ~15% of files match, that second read is the entire serial tail.
-//
-// Files are read into one buffer that lives for the whole chunk. `readFile` would
-// allocate per file, and its buffer is zero-filled before the read overwrites it —
-// on a 44 MB tree that is 44 MB of memset plus 44 MB of fresh pages to fault in,
-// all to hold bytes for the length of one memchr. A `string` is only built for the
-// files that actually match.
-pub fn scanChunk(paths: Vec<string>, pat: string): Vec<Hit> {
+// The prescan and the matcher must agree on case, or the prescan silently drops
+// files the matcher would have printed — so both go through literalIn/literalFrom.
+pub fn scanChunk(paths: Vec<string>, needle: string, ci: bool): Vec<Hit> {
     var hits: Vec<Hit> = Vec.new()
-    var buf: Vec<u8> = Vec.filled(262144, 0)
     for i in 0..paths.len {
-        let Result.Ok(f) = File.openRead(paths[i]) else {
-            continue
-        }
-        let size = f.size()
-        if size < pat.len || size > 1073741824 {
-            continue
-        }
-        if size > buf.len {
-            buf = Vec.filled(size, 0)
-        }
-        var got: i64 = 0
-        unsafe {
-            let base = buf.ptr() as i64
-            while got < size {
-                let n = readFd(f.fd, (base + got) as *u8, size - got)
-                if n <= 0 {
-                    break
+        match readFile(paths[i]) {
+            Result.Ok(data) => {
+                if literalIn(data, needle, ci) {
+                    hits.push(Hit {
+                        path: paths[i].clone(), content: data
+                    }
+                    )
                 }
-                got = got + n
             }
-            if memmemHit(base, got, pat) {
-                hits.push(Hit {
-                    path: paths[i].clone(), content: _bytesToString(base as *u8, got)
-                }
-                )
+            Result.Err(_) => {
             }
         }
     }
     return hits
-}
-
-// memchr for the first byte, memcmp to verify the rest — the shape of ripgrep's
-// fallback prefilter, and both calls are the platform's vectorised libc ones.
-pub fn memmemHit(base: i64, size: i64, pat: &string): bool {
-    let plen = pat.len
-    if plen == 0 {
-        return true
-    }
-    unsafe {
-        let np = pat.cstr()
-        let c0 = pat[0] as i32
-        var pos: i64 = 0
-        while pos + plen <= size {
-            let hit = memchr((base + pos) as *u8, c0, size - pos - plen + 1) as i64
-            if hit == 0 {
-                return false
-            }
-            let idx = hit - base
-            if memcmp((base + idx) as *u8, np, plen) == 0 {
-                return true
-            }
-            pos = idx + 1
-        }
-    }
-    return false
 }
 
 // Literal search over a directory, in parallel.
@@ -568,9 +542,10 @@ pub fn searchDirParallel(dirPath: &string, re: &mut Regex, opts: &mut RgOpts): v
         }
         // Even an empty chunk is submitted: the merge below indexes parts by
         // `idx % workers`, so the list must stay exactly `workers` long.
-        let pat = opts.pattern.clone()
+        let needle = opts.pattern.clone()
+        let ci = opts.ignoreCase
         ps.push(Promise<Vec<Hit>>.blocking(move(): Vec<Hit> => {
-            return scanChunk(chunk, pat)
+            return scanChunk(chunk, needle, ci)
         }
         ))
     }
@@ -707,6 +682,7 @@ pub fn main(): i32 {
         needsSeparator: false,
         pattern: pattern.clone(),
         literal: isPlainLiteral(pattern) && !args.getBool("word-regexp"),
+        ignoreCase: ignoreCase,
     }
 
     var target = args.getString("path")

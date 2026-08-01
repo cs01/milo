@@ -1,0 +1,90 @@
+// One frame of input, snapshotted out of SDL so the rest of the game never
+// touches a pointer.
+//
+// The SDL declarations themselves come from the `sdl` package rather than a
+// per-project copy — see milo.json. This file is only the part that is actually
+// game-specific: which keys mean what, and which of them are edge-triggered.
+
+from "sdl" import {
+    SDL_PollEvent, SDL_GetKeyboardState, SDL_QUIT
+}
+from "sdl/keys" import {
+    SC_A, SC_D, SC_W, SC_S, SC_J, SC_K, SC_M, SC_R, SC_X, SC_Z,
+    SC_ESCAPE, SC_SPACE, SC_LEFT, SC_RIGHT, SC_UP, SC_DOWN, SC_LSHIFT, SC_RSHIFT
+}
+
+// `jump`, `dash`, `restart` and `mute` are edge-triggered — true only on the
+// frame the key goes down. A held jump key must not re-fire off the buffer, and
+// a held M must not toggle the music sixty times a second.
+pub struct Input {
+    moveX: f64,
+    up: bool,
+    down: bool,
+    jump: bool,
+    jumpHeld: bool,
+    dash: bool,
+    restart: bool,
+    mute: bool,
+    quit: bool,
+    prevJump: bool,
+    prevDash: bool,
+    prevRestart: bool,
+    prevMute: bool,
+}
+
+pub fn inputNew(): Input {
+    return Input {
+        moveX: 0.0, up: false, down: false,
+        jump: false, jumpHeld: false, dash: false, restart: false,
+        mute: false, quit: false,
+        prevJump: false, prevDash: false, prevRestart: false, prevMute: false,
+    }
+}
+
+pub fn pollInput(inp: &mut Input, ev: &mut [u8; 64]) {
+    inp.moveX = 0.0
+    inp.up = false
+    inp.down = false
+
+    unsafe {
+        while SDL_PollEvent(ev) != 0 {
+            let evType: u32 = (ev[0] as u32) | ((ev[1] as u32) << 8) | ((ev[2] as u32) << 16) | ((ev[3] as u32) << 24)
+            if evType == SDL_QUIT {
+                inp.quit = true
+            }
+        }
+        let ks = SDL_GetKeyboardState(0 as *i32)
+        if ks[SC_ESCAPE] != 0 {
+            inp.quit = true
+        }
+        if ks[SC_A] != 0 || ks[SC_LEFT] != 0 {
+            inp.moveX = inp.moveX - 1.0
+        }
+        if ks[SC_D] != 0 || ks[SC_RIGHT] != 0 {
+            inp.moveX = inp.moveX + 1.0
+        }
+        if ks[SC_W] != 0 || ks[SC_UP] != 0 {
+            inp.up = true
+        }
+        if ks[SC_S] != 0 || ks[SC_DOWN] != 0 {
+            inp.down = true
+        }
+        // Three keys for jump and four for dash: whichever a player reaches for
+        // first is the right one, and nothing has to be configured.
+        let jumpNow = ks[SC_SPACE] != 0 || ks[SC_Z] != 0 || ks[SC_K] != 0
+        let dashNow = ks[SC_LSHIFT] != 0 || ks[SC_RSHIFT] != 0 || ks[SC_X] != 0 || ks[SC_J] != 0
+        let restartNow = ks[SC_R] != 0
+        let muteNow = ks[SC_M] != 0
+
+        inp.jump = jumpNow && !inp.prevJump
+        inp.jumpHeld = jumpNow
+        inp.dash = dashNow && !inp.prevDash
+        inp.restart = restartNow && !inp.prevRestart
+        inp.mute = muteNow && !inp.prevMute
+
+        inp.prevJump = jumpNow
+        inp.prevDash = dashNow
+        inp.prevRestart = restartNow
+        inp.prevMute = muteNow
+    }
+}

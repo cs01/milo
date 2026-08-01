@@ -1,0 +1,1087 @@
+// Simulation: movement, collision, enemies, pickups, particles, camera.
+//
+// The movement model is the modern platformer one rather than the 1985 one, and
+// the difference is entirely in the forgiveness:
+//
+//   coyote time     you can still jump for a moment after walking off an edge
+//   jump buffering  a jump pressed just before landing fires on landing
+//   variable height a short tap is a short jump
+//   apex hang       gravity eases near the top of an arc, so the peak reads
+//   wall jump       and a slide that gives you time to aim it
+//   dash            one air dash, refilled by touching ground or wall
+//
+// None of those change what is possible; they change how often the game does
+// what the player meant. That is what "feels modern" actually means here.
+//
+// Nothing in this file is unsafe and nothing in it touches SDL.
+
+from "std/math" import {
+    Math
+}
+from "std/random" import {
+    Random
+}
+from "./level" import {
+    Level, levelLoad, levelCount, tileAt, setTile, isSolid,
+    T_EMPTY, T_SOLID, T_PLAT, T_SPIKE, T_CRATE, T_PAD
+}
+from "./tiles" import {
+    TILE
+}
+
+// ── tuning ────────────────────────────────────────────────────────────────────
+
+pub let GRAVITY: f64 = 2150.0
+
+pub let MAX_FALL: f64 = 940.0
+
+pub let RUN_SPEED: f64 = 305.0
+
+pub let RUN_ACCEL: f64 = 2600.0
+
+pub let AIR_ACCEL: f64 = 1750.0
+
+pub let GROUND_FRICTION: f64 = 2900.0
+
+pub let AIR_DRAG: f64 = 620.0
+
+pub let JUMP_VEL: f64 = 660.0
+
+pub let JUMP_CUT: f64 = 0.42 // vy kept when the jump key is released early
+
+pub let COYOTE: f64 = 0.10
+
+pub let BUFFER: f64 = 0.12
+
+// Near the apex the arc is the part a player actually aims with, so it gets
+// stretched: weaker gravity and stronger air control for a moment.
+pub let APEX_SPEED: f64 = 110.0
+
+pub let WALL_SLIDE_MAX: f64 = 165.0
+
+pub let WALL_JUMP_VX: f64 = 360.0
+
+pub let WALL_JUMP_VY: f64 = 615.0
+
+pub let WALL_LOCK: f64 = 0.15
+
+pub let DASH_SPEED: f64 = 790.0
+
+pub let DASH_TIME: f64 = 0.145
+
+pub let DASH_KEEP: f64 = 0.46 // fraction of dash speed left when it ends
+
+pub let DASH_COOL: f64 = 0.14
+
+pub let STOMP_BOUNCE: f64 = 585.0
+
+pub let PAD_BOUNCE: f64 = 1080.0
+
+pub let PLAYER_W: f64 = 20.0
+
+pub let PLAYER_H: f64 = 32.0
+
+// Collision substep. A dash covers 790 px/s, which at a 50 ms frame is more than
+// a whole tile — resolving that in one step would tunnel straight through a
+// wall, so movement is chopped into pieces smaller than a tile.
+pub let STEP_MAX: f64 = 7.0
+
+pub let MOB_CRAWLER: i64 = 0
+
+pub let MOB_DRONE: i64 = 1
+
+pub let PK_SHARD: i64 = 0
+
+pub let PK_CORE: i64 = 1
+
+pub let ST_PLAY: i64 = 0
+
+pub let ST_CLEAR: i64 = 1
+
+pub let ST_DONE: i64 = 2
+
+// ── entities ──────────────────────────────────────────────────────────────────
+
+pub struct Player {
+    x: f64,
+    y: f64,
+    vx: f64,
+    vy: f64,
+    onGround: bool,
+    coyote: f64,
+    buffer: f64,
+    jumping: bool,
+    wallDir: f64, // -1 wall to the left, +1 to the right, 0 none
+    wallT: f64, // coyote time for the wall, same idea as for the ground
+    lockT: f64, // horizontal input lockout right after a wall jump
+    dashT: f64,
+    dashCd: f64,
+    dashes: i64,
+    dashX: f64,
+    dashY: f64,
+    facing: f64,
+    animT: f64,
+    sqX: f64, // squash and stretch, springs back toward 1
+    sqY: f64,
+    dead: bool,
+    deadT: f64,
+    spawnT: f64,
+}
+
+pub struct Mob {
+    kind: i64,
+    x: f64,
+    y: f64,
+    w: f64,
+    h: f64,
+    vx: f64,
+    baseX: f64,
+    baseY: f64,
+    phase: f64,
+    alive: bool,
+    dieT: f64,
+}
+
+pub struct Pickup {
+    x: f64,
+    y: f64,
+    kind: i64,
+    taken: bool,
+    t: f64,
+}
+
+pub struct Part {
+    x: f64,
+    y: f64,
+    vx: f64,
+    vy: f64,
+    life: f64,
+    max: f64,
+    r: f64,
+    g: f64,
+    b: f64,
+    size: f64,
+    grav: f64,
+}
+
+// A frozen copy of the player, left behind by a dash and fading out. Cheap, and
+// it is most of what makes a dash read as fast rather than as teleporting.
+pub struct Ghost {
+    x: f64,
+    y: f64,
+    t: f64,
+    frame: i64,
+    flip: bool,
+}
+
+pub struct World {
+    lvl: Level,
+    lvlIdx: i64,
+    p: Player,
+    mobs: Vec<Mob>,
+    pk: Vec<Pickup>,
+    parts: Vec<Part>,
+    ghosts: Vec<Ghost>,
+    camX: f64,
+    camY: f64,
+    vw: f64,
+    vh: f64,
+    shake: f64,
+    flash: f64,
+    hitstop: f64,
+    shards: i64,
+    shardTotal: i64,
+    banked: i64,
+    cores: i64,
+    deaths: i64,
+    time: f64,
+    t: f64,
+    state: i64,
+    clearT: f64,
+    // one-frame events, read by the audio layer and then forgotten
+    evJump: bool,
+    evLand: bool,
+    evDash: bool,
+    evShard: bool,
+    evCore: bool,
+    evStomp: bool,
+    evDie: bool,
+    evGoal: bool,
+    evPad: bool,
+    evBreak: bool,
+    evWall: bool,
+}
+
+// ── construction ──────────────────────────────────────────────────────────────
+
+fn playerAt(x: f64, y: f64): Player {
+    return Player {
+        x: x - PLAYER_W * 0.5, y: y - PLAYER_H,
+        vx: 0.0, vy: 0.0,
+        onGround: false, coyote: 0.0, buffer: 0.0, jumping: false,
+        wallDir: 0.0, wallT: 0.0, lockT: 0.0,
+        dashT: 0.0, dashCd: 0.0, dashes: 1, dashX: 1.0, dashY: 0.0,
+        facing: 1.0, animT: 0.0, sqX: 1.0, sqY: 1.0,
+        dead: false, deadT: 0.0, spawnT: 0.55,
+    }
+}
+
+fn spawnEntities(w: &mut World) {
+    w.mobs = Vec.new()
+    w.pk = Vec.new()
+    var i = 0
+    while i < w.lvl.crawlX.len {
+        let m = Mob {
+            kind: MOB_CRAWLER,
+            x: w.lvl.crawlX[i] - 14.0, y: w.lvl.crawlY[i] - 4.0,
+            w: 28.0, h: 20.0,
+            vx: 62.0, baseX: w.lvl.crawlX[i], baseY: w.lvl.crawlY[i],
+            phase: (i as f64) * 1.7, alive: true, dieT: 0.0,
+        }
+        w.mobs.push(m)
+        i = i + 1
+    }
+    i = 0
+    while i < w.lvl.droneX.len {
+        let m = Mob {
+            kind: MOB_DRONE,
+            x: w.lvl.droneX[i] - 14.0, y: w.lvl.droneY[i] - 10.0,
+            w: 28.0, h: 20.0,
+            vx: 0.0, baseX: w.lvl.droneX[i], baseY: w.lvl.droneY[i],
+            phase: (i as f64) * 2.1, alive: true, dieT: 0.0,
+        }
+        w.mobs.push(m)
+        i = i + 1
+    }
+    i = 0
+    while i < w.lvl.shardX.len {
+        let s = Pickup {
+            x: w.lvl.shardX[i], y: w.lvl.shardY[i], kind: PK_SHARD, taken: false, t: (i as f64) * 0.5
+        }
+        w.pk.push(s)
+        i = i + 1
+    }
+    i = 0
+    while i < w.lvl.coreX.len {
+        let s = Pickup {
+            x: w.lvl.coreX[i], y: w.lvl.coreY[i], kind: PK_CORE, taken: false, t: (i as f64) * 0.9
+        }
+        w.pk.push(s)
+        i = i + 1
+    }
+    w.shardTotal = w.lvl.shardX.len
+}
+
+pub fn worldNew(lvlIdx: i64, vw: f64, vh: f64): World {
+    let l = levelLoad(lvlIdx)
+    let sx = l.spawnX
+    let sy = l.spawnY
+    var w = World {
+        lvl: l, lvlIdx: lvlIdx,
+        p: playerAt(sx, sy),
+        mobs: Vec.new(), pk: Vec.new(), parts: Vec.new(), ghosts: Vec.new(),
+        camX: 0.0, camY: 0.0, vw: vw, vh: vh,
+        shake: 0.0, flash: 0.0, hitstop: 0.0,
+        shards: 0, shardTotal: 0, banked: 0, cores: 0, deaths: 0,
+        time: 0.0, t: 0.0, state: ST_PLAY, clearT: 0.0,
+        evJump: false, evLand: false, evDash: false, evShard: false, evCore: false,
+        evStomp: false, evDie: false, evGoal: false, evPad: false, evBreak: false,
+        evWall: false,
+    }
+    spawnEntities(w)
+    centreCamera(w)
+    return w
+}
+
+// Load a level in place, keeping the run's totals.
+pub fn worldGoto(w: &mut World, n: i64) {
+    w.lvlIdx = n
+    w.lvl = levelLoad(n)
+    w.p = playerAt(w.lvl.spawnX, w.lvl.spawnY)
+    w.parts = Vec.new()
+    w.ghosts = Vec.new()
+    w.shards = 0
+    w.state = ST_PLAY
+    w.clearT = 0.0
+    spawnEntities(w)
+    centreCamera(w)
+}
+
+// Restart the level after a death. Shards found this attempt are lost — they are
+// still there to collect, which is the point of losing them.
+pub fn worldRetry(w: &mut World) {
+    w.lvl = levelLoad(w.lvlIdx)
+    w.p = playerAt(w.lvl.spawnX, w.lvl.spawnY)
+    w.shards = 0
+    w.parts = Vec.new()
+    w.ghosts = Vec.new()
+    spawnEntities(w)
+}
+
+pub fn centreCamera(w: &mut World) {
+    w.camX = clampCamX(w, w.p.x + PLAYER_W * 0.5 - w.vw * 0.5)
+    w.camY = clampCamY(w, w.p.y + PLAYER_H * 0.5 - w.vh * 0.55)
+}
+
+fn clampCamX(w: &World, x: f64): f64 {
+    let maxX = (w.lvl.cols as f64) * TILE - w.vw
+    if maxX <= 0.0 {
+        return maxX * 0.5
+    }
+    return Math.clampF64(x, 0.0, maxX)
+}
+
+fn clampCamY(w: &World, y: f64): f64 {
+    let maxY = (w.lvl.rows as f64) * TILE - w.vh
+    if maxY <= 0.0 {
+        return maxY * 0.5
+    }
+    return Math.clampF64(y, 0.0, maxY)
+}
+
+// ── particles ─────────────────────────────────────────────────────────────────
+
+pub fn puff(w: &mut World, x: f64, y: f64, n: i64, spread: f64, r: f64, g: f64, b: f64, size: f64, grav: f64) {
+    for i in 0..n {
+        let life = Random.floatRange(0.22, 0.55)
+        let pt = Part {
+            x: x, y: y,
+            vx: Random.floatRange(0.0 - spread, spread),
+            vy: Random.floatRange(0.0 - spread, spread * 0.4),
+            life: life, max: life,
+            r: r, g: g, b: b,
+            size: size * Random.floatRange(0.6, 1.4),
+            grav: grav,
+        }
+        w.parts.push(pt)
+    }
+}
+
+fn burst(w: &mut World, x: f64, y: f64, n: i64, speed: f64, r: f64, g: f64, b: f64) {
+    for i in 0..n {
+        let a = Random.floatRange(0.0, 6.2831853)
+        let s = Random.floatRange(speed * 0.35, speed)
+        let life = Random.floatRange(0.3, 0.75)
+        let pt = Part {
+            x: x, y: y,
+            vx: Math.cos(a) * s, vy: Math.sin(a) * s,
+            life: life, max: life,
+            r: r, g: g, b: b,
+            size: Random.floatRange(1.6, 3.4),
+            grav: 380.0,
+        }
+        w.parts.push(pt)
+    }
+}
+
+fn stepParts(w: &mut World, dt: f64) {
+    var i = 0
+    while i < w.parts.len {
+        w.parts[i].life = w.parts[i].life - dt
+        if w.parts[i].life <= 0.0 {
+            let _ = w.parts.remove(i)
+        } else {
+            w.parts[i].vy = w.parts[i].vy + w.parts[i].grav * dt
+            w.parts[i].x = w.parts[i].x + w.parts[i].vx * dt
+            w.parts[i].y = w.parts[i].y + w.parts[i].vy * dt
+            i = i + 1
+        }
+    }
+    var j = 0
+    while j < w.ghosts.len {
+        w.ghosts[j].t = w.ghosts[j].t - dt
+        if w.ghosts[j].t <= 0.0 {
+            let _ = w.ghosts.remove(j)
+        } else {
+            j = j + 1
+        }
+    }
+}
+
+// ── collision ─────────────────────────────────────────────────────────────────
+
+fn cellOf(v: f64): i64 {
+    return Math.floor(v / TILE) as i64
+}
+
+// One axis, one substep. Returns true if something was hit.
+fn stepX(p: &mut Player, l: &Level, dx: f64): bool {
+    p.x = p.x + dx
+    if dx == 0.0 {
+        return false
+    }
+    let y0 = cellOf(p.y)
+    let y1 = cellOf(p.y + PLAYER_H - 0.01)
+    if dx > 0.0 {
+        let cx = cellOf(p.x + PLAYER_W - 0.01)
+        var hit = false
+        for cy in y0..y1 + 1 {
+            if isSolid(l, cx, cy) {
+                hit = true
+            }
+        }
+        if hit {
+            p.x = (cx as f64) * TILE - PLAYER_W
+            p.vx = 0.0
+            return true
+        }
+    } else {
+        let cx = cellOf(p.x)
+        var hit = false
+        for cy in y0..y1 + 1 {
+            if isSolid(l, cx, cy) {
+                hit = true
+            }
+        }
+        if hit {
+            p.x = ((cx + 1) as f64) * TILE
+            p.vx = 0.0
+            return true
+        }
+    }
+    return false
+}
+
+fn stepY(p: &mut Player, l: &Level, dy: f64, dropThrough: bool): i64 {
+    let prevBottom = p.y + PLAYER_H
+    p.y = p.y + dy
+    if dy == 0.0 {
+        return 0
+    }
+    let x0 = cellOf(p.x)
+    let x1 = cellOf(p.x + PLAYER_W - 0.01)
+    if dy > 0.0 {
+        let cy = cellOf(p.y + PLAYER_H - 0.01)
+        var hit = false
+        var pad = false
+        for cx in x0..x1 + 1 {
+            let v = tileAt(l, cx, cy)
+            if v == T_SOLID || v == T_CRATE {
+                hit = true
+            } else if v == T_PAD {
+                hit = true
+                pad = true
+            } else if v == T_PLAT && !dropThrough && prevBottom <= (cy as f64) * TILE + 1.5 {
+                // One-way: only a foot that was already above the surface lands
+                // on it, so you rise through a platform and stand on it coming
+                // back down.
+                hit = true
+            }
+        }
+        if hit {
+            p.y = (cy as f64) * TILE - PLAYER_H
+            p.vy = 0.0
+            p.onGround = true
+            if pad {
+                return 2
+            }
+            return 1
+        }
+    } else {
+        let cy = cellOf(p.y)
+        var hit = false
+        for cx in x0..x1 + 1 {
+            if isSolid(l, cx, cy) {
+                hit = true
+            }
+        }
+        if hit {
+            p.y = ((cy + 1) as f64) * TILE
+            p.vy = 0.0
+            return 0 - 1
+        }
+    }
+    return 0
+}
+
+fn touchingWall(p: &Player, l: &Level, dir: f64): bool {
+    let probe = if dir > 0.0 {
+        p.x + PLAYER_W + 1.0
+    } else {
+        p.x - 1.0
+    }
+    let cx = cellOf(probe)
+    // Ignore the top and bottom two pixels so a wall does not "grab" from a
+    // corner the player is only clipping.
+    let y0 = cellOf(p.y + 3.0)
+    let y1 = cellOf(p.y + PLAYER_H - 4.0)
+    for cy in y0..y1 + 1 {
+        if isSolid(l, cx, cy) {
+            return true
+        }
+    }
+    return false
+}
+
+fn overlapsSpike(p: &Player, l: &Level): bool {
+    // Spikes get a forgiving box: the hitbox is inset four pixels all round, so
+    // brushing the edge of a tooth is not a death.
+    let x0 = cellOf(p.x + 4.0)
+    let x1 = cellOf(p.x + PLAYER_W - 5.0)
+    let y0 = cellOf(p.y + 5.0)
+    let y1 = cellOf(p.y + PLAYER_H - 3.0)
+    for cy in y0..y1 + 1 {
+        for cx in x0..x1 + 1 {
+            if tileAt(l, cx, cy) == T_SPIKE {
+                return true
+            }
+        }
+    }
+    return false
+}
+
+// Break any crate the player is driving into, either dashing or head-first.
+fn breakCrates(w: &mut World) {
+    let dashing = w.p.dashT > 0.0
+    let rising = w.p.vy < 0.0 - 20.0
+    if !dashing && !rising {
+        return
+    }
+    var x0 = cellOf(w.p.x - 3.0)
+    var x1 = cellOf(w.p.x + PLAYER_W + 3.0)
+    var y0 = cellOf(w.p.y - 3.0)
+    var y1 = cellOf(w.p.y + PLAYER_H + 3.0)
+    for cy in y0..y1 + 1 {
+        for cx in x0..x1 + 1 {
+            if tileAt(w.lvl, cx, cy) == T_CRATE {
+                setTile(w.lvl, cx, cy, T_EMPTY)
+                let px = ((cx as f64) + 0.5) * TILE
+                let py = ((cy as f64) + 0.5) * TILE
+                burst(w, px, py, 16, 260.0, 0.95, 0.55, 0.18)
+                w.shake = w.shake + 5.0
+                w.evBreak = true
+            }
+        }
+    }
+}
+
+// ── the player ────────────────────────────────────────────────────────────────
+
+fn killPlayer(w: &mut World) {
+    if w.p.dead {
+        return
+    }
+    w.p.dead = true
+    w.p.deadT = 0.85
+    w.deaths = w.deaths + 1
+    w.shake = w.shake + 16.0
+    w.flash = 0.9
+    w.hitstop = 0.09
+    burst(w, w.p.x + PLAYER_W * 0.5, w.p.y + PLAYER_H * 0.5, 34, 420.0, 1.6, 0.35, 0.55)
+    w.evDie = true
+}
+
+fn updatePlayer(w: &mut World, dt: f64, moveX: f64, down: bool, jump: bool, jumpHeld: bool, dash: bool) {
+    // Ground state is recomputed every frame from the collision pass below.
+    let wasGround = w.p.onGround
+    w.p.onGround = false
+
+    if w.p.coyote > 0.0 {
+        w.p.coyote = w.p.coyote - dt
+    }
+    if w.p.wallT > 0.0 {
+        w.p.wallT = w.p.wallT - dt
+    }
+    if w.p.lockT > 0.0 {
+        w.p.lockT = w.p.lockT - dt
+    }
+    if w.p.dashCd > 0.0 {
+        w.p.dashCd = w.p.dashCd - dt
+    }
+    if w.p.spawnT > 0.0 {
+        w.p.spawnT = w.p.spawnT - dt
+    }
+    w.p.buffer = w.p.buffer - dt
+    if jump {
+        w.p.buffer = BUFFER
+    }
+
+    var mx = moveX
+    if w.p.lockT > 0.0 {
+        // After a wall jump the stick is ignored for a moment, or holding
+        // "into the wall" would cancel the push-off and stick you to it.
+        mx = 0.0
+    }
+    if mx != 0.0 {
+        w.p.facing = mx
+    }
+
+    // ── dash ──
+    if w.p.dashT > 0.0 {
+        w.p.dashT = w.p.dashT - dt
+        w.p.vx = w.p.dashX * DASH_SPEED
+        w.p.vy = w.p.dashY * DASH_SPEED
+        if w.p.dashT <= 0.0 {
+            w.p.vx = w.p.vx * DASH_KEEP
+            w.p.vy = w.p.vy * DASH_KEEP * 0.5
+            w.p.dashCd = DASH_COOL
+        }
+        // ghosts, one every other frame or so
+        if w.ghosts.len < 14 {
+            let g = Ghost {
+                x: w.p.x, y: w.p.y, t: 0.22, frame: 7, flip: w.p.facing < 0.0
+            }
+            w.ghosts.push(g)
+        }
+    } else if dash && w.p.dashes > 0 && w.p.dashCd <= 0.0 {
+        var dx = mx
+        var dy = 0.0
+        if down {
+            dy = 1.0
+        }
+        // Eight-way, but a dash with no direction held goes where you face —
+        // never nowhere.
+        if dx == 0.0 && dy == 0.0 {
+            dx = w.p.facing
+        }
+        let len = Math.sqrt(dx * dx + dy * dy)
+        w.p.dashX = dx / len
+        w.p.dashY = dy / len
+        w.p.dashT = DASH_TIME
+        w.p.dashes = w.p.dashes - 1
+        w.p.sqX = 1.45
+        w.p.sqY = 0.62
+        w.shake = w.shake + 4.0
+        w.evDash = true
+        puff(w, w.p.x + PLAYER_W * 0.5, w.p.y + PLAYER_H * 0.5, 12, 190.0, 1.5, 0.5, 1.7, 2.4, 40.0)
+    }
+
+    let dashing = w.p.dashT > 0.0
+
+    if !dashing {
+        // ── horizontal ──
+        let accel = if wasGround {
+            RUN_ACCEL
+        } else if Math.abs(w.p.vy) < APEX_SPEED {
+            AIR_ACCEL * 1.3 // the apex is where a jump is aimed
+        } else {
+            AIR_ACCEL
+        }
+        if mx != 0.0 {
+            let target = mx * RUN_SPEED
+            if w.p.vx < target {
+                w.p.vx = Math.minF64(w.p.vx + accel * dt, target)
+            } else if w.p.vx > target {
+                w.p.vx = Math.maxF64(w.p.vx - accel * dt, target)
+            }
+        } else {
+            let drag = if wasGround {
+                GROUND_FRICTION
+            } else {
+                AIR_DRAG
+            }
+            if w.p.vx > 0.0 {
+                w.p.vx = Math.maxF64(0.0, w.p.vx - drag * dt)
+            } else {
+                w.p.vx = Math.minF64(0.0, w.p.vx + drag * dt)
+            }
+        }
+
+        // ── gravity ──
+        var g = GRAVITY
+        if Math.abs(w.p.vy) < APEX_SPEED && !wasGround {
+            g = g * 0.62
+        }
+        if w.p.vy > 0.0 {
+            g = g * 1.12 // fall a little faster than you rise
+        }
+        w.p.vy = Math.minF64(w.p.vy + g * dt, MAX_FALL)
+
+        // ── wall slide ──
+        let sliding = !wasGround && w.p.wallDir != 0.0 && w.p.vy > 0.0 && mx * w.p.wallDir > 0.0
+        if sliding {
+            w.p.vy = Math.minF64(w.p.vy, WALL_SLIDE_MAX)
+            if Random.float() < 0.35 {
+                let sx = if w.p.wallDir > 0.0 {
+                    w.p.x + PLAYER_W
+                } else {
+                    w.p.x
+                }
+                puff(w, sx, w.p.y + Random.floatRange(6.0, 26.0), 1, 30.0, 0.9, 0.9, 1.2, 1.6, 120.0)
+            }
+        }
+
+        // ── jump ──
+        if w.p.buffer > 0.0 {
+            if wasGround || w.p.coyote > 0.0 {
+                w.p.vy = 0.0 - JUMP_VEL
+                w.p.jumping = true
+                w.p.buffer = 0.0
+                w.p.coyote = 0.0
+                w.p.sqX = 0.72
+                w.p.sqY = 1.38
+                w.evJump = true
+                puff(w, w.p.x + PLAYER_W * 0.5, w.p.y + PLAYER_H, 8, 110.0, 0.8, 0.85, 1.1, 2.2, 260.0)
+            } else if w.p.wallT > 0.0 && w.p.wallDir != 0.0 {
+                w.p.vy = 0.0 - WALL_JUMP_VY
+                w.p.vx = 0.0 - w.p.wallDir * WALL_JUMP_VX
+                w.p.facing = 0.0 - w.p.wallDir
+                w.p.lockT = WALL_LOCK
+                w.p.jumping = true
+                w.p.buffer = 0.0
+                w.p.wallT = 0.0
+                w.p.dashes = 1
+                w.p.sqX = 0.78
+                w.p.sqY = 1.30
+                w.evWall = true
+                let sx = if w.p.wallDir > 0.0 {
+                    w.p.x + PLAYER_W
+                } else {
+                    w.p.x
+                }
+                puff(w, sx, w.p.y + PLAYER_H * 0.6, 12, 170.0, 1.0, 0.95, 1.4, 2.4, 200.0)
+            }
+        }
+        // Releasing the key early cuts the rise — the whole of variable jump
+        // height is this one line.
+        if !jumpHeld && w.p.jumping && w.p.vy < 0.0 {
+            w.p.vy = w.p.vy * JUMP_CUT
+            w.p.jumping = false
+        }
+        if w.p.vy >= 0.0 {
+            w.p.jumping = false
+        }
+    }
+
+    // ── move, in substeps no larger than most of a tile ──
+    var dx = w.p.vx * dt
+    var dy = w.p.vy * dt
+    let dist = Math.maxF64(Math.abs(dx), Math.abs(dy))
+    var steps = (dist / STEP_MAX) as i64
+    if steps < 1 {
+        steps = 1
+    }
+    if steps > 24 {
+        steps = 24
+    }
+    let sdx = dx / (steps as f64)
+    let sdy = dy / (steps as f64)
+    var landed = 0
+    for i in 0..steps {
+        let hitX = stepX(w.p, w.lvl, sdx)
+        if hitX && dashing {
+            // A dash into a wall ends there rather than scraping along it.
+            w.p.dashT = 0.0
+            w.p.dashCd = DASH_COOL
+        }
+        let r = stepY(w.p, w.lvl, sdy, down)
+        if r > landed {
+            landed = r
+        }
+        if r < 0 && dashing {
+            w.p.dashT = 0.0
+        }
+    }
+
+    // ── after the move ──
+    var wall = 0.0
+    if touchingWall(w.p, w.lvl, 1.0) {
+        wall = 1.0
+    } else if touchingWall(w.p, w.lvl, -1.0) {
+        wall = -1.0
+    }
+    w.p.wallDir = wall
+    if wall != 0.0 && !w.p.onGround {
+        w.p.wallT = COYOTE
+        w.p.dashes = 1 // a wall refills the dash, same as the ground
+    }
+
+    if w.p.onGround {
+        w.p.coyote = COYOTE
+        w.p.dashes = 1
+        if !wasGround {
+            // landing
+            let speed = Math.abs(w.p.vx)
+            w.p.sqX = 1.28
+            w.p.sqY = 0.74
+            w.evLand = true
+            puff(w, w.p.x + PLAYER_W * 0.5, w.p.y + PLAYER_H, 7, 90.0 + speed * 0.2, 0.85, 0.9, 1.15, 2.2, 320.0)
+        }
+    }
+
+    if landed == 2 {
+        // launch pad
+        w.p.vy = 0.0 - PAD_BOUNCE
+        w.p.onGround = false
+        w.p.jumping = false
+        w.p.dashes = 1
+        w.p.sqX = 0.62
+        w.p.sqY = 1.55
+        w.shake = w.shake + 7.0
+        w.evPad = true
+        puff(w, w.p.x + PLAYER_W * 0.5, w.p.y + PLAYER_H, 18, 260.0, 1.7, 1.2, 0.35, 2.8, 260.0)
+    }
+
+    breakCrates(w)
+
+    // running dust
+    if w.p.onGround && Math.abs(w.p.vx) > 190.0 && Random.float() < 0.5 {
+        puff(w, w.p.x + PLAYER_W * 0.5, w.p.y + PLAYER_H - 1.0, 1, 40.0, 0.7, 0.75, 0.95, 1.8, 200.0)
+    }
+
+    // squash springs back
+    w.p.sqX = w.p.sqX + (1.0 - w.p.sqX) * Math.minF64(1.0, dt * 13.0)
+    w.p.sqY = w.p.sqY + (1.0 - w.p.sqY) * Math.minF64(1.0, dt * 13.0)
+    w.p.animT = w.p.animT + dt
+
+    if overlapsSpike(w.p, w.lvl) {
+        killPlayer(w)
+    }
+    if w.p.y > (w.lvl.rows as f64) * TILE + 80.0 {
+        killPlayer(w)
+    }
+}
+
+// ── enemies ───────────────────────────────────────────────────────────────────
+
+fn updateMobs(w: &mut World, dt: f64) {
+    var i = 0
+    while i < w.mobs.len {
+        if !w.mobs[i].alive {
+            w.mobs[i].dieT = w.mobs[i].dieT - dt
+            i = i + 1
+        } else if w.mobs[i].kind == MOB_CRAWLER {
+            let nx = w.mobs[i].x + w.mobs[i].vx * dt
+            // Turn at a wall, and turn at a ledge: a crawler that walks off its
+            // own platform is a crawler the player never meets.
+            let aheadX = if w.mobs[i].vx > 0.0 {
+                nx + w.mobs[i].w + 2.0
+            } else {
+                nx - 2.0
+            }
+            let cxAhead = cellOf(aheadX)
+            let cyBody = cellOf(w.mobs[i].y + w.mobs[i].h * 0.5)
+            let cyBelow = cellOf(w.mobs[i].y + w.mobs[i].h + 4.0)
+            if isSolid(w.lvl, cxAhead, cyBody) || !isSolid(w.lvl, cxAhead, cyBelow) {
+                w.mobs[i].vx = 0.0 - w.mobs[i].vx
+            } else {
+                w.mobs[i].x = nx
+            }
+            w.mobs[i].phase = w.mobs[i].phase + dt * 7.0
+            i = i + 1
+        } else {
+            // drone: a slow sweep with a bob, entirely scripted off its phase so
+            // it never needs collision
+            w.mobs[i].phase = w.mobs[i].phase + dt * 1.15
+            w.mobs[i].x = w.mobs[i].baseX - 14.0 + Math.sin(w.mobs[i].phase) * 96.0
+            w.mobs[i].y = w.mobs[i].baseY - 10.0 + Math.sin(w.mobs[i].phase * 2.3) * 15.0
+            i = i + 1
+        }
+    }
+    // reap the long-dead
+    var j = 0
+    while j < w.mobs.len {
+        if !w.mobs[j].alive && w.mobs[j].dieT <= 0.0 {
+            let _ = w.mobs.remove(j)
+        } else {
+            j = j + 1
+        }
+    }
+}
+
+fn killMob(w: &mut World, i: i64, r: f64, g: f64, b: f64) {
+    w.mobs[i].alive = false
+    w.mobs[i].dieT = 0.35
+    burst(w, w.mobs[i].x + w.mobs[i].w * 0.5, w.mobs[i].y + w.mobs[i].h * 0.5, 22, 330.0, r, g, b)
+    w.shake = w.shake + 8.0
+    w.hitstop = 0.055
+    w.evStomp = true
+}
+
+fn hitMobs(w: &mut World) {
+    if w.p.dead {
+        return
+    }
+    let px0 = w.p.x
+    let px1 = w.p.x + PLAYER_W
+    let py0 = w.p.y
+    let py1 = w.p.y + PLAYER_H
+    var i = 0
+    while i < w.mobs.len {
+        if w.mobs[i].alive {
+            let mx0 = w.mobs[i].x
+            let mx1 = w.mobs[i].x + w.mobs[i].w
+            let my0 = w.mobs[i].y
+            let my1 = w.mobs[i].y + w.mobs[i].h
+            if px1 > mx0 && px0 < mx1 && py1 > my0 && py0 < my1 {
+                if w.p.dashT > 0.0 {
+                    // A dash goes through anything. That is what makes the dash
+                    // an answer to the drone rather than only a movement toy.
+                    killMob(w, i, 1.5, 0.9, 0.3)
+                } else if w.mobs[i].kind == MOB_CRAWLER && w.p.vy > 40.0 && py1 < my0 + 16.0 {
+                    killMob(w, i, 1.2, 0.5, 1.6)
+                    w.p.vy = 0.0 - STOMP_BOUNCE
+                    w.p.sqX = 1.3
+                    w.p.sqY = 0.7
+                    w.p.dashes = 1
+                    w.p.jumping = true
+                } else {
+                    killPlayer(w)
+                }
+            }
+        }
+        i = i + 1
+    }
+}
+
+fn hitPickups(w: &mut World, dt: f64) {
+    let px0 = w.p.x - 6.0
+    let px1 = w.p.x + PLAYER_W + 6.0
+    let py0 = w.p.y - 6.0
+    let py1 = w.p.y + PLAYER_H + 6.0
+    var i = 0
+    while i < w.pk.len {
+        w.pk[i].t = w.pk[i].t + dt
+        if !w.pk[i].taken && !w.p.dead {
+            let r = if w.pk[i].kind == PK_CORE {
+                16.0
+            } else {
+                11.0
+            }
+            if w.pk[i].x + r > px0 && w.pk[i].x - r < px1 && w.pk[i].y + r > py0 && w.pk[i].y - r < py1 {
+                w.pk[i].taken = true
+                if w.pk[i].kind == PK_CORE {
+                    w.cores = w.cores + 1
+                    w.flash = Math.maxF64(w.flash, 0.45)
+                    w.shake = w.shake + 5.0
+                    burst(w, w.pk[i].x, w.pk[i].y, 26, 300.0, 1.5, 0.6, 1.8)
+                    w.evCore = true
+                } else {
+                    w.shards = w.shards + 1
+                    burst(w, w.pk[i].x, w.pk[i].y, 10, 200.0, 0.7, 1.5, 1.7)
+                    w.evShard = true
+                }
+            }
+        }
+        i = i + 1
+    }
+}
+
+fn hitGoal(w: &mut World) {
+    if w.p.dead || w.state != ST_PLAY {
+        return
+    }
+    let gx = w.lvl.goalX
+    let gy = w.lvl.goalY
+    if w.p.x + PLAYER_W > gx - 22.0 && w.p.x < gx + 22.0 && w.p.y + PLAYER_H > gy - 40.0 && w.p.y < gy + 30.0 {
+        w.state = ST_CLEAR
+        w.clearT = 1.6
+        w.banked = w.banked + w.shards
+        w.flash = 1.0
+        w.evGoal = true
+        burst(w, gx, gy, 46, 420.0, 0.7, 1.6, 1.5)
+    }
+}
+
+// ── frame ─────────────────────────────────────────────────────────────────────
+
+fn clearEvents(w: &mut World) {
+    w.evJump = false
+    w.evLand = false
+    w.evDash = false
+    w.evShard = false
+    w.evCore = false
+    w.evStomp = false
+    w.evDie = false
+    w.evGoal = false
+    w.evPad = false
+    w.evBreak = false
+    w.evWall = false
+}
+
+pub fn worldUpdate(w: &mut World, dt: f64, moveX: f64, down: bool, jump: bool, jumpHeld: bool, dash: bool) {
+    clearEvents(w)
+    w.t = w.t + dt
+
+    // Hit stop: a few frames of frozen simulation on an impact. The screen keeps
+    // drawing, so it reads as weight rather than as a dropped frame.
+    if w.hitstop > 0.0 {
+        w.hitstop = w.hitstop - dt
+        stepParts(w, dt * 0.25)
+        w.shake = Math.maxF64(0.0, w.shake - dt * 26.0)
+        return
+    }
+
+    w.shake = Math.maxF64(0.0, w.shake - dt * 42.0)
+    w.flash = Math.maxF64(0.0, w.flash - dt * 2.6)
+
+    if w.state == ST_CLEAR {
+        w.clearT = w.clearT - dt
+        stepParts(w, dt)
+        updateCamera(w, dt)
+        if w.clearT <= 0.0 {
+            let next = w.lvlIdx + 1
+            if next >= levelCount() {
+                w.state = ST_DONE
+            } else {
+                worldGoto(w, next)
+            }
+        }
+        return
+    }
+    if w.state == ST_DONE {
+        stepParts(w, dt)
+        updateCamera(w, dt)
+        return
+    }
+
+    w.time = w.time + dt
+
+    if w.p.dead {
+        w.p.deadT = w.p.deadT - dt
+        stepParts(w, dt)
+        updateCamera(w, dt)
+        if w.p.deadT <= 0.0 {
+            worldRetry(w)
+        }
+        return
+    }
+
+    updatePlayer(w, dt, moveX, down, jump, jumpHeld, dash)
+    updateMobs(w, dt)
+    hitMobs(w)
+    hitPickups(w, dt)
+    hitGoal(w)
+    stepParts(w, dt)
+    updateCamera(w, dt)
+}
+
+fn updateCamera(w: &mut World, dt: f64) {
+    // Look ahead of the player, further the faster they are going: the camera
+    // shows where you are about to be, not where you were.
+    let lead = w.p.facing * 78.0 + w.p.vx * 0.18
+    let tx = w.p.x + PLAYER_W * 0.5 + lead - w.vw * 0.5
+    var ty = w.p.y + PLAYER_H * 0.5 - w.vh * 0.55
+    // Falling fast pulls the view down so the landing is visible.
+    if w.p.vy > 240.0 {
+        ty = ty + (w.p.vy - 240.0) * 0.10
+    }
+    let kx = Math.minF64(1.0, dt * 5.0)
+    let ky = Math.minF64(1.0, dt * 4.0)
+    w.camX = clampCamX(w, w.camX + (tx - w.camX) * kx)
+    w.camY = clampCamY(w, w.camY + (ty - w.camY) * ky)
+}
+
+// Which hero frame the player is in. Kept here rather than in the renderer
+// because it is a fact about the simulation, not about how it is drawn.
+pub fn heroFrameOf(w: &World): i64 {
+    if w.p.dashT > 0.0 {
+        return 7
+    }
+    if !w.p.onGround {
+        if w.p.wallDir != 0.0 && w.p.vy > 0.0 {
+            return 8
+        }
+        if w.p.vy < 0.0 {
+            return 5
+        }
+        return 6
+    }
+    if Math.abs(w.p.vx) > 24.0 {
+        // cycle rate follows speed, so the feet stay planted at any pace
+        let rate = 5.0 + Math.abs(w.p.vx) * 0.028
+        let k = ((w.p.animT * rate) as i64) % 4
+        return 1 + k
+    }
+    return 0
+}

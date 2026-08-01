@@ -1,0 +1,216 @@
+// VOLT — a 2D momentum platformer written in Milo.
+//
+//   milo run examples/games/volt/main.milo
+//   milo build examples/games/volt/main.milo -o /tmp/volt --release && /tmp/volt
+//
+//   ARROWS / WASD    move          SPACE / Z / K   jump (hold for height)
+//   SHIFT / X / J    dash          DOWN            drop through a platform
+//   R                restart       M               music        ESC   quit
+//
+// Run right, stomp what crawls, dash through what flies, take the shards, reach
+// the gate. Three levels, no lives, instant respawn.
+//
+// Everything on screen is software: the sprites are pixel art written as strings
+// and the terrain is generated noise, all composited into a linear-light float
+// buffer with bloom and tone mapping (gfx.milo). SDL only blits the finished
+// frame. The SDL declarations come from the `sdl` package — see milo.json.
+//
+// Nothing outside sound.milo and the texture upload below is `unsafe`.
+
+from "std/math" import {
+    Math
+}
+from "std/random" import {
+    Random
+}
+from "sdl" import {
+    SDL_Init, SDL_CreateWindow, SDL_CreateRenderer, SDL_CreateTexture,
+    SDL_UpdateTexture, SDL_RenderClear, SDL_RenderCopy, SDL_RenderPresent,
+    SDL_ShowCursor, SDL_GetTicks, SDL_DestroyTexture, SDL_DestroyRenderer,
+    SDL_DestroyWindow, SDL_Quit,
+    SDL_INIT_VIDEO, SDL_INIT_AUDIO, SDL_WINDOWPOS_CENTERED, SDL_WINDOW_SHOWN,
+    SDL_TEXTUREACCESS_STREAMING, SDL_PIXELFORMAT_ABGR8888,
+    SDL_RENDERER_ACCELERATED, SDL_RENDERER_PRESENTVSYNC
+}
+from "./input" import {
+    inputNew, pollInput
+}
+from "./gfx" import {
+    canvasNew, present
+}
+from "./sprites" import {
+    heroFrames, crawlerSprite, droneSprite, shardFrames, coreSprite
+}
+from "./tiles" import {
+    tileSetNew
+}
+from "./world" import {
+    worldNew, worldUpdate, worldGoto, worldRetry, ST_PLAY, ST_CLEAR, ST_DONE
+}
+from "./render" import {
+    drawBackground, drawLevel, drawGoal, drawPickups, drawMobs, drawPlayer,
+    drawParts, drawSpeedLines, drawHud
+}
+from "./sound" import {
+    soundNew, musicTick, musicToggle, playJump, playLand, playDash, playShard,
+    playCore, playStomp, playDie, playGoal, playPad, playCrash
+}
+
+pub let W: i64 = 1280
+
+pub let H: i64 = 720
+
+pub fn main(): i32 {
+    if SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO) != 0 {
+        print("SDL_Init failed")
+        return 1
+    }
+    var win: *u8 = 0 as *u8
+    var ren: *u8 = 0 as *u8
+    var tex: *u8 = 0 as *u8
+    var ok = true
+    unsafe {
+        let title = "VOLT — written in Milo"
+        win = SDL_CreateWindow(title, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, W as i32, H as i32, SDL_WINDOW_SHOWN)
+        ren = SDL_CreateRenderer(win, 0 - 1, SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC)
+        tex = SDL_CreateTexture(ren, SDL_PIXELFORMAT_ABGR8888, SDL_TEXTUREACCESS_STREAMING, W as i32, H as i32)
+        if (win as i64) == 0 || (ren as i64) == 0 || (tex as i64) == 0 {
+            ok = false
+        }
+        let _ = SDL_ShowCursor(0)
+    }
+    if !ok {
+        print("SDL setup failed")
+        return 2
+    }
+
+    var c = canvasNew(W, H)
+    let hero = heroFrames()
+    let crawler = crawlerSprite()
+    let drone = droneSprite()
+    let shards = shardFrames()
+    let core = coreSprite()
+    let ts = tileSetNew()
+    var w = worldNew(0, W as f64, H as f64)
+    var snd = soundNew()
+    var inp = inputNew()
+    var ev: [u8; 64] = [0; 64]
+
+    var last = SDL_GetTicks()
+    var fpsAccum: f64 = 0.0
+    var fpsFrames: i64 = 0
+    var fpsShown: i64 = 0
+
+    while !inp.quit {
+        let now = SDL_GetTicks()
+        var dt = ((now - last) as f64) / 1000.0
+        last = now
+        // A frame longer than 50 ms is a hitch, not slow motion: clamp it so the
+        // simulation never takes a step it cannot resolve.
+        if dt > 0.05 {
+            dt = 0.05
+        }
+        if dt < 0.0005 {
+            dt = 0.0005
+        }
+
+        pollInput(inp, ev)
+        if inp.mute {
+            musicToggle(snd)
+        }
+        musicTick(snd)
+
+        if inp.restart {
+            if w.state == ST_DONE {
+                w = worldNew(0, W as f64, H as f64)
+            } else {
+                worldRetry(w)
+            }
+        }
+
+        worldUpdate(w, dt, inp.moveX, inp.down, inp.jump, inp.jumpHeld, inp.dash)
+
+        if w.evJump {
+            playJump(snd)
+        }
+        if w.evWall {
+            playJump(snd)
+        }
+        if w.evLand {
+            playLand(snd)
+        }
+        if w.evDash {
+            playDash(snd)
+        }
+        if w.evShard {
+            playShard(snd)
+        }
+        if w.evCore {
+            playCore(snd)
+        }
+        if w.evStomp {
+            playStomp(snd)
+        }
+        if w.evDie {
+            playDie(snd)
+        }
+        if w.evGoal {
+            playGoal(snd)
+        }
+        if w.evPad {
+            playPad(snd)
+        }
+        if w.evBreak {
+            playCrash(snd)
+        }
+
+        // Screen shake is applied as a camera offset at draw time, so it never
+        // touches the simulation and can never desync collision from what is on
+        // screen.
+        var ox = 0.0
+        var oy = 0.0
+        if w.shake > 0.2 {
+            ox = Random.floatRange(0.0 - w.shake, w.shake)
+            oy = Random.floatRange(0.0 - w.shake, w.shake)
+        }
+
+        drawBackground(c, w)
+        drawLevel(c, w, ts, ox, oy)
+        drawGoal(c, w, ox, oy)
+        drawPickups(c, w, shards, core, ox, oy)
+        drawMobs(c, w, crawler, drone, ox, oy)
+        drawPlayer(c, w, hero, ox, oy)
+        drawParts(c, w, ox, oy)
+        drawSpeedLines(c, w)
+
+        fpsAccum = fpsAccum + dt
+        fpsFrames = fpsFrames + 1
+        if fpsAccum > 0.5 {
+            fpsShown = ((fpsFrames as f64) / fpsAccum) as i64
+            fpsAccum = 0.0
+            fpsFrames = 0
+        }
+        drawHud(c, w, shards[0], fpsShown)
+
+        var exposure = 1.15
+        if w.flash > 0.0 {
+            exposure = exposure + w.flash * 0.9
+        }
+        // A high bloom threshold: solid art fills most of the frame, and a low
+        // one would fog the level instead of lighting the neon in it.
+        present(c, 0.55, exposure, 0.62)
+
+        unsafe {
+            SDL_UpdateTexture(tex, 0 as *u8, c.fb[0].addrOf() as *u8, (W * 4) as i32)
+            SDL_RenderClear(ren)
+            SDL_RenderCopy(ren, tex, 0 as *u8, 0 as *u8)
+            SDL_RenderPresent(ren)
+        }
+    }
+
+    SDL_DestroyTexture(tex)
+    SDL_DestroyRenderer(ren)
+    SDL_DestroyWindow(win)
+    SDL_Quit()
+    return 0
+}

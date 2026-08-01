@@ -1,0 +1,316 @@
+// Audio: PCM generated at startup and pushed at SDL's queue API. No asset
+// pipeline, no callback thread, no mixer — a few buffers and a QueueAudio call
+// when something happens.
+//
+// The bindings and SDL_AudioSpec come from the `sdl` package; the waveforms are
+// the game's own.
+
+from "std/math" import {
+    Math
+}
+from "sdl/audio" import {
+    SDL_OpenAudioDevice, SDL_QueueAudio, SDL_PauseAudioDevice, SDL_ClearQueuedAudio,
+    SDL_GetQueuedAudioSize, audioSpec, AUDIO_S16LSB
+}
+
+pub let RATE: i64 = 44100
+
+pub struct Sound {
+    dev: u32,
+    ok: bool,
+    // Music runs on its OWN device: SDL_QueueAudio appends rather than mixes, so
+    // sharing one device would make every effect wait behind the rest of the
+    // music loop before it was audible.
+    musicDev: u32,
+    musicOk: bool,
+    musicOn: bool,
+    music: Vec<i16>,
+    jump: Vec<i16>,
+    land: Vec<i16>,
+    dash: Vec<i16>,
+    shard: Vec<i16>,
+    core: Vec<i16>,
+    stomp: Vec<i16>,
+    die: Vec<i16>,
+    goal: Vec<i16>,
+    pad: Vec<i16>,
+    crash: Vec<i16>,
+}
+
+// A decaying tone, optionally sliding in pitch. Most of the effects are one of
+// these; `square` mixes in odd harmonics, which is what makes a sound read as
+// 8-bit rather than as a sine beep.
+fn toneWave(out: &mut Vec<i16>, freq0: f64, freq1: f64, secs: f64, amp: f64, square: f64) {
+    let n = (secs * (RATE as f64)) as i64
+    var phase = 0.0
+    for i in 0..n {
+        let t = (i as f64) / (n as f64)
+        let f = freq0 + (freq1 - freq0) * t
+        phase = phase + f * 6.283185307179586 / (RATE as f64)
+        var env = Math.pow(0.0016, t)
+        if t < 0.01 {
+            env = env * (t / 0.01)
+        }
+        var v = Math.sin(phase)
+        if square > 0.0 {
+            v = v + Math.sin(phase * 3.0) * square * 0.33 + Math.sin(phase * 5.0) * square * 0.2
+        }
+        let s = v * env * amp * 9000.0
+        out.push(Math.clampF64(s, 0.0 - 32000.0, 32000.0) as i16)
+    }
+}
+
+// Filtered noise, for impacts and the dash rush.
+fn noiseWave(out: &mut Vec<i16>, secs: f64, amp: f64, cut: f64, decay: f64) {
+    let n = (secs * (RATE as f64)) as i64
+    var lp = 0.0
+    var seed: i64 = 987654
+    for i in 0..n {
+        let t = (i as f64) / (n as f64)
+        seed = (seed * 1103515245 + 12345) % 2147483647
+        let white = ((seed % 2000) as f64) / 1000.0 - 1.0
+        lp = lp + (white - lp) * cut
+        let env = Math.pow(decay, t)
+        let s = lp * env * amp * 11000.0
+        out.push(Math.clampF64(s, 0.0 - 32000.0, 32000.0) as i16)
+    }
+}
+
+// Mix one note INTO an existing buffer, wrapping at the end. The wrap is what
+// makes the loop seamless: a tail that runs past the last sample continues at
+// the start, where the same bar begins again.
+fn addNote(out: &mut Vec<i16>, start: i64, freq: f64, secs: f64, amp: f64, harm: f64, tail: f64) {
+    let n = out.len
+    if n <= 0 {
+        return
+    }
+    let dur = (secs * (RATE as f64)) as i64
+    var phase = 0.0
+    let step = freq * 6.283185307179586 / (RATE as f64)
+    for i in 0..dur {
+        let t = (i as f64) / (dur as f64)
+        phase = phase + step
+        var env = Math.pow(tail, t)
+        if t < 0.02 {
+            env = env * (t / 0.02)
+        }
+        if t > 0.92 {
+            env = env * ((1.0 - t) / 0.08)
+        }
+        var v = Math.sin(phase)
+        if harm > 0.0 {
+            v = v + Math.sin(phase * 2.0) * harm + Math.sin(phase * 3.0) * harm * 0.35
+        }
+        var idx = start + i
+        idx = idx % n
+        let mixed = (out[idx] as f64) + v * env * amp * 9000.0
+        out[idx] = Math.clampF64(mixed, 0.0 - 32000.0, 32000.0) as i16
+    }
+}
+
+// A driving four-bar loop in A minor: a walking bass on eighths, a pad, and a
+// syncopated lead. Faster than a menu loop on purpose — the music is part of the
+// pace the movement is asking for.
+fn buildMusic(): Vec<i16> {
+    let BAR = 1.85
+    let bars = 4
+    let n = ((BAR * (bars as f64)) * (RATE as f64)) as i64
+    var buf: Vec<i16> = Vec.filled(n, 0)
+
+    var roots: Vec<f64> = Vec.new()
+    roots.push(110.00) // A2
+    roots.push(87.31) // F2
+    roots.push(98.00) // G2
+    roots.push(82.41) // E2
+    var third: Vec<f64> = Vec.new()
+    third.push(261.63)
+    third.push(220.00)
+    third.push(246.94)
+    third.push(207.65)
+    var fifth: Vec<f64> = Vec.new()
+    fifth.push(329.63)
+    fifth.push(261.63)
+    fifth.push(293.66)
+    fifth.push(246.94)
+
+    let spb = (BAR * (RATE as f64)) as i64
+    let eighth = BAR / 8.0
+    let es = (eighth * (RATE as f64)) as i64
+    for c in 0..bars {
+        let base = (c as i64) * spb
+        // bass, eighth notes, octave jump on the off-beats
+        for k in 0..8 {
+            var f = roots[c]
+            if k % 4 == 3 {
+                f = f * 2.0
+            }
+            addNote(buf, base + (k as i64) * es, f, eighth * 0.9, 0.34, 0.06, 0.05)
+        }
+        // pad
+        addNote(buf, base, third[c], BAR * 0.92, 0.075, 0.0, 0.60)
+        addNote(buf, base, fifth[c], BAR * 0.92, 0.065, 0.0, 0.60)
+        // lead: a syncopated figure, an octave up
+        for k in 0..8 {
+            let m = (k + c) % 7
+            if m == 0 || m == 2 || m == 3 || m == 5 {
+                var f = fifth[c]
+                if m == 2 {
+                    f = third[c] * 2.0
+                }
+                if m == 5 {
+                    f = fifth[c] * 1.5
+                }
+                addNote(buf, base + (k as i64) * es, f * 2.0, eighth * 1.4, 0.075, 0.12, 0.012)
+            }
+        }
+    }
+    return buf
+}
+
+fn openDevice(): u32 {
+    var spec = audioSpec(RATE as i32, AUDIO_S16LSB as u16, 1, 2048)
+    var dev: u32 = 0
+    unsafe {
+        dev = SDL_OpenAudioDevice(0 as *u8, 0, spec.addrOf() as *u8, 0 as *u8, 0)
+        if dev != 0 {
+            SDL_PauseAudioDevice(dev, 0)
+        }
+    }
+    return dev
+}
+
+pub fn soundNew(): Sound {
+    let dev = openDevice()
+    let mdev = openDevice()
+
+    var jump: Vec<i16> = Vec.new()
+    toneWave(jump, 380.0, 720.0, 0.10, 0.34, 0.55)
+
+    var land: Vec<i16> = Vec.new()
+    noiseWave(land, 0.07, 0.30, 0.10, 0.0004)
+
+    var dash: Vec<i16> = Vec.new()
+    noiseWave(dash, 0.20, 0.55, 0.22, 0.0008)
+    toneWave(dash, 900.0, 260.0, 0.16, 0.30, 0.40)
+
+    var shard: Vec<i16> = Vec.new()
+    toneWave(shard, 1320.0, 1340.0, 0.06, 0.42, 0.20)
+    toneWave(shard, 1976.0, 2000.0, 0.14, 0.34, 0.14)
+
+    var core: Vec<i16> = Vec.new()
+    toneWave(core, 523.0, 530.0, 0.09, 0.50, 0.30)
+    toneWave(core, 784.0, 790.0, 0.09, 0.50, 0.26)
+    toneWave(core, 1046.0, 1060.0, 0.36, 0.55, 0.22)
+
+    var stomp: Vec<i16> = Vec.new()
+    noiseWave(stomp, 0.11, 0.60, 0.30, 0.0002)
+    toneWave(stomp, 220.0, 90.0, 0.13, 0.45, 0.60)
+
+    var die: Vec<i16> = Vec.new()
+    toneWave(die, 330.0, 120.0, 0.16, 0.50, 0.45)
+    toneWave(die, 165.0, 70.0, 0.42, 0.45, 0.35)
+
+    var goal: Vec<i16> = Vec.new()
+    toneWave(goal, 523.0, 530.0, 0.11, 0.50, 0.24)
+    toneWave(goal, 659.0, 665.0, 0.11, 0.50, 0.22)
+    toneWave(goal, 784.0, 790.0, 0.12, 0.52, 0.20)
+    toneWave(goal, 1046.0, 1060.0, 0.55, 0.58, 0.18)
+
+    var pad: Vec<i16> = Vec.new()
+    toneWave(pad, 200.0, 1200.0, 0.22, 0.45, 0.50)
+
+    var crash: Vec<i16> = Vec.new()
+    noiseWave(crash, 0.16, 0.55, 0.45, 0.0003)
+
+    return Sound {
+        dev: dev, ok: dev != 0,
+        musicDev: mdev, musicOk: mdev != 0, musicOn: true, music: buildMusic(),
+        jump: jump, land: land, dash: dash, shard: shard, core: core,
+        stomp: stomp, die: die, goal: goal, pad: pad, crash: crash,
+    }
+}
+
+// Top up the music queue. SDL drains it in real time, so the loop is kept a
+// couple of seconds ahead and re-queued as it plays out.
+pub fn musicTick(s: &Sound) {
+    if !s.musicOk || !s.musicOn {
+        return
+    }
+    var queued: u32 = 0
+    unsafe {
+        queued = SDL_GetQueuedAudioSize(s.musicDev)
+    }
+    if (queued as i64) > RATE * 2 {
+        return
+    }
+    unsafe {
+        let _ = SDL_QueueAudio(s.musicDev, s.music.ptr() as *u8, (s.music.len * 2) as u32)
+    }
+}
+
+pub fn musicToggle(s: &mut Sound) {
+    s.musicOn = !s.musicOn
+    if !s.musicOn {
+        unsafe {
+            SDL_ClearQueuedAudio(s.musicDev)
+        }
+    }
+}
+
+fn play(s: &Sound, buf: &Vec<i16>) {
+    if !s.ok {
+        return
+    }
+    // Effects queue rather than mix, so a backlog would drift out of sync with
+    // what is on screen. Past a threshold, drop the sound instead.
+    var queued: u32 = 0
+    unsafe {
+        queued = SDL_GetQueuedAudioSize(s.dev)
+    }
+    if (queued as i64) > 26000 {
+        return
+    }
+    unsafe {
+        let _ = SDL_QueueAudio(s.dev, buf.ptr() as *u8, (buf.len * 2) as u32)
+    }
+}
+
+pub fn playJump(s: &Sound) {
+    play(s, s.jump)
+}
+
+pub fn playLand(s: &Sound) {
+    play(s, s.land)
+}
+
+pub fn playDash(s: &Sound) {
+    play(s, s.dash)
+}
+
+pub fn playShard(s: &Sound) {
+    play(s, s.shard)
+}
+
+pub fn playCore(s: &Sound) {
+    play(s, s.core)
+}
+
+pub fn playStomp(s: &Sound) {
+    play(s, s.stomp)
+}
+
+pub fn playDie(s: &Sound) {
+    play(s, s.die)
+}
+
+pub fn playGoal(s: &Sound) {
+    play(s, s.goal)
+}
+
+pub fn playPad(s: &Sound) {
+    play(s, s.pad)
+}
+
+pub fn playCrash(s: &Sound) {
+    play(s, s.crash)
+}

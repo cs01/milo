@@ -1,0 +1,219 @@
+// Terrain tiles, generated at startup. 16 art pixels square, drawn at 2x, so a
+// tile is 32 screen pixels and the art grid and the collision grid are the same
+// grid — there is no sub-tile alignment to get wrong.
+//
+// Ground comes in two variants picked by what is above it: a capped tile with a
+// lit edge, and a buried fill tile. That is the whole autotiler, and at this
+// scale it is enough — the lit cap is what makes a platform read as a surface
+// you can stand on.
+
+from "std/math" import {
+    Math
+}
+from "./gfx" import {
+    Sprite, spriteNew, spriteSet
+}
+
+pub let TILE_ART: i64 = 16
+
+pub let TILE: f64 = 32.0
+
+pub let TILE_I: i64 = 32
+
+// Bit-mixing hash. Wrapping by declaration: this is *supposed* to overflow, and
+// Milo traps on overflow by default.
+@wrapping
+fn hash2(x: i64, y: i64, seed: i64): f64 {
+    var h = x * 374761393 + y * 668265263 + seed * 1442695040
+    h = (h ^ (h >> 13)) * 1274126177
+    h = h ^ (h >> 16)
+    var m = h % 4096
+    if m < 0 {
+        m = 0 - m
+    }
+    return (m as f64) / 4096.0
+}
+
+fn valueNoise(x: f64, y: f64, seed: i64): f64 {
+    let x0 = Math.floor(x) as i64
+    let y0 = Math.floor(y) as i64
+    let tx = x - (x0 as f64)
+    let ty = y - (y0 as f64)
+    let sx = tx * tx * (3.0 - 2.0 * tx)
+    let sy = ty * ty * (3.0 - 2.0 * ty)
+    let n00 = hash2(x0, y0, seed)
+    let n10 = hash2(x0 + 1, y0, seed)
+    let n01 = hash2(x0, y0 + 1, seed)
+    let n11 = hash2(x0 + 1, y0 + 1, seed)
+    let a = n00 + (n10 - n00) * sx
+    let b = n01 + (n11 - n01) * sx
+    return a + (b - a) * sy
+}
+
+pub struct TileSet {
+    groundCap: Sprite, // exposed top surface
+    groundFill: Sprite, // buried
+    platform: Sprite, // one-way
+    spike: Sprite,
+    crate: Sprite,
+    pad: Sprite,
+}
+
+// Rock, two octaves of noise over a dark base. The top three rows of the capped
+// variant are lit by a cyan rim that fades down — a light source implied rather
+// than computed, which costs nothing and sells the depth.
+fn rockTile(capped: bool, seed: i64): Sprite {
+    var s = spriteNew(TILE_ART, TILE_ART)
+    for y in 0..TILE_ART {
+        for x in 0..TILE_ART {
+            let u = (x as f64) * 0.5
+            let v = (y as f64) * 0.5
+            var n = valueNoise(u, v, seed) * 0.62 + valueNoise(u * 2.3, v * 2.3, seed + 7) * 0.38
+            var r = 0.055 + n * 0.075
+            var g = 0.070 + n * 0.090
+            var b = 0.110 + n * 0.130
+            if capped {
+                if y == 0 {
+                    r = 0.30 + n * 0.30
+                    g = 1.00 + n * 0.55
+                    b = 1.25 + n * 0.45
+                } else if y == 1 {
+                    r = 0.14 + n * 0.14
+                    g = 0.34 + n * 0.22
+                    b = 0.44 + n * 0.22
+                } else if y == 2 {
+                    r = r + 0.05
+                    g = g + 0.09
+                    b = b + 0.12
+                }
+            }
+            // a darker seam at the tile border keeps a wall of tiles from
+            // melting into one flat field
+            if x == 0 || y == TILE_ART - 1 {
+                r = r * 0.62
+                g = g * 0.62
+                b = b * 0.66
+            }
+            spriteSet(s, x, y, r, g, b, 1.0)
+        }
+    }
+    return s
+}
+
+// Six art rows of metal slab, transparent below — you fall through it from
+// underneath, and the sprite says so by not being there.
+fn platformTile(): Sprite {
+    var s = spriteNew(TILE_ART, TILE_ART)
+    for y in 0..6 {
+        for x in 0..TILE_ART {
+            let n = valueNoise((x as f64) * 0.7, (y as f64) * 0.7, 31)
+            var r = 0.16 + n * 0.10
+            var g = 0.19 + n * 0.12
+            var b = 0.27 + n * 0.16
+            if y == 0 {
+                r = 0.70
+                g = 0.35
+                b = 1.10
+            }
+            if y == 1 {
+                r = 0.24
+                g = 0.16
+                b = 0.38
+            }
+            if y == 5 {
+                r = r * 0.45
+                g = g * 0.45
+                b = b * 0.5
+            }
+            spriteSet(s, x, y, r, g, b, 1.0)
+        }
+    }
+    return s
+}
+
+// Four teeth per tile. Hot at the tip, dark at the base — the eye reads the
+// bright line as the dangerous end without being told.
+fn spikeTile(): Sprite {
+    var s = spriteNew(TILE_ART, TILE_ART)
+    for y in 0..TILE_ART {
+        for x in 0..TILE_ART {
+            let local = x % 4
+            let centre = 1.5
+            let d = Math.abs((local as f64) - centre)
+            // teeth widen toward the bottom of the tile
+            let allow = (y as f64) / (TILE_ART as f64) * 2.0
+            if d <= allow {
+                let t = (y as f64) / ((TILE_ART - 1) as f64)
+                let heat = 1.0 - t
+                spriteSet(s, x, y, 0.15 + heat * heat * 2.10, 0.10 + heat * heat * 0.55, 0.18 + heat * heat * 0.30, 1.0)
+            }
+        }
+    }
+    return s
+}
+
+// Breakable: a crate with a bright cross brace, so "hit this" is legible at a
+// glance next to solid rock.
+fn crateTile(): Sprite {
+    var s = spriteNew(TILE_ART, TILE_ART)
+    for y in 0..TILE_ART {
+        for x in 0..TILE_ART {
+            let n = valueNoise((x as f64) * 0.8, (y as f64) * 0.8, 77)
+            var r = 0.26 + n * 0.14
+            var g = 0.17 + n * 0.09
+            var b = 0.10 + n * 0.06
+            let edge = x == 0 || y == 0 || x == TILE_ART - 1 || y == TILE_ART - 1
+            if edge {
+                r = 0.52
+                g = 0.34
+                b = 0.16
+            }
+            // the diagonal brace
+            if x == y || x == TILE_ART - 1 - y {
+                r = 0.95
+                g = 0.55
+                b = 0.18
+            }
+            spriteSet(s, x, y, r, g, b, 1.0)
+        }
+    }
+    return s
+}
+
+// Launch pad: a compressed spring under a hot plate.
+fn padTile(): Sprite {
+    var s = spriteNew(TILE_ART, TILE_ART)
+    for y in 0..TILE_ART {
+        for x in 0..TILE_ART {
+            if y < 4 {
+                let t = (y as f64) / 3.0
+                spriteSet(s, x, y, 1.60 * (1.0 - t * 0.5), 1.10 * (1.0 - t * 0.4), 0.30, 1.0)
+            } else if y < 12 {
+                // zigzag coil
+                let band = (y - 4) / 2
+                let on = if band % 2 == 0 {
+                    x % 6 < 3
+                } else {
+                    x % 6 >= 3
+                }
+                if on {
+                    spriteSet(s, x, y, 0.42, 0.34, 0.16, 1.0)
+                }
+            } else {
+                spriteSet(s, x, y, 0.10, 0.09, 0.13, 1.0)
+            }
+        }
+    }
+    return s
+}
+
+pub fn tileSetNew(): TileSet {
+    return TileSet {
+        groundCap: rockTile(true, 11),
+        groundFill: rockTile(false, 23),
+        platform: platformTile(),
+        spike: spikeTile(),
+        crate: crateTile(),
+        pad: padTile(),
+    }
+}

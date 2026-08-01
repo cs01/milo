@@ -1,0 +1,435 @@
+// Everything that puts ink on the canvas.
+//
+// Back to front: sky, three parallax layers, tiles, pickups, enemies, the
+// player, particles, then the HUD. The parallax layers are generated from a
+// hash of their world position rather than stored, so a level of any length has
+// a skyline behind it and none of it is in the binary.
+
+from "std/math" import {
+    Math
+}
+from "./gfx" import {
+    Canvas, Sprite, addPix, blendPix, fillRect, fillRectAdd, skyGradient, spot, line,
+    drawSprite, blitSprite, shadowSprite, text, textCentered, textWidth
+}
+from "./tiles" import {
+    TileSet, TILE
+}
+from "./level" import {
+    Level, tileAt, T_EMPTY, T_SOLID, T_PLAT, T_SPIKE, T_CRATE, T_PAD
+}
+from "./world" import {
+    World, Player, Mob, Pickup, Part, Ghost, heroFrameOf,
+    PLAYER_W, PLAYER_H, MOB_CRAWLER, MOB_DRONE, PK_SHARD, PK_CORE,
+    ST_PLAY, ST_CLEAR, ST_DONE
+}
+from "./sprites" import {
+    SHARD_FRAMES
+}
+
+pub let ART: f64 = 2.0 // art pixels to screen pixels
+
+@wrapping
+fn hashi(i: i64, seed: i64): f64 {
+    var h = i * 374761393 + seed * 668265263
+    h = (h ^ (h >> 13)) * 1274126177
+    h = h ^ (h >> 16)
+    var m = h % 8192
+    if m < 0 {
+        m = 0 - m
+    }
+    return (m as f64) / 8192.0
+}
+
+fn noise1(x: f64, seed: i64): f64 {
+    let i = Math.floor(x) as i64
+    let t = x - (i as f64)
+    let s = t * t * (3.0 - 2.0 * t)
+    let a = hashi(i, seed)
+    let b = hashi(i + 1, seed)
+    return a + (b - a) * s
+}
+
+// ── background ────────────────────────────────────────────────────────────────
+
+// Each level gets its own sky. Three palettes is not a lot of code and it is
+// most of why the levels do not feel like one level with the walls moved.
+fn skyOf(c: &mut Canvas, lvl: i64) {
+    if lvl == 1 {
+        skyGradient(c, 0.030, 0.018, 0.055, 0.010, 0.008, 0.020)
+    } else if lvl == 2 {
+        skyGradient(c, 0.055, 0.030, 0.075, 0.008, 0.010, 0.028)
+    } else {
+        skyGradient(c, 0.045, 0.055, 0.115, 0.012, 0.014, 0.038)
+    }
+}
+
+fn drawStars(c: &mut Canvas, camX: f64, camY: f64, t: f64) {
+    let px = camX * 0.06
+    let py = camY * 0.06
+    for i in 0..170 {
+        let bx = hashi(i, 3) * 2600.0
+        let by = hashi(i, 9) * 780.0
+        var x = bx - px
+        // wrap in a band wider than the screen so stars never pop in at an edge
+        x = x - Math.floor(x / 2600.0) * 2600.0
+        let y = by - py
+        let tw = 0.55 + 0.45 * Math.sin(t * 1.7 + (i as f64) * 1.3)
+        let k = (0.10 + hashi(i, 21) * 0.35) * tw
+        addPix(c, x as i64, y as i64, k * 0.8, k * 0.95, k * 1.2)
+    }
+}
+
+// A distant ridge: one column of fill per screen x, height from smooth noise.
+fn drawRidge(c: &mut Canvas, camX: f64, camY: f64, par: f64, base: f64, amp: f64, freq: f64, seed: i64, r: f64, g: f64, b: f64) {
+    let off = camX * par
+    let yoff = camY * par * 0.4
+    for x in 0..c.w {
+        let wx = ((x as f64) + off) * freq
+        let n = noise1(wx, seed) * 0.6 + noise1(wx * 2.7, seed + 5) * 0.28 + noise1(wx * 6.1, seed + 11) * 0.12
+        let top = base - n * amp - yoff
+        var y = top as i64
+        if y < 0 {
+            y = 0
+        }
+        // A lit rim on the crest, then flat fill: the silhouette carries the
+        // shape, the rim keeps it from reading as a hole in the sky.
+        blendPix(c, x, y, r * 3.4, g * 3.4, b * 3.6, 0.9)
+        y = y + 1
+        while y < c.h {
+            blendPix(c, x, y, r, g, b, 1.0)
+            y = y + 1
+        }
+    }
+}
+
+// Towers with lit windows. Everything about a building comes out of the hash of
+// its index, so the skyline is stable as the camera moves and nothing is stored.
+fn drawTowers(c: &mut Canvas, camX: f64, camY: f64, par: f64, base: f64, t: f64) {
+    let off = camX * par
+    let yoff = camY * par * 0.5
+    let span = 84.0
+    let first = Math.floor(off / span) as i64
+    for k in 0..20 {
+        let i = first + k
+        let bx = (i as f64) * span - off + hashi(i, 41) * 26.0
+        let bw = 40.0 + hashi(i, 43) * 44.0
+        let bh = 120.0 + hashi(i, 47) * 260.0
+        let top = base - bh - yoff
+        fillRect(c, bx, top, bx + bw, base - yoff + 40.0, 0.028, 0.030, 0.062, 1.0)
+        // roof edge
+        fillRect(c, bx, top, bx + bw, top + 2.0, 0.12, 0.22, 0.40, 1.0)
+        // windows: a sparse grid, a few of them lit and flickering
+        var wy = top + 8.0
+        var row = 0
+        while wy < base - yoff - 6.0 {
+            var wx = bx + 5.0
+            var col = 0
+            while wx < bx + bw - 6.0 {
+                let h = hashi(i * 977 + row * 31 + col, 53)
+                if h > 0.62 {
+                    let flick = 0.75 + 0.25 * Math.sin(t * 2.0 + h * 40.0)
+                    let warm = h > 0.9
+                    if warm {
+                        fillRectAdd(c, wx, wy, wx + 3.0, wy + 4.0, 0.42 * flick, 0.26 * flick, 0.10 * flick)
+                    } else {
+                        fillRectAdd(c, wx, wy, wx + 3.0, wy + 4.0, 0.10 * flick, 0.26 * flick, 0.42 * flick)
+                    }
+                }
+                wx = wx + 7.0
+                col = col + 1
+            }
+            wy = wy + 9.0
+            row = row + 1
+        }
+    }
+}
+
+pub fn drawBackground(c: &mut Canvas, w: &World) {
+    skyOf(c, w.lvlIdx)
+    drawStars(c, w.camX, w.camY, w.t)
+    // a low sun, parked behind everything
+    spot(c, (c.w as f64) * 0.72 - w.camX * 0.03, (c.h as f64) * 0.30 - w.camY * 0.03, 210.0, 0.28, 0.10, 0.22)
+    drawRidge(c, w.camX, w.camY, 0.10, (c.h as f64) * 0.62, 130.0, 0.0016, 5, 0.022, 0.020, 0.048)
+    drawTowers(c, w.camX, w.camY, 0.26, (c.h as f64) * 0.86, w.t)
+    drawRidge(c, w.camX, w.camY, 0.44, (c.h as f64) * 1.02, 90.0, 0.0031, 17, 0.014, 0.012, 0.030)
+}
+
+// ── tiles ─────────────────────────────────────────────────────────────────────
+
+pub fn drawLevel(c: &mut Canvas, w: &World, ts: &TileSet, ox: f64, oy: f64) {
+    let camX = w.camX - ox
+    let camY = w.camY - oy
+    var cx0 = (Math.floor(camX / TILE) as i64) - 1
+    var cy0 = (Math.floor(camY / TILE) as i64) - 1
+    let cx1 = cx0 + (c.w / 32) + 3
+    let cy1 = cy0 + (c.h / 32) + 3
+    if cx0 < 0 {
+        cx0 = 0
+    }
+    if cy0 < 0 {
+        cy0 = 0
+    }
+    for cy in cy0..cy1 + 1 {
+        for cx in cx0..cx1 + 1 {
+            let v = tileAt(w.lvl, cx, cy)
+            if v != T_EMPTY {
+                let sx = (cx as f64) * TILE - camX
+                let sy = (cy as f64) * TILE - camY
+                if v == T_SOLID {
+                    // The only autotiling there is: an exposed top gets the lit
+                    // cap, everything else gets fill.
+                    if tileAt(w.lvl, cx, cy - 1) == T_SOLID {
+                        drawSprite(c, ts.groundFill, sx, sy, ART, false, 0.0)
+                    } else {
+                        drawSprite(c, ts.groundCap, sx, sy, ART, false, 0.35)
+                    }
+                } else if v == T_PLAT {
+                    drawSprite(c, ts.platform, sx, sy, ART, false, 0.55)
+                } else if v == T_SPIKE {
+                    drawSprite(c, ts.spike, sx, sy, ART, false, 0.7)
+                } else if v == T_CRATE {
+                    drawSprite(c, ts.crate, sx, sy, ART, false, 0.2)
+                } else if v == T_PAD {
+                    drawSprite(c, ts.pad, sx, sy, ART, false, 0.9)
+                }
+            }
+        }
+    }
+}
+
+// ── entities ──────────────────────────────────────────────────────────────────
+
+pub fn drawGoal(c: &mut Canvas, w: &World, ox: f64, oy: f64) {
+    let x = w.lvl.goalX - w.camX + ox
+    let y = w.lvl.goalY - w.camY + oy
+    if x < -80.0 || x > (c.w as f64) + 80.0 {
+        return
+    }
+    // a column of light, brightest at the base
+    var k = 0
+    while k < 26 {
+        let t = (k as f64) / 26.0
+        let a = (1.0 - t) * 0.55
+        let wob = Math.sin(w.t * 3.0 + t * 8.0) * 3.0
+        fillRectAdd(c, x - 15.0 + wob * 0.4, y - 16.0 - (k as f64) * 16.0, x + 15.0 + wob * 0.4, y - (k as f64) * 16.0 + 2.0, 0.10 * a, 0.26 * a, 0.24 * a)
+        k = k + 1
+    }
+    // the ring itself
+    let pulse = 1.0 + 0.25 * Math.sin(w.t * 4.0)
+    var i = 0
+    while i < 40 {
+        let a = (i as f64) / 40.0 * 6.2831853
+        let r = 22.0 * pulse
+        let px = x + Math.cos(a) * r
+        let py = y - 20.0 + Math.sin(a) * r * 0.85
+        spot(c, px, py, 5.0, 0.35, 1.5, 1.3)
+        i = i + 1
+    }
+    spot(c, x, y - 20.0, 26.0, 0.10, 0.42, 0.40)
+    spot(c, x, y, 34.0, 0.16, 0.55, 0.50)
+}
+
+pub fn drawPickups(c: &mut Canvas, w: &World, shards: &Vec<Sprite>, core: &Sprite, ox: f64, oy: f64) {
+    var i = 0
+    while i < w.pk.len {
+        if !w.pk[i].taken {
+            let bob = Math.sin(w.pk[i].t * 2.6) * 4.0
+            let x = w.pk[i].x - w.camX + ox
+            let y = w.pk[i].y - w.camY + oy + bob
+            if x > -60.0 && x < (c.w as f64) + 60.0 {
+                if w.pk[i].kind == PK_CORE {
+                    spot(c, x, y, 30.0, 0.30, 0.10, 0.38)
+                    let s = 1.0 + 0.08 * Math.sin(w.pk[i].t * 3.4)
+                    drawSprite(c, core, x - 14.0 * s, y - 14.0 * s, ART * s, false, 0.85)
+                } else {
+                    let f = ((w.pk[i].t * 7.0) as i64) % SHARD_FRAMES
+                    spot(c, x, y, 15.0, 0.10, 0.26, 0.30)
+                    drawSprite(c, shards[f], x - 8.0, y - 11.0, ART, false, 1.1)
+                }
+            }
+        }
+        i = i + 1
+    }
+}
+
+pub fn drawMobs(c: &mut Canvas, w: &World, crawler: &Sprite, drone: &Sprite, ox: f64, oy: f64) {
+    var i = 0
+    while i < w.mobs.len {
+        let x = w.mobs[i].x - w.camX + ox
+        let y = w.mobs[i].y - w.camY + oy
+        if x > -80.0 && x < (c.w as f64) + 80.0 {
+            if !w.mobs[i].alive {
+                // a flattened, fading corpse
+                let t = Math.maxF64(0.0, w.mobs[i].dieT / 0.35)
+                blitSprite(c, crawler, x, y + 20.0 * (1.0 - t), ART, ART * t, false, t, 1.2, 1.4, 1.4, 1.6, 0.6)
+            } else if w.mobs[i].kind == MOB_CRAWLER {
+                // the walk is a squash, not a second sprite
+                let sq = 1.0 + 0.09 * Math.sin(w.mobs[i].phase)
+                let sw = ART / sq
+                let sh = ART * sq
+                let hx = x + (28.0 - 28.0 / sq) * 0.5
+                let hy = y + 20.0 - 20.0 * sq
+                spot(c, x + 14.0, y + 10.0, 20.0, 0.14, 0.05, 0.18)
+                blitSprite(c, crawler, hx, hy, sw, sh, w.mobs[i].vx < 0.0, 1.0, 0.3, 0.0, 0.0, 0.0, 0.0)
+            } else {
+                spot(c, x + 14.0, y + 10.0, 22.0, 0.22, 0.05, 0.05)
+                drawSprite(c, drone, x, y, ART, w.mobs[i].vx < 0.0, 0.35)
+                // thruster wash under the hull
+                let flick = 0.6 + 0.4 * Math.sin(w.t * 22.0 + w.mobs[i].phase)
+                spot(c, x + 5.0, y + 21.0, 6.0 * flick, 0.12, 0.45, 0.65)
+                spot(c, x + 23.0, y + 21.0, 6.0 * flick, 0.12, 0.45, 0.65)
+            }
+        }
+        i = i + 1
+    }
+}
+
+pub fn drawPlayer(c: &mut Canvas, w: &World, frames: &Vec<Sprite>, ox: f64, oy: f64) {
+    if w.p.dead {
+        return
+    }
+    let flip = w.p.facing < 0.0
+    let bx = w.p.x - w.camX + ox
+    let by = w.p.y - w.camY + oy
+
+    // dash ghosts, oldest first
+    var i = 0
+    while i < w.ghosts.len {
+        let t = w.ghosts[i].t / 0.22
+        let gx = w.ghosts[i].x - w.camX + ox - 2.0
+        let gy = w.ghosts[i].y - w.camY + oy
+        shadowSprite(c, frames[w.ghosts[i].frame], gx, gy, ART, ART, w.ghosts[i].flip, t * 0.45, 0.45 * t, 1.30 * t, 1.60 * t)
+        i = i + 1
+    }
+
+    let sq = frames[heroFrameOf(w)]
+    // Squash and stretch about the feet: the sprite's bottom edge stays on the
+    // ground while the body compresses, which is the only way it reads as impact
+    // rather than as the character sinking into the floor.
+    let sx = ART * w.p.sqX
+    let sy = ART * w.p.sqY
+    let dw = (sq.w as f64) * sx
+    let dh = (sq.h as f64) * sy
+    let footY = by + PLAYER_H
+    let dx = bx + PLAYER_W * 0.5 - dw * 0.5
+    let dy = footY - dh
+
+    // contact shadow
+    if w.p.onGround {
+        fillRect(c, bx - 2.0, footY - 3.0, bx + PLAYER_W + 2.0, footY + 1.0, 0.0, 0.0, 0.0, 0.35)
+    }
+    var glow = 0.30
+    var tmix = 0.0
+    if w.p.dashT > 0.0 {
+        glow = 1.1
+        tmix = 0.35
+    }
+    if w.p.spawnT > 0.0 {
+        // materialising: flicker in over half a second
+        let t = w.p.spawnT / 0.55
+        spot(c, bx + PLAYER_W * 0.5, by + PLAYER_H * 0.5, 40.0 * t, 0.3 * t, 0.9 * t, 1.1 * t)
+        blitSprite(c, sq, dx, dy, sx, sy, flip, 1.0 - t * 0.6, glow + t, 0.5, 1.6, 1.9, t)
+    } else {
+        blitSprite(c, sq, dx, dy, sx, sy, flip, 1.0, glow, 0.7, 1.5, 1.9, tmix)
+    }
+    // a soft light the character carries, so the level lights up around them
+    spot(c, bx + PLAYER_W * 0.5, by + PLAYER_H * 0.45, 52.0, 0.05, 0.11, 0.17)
+}
+
+pub fn drawParts(c: &mut Canvas, w: &World, ox: f64, oy: f64) {
+    var i = 0
+    while i < w.parts.len {
+        let t = w.parts[i].life / w.parts[i].max
+        let x = w.parts[i].x - w.camX + ox
+        let y = w.parts[i].y - w.camY + oy
+        if x > -20.0 && x < (c.w as f64) + 20.0 {
+            spot(c, x, y, w.parts[i].size * (0.4 + t * 0.9), w.parts[i].r * t, w.parts[i].g * t, w.parts[i].b * t)
+        }
+        i = i + 1
+    }
+}
+
+// Speed streaks while dashing — drawn in screen space, behind nothing.
+pub fn drawSpeedLines(c: &mut Canvas, w: &World) {
+    if w.p.dashT <= 0.0 {
+        return
+    }
+    let k = w.p.dashT / 0.145
+    for i in 0..22 {
+        let y = hashi(i, 71) * (c.h as f64)
+        let len = 90.0 + hashi(i, 73) * 190.0
+        let x = hashi(i + 400, 79) * (c.w as f64)
+        let dir = 0.0 - w.p.dashX
+        line(c, x, y, x + dir * len, y + w.p.dashY * len * 0.4, 0.10 * k, 0.22 * k, 0.30 * k)
+    }
+}
+
+// ── HUD ───────────────────────────────────────────────────────────────────────
+
+fn timeString(t: f64): string {
+    let total = (t * 100.0) as i64
+    let cs = total % 100
+    let secs = (total / 100) % 60
+    let mins = total / 6000
+    var s = mins.toString() + ":"
+    if secs < 10 {
+        s = s + "0"
+    }
+    s = s + secs.toString() + "."
+    if cs < 10 {
+        s = s + "0"
+    }
+    return s + cs.toString()
+}
+
+pub fn drawHud(c: &mut Canvas, w: &World, shard: &Sprite, fps: i64) {
+    // a dark bar so text stays readable over a bright sky
+    fillRect(c, 0.0, 0.0, c.w as f64, 46.0, 0.0, 0.0, 0.0, 0.35)
+
+    text(c, 22, 16, w.lvl.name, 2, 0.35, 0.95, 1.10)
+
+    drawSprite(c, shard, 300.0, 10.0, 2.0, false, 0.9)
+    let got = w.shards.toString() + "/" + w.shardTotal.toString()
+    text(c, 322, 16, got, 2, 0.85, 1.00, 0.65)
+
+    if w.cores > 0 {
+        text(c, 420, 16, "CORES " + w.cores.toString(), 2, 1.10, 0.55, 1.30)
+    }
+
+    let tm = timeString(w.time)
+    text(c, c.w - 22 - textWidth(tm, 2), 16, tm, 2, 0.55, 0.70, 0.95)
+
+    let dth = "DEATHS " + w.deaths.toString()
+    text(c, c.w - 200 - textWidth(dth, 2), 16, dth, 2, 0.70, 0.30, 0.35)
+
+    // dash charge: the one piece of state a player has to track, so it lives on
+    // the character's own colour rather than in a number
+    let cx = 22
+    let cy = 34
+    if w.p.dashes > 0 && w.p.dashCd <= 0.0 {
+        fillRectAdd(c, cx as f64, cy as f64, (cx + 16) as f64, (cy + 4) as f64, 0.9, 0.35, 1.2)
+    } else {
+        fillRect(c, cx as f64, cy as f64, (cx + 16) as f64, (cy + 4) as f64, 0.25, 0.12, 0.30, 1.0)
+    }
+
+    text(c, 22, c.h - 28, fps.toString() + " FPS", 2, 0.16, 0.26, 0.34)
+    let help = "ARROWS MOVE   SPACE JUMP   SHIFT DASH   R RESET   M MUSIC   ESC QUIT"
+    text(c, c.w - 22 - textWidth(help, 2), c.h - 28, help, 2, 0.16, 0.26, 0.34)
+
+    if w.state == ST_CLEAR {
+        fillRect(c, 0.0, (c.h / 2 - 70) as f64, c.w as f64, (c.h / 2 + 60) as f64, 0.0, 0.0, 0.0, 0.45)
+        textCentered(c, c.w / 2, c.h / 2 - 46, "GATE OPEN", 6, 0.40, 1.60, 1.40)
+        let line1 = "SHARDS " + w.shards.toString() + "/" + w.shardTotal.toString()
+        textCentered(c, c.w / 2, c.h / 2 + 16, line1, 3, 0.85, 1.00, 0.60)
+    }
+    if w.state == ST_DONE {
+        fillRect(c, 0.0, 0.0, c.w as f64, c.h as f64, 0.0, 0.0, 0.0, 0.55)
+        textCentered(c, c.w / 2, c.h / 2 - 90, "RUN COMPLETE", 7, 0.45, 1.70, 1.50)
+        textCentered(c, c.w / 2, c.h / 2 + 6, "SHARDS " + w.banked.toString(), 3, 0.85, 1.00, 0.60)
+        textCentered(c, c.w / 2, c.h / 2 + 42, "CORES " + w.cores.toString(), 3, 1.10, 0.55, 1.30)
+        textCentered(c, c.w / 2, c.h / 2 + 78, "TIME " + timeString(w.time), 3, 0.55, 0.70, 0.95)
+        textCentered(c, c.w / 2, c.h / 2 + 114, "DEATHS " + w.deaths.toString(), 3, 0.70, 0.30, 0.35)
+        textCentered(c, c.w / 2, c.h / 2 + 164, "R TO RUN IT AGAIN", 2, 0.40, 0.50, 0.65)
+    }
+}

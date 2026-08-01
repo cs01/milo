@@ -1,0 +1,333 @@
+// Every sprite in the game, built at startup. There is no asset directory and
+// no loader: the character frames are pixel art written as strings, and the
+// collectibles are generated from their own geometry.
+//
+// A palette entry is four floats of linear light, and values run past 1.0 on
+// purpose — a visor at 1.7 clears the bloom threshold and glows, the suit at
+// 0.3 beside it does not. That contrast is the whole look, and it is why the
+// art is authored in linear light rather than in 8-bit colour.
+
+from "std/math" import {
+    Math
+}
+from "./gfx" import {
+    Sprite, spriteNew, spriteSet
+}
+
+// ── string art ────────────────────────────────────────────────────────────────
+//
+// One character per pixel: '.' is transparent, '0'-'9' index the palette. Rows
+// need not be padded — anything short is transparent to the right — so a frame
+// only spells out the pixels it actually uses.
+
+fn palAdd(p: &mut Vec<f64>, r: f64, g: f64, b: f64) {
+    p.push(r)
+    p.push(g)
+    p.push(b)
+}
+
+fn charAt(rows: &Vec<string>, r: i64, c: i64): i64 {
+    if c >= rows[r].len {
+        return 46 // '.'
+    }
+    return rows[r][c] as i64
+}
+
+fn widest(rows: &Vec<string>): i64 {
+    var w = 0
+    for r in rows {
+        if r.len > w {
+            w = r.len
+        }
+    }
+    return w
+}
+
+fn spriteFrom(rows: &Vec<string>, pal: &Vec<f64>): Sprite {
+    let w = widest(rows)
+    let h = rows.len
+    var s = spriteNew(w, h)
+    for y in 0..h {
+        for x in 0..w {
+            let ch = charAt(rows, y, x)
+            if ch >= 48 && ch <= 57 {
+                let i = (ch - 48) * 3
+                if i + 2 < pal.len {
+                    spriteSet(s, x, y, pal[i], pal[i + 1], pal[i + 2], 1.0)
+                }
+            }
+        }
+    }
+    return s
+}
+
+// ── the runner ────────────────────────────────────────────────────────────────
+//
+//   0 outline   2 suit   3 suit lit   4 visor   5 core   7 scarf   8 boots
+
+fn heroPalette(): Vec<f64> {
+    var p: Vec<f64> = Vec.new()
+    palAdd(p, 0.015, 0.018, 0.035) // 0 outline
+    palAdd(p, 0.100, 0.130, 0.240) // 1 suit shadow
+    palAdd(p, 0.130, 0.170, 0.320) // 2 suit
+    palAdd(p, 0.260, 0.340, 0.580) // 3 suit lit
+    palAdd(p, 0.250, 1.700, 2.100) // 4 visor  (emissive)
+    palAdd(p, 1.800, 0.350, 0.950) // 5 core   (emissive)
+    palAdd(p, 1.200, 1.250, 1.350) // 6 white
+    palAdd(p, 1.400, 0.450, 0.220) // 7 scarf  (emissive)
+    palAdd(p, 0.400, 0.440, 0.560) // 8 boots
+    palAdd(p, 0.850, 0.620, 0.450) // 9 skin
+    return p
+}
+
+// Rows 0-11 are the same in every frame — helmet, visor, scarf, torso — so each
+// frame below only differs from the waist down, which is where a run cycle
+// actually lives.
+fn heroTorso(v: &mut Vec<string>) {
+    v.push("..00000000..")
+    v.push(".0333333330.")
+    v.push(".0344444430.")
+    v.push(".0344444430.")
+    v.push(".0322222230.")
+    v.push("..07777770..")
+    v.push(".0777777770.")
+    v.push(".0302222030.")
+    v.push(".0302552030.")
+    v.push(".0302222030.")
+    v.push("..03222230..")
+    v.push("..03222230..")
+}
+
+pub let HERO_IDLE: i64 = 0
+
+pub let HERO_RUN0: i64 = 1
+
+pub let HERO_RUN1: i64 = 2
+
+pub let HERO_RUN2: i64 = 3
+
+pub let HERO_RUN3: i64 = 4
+
+pub let HERO_JUMP: i64 = 5
+
+pub let HERO_FALL: i64 = 6
+
+pub let HERO_DASH: i64 = 7
+
+pub let HERO_WALL: i64 = 8
+
+pub fn heroFrames(): Vec<Sprite> {
+    let pal = heroPalette()
+    var out: Vec<Sprite> = Vec.new()
+
+    var idle: Vec<string> = Vec.new()
+    heroTorso(idle)
+    idle.push("..02200220..")
+    idle.push("..03300330..")
+    idle.push("..08800880..")
+    idle.push(".0888008880.")
+    out.push(spriteFrom(idle, pal))
+
+    // run, four frames: contact, pass, contact mirrored, recover
+    var r0: Vec<string> = Vec.new()
+    heroTorso(r0)
+    r0.push(".0220000220.")
+    r0.push("0330....0330")
+    r0.push("0880....0880")
+    r0.push("8880....0888")
+    out.push(spriteFrom(r0, pal))
+
+    var r1: Vec<string> = Vec.new()
+    heroTorso(r1)
+    r1.push("..02200220..")
+    r1.push("..03300330..")
+    r1.push("...0880880..")
+    r1.push("...0888880..")
+    out.push(spriteFrom(r1, pal))
+
+    var r2: Vec<string> = Vec.new()
+    heroTorso(r2)
+    r2.push(".0220000220.")
+    r2.push("0330....0330")
+    r2.push("0880....0880")
+    r2.push("0888....8880")
+    out.push(spriteFrom(r2, pal))
+
+    var r3: Vec<string> = Vec.new()
+    heroTorso(r3)
+    r3.push("..02200220..")
+    r3.push("..03300330..")
+    r3.push("..08800880..")
+    r3.push("..08808880..")
+    out.push(spriteFrom(r3, pal))
+
+    // jump: knees up, feet tucked out of the silhouette entirely
+    var jp: Vec<string> = Vec.new()
+    heroTorso(jp)
+    jp.push("..03222230..")
+    jp.push(".0388008830.")
+    jp.push(".0880000880.")
+    jp.push("............")
+    out.push(spriteFrom(jp, pal))
+
+    // fall: legs reaching for the ground
+    var fl: Vec<string> = Vec.new()
+    heroTorso(fl)
+    fl.push("..02200220..")
+    fl.push("..03300330..")
+    fl.push(".0330..0330.")
+    fl.push(".0880..0880.")
+    out.push(spriteFrom(fl, pal))
+
+    // dash: leaning, scarf pulled straight back, one long line from head to toe
+    var ds: Vec<string> = Vec.new()
+    ds.push("............")
+    ds.push("..00000000..")
+    ds.push(".0333333330.")
+    ds.push(".0344444440.")
+    ds.push(".0344444440.")
+    ds.push(".0322222230.")
+    ds.push("07777777770.")
+    ds.push("70302222030.")
+    ds.push("70302552030.")
+    ds.push(".0302222030.")
+    ds.push("..03222230..")
+    ds.push("..03222230..")
+    ds.push(".0322222230.")
+    ds.push(".0880008880.")
+    ds.push("..0880880...")
+    ds.push("............")
+    out.push(spriteFrom(ds, pal))
+
+    // wall slide: knees together, body flat against the surface
+    var wl: Vec<string> = Vec.new()
+    heroTorso(wl)
+    wl.push("...022220...")
+    wl.push("...033330...")
+    wl.push("...088880...")
+    wl.push("...088880...")
+    out.push(spriteFrom(wl, pal))
+
+    return out
+}
+
+// ── crawler ───────────────────────────────────────────────────────────────────
+//
+// The stompable one. No spikes anywhere on it: everything about the silhouette
+// has to say "land on me", because that is the one interaction it has.
+
+pub fn crawlerSprite(): Sprite {
+    var p: Vec<f64> = Vec.new()
+    palAdd(p, 0.015, 0.018, 0.035) // 0 outline
+    palAdd(p, 0.320, 0.130, 0.450) // 1 body
+    palAdd(p, 0.520, 0.240, 0.680) // 2 belly
+    palAdd(p, 0.0, 0.0, 0.0)
+    palAdd(p, 2.000, 0.600, 0.180) // 4 eye (emissive)
+    palAdd(p, 0.0, 0.0, 0.0)
+    palAdd(p, 1.300, 1.300, 1.350) // 6 white
+    var v: Vec<string> = Vec.new()
+    v.push("....000000....")
+    v.push("..0011111100..")
+    v.push(".011111111110.")
+    v.push(".014411114410.")
+    v.push(".014611116410.")
+    v.push(".011111111110.")
+    v.push(".011222222110.")
+    v.push(".011222222110.")
+    v.push("..0111111110..")
+    v.push("...00000000...")
+    return spriteFrom(v, p)
+}
+
+// ── drone ─────────────────────────────────────────────────────────────────────
+//
+// Hovers a fixed line and cannot be stomped — its shell is armoured and the only
+// safe answer is to dash through it or go around.
+
+pub fn droneSprite(): Sprite {
+    var p: Vec<f64> = Vec.new()
+    palAdd(p, 0.015, 0.018, 0.035) // 0 outline
+    palAdd(p, 0.0, 0.0, 0.0)
+    palAdd(p, 0.300, 1.100, 1.600) // 2 thruster (emissive)
+    palAdd(p, 0.500, 0.550, 0.680) // 3 shell
+    palAdd(p, 2.200, 0.280, 0.280) // 4 eye (emissive)
+    palAdd(p, 0.0, 0.0, 0.0)
+    palAdd(p, 1.400, 1.400, 1.400) // 6 white
+    var v: Vec<string> = Vec.new()
+    v.push("...00000000...")
+    v.push("..0333333330..")
+    v.push(".033333333330.")
+    v.push(".033344444330.")
+    v.push(".034466664430.")
+    v.push(".033344444330.")
+    v.push(".033333333330.")
+    v.push("..0333333330..")
+    v.push(".220000000022.")
+    v.push("..2........2..")
+    return spriteFrom(v, p)
+}
+
+// ── collectibles ──────────────────────────────────────────────────────────────
+//
+// Generated rather than drawn: a shard is a diamond whose half-width is the only
+// thing that changes across the spin, so six frames are six numbers.
+
+pub let SHARD_FRAMES: i64 = 6
+
+pub fn shardFrames(): Vec<Sprite> {
+    var widths: Vec<f64> = Vec.new()
+    widths.push(3.4)
+    widths.push(2.4)
+    widths.push(1.1)
+    widths.push(0.5)
+    widths.push(1.6)
+    widths.push(2.8)
+    var out: Vec<Sprite> = Vec.new()
+    for f in 0..SHARD_FRAMES {
+        let hw = widths[f]
+        var s = spriteNew(8, 11)
+        for y in 0..11 {
+            // Taper to a point at both ends; the widest band sits just above
+            // centre, which reads as a cut gem rather than a rhombus.
+            let ty = 1.0 - Math.abs((y as f64) - 4.6) / 6.2
+            let wx = hw * ty
+            for x in 0..8 {
+                let dx = Math.abs((x as f64) - 3.5)
+                if dx <= wx {
+                    let edge = 1.0 - dx / (wx + 0.001)
+                    // bright rim, cooler core, so the facet catches the bloom
+                    let k = 0.35 + edge * 0.35
+                    spriteSet(s, x, y, 0.55 + k * 0.9, 1.30 + k * 1.5, 1.55 + k * 1.2, 1.0)
+                }
+            }
+        }
+        out.push(s)
+    }
+    return out
+}
+
+// The level's single big pickup: a faceted hexagon, warmer than the shards so it
+// never reads as "just another one of those".
+pub fn coreSprite(): Sprite {
+    var s = spriteNew(14, 14)
+    for y in 0..14 {
+        for x in 0..14 {
+            let dx = ((x as f64) - 6.5) / 6.0
+            let dy = ((y as f64) - 6.5) / 6.5
+            // hexagon: the max of an axis test and a pair of diagonals
+            let hex = Math.maxF64(Math.abs(dy), Math.abs(dy) * 0.5 + Math.abs(dx) * 0.87)
+            if hex <= 1.0 {
+                let edge = 1.0 - hex
+                var k = 0.4 + edge * 0.8
+                // a facet seam down the middle catches a highlight
+                if x == 6 || x == 7 {
+                    k = k * 1.5
+                }
+                spriteSet(s, x, y, 1.30 * k, 0.55 * k, 1.60 * k, 1.0)
+            } else if hex <= 1.12 {
+                spriteSet(s, x, y, 0.02, 0.02, 0.04, 1.0)
+            }
+        }
+    }
+    return s
+}

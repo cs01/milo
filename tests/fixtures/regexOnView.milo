@@ -1,3 +1,6 @@
+// @skip-os: win32
+// std/regex binds POSIX regcomp, which the MSVC CRT does not provide.
+//
 // A `&string` view is not NUL-terminated — it points into the middle of a bigger
 // buffer. Before REG_STARTEND, regexec ran off the end of the view and reported
 // matches from the REST of the buffer, silently. This locks that shut.

@@ -344,26 +344,54 @@ fn fillNoData(city: &City, t: &mut Texture, n: i64) {
     var anyKnown = false
     // The drape spans [-reach, +reach] on both axes, with v measured from the
     // north edge — the same mapping render3d uses for the terrain UVs.
+    //
+    // Three passes at widening thresholds, taking the first that finds enough to
+    // solve from. Deep water is the honest boundary and the one that gives the
+    // right colour, but not every gap is over an ocean: Manhattan's is over the
+    // Hudson, which is fifteen metres deep, so a deep-water-only rule found
+    // nothing, bailed, and left the river black. Sea level next, and failing that
+    // anything fully covered at all — a fill from the wrong colour still beats a
+    // hole in the picture.
     let span = city.reach * 2.0
-    for cy in 0..m {
-        let wz = city.reach - (((cy as f64) + 0.5) / (m as f64)) * span
-        for cx in 0..m {
-            let cell = cy * m + cx
-            // Every texel real: a cell straddling the coverage boundary is part
-            // edge haze, and haze is what poisoned the first two attempts.
-            if cnt[cell] < full {
-                continue
-            }
-            let wx = (((cx as f64) + 0.5) / (m as f64)) * span - city.reach
-            if cityHeightAt(city, wx, wz) > ORTHO_SEA_DEPTH {
-                continue
-            }
-            known[cell] = true
-            anyKnown = true
-            r[cell] = sumR[cell] / (cnt[cell] as f64)
-            g[cell] = sumG[cell] / (cnt[cell] as f64)
-            b[cell] = sumB[cell] / (cnt[cell] as f64)
+    var tier = 0
+    while tier < 3 && !anyKnown {
+        var cut = ORTHO_SEA_DEPTH
+        if tier == 1 {
+            cut = 0.5
         }
+        if tier == 2 {
+            cut = 1.0e9
+        }
+        var found = 0
+        for cy in 0..m {
+            let wz = city.reach - (((cy as f64) + 0.5) / (m as f64)) * span
+            for cx in 0..m {
+                let cell = cy * m + cx
+                // Every texel real: a cell straddling the coverage boundary is
+                // part edge haze, and haze is what poisoned the first attempts.
+                if cnt[cell] < full {
+                    continue
+                }
+                let wx = (((cx as f64) + 0.5) / (m as f64)) * span - city.reach
+                if cityHeightAt(city, wx, wz) > cut {
+                    continue
+                }
+                known[cell] = true
+                found = found + 1
+                r[cell] = sumR[cell] / (cnt[cell] as f64)
+                g[cell] = sumG[cell] / (cnt[cell] as f64)
+                b[cell] = sumB[cell] / (cnt[cell] as f64)
+            }
+        }
+        // A handful of cells is not a boundary, it is noise with a mean.
+        if found >= 24 {
+            anyKnown = true
+        } else {
+            for cell in 0..m * m {
+                known[cell] = false
+            }
+        }
+        tier = tier + 1
     }
     if !anyKnown {
         return

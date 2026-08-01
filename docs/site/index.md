@@ -154,6 +154,13 @@ fn main() {
   <div class="cat cat-sim">
     <h3 class="cat-head">Graphics &amp; simulation</h3>
     <div class="tile-grid">
+      <a class="tile" href="https://github.com/milo-language/milo/tree/main/examples/games/flight">
+        <img class="tile-img" src="/showcase/flyby.png" alt="Flying over downtown San Francisco in FLYBY, the Bay Bridge running out across the water behind it" loading="lazy">
+        <h3>FLYBY</h3>
+        <p>A 3D flying game over five real places — SRTM terrain, OpenStreetMap buildings and bridges, aerial imagery draped on top. Perspective camera, near-plane clipping, depth-buffered triangles: every pixel is Milo on the CPU, one OS thread per scanline band.</p>
+        <div class="tile-tags"><span>software rasteriser</span><span>z-buffer</span><span>multicore</span><span>SDL</span></div>
+        <span class="tile-copy" role="button" tabindex="0" data-cmd="milo build examples/games/flight/main.milo -o /tmp/flyby --release &amp;&amp; /tmp/flyby" title="milo build examples/games/flight/main.milo -o /tmp/flyby --release &amp;&amp; /tmp/flyby">⧉ copy run command</span>
+      </a>
       <a class="tile" href="https://github.com/milo-language/milo/blob/main/examples/graphics/raytrace3d.milo">
         <img class="tile-img" src="/showcase/raytracer.png" alt="Chrome and coloured spheres reflecting each other on a checkerboard floor" loading="lazy">
         <h3>Real-time Ray Tracer</h3>

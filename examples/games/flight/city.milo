@@ -104,6 +104,9 @@ pub struct City {
     brTowerA: Vec<f64>,
     brTowerB: Vec<f64>,
 
+    // Buildings the bridge layer has taken over. See `claimBridgeStructures`.
+    bSkip: Vec<bool>,
+
     // Where the version-1 body ends, i.e. the first byte of the bridge section
     // (or of nothing, in a v1 file). Tools splice a new trailing section on
     // instead of rebuilding an asset whose expensive layers have not changed.
@@ -164,6 +167,7 @@ pub fn cityEmpty(): City {
         brTower: Vec.new(),
         brTowerA: Vec.new(),
         brTowerB: Vec.new(),
+        bSkip: Vec.new(),
         bodyEnd: 0,
         reach: 0.0,
         ortho: texNew(1, 0),
@@ -511,7 +515,66 @@ pub fn cityParse(src: &string): Result<City, string> {
     c.loaded = true
     buildIndex(c)
     deckProfile(c)
+    claimBridgeStructures(c)
     return Result.Ok(c)
+}
+
+// A bridge tower is often ALSO an OSM building polygon, standing in open water.
+// Extruded by the building pass it is a black slab beside the tower the bridge
+// layer drew — the two are the same structure described twice. The bridge owns it:
+// any footprint whose centre is over water AND inside a deck's corridor is dropped.
+//
+// Both halves of that test are load-bearing. Over water alone would take piers and
+// ferry terminals; inside the corridor alone would take the buildings a city road
+// bridge runs between, and San Francisco has plenty of those.
+fn claimBridgeStructures(c: &mut City) {
+    c.bSkip = Vec.filled(c.bCount, false)
+    if c.brCount == 0 {
+        return
+    }
+    for b in 0..c.bCount {
+        let mx = (c.bMinX[b] + c.bMaxX[b]) * 0.5
+        let mz = (c.bMinZ[b] + c.bMaxZ[b]) * 0.5
+        if cityHeightAt(c, mx, mz) > 2.0 {
+            continue
+        }
+        if nearAnyDeck(c, mx, mz) {
+            c.bSkip[b] = true
+        }
+    }
+}
+
+fn nearAnyDeck(c: &City, mx: f64, mz: f64): bool {
+    for i in 0..c.brCount {
+        let s0 = c.brStart[i]
+        let n = c.brLen[i]
+        let reachSq = (c.brHalfW[i] + 16.0) * (c.brHalfW[i] + 16.0)
+        for k in 0..n - 1 {
+            if segDistSq(mx, mz, c.brPtX[s0 + k], c.brPtZ[s0 + k], c.brPtX[s0 + k + 1], c.brPtZ[s0 + k + 1]) < reachSq {
+                return true
+            }
+        }
+    }
+    return false
+}
+
+fn segDistSq(px: f64, pz: f64, ax: f64, az: f64, bx: f64, bz: f64): f64 {
+    let ex = bx - ax
+    let ez = bz - az
+    let len2 = ex * ex + ez * ez
+    var t = 0.0
+    if len2 > 0.0 {
+        t = ((px - ax) * ex + (pz - az) * ez) / len2
+        if t < 0.0 {
+            t = 0.0
+        }
+        if t > 1.0 {
+            t = 1.0
+        }
+    }
+    let dx = px - (ax + ex * t)
+    let dz = pz - (az + ez * t)
+    return dx * dx + dz * dz
 }
 
 // The bridge section: count, then per bridge a half-width, a structure code, a

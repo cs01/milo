@@ -1201,6 +1201,9 @@ fn drawCity(s: &mut Scene, w: &World, v: &View, facade: &Texture) {
                     let ci = cz * w.city.gridN + cx
                     for slot in w.city.cellStart[ci]..w.city.cellStart[ci + 1] {
                         let b = w.city.cellItems[slot]
+                        if w.city.bSkip[b] {
+                            continue
+                        }
                         let midX = unfold(kx, (w.city.bMinX[b] + w.city.bMaxX[b]) * 0.5, reach)
                         let midZ = unfold(kz, (w.city.bMinZ[b] + w.city.bMaxZ[b]) * 0.5, reach)
                         let dx = midX - w.cam.x

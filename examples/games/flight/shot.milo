@@ -99,7 +99,7 @@ pub fn main(): i32 {
         if argv[i] == "--city" && i + 1 < argv.len {
             match cityLoad(argv[i + 1]) {
                 Result.Ok(loaded) => {
-                    print("flying " + loaded.name.clone() + " — " + loaded.bCount.toString() + " buildings")
+                    print("flying " + loaded.name.clone() + " — " + loaded.bCount.toString() + " buildings, " + loaded.brCount.toString() + " bridges")
                     city = loaded
                     // The game always drapes an aerial photograph over the terrain
                     // (main.milo embeds one per place), and the drape is what makes

@@ -93,11 +93,16 @@ pub struct Input {
     quit: bool,
     mute: bool, // edge-triggered: true only on the frame M goes down
     muteHeld: bool,
+    // Stick, not camera: the key you press is where you push the nose, so UP
+    // dives and DOWN climbs. This is how every flight sim maps a stick and it
+    // is the default here; `--natural` flips it back to UP-climbs.
+    invert: bool,
 }
 
-pub fn inputNew(): Input {
+pub fn inputNew(invert: bool): Input {
     return Input {
         moveX: 0.0, moveY: 0.0, boost: false, quit: false, mute: false, muteHeld: false,
+        invert: invert,
     }
 }
 
@@ -131,6 +136,8 @@ pub fn pollInput(inp: &mut Input, ev: &mut [u8; 64]) {
         if ks[SC_D] != 0 {
             inp.moveX = inp.moveX + 1.0
         }
+        // `moveY` is a pitch rate, +1 climb: the sign flips once, at the end,
+        // rather than in four places.
         if ks[SC_W] != 0 {
             inp.moveY = inp.moveY + 1.0
         }
@@ -144,14 +151,14 @@ pub fn pollInput(inp: &mut Input, ev: &mut [u8; 64]) {
         if ks[SC_RIGHT] != 0 {
             inp.moveX = inp.moveX + 1.0
         }
-        // UP climbs. `moveY` is a pitch rate, not a screen direction — the
-        // README and the on-screen hint both promise up = climb, and feeding
-        // screen-space (down-is-positive) straight into pitch inverted it.
         if ks[SC_UP] != 0 {
             inp.moveY = inp.moveY + 1.0
         }
         if ks[SC_DOWN] != 0 {
             inp.moveY = inp.moveY - 1.0
+        }
+        if inp.invert {
+            inp.moveY = 0.0 - inp.moveY
         }
         if ks[SC_SPACE] != 0 {
             inp.boost = true

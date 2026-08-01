@@ -11,7 +11,7 @@ from "./gfx3d" import {
     Camera, Scene, Vec3
 }
 from "./city" import {
-    City, cityEmpty, cityHeightAt, cityCoverAt, COVER_URBAN
+    City, cityEmpty, cityHeightAt, cityCoverAt, cityRoofAt, COVER_URBAN
 }
 
 pub let TILE: f64 = 44.0 // world units per terrain quad
@@ -89,6 +89,12 @@ pub struct World {
     // Empty unless a .city asset was loaded. Loaded once at startup and never
     // touched again — there is no fetching, decoding or streaming during play.
     city: City,
+    // The places waiting their turn. Every region change rotates one in, so a
+    // run crosses San Francisco, Hong Kong, Rio and the Grand Canyon rather
+    // than mirroring one map forever. All of them are already parsed and in
+    // memory — a swap is two moves, not a load.
+    next: Vec<City>,
+    nextIdx: i64,
     // One-axis mode: the player only climbs and dives, and the aircraft steers
     // itself along the course. Default on; `--pro` gives back the bank axis.
     easy: bool,
@@ -120,6 +126,18 @@ pub struct World {
     level: i64,
     cleared: i64, // rings cleared in total
     toNext: i64, // rings remaining before the country changes
+    // Bumpless transfer for the autopilot. The hoop it aims at changes the
+    // instant one is cleared, so the raw bearing STEPS, and that step went
+    // straight into the yaw rate as a twitch. `aimOff` absorbs the step and
+    // decays it away; `aimPrev` is last frame's raw bearing, which is how the
+    // step is detected without needing a stable identity for a hoop in a
+    // swap-removed Vec.
+    //
+    // An offset that decays, NOT a filter on the target: putting a lag in front
+    // of the controller adds a second pole to a loop that already has one, and
+    // the aircraft hunts left and right the whole way to the hoop.
+    aimOff: f64,
+    aimPrev: f64,
     pathT: f64, // how far along the coin trail we have laid track
     // Trail head. Kept here rather than read off the end of `rings`, which is
     // swap-removed and so does not hold the newest ring last.
@@ -219,6 +237,24 @@ pub fn heightAt(c: &City, x: f64, z: f64): f64 {
     return proceduralHeight(x, z)
 }
 
+// What you would hit at (x, z): the terrain, or a roof if a building stands
+// there. `pad` widens the footprints by the span of whatever is asking.
+//
+// The floor and the hoops both go through this rather than through heightAt, so
+// nothing the game places or pushes ends up inside a building — a hoop halfway
+// through a tower is unflyable, and a plane through one is a hole in the world.
+pub fn solidAt(c: &City, x: f64, z: f64, pad: f64): f64 {
+    let ground = heightAt(c, x, z)
+    if !c.loaded {
+        return ground
+    }
+    let roof = cityRoofAt(c, foldIn(x, c.reach), foldIn(z, c.reach), pad)
+    if roof > ground {
+        return roof
+    }
+    return ground
+}
+
 pub fn coverAt(c: &City, x: f64, z: f64): u8 {
     if c.loaded {
         return cityCoverAt(c, foldIn(x, c.reach), foldIn(z, c.reach))
@@ -233,13 +269,29 @@ pub fn worldNew(): World {
 }
 
 pub fn worldSeeded(seed: i64): World {
-    return worldIn(seed, cityEmpty(), true)
+    return worldIn(seed, Vec.new(), true)
 }
 
-pub fn worldIn(seed: i64, city: City, easy: bool): World {
+// `places` is the whole rotation: the head is flown first and the rest come in
+// one per region change. An empty list, or a list of one, is a world that never
+// changes place — which is what --place, --city and the procedural world all
+// want.
+pub fn worldIn(seed: i64, places: Vec<City>, easy: bool): World {
+    var rest = places
+    var head = cityEmpty()
+    if rest.len > 0 {
+        head = replace(rest[0], cityEmpty())
+        // Shift the tail down over the hole. Four elements at most, once, at
+        // startup — the alternative is teaching the rotation about an index
+        // that has to skip slot zero forever.
+        for i in 1..rest.len {
+            rest[i - 1] = replace(rest[i], cityEmpty())
+        }
+        let _ = rest.pop()
+    }
     var w = World {
         rng: Rng.new(seed),
-        city: city,
+        city: head,
         easy: easy,
         plane: Plane {
             x: 0.0, y: 160.0, z: 0.0, yaw: 0.0, pitch: 0.0, roll: 0.0, speed: 190.0
@@ -251,6 +303,8 @@ pub fn worldIn(seed: i64, city: City, easy: bool): World {
             x: 0.0, y: 0.0, z: 0.0, yaw: 0.0, pitch: 0.0, roll: 0.0, fov: 1.15, near: 0.6, far: (VIEW_TILES as f64) * TILE
         }
         ,
+        next: rest,
+        nextIdx: 0,
         rings: Vec.new(),
         sparks: Vec.new(),
         flocks: Vec.new(),
@@ -275,6 +329,8 @@ pub fn worldIn(seed: i64, city: City, easy: bool): World {
         level: 1,
         cleared: 0,
         toNext: 10,
+        aimOff: 0.0,
+        aimPrev: 0.0,
         pathT: 0.0,
         trailX: 0.0,
         trailZ: 0.0,
@@ -298,6 +354,47 @@ pub fn worldIn(seed: i64, city: City, easy: bool): World {
     return w
 }
 
+// Tallest roof under the span of a hoop facing `heading`, or NO_ROOF-ish (a
+// large negative) if nothing is built under it. The hoop's plane is
+// perpendicular to the heading, so the samples walk the perpendicular.
+fn roofUnderRing(c: &City, x: f64, z: f64, heading: f64, rad: f64): f64 {
+    let px = Math.cos(heading)
+    let pz = 0.0 - Math.sin(heading)
+    var top = 0.0 - 1.0e18
+    for i in 0..5 {
+        let t = ((i as f64) - 2.0) * 0.5 * rad
+        let r = solidAt(c, x + px * t, z + pz * t, 6.0)
+        if r > top {
+            top = r
+        }
+    }
+    return top
+}
+
+// Bring the next place in. The plane keeps its position and heading — every map
+// is mirrored to infinity, so any world coordinate lands somewhere valid in the
+// new one — and the hoops already laid ahead are lifted clear of whatever is
+// now under them.
+fn rotatePlace(w: &mut World) {
+    if w.next.len == 0 {
+        return
+    }
+    let k = w.nextIdx % w.next.len
+    // Two moves through a hole: the slot the incoming place came out of is
+    // where the outgoing one is parked, so the queue keeps cycling.
+    let incoming = replace(w.next[k], cityEmpty())
+    w.next[k] = replace(w.city, incoming)
+    w.nextIdx = (k + 1) % w.next.len
+    for i in 0..w.rings.len {
+        if w.rings[i].alive {
+            let low = roofUnderRing(w.city, w.rings[i].x, w.rings[i].z, w.rings[i].face, w.rings[i].r) + w.rings[i].r + 34.0
+            if w.rings[i].y < low {
+                w.rings[i].y = low
+            }
+        }
+    }
+}
+
 // The course wanders as a slow sine in heading, so it curls through valleys and
 // over ridges instead of running dead straight.
 pub fn layRing(w: &mut World) {
@@ -319,9 +416,17 @@ pub fn layRing(w: &mut World) {
     if bonus {
         rad = 40.0
     }
+    // Lift the hoop clear of anything built under it. A ring is a disc, not a
+    // point, so the sample runs the width of the hoop across its own plane —
+    // downtown, one tower under the rim is enough to make it unflyable.
+    var y = ground + ride
+    let low = roofUnderRing(w.city, nx, nz, heading, rad) + rad + 34.0
+    if low > y {
+        y = low
+    }
     w.rings.push(Ring {
         x: nx,
-        y: ground + ride,
+        y: y,
         z: nz,
         face: heading,
         r: rad,
@@ -350,6 +455,19 @@ pub fn layRing(w: &mut World) {
 // "Ahead" matters. Targeting the nearest live hoop makes the aircraft turn
 // around and go back for one it has just passed, which is the single worst thing
 // an autopilot can do to a six-year-old.
+// An angle difference folded into -pi..pi, so a heading either side of due
+// north is a small correction rather than most of a circle.
+fn wrapPi(a: f64): f64 {
+    var d = a
+    while d > 3.14159265358979 {
+        d = d - 6.28318530717959
+    }
+    while d < 0.0 - 3.14159265358979 {
+        d = d + 6.28318530717959
+    }
+    return d
+}
+
 fn autoSteer(w: &mut World, dt: f64) {
     let fwdX = Math.sin(w.plane.yaw)
     let fwdZ = Math.cos(w.plane.yaw)
@@ -375,13 +493,17 @@ fn autoSteer(w: &mut World, dt: f64) {
         return
     }
     let want = Math.atan2(w.rings[bi].x - w.plane.x, w.rings[bi].z - w.plane.z)
-    var diff = want - w.plane.yaw
-    while diff > 3.14159265358979 {
-        diff = diff - 6.28318530717959
+    // A jump in the bearing means the target changed; roll it into the offset so
+    // the controller's input stays continuous. Ordinary closing motion is a
+    // fraction of a degree per frame and passes straight through, so between
+    // hoops this is exactly the plain proportional controller it always was.
+    let step = wrapPi(want - w.aimPrev)
+    if Math.abs(step) > 0.12 {
+        w.aimOff = wrapPi(w.aimOff - step)
     }
-    while diff < 0.0 - 3.14159265358979 {
-        diff = diff + 6.28318530717959
-    }
+    w.aimPrev = want
+    w.aimOff = w.aimOff * Math.pow(0.04, dt)
+    var diff = wrapPi(want + w.aimOff - w.plane.yaw)
     w.plane.yaw = w.plane.yaw + Math.clampF64(diff * 1.6, 0.0 - 1.1, 1.1) * dt
     let bank = Math.clampF64(diff * 1.4, 0.0 - 1.1, 1.1)
     w.plane.roll = w.plane.roll + (bank - w.plane.roll) * Math.minF64(1.0, dt * 2.4)
@@ -553,7 +675,11 @@ pub fn worldUpdate(w: &mut World, dt: f64, inRoll: f64, inPitch: f64, boost: boo
     corridor(w, dt)
 
     // You cannot crash: the ground pushes you up and the sky pushes you down.
-    let ground = heightAt(w.city, w.plane.x, w.plane.z)
+    // Roofs push too — flying THROUGH a tower is worse than being bumped over
+    // it, and the push is the same rule the terrain already uses, so there is
+    // still no fail state. The pad is a wing half-span, so a wing does not
+    // disappear into a facade the fuselage cleared.
+    let ground = solidAt(w.city, w.plane.x, w.plane.z, 12.0)
     let floorY = ground + 26.0
     if w.plane.y < floorY {
         w.plane.y = w.plane.y + (floorY - w.plane.y) * Math.minF64(1.0, dt * 7.0)
@@ -793,6 +919,7 @@ fn clearRing(w: &mut World, i: i64) {
         w.prevTheme = w.theme
         w.theme = (w.theme + 1) % 4
         w.themeMix = 1.0
+        rotatePlace(w)
         w.banner = 3.4
         w.flash = 1.0
         w.shake = 9.0

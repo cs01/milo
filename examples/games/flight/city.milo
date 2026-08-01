@@ -147,12 +147,41 @@ pub fn cityLoad(path: &string): Result<City, string> {
     let Result.Ok(src) = readFile(path) else {
         return Result.Err("cannot read " + path)
     }
+    return cityParse(src)
+}
+
+// True when `n` bytes are actually there. Every length in the file is read FROM
+// the file, so each one has to be checked against what is left before it is used
+// to index: `--city` is the one untrusted input this program has, and a
+// truncated asset must come back as Result.Err, not as an out-of-bounds abort.
+// The bounds check would catch it either way — that is the language doing its
+// job — but a Result-returning parser that kills the process is a lie.
+fn have(src: &string, off: i64, n: i64): bool {
+    return n >= 0 && off >= 0 && off <= src.len - n
+}
+
+// Guards against a length field that is enormous rather than merely wrong: a
+// count is only plausible if the bytes it claims are in the file.
+fn plausible(src: &string, off: i64, count: i64, itemBytes: i64): bool {
+    if count < 0 {
+        return false
+    }
+    if count > (src.len - off) / itemBytes {
+        return false
+    }
+    return true
+}
+
+// Parsing is split from reading so the same decoder serves a file on disk and an
+// asset baked into the binary with @embedFile — the built-in city is not read at
+// runtime at all.
+pub fn cityParse(src: &string): Result<City, string> {
     if src.len < 16 {
         return Result.Err("truncated city file")
     }
     for i in 0..8 {
         if src[i] != MAGIC[i] {
-            return Result.Err(path + " is not a .city file")
+            return Result.Err("not a .city file")
         }
     }
     var p = 8
@@ -162,8 +191,14 @@ pub fn cityLoad(path: &string): Result<City, string> {
         return Result.Err("city file version " + ver.toString() + ", expected " + VERSION.toString())
     }
 
+    if !have(src, p, 4) {
+        return Result.Err("truncated city file: no name")
+    }
     let nameLen = getI32(src, p)
     p = p + 4
+    if !plausible(src, p, nameLen, 1) {
+        return Result.Err("truncated city file: name length " + nameLen.toString())
+    }
     var name = ""
     for i in 0..nameLen {
         name.push(src[p + i])
@@ -172,6 +207,9 @@ pub fn cityLoad(path: &string): Result<City, string> {
 
     var c = cityEmpty()
     c.name = name
+    if !have(src, p, 12) {
+        return Result.Err("truncated city file: no header")
+    }
     c.originLat = (getI32(src, p) as f64) / 10000000.0
     p = p + 4
     c.originLon = (getI32(src, p) as f64) / 10000000.0
@@ -179,6 +217,9 @@ pub fn cityLoad(path: &string): Result<City, string> {
     c.reach = (getI32(src, p) as f64) / 100.0
     p = p + 4
 
+    if !have(src, p, 16) {
+        return Result.Err("truncated city file: no terrain header")
+    }
     c.demN = getI32(src, p)
     p = p + 4
     c.demStep = (getI32(src, p) as f64) / 100.0
@@ -187,13 +228,22 @@ pub fn cityLoad(path: &string): Result<City, string> {
     p = p + 4
     c.demZ0 = (getI32(src, p) as f64) / 100.0
     p = p + 4
+    if c.demN < 0 || c.demN > 65535 {
+        return Result.Err("city file terrain grid " + c.demN.toString())
+    }
     let demCount = c.demN * c.demN
+    if !plausible(src, p, demCount, 4) {
+        return Result.Err("truncated city file: terrain grid " + c.demN.toString())
+    }
     c.dem = Vec.filled(demCount, 0.0)
     for i in 0..demCount {
         c.dem[i] = (getI32(src, p) as f64) / 100.0
         p = p + 4
     }
 
+    if !have(src, p, 16) {
+        return Result.Err("truncated city file: no land-cover header")
+    }
     c.coverN = getI32(src, p)
     p = p + 4
     c.coverStep = (getI32(src, p) as f64) / 100.0
@@ -202,21 +252,42 @@ pub fn cityLoad(path: &string): Result<City, string> {
     p = p + 4
     c.coverZ0 = (getI32(src, p) as f64) / 100.0
     p = p + 4
+    if c.coverN < 0 || c.coverN > 65535 {
+        return Result.Err("city file cover grid " + c.coverN.toString())
+    }
     let coverCount = c.coverN * c.coverN
+    if !plausible(src, p, coverCount, 1) {
+        return Result.Err("truncated city file: cover grid " + c.coverN.toString())
+    }
     c.cover = Vec.filled(coverCount, 0 as u8)
     for i in 0..coverCount {
         c.cover[i] = src[p + i]
     }
     p = p + coverCount
 
+    if !have(src, p, 4) {
+        return Result.Err("truncated city file: no building count")
+    }
     let nb = getI32(src, p)
     p = p + 4
+    // Eight bytes is the smallest a building can be (height + a zero point
+    // count), so a count claiming more than that is not merely wrong, it cannot
+    // be in the file at all.
+    if !plausible(src, p, nb, 8) {
+        return Result.Err("truncated city file: " + nb.toString() + " buildings")
+    }
     c.bCount = nb
     for i in 0..nb {
+        if !have(src, p, 8) {
+            return Result.Err("truncated city file: building " + i.toString())
+        }
         let h = (getI32(src, p) as f64) / 100.0
         p = p + 4
         let n = getI32(src, p)
         p = p + 4
+        if !plausible(src, p, n, 8) {
+            return Result.Err("truncated city file: building " + i.toString() + " has " + n.toString() + " points")
+        }
         var minX = 1000000000.0
         var minZ = 1000000000.0
         var maxX = 0.0 - 1000000000.0
@@ -410,6 +481,102 @@ pub fn cityHeightAt(c: &City, x: f64, z: f64): f64 {
         return h * (1.0 - t) - 6.0 * t
     }
     return h
+}
+
+// No footprint here. Not zero and not sea level: callers take a max against the
+// terrain, and any plausible height would win that max somewhere.
+pub let NO_ROOF: f64 = 0.0 - 1.0e18
+
+// Height of the tallest roof over (x, z), or NO_ROOF if the point is not over a
+// building. `pad` widens every footprint, so a query can stand in for something
+// with a span — an aircraft, a hoop — rather than a bare point.
+//
+// The footprint grid files a building under the cell holding its centre, so this
+// searches out to BUILDING_MARGIN in each direction rather than one cell. The
+// roof height matches what the renderer extrudes: one terrain sample at the
+// footprint's centre plus the building's own height, so a query never disagrees
+// with the box you can see.
+pub fn cityRoofAt(c: &City, x: f64, z: f64, pad: f64): f64 {
+    if c.bCount == 0 {
+        return NO_ROOF
+    }
+    let reachCells = (BUILDING_MARGIN + pad) / c.gridStep
+    var span = Math.ceil(reachCells) as i64
+    if span < 1 {
+        span = 1
+    }
+    let cx = cellIdx(c, x)
+    let cz = cellIdxZ(c, z)
+    var top = NO_ROOF
+    var gz = cz - span
+    while gz <= cz + span {
+        if gz >= 0 && gz < c.gridN {
+            var gx = cx - span
+            while gx <= cx + span {
+                if gx >= 0 && gx < c.gridN {
+                    let ci = gz * c.gridN + gx
+                    for slot in c.cellStart[ci]..c.cellStart[ci + 1] {
+                        let b = c.cellItems[slot]
+                        if x < c.bMinX[b] - pad || x > c.bMaxX[b] + pad || z < c.bMinZ[b] - pad || z > c.bMaxZ[b] + pad {
+                            continue
+                        }
+                        let roof = cityHeightAt(c, (c.bMinX[b] + c.bMaxX[b]) * 0.5, (c.bMinZ[b] + c.bMaxZ[b]) * 0.5) + c.bHeight[b]
+                        if roof <= top {
+                            continue
+                        }
+                        if insideFootprint(c, b, x, z, pad) {
+                            top = roof
+                        }
+                    }
+                }
+                gx = gx + 1
+            }
+        }
+        gz = gz + 1
+    }
+    return top
+}
+
+// Crossing test on the footprint, then a distance test on its edges for `pad`.
+// The two together are the polygon grown by `pad` — inside it, or within pad of
+// an edge.
+fn insideFootprint(c: &City, b: i64, x: f64, z: f64, pad: f64): bool {
+    let start = c.bStart[b]
+    let n = c.bLen[b]
+    if n < 3 {
+        return false
+    }
+    var inside = false
+    var j = n - 1
+    for i in 0..n {
+        let xi = c.bPtX[start + i]
+        let zi = c.bPtZ[start + i]
+        let xj = c.bPtX[start + j]
+        let zj = c.bPtZ[start + j]
+        if (zi > z) != (zj > z) {
+            if x < (xj - xi) * (z - zi) / (zj - zi) + xi {
+                inside = !inside
+            }
+        }
+        if pad > 0.0 && segDist(xi, zi, xj, zj, x, z) <= pad {
+            return true
+        }
+        j = i
+    }
+    return inside
+}
+
+fn segDist(ax: f64, az: f64, bx: f64, bz: f64, px: f64, pz: f64): f64 {
+    let dx = bx - ax
+    let dz = bz - az
+    let len2 = dx * dx + dz * dz
+    var t = 0.0
+    if len2 > 0.0 {
+        t = Math.clampF64(((px - ax) * dx + (pz - az) * dz) / len2, 0.0, 1.0)
+    }
+    let qx = ax + dx * t - px
+    let qz = az + dz * t - pz
+    return Math.sqrt(qx * qx + qz * qz)
 }
 
 pub fn cityCoverAt(c: &City, x: f64, z: f64): u8 {

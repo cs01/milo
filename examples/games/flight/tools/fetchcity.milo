@@ -208,6 +208,14 @@ fn srtmRaw(d: &string, r: i64, c: i64): f64 {
 
 // ---------------------------------------------------------------- Overpass
 
+// Cache file name for one Overpass query. The extent HAS to be in the key: the
+// key was once a bare "cover"/"buildings", so the second place you built reused
+// the first one's response and came out with another city's buildings on it —
+// silently, because the asset is valid, just wrong.
+fn cacheName(kind: &string, latMin: f64, lonMin: f64, latMax: f64, lonMax: f64): string {
+    return kind + "-" + fmt7(latMin) + "_" + fmt7(lonMin) + "_" + fmt7(latMax) + "_" + fmt7(lonMax)
+}
+
 fn overpass(query: &string, cacheKey: &string): Result<string, string> {
     let path = CACHE + "/" + cacheKey + ".json"
     if pathExists(path) {
@@ -500,7 +508,7 @@ fn main() {
     // shed that query rather than run it.
     let coverQ = "[out:json][timeout:180];(way[\"leisure\"~\"^(park|garden|golf_course|pitch|nature_reserve)$\"]" + bbox.clone() + ";way[\"landuse\"~\"^(forest|grass|meadow|cemetery|recreation_ground|village_green|allotments)$\"]" + bbox.clone() + ";way[\"natural\"~\"^(wood|scrub|grassland|heath|beach|sand|water|wetland)$\"]" + bbox.clone() + ";way[\"waterway\"=\"riverbank\"]" + bbox.clone() + ";);out tags geom;"
     var greens = 0
-    match overpass(coverQ, "cover") {
+    match overpass(coverQ, cacheName("cover", latMin, lonMin, latMax, lonMax)) {
         Ok(body) => {
             match Json.parse(body) {
                 Ok(doc) => {
@@ -552,7 +560,7 @@ fn main() {
     var bPtX: Vec<f64> = Vec.new()
     var bPtZ: Vec<f64> = Vec.new()
     var tallest = 0.0
-    match overpass(bQ, "buildings") {
+    match overpass(bQ, cacheName("buildings", latMin, lonMin, latMax, lonMax)) {
         Ok(body) => {
             match Json.parse(body) {
                 Ok(doc) => {

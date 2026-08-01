@@ -6,28 +6,55 @@ milo build examples/games/flight/main.milo -o /tmp/flyby --release && /tmp/flyby
 
 | | |
 |---|---|
-| up / down | climb and dive |
-| space | throttle up |
+| up / down | pitch — **up dives, down climbs**, like a stick |
+| space | afterburner |
+| M | music on / off |
 | ESC | quit |
+
+`--help` prints the lot.
 
 **One axis.** Up and down is the whole control scheme — the aircraft banks and
 steers itself onto the next hoop, so a small child can fly it. `--pro` gives back
 the bank axis on left / right.
 
-## Fly over a real city
+**Inverted by default.** The key you press is where you push the nose, which is
+how a stick works and how flight sims map one. `--natural` flips it to up-climbs.
+
+## Four real places, and you change place every ten rings
+
+You are flying the real world from the first frame. Four places are **built into
+the binary** — NASA SRTM terrain plus OpenStreetMap footprints extruded to their
+real heights, ~3 MB of asset baked in with `@embedFile`:
+
+| | |
+|---|---|
+| `sf` | San Francisco — hills, bay, downtown towers |
+| `hongkong` | Hong Kong — harbour, peaks straight out of the water |
+| `rio` | Rio de Janeiro — Sugarloaf, Corcovado, the beaches |
+| `canyon` | the Grand Canyon — 755 buildings and 2,200 m of rock |
+
+Every region change swaps the next one in, so a run crosses all four. Which one
+you start on comes off the clock, so two launches are not the same flight. All
+four are parsed at startup in about 5 ms — a swap mid-flight is two moves, not a
+load, and nothing is fetched, read or decoded while flying.
 
 ```bash
-/tmp/flyby --city examples/games/flight/cities/sf.city
+/tmp/flyby --place hongkong                 # just that one, no rotation
+/tmp/flyby --procedural                     # the endless generated world instead
+/tmp/flyby --city path/to/other.city        # a place you built yourself
 ```
 
-Real San Francisco: NASA SRTM terrain, 15,600 OpenStreetMap building footprints
-extruded to their real heights, real parks and a real coastline. The map is
-finite and the flight is not, so the world reflects at the edges rather than
-wrapping — a mirror is continuous at the seam, a wrap is a cliff.
+Each map is finite and the flight is not, so the world reflects at the edges
+rather than wrapping — a mirror is continuous at the seam, a wrap is a cliff.
 
-Nothing is fetched while flying; the asset is read once before the window opens.
-See [`cities/README.md`](cities/README.md) for attribution and for how to build
-an asset for anywhere else.
+Terrain is NASA SRTM (public domain); buildings and land cover are ©
+OpenStreetMap contributors under the [ODbL](https://www.openstreetmap.org/copyright)
+— see [`cities/README.md`](cities/README.md), and for how to build an asset for
+anywhere else.
+
+Rings never spawn inside a building and the plane never flies through one: the
+same "you cannot crash" push that lifts you off the ground lifts you over a
+roof, and a hoop is placed above whatever stands under its span.
 
 Fly **through the rings**, Pilotwings-style. A hoop standing across the course
 tells you which way to be pointing when you reach it, which a coin never could.

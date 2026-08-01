@@ -26,6 +26,9 @@ pub struct ArgParser {
     name: string,
     description: string,
     usage: string,
+    // Free text printed after the options block — the place for controls, an
+    // example invocation, or anything the per-flag help lines cannot say.
+    epilog: string,
     flags: Vec<FlagDef>,
     positionals: Vec<PositionalDef>,
     trailingArgs: bool,
@@ -53,6 +56,7 @@ fn newParser(name: string, description: string): ArgParser {
         name: name,
         description: description,
         usage: "",
+        epilog: "",
         flags: Vec.new(),
         positionals: Vec.new(),
         trailingArgs: false,
@@ -150,6 +154,12 @@ impl ArgParser {
         self.ignoreUnknown = true
     }
 
+    // Text printed at the end of --help, after the options.
+    // Example: parser.setEpilog("controls:\n  UP / DOWN   pitch")
+    fn setEpilog(self: &mut Self, text: string): void {
+        self.epilog = text
+    }
+
     // Generate formatted help text for all registered flags.
     fn helpText(self: &Self): string {
         var text: string = self.name + " - " + self.description + "\n\n"
@@ -208,6 +218,9 @@ impl ArgParser {
             text = text + fline + "\n"
         }
         text = text + "  -h, --help                  Show this help message\n"
+        if self.epilog.len > 0 {
+            text = text + "\n" + self.epilog + "\n"
+        }
         return text
     }
 

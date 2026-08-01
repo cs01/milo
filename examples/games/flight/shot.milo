@@ -106,7 +106,9 @@ pub fn main(): i32 {
 
     var c = canvasNew(W, H)
     var s = sceneNew(W, H)
-    var w = worldIn(SEED, city, easy)
+    var places: Vec<City> = Vec.new()
+    places.push(city)
+    var w = worldIn(SEED, places, easy)
     let groundTex = groundTexture()
     let skinTex = planeTexture()
     let snd = soundNew()

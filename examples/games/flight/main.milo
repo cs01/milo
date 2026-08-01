@@ -1,13 +1,10 @@
 // FLYBY — a 3D flying game written in Milo.
 //
 //   milo build examples/games/flight/main.milo -o /tmp/flyby --release && /tmp/flyby
-//   /tmp/flyby --city examples/games/flight/cities/sf.city
+//   /tmp/flyby --help
 //
-//   UP / DOWN      climb and dive — the only axis; the aircraft steers itself
-//   SPACE          throttle up
-//   ESC            quit
-//   --pro          give back the bank axis on LEFT / RIGHT
-//   --city <file>  fly a real place instead of the procedural world
+// San Francisco is baked into the binary (see `usage` below), so the game ships
+// as one file with no asset path to get wrong.
 //
 // Real 3D: a perspective camera, near-plane clipping and a depth-buffered
 // triangle rasteriser, all on the CPU in safe Milo (see gfx3d.milo). There is no
@@ -42,10 +39,10 @@ from "./world3d" import {
     worldIn, worldUpdate, SEED
 }
 from "./city" import {
-    City, cityLoad, cityEmpty
+    City, cityLoad, cityParse, cityEmpty
 }
-from "std/args" import {
-    args
+from "std/argparse" import {
+    ArgParser, ParsedArgs
 }
 from "./render3d" import {
     drawWorld, drawHud, drawGuide, drawSpeedLines
@@ -55,41 +52,156 @@ pub let W: i64 = 1280
 
 pub let H: i64 = 720
 
-// `--city <file>` flies a real place instead of the procedural world, and
-// `--pro` gives back the bank axis. The asset is read once, here, before the
-// window even opens: nothing is fetched, decoded or streamed while flying.
-fn loadCity(): City {
-    let a = args()
-    for i in 0..a.len {
-        if a[i] == "--city" && i + 1 < a.len {
-            match cityLoad(a[i + 1]) {
-                Result.Ok(city) => {
-                    print("flying " + city.name.clone() + " — " + city.bCount.toString() + " buildings")
-                    return city
-                }
-                Result.Err(e) => {
-                    print("could not load city: " + e)
-                    return cityEmpty()
-                }
-            }
-        }
-    }
-    return cityEmpty()
+pub let EPILOG: string = "built-in places (--place):
+  sf          San Francisco — hills, bay, downtown towers
+  hongkong    Hong Kong — harbour, peaks straight out of the water
+  rio         Rio de Janeiro — Sugarloaf, Corcovado, the beaches
+  canyon      the Grand Canyon — no buildings at all, just the rock
+
+controls:
+  UP / DOWN                   pitch — the only axis; the plane steers itself
+  LEFT / RIGHT                bank (--pro only)
+  SPACE                       afterburner
+  M                           music on / off
+  ESC                         quit
+
+Up dives and down climbs, the way a stick works; --natural flips it.
+Fly through the rings. You cannot crash. Every ten rings you arrive somewhere
+new — all four places are baked into the binary, so nothing is read or fetched
+while flying.
+
+Terrain: NASA SRTM (public domain). Buildings and land cover:
+(c) OpenStreetMap contributors, ODbL — openstreetmap.org/copyright."
+
+// std/argparse owns --help, unknown flags and missing values, so the game does
+// not grow its own half of a CLI parser.
+fn parseOpts(): ParsedArgs {
+    var p = ArgParser.new("flyby", "a 3D flying game written in Milo")
+    p.addString("place", "P", "Which built-in place to fly (default: a different one each launch)", "")
+    p.addString("city", "c", "Fly a .city asset from disk instead of a built-in place", "")
+    p.addBool("procedural", "", "Fly the endless generated world instead of a real place")
+    p.addBool("pro", "p", "Give back the bank axis on LEFT / RIGHT, and the corridor")
+    p.addBool("natural", "n", "UP climbs (default is stick-style: UP dives, DOWN climbs)")
+    p.setEpilog(EPILOG)
+    return p.parse()
 }
 
-fn proMode(): bool {
-    let a = args()
-    for i in 0..a.len {
-        if a[i] == "--pro" {
-            return true
+pub let PLACES: string = "sf hongkong rio canyon"
+
+// Every place is an @embedFile of the same bytes `--city` would read off disk,
+// so the decoder cannot tell the difference. They cost about 3 MB of binary
+// between them and buy a game that runs from anywhere with no asset directory
+// beside it — and four landscapes instead of one.
+//
+// All four are embedded whichever this returns: @embedFile is resolved at
+// compile time, so the branch picks bytes that are already in the binary.
+fn placeBytes(name: &string): string {
+    if name == "hongkong" {
+        return @embedFile("cities/hongkong.city")
+    }
+    if name == "rio" {
+        return @embedFile("cities/rio.city")
+    }
+    if name == "canyon" {
+        return @embedFile("cities/canyon.city")
+    }
+    return @embedFile("cities/sf.city")
+}
+
+fn placeName(i: i64): string {
+    if i == 1 {
+        return "hongkong"
+    }
+    if i == 2 {
+        return "rio"
+    }
+    if i == 3 {
+        return "canyon"
+    }
+    return "sf"
+}
+
+fn placeIndex(name: &string): i64 {
+    for i in 0..4 {
+        if placeName(i) == name {
+            return i
         }
     }
-    return false
+    return 0 - 1
+}
+
+fn parsePlace(name: &string): City {
+    match cityParse(placeBytes(name)) {
+        Result.Ok(city) => {
+            return city
+        }
+        Result.Err(e) => {
+            print("built-in place '" + name + "' is corrupt: " + e)
+            return cityEmpty()
+        }
+    }
+}
+
+// Every built-in place, starting from `first` and wrapping. The world flies the
+// head of this list and rotates the rest in, one per region change — so a run
+// crosses four real places instead of mirroring one forever. Which one you
+// start on comes off the wall clock, so two launches in a row are not the same
+// flight.
+fn allPlaces(first: i64): Vec<City> {
+    var v: Vec<City> = Vec.new()
+    for k in 0..4 {
+        v.push(parsePlace(placeName((first + k) % 4)))
+    }
+    return v
+}
+
+// A .city file from disk, or an empty city (the procedural world) if it will
+// not load. Only failure says anything on the terminal — the place's name is on
+// the HUD the moment the window opens, which is where a player is looking.
+fn loadFile(path: &string): City {
+    match cityLoad(path) {
+        Result.Ok(city) => {
+            return city
+        }
+        Result.Err(e) => {
+            print("could not load city: " + e)
+            return cityEmpty()
+        }
+    }
+}
+
+fn placesFor(o: &ParsedArgs): Vec<City> {
+    var v: Vec<City> = Vec.new()
+    if o.getBool("procedural") {
+        v.push(cityEmpty())
+        return v
+    }
+    let path = o.getString("city")
+    if path != "" {
+        v.push(loadFile(path))
+        return v
+    }
+    let want = o.getString("place")
+    if want == "" {
+        return allPlaces(epochMillis() / 1000 % 4)
+    }
+    let idx = placeIndex(want)
+    if idx < 0 {
+        print("no built-in place called '" + want + "' — try: " + PLACES)
+        v.push(cityEmpty())
+        return v
+    }
+    // An explicit --place is a request to fly THAT place, so nothing rotates in
+    // behind it.
+    v.push(parsePlace(want))
+    return v
 }
 
 pub fn main(): i32 {
-    let city = loadCity()
-    let easy = !proMode()
+    let o = parseOpts()
+    var places = placesFor(o)
+    let easy = !o.getBool("pro")
+    let invert = !o.getBool("natural")
     if SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO) != 0 {
         print("SDL_Init failed")
         return 1
@@ -115,11 +227,11 @@ pub fn main(): i32 {
 
     var c = canvasNew(W, H)
     var s = sceneNew(W, H)
-    var w = worldIn(SEED, city, easy)
+    var w = worldIn(SEED, places, easy)
     let groundTex = groundTexture()
     let skinTex = planeTexture()
     var snd = soundNew()
-    var inp = inputNew()
+    var inp = inputNew(invert)
     var ev: [u8; 64] = [0; 64]
     var last = SDL_GetTicks()
     var fpsAccum: f64 = 0.0

@@ -32,13 +32,39 @@ from "./city" import {
 // Sky gradient plus a sun disc, painted before anything else. There is no depth
 // test here — the terrain simply draws over it.
 fn drawSky(c: &mut Canvas, s: &Scene, w: &World, v: &View) {
+    // Where the true horizon lands on screen — a point at eye height, far
+    // ahead. The gradient is built around THAT row rather than around the middle
+    // of the window, so the haze stays on the horizon through a climb or a bank.
+    let fwdX = Math.sin(w.cam.yaw)
+    let fwdZ = Math.cos(w.cam.yaw)
+    let hp = toCamera(v, w.cam.x + fwdX * 9000.0, w.cam.y, w.cam.z + fwdZ * 9000.0)
+    var horizonY = v.cy
+    if hp.z > 1.0 {
+        horizonY = v.cy - hp.y * v.scale / hp.z
+    }
+    // The sky meets the fog exactly at the horizon: the last row of terrain is
+    // fully fogged there, and if the sky behind it were a different colour the
+    // draw distance would read as a hard edge — which is the pop-in you see as
+    // new geometry arrives. Blended into the same haze, it arrives invisibly.
+    let band = (c.h as f64) * 0.42
     for y in 0..c.h {
         let t = (y as f64) / (c.h as f64)
         let k = 1.0 - t
         let r = 0.10 + 0.34 * k * k + s.fogR * t * 0.55
         let g = 0.22 + 0.36 * k * k + s.fogG * t * 0.55
         let b = 0.52 + 0.34 * k * k + s.fogB * t * 0.40
-        fillRect(c, 0.0, y as f64, c.w as f64, (y + 1) as f64, r * 0.42, g * 0.42, b * 0.45)
+        var haze = 1.0 - (horizonY - (y as f64)) / band
+        if haze < 0.0 {
+            haze = 0.0
+        }
+        if haze > 1.0 {
+            haze = 1.0
+        }
+        haze = haze * haze
+        let sr = r * 0.42 * (1.0 - haze) + s.fogR * haze
+        let sg = g * 0.42 * (1.0 - haze) + s.fogG * haze
+        let sb = b * 0.45 * (1.0 - haze) + s.fogB * haze
+        fillRect(c, 0.0, y as f64, c.w as f64, (y + 1) as f64, sr, sg, sb)
     }
     // sun projected from its direction, so it sits correctly as you turn
     let far = 6000.0
@@ -597,9 +623,9 @@ pub fn drawWorld(c: &mut Canvas, s: &mut Scene, w: &World, ground: &Texture, ski
         // The region weather table is a set of moods for invented places. Over a
         // real city the point is to SEE it, so: clear air, fog only far enough
         // out to hide the edge of the data.
-        s.fogR = 0.60
-        s.fogG = 0.68
-        s.fogB = 0.80
+        s.fogR = 0.52
+        s.fogG = 0.66
+        s.fogB = 0.86
         s.fogStart = 1500.0
         s.fogEnd = 4200.0
         s.sunX = 0.38
@@ -607,6 +633,24 @@ pub fn drawWorld(c: &mut Canvas, s: &mut Scene, w: &World, ground: &Texture, ski
         s.sunZ = 0.34
     } else {
         applyWeather(s, w.prevTheme, w.theme, w.themeMix)
+    }
+    // Fog HAS to finish inside the draw distance. Every preset was written with
+    // an end past the far plane, so nothing was ever more than half fogged and
+    // the last row of terrain — and every building reaching the cull radius —
+    // switched on against clear sky.
+    //
+    // Where it STARTS is the difference between distance and smog. Held to the
+    // last third of the view, the near city keeps its own colours and only the
+    // far edge dissolves; started any closer, the haze sits on everything and
+    // the whole world goes grey.
+    if s.fogEnd > w.cam.far {
+        s.fogEnd = w.cam.far
+    }
+    if s.fogStart > s.fogEnd * 0.78 {
+        s.fogStart = s.fogEnd * 0.78
+    }
+    if s.fogStart < s.fogEnd * 0.66 {
+        s.fogStart = s.fogEnd * 0.66
     }
     let v = viewOf(w.cam, c.w, c.h)
     sceneClear(s)
@@ -1585,10 +1629,13 @@ pub fn drawHud(c: &mut Canvas, w: &World, s: &Scene, fps: i64) {
         }
     }
 
-    // Where you are, and how far to the next region.
+    // Where you are, and how far to the next place. The data credit is not on
+    // the HUD — ODbL wants attribution with the work, not burned into every
+    // frame, so it lives in --help and in cities/README.md.
     if w.city.loaded {
         text(c, 24, c.h - 58, w.city.name, 3, 0.75, 0.72, 0.55)
-        text(c, 24, c.h - 26, "OPENSTREETMAP + NASA SRTM", 2, 0.32, 0.34, 0.38)
+        let togo = "NEXT PLACE IN " + w.toNext.toString()
+        text(c, 24, c.h - 26, togo, 2, 0.32, 0.34, 0.38)
     } else {
         text(c, 24, c.h - 58, themeName(w.theme), 3, 0.75, 0.72, 0.55)
         let rem = "NEXT REGION IN " + w.toNext.toString()
@@ -1633,7 +1680,7 @@ pub fn drawHud(c: &mut Canvas, w: &World, s: &Scene, fps: i64) {
             textCentered(c, c.w / 2, c.h - 130, "UP AND DOWN TO FLY THROUGH THE RINGS", 2, 0.45 * f, 0.5 * f, 0.6 * f)
             textCentered(c, c.w / 2, c.h - 106, "THE PLANE STEERS ITSELF — YOU CANNOT CRASH", 2, 0.4 * f, 0.44 * f, 0.5 * f)
         } else {
-            textCentered(c, c.w / 2, c.h - 130, "LEFT RIGHT TO BANK    UP DOWN TO CLIMB AND DIVE", 2, 0.45 * f, 0.5 * f, 0.6 * f)
+            textCentered(c, c.w / 2, c.h - 130, "LEFT RIGHT TO BANK    UP DOWN TO PITCH", 2, 0.45 * f, 0.5 * f, 0.6 * f)
             textCentered(c, c.w / 2, c.h - 106, "FOLLOW THE GREEN BRACKETS — YOU CANNOT CRASH", 2, 0.4 * f, 0.44 * f, 0.5 * f)
         }
     }

@@ -225,11 +225,15 @@ pub fn frameOf(yaw: f64, pitch: f64, roll: f64): Frame {
     // right = the world-up-crossed heading; up follows from the other two
     let right = v3(cy, 0.0, 0.0 - sy)
     let up = fwd.cross(right)
-    // roll rotates right and up about forward, leaving forward alone
+    // Roll rotates right and up about forward, leaving forward alone. The signs
+    // look backwards because this basis is left-handed — fwd × right is +up, not
+    // -up — so the textbook `right·cos + up·sin` rolls the wrong way round the
+    // heading: a right turn came out with the left wing down and the horizon
+    // tilting away from the turn instead of into it.
     return Frame {
         fwd: fwd,
-        right: right.scale(cr) + up.scale(sr),
-        up: up.scale(cr) - right.scale(sr),
+        right: right.scale(cr) - up.scale(sr),
+        up: up.scale(cr) + right.scale(sr),
     }
 }
 

@@ -277,6 +277,50 @@ pub fn line(c: &mut Canvas, x0i: f64, y0i: f64, x1i: f64, y1i: f64, r: f64, g: f
     }
 }
 
+// A stroke with weight. The canvas is HDR and additive, so drawing the same
+// line twice over itself makes it brighter, not thicker — a bold marker has to
+// be several strokes laid side by side along the normal.
+pub fn thickLine(c: &mut Canvas, x0: f64, y0: f64, x1: f64, y1: f64, wide: f64, r: f64, g: f64, b: f64) {
+    let dx = x1 - x0
+    let dy = y1 - y0
+    let l = Math.sqrt(dx * dx + dy * dy) + 0.0001
+    let nx = 0.0 - dy / l
+    let ny = dx / l
+    var n = (wide as i64)
+    if n < 1 {
+        n = 1
+    }
+    // Spread the weight across the passes so a wide stroke is not also a
+    // brighter one — three passes of full brightness blows out to white.
+    let k = 1.0 / (n as f64)
+    for i in 0..n {
+        let off = ((i as f64) - ((n as f64) - 1.0) * 0.5) * 0.9
+        line(c, x0 + nx * off, y0 + ny * off, x1 + nx * off, y1 + ny * off, r * k, g * k, b * k)
+    }
+}
+
+// Darken a rectangle. fillRect ADDS light, which is right for a glow and wrong
+// for the panel behind the checklist: over a bright drape, adding to it makes
+// the text less readable, not more.
+pub fn shadeRect(c: &mut Canvas, x0: f64, y0: f64, x1: f64, y1: f64, k: f64) {
+    var ix0 = Math.maxI64(0, x0 as i64)
+    var iy0 = Math.maxI64(0, y0 as i64)
+    var ix1 = Math.minI64(c.w, x1 as i64)
+    var iy1 = Math.minI64(c.h, y1 as i64)
+    var y = iy0
+    while y < iy1 {
+        var x = ix0
+        while x < ix1 {
+            let i = (y * c.w + x) * 3
+            c.hdr[i] = c.hdr[i] * (k as f32)
+            c.hdr[i + 1] = c.hdr[i + 1] * (k as f32)
+            c.hdr[i + 2] = c.hdr[i + 2] * (k as f32)
+            x = x + 1
+        }
+        y = y + 1
+    }
+}
+
 // ── text ──────────────────────────────────────────────────────────────────────
 
 pub fn textWidth(s: &string, scale: i64): i64 {

@@ -74,10 +74,27 @@ way to advance the tour. A beacon also arms only once you have been outside its
 radius, because you spawn 235 m from Honolulu's first one and would otherwise
 collect it before touching a key.
 
-Arriving hands the camera to a slow orbit with the landmark's name and one fact
-about it. The orbit starts at the bearing you arrived on and eases in and out of
+Five per place, listed down the right of the screen and ticked off as you reach
+them, each with the time that leg took. The clock is per landmark rather than
+cumulative: "how long did that one take" is a number worth beating, a running
+total is not. Under the list is the name of the next region and nothing else —
+knowing there is more is the reason to finish these five; knowing what is in it
+is the reason to skip them. Find all five and the next region comes in on its
+own.
+
+Arriving hands the camera to an orbit that makes exactly one revolution of the
+subject, with its name, one fact about it, and what it cost you. The rate is
+TAU / SHOW_LEN rather than a fixed number, so the sweep is a full circle whatever
+the shot's length. It starts at the bearing you arrived on and eases in and out of
 your own camera over 1.6 s at each end — it used to cut to due north and cut back,
 which is two hard jumps in a shot whose whole job is to show you something.
+
+Opening a place runs the same machinery in reverse: the camera starts a kilometre
+up and two kilometres out, sweeps three quarters of a turn around the parked
+aircraft and descends into the chase pose, arriving on it exactly rather than
+cutting. It is held inside the terrain draw distance and pushes the haze out to
+the far plane while it runs — a survey from three kilometres up is a white screen,
+because every fog preset finishes at 1.7 km. Any stick input skips it.
 
 Over the invented world it is still hoops. Rings never spawn inside a building and
 the plane never flies through one: the same "you cannot crash" push that lifts you

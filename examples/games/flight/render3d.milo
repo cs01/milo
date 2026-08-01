@@ -4,7 +4,7 @@ from "std/math" import {
     Math
 }
 from "./gfx" import {
-    Canvas, fillRect, spot, line, darkLine, text, textCentered, textWidth
+    Canvas, fillRect, shadeRect, spot, line, thickLine, darkLine, text, textCentered, textWidth
 }
 // Small by-value carrier. Returning a Vec<i64> from this allocated once per
 // terrain quad per frame — a few thousand mallocs a frame, and most of the
@@ -26,7 +26,8 @@ from "./textures" import {
     groundTexture, planeTexture, facadeTexture
 }
 from "./world3d" import {
-    World, Trail, Theme, nextTheme, heightAt, coverAt, blockOf, foldIn, unfold, TILE, VIEW_TILES, TAU, MARK_REACH
+    World, Trail, Theme, nextTheme, heightAt, coverAt, blockOf, foldIn, unfold, TILE, VIEW_TILES, TAU, MARK_REACH,
+    fmtTime
 }
 from "./city" import {
     City, COVER_URBAN, COVER_PARK, COVER_SAND, COVER_WATER, BUILDING_MARGIN, cityCellX, cityCellZ, cityOrthoLocal
@@ -650,6 +651,14 @@ pub fn drawWorld(c: &mut Canvas, s: &mut Scene, w: &World, ground: &Texture, ski
     // last third of the view, the near city keeps its own colours and only the
     // far edge dissolves; started any closer, the haze sits on everything and
     // the whole world goes grey.
+    // The opening survey looks down from a kilometre up, where the presets put
+    // the whole city past the haze wall and the shot is a white screen. Pushed
+    // out to the draw distance for as long as the camera is up there — the fog
+    // still finishes inside the far plane, so the grid edge stays hidden.
+    if w.intro > 0.0 {
+        let up = Math.clampF64(w.intro / w.introLen, 0.0, 1.0)
+        s.fogEnd = s.fogEnd + (w.cam.far - s.fogEnd) * up
+    }
     if s.fogEnd > w.cam.far {
         s.fogEnd = w.cam.far
     }
@@ -1695,6 +1704,12 @@ fn triT(s: &mut Scene, v: &View, t: &Texture, p: &Vec<Vec3>, a: i64, b: i64, d: 
 // A reticle on the next coin, and an edge arrow when it is off screen. Without
 // this the trail is easy to lose the moment you overshoot one.
 pub fn drawGuide(c: &mut Canvas, w: &World, v: &View) {
+    // Hoops only. Over a real place the single live "ring" is the landmark
+    // beacon, which has its own marker in drawMarkGuide — this was drawing a
+    // second reticle, in a second colour, on the same target.
+    if w.city.loaded || w.intro > 0.0 {
+        return
+    }
     // nearest live coin ahead
     var bi = 0 - 1
     var bd = 1.0e18
@@ -1777,6 +1792,8 @@ pub fn drawMarkBeam(c: &mut Canvas, w: &World, v: &View) {
     if !w.city.loaded || w.showT > 0.0 {
         return
     }
+    // The beam stays up through the survey — it is the one thing the opening
+    // shot is establishing, and it is scenery rather than UI.
     for i in 0..w.rings.len {
         if !w.rings[i].beacon || !w.rings[i].alive {
             continue
@@ -1792,20 +1809,28 @@ pub fn drawMarkBeam(c: &mut Canvas, w: &World, v: &View) {
         // Fade with distance so a beam eight kilometres off is a hint rather than
         // a floodlight, but never all the way out — the point is to be findable.
         var fade = 1.0 - dist / 14000.0
-        if fade < 0.30 {
-            fade = 0.30
+        if fade < 0.48 {
+            fade = 0.48
         }
         let k = pulse * fade
         // Tall enough to clear the Koolau from the far side of the map, and to
         // stand well above the tallest thing anyone has built.
-        let TOP = 1500.0
-        let RADIUS = 22.0
+        let TOP = 1800.0
+        // Wide enough to read as a landmark from the far side of the map. At 22 m
+        // it was a thread against a city of 300 m towers — the thing it competes
+        // with for attention is the skyline, not the sky.
+        let RADIUS = 52.0
         // One sample per screen pixel of half-width, so the column is solid close
         // up without paying for samples that land on the same pixel far away. A
         // fixed count banded into visible stripes the moment you flew near one.
-        var CROSS = ((RADIUS * v.scale / Math.maxF64(dist, 1.0)) as i64) + 3
-        if CROSS > 48 {
-            CROSS = 48
+        // Never allowed to subtend less than this on screen. A column of a fixed
+        // width in metres is a hairline at eight kilometres — which is exactly
+        // the range at which it is the only thing telling you where to go.
+        let MIN_PIX = 9.0
+        let wide = Math.maxF64(RADIUS, MIN_PIX * dist / v.scale)
+        var CROSS = ((wide * v.scale / Math.maxF64(dist, 1.0)) as i64) + 3
+        if CROSS > 64 {
+            CROSS = 64
         }
         if CROSS < 5 {
             CROSS = 5
@@ -1824,47 +1849,64 @@ pub fn drawMarkBeam(c: &mut Canvas, w: &World, v: &View) {
                 continue
             }
             across = across * Math.sqrt(across)
-            let ox = right.x * frac * RADIUS
-            let oz = right.z * frac * RADIUS
+            // A hot white core inside a blue column: the core is what makes it
+            // read as light rather than as a painted cylinder, and it is narrow
+            // enough that the beam still reads blue from a distance.
+            let core = Math.maxF64(0.0, 1.0 - Math.abs(frac) * 4.0)
+            let ox = right.x * frac * wide
+            let oz = right.z * frac * wide
             for seg in 0..LIFTS {
                 let t0 = (seg as f64) / (LIFTS as f64)
                 let t1 = ((seg + 1) as f64) / (LIFTS as f64)
                 // Dissolves toward the top instead of ending on a hard edge.
                 let up = (1.0 - t0) * (1.0 - t0)
-                let amp = k * across * up * 0.85
+                let amp = k * across * up * 1.10
                 if amp < 0.004 {
                     continue
                 }
                 let a = toCamera(v, bx + ox, by + TOP * t0, bz + oz)
                 let b = toCamera(v, bx + ox, by + TOP * t1, bz + oz)
-                beamSeg(c, v, a, b, 0.34 * amp, 1.00 * amp, 0.92 * amp)
+                let hot = core * up * k * 0.9
+                beamSeg(c, v, a, b, (0.22 + hot) * amp, (0.62 + hot) * amp, (1.85 + hot) * amp)
             }
         }
         // The circle on the ground is the collection radius, drawn where it is:
         // fly over the inside of it and the landmark is yours.
-        let segs = 40
-        var prevOk = false
-        var pvx = 0.0
-        var pvy = 0.0
-        for si in 0..segs + 1 {
-            let ang = (si as f64) / (segs as f64) * TAU
-            let gx = bx + Math.sin(ang) * MARK_REACH
-            let gz = bz + Math.cos(ang) * MARK_REACH
-            let gy = heightAt(w.city, gx, gz) + 12.0
-            let p = toCamera(v, gx, gy, gz)
-            if p.z <= v.near {
-                prevOk = false
-                continue
-            }
-            let sx = v.cx + p.x * v.scale / p.z
-            let sy = v.cy - p.y * v.scale / p.z
-            if prevOk {
-                line(c, pvx, pvy, sx, sy, 0.18 * k, 0.60 * k, 0.55 * k)
-            }
-            pvx = sx
-            pvy = sy
-            prevOk = true
+        // Two rings rather than one, the inner one turning: a single static
+        // circle on a photographic drape is easy to lose, and the rotation is
+        // what tells you at a glance that this is the live target.
+        groundRing(c, w, v, bx, bz, MARK_REACH, 0.0, k * 1.6)
+        groundRing(c, w, v, bx, bz, MARK_REACH * 0.62, w.time * 0.7, k * 0.9)
+    }
+}
+
+// A circle drawn on the terrain, following it. Broken into dashes so it reads as
+// a marker and not as a road, and `spin` turns the dash pattern without moving
+// the circle.
+fn groundRing(c: &mut Canvas, w: &World, v: &View, cx: f64, cz: f64, rad: f64, spin: f64, k: f64) {
+    let segs = 48
+    var prevOk = false
+    var pvx = 0.0
+    var pvy = 0.0
+    for si in 0..segs + 1 {
+        let ang = (si as f64) / (segs as f64) * TAU
+        let gx = cx + Math.sin(ang + spin) * rad
+        let gz = cz + Math.cos(ang + spin) * rad
+        let gy = heightAt(w.city, gx, gz) + 12.0
+        let p = toCamera(v, gx, gy, gz)
+        if p.z <= v.near {
+            prevOk = false
+            continue
         }
+        let sx = v.cx + p.x * v.scale / p.z
+        let sy = v.cy - p.y * v.scale / p.z
+        // Two segments on, one off.
+        if prevOk && si % 3 != 2 {
+            thickLine(c, pvx, pvy, sx, sy, 3.0, 0.20 * k, 0.55 * k, 1.30 * k)
+        }
+        pvx = sx
+        pvy = sy
+        prevOk = true
     }
 }
 
@@ -1887,7 +1929,9 @@ fn beamSeg(c: &mut Canvas, v: &View, a: &Vec3, b: &Vec3, r: f64, g: f64, bl: f64
 }
 
 pub fn drawMarkGuide(c: &mut Canvas, w: &World, v: &View) {
-    if w.marks.len == 0 || !w.city.loaded {
+    // Off during both cinematics. A reticle and an edge chevron over a camera
+    // move read as UI stuck on top of a cutscene.
+    if w.marks.len == 0 || !w.city.loaded || w.showT > 0.0 || w.intro > 0.0 {
         return
     }
     let mx = w.marks[w.markIdx].x
@@ -1896,11 +1940,13 @@ pub fn drawMarkGuide(c: &mut Canvas, w: &World, v: &View) {
     // marker pinned to the dirt at the base of Coit Tower points at a car park.
     let my = heightAt(w.city, mx, mz) + 180.0
     let p = toCamera(v, mx, my, mz)
-    // No pulse. A marker that breathes draws the eye off the thing it is
-    // pointing at, and against a moving background it read as a flicker.
-    let cr = 0.42
-    let cg = 0.86
-    let cb = 0.70
+    // Blue, to match the beam standing on the same spot. Two markers for one
+    // destination in two different colours read as two destinations.
+    let cr = 0.34
+    let cg = 0.74
+    let cb = 1.55
+    let km = (w.markDist / 100.0) as i64
+    let range = ((km as f64) / 10.0).toString() + " KM"
     if p.z > 1.0 {
         let sx = v.cx + p.x * v.scale / p.z
         let sy = v.cy - p.y * v.scale / p.z
@@ -1911,12 +1957,20 @@ pub fn drawMarkGuide(c: &mut Canvas, w: &World, v: &View) {
         if sx > inset && sx < (c.w as f64) - inset && sy > inset && sy < (c.h as f64) - inset {
             // A diamond rather than the ring reticle, so a landmark never reads
             // as something to fly through.
-            let r = Math.clampF64(18000.0 / p.z, 10.0, 34.0)
-            line(c, sx, sy - r, sx + r, sy, cr, cg, cb)
-            line(c, sx + r, sy, sx, sy + r, cr, cg, cb)
-            line(c, sx, sy + r, sx - r, sy, cr, cg, cb)
-            line(c, sx - r, sy, sx, sy - r, cr, cg, cb)
-            textCentered(c, sx as i64, (sy + r + 10.0) as i64, w.markName, 2, cr, cg, cb)
+            let r = Math.clampF64(26000.0 / p.z, 18.0, 54.0)
+            thickLine(c, sx, sy - r, sx + r, sy, 3.0, cr, cg, cb)
+            thickLine(c, sx + r, sy, sx, sy + r, 3.0, cr, cg, cb)
+            thickLine(c, sx, sy + r, sx - r, sy, 3.0, cr, cg, cb)
+            thickLine(c, sx - r, sy, sx, sy - r, 3.0, cr, cg, cb)
+            // Corner ticks outside the diamond: they widen the mark's footprint
+            // without filling the middle of it, which is where the landmark is.
+            let t = r * 0.42
+            thickLine(c, sx - r - t, sy, sx - r - t * 0.3, sy, 2.0, cr, cg, cb)
+            thickLine(c, sx + r + t * 0.3, sy, sx + r + t, sy, 2.0, cr, cg, cb)
+            thickLine(c, sx, sy - r - t, sx, sy - r - t * 0.3, 2.0, cr, cg, cb)
+            thickLine(c, sx, sy + r + t * 0.3, sx, sy + r + t, 2.0, cr, cg, cb)
+            textCentered(c, sx as i64, (sy + r + 16.0) as i64, w.markName, 3, cr, cg, cb)
+            textCentered(c, sx as i64, (sy + r + 42.0) as i64, range, 2, cr * 0.8, cg * 0.8, cb * 0.8)
             return
         }
     }
@@ -1937,10 +1991,20 @@ pub fn drawMarkGuide(c: &mut Canvas, w: &World, v: &View) {
     let ay = v.cy + dirY * rad
     let nx = 0.0 - dirY
     let ny = dirX
-    line(c, ax + dirX * 24.0, ay + dirY * 24.0, ax + nx * 13.0, ay + ny * 13.0, cr, cg, cb)
-    line(c, ax + dirX * 24.0, ay + dirY * 24.0, ax - nx * 13.0, ay - ny * 13.0, cr, cg, cb)
-    line(c, ax - nx * 13.0, ay - ny * 13.0, ax + nx * 13.0, ay + ny * 13.0, cr * 0.8, cg * 0.8, cb * 0.8)
-    textCentered(c, (ax - dirX * 26.0) as i64, (ay - dirY * 26.0) as i64, w.markName, 2, cr * 0.9, cg * 0.9, cb * 0.9)
+    // A solid chevron, twice the size it was. This is the only thing on screen
+    // telling a lost player which way to turn, so it is drawn like it matters:
+    // filled by nested strokes, with a tail running back toward the centre.
+    let tip = 46.0
+    let halfW = 26.0
+    for i in 0..7 {
+        let s = 1.0 - (i as f64) * 0.13
+        thickLine(c, ax + dirX * tip * s, ay + dirY * tip * s, ax + nx * halfW * s, ay + ny * halfW * s, 3.0, cr, cg, cb)
+        thickLine(c, ax + dirX * tip * s, ay + dirY * tip * s, ax - nx * halfW * s, ay - ny * halfW * s, 3.0, cr, cg, cb)
+    }
+    thickLine(c, ax - nx * halfW, ay - ny * halfW, ax + nx * halfW, ay + ny * halfW, 3.0, cr * 0.8, cg * 0.8, cb * 0.8)
+    thickLine(c, ax - dirX * 34.0, ay - dirY * 34.0, ax, ay, 2.0, cr * 0.5, cg * 0.5, cb * 0.5)
+    textCentered(c, (ax - dirX * 62.0) as i64, (ay - dirY * 62.0 - 8.0) as i64, w.markName, 3, cr, cg, cb)
+    textCentered(c, (ax - dirX * 62.0) as i64, (ay - dirY * 62.0 + 20.0) as i64, range, 2, cr * 0.8, cg * 0.8, cb * 0.8)
 }
 
 // Speed lines: short streaks flying outward from the centre of the screen. The
@@ -1985,6 +2049,125 @@ pub let GAIN_Y: i64 = 176
 
 pub let TELEGRAPH_Y: i64 = 236
 
+// A tick, drawn rather than typed: the 5x7 font is uppercase ASCII and there is
+// no glyph for it. Two strokes, short arm down-right then long arm up-right.
+fn checkMark(c: &mut Canvas, x: f64, y: f64, s: f64, r: f64, g: f64, b: f64) {
+    thickLine(c, x, y + s * 0.55, x + s * 0.38, y + s, 3.0, r, g, b)
+    thickLine(c, x + s * 0.38, y + s, x + s, y, 3.0, r, g, b)
+}
+
+pub let PANEL_W: i64 = 330
+
+// The tour, down the right-hand side: what is left, what is done and how long
+// each one took. This is the game's only progress display — there is no score —
+// so it is the one piece of HUD allowed to be large.
+pub fn drawChecklist(c: &mut Canvas, w: &World) {
+    if w.marks.len == 0 || !w.city.loaded {
+        return
+    }
+    let x0 = c.w - PANEL_W - 18
+    let rowH = 34
+    let top = 74
+    let h = 58 + rowH * w.marks.len + 54
+    shadeRect(c, x0 as f64, (top - 34) as f64, (x0 + PANEL_W) as f64, ((top - 34) + h) as f64, 0.34)
+    text(c, x0 + 16, top - 22, "LANDMARKS", 2, 0.50, 0.62, 0.80)
+    text(c, c.w - 92, top - 22, w.markFound.toString() + " / " + w.marks.len.toString(), 2, 0.50, 0.62, 0.80)
+    for i in 0..w.marks.len {
+        let y = top + 22 + rowH * i
+        let done = w.marks[i].found
+        let here = i == w.markIdx && !done
+        var r = 0.24
+        var g = 0.28
+        var b = 0.34
+        if done {
+            r = 0.30
+            g = 0.95
+            b = 0.62
+        }
+        if here {
+            // The live one pulses. Nothing else on the panel moves, so this is
+            // unmissable without being loud.
+            let pulse = 0.78 + 0.22 * Math.sin(w.time * 4.0)
+            r = 0.40 * pulse
+            g = 0.86 * pulse
+            b = 1.70 * pulse
+        }
+        // The row that was just ticked flares and then settles into the plain
+        // "done" colour, so the eye is pulled to the line that changed.
+        if done && i == w.showIdx && w.foundPop > 0.0 {
+            let f = w.foundPop * w.foundPop
+            r = r + 1.5 * f
+            g = g + 1.5 * f
+            b = b + 1.2 * f
+            shadeRect(c, (x0 + 6) as f64, (y - 6) as f64, (x0 + PANEL_W - 6) as f64, (y + 24) as f64, 1.0 + 2.0 * f)
+        }
+        if done {
+            checkMark(c, (x0 + 16) as f64, y as f64, 15.0, r, g, b)
+        } else if here {
+            // A caret, not a tick: this one is where you are going.
+            thickLine(c, (x0 + 17) as f64, y as f64, (x0 + 29) as f64, (y + 8) as f64, 3.0, r, g, b)
+            thickLine(c, (x0 + 29) as f64, (y + 8) as f64, (x0 + 17) as f64, (y + 16) as f64, 3.0, r, g, b)
+        }
+        text(c, x0 + 42, y + 2, w.marks[i].name, 2, r, g, b)
+        if done {
+            let stamp = fmtTime(w.marks[i].took)
+            text(c, c.w - 34 - textWidth(stamp, 2), y + 2, stamp, 2, r * 0.9, g * 0.9, b * 0.9)
+        }
+    }
+    // The region after this one, named but not opened up. Knowing there is more
+    // is the reason to finish the five above; knowing what is in it is the
+    // reason to skip them.
+    let ny = top + 22 + rowH * w.marks.len + 16
+    if w.nextName != "" {
+        text(c, x0 + 16, ny, "NEXT", 2, 0.30, 0.34, 0.40)
+        text(c, x0 + 16 + textWidth("NEXT  ", 2), ny, w.nextName, 2, 0.52, 0.50, 0.42)
+    }
+}
+
+// The plate an arrival card sits on. Sized to its own widest line and darkened
+// in two steps, so it reads as a card over the shot rather than as a letterbox
+// bar the full width of the screen.
+fn cardBack(c: &mut Canvas, cx: i64, y0: i64, y1: i64, wide: i64, k: f64) {
+    let half = (wide / 2 + 46) as f64
+    shadeRect(c, (cx as f64) - half - 26.0, y0 as f64, (cx as f64) + half + 26.0, y1 as f64, 1.0 - 0.55 * k)
+    shadeRect(c, (cx as f64) - half, (y0 + 8) as f64, (cx as f64) + half, (y1 - 8) as f64, 1.0 - 0.82 * k)
+}
+
+// The arrival card, over the orbit: what you found, what it is, and what it
+// cost you. The `fact` on every Mark had been carried since the tour was written
+// and never once drawn — this is the payoff the comment on that field promises.
+pub fn drawFound(c: &mut Canvas, w: &World) {
+    if w.showT <= 0.0 || !w.city.loaded || w.marks.len == 0 {
+        return
+    }
+    // Up over the first half second and out over the last, so the card is never
+    // on screen at full strength while the camera is still moving fast.
+    let inK = Math.clampF64((w.showLen - w.showT) / 0.5, 0.0, 1.0)
+    let outK = Math.clampF64(w.showT / 0.8, 0.0, 1.0)
+    let k = Math.minF64(inK, outK)
+    if k <= 0.01 {
+        return
+    }
+    let cx = c.w / 2
+    if w.regionDone {
+        cardBack(c, cx, 150, 330, textWidth(w.city.name, 5), k)
+        textCentered(c, cx, 176, w.city.name, 5, 2.2 * k, 1.85 * k, 0.70 * k)
+        textCentered(c, cx, 236, "ALL " + w.marks.len.toString() + " FOUND", 3, 0.70 * k, 1.70 * k, 1.05 * k)
+        if w.nextName != "" {
+            textCentered(c, cx, 282, "NEXT UP  " + w.nextName, 2, 0.90 * k, 0.92 * k, 0.96 * k)
+        }
+        return
+    }
+    // Indexed at each use rather than bound to a local: `let m = w.marks[i]`
+    // would move a Mark out of a borrowed Vec, which is exactly the thing the
+    // checker is there to stop.
+    cardBack(c, cx, 76, 250, Math.maxI64(textWidth(w.marks[w.showIdx].name, 5), textWidth(w.marks[w.showIdx].fact, 2)), k)
+    textCentered(c, cx, 92, "FOUND", 2, 0.40 * k, 0.90 * k, 1.70 * k)
+    textCentered(c, cx, 120, w.marks[w.showIdx].name, 5, 2.1 * k, 2.0 * k, 1.75 * k)
+    textCentered(c, cx, 180, w.marks[w.showIdx].fact, 2, 0.90 * k, 0.94 * k, 1.00 * k)
+    textCentered(c, cx, 218, fmtTime(w.marks[w.showIdx].took) + "     " + w.markFound.toString() + " OF " + w.marks.len.toString(), 3, 0.55 * k, 1.55 * k, 1.00 * k)
+}
+
 pub fn drawHud(c: &mut Canvas, w: &World, _s: &Scene, _fps: i64) {
     // Deliberately almost empty. Score, altitude, speed, triangle count, the
     // afterburner gauge, the streak and the control hints were all in service of
@@ -1993,10 +2176,10 @@ pub fn drawHud(c: &mut Canvas, w: &World, _s: &Scene, _fps: i64) {
     // only two questions worth asking in flight: where am I, and what is that.
     if w.city.loaded {
         text(c, 24, c.h - 58, w.city.name, 3, 0.62, 0.60, 0.48)
-        if w.markName != "" {
-            let km = (w.markDist / 100.0) as i64
-            text(c, 24, c.h - 26, w.markName + "   " + ((km as f64) / 10.0).toString() + " KM", 2, 0.42, 0.48, 0.40)
-        }
+        // The name and the range moved onto the marker itself, where the player
+        // is already looking. Two copies of the same two facts, one of them in
+        // the far corner, is a HUD growing back.
+        text(c, 24, c.h - 26, "ENTER  ELSEWHERE      M  MUSIC", 2, 0.26, 0.28, 0.32)
         return
     }
     // Invented country still runs the hoop game, so it keeps its readouts.

@@ -36,7 +36,7 @@ from "./textures" import {
     groundTexture, planeTexture, facadeTexture
 }
 from "./world3d" import {
-    worldIn, worldUpdate, worldSetPlace, SEED
+    worldIn, worldUpdate, worldSetPlace, resetTour, SEED
 }
 from "./city" import {
     City, cityLoad, cityParse, cityEmpty, cityAttachOrtho
@@ -45,7 +45,8 @@ from "std/argparse" import {
     ArgParser, ParsedArgs
 }
 from "./render3d" import {
-    drawWorld, drawHud, drawGuide, drawMarkGuide, drawMarkBeam, drawSpeedLines
+    drawWorld, drawHud, drawGuide, drawMarkGuide, drawMarkBeam, drawSpeedLines,
+    drawChecklist, drawFound
 }
 
 pub let W: i64 = 1280
@@ -60,17 +61,20 @@ pub let EPILOG: string = "built-in places (--place):
   honolulu    Honolulu — a skyline with a volcano behind it, and reef below
 
 controls:
-  UP / DOWN                   pitch — the only axis; the plane steers itself
-  LEFT / RIGHT                bank (--pro only)
+  UP / DOWN                   pitch
+  LEFT / RIGHT                bank
   SPACE                       afterburner
   ENTER                       fly somewhere else
   M                           music on / off
   ESC                         quit
 
 Up dives and down climbs, the way a stick works; --natural flips it.
-Fly through the rings. You cannot crash. Every ten rings you arrive somewhere
-new — all four places are baked into the binary, so nothing is read or fetched
-while flying.
+
+Every place has five landmarks, listed down the right of the screen. A blue
+column of light stands on the one you are looking for; fly over it at any
+height and it is yours, timed and ticked off. Find all five and the next region
+comes in. You cannot crash. Every place is baked into the binary, so nothing is
+read or fetched while flying.
 
 Terrain: NASA SRTM (public domain). Buildings and land cover:
 (c) OpenStreetMap contributors, ODbL — openstreetmap.org/copyright."
@@ -132,6 +136,26 @@ fn placeName(i: i64): string {
         return "honolulu"
     }
     return "sf"
+}
+
+// The display name the asset carries, which is what marksFor keys off and what
+// the checklist prints for the region you have not reached yet. It is not
+// derivable from the slug — "yosemite" is "Yosemite Valley" — and reading it out
+// of the asset would mean decoding a place just to name it.
+fn placeTitle(i: i64): string {
+    if i == 1 {
+        return "MANHATTAN"
+    }
+    if i == 2 {
+        return "YOSEMITE VALLEY"
+    }
+    if i == 3 {
+        return "GRAND CANYON"
+    }
+    if i == 4 {
+        return "HONOLULU"
+    }
+    return "SAN FRANCISCO"
 }
 
 fn placeIndex(name: &string): i64 {
@@ -297,6 +321,9 @@ pub fn main(): i32 {
     var c = canvasNew(W, H)
     var s = sceneNew(W, H)
     var w = worldIn(SEED, places, easy)
+    if placeIdx >= 0 {
+        w.nextName = placeTitle((placeIdx + 1) % PLACE_COUNT)
+    }
     let groundTex = groundTexture()
     let skinTex = planeTexture()
     let facadeTex = facadeTexture()
@@ -325,9 +352,21 @@ pub fn main(): i32 {
         }
         // Only in one-axis mode: with `--pro` these same keys are the bank axis
         // and stepping the world every time the player turned would be absurd.
-        if easy && inp.placeStep != 0 && placeIdx >= 0 {
-            placeIdx = (placeIdx + inp.placeStep + PLACE_COUNT) % PLACE_COUNT
+        // Either the player asked for somewhere else, or the tour here is
+        // finished and the world has asked for the next region. Same swap.
+        var step = 0
+        if easy && inp.placeStep != 0 {
+            step = inp.placeStep
+        }
+        if w.evPlaceDone {
+            step = 1
+        }
+        if step != 0 && placeIdx >= 0 {
+            placeIdx = (placeIdx + step + PLACE_COUNT) % PLACE_COUNT
             worldSetPlace(w, parsePlace(placeName(placeIdx)))
+            w.nextName = placeTitle((placeIdx + 1) % PLACE_COUNT)
+        } else if w.evPlaceDone {
+            resetTour(w)
         }
         musicTick(snd)
 
@@ -361,6 +400,8 @@ pub fn main(): i32 {
         drawGuide(c, w, view)
         drawMarkBeam(c, w, view)
         drawMarkGuide(c, w, view)
+        drawChecklist(c, w)
+        drawFound(c, w)
         drawHud(c, w, s, fpsShown)
 
         var exposure = 1.0

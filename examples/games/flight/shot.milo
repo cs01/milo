@@ -35,7 +35,8 @@ from "std/fs" import {
     readFile, isFile
 }
 from "./render3d" import {
-    drawWorld, drawHud, drawGuide, drawMarkGuide, drawMarkBeam, drawSpeedLines
+    drawWorld, drawHud, drawGuide, drawMarkGuide, drawMarkBeam, drawSpeedLines,
+    drawChecklist, drawFound
 }
 
 pub extern fn fopen(path: *u8, mode: *u8): *u8
@@ -88,6 +89,9 @@ pub fn main(): i32 {
     }
     var city = cityEmpty()
     var easy = false
+    // The opening survey freezes the aircraft, so a capture would otherwise
+    // spend its first nine seconds of frames parked at the spawn point.
+    var intro = false
     var atX = 0.0
     var atZ = 0.0
     var atAlt = 0.0
@@ -142,6 +146,11 @@ pub fn main(): i32 {
             i = i + 5
             continue
         }
+        if argv[i] == "--intro" {
+            intro = true
+            i = i + 1
+            continue
+        }
         if argv[i] == "--easy" {
             easy = true
             i = i + 1
@@ -164,6 +173,9 @@ pub fn main(): i32 {
     var places: Vec<City> = Vec.new()
     places.push(city)
     var w = worldIn(SEED, places, easy)
+    if !intro {
+        w.intro = 0.0
+    }
     let groundTex = groundTexture()
     let skinTex = planeTexture()
     let facadeTex = facadeTexture()
@@ -202,6 +214,12 @@ pub fn main(): i32 {
                 roll = Math.clampF64(diff * 2.2, 0.0 - 1.0, 1.0)
                 pitch = Math.clampF64(dy * 0.03, 0.0 - 1.0, 1.0)
             }
+        }
+        // Any stick input skips the opening survey, which is right in the game
+        // and wrong here: the scripted autopilot is always pushing something.
+        if w.intro > 0.0 {
+            roll = 0.0
+            pitch = 0.0
         }
         worldUpdate(w, dt, roll, pitch, false)
 
@@ -259,6 +277,8 @@ pub fn main(): i32 {
             drawGuide(c, w, view)
             drawMarkBeam(c, w, view)
             drawMarkGuide(c, w, view)
+            drawChecklist(c, w)
+            drawFound(c, w)
             drawHud(c, w, s, 60)
             present(c, 0.35, 1.0)
             presentMs = presentMs + (epochMillis() - tp)

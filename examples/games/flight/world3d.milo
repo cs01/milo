@@ -537,9 +537,13 @@ pub fn worldIn(seed: i64, places: Vec<City>, easy: bool): World {
         offCourse: 0.0,
     }
     w.marks = marksFor(w.city.name)
-    w.plane.y = heightAt(w.city, 0.0, 0.0) + 150.0
-    for i in 0..10 {
-        layRing(w)
+    w.plane.y = heightAt(w.city, 0.0, 0.0) + 320.0
+    // Hoops only over invented country. Over a real place the landmarks are the
+    // reason to fly and a line of scoring rings just gets in front of them.
+    if !w.city.loaded {
+        for i in 0..10 {
+            layRing(w)
+        }
     }
     return w
 }
@@ -1108,8 +1112,10 @@ fn updateRings(w: &mut World, dt: f64) {
             i = i + 1
         }
     }
-    for k in 0..toLay {
-        layRing(w)
+    if !w.city.loaded {
+        for k in 0..toLay {
+            layRing(w)
+        }
     }
     updateSparks(w, dt)
 }

@@ -1539,17 +1539,22 @@ pub fn drawMarkGuide(c: &mut Canvas, w: &World, v: &View) {
     // marker pinned to the dirt at the base of Coit Tower points at a car park.
     let my = heightAt(w.city, mx, mz) + 180.0
     let p = toCamera(v, mx, my, mz)
-    let pulse = 0.72 + 0.28 * Math.sin(w.time * 3.0)
-    let cr = 0.45 * pulse
-    let cg = 1.15 * pulse
-    let cb = 0.85 * pulse
+    // No pulse. A marker that breathes draws the eye off the thing it is
+    // pointing at, and against a moving background it read as a flicker.
+    let cr = 0.42
+    let cg = 0.86
+    let cb = 0.70
     if p.z > 1.0 {
         let sx = v.cx + p.x * v.scale / p.z
         let sy = v.cy - p.y * v.scale / p.z
-        if sx > 30.0 && sx < (c.w as f64) - 30.0 && sy > 30.0 && sy < (c.h as f64) - 30.0 {
+        // Generous inset before falling back to the edge arrow. With the test
+        // right at the border a landmark hovering there flipped between diamond
+        // and arrow every frame, which is what the flickering was.
+        let inset = 90.0
+        if sx > inset && sx < (c.w as f64) - inset && sy > inset && sy < (c.h as f64) - inset {
             // A diamond rather than the ring reticle, so a landmark never reads
             // as something to fly through.
-            let r = Math.clampF64(26000.0 / p.z, 14.0, 54.0)
+            let r = Math.clampF64(18000.0 / p.z, 10.0, 34.0)
             line(c, sx, sy - r, sx + r, sy, cr, cg, cb)
             line(c, sx + r, sy, sx, sy + r, cr, cg, cb)
             line(c, sx, sy + r, sx - r, sy, cr, cg, cb)
@@ -1623,199 +1628,25 @@ pub let GAIN_Y: i64 = 176
 
 pub let TELEGRAPH_Y: i64 = 236
 
-pub fn drawHud(c: &mut Canvas, w: &World, s: &Scene, fps: i64) {
-    text(c, 24, 22, "SCORE " + w.score.toString(), 3, 0.95, 0.80, 0.30)
-    let alt = ((w.plane.y - heightAt(w.city, w.plane.x, w.plane.z)) as i64)
-    text(c, 24, 58, "ALT " + alt.toString() + "   SPD " + (w.plane.speed as i64).toString(), 2, 0.35, 0.45, 0.55)
-    // afterburner budget
-    let bx = 24.0
-    let by = (c.h as f64) - 92.0
-    fillRect(c, bx, by, bx + 220.0, by + 9.0, 0.05, 0.05, 0.06)
-    var brr = 0.35
-    var bgg = 0.85
-    var label = "AFTERBURNER"
-    if w.abLocked {
-        // recharging: red, and named as such, so the lockout is not a mystery
-        let pulse = 0.6 + 0.4 * Math.sin(w.time * 7.0)
-        brr = 0.95 * pulse
-        bgg = 0.30 * pulse
-        label = "RECHARGING"
-    } else if w.afterburner < 0.35 {
-        brr = 0.9
-        bgg = 0.45
-    }
-    fillRect(c, bx, by, bx + 220.0 * w.afterburner, by + 9.0, brr, bgg, 0.25)
-    text(c, 24, (by as i64) - 22, label, 2, brr * 0.5 + 0.15, bgg * 0.5 + 0.15, 0.34)
-
-    let ts = "TRIS " + s.tris.toString() + "   " + fps.toString() + " FPS"
-    text(c, c.w - 24 - textWidth(ts, 2), 22, ts, 2, 0.28, 0.36, 0.44)
-
-    // The streak. Shown from the very first ring — the count is the thing the
-    // player is accumulating, so it has to appear the moment it starts existing
-    // rather than materialising at x2 as if from nowhere. It ticks up by one per
-    // hoop, punches on each one, and only ever resets on a miss.
-    if w.combo > 0 {
-        let n = w.combo as f64
-        let f = Math.minF64(2.6, 0.7 + n * 0.10)
-        let beat = 1.0 + 0.16 * Math.sin(w.time * (5.0 + n * 0.6))
-        // the punch: each ring kicks the number bigger, then it settles back
-        var pop = 0.0
-        if w.comboPop > 0.0 {
-            pop = w.comboPop * w.comboPop
-        }
-        var size = 4
-        if w.combo >= 5 {
-            size = 5
-        }
-        if w.combo >= 10 {
-            size = 6
-        }
-        if w.combo >= 20 {
-            size = 7
-        }
-        if pop > 0.45 {
-            size = size + 1
-        }
-        var cr2 = 1.5
-        var cg2 = 1.1
-        var cb2 = 0.25
-        if w.combo >= 10 {
-            cr2 = 1.7
-            cg2 = 0.65
-            cb2 = 0.20
-        }
-        if w.combo >= 20 {
-            cr2 = 0.5
-            cg2 = 1.2
-            cb2 = 1.9
-        }
-        let k = f * beat * (1.0 + pop * 0.8)
-        textCentered(c, c.w / 2, STREAK_Y, "x" + w.combo.toString(), size, cr2 * k, cg2 * k, cb2 * k)
-        // Always labelled. An unexplained growing number is not a mechanic.
-        textCentered(c, c.w / 2, STREAK_Y + size * 9 + 4, "RING STREAK", 2, cr2 * 0.45, cg2 * 0.45, cb2 * 0.45)
-        // a bar that fills toward the next tier, so the streak always has a goal
-        var tier = 5.0
-        if w.combo >= 5 {
-            tier = 10.0
-        }
-        if w.combo >= 10 {
-            tier = 20.0
-        }
-        if w.combo >= 20 {
-            tier = 20.0
-        }
-        let frac = Math.minF64(1.0, n / tier)
-        let bw2 = 190.0
-        let bx2 = (c.w as f64) * 0.5 - bw2 * 0.5
-        let by2 = (STREAK_Y as f64) - 16.0
-        fillRect(c, bx2, by2, bx2 + bw2 * frac, by2 + 4.0, cr2 * 0.5, cg2 * 0.5, cb2 * 0.5)
-    }
-
-    // What the last ring was actually worth, rising and fading where the streak
-    // number sits. This is the line that connects "streak went up" to "score went
-    // up by a bigger number than last time".
-    if w.gainPop > 0.0 && w.combo > 0 {
-        let f = w.gainPop
-        let rise = (1.0 - f) * 30.0
-        let mult = Math.minI64(w.combo, 20)
-        var s2 = "+" + w.gain.toString()
-        if mult > 1 {
-            s2 = s2 + "  (x" + mult.toString() + ")"
-        }
-        textCentered(c, c.w / 2, GAIN_Y - (rise as i64), s2, 3, 1.5 * f, 1.25 * f, 0.5 * f)
-    }
-
-    // streak broken
-    // Occupies the streak's own slot: the streak is necessarily zero here, so
-    // the two can never be on screen together.
-    if w.missFlash > 0.0 {
-        let f = w.missFlash
-        textCentered(c, c.w / 2, STREAK_Y + 4, "STREAK LOST", 5, 1.6 * f, 0.25 * f, 0.30 * f)
-        if w.bestCombo > 1 {
-            textCentered(c, c.w / 2, STREAK_Y + 52, "BEST x" + w.bestCombo.toString(), 2, 0.8 * f, 0.5 * f, 0.4 * f)
-        }
-    }
-
-    // Leaving the course. The corridor turn assist is silent by design, so this
-    // is the only thing telling the player why the aircraft is easing back —
-    // an input that fights you without explanation reads as a broken control.
-    if w.offCourse > 0.02 {
-        let k = w.offCourse
-        let pulse = 0.6 + 0.4 * Math.sin(w.time * 8.0)
-        let a = k * pulse
-        // red edge vignette, thickening as you go
-        let t2 = 3.0 + 26.0 * k
-        fillRect(c, 0.0, 0.0, c.w as f64, t2, 0.9 * a, 0.10 * a, 0.12 * a)
-        fillRect(c, 0.0, (c.h as f64) - t2, c.w as f64, c.h as f64, 0.9 * a, 0.10 * a, 0.12 * a)
-        fillRect(c, 0.0, 0.0, t2, c.h as f64, 0.9 * a, 0.10 * a, 0.12 * a)
-        fillRect(c, (c.w as f64) - t2, 0.0, c.w as f64, c.h as f64, 0.9 * a, 0.10 * a, 0.12 * a)
-        if k > 0.15 {
-            textCentered(c, c.w / 2, c.h / 2 - 150, "LEAVING THE COURSE", 3, 1.5 * a, 0.35 * a, 0.30 * a)
-            textCentered(c, c.w / 2, c.h / 2 - 118, "TURN BACK TO THE RINGS", 2, 0.9 * a, 0.4 * a, 0.35 * a)
-        }
-    }
-
-    // Where you are, and how far to the next place. The data credit is not on
-    // the HUD — ODbL wants attribution with the work, not burned into every
-    // frame, so it lives in --help and in cities/README.md.
+pub fn drawHud(c: &mut Canvas, w: &World, _s: &Scene, _fps: i64) {
+    // Deliberately almost empty. Score, altitude, speed, triangle count, the
+    // afterburner gauge, the streak and the control hints were all in service of
+    // a hoop course that no longer exists, and every one of them was a line of
+    // text over the thing the player came to look at. What is left answers the
+    // only two questions worth asking in flight: where am I, and what is that.
     if w.city.loaded {
-        text(c, 24, c.h - 58, w.city.name, 3, 0.75, 0.72, 0.55)
-        // What the course is flying at. Without this the tour is invisible —
-        // the aircraft passes the Golden Gate and nothing says that is what it
-        // was, which is most of the point of routing over it.
+        text(c, 24, c.h - 58, w.city.name, 3, 0.62, 0.60, 0.48)
         if w.markName != "" {
             let km = (w.markDist / 100.0) as i64
-            text(c, 24, c.h - 26, w.markName + "   " + ((km as f64) / 10.0).toString() + " KM", 2, 0.55, 0.62, 0.48)
-        } else {
-            let togo = "NEXT PLACE IN " + w.toNext.toString()
-            text(c, 24, c.h - 26, togo, 2, 0.32, 0.34, 0.38)
+            text(c, 24, c.h - 26, w.markName + "   " + ((km as f64) / 10.0).toString() + " KM", 2, 0.42, 0.48, 0.40)
         }
-    } else {
-        text(c, 24, c.h - 58, themeName(w.theme), 3, 0.75, 0.72, 0.55)
-        let rem = "NEXT REGION IN " + w.toNext.toString()
-        text(c, 24, c.h - 26, rem, 2, 0.32, 0.34, 0.38)
+        return
     }
-
-    // Telegraph: name the country you are about to enter, louder as it nears.
-    if w.toNext <= 3 && w.banner <= 0.0 && !w.city.loaded {
-        let next = themeName(nextTheme(w.theme))
-        let urgency = (4.0 - (w.toNext as f64)) / 3.0
-        let pulse = 0.55 + 0.45 * Math.sin(w.time * (4.0 + urgency * 6.0))
-        let k = (0.35 + urgency * 0.85) * pulse
-        textCentered(c, c.w / 2, TELEGRAPH_Y, "APPROACHING", 2, k * 0.8, k * 0.8, k * 0.6)
-        textCentered(c, c.w / 2, TELEGRAPH_Y + 26, next, 5, k * 1.5, k * 1.2, k * 0.4)
-    }
-
-    if w.banner > 0.0 {
-        var f = 1.0
-        if w.banner < 1.2 {
-            f = w.banner / 1.2
-        }
-        if w.level > 1 && !w.city.loaded {
-            // arriving somewhere new
-            textCentered(c, c.w / 2, 130, "ENTERING", 3, 0.7 * f, 0.7 * f, 0.55 * f)
-            textCentered(c, c.w / 2, 176, themeName(w.theme), 9, 1.4 * f, 1.15 * f, 0.45 * f)
-            textCentered(c, c.w / 2, 268, "REGION " + w.level.toString(), 2, 0.5 * f, 0.55 * f, 0.6 * f)
-        } else {
-            textCentered(c, c.w / 2, 150, "FLYBY", 9, 1.3 * f, 1.0 * f, 0.35 * f)
-            if w.city.loaded {
-                textCentered(c, c.w / 2, 240, w.city.name, 3, 0.6 * f, 0.7 * f, 0.8 * f)
-            } else {
-                textCentered(c, c.w / 2, 240, "FLY THROUGH THE RINGS", 2, 0.5 * f, 0.6 * f, 0.7 * f)
-            }
-        }
-    }
-    if w.hint > 0.0 {
-        var f = 1.0
-        if w.hint < 1.0 {
-            f = w.hint
-        }
-        if w.easy {
-            textCentered(c, c.w / 2, c.h - 130, "UP AND DOWN TO FLY THROUGH THE RINGS", 2, 0.45 * f, 0.5 * f, 0.6 * f)
-            textCentered(c, c.w / 2, c.h - 106, "THE PLANE STEERS ITSELF — YOU CANNOT CRASH", 2, 0.4 * f, 0.44 * f, 0.5 * f)
-        } else {
-            textCentered(c, c.w / 2, c.h - 130, "LEFT RIGHT TO BANK    UP DOWN TO PITCH", 2, 0.45 * f, 0.5 * f, 0.6 * f)
-            textCentered(c, c.w / 2, c.h - 106, "FOLLOW THE GREEN BRACKETS — YOU CANNOT CRASH", 2, 0.4 * f, 0.44 * f, 0.5 * f)
-        }
+    // Invented country still runs the hoop game, so it keeps its readouts.
+    text(c, 24, 22, "SCORE " + w.score.toString(), 3, 0.95, 0.80, 0.30)
+    text(c, 24, c.h - 58, themeName(w.theme), 3, 0.75, 0.72, 0.55)
+    text(c, 24, c.h - 26, "NEXT REGION IN " + w.toNext.toString(), 2, 0.32, 0.34, 0.38)
+    if w.combo > 0 {
+        textCentered(c, c.w / 2, STREAK_Y, "x" + w.combo.toString(), 4, 1.5, 1.1, 0.25)
     }
 }

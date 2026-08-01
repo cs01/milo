@@ -2,8 +2,8 @@ name: Release
 
 # Two kinds of run share this workflow:
 #   * push to main  — rebuilds the rolling `latest` release, nothing else
-#   * push of a v* tag — cuts an immutable versioned release, and only then publishes
-#     to npm and bumps the Homebrew tap
+#   * push of a v* tag — cuts an immutable versioned release, builds the .deb/.rpm,
+#     and bumps the Homebrew tap
 # Package managers need a URL whose bytes never change, which `latest` is not, so
 # everything downstream of GitHub Releases is gated on the tag.
 on:
@@ -156,7 +156,6 @@ jobs:
 
             ```sh
             brew install milo-language/tap/milo     # macOS / Linuxbrew
-            npm  install -g @milo-lang/cli          # anywhere with node
             ```
 
             Or grab a tarball below. macOS quarantines anything downloaded through a
@@ -182,7 +181,6 @@ jobs:
 
             ```sh
             brew install milo-language/tap/milo     # macOS / Linuxbrew
-            npm  install -g @milo-lang/cli          # anywhere with node
             ```
 
             Debian/Ubuntu and Fedora/RHEL packages are attached below
@@ -201,35 +199,6 @@ jobs:
             SHA256SUMS
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-  npm:
-    needs: [meta, release]
-    if: needs.meta.outputs.version != ''
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: oven-sh/setup-bun@v2
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          registry-url: https://registry.npmjs.org
-      - uses: actions/download-artifact@v4
-        with:
-          merge-multiple: true
-          path: artifacts
-      - run: bun scripts/build-npm.ts "${{ needs.meta.outputs.version }}" artifacts npm-dist
-      # Platform packages first: publishing the wrapper before its optional deps exist
-      # leaves a window where `npm i -g @milo-lang/cli` installs no binary at all.
-      - name: Publish
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-        run: |
-          set -euo pipefail
-          for d in npm-dist/*/; do
-            [ "$d" = npm-dist/cli/ ] && continue
-            npm publish "$d" --access public
-          done
-          npm publish npm-dist/cli --access public
 
   homebrew:
     needs: [meta, release]

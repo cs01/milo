@@ -89,12 +89,29 @@ the shot's length. It starts at the bearing you arrived on and eases in and out 
 your own camera over 1.6 s at each end — it used to cut to due north and cut back,
 which is two hard jumps in a shot whose whole job is to show you something.
 
+The arrival orbit also has to be able to SEE the landmark. A fixed height above
+the subject is only enough where the subject is the highest thing around — half
+the Grand Canyon tour is below the rim, and a circle 320 m over Indian Garden
+spends a third of its sweep inside the wall behind it. `orbitHeight` raises the
+camera until it is above its own ground and until the straight line to the subject
+clears everything between; because it only ever raises, one forward pass along the
+line is enough. Height alone then turns the shot into a top-down map, so the
+circle also widens until the depression angle is back under about 40 degrees.
+
 Opening a place runs the same machinery in reverse: the camera starts a kilometre
 up and two kilometres out, sweeps three quarters of a turn around the parked
 aircraft and descends into the chase pose, arriving on it exactly rather than
 cutting. It is held inside the terrain draw distance and pushes the haze out to
 the far plane while it runs — a survey from three kilometres up is a white screen,
 because every fog preset finishes at 1.7 km. Any stick input skips it.
+
+With no place named on the command line, the game opens on a start screen listing
+the five regions with one line each. It lives in `menu.milo` and runs its own
+loop rather than becoming a mode inside the flight loop: the flight loop's job is
+to step a simulation sixty times a second, and there is no simulation yet — the
+place has not been decoded, which is the whole point of asking first. `drawMenu`
+takes a Canvas and nothing else, so the headless capture tool renders the screen
+exactly as the game does.
 
 Over the invented world it is still hoops. Rings never spawn inside a building and
 the plane never flies through one: the same "you cannot crash" push that lifts you

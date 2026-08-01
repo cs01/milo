@@ -13,6 +13,7 @@
 // You cannot crash. The ground pushes you up if you dive into it.
 
 from "./sdl" import {
+    Input,
     SDL_Init, SDL_CreateWindow, SDL_CreateRenderer, SDL_CreateTexture,
     SDL_UpdateTexture, SDL_RenderClear, SDL_RenderCopy, SDL_RenderPresent,
     SDL_ShowCursor, SDL_GetTicks, SDL_DestroyTexture, SDL_DestroyRenderer,
@@ -23,7 +24,7 @@ from "./sdl" import {
     inputNew, pollInput
 }
 from "./gfx" import {
-    canvasNew, present
+    Canvas, canvasNew, canvasFill, present, text, textCentered, fillRect, thickLine
 }
 from "./gfx3d" import {
     sceneNew, viewOf
@@ -41,8 +42,14 @@ from "./world3d" import {
 from "./city" import {
     City, cityLoad, cityParse, cityEmpty, cityAttachOrtho
 }
+from "std/math" import {
+    Math
+}
 from "std/argparse" import {
     ArgParser, ParsedArgs
+}
+from "./menu" import {
+    PLACE_COUNT, placeTitle, chooseRegion
 }
 from "./render3d" import {
     drawWorld, drawHud, drawGuide, drawMarkGuide, drawMarkBeam, drawSpeedLines,
@@ -70,6 +77,9 @@ controls:
 
 Up dives and down climbs, the way a stick works; --natural flips it.
 
+Launched with no --place, --city or --procedural, FLYBY opens on a start screen
+that asks where to fly; naming a place on the command line skips it.
+
 Every place has five landmarks, listed down the right of the screen. A blue
 column of light stands on the one you are looking for; fly over it at any
 height and it is yours, timed and ticked off. Find all five and the next region
@@ -93,11 +103,6 @@ fn parseOpts(): ParsedArgs {
 }
 
 pub let PLACES: string = "sf manhattan yosemite canyon honolulu"
-
-// One number for the size of the lineup. It used to be a literal 4 in three
-// places — a modulo, a loop bound and a wrap — and adding a fifth place meant
-// finding all three.
-pub let PLACE_COUNT: i64 = 5
 
 // Every place is an @embedFile of the same bytes `--city` would read off disk,
 // so the decoder cannot tell the difference. They cost about 3 MB of binary
@@ -136,26 +141,6 @@ fn placeName(i: i64): string {
         return "honolulu"
     }
     return "sf"
-}
-
-// The display name the asset carries, which is what marksFor keys off and what
-// the checklist prints for the region you have not reached yet. It is not
-// derivable from the slug — "yosemite" is "Yosemite Valley" — and reading it out
-// of the asset would mean decoding a place just to name it.
-fn placeTitle(i: i64): string {
-    if i == 1 {
-        return "MANHATTAN"
-    }
-    if i == 2 {
-        return "YOSEMITE VALLEY"
-    }
-    if i == 3 {
-        return "GRAND CANYON"
-    }
-    if i == 4 {
-        return "HONOLULU"
-    }
-    return "SAN FRANCISCO"
 }
 
 fn placeIndex(name: &string): i64 {
@@ -269,7 +254,7 @@ fn startIndex(o: &ParsedArgs): i64 {
 // Exactly one place is decoded at a time. Preloading all four held ~290 MB of
 // parsed footprints and imagery and got the process killed by the run guard;
 // decoding on the key press costs a beat and nothing else.
-fn placesFor(o: &ParsedArgs): Vec<City> {
+fn placesFor(o: &ParsedArgs, idx: i64): Vec<City> {
     var v: Vec<City> = Vec.new()
     if o.getBool("procedural") {
         v.push(cityEmpty())
@@ -280,7 +265,6 @@ fn placesFor(o: &ParsedArgs): Vec<City> {
         v.push(loadFile(path))
         return v
     }
-    let idx = startIndex(o)
     if idx < 0 {
         v.push(cityEmpty())
         return v
@@ -292,7 +276,6 @@ fn placesFor(o: &ParsedArgs): Vec<City> {
 pub fn main(): i32 {
     let o = parseOpts()
     var placeIdx = startIndex(o)
-    var places = placesFor(o)
     let easy = !o.getBool("pro")
     let invert = !o.getBool("natural")
     if SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO) != 0 {
@@ -319,6 +302,24 @@ pub fn main(): i32 {
     }
 
     var c = canvasNew(W, H)
+    var inp = inputNew(invert)
+    var ev: [u8; 64] = [0; 64]
+    // Ask before decoding anything. A place costs a beat to parse and drape, and
+    // spending it on San Francisco to then be asked which place you wanted is the
+    // wrong order — `--place`, `--city` and `--procedural` all say the answer
+    // already, so the screen only appears when nothing has.
+    if placeIdx >= 0 && o.getString("place") == "" {
+        let pick = chooseRegion(ren, tex, c, inp, ev, placeIdx)
+        if pick < 0 {
+            SDL_DestroyTexture(tex)
+            SDL_DestroyRenderer(ren)
+            SDL_DestroyWindow(win)
+            SDL_Quit()
+            return 0
+        }
+        placeIdx = pick
+    }
+    var places = placesFor(o, placeIdx)
     var s = sceneNew(W, H)
     var w = worldIn(SEED, places, easy)
     if placeIdx >= 0 {
@@ -328,8 +329,6 @@ pub fn main(): i32 {
     let skinTex = planeTexture()
     let facadeTex = facadeTexture()
     var snd = soundNew()
-    var inp = inputNew(invert)
-    var ev: [u8; 64] = [0; 64]
     var last = SDL_GetTicks()
     var fpsAccum: f64 = 0.0
     var fpsFrames: i64 = 0

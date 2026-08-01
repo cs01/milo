@@ -1,0 +1,128 @@
+// FLYBY — the lineup of places, and the screen that asks which one to open on.
+//
+// Split out of main.milo so the start screen can be drawn without an SDL window:
+// `drawMenu` takes a Canvas and nothing else, which is what makes it capturable
+// by the headless shot tool.
+
+from "std/math" import {
+    Math
+}
+from "./gfx" import {
+    Canvas, canvasFill, present, text, textCentered, fillRect, thickLine
+}
+from "./sdl" import {
+    Input, pollInput,
+    SDL_UpdateTexture, SDL_RenderClear, SDL_RenderCopy, SDL_RenderPresent
+}
+
+// One number for the size of the lineup. It used to be a literal 4 in three
+// places — a modulo, a loop bound and a wrap — and adding a fifth place meant
+// finding all three.
+pub let PLACE_COUNT: i64 = 5
+
+// The display name the asset carries, which is what marksFor keys off and what
+// the checklist prints for the region you have not reached yet. It is not
+// derivable from the slug — "yosemite" is "Yosemite Valley" — and reading it out
+// of the asset would mean decoding a place just to name it.
+pub fn placeTitle(i: i64): string {
+    if i == 1 {
+        return "MANHATTAN"
+    }
+    if i == 2 {
+        return "YOSEMITE VALLEY"
+    }
+    if i == 3 {
+        return "GRAND CANYON"
+    }
+    if i == 4 {
+        return "HONOLULU"
+    }
+    return "SAN FRANCISCO"
+}
+
+// One line per place on the start screen. Short enough to read at a glance and
+// specific enough to choose on — "a skyline with a volcano behind it" is a
+// reason to pick Honolulu; "a city in Hawaii" is not.
+pub fn placeBlurb(i: i64): string {
+    if i == 1 {
+        return "THE DENSEST SKYLINE THERE IS"
+    }
+    if i == 2 {
+        return "EL CAPITAN, HALF DOME, GRANITE"
+    }
+    if i == 3 {
+        return "NO BUILDINGS AT ALL, JUST THE ROCK"
+    }
+    if i == 4 {
+        return "A SKYLINE WITH A VOLCANO BEHIND IT"
+    }
+    return "THE GOLDEN GATE, THE BAY, DOWNTOWN"
+}
+
+// The start screen. Returns the place to open on, or -1 if the player quit
+// before choosing.
+//
+// It runs its own loop rather than becoming a mode inside the flight loop: the
+// flight loop's job is to step a simulation sixty times a second and there is no
+// simulation yet — the place has not been decoded, which is the whole point of
+// asking first.
+pub fn chooseRegion(ren: *u8, tex: *u8, c: &mut Canvas, inp: &mut Input, ev: &mut [u8; 64], start: i64): i64 {
+    var sel = start
+    if sel < 0 {
+        sel = 0
+    }
+    var t: f64 = 0.0
+    // Held down from the moment the window opened, ENTER would pick San
+    // Francisco before the screen was ever drawn.
+    var armed = false
+    while true {
+        pollInput(inp, ev)
+        if inp.quit {
+            return 0 - 1
+        }
+        if inp.menuStep != 0 {
+            sel = (sel + inp.menuStep + PLACE_COUNT) % PLACE_COUNT
+        }
+        if inp.placeStep != 0 && armed {
+            return sel
+        }
+        armed = true
+        t = t + 1.0 / 60.0
+
+        drawMenu(c, sel, t)
+        present(c, 0.35, 1.0)
+        unsafe {
+            SDL_UpdateTexture(tex, 0 as *u8, c.fb[0].addrOf() as *u8, (c.w * 4) as i32)
+            SDL_RenderClear(ren)
+            SDL_RenderCopy(ren, tex, 0 as *u8, 0 as *u8)
+            SDL_RenderPresent(ren)
+        }
+    }
+    return sel
+}
+
+// One frame of the start screen. Pure drawing — no SDL, no input, no loop — so
+// the headless capture tool can render it exactly as the game does.
+pub fn drawMenu(c: &mut Canvas, sel: i64, t: f64) {
+    canvasFill(c, 0.014, 0.020, 0.038)
+    textCentered(c, c.w / 2, 74, "FLYBY", 9, 1.30, 1.55, 2.40)
+    textCentered(c, c.w / 2, 178, "CHOOSE WHERE TO FLY", 2, 0.42, 0.50, 0.62)
+    let x0 = c.w / 2 - 300
+    for i in 0..PLACE_COUNT {
+        let y = 226 + 74 * i
+        let name = placeTitle(i)
+        if i == sel {
+            let pulse = 0.80 + 0.20 * Math.sin(t * 4.0)
+            // The bar is the selection, so it is drawn as light rather than
+            // as a darkened panel — the screen behind it is already black.
+            fillRect(c, (x0 - 26) as f64, (y - 14) as f64, (x0 + 626) as f64, (y + 54) as f64, 0.04 * pulse, 0.09 * pulse, 0.19 * pulse)
+            thickLine(c, (x0 - 12) as f64, y as f64, (x0 - 12) as f64, (y + 26) as f64, 3.0, 0.40 * pulse, 0.90 * pulse, 1.80 * pulse)
+            text(c, x0 + 8, y, name, 3, 0.70 * pulse, 1.45 * pulse, 2.40 * pulse)
+            text(c, x0 + 8, y + 32, placeBlurb(i), 2, 0.48, 0.56, 0.70)
+        } else {
+            text(c, x0 + 8, y, name, 3, 0.30, 0.33, 0.40)
+        }
+    }
+    textCentered(c, c.w / 2, c.h - 92, "UP / DOWN  CHOOSE      ENTER  FLY", 2, 0.34, 0.38, 0.46)
+    textCentered(c, c.w / 2, c.h - 56, "FIVE LANDMARKS EACH. FLY OVER THE BLUE BEAM.", 2, 0.24, 0.27, 0.33)
+}

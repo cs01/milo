@@ -277,6 +277,18 @@ pub fn line(c: &mut Canvas, x0i: f64, y0i: f64, x1i: f64, y1i: f64, r: f64, g: f
     }
 }
 
+// Set every pixel, rather than adding to what was there. fillRect and the sprite
+// drawers are additive because the canvas is HDR and everything in flight is a
+// light; a menu is the one screen that needs a floor to draw on.
+pub fn canvasFill(c: &mut Canvas, r: f64, g: f64, b: f64) {
+    let n = c.w * c.h
+    for i in 0..n {
+        c.hdr[i * 3] = r as f32
+        c.hdr[i * 3 + 1] = g as f32
+        c.hdr[i * 3 + 2] = b as f32
+    }
+}
+
 // A stroke with weight. The canvas is HDR and additive, so drawing the same
 // line twice over itself makes it brighter, not thicker — a bold marker has to
 // be several strokes laid side by side along the normal.

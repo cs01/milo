@@ -1988,6 +1988,13 @@ pub fn drawMarkGuide(c: &mut Canvas, w: &World, v: &View) {
         // vertical component of a point behind you points the wrong way.
         dirY = 0.0
         dirX = p.x
+        // Directly behind, p.x is ~0 and the normalise below turns that into no
+        // direction at all: a zero-size chevron at the centre of the screen with
+        // the label floating beside it and nothing to attach it to. Turning
+        // either way is a correct answer to "it is behind you", so pick one.
+        if Math.abs(dirX) < 1.0 {
+            dirX = 1.0
+        }
     }
     let l = Math.sqrt(dirX * dirX + dirY * dirY) + 0.001
     dirX = dirX / l
@@ -1999,18 +2006,30 @@ pub fn drawMarkGuide(c: &mut Canvas, w: &World, v: &View) {
     let ny = dirX
     // A solid chevron, twice the size it was. This is the only thing on screen
     // telling a lost player which way to turn, so it is drawn like it matters:
-    // filled by nested strokes, with a tail running back toward the centre.
+    // filled by nested strokes.
     let tip = 46.0
-    let halfW = 26.0
+    let wing = 26.0
     for i in 0..7 {
         let s = 1.0 - (i as f64) * 0.13
-        thickLine(c, ax + dirX * tip * s, ay + dirY * tip * s, ax + nx * halfW * s, ay + ny * halfW * s, 3.0, cr, cg, cb)
-        thickLine(c, ax + dirX * tip * s, ay + dirY * tip * s, ax - nx * halfW * s, ay - ny * halfW * s, 3.0, cr, cg, cb)
+        thickLine(c, ax + dirX * tip * s, ay + dirY * tip * s, ax + nx * wing * s, ay + ny * wing * s, 3.0, cr, cg, cb)
+        thickLine(c, ax + dirX * tip * s, ay + dirY * tip * s, ax - nx * wing * s, ay - ny * wing * s, 3.0, cr, cg, cb)
     }
-    thickLine(c, ax - nx * halfW, ay - ny * halfW, ax + nx * halfW, ay + ny * halfW, 3.0, cr * 0.8, cg * 0.8, cb * 0.8)
-    thickLine(c, ax - dirX * 34.0, ay - dirY * 34.0, ax, ay, 2.0, cr * 0.5, cg * 0.5, cb * 0.5)
-    textCentered(c, (ax - dirX * 62.0) as i64, (ay - dirY * 62.0 - 8.0) as i64, w.markName, 3, cr, cg, cb)
-    textCentered(c, (ax - dirX * 62.0) as i64, (ay - dirY * 62.0 + 20.0) as i64, range, 2, cr * 0.8, cg * 0.8, cb * 0.8)
+    thickLine(c, ax - nx * wing, ay - ny * wing, ax + nx * wing, ay + ny * wing, 3.0, cr * 0.8, cg * 0.8, cb * 0.8)
+    // The label sits BEHIND the chevron, and how far behind depends on which way
+    // the chevron points. Text only ever grows sideways, so an arrow pointing
+    // left or right has to be cleared by half a name — a fixed offset put
+    // "GOLDEN GATE BRIDGE" straight through it. There was also a tail line
+    // running back toward the centre, which crossed the label whatever the
+    // offset; the chevron reads fine without it.
+    let half = (textWidth(w.markName, 3) / 2) as f64
+    let back = 52.0 + Math.abs(dirX) * (half + 26.0) + Math.abs(dirY) * 22.0
+    var lx = ax - dirX * back
+    var ly = ay - dirY * back
+    // Clamped so a name near the edge of the ring is never half off screen.
+    lx = Math.clampF64(lx, half + 14.0, (c.w as f64) - half - 14.0)
+    ly = Math.clampF64(ly, 30.0, (c.h as f64) - 54.0)
+    textCentered(c, lx as i64, (ly - 12.0) as i64, w.markName, 3, cr, cg, cb)
+    textCentered(c, lx as i64, (ly + 16.0) as i64, range, 2, cr * 0.8, cg * 0.8, cb * 0.8)
 }
 
 // Speed lines: short streaks flying outward from the centre of the screen. The
@@ -2073,9 +2092,13 @@ pub fn drawChecklist(c: &mut Canvas, w: &World) {
     }
     let x0 = c.w - PANEL_W - 18
     let rowH = 34
-    let top = 74
-    let h = 58 + rowH * w.marks.len + 54
-    shadeRect(c, x0 as f64, (top - 34) as f64, (x0 + PANEL_W) as f64, ((top - 34) + h) as f64, 0.34)
+    let top = 110
+    let h = 94 + rowH * w.marks.len + 54
+    shadeRect(c, x0 as f64, (top - 70) as f64, (x0 + PANEL_W) as f64, ((top - 70) + h) as f64, 0.34)
+    // Where you are, over what you are looking for. It used to sit in the far
+    // bottom-left corner, which is the one part of the screen nothing else uses
+    // and therefore the one part nobody looks at.
+    text(c, x0 + 16, top - 58, w.city.name, 3, 0.86, 0.82, 0.66)
     text(c, x0 + 16, top - 22, "LANDMARKS", 2, 0.50, 0.62, 0.80)
     text(c, c.w - 92, top - 22, w.markFound.toString() + " / " + w.marks.len.toString(), 2, 0.50, 0.62, 0.80)
     for i in 0..w.marks.len {
@@ -2154,7 +2177,13 @@ pub fn drawFound(c: &mut Canvas, w: &World) {
     if k <= 0.01 {
         return
     }
-    let cx = c.w / 2
+    // Centred in the space the checklist leaves, not on the screen. A fact line
+    // is up to ~690 px wide at this scale, so a screen-centred plate runs under
+    // the panel and the last three words of every fact are unreadable.
+    var cx = c.w / 2
+    if w.marks.len > 0 {
+        cx = (c.w - PANEL_W - 38) / 2
+    }
     if w.regionDone {
         cardBack(c, cx, 150, 330, textWidth(w.city.name, 5), k)
         textCentered(c, cx, 176, w.city.name, 5, 2.2 * k, 1.85 * k, 0.70 * k)
@@ -2181,10 +2210,9 @@ pub fn drawHud(c: &mut Canvas, w: &World, _s: &Scene, _fps: i64) {
     // text over the thing the player came to look at. What is left answers the
     // only two questions worth asking in flight: where am I, and what is that.
     if w.city.loaded {
-        text(c, 24, c.h - 58, w.city.name, 3, 0.62, 0.60, 0.48)
-        // The name and the range moved onto the marker itself, where the player
-        // is already looking. Two copies of the same two facts, one of them in
-        // the far corner, is a HUD growing back.
+        // The place name moved to the top of the checklist and the landmark's
+        // name and range onto the marker itself, where the player is already
+        // looking. What is left down here is the two keys that are not obvious.
         text(c, 24, c.h - 26, "ENTER  ELSEWHERE      M  MUSIC", 2, 0.26, 0.28, 0.32)
         return
     }

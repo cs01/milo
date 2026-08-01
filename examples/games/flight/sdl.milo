@@ -100,6 +100,11 @@ pub struct Input {
     // reaches for them to steer and got the whole world swapped instead.
     placeStep: i64,
     placeHeld: bool,
+    // Menu navigation: the pitch axis read as discrete steps, edge-triggered,
+    // and BEFORE --natural flips it. A menu cursor that runs the wrong way
+    // because of a flight-control preference is a bug nobody would guess at.
+    menuStep: i64,
+    menuHeld: bool,
     // Stick, not camera: the key you press is where you push the nose, so UP
     // dives and DOWN climbs. This is how every flight sim maps a stick and it
     // is the default here; `--natural` flips it back to UP-climbs.
@@ -110,6 +115,7 @@ pub fn inputNew(invert: bool): Input {
     return Input {
         moveX: 0.0, moveY: 0.0, boost: false, quit: false, mute: false, muteHeld: false,
         placeStep: 0, placeHeld: false,
+        menuStep: 0, menuHeld: false,
         invert: invert,
     }
 }
@@ -121,6 +127,7 @@ pub fn pollInput(inp: &mut Input, ev: &mut [u8; 64]) {
     inp.boost = false
     inp.mute = false
     inp.placeStep = 0
+    inp.menuStep = 0
 
     unsafe {
         while SDL_PollEvent(ev) != 0 {
@@ -166,6 +173,17 @@ pub fn pollInput(inp: &mut Input, ev: &mut [u8; 64]) {
         if ks[SC_DOWN] != 0 {
             inp.moveY = inp.moveY - 1.0
         }
+        var raw = 0
+        if ks[SC_UP] != 0 || ks[SC_W] != 0 {
+            raw = 0 - 1
+        }
+        if ks[SC_DOWN] != 0 || ks[SC_S] != 0 {
+            raw = 1
+        }
+        if raw != 0 && !inp.menuHeld {
+            inp.menuStep = raw
+        }
+        inp.menuHeld = raw != 0
         if inp.invert {
             inp.moveY = 0.0 - inp.moveY
         }

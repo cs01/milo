@@ -944,14 +944,59 @@ fn corridor(w: &mut World, dt: f64) {
 // fixed pose and cutting straight back was two jumps in seven seconds, and both
 // of them landed on a frame where nothing else had moved — which is exactly when
 // a cut is most obvious.
+// How high the orbit camera has to fly at (ox, oz) to see the subject at all.
+//
+// A fixed height above the SUBJECT is only enough where the subject is the
+// highest thing around. Half the Grand Canyon tour is below the rim, so a circle
+// 320 m over Plateau Point spends a third of its sweep inside the wall behind it
+// and the shot cuts to brown rock. Two constraints, both cheap:
+//   - stay above whatever is under the camera itself
+//   - keep the straight line to the subject clear of everything in between
+//
+// Only ever raises, so one forward pass is enough: lifting the camera for a
+// sample near the subject cannot re-block a sample further out.
+fn orbitHeight(w: &World, ox: f64, oz: f64, mx: f64, mz: f64, ly: f64): f64 {
+    var oy = ly + 320.0
+    let under = solidAt(w.city, ox, oz, 40.0) + 150.0
+    if under > oy {
+        oy = under
+    }
+    let STEPS = 14
+    for i in 1..STEPS {
+        let t = (i as f64) / (STEPS as f64)
+        let sx = ox + (mx - ox) * t
+        let sz = oz + (mz - oz) * t
+        let need = solidAt(w.city, sx, sz, 40.0) + 70.0
+        // Height of the sight line at t, given the camera at oy and the subject
+        // at ly. Solve oy(1-t) + ly*t = need for the oy that just clears it.
+        if need > oy + (ly - oy) * t {
+            oy = (need - ly * t) / (1.0 - t)
+        }
+    }
+    // A landmark at the bottom of a mile-deep hole would otherwise put the
+    // camera in orbit. Past this the shot is better off clipping than tiny.
+    return Math.minF64(oy, ly + 2200.0)
+}
+
 fn orbitCamera(w: &mut World) {
     let mx = w.marks[w.showIdx].x
     let mz = w.marks[w.showIdx].z
     let ly = solidAt(w.city, mx, mz, 60.0) + 80.0
-    let RAD = 640.0
-    let ox = mx + Math.sin(w.showAngle) * RAD
-    let oz = mz + Math.cos(w.showAngle) * RAD
-    let oy = ly + 320.0
+    var rad = 640.0
+    var ox = mx + Math.sin(w.showAngle) * rad
+    var oz = mz + Math.cos(w.showAngle) * rad
+    var oy = orbitHeight(w, ox, oz, mx, mz, ly)
+    // Clearing the wall is only half the job. Indian Garden sits 900 m below the
+    // rim, so the height that gets a sight line at 640 m out is a near-vertical
+    // look-down — the shot stops being blocked and becomes a map. Widen the
+    // circle until the depression angle is back under about 40 degrees.
+    let SLOPE = 0.84
+    if oy - ly > rad * SLOPE {
+        rad = Math.minF64((oy - ly) / SLOPE, 2400.0)
+        ox = mx + Math.sin(w.showAngle) * rad
+        oz = mz + Math.cos(w.showAngle) * rad
+        oy = orbitHeight(w, ox, oz, mx, mz, ly)
+    }
     let oyaw = Math.atan2(mx - ox, mz - oz)
     let horiz = Math.sqrt((mx - ox) * (mx - ox) + (mz - oz) * (mz - oz))
     let opitch = 0.0 - Math.atan2(oy - ly, horiz)

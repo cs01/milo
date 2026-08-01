@@ -1,0 +1,45 @@
+// The positive half of tests/errors/closureStoredInStruct.milo: `move` heap-owns the
+// captures, so a closure stored in a struct or a Vec may outlive the frame it was written
+// in. A capture-free closure needs no `move` — there is nothing to dangle.
+// @expect: 6
+// @expect: 7
+// @expect: 20
+
+struct Holder {
+    f: (i64) => i64,
+}
+
+pub fn makeHolder(): Holder {
+    let n = 5
+    return Holder {
+        f: move(x: i64) => x + n
+    }
+}
+
+pub fn makeVec(): Vec < (i64) => i64 > {
+    let n = 6
+    var v: Vec < (i64) => i64 > = Vec.new()
+    v.push(move(x: i64) => x + n)
+    return v
+}
+
+pub fn makeFree(): Holder {
+    return Holder {
+        f: (x: i64) => x * 2
+    }
+}
+
+pub fn main(): i32 {
+    let h = makeHolder()
+    let g = h.f
+    print(g(1))
+
+    let v = makeVec()
+    let g2 = v[0]
+    print(g2(1))
+
+    let free = makeFree()
+    let g3 = free.f
+    print(g3(10))
+    return 0
+}

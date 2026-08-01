@@ -1,0 +1,26 @@
+// A closure without `move` captures by reference, so it is only valid while the frame
+// owning the capture is alive. Returning one directly is fine (the checker promotes it
+// to `move`), but hiding it inside a struct escaped by a side door the return check
+// never saw: the struct is what leaves, and the closure rode along pointing at the dead
+// frame. It read garbage at -O0 and hung at -O2, with ASAN silent because the capture
+// lives on the stack. The store is rejected instead — `move` is the way to say you want
+// the closure to own `n` (tests/fixtures/closureStoredMove.milo).
+// @error: cannot store a closure that captures 'n' by reference
+
+struct Holder {
+    f: (i64) => i64,
+}
+
+pub fn make(): Holder {
+    let n = 5
+    return Holder {
+        f: (x: i64) => x + n
+    }
+}
+
+pub fn main(): i32 {
+    let h = make()
+    let g = h.f
+    print(g(1))
+    return 0
+}

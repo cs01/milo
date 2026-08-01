@@ -20,6 +20,12 @@ from "std/fs" import {
 from "std/math" import {
     Math
 }
+from "std/png" import {
+    Png
+}
+from "./gfx3d" import {
+    Texture, texNew
+}
 
 pub let COVER_URBAN: u8 = 0 as u8
 
@@ -74,6 +80,12 @@ pub struct City {
     // Half-extent of the mapped area. Beyond this the ground fades to open sea,
     // which is the only honest thing to draw: there is no data out there.
     reach: f64,
+
+    // Aerial photograph of exactly this bbox, draped over the terrain. Optional:
+    // without it the ground falls back to the land-cover palette, which is four
+    // flat colours and reads as a diorama however good the heightmap is.
+    ortho: Texture,
+    orthoLoaded: bool,
 }
 
 pub fn cityEmpty(): City {
@@ -109,7 +121,72 @@ pub fn cityEmpty(): City {
         cellStart: Vec.new(),
         cellItems: Vec.new(),
         reach: 0.0,
+        ortho: texNew(1, 0),
+        orthoLoaded: false,
     }
+}
+
+// sRGB byte -> linear, as a 256-entry table. The canvas is linear HDR and the
+// photograph is gamma-encoded; skipping this leaves the whole drape milky,
+// because the midtones sit about 20% too bright in linear light. A table
+// because the alternative is twelve million pow() calls at startup.
+fn srgbTable(): Vec<f32> {
+    var t: Vec<f32> = Vec.filled(256, 0.0)
+    for i in 0..256 {
+        let c = (i as f64) / 255.0
+        var lin = c / 12.92
+        if c > 0.04045 {
+            lin = Math.pow((c + 0.055) / 1.055, 2.4)
+        }
+        t[i] = lin as f32
+    }
+    return t
+}
+
+// log2 of a power of two, or -1. The Texture sampler indexes rows by shifting,
+// so a non-power-of-two drape cannot be addressed at all.
+fn shiftOf(n: i64): i64 {
+    var k = 0
+    var v = 1
+    while v < n {
+        v = v * 2
+        k = k + 1
+    }
+    if v != n {
+        return 0 - 1
+    }
+    return k
+}
+
+// Decode an aerial photograph and hang it on the city as a mirrored texture.
+// Mirrored because the map reflects at its edge (world3d.foldIn) — the imagery
+// has to fold on the same period as the terrain or they disagree at the seam.
+pub fn cityAttachOrtho(c: &mut City, png: &string): Result<i64, string> {
+    let img = Png.decode(png)?
+    if img.width != img.height {
+        return Result.Err($"ortho must be square, got {img.width}x{img.height}")
+    }
+    let shift = shiftOf(img.width)
+    if shift < 0 {
+        return Result.Err($"ortho side must be a power of two, got {img.width}")
+    }
+    let n = img.width
+    var t = texNew(n, shift)
+    t.mirror = true
+    let lut = srgbTable()
+    let ch = img.channels
+    for y in 0..n {
+        for x in 0..n {
+            let src = (y * n + x) * ch
+            let dst = (y * n + x) * 3
+            t.px[dst] = lut[img.pixels[src] as i64]
+            t.px[dst + 1] = lut[img.pixels[src + 1] as i64]
+            t.px[dst + 2] = lut[img.pixels[src + 2] as i64]
+        }
+    }
+    c.ortho = t
+    c.orthoLoaded = true
+    return Result.Ok(n)
 }
 
 // ---------------------------------------------------------------- byte codec
@@ -147,7 +224,30 @@ pub fn cityLoad(path: &string): Result<City, string> {
     let Result.Ok(src) = readFile(path) else {
         return Result.Err("cannot read " + path)
     }
-    return cityParse(src)
+    var c = cityParse(src)?
+    // An aerial photograph sitting beside the asset, if someone built one. Its
+    // absence is not an error — the palette path is still there — so a failure
+    // to read is silence rather than a message about a file nobody asked for.
+    match readFile(orthoPathFor(path)) {
+        Result.Ok(png) => {
+            let _ = cityAttachOrtho(c, png)
+        }
+        Result.Err(_) => {
+        }
+    }
+    return Result.Ok(c)
+}
+
+fn orthoPathFor(path: &string): string {
+    var n = path.len
+    if path.endsWith(".city") {
+        n = n - 5
+    }
+    var base = ""
+    for i in 0..n {
+        base.push(path[i])
+    }
+    return base + ".ortho.png"
 }
 
 // True when `n` bytes are actually there. Every length in the file is read FROM

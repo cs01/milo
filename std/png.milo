@@ -70,10 +70,28 @@ fn decodePng(src: &string): Result<PngImage, string> {
         let t2 = src[pos + 6]
         let t3 = src[pos + 7]
         let dataStart = pos + 8
+        // The loop condition only proves the 8-byte header is present. `clen`
+        // comes off the wire, so the chunk body it claims has to be checked
+        // against what is actually here — a file truncated mid-IDAT otherwise
+        // ran the copy below straight off the end of `src`, which is a bounds
+        // abort, not the Result.Err this function's type promises.
+        if dataStart + clen > src.len {
+            return Result.Err("png: truncated chunk")
+        }
 
         if t0 == 'I' && t1 == 'H' && t2 == 'D' && t3 == 'R' {
+            if clen < 13 {
+                return Result.Err("png: short IHDR")
+            }
             width = be32(src, dataStart)
             height = be32(src, dataStart + 4)
+            // Bounded before they reach the stride arithmetic below: width and
+            // height are attacker-chosen 32-bit values, and `height * (stride +
+            // 1)` on two of them overflows i64, which traps rather than
+            // returning an error.
+            if width <= 0 || height <= 0 || width > 65535 || height > 65535 {
+                return Result.Err($"png: implausible dimensions {width}x{height}")
+            }
             let bitDepth = src[dataStart + 8] as i64
             let colorType = src[dataStart + 9] as i64
             let interlace = src[dataStart + 12] as i64

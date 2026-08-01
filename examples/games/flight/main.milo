@@ -39,7 +39,7 @@ from "./world3d" import {
     worldIn, worldUpdate, SEED
 }
 from "./city" import {
-    City, cityLoad, cityParse, cityEmpty
+    City, cityLoad, cityParse, cityEmpty, cityAttachOrtho
 }
 from "std/argparse" import {
     ArgParser, ParsedArgs
@@ -130,10 +130,31 @@ fn placeIndex(name: &string): i64 {
     return 0 - 1
 }
 
+// The aerial photograph for a built-in place, or "" if it has none yet. Same
+// @embedFile story as the .city itself — resolved at compile time, so every arm
+// is in the binary whichever this returns.
+fn orthoBytes(name: &string): string {
+    if name == "sf" {
+        return @embedFile("cities/sf.ortho.png")
+    }
+    return ""
+}
+
 fn parsePlace(name: &string): City {
     match cityParse(placeBytes(name)) {
         Result.Ok(city) => {
-            return city
+            var c = city
+            let png = orthoBytes(name)
+            if png != "" {
+                match cityAttachOrtho(c, png) {
+                    Result.Ok(_) => {
+                    }
+                    Result.Err(e) => {
+                        print("built-in place '" + name + "' has a bad ortho: " + e)
+                    }
+                }
+            }
+            return c
         }
         Result.Err(e) => {
             print("built-in place '" + name + "' is corrupt: " + e)
@@ -183,7 +204,10 @@ fn placesFor(o: &ParsedArgs): Vec<City> {
     }
     let want = o.getString("place")
     if want == "" {
-        return allPlaces(epochMillis() / 1000 % 4)
+        // Start on the place that has an aerial photograph, so the first thing
+        // anyone sees on a bare `milo run` is the drape rather than the palette.
+        // The rotation still carries the other three in behind it.
+        return allPlaces(placeIndex("sf"))
     }
     let idx = placeIndex(want)
     if idx < 0 {

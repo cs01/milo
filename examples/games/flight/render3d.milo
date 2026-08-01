@@ -721,6 +721,38 @@ pub fn drawWorld(c: &mut Canvas, s: &mut Scene, w: &World, ground: &Texture, ski
                     texFade = 0.0
                 }
             }
+            if w.city.orthoLoaded {
+                // The photograph IS the ground colour, so the vertex carries
+                // white and the texel supplies the albedo whole — the palette in
+                // `cornerAt` is bypassed rather than multiplied, or the picture
+                // comes out tinted by the guess it replaces.
+                //
+                // UV runs 0..1 across the mapped span; outside it the sampler's
+                // mirrored addressing folds on the same period as the terrain.
+                let os = 1.0 / (w.city.reach * 2.0)
+                let ou0 = (x0 + w.city.reach) * os
+                let ov0 = (z0 + w.city.reach) * os
+                let ou1 = (x1 + w.city.reach) * os
+                let ov1 = (z1 + w.city.reach) * os
+                // Mostly flat light. An aerial photograph already contains the
+                // sun that lit it, shadows included; a second Lambert term on
+                // top shades everything twice and the hills go to mud. A little
+                // is kept so relief still reads.
+                let la = 0.72 + 0.28 * k00.lt
+                let lb = 0.72 + 0.28 * k10.lt
+                let ld = 0.72 + 0.28 * k01.lt
+                let le = 0.72 + 0.28 * k11.lt
+                let oa = vtxC(x0, k00.h, z0, ou0, ov0, la, 1.0, 1.0, 1.0, 1.0)
+                let ob = vtxC(x1, k10.h, z0, ou1, ov0, lb, 1.0, 1.0, 1.0, 1.0)
+                let od = vtxC(x0, k01.h, z1, ou0, ov1, ld, 1.0, 1.0, 1.0, 1.0)
+                let oe = vtxC(x1, k11.h, z1, ou1, ov1, le, 1.0, 1.0, 1.0, 1.0)
+                // No distance cutoff: the far field is exactly what the drape is
+                // for, and dropping to flat colour out there would put the
+                // diorama back at the horizon.
+                triangleV(c, s, v, w.city.ortho, oa, od, ob, 1.0, 1.0, 1.0)
+                triangleV(c, s, v, w.city.ortho, ob, od, oe, 1.0, 1.0, 1.0)
+                continue
+            }
             let a = vtxC(x0, k00.h, z0, u0, v0, k00.lt, k00.r, k00.g, k00.b, k00.tw * texFade)
             let b = vtxC(x1, k10.h, z0, u1, v0, k10.lt, k10.r, k10.g, k10.b, k10.tw * texFade)
             let d = vtxC(x0, k01.h, z1, u0, v1, k01.lt, k01.r, k01.g, k01.b, k01.tw * texFade)

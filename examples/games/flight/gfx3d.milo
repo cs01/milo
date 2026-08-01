@@ -501,6 +501,12 @@ pub struct Texture {
     w: i64,
     h: i64,
     mask: i64, // w-1, w is a power of two
+    // Mirrored-repeat addressing instead of wrap. The detail textures tile, so
+    // wrap is right for them. An ortho drape is a photograph of a finite place,
+    // and the world REFLECTS at the map edge (see world3d.foldIn) — so the
+    // imagery has to reflect on exactly the same period or the picture and the
+    // terrain under it disagree at every seam.
+    mirror: bool,
     shift: i64, // log2(w), for the row stride
     px: Vec<f32>, // 3 floats per texel
 }
@@ -510,6 +516,7 @@ pub fn texNew(size: i64, shift: i64): Texture {
         w: size,
         h: size,
         mask: size - 1,
+        mirror: false,
         shift: shift,
         px: Vec.filled(size * size * 3, 0.0),
     }
@@ -611,13 +618,30 @@ fn rasterCamTex(c: &mut Canvas, s: &mut Scene, view: &View, tex: &Texture, a: &V
                     let vr = l0 * a.r + l1 * b.r + l2 * d.r
                     let vg = l0 * a.g + l1 * b.g + l2 * d.g
                     let vb = l0 * a.b + l1 * b.b + l2 * d.b
-                    var tx2 = ((uu * (tex.w as f64)) as i64) & tex.mask
-                    var ty2 = ((vv * (tex.h as f64)) as i64) & tex.mask
-                    if tx2 < 0 {
-                        tx2 = 0
-                    }
-                    if ty2 < 0 {
-                        ty2 = 0
+                    var tx2 = 0
+                    var ty2 = 0
+                    if tex.mirror {
+                        // Fold onto a 2w period, then reflect the upper half.
+                        // Masking by 2w-1 is what makes this correct for
+                        // negative world coordinates too, which is most of the
+                        // map: two's complement gives the positive residue.
+                        tx2 = ((uu * (tex.w as f64)) as i64) & (tex.w * 2 - 1)
+                        ty2 = ((vv * (tex.h as f64)) as i64) & (tex.h * 2 - 1)
+                        if tx2 >= tex.w {
+                            tx2 = tex.w * 2 - 1 - tx2
+                        }
+                        if ty2 >= tex.h {
+                            ty2 = tex.h * 2 - 1 - ty2
+                        }
+                    } else {
+                        tx2 = ((uu * (tex.w as f64)) as i64) & tex.mask
+                        ty2 = ((vv * (tex.h as f64)) as i64) & tex.mask
+                        if tx2 < 0 {
+                            tx2 = 0
+                        }
+                        if ty2 < 0 {
+                            ty2 = 0
+                        }
                     }
                     let ti = ((ty2 << tex.shift) + tx2) * 3
                     // texel faded toward 1 (no-op) where tw is low

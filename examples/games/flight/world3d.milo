@@ -112,6 +112,9 @@ pub struct Mark {
     name: string,
     x: f64,
     z: f64,
+    // Shown during the orbit. The reward for flying somewhere worth seeing is
+    // finding out what you are looking at; a score would not be.
+    fact: string,
 }
 
 // Ordered as a route, not by importance: consecutive entries are near each
@@ -121,74 +124,74 @@ pub fn marksFor(cityName: &string): Vec<Mark> {
     var m: Vec<Mark> = Vec.new()
     if cityName == "San Francisco" {
         m.push(Mark {
-            name: "SALESFORCE TOWER", x: 1126.0, z: 412.0
+            name: "SALESFORCE TOWER", x: 1126.0, z: 412.0, fact: "326 m. Tallest in San Francisco since 2018."
         }
         )
         m.push(Mark {
-            name: "ORACLE PARK", x: 1821.0, z: 0.0 - 824.0
+            name: "ORACLE PARK", x: 1821.0, z: 0.0 - 824.0, fact: "Home runs land in McCovey Cove, past right field."
         }
         )
         m.push(Mark {
-            name: "BAY BRIDGE", x: 2833.0, z: 1369.0
+            name: "BAY BRIDGE", x: 2833.0, z: 1369.0, fact: "Two bridges end to end, joined at Yerba Buena Island."
         }
         )
         m.push(Mark {
-            name: "TRANSAMERICA PYRAMID", x: 633.0, z: 1024.0
+            name: "TRANSAMERICA PYRAMID", x: 633.0, z: 1024.0, fact: "Tapered so its shadow would fall smaller on the street."
         }
         )
         m.push(Mark {
-            name: "COIT TOWER", x: 370.0, z: 1826.0
+            name: "COIT TOWER", x: 370.0, z: 1826.0, fact: "Paid for by a woman who chased fire engines as a girl."
         }
         )
         m.push(Mark {
-            name: "ALCATRAZ", x: 0.0 - 1144.0, z: 4564.0
+            name: "ALCATRAZ", x: 0.0 - 1144.0, z: 4564.0, fact: "A federal prison for 29 years. No escape was ever confirmed."
         }
         )
         m.push(Mark {
-            name: "GOLDEN GATE BRIDGE", x: 0.0 - 6009.0, z: 3774.0
+            name: "GOLDEN GATE BRIDGE", x: 0.0 - 6009.0, z: 3774.0, fact: "International Orange. The repainting never finishes."
         }
         )
         m.push(Mark {
-            name: "PALACE OF FINE ARTS", x: 0.0 - 3378.0, z: 1881.0
+            name: "PALACE OF FINE ARTS", x: 0.0 - 3378.0, z: 1881.0, fact: "Built of plaster for 1915, recast in concrete to keep it."
         }
         )
         m.push(Mark {
-            name: "TWIN PEAKS", x: 0.0 - 3317.0, z: 0.0 - 3518.0
+            name: "TWIN PEAKS", x: 0.0 - 3317.0, z: 0.0 - 3518.0, fact: "The highest viewpoint in the city. Fog arrives here first."
         }
         )
         return m
     }
     if cityName == "Manhattan" {
         m.push(Mark {
-            name: "CENTRAL PARK", x: 1062.0, z: 2772.0
+            name: "CENTRAL PARK", x: 1062.0, z: 2772.0, fact: "341 hectares, entirely built. Nothing in it is natural."
         }
         )
         m.push(Mark {
-            name: "ROCKEFELLER CENTER", x: 0.0 - 59.0, z: 78.0
+            name: "ROCKEFELLER CENTER", x: 0.0 - 59.0, z: 78.0, fact: "Nineteen buildings raised through the Depression."
         }
         )
         m.push(Mark {
-            name: "TIMES SQUARE", x: 0.0 - 632.0, z: 0.0
+            name: "TIMES SQUARE", x: 0.0 - 632.0, z: 0.0, fact: "Named for a newspaper that moved away in 1913."
         }
         )
         m.push(Mark {
-            name: "CHRYSLER BUILDING", x: 211.0, z: 0.0 - 712.0
+            name: "CHRYSLER BUILDING", x: 211.0, z: 0.0 - 712.0, fact: "Its spire was hidden inside, then raised in 90 minutes."
         }
         )
         m.push(Mark {
-            name: "EMPIRE STATE BUILDING", x: 0.0 - 649.0, z: 0.0 - 1069.0
+            name: "EMPIRE STATE BUILDING", x: 0.0 - 649.0, z: 0.0 - 1069.0, fact: "Built in 410 days, roughly a storey a day."
         }
         )
         m.push(Mark {
-            name: "FLATIRON BUILDING", x: 0.0 - 987.0, z: 0.0 - 1881.0
+            name: "FLATIRON BUILDING", x: 0.0 - 987.0, z: 0.0 - 1881.0, fact: "Two metres wide at the point. The wind here was famous."
         }
         )
         m.push(Mark {
-            name: "ONE WORLD TRADE", x: 0.0 - 2985.0, z: 0.0 - 5043.0
+            name: "ONE WORLD TRADE", x: 0.0 - 2985.0, z: 0.0 - 5043.0, fact: "541 m to the tip. That is 1776 feet, deliberately."
         }
         )
         m.push(Mark {
-            name: "BROOKLYN BRIDGE", x: 0.0 - 1594.0, z: 0.0 - 5778.0
+            name: "BROOKLYN BRIDGE", x: 0.0 - 1594.0, z: 0.0 - 5778.0, fact: "1883. The first steel-wire suspension bridge anywhere."
         }
         )
         return m
@@ -198,62 +201,62 @@ pub fn marksFor(cityName: &string): Vec<Mark> {
     // buildings. Only the nouns change.
     if cityName == "Yosemite Valley" {
         m.push(Mark {
-            name: "YOSEMITE FALLS", x: 0.0 - 343.0, z: 1291.0
+            name: "YOSEMITE FALLS", x: 0.0 - 343.0, z: 1291.0, fact: "739 m in three drops, the tallest in North America."
         }
         )
         m.push(Mark {
-            name: "NORTH DOME", x: 3389.0, z: 1981.0
+            name: "NORTH DOME", x: 3389.0, z: 1981.0, fact: "Granite scoured bare by ice, then split by frost."
         }
         )
         m.push(Mark {
-            name: "HALF DOME", x: 5264.0, z: 111.0
+            name: "HALF DOME", x: 5264.0, z: 111.0, fact: "Never split in half. A glacier took one face away."
         }
         )
         m.push(Mark {
-            name: "GLACIER POINT", x: 1769.0, z: 0.0 - 1948.0
+            name: "GLACIER POINT", x: 1769.0, z: 0.0 - 1948.0, fact: "975 m straight down to the valley floor."
         }
         )
         m.push(Mark {
-            name: "SENTINEL DOME", x: 572.0, z: 0.0 - 2438.0
+            name: "SENTINEL DOME", x: 572.0, z: 0.0 - 2438.0, fact: "One dome of granite, shedding in curved shells."
         }
         )
         m.push(Mark {
-            name: "CATHEDRAL ROCKS", x: 0.0 - 3565.0, z: 0.0 - 2905.0
+            name: "CATHEDRAL ROCKS", x: 0.0 - 3565.0, z: 0.0 - 2905.0, fact: "600 m of sheer wall on the valley's south side."
         }
         )
         m.push(Mark {
-            name: "BRIDALVEIL FALL", x: 0.0 - 4745.0, z: 0.0 - 3161.0
+            name: "BRIDALVEIL FALL", x: 0.0 - 4745.0, z: 0.0 - 3161.0, fact: "189 m. In a light wind it blows sideways and never lands."
         }
         )
         m.push(Mark {
-            name: "EL CAPITAN", x: 0.0 - 3952.0, z: 0.0 - 1225.0
+            name: "EL CAPITAN", x: 0.0 - 3952.0, z: 0.0 - 1225.0, fact: "900 m of unbroken granite, the largest such face on Earth."
         }
         )
         return m
     }
     if cityName == "Grand Canyon" {
         m.push(Mark {
-            name: "MATHER POINT", x: 603.0, z: 0.0 - 935.0
+            name: "MATHER POINT", x: 603.0, z: 0.0 - 935.0, fact: "Where most visitors see the canyon for the first time."
         }
         )
         m.push(Mark {
-            name: "YAVAPAI POINT", x: 0.0 - 423.0, z: 0.0 - 401.0
+            name: "YAVAPAI POINT", x: 0.0 - 423.0, z: 0.0 - 401.0, fact: "The rock exposed here spans nearly two billion years."
         }
         )
         m.push(Mark {
-            name: "INDIAN GARDEN", x: 0.0 - 2564.0, z: 668.0
+            name: "INDIAN GARDEN", x: 0.0 - 2564.0, z: 668.0, fact: "A green shelf halfway down, kept alive by a spring."
         }
         )
         m.push(Mark {
-            name: "PLATEAU POINT", x: 0.0 - 2429.0, z: 1625.0
+            name: "PLATEAU POINT", x: 0.0 - 2429.0, z: 1625.0, fact: "400 m above the river, still 900 m below the rim."
         }
         )
         m.push(Mark {
-            name: "BRIGHT ANGEL TRAILHEAD", x: 0.0 - 2573.0, z: 0.0 - 1403.0
+            name: "BRIGHT ANGEL TRAILHEAD", x: 0.0 - 2573.0, z: 0.0 - 1403.0, fact: "The trail follows a fault line down through the wall."
         }
         )
         m.push(Mark {
-            name: "GRAND CANYON VILLAGE", x: 0.0 - 2258.0, z: 0.0 - 1737.0
+            name: "GRAND CANYON VILLAGE", x: 0.0 - 2258.0, z: 0.0 - 1737.0, fact: "The rim settlement that grew from the 1901 railway."
         }
         )
         return m
@@ -324,6 +327,12 @@ pub struct World {
     markName: string, // the landmark currently being sought
     markDist: f64, // metres to it, for the HUD
     markFound: i64, // how many have been reached this visit
+    // The orbit that plays when a landmark is collected. While `showT` is
+    // positive the simulation is frozen and the camera flies a circle around
+    // the subject instead of following the aircraft.
+    showT: f64,
+    showIdx: i64,
+    showAngle: f64,
     pathT: f64, // how far along the coin trail we have laid track
     // Trail head. Kept here rather than read off the end of `rings`, which is
     // swap-removed and so does not hold the newest ring last.
@@ -520,6 +529,9 @@ pub fn worldIn(seed: i64, places: Vec<City>, easy: bool): World {
         markName: "",
         markDist: 0.0,
         markFound: 0,
+        showT: 0.0,
+        showIdx: 0,
+        showAngle: 0.0,
         pathT: 0.0,
         trailX: 0.0,
         trailZ: 0.0,
@@ -538,9 +550,17 @@ pub fn worldIn(seed: i64, places: Vec<City>, easy: bool): World {
     }
     w.marks = marksFor(w.city.name)
     w.plane.y = heightAt(w.city, 0.0, 0.0) + 320.0
+    // Point at the first landmark. Spawning on a fixed heading put the player's
+    // back to it as often as not, which reads as the game having lost it.
+    if w.marks.len > 0 {
+        w.plane.yaw = Math.atan2(w.marks[0].x - w.plane.x, w.marks[0].z - w.plane.z)
+        w.cam.yaw = w.plane.yaw
+    }
     // Hoops only over invented country. Over a real place the landmarks are the
     // reason to fly and a line of scoring rings just gets in front of them.
-    if !w.city.loaded {
+    if w.city.loaded {
+        placeMarkRing(w)
+    } else {
         for i in 0..10 {
             layRing(w)
         }
@@ -583,6 +603,8 @@ pub fn worldSetPlace(w: &mut World, c: City) {
     w.marks = marksFor(w.city.name)
     w.markIdx = 0
     w.markName = ""
+    w.showT = 0.0
+    placeMarkRing(w)
     // Hoops already laid may now be inside something: lift them clear.
     for i in 0..w.rings.len {
         if w.rings[i].alive {
@@ -697,6 +719,48 @@ pub fn layRing(w: &mut World) {
         pop: 0.0,
         side: 0.0 - 1.0,
         bonus: bonus,
+    }
+    )
+}
+
+// The single hoop standing in front of the current landmark. It is put on the
+// line the player is most likely to arrive along — the bearing from the previous
+// landmark — and faced along that line, so passing through it leaves the nose
+// pointed at the subject. The framing is geometry; nothing has to score it.
+pub fn placeMarkRing(w: &mut World) {
+    w.rings.clear()
+    if w.marks.len == 0 {
+        return
+    }
+    let mx = w.marks[w.markIdx].x
+    let mz = w.marks[w.markIdx].z
+    var px = 0.0
+    var pz = 0.0
+    if w.marks.len > 1 {
+        let prev = (w.markIdx - 1 + w.marks.len) % w.marks.len
+        px = w.marks[prev].x
+        pz = w.marks[prev].z
+    }
+    var dx = mx - px
+    var dz = mz - pz
+    let l = Math.sqrt(dx * dx + dz * dz) + 0.0001
+    dx = dx / l
+    dz = dz / l
+    // Far enough back that the landmark is comfortably in frame on the way in,
+    // not so far that the hoop and the subject read as unrelated.
+    let GAP = 900.0
+    let rx = mx - dx * GAP
+    let rz = mz - dz * GAP
+    let heading = Math.atan2(dx, dz)
+    let ground = solidAt(w.city, rx, rz, 60.0)
+    var y = ground + 240.0
+    let subj = solidAt(w.city, mx, mz, 60.0) + 200.0
+    if subj > y {
+        y = subj
+    }
+    w.rings.push(Ring {
+        x: rx, y: y, z: rz, face: heading, r: 95.0, alive: true,
+        pop: 0.0, side: 0.0 - 1.0, bonus: false,
     }
     )
 }
@@ -833,6 +897,24 @@ fn corridor(w: &mut World, dt: f64) {
     }
 }
 
+// The collect orbit. The camera leaves the aircraft, circles the subject and
+// looks at it. Held level and well above, because the point is to show the thing
+// whole — a camera that banks or sits at its base shows a wall.
+fn orbitCamera(w: &mut World) {
+    let mx = w.marks[w.showIdx].x
+    let mz = w.marks[w.showIdx].z
+    let ly = solidAt(w.city, mx, mz, 60.0) + 80.0
+    let RAD = 640.0
+    w.cam.x = mx + Math.sin(w.showAngle) * RAD
+    w.cam.z = mz + Math.cos(w.showAngle) * RAD
+    w.cam.y = ly + 320.0
+    w.cam.yaw = Math.atan2(mx - w.cam.x, mz - w.cam.z)
+    let horiz = Math.sqrt((mx - w.cam.x) * (mx - w.cam.x) + (mz - w.cam.z) * (mz - w.cam.z))
+    w.cam.pitch = 0.0 - Math.atan2(w.cam.y - ly, horiz)
+    w.cam.roll = 0.0
+    w.cam.fov = 1.05
+}
+
 pub fn worldUpdate(w: &mut World, dt: f64, inRoll: f64, inPitch: f64, boost: bool) {
     w.evRing = false
     w.evBonus = false
@@ -863,6 +945,21 @@ pub fn worldUpdate(w: &mut World, dt: f64, inRoll: f64, inPitch: f64, boost: boo
     }
     if w.comboPop > 0.0 {
         w.comboPop = w.comboPop - dt * 2.2
+    }
+
+    // Orbit running: the aircraft holds station and the camera does the work.
+    // Nothing else in the simulation advances, so a landmark cannot be collected
+    // while another is being shown.
+    if w.showT > 0.0 {
+        w.showT = w.showT - dt
+        w.showAngle = w.showAngle + dt * 0.30
+        orbitCamera(w)
+        updateSparks(w, dt)
+        if w.showT <= 0.0 {
+            w.markIdx = (w.markIdx + 1) % w.marks.len
+            placeMarkRing(w)
+        }
+        return
     }
     if w.gainPop > 0.0 {
         w.gainPop = w.gainPop - dt * 0.8
@@ -969,22 +1066,12 @@ pub fn worldUpdate(w: &mut World, dt: f64, inRoll: f64, inPitch: f64, boost: boo
     // which is what turns a gentle turn into something you feel in your stomach.
     w.cam.roll = w.cam.roll + (w.plane.roll * 0.18 - w.cam.roll) * Math.minF64(1.0, dt * 2.5)
 
-    // The tour used to advance as hoops were laid ahead of the player. In free
-    // flight nothing is laid, so it advances when the aircraft actually gets
-    // there — which is the only definition that means anything now.
+    // Distance readout only; reaching the landmark is the hoop's job.
     if w.marks.len > 0 {
         let dx = w.marks[w.markIdx].x - w.plane.x
         let dz = w.marks[w.markIdx].z - w.plane.z
-        let d = Math.sqrt(dx * dx + dz * dz)
-        w.markDist = d
+        w.markDist = Math.sqrt(dx * dx + dz * dz)
         w.markName = w.marks[w.markIdx].name.clone()
-        if d < 700.0 {
-            w.markIdx = (w.markIdx + 1) % w.marks.len
-            w.markFound = w.markFound + 1
-            w.flash = Math.maxF64(w.flash, 0.5)
-            w.banner = 1.8
-            w.evRegion = true
-        }
     }
     updateRings(w, dt)
     updateTrails(w, dt)
@@ -1093,9 +1180,14 @@ fn updateRings(w: &mut World, dt: f64) {
         if !w.rings[i].alive && w.rings[i].pop <= 0.0 {
             drop = true
         }
+        // The landmark hoop is a destination, not a hurdle on a course: it stays
+        // until it is flown through, however many times the player goes round.
+        // The cull below exists because a passed hoop on the endless course was
+        // gone for good — applied here it deleted the only hoop in the world a
+        // few seconds after takeoff and never replaced it.
         let bx = w.rings[i].x - w.plane.x
         let bz = w.rings[i].z - w.plane.z
-        if bx * Math.sin(w.plane.yaw) + bz * Math.cos(w.plane.yaw) < 0.0 - 420.0 {
+        if !w.city.loaded && bx * Math.sin(w.plane.yaw) + bz * Math.cos(w.plane.yaw) < 0.0 - 420.0 {
             // Still live this far behind means the hoop's plane was never
             // crossed at all — flown around rather than fluffed. Same penalty.
             if w.rings[i].alive {
@@ -1142,6 +1234,17 @@ fn missRing(w: &mut World, i: i64) {
 fn clearRing(w: &mut World, i: i64) {
     w.rings[i].alive = false
     w.rings[i].pop = 1.0
+    // Over a real place a hoop means one thing: the landmark behind it has been
+    // reached. Freeze and show it off rather than adding to a score.
+    if w.city.loaded {
+        w.showT = 7.0
+        w.showIdx = w.markIdx
+        w.showAngle = 0.0
+        w.markFound = w.markFound + 1
+        w.flash = Math.maxF64(w.flash, 0.6)
+        w.evRegion = true
+        return
+    }
     w.combo = w.combo + 1
     w.comboPop = 1.0
     w.cleared = w.cleared + 1

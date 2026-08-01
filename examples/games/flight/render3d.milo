@@ -1934,6 +1934,12 @@ pub fn drawMarkGuide(c: &mut Canvas, w: &World, v: &View) {
     if w.marks.len == 0 || !w.city.loaded || w.showT > 0.0 || w.intro > 0.0 {
         return
     }
+    // Nothing left to point at. markIdx still sits on the last landmark until
+    // the next region is decoded, and without this the marker spends that beat
+    // insisting you fly to somewhere you are already standing on.
+    if w.markFound >= w.marks.len {
+        return
+    }
     let mx = w.marks[w.markIdx].x
     let mz = w.marks[w.markIdx].z
     // Framed a little above the ground: these are things you look AT, and a

@@ -20,26 +20,34 @@ the bank axis on left / right.
 **Inverted by default.** The key you press is where you push the nose, which is
 how a stick works and how flight sims map one. `--natural` flips it to up-climbs.
 
-## Four real places, and you change place every ten rings
+## Five real places, and you change place every ten rings
 
-You are flying the real world from the first frame. Four places are **built into
-the binary** — NASA SRTM terrain plus OpenStreetMap footprints extruded to their
-real heights, ~3 MB of asset baked in with `@embedFile`:
+You are flying the real world from the first frame. Five places are **built into
+the binary** — NASA SRTM terrain, OpenStreetMap footprints extruded to their real
+heights, OSM bridges, and an aerial photograph draped over the lot:
 
 | | |
 |---|---|
-| `sf` | San Francisco — hills, bay, downtown towers |
-| `hongkong` | Hong Kong — harbour, peaks straight out of the water |
-| `rio` | Rio de Janeiro — Sugarloaf, Corcovado, the beaches |
-| `canyon` | the Grand Canyon — 755 buildings and 2,200 m of rock |
+| `sf` | San Francisco — hills, bay, and both bridges |
+| `manhattan` | Manhattan — the densest skyline there is, and the East River crossings |
+| `yosemite` | Yosemite Valley — El Capitan, Half Dome, granite |
+| `canyon` | the Grand Canyon — no buildings at all, just the rock |
+| `honolulu` | Honolulu — a skyline with a volcano behind it, and reef below |
 
-Every region change swaps the next one in, so a run crosses all four. Which one
-you start on comes off the clock, so two launches are not the same flight. All
-four are parsed at startup in about 5 ms — a swap mid-flight is two moves, not a
-load, and nothing is fetched, read or decoded while flying.
+Every region change swaps the next one in, so a run crosses all five. Which one
+you start on comes off the clock, so two launches are not the same flight.
+Exactly one is decoded at a time: preloading all of them held ~290 MB of parsed
+footprints and imagery and got the process killed by the run guard, and decoding
+on the key press costs a beat. Nothing is fetched or read from disk while flying.
+
+All five are in the United States, and that is a licensing constraint rather than
+a taste: the aerial imagery that can legally be redistributed is USGS and USDA,
+and the open global alternative (Sentinel-2 via EOX) serves JPEG, which nothing
+here can decode. Hong Kong and Rio were dropped rather than be the only two
+flat-shaded places.
 
 ```bash
-/tmp/flyby --place hongkong                 # just that one, no rotation
+/tmp/flyby --place honolulu                 # just that one, no rotation
 /tmp/flyby --procedural                     # the endless generated world instead
 /tmp/flyby --city path/to/other.city        # a place you built yourself
 ```
@@ -52,14 +60,30 @@ OpenStreetMap contributors under the [ODbL](https://www.openstreetmap.org/copyri
 — see [`cities/README.md`](cities/README.md), and for how to build an asset for
 anywhere else.
 
-Rings never spawn inside a building and the plane never flies through one: the
-same "you cannot crash" push that lifts you off the ground lifts you over a
-roof, and a hoop is placed above whatever stands under its span.
+Over a real place, **the landmark is the target**: a column of light stands on it,
+and flying over the circle on the ground at any height and any heading collects
+it. The beam is drawn additively after the geometry, so it shows through the ridge
+or the tower block in the way — over a city, something usually is.
 
-Fly **through the rings**, Pilotwings-style. A hoop standing across the course
-tells you which way to be pointing when you reach it, which a coin never could.
-Green brackets mark the next one, and an arrow pins to the screen edge pointing
-the way to turn when it is behind you.
+That replaced a hoop placed 900 m short of the landmark and faced along the
+bearing from the previous one, so that flying through it left the nose pointed at
+the subject. Lovely framing, and it silently required consecutive landmarks to be
+kilometres apart. Honolulu's are not — Aloha Tower to the ʻIolani Palace is 800 m
+— so the hoop landed *behind* the landmark you had just left, unreachable, with no
+way to advance the tour. A beacon also arms only once you have been outside its
+radius, because you spawn 235 m from Honolulu's first one and would otherwise
+collect it before touching a key.
+
+Arriving hands the camera to a slow orbit with the landmark's name and one fact
+about it. The orbit starts at the bearing you arrived on and eases in and out of
+your own camera over 1.6 s at each end — it used to cut to due north and cut back,
+which is two hard jumps in a shot whose whole job is to show you something.
+
+Over the invented world it is still hoops. Rings never spawn inside a building and
+the plane never flies through one: the same "you cannot crash" push that lifts you
+off the ground lifts you over a roof, and a hoop is placed above whatever stands
+under its span. Green brackets mark the next one, and an arrow pins to the screen
+edge pointing the way to turn when it is behind you.
 
 Clearing a ring throws a burst of sparks out around the hoop — thrown outward in
 the ring's own plane, given gravity, and drawn as camera-facing billboards so they
@@ -173,6 +197,30 @@ Two things in the OSM data had to be handled before any of that worked:
 - **A dual carriageway is two ways.** Eight metres apart, each fourteen metres wide,
   z-fighting into a dashed line. They are merged into one deck wide enough to cover
   both — 30 m for the Golden Gate against a real 27.
+
+## What an imagery service does instead of an error
+
+An aerial drape is fetched for the asset's exact extent, and outside its coverage
+the service does not fail — it draws the gap, in two different colours. The
+National Map basemap answers exact black where a tile is missing and an exact
+`(253,253,253)` band where the mosaic stops. Over Honolulu that is 8% and 14% of
+the square, all of it open Pacific, and draping it puts a black hole and a sheet
+of concrete on the sea.
+
+Both are flat, uniform and exact, which is what makes them safe to key on: across
+four million texels the four mainland drapes contain not one pixel of either.
+
+What goes in the gap is solved, not smeared, and solved **from the sea**. Two
+earlier attempts got that second half wrong — carrying the last real texel along
+each row painted the ocean in the service's own edge haze, and relaxing from
+whatever bordered the hole was smoother and just as wrong, because a coverage
+boundary runs along a coastline and most of what borders it is surf, sand and
+runway. The DEM settles it: it carries real bathymetry, so the asset already knows
+which parts of the picture are deep sea, and only those cells constrain the solve.
+
+Given the boundary it is Laplace inpainting — relax toward the average of the
+neighbours, iterated, holding the sea fixed — on a coarse grid, because
+information travels one cell per pass and the hole is a fifth of the picture.
 
 Colour and structure come from the tags rather than from a table of famous bridges:
 the Golden Gate carries `colour=orange` and `bridge:structure=suspension` in OSM,

@@ -26,7 +26,7 @@ from "./textures" import {
     groundTexture, planeTexture, facadeTexture
 }
 from "./world3d" import {
-    World, Trail, Theme, nextTheme, heightAt, coverAt, blockOf, foldIn, unfold, TILE, VIEW_TILES, TAU
+    World, Trail, Theme, nextTheme, heightAt, coverAt, blockOf, foldIn, unfold, TILE, VIEW_TILES, TAU, MARK_REACH
 }
 from "./city" import {
     City, COVER_URBAN, COVER_PARK, COVER_SAND, COVER_WATER, BUILDING_MARGIN, cityCellX, cityCellZ, cityOrthoLocal
@@ -1223,7 +1223,15 @@ fn drawCity(s: &mut Scene, w: &World, v: &View, facade: &Texture) {
                         if hgt / d < 0.0055 {
                             continue
                         }
-                        prism(s, w, v, facade, px, pz, b, kx, kz, reach, reversed, midX, midZ, d > 780.0)
+                        // The box stands in for the real outline only once the
+                        // building is small on screen. A flat distance did not
+                        // mean that: a 200 m footprint at 800 m fills a quarter
+                        // of the frame, and swapping its outline for a rectangle
+                        // there is the shape-change you can watch happen as you
+                        // fly in. Scale the switch by the footprint instead, so
+                        // what pops is always something a few pixels across.
+                        let ext = Math.maxF64(w.city.bMaxX[b] - w.city.bMinX[b], w.city.bMaxZ[b] - w.city.bMinZ[b])
+                        prism(s, w, v, facade, px, pz, b, kx, kz, reach, reversed, midX, midZ, d > Math.maxF64(780.0, ext * 26.0))
                     }
                 }
             }
@@ -1365,6 +1373,12 @@ fn drawRings(s: &mut Scene, w: &World, v: &View) {
     let segs = 22
     let tube = 5.0
     for i in 0..w.rings.len {
+        // A landmark beacon is a column of light, drawn in drawMarkBeam after the
+        // geometry pass so it shows through whatever is in front of it. There is
+        // no hoop to draw here.
+        if w.rings[i].beacon {
+            continue
+        }
         var rad = w.rings[i].r
         var br = 1.0
         var col = rgb(1.5, 1.15, 0.25)
@@ -1749,6 +1763,129 @@ pub fn drawGuide(c: &mut Canvas, w: &World, v: &View) {
 // pinned to the screen edge pointing the way to turn when it is not — without
 // this the HUD names a place and gives no clue which way to look, which is worse
 // than saying nothing.
+// The column of light standing on the current landmark, and the circle on the
+// ground you have to fly over to arrive.
+//
+// A real column, not a stroke: it is sampled across its own width in WORLD
+// metres, so it stands forty metres wide however far away it is — wide and soft
+// close up, a thread on the horizon. Drawn additively AFTER the geometry has been
+// flushed, so it shows through the ridge or the tower block between you and the
+// subject. That is deliberate and it is the whole reason this replaced a hoop: a
+// destination you cannot see is not a destination, and over a real city something
+// is nearly always in the way.
+pub fn drawMarkBeam(c: &mut Canvas, w: &World, v: &View) {
+    if !w.city.loaded || w.showT > 0.0 {
+        return
+    }
+    for i in 0..w.rings.len {
+        if !w.rings[i].beacon || !w.rings[i].alive {
+            continue
+        }
+        let bx = w.rings[i].x
+        let bz = w.rings[i].z
+        let by = w.rings[i].y
+        // Slow pulse, so a beam reads as a signal rather than as scenery.
+        let pulse = 0.72 + 0.28 * Math.sin(w.time * 2.4)
+        let dxc = bx - w.cam.x
+        let dzc = bz - w.cam.z
+        let dist = Math.sqrt(dxc * dxc + dzc * dzc)
+        // Fade with distance so a beam eight kilometres off is a hint rather than
+        // a floodlight, but never all the way out — the point is to be findable.
+        var fade = 1.0 - dist / 14000.0
+        if fade < 0.30 {
+            fade = 0.30
+        }
+        let k = pulse * fade
+        // Tall enough to clear the Koolau from the far side of the map, and to
+        // stand well above the tallest thing anyone has built.
+        let TOP = 1500.0
+        let RADIUS = 22.0
+        // One sample per screen pixel of half-width, so the column is solid close
+        // up without paying for samples that land on the same pixel far away. A
+        // fixed count banded into visible stripes the moment you flew near one.
+        var CROSS = ((RADIUS * v.scale / Math.maxF64(dist, 1.0)) as i64) + 3
+        if CROSS > 48 {
+            CROSS = 48
+        }
+        if CROSS < 5 {
+            CROSS = 5
+        }
+        let LIFTS = 7 // vertical segments, so the column can fade out as it rises
+        // Billboarded on the camera's own right vector: a column has no preferred
+        // side, and facing the viewer is what keeps its width constant as you
+        // circle it.
+        let right = v.right
+        for step in 0 - CROSS..CROSS + 1 {
+            let frac = (step as f64) / (CROSS as f64)
+            // Round falloff, bright core, soft edge — a cylinder of light seen
+            // through air, rather than a flat card.
+            var across = 1.0 - frac * frac
+            if across <= 0.0 {
+                continue
+            }
+            across = across * Math.sqrt(across)
+            let ox = right.x * frac * RADIUS
+            let oz = right.z * frac * RADIUS
+            for seg in 0..LIFTS {
+                let t0 = (seg as f64) / (LIFTS as f64)
+                let t1 = ((seg + 1) as f64) / (LIFTS as f64)
+                // Dissolves toward the top instead of ending on a hard edge.
+                let up = (1.0 - t0) * (1.0 - t0)
+                let amp = k * across * up * 0.85
+                if amp < 0.004 {
+                    continue
+                }
+                let a = toCamera(v, bx + ox, by + TOP * t0, bz + oz)
+                let b = toCamera(v, bx + ox, by + TOP * t1, bz + oz)
+                beamSeg(c, v, a, b, 0.34 * amp, 1.00 * amp, 0.92 * amp)
+            }
+        }
+        // The circle on the ground is the collection radius, drawn where it is:
+        // fly over the inside of it and the landmark is yours.
+        let segs = 40
+        var prevOk = false
+        var pvx = 0.0
+        var pvy = 0.0
+        for si in 0..segs + 1 {
+            let ang = (si as f64) / (segs as f64) * TAU
+            let gx = bx + Math.sin(ang) * MARK_REACH
+            let gz = bz + Math.cos(ang) * MARK_REACH
+            let gy = heightAt(w.city, gx, gz) + 12.0
+            let p = toCamera(v, gx, gy, gz)
+            if p.z <= v.near {
+                prevOk = false
+                continue
+            }
+            let sx = v.cx + p.x * v.scale / p.z
+            let sy = v.cy - p.y * v.scale / p.z
+            if prevOk {
+                line(c, pvx, pvy, sx, sy, 0.18 * k, 0.60 * k, 0.55 * k)
+            }
+            pvx = sx
+            pvy = sy
+            prevOk = true
+        }
+    }
+}
+
+// One vertical slice of the column, near-clipped. Clipped rather than dropped:
+// the beam is at its most useful when you are right on top of the landmark, which
+// is exactly when its base crosses the camera plane.
+fn beamSeg(c: &mut Canvas, v: &View, a: &Vec3, b: &Vec3, r: f64, g: f64, bl: f64) {
+    var pa = a
+    var pb = b
+    if pa.z <= v.near && pb.z <= v.near {
+        return
+    }
+    if pa.z <= v.near {
+        pa = pa.lerp(pb, (v.near - pa.z) / (pb.z - pa.z))
+    }
+    if pb.z <= v.near {
+        pb = pb.lerp(pa, (v.near - pb.z) / (pa.z - pb.z))
+    }
+    line(c, v.cx + pa.x * v.scale / pa.z, v.cy - pa.y * v.scale / pa.z, v.cx + pb.x * v.scale / pb.z, v.cy - pb.y * v.scale / pb.z, r, g, bl)
+}
+
 pub fn drawMarkGuide(c: &mut Canvas, w: &World, v: &View) {
     if w.marks.len == 0 || !w.city.loaded {
         return

@@ -61,6 +61,15 @@ pub struct Ring {
     pop: f64, // expands and fades once flown through
     side: f64, // signed distance of the aircraft last frame, for crossing detection
     bonus: bool, // blue: smaller, worth four times as much
+    // A landmark beacon rather than a hoop on a course: a column of light
+    // standing ON the subject, collected by flying over it at any height. See
+    // placeMarkRing for why the hoop had to go.
+    beacon: bool,
+    // A beacon arms once the aircraft has been OUTSIDE its radius. Landmarks sit
+    // where they sit — Honolulu's first one is 235 m from the spawn point — and
+    // without this the tour collects its own first stop before the player has
+    // touched a key.
+    armed: bool,
 }
 
 // A point on a wingtip contrail. Trails are ring buffers of world points, drawn
@@ -192,6 +201,48 @@ pub fn marksFor(cityName: &string): Vec<Mark> {
         )
         m.push(Mark {
             name: "BROOKLYN BRIDGE", x: 0.0 - 1594.0, z: 0.0 - 5778.0, fact: "1883. The first steel-wire suspension bridge anywhere."
+        }
+        )
+        return m
+    }
+    // Honolulu is the third kind of place in the lineup: a real skyline with a
+    // volcano in it. The tour runs the waterfront, climbs the craters behind the
+    // city and comes back along the reef.
+    if cityName == "Honolulu" {
+        m.push(Mark {
+            name: "ALOHA TOWER", x: 0.0 - 104.0, z: 211.0, fact: "1926. Ten storeys, and for thirty years the tallest thing in Hawaii."
+        }
+        )
+        m.push(Mark {
+            name: "IOLANI PALACE", x: 695.0, z: 211.0, fact: "The only royal palace on American soil. Wired for light before the White House."
+        }
+        )
+        m.push(Mark {
+            name: "PUNCHBOWL", x: 2074.0, z: 891.0, fact: "A crater the Hawaiians called Puowaina. Now 53,000 graves."
+        }
+        )
+        m.push(Mark {
+            name: "TANTALUS", x: 4876.0, z: 3006.0, fact: "A cinder cone. Oahu kept erupting long after the island was built."
+        }
+        )
+        m.push(Mark {
+            name: "MANOA VALLEY", x: 6844.0, z: 3117.0, fact: "Rain on most days of the year, and a rainbow on many of them."
+        }
+        )
+        m.push(Mark {
+            name: "DIAMOND HEAD", x: 6222.0, z: 0.0 - 4787.0, fact: "Leahi. Sailors named it for calcite they took for diamonds."
+        }
+        )
+        m.push(Mark {
+            name: "WAIKIKI", x: 3941.0, z: 0.0 - 3228.0, fact: "Wetland and fishponds until the Ala Wai Canal drained it in 1928."
+        }
+        )
+        m.push(Mark {
+            name: "MAGIC ISLAND", x: 1556.0, z: 0.0 - 2004.0, fact: "Not an island. A peninsula built for a resort nobody finished."
+        }
+        )
+        m.push(Mark {
+            name: "SAND ISLAND", x: 0.0 - 1867.0, z: 0.0, fact: "Dredge spoil from the harbour, now the port and a state park."
         }
         )
         return m
@@ -333,6 +384,18 @@ pub struct World {
     showT: f64,
     showIdx: i64,
     showAngle: f64,
+    // The orbit used to cut to a fixed start angle and cut back when it ended,
+    // which is two hard jumps around a shot whose whole job is to show you
+    // something. It now begins at the camera you already had, sweeps, and eases
+    // back to it: the pose at the moment of arrival, and how long the shot runs.
+    showLen: f64,
+    showFromX: f64,
+    showFromY: f64,
+    showFromZ: f64,
+    showFromYaw: f64,
+    showFromPitch: f64,
+    showFromRoll: f64,
+    showFromFov: f64,
     pathT: f64, // how far along the coin trail we have laid track
     // Trail head. Kept here rather than read off the end of `rings`, which is
     // swap-removed and so does not hold the newest ring last.
@@ -532,6 +595,14 @@ pub fn worldIn(seed: i64, places: Vec<City>, easy: bool): World {
         showT: 0.0,
         showIdx: 0,
         showAngle: 0.0,
+        showLen: 7.0,
+        showFromX: 0.0,
+        showFromY: 0.0,
+        showFromZ: 0.0,
+        showFromYaw: 0.0,
+        showFromPitch: 0.0,
+        showFromRoll: 0.0,
+        showFromFov: 1.15,
         pathT: 0.0,
         trailX: 0.0,
         trailZ: 0.0,
@@ -719,14 +790,23 @@ pub fn layRing(w: &mut World) {
         pop: 0.0,
         side: 0.0 - 1.0,
         bonus: bonus,
+        beacon: false,
+        armed: true,
     }
     )
 }
 
-// The single hoop standing in front of the current landmark. It is put on the
-// line the player is most likely to arrive along — the bearing from the previous
-// landmark — and faced along that line, so passing through it leaves the nose
-// pointed at the subject. The framing is geometry; nothing has to score it.
+// The current landmark, marked by a column of light standing on it and collected
+// by flying over it at any height.
+//
+// It used to be a hoop 900 m short of the subject, faced along the bearing from
+// the previous landmark, so that passing through it left the nose pointed at the
+// thing. That framing is lovely and it only works when consecutive landmarks are
+// kilometres apart. Honolulu's are not — Aloha Tower to the Iolani Palace is
+// 800 m — so the hoop was placed BEHIND the landmark you had just left, out of
+// frame in the one direction the player was not looking, with no way to reach it
+// and therefore no way to advance. A tour is a list of places to go and look at,
+// not a slalom, and a beam is visible from anywhere on the map at any altitude.
 pub fn placeMarkRing(w: &mut World) {
     w.rings.clear()
     if w.marks.len == 0 {
@@ -744,26 +824,20 @@ pub fn placeMarkRing(w: &mut World) {
     var dx = mx - px
     var dz = mz - pz
     let l = Math.sqrt(dx * dx + dz * dz) + 0.0001
-    dx = dx / l
-    dz = dz / l
-    // Far enough back that the landmark is comfortably in frame on the way in,
-    // not so far that the hoop and the subject read as unrelated.
-    let GAP = 900.0
-    let rx = mx - dx * GAP
-    let rz = mz - dz * GAP
-    let heading = Math.atan2(dx, dz)
-    let ground = solidAt(w.city, rx, rz, 60.0)
-    var y = ground + 240.0
-    let subj = solidAt(w.city, mx, mz, 60.0) + 200.0
-    if subj > y {
-        y = subj
-    }
+    // Kept only so anything that wants a heading for the target has one.
+    let heading = Math.atan2(dx / l, dz / l)
     w.rings.push(Ring {
-        x: rx, y: y, z: rz, face: heading, r: 95.0, alive: true,
-        pop: 0.0, side: 0.0 - 1.0, bonus: false,
+        x: mx, y: solidAt(w.city, mx, mz, 60.0), z: mz, face: heading,
+        r: MARK_REACH, alive: true,
+        pop: 0.0, side: 0.0 - 1.0, bonus: false, beacon: true, armed: false,
     }
     )
 }
+
+// How close, in plan, counts as arriving. Two seconds of flight at cruise: wide
+// enough that a landmark cannot be missed by a wingspan at 190 m/s, tight enough
+// that it is still a place you flew to rather than past.
+pub let MARK_REACH: f64 = 320.0
 
 // Keeps the aircraft on the course. The world is infinite procedural terrain, so
 // flying off the route is not a fail state — it is just nothing, forever, and a
@@ -900,19 +974,43 @@ fn corridor(w: &mut World, dt: f64) {
 // The collect orbit. The camera leaves the aircraft, circles the subject and
 // looks at it. Held level and well above, because the point is to show the thing
 // whole — a camera that banks or sits at its base shows a wall.
+// The cinematic orbit around a collected landmark.
+//
+// It eases out of the camera the player already had and eases back into it, so
+// the shot brackets the flight rather than interrupting it. Cutting straight to a
+// fixed pose and cutting straight back was two jumps in seven seconds, and both
+// of them landed on a frame where nothing else had moved — which is exactly when
+// a cut is most obvious.
 fn orbitCamera(w: &mut World) {
     let mx = w.marks[w.showIdx].x
     let mz = w.marks[w.showIdx].z
     let ly = solidAt(w.city, mx, mz, 60.0) + 80.0
     let RAD = 640.0
-    w.cam.x = mx + Math.sin(w.showAngle) * RAD
-    w.cam.z = mz + Math.cos(w.showAngle) * RAD
-    w.cam.y = ly + 320.0
-    w.cam.yaw = Math.atan2(mx - w.cam.x, mz - w.cam.z)
-    let horiz = Math.sqrt((mx - w.cam.x) * (mx - w.cam.x) + (mz - w.cam.z) * (mz - w.cam.z))
-    w.cam.pitch = 0.0 - Math.atan2(w.cam.y - ly, horiz)
-    w.cam.roll = 0.0
-    w.cam.fov = 1.05
+    let ox = mx + Math.sin(w.showAngle) * RAD
+    let oz = mz + Math.cos(w.showAngle) * RAD
+    let oy = ly + 320.0
+    let oyaw = Math.atan2(mx - ox, mz - oz)
+    let horiz = Math.sqrt((mx - ox) * (mx - ox) + (mz - oz) * (mz - oz))
+    let opitch = 0.0 - Math.atan2(oy - ly, horiz)
+
+    // Blend in over the first EASE seconds and out over the last, and take the
+    // smaller of the two so a shot shorter than 2*EASE still ends where it began.
+    let EASE = 1.6
+    let elapsed = w.showLen - w.showT
+    var k = Math.minF64(elapsed / EASE, w.showT / EASE)
+    k = Math.clampF64(k, 0.0, 1.0)
+    // Smoothstep, so the camera leaves and rejoins the flight at zero speed.
+    k = k * k * (3.0 - 2.0 * k)
+
+    w.cam.x = w.showFromX + (ox - w.showFromX) * k
+    w.cam.y = w.showFromY + (oy - w.showFromY) * k
+    w.cam.z = w.showFromZ + (oz - w.showFromZ) * k
+    // Through the short way round: lerping raw headings across the seam spins the
+    // camera most of a circle to travel a few degrees.
+    w.cam.yaw = w.showFromYaw + wrapPi(oyaw - w.showFromYaw) * k
+    w.cam.pitch = w.showFromPitch + (opitch - w.showFromPitch) * k
+    w.cam.roll = w.showFromRoll * (1.0 - k)
+    w.cam.fov = w.showFromFov + (1.05 - w.showFromFov) * k
 }
 
 pub fn worldUpdate(w: &mut World, dt: f64, inRoll: f64, inPitch: f64, boost: bool) {
@@ -1148,7 +1246,22 @@ fn updateRings(w: &mut World, dt: f64) {
             w.rings[i].pop = w.rings[i].pop - dt * 1.6
         }
         var drop = false
-        if w.rings[i].alive {
+        if w.rings[i].alive && w.rings[i].beacon {
+            // Plan distance only. A beam is a place on the map, and a place is
+            // arrived at from any heading and any height — which is the whole
+            // point of replacing the hoop.
+            let bdx = w.plane.x - w.rings[i].x
+            let bdz = w.plane.z - w.rings[i].z
+            let inside = bdx * bdx + bdz * bdz < w.rings[i].r * w.rings[i].r
+            if !w.rings[i].armed {
+                if !inside {
+                    w.rings[i].armed = true
+                }
+            } else if inside {
+                clearRing(w, i)
+                toLay = toLay + 1
+            }
+        } else if w.rings[i].alive {
             let nx = Math.sin(w.rings[i].face)
             let nz = Math.cos(w.rings[i].face)
             let dx = w.plane.x - w.rings[i].x
@@ -1238,8 +1351,17 @@ fn clearRing(w: &mut World, i: i64) {
     // reached. Freeze and show it off rather than adding to a score.
     if w.city.loaded {
         w.showT = 7.0
+        w.showLen = 7.0
         w.showIdx = w.markIdx
-        w.showAngle = 0.0
+        // Start the sweep exactly where the player is standing, not at due north.
+        w.showAngle = Math.atan2(w.cam.x - w.marks[w.markIdx].x, w.cam.z - w.marks[w.markIdx].z)
+        w.showFromX = w.cam.x
+        w.showFromY = w.cam.y
+        w.showFromZ = w.cam.z
+        w.showFromYaw = w.cam.yaw
+        w.showFromPitch = w.cam.pitch
+        w.showFromRoll = w.cam.roll
+        w.showFromFov = w.cam.fov
         w.markFound = w.markFound + 1
         w.flash = Math.maxF64(w.flash, 0.6)
         w.evRegion = true

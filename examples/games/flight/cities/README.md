@@ -11,6 +11,11 @@ once at startup:
   `building:levels` tags, extruded to their real heights.
 - **land cover** — OSM parks, woods, beaches and inland water, rasterised into a
   grid the terrain shader samples per vertex.
+- **imagery** — an aerial photograph of exactly the asset's extent, written
+  beside it as `<name>.ortho.png` and draped over the terrain. NAIP 1 m where it
+  reaches (it is a USDA farm survey, so CONUS only); the USGS National Map
+  orthoimagery basemap elsewhere, which is what covers Hawaii. Both are US
+  government products and public domain.
 - **bridges** — OSM ways tagged `bridge=yes`, kept as open polylines with their
   width, colour and structure. Their own layer because the terrain grid cannot
   carry them: SRTM samples the water under a bridge, not the deck over it. Deck
@@ -62,7 +67,9 @@ footprints and a terrain grid stay exactly what they were:
 
 ```bash
 milo run examples/games/flight/tools/fetchcity.milo -- \
-    --update examples/games/flight/cities/sf.city
+    --update examples/games/flight/cities/sf.city    # bridges only
+milo run examples/games/flight/tools/fetchcity.milo -- \
+    --ortho examples/games/flight/cities/sf.city     # the drape only
 ```
 
 `--radius` is in metres, measured from the centre to the edge of the square. It

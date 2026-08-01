@@ -239,9 +239,332 @@ pub fn cityAttachOrtho(c: &mut City, png: &string): Result<i64, string> {
             t.pxu[dst + 2] = img.pixels[src + 2]
         }
     }
+    fillNoData(c, t, n)
     c.ortho = t
     c.orthoLoaded = true
     return Result.Ok(n)
+}
+
+// Imagery services answer "outside my coverage" with exact black, not with an
+// error — so a coastal place comes back with a wedge of 0,0,0 where the survey
+// stopped offshore, and draping that paints a black hole on the sea. Honolulu's
+// square is 8.8% no-data, all of it open Pacific.
+//
+// What goes in the hole is solved, not smeared, and it is solved FROM THE SEA.
+//
+// Two attempts got that second half wrong. Carrying the last real texel along
+// each row painted the Pacific in the service's own edge haze. Relaxing from
+// whatever bordered the hole was smoother and just as wrong: a coverage boundary
+// runs along a coastline, so most of what borders the hole is surf, sand and
+// runway, and the ocean came out the colour of concrete.
+//
+// The terrain settles it. What is missing is open water — that is what lies
+// outside an imagery survey on a coastal tile — and the DEM carries real
+// bathymetry, so the asset already knows which parts of the picture are deep sea.
+// Only those cells constrain the solve. Everything else is free.
+//
+// Given the boundary, the fill is Laplace inpainting: relax toward the average of
+// the neighbours, iterated, holding the sea fixed. That is the standard answer
+// for a hole because the result is the smoothest surface meeting the real data at
+// every edge, and for open water it is also the physically right one — the sea's
+// colour does vary smoothly with depth, and there is no detail out there to
+// invent.
+//
+// Coarse because the hole is thousands of texels across and the fill has no
+// business carrying detail that far. 8x down, solved at 256 square, bilinear back
+// up — a few megabytes and a few milliseconds, against 60 MB and a second if the
+// relaxation ran at full resolution to produce the same gradient.
+//
+// See isNoData for what counts as a gap; there is more than one kind.
+
+// Cell size of the grid the fill is solved on, in texels. Coarse on purpose: the
+// hole is a fifth of the picture, the answer is a smooth ocean gradient, and a
+// Jacobi relaxation carries information one cell per pass — solve it at 256
+// square and the middle of the Pacific never hears from the coast. At 64 square
+// the whole thing converges in a few thousand passes and a few milliseconds.
+let ORTHO_COARSE: i64 = 32
+
+let ORTHO_RELAX: i64 = 4000
+
+// Imagery services do not report a gap, they draw one, and they do not agree on
+// what colour to draw it. The National Map basemap uses BOTH: exact black where a
+// tile is missing, and an exact (253,253,253) band where the mosaic simply stops
+// — 8% and 14% of the Honolulu square respectively. Both are flat, uniform and
+// exact, which is what makes them safe to key on: in four million texels of
+// photograph the mainland drapes contain not one pixel of either.
+fn isNoData(t: &Texture, i: i64): bool {
+    if t.pxu[i] == 0 as u8 && t.pxu[i + 1] == 0 as u8 && t.pxu[i + 2] == 0 as u8 {
+        return true
+    }
+    return t.pxu[i] == 253 as u8 && t.pxu[i + 1] == 253 as u8 && t.pxu[i + 2] == 253 as u8
+}
+
+// Deeper than this counts as open sea for the purpose of colouring the hole.
+// Not `< 0`: the reef and the lagoon are below sea level too, and they are
+// turquoise. Filling the Pacific with reef colour is the concrete mistake again
+// in a nicer shade.
+let ORTHO_SEA_DEPTH: f64 = 0.0 - 25.0
+
+fn fillNoData(city: &City, t: &mut Texture, n: i64) {
+    let m = n / ORTHO_COARSE
+    if m < 4 {
+        return
+    }
+    var sumR: Vec<f64> = Vec.filled(m * m, 0.0)
+    var sumG: Vec<f64> = Vec.filled(m * m, 0.0)
+    var sumB: Vec<f64> = Vec.filled(m * m, 0.0)
+    var cnt: Vec<i64> = Vec.filled(m * m, 0)
+    var holes = 0
+    for y in 0..n {
+        let cy = y / ORTHO_COARSE
+        for x in 0..n {
+            let i = (y * n + x) * 3
+            if isNoData(t, i) {
+                holes = holes + 1
+                continue
+            }
+            let c = cy * m + x / ORTHO_COARSE
+            sumR[c] = sumR[c] + (t.pxu[i] as f64)
+            sumG[c] = sumG[c] + (t.pxu[i + 1] as f64)
+            sumB[c] = sumB[c] + (t.pxu[i + 2] as f64)
+            cnt[c] = cnt[c] + 1
+        }
+    }
+    if holes == 0 {
+        return
+    }
+    // A coarse cell counts as known only if it is nearly all real texels. A cell
+    // straddling the coverage boundary is half edge haze, and seeding the solve
+    // with haze is exactly the mistake the row sweep made.
+    let full = ORTHO_COARSE * ORTHO_COARSE
+    var known: Vec<bool> = Vec.filled(m * m, false)
+    var r: Vec<f64> = Vec.filled(m * m, 0.0)
+    var g: Vec<f64> = Vec.filled(m * m, 0.0)
+    var b: Vec<f64> = Vec.filled(m * m, 0.0)
+    var anyKnown = false
+    // The drape spans [-reach, +reach] on both axes, with v measured from the
+    // north edge — the same mapping render3d uses for the terrain UVs.
+    let span = city.reach * 2.0
+    for cy in 0..m {
+        let wz = city.reach - (((cy as f64) + 0.5) / (m as f64)) * span
+        for cx in 0..m {
+            let cell = cy * m + cx
+            // Every texel real: a cell straddling the coverage boundary is part
+            // edge haze, and haze is what poisoned the first two attempts.
+            if cnt[cell] < full {
+                continue
+            }
+            let wx = (((cx as f64) + 0.5) / (m as f64)) * span - city.reach
+            if cityHeightAt(city, wx, wz) > ORTHO_SEA_DEPTH {
+                continue
+            }
+            known[cell] = true
+            anyKnown = true
+            r[cell] = sumR[cell] / (cnt[cell] as f64)
+            g[cell] = sumG[cell] / (cnt[cell] as f64)
+            b[cell] = sumB[cell] / (cnt[cell] as f64)
+        }
+    }
+    if !anyKnown {
+        return
+    }
+    // Seed the unknown cells by growing inward from the known ones, so the
+    // relaxation starts from something plausible instead of from black.
+    var filled: Vec<bool> = Vec.filled(m * m, false)
+    for c in 0..m * m {
+        filled[c] = known[c]
+    }
+    // Seeded from a SNAPSHOT of what was filled at the start of each sweep. In
+    // place, a cell marked filled early in the sweep lets its neighbour be marked
+    // later in the same sweep, so the seed races along +x and +y and cells get
+    // adopted before they have been given a value — leaving zeros, which read as
+    // black holes in the middle of the fill.
+    var nextFilled: Vec<bool> = Vec.filled(m * m, false)
+    var growing = true
+    while growing {
+        growing = false
+        for c in 0..m * m {
+            nextFilled[c] = filled[c]
+        }
+        for y in 0..m {
+            for x in 0..m {
+                let c = y * m + x
+                if filled[c] {
+                    continue
+                }
+                var sr = 0.0
+                var sg = 0.0
+                var sb = 0.0
+                var k = 0
+                if x > 0 && filled[c - 1] {
+                    sr = sr + r[c - 1]
+                    sg = sg + g[c - 1]
+                    sb = sb + b[c - 1]
+                    k = k + 1
+                }
+                if x < m - 1 && filled[c + 1] {
+                    sr = sr + r[c + 1]
+                    sg = sg + g[c + 1]
+                    sb = sb + b[c + 1]
+                    k = k + 1
+                }
+                if y > 0 && filled[c - m] {
+                    sr = sr + r[c - m]
+                    sg = sg + g[c - m]
+                    sb = sb + b[c - m]
+                    k = k + 1
+                }
+                if y < m - 1 && filled[c + m] {
+                    sr = sr + r[c + m]
+                    sg = sg + g[c + m]
+                    sb = sb + b[c + m]
+                    k = k + 1
+                }
+                if k > 0 {
+                    r[c] = sr / (k as f64)
+                    g[c] = sg / (k as f64)
+                    b[c] = sb / (k as f64)
+                    growing = true
+                }
+            }
+        }
+        // one generation per sweep, so the seed spreads evenly rather than
+        // racing across whichever axis the loop happens to walk first
+        for y in 0..m {
+            for x in 0..m {
+                let c = y * m + x
+                if filled[c] {
+                    continue
+                }
+                if (x > 0 && filled[c - 1]) || (x < m - 1 && filled[c + 1]) || (y > 0 && filled[c - m]) || (y < m - 1 && filled[c + m]) {
+                    nextFilled[c] = true
+                }
+            }
+        }
+        for c in 0..m * m {
+            filled[c] = nextFilled[c]
+        }
+    }
+    // Anything the growth could not reach — a pocket walled off by the grid's own
+    // edges — takes the average of the sea, which is the best answer available and
+    // beats the black it would otherwise keep.
+    var mr = 0.0
+    var mg = 0.0
+    var mb = 0.0
+    var mn = 0
+    for c in 0..m * m {
+        if known[c] {
+            mr = mr + r[c]
+            mg = mg + g[c]
+            mb = mb + b[c]
+            mn = mn + 1
+        }
+    }
+    for c in 0..m * m {
+        if !filled[c] {
+            r[c] = mr / (mn as f64)
+            g[c] = mg / (mn as f64)
+            b[c] = mb / (mn as f64)
+        }
+    }
+    // Relax the unknown cells toward the average of their neighbours, holding the
+    // known ones fixed. Jacobi, not Gauss-Seidel: in place, the sweep direction
+    // leaks into the answer and the gradient tilts the way the loop ran.
+    var nr: Vec<f64> = Vec.filled(m * m, 0.0)
+    var ng: Vec<f64> = Vec.filled(m * m, 0.0)
+    var nb: Vec<f64> = Vec.filled(m * m, 0.0)
+    for _pass in 0..ORTHO_RELAX {
+        for y in 0..m {
+            for x in 0..m {
+                let c = y * m + x
+                if known[c] {
+                    nr[c] = r[c]
+                    ng[c] = g[c]
+                    nb[c] = b[c]
+                    continue
+                }
+                var sr = 0.0
+                var sg = 0.0
+                var sb = 0.0
+                var k = 0
+                if x > 0 {
+                    sr = sr + r[c - 1]
+                    sg = sg + g[c - 1]
+                    sb = sb + b[c - 1]
+                    k = k + 1
+                }
+                if x < m - 1 {
+                    sr = sr + r[c + 1]
+                    sg = sg + g[c + 1]
+                    sb = sb + b[c + 1]
+                    k = k + 1
+                }
+                if y > 0 {
+                    sr = sr + r[c - m]
+                    sg = sg + g[c - m]
+                    sb = sb + b[c - m]
+                    k = k + 1
+                }
+                if y < m - 1 {
+                    sr = sr + r[c + m]
+                    sg = sg + g[c + m]
+                    sb = sb + b[c + m]
+                    k = k + 1
+                }
+                nr[c] = sr / (k as f64)
+                ng[c] = sg / (k as f64)
+                nb[c] = sb / (k as f64)
+            }
+        }
+        for c in 0..m * m {
+            r[c] = nr[c]
+            g[c] = ng[c]
+            b[c] = nb[c]
+        }
+    }
+    // Bilinear back up, into the no-data texels only. Cell centres sit half a
+    // coarse step in, which is what the -0.5 is: sampling from the corner shifts
+    // the whole fill by four texels and puts a step at the coverage boundary.
+    let inv = 1.0 / (ORTHO_COARSE as f64)
+    for y in 0..n {
+        let fy = ((y as f64) + 0.5) * inv - 0.5
+        var y0 = Math.floor(fy) as i64
+        if y0 < 0 {
+            y0 = 0
+        }
+        if y0 > m - 2 {
+            y0 = m - 2
+        }
+        let ty = Math.clampF64(fy - (y0 as f64), 0.0, 1.0)
+        for x in 0..n {
+            let i = (y * n + x) * 3
+            if !isNoData(t, i) {
+                continue
+            }
+            let fx = ((x as f64) + 0.5) * inv - 0.5
+            var x0 = Math.floor(fx) as i64
+            if x0 < 0 {
+                x0 = 0
+            }
+            if x0 > m - 2 {
+                x0 = m - 2
+            }
+            let tx = Math.clampF64(fx - (x0 as f64), 0.0, 1.0)
+            let c00 = y0 * m + x0
+            let c10 = c00 + 1
+            let c01 = c00 + m
+            let c11 = c01 + 1
+            t.pxu[i] = lerpByte(r[c00], r[c10], r[c01], r[c11], tx, ty)
+            t.pxu[i + 1] = lerpByte(g[c00], g[c10], g[c01], g[c11], tx, ty)
+            t.pxu[i + 2] = lerpByte(b[c00], b[c10], b[c01], b[c11], tx, ty)
+        }
+    }
+}
+
+fn lerpByte(v00: f64, v10: f64, v01: f64, v11: f64, tx: f64, ty: f64): u8 {
+    let a = v00 + (v10 - v00) * tx
+    let b = v01 + (v11 - v01) * tx
+    return Math.clampF64(a + (b - a) * ty, 0.0, 255.0) as u8
 }
 
 // ---------------------------------------------------------------- byte codec
@@ -755,7 +1078,7 @@ fn deckProfile(c: &mut City) {
 // thousand buildings — at the cost of searching one ring of cells wider, which
 // is what BUILDING_MARGIN below is for.
 fn buildIndex(c: &mut City) {
-    let span = c.reach * 2.0 + c.gridStep * 2.0
+    let span = c.reach + c.reach + c.gridStep * 2.0
     var n = (span / c.gridStep) as i64 + 1
     if n < 1 {
         n = 1

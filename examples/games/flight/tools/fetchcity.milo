@@ -16,7 +16,14 @@
 //   bridges    OSM ways tagged `bridge=yes`, kept as open polylines. The terrain
 //              grid cannot carry them — SRTM samples the water under a bridge,
 //              not the deck over it — so they are their own layer.
+//   imagery    The USGS National Map orthoimagery basemap, written beside the
+//              asset as `<name>.ortho.png` and draped over the terrain. USGS
+//              products are public domain. NAIP proper is the sharper source and
+//              is what the mainland places use, but it is a USDA farm survey and
+//              stops at the CONUS border — over Hawaii it returns an empty tile,
+//              which is what the National Map service is here for.
 //
+// `--ortho <file.city>` refetches only the drape for an existing asset.
 // `--update <file.city>` refetches ONLY the bridge layer and splices it onto an
 // existing asset. Terrain, land cover and a hundred thousand building footprints
 // are minutes of Overpass time and do not change between runs; a new trailing
@@ -745,6 +752,84 @@ fn putBridges(buf: &mut string, br: &Bridges) {
     }
 }
 
+// ------------------------------------------------------------------ imagery
+
+let ORTHO_PX: i64 = 2048
+
+// A square aerial photograph of exactly the asset's extent.
+//
+// Written to disk exactly as the server sent it — no decode, no re-encode. The
+// game's own PNG decoder reads it at load, so a round trip here would only add a
+// place for the picture to change without anyone deciding it should.
+fn fetchOrtho(latMin: f64, lonMin: f64, latMax: f64, lonMax: f64, out: &string): bool {
+    if pathExists(out) {
+        print("  drape already at " + out.clone())
+        return true
+    }
+    let bbox = fmt7(lonMin) + "," + fmt7(latMin) + "," + fmt7(lonMax) + "," + fmt7(latMax)
+    let url = "https://basemap.nationalmap.gov/arcgis/rest/services/USGSImageryOnly/MapServer/export?bbox=" + bbox + "&bboxSR=4326&imageSR=4326&size=" + ORTHO_PX.toString() + "," + ORTHO_PX.toString() + "&format=png24&f=image"
+    print("  fetching imagery ...")
+    var attempt = 0
+    while attempt < 3 {
+        match fetch(url) {
+            Result.Ok(resp) => {
+                let body = resp.text()
+                // A PNG this small over a 2048-square extent is the service's
+                // empty tile, not a photograph — that is how a place outside the
+                // imagery's coverage announces itself, with a 200.
+                if resp.ok() && body.len > 200000 {
+                    match writeFile(out.clone(), body) {
+                        Result.Ok(n) => {
+                            print("  wrote " + out.clone() + " (" + (n / 1024).toString() + " KiB)")
+                            return true
+                        }
+                        Result.Err(_e) => {
+                            print("  could not write " + out.clone())
+                            return false
+                        }
+                    }
+                }
+                print("  imagery service returned " + resp.status.toString() + ", " + (body.len / 1024).toString() + " KiB")
+            }
+            Result.Err(_e) => {
+                print("  imagery service unreachable")
+            }
+        }
+        attempt = attempt + 1
+        if attempt < 3 {
+            sleepSecs(4)
+        }
+    }
+    return false
+}
+
+// `foo.city` -> `foo.ortho.png`, the name cityLoad looks for beside an asset.
+fn orthoPathOf(cityPath: &string): string {
+    var n = cityPath.len
+    if cityPath.endsWith(".city") {
+        n = n - 5
+    }
+    var base = ""
+    for i in 0..n {
+        base.push(cityPath[i])
+    }
+    return base + ".ortho.png"
+}
+
+fn updateOrtho(path: string) {
+    let Result.Ok(src) = readFile(path) else {
+        print("cannot read " + path)
+        return
+    }
+    let Result.Ok(c) = cityParse(src) else {
+        print("cannot parse " + path)
+        return
+    }
+    print(c.name.clone() + ": " + fmt7(c.originLat) + ", " + fmt7(c.originLon) + "  radius " + (c.reach as i64).toString() + " m")
+    let mPerLon = M_PER_DEG_LAT * Math.cos(c.originLat * 3.14159265358979 / 180.0)
+    let _ = fetchOrtho(c.originLat - c.reach / M_PER_DEG_LAT, c.originLon - c.reach / mPerLon, c.originLat + c.reach / M_PER_DEG_LAT, c.originLon + c.reach / mPerLon, orthoPathOf(path))
+}
+
 // --------------------------------------------------------------------- main
 
 fn flagOf(a: &Vec<string>, name: &string, dflt: string): string {
@@ -761,6 +846,11 @@ fn main() {
     let update = flagOf(a, "--update", "")
     if update != "" {
         updateBridges(update)
+        return
+    }
+    let orthoOnly = flagOf(a, "--ortho", "")
+    if orthoOnly != "" {
+        updateOrtho(orthoOnly)
         return
     }
     let name = flagOf(a, "--name", "City")
@@ -976,9 +1066,10 @@ fn main() {
 
     putBridges(buf, br)
 
-    match writeFile(out, buf) {
+    match writeFile(out.clone(), buf) {
         Ok(nbytes) => {
-            print("wrote " + out + " (" + (nbytes / 1024).toString() + " KiB)")
+            print("wrote " + out.clone() + " (" + (nbytes / 1024).toString() + " KiB)")
+            let _ = fetchOrtho(latMin, lonMin, latMax, lonMax, orthoPathOf(out))
         }
         Err(_e) => {
             print("could not write " + out)

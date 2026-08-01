@@ -45,7 +45,7 @@ from "std/argparse" import {
     ArgParser, ParsedArgs
 }
 from "./render3d" import {
-    drawWorld, drawHud, drawGuide, drawMarkGuide, drawSpeedLines
+    drawWorld, drawHud, drawGuide, drawMarkGuide, drawMarkBeam, drawSpeedLines
 }
 
 pub let W: i64 = 1280
@@ -57,6 +57,7 @@ pub let EPILOG: string = "built-in places (--place):
   manhattan   Manhattan — the densest skyline there is
   yosemite    Yosemite Valley — El Capitan, Half Dome, granite
   canyon      the Grand Canyon — no buildings at all, just the rock
+  honolulu    Honolulu — a skyline with a volcano behind it, and reef below
 
 controls:
   UP / DOWN                   pitch — the only axis; the plane steers itself
@@ -87,7 +88,12 @@ fn parseOpts(): ParsedArgs {
     return p.parse()
 }
 
-pub let PLACES: string = "sf manhattan yosemite canyon"
+pub let PLACES: string = "sf manhattan yosemite canyon honolulu"
+
+// One number for the size of the lineup. It used to be a literal 4 in three
+// places — a modulo, a loop bound and a wrap — and adding a fifth place meant
+// finding all three.
+pub let PLACE_COUNT: i64 = 5
 
 // Every place is an @embedFile of the same bytes `--city` would read off disk,
 // so the decoder cannot tell the difference. They cost about 3 MB of binary
@@ -97,6 +103,9 @@ pub let PLACES: string = "sf manhattan yosemite canyon"
 // All four are embedded whichever this returns: @embedFile is resolved at
 // compile time, so the branch picks bytes that are already in the binary.
 fn placeBytes(name: &string): string {
+    if name == "honolulu" {
+        return @embedFile("cities/honolulu.city")
+    }
     if name == "manhattan" {
         return @embedFile("cities/manhattan.city")
     }
@@ -119,11 +128,14 @@ fn placeName(i: i64): string {
     if i == 3 {
         return "canyon"
     }
+    if i == 4 {
+        return "honolulu"
+    }
     return "sf"
 }
 
 fn placeIndex(name: &string): i64 {
-    for i in 0..4 {
+    for i in 0..PLACE_COUNT {
         if placeName(i) == name {
             return i
         }
@@ -134,11 +146,17 @@ fn placeIndex(name: &string): i64 {
 // The aerial photograph for a built-in place, or "" if it has none yet. Same
 // @embedFile story as the .city itself — resolved at compile time, so every arm
 // is in the binary whichever this returns.
-// Every place has one. That is why all four are in the United States: NAIP is a
-// USDA survey and stops at the border, and the open global alternative
+// Every place has one. That is why all five are in the United States: the open
+// imagery that can be redistributed is USGS/USDA, and the global alternative
 // (Sentinel-2 via EOX) serves JPEG, which nothing here can decode. Hong Kong and
 // Rio were dropped rather than left as the only two flat-shaded places.
+//
+// Hawaii is US but not CONUS, so NAIP — a USDA farm survey — has nothing there;
+// the drape comes off the USGS National Map basemap instead. See fetchcity.
 fn orthoBytes(name: &string): string {
+    if name == "honolulu" {
+        return @embedFile("cities/honolulu.ortho.png")
+    }
     if name == "manhattan" {
         return @embedFile("cities/manhattan.ortho.png")
     }
@@ -181,8 +199,8 @@ fn parsePlace(name: &string): City {
 // flight.
 fn allPlaces(first: i64): Vec<City> {
     var v: Vec<City> = Vec.new()
-    for k in 0..4 {
-        v.push(parsePlace(placeName((first + k) % 4)))
+    for k in 0..PLACE_COUNT {
+        v.push(parsePlace(placeName((first + k) % PLACE_COUNT)))
     }
     return v
 }
@@ -308,7 +326,7 @@ pub fn main(): i32 {
         // Only in one-axis mode: with `--pro` these same keys are the bank axis
         // and stepping the world every time the player turned would be absurd.
         if easy && inp.placeStep != 0 && placeIdx >= 0 {
-            placeIdx = (placeIdx + inp.placeStep + 4) % 4
+            placeIdx = (placeIdx + inp.placeStep + PLACE_COUNT) % PLACE_COUNT
             worldSetPlace(w, parsePlace(placeName(placeIdx)))
         }
         musicTick(snd)
@@ -341,6 +359,7 @@ pub fn main(): i32 {
         }
         drawSpeedLines(c, w)
         drawGuide(c, w, view)
+        drawMarkBeam(c, w, view)
         drawMarkGuide(c, w, view)
         drawHud(c, w, s, fpsShown)
 

@@ -43,7 +43,8 @@ from "./ephem" import {
 }
 from "./world" import {
     World, worldNew, startMission, resetMission, replan, commitPlan, doCapture,
-    advanceWorld, say, currentCapture, scrub, snapToBest, buildCurve, buildPreview
+    advanceWorld, say, currentCapture, scrub, snapToBest, buildCurve, buildPreview,
+    updateCamera
 }
 from "./render" import {
     W, H, drawScene, drawHud, drawOutcome
@@ -147,6 +148,7 @@ pub fn main(): i32 {
         }
 
         handleMap(w, inp, steps)
+        updateCamera(w, dt)
         advanceWorld(w, dt)
 
         drawScene(c, scene, w, texes)
@@ -174,6 +176,7 @@ fn handleMap(w: &mut World, inp: &Input, steps: &Vec<f64>) {
     // Camera. Dragging turns it; the wheel zooms, geometrically, because the
     // useful range spans a parking orbit to Saturn's and a linear zoom would
     // spend its whole travel in the first hundredth of that.
+    w.dragging = inp.down
     if inp.down {
         w.camYaw = w.camYaw - inp.dragX * 0.005
         w.camPitch = w.camPitch + inp.dragY * 0.005

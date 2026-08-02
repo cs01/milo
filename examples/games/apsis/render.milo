@@ -36,7 +36,7 @@ from "./nbody" import {
     Ship, Ephem, ephemPos, ephemVel, propagate, orbitAbout, dominantBody, Orbit
 }
 from "./world" import {
-    World, shipAbout, shipOrbit, currentCapture, porkDep, porkTof, CURVE_N
+    World, shipAbout, shipOrbit, currentCapture, CURVE_N, camDistNow, camPitchNow, arrivalEstimate
 }
 from "./mission" import {
     MISSION_COUNT
@@ -63,10 +63,11 @@ pub fn mapOf(w: &World): Map {
     if w.focus < 0 {
         focus = w.ship.pos
     }
-    let k = 1.0 / w.camDist
-    let cp = Math.cos(w.camPitch)
+    let k = 1.0 / camDistNow(w)
+    let pitch = camPitchNow(w)
+    let cp = Math.cos(pitch)
     // Unit vector from the focus toward the camera.
-    let dir = v3(Math.cos(w.camYaw) * cp, Math.sin(w.camYaw) * cp, Math.sin(w.camPitch))
+    let dir = v3(Math.cos(w.camYaw) * cp, Math.sin(w.camYaw) * cp, Math.sin(pitch))
     let eye = dir
     let fwd = dir.scale(-1.0)
     var right = fwd.cross(v3(0.0, 0.0, 1.0))
@@ -134,6 +135,18 @@ fn polyline(c: &mut Canvas, m: &Map, pts: &Vec<Vec3>, from: i64, to: i64, r: f64
         drawSeg(c, m, a, bb, r, g, b, wide)
         i = i + 1
     }
+}
+
+// The same polyline drawn three times, wide and faint underneath, narrow and
+// bright on top. The canvas is additive and gets a bloom pass at present time,
+// so the overlap reads as a glow around the path rather than as three lines —
+// it is the cheapest way to make a trajectory look like it is emitting light
+// instead of being a wire.
+fn glowline(c: &mut Canvas, m: &Map, pts: &Vec<Vec3>, r: f64, g: f64, b: f64) {
+    let n = pts.len as i64
+    polyline(c, m, pts, 0, n, r * 0.16, g * 0.16, b * 0.16, 7.0)
+    polyline(c, m, pts, 0, n, r * 0.34, g * 0.34, b * 0.34, 3.4)
+    polyline(c, m, pts, 0, n, r, g, b, 1.6)
 }
 
 fn drawSeg(c: &mut Canvas, m: &Map, a: &Vec3, b: &Vec3, r: f64, g: f64, bl: f64, wide: f64) {
@@ -405,14 +418,14 @@ fn drawShipTrack(c: &mut Canvas, m: &Map, w: &World) {
         span = 400.0 * SEC_PER_DAY
     }
     let live = propagate(w.e, w.ship, w.t, span, 200, 0 - 1)
-    polyline(c, m, live.pts, 0, live.pts.len as i64, 0.20, 0.85, 0.95, 1.0)
+    glowline(c, m, live.pts, 0.22, 0.80, 0.95)
 
     if (w.trackValid || w.preview) && !w.captured {
         // The plan, brighter and thicker. Two lines on the map at once is the
         // whole point: one is where you are going, the other is where you would
         // go if you did nothing.
         let n = w.track.pts.len as i64
-        polyline(c, m, w.track.pts, 0, n, 1.0, 0.66, 0.22, 2.2)
+        glowline(c, m, w.track.pts, 1.0, 0.66, 0.22)
         // Label the path itself, at its midpoint, so it reads as "this is where
         // you are going" and not as decoration.
         if n > 4 {
@@ -422,16 +435,34 @@ fn drawShipTrack(c: &mut Canvas, m: &Map, w: &World) {
                 plate(c, (mp.x + 16.0) as i64, (mp.y - 30.0) as i64, "YOUR TRANSFER  " + fmtSpan(w.planTof), UI, 1.0, 0.78, 0.34)
             }
         }
-        // Closest approach, marked where it happens.
+        // The two burns, marked on the path where they happen and priced. These
+        // are the only two moments in the whole mission that cost anything, and
+        // before this they were invisible.
+        if n > 1 {
+            let dp = project(m, toRender(m, w.track.pts[0]))
+            if dp.z > 0.0 {
+                burnMark(c, dp.x, dp.y, 0.35, 0.95, 1.0)
+                plate(c, (dp.x + 16.0) as i64, (dp.y - 10.0) as i64, "DEPARTURE BURN  " + fmtDv(w.planEjDv), UI, 0.45, 0.95, 1.0)
+            }
+        }
         if w.track.caDist > 0.0 && w.track.caDist < 1.0e12 {
             let to = w.missions[w.mission].to
             let cp = ephemPos(w.e, to, w.track.caTime)
             let p = project(m, toRender(m, cp))
             if p.z > 0.0 {
-                circleOutline(c, p.x, p.y, 7.0, 1.0, 0.72, 0.25)
+                burnMark(c, p.x, p.y, 1.0, 0.62, 0.25)
+                plate(c, (p.x + 16.0) as i64, (p.y + 12.0) as i64, "CAPTURE BURN  " + fmtDv(arrivalEstimate(w, w.track)), UI, 1.0, 0.74, 0.34)
             }
         }
     }
+}
+
+// A burn: a bright core with a halo, so it reads as an event on the path rather
+// than as another circle among the markers.
+fn burnMark(c: &mut Canvas, cx: f64, cy: f64, r: f64, g: f64, b: f64) {
+    spot(c, cx, cy, 16.0, r * 0.30, g * 0.30, b * 0.30)
+    spot(c, cx, cy, 6.0, r * 1.6, g * 1.6, b * 1.6)
+    circleOutline(c, cx, cy, 11.0, r, g, b)
 }
 
 fn circleOutline(c: &mut Canvas, cx: f64, cy: f64, rad: f64, r: f64, g: f64, b: f64) {
@@ -759,7 +790,10 @@ fn drawScrubBar(c: &mut Canvas, w: &World) {
             }
             let col = rampColor(f)
             let h = BAR_H * (1.0 - f * 0.88)
-            fillRect(c, x, BAR_Y + BAR_H - h, x + cw, BAR_Y + BAR_H, col.x, col.y, col.z)
+            fillRect(c, x, BAR_Y + BAR_H - h, x + cw, BAR_Y + BAR_H, col.x * 0.55, col.y * 0.55, col.z * 0.55)
+            // A hot rim along the top of the fill. The eye follows the bright
+            // edge, and the bright edge is the shape of the answer.
+            fillRect(c, x, BAR_Y + BAR_H - h, x + cw, BAR_Y + BAR_H - h + 3.0, col.x * 2.2, col.y * 2.2, col.z * 2.2)
         }
         i = i + 1
     }
@@ -833,7 +867,7 @@ fn drawActionBar(c: &mut Canvas, w: &World) {
     } else {
         if !w.committed {
             msg = "PRESS  ENTER  TO COMMIT  (" + fmtDv(w.planDv) + ")"
-            sub = "or P to choose a different window"
+            sub = "or LEFT / RIGHT to move the date, UP / DOWN the flight time"
         } else {
             let cap = currentCapture(w)
             let to = w.missions[w.mission].to

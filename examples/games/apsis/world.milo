@@ -50,6 +50,12 @@ pub struct World {
     spent: f64,
 
     focus: i64,
+    // The opening sweep: 1 at mission start, easing to 0. The camera starts
+    // wide and high and settles into the working view, because a static cut to
+    // a map of the solar system does not tell you it IS a map of the solar
+    // system — the move does.
+    sweep: f64,
+    dragging: bool,
     camDist: f64,
     camYaw: f64,
     camPitch: f64,
@@ -124,7 +130,7 @@ pub fn worldNew(): World {
         ,
         t: 0.0, warp: 60.0, paused: true,
         budget: 0.0, spent: 0.0,
-        focus: EARTH, camDist: 4.0e7, camYaw: 0.6, camPitch: 0.45,
+        focus: EARTH, sweep: 0.0, dragging: false, camDist: 4.0e7, camYaw: 0.6, camPitch: 0.45,
         planDep: 0.0, planTof: 0.0, planValid: false, planDv: 0.0, planArrVinf: 0.0,
         planPost: Ship {
             pos: v3(0.0, 0.0, 0.0), vel: v3(0.0, 0.0, 0.0)
@@ -175,17 +181,27 @@ pub fn startMission(w: &mut World, idx: i64) {
     w.paused = true
     w.warp = 60.0
     w.focus = from
-    // Frame the whole trip. Opening on the parking orbit is a beautiful shot of
-    // a planet and tells the player nothing about where they are going; the
-    // target and the transfer arc both have to be on screen from the first frame.
-    let reach = (ephemPos(w.e, to, t0 + tof) - ephemPos(w.e, from, t0)).len()
-    w.camDist = reach * 1.25
+    // Frame the whole trip from above the ecliptic. Opening on the parking orbit
+    // is a beautiful shot of a planet and tells the player nothing about where
+    // they are going; both orbits and the transfer between them have to be on
+    // screen, and from a viewpoint that shows them as the ellipses they are
+    // rather than edge-on as three straight lines.
+    if isLocalHop(w, i) {
+        w.camDist = 1.15e9
+    } else {
+        var reach = w.bodies[to].el.a
+        if w.bodies[from].el.a > reach {
+            reach = w.bodies[from].el.a
+        }
+        w.camDist = reach * 2.7
+    }
+    w.sweep = 1.0
     // Open on the DAY side. The camera angle is arbitrary, but a first frame
     // showing an unlit planet looks like a bug in the lighting rather than like
     // night, and the terminator is the best thing on screen.
     let toSun = (v3(0.0, 0.0, 0.0) - ephemPos(w.e, from, t0)).norm()
     w.camYaw = Math.atan2(toSun.y, toSun.x) + 0.55
-    w.camPitch = 0.38
+    w.camPitch = 0.95
     w.planDep = t0 + w.missions[i].nominalWait
     w.planTof = tof
     w.planValid = false
@@ -272,8 +288,14 @@ pub fn replan(w: &mut World) {
         // Refine straight from the burn: a lunar transfer is only a few days, so
         // it is not the ill-conditioned mess an interplanetary departure is, and
         // there is no separate correction to schedule.
+        // The arrival speed has to be measured at ARRIVAL. Taking it at the burn
+        // gives about 10 km/s rather than the real 0.9, and the gravity focusing
+        // factor that turns a wanted periapsis into an aim point is very
+        // sensitive to it — the aim came out three times too close and the ship
+        // flew into the Moon. One throwaway propagation buys the real number.
+        let rough = propagate(w.e, post, burn.t, tof, 8, to)
+        let arrVinf = rough.endVel - ephemVel(w.e, to, rough.tEnd)
         let aim = ephemPos(w.e, to, burn.t + tof)
-        let arrVinf = post.vel - ephemVel(w.e, to, burn.t + tof)
         let fix = solveArrival(w.e, post, burn.t, burn.t + tof, to, wantPeri, arrVinf, 4)
         let cruise = Ship {
             pos: post.pos, vel: post.vel + fix
@@ -285,7 +307,10 @@ pub fn replan(w: &mut World) {
         w.planMcT = burn.t
         w.planFix = fix
         w.planEjDv = burn.dv.len()
-        w.planDv = burn.dv.len() + fix.len()
+        // The quote includes the ARRIVAL burn. Quoting departure only is how a
+        // mission gets committed to at 6.6 km/s and then dies at the far end
+        // needing 9.4 more; the number on screen has to be the whole trip.
+        w.planDv = burn.dv.len() + fix.len() + arrivalEstimate(w, w.track)
         w.planArrVinf = (w.track.endVel - ephemVel(w.e, to, w.track.tEnd)).len()
         w.planValid = true
         w.trackValid = true
@@ -326,11 +351,38 @@ pub fn replan(w: &mut World) {
     w.planMcT = mcT
     w.planFix = fix
     w.planEjDv = ej.dvMag
-    w.planDv = ej.dvMag + fix.len()
+    w.planDv = ej.dvMag + fix.len() + arrivalEstimate(w, w.track)
     w.planArrVinf = vinfArr.len()
     w.planValid = true
     w.trackValid = true
     say(w, "plan ready")
+}
+
+// What the capture burn at the far end will cost, taken from the trajectory that
+// was actually computed rather than from the patched-conic guess.
+pub fn arrivalEstimate(w: &World, tr: &Track): f64 {
+    let to = w.missions[w.mission].to
+    let mu = w.e.mu[to]
+    let peri = tr.caDist
+    if peri <= 0.0 || peri > 1.0e12 {
+        return 0.0
+    }
+    // `caRelSpeed` is the speed at CLOSEST APPROACH, which is already at the
+    // bottom of the well — it is not the hyperbolic excess. Feeding it through
+    // sqrt(vinf^2 + 2mu/r) adds the fall a second time and overstated the Mars
+    // capture by 1.2 km/s, which was enough to price every mission out of its
+    // own budget.
+    let vPeri = tr.caRelSpeed
+    let apo = w.bodies[to].radius + w.missions[w.mission].captureApo
+    var a = (peri + apo) * 0.5
+    if a < peri {
+        a = peri
+    }
+    let vEll = Math.sqrt(mu * (2.0 / peri - 1.0 / a))
+    if vPeri <= vEll {
+        return 0.0
+    }
+    return vPeri - vEll
 }
 
 // Spend the departure burn and start flying it.
@@ -407,15 +459,20 @@ pub fn checkCapture(w: &mut World) {
         say(w, "still on an escape trajectory")
         return
     }
-    let want = w.bodies[to].radius + w.missions[w.mission].captureAlt
-    let tol = w.missions[w.mission].tolerance
-    if ob.periapsis < w.bodies[to].radius {
-        say(w, "that orbit intersects the surface")
+    // What counts as arrival is a genuinely BOUND orbit, not a bullseye. The
+    // mission's capture altitude is what the planner aims for; judging the
+    // player against it to the kilometre would be scoring them on the shooting
+    // solver's residual rather than on their own decisions.
+    if ob.periapsis < w.bodies[to].radius + 50.0e3 {
+        say(w, "that orbit grazes the surface")
         w.failed = true
         return
     }
-    if Math.abs(ob.periapsis - want) > tol {
-        say(w, "captured, but the periapsis is outside the mission band")
+    // Bound to the target rather than merely curving: an ellipse whose apoapsis
+    // reaches past the sphere of influence belongs to the Sun, and it will be
+    // taken back.
+    if ob.apoapsis > soiRadius(w.bodies, to) {
+        say(w, "captured for now, but that apoapsis is outside " + w.bodies[to].name.clone() + "'s pull")
         return
     }
     // One full revolution later, is it still an orbit?
@@ -441,6 +498,31 @@ pub fn shipAbout(w: &World): i64 {
 
 pub fn shipOrbit(w: &World): Orbit {
     return orbitAbout(w.e, w.ship, w.t, shipAbout(w))
+}
+
+// Camera motion that is not the player's: the opening sweep, and a slow drift
+// so a paused solar system is never a still image.
+pub fn updateCamera(w: &mut World, wall: f64) {
+    if w.sweep > 0.0 {
+        w.sweep = w.sweep - wall / 4.0
+        if w.sweep < 0.0 {
+            w.sweep = 0.0
+        }
+    }
+    if !w.dragging {
+        w.camYaw = w.camYaw + wall * 0.015
+    }
+}
+
+// How far out and how high the camera actually sits this frame, sweep included.
+pub fn camDistNow(w: &World): f64 {
+    let e = w.sweep * w.sweep
+    return w.camDist * (1.0 + 2.2 * e)
+}
+
+pub fn camPitchNow(w: &World): f64 {
+    let e = w.sweep * w.sweep
+    return w.camPitch * (1.0 - e) + 1.28 * e
 }
 
 pub fn advanceWorld(w: &mut World, wall: f64) {
@@ -674,16 +756,49 @@ pub fn scrub(w: &mut World, dDep: f64, dTof: f64) {
     buildPreview(w)
 }
 
-// Jump straight to the cheapest departure at this flight time.
+// Jump to the cheapest transfer in the window.
+//
+// The cheap cost model is a patched conic; the price the player is actually
+// charged comes from a shooting solver over the full force model. Those two
+// disagree most exactly where it matters — on fast, high-energy transfers — and
+// a search that trusts the cheap model walks into that gap and returns something
+// nobody can fly. Ranking on it alone picked a 748-day Jupiter shot that really
+// cost 40 km/s and called it the best in the window.
+//
+// So the model only RANKS, and each shortlisted flight time is priced by the
+// real planner. Five real plans is about a quarter of a second — affordable for
+// a keypress, and it means the number on screen is the number they get.
 pub fn snapToBest(w: &mut World) {
     if w.committed {
         return
     }
-    if w.curve.len == 0 {
+    let m = w.mission
+    let t0 = w.missions[m].windowOpen
+    let span = w.missions[m].windowSpan
+    let mid = w.missions[m].nominalTof
+    var mults: Vec<f64> = Vec.new()
+    mults.push(0.8)
+    mults.push(1.0)
+    mults.push(1.25)
+    mults.push(1.55)
+    var bestTotal = 1.0e30
+    var bestDep = w.planDep
+    var bestTof = w.planTof
+    var k = 0
+    while k < mults.len {
+        w.planTof = mid * mults[k]
         buildCurve(w)
+        w.planDep = t0 + span * (w.curveBestI as f64) / ((CURVE_N - 1) as f64)
+        replan(w)
+        if w.planValid && w.track.hit < 0 && w.planDv < bestTotal {
+            bestTotal = w.planDv
+            bestDep = w.planDep
+            bestTof = w.planTof
+        }
+        k = k + 1
     }
-    let t0 = w.missions[w.mission].windowOpen
-    let span = w.missions[w.mission].windowSpan
-    w.planDep = t0 + span * (w.curveBestI as f64) / ((CURVE_N - 1) as f64)
-    buildPreview(w)
+    w.planTof = bestTof
+    w.planDep = bestDep
+    buildCurve(w)
+    replan(w)
 }

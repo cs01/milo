@@ -1,0 +1,113 @@
+// Plays every mission, headless, through the real game state.
+//
+//   milo run examples/games/apsis/tools/checkmissions.milo
+//
+// This is the campaign's regression test. It drives the SAME functions the
+// keyboard drives — snapToBest, replan, commitPlan, advanceWorld, doCapture —
+// so a mission that cannot be finished, or a budget set below what a competent
+// plan costs, fails here instead of forty minutes into someone's evening.
+//
+// It exists because the graphical path could not be tested by hand: the window
+// takes keystrokes and the harness has none. Everything except the drawing is
+// reachable from here.
+
+from "std/math" import {
+    Math
+}
+from "std/strconv" import {
+    formatFloat
+}
+from "../ephem" import {
+    SEC_PER_DAY
+}
+from "../nbody" import {
+    orbitAbout, dominantBody
+}
+from "../world" import {
+    World, worldNew, startMission, replan, commitPlan, doCapture, advanceWorld,
+    snapToBest, scrub, checkCapture
+}
+from "../mission" import {
+    MISSION_COUNT
+}
+
+fn dv(x: f64): string {
+    return formatFloat(x / 1000.0, 2) + " km/s"
+}
+
+fn km(x: f64): string {
+    return formatFloat(x / 1000.0, 0) + " km"
+}
+
+// Coast until `until`, in steps, exactly the way the game does it — through
+// advanceWorld, so the scheduled course correction fires on the way past.
+fn coastTo(w: &mut World, until: f64) {
+    var guard = 0
+    while w.t < until && guard < 4000 && !w.failed {
+        let left = until - w.t
+        var warp = left * 0.25
+        if warp < 60.0 {
+            warp = 60.0
+        }
+        w.warp = warp
+        advanceWorld(w, 1.0)
+        guard = guard + 1
+    }
+}
+
+pub fn main(): i32 {
+    var w = worldNew()
+    var failures = 0
+    var m = 0
+    while m < MISSION_COUNT {
+        startMission(w, m)
+        let name = w.missions[m].name.clone()
+        let to = w.missions[m].to
+        print("")
+        print("== " + name + "  (budget " + dv(w.budget) + ") ==")
+
+        // Take the cheapest departure the window offers, which is what B does.
+        snapToBest(w)
+        replan(w)
+        if !w.planValid {
+            print("  FAIL: no plan could be made")
+            failures = failures + 1
+            m = m + 1
+        } else {
+            print("  plan: depart in " + formatFloat((w.planDep - w.missions[m].windowOpen) / SEC_PER_DAY, 1) + " d, fly " + formatFloat(w.planTof / SEC_PER_DAY, 1) + " d, cost " + dv(w.planDv))
+            print("  predicted arrival: " + km(w.track.caDist - w.bodies[to].radius) + " altitude")
+            let capT = w.track.caTime
+            commitPlan(w)
+            if !w.committed {
+                print("  FAIL: commit refused — " + w.message.clone())
+                failures = failures + 1
+            } else {
+                coastTo(w, capT)
+                if w.failed {
+                    print("  FAIL during coast: " + w.message.clone())
+                    failures = failures + 1
+                } else {
+                    let before = w.spent
+                    doCapture(w)
+                    print("  capture burn " + dv(w.spent - before) + ", total spent " + dv(w.spent) + " of " + dv(w.budget))
+                    let ob = orbitAbout(w.e, w.ship, w.t, to)
+                    print("  final orbit: peri " + km(ob.periapsis - w.bodies[to].radius) + ", apo " + km(ob.apoapsis - w.bodies[to].radius) + ", closed " + (ob.closed as i64).toString() + ", holder " + w.bodies[dominantBody(w.e, w.ship.pos, w.t)].name.clone())
+                    if w.won {
+                        print("  PASS — " + w.message.clone() + ", " + dv(w.budget - w.spent) + " left")
+                    } else {
+                        print("  FAIL — " + w.message.clone())
+                        failures = failures + 1
+                    }
+                }
+            }
+            m = m + 1
+        }
+    }
+    print("")
+    if failures == 0 {
+        print("all " + MISSION_COUNT.toString() + " missions completable")
+        return 0
+    }
+    print(failures.toString() + " of " + MISSION_COUNT.toString() + " missions FAILED")
+    return 1
+}

@@ -383,8 +383,13 @@ pub fn solveArrival(e: &Ephem, start: &Ship, t: f64, tArr: f64, target: i64, wan
         }
         let tr = propagate(e, s, t, tArr - t + 10.0 * 86400.0, 8, target)
         best = fix
-        if tr.caDist <= 0.0 || tr.hit >= 0 {
-            k = outer
+        if tr.hit >= 0 || tr.caDist <= 0.0 {
+            // The trial flew into the body. That is not a reason to stop — it is
+            // the strongest possible signal that the aim point is too close, and
+            // giving up here handed back a trajectory that impacts. Push the
+            // offset out and go round again.
+            b = b * 1.8
+            k = k + 1
         } else {
             let err = tr.caDist - wantPeri
             if Math.abs(err) < wantPeri * 0.02 {

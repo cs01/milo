@@ -1,0 +1,236 @@
+// FLYBY — the bloom and tone-map chain, on the GPU.
+//
+// gfx.present does this with loops over Vec<f32>: a 4x4 box downsample, a bright
+// pass, four separable blurs at widening strides, then a composite over every
+// pixel that adds the bloom back, tone-maps and packs to 8-bit. The composite
+// alone is a million pixels of dependent LUT lookups and it is the single
+// biggest fixed cost in the frame.
+//
+// It is also, exactly, what a fragment shader is: no cross-pixel writes, no
+// ordering, one output per pixel. So this file is the same pipeline expressed as
+// four passes over std/gpu, and the only thing that crosses the bus is the HDR
+// canvas itself.
+//
+// The arithmetic is deliberately the same as gfx.milo's, pass for pass and
+// constant for constant — the two paths are meant to produce the same picture,
+// and `--cpu` exists so they can be compared on a running frame.
+//
+// The one thing that does NOT move here is the drawing: the 3D rasteriser and
+// the 2D overlays still fill `Canvas.hdr` on the CPU, in the order they always
+// did. That order is load-bearing (see the note on gfx3d.rasterFlush), and
+// nothing in a post chain can preserve it for free.
+
+from "std/gpu" import {
+    Gpu, Mesh, Shader, Target, Texture2D, bindScreen, QUAD_VERT
+}
+
+// Quarter resolution for the bloom chain, matching gfx.canvasNew.
+pub let SHRINK: i64 = 4
+
+// Reinhard saturates well before this; gfx.milo's LUT stops at the same place.
+pub let TONE_MAX: f64 = 8.0
+
+// Only things brighter than white bloom. Same number and same reason as
+// gfx.present: mid-grey in linear light is about 0.21, so a lower threshold puts
+// an entire aerial photograph above the line and the whole picture hazes over.
+pub let BRIGHT_THRESHOLD: f64 = 0.90
+
+pub struct Post {
+    hdr: Texture2D, // the CPU canvas, re-uploaded every frame
+    a: Target, // quarter-res ping
+    b: Target, // quarter-res pong
+    bright: Shader,
+    blur: Shader,
+    comp: Shader,
+    quad: Mesh,
+    w: i64,
+    h: i64,
+    bw: i64,
+    bh: i64,
+}
+
+// Build the chain. Fails only on a shader that will not compile or a framebuffer
+// the driver refuses — both of which are "this machine cannot run the GPU path",
+// which the caller answers by staying on the CPU one.
+pub fn postNew(w: i64, h: i64, hdr: &Vec<f32>): Result<Post, string> {
+    let bw = w / SHRINK
+    let bh = h / SHRINK
+    let bright = Shader.compile(QUAD_VERT, BRIGHT_FRAG)?
+    let blur = Shader.compile(QUAD_VERT, BLUR_FRAG)?
+    let comp = Shader.compile(QUAD_VERT, COMPOSITE_FRAG)?
+    // NEAREST on the source: the bright pass takes exactly the sixteen texels of
+    // its 4x4 block, the way the CPU downsample does. Filtering here would blend
+    // in neighbours the CPU never saw.
+    let tex = Texture2D.rgb32f(w, h, hdr, false)
+    // LINEAR on the bloom targets, because the composite upsamples from them.
+    // The blur taps land on texel centres, where linear and nearest agree, so
+    // one filter setting serves both readers.
+    let a = Target.new(bw, bh, false, true)?
+    let b = Target.new(bw, bh, false, true)?
+    return Result.Ok(Post {
+        hdr: tex,
+        a: a,
+        b: b,
+        bright: bright,
+        blur: blur,
+        comp: comp,
+        quad: Mesh.fullscreenQuad(),
+        w: w,
+        h: h,
+        bw: bw,
+        bh: bh,
+    }
+    )
+}
+
+// One frame: upload, bloom, composite to the window. `dw`/`dh` are the
+// drawable's pixel size, which is not the window's size on a Retina display.
+//
+// The caller still has to zero the HDR canvas afterwards — gfx.present did that
+// as a side effect of reading it, and nothing on this path touches host memory.
+pub fn postDraw(p: &Post, hdr: &Vec<f32>, bloomGain: f64, exposure: f64, dw: i64, dh: i64) {
+    postUpload(p, hdr)
+
+    Gpu.depthTest(false)
+    Gpu.blendOff()
+
+    p.a.bind()
+    p.bright.bind()
+    p.hdr.bind(0)
+    p.bright.uniformI("uSrc", 0)
+    p.bright.uniform2F("uTexel", 1.0 / (p.w as f64), 1.0 / (p.h as f64))
+    p.bright.uniformF("uThreshold", BRIGHT_THRESHOLD)
+    p.quad.draw()
+
+    // Widening strides, [1,4,6,4,1]/16 each: a wide halo for twenty taps. Without
+    // the widest pass the halo has a visible square edge.
+    gpuBlurPass(p, 1)
+    gpuBlurPass(p, 2)
+    gpuBlurPass(p, 4)
+    gpuBlurPass(p, 8)
+
+    // Letterbox rather than stretch. The frame is always rendered at w x h, so a
+    // window of another shape gets bars — the same thing SDL_RenderSetLogicalSize
+    // does for the CPU path, and for the same reason: a 16:9 frame stretched
+    // across a 16:10 display turns every circle on the HUD into an ellipse.
+    bindScreen(dw, dh)
+    Gpu.clear(0.0, 0.0, 0.0, 1.0, false)
+    // Fit by width, and if that overflows the height, fit by height instead.
+    var vw = dw
+    var vh = vw * p.h / p.w
+    if vh > dh {
+        vh = dh
+        vw = vh * p.w / p.h
+    }
+    Gpu.viewport((dw - vw) / 2, (dh - vh) / 2, vw, vh)
+
+    p.comp.bind()
+    p.hdr.bind(0)
+    p.a.bindTexture(1)
+    p.comp.uniformI("uHdr", 0)
+    p.comp.uniformI("uBloom", 1)
+    // gfx.compositeAll folds the exposure into the bloom gain AND applies it
+    // again to the sum. Keeping the same two numbers keeps the same picture.
+    p.comp.uniformF("uGain", bloomGain * exposure)
+    p.comp.uniformF("uExposure", exposure)
+    p.comp.uniformF("uToneMax", TONE_MAX)
+    p.quad.draw()
+}
+
+// The canvas going up the bus, on its own, so a benchmark can say how much of
+// the GPU path is transfer and how much is shading.
+pub fn postUpload(p: &Post, hdr: &Vec<f32>) {
+    p.hdr.updateRgb32f(hdr)
+}
+
+// Horizontal a -> b, then vertical b -> a, so the chain always leaves its result
+// in `a` and the next stride can start from it.
+fn gpuBlurPass(p: &Post, stride: i64) {
+    let sx = (stride as f64) / (p.bw as f64)
+    let sy = (stride as f64) / (p.bh as f64)
+
+    p.b.bind()
+    p.blur.bind()
+    p.a.bindTexture(0)
+    p.blur.uniformI("uSrc", 0)
+    p.blur.uniform2F("uStep", sx, 0.0)
+    p.quad.draw()
+
+    p.a.bind()
+    p.blur.bind()
+    p.b.bindTexture(0)
+    p.blur.uniformI("uSrc", 0)
+    p.blur.uniform2F("uStep", 0.0, sy)
+    p.quad.draw()
+}
+
+pub fn postFree(p: &Post) {
+    p.quad.free()
+    p.bright.free()
+    p.blur.free()
+    p.comp.free()
+    p.a.free()
+    p.b.free()
+    p.hdr.free()
+}
+
+// ── shaders ───────────────────────────────────────────────────────────────────
+
+// The 4x4 box downsample and the bright pass in one, exactly as gfx.brightPass
+// does them: average the block, take its luminance, and keep the fraction of the
+// colour that sits above the threshold.
+pub let BRIGHT_FRAG: string = "#version 330 core
+in vec2 vUv;
+out vec4 fragColor;
+uniform sampler2D uSrc;
+uniform vec2 uTexel;
+uniform float uThreshold;
+void main() {
+    vec3 s = vec3(0.0);
+    for (int dy = 0; dy < 4; dy++) {
+        for (int dx = 0; dx < 4; dx++) {
+            vec2 o = vec2(float(dx) - 1.5, float(dy) - 1.5) * uTexel;
+            s += texture(uSrc, vUv + o).rgb;
+        }
+    }
+    s *= 0.0625;
+    float lum = dot(s, vec3(0.299, 0.587, 0.114));
+    float keep = lum > uThreshold ? (lum - uThreshold) / lum : 0.0;
+    fragColor = vec4(s * keep, 1.0);
+}
+"
+
+pub let BLUR_FRAG: string = "#version 330 core
+in vec2 vUv;
+out vec4 fragColor;
+uniform sampler2D uSrc;
+uniform vec2 uStep;
+void main() {
+    vec3 s = texture(uSrc, vUv - 2.0 * uStep).rgb * 0.0625
+           + texture(uSrc, vUv - uStep).rgb * 0.25
+           + texture(uSrc, vUv).rgb * 0.375
+           + texture(uSrc, vUv + uStep).rgb * 0.25
+           + texture(uSrc, vUv + 2.0 * uStep).rgb * 0.0625;
+    fragColor = vec4(s, 1.0);
+}
+"
+
+// The v flip is here and nowhere else: GL's row 0 is the bottom of the image and
+// the canvas's row 0 is the top, so every pass upstream works in the canvas's
+// own upside-down space and only the one that reaches the window turns it over.
+pub let COMPOSITE_FRAG: string = "#version 330 core
+in vec2 vUv;
+out vec4 fragColor;
+uniform sampler2D uHdr;
+uniform sampler2D uBloom;
+uniform float uGain;
+uniform float uExposure;
+uniform float uToneMax;
+void main() {
+    vec2 uv = vec2(vUv.x, 1.0 - vUv.y);
+    vec3 lin = (texture(uHdr, uv).rgb + texture(uBloom, uv).rgb * uGain) * uExposure;
+    lin = clamp(lin, 0.0, uToneMax);
+    vec3 mapped = lin / (1.0 + lin);
+    fragColor = vec4(pow(mapped, vec3(0.4545454545)), 1.0);
+}
+"

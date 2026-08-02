@@ -7,26 +7,25 @@
 // as one file with no asset path to get wrong.
 //
 // Real 3D: a perspective camera, near-plane clipping and a depth-buffered
-// triangle rasteriser, all on the CPU in safe Milo (see gfx3d.milo). There is no
-// GPU pipeline here — SDL only blits the finished frame.
+// triangle rasteriser, all on the CPU in safe Milo (see gfx3d.milo). The bloom
+// and tone map that turn that HDR canvas into a picture run on the GPU instead
+// (gpupost.milo, over std/gpu); `--cpu` keeps them on the CPU, and display.milo
+// is the seam. Which one is in use changes nothing above it.
 //
 // You cannot crash. The ground pushes you up if you dive into it.
 
 from "./sdl" import {
     Input,
-    SDL_Init, SDL_CreateWindow, SDL_CreateRenderer, SDL_CreateTexture,
-    SDL_UpdateTexture, SDL_RenderClear, SDL_RenderCopy, SDL_RenderPresent,
-    SDL_ShowCursor, SDL_GetTicks, SDL_DestroyTexture, SDL_DestroyRenderer,
-    SDL_SetWindowFullscreen, SDL_MaximizeWindow, SDL_RenderSetLogicalSize,
-    SDL_WINDOW_RESIZABLE, SDL_WINDOW_FULLSCREEN_DESKTOP,
-    SDL_DestroyWindow, SDL_Quit,
-    SDL_INIT_VIDEO, SDL_INIT_AUDIO, SDL_WINDOWPOS_CENTERED, SDL_WINDOW_SHOWN,
-    SDL_TEXTUREACCESS_STREAMING, SDL_PIXELFORMAT_ABGR8888,
-    SDL_RENDERER_ACCELERATED, SDL_RENDERER_PRESENTVSYNC,
+    SDL_Init, SDL_ShowCursor, SDL_GetTicks, SDL_SetWindowFullscreen,
+    SDL_WINDOW_FULLSCREEN_DESKTOP, SDL_Quit,
+    SDL_INIT_VIDEO, SDL_INIT_AUDIO,
     inputNew, pollInput
 }
+from "./display" import {
+    Screen, screenClose, screenOpen, screenPresent
+}
 from "./gfx" import {
-    Canvas, canvasNew, canvasFill, present, text, textCentered, fillRect, thickLine
+    Canvas, canvasNew, canvasFill, text, textCentered, fillRect, thickLine
 }
 from "./gfx3d" import {
     sceneNew, viewOf
@@ -103,6 +102,7 @@ fn parseOpts(): ParsedArgs {
     p.addBool("natural", "n", "UP climbs (default is stick-style: UP dives, DOWN climbs)")
     p.addBool("fullscreen", "f", "Open filling the display (F toggles it while flying)")
     p.addBool("maximized", "m", "Open maximised rather than in a 1280x720 window")
+    p.addBool("cpu", "", "Bloom and tone-map on the CPU instead of the GPU (they should look the same)")
     p.setEpilog(EPILOG)
     return p.parse()
 }
@@ -287,36 +287,17 @@ pub fn main(): i32 {
         print("SDL_Init failed")
         return 1
     }
-    var win: *u8 = 0 as *u8
-    var ren: *u8 = 0 as *u8
-    var tex: *u8 = 0 as *u8
-    var ok = true
-    unsafe {
-        let title = "FLYBY — written in Milo"
-        win = SDL_CreateWindow(title, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, W as i32, H as i32, SDL_WINDOW_SHOWN | SDL_WINDOW_RESIZABLE)
-        ren = SDL_CreateRenderer(win, 0 - 1, SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC)
-        tex = SDL_CreateTexture(ren, SDL_PIXELFORMAT_ABGR8888, SDL_TEXTUREACCESS_STREAMING, W as i32, H as i32)
-        if (win as i64) == 0 || (ren as i64) == 0 || (tex as i64) == 0 {
-            ok = false
-        }
-        // The frame is always rendered at W x H; this is what lets the window be
-        // any size at all. Without it the software renderer would have to be
-        // resized with the window — a new canvas, a new depth buffer and a new
-        // bloom chain every time the user drags a corner.
-        let _ = SDL_RenderSetLogicalSize(ren, W as i32, H as i32)
-        if o.getBool("fullscreen") {
-            let _ = SDL_SetWindowFullscreen(win, SDL_WINDOW_FULLSCREEN_DESKTOP)
-        } else if o.getBool("maximized") {
-            SDL_MaximizeWindow(win)
-        }
-        let _ = SDL_ShowCursor(0)
-    }
-    if !ok {
-        print("SDL setup failed")
-        return 2
-    }
-
+    // The canvas comes first now: the GL path uploads it as a texture, so the
+    // window cannot be opened until the buffer it will be showing exists.
     var c = canvasNew(W, H)
+    var scr = match screenOpen("FLYBY — written in Milo", W, H, !o.getBool("cpu"), c.hdr, o.getBool("fullscreen"), o.getBool("maximized")) {
+        Result.Ok(s) => s
+        Result.Err(e) => {
+            print("SDL setup failed: " + e)
+            return 2
+        }
+    }
+    let _ = SDL_ShowCursor(0)
     var inp = inputNew(invert)
     var ev: [u8; 64] = [0; 64]
     // Ask before decoding anything. A place costs a beat to parse and drape, and
@@ -324,11 +305,9 @@ pub fn main(): i32 {
     // wrong order — `--place`, `--city` and `--procedural` all say the answer
     // already, so the screen only appears when nothing has.
     if placeIdx >= 0 && o.getString("place") == "" {
-        let pick = chooseRegion(ren, tex, c, inp, ev, placeIdx)
+        let pick = chooseRegion(scr, c, inp, ev, placeIdx)
         if pick < 0 {
-            SDL_DestroyTexture(tex)
-            SDL_DestroyRenderer(ren)
-            SDL_DestroyWindow(win)
+            screenClose(scr)
             SDL_Quit()
             return 0
         }
@@ -371,7 +350,7 @@ pub fn main(): i32 {
             if full {
                 flags = SDL_WINDOW_FULLSCREEN_DESKTOP
             }
-            let _ = SDL_SetWindowFullscreen(win, flags)
+            let _ = SDL_SetWindowFullscreen(scr.win, flags)
         }
         // Only in one-axis mode: with `--pro` these same keys are the bank axis
         // and stepping the world every time the player turned would be absurd.
@@ -432,20 +411,9 @@ pub fn main(): i32 {
         if w.flash > 0.0 {
             exposure = 1.0 + w.flash * 0.8
         }
-        present(c, 0.35, exposure)
-
-        unsafe {
-            SDL_UpdateTexture(tex, 0 as *u8, c.fb[0].addrOf() as *u8, (W * 4) as i32)
-            SDL_RenderClear(ren)
-            SDL_RenderCopy(ren, tex, 0 as *u8, 0 as *u8)
-            SDL_RenderPresent(ren)
-        }
+        screenPresent(scr, c, 0.35, exposure)
     }
-    // Tear down in creation order's reverse. SDL_Quit would reclaim all of it
-    // anyway, but a leak an example teaches is a leak someone copies.
-    SDL_DestroyTexture(tex)
-    SDL_DestroyRenderer(ren)
-    SDL_DestroyWindow(win)
+    screenClose(scr)
     SDL_Quit()
     return 0
 }

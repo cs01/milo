@@ -1,0 +1,186 @@
+// FLYBY — do the CPU and GPU post chains agree?
+//
+// gfx.present and gpupost.postDraw are two implementations of the same bloom and
+// tone map, and the only claim worth making about the second one is that it
+// produces the first one's picture. So: draw a fixed canvas, run both, and diff
+// the 8-bit output.
+//
+//   milo run examples/games/flight/gpucheck.milo --release
+//
+// They are not expected to be bit-identical. The CPU path quantises linear light
+// to 1/256 before the tone curve (it is indexing a 2048-entry LUT) and the GPU
+// evaluates the curve continuously, so a channel or two of difference is the
+// design, not a bug. What would be a bug is a shifted image, a flipped one, or a
+// bloom that lands somewhere else — and those show up as tens or hundreds.
+//
+// A window has to exist for a GL context to exist, so this opens one. It is
+// hidden, it never swaps, and the readback comes off the default framebuffer
+// before anything is presented.
+
+from "std/gpu" import {
+    Gpu, readPixelsRgba8
+}
+from "./gfx" import {
+    Canvas, canvasClearHdr, canvasNew, canvasFill, line, present, spot, text,
+    thickLine
+}
+from "./gpupost" import {
+    postDraw, postNew, postUpload
+}
+from "./sdl" import {
+    SDL_CreateWindow, SDL_GL_CreateContext, SDL_GL_SetAttribute, SDL_GetError,
+    SDL_Init, SDL_Quit,
+    SDL_GL_CONTEXT_MAJOR_VERSION, SDL_GL_CONTEXT_MINOR_VERSION,
+    SDL_GL_CONTEXT_PROFILE_CORE, SDL_GL_CONTEXT_PROFILE_MASK, SDL_INIT_VIDEO,
+    SDL_WINDOWPOS_CENTERED, SDL_WINDOW_OPENGL
+}
+
+pub let W: i64 = 1280
+
+pub let H: i64 = 720
+
+// SDL_WINDOW_HIDDEN. Not in sdl.milo because the game never wants it.
+pub let HIDDEN: u32 = 0x8
+
+// Everything the post chain reacts to: dark ground, mid-grey that must NOT
+// bloom, and a handful of sources well above 1.0 that must.
+fn drawPattern(c: &mut Canvas) {
+    canvasFill(c, 0.02, 0.03, 0.05)
+    var y = 0
+    while y < H {
+        var x = 0
+        while x < W {
+            // A mid-grey field at 0.21 — linear middle grey, and the case that
+            // sent the whole picture milky when the threshold was too low.
+            if (x / 40 + y / 40) % 2 == 0 {
+                let i = (y * W + x) * 3
+                c.hdr[i] = 0.21
+                c.hdr[i + 1] = 0.21
+                c.hdr[i + 2] = 0.21
+            }
+            x = x + 1
+        }
+        y = y + 1
+    }
+    spot(c, 300.0, 200.0, 60.0, 4.0, 2.2, 0.6)
+    spot(c, 980.0, 520.0, 24.0, 0.4, 3.0, 5.0)
+    line(c, 100.0, 640.0, 1180.0, 90.0, 2.0, 2.0, 2.4)
+    thickLine(c, 640.0, 40.0, 640.0, 680.0, 5.0, 0.9, 0.2, 0.2)
+    text(c, 60, 60, "GPU VS CPU", 4, 3.0, 3.0, 3.0)
+}
+
+fn chan(px: u32, shift: u32): i64 {
+    return ((px >> shift) & 0xFF) as i64
+}
+
+pub fn main(): i32 {
+    if SDL_Init(SDL_INIT_VIDEO) != 0 {
+        print("SDL_Init failed")
+        return 1
+    }
+    unsafe {
+        let _ = SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3)
+        let _ = SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 3)
+        let _ = SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE)
+        let win = SDL_CreateWindow("gpucheck", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, W as i32, H as i32, SDL_WINDOW_OPENGL | HIDDEN)
+        if (win as i64) == 0 {
+            print("window: " + _cstrToString(SDL_GetError()))
+            return 2
+        }
+        if (SDL_GL_CreateContext(win) as i64) == 0 {
+            print("context: " + _cstrToString(SDL_GetError()))
+            return 3
+        }
+    }
+
+    var c = canvasNew(W, H)
+    drawPattern(c)
+
+    let p = match postNew(W, H, c.hdr) {
+        Result.Ok(x) => x
+        Result.Err(e) => {
+            print("post: " + e)
+            return 4
+        }
+    }
+    // The drawable is the window here: no Retina scaling on a hidden window, and
+    // the viewport then covers the whole framebuffer with no letterbox.
+    postDraw(p, c.hdr, 0.35, 1.0, W, H)
+    let gpu = readPixelsRgba8(W, H)
+
+    // postDraw does not touch the canvas, so the CPU path still has its input.
+    // present() consumes it — it zeroes as it composites — so it goes second.
+    present(c, 0.35, 1.0)
+
+    var worst = 0
+    var total = 0
+    var over8 = 0
+    for y in 0..H {
+        for x in 0..W {
+            // GL reads bottom-up; the canvas is top-down.
+            let g = gpu[(H - 1 - y) * W + x]
+            let s = c.fb[y * W + x]
+            var d = 0
+            for shift in 0..3 {
+                let k = (shift * 8) as u32
+                var diff = chan(g, k) - chan(s, k)
+                if diff < 0 {
+                    diff = 0 - diff
+                }
+                if diff > d {
+                    d = diff
+                }
+            }
+            total = total + d
+            if d > worst {
+                worst = d
+            }
+            if d > 8 {
+                over8 = over8 + 1
+            }
+        }
+    }
+    let px = W * H
+    print($"pixels {px}  worst channel diff {worst}  mean {(total as f64) / (px as f64)}  over 8: {over8}")
+
+    // What it costs. glFinish before each stop, or the GPU number is just the
+    // time it took to queue the commands.
+    let reps = 60
+    Gpu.finish()
+    let g0 = epochMillis()
+    for _ in 0..reps {
+        postDraw(p, c.hdr, 0.35, 1.0, W, H)
+    }
+    Gpu.finish()
+    let gpuMs = ((epochMillis() - g0) as f64) / (reps as f64)
+    let c0 = epochMillis()
+    for _ in 0..reps {
+        present(c, 0.35, 1.0)
+    }
+    let cpuMs = ((epochMillis() - c0) as f64) / (reps as f64)
+
+    // Split the GPU number: the upload is host bandwidth, the passes are the
+    // GPU's own work, and the clear is what the CPU path used to get for free
+    // (its composite zeroes the canvas as it reads it).
+    Gpu.finish()
+    let u0 = epochMillis()
+    for _ in 0..reps {
+        postUpload(p, c.hdr)
+    }
+    Gpu.finish()
+    let upMs = ((epochMillis() - u0) as f64) / (reps as f64)
+    let z0 = epochMillis()
+    for _ in 0..reps {
+        canvasClearHdr(c)
+    }
+    let zeroMs = ((epochMillis() - z0) as f64) / (reps as f64)
+    print($"post per frame: cpu {cpuMs} ms, gpu {gpuMs} ms (upload {upMs}, clear {zeroMs})")
+
+    SDL_Quit()
+    if worst > 24 || over8 > px / 100 {
+        print("FAIL: the two paths are not drawing the same picture")
+        return 5
+    }
+    print("OK")
+    return 0
+}

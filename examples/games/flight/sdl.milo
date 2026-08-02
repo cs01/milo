@@ -31,6 +31,29 @@ pub extern fn SDL_RenderCopy(ren: *u8, tex: *u8, src: *u8, dst: *u8): i32
 
 pub extern fn SDL_RenderPresent(ren: *u8): void
 
+// ── the GL path ───────────────────────────────────────────────────────────────
+//
+// A window is either an SDL_Renderer window or a GL window; asking for both gets
+// you a renderer that quietly owns the context. So the attributes below have to
+// be set BEFORE SDL_CreateWindow, and the window has to carry SDL_WINDOW_OPENGL.
+
+pub extern fn SDL_GL_SetAttribute(attr: i32, value: i32): i32
+
+pub extern fn SDL_GL_CreateContext(win: *u8): *u8
+
+pub extern fn SDL_GL_DeleteContext(ctx: *u8)
+
+pub extern fn SDL_GL_SwapWindow(win: *u8)
+
+pub extern fn SDL_GL_SetSwapInterval(interval: i32): i32
+
+// The drawable is not the window on a Retina display — it is twice the size in
+// each axis. Setting the GL viewport from SDL_GetWindowSize renders the frame
+// into the bottom-left quarter of the screen.
+pub extern fn SDL_GL_GetDrawableSize(win: *u8, w: *u8, h: *u8)
+
+pub extern fn SDL_GetError(): *u8
+
 pub extern fn SDL_PollEvent(event: *u8): i32
 
 pub extern fn SDL_GetKeyboardState(numkeys: *i32): *u8
@@ -67,6 +90,20 @@ pub let SDL_WINDOW_RESIZABLE: u32 = 0x20
 // own resolution rather than asking the driver for a mode change, which on macOS
 // is the difference between instant and a black screen for two seconds.
 pub let SDL_WINDOW_FULLSCREEN_DESKTOP: u32 = 0x1001
+
+pub let SDL_WINDOW_OPENGL: u32 = 0x2
+
+pub let SDL_GL_DOUBLEBUFFER: i32 = 5
+
+pub let SDL_GL_CONTEXT_MAJOR_VERSION: i32 = 17
+
+pub let SDL_GL_CONTEXT_MINOR_VERSION: i32 = 18
+
+pub let SDL_GL_CONTEXT_PROFILE_MASK: i32 = 21
+
+// Core, not compatibility: macOS gives 2.1 for a compatibility context and 4.1
+// for a core one, and everything in std/gpu is 3.3 core.
+pub let SDL_GL_CONTEXT_PROFILE_CORE: i32 = 1
 
 pub let SDL_TEXTUREACCESS_STREAMING: i32 = 1
 

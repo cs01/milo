@@ -1,0 +1,621 @@
+// std/gpu — a safe layer over OpenGL 3.3 core (std/gl).
+//
+// Shaders, vertex buffers, textures and offscreen targets, with the raw pointers
+// and the GLuint handles kept inside. Everything here assumes a current GL
+// context; creating one belongs to the window system. With SDL2 that is:
+//
+//   SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3)
+//   SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 3)
+//   SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE)
+//   let win = SDL_CreateWindow(..., SDL_WINDOW_OPENGL)
+//   let ctx = SDL_GL_CreateContext(win)
+//
+// 3.3 core is the floor on purpose: it is the highest version macOS ships (it
+// caps at 4.1 and only in a core profile), and it is old enough that every Mesa
+// and every driver of the last decade has it.
+//
+// GL objects are freed by an explicit `free`, not by Drop. Deleting a GL object
+// needs the context that made it to still be current, and a Drop firing during
+// teardown — or on a thread with no context — is undefined behaviour rather than
+// a leak. An explicit call puts the ordering where the program can see it.
+//
+//   var sh = Shader.compile(VERT, FRAG)!
+//   var quad = Mesh.fullscreenQuad()
+//   Gpu.clear(0.0, 0.0, 0.0, 1.0, true)
+//   sh.bind()
+//   sh.uniformF("time", t)
+//   quad.draw()
+
+from "std/gl" import {
+    glActiveTexture, glAttachShader, glBindBuffer, glBindFramebuffer,
+    glBindRenderbuffer, glBindTexture, glBindVertexArray, glBlendFunc,
+    glBufferData, glCheckFramebufferStatus, glClear, glClearColor,
+    glCompileShader, glCreateProgram, glCreateShader, glCullFace,
+    glDeleteBuffers, glDeleteFramebuffers, glDeleteProgram, glDeleteRenderbuffers,
+    glDeleteShader, glDeleteTextures, glDeleteVertexArrays, glDepthFunc,
+    glDepthMask, glDisable, glDrawArrays, glEnable, glEnableVertexAttribArray,
+    glFramebufferRenderbuffer, glFramebufferTexture2D, glGenBuffers,
+    glGenFramebuffers, glGenRenderbuffers, glGenTextures, glGenVertexArrays,
+    glFinish, glGetError, glGetProgramInfoLog, glGetProgramiv, glGetShaderInfoLog,
+    glGetShaderiv, glGetString, glGetUniformLocation, glLinkProgram,
+    glPixelStorei, glReadPixels, glRenderbufferStorage, glShaderSource,
+    glTexImage2D, glTexParameteri,
+    glTexSubImage2D, glUniform1f, glUniform1i, glUniform2f, glUniform3f,
+    glUniform4f, glUniformMatrix4fv, glUseProgram, glVertexAttribPointer,
+    glViewport,
+    GL_ARRAY_BUFFER, GL_BACK, GL_BLEND, GL_CLAMP_TO_EDGE, GL_COLOR_ATTACHMENT0,
+    GL_COLOR_BUFFER_BIT, GL_COMPILE_STATUS, GL_CULL_FACE, GL_DEPTH_ATTACHMENT,
+    GL_DEPTH_BUFFER_BIT, GL_DEPTH_COMPONENT24, GL_DEPTH_TEST, GL_FALSE,
+    GL_FLOAT, GL_FRAGMENT_SHADER, GL_FRAMEBUFFER, GL_FRAMEBUFFER_COMPLETE,
+    GL_LEQUAL, GL_LINEAR, GL_LINK_STATUS, GL_NEAREST, GL_ONE,
+    GL_ONE_MINUS_SRC_ALPHA, GL_RENDERBUFFER, GL_RGB, GL_RGB32F, GL_RGBA,
+    GL_RGBA16F, GL_RGBA8, GL_SRC_ALPHA, GL_STREAM_DRAW, GL_TEXTURE0,
+    GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_TEXTURE_MIN_FILTER,
+    GL_TEXTURE_WRAP_S, GL_TEXTURE_WRAP_T, GL_TRIANGLES, GL_TRUE,
+    GL_UNPACK_ALIGNMENT, GL_UNSIGNED_BYTE, GL_VERSION, GL_VERTEX_SHADER
+}
+
+// ── device ────────────────────────────────────────────────────────────────────
+
+// Free functions live under `Gpu` so a call site reads as the device doing
+// something, rather than as nine loose verbs in the importing module's scope.
+pub struct Gpu {
+}
+
+impl Gpu {
+    // The driver's GL version string, e.g. "4.1 Metal - 90.5". Useful in a
+    // startup log: a context that silently fell back to 2.1 fails later, in a
+    // shader compile, with an error that does not mention the version.
+    fn version(): string {
+        unsafe {
+            let p = glGetString(GL_VERSION)
+            if (p as i64) == 0 {
+                return ""
+            }
+            return _cstrToString(p)
+        }
+    }
+
+    // Block until the GPU has finished everything submitted. GL commands are
+    // queued, so without this a timer around a frame measures how long it took
+    // to *ask* — which on a warm driver is nearly free and tells you nothing.
+    fn finish() {
+        unsafe {
+            glFinish()
+        }
+    }
+
+    // Any GL error latched since the last check. GL keeps one flag per error
+    // type and clears it on read, so this drains only the first.
+    fn error(): u32 {
+        unsafe {
+            return glGetError()
+        }
+    }
+
+    fn viewport(x: i64, y: i64, w: i64, h: i64) {
+        unsafe {
+            glViewport(x as i32, y as i32, w as i32, h as i32)
+        }
+    }
+
+    fn clear(r: f64, g: f64, b: f64, a: f64, depth: bool) {
+        unsafe {
+            glClearColor(r as f32, g as f32, b as f32, a as f32)
+            var mask = GL_COLOR_BUFFER_BIT
+            if depth {
+                // A depth clear is a no-op unless depth writes are on, and a
+                // pass that turned them off leaves the buffer stale rather than
+                // erroring — so force them for the clear itself.
+                glDepthMask(GL_TRUE)
+                mask = mask | GL_DEPTH_BUFFER_BIT
+            }
+            glClear(mask)
+        }
+    }
+
+    fn depthTest(on: bool) {
+        unsafe {
+            if on {
+                glEnable(GL_DEPTH_TEST)
+                glDepthFunc(GL_LEQUAL)
+                glDepthMask(GL_TRUE)
+            } else {
+                glDisable(GL_DEPTH_TEST)
+            }
+        }
+    }
+
+    fn depthWrite(on: bool) {
+        unsafe {
+            if on {
+                glDepthMask(GL_TRUE)
+            } else {
+                glDepthMask(GL_FALSE)
+            }
+        }
+    }
+
+    fn cullBackFaces(on: bool) {
+        unsafe {
+            if on {
+                glEnable(GL_CULL_FACE)
+                glCullFace(GL_BACK)
+            } else {
+                glDisable(GL_CULL_FACE)
+            }
+        }
+    }
+
+    fn blendOff() {
+        unsafe {
+            glDisable(GL_BLEND)
+        }
+    }
+
+    fn blendAlpha() {
+        unsafe {
+            glEnable(GL_BLEND)
+            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
+        }
+    }
+
+    // Additive, for light. The whole point of an HDR target is that this can run
+    // past 1.0 without clipping.
+    fn blendAdd() {
+        unsafe {
+            glEnable(GL_BLEND)
+            glBlendFunc(GL_ONE, GL_ONE)
+        }
+    }
+}
+
+// ── shaders ───────────────────────────────────────────────────────────────────
+
+pub struct Shader {
+    id: u32,
+}
+
+impl Shader {
+    // Compile and link a vertex/fragment pair. The error is the driver's own log,
+    // which names the line — there is nothing this module could add to it.
+    fn compile(vert: &string, frag: &string): Result<Shader, string> {
+        unsafe {
+            let vs = compileStage(GL_VERTEX_SHADER, vert)?
+            let fs = compileStage(GL_FRAGMENT_SHADER, frag)?
+            let prog = glCreateProgram()
+            glAttachShader(prog, vs)
+            glAttachShader(prog, fs)
+            glLinkProgram(prog)
+            // Attached shaders are reference-counted by the program, so deleting
+            // them here frees the compiler's copy and keeps the linked code.
+            glDeleteShader(vs)
+            glDeleteShader(fs)
+            var ok: i32 = 0
+            glGetProgramiv(prog, GL_LINK_STATUS, (ok.addrOf()) as *u8)
+            if ok == 0 {
+                let log = programLog(prog)
+                glDeleteProgram(prog)
+                return Result.Err("link failed: " + log)
+            }
+            return Result.Ok(Shader {
+                id: prog
+            }
+            )
+        }
+    }
+
+    fn bind(self: &Self) {
+        unsafe {
+            glUseProgram(self.id)
+        }
+    }
+
+    // Uniform setters bind the program first: forgetting to is the single most
+    // common way a uniform silently goes to whichever shader ran last.
+    fn uniformI(self: &Self, name: &string, v: i64) {
+        unsafe {
+            glUseProgram(self.id)
+            glUniform1i(self.loc(name), v as i32)
+        }
+    }
+
+    fn uniformF(self: &Self, name: &string, v: f64) {
+        unsafe {
+            glUseProgram(self.id)
+            glUniform1f(self.loc(name), v as f32)
+        }
+    }
+
+    fn uniform2F(self: &Self, name: &string, a: f64, b: f64) {
+        unsafe {
+            glUseProgram(self.id)
+            glUniform2f(self.loc(name), a as f32, b as f32)
+        }
+    }
+
+    fn uniform3F(self: &Self, name: &string, a: f64, b: f64, c: f64) {
+        unsafe {
+            glUseProgram(self.id)
+            glUniform3f(self.loc(name), a as f32, b as f32, c as f32)
+        }
+    }
+
+    fn uniform4F(self: &Self, name: &string, a: f64, b: f64, c: f64, d: f64) {
+        unsafe {
+            glUseProgram(self.id)
+            glUniform4f(self.loc(name), a as f32, b as f32, c as f32, d as f32)
+        }
+    }
+
+    // A 4x4 matrix in column-major order — sixteen floats, the layout GLSL's
+    // `mat4` already has, so `transpose` stays false and nothing reorders.
+    fn uniformMat4(self: &Self, name: &string, m: &Vec<f32>) {
+        unsafe {
+            glUseProgram(self.id)
+            glUniformMatrix4fv(self.loc(name), 1, GL_FALSE, m.ptr() as *u8)
+        }
+    }
+
+    // Bind `tex` to texture unit `unit` and point the sampler at it.
+    fn sampler(self: &Self, name: &string, tex: &Texture2D, unit: i64) {
+        tex.bind(unit)
+        self.uniformI(name, unit)
+    }
+
+    // -1 for a name the linker dropped, which every glUniform* call ignores. A
+    // dead uniform is a normal thing (an unused branch of a shader), so this is
+    // not an error.
+    fn loc(self: &Self, name: &string): i32 {
+        unsafe {
+            return glGetUniformLocation(self.id, name)
+        }
+    }
+
+    fn free(self: &Self) {
+        unsafe {
+            glDeleteProgram(self.id)
+        }
+    }
+}
+
+fn compileStage(kind: u32, src: &string): Result<u32, string> {
+    unsafe {
+        let sh = glCreateShader(kind)
+        // glShaderSource wants a `const char* const*`, so the source's address
+        // has to exist as a value before it can be pointed at.
+        var p = _strDataPtr(src)
+        glShaderSource(sh, 1, (p.addrOf()) as *u8, 0 as *u8)
+        glCompileShader(sh)
+        var ok: i32 = 0
+        glGetShaderiv(sh, GL_COMPILE_STATUS, (ok.addrOf()) as *u8)
+        if ok == 0 {
+            let log = shaderLog(sh)
+            glDeleteShader(sh)
+            var what = "vertex"
+            if kind == GL_FRAGMENT_SHADER {
+                what = "fragment"
+            }
+            return Result.Err(what + " shader: " + log)
+        }
+        return Result.Ok(sh)
+    }
+}
+
+pub let LOG_CAP: i64 = 4096
+
+fn shaderLog(sh: u32): string {
+    unsafe {
+        var buf: Vec<u8> = Vec.filled(LOG_CAP, 0)
+        var n: i32 = 0
+        glGetShaderInfoLog(sh, LOG_CAP as i32, (n.addrOf()) as *u8, buf.ptr() as *u8)
+        return _bytesToString(buf.ptr() as *u8, n as i64)
+    }
+}
+
+fn programLog(prog: u32): string {
+    unsafe {
+        var buf: Vec<u8> = Vec.filled(LOG_CAP, 0)
+        var n: i32 = 0
+        glGetProgramInfoLog(prog, LOG_CAP as i32, (n.addrOf()) as *u8, buf.ptr() as *u8)
+        return _bytesToString(buf.ptr() as *u8, n as i64)
+    }
+}
+
+// ── meshes ────────────────────────────────────────────────────────────────────
+
+// A vertex array plus the one interleaved float buffer it reads. `attrs` is the
+// component count of each attribute in order — [3, 2, 4] is a vec3 at location
+// 0, a vec2 at 1 and a vec4 at 2, packed tightly, which is the layout every
+// shader in this module expects.
+pub struct Mesh {
+    vao: u32,
+    vbo: u32,
+    floatsPerVertex: i64,
+    vertices: i64,
+}
+
+impl Mesh {
+    fn new(attrs: &Vec<i64>): Mesh {
+        unsafe {
+            var vao: u32 = 0
+            var vbo: u32 = 0
+            glGenVertexArrays(1, (vao.addrOf()) as *u8)
+            glGenBuffers(1, (vbo.addrOf()) as *u8)
+            glBindVertexArray(vao)
+            glBindBuffer(GL_ARRAY_BUFFER, vbo)
+            var total = 0
+            for a in attrs {
+                total = total + a
+            }
+            let stride = (total * 4) as i32
+            var off = 0
+            var i = 0
+            while i < attrs.len {
+                let n = attrs[i]
+                glEnableVertexAttribArray(i as u32)
+                glVertexAttribPointer(i as u32, n as i32, GL_FLOAT, GL_FALSE, stride, (off * 4) as *u8)
+                off = off + n
+                i = i + 1
+            }
+            glBindVertexArray(0)
+            return Mesh {
+                vao: vao, vbo: vbo, floatsPerVertex: total, vertices: 0
+            }
+        }
+    }
+
+    // Replace the whole buffer. GL_STREAM_DRAW plus a full respecify is the
+    // orphaning idiom: the driver hands back a fresh allocation instead of
+    // stalling until the last frame's draw has finished reading the old one.
+    fn upload(self: &mut Self, data: &Vec<f32>) {
+        unsafe {
+            glBindBuffer(GL_ARRAY_BUFFER, self.vbo)
+            glBufferData(GL_ARRAY_BUFFER, (data.len * 4) as i64, data.ptr() as *u8, GL_STREAM_DRAW)
+            self.vertices = data.len / self.floatsPerVertex
+        }
+    }
+
+    fn draw(self: &Self) {
+        if self.vertices == 0 {
+            return
+        }
+        unsafe {
+            glBindVertexArray(self.vao)
+            glDrawArrays(GL_TRIANGLES, 0, self.vertices as i32)
+            glBindVertexArray(0)
+        }
+    }
+
+    // Two triangles covering clip space, with UVs — the input to every
+    // post-processing pass. Position is vec2 at location 0, UV vec2 at 1.
+    fn fullscreenQuad(): Mesh {
+        var attrs: Vec<i64> = Vec.new()
+        attrs.push(2)
+        attrs.push(2)
+        var m = Mesh.new(attrs)
+        var v: Vec<f32> = Vec.new()
+        pushQuadVertex(v, -1.0, -1.0, 0.0, 0.0)
+        pushQuadVertex(v, 1.0, -1.0, 1.0, 0.0)
+        pushQuadVertex(v, 1.0, 1.0, 1.0, 1.0)
+        pushQuadVertex(v, -1.0, -1.0, 0.0, 0.0)
+        pushQuadVertex(v, 1.0, 1.0, 1.0, 1.0)
+        pushQuadVertex(v, -1.0, 1.0, 0.0, 1.0)
+        m.upload(v)
+        return m
+    }
+
+    fn free(self: &Self) {
+        unsafe {
+            glDeleteBuffers(1, (self.vbo.addrOf()) as *u8)
+            glDeleteVertexArrays(1, (self.vao.addrOf()) as *u8)
+        }
+    }
+}
+
+fn pushQuadVertex(v: &mut Vec<f32>, x: f32, y: f32, u: f32, t: f32) {
+    v.push(x)
+    v.push(y)
+    v.push(u)
+    v.push(t)
+}
+
+// The vertex shader for a fullscreen pass, paired with `Mesh.fullscreenQuad`.
+pub let QUAD_VERT: string = "#version 330 core
+layout (location = 0) in vec2 aPos;
+layout (location = 1) in vec2 aUv;
+out vec2 vUv;
+void main() {
+    vUv = aUv;
+    gl_Position = vec4(aPos, 0.0, 1.0);
+}
+"
+
+// ── textures ──────────────────────────────────────────────────────────────────
+
+pub struct Texture2D {
+    id: u32,
+    w: i64,
+    h: i64,
+}
+
+impl Texture2D {
+    // An 8-bit RGBA texture from packed ABGR8888 words — the same layout the
+    // software renderers here hand to SDL, so a CPU framebuffer uploads with no
+    // repacking.
+    fn rgba8(w: i64, h: i64, pixels: &Vec<u32>, smooth: bool): Texture2D {
+        unsafe {
+            let id = newTexture(smooth)
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, w as i32, h as i32, 0, GL_RGBA, GL_UNSIGNED_BYTE, pixels.ptr() as *u8)
+            return Texture2D {
+                id: id, w: w, h: h
+            }
+        }
+    }
+
+    // Three floats per pixel of unbounded linear light. This is the format an
+    // HDR canvas is already in, so uploading one is a straight memcpy.
+    fn rgb32f(w: i64, h: i64, pixels: &Vec<f32>, smooth: bool): Texture2D {
+        unsafe {
+            let id = newTexture(smooth)
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB32F, w as i32, h as i32, 0, GL_RGB, GL_FLOAT, pixels.ptr() as *u8)
+            return Texture2D {
+                id: id, w: w, h: h
+            }
+        }
+    }
+
+    // An empty half-float target, for a framebuffer to render into. Half is
+    // enough for light that has already been exposed, and halves the bandwidth
+    // of every blur tap against RGBA32F.
+    fn rgba16f(w: i64, h: i64, smooth: bool): Texture2D {
+        unsafe {
+            let id = newTexture(smooth)
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, w as i32, h as i32, 0, GL_RGBA, GL_FLOAT, 0 as *u8)
+            return Texture2D {
+                id: id, w: w, h: h
+            }
+        }
+    }
+
+    fn updateRgb32f(self: &Self, pixels: &Vec<f32>) {
+        unsafe {
+            glBindTexture(GL_TEXTURE_2D, self.id)
+            glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, self.w as i32, self.h as i32, GL_RGB, GL_FLOAT, pixels.ptr() as *u8)
+        }
+    }
+
+    fn updateRgba8(self: &Self, pixels: &Vec<u32>) {
+        unsafe {
+            glBindTexture(GL_TEXTURE_2D, self.id)
+            glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, self.w as i32, self.h as i32, GL_RGBA, GL_UNSIGNED_BYTE, pixels.ptr() as *u8)
+        }
+    }
+
+    fn bind(self: &Self, unit: i64) {
+        unsafe {
+            glActiveTexture(GL_TEXTURE0 + (unit as u32))
+            glBindTexture(GL_TEXTURE_2D, self.id)
+        }
+    }
+
+    fn free(self: &Self) {
+        unsafe {
+            glDeleteTextures(1, (self.id.addrOf()) as *u8)
+        }
+    }
+}
+
+fn newTexture(smooth: bool): u32 {
+    unsafe {
+        var id: u32 = 0
+        glGenTextures(1, (id.addrOf()) as *u8)
+        glBindTexture(GL_TEXTURE_2D, id)
+        // Rows of a float canvas are 3 floats per pixel and so never 4-byte
+        // aligned at an odd width; the default alignment of 4 shears the image.
+        glPixelStorei(GL_UNPACK_ALIGNMENT, 1)
+        var filter = GL_NEAREST as i32
+        if smooth {
+            filter = GL_LINEAR as i32
+        }
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, filter)
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, filter)
+        // Clamp, not repeat: a blur tap that runs off the edge should read the
+        // edge texel, not wrap round and drag the far side of the frame in.
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE)
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE)
+        return id
+    }
+}
+
+// ── offscreen targets ─────────────────────────────────────────────────────────
+
+// A framebuffer with one colour texture and, optionally, a depth buffer.
+pub struct Target {
+    fbo: u32,
+    depth: u32, // renderbuffer id, 0 when the target has no depth
+    tex: Texture2D,
+    w: i64,
+    h: i64,
+}
+
+impl Target {
+    fn new(w: i64, h: i64, depth: bool, smooth: bool): Result<Target, string> {
+        unsafe {
+            let tex = Texture2D.rgba16f(w, h, smooth)
+            var fbo: u32 = 0
+            glGenFramebuffers(1, (fbo.addrOf()) as *u8)
+            glBindFramebuffer(GL_FRAMEBUFFER, fbo)
+            glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, tex.id, 0)
+            var rb: u32 = 0
+            if depth {
+                glGenRenderbuffers(1, (rb.addrOf()) as *u8)
+                glBindRenderbuffer(GL_RENDERBUFFER, rb)
+                glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, w as i32, h as i32)
+                glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, rb)
+            }
+            let status = glCheckFramebufferStatus(GL_FRAMEBUFFER)
+            glBindFramebuffer(GL_FRAMEBUFFER, 0)
+            if status != GL_FRAMEBUFFER_COMPLETE {
+                return Result.Err($"framebuffer incomplete: 0x{status}")
+            }
+            return Result.Ok(Target {
+                fbo: fbo, depth: rb, tex: tex, w: w, h: h
+            }
+            )
+        }
+    }
+
+    // Bind and set the viewport together. Every bug where a quarter-resolution
+    // pass rendered into the top-left sixteenth of its own target was these two
+    // lines drifting apart.
+    fn bind(self: &Self) {
+        unsafe {
+            glBindFramebuffer(GL_FRAMEBUFFER, self.fbo)
+            glViewport(0, 0, self.w as i32, self.h as i32)
+        }
+    }
+
+    // Bind what this target rendered as an input to the next pass. The colour
+    // texture is not handed out as a value on purpose: a second `Texture2D`
+    // holding the same GL name would be a second thing that thinks it may free
+    // it, and second-class references mean it cannot be lent out either.
+    fn bindTexture(self: &Self, unit: i64) {
+        self.tex.bind(unit)
+    }
+
+    fn free(self: &Self) {
+        unsafe {
+            if self.depth != 0 {
+                glDeleteRenderbuffers(1, (self.depth.addrOf()) as *u8)
+            }
+            glDeleteFramebuffers(1, (self.fbo.addrOf()) as *u8)
+        }
+        self.tex.free()
+    }
+}
+
+// Read back the bound framebuffer as ABGR8888 words — the layout SDL textures
+// and the software canvases here already use, so a frame read off the GPU can be
+// written straight out as a screenshot. Row 0 is the BOTTOM of the image in GL's
+// convention; flip it if you are writing PPM or PNG.
+//
+// This stalls the pipeline until the GPU has caught up, which is exactly what a
+// headless smoke test wants and exactly what a frame loop does not.
+pub fn readPixelsRgba8(w: i64, h: i64): Vec<u32> {
+    var out: Vec<u32> = Vec.filled(w * h, 0)
+    unsafe {
+        glReadPixels(0, 0, w as i32, h as i32, GL_RGBA, GL_UNSIGNED_BYTE, out.ptr() as *u8)
+    }
+    return out
+}
+
+// Render to the window again. `w`/`h` are the drawable size in pixels, which on
+// a Retina display is not the window size — ask SDL_GL_GetDrawableSize, not
+// SDL_GetWindowSize, or half the frame goes missing.
+pub fn bindScreen(w: i64, h: i64) {
+    unsafe {
+        glBindFramebuffer(GL_FRAMEBUFFER, 0)
+        glViewport(0, 0, w as i32, h as i32)
+    }
+}

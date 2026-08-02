@@ -697,6 +697,16 @@ function detectLibs(ir: string, target: TargetInfo, staticDeps = false): string 
   if (ir.includes("@JSGlobalContextCreate") || ir.includes("@JSEvaluateScript")) {
     if (target.os === "darwin") libs += " -framework JavaScriptCore";
   }
+  // OpenGL (std/gl). Detected rather than @link'd because the flag is not a -l
+  // name on darwin — the framework and libGL hold the same symbols under two
+  // spellings, and a `@link("GL")` in portable source would be wrong on one of
+  // the two hosts. The windows arm returned above: opengl32.dll exports GL 1.1
+  // only, so std/gl's 3.3 entry points are a deliberate link error there.
+  // Never static: the GL implementation is the installed driver, so a bundled
+  // libGL.a would talk to the wrong one (or to nothing).
+  if (/@gl[A-Z]/.test(ir)) {
+    libs += target.os === "darwin" ? " -framework OpenGL" : " -lGL";
+  }
   // The greps above run on pre-optimization IR, so they over-approximate badly:
   // std/os declares the TLS externs and defines wrappers around them, and every
   // program using std/io imports std/os — so `wc` picked up -lssl even though LLVM

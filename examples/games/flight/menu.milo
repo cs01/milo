@@ -8,11 +8,13 @@ from "std/math" import {
     Math
 }
 from "./gfx" import {
-    Canvas, canvasFill, present, text, textCentered, fillRect, thickLine
+    Canvas, canvasFill, text, textCentered, fillRect, thickLine
+}
+from "./display" import {
+    Screen, screenPresent
 }
 from "./sdl" import {
-    Input, pollInput,
-    SDL_UpdateTexture, SDL_RenderClear, SDL_RenderCopy, SDL_RenderPresent
+    Input, pollInput
 }
 
 // One number for the size of the lineup. It used to be a literal 4 in three
@@ -66,7 +68,7 @@ pub fn placeBlurb(i: i64): string {
 // flight loop's job is to step a simulation sixty times a second and there is no
 // simulation yet — the place has not been decoded, which is the whole point of
 // asking first.
-pub fn chooseRegion(ren: *u8, tex: *u8, c: &mut Canvas, inp: &mut Input, ev: &mut [u8; 64], start: i64): i64 {
+pub fn chooseRegion(s: &Screen, c: &mut Canvas, inp: &mut Input, ev: &mut [u8; 64], start: i64): i64 {
     var sel = start
     if sel < 0 {
         sel = 0
@@ -90,13 +92,7 @@ pub fn chooseRegion(ren: *u8, tex: *u8, c: &mut Canvas, inp: &mut Input, ev: &mu
         t = t + 1.0 / 60.0
 
         drawMenu(c, sel, t)
-        present(c, 0.35, 1.0)
-        unsafe {
-            SDL_UpdateTexture(tex, 0 as *u8, c.fb[0].addrOf() as *u8, (c.w * 4) as i32)
-            SDL_RenderClear(ren)
-            SDL_RenderCopy(ren, tex, 0 as *u8, 0 as *u8)
-            SDL_RenderPresent(ren)
-        }
+        screenPresent(s, c, 0.35, 1.0)
     }
     return sel
 }

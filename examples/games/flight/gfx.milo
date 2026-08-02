@@ -289,6 +289,16 @@ pub fn canvasFill(c: &mut Canvas, r: f64, g: f64, b: f64) {
     }
 }
 
+// Zero the HDR buffer. The CPU composite does this on the way past — it is
+// already touching every pixel — so this exists for the GL path, where the
+// canvas is uploaded whole and nothing on the host reads it back.
+pub fn canvasClearHdr(c: &mut Canvas) {
+    let n = c.w * c.h * 3
+    for i in 0..n {
+        c.hdr[i] = 0.0
+    }
+}
+
 // A stroke with weight. The canvas is HDR and additive, so drawing the same
 // line twice over itself makes it brighter, not thicker — a bold marker has to
 // be several strokes laid side by side along the normal.

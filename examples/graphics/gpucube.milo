@@ -1,0 +1,337 @@
+// A textured, depth-tested, lit cube on the GPU — the smallest complete use of
+// std/gpu there is.
+//
+//   milo build examples/graphics/gpucube.milo -o /tmp/gpucube --release && /tmp/gpucube
+//
+// Everything else in examples/graphics draws with loops over a buffer. This one
+// hands the triangles to the driver instead: one vertex array, one shader, a
+// depth buffer, and a texture generated at startup. ESC quits.
+//
+// It needs SDL2 for the window and a GL 3.3 core context; the OpenGL link flag
+// is added by the compiler when it sees the `gl*` symbols.
+
+from "std/gpu" import {
+    Gpu, Mesh, Shader, Texture2D, bindScreen
+}
+from "std/math" import {
+    Math
+}
+
+@link("SDL2")
+pub extern fn SDL_Init(flags: u32): i32
+
+pub extern fn SDL_CreateWindow(title: *u8, x: i32, y: i32, w: i32, h: i32, flags: u32): *u8
+
+pub extern fn SDL_GL_SetAttribute(attr: i32, value: i32): i32
+
+pub extern fn SDL_GL_CreateContext(win: *u8): *u8
+
+pub extern fn SDL_GL_DeleteContext(ctx: *u8)
+
+pub extern fn SDL_GL_SwapWindow(win: *u8)
+
+pub extern fn SDL_GL_SetSwapInterval(interval: i32): i32
+
+pub extern fn SDL_GL_GetDrawableSize(win: *u8, w: *u8, h: *u8)
+
+pub extern fn SDL_PollEvent(event: *u8): i32
+
+pub extern fn SDL_GetKeyboardState(numkeys: *i32): *u8
+
+pub extern fn SDL_GetTicks(): u32
+
+pub extern fn SDL_GetError(): *u8
+
+pub extern fn SDL_DestroyWindow(win: *u8)
+
+pub extern fn SDL_Quit()
+
+pub let SDL_INIT_VIDEO: u32 = 0x20
+
+pub let SDL_WINDOWPOS_CENTERED: i32 = 0x2FFF0000
+
+pub let SDL_WINDOW_SHOWN: u32 = 0x4
+
+pub let SDL_WINDOW_OPENGL: u32 = 0x2
+
+pub let SDL_WINDOW_RESIZABLE: u32 = 0x20
+
+pub let SDL_QUIT: u32 = 0x100
+
+pub let SDL_GL_CONTEXT_MAJOR_VERSION: i32 = 17
+
+pub let SDL_GL_CONTEXT_MINOR_VERSION: i32 = 18
+
+pub let SDL_GL_CONTEXT_PROFILE_MASK: i32 = 21
+
+pub let SDL_GL_CONTEXT_PROFILE_CORE: i32 = 1
+
+pub let SC_ESC: i64 = 41
+
+pub let W: i64 = 960
+
+pub let H: i64 = 640
+
+pub let VERT: string = "#version 330 core
+layout (location = 0) in vec3 aPos;
+layout (location = 1) in vec2 aUv;
+layout (location = 2) in vec3 aNormal;
+uniform mat4 uMvp;
+uniform mat4 uModel;
+out vec2 vUv;
+out vec3 vNormal;
+void main() {
+    vUv = aUv;
+    // The model matrix here is a rotation only, so it is its own normal matrix.
+    // Add any non-uniform scale and this line becomes wrong.
+    vNormal = mat3(uModel) * aNormal;
+    gl_Position = uMvp * vec4(aPos, 1.0);
+}
+"
+
+pub let FRAG: string = "#version 330 core
+in vec2 vUv;
+in vec3 vNormal;
+out vec4 fragColor;
+uniform sampler2D uTex;
+uniform vec3 uSun;
+void main() {
+    float lambert = max(dot(normalize(vNormal), normalize(uSun)), 0.0);
+    vec3 albedo = texture(uTex, vUv).rgb;
+    fragColor = vec4(albedo * (0.25 + 0.75 * lambert), 1.0);
+}
+"
+
+// ── geometry ──────────────────────────────────────────────────────────────────
+
+fn vertex(v: &mut Vec<f32>, x: f64, y: f64, z: f64, u: f64, t: f64, nx: f64, ny: f64, nz: f64) {
+    v.push(x as f32)
+    v.push(y as f32)
+    v.push(z as f32)
+    v.push(u as f32)
+    v.push(t as f32)
+    v.push(nx as f32)
+    v.push(ny as f32)
+    v.push(nz as f32)
+}
+
+// One face, as two triangles wound counter-clockwise seen from outside. The face
+// is built from its own centre plus two in-plane axes rather than from twelve
+// literal corners: the literal version is where a cube grows one face with its
+// winding backwards, which back-face culling then makes invisible.
+fn face(v: &mut Vec<f32>, nx: f64, ny: f64, nz: f64, ax: f64, ay: f64, az: f64, bx: f64, by: f64, bz: f64) {
+    let cx = nx * 0.5
+    let cy = ny * 0.5
+    let cz = nz * 0.5
+    vertex(v, cx - ax - bx, cy - ay - by, cz - az - bz, 0.0, 0.0, nx, ny, nz)
+    vertex(v, cx + ax - bx, cy + ay - by, cz + az - bz, 1.0, 0.0, nx, ny, nz)
+    vertex(v, cx + ax + bx, cy + ay + by, cz + az + bz, 1.0, 1.0, nx, ny, nz)
+    vertex(v, cx - ax - bx, cy - ay - by, cz - az - bz, 0.0, 0.0, nx, ny, nz)
+    vertex(v, cx + ax + bx, cy + ay + by, cz + az + bz, 1.0, 1.0, nx, ny, nz)
+    vertex(v, cx - ax + bx, cy - ay + by, cz - az + bz, 0.0, 1.0, nx, ny, nz)
+}
+
+fn cubeVertices(): Vec<f32> {
+    var v: Vec<f32> = Vec.new()
+    let h = 0.5
+    face(v, 0.0, 0.0, 1.0, h, 0.0, 0.0, 0.0, h, 0.0)
+    face(v, 0.0, 0.0, 0.0 - 1.0, 0.0 - h, 0.0, 0.0, 0.0, h, 0.0)
+    face(v, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0 - h, 0.0, h, 0.0)
+    face(v, 0.0 - 1.0, 0.0, 0.0, 0.0, 0.0, h, 0.0, h, 0.0)
+    face(v, 0.0, 1.0, 0.0, h, 0.0, 0.0, 0.0, 0.0, 0.0 - h)
+    face(v, 0.0, 0.0 - 1.0, 0.0, h, 0.0, 0.0, 0.0, 0.0, h)
+    return v
+}
+
+// ── matrices (column-major, the way GLSL reads a mat4) ────────────────────────
+
+fn identity(): Vec<f32> {
+    var m: Vec<f32> = Vec.filled(16, 0.0)
+    m[0] = 1.0
+    m[5] = 1.0
+    m[10] = 1.0
+    m[15] = 1.0
+    return m
+}
+
+fn multiply(a: &Vec<f32>, b: &Vec<f32>): Vec<f32> {
+    var m: Vec<f32> = Vec.filled(16, 0.0)
+    for col in 0..4 {
+        for row in 0..4 {
+            var s: f32 = 0.0
+            for k in 0..4 {
+                s = s + a[k * 4 + row] * b[col * 4 + k]
+            }
+            m[col * 4 + row] = s
+        }
+    }
+    return m
+}
+
+fn perspective(fovY: f64, aspect: f64, near: f64, far: f64): Vec<f32> {
+    var m: Vec<f32> = Vec.filled(16, 0.0)
+    let f = 1.0 / Math.tan(fovY * 0.5)
+    m[0] = (f / aspect) as f32
+    m[5] = f as f32
+    m[10] = ((far + near) / (near - far)) as f32
+    m[11] = 0.0 - 1.0
+    m[14] = ((2.0 * far * near) / (near - far)) as f32
+    return m
+}
+
+fn translation(x: f64, y: f64, z: f64): Vec<f32> {
+    var m = identity()
+    m[12] = x as f32
+    m[13] = y as f32
+    m[14] = z as f32
+    return m
+}
+
+fn rotationY(a: f64): Vec<f32> {
+    var m = identity()
+    let c = Math.cos(a)
+    let s = Math.sin(a)
+    m[0] = c as f32
+    m[2] = (0.0 - s) as f32
+    m[8] = s as f32
+    m[10] = c as f32
+    return m
+}
+
+fn rotationX(a: f64): Vec<f32> {
+    var m = identity()
+    let c = Math.cos(a)
+    let s = Math.sin(a)
+    m[5] = c as f32
+    m[6] = s as f32
+    m[9] = (0.0 - s) as f32
+    m[10] = c as f32
+    return m
+}
+
+// ── texture ───────────────────────────────────────────────────────────────────
+
+pub let TEX_SIZE: i64 = 64
+
+// A checker with a border, generated rather than loaded, so the example is one
+// file with no asset beside it. Packed ABGR8888, which is what Texture2D.rgba8
+// expects.
+fn checkerTexture(): Vec<u32> {
+    var px: Vec<u32> = Vec.filled(TEX_SIZE * TEX_SIZE, 0)
+    for y in 0..TEX_SIZE {
+        for x in 0..TEX_SIZE {
+            var r = 34
+            var g = 40
+            var b = 56
+            if (x / 8 + y / 8) % 2 == 0 {
+                r = 214
+                g = 226
+                b = 240
+            }
+            let edge = x < 2 || y < 2 || x >= TEX_SIZE - 2 || y >= TEX_SIZE - 2
+            if edge {
+                r = 250
+                g = 140
+                b = 60
+            }
+            px[y * TEX_SIZE + x] = 0xFF000000 | ((b as u32) << 16) | ((g as u32) << 8) | (r as u32)
+        }
+    }
+    return px
+}
+
+pub fn main(): i32 {
+    if SDL_Init(SDL_INIT_VIDEO) != 0 {
+        print("SDL_Init failed")
+        return 1
+    }
+    var win: *u8 = 0 as *u8
+    var ctx: *u8 = 0 as *u8
+    unsafe {
+        // These have to be set before the window exists; SDL reads them when it
+        // picks the pixel format and ignores them afterwards.
+        let _ = SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3)
+        let _ = SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 3)
+        let _ = SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE)
+        win = SDL_CreateWindow("gpucube — std/gpu", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, W as i32, H as i32, SDL_WINDOW_SHOWN | SDL_WINDOW_RESIZABLE | SDL_WINDOW_OPENGL)
+        if (win as i64) == 0 {
+            print("window: " + _cstrToString(SDL_GetError()))
+            return 2
+        }
+        ctx = SDL_GL_CreateContext(win)
+        if (ctx as i64) == 0 {
+            print("no GL 3.3 core context: " + _cstrToString(SDL_GetError()))
+            return 3
+        }
+        let _ = SDL_GL_SetSwapInterval(1)
+    }
+    print("OpenGL " + Gpu.version())
+
+    var sh = match Shader.compile(VERT, FRAG) {
+        Result.Ok(s) => s
+        Result.Err(e) => {
+            print(e)
+            return 4
+        }
+    }
+    var attrs: Vec<i64> = Vec.new()
+    attrs.push(3) // position
+    attrs.push(2) // uv
+    attrs.push(3) // normal
+    var cube = Mesh.new(attrs)
+    cube.upload(cubeVertices())
+    let tex = Texture2D.rgba8(TEX_SIZE, TEX_SIZE, checkerTexture(), false)
+
+    Gpu.depthTest(true)
+    Gpu.cullBackFaces(true)
+    Gpu.blendOff()
+
+    var ev: [u8; 64] = [0; 64]
+    var quit = false
+    let start = SDL_GetTicks()
+    while !quit {
+        unsafe {
+            while SDL_PollEvent(ev) != 0 {
+                let evType: u32 = (ev[0] as u32) | ((ev[1] as u32) << 8) | ((ev[2] as u32) << 16) | ((ev[3] as u32) << 24)
+                if evType == SDL_QUIT {
+                    quit = true
+                }
+            }
+            let keys = SDL_GetKeyboardState(0 as *i32)
+            if keys[SC_ESC] != 0 {
+                quit = true
+            }
+        }
+        let t = ((SDL_GetTicks() - start) as f64) / 1000.0
+
+        var dw: i32 = 0
+        var dh: i32 = 0
+        unsafe {
+            SDL_GL_GetDrawableSize(win, (dw.addrOf()) as *u8, (dh.addrOf()) as *u8)
+        }
+        bindScreen(dw as i64, dh as i64)
+        Gpu.clear(0.05, 0.06, 0.09, 1.0, true)
+
+        let model = multiply(rotationY(t * 0.9), rotationX(t * 0.55))
+        let view = translation(0.0, 0.0, 0.0 - 3.2)
+        let proj = perspective(1.0, (dw as f64) / (dh as f64), 0.1, 100.0)
+        let mvp = multiply(proj, multiply(view, model))
+
+        sh.bind()
+        sh.uniformMat4("uMvp", mvp)
+        sh.uniformMat4("uModel", model)
+        sh.uniform3F("uSun", 0.5, 0.8, 0.6)
+        sh.sampler("uTex", tex, 0)
+        cube.draw()
+
+        SDL_GL_SwapWindow(win)
+    }
+
+    cube.free()
+    tex.free()
+    sh.free()
+    SDL_GL_DeleteContext(ctx)
+    SDL_DestroyWindow(win)
+    SDL_Quit()
+    return 0
+}

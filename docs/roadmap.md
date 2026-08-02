@@ -70,11 +70,12 @@ Green-tier concurrency with one OS-thread escape hatch:
 - **No async/await** — blocking-shaped code yields automatically in green context
 - Public `Thread`/`Mutex`/`RwLock`/`parallel` were **removed** 2026-07-10 (green tier only — see [concurrency-simplification.md](concurrency-simplification.md))
 
-### Standard Library (70 modules)
+### Standard Library (72 modules)
 
 I/O & system: `io`, `fs`, `path`, `env`, `environ`, `args`, `process`, `signal`, `dl`, `sysinfo`, `mem`, `os`, `platform`, `term`, `pty`, `keys`, `ansi`
 Networking: `net` (TCP + DNS), `unix` (AF_UNIX), `fetch` (HTTPS client + TLS), `http`, `httpmw`, `ws`, `url`
 Data: `json`, `csv`, `toml`, `base64`, `base32`, `hex`, `sqlite`, `arena`, `set`, `pool`, `png`
+Graphics: `gl` (raw OpenGL 3.3 core), `gpu` (shaders, meshes, textures, offscreen targets) — darwin + linux; Windows exports only GL 1.1, so std/gl does not link there
 Compression: `deflate`, `inflate`, `zip`, `zstd`
 Crypto & auth: `crypto`, `sha256`, `sha1`, `hmac`, `jwt`, `totp`, `checksum`, `xxhash`
 Concurrency: `runtime`, `sync`, `select`, `event`
@@ -90,7 +91,7 @@ Time: `time`, `datetime`, `uuid`
 Testing: `testing`
 Prelude: `prelude`
 
-(89 files — several modules are platform splits.) Discover signatures with `milo api <terms>`; dump a module with `milo api --module std/<name>`.
+(91 files — several modules are platform splits.) Discover signatures with `milo api <terms>`; dump a module with `milo api --module std/<name>`.
 
 TLS clients verify certificates (`SSL_VERIFY_PEER` + hostname binding); JSON parsing is RFC 8259-strict with a lenient `jsonParseJsonc` and a `jsonPull` streaming tokenizer.
 

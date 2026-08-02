@@ -149,6 +149,10 @@ pub struct Mine {
     moving: bool,
     stateT: f64,
     blinkT: f64, // counts down to the next blink; negative while the eyes are shut
+    // 0 while the door is shut, 1 once the leaf has finished swinging clear. The
+    // door is passable the instant the quota lands; this is only the picture of
+    // it, and it has to take long enough to be seen.
+    doorAnim: f64,
 }
 
 // Deterministic value noise — no allocation, no state, same map every run so a
@@ -341,6 +345,7 @@ pub fn mineNew(): Mine {
         moving: false,
         stateT: 0.0,
         blinkT: 2.0,
+        doorAnim: 0.0,
     }
     generate(m)
     return m
@@ -357,6 +362,7 @@ pub fn nextLevel(m: &mut Mine) {
     m.py = (SURFACE as f64) * TILE - TILE * 0.5
     m.camX = 0.0
     m.camY = 0.0
+    m.doorAnim = 0.0
     m.deepest = SURFACE
     m.digX = 0 - 1
     m.digProgress = 0.0
@@ -640,7 +646,17 @@ fn bank(m: &mut Mine, kind: i64, value: i64) {
     if m.levelValue >= m.quota && !m.exitOpen {
         m.exitOpen = true
         m.flash = 0.8
-        addPop(m, m.px, m.py - 34.0, "THE WAY OUT IS OPEN", Col {
+        m.shake = 9.0
+        // splinters and dust off the door as the lock gives
+        let dx = ((m.exitX - 1) as f64) * TILE + TILE * 0.5
+        for i in 0..5 {
+            let dy = m.py + Random.floatRange(0.0 - 90.0, 90.0)
+            poof(m, dx, dy, Col {
+                r: 0.70, g: 0.34, b: 0.12
+            }
+            )
+        }
+        addPop(m, m.px, m.py - 44.0, "THE DOOR IS OPEN", Col {
             r: 0.4, g: 1.4, b: 0.6
         }
         )
@@ -892,6 +908,11 @@ pub fn mineUpdate(m: &mut Mine, dt: f64, inX: f64, inY: f64, viewW: f64, viewH: 
 
     updateParts(m, dt)
     updateFlies(m, dt)
+    // The leaf swings clear over about a second, so the moment you earn it is
+    // something you watch happen rather than something that has already happened.
+    if m.exitOpen && m.doorAnim < 1.0 {
+        m.doorAnim = Math.minF64(1.0, m.doorAnim + dt * 0.9)
+    }
     if m.satchelPulse > 0.0 {
         m.satchelPulse = m.satchelPulse - dt
     }

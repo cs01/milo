@@ -88,9 +88,15 @@ row. Making it full height fixed that but left it off screen behind a scroll, so
 it needed an edge marker to stand in for itself. Fitting the map to the window
 deleted both problems and the marker code with them.
 
-It says what it wants without any text: a **padlock** on every tile of the wall
-while it is shut, green with **arrows pouring rightward** once it is open. Fill
-the bar — 75 on level 1, +50 a level — and it opens.
+And it is a real door: a stone jamb, a timber leaf with vertical planks, iron
+straps and rivets, and one ring handle over a keyhole — drawn at the dog's own
+height rather than repeated up a wall that can be forty tiles tall, so it is
+always where you are looking. A green wall with arrows on it is a sign, not a door.
+
+Fill the bar — 75 on level 1, +50 a level — and **the door literally opens**: the
+lock gives with a shake and a burst of splinters, and over about a second the
+leaf swings away from you, drawn as its width collapsing toward the far jamb.
+What is left is a lit doorway you walk through.
 
 ## The world
 

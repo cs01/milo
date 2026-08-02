@@ -546,36 +546,100 @@ fn drawGrain(c: &mut Canvas, tx: i64, ty: i64, sx: f64, sy: f64, t: i64, col: &C
     }
 }
 
-// The door, tile by tile. It is on screen for the whole level, so it has to say
-// what it wants without any text: a padlock on every tile while it is shut,
-// arrows pouring rightward once it is open.
-fn drawDoor(c: &mut Canvas, m: &Mine, sx: f64, sy: f64, ty: i64, kk: f64) {
-    if m.exitOpen {
-        var q = 0
-        while q < 2 {
-            // The arrows scroll, which is the difference between a green wall and
-            // a green wall that is telling you to walk through it.
-            let ph = Math.mod(m.time * 1.6 + (q as f64) * 0.5 + (ty as f64) * 0.25, 1.0)
-            let yb = sy + TILE * (0.06 + 0.72 * ph)
-            let f = (1.0 - Math.abs(ph - 0.5) * 2.0) * 1.6
-            line(c, sx + TILE * 0.26, yb, sx + TILE * 0.70, yb + TILE * 0.11, 0.3 * f, 1.2 * f, 0.5 * f)
-            line(c, sx + TILE * 0.70, yb + TILE * 0.11, sx + TILE * 0.26, yb + TILE * 0.22, 0.3 * f, 1.2 * f, 0.5 * f)
-            q = q + 1
+// One tile-tall slice of the door.
+//
+// The door is a real door: a stone jamb on each side, and a timber leaf hung
+// inside it with planks, iron straps and rivets. When the quota lands the leaf
+// swings away from you — drawn as its width collapsing toward the far jamb,
+// which is what a door opening away from the camera actually does on screen —
+// and leaves a lit doorway you walk through. It used to be a green wall with
+// arrows on it, which is a sign, not a door.
+fn drawDoorTile(c: &mut Canvas, m: &Mine, sx: f64, sy: f64, ty: i64, kk: f64) {
+    let jamb = 5.0
+    // The doorway behind the leaf. Dark, with the daylight of the shaft beyond
+    // leaking in once there is a gap to leak through.
+    setRect(c, sx, sy, sx + TILE, sy + TILE, 0.05, 0.04, 0.04)
+    if m.doorAnim > 0.0 {
+        let g = m.doorAnim
+        // A flat strip, not a per-tile blob: a `spot` in each cell stacked up
+        // into a column of green circles instead of one lit passage.
+        setRect(c, sx + jamb, sy, sx + TILE, sy + TILE, 0.10 * g, 0.34 * g, 0.16 * g)
+        setRect(c, sx + jamb, sy, sx + jamb + 3.0, sy + TILE, 0.16 * g, 0.55 * g, 0.26 * g)
+    }
+
+    // The leaf. Hinged on the far side, so its near edge sweeps right as it opens.
+    let leafW = (TILE - jamb) * (1.0 - m.doorAnim)
+    if leafW > 2.0 {
+        let lx0 = sx + jamb + (TILE - jamb - leafW)
+        let lx1 = sx + TILE
+        // Timber, shaded darker toward the hinge to fake the turn.
+        let shade = 0.55 + 0.45 * (1.0 - m.doorAnim)
+        setRect(c, lx0, sy, lx1, sy + TILE, 0.62 * kk * shade, 0.28 * kk * shade, 0.10 * kk * shade)
+        // planks, and a highlight down the leading edge
+        var p = 1
+        while p < 4 {
+            let pxp = lx0 + leafW * (p as f64) * 0.25
+            setRect(c, pxp, sy, pxp + 1.5, sy + TILE, 0.34 * kk * shade, 0.13 * kk * shade, 0.04 * kk * shade)
+            p = p + 1
         }
+        setRect(c, lx0, sy, lx0 + 2.0, sy + TILE, 0.95 * kk * shade, 0.55 * kk * shade, 0.24 * kk * shade)
+        // Iron straps, on every other row so the wall of the door has a rhythm
+        // rather than a stripe on every tile.
+        if ty % 2 == 0 {
+            setRect(c, lx0, sy + TILE * 0.20, lx1, sy + TILE * 0.32, 0.20 * kk, 0.20 * kk, 0.24 * kk)
+            setRect(c, lx0, sy + TILE * 0.68, lx1, sy + TILE * 0.80, 0.20 * kk, 0.20 * kk, 0.24 * kk)
+            if leafW > 12.0 {
+                setRect(c, lx0 + 3.0, sy + TILE * 0.24, lx0 + 6.0, sy + TILE * 0.28, 0.65 * kk, 0.65 * kk, 0.70 * kk)
+                setRect(c, lx1 - 6.0, sy + TILE * 0.24, lx1 - 3.0, sy + TILE * 0.28, 0.65 * kk, 0.65 * kk, 0.70 * kk)
+                setRect(c, lx0 + 3.0, sy + TILE * 0.72, lx0 + 6.0, sy + TILE * 0.76, 0.65 * kk, 0.65 * kk, 0.70 * kk)
+                setRect(c, lx1 - 6.0, sy + TILE * 0.72, lx1 - 3.0, sy + TILE * 0.76, 0.65 * kk, 0.65 * kk, 0.70 * kk)
+            }
+        }
+    }
+
+    // Jambs last, so the leaf is inside the frame rather than in front of it.
+    setRect(c, sx, sy, sx + jamb, sy + TILE, 0.30 * kk, 0.24 * kk, 0.26 * kk)
+    setRect(c, sx, sy, sx + 2.0, sy + TILE, 0.44 * kk, 0.36 * kk, 0.38 * kk)
+    if ty % 3 == 0 {
+        // a course line in the stone jamb
+        setRect(c, sx, sy, sx + jamb, sy + 2.0, 0.16 * kk, 0.12 * kk, 0.14 * kk)
+    }
+}
+
+// The handle, the keyhole and the plate they sit on, drawn once at the player's
+// own height rather than repeated up a wall that can be forty tiles tall. It is
+// the one thing that says "door" instead of "gate", so it has to be where you
+// are looking, which is at the dog.
+fn drawDoorHandle(c: &mut Canvas, m: &Mine, camX: f64, camY: f64) {
+    if m.doorAnim >= 1.0 {
         return
     }
-    // padlock: a shackle over a body, one per tile, all the way up the wall
-    let cxp = sx + TILE * 0.5
-    let byp = sy + TILE * 0.56
-    let bw = TILE * 0.21
-    let bh = TILE * 0.16
-    setRect(c, cxp - bw, byp - bh, cxp + bw, byp + bh, 0.14, 0.09, 0.03)
-    setRect(c, cxp - bw + 2.0, byp - bh + 2.0, cxp + bw - 2.0, byp + bh - 2.0, 0.95 * kk, 0.62 * kk, 0.10 * kk)
-    setRect(c, cxp - 2.0, byp - 2.0, cxp + 2.0, byp + bh - 3.0, 0.14, 0.09, 0.03)
-    let sh = TILE * 0.15
-    setRect(c, cxp - sh, byp - bh - sh, cxp - sh + 3.5, byp - bh, 0.14, 0.09, 0.03)
-    setRect(c, cxp + sh - 3.5, byp - bh - sh, cxp + sh, byp - bh, 0.14, 0.09, 0.03)
-    setRect(c, cxp - sh, byp - bh - sh, cxp + sh, byp - bh - sh + 3.5, 0.14, 0.09, 0.03)
+    let f = 1.0 - m.doorAnim
+    let dx = (m.exitX - 1) as f64
+    let leafW = (TILE - 5.0) * f
+    let hx = dx * TILE - camX + 5.0 + (TILE - 5.0 - leafW) + leafW * 0.30
+    let top = (SURFACE as f64) * TILE - camY + TILE * 0.5
+    let bot = ((m.worldH - 2) as f64) * TILE - camY
+    let hy = Math.clampF64(m.py - camY, top, bot)
+    if leafW < 18.0 {
+        return
+    }
+    // back plate
+    setRect(c, hx - 9.0, hy - 13.0, hx + 9.0, hy + 13.0, 0.18, 0.17, 0.20)
+    setRect(c, hx - 7.0, hy - 11.0, hx + 7.0, hy + 11.0, 0.42, 0.40, 0.44)
+    // ring handle
+    circle(c, hx, hy - 4.0, 7.0, 12, 1.30, 0.92, 0.30)
+    circle(c, hx, hy - 4.0, 5.4, 12, 0.90, 0.62, 0.18)
+    // keyhole, which is where the lock reads from
+    setRect(c, hx - 2.5, hy + 3.0, hx + 2.5, hy + 8.0, 0.05, 0.04, 0.04)
+    setRect(c, hx - 4.0, hy + 3.0, hx + 4.0, hy + 6.0, 0.05, 0.04, 0.04)
+    if !m.exitOpen {
+        // it rattles when you push on it, and never quite gives
+        let rattle = Math.sin(m.time * 3.0) * 1.5
+        spot(c, hx, hy + 5.0, 5.0 + rattle, 0.30, 0.16, 0.03)
+    } else {
+        spot(c, hx, hy - 4.0, 12.0 * f, 0.5 * f, 0.9 * f, 0.3 * f)
+    }
 }
 
 // Treasure has to LOOK like treasure. Fat nuggets, a specular highlight that
@@ -721,10 +785,11 @@ pub fn drawMine(c: &mut Canvas, m: &Mine, ox: f64, oy: f64) {
             }
             if t == T_GATE {
                 // Visible from anywhere: this is the thing "head east" means.
-                if m.exitOpen {
-                    ambient = 1.20 + 0.45 * Math.sin(m.time * 5.0 - (ty as f64) * 0.6)
-                } else {
-                    ambient = 0.80 + 0.18 * Math.sin(m.time * 2.0 - (ty as f64) * 0.6)
+                // Lit like a made thing rather than like a wall, with a slow
+                // pulse while it is still locked so the eye keeps going back to it.
+                ambient = 0.88
+                if !m.exitOpen {
+                    ambient = 0.88 + 0.10 * Math.sin(m.time * 2.0 - (ty as f64) * 0.6)
                 }
             }
             if t == T_GOLD || t == T_GEM || t == T_CRYSTAL {
@@ -757,18 +822,15 @@ pub fn drawMine(c: &mut Canvas, m: &Mine, ox: f64, oy: f64) {
             if isOre {
                 texture = hostKind(m, tx, ty)
             }
-            var body = tileColor(texture)
-            if t == T_GATE && m.exitOpen {
-                body = Col {
-                    r: 0.15, g: 1.50, b: 0.40
-                }
+            let body = tileColor(texture)
+            // The door is not ground: it is joinery, square-edged and framed, so
+            // it skips the rounded-lump treatment entirely.
+            if t == T_GATE {
+                drawDoorTile(c, m, sx, sy, ty, kk)
+                continue
             }
             roundTile(c, sx - bl, sy - bt, sx + TILE + br, sy + TILE + bb, body.r * kk, body.g * kk, body.b * kk, rtl, rtr, rbl, rbr)
-            if t == T_GATE {
-                drawDoor(c, m, sx, sy, ty, kk)
-            } else {
-                drawGrain(c, tx, ty, sx, sy, texture, body, kk)
-            }
+            drawGrain(c, tx, ty, sx, sy, texture, body, kk)
             // A lit rim wherever the ground faces open air. Cheap, and it is what
             // makes a tunnel wall look like a surface rather than a colour.
             if !isSolid(tileAt(m, tx, ty - 1)) {
@@ -779,6 +841,8 @@ pub fn drawMine(c: &mut Canvas, m: &Mine, ox: f64, oy: f64) {
             }
         }
     }
+
+    drawDoorHandle(c, m, camX, camY)
 
     // The lamp, as ONE smooth additive glow over the finished tiles rather than a
     // per-tile brightness. It spills a little through rock, which is the price of
@@ -880,7 +944,7 @@ pub fn drawHud(c: &mut Canvas, m: &Mine) {
     if m.exitOpen {
         let pulse = 0.7 + 0.3 * Math.sin(m.time * 5.0)
         fillRect(c, bx, by, bx + bw, by + bh, 0.10 * pulse, 0.70 * pulse, 0.24 * pulse)
-        textCentered(c, c.w / 2, 70, "GO RIGHT TO THE GREEN DOOR!", 3, 0.5 * pulse, 1.3 * pulse, 0.6 * pulse)
+        textCentered(c, c.w / 2, 70, "THE DOOR IS OPEN! GO RIGHT!", 3, 0.5 * pulse, 1.3 * pulse, 0.6 * pulse)
     } else {
         var frac = (m.levelValue as f64) / (m.quota as f64)
         if frac > 1.0 {

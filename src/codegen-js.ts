@@ -503,6 +503,13 @@ export class CodegenJS {
         return this.genExpr(expr.operand);
       case "VecNew":
         return "[]";
+      case "VecFilled": {
+        // Vec.filled(n, x). Cloned per element like ArrayRepeat: the value is
+        // evaluated once in Milo too, but each slot owns its own copy, so a
+        // Vec.filled of a struct must not hand out n aliases of one object.
+        const val = this.genExpr(expr.value);
+        return `Array.from({length: ${this.genExpr(expr.count)}}, () => __clone(${val}))`;
+      }
       case "VecPush":
         return `${this.genExpr(expr.vec)}.push(${this.genExpr(expr.value)})`;
       case "VecPop":

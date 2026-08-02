@@ -41,6 +41,10 @@ const cases: Record<string, string> = {
   // statements sharing a line, so the reflow split the call in half.
   sigilBuiltin: `fn main(): i32 {\n    let s = @embedFile("hello.txt")\n    print(s)\n    return 0\n}\n`,
   sigilBuiltinNested: `fn body(): string {\n    return wrap(@embedFile("hello.txt"), 1)\n}\n`,
+  // A prefix `!` in an argument list came out as `f(a,!b)`: the `!` rule returned
+  // before the general space-after-a-comma one. Stable output, so the idempotence
+  // corpus could not see it — only a round-trip case can.
+  bangAfterComma: `fn main() {\n    let x = true\n    take(x, !x, 1)\n}\n`,
 };
 
 for (const [name, src] of Object.entries(cases)) {

@@ -811,8 +811,13 @@ pub fn wantSpaceBefore(tokens: &Vec<Token>, i: i64): bool {
         return false
     }
     // ! — space after keywords and binary ops (unary !), no space when postfix
+    //
+    // Comma is in the list because this rule returns before the general
+    // space-after-a-comma one further down: without it a prefix `!` in an
+    // argument list came out as `f(a,!b)`. The `(` and `[` cases returned above,
+    // so an opener still hugs its operand.
     if tk == TokKind.Bang {
-        return pk == TokKind.Keyword || isSpacedOp(pk)
+        return pk == TokKind.Keyword || pk == TokKind.Comma || isSpacedOp(pk)
     }
     // * — space when binary (multiply), tight when unary/pointer type.
     // After `:` `,` a keyword or any spaced operator (`=>`, `=`, ...) the `*`

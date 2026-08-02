@@ -1,0 +1,29 @@
+// _strDataPtr must work on every shape a `&string` argument arrives in. A local
+// and a struct field reach codegen as addresses; a `&string` PARAMETER arrives as
+// the %String aggregate itself, passed by value, and GEPing that emitted
+// `getelementptr %String, ptr <an SSA %String>` — invalid IR, so any function
+// taking `s: &string` and asking for its data pointer failed to compile.
+
+struct Holder {
+    s: string,
+}
+
+fn viaRefParam(s: &string): *u8 {
+    return _strDataPtr(s)
+}
+
+fn main() {
+    let local = "hello"
+    let fromLocal = _strDataPtr(local)
+    let fromParam = viaRefParam(local)
+    // @expect: same buffer: true
+    print($"same buffer: {fromLocal == fromParam}")
+    // @expect: h 104
+    print($"h {_loadU8(fromLocal)}")
+    let h = Holder {
+        s: "world"
+    }
+    let fromField = _strDataPtr(h.s)
+    // @expect: w 119
+    print($"w {_loadU8(fromField)}")
+}

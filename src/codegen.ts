@@ -4151,13 +4151,23 @@ export class Codegen {
       return [lines, s3, "%String"];
     }
     if (expr.func === "_strDataPtr") {
-      // extract the data pointer (field 0) from a &string
-      const [al, pv] = this.genExpr(expr.args[0].expr);
+      // Extract the data pointer (field 0) from a &string. The argument reaches
+      // codegen in one of two shapes and only one of them can be GEP'd: a local
+      // or a field is an address, but a `&string` *parameter* is the %String
+      // aggregate itself, passed by value. GEPing that emitted
+      // `getelementptr %String, ptr %t` against an SSA value of type %String,
+      // which LLVM rejects — so any function that took `s: &string` and called
+      // this on it failed to compile.
+      const [al, pv, ty] = this.genExpr(expr.args[0].expr);
       lines.push(...al);
-      const dataGep = this.nextTemp();
-      lines.push(`  ${dataGep} = getelementptr %String, ptr ${pv}, i32 0, i32 0`);
       const dataPtr = this.nextTemp();
-      lines.push(`  ${dataPtr} = load ptr, ptr ${dataGep}`);
+      if (ty === "%String") {
+        lines.push(`  ${dataPtr} = extractvalue %String ${pv}, 0`);
+      } else {
+        const dataGep = this.nextTemp();
+        lines.push(`  ${dataGep} = getelementptr %String, ptr ${pv}, i32 0, i32 0`);
+        lines.push(`  ${dataPtr} = load ptr, ptr ${dataGep}`);
+      }
       return [lines, dataPtr, "ptr"];
     }
     // ── Atomic intrinsics ──

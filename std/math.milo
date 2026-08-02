@@ -21,6 +21,15 @@ extern fn tan(x: f64): f64
 extern fn atan2(y: f64, x: f64): f64
 
 @pure
+extern fn asin(x: f64): f64
+
+@pure
+extern fn acos(x: f64): f64
+
+@pure
+extern fn atan(x: f64): f64
+
+@pure
 extern fn floor(x: f64): f64
 
 @pure
@@ -84,6 +93,36 @@ impl Math {
     @pure
     fn atan2(y: f64, x: f64): f64 {
         return atan2(y, x)
+    }
+
+    // Clamped before the call. Round-off in a dot product routinely lands a
+    // cosine at 1.0000000000000002, and libm's acos returns NaN there rather
+    // than 0 — a NaN that then propagates silently through an angle calculation.
+    @pure
+    fn acos(x: f64): f64 {
+        if x <= -1.0 {
+            return 3.14159265358979323846
+        }
+        if x >= 1.0 {
+            return 0.0
+        }
+        return acos(x)
+    }
+
+    @pure
+    fn asin(x: f64): f64 {
+        if x <= -1.0 {
+            return -1.57079632679489661923
+        }
+        if x >= 1.0 {
+            return 1.57079632679489661923
+        }
+        return asin(x)
+    }
+
+    @pure
+    fn atan(x: f64): f64 {
+        return atan(x)
     }
 
     @pure

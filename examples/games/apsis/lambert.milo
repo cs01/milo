@@ -1,0 +1,168 @@
+// Lambert's problem: given where you are, where you want to be, and how long you
+// are willing to take, what velocity do you need?
+//
+// This is the solver behind the porkchop screen and behind every "plan a
+// transfer" the game does for the player. It is pure two-body about the Sun —
+// which is not what the ship actually flies, since the integrator sums every
+// body — so a Lambert answer is a very good FIRST GUESS and not a final one.
+// That gap is not a defect being papered over; it is the reason mid-course
+// corrections exist in the game, exactly as they do in real mission operations.
+//
+// Universal-variable formulation (Vallado, Fundamentals of Astrodynamics and
+// Applications, algorithm 57), solved by bisection on psi. Bisection rather than
+// Newton because the porkchop grid evaluates thousands of these unattended: a
+// Newton iteration that diverges on one awkward geometry puts a NaN in the heat
+// map, and bisection on a bracketed root simply cannot.
+
+from "std/math" import {
+    Math
+}
+from "./vec3" import {
+    Vec3, v3
+}
+
+pub struct Lambert {
+    ok: bool,
+    v1: Vec3, // velocity needed at r1
+    v2: Vec3, // velocity you arrive at r2 with
+}
+
+fn cosh(x: f64): f64 {
+    let a = Math.exp(x)
+    return (a + 1.0 / a) * 0.5
+}
+
+fn sinh(x: f64): f64 {
+    let a = Math.exp(x)
+    return (a - 1.0 / a) * 0.5
+}
+
+// Stumpff functions. The series branches near zero are not an optimisation —
+// both closed forms are 0/0 there, and psi passes through zero on every
+// near-parabolic transfer, which is most of the interesting ones.
+fn stumpff2(psi: f64): f64 {
+    if psi > 1.0e-6 {
+        let s = Math.sqrt(psi)
+        return (1.0 - Math.cos(s)) / psi
+    }
+    if psi < -1.0e-6 {
+        let s = Math.sqrt(-psi)
+        return (cosh(s) - 1.0) / (-psi)
+    }
+    return 0.5 - psi / 24.0 + psi * psi / 720.0
+}
+
+fn stumpff3(psi: f64): f64 {
+    if psi > 1.0e-6 {
+        let s = Math.sqrt(psi)
+        return (s - Math.sin(s)) / (s * s * s)
+    }
+    if psi < -1.0e-6 {
+        let s = Math.sqrt(-psi)
+        return (sinh(s) - s) / (s * s * s)
+    }
+    return 1.0 / 6.0 - psi / 120.0 + psi * psi / 5040.0
+}
+
+pub fn lambertFail(): Lambert {
+    return Lambert {
+        ok: false, v1: v3(0.0, 0.0, 0.0), v2: v3(0.0, 0.0, 0.0)
+    }
+}
+
+pub fn lambert(r1: &Vec3, r2: &Vec3, dt: f64, mu: f64, prograde: bool): Lambert {
+    if dt <= 0.0 {
+        return lambertFail()
+    }
+    let n1 = r1.len()
+    let n2 = r2.len()
+    if n1 <= 0.0 || n2 <= 0.0 {
+        return lambertFail()
+    }
+    let cosdv = Math.clampF64(r1.dot(r2) / (n1 * n2), -1.0, 1.0)
+    var dv = Math.acos(cosdv)
+    // Which way round. The transfer plane is fixed by the two radii, so the only
+    // choice left is which of the two arcs to fly, and that is what makes a
+    // transfer prograde or retrograde.
+    let cz = r1.cross(r2).z
+    if prograde {
+        if cz < 0.0 {
+            dv = Math.pi() * 2.0 - dv
+        }
+    } else {
+        if cz > 0.0 {
+            dv = Math.pi() * 2.0 - dv
+        }
+    }
+    let denom = 1.0 - cosdv
+    if denom < 1.0e-12 {
+        // The two radii are collinear and same-side: the transfer plane is
+        // undefined and no single-revolution arc exists.
+        return lambertFail()
+    }
+    let a = Math.sin(dv) * Math.sqrt(n1 * n2 / denom)
+    if Math.abs(a) < 1.0e-9 {
+        return lambertFail()
+    }
+
+    var psi = 0.0
+    var psiLow = -4.0 * Math.pi() * Math.pi()
+    var psiUp = 4.0 * Math.pi() * Math.pi()
+    var y = 0.0
+    var i = 0
+    while i < 200 {
+        let c2 = stumpff2(psi)
+        let c3 = stumpff3(psi)
+        y = n1 + n2 + a * (psi * c3 - 1.0) / Math.sqrt(c2)
+        // With a positive A, a negative y means psi is too low for this geometry
+        // — the arc it describes passes through the central body. Walk the lower
+        // bracket up until the geometry is legal again.
+        if a > 0.0 && y < 0.0 {
+            var guard = 0
+            while y < 0.0 && guard < 200 {
+                psi = psi + 0.1
+                let d2 = stumpff2(psi)
+                let d3 = stumpff3(psi)
+                y = n1 + n2 + a * (psi * d3 - 1.0) / Math.sqrt(d2)
+                guard = guard + 1
+            }
+            psiLow = psi
+        }
+        let c2b = stumpff2(psi)
+        let c3b = stumpff3(psi)
+        if y < 0.0 || c2b <= 0.0 {
+            return lambertFail()
+        }
+        let chi = Math.sqrt(y / c2b)
+        let dtCalc = (chi * chi * chi * c3b + a * Math.sqrt(y)) / Math.sqrt(mu)
+        if dtCalc <= dt {
+            psiLow = psi
+        } else {
+            psiUp = psi
+        }
+        psi = (psiUp + psiLow) * 0.5
+        if Math.abs(dtCalc - dt) < 1.0e-6 * dt {
+            i = 200
+        } else {
+            i = i + 1
+        }
+    }
+
+    if y <= 0.0 {
+        return lambertFail()
+    }
+    let f = 1.0 - y / n1
+    let g = a * Math.sqrt(y / mu)
+    let gdot = 1.0 - y / n2
+    if Math.abs(g) < 1.0e-12 {
+        return lambertFail()
+    }
+    let v1 = (r2 - r1.scale(f)).scale(1.0 / g)
+    let v2 = (r2.scale(gdot) - r1).scale(1.0 / g)
+    if !Math.isFinite(v1.x) || !Math.isFinite(v2.x) {
+        return lambertFail()
+    }
+    return Lambert {
+        ok: true, v1: v1, v2: v2
+    }
+}

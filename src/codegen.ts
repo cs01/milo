@@ -560,7 +560,11 @@ export class Codegen {
     this.usedDbgDeclare = true;
   }
 
-  public nextTemp(): string { return `%t${this.tempCounter++}`; }
+  // The dot is load-bearing: a parameter named `t0` is emitted as the LLVM value
+  // `%t0` (see the param prologue), so a bare `%t${n}` counter collides with it
+  // and LLVM rejects the module with "multiple definition of local value". Milo
+  // identifiers cannot contain `.`, so this prefix cannot be reached from source.
+  public nextTemp(): string { return `%t.${this.tempCounter++}`; }
   public nextLabel(prefix = "L"): string { return `${prefix}${this.labelCounter++}`; }
   private localAddr(name: string): string {
     // A local/param shadows a same-named global. Decide on membership in `locals`,

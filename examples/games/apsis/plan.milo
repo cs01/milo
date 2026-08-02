@@ -1,0 +1,400 @@
+// Turning "I want to go to Mars" into a burn.
+//
+// This is the layer the player never has to understand, and it exists because
+// the honest answer to "what are the inputs" is a time and a three-component
+// velocity change, and nobody should have to derive one. Three things live here:
+//
+//   1. the parking orbit a mission starts in,
+//   2. the ejection burn that leaves it on a given escape asymptote, and
+//   3. a shooting refinement that corrects the first two against what the
+//      integrator actually does.
+//
+// Steps 1 and 2 are pure two-body patched conics — the same approximation every
+// real mission design starts from. Step 3 is what makes it true: it re-flies the
+// burn through the full n-body integrator, measures where the ship really ends
+// up, and nudges the burn until the miss closes. That division of labour is the
+// whole trick. Analytic gets within a few hundred thousand kilometres; shooting
+// takes it the rest of the way, and it works for gravity assists too, where no
+// closed form exists at all.
+
+from "std/math" import {
+    Math
+}
+from "./vec3" import {
+    Vec3, v3
+}
+from "./ephem" import {
+    Body, BODY_COUNT, SUN
+}
+from "./nbody" import {
+    Ship, Ephem, ephemPos, ephemVel, propagate, Track
+}
+from "./lambert" import {
+    Lambert, lambert
+}
+
+// A single planned burn: when, and how much velocity to add.
+pub struct Burn {
+    t: f64,
+    dv: Vec3,
+    valid: bool,
+}
+
+pub fn noBurn(): Burn {
+    return Burn {
+        t: 0.0, dv: v3(0.0, 0.0, 0.0), valid: false
+    }
+}
+
+// ── parking orbits ────────────────────────────────────────────────────────────
+
+// The plane of a parking orbit is chosen rather than fixed, because a single
+// prograde burn can only throw the ship along its own orbital plane. Real
+// missions solve this by launching into a parking orbit whose plane already
+// contains the departure asymptote; a game that instead spawned the player in an
+// arbitrary plane would be quietly demanding an expensive plane change before
+// every transfer — a tax the player did not choose and cannot see.
+//
+// Any normal perpendicular to `dir` would do geometrically. This picks the least
+// inclined of them, so a departure to a planet near the ecliptic looks like an
+// equatorial orbit rather than a polar one for no reason the player can see.
+pub fn planeContaining(dir: &Vec3): Vec3 {
+    let d = dir.norm()
+    let up = v3(0.0, 0.0, 1.0)
+    let n = up - d.scale(up.dot(d))
+    if n.len() < 1.0e-6 {
+        return d.anyPerp()
+    }
+    return n.norm()
+}
+
+pub fn parkingOrbit(e: &Ephem, about: i64, rad: f64, t: f64, normal: &Vec3, phase: f64): Ship {
+    let mu = e.mu[about]
+    let bp = ephemPos(e, about, t)
+    let bv = ephemVel(e, about, t)
+    let n = normal.norm()
+    let dir = n.anyPerp().rotate(n, phase)
+    let speed = Math.sqrt(mu / rad)
+    let tangent = n.cross(dir).norm()
+    return Ship {
+        pos: bp + dir.scale(rad), vel: bv + tangent.scale(speed)
+    }
+}
+
+// ── ejection ──────────────────────────────────────────────────────────────────
+
+// Where in a circular orbit of radius `rad` a prograde burn must happen for the
+// escape asymptote to point along `vinf`, and how fast the ship must be going
+// when it leaves.
+//
+// A prograde burn from a circular orbit makes the burn point the periapsis of
+// the resulting hyperbola, so the geometry reduces to one angle: the true
+// anomaly of the asymptote, acos(-1/e). Rotate the desired escape direction
+// backwards through that angle, in the orbit plane, and that is where to burn.
+pub struct Ejection {
+    periDir: Vec3, // unit, from the body centre to the burn point
+    burnDir: Vec3, // unit, the direction to burn in
+    speed: f64, // speed required just after the burn
+    dvMag: f64, // how much that costs from a circular orbit
+    valid: bool,
+}
+
+pub fn ejection(mu: f64, rad: f64, vinf: &Vec3, normal: &Vec3): Ejection {
+    let vinfMag = vinf.len()
+    if vinfMag <= 0.0 || rad <= 0.0 {
+        return Ejection {
+            periDir: v3(1.0, 0.0, 0.0), burnDir: v3(0.0, 1.0, 0.0),
+            speed: 0.0, dvMag: 0.0, valid: false
+        }
+    }
+    let ecc = 1.0 + rad * vinfMag * vinfMag / mu
+    let nuInf = Math.acos(-1.0 / ecc)
+    let n = normal.norm()
+    // Backwards through nuInf: the ship travels FROM periapsis TO the asymptote,
+    // so the burn point trails the escape direction by that angle.
+    let periDir = vinf.norm().rotate(n, -nuInf)
+    let burnDir = n.cross(periDir).norm()
+    let speed = Math.sqrt(vinfMag * vinfMag + 2.0 * mu / rad)
+    return Ejection {
+        periDir: periDir, burnDir: burnDir, speed: speed,
+        dvMag: speed - Math.sqrt(mu / rad), valid: true
+    }
+}
+
+// ── the transfer planner ──────────────────────────────────────────────────────
+
+pub struct Transfer {
+    burn: Burn,
+    // What the patched-conic model expected the trip to cost and to achieve.
+    vinf: Vec3,
+    depC3: f64, // departure hyperbolic excess speed
+    arrVinf: f64, // arrival hyperbolic excess speed
+    // What the integrator actually delivered after refinement.
+    missDist: f64,
+    arriveT: f64,
+    ok: bool,
+}
+
+// The patched-conic first guess: solve Lambert between the two planets, convert
+// the required heliocentric departure velocity into an escape asymptote, and
+// place the burn.
+pub fn planCoarse(e: &Ephem, from: i64, to: i64, tDep: f64, tof: f64, parkRad: f64, normal: &Vec3): Transfer {
+    let r1 = ephemPos(e, from, tDep)
+    let r2 = ephemPos(e, to, tDep + tof)
+    let sol = lambert(r1, r2, tof, e.mu[SUN], true)
+    if !sol.ok {
+        return Transfer {
+            burn: noBurn(), vinf: v3(0.0, 0.0, 0.0), depC3: 0.0, arrVinf: 0.0,
+            missDist: 1.0e30, arriveT: tDep + tof, ok: false
+        }
+    }
+    let vinf = sol.v1 - ephemVel(e, from, tDep)
+    let arrVinf = (sol.v2 - ephemVel(e, to, tDep + tof)).len()
+    let ej = ejection(e.mu[from], parkRad, vinf, normal)
+    if !ej.valid {
+        return Transfer {
+            burn: noBurn(), vinf: vinf, depC3: vinf.len(), arrVinf: arrVinf,
+            missDist: 1.0e30, arriveT: tDep + tof, ok: false
+        }
+    }
+    // The burn is expressed as the velocity CHANGE from the circular parking
+    // orbit at the burn point, which is what a maneuver node holds.
+    let circ = Math.sqrt(e.mu[from] / parkRad)
+    let dv = ej.burnDir.scale(ej.speed - circ)
+    return Transfer {
+        burn: Burn {
+            t: tDep, dv: dv, valid: true
+        }
+        ,
+        vinf: vinf, depC3: vinf.len(), arrVinf: arrVinf,
+        missDist: 1.0e30, arriveT: tDep + tof, ok: true
+    }
+}
+
+// The state the ship is in at the moment of the burn, given the parking orbit
+// the coarse plan assumed.
+pub fn ejectionState(e: &Ephem, from: i64, tDep: f64, parkRad: f64, vinf: &Vec3, normal: &Vec3): Ship {
+    let ej = ejection(e.mu[from], parkRad, vinf, normal)
+    let bp = ephemPos(e, from, tDep)
+    let bv = ephemVel(e, from, tDep)
+    return Ship {
+        pos: bp + ej.periDir.scale(parkRad),
+        vel: bv + ej.burnDir.scale(ej.speed),
+    }
+}
+
+// ── shooting ──────────────────────────────────────────────────────────────────
+
+// Where the ship ends up at a fixed arrival time, for a departure velocity
+// perturbed by `extra`.
+fn endAt(e: &Ephem, start: &Ship, t: f64, extra: &Vec3, span: f64): Vec3 {
+    let s = Ship {
+        pos: start.pos, vel: start.vel + extra
+    }
+    return propagate(e, s, t, span, 2, -1).endPos
+}
+
+// Solve a 3x3 system by Cramer's rule. Three unknowns is small enough that a
+// determinant beats any factorisation, and a singular Jacobian — which happens
+// when the arrival time sits exactly at a turning point — is one comparison away
+// rather than a pivoting strategy.
+fn solve3(c1: &Vec3, c2: &Vec3, c3: &Vec3, rhs: &Vec3): Vec3 {
+    let det = c1.dot(c2.cross(c3))
+    if Math.abs(det) < 1.0e-30 {
+        return v3(0.0, 0.0, 0.0)
+    }
+    let dx = rhs.dot(c2.cross(c3))
+    let dy = c1.dot(rhs.cross(c3))
+    let dz = c1.dot(c2.cross(rhs))
+    return v3(dx / det, dy / det, dz / det)
+}
+
+// Correct a departure velocity so the ship is at `aim` at time `tArr`.
+//
+// This is the Lambert boundary condition re-imposed on the real force model:
+// three unknowns (the departure velocity) against three equations (the arrival
+// position), which is square, smooth, and converges quadratically. Minimising
+// the scalar closest-approach distance instead — the obvious first idea — stalls
+// out around a hundred thousand kilometres, because that objective is a distance
+// to a moving point and its gradient goes flat and kinked near the minimum.
+//
+// The Jacobian is three central differences, so each iteration costs seven
+// propagations. At sub-millisecond propagations that is a few milliseconds for
+// the whole solve, which is why the game can afford to re-plan on demand.
+pub fn refineToPoint(e: &Ephem, start: &Ship, t: f64, tArr: f64, aim: &Vec3, iters: i64): Vec3 {
+    let span = tArr - t
+    var extra = v3(0.0, 0.0, 0.0)
+    var i = 0
+    while i < iters {
+        let r0 = endAt(e, start, t, extra, span) - aim
+        if r0.len() < 1000.0 {
+            i = iters
+        } else {
+            // The probe size sets how far the finite difference reaches. It is
+            // scaled to the residual because a 1 m/s probe is noise on a
+            // 700 000 km miss and a 100 m/s probe steps clean over the solution
+            // once the miss is down to hundreds of kilometres.
+            var h = r0.len() * 1.0e-11
+            if h < 0.0005 {
+                h = 0.0005
+            }
+            if h > 2.0 {
+                h = 2.0
+            }
+            let hx = v3(h, 0.0, 0.0)
+            let hy = v3(0.0, h, 0.0)
+            let hz = v3(0.0, 0.0, h)
+            let c1 = (endAt(e, start, t, extra + hx, span) - endAt(e, start, t, extra - hx, span)).scale(1.0 / (2.0 * h))
+            let c2 = (endAt(e, start, t, extra + hy, span) - endAt(e, start, t, extra - hy, span)).scale(1.0 / (2.0 * h))
+            let c3 = (endAt(e, start, t, extra + hz, span) - endAt(e, start, t, extra - hz, span)).scale(1.0 / (2.0 * h))
+            let step = solve3(c1, c2, c3, r0.scale(-1.0))
+            if step.len() <= 0.0 {
+                i = iters
+            } else {
+                // Capped, then backtracked. Newton on a 280-day trajectory is
+                // only locally valid: an early iteration from a bad guess will
+                // happily propose a kilometre per second, which flies the ship
+                // somewhere the linearisation knows nothing about. Without the
+                // accept-only-if-better test one such step lands the solver in a
+                // worse basin and it never recovers — that showed up as a single
+                // correction epoch costing 1.4 km/s while its neighbours cost 56.
+                var d = step
+                if d.len() > 200.0 {
+                    d = d.norm().scale(200.0)
+                }
+                var tried = 0
+                var accepted = false
+                while tried < 8 && !accepted {
+                    let cand = extra + d
+                    if (endAt(e, start, t, cand, span) - aim).len() < r0.len() {
+                        extra = cand
+                        accepted = true
+                    } else {
+                        d = d.scale(0.4)
+                    }
+                    tried = tried + 1
+                }
+                if !accepted {
+                    i = iters
+                } else {
+                    i = i + 1
+                }
+            }
+        }
+    }
+    return extra
+}
+
+// ── arrival ───────────────────────────────────────────────────────────────────
+
+// Where to aim so that the ship's PERIAPSIS at the target comes out at `periRad`
+// rather than the ship arriving at the target's centre.
+//
+// Aiming at the centre is what the shooting solver naturally does, and it lands
+// the ship in the planet. The quantity that actually sets periapsis is the
+// impact parameter B — how far off-centre the incoming asymptote passes — and
+// gravity focuses B down to a smaller periapsis, by a factor that grows as the
+// approach gets slower. Aiming at the centre plus B, perpendicular to the
+// approach, is textbook B-plane targeting and it is why an interplanetary
+// trajectory is corrected in two axes rather than three.
+pub fn aimPoint(e: &Ephem, target: i64, tArr: f64, vinfArr: &Vec3, periRad: f64): Vec3 {
+    let mu = e.mu[target]
+    let vmag = vinfArr.len()
+    let centre = ephemPos(e, target, tArr)
+    if vmag <= 0.0 || periRad <= 0.0 {
+        return centre
+    }
+    let b = periRad * Math.sqrt(1.0 + 2.0 * mu / (periRad * vmag * vmag))
+    // Offset perpendicular to the approach, tilted as little as possible off the
+    // ecliptic so the resulting capture orbit is not needlessly inclined.
+    let dir = vinfArr.norm()
+    let up = v3(0.0, 0.0, 1.0)
+    var off = up - dir.scale(up.dot(dir))
+    if off.len() < 1.0e-6 {
+        off = dir.anyPerp()
+    }
+    return centre + off.norm().scale(b)
+}
+
+// The burn that turns a flyby into an orbit: retrograde at periapsis, just hard
+// enough to drop the ship onto an ellipse with the apoapsis the mission wants.
+//
+// Done at periapsis because that is where it is cheapest — the Oberth effect is
+// not a trick here, it is the reason every real orbit insertion happens at the
+// bottom of the approach.
+pub struct Capture {
+    dv: f64,
+    periRad: f64,
+    tPeri: f64,
+    possible: bool,
+}
+
+pub fn captureBurn(e: &Ephem, s: &Ship, t: f64, about: i64, apoRad: f64): Capture {
+    let mu = e.mu[about]
+    let rv = s.pos - ephemPos(e, about, t)
+    let vv = s.vel - ephemVel(e, about, t)
+    let r = rv.len()
+    let v = vv.len()
+    let hv = rv.cross(vv)
+    let h = hv.len()
+    if h <= 0.0 || r <= 0.0 {
+        return Capture {
+            dv: 0.0, periRad: 0.0, tPeri: t, possible: false
+        }
+    }
+    let ev = (rv.scale(v * v - mu / r) - vv.scale(rv.dot(vv))).scale(1.0 / mu)
+    let ecc = ev.len()
+    let periRad = h * h / mu / (1.0 + ecc)
+    // Speed at periapsis on the arriving conic, from the vis-viva integral in the
+    // form that does not need the semi-major axis — which is infinite for a
+    // parabola and negative for the hyperbola the ship is actually on.
+    let vPeriNow = h / periRad
+    // Target ellipse with this periapsis and the requested apoapsis.
+    var apo = apoRad
+    if apo < periRad {
+        apo = periRad
+    }
+    let aTarget = (periRad + apo) * 0.5
+    let vPeriWant = Math.sqrt(mu * (2.0 / periRad - 1.0 / aTarget))
+    return Capture {
+        dv: vPeriNow - vPeriWant, periRad: periRad, tPeri: t, possible: vPeriNow > vPeriWant
+    }
+}
+
+// Aim for a periapsis and actually get one.
+//
+// `aimPoint` converts a wanted periapsis into an impact parameter using the
+// two-body focusing law and the arrival v-infinity that Lambert predicted. Both
+// of those are approximations — the real approach speed differs, and the aim
+// point is a fixed spot in space while the encounter geometry keeps moving — so
+// a single pass lands within a couple of thousand kilometres of the wrong
+// altitude. Measuring the periapsis the integrator actually produced and scaling
+// the offset by the ratio closes it in two or three passes, because periapsis is
+// very nearly linear in the impact parameter over this range.
+pub fn solveArrival(e: &Ephem, start: &Ship, t: f64, tArr: f64, target: i64, wantPeri: f64, vinfArr: &Vec3, outer: i64): Vec3 {
+    var b = wantPeri
+    var best = v3(0.0, 0.0, 0.0)
+    var k = 0
+    while k < outer {
+        let aim = aimPoint(e, target, tArr, vinfArr, b)
+        let fix = refineToPoint(e, start, t, tArr, aim, 14)
+        let s = Ship {
+            pos: start.pos, vel: start.vel + fix
+        }
+        let tr = propagate(e, s, t, tArr - t + 10.0 * 86400.0, 8, target)
+        best = fix
+        if tr.caDist <= 0.0 || tr.hit >= 0 {
+            k = outer
+        } else {
+            let err = tr.caDist - wantPeri
+            if Math.abs(err) < wantPeri * 0.02 {
+                k = outer
+            } else {
+                // Scale the offset by how far off the achieved periapsis was.
+                b = b * wantPeri / tr.caDist
+                k = k + 1
+            }
+        }
+    }
+    return best
+}

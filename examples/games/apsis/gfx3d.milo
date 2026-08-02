@@ -1,0 +1,461 @@
+// A small 3D pipeline on top of the 2D HDR canvas: perspective camera, near-plane
+// clipping, and a depth-buffered triangle rasteriser with flat shading and fog.
+//
+// This file is the SAFE half. Nothing here writes a pixel: a `triangle*` call
+// transforms into camera space, clips against the near plane, sets the triangle
+// up, and RECORDS it. `rasterFlush` then hands the recorded list to N OS threads,
+// one per horizontal band of the frame. The scanline loops themselves — and the
+// only unsafe code in the renderer — live in raster.milo.
+//
+// Recording rather than drawing immediately is what makes the split possible: a
+// worker cannot be handed the World, the City or a Texture (all of them own
+// heap), so everything a scanline needs has to be flattened into plain data
+// first. It costs one pass over a ~20k-entry command list per frame and buys
+// every core in the machine.
+
+from "std/math" import {
+    Math
+}
+from "std/runtime" import {
+    Promise
+}
+from "std/time" import {
+    epochMillis
+}
+from "./gfx" import {
+    Canvas
+}
+from "./vec3" import {
+    Vec3, v3
+}
+from "./raster" import {
+    Cmd, Job, TexRef, Texture, Tri, Vtx, bandRaster, bandsFor, texRef, texRefNone, triSetup, vtxC
+}
+from "./vec3" import {
+    Vec3, v3
+}
+
+// A linear-light colour. Same story as Vec3: three loose f64 parameters at the
+// end of every drawing call, in an order nothing but convention enforced.
+pub struct Rgb {
+    r: f64,
+    g: f64,
+    b: f64,
+}
+
+impl Add for Rgb {
+    fn add(self: &Self, o: &Self): Self {
+        return Rgb {
+            r: self.r + o.r, g: self.g + o.g, b: self.b + o.b
+        }
+    }
+}
+
+impl Mul for Rgb {
+    fn mul(self: &Self, o: &Self): Self {
+        return Rgb {
+            r: self.r * o.r, g: self.g * o.g, b: self.b * o.b
+        }
+    }
+}
+
+impl Rgb {
+    fn scale(self: &Self, k: f64): Rgb {
+        return Rgb {
+            r: self.r * k, g: self.g * k, b: self.b * k
+        }
+    }
+
+    fn lerp(self: &Self, o: &Rgb, t: f64): Rgb {
+        return Rgb {
+            r: self.r + (o.r - self.r) * t,
+            g: self.g + (o.g - self.g) * t,
+            b: self.b + (o.b - self.b) * t,
+        }
+    }
+}
+
+pub fn rgb(r: f64, g: f64, b: f64): Rgb {
+    return Rgb {
+        r: r, g: g, b: b
+    }
+}
+
+pub struct Camera {
+    x: f64,
+    y: f64,
+    z: f64,
+    yaw: f64, // heading, radians
+    pitch: f64,
+    roll: f64,
+    fov: f64, // vertical field of view, radians
+    near: f64,
+    far: f64,
+}
+
+pub struct Scene {
+    zbuf: Vec<f32>,
+    w: i64,
+    h: i64,
+    // sun direction, normalised, pointing FROM the surface TOWARD the light
+    sunX: f64,
+    sunY: f64,
+    sunZ: f64,
+    fogR: f64,
+    fogG: f64,
+    fogB: f64,
+    fogStart: f64,
+    fogEnd: f64,
+    tris: i64, // triangles actually rasterised this frame
+    // ── the recorded frame ──
+    //
+    // `cmds` and `bins` are grown, never shrunk: a frame's command list is the
+    // same size as the last one to within a few percent, so after the first
+    // second of flying every frame reuses the same allocation and the renderer
+    // does no heap work at all. `cmdN` and `binN` are the live lengths.
+    cmds: Vec<Cmd>,
+    cmdN: i64,
+    bins: Vec<Vec<i64>>, // per band: indices into cmds, in record order
+    binN: Vec<i64>,
+    // How many horizontal bands the frame is cut into, which is how many OS
+    // threads a flush uses. One means "rasterise inline on this thread" — the
+    // serial path, kept for A/B measurement and for machines that report a
+    // single core.
+    bands: i64,
+    flushMs: i64,
+}
+
+pub fn sceneNew(w: i64, h: i64): Scene {
+    let bands = bandsFor(h)
+    var bins: Vec<Vec<i64>> = Vec.new()
+    for _ in 0..bands {
+        let empty: Vec<i64> = Vec.new()
+        bins.push(empty)
+    }
+    return Scene {
+        zbuf: Vec.filled(w * h, 0.0),
+        w: w,
+        h: h,
+        sunX: 0.44,
+        sunY: 0.78,
+        sunZ: 0.44,
+        fogR: 0.30,
+        fogG: 0.42,
+        fogB: 0.62,
+        fogStart: 420.0,
+        fogEnd: 1500.0,
+        tris: 0,
+        cmds: Vec.new(),
+        cmdN: 0,
+        bins: bins,
+        binN: Vec.filled(bands, 0),
+        bands: bands,
+        flushMs: 0,
+    }
+}
+
+pub fn sceneClear(s: &mut Scene) {
+    let n = s.w * s.h
+    for i in 0..n {
+        s.zbuf[i] = 0.0 // storing 1/z, so 0 is infinitely far
+    }
+    s.tris = 0
+    s.flushMs = 0
+    resetRecord(s)
+}
+
+fn resetRecord(s: &mut Scene) {
+    s.cmdN = 0
+    for k in 0..s.bands {
+        s.binN[k] = 0
+    }
+}
+
+// ── camera transform ──────────────────────────────────────────────────────────
+
+// An orientation as three axes. The trig block that builds these was written out
+// three times — camera, aircraft model, wingtip contrails — and the three copies
+// had drifted: two of them rolled about a slightly different axis than the
+// camera did, so a banked, pitched aircraft was drawn tilted a few degrees off
+// the frame it was actually flying in.
+pub struct Frame {
+    fwd: Vec3,
+    right: Vec3,
+    up: Vec3,
+}
+
+pub fn frameOf(yaw: f64, pitch: f64, roll: f64): Frame {
+    let cy = Math.cos(yaw)
+    let sy = Math.sin(yaw)
+    let cp = Math.cos(pitch)
+    let sp = Math.sin(pitch)
+    let cr = Math.cos(roll)
+    let sr = Math.sin(roll)
+    let fwd = v3(sy * cp, sp, cy * cp)
+    // right = the world-up-crossed heading; up follows from the other two
+    let right = v3(cy, 0.0, 0.0 - sy)
+    let up = fwd.cross(right)
+    // Roll rotates right and up about forward, leaving forward alone. The signs
+    // look backwards because this basis is left-handed — fwd × right is +up, not
+    // -up — so the textbook `right·cos + up·sin` rolls the wrong way round the
+    // heading: a right turn came out with the left wing down and the horizon
+    // tilting away from the turn instead of into it.
+    return Frame {
+        fwd: fwd,
+        right: right.scale(cr) - up.scale(sr),
+        up: up.scale(cr) + right.scale(sr),
+    }
+}
+
+pub struct View {
+    // Rows of the world→camera rotation, precomputed once per frame. These were
+    // twelve loose f64 fields (rx, ry, rz, ux, …) — the same three vectors, spelled
+    // so that no function could take "the right vector" as one thing.
+    right: Vec3,
+    up: Vec3,
+    fwd: Vec3,
+    eye: Vec3,
+    scale: f64, // vertical projection scale in pixels
+    cx: f64,
+    cy: f64,
+    // Carried from the Camera rather than read off a global: the clip plane and
+    // the draw distance are properties of the camera looking at the scene, and
+    // a second camera (a mirror, a map inset) would need its own.
+    near: f64,
+    far: f64,
+}
+
+pub fn viewOf(c: &Camera, w: i64, h: i64): View {
+    let f = frameOf(c.yaw, c.pitch, c.roll)
+    let scale = (h as f64) * 0.5 / Math.tan(c.fov * 0.5)
+    return View {
+        right: f.right,
+        up: f.up,
+        fwd: f.fwd,
+        eye: v3(c.x, c.y, c.z),
+        scale: scale,
+        cx: (w as f64) * 0.5,
+        cy: (h as f64) * 0.5,
+        near: c.near,
+        far: c.far,
+    }
+}
+
+// World point → camera space. z is depth along the view direction. Three dot
+// products, which is what this always was under the twelve field names.
+pub fn toCameraV(v: &View, p: &Vec3): Vec3 {
+    let d = p - v.eye
+    return v3(d.dot(v.right), d.dot(v.up), d.dot(v.fwd))
+}
+
+pub fn toCamera(v: &View, x: f64, y: f64, z: f64): Vec3 {
+    return toCameraV(v, v3(x, y, z))
+}
+
+// ── recording ─────────────────────────────────────────────────────────────────
+
+// Append a set-up triangle to the frame's command list and file it under every
+// band its bounding box touches.
+//
+// The list is written in place over the previous frame's, growing only when a
+// frame is busier than any before it. `bins` is the reason a worker does not
+// walk the whole list: with 16 bands and a typical triangle a few dozen pixels
+// tall, a band's bin holds a small fraction of the frame, and the alternative
+// (every worker testing every triangle's bounding box) put the same 20k-entry
+// scan on all 16 threads.
+fn record(s: &mut Scene, cmd: Cmd) {
+    if !cmd.t.ok {
+        return
+    }
+    let idx = s.cmdN
+    if idx < s.cmds.len {
+        s.cmds[idx] = cmd
+    } else {
+        s.cmds.push(cmd)
+    }
+    s.cmdN = idx + 1
+    s.tris = s.tris + 1
+    // `y * bands / h` is the band owning row y, given bands tiled as
+    // [k*h/bands, (k+1)*h/bands). Integer division makes the two agree exactly,
+    // which is the whole disjointness argument in raster.bandRaster.
+    let lo = cmd.t.minY * s.bands / s.h
+    let hi = (cmd.t.maxY - 1) * s.bands / s.h
+    for band in lo..hi + 1 {
+        let n = s.binN[band]
+        if n < s.bins[band].len {
+            s.bins[band][n] = idx
+        } else {
+            s.bins[band].push(idx)
+        }
+        s.binN[band] = n + 1
+    }
+}
+
+fn cmdOf(s: &Scene, view: &View, a: &Vtx, b: &Vtx, d: &Vtx, tr: f64, tg: f64, tb: f64, tex: TexRef, textured: bool): Cmd {
+    let t = triSetup(s.w, s.h, view.scale, view.cx, view.cy, a.x, a.y, a.z, b.x, b.y, b.z, d.x, d.y, d.z)
+    return Cmd {
+        t: t,
+        ar: a.r, ag: a.g, ab: a.b,
+        br: b.r, bg: b.g, bb: b.b,
+        dr: d.r, dg: d.g, db: d.b,
+        al: a.light, bl: b.light, dl: d.light,
+        au: a.u * t.iaz, av: a.v * t.iaz,
+        bu: b.u * t.ibz, bv: b.v * t.ibz,
+        du: d.u * t.icz, dv: d.v * t.icz,
+        atw: a.tw, btw: b.tw, dtw: d.tw,
+        tr: tr, tg: tg, tb: tb,
+        tex: tex,
+        textured: textured,
+    }
+}
+
+// ── flush ─────────────────────────────────────────────────────────────────────
+
+// Rasterise everything recorded since the last flush, then reset the list.
+//
+// One flush is one fan-out: `bands` OS threads, each owning a contiguous, disjoint
+// range of rows of the canvas and the depth buffer, all of them reading the same
+// command list. The caller does not touch either buffer until every worker has
+// been awaited, which is what makes the shared base addresses in `Job` sound.
+//
+// This has to be called before anything that writes the canvas OUTSIDE the
+// z-buffered pipeline — the 2D contrails, sparks and afterburner glow — because
+// those draw in the order they are called and deferred triangles would otherwise
+// land on top of them. render3d.drawWorld marks those points.
+pub fn rasterFlush(c: &mut Canvas, s: &mut Scene) {
+    if s.cmdN == 0 {
+        return
+    }
+    let _t0 = epochMillis()
+    let cmdBase = s.cmds.ptr() as i64
+    let hdrBase = c.hdr.ptr() as i64
+    let zBase = s.zbuf.ptr() as i64
+    var ps: Vec<Promise<i64>> = Vec.new()
+    for k in 0..s.bands {
+        let n = s.binN[k]
+        if n == 0 {
+            continue
+        }
+        let job = Job {
+            cmdBase: cmdBase,
+            binBase: s.bins[k].ptr() as i64,
+            binLen: n,
+            hdrBase: hdrBase,
+            zBase: zBase,
+            w: s.w,
+            y0: k * s.h / s.bands,
+            y1: (k + 1) * s.h / s.bands,
+            fogR: s.fogR,
+            fogG: s.fogG,
+            fogB: s.fogB,
+            fogStart: s.fogStart,
+            fogEnd: s.fogEnd,
+        }
+        if s.bands == 1 {
+            let _ = bandRaster(job)
+        } else {
+            ps.push(Promise<i64>.blocking(move(): i64 => {
+                return bandRaster(job)
+            }
+            ))
+        }
+    }
+    if ps.len > 0 {
+        let _ = Promise.all(ps).await()!
+    }
+    s.flushMs = s.flushMs + (epochMillis() - _t0)
+    resetRecord(s)
+}
+
+// ── triangle entry points ─────────────────────────────────────────────────────
+
+// A world-space triangle, clipped against the near plane and then recorded.
+// Clipping matters: a triangle straddling the camera plane projects to garbage,
+// and terrain directly under a low-flying plane does exactly that.
+//
+// The flat-shaded case is the Gouraud case with one colour on all three vertices
+// and no light term: the interpolation then reproduces that colour exactly, and
+// there is one scanline loop to maintain instead of two.
+pub fn triangle(s: &mut Scene, v: &View, wa: &Vec3, wb: &Vec3, wd: &Vec3, col: &Rgb) {
+    triangleG(s, v, vtxC(wa.x, wa.y, wa.z, 0.0, 0.0, 1.0, col.r, col.g, col.b, 0.0), vtxC(wb.x, wb.y, wb.z, 0.0, 0.0, 1.0, col.r, col.g, col.b, 0.0), vtxC(wd.x, wd.y, wd.z, 0.0, 0.0, 1.0, col.r, col.g, col.b, 0.0), 1.0, 1.0, 1.0)
+}
+
+// World-space textured triangle, near-clipped. The clip carries every vertex
+// attribute by the same parameter, which a struct makes automatic.
+pub fn triangleV(s: &mut Scene, view: &View, t: &Texture, wa: &Vtx, wb: &Vtx, wd: &Vtx, tr: f64, tg: f64, tb: f64) {
+    let a = toCamVtx(view, wa)
+    let b = toCamVtx(view, wb)
+    let d = toCamVtx(view, wd)
+    let tex = texRef(t)
+    if a.z > view.near && b.z > view.near && d.z > view.near {
+        record(s, cmdOf(s, view, a, b, d, tr, tg, tb, tex, true))
+        return
+    }
+    if a.z <= view.near && b.z <= view.near && d.z <= view.near {
+        return
+    }
+    // Sutherland–Hodgman against the single near plane, producing 3 or 4 points.
+    // One Vec of vertices, not several parallel Vecs of coordinates: the parallel
+    // form let a push land in two of the three and nothing would say so.
+    var poly: Vec<Vtx> = Vec.new()
+    clipV(poly, a, b, view.near)
+    clipV(poly, b, d, view.near)
+    clipV(poly, d, a, view.near)
+    if poly.len < 3 {
+        return
+    }
+    for i in 1..poly.len - 1 {
+        record(s, cmdOf(s, view, poly[0], poly[i], poly[i + 1], tr, tg, tb, tex, true))
+    }
+}
+
+// World-space Gouraud triangle, near-clipped. u/v on the vertices are ignored.
+pub fn triangleG(s: &mut Scene, view: &View, wa: &Vtx, wb: &Vtx, wd: &Vtx, tr: f64, tg: f64, tb: f64) {
+    let a = toCamVtx(view, wa)
+    let b = toCamVtx(view, wb)
+    let d = toCamVtx(view, wd)
+    let none = texRefNone()
+    if a.z > view.near && b.z > view.near && d.z > view.near {
+        record(s, cmdOf(s, view, a, b, d, tr, tg, tb, none, false))
+        return
+    }
+    if a.z <= view.near && b.z <= view.near && d.z <= view.near {
+        return
+    }
+    var poly: Vec<Vtx> = Vec.new()
+    clipV(poly, a, b, view.near)
+    clipV(poly, b, d, view.near)
+    clipV(poly, d, a, view.near)
+    if poly.len < 3 {
+        return
+    }
+    for i in 1..poly.len - 1 {
+        record(s, cmdOf(s, view, poly[0], poly[i], poly[i + 1], tr, tg, tb, none, false))
+    }
+}
+
+fn toCamVtx(view: &View, w: &Vtx): Vtx {
+    let p = toCamera(view, w.x, w.y, w.z)
+    return vtxC(p.x, p.y, p.z, w.u, w.v, w.light, w.r, w.g, w.b, w.tw)
+}
+
+fn clipV(out: &mut Vec<Vtx>, a: &Vtx, b: &Vtx, near: f64) {
+    let ina = a.z > near
+    let inb = b.z > near
+    if ina {
+        out.push(vtxC(a.x, a.y, a.z, a.u, a.v, a.light, a.r, a.g, a.b, a.tw))
+    }
+    if ina != inb {
+        let t = (near - a.z) / (b.z - a.z)
+        out.push(vtxC(a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t, near, a.u + (b.u - a.u) * t, a.v + (b.v - a.v) * t, a.light + (b.light - a.light) * t, a.r + (b.r - a.r) * t, a.g + (b.g - a.g) * t, a.b + (b.b - a.b) * t, a.tw + (b.tw - a.tw) * t))
+    }
+}
+
+// Lambert term for a triangle whose world-space normal is (nx,ny,nz).
+pub fn shade(s: &Scene, nx: f64, ny: f64, nz: f64, ambient: f64): f64 {
+    var d = nx * s.sunX + ny * s.sunY + nz * s.sunZ
+    if d < 0.0 {
+        d = 0.0
+    }
+    return ambient + (1.0 - ambient) * d
+}

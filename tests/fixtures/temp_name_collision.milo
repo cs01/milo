@@ -1,0 +1,27 @@
+// @expect: 5
+// @expect: 30
+// @expect: 7
+
+// Identifiers that look like codegen's own temporaries. A parameter named `t0`
+// is emitted as the LLVM value `%t0`, so a temp counter spelled `%t0` produced
+// "multiple definition of local value named 't0'" and the module was rejected
+// before it ever ran.
+
+fn addem(t0: i32, t1: i32): i32 {
+    return t0 + t1
+}
+
+fn mixed(t2: i32, t10: i32): i32 {
+    let t3 = t2 * t10
+    return t3
+}
+
+pub fn main(): i32 {
+    print(addem(2, 3))
+    print(mixed(5, 6))
+    var t0 = 3
+    let t1 = 4
+    t0 = t0 + t1
+    print(t0)
+    return 0
+}

@@ -1,0 +1,120 @@
+// 3D vector maths, shared by the physics core and the renderer.
+//
+// This lives apart from gfx3d.milo because the integrator and the ephemeris need
+// it without pulling in the rasteriser and its threads — a headless physics test
+// should not link a canvas.
+
+from "std/math" import {
+    Math
+}
+
+pub struct Vec3 {
+    x: f64,
+    y: f64,
+    z: f64,
+}
+
+// Vector math as operators and methods, not as loose scalars.
+//
+// Everything below used to be written out one component at a time, and the cost
+// was not typing: a cross product spelled three times in three files is three
+// chances to transpose an index, which is exactly what happened while this file
+// was being written. `Vec3` is Copy, passed in registers, and every one of these
+// inlines to the same code the by-hand version emitted — the safety is free.
+impl Add for Vec3 {
+    fn add(self: &Self, o: &Self): Self {
+        return Vec3 {
+            x: self.x + o.x, y: self.y + o.y, z: self.z + o.z
+        }
+    }
+}
+
+impl Sub for Vec3 {
+    fn sub(self: &Self, o: &Self): Self {
+        return Vec3 {
+            x: self.x - o.x, y: self.y - o.y, z: self.z - o.z
+        }
+    }
+}
+
+// Componentwise, which is what `Mul` means for a vector type. Scaling by a
+// scalar is `.scale(k)` — Milo's `Mul` trait fixes the right-hand side to `Self`,
+// so `v * 2.0` is not expressible today (see docs/backlog.md, operator RHS).
+impl Mul for Vec3 {
+    fn mul(self: &Self, o: &Self): Self {
+        return Vec3 {
+            x: self.x * o.x, y: self.y * o.y, z: self.z * o.z
+        }
+    }
+}
+
+impl Vec3 {
+    fn scale(self: &Self, k: f64): Vec3 {
+        return Vec3 {
+            x: self.x * k, y: self.y * k, z: self.z * k
+        }
+    }
+
+    fn dot(self: &Self, o: &Vec3): f64 {
+        return self.x * o.x + self.y * o.y + self.z * o.z
+    }
+
+    fn cross(self: &Self, o: &Vec3): Vec3 {
+        return Vec3 {
+            x: self.y * o.z - self.z * o.y,
+            y: self.z * o.x - self.x * o.z,
+            z: self.x * o.y - self.y * o.x,
+        }
+    }
+
+    fn len(self: &Self): f64 {
+        return Math.sqrt(self.dot(self))
+    }
+
+    // Guarded: a zero-length direction is a bug upstream, but returning NaN from
+    // it turns that bug into a whole frame of black pixels a long way from the
+    // cause.
+    fn norm(self: &Self): Vec3 {
+        let l = self.len()
+        if l <= 0.0 {
+            return Vec3 {
+                x: 0.0, y: 0.0, z: 0.0
+            }
+        }
+        return self.scale(1.0 / l)
+    }
+
+    // Rodrigues' rotation about a unit axis. The ejection planner turns a
+    // desired escape direction into a burn point by rotating one vector about
+    // another, and doing that with three explicit trig blocks is how a sign
+    // error hides.
+    fn rotate(self: &Self, axis: &Vec3, angle: f64): Vec3 {
+        let c = Math.cos(angle)
+        let s = Math.sin(angle)
+        return self.scale(c) + axis.cross(self).scale(s) + axis.scale(axis.dot(self) * (1.0 - c))
+    }
+
+    // Any unit vector at right angles to this one. Used to build a parking
+    // orbit's plane when nothing else constrains it.
+    fn anyPerp(self: &Self): Vec3 {
+        var other = v3(0.0, 0.0, 1.0)
+        if Math.abs(self.z) > 0.9 {
+            other = v3(1.0, 0.0, 0.0)
+        }
+        return self.cross(other).norm()
+    }
+
+    fn lerp(self: &Self, o: &Vec3, t: f64): Vec3 {
+        return Vec3 {
+            x: self.x + (o.x - self.x) * t,
+            y: self.y + (o.y - self.y) * t,
+            z: self.z + (o.z - self.z) * t,
+        }
+    }
+}
+
+pub fn v3(x: f64, y: f64, z: f64): Vec3 {
+    return Vec3 {
+        x: x, y: y, z: z
+    }
+}

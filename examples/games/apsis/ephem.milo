@@ -1,0 +1,349 @@
+// Where the planets are, at any moment.
+//
+// The planets are on rails: their positions come from analytic Keplerian
+// elements with secular rates (Standish's approximate elements for 1800-2050),
+// not from the integrator. Only the SHIP is integrated — see nbody.milo.
+//
+// That split is deliberate. A full n-body solar system is chaotic on the
+// horizons this game plans over, so the same burn re-simulated a second time
+// would not arrive at the same place, and the player's plan would silently rot
+// between drawing it and flying it. Rails make the ephemeris a pure function of
+// time: `bodyState(id, t)` is the same answer forever, which is what lets a
+// predicted trajectory BE the flown one.
+//
+// Time is TDB seconds since J2000 (JD 2451545.0). Distances are metres,
+// velocities metres per second, in the J2000 ecliptic frame centred on the Sun.
+
+from "std/math" import {
+    Math
+}
+from "./vec3" import {
+    Vec3, v3
+}
+
+pub let AU: f64 = 1.495978707e11
+
+pub let SEC_PER_DAY: f64 = 86400.0
+
+// 36525 days. Standish's rates are all per Julian century.
+pub let CENTURY_SEC: f64 = 3155760000.0
+
+pub let J2000_JD: f64 = 2451545.0
+
+fn deg(d: f64): f64 {
+    return d * Math.pi() / 180.0
+}
+
+// Body ids are indices into `bodyTable()`, so they can index a Vec directly
+// rather than going through a match. Everything downstream — the integrator's
+// accelerator loop, the renderer's draw order, the mission definitions — keys
+// off these.
+pub let SUN: i64 = 0
+
+pub let MERCURY: i64 = 1
+
+pub let VENUS: i64 = 2
+
+pub let EARTH: i64 = 3
+
+pub let MOON: i64 = 4
+
+pub let MARS: i64 = 5
+
+pub let JUPITER: i64 = 6
+
+pub let SATURN: i64 = 7
+
+pub let BODY_COUNT: i64 = 8
+
+// Keplerian elements at J2000 plus their per-century rates. Angles in radians
+// once built; the table below is written in the degrees the source publishes.
+pub struct Elements {
+    a: f64, // semi-major axis, metres
+    aDot: f64,
+    e: f64, // eccentricity
+    eDot: f64,
+    inc: f64, // inclination to the ecliptic
+    incDot: f64,
+    lon: f64, // mean longitude
+    lonDot: f64,
+    peri: f64, // longitude of perihelion
+    periDot: f64,
+    node: f64, // longitude of the ascending node
+    nodeDot: f64,
+}
+
+pub struct State {
+    pos: Vec3,
+    vel: Vec3,
+}
+
+pub struct Body {
+    name: string,
+    mu: f64, // GM, m^3/s^2
+    radius: f64, // equatorial, metres
+    // What this body orbits. The Sun's is itself; the Moon's is the Earth. Used
+    // by the renderer to pick a frame and by the integrator to decide whose
+    // sphere of influence the ship is in.
+    parent: i64,
+    // Sidereal rotation period in seconds, for spinning the texture. Negative
+    // for retrograde — Venus really does turn backwards.
+    day: f64,
+    // Axial tilt, radians, applied when the sphere is built.
+    tilt: f64,
+    el: Elements,
+}
+
+fn elems(a: f64, aDot: f64, e: f64, eDot: f64, inc: f64, incDot: f64, lon: f64, lonDot: f64, peri: f64, periDot: f64, node: f64, nodeDot: f64): Elements {
+    return Elements {
+        a: a * AU, aDot: aDot * AU,
+        e: e, eDot: eDot,
+        inc: deg(inc), incDot: deg(incDot),
+        lon: deg(lon), lonDot: deg(lonDot),
+        peri: deg(peri), periDot: deg(periDot),
+        node: deg(node), nodeDot: deg(nodeDot),
+    }
+}
+
+fn noElems(): Elements {
+    return elems(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+}
+
+fn body(name: string, mu: f64, radius: f64, parent: i64, day: f64, tilt: f64, el: Elements): Body {
+    return Body {
+        name: name, mu: mu, radius: radius, parent: parent, day: day, tilt: deg(tilt), el: el
+    }
+}
+
+// The Earth's row carries the EARTH-MOON BARYCENTRE's elements, which is what
+// Standish tabulates. `bodyState` splits the pair apart using the mass ratio —
+// the barycentre sits about 4700 km from the Earth's centre, which is inside the
+// Earth but is still 0.7 Earth radii of targeting error if ignored.
+pub fn bodyTable(): Vec<Body> {
+    var t: Vec<Body> = Vec.new()
+    t.push(body("Sun", 1.32712440018e20, 6.957e8, 0, 2192832.0, 7.25, noElems()))
+    t.push(body("Mercury", 2.2031868551e13, 2.4397e6, SUN, 5067360.0, 0.034, elems(0.38709927, 0.00000037, 0.20563593, 0.00001906, 7.00497902, -0.00594749, 252.25032350, 149472.67411175, 77.45779628, 0.16047689, 48.33076593, -0.12534081)))
+    t.push(body("Venus", 3.24858592e14, 6.0518e6, SUN, -20996755.0, 177.36, elems(0.72333566, 0.00000390, 0.00677672, -0.00004107, 3.39467605, -0.00078890, 181.97909950, 58517.81538729, 131.60246718, 0.00268329, 76.67984255, -0.27769418)))
+    t.push(body("Earth", 3.986004418e14, 6.3781e6, SUN, 86164.0905, 23.4393, elems(1.00000261, 0.00000562, 0.01671123, -0.00004392, -0.00001531, -0.01294668, 100.46457166, 35999.37244981, 102.93768193, 0.32327364, 0.0, 0.0)))
+    t.push(body("Moon", 4.9028000661e12, 1.7374e6, EARTH, 2360591.5, 6.68, noElems()))
+    t.push(body("Mars", 4.282837362e13, 3.3895e6, SUN, 88642.66, 25.19, elems(1.52371034, 0.00001847, 0.09339410, 0.00007882, 1.84969142, -0.00813131, -4.55343205, 19140.30268499, -23.94362959, 0.44441088, 49.55953891, -0.29257343)))
+    t.push(body("Jupiter", 1.26686534e17, 7.1492e7, SUN, 35730.0, 3.13, elems(5.20288700, -0.00011607, 0.04838624, -0.00013253, 1.30439695, -0.00183714, 34.39644051, 3034.74612775, 14.72847983, 0.21252668, 100.47390909, 0.20469106)))
+    t.push(body("Saturn", 3.7931206234e16, 6.0268e7, SUN, 38362.0, 26.73, elems(9.53667594, -0.00125060, 0.05386179, -0.00050991, 2.48599187, 0.00193609, 49.95424423, 1222.49362201, 92.59887831, -0.41897216, 113.66242448, -0.28867794)))
+    return t
+}
+
+// Mass fraction of the Moon in the Earth-Moon pair, Mm / (Me + Mm).
+let MOON_FRAC: f64 = 0.012150585
+
+fn wrapAngle(a: f64): f64 {
+    let tau = Math.pi() * 2.0
+    var r = Math.mod(a, tau)
+    if r < 0.0 {
+        r = r + tau
+    }
+    return r
+}
+
+// Kepler's equation, E - e sin E = M, by Newton's method.
+//
+// The starting guess is M + e sin M rather than M: for the eccentricities in
+// this table plain M converges anyway, but a captured ship's own orbit can be
+// e > 0.9, where the flat guess takes twenty-odd iterations and can oscillate.
+pub fn keplerSolve(mAnom: f64, e: f64): f64 {
+    let m = wrapAngle(mAnom)
+    var big = m + e * Math.sin(m)
+    var i = 0
+    while i < 32 {
+        let f = big - e * Math.sin(big) - m
+        let fp = 1.0 - e * Math.cos(big)
+        let step = f / fp
+        big = big - step
+        if Math.abs(step) < 1.0e-13 {
+            return big
+        }
+        i = i + 1
+    }
+    return big
+}
+
+// Perifocal (x toward periapsis, y 90 degrees ahead in the orbit plane) into the
+// ecliptic, by Rz(node) Rx(inc) Rz(argument of periapsis).
+fn perifocalToEcliptic(xp: f64, yp: f64, argPeri: f64, inc: f64, node: f64): Vec3 {
+    let cw = Math.cos(argPeri)
+    let sw = Math.sin(argPeri)
+    let ci = Math.cos(inc)
+    let si = Math.sin(inc)
+    let cn = Math.cos(node)
+    let sn = Math.sin(node)
+    return v3(xp * (cw * cn - sw * sn * ci) - yp * (sw * cn + cw * sn * ci), xp * (cw * sn + sw * cn * ci) + yp * (cw * cn * ci - sw * sn), xp * (sw * si) + yp * (cw * si),)
+}
+
+// Position only, at `t` TDB seconds past J2000. Velocity comes from a central
+// difference on this — see `stateOf`.
+fn planetPos(el: &Elements, t: f64): Vec3 {
+    let cy = t / CENTURY_SEC
+    let a = el.a + el.aDot * cy
+    let e = el.e + el.eDot * cy
+    let inc = el.inc + el.incDot * cy
+    let lon = el.lon + el.lonDot * cy
+    let peri = el.peri + el.periDot * cy
+    let node = el.node + el.nodeDot * cy
+    let big = keplerSolve(lon - peri, e)
+    let xp = a * (Math.cos(big) - e)
+    let yp = a * Math.sqrt(1.0 - e * e) * Math.sin(big)
+    return perifocalToEcliptic(xp, yp, peri - node, inc, node)
+}
+
+// The Moon, geocentric, in the ecliptic frame.
+//
+// A bare Kepler ellipse is not good enough here: the evection term alone is 1.27
+// degrees of longitude, about 8500 km, which is more than an Earth radius of
+// error in the one place the player flies a close approach on purpose. The three
+// largest periodic terms from the lunar theory are added on top — evection, the
+// variation, and the annual equation — along with the two biggest terms in
+// distance. That lands within roughly 100 km, well under the width of any orbit
+// the player will insert into.
+fn moonPos(t: f64): Vec3 {
+    let cy = t / CENTURY_SEC
+    // Mean longitude, mean anomaly, mean elongation from the Sun, the Sun's own
+    // mean anomaly, and argument of latitude. Meeus, chapter 47.
+    let lp = deg(218.3164477 + 481267.88123421 * cy)
+    let mp = deg(134.9633964 + 477198.8675055 * cy)
+    let dEl = deg(297.8501921 + 445267.1114034 * cy)
+    let ms = deg(357.5291092 + 35999.0502909 * cy)
+    let fArg = deg(93.2720950 + 483202.0175233 * cy)
+    let node = deg(125.0445479 - 1934.1362891 * cy)
+
+    // Longitude: the equation of centre (6.289 sin M') is what a Kepler solve
+    // would have produced; the rest is what it would have missed.
+    let lam = lp
+    + deg(6.288774) * Math.sin(mp)
+    + deg(1.274027) * Math.sin(2.0 * dEl - mp)
+    + deg(0.658314) * Math.sin(2.0 * dEl)
+    + deg(0.213618) * Math.sin(2.0 * mp)
+    - deg(0.185116) * Math.sin(ms)
+    - deg(0.114332) * Math.sin(2.0 * fArg)
+    + deg(0.058793) * Math.sin(2.0 * dEl - 2.0 * mp)
+    + deg(0.057066) * Math.sin(2.0 * dEl - ms - mp)
+    + deg(0.053322) * Math.sin(2.0 * dEl + mp)
+    + deg(0.045758) * Math.sin(2.0 * dEl - ms)
+
+    let beta = deg(5.128122) * Math.sin(fArg)
+    + deg(0.280602) * Math.sin(mp + fArg)
+    + deg(0.277693) * Math.sin(mp - fArg)
+    + deg(0.173237) * Math.sin(2.0 * dEl - fArg)
+    + deg(0.055413) * Math.sin(2.0 * dEl - mp + fArg)
+    + deg(0.046271) * Math.sin(2.0 * dEl - mp - fArg)
+
+    let r = 385000.56e3
+    - 20905.355e3 * Math.cos(mp)
+    - 3699.111e3 * Math.cos(2.0 * dEl - mp)
+    - 2955.968e3 * Math.cos(2.0 * dEl)
+    - 569.925e3 * Math.cos(2.0 * mp)
+
+    // `node` is consumed only by the latitude terms above through F; keeping the
+    // binding documents where the 18.6-year regression enters.
+    let _ = node
+    let cb = Math.cos(beta)
+    return v3(r * cb * Math.cos(lam), r * cb * Math.sin(lam), r * Math.sin(beta))
+}
+
+// Heliocentric position of any body. The Earth and the Moon are the barycentre
+// displaced along the geocentric Moon vector in opposite proportions.
+pub fn bodyPos(bodies: &Vec<Body>, id: i64, t: f64): Vec3 {
+    if id == SUN {
+        return v3(0.0, 0.0, 0.0)
+    }
+    if id == EARTH {
+        let bary = planetPos(bodies[EARTH].el, t)
+        return bary - moonPos(t).scale(MOON_FRAC)
+    }
+    if id == MOON {
+        let bary = planetPos(bodies[EARTH].el, t)
+        return bary + moonPos(t).scale(1.0 - MOON_FRAC)
+    }
+    return planetPos(bodies[id].el, t)
+}
+
+// Velocity by central difference rather than by the analytic dE/dt.
+//
+// Both are correct for a pure ellipse, but the Moon's position is a periodic
+// series with no closed-form derivative worth transcribing, and the Earth's is a
+// difference of two models. One velocity path that works for every body — and
+// that cannot disagree with the position it is the derivative OF — is worth more
+// than the handful of microseconds. Over 60 s the truncation error is ~1e-10
+// relative, far below the elements' own accuracy.
+let DIFF_DT: f64 = 60.0
+
+pub fn bodyState(bodies: &Vec<Body>, id: i64, t: f64): State {
+    let p = bodyPos(bodies, id, t)
+    let ahead = bodyPos(bodies, id, t + DIFF_DT)
+    let behind = bodyPos(bodies, id, t - DIFF_DT)
+    return State {
+        pos: p, vel: (ahead - behind).scale(1.0 / (2.0 * DIFF_DT))
+    }
+}
+
+// Radius of a body's sphere of influence: how close the ship has to be before
+// this body, not the Sun, is the one that matters. Only used to pick a display
+// frame and to decide when a capture has happened — the integrator always sums
+// every body and never switches frames.
+pub fn soiRadius(bodies: &Vec<Body>, id: i64): f64 {
+    let b = bodies[id].parent
+    if id == SUN || b == id {
+        return 1.0e30
+    }
+    let a = bodies[id].el.a
+    if id == MOON {
+        // The Moon has no heliocentric elements of its own; its SOI is set by
+        // its distance from the Earth, not from the Sun.
+        return 384400.0e3 * Math.pow(bodies[MOON].mu / bodies[EARTH].mu, 0.4)
+    }
+    return a * Math.pow(bodies[id].mu / bodies[b].mu, 0.4)
+}
+
+// Calendar helpers. The game shows dates, and a mission's launch window is
+// written as one.
+pub fn julianDay(t: f64): f64 {
+    return J2000_JD + t / SEC_PER_DAY
+}
+
+// Civil date from TDB seconds past J2000, by the standard Fliegel-Van Flandern
+// inverse. Returns year, month, day packed as y*10000 + m*100 + d so a caller
+// needs one value; the game only ever formats it.
+pub fn dateOf(t: f64): i64 {
+    let jd = julianDay(t) + 0.5
+    let z = Math.floor(jd) as i64
+    let alpha = ((z as f64) - 1867216.25) / 36524.25
+    let a = z + 1 + (Math.floor(alpha) as i64) - ((Math.floor(alpha) / 4.0) as i64)
+    let b = a + 1524
+    let c = Math.floor(((b as f64) - 122.1) / 365.25) as i64
+    let d = Math.floor(365.25 * (c as f64)) as i64
+    let e = Math.floor(((b - d) as f64) / 30.6001) as i64
+    let day = b - d - (Math.floor(30.6001 * (e as f64)) as i64)
+    var month = e - 1
+    if e >= 14 {
+        month = e - 13
+    }
+    var year = c - 4716
+    if month <= 2 {
+        year = c - 4715
+    }
+    return year * 10000 + month * 100 + day
+}
+
+// Seconds past J2000 for a civil date at 00:00 TDB, the inverse of `dateOf`.
+pub fn timeOf(year: i64, month: i64, day: i64): f64 {
+    var y = year
+    var m = month
+    if m <= 2 {
+        y = y - 1
+        m = m + 12
+    }
+    let a = y / 100
+    let b = 2 - a + (a / 4)
+    let jd = (Math.floor(365.25 * ((y + 4716) as f64)) as i64)
+    + (Math.floor(30.6001 * ((m + 1) as f64)) as i64)
+    + day + b - 1524
+    return (((jd as f64) - 0.5) - J2000_JD) * SEC_PER_DAY
+}

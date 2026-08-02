@@ -11,7 +11,7 @@ milo build examples/games/dig/main.milo -o /tmp/prospect --release && /tmp/prosp
 
 **Built to be playable by a five-year-old.** One rule, one input, no timer, no
 enemies, no fail state. Hold a direction; the ground gives way. Fill the bar with
-treasure, then walk right into the glowing door.
+treasure, then walk into the glowing green door.
 
 You start above ground — sky, sun, clouds, a tree, and Milo waiting at the top of
 the shaft.
@@ -46,8 +46,7 @@ and at half that size the map was a field of detail nobody could parse.
 Three grounds, in three wandering bands, each with its own hue *and* its own
 marking so they still read when the light is low: pebbly tan **dirt** on top,
 layered orange **clay** below it, cracked blue-grey **stone** at the bottom.
-Purple-black **bedrock** is scenery you cannot dig, and it is deliberately rare —
-being walled in without understanding why is the one way this game stops being fun.
+Purple-black **bedrock** is the border of the map and nothing else.
 
 Tiles are not drawn as squares. Every corner that faces open air is rounded, by a
 radius that varies per tile, and every face that borders air bulges a pixel or
@@ -85,7 +84,7 @@ It is a real door, drawn as one object rather than tile by tile — a stone fram
 two leaves meeting in the middle with vertical planks and iron straps, two brass
 ring handles, and a keyhole that rattles while it is shut.
 
-Fill the bar — 75 on level 1, +50 a level — and **the door literally opens**: the
+Fill the bar — 75 on level 1, +25 a level — and **the door literally opens**: the
 lock gives with a shake and a burst of splinters, and over about a second both
 leaves swing outward to their jambs, leaving a lit passage. Stand in it and the
 level is done.
@@ -102,13 +101,25 @@ Bedrock cannot be dug, and a door you cannot reach is worse than no door.
 
 ## The world
 
-One screen wide, always. Level 1 is one screen tall as well, so the first level
-does not scroll at all; later levels grow downward only. Generated from smooth
-value noise offset by the level number, so a given level is the same every run —
-a good seam is somewhere you can go back to.
+**Every level is exactly one screen and nothing ever scrolls.** 32 x 18 tiles of
+40 px is 1280 x 720 — what you see is the whole level, start to finish. Later
+levels get harder through what is *in* the ground, not through more of it.
+
+There is **no bedrock inside the map**, only the border. Scattered boulders looked
+good and could, rarely, ring a pocket of ground and wall it off for good. "I am
+stuck and I do not know why" is the one way this game can stop being fun, and the
+only way to rule it out completely is for every tile inside the border to be
+diggable.
+
+A level is also **guaranteed winnable**. Noise thresholds do not promise that — an
+unlucky seed can bury less gold than the door costs, and a child digging a map
+that cannot be finished has no way to know that is what happened. So the generator
+counts what actually ended up in the ground and seeds more gold until there is
+twice the quota, which also means you never have to strip the whole map. The
+scatter is deterministic, so a level is still the same every run.
 
 Flooded pools open up in the mid depths. You swim straight through them; nothing
-bad happens. The water does not drain when you breach it.
+bad happens.
 
 ## Engine
 
@@ -121,8 +132,12 @@ upload in `main.milo`. Worldgen, the drill and the renderer contain none.
 
 ## Headless
 
-`shot.milo` drives the digger on a scripted path and dumps PPM frames, which is
-both how the screenshots are made and a deterministic smoke test for worldgen:
+`shot.milo` drives the digger and dumps PPM frames. It is how the screenshots are
+made, and it is the winnability test: it seeks the nearest seam, steers at the
+door once it opens, and detours upward if it has collected nothing in four
+seconds (a greedy seeker otherwise grinds against the locked door forever when
+the seam it wants is behind it). It reports the level it reached — 60 000 frames
+gets to level 12, so every level along the way was finishable.
 
 ```bash
 milo run examples/games/dig/shot.milo --release -- /tmp/prospect 1400 4200

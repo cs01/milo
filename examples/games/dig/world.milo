@@ -199,9 +199,12 @@ fn sizeForLevel(m: &mut Mine) {
     // Always exactly one screen wide — that is the whole point, and nothing here
     // may change it. Level 1 is exactly one screen tall too, so the first level
     // does not scroll at all; later levels grow downward only.
+    // One screen, exactly, on every level: 32 x 18 tiles of 40 px is 1280 x 720.
+    // Nothing scrolls, ever — what you see is the whole level. Later levels get
+    // harder through what is IN the ground, not through more of it.
     m.worldW = MAP_W
-    m.worldH = Math.minI64(MAP_H, SURFACE + 14 + (m.level - 1) * 4)
-    m.quota = 75 + (m.level - 1) * 50
+    m.worldH = SURFACE + 14
+    m.quota = 75 + (m.level - 1) * 25
     // The door is a 2x2 block buried out in the ground, not a wall down the side
     // of the map. It sits well clear of the shaft head you start in, and its top
     // left corner is (exitX, gateY). Somewhere different every level, but always
@@ -217,10 +220,12 @@ fn generate(m: &mut Mine) {
     // The level number offsets every noise field, so each level is a different
     // stretch of ground rather than the same map re-tuned.
     let seed = (m.level as f64) * 137.0
-    // Bedrock is scenery, not a maze. It never gets common enough to wall you in,
-    // because "I am stuck and I do not know why" is the one way this game can
-    // stop being fun.
-    let bedrockBias = Math.maxF64(0.90, 0.96 - (m.level as f64) * 0.012)
+    // There is NO bedrock inside the map — only the border. Scattered boulders
+    // looked good and could, rarely, ring a pocket of ground and wall it off for
+    // good. "I am stuck and I do not know why" is the one way this game can stop
+    // being fun, and the only way to rule it out completely is for every single
+    // tile inside the border to be diggable. Difficulty comes from how hard the
+    // ground is and how much the door costs, not from walls.
     for y in 0..MAP_H {
         for x in 0..MAP_W {
             var t = T_DIRT
@@ -244,10 +249,6 @@ fn generate(m: &mut Mine) {
                 }
                 if band > 0.64 && hardness > 0.86 - band * 0.62 {
                     t = T_STONE
-                }
-                // A few bedrock boulders. Deep only, and never a wall.
-                if depth > 0.45 && smoothNoise((x as f64) * 0.24 + 40.0 + seed, (y as f64) * 0.24 + seed) > bedrockBias {
-                    t = T_BEDROCK
                 }
                 // Ore veins: a separate noise field per ore, each past its own
                 // depth. Generous — finding treasure is the whole game, so it
@@ -309,6 +310,42 @@ fn generate(m: &mut Mine) {
         for x in m.exitX..m.exitX + 2 {
             m.tiles[y * MAP_W + x] = T_GATE as u8
         }
+    }
+    ensureEnoughTreasure(m)
+}
+
+// A level must always be winnable. Noise thresholds do not promise that: an
+// unlucky seed can leave less gold in the ground than the door costs, and a
+// child digging a map that cannot be finished has no way to know that is what
+// happened. So count what is actually buried here and seed more until there is
+// twice the quota, which also means you never have to strip the whole map.
+//
+// The scatter is deterministic — a stride coprime with the grid size — because
+// a level has to be the same every run.
+fn ensureEnoughTreasure(m: &mut Mine) {
+    let cells = m.worldW * m.worldH
+    var total: i64 = 0
+    for y in SURFACE..m.worldH {
+        for x in 0..m.worldW {
+            total = total + tileValue(m.tiles[y * MAP_W + x] as i64)
+        }
+    }
+    let need = m.quota * 2
+    var i: i64 = 0
+    while total < need && i < cells {
+        let idx = (i * 7919) % cells
+        let x = idx % m.worldW
+        let y = idx / m.worldW
+        i = i + 1
+        if x < 1 || x >= m.worldW - 1 || y < SURFACE + 1 || y >= m.worldH - 1 {
+            continue
+        }
+        let t = m.tiles[y * MAP_W + x] as i64
+        if t != T_DIRT && t != T_CLAY && t != T_STONE {
+            continue
+        }
+        m.tiles[y * MAP_W + x] = T_GOLD as u8
+        total = total + tileValue(T_GOLD)
     }
 }
 
@@ -907,7 +944,7 @@ pub fn mineUpdate(m: &mut Mine, dt: f64, inX: f64, inY: f64, viewW: f64, viewH: 
         let dy0 = (m.gateY as f64) * TILE
         if m.px > dx0 - TILE * 0.4 && m.px < dx0 + TILE * 2.4 && m.py > dy0 - TILE * 0.4 && m.py < dy0 + TILE * 2.4 {
             m.cleared = 2.6
-            m.flash = 0.9
+            m.flash = 0.40
             m.shake = 10.0
         }
     }

@@ -11,7 +11,7 @@ from "./gfx" import {
     Canvas, canvasNew, present
 }
 from "./world" import {
-    Mine, mineNew, mineUpdate, TILE
+    Mine, mineNew, mineUpdate, TILE, MAP_W, MAP_H, tileAt, tileValue
 }
 from "./render" import {
     drawMine, drawHud
@@ -71,22 +71,68 @@ pub fn main(): i32 {
     var m = mineNew()
     let dt = 1.0 / 60.0
 
+    var tgtX: i64 = 0 - 1
+    var tgtY: i64 = 0 - 1
+    var lastScore: i64 = 0
+    var stall: i64 = 0
+    var detour: i64 = 0
+
     for frame in 0..maxFrame + 1 {
-        // Dig down for a while, then east, alternating — a plausible tunnel.
-        // Once the door opens, steer at it: that turns this from a worldgen smoke
-        // test into an end-to-end one that actually finishes a level.
+        // Steer at the door once it is open, otherwise at the nearest seam.
+        // A fixed sweep pattern wedges itself along the bottom row and stops
+        // collecting, which reads as an unwinnable level when it is only an
+        // unwinnable robot — and that is exactly the thing this is here to catch.
+        if m.exitOpen {
+            tgtX = m.exitX
+            tgtY = m.gateY
+        } else if frame % 20 == 0 || tgtX < 0 {
+            let cx = (m.px / TILE) as i64
+            let cy = (m.py / TILE) as i64
+            var best: i64 = 1000000
+            tgtX = 0 - 1
+            for y in 0..MAP_H {
+                for x in 0..MAP_W {
+                    if tileValue(tileAt(m, x, y)) == 0 {
+                        continue
+                    }
+                    let d = Math.absI64(x - cx) + Math.absI64(y - cy)
+                    if d < best {
+                        best = d
+                        tgtX = x
+                        tgtY = y
+                    }
+                }
+            }
+        }
+        // The locked door is a 2x2 obstacle in the middle of the map, and a
+        // greedy seeker will grind against it forever if the seam it wants is on
+        // the far side. Bank on the score: if nothing has been collected in four
+        // seconds, climb for a while and re-approach from above.
+        if m.score != lastScore {
+            lastScore = m.score
+            stall = 0
+        } else {
+            stall = stall + 1
+        }
+        if stall > 240 {
+            detour = 100
+            stall = 0
+        }
         var ix = 0.0
         var iy = 0.0
-        if m.exitOpen {
-            let dx = ((m.exitX as f64) + 0.5) * TILE - m.px
-            let dy = ((m.gateY as f64) + 0.5) * TILE - m.py
-            if Math.abs(dx) > Math.abs(dy) {
+        if detour > 0 {
+            detour = detour - 1
+            iy = 0.0 - 1.0
+        } else if tgtX >= 0 {
+            let dx = ((tgtX as f64) + 0.5) * TILE - m.px
+            let dy = ((tgtY as f64) + 0.5) * TILE - m.py
+            if Math.abs(dx) > 8.0 && Math.abs(dx) >= Math.abs(dy) {
                 ix = if dx > 0.0 {
                     1.0
                 } else {
                     0.0 - 1.0
                 }
-            } else if Math.abs(dy) > 4.0 {
+            } else if Math.abs(dy) > 8.0 {
                 iy = if dy > 0.0 {
                     1.0
                 } else {
@@ -94,16 +140,7 @@ pub fn main(): i32 {
                 }
             }
         } else {
-            // down, right, down, left — a sweep rather than a single corner to
-            // wedge itself into once it runs out of map
-            let phase = (frame / 150) % 4
-            if phase == 0 || phase == 2 {
-                iy = 1.0
-            } else if phase == 1 {
-                ix = 1.0
-            } else {
-                ix = 0.0 - 1.0
-            }
+            iy = 1.0
         }
         mineUpdate(m, dt, ix, iy, W as f64, H as f64)
 

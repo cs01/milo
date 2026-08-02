@@ -30,10 +30,9 @@ on screen, and the next hit takes the shepherd instead of taking you. Get hit
 again and you are a chihuahua once more, thrown clear, and briefly untouchable —
 long enough to walk out of whatever hit you.
 
-Growing is a flicker between the two builds over half a second, lit from within
-while it happens. Not a tween: they are different animals rather than one animal
-at two scales, so there is nothing to interpolate — and the alternation is what
-reads as a transformation anyway.
+Growing is the shepherd swelling into place over half a second, lit from within,
+settling a touch past full size and coming back. The first version strobed
+between the two builds instead and it read as a glitch rather than as a change.
 
 Most of the bones are behind a crate, and the way through a crate is to **bark at
 it**. That is the digging: a bark breaks any crate in range, kills any cat or
@@ -187,7 +186,20 @@ three shipped sealed: a column of rock ran from the roof to the floor and no
 route past it existed, so the level could be started and never finished. They
 were rebuilt against a reachability check that floods the map with a
 conservative model of the jump (no dash, no launch pads) and asks whether the
-gate can be stood next to. Anything it calls reachable really is.
+gate can be stood next to.
+
+That check is only worth as much as its jump table, and the first table was
+hand-written and wrong — it allowed four tiles of rise when the arc topped out
+at three, so levels validated clean and then dead-ended a player at a wall the
+dog could not clear. The table is now **simulated from the game's own
+constants**, parsed straight out of `world.milo` and stepped at the same 60 Hz
+the game runs at, then cut to 78% for margin. It cannot drift from the physics
+because it is derived from it.
+
+`JUMP_VEL` was raised off the back of that: at the old value the peak was 193 px
+against the 192 a three-tile climb needs, so every three-tile step in the game
+was a pixel-perfect jump that felt like a wall you simply were not allowed
+past.
 
 ## Dependencies
 

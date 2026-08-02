@@ -56,7 +56,10 @@ pub let GROUND_FRICTION: f64 = 5800.0
 
 pub let AIR_DRAG: f64 = 1240.0
 
-pub let JUMP_VEL: f64 = 1320.0
+// Sized so a three-tile step clears with room to spare. At 1320 the peak was
+// 193 px against the 192 a three-tile climb needs — a pixel-perfect jump that
+// looked like a wall you were simply not allowed past.
+pub let JUMP_VEL: f64 = 1450.0
 
 pub let JUMP_CUT: f64 = 0.42 // vy kept when the jump key is released early
 

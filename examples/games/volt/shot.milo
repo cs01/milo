@@ -26,7 +26,8 @@ from "./level" import {
     tileAt, isSolid, T_SPIKE
 }
 from "./sprites" import {
-    dogFrames, catFrames, birdFrames, boneSprite, hydrantSprite, shardFrames, coreSprite
+    dogFrames, catFrames, birdFrames, boneSprite, hydrantSprite, shardFrames, coreSprite,
+    DOG_PEE
 }
 from "./world" import {
     World, worldNew, worldUpdate, PLAYER_W, PLAYER_H
@@ -174,6 +175,9 @@ fn sheet(path: &string) {
         drawSprite(c, shards[i], 560.0 + (i as f64) * 70.0, 500.0, s, false, 0.6)
         i = i + 1
     }
+    // the marking pose large, because it is the one that has to be right
+    drawSprite(c, dog.chi[DOG_PEE], 700.0, 440.0, 11.0, false, 0.25)
+    drawSprite(c, dog.shep[DOG_PEE], 960.0, 420.0, 11.0, false, 0.25)
     present(c, 0.4, 1.0, 0.9)
     writePpm(path, c)
     print("wrote " + path)

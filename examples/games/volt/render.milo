@@ -20,7 +20,7 @@ from "./level" import {
 }
 from "./world" import {
     World, Player, Mob, Pickup, Check, Part, Ghost, dogFrameOf, barkPhase,
-    peeSourceX, peeSourceY,
+    peeSourceX, peeSourceY, GROW_TIME,
     PLAYER_W, PLAYER_H, MOB_CAT, MOB_BIRD, PK_SHARD, PK_CORE, PK_BONE,
     FORM_CHI, FORM_SHEP, ST_PLAY, ST_CLEAR, ST_DONE
 }
@@ -454,19 +454,6 @@ pub fn drawPee(c: &mut Canvas, w: &World, ox: f64, oy: f64) {
 }
 
 pub fn drawPlayer(c: &mut Canvas, w: &World, art: &DogArt, ox: f64, oy: f64) {
-    // Growing into the shepherd is a flicker between the two builds rather than
-    // a tween. There is nothing to tween between — they are different animals,
-    // not one animal at two scales — and the alternation is what reads as a
-    // transformation anyway.
-    if w.p.growT > 0.0 {
-        let beat = ((w.p.growT * 26.0) as i64) % 2
-        if beat == 0 {
-            drawDog(c, w, art.shep, ox, oy)
-        } else {
-            drawDog(c, w, art.chi, ox, oy)
-        }
-        return
-    }
     if w.p.form == FORM_SHEP {
         drawDog(c, w, art.shep, ox, oy)
     } else {
@@ -496,8 +483,16 @@ fn drawDog(c: &mut Canvas, w: &World, frames: &Vec<Sprite>, ox: f64, oy: f64) {
     // Squash and stretch about the feet: the sprite's bottom edge stays on the
     // ground while the body compresses, which is the only way it reads as impact
     // rather than as the character sinking into the floor.
-    let sx = CHAR_ART * w.p.sqX
-    let sy = CHAR_ART * w.p.sqY
+    // Growing is the shepherd swelling into place, not a strobe between two
+    // dogs. It settles a touch past full size and comes back, which is what
+    // makes it land instead of just stopping.
+    var grow = 1.0
+    if w.p.growT > 0.0 {
+        let t = 1.0 - w.p.growT / GROW_TIME
+        grow = 0.72 + 0.28 * t + 0.13 * Math.sin(3.14159265 * t)
+    }
+    let sx = CHAR_ART * w.p.sqX * grow
+    let sy = CHAR_ART * w.p.sqY * grow
     let dw = (sq.w as f64) * sx
     let dh = (sq.h as f64) * sy
     let footY = by + PLAYER_H

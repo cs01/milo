@@ -500,6 +500,11 @@ fn dogSprite(sp: &DogSpec, pal: &Vec<f64>, frame: i64): Sprite {
         } else {
             C_FUR
         }
+        if frame == DOG_PEE && i == 0 {
+            // cocked, and drawn later so the body does not paint over it
+            i = i + 1
+            continue
+        }
         segment(g, w, h, hx, hipY, hx + ps.dx, footY + ps.dy, sp.legW, col)
         // a lighter paw, so the foot reads against the ground
         rectF(g, w, h, hx + ps.dx - sp.legW * 0.5, footY + ps.dy - 0.6, hx + ps.dx + sp.legW * 0.7, footY + ps.dy + 0.6, C_BELLY)
@@ -511,7 +516,9 @@ fn dogSprite(sp: &DogSpec, pal: &Vec<f64>, frame: i64): Sprite {
     let tailBaseY = bodyCy - bodyRy * 0.2
     var tailRise = sp.tailRise
     if frame == DOG_PEE {
-        tailRise = tailRise + 2.2
+        // straight up and out of the way: at this size the tail and a cocked
+        // rear leg want the same six pixels
+        tailRise = tailRise + 3.5
     }
     segment(g, w, h, tailBaseX, tailBaseY, tailBaseX - sp.tailLen * 0.6, tailBaseY - tailRise, sp.tailW, C_FUR)
     if tailRise > 2.0 {
@@ -526,20 +533,26 @@ fn dogSprite(sp: &DogSpec, pal: &Vec<f64>, frame: i64): Sprite {
     // top light along the spine
     ellipse(g, w, h, sp.bodyCx, bodyCy - bodyRy * 0.70, bodyRx * 0.72, bodyRy * 0.22, C_LIT)
 
-    // The cocked leg, drawn over the body rather than under it. Legs go down
-    // before the torso goes on, which is right for the three on the ground and
-    // exactly wrong for the one in the air — it was there the whole time,
-    // hidden behind the belly.
+    // The cocked leg, drawn over the body rather than under it, and sized off
+    // this build's own leg length rather than a shared offset — a fixed offset
+    // put the paw outside the sprite on the smaller dog, where it clipped into
+    // a thick bar that read as a wing.
+    //
+    // One straight limb, angled back and slightly up. A knee was the first
+    // instinct and it is wrong here: the whole leg is four art pixels long, and
+    // a bend in something that short just reads as a lump.
     if frame == DOG_PEE {
-        let cock = pose(frame, 0)
         let legCol = if sp.saddle {
             C_MASK
         } else {
             C_FUR
         }
-        let hipX = sp.legX0 + 1.2
-        segment(g, w, h, hipX, hipY - 0.6, hipX + cock.dx, footY + cock.dy, sp.legW, legCol)
-        rectF(g, w, h, hipX + cock.dx - sp.legW * 0.7, footY + cock.dy - 0.8, hipX + cock.dx + sp.legW * 0.5, footY + cock.dy + 0.7, C_BELLY)
+        let hipX = sp.legX0 + 1.0
+        let hipY2 = hipY - 0.4
+        let pawX = hipX - sp.legLen * 0.95
+        let pawY = hipY2 - sp.legLen * 0.45
+        segment(g, w, h, hipX, hipY2, pawX, pawY, sp.legW * 0.85, legCol)
+        rectF(g, w, h, pawX - sp.legW * 0.5, pawY - sp.legW * 0.5, pawX + sp.legW * 0.6, pawY + sp.legW * 0.6, C_BELLY)
     }
 
     // neck, joining head to body so the two never read as two animals

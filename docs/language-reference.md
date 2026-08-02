@@ -75,7 +75,7 @@ A binding may not reuse a name that is already in scope, anywhere in the enclosi
 function — not in a nested block, not as a loop or match binding. Unlike Rust,
 where shadowing is idiomatic, this is an error:
 
-```milo
+```milo error
 let row = 5
 for row in nums { … }   // error: 'row' shadows an outer binding — pick a different name
 ```

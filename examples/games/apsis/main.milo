@@ -30,7 +30,10 @@ from "./sdl" import {
     SDL_RENDERER_ACCELERATED, SDL_RENDERER_PRESENTVSYNC
 }
 from "./gfx" import {
-    Canvas, canvasNew, present, textCentered, text
+    Canvas, canvasNew, present, textCentered, text, canvasSetFont
+}
+from "./glyphs" import {
+    fontLoad
 }
 from "./gfx3d" import {
     Scene, sceneNew
@@ -103,6 +106,7 @@ pub fn main(): i32 {
     }
 
     var c = canvasNew(W, H)
+    canvasSetFont(c, fontLoad(@embedFile("bodies/font.png")))
     var scene = sceneNew(W, H)
     let texes = loadBodyTextures()
     var w = worldNew()

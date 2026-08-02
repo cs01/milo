@@ -1,4 +1,4 @@
-// std/png — decode PNG images (RFC 2083), pure Milo on std/inflate.
+// std/png — encode and decode PNG images (RFC 2083), pure Milo.
 //
 // Parses the chunk stream, concatenates IDAT, zlib-inflates it, then reverses the
 // per-scanline filters (None/Sub/Up/Average/Paeth) to recover raw pixels. This is
@@ -9,6 +9,12 @@
 
 from "std/inflate" import {
     Inflate
+}
+from "std/deflate" import {
+    Deflate
+}
+from "std/checksum" import {
+    Checksum
 }
 
 pub struct PngImage {
@@ -173,12 +179,100 @@ fn decodePng(src: &string): Result<PngImage, string> {
     )
 }
 
-// Png namespace — Png.decode(src) decodes a PNG into a PngImage.
+// ── encoding ──────────────────────────────────────────────────────────────────
+
+fn pushBe32(out: &mut string, v: i64) {
+    out.push(((v >> 24) & 255) as u8)
+    out.push(((v >> 16) & 255) as u8)
+    out.push(((v >> 8) & 255) as u8)
+    out.push((v & 255) as u8)
+}
+
+// One PNG chunk: length, type, payload, and a CRC over the TYPE AND PAYLOAD but
+// not the length. Getting that span wrong produces a file every decoder rejects
+// with a checksum error and no hint as to which half was wrong.
+fn chunk(out: &mut string, kind: &string, body: &string) {
+    pushBe32(out, body.len)
+    var crcInput = ""
+    crcInput.pushStr(kind)
+    crcInput.pushStr(body)
+    out.pushStr(kind)
+    out.pushStr(body)
+    pushBe32(out, Checksum.crc32(crcInput))
+}
+
+// Encode 8-bit truecolour (3 channels) or truecolour+alpha (4) to a PNG.
+//
+// Every scanline is written with filter type 0 (None). Filtering exists to make
+// the deflate stream smaller, and the encoder's job here is to be obviously
+// correct rather than small — the filters are the part of PNG that is easy to
+// get subtly wrong, and this is the write side of a decoder that already has to
+// implement all five of them to read other people's files.
+pub fn encodePng(pixels: &string, width: i64, height: i64, channels: i64): Result<string, string> {
+    if channels != 3 && channels != 4 {
+        return Result.Err($"encodePng: channels must be 3 or 4, got {channels}")
+    }
+    if width <= 0 || height <= 0 {
+        return Result.Err($"encodePng: bad size {width}x{height}")
+    }
+    let need = width * height * channels
+    if pixels.len < need {
+        return Result.Err($"encodePng: need {need} bytes, got {pixels.len}")
+    }
+
+    var raw = ""
+    var y = 0
+    while y < height {
+        raw.push(0 as u8) // filter: None
+        let start = y * width * channels
+        var i = 0
+        while i < width * channels {
+            raw.push(pixels[start + i])
+            i = i + 1
+        }
+        y = y + 1
+    }
+
+    var out = ""
+    // The 8-byte signature. The \r\n\x1a\n tail is a deliberate trap for
+    // transfers that mangle line endings — if it survives, the rest did too.
+    out.push(137 as u8)
+    out.push(80 as u8)
+    out.push(78 as u8)
+    out.push(71 as u8)
+    out.push(13 as u8)
+    out.push(10 as u8)
+    out.push(26 as u8)
+    out.push(10 as u8)
+
+    var ihdr = ""
+    pushBe32(ihdr, width)
+    pushBe32(ihdr, height)
+    ihdr.push(8 as u8) // bit depth
+    if channels == 3 {
+        ihdr.push(2 as u8) // truecolour
+    } else {
+        ihdr.push(6 as u8) // truecolour + alpha
+    }
+    ihdr.push(0 as u8) // deflate
+    ihdr.push(0 as u8) // adaptive filtering
+    ihdr.push(0 as u8) // no interlace
+    chunk(out, "IHDR", ihdr)
+    chunk(out, "IDAT", Deflate.zlib(raw))
+    chunk(out, "IEND", "")
+    return Result.Ok(out)
+}
+
+// Png namespace — Png.decode(src) reads a PNG, Png.encode(...) writes one.
 pub struct Png {
 }
 
 impl Png {
     fn decode(src: &string): Result<PngImage, string> {
         return decodePng(src)
+    }
+
+    fn encode(pixels: &string, width: i64, height: i64, channels: i64): Result<string, string> {
+        return encodePng(pixels, width, height, channels)
     }
 }

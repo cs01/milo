@@ -1,0 +1,62 @@
+// @expect: 4x3 rgb ok
+// @expect: 3x2 rgba ok
+// @expect: encoded is a png
+
+// Encode then decode: the write side has to produce something the read side —
+// which is a full RFC 2083 filter implementation — accepts byte for byte.
+
+from "std/png" import {
+    Png
+}
+
+fn roundTrip(w: i64, h: i64, ch: i64, label: &string) {
+    var px = ""
+    var i = 0
+    while i < w * h * ch {
+        px.push(((i * 37 + 11) % 251) as u8)
+        i = i + 1
+    }
+    match Png.encode(px, w, h, ch) {
+        Result.Ok(enc) => {
+            match Png.decode(enc) {
+                Result.Ok(img) => {
+                    var same = img.width == w && img.height == h && img.channels == ch
+                    var k = 0
+                    while k < w * h * ch {
+                        if img.pixels[k] != px[k] {
+                            same = false
+                        }
+                        k = k + 1
+                    }
+                    if same {
+                        print(label + " ok")
+                    } else {
+                        print(label + " MISMATCH")
+                    }
+                }
+                Result.Err(e) => {
+                    print(label + " decode failed: " + e)
+                }
+            }
+        }
+        Result.Err(e) => {
+            print(label + " encode failed: " + e)
+        }
+    }
+}
+
+pub fn main(): i32 {
+    roundTrip(4, 3, 3, "4x3 rgb")
+    roundTrip(3, 2, 4, "3x2 rgba")
+    match Png.encode("\u{1}\u{2}\u{3}", 1, 1, 3) {
+        Result.Ok(enc) => {
+            if enc[1] == 80 && enc[2] == 78 && enc[3] == 71 {
+                print("encoded is a png")
+            }
+        }
+        Result.Err(_) => {
+            print("encode failed")
+        }
+    }
+    return 0
+}

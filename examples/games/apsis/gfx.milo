@@ -20,7 +20,15 @@ from "./raster" import {
     bandsFor
 }
 
+from "./glyphs" import {
+    Font, fontEmpty, drawText
+}
+
 pub struct Canvas {
+    // The typeface. Empty until `canvasSetFont`, and `text` falls back to the
+    // built-in 5x7 bitmap while it is — so a missing or corrupt atlas costs
+    // legibility, not the whole HUD.
+    face: Font,
     w: i64,
     h: i64,
     hdr: Vec<f32>, // 3 floats per pixel, linear light, unbounded above 1.0
@@ -78,6 +86,7 @@ pub fn canvasNew(w: i64, h: i64): Canvas {
         uty[y] = (t as f32)
     }
     return Canvas {
+        face: fontEmpty(),
         w: w,
         h: h,
         hdr: Vec.filled(w * h * 3, 0.0),
@@ -339,32 +348,40 @@ pub fn textWidth(s: &string, scale: i64): i64 {
     return s.len * 6 * scale
 }
 
+pub fn canvasSetFont(c: &mut Canvas, f: Font) {
+    c.face = f
+}
+
 pub fn text(c: &mut Canvas, x: i64, y: i64, s: &string, scale: i64, r: f64, g: f64, b: f64) {
-    var pen = x
-    for k in 0..s.len {
-        var code = s[k] as i64
-        if code >= 97 && code <= 122 && code != 120 {
-            code = code - 32 // the table is uppercase-only, apart from 'x'
-        }
-        if code >= 0 && code < 128 {
-            let bits = c.font[code]
-            if bits != 0 {
-                for row in 0..7 {
-                    for col in 0..5 {
-                        if ((bits >> (row * 5 + col)) & 1) == 1 {
-                            let px = pen + col * scale
-                            let py = y + row * scale
-                            for sy in 0..scale {
-                                for sx in 0..scale {
-                                    addPix(c, px + sx, py + sy, r, g, b)
+    if c.face.ok {
+        drawText(c.hdr, c.w, c.h, c.face, x, y, s, scale, r, g, b)
+    } else {
+        var pen = x
+        for k in 0..s.len {
+            var code = s[k] as i64
+            if code >= 97 && code <= 122 && code != 120 {
+                code = code - 32 // the table is uppercase-only, apart from 'x'
+            }
+            if code >= 0 && code < 128 {
+                let bits = c.font[code]
+                if bits != 0 {
+                    for row in 0..7 {
+                        for col in 0..5 {
+                            if ((bits >> (row * 5 + col)) & 1) == 1 {
+                                let px = pen + col * scale
+                                let py = y + row * scale
+                                for sy in 0..scale {
+                                    for sx in 0..scale {
+                                        addPix(c, px + sx, py + sy, r, g, b)
+                                    }
                                 }
                             }
                         }
                     }
                 }
             }
+            pen = pen + 6 * scale
         }
-        pen = pen + 6 * scale
     }
 }
 

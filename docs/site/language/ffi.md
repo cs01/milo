@@ -52,6 +52,27 @@ fn main(): i32 {
 extern fn SDL_Init(flags: u32): i32
 ```
 
+A darwin framework is not a `-l` name, so it gets its own spelling. The framework and the
+linux `-l` usually hold the same symbols under two names, which makes this a job for the
+platform split — `gl.darwin.milo` and `gl.linux.milo` declaring the same surface:
+
+```milo
+// gl.darwin.milo
+@link("framework:OpenGL")
+pub extern fn glGetError(): u32
+
+// gl.linux.milo
+@link("GL")
+pub extern fn glGetError(): u32
+```
+
+`framework:` off darwin is an error, not a silently dropped flag — it means the platform
+arm is wrong, and a link that quietly omits a library fails later with undefined symbols.
+
+The name is constrained to letters, digits, `_`, `.`, `+` and `-` (after an optional
+`framework:`). It is pasted into the link command the compiler shells out to, and `milo
+add` fetches third-party source — building a package must not be able to run one.
+
 ## Verifying declarations against C
 
 An `extern fn` or `extern struct` is a **claim** about C, and C linkage has no mangling to check it against. A wrong parameter type, a wrong arity, or a field at the wrong offset links fine and corrupts silently at the ABI seam. `unsafe` does not help — it tracks provenance, not layout.

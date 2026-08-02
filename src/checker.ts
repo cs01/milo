@@ -1463,6 +1463,16 @@ export class TypeChecker {
               if (k !== "string") {
                 this.error(`'@link' argument must be a string library name, got '${attr.args[i]}'`, undefined,
                   `write @link("SDL2"), not @link(SDL2)`);
+                return;
+              }
+              // The name is pasted into the link command the compiler shells out to, so it
+              // is held to a charset that cannot close the argument and inject a command —
+              // the same reason @cLayout/@cSig constrain their arguments. `milo add` fetches
+              // third-party source, and building a package must not be able to run one.
+              const name = attr.args[i]!;
+              if (!TypeChecker.LINK_NAME_RE.test(name)) {
+                this.error(`'@link' argument '${name}' is not a library name`, undefined,
+                  `expected the '-l' name (letters, digits, '_', '.', '+', '-'), optionally 'framework:Name' for a darwin framework`);
               }
             });
           }
@@ -2345,6 +2355,9 @@ export class TypeChecker {
   private static readonly C_TYPE_RE = /^(struct |union |enum )?[A-Za-z_][A-Za-z0-9_]*$/;
   private static readonly C_IDENT_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
   private static readonly C_HEADER_RE = /^[A-Za-z0-9_][A-Za-z0-9_./+-]*\.h$/;
+  // `@link("SDL2")` / `@link("framework:OpenGL")`. Reaches a shell command line, so no
+  // spaces, quotes, semicolons, backticks, or `$` — see the check in validateAttributes.
+  private static readonly LINK_NAME_RE = /^(framework:)?[A-Za-z0-9_][A-Za-z0-9_.+-]*$/;
   // A C function signature, pasted verbatim into a generated TU — so it's held to a
   // charset that can't close the assert and inject statements. Allows what real decls
   // need (`ssize_t f(int, void *, size_t)`, `struct tm *g(const time_t *)`, `void h(void)`,

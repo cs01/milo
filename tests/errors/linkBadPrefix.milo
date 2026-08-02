@@ -1,0 +1,9 @@
+// @error: is not a library name
+// 'framework:' is the only prefix the link step knows how to spell. Anything else in
+// that position would reach the linker verbatim, so it is rejected here instead.
+@link("bundle:OpenGL")
+extern fn floor(x: f64): f64
+
+fn main() {
+    print(1)
+}

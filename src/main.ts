@@ -683,7 +683,22 @@ function libSpec(names: string[], darwinPrefix: string, target: TargetInfo, stat
 // search path. Reuses libSpec so --static-deps stays consistent.
 function declaredLibSpec(names: string[], target: TargetInfo, staticDeps: boolean): string {
   if (!names.length) return "";
-  return libSpec(names, "/opt/homebrew", target, staticDeps);
+  // `@link("framework:OpenGL")` — a darwin framework is not a `-l` name, and for the
+  // system graphics/media libraries the framework and the linux `-l` hold the same
+  // symbols under two spellings. Without this the flag could only come from the
+  // compiler recognising specific library names, which put OpenGL and JavaScriptCore
+  // into the compiler's vocabulary — a language shouldn't know what OpenGL is.
+  // A `framework:` link belongs in a `.darwin.milo` arm; it is unsatisfiable elsewhere.
+  const frameworks = names.filter(n => n.startsWith("framework:")).map(n => n.slice("framework:".length));
+  const libs = names.filter(n => !n.startsWith("framework:"));
+  if (frameworks.length && target.os !== "darwin") {
+    console.error(`error: @link("framework:${frameworks[0]}") targets ${target.os}, but frameworks exist only on darwin`);
+    console.error(`hint: put the framework link in a '.darwin.milo' arm and the '-l' spelling in the others`);
+    process.exit(1);
+  }
+  // Never static: a framework is the OS's copy, and there is no archive to name.
+  const frameworkFlags = frameworks.map(f => ` -framework ${f}`).join("");
+  return frameworkFlags + (libs.length ? libSpec(libs, "/opt/homebrew", target, staticDeps) : "");
 }
 
 function detectLibs(ir: string, target: TargetInfo, staticDeps = false): string {
@@ -721,16 +736,10 @@ function detectLibs(ir: string, target: TargetInfo, staticDeps = false): string 
   if (ir.includes("@JSGlobalContextCreate") || ir.includes("@JSEvaluateScript")) {
     if (target.os === "darwin") libs += " -framework JavaScriptCore";
   }
-  // OpenGL (std/gl). Detected rather than @link'd because the flag is not a -l
-  // name on darwin — the framework and libGL hold the same symbols under two
-  // spellings, and a `@link("GL")` in portable source would be wrong on one of
-  // the two hosts. The windows arm returned above: opengl32.dll exports GL 1.1
-  // only, so std/gl's 3.3 entry points are a deliberate link error there.
-  // Never static: the GL implementation is the installed driver, so a bundled
-  // libGL.a would talk to the wrong one (or to nothing).
-  if (/@gl[A-Z]/.test(ir)) {
-    libs += target.os === "darwin" ? " -framework OpenGL" : " -lGL";
-  }
+  // No OpenGL case here on purpose. GL is a package (`@link("framework:OpenGL")` in its
+  // darwin arm, `@link("GL")` elsewhere), so the flag comes from the bindings that need
+  // it rather than from the compiler recognising `gl*` in the IR. Nothing about a
+  // graphics API belongs in a language's link step.
   // The greps above run on pre-optimization IR, so they over-approximate badly:
   // std/os declares the TLS externs and defines wrappers around them, and every
   // program using std/io imports std/os — so `wc` picked up -lssl even though LLVM

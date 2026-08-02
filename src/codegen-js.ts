@@ -2,6 +2,71 @@
 import type { HIRModule, HIRFunction, HIRStmt, HIRExpr, HIRArg, HIRPattern } from "./hir";
 import type { TypeKind } from "./types";
 
+// Quote a Milo string literal as its UTF-8 bytes, one byte per JS code unit — the
+// representation the whole backend assumes (see the runtime's byte-string note).
+// `"héllo"` becomes "h\xc3\xa9llo", six units, so `.len` is 6 and `s[1]` is 195,
+// exactly as native reads it. Escaping every non-printable byte also keeps the
+// emitted file plain ASCII, so it can't be corrupted by an encoding guess.
+const __utf8 = new TextEncoder();
+export function jsByteString(s: string): string {
+  let out = '"';
+  for (const b of __utf8.encode(s)) {
+    if (b === 0x22) out += '\\"';
+    else if (b === 0x5c) out += "\\\\";
+    else if (b >= 0x20 && b < 0x7f) out += String.fromCharCode(b);
+    else out += "\\x" + b.toString(16).padStart(2, "0");
+  }
+  return out + '"';
+}
+
+// Host-independent runtime helpers. Everything that does IO (`__print`, `__flush`,
+// `__eprint`) is supplied by the host instead, because `milo emit-js` writes to a
+// real stdout and the playground captures into an array. Shared so those two can't
+// fork: the playground used to carry its own copy, which had already drifted to a
+// 6-digit `%g` long after the emitted runtime moved to shortest-round-trip.
+export const JS_RUNTIME_HELPERS: string = [
+  `function __assert(cond, msg) { if (!cond) throw new Error('assertion failed: ' + msg); }`,
+  // Every trap Milo guarantees natively — overflow, division by zero, out-of-bounds,
+  // over-shift, unwrap-on-None. Without these the JS backend silently computes a
+  // different answer than the binary for the exact inputs the native build refuses
+  // to run at all, which is the worst way for a second backend to be wrong.
+  `function __trap(m) { const e = new Error('milo: ' + m); e.__milo_trap = true; throw e; }`,
+  `function __ovf(v, lo, hi) { if (!(v >= lo && v <= hi)) __trap('runtime error: integer overflow'); return v; }`,
+  `function __idiv(a, b) { if (b === 0) __trap('division by zero'); return Math.trunc(a / b); }`,
+  `function __irem(a, b) { if (b === 0) __trap('division by zero'); return a % b; }`,
+  `function __idx(a, i) { if (!(i >= 0 && i < a.length)) __trap('array index out of bounds: ' + i + '/' + a.length); return a[i]; }`,
+  `function __idxSet(a, i, v) { if (!(i >= 0 && i < a.length)) __trap('array index out of bounds: ' + i + '/' + a.length); a[i] = v; return v; }`,
+  `function __sh(s, bits) { if (!(s >= 0 && s < bits)) __trap('shift amount out of range (>= ' + bits + ')'); return s; }`,
+  `function __unwrap(o) { if (o.tag !== 0) __trap('unwrap called on ' + (o.data === undefined ? 'None' : 'Err')); return o.data[0]; }`,
+  // Milo strings are UTF-8 byte buffers, so in JS they are held as one byte per
+  // UTF-16 code unit — a "binary string". That makes .length, s[i], .slice and `+=`
+  // byte-exact for free, which matters in both directions: `"héllo".len` is 6, and a
+  // string built a byte at a time (sha256, deflate, png) stays a byte buffer instead
+  // of becoming text. Source literals are stored as their UTF-8 bytes to match; the
+  // decode back to real text happens once, on output.
+  `function __obytes(s) { const u = new Uint8Array(s.length); for (let i = 0; i < s.length; i++) u[i] = s.charCodeAt(i) & 0xFF; return u; }`,
+  `function __otext(s) { return typeof TextDecoder !== 'undefined' ? new TextDecoder().decode(__obytes(s)) : s; }`,
+  `function __sbyte(s, i) { if (!(i >= 0 && i < s.length)) __trap('string index out of bounds: ' + i + '/' + s.length); return s.charCodeAt(i); }`,
+  // Mirrors @milo.fmt.f64 in codegen.ts so playground output equals the
+  // compiled binary's: walk the integer-digit count up by powers of ten, then
+  // raise %g precision until the text parses back to the same double. __gfmt
+  // is C's "%.*g" — exponent form when exp < -4 or exp >= precision, trailing
+  // zeros trimmed. Native prints f32 at f32 precision; JS has no f32, so a
+  // literal typed f32 is the one case where the two backends can disagree.
+  `function __gfmt(x, p) { if (x === 0) return Object.is(x, -0) ? '-0' : '0'; const es = x.toExponential(p - 1); const ei = es.indexOf('e'); const e = Number(es.slice(ei + 1)); if (e < -4 || e >= p) { let m = es.slice(0, ei); if (m.indexOf('.') >= 0) m = m.replace(/0+$/, '').replace(/\\.$/, ''); let ea = String(Math.abs(e)); if (ea.length < 2) ea = '0' + ea; return m + 'e' + (e < 0 ? '-' : '+') + ea; } let s = x.toFixed(Math.max(0, p - 1 - e)); if (s.indexOf('.') >= 0) s = s.replace(/0+$/, '').replace(/\\.$/, ''); return s; }`,
+  `function __fmtG(x) { if (Number.isNaN(x)) return 'nan'; if (!isFinite(x)) return x > 0 ? 'inf' : '-inf'; let dig = 1, pow = 10; const av = Math.abs(x); while (dig < 17 && av >= pow) { dig++; pow *= 10; } for (let p = dig; p < 17; p++) { const s = __gfmt(x, p); if (Number(s) === x) return s; } return __gfmt(x, 17); }`,
+  `function __propagate(r) { if (r.tag !== 0) throw { __milo_prop: r }; return r.data[0]; }`,
+  // Display formatting to match native: structs as `Name { f: v, … }`, enums as
+  // `Variant(a, …)`/`Variant`, strings quoted, floats via %g.
+  `function __displayVal(v) { if (typeof v === 'string') return JSON.stringify(v); if (typeof v === 'boolean') return String(v); if (typeof v === 'number') return Number.isInteger(v) ? String(v) : __fmtG(v); if (v && typeof v === 'object' && v.constructor && v.constructor.name !== 'Object') return __displayStruct(v); return String(v); }`,
+  `function __displayStruct(v) { const ks = Object.keys(v); return v.constructor.name + ' { ' + ks.map(k => k + ': ' + __displayVal(v[k])).join(', ') + ' }'; }`,
+  `function __displayEnum(v, name) { const e = __enumMeta[name][v.tag]; return e[1] === 0 ? e[0] : e[0] + '(' + v.data.map(__displayVal).join(', ') + ')'; }`,
+  // Maps need the explicit branch: Object.keys of a Map is empty, so the
+  // generic object path would silently produce an empty HashMap.
+  `function __clone(v) { if (v === null || typeof v !== 'object') return v; if (Array.isArray(v)) return v.map(__clone); if (v instanceof Map) return new Map(Array.from(v, ([k, x]) => [k, __clone(x)])); const o = Object.create(Object.getPrototypeOf(v)); for (const k of Object.keys(v)) o[k] = __clone(v[k]); return o; }`,
+  `function __eq(a, b) { if (a === b) return true; if (a === null || b === null || typeof a !== 'object' || typeof b !== 'object') return a === b; if (Array.isArray(a)) return Array.isArray(b) && a.length === b.length && a.every((v, i) => __eq(v, b[i])); if (a instanceof Map || b instanceof Map) { if (!(a instanceof Map && b instanceof Map) || a.size !== b.size) return false; for (const [k, v] of a) { if (!b.has(k) || !__eq(v, b.get(k))) return false; } return true; } const ka = Object.keys(a), kb = Object.keys(b); return ka.length === kb.length && ka.every(k => __eq(a[k], b[k])); }`,
+].join("\n");
+
 export class CodegenJS {
   private output: string[] = [];
   private indent = 0;
@@ -11,6 +76,10 @@ export class CodegenJS {
   // strings, bools) that are taken by `&mut`/`&` must share mutations across the call,
   // which JS by-value passing can't do. Ref params + ref-taken locals become boxes.
   private boxed: Set<string> = new Set();
+  // Set for the duration of a `@wrapping` function, mirroring codegen.ts: + - * and
+  // unary neg use defined modular arithmetic instead of trapping, and an over-shift
+  // is masked into range. Division by zero and bounds still trap.
+  private currentFnWrapping = false;
 
   // When true, emit requires/ensures as runtime checks (like a native `--debug`
   // build). Off by default so `milo emit-js` output — e.g. the browser emulators —
@@ -114,36 +183,23 @@ export class CodegenJS {
       this.emit("");
     }
 
-    // entry point
-    this.emit("main();");
-    this.emit("__flush();");
+    // Entry point. A trap has to flush first: native writes stdout as it goes and
+    // only then aborts, so output produced before the failing line is part of the
+    // observable behaviour both backends must agree on. Buffered `__out` would
+    // otherwise be dropped on the way out.
+    this.emit("try { main(); __flush(); } catch (__e) { __flush(); if (__e && __e.__milo_trap) { __eprint(__e.message + \"\\n\"); if (typeof process !== 'undefined') process.exit(134); } throw __e; }");
   }
 
   private emitRuntime() {
     this.emit("// runtime");
     this.emit("const __out = [];");
     this.emit("function __print(s) { __out.push(String(s)); }");
-    this.emit("function __flush() { if (__out.length === 0) return; const text = __out.join(''); __out.length = 0; if (typeof process !== 'undefined') process.stdout.write(text); else if (typeof console !== 'undefined') console.log(text); }");
-    this.emit("function __assert(cond, msg) { if (!cond) throw new Error('assertion failed: ' + msg); }");
-    // Mirrors @milo.fmt.f64 in codegen.ts so playground output equals the
-    // compiled binary's: walk the integer-digit count up by powers of ten, then
-    // raise %g precision until the text parses back to the same double. __gfmt
-    // is C's "%.*g" — exponent form when exp < -4 or exp >= precision, trailing
-    // zeros trimmed. Native prints f32 at f32 precision; JS has no f32, so a
-    // literal typed f32 is the one case where the two backends can disagree.
-    this.emit("function __gfmt(x, p) { if (x === 0) return Object.is(x, -0) ? '-0' : '0'; const es = x.toExponential(p - 1); const ei = es.indexOf('e'); const e = Number(es.slice(ei + 1)); if (e < -4 || e >= p) { let m = es.slice(0, ei); if (m.indexOf('.') >= 0) m = m.replace(/0+$/, '').replace(/\\.$/, ''); let ea = String(Math.abs(e)); if (ea.length < 2) ea = '0' + ea; return m + 'e' + (e < 0 ? '-' : '+') + ea; } let s = x.toFixed(Math.max(0, p - 1 - e)); if (s.indexOf('.') >= 0) s = s.replace(/0+$/, '').replace(/\\.$/, ''); return s; }");
-    this.emit("function __fmtG(x) { if (Number.isNaN(x)) return 'nan'; if (!isFinite(x)) return x > 0 ? 'inf' : '-inf'; let dig = 1, pow = 10; const av = Math.abs(x); while (dig < 17 && av >= pow) { dig++; pow *= 10; } for (let p = dig; p < 17; p++) { const s = __gfmt(x, p); if (Number(s) === x) return s; } return __gfmt(x, 17); }");
-    this.emit("function __propagate(r) { if (r.tag !== 0) throw { __milo_prop: r }; return r.data[0]; }");
-    this.emit("function __eprint(s) { if (typeof process !== 'undefined' && process.stderr) process.stderr.write(s); else if (typeof console !== 'undefined') console.error(s); }");
-    // Display formatting to match native: structs as `Name { f: v, … }`, enums as
-    // `Variant(a, …)`/`Variant`, strings quoted, floats via %g.
-    this.emit("function __displayVal(v) { if (typeof v === 'string') return JSON.stringify(v); if (typeof v === 'boolean') return String(v); if (typeof v === 'number') return Number.isInteger(v) ? String(v) : __fmtG(v); if (v && typeof v === 'object' && v.constructor && v.constructor.name !== 'Object') return __displayStruct(v); return String(v); }");
-    this.emit("function __displayStruct(v) { const ks = Object.keys(v); return v.constructor.name + ' { ' + ks.map(k => k + ': ' + __displayVal(v[k])).join(', ') + ' }'; }");
-    this.emit("function __displayEnum(v, name) { const e = __enumMeta[name][v.tag]; return e[1] === 0 ? e[0] : e[0] + '(' + v.data.map(__displayVal).join(', ') + ')'; }");
-    // Maps need the explicit branch: Object.keys of a Map is empty, so the
-    // generic object path would silently produce an empty HashMap.
-    this.emit("function __clone(v) { if (v === null || typeof v !== 'object') return v; if (Array.isArray(v)) return v.map(__clone); if (v instanceof Map) return new Map(Array.from(v, ([k, x]) => [k, __clone(x)])); const o = Object.create(Object.getPrototypeOf(v)); for (const k of Object.keys(v)) o[k] = __clone(v[k]); return o; }");
-    this.emit("function __eq(a, b) { if (a === b) return true; if (a === null || b === null || typeof a !== 'object' || typeof b !== 'object') return a === b; if (Array.isArray(a)) return Array.isArray(b) && a.length === b.length && a.every((v, i) => __eq(v, b[i])); const ka = Object.keys(a), kb = Object.keys(b); return ka.length === kb.length && ka.every(k => __eq(a[k], b[k])); }");
+    // Output is where the byte-string representation turns back into text: the
+    // buffer holds UTF-8 bytes one per code unit, so it goes out as raw bytes on a
+    // real stdout and gets decoded for console.log.
+    this.emit("function __flush() { if (__out.length === 0) return; const text = __out.join(''); __out.length = 0; if (typeof process !== 'undefined') process.stdout.write(__obytes(text)); else if (typeof console !== 'undefined') console.log(__otext(text)); }");
+    this.emit("function __eprint(s) { if (typeof process !== 'undefined' && process.stderr) process.stderr.write(__obytes(String(s))); else if (typeof console !== 'undefined') console.error(__otext(String(s))); }");
+    for (const line of JS_RUNTIME_HELPERS.split("\n")) this.emit(line);
     this.emit("");
   }
 
@@ -188,6 +244,8 @@ export class CodegenJS {
     this.collectRefTaken(fn.body, boxed);
     const prevBoxed = this.boxed;
     this.boxed = boxed;
+    const prevWrapping = this.currentFnWrapping;
+    this.currentFnWrapping = !!fn.isWrapping;
     const prevOutput = this.output;
 
     // Contracts. The browser has no solver, so — exactly like a native `--debug`
@@ -212,6 +270,7 @@ export class CodegenJS {
     this.usedPropagate = prevUsed;
     this.output = prevOutput;
     this.boxed = prevBoxed;
+    this.currentFnWrapping = prevWrapping;
 
     for (const cond of requireChecks)
       this.emit(`if (!(${cond})) throw new Error("requires clause violated");`);
@@ -257,6 +316,13 @@ export class CodegenJS {
         break;
       }
       case "Assign": {
+        // A direct `v[i] = x` needs the bounds check on the store side too, and a
+        // checked store can't be an assignment target — hence the helper call.
+        const t = stmt.target;
+        if (t.kind === "IndexAccess" && t.object.type.tag !== "string" && t.object.type.tag !== "hashmap") {
+          this.emit(`__idxSet(${this.genExpr(t.object)}, ${this.genExpr(t.index)}, ${this.genExpr(stmt.value)});`);
+          break;
+        }
         const target = this.genLValue(stmt.target);
         const val = this.genExpr(stmt.value);
         this.emit(`${target} = ${val};`);
@@ -310,7 +376,14 @@ export class CodegenJS {
         break;
       }
       case "ForRange": {
-        this.emit(`for (let ${stmt.varName} = ${this.genExpr(stmt.start)}; ${stmt.varName} < ${this.genExpr(stmt.end)}; ${stmt.varName}++) {`);
+        // Both bounds are evaluated once, before the loop, exactly as native does —
+        // inlining `end` into the JS condition re-evaluates it every iteration, so a
+        // body that mutates it (or merely calls something costly) diverges.
+        const start = this.nextTemp();
+        const end = this.nextTemp();
+        this.emit(`const ${start} = ${this.genExpr(stmt.start)};`);
+        this.emit(`const ${end} = ${this.genExpr(stmt.end)};`);
+        this.emit(`for (let ${stmt.varName} = ${start}; ${stmt.varName} < ${end}; ${stmt.varName}++) {`);
         this.indent++;
         for (const s of stmt.body) this.genStmt(s);
         this.indent--;
@@ -324,7 +397,7 @@ export class CodegenJS {
           const v = stmt.varName2 ?? "_";
           this.emit(`for (const [${k}, ${v}] of ${iter}) {`);
         } else if (stmt.iterableKind === "string") {
-          // milo iterates a string by byte (u8); JS `of` yields chars.
+          // milo iterates a string by UTF-8 byte (u8); JS `of` yields code points.
           const sv = this.nextTemp();
           const ix = this.nextTemp();
           this.emit(`const ${sv} = ${iter};`);
@@ -387,7 +460,7 @@ export class CodegenJS {
           const p = arm.pattern;
           let val: string;
           if (p.literalKind === "string") {
-            val = JSON.stringify(p.value);
+            val = jsByteString(String(p.value));
           } else if (p.literalKind === "char") {
             // char subject is a numeric byte (see CharLit) — compare numerically.
             // pattern.value is the byte as a decimal ("97"); fall back to charCodeAt
@@ -442,13 +515,20 @@ export class CodegenJS {
         // match/comparison is numeric; coerceToString converts back for display.
         return String(expr.value);
       case "StringLit":
-        return JSON.stringify(expr.value);
+        return jsByteString(expr.value);
       case "Ident":
         return this.boxed.has(expr.name) ? `${expr.name}.v` : expr.name;
       case "BinOp":
         return this.genBinOp(expr);
-      case "UnaryOp":
-        return `(${expr.op}${this.genExpr(expr.operand)})`;
+      case "UnaryOp": {
+        const v = this.genExpr(expr.operand);
+        // -INT_MIN is the one negation that overflows, and native traps on it.
+        if (expr.op === "-" && expr.type.tag === "int") {
+          const [lo, hi] = this.intRange(expr.type);
+          return this.currentFnWrapping ? this.maskInt(`(-${v})`, expr.type) : `__ovf((-${v}), ${lo}, ${hi})`;
+        }
+        return `(${expr.op}${v})`;
+      }
       case "Call":
         return this.genCall(expr);
       case "StructLit":
@@ -462,11 +542,15 @@ export class CodegenJS {
         return `Array.from({length: ${expr.count}}, () => __clone(${val}))`;
       }
       case "IndexAccess":
-        // milo strings index by byte (u8); JS string[i] is a 1-char string.
-        // charCodeAt gives the byte for ASCII (multi-byte UTF-8 handled elsewhere).
+        // milo strings index by byte (u8); JS string[i] is a UTF-16 code unit, which
+        // is only the same thing for ASCII — "hé"[1] is 233, not the 195 native reads.
         if (expr.object.type.tag === "string")
-          return `${this.genExpr(expr.object)}.charCodeAt(${this.genExpr(expr.index)})`;
-        return `${this.genExpr(expr.object)}[${this.genExpr(expr.index)}]`;
+          return `__sbyte(${this.genExpr(expr.object)}, ${this.genExpr(expr.index)})`;
+        // Bounds-checked: native aborts on an out-of-range index, JS would hand back
+        // `undefined` and let it propagate as NaN through the rest of the program.
+        if (expr.object.type.tag === "hashmap")
+          return `${this.genExpr(expr.object)}[${this.genExpr(expr.index)}]`;
+        return `__idx(${this.genExpr(expr.object)}, ${this.genExpr(expr.index)})`;
       case "EnumLit": {
         const args = expr.args.map(a => this.genExpr(a)).join(", ");
         return `${expr.enumName}.${expr.variant}(${args})`;
@@ -475,9 +559,10 @@ export class CodegenJS {
       case "VecLen":
         return `${this.genExpr(expr.object)}.length`;
       case "StringLen":
+        // byte length — exact, because a Milo string is stored one byte per code unit.
         return `${this.genExpr(expr.object)}.length`;
       case "Unwrap":
-        return `${this.genExpr(expr.operand)}.data[0]`;
+        return `__unwrap(${this.genExpr(expr.operand)})`;
       case "Propagate": {
         // `?`: on Err/None (tag !== 0) throw a sentinel caught at the function
         // boundary (genFunction wraps propagating bodies), which returns the Err/None.
@@ -553,9 +638,14 @@ export class CodegenJS {
       case "HashMapLen":
         return `${this.genExpr(expr.object)}.size`;
       case "StringPush":
+        // Known gap: correct for ASCII only. Milo pushes one UTF-8 byte, but a JS
+        // string can't hold a partial code point, so pushing the two bytes of a
+        // multi-byte character yields two Latin-1 chars instead. Fixing it properly
+        // needs Milo strings represented as byte arrays in JS, not JS strings.
         return `(${this.genExpr(expr.str)} += String.fromCharCode(${this.genExpr(expr.byte)}))`;
       case "StringSubstr":
       case "StringSlice":
+        // Byte offsets — see the byte-string note in the runtime.
         return `${this.genExpr(expr.str)}.slice(${this.genExpr(expr.start)}, ${this.genExpr(expr.end)})`;
       case "StringParseF64":
         return `parseFloat(${this.genExpr(expr.str)})`;
@@ -734,30 +824,49 @@ export class CodegenJS {
     }
 
     // Integer ops must match native Milo's fixed-width two's-complement semantics,
-    // which JS f64/int32 math does not give for free.
+    // which JS f64/int32 math does not give for free — and, outside a `@wrapping`
+    // function, must trap on overflow rather than wrap. Silently wrapping where the
+    // binary aborts is the divergence that matters most: the JS build keeps running
+    // with a value the native build declared impossible.
     if (expr.type.tag === "int") {
       const op = expr.op;
       const bits = expr.type.bits;
-      // JS bitwise/shift operators coerce operands to SIGNED int32. For <=32-bit
-      // types maskInt then yields the correct (positive) value; but i64/u64 — used
-      // by 32-bit CPU cores to hold masked 32-bit registers — need explicit
+      const [lo, hi] = this.intRange(expr.type);
+      // JS bitwise operators coerce operands to SIGNED int32. For <=32-bit types
+      // maskInt then yields the correct (positive) value; but i64/u64 — used by
+      // 32-bit CPU cores to hold masked 32-bit registers — need explicit
       // normalization so a bit31-set value like 0xFFFFFFFF isn't seen as -1.
-      if (op === "&" || op === "|" || op === "^" || op === "<<") {
+      if (op === "&" || op === "|" || op === "^") {
         const raw = `(${l} ${op} ${r})`;
         return bits >= 64 ? `(${raw} >>> 0)` : this.maskInt(raw, expr.type);
       }
-      if (op === ">>") {
+      if (op === "<<" || op === ">>") {
+        // Native traps on a shift amount >= the type width; `@wrapping` masks it
+        // into range instead. JS would do neither: `<<` silently takes `amount & 31`.
+        const amt = this.currentFnWrapping ? `((${r}) % ${bits})` : `__sh(${r}, ${bits})`;
+        if (op === "<<") {
+          // Multiply, don't `<<`, above 32 bits: JS's shift coerces to int32, so
+          // `1 << 40` on an i64 yields 256 instead of a trillion.
+          const raw = bits >= 64 ? `Math.trunc(${l} * 2 ** (${amt}))` : `(${l} << ${amt})`;
+          return bits >= 64 ? raw : this.maskInt(raw, expr.type);
+        }
         // Divide-based shift is correct for any magnitude (JS `>>` would coerce to
         // int32 and sign-corrupt 32-bit values) and matches native arithmetic shift
         // for negatives (Math.floor rounds toward -inf).
-        const raw = `Math.floor(${l} / 2 ** (${r}))`;
+        const raw = `Math.floor(${l} / 2 ** (${amt}))`;
         return bits >= 64 ? raw : this.maskInt(raw, expr.type);
       }
       if (op === "+" || op === "-" || op === "*") {
-        return this.maskInt(`(${l} ${op} ${r})`, expr.type);
+        const raw = `(${l} ${op} ${r})`;
+        return this.currentFnWrapping ? this.maskInt(raw, expr.type) : `__ovf(${raw}, ${lo}, ${hi})`;
       }
-      if (op === "/") return this.maskInt(`Math.trunc(${l} / ${r})`, expr.type);
-      if (op === "%") return `(${l} % ${r})`;
+      // Division by zero traps in a `@wrapping` function too — there is no modular
+      // answer to give. Only the INT_MIN/-1 overflow is wrapped there.
+      if (op === "/") {
+        const raw = `__idiv(${l}, ${r})`;
+        return this.currentFnWrapping ? this.maskInt(raw, expr.type) : `__ovf(${raw}, ${lo}, ${hi})`;
+      }
+      if (op === "%") return `__irem(${l}, ${r})`;
     }
 
     return `(${l} ${expr.op} ${r})`;
@@ -894,7 +1003,11 @@ export class CodegenJS {
       case "FieldAccess":
         return `${this.genLValue(expr.object)}.${expr.field}`;
       case "IndexAccess":
-        return `${this.genExpr(expr.object)}[${this.genExpr(expr.index)}]`;
+        // `v[i].field = x` works through this: __idx yields the element object and
+        // the field store lands on it. A bare `v[i] = x` is handled in Assign.
+        if (expr.object.type.tag === "hashmap")
+          return `${this.genExpr(expr.object)}[${this.genExpr(expr.index)}]`;
+        return `__idx(${this.genExpr(expr.object)}, ${this.genExpr(expr.index)})`;
       case "HeapDeref":
       case "PtrDeref":
         return this.genLValue(expr.operand);

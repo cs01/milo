@@ -7,7 +7,7 @@ import { TypeChecker } from "../../src/checker";
 import type { Program } from "../../src/ast";
 import type { TargetInfo } from "../../src/target";
 import { lower } from "../../src/lower";
-import { CodegenJS } from "../../src/codegen-js";
+import { CodegenJS, JS_RUNTIME_HELPERS } from "../../src/codegen-js";
 import { formatDiagnostic } from "../../src/diagnostics";
 
 declare const STDLIB_FILES: Record<string, string>;
@@ -159,21 +159,20 @@ export function compileAndRun(source: string): CompileResult {
     const bodyJs = new CodegenJS(true).generateBody(hirModule);
 
     const captured: string[] = [];
+    // Only the IO shims are local — the playground captures into an array where the
+    // emitted runtime writes to stdout. Everything else comes from the one shared
+    // copy, so the two can't drift the way they had (this file's `__fmtG` was still
+    // 6-digit `%g` long after the backend moved to shortest-round-trip).
     const runtime = `
       const __out = [];
       // eager: push each line straight to __captured so output printed before a
       // runtime abort (e.g. a violated contract) still shows.
-      function __print(s) { __captured.push(String(s)); }
-      function __flush() { if (__out.length) { __captured.push(__out.join('')); __out.length = 0; } }
-      function __assert(cond, msg) { if (!cond) throw new Error('assertion failed: ' + msg); }
-      function __fmtG(x) { if (!isFinite(x)) return String(x); if (x === 0) return '0'; let s = x.toPrecision(6); if (s.indexOf('e') >= 0) { s = Number(s).toExponential(); return s.replace(/e([+-])(\\d)$/, 'e$10$2'); } if (s.indexOf('.') >= 0) s = s.replace(/0+$/, '').replace(/\\.$/, ''); return s; }
-      function __propagate(r) { if (r.tag !== 0) throw { __milo_prop: r }; return r.data[0]; }
+      // __otext decodes the byte-string representation back to real text — the
+      // panel shows characters, not the UTF-8 bytes the program was manipulating.
+      function __print(s) { __captured.push(__otext(String(s))); }
+      function __flush() { if (__out.length) { __captured.push(__otext(__out.join(''))); __out.length = 0; } }
       function __eprint(s) { __out.push(String(s)); __flush(); }
-      function __displayVal(v) { if (typeof v === 'string') return JSON.stringify(v); if (typeof v === 'boolean') return String(v); if (typeof v === 'number') return Number.isInteger(v) ? String(v) : __fmtG(v); if (v && typeof v === 'object' && v.constructor && v.constructor.name !== 'Object') return __displayStruct(v); return String(v); }
-      function __displayStruct(v) { const ks = Object.keys(v); return v.constructor.name + ' { ' + ks.map(k => k + ': ' + __displayVal(v[k])).join(', ') + ' }'; }
-      function __displayEnum(v, name) { const e = __enumMeta[name][v.tag]; return e[1] === 0 ? e[0] : e[0] + '(' + v.data.map(__displayVal).join(', ') + ')'; }
-      function __clone(v) { if (v === null || typeof v !== 'object') return v; if (Array.isArray(v)) return v.map(__clone); const o = Object.create(Object.getPrototypeOf(v)); for (const k of Object.keys(v)) o[k] = __clone(v[k]); return o; }
-      function __eq(a, b) { if (a === b) return true; if (a === null || b === null || typeof a !== 'object' || typeof b !== 'object') return a === b; if (Array.isArray(a)) return Array.isArray(b) && a.length === b.length && a.every((v, i) => __eq(v, b[i])); const ka = Object.keys(a), kb = Object.keys(b); return ka.length === kb.length && ka.every(k => __eq(a[k], b[k])); }
+${JS_RUNTIME_HELPERS}
     `;
     const fn = new Function("__captured", runtime + bodyJs);
     // Separate runtime failures (aborts, contract violations) from compile-time

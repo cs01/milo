@@ -10,6 +10,19 @@ import { join } from "node:path";
 const MILO = join(import.meta.dir, "..", "src", "main.ts");
 
 async function bothWays(src: string): Promise<{ native: string; js: string }> {
+  const r = await runBoth(src);
+  if (r.nativeFailed) throw new Error(r.nativeErr);
+  if (r.jsFailed) throw new Error(r.jsErr);
+  return { native: r.native, js: r.js };
+}
+
+interface BothResult {
+  native: string; js: string;
+  nativeErr: string; jsErr: string;
+  nativeFailed: boolean; jsFailed: boolean;
+}
+
+function runBoth(src: string): BothResult {
   const dir = mkdtempSync(join(tmpdir(), "milo-emitjs-"));
   try {
     const milo = join(dir, "prog.milo");
@@ -19,13 +32,163 @@ async function bothWays(src: string): Promise<{ native: string; js: string }> {
     const emit = Bun.spawnSync(["bun", "run", MILO, "emit-js", milo, "-o", jsPath]);
     if (emit.exitCode !== 0) throw new Error(emit.stderr.toString() || emit.stdout.toString());
     const js = Bun.spawnSync(["bun", jsPath]);
-    if (native.exitCode !== 0) throw new Error(native.stderr.toString());
-    if (js.exitCode !== 0) throw new Error(js.stderr.toString());
-    return { native: native.stdout.toString().trim(), js: js.stdout.toString().trim() };
+    return {
+      native: native.stdout.toString().trim(),
+      js: js.stdout.toString().trim(),
+      nativeErr: native.stderr.toString(),
+      jsErr: js.stderr.toString(),
+      nativeFailed: native.exitCode !== 0,
+      jsFailed: js.exitCode !== 0,
+    };
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
 }
+
+// Every runtime trap Milo guarantees has to fire in the JS backend too. It used to
+// fire in none of them: the emitted program wrapped on overflow, produced Infinity
+// on a divide by zero and `undefined` past the end of a Vec, and carried on. A
+// second backend that silently keeps running where the binary aborts is worse than
+// no second backend, because the answer it prints looks like an answer.
+//
+// Native's message carries a source location and JS's doesn't, so the assertion is
+// that both fail and that native's message starts with the JS one — plus that
+// whatever was printed before the trap is identical, since native writes stdout as
+// it goes and a buffered JS runtime could lose it.
+function bothTrap(src: string, message: string, stdoutBefore = "") {
+  const r = runBoth(src);
+  expect({ native: r.nativeFailed, js: r.jsFailed }).toEqual({ native: true, js: true });
+  expect(r.jsErr).toContain(message);
+  expect(r.nativeErr).toContain(message);
+  expect(r.js).toBe(stdoutBefore);
+  expect(r.native).toBe(stdoutBefore);
+}
+
+test("emit-js: integer overflow traps like native", () => {
+  bothTrap(`
+pub fn main(): i32 {
+    var x: i32 = 2147483647
+    print("before")
+    x = x + 1
+    print(x.toString())
+    return 0
+}
+`, "integer overflow", "before");
+});
+
+test("emit-js: @wrapping opts out of the overflow trap in both backends", async () => {
+  const r = await bothWays(`
+@wrapping
+fn bump(x: i32): i32 {
+    return x + 1
+}
+
+pub fn main(): i32 {
+    print(bump(2147483647).toString())
+    // u8 wraps at its own width, not i32's.
+    print((255 as u8).wrappingAdd(1 as u8).toString())
+    return 0
+}
+`);
+  expect(r.js).toBe(r.native);
+  expect(r.native).toBe("-2147483648\n0");
+});
+
+test("emit-js: division by zero traps like native", () => {
+  bothTrap(`
+pub fn main(): i32 {
+    var z: i64 = 0
+    print((10 / z).toString())
+    return 0
+}
+`, "division by zero");
+});
+
+test("emit-js: out-of-bounds index traps like native", () => {
+  bothTrap(`
+pub fn main(): i32 {
+    var v: Vec<i64> = Vec.new()
+    v.push(1)
+    var i: i64 = 5
+    print(v[i].toString())
+    return 0
+}
+`, "array index out of bounds: 5/1");
+});
+
+test("emit-js: out-of-bounds store traps like native", () => {
+  bothTrap(`
+pub fn main(): i32 {
+    var v: Vec<i64> = Vec.new()
+    v.push(1)
+    var i: i64 = 3
+    v[i] = 9
+    return 0
+}
+`, "array index out of bounds: 3/1");
+});
+
+test("emit-js: over-shift traps like native", () => {
+  bothTrap(`
+pub fn main(): i32 {
+    var a: i32 = 1
+    var s: i32 = 40
+    print((a << s).toString())
+    return 0
+}
+`, "shift amount out of range (>= 32)");
+});
+
+test("emit-js: unwrap on None traps like native", () => {
+  bothTrap(`
+pub fn main(): i32 {
+    var v: Vec<i64> = Vec.new()
+    print(v.pop()!.toString())
+    return 0
+}
+`, "unwrap called on None");
+});
+
+test("emit-js: for-range evaluates its bounds once", async () => {
+  // JS inlined `end` into the loop condition, so a body that changed it kept the
+  // loop alive; native computes both bounds before entering.
+  const r = await bothWays(`
+pub fn main(): i32 {
+    var n: i64 = 3
+    var guard: i64 = 0
+    for i in 0..n {
+        n = n + 1
+        guard = guard + 1
+        if guard > 8 { break }
+        print(i.toString())
+    }
+    return 0
+}
+`);
+  expect(r.js).toBe(r.native);
+  expect(r.native).toBe("0\n1\n2");
+});
+
+test("emit-js: strings are UTF-8 bytes, not UTF-16 code units", async () => {
+  const r = await bothWays(`
+pub fn main(): i32 {
+    let s = "héllo"
+    print(s.len.toString())
+    // Indexing walks bytes: 'é' is the two bytes 195 169, not one code unit 233.
+    let t = "hé"
+    var i: i64 = 0
+    while i < t.len {
+        print(t[i].toString())
+        i = i + 1
+    }
+    // Slice offsets are byte offsets too.
+    print(s.substr(0, 3))
+    return 0
+}
+`);
+  expect(r.js).toBe(r.native);
+  expect(r.native).toBe("6\n104\n195\n169\nhé");
+});
 
 test("emit-js: Vec.filled matches native", async () => {
   const r = await bothWays(`

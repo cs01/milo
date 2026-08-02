@@ -11,6 +11,20 @@ last-verified: 2026-07-23
 Source-level breaks, newest first. Milo is pre-1.0 and does not promise
 compatibility, but every break belongs here with the migration spelled out.
 
+## Shadowing is rejected (2026-08-01)
+
+A binding may no longer reuse a name already in scope in the same function —
+nested block, loop binding, and match binding included. Migration: rename the
+inner binding (`for si in 0..shots.len`), or prefix it with `_` if nothing reads
+it.
+
+No compat shim was possible: the old behaviour was not merely permissive, it was
+wrong. Codegen's locals map is keyed by name with no scope, so a shadowing
+binding leaked past its scope — `let row = 5; for row in nums { … }; print(row)`
+printed the LAST ELEMENT, and mutated a `let` to do it. When the types differed
+the same leak emitted invalid LLVM IR. Blast radius across std, tests and
+examples was one file (`examples/games/flight/shot.milo`).
+
 ## Stdlib API coherence migrations (2026-07-30)
 
 Several APIs now have one supported spelling that follows the standard-library

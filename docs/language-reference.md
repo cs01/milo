@@ -69,6 +69,25 @@ let _ = mightFail()    // `_` discards a result; it may be repeated in one scope
 Under the hood, `let` maps to an SSA register and `var` maps to a stack allocation.
 This means what you write is what LLVM sees — no hidden costs.
 
+### No shadowing
+
+A binding may not reuse a name that is already in scope, anywhere in the enclosing
+function — not in a nested block, not as a loop or match binding. Unlike Rust,
+where shadowing is idiomatic, this is an error:
+
+```milo
+let row = 5
+for row in nums { … }   // error: 'row' shadows an outer binding — pick a different name
+```
+
+The reason is readability: with shadowing allowed, a line mentioning `row` a screen
+below means whichever `row` is nearest, and the reader has to reconstruct the block
+structure to know which. Names starting with `_` are exempt, since nothing reads
+them — two `match` arms may both bind `_e`.
+
+Sibling scopes are not shadowing: two loops in the same function may each bind `i`,
+because neither is inside the other.
+
 ### Semicolons
 
 Statements are separated by newlines — no terminator required. A trailing `;` is

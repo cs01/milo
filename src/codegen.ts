@@ -52,6 +52,8 @@ export function orderGuardIncludes(headers: string[], os: string): string[] {
   return ["winsock2.h", ...headers.filter(h => h !== "winsock2.h")];
 }
 
+interface LocalInfo { type: string; typeKind: TypeKind; mutable: boolean; isRef: boolean; addr?: string }
+
 export class Codegen {
   private target: TargetInfo;
   private output: string[] = [];
@@ -59,7 +61,7 @@ export class Codegen {
   private strCounter = 0;
   private tempCounter = 0;
   private labelCounter = 0;
-  private locals = new Map<string, { type: string; typeKind: TypeKind; mutable: boolean; isRef: boolean; addr?: string }>();
+  private locals = new Map<string, LocalInfo>();
   private fnSigs = new Map<string, { paramTypes: string[]; retType: string; variadic: boolean; wantsStringAddr?: boolean[] }>();
   // milo fns whose big-aggregate return is lowered to a hidden `ptr %__sret.out`
   // first param (see genStoreInto). Excludes main and exported fns (C ABI).
@@ -1561,6 +1563,7 @@ export class Codegen {
     this.locals.clear();
     this.droppableLocals = [];
     this.entryAllocas = [];
+    this.emittedAddrs.clear();
     this.currentFnName = fn.name;
     this.currentFnWrapping = !!fn.isWrapping;
     const lines: string[] = [];
@@ -1741,7 +1744,7 @@ export class Codegen {
         const isRefLocal = stmt.type.tag === "ref";
         const storedTypeKind = isRefLocal ? (stmt.type as Extract<TypeKind, {tag: "ref"}>).inner : stmt.type;
         const declTy = this.llvmType(storedTypeKind);
-        const addrName = this.locals.has(stmt.name) ? `%${stmt.name}.${this.scopeCounter++}.addr` : `%${stmt.name}.addr`;
+        const addrName = this.allocaName(stmt.name);
         // A ranged int is never a big aggregate, so the range check (now on the value
         // expression) doesn't interact with this path.
         const bigAgg = !isRefLocal && this.isBigAgg(declTy);
@@ -2693,12 +2696,45 @@ export class Codegen {
     return [lines, false];
   }
 
+  // Alloca names live for the whole function, but a binding's NAME does not:
+  // two sibling loops may both bind `line`, and since the loop scope is now
+  // unwound at the loop's end, `locals.has(name)` no longer reports the earlier
+  // one. Uniquing has to key off what was actually emitted, or LLVM rejects the
+  // function with `multiple definition of local value named 'line.addr'`.
+  private emittedAddrs = new Set<string>();
+
+  private allocaName(name: string): string {
+    const plain = `%${name}.addr`;
+    const addr = this.emittedAddrs.has(plain) ? `%${name}.${this.scopeCounter++}.addr` : plain;
+    this.emittedAddrs.add(addr);
+    return addr;
+  }
+
+  // A loop binding is scoped to the loop body, but `locals` is flat by name, so
+  // a binding that shadows an outer name has to be undone when the loop ends.
+  // Without this every later mention of that name resolves to the loop's slot:
+  // `let row = 5; for row in nums { … }; print(row)` printed the LAST ELEMENT,
+  // silently, and mutated a `let`. The checker scopes this correctly (pushScope
+  // around the body) — the leak was codegen-only.
+  private bindLoopLocal(name: string, entry: LocalInfo): [string, LocalInfo | undefined] {
+    const prev = this.locals.get(name);
+    this.locals.set(name, entry);
+    return [name, prev];
+  }
+
+  private unbindLoopLocals(saved: [string, LocalInfo | undefined][]): void {
+    for (const [name, prev] of saved) {
+      if (prev) this.locals.set(name, prev);
+      else this.locals.delete(name);
+    }
+  }
+
   private genForRange(stmt: HIRStmt & { kind: "ForRange" }): [string[], boolean] {
     const lines: string[] = [];
     const varTy = this.llvmType(stmt.varType);
-    const addrName = this.locals.has(stmt.varName) ? `%${stmt.varName}.${this.scopeCounter++}.addr` : `%${stmt.varName}.addr`;
+    const addrName = this.allocaName(stmt.varName);
     this.entryAllocas.push(`  ${addrName} = alloca ${varTy}`);
-    this.locals.set(stmt.varName, { type: varTy, typeKind: stmt.varType, mutable: false, isRef: false, addr: addrName });
+    const savedLoopLocals = [this.bindLoopLocal(stmt.varName, { type: varTy, typeKind: stmt.varType, mutable: false, isRef: false, addr: addrName })];
 
     const [startLines, startVal, startLLTy] = this.genExpr(stmt.start);
     lines.push(...startLines);
@@ -2774,6 +2810,7 @@ export class Codegen {
     this.loopHeader = prevHeader;
     this.loopExit = prevExit;
     this.loopDropStart = prevDropStart;
+    this.unbindLoopLocals(savedLoopLocals);
     return [lines, false];
   }
 
@@ -2835,11 +2872,11 @@ export class Codegen {
       const elemName = stmt.varName2 ?? stmt.varName;
       const elemType = elemTypeKind.tag === "ref" ? elemTypeKind.inner : elemTypeKind;
       const elemTy = this.llvmType(elemType);
-      const varAddr = this.locals.has(elemName) ? `%${elemName}.${this.scopeCounter++}.addr` : `%${elemName}.addr`;
+      const varAddr = this.allocaName(elemName);
       this.entryAllocas.push(`  ${varAddr} = alloca ptr`);
-      this.locals.set(elemName, { type: elemTy, typeKind: elemTypeKind, mutable: false, isRef: true, addr: varAddr });
+      const savedLoopLocals = [this.bindLoopLocal(elemName, { type: elemTy, typeKind: elemTypeKind, mutable: false, isRef: true, addr: varAddr })];
       if (stmt.varName2) {
-        this.locals.set(stmt.varName, { type: "i64", typeKind: { tag: "int", bits: 64, signed: true }, mutable: false, isRef: false, addr: idxAddr });
+        savedLoopLocals.push(this.bindLoopLocal(stmt.varName, { type: "i64", typeKind: { tag: "int", bits: 64, signed: true }, mutable: false, isRef: false, addr: idxAddr }));
       }
 
       const condLabel = this.nextLabel("for.cond");
@@ -2886,6 +2923,7 @@ export class Codegen {
       this.loopHeader = prevHeader;
       this.loopExit = prevExit;
       this.loopDropStart = prevDropStart;
+      this.unbindLoopLocals(savedLoopLocals);
       return [lines, false];
 
     } else if (stmt.iterableKind === "string") {
@@ -2905,11 +2943,11 @@ export class Codegen {
       lines.push(`  store i64 0, ptr ${idxAddr}`);
 
       const elemName2 = stmt.varName2 ?? stmt.varName;
-      const varAddr = this.locals.has(elemName2) ? `%${elemName2}.${this.scopeCounter++}.addr` : `%${elemName2}.addr`;
+      const varAddr = this.allocaName(elemName2);
       this.entryAllocas.push(`  ${varAddr} = alloca i8`);
-      this.locals.set(elemName2, { type: "i8", typeKind: { tag: "int", bits: 8, signed: false }, mutable: false, isRef: false, addr: varAddr });
+      const savedLoopLocals = [this.bindLoopLocal(elemName2, { type: "i8", typeKind: { tag: "int", bits: 8, signed: false }, mutable: false, isRef: false, addr: varAddr })];
       if (stmt.varName2) {
-        this.locals.set(stmt.varName, { type: "i64", typeKind: { tag: "int", bits: 64, signed: true }, mutable: false, isRef: false, addr: idxAddr });
+        savedLoopLocals.push(this.bindLoopLocal(stmt.varName, { type: "i64", typeKind: { tag: "int", bits: 64, signed: true }, mutable: false, isRef: false, addr: idxAddr }));
       }
 
       const condLabel = this.nextLabel("for.cond");
@@ -2958,6 +2996,7 @@ export class Codegen {
       this.loopHeader = prevHeader;
       this.loopExit = prevExit;
       this.loopDropStart = prevDropStart;
+      this.unbindLoopLocals(savedLoopLocals);
       return [lines, false];
 
     } else if (stmt.iterableKind === "array") {
@@ -2974,11 +3013,11 @@ export class Codegen {
       lines.push(`  store i32 0, ptr ${idxAddr}`);
 
       const elemName3 = stmt.varName2 ?? stmt.varName;
-      const varAddr = this.locals.has(elemName3) ? `%${elemName3}.${this.scopeCounter++}.addr` : `%${elemName3}.addr`;
+      const varAddr = this.allocaName(elemName3);
       this.entryAllocas.push(`  ${varAddr} = alloca ptr`);
-      this.locals.set(elemName3, { type: elemTy, typeKind: elemTypeKind3, mutable: false, isRef: true, addr: varAddr });
+      const savedLoopLocals = [this.bindLoopLocal(elemName3, { type: elemTy, typeKind: elemTypeKind3, mutable: false, isRef: true, addr: varAddr })];
       if (stmt.varName2) {
-        this.locals.set(stmt.varName, { type: "i32", typeKind: { tag: "int", bits: 32, signed: true }, mutable: false, isRef: false, addr: idxAddr });
+        savedLoopLocals.push(this.bindLoopLocal(stmt.varName, { type: "i32", typeKind: { tag: "int", bits: 32, signed: true }, mutable: false, isRef: false, addr: idxAddr }));
       }
 
       const condLabel = this.nextLabel("for.cond");
@@ -3025,6 +3064,7 @@ export class Codegen {
       this.loopHeader = prevHeader;
       this.loopExit = prevExit;
       this.loopDropStart = prevDropStart;
+      this.unbindLoopLocals(savedLoopLocals);
       return [lines, false];
 
     } else {
@@ -3050,14 +3090,17 @@ export class Codegen {
       this.entryAllocas.push(`  ${idxAddr} = alloca i64`);
       lines.push(`  store i64 0, ptr ${idxAddr}`);
 
-      const keyVarAddr = `%${stmt.varName}.addr`;
+      // A shadowing binding needs its OWN alloca, or the loop writes through to
+      // the outer variable's storage — the same `.N.addr` fallback the vec and
+      // array branches use.
+      const keyVarAddr = this.allocaName(stmt.varName);
       this.entryAllocas.push(`  ${keyVarAddr} = alloca ptr`);
-      this.locals.set(stmt.varName, { type: keyTy, typeKind: stmt.varType, mutable: false, isRef: true, addr: keyVarAddr });
+      const savedLoopLocals = [this.bindLoopLocal(stmt.varName, { type: keyTy, typeKind: stmt.varType, mutable: false, isRef: true, addr: keyVarAddr })];
 
       if (stmt.varName2 && stmt.varType2) {
-        const valVarAddr = `%${stmt.varName2}.addr`;
+        const valVarAddr = this.allocaName(stmt.varName2);
         this.entryAllocas.push(`  ${valVarAddr} = alloca ptr`);
-        this.locals.set(stmt.varName2, { type: valTy, typeKind: stmt.varType2, mutable: false, isRef: true, addr: valVarAddr });
+        savedLoopLocals.push(this.bindLoopLocal(stmt.varName2, { type: valTy, typeKind: stmt.varType2, mutable: false, isRef: true, addr: valVarAddr }));
       }
 
       const condLabel = this.nextLabel("for.cond");
@@ -3122,6 +3165,7 @@ export class Codegen {
       this.loopHeader = prevHeader;
       this.loopExit = prevExit;
       this.loopDropStart = prevDropStart;
+      this.unbindLoopLocals(savedLoopLocals);
       return [lines, false];
     }
   }
@@ -3207,15 +3251,15 @@ export class Codegen {
 
     // enumerate form: `for i, line in text.lines()` binds the piece to the second name
     const viewName = stmt.varName2 ?? stmt.varName;
-    const varAddr = this.locals.has(viewName) ? `%${viewName}.${this.scopeCounter++}.addr` : `%${viewName}.addr`;
+    const varAddr = this.allocaName(viewName);
     this.entryAllocas.push(`  ${varAddr} = alloca %String`);
-    this.locals.set(viewName, { type: "%String", typeKind: stmt.varType, mutable: false, isRef: false, addr: varAddr });
+    const savedLoopLocals = [this.bindLoopLocal(viewName, { type: "%String", typeKind: stmt.varType, mutable: false, isRef: false, addr: varAddr })];
     let idxAddr: string | null = null;
     if (stmt.varName2) {
       idxAddr = `%__strview_idx.${this.scopeCounter++}.addr`;
       this.entryAllocas.push(`  ${idxAddr} = alloca i64`);
       lines.push(`  store i64 0, ptr ${idxAddr}`);
-      this.locals.set(stmt.varName, { type: "i64", typeKind: { tag: "int", bits: 64, signed: true }, mutable: false, isRef: false, addr: idxAddr });
+      savedLoopLocals.push(this.bindLoopLocal(stmt.varName, { type: "i64", typeKind: { tag: "int", bits: 64, signed: true }, mutable: false, isRef: false, addr: idxAddr }));
     }
 
     const condLabel = this.nextLabel("strview.cond");
@@ -3346,6 +3390,7 @@ export class Codegen {
     this.loopHeader = prevHeader;
     this.loopExit = prevExit;
     this.loopDropStart = prevDropStart;
+    this.unbindLoopLocals(savedLoopLocals);
     return [lines, false];
   }
 
@@ -3379,11 +3424,9 @@ export class Codegen {
     const noneVariant = layout.variants.get("None")!;
     const elemTy = this.llvmType(stmt.varType);
 
-    const varAddr = this.locals.has(stmt.varName)
-      ? `%${stmt.varName}.${this.scopeCounter++}.addr`
-      : `%${stmt.varName}.addr`;
+    const varAddr = this.allocaName(stmt.varName);
     this.entryAllocas.push(`  ${varAddr} = alloca ${elemTy}`);
-    this.locals.set(stmt.varName, { type: elemTy, typeKind: stmt.varType, mutable: false, isRef: false, addr: varAddr });
+    const savedLoopLocals = [this.bindLoopLocal(stmt.varName, { type: elemTy, typeKind: stmt.varType, mutable: false, isRef: false, addr: varAddr })];
 
     const condLabel = this.nextLabel("iter.cond");
     const bodyLabel = this.nextLabel("iter.body");
@@ -3439,6 +3482,7 @@ export class Codegen {
     this.loopHeader = prevHeader;
     this.loopExit = prevExit;
     this.loopDropStart = prevDropStart;
+    this.unbindLoopLocals(savedLoopLocals);
     return [lines, false];
   }
 
@@ -5199,6 +5243,7 @@ export class Codegen {
         const savedLoopHeader = this.loopHeader;
         const savedLoopExit = this.loopExit;
         const savedEntryAllocas = this.entryAllocas;
+        const savedEmittedAddrs = this.emittedAddrs;
         const savedFnName = this.currentFnName;
         const savedEnsures = this.currentEnsures;
         this.tempCounter = 0;
@@ -5206,6 +5251,7 @@ export class Codegen {
         this.locals = new Map();
         this.droppableLocals = [];
         this.entryAllocas = [];
+        this.emittedAddrs = new Set();
         this.loopHeader = null;
         this.loopExit = null;
         // a Return inside the closure body must not assert the enclosing fn's ensures
@@ -5291,6 +5337,7 @@ export class Codegen {
         this.locals = savedLocals;
         this.droppableLocals = savedDroppable;
         this.entryAllocas = savedEntryAllocas;
+        this.emittedAddrs = savedEmittedAddrs;
         this.loopHeader = savedLoopHeader;
         this.loopExit = savedLoopExit;
         this.currentFnName = savedFnName;

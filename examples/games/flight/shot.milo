@@ -164,8 +164,8 @@ pub fn main(): i32 {
         shots.push(600)
     }
     var maxFrame: i64 = 0
-    for i in 0..shots.len {
-        maxFrame = Math.maxI64(maxFrame, shots[i])
+    for si in 0..shots.len {
+        maxFrame = Math.maxI64(maxFrame, shots[si])
     }
 
     var c = canvasNew(W, H)
@@ -194,14 +194,14 @@ pub fn main(): i32 {
         if w.rings.len > 0 {
             var bi = 0 - 1
             var bd = 1.0e18
-            for i in 0..w.rings.len {
-                if w.rings[i].alive {
-                    let dx = w.rings[i].x - w.plane.x
-                    let dz = w.rings[i].z - w.plane.z
+            for ri in 0..w.rings.len {
+                if w.rings[ri].alive {
+                    let dx = w.rings[ri].x - w.plane.x
+                    let dz = w.rings[ri].z - w.plane.z
                     let d = dx * dx + dz * dz
                     if d < bd {
                         bd = d
-                        bi = i
+                        bi = ri
                     }
                 }
             }
@@ -224,8 +224,8 @@ pub fn main(): i32 {
         worldUpdate(w, dt, roll, pitch, false)
 
         var want = false
-        for i in 0..shots.len {
-            if shots[i] == frame {
+        for si in 0..shots.len {
+            if shots[si] == frame {
                 want = true
             }
         }

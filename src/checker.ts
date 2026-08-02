@@ -1063,12 +1063,38 @@ export class TypeChecker {
     for (const [info, moved] of snap) info.moved = moved;
   }
 
+  // Index of the innermost scope belonging to the function currently being
+  // checked. Shadowing is judged relative to this, not to the whole stack.
+  private fnScopeFloor = 0;
+
   private declare(name: string, info: VarInfo) {
     const scope = this.scopes[this.scopes.length - 1];
     // `_` is a discard, not a name: `let _ = f()` twice in one scope is the
     // conventional way to ignore two results, so each one rebinds rather than
     // colliding. Everything else still gets the shadowing error.
     if (name !== "_" && scope.has(name)) { this.error(`variable '${name}' already declared in this scope`); return; }
+    // Shadowing an ENCLOSING binding is rejected too, not just a same-scope
+    // redeclaration. Rust allows it; Milo does not, because the reader of
+    // `for row in nums` a screen below `let row = 5` has no way to tell which
+    // `row` a later line means, and codegen leaked the inner binding past its
+    // scope for exactly as long as nothing tested it.
+    // Scan only down to the current function's own scope: monomorphization
+    // re-enters checkFunction mid-expression, so the CALLER's locals are still
+    // on the stack while a generic callee's params are declared. Without the
+    // floor, `std/arena`'s `h`/`val` params collided with every local named
+    // `h` at the call site.
+    // `_name` is the established "I am not reading this" marker (the unused-variable
+    // lint keys off it), and the readability argument for banning shadowing —
+    // which binding does a later line mean? — does not apply to a name nothing
+    // reads. Two match arms both binding `_e` stay legal.
+    if (name !== "_" && !name.startsWith("_")) {
+      for (let i = this.scopes.length - 2; i >= this.fnScopeFloor; i--) {
+        if (this.scopes[i].has(name)) {
+          this.error(`'${name}' shadows an outer binding — pick a different name`);
+          break;
+        }
+      }
+    }
     scope.set(name, info);
   }
 
@@ -3059,8 +3085,10 @@ export class TypeChecker {
     // currentFnRetType clobbered and make a later `?` see a void return.
     const savedIsUser = this.currentFnIsUser;
     const savedRetType = this.currentFnRetType;
+    const savedScopeFloor = this.fnScopeFloor;
     this.currentFnIsUser = this.fnIsUserCode(fn.name);
     this.pushScope();
+    this.fnScopeFloor = this.scopes.length - 1;
     const retType = this.resolve(fn.retType);
     // impl methods and generic instantiations never pass the declaration-level scan
     this.errorIfRefReturn(fn, retType);
@@ -3114,6 +3142,7 @@ export class TypeChecker {
     this.popScope();
     this.currentFnIsUser = savedIsUser;
     this.currentFnRetType = savedRetType;
+    this.fnScopeFloor = savedScopeFloor;
   }
 
   private checkStmt(stmt: Stmt, fnRetType: TypeKind) {

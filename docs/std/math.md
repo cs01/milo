@@ -26,6 +26,30 @@ fn Math.absI64(x: i64): i64
 
 _Undocumented._
 
+### `Math.acos`
+
+```milo
+fn Math.acos(x: f64): f64
+```
+
+_Undocumented._
+
+### `Math.asin`
+
+```milo
+fn Math.asin(x: f64): f64
+```
+
+_Undocumented._
+
+### `Math.atan`
+
+```milo
+fn Math.atan(x: f64): f64
+```
+
+_Undocumented._
+
 ### `Math.atan2`
 
 ```milo

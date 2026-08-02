@@ -1,28 +1,16 @@
 # Examples
 
-Runnable Milo programs. They double as integration smoke tests for the standard library.
+Runnable programs, also stdlib smoke tests.
+`./milo run examples/hello.milo`
 
-```bash
-./milo run examples/hello.milo
-./milo build examples/graphics/donut.milo -o /tmp/donut
-```
+- `basics/` — fib, json, arenas, interp
+- `cli-tools/` — grep, jq, tree, fmt
+- `games/` — flight (3D), dig, shatter, neon, volt, yap
+- `graphics/` — donut, plasma, raytracers, gpucube
+- `simulation/` — cloth, rigid bodies
+- `terminal/` — tetris, sysmon, tmux
+- `net/` — servers, weather, termpair
+- `embedded/` — bare-metal PID
+- `tools/` — java-dap
 
-| Folder | What's in it |
-|--------|--------------|
-| [`hello.milo`](hello.milo) | The canonical first program |
-| [`basics/`](basics) | Language and stdlib fundamentals: fib, fizzbuzz, json, arenas, a small interpreter |
-| [`cli-tools/`](cli-tools) | Coreutils-style tools, one `.milo` file each: grep, jq, tree, fmt |
-| [`games/`](games) | [`flight/`](games/flight) — a 3D flying game whose CPU triangle rasteriser runs on every core, flyable over five real places built from SRTM elevation, OpenStreetMap footprints and aerial imagery, [`dig/`](games/dig) — a mining game, [`shatter/`](games/shatter) — a brick breaker, [`neon/`](games/neon) — a horizontal shooter, R-Type-shaped, that answers "second-class references can't do gameplay code", [`volt/`](games/volt) — a 2D momentum platformer starring Milo the chihuahua, whose bark breaks crates and whose bone turns him into a german shepherd, and [`yap/`](games/yap) — a one-button flapper where the same chihuahua flaps his ears past fire hydrants |
-| [`graphics/`](graphics) | Truecolor terminal rendering: donut, plasma, aquarium, raytracers |
-| [`simulation/`](simulation) | Physics and numerical simulation: cloth, rigid bodies, phase space |
-| [`terminal/`](terminal) | TUIs and PTY work: tetris, sysmon, a mini tmux |
-| [`net/`](net) | HTTP servers and clients, plus the weather and termpair apps |
-| [`embedded/`](embedded) | Bare-metal and control code: PID step, flight controller |
-| [`tools/`](tools) | Developer tools: java-dap (JVM debug adapter) |
-
-Network examples need an internet connection.
-
-The three biggest Milo programs outgrew this directory and have their own repos:
-[emulators](https://github.com/milo-language/milo-emulators) (NES/SNES/Genesis),
-[milojs](https://github.com/milo-language/milojs) (JS engine + runtime), and
-[dapweb](https://github.com/milo-language/dapweb) (DAP debugger with a web UI).
+emulators, milojs, dapweb: own repos.

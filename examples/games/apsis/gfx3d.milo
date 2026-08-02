@@ -25,9 +25,6 @@ from "std/time" import {
 from "./gfx" import {
     Canvas
 }
-from "./vec3" import {
-    Vec3, v3
-}
 from "./raster" import {
     Cmd, Job, TexRef, Texture, Tri, Vtx, bandRaster, bandsFor, texRef, texRefNone, triSetup, vtxC
 }
@@ -106,6 +103,10 @@ pub struct Scene {
     fogB: f64,
     fogStart: f64,
     fogEnd: f64,
+    // Horizontal scissor, in pixels. Triangles are clamped to it at setup, which
+    // is what lets three cameras share one canvas.
+    sx0: i64,
+    sx1: i64,
     tris: i64, // triangles actually rasterised this frame
     // ── the recorded frame ──
     //
@@ -142,6 +143,8 @@ pub fn sceneNew(w: i64, h: i64): Scene {
         fogR: 0.30,
         fogG: 0.42,
         fogB: 0.62,
+        sx0: 0,
+        sx1: w,
         fogStart: 420.0,
         fogEnd: 1500.0,
         tris: 0,
@@ -292,7 +295,7 @@ fn record(s: &mut Scene, cmd: Cmd) {
 }
 
 fn cmdOf(s: &Scene, view: &View, a: &Vtx, b: &Vtx, d: &Vtx, tr: f64, tg: f64, tb: f64, tex: TexRef, textured: bool): Cmd {
-    let t = triSetup(s.w, s.h, view.scale, view.cx, view.cy, a.x, a.y, a.z, b.x, b.y, b.z, d.x, d.y, d.z)
+    let t = triSetup(s.sx0, s.sx1, s.h, view.scale, view.cx, view.cy, a.x, a.y, a.z, b.x, b.y, b.z, d.x, d.y, d.z)
     return Cmd {
         t: t,
         ar: a.r, ag: a.g, ab: a.b,

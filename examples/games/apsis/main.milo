@@ -44,7 +44,7 @@ from "./ephem" import {
 from "./world" import {
     World, worldNew, startMission, resetMission, replan, commitPlan, doCapture,
     advanceWorld, say, currentCapture, scrub, snapToBest, buildCurve, buildPreview,
-    updateCamera, cycleView, setView, VIEW_ROUTE
+    updateCamera, cycleView, setView, VIEW_ROUTE, skipTour
 }
 from "./render" import {
     W, H, drawScene, drawHud, drawOutcome
@@ -104,7 +104,6 @@ pub fn main(): i32 {
 
     var c = canvasNew(W, H)
     var scene = sceneNew(W, H)
-    print("decoding planet maps ...")
     let texes = loadBodyTextures()
     var w = worldNew()
     var inp = inputNew()
@@ -176,6 +175,11 @@ fn handleMap(w: &mut World, inp: &Input, steps: &Vec<f64>) {
     // Camera. Dragging turns it; the wheel zooms, geometrically, because the
     // useful range spans a parking orbit to Saturn's and a linear zoom would
     // spend its whole travel in the first hundredth of that.
+    // Any input at all ends the opening tour; nobody should have to sit through
+    // a camera move twice.
+    if inp.down || inp.wheel != 0.0 || inp.scrubX != 0.0 || inp.execute || inp.nextFocus || inp.pause || inp.warpUp {
+        skipTour(w)
+    }
     w.dragging = inp.down
     if inp.down {
         w.camYaw = w.camYaw - inp.dragX * 0.005

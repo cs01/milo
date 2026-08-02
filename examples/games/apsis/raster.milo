@@ -259,7 +259,7 @@ pub struct Tri {
 // Setup takes the viewport as two integers rather than the Scene it used to read
 // them off: setup runs on the recording thread but its result is consumed by a
 // worker, and a struct full of Vecs is not something a worker can hold.
-pub fn triSetup(w: i64, h: i64, scale: f64, ccx: f64, ccy: f64, ax: f64, ay: f64, az: f64, bx: f64, by: f64, bz: f64, dx: f64, dy: f64, dz: f64): Tri {
+pub fn triSetup(sx0: i64, sx1: i64, h: i64, scale: f64, ccx: f64, ccy: f64, ax: f64, ay: f64, az: f64, bx: f64, by: f64, bz: f64, dx: f64, dy: f64, dz: f64): Tri {
     let iaz = 1.0 / az
     let ibz = 1.0 / bz
     let icz = 1.0 / dz
@@ -287,14 +287,17 @@ pub fn triSetup(w: i64, h: i64, scale: f64, ccx: f64, ccy: f64, ax: f64, ay: f64
     var maxX = Math.ceil(Math.maxF64(x0, Math.maxF64(x1, x2))) as i64
     var minY = Math.floor(Math.minF64(y0, Math.minF64(y1, y2))) as i64
     var maxY = Math.ceil(Math.maxF64(y0, Math.maxF64(y1, y2))) as i64
-    if minX < 0 {
-        minX = 0
+    // Horizontal scissor. The screen is split into three panels, each with its
+    // own camera, and without a per-panel bound a planet drawn in one of them
+    // spills across the divider into the next.
+    if minX < sx0 {
+        minX = sx0
     }
     if minY < 0 {
         minY = 0
     }
-    if maxX > w {
-        maxX = w
+    if maxX > sx1 {
+        maxX = sx1
     }
     if maxY > h {
         maxY = h

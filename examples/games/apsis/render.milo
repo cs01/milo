@@ -33,11 +33,11 @@ from "./ephem" import {
     Body, bodyPos, dateOf, SEC_PER_DAY, AU, BODY_COUNT, SUN, EARTH, MOON, SATURN
 }
 from "./nbody" import {
-    Ship, Ephem, ephemPos, ephemVel, propagate, orbitAbout, dominantBody, Orbit
+    Ship, Ephem, Track, ephemPos, ephemVel, propagate, orbitAbout, dominantBody, Orbit
 }
 from "./world" import {
     World, shipAbout, shipOrbit, currentCapture, CURVE_N, camDistNow, camPitchNow, arrivalEstimate,
-    VIEW_DEPART, VIEW_ROUTE, VIEW_ARRIVE
+    VIEW_DEPART, VIEW_ROUTE, VIEW_ARRIVE, isLocalHop
 }
 from "./mission" import {
     MISSION_COUNT
@@ -53,21 +53,69 @@ pub struct Map {
     view: View,
     focus: Vec3, // world position the camera orbits, metres
     k: f64, // world metres -> render units
+    // The panel this map draws into. Everything 2D is clipped to it by hand; the
+    // 3D side is clipped by the scene's scissor.
+    px0: f64,
+    px1: f64,
+    // Which body this panel's frame follows, or -1 for the Sun-centred frame.
+    //
+    // A trajectory is a list of absolute positions at increasing times, and the
+    // panel is centred on where a body is NOW. Draw one against the other and
+    // the path is displaced by however far that body travelled in between — for
+    // a departure six weeks out, that is Earth moving 120 million kilometres,
+    // and the arc appears to start nowhere near the planet it leaves from. It
+    // also means sliding the departure date moves the whole path bodily across
+    // the screen instead of visibly re-shaping it, which is exactly what it
+    // looked like. Subtracting the body's position AT EACH POINT'S OWN TIME puts
+    // the path back in the frame the player is watching.
+    frameBody: i64,
+}
+
+pub let PANELS: i64 = 3
+
+pub fn panelX0(i: i64): f64 {
+    return (W as f64) * (i as f64) / (PANELS as f64)
+}
+
+pub fn panelX1(i: i64): f64 {
+    return (W as f64) * ((i + 1) as f64) / (PANELS as f64)
 }
 
 // The view basis is built here rather than by `viewOf`, because that one takes
 // yaw and pitch about a Y-up world and the solar system is Z-up: the ecliptic is
 // the XY plane and north is +Z. Feeding it these angles put the ecliptic on edge
 // and sent every planet's orbit across the screen as a straight line.
-pub fn mapOf(w: &World): Map {
-    var focus = ephemPos(w.e, w.focus, w.t)
-    if w.focus < 0 {
-        focus = w.ship.pos
+// One camera per panel.
+//
+// The screen is split into three: where you are leaving from, the route, and
+// where you are going. A single view cannot do that job — the route is drawn
+// from ten million kilometres, where both worlds are a fraction of a pixel, and
+// a view close enough to see a planet cannot contain the trajectory. Showing all
+// three at once removes the choice, and with it the need to explain it.
+pub fn mapFor(w: &World, panel: i64): Map {
+    let m = w.mission
+    var focusId = w.missions[m].from
+    var dist = w.bodies[focusId].radius * 7.0
+    var pitch = 0.26
+    var frame = w.missions[m].from
+    if panel == 1 {
+        dist = camDistNow(w)
+        pitch = camPitchNow(w)
+        // The route panel for an interplanetary hop is genuinely heliocentric —
+        // the transfer IS an orbit about the Sun and must be drawn as one.
+        if !isLocalHop(w, m) {
+            frame = 0 - 1
+        }
     }
-    let k = 1.0 / camDistNow(w)
-    let pitch = camPitchNow(w)
+    if panel == 2 {
+        focusId = w.missions[m].to
+        dist = w.bodies[focusId].radius * 9.0
+        pitch = 0.26
+        frame = w.missions[m].to
+    }
+    let focus = ephemPos(w.e, focusId, w.t)
+    let k = 1.0 / dist
     let cp = Math.cos(pitch)
-    // Unit vector from the focus toward the camera.
     let dir = v3(Math.cos(w.camYaw) * cp, Math.sin(w.camYaw) * cp, Math.sin(pitch))
     let eye = dir
     let fwd = dir.scale(-1.0)
@@ -77,16 +125,32 @@ pub fn mapOf(w: &World): Map {
     }
     right = right.norm()
     let up = right.cross(fwd).norm()
-    let scale = (H as f64) * 0.5 / Math.tan(0.35)
+    let x0 = panelX0(panel)
+    let x1 = panelX1(panel)
+    // The projection scale follows the PANEL width, not the frame, or a third of
+    // the screen would show a third of the picture at full zoom.
+    let scale = (x1 - x0) * 0.5 / Math.tan(0.40)
     return Map {
         view: View {
             right: right, up: up, fwd: fwd, eye: eye,
-            scale: scale, cx: (W as f64) * 0.5, cy: (H as f64) * 0.5,
+            scale: scale, cx: (x0 + x1) * 0.5, cy: (H as f64) * 0.46,
             near: 1.0e-5, far: 1.0e7,
         }
         ,
-        focus: focus, k: k
+        focus: focus, k: k, px0: x0, px1: x1, frameBody: frame,
     }
+}
+
+pub fn mapOf(w: &World): Map {
+    return mapFor(w, 1)
+}
+
+// A trajectory point, moved into this panel's frame.
+pub fn framed(m: &Map, w: &World, p: &Vec3, t: f64): Vec3 {
+    if m.frameBody < 0 {
+        return p
+    }
+    return p - ephemPos(w.e, m.frameBody, t) + ephemPos(w.e, m.frameBody, w.t)
 }
 
 pub fn toRender(m: &Map, p: &Vec3): Vec3 {
@@ -143,11 +207,95 @@ fn polyline(c: &mut Canvas, m: &Map, pts: &Vec<Vec3>, from: i64, to: i64, r: f64
 // so the overlap reads as a glow around the path rather than as three lines —
 // it is the cheapest way to make a trajectory look like it is emitting light
 // instead of being a wire.
-fn glowline(c: &mut Canvas, m: &Map, pts: &Vec<Vec3>, r: f64, g: f64, b: f64) {
-    let n = pts.len as i64
-    polyline(c, m, pts, 0, n, r * 0.16, g * 0.16, b * 0.16, 7.0)
-    polyline(c, m, pts, 0, n, r * 0.34, g * 0.34, b * 0.34, 3.4)
-    polyline(c, m, pts, 0, n, r, g, b, 1.6)
+fn glowline(c: &mut Canvas, m: &Map, w: &World, tr: &Track, r: f64, g: f64, b: f64) {
+    trackPass(c, m, w, tr, r * 0.16, g * 0.16, b * 0.16, 7.0)
+    trackPass(c, m, w, tr, r * 0.34, g * 0.34, b * 0.34, 3.4)
+    trackPass(c, m, w, tr, r, g, b, 1.6)
+}
+
+fn trackPass(c: &mut Canvas, m: &Map, w: &World, tr: &Track, r: f64, g: f64, b: f64, wide: f64) {
+    let n = tr.pts.len as i64
+    var i = 0
+    while i < n - 1 {
+        let a = toRender(m, framed(m, w, tr.pts[i], tr.times[i]))
+        let bb = toRender(m, framed(m, w, tr.pts[i + 1], tr.times[i + 1]))
+        drawSeg(c, m, a, bb, r, g, b, wide)
+        i = i + 1
+    }
+}
+
+// Liang-Barsky against the panel rectangle.
+struct Seg {
+    x0: f64,
+    y0: f64,
+    x1: f64,
+    y1: f64,
+    ok: bool,
+}
+
+fn clipToPanel(m: &Map, ix0: f64, iy0: f64, ix1: f64, iy1: f64): Seg {
+    let dx = ix1 - ix0
+    let dy = iy1 - iy0
+    var t0 = 0.0
+    var t1 = 1.0
+    var k = 0
+    while k < 4 {
+        var pp = 0.0
+        var qq = 0.0
+        if k == 0 {
+            pp = 0.0 - dx
+            qq = ix0 - m.px0
+        }
+        if k == 1 {
+            pp = dx
+            qq = m.px1 - ix0
+        }
+        if k == 2 {
+            pp = 0.0 - dy
+            qq = iy0
+        }
+        if k == 3 {
+            pp = dy
+            qq = (H as f64) - iy0
+        }
+        if pp == 0.0 {
+            if qq < 0.0 {
+                return Seg {
+                    x0: 0.0, y0: 0.0, x1: 0.0, y1: 0.0, ok: false
+                }
+            }
+        } else {
+            let rr = qq / pp
+            if pp < 0.0 {
+                if rr > t1 {
+                    return Seg {
+                        x0: 0.0, y0: 0.0, x1: 0.0, y1: 0.0, ok: false
+                    }
+                }
+                if rr > t0 {
+                    t0 = rr
+                }
+            } else {
+                if rr < t0 {
+                    return Seg {
+                        x0: 0.0, y0: 0.0, x1: 0.0, y1: 0.0, ok: false
+                    }
+                }
+                if rr < t1 {
+                    t1 = rr
+                }
+            }
+        }
+        k = k + 1
+    }
+    return Seg {
+        x0: ix0 + dx * t0, y0: iy0 + dy * t0,
+        x1: ix0 + dx * t1, y1: iy0 + dy * t1, ok: true
+    }
+}
+
+fn inPanel(m: &Map, x: f64, y: f64): bool {
+    return x >= m.px0 && x < m.px1 && y >= 0.0 && y < (H as f64)
 }
 
 fn drawSeg(c: &mut Canvas, m: &Map, a: &Vec3, b: &Vec3, r: f64, g: f64, bl: f64, wide: f64) {
@@ -172,18 +320,17 @@ fn drawSeg(c: &mut Canvas, m: &Map, a: &Vec3, b: &Vec3, r: f64, g: f64, bl: f64,
     if s0.z <= 0.0 || s1.z <= 0.0 {
         return
     }
-    // Off-screen by a wide margin on both ends: skip rather than hand the
-    // rasteriser a segment kilometres long in screen space.
-    if (s0.x < -4000.0 && s1.x < -4000.0) || (s0.x > 5200.0 && s1.x > 5200.0) {
-        return
-    }
-    if (s0.y < -4000.0 && s1.y < -4000.0) || (s0.y > 4700.0 && s1.y > 4700.0) {
+    // Clip to this panel. Without it an orbit drawn in the route panel runs
+    // straight across the other two, which is how the first three-panel build
+    // looked: three cameras, one continuous set of lines over the top.
+    let cl = clipToPanel(m, s0.x, s0.y, s1.x, s1.y)
+    if !cl.ok {
         return
     }
     if wide <= 1.0 {
-        line(c, s0.x, s0.y, s1.x, s1.y, r, g, bl)
+        line(c, cl.x0, cl.y0, cl.x1, cl.y1, r, g, bl)
     } else {
-        thickLine(c, s0.x, s0.y, s1.x, s1.y, wide, r, g, bl)
+        thickLine(c, cl.x0, cl.y0, cl.x1, cl.y1, wide, r, g, bl)
     }
 }
 
@@ -233,56 +380,92 @@ fn sunDirAt(w: &World, p: &Vec3): Vec3 {
 
 pub fn drawScene(c: &mut Canvas, s: &mut Scene, w: &World, texes: &Vec<Texture>) {
     canvasFill(c, 0.004, 0.006, 0.014)
-    sceneClear(s)
-    let m = mapOf(w)
-    drawStars(c, w)
+    var p = 0
+    while p < PANELS {
+        drawPanel(c, s, w, texes, p)
+        p = p + 1
+    }
+    // Dividers, drawn last so nothing sits on them.
+    var d = 1
+    while d < PANELS {
+        let x = panelX0(d)
+        fillRect(c, x - 1.0, 0.0, x + 1.0, H as f64, 0.10, 0.13, 0.18)
+        d = d + 1
+    }
+    drawPanelTitles(c, w)
+}
 
-    // Orbit tracks first, so bodies and the ship draw over them.
-    // Only the orbits worth seeing at this zoom. A track a hundred times wider
-    // than the view is not a curve on screen, it is a straight line across it,
-    // and eight of them turn a planet into a cat's cradle. One two-hundredth of
-    // the view and it is a dot under the body it belongs to.
-    var i = 1
-    while i < BODY_COUNT {
-        var size = w.bodies[i].el.a
-        if i == MOON {
-            size = 384400.0e3
+fn panelTitle(w: &World, p: i64): string {
+    let m = w.mission
+    if p == 0 {
+        return "LEAVING  " + w.bodies[w.missions[m].from].name.toUpper()
+    }
+    if p == 2 {
+        return "ARRIVING  " + w.bodies[w.missions[m].to].name.toUpper()
+    }
+    return "THE ROUTE"
+}
+
+fn drawPanelTitles(c: &mut Canvas, w: &World) {
+    var p = 0
+    while p < PANELS {
+        let cx = ((panelX0(p) + panelX1(p)) * 0.5) as i64
+        textCentered(c, cx, 96, panelTitle(w, p), UI, 0.52, 0.62, 0.72)
+        p = p + 1
+    }
+}
+
+fn drawPanel(c: &mut Canvas, s: &mut Scene, w: &World, texes: &Vec<Texture>, panel: i64) {
+    sceneClear(s)
+    s.sx0 = panelX0(panel) as i64
+    s.sx1 = panelX1(panel) as i64
+    let m = mapFor(w, panel)
+    drawStars(c, m)
+
+    // Orbit tracks only where they mean anything: on the route panel. In a view
+    // forty thousand kilometres across, an orbit a hundred times wider is not a
+    // curve, it is a line sweeping across the picture as the camera drifts.
+    if panel == 1 {
+        var i = 1
+        while i < BODY_COUNT {
+            var size = w.bodies[i].el.a
+            if i == MOON {
+                size = 384400.0e3
+            }
+            let rel = size / camDistNow(w)
+            if rel < 3.2 && rel > 0.02 {
+                var k = 0.16
+                if i == w.missions[w.mission].to {
+                    k = 0.42
+                }
+                if i == w.missions[w.mission].from {
+                    k = 0.30
+                }
+                var fade = 1.0
+                if rel > 2.0 {
+                    fade = (3.2 - rel) / 1.2
+                }
+                k = k * fade
+                drawBodyOrbit(c, m, w, i, k * 0.55, k * 0.72, k)
+            }
+            i = i + 1
         }
-        let rel = size / w.camDist
-        if rel < 60.0 && rel > 0.02 {
-            var k = 0.16
-            if i == w.missions[w.mission].to {
-                k = 0.42
-            }
-            if i == w.missions[w.mission].from {
-                k = 0.30
-            }
-            // Fade in at both ends so an orbit does not pop as the player zooms.
-            var fade = 1.0
-            if rel > 20.0 {
-                fade = (60.0 - rel) / 40.0
-            }
-            if rel < 0.10 {
-                fade = (rel - 0.02) / 0.08
-            }
-            k = k * fade
-            drawBodyOrbit(c, m, w, i, k * 0.55, k * 0.72, k)
-        }
-        i = i + 1
     }
 
-    drawShipTrack(c, m, w)
-    drawBodies(c, s, m, w, texes)
+    drawShipTrack(c, m, w, panel)
+    drawBodies(c, s, m, w, texes, panel)
     rasterFlush(c, s)
-    drawBodyLabels(c, m, w)
     drawShip(c, m, w)
+    drawTrackMarks(c, m, w, panel)
+    if panel == 1 {
+        drawTargetMarker(c, m, w)
+    }
 }
 
 // A fixed star field, so that turning the camera reads as turning rather than as
 // nothing happening. Positions come from a hash rather than a table: at this
 // brightness they are texture, not constellations.
-fn drawStars(c: &mut Canvas, w: &World) {
-    let m = mapOf(w)
+fn drawStars(c: &mut Canvas, m: &Map) {
     var i = 0
     while i < 400 {
         let h = ((i * 2654435761) % 100000) as f64 / 100000.0
@@ -291,7 +474,7 @@ fn drawStars(c: &mut Canvas, w: &World) {
         let lat = (h2 - 0.5) * Math.pi()
         let dir = v3(Math.cos(lat) * Math.cos(lon), Math.cos(lat) * Math.sin(lon), Math.sin(lat))
         let p = project(m, m.view.eye + dir.scale(100.0))
-        if p.z > 0.0 && p.x >= 0.0 && p.x < (W as f64) && p.y >= 0.0 && p.y < (H as f64) {
+        if p.z > 0.0 && inPanel(m, p.x, p.y) {
             let b = 0.10 + 0.30 * (((i * 31) % 97) as f64 / 97.0)
             spot(c, p.x, p.y, 0.8, b, b, b * 1.1)
         }
@@ -299,7 +482,7 @@ fn drawStars(c: &mut Canvas, w: &World) {
     }
 }
 
-fn drawBodies(c: &mut Canvas, s: &mut Scene, m: &Map, w: &World, texes: &Vec<Texture>) {
+fn drawBodies(c: &mut Canvas, s: &mut Scene, m: &Map, w: &World, texes: &Vec<Texture>, panel: i64) {
     var i = 0
     while i < BODY_COUNT {
         let wp = ephemPos(w.e, i, w.t)
@@ -318,7 +501,23 @@ fn drawBodies(c: &mut Canvas, s: &mut Scene, m: &Map, w: &World, texes: &Vec<Tex
                     drawGlowSphere(s, m.view, rp, rad, 3.4, 2.9, 2.0, segmentsFor(pix))
                 }
             } else {
-                if pix < 1.6 {
+                // On the route map a real planet is a fraction of a pixel, and a
+                // map of the solar system drawn to scale is an empty screen with
+                // some dots. Bodies that matter are drawn at a floor size so
+                // they are recognisably THEMSELVES — the imagery is the whole
+                // reason they are photographs and not circles. Orbits and
+                // trajectories stay exactly to scale; only the marbles are
+                // inflated, which is the same lie every orrery tells.
+                var drawRad = rad
+                var floorPix = 0.0
+                if panel == 1 && (i == w.missions[w.mission].from || i == w.missions[w.mission].to) {
+                    floorPix = 11.0
+                }
+                if pix < floorPix && floorPix > 0.0 {
+                    drawRad = floorPix * dist / m.view.scale
+                }
+                let shown = drawRad * m.view.scale / dist
+                if shown < 1.6 {
                     // Too small to be a sphere: a dot with a floor on its size,
                     // because a planet that vanishes at solar-system zoom makes
                     // the map useless exactly when it is most needed.
@@ -331,7 +530,7 @@ fn drawBodies(c: &mut Canvas, s: &mut Scene, m: &Map, w: &World, texes: &Vec<Tex
                     let sp = spinOf(w.t, w.bodies[i].day, w.bodies[i].tilt)
                     let sd = sunDirAt(w, wp)
                     if i == SATURN {
-                        drawRings(s, m.view, rp, rad * 1.24, rad * 2.27, sp, segmentsFor(pix) * 2, 1.0)
+                        drawRings(s, m.view, rp, drawRad * 1.24, drawRad * 2.27, sp, segmentsFor(shown) * 2, 1.0)
                     }
                     if texHasImage(texes[i]) {
                         // Tinted well above 1. These are real albedo maps and
@@ -339,9 +538,9 @@ fn drawBodies(c: &mut Canvas, s: &mut Scene, m: &Map, w: &World, texes: &Vec<Tex
                         // per cent, so a physically honest exposure renders the
                         // Earth almost black. The photograph is the subject
                         // here, not a lighting simulation.
-                        drawSphere(s, m.view, texes[i], rp, rad, sd, sp, segmentsFor(pix), 0.05, 2.9)
+                        drawSphere(s, m.view, texes[i], rp, drawRad, sd, sp, segmentsFor(shown), 0.05, 2.9)
                     } else {
-                        drawGlowSphere(s, m.view, rp, rad, 0.5, 0.5, 0.55, segmentsFor(pix))
+                        drawGlowSphere(s, m.view, rp, drawRad, 0.5, 0.5, 0.55, segmentsFor(shown))
                     }
                 }
             }
@@ -405,61 +604,63 @@ fn drawBodyLabels(c: &mut Canvas, m: &Map, w: &World) {
 }
 
 // The ship: its planned trajectory, its current orbit, and a marker.
-fn drawShipTrack(c: &mut Canvas, m: &Map, w: &World) {
-    // The osculating orbit it is on right now, integrated rather than drawn from
-    // a conic — it is the same code that flies the ship, so what is drawn is
-    // what happens, including the parts a conic would get wrong.
-    let about = shipAbout(w)
-    let ob = orbitAbout(w.e, w.ship, w.t, about)
-    var span = 3.0 * 3600.0
-    if ob.closed {
-        span = ob.period
-    }
-    if span > 400.0 * SEC_PER_DAY {
-        span = 400.0 * SEC_PER_DAY
-    }
-    let live = propagate(w.e, w.ship, w.t, span, 200, 0 - 1)
-    glowline(c, m, live.pts, 0.22, 0.80, 0.95)
-
+fn drawShipTrack(c: &mut Canvas, m: &Map, w: &World, panel: i64) {
+    glowline(c, m, w, w.liveTrack, 0.22, 0.80, 0.95)
     if (w.trackValid || w.preview) && !w.captured {
-        // The plan, brighter and thicker. Two lines on the map at once is the
-        // whole point: one is where you are going, the other is where you would
-        // go if you did nothing.
+        glowline(c, m, w, w.track, 1.0, 0.66, 0.22)
+    }
+}
+
+// The burn markers and their captions, drawn AFTER the spheres are rasterised.
+// Before that reorder the planet painted straight over them, which is how
+// "BURN 3.12 KM/S" ended up on screen as "N 3.12 KM/S".
+fn drawTrackMarks(c: &mut Canvas, m: &Map, w: &World, panel: i64) {
+    if (w.trackValid || w.preview) && !w.captured {
         let n = w.track.pts.len as i64
-        glowline(c, m, w.track.pts, 1.0, 0.66, 0.22)
-        // Label the path itself, at its midpoint, so it reads as "this is where
-        // you are going" and not as decoration.
-        if n > 4 {
-            let mid = toRender(m, w.track.pts[n / 2])
-            let mp = project(m, mid)
-            if mp.z > 0.0 {
-                plate(c, (mp.x + 16.0) as i64, (mp.y - 30.0) as i64, "YOUR TRANSFER  " + fmtSpan(w.planTof), UI, 1.0, 0.78, 0.34)
-            }
-        }
-        // The two burns, marked on the path where they happen and priced. These
-        // are the only two moments in the whole mission that cost anything, and
-        // before this they were invisible.
+        // The two burns are marked in every panel that can see them, but only
+        // LABELLED in the panel that is about that burn. Three panels showing
+        // the same two captions is how the first build read: six plates, four of
+        // them redundant, two of them spilling over a divider.
         if n > 1 {
-            let dp = project(m, toRender(m, w.track.pts[0]))
-            if dp.z > 0.0 {
+            let dp = project(m, toRender(m, framed(m, w, w.track.pts[0], w.track.times[0])))
+            if dp.z > 0.0 && inPanel(m, dp.x, dp.y) {
                 burnMark(c, dp.x, dp.y, 0.35, 0.95, 1.0)
-                plate(c, (dp.x + 16.0) as i64, (dp.y - 10.0) as i64, "DEPARTURE BURN  " + fmtDv(w.planEjDv), UI, 0.45, 0.95, 1.0)
+                if panel == 0 {
+                    label(c, m, dp.x + 16.0, dp.y - 10.0, "BURN " + fmtDv(w.planEjDv), 0.45, 0.95, 1.0)
+                }
             }
         }
         if w.track.caDist > 0.0 && w.track.caDist < 1.0e12 {
             let to = w.missions[w.mission].to
-            let cp = ephemPos(w.e, to, w.track.caTime)
+            let cp = framed(m, w, ephemPos(w.e, to, w.track.caTime), w.track.caTime)
             let p = project(m, toRender(m, cp))
-            if p.z > 0.0 {
+            if p.z > 0.0 && inPanel(m, p.x, p.y) {
                 burnMark(c, p.x, p.y, 1.0, 0.62, 0.25)
-                plate(c, (p.x + 16.0) as i64, (p.y + 12.0) as i64, "CAPTURE BURN  " + fmtDv(arrivalEstimate(w, w.track)), UI, 1.0, 0.74, 0.34)
+                if panel == 2 {
+                    label(c, m, p.x + 16.0, p.y + 12.0, "CAPTURE " + fmtDv(arrivalEstimate(w, w.track)), 1.0, 0.74, 0.34)
+                }
             }
         }
     }
 }
 
-// A burn: a bright core with a halo, so it reads as an event on the path rather
-// than as another circle among the markers.
+// A plate that is guaranteed to sit inside its panel: nudged left when it would
+// run over the divider, dropped when it cannot fit at all.
+fn label(c: &mut Canvas, m: &Map, x: f64, y: f64, s: &string, r: f64, g: f64, b: f64) {
+    let wdt = textWidth(s, UI) as f64
+    if wdt + 16.0 > m.px1 - m.px0 {
+        return
+    }
+    var lx = x
+    if lx + wdt + 8.0 > m.px1 {
+        lx = m.px1 - wdt - 8.0
+    }
+    if lx < m.px0 + 6.0 {
+        lx = m.px0 + 6.0
+    }
+    plate(c, lx as i64, y as i64, s, UI, r, g, b)
+}
+
 fn burnMark(c: &mut Canvas, cx: f64, cy: f64, r: f64, g: f64, b: f64) {
     spot(c, cx, cy, 16.0, r * 0.30, g * 0.30, b * 0.30)
     spot(c, cx, cy, 6.0, r * 1.6, g * 1.6, b * 1.6)
@@ -478,12 +679,12 @@ fn circleOutline(c: &mut Canvas, cx: f64, cy: f64, rad: f64, r: f64, g: f64, b: 
 
 fn drawShip(c: &mut Canvas, m: &Map, w: &World) {
     let p = project(m, toRender(m, w.ship.pos))
-    if p.z <= 0.0 {
+    if p.z <= 0.0 || !inPanel(m, p.x, p.y) {
         return
     }
     spot(c, p.x, p.y, 2.4, 2.4, 2.6, 2.2)
     circleOutline(c, p.x, p.y, 7.0, 0.5, 0.95, 1.0)
-    plate(c, (p.x + 14.0) as i64, (p.y + 6.0) as i64, "YOU", UI, 0.55, 0.95, 1.0)
+    label(c, m, p.x + 14.0, p.y + 6.0, "YOU", 0.55, 0.95, 1.0)
 }
 
 // ── the sequential ramp ───────────────────────────────────────────────────────
@@ -591,7 +792,7 @@ fn row(c: &mut Canvas, x: i64, y: i64, s: &string, r: f64, g: f64, b: f64) {
 pub fn drawHud(c: &mut Canvas, w: &World) {
     let m = w.mission
     text(c, 16, 14, w.bodies[w.missions[m].from].name.toUpper() + "  TO  " + w.bodies[w.missions[m].to].name.toUpper(), UI_BIG, 0.95, 0.98, 1.0)
-    text(c, 16, 50, viewName(w) + "        TAB  CHANGE VIEW", UI, 0.50, 0.60, 0.70)
+    text(c, 16, 50, w.missions[m].blurb, UI, 0.48, 0.58, 0.68)
 
     let dstr = fmtDate(w.t)
     text(c, W - 18 - textWidth(dstr, UI_BIG), 14, dstr, UI_BIG, 0.92, 0.95, 1.0)
@@ -602,7 +803,6 @@ pub fn drawHud(c: &mut Canvas, w: &World) {
     text(c, W - 18 - textWidth(wl, UI), 50, wl, UI, 0.62, 0.74, 0.86)
 
     drawBudget(c, w)
-    drawTargetMarker(c, w)
     drawScrubBar(c, w)
     drawActionBar(c, w)
     drawMessage(c, w)
@@ -645,18 +845,17 @@ fn drawBudget(c: &mut Canvas, w: &World) {
 // The first thing a new player does is look for the Moon, and at the opening
 // zoom the Moon is sixty screens away. Without this the map is a planet and a
 // void, and the honest reaction is the one this got: no idea what to do.
-fn drawTargetMarker(c: &mut Canvas, w: &World) {
+fn drawTargetMarker(c: &mut Canvas, m: &Map, w: &World) {
     let to = w.missions[w.mission].to
-    let m = mapOf(w)
     let wp = ephemPos(w.e, to, w.t)
     let p = project(m, toRender(m, wp))
     let dist = (wp - w.ship.pos).len()
-    let label = w.bodies[to].name + "  " + fmtDist(dist)
+    let lab = w.bodies[to].name + "  " + fmtDist(dist)
     let onScreen = p.z > 0.0 && p.x > 60.0 && p.x < (W - 60) as f64 && p.y > 100.0 && p.y < (H - 140) as f64
     if onScreen {
         circleOutline(c, p.x, p.y, 16.0, 1.0, 0.80, 0.30)
         circleOutline(c, p.x, p.y, 18.0, 1.0, 0.80, 0.30)
-        plate(c, (p.x - (textWidth(label, UI) as f64) * 0.5) as i64, (p.y - 46.0) as i64, label, UI, 1.0, 0.86, 0.42)
+        label(c, m, p.x - (textWidth(lab, UI) as f64) * 0.5, p.y - 46.0, lab, 1.0, 0.86, 0.42)
         return
     }
     // Off screen: clamp a marker to the frame edge in the target's direction and
@@ -680,11 +879,11 @@ fn drawTargetMarker(c: &mut Canvas, w: &World) {
     let cy = (H as f64) * 0.5 + uy * 240.0
     circleOutline(c, cx, cy, 12.0, 1.0, 0.80, 0.30)
     circleOutline(c, cx, cy, 5.0, 1.0, 0.80, 0.30)
-    var lx = (cx + 22.0) as i64
+    var lx = cx + 22.0
     if ux < 0.0 {
-        lx = (cx - 22.0) as i64 - textWidth(label, UI)
+        lx = cx - 22.0 - (textWidth(lab, UI) as f64)
     }
-    plate(c, lx, (cy - 8.0) as i64, label, UI, 1.0, 0.86, 0.42)
+    label(c, m, lx, cy - 8.0, lab, 1.0, 0.86, 0.42)
 }
 
 // The bottom strip is three fixed panels: fuel on the left, the launch window in

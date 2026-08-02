@@ -78,6 +78,11 @@ pub struct World {
     planEjDv: f64, // cost of the departure burn alone
     track: Track,
     trackValid: bool,
+    // The orbit the ship is on RIGHT NOW, integrated once when something changes
+    // rather than once per frame. Recomputing it every frame made it shimmer:
+    // the step-size rule records a slightly different set of points each time,
+    // so the polyline crawled even with the game paused.
+    liveTrack: Track,
 
     // Committed: the departure burn has been paid for and the correction is
     // still pending.
@@ -142,7 +147,7 @@ pub fn worldNew(): World {
         }
         ,
         planMcT: 0.0, planFix: v3(0.0, 0.0, 0.0), planEjDv: 0.0,
-        track: emptyTrack(), trackValid: false,
+        track: emptyTrack(), trackValid: false, liveTrack: emptyTrack(),
         committed: false, mccDone: false,
         captured: false, failed: false, won: false,
         message: "", messageAge: 0.0,
@@ -398,6 +403,7 @@ pub fn commitPlan(w: &mut World) {
     w.paused = false
     w.warp = 20000.0
     setView(w, VIEW_ROUTE)
+    refreshLive(w)
     say(w, "departure burn complete")
 }
 
@@ -426,6 +432,7 @@ pub fn doCapture(w: &mut World) {
         pos: w.ship.pos, vel: w.ship.vel - rel.norm().scale(cap.dv)
     }
     w.spent = w.spent + cap.dv
+    refreshLive(w)
     w.paused = true
     w.warp = 60.0
     w.focus = to
@@ -531,6 +538,19 @@ pub fn setView(w: &mut World, v: i64) {
     w.camYaw = Math.atan2(toSun.y, toSun.x) + 0.55
 }
 
+// Minimum on-screen radius, in pixels, that a body is allowed to shrink to.
+// Only the two worlds the mission is about, and only on the route map, where
+// true scale would render both of them invisible.
+pub fn camMinPix(w: &World, id: i64): f64 {
+    if w.view != VIEW_ROUTE || w.sweep > 0.0 {
+        return 0.0
+    }
+    if id == w.missions[w.mission].from || id == w.missions[w.mission].to {
+        return 11.0
+    }
+    return 0.0
+}
+
 pub fn cycleView(w: &mut World) {
     var v = w.view + 1
     if v > 2 {
@@ -541,27 +561,78 @@ pub fn cycleView(w: &mut World) {
 
 // Camera motion that is not the player's: the opening sweep, and a slow drift
 // so a paused solar system is never a still image.
+pub let TOUR_SECS: f64 = 9.0
+
+// The opening tour, and the drift.
+//
+// A map of the solar system drawn from ten million kilometres is a diagram of
+// dots, and nothing about a still frame of it says that the dots are photographs
+// of worlds or that the view can be turned. So a mission opens ON the planet,
+// close enough to see the terminator move, and pulls back to the route over a
+// few seconds. The pull-out is what explains the map.
+//
+// The drift is the other half: at three degrees a second, a paused game is still
+// visibly a three-dimensional scene being looked at from somewhere, which no
+// amount of instruction text achieves.
 pub fn updateCamera(w: &mut World, wall: f64) {
     if w.sweep > 0.0 {
-        w.sweep = w.sweep - wall / 4.0
+        w.sweep = w.sweep - wall / TOUR_SECS
         if w.sweep < 0.0 {
             w.sweep = 0.0
         }
     }
     if !w.dragging {
-        w.camYaw = w.camYaw + wall * 0.015
+        w.camYaw = w.camYaw + wall * 0.055
     }
 }
 
-// How far out and how high the camera actually sits this frame, sweep included.
+// Re-integrate the ship's current orbit for drawing. Called when the state
+// actually changes — after a step, after a burn, after a new plan — and never
+// from the renderer.
+pub fn refreshLive(w: &mut World) {
+    let about = dominantBody(w.e, w.ship.pos, w.t)
+    let ob = orbitAbout(w.e, w.ship, w.t, about)
+    var span = 3.0 * 3600.0
+    if ob.closed {
+        span = ob.period
+    }
+    if span > 60.0 * SEC_PER_DAY {
+        span = 60.0 * SEC_PER_DAY
+    }
+    w.liveTrack = propagate(w.e, w.ship, w.t, span, 200, 0 - 1)
+}
+
+pub fn skipTour(w: &mut World) {
+    w.sweep = 0.0
+}
+
+// Distance is interpolated in the LOG, not linearly: the tour crosses four
+// orders of magnitude between a planet's surface and a transfer orbit, and a
+// linear ease spends nine tenths of its time in the last percent of that.
 pub fn camDistNow(w: &World): f64 {
-    let e = w.sweep * w.sweep
-    return w.camDist * (1.0 + 2.2 * e)
+    if w.sweep <= 0.0 {
+        return w.camDist
+    }
+    let close = w.bodies[w.focus].radius * 6.0
+    // Hold the close shot for the first third, then ease out.
+    var t = w.sweep / 0.66
+    if t > 1.0 {
+        t = 1.0
+    }
+    let e = t * t * (3.0 - 2.0 * t)
+    return Math.exp(Math.log(close) * e + Math.log(w.camDist) * (1.0 - e))
 }
 
 pub fn camPitchNow(w: &World): f64 {
-    let e = w.sweep * w.sweep
-    return w.camPitch * (1.0 - e) + 1.28 * e
+    if w.sweep <= 0.0 {
+        return w.camPitch
+    }
+    var t = w.sweep / 0.66
+    if t > 1.0 {
+        t = 1.0
+    }
+    let e = t * t * (3.0 - 2.0 * t)
+    return 0.16 * e + w.camPitch * (1.0 - e)
 }
 
 pub fn advanceWorld(w: &mut World, wall: f64) {
@@ -608,6 +679,7 @@ pub fn advanceWorld(w: &mut World, wall: f64) {
     if span > 0.0 {
         w.ship = advance(w.e, w.ship, w.t, span)
         w.t = w.t + span
+        refreshLive(w)
     }
     if hitNode {
         w.paused = true

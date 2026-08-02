@@ -1,7 +1,8 @@
 // @proven: 1
 // @failed: 1
 // @unknown: 0
-// A break exits with the state at the break, not the state after unreachable statements.
+// A break exits the loop with the state at the break, so the invariant that held on
+// entry says nothing about `result` — the ensures must fail rather than ride on it.
 pub fn breakWithBadResult(): i64
 ensures result >= 0
 {
@@ -11,7 +12,6 @@ ensures result >= 0
     {
         x = -1
         break
-        x = 0
     }
     return x
 }

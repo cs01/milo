@@ -803,8 +803,15 @@ export class Parser {
 
   private parseReturn(): Stmt {
     const s = this.span(this.peek());
-    this.expect(TokenKind.Return);
-    if (this.at(TokenKind.RBrace)) return { kind: "Return", value: null, span: s };
+    const tok = this.expect(TokenKind.Return);
+    // Statements are newline-delimited in Milo, and a return value is no exception:
+    // an expression on a LATER line is the next statement, not this return's value.
+    // Without the line check, `return` followed by `print(x)` on the next line
+    // silently parsed as `return print(x)` — the call still ran, and a value-typed
+    // one produced IR that stored into a void slot.
+    if (this.at(TokenKind.RBrace) || this.at(TokenKind.Semicolon) || this.peek().line !== tok.line) {
+      return { kind: "Return", value: null, span: s };
+    }
     return { kind: "Return", value: this.parseExpr(), span: s };
   }
 

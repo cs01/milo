@@ -351,6 +351,27 @@ fn greet(name: string): void {
 }
 ```
 
+A `return` with no value exits a `void` function. Like every other statement it ends
+at the newline — an expression on the next line is the next statement, not the
+returned value — and since nothing after it can run, a following statement in the
+same block is a compile error:
+
+```milo
+fn f(x: i64) {
+    if x < 0 {
+        return
+    }
+    print(x)      // fine: reached when x >= 0
+}
+```
+
+```milo error
+fn g(x: i64) {
+    return
+    print(x)      // error: unreachable code
+}
+```
+
 ### Generic Functions
 
 ```milo
@@ -1365,7 +1386,6 @@ fn sum(t: Tree): i32 {
             return sum(*left) + sum(*right)
         }
     }
-    return 0
 }
 
 let tree = Tree.Node(
@@ -2442,7 +2462,6 @@ fn sum(t: Tree): i32 {
             return sum(*left) + sum(*right)
         }
     }
-    return 0
 }
 
 fn main(): i32 {

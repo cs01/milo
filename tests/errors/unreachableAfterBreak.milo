@@ -1,0 +1,13 @@
+// @error: unreachable code
+
+pub fn main(): i32 {
+    var i = 0
+    while i < 5 {
+        if i == 2 {
+            break
+            print(i)
+        }
+        i = i + 1
+    }
+    return 0
+}

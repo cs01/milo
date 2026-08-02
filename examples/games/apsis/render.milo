@@ -26,6 +26,9 @@ from "./gfx3d" import {
 from "./raster" import {
     Texture, texHasImage
 }
+from "./rocket" import {
+    Stand, standAt, drawRocket, drawPad
+}
 from "./sphere" import {
     drawSphere, drawGlowSphere, drawRings, segmentsFor, spinOf, Spin
 }
@@ -37,7 +40,7 @@ from "./nbody" import {
 }
 from "./world" import {
     World, shipAbout, shipOrbit, currentCapture, CURVE_N, camDistNow, camPitchNow, arrivalEstimate,
-    VIEW_DEPART, VIEW_ROUTE, VIEW_ARRIVE, isLocalHop
+    VIEW_DEPART, VIEW_ROUTE, VIEW_ARRIVE, isLocalHop, PHASE_TITLE, PHASE_BRIEF, PHASE_PLAY
 }
 from "./mission" import {
     MISSION_COUNT
@@ -380,6 +383,10 @@ fn sunDirAt(w: &World, p: &Vec3): Vec3 {
 
 pub fn drawScene(c: &mut Canvas, s: &mut Scene, w: &World, texes: &Vec<Texture>) {
     canvasFill(c, 0.004, 0.006, 0.014)
+    if w.phase == PHASE_TITLE {
+        drawTitle(c, s, w, texes)
+        return
+    }
     var p = 0
     while p < PANELS {
         drawPanel(c, s, w, texes, p)
@@ -393,6 +400,141 @@ pub fn drawScene(c: &mut Canvas, s: &mut Scene, w: &World, texes: &Vec<Texture>)
         d = d + 1
     }
     drawPanelTitles(c, w)
+}
+
+// A whole-screen camera, for the title.
+fn wideMap(w: &World, dist: f64, pitch: f64, yaw: f64): Map {
+    let cp = Math.cos(pitch)
+    let dir = v3(Math.cos(yaw) * cp, Math.sin(yaw) * cp, Math.sin(pitch))
+    let fwd = dir.scale(-1.0)
+    var right = fwd.cross(v3(0.0, 0.0, 1.0))
+    if right.len() < 1.0e-9 {
+        right = v3(1.0, 0.0, 0.0)
+    }
+    right = right.norm()
+    return Map {
+        view: View {
+            right: right, up: right.cross(fwd).norm(), fwd: fwd, eye: dir,
+            scale: (H as f64) * 0.5 / Math.tan(0.42),
+            cx: (W as f64) * 0.5, cy: (H as f64) * 0.44,
+            near: 1.0e-5, far: 1.0e7,
+        }
+        ,
+        focus: v3(0.0, 0.0, 0.0), k: 1.0 / dist, px0: 0.0, px1: W as f64, frameBody: 0 - 1,
+    }
+}
+
+// The title: the actual solar system, turning, with the six places written down
+// the side. Every destination in the campaign is on screen at once and to scale,
+// which is the one picture that makes "Mercury is the expensive one" land before
+// anybody has flown anything.
+fn drawTitle(c: &mut Canvas, s: &mut Scene, w: &World, texes: &Vec<Texture>) {
+    sceneClear(s)
+    s.sx0 = 0
+    s.sx1 = W
+    let m = wideMap(w, 2.4e12, 0.62, w.camYaw * 0.35)
+    drawStars(c, m)
+    var i = 1
+    while i < BODY_COUNT {
+        if i != MOON {
+            drawBodyOrbit(c, m, w, i, 0.16, 0.22, 0.30)
+        }
+        i = i + 1
+    }
+    // Every body at a floor size — at four billion kilometres across, true scale
+    // is an empty screen.
+    var b = 0
+    while b < BODY_COUNT {
+        if b != MOON {
+            let rp = toRender(m, ephemPos(w.e, b, w.t))
+            let dist = (rp - m.view.eye).len()
+            if dist > 0.0 {
+                var pix = 7.0
+                if b == SUN {
+                    pix = 16.0
+                }
+                let rad = pix * dist / m.view.scale
+                let sp = spinOf(w.t, w.bodies[b].day, w.bodies[b].tilt)
+                if b == SUN {
+                    drawGlowSphere(s, m.view, rp, rad, 3.4, 2.9, 2.0, 18)
+                } else {
+                    if texHasImage(texes[b]) {
+                        drawSphere(s, m.view, texes[b], rp, rad, sunDirAt(w, ephemPos(w.e, b, w.t)), sp, 18, 0.06, 2.9)
+                    }
+                }
+            }
+        }
+        b = b + 1
+    }
+    rasterFlush(c, s)
+
+    textCentered(c, W / 2, 60, "A P S I S", 5, 0.95, 0.98, 1.0)
+    textCentered(c, W / 2, 122, "get from one world to another, under real gravity", UI, 0.62, 0.72, 0.82)
+
+    // The campaign, in order, on a plate — the orbits are behind it and unreadable
+    // text over a moving starfield is the oldest mistake in the book.
+    shadeRect(c, 70.0, 226.0, (W - 70) as f64, 560.0, 0.74)
+    var y = 248
+    var k = 0
+    while k < MISSION_COUNT {
+        let n = (k + 1).toString() + "."
+        let name = w.bodies[w.missions[k].to].name.toUpper()
+        text(c, 96, y, n, UI_BIG, 1.0, 0.82, 0.35)
+        text(c, 140, y, name, UI_BIG, 0.90, 0.94, 0.99)
+        // Fixed column, clear of the longest name, so the blurbs line up instead
+        // of starting wherever the name happened to end.
+        text(c, 340, y + 8, w.missions[k].blurb, UI, 0.54, 0.64, 0.74)
+        y = y + 52
+        k = k + 1
+    }
+    textCentered(c, W / 2, H - 90, "PRESS  ENTER  TO BEGIN", UI_BIG, 1.0, 0.82, 0.35)
+}
+
+pub let PAD_METRES: f64 = 105.0
+
+fn drawPadShot(c: &mut Canvas, s: &mut Scene, w: &World) {
+    let x0 = panelX0(0)
+    let x1 = panelX1(0)
+    // The camera circles about twice over the length of the shot; the whole
+    // point is to see it from more than one side.
+    let spin = (1.0 - w.sweep) * 7.0
+    let pitch = 0.30 - 0.22 * (1.0 - w.sweep)
+    let cp = Math.cos(pitch)
+    let dir = v3(Math.cos(spin) * cp, Math.sin(spin) * cp, Math.sin(pitch))
+    let fwd = dir.scale(-1.0)
+    var right = fwd.cross(v3(0.0, 0.0, 1.0))
+    if right.len() < 1.0e-9 {
+        right = v3(1.0, 0.0, 0.0)
+    }
+    right = right.norm()
+    let up = right.cross(fwd).norm()
+    let m = Map {
+        view: View {
+            right: right, up: up, fwd: fwd, eye: dir,
+            scale: (x1 - x0) * 0.5 / Math.tan(0.40),
+            cx: (x0 + x1) * 0.5, cy: (H as f64) * 0.62,
+            near: 1.0e-4, far: 1.0e4,
+        }
+        ,
+        focus: v3(0.0, 0.0, 0.0), k: 1.0 / PAD_METRES, px0: x0, px1: x1, frameBody: 0 - 1,
+    }
+    drawStars(c, m)
+    // Ignition three quarters of the way through, then it climbs.
+    var throttle = (0.80 - w.sweep) / 0.30
+    if throttle < 0.0 {
+        throttle = 0.0
+    }
+    if throttle > 1.0 {
+        throttle = 1.0
+    }
+    let lift = 150.0 * throttle * throttle * throttle
+    // Centred on the vehicle's midpoint rather than its base, or it sits with
+    // its nose out of frame.
+    let st = standAt(v3(0.0, 0.0, -0.28), v3(0.0, 0.0, 1.0), v3(1.0, 0.0, 0.0), 1.0 / PAD_METRES)
+    drawPad(s, m.view, st)
+    drawRocket(s, m.view, st, throttle, lift)
+    rasterFlush(c, s)
+    textCentered(c, ((x0 + x1) * 0.5) as i64, 96, panelTitle(w, 0), UI, 0.52, 0.62, 0.72)
 }
 
 fn panelTitle(w: &World, p: i64): string {
@@ -419,6 +561,14 @@ fn drawPanel(c: &mut Canvas, s: &mut Scene, w: &World, texes: &Vec<Texture>, pan
     sceneClear(s)
     s.sx0 = panelX0(panel) as i64
     s.sx1 = panelX1(panel) as i64
+    // The opening shot: the vehicle on its pad, circled, with the engine lighting
+    // as the camera pulls away. It is the one moment in the game with a human
+    // scale in it, and a transfer priced in kilometres per second means very
+    // little until you have seen the machine that has to produce them.
+    if panel == 0 && w.sweep > 0.42 {
+        drawPadShot(c, s, w)
+        return
+    }
     let m = mapFor(w, panel)
     drawStars(c, m)
 
@@ -604,9 +754,18 @@ fn drawBodyLabels(c: &mut Canvas, m: &Map, w: &World) {
 }
 
 // The ship: its planned trajectory, its current orbit, and a marker.
+// One line at a time.
+//
+// Before committing, the gold line is the plan. After committing it IS the
+// flight, so drawing the planned path and the live path on top of each other
+// showed two nearly-identical curves in two colours with no way to tell which
+// was which — and where they differed, that difference read as a rendering
+// glitch rather than as the correction it is.
 fn drawShipTrack(c: &mut Canvas, m: &Map, w: &World, panel: i64) {
-    glowline(c, m, w, w.liveTrack, 0.22, 0.80, 0.95)
-    if (w.trackValid || w.preview) && !w.captured {
+    if w.committed || w.captured {
+        glowline(c, m, w, w.liveTrack, 0.30, 0.85, 1.0)
+    }
+    if !w.committed && (w.trackValid || w.preview) && !w.captured {
         glowline(c, m, w, w.track, 1.0, 0.66, 0.22)
     }
 }
@@ -790,6 +949,9 @@ fn row(c: &mut Canvas, x: i64, y: i64, s: &string, r: f64, g: f64, b: f64) {
 // been cut, and what is left is the four things a decision needs — where you are
 // going, when it is, what it costs, and what to press.
 pub fn drawHud(c: &mut Canvas, w: &World) {
+    if w.phase != PHASE_PLAY {
+        return
+    }
     let m = w.mission
     text(c, 16, 14, w.bodies[w.missions[m].from].name.toUpper() + "  TO  " + w.bodies[w.missions[m].to].name.toUpper(), UI_BIG, 0.95, 0.98, 1.0)
     text(c, 16, 50, w.missions[m].blurb, UI, 0.48, 0.58, 0.68)
@@ -1050,6 +1212,38 @@ fn drawMessage(c: &mut Canvas, w: &World) {
     let tw = textWidth(w.message, UI_BIG)
     shadeRect(c, ((W / 2) as f64) - (tw as f64) * 0.5 - 20.0, 96.0, ((W / 2) as f64) + (tw as f64) * 0.5 + 20.0, 144.0, 0.6 * a)
     textCentered(c, W / 2, 104, w.message, UI_BIG, a, a * 0.95, a * 0.85)
+}
+
+// Three steps, in order, before the mission starts. The game only ever asks for
+// two decisions and one confirmation, and saying so up front is cheaper than any
+// amount of on-screen instrumentation trying to imply it.
+pub fn drawBriefing(c: &mut Canvas, w: &World) {
+    if w.phase != PHASE_BRIEF {
+        return
+    }
+    let m = w.mission
+    shadeRect(c, 0.0, 0.0, W as f64, H as f64, 0.80)
+    textCentered(c, W / 2, 90, "MISSION " + (m + 1).toString() + " OF " + MISSION_COUNT.toString(), UI, 0.60, 0.70, 0.80)
+    textCentered(c, W / 2, 128, w.bodies[w.missions[m].from].name.toUpper() + "  TO  " + w.bodies[w.missions[m].to].name.toUpper(), 5, 0.95, 0.98, 1.0)
+    textCentered(c, W / 2, 196, w.missions[m].blurb, UI, 0.66, 0.76, 0.86)
+
+    let x = 250
+    var y = 280
+    text(c, x, y, "1.", UI_BIG, 1.0, 0.82, 0.35)
+    text(c, x + 60, y, "CHOOSE WHEN TO LEAVE", UI_BIG, 0.92, 0.96, 1.0)
+    text(c, x + 60, y + 38, "LEFT / RIGHT moves the date, UP / DOWN the flight time.", UI, 0.62, 0.72, 0.82)
+    text(c, x + 60, y + 64, "The curve at the bottom is what each day costs. B picks the cheapest.", UI, 0.62, 0.72, 0.82)
+    y = y + 128
+    text(c, x, y, "2.", UI_BIG, 1.0, 0.82, 0.35)
+    text(c, x + 60, y, "COMMIT, THEN WAIT", UI_BIG, 0.92, 0.96, 1.0)
+    text(c, x + 60, y + 38, "ENTER spends the fuel and starts the flight.", UI, 0.62, 0.72, 0.82)
+    text(c, x + 60, y + 64, "Then hold  .  to run time forward. It stops itself when you arrive.", UI, 0.62, 0.72, 0.82)
+    y = y + 128
+    text(c, x, y, "3.", UI_BIG, 1.0, 0.82, 0.35)
+    text(c, x + 60, y, "BURN TO STOP", UI_BIG, 0.92, 0.96, 1.0)
+    text(c, x + 60, y + 38, "ENTER again to enter orbit. Arrive with fuel left and the mission is yours.", UI, 0.62, 0.72, 0.82)
+
+    textCentered(c, W / 2, H - 74, "FUEL FOR THIS MISSION: " + fmtDv(w.missions[m].budget) + "        PRESS  ENTER", UI_BIG, 1.0, 0.82, 0.35)
 }
 
 pub fn drawOutcome(c: &mut Canvas, w: &World) {

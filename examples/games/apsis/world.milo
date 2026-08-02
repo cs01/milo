@@ -34,7 +34,19 @@ from "./mission" import {
     Mission, missionTable, MISSION_COUNT
 }
 
+// The game is in exactly one of three states, and they exist because dropping a
+// player straight into a three-panel instrument display of a transfer they did
+// not ask for explains nothing. Title first: the whole solar system and the six
+// places they will go. Then a briefing that says what the three steps are. Only
+// then the mission itself.
+pub let PHASE_TITLE: i64 = 0
+
+pub let PHASE_BRIEF: i64 = 1
+
+pub let PHASE_PLAY: i64 = 2
+
 pub struct World {
+    phase: i64,
     bodies: Vec<Body>,
     e: Ephem,
     missions: Vec<Mission>,
@@ -133,6 +145,7 @@ pub fn worldNew(): World {
     let e = ephemBuild(bodies, timeOf(2030, 1, 1), timeOf(2050, 1, 1), 21600.0)
     let missions = missionTable()
     var w = World {
+        phase: PHASE_TITLE,
         bodies: bodies, e: e, missions: missions, mission: 0, unlocked: 0,
         ship: Ship {
             pos: v3(0.0, 0.0, 0.0), vel: v3(0.0, 0.0, 0.0)
@@ -208,6 +221,18 @@ pub fn startMission(w: &mut World, idx: i64) {
     w.preview = false
     buildCurve(w)
     snapToBest(w)
+}
+
+// ENTER advances the state machine. One key does the whole game.
+pub fn advancePhase(w: &mut World) {
+    if w.phase == PHASE_TITLE {
+        w.phase = PHASE_BRIEF
+        return
+    }
+    if w.phase == PHASE_BRIEF {
+        w.phase = PHASE_PLAY
+        w.sweep = 1.0
+    }
 }
 
 pub fn resetMission(w: &mut World) {
@@ -595,6 +620,13 @@ pub fn refreshLive(w: &mut World) {
     var span = 3.0 * 3600.0
     if ob.closed {
         span = ob.period
+    }
+    // While a transfer is under way the useful horizon is "until you get there",
+    // not "one revolution of whatever you are technically orbiting" — which
+    // during a coast to the Moon is a sixty-day ellipse around the Earth drawn
+    // as a wandering line with nothing to do with the trip.
+    if w.committed && !w.captured && w.track.caTime > w.t {
+        span = w.track.caTime - w.t + 3600.0
     }
     if span > 60.0 * SEC_PER_DAY {
         span = 60.0 * SEC_PER_DAY

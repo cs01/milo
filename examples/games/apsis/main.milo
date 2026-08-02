@@ -47,10 +47,10 @@ from "./ephem" import {
 from "./world" import {
     World, worldNew, startMission, resetMission, replan, commitPlan, doCapture,
     advanceWorld, say, currentCapture, scrub, snapToBest, buildCurve, buildPreview,
-    updateCamera, cycleView, setView, VIEW_ROUTE, skipTour
+    updateCamera, cycleView, setView, VIEW_ROUTE, skipTour, advancePhase, PHASE_PLAY
 }
 from "./render" import {
-    W, H, drawScene, drawHud, drawOutcome
+    W, H, drawScene, drawHud, drawOutcome, drawBriefing
 }
 from "./mission" import {
     MISSION_COUNT
@@ -150,12 +150,19 @@ pub fn main(): i32 {
             }
         }
 
-        handleMap(w, inp, steps)
+        if w.phase == PHASE_PLAY {
+            handleMap(w, inp, steps)
+            advanceWorld(w, dt)
+        } else {
+            if inp.execute {
+                advancePhase(w)
+            }
+        }
         updateCamera(w, dt)
-        advanceWorld(w, dt)
 
         drawScene(c, scene, w, texes)
         drawHud(c, w)
+        drawBriefing(c, w)
         drawOutcome(c, w)
         present(c, 0.30, 1.0)
         unsafe {

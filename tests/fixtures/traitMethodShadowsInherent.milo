@@ -1,0 +1,33 @@
+// @expect: 1
+
+// An inherent method and a trait method of the same name mangle to distinct
+// symbols, so the same-file duplicate-decl check must not read the pair as a
+// redefinition. (Which one a generic call binds to is a separate question this
+// fixture deliberately does not pin down.)
+
+trait Greet {
+    fn hello(self: &Self): i64
+}
+
+struct Bar {
+    v: i64,
+}
+
+impl Bar {
+    fn hello(self: &Self): i64 {
+        return self.v
+    }
+}
+
+impl Greet for Bar {
+    fn hello(self: &Self): i64 {
+        return self.v + 7
+    }
+}
+
+fn main() {
+    let b = Bar {
+        v: 1
+    }
+    print(b.hello())
+}

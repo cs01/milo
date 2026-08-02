@@ -1,0 +1,25 @@
+// @error: 'fn Counter.get' is defined twice in this file
+
+// Two inherent impl blocks defining the same method mangle to one symbol. Without
+// the resolver check the only signal is LLVM's "invalid redefinition of function".
+
+struct Counter {
+    v: i64,
+}
+
+impl Counter {
+    fn get(self: &Self): i64 {
+        return self.v
+    }
+}
+
+impl Counter {
+    fn get(self: &Self): i64 {
+        return self.v + 100
+    }
+}
+
+fn main() {
+    let c = Counter { v: 1 }
+    print("{}", c.get())
+}

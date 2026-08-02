@@ -1,0 +1,20 @@
+// @error: 'struct Point' is defined twice in this file
+
+// The two copies can drift — whichever field layout survives the merge is the one
+// every use gets, with no diagnostic.
+
+pub struct Point {
+    x: i64,
+    y: i64,
+}
+
+pub struct Point {
+    x: i64,
+    y: i64,
+    z: i64,
+}
+
+fn main() {
+    let p = Point { x: 1, y: 2, z: 3 }
+    print("{}", p.x)
+}

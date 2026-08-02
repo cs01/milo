@@ -93,6 +93,53 @@ function parsePkgUrl(url: string): { host: string; path: string; version: string
   return { host: fullPath.slice(0, slashIdx), path: fullPath.slice(slashIdx + 1), version };
 }
 
+// A name declared twice at the top level of ONE file. The flat namespace would
+// silently keep one of them (dedup below is last-wins), so the two copies can
+// drift and every call site runs whichever the merge happened to pick — the
+// classic bad-merge / duplicated-tail-block bug. There is no overloading in
+// Milo, so a same-file redefinition has no legitimate reading.
+//
+// Cross-file collisions are a separate, deliberately laxer story (last-wins
+// override of a prelude fn is documented; see duplicate-fn below) — this check
+// is strictly within a single file, where nothing legitimate is being layered.
+function checkDuplicateDecls(prog: Program, file: string, source: string | undefined) {
+  // Values and types live in separate namespaces: `struct Point` next to
+  // `fn Point` is odd but not a redefinition, and the merge keeps both.
+  const seen = new Map<string, { line?: number }>();
+  // `label` is what the message shows ("fn Bar.hello"); `name` is the token the
+  // caret underlines, which for a method is just the method name.
+  const check = (ns: string, label: string, name: string, span?: Span) => {
+    const key = `${ns}:${name}`;
+    const prev = seen.get(key);
+    if (prev) {
+      throw new ParseError({
+        severity: "error",
+        code: "duplicate-decl",
+        span,
+        len: name.length,
+        message: `'${label}' is defined twice in this file`,
+        hint: `${prev.line !== undefined ? `the first definition is on line ${prev.line}. ` : ""}Milo has no overloading, so only one definition survives and every use runs it — a redefinition is almost always a bad merge or a duplicated block. Delete one, or rename it.`,
+      }, source, file);
+    }
+    seen.set(key, { line: span?.line });
+  };
+
+  for (const f of prog.functions) check("value", `${f.isExtern ? "extern fn" : "fn"} ${f.name}`, f.name, f.span);
+  for (const g of prog.globals) check("value", `${g.mutable ? "var" : "let"} ${g.name}`, g.name, g.span);
+  for (const s of prog.structs) check("type", `struct ${s.name}`, s.name, s.span);
+  for (const e of prog.enums) check("type", `enum ${e.name}`, e.name, e.span);
+  for (const t of prog.traits) check("type", `trait ${t.name}`, t.name, t.span);
+  for (const i of prog.interfaces) check("type", `interface ${i.name}`, i.name, i.span);
+  for (const a of prog.typeAliases) check("type", `type ${a.name}`, a.name, a.span);
+  // Methods collide per (type, trait) — an inherent `Bar.hello` and a
+  // `Greet for Bar` `hello` are distinct symbols and both are reachable, but two
+  // inherent `hello`s (in one impl block or two) collapse. Without this the only
+  // signal is LLVM's "invalid redefinition of function 'Bar$hello'".
+  for (const impl of prog.impls)
+    for (const m of impl.methods)
+      check(`impl:${impl.typeName}:${impl.traitName ?? ""}`, `fn ${impl.typeName}.${m.name}`, m.name, m.span);
+}
+
 export function resolveImports(program: Program, sourceDir: string, target: TargetInfo, entryFile?: string | null): Program {
   const visited = new Set<string>();
   const structs: typeof program.structs = [];
@@ -209,6 +256,7 @@ export function resolveImports(program: Program, sourceDir: string, target: Targ
 
       const tokens = new Lexer(source).tokenize();
       const imported = new Parser(tokens, source, absPath).parse();
+      checkDuplicateDecls(imported, absPath, source);
 
       if (imp.names) {
         // validate that all named symbols exist in the imported module
@@ -242,6 +290,7 @@ export function resolveImports(program: Program, sourceDir: string, target: Targ
     visited.add(preludePath);
     const src = readSource(preludePath);
     const prelude = new Parser(new Lexer(src).tokenize(), src, preludePath).parse();
+    checkDuplicateDecls(prelude, preludePath, src);
     for (const f of prelude.functions) f.sourceFile = preludePath;
     for (const im of prelude.impls) for (const m of im.methods) m.sourceFile = preludePath;
     const preludeUnit: Unit = { prog: prelude, file: preludePath, pkg: "", targets: [] };
@@ -254,6 +303,13 @@ export function resolveImports(program: Program, sourceDir: string, target: Targ
   preludeFiles.add(preludePath);
 
   // user code comes after prelude
+  {
+    // The entry was parsed by the caller, so re-read its text just for the
+    // diagnostic's source context; a program compiled from a string has none.
+    let entrySrc: string | undefined;
+    try { if (entryFile) entrySrc = readSource(entryFile); } catch {}
+    checkDuplicateDecls(program, entryFile ?? "(entry module)", entrySrc);
+  }
   for (const f of program.functions) f.sourceFile = entryFile ?? "(entry module)";
   for (const im of program.impls) for (const m of im.methods) m.sourceFile = entryFile ?? "(entry module)";
   const entryUnit: Unit = { prog: program, file: entryFile ?? "(entry module)", pkg: "", targets: [] };

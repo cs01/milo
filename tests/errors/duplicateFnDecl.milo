@@ -1,0 +1,16 @@
+// @error: 'fn shade' is defined twice in this file
+
+// A duplicated block (bad merge, botched scripted edit) used to compile: the flat
+// namespace kept the last body and every call site silently ran it.
+
+pub fn shade(a: i64): i64 {
+    return a * 2
+}
+
+pub fn shade(a: i64): i64 {
+    return a * 3
+}
+
+fn main() {
+    print("{}", shade(2))
+}

@@ -1057,6 +1057,10 @@ pub fn snapToBest(w: &mut World) {
     }
     w.planTof = bestTof
     w.planDep = bestDep
+    // Pressing B is a choice, the same as moving a dial — it must satisfy the
+    // "you have to touch something before you can launch" gate, or the one
+    // shortcut the game offers leaves you unable to commit.
+    w.hasScrubbed = true
     buildCurve(w)
     replan(w)
 }

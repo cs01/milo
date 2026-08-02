@@ -11,14 +11,14 @@ from "std/math" import {
     Math
 }
 from "./gfx" import {
-    Canvas, line, spot, circle, text, textCentered, textWidth, brickFill, fillRect, setRect
+    Canvas, line, spot, circle, text, textCentered, textWidth, fillRect, setRect
 }
 from "./mascot" import {
     Sprite, spriteMilo
 }
 from "./world" import {
     satchelX, satchelY,
-    Mine, Col, TILE, MAP_W, MAP_H, SURFACE, tileAt, tileColor, isSolid,
+    Mine, Col, TILE, SURFACE, tileAt, tileColor, isSolid,
     T_SKY, T_DIRT, T_CLAY, T_STONE, T_GOLD, T_GEM, T_CRYSTAL, T_BEDROCK, T_WATER,
     T_GATE, isUpgrade
 }
@@ -253,7 +253,6 @@ fn drawDog(c: &mut Canvas, m: &Mine, px: f64, py: f64) {
         1.0
     }
     let base = 1.95
-    let half = 9.0 * base
 
     var sclX = base
     var sclY = base
@@ -305,16 +304,33 @@ fn drawDog(c: &mut Canvas, m: &Mine, px: f64, py: f64) {
         }
     }
 
-    let cx = px + lean
-    let cy = py + bob
+    var cx = px + lean
+    var cy = py + bob
+    if m.cleared > 0.0 {
+        // He steps into the dark and shrinks away down it. Without this he just
+        // stops being drawn, which reads as a glitch instead of an exit.
+        let t = Math.minF64(1.0, (2.6 - m.cleared) / 0.55)
+        let dcx = ((m.exitX as f64) + 1.0) * TILE - (m.px - px)
+        let dcy = ((m.gateY as f64) + 1.0) * TILE - (m.py - py)
+        cx = cx + (dcx - cx) * t
+        cy = cy + (dcy - cy) * t
+        sclX = sclX * (1.0 - 0.45 * t)
+        sclY = sclY * (1.0 - 0.45 * t)
+    }
+    // Every stuck-on part is sized off `half`, so shrinking that shrinks the
+    // whole animal together. Without it the tail and ears kept their full length
+    // while he shrank into the doorway, and stuck out of the hole after he was
+    // gone.
+    let sc = (sclX + sclY) / (base * 2.0)
+    let half = 9.0 * base * sc
     let behind = 0.0 - flip
     // He is drawn as one animal: a body, four legs and a tail, with the mascot's
     // face as the head. Hanging extra ears and paws off the bare 18x18 logo — the
     // first thing tried here — did not read as a dog at all.
-    let bodyX = cx + behind * 14.0
-    let bodyY = cy + 7.0
-    let headX = cx + flip * 12.0
-    let headY = cy - 5.0 + headBob
+    let bodyX = cx + behind * 14.0 * sc
+    let bodyY = cy + 7.0 * sc
+    let headX = cx + flip * 12.0 * sc
+    let headY = cy - 5.0 * sc + headBob
 
     // Head bright, body mid, legs dark. The gradient is what separates the three
     // from each other without needing an outline between them.
@@ -335,13 +351,14 @@ fn drawDog(c: &mut Canvas, m: &Mine, px: f64, py: f64) {
     while seg <= 3 {
         let t = (seg as f64)
         let ang = 0.75 + wag * t * 0.28
-        let len = 6.0 + t * 5.0 // overlapping, or the tip reads as a loose ball
+        let len = (6.0 + t * 5.0) * sc // overlapping, or the tip reads as a loose ball
         let tx2 = bodyX + behind * Math.cos(ang) * len
-        let ty2 = bodyY - 4.0 - Math.sin(ang) * len
+        let ty2 = bodyY - 4.0 * sc - Math.sin(ang) * len
         if seg == 3 {
-            oval(c, tx2, ty2, 4.5, 4.5, 1.10, 0.98, 0.82)
+            oval(c, tx2, ty2, 4.5 * sc, 4.5 * sc, 1.10, 0.98, 0.82)
         } else {
-            oval(c, tx2, ty2, 7.0 - t * 0.8, 7.0 - t * 0.8, furR * 0.86, furG * 0.86, furB * 0.86)
+            let r2 = (7.0 - t * 0.8) * sc
+            oval(c, tx2, ty2, r2, r2, furR * 0.86, furG * 0.86, furB * 0.86)
         }
         seg = seg + 1
     }
@@ -351,11 +368,11 @@ fn drawDog(c: &mut Canvas, m: &Mine, px: f64, py: f64) {
     while i < 2 {
         let ph = m.time * legFreq + (i as f64) * 3.14159
         let sw = Math.sin(ph) * legSwing
-        leg(c, bodyX + behind * (2.0 + (i as f64) * 9.0) + sw * 0.6, bodyY + 4.0, rearLen, darkR, darkG, darkB)
+        leg(c, bodyX + behind * (2.0 + (i as f64) * 9.0) * sc + sw * 0.6 * sc, bodyY + 4.0 * sc, rearLen * sc, darkR, darkG, darkB)
         i = i + 1
     }
 
-    oval(c, bodyX, bodyY, 19.0, 13.0, furR, furG, furB)
+    oval(c, bodyX, bodyY, 19.0 * sc, 13.0 * sc, furR, furG, furB)
 
     // Front legs. While the drill is biting they leave the ground entirely and
     // scrabble at the rock face — the churning paws ARE the digging animation.
@@ -364,13 +381,13 @@ fn drawDog(c: &mut Canvas, m: &Mine, px: f64, py: f64) {
         let ph = m.time * legFreq + (f2 as f64) * 3.14159
         let sw = Math.sin(ph)
         if m.digging {
-            let reach = half * 0.95 + sw * 7.0
-            let across = 7.0 - 14.0 * (f2 as f64)
+            let reach = half * 0.95 + sw * 7.0 * sc
+            let across = (7.0 - 14.0 * (f2 as f64)) * sc
             let pxp = headX + m.faceX * reach + m.faceY * across
             let pyp = headY + m.faceY * reach + m.faceX * across
-            oval(c, pxp, pyp, 6.0, 5.0, furR * 1.12, furG * 1.12, furB * 1.12)
+            oval(c, pxp, pyp, 6.0 * sc, 5.0 * sc, furR * 1.12, furG * 1.12, furB * 1.12)
         } else {
-            leg(c, bodyX + flip * (8.0 + (f2 as f64) * 7.0) + sw * legSwing * 0.6, bodyY + 3.0, 13.0, furR * 0.9, furG * 0.9, furB * 0.9)
+            leg(c, bodyX + flip * (8.0 + (f2 as f64) * 7.0) * sc + sw * legSwing * 0.6 * sc, bodyY + 3.0 * sc, 13.0 * sc, furR * 0.9, furG * 0.9, furB * 0.9)
         }
         f2 = f2 + 1
     }
@@ -390,13 +407,13 @@ fn drawDog(c: &mut Canvas, m: &Mine, px: f64, py: f64) {
     let hx0 = headX - half * 0.90
     let hx1 = headX + half * 0.90
     let hy = headY - half * 0.78
-    setRect(c, hx0, hy, hx1, hy + 8.0, 1.05, 0.72, 0.10)
-    setRect(c, hx0 + 4.0, hy - 5.0, hx1 - 4.0, hy, 1.20, 0.82, 0.14)
+    setRect(c, hx0, hy, hx1, hy + 8.0 * sc, 1.05, 0.72, 0.10)
+    setRect(c, hx0 + 4.0 * sc, hy - 5.0 * sc, hx1 - 4.0 * sc, hy, 1.20, 0.82, 0.14)
     // brim, out in front of the face
-    setRect(c, headX + flip * half * 0.78, hy + 5.0, headX + flip * (half * 1.30), hy + 9.0, 0.85, 0.56, 0.08)
+    setRect(c, headX + flip * half * 0.78, hy + 5.0 * sc, headX + flip * (half * 1.30), hy + 9.0 * sc, 0.85, 0.56, 0.08)
     let lampX = headX + flip * half * 0.52
-    setRect(c, lampX - 3.5, hy - 3.5, lampX + 3.5, hy + 2.5, 1.5, 1.4, 1.0)
-    spot(c, lampX, hy, 7.0, 0.7, 0.6, 0.35)
+    setRect(c, lampX - 3.5 * sc, hy - 3.5 * sc, lampX + 3.5 * sc, hy + 2.5 * sc, 1.5, 1.4, 1.0)
+    spot(c, lampX, hy, 7.0 * sc, 0.7, 0.6, 0.35)
 
     // blink — paint muzzle fur over the eyes, with a lash line on top
     if m.blinkT < 0.0 && !m.digging {
@@ -571,7 +588,7 @@ fn drawDoor(c: &mut Canvas, m: &Mine, camX: f64, camY: f64) {
     spot(c, cxd, cyd, w * 1.7, 0.04 * pulse, 0.20 * pulse, 0.08 * pulse)
     spot(c, cxd, cyd, w * 0.95, 0.04 * pulse, 0.18 * pulse, 0.08 * pulse)
     if m.exitOpen {
-        spot(c, cxd, cyd, w * 2.2, 0.05, 0.26, 0.10)
+        spot(c, cxd, cyd, w * 1.4, 0.03, 0.14, 0.06)
     }
 
     // frame, and the opening behind the leaves
@@ -579,14 +596,10 @@ fn drawDoor(c: &mut Canvas, m: &Mine, camX: f64, camY: f64) {
     setRect(c, x0 - 4.0, y0 - 4.0, x0 + w + 4.0, y0 + h + 4.0, 0.10, 0.16, 0.11)
     setRect(c, x0, y0, x0 + w, y0 + h, 0.22, 0.34, 0.24)
     // Beyond the door is daylight, which is what you are digging towards.
-    // Kept deliberately dim. At full brightness the open doorway plus the
-    // level-clear flash washed the dog out completely the moment he stepped into
-    // it, which read as the dog vanishing rather than as the dog arriving.
-    let lit = 0.30 + 0.70 * a
-    setRect(c, x0 + jamb, y0 + jamb, x0 + w - jamb, y0 + h - jamb, 0.08 * lit, 0.62 * lit, 0.22 * lit)
-    if a > 0.0 {
-        spot(c, cxd, cyd, w * 0.6, 0.04 * a, 0.18 * a, 0.07 * a)
-    }
+    // Behind the leaves is a hole, not a light. The actual mouth is drawn again
+    // after the dog by drawDoorMouth so that it occludes him; this is only the
+    // part the leaves are about to uncover.
+    setRect(c, x0 + jamb, y0 + jamb, x0 + w - jamb, y0 + h - jamb, 0.020, 0.016, 0.014)
 
     // Two leaves meeting in the middle, each hinged on its own outer jamb, so
     // opening them sweeps the gap outward from the centre.
@@ -646,6 +659,41 @@ fn drawDoor(c: &mut Canvas, m: &Mine, camX: f64, camY: f64) {
             spot(c, cxd, cyd + 6.0, 6.0 + rattle, 0.10, 0.30, 0.12)
         }
     }
+}
+
+// The mouth of the doorway, drawn AFTER the dog so that stepping into it puts
+// him behind it. Him vanishing into the dark IS the reward — it is the only
+// thing that says he went somewhere rather than that he stopped moving.
+//
+// A tunnel, not a lit panel: near-black, darkest in the middle, with a lip along
+// the top and sides where the lamp catches the cut edge of the rock.
+fn drawDoorMouth(c: &mut Canvas, m: &Mine, camX: f64, camY: f64) {
+    if m.doorAnim <= 0.0 {
+        return
+    }
+    let x0 = (m.exitX as f64) * TILE - camX
+    let y0 = (m.gateY as f64) * TILE - camY
+    let w = TILE * 2.0
+    let h = TILE * 2.0
+    let jamb = 7.0
+    let halfW = (w * 0.5 - jamb) * (1.0 - m.doorAnim)
+    let gx0 = x0 + jamb + halfW
+    let gx1 = x0 + w - jamb - halfW
+    let gy0 = y0 + jamb
+    let gy1 = y0 + h - jamb
+    if gx1 - gx0 < 1.5 {
+        return
+    }
+    setRect(c, gx0, gy0, gx1, gy1, 0.016, 0.013, 0.012)
+    // Darker toward the centre, so it reads as depth rather than as a black card.
+    let inx = (gx1 - gx0) * 0.22
+    let iny = (gy1 - gy0) * 0.20
+    setRect(c, gx0 + inx, gy0 + iny, gx1 - inx, gy1 - iny, 0.004, 0.003, 0.003)
+    // the lit lip of the cut, top and sides
+    setRect(c, gx0, gy0, gx1, gy0 + 3.0, 0.20, 0.17, 0.14)
+    setRect(c, gx0, gy0, gx0 + 2.0, gy1, 0.11, 0.09, 0.08)
+    setRect(c, gx1 - 2.0, gy0, gx1, gy1, 0.11, 0.09, 0.08)
+    setRect(c, gx0, gy1 - 2.0, gx1, gy1, 0.06, 0.05, 0.05)
 }
 
 // Treasure has to LOOK like treasure. Fat nuggets, a specular highlight that
@@ -873,16 +921,19 @@ pub fn drawMine(c: &mut Canvas, m: &Mine, ox: f64, oy: f64) {
     let py = m.py - camY
     drawDog(c, m, px, py)
 
-    // the satchel, which swells for a moment each time something lands in it
-    let stx = satchelX(m) - camX
-    let sty = satchelY(m) - camY
-    var sw = 6.0
-    if m.satchelPulse > 0.0 {
-        sw = 6.0 + m.satchelPulse * 14.0
-        spot(c, stx, sty, sw * 2.0, 0.6, 0.45, 0.12)
+    // the satchel, which swells for a moment each time something lands in it.
+    // It goes through the door with him, so it stops being drawn on the way in.
+    if m.cleared <= 0.0 {
+        let stx = satchelX(m) - camX
+        let sty = satchelY(m) - camY
+        var sw = 6.0
+        if m.satchelPulse > 0.0 {
+            sw = 6.0 + m.satchelPulse * 14.0
+            spot(c, stx, sty, sw * 2.0, 0.6, 0.45, 0.12)
+        }
+        setRect(c, stx - sw, sty - sw * 0.75, stx + sw, sty + sw * 0.75, 0.30, 0.17, 0.07)
+        setRect(c, stx - sw, sty - sw * 0.75, stx + sw, sty - sw * 0.4, 0.40, 0.24, 0.10)
     }
-    setRect(c, stx - sw, sty - sw * 0.75, stx + sw, sty + sw * 0.75, 0.30, 0.17, 0.07)
-    setRect(c, stx - sw, sty - sw * 0.75, stx + sw, sty - sw * 0.4, 0.40, 0.24, 0.10)
 
     // nuggets in flight
     for i in 0..m.flies.len {
@@ -895,6 +946,10 @@ pub fn drawMine(c: &mut Canvas, m: &Mine, ox: f64, oy: f64) {
         spot(c, fx, fy, 6.0, col.r * 0.30, col.g * 0.30, col.b * 0.30)
         spot(c, fx, fy, 2.6, col.r * 1.2, col.g * 1.2, col.b * 1.2)
     }
+
+    // The mouth of the doorway goes over the dog, his satchel and any nugget
+    // still in flight, but under the floating labels.
+    drawDoorMouth(c, m, camX, camY)
 
     // floating labels
     for i in 0..m.pops.len {

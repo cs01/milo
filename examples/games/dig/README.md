@@ -86,8 +86,16 @@ ring handles, and a keyhole that rattles while it is shut.
 
 Fill the bar — 75 on level 1, +25 a level — and **the door literally opens**: the
 lock gives with a shake and a burst of splinters, and over about a second both
-leaves swing outward to their jambs, leaving a lit passage. Stand in it and the
-level is done.
+leaves swing outward to their jambs, uncovering a **black tunnel mouth** —
+near-black, darkest in the middle, with a lit lip where the lamp catches the cut
+edge of the rock.
+
+Walk in and **the dog disappears down it**. That is the payoff, so it is staged
+rather than switched off: he slides into the middle of the doorway, shrinking as
+he goes, and the mouth is drawn *after* him — over his satchel and any nugget
+still in flight, but under the floating labels — so the dark genuinely occludes
+him. Every part of him is sized off one shrink factor, or the tail and ears keep
+their full length and stick out of the hole after he is gone.
 
 Three earlier versions were all worse in the same way — they made you hunt. A gate
 three tiles tall at one depth meant "go right" was only half the instruction: you

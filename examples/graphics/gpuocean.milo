@@ -1,0 +1,554 @@
+// A raymarched ocean under a moving sky — the demo that justifies the GPU.
+//
+//   milo build examples/graphics/gpuocean.milo -o /tmp/gpuocean --release && /tmp/gpuocean
+//
+// LEFT/RIGHT scrub the time of day, UP/DOWN tilt the camera, SPACE pauses,
+// ESC quits.
+//
+// There is no geometry. Two triangles cover the screen and every pixel is
+// computed from scratch in the fragment shader: a ray is fired into the world,
+// marched against a wave heightfield until it crosses the surface, and shaded
+// with a Fresnel mix of sky reflection and deep water, a sun glint, and an
+// atmosphere that reddens as the sun sets and fills with stars after it does.
+//
+// This is the workload a GPU exists for and a CPU cannot have. Every pixel runs
+// the same few hundred instructions with no dependence on any other pixel — at
+// 1600x1000 that is ~1.6 million independent raymarches per frame, sixty times a
+// second. The software renderer in examples/games/flight manages a million
+// pixels of *compositing* in about 5 ms; this does far more work per pixel and
+// still finishes in a fraction of that, because it runs a few thousand of them
+// at once instead of sixteen.
+//
+// The ocean pass renders into an offscreen Target and is then blitted up to the
+// window, so the cost is set by that target's size rather than by however large
+// the window happens to be — the standard way to keep a heavy shader honest on a
+// Retina display, where the drawable is four times the pixels you asked for.
+
+from "std/gpu" import {
+    Gpu, Mesh, Shader, Target, bindScreen, QUAD_VERT
+}
+
+@link("SDL2")
+pub extern fn SDL_Init(flags: u32): i32
+
+pub extern fn SDL_CreateWindow(title: *u8, x: i32, y: i32, w: i32, h: i32, flags: u32): *u8
+
+pub extern fn SDL_GL_SetAttribute(attr: i32, value: i32): i32
+
+pub extern fn SDL_GL_CreateContext(win: *u8): *u8
+
+pub extern fn SDL_GL_DeleteContext(ctx: *u8)
+
+pub extern fn SDL_GL_SwapWindow(win: *u8)
+
+pub extern fn SDL_GL_SetSwapInterval(interval: i32): i32
+
+pub extern fn SDL_GL_GetDrawableSize(win: *u8, w: *u8, h: *u8)
+
+pub extern fn SDL_PollEvent(event: *u8): i32
+
+pub extern fn SDL_GetKeyboardState(numkeys: *i32): *u8
+
+pub extern fn SDL_GetTicks(): u32
+
+pub extern fn SDL_GetError(): *u8
+
+pub extern fn SDL_DestroyWindow(win: *u8)
+
+pub extern fn SDL_Quit()
+
+pub let SDL_INIT_VIDEO: u32 = 0x20
+
+pub let SDL_WINDOWPOS_CENTERED: i32 = 0x2FFF0000
+
+pub let SDL_WINDOW_SHOWN: u32 = 0x4
+
+pub let SDL_WINDOW_OPENGL: u32 = 0x2
+
+pub let SDL_WINDOW_RESIZABLE: u32 = 0x20
+
+pub let SDL_QUIT: u32 = 0x100
+
+pub let SDL_GL_CONTEXT_MAJOR_VERSION: i32 = 17
+
+pub let SDL_GL_CONTEXT_MINOR_VERSION: i32 = 18
+
+pub let SDL_GL_CONTEXT_PROFILE_MASK: i32 = 21
+
+pub let SDL_GL_CONTEXT_PROFILE_CORE: i32 = 1
+
+pub let SC_ESC: i64 = 41
+
+pub let SC_SPACE: i64 = 44
+
+pub let SC_RIGHT: i64 = 79
+
+pub let SC_LEFT: i64 = 80
+
+pub let SC_DOWN: i64 = 81
+
+pub let SC_UP: i64 = 82
+
+pub let WIN_W: i64 = 1280
+
+pub let WIN_H: i64 = 800
+
+// The raymarch runs at this width at most, whatever the window does. A Retina
+// 1280x800 window has a 2560x1600 drawable — four times the rays for a picture
+// this soft in the first place.
+pub let MAX_RENDER_W: i64 = 1600
+
+// ── the ocean shader ──────────────────────────────────────────────────────────
+
+pub let OCEAN_FRAG: string = "#version 330 core
+in vec2 vUv;
+out vec4 fragColor;
+
+uniform vec2 uRes;
+uniform float uTime;
+uniform float uSun;    // sun elevation, radians: > 0 is day
+uniform float uPitch;
+
+const float SEA_LEVEL = 0.0;
+const float EYE_HEIGHT = 2.6;
+const float FAR = 900.0;
+
+// ── noise ─────────────────────────────────────────────────────────────────────
+
+float hash21(vec2 p) {
+    p = fract(p * vec2(123.34, 456.21));
+    p += dot(p, p + 45.32);
+    return fract(p.x * p.y);
+}
+
+float vnoise(vec2 p) {
+    vec2 i = floor(p);
+    vec2 f = fract(p);
+    // Smoothstep weights: with linear ones the value field creases along every
+    // cell boundary, and on water that reads as a grid rather than as chop.
+    vec2 u = f * f * (3.0 - 2.0 * f);
+    float a = hash21(i);
+    float b = hash21(i + vec2(1.0, 0.0));
+    float c = hash21(i + vec2(0.0, 1.0));
+    float d = hash21(i + vec2(1.0, 1.0));
+    return mix(mix(a, b, u.x), mix(c, d, u.x), u.y);
+}
+
+float fbm(vec2 p) {
+    float v = 0.0;
+    float a = 0.5;
+    for (int i = 0; i < 5; i++) {
+        v += a * vnoise(p);
+        p = mat2(1.6, 1.2, -1.2, 1.6) * p;
+        a *= 0.5;
+    }
+    return v;
+}
+
+// ── the wave field ────────────────────────────────────────────────────────────
+
+// Height of the sea at a world xz. Octaves of a sharpened sine: `exp(sin(x)-1)`
+// pulls the troughs wide and the crests narrow, which is what an ocean actually
+// looks like and what a plain sine does not. Each octave also displaces the
+// domain of the next, so the crests wander instead of lining up in rows.
+float waveHeight(vec2 p, int octaves) {
+    float amp = 0.62;
+    float freq = 0.14;
+    float h = 0.0;
+    vec2 dir = normalize(vec2(0.86, 0.42));
+    float t = uTime * 0.9;
+    for (int i = 0; i < 8; i++) {
+        if (i >= octaves) { break; }
+        float d = dot(p, dir) * freq + t * (0.55 + float(i) * 0.42);
+        float s = sin(d);
+        h += amp * exp(s - 1.0);
+        p += dir * h * 0.55;
+        amp *= 0.55;
+        freq *= 1.92;
+        // Rotate each octave off the last so the swell has no single grain.
+        dir = mat2(0.80, -0.60, 0.60, 0.80) * dir;
+    }
+    // Fine chop, too small to march against but not to shade with.
+    h += fbm(p * 0.9 + vec2(uTime * 0.35, uTime * 0.2)) * 0.16;
+    return h - 0.55;
+}
+
+// Distance along the ray to the surface, or -1. Heightfield tracing: step until
+// the ray drops below the water, then bisect the last interval. Steps grow with
+// distance because the far field is both flatter in screen space and cheaper to
+// be wrong about.
+float traceSea(vec3 ro, vec3 rd) {
+    if (rd.y > -0.002) { return -1.0; }
+    float tPrev = 0.0;
+    float hPrev = ro.y - SEA_LEVEL;
+    float t = 1.0;
+    for (int i = 0; i < 96; i++) {
+        vec3 p = ro + rd * t;
+        float h = p.y - (SEA_LEVEL + waveHeight(p.xz, 4));
+        if (h < 0.0) {
+            // Linear interpolation on the crossing, then a few bisection rounds.
+            float tHit = tPrev + (t - tPrev) * hPrev / (hPrev - h);
+            for (int k = 0; k < 5; k++) {
+                vec3 q = ro + rd * tHit;
+                float hq = q.y - (SEA_LEVEL + waveHeight(q.xz, 4));
+                if (hq < 0.0) { t = tHit; } else { tPrev = tHit; }
+                tHit = mix(tPrev, t, 0.5);
+            }
+            return tHit;
+        }
+        tPrev = t;
+        hPrev = h;
+        t += max(0.35, h * 0.55) * (1.0 + t * 0.02);
+        if (t > FAR) { break; }
+    }
+    return -1.0;
+}
+
+// Central differences, with the sample spacing widened by distance. A fixed
+// epsilon makes the horizon boil: every pixel out there covers many wavelengths,
+// so it samples a different crest each frame.
+vec3 seaNormal(vec3 p, float dist) {
+    float e = max(0.02, dist * 0.006);
+    float h = waveHeight(p.xz, 4);
+    float hx = waveHeight(p.xz + vec2(e, 0.0), 4);
+    float hz = waveHeight(p.xz + vec2(0.0, e), 4);
+    return normalize(vec3(h - hx, e, h - hz));
+}
+
+// ── sky ───────────────────────────────────────────────────────────────────────
+
+vec3 sunDirection() {
+    return normalize(vec3(cos(uSun) * 0.85, sin(uSun), cos(uSun) * 0.52));
+}
+
+// Analytic sky: a zenith-to-horizon gradient whose colours are driven by the sun's
+// elevation, plus the sun itself, plus stars and clouds. Not a physical
+// scattering integral — but the two things the eye actually reads, a hot
+// low-angle horizon and a blue overhead, are both here.
+vec3 skyColor(vec3 rd, vec3 sun, bool withSun) {
+    float up = clamp(rd.y, -1.0, 1.0);
+    float day = clamp(sin(uSun) * 2.2 + 0.25, 0.0, 1.0);
+    // Twilight peaks as the sun crosses the horizon, not at noon or midnight.
+    float dusk = clamp(1.0 - abs(sin(uSun)) * 4.0, 0.0, 1.0);
+
+    vec3 zenithDay = vec3(0.16, 0.36, 0.72);
+    vec3 horizonDay = vec3(0.62, 0.74, 0.88);
+    vec3 zenithNight = vec3(0.008, 0.014, 0.040);
+    vec3 horizonNight = vec3(0.03, 0.045, 0.085);
+
+    vec3 zenith = mix(zenithNight, zenithDay, day);
+    vec3 horizon = mix(horizonNight, horizonDay, day);
+    // The low sun spills orange along the horizon, strongest where you are
+    // looking at it.
+    float towardSun = clamp(dot(normalize(vec3(rd.x, 0.0, rd.z)), normalize(vec3(sun.x, 0.0, sun.z))), 0.0, 1.0);
+    horizon = mix(horizon, vec3(1.15, 0.46, 0.20), dusk * pow(towardSun, 2.0) * 0.85);
+
+    float grad = pow(1.0 - clamp(up, 0.0, 1.0), 3.2);
+    vec3 col = mix(zenith, horizon, grad);
+
+    // Stars: a hard threshold on a hash, so they are points rather than a haze.
+    // Only above the horizon, and only once the sun is properly down.
+    float night = clamp(-sin(uSun) * 3.0, 0.0, 1.0);
+    if (up > 0.0 && night > 0.001) {
+        vec2 sp = rd.xz / max(rd.y, 0.08) * 4.0;
+        float s = hash21(floor(sp * 60.0));
+        float star = pow(clamp(s, 0.0, 1.0), 220.0) * 90.0;
+        // Twinkle, slightly out of phase per star.
+        star *= 0.75 + 0.25 * sin(uTime * 3.0 + s * 60.0);
+        col += vec3(star) * night * clamp(up * 3.0, 0.0, 1.0);
+    }
+
+    // Clouds, projected onto a plane overhead and drifting. Skipped for the
+    // reflection ray's sake only in the sense that it costs the same either way.
+    if (up > 0.02) {
+        vec2 cp = rd.xz / rd.y * 0.55 + vec2(uTime * 0.012, uTime * 0.006);
+        float c = fbm(cp * 1.3);
+        c = smoothstep(0.52, 0.95, c) * smoothstep(0.02, 0.30, up);
+        vec3 lit = mix(vec3(0.5, 0.52, 0.58), vec3(1.5, 1.05, 0.75), dusk);
+        col = mix(col, lit * (0.35 + 0.65 * day), c * 0.8);
+    }
+
+    if (withSun) {
+        float d = clamp(dot(rd, sun), 0.0, 1.0);
+        // Disc plus two halos: the tight one is the sun, the wide ones are the
+        // aureole that makes it feel like it is lighting the air around it.
+        vec3 sunTint = mix(vec3(1.8, 0.55, 0.22), vec3(2.6, 2.35, 2.05), clamp(sin(uSun) * 3.0, 0.0, 1.0));
+        col += sunTint * pow(d, 2200.0) * 14.0;
+        col += sunTint * pow(d, 260.0) * 0.55;
+        col += sunTint * pow(d, 12.0) * 0.16;
+    }
+    return col;
+}
+
+// ── shading ───────────────────────────────────────────────────────────────────
+
+vec3 shadeSea(vec3 p, vec3 n, vec3 rd, vec3 sun, float dist) {
+    vec3 refl = reflect(rd, n);
+    // A reflected ray that points into the water is unusable — clamp it back to
+    // just above grazing rather than sampling the sky below the horizon.
+    refl.y = max(refl.y, 0.012);
+    vec3 sky = skyColor(refl, sun, true);
+
+    // Schlick, with water's 0.02 normal-incidence reflectance. This one term is
+    // most of what makes water look like water: near-mirror at grazing angles,
+    // almost clear when you look straight down into it.
+    float fres = 0.02 + 0.98 * pow(1.0 - max(dot(n, -rd), 0.0), 5.0);
+
+    float day = clamp(sin(uSun) * 2.2 + 0.2, 0.0, 1.0);
+    vec3 deep = mix(vec3(0.004, 0.012, 0.026), vec3(0.012, 0.055, 0.085), day);
+    // Crests are thinner water and scatter light through from behind, which is
+    // the green-blue glow along the top of a wave.
+    float crest = clamp(p.y * 1.6 + 0.35, 0.0, 1.0);
+    vec3 sss = mix(vec3(0.02, 0.10, 0.11), vec3(0.10, 0.42, 0.38), day) * crest * crest;
+    vec3 body = deep + sss * 0.9;
+
+    vec3 col = mix(body, sky, fres);
+
+    // The glint. Tight and very bright, so it survives the tone curve as a
+    // highlight instead of washing into the reflection.
+    float spec = pow(max(dot(refl, sun), 0.0), 420.0);
+    vec3 sunLight = mix(vec3(2.0, 0.7, 0.3), vec3(2.4, 2.2, 1.9), clamp(sin(uSun) * 3.0, 0.0, 1.0));
+    col += sunLight * spec * 3.2 * clamp(sin(uSun) + 0.12, 0.0, 1.0);
+
+    // Foam on the sharpest crests only, textured so it is not a flat white cap.
+    float foam = smoothstep(0.62, 1.05, p.y) * smoothstep(0.35, 0.75, fbm(p.xz * 2.2 + uTime * 0.4));
+    col = mix(col, vec3(0.85, 0.90, 0.95) * (0.25 + 0.75 * day), foam * 0.55);
+
+    // Distance haze toward the sky the horizon is showing, which is what glues
+    // the two halves of the image together.
+    float fog = 1.0 - exp(-dist * 0.0032);
+    col = mix(col, skyColor(vec3(rd.x, max(rd.y, 0.0), rd.z), sun, false), fog);
+    return col;
+}
+
+// ── tone map ──────────────────────────────────────────────────────────────────
+
+vec3 tonemap(vec3 x) {
+    // ACES filmic approximation (Narkowicz). The sun and its glint are far above
+    // 1.0 on purpose; without a shoulder they clip to flat white discs.
+    x *= 0.9;
+    vec3 v = (x * (2.51 * x + 0.03)) / (x * (2.43 * x + 0.59) + 0.14);
+    return clamp(v, 0.0, 1.0);
+}
+
+void main() {
+    vec2 uv = (vUv * 2.0 - 1.0);
+    uv.x *= uRes.x / uRes.y;
+
+    vec3 ro = vec3(uTime * 1.4, EYE_HEIGHT, 0.0);
+    // Camera basis: a slow yaw drift plus the pitch the arrow keys set.
+    float yaw = sin(uTime * 0.045) * 0.35;
+    vec3 fwd = normalize(vec3(sin(yaw), uPitch, cos(yaw)));
+    vec3 right = normalize(cross(vec3(0.0, 1.0, 0.0), fwd));
+    vec3 up = cross(fwd, right);
+    vec3 rd = normalize(fwd * 1.45 + right * uv.x + up * uv.y);
+
+    vec3 sun = sunDirection();
+    float t = traceSea(ro, rd);
+
+    vec3 col;
+    if (t > 0.0) {
+        vec3 p = ro + rd * t;
+        vec3 n = seaNormal(p, t);
+        col = shadeSea(p, n, rd, sun, t);
+    } else {
+        col = skyColor(rd, sun, true);
+    }
+
+    col = tonemap(col);
+    col = pow(col, vec3(0.4545454545));
+    // A whisper of dither. Banding is very visible in a smooth sky gradient at
+    // 8 bits, and a sub-LSB of noise costs nothing to hide it.
+    col += (hash21(gl_FragCoord.xy + uTime) - 0.5) / 255.0;
+    fragColor = vec4(col, 1.0);
+}
+"
+
+// Straight copy of the offscreen target to the window. Both passes work in the
+// same UV space, so there is no flip here — the ocean pass never assumed a
+// screen orientation to begin with.
+pub let BLIT_FRAG: string = "#version 330 core
+in vec2 vUv;
+out vec4 fragColor;
+uniform sampler2D uSrc;
+void main() {
+    fragColor = vec4(texture(uSrc, vUv).rgb, 1.0);
+}
+"
+
+pub fn main(): i32 {
+    if SDL_Init(SDL_INIT_VIDEO) != 0 {
+        print("SDL_Init failed")
+        return 1
+    }
+    var win: *u8 = 0 as *u8
+    var ctx: *u8 = 0 as *u8
+    unsafe {
+        let _ = SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3)
+        let _ = SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 3)
+        let _ = SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE)
+        win = SDL_CreateWindow("gpuocean — std/gpu", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, WIN_W as i32, WIN_H as i32, SDL_WINDOW_SHOWN | SDL_WINDOW_RESIZABLE | SDL_WINDOW_OPENGL)
+        if (win as i64) == 0 {
+            print("window: " + _cstrToString(SDL_GetError()))
+            return 2
+        }
+        ctx = SDL_GL_CreateContext(win)
+        if (ctx as i64) == 0 {
+            print("no GL 3.3 core context: " + _cstrToString(SDL_GetError()))
+            return 3
+        }
+        let _ = SDL_GL_SetSwapInterval(1)
+    }
+    print("OpenGL " + Gpu.version())
+
+    var ocean = match Shader.compile(QUAD_VERT, OCEAN_FRAG) {
+        Result.Ok(s) => s
+        Result.Err(e) => {
+            print(e)
+            return 4
+        }
+    }
+    var blit = match Shader.compile(QUAD_VERT, BLIT_FRAG) {
+        Result.Ok(s) => s
+        Result.Err(e) => {
+            print(e)
+            return 5
+        }
+    }
+    var quad = Mesh.fullscreenQuad()
+
+    var dw: i32 = 0
+    var dh: i32 = 0
+    unsafe {
+        SDL_GL_GetDrawableSize(win, (dw.addrOf()) as *u8, (dh.addrOf()) as *u8)
+    }
+    var rw = renderWidth(dw as i64)
+    var rh = (dh as i64) * rw / (dw as i64)
+    var target = match Target.new(rw, rh, false, true) {
+        Result.Ok(t) => t
+        Result.Err(e) => {
+            print(e)
+            return 6
+        }
+    }
+
+    Gpu.depthTest(false)
+    Gpu.blendOff()
+
+    var ev: [u8; 64] = [0; 64]
+    var quit = false
+    var paused = false
+    var spaceHeld = false
+    var clock: f64 = 0.0
+    // Start mid-morning: the sea reads best with the sun off to one side, and
+    // opening on a black screen is a poor first frame.
+    var sunT: f64 = 0.62
+    var pitch: f64 = 0.0 - 0.10
+    var last = SDL_GetTicks()
+
+    while !quit {
+        let now = SDL_GetTicks()
+        var dt = ((now - last) as f64) / 1000.0
+        last = now
+        if dt > 0.05 {
+            dt = 0.05
+        }
+
+        unsafe {
+            while SDL_PollEvent(ev) != 0 {
+                let evType: u32 = (ev[0] as u32) | ((ev[1] as u32) << 8) | ((ev[2] as u32) << 16) | ((ev[3] as u32) << 24)
+                if evType == SDL_QUIT {
+                    quit = true
+                }
+            }
+            let keys = SDL_GetKeyboardState(0 as *i32)
+            if keys[SC_ESC] != 0 {
+                quit = true
+            }
+            // Edge-triggered, or holding SPACE toggles sixty times a second.
+            let sp = keys[SC_SPACE] != 0
+            if sp && !spaceHeld {
+                paused = !paused
+            }
+            spaceHeld = sp
+            if keys[SC_LEFT] != 0 {
+                sunT = sunT - dt * 0.55
+            }
+            if keys[SC_RIGHT] != 0 {
+                sunT = sunT + dt * 0.55
+            }
+            if keys[SC_UP] != 0 {
+                pitch = pitch + dt * 0.35
+            }
+            if keys[SC_DOWN] != 0 {
+                pitch = pitch - dt * 0.35
+            }
+        }
+        if pitch > 0.55 {
+            pitch = 0.55
+        }
+        if pitch < 0.0 - 0.45 {
+            pitch = 0.0 - 0.45
+        }
+        if !paused {
+            clock = clock + dt
+            // A full day in ninety seconds. Slow enough to watch, fast enough
+            // that nobody has to wait for sunset.
+            sunT = sunT + dt * (6.2831853 / 90.0)
+        }
+
+        // The window can be resized under us, and the offscreen target has to
+        // follow or the blit stretches. Rebuilt only on an actual change.
+        unsafe {
+            SDL_GL_GetDrawableSize(win, (dw.addrOf()) as *u8, (dh.addrOf()) as *u8)
+        }
+        let wantW = renderWidth(dw as i64)
+        let wantH = (dh as i64) * wantW / (dw as i64)
+        if wantW != rw || wantH != rh {
+            target.free()
+            match Target.new(wantW, wantH, false, true) {
+                Result.Ok(t) => {
+                    target = t
+                    rw = wantW
+                    rh = wantH
+                }
+                Result.Err(e) => {
+                    print("resize: " + e)
+                    quit = true
+                }
+            }
+        }
+
+        target.bind()
+        ocean.bind()
+        ocean.uniform2F("uRes", rw as f64, rh as f64)
+        ocean.uniformF("uTime", clock)
+        ocean.uniformF("uSun", sunT)
+        ocean.uniformF("uPitch", pitch)
+        quad.draw()
+
+        bindScreen(dw as i64, dh as i64)
+        blit.bind()
+        target.bindTexture(0)
+        blit.uniformI("uSrc", 0)
+        quad.draw()
+
+        SDL_GL_SwapWindow(win)
+    }
+
+    target.free()
+    quad.free()
+    blit.free()
+    ocean.free()
+    SDL_GL_DeleteContext(ctx)
+    SDL_DestroyWindow(win)
+    SDL_Quit()
+    return 0
+}
+
+fn renderWidth(drawableW: i64): i64 {
+    if drawableW < MAX_RENDER_W {
+        return drawableW
+    }
+    return MAX_RENDER_W
+}

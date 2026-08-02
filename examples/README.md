@@ -1,12 +1,12 @@
 # Examples
 
-Runnable programs, also stdlib smoke tests.
+Runnable programs; also stdlib tests.
 `./milo run examples/hello.milo`
 
 - `basics/` — fib, json, arenas, interp
 - `cli-tools/` — grep, jq, tree, fmt
 - `games/` — flight (3D), dig, shatter, neon, volt, yap
-- `graphics/` — donut, plasma, raytracers, gpucube
+- `graphics/` — donut, plasma, gpu cube/pong/ocean
 - `simulation/` — cloth, rigid bodies
 - `terminal/` — tetris, sysmon, tmux
 - `net/` — servers, weather, termpair

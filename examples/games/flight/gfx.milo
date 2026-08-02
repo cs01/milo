@@ -38,6 +38,19 @@ pub struct Canvas {
     uy0: Vec<i64>,
     uty: Vec<f32>,
     bands: i64, // horizontal bands the composite pass fans out over
+    // Pixels the 2D overlays claimed, and whether claiming is currently on.
+    //
+    // The GPU ocean (gpupost) replaces any pixel where the sea is nearer than the
+    // depth buffer says the world is — but the depth buffer only knows about
+    // z-buffered geometry. Contrails, sparks, the HUD and the checklist are drawn
+    // straight into the canvas afterwards and leave no depth behind, so without
+    // this the sea would be composited straight over the top of them.
+    //
+    // `locking` is switched on by render3d at the exact point the frame stops
+    // being 3D, which is why the sky and the terrain — drawn through these same
+    // primitives — do not claim anything.
+    lock: Vec<f32>,
+    locking: bool,
 }
 
 pub fn canvasNew(w: i64, h: i64): Canvas {
@@ -93,6 +106,26 @@ pub fn canvasNew(w: i64, h: i64): Canvas {
         uy0: uy0,
         uty: uty,
         bands: bandsFor(h),
+        lock: Vec.filled(w * h, 0.0),
+        locking: false,
+    }
+}
+
+// Claim a pixel for the 2D overlay layer, so the GPU ocean leaves it alone.
+// Inlined by hand into the hot primitives below rather than called from them:
+// `spot` and `fillRect` write whole rectangles and the bounds check is already
+// done there.
+fn claim(c: &mut Canvas, x: i64, y: i64) {
+    if c.locking {
+        c.lock[y * c.w + x] = 1.0
+    }
+}
+
+pub fn canvasClearLock(c: &mut Canvas) {
+    c.locking = false
+    let n = c.w * c.h
+    for i in 0..n {
+        c.lock[i] = 0.0
     }
 }
 
@@ -102,6 +135,7 @@ pub fn addPix(c: &mut Canvas, x: i64, y: i64, r: f64, g: f64, b: f64) {
     if x < 0 || y < 0 || x >= c.w || y >= c.h {
         return
     }
+    claim(c, x, y)
     let i = (y * c.w + x) * 3
     c.hdr[i] = c.hdr[i] + (r as f32)
     c.hdr[i + 1] = c.hdr[i + 1] + (g as f32)
@@ -123,6 +157,7 @@ pub fn darkPix(c: &mut Canvas, x: i64, y: i64, k: f64) {
     if f < 0.0 {
         f = 0.0
     }
+    claim(c, x, y)
     let i = (y * c.w + x) * 3
     c.hdr[i] = c.hdr[i] * (f as f32)
     c.hdr[i + 1] = c.hdr[i + 1] * (f as f32)
@@ -192,6 +227,7 @@ pub fn spot(c: &mut Canvas, cx: f64, cy: f64, rad: f64, r: f64, g: f64, b: f64) 
             let t = 1.0 - (dx * dx + dy * dy) * inv
             if t > 0.0 {
                 let f = t * t
+                claim(c, x, y)
                 let i = (y * c.w + x) * 3
                 c.hdr[i] = c.hdr[i] + ((r * f) as f32)
                 c.hdr[i + 1] = c.hdr[i + 1] + ((g * f) as f32)
@@ -333,6 +369,7 @@ pub fn shadeRect(c: &mut Canvas, x0: f64, y0: f64, x1: f64, y1: f64, k: f64) {
     while y < iy1 {
         var x = ix0
         while x < ix1 {
+            claim(c, x, y)
             let i = (y * c.w + x) * 3
             c.hdr[i] = c.hdr[i] * (k as f32)
             c.hdr[i + 1] = c.hdr[i + 1] * (k as f32)
@@ -689,6 +726,7 @@ pub fn fillRect(c: &mut Canvas, x0: f64, y0: f64, x1: f64, y1: f64, r: f64, g: f
     while y < iy1 {
         var x = ix0
         while x < ix1 {
+            claim(c, x, y)
             let i = (y * c.w + x) * 3
             c.hdr[i] = c.hdr[i] + (r as f32)
             c.hdr[i + 1] = c.hdr[i + 1] + (g as f32)

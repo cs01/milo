@@ -309,6 +309,24 @@ fn Texture2D.free(self: &Texture2D)
 
 _Undocumented._
 
+### `Texture2D.r32f`
+
+```milo
+fn Texture2D.r32f(w: i64, h: i64, pixels: &Vec<f32>, smooth: bool): Texture2D
+```
+
+One float per pixel. A depth buffer, a mask, a heightfield — anything the
+CPU computed per pixel and the shader needs to read back.
+
+### `Texture2D.r32fEmpty`
+
+```milo
+fn Texture2D.r32fEmpty(w: i64, h: i64, smooth: bool): Texture2D
+```
+
+Allocated but not filled — for a texture whose contents arrive later, or
+whose useful area is smaller than the allocation.
+
 ### `Texture2D.rgb32f`
 
 ```milo
@@ -337,6 +355,23 @@ fn Texture2D.rgba8(w: i64, h: i64, pixels: &Vec<u32>, smooth: bool): Texture2D
 An 8-bit RGBA texture from packed ABGR8888 words — the same layout the
 software renderers here hand to SDL, so a CPU framebuffer uploads with no
 repacking.
+
+### `Texture2D.updateR32f`
+
+```milo
+fn Texture2D.updateR32f(self: &Texture2D, pixels: &Vec<f32>)
+```
+
+_Undocumented._
+
+### `Texture2D.updateR32fRegion`
+
+```milo
+fn Texture2D.updateR32fRegion(self: &Texture2D, w: i64, h: i64, pixels: &Vec<f32>)
+```
+
+Write a w x h block into the bottom-left corner. Lets one fixed allocation
+serve inputs of varying size, which beats reallocating a texture mid-frame.
 
 ### `Texture2D.updateRgb32f`
 

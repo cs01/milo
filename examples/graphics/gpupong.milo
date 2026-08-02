@@ -1,0 +1,538 @@
+// Pong on the GPU — the hello world of std/gpu, and a whole game in one file.
+//
+//   milo build examples/graphics/gpupong.milo -o /tmp/gpupong --release && /tmp/gpupong
+//
+// W/S or UP/DOWN move, SPACE serves, R restarts, ESC quits. First to 7.
+//
+// The rendering is the point: every rectangle on screen — paddles, ball, net,
+// score pips, sparks — is two triangles appended to ONE `Vec<f32>`, uploaded
+// once per frame and drawn in a single call. That is the shape almost every 2D
+// GPU renderer has, and at a few hundred quads it is already doing less work
+// than a software blitter doing one rectangle at a time.
+//
+// Blending is additive, so overlapping quads brighten rather than cover. A glow
+// is then just the same rectangle drawn again, bigger and dimmer, which is why
+// there is no bloom pass here and nothing looks flat.
+//
+// Companion to gpucube.milo: that one is 3D with depth and a texture, this one
+// is 2D with a streaming vertex buffer and a game loop.
+
+from "std/gpu" import {
+    Gpu, Mesh, Shader, bindScreen
+}
+from "std/math" import {
+    Math
+}
+from "std/rng" import {
+    Rng
+}
+
+@link("SDL2")
+pub extern fn SDL_Init(flags: u32): i32
+
+pub extern fn SDL_CreateWindow(title: *u8, x: i32, y: i32, w: i32, h: i32, flags: u32): *u8
+
+pub extern fn SDL_GL_SetAttribute(attr: i32, value: i32): i32
+
+pub extern fn SDL_GL_CreateContext(win: *u8): *u8
+
+pub extern fn SDL_GL_DeleteContext(ctx: *u8)
+
+pub extern fn SDL_GL_SwapWindow(win: *u8)
+
+pub extern fn SDL_GL_SetSwapInterval(interval: i32): i32
+
+pub extern fn SDL_GL_GetDrawableSize(win: *u8, w: *u8, h: *u8)
+
+pub extern fn SDL_PollEvent(event: *u8): i32
+
+pub extern fn SDL_GetKeyboardState(numkeys: *i32): *u8
+
+pub extern fn SDL_GetTicks(): u32
+
+pub extern fn SDL_GetError(): *u8
+
+pub extern fn SDL_DestroyWindow(win: *u8)
+
+pub extern fn SDL_Quit()
+
+pub let SDL_INIT_VIDEO: u32 = 0x20
+
+pub let SDL_WINDOWPOS_CENTERED: i32 = 0x2FFF0000
+
+pub let SDL_WINDOW_SHOWN: u32 = 0x4
+
+pub let SDL_WINDOW_OPENGL: u32 = 0x2
+
+pub let SDL_WINDOW_RESIZABLE: u32 = 0x20
+
+pub let SDL_QUIT: u32 = 0x100
+
+pub let SDL_GL_CONTEXT_MAJOR_VERSION: i32 = 17
+
+pub let SDL_GL_CONTEXT_MINOR_VERSION: i32 = 18
+
+pub let SDL_GL_CONTEXT_PROFILE_MASK: i32 = 21
+
+pub let SDL_GL_CONTEXT_PROFILE_CORE: i32 = 1
+
+// USB HID scancodes, which is what SDL_GetKeyboardState is indexed by.
+pub let SC_W: i64 = 26
+
+pub let SC_S: i64 = 22
+
+pub let SC_R: i64 = 21
+
+pub let SC_ESC: i64 = 41
+
+pub let SC_SPACE: i64 = 44
+
+pub let SC_UP: i64 = 82
+
+pub let SC_DOWN: i64 = 81
+
+// The world is always this size; the window can be anything and gets letterboxed.
+pub let W: f64 = 960.0
+
+pub let H: f64 = 600.0
+
+pub let PADDLE_W: f64 = 14.0
+
+pub let PADDLE_H: f64 = 96.0
+
+pub let BALL: f64 = 13.0
+
+pub let WIN_SCORE: i64 = 7
+
+pub let VERT: string = "#version 330 core
+layout (location = 0) in vec2 aPos;
+layout (location = 1) in vec3 aColor;
+uniform vec2 uWorld;
+out vec3 vColor;
+void main() {
+    // World pixels (y down, origin top-left) to clip space (y up). Doing it here
+    // rather than on the CPU keeps the vertex buffer in the coordinates the game
+    // actually thinks in, which is the whole reason the rest of this file never
+    // mentions clip space.
+    vec2 ndc = vec2(aPos.x / uWorld.x * 2.0 - 1.0, 1.0 - aPos.y / uWorld.y * 2.0);
+    vColor = aColor;
+    gl_Position = vec4(ndc, 0.0, 1.0);
+}
+"
+
+pub let FRAG: string = "#version 330 core
+in vec3 vColor;
+out vec4 fragColor;
+void main() {
+    fragColor = vec4(vColor, 1.0);
+}
+"
+
+// ── the quad batch ────────────────────────────────────────────────────────────
+
+// Two triangles, five floats a vertex. Everything drawn this frame goes in here
+// in call order and leaves in one draw.
+fn quad(v: &mut Vec<f32>, x: f64, y: f64, w: f64, h: f64, r: f64, g: f64, b: f64) {
+    corner(v, x, y, r, g, b)
+    corner(v, x + w, y, r, g, b)
+    corner(v, x + w, y + h, r, g, b)
+    corner(v, x, y, r, g, b)
+    corner(v, x + w, y + h, r, g, b)
+    corner(v, x, y + h, r, g, b)
+}
+
+fn corner(v: &mut Vec<f32>, x: f64, y: f64, r: f64, g: f64, b: f64) {
+    v.push(x as f32)
+    v.push(y as f32)
+    v.push(r as f32)
+    v.push(g as f32)
+    v.push(b as f32)
+}
+
+// A rectangle plus two dimmer, larger copies behind it. Additive blending turns
+// that into a halo for the cost of two more quads — 30 floats — which is cheaper
+// than any per-pixel glow and is why nothing here needs a blur pass.
+fn glow(v: &mut Vec<f32>, x: f64, y: f64, w: f64, h: f64, r: f64, g: f64, b: f64) {
+    quad(v, x - 10.0, y - 10.0, w + 20.0, h + 20.0, r * 0.10, g * 0.10, b * 0.10)
+    quad(v, x - 4.0, y - 4.0, w + 8.0, h + 8.0, r * 0.22, g * 0.22, b * 0.22)
+    quad(v, x, y, w, h, r, g, b)
+}
+
+// ── game state ────────────────────────────────────────────────────────────────
+
+pub struct Spark {
+    x: f64,
+    y: f64,
+    vx: f64,
+    vy: f64,
+    life: f64,
+    r: f64,
+    g: f64,
+    b: f64,
+}
+
+pub struct Game {
+    playerY: f64,
+    aiY: f64,
+    ballX: f64,
+    ballY: f64,
+    ballVx: f64,
+    ballVy: f64,
+    served: bool,
+    playerScore: i64,
+    aiScore: i64,
+    sparks: Vec<Spark>,
+    rng: Rng,
+    // Counts up while the ball is in play and scales its speed. Reset on every
+    // serve, so a rally gets faster but a new point never starts at the last
+    // rally's speed.
+    rally: f64,
+}
+
+fn gameNew(): Game {
+    return Game {
+        playerY: H * 0.5 - PADDLE_H * 0.5,
+        aiY: H * 0.5 - PADDLE_H * 0.5,
+        ballX: W * 0.5,
+        ballY: H * 0.5,
+        ballVx: 0.0,
+        ballVy: 0.0,
+        served: false,
+        playerScore: 0,
+        aiScore: 0,
+        sparks: Vec.new(),
+        rng: Rng.new(20260802),
+        rally: 0.0,
+    }
+}
+
+fn serve(g: &mut Game, toPlayer: bool) {
+    g.ballX = W * 0.5
+    g.ballY = H * 0.5
+    g.ballVx = 0.0
+    g.ballVy = 0.0
+    g.served = false
+    g.rally = 0.0
+    // Which way it will go once served. Losing the point means serving toward
+    // the winner, which is the convention that makes a comeback feel earned.
+    if toPlayer {
+        g.ballVx = 0.0 - 1.0
+    } else {
+        g.ballVx = 1.0
+    }
+}
+
+fn burst(g: &mut Game, x: f64, y: f64, r: f64, gg: f64, b: f64) {
+    for _ in 0..18 {
+        let a = g.rng.float() * 6.2831853
+        let s = 90.0 + g.rng.float() * 260.0
+        g.sparks.push(Spark {
+            x: x,
+            y: y,
+            vx: Math.cos(a) * s,
+            vy: Math.sin(a) * s,
+            life: 0.30 + g.rng.float() * 0.35,
+            r: r,
+            g: gg,
+            b: b,
+        }
+        )
+    }
+}
+
+fn update(g: &mut Game, dt: f64, up: bool, down: bool, wantServe: bool) {
+    let speed = 520.0
+    if up {
+        g.playerY = g.playerY - speed * dt
+    }
+    if down {
+        g.playerY = g.playerY + speed * dt
+    }
+    g.playerY = clamp(g.playerY, 0.0, H - PADDLE_H)
+
+    if !g.served {
+        if wantServe {
+            g.served = true
+            let dir = if g.ballVx < 0.0 {
+                0.0 - 1.0
+            } else {
+                1.0
+            }
+            g.ballVx = dir * 380.0
+            g.ballVy = (g.rng.float() - 0.5) * 320.0
+        }
+    } else {
+        g.rally = g.rally + dt
+        // Speed rises with the rally and then stops. Without the cap a long
+        // rally ends by tunnelling the ball straight through a paddle.
+        var boost = 1.0 + g.rally * 0.06
+        if boost > 1.9 {
+            boost = 1.9
+        }
+        g.ballX = g.ballX + g.ballVx * boost * dt
+        g.ballY = g.ballY + g.ballVy * boost * dt
+
+        if g.ballY < 0.0 {
+            g.ballY = 0.0
+            g.ballVy = 0.0 - g.ballVy
+            burst(g, g.ballX, 0.0, 0.5, 0.9, 1.6)
+        }
+        if g.ballY + BALL > H {
+            g.ballY = H - BALL
+            g.ballVy = 0.0 - g.ballVy
+            burst(g, g.ballX, H, 0.5, 0.9, 1.6)
+        }
+
+        bounceOff(g, 40.0, g.playerY, true)
+        bounceOff(g, W - 40.0 - PADDLE_W, g.aiY, false)
+
+        if g.ballX + BALL < 0.0 {
+            g.aiScore = g.aiScore + 1
+            burst(g, 0.0, g.ballY, 2.0, 0.4, 0.5)
+            serve(g, true)
+        }
+        if g.ballX > W {
+            g.playerScore = g.playerScore + 1
+            burst(g, W, g.ballY, 0.5, 2.0, 0.9)
+            serve(g, false)
+        }
+    }
+
+    // The AI tracks the ball, but slower than the player can move and with a
+    // dead zone, so it is beatable by angling shots rather than by out-running
+    // it. A perfect tracker is unloseable and therefore not a game.
+    let target = g.ballY + BALL * 0.5 - PADDLE_H * 0.5
+    let delta = target - g.aiY
+    if Math.abs(delta) > 8.0 {
+        let step = 330.0 * dt
+        if delta > 0.0 {
+            g.aiY = g.aiY + step
+        } else {
+            g.aiY = g.aiY - step
+        }
+    }
+    g.aiY = clamp(g.aiY, 0.0, H - PADDLE_H)
+
+    stepSparks(g, dt)
+}
+
+// Reflect off a paddle, with the contact point setting the angle — the one rule
+// that makes Pong a game of placement instead of reaction.
+fn bounceOff(g: &mut Game, px: f64, py: f64, isPlayer: bool) {
+    if g.ballX + BALL < px || g.ballX > px + PADDLE_W {
+        return
+    }
+    if g.ballY + BALL < py || g.ballY > py + PADDLE_H {
+        return
+    }
+    // Only reflect a ball travelling INTO the paddle. Without this a ball that
+    // clipped the edge gets caught, flipping sign every frame while it overlaps.
+    if isPlayer && g.ballVx > 0.0 {
+        return
+    }
+    if !isPlayer && g.ballVx < 0.0 {
+        return
+    }
+    let hit = (g.ballY + BALL * 0.5 - py) / PADDLE_H - 0.5
+    g.ballVx = 0.0 - g.ballVx
+    g.ballVy = hit * 620.0
+    if isPlayer {
+        g.ballX = px + PADDLE_W
+        burst(g, g.ballX, g.ballY, 0.5, 2.0, 0.9)
+    } else {
+        g.ballX = px - BALL
+        burst(g, g.ballX, g.ballY, 2.0, 0.5, 1.4)
+    }
+}
+
+fn stepSparks(g: &mut Game, dt: f64) {
+    var live: Vec<Spark> = Vec.new()
+    for s in g.sparks {
+        if s.life - dt <= 0.0 {
+            continue
+        }
+        live.push(Spark {
+            x: s.x + s.vx * dt,
+            y: s.y + s.vy * dt,
+            vx: s.vx * 0.94,
+            vy: s.vy * 0.94 + 240.0 * dt,
+            life: s.life - dt,
+            r: s.r,
+            g: s.g,
+            b: s.b,
+        }
+        )
+    }
+    g.sparks = live
+}
+
+fn clamp(v: f64, lo: f64, hi: f64): f64 {
+    if v < lo {
+        return lo
+    }
+    if v > hi {
+        return hi
+    }
+    return v
+}
+
+// ── drawing ───────────────────────────────────────────────────────────────────
+
+fn build(g: &Game, v: &mut Vec<f32>) {
+    // Net: dashes rather than a line, so it reads as background.
+    var y = 12.0
+    while y < H {
+        quad(v, W * 0.5 - 2.0, y, 4.0, 16.0, 0.10, 0.13, 0.18)
+        y = y + 30.0
+    }
+    // Score as pips along the top — no font, no texture, and readable across a
+    // room, which a two-digit number at this size is not.
+    for i in 0..WIN_SCORE {
+        var lit = 0.06
+        if i < g.playerScore {
+            lit = 1.0
+        }
+        quad(v, W * 0.5 - 40.0 - (i as f64) * 26.0, 22.0, 16.0, 10.0, 0.25 * lit, 1.0 * lit, 0.45 * lit)
+        var lit2 = 0.06
+        if i < g.aiScore {
+            lit2 = 1.0
+        }
+        quad(v, W * 0.5 + 24.0 + (i as f64) * 26.0, 22.0, 16.0, 10.0, 1.0 * lit2, 0.30 * lit2, 0.70 * lit2)
+    }
+    glow(v, 40.0, g.playerY, PADDLE_W, PADDLE_H, 0.25, 1.05, 0.45)
+    glow(v, W - 40.0 - PADDLE_W, g.aiY, PADDLE_W, PADDLE_H, 1.05, 0.30, 0.70)
+    glow(v, g.ballX, g.ballY, BALL, BALL, 1.0, 1.0, 1.15)
+    for s in g.sparks {
+        let f = s.life * 2.2
+        quad(v, s.x - 2.0, s.y - 2.0, 4.0, 4.0, s.r * f, s.g * f, s.b * f)
+    }
+    if !g.served {
+        // A serve prompt drawn as a pulsing bar, for the same reason as the pips.
+        quad(v, W * 0.5 - 60.0, H - 60.0, 120.0, 6.0, 0.30, 0.36, 0.50)
+    }
+}
+
+pub fn main(): i32 {
+    if SDL_Init(SDL_INIT_VIDEO) != 0 {
+        print("SDL_Init failed")
+        return 1
+    }
+    var win: *u8 = 0 as *u8
+    var ctx: *u8 = 0 as *u8
+    unsafe {
+        // Before the window: SDL reads these when it picks the pixel format.
+        let _ = SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3)
+        let _ = SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 3)
+        let _ = SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE)
+        win = SDL_CreateWindow("gpupong — std/gpu", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, W as i32, H as i32, SDL_WINDOW_SHOWN | SDL_WINDOW_RESIZABLE | SDL_WINDOW_OPENGL)
+        if (win as i64) == 0 {
+            print("window: " + _cstrToString(SDL_GetError()))
+            return 2
+        }
+        ctx = SDL_GL_CreateContext(win)
+        if (ctx as i64) == 0 {
+            print("no GL 3.3 core context: " + _cstrToString(SDL_GetError()))
+            return 3
+        }
+        let _ = SDL_GL_SetSwapInterval(1)
+    }
+    print("OpenGL " + Gpu.version())
+
+    var sh = match Shader.compile(VERT, FRAG) {
+        Result.Ok(s) => s
+        Result.Err(e) => {
+            print(e)
+            return 4
+        }
+    }
+    var attrs: Vec<i64> = Vec.new()
+    attrs.push(2) // position, in world pixels
+    attrs.push(3) // colour, linear and allowed past 1.0
+    var batch = Mesh.new(attrs)
+
+    Gpu.depthTest(false)
+    Gpu.blendAdd()
+
+    var g = gameNew()
+    serve(g, true)
+    var verts: Vec<f32> = Vec.new()
+    var ev: [u8; 64] = [0; 64]
+    var quit = false
+    var last = SDL_GetTicks()
+
+    while !quit {
+        let now = SDL_GetTicks()
+        var dt = ((now - last) as f64) / 1000.0
+        last = now
+        // Clamp both ends: a hitch must not teleport the ball through a paddle,
+        // and a zero dt on a fast machine must not stall the rally timer.
+        if dt > 0.05 {
+            dt = 0.05
+        }
+        if dt < 0.0005 {
+            dt = 0.0005
+        }
+
+        var up = false
+        var down = false
+        var wantServe = false
+        unsafe {
+            while SDL_PollEvent(ev) != 0 {
+                let evType: u32 = (ev[0] as u32) | ((ev[1] as u32) << 8) | ((ev[2] as u32) << 16) | ((ev[3] as u32) << 24)
+                if evType == SDL_QUIT {
+                    quit = true
+                }
+            }
+            let keys = SDL_GetKeyboardState(0 as *i32)
+            if keys[SC_ESC] != 0 {
+                quit = true
+            }
+            up = keys[SC_W] != 0 || keys[SC_UP] != 0
+            down = keys[SC_S] != 0 || keys[SC_DOWN] != 0
+            wantServe = keys[SC_SPACE] != 0
+            if keys[SC_R] != 0 {
+                g = gameNew()
+                serve(g, true)
+            }
+        }
+
+        // Match point ends the rally and freezes the score; R starts again.
+        let over = g.playerScore >= WIN_SCORE || g.aiScore >= WIN_SCORE
+        if !over {
+            update(g, dt, up, down, wantServe)
+        }
+
+        verts.clear()
+        build(g, verts)
+        batch.upload(verts)
+
+        var dw: i32 = 0
+        var dh: i32 = 0
+        unsafe {
+            SDL_GL_GetDrawableSize(win, (dw.addrOf()) as *u8, (dh.addrOf()) as *u8)
+        }
+        bindScreen(dw as i64, dh as i64)
+        Gpu.clear(0.02, 0.03, 0.05, 1.0, false)
+        // Letterbox to the world's aspect, so a resized window never stretches
+        // a square ball into an egg.
+        var vw = dw as i64
+        var vh = vw * (H as i64) / (W as i64)
+        if vh > (dh as i64) {
+            vh = dh as i64
+            vw = vh * (W as i64) / (H as i64)
+        }
+        Gpu.viewport(((dw as i64) - vw) / 2, ((dh as i64) - vh) / 2, vw, vh)
+
+        sh.bind()
+        sh.uniform2F("uWorld", W, H)
+        batch.draw()
+        SDL_GL_SwapWindow(win)
+    }
+
+    batch.free()
+    sh.free()
+    SDL_GL_DeleteContext(ctx)
+    SDL_DestroyWindow(win)
+    SDL_Quit()
+    return 0
+}

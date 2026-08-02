@@ -16,10 +16,13 @@ from "std/gpu" import {
     Gpu
 }
 from "./gfx" import {
-    Canvas, canvasClearHdr, present
+    Canvas, canvasClearHdr, canvasClearLock, present
+}
+from "./gfx3d" import {
+    Scene
 }
 from "./gpupost" import {
-    Post, postDraw, postFree, postNew
+    Post, SeaView, postDraw, postFree, postNew
 }
 from "./sdl" import {
     SDL_CreateRenderer, SDL_CreateTexture, SDL_CreateWindow, SDL_DestroyRenderer,
@@ -50,12 +53,12 @@ pub struct Screen {
 // core context, or a driver that will not compile the post shaders, silently
 // gets the CPU path and a line on the terminal saying so. That is the right
 // failure — the game still runs, and the reason is written down.
-pub fn screenOpen(title: &string, w: i64, h: i64, wantGpu: bool, hdr: &Vec<f32>, fullscreen: bool, maximized: bool): Result<Screen, string> {
+pub fn screenOpen(title: &string, w: i64, h: i64, wantGpu: bool, hdr: &Vec<f32>, depth: &Vec<f32>, lock: &Vec<f32>, fullscreen: bool, maximized: bool): Result<Screen, string> {
     var s = Screen {
         win: 0 as *u8, ren: 0 as *u8, tex: 0 as *u8, ctx: 0 as *u8, post: Option.None, w: w, h: h
     }
     if wantGpu {
-        match openGl(title, w, h, hdr) {
+        match openGl(title, w, h, hdr, depth, lock) {
             Result.Ok(gl) => {
                 s = gl
             }
@@ -77,7 +80,7 @@ pub fn screenOpen(title: &string, w: i64, h: i64, wantGpu: bool, hdr: &Vec<f32>,
     return Result.Ok(s)
 }
 
-fn openGl(title: &string, w: i64, h: i64, hdr: &Vec<f32>): Result<Screen, string> {
+fn openGl(title: &string, w: i64, h: i64, hdr: &Vec<f32>, depth: &Vec<f32>, lock: &Vec<f32>): Result<Screen, string> {
     unsafe {
         // Before the window, not after: SDL reads these when it builds the pixel
         // format, and setting them afterwards is accepted and ignored.
@@ -96,7 +99,7 @@ fn openGl(title: &string, w: i64, h: i64, hdr: &Vec<f32>): Result<Screen, string
             return Result.Err(e)
         }
         let _ = SDL_GL_SetSwapInterval(1)
-        match postNew(w, h, hdr) {
+        match postNew(w, h, hdr, depth, lock) {
             Result.Ok(p) => {
                 print("gpu: OpenGL " + Gpu.version())
                 return Result.Ok(Screen {
@@ -157,7 +160,7 @@ pub fn screenIsGpu(s: &Screen): bool {
 
 // Bloom, tone-map and show the canvas. Both paths clear the HDR buffer as part
 // of presenting, so the next frame draws onto black without a separate pass.
-pub fn screenPresent(s: &Screen, c: &mut Canvas, bloomGain: f64, exposure: f64) {
+pub fn screenPresent(s: &Screen, c: &mut Canvas, sc: &Scene, cover: &Vec<f32>, coverDirty: bool, sv: &SeaView, bloomGain: f64, exposure: f64) {
     match s.post {
         Option.Some(p) => {
             var dw: i32 = 0
@@ -165,16 +168,18 @@ pub fn screenPresent(s: &Screen, c: &mut Canvas, bloomGain: f64, exposure: f64) 
             unsafe {
                 SDL_GL_GetDrawableSize(s.win, (dw.addrOf()) as *u8, (dh.addrOf()) as *u8)
             }
-            postDraw(p, c.hdr, bloomGain, exposure, dw as i64, dh as i64)
+            postDraw(p, c.hdr, sc.zbuf, c.lock, cover, coverDirty, sv, bloomGain, exposure, dw as i64, dh as i64)
             unsafe {
                 SDL_GL_SwapWindow(s.win)
             }
             // gfx.compositeBand zeroes the rows it reads; the GPU never touches
             // host memory, so the canvas has to be cleared here instead.
             canvasClearHdr(c)
+            canvasClearLock(c)
         }
         Option.None => {
             present(c, bloomGain, exposure)
+            canvasClearLock(c)
             unsafe {
                 SDL_UpdateTexture(s.tex, 0 as *u8, c.fb[0].addrOf() as *u8, (s.w * 4) as i32)
                 SDL_RenderClear(s.ren)

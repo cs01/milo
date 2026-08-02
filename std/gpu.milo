@@ -49,7 +49,7 @@ from "std/gl" import {
     GL_FLOAT, GL_FRAGMENT_SHADER, GL_FRAMEBUFFER, GL_FRAMEBUFFER_COMPLETE,
     GL_LEQUAL, GL_LINEAR, GL_LINK_STATUS, GL_NEAREST, GL_ONE,
     GL_ONE_MINUS_SRC_ALPHA, GL_RENDERBUFFER, GL_RGB, GL_RGB32F, GL_RGBA,
-    GL_RGBA16F, GL_RGBA8, GL_SRC_ALPHA, GL_STREAM_DRAW, GL_TEXTURE0,
+    GL_R32F, GL_RED, GL_RGBA16F, GL_RGBA8, GL_SRC_ALPHA, GL_STREAM_DRAW, GL_TEXTURE0,
     GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_TEXTURE_MIN_FILTER,
     GL_TEXTURE_WRAP_S, GL_TEXTURE_WRAP_T, GL_TRIANGLES, GL_TRUE,
     GL_UNPACK_ALIGNMENT, GL_UNSIGNED_BYTE, GL_VERSION, GL_VERTEX_SHADER
@@ -462,6 +462,46 @@ impl Texture2D {
             return Texture2D {
                 id: id, w: w, h: h
             }
+        }
+    }
+
+    // One float per pixel. A depth buffer, a mask, a heightfield — anything the
+    // CPU computed per pixel and the shader needs to read back.
+    fn r32f(w: i64, h: i64, pixels: &Vec<f32>, smooth: bool): Texture2D {
+        unsafe {
+            let id = newTexture(smooth)
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_R32F, w as i32, h as i32, 0, GL_RED, GL_FLOAT, pixels.ptr() as *u8)
+            return Texture2D {
+                id: id, w: w, h: h
+            }
+        }
+    }
+
+    // Allocated but not filled — for a texture whose contents arrive later, or
+    // whose useful area is smaller than the allocation.
+    fn r32fEmpty(w: i64, h: i64, smooth: bool): Texture2D {
+        unsafe {
+            let id = newTexture(smooth)
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_R32F, w as i32, h as i32, 0, GL_RED, GL_FLOAT, 0 as *u8)
+            return Texture2D {
+                id: id, w: w, h: h
+            }
+        }
+    }
+
+    // Write a w x h block into the bottom-left corner. Lets one fixed allocation
+    // serve inputs of varying size, which beats reallocating a texture mid-frame.
+    fn updateR32fRegion(self: &Self, w: i64, h: i64, pixels: &Vec<f32>) {
+        unsafe {
+            glBindTexture(GL_TEXTURE_2D, self.id)
+            glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, w as i32, h as i32, GL_RED, GL_FLOAT, pixels.ptr() as *u8)
+        }
+    }
+
+    fn updateR32f(self: &Self, pixels: &Vec<f32>) {
+        unsafe {
+            glBindTexture(GL_TEXTURE_2D, self.id)
+            glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, self.w as i32, self.h as i32, GL_RED, GL_FLOAT, pixels.ptr() as *u8)
         }
     }
 

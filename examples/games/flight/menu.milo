@@ -13,6 +13,12 @@ from "./gfx" import {
 from "./display" import {
     Screen, screenPresent
 }
+from "./gfx3d" import {
+    Scene
+}
+from "./gpupost" import {
+    seaViewNone
+}
 from "./sdl" import {
     Input, pollInput
 }
@@ -68,12 +74,13 @@ pub fn placeBlurb(i: i64): string {
 // flight loop's job is to step a simulation sixty times a second and there is no
 // simulation yet — the place has not been decoded, which is the whole point of
 // asking first.
-pub fn chooseRegion(s: &Screen, c: &mut Canvas, inp: &mut Input, ev: &mut [u8; 64], start: i64): i64 {
+pub fn chooseRegion(s: &Screen, c: &mut Canvas, sc: &Scene, inp: &mut Input, ev: &mut [u8; 64], start: i64): i64 {
     var sel = start
     if sel < 0 {
         sel = 0
     }
     var t: f64 = 0.0
+    let noCover: Vec<f32> = Vec.filled(1, 0.0)
     // Held down from the moment the window opened, ENTER would pick San
     // Francisco before the screen was ever drawn.
     var armed = false
@@ -92,7 +99,7 @@ pub fn chooseRegion(s: &Screen, c: &mut Canvas, inp: &mut Input, ev: &mut [u8; 6
         t = t + 1.0 / 60.0
 
         drawMenu(c, sel, t)
-        screenPresent(s, c, 0.35, 1.0)
+        screenPresent(s, c, sc, noCover, false, seaViewNone(), 0.35, 1.0)
     }
     return sel
 }

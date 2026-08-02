@@ -1499,3 +1499,37 @@ pub fn cityOrthoLocal(c: &City, lx: f64, lz: f64): Rgb {
     let i = ((tz << c.ortho.shift) + tx) * 3
     return rgb(c.ortho.lut[c.ortho.pxu[i] as i64] as f64, c.ortho.lut[c.ortho.pxu[i + 1] as i64] as f64, c.ortho.lut[c.ortho.pxu[i + 2] as i64] as f64)
 }
+
+// Does this place have a sea? The DEM's zero IS sea level (see the note at the
+// top of this file), so any terrain below it is underwater and the ocean plane
+// belongs in the frame. Yosemite's valley floor sits at 1200 m and the Grand
+// Canyon's rim higher still — for those the answer is no, and the GPU sea has
+// to stay switched off or it appears past the mountains at the horizon.
+pub fn cityHasSea(c: &City): bool {
+    if !c.loaded {
+        return false
+    }
+    for i in 0..c.dem.len {
+        if c.dem[i] < 0.0 - 0.5 {
+            return true
+        }
+    }
+    return false
+}
+
+// The elevation grid as f32, for the GPU sea to sample.
+//
+// It has to be the DEM and not the land-cover grid: `COVER_WATER` is for OSM's
+// inland lakes and rivers, and San Francisco's whole bay is 1196 cells of
+// 641601 — 0.19%. The sea is defined by elevation here, exactly as
+// render3d.cornerAt defines it.
+pub fn demHeights(c: &City): Vec<f32> {
+    if c.demN == 0 {
+        return Vec.filled(1, 0.0)
+    }
+    var m: Vec<f32> = Vec.filled(c.demN * c.demN, 0.0)
+    for i in 0..c.demN * c.demN {
+        m[i] = c.dem[i] as f32
+    }
+    return m
+}

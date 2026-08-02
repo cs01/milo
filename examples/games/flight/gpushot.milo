@@ -1,0 +1,212 @@
+// FLYBY — one frame of the GPU path, straight to a PNG.
+//
+//   milo run examples/games/flight/gpushot.milo --release -- /tmp/shot.png sf 240
+//
+// shot.milo does this for the software renderer, but it cannot see the GPU sea:
+// that is composited in a shader, after the canvas leaves the CPU. This opens a
+// hidden GL window, flies the real simulation for a few hundred frames with the
+// autopilot at the controls, and reads the finished frame back off the default
+// framebuffer.
+//
+// It exists because the alternative is asking a human to take a screenshot every
+// time a constant in the sea shader changes, which is a slow way to tune water.
+
+from "std/fs" import {
+    readFile, writeFile
+}
+from "std/gpu" import {
+    Gpu, readPixelsRgba8
+}
+from "std/png" import {
+    encodePng
+}
+from "std/args" import {
+    args
+}
+from "./sdl" import {
+    SDL_CreateWindow, SDL_GL_CreateContext, SDL_GL_SetAttribute, SDL_GetError,
+    SDL_Init, SDL_Quit,
+    SDL_GL_CONTEXT_MAJOR_VERSION, SDL_GL_CONTEXT_MINOR_VERSION,
+    SDL_GL_CONTEXT_PROFILE_CORE, SDL_GL_CONTEXT_PROFILE_MASK, SDL_INIT_VIDEO,
+    SDL_WINDOWPOS_CENTERED, SDL_WINDOW_OPENGL
+}
+from "./gfx" import {
+    Canvas, canvasNew, canvasClearHdr, canvasClearLock
+}
+from "./gfx3d" import {
+    sceneNew, viewOf
+}
+from "./gpupost" import {
+    CoverGrid, postDraw, postNew, seaViewOf
+}
+from "./city" import {
+    City, cityAttachOrtho, cityEmpty, cityHasSea, cityLoad, demHeights
+}
+from "./world3d" import {
+    worldIn, worldUpdate, SEED
+}
+from "./textures" import {
+    groundTexture, planeTexture, facadeTexture
+}
+from "./render3d" import {
+    drawWorld, drawHud, drawGuide, drawMarkGuide, drawMarkBeam, drawSpeedLines,
+    drawChecklist, drawFound, drawFence
+}
+
+pub let W: i64 = 1280
+
+pub let H: i64 = 720
+
+pub let HIDDEN: u32 = 0x8
+
+fn loadPlace(name: &string): City {
+    let base = "examples/games/flight/cities/" + name
+    match cityLoad(base + ".city") {
+        Result.Ok(city) => {
+            var c = city
+            match readFile(base + ".ortho.png") {
+                Result.Ok(png) => {
+                    match cityAttachOrtho(c, png) {
+                        Result.Ok(_) => {
+                        }
+                        Result.Err(e) => {
+                            print("ortho: " + e)
+                        }
+                    }
+                }
+                Result.Err(_) => {
+                }
+            }
+            return c
+        }
+        Result.Err(e) => {
+            print($"city: {e}")
+            return cityEmpty()
+        }
+    }
+}
+
+// ABGR8888 words, bottom-up as GL hands them over, into top-down RGB bytes.
+fn toRgb(px: &Vec<u32>, w: i64, h: i64): string {
+    var out = ""
+    for y in 0..h {
+        let row = (h - 1 - y) * w
+        for x in 0..w {
+            let p = px[row + x]
+            out.push((p & 0xFF) as u8)
+            out.push(((p >> 8) & 0xFF) as u8)
+            out.push(((p >> 16) & 0xFF) as u8)
+        }
+    }
+    return out
+}
+
+pub fn main(): i32 {
+    let a = args()
+    var out = "/tmp/flyby-gpu.png"
+    var place = "sf"
+    var frames = 240
+    if a.len > 1 {
+        out = a[1].clone()
+    }
+    if a.len > 2 {
+        place = a[2].clone()
+    }
+    if a.len > 3 {
+        frames = strToI64(a[3])
+    }
+
+    if SDL_Init(SDL_INIT_VIDEO) != 0 {
+        print("SDL_Init failed")
+        return 1
+    }
+    unsafe {
+        let _ = SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3)
+        let _ = SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 3)
+        let _ = SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE)
+        let win = SDL_CreateWindow("gpushot", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, W as i32, H as i32, SDL_WINDOW_OPENGL | HIDDEN)
+        if (win as i64) == 0 {
+            print("window: " + _cstrToString(SDL_GetError()))
+            return 2
+        }
+        if (SDL_GL_CreateContext(win) as i64) == 0 {
+            print("context: " + _cstrToString(SDL_GetError()))
+            return 3
+        }
+    }
+
+    var c = canvasNew(W, H)
+    var s = sceneNew(W, H)
+    var places: Vec<City> = Vec.new()
+    places.push(loadPlace(place))
+    var w = worldIn(SEED, places, true)
+    let groundTex = groundTexture()
+    let skinTex = planeTexture()
+    let facadeTex = facadeTexture()
+
+    let p = match postNew(W, H, c.hdr, s.zbuf, c.lock) {
+        Result.Ok(x) => x
+        Result.Err(e) => {
+            print("post: " + e)
+            return 4
+        }
+    }
+    let dem = demHeights(w.city)
+    let grid = CoverGrid {
+        n: w.city.demN, x0: w.city.demX0, z0: w.city.demZ0, step: w.city.demStep, reach: w.city.reach
+    }
+    print($"place {place} demN {w.city.demN} hasSea {cityHasSea(w.city)}")
+
+    // Fly for a while so the camera is somewhere worth photographing, then shoot
+    // the last frame. The autopilot steers on its own with no input at all.
+    var first = true
+    for i in 0..frames {
+        worldUpdate(w, 1.0 / 60.0, 0.0, 0.0, false)
+        let view = viewOf(w.cam, c.w, c.h)
+        drawWorld(c, s, w, groundTex, skinTex, facadeTex, view)
+        drawSpeedLines(c, w)
+        drawGuide(c, w, view)
+        drawFence(c, w, view)
+        drawMarkBeam(c, w, view)
+        drawMarkGuide(c, w, view)
+        drawChecklist(c, w)
+        drawFound(c, w)
+        drawHud(c, w, s, 60)
+        let sv = seaViewOf(view, s, grid, cityHasSea(w.city), w.time)
+        postDraw(p, c.hdr, s.zbuf, c.lock, dem, first, sv, 0.35, 1.0, W, H)
+        first = false
+        if i == frames - 1 {
+            let px = readPixelsRgba8(W, H)
+            match encodePng(toRgb(px, W, H), W, H, 3) {
+                Result.Ok(bytes) => {
+                    match writeFile(out, bytes) {
+                        Result.Ok(_) => {
+                            print($"wrote {out}  alt {w.cam.y as i64} m  err {Gpu.error()}")
+                        }
+                        Result.Err(e) => {
+                            print($"write: {e}")
+                        }
+                    }
+                }
+                Result.Err(e) => {
+                    print("png: " + e)
+                }
+            }
+        }
+        canvasClearHdr(c)
+        canvasClearLock(c)
+    }
+    SDL_Quit()
+    return 0
+}
+
+fn strToI64(s: &string): i64 {
+    var n = 0
+    for i in 0..s.len {
+        let d = (s[i] as i64) - 48
+        if d >= 0 && d <= 9 {
+            n = n * 10 + d
+        }
+    }
+    return n
+}

@@ -279,6 +279,8 @@ pub let GL_CLAMP_TO_EDGE: i32 = 0x812F
 
 pub let GL_DEPTH_COMPONENT24: u32 = 0x81A6
 
+pub let GL_R32F: i32 = 0x822E
+
 pub let GL_RGBA32F: i32 = 0x8814
 
 pub let GL_RGB32F: i32 = 0x8815

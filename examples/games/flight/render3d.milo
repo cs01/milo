@@ -792,6 +792,10 @@ pub fn drawWorld(c: &mut Canvas, s: &mut Scene, w: &World, ground: &Texture, ski
     // recorded triangles have to hit the buffer first or they would land on top
     // of the contrails instead of behind them.
     rasterFlush(c, s)
+    // From here down the frame stops being 3D: everything below draws straight
+    // into the canvas and leaves no depth behind, so it has to claim its pixels
+    // or the GPU sea (gpupost) composites straight over the top of it.
+    c.locking = true
     drawTrails(c, w, v)
     drawRings(s, w, v)
     drawPlane(c, s, w, v, skin)

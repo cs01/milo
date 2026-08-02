@@ -37,9 +37,17 @@ sound tells you which one you are without looking at the HUD.
 
 ## The hydrant
 
-Every level has four. Touch one and it lights; die and you come back to the last
-one you lit rather than to the start of the level. The treats you had are lost —
-they are still in the level, which is the point of losing them.
+Every level has four. Walk into one and Milo turns his back on it, lifts a leg
+and marks it, and it lights up. Die and you come back to the last one you lit
+rather than to the start of the level. The biscuits you had are lost — they are
+still in the level, which is the point of losing them.
+
+The marking takes about a second and any jump or dash cuts it short, so it is
+never something you have to sit through. The stream is drawn rather than
+simulated: a fixed parabola from the raised hip to the foot of the hydrant with
+droplets marching along it. A spray of physics particles was the obvious way to
+do it and it looked like a dust cloud — what the gag needs is a line you can
+follow. The puddle it leaves dries over the next few seconds.
 
 ## What makes it feel modern
 

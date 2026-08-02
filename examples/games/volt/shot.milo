@@ -33,7 +33,7 @@ from "./world" import {
 }
 from "./render" import {
     drawBackground, drawLevel, drawGoal, drawChecks, drawPickups, drawMobs,
-    drawPlayer, drawBark, drawParts, drawSpeedLines, drawHud
+    drawPlayer, drawPee, drawBark, drawParts, drawSpeedLines, drawHud
 }
 
 pub extern fn fopen(path: *u8, mode: *u8): *u8
@@ -141,10 +141,10 @@ fn sheet(path: &string) {
     let dog = dogFrames()
     let cat = catFrames()
     let bird = birdFrames()
-    let s = 6.0
+    let s = 4.6
     var i = 0
     while i < dog.chi.len {
-        let x = 40.0 + (i as f64) * 130.0
+        let x = 26.0 + (i as f64) * 103.0
         drawSprite(c, dog.chi[i], x, 60.0, s, false, 0.25)
         drawSprite(c, dog.shep[i], x, 200.0, s, false, 0.25)
         i = i + 1
@@ -237,6 +237,7 @@ pub fn main(): i32 {
             drawPickups(c, w, shards, core, bone, 0.0, 0.0)
             drawMobs(c, w, cat, bird, 0.0, 0.0)
             drawPlayer(c, w, dog, 0.0, 0.0)
+            drawPee(c, w, 0.0, 0.0)
             drawBark(c, w, 0.0, 0.0)
             drawParts(c, w, 0.0, 0.0)
             drawSpeedLines(c, w)

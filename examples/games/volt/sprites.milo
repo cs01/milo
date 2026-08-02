@@ -101,7 +101,9 @@ pub let DOG_BARK: i64 = 9
 
 pub let DOG_HURT: i64 = 10
 
-pub let DOG_FRAMES: i64 = 11
+pub let DOG_PEE: i64 = 11
+
+pub let DOG_FRAMES: i64 = 12
 
 // Grid colour indices. 0 is empty and 15 is the outline the last pass writes.
 let C_FUR: i64 = 1
@@ -473,6 +475,9 @@ fn dogSprite(sp: &DogSpec, pal: &Vec<f64>, frame: i64): Sprite {
         headCy = headCy + 1.6
     } else if frame == DOG_HURT {
         headCy = headCy + 1.2
+    } else if frame == DOG_PEE {
+        headCx = headCx - 0.5
+        headCy = headCy + 0.5
     }
 
     // legs first, so the body covers the hips
@@ -504,10 +509,14 @@ fn dogSprite(sp: &DogSpec, pal: &Vec<f64>, frame: i64): Sprite {
     // tail
     let tailBaseX = sp.bodyCx - bodyRx * 0.85
     let tailBaseY = bodyCy - bodyRy * 0.2
-    segment(g, w, h, tailBaseX, tailBaseY, tailBaseX - sp.tailLen * 0.6, tailBaseY - sp.tailRise, sp.tailW, C_FUR)
-    if sp.tailRise > 2.0 {
+    var tailRise = sp.tailRise
+    if frame == DOG_PEE {
+        tailRise = tailRise + 2.2
+    }
+    segment(g, w, h, tailBaseX, tailBaseY, tailBaseX - sp.tailLen * 0.6, tailBaseY - tailRise, sp.tailW, C_FUR)
+    if tailRise > 2.0 {
         // the chihuahua's tail carries on up and over
-        segment(g, w, h, tailBaseX - sp.tailLen * 0.6, tailBaseY - sp.tailRise, tailBaseX - sp.tailLen * 0.15, tailBaseY - sp.tailRise - 1.6, sp.tailW, C_FUR)
+        segment(g, w, h, tailBaseX - sp.tailLen * 0.6, tailBaseY - tailRise, tailBaseX - sp.tailLen * 0.15, tailBaseY - tailRise - 1.6, sp.tailW, C_FUR)
     }
 
     // body
@@ -870,7 +879,7 @@ pub fn coreSprite(): Sprite {
                 // is the whole of a tennis ball.
                 let arcL = Math.abs(Math.sqrt((dx - 2.98) * (dx - 2.98) + dy * dy) - 7.98)
                 let arcR = Math.abs(Math.sqrt((dx + 2.98) * (dx + 2.98) + dy * dy) - 7.98)
-                if arcL < 0.85 || arcR < 0.85 {
+                if (arcL < 0.85 || arcR < 0.85) && Math.abs(dy) < 5.2 {
                     r = 1.30
                     g = 1.30
                     b = 1.15

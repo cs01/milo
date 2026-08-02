@@ -20,6 +20,7 @@ from "./level" import {
 }
 from "./world" import {
     World, Player, Mob, Pickup, Check, Part, Ghost, dogFrameOf, barkPhase,
+    peeSourceX, peeSourceY,
     PLAYER_W, PLAYER_H, MOB_CAT, MOB_BIRD, PK_SHARD, PK_CORE, PK_BONE,
     FORM_CHI, FORM_SHEP, ST_PLAY, ST_CLEAR, ST_DONE
 }
@@ -293,6 +294,17 @@ pub fn drawChecks(c: &mut Canvas, w: &World, hydrant: &Sprite, ox: f64, oy: f64)
         // the hydrant stands on the floor of its tile, not at its centre
         let y = w.checks[i].y - w.camY + oy + TILE * 0.5
         if x > -80.0 && x < (c.w as f64) + 80.0 {
+            if w.checks[i].wet > 0.02 {
+                // a shallow puddle at the foot of it, drying slowly
+                let k = w.checks[i].wet
+                var e = 0
+                while e < 7 {
+                    let t = (e as f64) / 7.0
+                    let rw = (30.0 - t * 22.0) * k
+                    fillRect(c, x - rw, y - 3.0 + t * 5.0, x + rw, y + 1.0 + t * 5.0, 0.55 * k, 0.44 * k, 0.09 * k, 0.22 * k)
+                    e = e + 1
+                }
+            }
             if w.checks[i].lit {
                 let pulse = 0.75 + 0.25 * Math.sin(w.checks[i].t * 4.0)
                 spot(c, x, y - 30.0, 66.0 * pulse, 0.55, 0.42, 0.10)
@@ -404,6 +416,43 @@ pub fn drawBark(c: &mut Canvas, w: &World, ox: f64, oy: f64) {
 
 // Which build is on screen is the only thing the two paths differ by, and it is
 // decided here rather than inside the draw so the frame set can stay borrowed.
+// The stream: droplets marching along a fixed parabola from the raised hip to
+// the foot of the hydrant. Drawn rather than simulated, so it always lands
+// where it is aimed and always reads as one line instead of as a cloud.
+pub fn drawPee(c: &mut Canvas, w: &World, ox: f64, oy: f64) {
+    if w.p.peeT <= 0.0 || w.peeIdx < 0 || w.peeIdx >= w.checks.len {
+        return
+    }
+    let sx = peeSourceX(w) - w.camX + ox
+    let sy = peeSourceY(w) - w.camY + oy
+    let tx = w.checks[w.peeIdx].x - w.camX + ox
+    let ty = w.checks[w.peeIdx].y + 22.0 - w.camY + oy
+    // opens and closes rather than snapping on, which is most of why it is funny
+    let ramp = Math.minF64(1.0, Math.minF64(w.p.peeT * 5.0, (0.95 - w.p.peeT) * 6.0 + 0.15))
+    if ramp <= 0.0 {
+        return
+    }
+    // The arc has to scale with how far away he stood: a fixed height over a
+    // short span throws the stream straight up in the air.
+    let span = Math.abs(tx - sx)
+    let arc = Math.minF64(30.0, span * 0.42)
+    let n = 15
+    let march = (w.t * 5.0) - Math.floor(w.t * 5.0)
+    for i in 0..n {
+        var t = ((i as f64) + march) / (n as f64)
+        if t > 1.0 {
+            t = t - 1.0
+        }
+        let px = sx + (tx - sx) * t
+        let py = sy + (ty - sy) * t - arc * 4.0 * t * (1.0 - t)
+        // the droplets thin out and speed up along the arc
+        let size = (4.2 - t * 1.4) * ramp
+        // Alpha-over, and no glow under it: additive yellow on a bright sky
+        // washes straight to white, and the one thing this has to be is yellow.
+        disc(c, px, py, size, 1.05, 0.72, 0.06, 1.0)
+    }
+}
+
 pub fn drawPlayer(c: &mut Canvas, w: &World, art: &DogArt, ox: f64, oy: f64) {
     if w.p.form == FORM_SHEP {
         drawDog(c, w, art.shep, ox, oy)

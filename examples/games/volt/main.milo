@@ -5,6 +5,7 @@
 //
 //   ARROWS / WASD    move          SPACE / Z / K   jump (hold for height)
 //   SHIFT / X / J    dash          B / C / E       bark
+//   walk into a hydrant and he marks it; jump or dash cuts it short
 //   DOWN             drop through  R  restart      M  music      ESC  quit
 //
 // You are Milo, a chihuahua. Run right, stomp the cats, bark the birds out of
@@ -50,12 +51,12 @@ from "./world" import {
 }
 from "./render" import {
     drawBackground, drawLevel, drawGoal, drawChecks, drawPickups, drawMobs,
-    drawPlayer, drawBark, drawParts, drawSpeedLines, drawHud
+    drawPlayer, drawPee, drawBark, drawParts, drawSpeedLines, drawHud
 }
 from "./sound" import {
     soundNew, musicTick, musicToggle, playJump, playLand, playDash, playShard,
     playCore, playStomp, playDie, playGoal, playPad, playCrash, playBark,
-    playBone, playHurt, playCheck
+    playBone, playHurt, playCheck, playPee
 }
 
 pub let W: i64 = 1280
@@ -179,6 +180,9 @@ pub fn main(): i32 {
         if w.evCheck {
             playCheck(snd)
         }
+        if w.evPee {
+            playPee(snd)
+        }
 
         // Screen shake is applied as a camera offset at draw time, so it never
         // touches the simulation and can never desync collision from what is on
@@ -197,6 +201,7 @@ pub fn main(): i32 {
         drawPickups(c, w, shards, core, bone, ox, oy)
         drawMobs(c, w, cat, bird, ox, oy)
         drawPlayer(c, w, dog, ox, oy)
+        drawPee(c, w, ox, oy)
         drawBark(c, w, ox, oy)
         drawParts(c, w, ox, oy)
         drawSpeedLines(c, w)

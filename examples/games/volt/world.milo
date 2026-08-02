@@ -134,6 +134,10 @@ pub let DEAD_Y: f64 = 96.0
 // Where the player sits vertically once the camera has settled on the ground.
 pub let REST_Y: f64 = 0.58
 
+// Marking the hydrant. Long enough to read as a deliberate act, short enough
+// that nobody resents standing still for it — and any jump or dash cuts it.
+pub let PEE_TIME: f64 = 0.95
+
 pub let FORM_CHI: i64 = 0
 
 pub let FORM_SHEP: i64 = 1
@@ -182,6 +186,7 @@ pub struct Player {
     hurtT: f64,
     barkT: f64,
     barkCd: f64,
+    peeT: f64,
     dead: bool,
     deadT: f64,
     spawnT: f64,
@@ -216,6 +221,7 @@ pub struct Check {
     y: f64,
     lit: bool,
     t: f64,
+    wet: f64, // the puddle, which grows while it is being made and then dries
 }
 
 pub struct Part {
@@ -266,6 +272,7 @@ pub struct World {
     barkY: f64,
     barkRingT: f64,
     barkR: f64,
+    peeIdx: i64,
     shards: i64,
     shardTotal: i64,
     banked: i64,
@@ -291,6 +298,7 @@ pub struct World {
     evBone: bool,
     evHurt: bool,
     evCheck: bool,
+    evPee: bool,
 }
 
 // ── construction ──────────────────────────────────────────────────────────────
@@ -303,7 +311,7 @@ fn playerAt(x: f64, y: f64, form: i64): Player {
         wallDir: 0.0, wallT: 0.0, lockT: 0.0,
         dashT: 0.0, dashCd: 0.0, dashes: 1, dashX: 1.0, dashY: 0.0,
         facing: 1.0, animT: 0.0, sqX: 1.0, sqY: 1.0,
-        form: form, invT: 0.0, hurtT: 0.0, barkT: 0.0, barkCd: 0.0,
+        form: form, invT: 0.0, hurtT: 0.0, barkT: 0.0, barkCd: 0.0, peeT: 0.0,
         dead: false, deadT: 0.0, spawnT: 0.55,
     }
 }
@@ -363,7 +371,7 @@ fn spawnEntities(w: &mut World) {
     i = 0
     while i < w.lvl.checkX.len {
         let ck = Check {
-            x: w.lvl.checkX[i], y: w.lvl.checkY[i], lit: false, t: 0.0
+            x: w.lvl.checkX[i], y: w.lvl.checkY[i], lit: false, t: 0.0, wet: 0.0
         }
         w.checks.push(ck)
         i = i + 1
@@ -382,12 +390,13 @@ pub fn worldNew(lvlIdx: i64, vw: f64, vh: f64): World {
         camX: 0.0, camY: 0.0, vw: vw, vh: vh,
         shake: 0.0, flash: 0.0, hitstop: 0.0,
         spawnX: sx, spawnY: sy,
-        barkX: 0.0, barkY: 0.0, barkRingT: 0.0, barkR: 0.0,
+        barkX: 0.0, barkY: 0.0, barkRingT: 0.0, barkR: 0.0, peeIdx: 0 - 1,
         shards: 0, shardTotal: 0, banked: 0, cores: 0, deaths: 0,
         time: 0.0, t: 0.0, state: ST_PLAY, clearT: 0.0,
         evJump: false, evLand: false, evDash: false, evShard: false, evCore: false,
         evStomp: false, evDie: false, evGoal: false, evPad: false, evBreak: false,
         evWall: false, evBark: false, evBone: false, evHurt: false, evCheck: false,
+        evPee: false,
     }
     spawnEntities(w)
     centreCamera(w)
@@ -795,6 +804,30 @@ fn doBark(w: &mut World) {
     }
 }
 
+// Only the splash. The stream itself is drawn as an explicit arc in the
+// renderer rather than simulated: a spray of physics particles piles up into a
+// dust cloud at this scale, and what this wants is a line you can follow.
+fn peeStream(w: &mut World) {
+    if w.peeIdx < 0 || w.peeIdx >= w.checks.len {
+        return
+    }
+    if Random.float() > 0.3 {
+        return
+    }
+    let hx = w.checks[w.peeIdx].x
+    let hy = w.checks[w.peeIdx].y + 26.0
+    let sp = Part {
+        x: hx + Random.floatRange(0.0 - 8.0, 8.0), y: hy,
+        vx: Random.floatRange(0.0 - 45.0, 45.0),
+        vy: Random.floatRange(0.0 - 80.0, 0.0 - 30.0),
+        life: 0.24, max: 0.24,
+        r: 0.46, g: 0.35, b: 0.06,
+        size: Random.floatRange(0.9, 1.5),
+        grav: 900.0,
+    }
+    w.parts.push(sp)
+}
+
 fn updatePlayer(w: &mut World, dt: f64, moveX: f64, down: bool, jump: bool, jumpHeld: bool, dash: bool, bark: bool) {
     // Ground state is recomputed every frame from the collision pass below.
     let wasGround = w.p.onGround
@@ -827,6 +860,15 @@ fn updatePlayer(w: &mut World, dt: f64, moveX: f64, down: bool, jump: bool, jump
     if w.p.barkCd > 0.0 {
         w.p.barkCd = w.p.barkCd - dt
     }
+    if w.p.peeT > 0.0 {
+        // Cancellable: a jump or a dash is always more urgent than a hydrant.
+        if jump || dash || !w.p.onGround {
+            w.p.peeT = 0.0
+        } else {
+            w.p.peeT = w.p.peeT - dt
+            peeStream(w)
+        }
+    }
     w.p.buffer = w.p.buffer - dt
     if jump {
         w.p.buffer = BUFFER
@@ -837,6 +879,11 @@ fn updatePlayer(w: &mut World, dt: f64, moveX: f64, down: bool, jump: bool, jump
     }
 
     var mx = moveX
+    if w.p.peeT > 0.0 {
+        // Standing still is the animation. Letting the stick drive here would
+        // slide the dog out from under his own stream.
+        mx = 0.0
+    }
     if w.p.lockT > 0.0 {
         // After a wall jump the stick is ignored for a moment, or holding
         // "into the wall" would cancel the push-off and stick you to it.
@@ -1211,6 +1258,11 @@ fn hitChecks(w: &mut World, dt: f64) {
     var i = 0
     while i < w.checks.len {
         w.checks[i].t = w.checks[i].t + dt
+        if i == w.peeIdx && w.p.peeT > 0.0 {
+            w.checks[i].wet = Math.minF64(1.0, w.checks[i].wet + dt * 1.8)
+        } else if w.checks[i].wet > 0.0 {
+            w.checks[i].wet = Math.maxF64(0.0, w.checks[i].wet - dt * 0.10)
+        }
         if !w.checks[i].lit && !w.p.dead {
             let dx = w.checks[i].x - (w.p.x + PLAYER_W * 0.5)
             let dy = w.checks[i].y - (w.p.y + PLAYER_H * 0.5)
@@ -1221,6 +1273,18 @@ fn hitChecks(w: &mut World, dt: f64) {
                 w.flash = Math.maxF64(w.flash, 0.35)
                 burst(w, w.checks[i].x, w.checks[i].y - 21.0, 20, 440.0, 0.5, 1.3, 1.6)
                 w.evCheck = true
+                // Face away from it and lift a leg. A dog marks with his back to
+                // the thing, so the facing is the opposite of the approach.
+                if w.p.onGround {
+                    w.p.peeT = PEE_TIME
+                    w.peeIdx = i
+                    w.p.facing = if dx > 0.0 {
+                        0.0 - 1.0
+                    } else {
+                        1.0
+                    }
+                    w.evPee = true
+                }
             }
         }
         i = i + 1
@@ -1261,6 +1325,7 @@ fn clearEvents(w: &mut World) {
     w.evBone = false
     w.evHurt = false
     w.evCheck = false
+    w.evPee = false
 }
 
 pub fn worldUpdate(w: &mut World, dt: f64, moveX: f64, down: bool, jump: bool, jumpHeld: bool, dash: bool, bark: bool) {
@@ -1366,6 +1431,16 @@ fn updateCamera(w: &mut World, dt: f64) {
     w.camY = clampCamY(w, w.camY + (ty - w.camY) * ky)
 }
 
+// Where the stream starts: the raised hip, which is at the tail end because he
+// is standing with his back to the hydrant.
+pub fn peeSourceX(w: &World): f64 {
+    return w.p.x + PLAYER_W * 0.5 - w.p.facing * 20.0
+}
+
+pub fn peeSourceY(w: &World): f64 {
+    return w.p.y + PLAYER_H * 0.52
+}
+
 // How far the bark ring has travelled, 0 at the nose and 1 at full radius.
 pub fn barkPhase(w: &World): f64 {
     if w.barkRingT <= 0.0 {
@@ -1379,6 +1454,9 @@ pub fn barkPhase(w: &World): f64 {
 pub fn dogFrameOf(w: &World): i64 {
     if w.p.hurtT > 0.0 {
         return 10
+    }
+    if w.p.peeT > 0.0 && w.p.onGround {
+        return 11
     }
     if w.p.barkT > 0.0 && w.p.onGround {
         return 9

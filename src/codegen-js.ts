@@ -76,6 +76,14 @@ export class CodegenJS {
   // strings, bools) that are taken by `&mut`/`&` must share mutations across the call,
   // which JS by-value passing can't do. Ref params + ref-taken locals become boxes.
   private boxed: Set<string> = new Set();
+  // Every top-level function name, and the locals renamed because they collide with
+  // one. Milo lets `let lenBase = lenBase()` mean "call the function, bind a new
+  // local"; JS reads it as a self-referential `const` and throws a TDZ
+  // ReferenceError at the call. std/inflate does exactly this, so the whole PNG
+  // path crashed under emit-js. The rename is registered AFTER the initializer is
+  // generated, which is what lets the call in it still resolve to the function.
+  private fnNames: Set<string> = new Set();
+  private renamed: Map<string, string> = new Map();
   // Set for the duration of a `@wrapping` function, mirroring codegen.ts: + - * and
   // unary neg use defined modular arithmetic instead of trapping, and an over-shift
   // is masked into range. Division by zero and bounds still trap.
@@ -85,6 +93,21 @@ export class CodegenJS {
   // build). Off by default so `milo emit-js` output — e.g. the browser emulators —
   // carries no contract overhead; the playground opts in.
   constructor(private emitContracts = false) {}
+
+  // The JS name a local binds to, renaming it out of the way of a same-named
+  // top-level function. Call sites emit the function's name directly, so only
+  // value references need the map.
+  private bindLocal(name: string): string {
+    if (!this.fnNames.has(name)) return name;
+    const js = `${name}__local`;
+    this.renamed.set(name, js);
+    return js;
+  }
+
+  // A value reference to a name, after any such rename.
+  private localRef(name: string): string {
+    return this.renamed.get(name) ?? name;
+  }
 
   // JS-immutable primitive → needs a box to be shared by reference. Objects (struct/
   // vec/map/enum) are already reference types, so a `&mut` to them works as-is.
@@ -163,6 +186,8 @@ export class CodegenJS {
       this.emit(`const __itable = {\n${entries.join(",\n")}\n};`);
       this.emit("");
     }
+
+    for (const fn of module.functions) this.fnNames.add(fn.name);
 
     // module-level globals (e.g. lookup tables). Emit before functions: function
     // decls hoist, so a global initializer may reference a function declared later,
@@ -244,6 +269,8 @@ export class CodegenJS {
     this.collectRefTaken(fn.body, boxed);
     const prevBoxed = this.boxed;
     this.boxed = boxed;
+    const prevRenamed = this.renamed;
+    this.renamed = new Map();
     const prevWrapping = this.currentFnWrapping;
     this.currentFnWrapping = !!fn.isWrapping;
     const prevOutput = this.output;
@@ -270,6 +297,7 @@ export class CodegenJS {
     this.usedPropagate = prevUsed;
     this.output = prevOutput;
     this.boxed = prevBoxed;
+    this.renamed = prevRenamed;
     this.currentFnWrapping = prevWrapping;
 
     for (const cond of requireChecks)
@@ -305,14 +333,16 @@ export class CodegenJS {
   private genStmt(stmt: HIRStmt) {
     switch (stmt.kind) {
       case "Let": {
+        // Initializer first, THEN the rename — see the note on `fnNames`.
         const val = this.genExpr(stmt.value);
+        const js = this.bindLocal(stmt.name);
         if (this.boxed.has(stmt.name)) {
           // ref-taken primitive local: box it so callees mutating `&mut name` write back.
-          this.emit(`const ${stmt.name} = {v: ${val}};`);
+          this.emit(`const ${js} = {v: ${val}};`);
           break;
         }
         const kw = stmt.mutable ? "let" : "const";
-        this.emit(`${kw} ${stmt.name} = ${val};`);
+        this.emit(`${kw} ${js} = ${val};`);
         break;
       }
       case "Assign": {
@@ -517,7 +547,7 @@ export class CodegenJS {
       case "StringLit":
         return jsByteString(expr.value);
       case "Ident":
-        return this.boxed.has(expr.name) ? `${expr.name}.v` : expr.name;
+        return this.boxed.has(expr.name) ? `${this.localRef(expr.name)}.v` : this.localRef(expr.name);
       case "BinOp":
         return this.genBinOp(expr);
       case "UnaryOp": {
@@ -643,6 +673,11 @@ export class CodegenJS {
         // multi-byte character yields two Latin-1 chars instead. Fixing it properly
         // needs Milo strings represented as byte arrays in JS, not JS strings.
         return `(${this.genExpr(expr.str)} += String.fromCharCode(${this.genExpr(expr.byte)}))`;
+      case "StringPushStr":
+        // Both operands are already in the backend's byte-string form, so this is
+        // plain concatenation — none of StringPush's per-byte reinterpretation
+        // applies, and unlike that case it is correct for non-ASCII too.
+        return `(${this.genExpr(expr.str)} += ${this.genExpr(expr.other)})`;
       case "StringSubstr":
       case "StringSlice":
         // Byte offsets — see the byte-string note in the runtime.
@@ -999,7 +1034,7 @@ export class CodegenJS {
   private genLValue(expr: HIRExpr): string {
     switch (expr.kind) {
       case "Ident":
-        return this.boxed.has(expr.name) ? `${expr.name}.v` : expr.name;
+        return this.boxed.has(expr.name) ? `${this.localRef(expr.name)}.v` : this.localRef(expr.name);
       case "FieldAccess":
         return `${this.genLValue(expr.object)}.${expr.field}`;
       case "IndexAccess":

@@ -241,7 +241,7 @@ pub fn main(): i32 {
             drawParts(c, w, 0.0, 0.0)
             drawSpeedLines(c, w)
             drawHud(c, w, shards[0], bone, 60)
-            present(c, 0.55, 1.15, 0.62)
+            present(c, 0.28, 1.0, 2.2)
             writePpm(prefix + "-" + frame.toString() + ".ppm", c)
             print("wrote " + prefix + "-" + frame.toString() + ".ppm")
         }

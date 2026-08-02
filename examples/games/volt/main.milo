@@ -210,13 +210,14 @@ pub fn main(): i32 {
         }
         drawHud(c, w, shards[0], bone, fpsShown)
 
-        var exposure = 1.15
+        var exposure = 1.0
         if w.flash > 0.0 {
-            exposure = exposure + w.flash * 0.9
+            exposure = exposure + w.flash * 0.7
         }
-        // A high bloom threshold: solid art fills most of the frame, and a low
-        // one would fog the level instead of lighting the neon in it.
-        present(c, 0.55, exposure, 0.62)
+        // The threshold sits above the sky. Daylight art is bright everywhere,
+        // and a low threshold would bloom the blue into white fog instead of
+        // lighting the few things that are actually emitting.
+        present(c, 0.28, exposure, 2.2)
 
         unsafe {
             SDL_UpdateTexture(tex, 0 as *u8, c.fb[0].addrOf() as *u8, (W * 4) as i32)

@@ -1,11 +1,11 @@
-// Terrain tiles, generated at startup. 16 art pixels square, drawn at 2x, so a
-// tile is 32 screen pixels and the art grid and the collision grid are the same
-// grid — there is no sub-tile alignment to get wrong.
+// Terrain tiles, generated at startup. 16 art pixels square, drawn at ART, so
+// a tile is 64 screen pixels and the art grid and the collision grid are the
+// same grid — there is no sub-tile alignment to get wrong.
 //
-// Ground comes in two variants picked by what is above it: a capped tile with a
-// lit edge, and a buried fill tile. That is the whole autotiler, and at this
-// scale it is enough — the lit cap is what makes a platform read as a surface
-// you can stand on.
+// Ground comes in two variants picked by what is above it: a capped tile with
+// grass on top, and a buried dirt tile. That is the whole autotiler, and at
+// this scale it is enough — the grass is what makes a surface read as one you
+// can stand on.
 
 from "std/math" import {
     Math
@@ -16,12 +16,19 @@ from "./gfx" import {
 
 pub let TILE_ART: i64 = 16
 
-// A tile is 16 art pixels drawn at 3x. Everything in world.milo is expressed in
-// world pixels, so this number sets the scale of the whole game: raise it and
-// the camera comes in closer, at the cost of seeing less of the jump ahead.
-pub let TILE: f64 = 48.0
+// Art pixels to screen pixels, and the tile size that follows from it. This is
+// the one number that sets how close the camera is: raise it and everything
+// comes in nearer, at the cost of seeing less of the jump ahead. At 4x a
+// 1280-wide window shows 20 tiles, which is about what Mario showed.
+pub let ART: f64 = 4.0
 
-pub let TILE_I: i64 = 48
+pub let TILE: f64 = 64.0
+
+pub let TILE_I: i64 = 64
+
+// Characters are drawn a little larger than the world they stand in. Strictly
+// wrong, and it is what makes them read as the thing you are looking at.
+pub let CHAR_ART: f64 = 4.6
 
 // Bit-mixing hash. Wrapping by declaration: this is *supposed* to overflow, and
 // Milo traps on overflow by default.
@@ -62,42 +69,47 @@ pub struct TileSet {
     pad: Sprite,
 }
 
-// Rock, two octaves of noise over a dark base. The top three rows of the capped
-// variant are lit by a cyan rim that fades down — a light source implied rather
-// than computed, which costs nothing and sells the depth.
+// Earth, two octaves of noise over a warm brown. The capped variant wears four
+// rows of grass with a ragged lower edge — the ragged line is what stops a
+// hillside from reading as a stack of identical boxes.
 fn rockTile(capped: bool, seed: i64): Sprite {
     var s = spriteNew(TILE_ART, TILE_ART)
     for y in 0..TILE_ART {
         for x in 0..TILE_ART {
             let u = (x as f64) * 0.5
             let v = (y as f64) * 0.5
-            var n = valueNoise(u, v, seed) * 0.62 + valueNoise(u * 2.3, v * 2.3, seed + 7) * 0.38
-            // Dark on purpose: the dog is a small brown animal and the ground
-            // is most of the screen, so the rock has to sit well under him.
-            var r = 0.030 + n * 0.042
-            var g = 0.038 + n * 0.050
-            var b = 0.062 + n * 0.074
+            let n = valueNoise(u, v, seed) * 0.62 + valueNoise(u * 2.3, v * 2.3, seed + 7) * 0.38
+            var r = 0.230 + n * 0.170
+            var g = 0.150 + n * 0.115
+            var b = 0.075 + n * 0.060
+            // a few darker pebbles in the dirt
+            if n > 0.78 {
+                r = r * 0.72
+                g = g * 0.70
+                b = b * 0.68
+            }
             if capped {
-                if y == 0 {
-                    r = 0.22 + n * 0.22
-                    g = 0.72 + n * 0.40
-                    b = 0.92 + n * 0.34
-                } else if y == 1 {
-                    r = 0.09 + n * 0.09
-                    g = 0.22 + n * 0.15
-                    b = 0.29 + n * 0.15
-                } else if y == 2 {
-                    r = r + 0.03
-                    g = g + 0.05
-                    b = b + 0.07
+                let blade = valueNoise((x as f64) * 1.7, 0.0, seed + 3)
+                let grassDepth = 3.0 + blade * 2.6
+                if (y as f64) < grassDepth {
+                    let t = (y as f64) / grassDepth
+                    // bright at the tips, deeper green underneath
+                    r = 0.180 + (1.0 - t) * 0.320 + n * 0.10
+                    g = 0.620 + (1.0 - t) * 0.900 + n * 0.14
+                    b = 0.140 + (1.0 - t) * 0.180 + n * 0.06
+                } else if (y as f64) < grassDepth + 1.0 {
+                    // the shadow the grass casts on the earth under it
+                    r = r * 0.68
+                    g = g * 0.70
+                    b = b * 0.72
                 }
             }
             // a darker seam at the tile border keeps a wall of tiles from
             // melting into one flat field
             if x == 0 || y == TILE_ART - 1 {
-                r = r * 0.62
-                g = g * 0.62
-                b = b * 0.66
+                r = r * 0.80
+                g = g * 0.80
+                b = b * 0.82
             }
             spriteSet(s, x, y, r, g, b, 1.0)
         }
@@ -112,23 +124,25 @@ fn platformTile(): Sprite {
     for y in 0..6 {
         for x in 0..TILE_ART {
             let n = valueNoise((x as f64) * 0.7, (y as f64) * 0.7, 31)
-            var r = 0.16 + n * 0.10
-            var g = 0.19 + n * 0.12
-            var b = 0.27 + n * 0.16
+            var r = 0.52 + n * 0.20
+            var g = 0.34 + n * 0.14
+            var b = 0.16 + n * 0.08
             if y == 0 {
-                r = 0.70
-                g = 0.35
-                b = 1.10
+                // a sunlit top edge, so you can tell what you can land on
+                r = 0.95
+                g = 0.72 + n * 0.10
+                b = 0.42
             }
-            if y == 1 {
-                r = 0.24
-                g = 0.16
-                b = 0.38
+            // the grain
+            if y == 2 || y == 4 {
+                r = r * 0.82
+                g = g * 0.80
+                b = b * 0.80
             }
             if y == 5 {
-                r = r * 0.45
-                g = g * 0.45
-                b = b * 0.5
+                r = r * 0.55
+                g = g * 0.52
+                b = b * 0.50
             }
             spriteSet(s, x, y, r, g, b, 1.0)
         }
@@ -136,8 +150,8 @@ fn platformTile(): Sprite {
     return s
 }
 
-// Four teeth per tile. Hot at the tip, dark at the base — the eye reads the
-// bright line as the dangerous end without being told.
+// Four teeth per tile. Bright at the tip, dark at the base — the eye reads the
+// glinting line as the dangerous end without being told.
 fn spikeTile(): Sprite {
     var s = spriteNew(TILE_ART, TILE_ART)
     for y in 0..TILE_ART {
@@ -149,8 +163,9 @@ fn spikeTile(): Sprite {
             let allow = (y as f64) / (TILE_ART as f64) * 2.0
             if d <= allow {
                 let t = (y as f64) / ((TILE_ART - 1) as f64)
-                let heat = 1.0 - t
-                spriteSet(s, x, y, 0.15 + heat * heat * 2.10, 0.10 + heat * heat * 0.55, 0.18 + heat * heat * 0.30, 1.0)
+                let up = 1.0 - t
+                // iron: dark at the base, a hard white glint at the point
+                spriteSet(s, x, y, 0.20 + up * up * 1.10, 0.21 + up * up * 1.15, 0.26 + up * up * 1.20, 1.0)
             }
         }
     }
@@ -192,7 +207,7 @@ fn padTile(): Sprite {
         for x in 0..TILE_ART {
             if y < 4 {
                 let t = (y as f64) / 3.0
-                spriteSet(s, x, y, 1.60 * (1.0 - t * 0.5), 1.10 * (1.0 - t * 0.4), 0.30, 1.0)
+                spriteSet(s, x, y, 1.70 * (1.0 - t * 0.4), 0.55 * (1.0 - t * 0.3), 0.30, 1.0)
             } else if y < 12 {
                 // zigzag coil
                 let band = (y - 4) / 2
@@ -202,10 +217,10 @@ fn padTile(): Sprite {
                     x % 6 >= 3
                 }
                 if on {
-                    spriteSet(s, x, y, 0.42, 0.34, 0.16, 1.0)
+                    spriteSet(s, x, y, 0.72, 0.62, 0.30, 1.0)
                 }
             } else {
-                spriteSet(s, x, y, 0.10, 0.09, 0.13, 1.0)
+                spriteSet(s, x, y, 0.30, 0.22, 0.14, 1.0)
             }
         }
     }

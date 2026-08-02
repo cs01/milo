@@ -38,25 +38,25 @@ from "./tiles" import {
 
 // ── tuning ────────────────────────────────────────────────────────────────────
 //
-// Lengths are in world pixels and a tile is 48 of them, so every number here is
+// Lengths are in world pixels and a tile is 64 of them, so every number here is
 // really a number of tiles. Changing TILE alone would change the game's feel;
 // these move with it.
 
-pub let GRAVITY: f64 = 3225.0
+pub let GRAVITY: f64 = 4300.0
 
-pub let MAX_FALL: f64 = 1410.0
+pub let MAX_FALL: f64 = 1880.0
 
-pub let RUN_SPEED: f64 = 458.0
+pub let RUN_SPEED: f64 = 611.0
 
-pub let RUN_ACCEL: f64 = 3900.0
+pub let RUN_ACCEL: f64 = 5200.0
 
-pub let AIR_ACCEL: f64 = 2625.0
+pub let AIR_ACCEL: f64 = 3500.0
 
-pub let GROUND_FRICTION: f64 = 4350.0
+pub let GROUND_FRICTION: f64 = 5800.0
 
-pub let AIR_DRAG: f64 = 930.0
+pub let AIR_DRAG: f64 = 1240.0
 
-pub let JUMP_VEL: f64 = 990.0
+pub let JUMP_VEL: f64 = 1320.0
 
 pub let JUMP_CUT: f64 = 0.42 // vy kept when the jump key is released early
 
@@ -68,17 +68,17 @@ pub let BUFFER: f64 = 0.15
 
 // Near the apex the arc is the part a player actually aims with, so it gets
 // stretched: weaker gravity and stronger air control for a moment.
-pub let APEX_SPEED: f64 = 165.0
+pub let APEX_SPEED: f64 = 220.0
 
-pub let WALL_SLIDE_MAX: f64 = 248.0
+pub let WALL_SLIDE_MAX: f64 = 331.0
 
-pub let WALL_JUMP_VX: f64 = 540.0
+pub let WALL_JUMP_VX: f64 = 720.0
 
-pub let WALL_JUMP_VY: f64 = 923.0
+pub let WALL_JUMP_VY: f64 = 1231.0
 
 pub let WALL_LOCK: f64 = 0.15
 
-pub let DASH_SPEED: f64 = 1185.0
+pub let DASH_SPEED: f64 = 1580.0
 
 pub let DASH_TIME: f64 = 0.145
 
@@ -86,21 +86,21 @@ pub let DASH_KEEP: f64 = 0.46 // fraction of dash speed left when it ends
 
 pub let DASH_COOL: f64 = 0.14
 
-pub let STOMP_BOUNCE: f64 = 878.0
+pub let STOMP_BOUNCE: f64 = 1171.0
 
-pub let PAD_BOUNCE: f64 = 1620.0
+pub let PAD_BOUNCE: f64 = 2160.0
 
 // The hitbox is three quarters of a tile square and the dog is drawn larger
 // than it — the art overhangs the box on every side, so what looks like a near
 // miss is a miss.
-pub let PLAYER_W: f64 = 36.0
+pub let PLAYER_W: f64 = 48.0
 
-pub let PLAYER_H: f64 = 36.0
+pub let PLAYER_H: f64 = 48.0
 
 // Collision substep. A dash covers 1185 px/s, which at a 50 ms frame is more
 // than a whole tile — resolving that in one step would tunnel straight through
 // a wall, so movement is chopped into pieces smaller than a tile.
-pub let STEP_MAX: f64 = 10.0
+pub let STEP_MAX: f64 = 13.0
 
 // ── the bark ──
 //
@@ -111,9 +111,9 @@ pub let BARK_COOL: f64 = 0.45
 
 pub let BARK_TIME: f64 = 0.26 // how long the frame and the ring last
 
-pub let BARK_R_CHI: f64 = 96.0
+pub let BARK_R_CHI: f64 = 128.0
 
-pub let BARK_R_SHEP: f64 = 168.0
+pub let BARK_R_SHEP: f64 = 224.0
 
 // After a hit you are solid light for a moment and nothing can touch you. Long
 // enough to walk out of a spike pit, which is exactly what it is for.
@@ -121,9 +121,18 @@ pub let INVULN: f64 = 1.7
 
 pub let HURT_TIME: f64 = 0.45
 
-pub let HURT_KNOCK_X: f64 = 300.0
+pub let HURT_KNOCK_X: f64 = 400.0
 
-pub let HURT_KNOCK_Y: f64 = 560.0
+pub let HURT_KNOCK_Y: f64 = 747.0
+
+// How far the player may travel from the centre of the screen before the
+// camera moves at all. Roughly two tiles across and one and a half down.
+pub let DEAD_X: f64 = 130.0
+
+pub let DEAD_Y: f64 = 96.0
+
+// Where the player sits vertically once the camera has settled on the ground.
+pub let REST_Y: f64 = 0.58
 
 pub let FORM_CHI: i64 = 0
 
@@ -307,9 +316,9 @@ fn spawnEntities(w: &mut World) {
     while i < w.lvl.catX.len {
         let m = Mob {
             kind: MOB_CAT,
-            x: w.lvl.catX[i] - 21.0, y: w.lvl.catY[i] - 6.0,
-            w: 42.0, h: 30.0,
-            vx: 74.0, baseX: w.lvl.catX[i], baseY: w.lvl.catY[i],
+            x: w.lvl.catX[i] - 28.0, y: w.lvl.catY[i] - 8.0,
+            w: 56.0, h: 40.0,
+            vx: 99.0, baseX: w.lvl.catX[i], baseY: w.lvl.catY[i],
             phase: (i as f64) * 1.7, alive: true, dieT: 0.0,
         }
         w.mobs.push(m)
@@ -319,8 +328,8 @@ fn spawnEntities(w: &mut World) {
     while i < w.lvl.birdX.len {
         let m = Mob {
             kind: MOB_BIRD,
-            x: w.lvl.birdX[i] - 21.0, y: w.lvl.birdY[i] - 15.0,
-            w: 42.0, h: 30.0,
+            x: w.lvl.birdX[i] - 28.0, y: w.lvl.birdY[i] - 20.0,
+            w: 56.0, h: 40.0,
             vx: 0.0, baseX: w.lvl.birdX[i], baseY: w.lvl.birdY[i],
             phase: (i as f64) * 2.1, alive: true, dieT: 0.0,
         }
@@ -431,7 +440,7 @@ pub fn worldRetry(w: &mut World) {
 
 pub fn centreCamera(w: &mut World) {
     w.camX = clampCamX(w, w.p.x + PLAYER_W * 0.5 - w.vw * 0.5)
-    w.camY = clampCamY(w, w.p.y + PLAYER_H * 0.5 - w.vh * 0.55)
+    w.camY = clampCamY(w, w.p.y + PLAYER_H * 0.5 - w.vh * REST_Y)
 }
 
 fn clampCamX(w: &World, x: f64): f64 {
@@ -479,7 +488,7 @@ fn burst(w: &mut World, x: f64, y: f64, n: i64, speed: f64, r: f64, g: f64, b: f
             life: life, max: life,
             r: r, g: g, b: b,
             size: Random.floatRange(1.6, 3.4),
-            grav: 570.0,
+            grav: 760.0,
         }
         w.parts.push(pt)
     }
@@ -614,8 +623,8 @@ fn touchingWall(p: &Player, l: &Level, dir: f64): bool {
     let cx = cellOf(probe)
     // Ignore the top and bottom few pixels so a wall does not "grab" from a
     // corner the player is only clipping.
-    let y0 = cellOf(p.y + 4.0)
-    let y1 = cellOf(p.y + PLAYER_H - 6.0)
+    let y0 = cellOf(p.y + 5.0)
+    let y1 = cellOf(p.y + PLAYER_H - 8.0)
     for cy in y0..y1 + 1 {
         if isSolid(l, cx, cy) {
             return true
@@ -627,10 +636,10 @@ fn touchingWall(p: &Player, l: &Level, dir: f64): bool {
 fn overlapsSpike(p: &Player, l: &Level): bool {
     // Spikes get a forgiving box: the hitbox is inset a good third of the body
     // all round, so brushing the edge of a tooth is not a hit.
-    let x0 = cellOf(p.x + 11.0)
-    let x1 = cellOf(p.x + PLAYER_W - 12.0)
-    let y0 = cellOf(p.y + 11.0)
-    let y1 = cellOf(p.y + PLAYER_H - 4.0)
+    let x0 = cellOf(p.x + 15.0)
+    let x1 = cellOf(p.x + PLAYER_W - 16.0)
+    let y0 = cellOf(p.y + 15.0)
+    let y1 = cellOf(p.y + PLAYER_H - 5.0)
     for cy in y0..y1 + 1 {
         for cx in x0..x1 + 1 {
             if tileAt(l, cx, cy) == T_SPIKE {
@@ -648,7 +657,7 @@ fn breakCrateAt(w: &mut World, cx: i64, cy: i64) {
     setTile(w.lvl, cx, cy, T_EMPTY)
     let px = ((cx as f64) + 0.5) * TILE
     let py = ((cy as f64) + 0.5) * TILE
-    burst(w, px, py, 16, 390.0, 0.95, 0.55, 0.18)
+    burst(w, px, py, 16, 520.0, 0.95, 0.55, 0.18)
     w.shake = w.shake + 5.0
     w.evBreak = true
 }
@@ -683,7 +692,7 @@ fn killPlayer(w: &mut World) {
     w.shake = w.shake + 16.0
     w.flash = 0.9
     w.hitstop = 0.09
-    burst(w, w.p.x + PLAYER_W * 0.5, w.p.y + PLAYER_H * 0.5, 34, 630.0, 1.6, 0.35, 0.55)
+    burst(w, w.p.x + PLAYER_W * 0.5, w.p.y + PLAYER_H * 0.5, 34, 840.0, 1.6, 0.35, 0.55)
     w.evDie = true
 }
 
@@ -711,7 +720,7 @@ fn hurtPlayer(w: &mut World, fromX: f64) {
         w.shake = w.shake + 12.0
         w.flash = Math.maxF64(w.flash, 0.55)
         w.hitstop = 0.07
-        burst(w, w.p.x + PLAYER_W * 0.5, w.p.y + PLAYER_H * 0.5, 24, 480.0, 1.5, 0.75, 0.25)
+        burst(w, w.p.x + PLAYER_W * 0.5, w.p.y + PLAYER_H * 0.5, 24, 640.0, 1.5, 0.75, 0.25)
         w.evHurt = true
     } else {
         killPlayer(w)
@@ -874,7 +883,7 @@ fn updatePlayer(w: &mut World, dt: f64, moveX: f64, down: bool, jump: bool, jump
         w.p.sqY = 0.62
         w.shake = w.shake + 4.0
         w.evDash = true
-        puff(w, w.p.x + PLAYER_W * 0.5, w.p.y + PLAYER_H * 0.5, 12, 285.0, 1.5, 0.9, 0.5, 2.4, 60.0)
+        puff(w, w.p.x + PLAYER_W * 0.5, w.p.y + PLAYER_H * 0.5, 12, 380.0, 1.5, 0.9, 0.5, 2.4, 80.0)
     }
 
     let dashing = w.p.dashT > 0.0
@@ -928,7 +937,7 @@ fn updatePlayer(w: &mut World, dt: f64, moveX: f64, down: bool, jump: bool, jump
                 } else {
                     w.p.x
                 }
-                puff(w, sx, w.p.y + Random.floatRange(9.0, 30.0), 1, 45.0, 0.9, 0.9, 1.2, 1.6, 180.0)
+                puff(w, sx, w.p.y + Random.floatRange(12.0, 40.0), 1, 60.0, 0.9, 0.9, 1.2, 1.6, 180.0)
             }
         }
 
@@ -942,7 +951,7 @@ fn updatePlayer(w: &mut World, dt: f64, moveX: f64, down: bool, jump: bool, jump
                 w.p.sqX = 0.72
                 w.p.sqY = 1.38
                 w.evJump = true
-                puff(w, w.p.x + PLAYER_W * 0.5, w.p.y + PLAYER_H, 8, 165.0, 0.8, 0.85, 1.1, 2.2, 390.0)
+                puff(w, w.p.x + PLAYER_W * 0.5, w.p.y + PLAYER_H, 8, 220.0, 0.8, 0.85, 1.1, 2.2, 520.0)
             } else if w.p.wallT > 0.0 && w.p.wallDir != 0.0 {
                 w.p.vy = 0.0 - WALL_JUMP_VY
                 w.p.vx = 0.0 - w.p.wallDir * WALL_JUMP_VX
@@ -960,7 +969,7 @@ fn updatePlayer(w: &mut World, dt: f64, moveX: f64, down: bool, jump: bool, jump
                 } else {
                     w.p.x
                 }
-                puff(w, sx, w.p.y + PLAYER_H * 0.6, 12, 255.0, 1.0, 0.95, 1.4, 2.4, 300.0)
+                puff(w, sx, w.p.y + PLAYER_H * 0.6, 12, 340.0, 1.0, 0.95, 1.4, 2.4, 400.0)
             }
         }
         // Releasing the key early cuts the rise — the whole of variable jump
@@ -1026,7 +1035,7 @@ fn updatePlayer(w: &mut World, dt: f64, moveX: f64, down: bool, jump: bool, jump
             w.p.sqX = 1.28
             w.p.sqY = 0.74
             w.evLand = true
-            puff(w, w.p.x + PLAYER_W * 0.5, w.p.y + PLAYER_H, 7, 135.0 + speed * 0.2, 0.85, 0.9, 1.15, 2.2, 480.0)
+            puff(w, w.p.x + PLAYER_W * 0.5, w.p.y + PLAYER_H, 7, 180.0 + speed * 0.2, 0.85, 0.9, 1.15, 2.2, 640.0)
         }
     }
 
@@ -1040,14 +1049,14 @@ fn updatePlayer(w: &mut World, dt: f64, moveX: f64, down: bool, jump: bool, jump
         w.p.sqY = 1.55
         w.shake = w.shake + 7.0
         w.evPad = true
-        puff(w, w.p.x + PLAYER_W * 0.5, w.p.y + PLAYER_H, 18, 390.0, 1.7, 1.2, 0.35, 2.8, 390.0)
+        puff(w, w.p.x + PLAYER_W * 0.5, w.p.y + PLAYER_H, 18, 520.0, 1.7, 1.2, 0.35, 2.8, 520.0)
     }
 
     breakCrates(w)
 
     // running dust
-    if w.p.onGround && Math.abs(w.p.vx) > 285.0 && Random.float() < 0.5 {
-        puff(w, w.p.x + PLAYER_W * 0.5, w.p.y + PLAYER_H - 1.0, 1, 60.0, 0.7, 0.75, 0.95, 1.8, 300.0)
+    if w.p.onGround && Math.abs(w.p.vx) > 380.0 && Random.float() < 0.5 {
+        puff(w, w.p.x + PLAYER_W * 0.5, w.p.y + PLAYER_H - 1.0, 1, 80.0, 0.7, 0.75, 0.95, 1.8, 400.0)
     }
 
     // squash springs back
@@ -1060,7 +1069,7 @@ fn updatePlayer(w: &mut World, dt: f64, moveX: f64, down: bool, jump: bool, jump
         // hit and a shove, not the end of the run.
         hurtPlayer(w, w.p.x + PLAYER_W * 0.5 + w.p.facing * TILE)
     }
-    if w.p.y > (w.lvl.rows as f64) * TILE + 120.0 {
+    if w.p.y > (w.lvl.rows as f64) * TILE + 160.0 {
         killPlayer(w)
     }
 }
@@ -1078,13 +1087,13 @@ fn updateMobs(w: &mut World, dt: f64) {
             // Turn at a wall, and turn at a ledge: a cat that walks off its own
             // platform is a cat the player never meets.
             let aheadX = if w.mobs[i].vx > 0.0 {
-                nx + w.mobs[i].w + 3.0
+                nx + w.mobs[i].w + 4.0
             } else {
-                nx - 3.0
+                nx - 4.0
             }
             let cxAhead = cellOf(aheadX)
             let cyBody = cellOf(w.mobs[i].y + w.mobs[i].h * 0.5)
-            let cyBelow = cellOf(w.mobs[i].y + w.mobs[i].h + 6.0)
+            let cyBelow = cellOf(w.mobs[i].y + w.mobs[i].h + 8.0)
             if isSolid(w.lvl, cxAhead, cyBody) || !isSolid(w.lvl, cxAhead, cyBelow) {
                 w.mobs[i].vx = 0.0 - w.mobs[i].vx
             } else {
@@ -1096,8 +1105,8 @@ fn updateMobs(w: &mut World, dt: f64) {
             // bird: a slow sweep with a bob, entirely scripted off its phase so
             // it never needs collision
             w.mobs[i].phase = w.mobs[i].phase + dt * 1.15
-            w.mobs[i].x = w.mobs[i].baseX - 21.0 + Math.sin(w.mobs[i].phase) * 144.0
-            w.mobs[i].y = w.mobs[i].baseY - 15.0 + Math.sin(w.mobs[i].phase * 2.3) * 22.0
+            w.mobs[i].x = w.mobs[i].baseX - 28.0 + Math.sin(w.mobs[i].phase) * 192.0
+            w.mobs[i].y = w.mobs[i].baseY - 20.0 + Math.sin(w.mobs[i].phase * 2.3) * 29.0
             i = i + 1
         }
     }
@@ -1115,7 +1124,7 @@ fn updateMobs(w: &mut World, dt: f64) {
 fn killMob(w: &mut World, i: i64, r: f64, g: f64, b: f64) {
     w.mobs[i].alive = false
     w.mobs[i].dieT = 0.35
-    burst(w, w.mobs[i].x + w.mobs[i].w * 0.5, w.mobs[i].y + w.mobs[i].h * 0.5, 22, 495.0, r, g, b)
+    burst(w, w.mobs[i].x + w.mobs[i].w * 0.5, w.mobs[i].y + w.mobs[i].h * 0.5, 22, 660.0, r, g, b)
     w.shake = w.shake + 8.0
     w.hitstop = 0.055
     w.evStomp = true
@@ -1141,7 +1150,7 @@ fn hitMobs(w: &mut World) {
                     // A dash goes through anything. That is what makes the dash
                     // an answer to the bird rather than only a movement toy.
                     killMob(w, i, 1.5, 0.9, 0.3)
-                } else if w.mobs[i].kind == MOB_CAT && w.p.vy > 40.0 && py1 < my0 + 24.0 {
+                } else if w.mobs[i].kind == MOB_CAT && w.p.vy > 50.0 && py1 < my0 + 32.0 {
                     killMob(w, i, 1.2, 0.5, 1.6)
                     w.p.vy = 0.0 - STOMP_BOUNCE
                     w.p.sqX = 1.3
@@ -1158,18 +1167,18 @@ fn hitMobs(w: &mut World) {
 }
 
 fn hitPickups(w: &mut World, dt: f64) {
-    let px0 = w.p.x - 8.0
-    let px1 = w.p.x + PLAYER_W + 8.0
-    let py0 = w.p.y - 8.0
-    let py1 = w.p.y + PLAYER_H + 8.0
+    let px0 = w.p.x - 11.0
+    let px1 = w.p.x + PLAYER_W + 11.0
+    let py0 = w.p.y - 11.0
+    let py1 = w.p.y + PLAYER_H + 11.0
     var i = 0
     while i < w.pk.len {
         w.pk[i].t = w.pk[i].t + dt
         if !w.pk[i].taken && !w.p.dead {
             let r = if w.pk[i].kind == PK_SHARD {
-                14.0
+                19.0
             } else {
-                22.0
+                29.0
             }
             if w.pk[i].x + r > px0 && w.pk[i].x - r < px1 && w.pk[i].y + r > py0 && w.pk[i].y - r < py1 {
                 w.pk[i].taken = true
@@ -1177,7 +1186,7 @@ fn hitPickups(w: &mut World, dt: f64) {
                     w.cores = w.cores + 1
                     w.flash = Math.maxF64(w.flash, 0.45)
                     w.shake = w.shake + 5.0
-                    burst(w, w.pk[i].x, w.pk[i].y, 26, 450.0, 0.5, 1.4, 1.7)
+                    burst(w, w.pk[i].x, w.pk[i].y, 26, 600.0, 0.5, 1.4, 1.7)
                     w.evCore = true
                 } else if w.pk[i].kind == PK_BONE {
                     w.p.form = FORM_SHEP
@@ -1185,11 +1194,11 @@ fn hitPickups(w: &mut World, dt: f64) {
                     w.p.sqY = 1.45
                     w.flash = Math.maxF64(w.flash, 0.75)
                     w.shake = w.shake + 9.0
-                    burst(w, w.pk[i].x, w.pk[i].y, 34, 540.0, 1.7, 1.5, 0.9)
+                    burst(w, w.pk[i].x, w.pk[i].y, 34, 720.0, 1.7, 1.5, 0.9)
                     w.evBone = true
                 } else {
                     w.shards = w.shards + 1
-                    burst(w, w.pk[i].x, w.pk[i].y, 10, 300.0, 1.5, 1.0, 0.4)
+                    burst(w, w.pk[i].x, w.pk[i].y, 10, 400.0, 1.5, 1.0, 0.4)
                     w.evShard = true
                 }
             }
@@ -1205,12 +1214,12 @@ fn hitChecks(w: &mut World, dt: f64) {
         if !w.checks[i].lit && !w.p.dead {
             let dx = w.checks[i].x - (w.p.x + PLAYER_W * 0.5)
             let dy = w.checks[i].y - (w.p.y + PLAYER_H * 0.5)
-            if Math.abs(dx) < 40.0 && Math.abs(dy) < 48.0 {
+            if Math.abs(dx) < 53.0 && Math.abs(dy) < 64.0 {
                 w.checks[i].lit = true
                 w.spawnX = w.checks[i].x
                 w.spawnY = w.checks[i].y + 4.0
                 w.flash = Math.maxF64(w.flash, 0.35)
-                burst(w, w.checks[i].x, w.checks[i].y - 16.0, 20, 330.0, 0.5, 1.3, 1.6)
+                burst(w, w.checks[i].x, w.checks[i].y - 21.0, 20, 440.0, 0.5, 1.3, 1.6)
                 w.evCheck = true
             }
         }
@@ -1224,13 +1233,13 @@ fn hitGoal(w: &mut World) {
     }
     let gx = w.lvl.goalX
     let gy = w.lvl.goalY
-    if w.p.x + PLAYER_W > gx - 33.0 && w.p.x < gx + 33.0 && w.p.y + PLAYER_H > gy - 60.0 && w.p.y < gy + 45.0 {
+    if w.p.x + PLAYER_W > gx - 44.0 && w.p.x < gx + 44.0 && w.p.y + PLAYER_H > gy - 80.0 && w.p.y < gy + 60.0 {
         w.state = ST_CLEAR
         w.clearT = 1.6
         w.banked = w.banked + w.shards
         w.flash = 1.0
         w.evGoal = true
-        burst(w, gx, gy, 46, 630.0, 0.7, 1.6, 1.5)
+        burst(w, gx, gy, 46, 840.0, 0.7, 1.6, 1.5)
     }
 }
 
@@ -1316,17 +1325,43 @@ pub fn worldUpdate(w: &mut World, dt: f64, moveX: f64, down: bool, jump: bool, j
 }
 
 fn updateCamera(w: &mut World, dt: f64) {
-    // Look ahead of the player, further the faster they are going: the camera
-    // shows where you are about to be, not where you were.
-    let lead = w.p.facing * 100.0 + w.p.vx * 0.18
-    let tx = w.p.x + PLAYER_W * 0.5 + lead - w.vw * 0.5
-    var ty = w.p.y + PLAYER_H * 0.5 - w.vh * 0.56
-    // Falling fast pulls the view down so the landing is visible.
-    if w.p.vy > 360.0 {
-        ty = ty + (w.p.vy - 360.0) * 0.10
+    let px = w.p.x + PLAYER_W * 0.5
+    let py = w.p.y + PLAYER_H * 0.5
+    let halfW = w.vw * 0.5
+    let halfH = w.vh * 0.5
+
+    // Horizontal: a dead zone in the middle of the screen. Inside it the camera
+    // does not move at all — which is the whole point. A camera that leads the
+    // player by their facing swings the entire world every time they tap the
+    // other direction, and that is what made this feel like it was sliding
+    // around underneath you. Outside the zone the player pushes the edge along.
+    let camMidX = w.camX + halfW
+    var tx = w.camX
+    if px > camMidX + DEAD_X {
+        tx = px - halfW - DEAD_X
+    } else if px < camMidX - DEAD_X {
+        tx = px - halfW + DEAD_X
     }
-    let kx = Math.minF64(1.0, dt * 5.0)
-    let ky = Math.minF64(1.0, dt * 4.0)
+
+    // Vertical: the same idea with a taller box, so an ordinary jump never
+    // moves the view. Standing on the ground the camera settles back to put the
+    // floor a little below centre, slowly enough that it is never a lurch.
+    let camMidY = w.camY + halfH
+    var ty = w.camY
+    if py > camMidY + DEAD_Y {
+        ty = py - halfH - DEAD_Y
+    } else if py < camMidY - DEAD_Y {
+        ty = py - halfH + DEAD_Y
+    }
+    if w.p.onGround {
+        let rest = py - w.vh * REST_Y
+        ty = ty + (rest - ty) * Math.minF64(1.0, dt * 2.0)
+    }
+
+    // The dead zone already decides when to move, so the smoothing only has to
+    // take the edge off: fast enough that the player never outruns the view.
+    let kx = Math.minF64(1.0, dt * 11.0)
+    let ky = Math.minF64(1.0, dt * 8.0)
     w.camX = clampCamX(w, w.camX + (tx - w.camX) * kx)
     w.camY = clampCamY(w, w.camY + (ty - w.camY) * ky)
 }

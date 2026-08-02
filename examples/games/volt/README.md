@@ -57,14 +57,20 @@ this lives in `world.milo`:
 - **Eight-way dash,** refilled by touching ground or a wall, ending in kept
   momentum rather than a dead stop. A dash with no direction held goes where you
   face — never nowhere.
+- **A camera with a dead zone.** The view does not move at all while you are
+  inside a box in the middle of the screen — no lead, no easing toward your
+  facing. A camera that leans the way you are looking swings the whole world
+  every time you tap the other direction, which reads as the ground sliding
+  around underneath you.
 - **A hitbox smaller than the dog.** The art overhangs the collision box on every
   side, so what looks like a near miss is a miss.
 - **Spikes hurt rather than kill.** Walking into one sideways costs you the
   shepherd and throws you back out; it does not end the run.
 - **Hitstop.** Impacts freeze the simulation for a few frames while the screen
   keeps drawing, which reads as weight rather than as a dropped frame.
-- **Squash and stretch** about the feet, screen shake, and a camera that leads
-  the player by their velocity instead of following their position.
+- **Squash and stretch** about the feet, and screen shake that never touches the
+  simulation — it is a draw-time offset, so it can never desync collision from
+  what is on screen.
 
 None of it changes what is possible. It changes how often the game does what the
 player meant, which is what "feels modern" actually means.
@@ -95,20 +101,26 @@ does not. That contrast is the whole look, and it is why the art is authored in
 linear light rather than in 8-bit colour.
 
 **Terrain** (`tiles.milo`) is generated noise at 16 art pixels square, drawn at
-3x, so a tile is 48 screen pixels and the art grid and the collision grid are the
-same grid. `TILE` is the one number that sets how close the camera is. The
-autotiler is one rule: a solid tile with air above it gets the lit cap,
-everything else gets fill.
+4x, so a tile is 64 screen pixels and the art grid and the collision grid are the
+same grid. `ART` is the one number that sets how close the camera is — at 4x a
+1280-wide window shows 20 tiles, about what Mario showed. The autotiler is one
+rule: a solid tile with air above it gets grass, everything else gets dirt.
 
 **The canvas** (`gfx.milo`) carries two kinds of ink into one linear-light float
 buffer — alpha-over for anything with mass, additive for anything that emits —
 then bright-passes, blurs at quarter resolution, and tone-maps through a
-Reinhard curve. The vector games this canvas came from (`../neon`, `../flight`)
-are purely additive, which cannot draw a dark shape against a bright sky; a
-platformer is mostly dark shapes, and a small brown dog is the darkest of them.
+Reinhard curve. The bloom threshold sits *above* the sky: daylight art is bright
+everywhere, and a low threshold blooms the blue into white fog instead of
+lighting the few things that actually emit. The vector games this canvas came
+from (`../neon`, `../flight`) are purely additive, which cannot draw a dark
+shape against a bright sky — a small brown dog on a green hill is the whole
+opposite problem.
 
-**The skyline** is hashed from world position rather than stored, so a level of
-any length has towers with lit windows behind it and none of it is in the binary.
+**The landscape** is hashed from world position rather than stored, so a level
+of any length has clouds, blue mountains, green hills and a line of trees behind
+it, and none of it is in the binary. The three layers move at 8%, 22% and 42% of
+the camera; that spread is the whole trick, because the eye reads a difference
+in rates as distance.
 
 **Audio** (`sound.milo`) is PCM generated at startup and pushed at SDL's queue
 API: a driving four-bar loop in A minor on its own device, effects on another
@@ -122,7 +134,7 @@ One character per tile, and the same characters place the entities:
 ```
 .  air        #  solid      =  one-way platform    ^  spikes
 %  breakable  !  launch pad S  spawn               G  gate
-k  hydrant    b  bone       o  treat               O  gem
+k  hydrant    b  bone       o  biscuit             O  tennis ball
 c  cat        d  bird
 ```
 
@@ -144,6 +156,13 @@ milo run examples/games/volt/shot.milo --release -- --sheet   # every sprite, la
 `--sheet` is how the art gets iterated on: pixel art written as numbers and
 strings is authored blind, and this is the only way to see whether a frame says
 "dog" before it is fifteen pixels tall in a level.
+
+Levels are checked the same way — by tooling rather than by eye. Two of the
+three shipped sealed: a column of rock ran from the roof to the floor and no
+route past it existed, so the level could be started and never finished. They
+were rebuilt against a reachability check that floods the map with a
+conservative model of the jump (no dash, no launch pads) and asks whether the
+gate can be stood next to. Anything it calls reachable really is.
 
 ## Dependencies
 

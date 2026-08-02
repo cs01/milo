@@ -623,7 +623,7 @@ pub let CAT_FRAMES: i64 = 4
 
 pub let CAT_W: i64 = 18
 
-pub let CAT_H: i64 = 12
+pub let CAT_H: i64 = 13
 
 fn catPalette(): Vec<f64> {
     var p: Vec<f64> = Vec.new()
@@ -638,15 +638,16 @@ fn catPalette(): Vec<f64> {
 }
 
 fn catBody(v: &mut Vec<string>) {
-    v.push("")
-    v.push("...........00..00")
-    v.push("020.......0220220")
-    v.push("020.......0222220")
-    v.push("020......02422250")
-    v.push("0200....022222220")
-    v.push("02200222222222220")
-    v.push(".0222222222222220")
-    v.push("..03333333333220")
+    v.push("..........0.....0")
+    v.push("020.......00...00")
+    v.push("020.......0110110")
+    v.push("020.......0121210")
+    v.push("020......011111110")
+    v.push("0200.....014222510")
+    v.push("02200...0111111110")
+    v.push(".02222222222221110")
+    v.push("..0222222222222110")
+    v.push("...03333333333210")
 }
 
 pub fn catFrames(): Vec<Sprite> {
@@ -805,63 +806,78 @@ pub fn boneSprite(): Sprite {
     return s
 }
 
-// The small collectible: a warm amber crystal, six frames of spin. Only the
+// A biscuit: the small collectible, six frames of a slow tumble. Only the
 // half-width changes across the cycle, so six frames are six numbers.
 
 pub let SHARD_FRAMES: i64 = 6
 
 pub fn shardFrames(): Vec<Sprite> {
     var widths: Vec<f64> = Vec.new()
-    widths.push(3.4)
-    widths.push(2.4)
-    widths.push(1.1)
-    widths.push(0.5)
-    widths.push(1.6)
-    widths.push(2.8)
+    widths.push(1.00)
+    widths.push(0.82)
+    widths.push(0.48)
+    widths.push(0.26)
+    widths.push(0.60)
+    widths.push(0.90)
     var out: Vec<Sprite> = Vec.new()
     for f in 0..SHARD_FRAMES {
-        let hw = widths[f]
-        var s = spriteNew(8, 11)
+        let k = widths[f]
+        var s = spriteNew(11, 11)
         for y in 0..11 {
-            // Taper to a point at both ends; the widest band sits just above
-            // centre, which reads as a cut gem rather than a rhombus.
-            let ty = 1.0 - Math.abs((y as f64) - 4.6) / 6.2
-            let wx = hw * ty
-            for x in 0..8 {
-                let dx = Math.abs((x as f64) - 3.5)
-                if dx <= wx {
-                    let edge = 1.0 - dx / (wx + 0.001)
-                    // bright rim, cooler core, so the facet catches the bloom
-                    let k = 0.35 + edge * 0.35
-                    spriteSet(s, x, y, 1.55 + k * 1.4, 1.05 + k * 1.0, 0.35 + k * 0.5, 1.0)
+            for x in 0..11 {
+                let dx = ((x as f64) - 5.0) / (4.6 * k + 0.35)
+                let dy = ((y as f64) - 5.0) / 4.2
+                // a rounded square rather than a disc: it has to read as baked
+                let d = Math.maxF64(Math.abs(dx), Math.abs(dy)) * 0.72 + Math.sqrt(dx * dx + dy * dy) * 0.34
+                if d <= 1.0 {
+                    let edge = 1.0 - d
+                    let lit = 0.72 + edge * 0.75
+                    spriteSet(s, x, y, 1.05 * lit, 0.70 * lit, 0.32 * lit, 1.0)
+                } else if d <= 1.16 {
+                    spriteSet(s, x, y, 0.30, 0.17, 0.07, 1.0)
                 }
             }
+        }
+        // the two dents every dog biscuit has
+        if k > 0.5 {
+            spriteSet(s, 4, 3, 0.42, 0.26, 0.11, 1.0)
+            spriteSet(s, 6, 7, 0.42, 0.26, 0.11, 1.0)
         }
         out.push(s)
     }
     return out
 }
 
-// The level's single big pickup: a faceted hexagon, cooler than the treats so it
-// never reads as "just another one of those".
+// The level's single big pickup: a tennis ball. Nothing else on screen is that
+// green, so it never reads as "just another one of those".
 pub fn coreSprite(): Sprite {
-    var s = spriteNew(14, 14)
-    for y in 0..14 {
-        for x in 0..14 {
-            let dx = ((x as f64) - 6.5) / 6.0
-            let dy = ((y as f64) - 6.5) / 6.5
-            // hexagon: the max of an axis test and a pair of diagonals
-            let hex = Math.maxF64(Math.abs(dy), Math.abs(dy) * 0.5 + Math.abs(dx) * 0.87)
-            if hex <= 1.0 {
-                let edge = 1.0 - hex
-                var k = 0.4 + edge * 0.8
-                // a facet seam down the middle catches a highlight
-                if x == 6 || x == 7 {
-                    k = k * 1.5
+    let n = 16
+    var s = spriteNew(n, n)
+    let c = 7.5
+    for y in 0..n {
+        for x in 0..n {
+            let dx = (x as f64) - c
+            let dy = (y as f64) - c
+            let d = Math.sqrt(dx * dx + dy * dy)
+            if d <= 7.4 {
+                // lit from the top left, like everything else in the game
+                let lit = Math.clampF64(0.62 + (0.0 - dx - dy) * 0.055, 0.55, 1.30)
+                var r = 0.72 * lit
+                var g = 1.35 * lit
+                var b = 0.20 * lit
+                // The seam: two arcs that each pass through the top and bottom
+                // of the ball and bow out toward one side. That pair of curves
+                // is the whole of a tennis ball.
+                let arcL = Math.abs(Math.sqrt((dx - 2.98) * (dx - 2.98) + dy * dy) - 7.98)
+                let arcR = Math.abs(Math.sqrt((dx + 2.98) * (dx + 2.98) + dy * dy) - 7.98)
+                if arcL < 0.85 || arcR < 0.85 {
+                    r = 1.30
+                    g = 1.30
+                    b = 1.15
                 }
-                spriteSet(s, x, y, 0.45 * k, 1.30 * k, 1.60 * k, 1.0)
-            } else if hex <= 1.12 {
-                spriteSet(s, x, y, 0.02, 0.02, 0.04, 1.0)
+                spriteSet(s, x, y, r, g, b, 1.0)
+            } else if d <= 8.3 {
+                spriteSet(s, x, y, 0.05, 0.09, 0.02, 1.0)
             }
         }
     }

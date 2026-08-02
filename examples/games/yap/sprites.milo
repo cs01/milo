@@ -77,35 +77,6 @@ fn dogPalette(): Vec<f64> {
     return p
 }
 
-// Everything from the muzzle down is the same in every living frame — nose,
-// tongue, collar, tail, dangling legs. Only the ears move, which is the entire
-// animation budget a flapping dog needs.
-//
-// Every frame is padded to the same width (the trailing dots on the first row)
-// and holds the body in the same columns, so switching frames moves the ears and
-// nothing else. Without that the dog would jitter sideways once per flap.
-fn dogBody(v: &mut Vec<string>) {
-    v.push(".........033377733440")
-    v.push(".........0333333344770")
-    v.push(".........032223334440")
-    v.push("..........0333345550")
-    v.push("..0220000000333344440")
-    v.push("...00222222288884440")
-    v.push("...012222222944440")
-    v.push("....012222224440")
-    v.push(".....0122222440")
-    v.push("......040.040")
-    v.push(".....04400440")
-}
-
-// The head, from crown to eyes. Shared by the two upright poses; the ears-down
-// pose draws its own, because there the ears hang alongside these same rows.
-fn dogHead(v: &mut Vec<string>) {
-    v.push("..........0333333330")
-    v.push(".........033333333330")
-    v.push(".........033367733330")
-}
-
 pub let DOG_UP: i64 = 0
 
 pub let DOG_MID: i64 = 1
@@ -114,68 +85,124 @@ pub let DOG_DOWN: i64 = 2
 
 pub let DOG_DEAD: i64 = 3
 
+// Four poses. Only the ears differ between the three living ones — the body,
+// the tail and the four legs are identical, and every frame is the same width,
+// so switching frames moves the ears and nothing else. Without that the dog
+// would jitter sideways once per flap.
+//
+// The ears are rooted *under* the skull: an ear drawn above the head reads as a
+// rabbit, which is exactly what the first draft of this sprite looked like.
 pub fn dogFrames(): Vec<Sprite> {
     let pal = dogPalette()
     var out: Vec<Sprite> = Vec.new()
 
-    // Ears thrown up and back: the top of a flap, and the frame a player sees
-    // the instant they press the key. Ears always trail behind him — he is moving
-    // right, and ears that leaned into the wind would read as a rabbit.
+    // Ears thrown up and back — the frame a player sees the instant they press
+    // the key, so it is the most extreme pose of the three.
     var up: Vec<string> = Vec.new()
-    up.push(".......050..050.............")
-    up.push(".......0550.0550")
-    up.push("........0550.0550")
-    up.push("........0555005550")
-    up.push(".........05550055500")
-    dogHead(up)
-    dogBody(up)
+    up.push(".............030..030........")
+    up.push(".............0300.0300")
+    up.push(".............0330003300")
+    up.push(".............0353003530")
+    up.push(".............03533333500")
+    up.push(".............033333333300")
+    up.push("..000.......00333333333300")
+    up.push("..0200......03333333333330")
+    up.push("..002000...003333673333300")
+    up.push("...0022000.03333377333333000")
+    up.push("....002220000333333334447770")
+    up.push(".....00220222333333444447770")
+    up.push(".....00222222233333444447770")
+    up.push("....002222228883333444444400")
+    up.push("....02222222888433333555500")
+    up.push("....0222222289844442000000")
+    up.push("....02222222244444440")
+    up.push("....00222222224444400")
+    up.push(".....022222222444400")
+    up.push("....002220222224000")
+    up.push("....04444400444440")
+    up.push("....04444400444440")
+    up.push("....00000000000000")
     out.push(spriteFrom(up, pal))
 
     // Ears streaming back at a diagonal: coasting.
     var mid: Vec<string> = Vec.new()
-    mid.push("..050..050..................")
-    mid.push("...0550.0550")
-    mid.push(".....0550.0550")
-    mid.push(".......0555005550")
-    mid.push(".........05550055500")
-    dogHead(mid)
-    dogBody(mid)
+    mid.push(".............000.............")
+    mid.push(".......000...03000")
+    mid.push(".......03000.0033000")
+    mid.push(".......003300000533000")
+    mid.push("........0035530033333000")
+    mid.push(".........00355333333333000")
+    mid.push("..000.....0035333333333330")
+    mid.push("..0200.....003333333333300")
+    mid.push("..002000...003333673333300")
+    mid.push("...0022000.03333377333333000")
+    mid.push("....002220000333333334447770")
+    mid.push(".....00220222333333444447770")
+    mid.push(".....00222222233333444447770")
+    mid.push("....002222228883333444444400")
+    mid.push("....02222222888433333555500")
+    mid.push("....0222222289844442000000")
+    mid.push("....02222222244444440")
+    mid.push("....00222222224444400")
+    mid.push(".....022222222444400")
+    mid.push("....002220222224000")
+    mid.push("....04444400444440")
+    mid.push("....04444400444440")
+    mid.push("....00000000000000")
     out.push(spriteFrom(mid, pal))
 
-    // Ears blown flat back over the head: falling.
+    // Ears blown flat back over the skull: falling.
     var down: Vec<string> = Vec.new()
-    down.push("............................")
+    down.push(".............................")
     down.push("")
     down.push("")
-    down.push("...........05500550")
-    down.push("........0555005550")
-    down.push(".....055500555033330")
-    down.push("...0550.0550333333330")
-    down.push("..050.050033367733330")
-    dogBody(down)
+    down.push("...............0000000000")
+    down.push(".........0000000333330030")
+    down.push(".........0333333333333300")
+    down.push("..00000000333333333333300")
+    down.push("..02033355555333333333330")
+    down.push("..002000033553333673333300")
+    down.push("...0022000003333377333333000")
+    down.push("....002220000333333334447770")
+    down.push(".....00220222333333444447770")
+    down.push(".....00222222233333444447770")
+    down.push("....002222228883333444444400")
+    down.push("....02222222888433333555500")
+    down.push("....0222222289844442000000")
+    down.push("....02222222244444440")
+    down.push("....00222222224444400")
+    down.push(".....022222222444400")
+    down.push("....002220222224000")
+    down.push("....04444400444440")
+    down.push("....04444400444440")
+    down.push("....00000000000000")
     out.push(spriteFrom(down, pal))
 
-    // Dead: X eyes, tongue out to here.
+    // X eyes, tongue out to here.
     var dead: Vec<string> = Vec.new()
-    dead.push("............................")
+    dead.push(".............................")
     dead.push("")
     dead.push("")
-    dead.push("...........05500550")
-    dead.push("........0555005550")
-    dead.push(".....055500555033330")
-    dead.push("...0550.0550333333330")
-    dead.push("..050.050033373733330")
-    dead.push(".........033337333440")
-    dead.push(".........0333333344770")
-    dead.push(".........032223334440")
-    dead.push("..........033334555550")
-    dead.push("..0220000000333344455550")
-    dead.push("...00222222288884440")
-    dead.push("...012222222944440")
-    dead.push("....012222224440")
-    dead.push(".....0122222440")
-    dead.push("......040.040")
-    dead.push(".....04400440")
+    dead.push("...............0000000000")
+    dead.push(".........0000000333330030")
+    dead.push(".........0333333333333300")
+    dead.push("..00000000333333333333300")
+    dead.push("..02033355555333733733330")
+    dead.push("..002000033553333773333300")
+    dead.push("...0022000003333377333333000")
+    dead.push("....002220000333733734447770")
+    dead.push(".....00220222333333444447770")
+    dead.push(".....00222222233333444447770")
+    dead.push("....0022222288833334444444000")
+    dead.push("....0222222288843333355555550")
+    dead.push("....0222222289844442005555550")
+    dead.push("....0222222224444444005555550")
+    dead.push("....0022222222444440000000000")
+    dead.push(".....022222222444400")
+    dead.push("....002220222224000")
+    dead.push("....04444400444440")
+    dead.push("....04444400444440")
+    dead.push("....00000000000000")
     out.push(spriteFrom(dead, pal))
 
     return out

@@ -248,10 +248,7 @@ pub fn drawDog(c: &mut Canvas, w: &World, frames: &Vec<Sprite>, ox: f64, oy: f64
 
     let dw = (s.w as f64) * sx
     let dh = (s.h as f64) * sy
-    // Every frame is padded to the same width so the ears never move the body,
-    // which leaves the body sitting left of the frame's centre. Nudge it back so
-    // what you see is centred on the hitbox that kills you.
-    let dx = x - dw * 0.5 + 2.5 * sx
+    let dx = x - dw * 0.5
     let dy = y - dh * 0.5
 
     // contact shadow on the grass, tighter and darker the closer he gets

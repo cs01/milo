@@ -52,3 +52,29 @@ pub fn main(): i32 {
   expect(r.js).toBe(r.native);
   expect(r.native).toBe("4 7 9\n100 1 1\n1\n6");
 });
+
+test("emit-js: f32 rounds like native", async () => {
+  const r = await bothWays(`
+pub fn main(): i32 {
+    // 0.1 is not representable in either width, and f32 rounds it further. JS
+    // has one float type, so without Math.fround on the cast the JS backend
+    // keeps f64 precision here and the two disagree.
+    let a: f32 = 0.1 as f32
+    let b: f64 = a as f64
+    print((b > 0.1).toString())
+    var v: Vec<f32> = Vec.filled(3, 0.0)
+    v[0] = (1.0 / 3.0) as f32
+    print(((v[0] as f64) == 1.0 / 3.0).toString())
+    // A depth test: the stored f32 compared against the f64 that produced it.
+    // This is the shape the rasteriser runs a million times a frame. 1/7 rounds
+    // UP into f32, so the comparison is false — which is the point: the answer
+    // depends on the rounding, and both backends have to get the same one.
+    let z = 1.0 / 7.0
+    v[1] = z as f32
+    print(((v[1] as f64) < z).toString())
+    return 0
+}
+`);
+  expect(r.js).toBe(r.native);
+  expect(r.native).toBe("true\nfalse\nfalse");
+});

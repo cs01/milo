@@ -571,6 +571,10 @@ export class CodegenJS {
         return expr.value.type.tag === "float"
           ? `__fmtG(${this.genExpr(expr.value)})`
           : `String(${this.genExpr(expr.value)})`;
+      case "BoolToString":
+        // "true" / "false" — the same two words the native backend prints, and
+        // not JS's String(true) by accident: this has to keep agreeing with it.
+        return `(${this.genExpr(expr.value)} ? "true" : "false")`;
       case "JsonStringify":
         return `JSON.stringify(${this.genExpr(expr.value)})`;
       case "Closure":
@@ -848,7 +852,12 @@ export class CodegenJS {
     // Mask to the target width so `x as u8` wraps to 0..255 (native semantics),
     // not the 32-bit-signed truncation a bare `| 0` would give.
     if (target.tag === "int") return this.maskInt(val, target);
-    if (target.tag === "float") return `(+${val})`;
+    // JS has one float type. `x as f32` is not a no-op in Milo — it rounds to
+    // single precision, and native code that stores an f32 and reads it back
+    // sees the rounded value. Without fround the two backends drift apart the
+    // moment an f32 is compared against anything, which is exactly what a depth
+    // buffer does every pixel.
+    if (target.tag === "float") return target.bits === 32 ? `Math.fround(${val})` : `(+${val})`;
     if (target.tag === "bool") return `Boolean(${val})`;
     return val;
   }

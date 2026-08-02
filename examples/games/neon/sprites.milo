@@ -1,0 +1,610 @@
+// Every sprite in the game, built at startup. There is no asset directory and no
+// loader: the art is pixel art written as strings, and the pickups are generated
+// from their own geometry.
+//
+// A palette entry is three floats of linear light, and values run past 1.0 on
+// purpose — an eye at 2.6 clears the bloom threshold and glows, the carapace at
+// 0.3 beside it does not. That contrast is the whole look, and it is why the art
+// is authored in linear light rather than in 8-bit colour.
+//
+// The bestiary is biomechanical: bone-ivory plating over fleshy dark bodies, gold
+// ornament on the things that outrank you, and a wet red eye on everything that
+// wants you dead. The ship is the one clean machine on screen.
+
+from "std/math" import {
+    Math
+}
+from "./gfx" import {
+    Sprite, spriteNew, spriteSet
+}
+
+// ── string art ────────────────────────────────────────────────────────────────
+//
+// One character per pixel: '.' is transparent, '0'-'9' index the palette. Rows
+// need not be padded — anything short is transparent to the right — so a frame
+// only spells out the pixels it actually uses.
+
+fn palAdd(p: &mut Vec<f64>, r: f64, g: f64, b: f64) {
+    p.push(r)
+    p.push(g)
+    p.push(b)
+}
+
+fn charAt(rows: &Vec<string>, r: i64, c: i64): i64 {
+    if c >= rows[r].len {
+        return 46 // '.'
+    }
+    return rows[r][c] as i64
+}
+
+fn widest(rows: &Vec<string>): i64 {
+    var w = 0
+    for r in rows {
+        if r.len > w {
+            w = r.len
+        }
+    }
+    return w
+}
+
+fn spriteFrom(rows: &Vec<string>, pal: &Vec<f64>): Sprite {
+    let w = widest(rows)
+    let h = rows.len
+    var s = spriteNew(w, h)
+    for y in 0..h {
+        for x in 0..w {
+            let ch = charAt(rows, y, x)
+            if ch >= 48 && ch <= 57 {
+                let i = (ch - 48) * 3
+                if i + 2 < pal.len {
+                    spriteSet(s, x, y, pal[i], pal[i + 1], pal[i + 2], 1.0)
+                }
+            }
+        }
+    }
+    return s
+}
+
+// ── the ship ──────────────────────────────────────────────────────────────────
+
+// Deliberately not organic: white composite, gold trim, a teal canopy. It is the
+// only manufactured thing in the level and it should look like it does not
+// belong here.
+pub fn shipSprite(): Sprite {
+    var pal: Vec<f64> = Vec.new()
+    palAdd(pal, 0.03, 0.03, 0.05) // 0 outline
+    palAdd(pal, 0.22, 0.24, 0.30) // 1 hull shadow
+    palAdd(pal, 0.52, 0.55, 0.62) // 2 hull mid
+    palAdd(pal, 0.88, 0.91, 0.98) // 3 hull light
+    palAdd(pal, 1.35, 1.38, 1.48) // 4 hull white
+    palAdd(pal, 0.16, 0.14, 0.42) // 5 capsule shadow
+    palAdd(pal, 0.38, 0.34, 0.95) // 6 capsule body
+    palAdd(pal, 0.80, 0.76, 1.60) // 7 capsule light
+    palAdd(pal, 0.28, 1.80, 2.30) // 8 canopy
+    palAdd(pal, 2.30, 1.10, 0.28) // 9 engine / trim
+    // The R-9 silhouette is one big smooth coloured capsule slung under a grey
+    // mechanical hull, with a swept fin and a gun barrel out front. The capsule
+    // is the thing that reads at 40 pixels — it is the only large smooth mass on
+    // a ship that is otherwise all greebles.
+    var rows: Vec<string> = Vec.new()
+    rows.push(".......04440")
+    rows.push("......0433340")
+    rows.push(".....04333330")
+    rows.push("....043333330")
+    rows.push("...0433333330")
+    rows.push("..04333333330000")
+    rows.push("..0333333333333330000")
+    rows.push("9.03333222222222333330000")
+    rows.push("90233332888822222222333333000")
+    rows.push("902333328888222222222222233334440")
+    rows.push("9023333288882222222222222222334444440")
+    rows.push("90233332222222222222222222222233444440")
+    rows.push("902333222222222222222222222333333000")
+    rows.push("90033322222222222222222233330000")
+    rows.push("055666666666666666666666663330")
+    rows.push("05666777777777777777777766330")
+    rows.push("05667777777777777777777776630")
+    rows.push("05666777777777777777777766330")
+    rows.push("055666666666666666666666663330")
+    rows.push(".00333222222222222222233000")
+    rows.push("...0332222222222223300")
+    rows.push("....03222222222330")
+    rows.push(".....099999900")
+    return spriteFrom(rows, pal)
+}
+
+// ── shots ─────────────────────────────────────────────────────────────────────
+//
+// Every projectile is a sprite rather than a glow, because a glow lives in the
+// same visual channel as the bloom coming off the scenery and you cannot tell
+// them apart. A sprite has a dark rim, occludes what is behind it, and reads as
+// an object at a glance.
+
+// Yours: a flat lance of light, wider than it is tall, so a wall of them still
+// reads as horizontal motion.
+pub fn shotSprite(): Sprite {
+    var pal: Vec<f64> = Vec.new()
+    palAdd(pal, 0.05, 0.04, 0.02) // 0 rim
+    palAdd(pal, 1.30, 0.95, 0.20) // 1 body
+    palAdd(pal, 2.60, 2.20, 0.90) // 2 core
+    var rows: Vec<string> = Vec.new()
+    rows.push("..000000000")
+    rows.push(".011111111 0")
+    rows.push("01222222211")
+    rows.push(".011111111 0")
+    rows.push("..000000000")
+    return spriteFrom(rows, pal)
+}
+
+// The pods': same shape, different colour, so two friendly weapons never have to
+// be told apart under pressure.
+pub fn podShotSprite(): Sprite {
+    var pal: Vec<f64> = Vec.new()
+    palAdd(pal, 0.05, 0.02, 0.05) // 0 rim
+    palAdd(pal, 1.30, 0.30, 1.20) // 1 body
+    palAdd(pal, 2.40, 1.40, 2.40) // 2 core
+    var rows: Vec<string> = Vec.new()
+    rows.push(".0000000")
+    rows.push("01111110")
+    rows.push("01222110")
+    rows.push("01111110")
+    rows.push(".0000000")
+    return spriteFrom(rows, pal)
+}
+
+// Theirs: a round, hard-edged bead with a black rim and a white-hot centre. Round
+// versus flat is the read — you never have to resolve the colour.
+pub fn hostileShotSprite(): Sprite {
+    var pal: Vec<f64> = Vec.new()
+    palAdd(pal, 0.02, 0.01, 0.01) // 0 rim
+    palAdd(pal, 0.70, 0.05, 0.06) // 1 shell
+    palAdd(pal, 2.20, 0.18, 0.12) // 2 body
+    palAdd(pal, 2.90, 1.60, 1.30) // 3 core
+    var rows: Vec<string> = Vec.new()
+    rows.push("..00000")
+    rows.push(".0011100")
+    rows.push("001223100")
+    rows.push("012233210")
+    rows.push("012333210")
+    rows.push("012233210")
+    rows.push("001223100")
+    rows.push(".0011100")
+    rows.push("..00000")
+    return spriteFrom(rows, pal)
+}
+
+// A missile is a machine, so it gets a body, a nose and fins.
+pub fn missileSprite(): Sprite {
+    var pal: Vec<f64> = Vec.new()
+    palAdd(pal, 0.04, 0.03, 0.02) // 0 outline
+    palAdd(pal, 0.35, 0.32, 0.28) // 1 casing dark
+    palAdd(pal, 0.85, 0.80, 0.70) // 2 casing
+    palAdd(pal, 1.40, 1.34, 1.18) // 3 casing light
+    palAdd(pal, 2.60, 1.20, 0.20) // 4 warhead
+    palAdd(pal, 2.80, 1.90, 0.60) // 5 flame
+    var rows: Vec<string> = Vec.new()
+    rows.push("...0110")
+    rows.push("50112223300")
+    rows.push("501223333444440")
+    rows.push("50112223300")
+    rows.push("...0110")
+    return spriteFrom(rows, pal)
+}
+
+// The Force: a captured piece of the enemy, welded into a shell that obeys you.
+pub fn podSprite(): Sprite {
+    var pal: Vec<f64> = Vec.new()
+    palAdd(pal, 0.06, 0.04, 0.03) // 0 outline
+    palAdd(pal, 0.45, 0.18, 0.03) // 1 dark
+    palAdd(pal, 1.20, 0.50, 0.06) // 2 orange
+    palAdd(pal, 2.20, 1.00, 0.15) // 3 hot
+    palAdd(pal, 2.90, 2.40, 1.30) // 4 core
+    palAdd(pal, 1.55, 1.10, 0.30) // 5 gold nub
+    var rows: Vec<string> = Vec.new()
+    rows.push(".....0000")
+    rows.push("...00122100")
+    rows.push("..0122333210")
+    rows.push(".01233443321")
+    rows.push("5012334444321")
+    rows.push("5012344444432")
+    rows.push("50123444444325")
+    rows.push("50123444444325")
+    rows.push("5012344444432")
+    rows.push("5012334444321")
+    rows.push(".01233443321")
+    rows.push("..0122333210")
+    rows.push("...00122100")
+    rows.push(".....0000")
+    return spriteFrom(rows, pal)
+}
+
+// ── the bestiary ──────────────────────────────────────────────────────────────
+
+// Shared flesh-and-bone palette. Every grunt is the same organism at a different
+// size, which is the point of a hive.
+fn bioPal(): Vec<f64> {
+    var pal: Vec<f64> = Vec.new()
+    palAdd(pal, 0.04, 0.03, 0.04) // 0 outline
+    palAdd(pal, 0.20, 0.08, 0.09) // 1 shell rim
+    palAdd(pal, 0.38, 0.14, 0.16) // 2 shell dark
+    palAdd(pal, 0.68, 0.27, 0.28) // 3 shell mid
+    palAdd(pal, 1.00, 0.47, 0.44) // 4 shell lit
+    palAdd(pal, 0.88, 0.83, 0.68) // 5 bone
+    palAdd(pal, 0.40, 0.37, 0.30) // 6 bone dark
+    palAdd(pal, 2.60, 0.25, 0.15) // 7 eye
+    palAdd(pal, 0.55, 0.07, 0.06) // 8 eye socket
+    palAdd(pal, 1.35, 1.30, 1.15) // 9 bone white
+    return pal
+}
+
+// The grunt: two bone mandibles out front, a wet eye between them, ribbed shell
+// behind. The mandibles are the whole point — they give it a facing.
+pub fn droneSprite(): Sprite {
+    var rows: Vec<string> = Vec.new()
+    rows.push("....00.....0333330")
+    rows.push("...0590...033222330")
+    rows.push("..05590..03322222330")
+    rows.push(".05590..0332255223330")
+    rows.push("0559.0.03322555222330")
+    rows.push("0870..033225555222233")
+    rows.push("0870..033225555222233")
+    rows.push("0559.0.03322555222330")
+    rows.push(".05590..0332255223330")
+    rows.push("..05590..03322222330")
+    rows.push("...0590...033222330")
+    rows.push("....00.....0333330")
+    return spriteFrom(rows, bioPal())
+}
+
+// Spore. Drifts on a sine, trails filaments, pops loudly.
+pub fn weaverSprite(): Sprite {
+    var pal: Vec<f64> = Vec.new()
+    palAdd(pal, 0.04, 0.03, 0.05) // 0 outline
+    palAdd(pal, 0.22, 0.14, 0.30) // 1 sac dark
+    palAdd(pal, 0.55, 0.30, 0.75) // 2 sac mid
+    palAdd(pal, 1.00, 0.60, 1.30) // 3 sac lit
+    palAdd(pal, 1.90, 1.30, 2.40) // 4 sac hot
+    palAdd(pal, 0.85, 0.80, 0.68) // 5 bone
+    palAdd(pal, 2.40, 0.30, 1.60) // 6 nucleus
+    var rows: Vec<string> = Vec.new()
+    rows.push("...05550")
+    rows.push("..05122150")
+    rows.push(".05122332150")
+    rows.push("0512233443210")
+    rows.push("0122334444321")
+    rows.push("0122336644321")
+    rows.push("0122336644321")
+    rows.push("0122334444321")
+    rows.push("0512233443210")
+    rows.push(".05122332150")
+    rows.push("..0.1..2..1.0")
+    rows.push("...0...1...0")
+    rows.push("..0.....1..0")
+    return spriteFrom(rows, pal)
+}
+
+// Diver. All jaw, no patience.
+pub fn swooperSprite(): Sprite {
+    var pal: Vec<f64> = Vec.new()
+    palAdd(pal, 0.03, 0.04, 0.05) // 0 outline
+    palAdd(pal, 0.10, 0.26, 0.34) // 1 chitin dark
+    palAdd(pal, 0.24, 0.60, 0.78) // 2 chitin mid
+    palAdd(pal, 0.55, 1.10, 1.45) // 3 chitin lit
+    palAdd(pal, 0.90, 0.86, 0.72) // 4 fang
+    palAdd(pal, 1.40, 1.36, 1.20) // 5 fang lit
+    palAdd(pal, 2.60, 0.60, 0.20) // 6 eye
+    palAdd(pal, 0.06, 0.16, 0.22) // 7 vent
+    var rows: Vec<string> = Vec.new()
+    rows.push("........011110")
+    rows.push("....0011223321")
+    rows.push("54001223333221")
+    rows.push("55012233333221")
+    rows.push("0601223333322110")
+    rows.push("0601223333322110")
+    rows.push("55012233333221")
+    rows.push("54001223333221")
+    rows.push("....0011223321")
+    rows.push("........011110")
+    return spriteFrom(rows, pal)
+}
+
+// Carrier. An armour-plated womb with a jaw, holding the thing you want: the
+// glowing sac in the middle is the payload, and it is deliberately the brightest
+// part of the silhouette.
+pub fn carrierSprite(): Sprite {
+    var rows: Vec<string> = Vec.new()
+    rows.push("..........055555550")
+    rows.push("......005566666665500")
+    rows.push("...0055669999999966550")
+    rows.push("5.05566999922229999665500")
+    rows.push("95056699992222222999966550")
+    rows.push("0905669999222772229999665")
+    rows.push("09056699992277777229999665")
+    rows.push("0905669999227777722999665")
+    rows.push("09056699992277777229999665")
+    rows.push("0905669999222772229999665")
+    rows.push("95056699992222222999966550")
+    rows.push("5.05566999922229999665500")
+    rows.push("...0055669999999966550")
+    rows.push("......005566666665500")
+    rows.push("..........055555550")
+    return spriteFrom(rows, bioPal())
+}
+
+// Mine. A seed pod that resents being near you.
+pub fn mineSprite(): Sprite {
+    var pal: Vec<f64> = Vec.new()
+    palAdd(pal, 0.05, 0.02, 0.02) // 0 outline
+    palAdd(pal, 0.30, 0.06, 0.06) // 1 husk dark
+    palAdd(pal, 0.70, 0.14, 0.12) // 2 husk mid
+    palAdd(pal, 1.30, 0.28, 0.20) // 3 husk lit
+    palAdd(pal, 2.80, 0.35, 0.20) // 4 core
+    palAdd(pal, 0.85, 0.80, 0.68) // 5 spine
+    var rows: Vec<string> = Vec.new()
+    rows.push("..5...5...5..")
+    rows.push("..05.50.5.50")
+    rows.push("...001110")
+    rows.push("5.0122210.5")
+    rows.push("50123332105")
+    rows.push(".0123443210")
+    rows.push("501234432105")
+    rows.push(".0123443210")
+    rows.push("50123332105")
+    rows.push("5.0122210.5")
+    rows.push("...001110")
+    rows.push("..05.50.5.50")
+    rows.push("..5...5...5..")
+    return spriteFrom(rows, pal)
+}
+
+// Wall gun. Bone socket bolted into the rock, with a barrel that tracks you.
+pub fn turretSprite(): Sprite {
+    var rows: Vec<string> = Vec.new()
+    rows.push("...05555550")
+    rows.push(".005569965550")
+    rows.push("0556699779966550")
+    rows.push("0566997777799665")
+    rows.push("0566997787799665")
+    rows.push("0556699779966550")
+    rows.push("005566999966550")
+    rows.push("0022334444332200")
+    rows.push("0122333333332210")
+    rows.push("0111222222221110")
+    return spriteFrom(rows, bioPal())
+}
+
+// Head of the chain: an open jaw with bone fangs. The segments behind it are
+// plain beads, so the head is the thing your eye tracks.
+pub fn snakeHeadSprite(): Sprite {
+    var rows: Vec<string> = Vec.new()
+    rows.push("......00555550")
+    rows.push("....0059999955550")
+    rows.push("9.0599999999999550")
+    rows.push("090599992222999955")
+    rows.push("0905999222227299955")
+    rows.push("09059992222222299955")
+    rows.push("0905999222227299955")
+    rows.push("090599992222999955")
+    rows.push("9.0599999999999550")
+    rows.push("....0059999955550")
+    rows.push("......00555550")
+    return spriteFrom(rows, bioPal())
+}
+
+pub fn snakeSegSprite(): Sprite {
+    var rows: Vec<string> = Vec.new()
+    rows.push("...9.9.9")
+    rows.push("..005550")
+    rows.push(".05599550")
+    rows.push("05599229550")
+    rows.push("05992222995")
+    rows.push("05599229550")
+    rows.push(".05599550")
+    rows.push("..005550")
+    rows.push("...9.9.9")
+    return spriteFrom(rows, bioPal())
+}
+
+// Medic. A gland on legs; the beam is drawn by the renderer, not the sprite.
+pub fn healerSprite(): Sprite {
+    var pal: Vec<f64> = Vec.new()
+    palAdd(pal, 0.03, 0.05, 0.04) // 0 outline
+    palAdd(pal, 0.10, 0.30, 0.22) // 1 sac dark
+    palAdd(pal, 0.24, 0.70, 0.50) // 2 sac mid
+    palAdd(pal, 0.50, 1.30, 0.95) // 3 sac lit
+    palAdd(pal, 0.90, 2.20, 1.60) // 4 sac hot
+    palAdd(pal, 0.86, 0.82, 0.68) // 5 bone
+    palAdd(pal, 0.40, 0.38, 0.30) // 6 bone dark
+    var rows: Vec<string> = Vec.new()
+    rows.push("....0655560")
+    rows.push("..065511225560")
+    rows.push(".0651122333221560")
+    rows.push("065112233443322156")
+    rows.push("0511223344443322115")
+    rows.push("0511223344443322115")
+    rows.push("065112233443322156")
+    rows.push(".0651122333221560")
+    rows.push("..065511225560")
+    rows.push("....0655560")
+    return spriteFrom(rows, pal)
+}
+
+// Boss core: an eye the size of a house, behind its own armour.
+pub fn coreSprite(): Sprite {
+    var pal: Vec<f64> = Vec.new()
+    palAdd(pal, 0.04, 0.03, 0.03) // 0 outline
+    palAdd(pal, 0.26, 0.22, 0.16) // 1 bone dark
+    palAdd(pal, 0.60, 0.55, 0.42) // 2 bone mid
+    palAdd(pal, 0.96, 0.90, 0.72) // 3 bone
+    palAdd(pal, 1.40, 1.34, 1.14) // 4 bone white
+    palAdd(pal, 1.55, 1.05, 0.25) // 5 gold
+    palAdd(pal, 0.30, 0.10, 0.12) // 6 socket
+    palAdd(pal, 2.80, 0.30, 0.18) // 7 iris
+    palAdd(pal, 0.20, 1.90, 2.20) // 8 gem
+    palAdd(pal, 0.12, 0.08, 0.07) // 9 shadow
+    // Horned skull with a jaw of teeth on the side that faces you, and a gem set
+    // above the iris. It should look like it was grown, then decorated.
+    var rows: Vec<string> = Vec.new()
+    rows.push(".........5.........5")
+    rows.push("........055.......055")
+    rows.push(".......05550.....05550")
+    rows.push("......0555550...0555550")
+    rows.push("....0011255550001255550")
+    rows.push("...011223334555553334221100")
+    rows.push("..0112233444555554443322110")
+    rows.push("40112233445588885544332211")
+    rows.push("4011223344558888554433221100")
+    rows.push("940122334455667766554433221100")
+    rows.push("94012233445677776654433221100")
+    rows.push("9401223344567777665443322110")
+    rows.push("940122334455667766554433221100")
+    rows.push("4011223344556666554433221100")
+    rows.push("40112233445555555544332211")
+    rows.push("..0112233444555554443322110")
+    rows.push("...011223334555553334221100")
+    rows.push("....0011255550001255550")
+    rows.push("......0555550...0555550")
+    rows.push(".......05550.....05550")
+    rows.push("........055.......055")
+    rows.push(".........5.........5")
+    return spriteFrom(rows, pal)
+}
+
+// One scale off the boss, orbiting on its own.
+pub fn plateSprite(): Sprite {
+    var pal: Vec<f64> = Vec.new()
+    palAdd(pal, 0.04, 0.03, 0.03) // 0 outline
+    palAdd(pal, 0.28, 0.24, 0.17) // 1 bone dark
+    palAdd(pal, 0.62, 0.57, 0.43) // 2 bone mid
+    palAdd(pal, 0.98, 0.92, 0.74) // 3 bone
+    palAdd(pal, 1.45, 1.38, 1.18) // 4 bone white
+    palAdd(pal, 1.60, 1.10, 0.28) // 5 gold
+    var rows: Vec<string> = Vec.new()
+    rows.push("...05550")
+    rows.push(".005122150")
+    rows.push("051223343210")
+    rows.push("0512334443210")
+    rows.push("0122344444321")
+    rows.push("0122344444321")
+    rows.push("0512334443210")
+    rows.push("051223343210")
+    rows.push(".005122150")
+    rows.push("...05550")
+    return spriteFrom(rows, pal)
+}
+
+// ── pickups ───────────────────────────────────────────────────────────────────
+//
+// Generated rather than drawn: a capsule in the pickup's own colour with a mark
+// stamped into it, so a new pickup type is a switch arm and not a new grid of
+// characters. The mark is what you read at a glance; the colour is what you read
+// out of the corner of your eye.
+
+fn markPixel(kind: i64, x: i64, y: i64): bool {
+    // Coordinates are relative to a 16x16 capsule, mark area x 4..11, y 4..11.
+    if kind == 0 {
+        // POWER: a fat upward bolt
+        return (y >= 4 && y <= 7 && x >= 7 && x <= 9) || (y >= 8 && y <= 11 && x >= 6 && x <= 8)
+    }
+    if kind == 1 {
+        // POD: a ring
+        let dx = x - 7
+        let dy = y - 7
+        let d2 = dx * dx + dy * dy
+        return d2 <= 12 && d2 >= 3
+    }
+    if kind == 2 {
+        // MISSILE: an arrowhead pointing right
+        return x >= 4 && x <= 11 && Math.absI64(y - 7) <= (11 - x) / 2 && Math.absI64(y - 7) <= 3
+    }
+    if kind == 3 {
+        // SHIELD: a closed arc
+        let dx = x - 7
+        let dy = y - 7
+        let d2 = dx * dx + dy * dy
+        return (d2 <= 16 && d2 >= 8) || (y == 11 && x >= 4 && x <= 10)
+    }
+    // SPEED: two chevrons
+    return Math.absI64(Math.absI64(y - 7) - (x - 3)) <= 1 && x >= 4 && x <= 7 || Math.absI64(Math.absI64(y - 7) - (x - 7)) <= 1 && x >= 8 && x <= 11
+}
+
+pub fn orbSprite(kind: i64, r: f64, g: f64, b: f64): Sprite {
+    let n = 16
+    var s = spriteNew(n, n)
+    let c = 7.5
+    for y in 0..n {
+        for x in 0..n {
+            let dx = (x as f64) + 0.5 - c
+            let dy = (y as f64) + 0.5 - c
+            let d = Math.sqrt(dx * dx + dy * dy)
+            if d > 7.6 {
+                continue
+            }
+            if d > 6.4 {
+                // dark rim, so the capsule keeps an edge against a bright wall
+                spriteSet(s, x, y, r * 0.10, g * 0.10, b * 0.10, 1.0)
+            } else if d > 5.2 {
+                spriteSet(s, x, y, r * 1.30, g * 1.30, b * 1.30, 1.0)
+            } else if markPixel(kind, x, y) {
+                spriteSet(s, x, y, 2.60, 2.55, 2.40, 1.0)
+            } else {
+                // body, brighter toward the top-left so it reads as a solid
+                let f = 0.55 + 0.35 * (1.0 - d / 5.2) - dy * 0.04
+                spriteSet(s, x, y, r * f, g * f, b * f, 1.0)
+            }
+        }
+    }
+    return s
+}
+
+// ── the table ─────────────────────────────────────────────────────────────────
+
+pub struct Sprites {
+    ship: Sprite,
+    pod: Sprite,
+    drone: Sprite,
+    weaver: Sprite,
+    swooper: Sprite,
+    carrier: Sprite,
+    mine: Sprite,
+    turret: Sprite,
+    snakeHead: Sprite,
+    snakeSeg: Sprite,
+    healer: Sprite,
+    core: Sprite,
+    plate: Sprite,
+    orbs: Vec<Sprite>,
+    shot: Sprite,
+    podShot: Sprite,
+    hostileShot: Sprite,
+    missile: Sprite,
+}
+
+pub fn spritesNew(): Sprites {
+    var orbs: Vec<Sprite> = Vec.new()
+    orbs.push(orbSprite(0, 0.20, 1.30, 1.80)) // POWER   — cyan
+    orbs.push(orbSprite(1, 1.70, 0.30, 1.40)) // POD     — magenta
+    orbs.push(orbSprite(2, 1.80, 0.90, 0.15)) // MISSILE — amber
+    orbs.push(orbSprite(3, 0.25, 1.70, 0.70)) // SHIELD  — green
+    orbs.push(orbSprite(4, 1.50, 1.50, 1.70)) // SPEED   — white
+    return Sprites {
+        ship: shipSprite(),
+        pod: podSprite(),
+        drone: droneSprite(),
+        weaver: weaverSprite(),
+        swooper: swooperSprite(),
+        carrier: carrierSprite(),
+        mine: mineSprite(),
+        turret: turretSprite(),
+        snakeHead: snakeHeadSprite(),
+        snakeSeg: snakeSegSprite(),
+        healer: healerSprite(),
+        core: coreSprite(),
+        plate: plateSprite(),
+        orbs: orbs,
+        shot: shotSprite(),
+        podShot: podShotSprite(),
+        hostileShot: hostileShotSprite(),
+        missile: missileSprite(),
+    }
+}

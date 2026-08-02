@@ -13,12 +13,18 @@ from "std/args" import {
 from "./gfx" import {
     Canvas, canvasNew, present
 }
+from "./terrain" import {
+    topAt, botAt
+}
 from "./world" import {
     World, worldNew, worldUpdate, spawnSnake, spawnBoss, makeEnemy, spawn, Kind,
-    choosePerk, offerPerks, nearestEnemy, alive, Perk
+    dropOrb, nearestEnemy, alive
+}
+from "./sprites" import {
+    Sprites, spritesNew
 }
 from "./render" import {
-    Shapes, shapesNew, drawWorld, drawHud
+    drawWorld, drawHud
 }
 
 pub extern fn fopen(path: *u8, mode: *u8): *u8
@@ -74,51 +80,42 @@ pub fn main(): i32 {
 
     var c = canvasNew(W, H)
     var world = worldNew(W as f64, H as f64)
-    let shapes = shapesNew()
+    let shapes = spritesNew()
 
-    // stack the deck so a capture shows every system at once
-    choosePerk2(world, Perk.Spread)
-    choosePerk2(world, Perk.Chain)
-    choosePerk2(world, Perk.Burn)
-    choosePerk2(world, Perk.Homing)
-    choosePerk2(world, Perk.Turrets)
-    choosePerk2(world, Perk.Slowfield)
+    // stack the deck so a capture shows a fully kitted ship
+    for i in 0..6 {
+        dropOrb(world, world.player.x + 30.0, world.player.y)
+        worldUpdate(world, 1.0 / 60.0, 0.0, 0.0, false)
+    }
 
     let dt = 1.0 / 60.0
     for frame in 0..maxFrame + 1 {
-        if frame == 20 {
-            spawnSnake(world, 260.0, 180.0, 9)
-            for i in 0..7 {
-                let _ = spawn(world, makeEnemy(Kind.Seeker, 980.0 + (i as f64) * 22.0, 140.0 + (i as f64) * 30.0))
+        if frame == 40 {
+            spawnSnake(world, 1200.0, 300.0, 8)
+            for i in 0..6 {
+                let _ = spawn(world, makeEnemy(Kind.Drone, 900.0 + (i as f64) * 60.0, 160.0 + (i as f64) * 44.0))
             }
-            for i in 0..4 {
-                let _ = spawn(world, makeEnemy(Kind.Weaver, 200.0 + (i as f64) * 60.0, 620.0))
-            }
-            let _ = spawn(world, makeEnemy(Kind.Splitter, 1050.0, 560.0))
-            let _ = spawn(world, makeEnemy(Kind.Healer, 900.0, 620.0))
-            let _ = spawn(world, makeEnemy(Kind.BlackHole, 330.0, 470.0))
+            let _ = spawn(world, makeEnemy(Kind.Carrier, 1150.0, 520.0))
+            let _ = spawn(world, makeEnemy(Kind.Healer, 1000.0, 600.0))
         }
-        if frame == 140 {
-            spawnBoss(world, 980.0, 320.0)
+        if frame == 700 {
+            spawnBoss(world, 1000.0, 360.0)
         }
 
-        // scripted pilot: orbit the middle, shoot whatever is closest
+        // scripted pilot: stay centred in the cave, drift toward the nearest
+        // threat, and lean on the charge every couple of seconds
         let t = (frame as f64) * dt
-        var mvx = Math.cos(t * 1.7) * 0.6 + ((W as f64) * 0.5 - world.player.x) * 0.004
-        var mvy = Math.sin(t * 2.3) * 0.6 + ((H as f64) * 0.5 - world.player.y) * 0.004
-        var aim = t * 0.9
+        let ceil = topAt(world.terrain, world.player.x)
+        let floor = botAt(world.terrain, world.player.x)
+        let mid = (ceil + floor) * 0.5
+        var mvy = (mid - world.player.y) * 0.010 + Math.sin(t * 1.3) * 0.5
+        var mvx = Math.cos(t * 0.9) * 0.4
         let h = nearestEnemy(world, world.player.x, world.player.y, 3000.0, 0 - 1)
         if alive(world, h) {
-            let ddx = world.ents[h.slot].x - world.player.x
-            let ddy = world.ents[h.slot].y - world.player.y
-            aim = Math.atan2(ddy, ddx)
-            let d = Math.sqrt(ddx * ddx + ddy * ddy) + 0.001
-            if d < 240.0 {
-                mvx = mvx - ddx / d * 1.4
-                mvy = mvy - ddy / d * 1.4
-            }
+            mvy = mvy + Math.clampF64((world.ents[h.slot].y - world.player.y) * 0.01, 0.0 - 0.8, 0.8)
         }
-        worldUpdate(world, dt, mvx, mvy, aim, true, false)
+        let charging = (frame % 150) < 90
+        worldUpdate(world, dt, mvx, mvy, charging)
 
         var want = false
         for i in 0..shots.len {
@@ -134,15 +131,8 @@ pub fn main(): i32 {
             print("wrote " + prefix + "-" + frame.toString() + ".ppm")
         }
     }
-    print("entities alive at end: " + world.ents.len.toString())
+    print("entity slots used: " + world.ents.len.toString())
     print("score: " + world.score.toString())
+    print("stage: " + world.stage.toString())
     return 0
-}
-
-// The perk screen normally drives this; the capture tool grants perks directly.
-fn choosePerk2(w: &mut World, p: Perk) {
-    w.perkChoices.clear()
-    w.perkChoices.push(p)
-    w.perkPick = true
-    choosePerk(w, 0)
 }

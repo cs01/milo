@@ -1,9 +1,17 @@
 // Software HDR renderer for the neon shooter.
 //
-// Everything is drawn additively into a linear-light float buffer, then
-// bright-passed, blurred at quarter resolution and composited back with an
-// ACES-style tone curve. That is what makes overlapping neon strokes bloom into
-// each other instead of clipping to flat white.
+// Two kinds of ink share one linear-light float buffer:
+//
+//   blend — alpha-over, for anything with mass: hull plating, rock, sprites.
+//   add   — additive, for anything that emits: thrusters, shots, explosions.
+//
+// A purely additive canvas cannot draw a solid dark shape, and a side-scroller
+// through a biomechanical cave is mostly solid dark shapes. Keeping both means
+// the art has weight and the glow still blooms.
+//
+// The frame is bright-passed, blurred at quarter resolution and composited back
+// with an ACES-style tone curve, which is what makes overlapping neon strokes
+// bloom into each other instead of clipping to flat white.
 //
 // No GPU, no shaders — plain loops over Vec<f32>.
 
@@ -31,6 +39,32 @@ pub struct Canvas {
     utx: Vec<f32>, //                 horizontal lerp weight
     uy0: Vec<i64>,
     uty: Vec<f32>,
+}
+
+// A pixel-art image: straight (non-premultiplied) RGBA in linear light, four
+// floats per pixel. Colours run past 1.0 on purpose — that is what makes a
+// canopy or an eye bloom while the hull plating around it stays matte.
+pub struct Sprite {
+    w: i64,
+    h: i64,
+    px: Vec<f32>,
+}
+
+pub fn spriteNew(w: i64, h: i64): Sprite {
+    return Sprite {
+        w: w, h: h, px: Vec.filled(w * h * 4, 0.0)
+    }
+}
+
+pub fn spriteSet(s: &mut Sprite, x: i64, y: i64, r: f64, g: f64, b: f64, a: f64) {
+    if x < 0 || y < 0 || x >= s.w || y >= s.h {
+        return
+    }
+    let i = (y * s.w + x) * 4
+    s.px[i] = (r as f32)
+    s.px[i + 1] = (g as f32)
+    s.px[i + 2] = (b as f32)
+    s.px[i + 3] = (a as f32)
 }
 
 pub fn canvasNew(w: i64, h: i64): Canvas {
@@ -107,9 +141,165 @@ pub fn addPix(c: &mut Canvas, x: i64, y: i64, r: f64, g: f64, b: f64) {
     c.hdr[i + 2] = c.hdr[i + 2] + (b as f32)
 }
 
+// Alpha-over. Anything with mass goes through here so it can occlude what is
+// behind it — additive ink alone can only ever brighten.
+pub fn blendPix(c: &mut Canvas, x: i64, y: i64, r: f64, g: f64, b: f64, a: f64) {
+    if x < 0 || y < 0 || x >= c.w || y >= c.h || a <= 0.0 {
+        return
+    }
+    var k = a
+    if k > 1.0 {
+        k = 1.0
+    }
+    let inv = (1.0 - k) as f32
+    let i = (y * c.w + x) * 3
+    c.hdr[i] = c.hdr[i] * inv + ((r * k) as f32)
+    c.hdr[i + 1] = c.hdr[i + 1] * inv + ((g * k) as f32)
+    c.hdr[i + 2] = c.hdr[i + 2] * inv + ((b * k) as f32)
+}
+
+pub fn fillRect(c: &mut Canvas, x0: f64, y0: f64, x1: f64, y1: f64, r: f64, g: f64, b: f64, a: f64) {
+    if a <= 0.0 {
+        return
+    }
+    if !drawable(x0) || !drawable(y0) || !drawable(x1) || !drawable(y1) {
+        return
+    }
+    var k = a
+    if k > 1.0 {
+        k = 1.0
+    }
+    let inv = (1.0 - k) as f32
+    let cr = (r * k) as f32
+    let cg = (g * k) as f32
+    let cb = (b * k) as f32
+    var ix0 = Math.floor(x0) as i64
+    var iy0 = Math.floor(y0) as i64
+    var ix1 = Math.floor(x1) as i64
+    var iy1 = Math.floor(y1) as i64
+    if ix0 < 0 {
+        ix0 = 0
+    }
+    if iy0 < 0 {
+        iy0 = 0
+    }
+    if ix1 > c.w {
+        ix1 = c.w
+    }
+    if iy1 > c.h {
+        iy1 = c.h
+    }
+    var y = iy0
+    while y < iy1 {
+        var i = (y * c.w + ix0) * 3
+        var x = ix0
+        while x < ix1 {
+            c.hdr[i] = c.hdr[i] * inv + cr
+            c.hdr[i + 1] = c.hdr[i + 1] * inv + cg
+            c.hdr[i + 2] = c.hdr[i + 2] * inv + cb
+            i = i + 3
+            x = x + 1
+        }
+        y = y + 1
+    }
+}
+
+// ── sprites ───────────────────────────────────────────────────────────────────
+
+// Nearest-neighbour blit into a destination rectangle, anchored on the sprite's
+// centre because everything in this game is positioned by its centre.
+//
+// `glow` adds the sprite's own colour back on top of the blended result, which
+// is what pushes a canopy or an eye past the bloom threshold while the carapace
+// around it stays matte. `tmix` washes the whole sprite toward a tint — the
+// white flash on a hit.
+pub fn blitSprite(c: &mut Canvas, s: &Sprite, cx: f64, cy: f64, sx: f64, sy: f64, flip: bool, alpha: f64, glow: f64, tr: f64, tg: f64, tb: f64, tmix: f64) {
+    if alpha <= 0.0 || sx <= 0.0 || sy <= 0.0 {
+        return
+    }
+    if !drawable(cx) || !drawable(cy) {
+        return
+    }
+    let dw = (s.w as f64) * sx
+    let dh = (s.h as f64) * sy
+    let dx = cx - dw * 0.5
+    let dy = cy - dh * 0.5
+    var x0 = Math.floor(dx) as i64
+    var y0 = Math.floor(dy) as i64
+    var x1 = (Math.floor(dx + dw) as i64) + 1
+    var y1 = (Math.floor(dy + dh) as i64) + 1
+    if x1 <= 0 || y1 <= 0 || x0 >= c.w || y0 >= c.h {
+        return
+    }
+    if x0 < 0 {
+        x0 = 0
+    }
+    if y0 < 0 {
+        y0 = 0
+    }
+    if x1 > c.w {
+        x1 = c.w
+    }
+    if y1 > c.h {
+        y1 = c.h
+    }
+    let invx = 1.0 / sx
+    let invy = 1.0 / sy
+    var y = y0
+    while y < y1 {
+        var v = Math.floor(((y as f64) + 0.5 - dy) * invy) as i64
+        if v < 0 {
+            v = 0
+        }
+        if v >= s.h {
+            v = s.h - 1
+        }
+        let rowBase = v * s.w
+        var x = x0
+        while x < x1 {
+            var u = Math.floor(((x as f64) + 0.5 - dx) * invx) as i64
+            if u < 0 {
+                u = 0
+            }
+            if u >= s.w {
+                u = s.w - 1
+            }
+            if flip {
+                u = s.w - 1 - u
+            }
+            let si = (rowBase + u) * 4
+            let a = (s.px[si + 3] as f64) * alpha
+            if a > 0.001 {
+                var r = s.px[si] as f64
+                var g = s.px[si + 1] as f64
+                var b = s.px[si + 2] as f64
+                if tmix > 0.0 {
+                    r = r + (tr - r) * tmix
+                    g = g + (tg - g) * tmix
+                    b = b + (tb - b) * tmix
+                }
+                blendPix(c, x, y, r, g, b, a)
+                if glow > 0.0 {
+                    addPix(c, x, y, r * a * glow, g * a * glow, b * a * glow)
+                }
+            }
+            x = x + 1
+        }
+        y = y + 1
+    }
+}
+
+// The common case: upright, opaque, untinted.
+pub fn drawSprite(c: &mut Canvas, s: &Sprite, cx: f64, cy: f64, scale: f64, flip: bool, glow: f64) {
+    blitSprite(c, s, cx, cy, scale, scale, flip, 1.0, glow, 0.0, 0.0, 0.0, 0.0)
+}
+
 // A soft radial blob — the workhorse for particles, muzzle flashes and cores.
 pub fn spot(c: &mut Canvas, cx: f64, cy: f64, rad: f64, r: f64, g: f64, b: f64) {
     if rad <= 0.0 {
+        return
+    }
+    if !drawable(cx) || !drawable(cy) || !drawable(rad) {
         return
     }
     var x0 = (cx - rad) as i64
@@ -156,9 +346,24 @@ fn plot(c: &mut Canvas, x: i64, y: i64, cov: f64, r: f64, g: f64, b: f64) {
     addPix(c, x, y, r * cov, g * cov, b * cov)
 }
 
+// True for a coordinate that can safely be cast to i64 and then have small
+// integers added to it. NaN fails every comparison, so one bounds test rejects
+// NaN, +inf and -inf together.
+fn drawable(v: f64): bool {
+    return v > 0.0 - 1.0e7 && v < 1.0e7
+}
+
 // Xiaolin Wu antialiased line, drawn additively. Thin and bright — the bloom
 // pass supplies the halo, which is far cheaper than drawing a wide soft stroke.
+//
+// A drawing primitive must not be able to abort the process because a caller
+// handed it a non-finite coordinate: the physics upstream of this can go
+// unstable, and losing a line for one frame is the correct response to that,
+// not losing the game.
 pub fn line(c: &mut Canvas, x0i: f64, y0i: f64, x1i: f64, y1i: f64, r: f64, g: f64, b: f64) {
+    if !drawable(x0i) || !drawable(y0i) || !drawable(x1i) || !drawable(y1i) {
+        return
+    }
     var x0 = x0i
     var y0 = y0i
     var x1 = x1i

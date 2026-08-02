@@ -1,11 +1,11 @@
-// Game state: entities, weapons, the perk system, and everything that mutates
-// everything else.
+// Game state: the scrolling stage, its entities, the weapons, and the pickups
+// that rewrite what your gun does while you are still holding it down.
 //
 // This file exists to answer one objection: "handles are fine for data-oriented
 // numeric systems, show me messy gameplay code." So the interactions here are
 // deliberately tangled — objects hold links to other objects that can die
-// underneath them, deaths mutate their killer and their neighbours, and a perk
-// list rewrites what firing and hitting mean at runtime.
+// underneath them, deaths mutate their killer, their squad and their parent, and
+// a pickup rewrites firing and hitting at runtime with no pause and no menu.
 //
 // The rule Milo enforces is that no `&T` is ever stored. Every cross-object link
 // is a generational `Handle`, so a link to a dead object reads back as "gone"
@@ -19,8 +19,29 @@ from "std/random" import {
     Random
 }
 from "./grid" import {
-    Grid, gridNew, gridUpdate, gridImpulse, gridVortex, gridReset
+    Grid, gridNew, gridUpdate, gridImpulse, gridReset
 }
+from "./terrain" import {
+    Terrain, terrainNew, terrainReset, terrainAdvance, terrainOpen, terrainSetGap,
+    terrainHit, topAt, botAt
+}
+
+pub let TAU: f64 = 6.283185307179586
+
+pub let PI: f64 = 3.14159265358979
+
+// Which weapon made a bullet. The renderer picks a sprite from this, so every
+// projectile on screen is a distinct object rather than a differently-coloured
+// smear of light.
+pub let SRC_GUN: i64 = 0
+
+pub let SRC_POD: i64 = 1
+
+pub let SRC_MISSILE: i64 = 2
+
+pub let SRC_BEAM: i64 = 3
+
+pub let SRC_HOSTILE: i64 = 4
 
 // ── handles ───────────────────────────────────────────────────────────────────
 
@@ -44,18 +65,19 @@ pub fn handleIsNull(h: &Handle): bool {
 // ── entities ──────────────────────────────────────────────────────────────────
 
 pub enum Kind {
-    Seeker, // homes in on the player
-    Wanderer, // drifts and bounces, ignores you
-    Weaver, // strafes in on a sine wave
-    Splitter, // breaks into two smaller copies, twice
+    Drone, // holds formation, fires backwards down the lane
+    Weaver, // rides a sine wave across the screen
+    Swooper, // lines up on your altitude, then commits
+    Carrier, // fat, escorted, always drops a pickup
+    Mine, // drifts, bursts into a radial volley
+    Turret, // bolted to the cave, rides the terrain, tracks you
     SnakeHead, // leads a chain of segments
     SnakeSeg, // follows the segment ahead of it
-    BlackHole, // pulls the world in; eats bullets and enemies, then detonates
-    Healer, // repairs a nearby enemy over a visible beam
-    Turret, // player-owned, acquires and shoots targets
-    Sentinel, // boss core
-    Armor, // boss part, orbits its parent
-    Gem, // multiplier pickup
+    Healer, // repairs a wounded squadmate over a visible beam
+    Core, // boss core
+    Plate, // boss armour, orbits its core
+    Orb, // the glowing thing you pick up
+    Pod, // yours: trails you, shoots on its own, eats what is shot at you
 }
 
 pub struct Ent {
@@ -74,28 +96,29 @@ pub struct Ent {
     age: f64,
     phase: f64,
     spawnT: f64, // >0 while materialising: no collision, drawn as a warning ring
-    tier: i64, // splitter depth / black hole charge / armour index
+    tier: i64, // orb type / plate index / turret mount side
     value: i64, // score
+    fireT: f64,
     cr: f64,
     cg: f64,
     cb: f64,
     // status effects — set by one system, ticked by another, read by the renderer
     burn: f64,
-    slow: f64,
     flash: f64,
     // cross-entity links. These are the whole point of the file.
+    squad: i64, // formation id, or -1: clearing a whole squad drops a pickup
     leader: Handle, // segment ahead of me / my boss core
     follower: Handle, // segment behind me
-    target: Handle, // healer's patient, turret's mark
+    target: Handle, // healer's patient, turret's mark, pod's mark
 }
 
 fn blankEnt(): Ent {
     return Ent {
-        alive: false, gen: 0, kind: Kind.Gem,
+        alive: false, gen: 0, kind: Kind.Orb,
         x: 0.0, y: 0.0, vx: 0.0, vy: 0.0, ang: 0.0, spin: 0.0,
         radius: 8.0, hp: 1.0, maxHp: 1.0, age: 0.0, phase: 0.0, spawnT: 0.0,
-        tier: 0, value: 0, cr: 1.0, cg: 1.0, cb: 1.0,
-        burn: 0.0, slow: 0.0, flash: 0.0,
+        tier: 0, value: 0, fireT: 0.0, cr: 1.0, cg: 1.0, cb: 1.0,
+        burn: 0.0, flash: 0.0, squad: 0 - 1,
         leader: nullHandle(), follower: nullHandle(), target: nullHandle(),
     }
 }
@@ -110,14 +133,16 @@ pub struct Bullet {
     py: f64,
     life: f64,
     dmg: f64,
+    size: f64,
     pierce: i64,
-    bounces: i64,
     homing: f64,
+    hostile: bool, // shot at you, not by you
+    src: i64, // which weapon made it — the renderer picks a sprite from this
+    beam: bool, // a released charge: wide, and it clears its own lane
     target: Handle, // may die mid-flight; the missile re-acquires
     cr: f64,
     cg: f64,
     cb: f64,
-    fromTurret: bool,
 }
 
 pub struct Particle {
@@ -134,7 +159,7 @@ pub struct Particle {
     cb: f64,
 }
 
-// A lightning arc, queued by the chain-hit perk and drawn for a few frames.
+// A lightning arc, queued by the pod overcharge and drawn for a few frames.
 pub struct Arc {
     x0: f64,
     y0: f64,
@@ -144,16 +169,44 @@ pub struct Arc {
     seed: i64,
 }
 
-pub enum Perk {
-    Spread, // +2 barrels
-    Pierce, // bullets pass through
-    Chain, // hits arc to nearby enemies
-    Burn, // hits leave a burn that ticks
-    Homing, // bullets steer toward a target
-    Turrets, // drop an autonomous turret
-    Vampire, // kills heal you
-    Bounce, // bullets bounce off walls
-    Slowfield, // your wake slows enemies
+// Parallax dust. Nothing reads it but the renderer; it exists so the stage
+// obviously moves even where the cave is wide open.
+pub struct Star {
+    x: f64,
+    y: f64,
+    z: f64,
+}
+
+// ── pickups ───────────────────────────────────────────────────────────────────
+//
+// There is no upgrade screen. An orb is a glowing thing that drifts out of
+// something you killed; touching it makes the ship better immediately, and the
+// only decision is whether you can reach it.
+
+pub let ORB_POWER: i64 = 0
+
+pub let ORB_POD: i64 = 1
+
+pub let ORB_MISSILE: i64 = 2
+
+pub let ORB_SHIELD: i64 = 3
+
+pub let ORB_SPEED: i64 = 4
+
+pub fn orbName(t: i64): string {
+    if t == ORB_POWER {
+        return "POWER UP"
+    }
+    if t == ORB_POD {
+        return "POD ONLINE"
+    }
+    if t == ORB_MISSILE {
+        return "MISSILES"
+    }
+    if t == ORB_SHIELD {
+        return "SHIELD UP"
+    }
+    return "THRUSTERS"
 }
 
 pub struct Player {
@@ -161,15 +214,21 @@ pub struct Player {
     y: f64,
     vx: f64,
     vy: f64,
-    ang: f64,
     alive: bool,
-    hp: f64,
     lives: i64,
     respawn: f64,
     invuln: f64,
     cooldown: f64,
-    bombs: i64,
-    bombFlash: f64,
+    power: i64, // 1..5 — shot count and rate
+    speed: i64, // 0..3 — thruster upgrades
+    missiles: i64, // 0..2 — homing racks
+    missileT: f64,
+    shield: f64, // >0: the next hit is eaten instead of fatal
+    shieldT: f64, // countdown to the hull re-plating itself after a hit
+    charge: f64, // 0..1 while the fire key is held
+    charging: bool,
+    beamFlash: f64,
+    pods: i64,
 }
 
 pub struct World {
@@ -178,29 +237,36 @@ pub struct World {
     bullets: Vec<Bullet>,
     parts: Vec<Particle>,
     arcs: Vec<Arc>,
+    stars: Vec<Star>,
     grid: Grid,
+    terrain: Terrain,
     player: Player,
-    perks: Vec<Perk>,
     w: f64,
     h: f64,
     time: f64,
     score: i64,
     mult: i64,
-    multTimer: f64,
-    wave: i64,
-    waveTimer: f64,
-    pending: i64, // enemies still to spawn this wave
+    chain: i64, // kills without being hit — feeds the multiplier
+    scroll: f64, // px/s the stage moves left
+    dist: f64, // how far into the stage we are
+    stage: i64,
+    stageLen: f64,
+    bossUp: bool,
+    boss: Handle,
+    nextSpawn: f64, // distance at which the next squad enters
+    intro: i64, // scripted opening squads left: the first minute is taught, not rolled
+    gaveGift: bool, // the free pod that opens a run has been handed over
+    squadLive: Vec<i64>, // survivors per formation id; 0 by your hand pays out
     shake: f64,
     slowmo: f64,
     flash: f64,
     gameOver: bool,
-    banner: f64, // countdown on the big centred wave title
-    newKind: Kind, // enemy type introduced this wave, named on screen
-    newKindTimer: f64,
+    banner: f64,
     hurt: f64, // red edge vignette after taking a hit
-    perkPick: bool, // gameplay is paused while a perk is chosen
-    perkChoices: Vec<Perk>,
-    turretCount: i64,
+    pickupCode: i64, // last orb collected, for the floating label
+    pickupT: f64,
+    pickupX: f64,
+    pickupY: f64,
     // uniform spatial hash over enemies, rebuilt each frame:
     // `hashHead[cell]` is the first entity index, `hashNext[i]` the next one.
     hashHead: Vec<i64>,
@@ -212,42 +278,59 @@ pub struct World {
 pub let CELL: f64 = 96.0
 
 pub fn worldNew(w: f64, h: f64): World {
-    let cols = (w / CELL) as i64 + 1
-    let rows = (h / CELL) as i64 + 1
+    let cols = (w / CELL) as i64 + 2
+    let rows = (h / CELL) as i64 + 2
+    var stars: Vec<Star> = Vec.new()
+    for i in 0..220 {
+        stars.push(Star {
+            x: Random.floatRange(0.0, w),
+            y: Random.floatRange(0.0, h),
+            z: Random.floatRange(0.15, 1.0),
+        }
+        )
+    }
     return World {
         ents: Vec.new(),
         free: Vec.new(),
         bullets: Vec.new(),
         parts: Vec.new(),
         arcs: Vec.new(),
-        grid: gridNew(w, h, 42.0),
+        stars: stars,
+        grid: gridNew(w, h, 48.0),
+        terrain: terrainNew(w, h, 16.0),
         player: Player {
-            x: w * 0.5, y: h * 0.5, vx: 0.0, vy: 0.0, ang: 0.0,
-            alive: true, hp: 1.0, lives: 5, respawn: 0.0, invuln: 3.0,
-            cooldown: 0.0, bombs: 4, bombFlash: 0.0,
+            x: w * 0.22, y: h * 0.5, vx: 0.0, vy: 0.0,
+            alive: true, lives: 5, respawn: 0.0, invuln: 3.5,
+            cooldown: 0.0, power: 1, speed: 0, missiles: 0, missileT: 0.0,
+            shield: 1.0, shieldT: 0.0, charge: 0.0, charging: false, beamFlash: 0.0, pods: 0,
         }
         ,
-        perks: Vec.new(),
         w: w,
         h: h,
         time: 0.0,
         score: 0,
         mult: 1,
-        multTimer: 0.0,
-        wave: 0,
-        waveTimer: 1.5,
-        pending: 0,
+        chain: 0,
+        scroll: 170.0,
+        dist: 0.0,
+        stage: 1,
+        stageLen: 5200.0,
+        bossUp: false,
+        boss: nullHandle(),
+        nextSpawn: 950.0,
+        intro: 3,
+        gaveGift: false,
+        squadLive: Vec.new(),
         shake: 0.0,
         slowmo: 0.0,
         flash: 0.0,
         gameOver: false,
-        banner: 0.0,
-        newKind: Kind.Seeker,
-        newKindTimer: 0.0,
+        banner: 2.6,
         hurt: 0.0,
-        perkPick: false,
-        perkChoices: Vec.new(),
-        turretCount: 0,
+        pickupCode: 0 - 1,
+        pickupT: 0.0,
+        pickupX: 0.0,
+        pickupY: 0.0,
         hashHead: Vec.filled(cols * rows, 0 - 1),
         hashNext: Vec.new(),
         hashCols: cols,
@@ -274,10 +357,10 @@ pub fn spawn(w: &mut World, e: Ent): Handle {
         }
     }
     let g = w.ents[slot].gen + 1
-    var fresh = e
-    fresh.alive = true
-    fresh.gen = g
-    w.ents[slot] = fresh
+    var reused = e
+    reused.alive = true
+    reused.gen = g
+    w.ents[slot] = reused
     return Handle {
         slot: slot, gen: g
     }
@@ -308,12 +391,12 @@ pub fn alive(w: &World, h: &Handle): bool {
 
 pub fn burst(w: &mut World, x: f64, y: f64, n: i64, speed: f64, cr: f64, cg: f64, cb: f64, size: f64) {
     for i in 0..n {
-        let a = Random.floatRange(0.0, 6.283185307179586)
+        let a = Random.floatRange(0.0, TAU)
         let s = Random.floatRange(speed * 0.15, speed)
         let life = Random.floatRange(0.35, 1.1)
         w.parts.push(Particle {
             x: x, y: y,
-            vx: Math.cos(a) * s, vy: Math.sin(a) * s,
+            vx: Math.cos(a) * s - w.scroll * 0.35, vy: Math.sin(a) * s,
             life: life, maxLife: life, drag: 1.9, size: size,
             cr: cr, cg: cg, cb: cb,
         }
@@ -328,153 +411,6 @@ pub fn addArc(w: &mut World, x0: f64, y0: f64, x1: f64, y1: f64) {
     )
 }
 
-pub fn hasPerk(w: &World, p: Perk): bool {
-    for i in 0..w.perks.len {
-        if perkEq(w.perks[i], p) {
-            return true
-        }
-    }
-    return false
-}
-
-pub fn perkCount(w: &World, p: Perk): i64 {
-    var n: i64 = 0
-    for i in 0..w.perks.len {
-        if perkEq(w.perks[i], p) {
-            n = n + 1
-        }
-    }
-    return n
-}
-
-pub fn perkEq(a: Perk, b: Perk): bool {
-    return perkId(a) == perkId(b)
-}
-
-pub fn perkId(p: Perk): i64 {
-    match p {
-        Perk.Spread => {
-            return 0
-        }
-        Perk.Pierce => {
-            return 1
-        }
-        Perk.Chain => {
-            return 2
-        }
-        Perk.Burn => {
-            return 3
-        }
-        Perk.Homing => {
-            return 4
-        }
-        Perk.Turrets => {
-            return 5
-        }
-        Perk.Vampire => {
-            return 6
-        }
-        Perk.Bounce => {
-            return 7
-        }
-        Perk.Slowfield => {
-            return 8
-        }
-    }
-}
-
-pub fn perkName(p: Perk): string {
-    match p {
-        Perk.Spread => {
-            return "SPREAD"
-        }
-        Perk.Pierce => {
-            return "PIERCE"
-        }
-        Perk.Chain => {
-            return "CHAIN LIGHTNING"
-        }
-        Perk.Burn => {
-            return "INCENDIARY"
-        }
-        Perk.Homing => {
-            return "HOMING"
-        }
-        Perk.Turrets => {
-            return "AUTO TURRET"
-        }
-        Perk.Vampire => {
-            return "VAMPIRE"
-        }
-        Perk.Bounce => {
-            return "RICOCHET"
-        }
-        Perk.Slowfield => {
-            return "SLOW FIELD"
-        }
-    }
-}
-
-pub fn perkBlurb(p: Perk): string {
-    match p {
-        Perk.Spread => {
-            return "TWO MORE BARRELS"
-        }
-        Perk.Pierce => {
-            return "SHOTS PUNCH THROUGH"
-        }
-        Perk.Chain => {
-            return "HITS ARC TO NEARBY FOES"
-        }
-        Perk.Burn => {
-            return "HITS SET TARGETS ALIGHT"
-        }
-        Perk.Homing => {
-            return "SHOTS STEER AND RETARGET"
-        }
-        Perk.Turrets => {
-            return "DROPS AN AUTONOMOUS GUN"
-        }
-        Perk.Vampire => {
-            return "KILLS REFUND A BOMB"
-        }
-        Perk.Bounce => {
-            return "SHOTS RICOCHET OFF WALLS"
-        }
-        Perk.Slowfield => {
-            return "YOUR WAKE SLOWS ENEMIES"
-        }
-    }
-}
-
-pub fn perkFromId(i: i64): Perk {
-    if i == 0 {
-        return Perk.Spread
-    }
-    if i == 1 {
-        return Perk.Pierce
-    }
-    if i == 2 {
-        return Perk.Chain
-    }
-    if i == 3 {
-        return Perk.Burn
-    }
-    if i == 4 {
-        return Perk.Homing
-    }
-    if i == 5 {
-        return Perk.Turrets
-    }
-    if i == 6 {
-        return Perk.Vampire
-    }
-    if i == 7 {
-        return Perk.Bounce
-    }
-    return Perk.Slowfield
-}
-
 // ── spawning ──────────────────────────────────────────────────────────────────
 
 pub fn makeEnemy(kind: Kind, x: f64, y: f64): Ent {
@@ -482,187 +418,273 @@ pub fn makeEnemy(kind: Kind, x: f64, y: f64): Ent {
     e.kind = kind
     e.x = x
     e.y = y
-    e.spawnT = 0.85
-    e.phase = Random.floatRange(0.0, 6.283185307179586)
+    e.phase = Random.floatRange(0.0, TAU)
     match kind {
-        Kind.Seeker => {
+        Kind.Drone => {
             e.radius = 15.0
             e.hp = 2.0
             e.value = 20
-            e.spin = 2.2
+            e.spin = 1.6
+            e.vx = 0.0 - 130.0
+            e.fireT = Random.floatRange(2.4, 4.0)
             e.cr = 2.2
-            e.cg = 0.04
+            e.cg = 0.06
             e.cb = 0.85
         }
-        Kind.Wanderer => {
-            e.radius = 17.0
-            e.hp = 2.0
-            e.value = 15
-            e.spin = 0.9
-            let a = Random.floatRange(0.0, 6.283185307179586)
-            e.vx = Math.cos(a) * 62.0
-            e.vy = Math.sin(a) * 62.0
-            e.cr = 0.05
-            e.cg = 0.75
-            e.cb = 2.4
-        }
         Kind.Weaver => {
-            e.radius = 16.0
-            e.hp = 3.0
-            e.value = 30
-            e.spin = 3.4
+            e.radius = 14.0
+            e.hp = 2.0
+            e.value = 25
+            e.spin = 3.2
+            e.vx = 0.0 - 175.0
+            e.fireT = Random.floatRange(2.6, 4.2)
             e.cr = 2.2
             e.cg = 1.5
             e.cb = 0.02
         }
-        Kind.Splitter => {
-            e.radius = 20.0
-            e.hp = 4.0
-            e.value = 25
-            e.spin = 1.4
-            e.tier = 2
+        Kind.Swooper => {
+            e.radius = 13.0
+            e.hp = 2.0
+            e.value = 35
+            e.spin = 4.5
+            e.vx = 0.0 - 90.0
+            e.cr = 0.06
+            e.cg = 0.9
+            e.cb = 2.4
+        }
+        Kind.Carrier => {
+            e.radius = 26.0
+            e.hp = 16.0
+            e.value = 150
+            e.spin = 0.6
+            e.vx = 0.0 - 70.0
+            e.fireT = 1.4
             e.cr = 2.3
-            e.cg = 0.55
-            e.cb = 0.01
+            e.cg = 0.9
+            e.cb = 0.05
+        }
+        Kind.Mine => {
+            e.radius = 13.0
+            e.hp = 1.0
+            e.value = 15
+            e.spin = 1.2
+            e.vx = 0.0 - 20.0
+            // Hard red and nothing else: no pickup is ever red, so a mine can
+            // never read as something you want to touch.
+            e.cr = 2.4
+            e.cg = 0.05
+            e.cb = 0.12
+        }
+        Kind.Turret => {
+            e.radius = 15.0
+            e.hp = 5.0
+            e.value = 45
+            e.spin = 0.0
+            e.fireT = Random.floatRange(2.6, 4.0)
+            e.cr = 1.5
+            e.cg = 0.6
+            e.cb = 2.0
         }
         Kind.SnakeHead => {
-            e.radius = 13.0
+            e.radius = 14.0
             e.hp = 6.0
             e.value = 60
             e.spin = 0.0
+            e.vx = 0.0 - 120.0
             e.cr = 1.5
             e.cg = 1.9
             e.cb = 0.05
         }
         Kind.SnakeSeg => {
-            e.radius = 10.0
+            e.radius = 11.0
             e.hp = 3.0
             e.value = 15
             e.cr = 1.1
             e.cg = 1.5
             e.cb = 0.03
         }
-        Kind.BlackHole => {
-            e.radius = 18.0
-            e.hp = 22.0
-            e.value = 150
-            e.spin = 0.6
-            e.cr = 1.1
-            e.cg = 0.25
-            e.cb = 1.7
-        }
         Kind.Healer => {
-            e.radius = 12.0
-            e.hp = 5.0
-            e.value = 80
+            e.radius = 13.0
+            e.hp = 6.0
+            e.value = 90
             e.spin = 1.1
+            e.vx = 0.0 - 60.0
             e.cr = 0.15
             e.cg = 1.5
             e.cb = 1.6
         }
-        Kind.Turret => {
-            e.radius = 10.0
-            e.hp = 6.0
-            e.value = 0
-            e.spin = 0.0
-            e.cr = 0.95
-            e.cg = 0.35
-            e.cb = 1.9
-            e.spawnT = 0.25
-        }
-        Kind.Sentinel => {
-            e.radius = 34.0
-            e.hp = 90.0
-            e.value = 1000
-            e.spin = 0.35
+        Kind.Core => {
+            e.radius = 46.0
+            e.hp = 150.0
+            e.value = 2000
+            e.spin = 0.3
+            e.fireT = 1.4
             e.cr = 1.8
             e.cg = 0.5
             e.cb = 0.15
             e.spawnT = 1.6
         }
-        Kind.Armor => {
-            e.radius = 15.0
-            e.hp = 16.0
-            e.value = 120
+        Kind.Plate => {
+            e.radius = 17.0
+            e.hp = 22.0
+            e.value = 150
             e.spin = 2.0
             e.cr = 1.8
             e.cg = 0.9
             e.cb = 0.2
             e.spawnT = 1.6
         }
-        Kind.Gem => {
-            e.radius = 9.0
+        Kind.Orb => {
+            e.radius = 13.0
             e.hp = 1.0
             e.value = 0
-            e.spin = 2.6
-            e.cr = 0.1
-            e.cg = 2.4
-            e.cb = 0.45
+            e.spin = 1.4
+            e.vx = 0.0 - 40.0
+            e.cr = 0.2
+            e.cg = 2.2
+            e.cb = 2.4
+        }
+        Kind.Pod => {
+            e.radius = 12.0
+            e.hp = 1.0
+            e.value = 0
+            e.spin = 5.0
+            e.cr = 2.4
+            e.cg = 0.5
+            e.cb = 2.2
         }
     }
     e.maxHp = e.hp
     return e
 }
 
+pub fn isEnemy(k: Kind): bool {
+    match k {
+        Kind.Orb => {
+            return false
+        }
+        Kind.Pod => {
+            return false
+        }
+        _ => {
+            return true
+        }
+    }
+}
+
+// An orb is never a dud: the drop looks at what the ship is missing and picks
+// the thing that helps most. A pickup you already have is a punishment for
+// getting to it.
+fn pickOrbType(w: &World): i64 {
+    if w.player.pods == 0 {
+        return ORB_POD
+    }
+    if w.player.shield <= 0.0 && Random.range(0, 3) == 0 {
+        return ORB_SHIELD
+    }
+    if w.player.power < 5 && Random.range(0, 5) < 3 {
+        return ORB_POWER
+    }
+    if w.player.missiles < 2 {
+        return ORB_MISSILE
+    }
+    if w.player.speed < 3 {
+        return ORB_SPEED
+    }
+    if w.player.pods < 2 {
+        return ORB_POD
+    }
+    return ORB_POWER
+}
+
+fn orbColour(t: i64, e: &mut Ent) {
+    if t == ORB_POWER {
+        e.cr = 0.15
+        e.cg = 2.0
+        e.cb = 2.6
+        return
+    }
+    if t == ORB_POD {
+        e.cr = 2.6
+        e.cg = 0.25
+        e.cb = 2.2
+        return
+    }
+    if t == ORB_MISSILE {
+        e.cr = 2.6
+        e.cg = 1.3
+        e.cb = 0.15
+        return
+    }
+    if t == ORB_SHIELD {
+        e.cr = 0.2
+        e.cg = 2.6
+        e.cb = 0.9
+        return
+    }
+    e.cr = 2.2
+    e.cg = 2.2
+    e.cb = 2.4
+}
+
+pub fn dropOrb(w: &mut World, x: f64, y: f64) {
+    let t = pickOrbType(w)
+    var e = makeEnemy(Kind.Orb, x, y)
+    e.tier = t
+    e.vy = Random.floatRange(0.0 - 40.0, 40.0)
+    orbColour(t, e)
+    let cr = e.cr
+    let cg = e.cg
+    let cb = e.cb
+    let _ = spawn(w, e)
+    burst(w, x, y, 14, 180.0, cr * 0.4, cg * 0.4, cb * 0.4, 2.0)
+}
+
+// A squad is a formation that pays out only if you clear all of it. The counter
+// lives in the world, the id lives on the entity, and nothing holds a reference
+// to anything.
+pub fn newSquad(w: &mut World, n: i64): i64 {
+    w.squadLive.push(n)
+    return w.squadLive.len - 1
+}
+
 // A snake is a doubly linked chain of entities. Killing a middle segment has to
-// splice the chain back together — the link surgery in `damage` below.
+// splice the chain back together, in both directions.
 pub fn spawnSnake(w: &mut World, x: f64, y: f64, len: i64) {
     let head = spawn(w, makeEnemy(Kind.SnakeHead, x, y))
     var prev = head
     for i in 0..len {
-        var seg = makeEnemy(Kind.SnakeSeg, x, y + (i as f64 + 1.0) * 16.0)
+        var seg = makeEnemy(Kind.SnakeSeg, x + (i as f64 + 1.0) * 20.0, y)
         seg.leader = prev
-        seg.radius = 11.0 - (i as f64) * 0.25
+        seg.radius = 12.0 - (i as f64) * 0.2
         let h = spawn(w, seg)
         w.ents[prev.slot].follower = h
         prev = h
     }
 }
 
-// The boss carries four armour plates that orbit it. Each plate holds a handle
-// to the core and the core holds handles to the plates; a plate's death mutates
-// the core, and the core's death takes the plates with it.
+// The boss carries six armour plates that orbit it. Each plate holds a handle to
+// the core and the core counts its plates; a plate's death mutates the core, and
+// the core's death takes every plate that points at it.
 pub fn spawnBoss(w: &mut World, x: f64, y: f64) {
-    let core = spawn(w, makeEnemy(Kind.Sentinel, x, y))
-    for i in 0..4 {
-        var a = makeEnemy(Kind.Armor, x, y)
-        a.leader = core
-        a.tier = i
-        a.phase = (i as f64) * 1.5707963267948966
-        let h = spawn(w, a)
+    let core = spawn(w, makeEnemy(Kind.Core, x, y))
+    w.ents[core.slot].hp = 110.0 + (w.stage as f64) * 40.0
+    w.ents[core.slot].maxHp = w.ents[core.slot].hp
+    for i in 0..6 {
+        var p = makeEnemy(Kind.Plate, x, y)
+        p.leader = core
+        p.tier = i
+        p.phase = (i as f64) * TAU / 6.0
+        let h = spawn(w, p)
         if i == 0 {
-            w.ents[core.slot].follower = h // any surviving plate, for the shield check
+            w.ents[core.slot].follower = h
         }
     }
-    w.ents[core.slot].tier = 4 // plates remaining
-}
-
-pub struct P2 {
-    x: f64,
-    y: f64,
-}
-
-pub fn randomEdge(w: &World): P2 {
-    let side = Random.range(0, 4)
-    let m = 70.0
-    if side == 0 {
-        return P2 {
-            x: Random.floatRange(m, w.w - m), y: m
-        }
-    }
-    if side == 1 {
-        return P2 {
-            x: Random.floatRange(m, w.w - m), y: w.h - m
-        }
-    }
-    if side == 2 {
-        return P2 {
-            x: m, y: Random.floatRange(m, w.h - m)
-        }
-    }
-    return P2 {
-        x: w.w - m, y: Random.floatRange(m, w.h - m)
-    }
+    w.ents[core.slot].tier = 6 // plates remaining
+    w.boss = core
+    w.bossUp = true
+    w.shake = 8.0
+    w.banner = 2.4
 }
 
 // ── damage and death ──────────────────────────────────────────────────────────
@@ -672,88 +694,65 @@ pub fn addScore(w: &mut World, n: i64) {
 }
 
 // Deaths are where the tangle lives: one entity dying rewrites its neighbours'
-// links, mutates its parent, spawns children that inherit its state, and pushes
-// on the background grid — all through handles, none of it holding a reference.
+// links, mutates its parent, decrements a squad counter it does not own, and
+// pushes on the background lattice — all through handles, none of it holding a
+// reference.
 pub fn onDeath(w: &mut World, slot: i64, byPlayer: bool) {
     let e = w.ents[slot]
     let kind = e.kind
 
-    burst(w, e.x, e.y, 26, 320.0, e.cr, e.cg, e.cb, 2.4)
-    gridImpulse(w.grid, e.x, e.y, 240.0, 90.0)
-    w.shake = Math.maxF64(w.shake, 4.0)
+    burst(w, e.x, e.y, 24, 300.0, e.cr, e.cg, e.cb, 2.4)
+    gridImpulse(w.grid, e.x, e.y, 220.0, 80.0)
+    w.shake = Math.maxF64(w.shake, 2.2)
 
     if byPlayer {
         addScore(w, e.value)
+        w.chain = w.chain + 1
+        w.mult = Math.minI64(1 + w.chain / 12, 8)
     }
 
     match kind {
-        Kind.Splitter => {
-            if e.tier > 0 {
-                for i in 0..2 {
-                    var c = makeEnemy(Kind.Splitter, e.x, e.y)
-                    c.tier = e.tier - 1
-                    c.radius = e.radius * 0.62
-                    c.hp = 2.0
-                    c.maxHp = 2.0
-                    c.value = 15
-                    c.spawnT = 0.0
-                    let a = Random.floatRange(0.0, 6.283185307179586)
-                    c.vx = Math.cos(a) * 190.0
-                    c.vy = Math.sin(a) * 190.0
-                    let _ = spawn(w, c)
-                }
-            }
-        }
         Kind.SnakeHead => {
             spliceChain(w, slot)
         }
         Kind.SnakeSeg => {
             spliceChain(w, slot)
         }
-        Kind.BlackHole => {
-            // Detonation: shove the grid, hurt everything nearby, and seed the
-            // arena with the seekers it had swallowed.
-            gridImpulse(w.grid, e.x, e.y, 460.0, 150.0)
-            burst(w, e.x, e.y, 150, 620.0, 1.4, 0.4, 1.8, 3.0)
-            w.shake = 22.0
-            w.flash = 0.5
-            for i in 0..w.ents.len {
-                if w.ents[i].alive && i != slot {
-                    let dx = w.ents[i].x - e.x
-                    let dy = w.ents[i].y - e.y
-                    if dx * dx + dy * dy < 260.0 * 260.0 {
-                        damage(w, i, 6.0, false)
-                    }
-                }
+        Kind.Mine => {
+            // A mine is a trade: killing it at range is free, killing it in your
+            // face is not.
+            for i in 0..7 {
+                let a = (i as f64) * TAU / 7.0 + Random.floatRange(0.0, 0.3)
+                fireHostile(w, e.x, e.y, a, 150.0, 1.0)
             }
-            let n = 3 + e.tier / 2
-            for i in 0..n {
-                let a = Random.floatRange(0.0, 6.283185307179586)
-                var s = makeEnemy(Kind.Seeker, e.x + Math.cos(a) * 40.0, e.y + Math.sin(a) * 40.0)
-                s.spawnT = 0.35
-                let _ = spawn(w, s)
-            }
+            burst(w, e.x, e.y, 40, 380.0, 2.0, 0.6, 0.1, 2.8)
+            w.shake = Math.maxF64(w.shake, 5.0)
         }
-        Kind.Armor => {
+        Kind.Carrier => {
+            dropOrb(w, e.x, e.y)
+            burst(w, e.x, e.y, 90, 480.0, 2.2, 0.9, 0.1, 3.0)
+            w.shake = Math.maxF64(w.shake, 8.0)
+        }
+        Kind.Plate => {
             // Tell the core it lost a plate. The core may already be gone, in
             // which case the handle simply does not resolve.
             let core = e.leader
             if alive(w, core) {
                 w.ents[core.slot].tier = w.ents[core.slot].tier - 1
-                w.ents[core.slot].spin = w.ents[core.slot].spin * 1.35
+                w.ents[core.slot].spin = w.ents[core.slot].spin * 1.3
                 w.ents[core.slot].flash = 0.3
+                w.ents[core.slot].fireT = w.ents[core.slot].fireT * 0.86
             }
         }
-        Kind.Sentinel => {
+        Kind.Core => {
             // Core dies, plates go with it.
             for i in 0..w.ents.len {
                 if w.ents[i].alive {
                     match w.ents[i].kind {
-                        Kind.Armor => {
+                        Kind.Plate => {
                             if w.ents[i].leader.slot == slot {
-                                w.ents[i].hp = 0.0
-                                kill(w, i)
                                 burst(w, w.ents[i].x, w.ents[i].y, 40, 420.0, 1.8, 0.9, 0.2, 2.6)
+                                kill(w, i)
                             }
                         }
                         _ => {
@@ -761,37 +760,27 @@ pub fn onDeath(w: &mut World, slot: i64, byPlayer: bool) {
                     }
                 }
             }
-            burst(w, e.x, e.y, 260, 780.0, 1.9, 0.6, 0.15, 3.4)
-            gridImpulse(w.grid, e.x, e.y, 620.0, 230.0)
-            w.shake = 30.0
-            w.flash = 0.8
-        }
-        Kind.Turret => {
-            w.turretCount = w.turretCount - 1
+            burst(w, e.x, e.y, 300, 820.0, 1.9, 0.6, 0.15, 3.4)
+            gridImpulse(w.grid, e.x, e.y, 700.0, 260.0)
+            w.shake = 18.0
+            w.flash = 0.9
+            w.bossUp = false
+            w.boss = nullHandle()
+            for i in 0..3 {
+                dropOrb(w, e.x + (i as f64) * 40.0 - 40.0, e.y)
+            }
+            nextStage(w)
         }
         _ => {
         }
     }
 
-    // Enemies drop multiplier gems; pickups and player-owned things do not.
-    if byPlayer && isEnemy(kind) {
-        var n = 1
-        if e.value >= 60 {
-            n = 3
-        }
-        if e.value >= 500 {
-            n = 12
-        }
-        for i in 0..n {
-            var g = makeEnemy(Kind.Gem, e.x, e.y)
-            g.spawnT = 0.0
-            let a = Random.floatRange(0.0, 6.283185307179586)
-            g.vx = Math.cos(a) * 130.0
-            g.vy = Math.sin(a) * 130.0
-            let _ = spawn(w, g)
-        }
-        if hasPerk(w, Perk.Vampire) && Random.range(0, 24) == 0 {
-            w.player.bombs = Math.minI64(w.player.bombs + 1, 5)
+    // Squad payout: the counter belongs to the world, the id to the entity, and
+    // the last one to die by your hand is the one that pays.
+    if e.squad >= 0 && e.squad < w.squadLive.len {
+        w.squadLive[e.squad] = w.squadLive[e.squad] - 1
+        if w.squadLive[e.squad] == 0 && byPlayer {
+            dropOrb(w, e.x, e.y)
         }
     }
 
@@ -818,20 +807,6 @@ fn spliceChain(w: &mut World, slot: i64) {
     }
 }
 
-pub fn isEnemy(k: Kind): bool {
-    match k {
-        Kind.Gem => {
-            return false
-        }
-        Kind.Turret => {
-            return false
-        }
-        _ => {
-            return true
-        }
-    }
-}
-
 pub fn damage(w: &mut World, slot: i64, dmg: f64, byPlayer: bool) {
     if slot < 0 || slot >= w.ents.len {
         return
@@ -839,13 +814,19 @@ pub fn damage(w: &mut World, slot: i64, dmg: f64, byPlayer: bool) {
     if !w.ents[slot].alive || w.ents[slot].spawnT > 0.0 {
         return
     }
-    // An armoured core is invulnerable while any plate survives.
     match w.ents[slot].kind {
-        Kind.Sentinel => {
+        Kind.Core => {
+            // An armoured core is invulnerable while any plate survives.
             if w.ents[slot].tier > 0 {
                 w.ents[slot].flash = 0.12
                 return
             }
+        }
+        Kind.Pod => {
+            return
+        }
+        Kind.Orb => {
+            return
         }
         _ => {
         }
@@ -888,7 +869,7 @@ fn rehash(w: &mut World) {
     }
 }
 
-// ── targeting helpers ─────────────────────────────────────────────────────────
+// ── targeting ─────────────────────────────────────────────────────────────────
 
 pub fn nearestEnemy(w: &World, x: f64, y: f64, maxDist: f64, skip: i64): Handle {
     var best: i64 = 0 - 1
@@ -914,85 +895,136 @@ pub fn nearestEnemy(w: &World, x: f64, y: f64, maxDist: f64, skip: i64): Handle 
 
 // ── weapons ───────────────────────────────────────────────────────────────────
 
-fn fireBullet(w: &mut World, x: f64, y: f64, ang: f64, speed: f64, fromTurret: bool) {
-    var b = Bullet {
+fn firePlayer(w: &mut World, x: f64, y: f64, ang: f64, speed: f64, dmg: f64, src: i64, cr: f64, cg: f64, cb: f64) {
+    w.bullets.push(Bullet {
         alive: true,
         x: x, y: y,
         vx: Math.cos(ang) * speed, vy: Math.sin(ang) * speed,
         px: x, py: y,
-        life: 1.7, dmg: 1.0,
-        pierce: perkCount(w, Perk.Pierce),
-        bounces: 0,
-        homing: 0.0,
+        life: 1.4, dmg: dmg, size: 5.0,
+        pierce: 0, homing: 0.0,
+        hostile: false, beam: false, src: src,
         target: nullHandle(),
-        cr: 1.4, cg: 1.1, cb: 0.35,
-        fromTurret: fromTurret,
+        cr: cr, cg: cg, cb: cb,
     }
-    if hasPerk(w, Perk.Bounce) {
-        b.bounces = 2
-    }
-    if hasPerk(w, Perk.Homing) {
-        b.homing = 5.5
-        b.target = nearestEnemy(w, x, y, 460.0, 0 - 1)
-        b.cr = 0.6
-        b.cg = 1.5
-        b.cb = 1.6
-    }
-    if fromTurret {
-        b.cr = 0.5
-        b.cg = 1.3
-        b.cb = 1.8
-        b.dmg = 0.8
-    }
-    w.bullets.push(b)
+    )
 }
 
-fn playerFire(w: &mut World, aim: f64) {
-    let barrels = 1 + 2 * perkCount(w, Perk.Spread)
-    let spread = 0.13
-    let px = w.player.x
+pub fn fireHostile(w: &mut World, x: f64, y: f64, ang: f64, speed: f64, dmg: f64) {
+    w.bullets.push(Bullet {
+        alive: true,
+        x: x, y: y,
+        vx: Math.cos(ang) * speed - w.scroll * 0.25, vy: Math.sin(ang) * speed,
+        px: x, py: y,
+        life: 6.0, dmg: dmg, size: 7.0,
+        pierce: 0, homing: 0.0,
+        hostile: true, beam: false, src: SRC_HOSTILE,
+        target: nullHandle(),
+        cr: 2.2, cg: 0.5, cb: 0.15,
+    }
+    )
+}
+
+// Aim where the ship will be, not where it is — a shot at the current position
+// is free to ignore.
+fn fireAtPlayer(w: &mut World, x: f64, y: f64, speed: f64, dmg: f64) {
+    if !w.player.alive {
+        return
+    }
+    let dx = w.player.x - x
+    let dy = w.player.y - y
+    let d = Math.sqrt(dx * dx + dy * dy) + 0.0001
+    let lead = d / speed * 0.6
+    let a = Math.atan2(dy + w.player.vy * lead, dx + w.player.vx * lead)
+    fireHostile(w, x, y, a, speed, dmg)
+}
+
+fn fireMissile(w: &mut World, x: f64, y: f64, up: bool) {
+    var vy = 0.0 - 220.0
+    if !up {
+        vy = 220.0
+    }
+    w.bullets.push(Bullet {
+        alive: true,
+        x: x, y: y,
+        vx: 180.0, vy: vy,
+        px: x, py: y,
+        life: 2.8, dmg: 3.2, size: 11.0,
+        pierce: 0, homing: 4.2,
+        hostile: false, beam: false, src: SRC_MISSILE,
+        target: nearestEnemy(w, x, y, 900.0, 0 - 1),
+        cr: 2.6, cg: 1.5, cb: 0.35,
+    }
+    )
+}
+
+// The released charge: wide, piercing, and it burns return fire out of its own
+// lane, which is what makes holding the key for a second worth doing.
+fn fireBeam(w: &mut World, x: f64, y: f64, charge: f64) {
+    let p = Math.clampF64(charge, 0.0, 1.0)
+    w.bullets.push(Bullet {
+        alive: true,
+        x: x, y: y,
+        vx: 1450.0, vy: 0.0,
+        px: x, py: y,
+        life: 1.4, dmg: 3.0 + p * 16.0, size: 18.0 + p * 44.0,
+        pierce: 999, homing: 0.0,
+        hostile: false, beam: true, src: SRC_BEAM,
+        target: nullHandle(),
+        cr: 1.6, cg: 2.4, cb: 2.6,
+    }
+    )
+    w.player.beamFlash = 0.3
+    w.shake = Math.maxF64(w.shake, 3.0 + p * 5.0)
+    gridImpulse(w.grid, x, y, 260.0, 0.0 - 90.0)
+    burst(w, x + 20.0, y, 26, 260.0, 1.2, 2.0, 2.4, 2.4)
+}
+
+fn playerFire(w: &mut World) {
+    let px = w.player.x + 22.0
     let py = w.player.y
-    for i in 0..barrels {
-        let off = ((i as f64) - ((barrels - 1) as f64) * 0.5) * spread
-        let a = aim + off + Random.floatRange(0.0 - 0.02, 0.02)
-        fireBullet(w, px + Math.cos(a) * 16.0, py + Math.sin(a) * 16.0, a, 980.0, false)
+    let p = w.player.power
+    let dmg = 1.0 + (p as f64) * 0.25
+    // Straight barrels first: the shot that matters is the one on your line.
+    var straight = 1
+    if p >= 2 {
+        straight = 2
     }
-    w.player.vx = w.player.vx - Math.cos(aim) * 22.0
-    w.player.vy = w.player.vy - Math.sin(aim) * 22.0
-    gridImpulse(w.grid, px, py, 90.0, 16.0)
+    if p >= 4 {
+        straight = 3
+    }
+    for i in 0..straight {
+        let off = ((i as f64) - ((straight - 1) as f64) * 0.5) * 11.0
+        firePlayer(w, px, py + off, 0.0, 1120.0, dmg, SRC_GUN, 1.5, 1.9, 0.6)
+    }
+    if p >= 3 {
+        firePlayer(w, px, py, 0.0 - 0.20, 1060.0, dmg * 0.8, SRC_GUN, 1.6, 1.2, 0.4)
+        firePlayer(w, px, py, 0.20, 1060.0, dmg * 0.8, SRC_GUN, 1.6, 1.2, 0.4)
+    }
+    if p >= 5 {
+        firePlayer(w, px, py, 0.0 - 0.42, 1000.0, dmg * 0.7, SRC_GUN, 1.7, 0.9, 0.3)
+        firePlayer(w, px, py, 0.42, 1000.0, dmg * 0.7, SRC_GUN, 1.7, 0.9, 0.3)
+    }
+    gridImpulse(w.grid, px, py, 80.0, 12.0)
 }
 
-// A hit runs the whole perk chain: burn, chain lightning, pierce bookkeeping.
+// A hit is where a pickup gets to rewrite what hitting means.
 fn onBulletHit(w: &mut World, bi: i64, slot: i64) {
     let bx = w.bullets[bi].x
     let by = w.bullets[bi].y
     let dmg = w.bullets[bi].dmg
+    burst(w, bx, by, 4, 170.0, w.bullets[bi].cr, w.bullets[bi].cg, w.bullets[bi].cb, 1.5)
 
-    if hasPerk(w, Perk.Burn) {
-        w.ents[slot].burn = Math.maxF64(w.ents[slot].burn, 1.6)
-    }
-    burst(w, bx, by, 5, 190.0, w.bullets[bi].cr, w.bullets[bi].cg, w.bullets[bi].cb, 1.6)
-
-    if hasPerk(w, Perk.Chain) {
-        // Walk from the struck enemy to nearby ones, damaging each. Every hop is
-        // resolved through the slot table, so an enemy that died earlier in this
-        // same frame is simply skipped.
-        let hops = 1 + perkCount(w, Perk.Chain)
-        var fromX = w.ents[slot].x
-        var fromY = w.ents[slot].y
-        var prev = slot
-        for k in 0..hops {
-            let h = nearestEnemy(w, fromX, fromY, 210.0, prev)
-            if handleIsNull(h) {
-                break
-            }
-            let tx = w.ents[h.slot].x
-            let ty = w.ents[h.slot].y
-            addArc(w, fromX, fromY, tx, ty)
-            prev = h.slot
-            fromX = tx
-            fromY = ty
-            damage(w, h.slot, dmg * 0.7, true)
+    // Two pods overcharge: hits arc to a second target. The hop resolves through
+    // the slot table, so anything that died earlier in this same frame is
+    // simply skipped.
+    if w.player.pods >= 2 && Random.range(0, 3) == 0 {
+        let sx = w.ents[slot].x
+        let sy = w.ents[slot].y
+        let h = nearestEnemy(w, sx, sy, 190.0, slot)
+        if !handleIsNull(h) {
+            addArc(w, sx, sy, w.ents[h.slot].x, w.ents[h.slot].y)
+            damage(w, h.slot, dmg * 0.6, true)
         }
     }
 
@@ -1003,24 +1035,59 @@ fn onBulletHit(w: &mut World, bi: i64, slot: i64) {
     }
 }
 
-pub fn detonateBomb(w: &mut World) {
-    if w.player.bombs <= 0 || !w.player.alive {
+// ── collecting ────────────────────────────────────────────────────────────────
+
+fn addPod(w: &mut World) {
+    if w.player.pods >= 2 {
+        w.player.power = Math.minI64(w.player.power + 1, 5)
         return
     }
-    w.player.bombs = w.player.bombs - 1
-    w.player.bombFlash = 0.55
-    w.shake = 26.0
-    w.flash = 0.7
-    gridImpulse(w.grid, w.player.x, w.player.y, 900.0, 260.0)
-    burst(w, w.player.x, w.player.y, 220, 700.0, 1.2, 1.6, 1.9, 3.0)
-    for i in 0..w.bullets.len {
-        w.bullets[i].alive = false
-    }
-    for i in 0..w.ents.len {
-        if w.ents[i].alive && isEnemy(w.ents[i].kind) {
-            damage(w, i, 14.0, true)
+    var p = makeEnemy(Kind.Pod, w.player.x, w.player.y)
+    p.tier = w.player.pods
+    p.phase = (w.player.pods as f64) * PI
+    let _ = spawn(w, p)
+    w.player.pods = w.player.pods + 1
+}
+
+fn collectOrb(w: &mut World, slot: i64) {
+    let t = w.ents[slot].tier
+    let x = w.ents[slot].x
+    let y = w.ents[slot].y
+    let cr = w.ents[slot].cr
+    let cg = w.ents[slot].cg
+    let cb = w.ents[slot].cb
+    if t == ORB_POWER {
+        if w.player.power < 5 {
+            w.player.power = w.player.power + 1
+        } else {
+            w.score = w.score + 500
+        }
+    } else if t == ORB_POD {
+        addPod(w)
+    } else if t == ORB_MISSILE {
+        if w.player.missiles < 2 {
+            w.player.missiles = w.player.missiles + 1
+        } else {
+            w.score = w.score + 500
+        }
+    } else if t == ORB_SHIELD {
+        w.player.shield = 1.0
+    } else {
+        if w.player.speed < 3 {
+            w.player.speed = w.player.speed + 1
+        } else {
+            w.score = w.score + 500
         }
     }
+    w.score = w.score + 100
+    w.pickupCode = t
+    w.pickupT = 1.7
+    w.pickupX = x
+    w.pickupY = y
+    w.flash = Math.maxF64(w.flash, 0.28)
+    kill(w, slot)
+    burst(w, x, y, 40, 340.0, cr, cg, cb, 2.6)
+    gridImpulse(w.grid, x, y, 320.0, 90.0)
 }
 
 // ── entity behaviour ──────────────────────────────────────────────────────────
@@ -1056,61 +1123,94 @@ fn updateEnts(w: &mut World, dt: f64) {
             w.ents[i].flash = w.ents[i].flash - dt
         }
         // Burn ticks damage over time; it was applied by a completely different
-        // system (the bullet-hit path) and can kill without anything shooting.
+        // system and can kill without anything shooting.
         if w.ents[i].burn > 0.0 {
             w.ents[i].burn = w.ents[i].burn - dt
             damage(w, i, 2.4 * dt, true)
             if !w.ents[i].alive {
                 continue
             }
-            if Random.range(0, 3) == 0 {
-                w.parts.push(Particle {
-                    x: w.ents[i].x + Random.floatRange(0.0 - 8.0, 8.0),
-                    y: w.ents[i].y + Random.floatRange(0.0 - 8.0, 8.0),
-                    vx: Random.floatRange(0.0 - 30.0, 30.0), vy: Random.floatRange(0.0 - 90.0, 0.0 - 20.0),
-                    life: 0.4, maxLife: 0.4, drag: 1.4, size: 1.8,
-                    cr: 1.8, cg: 0.7, cb: 0.1,
-                }
-                )
-            }
         }
-        var slowK = 1.0
-        if w.ents[i].slow > 0.0 {
-            w.ents[i].slow = w.ents[i].slow - dt
-            slowK = 0.42
-        }
-        let sdt = dt * slowK
 
-        w.ents[i].ang = w.ents[i].ang + w.ents[i].spin * sdt
+        w.ents[i].ang = w.ents[i].ang + w.ents[i].spin * dt
 
         match w.ents[i].kind {
-            Kind.Seeker => {
-                steer(w, i, px, py, 430.0, 165.0, sdt)
-            }
-            Kind.Wanderer => {
-                w.ents[i].phase = w.ents[i].phase + sdt * 1.4
-                let a = w.ents[i].phase
-                w.ents[i].vx = w.ents[i].vx + Math.cos(a) * 60.0 * sdt
-                w.ents[i].vy = w.ents[i].vy + Math.sin(a * 1.3) * 60.0 * sdt
-            }
-            Kind.Weaver => {
-                let dx = px - w.ents[i].x
-                let dy = py - w.ents[i].y
-                let d = Math.sqrt(dx * dx + dy * dy) + 0.0001
-                let s = Math.sin(w.ents[i].age * 3.4) * 190.0
-                w.ents[i].vx = w.ents[i].vx + (dx / d * 380.0 - dy / d * s) * sdt
-                w.ents[i].vy = w.ents[i].vy + (dy / d * 380.0 + dx / d * s) * sdt
-                let sp = Math.sqrt(w.ents[i].vx * w.ents[i].vx + w.ents[i].vy * w.ents[i].vy)
-                if sp > 200.0 {
-                    w.ents[i].vx = w.ents[i].vx * 200.0 / sp
-                    w.ents[i].vy = w.ents[i].vy * 200.0 / sp
+            Kind.Drone => {
+                w.ents[i].phase = w.ents[i].phase + dt * 2.0
+                w.ents[i].vy = Math.sin(w.ents[i].phase) * 46.0
+                w.ents[i].fireT = w.ents[i].fireT - dt
+                if w.ents[i].fireT <= 0.0 && w.ents[i].x < w.w - 20.0 {
+                    w.ents[i].fireT = Random.floatRange(2.2, 4.0)
+                    fireHostile(w, w.ents[i].x - 16.0, w.ents[i].y, PI, 300.0, 1.0)
                 }
             }
-            Kind.Splitter => {
-                steer(w, i, px, py, 140.0, 105.0, sdt)
+            Kind.Weaver => {
+                w.ents[i].phase = w.ents[i].phase + dt * 3.1
+                w.ents[i].vy = Math.sin(w.ents[i].phase) * 300.0
+                w.ents[i].fireT = w.ents[i].fireT - dt
+                if w.ents[i].fireT <= 0.0 && w.ents[i].x < w.w - 20.0 {
+                    w.ents[i].fireT = Random.floatRange(2.4, 4.4)
+                    fireAtPlayer(w, w.ents[i].x, w.ents[i].y, 265.0, 1.0)
+                }
+            }
+            Kind.Swooper => {
+                // Line up on your altitude, then commit and leave.
+                if w.ents[i].age < 1.6 {
+                    let want = Math.clampF64(py - w.ents[i].y, 0.0 - 300.0, 300.0)
+                    w.ents[i].vy = w.ents[i].vy + want * 2.4 * dt
+                    w.ents[i].vy = w.ents[i].vy * Math.pow(0.06, dt)
+                } else {
+                    w.ents[i].vx = w.ents[i].vx - 700.0 * dt
+                }
+                w.ents[i].vx = Math.maxF64(w.ents[i].vx, 0.0 - 640.0)
+            }
+            Kind.Carrier => {
+                w.ents[i].phase = w.ents[i].phase + dt * 0.9
+                w.ents[i].vy = Math.sin(w.ents[i].phase) * 70.0
+                if w.ents[i].x < w.w * 0.72 {
+                    w.ents[i].vx = w.ents[i].vx * Math.pow(0.1, dt)
+                }
+                w.ents[i].fireT = w.ents[i].fireT - dt
+                if w.ents[i].fireT <= 0.0 && w.ents[i].x < w.w - 20.0 {
+                    w.ents[i].fireT = 2.8
+                    for k in 0..3 {
+                        let a = PI + ((k as f64) - 1.0) * 0.30
+                        fireHostile(w, w.ents[i].x - 24.0, w.ents[i].y, a, 300.0, 1.0)
+                    }
+                }
+            }
+            Kind.Mine => {
+                w.ents[i].vy = Math.sin(w.ents[i].age * 1.7 + w.ents[i].phase) * 22.0
+                let mdx = px - w.ents[i].x
+                let mdy = py - w.ents[i].y
+                if mdx * mdx + mdy * mdy < 56.0 * 56.0 && w.player.alive {
+                    onDeath(w, i, false)
+                    continue
+                }
+            }
+            Kind.Turret => {
+                // Bolted to the cave: it rides whatever the terrain does under
+                // it, and it does not care that the terrain is generated.
+                w.ents[i].vx = 0.0 - w.scroll
+                w.ents[i].vy = 0.0
+                if w.ents[i].tier == 0 {
+                    w.ents[i].y = botAt(w.terrain, w.ents[i].x) - w.ents[i].radius * 0.7
+                } else {
+                    w.ents[i].y = topAt(w.terrain, w.ents[i].x) + w.ents[i].radius * 0.7
+                }
+                if w.player.alive {
+                    w.ents[i].ang = Math.atan2(py - w.ents[i].y, px - w.ents[i].x)
+                }
+                w.ents[i].fireT = w.ents[i].fireT - dt
+                if w.ents[i].fireT <= 0.0 && w.ents[i].x < w.w - 10.0 && w.ents[i].x > 0.0 {
+                    w.ents[i].fireT = Random.floatRange(2.3, 3.8)
+                    fireAtPlayer(w, w.ents[i].x, w.ents[i].y, 275.0, 1.0)
+                }
             }
             Kind.SnakeHead => {
-                steer(w, i, px, py, 360.0, 150.0, sdt)
+                w.ents[i].phase = w.ents[i].phase + dt * 2.2
+                w.ents[i].vy = Math.sin(w.ents[i].phase) * 210.0
+                w.ents[i].ang = Math.atan2(w.ents[i].vy, w.ents[i].vx)
             }
             Kind.SnakeSeg => {
                 // Read the segment ahead, write myself. The leader may have died
@@ -1120,42 +1220,18 @@ fn updateEnts(w: &mut World, dt: f64) {
                 if alive(w, ld) {
                     let lx = w.ents[ld.slot].x
                     let ly = w.ents[ld.slot].y
-                    let dx = lx - w.ents[i].x
-                    let dy = ly - w.ents[i].y
-                    let d = Math.sqrt(dx * dx + dy * dy) + 0.0001
-                    let want = w.ents[i].radius + w.ents[ld.slot].radius + 3.0
-                    let pull = (d - want) * 16.0
-                    w.ents[i].vx = dx / d * pull
-                    w.ents[i].vy = dy / d * pull
-                    w.ents[i].ang = Math.atan2(dy, dx)
+                    let sdx = lx - w.ents[i].x
+                    let sdy = ly - w.ents[i].y
+                    let sd = Math.sqrt(sdx * sdx + sdy * sdy) + 0.0001
+                    let want = w.ents[i].radius + w.ents[ld.slot].radius + 4.0
+                    let pull = (sd - want) * 14.0
+                    w.ents[i].vx = sdx / sd * pull
+                    w.ents[i].vy = sdy / sd * pull
+                    w.ents[i].ang = Math.atan2(sdy, sdx)
                 } else {
-                    steer(w, i, px, py, 300.0, 140.0, sdt)
+                    w.ents[i].vx = 0.0 - 150.0
+                    w.ents[i].vy = w.ents[i].vy * Math.pow(0.4, dt)
                 }
-            }
-            Kind.BlackHole => {
-                w.ents[i].phase = w.ents[i].phase + sdt
-                let reach = 300.0 + (w.ents[i].tier as f64) * 8.0
-                gridVortex(w.grid, w.ents[i].x, w.ents[i].y, reach * 1.6, 2600.0, 1500.0, sdt)
-                let bx = w.ents[i].x
-                let by = w.ents[i].y
-                // Pulls the player, every other enemy, every particle and every
-                // bullet — one entity reaching into four unrelated containers.
-                pullPlayer(w, bx, by, reach, 640.0, sdt)
-                pullEnts(w, i, bx, by, reach, 520.0, sdt)
-                pullParticles(w, bx, by, reach * 1.4, 900.0, sdt)
-                pullBullets(w, i, bx, by, reach * 0.7, 700.0, sdt)
-                if Random.range(0, 2) == 0 {
-                    let a = Random.floatRange(0.0, 6.283185307179586)
-                    let r = Random.floatRange(reach * 0.5, reach)
-                    w.parts.push(Particle {
-                        x: bx + Math.cos(a) * r, y: by + Math.sin(a) * r,
-                        vx: 0.0, vy: 0.0, life: 0.9, maxLife: 0.9, drag: 0.1, size: 1.7,
-                        cr: 1.3, cg: 0.3, cb: 1.8,
-                    }
-                    )
-                }
-                w.ents[i].vx = w.ents[i].vx * 0.9
-                w.ents[i].vy = w.ents[i].vy * 0.9
             }
             Kind.Healer => {
                 // Pick a patient, keep station near it, mend it. When it dies the
@@ -1174,113 +1250,168 @@ fn updateEnts(w: &mut World, dt: f64) {
                 if alive(w, t2) {
                     let tx = w.ents[t2.slot].x
                     let ty = w.ents[t2.slot].y
-                    steer(w, i, tx, ty, 300.0, 150.0, sdt)
-                    let dx = tx - w.ents[i].x
-                    let dy = ty - w.ents[i].y
-                    if dx * dx + dy * dy < 300.0 * 300.0 {
+                    steer(w, i, tx + 60.0, ty, 320.0, 200.0, dt)
+                    let hdx = tx - w.ents[i].x
+                    let hdy = ty - w.ents[i].y
+                    if hdx * hdx + hdy * hdy < 280.0 * 280.0 {
                         let mx = w.ents[t2.slot].maxHp
-                        w.ents[t2.slot].hp = Math.minF64(w.ents[t2.slot].hp + 2.2 * sdt, mx)
-                        w.ents[t2.slot].slow = 0.0
+                        w.ents[t2.slot].hp = Math.minF64(w.ents[t2.slot].hp + 2.6 * dt, mx)
                     }
                 } else {
-                    steer(w, i, px, py, 190.0, 120.0, sdt)
+                    w.ents[i].vx = 0.0 - 90.0
+                    w.ents[i].vy = Math.sin(w.ents[i].age * 1.4) * 60.0
                 }
             }
-            Kind.Turret => {
-                w.ents[i].hp = w.ents[i].hp - sdt * 0.42 // batteries run down
-                if w.ents[i].hp <= 0.0 {
-                    onDeath(w, i, false)
-                    continue
-                }
-                let t = w.ents[i].target
-                if !alive(w, t) {
-                    w.ents[i].target = nearestEnemy(w, w.ents[i].x, w.ents[i].y, 520.0, i)
-                }
-                let t2 = w.ents[i].target
-                if alive(w, t2) {
-                    let a = Math.atan2(w.ents[t2.slot].y - w.ents[i].y, w.ents[t2.slot].x - w.ents[i].x)
-                    w.ents[i].ang = a
-                    w.ents[i].phase = w.ents[i].phase - sdt
-                    if w.ents[i].phase <= 0.0 {
-                        w.ents[i].phase = 0.16
-                        fireBullet(w, w.ents[i].x, w.ents[i].y, a, 820.0, true)
+            Kind.Core => {
+                // Holds station on the right and patrols vertically.
+                let holdX = w.w * 0.76
+                w.ents[i].vx = (holdX - w.ents[i].x) * 1.4
+                w.ents[i].phase = w.ents[i].phase + dt * 0.7
+                w.ents[i].vy = Math.sin(w.ents[i].phase) * 150.0
+                w.ents[i].fireT = w.ents[i].fireT - dt
+                if w.ents[i].fireT <= 0.0 {
+                    w.ents[i].fireT = 1.5
+                    if w.ents[i].tier > 0 {
+                        for k in 0..5 {
+                            let a = PI + ((k as f64) - 2.0) * 0.26
+                            fireHostile(w, w.ents[i].x - 40.0, w.ents[i].y, a, 300.0, 1.0)
+                        }
+                    } else {
+                        // Stripped: it stops being careful.
+                        for k in 0..14 {
+                            let a = (k as f64) * TAU / 14.0 + w.ents[i].age
+                            fireHostile(w, w.ents[i].x, w.ents[i].y, a, 250.0, 1.0)
+                        }
+                        var d = makeEnemy(Kind.Swooper, w.ents[i].x, w.ents[i].y)
+                        d.spawnT = 0.3
+                        let _ = spawn(w, d)
                     }
-                }
-                w.ents[i].vx = w.ents[i].vx * 0.86
-                w.ents[i].vy = w.ents[i].vy * 0.86
-            }
-            Kind.Sentinel => {
-                w.ents[i].phase = w.ents[i].phase + sdt
-                steer(w, i, px, py, 150.0, 92.0, sdt)
-                if w.ents[i].phase > 2.6 {
-                    w.ents[i].phase = 0.0
-                    for k in 0..3 {
-                        let a = Random.floatRange(0.0, 6.283185307179586)
-                        var s = makeEnemy(Kind.Seeker, w.ents[i].x + Math.cos(a) * 50.0, w.ents[i].y + Math.sin(a) * 50.0)
-                        s.spawnT = 0.4
-                        let _ = spawn(w, s)
-                    }
-                    w.ents[i].flash = 0.25
+                    w.ents[i].flash = 0.2
                 }
             }
-            Kind.Armor => {
+            Kind.Plate => {
                 // Position is derived from the core every frame — a parent-child
                 // attachment with no stored pointer either way.
                 let core = w.ents[i].leader
                 if alive(w, core) {
-                    w.ents[i].phase = w.ents[i].phase + sdt * 1.5
-                    let orbit = w.ents[core.slot].radius + 26.0
+                    w.ents[i].phase = w.ents[i].phase + dt * 1.3
+                    let orbit = w.ents[core.slot].radius + 34.0
                     w.ents[i].x = w.ents[core.slot].x + Math.cos(w.ents[i].phase) * orbit
-                    w.ents[i].y = w.ents[core.slot].y + Math.sin(w.ents[i].phase) * orbit
+                    w.ents[i].y = w.ents[core.slot].y + Math.sin(w.ents[i].phase) * orbit * 0.85
                     w.ents[i].vx = 0.0
                     w.ents[i].vy = 0.0
                 } else {
-                    steer(w, i, px, py, 190.0, 130.0, sdt)
+                    w.ents[i].vx = 0.0 - 200.0
                 }
             }
-            Kind.Gem => {
-                let dx = px - w.ents[i].x
-                let dy = py - w.ents[i].y
-                let d2 = dx * dx + dy * dy
-                if d2 < 190.0 * 190.0 && w.player.alive {
-                    let d = Math.sqrt(d2) + 0.0001
-                    w.ents[i].vx = w.ents[i].vx + dx / d * 1500.0 * sdt
-                    w.ents[i].vy = w.ents[i].vy + dy / d * 1500.0 * sdt
+            Kind.Orb => {
+                // The magnet is the whole design: you never have to line up on a
+                // pickup, you only have to get near it.
+                let odx = px - w.ents[i].x
+                let ody = py - w.ents[i].y
+                let od2 = odx * odx + ody * ody
+                if od2 < 200.0 * 200.0 && w.player.alive {
+                    let od = Math.sqrt(od2) + 0.0001
+                    w.ents[i].vx = w.ents[i].vx + odx / od * 2000.0 * dt
+                    w.ents[i].vy = w.ents[i].vy + ody / od * 2000.0 * dt
+                } else {
+                    w.ents[i].vx = w.ents[i].vx + (0.0 - 40.0 - w.ents[i].vx) * dt
                 }
-                w.ents[i].vx = w.ents[i].vx * 0.94
-                w.ents[i].vy = w.ents[i].vy * 0.94
-                if w.ents[i].age > 11.0 {
+                w.ents[i].vx = w.ents[i].vx * Math.pow(0.45, dt)
+                w.ents[i].vy = w.ents[i].vy * Math.pow(0.45, dt)
+                if w.ents[i].age > 16.0 {
+                    burst(w, w.ents[i].x, w.ents[i].y, 10, 120.0, w.ents[i].cr * 0.4, w.ents[i].cg * 0.4, w.ents[i].cb * 0.4, 1.6)
+                    kill(w, i)
+                    continue
+                }
+            }
+            Kind.Pod => {
+                podUpdate(w, i, dt)
+            }
+        }
+
+        w.ents[i].x = w.ents[i].x + w.ents[i].vx * dt
+        w.ents[i].y = w.ents[i].y + w.ents[i].vy * dt
+
+        // Vertical bounds. Turrets are already pinned to the rock; everything
+        // else stays inside the frame so nothing hides behind the wall.
+        match w.ents[i].kind {
+            Kind.Turret => {
+            }
+            Kind.Pod => {
+            }
+            _ => {
+                let r = w.ents[i].radius
+                if w.ents[i].y < r {
+                    w.ents[i].y = r
+                    w.ents[i].vy = Math.abs(w.ents[i].vy)
+                }
+                if w.ents[i].y > w.h - r {
+                    w.ents[i].y = w.h - r
+                    w.ents[i].vy = 0.0 - Math.abs(w.ents[i].vy)
+                }
+            }
+        }
+
+        // Off the left edge is gone, not dead: no score, no drop.
+        if w.ents[i].x < 0.0 - 90.0 {
+            match w.ents[i].kind {
+                Kind.Pod => {
+                }
+                _ => {
                     kill(w, i)
                     continue
                 }
             }
         }
 
-        w.ents[i].x = w.ents[i].x + w.ents[i].vx * sdt
-        w.ents[i].y = w.ents[i].y + w.ents[i].vy * sdt
-
-        // walls
-        let r = w.ents[i].radius
-        if w.ents[i].x < r {
-            w.ents[i].x = r
-            w.ents[i].vx = Math.abs(w.ents[i].vx)
-        }
-        if w.ents[i].x > w.w - r {
-            w.ents[i].x = w.w - r
-            w.ents[i].vx = 0.0 - Math.abs(w.ents[i].vx)
-        }
-        if w.ents[i].y < r {
-            w.ents[i].y = r
-            w.ents[i].vy = Math.abs(w.ents[i].vy)
-        }
-        if w.ents[i].y > w.h - r {
-            w.ents[i].y = w.h - r
-            w.ents[i].vy = 0.0 - Math.abs(w.ents[i].vy)
-        }
-
         if isEnemy(w.ents[i].kind) {
-            gridImpulse(w.grid, w.ents[i].x, w.ents[i].y, r * 4.5, 0.0 - 14.0)
+            gridImpulse(w.grid, w.ents[i].x, w.ents[i].y, w.ents[i].radius * 4.0, 0.0 - 12.0)
         }
+    }
+}
+
+// The pod: it trails you, it shoots without being told to, and it is the only
+// thing on screen that cannot be destroyed. Two of them bracket the ship.
+fn podUpdate(w: &mut World, i: i64, dt: f64) {
+    var offY = 0.0 - 34.0
+    if w.ents[i].tier == 1 {
+        offY = 34.0
+    }
+    w.ents[i].phase = w.ents[i].phase + dt * 2.4
+    let tx = w.player.x + 26.0 + Math.sin(w.ents[i].phase) * 5.0
+    let ty = w.player.y + offY + Math.cos(w.ents[i].phase * 1.3) * 5.0
+    // Spring toward the station instead of snapping to it, so the pods lag and
+    // swing when you move — the movement is most of the character.
+    w.ents[i].vx = w.ents[i].vx + (tx - w.ents[i].x) * 42.0 * dt
+    w.ents[i].vy = w.ents[i].vy + (ty - w.ents[i].y) * 42.0 * dt
+    w.ents[i].vx = w.ents[i].vx * Math.pow(0.0009, dt)
+    w.ents[i].vy = w.ents[i].vy * Math.pow(0.0009, dt)
+
+    let t = w.ents[i].target
+    if !alive(w, t) {
+        w.ents[i].target = nearestEnemy(w, w.ents[i].x, w.ents[i].y, 620.0, 0 - 1)
+    }
+    w.ents[i].fireT = w.ents[i].fireT - dt
+    if w.ents[i].fireT <= 0.0 {
+        w.ents[i].fireT = 0.26
+        let t2 = w.ents[i].target
+        var a = 0.0
+        if alive(w, t2) {
+            a = Math.atan2(w.ents[t2.slot].y - w.ents[i].y, w.ents[t2.slot].x - w.ents[i].x)
+            // Never shoot backwards: a pod firing left reads as a bug.
+            a = Math.clampF64(a, 0.0 - 1.0, 1.0)
+        }
+        firePlayer(w, w.ents[i].x + 10.0, w.ents[i].y, a, 940.0, 0.9, SRC_POD, 2.2, 0.7, 2.2)
+    }
+    if Random.range(0, 3) == 0 {
+        w.parts.push(Particle {
+            x: w.ents[i].x, y: w.ents[i].y,
+            vx: Random.floatRange(0.0 - 60.0, 20.0), vy: Random.floatRange(0.0 - 40.0, 40.0),
+            life: 0.3, maxLife: 0.3, drag: 2.4, size: 1.8,
+            cr: 1.6, cg: 0.3, cb: 1.6,
+        }
+        )
     }
 }
 
@@ -1309,86 +1440,62 @@ fn pickPatient(w: &World, self: i64): Handle {
     }
 }
 
-fn pullPlayer(w: &mut World, x: f64, y: f64, reach: f64, str: f64, dt: f64) {
-    if !w.player.alive {
-        return
-    }
-    let dx = x - w.player.x
-    let dy = y - w.player.y
-    let d2 = dx * dx + dy * dy
-    if d2 < reach * reach && d2 > 1.0 {
-        let d = Math.sqrt(d2)
-        let f = str * (1.0 - d / reach) * dt / d
-        w.player.vx = w.player.vx + dx * f
-        w.player.vy = w.player.vy + dy * f
+// ── bullets ───────────────────────────────────────────────────────────────────
+
+// A released charge burns return fire out of its own lane.
+fn beamSweep(w: &mut World, bi: i64) {
+    let bx = w.bullets[bi].x
+    let by = w.bullets[bi].y
+    let rad = w.bullets[bi].size * 0.5
+    for k in 0..w.bullets.len {
+        if k != bi && w.bullets[k].alive && w.bullets[k].hostile {
+            let dx = w.bullets[k].x - bx
+            let dy = w.bullets[k].y - by
+            if dx * dx < 5000.0 && dy * dy < rad * rad {
+                w.bullets[k].alive = false
+                burst(w, w.bullets[k].x, w.bullets[k].y, 3, 120.0, 1.4, 2.0, 2.2, 1.4)
+            }
+        }
     }
 }
 
-fn pullEnts(w: &mut World, self: i64, x: f64, y: f64, reach: f64, str: f64, dt: f64) {
+fn hitPlayerBullet(w: &mut World, bi: i64): bool {
+    if !w.player.alive || w.player.invuln > 0.0 {
+        return false
+    }
+    let dx = w.bullets[bi].x - w.player.x
+    let dy = w.bullets[bi].y - w.player.y
+    let rr = w.bullets[bi].size * 0.5 + 10.0
+    if dx * dx + dy * dy < rr * rr {
+        w.bullets[bi].alive = false
+        hurtPlayer(w)
+        return true
+    }
+    return false
+}
+
+// Pods eat what is shot at you. This is why a pod is worth more than a gun.
+fn hitPodBullet(w: &mut World, bi: i64): bool {
     for i in 0..w.ents.len {
-        if w.ents[i].alive && i != self && w.ents[i].spawnT <= 0.0 {
+        if w.ents[i].alive {
             match w.ents[i].kind {
-                Kind.BlackHole => {
-                    continue
-                }
-                Kind.Armor => {
-                    continue
+                Kind.Pod => {
+                    let dx = w.bullets[bi].x - w.ents[i].x
+                    let dy = w.bullets[bi].y - w.ents[i].y
+                    let rr = w.bullets[bi].size * 0.5 + w.ents[i].radius
+                    if dx * dx + dy * dy < rr * rr {
+                        w.bullets[bi].alive = false
+                        burst(w, w.bullets[bi].x, w.bullets[bi].y, 8, 200.0, 2.0, 0.6, 2.0, 1.8)
+                        return true
+                    }
                 }
                 _ => {
                 }
             }
-            let dx = x - w.ents[i].x
-            let dy = y - w.ents[i].y
-            let d2 = dx * dx + dy * dy
-            if d2 < reach * reach && d2 > 1.0 {
-                let d = Math.sqrt(d2)
-                let f = str * (1.0 - d / reach) * dt / d
-                w.ents[i].vx = w.ents[i].vx + dx * f
-                w.ents[i].vy = w.ents[i].vy + dy * f
-                if d < 26.0 && isEnemy(w.ents[i].kind) {
-                    // swallowed: the hole grows and charges toward detonation
-                    w.ents[self].tier = w.ents[self].tier + 1
-                    w.ents[self].radius = Math.minF64(w.ents[self].radius + 0.7, 40.0)
-                    burst(w, w.ents[i].x, w.ents[i].y, 12, 220.0, 1.3, 0.4, 1.8, 2.0)
-                    kill(w, i)
-                }
-            }
         }
     }
+    return false
 }
-
-fn pullParticles(w: &mut World, x: f64, y: f64, reach: f64, str: f64, dt: f64) {
-    for i in 0..w.parts.len {
-        let dx = x - w.parts[i].x
-        let dy = y - w.parts[i].y
-        let d2 = dx * dx + dy * dy
-        if d2 < reach * reach && d2 > 4.0 {
-            let d = Math.sqrt(d2)
-            let f = str * dt / d
-            w.parts[i].vx = w.parts[i].vx + dx * f
-            w.parts[i].vy = w.parts[i].vy + dy * f
-        }
-    }
-}
-
-fn pullBullets(w: &mut World, self: i64, x: f64, y: f64, reach: f64, str: f64, dt: f64) {
-    for i in 0..w.bullets.len {
-        if !w.bullets[i].alive {
-            continue
-        }
-        let dx = x - w.bullets[i].x
-        let dy = y - w.bullets[i].y
-        let d2 = dx * dx + dy * dy
-        if d2 < reach * reach {
-            let d = Math.sqrt(d2) + 0.0001
-            let f = str * dt / d
-            w.bullets[i].vx = w.bullets[i].vx + dx * f
-            w.bullets[i].vy = w.bullets[i].vy + dy * f
-        }
-    }
-}
-
-// ── bullets ───────────────────────────────────────────────────────────────────
 
 fn updateBullets(w: &mut World, dt: f64) {
     let n = w.bullets.len
@@ -1406,7 +1513,7 @@ fn updateBullets(w: &mut World, dt: f64) {
             if !alive(w, t) {
                 // The mark died; find a new one. This is the case that a raw
                 // pointer would get wrong and a generational handle gets right.
-                w.bullets[i].target = nearestEnemy(w, w.bullets[i].x, w.bullets[i].y, 420.0, 0 - 1)
+                w.bullets[i].target = nearestEnemy(w, w.bullets[i].x, w.bullets[i].y, 700.0, 0 - 1)
             }
             let t2 = w.bullets[i].target
             if alive(w, t2) {
@@ -1419,6 +1526,19 @@ fn updateBullets(w: &mut World, dt: f64) {
                 let s2 = Math.sqrt(w.bullets[i].vx * w.bullets[i].vx + w.bullets[i].vy * w.bullets[i].vy)
                 w.bullets[i].vx = w.bullets[i].vx * sp / s2
                 w.bullets[i].vy = w.bullets[i].vy * sp / s2
+            } else {
+                // Nothing to chase: flatten out and fly on down the lane.
+                w.bullets[i].vy = w.bullets[i].vy * Math.pow(0.02, dt)
+                w.bullets[i].vx = w.bullets[i].vx + 400.0 * dt
+            }
+            if Random.range(0, 2) == 0 {
+                w.parts.push(Particle {
+                    x: w.bullets[i].x, y: w.bullets[i].y,
+                    vx: Random.floatRange(0.0 - 60.0, 20.0), vy: Random.floatRange(0.0 - 30.0, 30.0),
+                    life: 0.26, maxLife: 0.26, drag: 2.6, size: 1.9,
+                    cr: 1.9, cg: 0.8, cb: 0.15,
+                }
+                )
             }
         }
         w.bullets[i].px = w.bullets[i].x
@@ -1426,42 +1546,45 @@ fn updateBullets(w: &mut World, dt: f64) {
         w.bullets[i].x = w.bullets[i].x + w.bullets[i].vx * dt
         w.bullets[i].y = w.bullets[i].y + w.bullets[i].vy * dt
 
-        var out = false
-        if w.bullets[i].x < 2.0 || w.bullets[i].x > w.w - 2.0 {
-            if w.bullets[i].bounces > 0 {
-                w.bullets[i].bounces = w.bullets[i].bounces - 1
-                w.bullets[i].vx = 0.0 - w.bullets[i].vx
-                w.bullets[i].x = Math.clampF64(w.bullets[i].x, 2.0, w.w - 2.0)
-                gridImpulse(w.grid, w.bullets[i].x, w.bullets[i].y, 90.0, 12.0)
-            } else {
-                out = true
-            }
-        }
-        if w.bullets[i].y < 2.0 || w.bullets[i].y > w.h - 2.0 {
-            if w.bullets[i].bounces > 0 {
-                w.bullets[i].bounces = w.bullets[i].bounces - 1
-                w.bullets[i].vy = 0.0 - w.bullets[i].vy
-                w.bullets[i].y = Math.clampF64(w.bullets[i].y, 2.0, w.h - 2.0)
-                gridImpulse(w.grid, w.bullets[i].x, w.bullets[i].y, 90.0, 12.0)
-            } else {
-                out = true
-            }
-        }
-        if out {
-            gridImpulse(w.grid, w.bullets[i].x, w.bullets[i].y, 70.0, 9.0)
+        if w.bullets[i].x < 0.0 - 40.0 || w.bullets[i].x > w.w + 60.0 || w.bullets[i].y < 0.0 - 40.0 || w.bullets[i].y > w.h + 40.0 {
             w.bullets[i].alive = false
             continue
         }
 
-        gridImpulse(w.grid, w.bullets[i].x, w.bullets[i].y, 58.0, 7.0)
+        // The cave stops bullets. A beam does not care.
+        if !w.bullets[i].beam {
+            if terrainHit(w.terrain, w.bullets[i].x, w.bullets[i].y, 2.0) {
+                burst(w, w.bullets[i].x, w.bullets[i].y, 4, 150.0, w.bullets[i].cr * 0.7, w.bullets[i].cg * 0.7, w.bullets[i].cb * 0.7, 1.5)
+                gridImpulse(w.grid, w.bullets[i].x, w.bullets[i].y, 60.0, 8.0)
+                w.bullets[i].alive = false
+                continue
+            }
+        }
 
-        // hash lookup: own cell plus the eight around it
+        if w.bullets[i].hostile {
+            if hitPodBullet(w, i) {
+                continue
+            }
+            let _ = hitPlayerBullet(w, i)
+            continue
+        }
+
+        if w.bullets[i].beam {
+            beamSweep(w, i)
+        }
+        gridImpulse(w.grid, w.bullets[i].x, w.bullets[i].y, 50.0, 6.0)
+
+        // hash lookup: own cell plus the ring around it
         let bx = w.bullets[i].x
         let by = w.bullets[i].y
-        var cx = (bx / CELL) as i64
-        var cy = (by / CELL) as i64
-        for oy in 0 - 1..2 {
-            for ox in 0 - 1..2 {
+        let cx = (bx / CELL) as i64
+        let cy = (by / CELL) as i64
+        var span = 1
+        if w.bullets[i].size > 40.0 {
+            span = 2
+        }
+        for oy in 0 - span..span + 1 {
+            for ox in 0 - span..span + 1 {
                 let gx = cx + ox
                 let gy = cy + oy
                 if gx < 0 || gy < 0 || gx >= w.hashCols || gy >= w.hashRows {
@@ -1473,7 +1596,7 @@ fn updateBullets(w: &mut World, dt: f64) {
                     if w.ents[e].alive && w.bullets[i].alive {
                         let dx = w.ents[e].x - bx
                         let dy = w.ents[e].y - by
-                        let rr = w.ents[e].radius + 4.0
+                        let rr = w.ents[e].radius + w.bullets[i].size * 0.5
                         if dx * dx + dy * dy < rr * rr {
                             onBulletHit(w, i, e)
                         }
@@ -1499,6 +1622,26 @@ fn updateBullets(w: &mut World, dt: f64) {
 
 // ── player ────────────────────────────────────────────────────────────────────
 
+// A hit with a shield up costs the shield and nothing else. Without one it costs
+// a life and a power level — enough to sting, not enough to end the run.
+fn hurtPlayer(w: &mut World) {
+    if !w.player.alive || w.player.invuln > 0.0 {
+        return
+    }
+    if w.player.shield > 0.0 {
+        w.player.shield = 0.0
+        w.player.shieldT = 13.0
+        w.player.invuln = 1.4
+        w.hurt = 0.5
+        w.shake = 7.0
+        w.flash = 0.4
+        burst(w, w.player.x, w.player.y, 70, 420.0, 0.3, 2.2, 1.0, 2.6)
+        gridImpulse(w.grid, w.player.x, w.player.y, 340.0, 130.0)
+        return
+    }
+    killPlayer(w)
+}
+
 fn killPlayer(w: &mut World) {
     if !w.player.alive || w.player.invuln > 0.0 {
         return
@@ -1506,49 +1649,66 @@ fn killPlayer(w: &mut World) {
     w.player.alive = false
     w.hurt = 1.2
     w.player.lives = w.player.lives - 1
-    w.player.respawn = 1.8
-    w.shake = 34.0
-    w.flash = 0.9
-    w.slowmo = 0.9
+    w.player.respawn = 1.7
+    w.player.shieldT = 6.0 // come back bare, but not for long
+    w.player.charge = 0.0
+    w.player.charging = false
+    w.player.power = Math.maxI64(1, w.player.power - 1)
+    w.chain = 0
     w.mult = 1
-    burst(w, w.player.x, w.player.y, 300, 760.0, 1.6, 1.6, 1.9, 3.2)
-    gridImpulse(w.grid, w.player.x, w.player.y, 700.0, 300.0)
-    for i in 0..w.ents.len {
-        if w.ents[i].alive && isEnemy(w.ents[i].kind) {
-            let dx = w.ents[i].x - w.player.x
-            let dy = w.ents[i].y - w.player.y
-            if dx * dx + dy * dy < 340.0 * 340.0 {
-                damage(w, i, 20.0, false)
-            }
+    w.shake = 18.0
+    w.flash = 0.9
+    w.slowmo = 0.8
+    burst(w, w.player.x, w.player.y, 280, 720.0, 1.6, 1.6, 1.9, 3.2)
+    gridImpulse(w.grid, w.player.x, w.player.y, 640.0, 280.0)
+    // Clear the lane you are about to come back into.
+    for i in 0..w.bullets.len {
+        if w.bullets[i].hostile {
+            w.bullets[i].alive = false
         }
     }
+    terrainOpen(w.terrain, 90)
     if w.player.lives <= 0 {
         w.gameOver = true
     }
 }
 
-fn updatePlayer(w: &mut World, dt: f64, mx: f64, my: f64, aim: f64, wantFire: bool) {
+fn updatePlayer(w: &mut World, dt: f64, mx: f64, my: f64, holdFire: bool) {
     if !w.player.alive {
         w.player.respawn = w.player.respawn - dt
         if w.player.respawn <= 0.0 && !w.gameOver {
             w.player.alive = true
-            w.player.x = w.w * 0.5
-            w.player.y = w.h * 0.5
+            w.player.x = w.w * 0.22
+            // Come back in the middle of whatever aperture is actually there.
+            // terrainOpen only affects columns generated from now on, so the
+            // rock you died in is still on screen.
+            w.player.y = (topAt(w.terrain, w.player.x) + botAt(w.terrain, w.player.x)) * 0.5
             w.player.vx = 0.0
             w.player.vy = 0.0
-            w.player.invuln = 3.2
-            gridImpulse(w.grid, w.player.x, w.player.y, 420.0, 120.0)
+            w.player.invuln = 3.4
+            gridImpulse(w.grid, w.player.x, w.player.y, 400.0, 110.0)
         }
         return
     }
     if w.player.invuln > 0.0 {
         w.player.invuln = w.player.invuln - dt
     }
-    if w.player.bombFlash > 0.0 {
-        w.player.bombFlash = w.player.bombFlash - dt
+    if w.player.beamFlash > 0.0 {
+        w.player.beamFlash = w.player.beamFlash - dt
+    }
+    // The hull re-plates itself if you stay clean for a while. A shooter where a
+    // single mistake compounds into the next one is not hard, it is brittle.
+    if w.player.shield <= 0.0 {
+        w.player.shieldT = w.player.shieldT - dt
+        if w.player.shieldT <= 0.0 {
+            w.player.shield = 1.0
+            w.flash = Math.maxF64(w.flash, 0.2)
+            burst(w, w.player.x, w.player.y, 18, 180.0, 0.2, 1.6, 0.8, 2.0)
+        }
     }
 
-    let accel = 3000.0
+    let accel = 3900.0 + (w.player.speed as f64) * 900.0
+    let maxSpd = 480.0 + (w.player.speed as f64) * 110.0
     var dx = mx
     var dy = my
     let m = Math.sqrt(dx * dx + dy * dy)
@@ -1557,75 +1717,111 @@ fn updatePlayer(w: &mut World, dt: f64, mx: f64, my: f64, aim: f64, wantFire: bo
         dy = dy / m
         w.player.vx = w.player.vx + dx * accel * dt
         w.player.vy = w.player.vy + dy * accel * dt
-        // thruster
-        let a = Math.atan2(0.0 - dy, 0.0 - dx) + Random.floatRange(0.0 - 0.35, 0.35)
-        w.parts.push(Particle {
-            x: w.player.x - dx * 14.0, y: w.player.y - dy * 14.0,
-            vx: Math.cos(a) * 260.0 + w.player.vx * 0.3, vy: Math.sin(a) * 260.0 + w.player.vy * 0.3,
-            life: 0.32, maxLife: 0.32, drag: 3.0, size: 2.2,
-            cr: 0.5, cg: 1.2, cb: 1.9,
-        }
-        )
     }
     let drag = Math.pow(0.0016, dt)
     w.player.vx = w.player.vx * drag
     w.player.vy = w.player.vy * drag
+    let sp = Math.sqrt(w.player.vx * w.player.vx + w.player.vy * w.player.vy)
+    if sp > maxSpd {
+        w.player.vx = w.player.vx * maxSpd / sp
+        w.player.vy = w.player.vy * maxSpd / sp
+    }
     w.player.x = w.player.x + w.player.vx * dt
     w.player.y = w.player.y + w.player.vy * dt
-    w.player.x = Math.clampF64(w.player.x, 16.0, w.w - 16.0)
-    w.player.y = Math.clampF64(w.player.y, 16.0, w.h - 16.0)
-    w.player.ang = aim
+    // The ship lives in the left two-thirds: the right third is where you read
+    // what is coming.
+    w.player.x = Math.clampF64(w.player.x, 22.0, w.w * 0.70)
+    w.player.y = Math.clampF64(w.player.y, 14.0, w.h - 14.0)
 
-    gridImpulse(w.grid, w.player.x, w.player.y, 150.0, 0.0 - 34.0)
+    // engine plume — always on, because the stage is always moving
+    w.parts.push(Particle {
+        x: w.player.x - 18.0, y: w.player.y + Random.floatRange(0.0 - 3.0, 3.0),
+        vx: 0.0 - 340.0 + w.player.vx * 0.4, vy: w.player.vy * 0.4 + Random.floatRange(0.0 - 40.0, 40.0),
+        life: 0.26, maxLife: 0.26, drag: 3.0, size: 2.4,
+        cr: 0.5, cg: 1.2, cb: 1.9,
+    }
+    )
 
-    if hasPerk(w, Perk.Slowfield) {
-        let reach = 150.0 + 40.0 * (perkCount(w, Perk.Slowfield) as f64)
-        for i in 0..w.ents.len {
-            if w.ents[i].alive && isEnemy(w.ents[i].kind) {
-                let ddx = w.ents[i].x - w.player.x
-                let ddy = w.ents[i].y - w.player.y
-                if ddx * ddx + ddy * ddy < reach * reach {
-                    w.ents[i].slow = 0.35
-                }
+    gridImpulse(w.grid, w.player.x, w.player.y, 140.0, 0.0 - 30.0)
+
+    // Flying into the rock is fatal. It is also the only thing in the game that
+    // kills you without shooting at you.
+    if terrainHit(w.terrain, w.player.x, w.player.y, 8.0) {
+        killPlayer(w)
+        return
+    }
+
+    // Charging: hold to build, release to spend. One key, no mode to discover.
+    if holdFire {
+        w.player.charging = true
+        w.player.charge = Math.minF64(w.player.charge + dt * 0.85, 1.0)
+        if Random.range(0, 2) == 0 && w.player.charge > 0.12 {
+            let a = Random.floatRange(0.0, TAU)
+            let r = 40.0 * (1.0 - w.player.charge) + 12.0
+            w.parts.push(Particle {
+                x: w.player.x + 22.0 + Math.cos(a) * r, y: w.player.y + Math.sin(a) * r,
+                vx: 0.0 - Math.cos(a) * r * 3.0, vy: 0.0 - Math.sin(a) * r * 3.0,
+                life: 0.22, maxLife: 0.22, drag: 0.4, size: 2.0,
+                cr: 1.0 + w.player.charge, cg: 1.8, cb: 2.2,
+            }
+            )
+        }
+    } else {
+        if w.player.charging {
+            w.player.charging = false
+            if w.player.charge > 0.22 {
+                fireBeam(w, w.player.x + 26.0, w.player.y, w.player.charge)
+            }
+            w.player.charge = 0.0
+        }
+    }
+
+    // The gun never stops. Holding a key to shoot adds nothing here — the key is
+    // for the charge.
+    w.player.cooldown = w.player.cooldown - dt
+    if w.player.cooldown <= 0.0 {
+        w.player.cooldown = 0.165 - (w.player.power as f64) * 0.013
+        playerFire(w)
+    }
+
+    if w.player.missiles > 0 {
+        w.player.missileT = w.player.missileT - dt
+        if w.player.missileT <= 0.0 {
+            w.player.missileT = 0.75
+            fireMissile(w, w.player.x + 6.0, w.player.y - 10.0, true)
+            if w.player.missiles > 1 {
+                fireMissile(w, w.player.x + 6.0, w.player.y + 10.0, false)
             }
         }
     }
 
-    w.player.cooldown = w.player.cooldown - dt
-    if wantFire && w.player.cooldown <= 0.0 {
-        w.player.cooldown = 0.085
-        playerFire(w, aim)
-    }
-
-    // touch: enemies kill, gems collect
+    // touch: enemies hurt, orbs help
     for i in 0..w.ents.len {
         if !w.ents[i].alive || w.ents[i].spawnT > 0.0 {
             continue
         }
-        let ddx = w.ents[i].x - w.player.x
-        let ddy = w.ents[i].y - w.player.y
+        let tdx = w.ents[i].x - w.player.x
+        let tdy = w.ents[i].y - w.player.y
         let rr = w.ents[i].radius + 11.0
-        if ddx * ddx + ddy * ddy < rr * rr {
+        if tdx * tdx + tdy * tdy < rr * rr {
             match w.ents[i].kind {
-                Kind.Gem => {
-                    w.mult = Math.minI64(w.mult + 1, 99)
-                    w.multTimer = 9.0
-                    w.score = w.score + 5
-                    burst(w, w.ents[i].x, w.ents[i].y, 8, 200.0, 0.3, 1.7, 0.8, 1.8)
-                    kill(w, i)
+                Kind.Orb => {
+                    collectOrb(w, i)
                 }
-                Kind.Turret => {
+                Kind.Pod => {
                 }
                 _ => {
-                    killPlayer(w)
-                    return
+                    hurtPlayer(w)
+                    if !w.player.alive {
+                        return
+                    }
                 }
             }
         }
     }
 }
 
-// ── particles, arcs ───────────────────────────────────────────────────────────
+// ── particles, arcs, stars ────────────────────────────────────────────────────
 
 fn updateParticles(w: &mut World, dt: f64) {
     var k: i64 = 0
@@ -1657,220 +1853,267 @@ fn updateParticles(w: &mut World, dt: f64) {
     }
 }
 
-// ── waves ─────────────────────────────────────────────────────────────────────
-
-pub fn enemiesAlive(w: &World): i64 {
-    var n: i64 = 0
-    for i in 0..w.ents.len {
-        if w.ents[i].alive && isEnemy(w.ents[i].kind) {
-            n = n + 1
+fn updateStars(w: &mut World, dt: f64) {
+    for i in 0..w.stars.len {
+        w.stars[i].x = w.stars[i].x - w.scroll * w.stars[i].z * 1.7 * dt
+        if w.stars[i].x < 0.0 - 4.0 {
+            w.stars[i].x = w.w + Random.floatRange(0.0, 40.0)
+            w.stars[i].y = Random.floatRange(0.0, w.h)
+            w.stars[i].z = Random.floatRange(0.15, 1.0)
         }
     }
-    return n
 }
 
-// One new enemy type per wave, in a fixed order, so the roster is learned rather
-// than dumped. `unlocked` is how many kinds this wave may draw from.
-fn unlockedKinds(wave: i64): i64 {
-    if wave <= 1 {
-        return 1
+// ── the stage director ────────────────────────────────────────────────────────
+
+fn spawnY(w: &World, pad: f64): f64 {
+    let x = w.w + 60.0
+    let lo = topAt(w.terrain, x) + pad
+    let hi = botAt(w.terrain, x) - pad
+    if hi <= lo {
+        return (lo + hi) * 0.5
     }
-    if wave <= 2 {
-        return 2
+    return Random.floatRange(lo, hi)
+}
+
+fn squadDrones(w: &mut World) {
+    let n = 4 + Random.range(0, 3)
+    let id = newSquad(w, n)
+    let y0 = spawnY(w, 90.0)
+    for i in 0..n {
+        var e = makeEnemy(Kind.Drone, w.w + 60.0 + (i as f64) * 46.0, y0 + (i as f64) * 26.0 - (n as f64) * 13.0)
+        e.squad = id
+        e.y = Math.clampF64(e.y, 30.0, w.h - 30.0)
+        let _ = spawn(w, e)
     }
-    if wave <= 3 {
-        return 3
+}
+
+// The teaching wave: a plain line of grunts, no escort, entering slowly and
+// holding their fire long enough for you to shoot first.
+fn introSquad(w: &mut World, n: i64) {
+    let id = newSquad(w, n)
+    let y0 = spawnY(w, 110.0)
+    for i in 0..n {
+        var e = makeEnemy(Kind.Drone, w.w + 60.0 + (i as f64) * 58.0, y0 + ((i as f64) - ((n - 1) as f64) * 0.5) * 40.0)
+        e.squad = id
+        e.vx = 0.0 - 95.0
+        e.fireT = 3.4 + (i as f64) * 0.5
+        e.y = Math.clampF64(e.y, 40.0, w.h - 40.0)
+        let _ = spawn(w, e)
     }
-    if wave <= 4 {
+}
+
+fn squadWeavers(w: &mut World) {
+    let n = 3 + Random.range(0, 3)
+    let id = newSquad(w, n)
+    for i in 0..n {
+        var e = makeEnemy(Kind.Weaver, w.w + 60.0 + (i as f64) * 70.0, w.h * 0.5)
+        e.squad = id
+        e.phase = (i as f64) * 0.7
+        let _ = spawn(w, e)
+    }
+}
+
+fn squadSwoopers(w: &mut World) {
+    let id = newSquad(w, 3)
+    for i in 0..3 {
+        var e = makeEnemy(Kind.Swooper, w.w + 60.0 + (i as f64) * 90.0, spawnY(w, 70.0))
+        e.squad = id
+        let _ = spawn(w, e)
+    }
+}
+
+fn squadCarrier(w: &mut World) {
+    var c = makeEnemy(Kind.Carrier, w.w + 90.0, spawnY(w, 120.0))
+    c.hp = 16.0 + (w.stage as f64) * 5.0
+    c.maxHp = c.hp
+    let cy = c.y
+    let _ = spawn(w, c)
+    for i in 0..3 {
+        var e = makeEnemy(Kind.Drone, w.w + 160.0 + (i as f64) * 40.0, cy + ((i as f64) - 1.0) * 60.0)
+        e.y = Math.clampF64(e.y, 30.0, w.h - 30.0)
+        let _ = spawn(w, e)
+    }
+}
+
+fn squadMines(w: &mut World) {
+    for i in 0..7 {
+        let _ = spawn(w, makeEnemy(Kind.Mine, w.w + 60.0 + Random.floatRange(0.0, 380.0), spawnY(w, 40.0)))
+    }
+}
+
+fn squadTurrets(w: &mut World) {
+    let n = 2 + Random.range(0, 2)
+    for i in 0..n {
+        let x = w.w + 60.0 + (i as f64) * 190.0
+        var e = makeEnemy(Kind.Turret, x, 0.0)
+        if Random.range(0, 2) == 0 {
+            e.tier = 1
+            e.y = topAt(w.terrain, w.w + 60.0)
+        } else {
+            e.tier = 0
+            e.y = botAt(w.terrain, w.w + 60.0)
+        }
+        let _ = spawn(w, e)
+    }
+}
+
+fn squadSnake(w: &mut World) {
+    spawnSnake(w, w.w + 80.0, spawnY(w, 120.0), 5 + Math.minI64(w.stage * 2, 8))
+}
+
+fn squadHealer(w: &mut World) {
+    let n = 4
+    let id = newSquad(w, n + 1)
+    let y0 = spawnY(w, 110.0)
+    var hl = makeEnemy(Kind.Healer, w.w + 200.0, y0)
+    hl.squad = id
+    let _ = spawn(w, hl)
+    for i in 0..n {
+        var e = makeEnemy(Kind.Drone, w.w + 60.0 + (i as f64) * 44.0, y0 + ((i as f64) - 1.5) * 44.0)
+        e.squad = id
+        e.hp = 4.0
+        e.maxHp = 4.0
+        e.y = Math.clampF64(e.y, 30.0, w.h - 30.0)
+        let _ = spawn(w, e)
+    }
+}
+
+// One new squad type per stage, in a fixed order, so the roster is learned
+// rather than dumped.
+fn unlockedSquads(stage: i64): i64 {
+    if stage <= 1 {
         return 4
     }
-    if wave <= 6 {
+    if stage == 2 {
         return 5
     }
-    if wave <= 9 {
+    if stage == 3 {
         return 6
     }
-    return 7
+    if stage == 4 {
+        return 7
+    }
+    return 8
 }
 
-pub fn kindForSlot(slot: i64): Kind {
-    if slot == 0 {
-        return Kind.Seeker
+pub fn squadName(id: i64): string {
+    if id == 0 {
+        return "INTERCEPTORS"
     }
-    if slot == 1 {
-        return Kind.Wanderer
+    if id == 1 {
+        return "WEAVERS"
     }
-    if slot == 2 {
-        return Kind.Weaver
+    if id == 2 {
+        return "DIVERS"
     }
-    if slot == 3 {
-        return Kind.Splitter
+    if id == 3 {
+        return "WALL GUNS"
     }
-    if slot == 4 {
-        return Kind.SnakeHead
+    if id == 4 {
+        return "MINEFIELD"
     }
-    if slot == 5 {
-        return Kind.Healer
+    if id == 5 {
+        return "CARRIER"
     }
-    return Kind.BlackHole
+    if id == 6 {
+        return "SERPENT"
+    }
+    return "MEDIC WING"
 }
 
-pub fn kindName(k: Kind): string {
-    match k {
-        Seeker => {
-            return "SEEKER — CHASES YOU"
-        }
-        Wanderer => {
-            return "DRIFTER — IGNORES YOU"
-        }
-        Weaver => {
-            return "WEAVER — STRAFES IN"
-        }
-        Splitter => {
-            return "SPLITTER — BREAKS APART"
-        }
-        SnakeHead => {
-            return "SNAKE — SHOOT THE CHAIN"
-        }
-        SnakeSeg => {
-            return "SNAKE"
-        }
-        Healer => {
-            return "MEDIC — REPAIRS OTHERS"
-        }
-        BlackHole => {
-            return "SINGULARITY — PULLS EVERYTHING"
-        }
-        Sentinel => {
-            return "SENTINEL — BREAK THE PLATES"
-        }
-        Armor => {
-            return "ARMOUR PLATE"
-        }
-        Turret => {
-            return "YOUR TURRET"
-        }
-        Gem => {
-            return "PICKUP"
-        }
+fn runSquad(w: &mut World, id: i64) {
+    if id == 0 {
+        squadDrones(w)
+        return
     }
+    if id == 1 {
+        squadWeavers(w)
+        return
+    }
+    if id == 2 {
+        squadSwoopers(w)
+        return
+    }
+    if id == 3 {
+        squadTurrets(w)
+        return
+    }
+    if id == 4 {
+        squadMines(w)
+        return
+    }
+    if id == 5 {
+        squadCarrier(w)
+        return
+    }
+    if id == 6 {
+        squadSnake(w)
+        return
+    }
+    squadHealer(w)
 }
 
-fn spawnForWave(w: &mut World) {
-    let p = randomEdge(w)
-    let wv = w.wave
-    let n = unlockedKinds(wv)
-    // The newest kind is rarer than the staples, so a wave still reads mostly
-    // like the one before it.
-    var slot = Random.range(0, n)
-    if n > 1 && slot == n - 1 && Random.range(0, 3) != 0 {
-        slot = Random.range(0, n - 1)
-    }
-    let k = kindForSlot(slot)
-    match k {
-        SnakeHead => {
-            spawnSnake(w, p.x, p.y, 4 + Math.minI64(wv / 3, 5))
-        }
-        _ => {
-            let _ = spawn(w, makeEnemy(k, p.x, p.y))
-        }
-    }
+fn nextStage(w: &mut World) {
+    w.stage = w.stage + 1
+    w.dist = 0.0
+    w.stageLen = 5200.0 + (w.stage as f64) * 900.0
+    w.scroll = Math.minF64(170.0 + (w.stage as f64) * 18.0, 280.0)
+    w.nextSpawn = 900.0
+    w.intro = 1
+    w.banner = 2.6
+    w.player.lives = Math.minI64(w.player.lives + 1, 5)
+    terrainSetGap(w.terrain, Math.maxF64(w.h * 0.92 - (w.stage as f64) * 24.0, w.h * 0.60))
+    terrainOpen(w.terrain, 60)
 }
 
-fn startWave(w: &mut World) {
-    w.wave = w.wave + 1
-    w.banner = 2.2
-    // A kind that becomes available this wave gets named on screen.
-    let before = unlockedKinds(w.wave - 1)
-    let now = unlockedKinds(w.wave)
-    if now > before && w.wave > 1 {
-        w.newKind = kindForSlot(now - 1)
-        w.newKindTimer = 4.0
-    }
-    if w.wave % 8 == 0 {
-        w.pending = 0
-        let p = randomEdge(w)
-        spawnBoss(w, p.x, p.y)
-        w.shake = 12.0
-    } else {
-        // Gentler ramp: the old one reached 34 simultaneous enemies by wave 15,
-        // which is where it stopped being readable.
-        w.pending = 3 + w.wave
-        if w.pending > 18 {
-            w.pending = 18
-        }
-    }
-    w.waveTimer = 0.0
-}
-
-fn updateWaves(w: &mut World, dt: f64) {
-    w.waveTimer = w.waveTimer - dt
-    if w.pending > 0 {
-        if w.waveTimer <= 0.0 {
-            spawnForWave(w)
-            w.pending = w.pending - 1
-            w.waveTimer = Math.maxF64(0.42, 1.15 - (w.wave as f64) * 0.03)
+fn updateStage(w: &mut World, dt: f64) {
+    if w.bossUp {
+        // The boss fight happens in a clear room, and the stage waits for it.
+        terrainOpen(w.terrain, 30)
+        if !alive(w, w.boss) {
+            w.bossUp = false
         }
         return
     }
-    if enemiesAlive(w) == 0 && w.waveTimer <= 0.0 {
-        if w.wave > 0 && w.wave % 2 == 0 && w.perks.len < 12 {
-            offerPerks(w)
-        }
-        startWave(w)
-        w.waveTimer = 1.1
-    }
-}
-
-pub fn offerPerks(w: &mut World) {
-    w.perkChoices.clear()
-    var tries: i64 = 0
-    while w.perkChoices.len < 3 && tries < 60 {
-        tries = tries + 1
-        let p = perkFromId(Random.range(0, 9))
-        var dup = false
-        for i in 0..w.perkChoices.len {
-            if perkEq(w.perkChoices[i], p) {
-                dup = true
-            }
-        }
-        if !dup {
-            w.perkChoices.push(p)
-        }
-    }
-    w.perkPick = true
-}
-
-pub fn choosePerk(w: &mut World, idx: i64) {
-    if idx < 0 || idx >= w.perkChoices.len {
+    w.dist = w.dist + w.scroll * dt
+    if w.dist > w.stageLen {
+        spawnBoss(w, w.w + 140.0, w.h * 0.5)
         return
     }
-    let p = w.perkChoices[idx]
-    w.perks.push(p)
-    w.perkPick = false
-    w.flash = 0.35
-    gridImpulse(w.grid, w.player.x, w.player.y, 500.0, 120.0)
-    // Turrets take effect immediately: two autonomous guns that pick their own
-    // targets and outlive the perk screen.
-    match p {
-        Perk.Turrets => {
-            for i in 0..2 {
-                let a = (i as f64) * 3.14159265 + 0.7
-                var t = makeEnemy(Kind.Turret, w.player.x + Math.cos(a) * 70.0, w.player.y + Math.sin(a) * 70.0)
-                t.hp = 26.0
-                t.maxHp = 26.0
-                let _ = spawn(w, t)
-                w.turretCount = w.turretCount + 1
-            }
+    // The free pod. A run that opens with the weakest gun and nothing helping you
+    // is a run that teaches nothing in its first ten seconds.
+    if !w.gaveGift && w.dist > 220.0 {
+        w.gaveGift = true
+        dropOrb(w, w.w + 30.0, w.h * 0.5)
+    }
+
+    if w.dist > w.nextSpawn {
+        // A scripted opening: the first squads are always the plain grunt, and
+        // they arrive three, then four, then five. Rolling wall-guns or divers as
+        // the very first thing you ever see is not difficulty, it is an ambush at
+        // the point where you do not yet know what the game is.
+        if w.intro > 0 {
+            introSquad(w, 6 - w.intro)
+            w.intro = w.intro - 1
+            w.nextSpawn = w.dist + 640.0
+            return
         }
-        _ => {
+        let unlocked = unlockedSquads(w.stage)
+        var pick = Random.range(0, unlocked)
+        // The newest squad type is rarer than the staples, so a stage still
+        // reads mostly like the one before it.
+        if unlocked > 4 && pick == unlocked - 1 && Random.range(0, 3) != 0 {
+            pick = Random.range(0, unlocked - 1)
         }
+        runSquad(w, pick)
+        w.nextSpawn = w.dist + Math.maxF64(260.0, Random.floatRange(560.0, 880.0) - (w.stage as f64) * 22.0)
     }
 }
 
 // ── top-level tick ────────────────────────────────────────────────────────────
 
-pub fn worldUpdate(w: &mut World, dtIn: f64, mx: f64, my: f64, aim: f64, fire: bool, bomb: bool) {
+pub fn worldUpdate(w: &mut World, dtIn: f64, mx: f64, my: f64, holdFire: bool) {
     var dt = dtIn
     if w.slowmo > 0.0 {
         w.slowmo = w.slowmo - dtIn
@@ -1887,38 +2130,31 @@ pub fn worldUpdate(w: &mut World, dtIn: f64, mx: f64, my: f64, aim: f64, fire: b
     if w.banner > 0.0 {
         w.banner = w.banner - dt
     }
-    if w.newKindTimer > 0.0 {
-        w.newKindTimer = w.newKindTimer - dt
-    }
     if w.hurt > 0.0 {
         w.hurt = w.hurt - dt
     }
-    if w.multTimer > 0.0 {
-        w.multTimer = w.multTimer - dt
-        if w.multTimer <= 0.0 && w.mult > 1 {
-            w.mult = w.mult - 1
-            w.multTimer = 3.6
-        }
+    if w.pickupT > 0.0 {
+        w.pickupT = w.pickupT - dt
+        w.pickupY = w.pickupY - 34.0 * dt
     }
 
-    // The perk screen and the game-over screen freeze gameplay but keep the
-    // background alive, so the grid keeps rippling behind the menu.
-    if w.perkPick || w.gameOver {
+    // Game over freezes the stage but keeps the background alive, so the lattice
+    // keeps rippling behind the text.
+    if w.gameOver {
         updateParticles(w, dt)
+        updateStars(w, dt)
         gridUpdate(w.grid, dt)
         return
     }
 
-    if bomb {
-        detonateBomb(w)
-    }
-
+    terrainAdvance(w.terrain, w.scroll * dt)
+    updateStars(w, dt)
     rehash(w)
-    updatePlayer(w, dt, mx, my, aim, fire)
+    updatePlayer(w, dt, mx, my, holdFire)
     updateEnts(w, dt)
     updateBullets(w, dt)
     updateParticles(w, dt)
-    updateWaves(w, dt)
+    updateStage(w, dt)
     gridUpdate(w.grid, dt)
 }
 
@@ -1930,32 +2166,46 @@ pub fn worldReset(w: &mut World) {
     w.bullets.clear()
     w.parts.clear()
     w.arcs.clear()
-    w.perks.clear()
-    w.perkChoices.clear()
     w.hashNext.clear()
-    w.player.x = w.w * 0.5
+    w.squadLive.clear()
+    w.player.x = w.w * 0.22
     w.player.y = w.h * 0.5
     w.player.vx = 0.0
     w.player.vy = 0.0
     w.player.alive = true
     w.player.lives = 5
-    w.player.bombs = 4
+    w.player.power = 1
+    w.player.speed = 0
+    w.player.missiles = 0
+    w.player.missileT = 0.0
+    w.player.shield = 1.0
+    w.player.shieldT = 0.0
+    w.player.charge = 0.0
+    w.player.charging = false
+    w.player.beamFlash = 0.0
+    w.player.pods = 0
     w.player.invuln = 3.0
     w.player.respawn = 0.0
     w.score = 0
     w.mult = 1
-    w.multTimer = 0.0
-    w.wave = 0
-    w.waveTimer = 1.2
-    w.pending = 0
+    w.chain = 0
+    w.scroll = 170.0
+    w.dist = 0.0
+    w.stage = 1
+    w.stageLen = 5200.0
+    w.bossUp = false
+    w.boss = nullHandle()
+    w.nextSpawn = 950.0
+    w.intro = 3
+    w.gaveGift = false
     w.shake = 0.0
     w.flash = 0.0
     w.slowmo = 0.0
     w.gameOver = false
-    w.banner = 0.0
-    w.newKindTimer = 0.0
+    w.banner = 2.6
     w.hurt = 0.0
-    w.perkPick = false
-    w.turretCount = 0
+    w.pickupT = 0.0
+    w.pickupCode = 0 - 1
     gridReset(w.grid)
+    terrainReset(w.terrain)
 }

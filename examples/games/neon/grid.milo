@@ -101,14 +101,52 @@ pub fn gridUpdate(g: &mut Grid, dt: f64) {
         }
     }
 
+    // Explicit Euler on a stiff spring sheet is only conditionally stable, and
+    // this sheet is driven by every bullet, every explosion and every black-hole
+    // pull in the game. Given enough simultaneous impulses it runs away, the
+    // positions reach infinity, and the renderer then casts a non-finite float
+    // to i64 — which the overflow check turns into an abort mid-game.
+    //
+    // Rather than tune the energy budget and hope, the sheet is made
+    // unconditionally bounded: a node may not outrun `vlim`, may not stray more
+    // than `lim` from its anchor, and anything that has already gone non-finite
+    // is reset. A cloth that cannot stretch past two and a half cells is also
+    // what it should look like.
+    let lim = g.spacing * 2.5
+    let vlim = 4000.0
     for i in 0..g.nodes.len {
         if g.nodes[i].invMass > 0.0 {
             let dx = g.nodes[i].ax - g.nodes[i].x
             let dy = g.nodes[i].ay - g.nodes[i].y
-            g.nodes[i].vx = (g.nodes[i].vx + dx * anchorK * dt) * damp
-            g.nodes[i].vy = (g.nodes[i].vy + dy * anchorK * dt) * damp
-            g.nodes[i].x = g.nodes[i].x + g.nodes[i].vx * dt
-            g.nodes[i].y = g.nodes[i].y + g.nodes[i].vy * dt
+            var vx = (g.nodes[i].vx + dx * anchorK * dt) * damp
+            var vy = (g.nodes[i].vy + dy * anchorK * dt) * damp
+            // NaN fails every comparison, so this catches it as well as infinity
+            if !(vx > 0.0 - vlim && vx < vlim) {
+                vx = Math.clampF64(vx, 0.0 - vlim, vlim)
+                if vx != vx {
+                    vx = 0.0
+                }
+            }
+            if !(vy > 0.0 - vlim && vy < vlim) {
+                vy = Math.clampF64(vy, 0.0 - vlim, vlim)
+                if vy != vy {
+                    vy = 0.0
+                }
+            }
+            var nx = g.nodes[i].x + vx * dt
+            var ny = g.nodes[i].y + vy * dt
+            if nx != nx {
+                nx = g.nodes[i].ax
+                vx = 0.0
+            }
+            if ny != ny {
+                ny = g.nodes[i].ay
+                vy = 0.0
+            }
+            g.nodes[i].vx = vx
+            g.nodes[i].vy = vy
+            g.nodes[i].x = Math.clampF64(nx, g.nodes[i].ax - lim, g.nodes[i].ax + lim)
+            g.nodes[i].y = Math.clampF64(ny, g.nodes[i].ay - lim, g.nodes[i].ay + lim)
         }
     }
 }
@@ -153,36 +191,36 @@ pub fn gridVortex(g: &mut Grid, cx: f64, cy: f64, radius: f64, pull: f64, swirl:
     }
 }
 
-pub fn gridDraw(c: &mut Canvas, g: &Grid, r: f64, gg: f64, b: f64) {
+// Shockwave-only draw: a spring is invisible until something disturbs it, so a
+// quiet screen shows nothing at all and an explosion shows the ripple travelling
+// out through the sheet. Drawing the whole lattice all the time — which is what
+// this used to do — turned the background into a permanent blue graph.
+pub fn gridDrawShock(c: &mut Canvas, g: &Grid, r: f64, gg: f64, b: f64) {
     let cols = g.cols
     let rows = g.rows
+    let cut = 1.6 // px of stretch below which a spring is not worth drawing
     for row in 0..rows {
         for col in 0..cols {
             let i = row * cols + col
-            // Stretched springs glow hot; a slack grid is nearly invisible.
             if col + 1 < cols {
                 let j = i + 1
                 let dx = g.nodes[j].x - g.nodes[i].x
                 let dy = g.nodes[j].y - g.nodes[i].y
-                let d = Math.sqrt(dx * dx + dy * dy)
-                var t = Math.abs(d - g.spacing) * 0.16
-                if t > 3.0 {
-                    t = 3.0
+                let t = Math.abs(Math.sqrt(dx * dx + dy * dy) - g.spacing)
+                if t > cut {
+                    let m = Math.minF64((t - cut) * 0.30, 2.4)
+                    line(c, g.nodes[i].x, g.nodes[i].y, g.nodes[j].x, g.nodes[j].y, r * m, gg * m, b * m)
                 }
-                let m = 0.42 + t * 11.0
-                line(c, g.nodes[i].x, g.nodes[i].y, g.nodes[j].x, g.nodes[j].y, r * m, gg * m + t * 0.18, b * m + t * 0.55)
             }
             if row + 1 < rows {
                 let j = i + cols
                 let dx = g.nodes[j].x - g.nodes[i].x
                 let dy = g.nodes[j].y - g.nodes[i].y
-                let d = Math.sqrt(dx * dx + dy * dy)
-                var t = Math.abs(d - g.spacing) * 0.16
-                if t > 3.0 {
-                    t = 3.0
+                let t = Math.abs(Math.sqrt(dx * dx + dy * dy) - g.spacing)
+                if t > cut {
+                    let m = Math.minF64((t - cut) * 0.30, 2.4)
+                    line(c, g.nodes[i].x, g.nodes[i].y, g.nodes[j].x, g.nodes[j].y, r * m, gg * m, b * m)
                 }
-                let m = 0.42 + t * 11.0
-                line(c, g.nodes[i].x, g.nodes[i].y, g.nodes[j].x, g.nodes[j].y, r * m, gg * m + t * 0.18, b * m + t * 0.55)
             }
         }
     }

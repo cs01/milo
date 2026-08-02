@@ -89,18 +89,17 @@ pub struct Input {
     mouseX: f64,
     mouseY: f64,
     fire: bool,
-    bomb: bool,
+    charge: bool, // held: build the beam. released: fire it.
     restart: bool,
     pause: bool,
     quit: bool,
-    pick: i64, // 1..3 on the upgrade screen, 0 for nothing
 }
 
 pub fn inputNew(): Input {
     return Input {
         moveX: 0.0, moveY: 0.0,
         mouseX: 0.0, mouseY: 0.0,
-        fire: false, bomb: false, restart: false, pause: false, quit: false, pick: 0,
+        fire: false, charge: false, restart: false, pause: false, quit: false,
     }
 }
 
@@ -109,10 +108,9 @@ pub fn pollInput(inp: &mut Input, ev: &mut [u8; 64], scale: f64) {
     inp.moveX = 0.0
     inp.moveY = 0.0
     inp.fire = false
-    inp.bomb = false
+    inp.charge = false
     inp.restart = false
     inp.pause = false
-    inp.pick = 0
 
     unsafe {
         while SDL_PollEvent(ev) != 0 {
@@ -137,8 +135,7 @@ pub fn pollInput(inp: &mut Input, ev: &mut [u8; 64], scale: f64) {
         if ks[SC_S] != 0 {
             inp.moveY = inp.moveY + 1.0
         }
-        // Arrows move too. Aiming is the mouse's job only — a second keyboard
-        // stick reads as a puzzle, not a control scheme.
+        // Arrows move too. There is nothing to aim: the ship shoots right.
         if ks[SC_LEFT] != 0 {
             inp.moveX = inp.moveX - 1.0
         }
@@ -152,7 +149,7 @@ pub fn pollInput(inp: &mut Input, ev: &mut [u8; 64], scale: f64) {
             inp.moveY = inp.moveY + 1.0
         }
         if ks[SC_SPACE] != 0 {
-            inp.bomb = true
+            inp.charge = true
         }
         if ks[SC_R] != 0 {
             inp.restart = true
@@ -163,18 +160,13 @@ pub fn pollInput(inp: &mut Input, ev: &mut [u8; 64], scale: f64) {
         if ks[SC_ENTER] != 0 {
             inp.restart = true
         }
-        for k in 0..3 {
-            if ks[SC_1 + k] != 0 {
-                inp.pick = k + 1
-            }
-        }
-
         var mpos: [i32; 2] = [0; 2]
         let btn = SDL_GetMouseState(mpos[0].addrOf() as *i32, mpos[1].addrOf() as *i32)
         inp.mouseX = (mpos[0] as f64) * scale
         inp.mouseY = (mpos[1] as f64) * scale
         if (btn & 1) != 0 {
             inp.fire = true
+            inp.charge = true
         }
     }
 

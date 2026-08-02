@@ -1,26 +1,26 @@
-// NEON — a twin-stick arena shooter written in Milo.
+// NEON — a horizontal shooter written in Milo.
 //
 // Build and play:
 //   milo run examples/games/neon/main.milo --release
 //
-//   ARROW KEYS / WASD   move — this is the only control you need
-//   MOUSE               optional: takes over aiming while you move it
-//                       (otherwise the gun locks the nearest threat by itself)
-//   SPACE               bomb
-//   1 2 3               pick an upgrade between waves
+//   ARROW KEYS / WASD   fly
+//   SPACE (hold)        charge; let go to fire the beam
 //   ENTER               restart after a game over
 //   ESC                 quit
+//
+// The gun fires by itself and it fires right. Pickups are glowing orbs that come
+// to you and take effect on contact — there is no menu anywhere in this game.
 //
 // The point of this example is the code, not the score: see README.md for what
 // each system is meant to prove about second-class references.
 
-from "std/math" import {
-    Math
+from "std/random" import {
+    Random
 }
 from "./sdl" import {
     SDL_Init, SDL_CreateWindow, SDL_CreateRenderer, SDL_CreateTexture,
     SDL_UpdateTexture, SDL_RenderClear, SDL_RenderCopy, SDL_RenderPresent,
-    SDL_ShowCursor, SDL_GetTicks, SDL_Delay, SDL_DestroyWindow, SDL_Quit,
+    SDL_ShowCursor, SDL_GetTicks, SDL_DestroyWindow, SDL_Quit,
     SDL_INIT_VIDEO, SDL_WINDOWPOS_CENTERED, SDL_WINDOW_SHOWN,
     SDL_TEXTUREACCESS_STREAMING, SDL_PIXELFORMAT_ABGR8888,
     SDL_RENDERER_ACCELERATED, SDL_RENDERER_PRESENTVSYNC,
@@ -30,13 +30,13 @@ from "./gfx" import {
     Canvas, canvasNew, present, text, textCentered, textWidth
 }
 from "./world" import {
-    World, worldNew, worldUpdate, worldReset, choosePerk, nearestEnemy, alive
+    World, worldNew, worldUpdate, worldReset
+}
+from "./sprites" import {
+    Sprites, spritesNew
 }
 from "./render" import {
-    Shapes, shapesNew, drawWorld, drawHud, drawAim, drawLock
-}
-from "std/random" import {
-    Random
+    drawWorld, drawHud
 }
 
 pub let W: i64 = 1280
@@ -69,20 +69,16 @@ pub fn main(): i32 {
 
     var c = canvasNew(W, H)
     var world = worldNew(W as f64, H as f64)
-    let shapes = shapesNew()
+    let shapes = spritesNew()
     var inp = inputNew()
     var ev: [u8; 64] = [0; 64]
 
     var last = SDL_GetTicks()
-    var lastMouseX: f64 = 0.0
-    var lastMouseY: f64 = 0.0
-    var mouseIdle: f64 = 99.0 // start in auto-aim; the mouse claims it when moved
     var fpsAccum: f64 = 0.0
     var fpsFrames: i64 = 0
     var fpsShown: i64 = 0
-    var titleTimer = 6.0
+    var titleTimer = 5.0
     var restartHeld = false
-    var pickHeld = false
 
     while !inp.quit {
         let now = SDL_GetTicks()
@@ -97,67 +93,13 @@ pub fn main(): i32 {
 
         pollInput(inp, ev, 1.0)
 
-        // Aim: locks onto the nearest threat by default, so the whole game is
-        // playable one-handed on the arrow keys. Touching the mouse hands aiming
-        // back to the mouse until it goes still again — no mode to discover, and
-        // no second stick to learn.
-        let mdx = inp.mouseX - lastMouseX
-        let mdy = inp.mouseY - lastMouseY
-        if mdx * mdx + mdy * mdy > 4.0 {
-            mouseIdle = 0.0
-        } else {
-            mouseIdle = mouseIdle + dt
-        }
-        lastMouseX = inp.mouseX
-        lastMouseY = inp.mouseY
-        let usingMouse = mouseIdle < 2.0
-
-        var aim = world.player.ang
-        var lockX = 0.0
-        var lockY = 0.0
-        var locked = false
-        if usingMouse {
-            let adx = inp.mouseX - world.player.x
-            let ady = inp.mouseY - world.player.y
-            if adx * adx + ady * ady > 4.0 {
-                aim = Math.atan2(ady, adx)
-            }
-        } else {
-            let h = nearestEnemy(world, world.player.x, world.player.y, 4000.0, 0 - 1)
-            if alive(world, h) {
-                lockX = world.ents[h.slot].x
-                lockY = world.ents[h.slot].y
-                locked = true
-                let tgt = Math.atan2(lockY - world.player.y, lockX - world.player.x)
-                // Turn toward the mark instead of snapping, so a target dying does
-                // not teleport the gun across the screen.
-                var d = tgt - aim
-                while d > 3.14159265358979 {
-                    d = d - 6.28318530717959
-                }
-                while d < 0.0 - 3.14159265358979 {
-                    d = d + 6.28318530717959
-                }
-                aim = aim + d * Math.minF64(1.0, dt * 14.0)
-            }
-        }
-        // Always firing. Holding a button to shoot adds nothing here.
-        let wantFire = true
-
-        if world.perkPick {
-            if inp.pick > 0 && !pickHeld {
-                choosePerk(world, inp.pick - 1)
-            }
-        }
-        pickHeld = inp.pick > 0
-
         if world.gameOver && inp.restart && !restartHeld {
             worldReset(world)
             titleTimer = 0.0
         }
         restartHeld = inp.restart
 
-        worldUpdate(world, dt, inp.moveX, inp.moveY, aim, wantFire, inp.bomb)
+        worldUpdate(world, dt, inp.moveX, inp.moveY, inp.charge)
 
         // screen shake
         var ox = 0.0
@@ -168,11 +110,6 @@ pub fn main(): i32 {
         }
 
         drawWorld(c, world, shapes, ox, oy)
-        if usingMouse {
-            drawAim(c, world, inp.mouseX, inp.mouseY, aim)
-        } else if locked {
-            drawLock(c, world, lockX, lockY, aim, world.time)
-        }
         drawHud(c, world)
 
         fpsAccum = fpsAccum + dt
@@ -183,9 +120,9 @@ pub fn main(): i32 {
             fpsFrames = 0
         }
         text(c, 24, H - 30, fpsShown.toString() + " FPS", 2, 0.18, 0.30, 0.38)
-        // Control strip stays up permanently — cheap, and there is nowhere else to
-        // find this out.
-        let help = "ARROWS MOVE    AUTO-AIM (MOUSE OVERRIDES)    SPACE BOMB    ESC QUIT"
+        // Control strip stays up permanently — cheap, and there is nowhere else
+        // to find this out.
+        let help = "ARROWS FLY    HOLD SPACE TO CHARGE    ORBS ARE GOOD    ESC QUIT"
         text(c, W - 24 - textWidth(help, 2), H - 30, help, 2, 0.18, 0.30, 0.38)
 
         if titleTimer > 0.0 {
@@ -194,10 +131,8 @@ pub fn main(): i32 {
             if titleTimer < 1.0 {
                 f = titleTimer
             }
-            textCentered(c, W / 2, H / 2 - 90, "NEON", 12, 0.6 * f, 1.4 * f, 2.0 * f)
-            textCentered(c, W / 2, H / 2 + 10, "WRITTEN IN MILO", 3, 1.4 * f, 1.0 * f, 0.4 * f)
-            textCentered(c, W / 2, H / 2 + 60, "ARROW KEYS MOVE — THE GUN AIMS ITSELF", 2, 0.7 * f, 0.9 * f, 1.2 * f)
-            textCentered(c, W / 2, H / 2 + 88, "SPACE BOMB      1 2 3 UPGRADES      ESC QUIT", 2, 0.5 * f, 0.7 * f, 0.9 * f)
+            textCentered(c, W / 2, 150, "NEON", 12, 0.6 * f, 1.4 * f, 2.0 * f)
+            textCentered(c, W / 2, 250, "WRITTEN IN MILO", 3, 1.4 * f, 1.0 * f, 0.4 * f)
         }
 
         var exposure = 1.0

@@ -11,7 +11,7 @@ from "./gfx" import {
     Canvas, canvasNew, present
 }
 from "./world" import {
-    Mine, mineNew, mineUpdate
+    Mine, mineNew, mineUpdate, TILE
 }
 from "./render" import {
     drawMine, drawHud
@@ -72,14 +72,38 @@ pub fn main(): i32 {
     let dt = 1.0 / 60.0
 
     for frame in 0..maxFrame + 1 {
-        // dig down for a while, then east, alternating — a plausible tunnel
-        let phase = (frame / 150) % 3
+        // Dig down for a while, then east, alternating — a plausible tunnel.
+        // Once the door opens, steer at it: that turns this from a worldgen smoke
+        // test into an end-to-end one that actually finishes a level.
         var ix = 0.0
         var iy = 0.0
-        if phase == 0 {
-            iy = 1.0
+        if m.exitOpen {
+            let dx = ((m.exitX as f64) + 0.5) * TILE - m.px
+            let dy = ((m.gateY as f64) + 0.5) * TILE - m.py
+            if Math.abs(dx) > Math.abs(dy) {
+                ix = if dx > 0.0 {
+                    1.0
+                } else {
+                    0.0 - 1.0
+                }
+            } else if Math.abs(dy) > 4.0 {
+                iy = if dy > 0.0 {
+                    1.0
+                } else {
+                    0.0 - 1.0
+                }
+            }
         } else {
-            ix = 1.0
+            // down, right, down, left — a sweep rather than a single corner to
+            // wedge itself into once it runs out of map
+            let phase = (frame / 150) % 4
+            if phase == 0 || phase == 2 {
+                iy = 1.0
+            } else if phase == 1 {
+                ix = 1.0
+            } else {
+                ix = 0.0 - 1.0
+            }
         }
         mineUpdate(m, dt, ix, iy, W as f64, H as f64)
 
@@ -97,6 +121,6 @@ pub fn main(): i32 {
             print("wrote " + prefix + "-" + frame.toString() + ".ppm")
         }
     }
-    print("value " + m.score.toString() + " gold " + m.gold.toString() + " gems " + m.gems.toString() + " depth " + m.deepest.toString())
+    print("level " + m.level.toString() + " value " + m.score.toString() + " gold " + m.gold.toString() + " gems " + m.gems.toString() + " depth " + m.deepest.toString())
     return 0
 }

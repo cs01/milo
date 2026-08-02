@@ -546,99 +546,102 @@ fn drawGrain(c: &mut Canvas, tx: i64, ty: i64, sx: f64, sy: f64, t: i64, col: &C
     }
 }
 
-// One tile-tall slice of the door.
+// The door: one 2x2 object out in the ground, drawn as a whole rather than tile
+// by tile, so it can have a frame, a lintel and two leaves that meet in the
+// middle instead of being a repeating wall pattern.
 //
-// The door is a real door: a stone jamb on each side, and a timber leaf hung
-// inside it with planks, iron straps and rivets. When the quota lands the leaf
-// swings away from you — drawn as its width collapsing toward the far jamb,
-// which is what a door opening away from the camera actually does on screen —
-// and leaves a lit doorway you walk through. It used to be a green wall with
-// arrows on it, which is a sign, not a door.
-fn drawDoorTile(c: &mut Canvas, m: &Mine, sx: f64, sy: f64, ty: i64, kk: f64) {
-    let jamb = 5.0
-    // The doorway behind the leaf. Dark, with the daylight of the shaft beyond
-    // leaking in once there is a gap to leak through.
-    setRect(c, sx, sy, sx + TILE, sy + TILE, 0.05, 0.04, 0.04)
-    if m.doorAnim > 0.0 {
-        let g = m.doorAnim
-        // A flat strip, not a per-tile blob: a `spot` in each cell stacked up
-        // into a column of green circles instead of one lit passage.
-        setRect(c, sx + jamb, sy, sx + TILE, sy + TILE, 0.10 * g, 0.34 * g, 0.16 * g)
-        setRect(c, sx + jamb, sy, sx + jamb + 3.0, sy + TILE, 0.16 * g, 0.55 * g, 0.26 * g)
+// It is bright green and it glows through the dirt on purpose. The level is one
+// screen, so a small child should be able to look at the map, see the green
+// thing, and know where they are going before they have dug a single block.
+fn drawDoor(c: &mut Canvas, m: &Mine, camX: f64, camY: f64) {
+    let x0 = (m.exitX as f64) * TILE - camX
+    let y0 = (m.gateY as f64) * TILE - camY
+    let w = TILE * 2.0
+    let h = TILE * 2.0
+    if x0 > (c.w as f64) + w || y0 > (c.h as f64) + h || x0 + w < 0.0 - w || y0 + h < 0.0 - h {
+        return
+    }
+    let cxd = x0 + w * 0.5
+    let cyd = y0 + h * 0.5
+    let a = m.doorAnim
+
+    // The beacon. Light leaking out through solid ground is not physical, and it
+    // is the whole reason the door works as a target.
+    let pulse = 0.72 + 0.28 * Math.sin(m.time * 3.0)
+    spot(c, cxd, cyd, w * 1.7, 0.04 * pulse, 0.20 * pulse, 0.08 * pulse)
+    spot(c, cxd, cyd, w * 0.95, 0.04 * pulse, 0.18 * pulse, 0.08 * pulse)
+    if m.exitOpen {
+        spot(c, cxd, cyd, w * 2.2, 0.05, 0.26, 0.10)
     }
 
-    // The leaf. Hinged on the far side, so its near edge sweeps right as it opens.
-    let leafW = (TILE - jamb) * (1.0 - m.doorAnim)
-    if leafW > 2.0 {
-        let lx0 = sx + jamb + (TILE - jamb - leafW)
-        let lx1 = sx + TILE
-        // Timber, shaded darker toward the hinge to fake the turn.
-        let shade = 0.55 + 0.45 * (1.0 - m.doorAnim)
-        setRect(c, lx0, sy, lx1, sy + TILE, 0.62 * kk * shade, 0.28 * kk * shade, 0.10 * kk * shade)
-        // planks, and a highlight down the leading edge
-        var p = 1
-        while p < 4 {
-            let pxp = lx0 + leafW * (p as f64) * 0.25
-            setRect(c, pxp, sy, pxp + 1.5, sy + TILE, 0.34 * kk * shade, 0.13 * kk * shade, 0.04 * kk * shade)
-            p = p + 1
+    // frame, and the opening behind the leaves
+    let jamb = 7.0
+    setRect(c, x0 - 4.0, y0 - 4.0, x0 + w + 4.0, y0 + h + 4.0, 0.10, 0.16, 0.11)
+    setRect(c, x0, y0, x0 + w, y0 + h, 0.22, 0.34, 0.24)
+    // Beyond the door is daylight, which is what you are digging towards.
+    let lit = 0.25 + 0.75 * a
+    setRect(c, x0 + jamb, y0 + jamb, x0 + w - jamb, y0 + h - jamb, 0.16 * lit, 1.25 * lit, 0.44 * lit)
+    if a > 0.0 {
+        spot(c, cxd, cyd, w * 0.6, 0.10 * a, 0.45 * a, 0.18 * a)
+    }
+
+    // Two leaves meeting in the middle, each hinged on its own outer jamb, so
+    // opening them sweeps the gap outward from the centre.
+    let halfW = (w * 0.5 - jamb) * (1.0 - a)
+    let ly0 = y0 + jamb
+    let ly1 = y0 + h - jamb
+    var side = 0
+    while side < 2 {
+        var lx0 = x0 + jamb
+        var lx1 = lx0 + halfW
+        if side == 1 {
+            lx1 = x0 + w - jamb
+            lx0 = lx1 - halfW
         }
-        setRect(c, lx0, sy, lx0 + 2.0, sy + TILE, 0.95 * kk * shade, 0.55 * kk * shade, 0.24 * kk * shade)
-        // Iron straps, on every other row so the wall of the door has a rhythm
-        // rather than a stripe on every tile.
-        if ty % 2 == 0 {
-            setRect(c, lx0, sy + TILE * 0.20, lx1, sy + TILE * 0.32, 0.20 * kk, 0.20 * kk, 0.24 * kk)
-            setRect(c, lx0, sy + TILE * 0.68, lx1, sy + TILE * 0.80, 0.20 * kk, 0.20 * kk, 0.24 * kk)
-            if leafW > 12.0 {
-                setRect(c, lx0 + 3.0, sy + TILE * 0.24, lx0 + 6.0, sy + TILE * 0.28, 0.65 * kk, 0.65 * kk, 0.70 * kk)
-                setRect(c, lx1 - 6.0, sy + TILE * 0.24, lx1 - 3.0, sy + TILE * 0.28, 0.65 * kk, 0.65 * kk, 0.70 * kk)
-                setRect(c, lx0 + 3.0, sy + TILE * 0.72, lx0 + 6.0, sy + TILE * 0.76, 0.65 * kk, 0.65 * kk, 0.70 * kk)
-                setRect(c, lx1 - 6.0, sy + TILE * 0.72, lx1 - 3.0, sy + TILE * 0.76, 0.65 * kk, 0.65 * kk, 0.70 * kk)
+        if halfW > 1.5 {
+            let shade = 0.60 + 0.40 * (1.0 - a)
+            setRect(c, lx0, ly0, lx1, ly1, 0.10 * shade, 0.62 * shade, 0.26 * shade)
+            // planks
+            var p = 1
+            while p < 3 {
+                let pxp = lx0 + halfW * (p as f64) / 3.0
+                setRect(c, pxp, ly0, pxp + 1.5, ly1, 0.05 * shade, 0.34 * shade, 0.14 * shade)
+                p = p + 1
             }
+            // iron straps and the meeting edge
+            setRect(c, lx0, ly0 + h * 0.16, lx1, ly0 + h * 0.24, 0.16, 0.18, 0.16)
+            setRect(c, lx0, ly1 - h * 0.24, lx1, ly1 - h * 0.16, 0.16, 0.18, 0.16)
+            let inner = if side == 0 {
+                lx1 - 2.5
+            } else {
+                lx0
+            }
+            setRect(c, inner, ly0, inner + 2.5, ly1, 0.03, 0.20, 0.09)
         }
+        side = side + 1
     }
 
-    // Jambs last, so the leaf is inside the frame rather than in front of it.
-    setRect(c, sx, sy, sx + jamb, sy + TILE, 0.30 * kk, 0.24 * kk, 0.26 * kk)
-    setRect(c, sx, sy, sx + 2.0, sy + TILE, 0.44 * kk, 0.36 * kk, 0.38 * kk)
-    if ty % 3 == 0 {
-        // a course line in the stone jamb
-        setRect(c, sx, sy, sx + jamb, sy + 2.0, 0.16 * kk, 0.12 * kk, 0.14 * kk)
-    }
-}
-
-// The handle, the keyhole and the plate they sit on, drawn once at the player's
-// own height rather than repeated up a wall that can be forty tiles tall. It is
-// the one thing that says "door" instead of "gate", so it has to be where you
-// are looking, which is at the dog.
-fn drawDoorHandle(c: &mut Canvas, m: &Mine, camX: f64, camY: f64) {
-    if m.doorAnim >= 1.0 {
-        return
-    }
-    let f = 1.0 - m.doorAnim
-    let dx = (m.exitX - 1) as f64
-    let leafW = (TILE - 5.0) * f
-    let hx = dx * TILE - camX + 5.0 + (TILE - 5.0 - leafW) + leafW * 0.30
-    let top = (SURFACE as f64) * TILE - camY + TILE * 0.5
-    let bot = ((m.worldH - 2) as f64) * TILE - camY
-    let hy = Math.clampF64(m.py - camY, top, bot)
-    if leafW < 18.0 {
-        return
-    }
-    // back plate
-    setRect(c, hx - 9.0, hy - 13.0, hx + 9.0, hy + 13.0, 0.18, 0.17, 0.20)
-    setRect(c, hx - 7.0, hy - 11.0, hx + 7.0, hy + 11.0, 0.42, 0.40, 0.44)
-    // ring handle
-    circle(c, hx, hy - 4.0, 7.0, 12, 1.30, 0.92, 0.30)
-    circle(c, hx, hy - 4.0, 5.4, 12, 0.90, 0.62, 0.18)
-    // keyhole, which is where the lock reads from
-    setRect(c, hx - 2.5, hy + 3.0, hx + 2.5, hy + 8.0, 0.05, 0.04, 0.04)
-    setRect(c, hx - 4.0, hy + 3.0, hx + 4.0, hy + 6.0, 0.05, 0.04, 0.04)
-    if !m.exitOpen {
-        // it rattles when you push on it, and never quite gives
-        let rattle = Math.sin(m.time * 3.0) * 1.5
-        spot(c, hx, hy + 5.0, 5.0 + rattle, 0.30, 0.16, 0.03)
-    } else {
-        spot(c, hx, hy - 4.0, 12.0 * f, 0.5 * f, 0.9 * f, 0.3 * f)
+    // Handles where the two leaves meet, and a keyhole under them while it is
+    // shut. This is the bit that says "door" rather than "green block".
+    if halfW > 6.0 {
+        let f = 1.0 - a
+        let gap = (w * 0.5 - jamb) * a
+        var s2 = 0
+        while s2 < 2 {
+            let hx = if s2 == 0 {
+                cxd - 5.0 - gap
+            } else {
+                cxd + 5.0 + gap
+            }
+            circle(c, hx, cyd - 2.0, 5.5, 10, 1.30 * f, 0.95 * f, 0.30 * f)
+            s2 = s2 + 1
+        }
+        if !m.exitOpen {
+            setRect(c, cxd - 2.5, cyd + 5.0, cxd + 2.5, cyd + 11.0, 0.04, 0.10, 0.05)
+            setRect(c, cxd - 4.5, cyd + 4.0, cxd + 4.5, cyd + 8.0, 0.04, 0.10, 0.05)
+            let rattle = Math.sin(m.time * 3.0) * 1.4
+            spot(c, cxd, cyd + 6.0, 6.0 + rattle, 0.10, 0.30, 0.12)
+        }
     }
 }
 
@@ -783,15 +786,6 @@ pub fn drawMine(c: &mut Canvas, m: &Mine, ox: f64, oy: f64) {
             if !exposed {
                 ambient = 0.46
             }
-            if t == T_GATE {
-                // Visible from anywhere: this is the thing "head east" means.
-                // Lit like a made thing rather than like a wall, with a slow
-                // pulse while it is still locked so the eye keeps going back to it.
-                ambient = 0.88
-                if !m.exitOpen {
-                    ambient = 0.88 + 0.10 * Math.sin(m.time * 2.0 - (ty as f64) * 0.6)
-                }
-            }
             if t == T_GOLD || t == T_GEM || t == T_CRYSTAL {
                 ambient = ambient + 0.06
             }
@@ -823,10 +817,9 @@ pub fn drawMine(c: &mut Canvas, m: &Mine, ox: f64, oy: f64) {
                 texture = hostKind(m, tx, ty)
             }
             let body = tileColor(texture)
-            // The door is not ground: it is joinery, square-edged and framed, so
-            // it skips the rounded-lump treatment entirely.
+            // The door is drawn as one 2x2 object after the whole tile pass, not
+            // as four independent cells.
             if t == T_GATE {
-                drawDoorTile(c, m, sx, sy, ty, kk)
                 continue
             }
             roundTile(c, sx - bl, sy - bt, sx + TILE + br, sy + TILE + bb, body.r * kk, body.g * kk, body.b * kk, rtl, rtr, rbl, rbr)
@@ -842,7 +835,7 @@ pub fn drawMine(c: &mut Canvas, m: &Mine, ox: f64, oy: f64) {
         }
     }
 
-    drawDoorHandle(c, m, camX, camY)
+    drawDoor(c, m, camX, camY)
 
     // The lamp, as ONE smooth additive glow over the finished tiles rather than a
     // per-tile brightness. It spills a little through rock, which is the price of
@@ -944,7 +937,7 @@ pub fn drawHud(c: &mut Canvas, m: &Mine) {
     if m.exitOpen {
         let pulse = 0.7 + 0.3 * Math.sin(m.time * 5.0)
         fillRect(c, bx, by, bx + bw, by + bh, 0.10 * pulse, 0.70 * pulse, 0.24 * pulse)
-        textCentered(c, c.w / 2, 70, "THE DOOR IS OPEN! GO RIGHT!", 3, 0.5 * pulse, 1.3 * pulse, 0.6 * pulse)
+        textCentered(c, c.w / 2, 70, "THE DOOR IS OPEN! GO TO IT!", 3, 0.5 * pulse, 1.3 * pulse, 0.6 * pulse)
     } else {
         var frac = (m.levelValue as f64) / (m.quota as f64)
         if frac > 1.0 {
@@ -959,9 +952,30 @@ pub fn drawHud(c: &mut Canvas, m: &Mine) {
         textCentered(c, c.w / 2, 70, "FILL THE BAR WITH TREASURE", 3, 0.44, 0.40, 0.30)
     }
 
-    // There is no off-screen door marker any more, and there is no need for one:
-    // the map is exactly one screen wide and the door runs the full height of its
-    // right-hand wall, so it is in view on every frame of every level.
+    // The map is one screen wide so the door never leaves the screen sideways,
+    // but a deep level scrolls and it can go off the top or the bottom. When it
+    // does, pin an arrow to that edge above the door's own column.
+    let dcx = ((m.exitX as f64) + 1.0) * TILE - m.camX
+    let dcy = ((m.gateY as f64) + 1.0) * TILE - m.camY
+    if dcy < 0.0 || dcy > (c.h as f64) {
+        var ey = (c.h as f64) - 46.0
+        var dir = 1.0
+        if dcy < 0.0 {
+            ey = 100.0
+            dir = 0.0 - 1.0
+        }
+        let ex = Math.clampF64(dcx, 40.0, (c.w as f64) - 40.0)
+        let pulse = 0.7 + 0.3 * Math.sin(m.time * 4.0)
+        var cr = 0.25
+        var cg = 0.85
+        if m.exitOpen {
+            cr = 0.4
+            cg = 1.5
+        }
+        line(c, ex - 14.0, ey, ex, ey + dir * 16.0, cr * pulse, cg * pulse, 0.4 * pulse)
+        line(c, ex + 14.0, ey, ex, ey + dir * 16.0, cr * pulse, cg * pulse, 0.4 * pulse)
+        line(c, ex, ey - dir * 22.0, ex, ey + dir * 16.0, cr * pulse, cg * pulse, 0.4 * pulse)
+    }
 
     if m.cleared > 0.0 {
         textCentered(c, c.w / 2, c.h / 2 - 40, "NICE DIGGING!", 7, 0.6, 1.3, 0.7)

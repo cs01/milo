@@ -76,27 +76,29 @@ drill**, a **wide drill** that takes the tiles either side of the bit, and a
 
 ## The door
 
-**The door is on screen at all times.** It runs the full height of the right-hand
-wall, and the map is exactly one screen wide — 40 px tiles into a 1280 px window
-is 32 of them — so there is no horizontal scrolling and nothing to go looking for.
-You can see the thing you are working towards from the first frame of a level to
-the last.
+The way out is a **2×2 green door buried out in the ground**, in a different spot
+every level. It glows through solid dirt on purpose: the level is one screen, so a
+small child can look at the map, see the green thing, and know where they are
+going before they have dug a single block. Then they dig over to it.
 
-Two earlier versions were worse in the same way. A gate three tiles tall at one
-depth meant "go right" was only half the instruction: you also had to find the
-row. Making it full height fixed that but left it off screen behind a scroll, so
-it needed an edge marker to stand in for itself. Fitting the map to the window
-deleted both problems and the marker code with them.
-
-And it is a real door: a stone jamb, a timber leaf with vertical planks, iron
-straps and rivets, and one ring handle over a keyhole — drawn at the dog's own
-height rather than repeated up a wall that can be forty tiles tall, so it is
-always where you are looking. A green wall with arrows on it is a sign, not a door.
+It is a real door, drawn as one object rather than tile by tile — a stone frame,
+two leaves meeting in the middle with vertical planks and iron straps, two brass
+ring handles, and a keyhole that rattles while it is shut.
 
 Fill the bar — 75 on level 1, +50 a level — and **the door literally opens**: the
-lock gives with a shake and a burst of splinters, and over about a second the
-leaf swings away from you, drawn as its width collapsing toward the far jamb.
-What is left is a lit doorway you walk through.
+lock gives with a shake and a burst of splinters, and over about a second both
+leaves swing outward to their jambs, leaving a lit passage. Stand in it and the
+level is done.
+
+Three earlier versions were all worse in the same way — they made you hunt. A gate
+three tiles tall at one depth meant "go right" was only half the instruction: you
+also had to find the row. Making it full height fixed that but put it off screen
+behind a scroll. Fitting the map to the window kept it in view, but a full-height
+wall down the side of the map is a wall, not a door. A small bright thing you can
+see from the start and walk to is the version that needs no explaining at all.
+
+Bedrock touching the door is downgraded to plain dirt when the level is generated.
+Bedrock cannot be dug, and a door you cannot reach is worse than no door.
 
 ## The world
 

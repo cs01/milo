@@ -201,9 +201,15 @@ fn sizeForLevel(m: &mut Mine) {
     // does not scroll at all; later levels grow downward only.
     m.worldW = MAP_W
     m.worldH = Math.minI64(MAP_H, SURFACE + 14 + (m.level - 1) * 4)
-    m.exitX = m.worldW - 2
-    m.gateY = SURFACE + 2
     m.quota = 75 + (m.level - 1) * 50
+    // The door is a 2x2 block buried out in the ground, not a wall down the side
+    // of the map. It sits well clear of the shaft head you start in, and its top
+    // left corner is (exitX, gateY). Somewhere different every level, but always
+    // reachable and never against an edge.
+    let spanX = Math.maxI64(1, m.worldW - 14)
+    let spanY = Math.maxI64(1, m.worldH - SURFACE - 6)
+    m.exitX = 8 + (m.level * 7) % spanX
+    m.gateY = SURFACE + 2 + (m.level * 5) % spanY
 }
 
 fn generate(m: &mut Mine) {
@@ -286,17 +292,23 @@ fn generate(m: &mut Mine) {
         m.tiles[y * MAP_W + 4] = T_SKY as u8
         m.tiles[y * MAP_W + 5] = T_SKY as u8
     }
-    // The way out: an open shaft down the right-hand edge, with the door running
-    // the FULL height of it. A gate three tiles tall at one depth meant "go right"
-    // was only half the instruction — you also had to find the row, and being
-    // walled out by bedrock at the wrong height is exactly the kind of silent
-    // dead end this game must not have. Now right is right, from anywhere.
-    // ..worldH - 1 covers every diggable row: stopping a row short left a gap
-    // under the door you could tunnel straight through, skipping the quota.
-    for y in SURFACE..m.worldH - 1 {
-        m.tiles[y * MAP_W + m.exitX] = T_SKY as u8
-        m.tiles[y * MAP_W + m.exitX - 1] = T_GATE as u8
-        m.tiles[y * MAP_W + m.exitX + 1] = T_BEDROCK as u8
+    // The door, written last so nothing in the generator can bury it. Bedrock
+    // touching it is downgraded to plain dirt: bedrock cannot be dug, and a door
+    // you cannot reach is worse than no door at all.
+    for y in m.gateY - 1..m.gateY + 3 {
+        for x in m.exitX - 1..m.exitX + 3 {
+            if x < 1 || y < SURFACE || x >= m.worldW - 1 || y >= m.worldH - 1 {
+                continue
+            }
+            if m.tiles[y * MAP_W + x] as i64 == T_BEDROCK {
+                m.tiles[y * MAP_W + x] = T_DIRT as u8
+            }
+        }
+    }
+    for y in m.gateY..m.gateY + 2 {
+        for x in m.exitX..m.exitX + 2 {
+            m.tiles[y * MAP_W + x] = T_GATE as u8
+        }
     }
 }
 
@@ -332,9 +344,9 @@ pub fn mineNew(): Mine {
         level: 1,
         quota: 75,
         levelValue: 0,
-        exitX: MAP_W - 6,
+        exitX: 12,
         exitOpen: false,
-        gateY: SURFACE + 4,
+        gateY: SURFACE + 6,
         worldW: 0,
         worldH: 0,
         cleared: 0.0,
@@ -648,7 +660,7 @@ fn bank(m: &mut Mine, kind: i64, value: i64) {
         m.flash = 0.8
         m.shake = 9.0
         // splinters and dust off the door as the lock gives
-        let dx = ((m.exitX - 1) as f64) * TILE + TILE * 0.5
+        let dx = (m.exitX as f64) * TILE + TILE
         for i in 0..5 {
             let dy = m.py + Random.floatRange(0.0 - 90.0, 90.0)
             poof(m, dx, dy, Col {
@@ -890,8 +902,10 @@ pub fn mineUpdate(m: &mut Mine, dt: f64, inX: f64, inY: f64, viewW: f64, viewH: 
             nextLevel(m)
         }
     } else if m.exitOpen {
-        let ex = (m.exitX as f64) * TILE + TILE * 0.5
-        if m.px > ex - TILE * 2.0 {
+        // Standing anywhere in the doorway finishes the level.
+        let dx0 = (m.exitX as f64) * TILE
+        let dy0 = (m.gateY as f64) * TILE
+        if m.px > dx0 - TILE * 0.4 && m.px < dx0 + TILE * 2.4 && m.py > dy0 - TILE * 0.4 && m.py < dy0 + TILE * 2.4 {
             m.cleared = 2.6
             m.flash = 0.9
             m.shake = 10.0

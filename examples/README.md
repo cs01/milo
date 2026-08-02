@@ -12,7 +12,7 @@ Runnable Milo programs. They double as integration smoke tests for the standard 
 | [`hello.milo`](hello.milo) | The canonical first program |
 | [`basics/`](basics) | Language and stdlib fundamentals: fib, fizzbuzz, json, arenas, a small interpreter |
 | [`cli-tools/`](cli-tools) | Coreutils-style tools, one `.milo` file each: grep, jq, tree, fmt |
-| [`games/`](games) | [`flight/`](games/flight) — a 3D flying game whose CPU triangle rasteriser runs on every core, flyable over five real places built from SRTM elevation, OpenStreetMap footprints and aerial imagery, [`dig/`](games/dig) — a mining game, [`shatter/`](games/shatter) — a brick breaker, [`neon/`](games/neon) — a twin-stick shooter that answers "second-class references can't do gameplay code", and [`volt/`](games/volt) — a 2D momentum platformer with pixel-art sprites, coyote time and an air dash |
+| [`games/`](games) | [`flight/`](games/flight) — a 3D flying game whose CPU triangle rasteriser runs on every core, flyable over five real places built from SRTM elevation, OpenStreetMap footprints and aerial imagery, [`dig/`](games/dig) — a mining game, [`shatter/`](games/shatter) — a brick breaker, [`neon/`](games/neon) — a twin-stick shooter that answers "second-class references can't do gameplay code", and [`volt/`](games/volt) — a 2D momentum platformer starring Milo the chihuahua, whose bark breaks crates and whose bone turns him into a german shepherd |
 | [`graphics/`](graphics) | Truecolor terminal rendering: donut, plasma, aquarium, raytracers |
 | [`simulation/`](simulation) | Physics and numerical simulation: cloth, rigid bodies, phase space |
 | [`terminal/`](terminal) | TUIs and PTY work: tetris, sysmon, a mini tmux |

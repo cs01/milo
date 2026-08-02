@@ -1,11 +1,16 @@
 // Every sprite in the game, built at startup. There is no asset directory and
-// no loader: the character frames are pixel art written as strings, and the
-// collectibles are generated from their own geometry.
+// no loader: the characters are pixel art written as strings, and the pickups
+// are generated from their own geometry.
 //
-// A palette entry is four floats of linear light, and values run past 1.0 on
-// purpose — a visor at 1.7 clears the bloom threshold and glows, the suit at
-// 0.3 beside it does not. That contrast is the whole look, and it is why the
-// art is authored in linear light rather than in 8-bit colour.
+// A palette entry is three floats of linear light, and values run past 1.0 on
+// purpose — an eye at 1.6 clears the bloom threshold and glows, the fur at 0.3
+// beside it does not. That contrast is the whole look, and it is why the art is
+// authored in linear light rather than in 8-bit colour.
+//
+// The dog comes in two builds. Milo the chihuahua is the one you start as; a
+// bone turns him into a german shepherd, who is bigger, darker and takes a hit
+// before you do. Both use the same frame indices so the renderer never has to
+// know which one it is holding.
 
 from "std/math" import {
     Math
@@ -43,11 +48,13 @@ fn widest(rows: &Vec<string>): i64 {
     return w
 }
 
-fn spriteFrom(rows: &Vec<string>, pal: &Vec<f64>): Sprite {
-    let w = widest(rows)
-    let h = rows.len
+// Every frame of a set is padded to the same box, so a run cycle does not
+// wobble: the renderer anchors sprites by their box, not by their ink.
+fn spriteFrom(rows: &Vec<string>, pal: &Vec<f64>, boxW: i64, boxH: i64): Sprite {
+    let w = Math.maxI64(boxW, widest(rows))
+    let h = Math.maxI64(boxH, rows.len)
     var s = spriteNew(w, h)
-    for y in 0..h {
+    for y in 0..rows.len {
         for x in 0..w {
             let ch = charAt(rows, y, x)
             if ch >= 48 && ch <= 57 {
@@ -61,216 +68,745 @@ fn spriteFrom(rows: &Vec<string>, pal: &Vec<f64>): Sprite {
     return s
 }
 
-// ── the runner ────────────────────────────────────────────────────────────────
+// ── the dog ───────────────────────────────────────────────────────────────────
 //
-//   0 outline   2 suit   3 suit lit   4 visor   5 core   7 scarf   8 boots
+// The two builds are not two sets of hand-drawn frames. A dog is a body, a
+// head, two ears, four legs and a tail, and the difference between a chihuahua
+// and a german shepherd is entirely in the proportions of those — so the shapes
+// are rasterised from numbers and the numbers are what differ.
+//
+// The trick that makes it read as pixel art rather than as blobs is the last
+// pass: every empty pixel touching a filled one becomes outline. Draw the
+// silhouette, get the ink for free.
 
-fn heroPalette(): Vec<f64> {
-    var p: Vec<f64> = Vec.new()
-    palAdd(p, 0.015, 0.018, 0.035) // 0 outline
-    palAdd(p, 0.100, 0.130, 0.240) // 1 suit shadow
-    palAdd(p, 0.130, 0.170, 0.320) // 2 suit
-    palAdd(p, 0.260, 0.340, 0.580) // 3 suit lit
-    palAdd(p, 0.250, 1.700, 2.100) // 4 visor  (emissive)
-    palAdd(p, 1.800, 0.350, 0.950) // 5 core   (emissive)
-    palAdd(p, 1.200, 1.250, 1.350) // 6 white
-    palAdd(p, 1.400, 0.450, 0.220) // 7 scarf  (emissive)
-    palAdd(p, 0.400, 0.440, 0.560) // 8 boots
-    palAdd(p, 0.850, 0.620, 0.450) // 9 skin
+pub let DOG_IDLE: i64 = 0
+
+pub let DOG_RUN0: i64 = 1
+
+pub let DOG_RUN1: i64 = 2
+
+pub let DOG_RUN2: i64 = 3
+
+pub let DOG_RUN3: i64 = 4
+
+pub let DOG_JUMP: i64 = 5
+
+pub let DOG_FALL: i64 = 6
+
+pub let DOG_DASH: i64 = 7
+
+pub let DOG_WALL: i64 = 8
+
+pub let DOG_BARK: i64 = 9
+
+pub let DOG_HURT: i64 = 10
+
+pub let DOG_FRAMES: i64 = 11
+
+// Grid colour indices. 0 is empty and 15 is the outline the last pass writes.
+let C_FUR: i64 = 1
+
+let C_LIT: i64 = 2
+
+let C_BELLY: i64 = 3
+
+let C_MASK: i64 = 4
+
+let C_EAR: i64 = 5
+
+let C_EYE: i64 = 6
+
+let C_PUPIL: i64 = 7
+
+let C_COLLAR: i64 = 8
+
+let C_NOSE: i64 = 9
+
+let C_TONGUE: i64 = 10
+
+let C_OUTLINE: i64 = 15
+
+pub struct DogSpec {
+    w: i64,
+    h: i64,
+    bodyCx: f64,
+    bodyCy: f64,
+    bodyRx: f64,
+    bodyRy: f64,
+    headCx: f64,
+    headCy: f64,
+    headR: f64,
+    neckW: f64,
+    snoutLen: f64,
+    snoutH: f64,
+    earW: f64,
+    earH: f64,
+    earX0: f64,
+    earX1: f64,
+    legLen: f64,
+    legW: f64,
+    legX0: f64,
+    legX1: f64,
+    legX2: f64,
+    legX3: f64,
+    tailLen: f64,
+    tailW: f64,
+    tailRise: f64,
+    // A german shepherd is black over the back and tan underneath; a chihuahua
+    // is one colour. This is the whole of the difference in markings.
+    saddle: bool,
+}
+
+pub struct DogArt {
+    chi: Vec<Sprite>, // milo the chihuahua
+    shep: Vec<Sprite>, // what a bone turns him into
+}
+
+fn chiSpec(): DogSpec {
+    return DogSpec {
+        w: 22, h: 16,
+        bodyCx: 8.6, bodyCy: 9.2, bodyRx: 5.0, bodyRy: 3.0,
+        headCx: 16.4, headCy: 5.4, headR: 3.8, neckW: 2.6,
+        snoutLen: 3.0, snoutH: 2.0,
+        earW: 3.2, earH: 5.2, earX0: 14.4, earX1: 18.0,
+        legLen: 4.0, legW: 1.4,
+        legX0: 4.6, legX1: 8.0, legX2: 11.8, legX3: 15.0,
+        tailLen: 4.0, tailW: 1.3, tailRise: 3.6,
+        saddle: false,
+    }
+}
+
+// Bigger in every dimension, and the proportions change as well as the scale:
+// a longer snout, a deeper chest, legs that are actually legs.
+fn shepSpec(): DogSpec {
+    return DogSpec {
+        w: 27, h: 20,
+        bodyCx: 10.6, bodyCy: 10.6, bodyRx: 6.2, bodyRy: 3.6,
+        headCx: 20.6, headCy: 5.8, headR: 4.0, neckW: 3.4,
+        snoutLen: 4.4, snoutH: 2.4,
+        earW: 2.6, earH: 5.6, earX0: 19.2, earX1: 22.2,
+        legLen: 6.0, legW: 1.6,
+        legX0: 5.4, legX1: 10.2, legX2: 15.0, legX3: 19.0,
+        tailLen: 6.4, tailW: 2.4, tailRise: 1.0,
+        saddle: true,
+    }
+}
+
+// ── a grid to draw into ───────────────────────────────────────────────────────
+
+fn gset(g: &mut Vec<i64>, w: i64, h: i64, x: i64, y: i64, v: i64) {
+    if x < 0 || y < 0 || x >= w || y >= h {
+        return
+    }
+    g[y * w + x] = v
+}
+
+fn gget(g: &Vec<i64>, w: i64, h: i64, x: i64, y: i64): i64 {
+    if x < 0 || y < 0 || x >= w || y >= h {
+        return 0
+    }
+    return g[y * w + x]
+}
+
+fn ellipse(g: &mut Vec<i64>, w: i64, h: i64, cx: f64, cy: f64, rx: f64, ry: f64, v: i64) {
+    for y in 0..h {
+        for x in 0..w {
+            let dx = ((x as f64) + 0.5 - cx) / rx
+            let dy = ((y as f64) + 0.5 - cy) / ry
+            if dx * dx + dy * dy <= 1.0 {
+                gset(g, w, h, x, y, v)
+            }
+        }
+    }
+}
+
+fn rectF(g: &mut Vec<i64>, w: i64, h: i64, x0: f64, y0: f64, x1: f64, y1: f64, v: i64) {
+    var y = Math.floor(y0) as i64
+    while (y as f64) < y1 {
+        var x = Math.floor(x0) as i64
+        while (x as f64) < x1 {
+            gset(g, w, h, x, y, v)
+            x = x + 1
+        }
+        y = y + 1
+    }
+}
+
+// A thick segment, used for legs and for the tail. Walks the line and stamps a
+// square at every step, which at this size is indistinguishable from a proper
+// capsule and a great deal shorter.
+fn segment(g: &mut Vec<i64>, w: i64, h: i64, x0: f64, y0: f64, x1: f64, y1: f64, thick: f64, v: i64) {
+    let dx = x1 - x0
+    let dy = y1 - y0
+    let n = Math.maxF64(Math.abs(dx), Math.abs(dy)) * 2.0 + 1.0
+    let steps = n as i64
+    let half = thick * 0.5
+    for i in 0..steps + 1 {
+        let t = (i as f64) / (steps as f64)
+        let px = x0 + dx * t
+        let py = y0 + dy * t
+        rectF(g, w, h, px - half, py - half, px + half, py + half, v)
+    }
+}
+
+// A triangle standing on its base, which is every ear either build has.
+fn earTri(g: &mut Vec<i64>, w: i64, h: i64, cx: f64, baseY: f64, halfW: f64, height: f64, lean: f64, fill: i64, inner: i64) {
+    var y = 0
+    while (y as f64) < height {
+        let t = (y as f64) / height
+        let hw = halfW * (1.0 - t)
+        let mid = cx + lean * t
+        var x = Math.floor(mid - hw) as i64
+        while (x as f64) < mid + hw {
+            gset(g, w, h, x, (baseY - (y as f64)) as i64, fill)
+            x = x + 1
+        }
+        // a warm centre, but only while the ear is wide enough to have one
+        if hw > 1.1 {
+            gset(g, w, h, mid as i64, (baseY - (y as f64)) as i64, inner)
+        }
+        y = y + 1
+    }
+}
+
+// Everything empty that touches ink becomes outline. Done once, at the end, so
+// no shape has to know what it is next to.
+fn outlinePass(g: &mut Vec<i64>, w: i64, h: i64) {
+    var marks: Vec<i64> = Vec.new()
+    for y in 0..h {
+        for x in 0..w {
+            if gget(g, w, h, x, y) == 0 {
+                let n = gget(g, w, h, x - 1, y) + gget(g, w, h, x + 1, y) + gget(g, w, h, x, y - 1) + gget(g, w, h, x, y + 1)
+                if n > 0 {
+                    marks.push(y * w + x)
+                }
+            }
+        }
+    }
+    for i in 0..marks.len {
+        g[marks[i]] = C_OUTLINE
+    }
+}
+
+fn palSet(p: &mut Vec<f64>, i: i64, r: f64, g: f64, b: f64) {
+    p[i * 3] = r
+    p[i * 3 + 1] = g
+    p[i * 3 + 2] = b
+}
+
+fn chiPalette(): Vec<f64> {
+    var p: Vec<f64> = Vec.filled(48, 0.0)
+    palSet(p, C_FUR, 0.400, 0.240, 0.125)
+    palSet(p, C_LIT, 0.620, 0.395, 0.205)
+    palSet(p, C_BELLY, 0.800, 0.590, 0.380)
+    palSet(p, C_MASK, 0.880, 0.680, 0.460)
+    palSet(p, C_EAR, 0.900, 0.420, 0.420)
+    palSet(p, C_EYE, 1.300, 1.300, 1.350)
+    palSet(p, C_PUPIL, 0.020, 0.018, 0.028)
+    palSet(p, C_COLLAR, 1.700, 0.600, 0.160)
+    palSet(p, C_NOSE, 0.030, 0.026, 0.036)
+    palSet(p, C_TONGUE, 1.250, 0.320, 0.480)
+    palSet(p, C_OUTLINE, 0.018, 0.014, 0.024)
     return p
 }
 
-// Rows 0-11 are the same in every frame — helmet, visor, scarf, torso — so each
-// frame below only differs from the waist down, which is where a run cycle
-// actually lives.
-fn heroTorso(v: &mut Vec<string>) {
-    v.push("..00000000..")
-    v.push(".0333333330.")
-    v.push(".0344444430.")
-    v.push(".0344444430.")
-    v.push(".0322222230.")
-    v.push("..07777770..")
-    v.push(".0777777770.")
-    v.push(".0302222030.")
-    v.push(".0302552030.")
-    v.push(".0302222030.")
-    v.push("..03222230..")
-    v.push("..03222230..")
+fn shepPalette(): Vec<f64> {
+    var p: Vec<f64> = Vec.filled(48, 0.0)
+    palSet(p, C_FUR, 0.075, 0.066, 0.078) // the black saddle
+    palSet(p, C_LIT, 0.130, 0.115, 0.130)
+    palSet(p, C_BELLY, 0.560, 0.340, 0.130)
+    palSet(p, C_MASK, 0.780, 0.500, 0.200)
+    palSet(p, C_EAR, 0.330, 0.180, 0.130)
+    palSet(p, C_EYE, 1.300, 1.300, 1.350)
+    palSet(p, C_PUPIL, 0.020, 0.018, 0.028)
+    palSet(p, C_COLLAR, 1.900, 0.680, 0.180)
+    palSet(p, C_NOSE, 0.030, 0.026, 0.036)
+    palSet(p, C_TONGUE, 1.250, 0.320, 0.480)
+    palSet(p, C_OUTLINE, 0.012, 0.010, 0.018)
+    return p
 }
 
-pub let HERO_IDLE: i64 = 0
+// ── posing ────────────────────────────────────────────────────────────────────
+//
+// A leg is a line from the hip to the paw, and a frame is four paw positions.
+// Everything a frame does to the legs is in here.
 
-pub let HERO_RUN0: i64 = 1
+struct Pose {
+    dx: f64,
+    dy: f64,
+}
 
-pub let HERO_RUN1: i64 = 2
+fn pose(frame: i64, leg: i64): Pose {
+    // legs 0,1 are the back pair and 2,3 the front, running from the tail
+    let back = leg < 2
+    if frame == DOG_RUN0 {
+        if back {
+            return Pose {
+                dx: 0.0 - 1.8, dy: 0.0
+            }
+        }
+        return Pose {
+            dx: 2.0, dy: 0.0 - 0.4
+        }
+    }
+    if frame == DOG_RUN1 {
+        if back {
+            return Pose {
+                dx: 0.6, dy: 0.0 - 1.2
+            }
+        }
+        return Pose {
+            dx: 0.0 - 0.6, dy: 0.0
+        }
+    }
+    if frame == DOG_RUN2 {
+        if back {
+            return Pose {
+                dx: 1.8, dy: 0.0 - 0.4
+            }
+        }
+        return Pose {
+            dx: 0.0 - 2.0, dy: 0.0
+        }
+    }
+    if frame == DOG_RUN3 {
+        if back {
+            return Pose {
+                dx: 0.0 - 0.6, dy: 0.0
+            }
+        }
+        return Pose {
+            dx: 0.8, dy: 0.0 - 1.2
+        }
+    }
+    if frame == DOG_JUMP {
+        if back {
+            return Pose {
+                dx: 0.0 - 2.4, dy: 0.0 - 2.6
+            }
+        }
+        return Pose {
+            dx: 1.6, dy: 0.0 - 2.8
+        }
+    }
+    if frame == DOG_FALL {
+        if back {
+            return Pose {
+                dx: 0.0 - 1.2, dy: 0.8
+            }
+        }
+        return Pose {
+            dx: 1.4, dy: 0.8
+        }
+    }
+    if frame == DOG_DASH {
+        if back {
+            return Pose {
+                dx: 0.0 - 3.0, dy: 0.0 - 1.4
+            }
+        }
+        return Pose {
+            dx: 2.4, dy: 0.0 - 1.6
+        }
+    }
+    if frame == DOG_WALL {
+        // braced: all four gathered under the belly and reaching the same way
+        if back {
+            return Pose {
+                dx: 1.4, dy: 0.0 - 0.8
+            }
+        }
+        return Pose {
+            dx: 0.0 - 0.4, dy: 0.0 - 0.8
+        }
+    }
+    if frame == DOG_HURT {
+        if back {
+            return Pose {
+                dx: 0.0 - 2.2, dy: 0.6
+            }
+        }
+        return Pose {
+            dx: 2.2, dy: 0.6
+        }
+    }
+    return Pose {
+        dx: 0.0, dy: 0.0
+    }
+}
 
-pub let HERO_RUN2: i64 = 3
+// ── the frame ─────────────────────────────────────────────────────────────────
 
-pub let HERO_RUN3: i64 = 4
+fn dogSprite(sp: &DogSpec, pal: &Vec<f64>, frame: i64): Sprite {
+    let w = sp.w
+    let h = sp.h
+    var g: Vec<i64> = Vec.filled(w * h, 0)
 
-pub let HERO_JUMP: i64 = 5
+    // A dash flattens and lengthens the whole animal; a hurt frame squashes it.
+    var stretch = 1.0
+    var squash = 1.0
+    var lift = 0.0
+    if frame == DOG_DASH {
+        stretch = 1.22
+        squash = 0.80
+        lift = 1.4
+    } else if frame == DOG_HURT {
+        stretch = 0.94
+        squash = 0.86
+        lift = 1.0
+    } else if frame == DOG_JUMP {
+        lift = 0.0 - 0.6
+    }
 
-pub let HERO_FALL: i64 = 6
+    let bodyRx = sp.bodyRx * stretch
+    let bodyRy = sp.bodyRy * squash
+    let bodyCy = sp.bodyCy + lift
+    // The head leans back to bark and drops forward to dash, which is most of
+    // what those two frames are.
+    var headCx = sp.headCx
+    var headCy = sp.headCy + lift * 0.7
+    if frame == DOG_BARK {
+        headCx = headCx - 0.6
+        headCy = headCy - 1.4
+    } else if frame == DOG_DASH {
+        headCx = headCx + 1.2
+        headCy = headCy + 1.6
+    } else if frame == DOG_HURT {
+        headCy = headCy + 1.2
+    }
 
-pub let HERO_DASH: i64 = 7
+    // legs first, so the body covers the hips
+    let hipY = bodyCy + bodyRy * 0.4
+    let footY = (h as f64) - 1.2
+    var i = 0
+    while i < 4 {
+        let hx = if i == 0 {
+            sp.legX0
+        } else if i == 1 {
+            sp.legX1
+        } else if i == 2 {
+            sp.legX2
+        } else {
+            sp.legX3
+        }
+        let ps = pose(frame, i)
+        let col = if sp.saddle {
+            C_MASK
+        } else {
+            C_FUR
+        }
+        segment(g, w, h, hx, hipY, hx + ps.dx, footY + ps.dy, sp.legW, col)
+        // a lighter paw, so the foot reads against the ground
+        rectF(g, w, h, hx + ps.dx - sp.legW * 0.5, footY + ps.dy - 0.6, hx + ps.dx + sp.legW * 0.7, footY + ps.dy + 0.6, C_BELLY)
+        i = i + 1
+    }
 
-pub let HERO_WALL: i64 = 8
+    // tail
+    let tailBaseX = sp.bodyCx - bodyRx * 0.85
+    let tailBaseY = bodyCy - bodyRy * 0.2
+    segment(g, w, h, tailBaseX, tailBaseY, tailBaseX - sp.tailLen * 0.6, tailBaseY - sp.tailRise, sp.tailW, C_FUR)
+    if sp.tailRise > 2.0 {
+        // the chihuahua's tail carries on up and over
+        segment(g, w, h, tailBaseX - sp.tailLen * 0.6, tailBaseY - sp.tailRise, tailBaseX - sp.tailLen * 0.15, tailBaseY - sp.tailRise - 1.6, sp.tailW, C_FUR)
+    }
 
-pub fn heroFrames(): Vec<Sprite> {
-    let pal = heroPalette()
+    // body
+    ellipse(g, w, h, sp.bodyCx, bodyCy, bodyRx, bodyRy, C_FUR)
+    // chest and belly: a second ellipse low and forward, in the lighter colour
+    ellipse(g, w, h, sp.bodyCx + bodyRx * 0.35, bodyCy + bodyRy * 0.45, bodyRx * 0.62, bodyRy * 0.55, C_BELLY)
+    // top light along the spine
+    ellipse(g, w, h, sp.bodyCx, bodyCy - bodyRy * 0.70, bodyRx * 0.72, bodyRy * 0.22, C_LIT)
+
+    // neck, joining head to body so the two never read as two animals
+    segment(g, w, h, sp.bodyCx + bodyRx * 0.5, bodyCy - bodyRy * 0.55, headCx - sp.headR * 0.45, headCy + sp.headR * 0.65, sp.neckW, C_FUR)
+
+    // ears, behind the skull
+    var lean = 0.0
+    var earH = sp.earH
+    if frame == DOG_DASH {
+        lean = 0.0 - 2.6 // streaming back
+        earH = earH * 0.85
+    } else if frame == DOG_HURT {
+        lean = 0.0 - 1.8
+        earH = earH * 0.55
+    } else if frame == DOG_BARK {
+        lean = 0.0 - 0.6
+    }
+    let earBase = headCy - sp.headR * 0.35
+    let earFill = if sp.saddle {
+        C_FUR
+    } else {
+        C_LIT
+    }
+    earTri(g, w, h, sp.earX0, earBase, sp.earW * 0.5, earH, lean, earFill, C_EAR)
+    earTri(g, w, h, sp.earX1, earBase, sp.earW * 0.42, earH * 0.88, lean, earFill, C_EAR)
+
+    // skull
+    ellipse(g, w, h, headCx, headCy, sp.headR, sp.headR * 0.92, C_FUR)
+    if sp.saddle {
+        // the tan mask: a shepherd's face is light everywhere but the muzzle
+        ellipse(g, w, h, headCx + sp.headR * 0.25, headCy + sp.headR * 0.15, sp.headR * 0.85, sp.headR * 0.78, C_MASK)
+    }
+
+    // snout, and the mouth if this frame has one open
+    let snoutY = headCy + sp.headR * 0.25
+    if frame == DOG_BARK {
+        // a wedge: upper jaw up, lower jaw down, tongue between them
+        rectF(g, w, h, headCx + sp.headR * 0.4, snoutY - sp.snoutH * 0.9, headCx + sp.headR * 0.4 + sp.snoutLen, snoutY - sp.snoutH * 0.1, C_MASK)
+        rectF(g, w, h, headCx + sp.headR * 0.4, snoutY + sp.snoutH * 0.5, headCx + sp.headR * 0.4 + sp.snoutLen * 0.8, snoutY + sp.snoutH * 1.3, C_MASK)
+        rectF(g, w, h, headCx + sp.headR * 0.5, snoutY, headCx + sp.headR * 0.5 + sp.snoutLen * 0.6, snoutY + sp.snoutH * 0.55, C_TONGUE)
+    } else {
+        rectF(g, w, h, headCx + sp.headR * 0.4, snoutY - sp.snoutH * 0.5, headCx + sp.headR * 0.4 + sp.snoutLen, snoutY + sp.snoutH * 0.5, C_MASK)
+    }
+    // nose
+    rectF(g, w, h, headCx + sp.headR * 0.4 + sp.snoutLen - 1.2, snoutY - sp.snoutH * 0.5, headCx + sp.headR * 0.4 + sp.snoutLen, snoutY + sp.snoutH * 0.1, C_NOSE)
+
+    // eye. Shut when hurt — one dark pixel row reads as a wince at this size.
+    let eyeX = (headCx + sp.headR * 0.05) as i64
+    let eyeY = (headCy - sp.headR * 0.25) as i64
+    if frame == DOG_HURT {
+        gset(g, w, h, eyeX, eyeY, C_PUPIL)
+        gset(g, w, h, eyeX + 1, eyeY, C_PUPIL)
+    } else {
+        gset(g, w, h, eyeX, eyeY, C_EYE)
+        gset(g, w, h, eyeX + 1, eyeY, C_PUPIL)
+        gset(g, w, h, eyeX, eyeY + 1, C_PUPIL)
+    }
+
+    // collar, the one emissive thing on the animal
+    let collarX = (headCx - sp.headR * 0.9) as i64
+    var cy = (headCy + sp.headR * 0.7) as i64
+    let collarBot = cy + 3
+    while cy < collarBot {
+        gset(g, w, h, collarX, cy, C_COLLAR)
+        gset(g, w, h, collarX - 1, cy, C_COLLAR)
+        cy = cy + 1
+    }
+
+    outlinePass(g, w, h)
+
+    var s = spriteNew(w, h)
+    for y in 0..h {
+        for x in 0..w {
+            let v = gget(g, w, h, x, y)
+            if v != 0 {
+                spriteSet(s, x, y, pal[v * 3], pal[v * 3 + 1], pal[v * 3 + 2], 1.0)
+            }
+        }
+    }
+    return s
+}
+
+fn buildDog(sp: &DogSpec, pal: &Vec<f64>): Vec<Sprite> {
+    var out: Vec<Sprite> = Vec.new()
+    for f in 0..DOG_FRAMES {
+        out.push(dogSprite(sp, pal, f))
+    }
+    return out
+}
+
+pub fn dogFrames(): DogArt {
+    return DogArt {
+        chi: buildDog(chiSpec(), chiPalette()),
+        shep: buildDog(shepSpec(), shepPalette()),
+    }
+}
+
+// ── the cat ───────────────────────────────────────────────────────────────────
+//
+// The stompable one, and the one a bark scatters. Everything about the
+// silhouette is soft — no spikes, no armour — because "land on me" is the one
+// interaction it has. The tail is the tell: it goes up when it is walking and
+// straight back when it is about to be jumped on.
+
+pub let CAT_FRAMES: i64 = 4
+
+pub let CAT_W: i64 = 18
+
+pub let CAT_H: i64 = 12
+
+fn catPalette(): Vec<f64> {
+    var p: Vec<f64> = Vec.new()
+    palAdd(p, 0.015, 0.012, 0.028) // 0 outline
+    palAdd(p, 0.180, 0.130, 0.260) // 1 fur dark
+    palAdd(p, 0.360, 0.260, 0.480) // 2 fur
+    palAdd(p, 0.520, 0.400, 0.640) // 3 belly
+    palAdd(p, 0.400, 1.800, 0.900) // 4 eye (emissive)
+    palAdd(p, 1.200, 0.400, 0.560) // 5 nose
+    palAdd(p, 1.300, 1.300, 1.350) // 6 white
+    return p
+}
+
+fn catBody(v: &mut Vec<string>) {
+    v.push("")
+    v.push("...........00..00")
+    v.push("020.......0220220")
+    v.push("020.......0222220")
+    v.push("020......02422250")
+    v.push("0200....022222220")
+    v.push("02200222222222220")
+    v.push(".0222222222222220")
+    v.push("..03333333333220")
+}
+
+pub fn catFrames(): Vec<Sprite> {
+    let pal = catPalette()
     var out: Vec<Sprite> = Vec.new()
 
-    var idle: Vec<string> = Vec.new()
-    heroTorso(idle)
-    idle.push("..02200220..")
-    idle.push("..03300330..")
-    idle.push("..08800880..")
-    idle.push(".0888008880.")
-    out.push(spriteFrom(idle, pal))
+    var f0: Vec<string> = Vec.new()
+    catBody(f0)
+    f0.push("...020......020")
+    f0.push("..0220.....0220")
+    out.push(spriteFrom(f0, pal, CAT_W, CAT_H))
 
-    // run, four frames: contact, pass, contact mirrored, recover
-    var r0: Vec<string> = Vec.new()
-    heroTorso(r0)
-    r0.push(".0220000220.")
-    r0.push("0330....0330")
-    r0.push("0880....0880")
-    r0.push("8880....0888")
-    out.push(spriteFrom(r0, pal))
+    var f1: Vec<string> = Vec.new()
+    catBody(f1)
+    f1.push("....020...020")
+    f1.push("....020...020")
+    out.push(spriteFrom(f1, pal, CAT_W, CAT_H))
 
-    var r1: Vec<string> = Vec.new()
-    heroTorso(r1)
-    r1.push("..02200220..")
-    r1.push("..03300330..")
-    r1.push("...0880880..")
-    r1.push("...0888880..")
-    out.push(spriteFrom(r1, pal))
+    var f2: Vec<string> = Vec.new()
+    catBody(f2)
+    f2.push("..020........020")
+    f2.push(".0220.......0220")
+    out.push(spriteFrom(f2, pal, CAT_W, CAT_H))
 
-    var r2: Vec<string> = Vec.new()
-    heroTorso(r2)
-    r2.push(".0220000220.")
-    r2.push("0330....0330")
-    r2.push("0880....0880")
-    r2.push("0888....8880")
-    out.push(spriteFrom(r2, pal))
-
-    var r3: Vec<string> = Vec.new()
-    heroTorso(r3)
-    r3.push("..02200220..")
-    r3.push("..03300330..")
-    r3.push("..08800880..")
-    r3.push("..08808880..")
-    out.push(spriteFrom(r3, pal))
-
-    // jump: knees up, feet tucked out of the silhouette entirely
-    var jp: Vec<string> = Vec.new()
-    heroTorso(jp)
-    jp.push("..03222230..")
-    jp.push(".0388008830.")
-    jp.push(".0880000880.")
-    jp.push("............")
-    out.push(spriteFrom(jp, pal))
-
-    // fall: legs reaching for the ground
-    var fl: Vec<string> = Vec.new()
-    heroTorso(fl)
-    fl.push("..02200220..")
-    fl.push("..03300330..")
-    fl.push(".0330..0330.")
-    fl.push(".0880..0880.")
-    out.push(spriteFrom(fl, pal))
-
-    // dash: leaning, scarf pulled straight back, one long line from head to toe
-    var ds: Vec<string> = Vec.new()
-    ds.push("............")
-    ds.push("..00000000..")
-    ds.push(".0333333330.")
-    ds.push(".0344444440.")
-    ds.push(".0344444440.")
-    ds.push(".0322222230.")
-    ds.push("07777777770.")
-    ds.push("70302222030.")
-    ds.push("70302552030.")
-    ds.push(".0302222030.")
-    ds.push("..03222230..")
-    ds.push("..03222230..")
-    ds.push(".0322222230.")
-    ds.push(".0880008880.")
-    ds.push("..0880880...")
-    ds.push("............")
-    out.push(spriteFrom(ds, pal))
-
-    // wall slide: knees together, body flat against the surface
-    var wl: Vec<string> = Vec.new()
-    heroTorso(wl)
-    wl.push("...022220...")
-    wl.push("...033330...")
-    wl.push("...088880...")
-    wl.push("...088880...")
-    out.push(spriteFrom(wl, pal))
+    var f3: Vec<string> = Vec.new()
+    catBody(f3)
+    f3.push(".....020..020")
+    f3.push(".....020..020")
+    out.push(spriteFrom(f3, pal, CAT_W, CAT_H))
 
     return out
 }
 
-// ── crawler ───────────────────────────────────────────────────────────────────
+// ── the bird ──────────────────────────────────────────────────────────────────
 //
-// The stompable one. No spikes anywhere on it: everything about the silhouette
-// has to say "land on me", because that is the one interaction it has.
+// Hovers a fixed line and cannot be stomped — it is above you by construction.
+// A dash goes through it and a bark drops it out of the sky.
 
-pub fn crawlerSprite(): Sprite {
+pub let BIRD_FRAMES: i64 = 4
+
+pub let BIRD_W: i64 = 16
+
+pub let BIRD_H: i64 = 11
+
+fn birdPalette(): Vec<f64> {
     var p: Vec<f64> = Vec.new()
-    palAdd(p, 0.015, 0.018, 0.035) // 0 outline
-    palAdd(p, 0.320, 0.130, 0.450) // 1 body
-    palAdd(p, 0.520, 0.240, 0.680) // 2 belly
-    palAdd(p, 0.0, 0.0, 0.0)
-    palAdd(p, 2.000, 0.600, 0.180) // 4 eye (emissive)
-    palAdd(p, 0.0, 0.0, 0.0)
+    palAdd(p, 0.012, 0.012, 0.020) // 0 outline
+    palAdd(p, 0.120, 0.140, 0.230) // 1 wing dark
+    palAdd(p, 0.260, 0.300, 0.460) // 2 body
+    palAdd(p, 0.420, 0.480, 0.700) // 3 wing lit
+    palAdd(p, 2.100, 0.320, 0.300) // 4 eye (emissive)
+    palAdd(p, 1.500, 0.850, 0.200) // 5 beak (emissive)
     palAdd(p, 1.300, 1.300, 1.350) // 6 white
-    var v: Vec<string> = Vec.new()
-    v.push("....000000....")
-    v.push("..0011111100..")
-    v.push(".011111111110.")
-    v.push(".014411114410.")
-    v.push(".014611116410.")
-    v.push(".011111111110.")
-    v.push(".011222222110.")
-    v.push(".011222222110.")
-    v.push("..0111111110..")
-    v.push("...00000000...")
-    return spriteFrom(v, p)
+    return p
 }
 
-// ── drone ─────────────────────────────────────────────────────────────────────
-//
-// Hovers a fixed line and cannot be stomped — its shell is armoured and the only
-// safe answer is to dash through it or go around.
-
-pub fn droneSprite(): Sprite {
-    var p: Vec<f64> = Vec.new()
-    palAdd(p, 0.015, 0.018, 0.035) // 0 outline
-    palAdd(p, 0.0, 0.0, 0.0)
-    palAdd(p, 0.300, 1.100, 1.600) // 2 thruster (emissive)
-    palAdd(p, 0.500, 0.550, 0.680) // 3 shell
-    palAdd(p, 2.200, 0.280, 0.280) // 4 eye (emissive)
-    palAdd(p, 0.0, 0.0, 0.0)
-    palAdd(p, 1.400, 1.400, 1.400) // 6 white
-    var v: Vec<string> = Vec.new()
-    v.push("...00000000...")
-    v.push("..0333333330..")
-    v.push(".033333333330.")
-    v.push(".033344444330.")
-    v.push(".034466664430.")
-    v.push(".033344444330.")
-    v.push(".033333333330.")
-    v.push("..0333333330..")
-    v.push(".220000000022.")
-    v.push("..2........2..")
-    return spriteFrom(v, p)
+// Body, head and tail: the same in every frame. Only the wing moves.
+fn birdBody(v: &mut Vec<string>, wing0: &string, wing1: &string, wing2: &string) {
+    v.push(wing0.clone())
+    v.push(wing1.clone())
+    v.push(wing2.clone())
+    v.push("....0222222240")
+    v.push("0330022222224450")
+    v.push("0330.0222222250")
+    v.push(".030..02222220")
+    v.push("....0002222000")
+    v.push("......0.0")
+    v.push(".....00.00")
 }
 
-// ── collectibles ──────────────────────────────────────────────────────────────
+pub fn birdFrames(): Vec<Sprite> {
+    let pal = birdPalette()
+    var out: Vec<Sprite> = Vec.new()
+
+    // up
+    var f0: Vec<string> = Vec.new()
+    birdBody(f0, "...0330", "..033330", "..033330")
+    out.push(spriteFrom(f0, pal, BIRD_W, BIRD_H))
+
+    // mid, coming down
+    var f1: Vec<string> = Vec.new()
+    birdBody(f1, "", "...0330", "..0333330")
+    out.push(spriteFrom(f1, pal, BIRD_W, BIRD_H))
+
+    // down: the wing is under the body, so the silhouette drops for a frame
+    var f2: Vec<string> = Vec.new()
+    var d: Vec<string> = Vec.new()
+    d.push("")
+    d.push("")
+    d.push("")
+    d.push("....0222222240")
+    d.push("0330022222224450")
+    d.push("0330.0222222250")
+    d.push(".030..02222220")
+    d.push("....0002222000")
+    d.push("...0333330")
+    d.push("..0333330")
+    d.push("...0330")
+    for r in d {
+        f2.push(r.clone())
+    }
+    out.push(spriteFrom(f2, pal, BIRD_W, BIRD_H))
+
+    // mid, going up
+    var f3: Vec<string> = Vec.new()
+    birdBody(f3, "", "...0330", "..0333330")
+    out.push(spriteFrom(f3, pal, BIRD_W, BIRD_H))
+
+    return out
+}
+
+// ── pickups ───────────────────────────────────────────────────────────────────
 //
-// Generated rather than drawn: a shard is a diamond whose half-width is the only
-// thing that changes across the spin, so six frames are six numbers.
+// Generated rather than drawn. A bone is two knuckles and a shaft, which is
+// three circles and a rectangle, and it has to be legible at a glance from the
+// far side of the screen — the silhouette is doing the work, not the shading.
+
+pub let BONE_W: i64 = 16
+
+pub let BONE_H: i64 = 10
+
+fn knuckle(s: &mut Sprite, cx: f64, cy: f64, r: f64, k: f64) {
+    var y = 0
+    while y < BONE_H {
+        var x = 0
+        while x < BONE_W {
+            let dx = (x as f64) - cx
+            let dy = (y as f64) - cy
+            let d = Math.sqrt(dx * dx + dy * dy)
+            if d <= r {
+                // a hot rim and a warm core: the bone is the one thing on screen
+                // that has to be spotted from anywhere
+                let edge = 1.0 - d / (r + 0.001)
+                let g = k * (0.75 + edge * 0.65)
+                spriteSet(s, x, y, 1.85 * g, 1.70 * g, 1.35 * g, 1.0)
+            }
+            x = x + 1
+        }
+        y = y + 1
+    }
+}
+
+pub fn boneSprite(): Sprite {
+    var s = spriteNew(BONE_W, BONE_H)
+    knuckle(s, 2.6, 2.4, 2.5, 1.0)
+    knuckle(s, 2.6, 7.0, 2.5, 1.0)
+    knuckle(s, 13.0, 2.4, 2.5, 1.0)
+    knuckle(s, 13.0, 7.0, 2.5, 1.0)
+    for y in 3..7 {
+        for x in 2..14 {
+            let edge = 1.0 - Math.abs((y as f64) - 4.5) / 3.0
+            let g = 0.80 + edge * 0.55
+            spriteSet(s, x, y, 1.85 * g, 1.70 * g, 1.35 * g, 1.0)
+        }
+    }
+    return s
+}
+
+// The small collectible: a warm amber crystal, six frames of spin. Only the
+// half-width changes across the cycle, so six frames are six numbers.
 
 pub let SHARD_FRAMES: i64 = 6
 
@@ -297,7 +833,7 @@ pub fn shardFrames(): Vec<Sprite> {
                     let edge = 1.0 - dx / (wx + 0.001)
                     // bright rim, cooler core, so the facet catches the bloom
                     let k = 0.35 + edge * 0.35
-                    spriteSet(s, x, y, 0.55 + k * 0.9, 1.30 + k * 1.5, 1.55 + k * 1.2, 1.0)
+                    spriteSet(s, x, y, 1.55 + k * 1.4, 1.05 + k * 1.0, 0.35 + k * 0.5, 1.0)
                 }
             }
         }
@@ -306,7 +842,7 @@ pub fn shardFrames(): Vec<Sprite> {
     return out
 }
 
-// The level's single big pickup: a faceted hexagon, warmer than the shards so it
+// The level's single big pickup: a faceted hexagon, cooler than the treats so it
 // never reads as "just another one of those".
 pub fn coreSprite(): Sprite {
     var s = spriteNew(14, 14)
@@ -323,11 +859,39 @@ pub fn coreSprite(): Sprite {
                 if x == 6 || x == 7 {
                     k = k * 1.5
                 }
-                spriteSet(s, x, y, 1.30 * k, 0.55 * k, 1.60 * k, 1.0)
+                spriteSet(s, x, y, 0.45 * k, 1.30 * k, 1.60 * k, 1.0)
             } else if hex <= 1.12 {
                 spriteSet(s, x, y, 0.02, 0.02, 0.04, 1.0)
             }
         }
     }
     return s
+}
+
+// ── the hydrant ───────────────────────────────────────────────────────────────
+//
+// The checkpoint. A dog game gets to have exactly one joke and this is it.
+
+pub fn hydrantSprite(): Sprite {
+    var p: Vec<f64> = Vec.new()
+    palAdd(p, 0.015, 0.010, 0.012) // 0 outline
+    palAdd(p, 0.420, 0.075, 0.070) // 1 body shadow
+    palAdd(p, 0.900, 0.170, 0.140) // 2 body
+    palAdd(p, 0.380, 0.400, 0.470) // 3 bolt
+    var v: Vec<string> = Vec.new()
+    v.push("....000")
+    v.push("...02220")
+    v.push("...03230")
+    v.push("..0222220")
+    v.push("..0111110")
+    v.push(".000000000")
+    v.push("..0122210")
+    v.push("0.0122210.0")
+    v.push("020122210020")
+    v.push("0.0122210.0")
+    v.push("..0122210")
+    v.push("..0122210")
+    v.push(".012222210")
+    v.push(".0000000000")
+    return spriteFrom(v, p, 12, 14)
 }

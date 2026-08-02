@@ -1,6 +1,7 @@
 # VOLT
 
-A 2D momentum platformer written in Milo. Three levels, no lives, instant respawn.
+A 2D momentum platformer written in Milo. You are Milo, a chihuahua. Three
+levels, hydrants for checkpoints, instant respawn.
 
 ```bash
 milo run examples/games/volt/main.milo
@@ -13,21 +14,40 @@ milo build examples/games/volt/main.milo -o /tmp/volt --release && /tmp/volt
 | `ARROWS` / `WASD` | move |
 | `SPACE` / `Z` / `K` | jump — hold for height |
 | `SHIFT` / `X` / `J` | dash, eight-way |
+| `B` / `C` / `E` | **bark** |
 | `DOWN` | drop through a platform |
 | `R` | restart the level |
 | `M` | music |
 | `ESC` | quit |
 
-Run right, stomp what crawls, dash through what flies, take the shards, reach the
-gate.
+Run right, stomp the cats, bark the birds out of the sky, dig a bone out of the
+dirt and spend a while as a german shepherd. Take the treats, reach the gate.
+
+## The bone
+
+A chihuahua is a chihuahua. Eat a bone and you are a **german shepherd**: bigger
+on screen, and the next hit takes the shepherd instead of taking you. Get hit
+again and you are a chihuahua once more, thrown clear, and briefly untouchable —
+long enough to walk out of whatever hit you.
+
+Most of the bones are behind a crate, and the way through a crate is to **bark at
+it**. That is the digging: a bark breaks any crate in range, kills any cat or
+bird in range, and reaches roughly twice as far when a shepherd is doing it. The
+sound tells you which one you are without looking at the HUD.
+
+## The hydrant
+
+Every level has four. Touch one and it lights; die and you come back to the last
+one you lit rather than to the start of the level. The treats you had are lost —
+they are still in the level, which is the point of losing them.
 
 ## What makes it feel modern
 
 The jump arc is not the interesting part — the forgiveness around it is. All of
 this lives in `world.milo`:
 
-- **Coyote time.** You can still jump for 100 ms after walking off an edge.
-- **Jump buffering.** A jump pressed up to 120 ms before landing fires on landing.
+- **Coyote time.** You can still jump for 130 ms after walking off an edge.
+- **Jump buffering.** A jump pressed up to 150 ms before landing fires on landing.
 - **Variable height.** Releasing the key mid-rise cuts the remaining velocity.
 - **Apex hang.** Near the top of the arc, gravity eases and air control gets
   stronger — the peak is where a jump is aimed, so it gets stretched.
@@ -37,6 +57,10 @@ this lives in `world.milo`:
 - **Eight-way dash,** refilled by touching ground or a wall, ending in kept
   momentum rather than a dead stop. A dash with no direction held goes where you
   face — never nowhere.
+- **A hitbox smaller than the dog.** The art overhangs the collision box on every
+  side, so what looks like a near miss is a miss.
+- **Spikes hurt rather than kill.** Walking into one sideways costs you the
+  shepherd and throws you back out; it does not end the run.
 - **Hitstop.** Impacts freeze the simulation for a few frames while the screen
   keeps drawing, which reads as weight rather than as a dropped frame.
 - **Squash and stretch** about the feet, screen shake, and a camera that leads
@@ -49,29 +73,39 @@ player meant, which is what "feels modern" actually means.
 
 Everything is software. There is no GPU pipeline — SDL blits one finished frame.
 
-**Sprites** (`sprites.milo`) are pixel art written as strings, one character per
-pixel, against palettes in **linear light**:
+**The dog** (`sprites.milo`) is not drawn frame by frame. A dog is a body, a
+head, two ears, four legs and a tail, and the difference between a chihuahua and
+a german shepherd is the proportions of those — so the shapes are rasterised
+from a `DogSpec` of numbers and the two builds are two sets of numbers. Each
+frame poses the four legs and, where it matters, the head and the ears. The last
+pass is what makes it read as pixel art rather than as blobs: **every empty pixel
+touching a filled one becomes outline**, so drawing the silhouette gets the ink
+for free.
+
+The cats, the bird and the hydrant are string art, one character per pixel,
+against palettes in **linear light**:
 
 ```
-".0344444430."     0 outline   3 suit lit   4 visor
-".0322222230."     values run past 1.0 on purpose
+"020......0242250"     0 outline   2 fur   4 eye   5 nose
+                       values run past 1.0 on purpose
 ```
 
-A visor at 1.7 clears the bloom threshold and glows; the suit at 0.3 beside it
+An eye at 1.8 clears the bloom threshold and glows; the fur at 0.36 beside it
 does not. That contrast is the whole look, and it is why the art is authored in
 linear light rather than in 8-bit colour.
 
 **Terrain** (`tiles.milo`) is generated noise at 16 art pixels square, drawn at
-2x, so the art grid and the collision grid are the same grid. The autotiler is
-one rule: a solid tile with air above it gets the lit cap, everything else gets
-fill.
+3x, so a tile is 48 screen pixels and the art grid and the collision grid are the
+same grid. `TILE` is the one number that sets how close the camera is. The
+autotiler is one rule: a solid tile with air above it gets the lit cap,
+everything else gets fill.
 
 **The canvas** (`gfx.milo`) carries two kinds of ink into one linear-light float
 buffer — alpha-over for anything with mass, additive for anything that emits —
 then bright-passes, blurs at quarter resolution, and tone-maps through a
 Reinhard curve. The vector games this canvas came from (`../neon`, `../flight`)
 are purely additive, which cannot draw a dark shape against a bright sky; a
-platformer is mostly dark shapes.
+platformer is mostly dark shapes, and a small brown dog is the darkest of them.
 
 **The skyline** is hashed from world position rather than stored, so a level of
 any length has towers with lit windows behind it and none of it is in the binary.
@@ -88,11 +122,28 @@ One character per tile, and the same characters place the entities:
 ```
 .  air        #  solid      =  one-way platform    ^  spikes
 %  breakable  !  launch pad S  spawn               G  gate
-o  shard      O  core       c  crawler             d  drone
+k  hydrant    b  bone       o  treat               O  gem
+c  cat        d  bird
 ```
 
 Rows are ragged on purpose — a row is only as long as its last non-air tile.
 Most of a platformer is sky, and this way the sky costs nothing to write down.
+
+## Looking at it without playing it
+
+`shot.milo` is a headless capture: a bot plays, and PPM frames are written at
+whichever ticks you ask for. No SDL and no window, so it runs anywhere, and it
+doubles as a deterministic smoke test for the whole simulation.
+
+```bash
+milo run examples/games/volt/shot.milo --release -- /tmp/volt 60 240 600
+milo run examples/games/volt/shot.milo --release -- /tmp/volt --level 2 300
+milo run examples/games/volt/shot.milo --release -- --sheet   # every sprite, large
+```
+
+`--sheet` is how the art gets iterated on: pixel art written as numbers and
+strings is authored blind, and this is the only way to see whether a frame says
+"dog" before it is fifteen pixels tall in a level.
 
 ## Dependencies
 

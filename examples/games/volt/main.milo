@@ -4,11 +4,12 @@
 //   milo build examples/games/volt/main.milo -o /tmp/volt --release && /tmp/volt
 //
 //   ARROWS / WASD    move          SPACE / Z / K   jump (hold for height)
-//   SHIFT / X / J    dash          DOWN            drop through a platform
-//   R                restart       M               music        ESC   quit
+//   SHIFT / X / J    dash          B / C / E       bark
+//   DOWN             drop through  R  restart      M  music      ESC  quit
 //
-// Run right, stomp what crawls, dash through what flies, take the shards, reach
-// the gate. Three levels, no lives, instant respawn.
+// You are Milo, a chihuahua. Run right, stomp the cats, bark the birds out of
+// the sky, dig a bone out of the dirt and spend a while as a german shepherd.
+// Three levels, hydrants for checkpoints, instant respawn.
 //
 // Everything on screen is software: the sprites are pixel art written as strings
 // and the terrain is generated noise, all composited into a linear-light float
@@ -39,21 +40,22 @@ from "./gfx" import {
     canvasNew, present
 }
 from "./sprites" import {
-    heroFrames, crawlerSprite, droneSprite, shardFrames, coreSprite
+    dogFrames, catFrames, birdFrames, boneSprite, hydrantSprite, shardFrames, coreSprite
 }
 from "./tiles" import {
     tileSetNew
 }
 from "./world" import {
-    worldNew, worldUpdate, worldGoto, worldRetry, ST_PLAY, ST_CLEAR, ST_DONE
+    worldNew, worldUpdate, worldGoto, worldRetry, FORM_SHEP, ST_PLAY, ST_CLEAR, ST_DONE
 }
 from "./render" import {
-    drawBackground, drawLevel, drawGoal, drawPickups, drawMobs, drawPlayer,
-    drawParts, drawSpeedLines, drawHud
+    drawBackground, drawLevel, drawGoal, drawChecks, drawPickups, drawMobs,
+    drawPlayer, drawBark, drawParts, drawSpeedLines, drawHud
 }
 from "./sound" import {
     soundNew, musicTick, musicToggle, playJump, playLand, playDash, playShard,
-    playCore, playStomp, playDie, playGoal, playPad, playCrash
+    playCore, playStomp, playDie, playGoal, playPad, playCrash, playBark,
+    playBone, playHurt, playCheck
 }
 
 pub let W: i64 = 1280
@@ -70,7 +72,7 @@ pub fn main(): i32 {
     var tex: *u8 = 0 as *u8
     var ok = true
     unsafe {
-        let title = "VOLT — written in Milo"
+        let title = "VOLT — a very small dog, written in Milo"
         win = SDL_CreateWindow(title, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, W as i32, H as i32, SDL_WINDOW_SHOWN)
         ren = SDL_CreateRenderer(win, 0 - 1, SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC)
         tex = SDL_CreateTexture(ren, SDL_PIXELFORMAT_ABGR8888, SDL_TEXTUREACCESS_STREAMING, W as i32, H as i32)
@@ -85,9 +87,11 @@ pub fn main(): i32 {
     }
 
     var c = canvasNew(W, H)
-    let hero = heroFrames()
-    let crawler = crawlerSprite()
-    let drone = droneSprite()
+    let dog = dogFrames()
+    let cat = catFrames()
+    let bird = birdFrames()
+    let bone = boneSprite()
+    let hydrant = hydrantSprite()
     let shards = shardFrames()
     let core = coreSprite()
     let ts = tileSetNew()
@@ -128,7 +132,7 @@ pub fn main(): i32 {
             }
         }
 
-        worldUpdate(w, dt, inp.moveX, inp.down, inp.jump, inp.jumpHeld, inp.dash)
+        worldUpdate(w, dt, inp.moveX, inp.down, inp.jump, inp.jumpHeld, inp.dash, inp.bark)
 
         if w.evJump {
             playJump(snd)
@@ -163,6 +167,18 @@ pub fn main(): i32 {
         if w.evBreak {
             playCrash(snd)
         }
+        if w.evBark {
+            playBark(snd, w.p.form == FORM_SHEP)
+        }
+        if w.evBone {
+            playBone(snd)
+        }
+        if w.evHurt {
+            playHurt(snd)
+        }
+        if w.evCheck {
+            playCheck(snd)
+        }
 
         // Screen shake is applied as a camera offset at draw time, so it never
         // touches the simulation and can never desync collision from what is on
@@ -177,9 +193,11 @@ pub fn main(): i32 {
         drawBackground(c, w)
         drawLevel(c, w, ts, ox, oy)
         drawGoal(c, w, ox, oy)
-        drawPickups(c, w, shards, core, ox, oy)
-        drawMobs(c, w, crawler, drone, ox, oy)
-        drawPlayer(c, w, hero, ox, oy)
+        drawChecks(c, w, hydrant, ox, oy)
+        drawPickups(c, w, shards, core, bone, ox, oy)
+        drawMobs(c, w, cat, bird, ox, oy)
+        drawPlayer(c, w, dog, ox, oy)
+        drawBark(c, w, ox, oy)
         drawParts(c, w, ox, oy)
         drawSpeedLines(c, w)
 
@@ -190,7 +208,7 @@ pub fn main(): i32 {
             fpsAccum = 0.0
             fpsFrames = 0
         }
-        drawHud(c, w, shards[0], fpsShown)
+        drawHud(c, w, shards[0], bone, fpsShown)
 
         var exposure = 1.15
         if w.flash > 0.0 {

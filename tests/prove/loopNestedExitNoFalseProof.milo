@@ -12,7 +12,6 @@ ensures result >= 0
         unsafe {
             x = -1
             break
-            x = 0
         }
     }
     return x
@@ -29,7 +28,6 @@ ensures result >= 0
             0 => {
                 x = -1
                 break
-                x = 0
             }
             _ => {
                 break

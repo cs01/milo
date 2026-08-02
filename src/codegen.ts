@@ -1680,7 +1680,10 @@ export class Codegen {
     for (const stmt of fn.body) {
       const [stmtLines, terminated] = this.genStmt(stmt);
       lines.push(...stmtLines);
-      if (terminated) hasTerminator = true;
+      // Anything past a terminator would land in an already-closed block and make
+      // the module unparseable. The checker rejects unreachable code before we get
+      // here; this just guarantees we can never emit malformed IR if it doesn't.
+      if (terminated) { hasTerminator = true; break; }
     }
 
     if (!hasTerminator) {
@@ -5322,7 +5325,7 @@ export class Codegen {
         for (const stmt of expr.body) {
           const [stmtLines, terminated] = this.genStmt(stmt);
           closureBody.push(...stmtLines);
-          if (terminated) hasTerminator = true;
+          if (terminated) { hasTerminator = true; break; }
         }
         if (!hasTerminator) {
           if (retTy === "void") closureBody.push("  ret void");

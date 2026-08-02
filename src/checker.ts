@@ -3111,6 +3111,7 @@ export class TypeChecker {
     }
 
     for (const stmt of fn.body) this.checkStmt(stmt, retType);
+    this.scanUnreachable(fn.body);
 
     // Lint: warn if a non-ref, non-Copy param was never moved — suggest &T
     if (!fn.isExtern) {
@@ -3863,6 +3864,49 @@ export class TypeChecker {
       }
     }
     return false;
+  }
+
+  // Matches already reported as non-exhaustive, keyed by their arm list. "Every arm
+  // returns" only implies the match diverges when the arms cover the subject, so
+  // reporting unreachable code after one of these would pile a bogus second error
+  // onto a file that already has the real one.
+  private nonExhaustiveMatches = new WeakSet<MatchArm[]>();
+
+  // Every Stmt kind, so the scan below can recognize a statement list by shape.
+  private static readonly STMT_KINDS: ReadonlySet<string> = new Set([
+    "LetDecl", "VarDecl", "Assign", "Return", "IfStmt", "WhileStmt", "ExprStmt",
+    "MatchStmt", "BreakStmt", "ContinueStmt", "IfLetStmt", "LetElseStmt",
+    "UnsafeBlock", "ForInStmt",
+  ]);
+
+  // A statement following one that always exits can never run. It has to be an error
+  // here rather than dead weight in codegen: emitting it appends instructions to an
+  // already-terminated LLVM block, which clang rejects outright.
+  //
+  // The walk is structural — any array of Stmt nodes, wherever it sits — instead of a
+  // hand-written per-node visitor. Statement lists hide inside expressions too (closure
+  // bodies, `if`/`match` in value position), and a visitor that misses one silently
+  // reopens the hole for that shape.
+  private scanUnreachable(node: unknown) {
+    if (Array.isArray(node)) {
+      if (node.length > 1 && node.every(n => n !== null && typeof n === "object" && TypeChecker.STMT_KINDS.has(n.kind))) {
+        const stmts = node as Stmt[];
+        for (let i = 0; i + 1 < stmts.length; i++) {
+          const stmt = stmts[i]!;
+          if (stmt.kind === "MatchStmt" && this.nonExhaustiveMatches.has(stmt.arms)) continue;
+          if (!this.bodyAlwaysReturns([stmt])) continue;
+          // One report per block: everything after the first dead statement is dead too.
+          this.error("unreachable code", stmts[i + 1]!.span,
+            "the statement above always exits, so nothing after it in this block can run");
+          break;
+        }
+      }
+      for (const child of node) this.scanUnreachable(child);
+      return;
+    }
+    if (node !== null && typeof node === "object") {
+      for (const value of Object.values(node)) this.scanUnreachable(value);
+    }
   }
 
   private allCopyEnumCache = new Map<string, boolean>();
@@ -7139,9 +7183,11 @@ export class TypeChecker {
         const hasFalseArm = arms.some(a => a.pattern.kind === "LiteralPattern" && a.pattern.value === false);
         if (!hasTrueArm || !hasFalseArm) {
           this.error(`non-exhaustive match on bool`, sp);
+          this.nonExhaustiveMatches.add(arms);
         }
       } else if (!hasWildcard) {
         this.error(`match on ${typeName(subjType)} requires a wildcard '_' arm`, sp);
+        this.nonExhaustiveMatches.add(arms);
       }
     } else if (isEnum && subjType.tag === "enum") {
       // The tag test is redundant — `subjType` is not reassigned after `isEnum` is
@@ -7222,6 +7268,7 @@ export class TypeChecker {
         for (const [name] of enumInfo.variants) {
           if (!covered.has(name)) {
             this.error(`non-exhaustive match: missing variant '${name}'`, sp);
+            this.nonExhaustiveMatches.add(arms);
           }
         }
       }

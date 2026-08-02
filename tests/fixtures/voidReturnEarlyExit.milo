@@ -1,0 +1,43 @@
+// A bare `return` really returns: nothing after it in the block runs, and a
+// statement on the line below is the NEXT statement, not the return's value.
+// @expect: neg
+// @expect: pos
+// @expect: after
+// @expect: last: 7
+// @expect: doubled: 14
+
+fn classify(x: i64) {
+    if x < 0 {
+        print("neg")
+        return
+    }
+    print("pos")
+    // reachable: the early return above only fires on the x < 0 path
+    print("after")
+}
+
+fn last(v: &Vec<i64>) {
+    if v.len == 0 {
+        return
+    }
+    print("last: ", v[v.len - 1])
+    return
+}
+
+// Contrast: a value return in a non-void fn behaves the same way.
+fn doubled(x: i64): i64 {
+    if x > 0 {
+        return x * 2
+    }
+    return 0
+}
+
+pub fn main(): i32 {
+    classify(-1)
+    classify(1)
+    var v: Vec<i64> = Vec.new()
+    v.push(7)
+    last(v)
+    print("doubled: ", doubled(7))
+    return 0
+}

@@ -42,12 +42,22 @@ and marks it, and it lights up. Die and you come back to the last one you lit
 rather than to the start of the level. The biscuits you had are lost — they are
 still in the level, which is the point of losing them.
 
-The marking takes about a second and any jump or dash cuts it short, so it is
-never something you have to sit through. The stream is drawn rather than
-simulated: a fixed parabola from the raised hip to the foot of the hydrant with
-droplets marching along it. A spray of physics particles was the obvious way to
-do it and it looked like a dust cloud — what the gag needs is a line you can
-follow. The puddle it leaves dries over the next few seconds.
+The marking takes a full second, and **the world does not stop for it**. Cats
+keep walking, birds keep sweeping, and either can reach you while you are stood
+there with a leg up — so a hydrant with something coming toward it is a real
+decision. A jump or a dash cuts the animation short at any point, and taking a
+hit cancels it outright.
+
+He shuffles into position first, a little under two tiles from the hydrant. That
+distance is not decoration: the dog is drawn far wider than his collision box,
+and standing where he happened to stop put the hydrant, the stream and the
+puddle all behind his own sprite.
+
+The stream is drawn rather than simulated: a fixed parabola from the raised hip
+to the foot of the hydrant with droplets marching along it. A spray of physics
+particles was the obvious way to do it and it looked like a dust cloud — what
+the gag needs is a line you can follow. The puddle dries over the next few
+seconds.
 
 ## What makes it feel modern
 

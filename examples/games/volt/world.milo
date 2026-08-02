@@ -138,7 +138,10 @@ pub let REST_Y: f64 = 0.70
 
 // Marking the hydrant. Long enough to read as a deliberate act, short enough
 // that nobody resents standing still for it — and any jump or dash cuts it.
-pub let PEE_TIME: f64 = 0.95
+pub let PEE_TIME: f64 = 1.0
+
+// How far from the hydrant he plants himself, centre to centre.
+pub let MARK_STANDOFF: f64 = 82.0
 
 pub let FORM_CHI: i64 = 0
 
@@ -275,6 +278,7 @@ pub struct World {
     barkRingT: f64,
     barkR: f64,
     peeIdx: i64,
+    peeStandX: f64, // where he shuffles to, so his own sprite is not on top of it
     shards: i64,
     shardTotal: i64,
     banked: i64,
@@ -392,7 +396,7 @@ pub fn worldNew(lvlIdx: i64, vw: f64, vh: f64): World {
         camX: 0.0, camY: 0.0, vw: vw, vh: vh,
         shake: 0.0, flash: 0.0, hitstop: 0.0,
         spawnX: sx, spawnY: sy,
-        barkX: 0.0, barkY: 0.0, barkRingT: 0.0, barkR: 0.0, peeIdx: 0 - 1,
+        barkX: 0.0, barkY: 0.0, barkRingT: 0.0, barkR: 0.0, peeIdx: 0 - 1, peeStandX: 0.0,
         shards: 0, shardTotal: 0, banked: 0, cores: 0, deaths: 0,
         time: 0.0, t: 0.0, state: ST_PLAY, clearT: 0.0,
         evJump: false, evLand: false, evDash: false, evShard: false, evCore: false,
@@ -719,6 +723,7 @@ fn hurtPlayer(w: &mut World, fromX: f64) {
         w.p.invT = INVULN
         w.p.hurtT = HURT_TIME
         w.p.dashT = 0.0
+        w.p.peeT = 0.0
         w.p.vy = 0.0 - HURT_KNOCK_Y
         let away = if w.p.x + PLAYER_W * 0.5 < fromX {
             0.0 - 1.0
@@ -863,11 +868,24 @@ fn updatePlayer(w: &mut World, dt: f64, moveX: f64, down: bool, jump: bool, jump
         w.p.barkCd = w.p.barkCd - dt
     }
     if w.p.peeT > 0.0 {
-        // Cancellable: a jump or a dash is always more urgent than a hydrant.
-        if jump || dash || !w.p.onGround {
+        // wasGround, NOT w.p.onGround: onGround is cleared at the top of this
+        // function and only recomputed after the collision pass below, so
+        // testing it here always reads false and cancelled the marking on the
+        // frame after it started.
+        if jump || dash || !wasGround {
             w.p.peeT = 0.0
         } else {
             w.p.peeT = w.p.peeT - dt
+            // Stop dead rather than sliding out from under the stream. The
+            // input is already ignored below; this kills the momentum he
+            // arrived with.
+            w.p.vx = w.p.vx * Math.maxF64(0.0, 1.0 - dt * 16.0)
+            // Shuffle into position. Goes through stepX so a hydrant tucked
+            // against a wall cannot push him into the rock.
+            let want = w.peeStandX - w.p.x
+            if Math.abs(want) > 1.5 {
+                let _ = stepX(w.p, w.lvl, Math.clampF64(want, 0.0 - 7.0, 7.0))
+            }
             peeStream(w)
         }
     }
@@ -1280,11 +1298,17 @@ fn hitChecks(w: &mut World, dt: f64) {
                 if w.p.onGround {
                     w.p.peeT = PEE_TIME
                     w.peeIdx = i
-                    w.p.facing = if dx > 0.0 {
+                    // He is on one side of it; stay on that side, and stand far
+                    // enough off that the hydrant is not hidden behind his own
+                    // sprite. The art is much wider than the hitbox, so "next
+                    // to it" has to mean most of a tile, not a few pixels.
+                    let side = if dx > 0.0 {
                         0.0 - 1.0
                     } else {
                         1.0
                     }
+                    w.p.facing = side
+                    w.peeStandX = w.checks[i].x + side * MARK_STANDOFF - PLAYER_W * 0.5
                     w.evPee = true
                 }
             }

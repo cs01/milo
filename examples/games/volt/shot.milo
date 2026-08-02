@@ -110,6 +110,12 @@ fn botStep(b: &mut Bot, w: &World, dt: f64) {
     b.bark = false
     b.barkT = b.barkT - dt
 
+    // Let a marking finish. Jump and dash both cancel it, and a bot that jumps
+    // whenever it feels like it never sees the animation at all.
+    if w.p.peeT > 0.0 {
+        return
+    }
+
     if w.p.onGround && Math.abs(w.p.vx) < 24.0 {
         b.stuckT = b.stuckT + dt
     } else {
@@ -223,6 +229,9 @@ pub fn main(): i32 {
         botStep(b, w, dt)
         worldUpdate(w, dt, b.moveX, false, b.jump, true, b.dash, b.bark)
 
+        if w.evPee {
+            print("marking a hydrant at frame " + frame.toString())
+        }
         var want = false
         for k in 0..shots.len {
             if shots[k] == frame {

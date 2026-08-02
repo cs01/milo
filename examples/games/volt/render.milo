@@ -428,7 +428,7 @@ pub fn drawPee(c: &mut Canvas, w: &World, ox: f64, oy: f64) {
     let tx = w.checks[w.peeIdx].x - w.camX + ox
     let ty = w.checks[w.peeIdx].y + 22.0 - w.camY + oy
     // opens and closes rather than snapping on, which is most of why it is funny
-    let ramp = Math.minF64(1.0, Math.minF64(w.p.peeT * 5.0, (0.95 - w.p.peeT) * 6.0 + 0.15))
+    let ramp = Math.minF64(1.0, Math.minF64(w.p.peeT * 5.0, (1.0 - w.p.peeT) * 6.0 + 0.15))
     if ramp <= 0.0 {
         return
     }

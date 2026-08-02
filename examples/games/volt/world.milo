@@ -132,7 +132,9 @@ pub let DEAD_X: f64 = 130.0
 pub let DEAD_Y: f64 = 96.0
 
 // Where the player sits vertically once the camera has settled on the ground.
-pub let REST_Y: f64 = 0.58
+// Low in the frame on purpose: the interesting half of a platformer is the sky
+// you are about to jump into, not the dirt you are standing on.
+pub let REST_Y: f64 = 0.70
 
 // Marking the hydrant. Long enough to read as a deliberate act, short enough
 // that nobody resents standing still for it — and any jump or dash cuts it.
@@ -1418,15 +1420,23 @@ fn updateCamera(w: &mut World, dt: f64) {
     } else if py < camMidY - DEAD_Y {
         ty = py - halfH + DEAD_Y
     }
+    // On the ground the resting height wins outright. Easing the *target*
+    // toward it and then easing the camera toward that target multiplies the
+    // two rates together, and the view takes seconds to settle instead of a
+    // third of one.
     if w.p.onGround {
-        let rest = py - w.vh * REST_Y
-        ty = ty + (rest - ty) * Math.minF64(1.0, dt * 2.0)
+        ty = py - w.vh * REST_Y
     }
 
     // The dead zone already decides when to move, so the smoothing only has to
     // take the edge off: fast enough that the player never outruns the view.
+    // Settling to the resting height is the one motion allowed to be leisurely.
     let kx = Math.minF64(1.0, dt * 11.0)
-    let ky = Math.minF64(1.0, dt * 8.0)
+    let ky = if w.p.onGround {
+        Math.minF64(1.0, dt * 3.2)
+    } else {
+        Math.minF64(1.0, dt * 8.0)
+    }
     w.camX = clampCamX(w, w.camX + (tx - w.camX) * kx)
     w.camY = clampCamY(w, w.camY + (ty - w.camY) * ky)
 }

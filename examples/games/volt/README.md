@@ -69,7 +69,9 @@ this lives in `world.milo`:
   inside a box in the middle of the screen — no lead, no easing toward your
   facing. A camera that leans the way you are looking swings the whole world
   every time you tap the other direction, which reads as the ground sliding
-  around underneath you.
+  around underneath you. On the ground it settles to put you 70% of the way
+  down the frame, because the interesting half of a platformer is the sky you
+  are about to jump into.
 - **A hitbox smaller than the dog.** The art overhangs the collision box on every
   side, so what looks like a near miss is a miss.
 - **Spikes hurt rather than kill.** Walking into one sideways costs you the

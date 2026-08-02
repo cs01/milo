@@ -1,6 +1,11 @@
-// Drawing the mine. Only the tiles inside the view are touched, and each one is
-// lit by distance from the lamp — the darkness is what makes a tunnel feel like a
-// tunnel rather than a grid of brown squares.
+// Drawing the mine. Only the tiles inside the view are touched.
+//
+// Everything here is aimed at one target: a five-year-old has to be able to look
+// at the screen and say what each thing is. That is why the ground is lit almost
+// flat with a single soft lamp glow on top rather than shaded per tile, why every
+// material carries a marking as well as a hue, why tiles are drawn as rounded
+// lumps that bulge past their cells, and why the dog is drawn brighter than life
+// with a dark outline. Mood lost to legibility, on purpose.
 
 from "std/math" import {
     Math
@@ -14,13 +19,84 @@ from "./mascot" import {
 from "./world" import {
     satchelX, satchelY,
     Mine, Col, TILE, MAP_W, MAP_H, SURFACE, tileAt, tileColor, isSolid,
-    T_SKY, T_GOLD, T_GEM, T_CRYSTAL, T_BEDROCK, T_WATER, T_GATE, isUpgrade
+    T_SKY, T_DIRT, T_CLAY, T_STONE, T_GOLD, T_GEM, T_CRYSTAL, T_BEDROCK, T_WATER,
+    T_GATE, isUpgrade
 }
 
 // Stable per-tile pseudo-random in 0..1.
 fn tileNoise(x: i64, y: i64): f64 {
     let v = Math.sin((x as f64) * 12.9898 + (y as f64) * 78.233) * 43758.5453
     return v - Math.floor(v)
+}
+
+// A tile drawn as a rounded lump instead of a square. A corner is only cut when
+// BOTH of its neighbours are open, so the inside of a mass stays solid and only
+// its outline goes soft — which is the whole difference between "ground" and
+// "graph paper". The radius wobbles per corner so no two lumps match.
+fn roundTile(c: &mut Canvas, x0: f64, y0: f64, x1: f64, y1: f64, r: f64, g: f64, b: f64, rtl: f64, rtr: f64, rbl: f64, rbr: f64) {
+    // Rows are stepped in whole screen pixels, not in tile-local ones. Walking
+    // fractional row edges through a truncating setRect drops the bottom row of
+    // every tile whose top bulges — which came out as a one-pixel black seam
+    // ruled straight across the map.
+    let h = y1 - y0
+    let py0 = Math.floor(y0) as i64
+    let py1 = Math.floor(y1) as i64
+    var yy = py0
+    while yy < py1 {
+        let fy = (yy as f64) + 0.5 - y0
+        var cutL = 0.0
+        var cutR = 0.0
+        if fy < rtl {
+            let d = rtl - fy
+            cutL = Math.maxF64(cutL, rtl - Math.sqrt(Math.maxF64(rtl * rtl - d * d, 0.0)))
+        }
+        if fy < rtr {
+            let d = rtr - fy
+            cutR = Math.maxF64(cutR, rtr - Math.sqrt(Math.maxF64(rtr * rtr - d * d, 0.0)))
+        }
+        if fy > h - rbl {
+            let d = fy - (h - rbl)
+            cutL = Math.maxF64(cutL, rbl - Math.sqrt(Math.maxF64(rbl * rbl - d * d, 0.0)))
+        }
+        if fy > h - rbr {
+            let d = fy - (h - rbr)
+            cutR = Math.maxF64(cutR, rbr - Math.sqrt(Math.maxF64(rbr * rbr - d * d, 0.0)))
+        }
+        setRect(c, x0 + cutL, yy as f64, x1 - cutR, (yy + 1) as f64, r, g, b)
+        yy = yy + 1
+    }
+}
+
+// How far this tile bulges past its cell on a side that faces open air. Two or
+// three pixels is enough: it breaks the shared straight line that made a wall of
+// tiles read as masonry.
+fn bulge(m: &Mine, tx: i64, ty: i64, dx: i64, dy: i64, seed: i64): f64 {
+    if isSolid(tileAt(m, tx + dx, ty + dy)) {
+        return 0.0
+    }
+    return 1.0 + 3.4 * tileNoise(tx * 11 + seed, ty * 7 + seed)
+}
+
+// How round each corner of this tile is. Open on both sides of a corner means
+// that corner is on the outside of the mass; a little per-tile jitter keeps the
+// silhouette from looking machined.
+fn cornerR(m: &Mine, tx: i64, ty: i64, dx: i64, dy: i64, seed: i64): f64 {
+    var open = 0
+    if !isSolid(tileAt(m, tx + dx, ty)) {
+        open = open + 1
+    }
+    if !isSolid(tileAt(m, tx, ty + dy)) {
+        open = open + 1
+    }
+    if open == 0 {
+        return 0.0
+    }
+    let j = tileNoise(tx * 3 + seed, ty * 5 + seed)
+    if open == 1 {
+        // Only one side is open: a shallow scallop, so a flat face still ripples.
+        return TILE * (0.10 + 0.24 * j)
+    }
+    return TILE * (0.34 + 0.28 * j)
 }
 
 // Everything above the dig site: sky gradient, sun, clouds, hills, a tree, and
@@ -37,59 +113,60 @@ fn drawSurface(c: &mut Canvas, m: &Mine, camX: f64, camY: f64) {
     while y < gy && y < c.h {
         if y >= 0 {
             let t = (y as f64) / Math.maxF64(groundY, 1.0)
-            let r = 0.10 + 0.32 * t
-            let g = 0.16 + 0.34 * t
-            let b = 0.34 + 0.22 * t
+            let r = 0.22 + 0.42 * t
+            let g = 0.42 + 0.38 * t
+            let b = 0.80 + 0.10 * t
             fillRect(c, 0.0, y as f64, c.w as f64, (y + 1) as f64, r, g, b)
         }
         y = y + 1
     }
     // sun, fixed in the sky rather than pinned to the world
-    let sunX = (c.w as f64) * 0.78
-    let sunY = groundY - 190.0
-    spot(c, sunX, sunY, 120.0, 0.35, 0.28, 0.10)
-    spot(c, sunX, sunY, 46.0, 1.5, 1.25, 0.55)
-    spot(c, sunX, sunY, 26.0, 2.2, 2.0, 1.3)
+    let sunX = (c.w as f64) * 0.80
+    let sunY = groundY - 112.0
+    spot(c, sunX, sunY, 130.0, 0.40, 0.32, 0.12)
+    spot(c, sunX, sunY, 50.0, 1.6, 1.35, 0.60)
+    spot(c, sunX, sunY, 28.0, 2.4, 2.2, 1.4)
     // clouds drifting
     for i in 0..4 {
         let base = Math.mod((i as f64) * 340.0 + m.time * 9.0 - camX * 0.25, (c.w as f64) + 400.0) - 200.0
-        let cy = groundY - 250.0 + (i as f64) * 34.0
-        spot(c, base, cy, 46.0, 0.30, 0.32, 0.38)
-        spot(c, base + 40.0, cy + 6.0, 34.0, 0.28, 0.30, 0.36)
-        spot(c, base - 36.0, cy + 8.0, 28.0, 0.26, 0.28, 0.34)
+        let cy = groundY - 132.0 + (i as f64) * 22.0
+        spot(c, base, cy, 52.0, 0.42, 0.44, 0.50)
+        spot(c, base + 44.0, cy + 7.0, 38.0, 0.40, 0.42, 0.48)
+        spot(c, base - 40.0, cy + 9.0, 32.0, 0.36, 0.38, 0.44)
     }
     // grass strip along the top of the ground
-    fillRect(c, 0.0, groundY - 6.0, c.w as f64, groundY, 0.10, 0.34, 0.12)
-    var gx = 0.0 - Math.mod(camX, 9.0)
+    fillRect(c, 0.0, groundY - 9.0, c.w as f64, groundY, 0.16, 0.52, 0.18)
+    var gx = 0.0 - Math.mod(camX, 13.0)
     while gx < (c.w as f64) {
-        let hh = 5.0 + tileNoise((gx as i64), 3) * 6.0
-        line(c, gx, groundY, gx + 1.5, groundY - hh, 0.12, 0.42, 0.14)
-        gx = gx + 9.0
+        let hh = 7.0 + tileNoise((gx as i64), 3) * 9.0
+        line(c, gx, groundY, gx + 2.5, groundY - hh, 0.20, 0.66, 0.22)
+        gx = gx + 13.0
     }
-    // a tree just left of the mine mouth
+    // a tree just right of the mine mouth
     let treeX = 11.0 * TILE - camX
     let ty0 = groundY
-    setRect(c, treeX - 9.0, ty0 - 100.0, treeX + 9.0, ty0, 0.20, 0.11, 0.05)
+    setRect(c, treeX - 10.0, ty0 - 58.0, treeX + 10.0, ty0, 0.34, 0.20, 0.10)
     // canopy as a few solid clumps — same blocky language as the ground
-    setRect(c, treeX - 62.0, ty0 - 150.0, treeX + 62.0, ty0 - 104.0, 0.05, 0.30, 0.08)
-    setRect(c, treeX - 44.0, ty0 - 182.0, treeX + 44.0, ty0 - 148.0, 0.06, 0.34, 0.09)
-    setRect(c, treeX - 22.0, ty0 - 204.0, treeX + 26.0, ty0 - 180.0, 0.07, 0.38, 0.10)
-    setRect(c, treeX - 62.0, ty0 - 116.0, treeX - 30.0, ty0 - 104.0, 0.04, 0.26, 0.07)
-    setRect(c, treeX + 30.0, ty0 - 118.0, treeX + 62.0, ty0 - 104.0, 0.04, 0.26, 0.07)
+    setRect(c, treeX - 56.0, ty0 - 96.0, treeX + 56.0, ty0 - 58.0, 0.10, 0.48, 0.14)
+    setRect(c, treeX - 40.0, ty0 - 122.0, treeX + 40.0, ty0 - 94.0, 0.12, 0.55, 0.16)
+    setRect(c, treeX - 20.0, ty0 - 140.0, treeX + 24.0, ty0 - 120.0, 0.14, 0.62, 0.18)
     // Two low spoil heaps flanking the shaft head. Small, so the entrance reads
     // as a dig rather than a sunken box.
     let mx = 5.0 * TILE - camX
-    setRect(c, mx - 34.0, ty0 - 5.0, mx - 20.0, ty0, 0.16, 0.10, 0.05)
-    setRect(c, mx + 20.0, ty0 - 5.0, mx + 34.0, ty0, 0.16, 0.10, 0.05)
+    setRect(c, mx - 52.0, ty0 - 8.0, mx - 32.0, ty0, 0.42, 0.28, 0.14)
+    setRect(c, mx + 32.0, ty0 - 8.0, mx + 52.0, ty0, 0.42, 0.28, 0.14)
 }
 
-// Blit a palette-indexed sprite, scaled, with 0 as transparent.
-fn drawSprite(c: &mut Canvas, s: Sprite, x: f64, y: f64, scale: f64, bright: f64) {
-    drawSpriteFlip(c, s, x, y, scale, bright, 1.0)
-}
-
-fn drawSpriteFlip(c: &mut Canvas, s: Sprite, x: f64, y: f64, scale: f64, bright: f64, flip: f64) {
+// Blit a palette-indexed sprite about its CENTRE, with independent x and y
+// scale. Squash and stretch is most of what makes a sprite feel alive, and it
+// needs a centre to squash about. Source pixel edges are computed from the same
+// expression on both sides so neighbouring pixels tile with no seam.
+fn drawSpriteT(c: &mut Canvas, s: &Sprite, cx: f64, cy: f64, sclX: f64, sclY: f64, bright: f64, flip: f64) {
+    let hw = (s.w as f64) * 0.5
+    let hh = (s.h as f64) * 0.5
     for py in 0..s.h {
+        let y0 = cy + ((py as f64) - hh) * sclY
+        let y1 = cy + (((py + 1) as f64) - hh) * sclY
         for px in 0..s.w {
             var sx2 = px
             if flip < 0.0 {
@@ -103,10 +180,415 @@ fn drawSpriteFlip(c: &mut Canvas, s: Sprite, x: f64, y: f64, scale: f64, bright:
             let r = ((rgb >> 16) & 0xFF) as f64 / 255.0 * bright
             let g = ((rgb >> 8) & 0xFF) as f64 / 255.0 * bright
             let b = (rgb & 0xFF) as f64 / 255.0 * bright
-            let x0 = x + (px as f64) * scale
-            let y0 = y + (py as f64) * scale
-            setRect(c, x0, y0, x0 + scale, y0 + scale, r, g, b)
+            let x0 = cx + ((px as f64) - hw) * sclX
+            let x1 = cx + (((px + 1) as f64) - hw) * sclX
+            setRect(c, x0, y0, x1, y1, r, g, b)
         }
+    }
+}
+
+// The same shape in one flat colour — used four times at small offsets to give
+// the dog a dark outline, so he never disappears into the wall he is chewing on.
+fn drawSpriteSolid(c: &mut Canvas, s: &Sprite, cx: f64, cy: f64, sclX: f64, sclY: f64, flip: f64, r: f64, g: f64, b: f64) {
+    let hw = (s.w as f64) * 0.5
+    let hh = (s.h as f64) * 0.5
+    for py in 0..s.h {
+        let y0 = cy + ((py as f64) - hh) * sclY
+        let y1 = cy + (((py + 1) as f64) - hh) * sclY
+        for px in 0..s.w {
+            var sx2 = px
+            if flip < 0.0 {
+                sx2 = s.w - 1 - px
+            }
+            if s.px[py * s.w + sx2] as i64 == 0 {
+                continue
+            }
+            let x0 = cx + ((px as f64) - hw) * sclX
+            let x1 = cx + (((px + 1) as f64) - hw) * sclX
+            setRect(c, x0, y0, x1, y1, r, g, b)
+        }
+    }
+}
+
+// An opaque oval with a dark rim: body, legs, paws, tail. Everything about the
+// dog that is not his face is built from this one shape, which is what keeps him
+// looking like one animal instead of a pile of parts.
+fn oval(c: &mut Canvas, x: f64, y: f64, rx: f64, ry: f64, cr: f64, cg: f64, cb: f64) {
+    let ryo = ry + 2.0
+    var yy = 0.0 - ryo
+    while yy <= ryo {
+        let to = 1.0 - yy * yy / (ryo * ryo)
+        if to > 0.0 {
+            let ow = (rx + 2.0) * Math.sqrt(to)
+            setRect(c, x - ow, y + yy, x + ow, y + yy + 1.0, 0.06, 0.04, 0.03)
+        }
+        let ti = 1.0 - yy * yy / (ry * ry)
+        if ti > 0.0 {
+            let iw = rx * Math.sqrt(ti)
+            setRect(c, x - iw, y + yy, x + iw, y + yy + 1.0, cr, cg, cb)
+        }
+        yy = yy + 1.0
+    }
+}
+
+// One leg: a stubby upper and a paw on the end.
+fn leg(c: &mut Canvas, x: f64, y: f64, len: f64, cr: f64, cg: f64, cb: f64) {
+    oval(c, x, y + len * 0.5, 4.0, len * 0.5 + 2.0, cr, cg, cb)
+    oval(c, x, y + len, 5.5, 4.0, cr * 1.15, cg * 1.15, cb * 1.15)
+}
+
+// The dog, and everything he is doing.
+//
+// Three states, read straight off the world: DIGGING (the drill is biting),
+// TROTTING (moving through open ground) and SITTING (you let go). Each one is a
+// different body rhythm plus its own set of stuck-on parts — a fast tail and
+// churning paws while he digs, a slow breath and a blink and the odd yawn when
+// he stops. The transition matters as much as the pose: `stateT` restarts on
+// every change, so the sit begins with a little settle rather than a snap.
+fn drawDog(c: &mut Canvas, m: &Mine, px: f64, py: f64) {
+    let dog = spriteMilo()
+    let flip = if m.faceX < 0.0 {
+        0.0 - 1.0
+    } else {
+        1.0
+    }
+    let base = 1.95
+    let half = 9.0 * base
+
+    var sclX = base
+    var sclY = base
+    var bob = 0.0 // whole animal
+    var headBob = 0.0 // head only, on top of that
+    var lean = 0.0
+    var tailFreq = 3.0
+    var tailAmp = 0.40
+    var legSwing = 0.0
+    var legFreq = 0.0
+    var rearLen = 13.0
+    var yawn = 0.0
+
+    if m.digging {
+        let w = Math.sin(m.time * 26.0)
+        sclX = base * (1.0 + 0.07 * w)
+        sclY = base * (1.0 - 0.07 * w)
+        bob = w * 1.5
+        headBob = w * 2.0
+        lean = m.faceX * 4.0
+        tailFreq = 24.0
+        tailAmp = 1.05
+        legSwing = 6.0
+        legFreq = 24.0
+    } else if m.moving {
+        let w = Math.sin(m.time * 13.0)
+        bob = 0.0 - Math.abs(w) * 3.5 // a trot is a series of little hops
+        headBob = 0.0 - Math.abs(w) * 1.5
+        tailFreq = 11.0
+        tailAmp = 0.7
+        legSwing = 7.0
+        legFreq = 13.0
+    } else {
+        let br = Math.sin(m.time * 2.4)
+        sclY = base * (1.0 + 0.04 * br)
+        sclX = base * (1.0 - 0.03 * br)
+        bob = br * 1.2
+        rearLen = 7.0 // he sits down, so the back legs fold under him
+        // Every few seconds of sitting he pops up, and every few after that he
+        // yawns. Idle animation is the difference between a paused game and a
+        // dog waiting for you.
+        let hop = Math.mod(m.stateT, 3.4)
+        if hop < 0.34 {
+            bob = bob - Math.sin(hop / 0.34 * 3.14159) * 9.0
+        }
+        let yw = Math.mod(m.stateT + 2.1, 5.6)
+        if yw < 0.7 {
+            yawn = Math.sin(yw / 0.7 * 3.14159)
+        }
+    }
+
+    let cx = px + lean
+    let cy = py + bob
+    let behind = 0.0 - flip
+    // He is drawn as one animal: a body, four legs and a tail, with the mascot's
+    // face as the head. Hanging extra ears and paws off the bare 18x18 logo — the
+    // first thing tried here — did not read as a dog at all.
+    let bodyX = cx + behind * 14.0
+    let bodyY = cy + 7.0
+    let headX = cx + flip * 12.0
+    let headY = cy - 5.0 + headBob
+
+    // Head bright, body mid, legs dark. The gradient is what separates the three
+    // from each other without needing an outline between them.
+    let furR = 0.80
+    let furG = 0.55
+    let furB = 0.32
+    let darkR = 0.50
+    let darkG = 0.32
+    let darkB = 0.17
+
+    // A small warm pool right under him, on top of the scene-wide lamp glow.
+    spot(c, cx, cy, 54.0, 0.10, 0.08, 0.04)
+
+    // Tail: three ovals tapering off the back of the body, wagging at the speed
+    // of his mood, with a pale tip.
+    let wag = Math.sin(m.time * tailFreq) * tailAmp
+    var seg = 0
+    while seg <= 3 {
+        let t = (seg as f64)
+        let ang = 0.75 + wag * t * 0.28
+        let len = 6.0 + t * 5.0 // overlapping, or the tip reads as a loose ball
+        let tx2 = bodyX + behind * Math.cos(ang) * len
+        let ty2 = bodyY - 4.0 - Math.sin(ang) * len
+        if seg == 3 {
+            oval(c, tx2, ty2, 4.5, 4.5, 1.10, 0.98, 0.82)
+        } else {
+            oval(c, tx2, ty2, 7.0 - t * 0.8, 7.0 - t * 0.8, furR * 0.86, furG * 0.86, furB * 0.86)
+        }
+        seg = seg + 1
+    }
+
+    // Back legs, behind the body.
+    var i = 0
+    while i < 2 {
+        let ph = m.time * legFreq + (i as f64) * 3.14159
+        let sw = Math.sin(ph) * legSwing
+        leg(c, bodyX + behind * (2.0 + (i as f64) * 9.0) + sw * 0.6, bodyY + 4.0, rearLen, darkR, darkG, darkB)
+        i = i + 1
+    }
+
+    oval(c, bodyX, bodyY, 19.0, 13.0, furR, furG, furB)
+
+    // Front legs. While the drill is biting they leave the ground entirely and
+    // scrabble at the rock face — the churning paws ARE the digging animation.
+    var f2 = 0
+    while f2 < 2 {
+        let ph = m.time * legFreq + (f2 as f64) * 3.14159
+        let sw = Math.sin(ph)
+        if m.digging {
+            let reach = half * 0.95 + sw * 7.0
+            let across = 7.0 - 14.0 * (f2 as f64)
+            let pxp = headX + m.faceX * reach + m.faceY * across
+            let pyp = headY + m.faceY * reach + m.faceX * across
+            oval(c, pxp, pyp, 6.0, 5.0, furR * 1.12, furG * 1.12, furB * 1.12)
+        } else {
+            leg(c, bodyX + flip * (8.0 + (f2 as f64) * 7.0) + sw * legSwing * 0.6, bodyY + 3.0, 13.0, furR * 0.9, furG * 0.9, furB * 0.9)
+        }
+        f2 = f2 + 1
+    }
+
+    // dark outline: four offset silhouettes under the real head sprite
+    let o = 2.5
+    drawSpriteSolid(c, dog, headX - o, headY, sclX, sclY, flip, 0.05, 0.03, 0.02)
+    drawSpriteSolid(c, dog, headX + o, headY, sclX, sclY, flip, 0.05, 0.03, 0.02)
+    drawSpriteSolid(c, dog, headX, headY - o, sclX, sclY, flip, 0.05, 0.03, 0.02)
+    drawSpriteSolid(c, dog, headX, headY + o, sclX, sclY, flip, 0.05, 0.03, 0.02)
+
+    // Brighter than life on purpose: the ground is lit almost flat now, so the
+    // only way the dog stays the most-readable thing on screen is to out-shine it.
+    drawSpriteT(c, dog, headX, headY, sclX, sclY, 1.55, flip)
+
+    // hard hat — reads as "miner" from across the room, and its lamp is the light
+    let hx0 = headX - half * 0.90
+    let hx1 = headX + half * 0.90
+    let hy = headY - half * 0.78
+    setRect(c, hx0, hy, hx1, hy + 8.0, 1.05, 0.72, 0.10)
+    setRect(c, hx0 + 4.0, hy - 5.0, hx1 - 4.0, hy, 1.20, 0.82, 0.14)
+    // brim, out in front of the face
+    setRect(c, headX + flip * half * 0.78, hy + 5.0, headX + flip * (half * 1.30), hy + 9.0, 0.85, 0.56, 0.08)
+    let lampX = headX + flip * half * 0.52
+    setRect(c, lampX - 3.5, hy - 3.5, lampX + 3.5, hy + 2.5, 1.5, 1.4, 1.0)
+    spot(c, lampX, hy, 7.0, 0.7, 0.6, 0.35)
+
+    // blink — paint muzzle fur over the eyes, with a lash line on top
+    if m.blinkT < 0.0 && !m.digging {
+        var e = 0
+        while e < 2 {
+            let dx = if e == 0 {
+                0.0 - 3.5
+            } else {
+                2.5
+            }
+            let ex = headX + flip * dx * sclX
+            let ey = headY - 0.5 * sclY
+            setRect(c, ex - sclX, ey - sclY, ex + sclX * 1.4, ey + sclY, 0.886, 0.753, 0.588)
+            line(c, ex - sclX, ey, ex + sclX * 1.2, ey, 0.10, 0.07, 0.05)
+            e = e + 1
+        }
+    }
+
+    // A yawn: the muzzle opens and a small tongue shows. Only when he is sitting.
+    if yawn > 0.0 {
+        let my = headY + half * 0.48
+        let mw = 5.0 * yawn
+        oval(c, headX, my, mw, mw * 0.9, 0.16, 0.07, 0.07)
+        oval(c, headX, my + mw * 0.35, mw * 0.6, mw * 0.4, 0.92, 0.50, 0.58)
+    }
+
+    // Left alone long enough, he dozes off. Nothing happens as a result — it is
+    // there so that a player who wanders away comes back to a dog, not a pause menu.
+    if !m.moving && m.stateT > 6.0 {
+        var z = 0
+        while z < 3 {
+            let ph = Math.mod(m.time * 0.45 + (z as f64) * 0.33, 1.0)
+            let zx = headX + flip * (half * 0.7 + ph * 26.0)
+            let zy = headY - half * 0.9 - ph * 34.0
+            let fz = (1.0 - ph) * Math.minF64(1.0, (m.stateT - 6.0) * 0.7)
+            text(c, zx as i64, zy as i64, "Z", 2 + (ph * 2.0) as i64, 0.7 * fz, 0.7 * fz, 0.9 * fz)
+            z = z + 1
+        }
+    }
+
+    // No tongue. A dark-rimmed pink oval anywhere near the muzzle stops reading as
+    // a tongue and starts reading as a wound — the paws and the tail carry the
+    // energy on their own.
+    if m.digging {
+        // the bite: a spinning three-spoke bit on the tile face, kept dim enough
+        // that it does not white out the paws working right beside it
+        let bx = headX + m.faceX * half * 1.55
+        let by = headY + m.faceY * half * 1.55
+        var q = 0
+        while q < 3 {
+            let a = m.time * 30.0 + (q as f64) * 2.0944
+            line(c, bx, by, bx + Math.cos(a) * 9.0, by + Math.sin(a) * 9.0, 1.1, 0.95, 0.6)
+            q = q + 1
+        }
+        spot(c, bx, by, 6.0, 0.9, 0.75, 0.35)
+    }
+}
+
+// Which plain ground a seam is embedded in. Nearest non-ore neighbour wins;
+// dirt if the seam is somehow surrounded by nothing but more seam.
+fn hostKind(m: &Mine, tx: i64, ty: i64): i64 {
+    var q = 1
+    while q <= 3 {
+        var d = 0
+        while d < 4 {
+            var nx = tx
+            var ny = ty
+            if d == 0 {
+                nx = tx - q
+            } else if d == 1 {
+                nx = tx + q
+            } else if d == 2 {
+                ny = ty - q
+            } else {
+                ny = ty + q
+            }
+            let n = tileAt(m, nx, ny)
+            if n == T_DIRT || n == T_CLAY || n == T_STONE {
+                return n
+            }
+            d = d + 1
+        }
+        q = q + 1
+    }
+    return T_DIRT
+}
+
+// Each ground gets its own marking, not just its own colour: dirt is pebbly,
+// clay is layered, stone is cracked, bedrock is speckled. Colour alone stops
+// working the moment the lamp dims it; a pattern survives.
+fn drawGrain(c: &mut Canvas, tx: i64, ty: i64, sx: f64, sy: f64, t: i64, col: &Col, kk: f64) {
+    if t == T_DIRT {
+        for q in 0..3 {
+            let a = tileNoise(tx * 7 + q * 31, ty * 13 + q * 17)
+            let b2 = tileNoise(tx * 5 + q * 11, ty * 3 + q * 23)
+            let s = TILE * (0.09 + 0.05 * b2)
+            let px2 = sx + TILE * (0.20 + 0.60 * a)
+            let py2 = sy + TILE * (0.20 + 0.60 * b2)
+            setRect(c, px2, py2, px2 + s, py2 + s, col.r * kk * 0.72, col.g * kk * 0.66, col.b * kk * 0.60)
+        }
+        return
+    }
+    if t == T_CLAY {
+        // Sedimentary streaks. Every one gets its own row, length and side from
+        // the tile hash — evenly placed bands line up across neighbours and turn
+        // the clay into brickwork, which is exactly the look being avoided here.
+        var q = 0
+        while q < 3 {
+            let a = tileNoise(tx * 13 + q * 7, ty * 29 + q * 3)
+            let b2 = tileNoise(tx * 5 + q * 19, ty * 11 + q * 23)
+            let yb = sy + TILE * (0.12 + 0.76 * a)
+            let xb = sx + TILE * (0.04 + 0.34 * b2)
+            let wb = TILE * (0.30 + 0.52 * tileNoise(tx + q * 3, ty * 7 + q))
+            if b2 > 0.45 {
+                setRect(c, xb, yb, xb + wb, yb + 3.0, col.r * kk * 1.30, col.g * kk * 1.15, col.b * kk * 0.95)
+            } else {
+                setRect(c, xb, yb, xb + wb, yb + 3.0, col.r * kk * 0.60, col.g * kk * 0.45, col.b * kk * 0.38)
+            }
+            q = q + 1
+        }
+        return
+    }
+    if t == T_STONE {
+        // A crooked crack, drawn additively so it catches the lamp. Every vertex
+        // gets its own hash: one shared random only slid the same chevron left and
+        // right, which tiled into wallpaper.
+        let a = tileNoise(tx * 9, ty * 9)
+        let b2 = tileNoise(tx * 31 + 4, ty * 17 + 9)
+        let d2 = tileNoise(tx * 3 + 21, ty * 41 + 2)
+        let e2 = tileNoise(tx * 47 + 6, ty * 5 + 13)
+        let x0 = sx + TILE * (0.10 + 0.35 * a)
+        let y0 = sy + TILE * (0.06 + 0.24 * b2)
+        let x1 = sx + TILE * (0.28 + 0.50 * d2)
+        let y1 = sy + TILE * (0.38 + 0.24 * a)
+        let x2 = sx + TILE * (0.15 + 0.70 * e2)
+        let y2 = sy + TILE * (0.72 + 0.24 * d2)
+        line(c, x0, y0, x1, y1, col.r * kk * 0.5, col.g * kk * 0.55, col.b * kk * 0.65)
+        line(c, x1, y1, x2, y2, col.r * kk * 0.5, col.g * kk * 0.55, col.b * kk * 0.65)
+        return
+    }
+    if t == T_GATE {
+        // Chevrons pointing the way out. The door is the only thing on the map
+        // that tells you what to do with it, so it says it in arrows.
+        var q = 0
+        while q < 3 {
+            let yb = sy + TILE * (0.16 + 0.34 * (q as f64))
+            line(c, sx + TILE * 0.28, yb, sx + TILE * 0.66, yb + TILE * 0.14, col.r * 0.9, col.g * 0.9, col.b * 0.8)
+            line(c, sx + TILE * 0.66, yb + TILE * 0.14, sx + TILE * 0.28, yb + TILE * 0.28, col.r * 0.9, col.g * 0.9, col.b * 0.8)
+            q = q + 1
+        }
+        return
+    }
+    if t == T_BEDROCK {
+        for q in 0..4 {
+            let a = tileNoise(tx * 3 + q * 41, ty * 19 + q * 7)
+            let b2 = tileNoise(tx * 23 + q * 5, ty * 29 + q * 13)
+            spot(c, sx + TILE * (0.15 + 0.7 * a), sy + TILE * (0.15 + 0.7 * b2), 2.6, 0.16, 0.14, 0.22)
+        }
+    }
+}
+
+// Treasure has to LOOK like treasure. Fat nuggets, a specular highlight that
+// travels across the seam, and a four-point twinkle that fires on its own clock
+// per tile — the sparkle is the reward, arriving before the number does.
+fn drawShimmer(c: &mut Canvas, m: &Mine, tx: i64, ty: i64, cx: f64, cy: f64, col: &Col, kk: f64) {
+    for q in 0..3 {
+        let a = tileNoise(tx * 5 + q, ty * 11 + q) * 6.2831853
+        let rr = 0.10 + 0.16 * tileNoise(tx + q * 13, ty + q * 7)
+        let nx = cx + Math.cos(a) * TILE * rr
+        let ny = cy + Math.sin(a) * TILE * rr
+        // body of the nugget, then a hard specular chip up and to the left — the
+        // offset highlight is what makes a blob read as something faceted
+        spot(c, nx, ny, TILE * 0.30, col.r * kk * 0.80, col.g * kk * 0.80, col.b * kk * 0.80)
+        spot(c, nx, ny, TILE * 0.17, col.r * kk * 0.70, col.g * kk * 0.70, col.b * kk * 0.70)
+        spot(c, nx - 2.5, ny - 2.5, TILE * 0.09, 1.1, 1.05, 0.85)
+    }
+    // A bright band sweeping across the tile, on a phase unique to the tile.
+    let ph = tileNoise(tx * 17, ty * 23)
+    let sweep = Math.mod(m.time * 0.55 + ph, 1.0)
+    let bandY = cy - TILE * 0.6 + sweep * TILE * 1.2
+    let fade = 1.0 - Math.abs(sweep - 0.5) * 2.0
+    spot(c, cx, bandY, TILE * 0.42, col.r * 0.30 * fade, col.g * 0.30 * fade, col.b * 0.30 * fade)
+    // Twinkle: a short, bright four-point star with a long gap between firings.
+    let tw = Math.mod(m.time * 0.9 + ph * 3.1, 1.0)
+    if tw < 0.16 {
+        let f = Math.sin(tw / 0.16 * 3.14159)
+        let armr = TILE * 0.55 * f
+        let bx = cx + Math.cos(ph * 6.28) * TILE * 0.22
+        let by = cy + Math.sin(ph * 6.28) * TILE * 0.22
+        line(c, bx - armr, by, bx + armr, by, 1.5 * f, 1.4 * f, 1.1 * f)
+        line(c, bx, by - armr, bx, by + armr, 1.5 * f, 1.4 * f, 1.1 * f)
+        spot(c, bx, by, TILE * 0.22 * f, 1.6 * f, 1.5 * f, 1.2 * f)
     }
 }
 
@@ -140,12 +622,12 @@ pub fn drawMine(c: &mut Canvas, m: &Mine, ox: f64, oy: f64) {
                 if litw < 0.0 {
                     litw = 0.0
                 }
-                let kw = 0.16 + litw * litw * 0.85
+                let kw = 0.45 + litw * litw * 0.60
                 var top = sy
                 if openAbove {
-                    let wob = Math.sin(m.time * 2.2 + (tx as f64) * 0.7) * 2.6
-                    + Math.sin(m.time * 3.7 + (tx as f64) * 1.9) * 1.4
-                    top = sy + 4.0 + wob
+                    let wob = Math.sin(m.time * 2.2 + (tx as f64) * 0.7) * 4.6
+                    + Math.sin(m.time * 3.7 + (tx as f64) * 1.9) * 2.4
+                    top = sy + 7.0 + wob
                 }
                 fillRect(c, sx, top, sx + TILE, sy + TILE, 0.05 * kw, 0.30 * kw, 0.70 * kw)
                 // depth shading toward the bottom of the tile
@@ -154,7 +636,7 @@ pub fn drawMine(c: &mut Canvas, m: &Mine, ox: f64, oy: f64) {
                     line(c, sx, top, sx + TILE, top, 0.5 * kw + 0.15, 1.4 * kw + 0.2, 1.9 * kw + 0.3)
                     // a glint riding along the crest
                     let g = 0.5 + 0.5 * Math.sin(m.time * 2.6 + (tx as f64) * 0.55)
-                    spot(c, sx + TILE * g, top, 3.4, 0.5 * kw, 1.1 * kw, 1.6 * kw)
+                    spot(c, sx + TILE * g, top, 6.0, 0.5 * kw, 1.1 * kw, 1.6 * kw)
                 }
                 // caustic banding under the surface
                 let cau = 0.5 + 0.5 * Math.sin(m.time * 1.9 + (tx as f64) * 1.3 + (ty as f64) * 0.8)
@@ -162,7 +644,24 @@ pub fn drawMine(c: &mut Canvas, m: &Mine, ox: f64, oy: f64) {
                 continue
             }
             if t == T_SKY {
-                continue // sky is painted by drawSurface; below ground it is void
+                if ty < SURFACE {
+                    continue // above ground the sky is drawSurface's job
+                }
+                // A dug-out tile is a hole with a back wall, not a void. Painting
+                // it dark-warm instead of leaving it black is what makes a tunnel
+                // read as carved rather than as a gap in the picture — and it is
+                // what the dog is silhouetted against.
+                let hx = sx + TILE * 0.5
+                let hy = sy + TILE * 0.5
+                let ddx = hx - (m.px - camX)
+                let ddy = hy - (m.py - camY)
+                var hl = 1.0 - Math.sqrt(ddx * ddx + ddy * ddy) / (m.lampRadius * 0.9)
+                if hl < 0.0 {
+                    hl = 0.0
+                }
+                let hk = 0.045 + hl * hl * 0.16
+                fillRect(c, sx, sy, sx + TILE, sy + TILE, hk * 1.0, hk * 0.72, hk * 0.52)
+                continue
             }
             // Lamp falloff — but only on tiles the light could actually reach.
             // A tile with no open neighbour is buried inside the rock, and lighting
@@ -189,66 +688,91 @@ pub fn drawMine(c: &mut Canvas, m: &Mine, ox: f64, oy: f64) {
             // smoothstep instead of a hard linear edge
             lit = lit * lit * (3.0 - 2.0 * lit)
             if !exposed {
-                lit = lit * 0.05
+                lit = lit * 0.45
             }
-            // Ore glows faintly on its own, so a seam is visible at the edge of the
-            // lamp — which is the thing that makes you keep going.
-            // Bedrock keeps a floor of its own light: you cannot dig it, so you
-            // need to see where it is even outside the lamp, or you walk into a
-            // wall you had no way of knowing about.
-            var ambient = 0.035
-            if t == T_BEDROCK {
-                ambient = 0.13
+            // Tiles are lit almost flat, and the lamp is added afterwards as one
+            // smooth glow over the whole scene. Per-tile lamp falloff was the
+            // real reason the ground read as squares: it painted every 34-pixel
+            // cell a slightly different uniform grey, which is a checkerboard no
+            // amount of rounded corners can hide.
+            var ambient = 0.62
+            if !exposed {
+                ambient = 0.46
             }
             if t == T_GATE {
                 // Visible from anywhere: this is the thing "head east" means.
                 if m.exitOpen {
-                    ambient = 1.10 + 0.45 * Math.sin(m.time * 5.0)
+                    ambient = 1.20 + 0.45 * Math.sin(m.time * 5.0 - (ty as f64) * 0.6)
                 } else {
-                    ambient = 0.34 + 0.10 * Math.sin(m.time * 2.0)
+                    ambient = 0.80 + 0.18 * Math.sin(m.time * 2.0 - (ty as f64) * 0.6)
                 }
             }
             if t == T_GOLD || t == T_GEM || t == T_CRYSTAL {
-                ambient = 0.20 + 0.07 * Math.sin(m.time * 3.0 + (tx as f64) + (ty as f64))
+                ambient = ambient + 0.06
             }
             if isUpgrade(t) {
-                ambient = 0.45 + 0.25 * Math.sin(m.time * 6.0 + (tx as f64))
+                ambient = 0.80 + 0.25 * Math.sin(m.time * 6.0 + (tx as f64))
             }
-            let k = ambient + lit * 0.95
+            let k = ambient + lit * 0.22
             let col = tileColor(t)
-            // Every tile gets its own shade. A uniform fill with a lit top edge is
-            // what made this read as stacked blocks instead of ground.
-            let grain = 0.93 + 0.14 * tileNoise(tx, ty)
+            // Only a whisper of per-tile shade variation. More than this and the
+            // patchwork of slightly different cells IS the grid.
+            let grain = 0.97 + 0.06 * tileNoise(tx, ty)
             let kk = k * grain
-            fillRect(c, sx, sy, sx + TILE, sy + TILE, col.r * kk * 0.5, col.g * kk * 0.5, col.b * kk * 0.5)
-            // Only draw a seam where the neighbour is a DIFFERENT material, so a
-            // solid mass of dirt looks like a mass rather than a grid.
-            if tileAt(m, tx, ty - 1) != t {
-                line(c, sx, sy, sx + TILE, sy, col.r * kk * 0.75, col.g * kk * 0.75, col.b * kk * 0.75)
+            let rtl = cornerR(m, tx, ty, 0 - 1, 0 - 1, 1)
+            let rtr = cornerR(m, tx, ty, 1, 0 - 1, 2)
+            let rbl = cornerR(m, tx, ty, 0 - 1, 1, 3)
+            let rbr = cornerR(m, tx, ty, 1, 1, 4)
+            let bl = bulge(m, tx, ty, 0 - 1, 0, 5)
+            let br = bulge(m, tx, ty, 1, 0, 6)
+            let bt = bulge(m, tx, ty, 0, 0 - 1, 7)
+            let bb = bulge(m, tx, ty, 0, 1, 8)
+            // Ore is rock with lumps in it. The body of an ore tile is painted in
+            // the colour of the ground AROUND it, not in the ore colour — fill a
+            // whole cell with gold and a seam reads as a yellow brick, a square
+            // you can see the outline of from across the map. Only the nuggets
+            // are metal.
+            let isOre = t == T_GOLD || t == T_GEM || t == T_CRYSTAL
+            var texture = t
+            if isOre {
+                texture = hostKind(m, tx, ty)
             }
-            if tileAt(m, tx - 1, ty) != t {
-                line(c, sx, sy, sx, sy + TILE, col.r * kk * 0.5, col.g * kk * 0.5, col.b * kk * 0.5)
-            }
-            if t == T_GOLD || t == T_GEM || t == T_CRYSTAL {
-                // irregular nuggets, not a grid of studs
-                let n = 3
-                for q in 0..n {
-                    let a = tileNoise(tx * 5 + q, ty * 11 + q) * 6.2831853
-                    let rr = 0.16 + 0.16 * tileNoise(tx + q * 13, ty + q * 7)
-                    spot(c, cx + Math.cos(a) * TILE * rr, cy + Math.sin(a) * TILE * rr, TILE * 0.20, col.r * kk * 0.85, col.g * kk * 0.85, col.b * kk * 0.85)
+            var body = tileColor(texture)
+            if t == T_GATE && m.exitOpen {
+                body = Col {
+                    r: 0.35, g: 1.30, b: 0.55
                 }
+            }
+            roundTile(c, sx - bl, sy - bt, sx + TILE + br, sy + TILE + bb, body.r * kk, body.g * kk, body.b * kk, rtl, rtr, rbl, rbr)
+            drawGrain(c, tx, ty, sx, sy, texture, body, kk)
+            // A lit rim wherever the ground faces open air. Cheap, and it is what
+            // makes a tunnel wall look like a surface rather than a colour.
+            if !isSolid(tileAt(m, tx, ty - 1)) {
+                line(c, sx + rtl, sy - bt + 0.5, sx + TILE - rtr, sy - bt + 0.5, body.r * kk * 0.45, body.g * kk * 0.45, body.b * kk * 0.40)
+            }
+            if t == T_GOLD || t == T_GEM || t == T_CRYSTAL || isUpgrade(t) {
+                drawShimmer(c, m, tx, ty, cx, cy, col, kk)
             }
         }
     }
+
+    // The lamp, as ONE smooth additive glow over the finished tiles rather than a
+    // per-tile brightness. It spills a little through rock, which is the price of
+    // not having the light itself drawn as a grid of squares.
+    let lx = m.px - camX
+    let ly = m.py - camY
+    spot(c, lx, ly, m.lampRadius * 0.85, 0.09, 0.075, 0.045)
+    spot(c, lx, ly, m.lampRadius * 0.40, 0.11, 0.09, 0.05)
+    spot(c, lx + m.faceX * 60.0, ly + m.faceY * 60.0, m.lampRadius * 0.30, 0.08, 0.065, 0.035)
 
     // the bite being taken out of the tile under the drill
     if m.digX >= 0 && m.digProgress > 0.0 {
         let sx = (m.digX as f64) * TILE - camX
         let sy = (m.digY as f64) * TILE - camY
         let p = Math.minF64(m.digProgress, 1.0)
-        let r = TILE * 0.55 * p
-        circle(c, sx + TILE * 0.5, sy + TILE * 0.5, r, 12, 1.3, 1.0, 0.4)
-        spot(c, sx + TILE * 0.5, sy + TILE * 0.5, r * 0.7, 0.7 * p, 0.5 * p, 0.15 * p)
+        let r = TILE * 0.40 * p
+        circle(c, sx + TILE * 0.5, sy + TILE * 0.5, r, 12, 0.55, 0.42, 0.16)
+        spot(c, sx + TILE * 0.5, sy + TILE * 0.5, r * 0.8, 0.35 * p, 0.25 * p, 0.08 * p)
     }
 
     // particles
@@ -260,31 +784,10 @@ pub fn drawMine(c: &mut Canvas, m: &Mine, ox: f64, oy: f64) {
         spot(c, m.parts[i].x - camX, m.parts[i].y - camY, sz, m.parts[i].cr * f, m.parts[i].cg * f, m.parts[i].cb * f)
     }
 
-    // the digger: a lamp, a body, and a drill bit pointing where you last moved
+    // the digger
     let px = m.px - camX
     let py = m.py - camY
-    // No big additive halo here: the tiles are already lit by distance from the
-    // lamp, so a second glow drawn over them double-lights everything and, worse,
-    // spills straight through solid rock. Just the lamp itself.
-    spot(c, px, py, 20.0, 0.30, 0.22, 0.10)
-    // The digger is Milo himself, facing the way you last moved.
-    let flip = if m.faceX < 0.0 {
-        0.0 - 1.0
-    } else {
-        1.0
-    }
-    drawSpriteFlip(c, spriteMilo(), px - 13.0, py - 15.0, 1.55, 1.0, flip)
-    // drill bit, spinning while it bites
-    let bx = px + m.faceX * 15.0
-    let by = py + m.faceY * 15.0
-    var wob = 0.0
-    if m.digProgress > 0.0 {
-        wob = Math.sin(m.time * 40.0) * 2.0
-    }
-    line(c, px, py + 2.0, bx + m.faceY * wob, by + m.faceX * wob, 1.5, 1.3, 0.8)
-    spot(c, bx, by, 3.4, 1.7, 1.4, 0.6)
-    // headlamp beam pointing the way
-    spot(c, px + m.faceX * 26.0, py + m.faceY * 26.0, 22.0, 0.22, 0.18, 0.08)
+    drawDog(c, m, px, py)
 
     // the satchel, which swells for a moment each time something lands in it
     let stx = satchelX(m) - camX
@@ -316,45 +819,65 @@ pub fn drawMine(c: &mut Canvas, m: &Mine, ox: f64, oy: f64) {
     }
 }
 
-pub fn drawHud(c: &mut Canvas, m: &Mine) {
-    var vs = 3
-    var vb = 1.0
-    if m.goldPulse > 0.0 {
-        vs = 4
-        vb = 1.0 + m.goldPulse * 2.4
-    }
-    text(c, 24, 22, "VALUE " + m.score.toString(), vs, 0.85 * vb, 0.70 * vb, 0.22 * vb)
-    let g = "GOLD " + m.gold.toString() + "   EMERALD " + m.gems.toString() + "   CRYSTAL " + m.crystals.toString()
-    text(c, 24, 58, g, 2, 0.30, 0.30, 0.34)
-    let d = "DEPTH " + (m.deepest - SURFACE).toString() + " M"
-    text(c, c.w - 24 - textWidth(d, 3), 22, d, 3, 0.40, 0.55, 0.70)
-    let lv = "LEVEL " + m.level.toString()
-    text(c, c.w - 24 - textWidth(lv, 2), 58, lv, 2, 0.30, 0.30, 0.34)
+// A little treasure icon: the same nugget-and-sparkle language as the seams, so
+// the counter and the thing in the ground are obviously the same object. Counts
+// beat names when the reader may not read yet.
+fn hudGem(c: &mut Canvas, x: f64, y: f64, t: f64, col: &Col, n: i64, scale: i64) {
+    spot(c, x, y, 15.0, col.r * 0.22, col.g * 0.22, col.b * 0.22)
+    setRect(c, x - 8.0, y - 8.0, x + 8.0, y + 8.0, col.r * 0.75, col.g * 0.75, col.b * 0.75)
+    setRect(c, x - 8.0, y - 8.0, x + 2.0, y + 1.0, col.r, col.g, col.b)
+    let tw = 0.5 + 0.5 * Math.sin(t)
+    spot(c, x - 4.0, y - 4.0, 5.0 * tw + 2.0, 1.4 * tw, 1.3 * tw, 1.1 * tw)
+    text(c, (x + 16.0) as i64, (y - 10.0) as i64, n.toString(), scale, 0.90, 0.86, 0.78)
+}
 
-    // quota bar: how much more is needed before the way out opens
-    let bx = (c.w as f64) * 0.5 - 190.0
-    let by = 34.0
-    fillRect(c, bx, by, bx + 380.0, by + 10.0, 0.04, 0.04, 0.05)
+pub fn drawHud(c: &mut Canvas, m: &Mine) {
+    // Three counters, as pictures with a number next to each. No labels to read.
+    let gc = tileColor(T_GOLD)
+    let ec = tileColor(T_GEM)
+    let cc = tileColor(T_CRYSTAL)
+    hudGem(c, 40.0, 36.0, m.time * 3.0, gc, m.gold, 4)
+    hudGem(c, 150.0, 36.0, m.time * 3.0 + 2.0, ec, m.gems, 4)
+    hudGem(c, 260.0, 36.0, m.time * 3.0 + 4.0, cc, m.crystals, 4)
+
+    let lv = "LEVEL " + m.level.toString()
+    text(c, c.w - 24 - textWidth(lv, 4), 22, lv, 4, 0.55, 0.70, 0.90)
+    let d = (m.deepest - SURFACE).toString() + " M DEEP"
+    text(c, c.w - 24 - textWidth(d, 2), 66, d, 2, 0.30, 0.38, 0.48)
+
+    // The bar. This is the only rule in the game, so it gets the middle of the
+    // screen and a chunky frame: fill it, then walk out the door.
+    let bw = 460.0
+    let bx = (c.w as f64) * 0.5 - bw * 0.5
+    let by = 26.0
+    let bh = 26.0
+    setRect(c, bx - 4.0, by - 4.0, bx + bw + 4.0, by + bh + 4.0, 0.16, 0.13, 0.10)
+    setRect(c, bx, by, bx + bw, by + bh, 0.05, 0.04, 0.04)
     if m.exitOpen {
         let pulse = 0.7 + 0.3 * Math.sin(m.time * 5.0)
-        fillRect(c, bx, by, bx + 380.0, by + 10.0, 0.06 * pulse, 0.42 * pulse, 0.14 * pulse)
-        textCentered(c, c.w / 2, 50, "HEAD RIGHT — THE WAY OUT IS OPEN", 2, 0.4 * pulse, 1.1 * pulse, 0.5 * pulse)
+        fillRect(c, bx, by, bx + bw, by + bh, 0.10 * pulse, 0.70 * pulse, 0.24 * pulse)
+        textCentered(c, c.w / 2, 70, "GO RIGHT TO THE GREEN DOOR!", 3, 0.5 * pulse, 1.3 * pulse, 0.6 * pulse)
     } else {
         var frac = (m.levelValue as f64) / (m.quota as f64)
         if frac > 1.0 {
             frac = 1.0
         }
-        fillRect(c, bx, by, bx + 380.0 * frac, by + 10.0, 0.50, 0.40, 0.10)
-        textCentered(c, c.w / 2, 50, m.levelValue.toString() + " / " + m.quota.toString() + " TO OPEN THE WAY OUT", 2, 0.34, 0.30, 0.22)
+        fillRect(c, bx, by, bx + bw * frac, by + bh, 0.85, 0.62, 0.14)
+        // a moving sheen on the filled part, so the bar itself looks like treasure
+        if frac > 0.02 {
+            let s = Math.mod(m.time * 0.7, 1.0) * frac
+            spot(c, bx + bw * s, by + bh * 0.5, 20.0, 0.5, 0.42, 0.12)
+        }
+        textCentered(c, c.w / 2, 70, "FILL THE BAR WITH TREASURE", 3, 0.44, 0.40, 0.30)
     }
 
-    // Where the gate is, and how far — you should never have to wonder.
+    // Where the door is, and how far. It runs the whole height of the map, so the
+    // marker sits at the player's own eye level and only ever means "that way".
     let gateWorldX = ((m.exitX - 1) as f64) * TILE
-    let gateWorldY = ((m.gateY + 1) as f64) * TILE
     let sxg = gateWorldX - m.camX
-    let syg = gateWorldY - m.camY
+    let syg = m.py - m.camY
     let metres = ((gateWorldX - m.px) / TILE) as i64
-    if sxg > (c.w as f64) - 30.0 || syg < 0.0 || syg > (c.h as f64) {
+    if sxg > (c.w as f64) - 30.0 {
         // off screen: pin an arrow to the edge in its direction
         let ey = Math.clampF64(syg, 60.0, (c.h as f64) - 60.0)
         var col = 0.55
@@ -367,16 +890,13 @@ pub fn drawHud(c: &mut Canvas, m: &Mine) {
         line(c, (c.w as f64) - 40.0, ey - 12.0, (c.w as f64) - 22.0, ey, col * pulse, cg2 * pulse, 0.5 * pulse)
         line(c, (c.w as f64) - 40.0, ey + 12.0, (c.w as f64) - 22.0, ey, col * pulse, cg2 * pulse, 0.5 * pulse)
         line(c, (c.w as f64) - 62.0, ey, (c.w as f64) - 22.0, ey, col * pulse, cg2 * pulse, 0.5 * pulse)
-        var lbl = "GATE " + metres.toString() + "M"
-        if !m.exitOpen {
-            lbl = "LOCKED " + metres.toString() + "M"
-        }
-        text(c, c.w - 62 - textWidth(lbl, 2), (ey as i64) + 16, lbl, 2, col * 0.7, cg2 * 0.7, 0.4)
+        let lbl = "DOOR " + metres.toString() + " M"
+        text(c, c.w - 62 - textWidth(lbl, 3), (ey as i64) + 20, lbl, 3, col * 0.8, cg2 * 0.8, 0.4)
     }
 
     if m.cleared > 0.0 {
-        textCentered(c, c.w / 2, c.h / 2 - 40, "LEVEL " + m.level.toString() + " CLEAR", 7, 0.6, 1.3, 0.7)
-        textCentered(c, c.w / 2, c.h / 2 + 30, "VALUE " + m.score.toString(), 3, 1.2, 1.0, 0.3)
+        textCentered(c, c.w / 2, c.h / 2 - 40, "NICE DIGGING!", 7, 0.6, 1.3, 0.7)
+        textCentered(c, c.w / 2, c.h / 2 + 30, "LEVEL " + (m.level + 1).toString() + " NEXT", 3, 1.2, 1.0, 0.3)
     }
 
     if m.banner > 0.0 {
@@ -384,15 +904,15 @@ pub fn drawHud(c: &mut Canvas, m: &Mine) {
         if m.banner < 1.0 {
             f = m.banner
         }
-        textCentered(c, c.w / 2, 150, "PROSPECT", 8, 1.2 * f, 0.9 * f, 0.3 * f)
-        textCentered(c, c.w / 2, 230, "DIG EAST TO THE WAY OUT — FILL THE BAR FIRST", 2, 0.5 * f, 0.45 * f, 0.35 * f)
+        textCentered(c, c.w / 2, 170, "PROSPECT", 9, 1.3 * f, 1.0 * f, 0.3 * f)
+        textCentered(c, c.w / 2, 260, "DIG! FIND TREASURE!", 3, 0.7 * f, 0.6 * f, 0.4 * f)
     }
     if m.hint > 0.0 {
         var f = 1.0
         if m.hint < 1.0 {
             f = m.hint
         }
-        textCentered(c, c.w / 2, c.h - 96, "ARROW KEYS OR WASD TO DIG — HOLD A DIRECTION", 2, 0.45 * f, 0.42 * f, 0.36 * f)
-        textCentered(c, c.w / 2, c.h - 70, "GLOWING SEAMS ARE WORTH MONEY. THERE IS NO TIMER.", 2, 0.35 * f, 0.33 * f, 0.28 * f)
+        textCentered(c, c.w / 2, c.h - 100, "HOLD AN ARROW KEY TO DIG", 3, 0.55 * f, 0.50 * f, 0.40 * f)
+        textCentered(c, c.w / 2, c.h - 60, "YOU CANNOT LOSE", 2, 0.35 * f, 0.33 * f, 0.28 * f)
     }
 }

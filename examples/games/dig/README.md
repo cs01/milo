@@ -9,58 +9,94 @@ milo build examples/games/dig/main.milo -o /tmp/prospect --release && /tmp/prosp
 | arrow keys or WASD | hold a direction to dig |
 | ESC | quit |
 
-You start above ground — sun, clouds, a tree, the pit-head, and Milo waiting at the
-top of the shaft. The mascot is lifted pixel-for-pixel out of
-`docs/site/public/logo.svg`, so he is the same 18×18 dog that is on the homepage.
+**Built to be playable by a five-year-old.** One rule, one input, no timer, no
+enemies, no fail state. Hold a direction; the ground gives way. Fill the bar with
+treasure, then walk right into the glowing door.
 
-**There is no timer, nothing chases you, and you cannot lose.** Hold a direction
-and the drill bites; softer ground gives way faster than stone.
+You start above ground — sky, sun, clouds, a tree, and Milo waiting at the top of
+the shaft.
 
-Each level runs **west to east**: fill the value bar, which unlocks the gate on the
-right, then dig over to it. The gate glows from anywhere on the map and an edge
-marker gives its distance, so "head east" always has something to aim at.
+## The dog
 
-Level 1 is a single screen wide and needs 90 in value — a couple of minutes. Levels
-grow mostly *downward* from there, with a bigger quota and more bedrock in the way,
-so later ones are mazes rather than open dirt.
+He is a whole animal — an oval body, four legs and a tail, wearing a hard hat,
+with the mascot from `docs/site/public/logo.svg` (the same 18×18 dog that is on
+the homepage) as his head. Everything below the neck is built from one oval
+primitive, which is what keeps him looking like one creature. Hanging ears, a
+tail and paws off the bare logo head — the first thing tried here — read as a
+mutant, not a dog.
 
-Three upgrades are buried in the earth, pulsing brighter than ore so you can spot
-them: **a faster drill**, a **wide drill** that takes the tiles either side of the
-bit, and a **brighter lamp**. They last for the level.
+Head bright, body mid, legs dark: that gradient separates the three without
+needing an outline between them, and the whole animal carries a dark rim so he
+never sinks into the wall he is chewing on.
 
-Ore glows faintly on its own, so a seam shows up at the edge of the lamp before you
-can see what it is — which is the entire hook. Gold is common near the surface,
-emerald sits deeper, and crystal only appears in the bottom third.
+Three states, read straight off the world, and meant to be obvious across a room:
 
-Flooded caverns open up in the mid depths. You swim straight through them; the
-surface is two travelling sine waves with a lit crest and caustic banding
-underneath. The water does not drain when you breach it — a flooded cavern stays
-flooded, and is a shortcut rather than a hazard.
+- **digging** — body juddering, both front paws off the ground and scrabbling at
+  the rock face, tail going flat out, a three-spoke bit spinning on the tile
+- **trotting** — a series of little hops, legs swinging in pairs
+- **sitting** — back legs folded under him, a slow breath, a blink, a pop up onto
+  his feet every few seconds, a yawn a few seconds after that, and if you leave
+  him long enough, Z's
 
-Breaking a tile throws a dust cloud that swells and thins out in about a third of a
-second, plus solid chunks that arc away and fall. Dust drifts upward and has heavy
-drag; debris has gravity and almost none. Same particle struct, different numbers.
+## The ground
+
+Blocks are big — 34 pixels — because a five-year-old reads "one block, one dig",
+and at half that size the map was a field of detail nobody could parse.
+
+Three grounds, in three wandering bands, each with its own hue *and* its own
+marking so they still read when the light is low: pebbly tan **dirt** on top,
+layered orange **clay** below it, cracked blue-grey **stone** at the bottom.
+Purple-black **bedrock** is scenery you cannot dig, and it is deliberately rare —
+being walled in without understanding why is the one way this game stops being fun.
+
+Tiles are not drawn as squares. Every corner that faces open air is rounded, by a
+radius that varies per tile, and every face that borders air bulges a pixel or
+three past its cell. The lamp is drawn as **one** smooth glow over the finished
+tiles rather than as a per-tile brightness — per-tile falloff was painting every
+34-pixel cell its own flat shade, which is a checkerboard no amount of rounded
+corners can hide.
+
+## Treasure
+
+Gold near the surface, emerald deeper, crystal at the bottom. An ore tile is
+painted in the colour of the ground **around** it, with only the nuggets in
+metal — fill a whole cell with gold and a seam reads as a yellow brick you can
+spot the outline of from across the map.
+
+Each nugget gets a body, an offset specular chip, a highlight band that sweeps
+across the seam on its own phase, and a four-point twinkle that fires on its own
+clock. The sparkle is the reward, and it arrives before the number does.
+
+Breaking a seam throws nuggets that scatter, hang for a beat, then home in on the
+satchel with a rising acceleration. The counter only ticks when one lands.
+
+Three upgrades are buried in the earth, pulsing brighter than ore: **a faster
+drill**, a **wide drill** that takes the tiles either side of the bit, and a
+**brighter lamp**. They last for the level.
+
+## The way out
+
+The door runs the **full height** of the right-hand wall. A gate three tiles tall
+at one depth meant "go right" was only half the instruction — you also had to
+find the row. Now right is right, from anywhere, and an edge marker gives the
+distance whenever it is off screen.
+
+Fill the bar (75 on level 1, +50 a level) and the wall turns green.
 
 ## The world
 
-The playable box grows with the level, from one screen wide up to 96 × 110 tiles.
-It is generated from smooth value noise with a fixed hash offset by the level
-number, so a given level is the same every run — a good seam is somewhere you can go
-back to. Depth drives everything: harder rock, rarer ore, bedrock pillars.
+One box a little wider than the screen and a few screens deep, growing slowly
+with the level. Generated from smooth value noise offset by the level number, so
+a given level is the same every run — a good seam is somewhere you can go back to.
 
-Ore does not go straight into the counter. Breaking a seam throws nuggets that
-scatter, hang for a beat, then home in on the satchel with a rising acceleration;
-the counter ticks and the total punches larger when one actually lands.
-
-Only the tiles inside the view are ever touched, and each is lit by distance from
-the lamp. The darkness is what makes a tunnel feel like a tunnel instead of a grid
-of brown squares.
+Flooded pools open up in the mid depths. You swim straight through them; nothing
+bad happens. The water does not drain when you breach it.
 
 ## Engine
 
-Same `gfx.milo` as `../neon` and `../shatter`: additive drawing into a linear-light
-`Vec<f32>`, bright-pass, separable blur at quarter resolution, Reinhard tone map.
-1280×720 at 60 fps on the CPU.
+Same `gfx.milo` as `../neon` and `../shatter`: additive drawing into a
+linear-light `Vec<f32>`, bright-pass, separable blur at quarter resolution,
+Reinhard tone map. 1280×720 at 60 fps on the CPU.
 
 `unsafe` appears twice, both FFI — the SDL calls in `sdl.milo` and the texture
 upload in `main.milo`. Worldgen, the drill and the renderer contain none.

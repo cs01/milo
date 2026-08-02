@@ -1,0 +1,62 @@
+// The stage director's pacing rules, as contracts a solver checks rather than
+// comments I have to believe.
+//
+// This is a separate file for a mechanical reason worth writing down: `milo
+// prove` generates verification conditions for every function in a file that
+// carries a contract, and `world.milo` is two thousand lines of gameplay. Proving
+// it did not finish in five minutes, and the compile-time contract gate runs on
+// every push. Keeping the provable decisions in their own small module makes the
+// proof instant and costs nothing — the rules were pure functions anyway.
+//
+// The rolls arrive as parameters because randomness is not provable. Drawing them
+// at the call site leaves behind a decision that is.
+//
+// Both functions are written for the bundled Fourier-Motzkin solver, which is
+// worth knowing before editing them: it decides a straight-line chain of up to
+// three branches and reports `unknown — no integer witness (rational-only)` at
+// four or more, because it finds a rational vertex and has no branch-and-bound to
+// hunt for an integer one. `--solver=z3` proves the longer forms happily. So
+// `unlockedSquads` is a clamp-and-offset rather than the five-arm staircase it
+// reads as, and the rarity re-roll lives at the call site rather than in here.
+// Neither shape is contorted for its own sake; both are the price of staying
+// inside a fragment the default solver can actually decide.
+
+pub let SQUAD_DRONES: i64 = 0
+
+// Which squad enters next.
+//
+// The second postcondition is the bug this game actually shipped: with no
+// `intro` guard your very first encounter could roll wall-mounted turrets, which
+// is an ambush at the point where you do not yet know what the game is. Delete
+// the guard below and `milo prove` refutes it with a counterexample — `intro = 1,
+// roll = 1, unlocked = 2, result = 1` — instead of it being found by playing.
+//
+// The first postcondition is the cheaper kind of safety: `runSquad` dispatches on
+// this id, so "always a valid squad" is worth stating even though nothing has
+// ever violated it.
+pub fn pickSquad(intro: i64, unlocked: i64, roll: i64): i64
+requires unlocked >= 1
+requires roll >= 0 && roll < unlocked
+ensures result >= 0 && result < unlocked
+ensures!(intro > 0) || result == SQUAD_DRONES
+{
+    if intro > 0 {
+        return SQUAD_DRONES // the opening is taught, never rolled
+    }
+    return roll
+}
+
+// How many squad types a stage may draw from: 4 at stage 1, one more each stage,
+// capped at 8. One new kind per stage, in a fixed order, so the roster is learned
+// rather than dumped.
+pub fn unlockedSquads(stage: i64): i64
+ensures result >= 1 && result <= 8
+{
+    if stage <= 1 {
+        return 4
+    }
+    if stage >= 5 {
+        return 8
+    }
+    return stage + 3
+}

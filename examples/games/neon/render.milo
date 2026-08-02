@@ -9,7 +9,7 @@ from "std/math" import {
     Math
 }
 from "./gfx" import {
-    Canvas, line, spot, circle, text, textCentered, textWidth, fillRect,
+    Canvas, line, spot, circle, text, textCentered, textWidth, fillRect, cameraSet, cameraClear,
     drawSprite, blitSprite, Sprite
 }
 from "./grid" import {
@@ -141,7 +141,7 @@ fn backdrop(c: &mut Canvas, w: &World) {
     let ch = c.h as f64
     // A floor tone under everything: without it the gaps between lumps are pure
     // black, and the wall reads as high-frequency noise rather than as a surface.
-    fillRect(c, 0.0, 0.0, c.w as f64, ch, 0.0075, 0.0068, 0.0085, 1.0)
+    fillRect(c, 0.0 - 80.0, 0.0 - 80.0, (c.w as f64) + 80.0, ch + 80.0, 0.0075, 0.0068, 0.0085, 1.0)
     noduleField(c, w.dist * 0.16, 62.0, 34.0, 0.0075, 0.0055, 101)
     ribcage(c, w.dist * 0.34, 224.0)
     noduleField(c, w.dist * 0.52, 104.0, 52.0, 0.016, 0.011, 401)
@@ -220,6 +220,9 @@ fn hashf(seed: i64, i: i64): f64 {
 }
 
 pub fn drawWorld(c: &mut Canvas, w: &World, s: &Sprites, ox: f64, oy: f64) {
+    // Enter world space once. Every primitive below picks the shake up from the
+    // canvas, so there is no per-call-site offset left to forget.
+    cameraSet(c, ox, oy)
     backdrop(c, w)
     // Drifting spores. Dim and cold on purpose — this layer used to be bright
     // enough to hide a bullet in.
@@ -228,7 +231,7 @@ pub fn drawWorld(c: &mut Canvas, w: &World, s: &Sprites, ox: f64, oy: f64) {
         let f = 0.03 + z * 0.11
         spot(c, w.stars[i].x, w.stars[i].y, 0.6 + z * 1.1, f * 0.55, f * 0.6, f * 0.7)
     }
-    terrainDraw(c, w.terrain, ox, oy)
+    terrainDraw(c, w.terrain)
     // The lattice is invisible until something shoves it; what you see here is
     // the shockwave, not a grid.
     gridDrawShock(c, w.grid, 0.10, 0.22, 0.40)
@@ -243,26 +246,26 @@ pub fn drawWorld(c: &mut Canvas, w: &World, s: &Sprites, ox: f64, oy: f64) {
                 let t = w.ents[i].target
                 if alive(w, t) {
                     let pulse = 0.6 + 0.4 * Math.sin(w.time * 14.0)
-                    line(c, w.ents[i].x + ox, w.ents[i].y + oy, w.ents[t.slot].x + ox, w.ents[t.slot].y + oy, 0.15 * pulse, 1.5 * pulse, 0.7 * pulse)
-                    spot(c, w.ents[t.slot].x + ox, w.ents[t.slot].y + oy, 9.0, 0.1, 0.9, 0.4)
+                    line(c, w.ents[i].x, w.ents[i].y, w.ents[t.slot].x, w.ents[t.slot].y, 0.15 * pulse, 1.5 * pulse, 0.7 * pulse)
+                    spot(c, w.ents[t.slot].x, w.ents[t.slot].y, 9.0, 0.1, 0.9, 0.4)
                 }
             }
             Kind.Plate => {
                 let core = w.ents[i].leader
                 if alive(w, core) {
-                    line(c, w.ents[i].x + ox, w.ents[i].y + oy, w.ents[core.slot].x + ox, w.ents[core.slot].y + oy, 0.55, 0.34, 0.08)
+                    line(c, w.ents[i].x, w.ents[i].y, w.ents[core.slot].x, w.ents[core.slot].y, 0.55, 0.34, 0.08)
                 }
             }
             Kind.SnakeSeg => {
                 let ld = w.ents[i].leader
                 if alive(w, ld) {
-                    line(c, w.ents[i].x + ox, w.ents[i].y + oy, w.ents[ld.slot].x + ox, w.ents[ld.slot].y + oy, 0.5, 0.45, 0.30)
+                    line(c, w.ents[i].x, w.ents[i].y, w.ents[ld.slot].x, w.ents[ld.slot].y, 0.5, 0.45, 0.30)
                 }
             }
             Kind.Pod => {
                 // A short tether to the ship, so a pod reads as yours and not as
                 // one more thing trying to kill you.
-                line(c, w.ents[i].x + ox, w.ents[i].y + oy, w.player.x + ox, w.player.y + oy, 0.55, 0.25, 0.05)
+                line(c, w.ents[i].x, w.ents[i].y, w.player.x, w.player.y, 0.55, 0.25, 0.05)
             }
             _ => {
             }
@@ -273,7 +276,7 @@ pub fn drawWorld(c: &mut Canvas, w: &World, s: &Sprites, ox: f64, oy: f64) {
     for i in 0..w.parts.len {
         let t = w.parts[i].life / w.parts[i].maxLife
         let f = t * t
-        spot(c, w.parts[i].x + ox, w.parts[i].y + oy, w.parts[i].size * (0.5 + t), w.parts[i].cr * f, w.parts[i].cg * f, w.parts[i].cb * f)
+        spot(c, w.parts[i].x, w.parts[i].y, w.parts[i].size * (0.5 + t), w.parts[i].cr * f, w.parts[i].cg * f, w.parts[i].cb * f)
     }
 
     // lightning arcs
@@ -281,14 +284,14 @@ pub fn drawWorld(c: &mut Canvas, w: &World, s: &Sprites, ox: f64, oy: f64) {
         let a = w.arcs[i]
         let f = a.life / 0.14
         let segs = 7
-        var px = a.x0 + ox
-        var py = a.y0 + oy
+        var px = a.x0
+        var py = a.y0
         let dx = a.x1 - a.x0
         let dy = a.y1 - a.y0
         for k in 1..segs + 1 {
             let t = (k as f64) / (segs as f64)
-            var qx = a.x0 + dx * t + ox
-            var qy = a.y0 + dy * t + oy
+            var qx = a.x0 + dx * t
+            var qy = a.y0 + dy * t
             if k < segs {
                 qx = qx + hashf(a.seed, k) * 16.0
                 qy = qy + hashf(a.seed, k + 99) * 16.0
@@ -311,32 +314,32 @@ pub fn drawWorld(c: &mut Canvas, w: &World, s: &Sprites, ox: f64, oy: f64) {
             while k < 9 {
                 let t = ((k as f64) / 8.0) * 2.0 - 1.0
                 let f = 1.0 - Math.abs(t) * 0.82
-                let yy = b.y + t * half + oy
-                line(c, tailX + ox, yy, b.x + ox, yy, b.cr * f, b.cg * f, b.cb * f)
+                let yy = b.y + t * half
+                line(c, tailX, yy, b.x, yy, b.cr * f, b.cg * f, b.cb * f)
                 k = k + 1
             }
-            line(c, tailX + ox, b.y + oy, b.x + ox, b.y + oy, 2.6, 2.6, 2.6)
-            spot(c, b.x + ox, b.y + oy, half * 1.2, 1.6, 2.0, 2.4)
+            line(c, tailX, b.y, b.x, b.y, 2.6, 2.6, 2.6)
+            spot(c, b.x, b.y, half * 1.2, 1.6, 2.0, 2.4)
             continue
         }
         // Every other projectile is a sprite. Shape carries the meaning, so the
         // read does not depend on resolving a colour against a lit wall: flat
         // lance = yours, round bead = theirs, finned body = a missile.
-        let bx = b.x + ox
-        let by = b.y + oy
+        let bx = b.x
+        let by = b.y
         if b.src == SRC_HOSTILE {
             // a short wake, then the bead itself on top of it
-            line(c, b.px + ox, b.py + oy, bx, by, 0.55, 0.05, 0.04)
+            line(c, b.px, b.py, bx, by, 0.55, 0.05, 0.04)
             spot(c, bx, by, 9.0, 0.34, 0.02, 0.02)
             drawSprite(c, s.hostileShot, bx, by, 1.7, false, 0.30)
         } else if b.src == SRC_MISSILE {
             drawSprite(c, s.missile, bx, by, 1.9, false, 0.25)
             spot(c, bx - 14.0, by, 5.0, 1.3, 0.55, 0.10)
         } else if b.src == SRC_POD {
-            line(c, b.px + ox, b.py + oy, bx, by, 0.7, 0.15, 0.7)
+            line(c, b.px, b.py, bx, by, 0.7, 0.15, 0.7)
             drawSprite(c, s.podShot, bx, by, 1.5, false, 0.40)
         } else {
-            line(c, b.px + ox, b.py + oy, bx, by, 0.6, 0.45, 0.10)
+            line(c, b.px, b.py, bx, by, 0.6, 0.45, 0.10)
             drawSprite(c, s.shot, bx, by, 1.6, false, 0.40)
         }
     }
@@ -347,8 +350,8 @@ pub fn drawWorld(c: &mut Canvas, w: &World, s: &Sprites, ox: f64, oy: f64) {
             continue
         }
         let e = w.ents[i]
-        let x = e.x + ox
-        let y = e.y + oy
+        let x = e.x
+        let y = e.y
         if e.spawnT > 0.0 {
             // materialising: a shrinking warning ring, no collision yet
             let r = e.radius * (1.0 + e.spawnT * 5.0)
@@ -421,8 +424,8 @@ pub fn drawWorld(c: &mut Canvas, w: &World, s: &Sprites, ox: f64, oy: f64) {
         if w.player.invuln > 0.0 {
             f = 0.35 + 0.65 * (0.5 + 0.5 * Math.sin(w.time * 34.0))
         }
-        let x = w.player.x + ox
-        let y = w.player.y + oy
+        let x = w.player.x
+        let y = w.player.y
         // exhaust first, so the hull sits on top of it
         spot(c, x - 34.0, y, 10.0, 0.9 * f, 0.34 * f, 0.06 * f)
         spot(c, x - 38.0, y, 5.0, 1.2 * f, 0.8 * f, 0.3 * f)
@@ -466,6 +469,7 @@ fn pipRow(c: &mut Canvas, x: i64, y: i64, n: i64, maxN: i64, r: f64, g: f64, b: 
 }
 
 pub fn drawHud(c: &mut Canvas, w: &World) {
+    cameraClear(c) // back to screen space: the HUD must not move
     // The wall behind the HUD is busy now, so the HUD gets its own plate.
     fillRect(c, 0.0, 0.0, 300.0, 226.0, 0.02, 0.02, 0.03, 0.72)
     fillRect(c, 0.0, 224.0, 300.0, 226.0, 0.20, 0.30, 0.40, 0.9)

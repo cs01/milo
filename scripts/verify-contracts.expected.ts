@@ -34,6 +34,10 @@ export const EXPECTED: Record<string, Expected> = {
   "examples/embedded/flightController.milo": { proven: 11, unknown: 55, errors: 0 },
   // 3 refuted here are baselined (unbounded-Int model of `setpoint - measured`).
   "examples/embedded/pidStep.milo": { proven: 8, unknown: 0, errors: 0 },
+  // neon's stage-pacing rules. Both functions are shaped to stay inside what the
+  // bundled Fourier-Motzkin solver decides (<= 3 branches); the four-arm staircase
+  // they replaced reported `no integer witness (rational-only)` and needed z3.
+  "examples/games/neon/director.milo": { proven: 3, unknown: 0, errors: 0 },
   // Both AES-128 key-length preconditions into std/crypto, proven at the call site.
   "examples/net/termpair/encryption.milo": { proven: 2, unknown: 4, errors: 0 },
   // 3 proven / 4 unknown since `Arena` grew `invariant live >= 0`: construction and the

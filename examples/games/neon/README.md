@@ -290,11 +290,63 @@ drawing primitive must not be able to abort the process because the physics
 upstream of it went unstable. Losing a line for one frame is the correct response
 to that; losing the game is not.
 
+## The rules that are checked rather than believed
+
+The pacing rules live in `director.milo` as contracts, and `bun test` proves them
+on every push through the compile-time contract gate:
+
+```milo
+pub fn pickSquad(intro: i64, unlocked: i64, roll: i64): i64
+requires unlocked >= 1
+requires roll >= 0 && roll < unlocked
+ensures result >= 0 && result < unlocked
+ensures !(intro > 0) || result == SQUAD_DRONES
+```
+
+The second postcondition is a bug this game actually shipped: with no `intro`
+guard, your very first encounter could roll wall-mounted turrets that lead their
+shots, at the point where you do not yet know what the game is. Delete the guard
+and the solver refutes it — `counterexample: intro = 1, unlocked = 2, roll = 1,
+result = 1` — rather than it being found by playing.
+
+The rolls are parameters because randomness is not provable. Drawing them at the
+call site leaves behind a decision that is, and the flavour rule that makes the
+newest squad type rarer stays outside, in the director, where it belongs.
+
+**Three things this cost, all worth knowing before writing your own:**
+
+1. **It is its own file for a mechanical reason.** `milo prove` generates
+   verification conditions for every function in a file that carries a contract.
+   `world.milo` is two thousand lines and did not finish proving in five minutes;
+   the gate runs on every push. A small pure module proves in 0.17 s.
+2. **Both functions are shaped for the bundled solver.** Fourier-Motzkin decides a
+   chain of up to three branches and reports `unknown — no integer witness
+   (rational-only)` at four or more, because it finds a rational vertex and has no
+   branch-and-bound to hunt for an integer one. `--solver=z3` proves the longer
+   forms happily. So `unlockedSquads` is a clamp-and-offset rather than the
+   five-arm staircase it reads as. That is a real constraint, not a free lunch.
+3. **Contracts cannot see NaN.** Floats are modelled as reals, so
+   `ensures result == result` — false under IEEE 754 — is reported **proven** for
+   an arbitrary `f64`. A contract can bound a float, and the lattice clamp above
+   would verify happily, but it could never have caught the non-finite value that
+   aborted this game. That was the runtime overflow check's job, and the division
+   of labour is worth stating plainly: **contracts cover the algebra, runtime
+   checks cover the domain.**
+
+And two of the three bugs that actually cost time here are not contract-shaped at
+all. The camera-shake mismatch was a consistency property between two call sites
+in different modules — no ghost state to hang it on — and it got fixed by moving
+the camera onto the `Canvas` so no draw site can omit it. Scenery blooming in the
+same visual channel as enemy fire is perceptual, and got fixed by the blend/add
+split. Both are *make the wrong thing unspellable*, which is a different tool from
+*prove the right thing holds*, and a real program needs both.
+
 ## Files
 
 | File | What |
 |---|---|
 | `world.milo` | entities, handles, AI, collisions, pickups, the stage director — the argument |
+| `director.milo` | the pacing rules, as contracts the compile-time gate proves |
 | `terrain.milo` | the scrolling cave: two height fields and the generator that walks them |
 | `sprites.milo` | every sprite, as strings; the pickups are generated |
 | `grid.milo` | the mass-spring lattice everything pushes on |

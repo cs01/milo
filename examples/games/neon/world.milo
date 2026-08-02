@@ -21,6 +21,9 @@ from "std/random" import {
 from "./grid" import {
     Grid, gridNew, gridUpdate, gridImpulse, gridReset
 }
+from "./director" import {
+    pickSquad, unlockedSquads
+}
 from "./terrain" import {
     Terrain, terrainNew, terrainReset, terrainAdvance, terrainOpen, terrainSetGap,
     terrainHit, topAt, botAt
@@ -1979,24 +1982,6 @@ fn squadHealer(w: &mut World) {
     }
 }
 
-// One new squad type per stage, in a fixed order, so the roster is learned
-// rather than dumped.
-fn unlockedSquads(stage: i64): i64 {
-    if stage <= 1 {
-        return 4
-    }
-    if stage == 2 {
-        return 5
-    }
-    if stage == 3 {
-        return 6
-    }
-    if stage == 4 {
-        return 7
-    }
-    return 8
-}
-
 pub fn squadName(id: i64): string {
     if id == 0 {
         return "INTERCEPTORS"
@@ -2100,12 +2085,16 @@ fn updateStage(w: &mut World, dt: f64) {
             return
         }
         let unlocked = unlockedSquads(w.stage)
-        var pick = Random.range(0, unlocked)
-        // The newest squad type is rarer than the staples, so a stage still
-        // reads mostly like the one before it.
-        if unlocked > 4 && pick == unlocked - 1 && Random.range(0, 3) != 0 {
-            pick = Random.range(0, unlocked - 1)
+        // The newest squad type is rarer than the staples, so a stage still reads
+        // mostly like the one before it. This is taste, so it stays here; the
+        // rules worth proving live in `pickSquad`.
+        var roll = Random.range(0, unlocked)
+        if unlocked > 4 && roll == unlocked - 1 && Random.range(0, 3) != 0 {
+            roll = Random.range(0, unlocked - 1)
         }
+        // The rolls are drawn here; the decision itself is a pure function with a
+        // contract, so the pacing rules are checked rather than believed.
+        let pick = pickSquad(w.intro, unlocked, roll)
         runSquad(w, pick)
         w.nextSpawn = w.dist + Math.maxF64(260.0, Random.floatRange(560.0, 880.0) - (w.stage as f64) * 22.0)
     }

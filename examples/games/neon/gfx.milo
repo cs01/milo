@@ -39,6 +39,25 @@ pub struct Canvas {
     utx: Vec<f32>, //                 horizontal lerp weight
     uy0: Vec<i64>,
     uty: Vec<f32>,
+    // Camera shake, applied by every world-space primitive below. It lives on the
+    // canvas rather than being threaded through each draw call because the bug it
+    // exists to prevent is *forgetting one*: the rock used to be drawn unshaken
+    // while the ship was shaken, so at 34px of shake you crashed into nothing.
+    // There is no longer a way to spell a world draw that skips it.
+    camX: f64,
+    camY: f64,
+}
+
+// Enter world space. Everything drawn until `cameraClear` moves with the shake.
+pub fn cameraSet(c: &mut Canvas, x: f64, y: f64) {
+    c.camX = x
+    c.camY = y
+}
+
+// Enter screen space — the HUD, which must never move.
+pub fn cameraClear(c: &mut Canvas) {
+    c.camX = 0.0
+    c.camY = 0.0
 }
 
 // A pixel-art image: straight (non-premultiplied) RGBA in linear light, four
@@ -119,6 +138,8 @@ pub fn canvasNew(w: i64, h: i64): Canvas {
         utx: utx,
         uy0: uy0,
         uty: uty,
+        camX: 0.0,
+        camY: 0.0,
     }
 }
 
@@ -158,10 +179,14 @@ pub fn blendPix(c: &mut Canvas, x: i64, y: i64, r: f64, g: f64, b: f64, a: f64) 
     c.hdr[i + 2] = c.hdr[i + 2] * inv + ((b * k) as f32)
 }
 
-pub fn fillRect(c: &mut Canvas, x0: f64, y0: f64, x1: f64, y1: f64, r: f64, g: f64, b: f64, a: f64) {
+pub fn fillRect(c: &mut Canvas, x0i: f64, y0i: f64, x1i: f64, y1i: f64, r: f64, g: f64, b: f64, a: f64) {
     if a <= 0.0 {
         return
     }
+    let x0 = x0i + c.camX
+    let y0 = y0i + c.camY
+    let x1 = x1i + c.camX
+    let y1 = y1i + c.camY
     if !drawable(x0) || !drawable(y0) || !drawable(x1) || !drawable(y1) {
         return
     }
@@ -213,10 +238,12 @@ pub fn fillRect(c: &mut Canvas, x0: f64, y0: f64, x1: f64, y1: f64, r: f64, g: f
 // is what pushes a canopy or an eye past the bloom threshold while the carapace
 // around it stays matte. `tmix` washes the whole sprite toward a tint — the
 // white flash on a hit.
-pub fn blitSprite(c: &mut Canvas, s: &Sprite, cx: f64, cy: f64, sx: f64, sy: f64, flip: bool, alpha: f64, glow: f64, tr: f64, tg: f64, tb: f64, tmix: f64) {
+pub fn blitSprite(c: &mut Canvas, s: &Sprite, cxi: f64, cyi: f64, sx: f64, sy: f64, flip: bool, alpha: f64, glow: f64, tr: f64, tg: f64, tb: f64, tmix: f64) {
     if alpha <= 0.0 || sx <= 0.0 || sy <= 0.0 {
         return
     }
+    let cx = cxi + c.camX
+    let cy = cyi + c.camY
     if !drawable(cx) || !drawable(cy) {
         return
     }
@@ -295,10 +322,12 @@ pub fn drawSprite(c: &mut Canvas, s: &Sprite, cx: f64, cy: f64, scale: f64, flip
 }
 
 // A soft radial blob — the workhorse for particles, muzzle flashes and cores.
-pub fn spot(c: &mut Canvas, cx: f64, cy: f64, rad: f64, r: f64, g: f64, b: f64) {
+pub fn spot(c: &mut Canvas, cxi: f64, cyi: f64, rad: f64, r: f64, g: f64, b: f64) {
     if rad <= 0.0 {
         return
     }
+    let cx = cxi + c.camX
+    let cy = cyi + c.camY
     if !drawable(cx) || !drawable(cy) || !drawable(rad) {
         return
     }
@@ -361,6 +390,13 @@ fn drawable(v: f64): bool {
 // unstable, and losing a line for one frame is the correct response to that,
 // not losing the game.
 pub fn line(c: &mut Canvas, x0i: f64, y0i: f64, x1i: f64, y1i: f64, r: f64, g: f64, b: f64) {
+    lineRaw(c, x0i + c.camX, y0i + c.camY, x1i + c.camX, y1i + c.camY, r, g, b)
+}
+
+// The camera is applied once, at the public entry point. `poly` and `circle`
+// build their own vertices and then come through here, so they must not pay the
+// offset a second time on the way down.
+fn lineRaw(c: &mut Canvas, x0i: f64, y0i: f64, x1i: f64, y1i: f64, r: f64, g: f64, b: f64) {
     if !drawable(x0i) || !drawable(y0i) || !drawable(x1i) || !drawable(y1i) {
         return
     }
@@ -430,7 +466,9 @@ pub fn line(c: &mut Canvas, x0i: f64, y0i: f64, x1i: f64, y1i: f64, r: f64, g: f
 
 // A closed polygon given as flat x,y pairs in model space, transformed by
 // position / rotation / scale. Every enemy in the game is one of these.
-pub fn poly(c: &mut Canvas, pts: &Vec<f64>, cx: f64, cy: f64, ang: f64, scale: f64, r: f64, g: f64, b: f64) {
+pub fn poly(c: &mut Canvas, pts: &Vec<f64>, cxi: f64, cyi: f64, ang: f64, scale: f64, r: f64, g: f64, b: f64) {
+    let cx = cxi + c.camX
+    let cy = cyi + c.camY
     let n = pts.len / 2
     if n < 2 {
         return
@@ -442,13 +480,15 @@ pub fn poly(c: &mut Canvas, pts: &Vec<f64>, cx: f64, cy: f64, ang: f64, scale: f
     for i in 0..n {
         let qx = cx + pts[i * 2] * ca - pts[i * 2 + 1] * sa
         let qy = cy + pts[i * 2] * sa + pts[i * 2 + 1] * ca
-        line(c, px, py, qx, qy, r, g, b)
+        lineRaw(c, px, py, qx, qy, r, g, b)
         px = qx
         py = qy
     }
 }
 
-pub fn circle(c: &mut Canvas, cx: f64, cy: f64, rad: f64, segs: i64, r: f64, g: f64, b: f64) {
+pub fn circle(c: &mut Canvas, cxi: f64, cyi: f64, rad: f64, segs: i64, r: f64, g: f64, b: f64) {
+    let cx = cxi + c.camX
+    let cy = cyi + c.camY
     let step = 6.283185307179586 / (segs as f64)
     var px = cx + rad
     var py = cy
@@ -456,7 +496,7 @@ pub fn circle(c: &mut Canvas, cx: f64, cy: f64, rad: f64, segs: i64, r: f64, g: 
         let a = (i as f64) * step
         let qx = cx + Math.cos(a) * rad
         let qy = cy + Math.sin(a) * rad
-        line(c, px, py, qx, qy, r, g, b)
+        lineRaw(c, px, py, qx, qy, r, g, b)
         px = qx
         py = qy
     }

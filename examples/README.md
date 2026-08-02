@@ -5,7 +5,7 @@ Runnable programs; also stdlib tests.
 
 - `basics/` — fib, json, arenas, interp
 - `cli-tools/` — grep, jq, tree, fmt
-- `games/` — flight (3D), dig, shatter, neon, volt, yap
+- `games/` — atlas (planets), flight (3D), dig, shatter, neon, volt, yap
 - `graphics/` — donut, plasma, gpu cube/pong/ocean
 - `simulation/` — cloth, rigid bodies
 - `terminal/` — tetris, sysmon, tmux

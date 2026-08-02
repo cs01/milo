@@ -1,0 +1,1126 @@
+// ATLAS — fly around the solar system and find out what is on it.
+//
+//   milo build examples/games/atlas/main.milo -o /tmp/atlas --release && /tmp/atlas
+//
+// Drag to spin the world, scroll to fly in and out, and click a glowing dot to
+// learn what is there. `L` swaps between two reading levels, because the same
+// place needs different words at five and at twelve.
+//
+// The whole scene is ten draw calls: a sky, a ball, a ring, a halo, a bloom
+// chain, and one batched vertex buffer for the entire interface.
+
+from "std/gpu" import {
+    Gpu, Mesh, Shader, Texture2D, QUAD_VERT, readPixelsRgba8
+}
+from "std/math" import {
+    Math
+}
+from "std/args" import {
+    args
+}
+from "std/strconv" import {
+    parseInt, parseFloat
+}
+from "./sdl" import {
+    Input, Size, hostNew, inputNew, pollInput, drawableSize, pixelScale,
+    SDL_GL_SwapWindow, SDL_GL_DeleteContext, SDL_DestroyWindow, SDL_Quit,
+    SDL_GetTicks, SDL_SetWindowFullscreen, SDL_WINDOW_FULLSCREEN_DESKTOP,
+}
+from "./mat4" import {
+    V3, v3, identity, multiply, perspective, lookAt, rotationY, rotationZ,
+    scaling, rotateVec, project, transposeRot, Projected,
+}
+from "./sphere" import {
+    PI, DEG, latLonToUnit, sphereMesh, invertedSphereMesh, ringMesh,
+}
+from "./shaders" import {
+    PLANET_VERT, PLANET_FRAG, ATMO_FRAG, RING_FRAG, SKY_FRAG,
+}
+from "./post" import {
+    Post, postNew,
+}
+from "./ui2d" import {
+    Ui, uiNew, uiSetAtlasSize, textWidth, lineHeight, wrapText, commas, fmtFixed,
+}
+from "./worlds" import {
+    World, Landmark, allWorlds, ANCHOR_RING,
+    W_SUN, W_MERCURY, W_VENUS, W_EARTH, W_MOON, W_MARS, W_JUPITER, W_SATURN,
+    W_URANUS, W_NEPTUNE,
+}
+from "./assets" import {
+    fontAtlas, mapMercury, mapVenus, mapEarth, mapMoon, mapMars, mapJupiter,
+    mapSaturn, mapSun, mapUranus, mapNeptune,
+}
+
+pub let WIN_W: i64 = 1360
+
+pub let WIN_H: i64 = 860
+
+// One fixed light for the whole solar system. It does not follow the camera:
+// flying round to the night side and watching the terminator crawl is half of
+// what makes a rendered planet feel like an object rather than a picture.
+pub let SUN_DIR: V3 = V3 {
+    x: 0.6337, y: 0.2896, z: 0.7170
+}
+
+pub let FOV: f64 = 0.80
+
+pub let MIN_DIST: f64 = 1.28
+
+pub let MAX_DIST: f64 = 9.0
+
+// A pin has to be big enough for a five-year-old with a trackpad to hit.
+pub let PIN_HIT: f64 = 30.0
+
+pub struct Pin {
+    x: f64,
+    y: f64,
+    onScreen: bool, // in front of the eye AND on the near side of the world
+    facing: f64, // 0 at the limb, 1 straight at the camera
+}
+
+pub struct App {
+    worlds: Vec<World>,
+    tex: Vec<Texture2D>,
+    loaded: Vec<bool>,
+    order: Vec<i64>, // the order maps are decoded in, most-likely-visited first
+    cursor: i64,
+    wi: i64,
+    yaw: f64,
+    pitch: f64,
+    dist: f64,
+    tYaw: f64,
+    tPitch: f64,
+    tDist: f64,
+    spin: f64,
+    tSpin: f64,
+    flying: bool,
+    sel: i64,
+    hov: i64,
+    level: i64, // 0 = explorer (about five), 1 = scientist (about twelve)
+    help: bool,
+    pulse: f64, // the ripple that runs out from a freshly picked landmark
+    arrive: f64, // 0..1 fade when a new world is entered
+    pins: Vec<Pin>,
+}
+
+// Turn `faceLon` toward the camera. Called on arrival at a world, and on the
+// very first frame, so nobody ever meets the Moon by its back.
+fn faceWorld(app: &mut App) {
+    app.yaw = 1.97
+    app.pitch = 0.28
+    app.tYaw = app.yaw
+    app.tPitch = app.pitch
+    app.spin = wrapAngle(app.yaw - app.worlds[app.wi].faceLon * DEG)
+    app.tSpin = app.spin
+    app.dist = app.worlds[app.wi].viewDist
+    app.tDist = app.dist
+    app.flying = false
+    app.arrive = 0.0
+}
+
+fn shortName(s: &string): string {
+    if s.startsWith("The ") {
+        return s.slice(4, s.len).clone()
+    }
+    return s.clone()
+}
+
+// A 1x1 placeholder so every slot in `tex` is a real texture before its map has
+// been decoded. Freeing a shared dummy ten times would delete one live name and
+// nine bogus ones, so each slot gets its own.
+fn dummyTexture(): Texture2D {
+    var px: Vec<u32> = Vec.filled(1, 0xFF303840)
+    return Texture2D.rgba8(1, 1, px, false)
+}
+
+fn loadMap(i: i64): Texture2D {
+    if i == W_SUN {
+        return mapSun()
+    }
+    if i == W_MERCURY {
+        return mapMercury()
+    }
+    if i == W_VENUS {
+        return mapVenus()
+    }
+    if i == W_EARTH {
+        return mapEarth()
+    }
+    if i == W_MOON {
+        return mapMoon()
+    }
+    if i == W_MARS {
+        return mapMars()
+    }
+    if i == W_JUPITER {
+        return mapJupiter()
+    }
+    if i == W_SATURN {
+        return mapSaturn()
+    }
+    if i == W_URANUS {
+        return mapUranus()
+    }
+    return mapNeptune()
+}
+
+fn ensureLoaded(app: &mut App, i: i64) {
+    if app.loaded[i] {
+        return
+    }
+    app.tex[i].free()
+    app.tex[i] = loadMap(i)
+    app.loaded[i] = true
+}
+
+// Decode at most one map per frame, in the background, while the player is
+// already flying around Earth. Twenty-two megabytes of PNG takes long enough
+// that doing it all up front is a blank window and a spinning cursor.
+fn pumpLoading(app: &mut App) {
+    while app.cursor < app.order.len {
+        let i = app.order[app.cursor]
+        app.cursor = app.cursor + 1
+        if !app.loaded[i] {
+            ensureLoaded(app, i)
+            return
+        }
+    }
+}
+
+// ── camera ────────────────────────────────────────────────────────────────────
+
+fn clampf(v: f64, lo: f64, hi: f64): f64 {
+    if v < lo {
+        return lo
+    }
+    if v > hi {
+        return hi
+    }
+    return v
+}
+
+// Shortest way round the circle. Without this, easing from 179 degrees to -179
+// takes the long way and the planet does a full spin to move two degrees.
+fn wrapAngle(a: f64): f64 {
+    var x = a
+    while x > PI {
+        x = x - PI * 2.0
+    }
+    while x < -PI {
+        x = x + PI * 2.0
+    }
+    return x
+}
+
+fn cameraDir(yaw: f64, pitch: f64): V3 {
+    let cp = Math.cos(pitch)
+    return v3(cp * Math.sin(yaw), Math.sin(pitch), cp * Math.cos(yaw))
+}
+
+// The planet's orientation: axial tilt first, then today's spin about the tilted
+// pole. Anything anchored to the surface goes through this, so a pin and the
+// texel under it can never drift apart.
+fn worldModel(app: &App): Vec<f32> {
+    let tilt = rotationZ(app.worlds[app.wi].tilt * DEG)
+    return multiply(tilt, rotationY(app.spin))
+}
+
+fn landmarkLocal(w: &World, li: i64): V3 {
+    if w.landmarks[li].anchor == ANCHOR_RING {
+        // Out on the ring plane rather than on the sphere, at the middle of the
+        // bright part and offset from the sun-facing side so the pin is legible.
+        let r = (w.ringInner + w.ringOuter) * 0.5
+        return v3(r * 0.82, 0.0, r * 0.57)
+    }
+    return latLonToUnit(w.landmarks[li].lat, w.landmarks[li].lon + w.lonOffset)
+}
+
+// Ease the spin so the chosen landmark turns into the daylight, and point the
+// camera at where it will be when it gets there. Solving the two together is the
+// only way the flight lands with the subject lit AND centred.
+fn flyTo(app: &mut App, li: i64) {
+    let local = landmarkLocal(app.worlds[app.wi], li)
+    let tilt = rotationZ(app.worlds[app.wi].tilt * DEG)
+
+    // Longitude of the sun in the planet's untilted frame, minus the landmark's
+    // own longitude, is the spin that brings one under the other. The tilt is a
+    // rotation, so its inverse is its transpose: rotate the sun by -tilt.
+    let untilted = rotateVec(rotationZ(-app.worlds[app.wi].tilt * DEG), SUN_DIR)
+    let want = Math.atan2(untilted.x, untilted.z)
+    let have = Math.atan2(local.x, local.z)
+    var delta = wrapAngle(want - have)
+    // Not dead-on: a light source directly behind the camera flattens every bit
+    // of relief the bump term just produced. Stopping short of the sub-solar
+    // point leaves the shadows that make a mountain look like a mountain.
+    delta = delta - 0.95
+    app.tSpin = app.spin + wrapAngle(delta - app.spin)
+
+    // Where that puts it, so the camera can be aimed at the arrival point.
+    let arrived = rotateVec(multiply(tilt, rotationY(app.tSpin)), local)
+    let n = arrived.norm()
+    app.tPitch = clampf(Math.asin(clampf(n.y, -1.0, 1.0)), -1.45, 1.45)
+    app.tYaw = Math.atan2(n.x, n.z)
+    var near = 2.45
+    if app.worlds[app.wi].landmarks[li].anchor == ANCHOR_RING {
+        near = app.worlds[app.wi].ringOuter * 1.9
+    }
+    app.tDist = near
+    app.flying = true
+    app.pulse = 0.0
+}
+
+fn easeCamera(app: &mut App, dt: f64) {
+    if !app.flying {
+        return
+    }
+    let k = 1.0 - Math.exp(-dt * 2.6)
+    app.yaw = app.yaw + wrapAngle(app.tYaw - app.yaw) * k
+    app.pitch = app.pitch + (app.tPitch - app.pitch) * k
+    app.dist = app.dist + (app.tDist - app.dist) * k
+    app.spin = app.spin + (app.tSpin - app.spin) * k
+    if Math.abs(wrapAngle(app.tYaw - app.yaw)) < 0.004 && Math.abs(app.tDist - app.dist) < 0.01 {
+        app.flying = false
+        app.spin = app.tSpin
+    }
+}
+
+// ── landmark projection ───────────────────────────────────────────────────────
+
+// `vp` here is view-projection WITHOUT the model: the positions below are
+// already rotated into world space, and passing the full MVP applies the
+// planet's spin a second time — which draws every pin at the right distance from
+// the centre and the wrong longitude.
+fn updatePins(app: &mut App, vp: &Vec<f32>, model: &Vec<f32>, eye: &V3, w: f64, h: f64) {
+    app.pins.clear()
+    let count = app.worlds[app.wi].landmarks.len
+    var i = 0
+    while i < count {
+        let local = landmarkLocal(app.worlds[app.wi], i)
+        // Lift surface pins clear of the surface so the marker is never
+        // z-fought by the very terrain it is labelling.
+        var lifted = local
+        if app.worlds[app.wi].landmarks[i].anchor != ANCHOR_RING {
+            lifted = local.scale(1.012)
+        }
+        let world = rotateVec(model, lifted)
+        let p = project(vp, world, w, h)
+        var facing = 0.0
+        var vis = false
+        if p.visible {
+            let toEye = eye.sub(world).norm()
+            let outward = rotateVec(model, local).norm()
+            facing = outward.dot(toEye)
+            // A ring pin has no outward surface normal worth testing, so it is
+            // visible whenever the depth buffer says it is.
+            if app.worlds[app.wi].landmarks[i].anchor == ANCHOR_RING {
+                facing = 1.0
+                vis = true
+            } else {
+                vis = facing > 0.06
+            }
+        }
+        app.pins.push(Pin {
+            x: p.x, y: p.y, onScreen: vis, facing: facing
+        }
+        )
+        i = i + 1
+    }
+}
+
+fn pickPin(app: &App, mx: f64, my: f64, u: f64): i64 {
+    var best = -1
+    var bestD = PIN_HIT * u * PIN_HIT * u
+    var i = 0
+    while i < app.pins.len {
+        if app.pins[i].onScreen {
+            let dx = app.pins[i].x - mx
+            let dy = app.pins[i].y - my
+            let d = dx * dx + dy * dy
+            if d < bestD {
+                bestD = d
+                best = i
+            }
+        }
+        i = i + 1
+    }
+    return best
+}
+
+// ── HUD ───────────────────────────────────────────────────────────────────────
+
+fn factRow(ui: &mut Ui, x: f64, y: f64, u: f64, label: &string, value: &string) {
+    ui.text(x, y, 8.0 * u, label, 0.52, 0.60, 0.72, 1.0)
+    ui.text(x + 132.0 * u, y, 9.0 * u, value, 0.88, 0.93, 1.0, 1.0)
+}
+
+fn hoursLabel(h: f64): string {
+    if h < 48.0 {
+        return fmtFixed(h, 1) + " hours"
+    }
+    return fmtFixed(h / 24.0, 1) + " Earth days"
+}
+
+fn yearLabel(d: f64): string {
+    if d <= 0.0 {
+        return "-"
+    }
+    if d < 800.0 {
+        return fmtFixed(d, 1) + " Earth days"
+    }
+    return fmtFixed(d / 365.25, 1) + " Earth years"
+}
+
+// What a child who weighs 30 kg would weigh here. Gravity as a multiple of g is
+// abstract; a number on a bathroom scale is not.
+fn weightLabel(g: f64): string {
+    return fmtFixed(30.0 * g, 1) + " kg"
+}
+
+fn drawInfoPanel(ui: &mut Ui, app: &App, u: f64) {
+    let x = 30.0 * u
+    let panelW = 340.0 * u
+    let body = 8.5 * u
+
+    // The blurb is wrapped before the panel is drawn, because the panel has to
+    // be tall enough to hold it — measuring after drawing is how text ends up
+    // sitting on the planet with no background behind it.
+    var blurb = app.worlds[app.wi].little.clone()
+    if app.level == 1 {
+        blurb = app.worlds[app.wi].big.clone()
+    }
+    var lines = wrapText(blurb, body, panelW - 44.0 * u)
+    var rows = 8
+    if app.worlds[app.wi].distanceOf.len == 0 {
+        rows = 7
+    }
+    let panelH = 118.0 * u + (rows as f64) * 30.0 * u + 16.0 * u + (lines.len as f64) * lineHeight(body)
+    ui.roundRect(x, 30.0 * u, panelW, panelH, 16.0 * u, 0.02, 0.035, 0.065, 0.82)
+
+    let tint = app.worlds[app.wi].tint
+    var y = 52.0 * u
+    ui.text(x + 22.0 * u, y, 19.0 * u, app.worlds[app.wi].name, tint.x, tint.y, tint.z, 1.0)
+    y = y + 46.0 * u
+    ui.text(x + 22.0 * u, y, 8.0 * u, app.worlds[app.wi].kind, 0.5, 0.58, 0.7, 1.0)
+    y = y + 30.0 * u
+
+    let fx = x + 22.0 * u
+    factRow(ui, fx, y, u, "ACROSS", commas(app.worlds[app.wi].diameterKm) + " km")
+    y = y + 30.0 * u
+    factRow(ui, fx, y, u, "ONE SPIN", hoursLabel(app.worlds[app.wi].dayHours))
+    y = y + 30.0 * u
+    factRow(ui, fx, y, u, "ONE ORBIT", yearLabel(app.worlds[app.wi].yearDays))
+    y = y + 30.0 * u
+    factRow(ui, fx, y, u, "TEMPERATURE", fmtFixed(app.worlds[app.wi].tempC, 0) + " C")
+    y = y + 30.0 * u
+    factRow(ui, fx, y, u, "MOONS", $"{app.worlds[app.wi].moons}")
+    y = y + 30.0 * u
+    factRow(ui, fx, y, u, "YOU WOULD WEIGH", weightLabel(app.worlds[app.wi].gravity))
+    y = y + 30.0 * u
+    if app.worlds[app.wi].distanceOf.len > 0 {
+        factRow(ui, fx, y, u, "FROM " + app.worlds[app.wi].distanceOf, commas(app.worlds[app.wi].distanceKm) + " km")
+        y = y + 30.0 * u
+    }
+    factRow(ui, fx, y, u, "TILT", fmtFixed(app.worlds[app.wi].tilt, 1) + " degrees")
+
+    var ly = y + 34.0 * u
+    var i = 0
+    while i < lines.len {
+        ui.text(x + 22.0 * u, ly, body, lines[i], 0.72, 0.79, 0.9, 1.0)
+        ly = ly + lineHeight(body)
+        i = i + 1
+    }
+}
+
+fn drawLandmarkCard(ui: &mut Ui, app: &App, u: f64, w: f64) {
+    if app.sel < 0 {
+        return
+    }
+    let cardW = 430.0 * u
+    let x = w - cardW - 30.0 * u
+    let y = 30.0 * u
+    let tint = app.worlds[app.wi].tint
+
+    var text = app.worlds[app.wi].landmarks[app.sel].little.clone()
+    if app.level == 1 {
+        text = app.worlds[app.wi].landmarks[app.sel].big.clone()
+    }
+    let body = 9.5 * u
+    var lines = wrapText(text, body, cardW - 48.0 * u)
+    let cardH = 106.0 * u + (lines.len as f64) * lineHeight(body) + 34.0 * u
+
+    ui.roundRect(x, y, cardW, cardH, 18.0 * u, 0.02, 0.035, 0.065, 0.88)
+    ui.roundRect(x, y, cardW, 5.0 * u, 2.5 * u, tint.x, tint.y, tint.z, 0.9)
+
+    ui.text(x + 24.0 * u, y + 28.0 * u, 7.5 * u, "LANDMARK", 0.5, 0.58, 0.7, 1.0)
+    ui.text(x + 24.0 * u, y + 50.0 * u, 14.0 * u, app.worlds[app.wi].landmarks[app.sel].name, 0.92, 0.96, 1.0, 1.0)
+
+    var ly = y + 106.0 * u
+    var i = 0
+    while i < lines.len {
+        ui.text(x + 24.0 * u, ly, body, lines[i], 0.80, 0.86, 0.95, 1.0)
+        ly = ly + lineHeight(body)
+        i = i + 1
+    }
+    ui.text(x + 24.0 * u, ly + 12.0 * u, 7.5 * u, "PRESS L FOR THE OTHER READING LEVEL", 0.42, 0.5, 0.62, 1.0)
+}
+
+fn drawPins(ui: &mut Ui, app: &App, u: f64, time: f64) {
+    var i = 0
+    while i < app.pins.len {
+        if app.pins[i].onScreen {
+            let fade = clampf(app.pins[i].facing * 3.0, 0.0, 1.0)
+            let selected = i == app.sel
+            let hovered = i == app.hov
+            var r = 0.55
+            var g = 0.85
+            var b = 1.0
+            if selected {
+                r = 1.0
+                g = 0.86
+                b = 0.45
+            }
+            let beat = 0.5 + 0.5 * Math.sin(time * 2.2 + (i as f64) * 1.7)
+            var radius = 13.0 * u
+            if hovered || selected {
+                radius = 18.0 * u
+            }
+            ui.glow(app.pins[i].x, app.pins[i].y, radius * (1.0 + 0.18 * beat), r, g, b, 0.55 * fade)
+            ui.ring(app.pins[i].x, app.pins[i].y, 8.0 * u, 1.6 * u, r, g, b, 0.95 * fade)
+            ui.glow(app.pins[i].x, app.pins[i].y, 3.2 * u, 1.0, 1.0, 1.0, fade)
+
+            // The name only appears once the pin is worth reading, which keeps
+            // eight labels from stacking into a wall at the limb.
+            if (hovered || selected) && fade > 0.35 {
+                let label = app.worlds[app.wi].landmarks[i].name.clone()
+                let ts = 9.0 * u
+                let tw = textWidth(label, ts)
+                let lx = app.pins[i].x - tw * 0.5
+                let ly = app.pins[i].y + 20.0 * u
+                ui.roundRect(lx - 12.0 * u, ly - 6.0 * u, tw + 24.0 * u, 30.0 * u, 8.0 * u, 0.02, 0.04, 0.07, 0.85)
+                ui.text(lx, ly, ts, label, r, g, b, 1.0)
+            }
+        }
+        i = i + 1
+    }
+}
+
+fn drawChips(ui: &mut Ui, app: &App, u: f64, w: f64, h: f64, mx: f64, my: f64): i64 {
+    let n = app.worlds.len
+    let cw = 106.0 * u
+    let ch = 40.0 * u
+    let gap = 8.0 * u
+    let total = (n as f64) * cw + ((n - 1) as f64) * gap
+    let x0 = (w - total) * 0.5
+    let y = h - ch - 28.0 * u
+    var hit = -1
+    var i = 0
+    while i < n {
+        let x = x0 + (i as f64) * (cw + gap)
+        let over = mx >= x && mx <= x + cw && my >= y && my <= y + ch
+        if over {
+            hit = i
+        }
+        let current = i == app.wi
+        var a = 0.55
+        if over {
+            a = 0.75
+        }
+        if current {
+            let t = app.worlds[i].tint
+            ui.roundRect(x, y, cw, ch, 12.0 * u, t.x * 0.35, t.y * 0.35, t.z * 0.35, 0.92)
+            ui.roundRect(x, y + ch - 3.0 * u, cw, 3.0 * u, 1.5 * u, t.x, t.y, t.z, 1.0)
+        } else {
+            ui.roundRect(x, y, cw, ch, 12.0 * u, 0.03, 0.05, 0.09, a)
+        }
+        var cr = 0.62
+        var cg = 0.70
+        var cb = 0.82
+        if current {
+            cr = 1.0
+            cg = 1.0
+            cb = 1.0
+        }
+        if !app.loaded[i] {
+            cr = 0.35
+            cg = 0.40
+            cb = 0.50
+        }
+        ui.textCentered(x + cw * 0.5, y + 13.0 * u, 8.0 * u, shortName(app.worlds[i].name), cr, cg, cb, 1.0)
+        i = i + 1
+    }
+    return hit
+}
+
+fn drawHelp(ui: &mut Ui, u: f64, w: f64, h: f64) {
+    ui.rect(0.0, 0.0, w, h, 0.0, 0.01, 0.02, 0.86)
+    let cx = w * 0.5
+    var y = h * 0.20
+    ui.textCentered(cx, y, 30.0 * u, "ATLAS", 0.55, 0.85, 1.0, 1.0)
+    y = y + 84.0 * u
+    ui.textCentered(cx, y, 11.0 * u, "Fly around the solar system and find out what is there.", 0.85, 0.9, 1.0, 1.0)
+    y = y + 62.0 * u
+
+    var rows: Vec<string> = Vec.new()
+    rows.push("DRAG          spin the world around")
+    rows.push("SCROLL / W S  fly closer and further away")
+    rows.push("CLICK A DOT   read about that place")
+    rows.push("L             swap reading level: Explorer or Scientist")
+    rows.push("1 - 9, 0      jump to a world")
+    rows.push("[  ]          previous or next world")
+    rows.push("SPACE         stop or start the spin")
+    rows.push("ESC           close the card")
+    rows.push("F             fullscreen")
+    rows.push("H             show or hide this help")
+    rows.push("Q             quit")
+    var i = 0
+    while i < rows.len {
+        ui.textCentered(cx, y, 10.0 * u, rows[i], 0.75, 0.82, 0.94, 1.0)
+        y = y + lineHeight(10.0 * u) * 1.15
+        i = i + 1
+    }
+    y = y + 30.0 * u
+    ui.textCentered(cx, y, 9.0 * u, "PRESS H TO START EXPLORING", 0.55, 0.85, 1.0, 1.0)
+}
+
+fn drawTopBar(ui: &mut Ui, app: &App, u: f64, w: f64) {
+    var levelName = "EXPLORER"
+    if app.level == 1 {
+        levelName = "SCIENTIST"
+    }
+    let label = "READING LEVEL: " + levelName
+    let ts = 8.0 * u
+    let tw = textWidth(label, ts)
+    let bw = tw + 34.0 * u
+    let x = w - bw - 30.0 * u
+    // Only when the card is closed, or it would sit on top of it.
+    if app.sel < 0 {
+        ui.roundRect(x, 30.0 * u, bw, 32.0 * u, 10.0 * u, 0.03, 0.05, 0.09, 0.7)
+        ui.text(x + 17.0 * u, 39.0 * u, ts, label, 0.62, 0.75, 0.9, 1.0)
+    }
+}
+
+fn drawHint(ui: &mut Ui, app: &App, u: f64, w: f64, h: f64) {
+    var msg = "DRAG TO SPIN   -   CLICK A GLOWING DOT   -   H FOR HELP"
+    if app.sel >= 0 {
+        msg = "ESC TO CLOSE   -   L TO CHANGE READING LEVEL   -   H FOR HELP"
+    }
+    // A pill behind it: the hint sits over the planet as often as not, and grey
+    // text on a sunlit continent is invisible.
+    let ts = 8.0 * u
+    let tw = textWidth(msg, ts)
+    ui.roundRect(w * 0.5 - tw * 0.5 - 18.0 * u, h - 104.0 * u, tw + 36.0 * u, 30.0 * u, 15.0 * u, 0.02, 0.035, 0.065, 0.55)
+    ui.textCentered(w * 0.5, h - 98.0 * u, ts, msg, 0.55, 0.63, 0.75, 1.0)
+}
+
+// ── capture ───────────────────────────────────────────────────────────────────
+
+pub extern fn fopen(path: *u8, mode: *u8): *u8
+
+pub extern fn fwrite(ptr: *u8, size: i64, count: i64, stream: *u8): i64
+
+pub extern fn fclose(stream: *u8): i32
+
+// A binary PPM, because it is six lines and needs no encoder. `--shot` exists so
+// the look of a world can be checked from a terminal, without a human being
+// asked to describe what the screen is doing.
+fn writePpm(path: &string, w: i64, h: i64, px: &Vec<u32>) {
+    var rgb: Vec<u8> = Vec.filled(w * h * 3, 0)
+    var y = 0
+    while y < h {
+        // glReadPixels hands back rows bottom-up; PPM wants them top-down.
+        let src = (h - 1 - y) * w
+        var x = 0
+        while x < w {
+            let p = px[src + x]
+            let o = (y * w + x) * 3
+            rgb[o] = (p & 0xFF) as u8
+            rgb[o + 1] = ((p >> 8) & 0xFF) as u8
+            rgb[o + 2] = ((p >> 16) & 0xFF) as u8
+            x = x + 1
+        }
+        y = y + 1
+    }
+    let header = "P6\n" + $"{w}" + " " + $"{h}" + "\n255\n"
+    unsafe {
+        let f = fopen(path.cstr(), "wb".cstr())
+        if (f as i64) == 0 {
+            print("cannot open " + path)
+            return
+        }
+        let _ = fwrite(header.cstr(), 1, header.len, f)
+        let _ = fwrite(rgb.ptr() as *u8, 1, w * h * 3, f)
+        let _ = fclose(f)
+    }
+}
+
+pub struct Options {
+    shot: string,
+    world: i64,
+    landmark: i64,
+    frames: i64,
+    level: i64,
+    // Look knobs, exposed so the picture can be tuned from a shell loop instead
+    // of a rebuild per experiment.
+    gain: f64,
+    atmo: f64,
+    sky: f64,
+    dist: f64,
+}
+
+fn parseOptions(): Options {
+    var o = Options {
+        shot: "", world: -1, landmark: -1, frames: 90, level: 0,
+        gain: 0.34, atmo: 1.0, sky: 1.0, dist: 0.0,
+    }
+    let a = args()
+    var i = 1
+    while i < a.len {
+        let k = a[i].clone()
+        var v = ""
+        if i + 1 < a.len {
+            v = a[i + 1].clone()
+        }
+        if k == "--shot" {
+            o.shot = v.clone()
+        }
+        if k == "--world" {
+            o.world = parseInt(v.clone()).unwrapOr(-1)
+        }
+        if k == "--landmark" {
+            o.landmark = parseInt(v.clone()).unwrapOr(-1)
+        }
+        if k == "--frames" {
+            o.frames = parseInt(v.clone()).unwrapOr(90)
+        }
+        if k == "--level" {
+            o.level = parseInt(v.clone()).unwrapOr(0)
+        }
+        if k == "--gain" {
+            o.gain = parseFloat(v.clone()).unwrapOr(0.34)
+        }
+        if k == "--atmo" {
+            o.atmo = parseFloat(v.clone()).unwrapOr(1.0)
+        }
+        if k == "--dist" {
+            o.dist = parseFloat(v.clone()).unwrapOr(0.0)
+        }
+        if k == "--sky" {
+            o.sky = parseFloat(v.clone()).unwrapOr(1.0)
+        }
+        i = i + 1
+    }
+    return o
+}
+
+// ── main ──────────────────────────────────────────────────────────────────────
+
+pub fn main(): i32 {
+    var host = hostNew("ATLAS - explore the solar system", WIN_W, WIN_H)
+    if !host.ok {
+        print(host.err)
+        return 1
+    }
+    print("OpenGL " + host.err)
+
+    var planetSh = match Shader.compile(PLANET_VERT, PLANET_FRAG) {
+        Result.Ok(s) => s
+        Result.Err(e) => {
+            print("planet shader: " + e)
+            return 2
+        }
+    }
+    var atmoSh = match Shader.compile(PLANET_VERT, ATMO_FRAG) {
+        Result.Ok(s) => s
+        Result.Err(e) => {
+            print("atmosphere shader: " + e)
+            return 2
+        }
+    }
+    var ringSh = match Shader.compile(PLANET_VERT, RING_FRAG) {
+        Result.Ok(s) => s
+        Result.Err(e) => {
+            print("ring shader: " + e)
+            return 2
+        }
+    }
+    var skySh = match Shader.compile(QUAD_VERT, SKY_FRAG) {
+        Result.Ok(s) => s
+        Result.Err(e) => {
+            print("sky shader: " + e)
+            return 2
+        }
+    }
+    var ui = match uiNew(fontAtlas()) {
+        Result.Ok(x) => x
+        Result.Err(e) => {
+            print("ui: " + e)
+            return 2
+        }
+    }
+    uiSetAtlasSize(ui, 384.0, 240.0)
+
+    var attrs: Vec<i64> = Vec.new()
+    attrs.push(3)
+    attrs.push(2)
+    attrs.push(3)
+    var ball = Mesh.new(attrs)
+    ball.upload(sphereMesh(180, 90))
+    var attrs2: Vec<i64> = Vec.new()
+    attrs2.push(3)
+    attrs2.push(2)
+    attrs2.push(3)
+    var shell = Mesh.new(attrs2)
+    shell.upload(invertedSphereMesh(72, 36))
+    var attrs3: Vec<i64> = Vec.new()
+    attrs3.push(3)
+    attrs3.push(2)
+    attrs3.push(3)
+    var ring = Mesh.new(attrs3)
+    var skyQuad = Mesh.fullscreenQuad()
+
+    var worlds = allWorlds()
+    ring.upload(ringMesh(256, worlds[W_SATURN].ringInner, worlds[W_SATURN].ringOuter))
+
+    var tex: Vec<Texture2D> = Vec.new()
+    var loaded: Vec<bool> = Vec.new()
+    var i = 0
+    while i < worlds.len {
+        tex.push(dummyTexture())
+        loaded.push(false)
+        i = i + 1
+    }
+    var order: Vec<i64> = Vec.new()
+    order.push(W_EARTH)
+    order.push(W_MOON)
+    order.push(W_MARS)
+    order.push(W_SATURN)
+    order.push(W_JUPITER)
+    order.push(W_VENUS)
+    order.push(W_MERCURY)
+    order.push(W_SUN)
+    order.push(W_URANUS)
+    order.push(W_NEPTUNE)
+
+    var app = App {
+        worlds: worlds, tex: tex, loaded: loaded, order: order, cursor: 0,
+        wi: W_EARTH,
+        yaw: 1.97, pitch: 0.28, dist: 3.0,
+        tYaw: 1.97, tPitch: 0.28, tDist: 3.0,
+        spin: 0.0, tSpin: 0.0, flying: false,
+        sel: -1, hov: -1, level: 0, help: true, pulse: 1.0, arrive: 0.0,
+        pins: Vec.new(),
+    }
+    ensureLoaded(app, W_EARTH)
+    faceWorld(app)
+
+    let opt = parseOptions()
+    let shooting = opt.shot.len > 0
+    if shooting {
+        app.help = false
+        app.level = opt.level
+        if opt.world >= 0 && opt.world < app.worlds.len {
+            ensureLoaded(app, opt.world)
+            app.wi = opt.world
+        }
+        faceWorld(app)
+        if opt.dist > 0.0 {
+            app.dist = opt.dist
+            app.tDist = opt.dist
+        }
+        if opt.landmark >= 0 && opt.landmark < app.worlds[app.wi].landmarks.len {
+            app.sel = opt.landmark
+            flyTo(app, opt.landmark)
+        }
+    }
+
+    var size = drawableSize(host.win)
+    var post = match postNew(size.w, size.h) {
+        Result.Ok(p) => p
+        Result.Err(e) => {
+            print("render targets: " + e)
+            return 3
+        }
+    }
+    var postW = size.w
+    var postH = size.h
+
+    var inp = inputNew()
+    var ev: [u8; 64] = [0; 64]
+    var fullscreen = false
+    let start = SDL_GetTicks()
+    var prevMs = SDL_GetTicks()
+    var frame = 0
+
+    while !inp.quit {
+        frame = frame + 1
+        let nowMs = SDL_GetTicks()
+        var dt = ((nowMs - prevMs) as f64) / 1000.0
+        prevMs = nowMs
+        if dt > 0.1 {
+            dt = 0.1
+        }
+        let time = ((nowMs - start) as f64) / 1000.0
+
+        size = drawableSize(host.win)
+        let w = size.w as f64
+        let h = size.h as f64
+        // Everything on the HUD is in these units, so the layout is identical on
+        // a Retina panel and a 1080p monitor instead of half the size on one.
+        let u = h / 900.0
+        pollInput(inp, ev, pixelScale(host.win))
+
+        if size.w != postW || size.h != postH {
+            post.free()
+            post = match postNew(size.w, size.h) {
+                Result.Ok(p) => p
+                Result.Err(_) => {
+                    return 3
+                }
+            }
+            postW = size.w
+            postH = size.h
+        }
+
+        pumpLoading(app)
+
+        // ── input ─────────────────────────────────────────────────────────────
+        if inp.toggleHelp {
+            app.help = !app.help
+        }
+        if inp.fullscreen {
+            fullscreen = !fullscreen
+            var flag: u32 = 0
+            if fullscreen {
+                flag = SDL_WINDOW_FULLSCREEN_DESKTOP
+            }
+            let _ = SDL_SetWindowFullscreen(host.win, flag)
+        }
+        if inp.toggleLevel {
+            app.level = 1 - app.level
+        }
+        if inp.deselect {
+            app.sel = -1
+        }
+        if inp.toggleSpin {
+            app.flying = false
+            if app.sel >= 0 {
+                app.sel = -1
+            }
+        }
+
+        var goto = -1
+        if inp.digit > 0 {
+            goto = inp.digit - 1
+        }
+        if inp.nextWorld {
+            goto = (app.wi + 1) % app.worlds.len
+        }
+        if inp.prevWorld {
+            goto = (app.wi + app.worlds.len - 1) % app.worlds.len
+        }
+
+        if !app.help {
+            if inp.down && inp.dragged {
+                app.flying = false
+                app.yaw = app.yaw - inp.dragX * 0.0042 / u
+                app.pitch = clampf(app.pitch + inp.dragY * 0.0042 / u, -1.45, 1.45)
+            }
+            if inp.orbitX != 0.0 || inp.orbitY != 0.0 {
+                app.flying = false
+                app.yaw = app.yaw + inp.orbitX * dt * 0.9
+                app.pitch = clampf(app.pitch + inp.orbitY * dt * 0.7, -1.45, 1.45)
+            }
+            let zoom = inp.wheel * 0.16 + inp.zoom * dt * 1.6
+            if zoom != 0.0 {
+                app.flying = false
+                app.dist = clampf(app.dist * Math.exp(-zoom), MIN_DIST, MAX_DIST)
+            }
+        }
+
+        // ── simulate ──────────────────────────────────────────────────────────
+        if app.sel < 0 && !app.flying {
+            app.spin = app.spin + dt * 0.055
+            app.tSpin = app.spin
+        }
+        easeCamera(app, dt)
+        app.pulse = clampf(app.pulse + dt * 0.55, 0.0, 1.0)
+        app.arrive = clampf(app.arrive + dt * 2.2, 0.0, 1.0)
+
+        // ── camera and matrices ───────────────────────────────────────────────
+        let dir = cameraDir(app.yaw, app.pitch)
+        let eye = dir.scale(app.dist)
+        let view = lookAt(eye, v3(0.0, 0.0, 0.0), v3(0.0, 1.0, 0.0))
+        let proj = perspective(FOV, w / h, 0.01, 200.0)
+        let vp = multiply(proj, view)
+        let model = worldModel(app)
+        let mvp = multiply(vp, model)
+
+        updatePins(app, vp, model, eye, w, h)
+
+        // ── pick ──────────────────────────────────────────────────────────────
+        app.hov = -1
+        var chipHit = -1
+        if !app.help {
+            app.hov = pickPin(app, inp.mx, inp.my, u)
+        }
+
+        // ── draw ──────────────────────────────────────────────────────────────
+        post.beginScene()
+
+        Gpu.depthTest(false)
+        Gpu.depthWrite(false)
+        Gpu.blendOff()
+        Gpu.cullBackFaces(false)
+        skySh.bind()
+        let right = dir.cross(v3(0.0, 1.0, 0.0)).norm()
+        let camUp = right.cross(dir).norm()
+        skySh.uniform3F("uRight", right.x, right.y, right.z)
+        skySh.uniform3F("uUp", camUp.x, camUp.y, camUp.z)
+        skySh.uniform3F("uFwd", dir.x * -1.0, dir.y * -1.0, dir.z * -1.0)
+        skySh.uniformF("uTanHalf", Math.tan(FOV * 0.5))
+        skySh.uniformF("uAspect", w / h)
+        skySh.uniform3F("uSunDir", SUN_DIR.x, SUN_DIR.y, SUN_DIR.z)
+        skySh.uniformF("uTime", time)
+        skySh.uniformF("uSkyGain", opt.sky)
+        skyQuad.draw()
+
+        Gpu.depthTest(true)
+        Gpu.depthWrite(true)
+        Gpu.cullBackFaces(true)
+        Gpu.blendOff()
+
+        let sunLocal = rotateVec(transposeRot(model), SUN_DIR)
+        var selDir = v3(0.0, 1.0, 0.0)
+        if app.sel >= 0 {
+            selDir = landmarkLocal(app.worlds[app.wi], app.sel).norm()
+        }
+        planetSh.bind()
+        planetSh.uniformMat4("uMvp", mvp)
+        planetSh.uniformMat4("uModel", model)
+        planetSh.uniform3F("uSun", SUN_DIR.x, SUN_DIR.y, SUN_DIR.z)
+        planetSh.uniform3F("uSunLocal", sunLocal.x, sunLocal.y, sunLocal.z)
+        planetSh.uniform3F("uEye", eye.x, eye.y, eye.z)
+        planetSh.uniform2F("uTexel", 1.0 / 2048.0, 1.0 / 1024.0)
+        planetSh.uniformF("uBump", app.worlds[app.wi].bump)
+        planetSh.uniformF("uSpecular", app.worlds[app.wi].specular)
+        planetSh.uniformF("uAmbient", app.worlds[app.wi].ambient)
+        planetSh.uniformF("uEmissive", app.worlds[app.wi].emissive)
+        planetSh.uniformF("uPunch", app.worlds[app.wi].punch)
+        planetSh.uniform3F("uAtmoTint", app.worlds[app.wi].tint.x, app.worlds[app.wi].tint.y, app.worlds[app.wi].tint.z)
+        planetSh.uniformF("uAtmoAmount", app.worlds[app.wi].atmo * 0.28)
+        planetSh.uniformF("uRingInner", app.worlds[app.wi].ringInner)
+        planetSh.uniformF("uRingOuter", app.worlds[app.wi].ringOuter)
+        var selAmount = 0.0
+        if app.sel >= 0 && app.pulse < 1.0 {
+            selAmount = app.pulse
+        }
+        planetSh.uniformF("uSelected", selAmount)
+        planetSh.uniform3F("uSelectDir", selDir.x, selDir.y, selDir.z)
+        planetSh.sampler("uTex", app.tex[app.wi], 0)
+        ball.draw()
+
+        // Rings after the planet so the depth buffer already holds the sphere and
+        // the far half of the ring is hidden behind it for free.
+        if app.worlds[app.wi].ringOuter > 0.0 {
+            let ringModel = rotationZ(app.worlds[app.wi].tilt * DEG)
+            Gpu.blendAlpha()
+            Gpu.depthWrite(false)
+            Gpu.cullBackFaces(false)
+            ringSh.bind()
+            ringSh.uniformMat4("uMvp", multiply(vp, ringModel))
+            ringSh.uniformMat4("uModel", ringModel)
+            ringSh.uniform3F("uSun", SUN_DIR.x, SUN_DIR.y, SUN_DIR.z)
+            ringSh.uniform3F("uEye", eye.x, eye.y, eye.z)
+            ringSh.uniform3F("uTint", app.worlds[app.wi].ringTint.x, app.worlds[app.wi].ringTint.y, app.worlds[app.wi].ringTint.z)
+            ring.draw()
+        }
+
+        if app.worlds[app.wi].atmo > 0.0 {
+            let s = 1.022 + 0.030 * app.worlds[app.wi].atmo
+            let atmoModel = multiply(model, scaling(s))
+            Gpu.blendAdd()
+            Gpu.depthWrite(false)
+            Gpu.cullBackFaces(true)
+            atmoSh.bind()
+            atmoSh.uniformMat4("uMvp", multiply(vp, atmoModel))
+            atmoSh.uniformMat4("uModel", atmoModel)
+            atmoSh.uniform3F("uSun", SUN_DIR.x, SUN_DIR.y, SUN_DIR.z)
+            atmoSh.uniform3F("uEye", eye.x, eye.y, eye.z)
+            atmoSh.uniform3F("uColor", app.worlds[app.wi].tint.x, app.worlds[app.wi].tint.y, app.worlds[app.wi].tint.z)
+            atmoSh.uniformF("uStrength", app.worlds[app.wi].atmo * 0.55 * opt.atmo)
+            shell.draw()
+        }
+
+        // Arriving at a new world fades up rather than cutting, which hides the
+        // one-frame hitch when its map is decoded on demand.
+        post.resolve(opt.gain, 0.15 + 0.85 * app.arrive, 0.34, size.w, size.h)
+
+        // ── overlay ───────────────────────────────────────────────────────────
+        if app.help {
+            drawHelp(ui, u, w, h)
+        } else {
+            drawPins(ui, app, u, time)
+            drawInfoPanel(ui, app, u)
+            drawLandmarkCard(ui, app, u, w)
+            drawTopBar(ui, app, u, w)
+            drawHint(ui, app, u, w, h)
+            chipHit = drawChips(ui, app, u, w, h, inp.mx, inp.my)
+        }
+        ui.flush(w, h)
+
+        // ── act on the click, now that hit regions are known ──────────────────
+        if inp.clicked {
+            if app.help {
+                app.help = false
+            } else {
+                if chipHit >= 0 {
+                    goto = chipHit
+                } else {
+                    if app.hov >= 0 {
+                        app.sel = app.hov
+                        flyTo(app, app.hov)
+                    } else {
+                        app.sel = -1
+                    }
+                }
+            }
+        }
+
+        if goto >= 0 && goto != app.wi {
+            ensureLoaded(app, goto)
+            app.wi = goto
+            app.sel = -1
+            faceWorld(app)
+        }
+
+        if shooting && frame >= opt.frames {
+            let px = readPixelsRgba8(size.w, size.h)
+            writePpm(opt.shot, size.w, size.h, px)
+            print("wrote " + opt.shot)
+            inp.quit = true
+        }
+
+        SDL_GL_SwapWindow(host.win)
+    }
+
+    ball.free()
+    shell.free()
+    ring.free()
+    skyQuad.free()
+    planetSh.free()
+    atmoSh.free()
+    ringSh.free()
+    skySh.free()
+    ui.free()
+    post.free()
+    var k = 0
+    while k < app.tex.len {
+        app.tex[k].free()
+        k = k + 1
+    }
+    SDL_GL_DeleteContext(host.ctx)
+    SDL_DestroyWindow(host.win)
+    SDL_Quit()
+    return 0
+}

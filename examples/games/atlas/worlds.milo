@@ -1,0 +1,360 @@
+// The ten worlds and the things worth flying to on each of them.
+//
+// Two things about this file are deliberate.
+//
+// First, every landmark carries TWO descriptions. The same place is a different
+// fact at five and at twelve — a five-year-old wants "the biggest volcano in the
+// whole solar system", a twelve-year-old wants to know it got that big because
+// Mars has no drifting plates to slide the crust off the hotspot. Writing one
+// text and hoping it lands for both is how educational software ends up boring
+// the older child and losing the younger one.
+//
+// Second, the numbers are real and the made-up parts say so. Latitudes and
+// longitudes are the published coordinates, so a pin lands where the feature
+// actually is on the map underneath it. Where a world has no photographic map
+// here — the Sun, Uranus, Neptune — the surface is generated, and any landmark
+// on it is described as a kind of place rather than as a spot you could point a
+// telescope at.
+
+from "./mat4" import {
+    V3, v3
+}
+
+// Where a landmark hangs. Almost everything is on the surface; Saturn's rings
+// are not a place on a sphere, so they get their own anchor rather than a lie
+// about latitude.
+pub let ANCHOR_SURFACE: i64 = 0
+
+pub let ANCHOR_RING: i64 = 1
+
+pub struct Landmark {
+    name: string,
+    lat: f64,
+    lon: f64,
+    anchor: i64,
+    little: string, // roughly age 5 — read aloud
+    big: string, // roughly age 12 — read alone
+}
+
+fn mark(name: string, lat: f64, lon: f64, little: string, big: string): Landmark {
+    return Landmark {
+        name: name, lat: lat, lon: lon, anchor: ANCHOR_SURFACE, little: little, big: big
+    }
+}
+
+fn ringMark(name: string, little: string, big: string): Landmark {
+    return Landmark {
+        name: name, lat: 0.0, lon: 0.0, anchor: ANCHOR_RING, little: little, big: big
+    }
+}
+
+pub struct World {
+    name: string,
+    kind: string,
+    diameterKm: f64,
+    dayHours: f64, // one spin, in Earth hours
+    yearDays: f64, // one orbit, in Earth days; 0 for the Sun
+    tempC: f64,
+    moons: i64,
+    distanceKm: f64,
+    distanceOf: string, // what the distance is measured from
+    gravity: f64, // in Earth gravities
+    tilt: f64, // axial tilt, degrees
+    // Rendering.
+    tint: V3, // atmosphere colour
+    atmo: f64, // 0 for an airless world
+    bump: f64,
+    specular: f64,
+    ambient: f64,
+    emissive: f64,
+    ringInner: f64, // in planet radii; 0 for no rings
+    ringOuter: f64,
+    ringTint: V3,
+    lonOffset: f64, // added to a landmark's longitude to match this map's meridian
+    viewDist: f64, // where the camera starts, in planet radii
+    // The longitude turned toward the camera on arrival. A world gets one chance
+    // to be recognised, and the Moon showing its cratered far side or Jupiter
+    // showing the blank hemisphere opposite the Red Spot wastes it.
+    faceLon: f64,
+    // Contrast and saturation lift. The USGS maps are calibrated products, not
+    // pictures: Mars in particular is a flat pink wash straight out of the file,
+    // and a child looking at it learns nothing about a world with terrain.
+    punch: f64,
+    little: string,
+    big: string,
+    landmarks: Vec<Landmark>,
+}
+
+// ── the Sun ───────────────────────────────────────────────────────────────────
+
+fn sun(): World {
+    var m: Vec<Landmark> = Vec.new()
+    m.push(mark("Sunspots", 22.0, -40.0, "These dark spots are cooler patches on the Sun. Cooler still means 3,500 degrees - way too hot to touch!", "Sunspots are regions where the Sun's magnetic field is so tangled it blocks heat rising from below. They are about 1,500 C cooler than the surface around them, which is why they look dark. Their number rises and falls on an 11-year cycle."))
+    m.push(mark("A Solar Flare", -30.0, 70.0, "Sometimes the Sun burps out a giant flash of light and energy. It can make glowing lights in the sky on Earth!", "A flare happens when twisted magnetic field lines snap and reconnect, releasing energy in minutes. The biggest ones fling a billion tonnes of plasma into space; when that cloud hits Earth's magnetic field we get auroras, and sometimes radio blackouts."))
+    m.push(mark("The Bubbly Surface", 0.0, 150.0, "The Sun's surface bubbles like soup in a pot. Each bubble is as big as a country!", "This is granulation: convection cells carrying hot gas up in the bright middles and letting cooler gas sink at the dark edges. Each granule is roughly 1,000 km across and lasts about 20 minutes."))
+    m.push(mark("The North Pole", 78.0, 0.0, "The Sun spins, but not all in one piece. The middle spins faster than the top!", "The Sun is a ball of plasma, not a solid, so it rotates differentially: about 25 days at the equator and 34 days near the poles. That shearing is what winds the magnetic field up until it snaps."))
+    return World {
+        name: "The Sun", kind: "Star",
+        diameterKm: 1392700.0, dayHours: 600.0, yearDays: 0.0, tempC: 5500.0,
+        moons: 0, distanceKm: 0.0, distanceOf: "",
+        gravity: 27.9, tilt: 7.25,
+        tint: v3(1.0, 0.62, 0.24), atmo: 2.4, bump: 0.0, specular: 0.0,
+        ambient: 1.0, emissive: 1.0,
+        ringInner: 0.0, ringOuter: 0.0, ringTint: v3(1.0, 1.0, 1.0),
+        lonOffset: 0.0, faceLon: 0.0, viewDist: 3.4, punch: 1.12,
+        little: "The Sun is a giant ball of burning gas, and it is the reason we have daytime, summer, and food. Everything else here goes around it.",
+        big: "The Sun holds 99.86% of all the mass in the solar system. In its core, hydrogen is squeezed so hard it fuses into helium, and the energy from that takes over 100,000 years to bump its way out to the surface - then only 8 minutes to reach Earth.",
+        landmarks: m,
+    }
+}
+
+// ── Mercury ───────────────────────────────────────────────────────────────────
+
+fn mercury(): World {
+    var m: Vec<Landmark> = Vec.new()
+    m.push(mark("Caloris Basin", 30.5, 189.8, "A rock the size of a city crashed here and left a dent bigger than Texas.", "Caloris is an impact basin 1,550 km wide, made about 3.8 billion years ago. The shock waves travelled right through the planet and met again on the far side, smashing the ground there into a jumble geologists call the Weird Terrain."))
+    m.push(mark("Discovery Rupes", -56.3, -37.7, "This is a giant wrinkle. Mercury got colder, shrank a bit, and its skin crinkled up like an old apple.", "Discovery Rupes is a lobate scarp: a cliff 650 km long and 2 km high where one slab of crust was pushed up over another. Mercury's iron core cooled and contracted, shrinking the whole planet by several kilometres in radius, and the crust had to buckle to fit."))
+    m.push(mark("Rachmaninoff", 27.6, -57.7, "A crater with another crater inside it, like a bullseye.", "A 290 km peak-ring basin with a smooth floor, which means lava flowed into it long after the impact. It is one of the youngest big basins on Mercury and evidence that the planet was volcanically active far more recently than anyone expected."))
+    m.push(mark("The Icy Poles", 87.0, 20.0, "Mercury is right next to the Sun, but there is ICE hiding at the top. Some holes never get any sunshine at all.", "Mercury barely tilts, so the floors of some polar craters have been in permanent shadow for billions of years and sit at about -170 C. Radar and MESSENGER found water ice there, probably delivered by comets and trapped ever since."))
+    return World {
+        name: "Mercury", kind: "Planet",
+        diameterKm: 4879.0, dayHours: 1407.6, yearDays: 88.0, tempC: 167.0,
+        moons: 0, distanceKm: 57900000.0, distanceOf: "the Sun",
+        gravity: 0.38, tilt: 0.03,
+        tint: v3(0.7, 0.66, 0.6), atmo: 0.0, bump: 0.030, specular: 0.0,
+        ambient: 0.045, emissive: 0.0,
+        ringInner: 0.0, ringOuter: 0.0, ringTint: v3(1.0, 1.0, 1.0),
+        lonOffset: 0.0, faceLon: 190.0, viewDist: 3.0, punch: 1.28,
+        little: "Mercury is the smallest planet and the closest to the Sun. It has no air, so it is covered in craters that never wear away.",
+        big: "Mercury's day is longer than its year in a strange way: it spins three times for every two orbits, so from the surface, sunrise to sunrise takes 176 Earth days. With no atmosphere to move heat around, noon is 430 C and midnight is -180 C.",
+        landmarks: m,
+    }
+}
+
+// ── Venus ─────────────────────────────────────────────────────────────────────
+
+fn venus(): World {
+    var m: Vec<Landmark> = Vec.new()
+    m.push(mark("Maxwell Montes", 65.2, 3.3, "The tallest mountain on Venus. It is even taller than Mount Everest!", "Maxwell Montes rises 11 km above the average surface - taller than Everest measured from sea level. It sits on Ishtar Terra, a highland the size of Australia, and it is one of the few features on Venus with a name that is not a woman's."))
+    m.push(mark("Aphrodite Terra", -5.0, 105.0, "A huge highland as big as Africa, with deep cracks running across it.", "Aphrodite Terra stretches about 10,000 km along the equator. Its eastern end is torn by chasms several kilometres deep - Venus has no plate tectonics, so instead of drifting apart, the crust stretches and rips in place."))
+    m.push(mark("Maat Mons", 0.5, 194.6, "A volcano taller than any mountain in America. It might still erupt!", "Maat Mons is an 8 km shield volcano. In 2023, researchers re-examined 1991 Magellan radar images and found a vent that changed shape between two passes - the first direct evidence of an active eruption on Venus."))
+    m.push(mark("Alpha Regio", -25.0, 5.0, "The ground here is squished into ridges, like a giant stepped on a rug.", "Alpha Regio is a tessera: terrain so deformed by compression and stretching that the ridges cross each other in several directions. Tesserae are the oldest surfaces on Venus, and almost everything else was paved over by lava around 500 million years ago."))
+    return World {
+        name: "Venus", kind: "Planet",
+        diameterKm: 12104.0, dayHours: 5832.5, yearDays: 224.7, tempC: 464.0,
+        moons: 0, distanceKm: 108200000.0, distanceOf: "the Sun",
+        gravity: 0.90, tilt: 177.4,
+        tint: v3(1.0, 0.86, 0.55), atmo: 1.5, bump: 0.020, specular: 0.0,
+        ambient: 0.10, emissive: 0.0,
+        ringInner: 0.0, ringOuter: 0.0, ringTint: v3(1.0, 1.0, 1.0),
+        lonOffset: 0.0, faceLon: 105.0, viewDist: 3.0, punch: 1.18,
+        little: "Venus is the hottest planet. Its thick yellow clouds trap all the heat, like a blanket that can never come off.",
+        big: "Venus is hotter than Mercury even though it is further from the Sun, because its atmosphere is 96% carbon dioxide and 90 times heavier than ours - a runaway greenhouse effect. It also spins backwards, and so slowly that one Venus day is longer than one Venus year.",
+        landmarks: m,
+    }
+}
+
+// ── Earth ─────────────────────────────────────────────────────────────────────
+
+fn earth(): World {
+    var m: Vec<Landmark> = Vec.new()
+    m.push(mark("Mount Everest", 27.99, 86.93, "The highest mountain on land. It is so tall that the air up there is too thin to breathe properly.", "Everest reaches 8,849 m and is still growing about 4 mm a year, because the Indian plate is still ploughing into Asia. At the summit the air pressure is a third of sea level, which is why almost everyone climbing it carries oxygen."))
+    m.push(mark("The Amazon", -3.4, -62.2, "The biggest rainforest in the world. It is so full of trees it makes its own rain!", "The Amazon covers 5.5 million square kilometres and holds about 10% of all known species. Its trees pump so much water into the air that they generate roughly half of the region's own rainfall - cut down enough of it and the rest starts to dry out."))
+    m.push(mark("The Sahara", 23.0, 13.0, "A desert nearly as big as the whole United States. It used to be green, with lakes and hippos!", "The Sahara covers 9.2 million square kilometres. Earth's axial tilt wobbles on a 41,000-year cycle, and about 6,000 years ago that wobble pulled the monsoon north far enough to fill the Sahara with grassland and lakes. Rock paintings there show swimmers."))
+    m.push(mark("Great Barrier Reef", -18.3, 147.7, "The biggest thing ever built by living creatures - tiny coral animals, working for thousands of years.", "The reef runs 2,300 km and is built from the limestone skeletons of coral polyps, each a few millimetres across. It is the only living structure visible from orbit, and warming water has now caused mass bleaching events several times in a decade."))
+    m.push(mark("Grand Canyon", 36.1, -112.1, "A river spent millions of years cutting a giant crack in the ground. It is a mile deep!", "The Colorado River carved 1.8 km down through rock layers that record almost two billion years of Earth's history. You are looking at a vertical timeline: the rock at the bottom is older than any complex life."))
+    m.push(mark("Antarctica", -82.0, 20.0, "The coldest place on Earth, covered in ice thicker than 30 school buses stacked up.", "The ice sheet averages 2.2 km thick and holds about 60% of the world's fresh water. The lowest natural temperature ever recorded on Earth, -89.2 C, was measured here at Vostok Station in 1983."))
+    m.push(mark("Mariana Trench", 11.35, 142.2, "The deepest hole in the ocean. If you dropped Mount Everest in, it would still be underwater!", "The Challenger Deep is 10,935 m down, where the Pacific plate is being forced beneath the Mariana plate. The pressure there is over 1,000 times what you feel at the surface, and there are still animals living in it."))
+    m.push(mark("The Nile", 30.5, 31.2, "One of the longest rivers on Earth. People have lived along it for thousands and thousands of years.", "The Nile runs 6,650 km north through the desert, fed by rains far to the south. Its annual flood laid down fresh silt every year, which is the reason a farming civilisation could exist in the middle of the Sahara for five thousand years."))
+    return World {
+        name: "Earth", kind: "Planet",
+        diameterKm: 12742.0, dayHours: 24.0, yearDays: 365.25, tempC: 15.0,
+        moons: 1, distanceKm: 149600000.0, distanceOf: "the Sun",
+        gravity: 1.0, tilt: 23.44,
+        tint: v3(0.35, 0.58, 1.0), atmo: 1.35, bump: 0.030, specular: 1.0,
+        ambient: 0.05, emissive: 0.0,
+        ringInner: 0.0, ringOuter: 0.0, ringTint: v3(1.0, 1.0, 1.0),
+        lonOffset: 0.0, faceLon: 15.0, viewDist: 3.0, punch: 1.12,
+        little: "Earth is our home. It is the only place we know of with oceans of liquid water, and the only place we know of with life.",
+        big: "Earth sits in the narrow band where water can be liquid, and it keeps an atmosphere and a magnetic field that shield the surface from solar radiation. About 71% of it is ocean, and the whole biosphere - every living thing ever found - lives in a shell only about 20 km thick.",
+        landmarks: m,
+    }
+}
+
+// ── the Moon ──────────────────────────────────────────────────────────────────
+
+fn moon(): World {
+    var m: Vec<Landmark> = Vec.new()
+    m.push(mark("Sea of Tranquility", 0.67, 23.47, "This is where people first walked on the Moon, in 1969. Their footprints are still there!", "Apollo 11 landed here on 20 July 1969. It is not a sea - it is a plain of ancient lava that flooded an impact basin. With no wind and no water, the boot prints will stay sharp for millions of years until micrometeorites slowly erase them."))
+    m.push(mark("Tycho Crater", -43.3, -11.36, "The bright crater with long white streaks. Look up at a full Moon and you can spot it!", "Tycho is 86 km wide and only about 108 million years old, which is young for the Moon. The rays are bright ejecta thrown out by the impact, stretching over 1,500 km; they fade with time, so bright rays mean a fresh crater."))
+    m.push(mark("Copernicus", 9.62, -20.08, "A big round crater with mountains right in the middle of it.", "Copernicus is 93 km across with terraced walls and a central peak. The peak is rock that rebounded upward in the seconds after the impact - the ground behaved like a splash, then froze in place."))
+    m.push(mark("Mare Imbrium", 32.8, -15.6, "One of the dark patches you can see from your garden. It is a huge frozen lava plain.", "The Imbrium basin was blasted out 3.9 billion years ago by an object perhaps 100 km wide, then filled with basalt lava. The dark maria cover about 16% of the Moon and almost all of them are on the near side, which nobody has fully explained."))
+    m.push(mark("South Pole", -85.0, 0.0, "There is frozen water hiding in dark holes here. Astronauts want to go back and find it.", "Craters near the south pole hold permanently shadowed regions that have not seen sunlight in billions of years, and they contain water ice. Water means drinking water, breathable oxygen, and rocket fuel that does not have to be lifted off Earth - which is why Artemis is aimed here."))
+    return World {
+        name: "The Moon", kind: "Moon",
+        diameterKm: 3475.0, dayHours: 655.7, yearDays: 27.3, tempC: -20.0,
+        moons: 0, distanceKm: 384400.0, distanceOf: "Earth",
+        gravity: 0.166, tilt: 6.68,
+        tint: v3(0.7, 0.7, 0.7), atmo: 0.0, bump: 0.040, specular: 0.0,
+        ambient: 0.035, emissive: 0.0,
+        ringInner: 0.0, ringOuter: 0.0, ringTint: v3(1.0, 1.0, 1.0),
+        lonOffset: 0.0, faceLon: 0.0, viewDist: 3.0, punch: 1.32,
+        little: "The Moon goes around the Earth. It always shows us the same face, so nobody saw its other side until we sent a spacecraft around the back.",
+        big: "The Moon is tidally locked: it spins exactly once per orbit, so one hemisphere permanently faces us. It is drifting away at 3.8 cm a year, and it stabilises Earth's axial tilt - without it, our seasons would wander wildly over millions of years.",
+        landmarks: m,
+    }
+}
+
+// ── Mars ──────────────────────────────────────────────────────────────────────
+
+fn mars(): World {
+    var m: Vec<Landmark> = Vec.new()
+    m.push(mark("Olympus Mons", 18.65, -133.8, "The biggest volcano in the whole solar system. It is so wide you could not see the top from the bottom!", "Olympus Mons is 22 km high and 600 km across - about the size of Arizona. Mars has no drifting plates, so a hotspot stayed under the same patch of crust for hundreds of millions of years and just kept piling lava on the same spot."))
+    m.push(mark("Valles Marineris", -14.0, -59.0, "A canyon so long it would stretch right across America. It makes the Grand Canyon look tiny.", "Valles Marineris runs 4,000 km long and up to 7 km deep. It is not a river canyon: it is a rift, a place where the crust cracked and pulled apart as the Tharsis volcanic bulge swelled up next to it."))
+    m.push(mark("Jezero Crater", 18.38, 77.58, "A robot called Perseverance is driving around here right now, looking for signs of tiny old life.", "Jezero held a lake about 3.5 billion years ago; orbital images show a river delta with the layered fan shape deltas make on Earth. Perseverance is caching rock cores there for a future mission to bring back to Earth."))
+    m.push(mark("Gale Crater", -5.4, 137.8, "Another robot, Curiosity, is climbing a mountain in the middle of this crater.", "Curiosity landed in Gale in 2012 and has been driving up Mount Sharp, a 5 km mound of layered sediment in the crater's centre. Each layer up the mountain is a younger chapter, and together they record Mars drying out."))
+    m.push(mark("Hellas Basin", -42.4, 70.5, "A dent so deep that if you stood at the bottom, the sky would be thicker above you.", "Hellas is 2,300 km wide and 7 km deep, from an impact about 4 billion years ago. The atmospheric pressure at its floor is roughly double the Martian average - one of the few places where liquid water could briefly exist without instantly boiling."))
+    m.push(mark("The North Ice Cap", 85.0, 0.0, "Mars has ice caps just like Earth. In winter the air itself freezes and snows down as dry ice!", "The permanent north cap is water ice, spiralled by winds into troughs. Each winter a seasonal layer of frozen carbon dioxide a metre thick condenses on top of it - about a quarter of the entire atmosphere freezes out and then returns in spring."))
+    return World {
+        name: "Mars", kind: "Planet",
+        diameterKm: 6779.0, dayHours: 24.6, yearDays: 687.0, tempC: -63.0,
+        moons: 2, distanceKm: 227900000.0, distanceOf: "the Sun",
+        gravity: 0.38, tilt: 25.19,
+        tint: v3(1.0, 0.72, 0.5), atmo: 0.45, bump: 0.035, specular: 0.0,
+        ambient: 0.05, emissive: 0.0,
+        ringInner: 0.0, ringOuter: 0.0, ringTint: v3(1.0, 1.0, 1.0),
+        lonOffset: 0.0, faceLon: -70.0, viewDist: 3.0, punch: 1.26,
+        little: "Mars is the red planet. It is cold and dusty, it has the biggest volcano anywhere, and robots from Earth are driving around on it today.",
+        big: "Mars is red because its surface is full of rusted iron. It once had rivers, lakes and probably an ocean, but with only 38% of Earth's gravity and no global magnetic field, the solar wind stripped most of the atmosphere away - what is left is 1% of ours.",
+        landmarks: m,
+    }
+}
+
+// ── Jupiter ───────────────────────────────────────────────────────────────────
+
+fn jupiter(): World {
+    var m: Vec<Landmark> = Vec.new()
+    m.push(mark("The Great Red Spot", -18.0, 133.2, "A storm bigger than the whole Earth. It has been spinning for hundreds of years!", "The Great Red Spot is an anticyclone wider than Earth, with winds around 430 km/h. It has been watched since at least 1831 and possibly since 1665 - and it is shrinking: it used to be wide enough to fit three Earths."))
+    m.push(mark("The Cloud Belts", 14.0, 40.0, "The stripes are winds. Light stripes go one way and dark stripes go the other way, really fast.", "The pale zones are rising ammonia clouds and the dark belts are gaps where you see deeper and warmer. Neighbouring bands move in opposite directions at up to 500 km/h, and the shear between them is what spins up storms like the Red Spot."))
+    m.push(mark("The Polar Cyclones", 80.0, 40.0, "At the top of Jupiter there are eight giant hurricanes arranged in a neat circle, like petals.", "Juno found a cyclone at the north pole ringed by eight more, each roughly the size of the continental United States, locked in a stable polygon. Nothing on Earth arranges storms like that, and why they do not merge is still an open question."))
+    m.push(mark("No Ground At All", -45.0, -60.0, "You could never land on Jupiter. There is nothing to stand on - it is gas all the way down.", "Descending into Jupiter, the gas just gets denser until, thousands of kilometres down, hydrogen is squeezed so hard it behaves like a liquid metal. That churning metallic hydrogen generates a magnetic field 20,000 times stronger than Earth's."))
+    return World {
+        name: "Jupiter", kind: "Planet",
+        diameterKm: 139820.0, dayHours: 9.93, yearDays: 4333.0, tempC: -145.0,
+        moons: 95, distanceKm: 778500000.0, distanceOf: "the Sun",
+        gravity: 2.53, tilt: 3.13,
+        tint: v3(1.0, 0.85, 0.66), atmo: 1.1, bump: 0.0, specular: 0.0,
+        ambient: 0.06, emissive: 0.0,
+        ringInner: 0.0, ringOuter: 0.0, ringTint: v3(1.0, 1.0, 1.0),
+        lonOffset: 0.0, faceLon: 133.0, viewDist: 3.0, punch: 1.45,
+        little: "Jupiter is the biggest planet by far. All the other planets could fit inside it. It is made of gas, so there is no ground to stand on.",
+        big: "Jupiter has more than twice the mass of every other planet combined. It spins so fast - under 10 hours - that it bulges visibly at the equator. Its gravity shepherds the asteroid belt and deflects or captures comets that might otherwise reach the inner planets.",
+        landmarks: m,
+    }
+}
+
+// ── Saturn ────────────────────────────────────────────────────────────────────
+
+fn saturn(): World {
+    var m: Vec<Landmark> = Vec.new()
+    m.push(ringMark("The Rings", "The rings are made of billions of chunks of ice, from snowball-sized to house-sized, all racing around Saturn.", "The rings are almost pure water ice, span roughly 280,000 km, and are typically only about 10 metres thick - if you shrank Saturn to the size of a dinner plate, the rings would be far thinner than a sheet of paper. They may be less than 100 million years old, younger than dinosaurs."))
+    m.push(mark("The Hexagon", 78.0, 30.0, "There is a giant SIX-SIDED shape at the top of Saturn. A hexagon, made of wind!", "A jet stream at Saturn's north pole flows in a near-perfect hexagon about 30,000 km across, and it has held that shape since Voyager saw it in 1981. Lab experiments with spinning fluid can reproduce polygonal jets, so it seems to be what a fast, narrow jet does at this scale."))
+    m.push(mark("The Cassini Division", -35.0, 100.0, "There is a big gap in the rings. A moon called Mimas keeps sweeping it clean!", "The 4,800 km gap is kept open by an orbital resonance: ice there orbits exactly twice for every one orbit of the moon Mimas, so it gets the same tug at the same point every time and is gradually pushed out."))
+    m.push(mark("Light Enough To Float", 0.0, -70.0, "Saturn is so light for its size that if you found a bathtub big enough, it would float!", "Saturn's average density is 0.69 g/cm3, less than water - the only planet for which that is true. It is mostly hydrogen and helium, and it is so far from the Sun that sunlight there is about 1% as strong as on Earth."))
+    return World {
+        name: "Saturn", kind: "Planet",
+        diameterKm: 116460.0, dayHours: 10.66, yearDays: 10759.0, tempC: -178.0,
+        moons: 146, distanceKm: 1434000000.0, distanceOf: "the Sun",
+        gravity: 1.06, tilt: 26.73,
+        tint: v3(1.0, 0.90, 0.68), atmo: 1.0, bump: 0.0, specular: 0.0,
+        ambient: 0.06, emissive: 0.0,
+        ringInner: 1.24, ringOuter: 2.32, ringTint: v3(0.94, 0.88, 0.76),
+        lonOffset: 0.0, faceLon: 0.0, viewDist: 5.4, punch: 1.40,
+        little: "Saturn has the most beautiful rings in the solar system. They are not solid - they are billions of pieces of ice going around and around.",
+        big: "Saturn is a gas giant nine times Earth's width, and its rings are its defining feature: bright, sharply divided, and constantly reshaped by dozens of small moons orbiting inside and beside them. Cassini measured the rings slowly raining down onto the planet.",
+        landmarks: m,
+    }
+}
+
+// ── Uranus ────────────────────────────────────────────────────────────────────
+
+fn uranus(): World {
+    var m: Vec<Landmark> = Vec.new()
+    m.push(mark("The Tipped-Over Pole", 85.0, 0.0, "Uranus lies on its side! Its pole points at the Sun, so one summer lasts 21 whole years.", "Uranus is tilted 98 degrees, probably knocked over by an enormous collision early on. Each pole spends 42 Earth years in continuous sunlight and then 42 in darkness, so its seasons work nothing like any other planet's."))
+    m.push(mark("The Methane Sky", 0.0, 60.0, "Uranus looks blue-green because of a gas called methane in its air.", "Methane in the upper atmosphere absorbs red light and lets blue-green scatter back, which is the whole reason for the colour. A haze layer of photochemical smog sits above it and washes the bands out - Uranus looks far blander than it actually is."))
+    m.push(mark("The Cold Record", -40.0, 150.0, "This is the coldest planet of them all, even colder than Neptune which is further away.", "Uranus recorded -224 C, the lowest temperature measured on any planet. Every other giant planet radiates more heat than it receives from the Sun; Uranus barely does, which suggests the collision that tipped it also robbed it of much of its internal heat."))
+    m.push(mark("Faint Dark Rings", 20.0, -120.0, "Uranus has rings too, but they are thin and almost black, so they are very hard to see.", "Thirteen narrow rings, discovered in 1977 when the planet passed in front of a star and the star blinked several times before and after. The ring particles are as dark as charcoal, probably radiation-processed carbon."))
+    return World {
+        name: "Uranus", kind: "Planet",
+        diameterKm: 50724.0, dayHours: 17.24, yearDays: 30687.0, tempC: -195.0,
+        moons: 28, distanceKm: 2871000000.0, distanceOf: "the Sun",
+        gravity: 0.89, tilt: 97.77,
+        tint: v3(0.62, 0.95, 0.96), atmo: 1.2, bump: 0.0, specular: 0.0,
+        ambient: 0.07, emissive: 0.0,
+        ringInner: 0.0, ringOuter: 0.0, ringTint: v3(1.0, 1.0, 1.0),
+        lonOffset: 0.0, faceLon: 0.0, viewDist: 3.0, punch: 1.05,
+        little: "Uranus is a big blue-green ball of gas, and it rolls around the Sun on its side like a barrel instead of spinning like a top.",
+        big: "Uranus is an ice giant: under its hydrogen-helium air is a hot, dense fluid of water, ammonia and methane. Only one spacecraft has ever visited - Voyager 2 flew past in 1986 and got a single distant look at a planet we still barely know.",
+        landmarks: m,
+    }
+}
+
+// ── Neptune ───────────────────────────────────────────────────────────────────
+
+fn neptune(): World {
+    var m: Vec<Landmark> = Vec.new()
+    m.push(mark("The Great Dark Spot", -23.0, -65.0, "A giant storm as wide as the Earth. This one disappeared - Neptune's storms come and go.", "Voyager 2 photographed the Great Dark Spot in 1989; when Hubble looked in 1994 it was gone, and new dark spots have appeared elsewhere since. Unlike Jupiter's Red Spot, Neptune's storms last years rather than centuries."))
+    m.push(mark("The Fastest Winds", 5.0, 120.0, "The windiest place we know of anywhere. The wind here blows faster than a jet plane.", "Winds on Neptune reach about 2,100 km/h, supersonic and the fastest measured in the solar system. What is strange is that Neptune gets almost no sunlight to drive weather, so the energy has to be coming from inside the planet."))
+    m.push(mark("Found With Maths", 40.0, 40.0, "People found Neptune by doing sums! They noticed Uranus was being tugged, worked out where the tugger must be, and pointed a telescope right at it.", "In 1846 Le Verrier used Uranus's orbital wobble to predict an unseen planet's position; Galle found it that same night, within one degree. It is the classic demonstration that Newtonian gravity does not just describe orbits - it predicts objects nobody has seen."))
+    m.push(mark("A Very Long Year", -60.0, 150.0, "One year on Neptune is 165 Earth years. It has only gone around the Sun once since we found it!", "Neptune completed its first full orbit since discovery in July 2011. It sits 30 times further from the Sun than Earth, where sunlight is about 1/900th as bright - noon on Neptune looks like deep twilight."))
+    return World {
+        name: "Neptune", kind: "Planet",
+        diameterKm: 49244.0, dayHours: 16.11, yearDays: 60190.0, tempC: -200.0,
+        moons: 16, distanceKm: 4495000000.0, distanceOf: "the Sun",
+        gravity: 1.14, tilt: 28.32,
+        tint: v3(0.35, 0.55, 1.0), atmo: 1.25, bump: 0.0, specular: 0.0,
+        ambient: 0.07, emissive: 0.0,
+        ringInner: 0.0, ringOuter: 0.0, ringTint: v3(1.0, 1.0, 1.0),
+        lonOffset: 0.0, faceLon: -65.0, viewDist: 3.0, punch: 1.05,
+        little: "Neptune is the furthest planet from the Sun. It is deep blue, freezing cold, and has the fastest winds anywhere.",
+        big: "Neptune is the densest giant planet and radiates 2.6 times more energy than it absorbs from the Sun, which is why a world in near-darkness has the most violent weather we know of. Its largest moon, Triton, orbits backwards and is almost certainly a captured Kuiper Belt object.",
+        landmarks: m,
+    }
+}
+
+pub fn allWorlds(): Vec<World> {
+    var w: Vec<World> = Vec.new()
+    w.push(sun())
+    w.push(mercury())
+    w.push(venus())
+    w.push(earth())
+    w.push(moon())
+    w.push(mars())
+    w.push(jupiter())
+    w.push(saturn())
+    w.push(uranus())
+    w.push(neptune())
+    return w
+}
+
+// Index into `allWorlds`, so the loader can fetch the right map without the
+// world table also knowing about textures.
+pub let W_SUN: i64 = 0
+
+pub let W_MERCURY: i64 = 1
+
+pub let W_VENUS: i64 = 2
+
+pub let W_EARTH: i64 = 3
+
+pub let W_MOON: i64 = 4
+
+pub let W_MARS: i64 = 5
+
+pub let W_JUPITER: i64 = 6
+
+pub let W_SATURN: i64 = 7
+
+pub let W_URANUS: i64 = 8
+
+pub let W_NEPTUNE: i64 = 9

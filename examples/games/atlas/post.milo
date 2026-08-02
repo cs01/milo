@@ -1,0 +1,123 @@
+// Render-to-target, bloom, tone-map.
+//
+// The scene is drawn into a half-float target in linear light, so the Sun and a
+// specular glint off the Pacific are allowed to be brighter than white instead of
+// clipping at it. The bright pass then finds exactly those places and blooms
+// them, which is the whole reason a planet on a black background looks like a
+// photograph rather than a sticker.
+
+from "std/gpu" import {
+    Gpu, Mesh, Shader, Target, bindScreen, QUAD_VERT
+}
+from "./shaders" import {
+    BRIGHT_FRAG, BLUR_FRAG, COMPOSITE_FRAG
+}
+
+// The bloom chain runs at a quarter of each axis. Anything finer costs four
+// times as much to blur and looks identical once it has been through a
+// twenty-tap kernel.
+pub let SHRINK: i64 = 4
+
+pub let BRIGHT_THRESHOLD: f64 = 1.05
+
+pub struct Post {
+    scene: Target,
+    a: Target,
+    b: Target,
+    bright: Shader,
+    blur: Shader,
+    comp: Shader,
+    quad: Mesh,
+    w: i64,
+    h: i64,
+}
+
+pub fn postNew(w: i64, h: i64): Result<Post, string> {
+    let bright = Shader.compile(QUAD_VERT, BRIGHT_FRAG)?
+    let blur = Shader.compile(QUAD_VERT, BLUR_FRAG)?
+    let comp = Shader.compile(QUAD_VERT, COMPOSITE_FRAG)?
+    // The scene target is the only one with a depth buffer; the post passes are
+    // flat quads that must never depth-test against anything.
+    let scene = Target.new(w, h, true, true)?
+    let a = Target.new(w / SHRINK, h / SHRINK, false, true)?
+    let b = Target.new(w / SHRINK, h / SHRINK, false, true)?
+    return Result.Ok(Post {
+        scene: scene, a: a, b: b,
+        bright: bright, blur: blur, comp: comp,
+        quad: Mesh.fullscreenQuad(), w: w, h: h,
+    }
+    )
+}
+
+impl Post {
+    // Bind the scene target and clear it. Everything 3D goes between this and
+    // `resolve`.
+    fn beginScene(self: &Self) {
+        self.scene.bind()
+        Gpu.clear(0.0, 0.0, 0.0, 1.0, true)
+    }
+
+    fn blurPass(self: &Self, stride: i64) {
+        let bw = self.w / SHRINK
+        let bh = self.h / SHRINK
+        let sx = (stride as f64) / (bw as f64)
+        let sy = (stride as f64) / (bh as f64)
+        self.b.bind()
+        self.blur.bind()
+        self.a.bindTexture(0)
+        self.blur.uniformI("uSrc", 0)
+        self.blur.uniform2F("uStep", sx, 0.0)
+        self.quad.draw()
+
+        self.a.bind()
+        self.blur.bind()
+        self.b.bindTexture(0)
+        self.blur.uniformI("uSrc", 0)
+        self.blur.uniform2F("uStep", 0.0, sy)
+        self.quad.draw()
+    }
+
+    // Bloom the scene and put it on the window.
+    fn resolve(self: &Self, gain: f64, exposure: f64, vignette: f64, dw: i64, dh: i64) {
+        Gpu.depthTest(false)
+        Gpu.blendOff()
+        Gpu.cullBackFaces(false)
+
+        self.a.bind()
+        self.bright.bind()
+        self.scene.bindTexture(0)
+        self.bright.uniformI("uSrc", 0)
+        self.bright.uniform2F("uTexel", 1.0 / (self.w as f64), 1.0 / (self.h as f64))
+        self.bright.uniformF("uThreshold", BRIGHT_THRESHOLD)
+        self.quad.draw()
+
+        // Widening strides: four passes of [1,4,6,4,1]/16 at 1, 2, 4, 8 texels
+        // give a wide halo for twenty taps. Drop the widest and the glow around
+        // the Sun acquires a visible square edge.
+        self.blurPass(1)
+        self.blurPass(2)
+        self.blurPass(4)
+        self.blurPass(8)
+
+        bindScreen(dw, dh)
+        self.comp.bind()
+        self.scene.bindTexture(0)
+        self.a.bindTexture(1)
+        self.comp.uniformI("uScene", 0)
+        self.comp.uniformI("uBloom", 1)
+        self.comp.uniformF("uGain", gain)
+        self.comp.uniformF("uExposure", exposure)
+        self.comp.uniformF("uVignette", vignette)
+        self.quad.draw()
+    }
+
+    fn free(self: &Self) {
+        self.quad.free()
+        self.bright.free()
+        self.blur.free()
+        self.comp.free()
+        self.scene.free()
+        self.a.free()
+        self.b.free()
+    }
+}

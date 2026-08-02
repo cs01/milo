@@ -40,7 +40,7 @@ Three states, read straight off the world, and meant to be obvious across a room
 
 ## The ground
 
-Blocks are big — 34 pixels — because a five-year-old reads "one block, one dig",
+Blocks are big — 40 pixels — because a five-year-old reads "one block, one dig",
 and at half that size the map was a field of detail nobody could parse.
 
 Three grounds, in three wandering bands, each with its own hue *and* its own
@@ -53,7 +53,7 @@ Tiles are not drawn as squares. Every corner that faces open air is rounded, by 
 radius that varies per tile, and every face that borders air bulges a pixel or
 three past its cell. The lamp is drawn as **one** smooth glow over the finished
 tiles rather than as a per-tile brightness — per-tile falloff was painting every
-34-pixel cell its own flat shade, which is a checkerboard no amount of rounded
+40-pixel cell its own flat shade, which is a checkerboard no amount of rounded
 corners can hide.
 
 ## Treasure
@@ -74,20 +74,30 @@ Three upgrades are buried in the earth, pulsing brighter than ore: **a faster
 drill**, a **wide drill** that takes the tiles either side of the bit, and a
 **brighter lamp**. They last for the level.
 
-## The way out
+## The door
 
-The door runs the **full height** of the right-hand wall. A gate three tiles tall
-at one depth meant "go right" was only half the instruction — you also had to
-find the row. Now right is right, from anywhere, and an edge marker gives the
-distance whenever it is off screen.
+**The door is on screen at all times.** It runs the full height of the right-hand
+wall, and the map is exactly one screen wide — 40 px tiles into a 1280 px window
+is 32 of them — so there is no horizontal scrolling and nothing to go looking for.
+You can see the thing you are working towards from the first frame of a level to
+the last.
 
-Fill the bar (75 on level 1, +50 a level) and the wall turns green.
+Two earlier versions were worse in the same way. A gate three tiles tall at one
+depth meant "go right" was only half the instruction: you also had to find the
+row. Making it full height fixed that but left it off screen behind a scroll, so
+it needed an edge marker to stand in for itself. Fitting the map to the window
+deleted both problems and the marker code with them.
+
+It says what it wants without any text: a **padlock** on every tile of the wall
+while it is shut, green with **arrows pouring rightward** once it is open. Fill
+the bar — 75 on level 1, +50 a level — and it opens.
 
 ## The world
 
-One box a little wider than the screen and a few screens deep, growing slowly
-with the level. Generated from smooth value noise offset by the level number, so
-a given level is the same every run — a good seam is somewhere you can go back to.
+One screen wide, always. Level 1 is one screen tall as well, so the first level
+does not scroll at all; later levels grow downward only. Generated from smooth
+value noise offset by the level number, so a given level is the same every run —
+a good seam is somewhere you can go back to.
 
 Flooded pools open up in the mid depths. You swim straight through them; nothing
 bad happens. The water does not drain when you breach it.

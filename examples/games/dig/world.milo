@@ -13,11 +13,16 @@ from "std/random" import {
 
 // Big chunky tiles. A five-year-old reads "one block = one thing you can dig";
 // at 18px the ground was a field of detail nobody could parse.
-pub let TILE: f64 = 34.0
+//
+// 40 px divides the 1280-wide window exactly 32 times, and the map is exactly
+// that wide — so there is never any horizontal scrolling and the door, which
+// runs the full height of the right-hand wall, is on screen at all times. You
+// can see the thing you are working towards from the first frame to the last.
+pub let TILE: f64 = 40.0
 
-pub let MAP_W: i64 = 64
+pub let MAP_W: i64 = 32
 
-pub let MAP_H: i64 = 48
+pub let MAP_H: i64 = 40
 
 // tile kinds
 pub let T_SKY: i64 = 0
@@ -128,9 +133,8 @@ pub struct Mine {
     exitX: i64,
     exitOpen: bool,
     gateY: i64,
-    // The playable box grows with the level. MAP_W/MAP_H are only the allocation;
-    // everything past worldW/worldH is filled with bedrock so a level 1 map is a
-    // small room rather than an intimidating continent.
+    // The playable box. Width is pinned to exactly one screen forever; only the
+    // depth grows with the level. Everything past worldH is filled with bedrock.
     worldW: i64,
     worldH: i64,
     cleared: f64,
@@ -184,16 +188,17 @@ pub fn setTile(m: &mut Mine, x: i64, y: i64, t: i64) {
     m.tiles[y * MAP_W + x] = t as u8
 }
 
-pub let SURFACE: i64 = 5
+pub let SURFACE: i64 = 4
 
-// How big this level's box is, and what it costs to open the gate.
+// How big this level's box is, and what it costs to open the door.
 fn sizeForLevel(m: &mut Mine) {
-    // Barely wider than the screen (1280 / 34 = 38 tiles) and only a few screens
-    // deep. A small box you can hold in your head beats a continent you get lost in.
-    m.worldW = Math.minI64(MAP_W, 42 + m.level * 3)
-    m.worldH = Math.minI64(MAP_H, SURFACE + 16 + m.level * 5)
-    m.exitX = m.worldW - 3
-    m.gateY = SURFACE + 3 + Math.minI64(m.level, 5)
+    // Always exactly one screen wide — that is the whole point, and nothing here
+    // may change it. Level 1 is exactly one screen tall too, so the first level
+    // does not scroll at all; later levels grow downward only.
+    m.worldW = MAP_W
+    m.worldH = Math.minI64(MAP_H, SURFACE + 14 + (m.level - 1) * 4)
+    m.exitX = m.worldW - 2
+    m.gateY = SURFACE + 2
     m.quota = 75 + (m.level - 1) * 50
 }
 
@@ -238,15 +243,15 @@ fn generate(m: &mut Mine) {
                 // depth. Generous — finding treasure is the whole game, so it
                 // should happen every few seconds, not every few minutes.
                 let vein = smoothNoise((x as f64) * 0.19 + 11.0 + seed, (y as f64) * 0.19 + 7.0 + seed)
-                if depth > 0.04 && vein > 0.855 {
+                if depth > 0.04 && vein > 0.888 {
                     t = T_GOLD
                 }
                 let vein2 = smoothNoise((x as f64) * 0.22 + 91.0 + seed, (y as f64) * 0.22 + 51.0 + seed)
-                if depth > 0.34 && vein2 > 0.900 {
+                if depth > 0.45 && vein2 > 0.930 {
                     t = T_GEM
                 }
                 let vein3 = smoothNoise((x as f64) * 0.28 + 5.0 + seed, (y as f64) * 0.28 + 77.0 + seed)
-                if depth > 0.62 && vein3 > 0.935 {
+                if depth > 0.72 && vein3 > 0.955 {
                     t = T_CRYSTAL
                 }
                 // One or two small ponds. Broad, smooth noise so they come out as
@@ -257,7 +262,7 @@ fn generate(m: &mut Mine) {
                 }
                 // Buried upgrades: uncommon, but shallow enough to actually meet one.
                 let up = smoothNoise((x as f64) * 0.55 + 613.0 + seed, (y as f64) * 0.55 + 217.0 + seed)
-                if depth > 0.10 && up > 0.972 {
+                if depth > 0.10 && up > 0.960 {
                     let pick = (hash2(x * 7 + 3, y * 11 + 5) * 3.0) as i64
                     if pick == 0 {
                         t = T_PWR_DRILL
@@ -407,7 +412,7 @@ pub fn tileColor(t: i64): Col {
     // buried upgrade as an invisible tile lit by an ambient term.
     if t == T_GATE {
         return Col {
-            r: 1.10, g: 0.66, b: 0.16
+            r: 1.30, g: 0.55, b: 0.06
         }
     }
     if t == T_PWR_DRILL {

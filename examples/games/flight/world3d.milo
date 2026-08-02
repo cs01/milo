@@ -239,9 +239,7 @@ pub struct World {
     trailR: Vec<Trail>,
     trailTick: f64,
     boosting: bool,
-    afterburner: f64, // 0..1, drains while boosting and refills when you let off
     boostBlend: f64, // eased 0..1, drives every visual speed cue
-    abLocked: bool, // true from the moment it empties until it is full again
     // One-frame event flags, drained by the main loop to fire sounds. Keeps the
     // simulation free of any dependency on audio.
     evRing: bool,
@@ -474,9 +472,7 @@ pub fn worldIn(seed: i64, places: Vec<City>, easy: bool): World {
         trailR: Vec.new(),
         trailTick: 0.0,
         boosting: false,
-        afterburner: 1.0,
         boostBlend: 0.0,
-        abLocked: false,
         evRing: false,
         evBonus: false,
         evRegion: false,
@@ -1216,24 +1212,13 @@ pub fn worldUpdate(w: &mut World, dt: f64, inRoll: f64, inPitch: f64, boost: boo
     // Energy, not a constant: a dive trades height for speed and a climb trades
     // it back. Throttle shifts the whole band. This is why the number on the HUD
     // was static before — nothing was driving it but the boost key.
-    // Afterburner is a budget, not a switch: it drains in about four seconds and
-    // takes eight to come back, so a boost is a decision rather than a held key.
-    // Run it dry and it locks out until it is FULL again — otherwise you can
-    // stutter the key and hold a permanent part-boost.
-    var burning = false
-    if boost && !w.abLocked && w.afterburner > 0.0 {
-        burning = true
-        w.afterburner = w.afterburner - dt * 0.25
-        if w.afterburner <= 0.0 {
-            w.afterburner = 0.0
-            w.abLocked = true
-        }
-    } else {
-        w.afterburner = Math.minF64(1.0, w.afterburner + dt * 0.125)
-        if w.afterburner >= 1.0 {
-            w.abLocked = false
-        }
-    }
+    // The afterburner is a switch, not a budget. It used to be a four-second tank
+    // that took eight to refill and locked out when run dry — a rationing rule
+    // that made sense when the goal was a hoop course with a par time. The goal
+    // now is to go and look at something eight kilometres away, and metering the
+    // one control that shortens that flight only makes it longer. It also cost a
+    // fuel gauge on a HUD that is otherwise down to two lines.
+    let burning = boost
     if burning && !w.boosting {
         w.evBoost = true
     }

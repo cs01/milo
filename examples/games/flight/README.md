@@ -7,7 +7,7 @@ milo build examples/games/flight/main.milo -o /tmp/flyby --release && /tmp/flyby
 | | |
 |---|---|
 | up / down | pitch — **up dives, down climbs**, like a stick |
-| space | afterburner |
+| space | afterburner — hold it as long as you like |
 | M | music on / off |
 | ESC | quit |
 

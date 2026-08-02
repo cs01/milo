@@ -70,7 +70,7 @@ pub let EPILOG: string = "built-in places (--place):
 controls:
   UP / DOWN                   pitch
   LEFT / RIGHT                bank
-  SPACE                       afterburner
+  SPACE                       afterburner — hold as long as you like
   ENTER                       fly somewhere else
   M                           music on / off
   ESC                         quit

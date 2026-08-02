@@ -40,7 +40,8 @@ from "./nbody" import {
 }
 from "./world" import {
     World, shipAbout, shipOrbit, currentCapture, CURVE_N, camDistNow, camPitchNow, arrivalEstimate,
-    VIEW_DEPART, VIEW_ROUTE, VIEW_ARRIVE, isLocalHop, PHASE_TITLE, PHASE_BRIEF, PHASE_PLAY
+    VIEW_DEPART, VIEW_ROUTE, VIEW_ARRIVE, isLocalHop, PHASE_TITLE, PHASE_BRIEF, PHASE_PLAY,
+    showsDateDial, showsBestKey
 }
 from "./mission" import {
     MISSION_COUNT
@@ -676,9 +677,6 @@ fn drawPanel(c: &mut Canvas, s: &mut Scene, w: &World, texes: &Vec<Texture>, pan
     rasterFlush(c, s)
     drawShip(c, m, w)
     drawTrackMarks(c, m, w, panel)
-    if panel == 0 {
-        drawTargetMarker(c, m, w)
-    }
 }
 
 // A fixed star field, so that turning the camera reads as turning rather than as
@@ -853,9 +851,7 @@ fn drawTrackMarks(c: &mut Canvas, m: &Map, w: &World, panel: i64) {
             let dp = project(m, toRender(m, framed(m, w, w.track.pts[0], w.track.times[0])))
             if dp.z > 0.0 && inPanel(m, dp.x, dp.y) {
                 burnMark(c, dp.x, dp.y, 0.35, 0.95, 1.0)
-                if !w.committed {
-                    label(c, m, dp.x + 16.0, dp.y - 10.0, "BURN " + fmtDv(w.planEjDv), 0.45, 0.95, 1.0)
-                }
+
             }
         }
         if w.track.caDist > 0.0 && w.track.caDist < 1.0e12 {
@@ -864,9 +860,7 @@ fn drawTrackMarks(c: &mut Canvas, m: &Map, w: &World, panel: i64) {
             let p = project(m, toRender(m, cp))
             if p.z > 0.0 && inPanel(m, p.x, p.y) {
                 burnMark(c, p.x, p.y, 1.0, 0.62, 0.25)
-                if !w.committed {
-                    label(c, m, p.x + 16.0, p.y + 12.0, "ARRIVE HERE", 1.0, 0.74, 0.34)
-                }
+
             }
         }
     }
@@ -1017,58 +1011,185 @@ fn row(c: &mut Canvas, x: i64, y: i64, s: &string, r: f64, g: f64, b: f64) {
 // one: you could not see the Earth. Everything that is merely INTERESTING has
 // been cut, and what is left is the four things a decision needs — where you are
 // going, when it is, what it costs, and what to press.
+// One step at a time.
+//
+// The screen used to show every control and every readout at once, and the
+// review of it was correct: the largest interactive element on mission one was
+// the departure-date curve, which on an Earth-to-Moon hop moves the price by
+// under one per cent. The player's attention was being pointed at the one dial
+// that does nothing, while the dial that matters was a grey caption at the far
+// right of a bar it was not attached to.
+//
+// So each beat of the mission draws only what that beat is about, and the beat
+// is derived from state that already existed — nothing here is a new mode flag
+// except `hasScrubbed`.
+pub let STEP_PAD: i64 = 0
+
+pub let STEP_CHOOSE: i64 = 1
+
+pub let STEP_READY: i64 = 2
+
+pub let STEP_FLYING: i64 = 3
+
+pub let STEP_STOP: i64 = 4
+
+pub fn stepOf(w: &World): i64 {
+    if w.sweep > 0.0 && !w.committed {
+        return STEP_PAD
+    }
+    if w.committed {
+        if currentCapture(w).possible {
+            return STEP_STOP
+        }
+        return STEP_FLYING
+    }
+    if w.hasScrubbed && w.planValid && w.spent + w.planDv <= w.budget {
+        return STEP_READY
+    }
+    return STEP_CHOOSE
+}
+
+// Kilometres per second, two decimals, no unit. The unit is printed once per
+// screen — mixing m/s and km/s in one row made a 592 m/s correction look two
+// hundred times bigger than the 3.16 km/s burn beside it.
+fn kms(v: f64): string {
+    return formatFloat(v / 1000.0, 2)
+}
+
 pub fn drawHud(c: &mut Canvas, w: &World) {
     if w.phase != PHASE_PLAY {
         return
     }
-    let m = w.mission
-    text(c, 16, 14, w.bodies[w.missions[m].from].name.toUpper() + "  TO  " + w.bodies[w.missions[m].to].name.toUpper(), UI_BIG, 0.95, 0.98, 1.0)
-    text(c, 16, 50, w.missions[m].blurb, UI, 0.48, 0.58, 0.68)
-
-    let dstr = fmtDate(w.t)
-    text(c, W - 18 - textWidth(dstr, UI_BIG), 14, dstr, UI_BIG, 0.92, 0.95, 1.0)
-    var wl = "PAUSED"
-    if !w.paused {
-        wl = warpLabel(w.warp)
+    let step = stepOf(w)
+    if step == STEP_PAD {
+        textCentered(c, W / 2, H - 60, "ENTER  TO SKIP", UI, 0.62, 0.70, 0.78)
+        return
     }
-    text(c, W - 18 - textWidth(wl, UI), 50, wl, UI, 0.62, 0.74, 0.86)
+    let m = w.mission
+    let to = w.missions[m].to
 
-    drawBudget(c, w)
-    drawScrubBar(c, w)
-    drawActionBar(c, w)
+    // The one sentence. It says the goal, not the mechanism.
+    text(c, 16, 14, "GET TO " + w.missions[m].name.toUpper() + " AND STOP THERE", UI_BIG, 0.95, 0.98, 1.0)
+    if step == STEP_CHOOSE {
+        text(c, 16, 52, "one tank of fuel: leaving spends most of it, stopping spends the rest", UI, 0.55, 0.65, 0.75)
+    }
+
+    // The date only exists once it is moving.
+    if step == STEP_FLYING || step == STEP_STOP {
+        let dstr = fmtDate(w.t)
+        text(c, W - 18 - textWidth(dstr, UI_BIG), 14, dstr, UI_BIG, 0.92, 0.95, 1.0)
+        var wl = "PAUSED"
+        if !w.paused {
+            wl = warpLabel(w.warp)
+        }
+        text(c, W - 18 - textWidth(wl, UI), 52, wl, UI, 0.62, 0.74, 0.86)
+    }
+
+    drawTallies(c, w, step)
+    if showsDateDial(w) && (step == STEP_CHOOSE || step == STEP_READY) {
+        drawScrubBar(c, w)
+    }
+    drawTargetMarker2(c, w, step)
+    drawActionBar2(c, w, step)
     drawMessage(c, w)
 }
 
-fn viewName(w: &World): string {
-    if w.view == VIEW_DEPART {
-        return "VIEW: " + w.bodies[w.missions[w.mission].from].name.toUpper()
+// The two numbers that decide everything, in the same units, on the same row,
+// forty pixels apart. They used to be a bar in one corner and a price in another
+// — which is not a comparison, it is two facts.
+fn drawTallies(c: &mut Canvas, w: &World, step: i64) {
+    let y = H - 128
+    let left = w.budget - w.spent
+    if step == STEP_CHOOSE || step == STEP_READY {
+        let trip = w.planDv
+        var r = 0.98
+        var g = 0.62
+        var b = 0.28
+        if trip <= w.budget - 400.0 {
+            r = 0.35
+            g = 0.95
+            b = 0.62
+        }
+        let a = "THIS TRIP  " + kms(trip)
+        let bb = "YOUR TANK  " + kms(w.budget)
+        let wa = textWidth(a, UI_BIG)
+        let wb = textWidth(bb, UI_BIG)
+        let x0 = (W - (wa + 60 + wb)) / 2
+        text(c, x0, y, a, UI_BIG, r, g, b)
+        text(c, x0 + wa + 60, y, bb, UI_BIG, 0.82, 0.88, 0.94)
+        textCentered(c, W / 2, y + 40, "km/s", UI, 0.48, 0.56, 0.64)
+    } else {
+        var s2 = "FUEL LEFT  " + kms(left)
+        if step == STEP_STOP {
+            s2 = "FUEL LEFT  " + kms(left) + "      THIS BURN  " + kms(currentCapture(w).dv)
+        }
+        textCentered(c, W / 2, y, s2, UI_BIG, 0.86, 0.91, 0.96)
+        textCentered(c, W / 2, y + 40, "km/s", UI, 0.48, 0.56, 0.64)
     }
-    if w.view == VIEW_ARRIVE {
-        return "VIEW: " + w.bodies[w.missions[w.mission].to].name.toUpper()
-    }
-    return "VIEW: ROUTE"
 }
 
-fn drawBudget(c: &mut Canvas, w: &World) {
-    var left = (w.budget - w.spent) / w.budget
-    if left < 0.0 {
-        left = 0.0
+// The destination ring stays; the distance number only appears once flying.
+fn drawTargetMarker2(c: &mut Canvas, w: &World, step: i64) {
+    let mp = mapFor(w, 0)
+    drawTargetRing(c, mp, w, step == STEP_FLYING)
+}
+
+fn drawActionBar2(c: &mut Canvas, w: &World, step: i64) {
+    var msg = ""
+    var sub = ""
+    var r = 1.0
+    var g = 0.82
+    var b = 0.35
+    let to = w.missions[w.mission].to
+    if step == STEP_CHOOSE {
+        if w.hasScrubbed && w.spent + w.planDv > w.budget {
+            msg = "THAT TRIP COSTS MORE THAN YOU HAVE"
+            sub = "press UP for more days — a slower trip burns less"
+            r = 0.96
+            g = 0.42
+            b = 0.32
+        } else {
+            msg = "PRESS  UP  TO TAKE MORE DAYS"
+            sub = "a slower trip burns less fuel"
+            if showsDateDial(w) {
+                sub = "a slower trip burns less fuel — LEFT / RIGHT changes the day you leave"
+            }
+        }
     }
-    let y = (H - 42) as f64
-    fillRect(c, 16.0, y, 296.0, y + 16.0, 0.08, 0.10, 0.14)
-    var br = 0.30
-    var bg = 0.85
-    var bb = 0.95
-    if left < 0.25 {
-        br = 0.95
-        bg = 0.55
-        bb = 0.25
+    if step == STEP_READY {
+        msg = "PRESS  ENTER  TO LAUNCH"
+        sub = kms(w.planDv) + " of your " + kms(w.budget) + " — you arrive with " + kms(w.budget - w.planDv) + " to spare"
+        if showsBestKey(w) {
+            sub = sub + "   ·   B for the cheapest"
+        }
     }
-    let fw = 280.0 * left
-    if fw > 0.0 {
-        fillRect(c, 16.0, y, 16.0 + fw, y + 16.0, br, bg, bb)
+    if step == STEP_FLYING {
+        msg = "COASTING TO " + w.missions[w.mission].name.toUpper()
+        // Time is ALREADY running — `commitPlan` unpauses and sets the warp. The
+        // old copy implied nothing happened until you pressed a key.
+        sub = "arrives " + fmtDate(w.planDep + w.planTof) + " — press . to run time faster, , to slow it"
+        r = 0.80
+        g = 0.86
+        b = 0.94
     }
-    text(c, 16, (y - 26.0) as i64, "FUEL  " + fmtDv(w.budget - w.spent), UI, 0.72, 0.80, 0.88)
+    if step == STEP_STOP {
+        msg = "PRESS  ENTER  TO STOP AT " + w.missions[w.mission].name.toUpper()
+        sub = "this is as close as you get — brake now, or fly past"
+        r = 0.40
+        g = 0.95
+        b = 0.95
+    }
+    let tw = textWidth(msg, UI_BIG)
+    let sw = textWidth(sub, UI)
+    var boxW = tw
+    if sw > boxW {
+        boxW = sw
+    }
+    let cx = (W / 2) as f64
+    let y0 = (H - 236) as f64
+    coverRect(c, cx - (boxW as f64) * 0.5 - 26.0, y0, cx + (boxW as f64) * 0.5 + 26.0, y0 + 76.0, 0.028, 0.036, 0.055)
+    textCentered(c, W / 2, (y0 + 12.0) as i64, msg, UI_BIG, r, g, b)
+    textCentered(c, W / 2, (y0 + 48.0) as i64, sub, UI, 0.68, 0.76, 0.84)
 }
 
 // Where the target is, when it is not on screen.
@@ -1076,12 +1197,15 @@ fn drawBudget(c: &mut Canvas, w: &World) {
 // The first thing a new player does is look for the Moon, and at the opening
 // zoom the Moon is sixty screens away. Without this the map is a planet and a
 // void, and the honest reaction is the one this got: no idea what to do.
-fn drawTargetMarker(c: &mut Canvas, m: &Map, w: &World) {
+fn drawTargetRing(c: &mut Canvas, m: &Map, w: &World, showDist: bool) {
     let to = w.missions[w.mission].to
     let wp = ephemPos(w.e, to, w.t)
     let p = project(m, toRender(m, wp))
     let dist = (wp - w.ship.pos).len()
-    let lab = w.bodies[to].name + "  " + fmtDist(dist)
+    var lab = w.bodies[to].name.toUpper()
+    if showDist {
+        lab = w.bodies[to].name.toUpper() + "  " + fmtDist(dist)
+    }
     // Margins follow the HUD. These were set when a plan panel took the top left
     // and an orbit readout the bottom right; with those gone, a body sitting
     // perfectly visible near the top edge was still being treated as off-screen
@@ -1148,8 +1272,8 @@ fn drawScrubBar(c: &mut Canvas, w: &World) {
     if w.curve.len == 0 {
         return
     }
-    text(c, BAR_X as i64, (BAR_Y - 26.0) as i64, "LEAVE ON", UI, 0.50, 0.60, 0.70)
-    let lab = "TAKE " + fmtSpan(w.planTof)
+    text(c, BAR_X as i64, (BAR_Y - 26.0) as i64, "DEPARTURE DAY", UI, 0.50, 0.60, 0.70)
+    let lab = "TRIP LENGTH " + fmtSpan(w.planTof) + "  (UP / DOWN)"
     text(c, (BAR_X + BAR_W) as i64 - textWidth(lab, UI), (BAR_Y - 26.0) as i64, lab, UI, 0.50, 0.60, 0.70)
 
     // The curve is clipped at three times the best cost: past that everything is
@@ -1178,7 +1302,7 @@ fn drawScrubBar(c: &mut Canvas, w: &World) {
                 f = 1.0
             }
             let col = rampColor(f)
-            let h = BAR_H * (1.0 - f * 0.88)
+            let h = BAR_H * (0.12 + f * 0.88)
             fillRect(c, x, BAR_Y + BAR_H - h, x + cw, BAR_Y + BAR_H, col.x * 0.55, col.y * 0.55, col.z * 0.55)
             // A hot rim along the top of the fill. The eye follows the bright
             // edge, and the bright edge is the shape of the answer.
@@ -1194,14 +1318,14 @@ fn drawScrubBar(c: &mut Canvas, w: &World) {
         // Same formula the bars use, or the line lands nowhere near the height
         // that actually means "this costs a budget's worth".
         let fb = (w.budget - lo) / (hi - lo)
-        let by = BAR_Y + BAR_H - BAR_H * (1.0 - fb * 0.88)
+        let by = BAR_Y + BAR_H - BAR_H * (0.12 + fb * 0.88)
         var q = 0
         while q < 60 {
             let qx = BAR_X + BAR_W * (q as f64) / 60.0
             fillRect(c, qx, by, qx + 6.0, by + 1.5, 0.95, 0.35, 0.28)
             q = q + 1
         }
-        text(c, (BAR_X + BAR_W + 8.0) as i64, (by - 8.0) as i64, "BUDGET", UI, 0.95, 0.45, 0.35)
+        text(c, (BAR_X + BAR_W + 8.0) as i64, (by - 8.0) as i64, "YOUR TANK", UI, 0.95, 0.45, 0.35)
     }
     let bx = BAR_X + BAR_W * (w.curveBestI as f64) / ((CURVE_N - 1) as f64)
     thickLine(c, bx, BAR_Y - 6.0, bx, BAR_Y + BAR_H + 4.0, 1.5, 0.25, 0.95, 0.65)
@@ -1331,33 +1455,23 @@ fn drawMessage(c: &mut Canvas, w: &World) {
 // Three steps, in order, before the mission starts. The game only ever asks for
 // two decisions and one confirmation, and saying so up front is cheaper than any
 // amount of on-screen instrumentation trying to imply it.
+// The mission card. Nothing more.
+//
+// This used to be three numbered steps explaining the whole loop before the
+// player had pressed a key. The screen now teaches those steps one beat at a
+// time, in place, and a player who has to read instructions first has already
+// been given two chances to be confused.
 pub fn drawBriefing(c: &mut Canvas, w: &World) {
     if w.phase != PHASE_BRIEF {
         return
     }
     let m = w.mission
     coverRect(c, 0.0, 0.0, W as f64, H as f64, 0.010, 0.014, 0.026)
-    textCentered(c, W / 2, 90, "MISSION " + (m + 1).toString() + " OF " + MISSION_COUNT.toString(), UI, 0.60, 0.70, 0.80)
-    textCentered(c, W / 2, 128, w.bodies[w.missions[m].from].name.toUpper() + "  TO  " + w.bodies[w.missions[m].to].name.toUpper(), 5, 0.95, 0.98, 1.0)
-    textCentered(c, W / 2, 196, w.missions[m].blurb, UI, 0.66, 0.76, 0.86)
-
-    let x = 250
-    var y = 280
-    text(c, x, y, "1.", UI_BIG, 1.0, 0.82, 0.35)
-    text(c, x + 60, y, "CHOOSE WHEN TO LEAVE", UI_BIG, 0.92, 0.96, 1.0)
-    text(c, x + 60, y + 38, "LEFT / RIGHT moves the date, UP / DOWN the flight time.", UI, 0.62, 0.72, 0.82)
-    text(c, x + 60, y + 64, "The curve at the bottom is what each day costs. B picks the cheapest.", UI, 0.62, 0.72, 0.82)
-    y = y + 128
-    text(c, x, y, "2.", UI_BIG, 1.0, 0.82, 0.35)
-    text(c, x + 60, y, "COMMIT, THEN WAIT", UI_BIG, 0.92, 0.96, 1.0)
-    text(c, x + 60, y + 38, "ENTER spends the fuel and starts the flight.", UI, 0.62, 0.72, 0.82)
-    text(c, x + 60, y + 64, "Then hold  .  to run time forward. It stops itself when you arrive.", UI, 0.62, 0.72, 0.82)
-    y = y + 128
-    text(c, x, y, "3.", UI_BIG, 1.0, 0.82, 0.35)
-    text(c, x + 60, y, "BURN TO STOP", UI_BIG, 0.92, 0.96, 1.0)
-    text(c, x + 60, y + 38, "ENTER again to enter orbit. Arrive with fuel left and the mission is yours.", UI, 0.62, 0.72, 0.82)
-
-    textCentered(c, W / 2, H - 74, "FUEL FOR THIS MISSION: " + fmtDv(w.missions[m].budget) + "        PRESS  ENTER", UI_BIG, 1.0, 0.82, 0.35)
+    textCentered(c, W / 2, 210, "MISSION " + (m + 1).toString() + " OF " + MISSION_COUNT.toString(), UI, 0.60, 0.70, 0.80)
+    textCentered(c, W / 2, 256, w.bodies[w.missions[m].from].name.toUpper() + "  TO  " + w.bodies[w.missions[m].to].name.toUpper(), 5, 0.95, 0.98, 1.0)
+    textCentered(c, W / 2, 348, w.missions[m].blurb, UI, 0.66, 0.76, 0.86)
+    textCentered(c, W / 2, 420, "FUEL FOR THIS MISSION: " + formatFloat(w.missions[m].budget / 1000.0, 2) + " km/s", UI_BIG, 0.88, 0.92, 0.96)
+    textCentered(c, W / 2, 500, "PRESS  ENTER", UI_BIG, 1.0, 0.82, 0.35)
 }
 
 pub fn drawOutcome(c: &mut Canvas, w: &World) {
@@ -1366,11 +1480,11 @@ pub fn drawOutcome(c: &mut Canvas, w: &World) {
     }
     coverRect(c, 0.0, 0.0, W as f64, H as f64, 0.012, 0.016, 0.028)
     if w.won {
-        textCentered(c, W / 2, 250, "CAPTURED", 6, 0.35, 0.95, 0.95)
+        textCentered(c, W / 2, 250, "IN ORBIT", 6, 0.35, 0.95, 0.95)
         textCentered(c, W / 2, 340, w.bodies[w.missions[w.mission].to].name + " ORBIT ACHIEVED", UI_BIG, 0.88, 0.92, 0.96)
         textCentered(c, W / 2, 380, fmtDv(w.budget - w.spent) + " STILL IN THE TANK", UI, 0.70, 0.80, 0.88)
         if w.mission + 1 < MISSION_COUNT {
-            textCentered(c, W / 2, 440, "ENTER  FOR " + w.missions[w.mission + 1].name, UI_BIG, 1.0, 0.82, 0.35)
+            textCentered(c, W / 2, 470, "ENTER  FOR " + w.missions[w.mission + 1].name.toUpper(), UI_BIG, 1.0, 0.82, 0.35)
         } else {
             textCentered(c, W / 2, 440, "THAT WAS THE LAST ONE. ALL SIX.", UI_BIG, 1.0, 0.82, 0.35)
         }

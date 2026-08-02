@@ -100,6 +100,13 @@ pub struct World {
     // still pending.
     committed: bool,
     mccDone: bool,
+    // Has the player moved a dial yet. ENTER is inert until they have.
+    //
+    // Without this the game opens on a solved, affordable plan and the only key
+    // it advertises finishes the mission — so a new player wins mission one
+    // without touching a control or learning what the number means, then meets
+    // Mars, where the same reflex fails, with no model of why.
+    hasScrubbed: bool,
 
     captured: bool,
     failed: bool,
@@ -133,6 +140,18 @@ pub fn say(w: &mut World, s: string) {
 // transfer happens entirely inside the Earth's gravity well, so it is solved
 // about the Earth rather than about the Sun, and there is no escape hyperbola at
 // all. It is the same Lambert solver with a different central body.
+// Progressive disclosure. The date scrubber and its cost curve are mission 2's
+// content and B is mission 3's, because on the Moon run the departure date moves
+// the price by under one per cent — teaching a dial that does nothing is worse
+// than teaching nothing.
+pub fn showsDateDial(w: &World): bool {
+    return w.mission >= 1
+}
+
+pub fn showsBestKey(w: &World): bool {
+    return w.mission >= 2
+}
+
 pub fn isLocalHop(w: &World, m: i64): bool {
     return w.bodies[w.missions[m].to].parent == w.missions[m].from
 }
@@ -161,7 +180,7 @@ pub fn worldNew(): World {
         ,
         planMcT: 0.0, planFix: v3(0.0, 0.0, 0.0), planEjDv: 0.0,
         track: emptyTrack(), trackValid: false, liveTrack: emptyTrack(),
-        committed: false, mccDone: false,
+        committed: false, mccDone: false, hasScrubbed: false,
         captured: false, failed: false, won: false,
         message: "", messageAge: 0.0,
         preview: false, curve: Vec.new(), curveBest: 0.0, curveWorst: 0.0, curveBestI: 0,
@@ -215,6 +234,7 @@ pub fn startMission(w: &mut World, idx: i64) {
     w.trackValid = false
     w.committed = false
     w.mccDone = false
+    w.hasScrubbed = false
     w.captured = false
     w.failed = false
     w.won = false
@@ -346,7 +366,6 @@ pub fn replan(w: &mut World) {
         w.planArrVinf = (w.track.endVel - ephemVel(w.e, to, w.track.tEnd)).len()
         w.planValid = true
         w.trackValid = true
-        say(w, "plan ready")
         return
     }
 
@@ -387,7 +406,6 @@ pub fn replan(w: &mut World) {
     w.planArrVinf = vinfArr.len()
     w.planValid = true
     w.trackValid = true
-    say(w, "plan ready")
 }
 
 // What the capture burn at the far end will cost, taken from the trajectory that
@@ -419,6 +437,9 @@ pub fn arrivalEstimate(w: &World, tr: &Track): f64 {
 
 // Spend the departure burn and start flying it.
 pub fn commitPlan(w: &mut World) {
+    if !w.hasScrubbed {
+        return
+    }
     if !w.planValid {
         say(w, "nothing planned — press P")
         return
@@ -442,7 +463,6 @@ pub fn commitPlan(w: &mut World) {
     w.warp = 20000.0
     setView(w, VIEW_ROUTE)
     refreshLive(w)
-    say(w, "departure burn complete")
 }
 
 // ── the capture burn ──────────────────────────────────────────────────────────
@@ -983,6 +1003,9 @@ pub fn scrub(w: &mut World, dDep: f64, dTof: f64) {
         tof = mid * 1.75
     }
     let tofChanged = tof != w.planTof
+    if dep != w.planDep || tofChanged {
+        w.hasScrubbed = true
+    }
     w.planDep = dep
     w.planTof = tof
     if tofChanged || w.curve.len == 0 {

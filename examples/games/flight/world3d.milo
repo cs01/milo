@@ -435,6 +435,53 @@ pub fn worldSeeded(seed: i64): World {
 // one per region change. An empty list, or a list of one, is a world that never
 // changes place — which is what --place, --city and the procedural world all
 // want.
+// How far out a place starts you from its first landmark. A short run: long
+// enough to see the beam standing on it and to be flying rather than falling out
+// of the sky, short enough that the opening leg is not the longest one.
+pub let SPAWN_RUN: f64 = 1500.0
+
+// The survey that plays when a place is swapped in mid-run. Shorter than the
+// one at launch — you already know what the game is by then, and the only new
+// information is what this place looks like.
+pub let INTRO_ARRIVE: f64 = 5.5
+
+// Put the aircraft a short run out from the first landmark, pointed at it.
+//
+// The offset runs toward the middle of the map, not backwards along the tour's
+// own bearing. Backwards along the bearing is the obvious choice and it puts you
+// off the edge of the world: Pearl Harbor sits 540 m from Honolulu's western
+// boundary, and 1500 m back along the route from it lands 550 m outside the map,
+// where the terrain is a mirrored copy of the far side. Toward the centre is
+// inside the map by construction — and for every place in the lineup it also
+// happens to be roughly the direction the tour carries on in.
+fn spawnAt(w: &mut World) {
+    if w.marks.len == 0 {
+        return
+    }
+    let mx = w.marks[0].x
+    let mz = w.marks[0].z
+    let l = Math.sqrt(mx * mx + mz * mz)
+    var ux = 0.0
+    var uz = 1.0
+    if l > 1.0 {
+        ux = 0.0 - mx / l
+        uz = 0.0 - mz / l
+    }
+    w.plane.x = mx + ux * SPAWN_RUN
+    w.plane.z = mz + uz * SPAWN_RUN
+    // Pointed at it. Spawning on a fixed heading put the player's back to the
+    // landmark as often as not, which reads as the game having lost it.
+    w.plane.yaw = Math.atan2(mx - w.plane.x, mz - w.plane.z)
+    w.plane.pitch = 0.0
+    w.plane.roll = 0.0
+    // Above whatever is under the SPAWN, not above the map origin. Yosemite's
+    // valley floor and its rim are 900 m apart, and the origin is not where you
+    // are standing any more.
+    w.plane.y = solidAt(w.city, w.plane.x, w.plane.z, 20.0) + 320.0
+    let pose = chasePose(w)
+    w.cam = pose
+}
+
 pub fn worldIn(seed: i64, places: Vec<City>, easy: bool): World {
     var rest = places
     var head = cityEmpty()
@@ -528,12 +575,7 @@ pub fn worldIn(seed: i64, places: Vec<City>, easy: bool): World {
     }
     w.marks = marksFor(w.city.name)
     w.plane.y = heightAt(w.city, 0.0, 0.0) + 320.0
-    // Point at the first landmark. Spawning on a fixed heading put the player's
-    // back to it as often as not, which reads as the game having lost it.
-    if w.marks.len > 0 {
-        w.plane.yaw = Math.atan2(w.marks[0].x - w.plane.x, w.marks[0].z - w.plane.z)
-        w.cam.yaw = w.plane.yaw
-    }
+    spawnAt(w)
     // Hoops only over invented country. Over a real place the landmarks are the
     // reason to fly and a line of scoring rings just gets in front of them.
     if w.city.loaded {
@@ -590,6 +632,13 @@ pub fn worldSetPlace(w: &mut World, c: City) {
     w.markStart = w.time
     w.foundPop = 0.0
     placeMarkRing(w)
+    // A place change is a new start, not a teleport with the old coordinates
+    // kept: every map is mirrored to infinity so the old position IS valid
+    // somewhere in the new one, but "valid" landed you 9 km from the first
+    // landmark of a tour you had not been shown yet.
+    spawnAt(w)
+    w.intro = INTRO_ARRIVE
+    w.introLen = INTRO_ARRIVE
     // Hoops already laid may now be inside something: lift them clear.
     for i in 0..w.rings.len {
         if w.rings[i].alive {
@@ -650,6 +699,9 @@ pub fn stepPlace(w: &mut World, dir: i64) {
     w.regionDone = false
     w.markStart = w.time
     w.foundPop = 0.0
+    spawnAt(w)
+    w.intro = INTRO_ARRIVE
+    w.introLen = INTRO_ARRIVE
     w.banner = 2.2
     w.evRegion = true
     for i in 0..w.rings.len {

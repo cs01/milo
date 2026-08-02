@@ -8,6 +8,7 @@ milo build examples/games/flight/main.milo -o /tmp/flyby --release && /tmp/flyby
 |---|---|
 | up / down | pitch — **up dives, down climbs**, like a stick |
 | space | afterburner — hold it as long as you like |
+| f | fullscreen on / off |
 | M | music on / off |
 | ESC | quit |
 
@@ -104,6 +105,16 @@ aircraft and descends into the chase pose, arriving on it exactly rather than
 cutting. It is held inside the terrain draw distance and pushes the haze out to
 the far plane while it runs — a survey from three kilometres up is a white screen,
 because every fog preset finishes at 1.7 km. Any stick input skips it.
+
+Every place drops you 1500 m out from its first landmark, pointed at it, and does
+the same again when the next region comes in. The offset runs toward the middle
+of the map rather than backwards along the tour's own bearing — backwards is the
+obvious choice and it puts you off the edge of the world, since Pearl Harbor sits
+540 m from Honolulu's western boundary.
+
+The window is resizable and `SDL_RenderSetLogicalSize` letterboxes the 1280x720
+frame into whatever size it ends up: the software renderer never resizes, so
+dragging a corner costs nothing. `--fullscreen`, `--maximized`, or `F` in flight.
 
 With no place named on the command line, the game opens on a start screen listing
 the five regions with one line each. It lives in `menu.milo` and runs its own

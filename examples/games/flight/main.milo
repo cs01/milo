@@ -17,6 +17,8 @@ from "./sdl" import {
     SDL_Init, SDL_CreateWindow, SDL_CreateRenderer, SDL_CreateTexture,
     SDL_UpdateTexture, SDL_RenderClear, SDL_RenderCopy, SDL_RenderPresent,
     SDL_ShowCursor, SDL_GetTicks, SDL_DestroyTexture, SDL_DestroyRenderer,
+    SDL_SetWindowFullscreen, SDL_MaximizeWindow, SDL_RenderSetLogicalSize,
+    SDL_WINDOW_RESIZABLE, SDL_WINDOW_FULLSCREEN_DESKTOP,
     SDL_DestroyWindow, SDL_Quit,
     SDL_INIT_VIDEO, SDL_INIT_AUDIO, SDL_WINDOWPOS_CENTERED, SDL_WINDOW_SHOWN,
     SDL_TEXTUREACCESS_STREAMING, SDL_PIXELFORMAT_ABGR8888,
@@ -72,6 +74,7 @@ controls:
   LEFT / RIGHT                bank
   SPACE                       afterburner — hold as long as you like
   ENTER                       fly somewhere else
+  F                           fullscreen on / off
   M                           music on / off
   ESC                         quit
 
@@ -98,6 +101,8 @@ fn parseOpts(): ParsedArgs {
     p.addBool("procedural", "", "Fly the endless generated world instead of a real place")
     p.addBool("pro", "p", "Give back the bank axis on LEFT / RIGHT, and the corridor")
     p.addBool("natural", "n", "UP climbs (default is stick-style: UP dives, DOWN climbs)")
+    p.addBool("fullscreen", "f", "Open filling the display (F toggles it while flying)")
+    p.addBool("maximized", "m", "Open maximised rather than in a 1280x720 window")
     p.setEpilog(EPILOG)
     return p.parse()
 }
@@ -288,11 +293,21 @@ pub fn main(): i32 {
     var ok = true
     unsafe {
         let title = "FLYBY — written in Milo"
-        win = SDL_CreateWindow(title, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, W as i32, H as i32, SDL_WINDOW_SHOWN)
+        win = SDL_CreateWindow(title, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, W as i32, H as i32, SDL_WINDOW_SHOWN | SDL_WINDOW_RESIZABLE)
         ren = SDL_CreateRenderer(win, 0 - 1, SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC)
         tex = SDL_CreateTexture(ren, SDL_PIXELFORMAT_ABGR8888, SDL_TEXTUREACCESS_STREAMING, W as i32, H as i32)
         if (win as i64) == 0 || (ren as i64) == 0 || (tex as i64) == 0 {
             ok = false
+        }
+        // The frame is always rendered at W x H; this is what lets the window be
+        // any size at all. Without it the software renderer would have to be
+        // resized with the window — a new canvas, a new depth buffer and a new
+        // bloom chain every time the user drags a corner.
+        let _ = SDL_RenderSetLogicalSize(ren, W as i32, H as i32)
+        if o.getBool("fullscreen") {
+            let _ = SDL_SetWindowFullscreen(win, SDL_WINDOW_FULLSCREEN_DESKTOP)
+        } else if o.getBool("maximized") {
+            SDL_MaximizeWindow(win)
         }
         let _ = SDL_ShowCursor(0)
     }
@@ -329,6 +344,7 @@ pub fn main(): i32 {
     let skinTex = planeTexture()
     let facadeTex = facadeTexture()
     var snd = soundNew()
+    var full = o.getBool("fullscreen")
     var last = SDL_GetTicks()
     var fpsAccum: f64 = 0.0
     var fpsFrames: i64 = 0
@@ -348,6 +364,14 @@ pub fn main(): i32 {
 
         if inp.mute {
             musicToggle(snd)
+        }
+        if inp.fullscreen {
+            full = !full
+            var flags: u32 = 0
+            if full {
+                flags = SDL_WINDOW_FULLSCREEN_DESKTOP
+            }
+            let _ = SDL_SetWindowFullscreen(win, flags)
         }
         // Only in one-axis mode: with `--pro` these same keys are the bank axis
         // and stepping the world every time the player turned would be absurd.

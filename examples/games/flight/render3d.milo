@@ -1975,8 +1975,12 @@ pub fn drawMarkGuide(c: &mut Canvas, w: &World, v: &View) {
             thickLine(c, sx + r + t * 0.3, sy, sx + r + t, sy, 2.0, cr, cg, cb)
             thickLine(c, sx, sy - r - t, sx, sy - r - t * 0.3, 2.0, cr, cg, cb)
             thickLine(c, sx, sy + r + t * 0.3, sx, sy + r + t, 2.0, cr, cg, cb)
-            textCentered(c, sx as i64, (sy + r + 16.0) as i64, w.markName, 3, cr, cg, cb)
-            textCentered(c, sx as i64, (sy + r + 42.0) as i64, range, 2, cr * 0.8, cg * 0.8, cb * 0.8)
+            // ABOVE the diamond, not below. You are almost always flying at the
+            // thing, so the diamond is almost always in the middle of the screen
+            // — which is where the aircraft is drawn, and a label under it lands
+            // on the fuselage.
+            textCentered(c, sx as i64, (sy - r - 46.0) as i64, w.markName, 3, cr, cg, cb)
+            textCentered(c, sx as i64, (sy - r - 20.0) as i64, range, 2, cr * 0.8, cg * 0.8, cb * 0.8)
             return
         }
     }

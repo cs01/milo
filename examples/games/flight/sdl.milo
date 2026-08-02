@@ -9,6 +9,16 @@ pub extern fn SDL_Init(flags: u32): i32
 
 pub extern fn SDL_CreateWindow(title: *u8, x: i32, y: i32, w: i32, h: i32, flags: u32): *u8
 
+pub extern fn SDL_SetWindowFullscreen(win: *u8, flags: u32): i32
+
+pub extern fn SDL_MaximizeWindow(win: *u8)
+
+// The frame is rendered once at 1280x720 whatever the window is doing. This
+// tells SDL that texture IS the picture, so RenderCopy scales it to the window
+// and letterboxes to keep the aspect — without it, maximising stretches a 16:9
+// frame across a 16:10 display and every circle on the HUD becomes an ellipse.
+pub extern fn SDL_RenderSetLogicalSize(ren: *u8, w: i32, h: i32): i32
+
 pub extern fn SDL_CreateRenderer(win: *u8, index: i32, flags: u32): *u8
 
 pub extern fn SDL_CreateTexture(ren: *u8, format: u32, access: i32, w: i32, h: i32): *u8
@@ -51,6 +61,13 @@ pub let SDL_WINDOWPOS_CENTERED: i32 = 0x2FFF0000
 
 pub let SDL_WINDOW_SHOWN: u32 = 0x4
 
+pub let SDL_WINDOW_RESIZABLE: u32 = 0x20
+
+// The borderless "fake" fullscreen: it takes the whole display at the desktop's
+// own resolution rather than asking the driver for a mode change, which on macOS
+// is the difference between instant and a black screen for two seconds.
+pub let SDL_WINDOW_FULLSCREEN_DESKTOP: u32 = 0x1001
+
 pub let SDL_TEXTUREACCESS_STREAMING: i32 = 1
 
 pub let SDL_PIXELFORMAT_ABGR8888: u32 = 0x16762004
@@ -67,6 +84,8 @@ pub let SC_A: i64 = 4
 pub let SC_D: i64 = 7
 
 pub let SC_M: i64 = 16
+
+pub let SC_F: i64 = 9
 
 pub let SC_S: i64 = 22
 
@@ -100,6 +119,8 @@ pub struct Input {
     // reaches for them to steer and got the whole world swapped instead.
     placeStep: i64,
     placeHeld: bool,
+    fullscreen: bool, // edge-triggered: true only on the frame F goes down
+    fullHeld: bool,
     // Menu navigation: the pitch axis read as discrete steps, edge-triggered,
     // and BEFORE --natural flips it. A menu cursor that runs the wrong way
     // because of a flight-control preference is a bug nobody would guess at.
@@ -115,6 +136,7 @@ pub fn inputNew(invert: bool): Input {
     return Input {
         moveX: 0.0, moveY: 0.0, boost: false, quit: false, mute: false, muteHeld: false,
         placeStep: 0, placeHeld: false,
+        fullscreen: false, fullHeld: false,
         menuStep: 0, menuHeld: false,
         invert: invert,
     }
@@ -128,6 +150,7 @@ pub fn pollInput(inp: &mut Input, ev: &mut [u8; 64]) {
     inp.mute = false
     inp.placeStep = 0
     inp.menuStep = 0
+    inp.fullscreen = false
 
     unsafe {
         while SDL_PollEvent(ev) != 0 {
@@ -194,6 +217,11 @@ pub fn pollInput(inp: &mut Input, ev: &mut [u8; 64]) {
             inp.placeStep = 1
         }
         inp.placeHeld = stepDown
+        let fDown = ks[SC_F] != 0
+        if fDown && !inp.fullHeld {
+            inp.fullscreen = true
+        }
+        inp.fullHeld = fDown
         if ks[SC_SPACE] != 0 {
             inp.boost = true
         }

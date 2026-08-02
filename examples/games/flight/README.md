@@ -33,7 +33,7 @@ heights, OSM bridges, and an aerial photograph draped over the lot:
 | `manhattan` | Manhattan — the densest skyline there is, and the East River crossings |
 | `yosemite` | Yosemite Valley — El Capitan, Half Dome, granite |
 | `canyon` | the Grand Canyon — no buildings at all, just the rock |
-| `honolulu` | Honolulu — a skyline with a volcano behind it, and reef below |
+| `honolulu` | Honolulu — a skyline with a volcano behind it, Pearl Harbor to the west |
 
 Every region change swaps the next one in, so a run crosses all five. Which one
 you start on comes off the clock, so two launches are not the same flight.

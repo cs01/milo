@@ -25,12 +25,14 @@ once at startup:
 Sea level is the DEM's own zero, so the coastline is the real one.
 
 An asset is a square, and a square drawn around a downtown does not always reach
-the thing next to it. `honolulu.city` is 16 km centred on the harbour, which puts
-Battleship Row about 1.4 km past its western edge — so FLYBY's PEARL HARBOR beacon
-stands on East Loch off Aiea, which the map does reach, rather than on a mirrored
-copy of the far side. Widening the square to hold both Pearl Harbor and Diamond
-Head means a refetch at `--lat 21.313 --lon -157.888 --radius 9500`, and a 1.4x
-bigger asset and drape.
+the thing next to it. `honolulu.city` used to be 16 km centred on the harbour,
+which put Battleship Row about 1.4 km past its western edge: the PEARL HARBOR
+beacon stood on East Loch off Aiea instead, and even that sat 240 m inside the
+boundary, close enough that the whole run in to it was a fight with the turn-back.
+It is now the 19 km square that holds both Pearl Harbor and Diamond Head —
+`--lat 21.313 --lon -157.888 --radius 9500` — at 1.4x the asset and drape. If you
+move a map's extent, the landmark coordinates in `world3d.marksFor` are in the
+asset's own frame and have to move with it.
 
 ## Attribution
 

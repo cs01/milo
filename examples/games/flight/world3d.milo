@@ -179,16 +179,20 @@ pub fn marksFor(cityName: &string): Vec<Mark> {
     // Honolulu is the third kind of place in the lineup: a real skyline with a
     // volcano in it. The tour opens over Pearl Harbor, runs the waterfront and
     // finishes on the crater at the far end of Waikiki.
+    //
+    // Coordinates are in the 19 km asset centred at 21.3130, -157.8880. The
+    // first one is why it is that big: on the old 16 km square centred downtown,
+    // Battleship Row was 1.4 km outside the map, so PEARL HARBOR stood on East
+    // Loch instead — and even that sat 240 m inside the boundary, close enough
+    // that the run in to it was one long fight with the turn-back. The wider
+    // square holds the real thing with three kilometres to spare.
     if cityName == "Honolulu" {
-        // East Loch, off Aiea. The asset is a 16 km square centred downtown and
-        // Battleship Row sits about 1.4 km past its western edge, so the beam
-        // stands on the harbour water this map does reach rather than on a
-        // mirrored copy of it — see the note in cities/README.md.
-        m.push(mk("PEARL HARBOR", 0.0 - 7460.0, 7120.0, "December 7, 1941. The Arizona is still down there, west of here."))
-        m.push(mk("ALOHA TOWER", 0.0 - 104.0, 211.0, "1926. Ten storeys, and for thirty years the tallest thing in Hawaii."))
-        m.push(mk("PUNCHBOWL", 2074.0, 891.0, "A crater the Hawaiians called Puowaina. Now 53,000 graves."))
-        m.push(mk("WAIKIKI", 3941.0, 0.0 - 3228.0, "Wetland and fishponds until the Ala Wai Canal drained it in 1928."))
-        m.push(mk("DIAMOND HEAD", 6222.0, 0.0 - 4787.0, "Leahi. Sailors named it for calcite they took for diamonds."))
+        // The USS Arizona Memorial, over Battleship Row itself.
+        m.push(mk("PEARL HARBOR", 0.0 - 6430.0, 5789.0, "December 7, 1941. The Arizona is still down there, under the memorial."))
+        m.push(mk("ALOHA TOWER", 2281.0, 0.0 - 680.0, "1926. Ten storeys, and for thirty years the tallest thing in Hawaii."))
+        m.push(mk("PUNCHBOWL", 4459.0, 0.0, "A crater the Hawaiians called Puowaina. Now 53,000 graves."))
+        m.push(mk("WAIKIKI", 6326.0, 0.0 - 4119.0, "Wetland and fishponds until the Ala Wai Canal drained it in 1928."))
+        m.push(mk("DIAMOND HEAD", 8607.0, 0.0 - 5678.0, "Leahi. Sailors named it for calcite they took for diamonds."))
         return m
     }
     // Natural country works exactly the same way: a landmark is a named thing
@@ -1064,17 +1068,29 @@ fn fence(w: &mut World, dt: f64) {
     // Quadratic, so the first touch of the wall is barely perceptible and it only
     // becomes a hand on the stick once you are clearly leaving.
     var assist = k * k * (0.15 + 0.85 * head)
-    // Off entirely on top of the landmark being sought. Half the tours have one
-    // out near the edge, and a wall that steers you off the thing it is standing
-    // behind is the same unwinnable game as a wall in front of it. The position
-    // cap below still holds, so this cannot let anyone out of the map.
+    // Off on the approach to a landmark that itself sits near the edge. Half the
+    // tours have one out there, and a wall that steers you off the thing it is
+    // standing behind is the same unwinnable game as a wall in front of it.
+    //
+    // The bubble is sized from how close the LANDMARK is to the wall, not from a
+    // fixed radius: Pearl Harbor sits 240 m inside Honolulu's boundary, so the
+    // whole of its final approach is inside the turn-back zone, and a fixed
+    // thousand-metre bubble still spent the two kilometres before it shoving the
+    // nose away. The position cap below is untouched, so none of this lets
+    // anyone out of the map.
     if w.marks.len > 0 && w.markIdx < w.marks.len {
         let mdx = w.plane.x - w.marks[w.markIdx].x
         let mdz = w.plane.z - w.marks[w.markIdx].z
         let md = Math.sqrt(mdx * mdx + mdz * mdz)
-        let BUBBLE = MARK_REACH + 700.0
-        if md < BUBBLE {
-            assist = assist * Math.clampF64(md / BUBBLE, 0.0, 1.0)
+        let edge = lim - Math.maxF64(Math.abs(w.marks[w.markIdx].x), Math.abs(w.marks[w.markIdx].z))
+        var bubble = MARK_REACH + 700.0
+        if edge < FENCE_SOFT {
+            // Far enough out to cover the whole run in from where the wall
+            // starts pushing, plus the room needed to line up on the hoop.
+            bubble = FENCE_SOFT - edge + MARK_REACH + 700.0
+        }
+        if md < bubble {
+            assist = assist * Math.clampF64(md / bubble, 0.0, 1.0)
         }
     }
     w.plane.yaw = w.plane.yaw + Math.clampF64(diff * 2.0, 0.0 - 1.6, 1.6) * assist * dt

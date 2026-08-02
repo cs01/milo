@@ -1,0 +1,187 @@
+// YAP — a chihuahua flaps his ears through the neighbourhood, written in Milo.
+//
+//   milo run examples/games/yap/main.milo
+//   milo build examples/games/yap/main.milo -o /tmp/yap --release && /tmp/yap
+//
+//   SPACE / UP / W / CLICK   flap        R   restart
+//   M                        music       ESC quit
+//
+// One button. Milo is four inches tall and the hydrants are not, so the only
+// question the game ever asks is when to beat your ears.
+//
+// Everything on screen is software: the dog is pixel art written as strings and
+// the neighbourhood is hashed out of its own world position, all composited into
+// a linear-light float buffer with bloom and tone mapping (gfx.milo). SDL only
+// blits the finished frame. The SDL declarations come from the `sdl` package —
+// see milo.json.
+//
+// Nothing outside sound.milo and the texture upload below is `unsafe`.
+
+from "std/random" import {
+    Random
+}
+from "sdl" import {
+    SDL_Init, SDL_CreateWindow, SDL_CreateRenderer, SDL_CreateTexture,
+    SDL_UpdateTexture, SDL_RenderClear, SDL_RenderCopy, SDL_RenderPresent,
+    SDL_ShowCursor, SDL_GetTicks, SDL_DestroyTexture, SDL_DestroyRenderer,
+    SDL_DestroyWindow, SDL_Quit,
+    SDL_INIT_VIDEO, SDL_INIT_AUDIO, SDL_WINDOWPOS_CENTERED, SDL_WINDOW_SHOWN,
+    SDL_TEXTUREACCESS_STREAMING, SDL_PIXELFORMAT_ABGR8888,
+    SDL_RENDERER_ACCELERATED, SDL_RENDERER_PRESENTVSYNC
+}
+from "./input" import {
+    inputNew, pollInput
+}
+from "./gfx" import {
+    canvasNew, present
+}
+from "./sprites" import {
+    dogFrames, boneSprite
+}
+from "./world" import {
+    worldNew, worldReset, worldUpdate, flap, canRestart, ST_OVER
+}
+from "./render" import {
+    drawBackground, drawGates, drawDog, drawParts, drawHud
+}
+from "./sound" import {
+    soundNew, musicTick, musicToggle, playYap, playPoint, playCrunch, playHurt, playThud
+}
+
+pub let W: i64 = 1280
+
+pub let H: i64 = 720
+
+pub fn main(): i32 {
+    if SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO) != 0 {
+        print("SDL_Init failed")
+        return 1
+    }
+    var win: *u8 = 0 as *u8
+    var ren: *u8 = 0 as *u8
+    var tex: *u8 = 0 as *u8
+    var ok = true
+    unsafe {
+        let title = "YAP — written in Milo"
+        win = SDL_CreateWindow(title, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, W as i32, H as i32, SDL_WINDOW_SHOWN)
+        ren = SDL_CreateRenderer(win, 0 - 1, SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC)
+        tex = SDL_CreateTexture(ren, SDL_PIXELFORMAT_ABGR8888, SDL_TEXTUREACCESS_STREAMING, W as i32, H as i32)
+        if (win as i64) == 0 || (ren as i64) == 0 || (tex as i64) == 0 {
+            ok = false
+        }
+        let _ = SDL_ShowCursor(0)
+    }
+    if !ok {
+        print("SDL setup failed")
+        return 2
+    }
+
+    var c = canvasNew(W, H)
+    let dog = dogFrames()
+    let bone = boneSprite()
+    var w = worldNew(W as f64, H as f64)
+    var snd = soundNew()
+    var inp = inputNew()
+    var ev: [u8; 64] = [0; 64]
+
+    var last = SDL_GetTicks()
+    var fpsAccum: f64 = 0.0
+    var fpsFrames: i64 = 0
+    var fpsShown: i64 = 0
+
+    while !inp.quit {
+        let now = SDL_GetTicks()
+        var dt = ((now - last) as f64) / 1000.0
+        last = now
+        // A frame longer than 50 ms is a hitch, not slow motion: clamp it so the
+        // dog never takes a step that tunnels him through a hydrant.
+        if dt > 0.05 {
+            dt = 0.05
+        }
+        if dt < 0.0005 {
+            dt = 0.0005
+        }
+
+        pollInput(inp, ev)
+        if inp.mute {
+            musicToggle(snd)
+        }
+        musicTick(snd)
+
+        if inp.restart {
+            worldReset(w)
+        }
+        if inp.flap {
+            if w.state == ST_OVER {
+                if canRestart(w) {
+                    worldReset(w)
+                }
+            } else {
+                flap(w)
+            }
+        }
+
+        worldUpdate(w, dt)
+
+        if w.evFlap {
+            playYap(snd)
+        }
+        if w.evScore {
+            playPoint(snd)
+        }
+        if w.evTreat {
+            playCrunch(snd)
+        }
+        if w.evHit {
+            playHurt(snd)
+        }
+        if w.evThud {
+            playThud(snd)
+        }
+
+        // Screen shake is a camera offset at draw time, so it never touches the
+        // simulation and can never desync collision from what is on screen.
+        var ox = 0.0
+        var oy = 0.0
+        if w.shake > 0.2 {
+            ox = Random.floatRange(0.0 - w.shake, w.shake)
+            oy = Random.floatRange(0.0 - w.shake, w.shake)
+        }
+
+        drawBackground(c, w)
+        drawGates(c, w, bone, ox, oy)
+        drawDog(c, w, dog, ox, oy)
+        drawParts(c, w, ox, oy)
+
+        fpsAccum = fpsAccum + dt
+        fpsFrames = fpsFrames + 1
+        if fpsAccum > 0.5 {
+            fpsShown = ((fpsFrames as f64) / fpsAccum) as i64
+            fpsAccum = 0.0
+            fpsFrames = 0
+        }
+        drawHud(c, w, bone, fpsShown)
+
+        var exposure = 1.0
+        if w.flash > 0.0 {
+            exposure = exposure + w.flash * 0.8
+        }
+        // A high bloom threshold: it is daytime and most of the frame is bright,
+        // so a low one would fog the sky instead of lighting the collar, the
+        // treats and the chrome on the hydrant caps.
+        present(c, 0.40, exposure, 0.90)
+
+        unsafe {
+            SDL_UpdateTexture(tex, 0 as *u8, c.fb[0].addrOf() as *u8, (W * 4) as i32)
+            SDL_RenderClear(ren)
+            SDL_RenderCopy(ren, tex, 0 as *u8, 0 as *u8)
+            SDL_RenderPresent(ren)
+        }
+    }
+
+    SDL_DestroyTexture(tex)
+    SDL_DestroyRenderer(ren)
+    SDL_DestroyWindow(win)
+    SDL_Quit()
+    return 0
+}

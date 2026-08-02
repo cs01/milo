@@ -1,0 +1,178 @@
+// Headless capture: a bot plays the game and PPM frames are dumped at chosen
+// ticks. No SDL and no window, so it runs anywhere and its output can be looked
+// at — which is the only way to review pixel art that was authored blind, as
+// strings, in sprites.milo.
+//
+//   milo run examples/games/yap/shot.milo -- /tmp/yap 40 200 520
+//   milo run examples/games/yap/shot.milo -- /tmp/yap --sheet
+//
+// It doubles as a deterministic smoke test for the whole simulation: sim, render
+// and the sprite tables all run here exactly as they do under SDL.
+
+from "std/args" import {
+    args
+}
+from "std/strconv" import {
+    parseInt
+}
+from "./gfx" import {
+    Canvas, canvasNew, present, drawSprite, fillRect, text
+}
+from "./sprites" import {
+    dogFrames, boneSprite
+}
+from "./world" import {
+    World, worldNew, worldUpdate, flap, DOG_X, ST_READY, ST_PLAY
+}
+from "./render" import {
+    drawBackground, drawGates, drawDog, drawParts, drawHud
+}
+
+pub extern fn fopen(path: *u8, mode: *u8): *u8
+
+pub extern fn fwrite(ptr: *u8, size: i64, count: i64, stream: *u8): i64
+
+pub extern fn fclose(stream: *u8): i32
+
+pub let W: i64 = 1280
+
+pub let H: i64 = 720
+
+fn writePpm(path: &string, c: &Canvas) {
+    var rgb: Vec<u8> = Vec.filled(W * H * 3, 0)
+    for i in 0..W * H {
+        let px = c.fb[i]
+        rgb[i * 3] = (px & 0xFF) as u8
+        rgb[i * 3 + 1] = ((px >> 8) & 0xFF) as u8
+        rgb[i * 3 + 2] = ((px >> 16) & 0xFF) as u8
+    }
+    let header = "P6\n" + W.toString() + " " + H.toString() + "\n255\n"
+    unsafe {
+        let f = fopen(path.cstr(), "wb".cstr())
+        if (f as i64) == 0 {
+            print("cannot open " + path)
+            return
+        }
+        let _ = fwrite(header.cstr(), 1, header.len, f)
+        let _ = fwrite(rgb.ptr() as *u8, 1, W * H * 3, f)
+        let _ = fclose(f)
+    }
+}
+
+// The bot aims at the next gap and flaps when it has sunk below it. Deliberately
+// crude — it exists to move the world past the camera, not to set a record, and
+// a bot that never dies would never show the death frames.
+fn wantsFlap(w: &World): bool {
+    var target = 320.0
+    var best = 1.0e9
+    for g in w.gates {
+        let dx = g.x - DOG_X
+        if dx > 0.0 - 40.0 && dx < best {
+            best = dx
+            // aim BELOW the gap centre: a flap climbs ~110 px after the key,
+            // so aiming at the centre puts the peak through the top hydrant
+            target = g.gapY + 34.0
+        }
+    }
+    // Never stack flaps: setting vy again while still rising throws away the
+    // arc the last one bought and sends the dog into the ceiling.
+    if w.vy < 0.0 - 50.0 {
+        return false
+    }
+    return w.y > target
+}
+
+// Every frame in the game, laid out large on a flat background.
+fn sheet(path: &string) {
+    var c = canvasNew(W, H)
+    fillRect(c, 0.0, 0.0, W as f64, H as f64, 0.030, 0.035, 0.055, 1.0)
+    let dog = dogFrames()
+    let bone = boneSprite()
+    var i = 0
+    while i < dog.len {
+        drawSprite(c, dog[i], 40.0 + (i as f64) * 310.0, 120.0, 10.0, false, 0.25)
+        i = i + 1
+    }
+    drawSprite(c, bone, 520.0, 520.0, 10.0, false, 0.6)
+    text(c, 40, 40, "MILO — EARS UP, EARS OUT, EARS DOWN, OOF", 3, 0.9, 0.95, 1.1)
+    present(c, 0.35, 1.0, 0.9)
+    writePpm(path, c)
+    print("wrote " + path)
+}
+
+pub fn main(): i32 {
+    let a = args()
+    if a.len < 2 {
+        print("usage: shot <prefix> [--sheet] [tick ...]")
+        return 1
+    }
+    let prefix = a[1]
+    var ticks: Vec<i64> = Vec.new()
+    var wantSheet = false
+    var giveUp: i64 = 0 - 1 // tick after which the bot stops flapping, to capture a death
+    var k = 2
+    while k < a.len {
+        if a[k] == "--sheet" {
+            wantSheet = true
+        } else if a[k] == "--die" && k + 1 < a.len {
+            giveUp = parseInt(a[k + 1]) ?? 0
+            k = k + 1
+        } else {
+            ticks.push(parseInt(a[k]) ?? 0)
+        }
+        k = k + 1
+    }
+    if wantSheet {
+        sheet(prefix + "_sheet.ppm")
+    }
+    if ticks.len == 0 {
+        return 0
+    }
+
+    var c = canvasNew(W, H)
+    let dog = dogFrames()
+    let bone = boneSprite()
+    var w = worldNew(W as f64, H as f64)
+    let dt = 1.0 / 60.0
+
+    var last = 0
+    for t in ticks {
+        if t > last {
+            last = t
+        }
+    }
+    var prevState = w.state
+    var tick = 0
+    while tick <= last {
+        if w.state == ST_READY && tick > 20 {
+            flap(w)
+        } else if w.state == ST_PLAY && (giveUp < 0 || tick < giveUp) && wantsFlap(w) {
+            flap(w)
+        }
+        worldUpdate(w, dt)
+        if w.state != prevState {
+            print("tick " + tick.toString() + ": state " + prevState.toString() + " -> " + w.state.toString() + "  y=" + (w.y as i64).toString() + " score=" + w.score.toString())
+            prevState = w.state
+        }
+
+        var shoot = false
+        for t in ticks {
+            if t == tick {
+                shoot = true
+            }
+        }
+        if shoot {
+            drawBackground(c, w)
+            drawGates(c, w, bone, 0.0, 0.0)
+            drawDog(c, w, dog, 0.0, 0.0)
+            drawParts(c, w, 0.0, 0.0)
+            drawHud(c, w, bone, 60)
+            present(c, 0.40, 1.0, 0.90)
+            let path = prefix + "_" + tick.toString() + ".ppm"
+            writePpm(path, c)
+            print("wrote " + path + "  score=" + w.score.toString() + " state=" + w.state.toString())
+        }
+        tick = tick + 1
+    }
+    return 0
+}

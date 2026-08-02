@@ -1,0 +1,287 @@
+// Audio: PCM generated at startup and pushed at SDL's queue API. No asset
+// pipeline, no callback thread, no mixer — a few buffers and a QueueAudio call
+// when something happens.
+//
+// The bindings and SDL_AudioSpec come from the `sdl` package; the waveforms are
+// the game's own. A chihuahua's bark is short, loud and far too high, so the
+// yap is a 40 ms squeal that slides *up* — three of them, cycled, because one
+// bark repeated sixty times a minute stops sounding like a dog.
+
+from "std/math" import {
+    Math
+}
+from "sdl/audio" import {
+    SDL_OpenAudioDevice, SDL_QueueAudio, SDL_PauseAudioDevice, SDL_ClearQueuedAudio,
+    SDL_GetQueuedAudioSize, audioSpec, AUDIO_S16LSB
+}
+
+pub let RATE: i64 = 44100
+
+pub struct Sound {
+    dev: u32,
+    ok: bool,
+    // Music runs on its OWN device: SDL_QueueAudio appends rather than mixes, so
+    // sharing one device would make every bark wait behind the rest of the loop
+    // before it was audible.
+    musicDev: u32,
+    musicOk: bool,
+    musicOn: bool,
+    music: Vec<i16>,
+    yap0: Vec<i16>,
+    yap1: Vec<i16>,
+    yap2: Vec<i16>,
+    which: i64,
+    point: Vec<i16>,
+    crunch: Vec<i16>,
+    hurt: Vec<i16>,
+    thud: Vec<i16>,
+}
+
+// A decaying tone, optionally sliding in pitch. `square` mixes in odd harmonics,
+// which is what makes a sound read as 8-bit rather than as a sine beep.
+fn toneWave(out: &mut Vec<i16>, freq0: f64, freq1: f64, secs: f64, amp: f64, square: f64) {
+    let n = (secs * (RATE as f64)) as i64
+    var phase = 0.0
+    for i in 0..n {
+        let t = (i as f64) / (n as f64)
+        let f = freq0 + (freq1 - freq0) * t
+        phase = phase + f * 6.283185307179586 / (RATE as f64)
+        var env = Math.pow(0.0016, t)
+        if t < 0.01 {
+            env = env * (t / 0.01)
+        }
+        var v = Math.sin(phase)
+        if square > 0.0 {
+            v = v + Math.sin(phase * 3.0) * square * 0.33 + Math.sin(phase * 5.0) * square * 0.2
+        }
+        let s = v * env * amp * 9000.0
+        out.push(Math.clampF64(s, 0.0 - 32000.0, 32000.0) as i16)
+    }
+}
+
+fn noiseWave(out: &mut Vec<i16>, secs: f64, amp: f64, cut: f64, decay: f64) {
+    let n = (secs * (RATE as f64)) as i64
+    var lp = 0.0
+    var seed: i64 = 987654
+    for i in 0..n {
+        let t = (i as f64) / (n as f64)
+        seed = (seed * 1103515245 + 12345) % 2147483647
+        let white = ((seed % 2000) as f64) / 1000.0 - 1.0
+        lp = lp + (white - lp) * cut
+        let env = Math.pow(decay, t)
+        let s = lp * env * amp * 11000.0
+        out.push(Math.clampF64(s, 0.0 - 32000.0, 32000.0) as i16)
+    }
+}
+
+// A bark: a hard noisy attack, then a squealing tone that bends up and cuts off.
+// The noise on the front is the whole trick — without it a bark is a whistle.
+fn barkWave(pitch: f64, bend: f64): Vec<i16> {
+    var v: Vec<i16> = Vec.new()
+    noiseWave(v, 0.022, 0.55, 0.55, 0.00002)
+    toneWave(v, pitch, pitch * bend, 0.055, 0.50, 0.75)
+    toneWave(v, pitch * bend * 0.72, pitch * 0.55, 0.045, 0.24, 0.40)
+    return v
+}
+
+// Mix one note INTO an existing buffer, wrapping at the end. The wrap is what
+// makes the loop seamless: a tail that runs past the last sample continues at
+// the start, where the same bar begins again.
+fn addNote(out: &mut Vec<i16>, start: i64, freq: f64, secs: f64, amp: f64, harm: f64, tail: f64) {
+    let n = out.len
+    if n <= 0 {
+        return
+    }
+    let dur = (secs * (RATE as f64)) as i64
+    var phase = 0.0
+    let step = freq * 6.283185307179586 / (RATE as f64)
+    for i in 0..dur {
+        let t = (i as f64) / (dur as f64)
+        phase = phase + step
+        var env = Math.pow(tail, t)
+        if t < 0.02 {
+            env = env * (t / 0.02)
+        }
+        if t > 0.92 {
+            env = env * ((1.0 - t) / 0.08)
+        }
+        var v = Math.sin(phase)
+        if harm > 0.0 {
+            v = v + Math.sin(phase * 2.0) * harm + Math.sin(phase * 3.0) * harm * 0.35
+        }
+        var idx = start + i
+        idx = idx % n
+        let mixed = (out[idx] as f64) + v * env * amp * 9000.0
+        out[idx] = Math.clampF64(mixed, 0.0 - 32000.0, 32000.0) as i16
+    }
+}
+
+// Four bars of C-G-Am-F: a bouncing bass on eighths and a nursery-rhyme lead an
+// octave up. Cheerful on purpose — the game is a small dog in a big sky.
+fn buildMusic(): Vec<i16> {
+    let BAR = 1.72
+    let bars = 4
+    let n = ((BAR * (bars as f64)) * (RATE as f64)) as i64
+    var buf: Vec<i16> = Vec.filled(n, 0)
+
+    var roots: Vec<f64> = Vec.new()
+    roots.push(130.81) // C3
+    roots.push(98.00) // G2
+    roots.push(110.00) // A2
+    roots.push(87.31) // F2
+    var third: Vec<f64> = Vec.new()
+    third.push(329.63) // E4
+    third.push(293.66) // D4
+    third.push(261.63) // C4
+    third.push(349.23) // F4
+    var fifth: Vec<f64> = Vec.new()
+    fifth.push(392.00) // G4
+    fifth.push(493.88) // B4
+    fifth.push(440.00) // A4
+    fifth.push(523.25) // C5
+
+    let spb = (BAR * (RATE as f64)) as i64
+    let eighth = BAR / 8.0
+    let es = (eighth * (RATE as f64)) as i64
+    for c in 0..bars {
+        let base = (c as i64) * spb
+        for k in 0..8 {
+            var f = roots[c]
+            if k % 2 == 1 {
+                f = f * 2.0 // the bounce: root, octave, root, octave
+            }
+            addNote(buf, base + (k as i64) * es, f, eighth * 0.75, 0.30, 0.05, 0.04)
+        }
+        addNote(buf, base, third[c], BAR * 0.9, 0.055, 0.0, 0.55)
+        for k in 0..8 {
+            let m = (k + c * 3) % 5
+            if m == 0 || m == 1 || m == 3 {
+                var f = third[c]
+                if m == 1 {
+                    f = fifth[c]
+                }
+                if m == 3 {
+                    f = fifth[c] * 1.25
+                }
+                addNote(buf, base + (k as i64) * es, f, eighth * 1.2, 0.085, 0.10, 0.02)
+            }
+        }
+    }
+    return buf
+}
+
+fn openDevice(): u32 {
+    var spec = audioSpec(RATE as i32, AUDIO_S16LSB as u16, 1, 2048)
+    var dev: u32 = 0
+    unsafe {
+        dev = SDL_OpenAudioDevice(0 as *u8, 0, spec.addrOf() as *u8, 0 as *u8, 0)
+        if dev != 0 {
+            SDL_PauseAudioDevice(dev, 0)
+        }
+    }
+    return dev
+}
+
+pub fn soundNew(): Sound {
+    let dev = openDevice()
+    let mdev = openDevice()
+
+    var point: Vec<i16> = Vec.new()
+    toneWave(point, 880.0, 1320.0, 0.055, 0.30, 0.30)
+
+    var crunch: Vec<i16> = Vec.new()
+    noiseWave(crunch, 0.055, 0.50, 0.70, 0.00008)
+    noiseWave(crunch, 0.045, 0.40, 0.55, 0.00010)
+    toneWave(crunch, 1320.0, 1760.0, 0.10, 0.26, 0.18)
+
+    // The death sound is the bark's opposite: a bend *down*, which is the shape
+    // of every cartoon whimper ever recorded.
+    var hurt: Vec<i16> = Vec.new()
+    noiseWave(hurt, 0.05, 0.55, 0.35, 0.00004)
+    toneWave(hurt, 900.0, 300.0, 0.22, 0.45, 0.55)
+    toneWave(hurt, 420.0, 180.0, 0.30, 0.32, 0.30)
+
+    var thud: Vec<i16> = Vec.new()
+    noiseWave(thud, 0.10, 0.60, 0.16, 0.00015)
+    toneWave(thud, 150.0, 60.0, 0.14, 0.42, 0.55)
+
+    return Sound {
+        dev: dev, ok: dev != 0,
+        musicDev: mdev, musicOk: mdev != 0, musicOn: true, music: buildMusic(),
+        yap0: barkWave(760.0, 1.85), yap1: barkWave(910.0, 1.62), yap2: barkWave(680.0, 2.10),
+        which: 0,
+        point: point, crunch: crunch, hurt: hurt, thud: thud,
+    }
+}
+
+// Top up the music queue. SDL drains it in real time, so the loop is kept a
+// couple of seconds ahead and re-queued as it plays out.
+pub fn musicTick(s: &Sound) {
+    if !s.musicOk || !s.musicOn {
+        return
+    }
+    var queued: u32 = 0
+    unsafe {
+        queued = SDL_GetQueuedAudioSize(s.musicDev)
+    }
+    if (queued as i64) > RATE * 2 {
+        return
+    }
+    unsafe {
+        let _ = SDL_QueueAudio(s.musicDev, s.music.ptr() as *u8, (s.music.len * 2) as u32)
+    }
+}
+
+pub fn musicToggle(s: &mut Sound) {
+    s.musicOn = !s.musicOn
+    if !s.musicOn {
+        unsafe {
+            SDL_ClearQueuedAudio(s.musicDev)
+        }
+    }
+}
+
+fn play(s: &Sound, buf: &Vec<i16>) {
+    if !s.ok {
+        return
+    }
+    // Effects queue rather than mix, so a backlog would drift out of sync with
+    // what is on screen. Past a threshold, drop the sound instead.
+    var queued: u32 = 0
+    unsafe {
+        queued = SDL_GetQueuedAudioSize(s.dev)
+    }
+    if (queued as i64) > 20000 {
+        return
+    }
+    unsafe {
+        let _ = SDL_QueueAudio(s.dev, buf.ptr() as *u8, (buf.len * 2) as u32)
+    }
+}
+
+pub fn playYap(s: &mut Sound) {
+    if s.which == 0 {
+        play(s, s.yap0)
+    } else if s.which == 1 {
+        play(s, s.yap1)
+    } else {
+        play(s, s.yap2)
+    }
+    s.which = (s.which + 1) % 3
+}
+
+pub fn playPoint(s: &Sound) {
+    play(s, s.point)
+}
+
+pub fn playCrunch(s: &Sound) {
+    play(s, s.crunch)
+}
+
+pub fn playHurt(s: &Sound) {
+    play(s, s.hurt)
+}
+
+pub fn playThud(s: &Sound) {
+    play(s, s.thud)
+}

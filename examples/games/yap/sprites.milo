@@ -1,0 +1,200 @@
+// Every sprite in the game, built at startup: no asset directory, no loader.
+// The frames are pixel art written as strings, one character per pixel.
+//
+// A palette entry is three floats of linear light and values run past 1.0 on
+// purpose — the collar and the tongue clear the bloom threshold and glow, the
+// fur beside them does not. That is the whole reason the art is authored in
+// linear light instead of in 8-bit colour.
+
+from "./gfx" import {
+    Sprite, spriteNew, spriteSet
+}
+
+// ── string art ────────────────────────────────────────────────────────────────
+//
+// '.' is transparent, '0'-'9' index the palette. Rows need not be padded —
+// anything short is transparent to the right — so a frame only spells out the
+// pixels it actually uses, and the ears can stick out past the body.
+
+fn palAdd(p: &mut Vec<f64>, r: f64, g: f64, b: f64) {
+    p.push(r)
+    p.push(g)
+    p.push(b)
+}
+
+fn charAt(rows: &Vec<string>, r: i64, c: i64): i64 {
+    if c >= rows[r].len {
+        return 46 // '.'
+    }
+    return rows[r][c] as i64
+}
+
+fn widest(rows: &Vec<string>): i64 {
+    var w = 0
+    for r in rows {
+        if r.len > w {
+            w = r.len
+        }
+    }
+    return w
+}
+
+fn spriteFrom(rows: &Vec<string>, pal: &Vec<f64>): Sprite {
+    let w = widest(rows)
+    let h = rows.len
+    var s = spriteNew(w, h)
+    for y in 0..h {
+        for x in 0..w {
+            let ch = charAt(rows, y, x)
+            if ch >= 48 && ch <= 57 {
+                let i = (ch - 48) * 3
+                if i + 2 < pal.len {
+                    spriteSet(s, x, y, pal[i], pal[i + 1], pal[i + 2], 1.0)
+                }
+            }
+        }
+    }
+    return s
+}
+
+// ── Milo the chihuahua ────────────────────────────────────────────────────────
+//
+//   0 outline   1 fur shadow   2 fur   3 fur lit   4 cream
+//   5 ear/tongue pink   6 eye glint   7 eye + nose   8 collar   9 tag
+
+fn dogPalette(): Vec<f64> {
+    var p: Vec<f64> = Vec.new()
+    palAdd(p, 0.030, 0.020, 0.030) // 0 outline
+    palAdd(p, 0.240, 0.150, 0.080) // 1 fur shadow
+    palAdd(p, 0.520, 0.330, 0.150) // 2 fur
+    palAdd(p, 0.780, 0.550, 0.280) // 3 fur lit
+    palAdd(p, 0.880, 0.740, 0.550) // 4 cream
+    palAdd(p, 1.300, 0.420, 0.550) // 5 ear / tongue (glows)
+    palAdd(p, 1.500, 1.500, 1.600) // 6 eye glint
+    palAdd(p, 0.020, 0.020, 0.030) // 7 eye, nose
+    palAdd(p, 1.500, 0.200, 0.220) // 8 collar  (glows)
+    palAdd(p, 1.800, 1.300, 0.300) // 9 name tag (glows)
+    return p
+}
+
+// Everything from the muzzle down is the same in every living frame — nose,
+// tongue, collar, tail, dangling legs. Only the ears move, which is the entire
+// animation budget a flapping dog needs.
+//
+// Every frame is padded to the same width (the trailing dots on the first row)
+// and holds the body in the same columns, so switching frames moves the ears and
+// nothing else. Without that the dog would jitter sideways once per flap.
+fn dogBody(v: &mut Vec<string>) {
+    v.push(".........033377733440")
+    v.push(".........0333333344770")
+    v.push(".........032223334440")
+    v.push("..........0333345550")
+    v.push("..0220000000333344440")
+    v.push("...00222222288884440")
+    v.push("...012222222944440")
+    v.push("....012222224440")
+    v.push(".....0122222440")
+    v.push("......040.040")
+    v.push(".....04400440")
+}
+
+// The head, from crown to eyes. Shared by the two upright poses; the ears-down
+// pose draws its own, because there the ears hang alongside these same rows.
+fn dogHead(v: &mut Vec<string>) {
+    v.push("..........0333333330")
+    v.push(".........033333333330")
+    v.push(".........033367733330")
+}
+
+pub let DOG_UP: i64 = 0
+
+pub let DOG_MID: i64 = 1
+
+pub let DOG_DOWN: i64 = 2
+
+pub let DOG_DEAD: i64 = 3
+
+pub fn dogFrames(): Vec<Sprite> {
+    let pal = dogPalette()
+    var out: Vec<Sprite> = Vec.new()
+
+    // Ears thrown up and back: the top of a flap, and the frame a player sees
+    // the instant they press the key. Ears always trail behind him — he is moving
+    // right, and ears that leaned into the wind would read as a rabbit.
+    var up: Vec<string> = Vec.new()
+    up.push(".......050..050.............")
+    up.push(".......0550.0550")
+    up.push("........0550.0550")
+    up.push("........0555005550")
+    up.push(".........05550055500")
+    dogHead(up)
+    dogBody(up)
+    out.push(spriteFrom(up, pal))
+
+    // Ears streaming back at a diagonal: coasting.
+    var mid: Vec<string> = Vec.new()
+    mid.push("..050..050..................")
+    mid.push("...0550.0550")
+    mid.push(".....0550.0550")
+    mid.push(".......0555005550")
+    mid.push(".........05550055500")
+    dogHead(mid)
+    dogBody(mid)
+    out.push(spriteFrom(mid, pal))
+
+    // Ears blown flat back over the head: falling.
+    var down: Vec<string> = Vec.new()
+    down.push("............................")
+    down.push("")
+    down.push("")
+    down.push("...........05500550")
+    down.push("........0555005550")
+    down.push(".....055500555033330")
+    down.push("...0550.0550333333330")
+    down.push("..050.050033367733330")
+    dogBody(down)
+    out.push(spriteFrom(down, pal))
+
+    // Dead: X eyes, tongue out to here.
+    var dead: Vec<string> = Vec.new()
+    dead.push("............................")
+    dead.push("")
+    dead.push("")
+    dead.push("...........05500550")
+    dead.push("........0555005550")
+    dead.push(".....055500555033330")
+    dead.push("...0550.0550333333330")
+    dead.push("..050.050033373733330")
+    dead.push(".........033337333440")
+    dead.push(".........0333333344770")
+    dead.push(".........032223334440")
+    dead.push("..........033334555550")
+    dead.push("..0220000000333344455550")
+    dead.push("...00222222288884440")
+    dead.push("...012222222944440")
+    dead.push("....012222224440")
+    dead.push(".....0122222440")
+    dead.push("......040.040")
+    dead.push(".....04400440")
+    out.push(spriteFrom(dead, pal))
+
+    return out
+}
+
+// ── a treat ───────────────────────────────────────────────────────────────────
+
+pub fn boneSprite(): Sprite {
+    var p: Vec<f64> = Vec.new()
+    palAdd(p, 0.030, 0.020, 0.030) // 0 outline
+    palAdd(p, 0.0, 0.0, 0.0)
+    palAdd(p, 0.0, 0.0, 0.0)
+    palAdd(p, 0.0, 0.0, 0.0)
+    palAdd(p, 1.500, 1.420, 1.150) // 4 bone (glows)
+    var v: Vec<string> = Vec.new()
+    v.push(".00...00.")
+    v.push("0440.0440")
+    v.push(".04444440")
+    v.push("0440.0440")
+    v.push(".00...00.")
+    return spriteFrom(v, p)
+}

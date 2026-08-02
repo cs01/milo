@@ -134,15 +134,73 @@ function fmtTimeInTz(date, timeZone) {
   return parts;
 }
 
-function getTzOffset(timeZone, date) {
-  var utc = new Date(date.toLocaleString("en-US", { timeZone: "UTC" }));
-  var loc = new Date(date.toLocaleString("en-US", { timeZone: timeZone }));
-  return (loc - utc) / 60000;
+// Wall-clock calendar date and minutes-past-midnight at the forecast
+// location. Every solar calculation anchors here: the browser's own UTC date
+// rolls over hours before the location's does (5pm Pacific is already
+// tomorrow in UTC), and using it shifted the whole sun day forward.
+function tzParts(date, timeZone) {
+  if (!timeZone) {
+    return {
+      year: date.getFullYear(),
+      month: date.getMonth() + 1,
+      day: date.getDate(),
+      minutes: date.getHours() * 60 + date.getMinutes(),
+    };
+  }
+  var parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: timeZone,
+    year: "numeric", month: "2-digit", day: "2-digit",
+    hour: "2-digit", minute: "2-digit", hour12: false,
+  }).formatToParts(date);
+  var p = {};
+  for (var i = 0; i < parts.length; i++) p[parts[i].type] = parts[i].value;
+  // hour12:false reports midnight as "24" in some engines
+  var hour = parseInt(p.hour, 10) % 24;
+  return {
+    year: parseInt(p.year, 10),
+    month: parseInt(p.month, 10),
+    day: parseInt(p.day, 10),
+    minutes: hour * 60 + parseInt(p.minute, 10),
+  };
 }
 
+function getTzOffset(timeZone, date) {
+  var p = tzParts(date, timeZone);
+  var asUtc = Date.UTC(p.year, p.month - 1, p.day, 0, p.minutes);
+  return Math.round((asUtc - Math.floor(date.getTime() / 60000) * 60000) / 60000);
+}
+
+// IANA zones are opaque to a reader ("America/Denver" on a 6:41 AM sunrise),
+// so label sun times with the zone's short name whenever the location is not
+// in the viewer's own zone.
+function tzLabel(date, timeZone) {
+  if (!timeZone) return "";
+  var here = Intl.DateTimeFormat().resolvedOptions().timeZone;
+  if (here === timeZone) return "";
+  var parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: timeZone, timeZoneName: "short", hour: "numeric",
+  }).formatToParts(date);
+  for (var i = 0; i < parts.length; i++) {
+    if (parts[i].type === "timeZoneName") return parts[i].value;
+  }
+  return "";
+}
+
+function fmtTimeTz(date, timeZone) {
+  var label = tzLabel(date, timeZone);
+  return fmtTimeInTz(date, timeZone) + (label ? " " + label : "");
+}
+
+// Sun times for the calendar day that `date` falls on *at the location*, not
+// the UTC day. Returned Dates are absolute instants; format them with the
+// location's zone.
 function calcSunTimes(lat, lon, date, timeZone) {
   var rad = Math.PI / 180;
-  var JD = Math.floor(date.getTime() / 86400000) + 2440587.5;
+  var lp = tzParts(date, timeZone);
+  // The algorithm's minute offsets are measured from 00:00 UTC of the day
+  // being solved for, so the local calendar day is re-anchored as a UTC day.
+  var dayStartUtc = Date.UTC(lp.year, lp.month - 1, lp.day);
+  var JD = dayStartUtc / 86400000 + 2440587.5;
   var n = JD - 2451545.0;
   var L = (280.46 + 0.9856474 * n) % 360;
   var g = ((357.528 + 0.9856003 * n) % 360) * rad;
@@ -153,13 +211,20 @@ function calcSunTimes(lat, lon, date, timeZone) {
   var cosHA =
     (Math.cos(90.833 * rad) - Math.sin(lat * rad) * sinDec) /
     (Math.cos(lat * rad) * Math.cos(decl));
+  // Above the Arctic circle the sun may not cross the horizon at all that day;
+  // cosHA > 1 is polar night, < -1 is midnight sun. There is no rise or set to
+  // count down to, so callers must check `polar` before using the times.
   if (cosHA > 1 || cosHA < -1)
     return {
       sunrise: new Date(date),
       sunset: new Date(date),
       solarNoon: new Date(date),
-      declination: 0,
-      dayLength: 0,
+      declination: decl / rad,
+      dayLength: cosHA < -1 ? 1440 : 0,
+      polar: cosHA < -1 ? "day" : "night",
+      riseLocalMin: 0,
+      setLocalMin: cosHA < -1 ? 1440 : 0,
+      noonLocalMin: 720,
     };
   var HA = Math.acos(cosHA) / rad;
   var y = Math.tan(eps / 2);
@@ -177,10 +242,7 @@ function calcSunTimes(lat, lon, date, timeZone) {
   var setLocalMin = solarNoon + 4 * HA + tzOff;
   var noonLocalMin = solarNoon + tzOff;
   function minsToDate(mins) {
-    var d = new Date(date);
-    d.setUTCHours(0, 0, 0, 0);
-    d.setUTCMinutes(Math.round(mins));
-    return d;
+    return new Date(dayStartUtc + Math.round(mins) * 60000);
   }
   return {
     sunrise: minsToDate(solarNoon - 4 * HA),
@@ -509,8 +571,7 @@ function uvCurveSvg(hourly, timeZone, nowTime) {
   }
   var area = line + "L" + W + "," + H + " L0," + H + " Z";
 
-  var tzOff = timeZone ? getTzOffset(timeZone, nowTime) : -nowTime.getTimezoneOffset();
-  var nowMin = nowTime.getUTCHours() * 60 + nowTime.getUTCMinutes() + tzOff;
+  var nowMin = tzParts(nowTime, timeZone).minutes;
   var nowFrac = Math.max(0, Math.min(1, nowMin / 1440));
   var nowX = nowFrac * W;
   var fi = Math.min(hourly.length - 2, Math.floor(nowFrac * (hourly.length - 1)));
@@ -1170,8 +1231,7 @@ function renderAlerts() {
 // Sun position arc for the sunrise/sunset tile, plus a hover tooltip of the
 // derived solar facts. Coordinates are in the 100x38 viewBox, not pixels.
 function sunArcSvg(sunTimes, timeZone, nowTime) {
-  var tzOff = timeZone ? getTzOffset(timeZone, nowTime) : -nowTime.getTimezoneOffset();
-  var nowLocalMin = nowTime.getUTCHours() * 60 + nowTime.getUTCMinutes() + tzOff;
+  var nowLocalMin = tzParts(nowTime, timeZone).minutes;
   var riseFrac = sunTimes.riseLocalMin / 1440;
   var setFrac = sunTimes.setLocalMin / 1440;
   var dayFrac = nowLocalMin / 1440;
@@ -1179,8 +1239,12 @@ function sunArcSvg(sunTimes, timeZone, nowTime) {
   var amp = 16;
 
   function sunPt(frac) {
+    var x = 5 + frac * 90;
+    // Polar night has no rise-to-set span to interpolate over: the arc would
+    // divide by zero. Park the track just under the horizon instead.
+    if (sunTimes.polar === "night") return { x: x, y: horizY + amp * 0.35 };
     var phase = ((frac - riseFrac) / (setFrac - riseFrac)) * Math.PI;
-    return { x: 5 + frac * 90, y: horizY - Math.sin(phase) * amp };
+    return { x: x, y: horizY - Math.sin(phase) * amp };
   }
 
   var fullPts = [];
@@ -1197,13 +1261,19 @@ function sunArcSvg(sunTimes, timeZone, nowTime) {
   var dayMins = Math.round(sunTimes.dayLength % 60);
   var goldenRise = new Date(sunTimes.sunrise.getTime() + 30 * 60000);
   var goldenSet = new Date(sunTimes.sunset.getTime() - 30 * 60000);
-  var tooltipLines = [
-    aboveHorizon ? "Sun is up" : "Sun is down",
-    "Solar noon: " + fmtTimeInTz(sunTimes.solarNoon, timeZone),
-    "Day length: " + dayHrs + "h " + dayMins + "m",
-    "Golden hour: " + fmtTimeInTz(goldenRise, timeZone) + ", " + fmtTimeInTz(goldenSet, timeZone),
-    "Declination: " + sunTimes.declination.toFixed(1) + "°",
-  ];
+  var tooltipLines = sunTimes.polar
+    ? [
+        sunTimes.polar === "day" ? "Sun never sets today" : "Sun never rises today",
+        "Day length: " + dayHrs + "h " + dayMins + "m",
+        "Declination: " + sunTimes.declination.toFixed(1) + "°",
+      ]
+    : [
+        aboveHorizon ? "Sun is up" : "Sun is down",
+        "Solar noon: " + fmtTimeTz(sunTimes.solarNoon, timeZone),
+        "Day length: " + dayHrs + "h " + dayMins + "m",
+        "Golden hour: " + fmtTimeTz(goldenRise, timeZone) + ", " + fmtTimeTz(goldenSet, timeZone),
+        "Declination: " + sunTimes.declination.toFixed(1) + "°",
+      ];
 
   return (
     '<div class="sun-arc-wrap">' +
@@ -1233,10 +1303,13 @@ function sunArcSvg(sunTimes, timeZone, nowTime) {
 // wrong and counts down to a sunset 14 hours away.
 function nextSunEvent(lat, lon, timeZone, now) {
   var t = calcSunTimes(lat, lon, now, timeZone);
+  if (t.polar) {
+    return { name: t.polar === "day" ? "Midnight sun" : "Polar night", at: null, times: t };
+  }
   if (now < t.sunrise) return { name: "Sunrise", at: t.sunrise, times: t };
   if (now < t.sunset) return { name: "Sunset", at: t.sunset, times: t };
   var tmr = calcSunTimes(lat, lon, new Date(now.getTime() + 86400000), timeZone);
-  return { name: "Sunrise", at: tmr.sunrise, times: t };
+  return { name: "Sunrise", at: tmr.sunrise, times: tmr };
 }
 
 function pad2(n) {
@@ -1383,16 +1456,24 @@ function render(city, forecast, hourlyData, grid, timeZone) {
   );
   var dayHrs = Math.floor(sunTimes.dayLength / 60);
   var dayMins = Math.round(sunTimes.dayLength % 60);
+  var sunValue = sunNext.at
+    ? fmtTimeTz(sunNext.at, timeZone)
+    : sunTimes.polar === "day" ? "All day" : "All night";
+  var sunSub = sunNext.at
+    ? 'in <span id="sunCountdown" class="countdown">' +
+      fmtCountdown(sunNext.at.getTime() - nowTime.getTime()) + "</span>"
+    : "Sun does not cross the horizon today";
   var tiles = tile(
     sunNext.name,
-    fmtTimeInTz(sunNext.at, timeZone),
-    'in <span id="sunCountdown" class="countdown">' +
-      fmtCountdown(sunNext.at.getTime() - nowTime.getTime()) + "</span>",
+    sunValue,
+    sunSub,
     sunArcSvg(sunTimes, timeZone, nowTime),
     sunArcSvg(sunTimes, timeZone, nowTime) +
-      detailRow("Sunrise", fmtTimeInTz(sunTimes.sunrise, timeZone)) +
-      detailRow("Solar noon", fmtTimeInTz(sunTimes.solarNoon, timeZone)) +
-      detailRow("Sunset", fmtTimeInTz(sunTimes.sunset, timeZone)) +
+      (sunTimes.polar
+        ? detailRow("Sunrise", "—") + detailRow("Sunset", "—")
+        : detailRow("Sunrise", fmtTimeTz(sunTimes.sunrise, timeZone)) +
+          detailRow("Solar noon", fmtTimeTz(sunTimes.solarNoon, timeZone)) +
+          detailRow("Sunset", fmtTimeTz(sunTimes.sunset, timeZone))) +
       detailRow("Daylight", dayHrs + "h " + dayMins + "m") +
       detailRow("Sun declination", sunTimes.declination.toFixed(1) + "°")
   );
@@ -1635,9 +1716,14 @@ function render(city, forecast, hourlyData, grid, timeZone) {
     '<div class="wx-divider"><div class="tiles">' + tiles + "</div></div>" +
     "</div></div>";
 
-  startSunCountdown(sunNext.at, function () {
-    render(city, forecast, hourlyData, grid, timeZone);
-  });
+  if (sunNext.at) {
+    startSunCountdown(sunNext.at, function () {
+      render(city, forecast, hourlyData, grid, timeZone);
+    });
+  } else if (sunTimer) {
+    clearInterval(sunTimer);
+    sunTimer = null;
+  }
 
   // wired after innerHTML so the button exists; lat/lon come from the globals
   // the fetch set, which are what a restored favorite needs to re-query

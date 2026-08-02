@@ -32,7 +32,7 @@ pub extern fn SDL_GL_SwapWindow(win: *u8)
 
 pub extern fn SDL_GL_SetSwapInterval(interval: i32): i32
 
-pub extern fn SDL_GL_GetDrawableSize(win: *u8, w: *u8, h: *u8)
+pub extern fn SDL_GL_GetDrawableSize(win: *u8, w: *i32, h: *i32)
 
 pub extern fn SDL_PollEvent(event: *u8): i32
 
@@ -307,7 +307,7 @@ pub fn main(): i32 {
         var dw: i32 = 0
         var dh: i32 = 0
         unsafe {
-            SDL_GL_GetDrawableSize(win, (dw.addrOf()) as *u8, (dh.addrOf()) as *u8)
+            SDL_GL_GetDrawableSize(win, dw.addrOf(), dh.addrOf())
         }
         bindScreen(dw as i64, dh as i64)
         Gpu.clear(0.05, 0.06, 0.09, 1.0, true)

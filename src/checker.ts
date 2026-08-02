@@ -4,6 +4,7 @@ import type { TypeKind } from "./types";
 import { typeFromAst, typeEq, typeName, isNumeric, isCopy, isScalar } from "./types";
 import type { Diagnostic, WarningConfig } from "./diagnostics";
 import { checkVisibility } from "./visibility";
+import { countCSigParams } from "./csig";
 import { basename } from "path";
 
 export interface VarInfo {
@@ -1494,6 +1495,7 @@ export class TypeChecker {
         }
       }
       this.checkVariadicExtern(fn);
+      this.warnUnverifiedExternFn(fn);
       if (fn.typeParams.length > 0) {
         this.genericFns.set(fn.name, { typeParams: fn.typeParams.map(tp => tp.name), decl: fn });
         continue;
@@ -1962,9 +1964,9 @@ export class TypeChecker {
       return;
     }
     const header = attr.args[0]!, sig = attr.args[1]!;
-    if (!TypeChecker.C_HEADER_RE.test(header)) {
+    if (!TypeChecker.isCHeaderSpec(header)) {
       this.error(`@cSig on '${f.name}': '${header}' is not a C header path`, undefined,
-        `expected a header ending in '.h', as written inside '#include <...>' — e.g. 'unistd.h'`);
+        `expected a header ending in '.h', as written inside '#include <...>' — e.g. 'unistd.h'. Separate per-platform spellings with '|' when no one name is portable`);
       return;
     }
     if (!TypeChecker.C_SIG_RE.test(sig)) {
@@ -1977,7 +1979,32 @@ export class TypeChecker {
         `'${sig}' must name '${f.name}' — the assert is generated against that symbol`);
       return;
     }
+    // Arity is checkable here, with no header in the picture: the guard TU compares C
+    // parameter i against Milo parameter i, so a signature that lists a different number
+    // of parameters than the decl would silently shift every comparison by one.
+    const cArity = countCSigParams(sig);
+    if (cArity !== null && !f.isVariadic && cArity !== f.params.length) {
+      this.error(`@cSig on '${f.name}': the signature takes ${cArity} parameter${cArity === 1 ? "" : "s"}, the Milo declaration takes ${f.params.length}`, undefined,
+        `'${sig}' and the 'extern fn' must describe the same call`);
+      return;
+    }
     this.cSigs.set(f.name, { header, sig });
+  }
+
+  // A `@cLayout`/`@cSig`/`@cValue` header argument: one path, or several separated by '|'
+  // for a header C spells differently per platform (macOS 'OpenGL/gl3.h' vs
+  // 'GL/glcorearb.h'). The guard TU takes the first that `__has_include` finds. A path may
+  // be prefixed with '+'-separated feature macros the header needs before it declares
+  // anything — 'GL_GLEXT_PROTOTYPES+GL/glcorearb.h'.
+  private static isCHeaderSpec(spec: string): boolean {
+    const alts = spec.split("|");
+    if (alts.length === 0) return false;
+    return alts.every(alt => {
+      const parts = alt.split("+");
+      const path = parts.pop();
+      return path !== undefined && TypeChecker.C_HEADER_RE.test(path)
+        && parts.every(f => TypeChecker.C_IDENT_RE.test(f));
+    });
   }
 
   // `@cValue("SDL_PIXELFORMAT_ABGR8888", "SDL2/SDL.h")` pins a Milo constant to the C
@@ -1995,7 +2022,7 @@ export class TypeChecker {
         `expected the macro or enumerator name as C spells it — e.g. 'SDL_INIT_VIDEO'`);
       return;
     }
-    if (!TypeChecker.C_HEADER_RE.test(header)) {
+    if (!TypeChecker.isCHeaderSpec(header)) {
       this.error(`@cValue on '${g.name}': '${header}' is not a C header path`, g.span,
         `expected a header ending in '.h', as written inside '#include <...>' — e.g. 'SDL2/SDL.h'`);
       return;
@@ -2387,6 +2414,23 @@ export class TypeChecker {
     }
   }
 
+  // The `extern fn` half of the same lint. A signature is as much an unverified claim as a
+  // layout is, and the pointer parameters are the worse half: a wrong field offset reads
+  // garbage, a wrong pointee width lets the callee write past what the caller reserved.
+  private warnUnverifiedExternFn(fn: Function): void {
+    if (!fn.isExtern) return;
+    if (fn.attributes?.some(a => a.name === "cSig")) return;
+    if (this.entryFile && fn.span?.file && fn.span.file !== this.entryFile) return;
+    const ptrParam = fn.params.find(p => declaredType(p).isPtr);
+    const why = ptrParam
+      ? `'${ptrParam.name}' is a pointer C writes through, so its pointee width is part of the contract and nothing checks it`
+      : `parameter and return widths are a claim about C that nothing checks`;
+    this.warn("unverified-extern",
+      `extern fn '${fn.name}' has no @cSig — its signature is an unverified claim about C`,
+      fn.span,
+      `${why}. Add '@cSig("some/header.h", "<the declaration as C spells it>")'`);
+  }
+
   private warnUnverifiedExtern(s: StructDecl): void {
     if (!s.isExtern || s.isOpaque) return;              // opaque types have no fields to verify
     if (s.attributes?.some(a => a.name === "cLayout")) return;
@@ -2436,7 +2480,7 @@ export class TypeChecker {
         `expected something like 'struct stat', 'mytypedef_t', or 'union sigval'`);
       return;
     }
-    if (!TypeChecker.C_HEADER_RE.test(header)) {
+    if (!TypeChecker.isCHeaderSpec(header)) {
       this.error(`@cLayout on '${s.name}': '${header}' is not a C header path`, undefined,
         `expected a header ending in '.h', as written inside '#include <...>' — e.g. 'sys/stat.h'`);
       return;

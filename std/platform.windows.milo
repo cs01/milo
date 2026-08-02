@@ -645,9 +645,9 @@ pub fn usleep(usec: u32): i32 {
 // equivalent for. _O_BINARY (0x8000) is essential: in text mode the CRT would translate
 // \n to \r\n through the pipe, corrupting any binary payload and desynchronising any
 // caller that counts bytes.
-pub extern fn _pipe(fds: *u8, size: u32, mode: i32): i32
+pub extern fn _pipe(fds: *i32, size: u32, mode: i32): i32
 
-pub fn pipe(fds: *u8): i32 {
+pub fn pipe(fds: *i32): i32 {
     return _pipe(fds, 4096 as u32, 32768)
 }
 

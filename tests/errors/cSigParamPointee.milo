@@ -1,0 +1,14 @@
+// @skip-os: win32
+// asserts on a diagnostic that quotes string.h's strlen spelling; the MSVC CRT
+// declares it differently, so the compile fails for a different reason.
+
+// @error: Milo writes through a *u32 (4-byte pointee)
+// An out-param's pointee width IS the contract — it is how many bytes the callee
+// writes into the caller's frame. Nothing else in the pipeline can see this: the ABI
+// passes one word whatever the pointee, so a wrong pointee links, runs, and scribbles.
+@cSig("string.h", "size_t strlen(const char *)")
+extern fn strlen(s: *u32): u64
+
+fn main() {
+    print(1)
+}

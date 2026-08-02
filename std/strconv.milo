@@ -5,7 +5,7 @@ from "std/os" import {
 }
 
 @cSig("stdlib.h", "long long strtoll(const char *, char **, int)")
-pub extern fn strtoll(str: *u8, endptr: *u8, base: i32): i64
+pub extern fn strtoll(str: *u8, endptr: **u8, base: i32): i64
 
 pub extern fn atof(str: *u8): f64
 
@@ -32,7 +32,7 @@ pub fn parseInt(s: string): Option<i64> {
         }
         i = i + 1
     }
-    return Option.Some(strtoll(s, 0 as *u8, 10))
+    return Option.Some(strtoll(s, 0 as **u8, 10))
 }
 
 // Parse an integer string with a given base (2, 8, 10, 16).
@@ -42,7 +42,7 @@ pub fn parseIntRadix(s: string, base: i32): Option<i64> {
     if s.len == 0 {
         return Option.None
     }
-    return Option.Some(strtoll(s, 0 as *u8, base))
+    return Option.Some(strtoll(s, 0 as **u8, base))
 }
 
 // Parse a floating-point string. Returns None if not a valid number.

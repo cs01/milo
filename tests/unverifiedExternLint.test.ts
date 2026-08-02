@@ -42,3 +42,25 @@ test("denying it makes the diagnostic an error, not a warning", () => {
   const d = diags(`extern struct Foo { a: i32 }`).find(x => x.code === CODE);
   expect(d?.severity).toBe("error");
 });
+
+test("fires on an extern fn with no @cSig", () => {
+  expect(codes(`extern fn sysconf(name: i32): i64`)).toContain(CODE);
+});
+
+test("silent when @cSig pins the signature", () => {
+  const src = `@cSig("unistd.h", "long sysconf(int)")\nextern fn sysconf(name: i32): i64`;
+  expect(codes(src)).not.toContain(CODE);
+});
+
+test("off unless denied, same as the struct half", () => {
+  expect(codes(`extern fn sysconf(name: i32): i64`, false)).not.toContain(CODE);
+});
+
+test("does not fire on a Milo fn — there is no foreign declaration to check", () => {
+  expect(codes(`fn add(a: i32, b: i32): i32 { return a + b }`)).not.toContain(CODE);
+});
+
+test("a pointer parameter is named in the hint — its pointee width is the contract", () => {
+  const d = diags(`extern fn glGenBuffers(n: i32, ids: *u32)`).find(x => x.code === CODE);
+  expect(d?.hint).toContain("ids");
+});

@@ -1,0 +1,11 @@
+// @error: takes 2 parameters, the Milo declaration takes 3
+// Arity is checkable with no header in the picture, and it has to be: the guard TU
+// compares C parameter i against Milo parameter i, so a signature listing a different
+// number of parameters would silently shift every width comparison by one and report a
+// mismatch against the wrong parameter — or, worse, agree by luck.
+@cSig("unistd.h", "ssize_t read(int, void *)")
+extern fn read(fd: i32, buf: *u8, n: i64): i64
+
+fn main() {
+    print(1)
+}

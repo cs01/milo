@@ -123,6 +123,19 @@ function pkgConfigCflags(linkLibs: string[]): string {
   return flags.join(" ");
 }
 
+// The guard TU emits `#warning "milo-guard-skip: <header>"` for every header that isn't on
+// this machine. Those claims went unchecked, and an unverified guard that looks verified is
+// worse than no guard, so each one is named here. Everything else the C compiler said —
+// deprecation notices from the headers themselves, most of all — is not this program's
+// business and is dropped.
+function reportGuardSkips(output: string): void {
+  const skipped = new Set<string>();
+  for (const m of output.matchAll(/milo-guard-skip:\s*([^"\n]+)/g)) skipped.add(m[1]!.trim());
+  for (const h of skipped) {
+    console.error(`warning: @cLayout/@cSig/@cValue guards for '${h}' skipped — no such header on this machine, so those declarations went unchecked`);
+  }
+}
+
 function verifyCDecls(cGuards: string | null, target: TargetInfo, linkLibs: string[] = []): void {
   if (!cGuards) return;
   // The guard TU is compiled with the host cc against the host's headers, so it only
@@ -158,15 +171,21 @@ function verifyCDecls(cGuards: string | null, target: TargetInfo, linkLibs: stri
   const tmpC = join(tmpdir(), `milo_cdecl_${crypto.randomUUID().slice(0, 8)}.c`);
   try {
     writeFileSync(tmpC, cGuards);
-    execSync(`${cc} -fsyntax-only ${crossFlags} ${libFlags} "${tmpC}"`, { stdio: ["pipe", "pipe", "pipe"] });
+    const stdout = execSync(`${cc} -fsyntax-only ${crossFlags} ${libFlags} "${tmpC}" 2>&1`, { stdio: ["pipe", "pipe", "pipe"] });
+    reportGuardSkips(stdout.toString());
   } catch (e: any) {
-    const stderr = e.stderr?.toString() ?? e.message ?? "";
+    const stderr = (e.stdout?.toString() ?? "") + (e.stderr?.toString() ?? e.message ?? "");
+    reportGuardSkips(stderr);
     // A header the preprocessor can't open aborts the TU before any assert is evaluated,
     // so nothing here was checked. That is a missing dev package, not a wrong declaration
     // — the third-party case (SDL headers absent while libSDL2 is installed and links
     // fine) is routine, and failing the build over it would make @cSig a hard dependency
     // on every consumer having -dev installed. Skip, but say so: an unverified guard must
     // never look like a verified one.
+    //
+    // Guards are wrapped in `#if __has_include` per header, so this only fires for a
+    // header the preprocessor found but could not read through — a broken include chain
+    // rather than an absent package, which is a whole-TU failure either way.
     const missing = stderr.match(/fatal error: '([^']+)' file not found/);
     if (missing) {
       console.error(`warning: @cLayout/@cSig/@cValue guards skipped — '${missing[1]}' is not installed, so there is no header to check these declarations against`);
@@ -187,6 +206,11 @@ function verifyCDecls(cGuards: string | null, target: TargetInfo, linkLibs: stri
       if (noMember) asserts.push(`${noMember[1]}: declared in Milo, but '${noMember[2]}' has no such field`);
       const unknownType = line.match(/(?:unknown type name|no type named|incomplete type) '([^']+)'/);
       if (unknownType) asserts.push(`'${unknownType[1]}': named in Milo, but the header declares no such type`);
+      // A @cSig pointee assert dereferences the C parameter type. If C's parameter is not a
+      // pointer at all, that deref is what fails, not the assert — and the Milo declaration
+      // passing a pointer where C takes a value is exactly the mismatch worth reporting.
+      const notPointer = line.match(/indirection requires pointer operand.*\('([^']+)'/);
+      if (notPointer) asserts.push(`'${notPointer[1]}': Milo declares a pointer parameter, but C takes this by value`);
     }
     // clang reports the error then a note pointing at the real declaration, so the same
     // finding arrives twice (once as `timespec`, once as `struct timespec`).

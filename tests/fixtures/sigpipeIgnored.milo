@@ -26,7 +26,7 @@ pub fn main(): i32 {
     ignoreSigpipe()
     var fds: [i32; 2] = [0; 2]
     unsafe {
-        if pipe(fds as *u8) != 0 {
+        if pipe(fds as *i32) != 0 {
             print("pipe() failed")
             return 1
         }

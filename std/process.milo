@@ -111,16 +111,16 @@ impl Child {
             var inP: [i32; 2] = [0; 2]
             var outP: [i32; 2] = [0; 2]
             var errP: [i32; 2] = [-1; 2]
-            if pipe(inP as *u8) != 0 {
+            if pipe(inP as *i32) != 0 {
                 return Result.Err("pipe(stdin) failed")
             }
-            if pipe(outP as *u8) != 0 {
+            if pipe(outP as *i32) != 0 {
                 close(inP[0])
                 close(inP[1])
                 return Result.Err("pipe(stdout) failed")
             }
             if !mergeStderr {
-                if pipe(errP as *u8) != 0 {
+                if pipe(errP as *i32) != 0 {
                     close(inP[0])
                     close(inP[1])
                     close(outP[0])

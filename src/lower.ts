@@ -146,11 +146,11 @@ class LowerCtx {
       });
     }
 
-    // Pair each @cSig with its Milo return type, so codegen can check the mapping
-    // (the C signature is the truth; the Milo decl's width/signedness must agree).
+    // Pair each @cSig with the Milo signature it claims to mirror, so codegen can check the
+    // mapping (the C signature is the truth; the Milo decl's widths must agree).
     const cSigs = [...this.c.cSigs.entries()].flatMap(([fnName, s]) => {
       const fn = functions.find(f => f.name === fnName);
-      return fn ? [{ fnName, header: s.header, sig: s.sig, retType: fn.retType }] : [];
+      return fn ? [{ fnName, header: s.header, sig: s.sig, retType: fn.retType, params: fn.params.map(p => ({ type: p.type })) }] : [];
     });
     // @cValue carries the literal through to codegen as text. The checker already
     // rejected anything that isn't an integer literal (optionally negated), so the

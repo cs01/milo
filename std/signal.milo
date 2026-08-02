@@ -114,7 +114,7 @@ pub fn installSignalPipe(sig: i32): i32 {
     }
     unsafe {
         var fds: [i32; 2] = [0; 2]
-        if pipe(fds as *u8) != 0 {
+        if pipe(fds as *i32) != 0 {
             return -1
         }
         let r = fds[0]

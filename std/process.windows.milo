@@ -34,7 +34,7 @@ from "std/sync" import {
 pub extern fn system(cmd: *u8): i32
 
 @cSig("io.h", "int _pipe(int *, unsigned int, int)")
-pub extern fn _pipe(fds: *u8, size: u32, mode: i32): i32
+pub extern fn _pipe(fds: *i32, size: u32, mode: i32): i32
 
 // intptr_t: 8 bytes on Win64, so a CRT fd maps to a full 64-bit OS HANDLE.
 @cSig("io.h", "intptr_t _get_osfhandle(int)")
@@ -50,7 +50,7 @@ pub extern fn CreateProcessA(appName: *u8, cmdLine: *u8, procAttr: *u8, threadAt
 pub extern fn WaitForSingleObject(handle: i64, ms: u32): u32
 
 @cSig("windows.h", "BOOL GetExitCodeProcess(HANDLE, LPDWORD)")
-pub extern fn GetExitCodeProcess(handle: i64, code: *u8): i32
+pub extern fn GetExitCodeProcess(handle: i64, code: *u32): i32
 
 @cSig("windows.h", "BOOL TerminateProcess(HANDLE, UINT)")
 pub extern fn TerminateProcess(handle: i64, exitCode: u32): i32
@@ -150,16 +150,16 @@ impl Child {
             var inP: [i32; 2] = [0; 2]
             var outP: [i32; 2] = [0; 2]
             var errP: [i32; 2] = [-1; 2]
-            if _pipe(inP as *u8, 4096 as u32, pipeFlags()) != 0 {
+            if _pipe(inP as *i32, 4096 as u32, pipeFlags()) != 0 {
                 return Result.Err("pipe(stdin) failed")
             }
-            if _pipe(outP as *u8, 4096 as u32, pipeFlags()) != 0 {
+            if _pipe(outP as *i32, 4096 as u32, pipeFlags()) != 0 {
                 close(inP[0])
                 close(inP[1])
                 return Result.Err("pipe(stdout) failed")
             }
             if !mergeStderr {
-                if _pipe(errP as *u8, 4096 as u32, pipeFlags()) != 0 {
+                if _pipe(errP as *i32, 4096 as u32, pipeFlags()) != 0 {
                     close(inP[0])
                     close(inP[1])
                     close(outP[0])
@@ -288,7 +288,7 @@ fn waitHandle(handle: i64): Result<i32> {
     unsafe {
         WaitForSingleObject(handle, 4294967295 as u32)
         var codeBuf: [u32; 1] = [0]
-        if GetExitCodeProcess(handle, codeBuf as *u8) == 0 {
+        if GetExitCodeProcess(handle, codeBuf as *u32) == 0 {
             return Result.Err("GetExitCodeProcess() failed")
         }
         return Result.Ok(codeBuf[0] as i32)

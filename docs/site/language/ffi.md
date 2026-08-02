@@ -1,3 +1,11 @@
+<!-- doc-meta
+system: c-ffi
+purpose: declaring, linking, and verifying C interfaces from Milo — extern fn/struct, @link, and the @cSig/@cLayout/@cValue build-time guards
+key-files: src/checker.ts (checkCSig/checkCLayout/checkCValue), src/codegen.ts (cDeclGuards/cSigGuard), src/csig.ts, src/main.ts (verifyCDecls)
+update-when: an FFI annotation changes what it accepts or what it verifies
+last-verified: 2026-08-02
+-->
+
 # C FFI
 
 Call any C library by declaring external functions.
@@ -57,21 +65,56 @@ Milo verifies these claims at build time against the real headers.
 extern fn sysconf(name: i32): i64
 ```
 
-The compiler generates a throwaway C translation unit that includes the header, compiles it, and discards it. It checks two independent claims and reports which one broke:
+The compiler generates a throwaway C translation unit that includes the header, compiles it, and discards it. It checks three independent claims and reports which one broke:
 
 1. the stated signature really is what the header declares (via `__builtin_types_compatible_p`)
 2. the Milo return type's width and signedness match that C return type
+3. each Milo parameter's width — and, for a pointer, its **pointee's** width — matches the C parameter in the same position
 
 ```
 error[c-decl]: a declaration does not match the C header it claims to describe
   sysconf: Milo declares a 4-byte return, C returns a different width
 ```
 
+Claim 3 is what an out-param needs. An out-param is the callee writing into your frame, so the pointee width *is* the contract, and nothing else in the pipeline can see it — the ABI passes one machine word whatever the pointee is:
+
+```milo
+@cSig("OpenGL/gl3.h", "void glGetShaderiv(GLuint, GLenum, GLint *)")
+extern fn glGetShaderiv(shader: u32, pname: u32, out: *u16)   // GL writes 4 bytes, not 2
+```
+
+```
+error[c-decl]: a declaration does not match the C header it claims to describe
+  glGetShaderiv parameter 3: Milo writes through a *u16 (2-byte pointee), OpenGL/gl3.h says 'GLint *'
+```
+
+Arity is checked earlier still, in the type checker, with no header involved — a signature that lists a different number of parameters than the declaration would shift every comparison above by one.
+
+**`*u8` is the opt-out.** A Milo `*u8` parameter stands for C's `void *` and for any pointer whose pointee Milo does not model — `LPSECURITY_ATTRIBUTES`, or a `struct stat` a caller reads as a byte buffer. Its pointee is never checked, because checking it would only force you to invent a fake pointee. Every other pointee is a claim about how wide the callee's writes are, and that claim gets checked. Spell the real pointee whenever you know it: `*u32` for a GL name, `*i32` for a `GLint` out-param. A struct pointee is compared with `>=`, matching the prefix rule below.
+
 **Why you write the C signature instead of the compiler deriving it:** Milo's type system can't express C type identity. `i64` is a 64-bit integer, but C distinguishes `long` from `long long` — on macOS `int64_t` *is* `long long`, so a derived declaration would reject the correct `sysconf` above. The signature says which C type is meant.
 
 Write it exactly as the header spells it, pointers included (`"ssize_t read(int, void *, size_t)"`) — that is what makes pointer-taking functions checkable at all.
 
-**Parameter mapping is not checked.** Introspecting a C function type's parameters needs a C parser; only arity and the return type are verified.
+**What is still not checked:** signedness of a parameter (a `size_t` C parameter against a Milo `i64` is common and harmless), and any parameter of a signature that takes a function pointer — nested parens make splitting the list unreliable, so those signatures get the header comparison and nothing else.
+
+### Headers that aren't named the same everywhere
+
+Some headers have no one portable spelling. Separate alternates with `|`; the first one present wins:
+
+```milo
+@cSig("OpenGL/gl3.h|GL/glcorearb.h", "GLenum glGetError(void)")
+extern fn glGetError(): u32
+```
+
+A path may be prefixed with `+`-separated feature macros the header needs before it declares anything — without them the header is present and empty, which reads as a wrong Milo declaration rather than a missing `#define`:
+
+```milo
+@cSig("OpenGL/gl3.h|GL_GLEXT_PROTOTYPES+GL/glcorearb.h", "void glGenBuffers(GLsizei, GLuint *)")
+extern fn glGenBuffers(n: i32, ids: *u32)
+```
+
+The same spelling works on `@cLayout` and `@cValue`.
 
 ### `@cLayout` — check a struct layout
 
@@ -116,24 +159,29 @@ Both sides are cast to one 64-bit type before comparing, so C's usual arithmetic
 
 The compiler links `@link` libraries by name and never needs their headers to build — so nothing else in a Milo build carries an `-I`. The guard TU does, and gets it from `pkg-config --cflags` for each `@link`ed library (trying the name as written, then lowercased: `@link("SDL2")` finds `sdl2.pc`).
 
-If the header isn't installed — a machine with `libSDL2` but not `libsdl2-dev` — the guards are **skipped with a warning**, not failed:
+If the header isn't installed — a machine with `libSDL2` but not `libsdl2-dev` — that header's guards are **skipped with a warning**, not failed:
 
 ```
-warning: @cLayout/@cSig/@cValue guards skipped — 'SDL2/SDL.h' is not installed,
-so there is no header to check these declarations against
+warning: @cLayout/@cSig/@cValue guards for 'SDL2/SDL.h' skipped — no such header on
+this machine, so those declarations went unchecked
 ```
 
-Failing would make every consumer of an annotated package install dev headers to build something that links fine without them. Skipping silently would be worse than no guard at all, so it is always announced.
+Failing would make every consumer of an annotated package install dev headers to build something that links fine without them. Skipping silently would be worse than no guard at all, so it is always announced, by name.
+
+The skip is **per header**. Each header is included behind its own `__has_include`, and each group of asserts behind its own `#ifdef`, so one absent third-party header no longer takes the `sys/stat.h` and `unistd.h` claims down with it. This is what makes the annotations usable in portable library code: a binding can be verified on the machines that have the header without becoming a hard dev-package dependency for everyone else.
 
 ### Finding what isn't verified
 
-These annotations are opt-in, so an unannotated `extern struct` looks exactly like a verified one. `--deny=unverified-extern` turns that into an error:
+These annotations are opt-in, so an unannotated `extern struct` or `extern fn` looks exactly like a verified one. `--deny=unverified-extern` turns that into an error:
 
 ```
 error: extern struct 'Stat' has no @cLayout — its layout is an unverified claim about C
+error: extern fn 'glGenBuffers' has no @cSig — its signature is an unverified claim about C
+  hint: 'ids' is a pointer C writes through, so its pointee width is part of the
+        contract and nothing checks it
 ```
 
-It's off by default on purpose: an `extern struct` paired with a local `.c` file has no header to name, a legitimate shape `@cLayout` can't express. Turn it on for a project where every layout should be pinned to a real header. It only reports structs in the file being compiled — a struct inside a library you imported isn't yours to annotate.
+It's off by default on purpose: an `extern struct` paired with a local `.c` file has no header to name, a legitimate shape `@cLayout` can't express. Turn it on for a project where every declaration should be pinned to a real header. It only reports declarations in the file being compiled — an extern inside a library you imported isn't yours to annotate.
 
 All three checks are skipped for bare-metal targets, which are freestanding and cross-compiled — the host's headers aren't the ones the program runs against. On a cross-compile with a sysroot (`MILO_WINDOWS_SDK`), they *do* run, against the target's headers.
 

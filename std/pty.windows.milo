@@ -26,7 +26,7 @@ from "std/io" import {
 // ── bindings ──
 
 @cSig("windows.h", "BOOL CreatePipe(PHANDLE, PHANDLE, LPSECURITY_ATTRIBUTES, DWORD)")
-pub extern fn CreatePipe(readPipe: *u8, writePipe: *u8, attrs: *u8, size: u32): i32
+pub extern fn CreatePipe(readPipe: *i64, writePipe: *i64, attrs: *u8, size: u32): i32
 
 // COORD is a by-value {SHORT X, SHORT Y} = 4 bytes, which the Win64 ABI passes in a
 // register exactly like an i32 (verified: passing the packed value returns S_OK). Packed
@@ -62,7 +62,7 @@ pub extern fn CreateProcessA(appName: *u8, cmdLine: *u8, procAttr: *u8, threadAt
 pub extern fn WaitForSingleObject(handle: i64, ms: u32): u32
 
 @cSig("windows.h", "BOOL GetExitCodeProcess(HANDLE, LPDWORD)")
-pub extern fn GetExitCodeProcess(handle: i64, code: *u8): i32
+pub extern fn GetExitCodeProcess(handle: i64, code: *u32): i32
 
 @cSig("windows.h", "BOOL TerminateProcess(HANDLE, UINT)")
 pub extern fn TerminateProcess(handle: i64, exitCode: u32): i32
@@ -134,10 +134,10 @@ impl Pty {
             // and keeps inWrite (to send input) and outRead (to receive output).
             var inPipe: [i64; 2] = [0; 2]
             var outPipe: [i64; 2] = [0; 2]
-            if CreatePipe(inPipe as *u8, ((inPipe as *u8) as i64 + 8) as *u8, 0 as *u8, 0 as u32) == 0 {
+            if CreatePipe(inPipe as *i64, ((inPipe as *u8) as i64 + 8) as *i64, 0 as *u8, 0 as u32) == 0 {
                 return Result.Err("CreatePipe(in) failed")
             }
-            if CreatePipe(outPipe as *u8, ((outPipe as *u8) as i64 + 8) as *u8, 0 as *u8, 0 as u32) == 0 {
+            if CreatePipe(outPipe as *i64, ((outPipe as *u8) as i64 + 8) as *i64, 0 as *u8, 0 as u32) == 0 {
                 CloseHandle(inPipe[0])
                 CloseHandle(inPipe[1])
                 return Result.Err("CreatePipe(out) failed")
@@ -266,7 +266,7 @@ impl Pty {
         unsafe {
             WaitForSingleObject(self._childHandle, 4294967295 as u32)
             var codeBuf: [u32; 1] = [0]
-            GetExitCodeProcess(self._childHandle, codeBuf as *u8)
+            GetExitCodeProcess(self._childHandle, codeBuf as *u32)
             return codeBuf[0] as i32
         }
     }

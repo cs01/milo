@@ -1978,10 +1978,12 @@ Why you write the C signature rather than the compiler deriving it: **Milo's typ
 can't express C type identity.** `i64` is a 64-bit integer, but C distinguishes `long`
 from `long long` — on macOS `int64_t` *is* `long long`, so a derived declaration would
 reject the correct `sysconf` above. The signature states which C type is meant; the build
-then checks two independent claims, and says which one broke:
+then checks three independent claims, and says which one broke:
 
 1. the stated signature really is what the header declares (via `__builtin_types_compatible_p`)
 2. the Milo return type's width and signedness match that C return type
+3. each Milo parameter's width — and, for a pointer, its pointee's width — matches the C
+   parameter in the same position
 
 ```
 error[c-decl]: a declaration does not match the C header it claims to describe
@@ -1992,9 +1994,35 @@ Write the signature exactly as the header spells it, including pointer types
 (`"ssize_t read(int, void *, size_t)"`) — that's what makes pointer-taking functions
 checkable at all.
 
-**Parameter mapping is not checked.** Introspecting a C function type's parameters needs
-a C parser; only arity and the return type are verified. The signature sits next to the
-Milo declaration so the two read together.
+Claim 3 is the one an out-param needs. An out-param is the callee writing into the
+caller's frame, so the pointee width *is* the contract, and nothing else in the pipeline
+can see it — the ABI passes one machine word whatever the pointee:
+
+```
+error[c-decl]: a declaration does not match the C header it claims to describe
+  glGetShaderiv parameter 3: Milo writes through a *u16 (2-byte pointee), OpenGL/gl3.h says 'GLint *'
+```
+
+A Milo `*u8` parameter is the **opt-out**: it stands for C's `void *` and for any pointer
+whose pointee Milo does not model, and its pointee is never checked. Spell the real
+pointee whenever you know it.
+
+Arity is checked in the type checker, before any header is read — a signature listing a
+different number of parameters than the declaration would shift every comparison above by
+one. Parameter *signedness* is not checked (a C `size_t` against a Milo `i64` is common
+and harmless), and neither is any parameter of a signature that takes a function pointer.
+
+**When the header has no portable name**, separate alternates with `|` — the first one
+`__has_include` finds wins — and prefix a path with `+`-separated feature macros it needs
+before it declares anything:
+
+```milo
+@cSig("OpenGL/gl3.h|GL_GLEXT_PROTOTYPES+GL/glcorearb.h", "void glGenBuffers(GLsizei, GLuint *)")
+extern fn glGenBuffers(n: i32, ids: *u32)
+```
+
+A header that is absent skips **its own** claims, with a warning naming it, and leaves
+every other header's claims checked.
 
 **When the C declaration differs by platform**, the declaration belongs in the stdlib
 platform split (`std/platform.windows.milo` and friends), not in a conditional

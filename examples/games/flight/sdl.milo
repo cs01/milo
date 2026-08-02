@@ -50,7 +50,7 @@ pub extern fn SDL_GL_SetSwapInterval(interval: i32): i32
 // The drawable is not the window on a Retina display — it is twice the size in
 // each axis. Setting the GL viewport from SDL_GetWindowSize renders the frame
 // into the bottom-left quarter of the screen.
-pub extern fn SDL_GL_GetDrawableSize(win: *u8, w: *u8, h: *u8)
+pub extern fn SDL_GL_GetDrawableSize(win: *u8, w: *i32, h: *i32)
 
 pub extern fn SDL_GetError(): *u8
 

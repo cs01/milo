@@ -346,7 +346,7 @@ _O_WRONLY|_O_CREAT|_O_TRUNC|_O_BINARY
 ### `pipe`
 
 ```milo
-pub fn pipe(fds: *u8): i32
+pub fn pipe(fds: *i32): i32
 ```
 
 _Undocumented._

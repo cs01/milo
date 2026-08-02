@@ -441,7 +441,8 @@ pub extern fn usleep(usec: u32): i32
 
 // pipe(2). Split out because the UCRT spells it _pipe and takes two extra arguments.
 
-pub extern fn pipe(fds: *u8): i32
+@cSig("unistd.h", "int pipe(int *)")
+pub extern fn pipe(fds: *i32): i32
 
 // ── fd I/O ──
 //

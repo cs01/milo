@@ -209,7 +209,7 @@ export interface HIRModule {
   // so the C header generator can emit forward `typedef struct X X;` declarations
   opaqueTypes?: string[];
   // From `@cSig(...)`: extern fn signatures to verify against real C headers at build time.
-  cSigs?: { fnName: string; header: string; sig: string; retType: TypeKind }[];
+  cSigs?: { fnName: string; header: string; sig: string; retType: TypeKind; params?: { type: TypeKind }[] }[];
   // From `@cValue(...)`: integer constants to verify against the C macros they transcribe.
   cValues?: { global: string; cName: string; header: string; value: string; signed: boolean }[];
   // From `@link("SDL2")` on extern fns: native libs to pass to the linker.

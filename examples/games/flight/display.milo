@@ -166,7 +166,7 @@ pub fn screenPresent(s: &Screen, c: &mut Canvas, sc: &Scene, cover: &Vec<f32>, c
             var dw: i32 = 0
             var dh: i32 = 0
             unsafe {
-                SDL_GL_GetDrawableSize(s.win, (dw.addrOf()) as *u8, (dh.addrOf()) as *u8)
+                SDL_GL_GetDrawableSize(s.win, dw.addrOf(), dh.addrOf())
             }
             postDraw(p, c.hdr, sc.zbuf, c.lock, cover, coverDirty, sv, bloomGain, exposure, dw as i64, dh as i64)
             unsafe {

@@ -107,14 +107,39 @@ pub struct City {
     // Buildings the bridge layer has taken over. See `claimBridgeStructures`.
     bSkip: Vec<bool>,
 
+    // Roof shape per building, from OSM's `roof:shape`, how much of the
+    // building's height that roof takes, and how far off the ground the whole
+    // thing starts. Empty on a version-2 asset, which is read as every roof flat
+    // and every building founded on the ground — which is what the renderer drew
+    // for all of them before this section existed.
+    //
+    // The base is what makes OSM's `building:part` usable: the Empire State
+    // Building is not one box but eight stacked slabs, each with its own
+    // footprint, `height` and `min_height`, and the mast on top of them is a
+    // pyramid starting at 330 m. Without a base every part starts at the
+    // pavement and the setbacks disappear inside the widest one.
+    bRoof: Vec<u8>,
+    bRoofH: Vec<f64>,
+    bBase: Vec<f64>,
+
     // Where the version-1 body ends, i.e. the first byte of the bridge section
     // (or of nothing, in a v1 file). Tools splice a new trailing section on
     // instead of rebuilding an asset whose expensive layers have not changed.
     bodyEnd: i64,
+    // And where the bridge section ends, for the same reason: the roof section
+    // after it is rewritten on its own.
+    bridgeEnd: i64,
 
     // Half-extent of the mapped area. Beyond this the ground fades to open sea,
     // which is the only honest thing to draw: there is no data out there.
     reach: f64,
+
+    // The highest thing in the map, above sea level: the tallest terrain sample
+    // plus the tallest building. The flight ceiling is measured from this rather
+    // than from the ground under the aircraft, because a ceiling that follows the
+    // terrain sits BELOW the summits anywhere the ground drops — over the Grand
+    // Canyon floor or the Yosemite valley floor it put the roof under the rim.
+    topMax: f64,
 
     // Aerial photograph of exactly this bbox, draped over the terrain. Optional:
     // without it the ground falls back to the land-cover palette, which is four
@@ -168,8 +193,13 @@ pub fn cityEmpty(): City {
         brTowerA: Vec.new(),
         brTowerB: Vec.new(),
         bSkip: Vec.new(),
+        bRoof: Vec.new(),
+        bRoofH: Vec.new(),
+        bBase: Vec.new(),
         bodyEnd: 0,
+        bridgeEnd: 0,
         reach: 0.0,
+        topMax: 0.0,
         ortho: texNew(1, 0),
         orthoLoaded: false,
     }
@@ -625,7 +655,7 @@ pub let MAGIC: string = "MILOCITY"
 // 2 added the bridge section at the tail. A v1 asset still loads — it simply has
 // no bridges — because everything before that section is byte-identical and the
 // reader stops where the file does.
-pub let VERSION: i64 = 2
+pub let VERSION: i64 = 3
 
 // ------------------------------------------------------------------- loading
 
@@ -860,14 +890,48 @@ pub fn cityParse(src: &string): Result<City, string> {
 
     c.bodyEnd = p
     if ver >= 2 {
-        parseBridges(c, src, p)?
+        p = parseBridges(c, src, p)?
+    }
+    c.bridgeEnd = p
+    // The roof section is optional even at version 3: a file may legitimately end
+    // after the bridges (nothing in the map has a shaped roof, or the writer
+    // predates the section), and a version number is a statement about layout,
+    // not a promise that every layer is present. A section that IS there still
+    // has to be complete and to match the building count.
+    if ver >= 3 && have(src, p, 4) {
+        parseRoofs(c, src, p)?
     }
 
     c.loaded = true
     buildIndex(c)
     deckProfile(c)
     claimBridgeStructures(c)
+    computeTop(c)
     return Result.Ok(c)
+}
+
+// Tallest terrain sample plus tallest building. An upper bound rather than the
+// true highest roof — the tallest tower is not necessarily on the highest
+// ground — which is what a ceiling wants: it can only ever be too generous.
+fn computeTop(c: &mut City) {
+    var top = 0.0
+    for i in 0..c.dem.len {
+        if c.dem[i] > top {
+            top = c.dem[i]
+        }
+    }
+    var tallest = 0.0
+    for i in 0..c.bCount {
+        if c.bHeight[i] > tallest {
+            tallest = c.bHeight[i]
+        }
+    }
+    for i in 0..c.brCount {
+        if c.brTower[i] > tallest {
+            tallest = c.brTower[i]
+        }
+    }
+    c.topMax = top + tallest
 }
 
 // A bridge tower is often ALSO an OSM building polygon, standing in open water.
@@ -976,8 +1040,75 @@ fn parseBridges(c: &mut City, src: &string, from: i64): Result<i64, string> {
         }
     }
     c.brCount = c.brHalfW.len
-    return Result.Ok(c.brCount)
+    return Result.Ok(p)
 }
+
+// Roof shapes, one per building, in the same order the body wrote them. A count
+// that disagrees with the building count means the two sections came from
+// different fetches, and a roof on the wrong building is worse than no roof.
+fn parseRoofs(c: &mut City, src: &string, from: i64): Result<i64, string> {
+    var p = from
+    if !have(src, p, 4) {
+        return Result.Err("truncated city file: no roof count")
+    }
+    let n = getI32(src, p)
+    p = p + 4
+    if n != c.bCount {
+        return Result.Err("city file has " + n.toString() + " roofs for " + c.bCount.toString() + " buildings")
+    }
+    if !have(src, p, n * 9) {
+        return Result.Err("truncated city file: " + n.toString() + " roofs")
+    }
+    c.bRoof = Vec.filled(n, 0 as u8)
+    c.bRoofH = Vec.filled(n, 0.0)
+    c.bBase = Vec.filled(n, 0.0)
+    for i in 0..n {
+        c.bRoof[i] = src[p]
+        p = p + 1
+        c.bRoofH[i] = (getI32(src, p) as f64) / 100.0
+        p = p + 4
+        c.bBase[i] = (getI32(src, p) as f64) / 100.0
+        p = p + 4
+    }
+    return Result.Ok(p)
+}
+
+// Roof shape of a building, or flat on an asset with no roof section.
+pub fn cityRoofKind(c: &City, b: i64): u8 {
+    if b < 0 || b >= c.bRoof.len {
+        return ROOF_FLAT
+    }
+    return c.bRoof[b]
+}
+
+pub fn cityRoofHeight(c: &City, b: i64): f64 {
+    if b < 0 || b >= c.bRoofH.len {
+        return 0.0
+    }
+    return c.bRoofH[b]
+}
+
+// How far above the ground this building starts. Non-zero only for the upper
+// slabs of a building modelled as parts.
+pub fn cityBase(c: &City, b: i64): f64 {
+    if b < 0 || b >= c.bBase.len {
+        return 0.0
+    }
+    return c.bBase[b]
+}
+
+// Roof shapes the renderer knows how to build. Everything OSM tags that is not
+// one of these — skillion, sawtooth, the long tail — is read as flat: a wrong
+// roof reads as a modelling error, a flat one reads as a building.
+pub let ROOF_FLAT: u8 = 0
+
+pub let ROOF_PYRAMIDAL: u8 = 1
+
+pub let ROOF_DOME: u8 = 2
+
+pub let ROOF_HIPPED: u8 = 3
+
+pub let ROOF_GABLED: u8 = 4
 
 fn srgbToLinear(v: f64): f64 {
     if v <= 0.04045 {
@@ -1084,7 +1215,16 @@ fn deckProfile(c: &mut City) {
         // Suspension and cable-stayed spans get towers, at the two ends of the
         // water they cross — which is where the real ones stand, because that is
         // where there is something to found them on.
-        if (c.brStruct[b] == 1 || c.brStruct[b] == 2) && clearance > 20.0 {
+        //
+        // A long, high crossing with no `bridge:structure` at all is taken as a
+        // suspension span. That tag is optional and often missing — the Bay
+        // Bridge's west span carries none, and without this it drew as a three
+        // kilometre grey ribbon seventy metres over the water with nothing
+        // holding it up. Nothing but a suspension or cable-stayed bridge gets
+        // built a kilometre long and that high, so the inference is safer than
+        // the flat ribbon it replaces.
+        let inferred = c.brStruct[b] == 0 && waterSpan > 900.0 && clearance > 45.0
+        if (c.brStruct[b] == 1 || c.brStruct[b] == 2 || inferred) && clearance > 20.0 {
             // Real suspension towers stand about twice the deck's clearance
             // above it — the Golden Gate's deck is 67 m over the water and its
             // towers 227 m, and that proportion is what makes the silhouette

@@ -61,7 +61,8 @@ from "std/time" import {
     sleepSecs
 }
 from "../city" import {
-    putI32, putCm, MAGIC, VERSION, COVER_URBAN, COVER_PARK, COVER_SAND, COVER_WATER, cityParse
+    putI32, putCm, MAGIC, VERSION, COVER_URBAN, COVER_PARK, COVER_SAND, COVER_WATER, cityParse,
+    ROOF_FLAT, ROOF_PYRAMIDAL, ROOF_DOME, ROOF_HIPPED, ROOF_GABLED
 }
 
 let M_PER_DEG_LAT: f64 = 111320.0
@@ -430,6 +431,48 @@ fn buildingHeight(doc: &Json, tags: i64): f64 {
     return 7.0
 }
 
+// OSM's `roof:shape`, narrowed to the handful of shapes the renderer builds.
+// Anything else — skillion, sawtooth, the long tail of one-offs — is flat: a
+// wrong roof reads as a modelling error, a flat one reads as a building.
+fn roofKindFor(doc: &Json, tags: i64): u8 {
+    let shape = tagStr(doc, tags, "roof:shape")
+    if shape == "pyramidal" || shape == "spire" || shape == "cone" || shape == "conical" || shape == "tented" {
+        return ROOF_PYRAMIDAL
+    }
+    if shape == "dome" || shape == "onion" || shape == "round" {
+        return ROOF_DOME
+    }
+    if shape == "hipped" || shape == "half-hipped" || shape == "mansard" || shape == "gambrel" {
+        return ROOF_HIPPED
+    }
+    if shape == "gabled" || shape == "saltbox" || shape == "quadruple_saltbox" {
+        return ROOF_GABLED
+    }
+    return ROOF_FLAT
+}
+
+// How much of the building's height the roof takes. Tagged where anyone has
+// bothered — the Transamerica Pyramid carries `roof:height=260 m`, i.e. the
+// whole tower — and otherwise a fraction that suits the shape. Never the entire
+// height: a pyramid needs a few metres of wall under it or its lowest courses
+// z-fight the ground it stands on.
+fn roofHeightFor(doc: &Json, tags: i64, kind: u8, h: f64): f64 {
+    var rh = leadingNum(tagStr(doc, tags, "roof:height"))
+    if rh <= 0.1 {
+        rh = leadingNum(tagStr(doc, tags, "roof:levels")) * LEVEL_HEIGHT
+    }
+    if rh <= 0.1 {
+        if kind == ROOF_PYRAMIDAL {
+            rh = h * 0.35
+        } else if kind == ROOF_DOME {
+            rh = h * 0.25
+        } else {
+            rh = Math.minF64(h * 0.35, 6.0)
+        }
+    }
+    return Math.clampF64(rh, 0.0, h * 0.95)
+}
+
 fn coverCodeFor(doc: &Json, tags: i64): u8 {
     let leisure = tagStr(doc, tags, "leisure")
     if leisure == "park" || leisure == "garden" || leisure == "golf_course" || leisure == "pitch" {
@@ -581,6 +624,367 @@ fn parseColour(v: &string): i64 {
 // Bridge ways in the bbox. Short ones are dropped: a city has hundreds of
 // forty-metre culvert decks, none of which is visible from a plane, and each one
 // costs eight triangles a frame forever.
+// The building layer, decoded from one Overpass response into the flat arrays
+// the asset stores. Shared by a full build and by `--roofs`, which re-derives
+// only the roof section: the two MUST agree building for building, because the
+// roof section is positional — a shape on the wrong index is a pyramid on an
+// office block.
+fn scanBuildings(bbox: &string, latMin: f64, lonMin: f64, latMax: f64, lonMax: f64, lat: f64, lon: f64, mPerLon: f64, bH: &mut Vec<f64>, bStart: &mut Vec<i64>, bLen: &mut Vec<i64>, bPtX: &mut Vec<f64>, bPtZ: &mut Vec<f64>, bRoof: &mut Vec<u8>, bRoofH: &mut Vec<f64>) {
+    let bQ = "[out:json][timeout:180];way[\"building\"]" + bbox.clone() + ";out tags geom;"
+    var tallest = 0.0
+    var shaped = 0
+    match overpass(bQ, cacheName("buildings", latMin, lonMin, latMax, lonMax)) {
+        Ok(body) => {
+            match Json.parse(body) {
+                Ok(doc) => {
+                    let els = doc.curField(doc.curRoot(), "elements")
+                    let n = doc.curLen(els)
+                    print("  " + n.toString() + " building ways")
+                    for i in 0..n {
+                        let el = doc.curChild(els, i)
+                        let geom = doc.curField(el, "geometry")
+                        var gn = doc.curLen(geom)
+                        if gn < 4 {
+                            continue
+                        }
+                        // A closed way repeats its first node last.
+                        gn = gn - 1
+                        // Footprints with dozens of nodes are curved facades and
+                        // bay windows; at 150 m up and 190 m/s they are a
+                        // rectangle. Decimate rather than drop.
+                        var stride = 1
+                        while gn / stride > 14 {
+                            stride = stride + 1
+                        }
+                        let tags = doc.curField(el, "tags")
+                        let h = buildingHeight(doc, tags)
+                        if h > tallest {
+                            tallest = h
+                        }
+                        let start = bPtX.len
+                        var count = 0
+                        var k = 0
+                        while k < gn {
+                            let p = doc.curChild(geom, k)
+                            let plat = floatOf(doc, doc.curField(p, "lat"))
+                            let plon = floatOf(doc, doc.curField(p, "lon"))
+                            bPtX.push((plon - lon) * mPerLon)
+                            bPtZ.push((plat - lat) * M_PER_DEG_LAT)
+                            count = count + 1
+                            k = k + stride
+                        }
+                        if count < 3 {
+                            bPtX.truncate(start)
+                            bPtZ.truncate(start)
+                            continue
+                        }
+                        let kind = roofKindFor(doc, tags)
+                        if kind != ROOF_FLAT {
+                            shaped = shaped + 1
+                        }
+                        bH.push(h)
+                        bStart.push(start)
+                        bLen.push(count)
+                        bRoof.push(kind)
+                        bRoofH.push(roofHeightFor(doc, tags, kind, h))
+                    }
+                }
+                Err(_e) => {
+                    print("  building JSON parse failed")
+                }
+            }
+        }
+        Err(e) => {
+            print("  " + e)
+        }
+    }
+    print("  kept " + bH.len.toString() + " buildings, tallest " + (tallest as i64).toString() + " m, " + shaped.toString() + " with a shaped roof")
+}
+
+// OSM's Simple 3D Buildings layer: `building:part` ways, each a slab of one
+// building with its own footprint, `height` and `min_height`.
+//
+// This is the difference between a skyline and a row of boxes. The Empire State
+// Building is one `building` way tagged 443 m — extruded on its own it is a
+// featureless slab — and eight parts that are its actual setbacks, plus a
+// pyramidal mast from 330 m up. Salesforce Tower's taper is a ring of parts.
+// Neither shape exists anywhere else in the data.
+fn scanParts(bbox: &string, latMin: f64, lonMin: f64, latMax: f64, lonMax: f64, lat: f64, lon: f64, mPerLon: f64, pH: &mut Vec<f64>, pBase: &mut Vec<f64>, pStart: &mut Vec<i64>, pLen: &mut Vec<i64>, pPtX: &mut Vec<f64>, pPtZ: &mut Vec<f64>, pRoof: &mut Vec<u8>, pRoofH: &mut Vec<f64>) {
+    let q = "[out:json][timeout:180];way[\"building:part\"]" + bbox.clone() + ";out tags geom;"
+    match overpass(q, cacheName("parts", latMin, lonMin, latMax, lonMax)) {
+        Ok(body) => {
+            match Json.parse(body) {
+                Ok(doc) => {
+                    let els = doc.curField(doc.curRoot(), "elements")
+                    let n = doc.curLen(els)
+                    print("  " + n.toString() + " building parts")
+                    for i in 0..n {
+                        let el = doc.curChild(els, i)
+                        let geom = doc.curField(el, "geometry")
+                        var gn = doc.curLen(geom)
+                        if gn < 4 {
+                            continue
+                        }
+                        gn = gn - 1
+                        var stride = 1
+                        while gn / stride > 14 {
+                            stride = stride + 1
+                        }
+                        let tags = doc.curField(el, "tags")
+                        let h = buildingHeight(doc, tags)
+                        var base = leadingNum(tagStr(doc, tags, "min_height"))
+                        if base <= 0.01 {
+                            base = leadingNum(tagStr(doc, tags, "building:min_level")) * LEVEL_HEIGHT
+                        }
+                        if base <= 0.01 {
+                            base = leadingNum(tagStr(doc, tags, "min_level")) * LEVEL_HEIGHT
+                        }
+                        // A part that ends below where it starts is a tagging
+                        // error, and extruding it downwards puts a slab through
+                        // the street.
+                        if h - base < 1.0 {
+                            continue
+                        }
+                        let start = pPtX.len
+                        var count = 0
+                        var k = 0
+                        while k < gn {
+                            let pt = doc.curChild(geom, k)
+                            pPtX.push((floatOf(doc, doc.curField(pt, "lon")) - lon) * mPerLon)
+                            pPtZ.push((floatOf(doc, doc.curField(pt, "lat")) - lat) * M_PER_DEG_LAT)
+                            count = count + 1
+                            k = k + stride
+                        }
+                        if count < 3 {
+                            pPtX.truncate(start)
+                            pPtZ.truncate(start)
+                            continue
+                        }
+                        let kind = roofKindFor(doc, tags)
+                        pH.push(h)
+                        pBase.push(base)
+                        pStart.push(start)
+                        pLen.push(count)
+                        pRoof.push(kind)
+                        pRoofH.push(roofHeightFor(doc, tags, kind, h - base))
+                    }
+                }
+                Err(_e) => {
+                    print("  building-part JSON parse failed")
+                }
+            }
+        }
+        Err(e) => {
+            print("  " + e)
+        }
+    }
+    print("  kept " + pH.len.toString() + " parts")
+}
+
+// Fetch the part layer and fold it into the building arrays: any plain footprint
+// the parts stand in is dropped, and the parts are appended in its place.
+//
+// Dropped, because a `building` way and its `building:part` ways describe the
+// SAME structure at two levels of detail. Keeping both leaves the coarse slab
+// standing inside the detailed one, z-fighting its walls all the way up — and
+// since the slab is tagged with the building's full height, it hides every
+// setback the parts exist to show.
+//
+// The test is deliberately conservative: a part has to reach at least 80% of the
+// footprint's height before that footprint is dropped. A dome or a chimney
+// mapped as a part of a low building must not delete the building under it.
+fn mergeParts(bbox: &string, latMin: f64, lonMin: f64, latMax: f64, lonMax: f64, lat: f64, lon: f64, mPerLon: f64, bH: &mut Vec<f64>, bBase: &mut Vec<f64>, bStart: &mut Vec<i64>, bLen: &mut Vec<i64>, bPtX: &mut Vec<f64>, bPtZ: &mut Vec<f64>, bRoof: &mut Vec<u8>, bRoofH: &mut Vec<f64>) {
+    var pH: Vec<f64> = Vec.new()
+    var pBase: Vec<f64> = Vec.new()
+    var pStart: Vec<i64> = Vec.new()
+    var pLen: Vec<i64> = Vec.new()
+    var pPtX: Vec<f64> = Vec.new()
+    var pPtZ: Vec<f64> = Vec.new()
+    var pRoof: Vec<u8> = Vec.new()
+    var pRoofH: Vec<f64> = Vec.new()
+    scanParts(bbox, latMin, lonMin, latMax, lonMax, lat, lon, mPerLon, pH, pBase, pStart, pLen, pPtX, pPtZ, pRoof, pRoofH)
+    if pH.len == 0 {
+        return
+    }
+
+    let nb = bH.len
+    // Footprint bounds, once. The suppression test is thousands of parts against
+    // a hundred thousand buildings, so it goes through a coarse grid rather than
+    // a scan: 500 m cells, and a part only ever looks at the nine around it.
+    var minX: Vec<f64> = Vec.filled(nb, 0.0)
+    var minZ: Vec<f64> = Vec.filled(nb, 0.0)
+    var maxX: Vec<f64> = Vec.filled(nb, 0.0)
+    var maxZ: Vec<f64> = Vec.filled(nb, 0.0)
+    for b in 0..nb {
+        var x0 = 1.0e18
+        var z0 = 1.0e18
+        var x1 = 0.0 - 1.0e18
+        var z1 = 0.0 - 1.0e18
+        for k in 0..bLen[b] {
+            let x = bPtX[bStart[b] + k]
+            let z = bPtZ[bStart[b] + k]
+            if x < x0 {
+                x0 = x
+            }
+            if x > x1 {
+                x1 = x
+            }
+            if z < z0 {
+                z0 = z
+            }
+            if z > z1 {
+                z1 = z
+            }
+        }
+        minX[b] = x0
+        minZ[b] = z0
+        maxX[b] = x1
+        maxZ[b] = z1
+    }
+    let CELL = 500.0
+    let side = ((latMax - latMin) * M_PER_DEG_LAT / CELL) as i64 + 4
+    let half = side / 2
+    var counts: Vec<i64> = Vec.filled(side * side + 1, 0)
+    for b in 0..nb {
+        counts[cellOf(minX[b], minZ[b], maxX[b], maxZ[b], CELL, side, half)] += 1
+    }
+    var cellStart: Vec<i64> = Vec.filled(side * side + 1, 0)
+    var acc = 0
+    for i in 0..side * side {
+        cellStart[i] = acc
+        acc = acc + counts[i]
+    }
+    cellStart[side * side] = acc
+    var items: Vec<i64> = Vec.filled(acc, 0)
+    var cursor: Vec<i64> = Vec.filled(side * side, 0)
+    for i in 0..side * side {
+        cursor[i] = cellStart[i]
+    }
+    for b in 0..nb {
+        let ci = cellOf(minX[b], minZ[b], maxX[b], maxZ[b], CELL, side, half)
+        items[cursor[ci]] = b
+        cursor[ci] = cursor[ci] + 1
+    }
+
+    var drop: Vec<bool> = Vec.filled(nb, false)
+    var dropped = 0
+    for i in 0..pH.len {
+        var cx = 0.0
+        var cz = 0.0
+        for k in 0..pLen[i] {
+            cx = cx + pPtX[pStart[i] + k]
+            cz = cz + pPtZ[pStart[i] + k]
+        }
+        cx = cx / (pLen[i] as f64)
+        cz = cz / (pLen[i] as f64)
+        let gx = ((cx / CELL) as i64) + half
+        let gz = ((cz / CELL) as i64) + half
+        var dz = 0 - 1
+        while dz <= 1 {
+            var dx = 0 - 1
+            while dx <= 1 {
+                let ex = gx + dx
+                let ez = gz + dz
+                if ex >= 0 && ex < side && ez >= 0 && ez < side {
+                    let ci = ez * side + ex
+                    for slot in cellStart[ci]..cellStart[ci + 1] {
+                        let b = items[slot]
+                        if drop[b] {
+                            continue
+                        }
+                        if cx < minX[b] || cx > maxX[b] || cz < minZ[b] || cz > maxZ[b] {
+                            continue
+                        }
+                        if pH[i] < bH[b] * 0.8 {
+                            continue
+                        }
+                        drop[b] = true
+                        dropped = dropped + 1
+                    }
+                }
+                dx = dx + 1
+            }
+            dz = dz + 1
+        }
+    }
+
+    // Rebuild the arrays without the dropped footprints, then append the parts.
+    var oH: Vec<f64> = Vec.new()
+    var oBase: Vec<f64> = Vec.new()
+    var oStart: Vec<i64> = Vec.new()
+    var oLen: Vec<i64> = Vec.new()
+    var oPtX: Vec<f64> = Vec.new()
+    var oPtZ: Vec<f64> = Vec.new()
+    var oRoof: Vec<u8> = Vec.new()
+    var oRoofH: Vec<f64> = Vec.new()
+    for b in 0..nb {
+        if drop[b] {
+            continue
+        }
+        let st = oPtX.len
+        for k in 0..bLen[b] {
+            oPtX.push(bPtX[bStart[b] + k])
+            oPtZ.push(bPtZ[bStart[b] + k])
+        }
+        oH.push(bH[b])
+        oBase.push(bBase[b])
+        oStart.push(st)
+        oLen.push(bLen[b])
+        oRoof.push(bRoof[b])
+        oRoofH.push(bRoofH[b])
+    }
+    for i in 0..pH.len {
+        let st = oPtX.len
+        for k in 0..pLen[i] {
+            oPtX.push(pPtX[pStart[i] + k])
+            oPtZ.push(pPtZ[pStart[i] + k])
+        }
+        oH.push(pH[i])
+        oBase.push(pBase[i])
+        oStart.push(st)
+        oLen.push(pLen[i])
+        oRoof.push(pRoof[i])
+        oRoofH.push(pRoofH[i])
+    }
+    print("  parts replaced " + dropped.toString() + " footprints; " + bH.len.toString() + " -> " + oH.len.toString() + " buildings")
+    replace(bH, oH)
+    replace(bBase, oBase)
+    replace(bStart, oStart)
+    replace(bLen, oLen)
+    replace(bPtX, oPtX)
+    replace(bPtZ, oPtZ)
+    replace(bRoof, oRoof)
+    replace(bRoofH, oRoofH)
+}
+
+// Which grid cell a footprint's centre falls in, clamped into the grid.
+fn cellOf(x0: f64, z0: f64, x1: f64, z1: f64, cell: f64, side: i64, half: i64): i64 {
+    var gx = (((x0 + x1) * 0.5 / cell) as i64) + half
+    var gz = (((z0 + z1) * 0.5 / cell) as i64) + half
+    if gx < 0 {
+        gx = 0
+    }
+    if gx >= side {
+        gx = side - 1
+    }
+    if gz < 0 {
+        gz = 0
+    }
+    if gz >= side {
+        gz = side - 1
+    }
+    return gz * side + gx
+}
+
+fn putRoofs(buf: &mut string, bRoof: &Vec<u8>, bRoofH: &Vec<f64>, bBase: &Vec<f64>) {
+    putI32(buf, bRoof.len)
+    for i in 0..bRoof.len {
+        buf.push(bRoof[i])
+        putCm(buf, bRoofH[i])
+        putCm(buf, bBase[i])
+    }
+}
+
 fn fetchBridges(bbox: &string, lat: f64, lon: f64, mPerLon: f64, cacheKey: &string): Bridges {
     var br = bridgesEmpty()
     let q = "[out:json][timeout:180];way[\"bridge\"][\"highway\"]" + bbox.clone() + ";out tags geom;"
@@ -848,6 +1252,11 @@ fn main() {
         updateBridges(update)
         return
     }
+    let parts = flagOf(a, "--parts", "")
+    if parts != "" {
+        updateParts(parts)
+        return
+    }
     let orthoOnly = flagOf(a, "--ortho", "")
     if orthoOnly != "" {
         updateOrtho(orthoOnly)
@@ -953,72 +1362,19 @@ fn main() {
     print("  filled " + greens.toString() + " cover polygons")
 
     // ── buildings ──
-    let bQ = "[out:json][timeout:180];way[\"building\"]" + bbox.clone() + ";out tags geom;"
     var bH: Vec<f64> = Vec.new()
     var bStart: Vec<i64> = Vec.new()
     var bLen: Vec<i64> = Vec.new()
     var bPtX: Vec<f64> = Vec.new()
     var bPtZ: Vec<f64> = Vec.new()
-    var tallest = 0.0
-    match overpass(bQ, cacheName("buildings", latMin, lonMin, latMax, lonMax)) {
-        Ok(body) => {
-            match Json.parse(body) {
-                Ok(doc) => {
-                    let els = doc.curField(doc.curRoot(), "elements")
-                    let n = doc.curLen(els)
-                    print("  " + n.toString() + " building ways")
-                    for i in 0..n {
-                        let el = doc.curChild(els, i)
-                        let geom = doc.curField(el, "geometry")
-                        var gn = doc.curLen(geom)
-                        if gn < 4 {
-                            continue
-                        }
-                        // A closed way repeats its first node last.
-                        gn = gn - 1
-                        // Footprints with dozens of nodes are curved facades and
-                        // bay windows; at 150 m up and 190 m/s they are a
-                        // rectangle. Decimate rather than drop.
-                        var stride = 1
-                        while gn / stride > 14 {
-                            stride = stride + 1
-                        }
-                        let h = buildingHeight(doc, doc.curField(el, "tags"))
-                        if h > tallest {
-                            tallest = h
-                        }
-                        let start = bPtX.len
-                        var count = 0
-                        var k = 0
-                        while k < gn {
-                            let p = doc.curChild(geom, k)
-                            let plat = floatOf(doc, doc.curField(p, "lat"))
-                            let plon = floatOf(doc, doc.curField(p, "lon"))
-                            bPtX.push((plon - lon) * mPerLon)
-                            bPtZ.push((plat - lat) * M_PER_DEG_LAT)
-                            count = count + 1
-                            k = k + stride
-                        }
-                        if count < 3 {
-                            bPtX.truncate(start)
-                            bPtZ.truncate(start)
-                            continue
-                        }
-                        bH.push(h)
-                        bStart.push(start)
-                        bLen.push(count)
-                    }
-                }
-                Err(_e) => {
-                    print("  building JSON parse failed")
-                }
-            }
-        }
-        Err(e) => {
-            print("  " + e)
-        }
+    var bRoof: Vec<u8> = Vec.new()
+    var bRoofH: Vec<f64> = Vec.new()
+    var bBase: Vec<f64> = Vec.new()
+    scanBuildings(bbox, latMin, lonMin, latMax, lonMax, lat, lon, mPerLon, bH, bStart, bLen, bPtX, bPtZ, bRoof, bRoofH)
+    for i in 0..bH.len {
+        bBase.push(0.0)
     }
-    print("  kept " + bH.len.toString() + " buildings, tallest " + (tallest as i64).toString() + " m")
+    mergeParts(bbox, latMin, lonMin, latMax, lonMax, lat, lon, mPerLon, bH, bBase, bStart, bLen, bPtX, bPtZ, bRoof, bRoofH)
 
     // ── bridges ──
     let br = fetchBridges(bbox, lat, lon, mPerLon, cacheName("bridges", latMin, lonMin, latMax, lonMax))
@@ -1065,6 +1421,7 @@ fn main() {
     }
 
     putBridges(buf, br)
+    putRoofs(buf, bRoof, bRoofH, bBase)
 
     match writeFile(out.clone(), buf) {
         Ok(nbytes) => {
@@ -1083,6 +1440,104 @@ fn main() {
 // terrain, the land cover and the hundred thousand footprints are copied
 // straight across — no Overpass call, no reprojection, and no chance of the
 // expensive layers coming back subtly different because OSM moved underneath.
+// Re-derive only the roof section and splice it onto an existing asset.
+//
+// The building layer is the expensive one and OSM moves under it, so rebuilding
+// the whole asset to add a roof shape would quietly change a hundred thousand
+// footprints too. This reads the same Overpass response the body was built from
+// (cached, so usually no network at all), runs the same scan, and refuses to
+// write if it does not come back with the same number of buildings — the
+// section is positional and a mismatch would put roofs on the wrong ones.
+// Rebuild the building layer of an existing asset from the cached OSM response
+// plus a fresh part query, and splice it back in.
+//
+// A full refetch would be the obvious way to add the part layer, and it is the
+// wrong one: it re-downloads eight megabytes of imagery and re-queries terrain,
+// land cover and bridges, all of which are already correct and none of which OSM
+// leaves alone between fetches. This rewrites exactly the bytes that change —
+// the building section and the roof section after it — and copies everything
+// else across untouched.
+fn updateParts(path: string) {
+    let Result.Ok(src) = readFile(path) else {
+        print("cannot read " + path)
+        return
+    }
+    let Result.Ok(c) = cityParse(src) else {
+        print("cannot parse " + path)
+        return
+    }
+    print(c.name.clone() + ": " + fmt7(c.originLat) + ", " + fmt7(c.originLon) + "  radius " + (c.reach as i64).toString() + " m")
+
+    let _ = makeDir(".cache", 493)
+    let _ = makeDir(CACHE, 493)
+    let mPerLon = M_PER_DEG_LAT * Math.cos(c.originLat * 3.14159265358979 / 180.0)
+    let latMin = c.originLat - c.reach / M_PER_DEG_LAT
+    let latMax = c.originLat + c.reach / M_PER_DEG_LAT
+    let lonMin = c.originLon - c.reach / mPerLon
+    let lonMax = c.originLon + c.reach / mPerLon
+    let bbox = bboxStr(latMin, lonMin, latMax, lonMax)
+
+    var bH: Vec<f64> = Vec.new()
+    var bStart: Vec<i64> = Vec.new()
+    var bLen: Vec<i64> = Vec.new()
+    var bPtX: Vec<f64> = Vec.new()
+    var bPtZ: Vec<f64> = Vec.new()
+    var bRoof: Vec<u8> = Vec.new()
+    var bRoofH: Vec<f64> = Vec.new()
+    var bBase: Vec<f64> = Vec.new()
+    scanBuildings(bbox, latMin, lonMin, latMax, lonMax, c.originLat, c.originLon, mPerLon, bH, bStart, bLen, bPtX, bPtZ, bRoof, bRoofH)
+    // The rescan has to reproduce the section it is replacing before it is
+    // allowed to add to it. A different count means OSM moved under the cache,
+    // and the terrain and cover sections about to be copied across came from the
+    // world as it was, not as it is.
+    if bH.len != c.bCount {
+        print("refusing to write: rescan found " + bH.len.toString() + " buildings, the asset holds " + c.bCount.toString())
+        return
+    }
+    for i in 0..bH.len {
+        bBase.push(0.0)
+    }
+    mergeParts(bbox, latMin, lonMin, latMax, lonMax, c.originLat, c.originLon, mPerLon, bH, bBase, bStart, bLen, bPtX, bPtZ, bRoof, bRoofH)
+
+    // Where the building section starts: everything before it is fixed-size or
+    // sized by a field already parsed.
+    var head = 8 + 4 + 4 + c.name.len + 12
+    head = head + 16 + c.demN * c.demN * 4
+    head = head + 16 + c.coverN * c.coverN
+
+    var buf = ""
+    for i in 0..8 {
+        buf.push(MAGIC[i])
+    }
+    putI32(buf, VERSION)
+    for i in 12..head {
+        buf.push(src[i])
+    }
+    putI32(buf, bH.len)
+    for i in 0..bH.len {
+        putCm(buf, bH[i])
+        putI32(buf, bLen[i])
+        let st = bStart[i]
+        for k in 0..bLen[i] {
+            putCm(buf, bPtX[st + k])
+            putCm(buf, bPtZ[st + k])
+        }
+    }
+    // Bridges, byte for byte.
+    for i in c.bodyEnd..c.bridgeEnd {
+        buf.push(src[i])
+    }
+    putRoofs(buf, bRoof, bRoofH, bBase)
+    match writeFile(path, buf) {
+        Ok(nbytes) => {
+            print("rewrote " + path + " (" + (nbytes / 1024).toString() + " KiB, version " + VERSION.toString() + ")")
+        }
+        Err(_e) => {
+            print("could not write " + path)
+        }
+    }
+}
+
 fn updateBridges(path: string) {
     let Result.Ok(src) = readFile(path) else {
         print("cannot read " + path)
@@ -1113,6 +1568,10 @@ fn updateBridges(path: string) {
         buf.push(src[i])
     }
     putBridges(buf, br)
+    // The roof section sits after the bridges, so a new bridge section of a
+    // different length moves it. Written back out from what was parsed rather
+    // than copied byte-wise for that reason.
+    putRoofs(buf, c.bRoof, c.bRoofH, c.bBase)
     match writeFile(path, buf) {
         Ok(nbytes) => {
             print("rewrote " + path + " (" + (nbytes / 1024).toString() + " KiB, version " + VERSION.toString() + ")")

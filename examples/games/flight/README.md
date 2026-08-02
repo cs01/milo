@@ -56,10 +56,62 @@ flat-shaded places.
 Each map is finite and the flight is not, so the world reflects at the edges
 rather than wrapping — a mirror is continuous at the seam, a wrap is a cliff.
 
+You do not get to fly out there, though. A blue lattice stands at the boundary,
+fading in about two kilometres out, and inside the last 1.5 km the aircraft turns
+itself back — hard once you are clearly leaving, not at all when you are merely
+flying along the edge. Past that there is a position cap you cannot cross at all,
+so the reflected copy of the city is scenery on the horizon rather than a place
+you can end up lost in. Like the ground and the ceiling, it is a push, never a
+fail state.
+
+**The ceiling is measured from the highest point on the map**, a clear kilometre
+over it, and not from the ground under the aircraft. A ceiling that follows the
+terrain sinks with it: over the Grand Canyon floor it sat below the rim and over
+the Yosemite valley floor below the top of El Capitan, so a climb out of either
+one hit an invisible lid partway up the wall it was trying to clear.
+
 Terrain is NASA SRTM (public domain); buildings and land cover are ©
 OpenStreetMap contributors under the [ODbL](https://www.openstreetmap.org/copyright)
 — see [`cities/README.md`](cities/README.md), and for how to build an asset for
 anywhere else.
+
+## The buildings are the buildings
+
+OSM models a tall building twice: once as a `building` footprint with a single
+height, and again as a set of `building:part` slabs, each with its own outline,
+`height` and `min_height`. Only the first was ever read, so every tower was one
+extruded box — the Empire State Building a featureless slab, Salesforce Tower a
+cylinder with a flat lid.
+
+Both layers are loaded now, and where parts stand in a footprint the footprint is
+dropped: the two describe the same structure at different detail, and keeping
+both leaves the coarse slab z-fighting the fine one all the way up. The Empire
+State Building comes back as its eight setbacks (20 m, 75, 90, 115, 255, 290,
+310, 330) under a pyramidal mast to 443 m; Salesforce Tower gets its taper.
+Manhattan gained 15,318 parts, San Francisco 1267, Honolulu 1133.
+
+`roof:shape` is read with them — pyramidal, dome, hipped and gabled are built as
+geometry, everything else is flat. That is what makes the Transamerica Pyramid a
+pyramid rather than a box tagged 260 m.
+
+The near field of the terrain is drawn at half tile size, out to about a
+kilometre. A 110 m quad is coarser than the 30 m data under it, which is
+invisible over open country and ruinous on anything small: Alcatraz is 500 m by
+300 m, so the whole island was five quads by three and came out a pancake. Where
+the fine mesh meets the coarse one its boundary midpoints are snapped to the
+average of their neighbours — exactly what the coarse edge interpolates — so the
+seam cannot crack.
+
+Named waterfalls have water. The course is traced down the terrain from the lip
+in the steepest downhill direction until the ground flattens, which finds the
+same chute the real water found: Yosemite Falls comes out as a 633 m drop against
+a real 739, and lands in a dome of spray.
+
+Suspension bridges have cables — main span, back-stays and hangers — because the
+cable IS the bridge. A crossing longer than 900 m of water needing more than 45 m
+of clearance is taken as a suspension span even when OSM does not say so: the Bay
+Bridge carries no `bridge:structure` tag at all and was drawing as three
+kilometres of grey ribbon with nothing holding it up.
 
 Over a real place, **the landmark is the target**: a column of light stands on it,
 and flying over the circle on the ground at any height and any heading collects

@@ -128,6 +128,11 @@ pub struct Mark {
     // parallel Vec<bool> + Vec<f64> the checklist would have to keep in step.
     found: bool,
     took: f64, // seconds from becoming the target to being reached
+    // Width in metres of the waterfall that falls here, or zero. A named fall
+    // with no water in it is the one landmark that reads as missing rather than
+    // as low detail: the terrain grid records the cliff and nothing else, so
+    // Yosemite Falls was a blank granite face with a beam standing on it.
+    fall: f64,
 }
 
 // Every list below is this long. Five is short enough to hold in your head and
@@ -139,7 +144,14 @@ pub let MARKS_PER_REGION: i64 = 5
 // field on Mark meant editing twenty-five struct literals.
 fn mk(name: string, x: f64, z: f64, fact: string): Mark {
     return Mark {
-        name: name, x: x, z: z, fact: fact, found: false, took: 0.0
+        name: name, x: x, z: z, fact: fact, found: false, took: 0.0, fall: 0.0
+    }
+}
+
+// A landmark that is a waterfall. `wide` is the width of the water at the lip.
+fn mkFall(name: string, x: f64, z: f64, fact: string, wide: f64): Mark {
+    return Mark {
+        name: name, x: x, z: z, fact: fact, found: false, took: 0.0, fall: wide
     }
 }
 
@@ -183,10 +195,10 @@ pub fn marksFor(cityName: &string): Vec<Mark> {
     // you go and look at, and a granite dome is a better subject than most
     // buildings. Only the nouns change.
     if cityName == "Yosemite Valley" {
-        m.push(mk("YOSEMITE FALLS", 0.0 - 343.0, 1291.0, "739 m in three drops, the tallest in North America."))
+        m.push(mkFall("YOSEMITE FALLS", 0.0 - 343.0, 1291.0, "739 m in three drops, the tallest in North America.", 26.0))
         m.push(mk("HALF DOME", 5264.0, 111.0, "Never split in half. A glacier took one face away."))
         m.push(mk("GLACIER POINT", 1769.0, 0.0 - 1948.0, "975 m straight down to the valley floor."))
-        m.push(mk("BRIDALVEIL FALL", 0.0 - 4745.0, 0.0 - 3161.0, "189 m. In a light wind it blows sideways and never lands."))
+        m.push(mkFall("BRIDALVEIL FALL", 0.0 - 4745.0, 0.0 - 3161.0, "189 m. In a light wind it blows sideways and never lands.", 14.0))
         m.push(mk("EL CAPITAN", 0.0 - 3952.0, 0.0 - 1225.0, "900 m of unbroken granite, the largest such face on Earth."))
         return m
     }
@@ -318,6 +330,12 @@ pub struct World {
     banner: f64,
     hint: f64,
     offCourse: f64, // 0 on the course line, 1 at the corridor wall
+    fence: f64, // 0 well inside the map, 1 against the boundary
+    skipHeld: bool, // the skip key was already down last frame
+    lastFind: bool, // this orbit is the tour's last, and signs the region off
+    // Where the boundary wall stands for THIS place, as a half-extent. Derived
+    // from the map and its tour together — see `computeFence`.
+    fenceLim: f64,
 }
 
 // Smooth value noise — the same hash-based field the mining game uses, so the
@@ -572,8 +590,13 @@ pub fn worldIn(seed: i64, places: Vec<City>, easy: bool): World {
         banner: 3.0,
         hint: 8.0,
         offCourse: 0.0,
+        fence: 0.0,
+        fenceLim: 0.0,
+        skipHeld: false,
+        lastFind: false,
     }
     w.marks = marksFor(w.city.name)
+    computeFence(w)
     w.plane.y = heightAt(w.city, 0.0, 0.0) + 320.0
     spawnAt(w)
     // Hoops only over invented country. Over a real place the landmarks are the
@@ -693,6 +716,7 @@ pub fn stepPlace(w: &mut World, dir: i64) {
     }
     // The tour belongs to the place, so it is rebuilt whenever the place moves.
     w.marks = marksFor(w.city.name)
+    computeFence(w)
     w.markIdx = 0
     w.markName = ""
     w.markFound = 0
@@ -831,6 +855,14 @@ pub let MARK_REACH: f64 = 320.0
 // degrees a fixed rate happened to cover.
 pub let SHOW_LEN: f64 = 8.0
 
+// How long the orbit takes to ease back into the chase pose at its end, and how
+// long the region sign-off holds on screen before the place changes. A skipped
+// shot is wound down to the first of these, which is the shortest clock that
+// still lands the camera home smoothly.
+pub let SHOW_EASE: f64 = 1.6
+
+pub let SIGNOFF: f64 = 3.2
+
 // The opening survey.
 pub let INTRO_LEN: f64 = 9.0
 
@@ -922,6 +954,140 @@ fn autoSteer(w: &mut World, dt: f64) {
     w.plane.roll = w.plane.roll + (bank - w.plane.roll) * Math.minF64(1.0, dt * 1.4)
 }
 
+// How high you may fly. Two rules, the higher of the two wins:
+//   - 900 m over whatever is directly under you, so there is always sky to climb
+//     into wherever you happen to be
+//   - a clear kilometre over the highest point in the whole map
+//
+// The second rule is the one that matters over terrain with relief. A ceiling
+// measured only from the ground beneath sinks with the ground: over the Grand
+// Canyon floor it sat a few hundred metres BELOW the rim, and over the Yosemite
+// valley floor below the top of El Capitan, so climbing out of either one hit an
+// invisible lid partway up the wall you were trying to get above.
+fn ceilingY(w: &World, ground: f64): f64 {
+    var top = ground + 900.0
+    if w.city.loaded {
+        let overMap = w.city.topMax + 1200.0
+        if overMap > top {
+            top = overMap
+        }
+    }
+    return top
+}
+
+// The map edge. Outside it the terrain is a mirrored copy of the inside
+// (foldIn), which is continuous but is also the same city over again — flying
+// out there is how you end up over a second Manhattan with no landmarks in it.
+// So the boundary is a wall: it shows itself, it turns you back, and it caps
+// your position. Never a fail state, the same as the ground and the ceiling.
+pub let FENCE_SOFT: f64 = 1500.0 // starts turning you this far inside the cap
+
+pub let FENCE_HARD: f64 = 300.0 // and the cap is this far inside the data edge
+
+// Where the wall stands, as a half-extent, for this place and its tour.
+//
+// Inside the data edge by FENCE_HARD — unless a landmark sits out there, in
+// which case the wall moves out to clear it. The Brooklyn Bridge is 5778 m from
+// the middle of a Manhattan asset that only reaches 6000, so a fixed 300 m
+// margin fenced off the last landmark of the tour and the region could not be
+// finished. A boundary that can make the game unwinnable is a worse bug than the
+// one it was added to fix, so the tour wins and the margin gives.
+//
+// Never past the data edge itself: out there the terrain is a mirrored copy, and
+// a landmark you collect over a reflection is not the landmark.
+fn computeFence(w: &mut World) {
+    if !w.city.loaded || w.city.reach <= 0.0 {
+        w.fenceLim = 0.0
+        return
+    }
+    var lim = w.city.reach - FENCE_HARD
+    for i in 0..w.marks.len {
+        // Half the collection radius past the landmark, so it can be flown OVER
+        // rather than only just touched from the side of it.
+        let need = Math.maxF64(Math.abs(w.marks[i].x), Math.abs(w.marks[i].z)) + MARK_REACH * 0.5
+        if need > lim {
+            lim = need
+        }
+    }
+    w.fenceLim = Math.minF64(lim, w.city.reach - 60.0)
+}
+
+pub fn fenceK(v: f64, lim: f64): f64 {
+    let soft = lim - FENCE_SOFT
+    let d = Math.abs(v)
+    if d <= soft {
+        return 0.0
+    }
+    return Math.clampF64((d - soft) / FENCE_SOFT, 0.0, 1.0)
+}
+
+fn fence(w: &mut World, dt: f64) {
+    if !w.city.loaded || w.fenceLim <= 0.0 {
+        w.fence = 0.0
+        return
+    }
+    let lim = w.fenceLim
+    let kx = fenceK(w.plane.x, lim)
+    let kz = fenceK(w.plane.z, lim)
+    let k = Math.maxF64(kx, kz)
+    w.fence = k
+    if k <= 0.0 {
+        return
+    }
+    // Inward normal of whichever walls are close, weighted by how close each is,
+    // so a corner turns you diagonally rather than into the other wall.
+    var inX = 0.0
+    var inZ = 0.0
+    if kx > 0.0 {
+        inX = kx
+        if w.plane.x > 0.0 {
+            inX = 0.0 - kx
+        }
+    }
+    if kz > 0.0 {
+        inZ = kz
+        if w.plane.z > 0.0 {
+            inZ = 0.0 - kz
+        }
+    }
+    let want = Math.atan2(inX, inZ)
+    let diff = wrapPi(want - w.plane.yaw)
+    // How much of the aircraft's heading is pointed OUT of the map. Flying along
+    // the edge, or already turning back, is not leaving — correcting it anyway is
+    // the invisible hand on the stick this game took out of the ring course.
+    let n = Math.sqrt(inX * inX + inZ * inZ)
+    var head = 0.0
+    if n > 0.0001 {
+        head = 0.0 - (Math.sin(w.plane.yaw) * inX + Math.cos(w.plane.yaw) * inZ) / n
+    }
+    head = Math.clampF64(head, 0.0, 1.0)
+    // Quadratic, so the first touch of the wall is barely perceptible and it only
+    // becomes a hand on the stick once you are clearly leaving.
+    var assist = k * k * (0.15 + 0.85 * head)
+    // Off entirely on top of the landmark being sought. Half the tours have one
+    // out near the edge, and a wall that steers you off the thing it is standing
+    // behind is the same unwinnable game as a wall in front of it. The position
+    // cap below still holds, so this cannot let anyone out of the map.
+    if w.marks.len > 0 && w.markIdx < w.marks.len {
+        let mdx = w.plane.x - w.marks[w.markIdx].x
+        let mdz = w.plane.z - w.marks[w.markIdx].z
+        let md = Math.sqrt(mdx * mdx + mdz * mdz)
+        let BUBBLE = MARK_REACH + 700.0
+        if md < BUBBLE {
+            assist = assist * Math.clampF64(md / BUBBLE, 0.0, 1.0)
+        }
+    }
+    w.plane.yaw = w.plane.yaw + Math.clampF64(diff * 2.0, 0.0 - 1.6, 1.6) * assist * dt
+    // Bank into the turn: the correction has to read as the aircraft flying
+    // rather than as the world rotating underneath it.
+    w.plane.roll = w.plane.roll + Math.clampF64(diff, 0.0 - 1.0, 1.0) * assist * 2.4 * dt
+    w.plane.roll = Math.clampF64(w.plane.roll, 0.0 - 1.10, 1.10)
+    // The turn on its own loses to a player who holds the nose at the wall, so
+    // the position is capped as well. At the cap you slide along it and turn.
+    w.plane.x = Math.clampF64(w.plane.x, 0.0 - lim, lim)
+    w.plane.z = Math.clampF64(w.plane.z, 0.0 - lim, lim)
+}
+
 fn corridor(w: &mut World, dt: f64) {
     // The autopilot already keeps the aircraft on the line; a second steering
     // force fighting it would only make the turns wobble.
@@ -1003,6 +1169,14 @@ fn corridor(w: &mut World, dt: f64) {
 //
 // Only ever raises, so one forward pass is enough: lifting the camera for a
 // sample near the subject cannot re-block a sample further out.
+// How far out a camera may go. Zero over invented country, which has no edge.
+fn camLimit(w: &World): f64 {
+    if !w.city.loaded || w.fenceLim <= 0.0 {
+        return 0.0
+    }
+    return w.fenceLim - 40.0
+}
+
 fn orbitHeight(w: &World, ox: f64, oz: f64, mx: f64, mz: f64, ly: f64): f64 {
     var oy = ly + 320.0
     let under = solidAt(w.city, ox, oz, 40.0) + 150.0
@@ -1043,6 +1217,15 @@ fn orbitCamera(w: &mut World) {
         rad = Math.minF64((oy - ly) / SLOPE, 2400.0)
         ox = mx + Math.sin(w.showAngle) * rad
         oz = mz + Math.cos(w.showAngle) * rad
+        oy = orbitHeight(w, ox, oz, mx, mz, ly)
+    }
+    // Same fence the survey respects: Pearl Harbor sits 540 m from Honolulu's
+    // western edge, and a 2.4 km orbit around it is otherwise half over the
+    // mirrored copy of the island.
+    let camLim = camLimit(w)
+    if camLim > 0.0 {
+        ox = Math.clampF64(ox, 0.0 - camLim, camLim)
+        oz = Math.clampF64(oz, 0.0 - camLim, camLim)
         oy = orbitHeight(w, ox, oz, mx, mz, ly)
     }
     let oyaw = Math.atan2(mx - ox, mz - oz)
@@ -1109,12 +1292,29 @@ fn introCamera(w: &mut World) {
     // the camera and the haze finishes inside that, so a survey from three
     // kilometres up looks at fog.
     let rad = 2200.0 + (58.0 - 2200.0) * e2
-    let alt = ground + 1050.0 + ((w.plane.y + 20.0) - (ground + 1050.0)) * e2
+    var alt = ground + 1050.0 + ((w.plane.y + 20.0) - (ground + 1050.0)) * e2
     // Behind the aircraft is where the sweep has to finish, so it is measured
     // backwards from there — three quarters of a turn, arriving exactly on it.
     let ang = (w.plane.yaw + PI) - (1.0 - e) * TAU * 0.75
-    let ox = w.plane.x + Math.sin(ang) * rad
-    let oz = w.plane.z + Math.cos(ang) * rad
+    var ox = w.plane.x + Math.sin(ang) * rad
+    var oz = w.plane.z + Math.cos(ang) * rad
+    // Held inside the boundary. A survey that swings out over the mirrored copy
+    // of the map opens the game on the one view the fence exists to prevent.
+    let camLim = camLimit(w)
+    if camLim > 0.0 {
+        ox = Math.clampF64(ox, 0.0 - camLim, camLim)
+        oz = Math.clampF64(oz, 0.0 - camLim, camLim)
+    }
+    // And above the rock. The survey circles at a fixed height over the ground
+    // under the AIRCRAFT, which in a valley is a height well inside the walls
+    // either side of it — in Yosemite the opening sweep spent a third of its arc
+    // inside the granite, looking at the back of it. Same two constraints the
+    // arrival orbit already solves, eased out as the shot settles into the chase
+    // pose so it does not lift the camera the player is about to fly with.
+    let clear = orbitHeight(w, ox, oz, w.plane.x, w.plane.z, w.plane.y)
+    if clear > alt {
+        alt = alt + (clear - alt) * (1.0 - e2)
+    }
     w.cam.x = ox
     w.cam.y = alt
     w.cam.z = oz
@@ -1209,11 +1409,29 @@ pub fn worldUpdate(w: &mut World, dt: f64, inRoll: f64, inPitch: f64, boost: boo
     // Nothing else in the simulation advances, so a landmark cannot be collected
     // while another is being shown.
     if w.showT > 0.0 {
+        // Space cuts the shot short. Not a hard cut: the orbit already eases back
+        // into the chase pose over its last SHOW_EASE seconds, so a skip winds
+        // the clock down to exactly that and the camera flies home rather than
+        // teleporting. Held down, it is one press per shot — the key has to be
+        // released before it can skip the next one.
+        if boost && !w.skipHeld && w.showT > SHOW_EASE {
+            w.showT = SHOW_EASE
+        }
+        w.skipHeld = boost
         w.showT = w.showT - dt
         // One full revolution over the length of the shot, whatever that length
         // is, so the subject is seen from every side and the sweep ends where it
         // started instead of stopping wherever a fixed rate had got to.
         w.showAngle = w.showAngle + dt * TAU / w.showLen
+        // The last landmark of a region signs the region off on the SAME orbit,
+        // rather than starting a second one. Two orbits back to back — one for
+        // the landmark, one for the region — is eight seconds of the world
+        // turning under you, and the cut between them lands on the one frame
+        // where nothing else has moved.
+        if w.lastFind && !w.regionDone && w.showT <= SIGNOFF {
+            w.regionDone = true
+            w.flash = Math.maxF64(w.flash, 0.9)
+        }
         orbitCamera(w)
         updateSparks(w, dt)
         if w.showT <= 0.0 {
@@ -1221,14 +1439,7 @@ pub fn worldUpdate(w: &mut World, dt: f64, inRoll: f64, inPitch: f64, boost: boo
                 // The sign-off has played: ask the caller for the next region.
                 w.evPlaceDone = true
                 w.regionDone = false
-            } else if w.markFound >= w.marks.len {
-                // Last one. Hold the camera on it for a shorter second lap while
-                // the region is signed off, rather than cutting to a banner over
-                // a chase view of nothing in particular.
-                w.regionDone = true
-                w.showT = 4.0
-                w.showLen = 4.0
-                w.flash = Math.maxF64(w.flash, 0.9)
+                w.lastFind = false
             } else {
                 advanceMark(w)
                 placeMarkRing(w)
@@ -1311,9 +1522,18 @@ pub fn worldUpdate(w: &mut World, dt: f64, inRoll: f64, inPitch: f64, boost: boo
             w.plane.pitch = w.plane.pitch * 0.85
         }
     }
-    if w.plane.y > ground + 900.0 {
-        w.plane.y = ground + 900.0
+    let ceil = ceilingY(w, ground)
+    if w.plane.y > ceil {
+        // Pushed rather than clamped, and the nose is levelled the same way the
+        // floor levels a dive. A hard clamp on y with the nose still up flies the
+        // aircraft along an invisible sheet of glass at full climb attitude.
+        w.plane.y = w.plane.y + (ceil - w.plane.y) * Math.minF64(1.0, dt * 7.0)
+        if w.plane.pitch > 0.0 {
+            w.plane.pitch = w.plane.pitch * 0.85
+        }
     }
+
+    fence(w, dt)
 
     // chase camera, trailing and slightly above
     let back = 58.0 + w.boostBlend * 22.0
@@ -1541,6 +1761,12 @@ fn clearRing(w: &mut World, i: i64) {
     if w.city.loaded {
         w.showT = SHOW_LEN
         w.showLen = SHOW_LEN
+        // The tour's last landmark carries the region sign-off as well, so its
+        // shot runs long enough to hold both cards.
+        w.lastFind = w.markFound + 1 >= w.marks.len
+        if w.lastFind {
+            w.showT = SHOW_LEN + SIGNOFF
+        }
         w.showIdx = w.markIdx
         // Start the sweep exactly where the player is standing, not at due north.
         w.showAngle = Math.atan2(w.cam.x - w.marks[w.markIdx].x, w.cam.z - w.marks[w.markIdx].z)

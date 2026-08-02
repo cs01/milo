@@ -36,7 +36,7 @@ from "std/fs" import {
 }
 from "./render3d" import {
     drawWorld, drawHud, drawGuide, drawMarkGuide, drawMarkBeam, drawSpeedLines,
-    drawChecklist, drawFound
+    drawChecklist, drawFound, drawFence
 }
 
 pub extern fn fopen(path: *u8, mode: *u8): *u8
@@ -275,6 +275,7 @@ pub fn main(): i32 {
             }
             drawSpeedLines(c, w)
             drawGuide(c, w, view)
+            drawFence(c, w, view)
             drawMarkBeam(c, w, view)
             drawMarkGuide(c, w, view)
             drawChecklist(c, w)

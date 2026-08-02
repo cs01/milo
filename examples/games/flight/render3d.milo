@@ -27,10 +27,11 @@ from "./textures" import {
 }
 from "./world3d" import {
     World, Trail, Theme, nextTheme, heightAt, coverAt, blockOf, foldIn, unfold, TILE, VIEW_TILES, TAU, MARK_REACH,
-    fmtTime
+    fmtTime, fenceK, FENCE_SOFT
 }
 from "./city" import {
-    City, COVER_URBAN, COVER_PARK, COVER_SAND, COVER_WATER, BUILDING_MARGIN, cityCellX, cityCellZ, cityOrthoLocal
+    City, COVER_URBAN, COVER_PARK, COVER_SAND, COVER_WATER, BUILDING_MARGIN, cityCellX, cityCellZ, cityOrthoLocal,
+    cityRoofKind, cityRoofHeight, cityBase, ROOF_FLAT, ROOF_PYRAMIDAL, ROOF_DOME, ROOF_HIPPED, ROOF_GABLED
 }
 
 // Sky gradient plus a sun disc, painted before anything else. There is no depth
@@ -258,6 +259,10 @@ pub fn applyWeather(s: &mut Scene, a: Theme, b: Theme, mix: f64) {
 }
 
 // How many tiles are on the perimeter of ring `r` (ring 0 is the single centre).
+// How many rings of the near field are drawn at half tile size. Nine rings is
+// about a kilometre, which is the range at which a 110 m quad starts to show.
+pub let FINE_RINGS: i64 = 9
+
 pub fn ringCount(r: i64): i64 {
     if r == 0 {
         return 1
@@ -425,6 +430,14 @@ pub struct Corners {
     n: i64,
     baseX: i64,
     baseZ: i64,
+    // Grid spacing and the index of the centre, so one cache type serves both the
+    // coarse grid and the half-size one drawn over the near field.
+    tile: f64,
+    half: i64,
+    // The two grid lines where this mesh butts onto a coarser one, in the same
+    // units as baseX/baseZ. Equal (or hi < lo) on a mesh with no such boundary.
+    snapLo: i64,
+    snapHi: i64,
     ok: Vec<bool>,
     h: Vec<f64>,
     lt: Vec<f64>,
@@ -434,12 +447,16 @@ pub struct Corners {
     tw: Vec<f64>,
 }
 
-fn cornersNew(baseX: i64, baseZ: i64): Corners {
-    let n = 2 * VIEW_TILES + 2
+fn cornersNew(baseX: i64, baseZ: i64, tile: f64, half: i64, snapLo: i64, snapHi: i64): Corners {
+    let n = 2 * half + 2
     return Corners {
         n: n,
         baseX: baseX,
         baseZ: baseZ,
+        tile: tile,
+        half: half,
+        snapLo: snapLo,
+        snapHi: snapHi,
         ok: Vec.filled(n * n, false),
         h: Vec.filled(n * n, 0.0),
         lt: Vec.filled(n * n, 0.0),
@@ -453,9 +470,27 @@ fn cornersNew(baseX: i64, baseZ: i64): Corners {
 fn cornerAt(cc: &mut Corners, s: &Scene, w: &World, ix: i64, iz: i64): Corner {
     let i = iz * cc.n + ix
     if !cc.ok[i] {
-        let x = ((cc.baseX + ix - VIEW_TILES) as f64) * TILE
-        let z = ((cc.baseZ + iz - VIEW_TILES) as f64) * TILE
-        let h = surfaceAt(w.city, x, z, w.time)
+        let x = ((cc.baseX + ix - cc.half) as f64) * cc.tile
+        let z = ((cc.baseZ + iz - cc.half) as f64) * cc.tile
+        var h = surfaceAt(w.city, x, z, w.time)
+        // Where the fine grid meets the coarse one, a fine corner sitting halfway
+        // along a coarse edge has no vertex to match on the other side: the coarse
+        // quad interpolates straight across it, and wherever the ground does not,
+        // the two edges part company and you see daylight through the seam. Snapped
+        // to the average of its two neighbours, which is exactly what the coarse
+        // edge does, the crack cannot open. Only the boundary ring is affected;
+        // everywhere else the fine mesh follows the terrain.
+        if cc.snapHi > cc.snapLo {
+            let ax = ix - cc.half
+            let az = iz - cc.half
+            let onZ = az == cc.snapLo || az == cc.snapHi
+            let onX = ax == cc.snapLo || ax == cc.snapHi
+            if onZ && ax % 2 != 0 {
+                h = (surfaceAt(w.city, x - cc.tile, z, w.time) + surfaceAt(w.city, x + cc.tile, z, w.time)) * 0.5
+            } else if onX && az % 2 != 0 {
+                h = (surfaceAt(w.city, x, z - cc.tile, w.time) + surfaceAt(w.city, x, z + cc.tile, w.time)) * 0.5
+            }
+        }
         let nrm = normalAt(w.city, x, z, w.time)
         let slope = 1.0 - nrm.y
         var col = themedSmooth(w.theme, h, slope)
@@ -678,7 +713,16 @@ pub fn drawWorld(c: &mut Canvas, s: &mut Scene, w: &World, ground: &Texture, ski
     let baseZ = Math.floor(w.cam.z / TILE) as i64
     let fwdX = Math.sin(w.cam.yaw)
     let fwdZ = Math.cos(w.cam.yaw)
-    var cc = cornersNew(baseX, baseZ)
+    var cc = cornersNew(baseX, baseZ, TILE, VIEW_TILES, 1, 0)
+    // The near field is drawn at half the tile size. A 110 m quad is coarser than
+    // the 30 m terrain data under it, which is invisible over open country and
+    // ruinous on anything small: Alcatraz is 500 m by 300 m, so the whole island
+    // — cliffs, quarry face, the drop to the water — was five quads by three, and
+    // came out a pancake. Only the rings you are on top of are subdivided, so this
+    // costs about two thousand extra triangles and nothing at range.
+    let fineLo = 0 - 2 * (FINE_RINGS - 1)
+    let fineHi = 2 * FINE_RINGS
+    var fc = cornersNew(baseX * 2, baseZ * 2, TILE * 0.5, FINE_RINGS * 2, fineLo, fineHi)
 
     // Front to back, in rings out from the camera tile. The z-buffer then rejects
     // hidden pixels with a single compare instead of shading them — near terrain
@@ -707,6 +751,24 @@ pub fn drawWorld(c: &mut Canvas, s: &mut Scene, w: &World, ground: &Texture, ski
             // Four shared grid corners, each carrying its own height, light and
             // colour. Neighbouring quads read the SAME corner, so no attribute
             // can jump across a quad edge — this is what removes the grid.
+            if ring < FINE_RINGS {
+                // Four sub-quads off the half-size grid. Its corners at even
+                // indices are the coarse corners, so the two meshes agree
+                // everywhere except the boundary midpoints, which snap.
+                let hx = tx * 2 - baseX * 2 + FINE_RINGS * 2
+                let hz = tz * 2 - baseZ * 2 + FINE_RINGS * 2
+                let half = TILE * 0.5
+                for sz in 0..2 {
+                    for sx in 0..2 {
+                        let f00 = cornerAt(fc, s, w, hx + sx, hz + sz)
+                        let f10 = cornerAt(fc, s, w, hx + sx + 1, hz + sz)
+                        let f01 = cornerAt(fc, s, w, hx + sx, hz + sz + 1)
+                        let f11 = cornerAt(fc, s, w, hx + sx + 1, hz + sz + 1)
+                        terrainQuad(s, w, v, ground, f00, f10, f01, f11, x0 + (sx as f64) * half, z0 + (sz as f64) * half, half, ring)
+                    }
+                }
+                continue
+            }
             let ix = tx - baseX + VIEW_TILES
             let iz = tz - baseZ + VIEW_TILES
             let k00 = cornerAt(cc, s, w, ix, iz)
@@ -714,88 +776,14 @@ pub fn drawWorld(c: &mut Canvas, s: &mut Scene, w: &World, ground: &Texture, ski
             let k01 = cornerAt(cc, s, w, ix, iz + 1)
             let k11 = cornerAt(cc, s, w, ix + 1, iz + 1)
 
-            // UVs are world position over a fixed period, so the detail texture
-            // tiles across the terrain with no per-quad seams.
-            let uvs = 1.0 / 34.0
-            let u0 = x0 * uvs
-            let v0 = z0 * uvs
-            let u1 = x1 * uvs
-            let v1 = z1 * uvs
-            // The detail texture dissolves over the last rings before the draw
-            // switches to the untextured path, so by the time it switches the
-            // texture is contributing nothing and there is nothing to see. It
-            // used to stop dead, drawing a line across the ground at a fixed
-            // distance — the texture cutoff was visible as a texture cutoff.
-            var texFade = 1.0
-            if ring >= 7 {
-                texFade = (11.0 - (ring as f64)) / 4.0
-                if texFade < 0.0 {
-                    texFade = 0.0
-                }
-            }
-            if w.city.orthoLoaded {
-                // The photograph IS the ground colour, so the vertex carries
-                // white and the texel supplies the albedo whole — the palette in
-                // `cornerAt` is bypassed rather than multiplied, or the picture
-                // comes out tinted by the guess it replaces.
-                //
-                // UV runs 0..1 across the mapped span; outside it the sampler's
-                // mirrored addressing folds on the same period as the terrain.
-                //
-                // v is measured from the NORTH edge, because a PNG's first row is
-                // its top and +z is north. Running it from -reach upward hung the
-                // photograph on the terrain upside down: the map still read as a
-                // city, hills still had relief (that comes from the DEM), and the
-                // only place the flip was visible was the water — which is how
-                // San Francisco ended up with the Sunset District's street grid
-                // painted across the Golden Gate strait.
-                let os = 1.0 / (w.city.reach * 2.0)
-                let ou0 = (x0 + w.city.reach) * os
-                let ov0 = (w.city.reach - z0) * os
-                let ou1 = (x1 + w.city.reach) * os
-                let ov1 = (w.city.reach - z1) * os
-                // Mostly flat light. An aerial photograph already contains the
-                // sun that lit it, shadows included; a second Lambert term on
-                // top shades everything twice and the hills go to mud. A little
-                // is kept so relief still reads.
-                let la = 0.72 + 0.28 * k00.lt
-                let lb = 0.72 + 0.28 * k10.lt
-                let ld = 0.72 + 0.28 * k01.lt
-                let le = 0.72 + 0.28 * k11.lt
-                let oa = vtxC(x0, k00.h, z0, ou0, ov0, la, 1.0, 1.0, 1.0, 1.0)
-                let ob = vtxC(x1, k10.h, z0, ou1, ov0, lb, 1.0, 1.0, 1.0, 1.0)
-                let od = vtxC(x0, k01.h, z1, ou0, ov1, ld, 1.0, 1.0, 1.0, 1.0)
-                let oe = vtxC(x1, k11.h, z1, ou1, ov1, le, 1.0, 1.0, 1.0, 1.0)
-                // No distance cutoff: the far field is exactly what the drape is
-                // for, and dropping to flat colour out there would put the
-                // diorama back at the horizon.
-                triangleV(s, v, w.city.ortho, oa, od, ob, 1.0, 1.0, 1.0)
-                triangleV(s, v, w.city.ortho, ob, od, oe, 1.0, 1.0, 1.0)
-                continue
-            }
-            let a = vtxC(x0, k00.h, z0, u0, v0, k00.lt, k00.r, k00.g, k00.b, k00.tw * texFade)
-            let b = vtxC(x1, k10.h, z0, u1, v0, k10.lt, k10.r, k10.g, k10.b, k10.tw * texFade)
-            let d = vtxC(x0, k01.h, z1, u0, v1, k01.lt, k01.r, k01.g, k01.b, k01.tw * texFade)
-            let e = vtxC(x1, k11.h, z1, u1, v1, k11.lt, k11.r, k11.g, k11.b, k11.tw * texFade)
-            // Texture only what is close enough to see. Distant quads are many,
-            // small, and deep in fog — they take the cheaper untextured path,
-            // which still interpolates colour so the far field stays smooth.
-            // The cutoff sits past where the fog has taken most of the contrast
-            // out; nearer than that it was a visible line across the ground
-            // where the detail simply stopped.
-            if ring < 11 {
-                triangleV(s, v, ground, a, d, b, 1.0, 1.0, 1.0)
-                triangleV(s, v, ground, b, d, e, 1.0, 1.0, 1.0)
-            } else {
-                triangleG(s, v, a, d, b, 1.0, 1.0, 1.0)
-                triangleG(s, v, b, d, e, 1.0, 1.0, 1.0)
-            }
+            terrainQuad(s, w, v, ground, k00, k10, k01, k11, x0, z0, TILE, ring)
         }
     }
 
     if w.city.loaded {
         drawCity(s, w, v, facade)
         drawBridges(s, w, v)
+        drawFalls(s, w, v)
     } else {
         drawProps(s, w, v, baseX, baseZ)
     }
@@ -809,6 +797,204 @@ pub fn drawWorld(c: &mut Canvas, s: &mut Scene, w: &World, ground: &Texture, ski
     drawPlane(c, s, w, v, skin)
     drawBirds(c, s, w, v)
     drawSparks(c, w, v)
+}
+
+// One terrain quad, from four corners that were sampled once and shared with its
+// neighbours. Split out of the grid walk because the near field is drawn at half
+// this tile size — see FINE_RINGS.
+fn terrainQuad(s: &mut Scene, w: &World, v: &View, ground: &Texture, k00: &Corner, k10: &Corner, k01: &Corner, k11: &Corner, x0: f64, z0: f64, tile: f64, ring: i64) {
+    let x1 = x0 + tile
+    let z1 = z0 + tile
+    // UVs are world position over a fixed period, so the detail texture
+    // tiles across the terrain with no per-quad seams.
+    let uvs = 1.0 / 34.0
+    let u0 = x0 * uvs
+    let v0 = z0 * uvs
+    let u1 = x1 * uvs
+    let v1 = z1 * uvs
+    // The detail texture dissolves over the last rings before the draw
+    // switches to the untextured path, so by the time it switches the
+    // texture is contributing nothing and there is nothing to see. It
+    // used to stop dead, drawing a line across the ground at a fixed
+    // distance — the texture cutoff was visible as a texture cutoff.
+    var texFade = 1.0
+    if ring >= 7 {
+        texFade = (11.0 - (ring as f64)) / 4.0
+        if texFade < 0.0 {
+            texFade = 0.0
+        }
+    }
+    if w.city.orthoLoaded {
+        // The photograph IS the ground colour, so the vertex carries
+        // white and the texel supplies the albedo whole — the palette in
+        // `cornerAt` is bypassed rather than multiplied, or the picture
+        // comes out tinted by the guess it replaces.
+        //
+        // UV runs 0..1 across the mapped span; outside it the sampler's
+        // mirrored addressing folds on the same period as the terrain.
+        //
+        // v is measured from the NORTH edge, because a PNG's first row is
+        // its top and +z is north. Running it from -reach upward hung the
+        // photograph on the terrain upside down: the map still read as a
+        // city, hills still had relief (that comes from the DEM), and the
+        // only place the flip was visible was the water — which is how
+        // San Francisco ended up with the Sunset District's street grid
+        // painted across the Golden Gate strait.
+        let os = 1.0 / (w.city.reach * 2.0)
+        let ou0 = (x0 + w.city.reach) * os
+        let ov0 = (w.city.reach - z0) * os
+        let ou1 = (x1 + w.city.reach) * os
+        let ov1 = (w.city.reach - z1) * os
+        // Mostly flat light. An aerial photograph already contains the
+        // sun that lit it, shadows included; a second Lambert term on
+        // top shades everything twice and the hills go to mud. A little
+        // is kept so relief still reads.
+        let la = 0.72 + 0.28 * k00.lt
+        let lb = 0.72 + 0.28 * k10.lt
+        let ld = 0.72 + 0.28 * k01.lt
+        let le = 0.72 + 0.28 * k11.lt
+        let oa = vtxC(x0, k00.h, z0, ou0, ov0, la, 1.0, 1.0, 1.0, 1.0)
+        let ob = vtxC(x1, k10.h, z0, ou1, ov0, lb, 1.0, 1.0, 1.0, 1.0)
+        let od = vtxC(x0, k01.h, z1, ou0, ov1, ld, 1.0, 1.0, 1.0, 1.0)
+        let oe = vtxC(x1, k11.h, z1, ou1, ov1, le, 1.0, 1.0, 1.0, 1.0)
+        // No distance cutoff: the far field is exactly what the drape is
+        // for, and dropping to flat colour out there would put the
+        // diorama back at the horizon.
+        triangleV(s, v, w.city.ortho, oa, od, ob, 1.0, 1.0, 1.0)
+        triangleV(s, v, w.city.ortho, ob, od, oe, 1.0, 1.0, 1.0)
+        return
+    }
+    let a = vtxC(x0, k00.h, z0, u0, v0, k00.lt, k00.r, k00.g, k00.b, k00.tw * texFade)
+    let b = vtxC(x1, k10.h, z0, u1, v0, k10.lt, k10.r, k10.g, k10.b, k10.tw * texFade)
+    let d = vtxC(x0, k01.h, z1, u0, v1, k01.lt, k01.r, k01.g, k01.b, k01.tw * texFade)
+    let e = vtxC(x1, k11.h, z1, u1, v1, k11.lt, k11.r, k11.g, k11.b, k11.tw * texFade)
+    // Texture only what is close enough to see. Distant quads are many,
+    // small, and deep in fog — they take the cheaper untextured path,
+    // which still interpolates colour so the far field stays smooth.
+    // The cutoff sits past where the fog has taken most of the contrast
+    // out; nearer than that it was a visible line across the ground
+    // where the detail simply stopped.
+    if ring < 11 {
+        triangleV(s, v, ground, a, d, b, 1.0, 1.0, 1.0)
+        triangleV(s, v, ground, b, d, e, 1.0, 1.0, 1.0)
+    } else {
+        triangleG(s, v, a, d, b, 1.0, 1.0, 1.0)
+        triangleG(s, v, b, d, e, 1.0, 1.0, 1.0)
+    }
+}
+
+// Waterfalls. A named fall is a landmark you fly to look at, and the terrain
+// grid has no idea there is water on the cliff — SRTM records the rock and
+// nothing else, so Yosemite Falls was blank granite with a beam standing on it.
+//
+// The course is traced down the terrain rather than stored: from the lip, step
+// in the steepest downhill direction until the ground goes flat. That finds the
+// same chute the real water found, follows whatever the DEM says the cliff does,
+// and costs no asset data at all.
+fn drawFalls(s: &mut Scene, w: &World, v: &View) {
+    if !w.city.loaded {
+        return
+    }
+    for i in 0..w.marks.len {
+        if w.marks[i].fall <= 0.0 {
+            continue
+        }
+        let fx = w.marks[i].x
+        let fz = w.marks[i].z
+        let dx = fx - w.cam.x
+        let dz = fz - w.cam.z
+        if dx * dx + dz * dz > v.far * v.far {
+            continue
+        }
+        fallRibbon(s, w, v, fx, fz, w.marks[i].fall)
+    }
+}
+
+fn fallRibbon(s: &mut Scene, w: &World, v: &View, lipX: f64, lipZ: f64, wide: f64) {
+    let STEP = 14.0
+    let MAX = 90
+    var cx = lipX
+    var cz = lipZ
+    var cy = heightAt(w.city, cx, cz)
+    // Walk to the lip first: the landmark is pinned at the fall, not necessarily
+    // at the exact metre the water leaves the rock.
+    var prevX = cx
+    var prevZ = cz
+    var prevY = cy
+    var have = false
+    var drop = 0.0
+    for step in 0..MAX {
+        // Steepest descent, sampled as a gradient over one step either side.
+        let hx0 = heightAt(w.city, cx - STEP, cz)
+        let hx1 = heightAt(w.city, cx + STEP, cz)
+        let hz0 = heightAt(w.city, cx, cz - STEP)
+        let hz1 = heightAt(w.city, cx, cz + STEP)
+        var gx = hx0 - hx1
+        var gz = hz0 - hz1
+        let gl = Math.sqrt(gx * gx + gz * gz)
+        if gl < 0.0001 {
+            break
+        }
+        gx = gx / gl
+        gz = gz / gl
+        let nx = cx + gx * STEP
+        let nz = cz + gz * STEP
+        let ny = heightAt(w.city, nx, nz)
+        let fell = cy - ny
+        // The chute has ended: the ground here is as flat as the valley floor.
+        if fell < 0.9 && drop > 40.0 {
+            break
+        }
+        drop = drop + Math.maxF64(fell, 0.0)
+        if have {
+            // Water narrows at the lip and spreads toward the plunge pool, and
+            // it stands a little off the rock so the two do not z-fight.
+            let t = (step as f64) / (MAX as f64)
+            let halfW = wide * (0.5 + 1.4 * t) * 0.5
+            let px = 0.0 - gz * halfW
+            let pz = gx * halfW
+            let lift = 2.0
+            let a0 = v3(prevX - px, prevY + lift, prevZ - pz)
+            let a1 = v3(prevX + px, prevY + lift, prevZ + pz)
+            let b1 = v3(cx + px, cy + lift, cz + pz)
+            let b0 = v3(cx - px, cy + lift, cz - pz)
+            // Brightness rides the speed of the drop: a sheer plunge is white
+            // spray, a run over slabs is greener water.
+            let white = Math.clampF64(fell / 6.0, 0.25, 1.0)
+            let col = rgb(0.55 + 0.55 * white, 0.72 + 0.45 * white, 0.88 + 0.35 * white)
+            triangle(s, v, a0, a1, b1, col)
+            triangle(s, v, a0, b1, b0, col)
+            triangle(s, v, b1, a1, a0, col)
+            triangle(s, v, b0, b1, a0, col)
+        }
+        prevX = cx
+        prevZ = cz
+        prevY = cy
+        have = true
+        cx = nx
+        cz = nz
+        cy = ny
+    }
+    if drop < 20.0 {
+        return
+    }
+    // The plunge pool: a low dome of spray where the water lands, which is what
+    // tells you from the air that the white line on the cliff is falling.
+    let mist = rgb(1.35, 1.45, 1.55)
+    let rad = wide * 1.6
+    let base = cy + 3.0
+    for ring in 0..3 {
+        let rr = rad * (0.5 + 0.28 * (ring as f64))
+        let hh = base + rad * (0.5 - 0.13 * (ring as f64)) + Math.sin(w.time * 1.7 + (ring as f64)) * 2.0
+        var prev = v3(cx + rr, hh, cz)
+        for k in 1..9 {
+            let a = (k as f64) / 8.0 * TAU
+            let p = v3(cx + Math.cos(a) * rr, hh, cz + Math.sin(a) * rr)
+            triangle(s, v, v3(cx, base, cz), prev, p, mist)
+            triangle(s, v, v3(cx, base, cz), p, prev, mist)
+            prev = p
+        }
+    }
 }
 
 // ── bridges ───────────────────────────────────────────────────────────────────
@@ -890,6 +1076,7 @@ fn bridgeSpan(s: &mut Scene, w: &World, v: &View, b: i64, kx: i64, kz: i64, reac
     if w.city.brTower[b] > 0.0 {
         bridgeTower(s, w, v, b, kx, kz, reach, w.city.brTowerA[b], col)
         bridgeTower(s, w, v, b, kx, kz, reach, w.city.brTowerB[b], col)
+        bridgeCables(s, w, v, b, kx, kz, reach, col)
     }
 }
 
@@ -939,20 +1126,27 @@ fn deckSegment(s: &mut Scene, v: &View, ax: f64, ay: f64, az: f64, bx: f64, by: 
     triangle(s, v, c0, d1, c1, under)
 }
 
-// A tapered tower rising from the water to well above the deck. No cables: a
-// suspension cable is a metre thick and two kilometres long, which is a shape
-// this rasteriser would spend a thousand triangles on and still show as a line.
-fn bridgeTower(s: &mut Scene, w: &World, v: &View, b: i64, kx: i64, kz: i64, reach: f64, t: f64, col: &Rgb) {
+// Where the arc-length fraction `t` along a way lands: deck position, and the
+// way's own direction there. Cables, hangers and towers all have to agree about
+// this or the cable comes down beside the tower it is supposed to hang from.
+struct ArcPoint {
+    x: f64,
+    y: f64,
+    z: f64,
+    ex: f64, // unit direction along the way, in the xz plane
+    ez: f64,
+}
+
+fn arcPoint(w: &World, b: i64, t: f64): ArcPoint {
     let n = w.city.brLen[b]
     let start = w.city.brStart[b]
-    // Walk the way to the arc-length fraction `t`.
     var total = 0.0
     for k in 1..n {
         let ddx = w.city.brPtX[start + k] - w.city.brPtX[start + k - 1]
         let ddz = w.city.brPtZ[start + k] - w.city.brPtZ[start + k - 1]
         total = total + Math.sqrt(ddx * ddx + ddz * ddz)
     }
-    let want = total * t
+    let want = total * Math.clampF64(t, 0.0, 1.0)
     var acc = 0.0
     var idx = 0
     var frac = 0.0
@@ -969,15 +1163,148 @@ fn bridgeTower(s: &mut Scene, w: &World, v: &View, b: i64, kx: i64, kz: i64, rea
         }
         acc = acc + seg
     }
-    if frac < 0.0 {
-        frac = 0.0
+    frac = Math.clampF64(frac, 0.0, 1.0)
+    let ex = w.city.brPtX[start + idx + 1] - w.city.brPtX[start + idx]
+    let ez = w.city.brPtZ[start + idx + 1] - w.city.brPtZ[start + idx]
+    var el = Math.sqrt(ex * ex + ez * ez)
+    if el < 0.0001 {
+        el = 1.0
     }
-    if frac > 1.0 {
-        frac = 1.0
+    return ArcPoint {
+        x: w.city.brPtX[start + idx] + ex * frac,
+        y: w.city.brPtY[start + idx] + (w.city.brPtY[start + idx + 1] - w.city.brPtY[start + idx]) * frac,
+        z: w.city.brPtZ[start + idx] + ez * frac,
+        ex: ex / el,
+        ez: ez / el,
     }
-    let lx = w.city.brPtX[start + idx] + (w.city.brPtX[start + idx + 1] - w.city.brPtX[start + idx]) * frac
-    let lz = w.city.brPtZ[start + idx] + (w.city.brPtZ[start + idx + 1] - w.city.brPtZ[start + idx]) * frac
-    let dy = w.city.brPtY[start + idx] + (w.city.brPtY[start + idx + 1] - w.city.brPtY[start + idx]) * frac
+}
+
+// A cable, drawn as two ribbons crossed at right angles rather than as a tube.
+// A suspension cable is under a metre thick and a kilometre long: a tube spends
+// a dozen triangles a segment to show one line of pixels, and a single flat
+// ribbon disappears whenever you look along its plane. The cross costs four
+// triangles and is visible from everywhere.
+fn cableSeg(s: &mut Scene, v: &View, ax: f64, ay: f64, az: f64, bx: f64, by: f64, bz: f64, rad: f64, col: &Rgb) {
+    var dx = bx - ax
+    var dz = bz - az
+    let dl = Math.sqrt(dx * dx + dz * dz)
+    if dl < 0.0001 {
+        return
+    }
+    let px = 0.0 - (dz / dl) * rad
+    let pz = (dx / dl) * rad
+    let h0 = v3(ax - px, ay, az - pz)
+    let h1 = v3(ax + px, ay, az + pz)
+    let h2 = v3(bx + px, by, bz + pz)
+    let h3 = v3(bx - px, by, bz - pz)
+    triangle(s, v, h0, h1, h2, col)
+    triangle(s, v, h0, h2, h3, col)
+    triangle(s, v, h2, h1, h0, col)
+    triangle(s, v, h3, h2, h0, col)
+    let w0 = v3(ax, ay - rad, az)
+    let w1 = v3(ax, ay + rad, az)
+    let w2 = v3(bx, by + rad, bz)
+    let w3 = v3(bx, by - rad, bz)
+    triangle(s, v, w0, w1, w2, col)
+    triangle(s, v, w0, w2, w3, col)
+    triangle(s, v, w2, w1, w0, col)
+    triangle(s, v, w3, w2, w0, col)
+}
+
+// The cables, which are what makes a suspension bridge one. The main span hangs
+// between the tower tops and comes down to deck level at midspan; the side spans
+// run from each tower top to an anchorage at the end of the way; hangers drop
+// from the cable to the deck. Sine rather than a true catenary — over a span
+// this long the two differ by less than the cable is thick.
+fn bridgeCables(s: &mut Scene, w: &World, v: &View, b: i64, kx: i64, kz: i64, reach: f64, col: &Rgb) {
+    let ta = w.city.brTowerA[b]
+    let tb = w.city.brTowerB[b]
+    if tb - ta < 0.02 {
+        return
+    }
+    let hw = w.city.brHalfW[b]
+    let towerH = w.city.brTower[b]
+    let pa = arcPoint(w, b, ta)
+    let pb = arcPoint(w, b, tb)
+    let topA = pa.y + towerH
+    let topB = pb.y + towerH
+    let rad = Math.maxF64(hw * 0.055, 0.9)
+    let cableCol = col.scale(0.82)
+    // Lateral offset of the two cables: the same one the tower legs stand on, so
+    // a cable lands on top of its tower and not beside it.
+    let offA = hw * 0.86
+
+    // Distance cull, once, off the middle of the span.
+    let midP = arcPoint(w, b, (ta + tb) * 0.5)
+    let mx = unfold(kx, midP.x, reach) - w.cam.x
+    let mz = unfold(kz, midP.z, reach) - w.cam.z
+    let d2 = mx * mx + mz * mz
+    if d2 > (v.far + 1400.0) * (v.far + 1400.0) {
+        return
+    }
+    // Hangers are hundreds of thin verticals; they earn their triangles only
+    // close in, where you can see them as separate lines.
+    let hangers = d2 < 3500.0 * 3500.0
+
+    let SEGS = 26
+    for side in 0..2 {
+        var sign = 1.0
+        if side == 1 {
+            sign = 0.0 - 1.0
+        }
+        var prevX = 0.0
+        var prevY = 0.0
+        var prevZ = 0.0
+        var have = false
+        // Anchorage to tower to tower to anchorage, in one walk over the way.
+        for i in 0..SEGS + 1 {
+            let u = (i as f64) / (SEGS as f64)
+            let t = ta + (tb - ta) * u
+            let p = arcPoint(w, b, t)
+            // Sag: the cable leaves each tower top and touches the deck at the
+            // middle of the span.
+            let straight = topA + (topB - topA) * u
+            let deck = p.y + 2.0
+            let sag = Math.sin(3.14159265358979 * u)
+            let cy = straight - (straight - deck) * sag
+            let ox = 0.0 - p.ez * hw * 0.86 * sign
+            let oz = p.ex * hw * 0.86 * sign
+            let cx = unfold(kx, p.x, reach) + ox
+            let cz = unfold(kz, p.z, reach) + oz
+            if have {
+                cableSeg(s, v, prevX, prevY, prevZ, cx, cy, cz, rad, cableCol)
+            }
+            if hangers && i > 0 && i < SEGS && cy - p.y > 6.0 {
+                cableSeg(s, v, cx, cy, cz, cx, p.y, cz, rad * 0.45, cableCol)
+            }
+            prevX = cx
+            prevY = cy
+            prevZ = cz
+            have = true
+        }
+        // Back-stays: tower top down to where the way meets land, which is where
+        // a real anchorage sits.
+        let endA = arcPoint(w, b, 0.0)
+        let endB = arcPoint(w, b, 1.0)
+        let axx = unfold(kx, endA.x, reach) - endA.ez * offA * sign
+        let azz = unfold(kz, endA.z, reach) + endA.ex * offA * sign
+        let bxx = unfold(kx, endB.x, reach) - endB.ez * offA * sign
+        let bzz = unfold(kz, endB.z, reach) + endB.ex * offA * sign
+        let taX = unfold(kx, pa.x, reach) - pa.ez * offA * sign
+        let taZ = unfold(kz, pa.z, reach) + pa.ex * offA * sign
+        let tbX = unfold(kx, pb.x, reach) - pb.ez * offA * sign
+        let tbZ = unfold(kz, pb.z, reach) + pb.ex * offA * sign
+        cableSeg(s, v, taX, topA, taZ, axx, endA.y + 3.0, azz, rad, cableCol)
+        cableSeg(s, v, tbX, topB, tbZ, bxx, endB.y + 3.0, bzz, rad, cableCol)
+    }
+}
+
+// A tapered tower rising from the water to well above the deck.
+fn bridgeTower(s: &mut Scene, w: &World, v: &View, b: i64, kx: i64, kz: i64, reach: f64, t: f64, col: &Rgb) {
+    let p = arcPoint(w, b, t)
+    let lx = p.x
+    let lz = p.z
+    let dy = p.y
     let x = unfold(kx, lx, reach)
     let z = unfold(kz, lz, reach)
     let dxc = x - w.cam.x
@@ -991,20 +1318,21 @@ fn bridgeTower(s: &mut Scene, w: &World, v: &View, b: i64, kx: i64, kz: i64, rea
     // road does is a post balanced on a ribbon.
     let base = Math.minF64(0.0, heightAt(w.city, x, z))
     // Two legs, one either side of the roadway, which is what carries the cables.
-    let ex = w.city.brPtX[start + idx + 1] - w.city.brPtX[start + idx]
-    let ez = w.city.brPtZ[start + idx + 1] - w.city.brPtZ[start + idx]
-    let el = Math.sqrt(ex * ex + ez * ez)
-    if el < 0.01 {
-        return
-    }
-    let ox = 0.0 - (ez / el) * hw * 0.86
-    let oz = (ex / el) * hw * 0.86
+    let ox = 0.0 - p.ez * hw * 0.86
+    let oz = p.ex * hw * 0.86
     let leg = Math.maxF64(hw * 0.28, 3.2)
     box3(s, v, x + ox, base, top, z + oz, leg, col.scale(0.9))
     box3(s, v, x - ox, base, top, z - oz, leg, col.scale(0.9))
-    // The cross brace above the roadway, which is the shape that says "tower"
-    // from a distance rather than "two posts".
+    // Cross braces: one above the roadway and two more up the tower, which is
+    // the ladder shape that reads as a suspension tower rather than two posts.
     box3(s, v, x, top - leg * 2.4, top, z, hw * 1.05, col.scale(0.82))
+    let above = top - dy
+    if above > 40.0 {
+        let b1 = dy + above * 0.30
+        let b2 = dy + above * 0.66
+        box3(s, v, x, b1, b1 + leg * 1.3, z, hw * 1.0, col.scale(0.80))
+        box3(s, v, x, b2, b2 + leg * 1.3, z, hw * 1.0, col.scale(0.80))
+    }
 }
 
 // Ground detail. Each terrain tile near the aircraft may carry one prop, placed
@@ -1271,8 +1599,16 @@ fn prism(s: &mut Scene, w: &World, v: &View, facade: &Texture, px: &mut Vec<f64>
     let start = w.city.bStart[b]
     // One ground height for the whole footprint. Sampling per corner would sink
     // a corner of every building on a San Francisco hill into the road.
-    let y0 = heightAt(w.city, midX, midZ) - 2.0
-    let y1 = y0 + w.city.bHeight[b] + 2.0
+    let ground = heightAt(w.city, midX, midZ)
+    // A part of a building starts partway up it (OSM `min_height`), and the two
+    // metres of sink that keep a ground-founded footprint out of the road would
+    // hang a setback two metres into the slab below it.
+    let base = cityBase(w.city, b)
+    var y0 = ground - 2.0
+    if base > 0.1 {
+        y0 = ground + base
+    }
+    let y1 = ground + w.city.bHeight[b]
 
     // Concrete, brick and glass, picked off the building id so a given building
     // is always the same colour and a street is not uniform.
@@ -1366,12 +1702,148 @@ fn prism(s: &mut Scene, w: &World, v: &View, facade: &Texture, px: &mut Vec<f64>
         triangleV(s, v, facade, a0, b1, b0, col.r, col.g, col.b)
     }
 
-    // Roof, as a fan. Wound the opposite way round from the base ring, which is
-    // what makes it face up rather than down.
+    // Roof. Flat is a fan wound the opposite way round from the base ring, which
+    // is what makes it face up rather than down; a shaped roof is built on top of
+    // that ring instead. Shapes are dropped at LOD range — a pyramid four pixels
+    // tall and a flat top four pixels tall are the same four pixels.
     let roof = col.scale(shade(s, 0.0, 1.0, 0.0, 0.42) * 1.06)
-    let a = v3(px[0], y1, pz[0])
-    for i in 1..(m - 1) {
-        triangle(s, v, a, v3(px[i + 1], y1, pz[i + 1]), v3(px[i], y1, pz[i]), roof)
+    let kind = cityRoofKind(w.city, b)
+    var rh = cityRoofHeight(w.city, b)
+    // The roof eats into the height rather than sitting on top of it: OSM's
+    // `height` is to the tip of the pyramid, not to the eaves under it.
+    if rh > (y1 - y0) * 0.95 {
+        rh = (y1 - y0) * 0.95
+    }
+    if lod || kind == ROOF_FLAT || rh < 0.5 {
+        let a = v3(px[0], y1, pz[0])
+        for i in 1..(m - 1) {
+            triangle(s, v, a, v3(px[i + 1], y1, pz[i + 1]), v3(px[i], y1, pz[i]), roof)
+        }
+        return
+    }
+    shapedRoof(s, v, px, pz, m, y1 - rh, y1, kind, roof, col)
+}
+
+// The roof shapes OSM tags and this renderer builds, standing on the ring the
+// walls just finished at `yEave` and reaching `yTop`.
+//
+// Every one of them is the same construction: take the wall ring, make a second
+// ring above it — collapsed to a point, shrunk, or squashed onto a ridge line —
+// and skin between the two. That keeps the winding rule identical to the walls'
+// (ring point i, up, ring point j) so a mirrored copy of the map needs no
+// special case here either.
+fn shapedRoof(s: &mut Scene, v: &View, px: &Vec<f64>, pz: &Vec<f64>, m: i64, yEave: f64, yTop: f64, kind: u8, roof: &Rgb, col: &Rgb) {
+    // Centroid of the ring: the apex of a pyramid, the pole of a dome, and the
+    // point everything shrinks toward for a hipped roof.
+    var cx = 0.0
+    var cz = 0.0
+    for i in 0..m {
+        cx = cx + px[i]
+        cz = cz + pz[i]
+    }
+    cx = cx / (m as f64)
+    cz = cz / (m as f64)
+    let side = col.scale(shade(s, 0.7, 0.6, 0.0, 0.42) * 1.02)
+
+    if kind == ROOF_PYRAMIDAL {
+        let apex = v3(cx, yTop, cz)
+        for i in 0..m {
+            var j = i + 1
+            if j == m {
+                j = 0
+            }
+            triangle(s, v, v3(px[i], yEave, pz[i]), apex, v3(px[j], yEave, pz[j]), side)
+        }
+        return
+    }
+    if kind == ROOF_DOME {
+        // Three lifts of a quarter-circle profile, capped with a fan. More reads
+        // as a sphere from the air; fewer reads as a cone.
+        let LIFTS = 4
+        var prevK = 1.0
+        var prevY = yEave
+        for l in 1..LIFTS + 1 {
+            let t = (l as f64) / (LIFTS as f64)
+            // x = cos, y = sin of a quarter turn: the profile of a dome.
+            let k = Math.cos(t * 1.5707963)
+            let y = yEave + (yTop - yEave) * Math.sin(t * 1.5707963)
+            for i in 0..m {
+                var j = i + 1
+                if j == m {
+                    j = 0
+                }
+                let a0 = v3(cx + (px[i] - cx) * prevK, prevY, cz + (pz[i] - cz) * prevK)
+                let a1 = v3(cx + (px[i] - cx) * k, y, cz + (pz[i] - cz) * k)
+                let b1 = v3(cx + (px[j] - cx) * k, y, cz + (pz[j] - cz) * k)
+                let b0 = v3(cx + (px[j] - cx) * prevK, prevY, cz + (pz[j] - cz) * prevK)
+                triangle(s, v, a0, a1, b1, side)
+                triangle(s, v, a0, b1, b0, side)
+            }
+            prevK = k
+            prevY = y
+        }
+        return
+    }
+    if kind == ROOF_HIPPED {
+        // One inward step, then a flat cap: the shape of a hip roof seen from
+        // anywhere but a lawn.
+        let k = 0.45
+        for i in 0..m {
+            var j = i + 1
+            if j == m {
+                j = 0
+            }
+            let a0 = v3(px[i], yEave, pz[i])
+            let a1 = v3(cx + (px[i] - cx) * k, yTop, cz + (pz[i] - cz) * k)
+            let b1 = v3(cx + (px[j] - cx) * k, yTop, cz + (pz[j] - cz) * k)
+            let b0 = v3(px[j], yEave, pz[j])
+            triangle(s, v, a0, a1, b1, side)
+            triangle(s, v, a0, b1, b0, side)
+        }
+        let a = v3(cx + (px[0] - cx) * k, yTop, cz + (pz[0] - cz) * k)
+        for i in 1..(m - 1) {
+            triangle(s, v, a, v3(cx + (px[i + 1] - cx) * k, yTop, cz + (pz[i + 1] - cz) * k), v3(cx + (px[i] - cx) * k, yTop, cz + (pz[i] - cz) * k), roof)
+        }
+        return
+    }
+    // Gabled: a ridge over the long axis of the footprint. Each wall-top point
+    // rises to the nearest end of the ridge, which gives two slopes and two
+    // gable ends on anything rectangular and something sane on anything else.
+    var x0 = px[0]
+    var x1 = px[0]
+    var z0 = pz[0]
+    var z1 = pz[0]
+    for i in 1..m {
+        if px[i] < x0 {
+            x0 = px[i]
+        }
+        if px[i] > x1 {
+            x1 = px[i]
+        }
+        if pz[i] < z0 {
+            z0 = pz[i]
+        }
+        if pz[i] > z1 {
+            z1 = pz[i]
+        }
+    }
+    var alongX = true
+    if z1 - z0 > x1 - x0 {
+        alongX = false
+    }
+    for i in 0..m {
+        var j = i + 1
+        if j == m {
+            j = 0
+        }
+        var ri = v3(cx, yTop, pz[i])
+        var rj = v3(cx, yTop, pz[j])
+        if alongX {
+            ri = v3(px[i], yTop, cz)
+            rj = v3(px[j], yTop, cz)
+        }
+        triangle(s, v, v3(px[i], yEave, pz[i]), ri, rj, side)
+        triangle(s, v, v3(px[i], yEave, pz[i]), rj, v3(px[j], yEave, pz[j]), side)
     }
 }
 
@@ -1880,6 +2352,150 @@ pub fn drawMarkBeam(c: &mut Canvas, w: &World, v: &View) {
     }
 }
 
+// beamSeg with a width. A hairline lattice a kilometre off aliases into a dashed
+// mess exactly where it has to read as a wall, and the boundary has to be legible
+// before you reach it rather than once you are in it.
+fn fenceSeg(c: &mut Canvas, v: &View, a: &Vec3, b: &Vec3, wide: f64, r: f64, g: f64, bl: f64) {
+    var pa = a
+    var pb = b
+    if pa.z <= v.near && pb.z <= v.near {
+        return
+    }
+    if pa.z <= v.near {
+        pa = pa.lerp(pb, (v.near - pa.z) / (pb.z - pa.z))
+    }
+    if pb.z <= v.near {
+        pb = pb.lerp(pa, (v.near - pb.z) / (pa.z - pb.z))
+    }
+    thickLine(c, v.cx + pa.x * v.scale / pa.z, v.cy - pa.y * v.scale / pa.z, v.cx + pb.x * v.scale / pb.z, v.cy - pb.y * v.scale / pb.z, wide, r, g, bl)
+}
+
+// How much of the lattice survives the ground between it and the camera. Nothing
+// here is depth-tested, so without this the wall paints itself over every ridge
+// in front of it and reads as a decal on the hillside rather than as a thing
+// standing at the edge of the map.
+//
+// Never all the way to zero: a hard cut pops as the aircraft moves, and a ghost
+// of the boundary showing through a ridge is useful — it is where you may not go,
+// and you want to know that before you crest the ridge.
+fn fenceClear(w: &World, x: f64, y: f64, z: f64): f64 {
+    let STEPS = 6
+    var deepest = 0.0
+    for i in 1..STEPS {
+        let t = (i as f64) / (STEPS as f64)
+        let sx = w.cam.x + (x - w.cam.x) * t
+        let sy = w.cam.y + (y - w.cam.y) * t
+        let sz = w.cam.z + (z - w.cam.z) * t
+        let pen = heightAt(w.city, sx, sz) - sy
+        if pen > deepest {
+            deepest = pen
+        }
+    }
+    if deepest <= 0.0 {
+        return 1.0
+    }
+    return Math.maxF64(0.16, 1.0 - deepest / 60.0)
+}
+
+// The edge of the mapped area, drawn as a blue lattice standing on the terrain:
+// posts on the ground, rails at fixed heights. It fades in well before the
+// turn-back takes the stick, because an involuntary turn with no visible cause
+// is indistinguishable from a bug.
+//
+// Additive and depth-test-free, like the landmark beams — it reads as a
+// projection rather than as something built out there, which is what it is.
+pub fn drawFence(c: &mut Canvas, w: &World, v: &View) {
+    if !w.city.loaded || w.fenceLim <= 0.0 || w.showT > 0.0 || w.intro > 0.0 {
+        return
+    }
+    let lim = w.fenceLim
+    // Visible a little before it starts pushing, so it is a place you see coming.
+    let SHOW = FENCE_SOFT + 500.0
+    let wallTop = w.city.topMax + 1200.0
+    let SPAN = 2800.0
+    let STEP = 200.0
+    let RAIL_STEP = 300.0
+    let n = (SPAN / STEP) as i64
+    let levels = (wallTop / RAIL_STEP) as i64 + 1
+    // Walls 0/1 stand at x = ±lim, walls 2/3 at z = ±lim.
+    for wall in 0..4 {
+        var sign = 1.0
+        if wall % 2 == 1 {
+            sign = 0.0 - 1.0
+        }
+        let axisX = wall < 2
+        var along0 = w.cam.z
+        var outAxis = w.cam.x
+        if !axisX {
+            along0 = w.cam.x
+            outAxis = w.cam.z
+        }
+        let d = lim - sign * outAxis
+        if d > SHOW || d < 0.0 - 600.0 {
+            continue
+        }
+        let near = Math.clampF64(1.0 - d / SHOW, 0.0, 1.0)
+        let amp0 = 0.30 * near + 0.80 * near * near
+        if amp0 < 0.01 {
+            continue
+        }
+        var prevOk = false
+        var prevX = 0.0
+        var prevZ = 0.0
+        var prevBase = 0.0
+        for i in 0 - n..n + 1 {
+            let along = along0 + (i as f64) * STEP
+            var gx = sign * lim
+            var gz = along
+            if !axisX {
+                gx = along
+                gz = sign * lim
+            }
+            let base = heightAt(w.city, gx, gz)
+            // Fades out along the wall as well as toward it: the sampled span has
+            // to end in air rather than on a hard vertical cut.
+            let edge = 1.0 - Math.abs((i as f64) / (n as f64))
+            let amp = amp0 * edge * edge
+            if amp > 0.004 {
+                let LIFTS = 8
+                for seg in 0..LIFTS {
+                    let t0 = (seg as f64) / (LIFTS as f64)
+                    let t1 = ((seg + 1) as f64) / (LIFTS as f64)
+                    let y0 = base + (wallTop - base) * t0
+                    let y1 = base + (wallTop - base) * t1
+                    let up = (1.0 - t0) * (1.0 - t0)
+                    let e = amp * up * 1.5 * fenceClear(w, gx, (y0 + y1) * 0.5, gz)
+                    let a = toCamera(v, gx, y0, gz)
+                    let b = toCamera(v, gx, y1, gz)
+                    fenceSeg(c, v, a, b, 3.0, 0.16 * e, 0.62 * e, 2.10 * e)
+                }
+            }
+            if prevOk {
+                for l in 1..levels {
+                    let y = (l as f64) * RAIL_STEP
+                    // A rail below the terrain at either end would be a line
+                    // through the hillside.
+                    if y < base || y < prevBase {
+                        continue
+                    }
+                    let up = Math.clampF64(1.0 - y / wallTop, 0.0, 1.0)
+                    let e = amp0 * edge * edge * (0.30 + 0.70 * up) * 1.2 * fenceClear(w, (prevX + gx) * 0.5, y, (prevZ + gz) * 0.5)
+                    if e < 0.004 {
+                        continue
+                    }
+                    let a = toCamera(v, prevX, y, prevZ)
+                    let b = toCamera(v, gx, y, gz)
+                    fenceSeg(c, v, a, b, 2.4, 0.16 * e, 0.62 * e, 2.10 * e)
+                }
+            }
+            prevOk = true
+            prevX = gx
+            prevZ = gz
+            prevBase = base
+        }
+    }
+}
+
 // A circle drawn on the terrain, following it. Broken into dashes so it reads as
 // a marker and not as a road, and `spin` turns the dash pattern without moving
 // the circle.
@@ -2181,30 +2797,30 @@ pub fn drawFound(c: &mut Canvas, w: &World) {
     if k <= 0.01 {
         return
     }
-    // Centred in the space the checklist leaves, not on the screen. A fact line
-    // is up to ~690 px wide at this scale, so a screen-centred plate runs under
-    // the panel and the last three words of every fact are unreadable.
-    var cx = c.w / 2
-    if w.marks.len > 0 {
-        cx = (c.w - PANEL_W - 38) / 2
-    }
+    // A band along the top, and a short one. The orbit frames its subject in the
+    // middle of the screen, so anything tall anywhere near the centre covers the
+    // thing the shot exists to show — which is what a 174 px plate did at the
+    // bottom and a 5x title did wherever it sat. Centred in the space the
+    // checklist leaves rather than on the screen: a fact line is ~690 px wide
+    // here, and a screen-centred plate runs under the panel.
+    let cx = (c.w - PANEL_W - 38) / 2
     if w.regionDone {
-        cardBack(c, cx, 150, 330, textWidth(w.city.name, 5), k)
-        textCentered(c, cx, 176, w.city.name, 5, 2.2 * k, 1.85 * k, 0.70 * k)
-        textCentered(c, cx, 236, "ALL " + w.marks.len.toString() + " FOUND", 3, 0.70 * k, 1.70 * k, 1.05 * k)
+        cardBack(c, cx, 14, 132, textWidth(w.city.name, 4), k)
+        textCentered(c, cx, 30, w.city.name, 4, 2.2 * k, 1.85 * k, 0.70 * k)
+        textCentered(c, cx, 78, "ALL " + w.marks.len.toString() + " FOUND", 2, 0.70 * k, 1.70 * k, 1.05 * k)
         if w.nextName != "" {
-            textCentered(c, cx, 282, "NEXT UP  " + w.nextName, 2, 0.90 * k, 0.92 * k, 0.96 * k)
+            textCentered(c, cx, 104, "NEXT UP  " + w.nextName, 2, 0.90 * k, 0.92 * k, 0.96 * k)
         }
         return
     }
     // Indexed at each use rather than bound to a local: `let m = w.marks[i]`
     // would move a Mark out of a borrowed Vec, which is exactly the thing the
     // checker is there to stop.
-    cardBack(c, cx, 76, 250, Math.maxI64(textWidth(w.marks[w.showIdx].name, 5), textWidth(w.marks[w.showIdx].fact, 2)), k)
-    textCentered(c, cx, 92, "FOUND", 2, 0.40 * k, 0.90 * k, 1.70 * k)
-    textCentered(c, cx, 120, w.marks[w.showIdx].name, 5, 2.1 * k, 2.0 * k, 1.75 * k)
-    textCentered(c, cx, 180, w.marks[w.showIdx].fact, 2, 0.90 * k, 0.94 * k, 1.00 * k)
-    textCentered(c, cx, 218, fmtTime(w.marks[w.showIdx].took) + "     " + w.markFound.toString() + " OF " + w.marks.len.toString(), 3, 0.55 * k, 1.55 * k, 1.00 * k)
+    cardBack(c, cx, 14, 138, Math.maxI64(textWidth(w.marks[w.showIdx].name, 4), textWidth(w.marks[w.showIdx].fact, 2)), k)
+    textCentered(c, cx, 28, "FOUND", 2, 0.40 * k, 0.90 * k, 1.70 * k)
+    textCentered(c, cx, 52, w.marks[w.showIdx].name, 4, 2.1 * k, 2.0 * k, 1.75 * k)
+    textCentered(c, cx, 92, w.marks[w.showIdx].fact, 2, 0.90 * k, 0.94 * k, 1.00 * k)
+    textCentered(c, cx, 114, fmtTime(w.marks[w.showIdx].took) + "     " + w.markFound.toString() + " OF " + w.marks.len.toString(), 2, 0.55 * k, 1.55 * k, 1.00 * k)
 }
 
 pub fn drawHud(c: &mut Canvas, w: &World, _s: &Scene, _fps: i64) {

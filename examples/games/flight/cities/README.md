@@ -85,6 +85,16 @@ is the one number worth thinking about: cost grows with its square, and so does
 the number of buildings Overpass has to return. 2000 m over downtown San
 Francisco is ~15,600 buildings and a 1.3 MB asset.
 
+`--parts` re-derives the building layer alone — the cached OSM response plus a
+fresh `building:part` query — and splices it back in. Everything else in the file
+is copied byte for byte, and it refuses to write if the rescan does not reproduce
+the building count it is replacing:
+
+```bash
+milo run examples/games/flight/tools/fetchcity.milo -- \
+    --parts examples/games/flight/cities/sf.city
+```
+
 Downloads are cached under `.cache/city/`, so re-running to tweak the extent
 costs nothing but the reprojection. Delete that directory to force a refetch.
 The public Overpass instances shed load by refusing requests outright; the tool

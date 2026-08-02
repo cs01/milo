@@ -124,6 +124,8 @@ pub let SC_R: i64 = 21
 
 pub let SC_H: i64 = 11
 
+pub let SC_B: i64 = 5
+
 pub let SC_1: i64 = 30
 
 pub let SDL_MOUSEWHEEL: u32 = 0x403
@@ -165,6 +167,13 @@ pub struct Input {
     resetHeld: bool,
     help: bool,
     helpHeld: bool,
+    // Held, not edge-triggered: scrubbing a date wants key repeat, and an
+    // edge-triggered arrow key means tapping it four hundred times to cross a
+    // launch window.
+    scrubX: f64,
+    scrubY: f64,
+    snapBest: bool,
+    snapHeld: bool,
 }
 
 pub fn inputNew(): Input {
@@ -175,7 +184,8 @@ pub fn inputNew(): Input {
         warpUp: false, warpUpHeld: false, warpDown: false, warpDownHeld: false,
         nextFocus: false, focusHeld: false, plan: false, planHeld: false,
         execute: false, execHeld: false, reset: false, resetHeld: false,
-        help: false, helpHeld: false,
+        help: false, helpHeld: false, scrubX: 0.0, scrubY: 0.0,
+        snapBest: false, snapHeld: false,
     }
 }
 
@@ -243,5 +253,20 @@ pub fn pollInput(inp: &mut Input, ev: &mut [u8; 64], sx: f64, sy: f64, ox: f64, 
         inp.execute = edge(ks[SC_RETURN] != 0, inp.execHeld)
         inp.reset = edge(ks[SC_R] != 0, inp.resetHeld)
         inp.help = edge(ks[SC_H] != 0, inp.helpHeld)
+        inp.snapBest = edge(ks[SC_B] != 0, inp.snapHeld)
+        inp.scrubX = 0.0
+        inp.scrubY = 0.0
+        if ks[SC_LEFT] != 0 {
+            inp.scrubX = inp.scrubX - 1.0
+        }
+        if ks[SC_RIGHT] != 0 {
+            inp.scrubX = inp.scrubX + 1.0
+        }
+        if ks[SC_DOWN] != 0 {
+            inp.scrubY = inp.scrubY - 1.0
+        }
+        if ks[SC_UP] != 0 {
+            inp.scrubY = inp.scrubY + 1.0
+        }
     }
 }

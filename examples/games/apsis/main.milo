@@ -43,11 +43,10 @@ from "./ephem" import {
 }
 from "./world" import {
     World, worldNew, startMission, resetMission, replan, commitPlan, doCapture,
-    advanceWorld, buildPorkchop, porkDep, porkTof, say, currentCapture
+    advanceWorld, say, currentCapture, scrub, snapToBest, buildCurve, buildPreview
 }
 from "./render" import {
-    W, H, drawScene, drawHud, drawOutcome, drawPorkchop,
-    PORK_X, PORK_Y, PORK_W, PORK_H
+    W, H, drawScene, drawHud, drawOutcome
 }
 from "./mission" import {
     MISSION_COUNT
@@ -147,18 +146,11 @@ pub fn main(): i32 {
             }
         }
 
-        if w.showPork {
-            handlePorkchop(w, inp)
-        } else {
-            handleMap(w, inp, steps)
-            advanceWorld(w, dt)
-        }
+        handleMap(w, inp, steps)
+        advanceWorld(w, dt)
 
         drawScene(c, scene, w, texes)
         drawHud(c, w)
-        if w.showPork {
-            drawPorkchop(c, w, inp.mx, inp.my)
-        }
         drawOutcome(c, w)
         present(c, 0.30, 1.0)
         unsafe {
@@ -238,13 +230,16 @@ fn handleMap(w: &mut World, inp: &Input, steps: &Vec<f64>) {
     if inp.reset {
         resetMission(w)
     }
-    if inp.plan {
-        if !w.committed {
-            buildPorkchop(w, 96, 60)
-            w.showPork = true
-        } else {
-            say(w, "already under way — R to start over")
-        }
+    // Scrubbing. The step scales with the window so a short lunar window and a
+    // hundred-and-fifty-day Saturn window both cross in about the same number of
+    // seconds of holding the key.
+    if inp.scrubX != 0.0 || inp.scrubY != 0.0 {
+        let dayStep = w.missions[w.mission].windowSpan / 86400.0 / 120.0
+        let tofStep = w.missions[w.mission].nominalTof / 86400.0 / 120.0
+        scrub(w, inp.scrubX * dayStep, inp.scrubY * tofStep)
+    }
+    if inp.snapBest {
+        snapToBest(w)
     }
     if inp.execute {
         if w.won {
@@ -258,31 +253,12 @@ fn handleMap(w: &mut World, inp: &Input, steps: &Vec<f64>) {
                 if w.committed {
                     doCapture(w)
                 } else {
+                    // Commit runs the real solver first. Up to this point the
+                    // player has been steering a coarse preview; this is where
+                    // the shooting method earns the trajectory they were shown.
+                    replan(w)
                     commitPlan(w)
                 }
-            }
-        }
-    }
-}
-
-fn handlePorkchop(w: &mut World, inp: &Input) {
-    if inp.plan || inp.quit {
-        w.showPork = false
-        // ESC closes the plot rather than the game: quitting out of a menu by
-        // accident, in a game whose whole state is one plan, is unforgivable.
-        return
-    }
-    if inp.pressed && w.porkW > 0 {
-        let cw = PORK_W / (w.porkW as f64)
-        let ch = PORK_H / (w.porkH as f64)
-        if inp.mx >= PORK_X && inp.mx < PORK_X + PORK_W && inp.my >= PORK_Y && inp.my < PORK_Y + PORK_H {
-            let i = ((inp.mx - PORK_X) / cw) as i64
-            let j = w.porkH - 1 - (((inp.my - PORK_Y) / ch) as i64)
-            if i >= 0 && i < w.porkW && j >= 0 && j < w.porkH {
-                w.planDep = porkDep(w, i)
-                w.planTof = porkTof(w, j)
-                replan(w)
-                w.showPork = false
             }
         }
     }

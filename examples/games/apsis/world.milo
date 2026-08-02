@@ -78,11 +78,14 @@ pub struct World {
     won: bool,
     message: string,
     messageAge: f64,
-    showPork: bool,
-    porkGrid: Vec<f64>,
-    porkW: i64,
-    porkH: i64,
-    porkBest: f64,
+    // The live preview: a coarse trajectory redrawn as the player scrubs, plus
+    // the cost of every departure date at the current flight time.
+    preview: bool,
+    curve: Vec<f64>,
+    curveBest: f64,
+    curveWorst: f64,
+    curveBestI: i64,
+
 }
 
 fn emptyTrack(): Track {
@@ -132,7 +135,7 @@ pub fn worldNew(): World {
         committed: false, mccDone: false,
         captured: false, failed: false, won: false,
         message: "", messageAge: 0.0,
-        showPork: false, porkGrid: Vec.new(), porkW: 0, porkH: 0, porkBest: 0.0,
+        preview: false, curve: Vec.new(), curveBest: 0.0, curveWorst: 0.0, curveBestI: 0,
     }
     startMission(w, 0)
     return w
@@ -172,7 +175,11 @@ pub fn startMission(w: &mut World, idx: i64) {
     w.paused = true
     w.warp = 60.0
     w.focus = from
-    w.camDist = park * 8.0
+    // Frame the whole trip. Opening on the parking orbit is a beautiful shot of
+    // a planet and tells the player nothing about where they are going; the
+    // target and the transfer arc both have to be on screen from the first frame.
+    let reach = (ephemPos(w.e, to, t0 + tof) - ephemPos(w.e, from, t0)).len()
+    w.camDist = reach * 1.25
     // Open on the DAY side. The camera angle is arbitrary, but a first frame
     // showing an unlit planet looks like a bug in the lighting rather than like
     // night, and the terminator is the best thing on screen.
@@ -188,9 +195,9 @@ pub fn startMission(w: &mut World, idx: i64) {
     w.captured = false
     w.failed = false
     w.won = false
-    w.showPork = false
-    w.porkW = 0
-    say(w, w.missions[i].name.clone())
+    w.preview = false
+    buildCurve(w)
+    snapToBest(w)
 }
 
 pub fn resetMission(w: &mut World) {
@@ -496,82 +503,187 @@ fn fmtSpeed(v: f64): string {
 // burn — total mission cost, not just the part that is easy to compute, because
 // a cheap departure into a brutal arrival is the classic trap and a plot that
 // hides it would be teaching the wrong lesson.
-pub fn buildPorkchop(w: &mut World, cols: i64, rows: i64) {
+// What one (departure, flight time) pair costs, all in: the burn out of the
+// parking orbit plus the burn into the capture orbit at the far end.
+//
+// Departure alone is the number that is easy to compute and it is the wrong one
+// to show. A cheap departure into a brutal arrival is the classic trap — the
+// fast transfers to Venus and Mercury are exactly that — and a readout that
+// hides the second half would be teaching the opposite of the lesson.
+pub fn cellCost(w: &World, dep: f64, tof: f64): f64 {
     let m = w.mission
     let from = w.missions[m].from
     let to = w.missions[m].to
     let park = w.bodies[from].radius + w.missions[m].parkAlt
-    let capApo = w.bodies[to].radius + w.missions[m].captureApo
     let capPeri = w.bodies[to].radius + w.missions[m].captureAlt
-    let t0 = w.missions[m].windowOpen
-    let span = w.missions[m].windowSpan
-    let tofMid = w.missions[m].nominalTof
-    let tofLo = tofMid * 0.45
-    let tofHi = tofMid * 1.75
-    var grid: Vec<f64> = Vec.new()
-    var best = 1.0e30
-    var j = 0
-    while j < rows {
-        let tof = tofLo + (tofHi - tofLo) * (j as f64) / ((rows - 1) as f64)
-        var i = 0
-        while i < cols {
-            let dep = t0 + span * (i as f64) / ((cols - 1) as f64)
-            var cost = 1.0e30
-            if isLocalHop(w, m) {
-                // The ship's ACTUAL position at `dep` would mean integrating a
-                // parking orbit forward for every one of the five thousand cells
-                // in this grid. The burn point is a free choice anyway — the
-                // player waits for it, see `bestLocalBurn` — so the cell is
-                // priced at the standard injection geometry instead: leave from
-                // a quarter turn behind the target's direction, which is where a
-                // translunar injection actually happens.
-                let r2 = ephemPos(w.e, to, dep + tof) - ephemPos(w.e, from, dep + tof)
-                let nrm = planeContaining(r2)
-                let r1 = r2.norm().rotate(nrm, 0.0 - Math.pi() * 0.5).scale(park)
-                let sol = lambert(r1, r2, tof, w.e.mu[from], true)
-                if sol.ok {
-                    let circ = Math.sqrt(w.e.mu[from] / park)
-                    let tangent = nrm.cross(r1.norm()).norm().scale(circ)
-                    cost = (sol.v1 - tangent).len()
-                }
-            } else {
-                let sol = lambert(ephemPos(w.e, from, dep), ephemPos(w.e, to, dep + tof), tof, w.e.mu[SUN], true)
-                if sol.ok {
-                    let vinf = (sol.v1 - ephemVel(w.e, from, dep)).len()
-                    let vinfArr = (sol.v2 - ephemVel(w.e, to, dep + tof)).len()
-                    // Departure: the burn from the parking orbit onto that
-                    // escape speed. Arrival: the burn from the incoming
-                    // hyperbola onto the mission's capture ellipse. Both from
-                    // vis-viva, both at periapsis.
-                    let dvDep = Math.sqrt(vinf * vinf + 2.0 * w.e.mu[from] / park) - Math.sqrt(w.e.mu[from] / park)
-                    let aCap = (capPeri + capApo) * 0.5
-                    let vHyp = Math.sqrt(vinfArr * vinfArr + 2.0 * w.e.mu[to] / capPeri)
-                    let vEll = Math.sqrt(w.e.mu[to] * (2.0 / capPeri - 1.0 / aCap))
-                    cost = dvDep + (vHyp - vEll)
-                }
-            }
-            if cost < best {
-                best = cost
-            }
-            grid.push(cost)
-            i = i + 1
+    let capApo = w.bodies[to].radius + w.missions[m].captureApo
+    if isLocalHop(w, m) {
+        let r2 = ephemPos(w.e, to, dep + tof) - ephemPos(w.e, from, dep + tof)
+        let nrm = planeContaining(r2)
+        let r1 = r2.norm().rotate(nrm, 0.0 - Math.pi() * 0.5).scale(park)
+        let sol = lambert(r1, r2, tof, w.e.mu[from], true)
+        if !sol.ok {
+            return 1.0e30
         }
-        j = j + 1
+        // Priced as a SPEED change, not as a vector difference against a guessed
+        // burn direction. Where in the parking orbit the burn happens is not the
+        // player's problem — `bestLocalBurn` finds the point that lines the two
+        // up — so charging them for the misalignment of an arbitrary sample
+        // point is charging for the sampling. It read as 7.9 km/s for a lunar
+        // transfer that actually costs 3.2.
+        let circ = Math.sqrt(w.e.mu[from] / park)
+        var dvDep = sol.v1.len() - circ
+        if dvDep < 0.0 {
+            dvDep = 0.0 - dvDep
+        }
+        // Arrival speed relative to the MOON, in the same frame the Lambert was
+        // solved in. Both terms have to be geocentric: subtracting the Moon's
+        // heliocentric velocity from a geocentric arrival velocity is a 30 km/s
+        // error, and it showed up on screen as a lunar transfer costing 34 km/s.
+        let moonRel = ephemVel(w.e, to, dep + tof) - ephemVel(w.e, from, dep + tof)
+        let arrV = (sol.v2 - moonRel).len()
+        let aCap = (capPeri + capApo) * 0.5
+        let vHyp = Math.sqrt(arrV * arrV + 2.0 * w.e.mu[to] / capPeri)
+        let vEll = Math.sqrt(w.e.mu[to] * (2.0 / capPeri - 1.0 / aCap))
+        return dvDep + (vHyp - vEll)
     }
-    w.porkGrid = grid
-    w.porkW = cols
-    w.porkH = rows
-    w.porkBest = best
+    let sol = lambert(ephemPos(w.e, from, dep), ephemPos(w.e, to, dep + tof), tof, w.e.mu[SUN], true)
+    if !sol.ok {
+        return 1.0e30
+    }
+    let vinf = (sol.v1 - ephemVel(w.e, from, dep)).len()
+    let vinfArr = (sol.v2 - ephemVel(w.e, to, dep + tof)).len()
+    let dvDep = Math.sqrt(vinf * vinf + 2.0 * w.e.mu[from] / park) - Math.sqrt(w.e.mu[from] / park)
+    let aCap = (capPeri + capApo) * 0.5
+    let vHyp = Math.sqrt(vinfArr * vinfArr + 2.0 * w.e.mu[to] / capPeri)
+    let vEll = Math.sqrt(w.e.mu[to] * (2.0 / capPeri - 1.0 / aCap))
+    return dvDep + (vHyp - vEll)
 }
 
-// Departure date and flight time for a cell of the plot.
-pub fn porkDep(w: &World, i: i64): f64 {
-    let m = w.mission
-    return w.missions[m].windowOpen + w.missions[m].windowSpan * (i as f64) / ((w.porkW - 1) as f64)
+pub let CURVE_N: i64 = 240
+
+// The cost of every departure date at the current flight time, as a curve to
+// draw under the scrubber. Two hundred and forty Lambert solves, about a
+// millisecond, so it can be rebuilt every time the flight time changes.
+pub fn buildCurve(w: &mut World) {
+    var v: Vec<f64> = Vec.new()
+    var best = 1.0e30
+    var worst = 0.0
+    var bestI = 0
+    let t0 = w.missions[w.mission].windowOpen
+    let span = w.missions[w.mission].windowSpan
+    var i = 0
+    while i < CURVE_N {
+        let dep = t0 + span * (i as f64) / ((CURVE_N - 1) as f64)
+        let c = cellCost(w, dep, w.planTof)
+        if c < best {
+            best = c
+            bestI = i
+        }
+        if c < 1.0e29 && c > worst {
+            worst = c
+        }
+        v.push(c)
+        i = i + 1
+    }
+    w.curve = v
+    w.curveBest = best
+    w.curveWorst = worst
+    w.curveBestI = bestI
 }
 
-pub fn porkTof(w: &World, j: i64): f64 {
+// A cheap, honest preview of where the current plan actually goes.
+//
+// The full plan runs a shooting solver — hundreds of propagations — which is
+// milliseconds well spent once, and far too slow to redo on every frame while an
+// arrow key is held down. This skips the correction entirely and flies the
+// coarse patched-conic burn through the real integrator, so what the player sees
+// while scrubbing is a true trajectory that simply has not been corrected yet.
+pub fn buildPreview(w: &mut World) {
+    if w.committed {
+        return
+    }
     let m = w.mission
+    let from = w.missions[m].from
+    let to = w.missions[m].to
+    let tof = w.planTof
+    let park = w.bodies[from].radius + w.missions[m].parkAlt
+    if isLocalHop(w, m) {
+        let burn = bestLocalBurn(w, from, to, tof)
+        if !burn.valid {
+            w.preview = false
+            return
+        }
+        let atBurn = advance(w.e, w.ship, w.t, burn.t - w.t)
+        let post = Ship {
+            pos: atBurn.pos, vel: atBurn.vel + burn.dv
+        }
+        w.track = propagate(w.e, post, burn.t, tof, 400, to)
+        w.preview = true
+        w.planValid = false
+        return
+    }
+    let dep = w.planDep
+    let sol = lambert(ephemPos(w.e, from, dep), ephemPos(w.e, to, dep + tof), tof, w.e.mu[SUN], true)
+    if !sol.ok {
+        w.preview = false
+        return
+    }
+    let vinf = sol.v1 - ephemVel(w.e, from, dep)
+    let normal = planeContaining(vinf)
+    let ej = ejection(w.e.mu[from], park, vinf, normal)
+    if !ej.valid {
+        w.preview = false
+        return
+    }
+    let post = ejectionState(w.e, from, dep, park, vinf, normal)
+    w.track = propagate(w.e, post, dep, tof, 400, to)
+    w.preview = true
+    w.planValid = false
+}
+
+// Slide the departure date and the flight time, in days.
+pub fn scrub(w: &mut World, dDep: f64, dTof: f64) {
+    if w.committed {
+        return
+    }
+    let m = w.mission
+    let t0 = w.missions[m].windowOpen
+    let t1 = t0 + w.missions[m].windowSpan
+    var dep = w.planDep + dDep * SEC_PER_DAY
+    if dep < t0 {
+        dep = t0
+    }
+    if dep > t1 {
+        dep = t1
+    }
     let mid = w.missions[m].nominalTof
-    return mid * 0.45 + (mid * 1.75 - mid * 0.45) * (j as f64) / ((w.porkH - 1) as f64)
+    var tof = w.planTof + dTof * SEC_PER_DAY
+    if tof < mid * 0.45 {
+        tof = mid * 0.45
+    }
+    if tof > mid * 1.75 {
+        tof = mid * 1.75
+    }
+    let tofChanged = tof != w.planTof
+    w.planDep = dep
+    w.planTof = tof
+    if tofChanged || w.curve.len == 0 {
+        buildCurve(w)
+    }
+    buildPreview(w)
+}
+
+// Jump straight to the cheapest departure at this flight time.
+pub fn snapToBest(w: &mut World) {
+    if w.committed {
+        return
+    }
+    if w.curve.len == 0 {
+        buildCurve(w)
+    }
+    let t0 = w.missions[w.mission].windowOpen
+    let span = w.missions[w.mission].windowSpan
+    w.planDep = t0 + span * (w.curveBestI as f64) / ((CURVE_N - 1) as f64)
+    buildPreview(w)
 }

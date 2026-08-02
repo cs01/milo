@@ -964,10 +964,14 @@ function openPopover(el) {
   var value = pick("data-pop-value", ".tile-value");
   var subText = pick("data-pop-sub", ".tile-sub");
 
+  // tile popovers are a short key/value list; alerts are pages of NWS prose and
+  // need a wider measure, so the trigger opts in rather than every popover growing
+  var wide = el.hasAttribute("data-pop-wide") ? " wx-pop-wide" : "";
+
   popEl = document.createElement("div");
   popEl.className = "wx-pop-overlay";
   popEl.innerHTML =
-    '<div class="wx-pop wx-card ' + cond + '">' +
+    '<div class="wx-pop wx-card' + wide + " " + cond + '">' +
     '<button class="wx-pop-close" aria-label="Close">✕</button>' +
     '<div class="tile-label">' + label + "</div>" +
     '<div class="wx-pop-value">' + value + "</div>" +
@@ -1208,7 +1212,7 @@ function alertsHtml() {
           esc(unwrapNwsText(p.instruction)) + "</div>"
         : "");
     html +=
-      '<div class="' + alertClass(p.severity) + '" data-pop tabindex="0" role="button" ' +
+      '<div class="' + alertClass(p.severity) + '" data-pop data-pop-wide tabindex="0" role="button" ' +
       'data-pop-label="Weather alert" ' +
       'data-pop-value="' + esc(p.event || "Alert") + '" ' +
       'data-pop-sub="' + esc(when) + '">' +

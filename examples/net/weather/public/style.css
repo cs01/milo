@@ -908,6 +908,14 @@ svg.sug-icon {
   animation: pop-rise 0.18s ease-out;
 }
 
+/* long-form popovers (NWS alert text). 40rem keeps the line measure near 75
+   characters — wider reads worse, not better — and width:100% still collapses
+   this to the phone layout below that. */
+.wx-pop-wide {
+  max-width: 40rem;
+  padding: 1.5rem;
+}
+
 /* the sun glow is a hero-scale flourish; at popover size it just washes out
    the text underneath */
 .wx-pop.clear-day::before,

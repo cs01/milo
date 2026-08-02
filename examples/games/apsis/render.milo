@@ -74,7 +74,15 @@ pub struct Map {
     frameBody: i64,
 }
 
-pub let PANELS: i64 = 3
+// One view.
+//
+// This was three panels — leaving, route, arriving — and the idea was sound but
+// the result was not: two of the three are stale for most of a mission. Once you
+// have left, "LEAVING EARTH" is a photograph of a decision you already made, and
+// its "BURN 3.12 km/s" caption labels an event in the past. The route is the only
+// panel that is always about what you are doing NOW, so it gets the screen, and
+// the destination appears as an inset only once it is close enough to matter.
+pub let PANELS: i64 = 1
 
 pub fn panelX0(i: i64): f64 {
     return (W as f64) * (i as f64) / (PANELS as f64)
@@ -101,11 +109,11 @@ pub fn mapFor(w: &World, panel: i64): Map {
     var dist = w.bodies[focusId].radius * 7.0
     var pitch = 0.26
     var frame = w.missions[m].from
-    if panel == 1 {
+    if panel == 0 {
         dist = camDistNow(w)
         pitch = camPitchNow(w)
-        // The route panel for an interplanetary hop is genuinely heliocentric —
-        // the transfer IS an orbit about the Sun and must be drawn as one.
+        // Heliocentric for an interplanetary hop: the transfer IS an orbit about
+        // the Sun and has to be drawn as one.
         if !isLocalHop(w, m) {
             frame = 0 - 1
         }
@@ -381,25 +389,75 @@ fn sunDirAt(w: &World, p: &Vec3): Vec3 {
     return (v3(0.0, 0.0, 0.0) - p).norm()
 }
 
+// The destination inset: bottom-right, and only when the ship is inside the
+// target's sphere of influence, which is exactly when "what does the arrival look
+// like" stops being a hypothetical.
+pub let INSET_W: f64 = 360.0
+
+pub let INSET_H: f64 = 270.0
+
+fn insetShown(w: &World): bool {
+    if !w.committed || w.captured {
+        return false
+    }
+    let to = w.missions[w.mission].to
+    return (ephemPos(w.e, to, w.t) - w.ship.pos).len() < soiRadius(w.bodies, to) * 2.5
+}
+
+fn drawInset(c: &mut Canvas, s: &mut Scene, w: &World, texes: &Vec<Texture>) {
+    let to = w.missions[w.mission].to
+    let x0 = (W as f64) - INSET_W - 16.0
+    let y0 = (H as f64) - INSET_H - 92.0
+    sceneClear(s)
+    s.sx0 = x0 as i64
+    s.sx1 = (x0 + INSET_W) as i64
+    let pitch = 0.28
+    let cp = Math.cos(pitch)
+    let dir = v3(Math.cos(w.camYaw) * cp, Math.sin(w.camYaw) * cp, Math.sin(pitch))
+    let fwd = dir.scale(-1.0)
+    var right = fwd.cross(v3(0.0, 0.0, 1.0))
+    if right.len() < 1.0e-9 {
+        right = v3(1.0, 0.0, 0.0)
+    }
+    right = right.norm()
+    let m = Map {
+        view: View {
+            right: right, up: right.cross(fwd).norm(), fwd: fwd, eye: dir,
+            scale: INSET_W * 0.5 / Math.tan(0.42),
+            cx: x0 + INSET_W * 0.5, cy: y0 + INSET_H * 0.5,
+            near: 1.0e-5, far: 1.0e7,
+        }
+        ,
+        focus: ephemPos(w.e, to, w.t), k: 1.0 / (w.bodies[to].radius * 9.0),
+        px0: x0, px1: x0 + INSET_W, frameBody: to,
+    }
+    fillRect(c, x0 - 2.0, y0 - 2.0, x0 + INSET_W + 2.0, y0 + INSET_H + 2.0, 0.06, 0.08, 0.11)
+    fillRect(c, x0, y0, x0 + INSET_W, y0 + INSET_H, 0.004, 0.006, 0.014)
+    drawShipTrack(c, m, w, 2)
+    drawBodies(c, s, m, w, texes, 2)
+    rasterFlush(c, s)
+    drawShip(c, m, w)
+    text(c, (x0 + 10.0) as i64, (y0 + 8.0) as i64, "ARRIVING  " + w.bodies[to].name.toUpper(), UI, 0.55, 0.66, 0.78)
+}
+
 pub fn drawScene(c: &mut Canvas, s: &mut Scene, w: &World, texes: &Vec<Texture>) {
     canvasFill(c, 0.004, 0.006, 0.014)
     if w.phase == PHASE_TITLE {
         drawTitle(c, s, w, texes)
         return
     }
-    var p = 0
-    while p < PANELS {
-        drawPanel(c, s, w, texes, p)
-        p = p + 1
+    // The briefing is a page, not an overlay. Dimming the live scene behind it
+    // left the trajectory, three planets and every HUD label showing straight
+    // through the text — the scene is bright and `shadeRect` darkens rather than
+    // covers, so "80% dim" over a starfield with glowing lines is still a
+    // starfield with glowing lines.
+    if w.phase == PHASE_BRIEF {
+        return
     }
-    // Dividers, drawn last so nothing sits on them.
-    var d = 1
-    while d < PANELS {
-        let x = panelX0(d)
-        fillRect(c, x - 1.0, 0.0, x + 1.0, H as f64, 0.10, 0.13, 0.18)
-        d = d + 1
+    drawPanel(c, s, w, texes, 0)
+    if insetShown(w) {
+        drawInset(c, s, w, texes)
     }
-    drawPanelTitles(c, w)
 }
 
 // A whole-screen camera, for the title.
@@ -473,7 +531,7 @@ fn drawTitle(c: &mut Canvas, s: &mut Scene, w: &World, texes: &Vec<Texture>) {
 
     // The campaign, in order, on a plate — the orbits are behind it and unreadable
     // text over a moving starfield is the oldest mistake in the book.
-    shadeRect(c, 70.0, 226.0, (W - 70) as f64, 560.0, 0.74)
+    fillRect(c, 70.0, 226.0, (W - 70) as f64, 560.0, 0.014, 0.018, 0.032)
     var y = 248
     var k = 0
     while k < MISSION_COUNT {
@@ -565,7 +623,7 @@ fn drawPanel(c: &mut Canvas, s: &mut Scene, w: &World, texes: &Vec<Texture>, pan
     // as the camera pulls away. It is the one moment in the game with a human
     // scale in it, and a transfer priced in kilometres per second means very
     // little until you have seen the machine that has to produce them.
-    if panel == 0 && w.sweep > 0.42 {
+    if panel == 0 && w.sweep > 0.42 && !w.committed {
         drawPadShot(c, s, w)
         return
     }
@@ -575,7 +633,7 @@ fn drawPanel(c: &mut Canvas, s: &mut Scene, w: &World, texes: &Vec<Texture>, pan
     // Orbit tracks only where they mean anything: on the route panel. In a view
     // forty thousand kilometres across, an orbit a hundred times wider is not a
     // curve, it is a line sweeping across the picture as the camera drifts.
-    if panel == 1 {
+    if panel == 0 {
         var i = 1
         while i < BODY_COUNT {
             var size = w.bodies[i].el.a
@@ -607,7 +665,7 @@ fn drawPanel(c: &mut Canvas, s: &mut Scene, w: &World, texes: &Vec<Texture>, pan
     rasterFlush(c, s)
     drawShip(c, m, w)
     drawTrackMarks(c, m, w, panel)
-    if panel == 1 {
+    if panel == 0 {
         drawTargetMarker(c, m, w)
     }
 }
@@ -660,7 +718,7 @@ fn drawBodies(c: &mut Canvas, s: &mut Scene, m: &Map, w: &World, texes: &Vec<Tex
                 // inflated, which is the same lie every orrery tells.
                 var drawRad = rad
                 var floorPix = 0.0
-                if panel == 1 && (i == w.missions[w.mission].from || i == w.missions[w.mission].to) {
+                if panel == 0 && (i == w.missions[w.mission].from || i == w.missions[w.mission].to) {
                     floorPix = 11.0
                 }
                 if pix < floorPix && floorPix > 0.0 {
@@ -784,7 +842,7 @@ fn drawTrackMarks(c: &mut Canvas, m: &Map, w: &World, panel: i64) {
             let dp = project(m, toRender(m, framed(m, w, w.track.pts[0], w.track.times[0])))
             if dp.z > 0.0 && inPanel(m, dp.x, dp.y) {
                 burnMark(c, dp.x, dp.y, 0.35, 0.95, 1.0)
-                if panel == 0 {
+                if !w.committed {
                     label(c, m, dp.x + 16.0, dp.y - 10.0, "BURN " + fmtDv(w.planEjDv), 0.45, 0.95, 1.0)
                 }
             }
@@ -795,8 +853,8 @@ fn drawTrackMarks(c: &mut Canvas, m: &Map, w: &World, panel: i64) {
             let p = project(m, toRender(m, cp))
             if p.z > 0.0 && inPanel(m, p.x, p.y) {
                 burnMark(c, p.x, p.y, 1.0, 0.62, 0.25)
-                if panel == 2 {
-                    label(c, m, p.x + 16.0, p.y + 12.0, "CAPTURE " + fmtDv(arrivalEstimate(w, w.track)), 1.0, 0.74, 0.34)
+                if !w.committed {
+                    label(c, m, p.x + 16.0, p.y + 12.0, "ARRIVE HERE", 1.0, 0.74, 0.34)
                 }
             }
         }
@@ -1013,7 +1071,11 @@ fn drawTargetMarker(c: &mut Canvas, m: &Map, w: &World) {
     let p = project(m, toRender(m, wp))
     let dist = (wp - w.ship.pos).len()
     let lab = w.bodies[to].name + "  " + fmtDist(dist)
-    let onScreen = p.z > 0.0 && p.x > 60.0 && p.x < (W - 60) as f64 && p.y > 100.0 && p.y < (H - 140) as f64
+    // Margins follow the HUD. These were set when a plan panel took the top left
+    // and an orbit readout the bottom right; with those gone, a body sitting
+    // perfectly visible near the top edge was still being treated as off-screen
+    // and drawn twice — once as itself and once as a clamped edge marker.
+    let onScreen = p.z > 0.0 && p.x > 30.0 && p.x < (W - 30) as f64 && p.y > 52.0 && p.y < (H - 96) as f64
     if onScreen {
         circleOutline(c, p.x, p.y, 16.0, 1.0, 0.80, 0.30)
         circleOutline(c, p.x, p.y, 18.0, 1.0, 0.80, 0.30)
@@ -1222,7 +1284,7 @@ pub fn drawBriefing(c: &mut Canvas, w: &World) {
         return
     }
     let m = w.mission
-    shadeRect(c, 0.0, 0.0, W as f64, H as f64, 0.80)
+    fillRect(c, 0.0, 0.0, W as f64, H as f64, 0.010, 0.014, 0.026)
     textCentered(c, W / 2, 90, "MISSION " + (m + 1).toString() + " OF " + MISSION_COUNT.toString(), UI, 0.60, 0.70, 0.80)
     textCentered(c, W / 2, 128, w.bodies[w.missions[m].from].name.toUpper() + "  TO  " + w.bodies[w.missions[m].to].name.toUpper(), 5, 0.95, 0.98, 1.0)
     textCentered(c, W / 2, 196, w.missions[m].blurb, UI, 0.66, 0.76, 0.86)
@@ -1250,7 +1312,7 @@ pub fn drawOutcome(c: &mut Canvas, w: &World) {
     if !w.won && !w.failed {
         return
     }
-    shadeRect(c, 0.0, 0.0, W as f64, H as f64, 0.78)
+    fillRect(c, 0.0, 0.0, W as f64, H as f64, 0.012, 0.016, 0.028)
     if w.won {
         textCentered(c, W / 2, 250, "CAPTURED", 6, 0.35, 0.95, 0.95)
         textCentered(c, W / 2, 340, w.bodies[w.missions[w.mission].to].name + " ORBIT ACHIEVED", UI_BIG, 0.88, 0.92, 0.96)

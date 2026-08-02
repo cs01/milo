@@ -219,8 +219,21 @@ pub fn startMission(w: &mut World, idx: i64) {
     w.failed = false
     w.won = false
     w.preview = false
+    w.phase = PHASE_BRIEF
+    // Deliberately NOT the optimum. This used to call snapToBest, so the game
+    // opened on the cheapest transfer in the window: B was a no-op, neither
+    // input changed anything worth looking at, and the whole campaign was ENTER,
+    // hold `.`, ENTER, six times over. Starting part-way up the curve means the
+    // first arrow press makes a number go down, which is the entire lesson.
+    w.planTof = tof * 0.62
+    w.planDep = t0 + w.missions[i].windowSpan * 0.68
     buildCurve(w)
-    snapToBest(w)
+    // A real, solved plan at that deliberately-suboptimal point, so the price is
+    // on screen from the first frame and the player can see it FALL when they
+    // press an arrow. Showing nothing until they scrub hides the feedback that
+    // makes the input make sense.
+    replan(w)
+    refreshLive(w)
 }
 
 // ENTER advances the state machine. One key does the whole game.
@@ -590,33 +603,26 @@ pub fn routeDist(w: &World): f64 {
         }
     }
     // Include every point of whichever path is on screen.
+    // Only up to ARRIVAL. The propagation runs past the encounter so the closest
+    // approach is bracketed, and that tail can fly a long way — including it in
+    // the framing zoomed the view out until the entire mission was a dot in the
+    // middle of an empty screen, which is what the whole coast phase looked like.
     var i = 0
     while i < w.track.pts.len {
-        var d = 0.0
-        if local {
-            d = (w.track.pts[i] - ephemPos(w.e, from, w.track.times[i])).len()
-        } else {
-            d = w.track.pts[i].len()
-        }
-        if d > far {
-            far = d
+        if w.track.times[i] <= w.track.caTime {
+            var d = 0.0
+            if local {
+                d = (w.track.pts[i] - ephemPos(w.e, from, w.track.times[i])).len()
+            } else {
+                d = w.track.pts[i].len()
+            }
+            if d > far {
+                far = d
+            }
         }
         i = i + 1
     }
-    var j = 0
-    while j < w.liveTrack.pts.len {
-        var d = 0.0
-        if local {
-            d = (w.liveTrack.pts[j] - ephemPos(w.e, from, w.liveTrack.times[j])).len()
-        } else {
-            d = w.liveTrack.pts[j].len()
-        }
-        if d > far {
-            far = d
-        }
-        j = j + 1
-    }
-    return far * 2.5
+    return far * 1.35
 }
 
 pub fn cycleView(w: &mut World) {

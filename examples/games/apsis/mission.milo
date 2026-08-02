@@ -49,10 +49,10 @@ fn mission(name: string, blurb: string, from: i64, to: i64, parkAlt: f64, capAlt
 // entire point of that mission.
 pub fn missionTable(): Vec<Mission> {
     var v: Vec<Mission> = Vec.new()
-    v.push(mission("The Moon", "The target moves. Aim where it will be, not where it is.", EARTH, MOON, 300.0, 100.0, 3000.0, 2500.0, 4600.0, timeOf(2030, 3, 1), 60.0, 4.0, 0.5))
+    v.push(mission("The Moon", "Going slower costs less. Give yourself more days and watch the price fall.", EARTH, MOON, 300.0, 100.0, 3000.0, 2500.0, 4600.0, timeOf(2030, 3, 1), 60.0, 4.0, 0.5))
     v.push(mission("Mars", "Launch windows are real. You wait for the planet; it does not wait for you.", EARTH, MARS, 300.0, 500.0, 20000.0, 4000.0, 6400.0, timeOf(2033, 3, 20), 90.0, 280.0, 30.0))
     v.push(mission("Venus", "Falling inward means arriving fast, and arriving fast is what costs.", EARTH, VENUS, 300.0, 500.0, 25000.0, 4000.0, 7000.0, timeOf(2031, 5, 20), 70.0, 150.0, 20.0))
-    v.push(mission("Mercury", "The closest planet is the most expensive to stop at. Falling toward the Sun is free; stopping is not.", EARTH, MERCURY, 300.0, 400.0, 12000.0, 3000.0, 18000.0, timeOf(2032, 6, 1), 90.0, 130.0, 20.0))
+    v.push(mission("Mercury", "The closest planet is the most expensive to stop at. Falling in is free; stopping is not.", EARTH, MERCURY, 300.0, 400.0, 12000.0, 3000.0, 18000.0, timeOf(2032, 6, 1), 90.0, 130.0, 20.0))
     v.push(mission("Jupiter", "Two years out, and the biggest planet charges the most to be caught by.", EARTH, JUPITER, 300.0, 2000.0, 400000.0, 60000.0, 19500.0, timeOf(2035, 1, 10), 120.0, 950.0, 40.0))
     v.push(mission("Saturn", "The graduation. Everything above, twice as far, on the same tank.", EARTH, SATURN, 300.0, 3000.0, 800000.0, 90000.0, 13500.0, timeOf(2037, 6, 1), 150.0, 2200.0, 50.0))
     return v

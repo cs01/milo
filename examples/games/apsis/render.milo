@@ -18,7 +18,7 @@ from "./vec3" import {
     Vec3, v3
 }
 from "./gfx" import {
-    Canvas, canvasFill, text, textCentered, textWidth, fillRect, line, thickLine, spot, shadeRect
+    Canvas, canvasFill, text, textCentered, textWidth, fillRect, coverRect, line, thickLine, spot, shadeRect
 }
 from "./gfx3d" import {
     Camera, Scene, View, sceneClear, viewOf, frameOf, rasterFlush
@@ -105,16 +105,25 @@ pub fn panelX1(i: i64): f64 {
 // three at once removes the choice, and with it the need to explain it.
 pub fn mapFor(w: &World, panel: i64): Map {
     let m = w.mission
-    var focusId = w.missions[m].from
+    // Follow `w.focus`. `setView` and the arrival hand-off already maintain it,
+    // and reading `.from` here instead meant that arriving at the Moon pointed
+    // the camera at the EARTH from 15 000 km — so the climax of mission one was
+    // a full-frame photograph of the Pacific with "Moon orbit achieved" printed
+    // across Australia.
+    var focusId = w.focus
+    if focusId < 0 || focusId >= BODY_COUNT {
+        focusId = w.missions[m].from
+    }
     var dist = w.bodies[focusId].radius * 7.0
     var pitch = 0.26
-    var frame = w.missions[m].from
+    var frame = focusId
     if panel == 0 {
         dist = camDistNow(w)
         pitch = camPitchNow(w)
         // Heliocentric for an interplanetary hop: the transfer IS an orbit about
-        // the Sun and has to be drawn as one.
-        if !isLocalHop(w, m) {
+        // the Sun and has to be drawn as one. Once the camera has handed over to
+        // the destination, the destination's frame is the useful one again.
+        if !isLocalHop(w, m) && focusId == w.missions[m].from {
             frame = 0 - 1
         }
     }
@@ -401,6 +410,9 @@ fn insetShown(w: &World): bool {
         return false
     }
     let to = w.missions[w.mission].to
+    if w.focus == to {
+        return false
+    }
     return (ephemPos(w.e, to, w.t) - w.ship.pos).len() < soiRadius(w.bodies, to) * 2.5
 }
 
@@ -431,8 +443,8 @@ fn drawInset(c: &mut Canvas, s: &mut Scene, w: &World, texes: &Vec<Texture>) {
         focus: ephemPos(w.e, to, w.t), k: 1.0 / (w.bodies[to].radius * 9.0),
         px0: x0, px1: x0 + INSET_W, frameBody: to,
     }
-    fillRect(c, x0 - 2.0, y0 - 2.0, x0 + INSET_W + 2.0, y0 + INSET_H + 2.0, 0.06, 0.08, 0.11)
-    fillRect(c, x0, y0, x0 + INSET_W, y0 + INSET_H, 0.004, 0.006, 0.014)
+    coverRect(c, x0 - 2.0, y0 - 2.0, x0 + INSET_W + 2.0, y0 + INSET_H + 2.0, 0.06, 0.08, 0.11)
+    coverRect(c, x0, y0, x0 + INSET_W, y0 + INSET_H, 0.004, 0.006, 0.014)
     drawShipTrack(c, m, w, 2)
     drawBodies(c, s, m, w, texes, 2)
     rasterFlush(c, s)
@@ -531,7 +543,7 @@ fn drawTitle(c: &mut Canvas, s: &mut Scene, w: &World, texes: &Vec<Texture>) {
 
     // The campaign, in order, on a plate — the orbits are behind it and unreadable
     // text over a moving starfield is the oldest mistake in the book.
-    fillRect(c, 70.0, 226.0, (W - 70) as f64, 560.0, 0.014, 0.018, 0.032)
+    coverRect(c, 70.0, 226.0, (W - 70) as f64, 560.0, 0.014, 0.018, 0.032)
     var y = 248
     var k = 0
     while k < MISSION_COUNT {
@@ -569,7 +581,7 @@ fn drawPadShot(c: &mut Canvas, s: &mut Scene, w: &World) {
     let m = Map {
         view: View {
             right: right, up: up, fwd: fwd, eye: dir,
-            scale: (x1 - x0) * 0.5 / Math.tan(0.40),
+            scale: 427.0 * 0.5 / Math.tan(0.40),
             cx: (x0 + x1) * 0.5, cy: (H as f64) * 0.62,
             near: 1.0e-4, far: 1.0e4,
         }
@@ -592,7 +604,6 @@ fn drawPadShot(c: &mut Canvas, s: &mut Scene, w: &World) {
     drawPad(s, m.view, st)
     drawRocket(s, m.view, st, throttle, lift)
     rasterFlush(c, s)
-    textCentered(c, ((x0 + x1) * 0.5) as i64, 96, panelTitle(w, 0), UI, 0.52, 0.62, 0.72)
 }
 
 fn panelTitle(w: &World, p: i64): string {
@@ -785,7 +796,7 @@ fn bodyTint(id: i64): Vec3 {
 fn plate(c: &mut Canvas, x: i64, y: i64, s: &string, scale: i64, r: f64, g: f64, b: f64) {
     let wdt = textWidth(s, scale) as f64
     let hgt = (8 * scale) as f64
-    shadeRect(c, (x as f64) - 6.0, (y as f64) - 4.0, (x as f64) + wdt + 6.0, (y as f64) + hgt + 6.0, 0.62)
+    coverRect(c, (x as f64) - 6.0, (y as f64) - 4.0, (x as f64) + wdt + 6.0, (y as f64) + hgt + 6.0, 0.02, 0.026, 0.042)
     text(c, x, y, s, scale, r, g, b)
 }
 
@@ -1144,10 +1155,17 @@ fn drawScrubBar(c: &mut Canvas, w: &World) {
     // The curve is clipped at three times the best cost: past that everything is
     // equally out of the question, and letting one impossible date set the scale
     // flattens the useful part into a straight line.
-    let lo = w.curveBest
-    var hi = w.curveBest * 3.0
-    if w.curveWorst < hi && w.curveWorst > lo {
-        hi = w.curveWorst
+    // Scaled to the MISSION BUDGET, not to its own best and worst.
+    //
+    // Renormalising per mission made the Moon's 30 m/s ripple and Mercury's
+    // 90 km/s canyon draw the same picture, so the shape a player learned to
+    // read on mission one meant nothing on mission four. Against the budget, the
+    // height of the bar answers the only question that matters — can I afford
+    // this day — and the budget line is drawn where "no" begins.
+    let lo = w.curveBest * 0.90
+    var hi = w.budget
+    if hi < w.curveBest * 1.08 {
+        hi = w.curveBest * 1.08
     }
     var i = 0
     while i < CURVE_N {
@@ -1171,6 +1189,20 @@ fn drawScrubBar(c: &mut Canvas, w: &World) {
 
     // Where the cheapest departure is, so the target is visible rather than
     // hunted for.
+    // Where the budget sits on the bar: above this line, you cannot pay for it.
+    if w.budget > lo && w.budget < hi {
+        // Same formula the bars use, or the line lands nowhere near the height
+        // that actually means "this costs a budget's worth".
+        let fb = (w.budget - lo) / (hi - lo)
+        let by = BAR_Y + BAR_H - BAR_H * (1.0 - fb * 0.88)
+        var q = 0
+        while q < 60 {
+            let qx = BAR_X + BAR_W * (q as f64) / 60.0
+            fillRect(c, qx, by, qx + 6.0, by + 1.5, 0.95, 0.35, 0.28)
+            q = q + 1
+        }
+        text(c, (BAR_X + BAR_W + 8.0) as i64, (by - 8.0) as i64, "BUDGET", UI, 0.95, 0.45, 0.35)
+    }
     let bx = BAR_X + BAR_W * (w.curveBestI as f64) / ((CURVE_N - 1) as f64)
     thickLine(c, bx, BAR_Y - 6.0, bx, BAR_Y + BAR_H + 4.0, 1.5, 0.25, 0.95, 0.65)
 
@@ -1191,7 +1223,7 @@ fn drawScrubBar(c: &mut Canvas, w: &World) {
     if cur < 1.0e29 {
         costLab = fmtDv(cur)
     }
-    let dl = fmtDate(w.planDep) + "   " + costLab
+    let dl = fmtDate(w.planDep) + "   est " + costLab
     var lx = (mx - (textWidth(dl, UI) as f64) * 0.5) as i64
     if (lx as f64) < BAR_X {
         lx = BAR_X as i64
@@ -1232,8 +1264,22 @@ fn drawActionBar(c: &mut Canvas, w: &World) {
         sub = "the bar below is what it costs to leave on each day — taller and brighter is cheaper"
     } else {
         if !w.committed {
-            msg = "PRESS  ENTER  TO COMMIT  (" + fmtDv(w.planDv) + ")"
-            sub = "or LEFT / RIGHT to move the date, UP / DOWN the flight time"
+            let over = w.spent + w.planDv - w.budget
+            if over > 0.0 {
+                // Felt while scrubbing, not discovered at ENTER.
+                msg = "OVER BUDGET BY " + fmtDv(over)
+                sub = "a longer flight time is usually cheaper — try UP"
+                r = 0.95
+                g = 0.42
+                b = 0.32
+            } else {
+                msg = "PRESS  ENTER  TO COMMIT  (" + fmtDv(w.planDv) + ")"
+                // The three burns that make up the price. Without this the tank
+                // drops mid-flight for a correction nothing ever mentioned, and
+                // it reads as the game taking fuel.
+                sub = "depart " + fmtDv(w.planEjDv) + "   correct " + fmtDv(w.planFix.len())
+                + "   capture " + fmtDv(arrivalEstimate(w, w.track))
+            }
         } else {
             let cap = currentCapture(w)
             let to = w.missions[w.mission].to
@@ -1267,13 +1313,19 @@ fn drawMessage(c: &mut Canvas, w: &World) {
     if w.messageAge > 6.0 || w.message.len == 0 {
         return
     }
+    // The action bar is already telling them to press ENTER; a banner saying the
+    // same thing two hundred pixels away is noise, not emphasis.
+    if w.committed && currentCapture(w).possible {
+        return
+    }
     var a = 1.0
     if w.messageAge > 4.5 {
         a = (6.0 - w.messageAge) / 1.5
     }
     let tw = textWidth(w.message, UI_BIG)
-    shadeRect(c, ((W / 2) as f64) - (tw as f64) * 0.5 - 20.0, 96.0, ((W / 2) as f64) + (tw as f64) * 0.5 + 20.0, 144.0, 0.6 * a)
-    textCentered(c, W / 2, 104, w.message, UI_BIG, a, a * 0.95, a * 0.85)
+    let my = (H - 292) as f64
+    coverRect(c, ((W / 2) as f64) - (tw as f64) * 0.5 - 20.0, my, ((W / 2) as f64) + (tw as f64) * 0.5 + 20.0, my + 44.0, 0.03, 0.038, 0.058)
+    textCentered(c, W / 2, (my + 8.0) as i64, w.message, UI_BIG, a, a * 0.95, a * 0.85)
 }
 
 // Three steps, in order, before the mission starts. The game only ever asks for
@@ -1284,7 +1336,7 @@ pub fn drawBriefing(c: &mut Canvas, w: &World) {
         return
     }
     let m = w.mission
-    fillRect(c, 0.0, 0.0, W as f64, H as f64, 0.010, 0.014, 0.026)
+    coverRect(c, 0.0, 0.0, W as f64, H as f64, 0.010, 0.014, 0.026)
     textCentered(c, W / 2, 90, "MISSION " + (m + 1).toString() + " OF " + MISSION_COUNT.toString(), UI, 0.60, 0.70, 0.80)
     textCentered(c, W / 2, 128, w.bodies[w.missions[m].from].name.toUpper() + "  TO  " + w.bodies[w.missions[m].to].name.toUpper(), 5, 0.95, 0.98, 1.0)
     textCentered(c, W / 2, 196, w.missions[m].blurb, UI, 0.66, 0.76, 0.86)
@@ -1312,7 +1364,7 @@ pub fn drawOutcome(c: &mut Canvas, w: &World) {
     if !w.won && !w.failed {
         return
     }
-    fillRect(c, 0.0, 0.0, W as f64, H as f64, 0.012, 0.016, 0.028)
+    coverRect(c, 0.0, 0.0, W as f64, H as f64, 0.012, 0.016, 0.028)
     if w.won {
         textCentered(c, W / 2, 250, "CAPTURED", 6, 0.35, 0.95, 0.95)
         textCentered(c, W / 2, 340, w.bodies[w.missions[w.mission].to].name + " ORBIT ACHIEVED", UI_BIG, 0.88, 0.92, 0.96)

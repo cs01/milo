@@ -675,6 +675,18 @@ pub fn compositeBand(job: PresentJob): i64 {
 // Bricks and the paddle want mass, so these draw solid with a vertical gradient
 // and a bright top edge — cheap, and enough to make a rectangle look lit.
 
+// An OPAQUE rectangle.
+//
+// `fillRect` adds and `shadeRect` multiplies, which is right for glows and for
+// dimming but means neither of them can cover anything: a "backdrop" drawn with
+// fillRect over a bright planet just makes it brighter. Clearing first and then
+// adding is the only way to get a surface that hides what is behind it, and
+// every full-screen page in this game wants exactly that.
+pub fn coverRect(c: &mut Canvas, x0: f64, y0: f64, x1: f64, y1: f64, r: f64, g: f64, b: f64) {
+    shadeRect(c, x0, y0, x1, y1, 0.0)
+    fillRect(c, x0, y0, x1, y1, r, g, b)
+}
+
 pub fn fillRect(c: &mut Canvas, x0: f64, y0: f64, x1: f64, y1: f64, r: f64, g: f64, b: f64) {
     var ix0 = x0 as i64
     var iy0 = y0 as i64

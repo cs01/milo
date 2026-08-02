@@ -526,6 +526,22 @@ fn dogSprite(sp: &DogSpec, pal: &Vec<f64>, frame: i64): Sprite {
     // top light along the spine
     ellipse(g, w, h, sp.bodyCx, bodyCy - bodyRy * 0.70, bodyRx * 0.72, bodyRy * 0.22, C_LIT)
 
+    // The cocked leg, drawn over the body rather than under it. Legs go down
+    // before the torso goes on, which is right for the three on the ground and
+    // exactly wrong for the one in the air — it was there the whole time,
+    // hidden behind the belly.
+    if frame == DOG_PEE {
+        let cock = pose(frame, 0)
+        let legCol = if sp.saddle {
+            C_MASK
+        } else {
+            C_FUR
+        }
+        let hipX = sp.legX0 + 1.2
+        segment(g, w, h, hipX, hipY - 0.6, hipX + cock.dx, footY + cock.dy, sp.legW, legCol)
+        rectF(g, w, h, hipX + cock.dx - sp.legW * 0.7, footY + cock.dy - 0.8, hipX + cock.dx + sp.legW * 0.5, footY + cock.dy + 0.7, C_BELLY)
+    }
+
     // neck, joining head to body so the two never read as two animals
     segment(g, w, h, sp.bodyCx + bodyRx * 0.5, bodyCy - bodyRy * 0.55, headCx - sp.headR * 0.45, headCy + sp.headR * 0.65, sp.neckW, C_FUR)
 

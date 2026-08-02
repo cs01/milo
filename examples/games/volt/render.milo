@@ -454,6 +454,19 @@ pub fn drawPee(c: &mut Canvas, w: &World, ox: f64, oy: f64) {
 }
 
 pub fn drawPlayer(c: &mut Canvas, w: &World, art: &DogArt, ox: f64, oy: f64) {
+    // Growing into the shepherd is a flicker between the two builds rather than
+    // a tween. There is nothing to tween between — they are different animals,
+    // not one animal at two scales — and the alternation is what reads as a
+    // transformation anyway.
+    if w.p.growT > 0.0 {
+        let beat = ((w.p.growT * 26.0) as i64) % 2
+        if beat == 0 {
+            drawDog(c, w, art.shep, ox, oy)
+        } else {
+            drawDog(c, w, art.chi, ox, oy)
+        }
+        return
+    }
     if w.p.form == FORM_SHEP {
         drawDog(c, w, art.shep, ox, oy)
     } else {
@@ -496,6 +509,9 @@ fn drawDog(c: &mut Canvas, w: &World, frames: &Vec<Sprite>, ox: f64, oy: f64) {
         fillRect(c, bx - 5.0, footY - 5.0, bx + PLAYER_W + 5.0, footY + 1.0, 0.0, 0.0, 0.0, 0.30)
     }
     var glow = 0.10
+    if w.p.growT > 0.0 {
+        glow = glow + w.p.growT * 1.8
+    }
     var tmix = 0.0
     if w.p.dashT > 0.0 {
         glow = 1.1

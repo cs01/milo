@@ -30,6 +30,11 @@ on screen, and the next hit takes the shepherd instead of taking you. Get hit
 again and you are a chihuahua once more, thrown clear, and briefly untouchable —
 long enough to walk out of whatever hit you.
 
+Growing is a flicker between the two builds over half a second, lit from within
+while it happens. Not a tween: they are different animals rather than one animal
+at two scales, so there is nothing to interpolate — and the alternation is what
+reads as a transformation anyway.
+
 Most of the bones are behind a crate, and the way through a crate is to **bark at
 it**. That is the digging: a bark breaks any crate in range, kills any cat or
 bird in range, and reaches roughly twice as far when a shepherd is doing it. The

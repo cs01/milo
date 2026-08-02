@@ -147,10 +147,10 @@ fn sheet(path: &string) {
     let dog = dogFrames()
     let cat = catFrames()
     let bird = birdFrames()
-    let s = 4.6
+    let s = 4.0
     var i = 0
     while i < dog.chi.len {
-        let x = 26.0 + (i as f64) * 103.0
+        let x = 16.0 + (i as f64) * 105.0
         drawSprite(c, dog.chi[i], x, 60.0, s, false, 0.25)
         drawSprite(c, dog.shep[i], x, 200.0, s, false, 0.25)
         i = i + 1

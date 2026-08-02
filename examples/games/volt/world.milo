@@ -138,6 +138,10 @@ pub let REST_Y: f64 = 0.70
 
 // Marking the hydrant. Long enough to read as a deliberate act, short enough
 // that nobody resents standing still for it — and any jump or dash cuts it.
+// Eating a bone is not instant. Long enough to see him swap, short enough that
+// it never costs you a jump you had lined up.
+pub let GROW_TIME: f64 = 0.55
+
 pub let PEE_TIME: f64 = 1.0
 
 // How far from the hydrant he plants himself, centre to centre.
@@ -192,6 +196,7 @@ pub struct Player {
     barkT: f64,
     barkCd: f64,
     peeT: f64,
+    growT: f64,
     dead: bool,
     deadT: f64,
     spawnT: f64,
@@ -317,7 +322,7 @@ fn playerAt(x: f64, y: f64, form: i64): Player {
         wallDir: 0.0, wallT: 0.0, lockT: 0.0,
         dashT: 0.0, dashCd: 0.0, dashes: 1, dashX: 1.0, dashY: 0.0,
         facing: 1.0, animT: 0.0, sqX: 1.0, sqY: 1.0,
-        form: form, invT: 0.0, hurtT: 0.0, barkT: 0.0, barkCd: 0.0, peeT: 0.0,
+        form: form, invT: 0.0, hurtT: 0.0, barkT: 0.0, barkCd: 0.0, peeT: 0.0, growT: 0.0,
         dead: false, deadT: 0.0, spawnT: 0.55,
     }
 }
@@ -867,6 +872,9 @@ fn updatePlayer(w: &mut World, dt: f64, moveX: f64, down: bool, jump: bool, jump
     if w.p.barkCd > 0.0 {
         w.p.barkCd = w.p.barkCd - dt
     }
+    if w.p.growT > 0.0 {
+        w.p.growT = w.p.growT - dt
+    }
     if w.p.peeT > 0.0 {
         // wasGround, NOT w.p.onGround: onGround is cleared at the top of this
         // function and only recomputed after the collision pass below, so
@@ -1256,6 +1264,9 @@ fn hitPickups(w: &mut World, dt: f64) {
                     burst(w, w.pk[i].x, w.pk[i].y, 26, 600.0, 0.5, 1.4, 1.7)
                     w.evCore = true
                 } else if w.pk[i].kind == PK_BONE {
+                    if w.p.form == FORM_CHI {
+                        w.p.growT = GROW_TIME
+                    }
                     w.p.form = FORM_SHEP
                     w.p.sqX = 0.70
                     w.p.sqY = 1.45

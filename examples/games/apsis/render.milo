@@ -1,0 +1,772 @@
+// Drawing the map.
+//
+// One camera, one scale factor, and everything expressed relative to whatever
+// the player is looking at. The solar system spans eleven orders of magnitude
+// between a parking orbit and Saturn's, which no single set of world coordinates
+// survives in an f32 depth buffer — so nothing is ever drawn in absolute metres.
+// Positions are made camera-relative and scaled by 1/camDist FIRST, in f64, and
+// only then handed to the rasteriser, which therefore always sees a scene about
+// one unit across whatever the zoom is doing.
+
+from "std/math" import {
+    Math
+}
+from "std/strconv" import {
+    formatFloat
+}
+from "./vec3" import {
+    Vec3, v3
+}
+from "./gfx" import {
+    Canvas, canvasFill, text, textCentered, textWidth, fillRect, line, thickLine, spot, shadeRect
+}
+from "./gfx3d" import {
+    Camera, Scene, View, sceneClear, viewOf, frameOf, rasterFlush
+}
+from "./raster" import {
+    Texture, texHasImage
+}
+from "./sphere" import {
+    drawSphere, drawGlowSphere, drawRings, segmentsFor, spinOf, Spin
+}
+from "./ephem" import {
+    Body, bodyPos, dateOf, SEC_PER_DAY, AU, BODY_COUNT, SUN, EARTH, MOON, SATURN
+}
+from "./nbody" import {
+    Ship, Ephem, ephemPos, ephemVel, propagate, orbitAbout, dominantBody, Orbit
+}
+from "./world" import {
+    World, shipAbout, shipOrbit, currentCapture, porkDep, porkTof
+}
+from "./mission" import {
+    MISSION_COUNT
+}
+
+pub let W: i64 = 1280
+
+pub let H: i64 = 720
+
+// ── camera ────────────────────────────────────────────────────────────────────
+
+pub struct Map {
+    view: View,
+    focus: Vec3, // world position the camera orbits, metres
+    k: f64, // world metres -> render units
+}
+
+// The view basis is built here rather than by `viewOf`, because that one takes
+// yaw and pitch about a Y-up world and the solar system is Z-up: the ecliptic is
+// the XY plane and north is +Z. Feeding it these angles put the ecliptic on edge
+// and sent every planet's orbit across the screen as a straight line.
+pub fn mapOf(w: &World): Map {
+    var focus = ephemPos(w.e, w.focus, w.t)
+    if w.focus < 0 {
+        focus = w.ship.pos
+    }
+    let k = 1.0 / w.camDist
+    let cp = Math.cos(w.camPitch)
+    // Unit vector from the focus toward the camera.
+    let dir = v3(Math.cos(w.camYaw) * cp, Math.sin(w.camYaw) * cp, Math.sin(w.camPitch))
+    let eye = dir
+    let fwd = dir.scale(-1.0)
+    var right = fwd.cross(v3(0.0, 0.0, 1.0))
+    if right.len() < 1.0e-9 {
+        right = v3(1.0, 0.0, 0.0)
+    }
+    right = right.norm()
+    let up = right.cross(fwd).norm()
+    let scale = (H as f64) * 0.5 / Math.tan(0.35)
+    return Map {
+        view: View {
+            right: right, up: up, fwd: fwd, eye: eye,
+            scale: scale, cx: (W as f64) * 0.5, cy: (H as f64) * 0.5,
+            near: 1.0e-5, far: 1.0e7,
+        }
+        ,
+        focus: focus, k: k
+    }
+}
+
+pub fn toRender(m: &Map, p: &Vec3): Vec3 {
+    return (p - m.focus).scale(m.k)
+}
+
+// Project a render-space point to the screen. `z` is depth along the view
+// direction; anything at or behind the near plane is reported as z <= 0 and the
+// caller must drop it, because the projection divides by z.
+pub struct Proj {
+    x: f64,
+    y: f64,
+    z: f64,
+}
+
+pub fn project(m: &Map, rp: &Vec3): Proj {
+    let d = rp - m.view.eye
+    let cx = d.dot(m.view.right)
+    let cy = d.dot(m.view.up)
+    let cz = d.dot(m.view.fwd)
+    if cz <= m.view.near {
+        return Proj {
+            x: 0.0, y: 0.0, z: cz
+        }
+    }
+    return Proj {
+        x: m.view.cx + cx * m.view.scale / cz,
+        y: m.view.cy - cy * m.view.scale / cz,
+        z: cz,
+    }
+}
+
+// ── polylines ─────────────────────────────────────────────────────────────────
+
+// Draw a world-space polyline, clipping each segment against the near plane.
+//
+// Clipping matters here more than it would in a normal scene: an orbit is a
+// closed loop around the camera's own focus, so a good fraction of it is behind
+// the viewer at any zoom where the orbit is bigger than the screen. Dropping
+// whole segments instead of clipping them makes an orbit flicker in and out as
+// the camera turns.
+fn polyline(c: &mut Canvas, m: &Map, pts: &Vec<Vec3>, from: i64, to: i64, r: f64, g: f64, b: f64, wide: f64) {
+    var i = from
+    while i < to - 1 {
+        let a = toRender(m, pts[i])
+        let bb = toRender(m, pts[i + 1])
+        drawSeg(c, m, a, bb, r, g, b, wide)
+        i = i + 1
+    }
+}
+
+fn drawSeg(c: &mut Canvas, m: &Map, a: &Vec3, b: &Vec3, r: f64, g: f64, bl: f64, wide: f64) {
+    var p0 = a
+    var p1 = b
+    let d0 = (p0 - m.view.eye).dot(m.view.fwd)
+    let d1 = (p1 - m.view.eye).dot(m.view.fwd)
+    let near = m.view.near
+    if d0 <= near && d1 <= near {
+        return
+    }
+    if d0 <= near {
+        let t = (near - d0) / (d1 - d0)
+        p0 = p0 + (p1 - p0).scale(t)
+    }
+    if d1 <= near {
+        let t = (near - d1) / (d0 - d1)
+        p1 = p1 + (p0 - p1).scale(t)
+    }
+    let s0 = project(m, p0)
+    let s1 = project(m, p1)
+    if s0.z <= 0.0 || s1.z <= 0.0 {
+        return
+    }
+    // Off-screen by a wide margin on both ends: skip rather than hand the
+    // rasteriser a segment kilometres long in screen space.
+    if (s0.x < -4000.0 && s1.x < -4000.0) || (s0.x > 5200.0 && s1.x > 5200.0) {
+        return
+    }
+    if (s0.y < -4000.0 && s1.y < -4000.0) || (s0.y > 4700.0 && s1.y > 4700.0) {
+        return
+    }
+    if wide <= 1.0 {
+        line(c, s0.x, s0.y, s1.x, s1.y, r, g, bl)
+    } else {
+        thickLine(c, s0.x, s0.y, s1.x, s1.y, wide, r, g, bl)
+    }
+}
+
+// A body's own orbit, one full revolution, straight from the analytic elements
+// rather than from the sampled grid — Saturn's period is longer than the whole
+// campaign, so the grid cannot hold a lap of it.
+fn drawBodyOrbit(c: &mut Canvas, m: &Map, w: &World, id: i64, r: f64, g: f64, b: f64) {
+    let parent = w.bodies[id].parent
+    if id == SUN {
+        return
+    }
+    var period = 0.0
+    if id == MOON {
+        period = 27.32 * SEC_PER_DAY
+    } else {
+        let a = w.bodies[id].el.a
+        period = Math.pi() * 2.0 * Math.sqrt(a * a * a / w.bodies[SUN].mu)
+    }
+    let n = 128
+    var prev = v3(0.0, 0.0, 0.0)
+    var i = 0
+    while i <= n {
+        let tt = w.t + period * (i as f64) / (n as f64)
+        var p = bodyPos(w.bodies, id, tt)
+        if id == MOON {
+            // The Moon's path is drawn about the Earth, not about the Sun:
+            // over one lunar month the Earth moves thirty times further than
+            // the Moon does around it, so the heliocentric track is a barely
+            // wavy line and tells the player nothing.
+            p = bodyPos(w.bodies, EARTH, w.t) + (p - bodyPos(w.bodies, EARTH, tt))
+        }
+        let rp = toRender(m, p)
+        if i > 0 {
+            drawSeg(c, m, prev, rp, r, g, b, 1.0)
+        }
+        prev = rp
+        i = i + 1
+    }
+    let _ = parent
+}
+
+// ── the scene ─────────────────────────────────────────────────────────────────
+
+fn sunDirAt(w: &World, p: &Vec3): Vec3 {
+    return (v3(0.0, 0.0, 0.0) - p).norm()
+}
+
+pub fn drawScene(c: &mut Canvas, s: &mut Scene, w: &World, texes: &Vec<Texture>) {
+    canvasFill(c, 0.004, 0.006, 0.014)
+    sceneClear(s)
+    let m = mapOf(w)
+    drawStars(c, w)
+
+    // Orbit tracks first, so bodies and the ship draw over them.
+    // Only the orbits worth seeing at this zoom. A track a hundred times wider
+    // than the view is not a curve on screen, it is a straight line across it,
+    // and eight of them turn a planet into a cat's cradle. One two-hundredth of
+    // the view and it is a dot under the body it belongs to.
+    var i = 1
+    while i < BODY_COUNT {
+        var size = w.bodies[i].el.a
+        if i == MOON {
+            size = 384400.0e3
+        }
+        let rel = size / w.camDist
+        if rel < 60.0 && rel > 0.02 {
+            var k = 0.16
+            if i == w.missions[w.mission].to {
+                k = 0.42
+            }
+            if i == w.missions[w.mission].from {
+                k = 0.30
+            }
+            // Fade in at both ends so an orbit does not pop as the player zooms.
+            var fade = 1.0
+            if rel > 20.0 {
+                fade = (60.0 - rel) / 40.0
+            }
+            if rel < 0.10 {
+                fade = (rel - 0.02) / 0.08
+            }
+            k = k * fade
+            drawBodyOrbit(c, m, w, i, k * 0.55, k * 0.72, k)
+        }
+        i = i + 1
+    }
+
+    drawShipTrack(c, m, w)
+    drawBodies(c, s, m, w, texes)
+    rasterFlush(c, s)
+    drawBodyLabels(c, m, w)
+    drawShip(c, m, w)
+}
+
+// A fixed star field, so that turning the camera reads as turning rather than as
+// nothing happening. Positions come from a hash rather than a table: at this
+// brightness they are texture, not constellations.
+fn drawStars(c: &mut Canvas, w: &World) {
+    let m = mapOf(w)
+    var i = 0
+    while i < 400 {
+        let h = ((i * 2654435761) % 100000) as f64 / 100000.0
+        let h2 = ((i * 40503 + 7919) % 100000) as f64 / 100000.0
+        let lon = h * Math.pi() * 2.0
+        let lat = (h2 - 0.5) * Math.pi()
+        let dir = v3(Math.cos(lat) * Math.cos(lon), Math.cos(lat) * Math.sin(lon), Math.sin(lat))
+        let p = project(m, m.view.eye + dir.scale(100.0))
+        if p.z > 0.0 && p.x >= 0.0 && p.x < (W as f64) && p.y >= 0.0 && p.y < (H as f64) {
+            let b = 0.10 + 0.30 * (((i * 31) % 97) as f64 / 97.0)
+            spot(c, p.x, p.y, 0.8, b, b, b * 1.1)
+        }
+        i = i + 1
+    }
+}
+
+fn drawBodies(c: &mut Canvas, s: &mut Scene, m: &Map, w: &World, texes: &Vec<Texture>) {
+    var i = 0
+    while i < BODY_COUNT {
+        let wp = ephemPos(w.e, i, w.t)
+        let rp = toRender(m, wp)
+        let rad = w.bodies[i].radius * m.k
+        let dist = (rp - m.view.eye).len()
+        if dist > 0.0 {
+            let pix = rad * m.view.scale / dist
+            if i == SUN {
+                if pix < 2.0 {
+                    let p = project(m, rp)
+                    if p.z > 0.0 {
+                        spot(c, p.x, p.y, 2.6, 3.0, 2.6, 1.6)
+                    }
+                } else {
+                    drawGlowSphere(s, m.view, rp, rad, 3.4, 2.9, 2.0, segmentsFor(pix))
+                }
+            } else {
+                if pix < 1.6 {
+                    // Too small to be a sphere: a dot with a floor on its size,
+                    // because a planet that vanishes at solar-system zoom makes
+                    // the map useless exactly when it is most needed.
+                    let p = project(m, rp)
+                    if p.z > 0.0 {
+                        let col = bodyTint(i)
+                        spot(c, p.x, p.y, 1.7, col.x * 0.9, col.y * 0.9, col.z * 0.9)
+                    }
+                } else {
+                    let sp = spinOf(w.t, w.bodies[i].day, w.bodies[i].tilt)
+                    let sd = sunDirAt(w, wp)
+                    if i == SATURN {
+                        drawRings(s, m.view, rp, rad * 1.24, rad * 2.27, sp, segmentsFor(pix) * 2, 1.0)
+                    }
+                    if texHasImage(texes[i]) {
+                        // Tinted well above 1. These are real albedo maps and
+                        // real albedo is dark — open ocean reflects about six
+                        // per cent, so a physically honest exposure renders the
+                        // Earth almost black. The photograph is the subject
+                        // here, not a lighting simulation.
+                        drawSphere(s, m.view, texes[i], rp, rad, sd, sp, segmentsFor(pix), 0.05, 2.9)
+                    } else {
+                        drawGlowSphere(s, m.view, rp, rad, 0.5, 0.5, 0.55, segmentsFor(pix))
+                    }
+                }
+            }
+        }
+        i = i + 1
+    }
+}
+
+fn bodyTint(id: i64): Vec3 {
+    if id == 1 {
+        return v3(0.62, 0.58, 0.54)
+    }
+    if id == 2 {
+        return v3(0.92, 0.78, 0.50)
+    }
+    if id == 3 {
+        return v3(0.42, 0.66, 0.95)
+    }
+    if id == 4 {
+        return v3(0.70, 0.70, 0.72)
+    }
+    if id == 5 {
+        return v3(0.90, 0.48, 0.32)
+    }
+    if id == 6 {
+        return v3(0.86, 0.74, 0.58)
+    }
+    return v3(0.88, 0.82, 0.62)
+}
+
+fn drawBodyLabels(c: &mut Canvas, m: &Map, w: &World) {
+    var i = 0
+    while i < BODY_COUNT {
+        let rp = toRender(m, ephemPos(w.e, i, w.t))
+        let p = project(m, rp)
+        if p.z > 0.0 && p.x > -40.0 && p.x < (W as f64) + 40.0 && p.y > 0.0 && p.y < (H as f64) {
+            let t = bodyTint(i)
+            var k = 0.55
+            if i == w.missions[w.mission].to {
+                k = 1.0
+            }
+            text(c, (p.x + 9.0) as i64, (p.y - 4.0) as i64, w.bodies[i].name, 1, t.x * k, t.y * k, t.z * k)
+        }
+        i = i + 1
+    }
+}
+
+// The ship: its planned trajectory, its current orbit, and a marker.
+fn drawShipTrack(c: &mut Canvas, m: &Map, w: &World) {
+    // The osculating orbit it is on right now, integrated rather than drawn from
+    // a conic — it is the same code that flies the ship, so what is drawn is
+    // what happens, including the parts a conic would get wrong.
+    let about = shipAbout(w)
+    let ob = orbitAbout(w.e, w.ship, w.t, about)
+    var span = 3.0 * 3600.0
+    if ob.closed {
+        span = ob.period
+    }
+    if span > 400.0 * SEC_PER_DAY {
+        span = 400.0 * SEC_PER_DAY
+    }
+    let live = propagate(w.e, w.ship, w.t, span, 200, 0 - 1)
+    polyline(c, m, live.pts, 0, live.pts.len as i64, 0.20, 0.85, 0.95, 1.0)
+
+    if w.trackValid && !w.captured {
+        // The plan, brighter and thicker. Two lines on the map at once is the
+        // whole point: one is where you are going, the other is where you would
+        // go if you did nothing.
+        let n = w.track.pts.len as i64
+        polyline(c, m, w.track.pts, 0, n, 0.95, 0.62, 0.20, 1.6)
+        // Closest approach, marked where it happens.
+        if w.track.caDist > 0.0 && w.track.caDist < 1.0e12 {
+            let to = w.missions[w.mission].to
+            let cp = ephemPos(w.e, to, w.track.caTime)
+            let p = project(m, toRender(m, cp))
+            if p.z > 0.0 {
+                circleOutline(c, p.x, p.y, 7.0, 1.0, 0.72, 0.25)
+            }
+        }
+    }
+}
+
+fn circleOutline(c: &mut Canvas, cx: f64, cy: f64, rad: f64, r: f64, g: f64, b: f64) {
+    var i = 0
+    while i < 24 {
+        let a0 = Math.pi() * 2.0 * (i as f64) / 24.0
+        let a1 = Math.pi() * 2.0 * ((i + 1) as f64) / 24.0
+        line(c, cx + Math.cos(a0) * rad, cy + Math.sin(a0) * rad, cx + Math.cos(a1) * rad, cy + Math.sin(a1) * rad, r, g, b)
+        i = i + 1
+    }
+}
+
+fn drawShip(c: &mut Canvas, m: &Map, w: &World) {
+    let p = project(m, toRender(m, w.ship.pos))
+    if p.z <= 0.0 {
+        return
+    }
+    spot(c, p.x, p.y, 2.4, 2.4, 2.6, 2.2)
+    circleOutline(c, p.x, p.y, 6.0, 0.5, 0.95, 1.0)
+}
+
+// ── the sequential ramp ───────────────────────────────────────────────────────
+
+// One hue, dark to bright, for a magnitude. Cheap is bright and expensive is
+// nearly the background, which is the right way round on a dark canvas: the eye
+// goes to the valley, and the valley is the answer.
+//
+// Not a rainbow. Porkchop plots are traditionally drawn in one, and a rainbow
+// encodes magnitude as hue, which has no perceptual order — readers cannot tell
+// which of two colours is larger without consulting the legend every time, and
+// it collapses entirely for a red-green colourblind reader. A single hue ramped
+// in lightness is monotonic for everyone.
+pub fn rampColor(f: f64): Vec3 {
+    var x = f
+    if x < 0.0 {
+        x = 0.0
+    }
+    if x > 1.0 {
+        x = 1.0
+    }
+    // Cyan through to deep indigo, with the chroma easing off at the dark end so
+    // the expensive corner recedes instead of vibrating against the background.
+    let l = 1.0 - x
+    let r = 0.06 + 0.30 * l * l
+    let g = 0.10 + 0.85 * l
+    let b = 0.22 + 0.75 * l * (0.5 + 0.5 * l)
+    return v3(r * (0.3 + 0.9 * l), g, b)
+}
+
+// ── HUD ───────────────────────────────────────────────────────────────────────
+
+pub fn fmtDate(t: f64): string {
+    let d = dateOf(t)
+    let y = d / 10000
+    let mo = (d / 100) % 100
+    let da = d % 100
+    var s = y.toString() + "-"
+    if mo < 10 {
+        s = s + "0"
+    }
+    s = s + mo.toString() + "-"
+    if da < 10 {
+        s = s + "0"
+    }
+    return s + da.toString()
+}
+
+pub fn fmtDv(v: f64): string {
+    if v >= 1000.0 {
+        return formatFloat(v / 1000.0, 2) + " km/s"
+    }
+    return formatFloat(v, 0) + " m/s"
+}
+
+pub fn fmtDist(d: f64): string {
+    if d > 0.02 * AU {
+        return formatFloat(d / AU, 3) + " AU"
+    }
+    if d > 1.0e6 {
+        return formatFloat(d / 1000.0, 0) + " km"
+    }
+    return formatFloat(d / 1000.0, 1) + " km"
+}
+
+pub fn fmtSpan(s: f64): string {
+    if s >= 2.0 * SEC_PER_DAY {
+        return formatFloat(s / SEC_PER_DAY, 1) + " d"
+    }
+    if s >= 3600.0 {
+        return formatFloat(s / 3600.0, 1) + " h"
+    }
+    return formatFloat(s / 60.0, 0) + " min"
+}
+
+fn warpLabel(v: f64): string {
+    if v >= 1000000.0 {
+        return formatFloat(v / 1000000.0, 1) + "M x"
+    }
+    if v >= 1000.0 {
+        return formatFloat(v / 1000.0, 0) + "k x"
+    }
+    return formatFloat(v, 0) + " x"
+}
+
+pub fn drawHud(c: &mut Canvas, w: &World) {
+    let m = w.mission
+    // Mission strip.
+    shadeRect(c, 0.0, 0.0, 470.0, 62.0, 0.55)
+    text(c, 14, 12, "MISSION " + (m + 1).toString() + " / " + MISSION_COUNT.toString() + "   " + w.missions[m].name, 2, 0.95, 0.98, 1.0)
+    text(c, 14, 38, w.missions[m].blurb, 1, 0.55, 0.66, 0.78)
+
+    // Clock.
+    let dw = textWidth(fmtDate(w.t), 2)
+    shadeRect(c, (W - 250) as f64, 0.0, W as f64, 56.0, 0.55)
+    text(c, W - 20 - dw, 12, fmtDate(w.t), 2, 0.92, 0.95, 1.0)
+    var wl = "paused"
+    if !w.paused {
+        wl = warpLabel(w.warp)
+    }
+    text(c, W - 20 - textWidth(wl, 1), 38, wl, 1, 0.60, 0.72, 0.85)
+
+    // Budget.
+    // The bar shows what is LEFT, not what is gone: it is a fuel gauge, and a
+    // fuel gauge that fills up as you burn reads exactly backwards.
+    var left = (w.budget - w.spent) / w.budget
+    if left < 0.0 {
+        left = 0.0
+    }
+    shadeRect(c, 0.0, (H - 74) as f64, 330.0, H as f64, 0.55)
+    text(c, 14, H - 66, "DELTA-V", 1, 0.55, 0.66, 0.78)
+    fillRect(c, 14.0, (H - 48) as f64, 314.0, (H - 32) as f64, 0.08, 0.10, 0.14)
+    var br = 0.30
+    var bg = 0.85
+    var bb = 0.95
+    if left < 0.25 {
+        br = 0.95
+        bg = 0.55
+        bb = 0.25
+    }
+    if left < 0.10 {
+        br = 0.95
+        bg = 0.30
+        bb = 0.22
+    }
+    let fw = 300.0 * left
+    if fw > 0.0 {
+        fillRect(c, 14.0, (H - 48) as f64, 14.0 + fw, (H - 32) as f64, br, bg, bb)
+    }
+    text(c, 14, H - 26, fmtDv(w.budget - w.spent) + " left of " + fmtDv(w.budget), 1, 0.72, 0.80, 0.88)
+
+    // Where the ship is, and on what.
+    let about = shipAbout(w)
+    let ob = shipOrbit(w)
+    shadeRect(c, (W - 330) as f64, (H - 96) as f64, W as f64, H as f64, 0.55)
+    text(c, W - 318, H - 88, "ORBITING " + w.bodies[about].name, 1, 0.55, 0.66, 0.78)
+    if ob.closed {
+        text(c, W - 318, H - 68, "peri " + fmtDist(ob.periapsis - w.bodies[about].radius) + "   apo " + fmtDist(ob.apoapsis - w.bodies[about].radius), 1, 0.85, 0.90, 0.95)
+        text(c, W - 318, H - 48, "e " + formatFloat(ob.ecc, 3) + "   period " + fmtSpan(ob.period), 1, 0.70, 0.78, 0.86)
+    } else {
+        text(c, W - 318, H - 68, "escape trajectory", 1, 0.95, 0.72, 0.35)
+        text(c, W - 318, H - 48, "speed " + formatFloat(ob.speed, 0) + " m/s", 1, 0.70, 0.78, 0.86)
+    }
+    text(c, W - 318, H - 26, "alt " + fmtDist(ob.altitude), 1, 0.70, 0.78, 0.86)
+
+    drawPlanPanel(c, w)
+    drawMessage(c, w)
+}
+
+fn drawPlanPanel(c: &mut Canvas, w: &World) {
+    let m = w.mission
+    let to = w.missions[m].to
+    let x = 14
+    var y = 86
+    shadeRect(c, 0.0, 76.0, 400.0, 250.0, 0.45)
+    text(c, x, y, "PLAN", 1, 0.55, 0.66, 0.78)
+    y = y + 22
+    text(c, x, y, "depart  " + fmtDate(w.planDep), 1, 0.88, 0.92, 0.96)
+    y = y + 20
+    text(c, x, y, "flight  " + fmtSpan(w.planTof), 1, 0.88, 0.92, 0.96)
+    y = y + 20
+    text(c, x, y, "arrive  " + fmtDate(w.planDep + w.planTof), 1, 0.88, 0.92, 0.96)
+    y = y + 24
+    if w.planValid {
+        text(c, x, y, "cost    " + fmtDv(w.planDv), 1, 0.35, 0.90, 0.95)
+        y = y + 20
+        let peri = w.track.caDist - w.bodies[to].radius
+        var r = 0.35
+        var g = 0.90
+        var b = 0.95
+        if w.track.hit >= 0 {
+            r = 0.95
+            g = 0.40
+            b = 0.30
+        }
+        text(c, x, y, "arrives " + fmtDist(peri) + " over " + w.bodies[to].name, 1, r, g, b)
+        y = y + 20
+        text(c, x, y, "at      " + formatFloat(w.planArrVinf, 0) + " m/s relative", 1, 0.70, 0.78, 0.86)
+    } else {
+        text(c, x, y, "no plan yet — press P for the window map", 1, 0.65, 0.70, 0.76)
+        y = y + 20
+    }
+    y = y + 26
+    if !w.committed {
+        text(c, x, y, "P window map    ENTER commit", 1, 0.60, 0.70, 0.80)
+    } else {
+        let cap = currentCapture(w)
+        if cap.possible {
+            text(c, x, y, "ENTER capture burn  " + fmtDv(cap.dv), 1, 1.0, 0.75, 0.30)
+        } else {
+            text(c, x, y, ". / , time warp    TAB focus", 1, 0.60, 0.70, 0.80)
+        }
+    }
+}
+
+fn drawMessage(c: &mut Canvas, w: &World) {
+    if w.messageAge > 6.0 || w.message.len == 0 {
+        return
+    }
+    var a = 1.0
+    if w.messageAge > 4.5 {
+        a = (6.0 - w.messageAge) / 1.5
+    }
+    let tw = textWidth(w.message, 2)
+    shadeRect(c, ((W / 2) as f64) - (tw as f64) * 0.5 - 16.0, 96.0, ((W / 2) as f64) + (tw as f64) * 0.5 + 16.0, 132.0, 0.6 * a)
+    textCentered(c, W / 2, 104, w.message, 2, a, a * 0.95, a * 0.85)
+}
+
+pub fn drawOutcome(c: &mut Canvas, w: &World) {
+    if !w.won && !w.failed {
+        return
+    }
+    shadeRect(c, 0.0, 0.0, W as f64, H as f64, 0.72)
+    if w.won {
+        textCentered(c, W / 2, 280, "CAPTURED", 4, 0.35, 0.95, 0.95)
+        textCentered(c, W / 2, 340, w.bodies[w.missions[w.mission].to].name + " orbit achieved with " + fmtDv(w.budget - w.spent) + " to spare", 2, 0.85, 0.90, 0.95)
+        if w.mission + 1 < MISSION_COUNT {
+            textCentered(c, W / 2, 400, "ENTER for " + w.missions[w.mission + 1].name, 2, 1.0, 0.80, 0.35)
+        } else {
+            textCentered(c, W / 2, 400, "that was the last one. all six.", 2, 1.0, 0.80, 0.35)
+        }
+    } else {
+        textCentered(c, W / 2, 300, "MISSION LOST", 4, 0.95, 0.40, 0.30)
+        textCentered(c, W / 2, 360, w.message, 2, 0.85, 0.85, 0.85)
+        textCentered(c, W / 2, 410, "R to try again", 2, 0.80, 0.85, 0.90)
+    }
+}
+
+// ── the porkchop screen ───────────────────────────────────────────────────────
+
+pub let PORK_X: f64 = 150.0
+
+pub let PORK_Y: f64 = 120.0
+
+pub let PORK_W: f64 = 760.0
+
+pub let PORK_H: f64 = 460.0
+
+// Departure date across, flight time up, total mission cost as brightness. Every
+// cell is a complete transfer that the game could fly; clicking one is the whole
+// interaction, and the blue valley is the answer.
+pub fn drawPorkchop(c: &mut Canvas, w: &World, mx: f64, my: f64) {
+    shadeRect(c, 0.0, 0.0, W as f64, H as f64, 0.86)
+    let m = w.mission
+    textCentered(c, W / 2, 40, "LAUNCH WINDOW — " + w.bodies[w.missions[m].from].name + " to " + w.bodies[w.missions[m].to].name, 2, 0.95, 0.98, 1.0)
+    textCentered(c, W / 2, 74, "brighter is cheaper. click a cell to plan it.", 1, 0.60, 0.70, 0.80)
+    if w.porkW <= 0 {
+        return
+    }
+    let cw = PORK_W / (w.porkW as f64)
+    let ch = PORK_H / (w.porkH as f64)
+    // The ramp spans the best transfer in the window up to three times its cost;
+    // beyond that everything is equally out of the question and stretching the
+    // scale to include it would flatten the valley into one shade.
+    let lo = w.porkBest
+    let hi = w.porkBest * 3.0
+    var j = 0
+    while j < w.porkH {
+        var i = 0
+        while i < w.porkW {
+            let cost = w.porkGrid[j * w.porkW + i]
+            let x0 = PORK_X + (i as f64) * cw
+            // Flight time increases upward, which is how every porkchop plot in
+            // the literature is drawn.
+            let y0 = PORK_Y + PORK_H - ((j + 1) as f64) * ch
+            if cost < 1.0e29 {
+                let f = (cost - lo) / (hi - lo)
+                let col = rampColor(f)
+                fillRect(c, x0, y0, x0 + cw + 0.6, y0 + ch + 0.6, col.x, col.y, col.z)
+            } else {
+                fillRect(c, x0, y0, x0 + cw + 0.6, y0 + ch + 0.6, 0.02, 0.02, 0.03)
+            }
+            i = i + 1
+        }
+        j = j + 1
+    }
+
+    // Axes.
+    text(c, PORK_X as i64, (PORK_Y + PORK_H + 12.0) as i64, fmtDate(porkDep(w, 0)), 1, 0.70, 0.78, 0.86)
+    let lastLab = fmtDate(porkDep(w, w.porkW - 1))
+    text(c, (PORK_X + PORK_W) as i64 - textWidth(lastLab, 1), (PORK_Y + PORK_H + 12.0) as i64, lastLab, 1, 0.70, 0.78, 0.86)
+    text(c, PORK_X as i64, (PORK_Y + PORK_H + 32.0) as i64, "departure date", 1, 0.50, 0.58, 0.66)
+    text(c, (PORK_X + PORK_W + 14.0) as i64, (PORK_Y + PORK_H - 8.0) as i64, fmtSpan(porkTof(w, 0)), 1, 0.70, 0.78, 0.86)
+    text(c, (PORK_X + PORK_W + 14.0) as i64, PORK_Y as i64, fmtSpan(porkTof(w, w.porkH - 1)), 1, 0.70, 0.78, 0.86)
+    text(c, (PORK_X + PORK_W + 14.0) as i64, (PORK_Y + PORK_H * 0.5) as i64, "flight time", 1, 0.50, 0.58, 0.66)
+
+    // Legend: the ramp with the two numbers that bound it, so a shade can be
+    // read as a cost without counting cells.
+    var k = 0
+    while k < 120 {
+        let f = (k as f64) / 119.0
+        let col = rampColor(f)
+        fillRect(c, PORK_X + (k as f64) * 2.0, PORK_Y - 34.0, PORK_X + (k as f64) * 2.0 + 2.4, PORK_Y - 18.0, col.x, col.y, col.z)
+        k = k + 1
+    }
+    text(c, PORK_X as i64, (PORK_Y - 54.0) as i64, fmtDv(lo), 1, 0.80, 0.86, 0.92)
+    text(c, (PORK_X + 240.0) as i64 - textWidth(fmtDv(hi) + " or worse", 1), (PORK_Y - 54.0) as i64, fmtDv(hi) + " or worse", 1, 0.80, 0.86, 0.92)
+
+    // Where the current plan sits.
+    markPlan(c, w)
+
+    // Hover readout.
+    if mx >= PORK_X && mx < PORK_X + PORK_W && my >= PORK_Y && my < PORK_Y + PORK_H {
+        let i = ((mx - PORK_X) / cw) as i64
+        let j2 = w.porkH - 1 - (((my - PORK_Y) / ch) as i64)
+        if i >= 0 && i < w.porkW && j2 >= 0 && j2 < w.porkH {
+            let cost = w.porkGrid[j2 * w.porkW + i]
+            let bx = mx + 14.0
+            let by = my - 46.0
+            shadeRect(c, bx, by, bx + 250.0, by + 62.0, 0.80)
+            text(c, bx as i64 + 8, by as i64 + 6, "leave " + fmtDate(porkDep(w, i)), 1, 0.92, 0.95, 1.0)
+            text(c, bx as i64 + 8, by as i64 + 24, "take  " + fmtSpan(porkTof(w, j2)), 1, 0.92, 0.95, 1.0)
+            if cost < 1.0e29 {
+                text(c, bx as i64 + 8, by as i64 + 42, "cost  " + fmtDv(cost), 1, 0.40, 0.92, 0.96)
+            } else {
+                text(c, bx as i64 + 8, by as i64 + 42, "no transfer", 1, 0.90, 0.45, 0.35)
+            }
+            circleOutline(c, mx, my, 5.0, 1.0, 1.0, 1.0)
+        }
+    }
+    textCentered(c, W / 2, (H - 34) as i64, "P or ESC to go back", 1, 0.60, 0.68, 0.76)
+}
+
+fn markPlan(c: &mut Canvas, w: &World) {
+    if w.porkW <= 0 {
+        return
+    }
+    let m = w.mission
+    let span = w.missions[m].windowSpan
+    let t0 = w.missions[m].windowOpen
+    let mid = w.missions[m].nominalTof
+    let tofLo = mid * 0.45
+    let tofHi = mid * 1.75
+    let fx = (w.planDep - t0) / span
+    let fy = (w.planTof - tofLo) / (tofHi - tofLo)
+    if fx < 0.0 || fx > 1.0 || fy < 0.0 || fy > 1.0 {
+        return
+    }
+    let x = PORK_X + PORK_W * fx
+    let y = PORK_Y + PORK_H * (1.0 - fy)
+    circleOutline(c, x, y, 8.0, 1.0, 0.78, 0.28)
+    circleOutline(c, x, y, 9.5, 1.0, 0.78, 0.28)
+}

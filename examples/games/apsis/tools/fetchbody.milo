@@ -1,0 +1,133 @@
+// Downloads the planet maps APSIS draws, from NASA and USGS.
+//
+//   milo run examples/games/apsis/tools/fetchbody.milo            # all of them
+//   milo run examples/games/apsis/tools/fetchbody.milo -- mars     # just one
+//
+// Two public sources, both free of an API key and both public domain, so the
+// results can be committed and redistributed:
+//
+//   planets   The USGS Astrogeology WMS at planetarymaps.usgs.gov, which serves
+//             the controlled global mosaics each mission produced — MESSENGER
+//             for Mercury, Magellan radar for Venus, LROC for the Moon, Viking
+//             MDIM21 for Mars, Cassini for Jupiter and Saturn.
+//   Earth     NASA GIBS, Blue Marble with shaded relief and bathymetry.
+//
+// Three things about these endpoints cost an afternoon to find out:
+//
+//   * `STYLES=` must be PRESENT AND EMPTY. MapServer 8 rejects a GetMap without
+//     it ("Missing required parameter STYLES") rather than defaulting, and the
+//     rejection comes back as HTTP 200 with an XML body, so it looks like a
+//     successful download until something tries to decode it as a PNG.
+//   * The Moon lives under /maps/earth/, not /maps/moon/. The latter answers,
+//     with an empty capabilities document.
+//   * The images are requested SQUARE even though they are equirectangular maps
+//     of a 2:1 domain. That is not a mistake: the renderer's texture sampler
+//     masks both axes with `w - 1` (see raster.milo), so a non-square texture
+//     samples its rows off the end. Asking the server to stretch the projection
+//     costs nothing — the map from latitude and longitude to pixel stays linear,
+//     which is all the sphere's UV mapping needs — and it keeps the renderer's
+//     inner loop free of a second mask.
+//
+// Google's data is deliberately not used: their terms forbid bulk download and
+// redistribution, so an asset built from it could not ship.
+
+from "std/fetch" import {
+    fetch
+}
+from "std/fs" import {
+    writeFile, pathExists
+}
+from "std/args" import {
+    args
+}
+
+struct Source {
+    name: string,
+    url: string,
+    size: i64,
+}
+
+fn usgs(name: string, mapFile: string, layer: string, size: i64): Source {
+    return Source {
+        name: name,
+        url: "https://planetarymaps.usgs.gov/cgi-bin/mapserv?map=" + mapFile
+        + "&service=WMS&version=1.1.1&request=GetMap&layers=" + layer
+        + "&styles=&srs=EPSG:4326&bbox=-180,-90,180,90&width=" + size.toString()
+        + "&height=" + size.toString() + "&format=image/png",
+        size: size,
+    }
+}
+
+// Earth and Mars are the two the player gets close enough to fill the screen
+// with; the rest are only ever seen from a distance where 1024 is already more
+// texels than pixels.
+fn sources(): Vec<Source> {
+    var v: Vec<Source> = Vec.new()
+    v.push(usgs("mercury", "/maps/mercury/mercury_simp_cyl.map", "MESSENGER_Color", 1024))
+    v.push(usgs("venus", "/maps/venus/venus_simp_cyl.map", "MAGELLAN_color", 1024))
+    v.push(Source {
+        name: "earth",
+        url: "https://gibs.earthdata.nasa.gov/wms/epsg4326/best/wms.cgi?SERVICE=WMS&VERSION=1.1.1"
+        + "&REQUEST=GetMap&LAYERS=BlueMarble_ShadedRelief_Bathymetry&STYLES="
+        + "&SRS=EPSG:4326&BBOX=-180,-90,180,90&WIDTH=2048&HEIGHT=2048&FORMAT=image/png",
+        size: 2048,
+    }
+    )
+    v.push(usgs("moon", "/maps/earth/moon_simp_cyl.map", "LROC_WAC", 1024))
+    v.push(usgs("mars", "/maps/mars/mars_simp_cyl.map", "MDIM21_color", 2048))
+    v.push(usgs("jupiter", "/maps/jupiter/jupiter_simp_cyl.map", "CASSINI", 1024))
+    v.push(usgs("saturn", "/maps/saturn/saturn_simp_cyl.map", "CASSINI", 1024))
+    return v
+}
+
+pub fn main(): i32 {
+    let argv = args()
+    var only = ""
+    var i = 1
+    while i < argv.len {
+        only = argv[i].clone()
+        i = i + 1
+    }
+    let all = sources()
+    var failed = 0
+    var k = 0
+    while k < all.len {
+        let name = all[k].name.clone()
+        if only == "" || only == name {
+            let out = "examples/games/apsis/bodies/" + name + ".png"
+            print("fetching " + name + " (" + all[k].size.toString() + "px) ...")
+            match fetch(all[k].url) {
+                Result.Ok(resp) => {
+                    // The WMS reports its own failures with HTTP 200 and an XML
+                    // body, so the status code proves nothing. A PNG starts with
+                    // a fixed 8-byte signature; anything else is an error
+                    // document wearing a .png name.
+                    if resp.body.len < 8 || resp.body[1] != 80 || resp.body[2] != 78 || resp.body[3] != 71 {
+                        print("  NOT A PNG — the server returned " + resp.body.len.toString() + " bytes, probably a service exception")
+                        failed = failed + 1
+                    } else {
+                        match writeFile(out, resp.body) {
+                            Result.Ok(_) => {
+                                print("  wrote " + out + " (" + resp.body.len.toString() + " bytes)")
+                            }
+                            Result.Err(err) => {
+                                let _ = err
+                                print("  write failed")
+                                failed = failed + 1
+                            }
+                        }
+                    }
+                }
+                Result.Err(_) => {
+                    print("  download failed")
+                    failed = failed + 1
+                }
+            }
+        }
+        k = k + 1
+    }
+    if failed > 0 {
+        return 1
+    }
+    return 0
+}

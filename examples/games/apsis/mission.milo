@@ -1,0 +1,59 @@
+// The campaign.
+//
+// Six missions. Each one is unfair without the idea the one before it forced you
+// to learn, which is the only structure a campaign about orbital mechanics
+// really needs — the subject already escalates on its own.
+//
+// A mission is won by arriving in a STABLE CAPTURE ORBIT: periapsis inside the
+// band the mission names, still closed an hour later, and with budget left. It
+// is lost by running the budget out, by hitting something, or by leaving the
+// target behind.
+
+from "./ephem" import {
+    SEC_PER_DAY, timeOf, EARTH, MOON, MARS, VENUS, MERCURY, JUPITER, SATURN
+}
+
+pub let MISSION_COUNT: i64 = 6
+
+pub struct Mission {
+    name: string,
+    // One line, shown under the title. What this mission is actually teaching,
+    // said as a fact about the solar system rather than as a lesson.
+    blurb: string,
+    from: i64,
+    to: i64,
+    parkAlt: f64, // starting circular orbit altitude
+    captureAlt: f64, // periapsis altitude that counts as arrival
+    captureApo: f64, // apoapsis to aim the insertion burn at
+    tolerance: f64, // how far off the target periapsis still counts
+    budget: f64, // total delta-v, m/s
+    windowOpen: f64, // earliest departure
+    windowSpan: f64, // how long the window stays open
+    nominalTof: f64, // the flight time the porkchop opens centred on
+    nominalWait: f64, // how far into the window the plan starts
+}
+
+fn mission(name: string, blurb: string, from: i64, to: i64, parkAlt: f64, capAlt: f64, capApo: f64, tol: f64, budget: f64, open: f64, span: f64, tof: f64, wait: f64): Mission {
+    return Mission {
+        name: name, blurb: blurb, from: from, to: to,
+        parkAlt: parkAlt * 1000.0, captureAlt: capAlt * 1000.0, captureApo: capApo * 1000.0,
+        tolerance: tol * 1000.0, budget: budget,
+        windowOpen: open, windowSpan: span * SEC_PER_DAY,
+        nominalTof: tof * SEC_PER_DAY, nominalWait: wait * SEC_PER_DAY,
+    }
+}
+
+// Budgets are set a little above what a competent plan costs, so a clean run
+// finishes with a visible margin and a sloppy one does not. They are not
+// generous: Mercury cannot be reached directly inside its budget, which is the
+// entire point of that mission.
+pub fn missionTable(): Vec<Mission> {
+    var v: Vec<Mission> = Vec.new()
+    v.push(mission("The Moon", "The target moves. Aim where it will be, not where it is.", EARTH, MOON, 300.0, 100.0, 3000.0, 400.0, 4600.0, timeOf(2030, 3, 1), 60.0, 4.0, 0.5))
+    v.push(mission("Mars", "Launch windows are real. You wait for the planet; it does not wait for you.", EARTH, MARS, 300.0, 500.0, 20000.0, 900.0, 6400.0, timeOf(2033, 3, 20), 90.0, 280.0, 30.0))
+    v.push(mission("Venus", "Falling inward means arriving fast, and arriving fast is what costs.", EARTH, VENUS, 300.0, 500.0, 25000.0, 900.0, 7000.0, timeOf(2031, 5, 20), 70.0, 150.0, 20.0))
+    v.push(mission("Mercury", "The closest planet is the hardest to stop at. The Sun does not let go.", EARTH, MERCURY, 300.0, 400.0, 12000.0, 800.0, 16000.0, timeOf(2032, 6, 1), 90.0, 130.0, 20.0))
+    v.push(mission("Jupiter", "Two and a half years out, and one course correction has to hold all of it.", EARTH, JUPITER, 300.0, 2000.0, 400000.0, 20000.0, 10500.0, timeOf(2035, 1, 10), 120.0, 950.0, 40.0))
+    v.push(mission("Saturn", "The graduation. Everything above, twice as far, on the same tank.", EARTH, SATURN, 300.0, 3000.0, 800000.0, 40000.0, 13500.0, timeOf(2037, 6, 1), 150.0, 2200.0, 50.0))
+    return v
+}

@@ -1,0 +1,219 @@
+// Drawing a planet.
+//
+// A UV sphere, lit by the Sun and wearing a real photograph of the place. The
+// mesh is rebuilt every frame rather than cached, because the tessellation
+// depends on how big the body is on screen right now — a world that is four
+// pixels across gets eight segments, and the one filling the frame gets a
+// hundred and twenty. Building it costs a few thousand sin/cos; caching it would
+// cost a rebuild every time the zoom changed, which is every frame the player is
+// scrolling.
+//
+// Lighting is per-vertex, interpolated across the triangle by the rasteriser's
+// gouraud path. Flat shading is visibly wrong on a sphere at any tessellation
+// that runs in real time: the terminator turns into a staircase, and the
+// terminator is the single most recognisable thing about a lit planet.
+
+from "std/math" import {
+    Math
+}
+from "./vec3" import {
+    Vec3, v3
+}
+from "./raster" import {
+    Texture, Vtx, vtxC
+}
+from "./gfx3d" import {
+    Scene, View, triangleV, triangleG
+}
+
+// How many segments a body of this on-screen radius deserves. Doubling the
+// tessellation past the point where a quad is a couple of pixels across buys
+// nothing but triangles.
+pub fn segmentsFor(pixRadius: f64): i64 {
+    var n = (pixRadius * 0.55) as i64
+    if n < 8 {
+        n = 8
+    }
+    if n > 120 {
+        n = 120
+    }
+    return n
+}
+
+// The orientation of a body's surface: spin about its own axis, tilted off the
+// ecliptic. Returned as the three axes of the body frame so the caller can turn
+// a latitude and longitude into a world direction with three multiplies.
+pub struct Spin {
+    ax: Vec3, // body x, through longitude 0 on the equator
+    ay: Vec3, // body y, through longitude 90
+    az: Vec3, // body north pole
+}
+
+pub fn spinOf(t: f64, day: f64, tilt: f64): Spin {
+    var ang = 0.0
+    if day != 0.0 {
+        ang = Math.mod(t / day, 1.0) * Math.pi() * 2.0
+    }
+    // Tilt about the +x axis, so the pole leans toward -y at zero.
+    let ct = Math.cos(tilt)
+    let st = Math.sin(tilt)
+    let pole = v3(0.0, -st, ct)
+    let eqA = v3(1.0, 0.0, 0.0)
+    let eqB = pole.cross(eqA).norm()
+    let ca = Math.cos(ang)
+    let sa = Math.sin(ang)
+    return Spin {
+        ax: eqA.scale(ca) + eqB.scale(sa),
+        ay: eqA.scale(-sa) + eqB.scale(ca),
+        az: pole,
+    }
+}
+
+fn surfaceDir(sp: &Spin, lat: f64, lon: f64): Vec3 {
+    let cl = Math.cos(lat)
+    return sp.ax.scale(cl * Math.cos(lon)) + sp.ay.scale(cl * Math.sin(lon)) + sp.az.scale(Math.sin(lat))
+}
+
+// Soft terminator. A hard max(0, n.L) puts a knife edge across the day/night
+// boundary; real limbs are softened by the finite angular size of the Sun and by
+// atmosphere, and half a percent of wrap reads as both without costing a shader.
+fn litness(ndotl: f64): f64 {
+    let soft = (ndotl + 0.08) / 1.08
+    if soft <= 0.0 {
+        return 0.0
+    }
+    if soft >= 1.0 {
+        return 1.0
+    }
+    // Smoothstep, so the terminator has no visible band where it clips.
+    return soft * soft * (3.0 - 2.0 * soft)
+}
+
+// Draw a textured, lit sphere. `centre` and `radius` are already in render
+// units; `sunDir` points from the body toward the Sun.
+pub fn drawSphere(s: &mut Scene, view: &View, tex: &Texture, centre: &Vec3, radius: f64, sunDir: &Vec3, sp: &Spin, segs: i64, ambient: f64, tint: f64) {
+    let rows = segs
+    let cols = segs * 2
+    let pi = Math.pi()
+    var j = 0
+    while j < rows {
+        let lat0 = -pi * 0.5 + pi * (j as f64) / (rows as f64)
+        let lat1 = -pi * 0.5 + pi * ((j + 1) as f64) / (rows as f64)
+        // v runs 0 at the NORTH pole because a PNG's first row is its top, and
+        // an equirectangular map puts north at the top.
+        let v0 = 0.5 - lat0 / pi
+        let v1 = 0.5 - lat1 / pi
+        var i = 0
+        while i < cols {
+            let lon0 = pi * 2.0 * (i as f64) / (cols as f64)
+            let lon1 = pi * 2.0 * ((i + 1) as f64) / (cols as f64)
+            let u0 = (i as f64) / (cols as f64)
+            let u1 = ((i + 1) as f64) / (cols as f64)
+
+            let n00 = surfaceDir(sp, lat0, lon0)
+            let n10 = surfaceDir(sp, lat0, lon1)
+            let n01 = surfaceDir(sp, lat1, lon0)
+            let n11 = surfaceDir(sp, lat1, lon1)
+
+            let l00 = ambient + (1.0 - ambient) * litness(n00.dot(sunDir))
+            let l10 = ambient + (1.0 - ambient) * litness(n10.dot(sunDir))
+            let l01 = ambient + (1.0 - ambient) * litness(n01.dot(sunDir))
+            let l11 = ambient + (1.0 - ambient) * litness(n11.dot(sunDir))
+
+            let p00 = centre + n00.scale(radius)
+            let p10 = centre + n10.scale(radius)
+            let p01 = centre + n01.scale(radius)
+            let p11 = centre + n11.scale(radius)
+
+            let a = vtxC(p00.x, p00.y, p00.z, u0, v0, l00, 1.0, 1.0, 1.0, 1.0)
+            let b = vtxC(p10.x, p10.y, p10.z, u1, v0, l10, 1.0, 1.0, 1.0, 1.0)
+            let c = vtxC(p11.x, p11.y, p11.z, u1, v1, l11, 1.0, 1.0, 1.0, 1.0)
+            let d = vtxC(p01.x, p01.y, p01.z, u0, v1, l01, 1.0, 1.0, 1.0, 1.0)
+            triangleV(s, view, tex, a, b, c, tint, tint, tint)
+            triangleV(s, view, tex, a, c, d, tint, tint, tint)
+            i = i + 1
+        }
+        j = j + 1
+    }
+}
+
+// An unlit sphere in one colour, for the Sun. The Sun is its own light source,
+// so running it through the lit path would draw a crescent Sun — which is
+// exactly what the first version did.
+pub fn drawGlowSphere(s: &mut Scene, view: &View, centre: &Vec3, radius: f64, r: f64, g: f64, b: f64, segs: i64) {
+    let rows = segs
+    let cols = segs * 2
+    let pi = Math.pi()
+    let sp = spinOf(0.0, 0.0, 0.0)
+    var j = 0
+    while j < rows {
+        let lat0 = -pi * 0.5 + pi * (j as f64) / (rows as f64)
+        let lat1 = -pi * 0.5 + pi * ((j + 1) as f64) / (rows as f64)
+        var i = 0
+        while i < cols {
+            let lon0 = pi * 2.0 * (i as f64) / (cols as f64)
+            let lon1 = pi * 2.0 * ((i + 1) as f64) / (cols as f64)
+            let p00 = centre + surfaceDir(sp, lat0, lon0).scale(radius)
+            let p10 = centre + surfaceDir(sp, lat0, lon1).scale(radius)
+            let p01 = centre + surfaceDir(sp, lat1, lon0).scale(radius)
+            let p11 = centre + surfaceDir(sp, lat1, lon1).scale(radius)
+            let a = vtxC(p00.x, p00.y, p00.z, 0.0, 0.0, 1.0, r, g, b, 0.0)
+            let bb = vtxC(p10.x, p10.y, p10.z, 0.0, 0.0, 1.0, r, g, b, 0.0)
+            let c = vtxC(p11.x, p11.y, p11.z, 0.0, 0.0, 1.0, r, g, b, 0.0)
+            let d = vtxC(p01.x, p01.y, p01.z, 0.0, 0.0, 1.0, r, g, b, 0.0)
+            triangleG(s, view, a, bb, c, 1.0, 1.0, 1.0)
+            triangleG(s, view, a, c, d, 1.0, 1.0, 1.0)
+            i = i + 1
+        }
+        j = j + 1
+    }
+}
+
+// Saturn's rings: a flat annulus in the body's equatorial plane, banded by
+// radius from the Cassini division outward.
+//
+// Drawn as geometry rather than as a sprite because the rings have to pass
+// BEHIND the planet on one side and in front on the other, which is a depth
+// question, and because their opening angle relative to the viewer is most of
+// what makes Saturn recognisable.
+pub fn drawRings(s: &mut Scene, view: &View, centre: &Vec3, inner: f64, outer: f64, sp: &Spin, segs: i64, lit: f64) {
+    let pi = Math.pi()
+    var i = 0
+    while i < segs {
+        let a0 = pi * 2.0 * (i as f64) / (segs as f64)
+        let a1 = pi * 2.0 * ((i + 1) as f64) / (segs as f64)
+        let d0 = sp.ax.scale(Math.cos(a0)) + sp.ay.scale(Math.sin(a0))
+        let d1 = sp.ax.scale(Math.cos(a1)) + sp.ay.scale(Math.sin(a1))
+        var band = 0
+        while band < 5 {
+            let f0 = (band as f64) / 5.0
+            let f1 = ((band + 1) as f64) / 5.0
+            let r0 = inner + (outer - inner) * f0
+            let r1 = inner + (outer - inner) * f1
+            // The Cassini division is a real gap, not a darker band: skipping
+            // the fourth ring outward is what makes the silhouette read as
+            // Saturn rather than as a disc.
+            if band != 3 {
+                var k = 0.62 + 0.12 * ((band % 2) as f64)
+                k = k * lit
+                let p00 = centre + d0.scale(r0)
+                let p10 = centre + d1.scale(r0)
+                let p01 = centre + d0.scale(r1)
+                let p11 = centre + d1.scale(r1)
+                let va = vtxC(p00.x, p00.y, p00.z, 0.0, 0.0, 1.0, k, k * 0.93, k * 0.80, 0.0)
+                let vb = vtxC(p10.x, p10.y, p10.z, 0.0, 0.0, 1.0, k, k * 0.93, k * 0.80, 0.0)
+                let vc = vtxC(p11.x, p11.y, p11.z, 0.0, 0.0, 1.0, k, k * 0.93, k * 0.80, 0.0)
+                let vd = vtxC(p01.x, p01.y, p01.z, 0.0, 0.0, 1.0, k, k * 0.93, k * 0.80, 0.0)
+                triangleG(s, view, va, vb, vc, 1.0, 1.0, 1.0)
+                triangleG(s, view, va, vc, vd, 1.0, 1.0, 1.0)
+                // Rings are thin and lit from one side, but they are visible
+                // from below too — without the back face the rings vanish
+                // whenever the camera crosses Saturn's equatorial plane.
+                triangleG(s, view, va, vc, vb, 1.0, 1.0, 1.0)
+                triangleG(s, view, va, vd, vc, 1.0, 1.0, 1.0)
+            }
+            band = band + 1
+        }
+        i = i + 1
+    }
+}

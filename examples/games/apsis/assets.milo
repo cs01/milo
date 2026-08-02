@@ -1,0 +1,106 @@
+// The planet maps, baked into the binary.
+//
+// Every image is an @embedFile of exactly the bytes `tools/fetchbody.milo`
+// downloaded, so the game ships as one file with no asset path to get wrong and
+// nothing is read from disk while it runs. See `bodies/README.md` for where they
+// came from and what licence they carry (public domain, all of them).
+//
+// They are decoded to byte-backed textures rather than to f32 triples: a
+// 2048-square map is 12 MB as sRGB bytes and 50 MB as floats, and the sampler's
+// lookup table makes the conversion exact anyway. FLYBY learned that the
+// expensive way — four preloaded 2048 drapes came to 200 MB and the memory guard
+// killed the process.
+
+from "std/png" import {
+    Png
+}
+from "./raster" import {
+    Texture, texNew, texEmpty
+}
+from "./ephem" import {
+    BODY_COUNT, SUN, MERCURY, VENUS, EARTH, MOON, MARS, JUPITER, SATURN
+}
+
+fn shiftOf(n: i64): i64 {
+    var k = 0
+    var v = 1
+    while v < n {
+        v = v * 2
+        k = k + 1
+    }
+    if v != n {
+        return 0 - 1
+    }
+    return k
+}
+
+fn srgbTable(): Vec<f32> {
+    var lut: Vec<f32> = Vec.new()
+    var i = 0
+    while i < 256 {
+        let c = (i as f64) / 255.0
+        var lin = c / 12.92
+        if c > 0.04045 {
+            lin = ((c + 0.055) / 1.055) * ((c + 0.055) / 1.055)
+            // The exact transfer is a 2.4 power; squaring is within a percent
+            // over the whole range and this runs 256 times at startup, so the
+            // difference is not worth an exp/log pair per entry.
+        }
+        lut.push(lin as f32)
+        i = i + 1
+    }
+    return lut
+}
+
+fn decode(png: &string): Texture {
+    match Png.decode(png) {
+        Result.Ok(img) => {
+            let n = img.width
+            let shift = shiftOf(n)
+            if shift < 0 || img.height != n {
+                // Square powers of two only — the sampler masks both axes with
+                // w-1. `fetchbody.milo` requests square images for exactly this
+                // reason; anything else here is a corrupted asset.
+                return texEmpty()
+            }
+            var t = texNew(n, shift)
+            t.byteSrc = true
+            t.lut = srgbTable()
+            t.px = Vec.new()
+            t.pxu = Vec.filled(n * n * 3, 0 as u8)
+            let ch = img.channels
+            var y = 0
+            while y < n {
+                var x = 0
+                while x < n {
+                    let src = (y * n + x) * ch
+                    let dst = (y * n + x) * 3
+                    t.pxu[dst] = img.pixels[src]
+                    t.pxu[dst + 1] = img.pixels[src + 1]
+                    t.pxu[dst + 2] = img.pixels[src + 2]
+                    x = x + 1
+                }
+                y = y + 1
+            }
+            return t
+        }
+        Result.Err(_) => {
+            return texEmpty()
+        }
+    }
+}
+
+// One texture per body, indexed by body id. The Sun's slot is empty — it is
+// drawn as its own light source, not as a lit surface.
+pub fn loadBodyTextures(): Vec<Texture> {
+    var v: Vec<Texture> = Vec.new()
+    v.push(texEmpty())
+    v.push(decode(@embedFile("bodies/mercury.png")))
+    v.push(decode(@embedFile("bodies/venus.png")))
+    v.push(decode(@embedFile("bodies/earth.png")))
+    v.push(decode(@embedFile("bodies/moon.png")))
+    v.push(decode(@embedFile("bodies/mars.png")))
+    v.push(decode(@embedFile("bodies/jupiter.png")))
+    v.push(decode(@embedFile("bodies/saturn.png")))
+    return v
+}

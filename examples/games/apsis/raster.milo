@@ -111,6 +111,20 @@ pub fn texNew(size: i64, shift: i64): Texture {
     }
 }
 
+// A texture that carries no image. Bodies without a map — the Sun, and any body
+// whose asset failed to decode — hold one of these, and the renderer draws them
+// through the untextured path instead.
+pub fn texEmpty(): Texture {
+    return Texture {
+        w: 0, h: 0, mask: 0, pxu: Vec.new(), lut: Vec.new(),
+        byteSrc: false, mirror: false, shift: 0, px: Vec.new(),
+    }
+}
+
+pub fn texHasImage(t: &Texture): bool {
+    return t.w > 0
+}
+
 pub fn texSet(t: &mut Texture, x: i64, y: i64, r: f64, g: f64, b: f64) {
     let i = ((y << t.shift) + x) * 3
     t.px[i] = r as f32

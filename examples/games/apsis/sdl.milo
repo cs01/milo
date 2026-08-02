@@ -107,123 +107,141 @@ pub let SC_UP: i64 = 82
 
 // One frame of input, snapshotted out of SDL so the rest of the game never
 // touches a pointer.
+
+// Mouse. The map is dragged and the maneuver handles are pulled, so unlike
+// FLYBY this game needs a pointer as well as a keyboard.
+pub extern fn SDL_GetMouseState(x: *i32, y: *i32): u32
+
+pub let SC_TAB: i64 = 43
+
+pub let SC_COMMA: i64 = 54
+
+pub let SC_PERIOD: i64 = 55
+
+pub let SC_P: i64 = 19
+
+pub let SC_R: i64 = 21
+
+pub let SC_H: i64 = 11
+
+pub let SC_1: i64 = 30
+
+pub let SDL_MOUSEWHEEL: u32 = 0x403
+
+pub let SDL_BUTTON_LMASK: u32 = 1
+
 pub struct Input {
-    moveX: f64, // bank: -1 left, +1 right
-    moveY: f64, // pitch: +1 climb, -1 dive
-    boost: bool,
     quit: bool,
-    mute: bool, // edge-triggered: true only on the frame M goes down
-    muteHeld: bool,
-    // Step to the next place, edge-triggered. On ENTER rather than LEFT/RIGHT:
-    // those are the bank axis under `--pro`, and even in one-axis mode a player
-    // reaches for them to steer and got the whole world swapped instead.
-    placeStep: i64,
-    placeHeld: bool,
-    fullscreen: bool, // edge-triggered: true only on the frame F goes down
+    // Pointer position in FRAME coordinates, not window coordinates. The window
+    // is resizable and the frame is a fixed 1280x720 letterboxed into it, so a
+    // raw SDL mouse position is in the wrong space the moment anybody drags a
+    // corner — which is exactly when a handle stops landing where it is drawn.
+    mx: f64,
+    my: f64,
+    dragX: f64,
+    dragY: f64,
+    down: bool,
+    pressed: bool, // edge: true only on the frame the button goes down
+    released: bool,
+    wheel: f64,
+    // Edge-triggered keys. Everything the game does on a key is a state change,
+    // and a held key that fires every frame would rewind the campaign in a third
+    // of a second.
+    fullscreen: bool,
     fullHeld: bool,
-    // Menu navigation: the pitch axis read as discrete steps, edge-triggered,
-    // and BEFORE --natural flips it. A menu cursor that runs the wrong way
-    // because of a flight-control preference is a bug nobody would guess at.
-    menuStep: i64,
-    menuHeld: bool,
-    // Stick, not camera: the key you press is where you push the nose, so UP
-    // dives and DOWN climbs. This is how every flight sim maps a stick and it
-    // is the default here; `--natural` flips it back to UP-climbs.
-    invert: bool,
+    pause: bool,
+    pauseHeld: bool,
+    warpUp: bool,
+    warpUpHeld: bool,
+    warpDown: bool,
+    warpDownHeld: bool,
+    nextFocus: bool,
+    focusHeld: bool,
+    plan: bool,
+    planHeld: bool,
+    execute: bool,
+    execHeld: bool,
+    reset: bool,
+    resetHeld: bool,
+    help: bool,
+    helpHeld: bool,
 }
 
-pub fn inputNew(invert: bool): Input {
+pub fn inputNew(): Input {
     return Input {
-        moveX: 0.0, moveY: 0.0, boost: false, quit: false, mute: false, muteHeld: false,
-        placeStep: 0, placeHeld: false,
-        fullscreen: false, fullHeld: false,
-        menuStep: 0, menuHeld: false,
-        invert: invert,
+        quit: false, mx: 0.0, my: 0.0, dragX: 0.0, dragY: 0.0,
+        down: false, pressed: false, released: false, wheel: 0.0,
+        fullscreen: false, fullHeld: false, pause: false, pauseHeld: false,
+        warpUp: false, warpUpHeld: false, warpDown: false, warpDownHeld: false,
+        nextFocus: false, focusHeld: false, plan: false, planHeld: false,
+        execute: false, execHeld: false, reset: false, resetHeld: false,
+        help: false, helpHeld: false,
     }
 }
 
-// Poll SDL and fill `inp`.
-pub fn pollInput(inp: &mut Input, ev: &mut [u8; 64]) {
-    inp.moveX = 0.0
-    inp.moveY = 0.0
-    inp.boost = false
-    inp.mute = false
-    inp.placeStep = 0
-    inp.menuStep = 0
-    inp.fullscreen = false
+fn edge(now: bool, held: &mut bool): bool {
+    let fired = now && !held
+    held = now
+    return fired
+}
 
+// Poll SDL and fill `inp`. `sx`/`sy` map window pixels onto the fixed frame.
+pub fn pollInput(inp: &mut Input, ev: &mut [u8; 64], sx: f64, sy: f64, ox: f64, oy: f64) {
+    inp.wheel = 0.0
+    inp.pressed = false
+    inp.released = false
     unsafe {
         while SDL_PollEvent(ev) != 0 {
             let evType: u32 = (ev[0] as u32) | ((ev[1] as u32) << 8) | ((ev[2] as u32) << 16) | ((ev[3] as u32) << 24)
             if evType == SDL_QUIT {
                 inp.quit = true
             }
+            if evType == SDL_MOUSEWHEEL {
+                // SDL_MouseWheelEvent: the y delta is a signed 32-bit field at
+                // offset 20. Read as little-endian bytes because the event union
+                // arrives here as raw storage.
+                let raw: u32 = (ev[20] as u32) | ((ev[21] as u32) << 8) | ((ev[22] as u32) << 16) | ((ev[23] as u32) << 24)
+                inp.wheel = inp.wheel + (raw as i32 as f64)
+            }
         }
+        var wx: i32 = 0
+        var wy: i32 = 0
+        let buttons = SDL_GetMouseState(wx.addrOf(), wy.addrOf())
+        let nx = ((wx as f64) - ox) * sx
+        let ny = ((wy as f64) - oy) * sy
+        let downNow = (buttons & SDL_BUTTON_LMASK) != 0
+        if downNow && !inp.down {
+            inp.pressed = true
+            inp.dragX = 0.0
+            inp.dragY = 0.0
+        } else {
+            if downNow {
+                inp.dragX = nx - inp.mx
+                inp.dragY = ny - inp.my
+            } else {
+                inp.dragX = 0.0
+                inp.dragY = 0.0
+            }
+        }
+        if !downNow && inp.down {
+            inp.released = true
+        }
+        inp.down = downNow
+        inp.mx = nx
+        inp.my = ny
+
         let ks = SDL_GetKeyboardState(0 as *i32)
         if ks[SC_ESC] != 0 {
             inp.quit = true
         }
-        // Edge-triggered, or holding M would toggle the music every frame.
-        let mDown = ks[SC_M] != 0
-        if mDown && !inp.muteHeld {
-            inp.mute = true
-        }
-        inp.muteHeld = mDown
-        if ks[SC_A] != 0 {
-            inp.moveX = inp.moveX - 1.0
-        }
-        if ks[SC_D] != 0 {
-            inp.moveX = inp.moveX + 1.0
-        }
-        // `moveY` is a pitch rate, +1 climb: the sign flips once, at the end,
-        // rather than in four places.
-        if ks[SC_W] != 0 {
-            inp.moveY = inp.moveY + 1.0
-        }
-        if ks[SC_S] != 0 {
-            inp.moveY = inp.moveY - 1.0
-        }
-        // Arrows do the same thing as WASD.
-        if ks[SC_LEFT] != 0 {
-            inp.moveX = inp.moveX - 1.0
-        }
-        if ks[SC_RIGHT] != 0 {
-            inp.moveX = inp.moveX + 1.0
-        }
-        if ks[SC_UP] != 0 {
-            inp.moveY = inp.moveY + 1.0
-        }
-        if ks[SC_DOWN] != 0 {
-            inp.moveY = inp.moveY - 1.0
-        }
-        var raw = 0
-        if ks[SC_UP] != 0 || ks[SC_W] != 0 {
-            raw = 0 - 1
-        }
-        if ks[SC_DOWN] != 0 || ks[SC_S] != 0 {
-            raw = 1
-        }
-        if raw != 0 && !inp.menuHeld {
-            inp.menuStep = raw
-        }
-        inp.menuHeld = raw != 0
-        if inp.invert {
-            inp.moveY = 0.0 - inp.moveY
-        }
-        // Edge-triggered like M: held down, this would rip through every place
-        // in the rotation in a fraction of a second.
-        let stepDown = ks[SC_RETURN] != 0
-        if stepDown && !inp.placeHeld {
-            inp.placeStep = 1
-        }
-        inp.placeHeld = stepDown
-        let fDown = ks[SC_F] != 0
-        if fDown && !inp.fullHeld {
-            inp.fullscreen = true
-        }
-        inp.fullHeld = fDown
-        if ks[SC_SPACE] != 0 {
-            inp.boost = true
-        }
+        inp.fullscreen = edge(ks[SC_F] != 0, inp.fullHeld)
+        inp.pause = edge(ks[SC_SPACE] != 0, inp.pauseHeld)
+        inp.warpUp = edge(ks[SC_PERIOD] != 0, inp.warpUpHeld)
+        inp.warpDown = edge(ks[SC_COMMA] != 0, inp.warpDownHeld)
+        inp.nextFocus = edge(ks[SC_TAB] != 0, inp.focusHeld)
+        inp.plan = edge(ks[SC_P] != 0, inp.planHeld)
+        inp.execute = edge(ks[SC_RETURN] != 0, inp.execHeld)
+        inp.reset = edge(ks[SC_R] != 0, inp.resetHeld)
+        inp.help = edge(ks[SC_H] != 0, inp.helpHeld)
     }
 }

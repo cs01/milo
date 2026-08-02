@@ -1,0 +1,577 @@
+// Game state, and the rules that move it.
+//
+// The camera lives here rather than in the renderer because where you are
+// looking is something the game reasons about: committing a plan moves the
+// focus, and arriving moves it again.
+//
+// The loop is plan → commit → coast → capture. Nothing in it asks the player for
+// a number: the plan comes from a date and a flight time, the commit spends what
+// the plan said it would, and the capture burn is offered when the ship is at
+// periapsis and not before.
+
+from "std/math" import {
+    Math
+}
+from "./vec3" import {
+    Vec3, v3
+}
+from "./ephem" import {
+    Body, bodyTable, soiRadius, timeOf, SEC_PER_DAY, AU,
+    BODY_COUNT, SUN, MERCURY, VENUS, EARTH, MOON, MARS, JUPITER, SATURN
+}
+from "./nbody" import {
+    Ship, Ephem, Track, ephemBuild, ephemPos, ephemVel, propagate, advance,
+    orbitAbout, dominantBody, Orbit
+}
+from "./lambert" import {
+    lambert
+}
+from "./plan" import {
+    Burn, noBurn, ejection, ejectionState, planeContaining, parkingOrbit,
+    aimPoint, captureBurn, solveArrival, refineToPoint, Capture
+}
+from "./mission" import {
+    Mission, missionTable, MISSION_COUNT
+}
+
+pub struct World {
+    bodies: Vec<Body>,
+    e: Ephem,
+    missions: Vec<Mission>,
+    mission: i64,
+    unlocked: i64,
+
+    ship: Ship,
+    t: f64,
+    warp: f64,
+    paused: bool,
+
+    budget: f64,
+    spent: f64,
+
+    focus: i64,
+    camDist: f64,
+    camYaw: f64,
+    camPitch: f64,
+
+    // The plan. Two numbers the player sets — when to leave, and how long to
+    // take — and everything else is derived.
+    planDep: f64,
+    planTof: f64,
+    planValid: bool,
+    planDv: f64,
+    planArrVinf: f64,
+    planPost: Ship, // ship state just after the departure burn
+    planMcT: f64, // when the course correction happens
+    planFix: Vec3, // and what it is
+    planEjDv: f64, // cost of the departure burn alone
+    track: Track,
+    trackValid: bool,
+
+    // Committed: the departure burn has been paid for and the correction is
+    // still pending.
+    committed: bool,
+    mccDone: bool,
+
+    captured: bool,
+    failed: bool,
+    won: bool,
+    message: string,
+    messageAge: f64,
+    showPork: bool,
+    porkGrid: Vec<f64>,
+    porkW: i64,
+    porkH: i64,
+    porkBest: f64,
+}
+
+fn emptyTrack(): Track {
+    return Track {
+        pts: Vec.new(), times: Vec.new(), tEnd: 0.0,
+        endPos: v3(0.0, 0.0, 0.0), endVel: v3(0.0, 0.0, 0.0),
+        hit: 0 - 1, caDist: 0.0, caTime: 0.0, caRelSpeed: 0.0, steps: 0,
+    }
+}
+
+pub fn say(w: &mut World, s: string) {
+    w.message = s
+    w.messageAge = 0.0
+}
+
+// True when the destination orbits the departure body — the Moon mission. That
+// transfer happens entirely inside the Earth's gravity well, so it is solved
+// about the Earth rather than about the Sun, and there is no escape hyperbola at
+// all. It is the same Lambert solver with a different central body.
+pub fn isLocalHop(w: &World, m: i64): bool {
+    return w.bodies[w.missions[m].to].parent == w.missions[m].from
+}
+
+pub fn worldNew(): World {
+    let bodies = bodyTable()
+    // One grid for the whole campaign: twenty years at six hours is about 29 000
+    // samples of eight bodies, built once in a fraction of a second, so no
+    // mission ever rebuilds it mid-flight.
+    let e = ephemBuild(bodies, timeOf(2030, 1, 1), timeOf(2050, 1, 1), 21600.0)
+    let missions = missionTable()
+    var w = World {
+        bodies: bodies, e: e, missions: missions, mission: 0, unlocked: 0,
+        ship: Ship {
+            pos: v3(0.0, 0.0, 0.0), vel: v3(0.0, 0.0, 0.0)
+        }
+        ,
+        t: 0.0, warp: 60.0, paused: true,
+        budget: 0.0, spent: 0.0,
+        focus: EARTH, camDist: 4.0e7, camYaw: 0.6, camPitch: 0.45,
+        planDep: 0.0, planTof: 0.0, planValid: false, planDv: 0.0, planArrVinf: 0.0,
+        planPost: Ship {
+            pos: v3(0.0, 0.0, 0.0), vel: v3(0.0, 0.0, 0.0)
+        }
+        ,
+        planMcT: 0.0, planFix: v3(0.0, 0.0, 0.0), planEjDv: 0.0,
+        track: emptyTrack(), trackValid: false,
+        committed: false, mccDone: false,
+        captured: false, failed: false, won: false,
+        message: "", messageAge: 0.0,
+        showPork: false, porkGrid: Vec.new(), porkW: 0, porkH: 0, porkBest: 0.0,
+    }
+    startMission(w, 0)
+    return w
+}
+
+pub fn startMission(w: &mut World, idx: i64) {
+    var i = idx
+    if i < 0 {
+        i = 0
+    }
+    if i >= MISSION_COUNT {
+        i = MISSION_COUNT - 1
+    }
+    w.mission = i
+    let from = w.missions[i].from
+    let to = w.missions[i].to
+    let t0 = w.missions[i].windowOpen
+    let park = w.bodies[from].radius + w.missions[i].parkAlt
+    let tof = w.missions[i].nominalTof
+
+    // Start in the plane the expected transfer wants, so the player is never
+    // silently charged for a plane change they did not choose (see plan.milo).
+    var normal = v3(0.0, 0.0, 1.0)
+    if isLocalHop(w, i) {
+        let r2 = ephemPos(w.e, to, t0 + tof) - ephemPos(w.e, from, t0 + tof)
+        normal = planeContaining(r2)
+    } else {
+        let sol = lambert(ephemPos(w.e, from, t0), ephemPos(w.e, to, t0 + tof), tof, w.e.mu[SUN], true)
+        if sol.ok {
+            normal = planeContaining(sol.v1 - ephemVel(w.e, from, t0))
+        }
+    }
+    w.ship = parkingOrbit(w.e, from, park, t0, normal, 0.0)
+    w.t = t0
+    w.budget = w.missions[i].budget
+    w.spent = 0.0
+    w.paused = true
+    w.warp = 60.0
+    w.focus = from
+    w.camDist = park * 8.0
+    // Open on the DAY side. The camera angle is arbitrary, but a first frame
+    // showing an unlit planet looks like a bug in the lighting rather than like
+    // night, and the terminator is the best thing on screen.
+    let toSun = (v3(0.0, 0.0, 0.0) - ephemPos(w.e, from, t0)).norm()
+    w.camYaw = Math.atan2(toSun.y, toSun.x) + 0.55
+    w.camPitch = 0.38
+    w.planDep = t0 + w.missions[i].nominalWait
+    w.planTof = tof
+    w.planValid = false
+    w.trackValid = false
+    w.committed = false
+    w.mccDone = false
+    w.captured = false
+    w.failed = false
+    w.won = false
+    w.showPork = false
+    w.porkW = 0
+    say(w, w.missions[i].name.clone())
+}
+
+pub fn resetMission(w: &mut World) {
+    startMission(w, w.mission)
+}
+
+// ── planning ──────────────────────────────────────────────────────────────────
+
+// The cheapest departure velocity for a local hop, searched over one lap of the
+// parking orbit.
+//
+// Unlike an interplanetary departure there is no asymptote to line up, so the
+// burn point is not determined by geometry — but it still matters enormously,
+// because leaving from the wrong side of the orbit means fighting the Earth for
+// half the trip. Sampling a full revolution and keeping the cheapest is both the
+// simplest way to find it and a fair description of what the answer means:
+// wait until you are at the right point in your orbit.
+fn bestLocalBurn(w: &World, from: i64, to: i64, tof: f64): Burn {
+    let mu = w.e.mu[from]
+    let r = (w.ship.pos - ephemPos(w.e, from, w.t)).len()
+    let period = Math.pi() * 2.0 * Math.sqrt(r * r * r / mu)
+    var best = noBurn()
+    var bestCost = 1.0e30
+    var k = 0
+    while k < 72 {
+        let dt = period * (k as f64) / 72.0
+        let bt = w.t + dt
+        let at = bt + tof
+        let s = advance(w.e, w.ship, w.t, dt)
+        let r1 = s.pos - ephemPos(w.e, from, bt)
+        let r2 = ephemPos(w.e, to, at) - ephemPos(w.e, from, at)
+        let sol = lambert(r1, r2, tof, mu, true)
+        if sol.ok {
+            let have = s.vel - ephemVel(w.e, from, bt)
+            let dv = sol.v1 - have
+            if dv.len() < bestCost {
+                bestCost = dv.len()
+                best = Burn {
+                    t: bt, dv: dv, valid: true
+                }
+            }
+        }
+        k = k + 1
+    }
+    return best
+}
+
+// Work out the burn for the current departure date and flight time, refine it
+// against the real integrator, and remember the trajectory it produces.
+pub fn replan(w: &mut World) {
+    if w.committed {
+        say(w, "already under way — R to start over")
+        return
+    }
+    let m = w.mission
+    let from = w.missions[m].from
+    let to = w.missions[m].to
+    let tof = w.planTof
+    let wantPeri = w.bodies[to].radius + w.missions[m].captureAlt
+
+    if isLocalHop(w, m) {
+        let burn = bestLocalBurn(w, from, to, tof)
+        if !burn.valid {
+            w.planValid = false
+            say(w, "no transfer for that flight time")
+            return
+        }
+        let atBurn = advance(w.e, w.ship, w.t, burn.t - w.t)
+        let post = Ship {
+            pos: atBurn.pos, vel: atBurn.vel + burn.dv
+        }
+        // Refine straight from the burn: a lunar transfer is only a few days, so
+        // it is not the ill-conditioned mess an interplanetary departure is, and
+        // there is no separate correction to schedule.
+        let aim = ephemPos(w.e, to, burn.t + tof)
+        let arrVinf = post.vel - ephemVel(w.e, to, burn.t + tof)
+        let fix = solveArrival(w.e, post, burn.t, burn.t + tof, to, wantPeri, arrVinf, 4)
+        let cruise = Ship {
+            pos: post.pos, vel: post.vel + fix
+        }
+        let _ = aim
+        w.track = propagate(w.e, cruise, burn.t, tof + 3.0 * SEC_PER_DAY, 512, to)
+        w.planDep = burn.t
+        w.planPost = post
+        w.planMcT = burn.t
+        w.planFix = fix
+        w.planEjDv = burn.dv.len()
+        w.planDv = burn.dv.len() + fix.len()
+        w.planArrVinf = (w.track.endVel - ephemVel(w.e, to, w.track.tEnd)).len()
+        w.planValid = true
+        w.trackValid = true
+        say(w, "plan ready")
+        return
+    }
+
+    let dep = w.planDep
+    let arr = dep + tof
+    let park = w.bodies[from].radius + w.missions[m].parkAlt
+    let sol = lambert(ephemPos(w.e, from, dep), ephemPos(w.e, to, arr), tof, w.e.mu[SUN], true)
+    if !sol.ok {
+        w.planValid = false
+        say(w, "no transfer exists for that date")
+        return
+    }
+    let vinf = sol.v1 - ephemVel(w.e, from, dep)
+    let vinfArr = sol.v2 - ephemVel(w.e, to, arr)
+    let normal = planeContaining(vinf)
+    let ej = ejection(w.e.mu[from], park, vinf, normal)
+    if !ej.valid {
+        w.planValid = false
+        say(w, "that departure is not reachable")
+        return
+    }
+    let post = ejectionState(w.e, from, dep, park, vinf, normal)
+    // Correct twenty days out, where the trajectory is far less sensitive than at
+    // periapsis — the same reason real missions schedule their first correction
+    // there rather than immediately.
+    let mcT = dep + 20.0 * SEC_PER_DAY
+    let coast = advance(w.e, post, dep, 20.0 * SEC_PER_DAY)
+    let fix = solveArrival(w.e, coast, mcT, arr, to, wantPeri, vinfArr, 4)
+    let cruise = Ship {
+        pos: coast.pos, vel: coast.vel + fix
+    }
+    w.track = propagate(w.e, cruise, mcT, arr - mcT + 25.0 * SEC_PER_DAY, 512, to)
+    w.planPost = post
+    w.planMcT = mcT
+    w.planFix = fix
+    w.planEjDv = ej.dvMag
+    w.planDv = ej.dvMag + fix.len()
+    w.planArrVinf = vinfArr.len()
+    w.planValid = true
+    w.trackValid = true
+    say(w, "plan ready")
+}
+
+// Spend the departure burn and start flying it.
+pub fn commitPlan(w: &mut World) {
+    if !w.planValid {
+        say(w, "nothing planned — press P")
+        return
+    }
+    if w.committed {
+        say(w, "already under way")
+        return
+    }
+    if w.spent + w.planDv > w.budget {
+        say(w, "that plan costs more than the budget left")
+        return
+    }
+    w.ship = Ship {
+        pos: w.planPost.pos, vel: w.planPost.vel
+    }
+    w.t = w.planDep
+    w.spent = w.spent + w.planEjDv
+    w.committed = true
+    w.mccDone = false
+    w.paused = false
+    w.warp = 20000.0
+    say(w, "departure burn complete")
+}
+
+// ── the capture burn ──────────────────────────────────────────────────────────
+
+pub fn currentCapture(w: &World): Capture {
+    let to = w.missions[w.mission].to
+    let apo = w.bodies[to].radius + w.missions[w.mission].captureApo
+    return captureBurn(w.e, w.ship, w.t, to, apo)
+}
+
+pub fn doCapture(w: &mut World) {
+    let to = w.missions[w.mission].to
+    let cap = currentCapture(w)
+    if !cap.possible {
+        say(w, "nothing to capture from — you are not falling toward it")
+        return
+    }
+    if w.spent + cap.dv > w.budget {
+        say(w, "not enough left in the tank for that burn")
+        w.failed = true
+        return
+    }
+    let rel = w.ship.vel - ephemVel(w.e, to, w.t)
+    w.ship = Ship {
+        pos: w.ship.pos, vel: w.ship.vel - rel.norm().scale(cap.dv)
+    }
+    w.spent = w.spent + cap.dv
+    w.paused = true
+    w.warp = 60.0
+    w.focus = to
+    checkCapture(w)
+}
+
+// Arrival is a stable capture orbit: closed, about the right body, with the
+// periapsis in the band the mission asked for. "Closed at the instant of the
+// burn" is not enough — a grazing ellipse whose periapsis is inside the
+// atmosphere is not an orbit, and neither is one the Sun takes back a week
+// later, so the test is re-run after a lap.
+pub fn checkCapture(w: &mut World) {
+    let to = w.missions[w.mission].to
+    let dom = dominantBody(w.e, w.ship.pos, w.t)
+    if dom != to {
+        say(w, "not captured — " + w.bodies[to].name.clone() + " is not the one holding you")
+        return
+    }
+    let ob = orbitAbout(w.e, w.ship, w.t, to)
+    if !ob.closed {
+        say(w, "still on an escape trajectory")
+        return
+    }
+    let want = w.bodies[to].radius + w.missions[w.mission].captureAlt
+    let tol = w.missions[w.mission].tolerance
+    if ob.periapsis < w.bodies[to].radius {
+        say(w, "that orbit intersects the surface")
+        w.failed = true
+        return
+    }
+    if Math.abs(ob.periapsis - want) > tol {
+        say(w, "captured, but the periapsis is outside the mission band")
+        return
+    }
+    // One full revolution later, is it still an orbit?
+    let later = advance(w.e, w.ship, w.t, ob.period)
+    let ob2 = orbitAbout(w.e, later, w.t + ob.period, to)
+    if !ob2.closed || ob2.periapsis < w.bodies[to].radius {
+        say(w, "that orbit does not survive a lap")
+        return
+    }
+    w.captured = true
+    w.won = true
+    if w.mission >= w.unlocked {
+        w.unlocked = w.mission + 1
+    }
+    say(w, "captured at " + w.bodies[to].name.clone())
+}
+
+// ── stepping ──────────────────────────────────────────────────────────────────
+
+pub fn shipAbout(w: &World): i64 {
+    return dominantBody(w.e, w.ship.pos, w.t)
+}
+
+pub fn shipOrbit(w: &World): Orbit {
+    return orbitAbout(w.e, w.ship, w.t, shipAbout(w))
+}
+
+pub fn advanceWorld(w: &mut World, wall: f64) {
+    w.messageAge = w.messageAge + wall
+    if w.paused || w.won || w.failed {
+        return
+    }
+    var span = wall * w.warp
+    if span <= 0.0 {
+        return
+    }
+    // The correction is part of the plan the player approved and paid for, so it
+    // happens on schedule rather than needing a second keypress in the middle of
+    // a time warp that may be running at ten thousand times real speed.
+    if w.committed && !w.mccDone && w.t + span >= w.planMcT {
+        let toMcc = w.planMcT - w.t
+        if toMcc > 0.0 {
+            w.ship = advance(w.e, w.ship, w.t, toMcc)
+            w.t = w.planMcT
+            span = span - toMcc
+        }
+        w.ship = Ship {
+            pos: w.ship.pos, vel: w.ship.vel + w.planFix
+        }
+        w.spent = w.spent + w.planFix.len()
+        w.mccDone = true
+        say(w, "course correction: " + fmtSpeed(w.planFix.len()))
+    }
+    if span > 0.0 {
+        w.ship = advance(w.e, w.ship, w.t, span)
+        w.t = w.t + span
+    }
+
+    // Ran into something.
+    var b = 0
+    while b < BODY_COUNT {
+        if (ephemPos(w.e, b, w.t) - w.ship.pos).len() < w.bodies[b].radius {
+            w.failed = true
+            say(w, "lost — impact on " + w.bodies[b].name.clone())
+            b = BODY_COUNT
+        } else {
+            b = b + 1
+        }
+    }
+}
+
+fn fmtSpeed(v: f64): string {
+    let n = (v * 10.0) as i64
+    return ((n / 10) as i64).toString() + "." + ((n % 10) as i64).toString() + " m/s"
+}
+
+// ── the porkchop ──────────────────────────────────────────────────────────────
+
+// The cost of leaving on every day of the window, for every flight time, as one
+// picture.
+//
+// This is the whole skill of interplanetary mission design compressed into a
+// heat map with a blue valley in it, and clicking the valley is the entire
+// interaction. The number in each cell is the departure burn plus the arrival
+// burn — total mission cost, not just the part that is easy to compute, because
+// a cheap departure into a brutal arrival is the classic trap and a plot that
+// hides it would be teaching the wrong lesson.
+pub fn buildPorkchop(w: &mut World, cols: i64, rows: i64) {
+    let m = w.mission
+    let from = w.missions[m].from
+    let to = w.missions[m].to
+    let park = w.bodies[from].radius + w.missions[m].parkAlt
+    let capApo = w.bodies[to].radius + w.missions[m].captureApo
+    let capPeri = w.bodies[to].radius + w.missions[m].captureAlt
+    let t0 = w.missions[m].windowOpen
+    let span = w.missions[m].windowSpan
+    let tofMid = w.missions[m].nominalTof
+    let tofLo = tofMid * 0.45
+    let tofHi = tofMid * 1.75
+    var grid: Vec<f64> = Vec.new()
+    var best = 1.0e30
+    var j = 0
+    while j < rows {
+        let tof = tofLo + (tofHi - tofLo) * (j as f64) / ((rows - 1) as f64)
+        var i = 0
+        while i < cols {
+            let dep = t0 + span * (i as f64) / ((cols - 1) as f64)
+            var cost = 1.0e30
+            if isLocalHop(w, m) {
+                // The ship's ACTUAL position at `dep` would mean integrating a
+                // parking orbit forward for every one of the five thousand cells
+                // in this grid. The burn point is a free choice anyway — the
+                // player waits for it, see `bestLocalBurn` — so the cell is
+                // priced at the standard injection geometry instead: leave from
+                // a quarter turn behind the target's direction, which is where a
+                // translunar injection actually happens.
+                let r2 = ephemPos(w.e, to, dep + tof) - ephemPos(w.e, from, dep + tof)
+                let nrm = planeContaining(r2)
+                let r1 = r2.norm().rotate(nrm, 0.0 - Math.pi() * 0.5).scale(park)
+                let sol = lambert(r1, r2, tof, w.e.mu[from], true)
+                if sol.ok {
+                    let circ = Math.sqrt(w.e.mu[from] / park)
+                    let tangent = nrm.cross(r1.norm()).norm().scale(circ)
+                    cost = (sol.v1 - tangent).len()
+                }
+            } else {
+                let sol = lambert(ephemPos(w.e, from, dep), ephemPos(w.e, to, dep + tof), tof, w.e.mu[SUN], true)
+                if sol.ok {
+                    let vinf = (sol.v1 - ephemVel(w.e, from, dep)).len()
+                    let vinfArr = (sol.v2 - ephemVel(w.e, to, dep + tof)).len()
+                    // Departure: the burn from the parking orbit onto that
+                    // escape speed. Arrival: the burn from the incoming
+                    // hyperbola onto the mission's capture ellipse. Both from
+                    // vis-viva, both at periapsis.
+                    let dvDep = Math.sqrt(vinf * vinf + 2.0 * w.e.mu[from] / park) - Math.sqrt(w.e.mu[from] / park)
+                    let aCap = (capPeri + capApo) * 0.5
+                    let vHyp = Math.sqrt(vinfArr * vinfArr + 2.0 * w.e.mu[to] / capPeri)
+                    let vEll = Math.sqrt(w.e.mu[to] * (2.0 / capPeri - 1.0 / aCap))
+                    cost = dvDep + (vHyp - vEll)
+                }
+            }
+            if cost < best {
+                best = cost
+            }
+            grid.push(cost)
+            i = i + 1
+        }
+        j = j + 1
+    }
+    w.porkGrid = grid
+    w.porkW = cols
+    w.porkH = rows
+    w.porkBest = best
+}
+
+// Departure date and flight time for a cell of the plot.
+pub fn porkDep(w: &World, i: i64): f64 {
+    let m = w.mission
+    return w.missions[m].windowOpen + w.missions[m].windowSpan * (i as f64) / ((w.porkW - 1) as f64)
+}
+
+pub fn porkTof(w: &World, j: i64): f64 {
+    let m = w.mission
+    let mid = w.missions[m].nominalTof
+    return mid * 0.45 + (mid * 1.75 - mid * 0.45) * (j as f64) / ((w.porkH - 1) as f64)
+}

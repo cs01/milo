@@ -36,7 +36,8 @@ from "./nbody" import {
     Ship, Ephem, ephemPos, ephemVel, propagate, orbitAbout, dominantBody, Orbit
 }
 from "./world" import {
-    World, shipAbout, shipOrbit, currentCapture, CURVE_N, camDistNow, camPitchNow, arrivalEstimate
+    World, shipAbout, shipOrbit, currentCapture, CURVE_N, camDistNow, camPitchNow, arrivalEstimate,
+    VIEW_DEPART, VIEW_ROUTE, VIEW_ARRIVE
 }
 from "./mission" import {
     MISSION_COUNT
@@ -387,7 +388,7 @@ fn drawBodyLabels(c: &mut Canvas, m: &Map, w: &World) {
     let skip = w.missions[w.mission].to
     var i = 0
     while i < BODY_COUNT {
-        if i != skip && i != w.focus {
+        if false {
             let rp = toRender(m, ephemPos(w.e, i, w.t))
             let p = project(m, rp)
             if p.z > 0.0 && p.x > -40.0 && p.x < (W as f64) + 40.0 && p.y > 0.0 && p.y < (H as f64) {
@@ -580,44 +581,50 @@ fn row(c: &mut Canvas, x: i64, y: i64, s: &string, r: f64, g: f64, b: f64) {
     text(c, x, y, s, UI, r, g, b)
 }
 
+// Deliberately thin.
+//
+// The first version put a plan panel, an orbit panel, a fuel panel, a window bar
+// and two help lines on screen at once, and the verdict on it was the correct
+// one: you could not see the Earth. Everything that is merely INTERESTING has
+// been cut, and what is left is the four things a decision needs — where you are
+// going, when it is, what it costs, and what to press.
 pub fn drawHud(c: &mut Canvas, w: &World) {
     let m = w.mission
-    // Mission strip.
-    shadeRect(c, 0.0, 0.0, 760.0, 84.0, 0.62)
-    text(c, 16, 12, w.bodies[w.missions[m].from].name.toUpper() + "  TO  " + w.bodies[w.missions[m].to].name.toUpper(), UI_BIG, 0.95, 0.98, 1.0)
-    text(c, 16 + textWidth(w.bodies[w.missions[m].from].name + "  TO  " + w.bodies[w.missions[m].to].name, UI_BIG) + 30, 18, "MISSION " + (m + 1).toString() + " / " + MISSION_COUNT.toString(), UI, 0.55, 0.66, 0.78)
-    row(c, 16, 52, w.missions[m].blurb, 0.58, 0.70, 0.82)
+    text(c, 16, 14, w.bodies[w.missions[m].from].name.toUpper() + "  TO  " + w.bodies[w.missions[m].to].name.toUpper(), UI_BIG, 0.95, 0.98, 1.0)
+    text(c, 16, 50, viewName(w) + "        TAB  CHANGE VIEW", UI, 0.50, 0.60, 0.70)
 
-    // Clock.
     let dstr = fmtDate(w.t)
-    shadeRect(c, (W - 330) as f64, 0.0, W as f64, 84.0, 0.62)
-    text(c, W - 20 - textWidth(dstr, UI_BIG), 12, dstr, UI_BIG, 0.92, 0.95, 1.0)
+    text(c, W - 18 - textWidth(dstr, UI_BIG), 14, dstr, UI_BIG, 0.92, 0.95, 1.0)
     var wl = "PAUSED"
     if !w.paused {
         wl = warpLabel(w.warp)
     }
-    text(c, W - 20 - textWidth(wl, UI), 52, wl, UI, 0.62, 0.74, 0.86)
+    text(c, W - 18 - textWidth(wl, UI), 50, wl, UI, 0.62, 0.74, 0.86)
 
     drawBudget(c, w)
-    drawOrbitPanel(c, w)
-    drawPlanPanel(c, w)
     drawTargetMarker(c, w)
     drawScrubBar(c, w)
     drawActionBar(c, w)
     drawMessage(c, w)
 }
 
+fn viewName(w: &World): string {
+    if w.view == VIEW_DEPART {
+        return "VIEW: " + w.bodies[w.missions[w.mission].from].name.toUpper()
+    }
+    if w.view == VIEW_ARRIVE {
+        return "VIEW: " + w.bodies[w.missions[w.mission].to].name.toUpper()
+    }
+    return "VIEW: ROUTE"
+}
+
 fn drawBudget(c: &mut Canvas, w: &World) {
-    // The bar shows what is LEFT, not what is gone: it is a fuel gauge, and a
-    // fuel gauge that fills as you burn reads exactly backwards.
     var left = (w.budget - w.spent) / w.budget
     if left < 0.0 {
         left = 0.0
     }
-    let y = STRIP_Y
-    shadeRect(c, 0.0, y, 320.0, H as f64, 0.66)
-    row(c, 14, (y + 12.0) as i64, "DELTA-V LEFT", 0.58, 0.70, 0.82)
-    fillRect(c, 14.0, y + 44.0, 306.0, y + 68.0, 0.08, 0.10, 0.14)
+    let y = (H - 42) as f64
+    fillRect(c, 16.0, y, 296.0, y + 16.0, 0.08, 0.10, 0.14)
     var br = 0.30
     var bg = 0.85
     var bb = 0.95
@@ -626,67 +633,11 @@ fn drawBudget(c: &mut Canvas, w: &World) {
         bg = 0.55
         bb = 0.25
     }
-    if left < 0.10 {
-        br = 0.95
-        bg = 0.30
-        bb = 0.22
-    }
-    let fw = 292.0 * left
+    let fw = 280.0 * left
     if fw > 0.0 {
-        fillRect(c, 14.0, y + 44.0, 14.0 + fw, y + 68.0, br, bg, bb)
+        fillRect(c, 16.0, y, 16.0 + fw, y + 16.0, br, bg, bb)
     }
-    row(c, 14, (y + 80.0) as i64, fmtDv(w.budget - w.spent), 0.85, 0.90, 0.95)
-    row(c, 14, (y + 108.0) as i64, "of " + fmtDv(w.budget), 0.62, 0.70, 0.78)
-}
-
-fn drawOrbitPanel(c: &mut Canvas, w: &World) {
-    let about = shipAbout(w)
-    let ob = shipOrbit(w)
-    let x = W - 322
-    let y = STRIP_Y
-    shadeRect(c, (W - 336) as f64, y, W as f64, H as f64, 0.66)
-    row(c, x, (y + 12.0) as i64, "ORBIT: " + w.bodies[about].name.toUpper(), 0.58, 0.70, 0.82)
-    if ob.closed {
-        row(c, x, (y + 44.0) as i64, "PERI " + fmtDist(ob.periapsis - w.bodies[about].radius), 0.86, 0.91, 0.96)
-        row(c, x, (y + 72.0) as i64, "APO  " + fmtDist(ob.apoapsis - w.bodies[about].radius), 0.86, 0.91, 0.96)
-        row(c, x, (y + 100.0) as i64, "LAP  " + fmtSpan(ob.period), 0.72, 0.80, 0.88)
-    } else {
-        row(c, x, (y + 44.0) as i64, "ESCAPING", 0.95, 0.72, 0.35)
-        row(c, x, (y + 72.0) as i64, "SPD  " + formatFloat(ob.speed, 0) + " M/S", 0.86, 0.91, 0.96)
-        row(c, x, (y + 100.0) as i64, "ALT  " + fmtDist(ob.altitude), 0.72, 0.80, 0.88)
-    }
-}
-
-fn drawPlanPanel(c: &mut Canvas, w: &World) {
-    let m = w.mission
-    let to = w.missions[m].to
-    let x = 16
-    var y = 100
-    shadeRect(c, 0.0, 92.0, 560.0, 268.0, 0.50)
-    row(c, x, y, "PLAN", 0.58, 0.70, 0.82)
-    y = y + 30
-    row(c, x, y, "DEPART  " + fmtDate(w.planDep), 0.88, 0.92, 0.96)
-    y = y + 26
-    row(c, x, y, "FLIGHT  " + fmtSpan(w.planTof), 0.88, 0.92, 0.96)
-    y = y + 26
-    row(c, x, y, "ARRIVE  " + fmtDate(w.planDep + w.planTof), 0.88, 0.92, 0.96)
-    y = y + 32
-    if w.planValid {
-        row(c, x, y, "COST    " + fmtDv(w.planDv), 0.35, 0.90, 0.95)
-        y = y + 26
-        let peri = w.track.caDist - w.bodies[to].radius
-        var r = 0.35
-        var g = 0.90
-        var b = 0.95
-        if w.track.hit >= 0 {
-            r = 0.95
-            g = 0.40
-            b = 0.30
-        }
-        row(c, x, y, "ARRIVES " + fmtDist(peri) + " OVER " + w.bodies[to].name, r, g, b)
-    } else {
-        row(c, x, y, "NOTHING PLANNED YET", 0.68, 0.72, 0.78)
-    }
+    text(c, 16, (y - 26.0) as i64, "FUEL  " + fmtDv(w.budget - w.spent), UI, 0.72, 0.80, 0.88)
 }
 
 // Where the target is, when it is not on screen.
@@ -740,15 +691,13 @@ fn drawTargetMarker(c: &mut Canvas, w: &World) {
 // the middle, the orbit on the right. They are laid out from constants rather
 // than eyeballed because the first version put the window bar straight through
 // the orbit readout, and at scale 2 there is no room to be approximate.
-pub let STRIP_Y: f64 = 566.0
-
-pub let BAR_X: f64 = 336.0
+pub let BAR_X: f64 = 340.0
 
 pub let BAR_W: f64 = 600.0
 
-pub let BAR_Y: f64 = 606.0
+pub let BAR_Y: f64 = 640.0
 
-pub let BAR_H: f64 = 56.0
+pub let BAR_H: f64 = 34.0
 
 // The launch window as one curve you scrub along.
 //
@@ -765,10 +714,9 @@ fn drawScrubBar(c: &mut Canvas, w: &World) {
     if w.curve.len == 0 {
         return
     }
-    shadeRect(c, BAR_X - 16.0, STRIP_Y, BAR_X + BAR_W + 16.0, H as f64, 0.66)
-    text(c, BAR_X as i64, (STRIP_Y + 12.0) as i64, "LAUNCH WINDOW", UI, 0.58, 0.70, 0.82)
-    let lab = "FLIGHT " + fmtSpan(w.planTof)
-    text(c, (BAR_X + BAR_W) as i64 - textWidth(lab, UI), (STRIP_Y + 12.0) as i64, lab, UI, 0.58, 0.70, 0.82)
+    text(c, BAR_X as i64, (BAR_Y - 26.0) as i64, "LEAVE ON", UI, 0.50, 0.60, 0.70)
+    let lab = "TAKE " + fmtSpan(w.planTof)
+    text(c, (BAR_X + BAR_W) as i64 - textWidth(lab, UI), (BAR_Y - 26.0) as i64, lab, UI, 0.50, 0.60, 0.70)
 
     // The curve is clipped at three times the best cost: past that everything is
     // equally out of the question, and letting one impossible date set the scale
@@ -802,11 +750,6 @@ fn drawScrubBar(c: &mut Canvas, w: &World) {
     // hunted for.
     let bx = BAR_X + BAR_W * (w.curveBestI as f64) / ((CURVE_N - 1) as f64)
     thickLine(c, bx, BAR_Y - 6.0, bx, BAR_Y + BAR_H + 4.0, 1.5, 0.25, 0.95, 0.65)
-    var blx = (bx - 24.0) as i64
-    if (blx as f64) < BAR_X {
-        blx = BAR_X as i64
-    }
-    text(c, blx, (BAR_Y + BAR_H + 6.0) as i64, "BEST", UI, 0.25, 0.95, 0.65)
 
     // The marker.
     let t0 = w.missions[w.mission].windowOpen
@@ -833,7 +776,7 @@ fn drawScrubBar(c: &mut Canvas, w: &World) {
     if (lx as f64) + (textWidth(dl, UI) as f64) > BAR_X + BAR_W {
         lx = (BAR_X + BAR_W) as i64 - textWidth(dl, UI)
     }
-    text(c, lx, (BAR_Y + BAR_H + 32.0) as i64, dl, UI, 1.0, 0.88, 0.42)
+    text(c, lx, (BAR_Y + BAR_H + 6.0) as i64, dl, UI, 1.0, 0.88, 0.42)
 }
 
 fn cursorCost(w: &World, f: f64): f64 {
@@ -891,7 +834,7 @@ fn drawActionBar(c: &mut Canvas, w: &World) {
         boxW = sw
     }
     let cx = (W / 2) as f64
-    let y0 = STRIP_Y - 96.0
+    let y0 = (H - 210) as f64
     shadeRect(c, cx - (boxW as f64) * 0.5 - 26.0, y0, cx + (boxW as f64) * 0.5 + 26.0, y0 + 76.0, 0.72)
     textCentered(c, W / 2, (y0 + 12.0) as i64, msg, UI_BIG, r, g, b)
     textCentered(c, W / 2, (y0 + 48.0) as i64, sub, UI, 0.70, 0.78, 0.86)

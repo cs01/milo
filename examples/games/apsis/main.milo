@@ -44,7 +44,7 @@ from "./ephem" import {
 from "./world" import {
     World, worldNew, startMission, resetMission, replan, commitPlan, doCapture,
     advanceWorld, say, currentCapture, scrub, snapToBest, buildCurve, buildPreview,
-    updateCamera
+    updateCamera, cycleView, setView, VIEW_ROUTE
 }
 from "./render" import {
     W, H, drawScene, drawHud, drawOutcome
@@ -198,17 +198,7 @@ fn handleMap(w: &mut World, inp: &Input, steps: &Vec<f64>) {
         }
     }
     if inp.nextFocus {
-        var f = w.focus + 1
-        if f >= BODY_COUNT {
-            f = 0
-        }
-        w.focus = f
-        // Reframe: each body wants a wildly different default zoom, and landing
-        // on Jupiter with the Moon's camera distance shows nothing at all.
-        w.camDist = w.bodies[f].radius * 12.0
-        if f == SUN {
-            w.camDist = 3.0e11
-        }
+        cycleView(w)
     }
     if inp.pause {
         w.paused = !w.paused

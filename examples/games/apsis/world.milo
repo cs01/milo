@@ -50,6 +50,11 @@ pub struct World {
     spent: f64,
 
     focus: i64,
+    // Which of the three framings the camera is in. The map view is the only one
+    // that shows the plan, and it is also the one where both worlds are a pixel
+    // across — so the other two exist purely to let the player look at the
+    // places they are flying between.
+    view: i64,
     // The opening sweep: 1 at mission start, easing to 0. The camera starts
     // wide and high and settles into the working view, because a static cut to
     // a map of the solar system does not tell you it IS a map of the solar
@@ -130,7 +135,7 @@ pub fn worldNew(): World {
         ,
         t: 0.0, warp: 60.0, paused: true,
         budget: 0.0, spent: 0.0,
-        focus: EARTH, sweep: 0.0, dragging: false, camDist: 4.0e7, camYaw: 0.6, camPitch: 0.45,
+        focus: EARTH, view: 1, sweep: 0.0, dragging: false, camDist: 4.0e7, camYaw: 0.6, camPitch: 0.45,
         planDep: 0.0, planTof: 0.0, planValid: false, planDv: 0.0, planArrVinf: 0.0,
         planPost: Ship {
             pos: v3(0.0, 0.0, 0.0), vel: v3(0.0, 0.0, 0.0)
@@ -181,27 +186,11 @@ pub fn startMission(w: &mut World, idx: i64) {
     w.paused = true
     w.warp = 60.0
     w.focus = from
-    // Frame the whole trip from above the ecliptic. Opening on the parking orbit
-    // is a beautiful shot of a planet and tells the player nothing about where
-    // they are going; both orbits and the transfer between them have to be on
-    // screen, and from a viewpoint that shows them as the ellipses they are
-    // rather than edge-on as three straight lines.
-    if isLocalHop(w, i) {
-        w.camDist = 1.15e9
-    } else {
-        var reach = w.bodies[to].el.a
-        if w.bodies[from].el.a > reach {
-            reach = w.bodies[from].el.a
-        }
-        w.camDist = reach * 2.7
-    }
     w.sweep = 1.0
     // Open on the DAY side. The camera angle is arbitrary, but a first frame
     // showing an unlit planet looks like a bug in the lighting rather than like
     // night, and the terminator is the best thing on screen.
-    let toSun = (v3(0.0, 0.0, 0.0) - ephemPos(w.e, from, t0)).norm()
-    w.camYaw = Math.atan2(toSun.y, toSun.x) + 0.55
-    w.camPitch = 0.95
+    setView(w, VIEW_ROUTE)
     w.planDep = t0 + w.missions[i].nominalWait
     w.planTof = tof
     w.planValid = false
@@ -408,6 +397,7 @@ pub fn commitPlan(w: &mut World) {
     w.mccDone = false
     w.paused = false
     w.warp = 20000.0
+    setView(w, VIEW_ROUTE)
     say(w, "departure burn complete")
 }
 
@@ -500,6 +490,55 @@ pub fn shipOrbit(w: &World): Orbit {
     return orbitAbout(w.e, w.ship, w.t, shipAbout(w))
 }
 
+pub let VIEW_DEPART: i64 = 0
+
+pub let VIEW_ROUTE: i64 = 1
+
+pub let VIEW_ARRIVE: i64 = 2
+
+// Frame one of the three views. Each picks its own subject and its own distance,
+// because "zoom" means something completely different at a parking orbit and at
+// the scale of a transfer, and asking the player to find each one on a scroll
+// wheel spanning eleven orders of magnitude is asking too much.
+pub fn setView(w: &mut World, v: i64) {
+    let m = w.mission
+    w.view = v
+    if v == VIEW_DEPART {
+        w.focus = w.missions[m].from
+        w.camDist = w.bodies[w.missions[m].from].radius * 7.0
+        w.camPitch = 0.30
+    } else {
+        if v == VIEW_ARRIVE {
+            w.focus = w.missions[m].to
+            w.camDist = w.bodies[w.missions[m].to].radius * 9.0
+            w.camPitch = 0.30
+        } else {
+            w.focus = w.missions[m].from
+            if isLocalHop(w, m) {
+                w.camDist = 1.15e9
+            } else {
+                var reach = w.bodies[w.missions[m].to].el.a
+                if w.bodies[w.missions[m].from].el.a > reach {
+                    reach = w.bodies[w.missions[m].from].el.a
+                }
+                w.camDist = reach * 2.7
+            }
+            w.camPitch = 0.95
+        }
+    }
+    // Point at the day side, so a close view opens on a lit planet.
+    let toSun = (v3(0.0, 0.0, 0.0) - ephemPos(w.e, w.focus, w.t)).norm()
+    w.camYaw = Math.atan2(toSun.y, toSun.x) + 0.55
+}
+
+pub fn cycleView(w: &mut World) {
+    var v = w.view + 1
+    if v > 2 {
+        v = 0
+    }
+    setView(w, v)
+}
+
 // Camera motion that is not the player's: the opening sweep, and a slow drift
 // so a paused solar system is never a still image.
 pub fn updateCamera(w: &mut World, wall: f64) {
@@ -551,9 +590,41 @@ pub fn advanceWorld(w: &mut World, wall: f64) {
         w.mccDone = true
         say(w, "course correction: " + fmtSpeed(w.planFix.len()))
     }
+    // Stop AT the burn.
+    //
+    // The capture burn is the one instant in a five-day flight that matters, it
+    // is a few minutes wide, and the player is crossing that flight at eighty
+    // thousand times real speed. Expecting them to feather the warp key onto it
+    // is not a difficulty, it is a trap — the first real playthrough sailed
+    // three days past the Moon and ended up on a 622 000 km ellipse around the
+    // Earth. Time now lands exactly on periapsis and stops itself.
+    var hitNode = false
+    if w.committed && !w.captured && w.track.caTime > w.t {
+        if w.t + span >= w.track.caTime {
+            span = w.track.caTime - w.t
+            hitNode = true
+        }
+    }
     if span > 0.0 {
         w.ship = advance(w.e, w.ship, w.t, span)
         w.t = w.t + span
+    }
+    if hitNode {
+        w.paused = true
+        w.warp = 60.0
+        setView(w, VIEW_ARRIVE)
+        say(w, "periapsis — press ENTER to capture")
+    }
+
+    // Coming in: swap to the arrival view on its own. The player is watching a
+    // date tick over at ten thousand times real speed and should not have to
+    // also be watching a distance readout to know when to look.
+    if w.committed && w.view != VIEW_ARRIVE {
+        let to = w.missions[w.mission].to
+        if (ephemPos(w.e, to, w.t) - w.ship.pos).len() < soiRadius(w.bodies, to) * 1.2 {
+            setView(w, VIEW_ARRIVE)
+            say(w, "arriving at " + w.bodies[to].name.clone())
+        }
     }
 
     // Ran into something.

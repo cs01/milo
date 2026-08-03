@@ -10,9 +10,9 @@
     },
     "sdl": {
       "url": "github.com/milo-language/milo-sdl",
-      "version": "v0.3.0",
-      "commit": "c573033f44dfd5cf38266adffcf5f27bb6830d33",
-      "hash": "sha256:65729874f7bfd69a8615df3650c9ba17002590fdde0433be1aa45d0e2f7234d1",
+      "version": "v0.3.1",
+      "commit": "b42758800563c6dde20ab55658db85145dce6211",
+      "hash": "sha256:5fbca9edb538e58663e9ac740fe960893f3fa28842eccf8d80ad01ddc923024b",
       "deps": []
     }
   }

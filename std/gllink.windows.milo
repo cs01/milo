@@ -1,0 +1,13 @@
+// std/gllink — the one GL declaration whose link flag differs per platform.
+//
+// Splitting all 300 bindings to vary one flag would duplicate the file three times,
+// so only `@link` lives here; std/gl carries every other entry point and no link of
+// its own, because one flag on the link line resolves all of them.
+//
+// Every arm MUST declare the same surface — that is the platform-split contract.
+// windows: `opengl32.dll` exports GL 1.1 only, so there is no library to name that
+// would resolve the 3.3 entry points in std/gl. Declared without a `@link` on
+// purpose: the failure is a link error naming the symbol, which is the truth,
+// rather than a plausible-looking value at runtime. See docs/roadmap.md.
+
+pub extern fn glGetError(): u32

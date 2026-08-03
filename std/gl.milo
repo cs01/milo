@@ -5,7 +5,8 @@
 // wrap — that module owns the shader/buffer/texture/framebuffer lifecycles and
 // keeps the raw pointers out of your program.
 //
-// The link flag is added by the compiler when it sees a `gl*` symbol in the IR:
+// The link flag comes from `std/gllink`, whose platform arms carry the `@link` and
+// the one entry point (glGetError) that has to live beside it:
 // `-framework OpenGL` on darwin, `-lGL` on linux. Windows is NOT supported here —
 // `opengl32.dll` only exports GL 1.1, so every 3.3 entry point below is an
 // undefined symbol at link time, by design and by name (see docs/roadmap.md,
@@ -50,8 +51,6 @@ pub extern fn glFrontFace(mode: u32)
 pub extern fn glPixelStorei(pname: u32, param: i32)
 
 pub extern fn glFinish()
-
-pub extern fn glGetError(): u32
 
 // Returns a static NUL-terminated string owned by the driver — read it with
 // std/cstr, never free it.

@@ -26,6 +26,10 @@
 //   sh.uniformF("time", t)
 //   quad.draw()
 
+from "std/gllink" import {
+    glGetError
+}
+
 from "std/gl" import {
     glActiveTexture, glAttachShader, glBindBuffer, glBindFramebuffer,
     glBindRenderbuffer, glBindTexture, glBindVertexArray, glBlendFunc,
@@ -36,7 +40,7 @@ from "std/gl" import {
     glDepthMask, glDisable, glDrawArrays, glEnable, glEnableVertexAttribArray,
     glFramebufferRenderbuffer, glFramebufferTexture2D, glGenBuffers,
     glGenFramebuffers, glGenRenderbuffers, glGenTextures, glGenVertexArrays,
-    glFinish, glGetError, glGetProgramInfoLog, glGetProgramiv, glGetShaderInfoLog,
+    glFinish, glGetProgramInfoLog, glGetProgramiv, glGetShaderInfoLog,
     glGetShaderiv, glGetString, glGetUniformLocation, glLinkProgram,
     glPixelStorei, glReadPixels, glRenderbufferStorage, glShaderSource,
     glTexImage2D, glTexParameteri,

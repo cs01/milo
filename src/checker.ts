@@ -4850,7 +4850,9 @@ export class TypeChecker {
               `use of moved variable '${expr.name}'`,
               sp,
               noCopy
-                ? `'${expr.name}' is a @noCopy handle, so transferring it ended its life here — copying one would let the same resource be released twice. Borrow it (pass it to a '&${typeName(t)}' parameter) instead of transferring, or reorder so the transfer is last.`
+                // A type from a package is stored as `gl$Texture2D`; the hint tells the
+                // reader what to type, and what they type is the bare name they imported.
+                ? `'${expr.name}' is a @noCopy handle, so transferring it ended its life here — copying one would let the same resource be released twice. Borrow it (pass it to a '&${typeName(t).split("$").pop()}' parameter) instead of transferring, or reorder so the transfer is last.`
                 : `ownership of '${expr.name}' was transferred earlier and it can no longer be used here. To keep it alive, clone it at the point of transfer: '${expr.name}.clone()'.`,
             );
           }

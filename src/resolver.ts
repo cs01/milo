@@ -186,6 +186,9 @@ export function resolveImports(program: Program, sourceDir: string, target: Targ
     targets: { names: string[]; aliases?: (string | undefined)[]; pkg: string }[];
   }
   const units: Unit[] = [];
+  // One `targets` check per package, not per import — a package's manifest can't change
+  // mid-build, and re-reading it for each of a dozen imports would show up in compile time.
+  const pkgTargetsChecked = new Set<string>();
 
   // `pkg` is the importing file's package id. A file resolved out of a manifest
   // `deps` entry belongs to that dep; anything the dep then resolves against its
@@ -193,6 +196,27 @@ export function resolveImports(program: Program, sourceDir: string, target: Targ
   // and the prelude are always "" and are never mangled.
   function resolvePath(dir: string, importPath: string, pkg: string): { path: string; pkg: string } {
     const withExt = importPath.endsWith(".milo") ? importPath : importPath + ".milo";
+
+    // A package's `targets` says which platforms it can be built for at all — a binding to
+    // a system library that only exists on some of them (OpenGL: no GL 3.3 on Windows) has
+    // no honest implementation elsewhere. Without this the failure surfaces as whichever
+    // file happened to be missing a platform arm, which reads as a broken package rather
+    // than one that was never claimed to support this target. Stdlib modules have no
+    // manifest and so no way to say this at all, which is one reason such a binding
+    // belongs in a package.
+    function checkPkgTarget(pkgName: string, cacheBase: string): void {
+      if (pkgTargetsChecked.has(pkgName)) return;
+      pkgTargetsChecked.add(pkgName);
+      const manifestPath = resolve(cacheBase, "milo.json");
+      if (!existsSync(manifestPath)) return;
+      let targets: unknown;
+      try { targets = JSON.parse(readFileSync(manifestPath, "utf-8")).targets; } catch { return; }
+      if (!Array.isArray(targets) || targets.length === 0) return;
+      if (targets.includes(target.os)) return;
+      throw new Error(
+        `package '${pkgName}' does not support ${target.os} — its milo.json declares targets [${targets.join(", ")}]`,
+      );
+    }
 
     // check if import starts with a known package name from milo.json
     if (deps) {
@@ -203,6 +227,7 @@ export function resolveImports(program: Program, sourceDir: string, target: Targ
         const parsed = parsePkgUrl(pkgUrl);
         if (parsed) {
           const cacheBase = resolve(cacheDir(), parsed.host, parsed.path, parsed.version);
+          checkPkgTarget(pkgName, cacheBase);
           // import "pkg/module" → ~/.milo/cache/host/org/repo/version/module.milo
           const subPath = firstSlash !== -1 ? importPath.slice(firstSlash + 1) : "";
           if (subPath) {
@@ -223,8 +248,15 @@ export function resolveImports(program: Program, sourceDir: string, target: Targ
 
     const absPath = resolve(dir, withExt);
     if (!existsSync(absPath)) {
-      // for stdlib paths, try platform-specific file first (e.g. platform.darwin.milo)
       const base = withExt.replace(/\.milo$/, "");
+      // The filename suffix is the whole platform mechanism, so it has to work wherever
+      // source lives — not only in std. A package binding a system library needs it most:
+      // OpenGL is `-framework OpenGL` on darwin and `-lGL` elsewhere, so its `@link` arm
+      // has to split, and without this a package could only split files its CONSUMER
+      // imported by package path, never ones it imported from itself.
+      const localPlatform = resolve(dir, `${base}.${target.os}.milo`);
+      if (existsSync(localPlatform)) return { path: localPlatform, pkg };
+      // for stdlib paths, try platform-specific file first (e.g. platform.darwin.milo)
       const platformPath = resolve(STDLIB_DIR, `${base}.${target.os}.milo`);
       if (bundleExists(platformPath) || existsSync(platformPath)) return { path: platformPath, pkg: "" };
       const stdPath = resolve(STDLIB_DIR, withExt);

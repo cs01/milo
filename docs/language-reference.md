@@ -1443,7 +1443,7 @@ to be used after it has been released.
 
 `@noCopy` says the type is move-tracked however plain its fields are:
 
-```milo
+```milo error
 @noCopy
 struct Texture {
     id: u32,
@@ -1451,15 +1451,21 @@ struct Texture {
 }
 
 impl Texture {
-    fn bind(self: &Self) { ... }      // borrows — call as often as you like
-    fn free(self: Self) { ... }       // consumes — ends the handle's life
+    // Borrows — call as often as you like.
+    fn bind(self: &Self) {
+        print(self.id)
+    }
+
+    // Consumes — ends the handle's life.
+    fn free(self: Self) {
+        print(self.id)
+    }
 }
 
-let t = Texture.rgba8(w, h, pixels)
+let t = Texture { id: 7, w: 640 }
 t.bind()
 t.free()
 t.bind()    // error: use of moved variable 't'
-t.free()    // likewise — the double free is the same error
 ```
 
 The attribute takes no arguments, and every instantiation of a `@noCopy` generic inherits

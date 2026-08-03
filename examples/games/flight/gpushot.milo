@@ -23,6 +23,9 @@ from "std/png" import {
 from "std/args" import {
     args
 }
+from "std/math" import {
+    Math
+}
 from "sdl" import {
     SDL_CreateWindow, SDL_GetError, SDL_Init, SDL_Quit,
     SDL_INIT_VIDEO, SDL_WINDOWPOS_CENTERED
@@ -48,7 +51,10 @@ from "./city" import {
     City, cityAttachOrtho, cityEmpty, cityHasSea, cityLoad, demHeights
 }
 from "./world3d" import {
-    worldIn, worldUpdate, SEED
+    World, heightAt
+}
+from "./world3d" import {
+    marksFor, worldIn, worldUpdate, SEED
 }
 from "./textures" import {
     groundTexture, planeTexture, facadeTexture
@@ -120,6 +126,18 @@ pub fn main(): i32 {
     if a.len > 3 {
         frames = strToI64(a[3])
     }
+    // Park the camera in front of landmark N instead of flying the autopilot.
+    // Without this there is no way to photograph a specific thing: the autopilot
+    // decides where the aircraft is, and tuning a waterfall by re-running the
+    // flight until it happens to point at one is not a workflow.
+    var mark = 0 - 1
+    if a.len > 4 {
+        mark = strToI64(a[4])
+    }
+    var dist = 900.0
+    if a.len > 5 {
+        dist = (strToI64(a[5])) as f64
+    }
 
     if SDL_Init(SDL_INIT_VIDEO) != 0 {
         print("SDL_Init failed")
@@ -177,6 +195,9 @@ pub fn main(): i32 {
     var first = true
     for i in 0..frames {
         worldUpdate(w, 1.0 / 60.0, 0.0, 0.0, false)
+        if mark >= 0 {
+            aimAtMark(w, place, mark, dist)
+        }
         let view = viewOf(w.cam, c.w, c.h)
         postBeginWorld(p)
         drawWorld(c, s, w, groundTex, skinTex, facadeTex, view)
@@ -214,6 +235,35 @@ pub fn main(): i32 {
     }
     SDL_Quit()
     return 0
+}
+
+// Stand off from a landmark and look at it, at an angle that shows a cliff face
+// rather than the top of one.
+fn aimAtMark(w: &mut World, place: &string, i: i64, dist: f64) {
+    let marks = marksFor(w.city.name)
+    if marks.len == 0 || i >= marks.len {
+        return
+    }
+    let mx = marks[i].x
+    let mz = marks[i].z
+    let lip = heightAt(w.city, mx, mz)
+    let ang = 0.6
+    w.cam.x = mx + Math.sin(ang) * dist
+    w.cam.z = mz + Math.cos(ang) * dist
+    // Above the ground UNDER THE CAMERA, not under the landmark: standing off a
+    // cliff means standing over the valley floor, which is several hundred metres
+    // lower, and offsetting from the lip put the camera inside the rock.
+    // Partway DOWN the drop, not relative to whatever is under the camera: at any
+    // useful standoff from a cliff the ground under the camera is another ridge,
+    // and sitting above that puts the lens over the rim looking at the back of the
+    // mountain. A fixed offset below the lip is in open air by construction.
+    w.cam.y = lip - 260.0
+    let target = lip - 240.0
+    w.cam.yaw = Math.atan2(mx - w.cam.x, mz - w.cam.z)
+    let dy = target - w.cam.y
+    let flat = Math.sqrt((mx - w.cam.x) * (mx - w.cam.x) + (mz - w.cam.z) * (mz - w.cam.z))
+    w.cam.pitch = Math.atan2(dy, flat)
+    w.cam.roll = 0.0
 }
 
 fn strToI64(s: &string): i64 {

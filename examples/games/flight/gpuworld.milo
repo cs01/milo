@@ -260,9 +260,15 @@ void main() {
         // Glassy and see-through at the lip, dense and white at the bottom.
         alpha = body * (0.42 + 0.58 * streak) * mix(0.62, 1.0, down);
 
-        vec3 glacial = vec3(0.30, 0.55, 0.66);
-        vec3 aerated = vec3(1.20, 1.30, 1.38);
-        col = mix(glacial, aerated, clamp(atomise * 0.85 + streak * 0.35, 0.0, 1.0));
+        // Water in free fall is white almost at once. The green-blue of deep
+        // water only shows where there is depth to look through, and a sheet
+        // coming off a lip has none — a photograph of Yosemite Falls is a white
+        // thread against grey granite from the very top. The tint below is what
+        // the water is BEFORE it aerates, and it survives only in the first few
+        // metres and along the thin edges.
+        vec3 glacial = vec3(0.62, 0.78, 0.86);
+        vec3 aerated = vec3(1.35, 1.42, 1.48);
+        col = mix(glacial, aerated, clamp(0.30 + atomise * 0.80 + streak * 0.35, 0.0, 1.0));
         col *= sunLight();
 
         // Forward scatter. Aerated water is a cloud, and a cloud lit from behind

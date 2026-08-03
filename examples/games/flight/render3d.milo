@@ -810,41 +810,73 @@ fn fallRibbon(s: &mut Scene, w: &World, v: &View, lipX: f64, lipZ: f64, wide: f6
     var drop = 0.0
     var dirX = 0.0
     var dirZ = 1.0
-    for step in 0..MAX {
-        // Steepest descent, sampled as a gradient over one step either side.
-        let hx0 = heightAt(w.city, cx - STEP, cz)
-        let hx1 = heightAt(w.city, cx + STEP, cz)
-        let hz0 = heightAt(w.city, cx, cz - STEP)
-        let hz1 = heightAt(w.city, cx, cz + STEP)
-        var gx = hx0 - hx1
-        var gz = hz0 - hz1
-        let gl = Math.sqrt(gx * gx + gz * gz)
-        if gl < 0.0001 {
-            break
-        }
-        gx = gx / gl
-        gz = gz / gl
-        dirX = gx
-        dirZ = gz
-        let nx = cx + gx * STEP
-        let nz = cz + gz * STEP
-        let ny = heightAt(w.city, nx, nz)
-        let fell = cy - ny
-        // The chute has ended: the ground here is as flat as the valley floor.
-        if fell < 0.9 && drop > 40.0 {
-            break
-        }
+    // Which way is downhill at the lip. Sampled once, at the top, and then held:
+    // this is where the water is thrown, and it does not get to change its mind
+    // halfway down a cliff.
+    let gx0 = heightAt(w.city, cx - STEP, cz) - heightAt(w.city, cx + STEP, cz)
+    let gz0 = heightAt(w.city, cx, cz - STEP) - heightAt(w.city, cx, cz + STEP)
+    let gl0 = Math.sqrt(gx0 * gx0 + gz0 * gz0)
+    if gl0 > 0.0001 {
+        dirX = gx0 / gl0
+        dirZ = gz0 / gl0
+    }
+    for _ in 0..MAX {
         px.push(cx)
         py.push(cy)
         pz.push(cz)
         pfall.push(drop)
-        // Free fall: speed goes as the square root of the distance dropped, and a
-        // sheer plunge is moving far faster than a run over slabs.
-        pspeed.push(Math.clampF64(Math.sqrt(Math.maxF64(drop, 0.0)) / 14.0 + fell / 9.0, 0.10, 1.0))
-        drop = drop + Math.maxF64(fell, 0.0)
-        cx = nx
-        cz = nz
-        cy = ny
+        // Free fall: speed goes as the square root of the distance dropped.
+        pspeed.push(Math.clampF64(Math.sqrt(Math.maxF64(drop, 0.0)) / 14.0, 0.15, 1.0))
+
+        // WATER FALLS. It does not follow the ground down.
+        //
+        // Tracing steepest descent over the heightfield — which is what this used
+        // to do — spreads a 633 m drop over 854 m of horizontal travel, because
+        // SRTM's 30 m posts smooth a sheer granite face into a steep slope and
+        // steepest descent obediently walks down it. The result is a diagonal
+        // smear across a mountainside rather than a plunge, which is why the fall
+        // read as tiny: it was never more than a few metres of drop per step of
+        // screen distance.
+        //
+        // So the water leaves the lip and descends, and only rides the terrain
+        // where the terrain is genuinely in the way. That handles both cases with
+        // one rule: a sheer cliff gives a vertical ribbon, a boulder run gives a
+        // cascade that hugs the rock, and Yosemite's three drops come out as three
+        // drops because the ledges between them really are ledges.
+        let stepDown = 14.0
+        // Forward throw. Larger than the water's real trajectory on purpose: the
+        // DEM does not contain the cliff. SRTM's 30 m posts smooth a vertical
+        // granite face into a slope, so the surface the heightfield describes sits
+        // WELL BEHIND where the rock actually is, and water that stops when it
+        // meets that surface stops a couple of hundred metres above the valley
+        // floor. Carrying the ribbon out from the face as it drops puts it in
+        // front of the smoothed slope, which is both where the real water is and
+        // where it has to be to read as falling.
+        let throwOut = 5.5
+        let ny = cy - stepDown
+        let nx = cx + dirX * throwOut
+        let nz = cz + dirZ * throwOut
+        let ground = heightAt(w.city, nx, nz)
+        // Only a real ledge counts as an obstruction. Within this tolerance the
+        // heightfield is describing the smoothed face, not something the water
+        // would actually land on.
+        if ground > ny + 22.0 {
+            // The rock is in the way — this is a ledge or a chute, so run along it
+            // rather than through it. If the ground here is no lower than where we
+            // already are, the fall has reached the valley floor and is finished.
+            if ground >= cy - 0.4 {
+                break
+            }
+            drop = drop + (cy - ground)
+            cy = ground
+            cx = nx
+            cz = nz
+        } else {
+            drop = drop + stepDown
+            cy = ny
+            cx = nx
+            cz = nz
+        }
     }
     if drop < 20.0 || px.len < 2 {
         return

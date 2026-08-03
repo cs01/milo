@@ -51,6 +51,38 @@ If it failed, say so with the output. Skipped a step? Say that. No hedging when 
 - Self-review the diff. Then **cross-model review**: `scripts/agent_review.sh implementation` runs personas (correctness, security, performance, maintainability, AI-smells, + domain) — a *different* lens than the model that wrote the code. See [docs/agent-review.md](docs/agent-review.md).
 - `/code-review` for a fast local diff pass.
 
+#### Ethos review — argue the change is wrong
+
+Milo is **a memory-safe systems language that guides you to correct, readable
+programs.** A change can pass every test and still work against that sentence.
+So before wrap-up, take the change's side away from yourself and make the case
+*against* it, out loud, on each clause. Answer with evidence from the diff, not
+intent — "I meant it to" is not an answer.
+
+- **memory-safe** — what does this let through that it shouldn't? Name the
+  expression form, container, or spelling that reaches the new code and gets the
+  permissive branch. If a rule is keyed to a node kind, a function name, or a
+  type tag, ask what the *next* spelling is: the recurring defect in this repo is
+  a check that matched one shape while the same operation spelled another way
+  walked past it. A rule that cannot be stated as a property of the program —
+  only as a list of cases — is the smell.
+- **guides you** — when a user gets this wrong, what do they see? A diagnostic
+  naming the cause and a fix is guidance. An LLVM verifier error, a silent
+  fallback to a plausible-looking value, garbage output, or a crash with no
+  source location is not, however correct the compiler was internally. Silently
+  doing something *other* than what the source says is the worst outcome
+  available and outranks a false rejection.
+- **correct** — where does this fail open? For every "unknown / can't tell /
+  didn't match" path, state whether it accepts or rejects, and justify accepting
+  if it does. Default to rejecting and let the user complain.
+- **readable** — could someone who did not write this infer the rule from the
+  code, or does it only make sense with the commit message in hand? Would they
+  reach the same answer for a case not in the tests?
+
+Write the strongest objection you found and how you answered it into the
+worksheet. "No objections" means the review did not happen — find one, then
+either fix it or record why it is acceptable.
+
 ### 6. Wrap-up
 - **Run the full validation** before you call it done: `bun test`, `bun run scripts/run-examples.ts` (all examples build+run), relevant benchmarks, sweep if you touched many files.
 - Update every doc your change made stale; bump `last-verified`.

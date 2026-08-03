@@ -8,6 +8,54 @@ import { countCSigParams } from "./csig";
 import { memberHint, closest, importHint, stdExportNames, VEC_MEMBERS, HASHMAP_MEMBERS, STRING_MEMBERS } from "./suggest";
 import { basename } from "path";
 
+// One hop from a place to a place inside it. `index` is deliberately opaque —
+// two index steps may or may not select the same element, and nothing here tries
+// to decide that. `payload` is the inside of an Option/Result reached by `!`/`?`.
+export type PlaceStep =
+  | { tag: "field"; name: string }
+  | { tag: "index" }
+  | { tag: "deref" }
+  | { tag: "payload" };
+
+// Storage an expression reaches. See `placesOf` for why this exists and why the
+// walker that produces it is total.
+export type Place =
+  // Reached from a named binding by a chain of steps.
+  | { tag: "path"; root: string; steps: PlaceStep[] }
+  // A fresh value that owns itself: a literal, an arithmetic result, a call's
+  // return. Aliases no binding, so every rule may ignore it.
+  | { tag: "value" }
+  // Storage this walker cannot name. Every rule must read it as "may be any
+  // place", never as "no place" — that direction is what made the old walkers
+  // leak, since each returned null for the kinds it didn't list.
+  | { tag: "opaque" };
+
+const VALUE: Place = { tag: "value" };
+const OPAQUE: Place = { tag: "opaque" };
+const INDEX: PlaceStep = { tag: "index" };
+const DEREF: PlaceStep = { tag: "deref" };
+const PAYLOAD: PlaceStep = { tag: "payload" };
+
+// Printable key for a step, and the spelling the older string-keyed callers use:
+// a field is ".name", everything else collapses to one opaque token per kind.
+function stepKey(s: PlaceStep): string {
+  switch (s.tag) {
+    case "field": return `.${s.name}`;
+    case "index": return "[]";
+    case "deref": return "*";
+    case "payload": return "!";
+  }
+}
+
+function stepsEq(a: PlaceStep[], b: PlaceStep[]): boolean {
+  return a.length === b.length && a.every((s, i) => stepKey(s) === stepKey(b[i]));
+}
+
+// How a step reads in a diagnostic, where an index has to look like source.
+function stepLabel(s: PlaceStep): string {
+  return s.tag === "index" ? "[…]" : stepKey(s);
+}
+
 export interface VarInfo {
   type: TypeKind;
   mutable: boolean;
@@ -3219,13 +3267,12 @@ export class TypeChecker {
   }
 
   private checkViewProvenance(value: Expr, sp?: Span) {
-    let root = value;
-    while (root.kind === "FieldAccess" || root.kind === "IndexAccess" || root.kind === "MethodCall") {
-      root = root.kind === "MethodCall" ? root.object : root.object;
-    }
-    if (root.kind === "Ident" && root.name === "self") return;
-    if (root.kind !== "Ident") return; // not a place expression — the type check already rejects it
-    this.error(`cannot return a view of '${root.name}'`, sp,
+    // Every place the returned view could point into must be the receiver's own
+    // storage — a fork returns one of several, and one bad arm is enough to dangle.
+    const places = this.placesOf(value);
+    const offending = places.find(p => p.tag === "path" && p.root !== "self");
+    if (!offending || offending.tag !== "path") return; // all self, or no named place
+    this.error(`cannot return a view of '${offending.root}'`, sp,
       `a returned view may only point into the receiver's own storage ('self...') — the call site freezes the receiver, so any other source could be moved or reallocated while the view is live`);
   }
 
@@ -4293,7 +4340,78 @@ export class TypeChecker {
     this.tryMove(receiver);
   }
 
+  // Where a move actually lands. An if- or match-expression owns nothing itself:
+  // it evaluates to one of its tails, so consuming it consumes whichever tail ran,
+  // and the move rule has to be applied to each of them. Before this existed no
+  // branch of `tryMoveLeaf` matched a fork at all, so `return if c { d.a } else
+  // { d.b }` moved nothing and checked nothing — it compiled and double-freed,
+  // while the identical `return d.a` was a compile error. Same for `??`, `!`, `?`
+  // and a cast wrapping the same access.
+  //
+  // Total, with no `default:` — a new Expr kind is a compile error here until it
+  // is classified, which is the whole point. See `placesOf` for the same argument.
+  private moveTargets(expr: Expr): Expr[] {
+    switch (expr.kind) {
+      // Handled directly: these are the forms that name storage (or, for a move
+      // closure, capture it).
+      case "Ident": case "FieldAccess": case "IndexAccess": case "Closure":
+        return [expr];
+
+      // Forks: exactly one tail is consumed, but which one is a runtime fact. Move
+      // every candidate — a binding consumed on either path is unusable after, and
+      // codegen only zeroes the slot the taken branch actually moved.
+      case "IfExpr":
+        return this.tailTargets([expr.thenBody, expr.elseBody]);
+      case "MatchExpr":
+        return this.tailTargets(expr.arms.map(a => a.body));
+      case "DefaultValue":
+        return [expr.operand, expr.default];
+
+      // Pass-throughs: the value comes out of the operand's storage.
+      case "Unwrap": case "Propagate":
+        return [expr.operand];
+
+      // A cast reinterprets, it does not consume: `s as *u8` on a `&string` takes
+      // the buffer's address (unsafe, FFI seam) and leaves `s` exactly as owned as
+      // it was. This is where moveTargets and placesOf legitimately disagree —
+      // placesOf DOES forward through a cast, because the resulting pointer aliases
+      // the operand's storage and the aliasing rules have to see that.
+      case "CastExpr":
+        return [];
+
+      // Fresh values. Their own operands are moved where those are checked — a
+      // struct literal's fields, a call's arguments — not through the result.
+      case "IntLit": case "FloatLit": case "BoolLit": case "StringLit": case "CharLit":
+      case "BinOp": case "UnaryOp": case "Call": case "MethodCall": case "StructLit":
+      case "ArrayLit": case "ArrayRepeat": case "EnumLit": case "RangeExpr": case "IsExpr":
+        return [];
+    }
+    const _exhaustive: never = expr;
+    void _exhaustive;
+    return [];
+  }
+
+  private tailTargets(bodies: Stmt[][]): Expr[] {
+    const out: Expr[] = [];
+    for (const body of bodies) {
+      // No value tail means the arm diverges (`return`, `break`, an abort) and
+      // consumes nothing on that path — there is no place to move.
+      const tail = this.tailExprOf(body);
+      if (tail) out.push(tail);
+    }
+    return out;
+  }
+
   private tryMove(expr: Expr) {
+    const targets = this.moveTargets(expr);
+    // A fork forwards to its tails; anything else is either itself the target or
+    // owns nothing. `targets[0] === expr` is the leaf case — recursing on it would
+    // not terminate.
+    if (targets.length === 1 && targets[0] === expr) { this.tryMoveLeaf(expr); return; }
+    for (const t of targets) this.tryMove(t);
+  }
+
+  private tryMoveLeaf(expr: Expr) {
     if (expr.kind === "Ident") {
       const info = this.lookup(expr.name);
       // Moving in an owned position through a borrow (`&T`, T non-Copy) would
@@ -4408,17 +4526,17 @@ export class TypeChecker {
   // moved rather than only which variable it came from. An index becomes `[…]` — the
   // subscript is not re-evaluated for the message, and naming the exact element would
   // imply a precision the check does not have.
-  private borrowBasePath(expr: Expr): { root: string; path: string; mutable: boolean } | null {
-    const segments: string[] = [];
-    let cur: Expr = expr;
-    while (cur.kind === "FieldAccess" || cur.kind === "IndexAccess") {
-      segments.unshift(cur.kind === "FieldAccess" ? `.${cur.field}` : "[…]");
-      cur = cur.object;
-    }
-    if (cur.kind !== "Ident") return null;
-    const info = this.lookup(cur.name);
+  // The borrow a place reaches through, if any: the root binding is a `&T`/`&mut T`
+  // and `path` spells the steps taken through it, for the diagnostic.
+  private borrowBaseOfPlace(p: { root: string; steps: PlaceStep[] }): { root: string; path: string; mutable: boolean } | null {
+    const info = this.lookup(p.root);
     if (!info || info.type.tag !== "ref") return null;
-    return { root: cur.name, path: segments.join(""), mutable: info.type.mutable };
+    return { root: p.root, path: p.steps.map(stepLabel).join(""), mutable: info.type.mutable };
+  }
+
+  private borrowBasePath(expr: Expr): { root: string; path: string; mutable: boolean } | null {
+    const p = this.soloPath(expr);
+    return p ? this.borrowBaseOfPlace(p) : null;
   }
 
   private resolveAssignTarget(expr: Expr): { type: TypeKind; mutable: boolean } | null {
@@ -4707,32 +4825,142 @@ export class TypeChecker {
     return t?.tag === "ref" ? { mutable: t.mutable } : null;
   }
 
+  // ── Places ────────────────────────────────────────────────────────────────
+  //
+  // A *place* is storage an expression evaluates to. `d.a` is the `a` field of
+  // whatever `d` names. `n + 1` is not a place at all — it is a fresh value that
+  // aliases nothing.
+  //
+  // Every aliasing rule in this checker asks the same question ("what storage
+  // does this expression reach, and through whose binding"), and each one used
+  // to ask it with its own walker: accessSteps, accessPath, borrowBasePath,
+  // isRootMutable, errorIfFrozen, freezeViewSource, plus two more inside the
+  // view-provenance code. Eight walkers, eight different sets of node kinds, and
+  // every kind none of them listed was a silent hole — `return d.a` was rejected
+  // as a move out of a borrow while `return if c { d.a } else { d.b }` compiled
+  // and double-freed, because no walker knew what an IfExpr was.
+  //
+  // So `placesOf` is TOTAL over the expression grammar and fails CLOSED. The
+  // switch has no `default`: the `never` assignment at the end makes a newly
+  // added Expr kind a compile error here until someone classifies it, and the
+  // conservative classification (`opaque` — "storage I cannot name") is the one
+  // that rejects rather than the one that lets code through.
+  //
+  // An expression yields a SET of places because control flow forks: the tails
+  // of an if- or match-expression are each a candidate result. Callers must
+  // satisfy their rule for *every* place in the set, never just the first.
+  private placesOf(e: Expr): Place[] {
+    switch (e.kind) {
+      // Fresh values. Own themselves, reach no binding's storage.
+      case "IntLit": case "FloatLit": case "BoolLit": case "StringLit": case "CharLit":
+      case "ArrayLit": case "ArrayRepeat": case "StructLit": case "EnumLit":
+      case "RangeExpr": case "IsExpr": case "Closure":
+        return [VALUE];
+
+      // `o ?? d` is a fork like an if-expression: the result is either o's
+      // payload — which lives in o's storage — or the default.
+      case "DefaultValue":
+        return [...this.stepInto(e.operand, PAYLOAD), ...this.placesOf(e.default)];
+
+      // Arithmetic, comparison and concatenation all build a new value. `&x` is
+      // not an expression in this language, so no BinOp/UnaryOp yields a borrow.
+      case "BinOp":
+        return [VALUE];
+      case "UnaryOp":
+        return e.op === "*" ? this.stepInto(e.operand, DEREF) : [VALUE];
+
+      case "Ident":
+        return [{ tag: "path", root: e.name, steps: [] }];
+      case "FieldAccess":
+        return this.stepInto(e.object, { tag: "field", name: e.field });
+      case "IndexAccess":
+        return this.stepInto(e.object, INDEX);
+
+      // The payload of `o!` / `o?` lives inside `o`'s storage, so unwrapping a
+      // borrowed Option reaches through the borrow exactly as a field access does.
+      case "Unwrap": case "Propagate":
+        return this.stepInto(e.operand, PAYLOAD);
+
+      // A cast reinterprets its operand in place — `p as *u8` keeps pointing at
+      // the same storage. Forwarding can only over-report (a cast of a non-Copy
+      // value is not expressible), and over-reporting is the safe direction.
+      case "CastExpr":
+        return this.placesOf(e.operand);
+
+      // A method returning a view (`v[a..b]`, which desugars to `.slice(a, b)`,
+      // or a user method returning `&[T]`/`&string`) points into its receiver's
+      // storage; provenance is enforced at the definition by checkViewProvenance,
+      // so the receiver is the root. Any other method returns an owned value.
+      // A missing type is not a licence to assume the safe answer.
+      case "MethodCall": {
+        const t = this.exprTypes.get(e);
+        if (!t) return [OPAQUE];
+        return t.tag === "ref" ? this.stepInto(e.object, INDEX) : [VALUE];
+      }
+
+      // Free functions cannot return a view (errorIfRefReturn rejects a `&T`
+      // return without a self receiver), so a call's result is owned. If one
+      // ever slips through as a ref, name it unknown rather than fresh.
+      case "Call": {
+        const t = this.exprTypes.get(e);
+        return t && t.tag === "ref" ? [OPAQUE] : [VALUE];
+      }
+
+      // Control-flow forks: the result is one of the branch tails. A branch with
+      // no value tail either diverges (contributes no place) or ends in a form
+      // tailExprOf does not model — indistinguishable here, so both are OPAQUE.
+      case "IfExpr":
+        return this.tailPlaces([e.thenBody, e.elseBody]);
+      case "MatchExpr":
+        return this.tailPlaces(e.arms.map(a => a.body));
+    }
+    // No `default:` on purpose. If this line stops compiling, a new Expr kind was
+    // added — classify it above. Reaching it at runtime means the parser produced
+    // a node the type says cannot exist, so fail closed rather than guess.
+    const _exhaustive: never = e;
+    void _exhaustive;
+    return [OPAQUE];
+  }
+
+  // Extend every place the base expression reaches by one step. A step off a
+  // fresh value stays fresh (`makeDoc().a` is a field of a temporary, which owns
+  // itself); a step off unnamed storage stays unnamed.
+  private stepInto(base: Expr, step: PlaceStep): Place[] {
+    return this.placesOf(base).map(p =>
+      p.tag === "path" ? { tag: "path", root: p.root, steps: [...p.steps, step] } as Place : p);
+  }
+
+  private tailPlaces(bodies: Stmt[][]): Place[] {
+    const out: Place[] = [];
+    for (const body of bodies) {
+      const tail = this.tailExprOf(body);
+      if (!tail) { out.push(OPAQUE); continue; }
+      out.push(...this.placesOf(tail));
+    }
+    return out;
+  }
+
+  // The single-place view the older callers want: a place set collapses to one
+  // path only when every member agrees on it. A set containing a value, unnamed
+  // storage, or two different roots has no single answer, and `null` here means
+  // "no single named place" — callers that must fail closed check the full set.
+  private soloPath(e: Expr): { root: string; steps: PlaceStep[] } | null {
+    const places = this.placesOf(e);
+    if (places.length === 0) return null;
+    const first = places[0];
+    if (first.tag !== "path") return null;
+    for (const p of places.slice(1)) {
+      if (p.tag !== "path" || p.root !== first.root || !stepsEq(p.steps, first.steps)) return null;
+    }
+    return { root: first.root, steps: first.steps };
+  }
+
   // Index-aware access path: each step is a field name (".f") or an opaque index
   // ("[]"). Unlike accessPath (which collapses to fields=null at the first index),
   // this preserves depth so an ancestor/descendant relationship survives an index.
   private accessSteps(e: Expr): { root: string; steps: string[] } | null {
-    if (e.kind === "Ident") return { root: e.name, steps: [] };
-    if (e.kind === "FieldAccess") {
-      const base = this.accessSteps(e.object);
-      return base ? { root: base.root, steps: [...base.steps, `.${e.field}`] } : null;
-    }
-    if (e.kind === "IndexAccess") {
-      const base = this.accessSteps(e.object);
-      return base ? { root: base.root, steps: [...base.steps, "[]"] } : null;
-    }
-    if (e.kind === "UnaryOp" && e.op === "*") {
-      const base = this.accessSteps(e.operand);
-      return base ? { root: base.root, steps: [...base.steps, "*"] } : null;
-    }
-    // A method returning a view (`v[a..b]`, which desugars to `.slice(a,b)`, or a
-    // user method returning `&[T]`) points into its receiver's storage — provenance
-    // is enforced at the definition (checkViewProvenance), so the receiver is the
-    // root and the view is a descendant of it.
-    if (e.kind === "MethodCall" && this.exprTypes.get(e)?.tag === "ref") {
-      const base = this.accessSteps(e.object);
-      return base ? { root: base.root, steps: [...base.steps, "[]"] } : null;
-    }
-    return null;
+    const p = this.soloPath(e);
+    return p ? { root: p.root, steps: p.steps.map(stepKey) } : null;
   }
 
   // True when the two step chains (same root) are in a containment relation that
@@ -4748,28 +4976,17 @@ export class TypeChecker {
   }
 
   // Access path for exclusivity: root variable + chain of field names. `fields` is
-  // null when the access goes through an index or deref, where offsets are dynamic
-  // and disjointness can't be proven — callers treat null as "may alias".
+  // null when the access goes through an index, deref or payload, where offsets are
+  // dynamic and disjointness can't be proven — callers treat null as "may alias".
   private accessPath(e: Expr): { root: string; fields: string[] | null } | null {
-    if (e.kind === "Ident") return { root: e.name, fields: [] };
-    if (e.kind === "FieldAccess") {
-      const base = this.accessPath(e.object);
-      if (!base) return null;
-      return { root: base.root, fields: base.fields === null ? null : [...base.fields, e.field] };
+    const p = this.soloPath(e);
+    if (!p) return null;
+    const fields: string[] = [];
+    for (const s of p.steps) {
+      if (s.tag !== "field") return { root: p.root, fields: null };
+      fields.push(s.name);
     }
-    if (e.kind === "IndexAccess") {
-      const base = this.accessPath(e.object);
-      return base ? { root: base.root, fields: null } : null;
-    }
-    if (e.kind === "UnaryOp" && e.op === "*") {
-      const base = this.accessPath(e.operand);
-      return base ? { root: base.root, fields: null } : null;
-    }
-    if (e.kind === "MethodCall" && this.exprTypes.get(e)?.tag === "ref") {
-      const base = this.accessPath(e.object);
-      return base ? { root: base.root, fields: null } : null;
-    }
-    return null;
+    return { root: p.root, fields };
   }
 
   private isRootMutable(expr: Expr): boolean {
@@ -4790,14 +5007,18 @@ export class TypeChecker {
   // borrow points into. Assignment freezing is handled in the Assign case; this guards
   // mutating method calls. In-place element assignment (v[i] = x) stays legal — it
   // never reallocs, and rewriting elements mid-iteration is a common safe pattern.
+  // Every binding this expression could be mutating must be unfrozen — a fork like
+  // `(if c { a } else { b }).push(x)` reaches two of them, and checking only the
+  // first would let the other's live borrow dangle.
   private errorIfFrozen(obj: Expr, action: string, sp?: Span) {
-    let e = obj;
-    while (e.kind === "FieldAccess" || e.kind === "IndexAccess") e = e.object;
-    if (e.kind !== "Ident") return;
-    const info = this.lookup(e.name);
-    if (info && this.frozenAgainst(info, obj)) {
-      this.error(`cannot ${action} '${e.name}' because it is borrowed`, sp,
-        `a slice or loop iteration over this variable is still live — mutating it could move memory the borrow points into`);
+    for (const place of this.placesOf(obj)) {
+      if (place.tag !== "path") continue;
+      const info = this.lookup(place.root);
+      if (info && this.frozenAgainst(info, obj)) {
+        this.error(`cannot ${action} '${place.root}' because it is borrowed`, sp,
+          `a slice or loop iteration over this variable is still live — mutating it could move memory the borrow points into`);
+        return;
+      }
     }
   }
 
@@ -4805,19 +5026,28 @@ export class TypeChecker {
   // hazard as calling a mutating method on it (the callee may realloc/free it).
   private setAutoBorrowChecked(arg: Expr, mutable: boolean, sp?: Span) {
     if (mutable) {
-      this.errorIfFrozen(arg, "pass", sp);
+      // Only for a value being *turned into* a borrow. An argument that is already
+      // a reference — a slice like `v[0..2]` — is not competing with the freeze, it
+      // IS one, and whether two of them may coexist is checkCallSiteExclusivity's
+      // call: it compares access paths and knows `v[0..2]` and `v[2..4]` are
+      // disjoint, which this check cannot see (any index collapses its path to
+      // "may alias"). Asking both means the blunt one always wins and
+      // `fill(v[0..2], v[2..4])` — a supported disjoint split — stops compiling.
+      if (this.exprTypes.get(arg)?.tag !== "ref") this.errorIfFrozen(arg, "pass", sp);
       // Passing an immutable binding to a '&mut' param mutates it through the
       // call — the same hazard method receivers already reject ("cannot push to
       // immutable Vec"). A 'let' claims immutability *and* SSA-register storage;
       // taking its address for '&mut' forces a spill and silently breaks both.
       // Free-function '&mut' args were the one path that skipped this check.
-      let root: Expr = arg;
-      while (root.kind === "FieldAccess" || root.kind === "IndexAccess") root = root.object;
-      if (root.kind === "Ident") {
-        const info = this.lookup(root.name);
+      // Every binding the argument could name has to be mutable: a fork reaches
+      // more than one, and it is the immutable arm that would be written through.
+      for (const place of this.placesOf(arg)) {
+        if (place.tag !== "path") continue;
+        const info = this.lookup(place.root);
         if (info && !info.mutable && info.type.tag !== "ref") {
           this.error(`cannot pass immutable '${this.describeExpr(arg)}' as a '&mut' argument`, sp,
             `declare with 'var' to make it mutable`);
+          break;
         }
       }
     }

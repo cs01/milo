@@ -192,8 +192,11 @@ pub fn main(): i32 {
     } else {
         80 as i64
     }
+    // .clone() because this arm hands `host`'s buffer to `authority` while `host`
+    // is still read below (resolve, the error message, the TLS handshake name).
+    // The other arm concatenates, which copies, so only this one consumes.
     let authority = if (port as i64) == defaultPort {
-        host
+        host.clone()
     } else {
         host + ":" + (port as i64).toString()
     }

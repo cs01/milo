@@ -21,10 +21,15 @@ from "std/args" import {
 from "std/strconv" import {
     parseInt, parseFloat
 }
-from "./sdl" import {
-    Input, Size, hostNew, inputNew, pollInput, drawableSize, pixelScale,
-    SDL_GL_SwapWindow, SDL_GL_DeleteContext, SDL_DestroyWindow, SDL_Quit,
-    SDL_GetTicks, SDL_SetWindowFullscreen, SDL_WINDOW_FULLSCREEN_DESKTOP,
+from "./host" import {
+    Input, Size, hostNew, inputNew, pollInput, drawableSize, pixelScale
+}
+from "sdl" import {
+    SDL_DestroyWindow, SDL_GetTicks, SDL_Quit, SDL_SetWindowFullscreen,
+    SDL_WINDOW_FULLSCREEN_DESKTOP
+}
+from "sdl/gl" import {
+    SDL_GL_DeleteContext, SDL_GL_SwapWindow
 }
 from "./mat4" import {
     V3, v3, identity, multiply, perspective, lookAt, rotationY, rotationZ,

@@ -19,7 +19,7 @@ from "./gfx3d" import {
 from "./gpupost" import {
     seaViewNone
 }
-from "./sdl" import {
+from "./input" import {
     Input, pollInput
 }
 

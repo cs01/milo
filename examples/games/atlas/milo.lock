@@ -3,9 +3,16 @@
   "packages": {
     "gl": {
       "url": "github.com/milo-language/gl",
-      "version": "v0.1.0",
-      "commit": "e908ea075a5ac150dee8c1aceeae4df8fbd30aec",
-      "hash": "sha256:6480910d4c61a5e15046a8f6d8da5a8fa612a43d811b3a232612910c4e8cec7c",
+      "version": "v0.1.1",
+      "commit": "62c8252d469f6c110f0f41f3b951224b859a44d8",
+      "hash": "sha256:8e75386d395f44d624902c50ea9d03412244ae04d40bcb5ef24638afee2d27a2",
+      "deps": []
+    },
+    "sdl": {
+      "url": "github.com/milo-language/milo-sdl",
+      "version": "v0.2.0",
+      "commit": "c4bdffaf1cac8fa41451d8c20b2f250237cdd864",
+      "hash": "sha256:ef09934c4a8e5849515fc0f380d242aa9dfb421deda1d6bff1b94ec21503aa8f",
       "deps": []
     }
   }

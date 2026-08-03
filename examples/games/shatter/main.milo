@@ -17,13 +17,15 @@
 from "std/math" import {
     Math
 }
-from "./sdl" import {
+from "sdl" import {
     SDL_Init, SDL_CreateWindow, SDL_CreateRenderer, SDL_CreateTexture,
     SDL_UpdateTexture, SDL_RenderClear, SDL_RenderCopy, SDL_RenderPresent,
     SDL_ShowCursor, SDL_GetTicks, SDL_DestroyWindow, SDL_Quit,
     SDL_INIT_VIDEO, SDL_WINDOWPOS_CENTERED, SDL_WINDOW_SHOWN,
     SDL_TEXTUREACCESS_STREAMING, SDL_PIXELFORMAT_ABGR8888,
     SDL_RENDERER_ACCELERATED, SDL_RENDERER_PRESENTVSYNC,
+}
+from "./input" import {
     Input, inputNew, pollInput
 }
 from "./gfx" import {

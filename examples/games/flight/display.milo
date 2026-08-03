@@ -24,19 +24,22 @@ from "./gfx3d" import {
 from "./gpupost" import {
     Post, SeaView, postDraw, postFree, postNew
 }
-from "./sdl" import {
+from "sdl" import {
     SDL_CreateRenderer, SDL_CreateTexture, SDL_CreateWindow, SDL_DestroyRenderer,
-    SDL_DestroyTexture, SDL_DestroyWindow, SDL_GL_CreateContext,
-    SDL_GL_DeleteContext, SDL_GL_GetDrawableSize, SDL_GL_SetAttribute,
-    SDL_GL_SetSwapInterval, SDL_GL_SwapWindow, SDL_GetError, SDL_MaximizeWindow,
+    SDL_DestroyTexture, SDL_DestroyWindow, SDL_GetError, SDL_MaximizeWindow,
     SDL_RenderClear, SDL_RenderCopy, SDL_RenderPresent, SDL_RenderSetLogicalSize,
     SDL_SetWindowFullscreen, SDL_UpdateTexture,
+    SDL_PIXELFORMAT_ABGR8888, SDL_RENDERER_ACCELERATED,
+    SDL_RENDERER_PRESENTVSYNC, SDL_TEXTUREACCESS_STREAMING,
+    SDL_WINDOWPOS_CENTERED, SDL_WINDOW_FULLSCREEN_DESKTOP,
+    SDL_WINDOW_RESIZABLE, SDL_WINDOW_SHOWN
+}
+from "sdl/gl" import {
+    SDL_GL_CreateContext, SDL_GL_DeleteContext, SDL_GL_GetDrawableSize,
+    SDL_GL_SetAttribute, SDL_GL_SetSwapInterval, SDL_GL_SwapWindow,
     SDL_GL_CONTEXT_MAJOR_VERSION, SDL_GL_CONTEXT_MINOR_VERSION,
     SDL_GL_CONTEXT_PROFILE_CORE, SDL_GL_CONTEXT_PROFILE_MASK,
-    SDL_GL_DOUBLEBUFFER, SDL_PIXELFORMAT_ABGR8888, SDL_RENDERER_ACCELERATED,
-    SDL_RENDERER_PRESENTVSYNC, SDL_TEXTUREACCESS_STREAMING,
-    SDL_WINDOWPOS_CENTERED, SDL_WINDOW_FULLSCREEN_DESKTOP, SDL_WINDOW_OPENGL,
-    SDL_WINDOW_RESIZABLE, SDL_WINDOW_SHOWN
+    SDL_GL_DOUBLEBUFFER, SDL_WINDOW_OPENGL
 }
 
 pub struct Screen {

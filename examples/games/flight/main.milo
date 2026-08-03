@@ -14,12 +14,12 @@
 //
 // You cannot crash. The ground pushes you up if you dive into it.
 
-from "./sdl" import {
-    Input,
-    SDL_Init, SDL_ShowCursor, SDL_GetTicks, SDL_SetWindowFullscreen,
-    SDL_WINDOW_FULLSCREEN_DESKTOP, SDL_Quit,
-    SDL_INIT_VIDEO, SDL_INIT_AUDIO,
-    inputNew, pollInput
+from "sdl" import {
+    SDL_Init, SDL_Quit, SDL_GetTicks, SDL_SetWindowFullscreen, SDL_ShowCursor,
+    SDL_INIT_AUDIO, SDL_INIT_VIDEO, SDL_WINDOW_FULLSCREEN_DESKTOP
+}
+from "./input" import {
+    Input, inputNew, pollInput
 }
 from "./display" import {
     Screen, screenClose, screenOpen, screenPresent

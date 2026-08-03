@@ -2,26 +2,17 @@
 // and no callback thread — build a few PCM buffers once, push one at the device
 // whenever something happens.
 //
-// This is the only file besides sdl.milo that touches raw pointers.
+// The SDL declarations come from the `sdl` package; the waveforms are ours.
 
 from "std/math" import {
     Math
 }
-
-@link("SDL2")
-pub extern fn SDL_OpenAudioDevice(device: *u8, iscapture: i32, desired: *u8, obtained: *u8, allowed: i32): u32
-
-pub extern fn SDL_QueueAudio(dev: u32, data: *u8, len: u32): i32
-
-pub extern fn SDL_PauseAudioDevice(dev: u32, pauseOn: i32): void
-
-pub extern fn SDL_ClearQueuedAudio(dev: u32): void
-
-pub extern fn SDL_GetQueuedAudioSize(dev: u32): u32
+from "sdl/audio" import {
+    SDL_ClearQueuedAudio, SDL_GetQueuedAudioSize, SDL_OpenAudioDevice,
+    SDL_PauseAudioDevice, SDL_QueueAudio, audioSpec, AUDIO_S16LSB
+}
 
 pub let RATE: i64 = 44100
-
-pub let AUDIO_S16LSB: i64 = 0x8010
 
 pub struct Sound {
     dev: u32,
@@ -177,29 +168,20 @@ fn rush(out: &mut Vec<i16>, secs: f64, amp: f64) {
 }
 
 pub fn soundNew(): Sound {
-    // SDL_AudioSpec, filled by hand: freq i32 @0, format u16 @4, channels u8 @6,
-    // silence u8 @7, samples u16 @8, padding u16 @10, size u32 @12, callback ptr
-    // @16, userdata ptr @24.
-    var spec: [u8; 32] = [0; 32]
-    let f = RATE
-    spec[0] = (f & 0xFF) as u8
-    spec[1] = ((f >> 8) & 0xFF) as u8
-    spec[2] = ((f >> 16) & 0xFF) as u8
-    spec[3] = ((f >> 24) & 0xFF) as u8
-    spec[4] = (AUDIO_S16LSB & 0xFF) as u8
-    spec[5] = ((AUDIO_S16LSB >> 8) & 0xFF) as u8
-    spec[6] = 1 // mono
-    spec[8] = 0 // 2048 samples
-    spec[9] = 8
+    // Mono 16-bit at 2048 samples a buffer. This used to be a hand-packed [u8; 32]
+    // with the field offsets written out as a comment; the package's SDL_AudioSpec
+    // is @cLayout-checked against the header instead, so a field landing in the
+    // wrong place is a build error rather than a device opened at the wrong rate.
+    var spec = audioSpec(RATE as i32, AUDIO_S16LSB as u16, 1, 2048)
 
     var dev: u32 = 0
     var mdev: u32 = 0
     unsafe {
-        dev = SDL_OpenAudioDevice(0 as *u8, 0, spec[0].addrOf() as *u8, 0 as *u8, 0)
+        dev = SDL_OpenAudioDevice(0 as *u8, 0, spec.addrOf() as *u8, 0 as *u8, 0)
         if dev != 0 {
             SDL_PauseAudioDevice(dev, 0)
         }
-        mdev = SDL_OpenAudioDevice(0 as *u8, 0, spec[0].addrOf() as *u8, 0 as *u8, 0)
+        mdev = SDL_OpenAudioDevice(0 as *u8, 0, spec.addrOf() as *u8, 0 as *u8, 0)
         if mdev != 0 {
             SDL_PauseAudioDevice(mdev, 0)
         }

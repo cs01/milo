@@ -12,6 +12,7 @@
 // wire that disappears at distance or a tube that fattens at the near end.
 
 from "gl" import {
+    GlContext,
     Mesh, Shader, Texture2D, Gpu
 }
 from "std/math" import {
@@ -62,7 +63,7 @@ pub struct Ui {
 // Decode the Menlo alpha atlas into a texture. It is stored as truecolour PNG
 // because std/png does not do greyscale; only the red channel carries coverage,
 // and it is splatted across RGB so bilinear filtering treats the channels alike.
-fn loadFont(png: &string): Texture2D {
+fn loadFont(gl: &mut GlContext, png: &string): Texture2D {
     match Png.decode(png) {
         Result.Ok(img) => {
             var px: Vec<u32> = Vec.filled(img.width * img.height, 0)
@@ -72,26 +73,26 @@ fn loadFont(png: &string): Texture2D {
                 px[i] = 0xFF000000 | (a << 16) | (a << 8) | a
                 i = i + 1
             }
-            return Texture2D.rgba8(img.width, img.height, px, true)
+            return Texture2D.rgba8(gl, img.width, img.height, px, true)
         }
         Result.Err(_) => {
             var px: Vec<u32> = Vec.filled(1, 0)
-            return Texture2D.rgba8(1, 1, px, false)
+            return Texture2D.rgba8(gl, 1, 1, px, false)
         }
     }
 }
 
-pub fn uiNew(fontPng: &string): Result<Ui, string> {
-    let sh = Shader.compile(UI_VERT, UI_FRAG)?
+pub fn uiNew(gl: &mut GlContext, fontPng: &string): Result<Ui, string> {
+    let sh = Shader.compile(gl, UI_VERT, UI_FRAG)?
     var attrs: Vec<i64> = Vec.new()
     attrs.push(2) // position, in drawable pixels
     attrs.push(2) // uv
     attrs.push(4) // rgba
     attrs.push(4) // mode, radius, halfWidth, halfHeight
-    let font = loadFont(fontPng)
+    let font = loadFont(gl, fontPng)
     return Result.Ok(Ui {
         verts: Vec.new(),
-        mesh: Mesh.new(attrs),
+        mesh: Mesh.new(gl, attrs),
         shader: sh,
         font: font,
         atlasW: 1.0,
@@ -248,10 +249,10 @@ impl Ui {
         self.verts.clear()
     }
 
-    fn free(self: Self) {
-        self.mesh.free()
-        self.shader.free()
-        self.font.free()
+    fn free(self: Self, gl: &mut GlContext) {
+        self.mesh.free(gl)
+        self.shader.free(gl)
+        self.font.free(gl)
     }
 }
 

@@ -14,7 +14,7 @@
 // same both times.
 
 from "gl" import {
-    Gpu
+    GlContext, Gpu
 }
 from "std/math" import {
     Math
@@ -53,6 +53,10 @@ pub let MAX_RENDER_PX: i64 = 3840
 pub struct Screen {
     win: *u8,
     ctx: *u8,
+    // Every GL object the renderer makes is registered here, so teardown is one
+    // sweep at a point this file chooses — while the GL context is still current,
+    // which is the whole reason the gl package has no destructors.
+    gl: GlContext,
     post: Post,
     // The last render size the targets were built for, so a window that is not
     // being dragged does not reallocate anything.
@@ -99,11 +103,12 @@ pub fn screenOpen(title: &string, w: i64, h: i64, ow: i64, oh: i64, ss: i64, ful
 
         let d = drawableOf(win)
         let r = renderSize(d.w, d.h, ss)
-        match postNew(r.w, r.h, ow, oh) {
+        var glc = GlContext.new()
+        match postNew(glc, r.w, r.h, ow, oh) {
             Result.Ok(p) => {
                 print("gpu: OpenGL " + Gpu.version())
                 return Result.Ok(Screen {
-                    win: win, ctx: ctx, post: p, rw: r.w, rh: r.h, ss: ss
+                    win: win, ctx: ctx, gl: glc, post: p, rw: r.w, rh: r.h, ss: ss
                 }
                 )
             }
@@ -157,7 +162,7 @@ pub fn screenBegin(s: &mut Screen): Size {
     let d = drawableOf(s.win)
     let r = renderSize(d.w, d.h, s.ss)
     if r.w != s.rw || r.h != s.rh {
-        match postResize(s.post, r.w, r.h) {
+        match postResize(s.gl, s.post, r.w, r.h) {
             Result.Ok(_) => {
                 s.rw = r.w
                 s.rh = r.h
@@ -186,6 +191,10 @@ pub fn screenPresent(s: &mut Screen, c: &mut Canvas, v: &View, sc: &Scene, cov: 
     canvasClear(c)
 }
 
+// The context is a public field rather than something handed out by a getter:
+// references here are second-class, so a function CANNOT return a `&mut
+// GlContext`. Call sites pass `scr.gl` directly, which is the same borrow without
+// the function in the middle.
 pub fn screenFullscreen(s: &Screen, on: bool) {
     unsafe {
         if on {
@@ -212,9 +221,13 @@ fn sdlError(): string {
 // `postFree` consumes the Post — its GL handles are @noCopy, so a borrow cannot
 // hand them over, which is why this takes the Screen by value.
 pub fn screenClose(s: Screen) {
-    postFree(s.post)
+    var own = s
+    postFree(own.gl, own.post)
+    // Anything the game forgot goes here, before the context it belongs to is
+    // destroyed two lines down.
+    own.gl.free()
     unsafe {
-        SDL_GL_DeleteContext(s.ctx)
-        SDL_DestroyWindow(s.win)
+        SDL_GL_DeleteContext(own.ctx)
+        SDL_DestroyWindow(own.win)
     }
 }

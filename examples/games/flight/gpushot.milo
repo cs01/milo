@@ -15,7 +15,7 @@ from "std/fs" import {
     readFile, writeFile
 }
 from "gl" import {
-    Gpu, readPixelsRgba8
+    GlContext, Gpu, readPixelsRgba8
 }
 from "std/png" import {
     encodePng
@@ -42,10 +42,10 @@ from "./gfx3d" import {
     sceneNew, viewOf
 }
 from "./gpupost" import {
-    CoverGrid, postBeginWorld, postFinish, postNew
+    CoverGrid, postBeginWorld, postFinish, postFree, postNew
 }
 from "./gpuworld" import {
-    drawSkyPass, drawStreams, gpuWorldNew, setOrtho
+    drawSkyPass, drawStreams, gpuWorldFree, gpuWorldNew, setOrtho
 }
 from "./city" import {
     City, cityAttachOrtho, cityEmpty, cityHasSea, cityLoad, demHeights
@@ -167,7 +167,8 @@ pub fn main(): i32 {
     let skinTex = planeTexture()
     let facadeTex = facadeTexture()
 
-    var gw = match gpuWorldNew(groundTex, skinTex, facadeTex) {
+    var gl = GlContext.new()
+    var gw = match gpuWorldNew(gl, groundTex, skinTex, facadeTex) {
         Result.Ok(x) => x
         Result.Err(e) => {
             print("gpu: " + e)
@@ -175,9 +176,9 @@ pub fn main(): i32 {
         }
     }
     if w.city.orthoLoaded {
-        setOrtho(gw, w.city.ortho)
+        setOrtho(gl, gw, w.city.ortho)
     }
-    var p = match postNew(W, H, W, H) {
+    var p = match postNew(gl, W, H, W, H) {
         Result.Ok(x) => x
         Result.Err(e) => {
             print("post: " + e)
@@ -233,6 +234,9 @@ pub fn main(): i32 {
         }
         canvasClear(c)
     }
+    gpuWorldFree(gl, gw)
+    postFree(gl, p)
+    gl.free()
     SDL_Quit()
     return 0
 }

@@ -18,6 +18,7 @@
 // is 2D with a streaming vertex buffer and a game loop.
 
 from "gl" import {
+    GlContext,
     Gpu, Mesh, Shader, bindScreen
 }
 from "std/math" import {
@@ -438,7 +439,10 @@ pub fn main(): i32 {
     }
     print("OpenGL " + Gpu.version())
 
-    var sh = match Shader.compile(VERT, FRAG) {
+    // Owns every GL object made through it; one call at the end sweeps whatever
+    // was not freed by hand.
+    var gl = GlContext.new()
+    var sh = match Shader.compile(gl, VERT, FRAG) {
         Result.Ok(s) => s
         Result.Err(e) => {
             print(e)
@@ -448,7 +452,7 @@ pub fn main(): i32 {
     var attrs: Vec<i64> = Vec.new()
     attrs.push(2) // position, in world pixels
     attrs.push(3) // colour, linear and allowed past 1.0
-    var batch = Mesh.new(attrs)
+    var batch = Mesh.new(gl, attrs)
 
     Gpu.depthTest(false)
     Gpu.blendAdd()
@@ -529,8 +533,9 @@ pub fn main(): i32 {
         SDL_GL_SwapWindow(win)
     }
 
-    batch.free()
-    sh.free()
+    batch.free(gl)
+    sh.free(gl)
+    gl.free()
     SDL_GL_DeleteContext(ctx)
     SDL_DestroyWindow(win)
     SDL_Quit()

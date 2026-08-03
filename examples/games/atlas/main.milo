@@ -10,6 +10,7 @@
 // chain, and one batched vertex buffer for the entire interface.
 
 from "gl" import {
+    GlContext,
     Gpu, Mesh, Shader, Texture2D, QUAD_VERT, readPixelsRgba8
 }
 from "std/math" import {
@@ -134,60 +135,60 @@ fn shortName(s: &string): string {
 // A 1x1 placeholder so every slot in `tex` is a real texture before its map has
 // been decoded. Freeing a shared dummy ten times would delete one live name and
 // nine bogus ones, so each slot gets its own.
-fn dummyTexture(): Texture2D {
+fn dummyTexture(gl: &mut GlContext): Texture2D {
     var px: Vec<u32> = Vec.filled(1, 0xFF303840)
-    return Texture2D.rgba8(1, 1, px, false)
+    return Texture2D.rgba8(gl, 1, 1, px, false)
 }
 
-fn loadMap(i: i64): Texture2D {
+fn loadMap(gl: &mut GlContext, i: i64): Texture2D {
     if i == W_SUN {
-        return mapSun()
+        return mapSun(gl)
     }
     if i == W_MERCURY {
-        return mapMercury()
+        return mapMercury(gl)
     }
     if i == W_VENUS {
-        return mapVenus()
+        return mapVenus(gl)
     }
     if i == W_EARTH {
-        return mapEarth()
+        return mapEarth(gl)
     }
     if i == W_MOON {
-        return mapMoon()
+        return mapMoon(gl)
     }
     if i == W_MARS {
-        return mapMars()
+        return mapMars(gl)
     }
     if i == W_JUPITER {
-        return mapJupiter()
+        return mapJupiter(gl)
     }
     if i == W_SATURN {
-        return mapSaturn()
+        return mapSaturn(gl)
     }
     if i == W_URANUS {
-        return mapUranus()
+        return mapUranus(gl)
     }
-    return mapNeptune()
+    return mapNeptune(gl)
 }
 
-fn ensureLoaded(app: &mut App, i: i64) {
+fn ensureLoaded(gl: &mut GlContext, app: &mut App, i: i64) {
     if app.loaded[i] {
         return
     }
-    app.tex[i].free()
-    app.tex[i] = loadMap(i)
+    app.tex[i].free(gl)
+    app.tex[i] = loadMap(gl, i)
     app.loaded[i] = true
 }
 
 // Decode at most one map per frame, in the background, while the player is
 // already flying around Earth. Twenty-two megabytes of PNG takes long enough
 // that doing it all up front is a blank window and a spinning cursor.
-fn pumpLoading(app: &mut App) {
+fn pumpLoading(gl: &mut GlContext, app: &mut App) {
     while app.cursor < app.order.len {
         let i = app.order[app.cursor]
         app.cursor = app.cursor + 1
         if !app.loaded[i] {
-            ensureLoaded(app, i)
+            ensureLoaded(gl, app, i)
             return
         }
     }
@@ -728,35 +729,38 @@ pub fn main(): i32 {
     }
     print("OpenGL " + host.err)
 
-    var planetSh = match Shader.compile(PLANET_VERT, PLANET_FRAG) {
+    // Owns every GL object the app makes, so teardown is one sweep while the
+    // context is still current.
+    var gl = GlContext.new()
+    var planetSh = match Shader.compile(gl, PLANET_VERT, PLANET_FRAG) {
         Result.Ok(s) => s
         Result.Err(e) => {
             print("planet shader: " + e)
             return 2
         }
     }
-    var atmoSh = match Shader.compile(PLANET_VERT, ATMO_FRAG) {
+    var atmoSh = match Shader.compile(gl, PLANET_VERT, ATMO_FRAG) {
         Result.Ok(s) => s
         Result.Err(e) => {
             print("atmosphere shader: " + e)
             return 2
         }
     }
-    var ringSh = match Shader.compile(PLANET_VERT, RING_FRAG) {
+    var ringSh = match Shader.compile(gl, PLANET_VERT, RING_FRAG) {
         Result.Ok(s) => s
         Result.Err(e) => {
             print("ring shader: " + e)
             return 2
         }
     }
-    var skySh = match Shader.compile(QUAD_VERT, SKY_FRAG) {
+    var skySh = match Shader.compile(gl, QUAD_VERT, SKY_FRAG) {
         Result.Ok(s) => s
         Result.Err(e) => {
             print("sky shader: " + e)
             return 2
         }
     }
-    var ui = match uiNew(fontAtlas()) {
+    var ui = match uiNew(gl, fontAtlas()) {
         Result.Ok(x) => x
         Result.Err(e) => {
             print("ui: " + e)
@@ -769,20 +773,20 @@ pub fn main(): i32 {
     attrs.push(3)
     attrs.push(2)
     attrs.push(3)
-    var ball = Mesh.new(attrs)
+    var ball = Mesh.new(gl, attrs)
     ball.upload(sphereMesh(180, 90))
     var attrs2: Vec<i64> = Vec.new()
     attrs2.push(3)
     attrs2.push(2)
     attrs2.push(3)
-    var shell = Mesh.new(attrs2)
+    var shell = Mesh.new(gl, attrs2)
     shell.upload(invertedSphereMesh(72, 36))
     var attrs3: Vec<i64> = Vec.new()
     attrs3.push(3)
     attrs3.push(2)
     attrs3.push(3)
-    var ring = Mesh.new(attrs3)
-    var skyQuad = Mesh.fullscreenQuad()
+    var ring = Mesh.new(gl, attrs3)
+    var skyQuad = Mesh.fullscreenQuad(gl)
 
     var worlds = allWorlds()
     ring.upload(ringMesh(256, worlds[W_SATURN].ringInner, worlds[W_SATURN].ringOuter))
@@ -791,7 +795,7 @@ pub fn main(): i32 {
     var loaded: Vec<bool> = Vec.new()
     var i = 0
     while i < worlds.len {
-        tex.push(dummyTexture())
+        tex.push(dummyTexture(gl))
         loaded.push(false)
         i = i + 1
     }
@@ -816,7 +820,7 @@ pub fn main(): i32 {
         sel: -1, hov: -1, level: 0, help: true, pulse: 1.0, arrive: 0.0,
         pins: Vec.new(),
     }
-    ensureLoaded(app, W_EARTH)
+    ensureLoaded(gl, app, W_EARTH)
     faceWorld(app)
 
     let opt = parseOptions()
@@ -825,7 +829,7 @@ pub fn main(): i32 {
         app.help = false
         app.level = opt.level
         if opt.world >= 0 && opt.world < app.worlds.len {
-            ensureLoaded(app, opt.world)
+            ensureLoaded(gl, app, opt.world)
             app.wi = opt.world
         }
         faceWorld(app)
@@ -840,7 +844,7 @@ pub fn main(): i32 {
     }
 
     var size = drawableSize(host.win)
-    var post = match postNew(size.w, size.h) {
+    var post = match postNew(gl, size.w, size.h) {
         Result.Ok(p) => p
         Result.Err(e) => {
             print("render targets: " + e)
@@ -876,8 +880,8 @@ pub fn main(): i32 {
         pollInput(inp, ev, pixelScale(host.win))
 
         if size.w != postW || size.h != postH {
-            post.free()
-            post = match postNew(size.w, size.h) {
+            post.free(gl)
+            post = match postNew(gl, size.w, size.h) {
                 Result.Ok(p) => p
                 Result.Err(_) => {
                     return 3
@@ -887,7 +891,7 @@ pub fn main(): i32 {
             postH = size.h
         }
 
-        pumpLoading(app)
+        pumpLoading(gl, app)
 
         // ── input ─────────────────────────────────────────────────────────────
         if inp.toggleHelp {
@@ -1093,7 +1097,7 @@ pub fn main(): i32 {
         }
 
         if goto >= 0 && goto != app.wi {
-            ensureLoaded(app, goto)
+            ensureLoaded(gl, app, goto)
             app.wi = goto
             app.sel = -1
             faceWorld(app)
@@ -1109,21 +1113,22 @@ pub fn main(): i32 {
         SDL_GL_SwapWindow(host.win)
     }
 
-    ball.free()
-    shell.free()
-    ring.free()
-    skyQuad.free()
-    planetSh.free()
-    atmoSh.free()
-    ringSh.free()
-    skySh.free()
-    ui.free()
-    post.free()
+    ball.free(gl)
+    shell.free(gl)
+    ring.free(gl)
+    skyQuad.free(gl)
+    planetSh.free(gl)
+    atmoSh.free(gl)
+    ringSh.free(gl)
+    skySh.free(gl)
+    ui.free(gl)
+    post.free(gl)
     var k = 0
     while k < app.tex.len {
-        app.tex[k].free()
+        app.tex[k].free(gl)
         k = k + 1
     }
+    gl.free()
     SDL_GL_DeleteContext(host.ctx)
     SDL_DestroyWindow(host.win)
     SDL_Quit()

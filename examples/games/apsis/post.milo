@@ -7,6 +7,7 @@
 // photograph rather than a sticker.
 
 from "gl" import {
+    GlContext,
     Gpu, Mesh, Shader, Target, bindScreen, QUAD_VERT
 }
 from "./shaders" import {
@@ -32,19 +33,19 @@ pub struct Post {
     h: i64,
 }
 
-pub fn postNew(w: i64, h: i64): Result<Post, string> {
-    let bright = Shader.compile(QUAD_VERT, BRIGHT_FRAG)?
-    let blur = Shader.compile(QUAD_VERT, BLUR_FRAG)?
-    let comp = Shader.compile(QUAD_VERT, COMPOSITE_FRAG)?
+pub fn postNew(gl: &mut GlContext, w: i64, h: i64): Result<Post, string> {
+    let bright = Shader.compile(gl, QUAD_VERT, BRIGHT_FRAG)?
+    let blur = Shader.compile(gl, QUAD_VERT, BLUR_FRAG)?
+    let comp = Shader.compile(gl, QUAD_VERT, COMPOSITE_FRAG)?
     // The scene target is the only one with a depth buffer; the post passes are
     // flat quads that must never depth-test against anything.
-    let scene = Target.new(w, h, true, true)?
-    let a = Target.new(w / SHRINK, h / SHRINK, false, true)?
-    let b = Target.new(w / SHRINK, h / SHRINK, false, true)?
+    let scene = Target.new(gl, w, h, true, true)?
+    let a = Target.new(gl, w / SHRINK, h / SHRINK, false, true)?
+    let b = Target.new(gl, w / SHRINK, h / SHRINK, false, true)?
     return Result.Ok(Post {
         scene: scene, a: a, b: b,
         bright: bright, blur: blur, comp: comp,
-        quad: Mesh.fullscreenQuad(), w: w, h: h,
+        quad: Mesh.fullscreenQuad(gl), w: w, h: h,
     }
     )
 }
@@ -111,13 +112,13 @@ impl Post {
         self.quad.draw()
     }
 
-    fn free(self: Self) {
-        self.quad.free()
-        self.bright.free()
-        self.blur.free()
-        self.comp.free()
-        self.scene.free()
-        self.a.free()
-        self.b.free()
+    fn free(self: Self, gl: &mut GlContext) {
+        self.quad.free(gl)
+        self.bright.free(gl)
+        self.blur.free(gl)
+        self.comp.free(gl)
+        self.scene.free(gl)
+        self.a.free(gl)
+        self.b.free(gl)
     }
 }

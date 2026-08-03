@@ -318,7 +318,7 @@ pub fn main(): i32 {
     let groundTex = groundTexture()
     let skinTex = planeTexture()
     let facadeTex = facadeTexture()
-    var gw = match gpuWorldNew(groundTex, skinTex, facadeTex) {
+    var gw = match gpuWorldNew(scr.gl, groundTex, skinTex, facadeTex) {
         Result.Ok(g) => g
         Result.Err(e) => {
             // No screenClose here: it consumes the Screen, and the checker then
@@ -338,7 +338,7 @@ pub fn main(): i32 {
     if placeIdx >= 0 && o.getString("place") == "" {
         let pick = chooseRegion(scr, gw, c, s, inp, ev, placeIdx)
         if pick < 0 {
-            gpuWorldFree(gw)
+            gpuWorldFree(scr.gl, gw)
             screenClose(scr)
             SDL_Quit()
             return 0
@@ -359,7 +359,7 @@ pub fn main(): i32 {
     }
     var coverDirty = true
     if w.city.orthoLoaded {
-        setOrtho(gw, w.city.ortho)
+        setOrtho(scr.gl, gw, w.city.ortho)
     }
     var snd = soundNew()
     var full = o.getBool("fullscreen")
@@ -407,9 +407,9 @@ pub fn main(): i32 {
             }
             coverDirty = true
             if w.city.orthoLoaded {
-                setOrtho(gw, w.city.ortho)
+                setOrtho(scr.gl, gw, w.city.ortho)
             } else {
-                clearOrtho(gw)
+                clearOrtho(scr.gl, gw)
             }
             w.nextName = placeTitle((placeIdx + 1) % PLACE_COUNT)
         } else if w.evPlaceDone {
@@ -466,7 +466,7 @@ pub fn main(): i32 {
         screenPresent(scr, c, view, s, grid, cover, coverDirty, cityHasSea(w.city), w.time, 0.35, exposure)
         coverDirty = false
     }
-    gpuWorldFree(gw)
+    gpuWorldFree(scr.gl, gw)
     screenClose(scr)
     SDL_Quit()
     return 0

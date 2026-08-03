@@ -12,6 +12,7 @@
 // cheaper and the honest way to draw a planet from an astronomical unit away.
 
 from "gl" import {
+    GlContext,
     Gpu, Mesh, Shader, Texture2D, QUAD_VERT
 }
 from "std/math" import {
@@ -66,41 +67,41 @@ pub struct Renderer {
     loaded: Vec<bool>,
 }
 
-pub fn rendererNew(): Result<Renderer, string> {
-    let planetSh = Shader.compile(PLANET_VERT, PLANET_FRAG)?
-    let atmoSh = Shader.compile(PLANET_VERT, ATMO_FRAG)?
-    let ringSh = Shader.compile(PLANET_VERT, RING_FRAG)?
-    let skySh = Shader.compile(QUAD_VERT, SKY_FRAG)?
+pub fn rendererNew(gl: &mut GlContext): Result<Renderer, string> {
+    let planetSh = Shader.compile(gl, PLANET_VERT, PLANET_FRAG)?
+    let atmoSh = Shader.compile(gl, PLANET_VERT, ATMO_FRAG)?
+    let ringSh = Shader.compile(gl, PLANET_VERT, RING_FRAG)?
+    let skySh = Shader.compile(gl, QUAD_VERT, SKY_FRAG)?
     var attrs: Vec<i64> = Vec.new()
     attrs.push(3)
     attrs.push(2)
     attrs.push(3)
-    var ball = Mesh.new(attrs)
+    var ball = Mesh.new(gl, attrs)
     ball.upload(sphereMesh(180, 90))
     var attrs2: Vec<i64> = Vec.new()
     attrs2.push(3)
     attrs2.push(2)
     attrs2.push(3)
-    var shell = Mesh.new(attrs2)
+    var shell = Mesh.new(gl, attrs2)
     shell.upload(invertedSphereMesh(72, 36))
     var attrs3: Vec<i64> = Vec.new()
     attrs3.push(3)
     attrs3.push(2)
     attrs3.push(3)
-    var ring = Mesh.new(attrs3)
+    var ring = Mesh.new(gl, attrs3)
     ring.upload(ringMesh(256, 1.24, 2.28))
 
     var tex: Vec<Texture2D> = Vec.new()
     var loaded: Vec<bool> = Vec.new()
     var i = 0
     while i < BODY_COUNT {
-        tex.push(dummyTexture())
+        tex.push(dummyTexture(gl))
         loaded.push(false)
         i = i + 1
     }
     return Result.Ok(Renderer {
         planetSh: planetSh, atmoSh: atmoSh, ringSh: ringSh, skySh: skySh,
-        ball: ball, shell: shell, ring: ring, skyQuad: Mesh.fullscreenQuad(),
+        ball: ball, shell: shell, ring: ring, skyQuad: Mesh.fullscreenQuad(gl),
         tex: tex, loaded: loaded,
     }
     )
@@ -108,28 +109,28 @@ pub fn rendererNew(): Result<Renderer, string> {
 
 // Decoding a map is twenty megabytes of PNG and a visible hitch, so it happens
 // once per body and only for the two worlds a mission actually visits.
-pub fn ensureLoaded(r: &mut Renderer, id: i64) {
+pub fn ensureLoaded(gl: &mut GlContext, r: &mut Renderer, id: i64) {
     if r.loaded[id] {
         return
     }
-    r.tex[id].free()
-    r.tex[id] = loadMap(id)
+    r.tex[id].free(gl)
+    r.tex[id] = loadMap(gl, id)
     r.loaded[id] = true
 }
 
 impl Renderer {
-    fn free(self: Self) {
-        self.ball.free()
-        self.shell.free()
-        self.ring.free()
-        self.skyQuad.free()
-        self.planetSh.free()
-        self.atmoSh.free()
-        self.ringSh.free()
-        self.skySh.free()
+    fn free(self: Self, gl: &mut GlContext) {
+        self.ball.free(gl)
+        self.shell.free(gl)
+        self.ring.free(gl)
+        self.skyQuad.free(gl)
+        self.planetSh.free(gl)
+        self.atmoSh.free(gl)
+        self.ringSh.free(gl)
+        self.skySh.free(gl)
         var i = 0
         while i < self.tex.len {
-            self.tex[i].free()
+            self.tex[i].free(gl)
             i = i + 1
         }
     }
@@ -292,7 +293,7 @@ fn orbitBandAmount(g: &Game, id: i64): f64 {
     return k
 }
 
-fn drawBody(r: &mut Renderer, g: &Game, v: &View, id: i64, t: f64, exposureUp: f64) {
+fn drawBody(gl: &mut GlContext, r: &mut Renderer, g: &Game, v: &View, id: i64, t: f64, exposureUp: f64) {
     let p = bodyPoint(g, id, t)
     let radius = g.bodies[id].radius
     if apparentRadius(v, p, radius) < SPHERE_MIN_PX {
@@ -304,7 +305,7 @@ fn drawBody(r: &mut Renderer, g: &Game, v: &View, id: i64, t: f64, exposureUp: f
     if (p - v.eye).len() * v.scale > 700.0 {
         return
     }
-    ensureLoaded(r, id)
+    ensureLoaded(gl, r, id)
     let sc = scenePoint(v, p)
     let rs = radius * v.scale
     let rot = multiply(rotationZ(g.bodies[id].tilt), rotationY(spinAngle(g, id, t)))
@@ -419,7 +420,7 @@ fn drawSky(r: &mut Renderer, g: &Game, v: &View, time: f64) {
 
 // Draw the scene and hand back where every body landed, so the overlay can put
 // markers and labels on exactly the same pixels.
-pub fn drawScene(r: &mut Renderer, g: &Game, v: &View, time: f64): Vec<Marker> {
+pub fn drawScene(gl: &mut GlContext, r: &mut Renderer, g: &Game, v: &View, time: f64): Vec<Marker> {
     drawSky(r, g, v, time)
     let t = displayTime(g)
     var ids = missionBodies(g)
@@ -428,7 +429,7 @@ pub fn drawScene(r: &mut Renderer, g: &Game, v: &View, time: f64): Vec<Marker> {
     while i < ids.len {
         let id = ids[i]
         let p = bodyPoint(g, id, t)
-        drawBody(r, g, v, id, t, 1.0)
+        drawBody(gl, r, g, v, id, t, 1.0)
         out.push(markerOf(v, id, p, g.bodies[id].radius))
         i = i + 1
     }

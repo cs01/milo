@@ -12,6 +12,7 @@
 // rather than all at startup.
 
 from "gl" import {
+    GlContext,
     Texture2D
 }
 from "std/math" import {
@@ -29,7 +30,7 @@ fn pack(r: i64, g: i64, b: i64): u32 {
     return 0xFF000000 | (((b & 0xFF) as u32) << 16) | (((g & 0xFF) as u32) << 8) | ((r & 0xFF) as u32)
 }
 
-fn decodeMap(src: &string): Texture2D {
+fn decodeMap(gl: &mut GlContext, src: &string): Texture2D {
     match Png.decode(src) {
         Result.Ok(img) => {
             var px: Vec<u32> = Vec.filled(img.width * img.height, 0)
@@ -41,13 +42,13 @@ fn decodeMap(src: &string): Texture2D {
                 px[i] = pack(img.pixels[o] as i64, img.pixels[o + 1] as i64, img.pixels[o + 2] as i64)
                 i = i + 1
             }
-            return Texture2D.rgba8(img.width, img.height, px, true)
+            return Texture2D.rgba8(gl, img.width, img.height, px, true)
         }
         Result.Err(_) => {
             // A map that will not decode is a broken build, not a runtime state
             // to design around: one magenta texel says so loudly.
             var px: Vec<u32> = Vec.filled(1, pack(255, 0, 255))
-            return Texture2D.rgba8(1, 1, px, false)
+            return Texture2D.rgba8(gl, 1, 1, px, false)
         }
     }
 }
@@ -58,37 +59,37 @@ pub fn fontAtlas(): string {
 
 // The map for a body id. Called at most twice per mission, on the frame the
 // mission starts.
-pub fn loadMap(id: i64): Texture2D {
+pub fn loadMap(gl: &mut GlContext, id: i64): Texture2D {
     if id == SUN {
-        return mapSun()
+        return mapSun(gl)
     }
     if id == MERCURY {
-        return decodeMap(@embedFile("bodies/mercury.png"))
+        return decodeMap(gl, @embedFile("bodies/mercury.png"))
     }
     if id == VENUS {
-        return decodeMap(@embedFile("bodies/venus.png"))
+        return decodeMap(gl, @embedFile("bodies/venus.png"))
     }
     if id == EARTH {
-        return decodeMap(@embedFile("bodies/earth.png"))
+        return decodeMap(gl, @embedFile("bodies/earth.png"))
     }
     if id == MOON {
-        return decodeMap(@embedFile("bodies/moon.png"))
+        return decodeMap(gl, @embedFile("bodies/moon.png"))
     }
     if id == MARS {
-        return decodeMap(@embedFile("bodies/mars.png"))
+        return decodeMap(gl, @embedFile("bodies/mars.png"))
     }
     if id == JUPITER {
-        return decodeMap(@embedFile("bodies/jupiter.png"))
+        return decodeMap(gl, @embedFile("bodies/jupiter.png"))
     }
-    return decodeMap(@embedFile("bodies/saturn.png"))
+    return decodeMap(gl, @embedFile("bodies/saturn.png"))
 }
 
 // A 1x1 placeholder so every texture slot is a real texture before its map has
 // been decoded. Freeing a shared dummy eight times would delete one live name and
 // seven bogus ones, so each slot gets its own.
-pub fn dummyTexture(): Texture2D {
+pub fn dummyTexture(gl: &mut GlContext): Texture2D {
     var px: Vec<u32> = Vec.filled(1, 0xFF303840)
-    return Texture2D.rgba8(1, 1, px, false)
+    return Texture2D.rgba8(gl, 1, 1, px, false)
 }
 
 // ── the generated Sun ─────────────────────────────────────────────────────────
@@ -158,7 +159,7 @@ pub let GEN_H: i64 = 512
 
 // The photosphere: granulation cells with darker sunspot clusters. It is emissive
 // in the shader, so these values are a pattern, not a brightness.
-pub fn mapSun(): Texture2D {
+pub fn mapSun(gl: &mut GlContext): Texture2D {
     var px: Vec<u32> = Vec.filled(GEN_W * GEN_H, 0)
     var y = 0
     while y < GEN_H {
@@ -184,5 +185,5 @@ pub fn mapSun(): Texture2D {
         }
         y = y + 1
     }
-    return Texture2D.rgba8(GEN_W, GEN_H, px, true)
+    return Texture2D.rgba8(gl, GEN_W, GEN_H, px, true)
 }

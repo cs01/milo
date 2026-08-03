@@ -8,6 +8,7 @@
 // written once; what is left here is this game's window setup and control scheme.
 
 from "gl" import {
+    GlContext,
     Gpu
 }
 from "sdl" import {

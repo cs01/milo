@@ -25,6 +25,7 @@
 // Retina display, where the drawable is four times the pixels you asked for.
 
 from "gl" import {
+    GlContext,
     Gpu, Mesh, Shader, Target, bindScreen, QUAD_VERT
 }
 
@@ -401,21 +402,24 @@ pub fn main(): i32 {
     }
     print("OpenGL " + Gpu.version())
 
-    var ocean = match Shader.compile(QUAD_VERT, OCEAN_FRAG) {
+    // Owns every GL object made through it; one call at the end sweeps whatever
+    // was not freed by hand.
+    var gl = GlContext.new()
+    var ocean = match Shader.compile(gl, QUAD_VERT, OCEAN_FRAG) {
         Result.Ok(s) => s
         Result.Err(e) => {
             print(e)
             return 4
         }
     }
-    var blit = match Shader.compile(QUAD_VERT, BLIT_FRAG) {
+    var blit = match Shader.compile(gl, QUAD_VERT, BLIT_FRAG) {
         Result.Ok(s) => s
         Result.Err(e) => {
             print(e)
             return 5
         }
     }
-    var quad = Mesh.fullscreenQuad()
+    var quad = Mesh.fullscreenQuad(gl)
 
     var dw: i32 = 0
     var dh: i32 = 0
@@ -424,7 +428,7 @@ pub fn main(): i32 {
     }
     var rw = renderWidth(dw as i64)
     var rh = (dh as i64) * rw / (dw as i64)
-    var target = match Target.new(rw, rh, false, true) {
+    var target = match Target.new(gl, rw, rh, false, true) {
         Result.Ok(t) => t
         Result.Err(e) => {
             print(e)
@@ -508,9 +512,9 @@ pub fn main(): i32 {
             // Build the replacement before releasing the old one: freeing up
             // front would leave `target` dead on the Err path with the rest of
             // this frame still to draw.
-            match Target.new(wantW, wantH, false, true) {
+            match Target.new(gl, wantW, wantH, false, true) {
                 Result.Ok(t) => {
-                    replace(target, t).free()
+                    replace(target, t).free(gl)
                     rw = wantW
                     rh = wantH
                 }
@@ -538,10 +542,11 @@ pub fn main(): i32 {
         SDL_GL_SwapWindow(win)
     }
 
-    target.free()
-    quad.free()
-    blit.free()
-    ocean.free()
+    target.free(gl)
+    quad.free(gl)
+    blit.free(gl)
+    ocean.free(gl)
+    gl.free()
     SDL_GL_DeleteContext(ctx)
     SDL_DestroyWindow(win)
     SDL_Quit()

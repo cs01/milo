@@ -24,7 +24,7 @@ from "std/math" import {
     Math
 }
 from "gl" import {
-    Gpu, Mesh, Shader, Target, Texture2D, bindScreen
+    GlContext, Gpu, Mesh, Shader, Target, Texture2D, bindScreen
 }
 from "./gfx" import {
     Canvas
@@ -95,32 +95,32 @@ pub struct Post {
     bh: i64,
 }
 
-pub fn postNew(w: i64, h: i64, ow: i64, oh: i64): Result<Post, string> {
-    let sea = Shader.compile(QUAD_VERT_LOCAL, seaFrag())?
-    let over = Shader.compile(QUAD_VERT_LOCAL, OVERLAY_FRAG)?
-    let bright = Shader.compile(QUAD_VERT_LOCAL, BRIGHT_FRAG)?
-    let blur = Shader.compile(QUAD_VERT_LOCAL, BLUR_FRAG)?
-    let comp = Shader.compile(QUAD_VERT_LOCAL, COMPOSITE_FRAG)?
+pub fn postNew(gl: &mut GlContext, w: i64, h: i64, ow: i64, oh: i64): Result<Post, string> {
+    let sea = Shader.compile(gl, QUAD_VERT_LOCAL, seaFrag())?
+    let over = Shader.compile(gl, QUAD_VERT_LOCAL, OVERLAY_FRAG)?
+    let bright = Shader.compile(gl, QUAD_VERT_LOCAL, BRIGHT_FRAG)?
+    let blur = Shader.compile(gl, QUAD_VERT_LOCAL, BLUR_FRAG)?
+    let comp = Shader.compile(gl, QUAD_VERT_LOCAL, COMPOSITE_FRAG)?
     var p = Post {
-        world: Target.new(4, 4, true, false)?,
-        scene: Target.new(4, 4, false, false)?,
-        a: Target.new(4, 4, false, true)?,
-        b: Target.new(4, 4, false, true)?,
+        world: Target.new(gl, 4, 4, true, false)?,
+        scene: Target.new(gl, 4, 4, false, false)?,
+        a: Target.new(gl, 4, 4, false, true)?,
+        b: Target.new(gl, 4, 4, false, true)?,
         // LINEAR, because the overlay is at a fixed resolution and the scene is
         // not: at anything but 1:1 a nearest-sampled HUD is a staircase.
-        overlay: Texture2D.rgb32f(ow, oh, Vec.filled(ow * oh * 3, 0.0), true),
-        overlayCov: Texture2D.r32f(ow, oh, Vec.filled(ow * oh, 0.0), true),
+        overlay: Texture2D.rgb32f(gl, ow, oh, Vec.filled(ow * oh * 3, 0.0), true),
+        overlayCov: Texture2D.r32f(gl, ow, oh, Vec.filled(ow * oh, 0.0), true),
         // One fixed allocation, big enough for any shipped map's cover grid, so
         // changing place is a sub-image upload rather than a reallocation.
         // LINEAR: the grid is coarse, and a nearest-sampled shoreline is a
         // staircase of 10 m steps. Filtering makes it a soft waterline.
-        cover: Texture2D.r32fEmpty(COVER_TEX, COVER_TEX, true),
+        cover: Texture2D.r32fEmpty(gl, COVER_TEX, COVER_TEX, true),
         sea: sea,
         over: over,
         bright: bright,
         blur: blur,
         comp: comp,
-        quad: Mesh.fullscreenQuad(),
+        quad: Mesh.fullscreenQuad(gl),
         w: 0,
         h: 0,
         ow: ow,
@@ -128,7 +128,7 @@ pub fn postNew(w: i64, h: i64, ow: i64, oh: i64): Result<Post, string> {
         bw: 1,
         bh: 1,
     }
-    postResize(p, w, h)?
+    postResize(gl, p, w, h)?
     return Result.Ok(p)
 }
 
@@ -140,16 +140,16 @@ pub fn postNew(w: i64, h: i64, ow: i64, oh: i64): Result<Post, string> {
 // fixed-size picture. Freeing first is not optional — a `Target` is @noCopy and
 // `free` consumes it, so the old one has to come out of the field before the new
 // one goes in.
-pub fn postResize(p: &mut Post, w: i64, h: i64): Result<i64, string> {
+pub fn postResize(gl: &mut GlContext, p: &mut Post, w: i64, h: i64): Result<i64, string> {
     if w == p.w && h == p.h {
         return Result.Ok(0)
     }
     let bw = Math.maxI64(1, w / SHRINK)
     let bh = Math.maxI64(1, h / SHRINK)
-    replace(p.world, Target.new(w, h, true, false)?).free()
-    replace(p.scene, Target.new(w, h, false, false)?).free()
-    replace(p.a, Target.new(bw, bh, false, true)?).free()
-    replace(p.b, Target.new(bw, bh, false, true)?).free()
+    replace(p.world, Target.new(gl, w, h, true, false)?).free(gl)
+    replace(p.scene, Target.new(gl, w, h, false, false)?).free(gl)
+    replace(p.a, Target.new(gl, bw, bh, false, true)?).free(gl)
+    replace(p.b, Target.new(gl, bw, bh, false, true)?).free(gl)
     p.w = w
     p.h = h
     p.bw = bw
@@ -267,20 +267,20 @@ fn gpuBlurPass(p: &Post, stride: i64) {
     p.quad.draw()
 }
 
-pub fn postFree(p: Post) {
-    p.world.free()
-    p.scene.free()
-    p.a.free()
-    p.b.free()
-    p.overlay.free()
-    p.overlayCov.free()
-    p.cover.free()
-    p.sea.free()
-    p.over.free()
-    p.bright.free()
-    p.blur.free()
-    p.comp.free()
-    p.quad.free()
+pub fn postFree(gl: &mut GlContext, p: Post) {
+    p.world.free(gl)
+    p.scene.free(gl)
+    p.a.free(gl)
+    p.b.free(gl)
+    p.overlay.free(gl)
+    p.overlayCov.free(gl)
+    p.cover.free(gl)
+    p.sea.free(gl)
+    p.over.free(gl)
+    p.bright.free(gl)
+    p.blur.free(gl)
+    p.comp.free(gl)
+    p.quad.free(gl)
 }
 
 // ── the sea ───────────────────────────────────────────────────────────────────

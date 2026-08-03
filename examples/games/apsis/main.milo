@@ -19,6 +19,7 @@
 // what it costs.
 
 from "gl" import {
+    GlContext,
     Gpu, readPixelsRgba8
 }
 from "std/math" import {
@@ -301,14 +302,17 @@ pub fn main(): i32 {
         return 1
     }
 
-    var renderer = match rendererNew() {
+    // Owns every GL object the game makes, so teardown is one sweep while the
+    // context is still current.
+    var gl = GlContext.new()
+    var renderer = match rendererNew(gl) {
         Result.Ok(r) => r
         Result.Err(e) => {
             print("shaders: " + e)
             return 2
         }
     }
-    var ui = match uiNew(fontAtlas()) {
+    var ui = match uiNew(gl, fontAtlas()) {
         Result.Ok(x) => x
         Result.Err(e) => {
             print("overlay: " + e)
@@ -324,11 +328,11 @@ pub fn main(): i32 {
     // The two worlds this mission visits, decoded before the first frame rather
     // than during it: twenty megabytes of PNG is a visible stall, and the place
     // to spend it is the loading of a mission, not the middle of a camera move.
-    ensureLoaded(renderer, g.missions[g.mi].from)
-    ensureLoaded(renderer, g.missions[g.mi].to)
+    ensureLoaded(gl, renderer, g.missions[g.mi].from)
+    ensureLoaded(gl, renderer, g.missions[g.mi].to)
 
     var size = drawableSize(host.win)
-    var post = match postNew(size.w, size.h) {
+    var post = match postNew(gl, size.w, size.h) {
         Result.Ok(p) => p
         Result.Err(e) => {
             print("render targets: " + e)
@@ -365,8 +369,8 @@ pub fn main(): i32 {
         pollInput(inp, ev, pixelScale(host.win))
 
         if size.w != postW || size.h != postH {
-            post.free()
-            post = match postNew(size.w, size.h) {
+            post.free(gl)
+            post = match postNew(gl, size.w, size.h) {
                 Result.Ok(p) => p
                 Result.Err(_) => {
                     return 3
@@ -387,8 +391,8 @@ pub fn main(): i32 {
 
         handleInput(g, inp, dt)
         if loadedFor != g.mi {
-            ensureLoaded(renderer, g.missions[g.mi].from)
-            ensureLoaded(renderer, g.missions[g.mi].to)
+            ensureLoaded(gl, renderer, g.missions[g.mi].from)
+            ensureLoaded(gl, renderer, g.missions[g.mi].to)
             loadedFor = g.mi
         }
         if !shooting {
@@ -398,7 +402,7 @@ pub fn main(): i32 {
 
         let view = viewOf(g, w, h)
         post.beginScene()
-        var marks = drawScene(renderer, g, view, time)
+        var marks = drawScene(gl, renderer, g, view, time)
         post.resolve(opt.gain, titleLevel(g), 0.36, size.w, size.h)
 
         drawOverlay(ui, g, view, marks)
@@ -419,9 +423,10 @@ pub fn main(): i32 {
         }
     }
 
-    renderer.free()
-    ui.free()
-    post.free()
+    renderer.free(gl)
+    ui.free(gl)
+    post.free(gl)
+    gl.free()
     SDL_GL_DeleteContext(host.ctx)
     SDL_DestroyWindow(host.win)
     SDL_Quit()

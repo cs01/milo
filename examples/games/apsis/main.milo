@@ -62,7 +62,7 @@ from "./ephem" import {
 from "./game" import {
     Game, gameNew, advance, advancePhase, updateCamera, dragCamera, zoomCamera,
     scrub, snapToBest, commit, startMission, setPhase, stepWarp,
-    PHASE_TITLE, PHASE_DEPART, PHASE_TARGET, PHASE_PLAN, PHASE_FLY, PHASE_ARRIVED,
+    PHASE_TITLE, PHASE_BRIEF, PHASE_DEPART, PHASE_TARGET, PHASE_PLAN, PHASE_FLY, PHASE_ARRIVED,
 }
 
 pub let WIN_W: i64 = 1360
@@ -86,6 +86,9 @@ pub struct Options {
 fn phaseFromName(s: &string): i64 {
     if s == "title" {
         return PHASE_TITLE
+    }
+    if s == "brief" {
+        return PHASE_BRIEF
     }
     if s == "depart" {
         return PHASE_DEPART
@@ -203,7 +206,7 @@ fn handleInput(g: &mut Game, inp: &Input, dt: f64) {
         startMission(g, g.mi)
     }
 
-    if g.phase == PHASE_TITLE || g.phase == PHASE_DEPART || g.phase == PHASE_TARGET {
+    if g.phase == PHASE_TITLE || g.phase == PHASE_BRIEF || g.phase == PHASE_DEPART || g.phase == PHASE_TARGET {
         if inp.advance || inp.commit || inp.clicked {
             advancePhase(g)
         }
@@ -220,9 +223,9 @@ fn handleInput(g: &mut Game, inp: &Input, dt: f64) {
         if inp.commit {
             commit(g)
         }
-        if inp.advance {
-            setPhase(g, PHASE_DEPART)
-        }
+        // SPACE deliberately does nothing here. It used to replay the two
+        // cinematics, which meant a player pressing the key that skipped them
+        // was sent straight back into them — Earth, Moon, Earth, forever.
     }
     if g.phase == PHASE_FLY {
         if inp.advance {
@@ -280,7 +283,8 @@ fn stage(g: &mut Game, o: &Options) {
 
 pub fn main(): i32 {
     let opt = parseOptions()
-    var host = hostNew("APSIS - you can be a rocket scientist too", WIN_W, WIN_H)
+    let shooting = opt.shot.len > 0
+    var host = hostNew("APSIS - you can be a rocket scientist too", WIN_W, WIN_H, !shooting)
     if !host.ok {
         print(host.err)
         return 1
@@ -303,7 +307,6 @@ pub fn main(): i32 {
     uiSetAtlasSize(ui, 384.0, 240.0)
 
     var g = gameNew()
-    let shooting = opt.shot.len > 0
     if shooting {
         stage(g, opt)
     }

@@ -40,7 +40,7 @@ from "./worlds" import {
     Look,
 }
 from "./game" import {
-    Game, PHASE_DEPART, PHASE_TARGET, PHASE_PLAN, PHASE_FLY, PHASE_ARRIVED,
+    Game, PHASE_TITLE, PHASE_DEPART, PHASE_TARGET, PHASE_PLAN, PHASE_FLY, PHASE_ARRIVED,
     eyePoint, displayTime,
 }
 from "./plan" import {
@@ -153,6 +153,11 @@ pub struct View {
 pub fn subjectShift(g: &Game): f64 {
     if g.phase == PHASE_DEPART || g.phase == PHASE_TARGET || g.phase == PHASE_ARRIVED {
         return 0.34
+    }
+    if g.phase == PHASE_TITLE {
+        // Same reason as the cinematics: the title type owns the left column, so
+        // the map is pushed out of it rather than drawn under it.
+        return 0.24
     }
     if g.phase == PHASE_PLAN || g.phase == PHASE_FLY {
         // The map gets the same treatment as a cinematic, because the dials are

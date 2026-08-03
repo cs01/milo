@@ -33,7 +33,7 @@ from "./plan" import {
     arcPoints, orbitPoints, orbitPeriod, relPos, parkRadius, parkSpeed,
 }
 from "./game" import {
-    Game, PHASE_TITLE, PHASE_DEPART, PHASE_TARGET, PHASE_PLAN, PHASE_FLY,
+    Game, PHASE_TITLE, PHASE_BRIEF, PHASE_DEPART, PHASE_TARGET, PHASE_PLAN, PHASE_FLY,
     PHASE_ARRIVED, DEPART_SECONDS, TARGET_SECONDS, displayTime, shipPoint, withinBudget,
     fuelLeft, mapRadius, warpMultiple,
 }
@@ -320,10 +320,20 @@ fn drawArrivalMark(ui: &mut Ui, g: &Game, v: &View, alpha: f64) {
         return
     }
     let c = fade(colAccent(), alpha * 0.85)
+    ui.glow(p.x, p.y, 20.0 * u, fade(colAccent(), alpha * 0.30))
     ui.ring(p.x, p.y, 9.0 * u, 1.4 * u, c)
     ui.disc(p.x, p.y, 2.6 * u, c)
-    let when = displayName(g.missions[g.mi].to) + " " + fmtDate(g.plan.t0 + g.plan.tof)
-    ui.textTracked(p.x - trackedWidth(when, 7.5 * u, 2.6 * u) * 0.5, p.y + 20.0 * u, 7.5 * u, 2.6 * u, when, fade(colAccent(), alpha * 0.7))
+    // Two rings labelled with the same world's name is the fastest way to lose a
+    // player on this screen, so this one says what it is rather than who it is.
+    // On the title screen the arc is scenery, not a plan, and naming its far end
+    // only crowds the Moon's own label.
+    if g.phase == PHASE_TITLE {
+        return
+    }
+    let head = "YOU MEET " + displayName(g.missions[g.mi].to).toUpper() + " HERE"
+    ui.textTracked(p.x - trackedWidth(head, 7.5 * u, 2.6 * u) * 0.5, p.y + 20.0 * u, 7.5 * u, 2.6 * u, head, fade(colAccent(), alpha * 0.9))
+    let when = fmtDate(g.plan.t0 + g.plan.tof)
+    ui.textTracked(p.x - trackedWidth(when, 7.0 * u, 2.4 * u) * 0.5, p.y + 38.0 * u, 7.0 * u, 2.4 * u, when, fade(colAccent(), alpha * 0.6))
 }
 
 fn drawBodyMarkers(ui: &mut Ui, g: &Game, v: &View, marks: &Vec<Marker>, alpha: f64) {
@@ -336,12 +346,25 @@ fn drawBodyMarkers(ui: &mut Ui, g: &Game, v: &View, marks: &Vec<Marker>, alpha: 
     var i = 0
     while i < marks.len {
         let id = marks[i].id
-        if marks[i].onScreen && !marks[i].solid {
+        // The two worlds the mission is about are drawn larger than the scenery.
+        // At map scale the Moon is four pixels of grey on black, and 'where is
+        // the world I am flying to' should never be a question.
+        let key = id == g.missions[g.mi].to || id == g.missions[g.mi].from
+        // A body wide enough for a sphere is not necessarily wide enough to SEE:
+        // the Moon on the lunar map is three pixels of grey, drawn as geometry
+        // and so given no marker at all. Anything under this gets one anyway.
+        let tiny = marks[i].px < 9.0 * u
+        if marks[i].onScreen && (!marks[i].solid || (key && tiny)) {
             let c = rgba(g.looks[id].dot.x, g.looks[id].dot.y, g.looks[id].dot.z, alpha)
             var r = 3.4 * u
             if id == SUN {
                 r = 5.0 * u
                 ui.glow(marks[i].x, marks[i].y, 34.0 * u, fade(c, 0.5))
+            }
+            if key {
+                r = 4.6 * u
+                ui.glow(marks[i].x, marks[i].y, 18.0 * u, fade(c, 0.40))
+                ui.ring(marks[i].x, marks[i].y, 11.0 * u, 1.2 * u, fade(c, alpha * 0.55))
             }
             ui.glow(marks[i].x, marks[i].y, 11.0 * u, fade(c, 0.45))
             ui.disc(marks[i].x, marks[i].y, r, c)
@@ -350,11 +373,28 @@ fn drawBodyMarkers(ui: &mut Ui, g: &Game, v: &View, marks: &Vec<Marker>, alpha: 
         // distance from the centre changes.
         if marks[i].onScreen && alpha > 0.05 {
             var off = 14.0 * u
-            if marks[i].solid {
+            if marks[i].solid && !tiny {
                 off = marks[i].px + 16.0 * u
             }
-            let name = displayName(id)
+            // 'MOON' next to the arc's far end and 'MOON' next to the dot the
+            // Moon is on today are the same word for two different facts; the
+            // one that moves says so.
+            var name = displayName(id)
+            var nameCol = colDim()
+            if key {
+                name = name.toUpper()
+                nameCol = colInk()
+            }
+            if id == g.missions[g.mi].to && g.plan.ok && g.phase == PHASE_PLAN {
+                name = name + " TODAY"
+            }
             var ly = marks[i].y + off
+            // The target's own label goes above it, because the arrival marker
+            // writes two lines below ITS ring and the two are often a finger's
+            // width apart on a short transfer.
+            if id == g.missions[g.mi].to && g.plan.ok {
+                ly = marks[i].y - off - 12.0 * u
+            }
             var k = 0
             while k < takenX.len {
                 if Math.abs(takenX[k] - marks[i].x) < 120.0 * u && Math.abs(takenY[k] - ly) < 26.0 * u {
@@ -364,7 +404,7 @@ fn drawBodyMarkers(ui: &mut Ui, g: &Game, v: &View, marks: &Vec<Marker>, alpha: 
             }
             takenX.push(marks[i].x)
             takenY.push(ly)
-            ui.textTracked(marks[i].x - trackedWidth(name, 7.5 * u, 2.6 * u) * 0.5, ly, 7.5 * u, 2.6 * u, name, fade(colDim(), alpha))
+            ui.textTracked(marks[i].x - trackedWidth(name, 7.5 * u, 2.6 * u) * 0.5, ly, 7.5 * u, 2.6 * u, name, fade(nameCol, alpha))
         }
         i = i + 1
     }
@@ -414,7 +454,7 @@ fn missionTag(g: &Game): string {
 
 // A horizontal track with a handle, and the value written above it. This is the
 // dial the whole game is played on, so it is the only widget that gets to be big.
-fn dial(ui: &mut Ui, x: f64, y: f64, w: f64, u: f64, name: &string, value: &string, frac: f64, live: bool) {
+fn dial(ui: &mut Ui, x: f64, y: f64, w: f64, u: f64, name: &string, value: &string, frac: f64, mark: f64, live: bool) {
     label(ui, x, y, u, name, colDim())
     var c = colInk()
     if live {
@@ -427,6 +467,14 @@ fn dial(ui: &mut Ui, x: f64, y: f64, w: f64, u: f64, name: &string, value: &stri
     ui.rect(x, ty, w, 1.5, fade(colFaint(), 0.8))
     let hx = x + w * frac
     ui.rect(x, ty, w * frac, 1.5, fade(colAccent(), 0.9))
+    // Where the cheapest plan in the window sits. A player who cannot find a
+    // date that fits was, before this, turning a dial with no idea which way the
+    // answer was.
+    if mark >= 0.0 && mark <= 1.0 {
+        let mx = x + w * mark
+        ui.rect(mx - 0.9 * u, ty - 9.0 * u, 1.8 * u, 7.0 * u, colGood())
+        ui.glow(mx, ty - 5.0 * u, 7.0 * u, fade(colGood(), 0.35))
+    }
     ui.glow(hx, ty + 0.5, 9.0 * u, fade(colAccent(), 0.5))
     ui.disc(hx, ty + 0.5, 3.4 * u, colAccent())
 }
@@ -439,7 +487,7 @@ fn costRow(ui: &mut Ui, x: f64, y: f64, w: f64, u: f64, name: &string, value: &s
 fn drawPlanPanel(ui: &mut Ui, g: &Game, u: f64, w: f64, h: f64) {
     let panelW = 470.0 * u
     let x = 64.0 * u
-    let panelH = 248.0 * u
+    let panelH = 312.0 * u
     let y = 236.0 * u
     ui.roundRect(x, y, panelW, panelH, 14.0 * u, colPanel())
 
@@ -448,8 +496,14 @@ fn drawPlanPanel(ui: &mut Ui, g: &Game, u: f64, w: f64, h: f64) {
     let m = g.missions[g.mi]
     let departFrac = (g.departT - m.windowOpen) / m.windowSpan
     let tofFrac = (g.tof - m.tofMin) / (m.tofMax - m.tofMin)
-    dial(ui, x + pad, y + 26.0 * u, inner * 0.46, u, "DEPART", fmtDate(g.departT), departFrac, true)
-    dial(ui, x + pad + inner * 0.54, y + 26.0 * u, inner * 0.46, u, "FLIGHT TIME", fmtDays(g.tof), tofFrac, true)
+    var departMark = -1.0
+    var tofMark = -1.0
+    if g.guide.ok {
+        departMark = (g.guide.t0 - m.windowOpen) / m.windowSpan
+        tofMark = (g.guide.tof - m.tofMin) / (m.tofMax - m.tofMin)
+    }
+    dial(ui, x + pad, y + 26.0 * u, inner * 0.46, u, "DEPART", fmtDate(g.departT), departFrac, departMark, true)
+    dial(ui, x + pad + inner * 0.54, y + 26.0 * u, inner * 0.46, u, "FLIGHT TIME", fmtDays(g.tof), tofFrac, tofMark, true)
 
     // The number the game is about.
     let ty = y + 124.0 * u
@@ -480,13 +534,39 @@ fn drawPlanPanel(ui: &mut Ui, g: &Game, u: f64, w: f64, h: f64) {
         ui.rect(x + pad, by, inner * frac, 3.0 * u, bar)
     }
 
-    var hint = "LEFT RIGHT  DEPART     UP DOWN  FLIGHT TIME     S  CHEAPEST     ENTER  LAUNCH"
-    var hintCol = colDim()
-    if g.plan.ok && !withinBudget(g) {
-        hint = "OVER BUDGET - TURN A DIAL UNTIL THE NUMBER FITS"
-        hintCol = colBad()
+    // The verdict and the controls are two different things and used to share one
+    // line: going over budget replaced the only place that said which keys turn
+    // the dials, exactly when the player most needed it.
+    var verdict = "IT FITS - ENTER TO LAUNCH"
+    var verdictCol = colGood()
+    if !g.plan.ok {
+        verdict = "NO TRANSFER AT THESE DIALS"
+        verdictCol = colBad()
+    } else {
+        if !withinBudget(g) {
+            // 'Turn a dial' is not advice when one of the two dials cannot fix
+            // it: at the shortest flight time no departure date in the window
+            // fits, and the player can spend the whole window finding that out.
+            var how = "TURN A DIAL"
+            if g.guide.ok {
+                if g.tof < g.guide.tof * 0.92 {
+                    how = "GIVE YOURSELF MORE DAYS"
+                } else {
+                    if g.tof > g.guide.tof * 1.08 {
+                        how = "TRY FEWER DAYS"
+                    } else {
+                        how = "AIM FOR THE GREEN MARKS"
+                    }
+                }
+            }
+            verdict = "OVER BUDGET BY " + commas(Math.round(g.plan.dvTotal - m.budget)) + " m/s - " + how
+            verdictCol = colBad()
+        }
     }
-    ui.textTracked(x + pad, by + 22.0 * u, 7.5 * u, 1.6 * u, hint, hintCol)
+    ui.textTracked(x + pad, by + 22.0 * u, 7.5 * u, 1.6 * u, verdict, verdictCol)
+    ui.textTracked(x + pad, by + 42.0 * u, 7.0 * u, 1.4 * u, "LEFT RIGHT   WHEN YOU LEAVE", fade(colDim(), 0.9))
+    ui.textTracked(x + pad, by + 60.0 * u, 7.0 * u, 1.4 * u, "UP DOWN      HOW LONG YOU TAKE", fade(colDim(), 0.9))
+    ui.textTracked(x + pad, by + 78.0 * u, 7.0 * u, 1.4 * u, "S  JUMP TO THE CHEAPEST PLAN (THE GREEN MARKS)", fade(colDim(), 0.9))
 }
 
 fn drawCostPanel(ui: &mut Ui, g: &Game, u: f64, w: f64, h: f64) {
@@ -495,7 +575,7 @@ fn drawCostPanel(ui: &mut Ui, g: &Game, u: f64, w: f64, h: f64) {
     }
     let panelW = 470.0 * u
     let x = 64.0 * u
-    let y = 504.0 * u
+    let y = 568.0 * u
     let panelH = 200.0 * u
     ui.roundRect(x, y, panelW, panelH, 14.0 * u, colPanel())
     let pad = 24.0 * u
@@ -526,6 +606,59 @@ fn drawMissionHeader(ui: &mut Ui, g: &Game, u: f64, alpha: f64) {
         y = y + lineHeight(9.0 * u)
         i = i + 1
     }
+    // The blurb is a hint about the physics; this is the instruction. Without it
+    // the plan screen shows two dials and a number and never says what winning
+    // one looks like.
+    if g.phase == PHASE_PLAN {
+        y = y + 10.0 * u
+        ui.textTracked(x, y, 7.5 * u, 2.4 * u, "GET THE BURN UNDER THE BUDGET, THEN LAUNCH", fade(colAccent(), alpha))
+    }
+}
+
+// ── the mission card ──────────────────────────────────────────────────────────
+
+// The card that names the mission. It is the one screen in the game that is
+// purely a title: no dial, no number, nothing to read except where you are going
+// and what it will cost.
+fn drawBrief(ui: &mut Ui, g: &Game, u: f64, w: f64, h: f64) {
+    let a = g.fade
+    let m = g.missions[g.mi]
+    let cx = w * 0.5
+    // A scrim, so display type at this size sits on something and not on a
+    // planet: the shot behind it is still moving, and the card must win.
+    ui.rect(0.0, 0.0, w, h, rgba(0.004, 0.007, 0.014, 0.52 * a))
+
+    var y = h * 0.30
+
+    // Which mission this is and where it goes, in one string, at the size of a
+    // chapter heading.
+    let head = "MISSION " + $"{g.mi + 1}" + ": " + m.name.toUpper()
+    var size = 34.0 * u
+    // One line, always: the longest name in the campaign still has to fit the
+    // window it is drawn in, so the type shrinks rather than wrapping.
+    let room = w - 96.0 * u
+    if titleWidth(head, size) > room {
+        size = size * room / titleWidth(head, size)
+    }
+    title(ui, cx - titleWidth(head, size) * 0.5, y, size, head, fade(colInk(), a))
+    y = y + size * 2.4
+
+    var lines = wrapText(m.blurb, 11.0 * u, 620.0 * u)
+    var i = 0
+    while i < lines.len {
+        ui.textCentered(cx, y, 11.0 * u, lines[i], fade(colDim(), a))
+        y = y + lineHeight(11.0 * u)
+        i = i + 1
+    }
+
+    y = y + 26.0 * u
+    let route = displayName(m.from).toUpper() + "   TO   " + displayName(m.to).toUpper()
+    ui.textCenteredTracked(cx, y, 9.0 * u, 4.0 * u, route, fade(colAccent(), a))
+    y = y + 30.0 * u
+    ui.textCenteredTracked(cx, y, 8.0 * u, 3.0 * u, "ONE TANK  -  " + commas(m.budget) + " m/s", fade(colDim(), a * 0.9))
+
+    let pulse = 0.55 + 0.45 * Math.sin(g.spin * 9.0)
+    ui.textCenteredTracked(cx, h - 78.0 * u, 8.5 * u, 3.4 * u, "SPACE TO BEGIN", fade(colAccent(), a * pulse))
 }
 
 // ── cinematics ────────────────────────────────────────────────────────────────
@@ -733,6 +866,9 @@ pub fn drawOverlay(ui: &mut Ui, g: &Game, v: &View, marks: &Vec<Marker>) {
         drawMap(ui, g, v, marks)
         drawTitle(ui, g, u, h)
     }
+    if g.phase == PHASE_BRIEF {
+        drawBrief(ui, g, u, w, h)
+    }
     if g.phase == PHASE_DEPART || g.phase == PHASE_TARGET {
         drawCinematic(ui, g, u, h)
     }
@@ -752,7 +888,7 @@ pub fn drawOverlay(ui: &mut Ui, g: &Game, v: &View, marks: &Vec<Marker>) {
         drawMap(ui, g, v, marks)
         drawArrived(ui, g, u, w, h)
     }
-    if g.phase != PHASE_TITLE {
+    if g.phase != PHASE_TITLE && g.phase != PHASE_BRIEF {
         ui.textTracked(w - 150.0 * u, h - 26.0 * u, 7.0 * u, 2.0 * u, "H  HELP", fade(colFaint(), 0.9))
     }
 }

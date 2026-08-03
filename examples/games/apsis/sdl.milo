@@ -50,6 +50,8 @@ pub let SDL_WINDOWPOS_CENTERED: i32 = 0x2FFF0000
 
 pub let SDL_WINDOW_SHOWN: u32 = 0x4
 
+pub let SDL_WINDOW_HIDDEN: u32 = 0x8
+
 pub let SDL_WINDOW_OPENGL: u32 = 0x2
 
 pub let SDL_WINDOW_RESIZABLE: u32 = 0x20
@@ -281,7 +283,10 @@ pub struct Host {
     err: string,
 }
 
-pub fn hostNew(title: &string, w: i64, h: i64): Host {
+// `visible` is false for a screenshot run: those never present a frame, so an
+// on-screen window is a black rectangle that opens over whatever the person is
+// actually doing and then vanishes.
+pub fn hostNew(title: &string, w: i64, h: i64, visible: bool): Host {
     if SDL_Init(SDL_INIT_VIDEO) != 0 {
         return Host {
             win: 0 as *u8, ctx: 0 as *u8, ok: false, err: "SDL_Init failed"
@@ -293,7 +298,11 @@ pub fn hostNew(title: &string, w: i64, h: i64): Host {
         let _ = SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3)
         let _ = SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 3)
         let _ = SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE)
-        let win = SDL_CreateWindow(title.cstr(), SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, w as i32, h as i32, SDL_WINDOW_SHOWN | SDL_WINDOW_RESIZABLE | SDL_WINDOW_OPENGL | SDL_WINDOW_ALLOW_HIGHDPI)
+        var shown = SDL_WINDOW_SHOWN
+        if !visible {
+            shown = SDL_WINDOW_HIDDEN
+        }
+        let win = SDL_CreateWindow(title.cstr(), SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, w as i32, h as i32, shown | SDL_WINDOW_RESIZABLE | SDL_WINDOW_OPENGL | SDL_WINDOW_ALLOW_HIGHDPI)
         if (win as i64) == 0 {
             return Host {
                 win: 0 as *u8, ctx: 0 as *u8, ok: false, err: "window: " + _cstrToString(SDL_GetError())

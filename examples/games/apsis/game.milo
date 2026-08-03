@@ -38,6 +38,14 @@ pub let PHASE_FLY: i64 = 4
 
 pub let PHASE_ARRIVED: i64 = 5
 
+// The card that names the mission before either world is shown. It is its own
+// phase rather than a caption on the departure shot because a player who has
+// just pressed ENTER at the end of the last mission needs to be told what the
+// next one IS before anything starts moving.
+pub let PHASE_BRIEF: i64 = 6
+
+pub let BRIEF_SECONDS: f64 = 4.5
+
 // How long each cinematic runs before it hands over on its own. Long enough to
 // see the world turn, short enough that a player replaying a mission is not
 // held hostage — and any key skips it anyway.
@@ -60,6 +68,7 @@ pub struct Cam {
     at: Vec3, // the eased focus point, in the central body's frame
     rate: f64, // easing rate for the current move
     drifting: bool, // slow automatic yaw, switched off by the first drag
+    drift: f64, // radians per second while drifting
 }
 
 pub struct Game {
@@ -72,6 +81,10 @@ pub struct Game {
     departT: f64, // the departure dial, absolute epoch
     tof: f64, // the flight-time dial
     plan: Plan,
+    // The cheapest plan in the whole window, found once when the mission starts.
+    // It is what `S` snaps to and what the two dials show a mark at, so a player
+    // who cannot find a date that fits can see where one is instead of guessing.
+    guide: Plan,
     flightT: f64, // seconds since the departure burn
     warp: f64,
     paused: bool,
@@ -152,8 +165,21 @@ pub fn currentMission(g: &Game): i64 {
     return g.mi
 }
 
+// The yaw that puts the camera between the Sun and a world, so the face it is
+// looking at is the lit one. Everything about the lighting is real, so this is
+// the only way to say 'start on the day side' without faking a light.
+fn sunwardYaw(g: &Game, id: i64): f64 {
+    let t = displayTime(g)
+    let here = relPos(g.bodies, id, t, g.missions[g.mi].center)
+    let toSun = relPos(g.bodies, SUN, t, g.missions[g.mi].center) - here
+    return Math.atan2(toSun.x, toSun.y)
+}
+
 fn cameraTargets(g: &mut Game) {
     let m = g.missions[g.mi]
+    // Cinematics override this; everything else turns at a rate that reads as
+    // 'not quite still'.
+    g.cam.drift = 0.045
     if g.phase == PHASE_TITLE {
         g.cam.tFocus = m.center
         g.cam.tDist = mapDistance(g) * 1.35
@@ -161,11 +187,27 @@ fn cameraTargets(g: &mut Game) {
         g.cam.rate = 1.4
         g.cam.drifting = true
     }
+    // The brief looks at the departure world from further out and turning, so
+    // the card has somewhere dark to sit and the shot is already moving when the
+    // departure card takes over from it.
+    if g.phase == PHASE_BRIEF {
+        g.cam.tFocus = m.from
+        g.cam.tDist = g.bodies[m.from].radius * g.looks[m.from].viewDist * 2.6
+        g.cam.tPitch = 0.42
+        g.cam.tYaw = 2.35
+        g.cam.rate = 1.1
+        g.cam.drifting = true
+    }
+    // Both world cards open on the day side and turn into the night side over
+    // the length of the shot: a lit disc that becomes a crescent says 'this is a
+    // ball lit by one star' in a way a fixed three-quarter view never does.
     if g.phase == PHASE_DEPART {
         g.cam.tFocus = m.from
         g.cam.tDist = g.bodies[m.from].radius * g.looks[m.from].viewDist
         g.cam.tPitch = 0.28
-        g.cam.tYaw = 1.97
+        g.cam.yaw = sunwardYaw(g, m.from) - 0.45
+        g.cam.tYaw = g.cam.yaw
+        g.cam.drift = 2.3 / DEPART_SECONDS
         g.cam.rate = 1.5
         g.cam.drifting = true
     }
@@ -173,7 +215,9 @@ fn cameraTargets(g: &mut Game) {
         g.cam.tFocus = m.to
         g.cam.tDist = g.bodies[m.to].radius * g.looks[m.to].viewDist
         g.cam.tPitch = 0.24
-        g.cam.tYaw = 1.62
+        g.cam.yaw = sunwardYaw(g, m.to) - 0.45
+        g.cam.tYaw = g.cam.yaw
+        g.cam.drift = 2.8 / TARGET_SECONDS
         g.cam.rate = 2.4
         g.cam.drifting = true
     }
@@ -244,8 +288,9 @@ pub fn startMission(g: &mut Game, index: i64) {
     g.won = false
     g.paused = false
     replan(g)
+    g.guide = bestPlan(g.bodies, g.missions[g.mi])
     g.warp = g.tof / 26.0
-    setPhase(g, PHASE_DEPART)
+    setPhase(g, PHASE_BRIEF)
     // Land the camera on the departure world immediately rather than easing in
     // from wherever the last mission ended, which would fly across the solar
     // system for two seconds before the mission starts.
@@ -267,6 +312,7 @@ pub fn gameNew(): Game {
         departT: 0.0,
         tof: 0.0,
         plan: planFail(),
+        guide: planFail(),
         flightT: 0.0,
         warp: 1.0,
         paused: false,
@@ -277,7 +323,7 @@ pub fn gameNew(): Game {
         cam: Cam {
             focus: 0, yaw: 0.0, pitch: 1.30, dist: 1.0e12,
             tYaw: 0.0, tPitch: 1.30, tDist: 1.0e12, tFocus: 0,
-            at: v3(0.0, 0.0, 0.0), rate: 1.2, drifting: true,
+            at: v3(0.0, 0.0, 0.0), rate: 1.2, drifting: true, drift: 0.045,
         }
         ,
         help: false,
@@ -291,8 +337,15 @@ pub fn gameNew(): Game {
     g.departT = m.windowOpen + m.windowSpan * 0.42
     g.tof = m.tofMin + (m.tofMax - m.tofMin) * 0.62
     replan(g)
-    g.cam.dist = mapDistance(g) * 1.35
-    g.cam.tDist = g.cam.dist
+    g.guide = bestPlan(g.bodies, g.missions[0])
+    // Without this the title camera keeps the focus it was built with — body 0,
+    // the Sun — and eases away from the map over the first few seconds, taking
+    // the transfer arc behind the type with it and ending up inside the Sun.
+    cameraTargets(g)
+    g.cam.focus = g.cam.tFocus
+    g.cam.dist = g.cam.tDist
+    g.cam.pitch = g.cam.tPitch
+    g.cam.at = focusPoint(g, g.cam.focus)
     return g
 }
 
@@ -400,6 +453,9 @@ pub fn advance(g: &mut Game, dt: f64) {
     g.fade = clampf(g.fade + dt * 1.6, 0.0, 1.0)
     g.spin = g.spin + dt * 0.10
 
+    if g.phase == PHASE_BRIEF && g.phaseT > BRIEF_SECONDS {
+        advancePhase(g)
+    }
     if g.phase == PHASE_DEPART && g.phaseT > DEPART_SECONDS {
         advancePhase(g)
     }
@@ -442,6 +498,10 @@ pub fn advancePhase(g: &mut Game) {
         startMission(g, 0)
         return
     }
+    if g.phase == PHASE_BRIEF {
+        setPhase(g, PHASE_DEPART)
+        return
+    }
     if g.phase == PHASE_DEPART {
         setPhase(g, PHASE_TARGET)
         return
@@ -477,7 +537,7 @@ pub fn updateCamera(g: &mut Game, dt: f64) {
     g.cam.yaw = g.cam.yaw + shortestAngle(g.cam.tYaw - g.cam.yaw) * k
     g.cam.pitch = g.cam.pitch + (g.cam.tPitch - g.cam.pitch) * k
     if g.cam.drifting {
-        g.cam.yaw = g.cam.yaw + dt * 0.045
+        g.cam.yaw = g.cam.yaw + dt * g.cam.drift
         g.cam.tYaw = g.cam.yaw
     }
 }

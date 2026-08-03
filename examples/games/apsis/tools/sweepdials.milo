@@ -1,0 +1,89 @@
+// Walk both dials across their whole range and look for an arc that jumps.
+//
+//   milo run examples/games/apsis/tools/sweepdials.milo
+//
+// The plan screen recomputes the transfer every frame the player holds a key, so
+// any dial value where the solver returns a wild answer is a line that flashes
+// across the map for one frame. This finds those values without a person holding
+// an arrow key for a minute: an arc whose farthest point is many times the target
+// orbit is not a transfer, it is a glitch.
+
+from "std/math" import {
+    Math
+}
+from "./../ephem" import {
+    bodyTable, SEC_PER_DAY, nowSeconds
+}
+from "./../mission" import {
+    missionTable, MISSION_COUNT
+}
+from "./../plan" import {
+    calibrateMission, solvePlan, arcPoints, relPos
+}
+
+fn round0(v: f64): string {
+    return $"{Math.round(v) as i64}"
+}
+
+pub fn main(): i32 {
+    var bodies = bodyTable()
+    var missions = missionTable()
+    var bad = 0
+    var mi = 0
+    while mi < MISSION_COUNT {
+        var m = missions[mi]
+        let _ = calibrateMission(bodies, m, nowSeconds())
+        // The scale everything on this map is measured against: how far the
+        // target sits from the body the transfer is drawn around.
+        let scale = relPos(bodies, m.to, m.windowOpen, m.center).len()
+        let steps = 240
+        let tofSteps = 12
+        var worst = 0.0
+        var worstDay = 0.0
+        var fails = 0
+        var j = 0
+        while j <= tofSteps {
+            let tof = m.tofMin + (m.tofMax - m.tofMin) * (j as f64) / (tofSteps as f64)
+            var i = 0
+            while i <= steps {
+                let t0 = m.windowOpen + m.windowSpan * (i as f64) / (steps as f64)
+                let p = solvePlan(bodies, m, t0, tof)
+                if p.ok {
+                    let pts = arcPoints(bodies, m, p, 64)
+                    var far = 0.0
+                    var k = 0
+                    while k < pts.len {
+                        let r = pts[k].len()
+                        if r > far {
+                            far = r
+                        }
+                        k = k + 1
+                    }
+                    let ratio = far / scale
+                    if ratio > worst {
+                        worst = ratio
+                        worstDay = (t0 - m.windowOpen) / SEC_PER_DAY
+                    }
+                    if ratio > 4.0 {
+                        bad = bad + 1
+                        if bad < 12 {
+                            print("  " + m.name + "  depart+" + round0((t0 - m.windowOpen) / SEC_PER_DAY) + "d  tof " + round0(tof / SEC_PER_DAY) + "d  arc reaches " + round0(ratio) + "x the target orbit  dv " + round0(p.dvTotal))
+                        }
+                    }
+                } else {
+                    fails = fails + 1
+                }
+                i = i + 1
+            }
+            j = j + 1
+        }
+        print(m.name + ": worst arc " + $"{Math.round(worst * 100.0) / 100.0}" + "x at depart+" + round0(worstDay) + "d, no-solution samples " + $"{fails}" + " of " + $"{(steps + 1) * (tofSteps + 1)}")
+        missions[mi] = m
+        mi = mi + 1
+    }
+    if bad > 0 {
+        print("suspicious dial values: " + $"{bad}")
+        return 1
+    }
+    return 0
+}

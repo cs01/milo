@@ -74,7 +74,10 @@ void main() {
         // Self-lit: brighten toward the limb so the disc reads as a ball of gas
         // rather than a sticker, and let the bloom pass do the rest.
         vec3 V = normalize(uEye - vWorld);
-        float limb = pow(1.0 - max(dot(N, V), 0.0), 1.6);
+        // clamp, not max: two normalised vectors can dot to 1.0000001, and
+        // pow(-1e-7, 1.6) is NaN — one NaN texel here is smeared by the bloom
+        // chain into a black square a quarter of the screen wide.
+        float limb = pow(clamp(1.0 - dot(N, V), 0.0, 1.0), 1.6);
         fragColor = vec4(albedo * (1.7 + 3.2 * limb), 1.0);
         return;
     }
@@ -135,7 +138,7 @@ void main() {
     // Air seen edge-on from the lit side: the haze that makes a day side glow at
     // the rim instead of ending at a hard circle.
     if (uAtmoAmount > 0.0) {
-        float rim = pow(1.0 - max(dot(N, V), 0.0), 3.0);
+        float rim = pow(clamp(1.0 - dot(N, V), 0.0, 1.0), 3.0);
         lit += uAtmoTint * rim * uAtmoAmount * (0.25 + 0.75 * lambert);
     }
 
@@ -455,7 +458,9 @@ void main() {
             s += texture(uSrc, vUv + o).rgb;
         }
     }
-    s *= 0.0625;
+    // An overflowed half-float would divide to NaN below, and one NaN texel
+    // becomes a 60-texel black square once the four blur passes have spread it.
+    s = min(s * 0.0625, vec3(1.0e4));
     float lum = dot(s, vec3(0.299, 0.587, 0.114));
     float keep = lum > uThreshold ? (lum - uThreshold) / lum : 0.0;
     fragColor = vec4(s * keep, 1.0);

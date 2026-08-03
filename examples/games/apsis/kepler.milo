@@ -105,25 +105,45 @@ fn unchanged(r0: &Vec3, v0: &Vec3): State {
 // every point on an ellipse. Writing it in dE rather than in E also means a
 // transfer that crosses periapsis needs no angle wrapping — the thing that makes
 // the textbook 'solve for E, subtract E0' version quietly wrong.
+// Newton alone is not enough. On a transfer with e above 0.99 the derivative r/a
+// is a few thousandths near the root, so one step from a poor iterate lands
+// hundreds of radians away and sixty more steps do not walk back — about one
+// sample in sixty came back non-converged, which drew a single point of the arc
+// 1e15 km from Earth and flashed a line across the map.
+//
+// The cure is the bracket. |e sin E0| and |e cos E0| are both at most 1, so the
+// root can never be further than 3 from n dt, and f is monotone increasing
+// because its derivative IS r/a. A Newton step that leaves the bracket is
+// replaced by a bisection, which cannot leave it, so the iteration converges from
+// any starting point.
 fn solveDeltaE(esinE0: f64, ecosE0: f64, mdt: f64): f64 {
+    var lo = mdt - 3.2
+    var hi = mdt + 3.2
     var dE = mdt
     var i = 0
-    while i < 60 {
+    while i < 100 {
         let s = Math.sin(dE)
         let c = Math.cos(dE)
         let f = dE + esinE0 * (1.0 - c) - ecosE0 * s - mdt
-        let fp = 1.0 + esinE0 * s - ecosE0 * c
-        if fp < 1.0e-12 {
-            i = 60
+        if f > 0.0 {
+            hi = dE
         } else {
+            lo = dE
+        }
+        let fp = 1.0 + esinE0 * s - ecosE0 * c
+        var next = (lo + hi) * 0.5
+        if fp > 1.0e-14 {
             let step = f / fp
-            dE = dE - step
-            if Math.abs(step) < 1.0e-12 {
-                i = 60
-            } else {
-                i = i + 1
+            let cand = dE - step
+            if cand > lo && cand < hi {
+                next = cand
             }
         }
+        if Math.abs(next - dE) < 1.0e-13 {
+            return next
+        }
+        dE = next
+        i = i + 1
     }
     return dE
 }
@@ -134,31 +154,53 @@ fn solveDeltaE(esinE0: f64, ecosE0: f64, mdt: f64): f64 {
 //
 // The step is limited because cosh grows fast enough that an unguarded Newton
 // step from a poor first guess overflows before it converges.
+// Bracketed the same way as the ellipse, for the same reason. There is no closed
+// bound on dH, so the bracket is found by doubling outward from zero — cosh
+// overflows a double around 710, and no transfer in this game is a thousandth of
+// that far along a hyperbola.
+fn hyperResidual(esinhH0: f64, ecoshH0: f64, mdt: f64, dH: f64): f64 {
+    return esinhH0 * (cosh(dH) - 1.0) + ecoshH0 * sinh(dH) - dH - mdt
+}
+
 fn solveDeltaH(esinhH0: f64, ecoshH0: f64, mdt: f64): f64 {
-    var dH = mdt / (ecoshH0 + 1.0)
+    var span = 1.0
+    while span < 700.0 && hyperResidual(esinhH0, ecoshH0, mdt, span) < 0.0 {
+        span = span * 2.0
+    }
+    var lo = -span
+    var hi = span
+    if hyperResidual(esinhH0, ecoshH0, mdt, 0.0) < 0.0 {
+        lo = 0.0
+    } else {
+        hi = 0.0
+        while lo > -700.0 && hyperResidual(esinhH0, ecoshH0, mdt, lo) > 0.0 {
+            lo = lo * 2.0
+        }
+    }
+    var dH = (lo + hi) * 0.5
     var i = 0
-    while i < 80 {
+    while i < 120 {
         let sh = sinh(dH)
         let ch = cosh(dH)
         let f = esinhH0 * (ch - 1.0) + ecoshH0 * sh - dH - mdt
-        let fp = esinhH0 * sh + ecoshH0 * ch - 1.0
-        if fp < 1.0e-12 {
-            i = 80
+        if f > 0.0 {
+            hi = dH
         } else {
-            var step = f / fp
-            if step > 1.0 {
-                step = 1.0
-            }
-            if step < -1.0 {
-                step = -1.0
-            }
-            dH = dH - step
-            if Math.abs(step) < 1.0e-13 {
-                i = 80
-            } else {
-                i = i + 1
+            lo = dH
+        }
+        let fp = esinhH0 * sh + ecoshH0 * ch - 1.0
+        var next = (lo + hi) * 0.5
+        if fp > 1.0e-14 {
+            let cand = dH - f / fp
+            if cand > lo && cand < hi {
+                next = cand
             }
         }
+        if Math.abs(next - dH) < 1.0e-13 {
+            return next
+        }
+        dH = next
+        i = i + 1
     }
     return dH
 }

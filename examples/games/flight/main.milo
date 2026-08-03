@@ -6,11 +6,14 @@
 // San Francisco is baked into the binary (see `usage` below), so the game ships
 // as one file with no asset path to get wrong.
 //
-// Real 3D: a perspective camera, near-plane clipping and a depth-buffered
-// triangle rasteriser, all on the CPU in safe Milo (see gfx3d.milo). The bloom
-// and tone map that turn that HDR canvas into a picture run on the GPU instead
-// (gpupost.milo, over the gl package); `--cpu` keeps them on the CPU, and display.milo
-// is the seam. Which one is in use changes nothing above it.
+// Real 3D, all of it on the GPU: gfx3d.milo records world-space triangles into
+// vertex streams, gpuworld.milo hands them to the driver, and gpupost.milo does
+// the sea, the 2D overlay, the bloom and the tone map. The sky, the distance haze
+// and the sea reflection all call one `skyColor` (sky.milo), which is what makes
+// them agree.
+//
+// It needs an OpenGL 3.3 core context and there is no software fallback. The one
+// that used to exist is now benchmarks/softraster — a benchmark, not a renderer.
 //
 // You cannot crash. The ground pushes you up if you dive into it.
 

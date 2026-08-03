@@ -1,0 +1,34 @@
+@noCopy
+struct Handle {
+    id: i32
+}
+
+fn release(h: Handle): i32 {
+    return h.id
+}
+
+fn open(): Result<i32, string> {
+    return Result.Ok(1)
+}
+
+// An arm that returns never falls through, so the release inside it must not mark
+// `h` moved for the code after the match.
+pub fn main(): i32 {
+    let h = Handle {
+        id: 7
+    }
+    match open() {
+        Result.Ok(v) => {
+            print(v)
+        }
+        Result.Err(e) => {
+            release(h)
+            return 2
+        }
+    }
+    print(release(h))
+    return 0
+}
+
+// @expect: 1
+// @expect: 7

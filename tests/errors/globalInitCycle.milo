@@ -1,0 +1,10 @@
+pub let A: string = "x" + B
+
+pub let B: string = "y" + A
+
+pub fn main(): i32 {
+    print(A)
+    return 0
+}
+
+// @error: depends on itself through another global

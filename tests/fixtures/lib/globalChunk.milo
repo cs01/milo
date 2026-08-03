@@ -1,0 +1,3 @@
+// A module-level constant another module concatenates into its own global — the
+// shader-source pattern that read a zeroed string before init order was fixed.
+pub let SKY_CHUNK: string = "SKY"

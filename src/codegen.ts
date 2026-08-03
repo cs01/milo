@@ -1340,8 +1340,8 @@ export class Codegen {
 
     // A global whose initializer needs to run code (an arena, a populated Vec) is emitted
     // zeroed and filled in by a generated routine that main calls before its own body.
-    // Evaluation is declaration order, and the resolver puts imported modules ahead of the
-    // importer, so a global may read anything declared above it and nothing below.
+    // Evaluation is `module.globals` order, which the checker has already sorted so that
+    // every global follows the ones its initializer reads (across modules too).
     const runtimeInitGlobals = module.globals.filter(g => !this.isFullyConstInit(g));
     this.needsGlobalInit = runtimeInitGlobals.length > 0;
     const initFn: HIRFunction | null = runtimeInitGlobals.length === 0 ? null : {

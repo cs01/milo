@@ -1,0 +1,16 @@
+from "./lib/globalChunk" import {
+    SKY_CHUNK
+}
+
+// Reads a global declared below it, and one from an imported module: initializers run
+// in dependency order, not source order.
+pub let FRAG: string = "head|" + SKY_CHUNK + "|" + TAIL
+
+pub let TAIL: string = "tail"
+
+pub fn main(): i32 {
+    print(FRAG)
+    return 0
+}
+
+// @expect: head|SKY|tail

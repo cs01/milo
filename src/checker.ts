@@ -1567,6 +1567,8 @@ export class TypeChecker {
     // on whether the method happens to be checked before its first call site.
     for (const fn of implFnsToCheck) this.recordViewProvenance(fn);
 
+    this.orderGlobalsByDependency(program);
+
     // type-check module-level globals — push a module scope so declare() works
     this.pushScope();
     const globalTypes = new Map<string, TypeKind>();
@@ -3917,6 +3919,108 @@ export class TypeChecker {
     this.pendingInferVecs.push({ elem, span: value.span });
     this.exprTypes.set(value, vecTy);
     return vecTy;
+  }
+
+  // Runtime global initializers run in `program.globals` order, so a global that reads
+  // another has to sit after it. Source order does not guarantee that: the resolver
+  // appends the entry module's globals before walking its imports, so `let FRAG = HEAD +
+  // SKY_GLSL` built from an imported chunk read a zeroed string and silently produced a
+  // truncated shader. Sort by dependency instead — direct reads, plus reads inside
+  // functions the initializer calls — and keep source order among independent globals.
+  //
+  // Call edges are an over-approximation (a name-keyed call graph), so a cycle they
+  // introduce is not necessarily real: only a cycle in the direct global→global edges is
+  // reported. Anything else falls back to source order, which is what shipped before.
+  private orderGlobalsByDependency(program: Program) {
+    const globals = program.globals;
+    if (globals.length < 2) return;
+    const index = new Map<string, number>();
+    globals.forEach((g, i) => index.set(g.name, i));
+
+    const scan = (node: unknown, reads: Set<string>, calls: Set<string>) => {
+      if (!node || typeof node !== "object") return;
+      if (Array.isArray(node)) { for (const c of node) scan(c, reads, calls); return; }
+      const n = node as Record<string, any>;
+      if (n.kind === "Ident" && typeof n.name === "string" && index.has(n.name)) reads.add(n.name);
+      // `Name.thing(...)` is parsed as an enum/static call; it may be a read of a global
+      // named `Name` (staticCallOnVariable rewrites it later) or a static method call.
+      if (n.kind === "EnumLit" && typeof n.enumName === "string") {
+        if (index.has(n.enumName)) reads.add(n.enumName);
+        if (typeof n.variant === "string") calls.add(`${n.enumName}.${n.variant}`);
+      }
+      if (n.kind === "Call" && n.callee?.kind === "Ident") calls.add(n.callee.name);
+      if (n.kind === "MethodCall" && typeof n.method === "string") calls.add(n.method);
+      for (const k in n) { if (k !== "span") scan(n[k], reads, calls); }
+    };
+
+    // Direct reads/calls of every callable, keyed by every name a call site could use.
+    const bodies = new Map<string, { reads: Set<string>; calls: Set<string> }>();
+    const record = (key: string, body: unknown) => {
+      let e = bodies.get(key);
+      if (!e) { e = { reads: new Set(), calls: new Set() }; bodies.set(key, e); }
+      scan(body, e.reads, e.calls);
+    };
+    for (const f of program.functions) if (!f.isExtern) record(f.name, f.body);
+    for (const im of program.impls) {
+      for (const m of im.methods) { record(m.name, m.body); record(`${im.typeName}.${m.name}`, m.body); }
+    }
+
+    // Fixpoint: which globals a callable reads once its callees are folded in.
+    let changed = true;
+    while (changed) {
+      changed = false;
+      for (const [, e] of bodies) {
+        for (const callee of e.calls) {
+          const c = bodies.get(callee);
+          if (!c) continue;
+          for (const r of c.reads) if (!e.reads.has(r)) { e.reads.add(r); changed = true; }
+        }
+      }
+    }
+
+    const directDeps: Set<string>[] = [];
+    const allDeps: Set<string>[] = [];
+    for (const g of globals) {
+      const reads = new Set<string>(), calls = new Set<string>();
+      scan(g.value, reads, calls);
+      reads.delete(g.name);
+      directDeps.push(new Set(reads));
+      const all = new Set(reads);
+      for (const callee of calls) for (const r of bodies.get(callee)?.reads ?? []) if (r !== g.name) all.add(r);
+      allDeps.push(all);
+    }
+
+    // Direct cycles are a real error — no order can satisfy them.
+    const onDirectCycle = new Set<number>();
+    const seen = new Array<number>(globals.length).fill(0); // 0 unvisited, 1 on stack, 2 done
+    const walkDirect = (i: number): void => {
+      if (seen[i] === 2) return;
+      if (seen[i] === 1) { onDirectCycle.add(i); return; }
+      seen[i] = 1;
+      for (const d of directDeps[i]!) { const j = index.get(d); if (j !== undefined) walkDirect(j); }
+      seen[i] = 2;
+    };
+    for (let i = 0; i < globals.length; i++) walkDirect(i);
+    for (const i of onDirectCycle) {
+      const g = globals[i]!;
+      this.error(`global '${g.name}': initializer depends on itself through another global`, g.span,
+        `module-level initializers run in dependency order before main; a cycle has no valid order`);
+    }
+
+    // Stable topological order: emit each global after everything it depends on,
+    // visiting in source order so unrelated globals keep their original positions.
+    const order: typeof globals = [];
+    const state = new Array<number>(globals.length).fill(0);
+    const visit = (i: number) => {
+      if (state[i] !== 0) return; // done, or already on the stack (cycle → source order wins)
+      state[i] = 1;
+      for (const d of allDeps[i]!) { const j = index.get(d); if (j !== undefined && j !== i) visit(j); }
+      state[i] = 2;
+      order.push(globals[i]!);
+    };
+    for (let i = 0; i < globals.length; i++) visit(i);
+    globals.length = 0;
+    globals.push(...order);
   }
 
   // Does this body unconditionally exit (return/break/continue) on every path?
@@ -7262,8 +7366,12 @@ export class TypeChecker {
         for (const s of arm.body) this.checkStmt(s, fnRetType);
         armTypes.push(this.blockExprType(arm.body));
         this.popScope();
-        for (const [info, moved] of this.snapshotMoveState()) {
-          if (moved) mergedMoves.set(info, true);
+        // An arm that always exits never falls through to the code after the match,
+        // so its moves must not reach there — same rule the if-statement uses.
+        if (!this.bodyAlwaysReturns(arm.body)) {
+          for (const [info, moved] of this.snapshotMoveState()) {
+            if (moved) mergedMoves.set(info, true);
+          }
         }
       }
       this.restoreMoveState(preMoves);
@@ -7348,8 +7456,12 @@ export class TypeChecker {
         if (patternMovedInfo) this.movedByPattern.delete(patternMovedInfo);
         armTypes.push(this.blockExprType(arm.body));
         this.popScope();
-        for (const [info, moved] of this.snapshotMoveState()) {
-          if (moved) mergedMoves.set(info, true);
+        // An arm that always exits never falls through to the code after the match,
+        // so its moves must not reach there — same rule the if-statement uses.
+        if (!this.bodyAlwaysReturns(arm.body)) {
+          for (const [info, moved] of this.snapshotMoveState()) {
+            if (moved) mergedMoves.set(info, true);
+          }
         }
       }
       this.restoreMoveState(preMoves);

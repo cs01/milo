@@ -17,7 +17,7 @@ pub struct Off {
 from "./gfx3d" import {
     Vec3,
     Scene, View, Camera, viewOf, sceneClear, triangle, shade, toCamera,
-    triangleV, triangleG
+    triangleV, triangleG, triangleF
 }
 from "./texture" import {
     Texture, Vtx, vtxC
@@ -792,16 +792,21 @@ fn drawFalls(s: &mut Scene, w: &World, v: &View) {
 fn fallRibbon(s: &mut Scene, w: &World, v: &View, lipX: f64, lipZ: f64, wide: f64) {
     let STEP = 14.0
     let MAX = 90
+    // Trace the chute first and keep it, rather than emitting as we walk: the
+    // shader needs to know the TOTAL drop at every vertex — how far down the fall
+    // a pixel is decides how broken up the water is there — and that is not known
+    // until the walk has finished.
+    var px: Vec<f64> = Vec.new()
+    var py: Vec<f64> = Vec.new()
+    var pz: Vec<f64> = Vec.new()
+    var pfall: Vec<f64> = Vec.new() // metres fallen at this point
+    var pspeed: Vec<f64> = Vec.new() // how fast the water is moving here, 0..1
     var cx = lipX
     var cz = lipZ
     var cy = heightAt(w.city, cx, cz)
-    // Walk to the lip first: the landmark is pinned at the fall, not necessarily
-    // at the exact metre the water leaves the rock.
-    var prevX = cx
-    var prevZ = cz
-    var prevY = cy
-    var have = false
     var drop = 0.0
+    var dirX = 0.0
+    var dirZ = 1.0
     for step in 0..MAX {
         // Steepest descent, sampled as a gradient over one step either side.
         let hx0 = heightAt(w.city, cx - STEP, cz)
@@ -816,6 +821,8 @@ fn fallRibbon(s: &mut Scene, w: &World, v: &View, lipX: f64, lipZ: f64, wide: f6
         }
         gx = gx / gl
         gz = gz / gl
+        dirX = gx
+        dirZ = gz
         let nx = cx + gx * STEP
         let nz = cz + gz * STEP
         let ny = heightAt(w.city, nx, nz)
@@ -824,55 +831,123 @@ fn fallRibbon(s: &mut Scene, w: &World, v: &View, lipX: f64, lipZ: f64, wide: f6
         if fell < 0.9 && drop > 40.0 {
             break
         }
+        px.push(cx)
+        py.push(cy)
+        pz.push(cz)
+        pfall.push(drop)
+        // Free fall: speed goes as the square root of the distance dropped, and a
+        // sheer plunge is moving far faster than a run over slabs.
+        pspeed.push(Math.clampF64(Math.sqrt(Math.maxF64(drop, 0.0)) / 14.0 + fell / 9.0, 0.10, 1.0))
         drop = drop + Math.maxF64(fell, 0.0)
-        if have {
-            // Water narrows at the lip and spreads toward the plunge pool, and
-            // it stands a little off the rock so the two do not z-fight.
-            let t = (step as f64) / (MAX as f64)
-            let halfW = wide * (0.5 + 1.4 * t) * 0.5
-            let px = 0.0 - gz * halfW
-            let pz = gx * halfW
-            let lift = 2.0
-            let a0 = v3(prevX - px, prevY + lift, prevZ - pz)
-            let a1 = v3(prevX + px, prevY + lift, prevZ + pz)
-            let b1 = v3(cx + px, cy + lift, cz + pz)
-            let b0 = v3(cx - px, cy + lift, cz - pz)
-            // Brightness rides the speed of the drop: a sheer plunge is white
-            // spray, a run over slabs is greener water.
-            let white = Math.clampF64(fell / 6.0, 0.25, 1.0)
-            let col = rgb(0.55 + 0.55 * white, 0.72 + 0.45 * white, 0.88 + 0.35 * white)
-            triangle(s, v, a0, a1, b1, col)
-            triangle(s, v, a0, b1, b0, col)
-            triangle(s, v, b1, a1, a0, col)
-            triangle(s, v, b0, b1, a0, col)
-        }
-        prevX = cx
-        prevZ = cz
-        prevY = cy
-        have = true
         cx = nx
         cz = nz
         cy = ny
     }
-    if drop < 20.0 {
+    if drop < 20.0 || px.len < 2 {
         return
     }
-    // The plunge pool: a low dome of spray where the water lands, which is what
-    // tells you from the air that the white line on the cliff is falling.
-    let mist = rgb(1.35, 1.45, 1.55)
-    let rad = wide * 1.6
-    let base = cy + 3.0
-    for ring in 0..3 {
-        let rr = rad * (0.5 + 0.28 * (ring as f64))
-        let hh = base + rad * (0.5 - 0.13 * (ring as f64)) + Math.sin(w.time * 1.7 + (ring as f64)) * 2.0
-        var prev = v3(cx + rr, hh, cz)
-        for k in 1..9 {
-            let a = (k as f64) / 8.0 * TAU
-            let p = v3(cx + Math.cos(a) * rr, hh, cz + Math.sin(a) * rr)
-            triangle(s, v, v3(cx, base, cz), prev, p, mist)
-            triangle(s, v, v3(cx, base, cz), p, prev, mist)
-            prev = p
+
+    // The ribbon. `uv.x` runs across it, `uv.y` is metres fallen — a real length,
+    // not a normalised one, so the threads in the shader keep their scale whether
+    // the drop is thirty metres or seven hundred.
+    for i in 0..px.len - 1 {
+        let t0 = (i as f64) / ((px.len - 1) as f64)
+        let t1 = ((i + 1) as f64) / ((px.len - 1) as f64)
+        // Water narrows at the lip and spreads toward the plunge pool, and stands
+        // a little off the rock so the two do not z-fight.
+        let h0 = wide * (0.6 + 2.4 * t0) * 0.5
+        let h1 = wide * (0.6 + 2.4 * t1) * 0.5
+        let ax = 0.0 - dirZ
+        let az = dirX
+        let lift = 2.0
+        // r/g/b are 1.0 on purpose: `triangleF` multiplies the vertex tint by the
+        // three numbers it is handed, so leaving them at one is what makes those
+        // three arrive at the shader as width, total drop and the spray flag.
+        let a0 = vtxC(px[i] - ax * h0, py[i] + lift, pz[i] - az * h0, 0.0, pfall[i], pspeed[i], 1.0, 1.0, 1.0, 0.0)
+        let a1 = vtxC(px[i] + ax * h0, py[i] + lift, pz[i] + az * h0, 1.0, pfall[i], pspeed[i], 1.0, 1.0, 1.0, 0.0)
+        let b0 = vtxC(px[i + 1] - ax * h1, py[i + 1] + lift, pz[i + 1] - az * h1, 0.0, pfall[i + 1], pspeed[i + 1], 1.0, 1.0, 1.0, 0.0)
+        let b1 = vtxC(px[i + 1] + ax * h1, py[i + 1] + lift, pz[i + 1] + az * h1, 1.0, pfall[i + 1], pspeed[i + 1], 1.0, 1.0, 1.0, 0.0)
+        triangleF(s, v, a0, a1, b1, wide, drop, 0.0)
+        triangleF(s, v, a0, b1, b0, wide, drop, 0.0)
+    }
+
+    // Mist torn off the sheet on the way down. A drop this tall is half spray
+    // before it lands, and without this the sheet ends in a plume that looks
+    // stuck on rather than thrown.
+    if drop > 120.0 {
+        for k in 0..18 {
+            let idx = 1 + ((k * 7) % (px.len - 1))
+            let cyc = w.time * 0.34 + propHash(k, 23)
+            let life = cyc - Math.floor(cyc)
+            let r = wide * (0.5 + 1.5 * life)
+            let fade = Math.sin(life * 3.14159265358979) * 0.55
+            if fade <= 0.02 {
+                continue
+            }
+            let sx = px[idx] + (propHash(k, 29) - 0.5) * wide * 2.2
+            let sy = py[idx] - life * 26.0
+            let sz = pz[idx] + (propHash(k, 31) - 0.5) * wide * 2.2
+            let rx = v.right.x * r
+            let ry = v.right.y * r
+            let rz = v.right.z * r
+            let ux = v.up.x * r
+            let uy = v.up.y * r
+            let uz = v.up.z * r
+            let q0 = vtxC(sx - rx - ux, sy - ry - uy, sz - rz - uz, 0.0 - 1.0, 0.0 - 1.0, fade, 1.0, 1.0, 1.0, 0.0)
+            let q1 = vtxC(sx + rx - ux, sy + ry - uy, sz + rz - uz, 1.0, 0.0 - 1.0, fade, 1.0, 1.0, 1.0, 0.0)
+            let q2 = vtxC(sx + rx + ux, sy + ry + uy, sz + rz + uz, 1.0, 1.0, fade, 1.0, 1.0, 1.0, 0.0)
+            let q3 = vtxC(sx - rx + ux, sy - ry + uy, sz - rz + uz, 0.0 - 1.0, 1.0, fade, 1.0, 1.0, 1.0, 0.0)
+            triangleF(s, v, q0, q1, q2, wide, drop, 1.0)
+            triangleF(s, v, q0, q2, q3, wide, drop, 1.0)
         }
+    }
+
+    // The plume at the foot.
+    //
+    // Camera-facing billboards rather than the three flat rings this used to be:
+    // a ring seen edge-on is a line, and from an aircraft you are almost always
+    // looking at one edge-on. A billboard has no edge to catch.
+    let baseX = px[px.len - 1]
+    let baseY = py[py.len - 1]
+    let baseZ = pz[pz.len - 1]
+    // The plume is what you actually see from a kilometre away. The sheet itself
+    // is honestly narrow — Yosemite Falls is about thirty metres across at the lip
+    // — and at flyby's distances a thirty-metre thread is a few pixels. What makes
+    // a tall fall visible from the air is the mist it throws, which is far wider
+    // than the water and catches the light.
+    let rad = wide * 3.4
+    for k in 0..34 {
+        let kk = k as f64
+        // Each puff has its own phase through a rise-and-fade cycle, so the plume
+        // boils continuously instead of pulsing as one.
+        let cycle = w.time * 0.26 + propHash(k, 7)
+        let life = cycle - Math.floor(cycle)
+        let ang = propHash(k, 11) * TAU
+        let spread = rad * (0.35 + 1.35 * life)
+        let cxx = baseX + Math.cos(ang) * spread * (0.6 + 0.8 * propHash(k, 13))
+        let czz = baseZ + Math.sin(ang) * spread * (0.6 + 0.8 * propHash(k, 17))
+        // Rises fast and slows, the way a mist plume does.
+        let cyy = baseY + 2.0 + rad * (0.20 + 1.15 * Math.sqrt(life))
+        // Grows as it rises and thins out as it goes.
+        let r = rad * (0.30 + 0.70 * life) * (0.6 + 0.7 * propHash(k, 19))
+        let fade = Math.sin(life * 3.14159265358979) // in at the bottom, out at the top
+        if fade <= 0.02 {
+            continue
+        }
+        let rx = v.right.x * r
+        let ry = v.right.y * r
+        let rz = v.right.z * r
+        let ux = v.up.x * r
+        let uy = v.up.y * r
+        let uz = v.up.z * r
+        // uv runs -1..1 across the billboard, which is what the shader takes the
+        // radial falloff from.
+        let q0 = vtxC(cxx - rx - ux, cyy - ry - uy, czz - rz - uz, 0.0 - 1.0, 0.0 - 1.0, fade, 1.0, 1.0, 1.0, 0.0)
+        let q1 = vtxC(cxx + rx - ux, cyy + ry - uy, czz + rz - uz, 1.0, 0.0 - 1.0, fade, 1.0, 1.0, 1.0, 0.0)
+        let q2 = vtxC(cxx + rx + ux, cyy + ry + uy, czz + rz + uz, 1.0, 1.0, fade, 1.0, 1.0, 1.0, 0.0)
+        let q3 = vtxC(cxx - rx + ux, cyy - ry + uy, czz - rz + uz, 0.0 - 1.0, 1.0, fade, 1.0, 1.0, 1.0, 0.0)
+        triangleF(s, v, q0, q1, q2, wide, drop, 1.0)
+        triangleF(s, v, q0, q2, q3, wide, drop, 1.0)
     }
 }
 

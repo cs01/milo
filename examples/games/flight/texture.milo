@@ -25,7 +25,15 @@ pub let SLOT_FACADE: i64 = 3
 
 pub let SLOT_ORTHO: i64 = 4
 
-pub let SLOT_COUNT: i64 = 5
+// Falling water and its spray. Not a texture at all — it is the one slot whose
+// stream is drawn with a different shader, because a waterfall is not a lit
+// surface with a picture on it: it is translucent, it is moving, it tears into
+// spray as it drops, and none of that is expressible as albedo times a Lambert
+// term. Keeping it in the same stream machinery costs one branch in `drawStreams`
+// and means the geometry above records it exactly like everything else.
+pub let SLOT_FALL: i64 = 5
+
+pub let SLOT_COUNT: i64 = 6
 
 pub struct Texture {
     w: i64,

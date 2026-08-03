@@ -28,8 +28,8 @@ from "gl" import {
     Gpu, Mesh, Shader, Texture2D, Wrap
 }
 from "./texture" import {
-    SLOT_COUNT, SLOT_FACADE, SLOT_GROUND, SLOT_NONE, SLOT_ORTHO, SLOT_SKIN,
-    Texture
+    SLOT_COUNT, SLOT_FACADE, SLOT_FALL, SLOT_GROUND, SLOT_NONE, SLOT_ORTHO,
+    SLOT_SKIN, Texture
 }
 from "./gfx3d" import {
     Scene, View
@@ -148,6 +148,148 @@ void main() {
 
 }
 
+// Falling water.
+//
+// A waterfall is the one thing in this world that a lit-surface shader cannot
+// draw. It is translucent and gets less so as it falls; it is made of threads
+// that move; it tears into spray on the way down and is pure spray by the time it
+// lands; and lit from behind it glows rather than shading. Drawn as albedo times a
+// Lambert term — which is what it was — it comes out as a flat white quad hanging
+// on a cliff.
+//
+// So the vertex attributes mean different things in this stream, and the geometry
+// that emits them (render3d.fallRibbon) knows it:
+//
+//   uv.x    across the ribbon, 0..1
+//   uv.y    METRES fallen from the lip, not a 0..1 coordinate — threads have to
+//           keep their real length whether the drop is 30 m or 700
+//   light   how fast the water is moving here, 0..1
+//   tint.x  the ribbon's width in metres, so the thread frequency is per-metre
+//   tint.y  the total drop, for working out how far down this pixel is
+//   tint.z  0 for the falling sheet, 1 for a spray puff
+//   tw      extra atomisation, for the parts already breaking up at the lip
+pub fn fallFrag(): string {
+    return "#version 330 core
+in vec2 vUv;
+in float vLight;
+in vec3 vTint;
+in float vTw;
+in float vDepth;
+in vec3 vWorld;
+
+out vec4 fragColor;
+
+uniform vec3 uEye;
+uniform vec2 uFogRange;
+"
+
+    + SKY_GLSL + "
+// A rainbow, in the direction a rainbow actually is.
+//
+// Not decoration and not placed by hand: sunlight refracting through spray comes
+// back at 42 degrees from the anti-solar point, which is why you only ever see one
+// with the sun behind you. `cos(42 degrees)` is 0.743, so the arc appears exactly
+// where the geometry says it should — fly around the fall and it swings round the
+// plume on its own.
+vec3 rainbow(vec3 rd) {
+    float a = dot(rd, -uSun);
+    float band = 1.0 - smoothstep(0.0, 0.030, abs(a - 0.743));
+    if (band <= 0.0) { return vec3(0.0); }
+    // Red outside, violet inside — the order refraction puts them in.
+    float t = clamp((a - 0.713) / 0.060, 0.0, 1.0);
+    vec3 c = vec3(
+        smoothstep(0.15, 0.62, t),
+        sin(clamp(t, 0.0, 1.0) * 3.14159),
+        smoothstep(0.85, 0.35, t));
+    // Only when the sun is up and reasonably strong.
+    return c * band * clamp(uSun.y * 3.0, 0.0, 1.0);
+}
+
+void main() {
+    vec3 rd = normalize(vWorld - uEye);
+    float across = vUv.x;
+    float fallen = vUv.y;
+    float width = max(vTint.x, 1.0);
+    float total = max(vTint.y, 1.0);
+    bool spray = vTint.z > 0.5;
+
+    // How far down the drop this pixel is, and how broken up the water is by the
+    // time it gets here. Water leaves a lip as a coherent sheet and is mostly air
+    // a couple of hundred metres later; that transition is the whole look.
+    float down = clamp(fallen / total, 0.0, 1.0);
+    float atomise = clamp(down * 1.45 + vTw * 0.6, 0.0, 1.0);
+
+    vec3 col = vec3(0.0);
+    float alpha = 0.0;
+
+    if (spray) {
+        // A puff of mist. `across`/`fallen` are -1..1 across the billboard here.
+        float r = length(vec2(across, fallen));
+        float soft = 1.0 - smoothstep(0.25, 1.0, r);
+        if (soft <= 0.001) { discard; }
+        // Turbulence, drifting upward, so the plume boils instead of sitting.
+        float n = skyFbm(vec2(vWorld.x * 0.09 + uTime * 0.10,
+                              vWorld.y * 0.09 - uTime * 0.55) * 2.0);
+        n = 0.45 + 0.55 * n;
+        alpha = soft * soft * n * 0.30 * vLight;
+        // Mist is lit by the whole sky, not by a direction — it is a cloud a few
+        // metres across. Backlit it glows, which is why the plume at the foot of a
+        // fall is brightest when you are looking toward the sun.
+        float back = pow(clamp(dot(rd, uSun), 0.0, 1.0), 2.0);
+        col = skyColor(vec3(0.0, 1.0, 0.0), false) * 1.30
+            + sunLight() * (0.55 + 1.60 * back);
+        col += rainbow(rd) * 1.9 * soft;
+    } else {
+        // Threads. Noise stretched hard along the fall and scrolling down it, in
+        // two bands at different rates so the sheet does not read as one texture
+        // sliding. The frequency is per-metre, so a wide fall gets more threads
+        // rather than wider ones.
+        float speed = 20.0 + vLight * 42.0;
+        vec2 p0 = vec2(across * width * 0.42, fallen * 0.16 - uTime * speed * 0.055);
+        vec2 p1 = vec2(across * width * 1.15, fallen * 0.44 - uTime * speed * 0.115);
+        float thread = skyFbm(p0) * 0.62 + skyFbm(p1) * 0.38;
+        // Coherent water is a few wide bands; aerated water is many fine ones.
+        float streak = mix(smoothstep(0.38, 0.72, thread),
+                           smoothstep(0.14, 0.96, thread), atomise);
+
+        // Feather the edges: a fall does not have a cut edge, it frays.
+        float mid = abs(across - 0.5) * 2.0;
+        float body = 1.0 - smoothstep(mix(0.80, 0.30, atomise), 1.0, mid);
+        if (body <= 0.001) { discard; }
+
+        // Glassy and see-through at the lip, dense and white at the bottom.
+        alpha = body * (0.42 + 0.58 * streak) * mix(0.62, 1.0, down);
+
+        vec3 glacial = vec3(0.30, 0.55, 0.66);
+        vec3 aerated = vec3(1.20, 1.30, 1.38);
+        col = mix(glacial, aerated, clamp(atomise * 0.85 + streak * 0.35, 0.0, 1.0));
+        col *= sunLight();
+
+        // Forward scatter. Aerated water is a cloud, and a cloud lit from behind
+        // glows — this is what stops a backlit fall reading as a grey stripe.
+        float back = pow(clamp(dot(rd, uSun), 0.0, 1.0), 2.5);
+        col += vec3(1.00, 0.95, 0.86) * back * 1.15 * atomise;
+
+        // Individual droplets catching the sun. Rare and very bright, which is
+        // what the bloom pass then turns into sparkle.
+        float spark = pow(skyFbm(vec2(across * width * 4.0,
+                                      fallen * 1.7 - uTime * speed * 0.42)), 11.0);
+        col += vec3(2.6, 2.5, 2.3) * spark * atomise * clamp(uSun.y * 2.5, 0.0, 1.0);
+
+        col += rainbow(rd) * atomise * 0.7;
+    }
+
+    // The same aerial perspective as everything else in the frame.
+    float f = clamp((vDepth - uFogRange.x) / (uFogRange.y - uFogRange.x), 0.0, 1.0);
+    col = mix(col, skyColor(rd, false), f);
+
+    // Premultiplied, to match the blend the pass is drawn with.
+    fragColor = vec4(col * alpha, alpha);
+}
+"
+
+}
+
 // Everything the GPU needs to draw a frame's geometry.
 //
 // One mesh per slot rather than one per draw: the streams are refilled and
@@ -155,6 +297,7 @@ void main() {
 // the driver hands back fresh storage instead of stalling on last frame's read.
 pub struct GpuWorld {
     shader: Shader,
+    fall: Shader,
     sky: Shader,
     quad: Mesh,
     meshNone: Mesh,
@@ -162,6 +305,7 @@ pub struct GpuWorld {
     meshSkin: Mesh,
     meshFacade: Mesh,
     meshOrtho: Mesh,
+    meshFall: Mesh,
     // A single white texel, bound for the untextured stream. Cheaper than a
     // second shader and it can never be sampled anyway — those vertices carry
     // tw = 0, so the mix() weight on the texel is zero.
@@ -175,10 +319,14 @@ pub struct GpuWorld {
 
 pub fn gpuWorldNew(ground: &Texture, skin: &Texture, facade: &Texture): Result<GpuWorld, string> {
     let shader = Shader.compile(WORLD_VERT, worldFrag())?
+    // The same vertex shader: the attributes are the same ten floats, they just
+    // mean different things downstream.
+    let fall = Shader.compile(WORLD_VERT, fallFrag())?
     let sky = Shader.compile(QUAD_VERT_LOCAL, skyboxFrag())?
     var white: Vec<f32> = Vec.filled(3, 1.0)
     return Result.Ok(GpuWorld {
         shader: shader,
+        fall: fall,
         sky: sky,
         quad: Mesh.fullscreenQuad(),
         meshNone: worldMesh(),
@@ -186,6 +334,7 @@ pub fn gpuWorldNew(ground: &Texture, skin: &Texture, facade: &Texture): Result<G
         meshSkin: worldMesh(),
         meshFacade: worldMesh(),
         meshOrtho: worldMesh(),
+        meshFall: worldMesh(),
         white: Texture2D.rgb32f(1, 1, white, false),
         ground: uploadTexture(ground),
         skin: uploadTexture(skin),
@@ -382,6 +531,27 @@ pub fn drawStreams(g: &mut GpuWorld, s: &mut Scene, v: &View, w: f64, h: f64, ti
     drawSlot(g, s, SLOT_FACADE)
     drawSlot(g, s, SLOT_ORTHO)
     drawSlot(g, s, SLOT_SKIN)
+
+    // Water last, and translucent.
+    //
+    // Depth TEST on so a cliff in front of the fall still hides it; depth WRITE
+    // off so the sheet does not occlude the spray drifting in front of it, and so
+    // two layers of the same plume both contribute. That is the standard
+    // arrangement for transparency and the reason it has to come after every
+    // opaque draw rather than being just another slot in the list.
+    if s.streams[SLOT_FALL].len > 0 {
+        Gpu.depthWrite(false)
+        Gpu.blendPremultiplied()
+        g.fall.bind()
+        g.fall.uniformMat4("uViewProj", m)
+        g.fall.uniform3F("uEye", v.eye.x, v.eye.y, v.eye.z)
+        g.fall.uniform2F("uFogRange", s.fogStart, s.fogEnd)
+        skyUniforms(g.fall, s, time)
+        g.meshFall.upload(s.streams[SLOT_FALL])
+        g.meshFall.draw()
+        Gpu.blendOff()
+        Gpu.depthWrite(true)
+    }
 }
 
 fn drawSlot(g: &mut GpuWorld, s: &mut Scene, slot: i64) {
@@ -451,6 +621,7 @@ pub fn gpuWorldFree(g: GpuWorld) {
         }
     }
     own.shader.free()
+    own.fall.free()
     own.sky.free()
     own.quad.free()
     own.meshNone.free()
@@ -458,6 +629,7 @@ pub fn gpuWorldFree(g: GpuWorld) {
     own.meshSkin.free()
     own.meshFacade.free()
     own.meshOrtho.free()
+    own.meshFall.free()
     own.white.free()
     own.ground.free()
     own.skin.free()

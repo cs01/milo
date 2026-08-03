@@ -17,7 +17,7 @@ from "std/math" import {
     Math
 }
 from "./texture" import {
-    SLOT_COUNT, SLOT_NONE, Texture, Vtx, vtxC
+    SLOT_COUNT, SLOT_FALL, SLOT_NONE, Texture, Vtx, vtxC
 }
 
 pub struct Vec3 {
@@ -366,6 +366,22 @@ pub fn triangleV(s: &mut Scene, view: &View, t: &Texture, wa: &Vtx, wb: &Vtx, wd
     push(s.streams[slot], wa, tr, tg, tb, wa.tw)
     push(s.streams[slot], wb, tr, tg, tb, wb.tw)
     push(s.streams[slot], wd, tr, tg, tb, wd.tw)
+    s.tris = s.tris + 1
+}
+
+// A triangle of falling water.
+//
+// Same ten floats as everything else, but `gpuworld.fallFrag` reads them as a
+// water parameterisation rather than as albedo and light — see the table on that
+// function. Recorded into its own stream because it is drawn translucent, after
+// all the opaque geometry, with a shader of its own.
+pub fn triangleF(s: &mut Scene, view: &View, wa: &Vtx, wb: &Vtx, wd: &Vtx, width: f64, total: f64, spray: f64) {
+    if behind(view, wa, wb, wd) {
+        return
+    }
+    push(s.streams[SLOT_FALL], wa, width, total, spray, wa.tw)
+    push(s.streams[SLOT_FALL], wb, width, total, spray, wb.tw)
+    push(s.streams[SLOT_FALL], wd, width, total, spray, wd.tw)
     s.tris = s.tris + 1
 }
 

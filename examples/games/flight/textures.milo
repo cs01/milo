@@ -5,8 +5,8 @@
 from "std/math" import {
     Math
 }
-from "./raster" import {
-    Texture, texNew, texSet
+from "./texture" import {
+    SLOT_FACADE, SLOT_GROUND, SLOT_SKIN, Texture, texNew, texSet
 }
 
 pub let TEX_SIZE: i64 = 128
@@ -69,6 +69,7 @@ fn fbm(u: f64, v: f64, seed: f64): f64 {
 // One texture serves every region for exactly that reason.
 pub fn groundTexture(): Texture {
     var t = texNew(TEX_SIZE, TEX_SHIFT)
+    t.slot = SLOT_GROUND
     for y in 0..TEX_SIZE {
         for x in 0..TEX_SIZE {
             let u = (x as f64) / (TEX_SIZE as f64)
@@ -96,6 +97,7 @@ pub fn groundTexture(): Texture {
 // a few rivet rows. Laid out in UV so the whole airframe indexes into one sheet.
 pub fn planeTexture(): Texture {
     var t = texNew(TEX_SIZE, TEX_SHIFT)
+    t.slot = SLOT_SKIN
     for y in 0..TEX_SIZE {
         for x in 0..TEX_SIZE {
             var r = 0.86
@@ -140,6 +142,7 @@ pub fn planeTexture(): Texture {
 // normalised UVs would stretch one window over sixty floors.
 pub fn facadeTexture(): Texture {
     var t = texNew(TEX_SIZE, TEX_SHIFT)
+    t.slot = SLOT_FACADE
     // 8 storeys and 8 window bays across the tile, so the tile repeats on a
     // whole storey and the bands cannot drift out of alignment when it wraps.
     let cells = 8

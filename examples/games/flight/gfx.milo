@@ -1,131 +1,73 @@
-// Software HDR renderer for the neon shooter.
+// The 2D overlay layer: HUD, checklist, contrails, sparks, birds, menus.
 //
-// Everything is drawn additively into a linear-light float buffer, then
-// bright-passed, blurred at quarter resolution and composited back with an
-// ACES-style tone curve. That is what makes overlapping neon strokes bloom into
-// each other instead of clipping to flat white.
+// Everything here draws into a linear-light float buffer at a FIXED resolution,
+// independent of the 3D one. That independence is the point — the scene renders
+// at the drawable size, or twice it under `--ss 2`, and none of that changes how
+// much work the overlay is. It used to be the same buffer the whole frame was
+// rasterised into, so every extra pixel of detail cost 2D time as well.
+//
+// The layer is composited over the finished scene as
+//
+//     result = overlay + scene * (1 - cov)
+//
+// which is premultiplied alpha, and covers all three kinds of primitive here
+// with one blend:
+//
+//   - additive (spot, line, text, fillRect): write colour, leave cov at 0, and
+//     the scene shows through underneath. This is most of the file — glow,
+//     sparks and HUD strokes all want to add light rather than replace it.
+//   - darkening (darkPix, shadeRect): write cov, leave colour at 0, and the
+//     result is scene * (1 - cov). A card background behind the checklist and a
+//     bird silhouetted against a bright sky are the same operation.
+//   - opaque: both, which nothing currently needs but which falls out for free.
 //
 // No GPU, no shaders — plain loops over Vec<f32>.
 
 from "std/math" import {
     Math
 }
-from "std/runtime" import {
-    Promise
-}
 from "./font" import {
     fontTable
-}
-from "./raster" import {
-    bandsFor
 }
 
 pub struct Canvas {
     w: i64,
     h: i64,
     hdr: Vec<f32>, // 3 floats per pixel, linear light, unbounded above 1.0
-    bw: i64,
-    bh: i64,
-    b0: Vec<f32>, // bright-pass / ping
-    b1: Vec<f32>, // pong
-    fb: Vec<u32>, // ABGR8888 output handed to SDL
+    // How much of the scene behind this pixel the overlay hides, 0..1. Only the
+    // darkening primitives write it; everything else adds light and leaves the
+    // scene showing through. See the composite formula at the top of the file.
+    cov: Vec<f32>,
     font: Vec<i64>,
-    // Precomputed so the composite pass does no float coordinate math and no
-    // pow() per channel — those two alone were 31 of 32 ms/frame at 720p.
-    tonelut: Vec<u32>,
-    ux0: Vec<i64>, // bloom bilinear: left source column per output x
-    utx: Vec<f32>, //                 horizontal lerp weight
-    uy0: Vec<i64>,
-    uty: Vec<f32>,
-    bands: i64, // horizontal bands the composite pass fans out over
-    // Pixels the 2D overlays claimed, and whether claiming is currently on.
-    //
-    // The GPU ocean (gpupost) replaces any pixel where the sea is nearer than the
-    // depth buffer says the world is — but the depth buffer only knows about
-    // z-buffered geometry. Contrails, sparks, the HUD and the checklist are drawn
-    // straight into the canvas afterwards and leave no depth behind, so without
-    // this the sea would be composited straight over the top of them.
-    //
-    // `locking` is switched on by render3d at the exact point the frame stops
-    // being 3D, which is why the sky and the terrain — drawn through these same
-    // primitives — do not claim anything.
-    lock: Vec<f32>,
-    locking: bool,
 }
 
 pub fn canvasNew(w: i64, h: i64): Canvas {
-    let bw = w / 4
-    let bh = h / 4
-    var lut: Vec<u32> = Vec.filled(TONE_STEPS + 1, 0)
-    for i in 0..TONE_STEPS + 1 {
-        lut[i] = encodeSlow((i as f64) / 256.0)
-    }
-    var ux0: Vec<i64> = Vec.filled(w, 0)
-    var utx: Vec<f32> = Vec.filled(w, 0.0)
-    for x in 0..w {
-        let fx = ((x as f64) + 0.5) * 0.25 - 0.5
-        var i0 = Math.floor(fx) as i64
-        let t = fx - (i0 as f64)
-        if i0 < 0 {
-            i0 = 0
-        }
-        if i0 > bw - 2 {
-            i0 = bw - 2
-        }
-        ux0[x] = i0
-        utx[x] = (t as f32)
-    }
-    var uy0: Vec<i64> = Vec.filled(h, 0)
-    var uty: Vec<f32> = Vec.filled(h, 0.0)
-    for y in 0..h {
-        let fy = ((y as f64) + 0.5) * 0.25 - 0.5
-        var i0 = Math.floor(fy) as i64
-        let t = fy - (i0 as f64)
-        if i0 < 0 {
-            i0 = 0
-        }
-        if i0 > bh - 2 {
-            i0 = bh - 2
-        }
-        uy0[y] = i0
-        uty[y] = (t as f32)
-    }
     return Canvas {
         w: w,
         h: h,
         hdr: Vec.filled(w * h * 3, 0.0),
-        bw: bw,
-        bh: bh,
-        b0: Vec.filled(bw * bh * 3, 0.0),
-        b1: Vec.filled(bw * bh * 3, 0.0),
-        fb: Vec.filled(w * h, 0),
+        cov: Vec.filled(w * h, 0.0),
         font: fontTable(),
-        tonelut: lut,
-        ux0: ux0,
-        utx: utx,
-        uy0: uy0,
-        uty: uty,
-        bands: bandsFor(h),
-        lock: Vec.filled(w * h, 0.0),
-        locking: false,
     }
 }
 
-// Claim a pixel for the 2D overlay layer, so the GPU ocean leaves it alone.
-// Inlined by hand into the hot primitives below rather than called from them:
-// `spot` and `fillRect` write whole rectangles and the bounds check is already
-// done there.
-fn claim(c: &mut Canvas, x: i64, y: i64) {
-    if c.locking {
-        c.lock[y * c.w + x] = 1.0
+// Hide `k` of the scene behind this pixel — 0 leaves it untouched, 1 blacks it
+// out. Kept as a max rather than a sum so two overlapping cards do not stack into
+// something darker than either of them asked for.
+fn hide(c: &mut Canvas, x: i64, y: i64, k: f64) {
+    let i = y * c.w + x
+    if (c.cov[i] as f64) < k {
+        c.cov[i] = k as f32
     }
 }
 
-pub fn canvasClearLock(c: &mut Canvas) {
-    c.locking = false
+pub fn canvasClear(c: &mut Canvas) {
     let n = c.w * c.h
     for i in 0..n {
-        c.lock[i] = 0.0
+        c.hdr[i * 3] = 0.0
+        c.hdr[i * 3 + 1] = 0.0
+        c.hdr[i * 3 + 2] = 0.0
+        c.cov[i] = 0.0
     }
 }
 
@@ -135,17 +77,20 @@ pub fn addPix(c: &mut Canvas, x: i64, y: i64, r: f64, g: f64, b: f64) {
     if x < 0 || y < 0 || x >= c.w || y >= c.h {
         return
     }
-    claim(c, x, y)
     let i = (y * c.w + x) * 3
     c.hdr[i] = c.hdr[i] + (r as f32)
     c.hdr[i + 1] = c.hdr[i + 1] + (g as f32)
     c.hdr[i + 2] = c.hdr[i + 2] + (b as f32)
 }
 
-// Darken a pixel toward black by `k` (0 = untouched, 1 = black), with coverage
-// for antialiasing. Everything else in this file draws ADDITIVELY, which suits
-// glow, sparks and HUD strokes — but an additive primitive can only brighten,
-// so it cannot draw a dark silhouette against a bright sky. Birds need this.
+// Darken toward black by `k` (0 = untouched, 1 = black), with coverage for
+// antialiasing. Everything else in this file draws ADDITIVELY, which suits glow,
+// sparks and HUD strokes — but an additive primitive can only brighten, so it
+// cannot draw a dark silhouette against a bright sky. Birds need this.
+//
+// It writes coverage rather than multiplying pixels, because the thing being
+// darkened is the SCENE and the scene is on the GPU. The composite does the
+// multiply: `scene * (1 - cov)`.
 pub fn darkPix(c: &mut Canvas, x: i64, y: i64, k: f64) {
     if x < 0 || y < 0 || x >= c.w || y >= c.h {
         return
@@ -153,15 +98,7 @@ pub fn darkPix(c: &mut Canvas, x: i64, y: i64, k: f64) {
     if k <= 0.0 {
         return
     }
-    var f = 1.0 - k
-    if f < 0.0 {
-        f = 0.0
-    }
-    claim(c, x, y)
-    let i = (y * c.w + x) * 3
-    c.hdr[i] = c.hdr[i] * (f as f32)
-    c.hdr[i + 1] = c.hdr[i + 1] * (f as f32)
-    c.hdr[i + 2] = c.hdr[i + 2] * (f as f32)
+    hide(c, x, y, Math.minF64(k, 1.0))
 }
 
 // A dark line, for silhouettes. Same DDA walk as `line`, darkening instead of
@@ -227,7 +164,6 @@ pub fn spot(c: &mut Canvas, cx: f64, cy: f64, rad: f64, r: f64, g: f64, b: f64) 
             let t = 1.0 - (dx * dx + dy * dy) * inv
             if t > 0.0 {
                 let f = t * t
-                claim(c, x, y)
                 let i = (y * c.w + x) * 3
                 c.hdr[i] = c.hdr[i] + ((r * f) as f32)
                 c.hdr[i + 1] = c.hdr[i + 1] + ((g * f) as f32)
@@ -316,22 +252,16 @@ pub fn line(c: &mut Canvas, x0i: f64, y0i: f64, x1i: f64, y1i: f64, r: f64, g: f
 // Set every pixel, rather than adding to what was there. fillRect and the sprite
 // drawers are additive because the canvas is HDR and everything in flight is a
 // light; a menu is the one screen that needs a floor to draw on.
+// Full coverage as well as colour: a menu is opaque, and the scene behind it —
+// which is still being rendered, because the simulation keeps running — has to
+// be hidden rather than added to.
 pub fn canvasFill(c: &mut Canvas, r: f64, g: f64, b: f64) {
     let n = c.w * c.h
     for i in 0..n {
         c.hdr[i * 3] = r as f32
         c.hdr[i * 3 + 1] = g as f32
         c.hdr[i * 3 + 2] = b as f32
-    }
-}
-
-// Zero the HDR buffer. The CPU composite does this on the way past — it is
-// already touching every pixel — so this exists for the GL path, where the
-// canvas is uploaded whole and nothing on the host reads it back.
-pub fn canvasClearHdr(c: &mut Canvas) {
-    let n = c.w * c.h * 3
-    for i in 0..n {
-        c.hdr[i] = 0.0
+        c.cov[i] = 1.0
     }
 }
 
@@ -369,11 +299,7 @@ pub fn shadeRect(c: &mut Canvas, x0: f64, y0: f64, x1: f64, y1: f64, k: f64) {
     while y < iy1 {
         var x = ix0
         while x < ix1 {
-            claim(c, x, y)
-            let i = (y * c.w + x) * 3
-            c.hdr[i] = c.hdr[i] * (k as f32)
-            c.hdr[i + 1] = c.hdr[i + 1] * (k as f32)
-            c.hdr[i + 2] = c.hdr[i + 2] * (k as f32)
+            hide(c, x, y, 1.0 - k)
             x = x + 1
         }
         y = y + 1
@@ -419,292 +345,6 @@ pub fn textCentered(c: &mut Canvas, cx: i64, y: i64, s: &string, scale: i64, r: 
     text(c, cx - textWidth(s, scale) / 2, y, s, scale, r, g, b)
 }
 
-// ── bloom + tone mapping ──────────────────────────────────────────────────────
-
-fn brightPass(c: &mut Canvas, threshold: f64) {
-    let bw = c.bw
-    let bh = c.bh
-    for by in 0..bh {
-        for bx in 0..bw {
-            var sr = 0.0
-            var sg = 0.0
-            var sb = 0.0
-            let sy0 = by * 4
-            let sx0 = bx * 4
-            for dy in 0..4 {
-                let rowBase = ((sy0 + dy) * c.w + sx0) * 3
-                for dx in 0..4 {
-                    let i = rowBase + dx * 3
-                    sr = sr + (c.hdr[i] as f64)
-                    sg = sg + (c.hdr[i + 1] as f64)
-                    sb = sb + (c.hdr[i + 2] as f64)
-                }
-            }
-            sr = sr * 0.0625
-            sg = sg * 0.0625
-            sb = sb * 0.0625
-            let lum = sr * 0.299 + sg * 0.587 + sb * 0.114
-            var keep = 0.0
-            if lum > threshold {
-                keep = (lum - threshold) / lum
-            }
-            let o = (by * bw + bx) * 3
-            c.b0[o] = ((sr * keep) as f32)
-            c.b0[o + 1] = ((sg * keep) as f32)
-            c.b0[o + 2] = ((sb * keep) as f32)
-        }
-    }
-}
-
-// Separable [1,4,6,4,1]/16 blur with a tap stride, so a couple of passes at
-// different strides give a wide halo for very few samples.
-fn blurPass(c: &mut Canvas, stride: i64) {
-    let bw = c.bw
-    let bh = c.bh
-    // horizontal: b0 -> b1
-    for y in 0..bh {
-        for x in 0..bw {
-            var sr = 0.0
-            var sg = 0.0
-            var sb = 0.0
-            for k in 0..5 {
-                var sx = x + (k - 2) * stride
-                if sx < 0 {
-                    sx = 0
-                }
-                if sx >= bw {
-                    sx = bw - 1
-                }
-                let wgt = KERNEL[k]
-                let i = (y * bw + sx) * 3
-                sr = sr + (c.b0[i] as f64) * wgt
-                sg = sg + (c.b0[i + 1] as f64) * wgt
-                sb = sb + (c.b0[i + 2] as f64) * wgt
-            }
-            let o = (y * bw + x) * 3
-            c.b1[o] = (sr as f32)
-            c.b1[o + 1] = (sg as f32)
-            c.b1[o + 2] = (sb as f32)
-        }
-    }
-    // vertical: b1 -> b0
-    for y in 0..bh {
-        for x in 0..bw {
-            var sr = 0.0
-            var sg = 0.0
-            var sb = 0.0
-            for k in 0..5 {
-                var sy = y + (k - 2) * stride
-                if sy < 0 {
-                    sy = 0
-                }
-                if sy >= bh {
-                    sy = bh - 1
-                }
-                let wgt = KERNEL[k]
-                let i = (sy * bw + x) * 3
-                sr = sr + (c.b1[i] as f64) * wgt
-                sg = sg + (c.b1[i + 1] as f64) * wgt
-                sb = sb + (c.b1[i + 2] as f64) * wgt
-            }
-            let o = (y * bw + x) * 3
-            c.b0[o] = (sr as f32)
-            c.b0[o + 1] = (sg as f32)
-            c.b0[o + 2] = (sb as f32)
-        }
-    }
-}
-
-pub let KERNEL: [f64; 5] = [0.0625, 0.25, 0.375, 0.25, 0.0625]
-
-// Reinhard, not ACES. The filmic curve lifts the low end so hard that a stroke at
-// 0.5 already reads as 80% white, which flattens every neon colour into paper.
-// x/(1+x) keeps the shadows dark and lets the colour survive up to the core.
-fn tone(x: f64): f64 {
-    if x <= 0.0 {
-        return 0.0
-    }
-    return x / (1.0 + x)
-}
-
-pub let TONE_STEPS: i64 = 2048 // covers linear 0..8, past which the curve is saturated
-
-fn encodeSlow(v: f64): u32 {
-    // gamma 1/2.2 into 8-bit
-    let s = Math.pow(tone(v), 0.4545454545)
-    var n = (s * 255.0 + 0.5) as i64
-    if n < 0 {
-        n = 0
-    }
-    if n > 255 {
-        n = 255
-    }
-    return n as u32
-}
-
-// Bloom, composite, tone-map and pack into the ABGR framebuffer. Also zeroes the
-// HDR buffer as it goes, so the next frame needs no separate clear pass.
-pub fn present(c: &mut Canvas, bloomGain: f64, exposure: f64) {
-    // Only things brighter than white bloom: the sun, the ring hoops, the engine
-    // nozzles, the sparks — all of which are authored at 1.5 and up.
-    //
-    // This was 0.16, chosen so a 1px antialiased stroke (which averages to ~1/16
-    // through the 4x downsample) would still halo. That holds for a dark scene
-    // with a few bright lines on it. It does not survive an aerial photograph
-    // filling the frame: mid-grey in linear light is about 0.21, so the entire
-    // ground sat above the threshold and the whole picture bloomed into haze.
-    // Thin overlay strokes lose their halo; the ground stops being milk.
-    brightPass(c, 0.90)
-    blurPass(c, 1)
-    blurPass(c, 2)
-    blurPass(c, 4)
-    blurPass(c, 8) // without the widest pass the halo has a visible square edge
-
-    // The composite is the expensive half — a million pixels against 57k for the
-    // whole bloom chain above — and it is the only pass with no cross-row reads
-    // on the buffer it writes, so it parallelises with a single fan-out. The
-    // bloom chain would need a barrier between each of its nine passes and is
-    // left alone: nine thread spawns cost more than the passes do.
-    compositeAll(c, bloomGain, exposure)
-}
-
-// Per-band arguments for the composite pass. Same shape and same rules as
-// raster.Job — every field a scalar, the buffers as base addresses, and each
-// band owning a disjoint half-open range of rows. See the SAFETY note on
-// raster.bandRaster; the argument is identical.
-pub struct PresentJob {
-    hdr: i64, // *f32, read then zeroed — this band's rows only
-    b0: i64, // *f32, read-only (the blurred bloom, quarter res)
-    fb: i64, // *u32, written — this band's rows only
-    ux0: i64, // *i64
-    utx: i64, // *f32
-    uy0: i64, // *i64
-    uty: i64, // *f32
-    tonelut: i64, // *u32
-    w: i64,
-    bw: i64,
-    y0: i64,
-    y1: i64,
-    gain: f32,
-    expo: f32,
-    maxIdx: i64,
-}
-
-fn compositeAll(c: &mut Canvas, bloomGain: f64, exposure: f64) {
-    var job = PresentJob {
-        hdr: c.hdr.ptr() as i64,
-        b0: c.b0.ptr() as i64,
-        fb: c.fb.ptr() as i64,
-        ux0: c.ux0.ptr() as i64,
-        utx: c.utx.ptr() as i64,
-        uy0: c.uy0.ptr() as i64,
-        uty: c.uty.ptr() as i64,
-        tonelut: c.tonelut.ptr() as i64,
-        w: c.w,
-        bw: c.bw,
-        y0: 0,
-        y1: c.h,
-        gain: (bloomGain * exposure) as f32,
-        expo: (exposure * 256.0) as f32,
-        maxIdx: TONE_STEPS,
-    }
-    if c.bands <= 1 {
-        compositeBand(job)
-        return
-    }
-    var ps: Vec<Promise<i64>> = Vec.new()
-    for k in 0..c.bands {
-        var j = job
-        j.y0 = k * c.h / c.bands
-        j.y1 = (k + 1) * c.h / c.bands
-        ps.push(Promise<i64>.blocking(move(): i64 => {
-            return compositeBand(j)
-        }
-        ))
-    }
-    let _ = Promise.all(ps).await()!
-}
-
-// Composite, tone-map and pack rows [y0,y1) into the ABGR framebuffer. Also
-// zeroes those rows of the HDR buffer, so the next frame needs no clear pass.
-pub fn compositeBand(job: PresentJob): i64 {
-    unsafe {
-        let hdr = job.hdr as *f32
-        let b0 = job.b0 as *f32
-        let fb = job.fb as *u32
-        let ux0 = job.ux0 as *i64
-        let utx = job.utx as *f32
-        let uy0 = job.uy0 as *i64
-        let uty = job.uty as *f32
-        let tonelut = job.tonelut as *u32
-        let bw = job.bw
-        let gain = job.gain
-        let expo = job.expo
-        let maxIdx = job.maxIdx
-        var y = job.y0
-        while y < job.y1 {
-            let by0 = uy0[y]
-            let ty = uty[y]
-            let row0 = by0 * bw * 3
-            let row1 = (by0 + 1) * bw * 3
-            var s = y * job.w * 3
-            var o = y * job.w
-            var x = 0
-            while x < job.w {
-                let bx = ux0[x] * 3
-                let tx = utx[x]
-                let w00: f32 = (1.0 - tx) * (1.0 - ty)
-                let w01: f32 = tx * (1.0 - ty)
-                let w10: f32 = (1.0 - tx) * ty
-                let w11: f32 = tx * ty
-                let i00 = row0 + bx
-                let i10 = row1 + bx
-
-                let v0 = (hdr[s] + (b0[i00] * w00 + b0[i00 + 3] * w01 + b0[i10] * w10 + b0[i10 + 3] * w11) * gain) * expo
-                let v1 = (hdr[s + 1] + (b0[i00 + 1] * w00 + b0[i00 + 4] * w01 + b0[i10 + 1] * w10 + b0[i10 + 4] * w11) * gain) * expo
-                let v2 = (hdr[s + 2] + (b0[i00 + 2] * w00 + b0[i00 + 5] * w01 + b0[i10 + 2] * w10 + b0[i10 + 5] * w11) * gain) * expo
-                hdr[s] = 0.0
-                hdr[s + 1] = 0.0
-                hdr[s + 2] = 0.0
-
-                var n0 = v0 as i64
-                var n1 = v1 as i64
-                var n2 = v2 as i64
-                if n0 < 0 {
-                    n0 = 0
-                }
-                if n1 < 0 {
-                    n1 = 0
-                }
-                if n2 < 0 {
-                    n2 = 0
-                }
-                if n0 > maxIdx {
-                    n0 = maxIdx
-                }
-                if n1 > maxIdx {
-                    n1 = maxIdx
-                }
-                if n2 > maxIdx {
-                    n2 = maxIdx
-                }
-                fb[o] = 0xFF000000 | (tonelut[n2] << 16) | (tonelut[n1] << 8) | tonelut[n0]
-                s = s + 3
-                o = o + 1
-                x = x + 1
-            }
-            y = y + 1
-        }
-    }
-    return job.y1 - job.y0
-}
-
-// ── filled shapes ─────────────────────────────────────────────────────────────
-//
-// The wireframe look of the vector shooter left everything reading as an outline.
-// Bricks and the paddle want mass, so these draw solid with a vertical gradient
-// and a bright top edge — cheap, and enough to make a rectangle look lit.
-
 pub fn fillRect(c: &mut Canvas, x0: f64, y0: f64, x1: f64, y1: f64, r: f64, g: f64, b: f64) {
     var ix0 = x0 as i64
     var iy0 = y0 as i64
@@ -726,7 +366,6 @@ pub fn fillRect(c: &mut Canvas, x0: f64, y0: f64, x1: f64, y1: f64, r: f64, g: f
     while y < iy1 {
         var x = ix0
         while x < ix1 {
-            claim(c, x, y)
             let i = (y * c.w + x) * 3
             c.hdr[i] = c.hdr[i] + (r as f32)
             c.hdr[i + 1] = c.hdr[i + 1] + (g as f32)

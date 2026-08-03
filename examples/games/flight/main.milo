@@ -6,23 +6,26 @@
 // San Francisco is baked into the binary (see `usage` below), so the game ships
 // as one file with no asset path to get wrong.
 //
-// Real 3D: a perspective camera, near-plane clipping and a depth-buffered
-// triangle rasteriser, all on the CPU in safe Milo (see gfx3d.milo). The bloom
-// and tone map that turn that HDR canvas into a picture run on the GPU instead
-// (gpupost.milo, over the gl package); `--cpu` keeps them on the CPU, and display.milo
-// is the seam. Which one is in use changes nothing above it.
+// Real 3D, all of it on the GPU: gfx3d.milo records world-space triangles into
+// vertex streams, gpuworld.milo hands them to the driver, and gpupost.milo does
+// the sea, the 2D overlay, the bloom and the tone map. The sky, the distance haze
+// and the sea reflection all call one `skyColor` (sky.milo), which is what makes
+// them agree.
+//
+// It needs an OpenGL 3.3 core context and there is no software fallback. The one
+// that used to exist is now benchmarks/softraster — a benchmark, not a renderer.
 //
 // You cannot crash. The ground pushes you up if you dive into it.
 
-from "./sdl" import {
-    Input,
-    SDL_Init, SDL_ShowCursor, SDL_GetTicks, SDL_SetWindowFullscreen,
-    SDL_WINDOW_FULLSCREEN_DESKTOP, SDL_Quit,
-    SDL_INIT_VIDEO, SDL_INIT_AUDIO,
-    inputNew, pollInput
+from "sdl" import {
+    SDL_Init, SDL_Quit, SDL_GetTicks, SDL_SetWindowFullscreen, SDL_ShowCursor,
+    SDL_INIT_AUDIO, SDL_INIT_VIDEO, SDL_WINDOW_FULLSCREEN_DESKTOP
+}
+from "./input" import {
+    Input, inputNew, pollInput
 }
 from "./display" import {
-    Screen, screenClose, screenOpen, screenPresent
+    Screen, screenBegin, screenClose, screenFullscreen, screenOpen, screenPresent
 }
 from "./gfx" import {
     Canvas, canvasNew, canvasFill, text, textCentered, fillRect, thickLine
@@ -44,7 +47,10 @@ from "./city" import {
     City, cityLoad, cityParse, cityEmpty, cityAttachOrtho, cityHasSea, demHeights
 }
 from "./gpupost" import {
-    CoverGrid, seaViewOf
+    CoverGrid
+}
+from "./gpuworld" import {
+    clearOrtho, drawSkyPass, drawStreams, gpuWorldFree, gpuWorldNew, setOrtho
 }
 from "std/math" import {
     Math
@@ -290,13 +296,16 @@ pub fn main(): i32 {
         print("SDL_Init failed")
         return 1
     }
-    // The canvas comes first now: the GL path uploads it as a texture, so the
-    // window cannot be opened until the buffer it will be showing exists.
+    // The 2D overlay's own canvas, at its own fixed resolution. The 3D scene
+    // renders at the window's, which is a different and much larger number — that
+    // separation is why a bigger window costs GPU time and no CPU time at all.
     var c = canvasNew(W, H)
-    // The scene comes with it: the GPU sea reads the rasteriser's depth buffer,
-    // so that has to exist before the window that will be showing it.
     var s = sceneNew(W, H)
-    var scr = match screenOpen("FLYBY — written in Milo", W, H, !o.getBool("cpu"), c.hdr, s.zbuf, c.lock, o.getBool("fullscreen"), o.getBool("maximized")) {
+    var ss = 1
+    if o.getBool("ss") {
+        ss = 2
+    }
+    var scr = match screenOpen("FLYBY — written in Milo", W, H, W, H, ss, o.getBool("fullscreen"), o.getBool("maximized")) {
         Result.Ok(opened) => opened
         Result.Err(e) => {
             print("SDL setup failed: " + e)
@@ -304,6 +313,22 @@ pub fn main(): i32 {
         }
     }
     let _ = SDL_ShowCursor(0)
+    // The procedural textures and the GPU renderer come up before the start
+    // screen, because the start screen draws a sky and the sky is a GPU pass.
+    let groundTex = groundTexture()
+    let skinTex = planeTexture()
+    let facadeTex = facadeTexture()
+    var gw = match gpuWorldNew(groundTex, skinTex, facadeTex) {
+        Result.Ok(g) => g
+        Result.Err(e) => {
+            // No screenClose here: it consumes the Screen, and the checker then
+            // has to assume it is gone on the path that continues. SDL_Quit tears
+            // the context and the window down anyway, which is all this would do.
+            print("gpu: " + e)
+            SDL_Quit()
+            return 2
+        }
+    }
     var inp = inputNew(invert)
     var ev: [u8; 64] = [0; 64]
     // Ask before decoding anything. A place costs a beat to parse and drape, and
@@ -311,8 +336,9 @@ pub fn main(): i32 {
     // wrong order — `--place`, `--city` and `--procedural` all say the answer
     // already, so the screen only appears when nothing has.
     if placeIdx >= 0 && o.getString("place") == "" {
-        let pick = chooseRegion(scr, c, s, inp, ev, placeIdx)
+        let pick = chooseRegion(scr, gw, c, s, inp, ev, placeIdx)
         if pick < 0 {
+            gpuWorldFree(gw)
             screenClose(scr)
             SDL_Quit()
             return 0
@@ -332,9 +358,9 @@ pub fn main(): i32 {
         n: w.city.demN, x0: w.city.demX0, z0: w.city.demZ0, step: w.city.demStep, reach: w.city.reach
     }
     var coverDirty = true
-    let groundTex = groundTexture()
-    let skinTex = planeTexture()
-    let facadeTex = facadeTexture()
+    if w.city.orthoLoaded {
+        setOrtho(gw, w.city.ortho)
+    }
     var snd = soundNew()
     var full = o.getBool("fullscreen")
     var last = SDL_GetTicks()
@@ -359,11 +385,7 @@ pub fn main(): i32 {
         }
         if inp.fullscreen {
             full = !full
-            var flags: u32 = 0
-            if full {
-                flags = SDL_WINDOW_FULLSCREEN_DESKTOP
-            }
-            let _ = SDL_SetWindowFullscreen(scr.win, flags)
+            screenFullscreen(scr, full)
         }
         // Only in one-axis mode: with `--pro` these same keys are the bank axis
         // and stepping the world every time the player turned would be absurd.
@@ -384,6 +406,11 @@ pub fn main(): i32 {
                 n: w.city.demN, x0: w.city.demX0, z0: w.city.demZ0, step: w.city.demStep, reach: w.city.reach
             }
             coverDirty = true
+            if w.city.orthoLoaded {
+                setOrtho(gw, w.city.ortho)
+            } else {
+                clearOrtho(gw)
+            }
             w.nextName = placeTitle((placeIdx + 1) % PLACE_COUNT)
         } else if w.evPlaceDone {
             resetTour(w)
@@ -392,7 +419,12 @@ pub fn main(): i32 {
 
         worldUpdate(w, dt, inp.moveX, inp.moveY, inp.boost)
         let view = viewOf(w.cam, c.w, c.h)
+        // Bind the scene target and match it to the window before any geometry is
+        // recorded, because the render size is what the projection is built from.
+        let rs = screenBegin(scr)
         drawWorld(c, s, w, groundTex, skinTex, facadeTex, view)
+        drawSkyPass(gw, s, view, rs.w as f64, rs.h as f64, w.time)
+        drawStreams(gw, s, view, rs.w as f64, rs.h as f64, w.time)
 
         fpsAccum = fpsAccum + dt
         fpsFrames = fpsFrames + 1
@@ -430,11 +462,11 @@ pub fn main(): i32 {
             exposure = 1.0 + w.flash * 0.8
         }
         // The sea only exists where the DEM says it does, and its camera is the
-        // one the rasteriser just used.
-        let sv = seaViewOf(view, s, grid, cityHasSea(w.city), w.time)
-        screenPresent(scr, c, s, cover, coverDirty, sv, 0.35, exposure)
+        // one the geometry was just drawn with.
+        screenPresent(scr, c, view, s, grid, cover, coverDirty, cityHasSea(w.city), w.time, 0.35, exposure)
         coverDirty = false
     }
+    gpuWorldFree(gw)
     screenClose(scr)
     SDL_Quit()
     return 0

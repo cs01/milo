@@ -2,10 +2,17 @@
   "lockVersion": 1,
   "packages": {
     "gl": {
-      "url": "github.com/milo-language/gl",
-      "version": "v0.1.0",
-      "commit": "e908ea075a5ac150dee8c1aceeae4df8fbd30aec",
-      "hash": "sha256:6480910d4c61a5e15046a8f6d8da5a8fa612a43d811b3a232612910c4e8cec7c",
+      "url": "github.com/milo-language/milo-gl",
+      "version": "v0.1.3",
+      "commit": "341fe4654b5905538bc4ed0ce3111168ef953fff",
+      "hash": "sha256:be9aba4ad7f4be838867fe50f8c4d2a1ac3378b0978266cd38898a0241f8c504",
+      "deps": []
+    },
+    "sdl": {
+      "url": "github.com/milo-language/milo-sdl",
+      "version": "v0.3.1",
+      "commit": "b42758800563c6dde20ab55658db85145dce6211",
+      "hash": "sha256:5fbca9edb538e58663e9ac740fe960893f3fa28842eccf8d80ad01ddc923024b",
       "deps": []
     }
   }

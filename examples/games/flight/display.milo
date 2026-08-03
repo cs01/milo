@@ -1,86 +1,72 @@
-// FLYBY — the window, and the one place that knows how a finished frame reaches
-// it.
+// FLYBY — the window, the GL context, and the one place that knows how a finished
+// frame reaches the screen.
 //
-// There are two ways out of the renderer and the game should not care which is
-// in use: an SDL_Renderer with a streaming texture (the CPU bloom chain in
-// gfx.present packs an 8-bit framebuffer, SDL blits it), or a GL context (the
-// canvas goes up as a float texture and gpupost does the bloom and the tone map
-// in shaders). Both start from the same `Canvas.hdr` and are meant to land on
-// the same picture.
+// There used to be two ways out of the renderer and a seam here to hide which was
+// in use: an SDL_Renderer with a streaming texture for the software path, or a GL
+// context for the hardware one. The software path is gone — it lives on in
+// benchmarks/softraster, where it is a benchmark rather than a second renderer to
+// keep in step — so this file is one path, and the seam it existed to hide has
+// collapsed into `screenFrame`.
 //
-// A window cannot be both: SDL_CreateRenderer on a GL window takes the context
-// over. So the choice is made once, here, before the window exists, and
-// `screenPresent` is the only function either path is reachable through.
+// Losing the fallback is a real cost: a machine with no GL 3.3 core context now
+// gets an error at startup instead of a slower picture. It buys the sky, which
+// could not be built while every visual change had to land twice and look the
+// same both times.
 
 from "gl" import {
     Gpu
 }
+from "std/math" import {
+    Math
+}
 from "./gfx" import {
-    Canvas, canvasClearHdr, canvasClearLock, present
+    Canvas, canvasClear
 }
 from "./gfx3d" import {
-    Scene
+    Scene, View
 }
 from "./gpupost" import {
-    Post, SeaView, postDraw, postFree, postNew
+    CoverGrid, Post, postBeginWorld, postFinish, postFree, postNew, postResize
 }
-from "./sdl" import {
-    SDL_CreateRenderer, SDL_CreateTexture, SDL_CreateWindow, SDL_DestroyRenderer,
-    SDL_DestroyTexture, SDL_DestroyWindow, SDL_GL_CreateContext,
-    SDL_GL_DeleteContext, SDL_GL_GetDrawableSize, SDL_GL_SetAttribute,
-    SDL_GL_SetSwapInterval, SDL_GL_SwapWindow, SDL_GetError, SDL_MaximizeWindow,
-    SDL_RenderClear, SDL_RenderCopy, SDL_RenderPresent, SDL_RenderSetLogicalSize,
-    SDL_SetWindowFullscreen, SDL_UpdateTexture,
+from "sdl" import {
+    SDL_CreateWindow, SDL_DestroyWindow, SDL_GetError, SDL_MaximizeWindow,
+    SDL_SetWindowFullscreen,
+    SDL_WINDOWPOS_CENTERED, SDL_WINDOW_ALLOW_HIGHDPI,
+    SDL_WINDOW_FULLSCREEN_DESKTOP, SDL_WINDOW_RESIZABLE, SDL_WINDOW_SHOWN
+}
+from "sdl/glcontext" import {
+    SDL_GL_CreateContext, SDL_GL_DeleteContext, SDL_GL_GetDrawableSize,
+    SDL_GL_SetAttribute, SDL_GL_SetSwapInterval, SDL_GL_SwapWindow,
     SDL_GL_CONTEXT_MAJOR_VERSION, SDL_GL_CONTEXT_MINOR_VERSION,
     SDL_GL_CONTEXT_PROFILE_CORE, SDL_GL_CONTEXT_PROFILE_MASK,
-    SDL_GL_DOUBLEBUFFER, SDL_PIXELFORMAT_ABGR8888, SDL_RENDERER_ACCELERATED,
-    SDL_RENDERER_PRESENTVSYNC, SDL_TEXTUREACCESS_STREAMING,
-    SDL_WINDOWPOS_CENTERED, SDL_WINDOW_FULLSCREEN_DESKTOP, SDL_WINDOW_OPENGL,
-    SDL_WINDOW_RESIZABLE, SDL_WINDOW_SHOWN
+    SDL_GL_DEPTH_SIZE, SDL_GL_DOUBLEBUFFER, SDL_WINDOW_OPENGL
 }
+
+// A cap on the render target, not on the window.
+//
+// Supersampling multiplies the drawable size, and a maximised window on a Retina
+// display is already 5120 wide before any multiplier. Left uncapped, `--ss 2`
+// there asks for a 10240 x 5760 RGBA16F target — 470 MB for one attachment, twice
+// over, which is how a graphics setting becomes a driver crash.
+pub let MAX_RENDER_PX: i64 = 3840
 
 pub struct Screen {
     win: *u8,
-    ren: *u8, // 0 on the GL path
-    tex: *u8, // 0 on the GL path
-    ctx: *u8, // 0 on the CPU path
-    post: Option<Post>,
-    w: i64,
-    h: i64,
+    ctx: *u8,
+    post: Post,
+    // The last render size the targets were built for, so a window that is not
+    // being dragged does not reallocate anything.
+    rw: i64,
+    rh: i64,
+    ss: i64, // supersample factor: 1 or 2
 }
 
-// Open the window. `wantGpu` is a request, not a promise: a machine with no 3.3
-// core context, or a driver that will not compile the post shaders, silently
-// gets the CPU path and a line on the terminal saying so. That is the right
-// failure — the game still runs, and the reason is written down.
-pub fn screenOpen(title: &string, w: i64, h: i64, wantGpu: bool, hdr: &Vec<f32>, depth: &Vec<f32>, lock: &Vec<f32>, fullscreen: bool, maximized: bool): Result<Screen, string> {
-    var s = Screen {
-        win: 0 as *u8, ren: 0 as *u8, tex: 0 as *u8, ctx: 0 as *u8, post: Option.None, w: w, h: h
-    }
-    if wantGpu {
-        match openGl(title, w, h, hdr, depth, lock) {
-            Result.Ok(gl) => {
-                s = gl
-            }
-            Result.Err(e) => {
-                print("gpu: " + e + " — falling back to the CPU renderer")
-            }
-        }
-    }
-    if (s.win as i64) == 0 {
-        s = openRenderer(title, w, h)?
-    }
-    unsafe {
-        if fullscreen {
-            let _ = SDL_SetWindowFullscreen(s.win, SDL_WINDOW_FULLSCREEN_DESKTOP)
-        } else if maximized {
-            SDL_MaximizeWindow(s.win)
-        }
-    }
-    return Result.Ok(s)
-}
-
-fn openGl(title: &string, w: i64, h: i64, hdr: &Vec<f32>, depth: &Vec<f32>, lock: &Vec<f32>): Result<Screen, string> {
+// Open the window and the context.
+//
+// `ow`/`oh` are the 2D overlay's fixed resolution, which is NOT the render
+// resolution — the HUD is laid out in its own space and stays the same size
+// whatever the window does.
+pub fn screenOpen(title: &string, w: i64, h: i64, ow: i64, oh: i64, ss: i64, fullscreen: bool, maximized: bool): Result<Screen, string> {
     unsafe {
         // Before the window, not after: SDL reads these when it builds the pixel
         // format, and setting them afterwards is accepted and ignored.
@@ -88,22 +74,36 @@ fn openGl(title: &string, w: i64, h: i64, hdr: &Vec<f32>, depth: &Vec<f32>, lock
         let _ = SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 3)
         let _ = SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE)
         let _ = SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1)
-        let win = SDL_CreateWindow(title, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, w as i32, h as i32, SDL_WINDOW_SHOWN | SDL_WINDOW_RESIZABLE | SDL_WINDOW_OPENGL)
+        // The scene has its own depth buffer on its own framebuffer, so the
+        // window does not strictly need one — but a driver that hands back a
+        // context with no depth bits at all is one worth finding out about here
+        // rather than in a shader.
+        let _ = SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE, 24)
+        let flags = SDL_WINDOW_SHOWN | SDL_WINDOW_RESIZABLE | SDL_WINDOW_OPENGL | SDL_WINDOW_ALLOW_HIGHDPI
+        let win = SDL_CreateWindow(title, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, w as i32, h as i32, flags)
         if (win as i64) == 0 {
-            return Result.Err(sdlError())
+            return Result.Err("window: " + sdlError())
         }
         let ctx = SDL_GL_CreateContext(win)
         if (ctx as i64) == 0 {
             let e = sdlError()
             SDL_DestroyWindow(win)
-            return Result.Err(e)
+            return Result.Err("no GL 3.3 core context: " + e)
         }
         let _ = SDL_GL_SetSwapInterval(1)
-        match postNew(w, h, hdr, depth, lock) {
+        if fullscreen {
+            let _ = SDL_SetWindowFullscreen(win, SDL_WINDOW_FULLSCREEN_DESKTOP)
+        } else if maximized {
+            SDL_MaximizeWindow(win)
+        }
+
+        let d = drawableOf(win)
+        let r = renderSize(d.w, d.h, ss)
+        match postNew(r.w, r.h, ow, oh) {
             Result.Ok(p) => {
                 print("gpu: OpenGL " + Gpu.version())
                 return Result.Ok(Screen {
-                    win: win, ren: 0 as *u8, tex: 0 as *u8, ctx: ctx, post: Option.Some(p), w: w, h: h
+                    win: win, ctx: ctx, post: p, rw: r.w, rh: r.h, ss: ss
                 }
                 )
             }
@@ -116,24 +116,83 @@ fn openGl(title: &string, w: i64, h: i64, hdr: &Vec<f32>, depth: &Vec<f32>, lock
     }
 }
 
-fn openRenderer(title: &string, w: i64, h: i64): Result<Screen, string> {
+pub struct Size {
+    w: i64,
+    h: i64,
+}
+
+// The drawable in PIXELS, which on a Retina display is twice the window's size in
+// points. Setting a viewport from the window size instead renders the frame into
+// a quarter of it.
+pub fn drawableOf(win: *u8): Size {
+    var dw: i32 = 0
+    var dh: i32 = 0
     unsafe {
-        let win = SDL_CreateWindow(title, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, w as i32, h as i32, SDL_WINDOW_SHOWN | SDL_WINDOW_RESIZABLE)
-        let ren = SDL_CreateRenderer(win, 0 - 1, SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC)
-        let tex = SDL_CreateTexture(ren, SDL_PIXELFORMAT_ABGR8888, SDL_TEXTUREACCESS_STREAMING, w as i32, h as i32)
-        if (win as i64) == 0 || (ren as i64) == 0 || (tex as i64) == 0 {
-            return Result.Err(sdlError())
+        SDL_GL_GetDrawableSize(win, dw.addrOf(), dh.addrOf())
+    }
+    return Size {
+        w: Math.maxI64(1, dw as i64), h: Math.maxI64(1, dh as i64)
+    }
+}
+
+// The drawable times the supersample factor, scaled back if that would exceed
+// MAX_RENDER_PX on either axis. Scaling both by the same ratio keeps the aspect,
+// which is what stops the projection from stretching.
+fn renderSize(dw: i64, dh: i64, ss: i64): Size {
+    var w = dw * ss
+    var h = dh * ss
+    let most = Math.maxI64(w, h)
+    if most > MAX_RENDER_PX {
+        w = w * MAX_RENDER_PX / most
+        h = h * MAX_RENDER_PX / most
+    }
+    return Size {
+        w: Math.maxI64(1, w), h: Math.maxI64(1, h)
+    }
+}
+
+// Start a frame: match the targets to the window and bind the one the world draws
+// into. Returns the render size, which is what the projection needs.
+pub fn screenBegin(s: &mut Screen): Size {
+    let d = drawableOf(s.win)
+    let r = renderSize(d.w, d.h, s.ss)
+    if r.w != s.rw || r.h != s.rh {
+        match postResize(s.post, r.w, r.h) {
+            Result.Ok(_) => {
+                s.rw = r.w
+                s.rh = r.h
+            }
+            Result.Err(e) => {
+                // Keep drawing at the old size rather than dying because someone
+                // dragged a window corner.
+                print("gpu: could not resize to " + $"{r.w}x{r.h}" + ": " + e)
+            }
         }
-        // The frame is always rendered at w x h; this is what lets the window be
-        // any size at all. Without it the software renderer would have to be
-        // resized with the window — a new canvas, a new depth buffer and a new
-        // bloom chain every time the user drags a corner. The GL path does the
-        // same letterboxing itself, in gpupost.postDraw.
-        let _ = SDL_RenderSetLogicalSize(ren, w as i32, h as i32)
-        return Result.Ok(Screen {
-            win: win, ren: ren, tex: tex, ctx: 0 as *u8, post: Option.None, w: w, h: h
+    }
+    postBeginWorld(s.post)
+    return Size {
+        w: s.rw, h: s.rh
+    }
+}
+
+// Finish it: sea, overlay, bloom, tone map, swap. Clearing the overlay canvas is
+// part of presenting, because nothing on the host reads it back.
+pub fn screenPresent(s: &mut Screen, c: &mut Canvas, v: &View, sc: &Scene, cov: &CoverGrid, cover: &Vec<f32>, coverDirty: bool, hasSea: bool, time: f64, bloomGain: f64, exposure: f64) {
+    let d = drawableOf(s.win)
+    postFinish(s.post, c, v, sc, cov, cover, coverDirty, hasSea, time, bloomGain, exposure, d.w, d.h)
+    unsafe {
+        SDL_GL_SwapWindow(s.win)
+    }
+    canvasClear(c)
+}
+
+pub fn screenFullscreen(s: &Screen, on: bool) {
+    unsafe {
+        if on {
+            let _ = SDL_SetWindowFullscreen(s.win, SDL_WINDOW_FULLSCREEN_DESKTOP)
+        } else {
+            let _ = SDL_SetWindowFullscreen(s.win, 0)
         }
-        )
     }
 }
 
@@ -147,72 +206,15 @@ fn sdlError(): string {
     }
 }
 
-pub fn screenIsGpu(s: &Screen): bool {
-    match s.post {
-        Option.Some(_) => {
-            return true
-        }
-        Option.None => {
-            return false
-        }
-    }
-}
-
-// Bloom, tone-map and show the canvas. Both paths clear the HDR buffer as part
-// of presenting, so the next frame draws onto black without a separate pass.
-pub fn screenPresent(s: &Screen, c: &mut Canvas, sc: &Scene, cover: &Vec<f32>, coverDirty: bool, sv: &SeaView, bloomGain: f64, exposure: f64) {
-    match s.post {
-        Option.Some(p) => {
-            var dw: i32 = 0
-            var dh: i32 = 0
-            unsafe {
-                SDL_GL_GetDrawableSize(s.win, dw.addrOf(), dh.addrOf())
-            }
-            postDraw(p, c.hdr, sc.zbuf, c.lock, cover, coverDirty, sv, bloomGain, exposure, dw as i64, dh as i64)
-            unsafe {
-                SDL_GL_SwapWindow(s.win)
-            }
-            // gfx.compositeBand zeroes the rows it reads; the GPU never touches
-            // host memory, so the canvas has to be cleared here instead.
-            canvasClearHdr(c)
-            canvasClearLock(c)
-        }
-        Option.None => {
-            present(c, bloomGain, exposure)
-            canvasClearLock(c)
-            unsafe {
-                SDL_UpdateTexture(s.tex, 0 as *u8, c.fb[0].addrOf() as *u8, (s.w * 4) as i32)
-                SDL_RenderClear(s.ren)
-                SDL_RenderCopy(s.ren, s.tex, 0 as *u8, 0 as *u8)
-                SDL_RenderPresent(s.ren)
-            }
-        }
-    }
-}
-
-// Tear down in creation order's reverse. SDL_Quit would reclaim all of it
-// anyway, but a leak an example teaches is a leak someone copies.
-pub fn screenClose(s: &mut Screen) {
-    // postFree consumes the Post — its GL handles are @noCopy, so a borrow can't
-    // hand them over. Take the value out of the field first; the screen is being
-    // torn down, so leaving None behind costs nothing.
-    match replace(s.post, Option.None) {
-        Option.Some(p) => {
-            postFree(p)
-        }
-        Option.None => {
-        }
-    }
+// Tear down in creation order's reverse. SDL_Quit would reclaim all of it anyway,
+// but a leak an example teaches is a leak someone copies.
+//
+// `postFree` consumes the Post — its GL handles are @noCopy, so a borrow cannot
+// hand them over, which is why this takes the Screen by value.
+pub fn screenClose(s: Screen) {
+    postFree(s.post)
     unsafe {
-        if (s.ctx as i64) != 0 {
-            SDL_GL_DeleteContext(s.ctx)
-        }
-        if (s.tex as i64) != 0 {
-            SDL_DestroyTexture(s.tex)
-        }
-        if (s.ren as i64) != 0 {
-            SDL_DestroyRenderer(s.ren)
-        }
+        SDL_GL_DeleteContext(s.ctx)
         SDL_DestroyWindow(s.win)
     }
 }

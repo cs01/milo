@@ -1,0 +1,8 @@
+// @error: expected a type, but the file ended here
+
+// A file that stops mid-declaration used to walk the parser's token index past
+// the EOF sentinel, and the next lookahead read `undefined.kind` — a raw
+// TypeError with a JS stack trace instead of a diagnostic. Found by
+// scripts/fuzz-frontend.ts. The file must stay truncated: the last token is the
+// colon, with nothing after it.
+struct P{x:

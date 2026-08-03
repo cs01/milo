@@ -1,0 +1,177 @@
+// One sky, in GLSL, shared by everything that needs to know what is up there.
+//
+// This file exists because there used to be three answers and they disagreed.
+// The sky was a per-row gradient on the CPU, interpolated toward a fog colour.
+// The terrain faded into that same fog colour, a constant, regardless of which
+// way the pixel was looking. And the sea reflected the fog colour too — so the
+// water was reflecting a flat grey sheet, which is exactly what it looked like.
+//
+// A sea can only be as dramatic as the thing it reflects. So `skyColor` is
+// textually pasted into the sky pass, the world pass and the sea pass, and all
+// three now ask the same function the same question: what is the light coming
+// from direction `rd`? Distance haze is that colour along the view ray, the sky
+// is that colour with the sun in it, and the reflection is that colour bounced
+// off the water. They agree because they cannot do anything else.
+//
+// It is not a scattering integral. The three things the eye actually reads are a
+// blue overhead, a pale hot band at the horizon, and the sun sitting in a glow
+// that spills into the air around it — and those are cheap.
+
+// Prepended to every fragment shader that calls `skyColor`. `uSun` is a unit
+// direction pointing FROM the ground TOWARD the light, so `uSun.y` is the sine of
+// its elevation: positive by day, negative once it is down.
+pub let SKY_GLSL: string = "
+uniform vec3 uSun;
+uniform float uTime;
+uniform float uTurbidity;   // 0 clear, 1 thick — weather drives this
+uniform float uCloud;       // 0 none, 1 overcast
+
+float skyHash21(vec2 p) {
+    p = fract(p * vec2(123.34, 456.21));
+    p += dot(p, p + 45.32);
+    return fract(p.x * p.y);
+}
+
+float skyNoise(vec2 p) {
+    vec2 i = floor(p);
+    vec2 f = fract(p);
+    vec2 u = f * f * (3.0 - 2.0 * f);
+    float a = skyHash21(i);
+    float b = skyHash21(i + vec2(1.0, 0.0));
+    float c = skyHash21(i + vec2(0.0, 1.0));
+    float d = skyHash21(i + vec2(1.0, 1.0));
+    return mix(mix(a, b, u.x), mix(c, d, u.x), u.y);
+}
+
+float skyFbm(vec2 p) {
+    float v = 0.0;
+    float a = 0.5;
+    for (int i = 0; i < 5; i++) {
+        v += a * skyNoise(p);
+        p = mat2(1.6, 1.2, -1.2, 1.6) * p;
+        a *= 0.5;
+    }
+    return v;
+}
+
+// The cloud deck, as a function of the direction you are looking.
+//
+// Projected onto a plane overhead rather than modelled: a ray going up hits the
+// deck at xz = rd.xz/rd.y, which is the whole parallax — look toward the horizon
+// and the projection stretches, exactly as a real cloud layer does. Two octave
+// bands at different drift speeds keep it from sliding as one sheet.
+//
+// Returns coverage in x and how sunlit it is in y.
+vec2 cloudDeck(vec3 rd) {
+    if (rd.y < 0.015 || uCloud < 0.002) { return vec2(0.0); }
+    vec2 cp = rd.xz / rd.y * 0.5;
+    float c = skyFbm(cp * 0.9 + vec2(uTime * 0.010, uTime * 0.006)) * 0.65
+            + skyFbm(cp * 2.7 + vec2(uTime * 0.021, -uTime * 0.008)) * 0.35;
+    // The threshold is what makes clouds have edges. Sliding it with uCloud is
+    // how overcast happens: at 1.0 almost everything is above the line.
+    float lo = mix(0.62, 0.30, uCloud);
+    float cover = smoothstep(lo, lo + 0.26, c);
+    // Fade the deck out toward the horizon. It is a flat plane, so at a grazing
+    // angle the projection runs to infinity and the noise turns to aliasing.
+    cover *= smoothstep(0.015, 0.20, rd.y);
+    // Thicker where the noise piled up, which is what the underside shading uses.
+    return vec2(cover, smoothstep(lo + 0.26, lo + 0.02, c));
+}
+
+// The light arriving from direction `rd`. `withSun` adds the disc and its
+// aureole — wanted looking at the sky, not wanted for the haze the terrain fades
+// into, where a sun disc bleeding through a hillside is a bug.
+vec3 skyColor(vec3 rd, bool withSun) {
+    float up = clamp(rd.y, -1.0, 1.0);
+    // Daylight rises fast once the sun clears the horizon and is gone well before
+    // it is properly down, which is what makes dusk short and blue rather than a
+    // linear fade from noon to midnight.
+    float day = clamp(uSun.y * 2.4 + 0.22, 0.0, 1.0);
+    // Twilight peaks as the sun CROSSES the horizon, not at noon or midnight.
+    float dusk = clamp(1.0 - abs(uSun.y) * 4.0, 0.0, 1.0);
+
+    vec3 zenithDay = vec3(0.09, 0.26, 0.62);
+    vec3 horizonDay = vec3(0.58, 0.72, 0.90);
+    vec3 zenithNight = vec3(0.006, 0.012, 0.036);
+    vec3 horizonNight = vec3(0.028, 0.042, 0.080);
+
+    vec3 zenith = mix(zenithNight, zenithDay, day);
+    vec3 horizon = mix(horizonNight, horizonDay, day);
+    // Haze washes the blue out of the whole dome and lifts the horizon toward
+    // white. This is the dial the weather presets turn, and it replaces the flat
+    // fog colour the terrain used to fade into.
+    zenith = mix(zenith, vec3(0.26, 0.34, 0.48) * (0.15 + 0.85 * day), uTurbidity * 0.55);
+    horizon = mix(horizon, vec3(0.52, 0.58, 0.68) * (0.15 + 0.85 * day), uTurbidity * 0.50);
+
+    // The low sun spills orange along the horizon, strongest where you are
+    // looking straight at it. Measured in the horizontal plane only, so it does
+    // not follow the sun up into the sky at noon.
+    float towardSun = clamp(dot(normalize(vec3(rd.x, 0.0, rd.z) + vec3(0.0001, 0.0, 0.0)),
+                                normalize(vec3(uSun.x, 0.0, uSun.z) + vec3(0.0001, 0.0, 0.0))), 0.0, 1.0);
+    horizon = mix(horizon, vec3(1.20, 0.48, 0.20), dusk * pow(towardSun, 2.0) * 0.85);
+
+    // A high exponent keeps the gradient tight to the horizon instead of
+    // washing the whole dome pale, which is what a linear ramp does.
+    float grad = pow(1.0 - clamp(up, 0.0, 1.0), 3.4);
+    vec3 col = mix(zenith, horizon, grad);
+
+    // Below the horizon there is no sky, and this is the direction most of the
+    // frame is looking: `skyColor` is the aerial perspective the terrain fades
+    // into, and terrain is under the horizon. Haze seen against the ground is
+    // markedly darker than the same haze seen against the sky — it is lit from
+    // above and there is no bright band behind it — and getting this factor
+    // wrong is what turns a city into a white sheet.
+    col = mix(col, horizon * 0.42, clamp(-up * 5.0, 0.0, 1.0));
+
+    // Aerial glow around the sun even away from the disc: the air itself is lit.
+    float d = clamp(dot(rd, uSun), 0.0, 1.0);
+    vec3 sunTint = mix(vec3(1.7, 0.52, 0.20), vec3(2.4, 2.25, 2.00), clamp(uSun.y * 3.0, 0.0, 1.0));
+    col += sunTint * pow(d, 6.0) * 0.10 * day * (0.4 + uTurbidity);
+
+    vec2 deck = cloudDeck(rd);
+    if (deck.x > 0.001) {
+        // Lit from the sun's side, dark underneath. A cloud with no underside is
+        // a white blob; the whole read of a cloud deck is that contrast.
+        vec3 top = mix(vec3(0.62, 0.64, 0.70), vec3(1.9, 1.35, 0.95), dusk);
+        vec3 base = mix(vec3(0.20, 0.22, 0.28), vec3(0.55, 0.36, 0.34), dusk);
+        vec3 lit = mix(base, top, deck.y) * (0.30 + 0.70 * day);
+        // Silver lining: the rim facing the sun catches it.
+        lit += sunTint * pow(d, 8.0) * (1.0 - deck.y) * 0.35 * day;
+        col = mix(col, lit, deck.x * 0.92);
+    }
+
+    if (withSun) {
+        // Disc plus two halos. The tight one is the sun; the wide ones are the
+        // aureole that makes it read as lighting the air around it rather than
+        // as a sticker on the sky. Clouds in front of it take it down.
+        float clear = 1.0 - deck.x * 0.85;
+        col += sunTint * pow(d, 2400.0) * 16.0 * clear;
+        col += sunTint * pow(d, 280.0) * 0.60 * clear;
+        col += sunTint * pow(d, 13.0) * 0.18 * clear;
+    }
+    return col;
+}
+
+// The colour of the light actually falling on the world, as opposed to the colour
+// of the sky you can see.
+//
+// Nothing in the geometry pass knew about this: a vertex carried one scalar
+// Lambert term and the shader multiplied albedo by it, so the sun was white at
+// every hour of the day. That is fine at noon and wrong at every other time —
+// low light is warm because it has come through more atmosphere, and that
+// warmth on west-facing walls is most of what makes late afternoon read as
+// late afternoon rather than as noon with a dimmer switch.
+//
+// Approximate: it tints ambient as well as direct, because a per-vertex scalar
+// cannot separate them. That errs toward the whole scene taking the hour\'s
+// colour, which is the direction a photograph errs in too.
+vec3 sunLight() {
+    float e = clamp(uSun.y, 0.0, 1.0);
+    // Warm and dim near the horizon, white and full overhead.
+    vec3 warm = vec3(1.32, 0.78, 0.46);
+    vec3 noon = vec3(1.02, 1.00, 0.98);
+    vec3 c = mix(warm, noon, smoothstep(0.05, 0.55, e));
+    // Haze scatters the direct beam, which takes the edge off the tint.
+    return mix(c, vec3(dot(c, vec3(0.33))), uTurbidity * 0.30) * (0.35 + 0.65 * smoothstep(0.0, 0.35, e));
+}
+"

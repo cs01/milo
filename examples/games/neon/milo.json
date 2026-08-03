@@ -1,7 +1,7 @@
 {
-  "name": "volt",
+  "name": "neon",
   "version": "0.1.0",
-  "description": "VOLT — a neon momentum platformer",
+  "description": "NEON — a horizontal shooter",
   "deps": {
     "sdl": "github.com/milo-language/milo-sdl@v0.3.1"
   }

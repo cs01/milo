@@ -2,115 +2,34 @@
 //
 // Nothing above this file touches a pointer or an SDL constant: `pollInput`
 // snapshots the keyboard and the mouse into a plain struct once per frame, and
-// every key is edge-triggered unless holding it down is the point — which, for
-// the two dials this game is played with, it is.
+// every key is edge-triggered unless holding it down is the point.
+//
+// The SDL declarations themselves live in the `sdl` package, header-verified and
+// written once; what is left here is this game's window setup and control scheme.
 
 from "gl" import {
     Gpu
 }
-
-@link("SDL2")
-pub extern fn SDL_Init(flags: u32): i32
-
-pub extern fn SDL_CreateWindow(title: *u8, x: i32, y: i32, w: i32, h: i32, flags: u32): *u8
-
-pub extern fn SDL_SetWindowFullscreen(win: *u8, flags: u32): i32
-
-pub extern fn SDL_GL_SetAttribute(attr: i32, value: i32): i32
-
-pub extern fn SDL_GL_CreateContext(win: *u8): *u8
-
-pub extern fn SDL_GL_DeleteContext(ctx: *u8)
-
-pub extern fn SDL_GL_SwapWindow(win: *u8)
-
-pub extern fn SDL_GL_SetSwapInterval(interval: i32): i32
-
-pub extern fn SDL_GL_GetDrawableSize(win: *u8, w: *u8, h: *u8)
-
-pub extern fn SDL_GetWindowSize(win: *u8, w: *u8, h: *u8)
-
-pub extern fn SDL_PollEvent(event: *u8): i32
-
-pub extern fn SDL_GetKeyboardState(numkeys: *i32): *u8
-
-pub extern fn SDL_GetMouseState(x: *i32, y: *i32): u32
-
-pub extern fn SDL_GetTicks(): u32
-
-pub extern fn SDL_GetError(): *u8
-
-pub extern fn SDL_DestroyWindow(win: *u8)
-
-pub extern fn SDL_Quit()
-
-pub let SDL_INIT_VIDEO: u32 = 0x20
-
-pub let SDL_WINDOWPOS_CENTERED: i32 = 0x2FFF0000
-
-pub let SDL_WINDOW_SHOWN: u32 = 0x4
-
-pub let SDL_WINDOW_HIDDEN: u32 = 0x8
-
-pub let SDL_WINDOW_OPENGL: u32 = 0x2
-
-pub let SDL_WINDOW_RESIZABLE: u32 = 0x20
-
-pub let SDL_WINDOW_ALLOW_HIGHDPI: u32 = 0x2000
-
-pub let SDL_WINDOW_FULLSCREEN_DESKTOP: u32 = 0x1001
-
-pub let SDL_QUIT: u32 = 0x100
-
-pub let SDL_MOUSEWHEEL: u32 = 0x403
-
-pub let SDL_BUTTON_LMASK: u32 = 1
-
-pub let SDL_GL_CONTEXT_MAJOR_VERSION: i32 = 17
-
-pub let SDL_GL_CONTEXT_MINOR_VERSION: i32 = 18
-
-pub let SDL_GL_CONTEXT_PROFILE_MASK: i32 = 21
-
-pub let SDL_GL_CONTEXT_PROFILE_CORE: i32 = 1
-
-pub let SC_A: i64 = 4
-
-pub let SC_D: i64 = 7
-
-pub let SC_F: i64 = 9
-
-pub let SC_H: i64 = 11
-
-pub let SC_Q: i64 = 20
-
-pub let SC_R: i64 = 21
-
-pub let SC_S: i64 = 22
-
-pub let SC_1: i64 = 30
-
-pub let SC_RETURN: i64 = 40
-
-pub let SC_ESC: i64 = 41
-
-pub let SC_MINUS: i64 = 45
-
-pub let SC_EQUALS: i64 = 46
-
-pub let SC_LBRACKET: i64 = 47
-
-pub let SC_RBRACKET: i64 = 48
-
-pub let SC_SPACE: i64 = 44
-
-pub let SC_RIGHT: i64 = 79
-
-pub let SC_LEFT: i64 = 80
-
-pub let SC_DOWN: i64 = 81
-
-pub let SC_UP: i64 = 82
+from "sdl" import {
+    SDL_CreateWindow, SDL_DestroyWindow, SDL_GetError, SDL_GetKeyboardState,
+    SDL_GetMouseState, SDL_GetTicks, SDL_GetWindowSize, SDL_Init, SDL_PollEvent,
+    SDL_Quit, SDL_SetWindowFullscreen,
+    SDL_BUTTON_LMASK, SDL_INIT_VIDEO, SDL_MOUSEWHEEL, SDL_QUIT,
+    SDL_WINDOWPOS_CENTERED, SDL_WINDOW_ALLOW_HIGHDPI,
+    SDL_WINDOW_FULLSCREEN_DESKTOP, SDL_WINDOW_HIDDEN, SDL_WINDOW_RESIZABLE,
+    SDL_WINDOW_SHOWN
+}
+from "sdl/glcontext" import {
+    SDL_GL_CreateContext, SDL_GL_DeleteContext, SDL_GL_GetDrawableSize,
+    SDL_GL_SetAttribute, SDL_GL_SetSwapInterval, SDL_GL_SwapWindow,
+    SDL_GL_CONTEXT_MAJOR_VERSION, SDL_GL_CONTEXT_MINOR_VERSION,
+    SDL_GL_CONTEXT_PROFILE_CORE, SDL_GL_CONTEXT_PROFILE_MASK, SDL_WINDOW_OPENGL
+}
+from "sdl/keys" import {
+    SC_1, SC_A, SC_D, SC_DOWN, SC_EQUALS, SC_ESCAPE, SC_F, SC_H, SC_LEFT,
+    SC_LEFTBRACKET, SC_MINUS, SC_Q, SC_R, SC_RETURN, SC_RIGHT, SC_RIGHTBRACKET,
+    SC_S, SC_SPACE, SC_UP
+}
 
 // One frame of input, in drawable pixels. The 3D scene is projected with the
 // live drawable size and the overlay is laid out in the same space, so unlike a
@@ -222,7 +141,7 @@ pub fn pollInput(inp: &mut Input, ev: &mut [u8; 64], scale: f64) {
         inp.my = ny
 
         let ks = SDL_GetKeyboardState(0 as *i32)
-        if ks[SC_Q] != 0 || ks[SC_ESC] != 0 {
+        if ks[SC_Q] != 0 || ks[SC_ESCAPE] != 0 {
             inp.quit = true
         }
         inp.advance = edge(ks[SC_SPACE] != 0, inp.spaceHeld)
@@ -231,8 +150,8 @@ pub fn pollInput(inp: &mut Input, ev: &mut [u8; 64], scale: f64) {
         inp.reset = edge(ks[SC_R] != 0, inp.resetHeld)
         inp.help = edge(ks[SC_H] != 0, inp.helpHeld)
         inp.fullscreen = edge(ks[SC_F] != 0, inp.fullHeld)
-        inp.warpDown = edge(ks[SC_LBRACKET] != 0, inp.warpDownHeld)
-        inp.warpUp = edge(ks[SC_RBRACKET] != 0, inp.warpUpHeld)
+        inp.warpDown = edge(ks[SC_LEFTBRACKET] != 0, inp.warpDownHeld)
+        inp.warpUp = edge(ks[SC_RIGHTBRACKET] != 0, inp.warpUpHeld)
 
         // The dials are held, not tapped: the whole feel of the plan screen is
         // watching a number fall while a key is down.
@@ -334,7 +253,7 @@ pub fn drawableSize(win: *u8): Size {
     var dw: i32 = 0
     var dh: i32 = 0
     unsafe {
-        SDL_GL_GetDrawableSize(win, (dw.addrOf()) as *u8, (dh.addrOf()) as *u8)
+        SDL_GL_GetDrawableSize(win, dw.addrOf(), dh.addrOf())
     }
     return Size {
         w: dw as i64, h: dh as i64
@@ -345,7 +264,7 @@ pub fn pixelScale(win: *u8): f64 {
     var ww: i32 = 0
     var wh: i32 = 0
     unsafe {
-        SDL_GetWindowSize(win, (ww.addrOf()) as *u8, (wh.addrOf()) as *u8)
+        SDL_GetWindowSize(win, ww.addrOf(), wh.addrOf())
     }
     if ww <= 0 {
         return 1.0

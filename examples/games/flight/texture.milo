@@ -1,0 +1,122 @@
+// Textures and vertices — the CPU-side containers the world is built out of,
+// before any of it reaches the GPU.
+//
+// A `Texture` here is pixels in host memory: generated procedurally at startup
+// (ground grain, aircraft skin, building facades) or decoded from a PNG (the
+// aerial drape over a real city). `gpuworld.uploadTextures` turns each one into a
+// GL texture once; nothing samples these arrays at draw time any more.
+//
+// `slot` is what survives that upload. A triangle names its texture by passing
+// the `&Texture` it was built with, and the renderer has to turn that into one of
+// a handful of GL bindings — Milo has no pointer identity to compare, and
+// comparing width and height would put the ground and the facade in the same
+// bucket. An explicit small integer, set once at creation, is the whole mechanism.
+
+// Where this texture lives in the renderer's binding table. Kept as constants
+// rather than an enum because the value indexes a `Vec` of vertex streams, and
+// `SLOT_NONE` has to be a real index too.
+pub let SLOT_NONE: i64 = 0
+
+pub let SLOT_GROUND: i64 = 1
+
+pub let SLOT_SKIN: i64 = 2
+
+pub let SLOT_FACADE: i64 = 3
+
+pub let SLOT_ORTHO: i64 = 4
+
+// Falling water and its spray. Not a texture at all — it is the one slot whose
+// stream is drawn with a different shader, because a waterfall is not a lit
+// surface with a picture on it: it is translucent, it is moving, it tears into
+// spray as it drops, and none of that is expressible as albedo times a Lambert
+// term. Keeping it in the same stream machinery costs one branch in `drawStreams`
+// and means the geometry above records it exactly like everything else.
+pub let SLOT_FALL: i64 = 5
+
+pub let SLOT_COUNT: i64 = 6
+
+pub struct Texture {
+    w: i64,
+    h: i64,
+    slot: i64,
+    // Aerial drapes keep their texels as the sRGB bytes that came off the wire.
+    // As f32 triples a 2048-square drape is 50 MB, and four places preloaded at
+    // startup came to 200 MB of imagery — enough to get the process killed by the
+    // memory guard. The bytes are a quarter of that, and uploading them as
+    // GL_SRGB8 makes the driver decode them exactly, in hardware, at no cost.
+    pxu: Vec<u8>,
+    // sRGB byte -> linear, 256 entries. The GPU decodes sRGB in hardware and does
+    // not need this, but the CPU still samples the drape once per terrain corner
+    // to tint the vertices under it (city.orthoAt), and that read has to land in
+    // the same linear space the shader will.
+    lut: Vec<f32>,
+    byteSrc: bool,
+    // Mirrored-repeat addressing instead of wrap. The detail textures tile, so
+    // wrap is right for them. An ortho drape is a photograph of a finite place,
+    // and the world REFLECTS at the map edge (see world3d.foldIn) — so the
+    // imagery has to reflect on exactly the same period or the picture and the
+    // terrain under it disagree at every seam.
+    mirror: bool,
+    shift: i64, // log2(w), for the row stride
+    px: Vec<f32>, // 3 floats per texel, linear light
+}
+
+pub fn texNew(size: i64, shift: i64): Texture {
+    return Texture {
+        w: size,
+        h: size,
+        slot: SLOT_NONE,
+        pxu: Vec.new(),
+        lut: Vec.new(),
+        byteSrc: false,
+        mirror: false,
+        shift: shift,
+        px: Vec.filled(size * size * 3, 0.0),
+    }
+}
+
+pub fn texSet(t: &mut Texture, x: i64, y: i64, r: f64, g: f64, b: f64) {
+    let i = ((y << t.shift) + x) * 3
+    t.px[i] = r as f32
+    t.px[i + 1] = g as f32
+    t.px[i + 2] = b as f32
+}
+
+// A vertex, in world space.
+//
+// This is the layout that goes to the GPU, one float per field in this order —
+// see `gpuworld.WORLD_VERT`, which declares the same ten floats as five
+// attributes. Adding a field here means adding it there.
+pub struct Vtx {
+    x: f64,
+    y: f64,
+    z: f64,
+    u: f64,
+    v: f64,
+    light: f64,
+    // Per-vertex tint, multiplied with the triangle's base colour. Terrain needs
+    // this: with one colour per quad, any surface whose colour varies with height
+    // or slope draws its own tile grid, because neighbouring quads snap to
+    // different values along an edge they share.
+    r: f64,
+    g: f64,
+    b: f64,
+    // How much of the detail texture to apply, 0..1. Terrain and water share one
+    // draw call per quad, and the ground grain painted over water is the single
+    // loudest cue that a surface is NOT water — static speckle cannot be moving
+    // liquid. Fading it out per vertex keeps the shoreline seamless, which a
+    // per-quad "is this a water tile" choice could not.
+    tw: f64,
+}
+
+pub fn vtx(x: f64, y: f64, z: f64, u: f64, v: f64, light: f64): Vtx {
+    return Vtx {
+        x: x, y: y, z: z, u: u, v: v, light: light, r: 1.0, g: 1.0, b: 1.0, tw: 1.0
+    }
+}
+
+pub fn vtxC(x: f64, y: f64, z: f64, u: f64, v: f64, light: f64, r: f64, g: f64, b: f64, tw: f64): Vtx {
+    return Vtx {
+        x: x, y: y, z: z, u: u, v: v, light: light, r: r, g: g, b: b, tw: tw
+    }
+}

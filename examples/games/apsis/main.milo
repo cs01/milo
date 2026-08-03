@@ -36,10 +36,15 @@ from "std/png" import {
 from "std/fs" import {
     writeFile
 }
-from "./sdl" import {
-    Input, inputNew, pollInput, hostNew, drawableSize, pixelScale,
-    SDL_GL_SwapWindow, SDL_GL_DeleteContext, SDL_DestroyWindow, SDL_Quit,
-    SDL_GetTicks, SDL_SetWindowFullscreen, SDL_WINDOW_FULLSCREEN_DESKTOP,
+from "./host" import {
+    Input, inputNew, pollInput, hostNew, drawableSize, pixelScale
+}
+from "sdl" import {
+    SDL_DestroyWindow, SDL_GetTicks, SDL_Quit, SDL_SetWindowFullscreen,
+    SDL_WINDOW_FULLSCREEN_DESKTOP
+}
+from "sdl/glcontext" import {
+    SDL_GL_DeleteContext, SDL_GL_SwapWindow
 }
 from "./post" import {
     Post, postNew

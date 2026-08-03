@@ -93,6 +93,10 @@ is discoverability via `milo api simd`.
   classification, and vector arguments have their own rules on both SysV and AArch64. Simplest
   first move: **reject `Simd` in `extern` signatures** in stage 1 and revisit, rather than
   emitting a wrong-ABI call that works on one platform.
-- **Measuring.** The claim to beat is 3–5× on the flyby rasteriser. Benchmark that specific
+- **Measuring.** The claim to beat is 3–5× on the software rasteriser. It is no longer in
+  flyby — that renderer moved to the GPU on 2026-08-02 — so the subject is now
+  `benchmarks/softraster/`, which runs the same `bandRaster`, `spot`, `blurPass` and
+  composite loops against synthetic geometry and reports the two halves separately.
+  Benchmark that specific
   loop, on a quiet box, and report the honest number — including if it turns out LLVM's
   auto-vectoriser was already getting most of it.

@@ -100,3 +100,6 @@ roms/
 
 # Staged from the repo-root install.sh by the docs build; not a source file.
 docs/site/public/install.sh
+
+# Fuzzer output — regenerated per run, never a source of truth.
+.fuzz-findings*/

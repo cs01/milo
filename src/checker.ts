@@ -6124,7 +6124,7 @@ export class TypeChecker {
             return this.setType(expr, { tag: "bool" });
           }
           if (expr.method === "unwrapOr") {
-            if (expr.args.length !== 1) { this.error(`'unwrapOr' expects 1 argument`, sp); }
+            if (expr.args.length !== 1) { this.error(`'unwrapOr' expects 1 argument`, sp); return this.setType(expr, { tag: "unknown" }); }
             const inner = this.unwrapableInner(objType);
             if (inner && !isCopy(inner)) {
               // select-based lowering copies the payload; for owned types that would
@@ -6171,7 +6171,7 @@ export class TypeChecker {
           // Same Copy gate as unwrapOr, for the same reason: the payload is loaded, not
           // moved out.
           if (expr.method === "unwrapOrElse") {
-            if (expr.args.length !== 1) { this.error(`'unwrapOrElse' expects 1 argument`, sp); }
+            if (expr.args.length !== 1) { this.error(`'unwrapOrElse' expects 1 argument`, sp); return this.setType(expr, { tag: "unknown" }); }
             const inner = this.unwrapableInner(objType);
             if (inner && !isCopy(inner)) {
               this.error(`'unwrapOrElse' on a non-Copy Option<${typeName(inner)}> — use 'match' to move the value out`, sp);
@@ -6202,7 +6202,7 @@ export class TypeChecker {
             return this.setType(expr, { tag: "bool" });
           }
           if (expr.method === "unwrapOr") {
-            if (expr.args.length !== 1) { this.error(`'unwrapOr' expects 1 argument`, sp); }
+            if (expr.args.length !== 1) { this.error(`'unwrapOr' expects 1 argument`, sp); return this.setType(expr, { tag: "unknown" }); }
             const inner = this.unwrapableInner(objType);
             if (inner && !isCopy(inner)) {
               this.error(`'unwrapOr' on a non-Copy Result<${typeName(inner)}> — use 'match' to move the value out`, sp);
@@ -6297,7 +6297,9 @@ export class TypeChecker {
           const saturatingMethods = ["saturatingAdd", "saturatingSub", "saturatingMul"];
           const checkedMethods = ["checkedAdd", "checkedSub", "checkedMul", "checkedDiv", "checkedRem"];
           if (wrappingMethods.includes(expr.method) || saturatingMethods.includes(expr.method)) {
-            if (expr.args.length !== 1) { this.error(`'${expr.method}' expects 1 argument`, sp); }
+            // Must return, not fall through: `this.error` accumulates a diagnostic
+            // and keeps going, so with zero args the `args[0]` below is undefined.
+            if (expr.args.length !== 1) { this.error(`'${expr.method}' expects 1 argument`, sp); return this.setType(expr, { tag: "unknown" }); }
             const argType = this.checkExprWithHint(expr.args[0], objType);
             if (!typeEq(objType, argType) && argType.tag !== "unknown") {
               this.error(`'${expr.method}': expected ${typeName(objType)}, got ${typeName(argType)}`, sp);
@@ -6305,7 +6307,7 @@ export class TypeChecker {
             return this.setType(expr, objType);
           }
           if (checkedMethods.includes(expr.method)) {
-            if (expr.args.length !== 1) { this.error(`'${expr.method}' expects 1 argument`, sp); }
+            if (expr.args.length !== 1) { this.error(`'${expr.method}' expects 1 argument`, sp); return this.setType(expr, { tag: "unknown" }); }
             const argType = this.checkExprWithHint(expr.args[0], objType);
             if (!typeEq(objType, argType) && argType.tag !== "unknown") {
               this.error(`'${expr.method}': expected ${typeName(objType)}, got ${typeName(argType)}`, sp);

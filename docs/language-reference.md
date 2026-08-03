@@ -1877,8 +1877,9 @@ Two things `pub` does **not** mark:
   no separate spelling for it.
 - **`import`s.** An import binds a name locally; it does not re-export it.
 
-`pub` is distinct from `@export`, which forces external C linkage (see [C FFI](#c-ffi)).
-A `pub fn` is visible to other Milo files; an `@export fn` is visible to the C linker.
+`pub` is distinct from `@externalLinkage`, which forces external C linkage (see
+[C FFI](#c-ffi)). A `pub fn` is visible to other Milo files; an `@externalLinkage fn`
+is visible to the C linker.
 
 `pub` is a **soft keyword**: it is only special immediately before a declaration, so
 it remains usable as an ordinary identifier (`var pub = 5`, `fn pub()`).

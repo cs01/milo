@@ -33,11 +33,11 @@ export function emptyPkgDecls(): PkgDeclNames {
   return { values: new Set(), types: new Set() };
 }
 
-// `extern fn` binds a C symbol by name and `@export` is a deliberate C ABI
+// `extern fn` binds a C symbol by name and `@externalLinkage` is a deliberate C ABI
 // surface: renaming either would change what the linker sees.
 export function isManglableFn(f: Function): boolean {
   if (f.isExtern) return false;
-  if (f.attributes?.some((a) => a.name === "export")) return false;
+  if (f.attributes?.some((a) => a.name === "externalLinkage")) return false;
   return true;
 }
 

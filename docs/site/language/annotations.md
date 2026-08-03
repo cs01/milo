@@ -3,7 +3,7 @@ system: annotations
 purpose: the `@` surface — every compile-time builtin and declaration attribute the compiler understands
 key-files: src/parser.ts, src/checker.ts (validateAttributes), src/lower.ts (embedFile/targetOs), src/codegen.ts (cSigGuard)
 update-when: an `@` construct is added, removed, or changes what it accepts
-last-verified: 2026-07-24
+last-verified: 2026-08-02
 -->
 
 # Annotations and Compiler Builtins
@@ -18,7 +18,7 @@ is one of the eight constructs below.
 | `@targetOs()` | expression | The OS being compiled for, as a string |
 | `@derive(Eq)` | struct | Generates field-by-field `==` and `!=` |
 | `@link(lib)` | `extern fn` | Links against a native library |
-| `@export` | `fn` | Forces external linkage |
+| `@externalLinkage` | `fn` | Forces external linkage, so DCE cannot drop the symbol |
 | `@cSig(header, sig)` | `extern fn` | Verifies the signature against a C header |
 | `@cLayout(cType, header)` | `extern struct` | Verifies field offsets against a C header |
 | `@cValue(cName, header)` | global `let` | Verifies an integer constant against a C macro |
@@ -29,8 +29,8 @@ compiling. The rest are **attributes** — they sit above a declaration.
 
 An unknown attribute is an error, never a silent no-op. So is an attribute on the wrong
 kind of declaration: `@cLayout` on a non-extern struct, `@link` on a regular `fn`, or
-`@export` on an `extern fn` (which declares a function defined elsewhere, so there is
-nothing there to export).
+`@externalLinkage` on an `extern fn` (which declares a function defined elsewhere, so
+there is no definition there to give linkage to).
 
 ## Compile-time builtins
 
@@ -134,7 +134,7 @@ Adds the `-l` flag, so the declaration and its link requirement stay together:
 extern fn SDL_Init(flags: u32): i32
 ```
 
-### `@export`
+### `@externalLinkage`
 
 Forces external linkage on a function the compiler would otherwise see as unreachable
 and drop. There is one reason to need it, in two settings: the only caller is outside
@@ -143,14 +143,14 @@ against this executable, or a C program linking a Milo archive — in both cases
 inside the program calls the function, so nothing keeps it.
 
 ```milo
-@export
+@externalLinkage
 pub fn pluginEntry(): i32 { return 7 }
 ```
 
 The rule is about *where the definition lives*, not about `pub`. Functions in the file
 being compiled get external linkage already; a function reached only through an `import`
-is `internal` by default, so dead-code elimination is free to drop it. `@export` is what
-overrides that.
+is `internal` by default, so dead-code elimination is free to drop it.
+`@externalLinkage` is what overrides that.
 
 `build-lib` shows the difference, since its header declares exactly the functions that
 kept external linkage:
@@ -163,13 +163,14 @@ pub fn miloGreet(): void { print("hello from milo") }
 ```
 
 ```milo
-// helpers.milo — reached only by import, so it needs @export
-@export
+// helpers.milo — reached only by import, so it needs @externalLinkage
+@externalLinkage
 pub fn miloAdd(a: i32, b: i32): i32 { return a + b }
 ```
 
-Drop the `@export` and `miloAdd` vanishes from both the header and the archive, and the
-C side fails to link. `miloGreet` needs no annotation, being in the file that was built.
+Drop the `@externalLinkage` and `miloAdd` vanishes from both the header and the archive,
+and the C side fails to link. `miloGreet` needs no annotation, being in the file that was
+built.
 
 ```bash
 milo build-lib mathlib.milo -o libmathlib.a    # also writes libmathlib.h

@@ -5,6 +5,10 @@
 - **Status:** DONE (landed on main 2026-07-24, CI green)
 - **Related:** [docs/plans/package-manager.md](../plans/package-manager.md) §P-1
 
+> **Later note (2026-08-02):** the C-linkage attribute this worksheet calls `@export` was
+> renamed to `@externalLinkage`. The reasoning below is kept as written — it records the
+> decision as it stood — but the collision it cites no longer exists. `pub` stayed anyway.
+
 ## Goal
 
 Milo declarations are file-private by default. `pub` exports them. Referencing a non-`pub` declaration from another file is a compile error naming both files. Prerequisite for packages: without it every internal helper is somebody's dependency.

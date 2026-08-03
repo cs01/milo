@@ -1,0 +1,7 @@
+// @error: no definition here to give linkage to
+@externalLinkage
+extern fn getpid(): i32
+
+fn main() {
+    let _p = getpid()
+}

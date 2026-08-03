@@ -44,7 +44,7 @@ Everything is public today. A package ecosystem without a private/public boundar
 
 **Not `_name` for private.** The underscore prefix is already the convention for *deliberately unused* — `_x` on a parameter you don't read. Overloading it with "private" makes `_helper` mean two unrelated things and makes the unused-lint's job ambiguous. A keyword is the honest spelling.
 
-**`pub`, not `export`, and the reason is not taste: `@export` is already taken.** It forces external C linkage (`src/checker.ts:1169-1175`). A language with both `export fn foo` (visible to other Milo modules) and `@export fn foo` (visible to the C linker) has two unrelated exports one sigil apart. `pub fn` collides with nothing.
+**`pub`, not `export`.** The original reason was a collision: the C-linkage attribute was spelled `@export`, and a language with both `export fn foo` (visible to other Milo modules) and `@export fn foo` (visible to the C linker) has two unrelated exports one sigil apart. That attribute is now `@externalLinkage`, which says what it does, so the collision is gone. `pub` stays anyway — it shipped, it is a soft keyword with zero breakage, and re-spelling the most common keyword in the language buys nothing.
 
 ```milo
 pub fn parse(s: string): Result<Doc, Error> { ... }   // importable
@@ -111,7 +111,7 @@ std stays unmangled deliberately: it is compiler-versioned, single-instance, and
 Never mangled:
 
 - `extern fn` — binds a C symbol by name. Already exempt from the dedup checks, same rule.
-- `@export` fns — a deliberate public C ABI surface.
+- `@externalLinkage` fns — a deliberate public C ABI surface.
 
 **Intra-package references.** Inside `P`'s own modules, a reference to `foo` rewrites to `P$foo` only when `foo` is declared somewhere in `P`. Otherwise it is left alone: it belongs to std, or to an extern, or to a dep of `P`.
 

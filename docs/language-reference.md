@@ -1432,6 +1432,47 @@ print(b)         // fine
 This applies to structs, enums, strings, Vec, HashMap, and Heap.
 Primitive types (`i32`, `bool`, `f64`, etc.) are copied, not moved.
 
+A struct whose fields are all Copy is itself Copy, and so is never move-tracked.
+
+### `@noCopy` — move-tracked handles
+
+That rule is wrong for one important shape: the **resource handle**. A GL texture name,
+a file descriptor, an index into a foreign table — each is an integer, so the all-fields-
+Copy rule makes it Copy, and move checking never engages for exactly the type most likely
+to be used after it has been released.
+
+`@noCopy` says the type is move-tracked however plain its fields are:
+
+```milo
+@noCopy
+struct Texture {
+    id: u32,
+    w: i64,
+}
+
+impl Texture {
+    fn bind(self: &Self) { ... }      // borrows — call as often as you like
+    fn free(self: Self) { ... }       // consumes — ends the handle's life
+}
+
+let t = Texture.rgba8(w, h, pixels)
+t.bind()
+t.free()
+t.bind()    // error: use of moved variable 't'
+t.free()    // likewise — the double free is the same error
+```
+
+The attribute takes no arguments, and every instantiation of a `@noCopy` generic inherits
+it: `Slot<i32>` is no more copyable than the `Slot<T>` it came from.
+
+**A `Drop` impl already implies this** — a type with a destructor is never Copy. Reach for
+`@noCopy` when the release has an ordering requirement the compiler cannot see, so a
+destructor would be wrong: `glDeleteTextures` needs the GL context that made the texture
+to still be current, and a `Drop` firing during teardown or on a thread with no context is
+undefined behaviour rather than a leak. `@noCopy` is move-tracked with **no destructor** —
+forgetting to release is still a leak, but releasing twice, or using after release, is a
+compile error.
+
 ### Move in Branches
 
 The compiler tracks moves through control flow:

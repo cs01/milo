@@ -1,0 +1,33 @@
+// @error: use of moved variable
+// A resource handle is an integer, so the all-fields-Copy rule would make this type
+// Copy and `free` would consume nothing — the release-then-use below is the bug
+// @noCopy exists to catch. See isAllCopyStruct.
+
+@noCopy
+struct Texture {
+    id: u32,
+    w: i64,
+}
+
+impl Texture {
+    fn make(): Texture {
+        return Texture {
+            id: 7, w: 640
+        }
+    }
+
+    fn bind(self: &Self) {
+        print(self.id)
+    }
+
+    // Consumes: releasing the GL name ends this handle's life.
+    fn free(self: Self) {
+        print(self.id)
+    }
+}
+
+fn main() {
+    let t = Texture.make()
+    t.free()
+    t.bind()
+}

@@ -1,0 +1,22 @@
+// @error: use of moved variable
+// The other half of what @noCopy buys: releasing the same handle twice is the same
+// use-after-move the compiler already rejects for a String or a Vec.
+
+@noCopy
+struct Fd {
+    n: i32,
+}
+
+impl Fd {
+    fn close(self: Self) {
+        print(self.n)
+    }
+}
+
+fn main() {
+    let f = Fd {
+        n: 3
+    }
+    f.close()
+    f.close()
+}

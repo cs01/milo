@@ -82,6 +82,8 @@ export interface StructInfo {
   isExtern?: boolean;
   isOpaque?: boolean;
   cLayout?: CLayout;
+  // `@noCopy`: this type is move-tracked however plain its fields are. See isAllCopyStruct.
+  noCopy?: boolean;
 }
 
 // A verified claim about a C type's layout, from `@cLayout(cType, header)`.
@@ -832,7 +834,13 @@ export class TypeChecker {
       name: f.name,
       type: this.resolve(this.substituteMiloType(f.type, generic.typeParams, typeArgs)),
     }));
-    this.structs.set(mangled, { fields, baseName, typeArgs });
+    this.structs.set(mangled, {
+      fields, baseName, typeArgs,
+      // Copy-ness is a property of the declaration, so every instantiation of a
+      // `@noCopy` generic inherits it — `Handle<Texture>` is no more copyable than
+      // the `Handle<T>` it came from.
+      ...(generic.decl.attributes?.some(a => a.name === "noCopy") ? { noCopy: true } : {}),
+    });
 
     const decl: StructDecl = {
       kind: "StructDecl",
@@ -1259,7 +1267,10 @@ export class TypeChecker {
             this.error(`struct '${s.name}' field '${f.name}': references cannot be stored in a collection`, undefined, `references are second-class — store owned values instead`);
           }
         }
-        this.structs.set(s.name, { fields, isExtern: s.isExtern, isOpaque: s.isOpaque });
+        this.structs.set(s.name, {
+          fields, isExtern: s.isExtern, isOpaque: s.isOpaque,
+          ...(s.attributes?.some(a => a.name === "noCopy") ? { noCopy: true } : {}),
+        });
       }
     }
 
@@ -1335,6 +1346,10 @@ export class TypeChecker {
       if (s.attributes) {
         for (const attr of s.attributes) {
           if (attr.name === "cLayout") this.checkCLayout(s, attr);
+          if (attr.name === "noCopy" && attr.args && attr.args.length > 0) {
+            this.error(`'@noCopy' on '${s.name}' takes no arguments`, s.span,
+              `write '@noCopy' on its own line above the struct`);
+          }
         }
       }
     }
@@ -1956,7 +1971,7 @@ export class TypeChecker {
   // in silence, so a typo (`@clayout`, `@drive(Eq)`) looked like it worked while doing
   // nothing — the same silent-failure class @cLayout exists to close. Enums parse
   // attributes but nothing consumes them, so those are rejected rather than ignored.
-  private static readonly KNOWN_ATTRS = ["derive", "cLayout", "cSig"];
+  private static readonly KNOWN_ATTRS = ["derive", "cLayout", "cSig", "noCopy"];
 
   // `@cSig("unistd.h", "long sysconf(int)")` — the C signature is checked against the real
   // header at build time. Milo's type system can't express C type identity (is `i64` a
@@ -3996,6 +4011,13 @@ export class TypeChecker {
     if (cached !== undefined) return cached;
     const info = this.structs.get(name);
     if (!info) { this.allCopyCache.set(name, false); return false; }
+    // `@noCopy`. A resource handle is an integer — a GL texture name, an fd, an index
+    // into someone else's table — so the all-fields-Copy rule above says it is Copy, and
+    // move checking never engages for exactly the type most likely to be used after it is
+    // released. Drop already forces non-Copy, but a handle whose cleanup has an ordering
+    // requirement the compiler can't see (glDeleteTextures needs the context still
+    // current) can't take a Drop. This is that case: move-tracked, no destructor.
+    if (info.noCopy) { this.allCopyCache.set(name, false); return false; }
     // guard against cycles
     this.allCopyCache.set(name, false);
     const result = info.fields.every(f =>
@@ -4819,10 +4841,17 @@ export class TypeChecker {
               `the pattern moved '${expr.name}''s payload out, so reading '${expr.name}' here would see a zeroed value. Use the pattern's binding instead, or compute what you need from '${expr.name}' before the match.`,
             );
           } else {
+            // A `@noCopy` handle is deliberately not clonable — duplicating one is how you
+            // get the double-free it exists to prevent — so the usual hint would name a fix
+            // that cannot be applied. Point at the ownership question instead.
+            const t = this.deref(info.type);
+            const noCopy = t.tag === "struct" && this.structs.get(t.name)?.noCopy === true;
             this.error(
               `use of moved variable '${expr.name}'`,
               sp,
-              `ownership of '${expr.name}' was transferred earlier and it can no longer be used here. To keep it alive, clone it at the point of transfer: '${expr.name}.clone()'.`,
+              noCopy
+                ? `'${expr.name}' is a @noCopy handle, so transferring it ended its life here — copying one would let the same resource be released twice. Borrow it (pass it to a '&${typeName(t)}' parameter) instead of transferring, or reorder so the transfer is last.`
+                : `ownership of '${expr.name}' was transferred earlier and it can no longer be used here. To keep it alive, clone it at the point of transfer: '${expr.name}.clone()'.`,
             );
           }
           return this.setType(expr, this.deref(info.type));

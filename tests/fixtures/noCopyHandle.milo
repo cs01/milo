@@ -1,0 +1,63 @@
+// @expect: 7
+// @expect: 640
+// @expect: 7
+// @expect: 1
+// @expect: 2
+// A @noCopy handle is an ordinary value that happens to be move-tracked: borrow it as
+// often as you like, move it exactly once. Nothing about codegen changes — the type is
+// still two integers passed in registers.
+
+@noCopy
+struct Texture {
+    id: u32,
+    w: i64,
+}
+
+impl Texture {
+    fn bind(self: &Self) {
+        print(self.id)
+    }
+
+    fn width(self: &Self): i64 {
+        return self.w
+    }
+
+    fn free(self: Self) {
+        print(self.id)
+    }
+}
+
+// A generic @noCopy type: every instantiation inherits the declaration's copy-ness.
+@noCopy
+struct Slot<T> {
+    index: i64,
+}
+
+impl Slot<T> {
+    fn take(self: Self): i64 {
+        return self.index
+    }
+}
+
+fn consume(t: Texture) {
+    t.free()
+}
+
+fn main() {
+    let t = Texture {
+        id: 7, w: 640
+    }
+    t.bind()
+    print(t.width())
+    // The one move. `t` is unusable after this, which is the point.
+    consume(t)
+
+    let a: Slot<i32> = Slot {
+        index: 1
+    }
+    let b: Slot<bool> = Slot {
+        index: 2
+    }
+    print(a.take())
+    print(b.take())
+}

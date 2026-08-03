@@ -23,15 +23,31 @@ export class Parser {
   constructor(private tokens: Token[], private source?: string, private filePath?: string) {}
 
   private cloneExpr(e: Expr): Expr { return structuredClone(e); }
-  private peek(): Token { return this.tokens[this.pos]; }
-  private peekN(n: number): Token { return this.tokens[this.pos + n]; }
+  // Clamped to the EOF sentinel. A truncated file (`struct P{x:`) lets some
+  // production consume EOF as if it were content and walk `pos` past the end;
+  // without the clamp the very next lookahead is `undefined.kind`, which reaches
+  // the user as a raw TypeError instead of a diagnostic. Every read past the end
+  // sees EOF, so the enclosing `expect` reports it properly.
+  //
+  // `peek` itself needs no bounds test: `advance` below is the only thing that
+  // moves `pos`, and it stops on the EOF sentinel, so `pos` is always in range.
+  // This is the parser's hottest call — a clamp here costs ~8% of parse time.
+  private peek(): Token { return this.tokens[this.pos]!; }
+  private peekN(n: number): Token { return this.tokens[Math.min(this.pos + n, this.tokens.length - 1)]!; }
   // adjacent same-kind tokens with no intervening whitespace — used for << and >>
   private atAdjacent(k: TokenKind): boolean {
     const a = this.peek();
     const b = this.peekN(1);
     return a && b && a.kind === k && b.kind === k && a.line === b.line && b.col === a.col + 1;
   }
-  private advance(): Token { return this.tokens[this.pos++]; }
+  // Never advances past EOF, so a loop that keeps consuming on malformed input
+  // stalls on the sentinel and hits an `expect` failure instead of running off
+  // the array.
+  private advance(): Token {
+    const tok = this.peek();
+    if (this.pos < this.tokens.length - 1) this.pos++;
+    return tok;
+  }
   private span(tok: Token): Span { return { line: tok.line, col: tok.col, file: this.filePath }; }
 
   private at(kind: TokenKind): boolean { return this.peek().kind === kind; }
@@ -253,6 +269,10 @@ export class Parser {
   // ── Types ──
 
   private parseType(): MiloType {
+    // Bail before the fallback `advance()` below can accept EOF as a type name.
+    // Several callers loop until a closing delimiter they will never see in a
+    // truncated file, and a parseType that returns without consuming would spin.
+    if (this.at(TokenKind.Eof)) this.error("expected a type, but the file ended here", this.peek());
     // &T or &mut T
     if (this.match(TokenKind.Amp)) {
       const isMut = !!this.match(TokenKind.Mut);

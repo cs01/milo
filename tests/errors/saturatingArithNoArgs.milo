@@ -1,0 +1,12 @@
+// @error: 'saturatingSub' expects 1 argument
+
+// `checker.error()` records a diagnostic and returns — it does not throw — so an
+// arity check that doesn't return falls straight through into `args[0]` and
+// crashes on the argument it just reported as missing. Found by
+// scripts/fuzz-frontend.ts; the same shape guarded the wrapping/checked/rotate
+// intrinsics and Option/Result unwrapOr.
+pub fn main(): i32 {
+    let c: u8 = 20
+    let diff = c.saturatingSub()
+    return 0
+}

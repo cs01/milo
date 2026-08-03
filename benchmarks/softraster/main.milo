@@ -1,0 +1,227 @@
+// The software renderer's hot loops, isolated and timed.
+//
+//   milo run benchmarks/softraster/main.milo --release
+//   milo run benchmarks/softraster/main.milo --release -- 1920 1080 40000 30
+//
+// This used to be flyby. When flyby's rasteriser moved to the GPU the code did
+// not become worthless — it became the thing two backlog entries are MEASURED
+// against, and those numbers were quoted from a running game that no longer
+// exists:
+//
+//   #16 bounds-check elision — "17-22%, measured on examples/games/flight:
+//        stripping all 362 bounds checks takes the frame from 23ms to 18-19ms"
+//   #17 SIMD — "spot 24.6%, blurPass 23.6%, rasterCamTex 20.7%, fillRect 8.5%,
+//        rasterCamG 8.1%, plus ~26% in present()'s composite"
+//
+// Both are claims about these loops, so these loops are what has to keep
+// running. Isolating them is an improvement on measuring the game: the triangle
+// mix is fixed instead of depending on where the autopilot happened to fly, and
+// the two halves are timed separately rather than inferred from a sampling
+// profile.
+//
+// The geometry is synthetic and deterministic — a hash-driven spray of triangles
+// over the frame, at depths and sizes chosen to land in roughly the same
+// proportion of large-near to small-far that a terrain grid produces. It is not
+// a picture of anything. The point is the instruction mix.
+
+from "std/args" import {
+    args
+}
+from "std/runtime" import {
+    Promise
+}
+from "std/math" import {
+    Math
+}
+from "std/strconv" import {
+    parseInt
+}
+from "std/time" import {
+    epochMillis
+}
+from "./raster" import {
+    Cmd, Job, bandRaster, bandsFor, texRefNone, triSetup
+}
+from "./bloom" import {
+    Canvas, canvasNew, present, spot
+}
+
+fn arg(a: &Vec<string>, i: i64, fallback: i64): i64 {
+    if a.len <= i {
+        return fallback
+    }
+    match parseInt(a[i]) {
+        Option.Some(v) => {
+            return v
+        }
+        Option.None => {
+            return fallback
+        }
+    }
+}
+
+// A deterministic hash in 0..1. The same field flyby's terrain used, so the
+// distribution of triangle sizes is at least a relative of the real one.
+fn hash(i: i64, salt: i64): f64 {
+    var h = (i * 374761393 + salt * 668265263) & 0x7FFFFFFF
+    h = (h ^ (h >> 13)) * 1274126177
+    return ((h & 0x7FFFFFFF) as f64) / 2147483647.0
+}
+
+// Build the frame's command list once, outside the timed loop: this is the
+// rasteriser's benchmark, not the geometry stage's.
+fn buildCommands(w: i64, h: i64, n: i64): Vec<Cmd> {
+    var out: Vec<Cmd> = Vec.new()
+    let scale = (h as f64) * 0.9
+    let cx = (w as f64) * 0.5
+    let cy = (h as f64) * 0.5
+    for i in 0..n {
+        // Depth spread over the draw distance, weighted toward the far field the
+        // way a terrain grid is — most triangles are small and distant, a few
+        // near ones cover most of the pixels.
+        let t = hash(i, 1)
+        let z = 6.0 + t * t * 1400.0
+        // Spread across the frustum, so most of the spray lands on screen: the
+        // half-extent at depth z is z*(w/2)/scale horizontally and z*(h/2)/scale
+        // vertically.
+        let x = (hash(i, 2) - 0.5) * 2.0 * z * (w as f64) * 0.5 / scale
+        let y = (hash(i, 3) - 0.5) * 2.0 * z * (h as f64) * 0.5 / scale
+        // Side length in world units, so screen size falls off with depth the
+        // way a terrain quad's does.
+        let s = 0.5 + hash(i, 4) * 0.030 * z
+        // Wound so the signed screen-space area comes out positive: triSetup
+        // culls the other way round, and camera y is up while screen y is down,
+        // so the intuitive counter-clockwise ordering is the rejected one.
+        let tri = triSetup(w, h, scale, cx, cy, x, y, z, x + hash(i, 7) * s * 0.4, y + s, z + hash(i, 8) * s * 0.3, x + s, y + hash(i, 5) * s * 0.4, z + hash(i, 6) * s * 0.3)
+        if !tri.ok {
+            continue
+        }
+        let l0 = 0.45 + hash(i, 9) * 0.55
+        let l1 = 0.45 + hash(i, 10) * 0.55
+        let l2 = 0.45 + hash(i, 11) * 0.55
+        out.push(Cmd {
+            t: tri,
+            ar: hash(i, 12), ag: hash(i, 13), ab: hash(i, 14),
+            br: hash(i, 15), bg: hash(i, 16), bb: hash(i, 17),
+            dr: hash(i, 18), dg: hash(i, 19), db: hash(i, 20),
+            al: l0, bl: l1, dl: l2,
+            au: 0.0, av: 0.0, bu: 0.0, bv: 0.0, du: 0.0, dv: 0.0,
+            atw: 0.0, btw: 0.0, dtw: 0.0,
+            tr: 1.0, tg: 1.0, tb: 1.0,
+            tex: texRefNone(),
+            // The Gouraud path. The textured one wants a live Texture behind a
+            // raw pointer, which is a benchmark of the asset pipeline as much as
+            // of the scanline loop — see the note at the bottom.
+            textured: false,
+        }
+        )
+    }
+    return out
+}
+
+// Bin every command into the bands whose rows it touches, exactly as
+// gfx3d.record did.
+fn binCommands(cmds: &Vec<Cmd>, h: i64, bands: i64): Vec<Vec<i64>> {
+    var bins: Vec<Vec<i64>> = Vec.new()
+    for _ in 0..bands {
+        let empty: Vec<i64> = Vec.new()
+        bins.push(empty)
+    }
+    for i in 0..cmds.len {
+        let lo = cmds[i].t.minY * bands / h
+        let hi = (cmds[i].t.maxY - 1) * bands / h
+        for k in lo..hi + 1 {
+            bins[k].push(i)
+        }
+    }
+    return bins
+}
+
+pub fn main(): i32 {
+    let a = args()
+    let w = arg(a, 1, 1280)
+    let h = arg(a, 2, 720)
+    let tris = arg(a, 3, 20000)
+    let frames = arg(a, 4, 30)
+
+    var c = canvasNew(w, h)
+    var zbuf: Vec<f32> = Vec.filled(w * h, 0.0)
+    let bands = bandsFor(h)
+    let cmds = buildCommands(w, h, tris)
+    let bins = binCommands(cmds, h, bands)
+    var binLens: Vec<i64> = Vec.new()
+    for k in 0..bands {
+        binLens.push(bins[k].len)
+    }
+    print($"{w}x{h}  {cmds.len} triangles  {bands} bands  {frames} frames")
+
+    var rasterMs: i64 = 0
+    var postMs: i64 = 0
+    for _ in 0..frames {
+        for i in 0..(w * h) {
+            zbuf[i] = 0.0
+        }
+        for i in 0..(w * h * 3) {
+            c.hdr[i] = 0.0
+        }
+
+        let t0 = epochMillis()
+        rasterFrame(c, zbuf, cmds, bins, binLens, bands, w, h)
+        let t1 = epochMillis()
+        // A handful of additive splats, because `spot` was the hottest single
+        // function in the profile and the composite alone does not exercise it.
+        for i in 0..70 {
+            spot(c, hash(i, 31) * (w as f64), hash(i, 32) * (h as f64), 6.0 + hash(i, 33) * 34.0, 0.9, 0.7, 0.4)
+        }
+        present(c, 0.35, 1.0)
+        let t2 = epochMillis()
+        rasterMs = rasterMs + (t1 - t0)
+        postMs = postMs + (t2 - t1)
+    }
+
+    let f = frames as f64
+    let r = (rasterMs as f64) / f
+    let p = (postMs as f64) / f
+    print($"raster  {r} ms/frame")
+    print($"post    {p} ms/frame")
+    print($"total   {r + p} ms/frame")
+    // Kept alive so nothing above can be optimised away as dead.
+    print($"checksum {c.fb[(w * h) / 2]}")
+    return 0
+}
+
+fn rasterFrame(c: &mut Canvas, zbuf: &mut Vec<f32>, cmds: &Vec<Cmd>, bins: &Vec<Vec<i64>>, binLens: &Vec<i64>, bands: i64, w: i64, h: i64) {
+    let cmdBase = cmds.ptr() as i64
+    let hdrBase = c.hdr.ptr() as i64
+    let zBase = zbuf.ptr() as i64
+    var ps: Vec<Promise<i64>> = Vec.new()
+    for k in 0..bands {
+        if binLens[k] == 0 {
+            continue
+        }
+        let job = Job {
+            cmdBase: cmdBase,
+            binBase: bins[k].ptr() as i64,
+            binLen: binLens[k],
+            hdrBase: hdrBase,
+            zBase: zBase,
+            w: w,
+            y0: k * h / bands,
+            y1: (k + 1) * h / bands,
+            fogR: 0.30, fogG: 0.42, fogB: 0.62,
+            fogStart: 420.0,
+            fogEnd: 1500.0,
+        }
+        if bands == 1 {
+            let _ = bandRaster(job)
+        } else {
+            ps.push(Promise<i64>.blocking(move(): i64 => {
+                return bandRaster(job)
+            }
+            ))
+        }
+    }
+    if ps.len > 0 {
+        let _ = Promise.all(ps).await()!
+    }
+}

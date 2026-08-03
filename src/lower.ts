@@ -169,13 +169,13 @@ class LowerCtx {
         signed: type?.tag === "int" ? type.signed : true,
       }];
     });
-    // @export joins the entry program's functions in getting external linkage.
+    // @externalLinkage joins the entry program's functions in getting external linkage.
     // Imported-module fns are `internal` by default, which is right for dead-code
     // elimination but makes them invisible to a dlopen'd library that must resolve
     // against this executable.
     const exported = new Set(program.userFnNames ?? []);
     for (const fn of program.functions) {
-      if (fn.attributes?.some(a => a.name === "export")) exported.add(fn.name);
+      if (fn.attributes?.some(a => a.name === "externalLinkage")) exported.add(fn.name);
     }
     const linkLibs: string[] = [];
     for (const fn of program.functions) {

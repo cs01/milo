@@ -1,7 +1,0 @@
-// @error: nothing here to export
-@export
-extern fn getpid(): i32
-
-fn main() {
-    let _p = getpid()
-}

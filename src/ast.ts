@@ -199,7 +199,7 @@ export interface Function {
   isExtern: boolean;
   isVariadic: boolean;
   // `pub` marks a declaration importable from another file. Absent = file-private.
-  // Distinct from `@export`, which forces C external linkage (see checker.ts).
+  // Distinct from `@externalLinkage`, which forces C external linkage (see checker.ts).
   isPub?: boolean;
   // Set by the parser to the function-name token — the anchor for fn-level
   // diagnostics (duplicate/shadow definitions). Optional: synthetic Function

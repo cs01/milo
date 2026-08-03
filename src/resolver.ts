@@ -384,7 +384,7 @@ export function resolveImports(program: Program, sourceDir: string, target: Targ
   // Index every package's top-level names first: an intra-package reference is
   // rewritten only when the name is declared *somewhere* in that package, and a
   // cross-package import binds only names the target package actually mangled
-  // (an `extern`/`@export` fn keeps its written name).
+  // (an `extern`/`@externalLinkage` fn keeps its written name).
   const pkgDecls = new Map<string, PkgDeclNames>();
   for (const u of units) {
     if (u.pkg === "") continue;

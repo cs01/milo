@@ -1,0 +1,488 @@
+// Every GLSL program in the game, in one file.
+//
+// They are strings rather than files on disk so the binary is the whole game —
+// there is no asset path to get wrong and no way to ship a build whose shaders do
+// not match its code.
+
+// ── worlds ────────────────────────────────────────────────────────────────────
+
+pub let PLANET_VERT: string = "#version 330 core
+layout (location = 0) in vec3 aPos;
+layout (location = 1) in vec2 aUv;
+layout (location = 2) in vec3 aNormal;
+uniform mat4 uMvp;
+uniform mat4 uModel;
+out vec2 vUv;
+out vec3 vNormal;
+out vec3 vWorld;
+out vec3 vLocal;
+void main() {
+    vUv = aUv;
+    vNormal = mat3(uModel) * aNormal;
+    vLocal = aPos;
+    vWorld = (uModel * vec4(aPos, 1.0)).xyz;
+    gl_Position = uMvp * vec4(aPos, 1.0);
+}
+"
+
+// The surface. One shader for every world: a rocky moon and a gas giant differ
+// only in the uniforms they are handed.
+//
+// The relief is faked from the map's own luminance rather than from a height
+// texture, because none of these maps ship one. It is wrong in the strict sense —
+// a dark basalt plain is not a valley — but at the scale the camera flies at it
+// reads as terrain, and it is what turns a flat decal into a place.
+pub let PLANET_FRAG: string = "#version 330 core
+in vec2 vUv;
+in vec3 vNormal;
+in vec3 vWorld;
+in vec3 vLocal;
+out vec4 fragColor;
+
+uniform sampler2D uTex;
+uniform vec3 uSun;        // direction TO the sun, world space, normalised
+uniform vec3 uSunLocal;   // the same direction in the planet's own frame
+uniform vec3 uEye;
+uniform vec2 uTexel;
+uniform float uBump;      // relief strength, 0 for a gas giant
+uniform float uSpecular;  // water glint, 0 for anything airless
+uniform float uAmbient;
+uniform float uEmissive;  // 1.0 for the Sun, which lights itself
+uniform vec3 uAtmoTint;   // colour scattered into the day side near the limb
+uniform float uAtmoAmount;
+uniform float uRingInner; // 0 disables the ring shadow entirely
+uniform float uRingOuter;
+uniform float uPunch;     // contrast and saturation lift for a flat map
+uniform float uOrbitBand; // 0..1 sweep of the parking orbit highlight
+uniform vec3 uOrbitDir;
+
+float luma(vec3 c) { return dot(c, vec3(0.299, 0.587, 0.114)); }
+
+// Contrast around a mid-grey, then saturation by the same amount. Applied to the
+// albedo before any lighting, so it reads as a property of the surface rather
+// than as a grade over the whole picture.
+vec3 punchy(vec3 c, float k) {
+    c = clamp((c - 0.42) * k + 0.42, 0.0, 2.0);
+    return clamp(mix(vec3(luma(c)), c, 1.0 + (k - 1.0) * 1.6), 0.0, 2.0);
+}
+
+void main() {
+    vec3 albedo = punchy(texture(uTex, vUv).rgb, uPunch);
+    vec3 N = normalize(vNormal);
+
+    if (uEmissive > 0.5) {
+        // Self-lit: brighten toward the limb so the disc reads as a ball of gas
+        // rather than a sticker, and let the bloom pass do the rest.
+        vec3 V = normalize(uEye - vWorld);
+        float limb = pow(1.0 - max(dot(N, V), 0.0), 1.6);
+        fragColor = vec4(albedo * (1.7 + 3.2 * limb), 1.0);
+        return;
+    }
+
+    // Perturb the normal by the map's luminance gradient. The tangent frame is
+    // built from the pole axis, which degenerates exactly at the poles — the
+    // guard keeps those two rows from turning into a bright ring.
+    if (uBump > 0.0) {
+        float l0 = luma(texture(uTex, vUv - vec2(uTexel.x, 0.0)).rgb);
+        float l1 = luma(texture(uTex, vUv + vec2(uTexel.x, 0.0)).rgb);
+        float l2 = luma(texture(uTex, vUv - vec2(0.0, uTexel.y)).rgb);
+        float l3 = luma(texture(uTex, vUv + vec2(0.0, uTexel.y)).rgb);
+        vec3 up = vec3(0.0, 1.0, 0.0);
+        vec3 T = cross(up, N);
+        if (dot(T, T) > 1e-5) {
+            T = normalize(T);
+            vec3 B = cross(N, T);
+            N = normalize(N + (T * (l0 - l1) + B * (l2 - l3)) * uBump * 24.0);
+        }
+    }
+
+    float ndl = dot(N, uSun);
+    // A wrapped diffuse term: real terminators are soft because the sun is a
+    // disc, not a point, and a hard max(ndl, 0) puts a razor line across Mars.
+    float lambert = clamp((ndl + 0.07) / 1.07, 0.0, 1.0);
+    lambert = lambert * lambert * (3.0 - 2.0 * lambert);
+
+    // Saturn's rings across its own summer hemisphere. The fragment is walked
+    // toward the sun in planet-local space until it crosses the ring plane; if it
+    // lands between the edges it is in shadow.
+    float ringShade = 1.0;
+    if (uRingOuter > 0.0 && abs(uSunLocal.y) > 1e-3) {
+        float t = -vLocal.y / uSunLocal.y;
+        if (t > 0.0) {
+            vec2 hit = vLocal.xz + t * uSunLocal.xz;
+            float r = length(hit);
+            float e = 0.02;
+            float inBand = smoothstep(uRingInner - e, uRingInner + e, r)
+                         * (1.0 - smoothstep(uRingOuter - e, uRingOuter + e, r));
+            ringShade = 1.0 - 0.72 * inBand;
+        }
+    }
+
+    vec3 V = normalize(uEye - vWorld);
+    vec3 lit = albedo * (uAmbient + lambert * ringShade);
+
+    // Water glint. Masked on blue-over-red so it lands on ocean and not on the
+    // Sahara, which is the brightest thing on the map and would otherwise flare.
+    if (uSpecular > 0.0) {
+        float wet = clamp((albedo.b - albedo.r * 0.9) * 4.0, 0.0, 1.0);
+        vec3 H = normalize(uSun + V);
+        // The GEOMETRIC normal, not the bumped one: relief faked from albedo
+        // scatters the highlight into a wide smear across half an ocean.
+        float spec = pow(max(dot(normalize(vNormal), H), 0.0), 320.0) * wet * uSpecular;
+        lit += vec3(1.0, 0.97, 0.88) * spec * lambert * 0.55;
+    }
+
+    // Air seen edge-on from the lit side: the haze that makes a day side glow at
+    // the rim instead of ending at a hard circle.
+    if (uAtmoAmount > 0.0) {
+        float rim = pow(1.0 - max(dot(N, V), 0.0), 3.0);
+        lit += uAtmoTint * rim * uAtmoAmount * (0.25 + 0.75 * lambert);
+    }
+
+    // The parking orbit, announced on the surface: a band of light that runs
+    // once around the planet along the orbit plane while the departure card is
+    // up, so 'you are in a 300 km orbit' has something to look at.
+    if (uOrbitBand > 0.0) {
+        float d = abs(dot(normalize(vLocal), uOrbitDir));
+        float band = exp(-pow(d * 26.0, 2.0));
+        lit += vec3(0.95, 0.68, 0.28) * band * uOrbitBand * 0.55;
+    }
+
+    fragColor = vec4(lit, 1.0);
+}
+"
+
+// The atmosphere shell — a slightly larger sphere with its winding reversed, so
+// what is drawn is its FAR side and the glow appears outside the planet's
+// silhouette rather than smeared over its face.
+pub let ATMO_FRAG: string = "#version 330 core
+in vec3 vNormal;
+in vec3 vWorld;
+out vec4 fragColor;
+uniform vec3 uSun;
+uniform vec3 uEye;
+uniform vec3 uColor;
+uniform float uStrength;
+void main() {
+    vec3 N = normalize(vNormal);
+    vec3 V = normalize(uEye - vWorld);
+    float e = abs(dot(N, V));
+    // Peak just inside the shell's own silhouette and fall to nothing AT it.
+    // Without the second factor the glow is brightest exactly where the shell
+    // ends, and a hard-edged translucent ball is drawn around the planet.
+    float rim = pow(clamp(1.0 - e, 0.0, 1.0), 3.5) * smoothstep(0.0, 0.30, e);
+    // Forward scattering: the limb in front of the sun is far brighter than the
+    // limb behind it, which is what makes a sunrise from orbit look like one.
+    float sun = clamp(dot(N, uSun), -1.0, 1.0);
+    float scatter = pow(clamp(sun * 0.5 + 0.5, 0.0, 1.0), 2.2);
+    fragColor = vec4(uColor * rim * scatter * uStrength, 1.0);
+}
+"
+
+// Saturn's rings. Banded by radius from a hash rather than a texture, with the
+// planet's own shadow cut across them.
+pub let RING_FRAG: string = "#version 330 core
+in vec2 vUv;
+in vec3 vWorld;
+in vec3 vLocal;
+out vec4 fragColor;
+uniform vec3 uSun;
+uniform vec3 uEye;
+uniform vec3 uTint;
+
+float hash11(float p) {
+    p = fract(p * 0.1031);
+    p *= p + 33.33;
+    return fract((p + p) * p);
+}
+
+float bands(float t) {
+    float s = 0.0;
+    s += 0.55 * hash11(floor(t * 90.0));
+    s += 0.30 * hash11(floor(t * 31.0) + 17.0);
+    s += 0.15 * hash11(floor(t * 190.0) + 91.0);
+    return s;
+}
+
+void main() {
+    float t = vUv.x;
+    float d = bands(t);
+    // The Cassini Division and the faint inner C ring: real gaps, placed by
+    // fraction of the ring span, because a uniform disc reads as a CD.
+    float gap = 1.0 - 0.92 * exp(-pow((t - 0.62) * 42.0, 2.0));
+    float inner = smoothstep(0.0, 0.10, t);
+    float outer = 1.0 - smoothstep(0.93, 1.0, t);
+    float alpha = clamp(d * 1.55, 0.0, 1.0) * gap * inner * outer;
+
+    // Planet shadow: the ring point is dark if the line from it to the sun
+    // passes within one planet radius of the origin on the sun's side.
+    vec3 p = vLocal;
+    float tc = dot(-p, uSun);
+    float shade = 1.0;
+    if (tc > 0.0) {
+        float miss = length(p + uSun * tc);
+        shade = mix(0.16, 1.0, smoothstep(0.99, 1.14, miss));
+    }
+
+    // Ice scatters forward, so the far side of the ring glows when it is between
+    // the eye and the sun.
+    vec3 V = normalize(uEye - vWorld);
+    float phase = 1.0 + 0.8 * pow(clamp(dot(-V, uSun), 0.0, 1.0), 8.0);
+
+    vec3 col = uTint * (0.55 + 0.45 * d) * shade * phase;
+    fragColor = vec4(col * alpha, alpha);
+}
+"
+
+// ── sky ───────────────────────────────────────────────────────────────────────
+
+// The background, as a fullscreen quad with the view ray rebuilt per pixel.
+// Nothing here is geometry, so it costs one pass and never sorts against a
+// planet.
+pub let SKY_FRAG: string = "#version 330 core
+in vec2 vUv;
+out vec4 fragColor;
+uniform vec3 uRight;
+uniform vec3 uUp;
+uniform vec3 uFwd;
+uniform float uTanHalf;
+uniform float uAspect;
+uniform vec3 uSunDir;
+uniform float uSunSize;   // how hard the disc is; the Sun is smaller from Saturn
+uniform float uTime;
+uniform float uSkyGain;
+
+float hash13(vec3 p) {
+    p = fract(p * 0.1031);
+    p += dot(p, p.zyx + 31.32);
+    return fract((p.x + p.y) * p.z);
+}
+
+vec3 hash33(vec3 p) {
+    p = vec3(dot(p, vec3(127.1, 311.7, 74.7)),
+             dot(p, vec3(269.5, 183.3, 246.1)),
+             dot(p, vec3(113.5, 271.9, 124.6)));
+    return fract(sin(p) * 43758.5453);
+}
+
+// One star field: a random point inside each cell of a 3D lattice sampled on the
+// unit sphere. Cheaper and rounder than a 2D lat/lon grid, which crowds stars at
+// the poles the way every hand-rolled starfield does. The brightest hit in the
+// 3x3x3 neighbourhood wins, so a star never gets a second one welded to its side.
+vec3 stars(vec3 dir, float scale, float sharp, float density) {
+    vec3 p = dir * scale;
+    vec3 id = floor(p);
+    vec3 f = p - id;
+    float best = 0.0;
+    vec3 tint = vec3(1.0);
+    for (int k = -1; k <= 1; k++) {
+        for (int j = -1; j <= 1; j++) {
+            for (int i = -1; i <= 1; i++) {
+                vec3 o = vec3(float(i), float(j), float(k));
+                vec3 cell = id + o;
+                vec3 r = hash33(cell);
+                if (r.z <= density) {
+                    continue;
+                }
+                vec3 jitter = hash33(cell + 7.3);
+                float d = length(f - o - jitter);
+                float b = pow(max(0.0, 1.0 - d * sharp), 12.0);
+                // Twinkle: a slow per-star phase, not a global flicker.
+                b *= 0.72 + 0.28 * sin(uTime * 1.7 + r.x * 40.0);
+                if (b > best) {
+                    best = b;
+                    // Real star colour runs blue-white to orange; the ones that
+                    // are obviously coloured are the memorable ones.
+                    tint = mix(vec3(0.62, 0.74, 1.0), vec3(1.0, 0.78, 0.55), r.y);
+                }
+            }
+        }
+    }
+    return tint * best;
+}
+
+float vnoise(vec3 p) {
+    vec3 i = floor(p);
+    vec3 f = p - i;
+    f = f * f * (3.0 - 2.0 * f);
+    float n000 = hash13(i + vec3(0.0, 0.0, 0.0));
+    float n100 = hash13(i + vec3(1.0, 0.0, 0.0));
+    float n010 = hash13(i + vec3(0.0, 1.0, 0.0));
+    float n110 = hash13(i + vec3(1.0, 1.0, 0.0));
+    float n001 = hash13(i + vec3(0.0, 0.0, 1.0));
+    float n101 = hash13(i + vec3(1.0, 0.0, 1.0));
+    float n011 = hash13(i + vec3(0.0, 1.0, 1.0));
+    float n111 = hash13(i + vec3(1.0, 1.0, 1.0));
+    return mix(mix(mix(n000, n100, f.x), mix(n010, n110, f.x), f.y),
+               mix(mix(n001, n101, f.x), mix(n011, n111, f.x), f.y), f.z);
+}
+
+float fbm(vec3 p) {
+    float a = 0.5;
+    float s = 0.0;
+    for (int i = 0; i < 4; i++) {
+        s += a * vnoise(p);
+        p *= 2.03;
+        a *= 0.5;
+    }
+    return s;
+}
+
+void main() {
+    vec2 ndc = vUv * 2.0 - 1.0;
+    vec3 dir = normalize(uFwd + uRight * ndc.x * uTanHalf * uAspect + uUp * ndc.y * uTanHalf);
+
+    vec3 col = vec3(0.004, 0.005, 0.010);
+
+    // The galactic plane, tilted so it does not line up with anything else on
+    // screen. Broad, dim, and slightly warm — it should be noticed second.
+    vec3 axis = normalize(vec3(0.36, 0.82, -0.44));
+    float band = exp(-pow(dot(dir, axis) * 3.4, 2.0));
+    float clouds = fbm(dir * 9.0) * 0.6 + fbm(dir * 26.0) * 0.4;
+    col += vec3(0.15, 0.15, 0.24) * band * (0.12 + 0.88 * clouds) * 0.42;
+
+    col += stars(dir, 34.0, 5.6, 0.76) * 2.2;
+    col += stars(dir, 78.0, 10.0, 0.62) * 0.85;
+    col += stars(dir, 165.0, 20.0, 0.45) * 0.30;
+
+    // The Sun as a hard disc with a wide halo. Its apparent size is a uniform
+    // because the whole point of the last mission is that it has shrunk.
+    float sd = max(dot(dir, uSunDir), 0.0);
+    col += vec3(1.0, 0.94, 0.82) * pow(sd, 3400.0 / max(uSunSize, 0.02)) * 26.0;
+    col += vec3(1.0, 0.80, 0.52) * pow(sd, 160.0) * 0.5 * uSunSize;
+    col += vec3(0.85, 0.62, 0.40) * pow(sd, 12.0) * 0.045 * uSunSize;
+
+    fragColor = vec4(col * uSkyGain, 1.0);
+}
+"
+
+// ── overlay ───────────────────────────────────────────────────────────────────
+
+// The whole interface — panels, orbit lines, the transfer arc, markers, text — is
+// one vertex buffer through this pair, with the shape selected per vertex, so it
+// is a single draw call in the order it was written.
+pub let UI_VERT: string = "#version 330 core
+layout (location = 0) in vec2 aPos;
+layout (location = 1) in vec2 aUv;
+layout (location = 2) in vec4 aColor;
+layout (location = 3) in vec4 aAux;
+uniform vec2 uScreen;
+out vec2 vUv;
+out vec4 vColor;
+out vec4 vAux;
+void main() {
+    vUv = aUv;
+    vColor = aColor;
+    vAux = aAux;
+    gl_Position = vec4(aPos.x / uScreen.x * 2.0 - 1.0, 1.0 - aPos.y / uScreen.y * 2.0, 0.0, 1.0);
+}
+"
+
+// aAux = (mode, radius, halfWidth, halfHeight) in pixels.
+//   0 solid   1 glyph   2 rounded rect   3 radial glow   4 ring outline
+//   5 line    6 line glow   7 disc
+//
+// Modes 5 and 6 read vUv.y as the signed position across the strip, -1 at one
+// edge and +1 at the other, with the half-thickness in pixels in aAux.y. That is
+// what lets an orbit be one hairline wide at any zoom without a geometry shader.
+pub let UI_FRAG: string = "#version 330 core
+in vec2 vUv;
+in vec4 vColor;
+in vec4 vAux;
+out vec4 fragColor;
+uniform sampler2D uFont;
+void main() {
+    int mode = int(vAux.x + 0.5);
+    float a = 1.0;
+    if (mode == 1) {
+        // The atlas is greyscale coverage stored in red; it is the alpha.
+        a = texture(uFont, vUv).r;
+    } else if (mode == 2) {
+        vec2 hs = vAux.zw;
+        float r = min(vAux.y, min(hs.x, hs.y));
+        vec2 q = abs((vUv * 2.0 - 1.0) * hs) - hs + r;
+        float d = length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - r;
+        a = 1.0 - smoothstep(-0.75, 0.75, d);
+    } else if (mode == 3) {
+        float d = length(vUv * 2.0 - 1.0);
+        a = pow(clamp(1.0 - d, 0.0, 1.0), 2.2);
+    } else if (mode == 4) {
+        vec2 hs = vAux.zw;
+        float d = abs(length((vUv * 2.0 - 1.0) * hs) - (hs.x - vAux.y));
+        a = 1.0 - smoothstep(0.0, 1.4, d - 0.7);
+    } else if (mode == 5) {
+        // `half` is a reserved word in GLSL, hence `hw`.
+        float hw = max(vAux.y, 0.5);
+        float d = abs(vUv.y) * hw;
+        a = 1.0 - smoothstep(hw - 1.0, hw, d);
+    } else if (mode == 6) {
+        float t = clamp(abs(vUv.y), 0.0, 1.0);
+        a = exp(-t * t * 3.6) - 0.027;
+    } else if (mode == 7) {
+        float d = length(vUv * 2.0 - 1.0);
+        a = clamp((1.0 - d) * max(vAux.y, 1.0), 0.0, 1.0);
+    }
+    if (a <= 0.0) {
+        discard;
+    }
+    fragColor = vec4(vColor.rgb, vColor.a * a);
+}
+"
+
+// ── post ──────────────────────────────────────────────────────────────────────
+
+pub let BRIGHT_FRAG: string = "#version 330 core
+in vec2 vUv;
+out vec4 fragColor;
+uniform sampler2D uSrc;
+uniform vec2 uTexel;
+uniform float uThreshold;
+void main() {
+    vec3 s = vec3(0.0);
+    for (int dy = 0; dy < 4; dy++) {
+        for (int dx = 0; dx < 4; dx++) {
+            vec2 o = vec2(float(dx) - 1.5, float(dy) - 1.5) * uTexel;
+            s += texture(uSrc, vUv + o).rgb;
+        }
+    }
+    s *= 0.0625;
+    float lum = dot(s, vec3(0.299, 0.587, 0.114));
+    float keep = lum > uThreshold ? (lum - uThreshold) / lum : 0.0;
+    fragColor = vec4(s * keep, 1.0);
+}
+"
+
+pub let BLUR_FRAG: string = "#version 330 core
+in vec2 vUv;
+out vec4 fragColor;
+uniform sampler2D uSrc;
+uniform vec2 uStep;
+void main() {
+    vec3 s = texture(uSrc, vUv - 2.0 * uStep).rgb * 0.0625
+           + texture(uSrc, vUv - uStep).rgb * 0.25
+           + texture(uSrc, vUv).rgb * 0.375
+           + texture(uSrc, vUv + uStep).rgb * 0.25
+           + texture(uSrc, vUv + 2.0 * uStep).rgb * 0.0625;
+    fragColor = vec4(s, 1.0);
+}
+"
+
+// Tone-map and gamma. The scene is rendered into a half-float target in linear
+// light, so this is the only place the picture becomes sRGB.
+pub let COMPOSITE_FRAG: string = "#version 330 core
+in vec2 vUv;
+out vec4 fragColor;
+uniform sampler2D uScene;
+uniform sampler2D uBloom;
+uniform float uGain;
+uniform float uExposure;
+uniform float uVignette;
+void main() {
+    vec3 lin = (texture(uScene, vUv).rgb + texture(uBloom, vUv).rgb * uGain) * uExposure;
+    lin = clamp(lin, 0.0, 12.0);
+    vec3 mapped = lin / (1.0 + lin);
+    vec2 d = vUv - 0.5;
+    mapped *= 1.0 - uVignette * dot(d, d);
+    fragColor = vec4(pow(mapped, vec3(0.4545454545)), 1.0);
+}
+"

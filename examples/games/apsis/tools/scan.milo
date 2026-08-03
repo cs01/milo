@@ -1,0 +1,68 @@
+// Where the real launch opportunity is, so the mission table can be centred on
+// it.
+//
+//   milo run examples/games/apsis/tools/scan.milo
+//
+// A mission's window is meant to contain the cheapest transfer with room on both
+// sides. This sweeps far wider than any window and prints the global minimum it
+// finds, which is how the dates and flight times in mission.milo were chosen.
+
+from "std/math" import {
+    Math
+}
+from "./../ephem" import {
+    bodyTable, SEC_PER_DAY, dateOf
+}
+from "./../mission" import {
+    missionTable, MISSION_COUNT
+}
+from "./../plan" import {
+    solvePlan
+}
+
+fn round0(v: f64): string {
+    return $"{Math.round(v) as i64}"
+}
+
+pub fn main(): i32 {
+    let bodies = bodyTable()
+    let missions = missionTable()
+    var i = 0
+    while i < MISSION_COUNT {
+        // Sweep a whole synodic period either side of the written window, in
+        // steps coarse enough to finish and fine enough not to skip a trough.
+        var spanDays = 400.0
+        var stepDays = 4.0
+        if i == 0 {
+            spanDays = 30.0
+            stepDays = 0.5
+        }
+        if i >= 4 {
+            spanDays = 800.0
+            stepDays = 8.0
+        }
+        let t0Mid = missions[i].windowOpen + missions[i].windowSpan * 0.5
+        var bestT = 0.0
+        var bestF = 0.0
+        var bestDv = 1.0e30
+        var d = -spanDays
+        while d <= spanDays {
+            let t = t0Mid + d * SEC_PER_DAY
+            var k = 0
+            while k <= 40 {
+                let tof = missions[i].tofMin + (missions[i].tofMax - missions[i].tofMin) * (k as f64) / 40.0
+                let p = solvePlan(bodies, missions[i], t, tof)
+                if p.ok && p.dvTotal < bestDv {
+                    bestDv = p.dvTotal
+                    bestT = t
+                    bestF = tof
+                }
+                k = k + 1
+            }
+            d = d + stepDays
+        }
+        print(missions[i].name + ": best " + round0(bestDv) + " m/s at " + $"{dateOf(bestT)}" + " tof " + round0(bestF / SEC_PER_DAY) + "d" + "  (window opens " + $"{dateOf(missions[i].windowOpen)}" + ", offset " + round0((bestT - missions[i].windowOpen) / SEC_PER_DAY) + "d)")
+        i = i + 1
+    }
+    return 0
+}

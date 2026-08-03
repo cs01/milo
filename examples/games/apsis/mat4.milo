@@ -1,0 +1,173 @@
+// 4x4 matrices, column-major — the layout GLSL reads a `mat4` in, so a matrix
+// built here goes straight to `Shader.uniformMat4` with no transpose.
+//
+// The vector type is `Vec3` from vec3.milo, the same one the ephemeris and the
+// Lambert solver use. There is exactly one 3D vector in this game: a position the
+// physics produced and a position the camera projects must not be two types that
+// happen to have the same fields.
+
+from "std/math" import {
+    Math
+}
+from "./vec3" import {
+    Vec3, v3
+}
+
+pub fn identity(): Vec<f32> {
+    var m: Vec<f32> = Vec.filled(16, 0.0)
+    m[0] = 1.0
+    m[5] = 1.0
+    m[10] = 1.0
+    m[15] = 1.0
+    return m
+}
+
+pub fn multiply(a: &Vec<f32>, b: &Vec<f32>): Vec<f32> {
+    var m: Vec<f32> = Vec.filled(16, 0.0)
+    var col = 0
+    while col < 4 {
+        var row = 0
+        while row < 4 {
+            var s: f32 = 0.0
+            var k = 0
+            while k < 4 {
+                s = s + a[k * 4 + row] * b[col * 4 + k]
+                k = k + 1
+            }
+            m[col * 4 + row] = s
+            row = row + 1
+        }
+        col = col + 1
+    }
+    return m
+}
+
+pub fn perspective(fovY: f64, aspect: f64, near: f64, far: f64): Vec<f32> {
+    var m: Vec<f32> = Vec.filled(16, 0.0)
+    let f = 1.0 / Math.tan(fovY * 0.5)
+    m[0] = (f / aspect) as f32
+    m[5] = f as f32
+    m[10] = ((far + near) / (near - far)) as f32
+    m[11] = -1.0
+    m[14] = ((2.0 * far * near) / (near - far)) as f32
+    return m
+}
+
+pub fn lookAt(eye: &Vec3, at: &Vec3, up: &Vec3): Vec<f32> {
+    let f = (at - eye).norm()
+    let s = f.cross(up).norm()
+    let u = s.cross(f)
+    var m = identity()
+    m[0] = s.x as f32
+    m[4] = s.y as f32
+    m[8] = s.z as f32
+    m[1] = u.x as f32
+    m[5] = u.y as f32
+    m[9] = u.z as f32
+    m[2] = (-f.x) as f32
+    m[6] = (-f.y) as f32
+    m[10] = (-f.z) as f32
+    m[12] = (-s.dot(eye)) as f32
+    m[13] = (-u.dot(eye)) as f32
+    m[14] = f.dot(eye) as f32
+    return m
+}
+
+pub fn rotationY(a: f64): Vec<f32> {
+    var m = identity()
+    let c = Math.cos(a)
+    let s = Math.sin(a)
+    m[0] = c as f32
+    m[2] = (-s) as f32
+    m[8] = s as f32
+    m[10] = c as f32
+    return m
+}
+
+pub fn rotationZ(a: f64): Vec<f32> {
+    var m = identity()
+    let c = Math.cos(a)
+    let s = Math.sin(a)
+    m[0] = c as f32
+    m[1] = s as f32
+    m[4] = (-s) as f32
+    m[5] = c as f32
+    return m
+}
+
+pub fn scaling(k: f64): Vec<f32> {
+    var m = identity()
+    m[0] = k as f32
+    m[5] = k as f32
+    m[10] = k as f32
+    return m
+}
+
+pub fn translation(p: &Vec3): Vec<f32> {
+    var m = identity()
+    m[12] = p.x as f32
+    m[13] = p.y as f32
+    m[14] = p.z as f32
+    return m
+}
+
+// The rotation part of `m` applied to a direction — no translation, which is what
+// a surface normal or a spin axis wants.
+pub fn rotateVec(m: &Vec<f32>, v: &Vec3): Vec3 {
+    let x = (m[0] as f64) * v.x + (m[4] as f64) * v.y + (m[8] as f64) * v.z
+    let y = (m[1] as f64) * v.x + (m[5] as f64) * v.y + (m[9] as f64) * v.z
+    let z = (m[2] as f64) * v.x + (m[6] as f64) * v.y + (m[10] as f64) * v.z
+    return v3(x, y, z)
+}
+
+// The inverse of a pure rotation is its transpose. Every model matrix here is
+// tilt * spin, both rotations, so this is exact and steadier than a general
+// 4x4 inverse.
+pub fn transposeRot(m: &Vec<f32>): Vec<f32> {
+    var t = identity()
+    t[0] = m[0]
+    t[1] = m[4]
+    t[2] = m[8]
+    t[4] = m[1]
+    t[5] = m[5]
+    t[6] = m[9]
+    t[8] = m[2]
+    t[9] = m[6]
+    t[10] = m[10]
+    return t
+}
+
+pub struct Projected {
+    x: f64,
+    y: f64,
+    depth: f64, // view-space distance, for sorting and for fading distant labels
+    visible: bool,
+}
+
+// World point to drawable pixels, with y already flipped into the overlay's
+// top-left-origin space. `visible` is false behind the eye, where the perspective
+// divide flips the sign and a point behind you would land on screen.
+pub fn project(mvp: &Vec<f32>, p: &Vec3, w: f64, h: f64): Projected {
+    let cx = (mvp[0] as f64) * p.x + (mvp[4] as f64) * p.y + (mvp[8] as f64) * p.z + (mvp[12] as f64)
+    let cy = (mvp[1] as f64) * p.x + (mvp[5] as f64) * p.y + (mvp[9] as f64) * p.z + (mvp[13] as f64)
+    let cw = (mvp[3] as f64) * p.x + (mvp[7] as f64) * p.y + (mvp[11] as f64) * p.z + (mvp[15] as f64)
+    if cw <= 1.0e-9 {
+        return Projected {
+            x: 0.0, y: 0.0, depth: 0.0, visible: false
+        }
+    }
+    let inv = 1.0 / cw
+    return Projected {
+        x: (cx * inv * 0.5 + 0.5) * w,
+        y: (0.5 - cy * inv * 0.5) * h,
+        depth: cw,
+        visible: true,
+    }
+}
+
+// The ecliptic frame the physics works in has z out of the orbit plane; OpenGL
+// wants y up. Every position crosses this boundary exactly once, here, so a
+// planet drawn edge-on is a bug in one function rather than in six.
+pub fn toGl(p: &Vec3): Vec3 {
+    return v3(p.x, p.z, p.y)
+}

@@ -1,0 +1,497 @@
+// Game state: six missions, five phases, one camera.
+//
+// The phases are a straight line — look at where you are leaving, look at where
+// you are going, plan the transfer from above, fly it, arrive — and the camera is
+// what joins them. It is never cut: every change of phase retargets the same
+// orbiting camera and lets it ease, which is why zooming out of Earth to the top
+// view reads as leaving rather than as a scene change.
+
+from "std/math" import {
+    Math
+}
+from "./vec3" import {
+    Vec3, v3
+}
+from "./ephem" import {
+    Body, bodyTable, bodyPos, bodyState, SEC_PER_DAY, SUN
+}
+from "./worlds" import {
+    Look, lookTable
+}
+from "./mission" import {
+    Mission, missionTable, MISSION_COUNT, DEPART_ORBIT
+}
+from "./plan" import {
+    Plan, planFail, solvePlan, bestPlan, shipAt, relPos, relState, parkRadius, parkSpeed
+}
+
+pub let PHASE_TITLE: i64 = 0
+
+pub let PHASE_DEPART: i64 = 1
+
+pub let PHASE_TARGET: i64 = 2
+
+pub let PHASE_PLAN: i64 = 3
+
+pub let PHASE_FLY: i64 = 4
+
+pub let PHASE_ARRIVED: i64 = 5
+
+// How long each cinematic runs before it hands over on its own. Long enough to
+// see the world turn, short enough that a player replaying a mission is not
+// held hostage — and any key skips it anyway.
+pub let CINEMATIC_SECONDS: f64 = 7.5
+
+pub struct Cam {
+    focus: i64, // body the camera orbits; the mission's centre means the map view
+    yaw: f64,
+    pitch: f64,
+    dist: f64, // metres from the focus
+    tYaw: f64,
+    tPitch: f64,
+    tDist: f64,
+    tFocus: i64,
+    at: Vec3, // the eased focus point, in the central body's frame
+    rate: f64, // easing rate for the current move
+    drifting: bool, // slow automatic yaw, switched off by the first drag
+}
+
+pub struct Game {
+    bodies: Vec<Body>,
+    looks: Vec<Look>,
+    missions: Vec<Mission>,
+    mi: i64,
+    phase: i64,
+    phaseT: f64,
+    departT: f64, // the departure dial, absolute epoch
+    tof: f64, // the flight-time dial
+    plan: Plan,
+    flightT: f64, // seconds since the departure burn
+    warp: f64,
+    paused: bool,
+    spentDepart: f64,
+    spentArrive: f64,
+    won: bool,
+    cleared: Vec<bool>,
+    cam: Cam,
+    help: bool,
+    spin: f64, // cinematic rotation phase
+    fade: f64, // 0..1 overlay fade-in after a phase change
+}
+
+fn clampf(v: f64, lo: f64, hi: f64): f64 {
+    if v < lo {
+        return lo
+    }
+    if v > hi {
+        return hi
+    }
+    return v
+}
+
+pub fn shortestAngle(a: f64): f64 {
+    let pi = Math.pi()
+    var x = a
+    while x > pi {
+        x = x - pi * 2.0
+    }
+    while x < -pi {
+        x = x + pi * 2.0
+    }
+    return x
+}
+
+// The radius the map view has to contain: the further of the two orbits, with
+// room around it. A transfer that leaves the frame is a transfer nobody can read.
+pub fn mapRadius(g: &Game): f64 {
+    let m = g.missions[g.mi]
+    let a = relPos(g.bodies, m.from, g.departT, m.center).len()
+    let b = relPos(g.bodies, m.to, g.departT + g.tof, m.center).len()
+    var r = a
+    if b > r {
+        r = b
+    }
+    if r < 1.0 {
+        r = 1.0e9
+    }
+    return r
+}
+
+pub fn mapDistance(g: &Game): f64 {
+    return mapRadius(g) * 3.5
+}
+
+// Where the camera is pointed, in the central body's frame.
+pub fn focusPoint(g: &Game, id: i64): Vec3 {
+    let m = g.missions[g.mi]
+    if id == m.center {
+        return v3(0.0, 0.0, 0.0)
+    }
+    return relPos(g.bodies, id, displayTime(g), m.center)
+}
+
+// The epoch everything is drawn at. Scrubbing the departure dial moves the
+// planets, which is the whole reason a launch window is visible rather than
+// merely stated.
+pub fn displayTime(g: &Game): f64 {
+    if g.phase == PHASE_FLY || g.phase == PHASE_ARRIVED {
+        if g.plan.ok {
+            return g.plan.t0 + g.flightT
+        }
+    }
+    return g.departT
+}
+
+pub fn currentMission(g: &Game): i64 {
+    return g.mi
+}
+
+fn cameraTargets(g: &mut Game) {
+    let m = g.missions[g.mi]
+    if g.phase == PHASE_TITLE {
+        g.cam.tFocus = m.center
+        g.cam.tDist = mapDistance(g) * 1.35
+        g.cam.tPitch = 1.30
+        g.cam.rate = 1.4
+        g.cam.drifting = true
+    }
+    if g.phase == PHASE_DEPART {
+        g.cam.tFocus = m.from
+        g.cam.tDist = g.bodies[m.from].radius * g.looks[m.from].viewDist
+        g.cam.tPitch = 0.28
+        g.cam.tYaw = 1.97
+        g.cam.rate = 1.5
+        g.cam.drifting = true
+    }
+    if g.phase == PHASE_TARGET {
+        g.cam.tFocus = m.to
+        g.cam.tDist = g.bodies[m.to].radius * g.looks[m.to].viewDist
+        g.cam.tPitch = 0.24
+        g.cam.tYaw = 1.62
+        g.cam.rate = 1.5
+        g.cam.drifting = true
+    }
+    if g.phase == PHASE_PLAN {
+        g.cam.tFocus = m.center
+        g.cam.tDist = mapDistance(g)
+        g.cam.tPitch = 1.47
+        g.cam.tYaw = 0.0
+        // Slower than the others on purpose: this is the shot that turns a planet
+        // into a dot on a diagram, and it should be felt.
+        g.cam.rate = 0.85
+        g.cam.drifting = false
+    }
+    if g.phase == PHASE_FLY {
+        g.cam.tFocus = m.center
+        g.cam.tDist = mapDistance(g)
+        g.cam.tPitch = 1.44
+        g.cam.rate = 0.9
+        g.cam.drifting = false
+    }
+    if g.phase == PHASE_ARRIVED {
+        g.cam.tFocus = m.to
+        g.cam.tDist = g.bodies[m.to].radius * g.looks[m.to].viewDist
+        g.cam.tPitch = 0.30
+        g.cam.rate = 0.8
+        g.cam.drifting = true
+    }
+}
+
+pub fn setPhase(g: &mut Game, phase: i64) {
+    g.phase = phase
+    g.phaseT = 0.0
+    g.fade = 0.0
+    cameraTargets(g)
+}
+
+pub fn replan(g: &mut Game) {
+    let m = g.missions[g.mi]
+    g.plan = solvePlan(g.bodies, m, g.departT, g.tof)
+}
+
+pub fn startMission(g: &mut Game, index: i64) {
+    g.mi = clampf(index as f64, 0.0, (MISSION_COUNT - 1) as f64) as i64
+    let m = g.missions[g.mi]
+    g.departT = m.windowOpen + m.departNominal
+    g.tof = m.tofNominal
+    g.flightT = 0.0
+    g.spentDepart = 0.0
+    g.spentArrive = 0.0
+    g.won = false
+    g.paused = false
+    replan(g)
+    g.warp = g.tof / 26.0
+    setPhase(g, PHASE_DEPART)
+    // Land the camera on the departure world immediately rather than easing in
+    // from wherever the last mission ended, which would fly across the solar
+    // system for two seconds before the mission starts.
+    g.cam.focus = m.from
+    g.cam.dist = g.cam.tDist
+    g.cam.yaw = g.cam.tYaw
+    g.cam.pitch = g.cam.tPitch
+    g.cam.at = focusPoint(g, m.from)
+}
+
+pub fn gameNew(): Game {
+    var g = Game {
+        bodies: bodyTable(),
+        looks: lookTable(),
+        missions: missionTable(),
+        mi: 0,
+        phase: PHASE_TITLE,
+        phaseT: 0.0,
+        departT: 0.0,
+        tof: 0.0,
+        plan: planFail(),
+        flightT: 0.0,
+        warp: 1.0,
+        paused: false,
+        spentDepart: 0.0,
+        spentArrive: 0.0,
+        won: false,
+        cleared: Vec.filled(MISSION_COUNT, false),
+        cam: Cam {
+            focus: 0, yaw: 0.0, pitch: 1.30, dist: 1.0e12,
+            tYaw: 0.0, tPitch: 1.30, tDist: 1.0e12, tFocus: 0,
+            at: v3(0.0, 0.0, 0.0), rate: 1.2, drifting: true,
+        }
+        ,
+        help: false,
+        spin: 0.0,
+        fade: 0.0,
+    }
+    let m = g.missions[0]
+    g.departT = m.windowOpen + m.departNominal
+    g.tof = m.tofNominal
+    replan(g)
+    g.cam.dist = mapDistance(g) * 1.35
+    g.cam.tDist = g.cam.dist
+    return g
+}
+
+// ── the dials ─────────────────────────────────────────────────────────────────
+
+// Both dials move in days, and both are clamped to the mission's own limits: the
+// window is a fact about the solar system, and letting a player scrub outside it
+// would only ever show them a transfer that costs four times as much.
+pub fn scrub(g: &mut Game, dDays: f64, dTofDays: f64) {
+    let m = g.missions[g.mi]
+    if dDays != 0.0 {
+        g.departT = clampf(g.departT + dDays * SEC_PER_DAY, m.windowOpen, m.windowOpen + m.windowSpan)
+    }
+    if dTofDays != 0.0 {
+        g.tof = clampf(g.tof + dTofDays * SEC_PER_DAY, m.tofMin, m.tofMax)
+    }
+    replan(g)
+}
+
+pub fn snapToBest(g: &mut Game) {
+    let m = g.missions[g.mi]
+    let p = bestPlan(g.bodies, m)
+    if p.ok {
+        g.departT = p.t0
+        g.tof = p.tof
+        g.plan = p
+    }
+}
+
+pub fn withinBudget(g: &Game): bool {
+    if !g.plan.ok {
+        return false
+    }
+    return g.plan.dvTotal <= g.missions[g.mi].budget
+}
+
+pub fn commit(g: &mut Game) {
+    if !withinBudget(g) {
+        return
+    }
+    g.spentDepart = g.plan.dvDepart
+    g.flightT = 0.0
+    g.warp = g.tof / 26.0
+    setPhase(g, PHASE_FLY)
+}
+
+// ── time ──────────────────────────────────────────────────────────────────────
+
+pub fn warpSteps(): Vec<f64> {
+    var v: Vec<f64> = Vec.new()
+    v.push(0.25)
+    v.push(0.5)
+    v.push(1.0)
+    v.push(2.0)
+    v.push(4.0)
+    v.push(8.0)
+    return v
+}
+
+// The warp multiplier is relative to 'the whole flight in about half a minute',
+// so one key means the same thing on a four-day lunar hop and a six-year cruise
+// to Saturn.
+pub fn baseWarp(g: &Game): f64 {
+    return g.tof / 26.0
+}
+
+pub fn stepWarp(g: &mut Game, up: bool) {
+    let steps = warpSteps()
+    let base = baseWarp(g)
+    var idx = 2
+    var i = 0
+    while i < steps.len {
+        if Math.abs(steps[i] * base - g.warp) < Math.abs(steps[idx] * base - g.warp) {
+            idx = i
+        }
+        i = i + 1
+    }
+    if up {
+        idx = idx + 1
+    } else {
+        idx = idx - 1
+    }
+    if idx < 0 {
+        idx = 0
+    }
+    if idx >= steps.len {
+        idx = steps.len - 1
+    }
+    g.warp = steps[idx] * base
+    g.paused = false
+}
+
+pub fn warpMultiple(g: &Game): f64 {
+    let base = baseWarp(g)
+    if base <= 0.0 {
+        return 1.0
+    }
+    return g.warp / base
+}
+
+// ── the frame ─────────────────────────────────────────────────────────────────
+
+pub fn advance(g: &mut Game, dt: f64) {
+    g.phaseT = g.phaseT + dt
+    g.fade = clampf(g.fade + dt * 1.6, 0.0, 1.0)
+    g.spin = g.spin + dt * 0.10
+
+    if g.phase == PHASE_DEPART || g.phase == PHASE_TARGET {
+        if g.phaseT > CINEMATIC_SECONDS {
+            advancePhase(g)
+        }
+    }
+
+    if g.phase == PHASE_FLY && !g.paused {
+        g.flightT = g.flightT + dt * g.warp
+        if g.flightT >= g.tof {
+            g.flightT = g.tof
+            g.spentArrive = g.plan.dvArrive
+            g.won = g.plan.dvTotal <= g.missions[g.mi].budget
+            if g.won {
+                g.cleared[g.mi] = true
+            }
+            setPhase(g, PHASE_ARRIVED)
+        }
+    }
+
+    // The approach: hand the camera to the target world for the last stretch, so
+    // arrival is watched from close by rather than as two dots meeting.
+    if g.phase == PHASE_FLY && g.plan.ok {
+        let left = g.tof - g.flightT
+        let close = g.tof * 0.045
+        if left < close {
+            let m = g.missions[g.mi]
+            let k = clampf(1.0 - left / close, 0.0, 1.0)
+            g.cam.tFocus = m.to
+            let near = g.bodies[m.to].radius * g.looks[m.to].viewDist
+            g.cam.tDist = mapDistance(g) * (1.0 - k) + near * k
+            g.cam.tPitch = 1.44 * (1.0 - k) + 0.30 * k
+            g.cam.rate = 1.1
+        }
+    }
+}
+
+pub fn advancePhase(g: &mut Game) {
+    if g.phase == PHASE_TITLE {
+        startMission(g, 0)
+        return
+    }
+    if g.phase == PHASE_DEPART {
+        setPhase(g, PHASE_TARGET)
+        return
+    }
+    if g.phase == PHASE_TARGET {
+        setPhase(g, PHASE_PLAN)
+        return
+    }
+    if g.phase == PHASE_ARRIVED {
+        if g.won && g.mi + 1 < MISSION_COUNT {
+            startMission(g, g.mi + 1)
+        } else {
+            startMission(g, g.mi)
+        }
+    }
+}
+
+pub fn updateCamera(g: &mut Game, dt: f64) {
+    if g.cam.focus != g.cam.tFocus {
+        // Switching focus mid-move would teleport the camera by the distance
+        // between two planets; instead the old focus point is kept until the
+        // eased position has caught up with the new one.
+        g.cam.focus = g.cam.tFocus
+    }
+    let want = focusPoint(g, g.cam.focus)
+    let k = 1.0 - Math.exp(-dt * g.cam.rate)
+    g.cam.at = g.cam.at.lerp(want, k)
+    // Distance eases in log space: a move from three Earth radii out to two
+    // astronomical units is a change of scale, not of position, and easing it
+    // linearly spends nine tenths of the shot already arrived.
+    let ld = Math.log(g.cam.dist) + (Math.log(g.cam.tDist) - Math.log(g.cam.dist)) * k
+    g.cam.dist = Math.exp(ld)
+    g.cam.yaw = g.cam.yaw + shortestAngle(g.cam.tYaw - g.cam.yaw) * k
+    g.cam.pitch = g.cam.pitch + (g.cam.tPitch - g.cam.pitch) * k
+    if g.cam.drifting {
+        g.cam.yaw = g.cam.yaw + dt * 0.045
+        g.cam.tYaw = g.cam.yaw
+    }
+}
+
+pub fn dragCamera(g: &mut Game, dx: f64, dy: f64) {
+    g.cam.drifting = false
+    g.cam.yaw = g.cam.yaw - dx * 0.005
+    g.cam.pitch = clampf(g.cam.pitch + dy * 0.005, -1.52, 1.52)
+    g.cam.tYaw = g.cam.yaw
+    g.cam.tPitch = g.cam.pitch
+}
+
+pub fn zoomCamera(g: &mut Game, amount: f64) {
+    let m = g.missions[g.mi]
+    let lo = g.bodies[m.to].radius * 1.6
+    let hi = mapDistance(g) * 6.0
+    g.cam.dist = clampf(g.cam.dist * Math.exp(-amount), lo, hi)
+    g.cam.tDist = g.cam.dist
+}
+
+// The camera's eye, in the central body's frame, in metres.
+pub fn eyePoint(g: &Game): Vec3 {
+    let cp = Math.cos(g.cam.pitch)
+    let dir = v3(cp * Math.sin(g.cam.yaw), Math.sin(g.cam.pitch), cp * Math.cos(g.cam.yaw))
+    // The camera orbits in GL axes (y up); the frame it orbits IN is the ecliptic
+    // (z up), so the swap happens here and the caller never sees two conventions.
+    let ecl = v3(dir.x, dir.z, dir.y)
+    return g.cam.at + ecl.scale(g.cam.dist)
+}
+
+// Where the ship is right now, in the central frame. Before the burn it sits at
+// the departure point, which is where the plan says it will start.
+pub fn shipPoint(g: &Game): Vec3 {
+    if !g.plan.ok {
+        return v3(0.0, 0.0, 0.0)
+    }
+    if g.phase == PHASE_FLY || g.phase == PHASE_ARRIVED {
+        return shipAt(g.bodies, g.missions[g.mi], g.plan, g.flightT).pos
+    }
+    return g.plan.r1
+}
+
+pub fn fuelLeft(g: &Game): f64 {
+    return g.missions[g.mi].budget - g.spentDepart - g.spentArrive
+}

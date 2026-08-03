@@ -1,0 +1,203 @@
+// Where everything lands on screen, without a screen.
+//
+//   milo run examples/games/apsis/tools/checklayout.milo
+//
+// The graphical build cannot be driven by a test, but the arithmetic behind it
+// can: this stages each phase of each mission, builds the very same camera the
+// renderer builds, and projects the bodies and the transfer arc through the very
+// same matrices. A trajectory drawn off the edge of the window, a planet behind
+// the camera, or a map zoomed so far out that the whole mission is four pixels
+// wide all show up here as numbers.
+
+from "std/math" import {
+    Math
+}
+from "./../vec3" import {
+    Vec3
+}
+from "./../game" import {
+    Game, gameNew, startMission, setPhase, updateCamera, commit, shipPoint,
+    snapToBest, PHASE_DEPART, PHASE_TARGET, PHASE_PLAN, PHASE_FLY,
+}
+from "./../render" import {
+    viewOf, projectPoint, apparentRadius, bodyPoint, missionBodies, SPHERE_MIN_PX,
+}
+from "./../plan" import {
+    arcPoints,
+}
+from "./../mission" import {
+    MISSION_COUNT,
+}
+from "./../worlds" import {
+    displayName,
+}
+from "./../ephem" import {
+    SEC_PER_DAY,
+}
+
+let W: f64 = 1360.0
+
+let H: f64 = 860.0
+
+fn round0(v: f64): string {
+    return $"{Math.round(v) as i64}"
+}
+
+fn pad(s: &string, n: i64): string {
+    var out = s.clone()
+    while out.len < n {
+        out = out + " "
+    }
+    return out
+}
+
+// Let the camera finish its move, the way it would after a couple of seconds of
+// play. Everything below is about where things end up, not about the ease.
+fn settle(g: &mut Game) {
+    var i = 0
+    while i < 400 {
+        updateCamera(g, 0.05)
+        i = i + 1
+    }
+}
+
+fn phaseName(p: i64): string {
+    if p == PHASE_DEPART {
+        return "depart"
+    }
+    if p == PHASE_TARGET {
+        return "target"
+    }
+    if p == PHASE_PLAN {
+        return "plan"
+    }
+    return "fly"
+}
+
+fn report(g: &mut Game, phase: i64, failures: &mut i64) {
+    let v = viewOf(g, W, H)
+    var line = pad(phaseName(phase), 8)
+
+    // Every body the mission draws has to be somewhere a player can see.
+    var ids = missionBodies(g)
+    var i = 0
+    while i < ids.len {
+        let p = bodyPoint(g, ids[i], g.departT)
+        let pr = projectPoint(v, p)
+        let px = apparentRadius(v, p, g.bodies[ids[i]].radius)
+        var mark = "dot"
+        if px >= SPHERE_MIN_PX {
+            mark = "ball"
+        }
+        line = line + pad(displayName(ids[i]) + " " + round0(pr.x) + "," + round0(pr.y) + " r" + round0(px) + " " + mark, 30)
+        i = i + 1
+    }
+    print(line)
+
+    // The arc has to be on the screen, and it has to be big enough to read.
+    if g.plan.ok && (phase == PHASE_PLAN || phase == PHASE_FLY) {
+        let pts = arcPoints(g.bodies, g.missions[g.mi], g.plan, 64)
+        var minX = 1.0e9
+        var maxX = -1.0e9
+        var minY = 1.0e9
+        var maxY = -1.0e9
+        var offScreen = 0
+        var k = 0
+        while k < pts.len {
+            let pr = projectPoint(v, pts[k])
+            if pr.visible {
+                if pr.x < minX {
+                    minX = pr.x
+                }
+                if pr.x > maxX {
+                    maxX = pr.x
+                }
+                if pr.y < minY {
+                    minY = pr.y
+                }
+                if pr.y > maxY {
+                    maxY = pr.y
+                }
+                if pr.x < 0.0 || pr.x > W || pr.y < 0.0 || pr.y > H {
+                    offScreen = offScreen + 1
+                }
+            } else {
+                offScreen = offScreen + 1
+            }
+            k = k + 1
+        }
+        let spanX = maxX - minX
+        let spanY = maxY - minY
+        print("        arc x " + round0(minX) + ".." + round0(maxX) + "  y " + round0(minY) + ".." + round0(maxY) + "  off-screen " + $"{offScreen}" + "/" + $"{pts.len}")
+        if offScreen > 6 {
+            print("        FAIL: the transfer arc does not fit the window")
+            failures = failures + 1
+        }
+        if spanX < 120.0 && spanY < 120.0 {
+            print("        FAIL: the transfer arc is smaller than a thumbnail")
+            failures = failures + 1
+        }
+    }
+
+    // On a cinematic the world has to fill a good part of the frame, or the shot
+    // is a dot in the middle of a starfield.
+    if phase == PHASE_DEPART || phase == PHASE_TARGET {
+        var id = g.missions[g.mi].from
+        if phase == PHASE_TARGET {
+            id = g.missions[g.mi].to
+        }
+        let px = apparentRadius(v, bodyPoint(g, id, g.departT), g.bodies[id].radius)
+        if px < H * 0.18 {
+            print("        FAIL: " + displayName(id) + " is only " + round0(px) + " px across on its own card")
+            failures = failures + 1
+        }
+    }
+}
+
+pub fn main(): i32 {
+    var g = gameNew()
+    var failures = 0
+    var mi = 0
+    while mi < MISSION_COUNT {
+        startMission(g, mi)
+        print("== " + g.missions[mi].name)
+        settle(g)
+        report(g, PHASE_DEPART, failures)
+
+        setPhase(g, PHASE_TARGET)
+        settle(g)
+        report(g, PHASE_TARGET, failures)
+
+        setPhase(g, PHASE_PLAN)
+        settle(g)
+        report(g, PHASE_PLAN, failures)
+
+        // Mid-flight, with the ship half way round the arc. The dials have to be
+        // snapped to a plan that fits first, because that is the only kind of
+        // plan the game will let anyone launch.
+        snapToBest(g)
+        commit(g)
+        if g.phase != PHASE_FLY {
+            print("        FAIL: the cheapest plan in the window will not commit")
+            failures = failures + 1
+        }
+        g.flightT = g.tof * 0.5
+        settle(g)
+        report(g, PHASE_FLY, failures)
+        let sp = shipPoint(g)
+        let v = viewOf(g, W, H)
+        let pr = projectPoint(v, sp)
+        print("        ship at " + round0(pr.x) + "," + round0(pr.y))
+        if !pr.visible || pr.x < 0.0 || pr.x > W || pr.y < 0.0 || pr.y > H {
+            print("        FAIL: the ship is off the window in mid-flight")
+            failures = failures + 1
+        }
+        mi = mi + 1
+    }
+    if failures > 0 {
+        print($"{failures}" + " layout problems")
+        return 1
+    }
+    print("layout is sane in every phase of every mission")
+    return 0
+}

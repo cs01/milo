@@ -1,0 +1,401 @@
+// APSIS — plan one transfer between two worlds, under real gravity.
+//
+//   milo build examples/games/apsis/main.milo -o /tmp/apsis --release && /tmp/apsis
+//
+// Six trips, from the Moon out to Saturn. Each one is the same shape: look at
+// where you are leaving from, look at where you are going, pull back until both
+// orbits fit on the screen, and then turn two dials — when you leave, and how
+// long you take — until the burn fits in the tank. Then you fly the arc you drew.
+//
+// You never type a velocity. The two numbers on the dials are the only inputs,
+// and everything else — the launch window, the price of arriving early, the fact
+// that Mercury costs three times what Mars does — falls out of the arithmetic
+// rather than out of a difficulty setting.
+//
+// The planets are on rails from real Keplerian elements; the transfer is a real
+// Lambert solution about the real central mass; the arc that is drawn is walked
+// by the same propagator the ship flies, so the prediction and the flight cannot
+// disagree. `tools/checkmissions.milo` runs every mission headless and prints
+// what it costs.
+
+from "std/gpu" import {
+    readPixelsRgba8
+}
+from "std/math" import {
+    Math
+}
+from "std/args" import {
+    args
+}
+from "std/strconv" import {
+    parseInt, parseFloat
+}
+from "std/png" import {
+    encodePng
+}
+from "std/fs" import {
+    writeFile
+}
+from "./sdl" import {
+    Input, inputNew, pollInput, hostNew, drawableSize, pixelScale,
+    SDL_GL_SwapWindow, SDL_GL_DeleteContext, SDL_DestroyWindow, SDL_Quit,
+    SDL_GetTicks, SDL_SetWindowFullscreen, SDL_WINDOW_FULLSCREEN_DESKTOP,
+}
+from "./post" import {
+    Post, postNew
+}
+from "./ui2d" import {
+    Ui, uiNew, uiSetAtlasSize
+}
+from "./assets" import {
+    fontAtlas
+}
+from "./render" import {
+    Renderer, rendererNew, View, viewOf, drawScene, ensureLoaded
+}
+from "./hud" import {
+    drawOverlay
+}
+from "./ephem" import {
+    SEC_PER_DAY
+}
+from "./game" import {
+    Game, gameNew, advance, advancePhase, updateCamera, dragCamera, zoomCamera,
+    scrub, snapToBest, commit, startMission, setPhase, stepWarp,
+    PHASE_TITLE, PHASE_DEPART, PHASE_TARGET, PHASE_PLAN, PHASE_FLY, PHASE_ARRIVED,
+}
+
+pub let WIN_W: i64 = 1360
+
+pub let WIN_H: i64 = 860
+
+// Holding a dial should cross its whole range in about this long. Both dials use
+// it, so the four-day lunar window and the hundred-and-fifty-day Saturn one feel
+// the same under the finger.
+pub let DIAL_SECONDS: f64 = 4.5
+
+pub struct Options {
+    shot: string,
+    mission: i64,
+    phase: i64,
+    frames: i64,
+    flight: f64, // fraction of the flight to jump to before shooting
+    gain: f64,
+}
+
+fn phaseFromName(s: &string): i64 {
+    if s == "title" {
+        return PHASE_TITLE
+    }
+    if s == "depart" {
+        return PHASE_DEPART
+    }
+    if s == "target" {
+        return PHASE_TARGET
+    }
+    if s == "plan" {
+        return PHASE_PLAN
+    }
+    if s == "fly" {
+        return PHASE_FLY
+    }
+    if s == "arrived" {
+        return PHASE_ARRIVED
+    }
+    return -1
+}
+
+fn parseOptions(): Options {
+    var o = Options {
+        shot: "", mission: 0, phase: -1, frames: 90, flight: 0.5, gain: 0.34,
+    }
+    let a = args()
+    var i = 1
+    while i < a.len {
+        let k = a[i].clone()
+        var v = ""
+        if i + 1 < a.len {
+            v = a[i + 1].clone()
+        }
+        if k == "--shot" {
+            o.shot = v.clone()
+        }
+        if k == "--mission" {
+            o.mission = parseInt(v.clone()).unwrapOr(1) - 1
+        }
+        if k == "--phase" {
+            o.phase = phaseFromName(v)
+        }
+        if k == "--frames" {
+            o.frames = parseInt(v.clone()).unwrapOr(90)
+        }
+        if k == "--flight" {
+            o.flight = parseFloat(v.clone()).unwrapOr(0.5)
+        }
+        if k == "--gain" {
+            o.gain = parseFloat(v.clone()).unwrapOr(0.34)
+        }
+        i = i + 1
+    }
+    return o
+}
+
+// ABGR8888 words, bottom-up as GL hands them over, into top-down RGB bytes.
+fn toRgb(px: &Vec<u32>, w: i64, h: i64): string {
+    var out = ""
+    var y = 0
+    while y < h {
+        let row = (h - 1 - y) * w
+        var x = 0
+        while x < w {
+            let p = px[row + x]
+            out.push((p & 0xFF) as u8)
+            out.push(((p >> 8) & 0xFF) as u8)
+            out.push(((p >> 16) & 0xFF) as u8)
+            x = x + 1
+        }
+        y = y + 1
+    }
+    return out
+}
+
+fn writeShot(path: &string, w: i64, h: i64) {
+    let px = readPixelsRgba8(w, h)
+    match encodePng(toRgb(px, w, h), w, h, 3) {
+        Result.Ok(bytes) => {
+            match writeFile(path, bytes) {
+                Result.Ok(_) => {
+                    print("wrote " + path)
+                }
+                Result.Err(e) => {
+                    print("cannot write " + path + ": " + $"{e}")
+                }
+            }
+        }
+        Result.Err(e) => {
+            print("encode failed: " + e)
+        }
+    }
+}
+
+// Everything the keyboard and the mouse can do, in one place, keyed by phase.
+fn handleInput(g: &mut Game, inp: &Input, dt: f64) {
+    if inp.help {
+        g.help = !g.help
+    }
+    if g.help {
+        return
+    }
+    if inp.down && inp.dragged {
+        dragCamera(g, inp.dragX, inp.dragY)
+    }
+    let zoom = inp.wheel * 0.16 + inp.zoom * dt * 1.8
+    if zoom != 0.0 {
+        zoomCamera(g, zoom)
+    }
+    if inp.digit > 0 {
+        startMission(g, inp.digit - 1)
+    }
+    if inp.reset {
+        startMission(g, g.mi)
+    }
+
+    if g.phase == PHASE_TITLE || g.phase == PHASE_DEPART || g.phase == PHASE_TARGET {
+        if inp.advance || inp.commit || inp.clicked {
+            advancePhase(g)
+        }
+    }
+    if g.phase == PHASE_PLAN {
+        if inp.scrubX != 0.0 || inp.scrubY != 0.0 {
+            let dayStep = g.missions[g.mi].windowSpan / SEC_PER_DAY / DIAL_SECONDS * dt
+            let tofStep = (g.missions[g.mi].tofMax - g.missions[g.mi].tofMin) / SEC_PER_DAY / DIAL_SECONDS * dt
+            scrub(g, inp.scrubX * dayStep, inp.scrubY * tofStep)
+        }
+        if inp.snap {
+            snapToBest(g)
+        }
+        if inp.commit {
+            commit(g)
+        }
+        if inp.advance {
+            setPhase(g, PHASE_DEPART)
+        }
+    }
+    if g.phase == PHASE_FLY {
+        if inp.advance {
+            g.paused = !g.paused
+        }
+        if inp.warpUp {
+            stepWarp(g, true)
+        }
+        if inp.warpDown {
+            stepWarp(g, false)
+        }
+    }
+    if g.phase == PHASE_ARRIVED {
+        if inp.commit || inp.advance || inp.clicked {
+            advancePhase(g)
+        }
+    }
+}
+
+// Put the game straight into a state worth photographing, so a look can be
+// checked from a terminal without a person at the keyboard.
+fn stage(g: &mut Game, o: &Options) {
+    startMission(g, o.mission)
+    if o.phase < 0 {
+        return
+    }
+    if o.phase == PHASE_FLY || o.phase == PHASE_ARRIVED {
+        // The dials open over budget on most missions, and `commit` refuses a
+        // plan that does not fit — so a staged flight has to be a plan a player
+        // could actually have launched.
+        snapToBest(g)
+        commit(g)
+        g.flightT = g.tof * o.flight
+        if o.phase == PHASE_ARRIVED {
+            g.flightT = g.tof
+            g.spentArrive = g.plan.dvArrive
+            g.won = true
+            setPhase(g, PHASE_ARRIVED)
+        }
+    } else {
+        setPhase(g, o.phase)
+    }
+    // The camera eases, and a shot taken on frame one would catch it mid-flight
+    // between two phases; land it where the phase wants it.
+    var i = 0
+    while i < 400 {
+        updateCamera(g, 0.05)
+        i = i + 1
+    }
+    g.fade = 1.0
+}
+
+pub fn main(): i32 {
+    let opt = parseOptions()
+    var host = hostNew("APSIS - you can be a rocket scientist too", WIN_W, WIN_H)
+    if !host.ok {
+        print(host.err)
+        return 1
+    }
+
+    var renderer = match rendererNew() {
+        Result.Ok(r) => r
+        Result.Err(e) => {
+            print("shaders: " + e)
+            return 2
+        }
+    }
+    var ui = match uiNew(fontAtlas()) {
+        Result.Ok(x) => x
+        Result.Err(e) => {
+            print("overlay: " + e)
+            return 2
+        }
+    }
+    uiSetAtlasSize(ui, 384.0, 240.0)
+
+    var g = gameNew()
+    let shooting = opt.shot.len > 0
+    if shooting {
+        stage(g, opt)
+    }
+    // The two worlds this mission visits, decoded before the first frame rather
+    // than during it: twenty megabytes of PNG is a visible stall, and the place
+    // to spend it is the loading of a mission, not the middle of a camera move.
+    ensureLoaded(renderer, g.missions[g.mi].from)
+    ensureLoaded(renderer, g.missions[g.mi].to)
+
+    var size = drawableSize(host.win)
+    var post = match postNew(size.w, size.h) {
+        Result.Ok(p) => p
+        Result.Err(e) => {
+            print("render targets: " + e)
+            return 3
+        }
+    }
+    var postW = size.w
+    var postH = size.h
+
+    var inp = inputNew()
+    var ev: [u8; 64] = [0; 64]
+    var fullscreen = false
+    let start = SDL_GetTicks()
+    var prevMs = SDL_GetTicks()
+    var frame = 0
+    var loadedFor = -1
+
+    while !inp.quit {
+        frame = frame + 1
+        let nowMs = SDL_GetTicks()
+        var dt = ((nowMs - prevMs) as f64) / 1000.0
+        prevMs = nowMs
+        // A long stall — the first frame after decoding a map, or a window drag —
+        // must not be handed to the flight as a real time step, or the ship jumps
+        // a month at high warp.
+        if dt > 0.1 {
+            dt = 0.1
+        }
+        let time = ((nowMs - start) as f64) / 1000.0
+
+        size = drawableSize(host.win)
+        let w = size.w as f64
+        let h = size.h as f64
+        pollInput(inp, ev, pixelScale(host.win))
+
+        if size.w != postW || size.h != postH {
+            post.free()
+            post = match postNew(size.w, size.h) {
+                Result.Ok(p) => p
+                Result.Err(_) => {
+                    return 3
+                }
+            }
+            postW = size.w
+            postH = size.h
+        }
+
+        if inp.fullscreen {
+            fullscreen = !fullscreen
+            var flag: u32 = 0
+            if fullscreen {
+                flag = SDL_WINDOW_FULLSCREEN_DESKTOP
+            }
+            let _ = SDL_SetWindowFullscreen(host.win, flag)
+        }
+
+        handleInput(g, inp, dt)
+        if loadedFor != g.mi {
+            ensureLoaded(renderer, g.missions[g.mi].from)
+            ensureLoaded(renderer, g.missions[g.mi].to)
+            loadedFor = g.mi
+        }
+        if !shooting {
+            advance(g, dt)
+            updateCamera(g, dt)
+        }
+
+        let view = viewOf(g, w, h)
+        post.beginScene()
+        var marks = drawScene(renderer, g, view, time)
+        post.resolve(opt.gain, 1.0, 0.36, size.w, size.h)
+
+        drawOverlay(ui, g, view, marks)
+        ui.flush(w, h)
+
+        if shooting && frame >= opt.frames {
+            writeShot(opt.shot, size.w, size.h)
+            inp.quit = true
+        }
+        SDL_GL_SwapWindow(host.win)
+    }
+
+    renderer.free()
+    ui.free()
+    post.free()
+    SDL_GL_DeleteContext(host.ctx)
+    SDL_DestroyWindow(host.win)
+    SDL_Quit()
+    return 0
+}

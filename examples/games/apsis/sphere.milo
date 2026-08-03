@@ -1,0 +1,127 @@
+// Geometry: a UV sphere for the worlds, a flat annulus for Saturn's rings.
+//
+// The lat/lon convention lives here and nowhere else:
+//
+//   lat  +90 north  ..  -90 south
+//   lon -180 .. +180, increasing east, with lon = 0 facing +Z
+//   u    0 at lon -180, 1 at lon +180
+//   v    0 at the north pole (image row 0), 1 at the south pole
+
+from "std/math" import {
+    Math
+}
+from "./vec3" import {
+    Vec3, v3
+}
+
+pub let PI: f64 = 3.14159265358979323846
+
+pub let DEG: f64 = 0.017453292519943295
+
+pub fn latLonToUnit(lat: f64, lon: f64): Vec3 {
+    let cl = Math.cos(lat * DEG)
+    return v3(cl * Math.sin(lon * DEG), Math.sin(lat * DEG), cl * Math.cos(lon * DEG))
+}
+
+fn push8(v: &mut Vec<f32>, x: f64, y: f64, z: f64, u: f64, t: f64, nx: f64, ny: f64, nz: f64) {
+    v.push(x as f32)
+    v.push(y as f32)
+    v.push(z as f32)
+    v.push(u as f32)
+    v.push(t as f32)
+    v.push(nx as f32)
+    v.push(ny as f32)
+    v.push(nz as f32)
+}
+
+// A unit sphere as `segments` columns by `rings` rows of quads, wound
+// counter-clockwise seen from outside so back-face culling keeps the near half.
+//
+// The pole rows still emit degenerate triangles — two of the four corners
+// coincide — which the rasteriser discards for free and which keeps the loop a
+// single uniform grid. Special-casing them buys nothing and is where the seam
+// artefacts come from.
+pub fn sphereMesh(segments: i64, rings: i64): Vec<f32> {
+    var v: Vec<f32> = Vec.new()
+    var j = 0
+    while j < rings {
+        let v0 = (j as f64) / (rings as f64)
+        let v1 = ((j + 1) as f64) / (rings as f64)
+        let lat0 = 90.0 - v0 * 180.0
+        let lat1 = 90.0 - v1 * 180.0
+        var i = 0
+        while i < segments {
+            let u0 = (i as f64) / (segments as f64)
+            let u1 = ((i + 1) as f64) / (segments as f64)
+            let lon0 = u0 * 360.0 - 180.0
+            let lon1 = u1 * 360.0 - 180.0
+            let a = latLonToUnit(lat0, lon0)
+            let b = latLonToUnit(lat0, lon1)
+            let c = latLonToUnit(lat1, lon1)
+            let d = latLonToUnit(lat1, lon0)
+            push8(v, a.x, a.y, a.z, u0, v0, a.x, a.y, a.z)
+            push8(v, d.x, d.y, d.z, u0, v1, d.x, d.y, d.z)
+            push8(v, c.x, c.y, c.z, u1, v1, c.x, c.y, c.z)
+            push8(v, a.x, a.y, a.z, u0, v0, a.x, a.y, a.z)
+            push8(v, c.x, c.y, c.z, u1, v1, c.x, c.y, c.z)
+            push8(v, b.x, b.y, b.z, u1, v0, b.x, b.y, b.z)
+            i = i + 1
+        }
+        j = j + 1
+    }
+    return v
+}
+
+// The same sphere with the winding reversed, for the atmosphere shell: it is
+// drawn with the depth test on and back-face culling still enabled, so showing
+// only its far side puts the halo behind the planet where a limb glow belongs.
+pub fn invertedSphereMesh(segments: i64, rings: i64): Vec<f32> {
+    var src = sphereMesh(segments, rings)
+    var v: Vec<f32> = Vec.new()
+    var t = 0
+    while t + 24 <= src.len {
+        // Swap the second and third vertex of every triangle, and flip the
+        // normals so the shader's fresnel term still measures against outward.
+        var k = 0
+        while k < 8 {
+            v.push(src[t + k])
+            k = k + 1
+        }
+        k = 0
+        while k < 8 {
+            v.push(src[t + 16 + k])
+            k = k + 1
+        }
+        k = 0
+        while k < 8 {
+            v.push(src[t + 8 + k])
+            k = k + 1
+        }
+        t = t + 24
+    }
+    return v
+}
+
+// A flat ring in the XZ plane. `u` runs 0 at the inner edge to 1 at the outer,
+// which is the only coordinate the ring shader needs — the banding is a function
+// of radius alone. Two-sided is handled by drawing it with culling off.
+pub fn ringMesh(segments: i64, inner: f64, outer: f64): Vec<f32> {
+    var v: Vec<f32> = Vec.new()
+    var i = 0
+    while i < segments {
+        let a0 = ((i as f64) / (segments as f64)) * PI * 2.0
+        let a1 = (((i + 1) as f64) / (segments as f64)) * PI * 2.0
+        let c0 = Math.cos(a0)
+        let s0 = Math.sin(a0)
+        let c1 = Math.cos(a1)
+        let s1 = Math.sin(a1)
+        push8(v, c0 * inner, 0.0, s0 * inner, 0.0, 0.0, 0.0, 1.0, 0.0)
+        push8(v, c1 * inner, 0.0, s1 * inner, 0.0, 1.0, 0.0, 1.0, 0.0)
+        push8(v, c1 * outer, 0.0, s1 * outer, 1.0, 1.0, 0.0, 1.0, 0.0)
+        push8(v, c0 * inner, 0.0, s0 * inner, 0.0, 0.0, 0.0, 1.0, 0.0)
+        push8(v, c1 * outer, 0.0, s1 * outer, 1.0, 1.0, 0.0, 1.0, 0.0)
+        push8(v, c0 * outer, 0.0, s0 * outer, 1.0, 0.0, 0.0, 1.0, 0.0)
+        i = i + 1
+    }
+    return v
+}

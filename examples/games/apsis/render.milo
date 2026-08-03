@@ -1,0 +1,406 @@
+// The 3D scene: sky, worlds, rings, halos.
+//
+// One camera covers a parking orbit and Saturn's, a range of six orders of
+// magnitude, and it does it by never expressing anything in absolute units. Every
+// position is first made relative to what the camera is looking at and then
+// divided by how far away the camera is, so the eye is always at distance one and
+// the depth buffer always sees the same numbers. Without that the far plane needed
+// for Saturn would z-fight Earth into stripes.
+//
+// A body is drawn as a sphere only while it is big enough on screen to be worth
+// one. Below a couple of pixels it becomes a marker on the overlay, which is both
+// cheaper and the honest way to draw a planet from an astronomical unit away.
+
+from "std/gpu" import {
+    Gpu, Mesh, Shader, Texture2D, QUAD_VERT
+}
+from "std/math" import {
+    Math
+}
+from "./vec3" import {
+    Vec3, v3
+}
+from "./mat4" import {
+    Projected, identity, multiply, perspective, lookAt, rotationY, rotationZ,
+    scaling, translation, rotateVec, transposeRot, project, toGl,
+}
+from "./sphere" import {
+    sphereMesh, invertedSphereMesh, ringMesh, DEG,
+}
+from "./shaders" import {
+    PLANET_VERT, PLANET_FRAG, ATMO_FRAG, RING_FRAG, SKY_FRAG,
+}
+from "./assets" import {
+    loadMap, dummyTexture,
+}
+from "./ephem" import {
+    Body, BODY_COUNT, SUN, SATURN, bodyPos,
+}
+from "./worlds" import {
+    Look,
+}
+from "./game" import {
+    Game, PHASE_DEPART, PHASE_TARGET, PHASE_PLAN, PHASE_FLY, PHASE_ARRIVED,
+    eyePoint, displayTime,
+}
+from "./plan" import {
+    relPos, parkRadius,
+}
+
+pub let FOV: f64 = 0.72
+
+// Below this many pixels of radius a sphere is not worth drawing: the overlay's
+// marker is clearer, and a two-pixel textured ball is just aliasing.
+pub let SPHERE_MIN_PX: f64 = 2.2
+
+pub struct Renderer {
+    planetSh: Shader,
+    atmoSh: Shader,
+    ringSh: Shader,
+    skySh: Shader,
+    ball: Mesh,
+    shell: Mesh,
+    ring: Mesh,
+    skyQuad: Mesh,
+    tex: Vec<Texture2D>,
+    loaded: Vec<bool>,
+}
+
+pub fn rendererNew(): Result<Renderer, string> {
+    let planetSh = Shader.compile(PLANET_VERT, PLANET_FRAG)?
+    let atmoSh = Shader.compile(PLANET_VERT, ATMO_FRAG)?
+    let ringSh = Shader.compile(PLANET_VERT, RING_FRAG)?
+    let skySh = Shader.compile(QUAD_VERT, SKY_FRAG)?
+    var attrs: Vec<i64> = Vec.new()
+    attrs.push(3)
+    attrs.push(2)
+    attrs.push(3)
+    var ball = Mesh.new(attrs)
+    ball.upload(sphereMesh(180, 90))
+    var attrs2: Vec<i64> = Vec.new()
+    attrs2.push(3)
+    attrs2.push(2)
+    attrs2.push(3)
+    var shell = Mesh.new(attrs2)
+    shell.upload(invertedSphereMesh(72, 36))
+    var attrs3: Vec<i64> = Vec.new()
+    attrs3.push(3)
+    attrs3.push(2)
+    attrs3.push(3)
+    var ring = Mesh.new(attrs3)
+    ring.upload(ringMesh(256, 1.24, 2.28))
+
+    var tex: Vec<Texture2D> = Vec.new()
+    var loaded: Vec<bool> = Vec.new()
+    var i = 0
+    while i < BODY_COUNT {
+        tex.push(dummyTexture())
+        loaded.push(false)
+        i = i + 1
+    }
+    return Result.Ok(Renderer {
+        planetSh: planetSh, atmoSh: atmoSh, ringSh: ringSh, skySh: skySh,
+        ball: ball, shell: shell, ring: ring, skyQuad: Mesh.fullscreenQuad(),
+        tex: tex, loaded: loaded,
+    }
+    )
+}
+
+// Decoding a map is twenty megabytes of PNG and a visible hitch, so it happens
+// once per body and only for the two worlds a mission actually visits.
+pub fn ensureLoaded(r: &mut Renderer, id: i64) {
+    if r.loaded[id] {
+        return
+    }
+    r.tex[id].free()
+    r.tex[id] = loadMap(id)
+    r.loaded[id] = true
+}
+
+impl Renderer {
+    fn free(self: &Self) {
+        self.ball.free()
+        self.shell.free()
+        self.ring.free()
+        self.skyQuad.free()
+        self.planetSh.free()
+        self.atmoSh.free()
+        self.ringSh.free()
+        self.skySh.free()
+        var i = 0
+        while i < self.tex.len {
+            self.tex[i].free()
+            i = i + 1
+        }
+    }
+}
+
+// Everything the overlay needs in order to put a line exactly where the scene put
+// a planet: the same view-projection, the same scale, the same focus.
+pub struct View {
+    vp: Vec<f32>,
+    scale: f64, // metres to scene units
+    at: Vec3, // the focus point, central frame, metres
+    eye: Vec3, // the eye, central frame, metres
+    w: f64,
+    h: f64,
+}
+
+pub fn viewOf(g: &Game, w: f64, h: f64): View {
+    let eye = eyePoint(g)
+    let s = 1.0 / g.cam.dist
+    let eyeGl = toGl(eye - g.cam.at).scale(s)
+    let view = lookAt(eyeGl, v3(0.0, 0.0, 0.0), v3(0.0, 1.0, 0.0))
+    // The near plane is a hundredth of the eye distance and the far plane is
+    // eight hundred times it, which covers a planet under the camera and the
+    // whole orbit it is on without ever changing units.
+    let proj = perspective(FOV, w / h, 0.01, 800.0)
+    return View {
+        vp: multiply(proj, view), scale: s, at: g.cam.at.scale(1.0), eye: eye.scale(1.0), w: w, h: h,
+    }
+}
+
+// A point in the central frame, in metres, to scene units.
+pub fn scenePoint(v: &View, p: &Vec3): Vec3 {
+    return toGl(p - v.at).scale(v.scale)
+}
+
+pub fn projectPoint(v: &View, p: &Vec3): Projected {
+    let q = scenePoint(v, p)
+    return project(v.vp, q, v.w, v.h)
+}
+
+// The apparent radius of a body, in pixels. This is what decides sphere or dot,
+// and it is also what the overlay uses to keep a marker just outside the disc.
+pub fn apparentRadius(v: &View, p: &Vec3, radius: f64): f64 {
+    let d = (p - v.eye).len()
+    if d <= 0.0 {
+        return 0.0
+    }
+    return (radius / d) / Math.tan(FOV * 0.5) * v.h * 0.5
+}
+
+pub struct Marker {
+    id: i64,
+    x: f64,
+    y: f64,
+    px: f64, // apparent radius in pixels
+    onScreen: bool,
+    solid: bool, // drawn as a sphere, so the overlay must not put a dot on it
+}
+
+fn markerOf(v: &View, id: i64, p: &Vec3, radius: f64): Marker {
+    let pr = projectPoint(v, p)
+    let px = apparentRadius(v, p, radius)
+    return Marker {
+        id: id, x: pr.x, y: pr.y, px: px, onScreen: pr.visible, solid: px >= SPHERE_MIN_PX,
+    }
+}
+
+// Which bodies this mission draws at all. Four at most, and usually three: the
+// worlds a transfer touches plus whatever it is orbiting. Drawing the rest would
+// put Jupiter in the corner of a lunar mission.
+pub fn missionBodies(g: &Game): Vec<i64> {
+    var out: Vec<i64> = Vec.new()
+    out.push(SUN)
+    let c = g.missions[g.mi].center
+    let f = g.missions[g.mi].from
+    let t = g.missions[g.mi].to
+    if c != SUN {
+        out.push(c)
+    }
+    if f != SUN && f != c {
+        out.push(f)
+    }
+    if t != SUN && t != c && t != f {
+        out.push(t)
+    }
+    return out
+}
+
+// Where a body is, in the frame the camera works in.
+pub fn bodyPoint(g: &Game, id: i64, t: f64): Vec3 {
+    return relPos(g.bodies, id, t, g.missions[g.mi].center)
+}
+
+// Direction from `p` to the Sun, in scene units. Every mission is lit by the real
+// Sun in the real direction, which is why the terminator on the departure world
+// is where it would be on the day the player leaves.
+fn sunDirAt(g: &Game, v: &View, p: &Vec3, t: f64): Vec3 {
+    let center = g.missions[g.mi].center
+    let sunHere = relPos(g.bodies, SUN, t, center)
+    let d = scenePoint(v, sunHere) - scenePoint(v, p)
+    let n = d.norm()
+    if n.len() < 0.5 {
+        return v3(0.0, 0.0, 1.0)
+    }
+    return n
+}
+
+fn spinAngle(g: &Game, id: i64, t: f64): f64 {
+    let day = g.bodies[id].day
+    var turns = g.spin * 0.35
+    if Math.abs(day) > 1.0 {
+        turns = turns + Math.mod(t, day) / day
+    }
+    return turns * Math.pi() * 2.0
+}
+
+// The parking orbit, painted on the departure world as a band of light while the
+// departure card is up. It is the one thing on that screen the player is already
+// standing on.
+fn orbitBandAmount(g: &Game, id: i64): f64 {
+    if g.phase != PHASE_DEPART {
+        return 0.0
+    }
+    if id != g.missions[g.mi].from {
+        return 0.0
+    }
+    let k = g.phaseT * 0.6
+    if k > 1.0 {
+        return 1.0
+    }
+    return k
+}
+
+fn drawBody(r: &mut Renderer, g: &Game, v: &View, id: i64, t: f64, exposureUp: f64) {
+    let p = bodyPoint(g, id, t)
+    let radius = g.bodies[id].radius
+    if apparentRadius(v, p, radius) < SPHERE_MIN_PX {
+        return
+    }
+    // Past the far plane there is nothing to draw: from a parking orbit the Sun
+    // is seven thousand scene units away, and the sky shader is what puts it on
+    // the screen.
+    if (p - v.eye).len() * v.scale > 700.0 {
+        return
+    }
+    ensureLoaded(r, id)
+    let sc = scenePoint(v, p)
+    let rs = radius * v.scale
+    let rot = multiply(rotationZ(g.bodies[id].tilt), rotationY(spinAngle(g, id, t)))
+    let model = multiply(multiply(translation(sc), rot), scaling(rs))
+    let mvp = multiply(v.vp, model)
+    let sun = sunDirAt(g, v, p, t)
+    let sunLocal = rotateVec(transposeRot(rot), sun)
+    let eyeGl = toGl(v.eye - v.at).scale(v.scale)
+
+    Gpu.depthTest(true)
+    Gpu.depthWrite(true)
+    Gpu.cullBackFaces(true)
+    Gpu.blendOff()
+    r.planetSh.bind()
+    r.planetSh.uniformMat4("uMvp", mvp)
+    r.planetSh.uniformMat4("uModel", model)
+    r.planetSh.uniform3F("uSun", sun.x, sun.y, sun.z)
+    r.planetSh.uniform3F("uSunLocal", sunLocal.x, sunLocal.y, sunLocal.z)
+    r.planetSh.uniform3F("uEye", eyeGl.x, eyeGl.y, eyeGl.z)
+    r.planetSh.uniform2F("uTexel", 1.0 / 2048.0, 1.0 / 1024.0)
+    r.planetSh.uniformF("uBump", g.looks[id].bump)
+    r.planetSh.uniformF("uSpecular", g.looks[id].specular)
+    r.planetSh.uniformF("uAmbient", g.looks[id].ambient)
+    r.planetSh.uniformF("uEmissive", g.looks[id].emissive)
+    r.planetSh.uniformF("uPunch", g.looks[id].punch)
+    r.planetSh.uniform3F("uAtmoTint", g.looks[id].tint.x, g.looks[id].tint.y, g.looks[id].tint.z)
+    r.planetSh.uniformF("uAtmoAmount", g.looks[id].atmo * 0.28)
+    r.planetSh.uniformF("uRingInner", g.looks[id].ringInner)
+    r.planetSh.uniformF("uRingOuter", g.looks[id].ringOuter)
+    r.planetSh.uniformF("uOrbitBand", orbitBandAmount(g, id))
+    // The parking orbit is drawn in the plane the transfer leaves in, so the band
+    // crosses the world the way the ship does.
+    let bandDir = v3(0.0, 1.0, 0.0)
+    r.planetSh.uniform3F("uOrbitDir", bandDir.x, bandDir.y, bandDir.z)
+    r.planetSh.sampler("uTex", r.tex[id], 0)
+    r.ball.draw()
+
+    // Rings after the planet, so the depth buffer already holds the sphere and
+    // the far half of the ring is hidden behind it for free.
+    if g.looks[id].ringOuter > 0.0 {
+        let ringModel = multiply(multiply(translation(sc), rotationZ(g.bodies[id].tilt)), scaling(rs))
+        Gpu.blendAlpha()
+        Gpu.depthWrite(false)
+        Gpu.cullBackFaces(false)
+        r.ringSh.bind()
+        r.ringSh.uniformMat4("uMvp", multiply(v.vp, ringModel))
+        r.ringSh.uniformMat4("uModel", ringModel)
+        r.ringSh.uniform3F("uSun", sun.x, sun.y, sun.z)
+        r.ringSh.uniform3F("uEye", eyeGl.x, eyeGl.y, eyeGl.z)
+        r.ringSh.uniform3F("uTint", g.looks[id].ringTint.x, g.looks[id].ringTint.y, g.looks[id].ringTint.z)
+        r.ring.draw()
+    }
+
+    if g.looks[id].atmo > 0.0 {
+        let s = 1.022 + 0.030 * g.looks[id].atmo
+        let atmoModel = multiply(multiply(translation(sc), rot), scaling(rs * s))
+        Gpu.blendAdd()
+        Gpu.depthWrite(false)
+        Gpu.cullBackFaces(true)
+        r.atmoSh.bind()
+        r.atmoSh.uniformMat4("uMvp", multiply(v.vp, atmoModel))
+        r.atmoSh.uniformMat4("uModel", atmoModel)
+        r.atmoSh.uniform3F("uSun", sun.x, sun.y, sun.z)
+        r.atmoSh.uniform3F("uEye", eyeGl.x, eyeGl.y, eyeGl.z)
+        r.atmoSh.uniform3F("uColor", g.looks[id].tint.x, g.looks[id].tint.y, g.looks[id].tint.z)
+        r.atmoSh.uniformF("uStrength", g.looks[id].atmo * 0.55 * exposureUp)
+        r.shell.draw()
+    }
+}
+
+fn drawSky(r: &mut Renderer, g: &Game, v: &View, time: f64) {
+    let dirGl = toGl(v.at - v.eye).norm()
+    let right = dirGl.cross(v3(0.0, 1.0, 0.0)).norm()
+    let camUp = right.cross(dirGl).norm()
+    let center = g.missions[g.mi].center
+    let sunHere = relPos(g.bodies, SUN, displayTime(g), center)
+    var sunDir = toGl(sunHere - v.eye).norm()
+    if sunDir.len() < 0.5 {
+        sunDir = v3(0.0, 0.0, 1.0)
+    }
+    // The Sun's apparent size, relative to how it looks from Earth. From Saturn it
+    // really is a tenth the width, and the sky should say so.
+    let d = (sunHere - v.eye).len()
+    var size = 1.0
+    if d > 1.0 {
+        size = 1.495978707e11 / d
+    }
+    if size > 4.0 {
+        size = 4.0
+    }
+    if size < 0.06 {
+        size = 0.06
+    }
+
+    Gpu.depthTest(false)
+    Gpu.depthWrite(false)
+    Gpu.blendOff()
+    Gpu.cullBackFaces(false)
+    r.skySh.bind()
+    r.skySh.uniform3F("uRight", right.x, right.y, right.z)
+    r.skySh.uniform3F("uUp", camUp.x, camUp.y, camUp.z)
+    r.skySh.uniform3F("uFwd", dirGl.x, dirGl.y, dirGl.z)
+    r.skySh.uniformF("uTanHalf", Math.tan(FOV * 0.5))
+    r.skySh.uniformF("uAspect", v.w / v.h)
+    r.skySh.uniform3F("uSunDir", sunDir.x, sunDir.y, sunDir.z)
+    r.skySh.uniformF("uSunSize", size)
+    r.skySh.uniformF("uTime", time)
+    r.skySh.uniformF("uSkyGain", 1.0)
+    r.skyQuad.draw()
+}
+
+// Draw the scene and hand back where every body landed, so the overlay can put
+// markers and labels on exactly the same pixels.
+pub fn drawScene(r: &mut Renderer, g: &Game, v: &View, time: f64): Vec<Marker> {
+    drawSky(r, g, v, time)
+    let t = displayTime(g)
+    var ids = missionBodies(g)
+    var out: Vec<Marker> = Vec.new()
+    var i = 0
+    while i < ids.len {
+        let id = ids[i]
+        let p = bodyPoint(g, id, t)
+        drawBody(r, g, v, id, t, 1.0)
+        out.push(markerOf(v, id, p, g.bodies[id].radius))
+        i = i + 1
+    }
+    return out
+}

@@ -1,0 +1,89 @@
+// Every mission, priced, headless.
+//
+//   milo run examples/games/apsis/tools/checkmissions.milo
+//
+// This is the campaign's regression test. It runs the same solver the dials run
+// and prints what the best plan in each window costs, so a budget set below what
+// the window can actually do fails here rather than forty minutes into someone's
+// evening. It also checks the property the whole game rests on: that the arc the
+// player is shown, walked by the propagator, ends where the target will be.
+//
+// The window is a fact, not a knob. If a mission cannot be flown inside its
+// budget, either the budget or the window is wrong — not the physics.
+
+from "std/math" import {
+    Math
+}
+from "./../ephem" import {
+    bodyTable, SEC_PER_DAY
+}
+from "./../mission" import {
+    missionTable, MISSION_COUNT
+}
+from "./../plan" import {
+    bestPlan, solvePlan, shipAt, relPos
+}
+
+fn pad(s: &string, n: i64): string {
+    var out = s.clone()
+    while out.len < n {
+        out = out + " "
+    }
+    return out
+}
+
+fn round0(v: f64): string {
+    return $"{Math.round(v) as i64}"
+}
+
+pub fn main(): i32 {
+    let bodies = bodyTable()
+    let missions = missionTable()
+    var failures = 0
+
+    print(pad("MISSION", 12) + pad("DEPART", 9) + pad("FLIGHT", 9) + pad("LEAVE", 9) + pad("ARRIVE", 9) + pad("TOTAL", 9) + pad("BUDGET", 9) + "MARGIN")
+    var i = 0
+    while i < MISSION_COUNT {
+        let p = bestPlan(bodies, missions[i])
+        if !p.ok {
+            print(pad(missions[i].name, 12) + "no transfer found in the window")
+            failures = failures + 1
+        } else {
+            let waitDays = (p.t0 - missions[i].windowOpen) / SEC_PER_DAY
+            let margin = missions[i].budget - p.dvTotal
+            print(pad(missions[i].name, 12) + pad("+" + round0(waitDays) + "d", 9) + pad(round0(p.tof / SEC_PER_DAY) + "d", 9) + pad(round0(p.dvDepart), 9) + pad(round0(p.dvArrive), 9) + pad(round0(p.dvTotal), 9) + pad(round0(missions[i].budget), 9) + round0(margin))
+            if margin < 0.0 {
+                print("  FAIL: the cheapest plan in the window does not fit the budget")
+                failures = failures + 1
+            }
+            // The drawn arc IS the flight: propagating the departure state to the
+            // arrival time has to land on the target, not near it.
+            let end = shipAt(bodies, missions[i], p, p.tof)
+            let target = relPos(bodies, missions[i].to, p.t0 + p.tof, missions[i].center)
+            let miss = (end.pos - target).len()
+            let rel = miss / target.len()
+            if rel > 1.0e-4 {
+                print("  FAIL: the propagated arc misses the target by " + round0(miss / 1000.0) + " km")
+                failures = failures + 1
+            }
+            // The dials start somewhere playable: the nominal plan must at least
+            // exist, or the first thing a player sees is 'no transfer'.
+            let nominal = solvePlan(bodies, missions[i], missions[i].windowOpen + missions[i].departNominal, missions[i].tofNominal)
+            if !nominal.ok {
+                print("  FAIL: the starting position of the dials has no transfer")
+                failures = failures + 1
+            } else {
+                let over = nominal.dvTotal / missions[i].budget
+                print("             opens at " + round0(nominal.dvTotal) + " m/s, " + $"{Math.round(over * 100.0) as i64}" + "% of budget")
+            }
+        }
+        i = i + 1
+    }
+
+    if failures > 0 {
+        print($"{failures}" + " problems")
+        return 1
+    }
+    print("all six missions fit their budgets")
+    return 0
+}

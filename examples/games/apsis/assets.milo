@@ -1,0 +1,188 @@
+// Surface maps.
+//
+// Seven of the eight bodies have a real photographic map — public-domain USGS and
+// NASA imagery, fetched by `tools/fetchbody.milo` and committed next door in
+// `bodies/`. The Sun has none, so its photosphere is generated: at the resolution
+// the camera flies at, granulation is noise and a gradient, and a made-up Sun is
+// honest as long as nothing claims it is a photograph.
+//
+// Every map ends up as one `Texture2D` and the host-side pixels are dropped
+// immediately. Earth alone is sixteen megabytes as packed RGBA, and a mission
+// only ever needs two of these at once — which is why they are decoded on demand
+// rather than all at startup.
+
+from "std/gpu" import {
+    Texture2D
+}
+from "std/math" import {
+    Math
+}
+from "std/png" import {
+    Png
+}
+from "./ephem" import {
+    SUN, MERCURY, VENUS, EARTH, MOON, MARS, JUPITER
+}
+
+// Packed the way `Texture2D.rgba8` reads it: 0xAABBGGRR.
+fn pack(r: i64, g: i64, b: i64): u32 {
+    return 0xFF000000 | (((b & 0xFF) as u32) << 16) | (((g & 0xFF) as u32) << 8) | ((r & 0xFF) as u32)
+}
+
+fn decodeMap(src: &string): Texture2D {
+    match Png.decode(src) {
+        Result.Ok(img) => {
+            var px: Vec<u32> = Vec.filled(img.width * img.height, 0)
+            var i = 0
+            let n = img.width * img.height
+            let ch = img.channels
+            while i < n {
+                let o = i * ch
+                px[i] = pack(img.pixels[o] as i64, img.pixels[o + 1] as i64, img.pixels[o + 2] as i64)
+                i = i + 1
+            }
+            return Texture2D.rgba8(img.width, img.height, px, true)
+        }
+        Result.Err(_) => {
+            // A map that will not decode is a broken build, not a runtime state
+            // to design around: one magenta texel says so loudly.
+            var px: Vec<u32> = Vec.filled(1, pack(255, 0, 255))
+            return Texture2D.rgba8(1, 1, px, false)
+        }
+    }
+}
+
+pub fn fontAtlas(): string {
+    return @embedFile("bodies/font.png")
+}
+
+// The map for a body id. Called at most twice per mission, on the frame the
+// mission starts.
+pub fn loadMap(id: i64): Texture2D {
+    if id == SUN {
+        return mapSun()
+    }
+    if id == MERCURY {
+        return decodeMap(@embedFile("bodies/mercury.png"))
+    }
+    if id == VENUS {
+        return decodeMap(@embedFile("bodies/venus.png"))
+    }
+    if id == EARTH {
+        return decodeMap(@embedFile("bodies/earth.png"))
+    }
+    if id == MOON {
+        return decodeMap(@embedFile("bodies/moon.png"))
+    }
+    if id == MARS {
+        return decodeMap(@embedFile("bodies/mars.png"))
+    }
+    if id == JUPITER {
+        return decodeMap(@embedFile("bodies/jupiter.png"))
+    }
+    return decodeMap(@embedFile("bodies/saturn.png"))
+}
+
+// A 1x1 placeholder so every texture slot is a real texture before its map has
+// been decoded. Freeing a shared dummy eight times would delete one live name and
+// seven bogus ones, so each slot gets its own.
+pub fn dummyTexture(): Texture2D {
+    var px: Vec<u32> = Vec.filled(1, 0xFF303840)
+    return Texture2D.rgba8(1, 1, px, false)
+}
+
+// ── the generated Sun ─────────────────────────────────────────────────────────
+
+fn hash2(x: i64, y: i64): f64 {
+    var h = (x * 374761393 + y * 668265263) & 0x7FFFFFFF
+    h = (h ^ (h >> 13)) * 1274126177
+    h = h & 0x7FFFFFFF
+    return (h as f64) / 2147483647.0
+}
+
+fn smooth(t: f64): f64 {
+    return t * t * (3.0 - 2.0 * t)
+}
+
+// Value noise that wraps in x, so there is no seam where longitude 180 meets
+// longitude -180 — the one artefact anyone will spot, because the Sun turns.
+fn noise2(x: f64, y: f64, period: i64): f64 {
+    let xi = Math.floor(x) as i64
+    let yi = Math.floor(y) as i64
+    let fx = smooth(x - (xi as f64))
+    let fy = smooth(y - (yi as f64))
+    let x0 = ((xi % period) + period) % period
+    let x1 = (x0 + 1) % period
+    let a = hash2(x0, yi)
+    let b = hash2(x1, yi)
+    let c = hash2(x0, yi + 1)
+    let d = hash2(x1, yi + 1)
+    return (a + (b - a) * fx) + ((c + (d - c) * fx) - (a + (b - a) * fx)) * fy
+}
+
+fn fbm2(x: f64, y: f64, base: i64, octaves: i64): f64 {
+    var amp = 0.5
+    var freq = 1.0
+    var period = base
+    var sum = 0.0
+    var norm = 0.0
+    var i = 0
+    while i < octaves {
+        sum = sum + amp * noise2(x * freq, y * freq, period)
+        norm = norm + amp
+        amp = amp * 0.5
+        freq = freq * 2.0
+        period = period * 2
+        i = i + 1
+    }
+    return sum / norm
+}
+
+fn clamp01(v: f64): f64 {
+    if v < 0.0 {
+        return 0.0
+    }
+    if v > 1.0 {
+        return 1.0
+    }
+    return v
+}
+
+fn mixc(a: f64, b: f64, t: f64): f64 {
+    return a + (b - a) * t
+}
+
+pub let GEN_W: i64 = 1024
+
+pub let GEN_H: i64 = 512
+
+// The photosphere: granulation cells with darker sunspot clusters. It is emissive
+// in the shader, so these values are a pattern, not a brightness.
+pub fn mapSun(): Texture2D {
+    var px: Vec<u32> = Vec.filled(GEN_W * GEN_H, 0)
+    var y = 0
+    while y < GEN_H {
+        let v = (y as f64) / (GEN_H as f64)
+        var x = 0
+        while x < GEN_W {
+            let u = (x as f64) / (GEN_W as f64)
+            let gran = fbm2(u * 90.0, v * 45.0, 90, 3)
+            let coarse = fbm2(u * 12.0, v * 6.0, 12, 3)
+            var t = clamp01(0.55 + (gran - 0.5) * 0.9 + (coarse - 0.5) * 0.35)
+            // Spots cluster in two mid-latitude belts, which is where they live.
+            let belt = Math.exp(-Math.pow((v - 0.36) * 14.0, 2.0)) + Math.exp(-Math.pow((v - 0.64) * 14.0, 2.0))
+            let spot = fbm2(u * 20.0, v * 10.0, 20, 2)
+            if spot > 0.70 {
+                t = t - (spot - 0.70) * 3.4 * belt
+            }
+            t = clamp01(t)
+            let r = mixc(0.72, 1.0, t)
+            let g = mixc(0.26, 0.86, t)
+            let b = mixc(0.05, 0.46, t)
+            px[y * GEN_W + x] = pack((r * 255.0) as i64, (g * 255.0) as i64, (b * 255.0) as i64)
+            x = x + 1
+        }
+        y = y + 1
+    }
+    return Texture2D.rgba8(GEN_W, GEN_H, px, true)
+}

@@ -1,0 +1,395 @@
+// The 2D layer: panels, orbit lines, markers, labels and text, batched into one
+// vertex buffer and drawn in one call.
+//
+// Shapes are not separate draw calls with separate shaders — each vertex carries
+// a mode, so a rounded panel, a hairline orbit and a line of text can be emitted
+// in the order they should overlap without ever rebinding anything. That order IS
+// the z-order; there is no depth test on this layer.
+//
+// The orbits and the transfer arc live here rather than in the 3D scene on
+// purpose: a one-pixel line that stays one pixel from a parking orbit out to
+// Saturn's is a screen-space object, and drawing it as geometry means either a
+// wire that disappears at distance or a tube that fattens at the near end.
+
+from "std/gpu" import {
+    Mesh, Shader, Texture2D, Gpu
+}
+from "std/math" import {
+    Math
+}
+from "std/png" import {
+    Png
+}
+from "./shaders" import {
+    UI_VERT, UI_FRAG
+}
+
+pub let CELL_W: i64 = 24
+
+pub let CELL_H: i64 = 40
+
+pub let COLS: i64 = 16
+
+pub let FIRST: i64 = 32
+
+pub let LAST: i64 = 126
+
+pub let MODE_SOLID: f64 = 0.0
+
+pub let MODE_GLYPH: f64 = 1.0
+
+pub let MODE_ROUND: f64 = 2.0
+
+pub let MODE_GLOW: f64 = 3.0
+
+pub let MODE_RING: f64 = 4.0
+
+pub let MODE_LINE: f64 = 5.0
+
+pub let MODE_LINE_GLOW: f64 = 6.0
+
+pub let MODE_DISC: f64 = 7.0
+
+pub struct Ui {
+    verts: Vec<f32>,
+    mesh: Mesh,
+    shader: Shader,
+    font: Texture2D,
+    atlasW: f64,
+    atlasH: f64,
+}
+
+// Decode the Menlo alpha atlas into a texture. It is stored as truecolour PNG
+// because std/png does not do greyscale; only the red channel carries coverage,
+// and it is splatted across RGB so bilinear filtering treats the channels alike.
+fn loadFont(png: &string): Texture2D {
+    match Png.decode(png) {
+        Result.Ok(img) => {
+            var px: Vec<u32> = Vec.filled(img.width * img.height, 0)
+            var i = 0
+            while i < img.width * img.height {
+                let a = img.pixels[i * img.channels] as u32
+                px[i] = 0xFF000000 | (a << 16) | (a << 8) | a
+                i = i + 1
+            }
+            return Texture2D.rgba8(img.width, img.height, px, true)
+        }
+        Result.Err(_) => {
+            var px: Vec<u32> = Vec.filled(1, 0)
+            return Texture2D.rgba8(1, 1, px, false)
+        }
+    }
+}
+
+pub fn uiNew(fontPng: &string): Result<Ui, string> {
+    let sh = Shader.compile(UI_VERT, UI_FRAG)?
+    var attrs: Vec<i64> = Vec.new()
+    attrs.push(2) // position, in drawable pixels
+    attrs.push(2) // uv
+    attrs.push(4) // rgba
+    attrs.push(4) // mode, radius, halfWidth, halfHeight
+    let font = loadFont(fontPng)
+    return Result.Ok(Ui {
+        verts: Vec.new(),
+        mesh: Mesh.new(attrs),
+        shader: sh,
+        font: font,
+        atlasW: 1.0,
+        atlasH: 1.0,
+    }
+    )
+}
+
+// The atlas dimensions are needed to turn a cell index into uv, and Texture2D
+// keeps them, so this is read once after construction rather than threaded
+// through every call.
+pub fn uiSetAtlasSize(u: &mut Ui, w: f64, h: f64) {
+    u.atlasW = w
+    u.atlasH = h
+}
+
+fn vert(u: &mut Ui, x: f64, y: f64, s: f64, t: f64, r: f64, g: f64, b: f64, a: f64, mode: f64, rad: f64, hw: f64, hh: f64) {
+    u.verts.push(x as f32)
+    u.verts.push(y as f32)
+    u.verts.push(s as f32)
+    u.verts.push(t as f32)
+    u.verts.push(r as f32)
+    u.verts.push(g as f32)
+    u.verts.push(b as f32)
+    u.verts.push(a as f32)
+    u.verts.push(mode as f32)
+    u.verts.push(rad as f32)
+    u.verts.push(hw as f32)
+    u.verts.push(hh as f32)
+}
+
+fn quad(u: &mut Ui, x: f64, y: f64, w: f64, h: f64, s0: f64, t0: f64, s1: f64, t1: f64, r: f64, g: f64, b: f64, a: f64, mode: f64, rad: f64) {
+    let hw = w * 0.5
+    let hh = h * 0.5
+    vert(u, x, y, s0, t0, r, g, b, a, mode, rad, hw, hh)
+    vert(u, x + w, y, s1, t0, r, g, b, a, mode, rad, hw, hh)
+    vert(u, x + w, y + h, s1, t1, r, g, b, a, mode, rad, hw, hh)
+    vert(u, x, y, s0, t0, r, g, b, a, mode, rad, hw, hh)
+    vert(u, x + w, y + h, s1, t1, r, g, b, a, mode, rad, hw, hh)
+    vert(u, x, y + h, s0, t1, r, g, b, a, mode, rad, hw, hh)
+}
+
+pub struct Rgba {
+    r: f64,
+    g: f64,
+    b: f64,
+    a: f64,
+}
+
+pub fn rgba(r: f64, g: f64, b: f64, a: f64): Rgba {
+    return Rgba {
+        r: r, g: g, b: b, a: a
+    }
+}
+
+pub fn fade(c: &Rgba, k: f64): Rgba {
+    return Rgba {
+        r: c.r, g: c.g, b: c.b, a: c.a * k
+    }
+}
+
+impl Ui {
+    fn rect(self: &mut Self, x: f64, y: f64, w: f64, h: f64, c: &Rgba) {
+        quad(self, x, y, w, h, 0.0, 0.0, 1.0, 1.0, c.r, c.g, c.b, c.a, MODE_SOLID, 0.0)
+    }
+
+    fn roundRect(self: &mut Self, x: f64, y: f64, w: f64, h: f64, rad: f64, c: &Rgba) {
+        quad(self, x, y, w, h, 0.0, 0.0, 1.0, 1.0, c.r, c.g, c.b, c.a, MODE_ROUND, rad)
+    }
+
+    // A soft radial falloff, centred on (cx, cy).
+    fn glow(self: &mut Self, cx: f64, cy: f64, radius: f64, c: &Rgba) {
+        quad(self, cx - radius, cy - radius, radius * 2.0, radius * 2.0, 0.0, 0.0, 1.0, 1.0, c.r, c.g, c.b, c.a, MODE_GLOW, 0.0)
+    }
+
+    // A filled circle, antialiased by its own radius: the marker for a body that
+    // is too small on screen to be worth a sphere.
+    fn disc(self: &mut Self, cx: f64, cy: f64, radius: f64, c: &Rgba) {
+        quad(self, cx - radius, cy - radius, radius * 2.0, radius * 2.0, 0.0, 0.0, 1.0, 1.0, c.r, c.g, c.b, c.a, MODE_DISC, radius)
+    }
+
+    fn ring(self: &mut Self, cx: f64, cy: f64, radius: f64, thick: f64, c: &Rgba) {
+        quad(self, cx - radius, cy - radius, radius * 2.0, radius * 2.0, 0.0, 0.0, 1.0, 1.0, c.r, c.g, c.b, c.a, MODE_RING, thick)
+    }
+
+    // One segment, `width` pixels across, with uv.y running -1 to +1 across the
+    // strip so the shader can antialias it. The ends are extended by half the
+    // width along the segment, which closes the notch a polyline would otherwise
+    // show on the outside of every bend.
+    fn line(self: &mut Self, x0: f64, y0: f64, x1: f64, y1: f64, width: f64, c: &Rgba) {
+        lineMode(self, x0, y0, x1, y1, width, c, MODE_LINE)
+    }
+
+    // The same segment with a gaussian falloff across it — the halo that sits
+    // under the transfer arc and makes it read as light rather than as ink.
+    fn lineGlow(self: &mut Self, x0: f64, y0: f64, x1: f64, y1: f64, width: f64, c: &Rgba) {
+        lineMode(self, x0, y0, x1, y1, width, c, MODE_LINE_GLOW)
+    }
+
+    // `size` is the advance per character in pixels; a glyph box is 4/3 of that
+    // wide and 40/24 of the box tall, which is Menlo's cell aspect. `y` is the
+    // top of the line. `track` is extra advance per character: the display type
+    // in this game is letterspaced, and a monospace face without tracking looks
+    // like a terminal rather than like a title.
+    fn textTracked(self: &mut Self, x: f64, y: f64, size: f64, track: f64, s: &string, c: &Rgba) {
+        let boxW = size * 4.0 / 3.0
+        let boxH = boxW * (CELL_H as f64) / (CELL_W as f64)
+        let du = (CELL_W as f64) / self.atlasW
+        let dv = (CELL_H as f64) / self.atlasH
+        let adv = size + track
+        var i = 0
+        while i < s.len {
+            let code = s[i] as i64
+            if code > FIRST && code <= LAST {
+                let idx = code - FIRST
+                let s0 = ((idx % COLS) as f64) * du
+                let t0 = ((idx / COLS) as f64) * dv
+                quad(self, x + adv * (i as f64), y, boxW, boxH, s0, t0, s0 + du, t0 + dv, c.r, c.g, c.b, c.a, MODE_GLYPH, 0.0)
+            }
+            i = i + 1
+        }
+    }
+
+    fn text(self: &mut Self, x: f64, y: f64, size: f64, s: &string, c: &Rgba) {
+        self.textTracked(x, y, size, 0.0, s, c)
+    }
+
+    fn textCentered(self: &mut Self, cx: f64, y: f64, size: f64, s: &string, c: &Rgba) {
+        self.textTracked(cx - textWidth(s, size) * 0.5, y, size, 0.0, s, c)
+    }
+
+    fn textCenteredTracked(self: &mut Self, cx: f64, y: f64, size: f64, track: f64, s: &string, c: &Rgba) {
+        self.textTracked(cx - trackedWidth(s, size, track) * 0.5, y, size, track, s, c)
+    }
+
+    fn textRight(self: &mut Self, rx: f64, y: f64, size: f64, s: &string, c: &Rgba) {
+        self.textTracked(rx - textWidth(s, size), y, size, 0.0, s, c)
+    }
+
+    // Draw and reset. Blending is alpha and the depth test is off — this layer
+    // always sits on top of the scene.
+    fn flush(self: &mut Self, screenW: f64, screenH: f64) {
+        if self.verts.len == 0 {
+            return
+        }
+        Gpu.depthTest(false)
+        Gpu.blendAlpha()
+        Gpu.cullBackFaces(false)
+        self.mesh.upload(self.verts)
+        self.shader.bind()
+        self.shader.uniform2F("uScreen", screenW, screenH)
+        self.shader.sampler("uFont", self.font, 0)
+        self.mesh.draw()
+        self.verts.clear()
+    }
+
+    fn free(self: &Self) {
+        self.mesh.free()
+        self.shader.free()
+        self.font.free()
+    }
+}
+
+fn lineMode(u: &mut Ui, x0: f64, y0: f64, x1: f64, y1: f64, width: f64, c: &Rgba, mode: f64) {
+    var dx = x1 - x0
+    var dy = y1 - y0
+    let len = Math.sqrt(dx * dx + dy * dy)
+    if len < 1.0e-6 {
+        return
+    }
+    dx = dx / len
+    dy = dy / len
+    let hw = width * 0.5
+    let ex = dx * hw
+    let ey = dy * hw
+    let nx = -dy * hw
+    let ny = dx * hw
+    let ax = x0 - ex
+    let ay = y0 - ey
+    let bx = x1 + ex
+    let by = y1 + ey
+    vert(u, ax + nx, ay + ny, 0.0, 1.0, c.r, c.g, c.b, c.a, mode, hw, 0.0, 0.0)
+    vert(u, bx + nx, by + ny, 1.0, 1.0, c.r, c.g, c.b, c.a, mode, hw, 0.0, 0.0)
+    vert(u, bx - nx, by - ny, 1.0, -1.0, c.r, c.g, c.b, c.a, mode, hw, 0.0, 0.0)
+    vert(u, ax + nx, ay + ny, 0.0, 1.0, c.r, c.g, c.b, c.a, mode, hw, 0.0, 0.0)
+    vert(u, bx - nx, by - ny, 1.0, -1.0, c.r, c.g, c.b, c.a, mode, hw, 0.0, 0.0)
+    vert(u, ax - nx, ay - ny, 0.0, -1.0, c.r, c.g, c.b, c.a, mode, hw, 0.0, 0.0)
+}
+
+pub fn textWidth(s: &string, size: f64): f64 {
+    return (s.len as f64) * size
+}
+
+pub fn trackedWidth(s: &string, size: f64, track: f64): f64 {
+    if s.len == 0 {
+        return 0.0
+    }
+    return (s.len as f64) * (size + track) - track
+}
+
+// The line height that keeps body copy readable rather than merely legible. The
+// glyph box is 2.22 x the advance, so anything under that overlaps descenders.
+pub fn lineHeight(size: f64): f64 {
+    return size * 2.35
+}
+
+// Greedy word wrap to a pixel width. Returns the lines; a word longer than the
+// column is left to overhang rather than broken.
+pub fn wrapText(s: &string, size: f64, maxWidth: f64): Vec<string> {
+    var out: Vec<string> = Vec.new()
+    let perLine = (maxWidth / size) as i64
+    if perLine < 4 {
+        out.push(s.clone())
+        return out
+    }
+    var line = ""
+    var word = ""
+    var i = 0
+    while i <= s.len {
+        var c = 32
+        if i < s.len {
+            c = s[i] as i64
+        }
+        if c == 32 || i == s.len {
+            if word.len > 0 {
+                if line.len == 0 {
+                    line = word.clone()
+                } else {
+                    if line.len + 1 + word.len <= perLine {
+                        line = line + " " + word
+                    } else {
+                        out.push(line.clone())
+                        line = word.clone()
+                    }
+                }
+                word = ""
+            }
+        } else {
+            word = word + s.slice(i, i + 1).clone()
+        }
+        i = i + 1
+    }
+    if line.len > 0 {
+        out.push(line)
+    }
+    return out
+}
+
+// A number with a fixed number of decimals. Milo's default float printing is
+// shortest-round-trip, which is right everywhere except a column of numbers meant
+// to be compared at a glance.
+pub fn fmtFixed(v: f64, decimals: i64): string {
+    var scale = 1.0
+    var i = 0
+    while i < decimals {
+        scale = scale * 10.0
+        i = i + 1
+    }
+    let rounded = Math.round(v * scale) / scale
+    var whole = (Math.abs(rounded)) as i64
+    var frac = (Math.round((Math.abs(rounded) - (whole as f64)) * scale)) as i64
+    if frac >= (scale as i64) {
+        whole = whole + 1
+        frac = 0
+    }
+    var s = ""
+    if rounded < 0.0 {
+        s = "-"
+    }
+    s = s + $"{whole}"
+    if decimals > 0 {
+        var fs = $"{frac}"
+        while fs.len < decimals {
+            fs = "0" + fs
+        }
+        s = s + "." + fs
+    }
+    return s
+}
+
+// Thousands separators. A delta-v is the number the whole game is about, and
+// "6240 m/s" is harder to compare against a budget than "6,240 m/s".
+pub fn commas(v: f64): string {
+    let n = Math.abs(v) as i64
+    var digits = $"{n}"
+    var out = ""
+    var count = 0
+    var i = digits.len - 1
+    while i >= 0 {
+        out = digits.slice(i, i + 1).clone() + out
+        count = count + 1
+        if count % 3 == 0 && i > 0 {
+            out = "," + out
+        }
+        i = i - 1
+    }
+    if v < 0.0 {
+        return "-" + out
+    }
+    return out
+}

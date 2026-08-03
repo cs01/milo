@@ -1,12 +1,11 @@
 // Lambert's problem: given where you are, where you want to be, and how long you
 // are willing to take, what velocity do you need?
 //
-// This is the solver behind the porkchop screen and behind every "plan a
-// transfer" the game does for the player. It is pure two-body about the Sun —
-// which is not what the ship actually flies, since the integrator sums every
-// body — so a Lambert answer is a very good FIRST GUESS and not a final one.
-// That gap is not a defect being papered over; it is the reason mid-course
-// corrections exist in the game, exactly as they do in real mission operations.
+// This is the solver behind both dials on the plan screen. It is pure two-body
+// about the central mass, and so is the flight — `kepler.propagate` walks the
+// very conic this returns — so the arc the player is shown before committing is
+// the arc the ship then flies, to the last metre. The planets move on their own
+// rails underneath it, which is where the launch window comes from.
 //
 // Universal-variable formulation (Vallado, Fundamentals of Astrodynamics and
 // Applications, algorithm 57), solved by bisection on psi. Bisection rather than
@@ -20,48 +19,14 @@ from "std/math" import {
 from "./vec3" import {
     Vec3, v3
 }
+from "./kepler" import {
+    stumpff2, stumpff3
+}
 
 pub struct Lambert {
     ok: bool,
     v1: Vec3, // velocity needed at r1
     v2: Vec3, // velocity you arrive at r2 with
-}
-
-fn cosh(x: f64): f64 {
-    let a = Math.exp(x)
-    return (a + 1.0 / a) * 0.5
-}
-
-fn sinh(x: f64): f64 {
-    let a = Math.exp(x)
-    return (a - 1.0 / a) * 0.5
-}
-
-// Stumpff functions. The series branches near zero are not an optimisation —
-// both closed forms are 0/0 there, and psi passes through zero on every
-// near-parabolic transfer, which is most of the interesting ones.
-fn stumpff2(psi: f64): f64 {
-    if psi > 1.0e-6 {
-        let s = Math.sqrt(psi)
-        return (1.0 - Math.cos(s)) / psi
-    }
-    if psi < -1.0e-6 {
-        let s = Math.sqrt(-psi)
-        return (cosh(s) - 1.0) / (-psi)
-    }
-    return 0.5 - psi / 24.0 + psi * psi / 720.0
-}
-
-fn stumpff3(psi: f64): f64 {
-    if psi > 1.0e-6 {
-        let s = Math.sqrt(psi)
-        return (s - Math.sin(s)) / (s * s * s)
-    }
-    if psi < -1.0e-6 {
-        let s = Math.sqrt(-psi)
-        return (sinh(s) - s) / (s * s * s)
-    }
-    return 1.0 / 6.0 - psi / 120.0 + psi * psi / 5040.0
 }
 
 pub fn lambertFail(): Lambert {

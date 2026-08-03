@@ -1,0 +1,304 @@
+// What a transfer costs, and what it looks like.
+//
+// One function does the whole game's arithmetic: given a departure date and a
+// flight time, `solvePlan` finds the conic that connects where you are to where
+// the target will be, and prices the two burns that get you onto it and off it
+// again. Everything the player turns a dial to see comes out of here.
+//
+// The two burns are the standard patched-conic pair, and they are the honest
+// numbers a mission designer would quote:
+//
+//   departure   the parking orbit is circular at r_p, and leaving costs the
+//               difference between circular speed and the speed of a hyperbola
+//               with the excess the transfer needs: sqrt(v_inf^2 + 2 mu / r_p).
+//   arrival     you fall to periapsis at the same excess and burn down onto an
+//               ellipse with the periapsis and apoapsis the mission names.
+//
+// Nothing here is a fudge factor. The reason a Mars window is 90 days wide and a
+// Mercury one costs three times as much is that these formulas say so.
+
+from "std/math" import {
+    Math
+}
+from "./vec3" import {
+    Vec3, v3
+}
+from "./ephem" import {
+    Body, State, bodyPos, bodyState, SEC_PER_DAY
+}
+from "./lambert" import {
+    lambert
+}
+from "./kepler" import {
+    propagate
+}
+from "./mission" import {
+    Mission, DEPART_ESCAPE, DEPART_ORBIT
+}
+
+pub struct Plan {
+    ok: bool,
+    t0: f64, // departure, TDB seconds past J2000
+    tof: f64,
+    r1: Vec3, // ship state at departure, in the central body's frame
+    v1: Vec3,
+    r2: Vec3, // and at arrival
+    v2: Vec3,
+    vInfDepart: f64,
+    vInfArrive: f64,
+    dvDepart: f64,
+    dvArrive: f64,
+    dvTotal: f64,
+}
+
+pub fn planFail(): Plan {
+    let zero = v3(0.0, 0.0, 0.0)
+    return Plan {
+        ok: false, t0: 0.0, tof: 0.0,
+        r1: zero, v1: zero, r2: zero, v2: zero,
+        vInfDepart: 0.0, vInfArrive: 0.0,
+        dvDepart: 0.0, dvArrive: 0.0, dvTotal: 0.0,
+    }
+}
+
+// Position and velocity of `id` relative to `center`. For a heliocentric mission
+// this is the raw ephemeris; for the lunar one it is the geocentric frame the
+// whole transfer lives in.
+pub fn relState(bodies: &Vec<Body>, id: i64, t: f64, center: i64): State {
+    let a = bodyState(bodies, id, t)
+    if id == center {
+        return State {
+            pos: v3(0.0, 0.0, 0.0), vel: v3(0.0, 0.0, 0.0)
+        }
+    }
+    let b = bodyState(bodies, center, t)
+    return State {
+        pos: a.pos - b.pos, vel: a.vel - b.vel
+    }
+}
+
+pub fn relPos(bodies: &Vec<Body>, id: i64, t: f64, center: i64): Vec3 {
+    if id == center {
+        return v3(0.0, 0.0, 0.0)
+    }
+    return bodyPos(bodies, id, t) - bodyPos(bodies, center, t)
+}
+
+pub fn parkRadius(bodies: &Vec<Body>, m: &Mission): f64 {
+    return bodies[m.from].radius + m.parkAlt
+}
+
+pub fn captureRadius(bodies: &Vec<Body>, m: &Mission): f64 {
+    return bodies[m.to].radius + m.captureAlt
+}
+
+pub fn captureApoRadius(bodies: &Vec<Body>, m: &Mission): f64 {
+    return bodies[m.to].radius + m.captureApo
+}
+
+// Circular speed in the parking orbit — the number the departure card quotes,
+// and the speed the departure burn is measured against.
+pub fn parkSpeed(bodies: &Vec<Body>, m: &Mission): f64 {
+    return Math.sqrt(bodies[m.from].mu / parkRadius(bodies, m))
+}
+
+// The insertion burn: fall to periapsis with `vInf` of excess, then burn down
+// onto the ellipse the mission asks for.
+fn insertionCost(bodies: &Vec<Body>, m: &Mission, vInf: f64): f64 {
+    let mu = bodies[m.to].mu
+    let rp = captureRadius(bodies, m)
+    let ra = captureApoRadius(bodies, m)
+    let vHyp = Math.sqrt(vInf * vInf + 2.0 * mu / rp)
+    let vEll = Math.sqrt(2.0 * mu * ra / (rp * (rp + ra)))
+    return vHyp - vEll
+}
+
+// The escape burn: from circular in the parking orbit onto a hyperbola with
+// `vInf` left over at infinity. Where on the orbit it happens does not matter,
+// which is exactly why interplanetary departures have a date and not a place.
+fn escapeCost(bodies: &Vec<Body>, m: &Mission, vInf: f64): f64 {
+    let mu = bodies[m.from].mu
+    let rp = parkRadius(bodies, m)
+    return Math.sqrt(vInf * vInf + 2.0 * mu / rp) - Math.sqrt(mu / rp)
+}
+
+fn finish(m: &Mission, bodies: &Vec<Body>, t0: f64, tof: f64, r1: &Vec3, v1: &Vec3, r2: &Vec3, v2: &Vec3, dvDepart: f64, vInfD: f64, targetVel: &Vec3): Plan {
+    let vInfA = (v2 - targetVel).len()
+    let dvA = insertionCost(bodies, m, vInfA)
+    return Plan {
+        ok: true, t0: t0, tof: tof,
+        r1: r1.scale(1.0), v1: v1.scale(1.0), r2: r2.scale(1.0), v2: v2.scale(1.0),
+        vInfDepart: vInfD, vInfArrive: vInfA,
+        dvDepart: dvDepart, dvArrive: dvA, dvTotal: dvDepart + dvA,
+    }
+}
+
+// A transfer that starts by escaping the departure planet. The ship's departure
+// state is the planet's own: at the scale of the drawing, the sphere of influence
+// it climbs out of is thinner than the line.
+fn solveEscape(bodies: &Vec<Body>, m: &Mission, t0: f64, tof: f64): Plan {
+    let mu = bodies[m.center].mu
+    let s1 = relState(bodies, m.from, t0, m.center)
+    let s2 = relState(bodies, m.to, t0 + tof, m.center)
+    let lam = lambert(s1.pos, s2.pos, tof, mu, true)
+    if !lam.ok {
+        return planFail()
+    }
+    let vInfD = (lam.v1 - s1.vel).len()
+    return finish(m, bodies, t0, tof, s1.pos, lam.v1, s2.pos, lam.v2, escapeCost(bodies, m, vInfD), vInfD, s2.vel)
+}
+
+// How many points on the parking orbit are tried as departure points. Every one
+// is a whole Lambert solve, and the cost curve around the circle is smooth and
+// single-troughed, so seventy-two is far finer than it needs to be and still
+// cheap enough to run inside a frame.
+pub let DEPART_SAMPLES: i64 = 72
+
+// A transfer that never escapes: the ship burns at a point on its circular
+// parking orbit and coasts to the target on one ellipse about the same body.
+//
+// The departure point is a free variable — the same lunar transfer costs
+// hundreds of metres per second more if you burn on the wrong side of the Earth —
+// so it is scanned rather than assumed. The parking orbit is taken to lie in the
+// target's own orbit plane, which is what a launch aimed at the Moon does.
+fn solveFromOrbit(bodies: &Vec<Body>, m: &Mission, t0: f64, tof: f64): Plan {
+    let mu = bodies[m.center].mu
+    let rPark = parkRadius(bodies, m)
+    let vPark = Math.sqrt(mu / rPark)
+    let now = relState(bodies, m.to, t0, m.center)
+    let s2 = relState(bodies, m.to, t0 + tof, m.center)
+    let normal = now.pos.cross(now.vel).norm()
+    let e1 = now.pos.norm()
+    let e2 = normal.cross(e1)
+
+    var best = planFail()
+    var bestCost = 1.0e30
+    var i = 0
+    while i < DEPART_SAMPLES {
+        let th = (i as f64) / (DEPART_SAMPLES as f64) * Math.pi() * 2.0
+        let dir = e1.scale(Math.cos(th)) + e2.scale(Math.sin(th))
+        let r1 = dir.scale(rPark)
+        let lam = lambert(r1, s2.pos, tof, mu, true)
+        if lam.ok {
+            // Prograde in the parking orbit's own plane, which is the direction
+            // the ship is already moving before the burn.
+            let vCirc = normal.cross(dir).scale(vPark)
+            let dv1 = (lam.v1 - vCirc).len()
+            let vInfA = (lam.v2 - s2.vel).len()
+            let total = dv1 + insertionCost(bodies, m, vInfA)
+            if total < bestCost {
+                bestCost = total
+                best = finish(m, bodies, t0, tof, r1, lam.v1, s2.pos, lam.v2, dv1, dv1, s2.vel)
+            }
+        }
+        i = i + 1
+    }
+    return best
+}
+
+pub fn solvePlan(bodies: &Vec<Body>, m: &Mission, t0: f64, tof: f64): Plan {
+    if tof <= 0.0 {
+        return planFail()
+    }
+    if m.departMode == DEPART_ORBIT {
+        return solveFromOrbit(bodies, m, t0, tof)
+    }
+    return solveEscape(bodies, m, t0, tof)
+}
+
+// The cheapest transfer the window contains: a coarse sweep, then two rounds of
+// refinement around the best cell.
+//
+// A grid this coarse would miss a narrow trough, and a fine one would take long
+// enough to be felt as a stall on a keypress. Refining around the winner gets
+// both, because the cost surface over (departure, flight time) is smooth — it is
+// the porkchop plot every mission designer stares at, and the minimum sits at the
+// bottom of a broad basin rather than in a crack.
+pub fn bestPlan(bodies: &Vec<Body>, m: &Mission): Plan {
+    var t0 = m.windowOpen + m.windowSpan * 0.5
+    var tof = (m.tofMin + m.tofMax) * 0.5
+    var spanT = m.windowSpan * 0.5
+    var spanF = (m.tofMax - m.tofMin) * 0.5
+    var best = planFail()
+    var bestCost = 1.0e30
+
+    var round = 0
+    while round < 3 {
+        var steps = 8
+        if round == 0 {
+            steps = 20
+        }
+        var bt = t0
+        var bf = tof
+        var i = 0
+        while i <= steps {
+            let ti = t0 - spanT + 2.0 * spanT * (i as f64) / (steps as f64)
+            var j = 0
+            while j <= steps {
+                let fj = tof - spanF + 2.0 * spanF * (j as f64) / (steps as f64)
+                if ti >= m.windowOpen && ti <= m.windowOpen + m.windowSpan && fj >= m.tofMin && fj <= m.tofMax {
+                    let p = solvePlan(bodies, m, ti, fj)
+                    if p.ok && p.dvTotal < bestCost {
+                        bestCost = p.dvTotal
+                        bt = ti
+                        bf = fj
+                        best = p
+                    }
+                }
+                j = j + 1
+            }
+            i = i + 1
+        }
+        t0 = bt
+        tof = bf
+        spanT = spanT / (steps as f64) * 2.0
+        spanF = spanF / (steps as f64) * 2.0
+        round = round + 1
+    }
+    return best
+}
+
+// Where the ship is `dt` seconds after the departure burn. This is the function
+// the flight uses AND the function the drawn arc is made of.
+pub fn shipAt(bodies: &Vec<Body>, m: &Mission, p: &Plan, dt: f64): State {
+    return propagate(p.r1, p.v1, dt, bodies[m.center].mu)
+}
+
+// The transfer as a polyline in the central frame, ready to project.
+pub fn arcPoints(bodies: &Vec<Body>, m: &Mission, p: &Plan, n: i64): Vec<Vec3> {
+    var out: Vec<Vec3> = Vec.new()
+    if !p.ok {
+        return out
+    }
+    var i = 0
+    while i <= n {
+        let dt = p.tof * (i as f64) / (n as f64)
+        let s = shipAt(bodies, m, p, dt)
+        out.push(s.pos)
+        i = i + 1
+    }
+    return out
+}
+
+// One body's orbit, sampled off the ephemeris itself rather than from elements,
+// so the ring drawn on the map is the same curve the planet is about to walk.
+pub fn orbitPoints(bodies: &Vec<Body>, id: i64, center: i64, t: f64, periodSec: f64, n: i64): Vec<Vec3> {
+    var out: Vec<Vec3> = Vec.new()
+    var i = 0
+    while i <= n {
+        let ti = t + periodSec * (i as f64) / (n as f64)
+        out.push(relPos(bodies, id, ti, center))
+        i = i + 1
+    }
+    return out
+}
+
+// Orbital period from the tabulated semi-major axis. The Moon's row has no
+// heliocentric elements, so its own 27.32-day month is used instead.
+pub fn orbitPeriod(bodies: &Vec<Body>, id: i64, center: i64): f64 {
+    if bodies[id].el.a <= 0.0 {
+        return 27.321661 * SEC_PER_DAY
+    }
+    let a = bodies[id].el.a
+    return 2.0 * Math.pi() * Math.sqrt(a * a * a / bodies[center].mu)
+}

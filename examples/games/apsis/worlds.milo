@@ -1,0 +1,87 @@
+// How each body is lit and drawn, indexed by the same body id the ephemeris uses.
+//
+// The physics table in ephem.milo says how big a world is and where it is; this
+// one says what it looks like. They are separate because a wrong tint is a
+// cosmetic bug and a wrong mu is a trajectory that misses, and the two should
+// never be edited in the same row by accident.
+
+from "./vec3" import {
+    Vec3, v3
+}
+from "./ephem" import {
+    BODY_COUNT, SUN, MERCURY, VENUS, EARTH, MOON, MARS, JUPITER, SATURN
+}
+
+pub struct Look {
+    tint: Vec3, // atmosphere and label colour
+    atmo: f64, // 0 for an airless body
+    bump: f64, // relief faked from the map's luminance
+    specular: f64, // water glint
+    ambient: f64,
+    emissive: f64, // 1 for the Sun
+    punch: f64, // contrast lift for a flat map
+    ringInner: f64, // in planet radii; 0 means no ring
+    ringOuter: f64,
+    ringTint: Vec3,
+    // How far off the surface the cinematic camera sits, in planet radii.
+    viewDist: f64,
+    // Marker colour on the map, where a planet is a dot rather than a sphere.
+    dot: Vec3,
+}
+
+fn look(tr: f64, tg: f64, tb: f64, atmo: f64, bump: f64, spec: f64, amb: f64, emis: f64, punch: f64, ri: f64, ro: f64, rr: f64, rg: f64, rb: f64, view: f64, dr: f64, dg: f64, db: f64): Look {
+    return Look {
+        tint: v3(tr, tg, tb), atmo: atmo, bump: bump, specular: spec,
+        ambient: amb, emissive: emis, punch: punch,
+        ringInner: ri, ringOuter: ro, ringTint: v3(rr, rg, rb),
+        viewDist: view, dot: v3(dr, dg, db),
+    }
+}
+
+pub fn lookTable(): Vec<Look> {
+    var t: Vec<Look> = Vec.new()
+    // Sun: self-lit, so ambient and lambert never touch it and the bloom pass
+    // does all the work.
+    t.push(look(1.00, 0.78, 0.42, 0.0, 0.0, 0.0, 0.0, 1.0, 1.05, 0.0, 0.0, 0.0, 0.0, 0.0, 3.4, 1.00, 0.80, 0.45))
+    t.push(look(0.72, 0.68, 0.62, 0.0, 0.85, 0.0, 0.030, 0.0, 1.35, 0.0, 0.0, 0.0, 0.0, 0.0, 2.9, 0.78, 0.74, 0.68))
+    t.push(look(0.98, 0.85, 0.60, 1.0, 0.10, 0.0, 0.055, 0.0, 1.20, 0.0, 0.0, 0.0, 0.0, 0.0, 3.0, 0.97, 0.84, 0.58))
+    t.push(look(0.42, 0.66, 1.00, 1.0, 0.55, 1.0, 0.045, 0.0, 1.22, 0.0, 0.0, 0.0, 0.0, 0.0, 3.0, 0.45, 0.72, 1.00))
+    t.push(look(0.70, 0.72, 0.78, 0.0, 1.00, 0.0, 0.028, 0.0, 1.40, 0.0, 0.0, 0.0, 0.0, 0.0, 2.9, 0.80, 0.83, 0.90))
+    t.push(look(0.98, 0.62, 0.42, 0.35, 0.80, 0.0, 0.035, 0.0, 1.32, 0.0, 0.0, 0.0, 0.0, 0.0, 3.0, 0.95, 0.55, 0.36))
+    t.push(look(0.94, 0.82, 0.68, 0.55, 0.05, 0.0, 0.055, 0.0, 1.18, 0.0, 0.0, 0.0, 0.0, 0.0, 3.2, 0.93, 0.80, 0.63))
+    t.push(look(0.96, 0.88, 0.70, 0.45, 0.05, 0.0, 0.055, 0.0, 1.16, 1.24, 2.28, 0.86, 0.78, 0.64, 4.6, 0.95, 0.87, 0.66))
+    return t
+}
+
+// The name the overlay prints, letterspaced, when a world fills the frame.
+pub fn displayName(id: i64): string {
+    if id == SUN {
+        return "SUN"
+    }
+    if id == MERCURY {
+        return "MERCURY"
+    }
+    if id == VENUS {
+        return "VENUS"
+    }
+    if id == EARTH {
+        return "EARTH"
+    }
+    if id == MOON {
+        return "MOON"
+    }
+    if id == MARS {
+        return "MARS"
+    }
+    if id == JUPITER {
+        return "JUPITER"
+    }
+    if id == SATURN {
+        return "SATURN"
+    }
+    return "WORLD"
+}
+
+pub fn bodyCount(): i64 {
+    return BODY_COUNT
+}

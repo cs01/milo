@@ -1,0 +1,234 @@
+// Two-body motion, forward in time.
+//
+// The transfer the player is shown and the transfer the ship flies are the same
+// conic sampled at different times — there is no integrator that could drift away
+// from the drawn arc between planning it and flying it. That is the one property
+// this game's whole claim rests on, and it is bought by propagating analytically
+// rather than by stepping.
+//
+// The f and g functions in terms of the CHANGE in eccentric anomaly, rather than
+// the universal-variable formulation.
+//
+// That choice is not stylistic. The universal form solved by Newton on chi
+// diverges on exactly the orbit this game opens with: a lunar transfer is an
+// ellipse with e above 0.97, and its chi iteration walked off to a point 1e15 km
+// away on about one sample in sixty — a single spike in the middle of an
+// otherwise clean arc. Solving for dE instead gives a Kepler equation whose
+// derivative is r/a, which is positive everywhere, so Newton is monotone and
+// cannot leave the root no matter how eccentric the orbit gets.
+//
+// The Stumpff functions still live here, because Lambert's problem needs the same
+// pair and two copies is one place for a sign to go wrong.
+
+from "std/math" import {
+    Math
+}
+from "./vec3" import {
+    Vec3, v3
+}
+from "./ephem" import {
+    State
+}
+
+fn cosh(x: f64): f64 {
+    let a = Math.exp(x)
+    return (a + 1.0 / a) * 0.5
+}
+
+fn sinh(x: f64): f64 {
+    let a = Math.exp(x)
+    return (a - 1.0 / a) * 0.5
+}
+
+// The series branches near zero are not an optimisation — both closed forms are
+// 0/0 there, and psi passes through zero on every near-parabolic transfer, which
+// is most of the interesting ones.
+pub fn stumpff2(psi: f64): f64 {
+    if psi > 1.0e-6 {
+        let s = Math.sqrt(psi)
+        return (1.0 - Math.cos(s)) / psi
+    }
+    if psi < -1.0e-6 {
+        let s = Math.sqrt(-psi)
+        return (cosh(s) - 1.0) / (-psi)
+    }
+    return 0.5 - psi / 24.0 + psi * psi / 720.0
+}
+
+pub fn stumpff3(psi: f64): f64 {
+    if psi > 1.0e-6 {
+        let s = Math.sqrt(psi)
+        return (s - Math.sin(s)) / (s * s * s)
+    }
+    if psi < -1.0e-6 {
+        let s = Math.sqrt(-psi)
+        return (sinh(s) - s) / (s * s * s)
+    }
+    return 1.0 / 6.0 - psi / 120.0 + psi * psi / 5040.0
+}
+
+// Semi-major axis from a state vector. Negative for a hyperbola, which is how
+// the caller finds out it is on one.
+pub fn semiMajor(r: &Vec3, v: &Vec3, mu: f64): f64 {
+    let rn = r.len()
+    if rn <= 0.0 {
+        return 0.0
+    }
+    let energy = v.dot(v) * 0.5 - mu / rn
+    if Math.abs(energy) < 1.0e-20 {
+        return 0.0
+    }
+    return -mu / (2.0 * energy)
+}
+
+pub fn period(a: f64, mu: f64): f64 {
+    if a <= 0.0 {
+        return 0.0
+    }
+    return 2.0 * Math.pi() * Math.sqrt(a * a * a / mu)
+}
+
+// The state a caller hands back when the geometry is degenerate: standing still
+// is a straight line on screen, which is far easier to see and to fix than a NaN
+// that poisons every later frame.
+fn unchanged(r0: &Vec3, v0: &Vec3): State {
+    return State {
+        pos: r0.scale(1.0), vel: v0.scale(1.0)
+    }
+}
+
+// Kepler's equation in difference form, for an ellipse:
+//
+//   n dt = dE + (e sin E0)(1 - cos dE) - (e cos E0) sin dE
+//
+// Newton on this cannot diverge: the derivative is r/a, and r is positive for
+// every point on an ellipse. Writing it in dE rather than in E also means a
+// transfer that crosses periapsis needs no angle wrapping — the thing that makes
+// the textbook 'solve for E, subtract E0' version quietly wrong.
+fn solveDeltaE(esinE0: f64, ecosE0: f64, mdt: f64): f64 {
+    var dE = mdt
+    var i = 0
+    while i < 60 {
+        let s = Math.sin(dE)
+        let c = Math.cos(dE)
+        let f = dE + esinE0 * (1.0 - c) - ecosE0 * s - mdt
+        let fp = 1.0 + esinE0 * s - ecosE0 * c
+        if fp < 1.0e-12 {
+            i = 60
+        } else {
+            let step = f / fp
+            dE = dE - step
+            if Math.abs(step) < 1.0e-12 {
+                i = 60
+            } else {
+                i = i + 1
+            }
+        }
+    }
+    return dE
+}
+
+// The same, for a hyperbola:
+//
+//   n dt = (e sinh H0)(cosh dH - 1) + (e cosh H0) sinh dH - dH
+//
+// The step is limited because cosh grows fast enough that an unguarded Newton
+// step from a poor first guess overflows before it converges.
+fn solveDeltaH(esinhH0: f64, ecoshH0: f64, mdt: f64): f64 {
+    var dH = mdt / (ecoshH0 + 1.0)
+    var i = 0
+    while i < 80 {
+        let sh = sinh(dH)
+        let ch = cosh(dH)
+        let f = esinhH0 * (ch - 1.0) + ecoshH0 * sh - dH - mdt
+        let fp = esinhH0 * sh + ecoshH0 * ch - 1.0
+        if fp < 1.0e-12 {
+            i = 80
+        } else {
+            var step = f / fp
+            if step > 1.0 {
+                step = 1.0
+            }
+            if step < -1.0 {
+                step = -1.0
+            }
+            dH = dH - step
+            if Math.abs(step) < 1.0e-13 {
+                i = 80
+            } else {
+                i = i + 1
+            }
+        }
+    }
+    return dH
+}
+
+fn fgState(r0: &Vec3, v0: &Vec3, f: f64, g: f64, fdot: f64, gdot: f64): State {
+    let pos = r0.scale(f) + v0.scale(g)
+    let vel = r0.scale(fdot) + v0.scale(gdot)
+    if !Math.isFinite(pos.x) || !Math.isFinite(vel.x) {
+        return unchanged(r0, v0)
+    }
+    return State {
+        pos: pos, vel: vel
+    }
+}
+
+// Where a body at (r0, v0) is `dt` seconds later, under a point mass `mu`.
+pub fn propagate(r0: &Vec3, v0: &Vec3, dt: f64, mu: f64): State {
+    let r0n = r0.len()
+    if r0n <= 0.0 || mu <= 0.0 || Math.abs(dt) < 1.0e-9 {
+        return unchanged(r0, v0)
+    }
+    // 1/a, by the vis-viva equation. Positive on an ellipse, negative on a
+    // hyperbola, and zero — to within rounding — on a parabola.
+    let alpha = 2.0 / r0n - v0.dot(v0) / mu
+    let rdotv = r0.dot(v0)
+
+    if alpha > 1.0e-13 {
+        let a = 1.0 / alpha
+        let n = Math.sqrt(mu / (a * a * a))
+        // e sin E0 and e cos E0, which is all of the shape of the orbit that the
+        // difference form needs — the eccentricity itself never appears.
+        let ecosE0 = 1.0 - r0n / a
+        let esinE0 = rdotv / Math.sqrt(mu * a)
+        let dE = solveDeltaE(esinE0, ecosE0, n * dt)
+        let c = Math.cos(dE)
+        let s = Math.sin(dE)
+        let r = a * (1.0 - ecosE0 * c + esinE0 * s)
+        if r < 1.0e-6 {
+            return unchanged(r0, v0)
+        }
+        let f = 1.0 - a / r0n * (1.0 - c)
+        let g = dt - Math.sqrt(a * a * a / mu) * (dE - s)
+        let fdot = -Math.sqrt(mu * a) * s / (r * r0n)
+        let gdot = 1.0 - a / r * (1.0 - c)
+        return fgState(r0, v0, f, g, fdot, gdot)
+    }
+
+    if alpha < -1.0e-13 {
+        let ah = -1.0 / alpha
+        let n = Math.sqrt(mu / (ah * ah * ah))
+        let ecoshH0 = 1.0 + r0n / ah
+        let esinhH0 = rdotv / Math.sqrt(mu * ah)
+        let dH = solveDeltaH(esinhH0, ecoshH0, n * dt)
+        let ch = cosh(dH)
+        let sh = sinh(dH)
+        let r = ah * (ecoshH0 * ch + esinhH0 * sh - 1.0)
+        if r < 1.0e-6 {
+            return unchanged(r0, v0)
+        }
+        let f = 1.0 - ah / r0n * (ch - 1.0)
+        let g = dt - Math.sqrt(ah * ah * ah / mu) * (sh - dH)
+        let fdot = -Math.sqrt(mu * ah) * sh / (r * r0n)
+        let gdot = 1.0 - ah / r * (ch - 1.0)
+        return fgState(r0, v0, f, g, fdot, gdot)
+    }
+
+    // Parabolic to within rounding. Barker's equation would be exact here, but
+    // nothing in this game is ever within 1e-13 of parabolic on purpose, and a
+    // straight coast for one frame is a better failure than a divide by zero.
+    return State {
+        pos: r0 + v0.scale(dt), vel: v0.scale(1.0)
+    }
+}

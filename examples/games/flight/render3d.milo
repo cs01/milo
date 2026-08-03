@@ -17,9 +17,9 @@ pub struct Off {
 from "./gfx3d" import {
     Vec3,
     Scene, View, Camera, viewOf, sceneClear, triangle, shade, toCamera,
-    triangleV, triangleG, rasterFlush
+    triangleV, triangleG
 }
-from "./raster" import {
+from "./texture" import {
     Texture, Vtx, vtxC
 }
 from "./textures" import {
@@ -32,143 +32,6 @@ from "./world3d" import {
 from "./city" import {
     City, COVER_URBAN, COVER_PARK, COVER_SAND, COVER_WATER, BUILDING_MARGIN, cityCellX, cityCellZ, cityOrthoLocal,
     cityRoofKind, cityRoofHeight, cityBase, ROOF_FLAT, ROOF_PYRAMIDAL, ROOF_DOME, ROOF_HIPPED, ROOF_GABLED
-}
-
-// Sky gradient plus a sun disc, painted before anything else. There is no depth
-// test here — the terrain simply draws over it.
-fn drawSky(c: &mut Canvas, s: &Scene, w: &World, v: &View) {
-    // Where the true horizon lands on screen — a point at eye height, far
-    // ahead. The gradient is built around THAT row rather than around the middle
-    // of the window, so the haze stays on the horizon through a climb or a bank.
-    let fwdX = Math.sin(w.cam.yaw)
-    let fwdZ = Math.cos(w.cam.yaw)
-    let hp = toCamera(v, w.cam.x + fwdX * 9000.0, w.cam.y, w.cam.z + fwdZ * 9000.0)
-    var horizonY = v.cy
-    if hp.z > 1.0 {
-        horizonY = v.cy - hp.y * v.scale / hp.z
-    }
-    // The sky meets the fog exactly at the horizon: the last row of terrain is
-    // fully fogged there, and if the sky behind it were a different colour the
-    // draw distance would read as a hard edge — which is the pop-in you see as
-    // new geometry arrives. Blended into the same haze, it arrives invisibly.
-    let band = (c.h as f64) * 0.42
-    for y in 0..c.h {
-        let t = (y as f64) / (c.h as f64)
-        let k = 1.0 - t
-        let r = 0.10 + 0.34 * k * k + s.fogR * t * 0.55
-        let g = 0.22 + 0.36 * k * k + s.fogG * t * 0.55
-        let b = 0.52 + 0.34 * k * k + s.fogB * t * 0.40
-        var haze = 1.0 - (horizonY - (y as f64)) / band
-        if haze < 0.0 {
-            haze = 0.0
-        }
-        if haze > 1.0 {
-            haze = 1.0
-        }
-        haze = haze * haze
-        let sr = r * 0.42 * (1.0 - haze) + s.fogR * haze
-        let sg = g * 0.42 * (1.0 - haze) + s.fogG * haze
-        let sb = b * 0.45 * (1.0 - haze) + s.fogB * haze
-        fillRect(c, 0.0, y as f64, c.w as f64, (y + 1) as f64, sr, sg, sb)
-    }
-    // sun projected from its direction, so it sits correctly as you turn
-    let far = 6000.0
-    let sp = toCamera(v, w.cam.x + s.sunX * far, w.cam.y + s.sunY * far, w.cam.z + s.sunZ * far)
-    if sp.z > 1.0 {
-        let sx = v.cx + sp.x * v.scale / sp.z
-        let sy = v.cy - sp.y * v.scale / sp.z
-        spot(c, sx, sy, 190.0, 0.16, 0.13, 0.07)
-        spot(c, sx, sy, 62.0, 0.9, 0.78, 0.42)
-        spot(c, sx, sy, 30.0, 1.9, 1.7, 1.2)
-    }
-}
-
-// Clouds: billboard puffs on a scrolling world grid, drawn after the sky and
-// before the terrain, so a ridge in front of a cloud simply paints over it. They
-// are additive spots rather than geometry — a cloud has no silhouette worth
-// rasterising, and at this distance a soft blob is the whole effect.
-//
-// Placement is hashed off the cell index, so clouds are stationary in the world
-// and slide past as you fly instead of swimming with the camera.
-fn drawClouds(c: &mut Canvas, s: &Scene, w: &World, v: &View) {
-    let CELL = 900.0
-    let REACH = 9
-    let CLOUD_FADE = 9000.0
-    let baseX = Math.floor(w.cam.x / CELL) as i64
-    let baseZ = Math.floor(w.cam.z / CELL) as i64
-    // clouds drift slowly downwind, the same direction for every cell
-    let driftX = w.time * 5.5
-    let driftZ = w.time * 2.0
-    // Clouds tinted toward the region's own haze, so a desert sky and a coast
-    // sky do not share the same white.
-    let tr = 0.72 + s.fogR * 0.42
-    let tg = 0.74 + s.fogG * 0.36
-    let tb = 0.80 + s.fogB * 0.30
-    for gx in 0 - REACH..REACH + 1 {
-        for gz in 0 - REACH..REACH + 1 {
-            let cxi = baseX + gx
-            let czi = baseZ + gz
-            // A low-frequency cover field over the CELL grid, so cloud lives in
-            // banks with open sky between them. Deciding per cell independently
-            // scatters one puff-ball per cell evenly across the whole sky, which
-            // reads as a lattice — real cloud clumps.
-            let cover = noise2((cxi as f64) * 0.34, (czi as f64) * 0.34)
-            // Thinner cover over a real city: the overcast that suits an
-            // invented coastline hides the thing you loaded the map to see.
-            var minCover = 0.42
-            if w.city.loaded {
-                minCover = 0.66
-            }
-            if cover < minCover {
-                continue
-            }
-            // denser banks carry more individual clouds
-            let clump = 1 + ((cover - minCover) * 5.0) as i64
-            for q in 0..clump {
-                let jx = propHash(cxi * 31 + q * 13 + 1, czi * 17 + q * 7 + 9)
-                let jz = propHash(cxi * 11 + q * 5 + 4, czi * 23 + q * 19 + 2)
-                let wx = ((cxi as f64) + jx) * CELL + driftX
-                let wz = ((czi as f64) + jz) * CELL + driftZ
-                let wy = 500.0 + propHash(cxi * 5 + q * 3 + 6, czi * 3 + q * 11 + 8) * 460.0
-                let p = toCamera(v, wx, wy, wz)
-                if p.z < 60.0 {
-                    continue
-                }
-                let inv = 1.0 / p.z
-                let sx = v.cx + p.x * v.scale * inv
-                let sy = v.cy - p.y * v.scale * inv
-                let rad = (220.0 + cover * 260.0) * v.scale * inv
-                if rad < 3.0 {
-                    continue
-                }
-                if sx < 0.0 - rad * 3.0 || sx > (c.w as f64) + rad * 3.0 {
-                    continue
-                }
-                // Clouds get their own distance fade, NOT the terrain fog range.
-                // Terrain fog is tuned to bury the far edge of a 1000-unit tile
-                // grid; applied to the sky it culls every cloud that is not
-                // directly overhead, which is to say all the ones you would see.
-                var far = 1.0 - p.z / CLOUD_FADE
-                if far < 0.0 {
-                    continue
-                }
-                let lit = (0.30 + 0.58 * far * far) * (0.7 + 0.5 * cover)
-                // A handful of overlapping puffs of different sizes: one circle
-                // reads as a ball, several read as a cloud.
-                let n = 5 + ((propHash(cxi + 77 + q * 3, czi + 31 + q * 9) * 5.0) as i64)
-                for k in 0..n {
-                    let hk = propHash(cxi * 101 + k * 7 + q, czi * 53 + k * 3 + q * 5)
-                    let hk2 = propHash(cxi * 47 + k * 11 + q * 7, czi * 89 + k * 5 + q)
-                    let ox = (hk - 0.5) * rad * 2.8
-                    let oy = (hk2 - 0.5) * rad * 0.6
-                    let pr = rad * (0.40 + hk2 * 0.48)
-                    // brighter on top, shaded underneath
-                    let up = 1.0 + 0.38 * (0.5 - hk2)
-                    spot(c, sx + ox, sy + oy, pr, lit * tr * 0.50 * up, lit * tg * 0.52 * up, lit * tb * 0.58 * up)
-                }
-            }
-        }
-    }
 }
 
 pub fn themeName(t: Theme): string {
@@ -196,9 +59,13 @@ pub fn themeName(t: Theme): string {
 // crossfaded between regions; the sun jumped, because the function that set it
 // was called first and then overwritten.
 pub struct Weather {
-    fogR: f64,
-    fogG: f64,
-    fogB: f64,
+    // What the air DOES, not what colour it is. A region used to carry three fog
+    // constants and the terrain faded into them; now it carries how thick the
+    // haze is and how much cloud is in it, and sky.skyColor turns that into a
+    // colour per direction. Sunrise over a hazy coast and noon over a clear
+    // desert used to need the same three numbers to mean two different things.
+    turbidity: f64,
+    cloud: f64,
     // Fog distance is the weather: the coast is hazy, the desert is glass-clear,
     // the forest sits in the middle, the city is smogged in.
     fogStart: f64,
@@ -210,28 +77,28 @@ pub struct Weather {
 
 fn weatherOf(t: Theme): Weather {
     if (t as i32) == (Theme.Desert as i32) {
-        return Weather { // desert: see forever
-            fogR: 0.60, fogG: 0.46, fogB: 0.30,
+        return Weather { // desert: see forever, and almost nothing in the sky
+            turbidity: 0.16, cloud: 0.10,
             fogStart: 1100.0, fogEnd: 3200.0,
             sunX: 0.30, sunY: 0.90, sunZ: 0.30,
         }
     }
     if (t as i32) == (Theme.Forest as i32) {
-        return Weather { // forest: some haze
-            fogR: 0.26, fogG: 0.38, fogB: 0.40,
+        return Weather { // forest: some haze, broken cloud
+            turbidity: 0.42, cloud: 0.45,
             fogStart: 620.0, fogEnd: 1900.0,
             sunX: 0.50, sunY: 0.72, sunZ: 0.48,
         }
     }
     if (t as i32) == (Theme.City as i32) {
-        return Weather { // city: smog
-            fogR: 0.38, fogG: 0.40, fogB: 0.46,
+        return Weather { // city: smog, and a lid on it
+            turbidity: 0.78, cloud: 0.55,
             fogStart: 380.0, fogEnd: 1300.0,
             sunX: 0.40, sunY: 0.84, sunZ: 0.36,
         }
     }
-    return Weather { // coast: sea haze
-        fogR: 0.30, fogG: 0.42, fogB: 0.62,
+    return Weather { // coast: sea haze under a big sky
+        turbidity: 0.38, cloud: 0.35,
         fogStart: 560.0, fogEnd: 1700.0,
         sunX: 0.44, sunY: 0.78, sunZ: 0.44,
     }
@@ -242,9 +109,8 @@ fn weatherOf(t: Theme): Weather {
 pub fn applyWeather(s: &mut Scene, a: Theme, b: Theme, mix: f64) {
     let wa = weatherOf(a)
     let wb = weatherOf(b)
-    s.fogR = wb.fogR + (wa.fogR - wb.fogR) * mix
-    s.fogG = wb.fogG + (wa.fogG - wb.fogG) * mix
-    s.fogB = wb.fogB + (wa.fogB - wb.fogB) * mix
+    s.turbidity = wb.turbidity + (wa.turbidity - wb.turbidity) * mix
+    s.cloud = wb.cloud + (wa.cloud - wb.cloud) * mix
     s.fogStart = wb.fogStart + (wa.fogStart - wb.fogStart) * mix
     s.fogEnd = wb.fogEnd + (wa.fogEnd - wb.fogEnd) * mix
     // The sun is a direction, so it has to come back off the lerp normalised —
@@ -556,11 +422,16 @@ fn cornerAt(cc: &mut Corners, s: &Scene, w: &World, ix: i64, iz: i64): Corner {
             let m = 1.0 - cosI
             let m2 = m * m
             let fres = 0.02 + 0.42 * m2 * m2 * m
-            // reflected sky, not fog: fog is desaturated by design, and water
-            // that reflects it comes out grey
-            let skyR = s.fogR * 0.22 + 0.02
-            let skyG = s.fogG * 0.42 + 0.08
-            let skyB = s.fogB * 0.70 + 0.20
+            // Reflected sky. This is the per-vertex cousin of what the sea
+            // shader does per pixel, for the DEM's own water sheet — lakes and
+            // river surfaces that are terrain rather than ocean. Sampling the
+            // real skyColor here is not possible (it is GLSL, and this runs on
+            // the CPU), so it is the same idea by hand: a zenith blue thinned
+            // toward white by however hazy the air is.
+            let clear = 1.0 - s.turbidity
+            let skyR = 0.05 + 0.30 * s.turbidity
+            let skyG = 0.13 + 0.28 * s.turbidity
+            let skyB = 0.34 * clear + 0.42
             var wr = body.r + (skyR - body.r) * fres
             var wg = body.g + (skyG - body.g) * fres
             var wb = body.b + (skyB - body.b) * fres
@@ -666,14 +537,23 @@ pub fn drawWorld(c: &mut Canvas, s: &mut Scene, w: &World, ground: &Texture, ski
         // The region weather table is a set of moods for invented places. Over a
         // real city the point is to SEE it, so: clear air, fog only far enough
         // out to hide the edge of the data.
-        s.fogR = 0.52
-        s.fogG = 0.66
-        s.fogB = 0.86
+        s.turbidity = 0.30
+        s.cloud = 0.30
         s.fogStart = 1500.0
         s.fogEnd = 4200.0
-        s.sunX = 0.38
-        s.sunY = 0.86
-        s.sunZ = 0.34
+        // Late afternoon, not noon.
+        //
+        // The sun used to sit at 60 degrees because nothing could be done with
+        // where it was: the sky was a fixed gradient, the haze was three
+        // constants and the sea reflected the haze, so a low sun bought a
+        // slightly different shade of grey. With a real sky it is the single
+        // biggest dial in the game — it puts a glitter path across the bay,
+        // warms every west-facing facade, and turns the haze band from grey to
+        // gold. High noon is the one lighting condition that makes a city look
+        // like a model of itself.
+        s.sunX = 0.0 - 0.80
+        s.sunY = 0.32
+        s.sunZ = 0.51
     } else {
         applyWeather(s, w.prevTheme, w.theme, w.themeMix)
     }
@@ -704,8 +584,6 @@ pub fn drawWorld(c: &mut Canvas, s: &mut Scene, w: &World, ground: &Texture, ski
         s.fogStart = s.fogEnd * 0.66
     }
     sceneClear(s)
-    drawSky(c, s, w, v)
-    drawClouds(c, s, w, v)
 
     // Walk a grid of quads centred on the aircraft. Anything behind the camera is
     // rejected before any per-vertex work.
@@ -787,15 +665,12 @@ pub fn drawWorld(c: &mut Canvas, s: &mut Scene, w: &World, ground: &Texture, ski
     } else {
         drawProps(s, w, v, baseX, baseZ)
     }
-    // Everything above is z-buffered geometry and went into the command list.
-    // Everything below draws straight into the canvas in call order, so the
-    // recorded triangles have to hit the buffer first or they would land on top
-    // of the contrails instead of behind them.
-    rasterFlush(c, s)
-    // From here down the frame stops being 3D: everything below draws straight
-    // into the canvas and leaves no depth behind, so it has to claim its pixels
-    // or the GPU sea (gpupost) composites straight over the top of it.
-    c.locking = true
+    // Everything below draws into the 2D overlay rather than recording geometry,
+    // and the overlay is composited over the finished scene. It used to matter
+    // enormously that the recorded triangles were flushed to the canvas before
+    // this point — they would have landed on top of the contrails otherwise —
+    // and with the depth buffer and the compositing order both being the
+    // driver's now, it does not.
     drawTrails(c, w, v)
     drawRings(s, w, v)
     drawPlane(c, s, w, v, skin)
@@ -1959,6 +1834,24 @@ fn drawSparks(c: &mut Canvas, w: &World, v: &View) {
 //
 // Depth-tested by hand against the z-buffer, because `line` writes straight to
 // the canvas. Without the test a flock behind a ridge draws over the ridge.
+// Does the line from the eye to this point pass under the ground?
+//
+// Six samples, biased toward the far end because that is where a ridge actually
+// intervenes — near the camera the ray is barely above the eye and a sample there
+// only ever finds the hill the aircraft is already over.
+fn rayHitsGround(w: &World, v: &View, px: f64, py: f64, pz: f64): bool {
+    for i in 1..7 {
+        let t = (i as f64) / 7.0
+        let x = v.eye.x + (px - v.eye.x) * t
+        let y = v.eye.y + (py - v.eye.y) * t
+        let z = v.eye.z + (pz - v.eye.z) * t
+        if y < heightAt(w.city, x, z) {
+            return true
+        }
+    }
+    return false
+}
+
 fn drawBirds(c: &mut Canvas, s: &Scene, w: &World, v: &View) {
     for i in 0..w.flocks.len {
         let f = w.flocks[i]
@@ -1994,9 +1887,12 @@ fn drawBirds(c: &mut Canvas, s: &Scene, w: &World, v: &View) {
             if sx < 0.0 || sy < 0.0 || sx >= (c.w as f64) || sy >= (c.h as f64) {
                 continue
             }
-            // occlusion: the z-buffer holds 1/z, larger is nearer
-            let zi = ((sy as i64) * s.w) + (sx as i64)
-            if (s.zbuf[zi] as f64) > inv {
+            // Occlusion, against the terrain rather than against a depth buffer.
+            // The depth buffer is the driver's now and reading it back would stall
+            // the pipeline for one bird; walking the ray over the heightfield the
+            // terrain was built from costs six lookups and answers the same
+            // question — is there a hill between the camera and this bird.
+            if rayHitsGround(w, v, bx, by, bz) {
                 continue
             }
             // wingspan in pixels; below a pixel there is nothing to draw
@@ -2134,10 +2030,6 @@ fn drawPlane(c: &mut Canvas, s: &mut Scene, w: &World, v: &View, skin: &Texture)
             triangle(s, v, bay[j], bay[segs2], bay[j2], rgb(0.14, 0.10, 0.09))
         }
     }
-
-    // The aircraft's own triangles are recorded, not drawn; the glow below is a
-    // 2D additive splat with no depth test, so it has to come after them.
-    rasterFlush(c, s)
 
     // twin nozzles, glowing with throttle
     let k = (w.plane.speed - 170.0) / 170.0

@@ -11,13 +11,16 @@ from "./gfx" import {
     Canvas, canvasFill, text, textCentered, fillRect, thickLine
 }
 from "./display" import {
-    Screen, screenPresent
+    Screen, screenBegin, screenPresent
 }
 from "./gfx3d" import {
-    Scene
+    Camera, Scene, View, viewOf
 }
 from "./gpupost" import {
-    seaViewNone
+    coverGridNone
+}
+from "./gpuworld" import {
+    GpuWorld, drawSkyPass
 }
 from "./input" import {
     Input, pollInput
@@ -74,13 +77,21 @@ pub fn placeBlurb(i: i64): string {
 // flight loop's job is to step a simulation sixty times a second and there is no
 // simulation yet — the place has not been decoded, which is the whole point of
 // asking first.
-pub fn chooseRegion(s: &Screen, c: &mut Canvas, sc: &Scene, inp: &mut Input, ev: &mut [u8; 64], start: i64): i64 {
+pub fn chooseRegion(s: &mut Screen, gw: &GpuWorld, c: &mut Canvas, sc: &Scene, inp: &mut Input, ev: &mut [u8; 64], start: i64): i64 {
     var sel = start
     if sel < 0 {
         sel = 0
     }
     var t: f64 = 0.0
-    let noCover: Vec<f32> = Vec.filled(1, 0.0)
+    let empty: Vec<f32> = Vec.filled(1, 0.0)
+    let noCover = coverGridNone()
+    // A camera looking at nothing in particular. The menu covers the frame, so
+    // this only decides which patch of sky is behind it.
+    let cam = Camera {
+        x: 0.0, y: 600.0, z: 0.0, yaw: 0.0, pitch: 0.0, roll: 0.0,
+        fov: 1.15, near: 0.6, far: 4000.0
+    }
+    let view = viewOf(cam, c.w, c.h)
     // Held down from the moment the window opened, ENTER would pick San
     // Francisco before the screen was ever drawn.
     var armed = false
@@ -99,7 +110,11 @@ pub fn chooseRegion(s: &Screen, c: &mut Canvas, sc: &Scene, inp: &mut Input, ev:
         t = t + 1.0 / 60.0
 
         drawMenu(c, sel, t)
-        screenPresent(s, c, sc, noCover, false, seaViewNone(), 0.35, 1.0)
+        // The start screen has no world yet, so it renders an empty scene: the
+        // sky pass draws, nothing is recorded, and the menu covers all of it.
+        let rs = screenBegin(s)
+        drawSkyPass(gw, sc, view, rs.w as f64, rs.h as f64, t)
+        screenPresent(s, c, view, sc, noCover, empty, false, false, t, 0.35, 1.0)
     }
     return sel
 }

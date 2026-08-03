@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "description": "ATLAS — a globe renderer on the GPU via the gl package",
   "deps": {
-    "gl": "github.com/milo-language/gl@v0.1.1",
+    "gl": "github.com/milo-language/gl@v0.1.2",
     "sdl": "github.com/milo-language/milo-sdl@v0.2.0"
   }
 }

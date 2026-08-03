@@ -26,8 +26,8 @@ from "std/png" import {
 from "./gfx3d" import {
     Rgb, rgb
 }
-from "./raster" import {
-    Texture, texNew
+from "./texture" import {
+    SLOT_ORTHO, Texture, texNew
 }
 
 pub let COVER_URBAN: u8 = 0 as u8
@@ -256,6 +256,7 @@ pub fn cityAttachOrtho(c: &mut City, png: &string): Result<i64, string> {
     // and the LUT converts at sample time. Holding them as f32 triples cost four
     // times the memory for no more information than the bytes already carry.
     t.byteSrc = true
+    t.slot = SLOT_ORTHO
     t.lut = srgbTable()
     t.px = Vec.new()
     t.pxu = Vec.filled(n * n * 3, 0 as u8)

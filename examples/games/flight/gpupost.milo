@@ -1,114 +1,60 @@
-// FLYBY — the bloom and tone-map chain, on the GPU.
+// Everything that happens to a frame after the geometry: the sea, the 2D overlay,
+// bloom, and the tone map that turns unbounded linear light into a picture.
 //
-// gfx.present does this with loops over Vec<f32>: a 4x4 box downsample, a bright
-// pass, four separable blurs at widening strides, then a composite over every
-// pixel that adds the bloom back, tone-maps and packs to 8-bit. The composite
-// alone is a million pixels of dependent LUT lookups and it is the single
-// biggest fixed cost in the frame.
+// The order is load-bearing and worth stating once:
 //
-// It is also, exactly, what a fragment shader is: no cross-pixel writes, no
-// ordering, one output per pixel. So this file is the same pipeline expressed as
-// four passes over the gl package, and the only thing that crosses the bus is the HDR
-// canvas itself.
+//   1. sky + geometry, into `world` — colour in rgb, camera depth in alpha
+//   2. sea, reading `world`, writing `scene`
+//   3. overlay, blended into `scene`
+//   4. bright pass and four blurs, at quarter resolution
+//   5. composite to the window, tone-mapped
 //
-// The arithmetic is deliberately the same as gfx.milo's, pass for pass and
-// constant for constant — the two paths are meant to produce the same picture,
-// and `--cpu` exists so they can be compared on a running frame.
+// The sea is at 2 rather than after the bloom because it has to be a thing in the
+// photograph, not a decal on top of one: the bloom has to see the sun glitter and
+// the tone map has to see the water, or the brightest thing in the frame is the
+// only thing that does not glow.
 //
-// The one thing that does NOT move here is the drawing: the 3D rasteriser and
-// the 2D overlays still fill `Canvas.hdr` on the CPU, in the order they always
-// did. That order is load-bearing (see the note on gfx3d.rasterFlush), and
-// nothing in a post chain can preserve it for free.
+// The sea is still a screen-space raymarch rather than a mesh, and that is the
+// right shape for it — a heightfield traced per pixel has no tessellation to run
+// out of at the horizon, and the alpha channel of `world` gives it exact depth to
+// occlude against. What changed is what it reflects: `sky.skyColor`, the same
+// function the sky pass and the terrain haze call, instead of a flat fog colour.
 
+from "std/math" import {
+    Math
+}
 from "gl" import {
-    Gpu, Mesh, Shader, Target, Texture2D, bindScreen, QUAD_VERT
+    Gpu, Mesh, Shader, Target, Texture2D, bindScreen
+}
+from "./gfx" import {
+    Canvas
 }
 from "./gfx3d" import {
     Scene, View
 }
+from "./sky" import {
+    SKY_GLSL
+}
+from "./gpuworld" import {
+    QUAD_VERT_LOCAL, projScale, skyUniforms
+}
 
-// Quarter resolution for the bloom chain, matching gfx.canvasNew.
+// Quarter resolution for the bloom chain.
 pub let SHRINK: i64 = 4
 
-// Reinhard saturates well before this; gfx.milo's LUT stops at the same place.
+// Reinhard saturates well before this.
 pub let TONE_MAX: f64 = 8.0
 
-// Only things brighter than white bloom. Same number and same reason as
-// gfx.present: mid-grey in linear light is about 0.21, so a lower threshold puts
-// an entire aerial photograph above the line and the whole picture hazes over.
+// Only things brighter than white bloom. Mid-grey in linear light is about 0.21,
+// so a lower threshold puts an entire aerial photograph above the line and the
+// whole picture hazes over.
 pub let BRIGHT_THRESHOLD: f64 = 0.90
 
 // Side of the cover-mask texture. The largest shipped map is 19 km at a ~10 m
 // cover step, so 2048 covers every place with room to spare.
 pub let COVER_TEX: i64 = 2048
 
-// Everything the sea shader needs to agree with the frame the CPU just drew:
-// the same camera, the same sun, the same haze. Passed as one struct because
-// getting any single one of them out of step is invisible in code review and
-// obvious on screen — a sea lit from the wrong side, or one that stays crisp
-// while the terrain behind it fades into fog.
-pub struct SeaView {
-    eyeX: f64,
-    eyeY: f64,
-    eyeZ: f64,
-    rightX: f64,
-    rightY: f64,
-    rightZ: f64,
-    upX: f64,
-    upY: f64,
-    upZ: f64,
-    fwdX: f64,
-    fwdY: f64,
-    fwdZ: f64,
-    scale: f64, // pixels per unit at unit depth
-    cx: f64,
-    cy: f64,
-    sunX: f64,
-    sunY: f64,
-    sunZ: f64,
-    fogR: f64,
-    fogG: f64,
-    fogB: f64,
-    fogStart: f64,
-    fogEnd: f64,
-    time: f64,
-    // The elevation grid, which is what actually decides where the sea is.
-    coverN: i64,
-    coverX0: f64,
-    coverZ0: f64,
-    coverStep: f64,
-    reach: f64, // half-width of the map, for the mirror fold
-    // False for a place with no sea — Yosemite sits at 1200 m, and an ocean
-    // plane at y=0 would otherwise appear past the mountains at the horizon.
-    hasSea: bool,
-}
-
-// Pull the sea's camera straight out of the one the rasteriser used, so the two
-// cannot drift. `hasSea` is the caller's call — see city.cityHasSea.
-pub fn seaViewOf(v: &View, s: &Scene, cov: &CoverGrid, hasSea: bool, time: f64): SeaView {
-    return SeaView {
-        eyeX: v.eye.x, eyeY: v.eye.y, eyeZ: v.eye.z,
-        rightX: v.right.x, rightY: v.right.y, rightZ: v.right.z,
-        upX: v.up.x, upY: v.up.y, upZ: v.up.z,
-        fwdX: v.fwd.x, fwdY: v.fwd.y, fwdZ: v.fwd.z,
-        scale: v.scale,
-        cx: v.cx,
-        cy: v.cy,
-        sunX: s.sunX, sunY: s.sunY, sunZ: s.sunZ,
-        fogR: s.fogR, fogG: s.fogG, fogB: s.fogB,
-        fogStart: s.fogStart,
-        fogEnd: s.fogEnd,
-        time: time,
-        coverN: cov.n,
-        coverX0: cov.x0,
-        coverZ0: cov.z0,
-        coverStep: cov.step,
-        reach: cov.reach,
-        hasSea: hasSea,
-    }
-}
-
-// Where the cover grid sits in the world. Separated from City so gpupost does
+// Where the cover grid sits in the world. Separated from City so this file does
 // not have to import the asset format.
 pub struct CoverGrid {
     n: i64,
@@ -118,139 +64,154 @@ pub struct CoverGrid {
     reach: f64,
 }
 
-// A camera that draws no sea at all — the start screen, which has no world yet.
-pub fn seaViewNone(): SeaView {
-    return SeaView {
-        eyeX: 0.0, eyeY: 0.0, eyeZ: 0.0,
-        rightX: 1.0, rightY: 0.0, rightZ: 0.0,
-        upX: 0.0, upY: 1.0, upZ: 0.0,
-        fwdX: 0.0, fwdY: 0.0, fwdZ: 1.0,
-        scale: 1.0, cx: 0.0, cy: 0.0,
-        sunX: 0.0, sunY: 1.0, sunZ: 0.0,
-        fogR: 0.0, fogG: 0.0, fogB: 0.0,
-        fogStart: 1.0, fogEnd: 2.0,
-        time: 0.0,
-        coverN: 0, coverX0: 0.0, coverZ0: 0.0, coverStep: 1.0, reach: 1.0,
-        hasSea: false,
+pub fn coverGridNone(): CoverGrid {
+    return CoverGrid {
+        n: 0, x0: 0.0, z0: 0.0, step: 1.0, reach: 1.0
     }
 }
 
 pub struct Post {
-    hdr: Texture2D, // the CPU canvas, re-uploaded every frame
-    depth: Texture2D, // the rasteriser's 1/z, so the sea can be occluded
-    lock: Texture2D, // pixels the 2D overlays own
-    cover: Texture2D, // the land-cover water mask, re-uploaded only on a place change
-    scene: Target, // the canvas with the sea composited into it
+    // Sky and geometry land here. Depth is a renderbuffer for the hardware test;
+    // the alpha channel carries the same depth as a linear number the sea pass
+    // can read, which is cheaper than attaching a depth texture and un-projecting.
+    world: Target,
+    scene: Target, // world with the sea and the overlay composited in
     a: Target, // quarter-res ping
     b: Target, // quarter-res pong
+    overlay: Texture2D, // the 2D layer's linear light
+    overlayCov: Texture2D, // and how much of the scene it hides
+    cover: Texture2D, // the land-cover water mask, uploaded on a place change
     sea: Shader,
+    over: Shader,
     bright: Shader,
     blur: Shader,
     comp: Shader,
     quad: Mesh,
-    w: i64,
+    w: i64, // render resolution — the drawable, times the supersample factor
     h: i64,
+    ow: i64, // the 2D overlay's own fixed resolution
+    oh: i64,
     bw: i64,
     bh: i64,
 }
 
-// Build the chain. Fails only on a shader that will not compile or a framebuffer
-// the driver refuses — both of which are "this machine cannot run the GPU path",
-// which the caller answers by staying on the CPU one.
-pub fn postNew(w: i64, h: i64, hdr: &Vec<f32>, depth: &Vec<f32>, lock: &Vec<f32>): Result<Post, string> {
-    let bw = w / SHRINK
-    let bh = h / SHRINK
-    let sea = Shader.compile(QUAD_VERT, SEA_FRAG)?
-    let bright = Shader.compile(QUAD_VERT, BRIGHT_FRAG)?
-    let blur = Shader.compile(QUAD_VERT, BLUR_FRAG)?
-    let comp = Shader.compile(QUAD_VERT, COMPOSITE_FRAG)?
-    // NEAREST on the source: the bright pass takes exactly the sixteen texels of
-    // its 4x4 block, the way the CPU downsample does. Filtering here would blend
-    // in neighbours the CPU never saw.
-    let tex = Texture2D.rgb32f(w, h, hdr, false)
-    // LINEAR on the bloom targets, because the composite upsamples from them.
-    // The blur taps land on texel centres, where linear and nearest agree, so
-    // one filter setting serves both readers.
-    let a = Target.new(bw, bh, false, true)?
-    let b = Target.new(bw, bh, false, true)?
-    // The sea pass writes here and everything downstream reads it instead of the
-    // uploaded canvas. NEAREST, because both readers sample it 1:1.
-    let scene = Target.new(w, h, false, false)?
-    return Result.Ok(Post {
-        hdr: tex,
-        depth: Texture2D.r32f(w, h, depth, false),
-        lock: Texture2D.r32f(w, h, lock, false),
+pub fn postNew(w: i64, h: i64, ow: i64, oh: i64): Result<Post, string> {
+    let sea = Shader.compile(QUAD_VERT_LOCAL, seaFrag())?
+    let over = Shader.compile(QUAD_VERT_LOCAL, OVERLAY_FRAG)?
+    let bright = Shader.compile(QUAD_VERT_LOCAL, BRIGHT_FRAG)?
+    let blur = Shader.compile(QUAD_VERT_LOCAL, BLUR_FRAG)?
+    let comp = Shader.compile(QUAD_VERT_LOCAL, COMPOSITE_FRAG)?
+    var p = Post {
+        world: Target.new(4, 4, true, false)?,
+        scene: Target.new(4, 4, false, false)?,
+        a: Target.new(4, 4, false, true)?,
+        b: Target.new(4, 4, false, true)?,
+        // LINEAR, because the overlay is at a fixed resolution and the scene is
+        // not: at anything but 1:1 a nearest-sampled HUD is a staircase.
+        overlay: Texture2D.rgb32f(ow, oh, Vec.filled(ow * oh * 3, 0.0), true),
+        overlayCov: Texture2D.r32f(ow, oh, Vec.filled(ow * oh, 0.0), true),
         // One fixed allocation, big enough for any shipped map's cover grid, so
         // changing place is a sub-image upload rather than a reallocation.
         // LINEAR: the grid is coarse, and a nearest-sampled shoreline is a
         // staircase of 10 m steps. Filtering makes it a soft waterline.
         cover: Texture2D.r32fEmpty(COVER_TEX, COVER_TEX, true),
-        scene: scene,
-        a: a,
-        b: b,
         sea: sea,
+        over: over,
         bright: bright,
         blur: blur,
         comp: comp,
         quad: Mesh.fullscreenQuad(),
-        w: w,
-        h: h,
-        bw: bw,
-        bh: bh,
+        w: 0,
+        h: 0,
+        ow: ow,
+        oh: oh,
+        bw: 1,
+        bh: 1,
     }
-    )
+    postResize(p, w, h)?
+    return Result.Ok(p)
 }
 
-// One frame: upload, bloom, composite to the window. `dw`/`dh` are the
-// drawable's pixel size, which is not the window's size on a Retina display.
+// Rebuild every full-resolution target for a new render size.
 //
-// The caller still has to zero the HDR canvas afterwards — gfx.present did that
-// as a side effect of reading it, and nothing on this path touches host memory.
-pub fn postDraw(p: &Post, hdr: &Vec<f32>, depth: &Vec<f32>, lock: &Vec<f32>, cover: &Vec<f32>, coverDirty: bool, sv: &SeaView, bloomGain: f64, exposure: f64, dw: i64, dh: i64) {
-    postUpload(p, hdr)
-    p.depth.updateR32f(depth)
-    p.lock.updateR32f(lock)
+// This is what makes resolution a window property rather than a compile-time one:
+// the frame is rendered at the drawable size (times the supersample factor), so
+// dragging the window bigger genuinely draws more pixels instead of scaling up a
+// fixed-size picture. Freeing first is not optional — a `Target` is @noCopy and
+// `free` consumes it, so the old one has to come out of the field before the new
+// one goes in.
+pub fn postResize(p: &mut Post, w: i64, h: i64): Result<i64, string> {
+    if w == p.w && h == p.h {
+        return Result.Ok(0)
+    }
+    let bw = Math.maxI64(1, w / SHRINK)
+    let bh = Math.maxI64(1, h / SHRINK)
+    replace(p.world, Target.new(w, h, true, false)?).free()
+    replace(p.scene, Target.new(w, h, false, false)?).free()
+    replace(p.a, Target.new(bw, bh, false, true)?).free()
+    replace(p.b, Target.new(bw, bh, false, true)?).free()
+    p.w = w
+    p.h = h
+    p.bw = bw
+    p.bh = bh
+    return Result.Ok(0)
+}
+
+// Point the driver at the world target and clear it. Everything the sky pass and
+// the geometry passes draw goes here.
+pub fn postBeginWorld(p: &Post) {
+    p.world.bind()
+    Gpu.clear(0.0, 0.0, 0.0, 0.0, true)
+}
+
+// The sea, then the overlay, then bloom, then the window.
+pub fn postFinish(p: &Post, c: &Canvas, v: &View, s: &Scene, cov: &CoverGrid, cover: &Vec<f32>, coverDirty: bool, hasSea: bool, time: f64, bloomGain: f64, exposure: f64, dw: i64, dh: i64) {
     // Only when the place changes: a 19 km grid is 14 MB and there is no reason
     // to push it down the bus sixty times a second for a map that never moves.
-    if coverDirty && sv.coverN > 0 {
-        p.cover.updateR32fRegion(sv.coverN, sv.coverN, cover)
+    if coverDirty && cov.n > 0 {
+        p.cover.updateR32fRegion(cov.n, cov.n, cover)
     }
 
     Gpu.depthTest(false)
     Gpu.blendOff()
 
-    // The sea, composited into the CPU's frame by depth. Everything downstream
-    // reads the result, so the bloom sees the glint and the tone map sees the
-    // water — which is the whole reason this runs before them and not after.
     p.scene.bind()
     p.sea.bind()
-    p.hdr.bind(0)
-    p.depth.bind(1)
-    p.lock.bind(2)
-    p.cover.bind(3)
-    p.sea.uniformI("uColor", 0)
-    p.sea.uniformI("uDepth", 1)
-    p.sea.uniformI("uLock", 2)
-    p.sea.uniformI("uCover", 3)
-    p.sea.uniform4F("uCover0", sv.coverX0, sv.coverZ0, sv.coverStep, sv.coverN as f64)
-    p.sea.uniform2F("uCoverTex", COVER_TEX as f64, sv.reach)
+    p.world.bindTexture(0)
+    p.cover.bind(1)
+    p.sea.uniformI("uWorld", 0)
+    p.sea.uniformI("uCover", 1)
+    p.sea.uniform4F("uCover0", cov.x0, cov.z0, cov.step, cov.n as f64)
+    p.sea.uniform2F("uCoverTex", COVER_TEX as f64, cov.reach)
     p.sea.uniform2F("uRes", p.w as f64, p.h as f64)
-    p.sea.uniform3F("uEye", sv.eyeX, sv.eyeY, sv.eyeZ)
-    p.sea.uniform3F("uRight", sv.rightX, sv.rightY, sv.rightZ)
-    p.sea.uniform3F("uUp", sv.upX, sv.upY, sv.upZ)
-    p.sea.uniform3F("uFwd", sv.fwdX, sv.fwdY, sv.fwdZ)
-    p.sea.uniform2F("uCenter", sv.cx, sv.cy)
-    p.sea.uniformF("uScale", sv.scale)
-    p.sea.uniform3F("uSun", sv.sunX, sv.sunY, sv.sunZ)
-    p.sea.uniform3F("uFog", sv.fogR, sv.fogG, sv.fogB)
-    p.sea.uniform2F("uFogRange", sv.fogStart, sv.fogEnd)
-    p.sea.uniformF("uTime", sv.time)
+    p.sea.uniform3F("uEye", v.eye.x, v.eye.y, v.eye.z)
+    p.sea.uniform3F("uRight", v.right.x, v.right.y, v.right.z)
+    p.sea.uniform3F("uUp", v.up.x, v.up.y, v.up.z)
+    p.sea.uniform3F("uFwd", v.fwd.x, v.fwd.y, v.fwd.z)
+    let ps = projScale(v, p.w as f64, p.h as f64)
+    p.sea.uniform2F("uProj", ps.x, ps.y)
+    p.sea.uniform2F("uFogRange", s.fogStart, s.fogEnd)
+    skyUniforms(p.sea, s, time)
     var on = 0.0
-    if sv.hasSea {
+    if hasSea {
         on = 1.0
     }
     p.sea.uniformF("uSeaOn", on)
     p.quad.draw()
+
+    // The 2D layer, blended in. Premultiplied alpha: the shader emits the
+    // overlay's own light in rgb and how much of the scene it hides in alpha, and
+    // GL_ONE / GL_ONE_MINUS_SRC_ALPHA gives `overlay + scene * (1 - cov)`.
+    p.overlay.updateRgb32f(c.hdr)
+    p.overlayCov.updateR32f(c.cov)
+    Gpu.blendPremultiplied()
+    p.over.bind()
+    p.overlay.bind(0)
+    p.overlayCov.bind(1)
+    p.over.uniformI("uOverlay", 0)
+    p.over.uniformI("uCov", 1)
+    p.quad.draw()
+    Gpu.blendOff()
 
     p.a.bind()
     p.bright.bind()
@@ -267,38 +228,22 @@ pub fn postDraw(p: &Post, hdr: &Vec<f32>, depth: &Vec<f32>, lock: &Vec<f32>, cov
     gpuBlurPass(p, 4)
     gpuBlurPass(p, 8)
 
-    // Letterbox rather than stretch. The frame is always rendered at w x h, so a
-    // window of another shape gets bars — the same thing SDL_RenderSetLogicalSize
-    // does for the CPU path, and for the same reason: a 16:9 frame stretched
-    // across a 16:10 display turns every circle on the HUD into an ellipse.
+    // Straight to the window with no letterbox: the scene was rendered at this
+    // aspect, because it was rendered at this drawable's size. The old fixed
+    // 1280x720 frame needed bars to avoid stretching circles on the HUD into
+    // ellipses; a frame that is already the right shape does not.
     bindScreen(dw, dh)
     Gpu.clear(0.0, 0.0, 0.0, 1.0, false)
-    // Fit by width, and if that overflows the height, fit by height instead.
-    var vw = dw
-    var vh = vw * p.h / p.w
-    if vh > dh {
-        vh = dh
-        vw = vh * p.w / p.h
-    }
-    Gpu.viewport((dw - vw) / 2, (dh - vh) / 2, vw, vh)
 
     p.comp.bind()
     p.scene.bindTexture(0)
     p.a.bindTexture(1)
     p.comp.uniformI("uHdr", 0)
     p.comp.uniformI("uBloom", 1)
-    // gfx.compositeAll folds the exposure into the bloom gain AND applies it
-    // again to the sum. Keeping the same two numbers keeps the same picture.
     p.comp.uniformF("uGain", bloomGain * exposure)
     p.comp.uniformF("uExposure", exposure)
     p.comp.uniformF("uToneMax", TONE_MAX)
     p.quad.draw()
-}
-
-// The canvas going up the bus, on its own, so a benchmark can say how much of
-// the GPU path is transfer and how much is shading.
-pub fn postUpload(p: &Post, hdr: &Vec<f32>) {
-    p.hdr.updateRgb32f(hdr)
 }
 
 // Horizontal a -> b, then vertical b -> a, so the chain always leaves its result
@@ -323,94 +268,59 @@ fn gpuBlurPass(p: &Post, stride: i64) {
 }
 
 pub fn postFree(p: Post) {
-    p.quad.free()
-    p.sea.free()
+    p.world.free()
     p.scene.free()
-    p.depth.free()
-    p.lock.free()
+    p.a.free()
+    p.b.free()
+    p.overlay.free()
+    p.overlayCov.free()
     p.cover.free()
+    p.sea.free()
+    p.over.free()
     p.bright.free()
     p.blur.free()
     p.comp.free()
-    p.a.free()
-    p.b.free()
-    p.hdr.free()
+    p.quad.free()
 }
 
-// ── shaders ───────────────────────────────────────────────────────────────────
+// ── the sea ───────────────────────────────────────────────────────────────────
 
-// The sea, raymarched per pixel and composited into the CPU's frame by depth.
+// A heightfield traced per pixel, occluded by the depth the geometry pass left in
+// the alpha channel, reflecting the same sky everything else in the frame does.
 //
-// The rasteriser already writes 1/z for every pixel of geometry it draws, and
-// the sea is a surface at a known height (the DEM's own zero), so the whole
-// question "is there water in front of what the CPU drew here?" is answered by
-// intersecting one ray with one heightfield and comparing depths. No geometry,
-// no changes to the rasteriser, and the aerial photograph's flat blue is simply
-// covered up where the sea wins.
-//
-// The camera basis and the projection constants are the *same numbers*
-// gfx3d.viewOf handed the rasteriser, and the inverse is exact: a pixel maps
-// back to the ray that drew it. Anything less and the sea would slide against
-// the coastline as the aircraft turned.
-pub let SEA_FRAG: string = "#version 330 core
+// A function rather than a global, because the source pastes in `SKY_GLSL`.
+pub fn seaFrag(): string {
+    return "#version 330 core
 in vec2 vUv;
 out vec4 fragColor;
 
-uniform sampler2D uColor;
-uniform sampler2D uDepth;
-uniform sampler2D uLock;
+uniform sampler2D uWorld;   // rgb = the frame so far, a = camera depth (0 = sky)
+uniform sampler2D uCover;
+uniform vec4 uCover0;       // x0, z0, step, n
+uniform vec2 uCoverTex;     // texture side, map reach
 uniform vec2 uRes;
 uniform vec3 uEye;
 uniform vec3 uRight;
 uniform vec3 uUp;
 uniform vec3 uFwd;
-uniform vec2 uCenter;
-uniform float uScale;
-uniform vec3 uSun;
-uniform vec3 uFog;
+uniform vec2 uProj;
 uniform vec2 uFogRange;
-uniform float uTime;
 uniform float uSeaOn;
-uniform sampler2D uCover;
-uniform vec4 uCover0;   // x0, z0, step, n
-uniform vec2 uCoverTex; // texture side, map reach
+"
 
+    + SKY_GLSL + "
 const float SEA_LIFT = 0.80;
-// Terrain at or under this is the DEM's water sheet, not land. Generous enough
+// Terrain at or under this is the DEM\'s water sheet, not land. Generous enough
 // to swallow the noise flyby adds to terrain, tight enough that a real shore
 // keeps its edge — SRTM posts are 30 m apart, so this is a sliver of a pixel.
-// Something standing ON the water — a bridge deck, a tower, a ship — is this
-// far above it or more, and keeps its pixel. The fade means a shoal the DEM
-// lifted by a metre or two does not punch a hard-edged hole in the sea.
+// Something standing ON the water — a bridge deck, a tower, a ship — is this far
+// above it or more, and keeps its pixel.
 const float WATERLINE = 3.0;
 const float WATERLINE_FADE = 12.0;
 
-float hash21(vec2 p) {
-    p = fract(p * vec2(123.34, 456.21));
-    p += dot(p, p + 45.32);
-    return fract(p.x * p.y);
-}
-
-float vnoise(vec2 p) {
-    vec2 i = floor(p);
-    vec2 f = fract(p);
-    vec2 u = f * f * (3.0 - 2.0 * f);
-    float a = hash21(i);
-    float b = hash21(i + vec2(1.0, 0.0));
-    float c = hash21(i + vec2(0.0, 1.0));
-    float d = hash21(i + vec2(1.0, 1.0));
-    return mix(mix(a, b, u.x), mix(c, d, u.x), u.y);
-}
-
-float fbm(vec2 p) {
-    float v = 0.0;
-    float a = 0.5;
-    for (int i = 0; i < 4; i++) {
-        v += a * vnoise(p);
-        p = mat2(1.6, 1.2, -1.2, 1.6) * p;
-        a *= 0.5;
-    }
-    return v;
+// Metres of sea covered by one pixel at this distance.
+float footprint(float dist) {
+    return dist * 2.0 / (uProj.y * uRes.y);
 }
 
 // Metres. A ~130 m primary swell with shorter waves across it, plus wind chop.
@@ -449,8 +359,8 @@ float seaHeight(vec2 p, float span) {
     }
     // Chop, in the ORIGINAL frame — the loop above has warped `p` a long way by
     // now and noise on that is smeared along the swell instead of across it.
-    h += (fbm(p0 * 0.085 + vec2(uTime * 0.10, uTime * 0.07)) - 0.5) * 1.55 * smoothstep(24.0, 8.0, span);
-    h += (fbm(p0 * 0.021 + vec2(uTime * 0.03, uTime * 0.05)) - 0.5) * 1.15;
+    h += (skyFbm(p0 * 0.085 + vec2(uTime * 0.10, uTime * 0.07)) - 0.5) * 1.55 * smoothstep(24.0, 8.0, span);
+    h += (skyFbm(p0 * 0.021 + vec2(uTime * 0.03, uTime * 0.05)) - 0.5) * 1.15;
     return h + SEA_LIFT;
 }
 
@@ -458,11 +368,6 @@ float seaHeight(vec2 p, float span) {
 // world is MIRRORED at the edges rather than wrapped — and the sea has to fold
 // exactly the way the terrain does or the coastline and the water disagree one
 // map-width out.
-// Metres of sea covered by one pixel at this distance.
-float footprint(float dist) {
-    return dist / uScale;
-}
-
 float foldIn(float v, float reach) {
     float period = reach * 2.0;
     float k = floor((v + reach) / period);
@@ -498,29 +403,30 @@ float wetness(vec2 xz) {
     return 1.0 - smoothstep(-0.5, 2.5, h);
 }
 
+
 void main() {
-    vec3 cpu = texture(uColor, vUv).rgb;
-    // Any of these three and the CPU's pixel stands: no sea in this place, the
-    // 2D overlay owns the pixel, or the ray never goes down.
-    if (uSeaOn < 0.5 || texture(uLock, vUv).r > 0.5) {
-        fragColor = vec4(cpu, 1.0);
+    vec4 world = texture(uWorld, vUv);
+    vec3 base = world.rgb;
+    float sceneZ = world.a;
+    if (uSeaOn < 0.5) {
+        fragColor = vec4(base, sceneZ);
         return;
     }
 
-    // Exactly the inverse of raster.triSetup's projection: it wrote
-    // sx = cx + camX*scale/camZ and sy = cy - camY*scale/camZ.
-    vec2 px = vUv * uRes;
-    float a = (px.x - uCenter.x) / uScale;
-    float b = -(px.y - uCenter.y) / uScale;
+    // Exactly the inverse of gpuworld.viewProj, which is why they share uProj:
+    // a field of view reconstructed a fraction off is a sea that does not line up
+    // with the coast it is lapping against.
+    float a = (vUv.x * 2.0 - 1.0) / uProj.x;
+    float b = (vUv.y * 2.0 - 1.0) / uProj.y;
     vec3 rd = normalize(uRight * a + uUp * b + uFwd);
 
     if (rd.y > -0.0008 || uEye.y <= 0.2) {
-        fragColor = vec4(cpu, 1.0);
+        fragColor = vec4(base, sceneZ);
         return;
     }
     float t = -uEye.y / rd.y;
     if (t <= 0.0 || t > uFogRange.y) {
-        fragColor = vec4(cpu, 1.0);
+        fragColor = vec4(base, sceneZ);
         return;
     }
 
@@ -534,36 +440,34 @@ void main() {
         if (t < 0.0) { t = 0.0; }
     }
     vec3 p = uEye + rd * t;
-
-    // Depth, in the rasteriser's own terms: camera-space z along the view axis.
     float seaZ = dot(p - uEye, uFwd);
-    float cpuInvZ = texture(uDepth, vUv).r;
+
     // Where is the sea? Ask the map, not the geometry.
     //
-    // Two earlier answers were wrong and both failed the same way. Racing the
-    // sea against the depth buffer fails because SRTM writes 0 over water, so
-    // the terrain across a bay is coplanar with the sea and float noise decides
-    // per pixel. Thresholding the reconstructed world height fails because the
-    // DEM has real noise over water — scattered cells lifted a few metres that
-    // the renderer then paints as land, in the middle of a bay.
-    //
-    // The land-cover grid has none of that ambiguity. It says water or it does
-    // not, it is the same grid the terrain shader reads, and it is a property of
-    // the map rather than of this frame's floating-point.
+    // Two earlier answers were wrong and both failed the same way. Racing the sea
+    // against the depth buffer fails because SRTM writes 0 over water, so the
+    // terrain across a bay is coplanar with the sea and float noise decides per
+    // pixel. Thresholding the reconstructed world height fails because the DEM has
+    // real noise over water — scattered cells lifted a few metres that the
+    // renderer then paints as land, in the middle of a bay.
     float wet = wetness(p.xz);
     if (seaZ <= 0.0 || wet < 0.002) {
-        fragColor = vec4(cpu, 1.0);
+        fragColor = vec4(base, sceneZ);
         return;
     }
-    // Anything standing on the water still occludes it.
-    float cosF = max(dot(rd, uFwd), 0.0001);
-    bool cpuIsSky = cpuInvZ <= 0.0;
-    float cpuY = uEye.y + rd.y * ((1.0 / max(cpuInvZ, 0.000001)) / cosF);
-    if (!cpuIsSky) {
-        wet *= 1.0 - smoothstep(WATERLINE, WATERLINE + WATERLINE_FADE, cpuY);
+    // Anything standing on the water still occludes it — a bridge deck, a tower,
+    // a ship. Judged by HEIGHT, not by depth: the DEM writes 0 over water, so the
+    // terrain across a bay is coplanar with the sea and a depth comparison is
+    // decided by float noise per pixel. Reconstructing what height the drawn
+    // pixel is at and asking whether it is above the waterline has no such tie.
+    bool isSky = sceneZ <= 0.0;
+    if (!isSky) {
+        float cosF = max(dot(rd, uFwd), 0.0001);
+        float sceneY = uEye.y + rd.y * (sceneZ / cosF);
+        wet *= 1.0 - smoothstep(WATERLINE, WATERLINE + WATERLINE_FADE, sceneY);
     }
     if (wet < 0.002) {
-        fragColor = vec4(cpu, 1.0);
+        fragColor = vec4(base, sceneZ);
         return;
     }
 
@@ -571,57 +475,75 @@ void main() {
     // A fixed epsilon makes the far water boil, because out there one pixel spans
     // several wavelengths and picks a different crest every frame.
     float span = footprint(seaZ);
-    // Sample the normal over a whole pixel's worth of sea, so the far field is
-    // an average rather than whichever crest this pixel happened to land on.
     float e = max(0.30, span);
     float h0 = seaHeight(p.xz, span);
     float hx = seaHeight(p.xz + vec2(e, 0.0), span);
     float hz = seaHeight(p.xz + vec2(0.0, e), span);
     vec3 n = normalize(vec3(h0 - hx, e, h0 - hz));
 
-    // The sky this water is under, built from the haze the terrain is already
-    // fading into. Reusing uFog is what keeps the sea and the land in the same
-    // photograph — an independently invented sky colour reads as a decal.
+    // The sky this water is under — the real one, with the sun in it.
+    //
+    // This single line is the difference between water and paint. It used to mix
+    // two tints out of the flat fog colour, so the sea reflected a grey sheet and
+    // looked like one. `skyColor` is the same function the sky pass draws with, so
+    // what the water shows is what is actually above it: the horizon band, the
+    // clouds, the sun, and all of it moving as the aircraft turns.
     vec3 refl = reflect(rd, n);
     refl.y = max(refl.y, 0.015);
-    vec3 zenith = uFog * vec3(0.22, 0.44, 0.98);
-    vec3 sky = mix(uFog, zenith, pow(clamp(refl.y, 0.0, 1.0), 0.65));
+    vec3 sky = skyColor(refl, true);
 
-    // Capped, not physical — and this is the single thing that decides whether
-    // the bay reads as water or as paint. Schlick goes to 1.0 at a grazing angle,
-    // and a chase camera looking flat across a bay is ALL grazing angle: taken
-    // literally every pixel becomes sky colour and the sea disappears into the
-    // haze. render3d.cornerAt caps its own water for the same reason.
+    // Capped, not physical. Schlick goes to 1.0 at a grazing angle, and a chase
+    // camera looking flat across a bay is ALL grazing angle: taken literally every
+    // pixel becomes sky colour and the sea disappears into the haze.
     float fres = 0.02 + 0.74 * pow(1.0 - max(dot(n, -rd), 0.0), 5.0);
-    vec3 deep = uFog * vec3(0.030, 0.085, 0.165) + vec3(0.003, 0.018, 0.036);
+    float day = clamp(uSun.y * 2.4 + 0.20, 0.0, 1.0);
+    vec3 deep = mix(vec3(0.004, 0.012, 0.026), vec3(0.012, 0.055, 0.090), day);
     // Crests are thinner water and glow with what comes through from behind.
     float crest = clamp((h0 - SEA_LIFT) * 0.40, 0.0, 1.0);
     vec3 col = mix(deep + vec3(0.012, 0.070, 0.062) * crest * crest, sky, fres);
 
-    float sun = clamp(dot(uSun, vec3(0.0, 1.0, 0.0)) + 0.25, 0.0, 1.0);
-    float gl = max(dot(refl, uSun), 0.0);
     // Two lobes: a tight specular for the glint itself and a broad one for the
-    // sheen that spreads down-sun across a choppy surface. The tight one alone
-    // is a dot nobody notices from a thousand feet up.
+    // sheen that spreads down-sun across a choppy surface. The tight one alone is
+    // a dot nobody notices from a thousand feet up.
+    float gl = max(dot(refl, uSun), 0.0);
+    float sun = clamp(uSun.y + 0.25, 0.0, 1.0);
     col += vec3(2.2, 2.0, 1.7) * pow(gl, 900.0) * 5.0 * sun;
     col += vec3(1.6, 1.5, 1.25) * pow(gl, 14.0) * 0.55 * sun;
 
-    // Foam: the tallest crests AND only where a slow noise field says the wind
-    // is tearing them. Height alone put a white line on every single crest of
-    // the primary swell, which is what turned the sea into corduroy.
-    float foamMask = fbm(p.xz * 0.028 + vec2(uTime * 0.03, 0.0));
+    // Foam: the tallest crests AND only where a slow noise field says the wind is
+    // tearing them. Height alone put a white line on every crest of the primary
+    // swell, which is what turned the sea into corduroy.
+    float foamMask = skyFbm(p.xz * 0.028 + vec2(uTime * 0.03, 0.0));
     float foam = smoothstep(2.9, 3.8, h0) * smoothstep(0.52, 0.78, foamMask) * smoothstep(9.0, 2.5, span);
     col = mix(col, vec3(0.72, 0.80, 0.88), foam * 0.35);
 
-    // The same linear fog the rasteriser applied to the terrain, with the same
-    // two constants — see raster.bandFlat.
+    // The same aerial perspective the terrain got, toward the same sky.
     float fog = clamp((seaZ - uFogRange.x) / (uFogRange.y - uFogRange.x), 0.0, 1.0);
-    col = mix(col, uFog, fog);
+    col = mix(col, skyColor(rd, false), fog);
 
-    // Fade the sea out over the last stretch rather than ending it on a line.
-    // By then it is almost pure fog and so is the CPU's pixel, so nothing shows.
+    // Fade the sea out over the last stretch rather than ending it on a line. By
+    // then it is almost pure haze and so is what is behind it, so nothing shows.
     float edge = 1.0 - smoothstep(uFogRange.y * 0.75, uFogRange.y, t);
-    fragColor = vec4(mix(cpu, col, edge * wet), 1.0);
+    float k = edge * wet;
+    fragColor = vec4(mix(base, col, k), mix(sceneZ, seaZ, k));
+}
+"
+
+}
+
+// The 2D layer, in premultiplied-alpha form.
+//
+// rgb is the overlay\'s own light and alpha is how much of the scene it hides, so
+// GL_ONE / GL_ONE_MINUS_SRC_ALPHA composites it as `overlay + scene * (1 - cov)`.
+// The v flip is here: the canvas\'s row 0 is its top and GL\'s row 0 is the bottom.
+pub let OVERLAY_FRAG: string = "#version 330 core
+in vec2 vUv;
+out vec4 fragColor;
+uniform sampler2D uOverlay;
+uniform sampler2D uCov;
+void main() {
+    vec2 uv = vec2(vUv.x, 1.0 - vUv.y);
+    fragColor = vec4(texture(uOverlay, uv).rgb, texture(uCov, uv).r);
 }
 "
 
@@ -664,9 +586,9 @@ void main() {
 }
 "
 
-// The v flip is here and nowhere else: GL's row 0 is the bottom of the image and
-// the canvas's row 0 is the top, so every pass upstream works in the canvas's
-// own upside-down space and only the one that reaches the window turns it over.
+// No v flip: the scene is rendered by the driver, so it is already in GL's
+// orientation all the way through. The one thing that is not — the CPU's 2D
+// overlay — is flipped where it is sampled, in OVERLAY_FRAG.
 pub let COMPOSITE_FRAG: string = "#version 330 core
 in vec2 vUv;
 out vec4 fragColor;
@@ -676,8 +598,7 @@ uniform float uGain;
 uniform float uExposure;
 uniform float uToneMax;
 void main() {
-    vec2 uv = vec2(vUv.x, 1.0 - vUv.y);
-    vec3 lin = (texture(uHdr, uv).rgb + texture(uBloom, uv).rgb * uGain) * uExposure;
+    vec3 lin = (texture(uHdr, vUv).rgb + texture(uBloom, vUv).rgb * uGain) * uExposure;
     lin = clamp(lin, 0.0, uToneMax);
     vec3 mapped = lin / (1.0 + lin);
     fragColor = vec4(pow(mapped, vec3(0.4545454545)), 1.0);

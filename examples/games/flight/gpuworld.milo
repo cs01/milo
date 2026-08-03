@@ -1,0 +1,465 @@
+// The world, rasterised by the driver.
+//
+// Every triangle in the game — terrain, city blocks, bridge decks and cables,
+// props, waterfalls, rings, the aircraft — already went through `gfx3d.triangleV`
+// and `triangleG`, which never drew anything: they transformed, clipped and
+// RECORDED. That recording used to be a command list for a scanline rasteriser
+// running on N threads. It is now five vertex streams and five draw calls, and
+// the two thousand lines of geometry above did not change at all.
+//
+// What the move buys, in order of how much it matters:
+//
+//   - The sky, the haze and the sea are the same function now (see sky.milo).
+//     They could not be before: the haze was three constants because a per-pixel
+//     sky was not affordable in a scanline loop.
+//   - Depth is the driver's. Draw order stops being load-bearing, which is what
+//     let the second flush and the interleaving rules go away.
+//   - Texturing is free, so the LOD dodges that existed to avoid it — a detail
+//     texture that faded out past ring 7 and stopped entirely at ring 11 — are
+//     gone, and the terrain keeps its grain to the horizon.
+//   - Resolution stops being a frame-time decision. The scene renders at the
+//     drawable size, and `--ss 2` renders it at twice that and downsamples.
+//
+// Streams are keyed by texture rather than by what the geometry is, because a
+// draw call is a texture binding: `Texture.slot` says which of the five a
+// triangle belongs to and everything with the same slot goes out together.
+
+from "gl" import {
+    Gpu, Mesh, Shader, Texture2D, Wrap
+}
+from "./texture" import {
+    SLOT_COUNT, SLOT_FACADE, SLOT_GROUND, SLOT_NONE, SLOT_ORTHO, SLOT_SKIN,
+    Texture
+}
+from "./gfx3d" import {
+    Scene, View
+}
+from "./sky" import {
+    SKY_GLSL
+}
+
+// Ten floats per vertex, laid out exactly as `texture.Vtx` declares them.
+pub let VERTEX_FLOATS: i64 = 10
+
+pub let WORLD_VERT: string = "#version 330 core
+layout (location = 0) in vec3 aPos;
+layout (location = 1) in vec2 aUv;
+layout (location = 2) in float aLight;
+layout (location = 3) in vec3 aTint;
+layout (location = 4) in float aTw;
+
+uniform mat4 uViewProj;
+
+out vec2 vUv;
+out float vLight;
+out vec3 vTint;
+out float vTw;
+out float vDepth;
+out vec3 vWorld;
+
+void main() {
+    vUv = aUv;
+    vLight = aLight;
+    vTint = aTint;
+    vTw = aTw;
+    vWorld = aPos;
+    vec4 clip = uViewProj * vec4(aPos, 1.0);
+    // The projection is built so that w IS camera-space depth along the view
+    // axis — the same number the old rasteriser depth-tested on. That is what
+    // lets the fragment shader hand it to the sea pass in the alpha channel
+    // without reconstructing anything from a depth buffer.
+    vDepth = clip.w;
+    gl_Position = clip;
+}
+"
+
+// Colour in rgb, camera-space depth in alpha.
+//
+// The alpha channel is the whole occlusion story for the passes downstream. The
+// target is RGBA16F and nothing was using alpha; writing linear depth into it is
+// free, exact, and saves attaching a depth texture the sea pass would then have
+// to un-project. The sky pass writes 0 there, meaning "nothing is here".
+// A function, not a global: the source is `SKY_GLSL` pasted into a body, and a
+// global whose initializer concatenates another global is not a compile-time
+// constant. Shaders are compiled once at startup, so the call costs nothing.
+pub fn worldFrag(): string {
+    return "#version 330 core
+in vec2 vUv;
+in float vLight;
+in vec3 vTint;
+in float vTw;
+in float vDepth;
+in vec3 vWorld;
+
+out vec4 fragColor;
+
+uniform sampler2D uTex;
+uniform vec3 uEye;
+uniform vec2 uFogRange;
+"
+
+    + SKY_GLSL + "
+void main() {
+    // `tw` fades the detail texture toward 1.0, which is a no-op multiplier —
+    // that is how terrain and water share one draw call, and how the untextured
+    // stream works at all: it carries tw = 0 and never sees its white texture.
+    vec3 texel = texture(uTex, vUv).rgb;
+    vec3 col = vTint * vLight * mix(vec3(1.0), texel, vTw) * sunLight();
+
+    // Aerial perspective, toward the sky THIS pixel is looking at rather than
+    // toward a constant. A ridge against a bright horizon and the same ridge
+    // against the blue overhead now fade into different colours, which is what
+    // distance actually looks like and what one fog colour could never give.
+    vec3 rd = normalize(vWorld - uEye);
+    float f = clamp((vDepth - uFogRange.x) / (uFogRange.y - uFogRange.x), 0.0, 1.0);
+    col = mix(col, skyColor(rd, false), f);
+
+    fragColor = vec4(col, vDepth);
+}
+"
+
+}
+
+// The sky, as one fullscreen quad behind everything.
+//
+// Depth-tested against nothing and written first, so the world draws over it.
+// The ray is the inverse of the projection in `viewProj` — the same three camera
+// axes, undone.
+pub fn skyboxFrag(): string {
+    return "#version 330 core
+in vec2 vUv;
+out vec4 fragColor;
+
+uniform vec3 uRight;
+uniform vec3 uUp;
+uniform vec3 uFwd;
+uniform vec2 uProj;
+"
+
+    + SKY_GLSL + "
+void main() {
+    float a = (vUv.x * 2.0 - 1.0) / uProj.x;
+    float b = (vUv.y * 2.0 - 1.0) / uProj.y;
+    vec3 rd = normalize(uRight * a + uUp * b + uFwd);
+    // Alpha 0: no geometry here. The sea pass reads that as open sky.
+    fragColor = vec4(skyColor(rd, true), 0.0);
+}
+"
+
+}
+
+// Everything the GPU needs to draw a frame's geometry.
+//
+// One mesh per slot rather than one per draw: the streams are refilled and
+// re-uploaded every frame with GL_STREAM_DRAW, which is the orphaning idiom —
+// the driver hands back fresh storage instead of stalling on last frame's read.
+pub struct GpuWorld {
+    shader: Shader,
+    sky: Shader,
+    quad: Mesh,
+    meshNone: Mesh,
+    meshGround: Mesh,
+    meshSkin: Mesh,
+    meshFacade: Mesh,
+    meshOrtho: Mesh,
+    // A single white texel, bound for the untextured stream. Cheaper than a
+    // second shader and it can never be sampled anyway — those vertices carry
+    // tw = 0, so the mix() weight on the texel is zero.
+    white: Texture2D,
+    ground: Texture2D,
+    skin: Texture2D,
+    facade: Texture2D,
+    // The aerial drape arrives with a city and changes when the place does.
+    ortho: Option<Texture2D>,
+}
+
+pub fn gpuWorldNew(ground: &Texture, skin: &Texture, facade: &Texture): Result<GpuWorld, string> {
+    let shader = Shader.compile(WORLD_VERT, worldFrag())?
+    let sky = Shader.compile(QUAD_VERT_LOCAL, skyboxFrag())?
+    var white: Vec<f32> = Vec.filled(3, 1.0)
+    return Result.Ok(GpuWorld {
+        shader: shader,
+        sky: sky,
+        quad: Mesh.fullscreenQuad(),
+        meshNone: worldMesh(),
+        meshGround: worldMesh(),
+        meshSkin: worldMesh(),
+        meshFacade: worldMesh(),
+        meshOrtho: worldMesh(),
+        white: Texture2D.rgb32f(1, 1, white, false),
+        ground: uploadTexture(ground),
+        skin: uploadTexture(skin),
+        facade: uploadTexture(facade),
+        ortho: Option.None,
+    }
+    )
+}
+
+// The fullscreen-quad vertex shader, restated rather than imported, because the
+// sky pass needs `vUv` and the gl package's own `QUAD_VERT` is the same thing.
+pub let QUAD_VERT_LOCAL: string = "#version 330 core
+layout (location = 0) in vec2 aPos;
+layout (location = 1) in vec2 aUv;
+out vec2 vUv;
+void main() {
+    vUv = aUv;
+    gl_Position = vec4(aPos, 0.0, 1.0);
+}
+"
+
+fn worldMesh(): Mesh {
+    var attrs: Vec<i64> = Vec.new()
+    attrs.push(3) // position
+    attrs.push(2) // uv
+    attrs.push(1) // light
+    attrs.push(3) // tint
+    attrs.push(1) // texture weight
+    return Mesh.new(attrs)
+}
+
+// A CPU texture becomes a GL one, once, at startup.
+//
+// The drape goes up as GL_SRGB8 and the procedural ones as float, which is not
+// an arbitrary split: the drape's texels came off a PNG as sRGB bytes and the
+// hardware decodes them exactly, before filtering. The procedural textures were
+// computed in linear light and never had a byte form to decode.
+//
+// Mipmaps and anisotropy matter more here than anything else in this file. The
+// old rasteriser sampled one texel per pixel with no filtering, which is why the
+// detail texture had to be faded out by distance — drawn to the horizon it would
+// have crawled. With a mip chain it settles, and the fade could be deleted.
+fn uploadTexture(t: &Texture): Texture2D {
+    var tex = Texture2D.rgb32f(1, 1, Vec.filled(3, 1.0), false)
+    if t.byteSrc {
+        tex = Texture2D.srgb8(t.w, t.h, t.pxu, true)
+    } else {
+        tex = Texture2D.rgb32f(t.w, t.h, t.px, true)
+    }
+    if t.mirror {
+        tex.setWrap(Wrap.Mirror)
+    } else {
+        tex.setWrap(Wrap.Repeat)
+    }
+    tex.generateMipmaps()
+    tex.setAnisotropy(16.0)
+    return tex
+}
+
+// Hand the renderer this place's aerial photograph. Freeing the old one first is
+// not optional — `Texture2D` is @noCopy and `free` consumes it, so the previous
+// drape has to be taken out of the field before the new one goes in.
+pub fn setOrtho(g: &mut GpuWorld, t: &Texture) {
+    match replace(g.ortho, Option.None) {
+        Option.Some(old) => {
+            old.free()
+        }
+        Option.None => {
+        }
+    }
+    g.ortho = Option.Some(uploadTexture(t))
+}
+
+pub fn clearOrtho(g: &mut GpuWorld) {
+    match replace(g.ortho, Option.None) {
+        Option.Some(old) => {
+            old.free()
+        }
+        Option.None => {
+        }
+    }
+}
+
+// World → clip, as one matrix.
+//
+// Built directly rather than as a view matrix times a projection matrix, because
+// the projection is four non-zero entries and multiplying a mostly-empty 4x4 by
+// hand is more code than folding it in. The rows are:
+//
+//   row0 = sx * right       row1 = sy * up
+//   row2 = A * fwd + B      row3 = fwd
+//
+// with the translation of each being minus that axis dotted with the eye. `sx`
+// and `sy` reproduce the old rasteriser's projection exactly — it wrote
+// `sx = cx + camX*scale/camZ`, so the ndc form is `camX*scale/(camZ*w/2)`.
+//
+// Column-major, because that is the layout GLSL's `mat4` already has, so nothing
+// transposes on the way in.
+pub fn viewProj(v: &View, w: f64, h: f64): Vec<f32> {
+    let s = projScale(v, w, h)
+    let sx = s.x
+    let sy = s.y
+    let n = v.near
+    let f = v.far
+    let a = (f + n) / (f - n)
+    let b = 0.0 - 2.0 * f * n / (f - n)
+
+    let tr = 0.0 - v.right.dot(v.eye)
+    let tu = 0.0 - v.up.dot(v.eye)
+    let tf = 0.0 - v.fwd.dot(v.eye)
+
+    var m: Vec<f32> = Vec.filled(16, 0.0)
+    // col*4 + row
+    m[0] = (sx * v.right.x) as f32
+    m[4] = (sx * v.right.y) as f32
+    m[8] = (sx * v.right.z) as f32
+    m[12] = (sx * tr) as f32
+
+    m[1] = (sy * v.up.x) as f32
+    m[5] = (sy * v.up.y) as f32
+    m[9] = (sy * v.up.z) as f32
+    m[13] = (sy * tu) as f32
+
+    m[2] = (a * v.fwd.x) as f32
+    m[6] = (a * v.fwd.y) as f32
+    m[10] = (a * v.fwd.z) as f32
+    m[14] = (a * tf + b) as f32
+
+    m[3] = v.fwd.x as f32
+    m[7] = v.fwd.y as f32
+    m[11] = v.fwd.z as f32
+    m[15] = tf as f32
+    return m
+}
+
+// The two projection scales, as one thing, because the sky pass and the sea pass
+// both have to invert exactly what the geometry pass applied — and a ray
+// reconstructed with a slightly different field of view is a sea that does not
+// line up with the coast it is lapping against.
+//
+// `v.scale` is pixels per unit at unit depth for the OVERLAY's resolution, which
+// is not the render target's. Dividing by `v.cy` cancels that out: the result is
+// `1/tan(fov/2)`, which is resolution-free. Horizontal then follows from the
+// render target's aspect, so widening the window widens the view rather than
+// stretching it.
+pub fn projScale(v: &View, w: f64, h: f64): Vec2 {
+    let sy = v.scale / v.cy
+    return Vec2 {
+        x: sy * h / w, y: sy
+    }
+}
+
+pub struct Vec2 {
+    x: f64,
+    y: f64,
+}
+
+// The sky, first, with depth writes off so it never occludes anything.
+pub fn drawSkyPass(g: &GpuWorld, s: &Scene, v: &View, w: f64, h: f64, time: f64) {
+    Gpu.depthTest(false)
+    Gpu.depthWrite(false)
+    Gpu.blendOff()
+    g.sky.bind()
+    g.sky.uniform3F("uRight", v.right.x, v.right.y, v.right.z)
+    g.sky.uniform3F("uUp", v.up.x, v.up.y, v.up.z)
+    g.sky.uniform3F("uFwd", v.fwd.x, v.fwd.y, v.fwd.z)
+    let ps = projScale(v, w, h)
+    g.sky.uniform2F("uProj", ps.x, ps.y)
+    skyUniforms(g.sky, s, time)
+    g.quad.draw()
+}
+
+// Everything recorded this frame, in five draws.
+pub fn drawStreams(g: &mut GpuWorld, s: &mut Scene, v: &View, w: f64, h: f64, time: f64) {
+    Gpu.depthTest(true)
+    Gpu.depthWrite(true)
+    Gpu.blendOff()
+    // No back-face culling. The world is not a closed solid — terrain quads,
+    // bridge cables, ring bands and waterfall ribbons are all single-sided
+    // surfaces meant to be seen from either side, and the old rasteriser drew
+    // them whichever way they wound.
+    Gpu.cullBackFaces(false)
+
+    g.shader.bind()
+    let m = viewProj(v, w, h)
+    g.shader.uniformMat4("uViewProj", m)
+    g.shader.uniform3F("uEye", v.eye.x, v.eye.y, v.eye.z)
+    g.shader.uniform2F("uFogRange", s.fogStart, s.fogEnd)
+    g.shader.uniformI("uTex", 0)
+    skyUniforms(g.shader, s, time)
+
+    drawSlot(g, s, SLOT_NONE)
+    drawSlot(g, s, SLOT_GROUND)
+    drawSlot(g, s, SLOT_FACADE)
+    drawSlot(g, s, SLOT_ORTHO)
+    drawSlot(g, s, SLOT_SKIN)
+}
+
+fn drawSlot(g: &mut GpuWorld, s: &mut Scene, slot: i64) {
+    if s.streams[slot].len == 0 {
+        return
+    }
+    bindSlot(g, slot)
+    if slot == SLOT_NONE {
+        g.meshNone.upload(s.streams[slot])
+        g.meshNone.draw()
+    } else if slot == SLOT_GROUND {
+        g.meshGround.upload(s.streams[slot])
+        g.meshGround.draw()
+    } else if slot == SLOT_FACADE {
+        g.meshFacade.upload(s.streams[slot])
+        g.meshFacade.draw()
+    } else if slot == SLOT_ORTHO {
+        g.meshOrtho.upload(s.streams[slot])
+        g.meshOrtho.draw()
+    } else {
+        g.meshSkin.upload(s.streams[slot])
+        g.meshSkin.draw()
+    }
+}
+
+fn bindSlot(g: &GpuWorld, slot: i64) {
+    if slot == SLOT_GROUND {
+        g.ground.bind(0)
+    } else if slot == SLOT_FACADE {
+        g.facade.bind(0)
+    } else if slot == SLOT_SKIN {
+        g.skin.bind(0)
+    } else if slot == SLOT_ORTHO {
+        match g.ortho {
+            Option.Some(t) => {
+                t.bind(0)
+            }
+            Option.None => {
+                g.white.bind(0)
+            }
+        }
+    } else {
+        g.white.bind(0)
+    }
+}
+
+// The four uniforms `SKY_GLSL` declares. Every shader that pastes it needs all
+// four set, and a shader that got three of them right is a sea lit by a
+// different sun than the sky above it — which is invisible in a diff and obvious
+// on screen. One function, called from every bind site.
+pub fn skyUniforms(sh: &Shader, s: &Scene, time: f64) {
+    sh.uniform3F("uSun", s.sunX, s.sunY, s.sunZ)
+    sh.uniformF("uTime", time)
+    sh.uniformF("uTurbidity", s.turbidity)
+    sh.uniformF("uCloud", s.cloud)
+}
+
+pub fn gpuWorldFree(g: GpuWorld) {
+    var own = g
+    // The drape lives in an Option and `free` consumes it, so it has to come out
+    // of the field first — a borrow cannot hand over a @noCopy handle.
+    match replace(own.ortho, Option.None) {
+        Option.Some(t) => {
+            t.free()
+        }
+        Option.None => {
+        }
+    }
+    own.shader.free()
+    own.sky.free()
+    own.quad.free()
+    own.meshNone.free()
+    own.meshGround.free()
+    own.meshSkin.free()
+    own.meshFacade.free()
+    own.meshOrtho.free()
+    own.white.free()
+    own.ground.free()
+    own.skin.free()
+    own.facade.free()
+}

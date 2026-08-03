@@ -2,14 +2,14 @@
 //
 //   milo run examples/games/flight/gpushot.milo --release -- /tmp/shot.png sf 240
 //
-// shot.milo does this for the software renderer, but it cannot see the GPU sea:
-// that is composited in a shader, after the canvas leaves the CPU. This opens a
-// hidden GL window, flies the real simulation for a few hundred frames with the
-// autopilot at the controls, and reads the finished frame back off the default
+// Opens a hidden GL window, flies the real simulation for a few hundred frames
+// with the autopilot at the controls, and reads the finished frame back off the
 // framebuffer.
 //
 // It exists because the alternative is asking a human to take a screenshot every
-// time a constant in the sea shader changes, which is a slow way to tune water.
+// time a constant in a shader changes, which is a slow way to tune water — and
+// because since the renderer moved to the GPU there is no other way to see a
+// frame at all: nothing on the host ever holds the finished picture.
 
 from "std/fs" import {
     readFile, writeFile
@@ -33,13 +33,16 @@ from "sdl/gl" import {
     SDL_GL_CONTEXT_PROFILE_CORE, SDL_GL_CONTEXT_PROFILE_MASK, SDL_WINDOW_OPENGL
 }
 from "./gfx" import {
-    Canvas, canvasNew, canvasClearHdr, canvasClearLock
+    Canvas, canvasClear, canvasNew
 }
 from "./gfx3d" import {
     sceneNew, viewOf
 }
 from "./gpupost" import {
-    CoverGrid, postDraw, postNew, seaViewOf
+    CoverGrid, postBeginWorld, postFinish, postNew
+}
+from "./gpuworld" import {
+    drawSkyPass, drawStreams, gpuWorldNew, setOrtho
 }
 from "./city" import {
     City, cityAttachOrtho, cityEmpty, cityHasSea, cityLoad, demHeights
@@ -146,7 +149,17 @@ pub fn main(): i32 {
     let skinTex = planeTexture()
     let facadeTex = facadeTexture()
 
-    let p = match postNew(W, H, c.hdr, s.zbuf, c.lock) {
+    var gw = match gpuWorldNew(groundTex, skinTex, facadeTex) {
+        Result.Ok(x) => x
+        Result.Err(e) => {
+            print("gpu: " + e)
+            return 4
+        }
+    }
+    if w.city.orthoLoaded {
+        setOrtho(gw, w.city.ortho)
+    }
+    var p = match postNew(W, H, W, H) {
         Result.Ok(x) => x
         Result.Err(e) => {
             print("post: " + e)
@@ -165,7 +178,10 @@ pub fn main(): i32 {
     for i in 0..frames {
         worldUpdate(w, 1.0 / 60.0, 0.0, 0.0, false)
         let view = viewOf(w.cam, c.w, c.h)
+        postBeginWorld(p)
         drawWorld(c, s, w, groundTex, skinTex, facadeTex, view)
+        drawSkyPass(gw, s, view, W as f64, H as f64, w.time)
+        drawStreams(gw, s, view, W as f64, H as f64, w.time)
         drawSpeedLines(c, w)
         drawGuide(c, w, view)
         drawFence(c, w, view)
@@ -174,8 +190,7 @@ pub fn main(): i32 {
         drawChecklist(c, w)
         drawFound(c, w)
         drawHud(c, w, s, 60)
-        let sv = seaViewOf(view, s, grid, cityHasSea(w.city), w.time)
-        postDraw(p, c.hdr, s.zbuf, c.lock, dem, first, sv, 0.35, 1.0, W, H)
+        postFinish(p, c, view, s, grid, dem, first, cityHasSea(w.city), w.time, 0.35, 1.0, W, H)
         first = false
         if i == frames - 1 {
             let px = readPixelsRgba8(W, H)
@@ -195,8 +210,7 @@ pub fn main(): i32 {
                 }
             }
         }
-        canvasClearHdr(c)
-        canvasClearLock(c)
+        canvasClear(c)
     }
     SDL_Quit()
     return 0

@@ -126,8 +126,6 @@
   "pureFn.milo": "crash",
   "qfliaSolver.milo": "noEmit",
   "regexOnView.milo": "noEmit",
-  "replaceFieldOutOfMutBorrow.milo": "noEmit",
-  "replaceSwap.milo": "noEmit",
   "resultAndThen.milo": "noEmit",
   "resultCombinatorCopyReuse.milo": "noEmit",
   "resultCombinators.milo": "noEmit",

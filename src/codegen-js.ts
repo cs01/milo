@@ -631,6 +631,19 @@ export class CodegenJS {
         // pop(): Option<T> — Some(last)/None. Bind the array once so the length
         // check and the mutating .pop() hit the same reference.
         return `((_v) => _v.length > 0 ? ${expr.optionEnumName}.Some(_v.pop()) : ${expr.optionEnumName}.None())(${this.genExpr(expr.vec)})`;
+      case "MemReplace": {
+        // replace(place, v): store v, hand back the old contents. The new value is
+        // evaluated first, through the IIFE parameter, so it cannot observe the
+        // half-updated place.
+        const place = this.genPlaceAccess(expr.place);
+        return `((_n) => { const _o = ${place.read}; ${place.write("_n")}; return _o; })(${this.genExpr(expr.value)})`;
+      }
+      case "MemSwap": {
+        // swap(a, b): exchange two places, yielding nothing.
+        const a = this.genPlaceAccess(expr.a);
+        const b = this.genPlaceAccess(expr.b);
+        return `(() => { const _t = ${a.read}; ${a.write(b.read)}; ${b.write("_t")}; })()`;
+      }
       case "VecClone":
         return `__clone(${this.genExpr(expr.object)})`;
       case "VecReverse":
@@ -1029,6 +1042,21 @@ export class CodegenJS {
     if (expr.type.tag === "struct") return `__displayStruct(${val})`;
     if (expr.type.tag === "enum") return `__displayEnum(${val}, ${JSON.stringify(expr.type.name)})`;
     return `String(${val})`;
+  }
+
+  // A place as a read expression plus a write builder. `replace`/`swap` need both
+  // halves, and an indexed place cannot supply them from one string: the checked
+  // store is `__idxSet(...)`, a call, which is not an assignment target. The object
+  // and index texts are emitted more than once, so a subscript with side effects
+  // would be evaluated more than once.
+  private genPlaceAccess(expr: HIRExpr): { read: string; write: (v: string) => string } {
+    if (expr.kind === "IndexAccess" && expr.object.type.tag !== "string" && expr.object.type.tag !== "hashmap") {
+      const obj = this.genExpr(expr.object);
+      const idx = this.genExpr(expr.index);
+      return { read: `__idx(${obj}, ${idx})`, write: v => `__idxSet(${obj}, ${idx}, ${v})` };
+    }
+    const lv = this.genLValue(expr);
+    return { read: lv, write: v => `${lv} = ${v}` };
   }
 
   private genLValue(expr: HIRExpr): string {

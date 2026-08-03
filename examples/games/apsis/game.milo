@@ -66,8 +66,7 @@ pub fn titleWorlds(): Vec<i64> {
 }
 
 pub fn titleSlot(g: &Game): i64 {
-    let ws = titleWorlds()
-    let n = ws.len
+    let n = titleWorlds().len
     var i = (g.phaseT / TITLE_SLOT) as i64
     i = i % n
     if i < 0 {
@@ -77,8 +76,7 @@ pub fn titleSlot(g: &Game): i64 {
 }
 
 pub fn titleWorld(g: &Game): i64 {
-    let ws = titleWorlds()
-    return ws[titleSlot(g)]
+    return titleWorlds() [titleSlot(g)]
 }
 
 // 0 at a cut, 1 for the body of a slot.

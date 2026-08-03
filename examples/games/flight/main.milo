@@ -9,7 +9,7 @@
 // Real 3D: a perspective camera, near-plane clipping and a depth-buffered
 // triangle rasteriser, all on the CPU in safe Milo (see gfx3d.milo). The bloom
 // and tone map that turn that HDR canvas into a picture run on the GPU instead
-// (gpupost.milo, over std/gpu); `--cpu` keeps them on the CPU, and display.milo
+// (gpupost.milo, over the gl package); `--cpu` keeps them on the CPU, and display.milo
 // is the seam. Which one is in use changes nothing above it.
 //
 // You cannot crash. The ground pushes you up if you dive into it.

@@ -5,7 +5,7 @@
 // every key is edge-triggered unless holding it down is the point — which, for
 // the two dials this game is played with, it is.
 
-from "std/gpu" import {
+from "gl" import {
     Gpu
 }
 

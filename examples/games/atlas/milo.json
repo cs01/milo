@@ -1,0 +1,8 @@
+{
+  "name": "atlas",
+  "version": "0.1.0",
+  "description": "ATLAS \u2014 a globe renderer on the GPU via the gl package",
+  "deps": {
+    "gl": "github.com/milo-language/gl@v0.1.0"
+  }
+}

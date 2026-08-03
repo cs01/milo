@@ -28,7 +28,6 @@ Generated from `std/**/*.milo` doc-comments — do not edit by hand.
 - [std/fetch](./fetch.md)
 - [std/fmt](./fmt.md)
 - [std/fs](./fs.md)
-- [std/gpu](./gpu.md)
 - [std/hex](./hex.md)
 - [std/hmac](./hmac.md)
 - [std/http](./http.md)

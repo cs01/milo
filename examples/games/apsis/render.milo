@@ -11,7 +11,7 @@
 // one. Below a couple of pixels it becomes a marker on the overlay, which is both
 // cheaper and the honest way to draw a planet from an astronomical unit away.
 
-from "std/gpu" import {
+from "gl" import {
     Gpu, Mesh, Shader, Texture2D, QUAD_VERT
 }
 from "std/math" import {
@@ -118,7 +118,7 @@ pub fn ensureLoaded(r: &mut Renderer, id: i64) {
 }
 
 impl Renderer {
-    fn free(self: &Self) {
+    fn free(self: Self) {
         self.ball.free()
         self.shell.free()
         self.ring.free()

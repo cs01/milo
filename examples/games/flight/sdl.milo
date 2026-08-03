@@ -102,7 +102,7 @@ pub let SDL_GL_CONTEXT_MINOR_VERSION: i32 = 18
 pub let SDL_GL_CONTEXT_PROFILE_MASK: i32 = 21
 
 // Core, not compatibility: macOS gives 2.1 for a compatibility context and 4.1
-// for a core one, and everything in std/gpu is 3.3 core.
+// for a core one, and everything in the gl package is 3.3 core.
 pub let SDL_GL_CONTEXT_PROFILE_CORE: i32 = 1
 
 pub let SDL_TEXTUREACCESS_STREAMING: i32 = 1

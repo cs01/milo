@@ -17,7 +17,7 @@
 // hidden, it never swaps, and the readback comes off the default framebuffer
 // before anything is presented.
 
-from "std/gpu" import {
+from "gl" import {
     Gpu, readPixelsRgba8
 }
 from "./gfx" import {

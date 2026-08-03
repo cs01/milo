@@ -198,8 +198,8 @@ export function resolveImports(program: Program, sourceDir: string, target: Targ
     const withExt = importPath.endsWith(".milo") ? importPath : importPath + ".milo";
 
     // A package's `targets` says which platforms it can be built for at all — a binding to
-    // a system library that only exists on some of them (OpenGL: no GL 3.3 on Windows) has
-    // no honest implementation elsewhere. Without this the failure surfaces as whichever
+    // a system library that only exists on some of them has no honest implementation
+    // elsewhere. Without this the failure surfaces as whichever
     // file happened to be missing a platform arm, which reads as a broken package rather
     // than one that was never claimed to support this target. Stdlib modules have no
     // manifest and so no way to say this at all, which is one reason such a binding
@@ -251,8 +251,8 @@ export function resolveImports(program: Program, sourceDir: string, target: Targ
       const base = withExt.replace(/\.milo$/, "");
       // The filename suffix is the whole platform mechanism, so it has to work wherever
       // source lives — not only in std. A package binding a system library needs it most:
-      // OpenGL is `-framework OpenGL` on darwin and `-lGL` elsewhere, so its `@link` arm
-      // has to split, and without this a package could only split files its CONSUMER
+      // one that ships as a darwin framework and an archive elsewhere has to split its
+      // `@link` arm, and without this a package could only split files its CONSUMER
       // imported by package path, never ones it imported from itself.
       const localPlatform = resolve(dir, `${base}.${target.os}.milo`);
       if (existsSync(localPlatform)) return { path: localPlatform, pkg };

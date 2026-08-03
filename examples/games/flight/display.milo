@@ -12,7 +12,7 @@
 // over. So the choice is made once, here, before the window exists, and
 // `screenPresent` is the only function either path is reachable through.
 
-from "std/gpu" import {
+from "gl" import {
     Gpu
 }
 from "./gfx" import {
@@ -192,8 +192,11 @@ pub fn screenPresent(s: &Screen, c: &mut Canvas, sc: &Scene, cover: &Vec<f32>, c
 
 // Tear down in creation order's reverse. SDL_Quit would reclaim all of it
 // anyway, but a leak an example teaches is a leak someone copies.
-pub fn screenClose(s: &Screen) {
-    match s.post {
+pub fn screenClose(s: &mut Screen) {
+    // postFree consumes the Post — its GL handles are @noCopy, so a borrow can't
+    // hand them over. Take the value out of the field first; the screen is being
+    // torn down, so leaving None behind costs nothing.
+    match replace(s.post, Option.None) {
         Option.Some(p) => {
             postFree(p)
         }

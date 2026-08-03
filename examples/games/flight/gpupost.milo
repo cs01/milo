@@ -8,7 +8,7 @@
 //
 // It is also, exactly, what a fragment shader is: no cross-pixel writes, no
 // ordering, one output per pixel. So this file is the same pipeline expressed as
-// four passes over std/gpu, and the only thing that crosses the bus is the HDR
+// four passes over the gl package, and the only thing that crosses the bus is the HDR
 // canvas itself.
 //
 // The arithmetic is deliberately the same as gfx.milo's, pass for pass and
@@ -20,7 +20,7 @@
 // did. That order is load-bearing (see the note on gfx3d.rasterFlush), and
 // nothing in a post chain can preserve it for free.
 
-from "std/gpu" import {
+from "gl" import {
     Gpu, Mesh, Shader, Target, Texture2D, bindScreen, QUAD_VERT
 }
 from "./gfx3d" import {
@@ -322,7 +322,7 @@ fn gpuBlurPass(p: &Post, stride: i64) {
     p.quad.draw()
 }
 
-pub fn postFree(p: &Post) {
+pub fn postFree(p: Post) {
     p.quad.free()
     p.sea.free()
     p.scene.free()

@@ -3798,12 +3798,14 @@ export class Codegen {
       subjAddr = pAddr;
       subjTy = pTy;
     } else {
-      const [subjLines, subjVal, subjTyL] = this.genExpr(stmt.subject);
-      lines.push(...subjLines);
+      // genStoreInto, not genExpr+store: a big-aggregate subject never becomes an
+      // SSA value, so genExpr hands back a POINTER for it. Storing that as if it
+      // were the aggregate emitted `store %Option_Post %ptr` — invalid IR, caught
+      // only by clang. `match replace(x, ...)` on an enum ≥128 bytes hit this.
+      subjTy = this.llvmType(stmt.subject.type);
       subjAddr = this.nextTemp();
-      subjTy = subjTyL;
       lines.push(`  ${subjAddr} = alloca ${subjTy}`);
-      lines.push(`  store ${subjTy} ${subjVal}, ptr ${subjAddr}`);
+      this.genStoreInto(lines, subjAddr, subjTy, stmt.subject);
     }
 
     const tagPtr = this.nextTemp();

@@ -1,0 +1,8 @@
+{
+  "name": "gpu-examples",
+  "version": "0.1.0",
+  "description": "GPU examples — OpenGL comes from the gl package, not the stdlib",
+  "deps": {
+    "gl": "github.com/milo-language/gl@v0.1.0"
+  }
+}

@@ -1,6 +1,6 @@
-// Pong on the GPU — the hello world of std/gpu, and a whole game in one file.
+// Pong on the GPU — the hello world of the gl package, and a whole game in one file.
 //
-//   milo build examples/graphics/gpupong.milo -o /tmp/gpupong --release && /tmp/gpupong
+//   milo build examples/graphics/gpu/gpupong.milo -o /tmp/gpupong --release && /tmp/gpupong
 //
 // W/S or UP/DOWN move, SPACE serves, R restarts, ESC quits. First to 7.
 //
@@ -17,7 +17,7 @@
 // Companion to gpucube.milo: that one is 3D with depth and a texture, this one
 // is 2D with a streaming vertex buffer and a game loop.
 
-from "std/gpu" import {
+from "gl" import {
     Gpu, Mesh, Shader, bindScreen
 }
 from "std/math" import {
@@ -424,7 +424,7 @@ pub fn main(): i32 {
         let _ = SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3)
         let _ = SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 3)
         let _ = SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE)
-        win = SDL_CreateWindow("gpupong — std/gpu", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, W as i32, H as i32, SDL_WINDOW_SHOWN | SDL_WINDOW_RESIZABLE | SDL_WINDOW_OPENGL)
+        win = SDL_CreateWindow("gpupong — the gl package", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, W as i32, H as i32, SDL_WINDOW_SHOWN | SDL_WINDOW_RESIZABLE | SDL_WINDOW_OPENGL)
         if (win as i64) == 0 {
             print("window: " + _cstrToString(SDL_GetError()))
             return 2

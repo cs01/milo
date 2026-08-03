@@ -9,7 +9,7 @@
 // The whole scene is ten draw calls: a sky, a ball, a ring, a halo, a bloom
 // chain, and one batched vertex buffer for the entire interface.
 
-from "std/gpu" import {
+from "gl" import {
     Gpu, Mesh, Shader, Texture2D, QUAD_VERT, readPixelsRgba8
 }
 from "std/math" import {

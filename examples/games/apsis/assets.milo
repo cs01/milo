@@ -11,7 +11,7 @@
 // only ever needs two of these at once — which is why they are decoded on demand
 // rather than all at startup.
 
-from "std/gpu" import {
+from "gl" import {
     Texture2D
 }
 from "std/math" import {

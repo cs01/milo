@@ -683,11 +683,11 @@ function libSpec(names: string[], darwinPrefix: string, target: TargetInfo, stat
 // search path. Reuses libSpec so --static-deps stays consistent.
 function declaredLibSpec(names: string[], target: TargetInfo, staticDeps: boolean): string {
   if (!names.length) return "";
-  // `@link("framework:OpenGL")` — a darwin framework is not a `-l` name, and for the
-  // system graphics/media libraries the framework and the linux `-l` hold the same
-  // symbols under two spellings. Without this the flag could only come from the
-  // compiler recognising specific library names, which put OpenGL and JavaScriptCore
-  // into the compiler's vocabulary — a language shouldn't know what OpenGL is.
+  // `@link("framework:Foo")` — a darwin framework is not a `-l` name, and a system
+  // library that ships as a framework on darwin and an archive elsewhere holds the
+  // same symbols under two spellings. Without this prefix the flag could only come
+  // from the compiler recognising particular library names, which is exactly what
+  // puts a specific vendor's API into a general-purpose language's vocabulary.
   // A `framework:` link belongs in a `.darwin.milo` arm; it is unsatisfiable elsewhere.
   const frameworks = names.filter(n => n.startsWith("framework:")).map(n => n.slice("framework:".length));
   const libs = names.filter(n => !n.startsWith("framework:"));
@@ -736,10 +736,9 @@ function detectLibs(ir: string, target: TargetInfo, staticDeps = false): string 
   if (ir.includes("@JSGlobalContextCreate") || ir.includes("@JSEvaluateScript")) {
     if (target.os === "darwin") libs += " -framework JavaScriptCore";
   }
-  // No OpenGL case here on purpose. GL is a package (`@link("framework:OpenGL")` in its
-  // darwin arm, `@link("GL")` elsewhere), so the flag comes from the bindings that need
-  // it rather than from the compiler recognising `gl*` in the IR. Nothing about a
-  // graphics API belongs in a language's link step.
+  // Nothing gets added to this list. Every case here is a name the compiler has to
+  // know, and a general-purpose language should not know what any particular vendor's
+  // API is called — a binding declares its own `@link` and the flag comes from there.
   // The greps above run on pre-optimization IR, so they over-approximate badly:
   // std/os declares the TLS externs and defines wrappers around them, and every
   // program using std/io imports std/os — so `wc` picked up -lssl even though LLVM
@@ -806,7 +805,10 @@ function compileToBinary(sourcePath: string, outputPath: string | null, target: 
     // "library not found" is traceable to the @link that requested it (vs an
     // auto-detected lib or a `--` passthrough). Re-run with MILO_VERBOSE=1 for the full command.
     if (linkLibs.length) {
-      console.error(`note: ${linkLibs.map(l => `-l${l}`).join(" ")} added by @link(...) in your source — remove the @link or install the library (MILO_VERBOSE=1 to see the full link command)`);
+      // Spell each one the way it actually reaches the linker — a `framework:` name
+      // printed as `-lframework:Foo` is not a flag anyone could act on.
+      const spelled = linkLibs.map(l => l.startsWith("framework:") ? `-framework ${l.slice("framework:".length)}` : `-l${l}`).join(" ");
+      console.error(`note: ${spelled} added by @link(...) in your source — remove the @link or install the library (MILO_VERBOSE=1 to see the full link command)`);
     }
     const host = getHostTarget();
     if (!target.bareMetal && (target.os !== host.os || target.arch !== host.arch)) {

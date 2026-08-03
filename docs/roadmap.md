@@ -75,7 +75,6 @@ Green-tier concurrency with one OS-thread escape hatch:
 I/O & system: `io`, `fs`, `path`, `env`, `environ`, `args`, `process`, `signal`, `dl`, `sysinfo`, `mem`, `os`, `platform`, `term`, `pty`, `keys`, `ansi`
 Networking: `net` (TCP + DNS), `unix` (AF_UNIX), `fetch` (HTTPS client + TLS), `http`, `httpmw`, `ws`, `url`
 Data: `json`, `csv`, `toml`, `base64`, `base32`, `hex`, `sqlite`, `arena`, `set`, `pool`, `png`
-Graphics: `gl` (raw OpenGL 3.3 core), `gpu` (shaders, meshes, textures, offscreen targets) — darwin + linux; Windows exports only GL 1.1, so std/gl does not link there
 Compression: `deflate`, `inflate`, `zip`, `zstd`
 Crypto & auth: `crypto`, `sha256`, `sha1`, `hmac`, `jwt`, `totp`, `checksum`, `xxhash`
 Concurrency: `runtime`, `sync`, `select`, `event`

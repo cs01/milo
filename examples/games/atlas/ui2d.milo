@@ -6,7 +6,7 @@
 // the order they should overlap without ever rebinding anything. That order IS
 // the z-order; there is no depth test on this layer.
 
-from "std/gpu" import {
+from "gl" import {
     Mesh, Shader, Texture2D, Gpu
 }
 from "std/math" import {
@@ -184,7 +184,7 @@ impl Ui {
         self.verts.clear()
     }
 
-    fn free(self: &Self) {
+    fn free(self: Self) {
         self.mesh.free()
         self.shader.free()
         self.font.free()

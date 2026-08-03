@@ -1,6 +1,6 @@
 // A raymarched ocean under a moving sky — the demo that justifies the GPU.
 //
-//   milo build examples/graphics/gpuocean.milo -o /tmp/gpuocean --release && /tmp/gpuocean
+//   milo build examples/graphics/gpu/gpuocean.milo -o /tmp/gpuocean --release && /tmp/gpuocean
 //
 // LEFT/RIGHT scrub the time of day, UP/DOWN tilt the camera, SPACE pauses,
 // ESC quits.
@@ -24,7 +24,7 @@
 // the window happens to be — the standard way to keep a heavy shader honest on a
 // Retina display, where the drawable is four times the pixels you asked for.
 
-from "std/gpu" import {
+from "gl" import {
     Gpu, Mesh, Shader, Target, bindScreen, QUAD_VERT
 }
 
@@ -387,7 +387,7 @@ pub fn main(): i32 {
         let _ = SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3)
         let _ = SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 3)
         let _ = SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE)
-        win = SDL_CreateWindow("gpuocean — std/gpu", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, WIN_W as i32, WIN_H as i32, SDL_WINDOW_SHOWN | SDL_WINDOW_RESIZABLE | SDL_WINDOW_OPENGL)
+        win = SDL_CreateWindow("gpuocean — the gl package", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, WIN_W as i32, WIN_H as i32, SDL_WINDOW_SHOWN | SDL_WINDOW_RESIZABLE | SDL_WINDOW_OPENGL)
         if (win as i64) == 0 {
             print("window: " + _cstrToString(SDL_GetError()))
             return 2
@@ -505,10 +505,12 @@ pub fn main(): i32 {
         let wantW = renderWidth(dw as i64)
         let wantH = (dh as i64) * wantW / (dw as i64)
         if wantW != rw || wantH != rh {
-            target.free()
+            // Build the replacement before releasing the old one: freeing up
+            // front would leave `target` dead on the Err path with the rest of
+            // this frame still to draw.
             match Target.new(wantW, wantH, false, true) {
                 Result.Ok(t) => {
-                    target = t
+                    replace(target, t).free()
                     rw = wantW
                     rh = wantH
                 }

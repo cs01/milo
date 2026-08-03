@@ -6,7 +6,7 @@
 // them, which is the whole reason a planet on a black background looks like a
 // photograph rather than a sticker.
 
-from "std/gpu" import {
+from "gl" import {
     Gpu, Mesh, Shader, Target, bindScreen, QUAD_VERT
 }
 from "./shaders" import {
@@ -111,7 +111,7 @@ impl Post {
         self.quad.draw()
     }
 
-    fn free(self: &Self) {
+    fn free(self: Self) {
         self.quad.free()
         self.bright.free()
         self.blur.free()

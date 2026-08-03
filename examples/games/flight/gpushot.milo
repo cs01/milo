@@ -14,7 +14,7 @@
 from "std/fs" import {
     readFile, writeFile
 }
-from "std/gpu" import {
+from "gl" import {
     Gpu, readPixelsRgba8
 }
 from "std/png" import {

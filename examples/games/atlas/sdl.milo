@@ -4,7 +4,7 @@
 // snapshots the keyboard and the mouse into a plain struct once per frame, and
 // every key the game reads is edge-triggered unless holding it down is the point.
 
-from "std/gpu" import {
+from "gl" import {
     Gpu
 }
 

@@ -1,0 +1,78 @@
+// A match subject that is a temporary big aggregate (>= the 128-byte SSA
+// threshold) is materialized into its alloca by memcpy, not by a whole-aggregate
+// store. `replace` on a big enum hands back a POINTER to the moved-out value, so
+// storing it as if it were the aggregate emitted invalid IR that only clang caught.
+
+struct Big {
+    f0: i64,
+    f1: i64,
+    f2: i64,
+    f3: i64,
+    f4: i64,
+    f5: i64,
+    f6: i64,
+    f7: i64,
+    f8: i64,
+    f9: i64,
+    f10: i64,
+    f11: i64,
+    f12: i64,
+    f13: i64,
+    f14: i64,
+    f15: i64,
+    f16: i64,
+    f17: i64,
+    f18: i64,
+    f19: i64,
+    f20: i64,
+    f21: i64,
+    f22: i64,
+    f23: i64,
+    f24: i64,
+    f25: i64,
+    f26: i64,
+    f27: i64,
+    f28: i64,
+    f29: i64,
+    f30: i64,
+    f31: i64,
+    f32: i64,
+    f33: i64,
+    f34: i64,
+    f35: i64,
+    f36: i64,
+    f37: i64,
+    f38: i64,
+    f39: i64,
+}
+
+struct Holder {
+    slot: Option<Big>,
+}
+
+fn drain(h: &mut Holder): void {
+    match replace(h.slot, Option.None) {
+        Option.Some(b) => {
+            print($"drained {b.f39}")
+        }
+        Option.None => {
+            print("empty")
+        }
+    }
+}
+
+fn main(): void {
+    var h = Holder {
+        slot: Option.Some(Big {
+            f0: 0, f1: 1, f2: 2, f3: 3, f4: 4, f5: 5, f6: 6, f7: 7, f8: 8, f9: 9, f10: 10, f11: 11, f12: 12, f13: 13, f14: 14, f15: 15, f16: 16, f17: 17, f18: 18, f19: 19, f20: 20, f21: 21, f22: 22, f23: 23, f24: 24, f25: 25, f26: 26, f27: 27, f28: 28, f29: 29, f30: 30, f31: 31, f32: 32, f33: 33, f34: 34, f35: 35, f36: 36, f37: 37, f38: 38, f39: 39
+        }
+        )
+    }
+    drain(h)
+    // The place was emptied, so the second drain sees None rather than the
+    // moved-out value a plain read would have left behind.
+    drain(h)
+}
+
+// @expect: drained 39
+// @expect: empty

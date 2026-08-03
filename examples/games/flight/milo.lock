@@ -1,0 +1,12 @@
+{
+  "lockVersion": 1,
+  "packages": {
+    "gl": {
+      "url": "github.com/milo-language/gl",
+      "version": "v0.1.0",
+      "commit": "e908ea075a5ac150dee8c1aceeae4df8fbd30aec",
+      "hash": "sha256:6480910d4c61a5e15046a8f6d8da5a8fa612a43d811b3a232612910c4e8cec7c",
+      "deps": []
+    }
+  }
+}

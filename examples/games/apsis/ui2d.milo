@@ -11,7 +11,7 @@
 // Saturn's is a screen-space object, and drawing it as geometry means either a
 // wire that disappears at distance or a tube that fattens at the near end.
 
-from "std/gpu" import {
+from "gl" import {
     Mesh, Shader, Texture2D, Gpu
 }
 from "std/math" import {
@@ -248,7 +248,7 @@ impl Ui {
         self.verts.clear()
     }
 
-    fn free(self: &Self) {
+    fn free(self: Self) {
         self.mesh.free()
         self.shader.free()
         self.font.free()

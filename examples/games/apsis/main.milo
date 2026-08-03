@@ -18,7 +18,7 @@
 // disagree. `tools/checkmissions.milo` runs every mission headless and prints
 // what it costs.
 
-from "std/gpu" import {
+from "gl" import {
     Gpu, readPixelsRgba8
 }
 from "std/math" import {

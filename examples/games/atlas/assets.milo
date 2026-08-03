@@ -12,7 +12,7 @@
 // of those alive on the CPU for no reason is how FLYBY once got its process
 // killed by the memory guard.
 
-from "std/gpu" import {
+from "gl" import {
     Texture2D
 }
 from "std/math" import {

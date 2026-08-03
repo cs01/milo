@@ -1,0 +1,74 @@
+// Indexing a container returned by value. `genLValue` answers "null" for anything
+// that is not a place, and the index paths GEP'd straight from that null base — so
+// the length load hit 0x8 and the callee was never even called. A temporary has no
+// address until codegen gives it one.
+//
+// The materialized container is owned by nobody, so it also has to be dropped once
+// the element is out — after the load or the deep clone, never before.
+
+struct World {
+    name: string,
+    r: i64,
+}
+
+fn nums(): Vec<i64> {
+    var v: Vec<i64> = []
+    v.push(11)
+    v.push(22)
+    return v
+}
+
+fn names(): Vec<string> {
+    var v: Vec<string> = []
+    v.push("mercury")
+    v.push("venus")
+    return v
+}
+
+fn worlds(): Vec<World> {
+    var v: Vec<World> = []
+    v.push(World {
+        name: "earth", r: 6371
+    }
+    )
+    v.push(World {
+        name: "mars", r: 3390
+    }
+    )
+    return v
+}
+
+fn fixed(): [i64; 3] {
+    return [7, 8, 9]
+}
+
+fn slot(n: i64): i64 {
+    return n % 2
+}
+
+fn main(): void {
+    print(nums() [1])
+    print(names() [0])
+    // A computed index, which is the shape that first crashed: the subscript is
+    // itself a call, so neither side of the index is a place.
+    print(names() [slot(3)])
+    print(worlds() [1].name)
+    print(worlds() [0].r)
+    print(fixed() [2])
+    // In a loop: a fresh temporary per iteration, each one dropped.
+    var total: i64 = 0
+    var i = 0
+    while i < 3 {
+        total = total + nums() [0]
+        i = i + 1
+    }
+    print(total)
+}
+
+// @expect: 22
+// @expect: mercury
+// @expect: venus
+// @expect: mars
+// @expect: 6371
+// @expect: 9
+// @expect: 33

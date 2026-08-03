@@ -2125,8 +2125,8 @@ export class Codegen {
   }
 
   private genBoundsCheckedPtr(expr: HIRExpr & { kind: "IndexAccess" }, lines: string[]): [string[], string, string] {
-    const [objLines, objPtr, objTy] = this.genLValue(expr.object);
-    lines.push(...objLines);
+    const objPtr = this.genIndexObjectPtr(expr.object, lines);
+    const objTy = this.llvmType(expr.object.type.tag === "ref" ? expr.object.type.inner : expr.object.type);
     const [idxLines, idxVal, idxTy] = this.genExpr(expr.index);
     lines.push(...idxLines);
 
@@ -4905,6 +4905,11 @@ export class Codegen {
         }
         {
         const effObj = expr.object.type.tag === "ref" ? expr.object.type.inner : expr.object.type;
+        // Indexing a temporary container (`worlds()[i]`) materializes it into a slot
+        // that nothing else owns. Drop it once the element is safely out — after the
+        // load, or after the deep clone — never before, or the element pointer would
+        // outlive its buffer.
+        const tempMark = this.argTempDrops.length;
         if (effObj.tag === "vec" || (effObj.tag === "array" && effObj.size === null)) {
           const [ptrLines, ptr, elemTy] = this.genVecBoundsCheckedPtr(expr, lines);
           const elemKind = effObj.element;
@@ -4912,10 +4917,12 @@ export class Codegen {
           // semantics: Vec[i] always returns an independent value.
           if (this.needsDropCg(elemKind)) {
             const cloned = this.emitDeepCloneFromPtr(lines, ptr, elemKind);
+            this.flushArgTempDrops(lines, tempMark);
             return [lines, cloned, elemTy];
           }
           const val = this.nextTemp();
           lines.push(`  ${val} = load ${elemTy}, ptr ${ptr}`);
+          this.flushArgTempDrops(lines, tempMark);
           return [lines, val, elemTy];
         }
         const [ptrLines, ptr, elemTy] = this.genBoundsCheckedPtr(expr, lines);
@@ -4925,10 +4932,12 @@ export class Codegen {
         // on a double free.
         if (effObj.tag === "array" && this.needsDropCg(expr.type)) {
           const cloned = this.emitDeepCloneFromPtr(lines, ptr, expr.type);
+          this.flushArgTempDrops(lines, tempMark);
           return [lines, cloned, elemTy];
         }
         const val = this.nextTemp();
         lines.push(`  ${val} = load ${elemTy}, ptr ${ptr}`);
+        this.flushArgTempDrops(lines, tempMark);
         return [lines, val, elemTy];
         }
       }
@@ -8092,6 +8101,30 @@ export class Codegen {
     return false;
   }
 
+  // The address of an indexed container. genLValue answers "null" for anything that
+  // is not a place, and indexing a call result — `worlds()[i]` — then GEP'd from that
+  // null base and read the length field at 0x8, so the callee never even ran. A
+  // temporary has no address until we give it one, so materialize it into a slot.
+  //
+  // The slot joins argTempDrops rather than being dropped here: at this point the
+  // caller holds only a POINTER to the element, so freeing the container first would
+  // leave that pointer dangling on the very next line. The read paths in genExpr take
+  // a mark before calling and flush after the element has been loaded or cloned.
+  //
+  // Only a read can get here. `f()[0] = x` is rejected by the checker ("cannot assign
+  // to immutable"), so the lvalue paths never see a non-place object.
+  private genIndexObjectPtr(obj: HIRExpr, lines: string[]): string {
+    const [objLines, objPtr] = this.genLValue(obj);
+    lines.push(...objLines);
+    if (objPtr !== "null") return objPtr;
+    const ty = this.llvmType(obj.type.tag === "ref" ? obj.type.inner : obj.type);
+    const slot = this.nextTemp();
+    this.entryAllocas.push(`  ${slot} = alloca ${ty}`);
+    this.genStoreInto(lines, slot, ty, obj);
+    if (this.needsDropCg(obj.type)) this.argTempDrops.push({ addr: slot, type: obj.type });
+    return slot;
+  }
+
   private genVecBoundsCheckedPtr(expr: HIRExpr & { kind: "IndexAccess" }, lines: string[]): [string[], string, string] {
     this.hasVecType = true;
 
@@ -8104,8 +8137,7 @@ export class Codegen {
     }
     const elemTy = this.llvmType(vecType.element);
 
-    const [vecPtrLines, vecPtr] = this.genLValue(expr.object);
-    lines.push(...vecPtrLines);
+    const vecPtr = this.genIndexObjectPtr(expr.object, lines);
     const [idxLines, idxVal, idxTy] = this.genExpr(expr.index);
     lines.push(...idxLines);
 

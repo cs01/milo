@@ -13,7 +13,7 @@ from "./vec3" import {
     Vec3, v3
 }
 from "./ephem" import {
-    Body, bodyTable, bodyPos, bodyState, SEC_PER_DAY, SUN
+    Body, bodyTable, bodyPos, bodyState, nowSeconds, SEC_PER_DAY, SUN
 }
 from "./worlds" import {
     Look, lookTable
@@ -22,7 +22,8 @@ from "./mission" import {
     Mission, missionTable, MISSION_COUNT, DEPART_ORBIT
 }
 from "./plan" import {
-    Plan, planFail, solvePlan, bestPlan, shipAt, relPos, relState, parkRadius, parkSpeed
+    Plan, planFail, solvePlan, bestPlan, calibrateMission, shipAt, relPos, relState,
+    parkRadius, parkSpeed
 }
 
 pub let PHASE_TITLE: i64 = 0
@@ -40,7 +41,12 @@ pub let PHASE_ARRIVED: i64 = 5
 // How long each cinematic runs before it hands over on its own. Long enough to
 // see the world turn, short enough that a player replaying a mission is not
 // held hostage — and any key skips it anyway.
-pub let CINEMATIC_SECONDS: f64 = 7.5
+pub let DEPART_SECONDS: f64 = 6.0
+
+// The arrival card runs longer than the departure one: the camera has to fly
+// there first, and a world you have never seen deserves more of the shot than
+// the one you are standing on.
+pub let TARGET_SECONDS: f64 = 10.0
 
 pub struct Cam {
     focus: i64, // body the camera orbits; the mission's centre means the map view
@@ -168,7 +174,7 @@ fn cameraTargets(g: &mut Game) {
         g.cam.tDist = g.bodies[m.to].radius * g.looks[m.to].viewDist
         g.cam.tPitch = 0.24
         g.cam.tYaw = 1.62
-        g.cam.rate = 1.5
+        g.cam.rate = 2.4
         g.cam.drifting = true
     }
     if g.phase == PHASE_PLAN {
@@ -178,7 +184,7 @@ fn cameraTargets(g: &mut Game) {
         g.cam.tYaw = 0.0
         // Slower than the others on purpose: this is the shot that turns a planet
         // into a dot on a diagram, and it should be felt.
-        g.cam.rate = 0.85
+        g.cam.rate = 0.55
         g.cam.drifting = false
     }
     if g.phase == PHASE_FLY {
@@ -209,8 +215,26 @@ pub fn replan(g: &mut Game) {
     g.plan = solvePlan(g.bodies, m, g.departT, g.tof)
 }
 
+// Calibration is done once per mission, the first time it is started, because
+// the search is a few thousand Lambert solves — a fraction of a second, but a
+// fraction that belongs to the loading of a mission rather than to a frame in
+// the middle of one.
+pub fn calibrate(g: &mut Game, i: i64) {
+    if g.missions[i].calibrated {
+        return
+    }
+    // Calibrated on a copy and written back: `calibrateMission` needs the body
+    // table by reference while it mutates the mission, and the checker will not
+    // hand out both out of the same `g` at once — which is the rule doing its
+    // job, since a table that grew mid-call would leave a dangling reference.
+    var m = g.missions[i]
+    let _ = calibrateMission(g.bodies, m, nowSeconds())
+    g.missions[i] = m
+}
+
 pub fn startMission(g: &mut Game, index: i64) {
     g.mi = clampf(index as f64, 0.0, (MISSION_COUNT - 1) as f64) as i64
+    calibrate(g, g.mi)
     let m = g.missions[g.mi]
     g.departT = m.windowOpen + m.departNominal
     g.tof = m.tofNominal
@@ -260,9 +284,12 @@ pub fn gameNew(): Game {
         spin: 0.0,
         fade: 0.0,
     }
+    calibrate(g, 0)
+    // The title screen is a picture before it is a game state, so its dials sit
+    // where the transfer draws well rather than where a mission starts.
     let m = g.missions[0]
-    g.departT = m.windowOpen + m.departNominal
-    g.tof = m.tofNominal
+    g.departT = m.windowOpen + m.windowSpan * 0.42
+    g.tof = m.tofMin + (m.tofMax - m.tofMin) * 0.62
     replan(g)
     g.cam.dist = mapDistance(g) * 1.35
     g.cam.tDist = g.cam.dist
@@ -373,10 +400,11 @@ pub fn advance(g: &mut Game, dt: f64) {
     g.fade = clampf(g.fade + dt * 1.6, 0.0, 1.0)
     g.spin = g.spin + dt * 0.10
 
-    if g.phase == PHASE_DEPART || g.phase == PHASE_TARGET {
-        if g.phaseT > CINEMATIC_SECONDS {
-            advancePhase(g)
-        }
+    if g.phase == PHASE_DEPART && g.phaseT > DEPART_SECONDS {
+        advancePhase(g)
+    }
+    if g.phase == PHASE_TARGET && g.phaseT > TARGET_SECONDS {
+        advancePhase(g)
     }
 
     if g.phase == PHASE_FLY && !g.paused {

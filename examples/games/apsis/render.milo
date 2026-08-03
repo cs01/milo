@@ -146,6 +146,23 @@ pub struct View {
     h: f64,
 }
 
+// How far to push the subject off centre, in NDC. A world that fills the frame
+// and a paragraph of type cannot share the middle, and moving the camera sideways
+// would relight it — an off-axis projection slides the picture instead, so the
+// terminator stays exactly where the date put it.
+pub fn subjectShift(g: &Game): f64 {
+    if g.phase == PHASE_DEPART || g.phase == PHASE_TARGET || g.phase == PHASE_ARRIVED {
+        return 0.34
+    }
+    if g.phase == PHASE_PLAN || g.phase == PHASE_FLY {
+        // The map gets the same treatment as a cinematic, because the dials are
+        // no different from a caption: a panel over the trajectory hides the one
+        // thing the player is turning them to watch.
+        return 0.30
+    }
+    return 0.0
+}
+
 pub fn viewOf(g: &Game, w: f64, h: f64): View {
     let eye = eyePoint(g)
     let s = 1.0 / g.cam.dist
@@ -154,7 +171,8 @@ pub fn viewOf(g: &Game, w: f64, h: f64): View {
     // The near plane is a hundredth of the eye distance and the far plane is
     // eight hundred times it, which covers a planet under the camera and the
     // whole orbit it is on without ever changing units.
-    let proj = perspective(FOV, w / h, 0.01, 800.0)
+    var proj = perspective(FOV, w / h, 0.01, 800.0)
+    proj[8] = (-subjectShift(g)) as f32
     return View {
         vp: multiply(proj, view), scale: s, at: g.cam.at.scale(1.0), eye: eye.scale(1.0), w: w, h: h,
     }
@@ -384,6 +402,7 @@ fn drawSky(r: &mut Renderer, g: &Game, v: &View, time: f64) {
     r.skySh.uniformF("uSunSize", size)
     r.skySh.uniformF("uTime", time)
     r.skySh.uniformF("uSkyGain", 1.0)
+    r.skySh.uniformF("uShift", subjectShift(g))
     r.skyQuad.draw()
 }
 

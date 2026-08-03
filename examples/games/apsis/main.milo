@@ -19,7 +19,7 @@
 // what it costs.
 
 from "std/gpu" import {
-    readPixelsRgba8
+    Gpu, readPixelsRgba8
 }
 from "std/math" import {
     Math
@@ -107,7 +107,7 @@ fn phaseFromName(s: &string): i64 {
 
 fn parseOptions(): Options {
     var o = Options {
-        shot: "", mission: 0, phase: -1, frames: 90, flight: 0.5, gain: 0.34,
+        shot: "", mission: 0, phase: -1, frames: 90, flight: 0.5, gain: 0.22,
     }
     let a = args()
     var i = 1
@@ -160,6 +160,9 @@ fn toRgb(px: &Vec<u32>, w: i64, h: i64): string {
 }
 
 fn writeShot(path: &string, w: i64, h: i64) {
+    // Nothing has been swapped, so this reads the back buffer — which is the
+    // whole frame, and the only way to get one without a compositor.
+    Gpu.finish()
     let px = readPixelsRgba8(w, h)
     match encodePng(toRgb(px, w, h), w, h, 3) {
         Result.Ok(bytes) => {
@@ -270,6 +273,9 @@ fn stage(g: &mut Game, o: &Options) {
         i = i + 1
     }
     g.fade = 1.0
+    // A shot should show the phase settled, not on its first frame: the parking
+    // orbit band and the cinematic's own progress bar both grow with phaseT.
+    g.phaseT = 3.2
 }
 
 pub fn main(): i32 {
@@ -384,11 +390,19 @@ pub fn main(): i32 {
         drawOverlay(ui, g, view, marks)
         ui.flush(w, h)
 
-        if shooting && frame >= opt.frames {
-            writeShot(opt.shot, size.w, size.h)
-            inp.quit = true
+        if shooting {
+            // Presenting is what a screenshot must not do: on macOS
+            // SDL_GL_SwapWindow blocks on the display link, and a window that no
+            // compositor is showing — a build run from a terminal with no
+            // foreground app — never gets one. Rendering and reading the back
+            // buffer needs no compositor at all.
+            if frame >= opt.frames {
+                writeShot(opt.shot, size.w, size.h)
+                inp.quit = true
+            }
+        } else {
+            SDL_GL_SwapWindow(host.win)
         }
-        SDL_GL_SwapWindow(host.win)
     }
 
     renderer.free()

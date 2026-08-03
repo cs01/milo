@@ -20,6 +20,11 @@ jump to a mission, `R` restarts one, `H` is help, `F` fullscreen, `Q` quits.
 - The planets are on rails from Standish's Keplerian elements, and the Moon from
   the largest periodic terms of the lunar theory — so launch windows are windows,
   not a timer.
+- Nothing is dated in advance. Every mission is calibrated when you start it, by
+  searching forward from **today** for the next real opportunity; the window is
+  hung around what it finds and the tank is sized from it, so the trip you are
+  offered is one you could still book and the difficulty does not depend on which
+  year you play.
 - The transfer is a Lambert solution about the real central mass, and the two
   burns are priced the way a mission designer prices them: escape from a circular
   parking orbit onto a hyperbola with the excess the transfer needs, and capture
@@ -32,7 +37,7 @@ Nothing is tuned for playability except the size of the tank.
 ```bash
 milo run examples/games/apsis/tools/checkmissions.milo   # prices every mission
 milo run examples/games/apsis/tools/checklayout.milo     # projects every phase, without a window
-milo run examples/games/apsis/tools/scan.milo            # finds the real launch opportunities
+milo run examples/games/apsis/tools/scan.milo            # sweeps wider than any window, for tuning
 ```
 
 `--shot out.png --mission N --phase depart|target|plan|fly|arrived` captures a

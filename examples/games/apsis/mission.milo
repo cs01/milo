@@ -5,6 +5,14 @@
 // total fits the budget. Nothing else is asked of you, because everything hard
 // about going somewhere is already in those two numbers.
 //
+// Nothing here is a date. A window is not a fact about the year 2033, it is a
+// fact about where two planets are, and both of them are moving right now — so
+// every mission is CALIBRATED at startup by searching forward from today for the
+// next real opportunity (see `plan.searchWindow`). The table below says how far
+// ahead to look and how much slack to leave; when the game is played decides the
+// rest. That also means the tank is sized against the window you actually got,
+// not against a good one somebody found once.
+//
 // The order is the order the ideas arrive in: the Moon teaches that going slower
 // is cheaper, Mars that the window is a real thing you wait for, Venus that
 // falling inward means arriving fast, Mercury that stopping is what costs,
@@ -12,7 +20,7 @@
 // range on the same tank.
 
 from "./ephem" import {
-    SEC_PER_DAY, timeOf, SUN, EARTH, MOON, MARS, VENUS, MERCURY, JUPITER, SATURN
+    SEC_PER_DAY, SUN, EARTH, MOON, MARS, VENUS, MERCURY, JUPITER, SATURN
 }
 
 pub let MISSION_COUNT: i64 = 6
@@ -42,38 +50,54 @@ pub struct Mission {
     parkAlt: f64, // circular parking orbit altitude, metres
     captureAlt: f64, // periapsis of the arrival orbit, metres
     captureApo: f64, // apoapsis of the arrival orbit, metres
-    budget: f64, // total delta-v available, m/s
-    windowOpen: f64, // earliest departure, TDB seconds past J2000
-    windowSpan: f64, // how long the window stays open
+
+    // ── how the window is found, relative to today ────────────────────────────
+    leadDays: f64, // no launch sooner than this: a mission needs building
+    searchDays: f64, // how far ahead to look — one synodic period, near enough
+    spanDays: f64, // how wide the window the player scrubs across is
+    tofSearchLo: f64, // the flight times the search will consider
+    tofSearchHi: f64,
+    tofLoFactor: f64, // the dial's range, as multiples of the best flight time
+    tofHiFactor: f64,
+    budgetMargin: f64, // the tank is the cheapest plan in the window, times this
+
+    // ── filled in by calibration, from the date the game is played ────────────
+    windowOpen: f64,
+    windowSpan: f64,
     tofMin: f64,
     tofMax: f64,
     tofNominal: f64,
-    departNominal: f64, // where in the window the dials start
+    departNominal: f64,
+    budget: f64,
+    calibrated: bool,
 }
 
-fn mission(name: string, blurb: string, fromNote: string, toNote: string, center: i64, from: i64, to: i64, mode: i64, parkAlt: f64, capAlt: f64, capApo: f64, budget: f64, open: f64, spanDays: f64, tofLo: f64, tofHi: f64, tofNom: f64, waitNom: f64): Mission {
+fn mission(name: string, blurb: string, fromNote: string, toNote: string, center: i64, from: i64, to: i64, mode: i64, parkAlt: f64, capAlt: f64, capApo: f64, lead: f64, search: f64, span: f64, tofLo: f64, tofHi: f64, loF: f64, hiF: f64, margin: f64): Mission {
     return Mission {
         name: name, blurb: blurb, fromNote: fromNote, toNote: toNote,
         center: center, from: from, to: to, departMode: mode,
         parkAlt: parkAlt * 1000.0, captureAlt: capAlt * 1000.0, captureApo: capApo * 1000.0,
-        budget: budget,
-        windowOpen: open, windowSpan: spanDays * SEC_PER_DAY,
+        leadDays: lead, searchDays: search, spanDays: span,
+        tofSearchLo: tofLo, tofSearchHi: tofHi,
+        tofLoFactor: loF, tofHiFactor: hiF, budgetMargin: margin,
+        windowOpen: 0.0, windowSpan: span * SEC_PER_DAY,
         tofMin: tofLo * SEC_PER_DAY, tofMax: tofHi * SEC_PER_DAY,
-        tofNominal: tofNom * SEC_PER_DAY, departNominal: waitNom * SEC_PER_DAY,
+        tofNominal: (tofLo + tofHi) * 0.5 * SEC_PER_DAY,
+        departNominal: span * 0.12 * SEC_PER_DAY,
+        budget: 0.0, calibrated: false,
     }
 }
 
-// Budgets sit a little above what a well-tuned plan costs, so a clean run
-// finishes with a visible margin and a sloppy one does not. They are not
-// generous: every one of them is inside ten per cent of the cheapest transfer the
-// window contains, which is why the dials are worth turning.
+// The margins are the difficulty curve, and they are the only one: the Moon
+// forgives ten per cent of waste and Saturn forgives five, whatever window the
+// calendar happens to hand you.
 pub fn missionTable(): Vec<Mission> {
     var v: Vec<Mission> = Vec.new()
-    v.push(mission("The Moon", "Going slower costs less. Give yourself more days and watch the price fall.", "A 300 km parking orbit. You are already going 7.73 km/s — the hard part is over.", "Airless, so there is no aerobraking. Every metre per second you arrive with, you pay to lose.", EARTH, EARTH, MOON, DEPART_ORBIT, 300.0, 100.0, 3000.0, 3850.0, timeOf(2030, 3, 1), 27.0, 2.5, 9.0, 2.6, 12.0))
-    v.push(mission("Mars", "Launch windows are real. You wait for the planet; it does not wait for you.", "Leaving Earth means outrunning it: 29.8 km/s around the Sun, and you need more.", "Thin air, half a g, and a periapsis at 500 km. The cheapest arrivals are the slow ones.", SUN, EARTH, MARS, DEPART_ESCAPE, 300.0, 500.0, 20000.0, 5400.0, timeOf(2033, 3, 1), 90.0, 150.0, 340.0, 320.0, 12.0))
-    v.push(mission("Venus", "Falling inward means arriving fast, and arriving fast is what costs.", "Downhill, for once. Slowing down relative to Earth drops you toward the Sun.", "The same size as Earth and twice as hot. Capture at 500 km, above the cloud deck.", SUN, EARTH, VENUS, DEPART_ESCAPE, 300.0, 500.0, 25000.0, 5500.0, timeOf(2031, 5, 10), 70.0, 80.0, 200.0, 90.0, 10.0))
-    v.push(mission("Mercury", "The closest planet is the most expensive to stop at. Falling in is free; stopping is not.", "You are aiming at the bottom of the Sun's gravity well, and you will arrive with speed to spare.", "No air, almost no gravity to help, and 10 km/s of arrival speed to cancel.", SUN, EARTH, MERCURY, DEPART_ESCAPE, 300.0, 400.0, 12000.0, 12900.0, timeOf(2032, 4, 15), 70.0, 70.0, 150.0, 125.0, 8.0))
-    v.push(mission("Jupiter", "Two years out, and the biggest planet charges the most to be caught by.", "Escape speed from Earth's orbit around the Sun is 42 km/s. You have to find 8 of them.", "Capture at 2000 km above the cloud tops, on an orbit that reaches 400,000 km out.", SUN, EARTH, JUPITER, DEPART_ESCAPE, 300.0, 2000.0, 400000.0, 11600.0, timeOf(2034, 5, 1), 120.0, 700.0, 1500.0, 780.0, 30.0))
-    v.push(mission("Saturn", "The graduation. Everything above, twice as far, on the same tank.", "Six years of coasting starts with one burn, and you will not get to take it back.", "Through the ring plane and into a long ellipse. Arrive slowly or do not arrive.", SUN, EARTH, SATURN, DEPART_ESCAPE, 300.0, 3000.0, 800000.0, 9900.0, timeOf(2038, 9, 1), 160.0, 1800.0, 4200.0, 2100.0, 40.0))
+    v.push(mission("The Moon", "Going slower costs less. Give yourself more days and watch the price fall.", "A 300 km parking orbit. You are already going 7.73 km/s — the hard part is over.", "Airless, so there is no aerobraking. Every metre per second you arrive with, you pay to lose.", EARTH, EARTH, MOON, DEPART_ORBIT, 300.0, 100.0, 3000.0, 14.0, 29.5, 24.0, 2.0, 9.0, 0.40, 1.8, 1.10))
+    v.push(mission("Mars", "Launch windows are real. You wait for the planet; it does not wait for you.", "Leaving Earth means outrunning it: 29.8 km/s around the Sun, and you need more.", "Thin air, half a g, and a periapsis at 500 km. The cheapest arrivals are the slow ones.", SUN, EARTH, MARS, DEPART_ESCAPE, 300.0, 500.0, 20000.0, 60.0, 800.0, 90.0, 150.0, 340.0, 0.62, 1.5, 1.08))
+    v.push(mission("Venus", "Falling inward means arriving fast, and arriving fast is what costs.", "Downhill, for once. Slowing down relative to Earth drops you toward the Sun.", "The same size as Earth and twice as hot. Capture at 500 km, above the cloud deck.", SUN, EARTH, VENUS, DEPART_ESCAPE, 300.0, 500.0, 25000.0, 60.0, 590.0, 70.0, 80.0, 200.0, 0.55, 1.55, 1.08))
+    v.push(mission("Mercury", "The closest planet is the most expensive to stop at. Falling in is free; stopping is not.", "You are aiming at the bottom of the Sun's gravity well, and you will arrive with speed to spare.", "No air, almost no gravity to help, and 10 km/s of arrival speed to cancel.", SUN, EARTH, MERCURY, DEPART_ESCAPE, 300.0, 400.0, 12000.0, 60.0, 120.0, 60.0, 70.0, 150.0, 0.7, 1.5, 1.07))
+    v.push(mission("Jupiter", "Two years out, and the biggest planet charges the most to be caught by.", "Escape speed from Earth's orbit around the Sun is 42 km/s. You have to find 8 of them.", "Capture at 2000 km above the cloud tops, on an orbit that reaches 400,000 km out.", SUN, EARTH, JUPITER, DEPART_ESCAPE, 300.0, 2000.0, 400000.0, 90.0, 400.0, 120.0, 700.0, 1500.0, 0.6, 1.4, 1.07))
+    v.push(mission("Saturn", "The graduation. Everything above, twice as far, on the same tank.", "Six years of coasting starts with one burn, and you will not get to take it back.", "Through the ring plane and into a long ellipse. Arrive slowly or do not arrive.", SUN, EARTH, SATURN, DEPART_ESCAPE, 300.0, 3000.0, 800000.0, 90.0, 380.0, 150.0, 1800.0, 4200.0, 0.55, 1.35, 1.06))
     return v
 }

@@ -17,6 +17,9 @@
 from "std/math" import {
     Math
 }
+from "std/time" import {
+    epochMillis
+}
 from "./vec3" import {
     Vec3, v3
 }
@@ -300,6 +303,18 @@ pub fn soiRadius(bodies: &Vec<Body>, id: i64): f64 {
         return 384400.0e3 * Math.pow(bodies[MOON].mu / bodies[EARTH].mu, 0.4)
     }
     return a * Math.pow(bodies[id].mu / bodies[b].mu, 0.4)
+}
+
+// Unix seconds at the J2000 epoch, 2000-01-01 12:00 TT. The 69-odd seconds
+// between TT and UTC are ignored: they are worth about 2 km of Earth's orbit,
+// and nothing in this game can see that.
+pub let J2000_UNIX: f64 = 946728000.0
+
+// Now, in the same TDB seconds past J2000 everything else here is expressed in.
+// Every launch window in the game is found by searching forward from this, so a
+// mission is always a trip you could still book.
+pub fn nowSeconds(): f64 {
+    return (epochMillis() as f64) / 1000.0 - J2000_UNIX
 }
 
 // Calendar helpers. The game shows dates, and a mission's launch window is

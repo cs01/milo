@@ -258,6 +258,156 @@ pub fn bestPlan(bodies: &Vec<Body>, m: &Mission): Plan {
     return best
 }
 
+// The next real launch opportunity after `fromT`.
+//
+// A window is not a date somebody chose, it is the next time the geometry is
+// cheap — so this sweeps a whole synodic period forward and finds the bottom of
+// the porkchop, and the mission's window is then hung around what it found. The
+// sweep is coarse on purpose and its winner is refined twice; the cost surface is
+// smooth, and a grid fine enough to trust everywhere would be felt as a stall on
+// the frame a mission starts.
+pub fn searchWindow(bodies: &Vec<Body>, m: &Mission, fromT: f64): Plan {
+    var best = planFail()
+    var bestCost = 1.0e30
+    var bestT = fromT
+    var bestF = (m.tofSearchLo + m.tofSearchHi) * 0.5 * SEC_PER_DAY
+
+    let steps = 44
+    var i = 0
+    while i <= steps {
+        let t = fromT + m.searchDays * SEC_PER_DAY * (i as f64) / (steps as f64)
+        var j = 0
+        while j <= 14 {
+            let tof = (m.tofSearchLo + (m.tofSearchHi - m.tofSearchLo) * (j as f64) / 14.0) * SEC_PER_DAY
+            let p = solvePlan(bodies, m, t, tof)
+            if p.ok && p.dvTotal < bestCost {
+                bestCost = p.dvTotal
+                bestT = t
+                bestF = tof
+                best = p
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+
+    var spanT = m.searchDays * SEC_PER_DAY / (steps as f64)
+    var spanF = (m.tofSearchHi - m.tofSearchLo) * SEC_PER_DAY / 14.0
+    var round = 0
+    while round < 2 {
+        var ct = bestT
+        var cf = bestF
+        var a = -4
+        while a <= 4 {
+            let t = ct + spanT * (a as f64) / 4.0
+            var b = -4
+            while b <= 4 {
+                let tof = cf + spanF * (b as f64) / 4.0
+                if t >= fromT && tof >= m.tofSearchLo * SEC_PER_DAY && tof <= m.tofSearchHi * SEC_PER_DAY {
+                    let p = solvePlan(bodies, m, t, tof)
+                    if p.ok && p.dvTotal < bestCost {
+                        bestCost = p.dvTotal
+                        bestT = t
+                        bestF = tof
+                        best = p
+                    }
+                }
+                b = b + 1
+            }
+            a = a + 1
+        }
+        spanT = spanT * 0.35
+        spanF = spanF * 0.35
+        round = round + 1
+    }
+    return best
+}
+
+fn clampf(v: f64, lo: f64, hi: f64): f64 {
+    if v < lo {
+        return lo
+    }
+    if v > hi {
+        return hi
+    }
+    return v
+}
+
+pub struct Opening {
+    depart: f64, // offset into the window
+    tof: f64,
+}
+
+// Where the dials open.
+//
+// Not at the answer, and not at a fixed offset from it either: the shape of the
+// cost surface changes from one opportunity to the next, so a start that reads as
+// 'a bit expensive' in one window is absurd in the next — a Mercury dial opening
+// at six hundred per cent of the tank is not a puzzle, it is a wall. This picks
+// the pair of dial positions whose cost lands nearest one and a half tanks: over
+// budget, plainly wrong, and plainly fixable by turning something.
+fn pickOpening(bodies: &Vec<Body>, m: &Mission): Opening {
+    let want = m.budget * 1.45
+    var bestScore = 1.0e30
+    var bestD = m.windowSpan * 0.12
+    var bestF = (m.tofMin + m.tofMax) * 0.5
+    var i = 0
+    while i <= 6 {
+        let d = m.windowSpan * (i as f64) / 6.0
+        var j = 0
+        while j <= 10 {
+            let tof = m.tofMin + (m.tofMax - m.tofMin) * (j as f64) / 10.0
+            let p = solvePlan(bodies, m, m.windowOpen + d, tof)
+            if p.ok {
+                let score = Math.abs(p.dvTotal - want)
+                if score < bestScore {
+                    bestScore = score
+                    bestD = d
+                    bestF = tof
+                }
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    return Opening {
+        depart: bestD, tof: bestF
+    }
+}
+
+// Hang a mission's window, dials and tank on the next opportunity there actually
+// is, given the date the game is being played on.
+//
+// The tank is the cheapest plan in the window times the mission's own margin, so
+// the difficulty is a property of the game rather than of which decade it is
+// played in — a bad Mars window and a good one are equally winnable, and equally
+// unforgiving of a badly turned dial.
+pub fn calibrateMission(bodies: &Vec<Body>, m: &mut Mission, now: f64): bool {
+    let start = now + m.leadDays * SEC_PER_DAY
+    let best = searchWindow(bodies, m, start)
+    if !best.ok {
+        m.windowOpen = start
+        m.budget = 1.0e9
+        m.calibrated = true
+        return false
+    }
+    let span = m.spanDays * SEC_PER_DAY
+    var open = best.t0 - span * 0.40
+    if open < start {
+        open = start
+    }
+    m.windowOpen = open
+    m.windowSpan = span
+    m.tofMin = best.tof * m.tofLoFactor
+    m.tofMax = best.tof * m.tofHiFactor
+    m.budget = Math.round(best.dvTotal * m.budgetMargin / 50.0) * 50.0
+    let open2 = pickOpening(bodies, m)
+    m.departNominal = open2.depart
+    m.tofNominal = clampf(open2.tof, m.tofMin, m.tofMax)
+    m.calibrated = true
+    return true
+}
+
 // Where the ship is `dt` seconds after the departure burn. This is the function
 // the flight uses AND the function the drawn arc is made of.
 pub fn shipAt(bodies: &Vec<Body>, m: &Mission, p: &Plan, dt: f64): State {

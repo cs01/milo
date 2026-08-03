@@ -34,7 +34,7 @@ from "./plan" import {
 }
 from "./game" import {
     Game, PHASE_TITLE, PHASE_DEPART, PHASE_TARGET, PHASE_PLAN, PHASE_FLY,
-    PHASE_ARRIVED, CINEMATIC_SECONDS, displayTime, shipPoint, withinBudget,
+    PHASE_ARRIVED, DEPART_SECONDS, TARGET_SECONDS, displayTime, shipPoint, withinBudget,
     fuelLeft, mapRadius, warpMultiple,
 }
 
@@ -59,7 +59,7 @@ pub fn colAccent(): Rgba {
 }
 
 pub fn colOrbit(): Rgba {
-    return rgba(0.30, 0.37, 0.52, 0.75)
+    return rgba(0.34, 0.42, 0.58, 0.95)
 }
 
 pub fn colPanel(): Rgba {
@@ -257,7 +257,7 @@ fn drawOrbits(ui: &mut Ui, g: &Game, v: &View, alpha: f64) {
     while i < ids.len {
         let per = orbitPeriod(g.bodies, ids[i], center)
         let pts = orbitPoints(g.bodies, ids[i], center, t, per, 220)
-        polyline(ui, v, pts, 1.6, fade(colOrbit(), alpha), 0)
+        polyline(ui, v, pts, 1.8, fade(colOrbit(), alpha), 0)
         i = i + 1
     }
 }
@@ -307,8 +307,32 @@ fn drawShip(ui: &mut Ui, g: &Game, v: &View, alpha: f64) {
     ui.disc(p.x, p.y, 2.2 * u, fade(colInk(), alpha))
 }
 
+// Where the target will BE, which is not where it is. The arc ends here, and
+// without a marker on it the whole trajectory appears to stop in empty space —
+// which is exactly the misunderstanding the mission is about.
+fn drawArrivalMark(ui: &mut Ui, g: &Game, v: &View, alpha: f64) {
+    if !g.plan.ok {
+        return
+    }
+    let u = v.h / 900.0
+    let p = projectPoint(v, g.plan.r2)
+    if !p.visible {
+        return
+    }
+    let c = fade(colAccent(), alpha * 0.85)
+    ui.ring(p.x, p.y, 9.0 * u, 1.4 * u, c)
+    ui.disc(p.x, p.y, 2.6 * u, c)
+    let when = displayName(g.missions[g.mi].to) + " " + fmtDate(g.plan.t0 + g.plan.tof)
+    ui.textTracked(p.x - trackedWidth(when, 7.5 * u, 2.6 * u) * 0.5, p.y + 20.0 * u, 7.5 * u, 2.6 * u, when, fade(colAccent(), alpha * 0.7))
+}
+
 fn drawBodyMarkers(ui: &mut Ui, g: &Game, v: &View, marks: &Vec<Marker>, alpha: f64) {
     let u = v.h / 900.0
+    // Where a label has already been written. Two dots a centimetre apart on the
+    // map — the Sun and the Earth, on the way to Saturn — would otherwise print
+    // their names on top of each other.
+    var takenX: Vec<f64> = Vec.new()
+    var takenY: Vec<f64> = Vec.new()
     var i = 0
     while i < marks.len {
         let id = marks[i].id
@@ -330,7 +354,17 @@ fn drawBodyMarkers(ui: &mut Ui, g: &Game, v: &View, marks: &Vec<Marker>, alpha: 
                 off = marks[i].px + 16.0 * u
             }
             let name = displayName(id)
-            ui.textTracked(marks[i].x - trackedWidth(name, 7.5 * u, 2.6 * u) * 0.5, marks[i].y + off, 7.5 * u, 2.6 * u, name, fade(colDim(), alpha))
+            var ly = marks[i].y + off
+            var k = 0
+            while k < takenX.len {
+                if Math.abs(takenX[k] - marks[i].x) < 120.0 * u && Math.abs(takenY[k] - ly) < 26.0 * u {
+                    ly = marks[i].y - off - 12.0 * u
+                }
+                k = k + 1
+            }
+            takenX.push(marks[i].x)
+            takenY.push(ly)
+            ui.textTracked(marks[i].x - trackedWidth(name, 7.5 * u, 2.6 * u) * 0.5, ly, 7.5 * u, 2.6 * u, name, fade(colDim(), alpha))
         }
         i = i + 1
     }
@@ -367,6 +401,7 @@ pub fn drawMap(ui: &mut Ui, g: &Game, v: &View, marks: &Vec<Marker>) {
     drawOrbits(ui, g, v, alpha)
     drawParkingOrbit(ui, g, v, marks, alpha)
     drawTransfer(ui, g, v, alpha)
+    drawArrivalMark(ui, g, v, alpha)
     drawBodyMarkers(ui, g, v, marks, alpha)
     drawShip(ui, g, v, alpha)
 }
@@ -385,8 +420,10 @@ fn dial(ui: &mut Ui, x: f64, y: f64, w: f64, u: f64, name: &string, value: &stri
     if live {
         c = colAccent()
     }
-    ui.textRight(x + w, y - 3.0 * u, 11.0 * u, value, c)
-    let ty = y + 26.0 * u
+    // The value sits under its own name rather than beside it: a date and a
+    // caption on one line fit until the day the date is 'MAR' and they collide.
+    ui.text(x, y + 17.0 * u, 12.0 * u, value, c)
+    let ty = y + 52.0 * u
     ui.rect(x, ty, w, 1.5, fade(colFaint(), 0.8))
     let hx = x + w * frac
     ui.rect(x, ty, w * frac, 1.5, fade(colAccent(), 0.9))
@@ -400,10 +437,10 @@ fn costRow(ui: &mut Ui, x: f64, y: f64, w: f64, u: f64, name: &string, value: &s
 }
 
 fn drawPlanPanel(ui: &mut Ui, g: &Game, u: f64, w: f64, h: f64) {
-    let panelW = 520.0 * u
-    let x = (w - panelW) * 0.5
-    let panelH = 210.0 * u
-    let y = h - panelH - 34.0 * u
+    let panelW = 470.0 * u
+    let x = 64.0 * u
+    let panelH = 248.0 * u
+    let y = 236.0 * u
     ui.roundRect(x, y, panelW, panelH, 14.0 * u, colPanel())
 
     let pad = 30.0 * u
@@ -411,12 +448,12 @@ fn drawPlanPanel(ui: &mut Ui, g: &Game, u: f64, w: f64, h: f64) {
     let m = g.missions[g.mi]
     let departFrac = (g.departT - m.windowOpen) / m.windowSpan
     let tofFrac = (g.tof - m.tofMin) / (m.tofMax - m.tofMin)
-    dial(ui, x + pad, y + 30.0 * u, inner * 0.46, u, "DEPART", fmtDate(g.departT), departFrac, true)
-    dial(ui, x + pad + inner * 0.54, y + 30.0 * u, inner * 0.46, u, "FLIGHT TIME", fmtDays(g.tof), tofFrac, true)
+    dial(ui, x + pad, y + 26.0 * u, inner * 0.46, u, "DEPART", fmtDate(g.departT), departFrac, true)
+    dial(ui, x + pad + inner * 0.54, y + 26.0 * u, inner * 0.46, u, "FLIGHT TIME", fmtDays(g.tof), tofFrac, true)
 
     // The number the game is about.
-    let ty = y + 108.0 * u
-    label(ui, x + pad, ty + 14.0 * u, u, "TOTAL BURN", colDim())
+    let ty = y + 124.0 * u
+    label(ui, x + pad, ty, u, "TOTAL BURN", colDim())
     var big = "NO TRANSFER"
     var bigCol = colBad()
     if g.plan.ok {
@@ -425,11 +462,11 @@ fn drawPlanPanel(ui: &mut Ui, g: &Game, u: f64, w: f64, h: f64) {
             bigCol = colInk()
         }
     }
-    ui.text(x + pad, ty, 20.0 * u, big, bigCol)
-    ui.textRight(x + panelW - pad, ty + 14.0 * u, 8.0 * u, "BUDGET " + commas(m.budget) + " m/s", colDim())
+    ui.text(x + pad, ty + 20.0 * u, 20.0 * u, big, bigCol)
+    ui.textRight(x + panelW - pad, ty, 8.0 * u, "BUDGET " + commas(m.budget) + " m/s", colDim())
 
     // The budget bar: how much of the tank this plan spends.
-    let by = ty + 44.0 * u
+    let by = ty + 72.0 * u
     ui.rect(x + pad, by, inner, 3.0 * u, fade(colFaint(), 0.55))
     if g.plan.ok {
         var frac = g.plan.dvTotal / m.budget
@@ -456,9 +493,9 @@ fn drawCostPanel(ui: &mut Ui, g: &Game, u: f64, w: f64, h: f64) {
     if !g.plan.ok {
         return
     }
-    let panelW = 300.0 * u
-    let x = w - panelW - 34.0 * u
-    let y = h * 0.30
+    let panelW = 470.0 * u
+    let x = 64.0 * u
+    let y = 504.0 * u
     let panelH = 200.0 * u
     ui.roundRect(x, y, panelW, panelH, 14.0 * u, colPanel())
     let pad = 24.0 * u
@@ -480,9 +517,9 @@ fn drawMissionHeader(ui: &mut Ui, g: &Game, u: f64, alpha: f64) {
     let x = 44.0 * u
     label(ui, x, 44.0 * u, u, missionTag(g), fade(colDim(), alpha))
     let name = g.missions[g.mi].name.clone()
-    title(ui, x, 66.0 * u, 26.0 * u, name.toUpper(), fade(colInk(), alpha))
+    title(ui, x, 64.0 * u, 21.0 * u, name.toUpper(), fade(colInk(), alpha))
     var lines = wrapText(g.missions[g.mi].blurb, 9.0 * u, 430.0 * u)
-    var y = 138.0 * u
+    var y = 120.0 * u
     var i = 0
     while i < lines.len {
         ui.text(x, y, 9.0 * u, lines[i], fade(colDim(), alpha))
@@ -509,8 +546,8 @@ fn drawCinematic(ui: &mut Ui, g: &Game, u: f64, h: f64) {
 
     label(ui, x, y, u, kicker, fade(colAccent(), a))
     y = y + 34.0 * u
-    title(ui, x, y, 40.0 * u, displayName(id), fade(colInk(), a))
-    y = y + 96.0 * u
+    title(ui, x, y, 31.0 * u, displayName(id), fade(colInk(), a))
+    y = y + 78.0 * u
     var lines = wrapText(note, 10.0 * u, 460.0 * u)
     var i = 0
     while i < lines.len {
@@ -529,7 +566,11 @@ fn drawCinematic(ui: &mut Ui, g: &Game, u: f64, h: f64) {
     // game that is not a date.
     let barW = 200.0 * u
     let by = h - 60.0 * u
-    var frac = g.phaseT / CINEMATIC_SECONDS
+    var span = TARGET_SECONDS
+    if leaving {
+        span = DEPART_SECONDS
+    }
+    var frac = g.phaseT / span
     if frac > 1.0 {
         frac = 1.0
     }
@@ -543,9 +584,9 @@ fn drawCinematic(ui: &mut Ui, g: &Game, u: f64, h: f64) {
 
 fn drawFlightHud(ui: &mut Ui, g: &Game, u: f64, w: f64, h: f64) {
     let panelW = 470.0 * u
-    let x = (w - panelW) * 0.5
+    let x = 64.0 * u
     let panelH = 96.0 * u
-    let y = h - panelH - 34.0 * u
+    let y = 236.0 * u
     ui.roundRect(x, y, panelW, panelH, 14.0 * u, colPanel())
     let pad = 26.0 * u
     let inner = panelW - pad * 2.0
@@ -570,9 +611,9 @@ fn drawFlightHud(ui: &mut Ui, g: &Game, u: f64, w: f64, h: f64) {
 }
 
 fn drawFuel(ui: &mut Ui, g: &Game, u: f64, w: f64, h: f64) {
-    let x = w - 300.0 * u - 34.0 * u
-    let y = h * 0.32
-    let panelW = 300.0 * u
+    let x = 64.0 * u
+    let y = 372.0 * u
+    let panelW = 470.0 * u
     ui.roundRect(x, y, panelW, 132.0 * u, 14.0 * u, colPanel())
     let pad = 24.0 * u
     let inner = panelW - pad * 2.0
@@ -593,8 +634,8 @@ fn drawFuel(ui: &mut Ui, g: &Game, u: f64, w: f64, h: f64) {
 // ── arrival ───────────────────────────────────────────────────────────────────
 
 fn drawArrived(ui: &mut Ui, g: &Game, u: f64, w: f64, h: f64) {
-    let cardW = 520.0 * u
-    let x = (w - cardW) * 0.5
+    let cardW = 470.0 * u
+    let x = 64.0 * u
     let cardH = 268.0 * u
     let y = (h - cardH) * 0.5
     ui.roundRect(x, y, cardW, cardH, 16.0 * u, rgba(0.015, 0.02, 0.032, 0.90))
@@ -603,7 +644,7 @@ fn drawArrived(ui: &mut Ui, g: &Game, u: f64, w: f64, h: f64) {
     let cx = x + cardW * 0.5
     label(ui, cx - trackedWidth("IN ORBIT AROUND", 8.0 * u, 3.0 * u) * 0.5, y + 34.0 * u, u, "IN ORBIT AROUND", colAccent())
     let name = displayName(g.missions[g.mi].to)
-    title(ui, cx - titleWidth(name, 30.0 * u) * 0.5, y + 62.0 * u, 30.0 * u, name, colInk())
+    title(ui, cx - titleWidth(name, 25.0 * u) * 0.5, y + 60.0 * u, 25.0 * u, name, colInk())
 
     let pad = 40.0 * u
     let inner = cardW - pad * 2.0
@@ -629,8 +670,8 @@ fn drawTitle(ui: &mut Ui, g: &Game, u: f64, h: f64) {
     var y = h * 0.30
     ui.textTracked(x, y, 9.0 * u, 6.0 * u, "A GAME ABOUT GETTING SOMEWHERE", colDim())
     y = y + 44.0 * u
-    title(ui, x, y, 62.0 * u, "APSIS", colInk())
-    y = y + 150.0 * u
+    title(ui, x, y, 46.0 * u, "APSIS", colInk())
+    y = y + 116.0 * u
     ui.text(x, y, 15.0 * u, "You can be a rocket scientist too.", colAccent())
     y = y + 56.0 * u
     var lines = wrapText("Six trips, from the Moon out to Saturn. Real gravity, real launch windows, one tank of fuel. You never type a velocity - you turn a dial until the number is small enough, and then you go.", 10.0 * u, 460.0 * u)
@@ -649,7 +690,7 @@ fn drawHelp(ui: &mut Ui, u: f64, w: f64, h: f64) {
     ui.rect(0.0, 0.0, w, h, rgba(0.0, 0.006, 0.014, 0.90))
     let cx = w * 0.5
     var y = h * 0.20
-    title(ui, cx - titleWidth("APSIS", 34.0 * u) * 0.5, y, 34.0 * u, "APSIS", colInk())
+    title(ui, cx - titleWidth("APSIS", 26.0 * u) * 0.5, y, 26.0 * u, "APSIS", colInk())
     y = y + 92.0 * u
     var rows: Vec<string> = Vec.new()
     rows.push("LEFT RIGHT    when you leave")

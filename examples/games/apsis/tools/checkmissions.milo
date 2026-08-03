@@ -20,8 +20,11 @@ from "./../ephem" import {
 from "./../mission" import {
     missionTable, MISSION_COUNT
 }
+from "./../ephem" import {
+    nowSeconds
+}
 from "./../plan" import {
-    bestPlan, solvePlan, shipAt, relPos
+    calibrateMission, bestPlan, solvePlan, shipAt, relPos
 }
 
 fn pad(s: &string, n: i64): string {
@@ -38,7 +41,14 @@ fn round0(v: f64): string {
 
 pub fn main(): i32 {
     let bodies = bodyTable()
-    let missions = missionTable()
+    var missions = missionTable()
+    // The windows are relative to today, so nothing here means anything until
+    // every mission has been hung on the opportunity it actually has.
+    var c = 0
+    while c < MISSION_COUNT {
+        let _ = calibrateMission(bodies, missions[c], nowSeconds())
+        c = c + 1
+    }
     var failures = 0
 
     print(pad("MISSION", 12) + pad("DEPART", 9) + pad("FLIGHT", 9) + pad("LEAVE", 9) + pad("ARRIVE", 9) + pad("TOTAL", 9) + pad("BUDGET", 9) + "MARGIN")

@@ -62,7 +62,7 @@ from "./ephem" import {
 from "./game" import {
     Game, gameNew, advance, advancePhase, updateCamera, dragCamera, zoomCamera,
     scrub, snapToBest, commit, startMission, setPhase, stepWarp,
-    PHASE_TITLE, PHASE_BRIEF, PHASE_DEPART, PHASE_TARGET, PHASE_PLAN, PHASE_FLY, PHASE_ARRIVED,
+    PHASE_TITLE, PHASE_BRIEF, titleLevel, PHASE_DEPART, PHASE_TARGET, PHASE_PLAN, PHASE_FLY, PHASE_ARRIVED,
 }
 
 pub let WIN_W: i64 = 1360
@@ -81,6 +81,9 @@ pub struct Options {
     frames: i64,
     flight: f64, // fraction of the flight to jump to before shooting
     gain: f64,
+    // How far into the phase a screenshot is taken. The title slideshow is on a
+    // clock, so this is the only way to photograph the world it is not on yet.
+    phaseT: f64,
 }
 
 fn phaseFromName(s: &string): i64 {
@@ -110,7 +113,7 @@ fn phaseFromName(s: &string): i64 {
 
 fn parseOptions(): Options {
     var o = Options {
-        shot: "", mission: 0, phase: -1, frames: 90, flight: 0.5, gain: 0.22,
+        shot: "", mission: 0, phase: -1, frames: 90, flight: 0.5, gain: 0.22, phaseT: 3.2,
     }
     let a = args()
     var i = 1
@@ -134,6 +137,9 @@ fn parseOptions(): Options {
         }
         if k == "--flight" {
             o.flight = parseFloat(v.clone()).unwrapOr(0.5)
+        }
+        if k == "--phase-t" {
+            o.phaseT = parseFloat(v.clone()).unwrapOr(3.2)
         }
         if k == "--gain" {
             o.gain = parseFloat(v.clone()).unwrapOr(0.34)
@@ -269,16 +275,16 @@ fn stage(g: &mut Game, o: &Options) {
         setPhase(g, o.phase)
     }
     // The camera eases, and a shot taken on frame one would catch it mid-flight
-    // between two phases; land it where the phase wants it.
+    // between two phases; land it where the phase wants it. The clock is wound
+    // forward first, so a slideshow shot gets the world it asked for.
+    g.phaseT = o.phaseT
+    advance(g, 0.0)
     var i = 0
     while i < 400 {
         updateCamera(g, 0.05)
         i = i + 1
     }
     g.fade = 1.0
-    // A shot should show the phase settled, not on its first frame: the parking
-    // orbit band and the cinematic's own progress bar both grow with phaseT.
-    g.phaseT = 3.2
 }
 
 pub fn main(): i32 {
@@ -388,7 +394,7 @@ pub fn main(): i32 {
         let view = viewOf(g, w, h)
         post.beginScene()
         var marks = drawScene(renderer, g, view, time)
-        post.resolve(opt.gain, 1.0, 0.36, size.w, size.h)
+        post.resolve(opt.gain, titleLevel(g), 0.36, size.w, size.h)
 
         drawOverlay(ui, g, view, marks)
         ui.flush(w, h)

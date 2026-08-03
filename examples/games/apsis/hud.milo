@@ -33,7 +33,7 @@ from "./plan" import {
     arcPoints, orbitPoints, orbitPeriod, relPos, parkRadius, parkSpeed,
 }
 from "./game" import {
-    Game, PHASE_TITLE, PHASE_BRIEF, PHASE_DEPART, PHASE_TARGET, PHASE_PLAN, PHASE_FLY,
+    Game, PHASE_TITLE, titleWorld, titleLevel, PHASE_BRIEF, PHASE_DEPART, PHASE_TARGET, PHASE_PLAN, PHASE_FLY,
     PHASE_ARRIVED, DEPART_SECONDS, TARGET_SECONDS, displayTime, shipPoint, withinBudget,
     fuelLeft, mapRadius, warpMultiple,
 }
@@ -798,7 +798,7 @@ fn drawArrived(ui: &mut Ui, g: &Game, u: f64, w: f64, h: f64) {
 
 // ── title ─────────────────────────────────────────────────────────────────────
 
-fn drawTitle(ui: &mut Ui, g: &Game, u: f64, h: f64) {
+fn drawTitle(ui: &mut Ui, g: &Game, u: f64, w: f64, h: f64) {
     let x = 88.0 * u
     var y = h * 0.30
     ui.textTracked(x, y, 9.0 * u, 6.0 * u, "A GAME ABOUT GETTING SOMEWHERE", colDim())
@@ -817,6 +817,12 @@ fn drawTitle(ui: &mut Ui, g: &Game, u: f64, h: f64) {
     y = y + 34.0 * u
     let pulse = 0.55 + 0.45 * Math.sin(g.spin * 9.0)
     ui.textTracked(x, y, 9.0 * u, 4.0 * u, "PRESS SPACE TO BEGIN", fade(colAccent(), pulse))
+
+    // Which world is on screen, fading with it. Six named places is the promise
+    // the game is making, and the slideshow should say them out loud.
+    let name = displayName(titleWorld(g))
+    let lvl = titleLevel(g)
+    ui.textTracked(w - 64.0 * u - trackedWidth(name, 8.0 * u, 4.0 * u), h - 60.0 * u, 8.0 * u, 4.0 * u, name, fade(colDim(), lvl))
 }
 
 fn drawHelp(ui: &mut Ui, u: f64, w: f64, h: f64) {
@@ -863,8 +869,7 @@ pub fn drawOverlay(ui: &mut Ui, g: &Game, v: &View, marks: &Vec<Marker>) {
     }
 
     if g.phase == PHASE_TITLE {
-        drawMap(ui, g, v, marks)
-        drawTitle(ui, g, u, h)
+        drawTitle(ui, g, u, w, h)
     }
     if g.phase == PHASE_BRIEF {
         drawBrief(ui, g, u, w, h)

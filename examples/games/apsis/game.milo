@@ -13,7 +13,8 @@ from "./vec3" import {
     Vec3, v3
 }
 from "./ephem" import {
-    Body, bodyTable, bodyPos, bodyState, nowSeconds, SEC_PER_DAY, SUN
+    Body, bodyTable, bodyPos, bodyState, nowSeconds, SEC_PER_DAY, SUN, EARTH, MARS,
+    JUPITER, SATURN
 }
 from "./worlds" import {
     Look, lookTable
@@ -45,6 +46,54 @@ pub let PHASE_ARRIVED: i64 = 5
 pub let PHASE_BRIEF: i64 = 6
 
 pub let BRIEF_SECONDS: f64 = 4.5
+
+// The title screen is a slideshow of worlds rather than a diagram: a map of a
+// transfer explains the game to someone who has already played it, and a lit
+// planet turning in the dark is the only thing that sells it to anyone else.
+pub let TITLE_SLOT: f64 = 8.0
+
+// The cut happens through black, which is also where the next world's sixteen
+// megabytes of map get decoded — a stall nobody can see.
+pub let TITLE_FADE: f64 = 1.2
+
+pub fn titleWorlds(): Vec<i64> {
+    var v: Vec<i64> = Vec.new()
+    v.push(SATURN)
+    v.push(JUPITER)
+    v.push(MARS)
+    v.push(EARTH)
+    return v
+}
+
+pub fn titleSlot(g: &Game): i64 {
+    let ws = titleWorlds()
+    let n = ws.len
+    var i = (g.phaseT / TITLE_SLOT) as i64
+    i = i % n
+    if i < 0 {
+        i = 0
+    }
+    return i
+}
+
+pub fn titleWorld(g: &Game): i64 {
+    let ws = titleWorlds()
+    return ws[titleSlot(g)]
+}
+
+// 0 at a cut, 1 for the body of a slot.
+pub fn titleLevel(g: &Game): f64 {
+    if g.phase != PHASE_TITLE {
+        return 1.0
+    }
+    let k = Math.mod(g.phaseT, TITLE_SLOT)
+    var a = clampf(k / TITLE_FADE, 0.0, 1.0)
+    let b = clampf((TITLE_SLOT - k) / TITLE_FADE, 0.0, 1.0)
+    if b < a {
+        a = b
+    }
+    return a * a * (3.0 - 2.0 * a)
+}
 
 // How long each cinematic runs before it hands over on its own. Long enough to
 // see the world turn, short enough that a player replaying a mission is not
@@ -96,6 +145,7 @@ pub struct Game {
     help: bool,
     spin: f64, // cinematic rotation phase
     fade: f64, // 0..1 overlay fade-in after a phase change
+    titleAt: i64, // which world the title slideshow is on, -1 before the first
 }
 
 fn clampf(v: f64, lo: f64, hi: f64): f64 {
@@ -181,9 +231,24 @@ fn cameraTargets(g: &mut Game) {
     // 'not quite still'.
     g.cam.drift = 0.045
     if g.phase == PHASE_TITLE {
-        g.cam.tFocus = m.center
-        g.cam.tDist = mapDistance(g) * 1.35
-        g.cam.tPitch = 1.30
+        let id = titleWorld(g)
+        g.cam.tFocus = id
+        // Further out than a cinematic sits: the type owns the left half of the
+        // screen and a world that crosses it is a background, not a subject.
+        var back = 1.75
+        var pitch = 0.26
+        if g.looks[id].ringOuter > 0.0 {
+            // A ringed world is both wider and, seen flat, a line.
+            back = 2.15
+            pitch = 0.46
+        }
+        g.cam.tDist = g.bodies[id].radius * g.looks[id].viewDist * back
+        g.cam.tPitch = pitch
+        // Off the sun line far enough for a terminator: a fully front-lit ball
+        // is a sticker, and the shadow is what makes it a photograph.
+        g.cam.yaw = sunwardYaw(g, id) - 0.95
+        g.cam.tYaw = g.cam.yaw
+        g.cam.drift = 0.030
         g.cam.rate = 1.4
         g.cam.drifting = true
     }
@@ -329,6 +394,7 @@ pub fn gameNew(): Game {
         help: false,
         spin: 0.0,
         fade: 0.0,
+        titleAt: -1,
     }
     calibrate(g, 0)
     // The title screen is a picture before it is a game state, so its dials sit
@@ -450,6 +516,20 @@ pub fn warpMultiple(g: &Game): f64 {
 
 pub fn advance(g: &mut Game, dt: f64) {
     g.phaseT = g.phaseT + dt
+    // The slideshow cuts rather than eases: the next world is a billion
+    // kilometres away, and easing to it would fly the camera across the solar
+    // system in the middle of the title.
+    if g.phase == PHASE_TITLE {
+        let slot = titleSlot(g)
+        if slot != g.titleAt {
+            g.titleAt = slot
+            cameraTargets(g)
+            g.cam.focus = g.cam.tFocus
+            g.cam.at = focusPoint(g, g.cam.focus)
+            g.cam.dist = g.cam.tDist
+            g.cam.pitch = g.cam.tPitch
+        }
+    }
     g.fade = clampf(g.fade + dt * 1.6, 0.0, 1.0)
     g.spin = g.spin + dt * 0.10
 

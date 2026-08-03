@@ -40,7 +40,7 @@ from "./worlds" import {
     Look,
 }
 from "./game" import {
-    Game, PHASE_TITLE, PHASE_DEPART, PHASE_TARGET, PHASE_PLAN, PHASE_FLY, PHASE_ARRIVED,
+    Game, PHASE_TITLE, titleWorld, PHASE_DEPART, PHASE_TARGET, PHASE_PLAN, PHASE_FLY, PHASE_ARRIVED,
     eyePoint, displayTime,
 }
 from "./plan" import {
@@ -156,8 +156,8 @@ pub fn subjectShift(g: &Game): f64 {
     }
     if g.phase == PHASE_TITLE {
         // Same reason as the cinematics: the title type owns the left column, so
-        // the map is pushed out of it rather than drawn under it.
-        return 0.24
+        // the world is pushed out of it rather than drawn under it.
+        return 0.36
     }
     if g.phase == PHASE_PLAN || g.phase == PHASE_FLY {
         // The map gets the same treatment as a cinematic, because the dials are
@@ -225,6 +225,12 @@ fn markerOf(v: &View, id: i64, p: &Vec3, radius: f64): Marker {
 // put Jupiter in the corner of a lunar mission.
 pub fn missionBodies(g: &Game): Vec<i64> {
     var out: Vec<i64> = Vec.new()
+    // The title screen is one world at a time, and it is not always one this
+    // mission touches.
+    if g.phase == PHASE_TITLE {
+        out.push(titleWorld(g))
+        return out
+    }
     out.push(SUN)
     let c = g.missions[g.mi].center
     let f = g.missions[g.mi].from

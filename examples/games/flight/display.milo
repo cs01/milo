@@ -34,7 +34,7 @@ from "sdl" import {
     SDL_WINDOWPOS_CENTERED, SDL_WINDOW_ALLOW_HIGHDPI,
     SDL_WINDOW_FULLSCREEN_DESKTOP, SDL_WINDOW_RESIZABLE, SDL_WINDOW_SHOWN
 }
-from "sdl/gl" import {
+from "sdl/glcontext" import {
     SDL_GL_CreateContext, SDL_GL_DeleteContext, SDL_GL_GetDrawableSize,
     SDL_GL_SetAttribute, SDL_GL_SetSwapInterval, SDL_GL_SwapWindow,
     SDL_GL_CONTEXT_MAJOR_VERSION, SDL_GL_CONTEXT_MINOR_VERSION,

@@ -9,7 +9,7 @@ Runnable programs; also stdlib tests.
 
 Every game here binds SDL2 through the [`sdl`](https://github.com/milo-language/milo-sdl)
 package rather than restating the declarations, and the three that render on the GPU —
-flight, apsis, atlas — also depend on [`gl`](https://github.com/milo-language/gl). Both
+flight, apsis, atlas — also depend on [`gl`](https://github.com/milo-language/milo-gl). Both
 are listed in each game's `milo.json`, so run `milo pkg install` in that directory once
 before building it. There used to be seven near-identical copies of those bindings across
 this tree, and the drift cost flight its entire soundtrack: one copy asked SDL_Init for

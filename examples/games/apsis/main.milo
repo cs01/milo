@@ -43,7 +43,7 @@ from "sdl" import {
     SDL_DestroyWindow, SDL_GetTicks, SDL_Quit, SDL_SetWindowFullscreen,
     SDL_WINDOW_FULLSCREEN_DESKTOP
 }
-from "sdl/gl" import {
+from "sdl/glcontext" import {
     SDL_GL_DeleteContext, SDL_GL_SwapWindow
 }
 from "./post" import {

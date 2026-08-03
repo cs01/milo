@@ -30,7 +30,7 @@ from "sdl" import {
     SDL_CreateWindow, SDL_GetError, SDL_Init, SDL_Quit,
     SDL_INIT_VIDEO, SDL_WINDOWPOS_CENTERED
 }
-from "sdl/gl" import {
+from "sdl/glcontext" import {
     SDL_GL_CreateContext, SDL_GL_SetAttribute,
     SDL_GL_CONTEXT_MAJOR_VERSION, SDL_GL_CONTEXT_MINOR_VERSION,
     SDL_GL_CONTEXT_PROFILE_CORE, SDL_GL_CONTEXT_PROFILE_MASK, SDL_WINDOW_OPENGL

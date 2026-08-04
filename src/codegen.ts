@@ -56,6 +56,16 @@ export function orderGuardIncludes(headers: string[], os: string): string[] {
 
 interface LocalInfo { type: string; typeKind: TypeKind; mutable: boolean; isRef: boolean; addr?: string }
 
+// One name for codegen's return shape: the IR lines an expression emits, the SSA value it
+// leaves the result in, and that value's LLVM type.
+//
+// `value` and `type` are both bare `string` and adjacent, so nothing but argument order
+// stops them being swapped — the kind of mistake that produces IR which is wrong rather
+// than invalid. Making them distinct branded types is the real fix and costs ~390 call-site
+// changes here; this alias is the one place that change would need to land, and Milo's
+// newtypes make it free on the other side of the port. See docs/backlog.md.
+type Gen = [lines: string[], value: string, type: string];
+
 export class Codegen {
   private target: TargetInfo;
   private output: string[] = [];
@@ -949,7 +959,7 @@ export class Codegen {
   // Emit an extern call whose signature crosses the C ABI with a by-value struct.
   // argVals hold the Milo-level argument values (struct params are whole %T values);
   // here we reinterpret each into the register/indirect/sret form the ABI demands.
-  private emitExternAbiCall(expr: HIRExpr & { kind: "Call" }, argVals: { val: string; type: string }[], lines: string[]): [string[], string, string] {
+  private emitExternAbiCall(expr: HIRExpr & { kind: "Call" }, argVals: { val: string; type: string }[], lines: string[]): Gen {
     const abi = must(this.externAbi, expr.func, "extern abi");
     const sig = must(this.fnSigs, expr.func, "fn sigs");
     const lowered = this.externLoweredSig(expr.func);
@@ -2082,7 +2092,7 @@ export class Codegen {
     throw new Error(`genStmtRaw: unhandled HIR kind '${(_exhaustive as { kind: string }).kind}'`);
   }
 
-  public genLValue(expr: HIRExpr): [string[], string, string] {
+  public genLValue(expr: HIRExpr): Gen {
     const lines: string[] = [];
     if (expr.kind === "Ident") {
       const local = this.locals.get(expr.name);
@@ -2158,7 +2168,7 @@ export class Codegen {
     return [lines, "null", "i32"];
   }
 
-  private genBoundsCheckedPtr(expr: HIRExpr & { kind: "IndexAccess" }, lines: string[]): [string[], string, string] {
+  private genBoundsCheckedPtr(expr: HIRExpr & { kind: "IndexAccess" }, lines: string[]): Gen {
     const objPtr = this.genIndexObjectPtr(expr.object, lines);
     const objTy = this.llvmType(expr.object.type.tag === "ref" ? expr.object.type.inner : expr.object.type);
     const [idxLines, idxVal, idxTy] = this.genExpr(expr.index);
@@ -2941,7 +2951,7 @@ export class Codegen {
   // if it owns heap data, register it as a droppable local so the buffer is freed
   // at function exit. Elements are only borrowed (&T) in the body, never moved, so
   // one whole-container drop is sound and the alive-flag makes it double-free safe.
-  private genForEachIterableAddr(iterable: HIRExpr): [string[], string, string] {
+  private genForEachIterableAddr(iterable: HIRExpr): Gen {
     const lvalueKinds = ["Ident", "FieldAccess", "IndexAccess", "PtrDeref", "HeapDeref"];
     if (lvalueKinds.includes(iterable.kind)) {
       return this.genLValue(iterable);
@@ -3985,7 +3995,7 @@ export class Codegen {
     }
   }
 
-  private genBuiltinCall(expr: HIRExpr & { kind: "Call" }, lines: string[]): [string[], string, string] {
+  private genBuiltinCall(expr: HIRExpr & { kind: "Call" }, lines: string[]): Gen {
     if (expr.func === "print" || expr.func === "format") {
       this.needsFree = true;
       const isFormat = expr.func === "format";
@@ -4334,7 +4344,7 @@ export class Codegen {
     expr: HIRExpr & { kind: "Call" },
     spec: { kind: "load" | "store" | "rmw" | "cas"; rmwOp?: string; ty: string; align: number; isBool?: boolean },
     lines: string[],
-  ): [string[], string, string] {
+  ): Gen {
     const { ty, align, isBool } = spec;
     const [pl, pv] = this.genExpr(expr.args[0].expr);
     lines.push(...pl);
@@ -4347,7 +4357,7 @@ export class Codegen {
       lines.push(`  ${ext} = zext i1 ${v} to i8`);
       return ext;
     };
-    const narrow = (v: string): [string[], string, string] => {
+    const narrow = (v: string): Gen => {
       if (!isBool) return [lines, v, ty];
       const b = this.nextTemp();
       lines.push(`  ${b} = trunc i8 ${v} to i1`);
@@ -4385,7 +4395,7 @@ export class Codegen {
   // sretDest: only honored when `expr` itself is a direct call to an
   // sret-lowered fn (set by genStoreInto); the callee then writes straight
   // into that pointer and no aggregate SSA value is materialized.
-  public genExpr(expr: HIRExpr, sretDest?: string): [string[], string, string] {
+  public genExpr(expr: HIRExpr, sretDest?: string): Gen {
     const lines: string[] = [];
     const lt = this.llvmType(expr.type);
 
@@ -4731,7 +4741,7 @@ export class Codegen {
     throw new Error(`genExpr: unhandled HIR kind '${(_exhaustive as { kind: string }).kind}'`);
   }
 
-  private genStringWithCapacity(expr: HIRExpr & { kind: "StringWithCapacity" }, lines: string[]): [string[], string, string] {
+  private genStringWithCapacity(expr: HIRExpr & { kind: "StringWithCapacity" }, lines: string[]): Gen {
     this.hasStringType = true;
     this.needsMalloc = true;
     const [capLines, capVal] = this.genExpr(expr.capacity);
@@ -4748,7 +4758,7 @@ export class Codegen {
     return [lines, s2, "%String"];
   }
 
-  private genIdent(expr: HIRExpr & { kind: "Ident" }, lines: string[]): [string[], string, string] {
+  private genIdent(expr: HIRExpr & { kind: "Ident" }, lines: string[]): Gen {
     const local = this.locals.get(expr.name);
     if (!local) {
       // named function used as value — generate trampoline with closure calling convention
@@ -4826,7 +4836,7 @@ export class Codegen {
     return [lines, tmp, local.type];
   }
 
-  private genBinOp(expr: HIRExpr & { kind: "BinOp" }, lines: string[]): [string[], string, string] {
+  private genBinOp(expr: HIRExpr & { kind: "BinOp" }, lines: string[]): Gen {
     if (expr.op === "&&" || expr.op === "||") {
       return this.genShortCircuit(expr, lines);
     }
@@ -4928,7 +4938,7 @@ export class Codegen {
     console.error(`error[codegen]: unknown binary op '${expr.op}'`); process.exit(1);
   }
 
-  private genUnaryOp(expr: HIRExpr & { kind: "UnaryOp" }, lines: string[]): [string[], string, string] {
+  private genUnaryOp(expr: HIRExpr & { kind: "UnaryOp" }, lines: string[]): Gen {
     if (expr.op === "&") {
       const [al, addr] = this.genLValue(expr.operand);
       lines.push(...al);
@@ -4959,7 +4969,7 @@ export class Codegen {
     console.error(`error[codegen]: unknown unary op '${expr.op}'`); process.exit(1);
   }
 
-  private genCall(expr: HIRExpr & { kind: "Call" }, lines: string[], sretDest?: string): [string[], string, string] {
+  private genCall(expr: HIRExpr & { kind: "Call" }, lines: string[], sretDest?: string): Gen {
     if (Codegen.BUILTINS.has(expr.func) && !this.userDeclaredFns.has(expr.func)) {
       return this.genBuiltinCall(expr, lines);
     }
@@ -5060,7 +5070,7 @@ export class Codegen {
     return [lines, tmp, retTy];
   }
 
-  private genStructLit(expr: HIRExpr & { kind: "StructLit" }, lines: string[]): [string[], string, string] {
+  private genStructLit(expr: HIRExpr & { kind: "StructLit" }, lines: string[]): Gen {
     const layout = must(this.structLayouts, expr.name, "struct layouts");
     const structTy = `%${expr.name}`;
     const alloca = this.nextTemp();
@@ -5077,7 +5087,7 @@ export class Codegen {
     return [lines, val, structTy];
   }
 
-  private genArrayLen(expr: HIRExpr & { kind: "ArrayLen" }, lines: string[]): [string[], string, string] {
+  private genArrayLen(expr: HIRExpr & { kind: "ArrayLen" }, lines: string[]): Gen {
     const objType = expr.object.type.tag === "ref" ? expr.object.type.inner : expr.object.type;
     if (objType.tag === "array" && objType.size !== null) {
       return [lines, String(objType.size), "i32"];
@@ -5093,7 +5103,7 @@ export class Codegen {
     return [lines, "0", "i32"];
   }
 
-  private genArrayLit(expr: HIRExpr & { kind: "ArrayLit" }, lines: string[]): [string[], string, string] {
+  private genArrayLit(expr: HIRExpr & { kind: "ArrayLit" }, lines: string[]): Gen {
     // Vec literal: `[a, b, c]` with Vec<T> type hint. Emit malloc + N stores, build %Vec struct.
     if (expr.type.tag === "vec") {
       this.hasVecType = true;
@@ -5150,7 +5160,7 @@ export class Codegen {
     return [lines, val, arrTy];
   }
 
-  private genArrayRepeat(expr: HIRExpr & { kind: "ArrayRepeat" }, lines: string[]): [string[], string, string] {
+  private genArrayRepeat(expr: HIRExpr & { kind: "ArrayRepeat" }, lines: string[]): Gen {
     const elemKind = expr.type.tag === "array" ? expr.type.element : { tag: "int" as const, bits: 32, signed: true };
     const elemTy = this.llvmType(elemKind);
     const arrTy = `[${expr.count} x ${elemTy}]`;
@@ -5184,7 +5194,7 @@ export class Codegen {
     return [lines, val, arrTy];
   }
 
-  private genIndexAccess(expr: HIRExpr & { kind: "IndexAccess" }, lines: string[]): [string[], string, string] {
+  private genIndexAccess(expr: HIRExpr & { kind: "IndexAccess" }, lines: string[]): Gen {
     const objTag = expr.object.type.tag === "ref" ? expr.object.type.inner.tag : expr.object.type.tag;
     if (objTag === "string") {
       return this.genStringIndex(expr, lines);
@@ -5240,7 +5250,7 @@ export class Codegen {
     }
   }
 
-  private genEnumLit(expr: HIRExpr & { kind: "EnumLit" }, lines: string[]): [string[], string, string] {
+  private genEnumLit(expr: HIRExpr & { kind: "EnumLit" }, lines: string[]): Gen {
     const layout = must(this.enumLayouts, expr.enumName, "enum layouts");
     const variant = must(layout.variants, expr.variant, "variants");
     const enumTy = `%${expr.enumName}`;
@@ -5272,7 +5282,7 @@ export class Codegen {
     return [lines, val, enumTy];
   }
 
-  private genMemReplace(expr: HIRExpr & { kind: "MemReplace" }, lines: string[], sretDest?: string): [string[], string, string] {
+  private genMemReplace(expr: HIRExpr & { kind: "MemReplace" }, lines: string[], sretDest?: string): Gen {
     const [pl, placePtr, placeTy] = this.genLValue(expr.place);
     lines.push(...pl);
     if (this.isBigAgg(placeTy)) {
@@ -5292,7 +5302,7 @@ export class Codegen {
     return [lines, old, placeTy];
   }
 
-  private genEnumTryFrom(expr: HIRExpr & { kind: "EnumTryFrom" }, lines: string[]): [string[], string, string] {
+  private genEnumTryFrom(expr: HIRExpr & { kind: "EnumTryFrom" }, lines: string[]): Gen {
     const [vl, nv, nTy] = this.genExpr(expr.value);
     lines.push(...vl);
     // Compare in i64 (every discriminant fits). Sign-extend a signed source, zero-extend
@@ -5343,7 +5353,7 @@ export class Codegen {
     return [lines, out, optTy];
   }
 
-  private genMemSwap(expr: HIRExpr & { kind: "MemSwap" }, lines: string[]): [string[], string, string] {
+  private genMemSwap(expr: HIRExpr & { kind: "MemSwap" }, lines: string[]): Gen {
     const [al, aPtr, aTy] = this.genLValue(expr.a);
     lines.push(...al);
     const [bl, bPtr] = this.genLValue(expr.b);
@@ -5374,7 +5384,7 @@ export class Codegen {
     return [lines, "", "void"];
   }
 
-  private genVecWithCapacity(expr: HIRExpr & { kind: "VecWithCapacity" }, lines: string[]): [string[], string, string] {
+  private genVecWithCapacity(expr: HIRExpr & { kind: "VecWithCapacity" }, lines: string[]): Gen {
     this.hasVecType = true;
     this.needsMalloc = true;
     const elemSize = this.typeSizeOf(expr.elementType);
@@ -5397,7 +5407,7 @@ export class Codegen {
     return [lines, v2, "%Vec"];
   }
 
-  private genVecFilled(expr: HIRExpr & { kind: "VecFilled" }, lines: string[]): [string[], string, string] {
+  private genVecFilled(expr: HIRExpr & { kind: "VecFilled" }, lines: string[]): Gen {
     this.hasVecType = true;
     this.needsMalloc = true;
     const elemSize = this.typeSizeOf(expr.elementType);
@@ -5443,7 +5453,7 @@ export class Codegen {
     return [lines, v2, "%Vec"];
   }
 
-  private genClosure(expr: HIRExpr & { kind: "Closure" }, lines: string[]): [string[], string, string] {
+  private genClosure(expr: HIRExpr & { kind: "Closure" }, lines: string[]): Gen {
     const lt = this.llvmType(expr.type);
     const closureName = `__closure_${this.closureCounter++}`;
     const captures = expr.captures;
@@ -5628,7 +5638,7 @@ export class Codegen {
     }
   }
 
-  private genCFnCall(expr: HIRExpr & { kind: "CFnCall" }, lines: string[]): [string[], string, string] {
+  private genCFnCall(expr: HIRExpr & { kind: "CFnCall" }, lines: string[]): Gen {
     // a bare C function pointer: call it directly, with no env prepended
     const [calLines, calVal] = this.genExpr(expr.callee);
     lines.push(...calLines);
@@ -5658,7 +5668,7 @@ export class Codegen {
     return [lines, cResult, cRetTy];
   }
 
-  private genClosureCall(expr: HIRExpr & { kind: "ClosureCall" }, lines: string[]): [string[], string, string] {
+  private genClosureCall(expr: HIRExpr & { kind: "ClosureCall" }, lines: string[]): Gen {
     // load the { fn_ptr, env_ptr } pair from the callee
     const [calLines, calVal] = this.genExpr(expr.callee);
     lines.push(...calLines);
@@ -5698,7 +5708,7 @@ export class Codegen {
     return [lines, result, retTy];
   }
 
-  private genInterfaceCoerce(expr: HIRExpr & { kind: "InterfaceCoerce" }, lines: string[]): [string[], string, string] {
+  private genInterfaceCoerce(expr: HIRExpr & { kind: "InterfaceCoerce" }, lines: string[]): Gen {
     // build fat pointer { ptr data, ptr itable }
     const isHeapCoerce = expr.type.tag === "heap";
     let dataPtr: string;
@@ -5723,7 +5733,7 @@ export class Codegen {
     return [lines, s1, "{ ptr, ptr }"];
   }
 
-  private genIfExpr(expr: HIRExpr & { kind: "IfExpr" }, lines: string[]): [string[], string, string] {
+  private genIfExpr(expr: HIRExpr & { kind: "IfExpr" }, lines: string[]): Gen {
     const resultTy = this.llvmType(expr.type);
     const resultAddr = `%__ifexpr.${this.scopeCounter++}.addr`;
     this.entryAllocas.push(`  ${resultAddr} = alloca ${resultTy}`);
@@ -5788,7 +5798,7 @@ export class Codegen {
     return [lines, result, resultTy];
   }
 
-  private genMatchExpr(expr: HIRExpr & { kind: "MatchExpr" }, lines: string[]): [string[], string, string] {
+  private genMatchExpr(expr: HIRExpr & { kind: "MatchExpr" }, lines: string[]): Gen {
     const resultTy = this.llvmType(expr.type);
     const resultAddr = `%__matchexpr.${this.scopeCounter++}.addr`;
     this.entryAllocas.push(`  ${resultAddr} = alloca ${resultTy}`);
@@ -5813,7 +5823,7 @@ export class Codegen {
     return [lines, result, resultTy];
   }
 
-  private genInterfaceMethodCall(expr: HIRExpr & { kind: "InterfaceMethodCall" }, lines: string[]): [string[], string, string] {
+  private genInterfaceMethodCall(expr: HIRExpr & { kind: "InterfaceMethodCall" }, lines: string[]): Gen {
     // object is { ptr data, ptr itable } — either directly or loaded from alloca
     let objVal: string;
     const recv = expr.object;
@@ -5874,7 +5884,7 @@ export class Codegen {
     return [lines, result, retTy];
   }
 
-  private genUnwrap(expr: HIRExpr & { kind: "Unwrap" }, lines: string[]): [string[], string, string] {
+  private genUnwrap(expr: HIRExpr & { kind: "Unwrap" }, lines: string[]): Gen {
     this.needsPrintf = true;
     this.needsExit = true;
     const [ol, ov, ot] = this.genExpr(expr.operand);
@@ -5953,7 +5963,7 @@ export class Codegen {
     return [lines, result, resultTy];
   }
 
-  private genPropagate(expr: HIRExpr & { kind: "Propagate" }, lines: string[]): [string[], string, string] {
+  private genPropagate(expr: HIRExpr & { kind: "Propagate" }, lines: string[]): Gen {
     const [ol, ov, ot] = this.genExpr(expr.operand);
     lines.push(...ol);
 
@@ -6065,7 +6075,7 @@ export class Codegen {
     return [lines, result, resultTy];
   }
 
-  private genDefaultValue(expr: HIRExpr & { kind: "DefaultValue" }, lines: string[]): [string[], string, string] {
+  private genDefaultValue(expr: HIRExpr & { kind: "DefaultValue" }, lines: string[]): Gen {
     const [ol, ov] = this.genExpr(expr.operand);
     lines.push(...ol);
 
@@ -6128,7 +6138,7 @@ export class Codegen {
     return [lines, result, resultTy];
   }
 
-  private genShortCircuit(expr: HIRExpr & { kind: "BinOp" }, lines: string[]): [string[], string, string] {
+  private genShortCircuit(expr: HIRExpr & { kind: "BinOp" }, lines: string[]): Gen {
     const isAnd = expr.op === "&&";
     const resultAddr = this.nextTemp();
     // Hoist to entry block — alloca in loop body grows stack each iteration → overflow.
@@ -6154,7 +6164,7 @@ export class Codegen {
     return [lines, result, "i1"];
   }
 
-  private genCast(expr: HIRExpr & { kind: "Cast" }, lines: string[]): [string[], string, string] {
+  private genCast(expr: HIRExpr & { kind: "Cast" }, lines: string[]): Gen {
     const fromKind = expr.operand.type;
     const toKind = expr.targetType;
     const toTy = this.llvmType(expr.targetType);
@@ -6354,7 +6364,7 @@ export class Codegen {
     lines.push(`  store %String ${withLen}, ptr ${tgtPtr}`);
   }
 
-  private genStringConcat(lines: string[], lv: string, rv: string): [string[], string, string] {
+  private genStringConcat(lines: string[], lv: string, rv: string): Gen {
     this.hasStringType = true;
     this.needsMalloc = true;
     this.needsMemcpy = true;
@@ -6390,7 +6400,7 @@ export class Codegen {
     return [lines, s2, "%String"];
   }
 
-  public genStringCmp(lines: string[], lv: string, rv: string, isEq: boolean): [string[], string, string] {
+  public genStringCmp(lines: string[], lv: string, rv: string, isEq: boolean): Gen {
     this.needsMemcmp = true;
     const aLen = this.nextTemp();
     lines.push(`  ${aLen} = extractvalue %String ${lv}, 1`);
@@ -6426,7 +6436,7 @@ export class Codegen {
   }
 
   // lexicographic string ordering via memcmp on common prefix, then length tiebreak
-  public genStringOrd(lines: string[], lv: string, rv: string, op: string): [string[], string, string] {
+  public genStringOrd(lines: string[], lv: string, rv: string, op: string): Gen {
     this.needsMemcmp = true;
     const aLen = this.nextTemp();
     lines.push(`  ${aLen} = extractvalue %String ${lv}, 1`);
@@ -6471,7 +6481,7 @@ export class Codegen {
     return [lines, result, "i1"];
   }
 
-  private genStringIndex(expr: HIRExpr & { kind: "IndexAccess" }, lines: string[]): [string[], string, string] {
+  private genStringIndex(expr: HIRExpr & { kind: "IndexAccess" }, lines: string[]): Gen {
     this.hasStringType = true;
     this.needsBoundsCheck = true;
     const [ol, ov] = this.genExpr(expr.object);
@@ -6505,7 +6515,7 @@ export class Codegen {
     return [lines, byte, "i8"];
   }
 
-  private genFieldPtr(expr: HIRExpr & { kind: "FieldAccess" }): [string[], string, string] {
+  private genFieldPtr(expr: HIRExpr & { kind: "FieldAccess" }): Gen {
     const lines: string[] = [];
     // pointer-to-struct: load the ptr value, GEP into the pointed-to struct
     if (expr.object.type.tag === "ptr" && expr.object.type.inner.tag === "struct") {
@@ -6586,7 +6596,7 @@ export class Codegen {
     return [lines, tmp];
   }
 
-  private genVecPush(expr: HIRExpr & { kind: "VecPush" }, lines: string[]): [string[], string, string] {
+  private genVecPush(expr: HIRExpr & { kind: "VecPush" }, lines: string[]): Gen {
     this.hasVecType = true;
     this.needsMalloc = true;
     this.needsFree = true;
@@ -6687,7 +6697,7 @@ export class Codegen {
   // pop(): Option<T> — Some(last) when non-empty, None when empty. The popped
   // slot's ownership transfers into the Some payload (len-- makes the slot dead),
   // so the value moves out with no clone. No panic path: `!` handles that.
-  private genVecPop(expr: HIRExpr & { kind: "VecPop" }, lines: string[]): [string[], string, string] {
+  private genVecPop(expr: HIRExpr & { kind: "VecPop" }, lines: string[]): Gen {
     this.hasVecType = true;
 
     const vecType = expr.vec.type;
@@ -6771,7 +6781,7 @@ export class Codegen {
     return { fnPtr, envPtr, data, len, elemTy: this.llvmType(elemType) };
   }
 
-  private genVecMap(expr: HIRExpr & { kind: "VecMap" }, lines: string[]): [string[], string, string] {
+  private genVecMap(expr: HIRExpr & { kind: "VecMap" }, lines: string[]): Gen {
     const { fnPtr, envPtr, data, len, elemTy } = this.genVecMethodPreamble(expr.vec, expr.callback, expr.elementType, lines);
     const resultElemTy = this.llvmType(expr.resultElementType);
     const resultElemSize = this.typeSizeOf(expr.resultElementType);
@@ -6836,7 +6846,7 @@ export class Codegen {
     return [lines, v2, "%Vec"];
   }
 
-  private genVecFilter(expr: HIRExpr & { kind: "VecFilter" }, lines: string[]): [string[], string, string] {
+  private genVecFilter(expr: HIRExpr & { kind: "VecFilter" }, lines: string[]): Gen {
     const { fnPtr, envPtr, data, len, elemTy } = this.genVecMethodPreamble(expr.vec, expr.callback, expr.elementType, lines);
     const elemSize = this.typeSizeOf(expr.elementType);
     this.needsMalloc = true;
@@ -6905,7 +6915,7 @@ export class Codegen {
     return [lines, v2, "%Vec"];
   }
 
-  private genVecEach(expr: HIRExpr & { kind: "VecEach" }, lines: string[]): [string[], string, string] {
+  private genVecEach(expr: HIRExpr & { kind: "VecEach" }, lines: string[]): Gen {
     const { fnPtr, envPtr, data, len, elemTy } = this.genVecMethodPreamble(expr.vec, expr.callback, expr.elementType, lines);
 
     const idxAddr = `%__each_idx.${this.scopeCounter++}.addr`;
@@ -6935,7 +6945,7 @@ export class Codegen {
     return [lines, "void", "void"];
   }
 
-  private genVecFind(expr: HIRExpr & { kind: "VecFind" }, lines: string[]): [string[], string, string] {
+  private genVecFind(expr: HIRExpr & { kind: "VecFind" }, lines: string[]): Gen {
     const { fnPtr, envPtr, data, len, elemTy } = this.genVecMethodPreamble(expr.vec, expr.callback, expr.elementType, lines);
     const enumTy = `%${expr.optionEnumName}`;
     const enumLayout = this.enumLayouts.get(expr.optionEnumName);
@@ -6997,7 +7007,7 @@ export class Codegen {
     return [lines, result, enumTy];
   }
 
-  private genVecAny(expr: HIRExpr & { kind: "VecAny" }, lines: string[]): [string[], string, string] {
+  private genVecAny(expr: HIRExpr & { kind: "VecAny" }, lines: string[]): Gen {
     const { fnPtr, envPtr, data, len, elemTy } = this.genVecMethodPreamble(expr.vec, expr.callback, expr.elementType, lines);
 
     const resultAddr = `%__any_result.${this.scopeCounter++}.addr`;
@@ -7043,7 +7053,7 @@ export class Codegen {
 
   // v.sum() — accumulate all elements. Integer addition follows the enclosing function's
   // normal checked/wrapping policy; floats use fadd. Empty vec sums to 0.
-  private genVecSum(expr: HIRExpr & { kind: "VecSum" }, lines: string[]): [string[], string, string] {
+  private genVecSum(expr: HIRExpr & { kind: "VecSum" }, lines: string[]): Gen {
     this.hasVecType = true;
     const [vl, vv] = this.genExpr(expr.vec);
     lines.push(...vl);
@@ -7095,7 +7105,7 @@ export class Codegen {
     return [lines, result, elemTy];
   }
 
-  private genVecAll(expr: HIRExpr & { kind: "VecAll" }, lines: string[]): [string[], string, string] {
+  private genVecAll(expr: HIRExpr & { kind: "VecAll" }, lines: string[]): Gen {
     const { fnPtr, envPtr, data, len, elemTy } = this.genVecMethodPreamble(expr.vec, expr.callback, expr.elementType, lines);
 
     const resultAddr = `%__all_result.${this.scopeCounter++}.addr`;
@@ -7142,7 +7152,7 @@ export class Codegen {
   // acc = cb(acc, &elem) over every element. The accumulator lives in an alloca so
   // the loop body can write it without a phi, matching how the other Vec callbacks
   // carry state across iterations.
-  private genVecFold(expr: HIRExpr & { kind: "VecFold" }, lines: string[]): [string[], string, string] {
+  private genVecFold(expr: HIRExpr & { kind: "VecFold" }, lines: string[]): Gen {
     const [initLines, initVal, accTy] = this.genExpr(expr.init);
     lines.push(...initLines);
     const { fnPtr, envPtr, data, len, elemTy } = this.genVecMethodPreamble(expr.vec, expr.callback, expr.elementType, lines);
@@ -7186,7 +7196,7 @@ export class Codegen {
     return [lines, result, accTy];
   }
 
-  private genVecReverse(expr: HIRExpr & { kind: "VecReverse" }, lines: string[]): [string[], string, string] {
+  private genVecReverse(expr: HIRExpr & { kind: "VecReverse" }, lines: string[]): Gen {
     this.hasVecType = true;
     this.needsMemcpy = true;
     const elemType = expr.elementType;
@@ -7255,7 +7265,7 @@ export class Codegen {
   // shortening the length without running their drop glue would leak every string,
   // nested Vec or Drop-implementing struct above the cut. The counter lives in an
   // alloca rather than a phi because emitDropValue splits the block.
-  private genVecTruncate(expr: HIRExpr & { kind: "VecTruncate" }, lines: string[]): [string[], string, string] {
+  private genVecTruncate(expr: HIRExpr & { kind: "VecTruncate" }, lines: string[]): Gen {
     this.hasVecType = true;
     const elemType = expr.elementType;
     const elemTy = this.llvmType(elemType);
@@ -7324,7 +7334,7 @@ export class Codegen {
     return [lines, "void", "void"];
   }
 
-  private genVecSwap(expr: HIRExpr & { kind: "VecSwap" }, lines: string[]): [string[], string, string] {
+  private genVecSwap(expr: HIRExpr & { kind: "VecSwap" }, lines: string[]): Gen {
     this.hasVecType = true;
     this.needsMemcpy = true;
     const elemType = expr.elementType;
@@ -7358,7 +7368,7 @@ export class Codegen {
     return [lines, "void", "void"];
   }
 
-  private genVecInsert(expr: HIRExpr & { kind: "VecInsert" }, lines: string[]): [string[], string, string] {
+  private genVecInsert(expr: HIRExpr & { kind: "VecInsert" }, lines: string[]): Gen {
     this.hasVecType = true;
     this.needsMalloc = true;
     this.needsFree = true;
@@ -7465,7 +7475,7 @@ export class Codegen {
     return [lines, "void", "void"];
   }
 
-  private genVecRemove(expr: HIRExpr & { kind: "VecRemove" }, lines: string[]): [string[], string, string] {
+  private genVecRemove(expr: HIRExpr & { kind: "VecRemove" }, lines: string[]): Gen {
     this.hasVecType = true;
     this.needsDprintf = true;
     this.needsExit = true;
@@ -7526,7 +7536,7 @@ export class Codegen {
     return [lines, val, elemTy];
   }
 
-  private genVecContains(expr: HIRExpr & { kind: "VecContains" }, lines: string[]): [string[], string, string] {
+  private genVecContains(expr: HIRExpr & { kind: "VecContains" }, lines: string[]): Gen {
     this.hasVecType = true;
     const elemType = expr.elementType;
     const elemTy = this.llvmType(elemType);
@@ -7623,7 +7633,7 @@ export class Codegen {
 
   // v.get(i) / v.first() / v.last(): the total read. A negative index becomes a huge
   // unsigned value, so the single `ult` test rejects both ends without a second compare.
-  private genVecGetOpt(expr: HIRExpr & { kind: "VecGetOpt" }, lines: string[]): [string[], string, string] {
+  private genVecGetOpt(expr: HIRExpr & { kind: "VecGetOpt" }, lines: string[]): Gen {
     this.hasVecType = true;
     const elemTy = this.llvmType(expr.elementType);
     const [vl, vv] = this.genExpr(expr.object);
@@ -7675,7 +7685,7 @@ export class Codegen {
     return out;
   }
 
-  private genVecMinMax(expr: HIRExpr & { kind: "VecMinMax" }, lines: string[]): [string[], string, string] {
+  private genVecMinMax(expr: HIRExpr & { kind: "VecMinMax" }, lines: string[]): Gen {
     this.hasVecType = true;
     const elemTy = this.llvmType(expr.elementType);
     const [vl, vv] = this.genExpr(expr.object);
@@ -7758,7 +7768,7 @@ export class Codegen {
     return [lines, result, slot.enumTy];
   }
 
-  private genVecIndexOf(expr: HIRExpr & { kind: "VecIndexOf" }, lines: string[]): [string[], string, string] {
+  private genVecIndexOf(expr: HIRExpr & { kind: "VecIndexOf" }, lines: string[]): Gen {
     this.hasVecType = true;
     const elemTy = this.llvmType(expr.elementType);
     const [vl, vv] = this.genExpr(expr.vec);
@@ -7826,7 +7836,7 @@ export class Codegen {
     return [lines, result, slot.enumTy];
   }
 
-  private genVecPosition(expr: HIRExpr & { kind: "VecPosition" }, lines: string[]): [string[], string, string] {
+  private genVecPosition(expr: HIRExpr & { kind: "VecPosition" }, lines: string[]): Gen {
     const { fnPtr, envPtr, data, len, elemTy } = this.genVecMethodPreamble(expr.vec, expr.callback, expr.elementType, lines);
     const slot = this.optionResultSlot(expr.optionEnumName, "vecpos", lines);
     const iAddr = this.nextTemp();
@@ -7925,7 +7935,7 @@ export class Codegen {
   // v.extend(other): the elements move across bitwise, so nothing is cloned and
   // nothing is dropped. Only `other`'s spine is freed — its elements now live in
   // the destination, and the checker has marked `other` moved so it never drops.
-  private genVecExtend(expr: HIRExpr & { kind: "VecExtend" }, lines: string[]): [string[], string, string] {
+  private genVecExtend(expr: HIRExpr & { kind: "VecExtend" }, lines: string[]): Gen {
     this.hasVecType = true;
     this.needsFree = true;
     this.needsMemcpy = true;
@@ -7978,7 +7988,7 @@ export class Codegen {
 
   // v.retain(pred): one pass, compacting keepers toward the front and dropping the
   // rest where they sit. No second buffer — that is the whole point next to filter.
-  private genVecRetain(expr: HIRExpr & { kind: "VecRetain" }, lines: string[]): [string[], string, string] {
+  private genVecRetain(expr: HIRExpr & { kind: "VecRetain" }, lines: string[]): Gen {
     this.hasVecType = true;
     const elemTy = this.llvmType(expr.elementType);
     const [vecLines, vecPtr] = this.genLValue(expr.object);
@@ -8056,7 +8066,7 @@ export class Codegen {
     return [lines, "0", "void"];
   }
 
-  private genVecReserve(expr: HIRExpr & { kind: "VecReserve" }, lines: string[]): [string[], string, string] {
+  private genVecReserve(expr: HIRExpr & { kind: "VecReserve" }, lines: string[]): Gen {
     this.hasVecType = true;
     const elemSize = this.typeSizeOf(expr.elementType);
     const [vecLines, vecPtr] = this.genLValue(expr.object);
@@ -8076,7 +8086,7 @@ export class Codegen {
     return [lines, "0", "void"];
   }
 
-  private genVecEnumerate(expr: HIRExpr & { kind: "VecEnumerate" }, lines: string[]): [string[], string, string] {
+  private genVecEnumerate(expr: HIRExpr & { kind: "VecEnumerate" }, lines: string[]): Gen {
     const { fnPtr, envPtr, data, len, elemTy } = this.genVecMethodPreamble(expr.vec, expr.callback, expr.elementType, lines);
 
     const idxAddr = `%__enum_idx.${this.scopeCounter++}.addr`;
@@ -8107,7 +8117,7 @@ export class Codegen {
   }
 
   // String.push(u8) — same grow logic as Vec but element size is 1
-  private genStringPush(expr: HIRExpr & { kind: "StringPush" }, lines: string[]): [string[], string, string] {
+  private genStringPush(expr: HIRExpr & { kind: "StringPush" }, lines: string[]): Gen {
     this.hasStringType = true;
     this.needsMalloc = true;
     this.needsFree = true;
@@ -8201,7 +8211,7 @@ export class Codegen {
   // Append a whole string in place. `s = s + t` reallocates and copies the
   // accumulator on every concat (quadratic when building in a loop); this grows
   // amortized like Vec.push and copies only the addition.
-  private genStringPushStr(expr: HIRExpr & { kind: "StringPushStr" }, lines: string[]): [string[], string, string] {
+  private genStringPushStr(expr: HIRExpr & { kind: "StringPushStr" }, lines: string[]): Gen {
     this.hasStringType = true;
     this.needsMalloc = true;
     this.needsFree = true;
@@ -8358,7 +8368,7 @@ export class Codegen {
   }
 
   // String.substr(start, end) — allocate new owned string from s[start..end]
-  private genStringSubstr(expr: HIRExpr & { kind: "StringSubstr" }, lines: string[]): [string[], string, string] {
+  private genStringSubstr(expr: HIRExpr & { kind: "StringSubstr" }, lines: string[]): Gen {
     this.hasStringType = true;
     this.needsMalloc = true;
     this.needsMemcpy = true;
@@ -8399,7 +8409,7 @@ export class Codegen {
   }
 
   // String.slice(start, end) — zero-copy view. Non-owning %String with cap=0.
-  private genStringSlice(expr: HIRExpr & { kind: "StringSlice" }, lines: string[]): [string[], string, string] {
+  private genStringSlice(expr: HIRExpr & { kind: "StringSlice" }, lines: string[]): Gen {
     this.hasStringType = true;
 
     const [strLines, strVal] = this.genExpr(expr.str);
@@ -8429,7 +8439,7 @@ export class Codegen {
 
   // v.slice(a, b) / v[a..b] — non-owning view: same %Vec rep with adjusted ptr/len
   // and cap=0, so drop glue skips free (the source still owns the buffer).
-  private genVecSlice(expr: HIRExpr & { kind: "VecSlice" }, lines: string[]): [string[], string, string] {
+  private genVecSlice(expr: HIRExpr & { kind: "VecSlice" }, lines: string[]): Gen {
     this.hasVecType = true;
     const elemTy = this.llvmType(expr.elementType);
 
@@ -8492,7 +8502,7 @@ export class Codegen {
 
   // Slice a fixed-size array into a non-owning %Vec view (cap=0) pointing at the
   // array's own storage. Bound is the static extent N parsed from its [N x T] type.
-  private genArraySlice(expr: HIRExpr & { kind: "VecSlice" }, lines: string[]): [string[], string, string] {
+  private genArraySlice(expr: HIRExpr & { kind: "VecSlice" }, lines: string[]): Gen {
     const [aLines, arrPtr, arrTy] = this.genLValue(expr.vec);
     lines.push(...aLines);
     const startVal = this.genBoundI64(expr.start, lines);
@@ -8542,7 +8552,7 @@ export class Codegen {
   }
 
   // n.toString() / x.toString() — snprintf into heap buffer, return owned %String
-  private genNumberToString(expr: HIRExpr & { kind: "NumberToString" }, lines: string[]): [string[], string, string] {
+  private genNumberToString(expr: HIRExpr & { kind: "NumberToString" }, lines: string[]): Gen {
     this.needsSnprintf = true;
     this.needsMalloc = true;
     this.hasStringType = true;
@@ -8604,7 +8614,7 @@ export class Codegen {
     return [lines, s2, "%String"];
   }
 
-  private genBoolToString(expr: HIRExpr & { kind: "BoolToString" }, lines: string[]): [string[], string, string] {
+  private genBoolToString(expr: HIRExpr & { kind: "BoolToString" }, lines: string[]): Gen {
     this.hasStringType = true;
     const [vLines, vVal] = this.genExpr(expr.value);
     lines.push(...vLines);
@@ -8624,7 +8634,7 @@ export class Codegen {
   }
 
   // s.clone() — deep copy of the underlying byte buffer; result is an owned %String
-  private genStringClone(expr: HIRExpr & { kind: "StringClone" }, lines: string[]): [string[], string, string] {
+  private genStringClone(expr: HIRExpr & { kind: "StringClone" }, lines: string[]): Gen {
     this.hasStringType = true;
     this.needsMalloc = true;
     this.needsMemcpy = true;
@@ -8665,7 +8675,7 @@ export class Codegen {
     return [lines, s2, "%String"];
   }
 
-  private genStringFind(expr: HIRExpr & { kind: "StringFind" }, lines: string[]): [string[], string, string] {
+  private genStringFind(expr: HIRExpr & { kind: "StringFind" }, lines: string[]): Gen {
     const enumTy = `%${expr.optionEnumName}`;
     const layout = this.enumLayouts.get(expr.optionEnumName);
     const noneVariant = layout?.variants.get("None");
@@ -8755,7 +8765,7 @@ export class Codegen {
     return slot;
   }
 
-  private genVecBoundsCheckedPtr(expr: HIRExpr & { kind: "IndexAccess" }, lines: string[]): [string[], string, string] {
+  private genVecBoundsCheckedPtr(expr: HIRExpr & { kind: "IndexAccess" }, lines: string[]): Gen {
     this.hasVecType = true;
 
     // A slice (`&[T]` / unsized `[T]`, tag "array" with size null) shares the Vec's
@@ -8995,7 +9005,7 @@ export class Codegen {
     throw new Error(`uncomparable key type: ${keyType.tag}`);
   }
 
-  private genHashMapNew(expr: HIRExpr & { kind: "HashMapNew" }, lines: string[]): [string[], string, string] {
+  private genHashMapNew(expr: HIRExpr & { kind: "HashMapNew" }, lines: string[]): Gen {
     this.hasHashMapType = true;
     this.needsMalloc = true;
     const entryTy = this.hashMapEntryType(expr.keyType, expr.valueType);
@@ -9024,7 +9034,7 @@ export class Codegen {
     return [lines, s3, "%HashMap"];
   }
 
-  private genHashMapInsert(expr: HIRExpr & { kind: "HashMapInsert" }, lines: string[]): [string[], string, string] {
+  private genHashMapInsert(expr: HIRExpr & { kind: "HashMapInsert" }, lines: string[]): Gen {
     this.hasHashMapType = true;
     this.needsMalloc = true;
     this.needsFree = true;
@@ -9304,7 +9314,7 @@ export class Codegen {
     return [lines, "0", "void"];
   }
 
-  private genHashMapContains(expr: HIRExpr & { kind: "HashMapContains" }, lines: string[]): [string[], string, string] {
+  private genHashMapContains(expr: HIRExpr & { kind: "HashMapContains" }, lines: string[]): Gen {
     this.hasHashMapType = true;
     const mapType = expr.map.type;
     if (mapType.tag !== "hashmap") throw new Error("HashMapContains on non-hashmap");
@@ -9392,7 +9402,7 @@ export class Codegen {
     return [lines, result, "i1"];
   }
 
-  private genHashMapRemove(expr: HIRExpr & { kind: "HashMapRemove" }, lines: string[]): [string[], string, string] {
+  private genHashMapRemove(expr: HIRExpr & { kind: "HashMapRemove" }, lines: string[]): Gen {
     this.hasHashMapType = true;
     const mapType = expr.map.type;
     if (mapType.tag !== "hashmap") throw new Error("HashMapRemove on non-hashmap");
@@ -9500,7 +9510,7 @@ export class Codegen {
   // HashMap.withCapacity(n): pre-size the table so inserting n entries never rehashes.
   // Insert grows when (len+1)*4 >= cap*3, so the table must hold cap > 4(n+1)/3; the
   // loop rounds that up to a power of two (the mask-based probe requires one).
-  private genHashMapWithCapacity(expr: HIRExpr & { kind: "HashMapWithCapacity" }, lines: string[]): [string[], string, string] {
+  private genHashMapWithCapacity(expr: HIRExpr & { kind: "HashMapWithCapacity" }, lines: string[]): Gen {
     this.hasHashMapType = true;
     this.needsMalloc = true;
     this.needsMemset = true;
@@ -9561,7 +9571,7 @@ export class Codegen {
     return [lines, s3, "%HashMap"];
   }
 
-  private genHashMapClone(expr: HIRExpr & { kind: "HashMapClone" }, lines: string[]): [string[], string, string] {
+  private genHashMapClone(expr: HIRExpr & { kind: "HashMapClone" }, lines: string[]): Gen {
     this.hasHashMapType = true;
     const [ol, ov] = this.genExpr(expr.object);
     lines.push(...ol);
@@ -9577,7 +9587,7 @@ export class Codegen {
   // Drop every live key/value, then zero the states. Capacity and the hash seed
   // survive — clear() is "empty this map", not "give the memory back", so a
   // rebuild after clear() reuses the table it already paid for (Vec.clear too).
-  private genHashMapClear(expr: HIRExpr & { kind: "HashMapClear" }, lines: string[]): [string[], string, string] {
+  private genHashMapClear(expr: HIRExpr & { kind: "HashMapClear" }, lines: string[]): Gen {
     this.hasHashMapType = true;
     this.needsMemset = true;
     const mapType = expr.object.type;
@@ -9662,7 +9672,7 @@ export class Codegen {
 
   // keys()/values() → a fresh Vec holding a deep clone of each occupied slot's
   // key (or value). The map keeps its own copy, so the two never share a buffer.
-  private genHashMapEntries(expr: HIRExpr & { kind: "HashMapEntries" }, lines: string[]): [string[], string, string] {
+  private genHashMapEntries(expr: HIRExpr & { kind: "HashMapEntries" }, lines: string[]): Gen {
     this.hasVecType = true;
     this.hasHashMapType = true;
     this.needsMalloc = true;
@@ -9741,7 +9751,7 @@ export class Codegen {
     return [lines, v2, "%Vec"];
   }
 
-  private genHashMapGet(expr: HIRExpr & { kind: "HashMapGet" }, lines: string[]): [string[], string, string] {
+  private genHashMapGet(expr: HIRExpr & { kind: "HashMapGet" }, lines: string[]): Gen {
     this.hasHashMapType = true;
     const mapType = expr.map.type;
     if (mapType.tag !== "hashmap") throw new Error("HashMapGet on non-hashmap");
@@ -9877,7 +9887,7 @@ export class Codegen {
     return [lines, result, optionTy];
   }
 
-  private genHashMapGetOrDefault(expr: HIRExpr & { kind: "HashMapGetOrDefault" }, lines: string[]): [string[], string, string] {
+  private genHashMapGetOrDefault(expr: HIRExpr & { kind: "HashMapGetOrDefault" }, lines: string[]): Gen {
     this.hasHashMapType = true;
     const mapType = expr.map.type;
     if (mapType.tag !== "hashmap") throw new Error("HashMapGetOrDefault on non-hashmap");
@@ -10522,7 +10532,7 @@ export class Codegen {
     return buf;
   }
 
-  private genJsonStringify(expr: HIRExpr & { kind: "JsonStringify" }, lines: string[]): [string[], string, string] {
+  private genJsonStringify(expr: HIRExpr & { kind: "JsonStringify" }, lines: string[]): Gen {
     this.needsSnprintf = true;
     this.needsMalloc = true;
     this.hasStringType = true;
@@ -11615,7 +11625,7 @@ export class Codegen {
   }
 
   // x.wrappingAdd(y) — plain LLVM add/sub/mul (wraps by definition)
-  private genWrappingArith(expr: HIRExpr & { kind: "WrappingArith" }, lines: string[]): [string[], string, string] {
+  private genWrappingArith(expr: HIRExpr & { kind: "WrappingArith" }, lines: string[]): Gen {
     const [ll, lv, lt] = this.genExpr(expr.left);
     const [rl, rv] = this.genExpr(expr.right);
     lines.push(...ll, ...rl);
@@ -11625,7 +11635,7 @@ export class Codegen {
   }
 
   // x.saturatingAdd(y) — clamps to min/max instead of wrapping
-  private genSaturatingArith(expr: HIRExpr & { kind: "SaturatingArith" }, lines: string[]): [string[], string, string] {
+  private genSaturatingArith(expr: HIRExpr & { kind: "SaturatingArith" }, lines: string[]): Gen {
     const [ll, lv, lt] = this.genExpr(expr.left);
     const [rl, rv] = this.genExpr(expr.right);
     lines.push(...ll, ...rl);
@@ -11646,7 +11656,7 @@ export class Codegen {
   }
 
   // manual saturating multiply using overflow intrinsic
-  private emitSaturatingMul(lines: string[], lv: string, rv: string, lt: string, signed: boolean, ty: TypeKind): [string[], string, string] {
+  private emitSaturatingMul(lines: string[], lv: string, rv: string, lt: string, signed: boolean, ty: TypeKind): Gen {
     const prefix = signed ? "s" : "u";
     const intrinsic = `@llvm.${prefix}mul.with.overflow.${lt}`;
     this.usedOverflowIntrinsics.add(`declare {${lt}, i1} ${intrinsic}(${lt}, ${lt})`);
@@ -11674,7 +11684,7 @@ export class Codegen {
   }
 
   // x.checkedAdd(y) — returns Option<T>, None on overflow
-  private genCheckedArith(expr: HIRExpr & { kind: "CheckedArith" }, lines: string[]): [string[], string, string] {
+  private genCheckedArith(expr: HIRExpr & { kind: "CheckedArith" }, lines: string[]): Gen {
     // div/rem have no *.with.overflow intrinsic — the failure modes are divisor==0
     // and (signed) INT_MIN/-1, and the division itself traps on those, so it must be
     // guarded and executed only on the safe path. Handled separately.
@@ -11748,7 +11758,7 @@ export class Codegen {
   // x.checkedDiv(y) / x.checkedRem(y) — Option<T>, None on divide-by-zero or
   // (signed) INT_MIN/-1. The divide is emitted only on the safe branch because
   // LLVM sdiv/udiv trap on a zero divisor.
-  private genCheckedDivRem(expr: HIRExpr & { kind: "CheckedArith" }, lines: string[]): [string[], string, string] {
+  private genCheckedDivRem(expr: HIRExpr & { kind: "CheckedArith" }, lines: string[]): Gen {
     const [ll, lv, lt] = this.genExpr(expr.left);
     const [rl, rv] = this.genExpr(expr.right);
     lines.push(...ll, ...rl);
@@ -11827,7 +11837,7 @@ export class Codegen {
   // Integer bit intrinsics. countOnes/leadingZeros/trailingZeros (ctpop/ctlz/cttz)
   // return an i64 count; rotateLeft/Right (fshl/fshr funnel shift) and reverseBits
   // (bitreverse) return the same width as the receiver.
-  private genBitIntrinsic(expr: HIRExpr & { kind: "BitIntrinsic" }, lines: string[]): [string[], string, string] {
+  private genBitIntrinsic(expr: HIRExpr & { kind: "BitIntrinsic" }, lines: string[]): Gen {
     const [vl, vv, vt] = this.genExpr(expr.value);
     lines.push(...vl);
     const name = `@llvm.${expr.intrinsic}.${vt}`;
@@ -11867,7 +11877,7 @@ export class Codegen {
   // opt.isSome()/isNone()/unwrapOr(d). Some is always tag 0. unwrapOr selects the
   // Some payload vs the default; the checker restricts it to Copy inner types so the
   // payload load can't alias an owned heap buffer.
-  private genOptionOp(expr: HIRExpr & { kind: "OptionOp" }, lines: string[]): [string[], string, string] {
+  private genOptionOp(expr: HIRExpr & { kind: "OptionOp" }, lines: string[]): Gen {
     const [vl, vv] = this.genExpr(expr.value);
     lines.push(...vl);
     const enumTy = `%${expr.enumName}`;

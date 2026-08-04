@@ -1191,6 +1191,7 @@ let doubled = nums.map((n: &i32) => n * 2)       // [2, 4, 6, 8, 10]
 let evens = nums.filter((n: &i32) => n % 2 == 0)  // [2, 4]
 let hasNeg = nums.any((n: &i32) => n < 0)          // false
 let allPos = nums.all((n: &i32) => n > 0)          // true
+let total = nums.fold(0, (acc: i32, n: &i32) => acc + n)  // 15
 nums.each((n: &i32) => print(n))             // side effects
 nums.enumerate((i: i64, n: &i32) => {              // index + element
     print(i.toString() + ": " + n.toString())
@@ -1201,6 +1202,15 @@ print(words.join(", "))                             // "hello, world"
 words.contains("hello")                             // true
 words.isEmpty()                                     // false
 ```
+
+`fold(init, (acc, elem) => acc)` is the accumulate half of the set — the callback's
+return type must match `init`, which is what the result type comes from. `reduce` is
+accepted as a synonym. The initial value is mandatory, so an empty `Vec` returns it
+rather than failing.
+
+`print` renders a `Vec` as `[a, b, c]` and a `HashMap` as `{k: v}`, recursing into
+elements — a `Vec<Vec<i64>>` prints `[[1, 2], [3]]`, and string elements are quoted
+so they can't be confused with the separators.
 
 ### Mutating methods
 
@@ -2270,6 +2280,29 @@ let doc = Json.obj()
 
 Builder methods: `.str/.int/.float/.bool/.nil/.obj/.arr/.val` (chainable, consume and return the builder; string values are escaped). `Json.arr()` has the same set minus keys.
 
+### Reading a nested value
+
+`get(key)` returns `Option<Json>`, so walking three levels down nests three Options.
+The `*Path` accessors collapse the whole walk into one, which `??` can finish:
+
+```milo
+from "std/json" import { Json }
+
+let body = "{\"headers\":{\"Host\":\"example.com\"},\"items\":[{\"count\":3}],\"pi\":3.5,\"ok\":true}"
+let doc = Json.parse(body)!
+
+print(doc.strPath("headers.Host") ?? "(none)")   // example.com
+print(doc.i64Path("items[0].count") ?? 0)        // 3
+print(doc.f64Path("pi") ?? 0.0)                  // 3.5
+print(doc.boolPath("ok") ?? false)               // true
+let first = doc.path("items[0]")                 // Option<Json>, to keep walking
+```
+
+A path segment is a key, or `[n]` for an array index. A missing key, an out-of-range
+index, or a value of the wrong kind all yield `None` — the walk never panics, whatever
+the document turns out to contain. Keys containing `.` or `[` are not addressable this
+way; use `get`/`at` for those.
+
 ---
 
 ## Compile-Time File Embedding
@@ -2564,6 +2597,27 @@ let msg = $"Hello {name}, version {version}!"
 let x: i32 = 10
 let y: i32 = 20
 print($"{x} + {y} = {x + y}")   // 10 + 20 = 30
+```
+
+The `$` goes **before** the quote, and the braces hold the expression alone — there is
+no `$` inside them. A plain `"..."` is never interpolated, so the JavaScript spelling
+emits its own characters:
+
+```milo
+let name = "world"
+print("hello ${name}")    // prints: hello ${name}
+print($"hello {name}")    // prints: hello world
+```
+
+Because that is silent rather than a type error, the compiler warns
+([`missing-interpolation`](site/language/warnings-and-errors.md)) whenever a plain
+literal holds `${name}` or `{name}` and `name` is a real binding in scope.
+
+Write a literal brace with `\{` / `\}`:
+
+```milo
+let id = "7"
+print($"\{\"id\": \"{id}\"}")   // {"id": "7"}
 ```
 
 F-strings desugar to `format()` calls. The `format()` builtin is also available directly:

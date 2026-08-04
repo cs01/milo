@@ -5,6 +5,7 @@ import { typeFromAst, typeEq, typeName, isNumeric, isCopy, isScalar } from "./ty
 import type { Diagnostic, WarningConfig } from "./diagnostics";
 import { checkVisibility } from "./visibility";
 import { countCSigParams } from "./csig";
+import { memberHint, closest, importHint, stdExportNames, VEC_MEMBERS, HASHMAP_MEMBERS, STRING_MEMBERS } from "./suggest";
 import { basename } from "path";
 
 export interface VarInfo {
@@ -353,6 +354,102 @@ export class TypeChecker {
 
   private error(msg: string, span?: Span, hint?: string) {
     this.diagnostics.push({ severity: "error", span, message: msg, hint });
+  }
+
+  // Every method name callable on `t`, for "did you mean" only. Builtin receivers
+  // dispatch through hand-written if-chains with no symbol table, so their names
+  // come from the lists in suggest.ts; user types read their real impl blocks.
+  private methodCandidates(t: TypeKind): string[] {
+    const bare = t.tag === "ref" ? t.inner : t;
+    switch (bare.tag) {
+      case "vec": case "array": return [...VEC_MEMBERS];
+      case "hashmap": return [...HASHMAP_MEMBERS];
+      case "string": return [...STRING_MEMBERS];
+      default: break;
+    }
+    const name = (bare as any).name;
+    if (typeof name !== "string") return [];
+    const out: string[] = [];
+    const inherent = this.inherentImpls.get(name);
+    if (inherent) out.push(...inherent.methods.keys());
+    for (const impl of this.traitImpls.get(name) ?? []) out.push(...impl.methods.keys());
+    const sdef = this.structs.get(name);
+    // fn-typed fields are callable as methods, so they belong in the candidate set
+    if (sdef) for (const f of sdef.fields) if (f.type.tag === "fn") out.push(f.name);
+    return out;
+  }
+
+  // A plain `"..."` is not interpolated — only `$"..."` is. `"hi ${name}"` and
+  // `"hi {name}"` therefore compile to those characters verbatim, with no error,
+  // which is the one way to get silently wrong output in this language. Warning
+  // requires the braced name to actually resolve in scope, so a literal holding
+  // shell (`"${PATH}"`), CSS, or a format string for some other tool stays quiet.
+  private checkMissingInterpolation(expr: import("./ast").StringLit) {
+    if (expr.fromFString) return;
+    const v = expr.value;
+    if (!v.includes("{")) return;
+    for (const m of v.matchAll(/\$?\{([A-Za-z_][A-Za-z0-9_]*)\}/g)) {
+      if (!this.lookup(m[1])) continue;
+      this.warn("missing-interpolation", `'${m[0]}' in a plain string is not interpolated`, expr.span,
+        `prefix the literal with '$' to interpolate: $"...{${m[1]}}..."  (Milo drops the '$' inside the braces)`);
+      return;
+    }
+  }
+
+  // `Foo.bar()` where the whole thing failed to resolve. Three very different
+  // mistakes land here — a typo'd static method, a typo'd type name, and a type
+  // that exists in std but wasn't imported — and reporting all three as "unknown
+  // enum" left the reader with nothing to act on (and, for a struct, a word that
+  // doesn't apply to their code at all).
+  private errorUnknownStatic(typeName_: string, member: string, sp: Span | undefined) {
+    const known = this.structs.has(typeName_) || this.enums.has(typeName_) ||
+      this.genericStructs.has(typeName_) || this.genericEnums.has(typeName_);
+    if (known) {
+      const statics: string[] = [...(this.inherentImpls.get(typeName_)?.methods.keys() ?? [])];
+      for (const impl of this.traitImpls.get(typeName_) ?? []) statics.push(...impl.methods.keys());
+      const variants = [...(this.enums.get(typeName_)?.variants.keys() ?? [])];
+      // A generic type's impl block is only registered per monomorphization, so
+      // `Arena.new()` finds nothing to call while `Arena<Node>.new()` works. The
+      // empty candidate set would otherwise leave this error with no hint at all.
+      const params = this.genericStructs.get(typeName_)?.typeParams ?? this.genericEnums.get(typeName_)?.typeParams;
+      const hint = memberHint(member, [...statics, ...variants]) ??
+        (params && params.length > 0
+          ? `'${typeName_}' is generic — spell its type arguments: '${typeName_}<${params.join(", ")}>.${member}(...)'`
+          : undefined);
+      this.error(`type '${typeName_}' has no static method '${member}'`, sp, hint);
+      return;
+    }
+    const fromStd = importHint(typeName_);
+    if (fromStd) { this.error(`unknown type '${typeName_}'`, sp, fromStd); return; }
+    const names = new Set<string>([
+      ...this.structs.keys(), ...this.enums.keys(),
+      ...this.genericStructs.keys(), ...this.genericEnums.keys(),
+      ...stdExportNames(),
+    ]);
+    const near = closest(typeName_, names);
+    this.error(`unknown type '${typeName_}'`, sp,
+      near ? `did you mean '${near}'?` : `no type named '${typeName_}' is declared or imported here`);
+  }
+
+  // Nearest in-scope binding or function to a name that didn't resolve. Scopes are
+  // searched innermost-out so a shadowing local wins the suggestion.
+  private nameHint(name: string): string | undefined {
+    const seen = new Set<string>();
+    for (let i = this.scopes.length - 1; i >= 0; i--) for (const k of this.scopes[i].keys()) seen.add(k);
+    for (const k of this.functions.keys()) if (!k.includes("$")) seen.add(k);
+    const near = closest(name, seen);
+    return near ? `did you mean '${near}'?` : undefined;
+  }
+
+  // Field names readable on `t`. The builtin containers expose exactly one, which
+  // is what makes the `.length` → `.len` suggestion land.
+  private fieldCandidates(t: TypeKind): string[] {
+    const bare = t.tag === "ref" ? t.inner : t;
+    switch (bare.tag) {
+      case "vec": case "array": case "hashmap": case "string": return ["len"];
+      case "struct": return this.structs.get(bare.name)?.fields.map(f => f.name) ?? [];
+      default: return [];
+    }
   }
 
   private warn(code: string, msg: string, span?: Span, hint?: string, len?: number) {
@@ -4328,7 +4425,7 @@ export class TypeChecker {
     const sp = expr.span;
     if (expr.kind === "Ident") {
       const info = this.lookup(expr.name);
-      if (!info) { this.error(`undefined variable '${expr.name}'`, sp); return null; }
+      if (!info) { this.error(`undefined variable '${expr.name}'`, sp, this.nameHint(expr.name)); return null; }
       if (info.type.tag === "ref" && info.type.mutable) {
         this.setType(expr, info.type.inner);
         return { type: info.type.inner, mutable: true };
@@ -4355,7 +4452,7 @@ export class TypeChecker {
         const info = this.structs.get(objType.name);
         if (!info) { this.error(`unknown struct '${objType.name}'`, sp); return null; }
         const field = info.fields.find(f => f.name === expr.field);
-        if (!field) { this.error(`struct '${objType.name}' has no field '${expr.field}'`, sp); return null; }
+        if (!field) { this.error(`struct '${objType.name}' has no field '${expr.field}'`, sp, memberHint(expr.field, this.fieldCandidates(objType))); return null; }
         this.setType(expr, field.type);
         const mutable = throughPtr ? true : this.isRootMutable(expr.object);
         return { type: field.type, mutable };
@@ -4859,7 +4956,7 @@ export class TypeChecker {
         const sp = expr.span;
         for (const f of expr.fields) {
           const fieldDef = hintInfo.fields.find(d => d.name === f.name);
-          if (!fieldDef) { this.error(`struct '${expr.name}' has no field '${f.name}'`, sp); continue; }
+          if (!fieldDef) { this.error(`struct '${expr.name}' has no field '${f.name}'`, sp, memberHint(f.name, hintInfo.fields.map(d => d.name))); continue; }
           let valType = this.checkExprWithHint(f.value, fieldDef.type);
           if (fieldDef.type.tag === "int" && valType.tag === "int" && !typeEq(fieldDef.type, valType) && this.isConstIntExpr(f.value)) {
             this.retypeConstInt(f.value, fieldDef.type);
@@ -4924,6 +5021,7 @@ export class TypeChecker {
       case "CharLit":
         return this.setType(expr, { tag: "int", bits: 8, signed: false });
       case "StringLit":
+        this.checkMissingInterpolation(expr);
         return this.setType(expr, { tag: "string" });
       case "Ident": {
         const info = this.lookup(expr.name);
@@ -4934,7 +5032,8 @@ export class TypeChecker {
             const fnType: TypeKind = { tag: "fn", params: fnSig.params.map(p => p.type), ret: fnSig.ret };
             return this.setType(expr, fnType);
           }
-          this.error(`undefined variable '${expr.name}'`, sp); return this.setType(expr, { tag: "unknown" });
+          this.error(`undefined variable '${expr.name}'`, sp, this.nameHint(expr.name));
+          return this.setType(expr, { tag: "unknown" });
         }
         info.read = true;
         if (info.moved) {
@@ -5649,7 +5748,7 @@ export class TypeChecker {
           const typeMap = new Map<string, TypeKind>();
           for (const f of expr.fields) {
             const declField = genericInfo.decl.fields.find(d => d.name === f.name);
-            if (!declField) { this.error(`struct '${expr.name}' has no field '${f.name}'`, sp); continue; }
+            if (!declField) { this.error(`struct '${expr.name}' has no field '${f.name}'`, sp, memberHint(f.name, genericInfo.decl.fields.map(d => d.name))); continue; }
             const valType = this.checkExpr(f.value);
             // Infer type params from the field's declared (unsubstituted) type against the
             // argument's concrete type — recursively, so `Vec<T>`/`[T]`/nested generics
@@ -5689,7 +5788,7 @@ export class TypeChecker {
         if (!info) { this.error(`unknown struct '${expr.name}'`, sp); return this.setType(expr, { tag: "unknown" }); }
         for (const f of expr.fields) {
           const fieldDef = info.fields.find(d => d.name === f.name);
-          if (!fieldDef) { this.error(`struct '${expr.name}' has no field '${f.name}'`, sp); continue; }
+          if (!fieldDef) { this.error(`struct '${expr.name}' has no field '${f.name}'`, sp, memberHint(f.name, info.fields.map(d => d.name))); continue; }
           let valType = this.checkExprWithHint(f.value, fieldDef.type);
           if (fieldDef.type.tag === "int" && valType.tag === "int" && !typeEq(fieldDef.type, valType) && this.isConstIntExpr(f.value)) {
             this.retypeConstInt(f.value, fieldDef.type);
@@ -5724,7 +5823,7 @@ export class TypeChecker {
           const info = this.structs.get(objType.name);
           if (!info) { this.error(`unknown struct '${objType.name}'`, sp); return this.setType(expr, { tag: "unknown" }); }
           const field = info.fields.find(f => f.name === expr.field);
-          if (!field) { this.error(`struct '${objType.name}' has no field '${expr.field}'`, sp); return this.setType(expr, { tag: "unknown" }); }
+          if (!field) { this.error(`struct '${objType.name}' has no field '${expr.field}'`, sp, memberHint(expr.field, this.fieldCandidates(objType))); return this.setType(expr, { tag: "unknown" }); }
           return this.setType(expr, field.type);
         }
         if (objType.tag === "enum") {
@@ -5744,7 +5843,8 @@ export class TypeChecker {
         if (objType.tag === "hashmap" && expr.field === "len") {
           return this.setType(expr, { tag: "int", bits: 64, signed: true });
         }
-        this.error(`cannot access field '${expr.field}' on type ${typeName(objType)}`, sp);
+        this.error(`cannot access field '${expr.field}' on type ${typeName(objType)}`, sp,
+          memberHint(expr.field, this.fieldCandidates(objType)));
         return this.setType(expr, { tag: "unknown" });
       }
       case "ArrayLit": {
@@ -6020,7 +6120,8 @@ export class TypeChecker {
           }
           const asMethod = this.staticCallOnVariable(expr, sp);
           if (asMethod) return asMethod;
-          this.error(`unknown enum '${expr.enumName}'`, sp); return this.setType(expr, { tag: "unknown" });
+          this.errorUnknownStatic(expr.enumName, expr.variant, sp);
+          return this.setType(expr, { tag: "unknown" });
         }
         const variant = info.variants.get(expr.variant);
         if (!variant) { this.error(`enum '${expr.enumName}' has no variant '${expr.variant}'`, sp); return this.setType(expr, { tag: "unknown" }); }
@@ -6617,6 +6718,47 @@ export class TypeChecker {
             if (expr.args.length !== 0) { this.error(`'isEmpty' takes no arguments`, sp); }
             return this.setType(expr, { tag: "bool" });
           }
+          // fold(init, (acc, elem) => acc) — the accumulate half of the functional
+          // set. `reduce` is accepted as the same operation because that is what
+          // the majority of readers will type; the suggestion table points at
+          // `fold` when neither spelling is a method (a non-Vec receiver).
+          if (expr.method === "fold" || expr.method === "reduce") {
+            if (expr.args.length !== 2) {
+              this.error(`'${expr.method}' expects 2 arguments (initial value, callback)`, sp);
+              return this.setType(expr, { tag: "unknown" });
+            }
+            let accType = this.checkExpr(expr.args[0]);
+            // A bare `0` seed defaults to i64, which would make every fold over a
+            // narrower Vec a width mismatch the writer has to spell around. When the
+            // callback annotates its accumulator, that annotation is the real type —
+            // adopt it before checking the callback, or the closure body reports the
+            // mismatch first and the seed never gets a chance to widen. Only for a
+            // constant seed, where re-typing loses nothing.
+            const cb = expr.args[1];
+            if (accType.tag === "int" && this.isConstIntExpr(expr.args[0]) &&
+                cb.kind === "Closure" && cb.params.length > 0) {
+              // A closure param may legitimately have no annotation, so read the
+              // field directly rather than through declaredType (which throws).
+              const declared = cb.params[0].type;
+              if (declared) {
+                const annotated = this.resolve(declared);
+                if (annotated.tag === "int" && !typeEq(annotated, accType)) {
+                  this.retypeConstInt(expr.args[0], annotated);
+                  accType = annotated;
+                }
+              }
+            }
+            const elemRef: TypeKind = { tag: "ref", inner: objType.element, mutable: false };
+            const cbHint: TypeKind = { tag: "fn", params: [accType, elemRef], ret: accType };
+            const cbBorrow = this.borrowDuringCallback(expr.object);
+            const cbType = this.checkExprWithHint(expr.args[1], cbHint);
+            if (cbBorrow) this.unfreeze(cbBorrow);
+            if (cbType.tag !== "fn") { this.error(`'${expr.method}' argument 2 must be a function`, sp); return this.setType(expr, { tag: "unknown" }); }
+            if (!typeEq(cbType.ret, accType) && cbType.ret.tag !== "unknown" && accType.tag !== "unknown") {
+              this.error(`'${expr.method}' callback must return ${typeName(accType)} to match the initial value, got ${typeName(cbType.ret)}`, sp);
+            }
+            return this.setType(expr, accType);
+          }
           if (expr.method === "sum") {
             if (expr.args.length !== 0) { this.error(`'sum' takes no arguments`, sp); }
             if (objType.element.tag !== "int" && objType.element.tag !== "float") {
@@ -6736,7 +6878,7 @@ export class TypeChecker {
             }
             return this.setType(expr, objType);
           }
-          this.error(`Vec has no method '${expr.method}'`, sp);
+          this.error(`Vec has no method '${expr.method}'`, sp, memberHint(expr.method, VEC_MEMBERS));
           return this.setType(expr, { tag: "unknown" });
         }
         if (objType.tag === "hashmap") {
@@ -6801,7 +6943,7 @@ export class TypeChecker {
             if (expr.args.length !== 0) { this.error(`'len' takes no arguments`, sp); }
             return this.setType(expr, { tag: "int", bits: 64, signed: true });
           }
-          this.error(`HashMap has no method '${expr.method}'`, sp);
+          this.error(`HashMap has no method '${expr.method}'`, sp, memberHint(expr.method, HASHMAP_MEMBERS));
           return this.setType(expr, { tag: "unknown" });
         }
         if (objType.tag === "string") {
@@ -7091,7 +7233,8 @@ export class TypeChecker {
           return this.setType(expr, objType);
         }
 
-        this.error(`type '${typeName(objType)}' has no method '${expr.method}'`, sp);
+        this.error(`type '${typeName(objType)}' has no method '${expr.method}'`, sp,
+          memberHint(expr.method, this.methodCandidates(objType)));
         return this.setType(expr, { tag: "unknown" });
       }
       case "RangeExpr":

@@ -1,0 +1,22 @@
+// @expect: 10
+// @expect: 24
+// @expect: 10
+// @expect: 3
+// @expect: 42
+
+// fold/reduce over a Vec: the accumulator's type comes from the initial value, so
+// the callback can fold into something other than the element type. An empty Vec
+// returns the initial value rather than failing.
+pub fn main(): i32 {
+    let v: Vec<i64> = [1, 2, 3, 4]
+    print(v.fold(0, (a: i64, b: &i64) => a + b))
+    print(v.reduce(1, (a: i64, b: &i64) => a * b))
+    print(v.fold(0, (a, b) => a + b))
+
+    let words: Vec<string> = ["a", "b", "c"]
+    print(words.fold(0, (a: i64, w: &string) => a + w.len))
+
+    let empty: Vec<i64> = []
+    print(empty.fold(42, (a: i64, b: &i64) => a + b))
+    return 0
+}

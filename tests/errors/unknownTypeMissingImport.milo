@@ -1,0 +1,9 @@
+// @error: from "std/json" import { Json }
+
+// A type used without importing it is indistinguishable from a typo at the use
+// site, but the compiler can read std and write out the exact import line.
+pub fn main(): i32 {
+    let doc = Json.obj()
+    print(doc.build())
+    return 0
+}

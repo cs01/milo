@@ -2,6 +2,11 @@ import type { Token, Trivia } from "./tokens";
 import { TokenKind, KEYWORDS } from "./tokens";
 import { ParseError } from "./diagnostics";
 
+// Stand-ins for `\{` / `\}` inside an f-string token value — see lexFString.
+// Shared with the parser, which is the only thing allowed to resolve them.
+export const FSTRING_LBRACE = "\uF77B";
+export const FSTRING_RBRACE = "\uF77D";
+
 export class Lexer {
   private pos = 0;
   private line = 1;
@@ -82,7 +87,13 @@ export class Lexer {
     this.advance(); // opening "
     let value = "";
     let braceDepth = 0;
-    const escapes: Record<string, string> = { n: "\n", t: "\t", r: "\r", "\\": "\\", '"': '"', "0": "\0", "{": "{", "}": "}" };
+    // `\{` and `\}` resolve to sentinels, not to real braces: the token value is
+    // re-scanned for interpolation openers by the parser, and a resolved `{` there
+    // is indistinguishable from one the author wrote to open an expression. That
+    // made `$"\{\"k\": \"{v}\"}"` silently swallow the JSON as an expression and
+    // emit garbage. The parser converts them back. PUA range as in lexHexEscape;
+    // 0xF77B/0xF77D can't collide there because it only encodes bytes >= 0x80.
+    const escapes: Record<string, string> = { n: "\n", t: "\t", r: "\r", "\\": "\\", '"': '"', "0": "\0", "{": FSTRING_LBRACE, "}": FSTRING_RBRACE };
     while (true) {
       if (this.pos >= this.source.length) this.error("unterminated string", line, col);
       const ch = this.advance();

@@ -99,6 +99,8 @@ export class Codegen {
   private needsExit = false;
   private needsMalloc = false;
   private needsFree = false;
+  private needsRealloc = false;
+  private emittedBufAppend = false;
   public needsMemcpy = false;
   private needsStrlen = false;
   public needsMemcmp = false;
@@ -1400,6 +1402,8 @@ export class Codegen {
       this.output.splice(1, 0, "declare ptr @memcpy(ptr, ptr, i64)");
     if (this.needsFree && !declaredExterns.has("free"))
       this.output.splice(1, 0, "declare void @free(ptr)");
+    if (this.needsRealloc && !declaredExterns.has("realloc"))
+      this.output.splice(1, 0, "declare ptr @realloc(ptr, i64)");
     if (this.needsMalloc && !declaredExterns.has("malloc"))
       this.output.splice(1, 0, "declare ptr @malloc(i64)");
     if (this.needsExit && !declaredExterns.has("exit"))
@@ -5246,6 +5250,8 @@ export class Codegen {
         return this.genVecSum(expr, lines);
       case "VecAll":
         return this.genVecAll(expr, lines);
+      case "VecFold":
+        return this.genVecFold(expr, lines);
       case "VecIsEmpty": {
         this.hasVecType = true;
         const [ol, ov] = this.genExpr(expr.object);
@@ -7017,6 +7023,53 @@ export class Codegen {
     const result = this.nextTemp();
     lines.push(`  ${result} = load i1, ptr ${resultAddr}`);
     return [lines, result, "i1"];
+  }
+
+  // acc = cb(acc, &elem) over every element. The accumulator lives in an alloca so
+  // the loop body can write it without a phi, matching how the other Vec callbacks
+  // carry state across iterations.
+  private genVecFold(expr: HIRExpr & { kind: "VecFold" }, lines: string[]): [string[], string, string] {
+    const [initLines, initVal, accTy] = this.genExpr(expr.init);
+    lines.push(...initLines);
+    const { fnPtr, envPtr, data, len, elemTy } = this.genVecMethodPreamble(expr.vec, expr.callback, expr.elementType, lines);
+
+    const accAddr = `%__fold_acc.${this.scopeCounter++}.addr`;
+    this.entryAllocas.push(`  ${accAddr} = alloca ${accTy}`);
+    lines.push(`  store ${accTy} ${initVal}, ptr ${accAddr}`);
+
+    const idxAddr = `%__fold_idx.${this.scopeCounter++}.addr`;
+    this.entryAllocas.push(`  ${idxAddr} = alloca i64`);
+    lines.push(`  store i64 0, ptr ${idxAddr}`);
+
+    const condLabel = this.nextLabel("fold.cond");
+    const bodyLabel = this.nextLabel("fold.body");
+    const endLabel = this.nextLabel("fold.end");
+
+    lines.push(`  br label %${condLabel}`);
+    lines.push(`${condLabel}:`);
+    const idx = this.nextTemp();
+    lines.push(`  ${idx} = load i64, ptr ${idxAddr}`);
+    const cmp = this.nextTemp();
+    lines.push(`  ${cmp} = icmp ult i64 ${idx}, ${len}`);
+    lines.push(`  br i1 ${cmp}, label %${bodyLabel}, label %${endLabel}`);
+
+    lines.push(`${bodyLabel}:`);
+    const elemPtr = this.nextTemp();
+    lines.push(`  ${elemPtr} = getelementptr ${elemTy}, ptr ${data}, i64 ${idx}`);
+    const acc = this.nextTemp();
+    lines.push(`  ${acc} = load ${accTy}, ptr ${accAddr}`);
+    const next = this.nextTemp();
+    lines.push(`  ${next} = call ${accTy} ${fnPtr}(ptr ${envPtr}, ${accTy} ${acc}, ptr ${elemPtr})`);
+    lines.push(`  store ${accTy} ${next}, ptr ${accAddr}`);
+    const nextIdx = this.nextTemp();
+    lines.push(`  ${nextIdx} = add i64 ${idx}, 1`);
+    lines.push(`  store i64 ${nextIdx}, ptr ${idxAddr}`);
+    lines.push(`  br label %${condLabel}`);
+
+    lines.push(`${endLabel}:`);
+    const result = this.nextTemp();
+    lines.push(`  ${result} = load ${accTy}, ptr ${accAddr}`);
+    return [lines, result, accTy];
   }
 
   private genVecReverse(expr: HIRExpr & { kind: "VecReverse" }, lines: string[]): [string[], string, string] {
@@ -9200,6 +9253,20 @@ export class Codegen {
       tempBufs.push(buf);
       return;
     }
+    if (tk.tag === "vec" || (tk.tag === "array" && tk.size !== null)) {
+      const buf = this.emitSeqDisplay(tk, val, lines);
+      partFmts.push("%s");
+      partArgs.push({ val: buf, type: "ptr" });
+      tempBufs.push(buf);
+      return;
+    }
+    if (tk.tag === "hashmap") {
+      const buf = this.emitMapDisplay(tk, val, lines);
+      partFmts.push("%s");
+      partArgs.push({ val: buf, type: "ptr" });
+      tempBufs.push(buf);
+      return;
+    }
     if (tk.tag === "ptr") {
       partFmts.push("%p");
       partArgs.push({ val: val, type: "ptr" });
@@ -9207,6 +9274,259 @@ export class Codegen {
     }
     // fallback for unsupported types: print as pointer (better than silent miscompile)
     partFmts.push("<unprintable>");
+  }
+
+  // ── Displaying a container ──────────────────────────────────────────────────
+  //
+  // Structs and enums render through one compile-time format string because their
+  // shape is fixed. A Vec's length and a HashMap's occupancy are not, so these
+  // build the text at runtime into a grown-on-demand buffer instead. The result is
+  // a malloc'd NUL-terminated C string, the same contract emitStructDisplay has,
+  // so the caller frees it out of `tempBufs` exactly the same way.
+
+  // Append `n` bytes of `src` to a buffer held in three caller allocas
+  // (ptr, len, cap), growing it geometrically. Emitted once per module.
+  private bufAppendFn(): string {
+    if (!this.emittedBufAppend) {
+      this.emittedBufAppend = true;
+      this.needsRealloc = true;
+      this.needsMemcpy = true;
+      this.helperFnBodies.push([
+        "define internal void @milo.bufappend(ptr %bufSlot, ptr %lenSlot, ptr %capSlot, ptr %src, i64 %n) {",
+        "entry:",
+        "  %len = load i64, ptr %lenSlot",
+        "  %cap = load i64, ptr %capSlot",
+        "  %end = add i64 %len, %n",
+        // +1 so the NUL written below always has room
+        "  %need = add i64 %end, 1",
+        "  %fits = icmp ule i64 %need, %cap",
+        "  br i1 %fits, label %copy, label %grow",
+        "grow:",
+        "  %dbl = shl i64 %cap, 1",
+        "  %small = icmp ult i64 %dbl, %need",
+        "  %newcap = select i1 %small, i64 %need, i64 %dbl",
+        "  %old = load ptr, ptr %bufSlot",
+        "  %nb = call ptr @realloc(ptr %old, i64 %newcap)",
+        "  store ptr %nb, ptr %bufSlot",
+        "  store i64 %newcap, ptr %capSlot",
+        "  br label %copy",
+        "copy:",
+        "  %buf = load ptr, ptr %bufSlot",
+        "  %dst = getelementptr i8, ptr %buf, i64 %len",
+        "  call ptr @memcpy(ptr %dst, ptr %src, i64 %n)",
+        "  store i64 %end, ptr %lenSlot",
+        "  %term = getelementptr i8, ptr %buf, i64 %end",
+        "  store i8 0, ptr %term",
+        "  ret void",
+        "}",
+      ]);
+    }
+    return "@milo.bufappend";
+  }
+
+  // Allocas for one display buffer, seeded with an initial malloc. Entry-block
+  // allocas, not inline ones: a `print` inside a loop would otherwise grow the
+  // stack once per iteration.
+  private newDisplayBuf(lines: string[]): { buf: string; len: string; cap: string } {
+    this.needsMalloc = true;
+    const n = this.scopeCounter++;
+    const buf = `%__disp_buf.${n}.addr`;
+    const len = `%__disp_len.${n}.addr`;
+    const cap = `%__disp_cap.${n}.addr`;
+    this.entryAllocas.push(`  ${buf} = alloca ptr`);
+    this.entryAllocas.push(`  ${len} = alloca i64`);
+    this.entryAllocas.push(`  ${cap} = alloca i64`);
+    const initial = this.nextTemp();
+    lines.push(`  ${initial} = call ptr @malloc(i64 64)`);
+    lines.push(`  store i8 0, ptr ${initial}`);
+    lines.push(`  store ptr ${initial}, ptr ${buf}`);
+    lines.push(`  store i64 0, ptr ${len}`);
+    lines.push(`  store i64 64, ptr ${cap}`);
+    return { buf, len, cap };
+  }
+
+  private appendLiteral(slots: { buf: string; len: string; cap: string }, text: string, lines: string[]): void {
+    if (text.length === 0) return;
+    const s = this.addString(text);
+    lines.push(`  call void ${this.bufAppendFn()}(ptr ${slots.buf}, ptr ${slots.len}, ptr ${slots.cap}, ptr ${s.label}, i64 ${text.length})`);
+  }
+
+  // Render one element and append it. `quoteStrings` matches emitStructDisplay:
+  // a bare string element is ambiguous next to the separators.
+  private appendElement(
+    tk: TypeKind,
+    val: string,
+    slots: { buf: string; len: string; cap: string },
+    lines: string[],
+  ): void {
+    this.needsStrlen = true;
+    this.needsFree = true;
+    const fmts: string[] = [];
+    const args: { val: string; type: string }[] = [];
+    const temps: string[] = [];
+    const quote = tk.tag === "string" || (tk.tag === "ref" && tk.inner.tag === "string");
+    if (quote) fmts.push(`"`);
+    this.emitDisplayPart(tk, val, this.llvmType(tk), lines, fmts, args, temps);
+    if (quote) fmts.push(`"`);
+    const rendered = this.emitSnprintfToBuf(fmts.join(""), args, temps, lines);
+    const n = this.nextTemp();
+    lines.push(`  ${n} = call i64 @strlen(ptr ${rendered})`);
+    lines.push(`  call void ${this.bufAppendFn()}(ptr ${slots.buf}, ptr ${slots.len}, ptr ${slots.cap}, ptr ${rendered}, i64 ${n})`);
+    lines.push(`  call void @free(ptr ${rendered})`);
+  }
+
+  // `[a, b, c]` for a Vec (runtime length) or a fixed array (unrolled — the length
+  // is a compile-time constant, so a loop would only cost IR).
+  private emitSeqDisplay(tk: TypeKind & { tag: "vec" | "array" }, val: string, lines: string[]): string {
+    const elem = tk.tag === "vec" ? tk.element : tk.element;
+    const slots = this.newDisplayBuf(lines);
+    this.appendLiteral(slots, "[", lines);
+
+    if (tk.tag === "array" && tk.size !== null) {
+      const elemTy = this.llvmType(elem);
+      for (let i = 0; i < tk.size; i++) {
+        if (i > 0) this.appendLiteral(slots, ", ", lines);
+        const e = this.nextTemp();
+        lines.push(`  ${e} = extractvalue [${tk.size} x ${elemTy}] ${val}, ${i}`);
+        this.appendElement(elem, e, slots, lines);
+      }
+    } else {
+      const data = this.nextTemp();
+      const len = this.nextTemp();
+      lines.push(`  ${data} = extractvalue %Vec ${val}, 0`);
+      lines.push(`  ${len} = extractvalue %Vec ${val}, 1`);
+      const elemTy = this.llvmType(elem);
+      const n = this.scopeCounter++;
+      const idxAddr = `%__disp_i.${n}.addr`;
+      this.entryAllocas.push(`  ${idxAddr} = alloca i64`);
+      lines.push(`  store i64 0, ptr ${idxAddr}`);
+      const cond = this.nextLabel("disp.cond");
+      const body = this.nextLabel("disp.body");
+      const end = this.nextLabel("disp.end");
+      const sep = this.nextLabel("disp.sep");
+      lines.push(`  br label %${cond}`);
+      lines.push(`${cond}:`);
+      const i = this.nextTemp();
+      lines.push(`  ${i} = load i64, ptr ${idxAddr}`);
+      const more = this.nextTemp();
+      lines.push(`  ${more} = icmp slt i64 ${i}, ${len}`);
+      lines.push(`  br i1 ${more}, label %${sep}, label %${end}`);
+      lines.push(`${sep}:`);
+      const first = this.nextTemp();
+      lines.push(`  ${first} = icmp eq i64 ${i}, 0`);
+      const sepDone = this.nextLabel("disp.sepdone");
+      const sepDo = this.nextLabel("disp.sepdo");
+      lines.push(`  br i1 ${first}, label %${sepDone}, label %${sepDo}`);
+      lines.push(`${sepDo}:`);
+      this.appendLiteral(slots, ", ", lines);
+      lines.push(`  br label %${sepDone}`);
+      lines.push(`${sepDone}:`);
+      lines.push(`  br label %${body}`);
+      lines.push(`${body}:`);
+      const ePtr = this.nextTemp();
+      lines.push(`  ${ePtr} = getelementptr ${elemTy}, ptr ${data}, i64 ${i}`);
+      const e = this.nextTemp();
+      lines.push(`  ${e} = load ${elemTy}, ptr ${ePtr}`);
+      this.appendElement(elem, e, slots, lines);
+      const next = this.nextTemp();
+      lines.push(`  ${next} = add i64 ${i}, 1`);
+      lines.push(`  store i64 ${next}, ptr ${idxAddr}`);
+      lines.push(`  br label %${cond}`);
+      lines.push(`${end}:`);
+    }
+    this.appendLiteral(slots, "]", lines);
+    const out = this.nextTemp();
+    lines.push(`  ${out} = load ptr, ptr ${slots.buf}`);
+    return out;
+  }
+
+  // `{k: v, k: v}` over the open-addressed table, skipping unoccupied slots —
+  // same state==1 test the `for k, v in map` lowering uses.
+  private emitMapDisplay(tk: TypeKind & { tag: "hashmap" }, val: string, lines: string[]): string {
+    const slots = this.newDisplayBuf(lines);
+    this.appendLiteral(slots, "{", lines);
+
+    const data = this.nextTemp();
+    const cap = this.nextTemp();
+    lines.push(`  ${data} = extractvalue %HashMap ${val}, 0`);
+    lines.push(`  ${cap} = extractvalue %HashMap ${val}, 2`);
+    const entryTy = this.hashMapEntryType(tk.key, tk.value);
+    const keyTy = this.llvmType(tk.key);
+    const valTy = this.llvmType(tk.value);
+
+    const n = this.scopeCounter++;
+    const idxAddr = `%__dispm_i.${n}.addr`;
+    const seenAddr = `%__dispm_seen.${n}.addr`;
+    this.entryAllocas.push(`  ${idxAddr} = alloca i64`);
+    this.entryAllocas.push(`  ${seenAddr} = alloca i64`);
+    lines.push(`  store i64 0, ptr ${idxAddr}`);
+    lines.push(`  store i64 0, ptr ${seenAddr}`);
+
+    const cond = this.nextLabel("dispm.cond");
+    const check = this.nextLabel("dispm.check");
+    const body = this.nextLabel("dispm.body");
+    const step = this.nextLabel("dispm.next");
+    const end = this.nextLabel("dispm.end");
+    lines.push(`  br label %${cond}`);
+    lines.push(`${cond}:`);
+    const i = this.nextTemp();
+    lines.push(`  ${i} = load i64, ptr ${idxAddr}`);
+    const more = this.nextTemp();
+    lines.push(`  ${more} = icmp ult i64 ${i}, ${cap}`);
+    lines.push(`  br i1 ${more}, label %${check}, label %${end}`);
+
+    lines.push(`${check}:`);
+    const entryPtr = this.nextTemp();
+    lines.push(`  ${entryPtr} = getelementptr ${entryTy}, ptr ${data}, i64 ${i}`);
+    const statePtr = this.nextTemp();
+    lines.push(`  ${statePtr} = getelementptr ${entryTy}, ptr ${entryPtr}, i32 0, i32 0`);
+    const state = this.nextTemp();
+    lines.push(`  ${state} = load i8, ptr ${statePtr}`);
+    const occupied = this.nextTemp();
+    lines.push(`  ${occupied} = icmp eq i8 ${state}, 1`);
+    lines.push(`  br i1 ${occupied}, label %${body}, label %${step}`);
+
+    lines.push(`${body}:`);
+    const seen = this.nextTemp();
+    lines.push(`  ${seen} = load i64, ptr ${seenAddr}`);
+    const isFirst = this.nextTemp();
+    lines.push(`  ${isFirst} = icmp eq i64 ${seen}, 0`);
+    const sepDone = this.nextLabel("dispm.sepdone");
+    const sepDo = this.nextLabel("dispm.sepdo");
+    lines.push(`  br i1 ${isFirst}, label %${sepDone}, label %${sepDo}`);
+    lines.push(`${sepDo}:`);
+    this.appendLiteral(slots, ", ", lines);
+    lines.push(`  br label %${sepDone}`);
+    lines.push(`${sepDone}:`);
+    const seenNext = this.nextTemp();
+    lines.push(`  ${seenNext} = add i64 ${seen}, 1`);
+    lines.push(`  store i64 ${seenNext}, ptr ${seenAddr}`);
+    const kPtr = this.nextTemp();
+    lines.push(`  ${kPtr} = getelementptr ${entryTy}, ptr ${entryPtr}, i32 0, i32 1`);
+    const k = this.nextTemp();
+    lines.push(`  ${k} = load ${keyTy}, ptr ${kPtr}`);
+    this.appendElement(tk.key, k, slots, lines);
+    this.appendLiteral(slots, ": ", lines);
+    const vPtr = this.nextTemp();
+    lines.push(`  ${vPtr} = getelementptr ${entryTy}, ptr ${entryPtr}, i32 0, i32 2`);
+    const v = this.nextTemp();
+    lines.push(`  ${v} = load ${valTy}, ptr ${vPtr}`);
+    this.appendElement(tk.value, v, slots, lines);
+    lines.push(`  br label %${step}`);
+
+    lines.push(`${step}:`);
+    const iNow = this.nextTemp();
+    lines.push(`  ${iNow} = load i64, ptr ${idxAddr}`);
+    const iNext = this.nextTemp();
+    lines.push(`  ${iNext} = add i64 ${iNow}, 1`);
+    lines.push(`  store i64 ${iNext}, ptr ${idxAddr}`);
+    lines.push(`  br label %${cond}`);
+    lines.push(`${end}:`);
+
+    this.appendLiteral(slots, "}", lines);
+    const out = this.nextTemp();
+    lines.push(`  ${out} = load ptr, ptr ${slots.buf}`);
+    return out;
   }
 
   // snprintf a struct into a malloc'd buffer formatted as `Name { f1: v1, f2: v2 }`.

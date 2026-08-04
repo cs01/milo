@@ -1001,6 +1001,9 @@ class LowerCtx {
           if (expr.method === "all") {
             return { kind: "VecAll", vec: this.lowerExpr(expr.object), callback: this.lowerExpr(expr.args[0]), elementType: objType.element, type, span: expr.span };
           }
+          if (expr.method === "fold" || expr.method === "reduce") {
+            return { kind: "VecFold", vec: this.lowerExpr(expr.object), init: this.lowerExpr(expr.args[0]), callback: this.lowerExpr(expr.args[1]), elementType: objType.element, type, span: expr.span };
+          }
           if (expr.method === "sum") {
             return { kind: "VecSum", vec: this.lowerExpr(expr.object), elementType: objType.element, type, span: expr.span };
           }

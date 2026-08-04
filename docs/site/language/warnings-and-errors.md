@@ -116,6 +116,22 @@ let html = @embedFile("index.html")   // preferred
 
 The bare form still compiles and behaves identically.
 
+### missing-interpolation
+
+Only `$"..."` interpolates. A plain `"..."` holding `${name}` or `{name}` emits those characters verbatim — the one way to get silently wrong output — so it warns when the braced name is a real binding in scope.
+
+```milo
+let name = "world"
+print("hello ${name}")    // warning: '${name}' in a plain string is not interpolated
+print($"hello {name}")    // correct — note the '$' moves to the front
+```
+
+```
+  hint: prefix the literal with '$' to interpolate: $"...{name}..."
+```
+
+A literal whose braced name doesn't resolve — a shell fragment like `"${PATH}"`, a CSS rule, a format string meant for another tool — never warns.
+
 ### unused-move
 
 An owned parameter that's never moved might not need ownership. This is off by default.

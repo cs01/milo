@@ -1,0 +1,16 @@
+// @expect: {"id": "7"}
+// @expect: {}
+// @expect: a{b}c
+
+// An escaped brace in an f-string is a literal brace, not an interpolation opener.
+// The lexer resolves `\{` to a sentinel so the parser's brace scan can tell the two
+// apart; before that, everything up to the matching `}` was swallowed as an
+// expression and the output was silently wrong.
+pub fn main(): i32 {
+    let id = "7"
+    print($"\{\"id\": \"{id}\"}")
+    print($"\{}")
+    let mid = "b"
+    print($"a\{{mid}\}c")
+    return 0
+}

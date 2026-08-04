@@ -1,0 +1,101 @@
+// Unit tests for "did you mean" hints. Two sources feed them: an alias table for
+// names that exist here under a different spelling (`length`, `toUpperCase`,
+// `forEach` are not typos, so edit distance can never find them), and edit distance
+// against the receiver's real members for actual typos.
+import { test, expect } from "bun:test";
+import { Lexer } from "../src/lexer";
+import { Parser } from "../src/parser";
+import { TypeChecker } from "../src/checker";
+import { closest, editDistance, memberHint, importHint, VEC_MEMBERS, STRING_MEMBERS } from "../src/suggest";
+import { mkdtempSync, writeFileSync } from "fs";
+import { join } from "path";
+import { tmpdir } from "os";
+
+const dir = mkdtempSync(join(tmpdir(), "milo-suggest-"));
+
+// The first error's hint for a whole-program source, or undefined.
+function hintFor(src: string): string | undefined {
+  const entry = join(dir, `t${Math.random().toString(36).slice(2)}.milo`);
+  writeFileSync(entry, src);
+  const prog = new Parser(new Lexer(src).tokenize(), src, entry).parse();
+  const diags = new TypeChecker().check(prog).diagnostics.filter(d => d.severity === "error");
+  return diags[0]?.hint;
+}
+
+function errorFor(src: string): string | undefined {
+  const entry = join(dir, `t${Math.random().toString(36).slice(2)}.milo`);
+  writeFileSync(entry, src);
+  const prog = new Parser(new Lexer(src).tokenize(), src, entry).parse();
+  const diags = new TypeChecker().check(prog).diagnostics.filter(d => d.severity === "error");
+  return diags[0]?.message;
+}
+
+test("edit distance bails out past the cap instead of scoring exactly", () => {
+  expect(editDistance("abc", "abc", 2)).toBe(0);
+  expect(editDistance("abc", "abd", 2)).toBe(1);
+  // Beyond the cap the exact score doesn't matter, only that it exceeds it.
+  expect(editDistance("abc", "xyzzy", 2)).toBeGreaterThan(2);
+});
+
+test("closest scales its threshold to the name's length", () => {
+  // One edit is a lot in a 3-char name and little in a 15-char one.
+  expect(closest("le", ["len"])).toBe("len");
+  expect(closest("xyz", ["len"])).toBe(null);
+  expect(closest("splitWhitespac", [...STRING_MEMBERS])).toBe("splitWhitespace");
+});
+
+test("a case-only difference always wins", () => {
+  expect(closest("ToUpper", [...STRING_MEMBERS])).toBe("toUpper");
+});
+
+test("alias table catches cross-language spellings edit distance cannot", () => {
+  expect(memberHint("length", ["len"])).toBe("did you mean 'len'?");
+  expect(memberHint("toUpperCase", [...STRING_MEMBERS])).toBe("did you mean 'toUpper'?");
+  expect(memberHint("forEach", [...VEC_MEMBERS])).toBe("did you mean 'each'?");
+  expect(memberHint("push_back", [...VEC_MEMBERS])).toBe("did you mean 'push'?");
+});
+
+test("an alias whose target is not a member still names the Milo concept", () => {
+  // `length` on a struct with no `len` should not claim a member that isn't there.
+  expect(memberHint("length", ["name", "age"])).toBe("Milo spells this 'len'");
+});
+
+test("methods spelled as operators get their own hint, not a near-miss name", () => {
+  expect(memberHint("unwrap", ["isSome", "map"])).toContain("'!'");
+  expect(memberHint("equals", ["clone"])).toContain("'=='");
+});
+
+test("importHint names the std module that exports a type", () => {
+  expect(importHint("Json")).toContain('from "std/json" import { Json }');
+  expect(importHint("Router")).toContain('from "std/http" import { Router }');
+  expect(importHint("NoSuchTypeAnywhere")).toBeUndefined();
+});
+
+test("hints reach the real diagnostics", () => {
+  expect(hintFor(`fn main() {\n  let v: Vec<i64> = [1]\n  print(v.length)\n}\n`)).toBe("did you mean 'len'?");
+  expect(hintFor(`fn main() {\n  let s = "a"\n  print(s.toUpperCase())\n}\n`)).toBe("did you mean 'toUpper'?");
+  expect(hintFor(`fn main() {\n  let count = 5\n  print(cont)\n}\n`)).toBe("did you mean 'count'?");
+  expect(hintFor(`struct U { name: string }\nfn main() {\n  let u = U { name: "a" }\n  print(u.nmae)\n}\n`))
+    .toBe("did you mean 'name'?");
+});
+
+test("a failed static call reports the real mistake, not 'unknown enum'", () => {
+  // Every one of these used to be "unknown enum 'X'" — including the struct case,
+  // where the word did not apply to the user's code at all.
+  const missingImport = `fn main() {\n  let x = Json.obj()\n  print(1)\n}\n`;
+  expect(errorFor(missingImport)).toBe("unknown type 'Json'");
+  expect(hintFor(missingImport)).toContain('from "std/json" import { Json }');
+
+  const typoStatic = `struct P { a: i64 }\nimpl P { fn new(): P { return P { a: 1 } } }\nfn main() {\n  let x = P.knew()\n  print(1)\n}\n`;
+  expect(errorFor(typoStatic)).toBe("type 'P' has no static method 'knew'");
+  expect(hintFor(typoStatic)).toBe("did you mean 'new'?");
+
+  const unknown = `fn main() {\n  let x = Frobnicator.go()\n  print(1)\n}\n`;
+  expect(errorFor(unknown)).toBe("unknown type 'Frobnicator'");
+});
+
+test("a bare static call on a generic type says to spell the type arguments", () => {
+  const src = `struct Box<T> { v: T }\nimpl Box<T> { fn make(v: T): Box<T> { return Box { v: v } } }\nfn main() {\n  let b = Box.make(1)\n  print(1)\n}\n`;
+  expect(hintFor(src)).toContain("is generic");
+  expect(hintFor(src)).toContain("Box<T>.make");
+});

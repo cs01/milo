@@ -147,7 +147,8 @@ pool alive for the whole program — does not compile today:
 
 ```milo
 var pool: Arena<Node> = Arena.new()
-// error: unknown enum 'Arena'
+// error: type 'Arena' has no static method 'new'
+//   hint: 'Arena' is generic — spell its type arguments: 'Arena<T>.new(...)'
 
 var pool: Arena<Node> = Arena<Node>.new()
 // error: undefined variable 'nextArenaId'  (in std/arena.milo)

@@ -140,6 +140,24 @@ let content = match readFile(path) {
 
 Reach for a nested `match` only when the types genuinely nest — patterns are one level deep (`Ok(Some(x))` does not parse), so `Result<Option<T>>` does require two levels.
 
+Reading a nested JSON field used to be the worst offender, because `get` returns an
+`Option<Json>` at every level. `std/json`'s path accessors flatten the whole walk:
+
+```milo
+// don't — one Option, and one match, per level
+match data.get("headers") {
+    Option.Some(h) => { match h.get("Host") { Option.Some(v) => { ... } Option.None => {} } }
+    Option.None => {}
+}
+
+// do
+data.strPath("headers.Host") ?? "(none)"
+```
+
+`strPath`/`i64Path`/`f64Path`/`boolPath` end the walk at a scalar; `path` returns
+`Option<Json>` when you need to keep going. A missing key, an out-of-range `[n]`, or a
+value of the wrong kind all give `None` — the walk is total for any document.
+
 Note `unwrapOr`/`unwrapOrElse` are rejected on non-Copy payloads (`string`, `Vec<T>`) because they'd alias the heap buffer; `??` has no such restriction. Prefer `??`.
 
 ### Reading the match subject inside its own arm
@@ -156,6 +174,18 @@ match v {
 This is now a compile error. It used to compile and silently read zeroed memory — and because the enum *tag* survives the move, a discriminant-only check kept answering correctly while a payload-reading one didn't. If you need a fact about the subject inside an arm, compute it **before** the match, or use the binding.
 
 Arms that don't destructure a non-Copy payload (`_`, no bindings, Copy-only payloads) leave the subject intact and may still read it.
+
+## Debugging
+
+`print` renders containers structurally — `Vec` as `[a, b, c]`, `HashMap` as `{k: v}`,
+recursing into elements and quoting strings. There is no need to write a loop to see
+what is in a collection:
+
+```milo
+print(v)                       // [1, 2, 3]
+print(nested)                  // [[1, 2], [3]]
+print(byName)                  // {"a": User { name: "a", age: 3 }}
+```
 
 ## When something feels harder than it should
 

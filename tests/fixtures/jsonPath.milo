@@ -1,0 +1,31 @@
+// @expect: c
+// @expect: x
+// @expect: 7
+// @expect: true
+// @expect: 3.5
+// @expect: none
+// @expect: none
+// @expect: none
+// @expect: none
+// @expect: c
+
+// Json path accessors collapse a nested walk into one Option. Every malformed or
+// missing path yields None rather than panicking, so `??` is enough to finish.
+from "std/json" import {
+    Json
+}
+
+pub fn main(): i32 {
+    let v = Json.parse("{\"a\":{\"b\":\"c\"},\"items\":[{\"name\":\"x\",\"n\":7}],\"ok\":true,\"pi\":3.5}")!
+    print(v.strPath("a.b") ?? "none")
+    print(v.strPath("items[0].name") ?? "none")
+    print(v.i64Path("items[0].n") ?? -1)
+    print(v.boolPath("ok") ?? false)
+    print(v.f64Path("pi") ?? 0.0)
+    print(v.strPath("a.missing") ?? "none")
+    print(v.strPath("items[9].name") ?? "none")
+    print(v.strPath("nope.deep") ?? "none")
+    print(v.strPath("items[.name") ?? "none")
+    print(v.path("a")!.strPath("b") ?? "none")
+    return 0
+}

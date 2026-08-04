@@ -66,6 +66,14 @@ fn Json.boolAt(self: &Json, index: i64, key: &string): Option<bool>
 
 _Undocumented._
 
+### `Json.boolPath`
+
+```milo
+fn Json.boolPath(self: &Json, p: &string): Option<bool>
+```
+
+_Undocumented._
+
 ### `Json.childBoolAt`
 
 ```milo
@@ -163,6 +171,17 @@ fn Json.curLen(self: &Json, cur: i64): i64
 
 _Undocumented._
 
+### `Json.curPath`
+
+```milo
+fn Json.curPath(self: &Json, p: &string): i64
+```
+
+Cursor at the end of a dotted path — "a.b", "items[0].name". A missing key,
+an out-of-range index or a shape mismatch yields -1, which every cursor
+accessor already reads as "nothing here", so the walk is total for any input.
+A key containing '.' or '[' is not addressable this way; use get()/at().
+
 ### `Json.curRoot`
 
 ```milo
@@ -203,6 +222,14 @@ fn Json.f64At(self: &Json, index: i64, key: &string): Option<f64>
 
 _Undocumented._
 
+### `Json.f64Path`
+
+```milo
+fn Json.f64Path(self: &Json, p: &string): Option<f64>
+```
+
+_Undocumented._
+
 ### `Json.get`
 
 ```milo
@@ -231,6 +258,14 @@ _Undocumented._
 
 ```milo
 fn Json.i64At(self: &Json, index: i64, key: &string): Option<i64>
+```
+
+_Undocumented._
+
+### `Json.i64Path`
+
+```milo
+fn Json.i64Path(self: &Json, p: &string): Option<i64>
 ```
 
 _Undocumented._
@@ -323,6 +358,14 @@ fn Json.parseJsonc(s: string): Result<Json>
 
 Parse JSON with JSONC extensions (comments, trailing commas).
 
+### `Json.path`
+
+```milo
+fn Json.path(self: &Json, p: &string): Option<Json>
+```
+
+_Undocumented._
+
 ### `Json.rawStr`
 
 ```milo
@@ -343,6 +386,14 @@ _Undocumented._
 
 ```milo
 fn Json.strAt(self: &Json, index: i64, key: &string): Option<string>
+```
+
+_Undocumented._
+
+### `Json.strPath`
+
+```milo
+fn Json.strPath(self: &Json, p: &string): Option<string>
 ```
 
 _Undocumented._

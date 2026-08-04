@@ -1331,6 +1331,15 @@ const VEC_BUILTIN_METHODS: { name: string; sig: string }[] = [
   { name: "join", sig: "(sep: string): string" },
   { name: "map", sig: "(f): Vec<U>" },
   { name: "filter", sig: "(pred): Vec<T>" },
+  { name: "fold", sig: "(init: A, f: (A, &T) => A): A" },
+  { name: "each", sig: "(f)" },
+  { name: "enumerate", sig: "(f)" },
+  { name: "find", sig: "(pred): Option<T>" },
+  { name: "any", sig: "(pred): bool" },
+  { name: "all", sig: "(pred): bool" },
+  { name: "sum", sig: "(): T" },
+  { name: "truncate", sig: "(len: i64)" },
+  { name: "clear", sig: "()" },
   { name: "len", sig: ": i64" },
   { name: "isEmpty", sig: "(): bool" },
   { name: "clone", sig: "(): Vec<T>" },
@@ -1340,6 +1349,7 @@ const MAP_BUILTIN_METHODS: { name: string; sig: string }[] = [
   { name: "get", sig: "(key: K): Option<V>" },
   { name: "contains", sig: "(key: K): bool" },
   { name: "remove", sig: "(key: K)" },
+  { name: "getOrDefault", sig: "(key: K, fallback: V): V" },
   { name: "len", sig: ": i64" },
   { name: "isEmpty", sig: "(): bool" },
   { name: "clone", sig: "(): HashMap<K, V>" },
@@ -1738,6 +1748,35 @@ function handleCodeAction(uri: string, range: any): object[] {
           range: { start: offsetToPos(source, start), end: offsetToPos(source, start) },
           newText: "@",
         }] } },
+      });
+      continue;
+    }
+
+    // `"hi ${name}"` → `$"hi {name}"`. The span points at the opening quote, and
+    // the fix is two edits: insert the `$` and drop each `$` that sits inside the
+    // literal ahead of a brace. Anchored to the quote so a literal that doesn't
+    // start where the diagnostic claims is left alone.
+    if (d.code === "missing-interpolation") {
+      const quote = posToOffset(source, dl, d.span.col - 1);
+      if (source[quote] !== '"') continue;
+      const close = source.indexOf('"', quote + 1);
+      if (close < 0) continue;
+      const edits: { range: object; newText: string }[] = [
+        { range: { start: offsetToPos(source, quote), end: offsetToPos(source, quote) }, newText: "$" },
+      ];
+      for (let i = quote + 1; i < close - 1; i++) {
+        if (source[i] === "$" && source[i + 1] === "{") {
+          edits.push({ range: { start: offsetToPos(source, i), end: offsetToPos(source, i + 1) }, newText: "" });
+        }
+      }
+      actions.push({
+        title: "Make this an interpolated string",
+        kind: "quickfix",
+        diagnostics: [{
+          range: { start: { line: dl, character: d.span.col - 1 }, end: { line: dl, character: d.span.col } },
+          severity: 2, source: "milo", message: d.message,
+        }],
+        edit: { changes: { [uri]: edits } },
       });
       continue;
     }

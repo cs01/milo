@@ -1,0 +1,10 @@
+// @error: 'if' is an expression
+
+// `?` is already the propagate operator, so a ternary leaves its ':' stranded. The
+// hint points at `if`, which is an expression here and covers the same use.
+pub fn main(): i32 {
+    let x: i64 = 5
+    let y = x > 3 ? "big" : "small"
+    print(y)
+    return 0
+}

@@ -1,0 +1,17 @@
+// @error: has no static method 'knew'
+
+// A failed static call on a type that exists names the type and the method. This
+// used to report "unknown enum 'P'" — a word that does not apply to a struct.
+struct P { a: i64 }
+
+impl P {
+    fn new(): P {
+        return P { a: 1 }
+    }
+}
+
+pub fn main(): i32 {
+    let p = P.knew()
+    print(p.a)
+    return 0
+}

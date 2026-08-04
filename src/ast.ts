@@ -66,7 +66,10 @@ export interface Attribute {
 export interface IntLit { kind: "IntLit"; value: bigint; span?: Span }
 export interface FloatLit { kind: "FloatLit"; value: number; span?: Span }
 export interface BoolLit { kind: "BoolLit"; value: boolean; span?: Span }
-export interface StringLit { kind: "StringLit"; value: string; span?: Span }
+// `fromFString` marks a piece produced by desugaring `$"..."`. Braces in such a
+// piece got there through an escape and are meant literally, so the
+// missing-interpolation warning must not fire on them.
+export interface StringLit { kind: "StringLit"; value: string; span?: Span; fromFString?: true }
 export interface CharLit { kind: "CharLit"; value: number; span?: Span }
 export interface Ident { kind: "Ident"; name: string; span?: Span }
 export interface BinOp { kind: "BinOp"; op: string; left: Expr; right: Expr; span?: Span }

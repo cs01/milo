@@ -1,0 +1,10 @@
+// @error: Milo has no '++' — write 'i += 1'
+
+// `++` is a C-family reflex with an exact Milo spelling, so the parse error names
+// it rather than reporting a stray '+'.
+pub fn main(): i32 {
+    var i: i64 = 0
+    i++
+    print(i)
+    return 0
+}

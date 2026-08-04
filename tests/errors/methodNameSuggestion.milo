@@ -1,0 +1,9 @@
+// @error: did you mean 'toUpper'?
+
+// `toUpperCase` is not a typo — it is the JavaScript spelling — so edit distance
+// alone would never find it. The alias table carries it.
+pub fn main(): i32 {
+    let s = "hello"
+    print(s.toUpperCase())
+    return 0
+}

@@ -20,6 +20,8 @@ Shipped items are one-liners here — git history and the linked design docs kee
 
 Primitive types, `let`/`var`, if/else, while/for, functions, structs, enums with exhaustiveness-checked pattern matching, generics with monomorphization and inference, move semantics with use-after-move detection, second-class references (`&T`/`&mut T` in params only), closures (including escaping/move closures), traits with static dispatch and `@derive(Eq)`, operator overloading, Go-style interfaces (structural typing, vtable dispatch), `Heap<T>`, `Option<T>`, `Result<T,E>` with `!`/`?`/`??`, auto-`From` error conversion through `?`, `let`-else, string interpolation, bitwise ops, hex/binary literals, `as` casts, for-in over ranges/Vec/array/string/HashMap and any type with `next(&mut Self): Option<T>`, slicing on Vec/array/string, `pub`/private visibility with per-file enforcement, `@embedFile`, `@externalLinkage`, `@targetOs()`, HIR-based typed IR.
 
+Diagnostics carry "did you mean" suggestions on a missed method, field, or name — from an alias table for other languages' spellings (`length`, `toUpperCase`, `forEach`, `unwrap`) as well as edit distance — and a failed static call reports the real mistake (unknown type / no such static method / missing import, with the `from "std/x" import { Y }` line written out) instead of the old blanket "unknown enum". A plain string holding `${name}` warns (`missing-interpolation`) rather than silently emitting the characters.
+
 ### Type System & Safety
 
 - **Ownership**: single-owner moves, compiler-tracked drops, no GC, no RC

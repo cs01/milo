@@ -1,4 +1,8 @@
-// Fetch data from an HTTP API and parse the JSON response
+// Fetch data from an HTTP API and parse the JSON response.
+//
+// The response is a Result, so the failure has to be handled — but reading a
+// nested field out of the body is one `strPath` call, and `??` supplies the
+// default instead of a match arm per level.
 from "std/fetch" import {
     fetch
 }
@@ -8,60 +12,10 @@ pub fn main(): i32 {
     match resp {
         Result.Ok(r) => {
             print("status: ", r.status)
-
             let data = r.json()
-
-            let origin = data.get("origin")
-            match origin {
-                Option.Some(v) => {
-                    match v.asStr() {
-                        Option.Some(s) => {
-                            print("origin: ", s)
-                        }
-                        Option.None => {
-                        }
-                    }
-                }
-                Option.None => {
-                }
-            }
-
-            let headers = data.get("headers")
-            match headers {
-                Option.Some(h) => {
-                    let host = h.get("Host")
-                    match host {
-                        Option.Some(v) => {
-                            match v.asStr() {
-                                Option.Some(s) => {
-                                    print("host: ", s)
-                                }
-                                Option.None => {
-                                }
-                            }
-                        }
-                        Option.None => {
-                        }
-                    }
-                }
-                Option.None => {
-                }
-            }
-
-            let url = data.get("url")
-            match url {
-                Option.Some(v) => {
-                    match v.asStr() {
-                        Option.Some(s) => {
-                            print("url: ", s)
-                        }
-                        Option.None => {
-                        }
-                    }
-                }
-                Option.None => {
-                }
-            }
+            print("origin: ", data.strPath("origin") ?? "(none)")
+            print("host: ", data.strPath("headers.Host") ?? "(none)")
+            print("url: ", data.strPath("url") ?? "(none)")
         }
         Result.Err(msg) => {
             print("error: ", msg)

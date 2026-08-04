@@ -737,6 +737,10 @@ export class CodegenJS {
         return `${this.genExpr(expr.vec)}.some(${this.genExpr(expr.callback)})`;
       case "VecAll":
         return `${this.genExpr(expr.vec)}.every(${this.genExpr(expr.callback)})`;
+      case "VecFold":
+        // JS reduce takes (acc, elem) in the same order, so the Milo callback maps
+        // over directly; the explicit initial value keeps the empty-Vec case total.
+        return `${this.genExpr(expr.vec)}.reduce(${this.genExpr(expr.callback)}, ${this.genExpr(expr.init)})`;
       case "InterfaceCoerce":
         // JS is duck-typed: an interface value is just the concrete instance. Dispatch
         // later reads its constructor.name, so no boxing needed.

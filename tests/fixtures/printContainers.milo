@@ -1,0 +1,47 @@
+// @expect: [1, 2, 3]
+// @expect: []
+// @expect: ["a", "b"]
+// @expect: [1.5, 2.25]
+// @expect: [7, 8, 9]
+// @expect: [[1, 2], [3]]
+// @expect: [User { name: "x", age: 1 }]
+// @expect: {"k": 1}
+// @expect: v=[1, 2, 3]
+
+// print renders containers structurally instead of "<unprintable>". Length is a
+// runtime property, so this walks the Vec/HashMap at runtime rather than baking a
+// format string — the buffer it builds is freed with the rest of the print temps.
+struct User {
+    name: string, age: i32
+}
+
+pub fn main(): i32 {
+    let v: Vec<i64> = [1, 2, 3]
+    print(v)
+    let e: Vec<i64> = []
+    print(e)
+    let s: Vec<string> = ["a", "b"]
+    print(s)
+    let f: Vec<f64> = [1.5, 2.25]
+    print(f)
+    let arr: [i64; 3] = [7, 8, 9]
+    print(arr)
+
+    var nested: Vec<Vec<i64>> = Vec.new()
+    nested.push([1, 2])
+    nested.push([3])
+    print(nested)
+
+    let us: Vec<User> = [User {
+        name: "x", age: 1
+    }
+    ]
+    print(us)
+
+    var m: HashMap<string, i64> = HashMap.new()
+    m.insert("k", 1)
+    print(m)
+
+    print("v=", v)
+    return 0
+}

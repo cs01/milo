@@ -1,6 +1,6 @@
 import type { Token } from "./tokens";
 import { TokenKind } from "./tokens";
-import { Lexer } from "./lexer";
+import { Lexer, FSTRING_LBRACE, FSTRING_RBRACE } from "./lexer";
 import { ParseError } from "./diagnostics";
 import type {
   MiloType, Param, Expr, Stmt, Function, Program, StructDecl, StructField,
@@ -1535,6 +1535,24 @@ export class Parser {
       return this.parseMatchExpr(s);
     }
 
+    // Two shapes worth naming rather than reporting as a stray operator: both are
+    // reflexes from other C-family languages, and both have an exact Milo spelling.
+    // `i++` reaches here as the second '+' of `i + +?`; `a ? b : c` as the ':' left
+    // over after '?' was taken as the propagate operator.
+    const prevKind = this.pos > 0 ? this.tokens[this.pos - 1]!.kind : null;
+    if (tok.kind === TokenKind.Plus && prevKind === TokenKind.Plus) {
+      this.error(`unexpected token '${tok.kind}'`, tok, undefined, "Milo has no '++' — write 'i += 1'");
+    }
+    // A ':' with a '?' earlier on the same line is a ternary: the '?' was already
+    // taken as the propagate operator, leaving the ':' with nothing to attach to.
+    if (tok.kind === TokenKind.Colon) {
+      for (let i = this.pos - 1; i >= 0 && this.tokens[i]!.line === tok.line; i--) {
+        if (this.tokens[i]!.kind === TokenKind.Question) {
+          this.error(`unexpected token '${tok.kind}'`, tok, undefined,
+            "Milo has no '?:' — 'if' is an expression: 'let y = if cond { a } else { b }'");
+        }
+      }
+    }
     this.error(`unexpected token '${tok.kind}'`, tok);
   }
 
@@ -1671,11 +1689,15 @@ export class Parser {
 
   private parseFString(raw: string, span: Span): Expr {
     const args: Expr[] = [];
+    // Resolve the lexer's escaped-brace sentinels only when a literal run is
+    // flushed. Doing it up front would put real `{`/`}` back into `raw` and
+    // reintroduce the ambiguity the sentinels exist to remove.
+    const unescape = (s: string) => s.split(FSTRING_LBRACE).join("{").split(FSTRING_RBRACE).join("}");
     let lit = "";
     let i = 0;
     while (i < raw.length) {
       if (raw[i] === "{") {
-        if (lit.length > 0) { args.push({ kind: "StringLit", value: lit, span }); lit = ""; }
+        if (lit.length > 0) { args.push({ kind: "StringLit", value: unescape(lit), span, fromFString: true }); lit = ""; }
         i++;
         let depth = 1;
         let exprStr = "";
@@ -1700,7 +1722,7 @@ export class Parser {
         i++;
       }
     }
-    if (lit.length > 0) args.push({ kind: "StringLit", value: lit, span });
+    if (lit.length > 0) args.push({ kind: "StringLit", value: unescape(lit), span, fromFString: true });
     if (args.length === 1 && args[0].kind === "StringLit") return args[0];
     return { kind: "Call", func: "format", args, span };
   }

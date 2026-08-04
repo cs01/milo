@@ -20,6 +20,21 @@ that are load-bearing rather than cosmetic.
 as code lands. Every behavioral claim below has its probe recorded — re-run it before
 starting, and correct the entry when it lies.
 
+**This file ranks by convention violation, not by use — weigh that yourself.** An in-repo
+consumer count (excluding each module's own fixtures) puts these at **zero**: `base32`, `dl`,
+`environ`, `keys`, `pool`, `sqlite`, `testing`, `toml`, `unix`, `url`, `zip`, `zstd`; and these
+at **one**: `csv`, `cstr`, `httpmw`, `log`, `set`, `sha1`, `smt`, `sort`, `totp`, `uuid`. It is
+a weak signal — std exists for users, not this repo, and the sibling repos (emulators, milojs,
+yaml, dapweb) consume some of these — but it is the only dogfooding evidence available. So the
+Tier 5 "sharpest case" (`std/unix` and `std/net` disagreeing on error types) is a fight between
+a module with no callers and one with several. Prefer items that block programs from being
+written (struct⇄JSON, `Reader`/`Writer`, UDP, timers, enumerable `HashSet`) over convention debt
+in modules nobody calls.
+
+**`std/csv` is explicitly parked** (decision 2026-08-03). One consumer, its own fixture. Not
+worth extracting to a package, not worth further investment; it stays where it is at whatever
+state the Tier 1 decoder pass leaves it. Do not re-propose work on it.
+
 **Checked items stay** with a one-line note on what landed (unlike `backlog.md`, where
 shipped entries are deleted). This file is a record of a single audit, not a live queue.
 

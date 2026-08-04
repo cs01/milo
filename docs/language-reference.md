@@ -1212,6 +1212,51 @@ return type must match `init`, which is what the result type comes from. `reduce
 accepted as a synonym. The initial value is mandatory, so an empty `Vec` returns it
 rather than failing.
 
+### Reading elements
+
+`v[i]` panics out of range. The total reads return `Option<T>` instead, cloning the
+element out — a reference into the buffer could not survive the next `push`.
+
+```milo
+let v: Vec<i64> = [3, 1, 4]
+v.get(0)          // Some(3)
+v.get(99)         // None
+v.first()         // Some(3)
+v.last()          // Some(4)
+v.min()           // Some(1)
+v.max()           // Some(4)
+v.indexOf(4)      // Some(2)  — where, not what
+v.position((n: &i64) => n > 3)   // Some(2) — the predicate form
+v.find((n: &i64) => n > 3)       // Some(4) — the value, not the index
+```
+
+`min`/`max`/`indexOf` take the same comparable elements `sort` does — int, float,
+string, bool. There is no ordering on a struct (equality and hashing are derived
+facts; ordering is an opinion), so use `sortByKey` then `first`, or `fold`.
+
+There is no `binarySearch`: its contract is "the Vec is already sorted", which the
+compiler cannot check and a wrong answer does not announce. There is no
+`chunks`/`windows` either — both hand back a collection of slices, and a slice is a
+second-class reference that cannot be stored in a `Vec`.
+
+### Growing and shrinking
+
+```milo
+var a: Vec<string> = ["a"]
+var b: Vec<string> = ["b", "c"]
+a.extend(b)               // ["a", "b", "c"] — b is moved in, not copied
+a.retain((s: &string) => s != "b")   // ["a", "c"] — in place, no second buffer
+
+a.capacity()              // slots allocated
+a.reserve(100)            // room for 100 MORE, on top of the current len
+```
+
+`extend` takes ownership: the elements transfer bitwise, nothing is cloned, and the
+source is gone afterwards (`v.extend(other.clone())` if you still need it).
+
+`retain(pred)` is `filter`'s in-place twin — `filter` allocates a second `Vec`,
+`retain` compacts this one and runs drop glue on the elements it discards.
+
 `print` renders a `Vec` as `[a, b, c]` and a `HashMap` as `{k: v}`, recursing into
 elements — a `Vec<Vec<i64>>` prints `[[1, 2], [3]]`, and string elements are quoted
 so they can't be confused with the separators.

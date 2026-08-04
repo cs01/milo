@@ -120,7 +120,7 @@ export interface VarInfo {
 // element ops are intentionally absent.
 const MUTATING_COLLECTION_METHODS = new Set([
   "push", "pushStr", "pop", "insert", "remove", "reverse", "swap", "sort", "sortBy", "sortByKey",
-  "clear", "truncate",
+  "clear", "truncate", "extend", "retain", "reserve",
 ]);
 
 export interface CaptureInfo {
@@ -7332,6 +7332,102 @@ export class TypeChecker {
               this.error(`cannot clone Vec<${typeName(el)}>: closures cannot be cloned`, sp);
             }
             return this.setType(expr, objType);
+          }
+          // `v[i]` panics out of range; get/first/last are the total reads. The
+          // element comes back cloned — a reference into the buffer could not
+          // outlive a later push.
+          if (expr.method === "get" || expr.method === "first" || expr.method === "last") {
+            const want = expr.method === "get" ? 1 : 0;
+            if (expr.args.length !== want) {
+              this.error(`'${expr.method}' expects ${want} argument${want === 1 ? " (index)" : "s"}, got ${expr.args.length}`, sp);
+            }
+            if (want === 1 && expr.args.length === 1) {
+              const idxType = this.checkExpr(expr.args[0]);
+              if (idxType.tag !== "int" && idxType.tag !== "unknown") { this.error(`'get' index must be an integer, got ${typeName(idxType)}`, sp); }
+            }
+            return this.setType(expr, this.resolveOptionForValue(objType.element, sp));
+          }
+          // Same comparable-element gate `sort` uses. Milo has no ordering trait, so
+          // rather than invent an ordering for structs (which would be an opinion, not
+          // a fact — see the HashMap key note) min/max are refused on them outright.
+          if (expr.method === "min" || expr.method === "max") {
+            if (expr.args.length !== 0) { this.error(`'${expr.method}' takes no arguments`, sp); }
+            const el = objType.element;
+            if (el.tag !== "int" && el.tag !== "float" && el.tag !== "string" && el.tag !== "bool") {
+              this.error(`'${expr.method}' requires a Vec of a comparable type (int, float, string, bool), got Vec<${typeName(el)}>`, sp,
+                `there is no ordering on ${typeName(el)} — use 'fold' with your own comparison, or 'sortByKey' then 'first'`);
+              return this.setType(expr, { tag: "unknown" });
+            }
+            return this.setType(expr, this.resolveOptionForValue(el, sp));
+          }
+          // `find` answers "which value"; `indexOf`/`position` answer "where".
+          if (expr.method === "indexOf") {
+            if (expr.args.length !== 1) { this.error(`'indexOf' expects 1 argument`, sp); return this.setType(expr, { tag: "unknown" }); }
+            const el = objType.element;
+            if (el.tag !== "int" && el.tag !== "float" && el.tag !== "string" && el.tag !== "bool") {
+              this.error(`'indexOf' requires a Vec of a comparable type (int, float, string, bool), got Vec<${typeName(el)}>`, sp,
+                `use 'position' with a predicate instead`);
+              return this.setType(expr, { tag: "unknown" });
+            }
+            const argType = this.checkExprWithHint(expr.args[0], el);
+            if (!typeEq(el, argType) && argType.tag !== "unknown") {
+              this.error(`'indexOf': expected ${typeName(el)}, got ${typeName(argType)}`, sp);
+            }
+            return this.setType(expr, this.resolveOptionForValue({ tag: "int", bits: 64, signed: true }, sp));
+          }
+          if (expr.method === "position") {
+            if (expr.args.length !== 1) { this.error(`'position' expects 1 argument`, sp); return this.setType(expr, { tag: "unknown" }); }
+            const elemRef: TypeKind = { tag: "ref", inner: objType.element, mutable: false };
+            const cbHint: TypeKind = { tag: "fn", params: [elemRef], ret: { tag: "bool" } };
+            const cbBorrow = this.borrowDuringCallback(expr.object);
+            const cbType = this.checkExprWithHint(expr.args[0], cbHint);
+            if (cbBorrow) this.unfreeze(cbBorrow);
+            if (cbType.tag !== "fn") { this.error(`'position' argument must be a function`, sp); return this.setType(expr, { tag: "unknown" }); }
+            return this.setType(expr, this.resolveOptionForValue({ tag: "int", bits: 64, signed: true }, sp));
+          }
+          // extend moves the other Vec in — its elements are transplanted, not copied,
+          // so there is no clone and no way to touch the source afterwards.
+          if (expr.method === "extend") {
+            if (expr.args.length !== 1) { this.error(`'extend' expects 1 argument (a Vec to append)`, sp); return this.setType(expr, { tag: "void" }); }
+            if (!this.isRootMutable(expr.object)) {
+              this.error(`cannot extend an immutable Vec`, sp, `declare with 'var' to make it mutable`);
+            }
+            const otherType = this.checkExprWithHint(expr.args[0], objType);
+            if (otherType.tag === "ref") {
+              this.error(`'extend' takes ownership of the other Vec`, sp, `clone it if you still need it: 'v.extend(other.clone())'`);
+            } else if (!typeEq(objType, otherType) && otherType.tag !== "unknown") {
+              this.error(`'extend': expected ${typeName(objType)}, got ${typeName(otherType)}`, sp);
+            }
+            this.tryMove(expr.args[0]);
+            return this.setType(expr, { tag: "void" });
+          }
+          // retain is filter's in-place twin: no second buffer, and the rejected
+          // elements are dropped rather than leaked.
+          if (expr.method === "retain") {
+            if (expr.args.length !== 1) { this.error(`'retain' expects 1 argument (predicate)`, sp); return this.setType(expr, { tag: "void" }); }
+            if (!this.isRootMutable(expr.object)) {
+              this.error(`cannot retain on an immutable Vec`, sp, `declare with 'var' to make it mutable`);
+            }
+            const elemRef: TypeKind = { tag: "ref", inner: objType.element, mutable: false };
+            const cbHint: TypeKind = { tag: "fn", params: [elemRef], ret: { tag: "bool" } };
+            const cbBorrow = this.borrowDuringCallback(expr.object);
+            const cbType = this.checkExprWithHint(expr.args[0], cbHint);
+            if (cbBorrow) this.unfreeze(cbBorrow);
+            if (cbType.tag !== "fn") { this.error(`'retain' argument must be a predicate function`, sp); }
+            return this.setType(expr, { tag: "void" });
+          }
+          if (expr.method === "capacity") {
+            if (expr.args.length !== 0) { this.error(`'capacity' takes no arguments`, sp); }
+            return this.setType(expr, { tag: "int", bits: 64, signed: true });
+          }
+          if (expr.method === "reserve") {
+            if (expr.args.length !== 1) { this.error(`'reserve' expects 1 argument (extra capacity)`, sp); return this.setType(expr, { tag: "void" }); }
+            if (!this.isRootMutable(expr.object)) {
+              this.error(`cannot reserve on an immutable Vec`, sp, `declare with 'var' to make it mutable`);
+            }
+            const nType = this.checkExpr(expr.args[0]);
+            if (nType.tag !== "int" && nType.tag !== "unknown") { this.error(`'reserve': expected an integer, got ${typeName(nType)}`, sp); }
+            return this.setType(expr, { tag: "void" });
           }
           this.error(`Vec has no method '${expr.method}'`, sp, memberHint(expr.method, VEC_MEMBERS));
           return this.setType(expr, { tag: "unknown" });

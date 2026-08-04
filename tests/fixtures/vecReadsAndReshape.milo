@@ -1,0 +1,98 @@
+// @expect: 3
+// @expect: -1
+// @expect: 3
+// @expect: 5
+// @expect: 1
+// @expect: 5
+// @expect: 2
+// @expect: -1
+// @expect: 2
+// @expect: -7
+// @expect: -7
+// @expect: -7
+// @expect: [3, 4, 5]
+// @expect: ["a", "b", "c", "d"]
+// @expect: a
+// @expect: d
+// @expect: 2
+// @expect: ["alpha", "gamma", "delta"]
+// @expect: 1
+// @expect: keep
+// @expect: ["seed", "x1", "x2"]
+// @expect: true
+// @expect: 0
+// @expect: [1]
+
+// The total reads (get/first/last/min/max/indexOf/position) return Option, so an
+// empty Vec or an out-of-range index answers None instead of panicking. extend
+// moves the other Vec in; retain is filter without the second buffer.
+struct Item {
+    name: string, n: i64
+}
+
+fn makeVec(): Vec<string> {
+    var v: Vec<string> = []
+    v.push("x1")
+    v.push("x2")
+    return v
+}
+
+pub fn main(): i32 {
+    var v: Vec<i64> = [3, 1, 4, 1, 5]
+    print(v.get(0)!)
+    print(v.get(99) ?? -1)
+    print(v.first()!)
+    print(v.last()!)
+    print(v.min()!)
+    print(v.max()!)
+    print(v.indexOf(4)!)
+    print(v.indexOf(99) ?? -1)
+    print(v.position((x: &i64) => x > 3)!)
+
+    var empty: Vec<i64> = []
+    print(empty.first() ?? -7)
+    print(empty.last() ?? -7)
+    print(empty.min() ?? -7)
+
+    v.retain((x: &i64) => x != 1)
+    print(v)
+
+    var a: Vec<string> = ["a", "b"]
+    var b: Vec<string> = ["c", "d"]
+    a.extend(b)
+    print(a)
+    print(a.min()!)
+    print(a.max()!)
+    print(a.indexOf("c")!)
+
+    // retain runs drop glue on what it discards, for strings and for struct fields
+    var names: Vec<string> = ["alpha", "beta", "gamma", "delta"]
+    names.retain((s: &string) => s.len() == 5)
+    print(names)
+
+    var items: Vec<Item> = []
+    items.push(Item {
+        name: "keep", n: 1
+    }
+    )
+    items.push(Item {
+        name: "toss", n: 2
+    }
+    )
+    items.retain((it: &Item) => it.n != 2)
+    print(items.len())
+    print(items[0].name)
+
+    // extend from a temporary: the source's spine is freed exactly once
+    var acc: Vec<string> = ["seed"]
+    acc.extend(makeVec())
+    print(acc)
+
+    var r: Vec<i64> = []
+    r.reserve(64)
+    print(r.capacity() >= 64)
+    print(r.len())
+    r.push(1)
+    print(r)
+    return 0
+}

@@ -1,0 +1,75 @@
+// @skip-os: win32
+// Not a Reader/Writer limitation: a std/net TcpListener.bind + TcpStream.connect
+// round-trip with no streams in it at all dies the same way under Wine (no output,
+// exit 9), which is why every other TcpStream fixture is skipped here too. The raw
+// std/os socket path (greenThreadEcho) does run. Real Windows in CI is the
+// authority; unskip when std/net itself is verified there.
+
+// A line protocol over TCP through the Reader/Writer spine. The point of the
+// borrowed `stream()` view: the same socket is read by a BufReader and written by
+// a BufWriter at the same time, which an owning wrapper could not express.
+// @expect: server got: ping
+// @expect: client got: pong
+from "std/net" import {
+    TcpListener, TcpStream, ip4
+}
+from "std/io" import {
+    BufReader, BufWriter, FdStream
+}
+from "std/runtime" import {
+    Task, schedulerRunToCompletion
+}
+from "std/os" import {
+    getSockPort
+}
+
+fn serve(lis: TcpListener): void {
+    match lis.accept() {
+        Result.Ok(conn) => {
+            var r = BufReader<FdStream>.new(conn.stream())
+            var w = BufWriter<FdStream>.new(conn.stream())
+            match r.readLine()! {
+                Option.Some(line) => {
+                    print("server got: " + line)
+                    w.writeLine("pong")!
+                    // Explicit: the reply has to be on the wire before this task
+                    // ends and `conn` closes the socket underneath the writer.
+                    w.flush()!
+                }
+                Option.None => {
+                    print("server got: <eof>")
+                }
+            }
+        }
+        Result.Err(_e) => {
+            print("accept failed")
+        }
+    }
+}
+
+pub fn main(): i32 {
+    let lis = TcpListener.bind(0)!
+    let port = getSockPort(lis.fd) as u16
+    Task.spawn(move(): void => {
+        serve(lis)
+    }
+    )
+
+    let cli = TcpStream.connect(ip4(127, 0, 0, 1), port)!
+    var w = BufWriter<FdStream>.new(cli.stream())
+    w.writeLine("ping")!
+    w.flush()!
+    // main is not a green task, so the server above has not run yet. Drain the
+    // scheduler before reading, or the blocking read below waits on nobody.
+    schedulerRunToCompletion()
+    var r = BufReader<FdStream>.new(cli.stream())
+    match r.readLine()! {
+        Option.Some(line) => {
+            print("client got: " + line)
+        }
+        Option.None => {
+            print("client got: <eof>")
+        }
+    }
+    return 0
+}

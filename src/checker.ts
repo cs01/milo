@@ -400,6 +400,12 @@ export class TypeChecker {
   private inherentImpls = new Map<string, ImplInfo>();
   private genericImpls = new Map<string, { impl: import("./ast").ImplDecl; program: Program }[]>();
   private _pendingImplFns: Function[] = [];
+  // Trait bounds on a generic STRUCT's type params, checked after every impl has
+  // registered. A struct is monomorphized as soon as a field mentions it, which can
+  // be before `impl Reader for File` exists — checking eagerly would reject the
+  // legal case, so the verdict waits until the impl tables are complete.
+  private _pendingStructBounds: { struct: string; mangled: string; param: string; concrete: TypeKind; bound: string }[] = [];
+  private _boundFailedStructs = new Set<string>();
   private resolvedMethods = new Map<Expr, string>();
   private heapMethodReceivers = new Set<Expr>();
   private iteratorForIns = new Map<Stmt, { nextMethod: string; elemType: TypeKind; optionEnumName: string }>();
@@ -1036,6 +1042,13 @@ export class TypeChecker {
     const typeMap = new Map<string, TypeKind>();
     generic.typeParams.forEach((p, i) => typeMap.set(p, typeArgs[i]));
 
+    for (let i = 0; i < generic.decl.typeParams.length; i++) {
+      const tp = generic.decl.typeParams[i];
+      for (const bound of tp.bounds) {
+        this._pendingStructBounds.push({ struct: baseName, mangled, param: tp.name, concrete: typeArgs[i], bound });
+      }
+    }
+
     const variants = new Map<string, { tag: number; fields: TypeKind[] }>();
     for (const [vName, vInfo] of generic.variants) {
       variants.set(vName, {
@@ -1058,6 +1071,26 @@ export class TypeChecker {
     return mangled;
   }
 
+  // Rule on every generic-struct bound recorded so far. Callable only once the impl
+  // tables are complete — see `_pendingStructBounds`.
+  private flushStructBounds() {
+    while (this._pendingStructBounds.length > 0) {
+      for (const b of this._pendingStructBounds.splice(0)) {
+        if (this.typeImplementsTrait(typeName(b.concrete), b.bound)) continue;
+        this.error(`type '${typeName(b.concrete)}' does not implement trait '${b.bound}', required by '${b.struct}<${b.param}: ${b.bound}>'`);
+        this._boundFailedStructs.add(b.mangled);
+      }
+    }
+  }
+
+  // Bodies of a bound-violating instantiation are skipped: every one of them would
+  // re-report the violation as "type 'i64' has no method 'read'" pointing inside the
+  // library, burying the single line that names the real cause.
+  private fromBoundFailedStruct(fn: Function): boolean {
+    const sep = fn.name.indexOf("$");
+    return sep > 0 && this._boundFailedStructs.has(fn.name.slice(0, sep));
+  }
+
   private monomorphizeStruct(baseName: string, typeArgs: TypeKind[]): string {
     const mangled = `${baseName}_${typeArgs.map(a => this.mangleTypeName(a)).join("_")}`;
     if (this.structs.has(mangled)) return mangled;
@@ -1065,6 +1098,13 @@ export class TypeChecker {
     const generic = this.genericStructs.get(baseName)!;
     const typeMap = new Map<string, TypeKind>();
     generic.typeParams.forEach((p, i) => typeMap.set(p, typeArgs[i]));
+
+    for (let i = 0; i < generic.decl.typeParams.length; i++) {
+      const tp = generic.decl.typeParams[i];
+      for (const bound of tp.bounds) {
+        this._pendingStructBounds.push({ struct: baseName, mangled, param: tp.name, concrete: typeArgs[i], bound });
+      }
+    }
 
     const fields = generic.decl.fields.map(f => ({
       name: f.name,
@@ -1969,18 +2009,24 @@ export class TypeChecker {
       if (!fn.isExtern && fn.typeParams.length === 0) this.recover(() => this.checkFunction(fn));
     }
 
+    this.flushStructBounds();
+
     // type-check impl method bodies after all registrations
     for (const fn of implFnsToCheck) {
+      if (this.fromBoundFailedStruct(fn)) continue;
       this.recover(() => this.checkFunction(fn));
     }
 
     // drain deferred impl fns from generic impl monomorphization
     while (this._pendingImplFns.length > 0) {
       const batch = this._pendingImplFns.splice(0);
+      this.flushStructBounds();
       for (const fn of batch) {
+        if (this.fromBoundFailedStruct(fn)) continue;
         this.recover(() => this.checkFunction(fn));
       }
     }
+    this.flushStructBounds();
 
     // Any deferred-inference Vec that never saw a `push` couldn't have its element
     // resolved — fall back to the original "add an annotation" error.
@@ -6754,8 +6800,10 @@ export class TypeChecker {
       const typeArgs = expr.typeArgs.map(ta => this.resolve(ta));
       const mangled = this.monomorphizeStruct(expr.enumName, typeArgs);
       // process pending impl methods that monomorphization may have generated
+      this.flushStructBounds();
       while (this._pendingImplFns.length > 0) {
         const fn = this._pendingImplFns.shift()!;
+        if (this.fromBoundFailedStruct(fn)) continue;
         this.checkFunction(fn);
       }
       const inherent = this.inherentImpls.get(mangled);

@@ -148,6 +148,20 @@ fn TcpStream.send(self: &TcpStream, data: &string): Result<i64, NetError>
 
 _Undocumented._
 
+### `TcpStream.stream`
+
+```milo
+fn TcpStream.stream(self: &TcpStream): FdStream
+```
+
+A non-owning std/io Reader+Writer view of this socket, so `BufReader` and
+`BufWriter` work over TCP. Borrowing rather than consuming the stream is the
+point: a request/response protocol needs to read and write the same socket,
+and a wrapper that owned it could only do one. The TcpStream must outlive the
+view — it still owns the fd and closes it on drop, and nothing checks that, so
+`TcpStream.connect(...)!.stream()` on a temporary is wrong. Bind the stream to
+a name first; see FdStream in std/io.
+
 ### `TcpStream.take`
 
 ```milo

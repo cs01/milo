@@ -14,7 +14,7 @@ impl HasValue for Box99 {
     }
 }
 
-pub fn printValue < T: HasValue > (thing: &T) {
+pub fn printValue<T: HasValue>(thing: &T) {
     print(thing.value())
 }
 

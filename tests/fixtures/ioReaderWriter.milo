@@ -1,0 +1,93 @@
+// Reader/Writer spine: in-memory adapters, buffering, composition, copyStream.
+// @expect: line: alpha
+// @expect: line: beta
+// @expect: line: gamma
+// @expect: byte: 104
+// @expect: exact: ello
+// @expect: rest:  world
+// @expect: copied 11
+// @expect: sink: hello world
+// @expect: nested 26
+// @expect: pending 5
+// @expect: flushed: abcde
+
+from "std/io" import {
+    BufReader,
+    BufWriter,
+    BytesReader,
+    BytesWriter,
+    Reader,
+    Writer,
+    copyStream
+}
+
+// A decoder written against the trait, not against any concrete source.
+fn countBytes<R: Reader>(src: &mut R): Result<i64, IoError> {
+    var total: i64 = 0
+    while true {
+        let chunk = src.read(4)?
+        if chunk.len == 0 {
+            return Result.Ok(total)
+        }
+        total = total + chunk.len
+    }
+    return Result.Ok(total)
+}
+
+fn lines(): void {
+    var r = BufReader<BytesReader>.withCapacity(BytesReader.new("alpha\r\nbeta\ngamma"), 4)
+    while true {
+        let got = r.readLine()!
+        match got {
+            Option.Some(line) => {
+                print("line: " + line)
+            }
+            Option.None => {
+                return
+            }
+        }
+    }
+}
+
+fn cursor(): void {
+    var r = BufReader<BytesReader>.withCapacity(BytesReader.new("hello world"), 3)
+    print("byte: " + r.readByte()!.toString())
+    print("exact: " + r.readExact(4)!)
+    print("rest: " + r.readAll()!)
+}
+
+fn pump(): void {
+    var src = BytesReader.new("hello world")
+    var dst = BytesWriter.new()
+    let n = copyStream(src, dst)!
+    print("copied " + n.toString())
+    print("sink: " + dst.take())
+}
+
+// BufReader is a Reader, so it stacks under a generic bound.
+fn nested(): void {
+    var r = BufReader<BytesReader>.withCapacity(BytesReader.new("abcdefghijklmnopqrstuvwxyz"), 7)
+    print("nested " + countBytes(r)!.toString())
+}
+
+fn buffered(): void {
+    var w = BufWriter<BytesWriter>.withCapacity(BytesWriter.new(), 1024)
+    w.write("abc")!
+    w.writeByte(100)!
+    w.writeByte(101)!
+    print("pending " + w.pending().toString())
+    w.flush()!
+    // The sink is inside the BufWriter now, so read it back through the trait.
+    var probe = BytesWriter.new()
+    var reread = BytesReader.new("abcde")
+    copyStream(reread, probe)!
+    print("flushed: " + probe.take())
+}
+
+fn main(): void {
+    lines()
+    cursor()
+    pump()
+    nested()
+    buffered()
+}

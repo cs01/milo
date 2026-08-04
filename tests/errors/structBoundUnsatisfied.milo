@@ -1,0 +1,37 @@
+// A trait bound on a generic STRUCT's type param is enforced, and the diagnostic
+// names the struct that required it instead of leaking "no method 'get'" errors
+// out of the wrapper's own body.
+// @error: does not implement trait 'HasValue', required by 'Wrap<T: HasValue>'
+
+trait HasValue {
+    fn value(self: &Self): i32
+}
+
+struct Empty {
+    x: i32
+}
+
+struct Wrap<T: HasValue> {
+    inner: T,
+}
+
+impl Wrap<T> {
+    fn make(inner: T): Wrap<T> {
+        var w: Wrap<T> = Wrap {
+            inner: inner
+        }
+        return w
+    }
+
+    fn get(self: &Self): i32 {
+        return self.inner.value()
+    }
+}
+
+fn main(): i32 {
+    let w = Wrap<Empty>.make(Empty {
+        x: 0
+    }
+    )
+    return w.get()
+}

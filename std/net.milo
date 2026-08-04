@@ -35,7 +35,8 @@ from "std/sync" import {
     Channel
 }
 from "std/io" import {
-    fdChannel
+    fdChannel,
+    FdStream
 }
 
 // ── NetError ──
@@ -196,6 +197,17 @@ impl TcpStream {
     // with it. Do not close the returned fd yourself.
     fn rawFd(self: &Self): i32 {
         return self.fd
+    }
+
+    // A non-owning std/io Reader+Writer view of this socket, so `BufReader` and
+    // `BufWriter` work over TCP. Borrowing rather than consuming the stream is the
+    // point: a request/response protocol needs to read and write the same socket,
+    // and a wrapper that owned it could only do one. The TcpStream must outlive the
+    // view — it still owns the fd and closes it on drop, and nothing checks that, so
+    // `TcpStream.connect(...)!.stream()` on a temporary is wrong. Bind the stream to
+    // a name first; see FdStream in std/io.
+    fn stream(self: &Self): FdStream {
+        return FdStream.onSocket(self.fd)
     }
 
     // A single read of whatever is currently available, unlike `recv()` which loops until

@@ -20,7 +20,7 @@ impl Counter {
 impl Iterator for Counter {
 }
 
-fn describe < I: Iterator > (it: I): i64 {
+fn describe<I: Iterator>(it: I): i64 {
     return 1
 }
 

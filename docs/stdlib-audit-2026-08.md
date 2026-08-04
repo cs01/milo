@@ -128,7 +128,27 @@ shipped entries are deleted). This file is a record of a single audit, not a liv
 
 ## Tier 2 — the architectural one
 
-- [ ] **No `Reader`/`Writer` abstraction.** Go's `io.Reader`/`io.Writer` and Rust's
+- [x] **No `Reader`/`Writer` abstraction.** *Shipped in `std/io`: `trait Reader { read(max) }`
+  and `trait Writer { write(data); flush() }`, both over `IoError`. Traits, not `interface`s —
+  an interface value is a fat pointer that has to be stored somewhere, and second-class
+  references make a stored `&Reader` inexpressible, so the wrapper owns its source instead:
+  `BufReader<File>` is a real struct containing a real `File`. Adapters: `FdStream` (a
+  non-owning view of any descriptor, with the socket/CRT-fd split Windows needs),
+  `BytesReader`/`BytesWriter` (in-memory), `File` itself (both traits), and
+  `TcpStream.stream()`. `BufReader<R>` gives `readByte`/`readLine`/`readUntil`/`readExact`/
+  `readAll` over one syscall per 64 KiB; `BufWriter<W>` buffers and **flushes on drop** —
+  unflushed bytes are never silently lost, and a failed drop-flush goes to stderr rather
+  than nowhere. Both re-implement their own trait, so they stack. `copyStream(src, dst)` is
+  the pipe. `File` also grew `read(n)`/`seek`/`tell`/`close`/`rawFd`/`stream`, closing the
+  streaming-file-IO half of this item. Two compiler fixes came with it: a trait bound on a
+  generic struct's type param (`struct BufReader<R: Reader>`) was parsed and thrown away —
+  it is now enforced, with the bodies of a violating instantiation suppressed so the one
+  useful error is not buried under "type 'i64' has no method 'read'" pointing inside std;
+  and the formatter emitted `fn f < T: Bound > (...)` for any bounded type param. NOT done,
+  and still worth doing: `TlsStream`, `Child`, `WsConn`, and `deflate`/`inflate` are
+  unretrofitted — TLS needs an SSL_read-aware adapter rather than an fd one.*
+
+  Original finding: Go's `io.Reader`/`io.Writer` and Rust's
   `Read`/`Write` are the spine their stdlibs hang on. Milo has interfaces *and* traits and
   uses neither here. Every source has a bespoke shape:
   ```

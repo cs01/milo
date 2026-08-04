@@ -426,9 +426,11 @@ pub extern fn pthread_join(thread: i64, retval: *u8): i32
 
 pub extern fn pthread_detach(thread: i64): i32
 
-// pthread_t is an unsigned long here, so it fits i64 and is only ever compared for
+// pthread_t is an unsigned long here. Declared u64 to match C exactly — the audit in
+// scripts/audit-extern-returns.ts checks return signedness, and a signed claim over an
+// unsigned C type is drift even when the bits are identical. Only ever compared for
 // equality (std/sync uses it to name the thread that owns a running Once).
-pub extern fn pthread_self(): i64
+pub extern fn pthread_self(): u64
 
 pub extern fn pthread_mutex_init(mutex: *u8, attr: *u8): i32
 

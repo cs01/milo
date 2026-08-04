@@ -555,7 +555,7 @@ _Undocumented._
 ### `pthread_self`
 
 ```milo
-pub fn pthread_self(): i64
+pub fn pthread_self(): u64
 ```
 
 Not the HANDLE pthread_create hands back — a thread id is what callers actually want

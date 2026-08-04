@@ -556,8 +556,8 @@ pub fn pthread_detach(thread: i64): i32 {
 // Not the HANDLE pthread_create hands back — a thread id is what callers actually want
 // here (they only compare it for equality to recognize "this same thread"), and unlike
 // GetCurrentThread()'s pseudo-handle it is unique process-wide.
-pub fn pthread_self(): i64 {
-    return GetCurrentThreadId() as i64
+pub fn pthread_self(): u64 {
+    return GetCurrentThreadId() as u64
 }
 
 pub fn pthread_rwlock_init(rwlock: *u8, _attr: *u8): i32 {

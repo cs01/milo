@@ -1110,7 +1110,7 @@ fn onceRejectReentry(p: *u8, mtx: *u8): void {
     } else {
         // Owner is not a green task, so anything on its OS thread — including a green
         // task its initializer just spawned — is downstream of it and cannot proceed.
-        reentrant = pthread_self() == nodeLoadI64(p, 40)
+        reentrant = (pthread_self() as i64) == nodeLoadI64(p, 40)
     }
     if reentrant {
         pthread_mutex_unlock(mtx)
@@ -1176,7 +1176,7 @@ impl Once {
             if _atomicLoadI64(onceStatePtr(p)) == ONCE_IDLE {
                 _atomicStoreI64(onceStatePtr(p), ONCE_RUNNING)
                 nodeStorePtr(p, 32, schedulerCurrent())
-                nodeStoreI64(p, 40, pthread_self())
+                nodeStoreI64(p, 40, pthread_self() as i64)
                 pthread_mutex_unlock(mtx)
                 return true
             }

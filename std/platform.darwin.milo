@@ -441,9 +441,10 @@ pub extern fn pthread_join(thread: i64, retval: *u8): i32
 
 pub extern fn pthread_detach(thread: i64): i32
 
-// pthread_t is a pointer here, so it fits i64 and is only ever compared for equality
-// (std/sync uses it to name the thread that owns a running Once).
-pub extern fn pthread_self(): i64
+// pthread_t is an opaque pointer here, which fits u64. Declared u64 to match the Linux
+// arm's C type so std/sync has one spelling. Only ever compared for equality (it names
+// the thread that owns a running Once).
+pub extern fn pthread_self(): u64
 
 pub extern fn pthread_mutex_init(mutex: *u8, attr: *u8): i32
 

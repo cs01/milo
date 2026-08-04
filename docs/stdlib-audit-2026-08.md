@@ -201,6 +201,26 @@ Ranked by how often real programs hit them.
   to be armed and inert.* Left out: monotonic clock, `sendTimeout`, `context.Context`-style
   cancellation (its own audit entry), `Instant` arithmetic.
 
+  **Two hazards shipped with it — fix before anyone builds on this:**
+  1. **`sleepFor`'s resolution depends on invisible global state.** With no scheduler it is a
+     `usleep` honoring microseconds; once *anything* in the process has spawned a green task,
+     sub-millisecond spans round **up to 1 ms**. So `sleepFor(Duration.micros(100))` is 100 µs
+     or 1 ms depending on whether an unrelated library spawned a task — a 10× timing swing by
+     action at a distance, which is precisely what "guides you to correct programs" forbids. It
+     is only *documented*, the weakest mitigation. Real fix: sub-millisecond deadlines in the
+     event loop (it stores epoch ms today), a scheduler change.
+  2. **One green task per timer**, each with a 1 MB reserved stack. A server arming a
+     per-request timeout at 10k rps creates 10k tasks and nothing at the call site warns. Go
+     multiplexes every timer onto one heap. `recvTimeout`/`waitReadable` are task-free select
+     arms and are the correct hot-path answer, but the API does not say so loudly enough. Real
+     fix: a timer wheel on the scheduler.
+
+  Also open: `sleepMs` and `sleepFor` are now two spellings of one act (kept to avoid churning
+  a dozen examples, but it is exactly the convention debt Tier 5 complains about); `toString`
+  emits `"us"` where Go emits `"µs"` (parse accepts both); a `Ticker` drops ticks under a slow
+  receiver, so counting ticks under-counts elapsed time — observable only because the tick
+  carries its `Instant`.
+
 - [ ] **No cancellation.** No `context.Context` analogue. `select.onTimeout(ms)` exists but
   nothing propagates cancellation down a call tree.
 

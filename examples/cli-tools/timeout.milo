@@ -41,14 +41,17 @@ pub fn printHelp(): void {
     print("  127  COMMAND not found")
 }
 
-// Seconds from a GNU-timeout duration: "30", "30s", "5m", "2h". A bare number is
-// seconds, which std's parser rejects on purpose, so that case is handled here.
+// Milliseconds from a GNU-timeout duration: "30", "30s", "0.3s", "500ms", "5m", "2h".
+// A bare number is seconds, which std's parser rejects on purpose, so that case is
+// handled here. Milliseconds, not seconds, because real `timeout(1)` takes fractional
+// durations and every deadline downstream is already in ms — rounding to whole seconds
+// here would throw away the sub-second precision `Duration.parse` just recovered.
 // 0 means "not a duration" — main already treats non-positive as an error.
 pub fn parseDuration(s: &string): i64 {
     if let Option.Some(d) = Duration.parse(s) {
-        return d.toSecs()
+        return d.toMillis()
     }
-    return s.parseInt() ?? 0
+    return (s.parseInt() ?? 0) * 1000
 }
 
 pub fn parseSignal(s: &string): i32 {
@@ -150,7 +153,7 @@ pub fn parseFlags(argv: &Vec<string>): TimeoutOpts {
                 exit(125)
             }
             let kaStr = argv[opts.cmdStart].clone()
-            opts.killAfterMs = parseDuration(kaStr) * 1000
+            opts.killAfterMs = parseDuration(kaStr)
             opts.hasKillAfter = true
             opts.cmdStart = opts.cmdStart + 1
             continue
@@ -186,8 +189,8 @@ pub fn main(): i32 {
     }
 
     let durStr = argv[cmdStart].clone()
-    let secs = parseDuration(durStr)
-    if secs <= 0 {
+    let durMs = parseDuration(durStr)
+    if durMs <= 0 {
         print("error: duration must be positive")
         return 125
     }
@@ -214,7 +217,7 @@ pub fn main(): i32 {
         i = i + 1
     }
 
-    let deadlineMs = epochMillis() + secs * 1000
+    let deadlineMs = epochMillis() + durMs
 
     // Wait on the child's exit as an EVENT rather than polling waitpid every 50ms:
     // SIGCHLD makes a pipe readable, and Select waits on that fd and the deadline together.

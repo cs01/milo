@@ -11,6 +11,43 @@ last-verified: 2026-08-03
 Source-level breaks, newest first. Milo is pre-1.0 and does not promise
 compatibility, but every break belongs here with the migration spelled out.
 
+## `Duration` accessors became methods, and `Duration` is now nanoseconds (2026-08-04)
+
+`durationSecs(d)` / `durationMillis(d)` / `durationMicros(d)` are **removed**. They are
+`d.toSecs()` / `d.toMillis()` / `d.toMicros()`, and they now have the siblings the
+free-function shape could never grow: `toNanos`, `toMins`, `toHours`, `toSecsF64`,
+`toMillisF64`. Three free functions in a flat namespace could not become nine.
+
+The representation changed with them: `Duration` was `{ totalUsec: i64 }` and is now i64
+**nanoseconds** — ±292.47 years at 1 ns resolution. The field is private (`_nanos`), so
+code that read `d.totalUsec` fails to compile rather than silently reading a value 1000×
+larger. Overflow past the range traps like any other checked i64 arithmetic;
+`Duration.parse` returns `None` instead, because it takes untrusted text.
+
+No compat shim is possible — the flat namespace has no place to put an old spelling — and
+none is wanted: the old names were the only accessors, so every call site is a one-line
+mechanical edit.
+
+    // before
+    let ms = durationMillis(since(start))
+    print("took " + ms.toString() + "ms")
+
+    // after
+    print("took ", since(start).toString())        // "1.5s", "2m3.5s", "1h30m0s"
+    let ms = since(start).toMillis()               // when you want the number
+
+New in the same change: `Duration` construction (`Duration.zero/nanos/micros/millis/secs/
+mins/hours/days`), `Duration.parse` (Go-style `"1h30m"`, `"-1.5h"`, `"300ms"`, `"7d"` →
+`Option<Duration>`), `+`/`-`/`==`, `times`/`dividedBy`/`ratio`/`negated`/`abs`,
+`compare`/`isLess`/`isGreater`, `toString`, `sleepFor`, `ensureTimersLive`, and the new
+module `std/timer` (`Timer`, `Ticker`, `recvTimeout`, `waitReadable`/`waitWritable`). No
+other existing name changed.
+
+Behavioral change, not source-level: a green `sleepMs` used to busy-yield for the whole
+span and now parks on a select timer arm, so other green tasks get the CPU; and `sleepMs`
+no longer truncates its argument to `u32` (sleeps past ~71 minutes used to silently
+return early).
+
 ## `Jwt.verifyHS256` returns the validated claims, not a bool (2026-08-03)
 
 `Jwt.verifyHS256(token, secret) -> bool` checked the signature and nothing else: no

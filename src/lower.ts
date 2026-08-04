@@ -451,6 +451,26 @@ class LowerCtx {
           };
         }
         let iterType = this.typeOf(stmt.iterable);
+        // `@iter` field: the loop walks `wrapper.field`, so from here down this is an
+        // ordinary Vec/HashMap/array/string for-in — nothing else in the pipeline
+        // needs to know a struct was involved.
+        const delegateField = this.c.iterDelegates.get(stmt);
+        let iterableExpr: HIRExpr;
+        if (delegateField) {
+          const structTy = iterType?.tag === "ref" ? iterType.inner : iterType;
+          const info = structTy?.tag === "struct" ? this.c.structs.get(structTy.name) : undefined;
+          const fieldType = info?.fields.find(f => f.name === delegateField)?.type ?? { tag: "unknown" as const };
+          iterableExpr = {
+            kind: "FieldAccess",
+            object: this.lowerExpr(stmt.iterable),
+            field: delegateField,
+            type: fieldType,
+            span: stmt.span,
+          };
+          iterType = fieldType;
+        } else {
+          iterableExpr = this.lowerExpr(stmt.iterable);
+        }
         // slices (&[T]) and &Vec iterate like vecs — same non-owning %Vec layout
         if (iterType?.tag === "ref" && (iterType.inner.tag === "array" || iterType.inner.tag === "vec")) {
           iterType = iterType.inner;
@@ -499,7 +519,7 @@ class LowerCtx {
           varName2: stmt.varName2,
           varType,
           varType2,
-          iterable: this.lowerExpr(stmt.iterable),
+          iterable: iterableExpr,
           iterableKind,
           body: stmt.body.map(s => this.lowerStmt(s, fnRetType)),
           ...(forInvariants.length > 0 && { invariants: forInvariants }),
@@ -779,6 +799,9 @@ class LowerCtx {
         if (expr.enumName === "HashMap" && expr.variant === "new" && type.tag === "hashmap") {
           return { kind: "HashMapNew", keyType: type.key, valueType: type.value, type, span: expr.span };
         }
+        if (expr.enumName === "HashMap" && expr.variant === "withCapacity" && type.tag === "hashmap") {
+          return { kind: "HashMapWithCapacity", capacity: this.lowerExpr(expr.args[0]), keyType: type.key, valueType: type.value, type, span: expr.span };
+        }
         // `Kind.tryFrom(n)` → Option<Kind>. `type` is the Option enum the checker inferred.
         const reprInfo = this.c.enums.get(expr.enumName);
         if (expr.variant === "tryFrom" && reprInfo?.reprType && type.tag === "enum") {
@@ -1055,6 +1078,47 @@ class LowerCtx {
           if (expr.method === "clone") {
             return { kind: "VecClone", object: this.lowerExpr(expr.object), elementType: objType.element, type, span: expr.span };
           }
+          if (expr.method === "get" || expr.method === "first" || expr.method === "last") {
+            const i64: TypeKind = { tag: "int", bits: 64, signed: true };
+            const object = this.lowerExpr(expr.object);
+            let index: import("./hir").HIRExpr;
+            if (expr.method === "get") {
+              index = this.lowerExpr(expr.args[0]);
+            } else if (expr.method === "first") {
+              index = { kind: "IntLit", value: 0n, type: i64, span: expr.span };
+            } else {
+              // last() = get(len - 1); an empty Vec gives -1, which the bounds test
+              // rejects into None rather than wrapping around.
+              index = {
+                kind: "BinOp", op: "-",
+                left: { kind: "VecLen", object: this.lowerExpr(expr.object), type: i64, span: expr.span },
+                right: { kind: "IntLit", value: 1n, type: i64, span: expr.span },
+                type: i64, span: expr.span,
+              };
+            }
+            return { kind: "VecGetOpt", object, index, elementType: objType.element, optionEnumName: type.tag === "enum" ? type.name : "", type, span: expr.span };
+          }
+          if (expr.method === "min" || expr.method === "max") {
+            return { kind: "VecMinMax", object: this.lowerExpr(expr.object), elementType: objType.element, isMax: expr.method === "max", optionEnumName: type.tag === "enum" ? type.name : "", type, span: expr.span };
+          }
+          if (expr.method === "indexOf") {
+            return { kind: "VecIndexOf", vec: this.lowerExpr(expr.object), value: this.lowerExpr(expr.args[0]), elementType: objType.element, optionEnumName: type.tag === "enum" ? type.name : "", type, span: expr.span };
+          }
+          if (expr.method === "position") {
+            return { kind: "VecPosition", vec: this.lowerExpr(expr.object), callback: this.lowerExpr(expr.args[0]), elementType: objType.element, optionEnumName: type.tag === "enum" ? type.name : "", type, span: expr.span };
+          }
+          if (expr.method === "extend") {
+            return { kind: "VecExtend", object: this.lowerExpr(expr.object), other: this.lowerExpr(expr.args[0]), elementType: objType.element, type, span: expr.span };
+          }
+          if (expr.method === "retain") {
+            return { kind: "VecRetain", object: this.lowerExpr(expr.object), callback: this.lowerExpr(expr.args[0]), elementType: objType.element, type, span: expr.span };
+          }
+          if (expr.method === "capacity") {
+            return { kind: "VecCapacity", object: this.lowerExpr(expr.object), type, span: expr.span };
+          }
+          if (expr.method === "reserve") {
+            return { kind: "VecReserve", object: this.lowerExpr(expr.object), additional: this.lowerExpr(expr.args[0]), elementType: objType.element, type, span: expr.span };
+          }
         }
         if (objType?.tag === "hashmap") {
           if (expr.method === "insert") {
@@ -1075,6 +1139,24 @@ class LowerCtx {
           }
           if (expr.method === "len") {
             return { kind: "HashMapLen", object: this.lowerExpr(expr.object), type, span: expr.span };
+          }
+          if (expr.method === "isEmpty") {
+            const i64: TypeKind = { tag: "int", bits: 64, signed: true };
+            return {
+              kind: "BinOp", op: "==",
+              left: { kind: "HashMapLen", object: this.lowerExpr(expr.object), type: i64, span: expr.span },
+              right: { kind: "IntLit", value: 0n, type: i64, span: expr.span },
+              type, span: expr.span,
+            };
+          }
+          if (expr.method === "clone") {
+            return { kind: "HashMapClone", object: this.lowerExpr(expr.object), type, span: expr.span };
+          }
+          if (expr.method === "clear") {
+            return { kind: "HashMapClear", object: this.lowerExpr(expr.object), type, span: expr.span };
+          }
+          if (expr.method === "keys" || expr.method === "values") {
+            return { kind: "HashMapEntries", object: this.lowerExpr(expr.object), field: expr.method === "keys" ? "key" : "value", type, span: expr.span };
           }
         }
         if (objType?.tag === "string") {

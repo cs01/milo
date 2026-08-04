@@ -61,6 +61,12 @@ export type HIRExpr =
   | { kind: "HashMapContains"; map: HIRExpr; key: HIRExpr; type: TypeKind; span?: Span }
   | { kind: "HashMapRemove"; map: HIRExpr; key: HIRExpr; type: TypeKind; span?: Span }
   | { kind: "HashMapLen"; object: HIRExpr; type: TypeKind; span?: Span }
+  | { kind: "HashMapWithCapacity"; capacity: HIRExpr; keyType: TypeKind; valueType: TypeKind; type: TypeKind; span?: Span }
+  | { kind: "HashMapClone"; object: HIRExpr; type: TypeKind; span?: Span }
+  | { kind: "HashMapClear"; object: HIRExpr; type: TypeKind; span?: Span }
+  // `keys()`/`values()` snapshot the occupied slots into a fresh Vec (deep-cloned —
+  // the map keeps its own copy). `field` says which half of the entry to collect.
+  | { kind: "HashMapEntries"; object: HIRExpr; field: "key" | "value"; type: TypeKind; span?: Span }
   | { kind: "StringWithCapacity"; capacity: HIRExpr; type: TypeKind; span?: Span }
   | { kind: "StringPush"; str: HIRExpr; byte: HIRExpr; type: TypeKind; span?: Span }
   | { kind: "StringPushStr"; str: HIRExpr; other: HIRExpr; type: TypeKind; span?: Span }
@@ -92,6 +98,16 @@ export type HIRExpr =
   | { kind: "VecRemove"; object: HIRExpr; index: HIRExpr; elementType: TypeKind; type: TypeKind; span?: Span }
   | { kind: "VecTruncate"; object: HIRExpr; length: HIRExpr; elementType: TypeKind; type: TypeKind; span?: Span }
   | { kind: "VecContains"; vec: HIRExpr; value: HIRExpr; elementType: TypeKind; type: TypeKind; span?: Span }
+  // Total indexed read: `get(i)`, and the `first()`/`last()` sugar that lowers to it.
+  // Out of range yields None instead of the panic `v[i]` raises.
+  | { kind: "VecGetOpt"; object: HIRExpr; index: HIRExpr; elementType: TypeKind; optionEnumName: string; type: TypeKind; span?: Span }
+  | { kind: "VecMinMax"; object: HIRExpr; elementType: TypeKind; isMax: boolean; optionEnumName: string; type: TypeKind; span?: Span }
+  | { kind: "VecIndexOf"; vec: HIRExpr; value: HIRExpr; elementType: TypeKind; optionEnumName: string; type: TypeKind; span?: Span }
+  | { kind: "VecPosition"; vec: HIRExpr; callback: HIRExpr; elementType: TypeKind; optionEnumName: string; type: TypeKind; span?: Span }
+  | { kind: "VecExtend"; object: HIRExpr; other: HIRExpr; elementType: TypeKind; type: TypeKind; span?: Span }
+  | { kind: "VecRetain"; object: HIRExpr; callback: HIRExpr; elementType: TypeKind; type: TypeKind; span?: Span }
+  | { kind: "VecCapacity"; object: HIRExpr; type: TypeKind; span?: Span }
+  | { kind: "VecReserve"; object: HIRExpr; additional: HIRExpr; elementType: TypeKind; type: TypeKind; span?: Span }
   | { kind: "VecSort"; object: HIRExpr; elementType: TypeKind; type: TypeKind; span?: Span }
   | { kind: "VecSortBy"; object: HIRExpr; callback: HIRExpr; elementType: TypeKind; type: TypeKind; span?: Span }
   | { kind: "VecSortByKey"; object: HIRExpr; callback: HIRExpr; elementType: TypeKind; keyType: TypeKind; type: TypeKind; span?: Span }

@@ -57,6 +57,10 @@ return_stmt = "return" [ expr ] ;
 if_stmt     = "if" expr block [ "else" ( if_stmt | block ) ] ;
 while_stmt  = "while" expr { loop_contract } block ;
 for_stmt    = "for" IDENT [ "," IDENT ] "in" expr { loop_contract } block ;  (* expr is a range (a..b) or an iterable (Vec, etc.) *)
+
+(* An iterable is a range, Vec, slice, array, string, HashMap, a struct with a "next"
+   method, or a struct with an "@iter"-marked field — the loop then walks that field
+   as if it had been written out. See docs/language-reference.md. *)
 loop_contract = ( "invariant" | "decreases" ) expr ;
 break_stmt  = "break" ;      (* only valid inside a loop body; exits the innermost loop *)
 continue_stmt = "continue" ; (* only valid inside a loop body; jumps to the innermost loop's next iteration *)

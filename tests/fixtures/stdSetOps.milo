@@ -1,0 +1,79 @@
+// @expect: 2
+// @expect: false
+// @expect: 3
+// @expect: [1, 2]
+// @expect: [1, 2, 3]
+// @expect: [2]
+// @expect: [1]
+// @expect: true
+// @expect: false
+// @expect: 2
+// @expect: ["a", "b"]
+// @expect: found a
+// @expect: 2
+// @expect: 3
+// @expect: 0
+// @expect: true
+
+// A set you can enumerate: `for x in s` walks the backing map's keys via the
+// struct's `@iter` field, so it borrows and allocates nothing. Iteration order is
+// reseeded every run, so everything order-sensitive here goes through toVec+sort.
+from "std/set" import {
+    HashSet
+}
+
+pub fn main(): i32 {
+    var s: HashSet<i64> = HashSet<i64>.new()
+    s.add(1)
+    s.add(2)
+    s.add(2)
+    print(s.len())
+    print(s.isEmpty())
+
+    var sum = 0
+    for x in s {
+        sum = sum + x
+    }
+    print(sum)
+
+    var v = s.toVec()
+    v.sort()
+    print(v)
+
+    var t: HashSet<i64> = HashSet<i64>.new()
+    t.add(2)
+    t.add(3)
+    var u = s.union(t)
+    var uv = u.toVec()
+    uv.sort()
+    print(uv)
+    var iv = s.intersect(t).toVec()
+    iv.sort()
+    print(iv)
+    var dv = s.difference(t).toVec()
+    dv.sort()
+    print(dv)
+    print(s.isSubsetOf(u))
+    print(u.isSubsetOf(s))
+
+    var words: HashSet<string> = HashSet<string>.fromVec(["a", "b", "a"])
+    print(words.len())
+    var wv = words.toVec()
+    wv.sort()
+    print(wv)
+    for w in words {
+        if w == "a" {
+            print("found a")
+        }
+    }
+
+    var c = words.clone()
+    c.add("z")
+    print(words.len())
+    print(c.len())
+
+    words.clear()
+    print(words.len())
+    print(words.isEmpty())
+    return 0
+}

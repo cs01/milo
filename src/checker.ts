@@ -120,7 +120,7 @@ export interface VarInfo {
 // element ops are intentionally absent.
 const MUTATING_COLLECTION_METHODS = new Set([
   "push", "pushStr", "pop", "insert", "remove", "reverse", "swap", "sort", "sortBy", "sortByKey",
-  "clear", "truncate",
+  "clear", "truncate", "extend", "retain", "reserve",
 ]);
 
 export interface CaptureInfo {
@@ -145,7 +145,10 @@ export interface FnSig {
 }
 
 export interface StructInfo {
-  fields: { name: string; type: TypeKind; cOpaque?: boolean }[];
+  // `iterDelegate`: `@iter` on the field — `for x in wrapper` iterates this field
+  // instead of looking for a `next` method. Lets a newtype keep the container's
+  // iteration without leaking the field or paying for a snapshot.
+  fields: { name: string; type: TypeKind; cOpaque?: boolean; iterDelegate?: boolean }[];
   baseName?: string;
   typeArgs?: TypeKind[];
   isExtern?: boolean;
@@ -225,6 +228,8 @@ export interface CheckResult {
   globalTypes?: Map<string, TypeKind>;
   iteratorForIns: Map<Stmt, { nextMethod: string; elemType: TypeKind; optionEnumName: string }>;
   stringViewForIns: Map<Stmt, { mode: "lines" | "split" }>;
+  // `for x in wrapper` where the struct has an `@iter` field: the field to walk instead.
+  iterDelegates: Map<Stmt, string>;
 }
 
 interface GenericEnumInfo {
@@ -391,6 +396,7 @@ export class TypeChecker {
   private heapMethodReceivers = new Set<Expr>();
   private iteratorForIns = new Map<Stmt, { nextMethod: string; elemType: TypeKind; optionEnumName: string }>();
   private stringViewForIns = new Map<Stmt, { mode: "lines" | "split" }>();
+  private iterDelegates = new Map<Stmt, string>();
   private resolvedOperators = new Map<Expr, string>();
   private fnFieldCalls = new Set<Expr>();
   private propagateConversions = new Map<Expr, { targetEnumName: string; wrapVariant: string; wrapTag: number }>();
@@ -1052,6 +1058,7 @@ export class TypeChecker {
     const fields = generic.decl.fields.map(f => ({
       name: f.name,
       type: this.resolve(this.substituteMiloType(f.type, generic.typeParams, typeArgs)),
+      ...(f.attributes?.some(a => a.name === "iter") ? { iterDelegate: true } : {}),
     }));
     this.structs.set(mangled, {
       fields, baseName, typeArgs,
@@ -1465,6 +1472,7 @@ export class TypeChecker {
       globalTypes: this._globalTypes,
       iteratorForIns: this.iteratorForIns,
       stringViewForIns: this.stringViewForIns,
+      iterDelegates: this.iterDelegates,
     };
   }
 
@@ -1573,6 +1581,7 @@ export class TypeChecker {
         const fields = s.fields.map(f => ({
           name: f.name, type: this.resolve(f.type),
           ...(f.attributes?.some(a => a.name === "cOpaque") ? { cOpaque: true } : {}),
+          ...(f.attributes?.some(a => a.name === "iter") ? { iterDelegate: true } : {}),
         }));
         for (const f of fields) {
           if (f.type.tag === "ref") {
@@ -2761,12 +2770,34 @@ export class TypeChecker {
   // so the size assert stays meaningful. Anything else on a field is rejected: a silently
   // ignored attribute is the failure this whole feature exists to close.
   private validateFieldAttributes(s: StructDecl): void {
+    let iterFields = 0;
     for (const f of s.fields) {
       if (!f.attributes) continue;
       for (const attr of f.attributes) {
-        if (attr.name !== "cOpaque") {
+        if (attr.name === "iter") {
+          if (attr.args.length !== 0) {
+            this.error(`@iter on '${s.name}.${f.name}': takes no arguments`, s.span);
+          }
+          // The delegate must itself be something `for-in` knows how to walk. A
+          // second one would make `for x in wrapper` ambiguous with no way to say
+          // which you meant, so one per struct.
+          if (++iterFields > 1) {
+            this.error(`'${s.name}' has more than one @iter field`, s.span,
+              `a struct iterates exactly one field — mark only the container that 'for x in ${s.name.toLowerCase()}' should walk`);
+          }
+          // Read the written type rather than resolving it: on a generic decl the
+          // field's type arguments are still type parameters, and resolving
+          // `HashMap<T, bool>` here would report T as an unhashable key.
+          const ft = f.type;
+          const iterable = !ft.isRef && !ft.isRefMut && !ft.isPtr &&
+            (ft.isArray || ft.name === "Vec" || ft.name === "HashMap" || ft.name === "string");
+          if (!iterable) {
+            this.error(`@iter on '${s.name}.${f.name}': '${ft.name}' is not iterable`, s.span,
+              `mark a Vec, HashMap, array, or string field`);
+          }
+        } else if (attr.name !== "cOpaque") {
           this.error(`'@${attr.name}' is not supported on a struct field — '${s.name}.${f.name}'`, s.span,
-            `only '@cOpaque' applies to a field; it marks C-invisible padding for @cLayout`);
+            `only '@cOpaque' and '@iter' apply to a field`);
         } else if (!s.isExtern) {
           this.error(`@cOpaque on '${s.name}.${f.name}': only an 'extern struct' field can be C-invisible`, s.span,
             `a Milo struct has no C layout to be opaque against`);
@@ -3808,6 +3839,21 @@ export class TypeChecker {
           // iterating a slice (&[T]) or &Vec: deref — the loop borrows the view, not a copy
           if (iterType.tag === "ref" && (iterType.inner.tag === "array" || iterType.inner.tag === "vec")) {
             iterType = iterType.inner;
+          }
+          // `@iter` on a field redirects the loop to that field. A newtype over a
+          // container (HashSet over HashMap) then iterates exactly as the container
+          // does — same bindings, same borrow, no snapshot — instead of needing a
+          // `next` method it cannot write (an iterator would have to hold a
+          // reference into the wrapper, and references are second-class).
+          {
+            const structTy = iterType.tag === "ref" && iterType.inner.tag === "struct" ? iterType.inner : iterType;
+            if (structTy.tag === "struct") {
+              const delegate = this.structs.get(structTy.name)?.fields.find(f => f.iterDelegate);
+              if (delegate) {
+                this.iterDelegates.set(stmt, delegate.name);
+                iterType = delegate.type;
+              }
+            }
           }
           if (iterType.tag === "vec") {
             const elemRef: TypeKind = { tag: "ref", inner: iterType.element, mutable: false };
@@ -5321,6 +5367,15 @@ export class TypeChecker {
       this.exprTypes.set(expr, hint);
       return hint;
     }
+    if (expr.kind === "EnumLit" && expr.enumName === "HashMap" && expr.variant === "withCapacity" && hint?.tag === "hashmap") {
+      if (expr.args.length !== 1) { this.error(`'HashMap.withCapacity' expects 1 argument (capacity), got ${expr.args.length}`, expr.span); }
+      else {
+        const c = this.checkExpr(expr.args[0]);
+        if (c.tag !== "int" && c.tag !== "unknown") this.error(`'HashMap.withCapacity': capacity must be an integer, got ${typeName(c)}`, expr.span);
+      }
+      this.exprTypes.set(expr, hint);
+      return hint;
+    }
     if (hint && expr.kind === "ArrayLit" && hint.tag === "array") {
       for (const elem of expr.elements) {
         this.checkExprWithHint(elem, hint.element);
@@ -6390,9 +6445,9 @@ export class TypeChecker {
           this.error(`cannot infer Vec element type — add a type annotation: 'let v: Vec<T> = Vec.${expr.variant}(...)'`, sp);
           return this.setType(expr, { tag: "unknown" });
         }
-        if (expr.enumName === "HashMap" && expr.variant === "new") {
-          if (expr.args.length !== 0) this.error(`'HashMap.new' takes no arguments`, sp);
-          this.error(`cannot infer HashMap types — add a type annotation: 'let m: HashMap<K, V> = HashMap.new()'`, sp);
+        if (expr.enumName === "HashMap" && (expr.variant === "new" || expr.variant === "withCapacity")) {
+          if (expr.variant === "new" && expr.args.length !== 0) this.error(`'HashMap.new' takes no arguments`, sp);
+          this.error(`cannot infer HashMap types — add a type annotation: 'let m: HashMap<K, V> = HashMap.${expr.variant}(${expr.variant === "new" ? "" : "n"})'`, sp);
           return this.setType(expr, { tag: "unknown" });
         }
         const genericInfo = this.genericEnums.get(expr.enumName);
@@ -7324,6 +7379,102 @@ export class TypeChecker {
             }
             return this.setType(expr, objType);
           }
+          // `v[i]` panics out of range; get/first/last are the total reads. The
+          // element comes back cloned — a reference into the buffer could not
+          // outlive a later push.
+          if (expr.method === "get" || expr.method === "first" || expr.method === "last") {
+            const want = expr.method === "get" ? 1 : 0;
+            if (expr.args.length !== want) {
+              this.error(`'${expr.method}' expects ${want} argument${want === 1 ? " (index)" : "s"}, got ${expr.args.length}`, sp);
+            }
+            if (want === 1 && expr.args.length === 1) {
+              const idxType = this.checkExpr(expr.args[0]);
+              if (idxType.tag !== "int" && idxType.tag !== "unknown") { this.error(`'get' index must be an integer, got ${typeName(idxType)}`, sp); }
+            }
+            return this.setType(expr, this.resolveOptionForValue(objType.element, sp));
+          }
+          // Same comparable-element gate `sort` uses. Milo has no ordering trait, so
+          // rather than invent an ordering for structs (which would be an opinion, not
+          // a fact — see the HashMap key note) min/max are refused on them outright.
+          if (expr.method === "min" || expr.method === "max") {
+            if (expr.args.length !== 0) { this.error(`'${expr.method}' takes no arguments`, sp); }
+            const el = objType.element;
+            if (el.tag !== "int" && el.tag !== "float" && el.tag !== "string" && el.tag !== "bool") {
+              this.error(`'${expr.method}' requires a Vec of a comparable type (int, float, string, bool), got Vec<${typeName(el)}>`, sp,
+                `there is no ordering on ${typeName(el)} — use 'fold' with your own comparison, or 'sortByKey' then 'first'`);
+              return this.setType(expr, { tag: "unknown" });
+            }
+            return this.setType(expr, this.resolveOptionForValue(el, sp));
+          }
+          // `find` answers "which value"; `indexOf`/`position` answer "where".
+          if (expr.method === "indexOf") {
+            if (expr.args.length !== 1) { this.error(`'indexOf' expects 1 argument`, sp); return this.setType(expr, { tag: "unknown" }); }
+            const el = objType.element;
+            if (el.tag !== "int" && el.tag !== "float" && el.tag !== "string" && el.tag !== "bool") {
+              this.error(`'indexOf' requires a Vec of a comparable type (int, float, string, bool), got Vec<${typeName(el)}>`, sp,
+                `use 'position' with a predicate instead`);
+              return this.setType(expr, { tag: "unknown" });
+            }
+            const argType = this.checkExprWithHint(expr.args[0], el);
+            if (!typeEq(el, argType) && argType.tag !== "unknown") {
+              this.error(`'indexOf': expected ${typeName(el)}, got ${typeName(argType)}`, sp);
+            }
+            return this.setType(expr, this.resolveOptionForValue({ tag: "int", bits: 64, signed: true }, sp));
+          }
+          if (expr.method === "position") {
+            if (expr.args.length !== 1) { this.error(`'position' expects 1 argument`, sp); return this.setType(expr, { tag: "unknown" }); }
+            const elemRef: TypeKind = { tag: "ref", inner: objType.element, mutable: false };
+            const cbHint: TypeKind = { tag: "fn", params: [elemRef], ret: { tag: "bool" } };
+            const cbBorrow = this.borrowDuringCallback(expr.object);
+            const cbType = this.checkExprWithHint(expr.args[0], cbHint);
+            if (cbBorrow) this.unfreeze(cbBorrow);
+            if (cbType.tag !== "fn") { this.error(`'position' argument must be a function`, sp); return this.setType(expr, { tag: "unknown" }); }
+            return this.setType(expr, this.resolveOptionForValue({ tag: "int", bits: 64, signed: true }, sp));
+          }
+          // extend moves the other Vec in — its elements are transplanted, not copied,
+          // so there is no clone and no way to touch the source afterwards.
+          if (expr.method === "extend") {
+            if (expr.args.length !== 1) { this.error(`'extend' expects 1 argument (a Vec to append)`, sp); return this.setType(expr, { tag: "void" }); }
+            if (!this.isRootMutable(expr.object)) {
+              this.error(`cannot extend an immutable Vec`, sp, `declare with 'var' to make it mutable`);
+            }
+            const otherType = this.checkExprWithHint(expr.args[0], objType);
+            if (otherType.tag === "ref") {
+              this.error(`'extend' takes ownership of the other Vec`, sp, `clone it if you still need it: 'v.extend(other.clone())'`);
+            } else if (!typeEq(objType, otherType) && otherType.tag !== "unknown") {
+              this.error(`'extend': expected ${typeName(objType)}, got ${typeName(otherType)}`, sp);
+            }
+            this.tryMove(expr.args[0]);
+            return this.setType(expr, { tag: "void" });
+          }
+          // retain is filter's in-place twin: no second buffer, and the rejected
+          // elements are dropped rather than leaked.
+          if (expr.method === "retain") {
+            if (expr.args.length !== 1) { this.error(`'retain' expects 1 argument (predicate)`, sp); return this.setType(expr, { tag: "void" }); }
+            if (!this.isRootMutable(expr.object)) {
+              this.error(`cannot retain on an immutable Vec`, sp, `declare with 'var' to make it mutable`);
+            }
+            const elemRef: TypeKind = { tag: "ref", inner: objType.element, mutable: false };
+            const cbHint: TypeKind = { tag: "fn", params: [elemRef], ret: { tag: "bool" } };
+            const cbBorrow = this.borrowDuringCallback(expr.object);
+            const cbType = this.checkExprWithHint(expr.args[0], cbHint);
+            if (cbBorrow) this.unfreeze(cbBorrow);
+            if (cbType.tag !== "fn") { this.error(`'retain' argument must be a predicate function`, sp); }
+            return this.setType(expr, { tag: "void" });
+          }
+          if (expr.method === "capacity") {
+            if (expr.args.length !== 0) { this.error(`'capacity' takes no arguments`, sp); }
+            return this.setType(expr, { tag: "int", bits: 64, signed: true });
+          }
+          if (expr.method === "reserve") {
+            if (expr.args.length !== 1) { this.error(`'reserve' expects 1 argument (extra capacity)`, sp); return this.setType(expr, { tag: "void" }); }
+            if (!this.isRootMutable(expr.object)) {
+              this.error(`cannot reserve on an immutable Vec`, sp, `declare with 'var' to make it mutable`);
+            }
+            const nType = this.checkExpr(expr.args[0]);
+            if (nType.tag !== "int" && nType.tag !== "unknown") { this.error(`'reserve': expected an integer, got ${typeName(nType)}`, sp); }
+            return this.setType(expr, { tag: "void" });
+          }
           this.error(`Vec has no method '${expr.method}'`, sp, memberHint(expr.method, VEC_MEMBERS));
           return this.setType(expr, { tag: "unknown" });
         }
@@ -7388,6 +7539,42 @@ export class TypeChecker {
           if (expr.method === "len") {
             if (expr.args.length !== 0) { this.error(`'len' takes no arguments`, sp); }
             return this.setType(expr, { tag: "int", bits: 64, signed: true });
+          }
+          if (expr.method === "isEmpty") {
+            if (expr.args.length !== 0) { this.error(`'isEmpty' takes no arguments`, sp); }
+            return this.setType(expr, { tag: "bool" });
+          }
+          if (expr.method === "clear") {
+            if (expr.args.length !== 0) { this.error(`'clear' takes no arguments`, sp); }
+            if (!this.isRootMutable(expr.object)) {
+              this.error(`cannot clear an immutable HashMap`, sp, `declare with 'var' to make it mutable`);
+            }
+            return this.setType(expr, { tag: "void" });
+          }
+          if (expr.method === "clone") {
+            if (expr.args.length !== 0) { this.error(`'clone' takes no arguments`, sp); }
+            for (const [what, t] of [["key", objType.key], ["value", objType.value]] as const) {
+              if (t.tag === "interface") {
+                this.error(`cannot clone a HashMap with ${what} type ${typeName(t)}: an interface value has no clone`, sp,
+                  `the concrete type is erased and the itable carries no clone slot`);
+              } else if (t.tag === "fn") {
+                this.error(`cannot clone a HashMap with ${what} type ${typeName(t)}: closures cannot be cloned`, sp);
+              }
+            }
+            return this.setType(expr, objType);
+          }
+          // keys()/values() snapshot into a Vec. Iteration order is unspecified and
+          // varies per process (the hash seed is randomized), so the snapshot is the
+          // supported way to get a stable order: collect, then sort.
+          if (expr.method === "keys" || expr.method === "values") {
+            if (expr.args.length !== 0) { this.error(`'${expr.method}' takes no arguments`, sp); }
+            const el = expr.method === "keys" ? objType.key : objType.value;
+            if (el.tag === "interface" || el.tag === "fn") {
+              this.error(`'${expr.method}' cannot copy ${typeName(el)} out of the map`, sp,
+                `iterate with 'for k, v in map' instead — it borrows rather than copies`);
+              return this.setType(expr, { tag: "unknown" });
+            }
+            return this.setType(expr, { tag: "vec", element: el });
           }
           this.error(`HashMap has no method '${expr.method}'`, sp, memberHint(expr.method, HASHMAP_MEMBERS));
           return this.setType(expr, { tag: "unknown" });

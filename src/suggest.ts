@@ -153,14 +153,16 @@ const OPERATOR_FORMS: ReadonlyMap<string, string> = new Map([
 // Builtin members per receiver, for the types whose dispatch is a hand-written
 // if-chain in the checker rather than a symbol table.
 export const VEC_MEMBERS = [
-  "push", "pop", "len", "get", "insert", "remove", "clear", "truncate", "swap",
-  "map", "filter", "fold", "each", "enumerate", "find", "any", "all", "sum",
+  "push", "pop", "len", "get", "first", "last", "insert", "remove", "clear",
+  "truncate", "swap", "extend", "retain", "map", "filter", "fold", "each",
+  "enumerate", "find", "position", "indexOf", "any", "all", "sum", "min", "max",
   "join", "contains", "isEmpty", "sort", "sortBy", "sortByKey", "reverse",
-  "slice", "clone",
+  "slice", "clone", "capacity", "reserve",
 ] as const;
 
 export const HASHMAP_MEMBERS = [
   "insert", "get", "getOrDefault", "remove", "contains", "len", "isEmpty", "clone",
+  "clear", "keys", "values",
 ] as const;
 
 export const STRING_MEMBERS = [

@@ -5280,6 +5280,28 @@ export class Codegen {
         return this.genVecContains(expr, lines);
       case "VecEnumerate":
         return this.genVecEnumerate(expr, lines);
+      case "VecGetOpt":
+        return this.genVecGetOpt(expr, lines);
+      case "VecMinMax":
+        return this.genVecMinMax(expr, lines);
+      case "VecIndexOf":
+        return this.genVecIndexOf(expr, lines);
+      case "VecPosition":
+        return this.genVecPosition(expr, lines);
+      case "VecExtend":
+        return this.genVecExtend(expr, lines);
+      case "VecRetain":
+        return this.genVecRetain(expr, lines);
+      case "VecReserve":
+        return this.genVecReserve(expr, lines);
+      case "VecCapacity": {
+        this.hasVecType = true;
+        const [ol, ov] = this.genExpr(expr.object);
+        lines.push(...ol);
+        const cap = this.nextTemp();
+        lines.push(`  ${cap} = extractvalue %Vec ${ov}, 2`);
+        return [lines, cap, "i64"];
+      }
       case "VecSort":
         return genVecSort(this, expr.object, expr.elementType, lines);
       case "VecSortBy":
@@ -5298,6 +5320,14 @@ export class Codegen {
         return this.genHashMapContains(expr, lines);
       case "HashMapRemove":
         return this.genHashMapRemove(expr, lines);
+      case "HashMapWithCapacity":
+        return this.genHashMapWithCapacity(expr, lines);
+      case "HashMapClone":
+        return this.genHashMapClone(expr, lines);
+      case "HashMapClear":
+        return this.genHashMapClear(expr, lines);
+      case "HashMapEntries":
+        return this.genHashMapEntries(expr, lines);
       case "HashMapLen": {
         this.hasHashMapType = true;
         const [ol, ov] = this.genExpr(expr.object);
@@ -6314,7 +6344,7 @@ export class Codegen {
   }
 
   // lexicographic string ordering via memcmp on common prefix, then length tiebreak
-  private genStringOrd(lines: string[], lv: string, rv: string, op: string): [string[], string, string] {
+  public genStringOrd(lines: string[], lv: string, rv: string, op: string): [string[], string, string] {
     this.needsMemcmp = true;
     const aLen = this.nextTemp();
     lines.push(`  ${aLen} = extractvalue %String ${lv}, 1`);
@@ -7487,6 +7517,481 @@ export class Codegen {
     const result = this.nextTemp();
     lines.push(`  ${result} = load i1, ptr ${resultAddr}`);
     return [lines, result, "i1"];
+  }
+
+  // Set up an `alloca Option<…>` pre-filled with None; callers branch to a "some"
+  // block that overwrites the tag and payload. Shared by get/min/max/indexOf/position.
+  private optionResultSlot(optionEnumName: string, label: string, lines: string[]): {
+    enumTy: string; addr: string; tagPtr: string; someTag: number;
+  } {
+    const enumTy = `%${optionEnumName}`;
+    const layout = this.enumLayouts.get(optionEnumName);
+    if (!layout) throw new Error(`enum layout not found for ${optionEnumName}`);
+    const none = layout.variants.get("None");
+    const some = layout.variants.get("Some");
+    if (!none || !some) throw new Error("Option enum missing Some/None variants");
+    const addr = `%__${label}.${this.scopeCounter++}.addr`;
+    this.entryAllocas.push(`  ${addr} = alloca ${enumTy}`);
+    lines.push(`  store ${enumTy} zeroinitializer, ptr ${addr}`);
+    const tagPtr = this.nextTemp();
+    lines.push(`  ${tagPtr} = getelementptr ${enumTy}, ptr ${addr}, i32 0, i32 0`);
+    lines.push(`  store i32 ${none.tag}, ptr ${tagPtr}`);
+    return { enumTy, addr, tagPtr, someTag: some.tag };
+  }
+
+  // v.get(i) / v.first() / v.last(): the total read. A negative index becomes a huge
+  // unsigned value, so the single `ult` test rejects both ends without a second compare.
+  private genVecGetOpt(expr: HIRExpr & { kind: "VecGetOpt" }, lines: string[]): [string[], string, string] {
+    this.hasVecType = true;
+    const elemTy = this.llvmType(expr.elementType);
+    const [vl, vv] = this.genExpr(expr.object);
+    lines.push(...vl);
+    const data = this.nextTemp();
+    lines.push(`  ${data} = extractvalue %Vec ${vv}, 0`);
+    const len = this.nextTemp();
+    lines.push(`  ${len} = extractvalue %Vec ${vv}, 1`);
+    const [il, iv] = this.genExpr(expr.index);
+    lines.push(...il);
+
+    const slot = this.optionResultSlot(expr.optionEnumName, "vecget", lines);
+    const inBounds = this.nextTemp();
+    lines.push(`  ${inBounds} = icmp ult i64 ${iv}, ${len}`);
+    const someLabel = this.nextLabel("vecget.some");
+    const endLabel = this.nextLabel("vecget.end");
+    lines.push(`  br i1 ${inBounds}, label %${someLabel}, label %${endLabel}`);
+    lines.push(`${someLabel}:`);
+    const elemPtr = this.nextTemp();
+    lines.push(`  ${elemPtr} = getelementptr ${elemTy}, ptr ${data}, i64 ${iv}`);
+    const cloned = this.emitDeepCloneFromPtr(lines, elemPtr, expr.elementType);
+    lines.push(`  store i32 ${slot.someTag}, ptr ${slot.tagPtr}`);
+    const payloadPtr = this.nextTemp();
+    lines.push(`  ${payloadPtr} = getelementptr ${slot.enumTy}, ptr ${slot.addr}, i32 0, i32 1`);
+    lines.push(`  store ${elemTy} ${cloned}, ptr ${payloadPtr}`);
+    lines.push(`  br label %${endLabel}`);
+    lines.push(`${endLabel}:`);
+    const result = this.nextTemp();
+    lines.push(`  ${result} = load ${slot.enumTy}, ptr ${slot.addr}`);
+    return [lines, result, slot.enumTy];
+  }
+
+  // `a <op> b` for the comparable element types min/max/sort accept.
+  private emitElemOrd(lines: string[], elemType: TypeKind, a: string, b: string, wantGreater: boolean): string {
+    const lt = this.llvmType(elemType);
+    if (elemType.tag === "string") {
+      const [, r] = this.genStringOrd(lines, a, b, wantGreater ? ">" : "<");
+      return r;
+    }
+    const out = this.nextTemp();
+    if (elemType.tag === "float") {
+      lines.push(`  ${out} = fcmp ${wantGreater ? "ogt" : "olt"} ${lt} ${a}, ${b}`);
+      return out;
+    }
+    // bool is i1: unsigned ordering makes false < true
+    const signed = elemType.tag === "int" && elemType.signed;
+    const pred = wantGreater ? (signed ? "sgt" : "ugt") : (signed ? "slt" : "ult");
+    lines.push(`  ${out} = icmp ${pred} ${lt} ${a}, ${b}`);
+    return out;
+  }
+
+  private genVecMinMax(expr: HIRExpr & { kind: "VecMinMax" }, lines: string[]): [string[], string, string] {
+    this.hasVecType = true;
+    const elemTy = this.llvmType(expr.elementType);
+    const [vl, vv] = this.genExpr(expr.object);
+    lines.push(...vl);
+    const data = this.nextTemp();
+    lines.push(`  ${data} = extractvalue %Vec ${vv}, 0`);
+    const len = this.nextTemp();
+    lines.push(`  ${len} = extractvalue %Vec ${vv}, 1`);
+
+    const slot = this.optionResultSlot(expr.optionEnumName, "vecminmax", lines);
+    const empty = this.nextTemp();
+    lines.push(`  ${empty} = icmp eq i64 ${len}, 0`);
+    const scanLabel = this.nextLabel("vecmm.scan");
+    const endLabel = this.nextLabel("vecmm.end");
+    lines.push(`  br i1 ${empty}, label %${endLabel}, label %${scanLabel}`);
+    lines.push(`${scanLabel}:`);
+
+    // Track the winning index, not the value: a String winner is cloned once, at
+    // the end, instead of on every improvement.
+    const bestAddr = this.nextTemp();
+    lines.push(`  ${bestAddr} = alloca i64`);
+    lines.push(`  store i64 0, ptr ${bestAddr}`);
+    const iAddr = this.nextTemp();
+    lines.push(`  ${iAddr} = alloca i64`);
+    lines.push(`  store i64 1, ptr ${iAddr}`);
+    const cond = this.nextLabel("vecmm.cond");
+    const body = this.nextLabel("vecmm.body");
+    const better = this.nextLabel("vecmm.better");
+    const step = this.nextLabel("vecmm.step");
+    const done = this.nextLabel("vecmm.done");
+    lines.push(`  br label %${cond}`);
+    lines.push(`${cond}:`);
+    const i = this.nextTemp();
+    lines.push(`  ${i} = load i64, ptr ${iAddr}`);
+    const more = this.nextTemp();
+    lines.push(`  ${more} = icmp ult i64 ${i}, ${len}`);
+    lines.push(`  br i1 ${more}, label %${body}, label %${done}`);
+    lines.push(`${body}:`);
+    const curPtr = this.nextTemp();
+    lines.push(`  ${curPtr} = getelementptr ${elemTy}, ptr ${data}, i64 ${i}`);
+    const cur = this.nextTemp();
+    lines.push(`  ${cur} = load ${elemTy}, ptr ${curPtr}`);
+    const bestIdx = this.nextTemp();
+    lines.push(`  ${bestIdx} = load i64, ptr ${bestAddr}`);
+    const bestPtr = this.nextTemp();
+    lines.push(`  ${bestPtr} = getelementptr ${elemTy}, ptr ${data}, i64 ${bestIdx}`);
+    const best = this.nextTemp();
+    lines.push(`  ${best} = load ${elemTy}, ptr ${bestPtr}`);
+    const wins = this.emitElemOrd(lines, expr.elementType, cur, best, expr.isMax);
+    const winsLabel = this.nextLabel("vecmm.cmpdone");
+    lines.push(`  br label %${winsLabel}`);
+    lines.push(`${winsLabel}:`);
+    lines.push(`  br i1 ${wins}, label %${better}, label %${step}`);
+    lines.push(`${better}:`);
+    const iNow = this.nextTemp();
+    lines.push(`  ${iNow} = load i64, ptr ${iAddr}`);
+    lines.push(`  store i64 ${iNow}, ptr ${bestAddr}`);
+    lines.push(`  br label %${step}`);
+    lines.push(`${step}:`);
+    const iCur = this.nextTemp();
+    lines.push(`  ${iCur} = load i64, ptr ${iAddr}`);
+    const iNext = this.nextTemp();
+    lines.push(`  ${iNext} = add i64 ${iCur}, 1`);
+    lines.push(`  store i64 ${iNext}, ptr ${iAddr}`);
+    lines.push(`  br label %${cond}`);
+    lines.push(`${done}:`);
+    const winIdx = this.nextTemp();
+    lines.push(`  ${winIdx} = load i64, ptr ${bestAddr}`);
+    const winPtr = this.nextTemp();
+    lines.push(`  ${winPtr} = getelementptr ${elemTy}, ptr ${data}, i64 ${winIdx}`);
+    const cloned = this.emitDeepCloneFromPtr(lines, winPtr, expr.elementType);
+    lines.push(`  store i32 ${slot.someTag}, ptr ${slot.tagPtr}`);
+    const payloadPtr = this.nextTemp();
+    lines.push(`  ${payloadPtr} = getelementptr ${slot.enumTy}, ptr ${slot.addr}, i32 0, i32 1`);
+    lines.push(`  store ${elemTy} ${cloned}, ptr ${payloadPtr}`);
+    lines.push(`  br label %${endLabel}`);
+    lines.push(`${endLabel}:`);
+    const result = this.nextTemp();
+    lines.push(`  ${result} = load ${slot.enumTy}, ptr ${slot.addr}`);
+    return [lines, result, slot.enumTy];
+  }
+
+  private genVecIndexOf(expr: HIRExpr & { kind: "VecIndexOf" }, lines: string[]): [string[], string, string] {
+    this.hasVecType = true;
+    const elemTy = this.llvmType(expr.elementType);
+    const [vl, vv] = this.genExpr(expr.vec);
+    lines.push(...vl);
+    const data = this.nextTemp();
+    lines.push(`  ${data} = extractvalue %Vec ${vv}, 0`);
+    const len = this.nextTemp();
+    lines.push(`  ${len} = extractvalue %Vec ${vv}, 1`);
+    const [nl, nv] = this.genExpr(expr.value);
+    lines.push(...nl);
+
+    const slot = this.optionResultSlot(expr.optionEnumName, "vecidx", lines);
+    const iAddr = this.nextTemp();
+    lines.push(`  ${iAddr} = alloca i64`);
+    lines.push(`  store i64 0, ptr ${iAddr}`);
+    const cond = this.nextLabel("vecidx.cond");
+    const body = this.nextLabel("vecidx.body");
+    const found = this.nextLabel("vecidx.found");
+    const step = this.nextLabel("vecidx.step");
+    const end = this.nextLabel("vecidx.end");
+    lines.push(`  br label %${cond}`);
+    lines.push(`${cond}:`);
+    const i = this.nextTemp();
+    lines.push(`  ${i} = load i64, ptr ${iAddr}`);
+    const more = this.nextTemp();
+    lines.push(`  ${more} = icmp ult i64 ${i}, ${len}`);
+    lines.push(`  br i1 ${more}, label %${body}, label %${end}`);
+    lines.push(`${body}:`);
+    const elemPtr = this.nextTemp();
+    lines.push(`  ${elemPtr} = getelementptr ${elemTy}, ptr ${data}, i64 ${i}`);
+    const elemVal = this.nextTemp();
+    lines.push(`  ${elemVal} = load ${elemTy}, ptr ${elemPtr}`);
+    let eq: string;
+    if (expr.elementType.tag === "string") {
+      const [, r] = this.genStringCmp(lines, elemVal, nv, true);
+      eq = r;
+    } else {
+      eq = this.nextTemp();
+      lines.push(`  ${eq} = ${expr.elementType.tag === "float" ? "fcmp oeq" : "icmp eq"} ${elemTy} ${elemVal}, ${nv}`);
+    }
+    // the string compare above may have opened blocks; land in a fresh one so the
+    // index load below is reachable from a single predecessor
+    const testLabel = this.nextLabel("vecidx.test");
+    lines.push(`  br label %${testLabel}`);
+    lines.push(`${testLabel}:`);
+    lines.push(`  br i1 ${eq}, label %${found}, label %${step}`);
+    lines.push(`${found}:`);
+    const hitIdx = this.nextTemp();
+    lines.push(`  ${hitIdx} = load i64, ptr ${iAddr}`);
+    lines.push(`  store i32 ${slot.someTag}, ptr ${slot.tagPtr}`);
+    const payloadPtr = this.nextTemp();
+    lines.push(`  ${payloadPtr} = getelementptr ${slot.enumTy}, ptr ${slot.addr}, i32 0, i32 1`);
+    lines.push(`  store i64 ${hitIdx}, ptr ${payloadPtr}`);
+    lines.push(`  br label %${end}`);
+    lines.push(`${step}:`);
+    const iCur = this.nextTemp();
+    lines.push(`  ${iCur} = load i64, ptr ${iAddr}`);
+    const iNext = this.nextTemp();
+    lines.push(`  ${iNext} = add i64 ${iCur}, 1`);
+    lines.push(`  store i64 ${iNext}, ptr ${iAddr}`);
+    lines.push(`  br label %${cond}`);
+    lines.push(`${end}:`);
+    const result = this.nextTemp();
+    lines.push(`  ${result} = load ${slot.enumTy}, ptr ${slot.addr}`);
+    return [lines, result, slot.enumTy];
+  }
+
+  private genVecPosition(expr: HIRExpr & { kind: "VecPosition" }, lines: string[]): [string[], string, string] {
+    const { fnPtr, envPtr, data, len, elemTy } = this.genVecMethodPreamble(expr.vec, expr.callback, expr.elementType, lines);
+    const slot = this.optionResultSlot(expr.optionEnumName, "vecpos", lines);
+    const iAddr = this.nextTemp();
+    lines.push(`  ${iAddr} = alloca i64`);
+    lines.push(`  store i64 0, ptr ${iAddr}`);
+    const cond = this.nextLabel("vecpos.cond");
+    const body = this.nextLabel("vecpos.body");
+    const found = this.nextLabel("vecpos.found");
+    const step = this.nextLabel("vecpos.step");
+    const end = this.nextLabel("vecpos.end");
+    lines.push(`  br label %${cond}`);
+    lines.push(`${cond}:`);
+    const i = this.nextTemp();
+    lines.push(`  ${i} = load i64, ptr ${iAddr}`);
+    const more = this.nextTemp();
+    lines.push(`  ${more} = icmp ult i64 ${i}, ${len}`);
+    lines.push(`  br i1 ${more}, label %${body}, label %${end}`);
+    lines.push(`${body}:`);
+    const elemPtr = this.nextTemp();
+    lines.push(`  ${elemPtr} = getelementptr ${elemTy}, ptr ${data}, i64 ${i}`);
+    const hit = this.nextTemp();
+    lines.push(`  ${hit} = call i1 ${fnPtr}(ptr ${envPtr}, ptr ${elemPtr})`);
+    lines.push(`  br i1 ${hit}, label %${found}, label %${step}`);
+    lines.push(`${found}:`);
+    lines.push(`  store i32 ${slot.someTag}, ptr ${slot.tagPtr}`);
+    const payloadPtr = this.nextTemp();
+    lines.push(`  ${payloadPtr} = getelementptr ${slot.enumTy}, ptr ${slot.addr}, i32 0, i32 1`);
+    lines.push(`  store i64 ${i}, ptr ${payloadPtr}`);
+    lines.push(`  br label %${end}`);
+    lines.push(`${step}:`);
+    const iNext = this.nextTemp();
+    lines.push(`  ${iNext} = add i64 ${i}, 1`);
+    lines.push(`  store i64 ${iNext}, ptr ${iAddr}`);
+    lines.push(`  br label %${cond}`);
+    lines.push(`${end}:`);
+    const result = this.nextTemp();
+    lines.push(`  ${result} = load ${slot.enumTy}, ptr ${slot.addr}`);
+    return [lines, result, slot.enumTy];
+  }
+
+  // Grow `vecPtr`'s buffer so it holds at least `needCap` elements. Leaves the
+  // %Vec's data/cap fields updated; len is the caller's business.
+  private emitVecEnsureCapacity(lines: string[], vecPtr: string, needCap: string, elemSize: number, tag: string) {
+    this.needsMalloc = true;
+    this.needsFree = true;
+    this.needsMemcpy = true;
+    const dataPtr = this.nextTemp();
+    lines.push(`  ${dataPtr} = getelementptr %Vec, ptr ${vecPtr}, i32 0, i32 0`);
+    const lenPtr = this.nextTemp();
+    lines.push(`  ${lenPtr} = getelementptr %Vec, ptr ${vecPtr}, i32 0, i32 1`);
+    const capPtr = this.nextTemp();
+    lines.push(`  ${capPtr} = getelementptr %Vec, ptr ${vecPtr}, i32 0, i32 2`);
+    const cap = this.nextTemp();
+    lines.push(`  ${cap} = load i64, ptr ${capPtr}`);
+    const enough = this.nextTemp();
+    lines.push(`  ${enough} = icmp uge i64 ${cap}, ${needCap}`);
+    const growLabel = this.nextLabel(`${tag}.grow`);
+    const doneLabel = this.nextLabel(`${tag}.gdone`);
+    lines.push(`  br i1 ${enough}, label %${doneLabel}, label %${growLabel}`);
+    lines.push(`${growLabel}:`);
+    // Geometric growth on top of the exact request, so repeated extends stay amortized.
+    const dbl = this.nextTemp();
+    lines.push(`  ${dbl} = shl i64 ${cap}, 1`);
+    const useDbl = this.nextTemp();
+    lines.push(`  ${useDbl} = icmp ugt i64 ${dbl}, ${needCap}`);
+    const newCap = this.nextTemp();
+    lines.push(`  ${newCap} = select i1 ${useDbl}, i64 ${dbl}, i64 ${needCap}`);
+    const bytes = this.nextTemp();
+    lines.push(`  ${bytes} = mul i64 ${newCap}, ${elemSize}`);
+    const newBuf = this.nextTemp();
+    lines.push(`  ${newBuf} = call ptr @malloc(i64 ${bytes})`);
+    const oldBuf = this.nextTemp();
+    lines.push(`  ${oldBuf} = load ptr, ptr ${dataPtr}`);
+    const len = this.nextTemp();
+    lines.push(`  ${len} = load i64, ptr ${lenPtr}`);
+    const copyBytes = this.nextTemp();
+    lines.push(`  ${copyBytes} = mul i64 ${len}, ${elemSize}`);
+    lines.push(`  call ptr @memcpy(ptr ${newBuf}, ptr ${oldBuf}, i64 ${copyBytes})`);
+    // A zero-cap Vec has a null buffer; free(null) is defined, but the guard keeps
+    // the "buffer or null" invariant push relies on visible at the call site.
+    const hadBuf = this.nextTemp();
+    lines.push(`  ${hadBuf} = icmp ne ptr ${oldBuf}, null`);
+    const freeLabel = this.nextLabel(`${tag}.free`);
+    const setLabel = this.nextLabel(`${tag}.set`);
+    lines.push(`  br i1 ${hadBuf}, label %${freeLabel}, label %${setLabel}`);
+    lines.push(`${freeLabel}:`);
+    lines.push(`  call void @free(ptr ${oldBuf})`);
+    lines.push(`  br label %${setLabel}`);
+    lines.push(`${setLabel}:`);
+    lines.push(`  store ptr ${newBuf}, ptr ${dataPtr}`);
+    lines.push(`  store i64 ${newCap}, ptr ${capPtr}`);
+    lines.push(`  br label %${doneLabel}`);
+    lines.push(`${doneLabel}:`);
+  }
+
+  // v.extend(other): the elements move across bitwise, so nothing is cloned and
+  // nothing is dropped. Only `other`'s spine is freed — its elements now live in
+  // the destination, and the checker has marked `other` moved so it never drops.
+  private genVecExtend(expr: HIRExpr & { kind: "VecExtend" }, lines: string[]): [string[], string, string] {
+    this.hasVecType = true;
+    this.needsFree = true;
+    this.needsMemcpy = true;
+    const elemSize = this.typeSizeOf(expr.elementType);
+
+    const [dstLines, dstPtr] = this.genLValue(expr.object);
+    lines.push(...dstLines);
+    const [srcLines, srcVal] = this.genExpr(expr.other);
+    lines.push(...srcLines);
+    const srcData = this.nextTemp();
+    lines.push(`  ${srcData} = extractvalue %Vec ${srcVal}, 0`);
+    const srcLen = this.nextTemp();
+    lines.push(`  ${srcLen} = extractvalue %Vec ${srcVal}, 1`);
+    const srcCap = this.nextTemp();
+    lines.push(`  ${srcCap} = extractvalue %Vec ${srcVal}, 2`);
+
+    const lenPtr = this.nextTemp();
+    lines.push(`  ${lenPtr} = getelementptr %Vec, ptr ${dstPtr}, i32 0, i32 1`);
+    const dstLen = this.nextTemp();
+    lines.push(`  ${dstLen} = load i64, ptr ${lenPtr}`);
+    const need = this.nextTemp();
+    lines.push(`  ${need} = add i64 ${dstLen}, ${srcLen}`);
+    this.emitVecEnsureCapacity(lines, dstPtr, need, elemSize, "vecext");
+
+    const dataPtr = this.nextTemp();
+    lines.push(`  ${dataPtr} = getelementptr %Vec, ptr ${dstPtr}, i32 0, i32 0`);
+    const dstData = this.nextTemp();
+    lines.push(`  ${dstData} = load ptr, ptr ${dataPtr}`);
+    const offBytes = this.nextTemp();
+    lines.push(`  ${offBytes} = mul i64 ${dstLen}, ${elemSize}`);
+    const tail = this.nextTemp();
+    lines.push(`  ${tail} = getelementptr i8, ptr ${dstData}, i64 ${offBytes}`);
+    const copyBytes = this.nextTemp();
+    lines.push(`  ${copyBytes} = mul i64 ${srcLen}, ${elemSize}`);
+    lines.push(`  call ptr @memcpy(ptr ${tail}, ptr ${srcData}, i64 ${copyBytes})`);
+    lines.push(`  store i64 ${need}, ptr ${lenPtr}`);
+
+    // A slice (cap 0) never owns its buffer, and a zero-cap Vec has none.
+    const owns = this.nextTemp();
+    lines.push(`  ${owns} = icmp ugt i64 ${srcCap}, 0`);
+    const freeLabel = this.nextLabel("vecext.free");
+    const endLabel = this.nextLabel("vecext.end");
+    lines.push(`  br i1 ${owns}, label %${freeLabel}, label %${endLabel}`);
+    lines.push(`${freeLabel}:`);
+    lines.push(`  call void @free(ptr ${srcData})`);
+    lines.push(`  br label %${endLabel}`);
+    lines.push(`${endLabel}:`);
+    return [lines, "0", "void"];
+  }
+
+  // v.retain(pred): one pass, compacting keepers toward the front and dropping the
+  // rest where they sit. No second buffer — that is the whole point next to filter.
+  private genVecRetain(expr: HIRExpr & { kind: "VecRetain" }, lines: string[]): [string[], string, string] {
+    this.hasVecType = true;
+    const elemTy = this.llvmType(expr.elementType);
+    const [vecLines, vecPtr] = this.genLValue(expr.object);
+    lines.push(...vecLines);
+    const [cl, cv] = this.genExpr(expr.callback);
+    lines.push(...cl);
+    const fnPtr = this.nextTemp();
+    lines.push(`  ${fnPtr} = extractvalue { ptr, ptr } ${cv}, 0`);
+    const envPtr = this.nextTemp();
+    lines.push(`  ${envPtr} = extractvalue { ptr, ptr } ${cv}, 1`);
+
+    const dataFieldPtr = this.nextTemp();
+    lines.push(`  ${dataFieldPtr} = getelementptr %Vec, ptr ${vecPtr}, i32 0, i32 0`);
+    const data = this.nextTemp();
+    lines.push(`  ${data} = load ptr, ptr ${dataFieldPtr}`);
+    const lenPtr = this.nextTemp();
+    lines.push(`  ${lenPtr} = getelementptr %Vec, ptr ${vecPtr}, i32 0, i32 1`);
+    const len = this.nextTemp();
+    lines.push(`  ${len} = load i64, ptr ${lenPtr}`);
+
+    const iAddr = this.nextTemp();
+    lines.push(`  ${iAddr} = alloca i64`);
+    lines.push(`  store i64 0, ptr ${iAddr}`);
+    const keptAddr = this.nextTemp();
+    lines.push(`  ${keptAddr} = alloca i64`);
+    lines.push(`  store i64 0, ptr ${keptAddr}`);
+
+    const cond = this.nextLabel("vecret.cond");
+    const body = this.nextLabel("vecret.body");
+    const keep = this.nextLabel("vecret.keep");
+    const dropIt = this.nextLabel("vecret.drop");
+    const step = this.nextLabel("vecret.step");
+    const end = this.nextLabel("vecret.end");
+    lines.push(`  br label %${cond}`);
+    lines.push(`${cond}:`);
+    const i = this.nextTemp();
+    lines.push(`  ${i} = load i64, ptr ${iAddr}`);
+    const more = this.nextTemp();
+    lines.push(`  ${more} = icmp ult i64 ${i}, ${len}`);
+    lines.push(`  br i1 ${more}, label %${body}, label %${end}`);
+    lines.push(`${body}:`);
+    const elemPtr = this.nextTemp();
+    lines.push(`  ${elemPtr} = getelementptr ${elemTy}, ptr ${data}, i64 ${i}`);
+    const hit = this.nextTemp();
+    lines.push(`  ${hit} = call i1 ${fnPtr}(ptr ${envPtr}, ptr ${elemPtr})`);
+    lines.push(`  br i1 ${hit}, label %${keep}, label %${dropIt}`);
+    lines.push(`${keep}:`);
+    const kept = this.nextTemp();
+    lines.push(`  ${kept} = load i64, ptr ${keptAddr}`);
+    const dstSlot = this.nextTemp();
+    lines.push(`  ${dstSlot} = getelementptr ${elemTy}, ptr ${data}, i64 ${kept}`);
+    const val = this.nextTemp();
+    lines.push(`  ${val} = load ${elemTy}, ptr ${elemPtr}`);
+    lines.push(`  store ${elemTy} ${val}, ptr ${dstSlot}`);
+    const keptNext = this.nextTemp();
+    lines.push(`  ${keptNext} = add i64 ${kept}, 1`);
+    lines.push(`  store i64 ${keptNext}, ptr ${keptAddr}`);
+    lines.push(`  br label %${step}`);
+    lines.push(`${dropIt}:`);
+    if (this.needsDropCg(expr.elementType)) {
+      this.emitDropValue(lines, elemPtr, expr.elementType);
+    }
+    lines.push(`  br label %${step}`);
+    lines.push(`${step}:`);
+    const iCur = this.nextTemp();
+    lines.push(`  ${iCur} = load i64, ptr ${iAddr}`);
+    const iNext = this.nextTemp();
+    lines.push(`  ${iNext} = add i64 ${iCur}, 1`);
+    lines.push(`  store i64 ${iNext}, ptr ${iAddr}`);
+    lines.push(`  br label %${cond}`);
+    lines.push(`${end}:`);
+    const finalLen = this.nextTemp();
+    lines.push(`  ${finalLen} = load i64, ptr ${keptAddr}`);
+    lines.push(`  store i64 ${finalLen}, ptr ${lenPtr}`);
+    return [lines, "0", "void"];
+  }
+
+  private genVecReserve(expr: HIRExpr & { kind: "VecReserve" }, lines: string[]): [string[], string, string] {
+    this.hasVecType = true;
+    const elemSize = this.typeSizeOf(expr.elementType);
+    const [vecLines, vecPtr] = this.genLValue(expr.object);
+    lines.push(...vecLines);
+    const [nLines, nRaw] = this.genExpr(expr.additional);
+    lines.push(...nLines);
+    this.emitNonNegativeCheck(lines, nRaw, "capacity", expr.span);
+    const lenPtr = this.nextTemp();
+    lines.push(`  ${lenPtr} = getelementptr %Vec, ptr ${vecPtr}, i32 0, i32 1`);
+    const len = this.nextTemp();
+    lines.push(`  ${len} = load i64, ptr ${lenPtr}`);
+    // reserve(n) is "room for n MORE", matching Rust — the count a writer has in
+    // hand is almost always how many they are about to push, not the final total.
+    const need = this.nextTemp();
+    lines.push(`  ${need} = add i64 ${len}, ${nRaw}`);
+    this.emitVecEnsureCapacity(lines, vecPtr, need, elemSize, "vecrsv");
+    return [lines, "0", "void"];
   }
 
   private genVecEnumerate(expr: HIRExpr & { kind: "VecEnumerate" }, lines: string[]): [string[], string, string] {
@@ -8676,6 +9181,15 @@ export class Codegen {
       this.emitDropValue(lines, existingValPtr, valueType);
     }
     lines.push(`  store ${valTy} ${valVal}, ptr ${existingValPtr}`);
+    // The map keeps the key it already has, so the one just handed in has no owner:
+    // the checker moved it out of the caller and this path never stores it. Without
+    // this, re-inserting a `String` key leaked its buffer on every duplicate.
+    if (this.needsDropCg(keyType)) {
+      const dupKeyAddr = this.nextTemp();
+      lines.push(`  ${dupKeyAddr} = alloca ${keyTy}`);
+      lines.push(`  store ${keyTy} ${keyVal}, ptr ${dupKeyAddr}`);
+      this.emitDropValue(lines, dupKeyAddr, keyType);
+    }
     lines.push(`  br label %${insertDone}`);
 
     // empty or tombstone: insert here
@@ -8899,6 +9413,250 @@ export class Codegen {
 
     lines.push(`${doneLabel}:`);
     return [lines, "0", "void"];
+  }
+
+  // HashMap.withCapacity(n): pre-size the table so inserting n entries never rehashes.
+  // Insert grows when (len+1)*4 >= cap*3, so the table must hold cap > 4(n+1)/3; the
+  // loop rounds that up to a power of two (the mask-based probe requires one).
+  private genHashMapWithCapacity(expr: HIRExpr & { kind: "HashMapWithCapacity" }, lines: string[]): [string[], string, string] {
+    this.hasHashMapType = true;
+    this.needsMalloc = true;
+    this.needsMemset = true;
+    const entryTy = this.hashMapEntryType(expr.keyType, expr.valueType);
+    const [capLines, nVal] = this.genExpr(expr.capacity);
+    lines.push(...capLines);
+    this.emitNonNegativeCheck(lines, nVal, "capacity", expr.span);
+
+    const nPlus1 = this.nextTemp();
+    lines.push(`  ${nPlus1} = add i64 ${nVal}, 1`);
+    const scaled = this.nextTemp();
+    lines.push(`  ${scaled} = mul i64 ${nPlus1}, 4`);
+    const wantDiv = this.nextTemp();
+    lines.push(`  ${wantDiv} = udiv i64 ${scaled}, 3`);
+    const want = this.nextTemp();
+    lines.push(`  ${want} = add i64 ${wantDiv}, 1`);
+
+    const capSlot = this.nextTemp();
+    lines.push(`  ${capSlot} = alloca i64`);
+    lines.push(`  store i64 8, ptr ${capSlot}`);
+    const roundCond = this.nextLabel("hmwc.cond");
+    const roundBody = this.nextLabel("hmwc.body");
+    const roundEnd = this.nextLabel("hmwc.end");
+    lines.push(`  br label %${roundCond}`);
+    lines.push(`${roundCond}:`);
+    const curCap = this.nextTemp();
+    lines.push(`  ${curCap} = load i64, ptr ${capSlot}`);
+    const tooSmall = this.nextTemp();
+    lines.push(`  ${tooSmall} = icmp ult i64 ${curCap}, ${want}`);
+    lines.push(`  br i1 ${tooSmall}, label %${roundBody}, label %${roundEnd}`);
+    lines.push(`${roundBody}:`);
+    const dbl = this.nextTemp();
+    lines.push(`  ${dbl} = shl i64 ${curCap}, 1`);
+    lines.push(`  store i64 ${dbl}, ptr ${capSlot}`);
+    lines.push(`  br label %${roundCond}`);
+    lines.push(`${roundEnd}:`);
+    const cap = this.nextTemp();
+    lines.push(`  ${cap} = load i64, ptr ${capSlot}`);
+
+    const entrySize = this.nextTemp();
+    lines.push(`  ${entrySize} = getelementptr ${entryTy}, ptr null, i32 1`);
+    const entrySizeI = this.nextTemp();
+    lines.push(`  ${entrySizeI} = ptrtoint ptr ${entrySize} to i64`);
+    const totalSize = this.nextTemp();
+    lines.push(`  ${totalSize} = mul i64 ${entrySizeI}, ${cap}`);
+    const dataPtr = this.nextTemp();
+    lines.push(`  ${dataPtr} = call ptr @malloc(i64 ${totalSize})`);
+    lines.push(`  call ptr @memset(ptr ${dataPtr}, i32 0, i64 ${totalSize})`);
+
+    const s0 = this.nextTemp();
+    lines.push(`  ${s0} = insertvalue %HashMap undef, ptr ${dataPtr}, 0`);
+    const s1 = this.nextTemp();
+    lines.push(`  ${s1} = insertvalue %HashMap ${s0}, i64 0, 1`);
+    const s2 = this.nextTemp();
+    lines.push(`  ${s2} = insertvalue %HashMap ${s1}, i64 ${cap}, 2`);
+    const s3 = this.nextTemp();
+    lines.push(`  ${s3} = insertvalue %HashMap ${s2}, i64 0, 3`);
+    return [lines, s3, "%HashMap"];
+  }
+
+  private genHashMapClone(expr: HIRExpr & { kind: "HashMapClone" }, lines: string[]): [string[], string, string] {
+    this.hasHashMapType = true;
+    const [ol, ov] = this.genExpr(expr.object);
+    lines.push(...ol);
+    // emitDeepCloneFromPtr reads through a pointer; the spill is a shallow copy
+    // that is never dropped — only the clone it produces is owned by the caller.
+    const slot = this.nextTemp();
+    lines.push(`  ${slot} = alloca %HashMap`);
+    lines.push(`  store %HashMap ${ov}, ptr ${slot}`);
+    const cloned = this.emitDeepCloneFromPtr(lines, slot, expr.object.type);
+    return [lines, cloned, "%HashMap"];
+  }
+
+  // Drop every live key/value, then zero the states. Capacity and the hash seed
+  // survive — clear() is "empty this map", not "give the memory back", so a
+  // rebuild after clear() reuses the table it already paid for (Vec.clear too).
+  private genHashMapClear(expr: HIRExpr & { kind: "HashMapClear" }, lines: string[]): [string[], string, string] {
+    this.hasHashMapType = true;
+    this.needsMemset = true;
+    const mapType = expr.object.type;
+    if (mapType.tag !== "hashmap") throw new Error("HashMapClear on non-hashmap");
+    const entryTy = this.hashMapEntryType(mapType.key, mapType.value);
+    const [mapPtrLines, mapPtr] = this.genLValue(expr.object);
+    lines.push(...mapPtrLines);
+
+    const dataFieldPtr = this.nextTemp();
+    lines.push(`  ${dataFieldPtr} = getelementptr %HashMap, ptr ${mapPtr}, i32 0, i32 0`);
+    const data = this.nextTemp();
+    lines.push(`  ${data} = load ptr, ptr ${dataFieldPtr}`);
+    const capPtr = this.nextTemp();
+    lines.push(`  ${capPtr} = getelementptr %HashMap, ptr ${mapPtr}, i32 0, i32 2`);
+    const cap = this.nextTemp();
+    lines.push(`  ${cap} = load i64, ptr ${capPtr}`);
+    const isNull = this.nextTemp();
+    lines.push(`  ${isNull} = icmp eq ptr ${data}, null`);
+    const doLabel = this.nextLabel("hmc.do");
+    const endLabel = this.nextLabel("hmc.end");
+    lines.push(`  br i1 ${isNull}, label %${endLabel}, label %${doLabel}`);
+    lines.push(`${doLabel}:`);
+
+    if (this.needsDropCg(mapType.key) || this.needsDropCg(mapType.value)) {
+      const cond = this.nextLabel("hmc.cond");
+      const body = this.nextLabel("hmc.body");
+      const dropIt = this.nextLabel("hmc.drop");
+      const step = this.nextLabel("hmc.step");
+      const loopEnd = this.nextLabel("hmc.loopend");
+      const iAddr = this.nextTemp();
+      lines.push(`  ${iAddr} = alloca i64`);
+      lines.push(`  store i64 0, ptr ${iAddr}`);
+      lines.push(`  br label %${cond}`);
+      lines.push(`${cond}:`);
+      const i = this.nextTemp();
+      lines.push(`  ${i} = load i64, ptr ${iAddr}`);
+      const more = this.nextTemp();
+      lines.push(`  ${more} = icmp ult i64 ${i}, ${cap}`);
+      lines.push(`  br i1 ${more}, label %${body}, label %${loopEnd}`);
+      lines.push(`${body}:`);
+      const entryPtr = this.nextTemp();
+      lines.push(`  ${entryPtr} = getelementptr ${entryTy}, ptr ${data}, i64 ${i}`);
+      const state = this.nextTemp();
+      lines.push(`  ${state} = load i8, ptr ${entryPtr}`);
+      const occupied = this.nextTemp();
+      lines.push(`  ${occupied} = icmp eq i8 ${state}, 1`);
+      lines.push(`  br i1 ${occupied}, label %${dropIt}, label %${step}`);
+      lines.push(`${dropIt}:`);
+      if (this.needsDropCg(mapType.key)) {
+        const kPtr = this.nextTemp();
+        lines.push(`  ${kPtr} = getelementptr ${entryTy}, ptr ${entryPtr}, i32 0, i32 1`);
+        this.emitDropValue(lines, kPtr, mapType.key);
+      }
+      if (this.needsDropCg(mapType.value)) {
+        const vPtr = this.nextTemp();
+        lines.push(`  ${vPtr} = getelementptr ${entryTy}, ptr ${entryPtr}, i32 0, i32 2`);
+        this.emitDropValue(lines, vPtr, mapType.value);
+      }
+      lines.push(`  br label %${step}`);
+      lines.push(`${step}:`);
+      const nextI = this.nextTemp();
+      lines.push(`  ${nextI} = add i64 ${i}, 1`);
+      lines.push(`  store i64 ${nextI}, ptr ${iAddr}`);
+      lines.push(`  br label %${cond}`);
+      lines.push(`${loopEnd}:`);
+    }
+
+    const entrySize = this.nextTemp();
+    lines.push(`  ${entrySize} = getelementptr ${entryTy}, ptr null, i32 1`);
+    const entrySizeI = this.nextTemp();
+    lines.push(`  ${entrySizeI} = ptrtoint ptr ${entrySize} to i64`);
+    const totalSize = this.nextTemp();
+    lines.push(`  ${totalSize} = mul i64 ${entrySizeI}, ${cap}`);
+    lines.push(`  call ptr @memset(ptr ${data}, i32 0, i64 ${totalSize})`);
+    const lenPtr = this.nextTemp();
+    lines.push(`  ${lenPtr} = getelementptr %HashMap, ptr ${mapPtr}, i32 0, i32 1`);
+    lines.push(`  store i64 0, ptr ${lenPtr}`);
+    lines.push(`  br label %${endLabel}`);
+    lines.push(`${endLabel}:`);
+    return [lines, "0", "void"];
+  }
+
+  // keys()/values() → a fresh Vec holding a deep clone of each occupied slot's
+  // key (or value). The map keeps its own copy, so the two never share a buffer.
+  private genHashMapEntries(expr: HIRExpr & { kind: "HashMapEntries" }, lines: string[]): [string[], string, string] {
+    this.hasVecType = true;
+    this.hasHashMapType = true;
+    this.needsMalloc = true;
+    const mapType = expr.object.type;
+    if (mapType.tag !== "hashmap") throw new Error("HashMapEntries on non-hashmap");
+    const elemType = expr.field === "key" ? mapType.key : mapType.value;
+    const fieldIdx = expr.field === "key" ? 1 : 2;
+    const entryTy = this.hashMapEntryType(mapType.key, mapType.value);
+    const elemTy = this.llvmType(elemType);
+    const elemSize = this.typeSizeOf(elemType);
+
+    const [ol, ov] = this.genExpr(expr.object);
+    lines.push(...ol);
+    const data = this.nextTemp();
+    lines.push(`  ${data} = extractvalue %HashMap ${ov}, 0`);
+    const len = this.nextTemp();
+    lines.push(`  ${len} = extractvalue %HashMap ${ov}, 1`);
+    const cap = this.nextTemp();
+    lines.push(`  ${cap} = extractvalue %HashMap ${ov}, 2`);
+    const bytes = this.nextTemp();
+    lines.push(`  ${bytes} = mul i64 ${len}, ${elemSize}`);
+    const buf = this.nextTemp();
+    lines.push(`  ${buf} = call ptr @malloc(i64 ${bytes})`);
+
+    const iAddr = this.nextTemp();
+    lines.push(`  ${iAddr} = alloca i64`);
+    lines.push(`  store i64 0, ptr ${iAddr}`);
+    const outAddr = this.nextTemp();
+    lines.push(`  ${outAddr} = alloca i64`);
+    lines.push(`  store i64 0, ptr ${outAddr}`);
+    const cond = this.nextLabel("hme.cond");
+    const body = this.nextLabel("hme.body");
+    const take = this.nextLabel("hme.take");
+    const step = this.nextLabel("hme.step");
+    const end = this.nextLabel("hme.end");
+    lines.push(`  br label %${cond}`);
+    lines.push(`${cond}:`);
+    const i = this.nextTemp();
+    lines.push(`  ${i} = load i64, ptr ${iAddr}`);
+    const more = this.nextTemp();
+    lines.push(`  ${more} = icmp ult i64 ${i}, ${cap}`);
+    lines.push(`  br i1 ${more}, label %${body}, label %${end}`);
+    lines.push(`${body}:`);
+    const entryPtr = this.nextTemp();
+    lines.push(`  ${entryPtr} = getelementptr ${entryTy}, ptr ${data}, i64 ${i}`);
+    const state = this.nextTemp();
+    lines.push(`  ${state} = load i8, ptr ${entryPtr}`);
+    const occupied = this.nextTemp();
+    lines.push(`  ${occupied} = icmp eq i8 ${state}, 1`);
+    lines.push(`  br i1 ${occupied}, label %${take}, label %${step}`);
+    lines.push(`${take}:`);
+    const srcPtr = this.nextTemp();
+    lines.push(`  ${srcPtr} = getelementptr ${entryTy}, ptr ${entryPtr}, i32 0, i32 ${fieldIdx}`);
+    const cloned = this.emitDeepCloneFromPtr(lines, srcPtr, elemType);
+    const outIdx = this.nextTemp();
+    lines.push(`  ${outIdx} = load i64, ptr ${outAddr}`);
+    const dstPtr = this.nextTemp();
+    lines.push(`  ${dstPtr} = getelementptr ${elemTy}, ptr ${buf}, i64 ${outIdx}`);
+    lines.push(`  store ${elemTy} ${cloned}, ptr ${dstPtr}`);
+    const nextOut = this.nextTemp();
+    lines.push(`  ${nextOut} = add i64 ${outIdx}, 1`);
+    lines.push(`  store i64 ${nextOut}, ptr ${outAddr}`);
+    lines.push(`  br label %${step}`);
+    lines.push(`${step}:`);
+    const nextI = this.nextTemp();
+    lines.push(`  ${nextI} = add i64 ${i}, 1`);
+    lines.push(`  store i64 ${nextI}, ptr ${iAddr}`);
+    lines.push(`  br label %${cond}`);
+    lines.push(`${end}:`);
+    const v0 = this.nextTemp();
+    lines.push(`  ${v0} = insertvalue %Vec undef, ptr ${buf}, 0`);
+    const v1 = this.nextTemp();
+    lines.push(`  ${v1} = insertvalue %Vec ${v0}, i64 ${len}, 1`);
+    const v2 = this.nextTemp();
+    lines.push(`  ${v2} = insertvalue %Vec ${v1}, i64 ${len}, 2`);
+    return [lines, v2, "%Vec"];
   }
 
   private genHashMapGet(expr: HIRExpr & { kind: "HashMapGet" }, lines: string[]): [string[], string, string] {
@@ -9243,7 +10001,10 @@ export class Codegen {
       tempBufs.push(buf);
       return;
     }
-    if (tk.tag === "vec" || (tk.tag === "array" && tk.size !== null)) {
+    // A slice (`array` with size null) shares the Vec's %Vec runtime rep, so the
+    // same runtime-length loop renders it — a slice printing as <unprintable>
+    // while the Vec it views prints fine was the only gap here.
+    if (tk.tag === "vec" || tk.tag === "array") {
       const buf = this.emitSeqDisplay(tk, val, lines);
       partFmts.push("%s");
       partArgs.push({ val: buf, type: "ptr" });
@@ -10368,6 +11129,20 @@ export class Codegen {
       case "VecFilled":
       case "VecMap":
       case "VecFilter":
+      case "HashMapWithCapacity":
+      case "HashMapClone":
+      case "HashMapEntries":
+      // Option-returning Vec reads: the payload is either cloned out of the buffer
+      // (get/first/last/min/max/find) or moved out of it (pop). Either way nothing
+      // else owns it, so `print(v.get(0)!)` used to leak one copy per call.
+      case "VecGetOpt":
+      case "VecMinMax":
+      case "VecPop":
+      case "VecFind":
+      // HashMap.get clones the value out of the table for the same reason. Its
+      // sibling getOrDefault is deliberately NOT here: on a miss it hands back the
+      // caller's own default, which the caller still owns.
+      case "HashMapGet":
         return true;
       case "BinOp":
         // string `+` only — the comparisons return bool

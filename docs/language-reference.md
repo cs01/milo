@@ -478,6 +478,28 @@ To iterate a custom *container* without copying each element, hand out a slice v
 a non-owning fat pointer over the backing store) and iterate that: `for x in c.view()` where
 `fn view(self: &Self): &[T]`. The elements are borrowed, not cloned.
 
+**`@iter` — a newtype iterates its field.** A struct that wraps a container marks the
+field, and `for x in wrapper` walks that field exactly as the container itself would —
+same bindings, same borrow, nothing allocated:
+
+```milo
+struct Ids {
+    @iter v: Vec<i64>,
+}
+
+let ids = Ids { v: [1, 2, 3] }
+for x in ids { print(x) }        // 1, 2, 3 — x is &i64, as for any Vec
+for i, x in ids { print(i) }     // the two-binding form comes through too
+```
+
+Mark a `Vec`, `HashMap`, array, or `string` field, at most one per struct (two would make
+`for x in wrapper` ambiguous). `@iter` is what makes `HashSet` enumerable: a set cannot
+write a `next` method, because the iterator would have to hold a reference into the set,
+and references are second-class. Delegating to the backing `HashMap` costs nothing —
+without it, enumerating a set would mean snapshotting it into a `Vec` first.
+
+A struct with no `@iter` field falls back to the `next` protocol above.
+
 **The `Iterator` marker trait.** `impl Iterator for X {}` marks `X` as iterable so it
 satisfies an `<I: Iterator>` bound and can be named in a prover contract over "any
 iterator". It is a marker: the `next` contract above is what the `for` loop actually
@@ -1212,6 +1234,51 @@ return type must match `init`, which is what the result type comes from. `reduce
 accepted as a synonym. The initial value is mandatory, so an empty `Vec` returns it
 rather than failing.
 
+### Reading elements
+
+`v[i]` panics out of range. The total reads return `Option<T>` instead, cloning the
+element out — a reference into the buffer could not survive the next `push`.
+
+```milo
+let v: Vec<i64> = [3, 1, 4]
+v.get(0)          // Some(3)
+v.get(99)         // None
+v.first()         // Some(3)
+v.last()          // Some(4)
+v.min()           // Some(1)
+v.max()           // Some(4)
+v.indexOf(4)      // Some(2)  — where, not what
+v.position((n: &i64) => n > 3)   // Some(2) — the predicate form
+v.find((n: &i64) => n > 3)       // Some(4) — the value, not the index
+```
+
+`min`/`max`/`indexOf` take the same comparable elements `sort` does — int, float,
+string, bool. There is no ordering on a struct (equality and hashing are derived
+facts; ordering is an opinion), so use `sortByKey` then `first`, or `fold`.
+
+There is no `binarySearch`: its contract is "the Vec is already sorted", which the
+compiler cannot check and a wrong answer does not announce. There is no
+`chunks`/`windows` either — both hand back a collection of slices, and a slice is a
+second-class reference that cannot be stored in a `Vec`.
+
+### Growing and shrinking
+
+```milo
+var a: Vec<string> = ["a"]
+var b: Vec<string> = ["b", "c"]
+a.extend(b)               // ["a", "b", "c"] — b is moved in, not copied
+a.retain((s: &string) => s != "b")   // ["a", "c"] — in place, no second buffer
+
+a.capacity()              // slots allocated
+a.reserve(100)            // room for 100 MORE, on top of the current len
+```
+
+`extend` takes ownership: the elements transfer bitwise, nothing is cloned, and the
+source is gone afterwards (`v.extend(other.clone())` if you still need it).
+
+`retain(pred)` is `filter`'s in-place twin — `filter` allocates a second `Vec`,
+`retain` compacts this one and runs drop glue on the elements it discards.
+
 `print` renders a `Vec` as `[a, b, c]` and a `HashMap` as `{k: v}`, recursing into
 elements — a `Vec<Vec<i64>>` prints `[[1, 2], [3]]`, and string elements are quoted
 so they can't be confused with the separators.
@@ -1361,6 +1428,37 @@ if let Option.Some(v) = val {
 let v = m.getOrDefault("hello", 0)  // returns i32 directly (0 if missing)
 
 m.remove("hello")
+
+print(m.isEmpty())
+let copy = m.clone()               // deep copy; the two share no heap data
+m.clear()                          // drop every entry, keep the table's capacity
+```
+
+`HashMap.withCapacity(n)` presizes the table so `n` inserts never rehash:
+
+```milo
+var counts: HashMap<string, i64> = HashMap.withCapacity(1000)
+```
+
+### keys() and values()
+
+```milo
+var ks = m.keys()      // Vec<K>, a deep copy of every live key
+var vs = m.values()    // Vec<V>
+ks.sort()
+```
+
+Both snapshot the map into a fresh `Vec`, so mutating the map afterwards does not
+disturb the snapshot. This is the supported way to get a **stable** order out of a
+map — collect, then sort (see the order note below). To read entries without
+copying, use `for k, v in m`, which borrows.
+
+There is no `entry` / `getOrInsert`. Both hand back a mutable reference *into* the
+table, and Milo's references are second-class — they cannot be returned. Count with
+the two-lookup form instead:
+
+```milo
+m.insert(word, m.getOrDefault(word, 0) + 1)
 ```
 
 ### Iteration

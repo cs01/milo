@@ -1,7 +1,13 @@
-// std/set — HashSet<T> backed by HashMap<T, bool>
+// std/set — HashSet<T>, a set of unique values backed by a HashMap<T, bool>.
+//
+// Iteration order is unspecified and reseeded every process, exactly as it is for
+// HashMap. Collect with toVec() and sort when you need a stable order.
 
 pub struct HashSet<T> {
-    inner: HashMap<T, bool>,
+    // `@iter` hands `for x in s` straight to the map, which yields its keys — the
+    // set's elements. Without it a set would need a `next` method, and an iterator
+    // over this set would have to hold a reference into it, which Milo forbids.
+    @iter inner: HashMap<T, bool>,
 }
 
 impl HashSet<T> {
@@ -10,6 +16,24 @@ impl HashSet<T> {
         return HashSet {
             inner: HashMap.new()
         }
+    }
+
+    // Create an empty HashSet sized so `capacity` adds never rehash.
+    fn withCapacity(capacity: i64): HashSet<T> {
+        return HashSet {
+            inner: HashMap.withCapacity(capacity)
+        }
+    }
+
+    // Collect a Vec into a set, dropping duplicates.
+    fn fromVec(items: Vec<T>): HashSet<T> {
+        var out: HashSet<T> = HashSet {
+            inner: HashMap.withCapacity(items.len())
+        }
+        for x in items {
+            out.inner.insert(x.clone(), true)
+        }
+        return out
     }
 
     // Add a value to the set.
@@ -30,5 +54,76 @@ impl HashSet<T> {
     // Number of elements in the set.
     fn len(self: &HashSet<T>): i64 {
         return self.inner.len
+    }
+
+    fn isEmpty(self: &HashSet<T>): bool {
+        return self.inner.len == 0
+    }
+
+    // Drop every element, keeping the table's capacity.
+    fn clear(self: &mut HashSet<T>): void {
+        self.inner.clear()
+    }
+
+    fn clone(self: &HashSet<T>): HashSet<T> {
+        return HashSet {
+            inner: self.inner.clone()
+        }
+    }
+
+    // Snapshot the elements into a Vec. Sort it if you need a stable order —
+    // `print` on a set would otherwise expose the randomized bucket order.
+    fn toVec(self: &HashSet<T>): Vec<T> {
+        return self.inner.keys()
+    }
+
+    // Everything in either set.
+    fn union(self: &HashSet<T>, other: &HashSet<T>): HashSet<T> {
+        var out: HashSet<T> = HashSet {
+            inner: HashMap.withCapacity(self.inner.len + other.inner.len)
+        }
+        for x in self {
+            out.inner.insert(x.clone(), true)
+        }
+        for x in other {
+            out.inner.insert(x.clone(), true)
+        }
+        return out
+    }
+
+    // Everything in both sets.
+    fn intersect(self: &HashSet<T>, other: &HashSet<T>): HashSet<T> {
+        var out: HashSet<T> = HashSet {
+            inner: HashMap.new()
+        }
+        for x in self {
+            if other.inner.contains(x) {
+                out.inner.insert(x.clone(), true)
+            }
+        }
+        return out
+    }
+
+    // Everything in this set that is not in `other`.
+    fn difference(self: &HashSet<T>, other: &HashSet<T>): HashSet<T> {
+        var out: HashSet<T> = HashSet {
+            inner: HashMap.new()
+        }
+        for x in self {
+            if !other.inner.contains(x) {
+                out.inner.insert(x.clone(), true)
+            }
+        }
+        return out
+    }
+
+    // True when every element of this set is also in `other`.
+    fn isSubsetOf(self: &HashSet<T>, other: &HashSet<T>): bool {
+        for x in self {
+            if !other.inner.contains(x) {
+                return false
+            }
+        }
+        return true
     }
 }

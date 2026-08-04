@@ -1,0 +1,60 @@
+// @expect: true
+// @expect: false
+// @expect: ["a", "b", "c"]
+// @expect: [1, 2, 3]
+// @expect: 3
+// @expect: 4
+// @expect: 0
+// @expect: true
+// @expect: 9
+// @expect: 100
+// @expect: 0
+// @expect: 99
+// @expect: 100
+
+// keys()/values() snapshot the live entries into a fresh Vec. Iteration order is
+// unspecified and reseeded every run, so this sorts before comparing — never
+// compare a map's entries in enumeration order.
+pub fn main(): i32 {
+    var m: HashMap<string, i64> = HashMap.new()
+    print(m.isEmpty())
+    m.insert("a", 1)
+    m.insert("b", 2)
+    m.insert("c", 3)
+    print(m.isEmpty())
+
+    var ks = m.keys()
+    ks.sort()
+    print(ks)
+    var vs = m.values()
+    vs.sort()
+    print(vs)
+
+    // the clone is independent — inserting into it leaves the original at 3
+    var c = m.clone()
+    c.insert("d", 4)
+    print(m.len())
+    print(c.len())
+
+    m.clear()
+    print(m.len())
+    print(m.isEmpty())
+    // clear keeps the table usable, it does not poison it
+    m.insert("z", 9)
+    print(m.get("z")!)
+
+    // withCapacity presizes so none of these inserts rehashes
+    var big: HashMap<i64, string> = HashMap.withCapacity(100)
+    var i = 0
+    while i < 100 {
+        big.insert(i, "v")
+        i = i + 1
+    }
+    print(big.len())
+    var bk = big.keys()
+    bk.sort()
+    print(bk[0])
+    print(bk[99])
+    print(big.values().len())
+    return 0
+}

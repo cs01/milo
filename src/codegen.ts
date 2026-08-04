@@ -660,29 +660,42 @@ export class Codegen {
   // Escape a JS string into an LLVM `c"..."` body plus its exact byte length (no null
   // terminator). Backslash MUST become \5C — a raw '\' from e.g. a Windows path (`D:\a\...`)
   // would otherwise be read by LLVM as an escape and desync the declared array size.
+  // Built in bounded chunks joined once at the end, rather than one `escaped += ch` per
+  // character. `@embedFile` turns an asset into a string with one char per byte, so this
+  // runs ~63 million times for `examples/games/flight` — appending to a single growing
+  // string there cost ~15s, more than the whole rest of the compile.
+  //
+  // The ASCII short-circuit on `byteLen` matters as much as the chunking: the old default
+  // arm called `Buffer.byteLength(ch, "utf-8")` — a native call — for every ordinary
+  // character, to compute a value that is 1 whenever the code point is below 0x80.
   private escapeCString(value: string): { escaped: string; byteLen: number } {
-    let escaped = "";
+    const parts: string[] = [];
+    let chunk = "";
     let byteLen = 0;
     for (const ch of value) {
       const code = ch.codePointAt(0)!;
       if (code >= 0xF780 && code <= 0xF7FF) {
         // PUA sentinel from \xNN escape — emit as raw single byte
         const byte = code - 0xF700;
-        escaped += `\\${byte.toString(16).toUpperCase().padStart(2, "0")}`;
+        chunk += `\\${byte.toString(16).toUpperCase().padStart(2, "0")}`;
         byteLen += 1;
       } else {
         switch (code) {
-          case 0x5C: escaped += "\\5C"; byteLen += 1; break;
-          case 0x0A: escaped += "\\0A"; byteLen += 1; break;
-          case 0x0D: escaped += "\\0D"; byteLen += 1; break;
-          case 0x09: escaped += "\\09"; byteLen += 1; break;
-          case 0x00: escaped += "\\00"; byteLen += 1; break;
-          case 0x22: escaped += "\\22"; byteLen += 1; break;
-          default: escaped += ch; byteLen += Buffer.byteLength(ch, "utf-8");
+          case 0x5C: chunk += "\\5C"; byteLen += 1; break;
+          case 0x0A: chunk += "\\0A"; byteLen += 1; break;
+          case 0x0D: chunk += "\\0D"; byteLen += 1; break;
+          case 0x09: chunk += "\\09"; byteLen += 1; break;
+          case 0x00: chunk += "\\00"; byteLen += 1; break;
+          case 0x22: chunk += "\\22"; byteLen += 1; break;
+          default:
+            chunk += ch;
+            byteLen += code < 0x80 ? 1 : Buffer.byteLength(ch, "utf-8");
         }
       }
+      if (chunk.length >= 65536) { parts.push(chunk); chunk = ""; }
     }
-    return { escaped, byteLen };
+    parts.push(chunk);
+    return { escaped: parts.join(""), byteLen };
   }
 
   private addString(value: string): { label: string; length: number } {

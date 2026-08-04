@@ -16,7 +16,9 @@ from "std/os" import {
     lstat,
     mkdir,
     mkdtemp,
+    mkstemp,
     opendir,
+    readFd,
     readdir,
     readlink,
     realpath,
@@ -27,10 +29,17 @@ from "std/os" import {
     strlen,
     symlink,
     truncate,
-    unlink
+    unlink,
+    writeFd
 }
 from "std/io" import {
     File, IoError, ioError
+}
+from "std/path" import {
+    Path
+}
+from "std/sort" import {
+    sortStrings
 }
 from "std/platform" import {
     direntNameOffset,
@@ -40,7 +49,10 @@ from "std/platform" import {
     statModeOffset,
     statSizeOffset,
     access,
+    close,
     devNullPath,
+    oWriteCreateTrunc,
+    open,
     read
 }
 
@@ -53,6 +65,11 @@ pub fn devNull(): string {
 // File metadata from stat().
 pub struct FileInfo {
     size: i64,
+    // Do not trust this field yet. It is read at a fixed byte offset into struct
+    // stat, and st_mode's offset is arch-specific (24 on x86_64 Linux, 16 on
+    // arm64) while std/platform splits by OS only — on arm64 Linux it reads a
+    // different field and comes back 0. isDir/isFile/isSymlink deliberately avoid
+    // it; so does copyFile.
     mode: i32,
 }
 
@@ -363,6 +380,14 @@ pub fn dataSyncFd(fd: i32): Result<Unit, IoError> {
     return ok()
 }
 
+// Create a new directory with a unique name and return its path. `prefix` is a
+// path prefix, not a parent directory: makeTempDir("/tmp/build-") creates
+// something like "/tmp/build-a1B2c3".
+//
+// The directory is created 0700 and is the caller's to remove — nothing cleans
+// it up at exit. `removeAll` is the usual companion.
+//
+// Needs POSIX mkdtemp, so it does not link on Windows.
 pub fn makeTempDir(prefix: &string): Result<string, IoError> {
     // mkdtemp modifies template in place — copy into mutable buffer
     var buf: [u8; 4096] = [0; 4096]
@@ -380,6 +405,39 @@ pub fn makeTempDir(prefix: &string): Result<string, IoError> {
             return Result.Err(ioError(prefix))
         }
         return Result.Ok(_cstrToString(r))
+    }
+}
+
+// Create a new empty file with a unique name and return its path. `prefix` is a
+// path prefix, not a parent directory: makeTempFile("/tmp/build-") creates
+// something like "/tmp/build-a1B2c3".
+//
+// The file is created 0600 and returned closed — open it with File.openWrite.
+// It is the caller's to remove; nothing cleans it up at exit. Reopening by name
+// is safe against the classic /tmp attack because the file already exists and is
+// owned by this process; an attacker cannot substitute their own file for it in
+// a sticky directory.
+//
+// Pairs with makeTempDir, and like it needs POSIX mkstemp, so it does not link
+// on Windows.
+pub fn makeTempFile(prefix: &string): Result<string, IoError> {
+    // mkstemp modifies template in place — copy into mutable buffer
+    var buf: [u8; 4096] = [0; 4096]
+    let tmpl = prefix + "XXXXXX"
+    if tmpl.len >= 4096 {
+        return Result.Err(IoError.Other("temporary file prefix is too long"))
+    }
+    unsafe {
+        for i in 0..tmpl.len {
+            buf[i] = tmpl[i]
+        }
+        buf[tmpl.len] = 0
+        let fd = mkstemp(buf as *u8)
+        if fd < 0 {
+            return Result.Err(ioError(prefix))
+        }
+        close(fd)
+        return Result.Ok(_cstrToString(buf as *u8))
     }
 }
 
@@ -423,10 +481,483 @@ pub fn lstatInfo(path: &string): Option<FileInfo> {
     )
 }
 
+// Check if a path is a symbolic link. Does not follow it — a dangling link is
+// still a link.
 pub fn isSymlink(path: &string): bool {
-    let Option.Some(info) = lstatInfo(path) else {
+    // readlink, not the S_IFLNK bit out of lstat: st_mode's offset inside struct
+    // stat is arch-specific (24 on x86_64 Linux, 16 on arm64) while std/platform
+    // splits by OS only, so the bit test reads the wrong field on arm64 Linux.
+    // readlink is arch- and libc-independent — it fails with EINVAL on anything
+    // that is not a symlink. removeAll's refusal to follow links rests on this.
+    var buf: [u8; 4096] = [0; 4096]
+    unsafe {
+        return readlink(path, buf as *u8, 4095) >= 0
+    }
+}
+
+// ── Recursive traversal ──
+
+// One node of a directory tree, produced by walkDir.
+pub struct WalkEntry {
+    // Full path: the walk root joined with relPath.
+    path: string,
+    // Path relative to the walk root, always "/"-separated. This is what glob
+    // patterns are matched against.
+    relPath: string,
+    // A symlink to a directory is NOT a directory here — walkDir never follows
+    // links, so it reports one as an ordinary entry with no children.
+    isDir: bool,
+}
+
+// True when this directory entry may be descended into. A symlink is checked
+// before isDir because isDir goes through opendir, which follows the link.
+fn walkIsDir(entry: &DirEntry, fullPath: &string): bool {
+    if entry.isDir {
+        return true
+    }
+    if entry.isFile {
         return false
     }
-    // S_IFLNK = 0xA000 = 40960
-    return (info.mode & 61440) == 40960
+    // Neither: a symlink (DT_LNK), or a filesystem that reports DT_UNKNOWN and
+    // makes the caller ask the OS.
+    if isSymlink(fullPath) {
+        return false
+    }
+    return isDir(fullPath)
+}
+
+// Walk the tree under `root`, returning every entry below it. The root itself is
+// not included. A directory always appears before its contents; order within one
+// directory is whatever the filesystem reports, so sort the result if you need
+// determinism (`glob` already does).
+//
+// Symlinks are never followed. A link to a directory comes back with
+// `isDir: false` and no children, so a link cycle cannot hang the walk.
+//
+// Eager, not lazy. Milo has no lazy iterators, and a cursor type would not pay
+// for itself here: every entry name is an owned string either way, so laziness
+// would save the result Vec and none of the syscalls, while adding a stateful
+// type whose interrupted state is a new thing to get wrong. Walk a subtree
+// instead of the whole disk if the entry list would be too large to hold.
+//
+// The first unreadable directory aborts the walk with its IoError. Returning a
+// short list that silently omitted a permission-denied subtree is exactly the
+// failure this signature exists to prevent. Paths are built absolute, so a tree
+// deeper than the OS path limit fails here rather than being traversed; `rm -rf`
+// avoids that with openat, this does not.
+pub fn walkDir(root: &string): Result<Vec<WalkEntry>, IoError> {
+    var out: Vec<WalkEntry> = Vec.new()
+    // Breadth-first over a growing queue rather than recursion: tree depth is
+    // attacker-controllable (a deep unpacked archive), and this cannot overflow
+    // the stack.
+    var pending: Vec<string> = Vec.new()
+    pending.push("")
+    var head: i64 = 0
+    while head < pending.len {
+        let rel = pending[head]
+        head = head + 1
+        var dirPath = root.clone()
+        if rel.len > 0 {
+            dirPath = Path.join(root, rel)
+        }
+        let entries = readDir(dirPath)?
+        for entry in entries {
+            let childPath = Path.join(dirPath, entry.name)
+            var childRel = entry.name.clone()
+            if rel.len > 0 {
+                childRel = rel + "/" + entry.name
+            }
+            let dirLike = walkIsDir(entry, childPath)
+            if dirLike {
+                pending.push(childRel.clone())
+            }
+            out.push(WalkEntry {
+                path: childPath, relPath: childRel, isDir: dirLike
+            }
+            )
+        }
+    }
+    return Result.Ok(out)
+}
+
+// ── Glob matching ──
+
+// Index just past the ']' closing a character class that starts at `start`, or
+// None when the pattern has no closing bracket (then '[' is an ordinary byte).
+fn globClassEnd(pat: &string, start: i64): Option<i64> {
+    var i = start + 1
+    if i < pat.len && (pat[i] == '!' || pat[i] == '^') {
+        i = i + 1
+    }
+    // A ']' in first position is a literal, not the terminator.
+    if i < pat.len && pat[i] == ']' {
+        i = i + 1
+    }
+    while i < pat.len {
+        if pat[i] == ']' {
+            return Option.Some(i + 1)
+        }
+        i = i + 1
+    }
+    return Option.None
+}
+
+// Does the class spanning pat[start..end) (start on '[', end just past ']')
+// accept byte `ch`?
+fn globClassHas(pat: &string, start: i64, end: i64, ch: u8): bool {
+    let last = end - 1
+    var i = start + 1
+    var negate = false
+    if i < last && (pat[i] == '!' || pat[i] == '^') {
+        negate = true
+        i = i + 1
+    }
+    var found = false
+    while i < last {
+        if i + 2 < last && pat[i + 1] == '-' {
+            if ch >= pat[i] && ch <= pat[i + 2] {
+                found = true
+            }
+            i = i + 3
+        } else {
+            if pat[i] == ch {
+                found = true
+            }
+            i = i + 1
+        }
+    }
+    if negate {
+        return !found
+    }
+    return found
+}
+
+// Index just past the pattern element at `p` when it accepts byte `ch`, else
+// None. Handles literals, '?', '\' escapes and character classes; '*' is the
+// caller's job because only the caller can backtrack.
+fn globStep(pat: &string, p: i64, ch: u8): Option<i64> {
+    let c = pat[p]
+    if c == '?' {
+        return Option.Some(p + 1)
+    }
+    if c == '[' {
+        let Option.Some(end) = globClassEnd(pat, p) else {
+            // Unterminated class: '[' matches itself.
+            if c == ch {
+                return Option.Some(p + 1)
+            }
+            return Option.None
+        }
+        if globClassHas(pat, p, end, ch) {
+            return Option.Some(end)
+        }
+        return Option.None
+    }
+    if c == '\\' && p + 1 < pat.len {
+        if pat[p + 1] == ch {
+            return Option.Some(p + 2)
+        }
+        return Option.None
+    }
+    if c == ch {
+        return Option.Some(p + 1)
+    }
+    return Option.None
+}
+
+// Match one path segment (no '/' inside either side). Single backtrack point,
+// which is enough because the segment has no separator constraint to violate:
+// if a later '*' fails, widening an earlier '*' can never help.
+fn globMatchSegment(pat: &string, text: &string): bool {
+    var p: i64 = 0
+    var s: i64 = 0
+    var starP: i64 = -1
+    var starS: i64 = 0
+    while s < text.len {
+        var stepped = false
+        if p < pat.len {
+            if pat[p] == '*' {
+                starP = p
+                starS = s
+                p = p + 1
+                stepped = true
+            } else {
+                match globStep(pat, p, text[s]) {
+                    Option.Some(next) => {
+                        p = next
+                        s = s + 1
+                        stepped = true
+                    }
+                    Option.None => {
+                    }
+                }
+            }
+        }
+        if !stepped {
+            if starP < 0 {
+                return false
+            }
+            starS = starS + 1
+            s = starS
+            p = starP + 1
+        }
+    }
+    while p < pat.len && pat[p] == '*' {
+        p = p + 1
+    }
+    return p >= pat.len
+}
+
+// Match pattern segments from `pi` against text segments from `ti`. Recursion is
+// bounded by the number of "**" segments, which is one or two in any real
+// pattern; every other segment advances both sides in lockstep.
+fn globMatchSegments(pat: &Vec<string>, pi: i64, text: &Vec<string>, ti: i64): bool {
+    if pi >= pat.len {
+        return ti >= text.len
+    }
+    if pat[pi] == "**" {
+        // "**/**" means the same as "**". Collapsing keeps the cost polynomial in
+        // depth instead of letting a hostile pattern multiply the search.
+        if pi + 1 < pat.len && pat[pi + 1] == "**" {
+            return globMatchSegments(pat, pi + 1, text, ti)
+        }
+        var k = ti
+        while k <= text.len {
+            if globMatchSegments(pat, pi + 1, text, k) {
+                return true
+            }
+            k = k + 1
+        }
+        return false
+    }
+    if ti >= text.len {
+        return false
+    }
+    if !globMatchSegment(pat[pi], text[ti]) {
+        return false
+    }
+    return globMatchSegments(pat, pi + 1, text, ti + 1)
+}
+
+// Match a glob pattern against a path-like string.
+//
+// Pure — it never touches the filesystem, so it works on anything "/"-separated:
+// archive members, object-store keys, route tables. `glob` is this function plus
+// a `walkDir`.
+//
+// | Pattern | Matches |
+// |---|---|
+// | `?` | one byte, never `/` |
+// | `*` | any run of bytes inside one segment, never `/` |
+// | `**` | as a whole segment: zero or more segments |
+// | `[abc]` `[a-z]` | one byte from the set |
+// | `[!a-z]` `[^a-z]` | one byte outside the set |
+// | `\*` | a literal `*` |
+//
+// `**` is only special as a complete segment: `src/**/*.milo` crosses
+// directories, `src/**.milo` is just `src/*.milo`. A trailing `/` leaves an
+// empty final segment that no path can match, so "everything under src" is
+// `src/**`, never `src/**/`. Matching is bytewise, so a range like `[à-ø]` over
+// multibyte UTF-8 compares bytes, not code points.
+// Nothing here is anchored to a filesystem, so a leading `/`, `.`, or `..` is an
+// ordinary segment and dotfiles are not special-cased.
+pub fn globMatch(pattern: &string, text: &string): bool {
+    let patSegs = pattern.split("/")
+    let textSegs = text.split("/")
+    return globMatchSegments(patSegs, 0, textSegs, 0)
+}
+
+// Every path under `root` whose path *relative to root* matches `pattern`.
+// Returned paths are root-prefixed and ready to open; the list is sorted, so a
+// build that globs its inputs is reproducible.
+//
+// Because matching is on the relative path, `glob(dir, "*.milo")` finds only the
+// top level and `glob(dir, "**/*.milo")` finds every depth. Directories are
+// matched too — `glob(dir, "**")` lists the whole tree.
+//
+// Walks the whole tree first (see walkDir): the pattern does not prune the walk,
+// so `glob("/", "*")` reads the entire disk. Inherits walkDir's failure mode —
+// one unreadable directory fails the call rather than silently shortening the
+// list.
+pub fn glob(root: &string, pattern: &string): Result<Vec<string>, IoError> {
+    var out: Vec<string> = Vec.new()
+    let entries = walkDir(root)?
+    for entry in entries {
+        if globMatch(pattern, entry.relPath) {
+            out.push(entry.path.clone())
+        }
+    }
+    sortStrings(out)
+    return Result.Ok(out)
+}
+
+// ── Recursive create and delete ──
+
+// Create `path` and every missing parent, like `mkdir -p`.
+//
+// Succeeds when the directory already exists. Fails when a component exists as
+// something other than a directory, or cannot be created. `mode` applies only to
+// directories this call creates and is filtered by the process umask; an
+// existing directory keeps the mode it has.
+//
+// Intermediate directories briefly exist before the leaf does, so a failure part
+// way through leaves the prefix it managed to create.
+pub fn mkdirAll(path: &string, mode: i32): Result<Unit, IoError> {
+    if path.len == 0 {
+        return Result.Err(IoError.Other("mkdirAll: empty path"))
+    }
+    if isDir(path) {
+        return ok()
+    }
+    var cur = ""
+    if path[0] == '/' {
+        cur = "/"
+    }
+    let parts = path.split("/")
+    for part in parts {
+        // Empty parts come from a leading, doubled or trailing separator.
+        if part.len == 0 {
+            continue
+        }
+        if cur.len == 0 {
+            cur = part.clone()
+        } else if cur == "/" {
+            cur = "/" + part
+        } else {
+            cur = cur + "/" + part
+        }
+        if isDir(cur) {
+            continue
+        }
+        if mkdir(cur, mode as u32) != 0 {
+            // EEXIST here means either a concurrent creator won the race (fine)
+            // or the name is taken by a file (not fine) — re-check rather than
+            // trusting errno to tell those apart.
+            if isDir(cur) {
+                continue
+            }
+            return errPath(cur)
+        }
+    }
+    return ok()
+}
+
+// Recursively delete `path` and everything under it, like `rm -rf`.
+//
+// **Symlinks are removed, never followed.** `removeAll(link)` where link points
+// at /etc unlinks the link and leaves /etc untouched, and the same holds for
+// every link found inside the tree. This is the whole reason the walk here does
+// not reuse walkDir's entry list.
+//
+// A path that does not exist is success: the postcondition — it is gone —
+// already holds, matching `rm -rf`.
+//
+// Failure is **not** all-or-nothing. This deletes depth-first and returns the
+// IoError of the first entry it cannot remove, leaving everything not yet
+// visited in place. A caller that needs the tree actually gone must check the
+// result; a partially emptied tree is a real outcome.
+//
+// Not safe against another process mutating the tree underneath you — the
+// classic rm -rf TOCTOU race applies. Use it on trees you own, such as a build
+// output or a makeTempDir scratch space. Like walkDir it builds absolute paths,
+// so it cannot empty a tree deeper than the OS path limit.
+pub fn removeAll(path: &string): Result<Unit, IoError> {
+    // Order matters: a symlink is unlinked before anything asks what it points
+    // at, and pathExists/isDir both follow links.
+    if isSymlink(path) {
+        return removeFile(path)
+    }
+    if !pathExists(path) {
+        return ok()
+    }
+    if !isDir(path) {
+        return removeFile(path)
+    }
+    // Iterative, like walkDir: tree depth is attacker-controllable (a deep
+    // unpacked archive), and recursing per level would put that depth on a
+    // stack — including the much smaller stack of a green task.
+    var dirs: Vec<string> = Vec.new()
+    dirs.push(path.clone())
+    var head: i64 = 0
+    while head < dirs.len {
+        let dir = dirs[head]
+        head = head + 1
+        let entries = readDir(dir)?
+        for entry in entries {
+            let child = Path.join(dir, entry.name)
+            if walkIsDir(entry, child) {
+                dirs.push(child)
+            } else {
+                // Symlinks land here (walkIsDir refuses to call one a directory),
+                // so this unlinks the link itself and never its target.
+                removeFile(child)?
+            }
+        }
+    }
+    // Discovery order puts every parent before its children, so removing in
+    // reverse always meets an already-empty directory.
+    var i = dirs.len - 1
+    while i >= 0 as i64 {
+        removeDir(dirs[i])?
+        i = i - 1
+    }
+    return ok()
+}
+
+// ── Copying ──
+
+// Copy the contents of `src` onto `dst`, creating or truncating `dst`.
+//
+// Streams through a 64 KiB buffer, so a file larger than memory copies fine.
+// Copying a directory is an error, not a recursive copy.
+//
+// Permissions are not copied verbatim: `dst` is created 0644 (the same mode
+// writeFile uses), then set to 0755 when `src` is executable. Reading a file's
+// mode bits portably is not possible today — see FileInfo.mode — and quietly
+// dropping the executable bit off a copied program is the worse failure. **The
+// consequence is that copying a 0600 file yields a 0644 one**: chmod `dst`
+// yourself when the copy has to stay private. Timestamps, xattrs and ACLs are
+// not copied either, and a sparse file is copied dense.
+//
+// On failure `dst` is left truncated or partially written, not removed.
+pub fn copyFile(src: &string, dst: &string): Result<Unit, IoError> {
+    if isDir(src) {
+        return Result.Err(IoError.IsDirectory(src.clone()))
+    }
+    unsafe {
+        let srcFd = open(src, 0)
+        if srcFd < 0 {
+            return errPath(src)
+        }
+        let dstFd = open(dst, oWriteCreateTrunc(), 420)
+        if dstFd < 0 {
+            close(srcFd)
+            return errPath(dst)
+        }
+        var buf: [u8; 65536] = [0; 65536]
+        while true {
+            let n = readFd(srcFd, buf as *u8, 65536)
+            if n < 0 {
+                close(srcFd)
+                close(dstFd)
+                return errPath(src)
+            }
+            if n == 0 {
+                break
+            }
+            if writeFd(dstFd, buf as *u8, n) != n {
+                close(srcFd)
+                close(dstFd)
+                return errPath(dst)
+            }
+        }
+        close(srcFd)
+        close(dstFd)
+    }
+    // X_OK = 1. access() answers "can this process execute it", which is the
+    // question a copied program cares about, and unlike st_mode it is portable.
+    if access(src, 1) == 0 {
+        setMode(dst, 493)?
+    }
+    return ok()
 }

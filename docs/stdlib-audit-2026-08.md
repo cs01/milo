@@ -224,8 +224,17 @@ Ranked by how often real programs hit them.
 - [ ] **No cancellation.** No `context.Context` analogue. `select.onTimeout(ms)` exists but
   nothing propagates cancellation down a call tree.
 
-- [ ] **No filesystem walk, glob, `mkdir -p`, `rm -rf`, or `copyFile`.** `readDir` is one level
-  deep. `makeTempDir` exists but `makeTempFile` does not.
+- [x] **No filesystem walk, glob, `mkdir -p`, `rm -rf`, or `copyFile`.** *Shipped in `std/fs`:
+  `walkDir`, `globMatch`, `glob`, `mkdirAll`, `removeAll`, `copyFile`, `makeTempFile`.
+  `walkDir` is eager (Vec of `WalkEntry`) — no lazy iterators, and every entry name is an owned
+  string either way, so a cursor would save the result Vec and none of the syscalls. `globMatch`
+  is pure and usable on any `/`-separated string; `**` is special only as a whole segment.
+  `removeAll` never follows symlinks and stops at the first entry it cannot delete (not
+  all-or-nothing — documented). Found and fixed on the way: `isSymlink` read the `S_IFLNK` bit
+  out of `lstat` at an arch-specific `st_mode` offset, so it answered wrong on arm64 Linux — it
+  now uses `readlink`, which is arch-independent. That bug would have made `removeAll` follow
+  links there. `copyFile` cannot preserve mode verbatim for the same reason, so it propagates
+  only the executable bit via `access(X_OK)`.*
 
 - [ ] **No HTTPS server.** TLS is client-side only (`fetch.TlsStream`); `http.serve` is
   plaintext. Also missing on the server: multipart/form-data, static file serving, body size

@@ -1,0 +1,131 @@
+// @skip-os: win32
+// std/fs reaches directories through POSIX opendir/readdir and mkstemp, which
+// the MSVC CRT does not export. Unskip once std/fs grows a Windows arm.
+// @expect: mkdirAll ok
+// @expect: mkdirAll existing ok
+// @expect: mkdirAll over file err
+// @expect: walk 7
+// @expect: glob a/b/two.txt
+// @expect: glob a/one.txt
+// @expect: glob-top 0
+// @expect: glob-one-level 3
+// @expect: glob-trailing-slash 0
+// @expect: copy one
+// @expect: copy missing err
+// @expect: tempfile exists
+// @expect: tempfile empty
+// @expect: removeAll ok
+// @expect: symlink target survived
+// @expect: removeAll missing ok
+from "std/fs" import {
+    copyFile,
+    glob,
+    makeTempDir,
+    makeTempFile,
+    mkdirAll,
+    pathExists,
+    readFile,
+    removeAll,
+    softLink,
+    walkDir,
+    writeFile
+}
+
+pub fn main(): i32 {
+    // A tree the walk must NOT reach through the symlink planted below.
+    let outside = makeTempDir("/tmp/miloFsOutside-")!
+    writeFile(outside + "/keep.txt", "keep")!
+
+    let root = makeTempDir("/tmp/miloFsTree-")!
+    match mkdirAll(root + "/a/b/c", 493) {
+        Result.Ok(_u) => {
+            print("mkdirAll ok")
+        }
+        Result.Err(_e) => {
+            print("mkdirAll failed")
+        }
+    }
+    match mkdirAll(root + "/a/b/c", 493) {
+        Result.Ok(_u) => {
+            print("mkdirAll existing ok")
+        }
+        Result.Err(_e) => {
+            print("mkdirAll existing failed")
+        }
+    }
+    writeFile(root + "/a/one.txt", "one")!
+    writeFile(root + "/a/b/two.txt", "two")!
+    writeFile(root + "/a/b/c/three.dat", "three")!
+    match mkdirAll(root + "/a/one.txt/sub", 493) {
+        Result.Err(_e) => {
+            print("mkdirAll over file err")
+        }
+        Result.Ok(_u) => {
+            print("mkdirAll over file unexpectedly ok")
+        }
+    }
+    softLink(outside, root + "/a/link")!
+
+    // 7 = a, a/b, a/b/c, a/one.txt, a/b/two.txt, a/b/c/three.dat, a/link.
+    // The link contributes exactly one entry: descending it would add keep.txt.
+    let entries = walkDir(root)!
+    print("walk " + entries.len.toString())
+
+    // glob results are sorted, so this order is a contract, not luck.
+    let txt = glob(root, "**/*.txt")!
+    for hit in txt {
+        print("glob " + hit.substr(root.len + 1, hit.len))
+    }
+    let top = glob(root, "*.txt")!
+    print("glob-top " + top.len.toString())
+    let oneLevel = glob(root, "a/*")!
+    print("glob-one-level " + oneLevel.len.toString())
+    // A trailing "/" leaves an empty final segment, which no path can match.
+    let trailing = glob(root, "a/**/")!
+    print("glob-trailing-slash " + trailing.len.toString())
+
+    copyFile(root + "/a/one.txt", root + "/copy.txt")!
+    print("copy " + readFile(root + "/copy.txt")!)
+    match copyFile(root + "/nope.txt", root + "/copy.txt") {
+        Result.Err(_e) => {
+            print("copy missing err")
+        }
+        Result.Ok(_u) => {
+            print("copy missing unexpectedly ok")
+        }
+    }
+
+    let temp = makeTempFile(root + "/scratch-")!
+    if pathExists(temp) {
+        print("tempfile exists")
+    } else {
+        print("tempfile missing")
+    }
+    if readFile(temp)!.len == 0 {
+        print("tempfile empty")
+    } else {
+        print("tempfile not empty")
+    }
+
+    removeAll(root)!
+    if !pathExists(root) {
+        print("removeAll ok")
+    } else {
+        print("removeAll left the tree")
+    }
+    if readFile(outside + "/keep.txt")! == "keep" {
+        print("symlink target survived")
+    } else {
+        print("symlink target was followed")
+    }
+    removeAll(outside)!
+    match removeAll(root) {
+        Result.Ok(_u) => {
+            print("removeAll missing ok")
+        }
+        Result.Err(_e) => {
+            print("removeAll missing failed")
+        }
+    }
+    return 0
+}

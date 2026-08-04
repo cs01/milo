@@ -3,13 +3,25 @@ system: breaking-changes
 purpose: source-level breaks users have to act on, with the migration and the reason a compat shim was impossible
 key-files: std/platform.*.milo, std/os.milo
 update-when: a public stdlib name moves, is renamed, or changes signature
-last-verified: 2026-07-23
+last-verified: 2026-08-03
 -->
 
 # Breaking changes
 
 Source-level breaks, newest first. Milo is pre-1.0 and does not promise
 compatibility, but every break belongs here with the migration spelled out.
+
+## `Uuid.v4()` returns a `Uuid`, not a `string` (2026-08-03)
+
+`std/uuid` grew a real value type: `Uuid` is 16 bytes (Copy, no heap), with
+`Uuid.v4()`, `Uuid.v7()`, `Uuid.parse()`, `Uuid.nil()`, `toString()`, `isNil()`,
+`version()`, `variant()`, `timestampMs()`, and `Eq`. Migration: append
+`.toString()` where a string was wanted (`Uuid.v4().toString()`).
+
+No compat shim was possible under the one-spelling rule: a `Uuid.v4(): string`
+alongside `Uuid.v4(): Uuid` cannot coexist, and keeping the string spelling for
+v4 while v7 returned a value would make the module's two constructors disagree
+about what a UUID is. The private `uuidV4()` free function is gone with it.
 
 ## Shadowing is rejected (2026-08-01)
 

@@ -3,7 +3,7 @@ system: language-reference
 purpose: the syntax-and-semantics reference for Milo — types, control flow, ownership, slices, Heap, arenas, generics
 key-files: src/parser.ts, src/checker.ts, docs/grammar.ebnf, std/arena.milo
 update-when: surface syntax or a language feature changes, or a stdlib type gets first-class reference docs
-last-verified: 2026-07-31 (every snippet compiles; float printing + move-out-of-borrow sections added)
+last-verified: 2026-08-03 (Uuid value-type section added and compiled; full snippet sweep last run 2026-07-31)
 -->
 
 # The Milo Language Guide
@@ -3238,12 +3238,22 @@ print(Color.yellow("warning: "), Color.dim("details"))
 
 Available (all on `Color.`): `red`, `green`, `yellow`, `blue`, `magenta`, `cyan`, `white`, `gray`, `bold`, `dim`, `italic`, `underline`, `strikethrough`, `bgRed`, `bgGreen`, `bgYellow`, `bgBlue`.
 
-### UUID Generation (std/uuid)
+### UUIDs (std/uuid)
+
+`Uuid` is a 16-byte value type (Copy, no heap). `toString()` is the only
+allocating operation.
 
 ```milo
 from "std/uuid" import { Uuid }
 
-let id = Uuid.v4()   // "550e8400-e29b-41d4-a716-446655440000"
+let id = Uuid.v7()          // time-ordered (RFC 9562); the better default for keys
+let random = Uuid.v4()      // 122 random bits
+print(id.toString())        // "019fcb1a-78ff-709f-8475-54c6d59b0057"
+
+if let Some(u) = Uuid.parse("550e8400-e29b-41d4-a716-446655440000") {
+    print(u.version())      // 4
+    print(u == Uuid.nil())  // false
+}
 ```
 
 ---

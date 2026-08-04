@@ -1,4 +1,13 @@
-// std/base64 — base64 encode/decode
+// std/base64 — Base64 encode/decode (RFC 4648 §4 and §5), pure Milo.
+//
+// `encode`/`decode` use the standard alphabet with '=' padding; `urlEncode`/
+// `urlDecode` use the URL-safe alphabet ('+' → '-', '/' → '_') and no padding.
+// Decoding is strict: any byte outside the selected alphabet, a bad length, or
+// misplaced padding is an `Err` naming the byte offset. Whitespace and newlines are
+// *not* accepted — MIME-wrapped base64 must be unwrapped by the caller. The reason
+// is that a base64 payload is usually a credential or a ciphertext: a decoder that
+// maps unknown bytes to zero turns a corrupt auth header into a plausible-looking
+// string, which is exactly the failure this module must not produce.
 
 fn b64EncodeChar(val: u8): u8 {
     if val < 26 {
@@ -16,23 +25,33 @@ fn b64EncodeChar(val: u8): u8 {
     return 47
 }
 
-fn b64DecodeChar(ch: u8): u8 {
+// 6-bit value of a base64 symbol, or -1 when `ch` is not one in this alphabet.
+fn b64Val(ch: u8, urlSafe: bool): i64 {
     if ch >= 65 && ch <= 90 {
-        return ch - 65
+        return (ch - 65) as i64
     }
     if ch >= 97 && ch <= 122 {
-        return ch - 97 + 26
+        return (ch - 97) as i64 + 26
     }
     if ch >= 48 && ch <= 57 {
-        return ch - 48 + 52
+        return (ch - 48) as i64 + 52
     }
-    if ch == 43 {
+    if urlSafe {
+        if ch == '-' {
+            return 62
+        }
+        if ch == '_' {
+            return 63
+        }
+        return -1
+    }
+    if ch == '+' {
         return 62
     }
-    if ch == 47 {
+    if ch == '/' {
         return 63
     }
-    return 0
+    return -1
 }
 
 // Encode a string to base64.
@@ -69,7 +88,7 @@ fn base64Encode(input: &string): string {
 }
 
 // URL-safe base64, no padding (RFC 4648 §5): '+' → '-', '/' → '_', drop '='.
-// Used for embedding binary data in URL fragments.
+// Used for embedding binary data in URL fragments and in JOSE/JWT segments.
 fn base64UrlEncode(input: &string): string {
     let std = base64Encode(input)
     var result = ""
@@ -86,28 +105,90 @@ fn base64UrlEncode(input: &string): string {
     return result
 }
 
-// Decode a base64 string.
-fn base64Decode(input: &string): string {
-    var result = ""
-    var i: i64 = 0
-    while i + 3 < input.len {
-        if input[i] == 61 {
-            break
-        }
-        let a = b64DecodeChar(input[i])
-        let b = b64DecodeChar(input[i + 1])
-        let c = b64DecodeChar(input[i + 2])
-        let d = b64DecodeChar(input[i + 3])
-        result.push((a << 2) | (b >> 4))
-        if input[i + 2] != 61 {
-            result.push(((b & 15) << 4) | (c >> 2))
-        }
-        if input[i + 3] != 61 {
-            result.push(((c & 3) << 6) | d)
-        }
-        i = i + 4
+// Shared strict decoder. `urlSafe` picks the alphabet; `padRequired` demands the
+// canonical '='-padded form (standard base64) versus allowing it to be omitted
+// (URL-safe base64, whose whole point is that '=' does not survive a URL).
+// `label` prefixes error messages so a caller can tell which alphabet rejected it.
+fn b64DecodeCore(input: &string, urlSafe: bool, padRequired: bool, label: &string): Result<string> {
+    // Split off trailing padding first: '=' is a length marker, not a symbol, and
+    // it may appear only at the very end.
+    var end = input.len
+    while end > 0 && input[end - 1] == 61 {
+        end = end - 1
     }
-    return result
+    let pad = input.len - end
+    if pad > 2 {
+        return Result.Err(label + ": " + pad.toString() + " padding characters, at most 2 allowed")
+    }
+    for i in 0..end {
+        if input[i] == 61 {
+            return Result.Err(label + ": '=' padding before end of input at byte " + i.toString())
+        }
+    }
+    if pad > 0 || padRequired {
+        if input.len % 4 != 0 {
+            return Result.Err(label + ": length " + input.len.toString() + " is not a multiple of 4")
+        }
+    }
+    let rem = end % 4
+    // Only reachable for unpadded URL-safe input; a multiple-of-4 length with at
+    // most 2 pad characters can never leave one symbol over.
+    if rem == 1 {
+        return Result.Err(label + ": truncated input, " + end.toString() + " symbols leaves a dangling 6 bits")
+    }
+
+    var out = ""
+    var i: i64 = 0
+    while i < end {
+        let a = b64Val(input[i], urlSafe)
+        if a < 0 {
+            return Result.Err(label + ": invalid character at byte " + i.toString())
+        }
+        let b = b64Val(input[i + 1], urlSafe)
+        if b < 0 {
+            return Result.Err(label + ": invalid character at byte " + (i + 1).toString())
+        }
+        var acc = (a << 18) | (b << 12)
+        let group = end - i
+        if group == 2 {
+            out.push(((acc >> 16) & 0xff) as u8)
+            i = end
+        } else {
+            let c = b64Val(input[i + 2], urlSafe)
+            if c < 0 {
+                return Result.Err(label + ": invalid character at byte " + (i + 2).toString())
+            }
+            acc = acc | (c << 6)
+            out.push(((acc >> 16) & 0xff) as u8)
+            if group == 3 {
+                out.push(((acc >> 8) & 0xff) as u8)
+                i = end
+            } else {
+                let d = b64Val(input[i + 3], urlSafe)
+                if d < 0 {
+                    return Result.Err(label + ": invalid character at byte " + (i + 3).toString())
+                }
+                acc = acc | d
+                out.push(((acc >> 8) & 0xff) as u8)
+                out.push((acc & 0xff) as u8)
+                i = i + 4
+            }
+        }
+    }
+    return Result.Ok(out)
+}
+
+// Decode standard base64. Requires '='-padded, multiple-of-4 input over the
+// A–Za–z0–9+/ alphabet; anything else — including whitespace — is an error.
+// Non-zero bits past the end of the final partial group are ignored, matching Go.
+fn base64Decode(input: &string): Result<string> {
+    return b64DecodeCore(input, false, true, "base64")
+}
+
+// Decode URL-safe base64 (RFC 4648 §5) over A–Za–z0–9-_. Padding is optional, since
+// `urlEncode` and JOSE both omit it, but if present it must be correct.
+fn base64UrlDecode(input: &string): Result<string> {
+    return b64DecodeCore(input, true, false, "base64url")
 }
 
 // Base64 namespace — call as Base64.encode(...), Base64.decode(...).
@@ -115,15 +196,26 @@ pub struct Base64 {
 }
 
 impl Base64 {
+    // Encode bytes as standard base64 with '=' padding (RFC 4648 §4).
     fn encode(input: &string): string {
         return base64Encode(input)
     }
 
+    // Encode bytes as URL-safe base64 with no padding (RFC 4648 §5).
     fn urlEncode(input: &string): string {
         return base64UrlEncode(input)
     }
 
-    fn decode(input: &string): string {
+    // Decode standard base64. Errs on any byte outside A–Za–z0–9+/=, a length that
+    // is not a multiple of 4, or misplaced/oversized padding; whitespace and
+    // newlines are rejected, so unwrap MIME line-wrapping before calling this.
+    fn decode(input: &string): Result<string> {
         return base64Decode(input)
+    }
+
+    // Decode URL-safe base64 (A–Za–z0–9-_). Padding is optional but must be
+    // correct if present. Same strictness as `decode` otherwise.
+    fn urlDecode(input: &string): Result<string> {
+        return base64UrlDecode(input)
     }
 }

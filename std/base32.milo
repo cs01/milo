@@ -1,10 +1,18 @@
-// std/base32 — Base32 encode/decode (RFC 4648), pure Milo.
+// std/base32 — Base32 encode/decode (RFC 4648 §6), pure Milo.
 //
 // The encoding otpauth:// URIs use for TOTP/HOTP secrets, and what DNS, S/MIME and
 // many license keys use for case-insensitive, human-transcribable binary. Alphabet
-// A–Z2–7, MSB-first, '=' padding to an 8-char group. Decoding accepts lowercase and
-// skips padding/whitespace, so a secret copied from an authenticator app just works.
-// Output/input are byte strings, matching std/base64.
+// A–Z2–7, MSB-first, '=' padding to an 8-char group. Output/input are byte strings,
+// matching std/base64.
+//
+// Two decoders, because the two jobs are genuinely different:
+//   `decode`      strict RFC 4648 — padded, multiple-of-8, alphabet only. Use it on
+//                 machine-produced input, where anything else means corruption.
+//   `decodeLoose` skips ASCII whitespace, '-' and '=' before decoding, and does not
+//                 require padding. Use it on a secret a human copied out of an
+//                 authenticator app, where "JBSW Y3DP EHPK 3PXP" is the normal shape.
+// Both reject characters outside the alphabet. Lowercase is accepted by both: the
+// alphabet has no lowercase symbols, so case-folding is unambiguous, not a guess.
 
 fn b32Char(v: i64): u8 {
     if v < 26 {
@@ -51,18 +59,19 @@ fn b32Val(c: u8): i64 {
     return -1
 }
 
-// Decode a Base32 string to bytes. Padding, whitespace, and case are tolerated;
-// any other character is skipped so lightly-formatted secrets still decode.
-fn base32Decode(input: &string): string {
+// A final group of `n` symbols is only reachable from a whole number of input bytes
+// for n in {2,4,5,7} (plus the empty n == 0); 1, 3 and 6 leave a dangling fragment.
+fn b32ValidTail(n: i64): bool {
+    return n == 0 || n == 2 || n == 4 || n == 5 || n == 7
+}
+
+// Turn a validated symbol run into bytes. `symbols` holds only alphabet characters.
+fn b32Emit(symbols: &string): string {
     var out = ""
     var buffer: i64 = 0
     var bits: i64 = 0
-    for i in 0..input.len {
-        let v = b32Val(input[i])
-        if v < 0 {
-            continue
-        }
-        buffer = (buffer << 5) | v
+    for i in 0..symbols.len {
+        buffer = (buffer << 5) | b32Val(symbols[i])
         bits = bits + 5
         if bits >= 8 {
             bits = bits - 8
@@ -72,16 +81,69 @@ fn base32Decode(input: &string): string {
     return out
 }
 
+// Strict RFC 4648 decode: '='-padded to a multiple of 8, alphabet symbols only.
+// Whitespace, '-' and any other byte are errors, reported with their offset.
+fn base32Decode(input: &string): Result<string> {
+    var end = input.len
+    while end > 0 && input[end - 1] == '=' {
+        end = end - 1
+    }
+    if input.len % 8 != 0 {
+        return Result.Err("base32: length " + input.len.toString() + " is not a multiple of 8")
+    }
+    if !b32ValidTail(end % 8) {
+        return Result.Err("base32: " + (input.len - end).toString() + " padding characters is not a valid amount")
+    }
+    var symbols = ""
+    for i in 0..end {
+        if b32Val(input[i]) < 0 {
+            return Result.Err("base32: invalid character at byte " + i.toString())
+        }
+        symbols.push(input[i])
+    }
+    return Result.Ok(b32Emit(symbols))
+}
+
+// Lenient decode for human-transcribed secrets: ASCII whitespace, '-' and '=' are
+// skipped wherever they appear and padding is optional. Every other non-alphabet
+// byte is still an error — leniency is about formatting, never about content.
+fn base32DecodeLoose(input: &string): Result<string> {
+    var symbols = ""
+    for i in 0..input.len {
+        let c = input[i]
+        if c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '-' || c == '=' {
+            continue
+        }
+        if b32Val(c) < 0 {
+            return Result.Err("base32: invalid character at byte " + i.toString())
+        }
+        symbols.push(c)
+    }
+    if !b32ValidTail(symbols.len % 8) {
+        return Result.Err("base32: truncated input, " + symbols.len.toString() + " symbols leaves a dangling fragment")
+    }
+    return Result.Ok(b32Emit(symbols))
+}
+
 // Base32 namespace — call as Base32.encode(...), Base32.decode(...).
 pub struct Base32 {
 }
 
 impl Base32 {
+    // Encode bytes as Base32 with '=' padding to a multiple of 8 characters.
     fn encode(input: &string): string {
         return base32Encode(input)
     }
 
-    fn decode(input: &string): string {
+    // Strict RFC 4648 decode. Requires a multiple-of-8 padded length and A–Z2–7
+    // symbols (lowercase accepted); whitespace, '-' and any other byte are errors.
+    fn decode(input: &string): Result<string> {
         return base32Decode(input)
+    }
+
+    // Decode a human-transcribed secret: ASCII whitespace, '-' and '=' are skipped
+    // and padding is optional. Non-alphabet bytes are still an error.
+    fn decodeLoose(input: &string): Result<string> {
+        return base32DecodeLoose(input)
     }
 }

@@ -17,7 +17,7 @@ pub fn main(): i32 {
     print("f=", Hex.encode("f"))
     print("fo=", Hex.encode("fo"))
     print("foobar=", Hex.encode("foobar"))
-    print("rtLower=", Hex.decode("666f6f626172"))
-    print("rtUpper=", Hex.decode("666F6F626172"))
+    print("rtLower=", Hex.decode("666f6f626172")!)
+    print("rtUpper=", Hex.decode("666F6F626172")!)
     return 0
 }

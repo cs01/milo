@@ -15,7 +15,7 @@ pub fn main(): i32 {
     let seed = "12345678901234567890"
     let b32 = Base32.encode(seed)
     print(b32)
-    let secret = Base32.decode(b32)
+    let secret = Base32.decode(b32)!
     print(Totp.hotp(secret, 0, 6))
     print(Totp.hotp(secret, 1, 6))
     return 0

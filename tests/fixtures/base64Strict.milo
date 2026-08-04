@@ -1,0 +1,51 @@
+// Base64.decode / Base64.urlDecode are strict and report why they failed. Before
+// this, every line below that now prints an error produced a shorter-but-plausible
+// string instead — a corrupt auth header decoded to something that looked real.
+// @expect: rt=foobar
+// @expect: empty=[]
+// @expect: badchar=base64: invalid character at byte 0
+// @expect: notmul4=base64: length 3 is not a multiple of 4
+// @expect: space=base64: length 9 is not a multiple of 4
+// @expect: newline=base64: length 9 is not a multiple of 4
+// @expect: allpad=base64: 4 padding characters, at most 2 allowed
+// @expect: midpad=base64: '=' padding before end of input at byte 1
+// @expect: urlalpha=base64: invalid character at byte 3
+// @expect: urlrt=foo?~
+// @expect: urlnopad=f
+// @expect: urlpad=f
+// @expect: urldangling=base64url: truncated input, 9 symbols leaves a dangling 6 bits
+// @expect: urlstdalpha=base64url: invalid character at byte 3
+
+from "std/base64" import {
+    Base64
+}
+
+fn show(r: Result<string>): string {
+    match r {
+        Result.Ok(v) => {
+            return v
+        }
+        Result.Err(e) => {
+            return e
+        }
+    }
+}
+
+pub fn main(): i32 {
+    print("rt=", show(Base64.decode(Base64.encode("foobar"))))
+    print("empty=[", show(Base64.decode("")), "]")
+    print("badchar=", show(Base64.decode("!!!!")))
+    print("notmul4=", show(Base64.decode("abc")))
+    print("space=", show(Base64.decode("Zm9v YmFy")))
+    print("newline=", show(Base64.decode("Zm9vYmFy\n")))
+    print("allpad=", show(Base64.decode("====")))
+    print("midpad=", show(Base64.decode("Z=9vYmFy")))
+    print("urlalpha=", show(Base64.decode("Zm9-YmFy")))
+
+    print("urlrt=", show(Base64.urlDecode(Base64.urlEncode("foo?~"))))
+    print("urlnopad=", show(Base64.urlDecode("Zg")))
+    print("urlpad=", show(Base64.urlDecode("Zg==")))
+    print("urldangling=", show(Base64.urlDecode("Zm9vYmFyZ")))
+    print("urlstdalpha=", show(Base64.urlDecode("Zm9+YmFy")))
+    return 0
+}

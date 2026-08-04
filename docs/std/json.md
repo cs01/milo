@@ -206,6 +206,14 @@ fn Json.curStr(self: &Json, cur: i64): Option<string>
 
 _Undocumented._
 
+### `Json.curUint`
+
+```milo
+fn Json.curUint(self: &Json, cur: i64): Option<u64>
+```
+
+Unsigned read, for values above i64::MAX that `curInt` must reject.
+
 ### `Json.f64`
 
 ```milo
@@ -478,6 +486,47 @@ fn JsonArr.val(self: JsonArr, val: JsonVal): JsonArr
 
 _Undocumented._
 
+### `jsonBoolStr`
+
+```milo
+pub fn jsonBoolStr(b: bool): string
+```
+
+`true`/`false` as JSON text.
+
+### `JsonError.message`
+
+```milo
+fn JsonError.message(self: &JsonError): string
+```
+
+_Undocumented._
+
+### `JsonError.path`
+
+```milo
+fn JsonError.path(self: &JsonError): string
+```
+
+Dotted path to the offending value, "" for a syntax error.
+
+### `JsonError.under`
+
+```milo
+fn JsonError.under(self: JsonError, seg: string): JsonError
+```
+
+Re-root the error one level up. Decoders build paths bottom-up so the
+success path never allocates a path string.
+
+### `JsonError.underIndex`
+
+```milo
+fn JsonError.underIndex(self: JsonError, index: i64): JsonError
+```
+
+_Undocumented._
+
 ### `jsonEscapeStr`
 
 ```milo
@@ -485,6 +534,14 @@ pub fn jsonEscapeStr(s: &string): string
 ```
 
 _Undocumented._
+
+### `jsonKindName`
+
+```milo
+pub fn jsonKindName(kind: i32): string
+```
+
+Human-readable name for a `curKind` result, including -1 for "no such node".
 
 ### `JsonObj.arr`
 
@@ -615,6 +672,14 @@ fn JsonPull.next(self: &mut JsonPull): JsonToken
 ```
 
 _Undocumented._
+
+### `jsonQuote`
+
+```milo
+pub fn jsonQuote(s: &string): string
+```
+
+Quote and escape a string as a JSON string literal, brackets included.
 
 ### `jsonSer`
 

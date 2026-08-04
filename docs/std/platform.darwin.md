@@ -78,6 +78,30 @@ Winsock has no POSIX counterpart: sockets are ready to use with no init, and the
 errors go through errno like everything else. These fold to that so std/net's socket
 paths read the same on every platform (see platform.windows for the real work).
 
+### `environBlock`
+
+```milo
+pub fn environBlock(): **u8
+```
+
+The live NULL-terminated `NAME=VALUE` array, reflecting every setenv/unsetenv so far.
+
+### `envSet`
+
+```milo
+pub fn envSet(name: *u8, value: *u8): i32
+```
+
+Set `name` to `value`, replacing any existing value. 0 on success.
+
+### `envUnset`
+
+```milo
+pub fn envUnset(name: *u8): i32
+```
+
+Remove `name` from the environment. 0 on success; removing an unset name succeeds.
+
 ### `evAdd`
 
 ```milo
@@ -141,6 +165,17 @@ pub fn evOneshot(): u16
 ```
 
 _Undocumented._
+
+### `execvpWithEnv`
+
+```milo
+pub fn execvpWithEnv(file: *u8, argv: *u8, envp: *u8): i32
+```
+
+execvp — PATH search included — with an explicit environment. Linux has execvpe for
+this; macOS does not, so the process's environ pointer is overwritten first and plain
+execvp picks it up. Correct only between fork and exec, where no other code can
+observe the clobbered environ.
 
 ### `exePathInto`
 

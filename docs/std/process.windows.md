@@ -50,7 +50,7 @@ _Undocumented._
 fn Child.readStdout(self: &Child, buf: *u8, len: i64): i64
 ```
 
-_Undocumented._
+Only valid when stdout is a pipe (the default) rather than redirected elsewhere.
 
 ### `Child.signal`
 
@@ -66,7 +66,9 @@ _Undocumented._
 fn Child.spawn(program: &string, args: &Vec<string>, mergeStderr: bool): Result<Child>
 ```
 
-_Undocumented._
+Spawn with both stdio pipes and nothing else configured. Shorthand for
+`Command.new(program).args(args).stderr(...)` — use Command when the child needs
+a working directory, an environment, or a stream pointed anywhere but a pipe.
 
 ### `Child.stderr`
 
@@ -82,7 +84,7 @@ _Undocumented._
 fn Child.stdout(self: &Child): Channel<string>
 ```
 
-_Undocumented._
+Only valid when stdout is a pipe (the default).
 
 ### `Child.wait`
 
@@ -98,12 +100,102 @@ _Undocumented._
 fn Child.writeStdin(self: &Child, buf: *u8, len: i64): i64
 ```
 
-_Undocumented._
+Only valid while stdin is a pipe: Stdio.Inherit/Null/Read leave nothing for the
+parent to write, and closeStdin() has already sent EOF.
 
 ### `Child.writeStdinStr`
 
 ```milo
 fn Child.writeStdinStr(self: &Child, s: &string): i64
+```
+
+_Undocumented._
+
+### `Command.arg`
+
+```milo
+fn Command.arg(self: Command, value: &string): Command
+```
+
+_Undocumented._
+
+### `Command.args`
+
+```milo
+fn Command.args(self: Command, values: &Vec<string>): Command
+```
+
+_Undocumented._
+
+### `Command.dir`
+
+```milo
+fn Command.dir(self: Command, path: &string): Command
+```
+
+Run the child in `path`. Unlike POSIX, a directory the child cannot enter fails
+spawn() itself — CreateProcess validates it before the process exists.
+
+### `Command.env`
+
+```milo
+fn Command.env(self: Command, name: &string, value: &string): Command
+```
+
+_Undocumented._
+
+### `Command.envClear`
+
+```milo
+fn Command.envClear(self: Command): Command
+```
+
+_Undocumented._
+
+### `Command.envRemove`
+
+```milo
+fn Command.envRemove(self: Command, name: &string): Command
+```
+
+_Undocumented._
+
+### `Command.new`
+
+```milo
+fn Command.new(program: &string): Command
+```
+
+_Undocumented._
+
+### `Command.spawn`
+
+```milo
+fn Command.spawn(self: &Command): Result<Child>
+```
+
+_Undocumented._
+
+### `Command.stderr`
+
+```milo
+fn Command.stderr(self: Command, mode: Stdio): Command
+```
+
+_Undocumented._
+
+### `Command.stdin`
+
+```milo
+fn Command.stdin(self: Command, mode: Stdio): Command
+```
+
+_Undocumented._
+
+### `Command.stdout`
+
+```milo
+fn Command.stdout(self: Command, mode: Stdio): Command
 ```
 
 _Undocumented._

@@ -259,7 +259,11 @@ pub extern fn fdatasync(fd: i32): i32
 
 pub extern fn mkdtemp(template: *u8): *u8
 
-@cSig("stdlib.h", "int mkstemp(char *)")
+// No @cSig: the guard compiles a TU against the target's real headers, and the MSVC
+// CRT has no mkstemp — so asserting its signature fails every Windows build, not just
+// the one call that needs it. Its POSIX-only neighbours (mkdtemp, opendir) are bare for
+// the same reason. On Windows this stays a link error naming the symbol, which is the
+// documented behaviour for a name only some platforms can provide.
 pub extern fn mkstemp(template: *u8): i32
 
 pub extern fn getcwd(buf: *u8, size: i64): *u8

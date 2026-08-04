@@ -78,6 +78,37 @@ Winsock has no POSIX counterpart: sockets are ready to use with no init, and the
 errors go through errno like everything else. These fold to that so std/net's socket
 paths read the same on every platform (see platform.windows for the real work).
 
+### `environBlock`
+
+```milo
+pub fn environBlock(): **u8
+```
+
+The live NULL-terminated `NAME=VALUE` array, reflecting every setenv/unsetenv so far.
+
+glibc publishes `environ` as a variable and Milo has no extern-variable syntax, so its
+address comes out of the dynamic symbol table (RTLD_DEFAULT is NULL on glibc; the link
+line always carries -ldl -rdynamic). /proc/self/environ is NOT a substitute — it is the
+environment the process was started with, frozen, and never reflects a later setenv.
+A null return means the symbol was not found, which callers must treat as "unknown",
+not "empty".
+
+### `envSet`
+
+```milo
+pub fn envSet(name: *u8, value: *u8): i32
+```
+
+Set `name` to `value`, replacing any existing value. 0 on success.
+
+### `envUnset`
+
+```milo
+pub fn envUnset(name: *u8): i32
+```
+
+Remove `name` from the environment. 0 on success; removing an unset name succeeds.
+
 ### `epollCtlAdd`
 
 ```milo
@@ -141,6 +172,14 @@ pub fn epollOut(): u32
 ```
 
 _Undocumented._
+
+### `execvpWithEnv`
+
+```milo
+pub fn execvpWithEnv(file: *u8, argv: *u8, envp: *u8): i32
+```
+
+execvp — PATH search included — with an explicit environment.
 
 ### `exePathInto`
 

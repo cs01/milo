@@ -41,6 +41,7 @@ fn Child.readStdout(self: &Child, buf: *u8, len: i64): i64
 ```
 
 Low-level single read into a raw buffer. Prefer `stdout()` for streaming.
+Only valid when stdout is a pipe (the default) rather than redirected elsewhere.
 
 ### `Child.signal`
 
@@ -56,7 +57,9 @@ _Undocumented._
 fn Child.spawn(program: &string, args: &Vec<string>, mergeStderr: bool): Result<Child>
 ```
 
-_Undocumented._
+Spawn with both stdio pipes and nothing else configured. Shorthand for
+`Command.new(program).args(args).stderr(...)` — use Command when the child needs
+a working directory, an environment, or a stream pointed anywhere but a pipe.
 
 ### `Child.stderr`
 
@@ -76,6 +79,7 @@ fn Child.stdout(self: &Child): Channel<string>
 Stream the child's stdout as an iterable channel, pumped on a background
 green task — the uniform async-read API shared with pty/socket/pipe.
 `for chunk in child.stdout()`; closes at EOF (child exits / closes stdout).
+Only valid when stdout is a pipe (the default).
 
 ### `Child.wait`
 
@@ -91,12 +95,110 @@ _Undocumented._
 fn Child.writeStdin(self: &Child, buf: *u8, len: i64): i64
 ```
 
-_Undocumented._
+Only valid while stdin is a pipe: Stdio.Inherit/Null/Read leave nothing for the
+parent to write, and closeStdin() has already sent EOF.
 
 ### `Child.writeStdinStr`
 
 ```milo
 fn Child.writeStdinStr(self: &Child, s: &string): i64
+```
+
+_Undocumented._
+
+### `Command.arg`
+
+```milo
+fn Command.arg(self: Command, value: &string): Command
+```
+
+Append one argument. Arguments are passed to the child verbatim — there is no
+shell in the way, so quoting and globbing are neither needed nor performed.
+
+### `Command.args`
+
+```milo
+fn Command.args(self: Command, values: &Vec<string>): Command
+```
+
+Append several arguments.
+
+### `Command.dir`
+
+```milo
+fn Command.dir(self: Command, path: &string): Command
+```
+
+Run the child in `path` instead of the parent's working directory. A path the
+child cannot enter fails the child with exit code 126 (the shell's "found but
+could not execute"), reported by wait() like any other post-fork failure.
+
+### `Command.env`
+
+```milo
+fn Command.env(self: Command, name: &string, value: &string): Command
+```
+
+Set `name` in the child's environment. Overrides an inherited value; the parent's
+own environment is untouched, unlike Env.set.
+
+### `Command.envClear`
+
+```milo
+fn Command.envClear(self: Command): Command
+```
+
+Start from an empty environment instead of inheriting the parent's. Variables set
+with `env` afterwards — or before — still apply; this only drops what was inherited.
+Note that a child with no PATH cannot itself find programs by name.
+
+### `Command.envRemove`
+
+```milo
+fn Command.envRemove(self: Command, name: &string): Command
+```
+
+Remove `name` from the child's environment.
+
+### `Command.new`
+
+```milo
+fn Command.new(program: &string): Command
+```
+
+A command that runs `program` (PATH-searched, like the shell) with no arguments.
+The program name is borrowed and copied in: it is usually a long-lived constant.
+
+### `Command.spawn`
+
+```milo
+fn Command.spawn(self: &Command): Result<Child>
+```
+
+Start the child and return immediately. On POSIX a program that does not exist is
+reported by the child's exit status (127) rather than here — the exec only happens
+after the fork, so spawn cannot know.
+
+### `Command.stderr`
+
+```milo
+fn Command.stderr(self: Command, mode: Stdio): Command
+```
+
+_Undocumented._
+
+### `Command.stdin`
+
+```milo
+fn Command.stdin(self: Command, mode: Stdio): Command
+```
+
+_Undocumented._
+
+### `Command.stdout`
+
+```milo
+fn Command.stdout(self: Command, mode: Stdio): Command
 ```
 
 _Undocumented._

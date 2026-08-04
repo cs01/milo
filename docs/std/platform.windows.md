@@ -126,6 +126,40 @@ pub fn ensureNetInit(): void
 
 _Undocumented._
 
+### `environBlock`
+
+```milo
+pub fn environBlock(): **u8
+```
+
+The live NULL-terminated `NAME=VALUE` array, reflecting every _putenv_s so far.
+
+### `envSet`
+
+```milo
+pub fn envSet(name: *u8, value: *u8): i32
+```
+
+Set `name` to `value`, replacing any existing value. 0 on success.
+
+### `envUnset`
+
+```milo
+pub fn envUnset(name: *u8): i32
+```
+
+Remove `name` from the environment. 0 on success.
+
+### `execvpWithEnv`
+
+```milo
+pub fn execvpWithEnv(_file: *u8, _argv: *u8, _envp: *u8): i32
+```
+
+No fork here: std/process.windows hands the child's environment to CreateProcess up
+front, so nothing on this arm can reach an exec. Aborts rather than returning -1,
+which a caller would read as an ordinary exec failure.
+
 ### `exePathInto`
 
 ```milo
@@ -524,7 +558,11 @@ _Undocumented._
 pub fn read(fd: i32, buf: *u8, nbyte: i64): i64
 ```
 
-_Undocumented._
+The negative-fd guards below are not defensive noise. POSIX read/write/close on a bad
+fd set EBADF and return -1; the UCRT runs its invalid-parameter handler, whose default
+is to terminate the process on the spot — so std code that reads a closed or absent
+stream (Child.readStdout on a stream redirected away from a pipe, say) would be a
+harmless -1 on POSIX and a silent whole-process kill here.
 
 ### `sigchldNum`
 

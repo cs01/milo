@@ -687,9 +687,22 @@ class LowerCtx {
           // the same U+F7xx private-use sentinel that \xNN escapes use, which
           // codegen emits back as raw single bytes.
           const bytes = readFileSync(absPath);
+          // Built in chunks, not byte-at-a-time. `contents += ...` per byte is quadratic in
+          // practice on a multi-megabyte asset: `examples/games/flight` embeds ~63 MB of
+          // city data and spent 8s of its 8.5s compile inside this loop, which read as a
+          // superlinear pathology in the type checker until the input was measured in bytes
+          // rather than source lines.
+          const codes = new Uint16Array(bytes.length);
+          for (let i = 0; i < bytes.length; i++) {
+            const b = bytes[i]!;
+            codes[i] = b < 0x80 ? b : 0xF700 + b;
+          }
+          // 8192 stays well under the argument-count limit that makes `fromCharCode(...all)`
+          // overflow the stack on a large asset.
+          const CHUNK = 8192;
           let contents = "";
-          for (const byte of bytes) {
-            contents += byte < 0x80 ? String.fromCharCode(byte) : String.fromCharCode(0xF700 + byte);
+          for (let i = 0; i < codes.length; i += CHUNK) {
+            contents += String.fromCharCode(...codes.subarray(i, i + CHUNK));
           }
           return { kind: "StringLit", value: contents, type: { tag: "string" as const }, span: expr.span };
         }

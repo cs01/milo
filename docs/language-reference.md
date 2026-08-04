@@ -1500,6 +1500,45 @@ fn main() {
 }
 ```
 
+Using the struct **as a whole** while a field is missing is an error as well, since it
+would show the emptied field as if it were data:
+
+```milo error
+struct Pair {
+    a: string,
+    b: string,
+}
+
+fn main() {
+    let p = Pair { a: "one", b: "two" }
+    let x = p.a
+    print(x)
+    print(p)           // error: 'p' is incomplete: 'p.a' was moved out of it
+}
+```
+
+A type with a `Drop` impl cannot be taken apart at all. `drop` runs against the whole
+value, so a destructor that found one of its fields already gone would be reading an
+empty one:
+
+```milo error
+struct Res {
+    name: string,
+}
+
+impl Drop for Res {
+    fn drop(self: &mut Self) {
+        print("dropping " + self.name)
+    }
+}
+
+fn main() {
+    let r = Res { name: "alpha" }
+    let stolen = r.name    // error: cannot move 'r.name' out of 'Res', which implements Drop
+    print(stolen)
+}
+```
+
 An index is a runtime value, so `v[i]` is not tracked this way — see
 [docs/backlog.md](backlog.md) on the container-dependent answer.
 

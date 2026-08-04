@@ -1,0 +1,23 @@
+// Rust's E0509. A Drop impl takes '&mut self' and is written against every field being
+// present, so a type with one cannot be taken apart field-wise. What made this urgent is
+// what used to happen instead: codegen saw a partially moved local, skipped its drop glue
+// entirely, and the destructor never ran at all — a silent resource leak with no
+// diagnostic. Found by scripts/fuzz-ownership.ts (the 'drop-partial' spelling).
+// @error: which implements Drop
+struct Res {
+    name: string,
+}
+
+impl Drop for Res {
+    fn drop(self: &mut Self) {
+        print("dropping " + self.name)
+    }
+}
+
+fn main() {
+    let r = Res {
+        name: "alpha"
+    }
+    let stolen = r.name
+    print(stolen)
+}

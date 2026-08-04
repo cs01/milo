@@ -325,6 +325,12 @@ export class TypeChecker {
   private dropImpls = new Set<string>();
   private sendTypes = new Set<string>();
   private syncTypes = new Set<string>();
+  // Depth of nesting inside the OBJECT of a field/index access. While raised, an
+  // identifier read is naming a container on the way to a narrower place rather than
+  // using the value itself — the one distinction the partial-move read rule needs.
+  // A new object-checking site that forgets to raise it over-reports rather than
+  // under-reports, which is the direction to fail in.
+  private placeBaseDepth = 0;
   private unsafeDepth = 0;
   // Parallel to unsafeDepth: one flag per live `unsafe` block, set true the moment
   // an operation inside it actually needs unsafe. A block popped still false is the
@@ -4583,6 +4589,12 @@ export class TypeChecker {
       if (fieldType && !isCopy(fieldType, (n) => this.isAllCopyEnum(n), (n) => this.isAllCopyStruct(n))) {
         const base = this.borrowBasePath(expr);
         if (base === null) {
+          const dropTy = this.dropTypeInPath(expr);
+          if (dropTy) {
+            this.error(`cannot move '${this.describeExpr(expr)}' out of '${dropTy}', which implements Drop`, expr.span,
+              `a Drop impl runs against the whole value, so taking a field out of it would leave the destructor reading an empty one — clone the field, or consume the '${dropTy}' whole`);
+            return;
+          }
           // Owned root: the field really is handed over, so record WHICH field left.
           // Reading it again is caught at the read (checkExpr), not here — a move
           // position reads first, so checking in both places would double-report.
@@ -4659,7 +4671,9 @@ export class TypeChecker {
       return { type: t, mutable: info.mutable };
     }
     if (expr.kind === "FieldAccess") {
+      this.placeBaseDepth++;
       let objType = this.checkExpr(expr.object);
+      this.placeBaseDepth--;
       // auto-deref *Struct for field assignment (always mutable through ptr)
       let throughPtr = false;
       if (objType.tag === "ptr" && objType.inner.tag === "struct") {
@@ -5073,6 +5087,27 @@ export class TypeChecker {
 
   // Assigning to a place puts a value back: it and everything under it are live
   // again. Without this, `p.a = "new"` would leave `p.a` permanently unusable.
+  // Rust's E0509: the type a field is being moved out of implements Drop. Returns the
+  // offending type name, checking every base in the chain — moving `p.i.t` leaves both
+  // `p.i` and `p` incomplete, so a Drop on either is a problem.
+  //
+  // Milo's answer before this check was worse than either alternative: codegen sees a
+  // partially moved local and skips its drop glue entirely, so `drop` never runs at all
+  // and whatever it was going to release — a file, a GL name, a lock — leaks with no
+  // diagnostic. Running it instead would hand the destructor a zeroed field, which is
+  // the silent-wrong-data outcome. A `Drop` impl is written against the whole value, so
+  // the honest answer is that the value cannot be taken apart.
+  private dropTypeInPath(e: Expr): string | null {
+    let cur: Expr = e;
+    while (cur.kind === "FieldAccess" || cur.kind === "IndexAccess") {
+      cur = cur.object;
+      const t = this.exprTypes.get(cur);
+      const bare = t && t.tag === "ref" ? t.inner : t;
+      if (bare && bare.tag === "struct" && this.dropImpls.has(bare.name)) return bare.name;
+    }
+    return null;
+  }
+
   private markPlaceMoved(info: VarInfo, path: string) {
     (info.movedPlaces ??= new Set()).add(path);
   }
@@ -5396,6 +5431,16 @@ export class TypeChecker {
           return this.setType(expr, { tag: "unknown" });
         }
         info.read = true;
+        // A use of the WHOLE value while one of its places is missing. Reading `p.b`
+        // after `p.a` left is fine — a different place — and that read reaches here
+        // with placeBaseDepth raised, because `p` is only the base of a narrower place.
+        // Anything else names the value itself: an argument, a receiver, a return, a
+        // print. Handing that on shows the zeroed field as if it were data.
+        if (this.placeBaseDepth === 0 && info.movedPlaces && info.movedPlaces.size > 0) {
+          const gone = [...info.movedPlaces][0]!;
+          this.error(`'${expr.name}' is incomplete: '${expr.name}${gone}' was moved out of it`, sp,
+            `using '${expr.name}' as a whole would show that field as empty — clone it at the point of transfer, or use the fields that are still there`);
+        }
         if (info.moved) {
           if (this.movedByPattern.has(info)) {
             this.error(
@@ -6169,7 +6214,9 @@ export class TypeChecker {
         // not a variable, so checkExpr(object) would report it undefined.
         const fnc = floatNamespaceConst(expr);
         if (fnc) return this.setType(expr, { tag: "float", bits: fnc.bits });
+        this.placeBaseDepth++;
         let objType = this.checkExpr(expr.object);
+        this.placeBaseDepth--;
         // auto-deref through references for field access
         if (objType.tag === "ref") objType = objType.inner;
         // auto-deref through pointers for field access (requires unsafe)
@@ -6239,7 +6286,9 @@ export class TypeChecker {
         return this.setType(expr, { tag: "array", element: elemType, size: expr.count });
       }
       case "IndexAccess": {
+        this.placeBaseDepth++;
         const rawObjType = this.checkExpr(expr.object);
+        this.placeBaseDepth--;
         const objType = rawObjType.tag === "ref" ? rawObjType.inner : rawObjType;
         const idxType = this.checkExpr(expr.index);
         if (idxType.tag !== "int" && idxType.tag !== "unknown") {

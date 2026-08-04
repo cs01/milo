@@ -106,6 +106,20 @@ class Program {
     b: string,
 }
 
+// A type whose destructor is observable. Its output is part of the predicted stdout,
+// so a drop that does not run, runs twice, or runs at the wrong point is a mismatch.
+// Added after a partial move out of a Drop type turned out to skip the destructor
+// entirely — a silent resource leak the string-only shapes could not express.
+struct Res {
+    name: string,
+}
+
+impl Drop for Res {
+    fn drop(self: &mut Self) {
+        print("drop " + self.name)
+    }
+}
+
 fn consume(s: string): i64 {
     return s.len()
 }
@@ -292,6 +306,25 @@ const SHAPES: Shape[] = [
     },
   },
   {
+    // A destructor whose position in the output is knowable. The value lives in a
+    // taken branch with nothing else in it, so its drop fires at one unambiguous
+    // point — no general drop-ordering model needed, and a missing or duplicated
+    // destructor shows up as a stdout mismatch like any other wrong value.
+    name: "drop-scope",
+    apply(p) {
+      const c = p.cond();
+      if (!c.value) return false;   // an untaken branch would print nothing to check
+      const r = p.fresh("r"), word = pick(WORDS);
+      p.open(`if ${c.name} {`);
+      p.emit(`let ${r} = Res { name: "${word}" }`);
+      p.emit(`print(borrow(${r}.name))`);
+      p.expected.push(String(word.length));
+      p.close();
+      p.expected.push(`drop ${word}`);
+      return true;
+    },
+  },
+  {
     // `.clone()` is the escape hatch the diagnostics point at, so it has to actually
     // produce an independent buffer. If it aliased, this shape would double-free.
     name: "clone",
@@ -335,7 +368,7 @@ function generate(invalidate: boolean): Case {
       const s = pick(dead);
       // The last spelling is the interesting one: the use is buried in a fork tail,
       // which is precisely the shape the checker used to walk straight past.
-      const spelling = pick(["borrow", "print", "consume", "rebind", "fork"]);
+      const spelling = pick(["borrow", "print", "consume", "rebind", "fork", "whole", "drop-partial"]);
       const live = p.live();
       switch (spelling) {
         case "borrow": p.emit(`print(borrow(${s.ref}))`); break;
@@ -347,6 +380,23 @@ function generate(invalidate: boolean): Case {
           p.emit(`let ${p.fresh("v")} = if ${p.cond().name} { ${s.ref} } else { ${other} }`);
           break;
         }
+        // Use of the WHOLE value while one of its places is gone. Only meaningful when
+        // the dead slot is a struct FIELD — a plain binding cannot be missing a part and
+        // still exist — so a non-field slot falls back to an ordinary use-after-move.
+        case "whole": {
+          if (!s.ref.includes(".")) { p.emit(`print(borrow(${s.ref}))`); break; }
+          p.emit(`print(${s.ref.split(".")[0]!})`);
+          break;
+        }
+        // A field taken out of a type with a destructor. Self-contained, because the
+        // bug it encodes needs no prior state: the move used to compile and the drop
+        // then never ran at all.
+        case "drop-partial": {
+          const r = p.fresh("r");
+          p.emit(`let ${r} = Res { name: "${pick(WORDS)}" }`);
+          p.emit(`let ${p.fresh("v")} = ${r}.name`);
+          break;
+        }
       }
       invalid = { ref: s.ref, spelling };
     }
@@ -356,7 +406,9 @@ function generate(invalidate: boolean): Case {
 
 // ── the oracles ───────────────────────────────────────────────────────────────
 
-function sh(cmd: string, env?: Record<string, string>) {
+interface Run { ok: boolean; stdout: string; stderr: string; status: number }
+
+function sh(cmd: string, env?: Record<string, string>): Run {
   try {
     const stdout = execSync(cmd, {
       encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"], timeout: 120000,
@@ -364,7 +416,7 @@ function sh(cmd: string, env?: Record<string, string>) {
     });
     return { ok: true, stdout, stderr: "", status: 0 };
   } catch (e: any) {
-    return { ok: false, stdout: e.stdout ?? "", stderr: e.stderr ?? "", status: e.status ?? -1 };
+    return { ok: false, stdout: String(e.stdout ?? ""), stderr: String(e.stderr ?? ""), status: Number(e.status ?? -1) };
   }
 }
 

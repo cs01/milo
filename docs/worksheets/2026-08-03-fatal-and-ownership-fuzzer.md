@@ -81,6 +81,67 @@ assignment, and covering-prefix aware: once `p.i` is gone, so is `p.i.t`. Moving
 the whole binding after a partial move is rejected too, for the same reason —
 handing on a struct with a zeroed field passes it off as real data.
 
+### Two more rules, after a corpus measurement
+
+The first pass rejected re-using a moved field and moving a partially-moved struct, but
+left two holes. Both are now closed, and both were decided on data rather than taste.
+
+**A partial move out of a `Drop` type is rejected** (Rust's E0509). The old behaviour was
+worse than either alternative: codegen saw a partially moved local and skipped its drop
+glue entirely, so
+
+```milo
+impl Drop for Res { fn drop(self: &mut Self) { print("dropping " + self.name) } }
+var r = Res { name: "alpha", tag: "beta" }
+let stolen = r.name        // partial move
+// program ends. "dropping" never prints.
+```
+
+A destructor that silently does not run is a leaked file, GL name, or lock with no
+diagnostic. Running it instead would hand it a zeroed field, which is the silent-wrong-data
+outcome. A `Drop` impl is written against the whole value, so the honest answer is that the
+value cannot be taken apart. Confirmed pre-existing on `main` at d33bcf1d, independent of
+the per-place work.
+
+**A whole-value use of a partially-moved struct is rejected** (Rust's E0382, borrow of
+partially moved value). `print(p)` after `p.a` left used to print `Pair { a: "", b: "two" }`.
+
+The distinguishing question — is this identifier the value being used, or the base of a
+narrower place? — is `placeBaseDepth`, raised only while checking the object of a field or
+index access. A new object-checking site that forgets to raise it over-reports rather than
+under-reports, which is the direction to fail in.
+
+**The measurement.** Both rules were instrumented before being enforced, and every entry
+point we have was swept:
+
+| corpus | entry points | functions checked | sites either rule would reject |
+|---|---|---|---|
+| this repo (`examples`, `std`, `tests/fixtures`) | 589 | 71,718 | 0 |
+| emulators (nes, snes, genesis) | 40 | 14,952 | 0 |
+| milojs, yaml, dapweb, milo-gl, milo-sdl | 15 | 8,827 | 0 |
+
+Zero. Adopting Rust's answer here costs nothing in code we own. The count is valid on
+programs whose build later fails, because the checker walks the whole program first —
+verified by counting checked functions (519 in `nes.milo` on a run that errored).
+
+### Where Milo now stands against Rust
+
+| case | Rust | Milo |
+|---|---|---|
+| `let x = p.a` on an owned struct | ok | ok |
+| `p.b` afterwards | ok | ok |
+| `p.a` again | E0382 | rejected |
+| `take(p)` | E0382 | rejected |
+| `print(p)` / `borrow(p)` | E0382 | rejected |
+| `p.a = v` then use `p` | ok | ok |
+| partial move out of a `Drop` type | E0509 | rejected |
+| partial move out of a `&T` | E0507 | rejected (already) |
+| `let x = v[0]` on `Vec<string>` | **E0507** | **silently deep-copies** |
+
+The last row is the only remaining divergence and it is Tier 1 #7, unchanged by this work:
+Rust never copies a heap value implicitly, and Milo's index path mallocs and memcpys
+without saying so. Breaking change, own decision.
+
 ## Decisions
 
 - **Not every `error()` becomes a `fatal()`.** The ~100 sites that report a type
@@ -156,12 +217,19 @@ loop rule, where there used to be eight copies of the loop rule.
 - `bun test` — see below; `tests/run.test.ts` 737 pass / 0 fail (3 new fixtures).
 - `tsc` on `src/` — 0 errors, gate held at zero.
 - `bun scripts/run-examples.ts` — 71 compiled, 24 ran, 0 failed.
-- `bun scripts/fuzz-ownership.ts` across seeds 4/11/21/37/101, 150 cases: no
-  findings, and the counters non-vacuous every run (valid accepted > 0, invalid
-  rejected = invalid total).
+- `bun scripts/fuzz-ownership.ts` across seeds 4/7/11/21/37/101: no findings, and
+  the counters non-vacuous every run (valid accepted > 0, invalid rejected =
+  invalid total). Run against `main` at d33bcf1d with the same generator it
+  reports 9 findings in 60 cases, three of them the `drop-partial` spelling —
+  the harness earns its keep rather than only agreeing with the fix.
+- Corpus sweep for the two new rules: 645 entry points across this repo, the three
+  emulators, milojs, yaml, dapweb, milo-gl and milo-sdl — 0 rejections.
 - New fixtures: `tests/errors/moveFieldTwice.milo`,
   `tests/errors/movePartiallyMovedStruct.milo`,
-  `tests/fixtures/moveFieldThenReassign.milo`.
+  `tests/errors/moveFieldOutOfDropType.milo`,
+  `tests/errors/readPartiallyMovedStruct.milo`,
+  `tests/fixtures/moveFieldThenReassign.milo`,
+  `tests/fixtures/dropRunsAfterFieldClone.milo`.
 - New tests: `tests/checkerRecovery.test.ts`, `tests/ownershipSoundness.test.ts`
   (40 cases, fixed seed, in CI).
 
@@ -170,12 +238,6 @@ loop rule, where there used to be eight copies of the loop rule.
 - Tier 1 #7 (one aliasing rule, three answers by container) now has a wider gap
   between the field answer and the index answer. Still needs the breaking-change
   decision.
-- Reading a partially-moved struct *by borrow* is still accepted — `borrow(p)`
-  after `p.a` left sees a zeroed field. Rust rejects it. Moving it is now
-  rejected, which covers the case where the zeroed field gets passed on as data;
-  the borrow case only reads it, and rejecting it would need the same
-  partial-move-through-a-reference analysis with no evidence yet that anyone hits
-  it.
 - The fuzzer generates one struct shape and string payloads. Vec-of-struct,
   enum payloads, closures capturing by move, and `Drop` impls are all untried
   ground; each is a shape entry, not a redesign.

@@ -1,0 +1,26 @@
+// The other side of the E0509 rule: cloning the field instead of moving it leaves the
+// value whole, so the destructor still runs and still sees real data. Without this the
+// rejection above could be satisfied by never running Drop at all, which is the bug it
+// was written for.
+// @expect: alpha
+// @expect: 5
+// @expect: dropping alpha/beta
+struct Res {
+    name: string,
+    tag: string,
+}
+
+impl Drop for Res {
+    fn drop(self: &mut Self) {
+        print("dropping " + self.name + "/" + self.tag)
+    }
+}
+
+fn main() {
+    let r = Res {
+        name: "alpha", tag: "beta"
+    }
+    let copied = r.name.clone()
+    print(copied)
+    print(r.name.len())
+}

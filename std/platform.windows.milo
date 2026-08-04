@@ -697,15 +697,29 @@ fn clampCount(nbyte: i64): u32 {
     return nbyte as u32
 }
 
+// The negative-fd guards below are not defensive noise. POSIX read/write/close on a bad
+// fd set EBADF and return -1; the UCRT runs its invalid-parameter handler, whose default
+// is to terminate the process on the spot — so std code that reads a closed or absent
+// stream (Child.readStdout on a stream redirected away from a pipe, say) would be a
+// harmless -1 on POSIX and a silent whole-process kill here.
 pub fn read(fd: i32, buf: *u8, nbyte: i64): i64 {
+    if fd < 0 {
+        return -1
+    }
     return _read(fd, buf, clampCount(nbyte)) as i64
 }
 
 pub fn write(fd: i32, buf: *u8, nbyte: i64): i64 {
+    if fd < 0 {
+        return -1
+    }
     return _write(fd, buf, clampCount(nbyte)) as i64
 }
 
 pub fn close(fd: i32): i32 {
+    if fd < 0 {
+        return -1
+    }
     return _close(fd)
 }
 
@@ -730,6 +744,50 @@ pub fn getpid(): i32 {
 // fd layer opens it just like a file.
 pub fn devNullPath(): string {
     return "NUL"
+}
+
+// ── environment ──
+//
+// The UCRT has neither setenv nor unsetenv: `_putenv_s` does both, deleting the variable
+// when the value is the empty string. It updates the Win32 environment block too, so
+// GetEnvironmentVariable and std/environ see the change.
+
+@cSig("stdlib.h", "errno_t _putenv_s(const char *, const char *)")
+pub extern fn _putenv_s(name: *u8, value: *u8): i32
+
+// The UCRT's accessor for its narrow environment table — the `_environ` global is only
+// a macro over it, and is deprecated as a direct reference. macOS's _NSGetEnviron has
+// the same shape for the same reason.
+@cSig("stdlib.h", "char ***__p__environ(void)")
+pub extern fn __p__environ(): ***u8
+
+// Set `name` to `value`, replacing any existing value. 0 on success.
+pub fn envSet(name: *u8, value: *u8): i32 {
+    unsafe {
+        return _putenv_s(name, value)
+    }
+}
+
+// Remove `name` from the environment. 0 on success.
+pub fn envUnset(name: *u8): i32 {
+    unsafe {
+        return _putenv_s(name, "" as *u8)
+    }
+}
+
+// The live NULL-terminated `NAME=VALUE` array, reflecting every _putenv_s so far.
+pub fn environBlock(): **u8 {
+    unsafe {
+        return *__p__environ()
+    }
+}
+
+// No fork here: std/process.windows hands the child's environment to CreateProcess up
+// front, so nothing on this arm can reach an exec. Aborts rather than returning -1,
+// which a caller would read as an ordinary exec failure.
+pub fn execvpWithEnv(_file: *u8, _argv: *u8, _envp: *u8): i32 {
+    assert(false, "execvpWithEnv: Windows creates processes with CreateProcess, not fork+exec")
+    return -1
 }
 
 // ── dynamic loading ──

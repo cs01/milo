@@ -175,7 +175,21 @@ Ranked by how often real programs hit them.
   `std/png`. Two audit details were stale: `examples/emulators/` has moved to its own repo, and
   the hand-rolling was worse inside `std/` than in `examples/`.*
 
-- [ ] **No child-process env or cwd, and no `setenv` at all.** `Child.spawn(program, args,
+- [x] **No child-process env or cwd, and no `setenv` at all.** *`Command` shipped on both
+  arms: `new/arg/args/dir/env/envRemove/envClear/stdin/stdout/stderr/spawn`, with a `Stdio`
+  enum (`Pipe`/`Inherit`/`Null`/`Merge`/`Read`/`Write`/`Append`). `mergeStderr` is folded in
+  as `Stdio.Merge`, and `Child.spawn(program, args, mergeStderr)` is now a three-line shim
+  over it — one spawn implementation, not two. Direction-specific variants pointed at the
+  wrong stream are a spawn error naming the stream, and no child is created. `Env.set` /
+  `Env.remove` mutate the process's own environment, with the libc thread-safety limit
+  stated in the doc comment rather than papered over. New platform seam:
+  `envSet`/`envUnset`/`environBlock`/`execvpWithEnv` (macOS has no execvpe, Windows has
+  neither setenv nor unsetenv, and Linux's `environ` needed a dlsym because Milo has no
+  extern-variable syntax — `/proc/self/environ` is frozen at exec and would have gone stale
+  the moment `Env.set` ran). Found and fixed alongside: the Windows arm's `read`/`write`/
+  `close` handed a negative fd to the UCRT, whose invalid-parameter handler kills the
+  process where POSIX returns -1. **Deliberately not shipped**: `detached`/`setsid`, and
+  `output()`/`status()` convenience runners.* Original finding: `Child.spawn(program, args,
   mergeStderr)` is the whole surface (`std/process.milo:109`) — no cwd, no env, no stdio
   redirection, no detached. And `setenv`/`putenv` appear nowhere in `std/`, so a program cannot
   mutate even its own environment. Go `exec.Cmd{Dir,Env}`, Rust `Command::env/current_dir`,

@@ -1,7 +1,9 @@
 // platform-specific constants and helpers for macOS/BSD
 
 from "std/os" import {
-    htons
+    htons,
+    execvp,
+    memcpy
 }
 
 // Fields carry C's spelling, not Milo camelCase: @cLayout emits
@@ -376,6 +378,55 @@ pub fn exePathInto(buf: *u8, bufsize: i64): i64 {
             return -1
         }
         return n as i64
+    }
+}
+
+// ── environment ──
+// The three OS arms disagree on all of this: Windows has no setenv/unsetenv (the UCRT
+// spells both `_putenv_s`) and macOS has no execvpe. std/env and std/process talk to
+// these four names and never to the C ones.
+
+@cSig("stdlib.h", "int setenv(const char *, const char *, int)")
+pub extern fn setenv(name: *u8, value: *u8, overwrite: i32): i32
+
+@cSig("stdlib.h", "int unsetenv(const char *)")
+pub extern fn unsetenv(name: *u8): i32
+
+// macOS does not export `environ` from a shared library, so the address of the
+// environment array is only reachable through this accessor (`char ***`).
+@cSig("crt_externs.h", "char ***_NSGetEnviron(void)")
+pub extern fn _NSGetEnviron(): ***u8
+
+// Set `name` to `value`, replacing any existing value. 0 on success.
+pub fn envSet(name: *u8, value: *u8): i32 {
+    unsafe {
+        return setenv(name, value, 1)
+    }
+}
+
+// Remove `name` from the environment. 0 on success; removing an unset name succeeds.
+pub fn envUnset(name: *u8): i32 {
+    unsafe {
+        return unsetenv(name)
+    }
+}
+
+// The live NULL-terminated `NAME=VALUE` array, reflecting every setenv/unsetenv so far.
+pub fn environBlock(): **u8 {
+    unsafe {
+        return *_NSGetEnviron()
+    }
+}
+
+// execvp — PATH search included — with an explicit environment. Linux has execvpe for
+// this; macOS does not, so the process's environ pointer is overwritten first and plain
+// execvp picks it up. Correct only between fork and exec, where no other code can
+// observe the clobbered environ.
+pub fn execvpWithEnv(file: *u8, argv: *u8, envp: *u8): i32 {
+    unsafe {
+        var slot: *u8 = envp
+        memcpy(_NSGetEnviron() as *u8, (slot.addrOf()) as *u8, 8)
+        return execvp(file, argv)
     }
 }
 

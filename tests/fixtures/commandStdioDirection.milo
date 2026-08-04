@@ -1,0 +1,45 @@
+// @expect: stdin cannot be Stdio.Write — the child reads it
+// @expect: stdout cannot be Stdio.Read — the child writes it
+// @expect: stdout cannot be Stdio.Merge — only stderr can merge
+// @expect: stderr cannot be Stdio.Read — the child writes it
+// @expect: child env still inherited
+
+// Three of the Stdio variants only make sense in one direction. Pointing one the wrong
+// way is a spawn error naming the stream, not a stream quietly left on the terminal —
+// and no child is created, so nothing is half-started when it happens.
+
+from "std/process" import {
+    Command, Stdio
+}
+from "std/env" import {
+    Env
+}
+
+fn expectErr(cmd: Command): void {
+    match cmd.spawn() {
+        Result.Ok(_c) => {
+            print("spawned anyway")
+        }
+        Result.Err(msg) => {
+            print(msg)
+        }
+    }
+}
+
+pub fn main(): i32 {
+    expectErr(Command.new("true").stdin(Stdio.Write("/dev/null")))
+    expectErr(Command.new("true").stdout(Stdio.Read("/dev/null")))
+    expectErr(Command.new("true").stdout(Stdio.Merge))
+    expectErr(Command.new("true").stderr(Stdio.Read("/dev/null")))
+
+    // A Command that was never spawned leaves the parent's own environment alone.
+    let _s = Env.set("MILO_DIRECTION_FIXTURE", "yes")!
+    let _c = Command.new("true").envRemove("MILO_DIRECTION_FIXTURE")
+    if Env.getOr("MILO_DIRECTION_FIXTURE", "<unset>") == "yes" {
+        print("child env still inherited")
+    } else {
+        print("Command mutated the parent environment")
+    }
+    let _r = Env.remove("MILO_DIRECTION_FIXTURE")!
+    return 0
+}

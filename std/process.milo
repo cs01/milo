@@ -7,9 +7,16 @@ from "std/platform" import {
     pipe,
     close,
     read,
-    write
+    write,
+    open,
+    devNullPath,
+    oWriteCreateTrunc,
+    oWriteCreateAppend,
+    environBlock,
+    execvpWithEnv
 }
 from "std/os" import {
+    chdir,
     dup2,
     execl,
     execvp,
@@ -106,100 +113,42 @@ pub struct Child {
 }
 
 impl Child {
+    // Spawn with both stdio pipes and nothing else configured. Shorthand for
+    // `Command.new(program).args(args).stderr(...)` — use Command when the child needs
+    // a working directory, an environment, or a stream pointed anywhere but a pipe.
     fn spawn(program: &string, args: &Vec<string>, mergeStderr: bool): Result<Child> {
-        unsafe {
-            var inP: [i32; 2] = [0; 2]
-            var outP: [i32; 2] = [0; 2]
-            var errP: [i32; 2] = [-1; 2]
-            if pipe(inP as *i32) != 0 {
-                return Result.Err("pipe(stdin) failed")
-            }
-            if pipe(outP as *i32) != 0 {
-                close(inP[0])
-                close(inP[1])
-                return Result.Err("pipe(stdout) failed")
-            }
-            if !mergeStderr {
-                if pipe(errP as *i32) != 0 {
-                    close(inP[0])
-                    close(inP[1])
-                    close(outP[0])
-                    close(outP[1])
-                    return Result.Err("pipe(stderr) failed")
-                }
-            }
-
-            let argv = buildArgv(program, args)
-
-            let pid = fork()
-            if pid < 0 {
-                close(inP[0])
-                close(inP[1])
-                close(outP[0])
-                close(outP[1])
-                if !mergeStderr {
-                    close(errP[0])
-                    close(errP[1])
-                }
-                freeArgv(argv, args.len + 2)
-                return Result.Err("fork() failed")
-            }
-
-            if pid == 0 {
-                dup2(inP[0], 0)
-                dup2(outP[1], 1)
-                if mergeStderr {
-                    dup2(outP[1], 2)
-                } else {
-                    dup2(errP[1], 2)
-                }
-                // Close every inherited fd except the dup'd stdio. Without this
-                // the child leaks the parent's fds — listening sockets, client
-                // connections, the green runtime's kqueue — into the exec'd
-                // program. Some children (e.g. lldb-dap) then wedge or misbehave,
-                // and it's a descriptor leak regardless. The dup'd 0/1/2 stay open.
-                var extraFd: i32 = 3
-                while extraFd < 1024 {
-                    close(extraFd)
-                    extraFd = extraFd + 1
-                }
-                var prog0: *u8 = 0 as *u8
-                memcpy((prog0.addrOf()) as *u8, argv, 8)
-                execvp(prog0, argv)
-                exit(127)
-            }
-
-            // Parent: close the child-side ends, keep the parent-side ends.
-            close(inP[0])
-            close(outP[1])
-            var errRead: i32 = -1
-            if !mergeStderr {
-                close(errP[1])
-                errRead = errP[0]
-            }
-            freeArgv(argv, args.len + 2)
-            return Result.Ok(Child {
-                pid: pid,
-                stdinFd: inP[1],
-                stdoutFd: outP[0],
-                stderrFd: errRead,
-            }
-            )
+        let errMode = if mergeStderr {
+            Stdio.Merge
+        } else {
+            Stdio.Pipe
         }
+        return Command.new(program).args(args).stderr(errMode).spawn()
     }
 
-    fn writeStdin(self: &Self, buf: *u8, len: i64): i64 {
+    // Only valid while stdin is a pipe: Stdio.Inherit/Null/Read leave nothing for the
+    // parent to write, and closeStdin() has already sent EOF.
+    fn writeStdin(self: &Self, buf: *u8, len: i64): i64
+    requires
+    self.stdinFd >= 0
+    {
         return write(self.stdinFd, buf, len)
     }
 
-    fn writeStdinStr(self: &Self, s: &string): i64 {
+    fn writeStdinStr(self: &Self, s: &string): i64
+    requires
+    self.stdinFd >= 0
+    {
         unsafe {
             return write(self.stdinFd, s as *u8, s.len)
         }
     }
 
     // Low-level single read into a raw buffer. Prefer `stdout()` for streaming.
-    fn readStdout(self: &Self, buf: *u8, len: i64): i64 {
+    // Only valid when stdout is a pipe (the default) rather than redirected elsewhere.
+    fn readStdout(self: &Self, buf: *u8, len: i64): i64
+    requires
+    self.stdoutFd >= 0
+    {
         return read(self.stdoutFd, buf, len)
     }
 
@@ -214,7 +163,11 @@ impl Child {
     // Stream the child's stdout as an iterable channel, pumped on a background
     // green task — the uniform async-read API shared with pty/socket/pipe.
     // `for chunk in child.stdout()`; closes at EOF (child exits / closes stdout).
-    fn stdout(self: &Self): Channel<string> {
+    // Only valid when stdout is a pipe (the default).
+    fn stdout(self: &Self): Channel<string>
+    requires
+    self.stdoutFd >= 0
+    {
         return fdChannel(self.stdoutFd)
     }
 
@@ -267,33 +220,525 @@ impl Child {
     }
 }
 
-// Build a NULL-terminated argv: argv[0]=program, argv[1..n]=args, argv[n+1]=NULL.
-// Each string is copied into its own NUL-terminated C buffer so it stays valid
-// across fork/exec. Caller frees with _freeArgv(argv, args.len + 2).
-fn buildArgv(program: &string, args: &Vec<string>): *u8 {
+// ── Command ──
+//
+// Everything a child needs beyond its argument list: working directory, environment,
+// and where each of the three standard streams goes. `Command.new(prog)` starts from
+// the same defaults `Child.spawn(prog, args, true)` has always had — stdin and stdout
+// on pipes, stderr merged into stdout — and each builder method changes one thing:
+//
+//     let child = Command.new("git")
+//         .arg("status")
+//         .dir(repoPath)
+//         .env("GIT_PAGER", "cat")
+//         .stderr(Stdio.Pipe)
+//         .spawn()!
+//
+// The builder takes ownership of the receiver and hands it back, so a chain works and a
+// stored Command can be reused: `spawn` borrows, and spawning the same Command twice is
+// two independent children.
+
+// Where one of a child's standard streams comes from, or goes to.
+//
+// Three of these are direction-specific and a spawn that mixes them up is a hard error
+// naming the stream, never a stream silently left on the parent's terminal.
+pub enum Stdio {
+    // A pipe the parent holds the other end of: Child.writeStdin / stdout() / stderr().
+    Pipe,
+    // The parent's own stream, unchanged — the child shares the terminal.
+    Inherit,
+    // /dev/null (NUL on Windows).
+    Null,
+    // stderr only: whatever stdout was pointed at, so both arrive interleaved on one fd.
+    Merge,
+    // stdin only: read the file at this path.
+    Read(string),
+    // stdout/stderr only: create or truncate the file at this path.
+    Write(string),
+    // stdout/stderr only: create or append to the file at this path.
+    Append(string),
+}
+
+// One env mutation, in the order the caller made it. Kept as a list rather than applied
+// eagerly because the parent's environment is only read at spawn time — a Command built
+// before an Env.set and spawned after it sees the new value.
+struct EnvChange {
+    name: string,
+    value: string,
+    remove: bool,
+}
+
+pub struct Command {
+    program: string,
+    argv: Vec<string>,
+    // "" means "the parent's working directory", which is not a path a child can
+    // meaningfully be given, so there is no ambiguity with a real value.
+    workDir: string,
+    envChanges: Vec<EnvChange>,
+    inheritEnv: bool,
+    inMode: Stdio,
+    outMode: Stdio,
+    errMode: Stdio,
+}
+
+impl Command {
+    // A command that runs `program` (PATH-searched, like the shell) with no arguments.
+    // The program name is borrowed and copied in: it is usually a long-lived constant.
+    fn new(program: &string): Command {
+        return Command {
+            program: program.clone(),
+            argv: Vec.new(),
+            workDir: "",
+            envChanges: Vec.new(),
+            inheritEnv: true,
+            inMode: Stdio.Pipe,
+            outMode: Stdio.Pipe,
+            errMode: Stdio.Merge,
+        }
+    }
+
+    // Append one argument. Arguments are passed to the child verbatim — there is no
+    // shell in the way, so quoting and globbing are neither needed nor performed.
+    fn arg(self: Command, value: &string): Command {
+        var c = self
+        c.argv.push(value.clone())
+        return c
+    }
+
+    // Append several arguments.
+    fn args(self: Command, values: &Vec<string>): Command {
+        var c = self
+        for i in 0..values.len {
+            c.argv.push(values[i].clone())
+        }
+        return c
+    }
+
+    // Run the child in `path` instead of the parent's working directory. A path the
+    // child cannot enter fails the child with exit code 126 (the shell's "found but
+    // could not execute"), reported by wait() like any other post-fork failure.
+    fn dir(self: Command, path: &string): Command {
+        var c = self
+        c.workDir = path.clone()
+        return c
+    }
+
+    // Set `name` in the child's environment. Overrides an inherited value; the parent's
+    // own environment is untouched, unlike Env.set.
+    fn env(self: Command, name: &string, value: &string): Command {
+        var c = self
+        c.envChanges.push(EnvChange {
+            name: name.clone(), value: value.clone(), remove: false
+        }
+        )
+        return c
+    }
+
+    // Remove `name` from the child's environment.
+    fn envRemove(self: Command, name: &string): Command {
+        var c = self
+        c.envChanges.push(EnvChange {
+            name: name.clone(), value: "", remove: true
+        }
+        )
+        return c
+    }
+
+    // Start from an empty environment instead of inheriting the parent's. Variables set
+    // with `env` afterwards — or before — still apply; this only drops what was inherited.
+    // Note that a child with no PATH cannot itself find programs by name.
+    fn envClear(self: Command): Command {
+        var c = self
+        c.inheritEnv = false
+        return c
+    }
+
+    fn stdin(self: Command, mode: Stdio): Command {
+        var c = self
+        c.inMode = mode
+        return c
+    }
+
+    fn stdout(self: Command, mode: Stdio): Command {
+        var c = self
+        c.outMode = mode
+        return c
+    }
+
+    fn stderr(self: Command, mode: Stdio): Command {
+        var c = self
+        c.errMode = mode
+        return c
+    }
+
+    // Start the child and return immediately. On POSIX a program that does not exist is
+    // reported by the child's exit status (127) rather than here — the exec only happens
+    // after the fork, so spawn cannot know.
+    fn spawn(self: &Self): Result<Child> {
+        return commandSpawn(self)
+    }
+}
+
+// Resolved fds for one standard stream: `child` is dup2'd onto the child's descriptor
+// and closed in the parent; `parent` is the pipe end the parent keeps. -1 means "none",
+// which for `child` is how Stdio.Inherit is expressed.
+struct StreamFds {
+    child: i32,
+    parent: i32,
+}
+
+fn noStreamFds(): StreamFds {
+    return StreamFds {
+        child: -1, parent: -1
+    }
+}
+
+// Open one standard stream. `childWrites` selects the direction, which is what makes
+// Stdio.Read valid only on stdin and Stdio.Write/Append only on stdout and stderr.
+fn openStdio(mode: &Stdio, childWrites: bool, label: string): Result<StreamFds> {
     unsafe {
-        let argc = args.len + 2
-        let argv = malloc(argc * 8)
+        match mode {
+            Stdio.Inherit => {
+                return Result.Ok(noStreamFds())
+            }
+            Stdio.Pipe => {
+                var fds: [i32; 2] = [0; 2]
+                if pipe(fds as *i32) != 0 {
+                    return Result.Err("pipe(" + label + ") failed")
+                }
+                if childWrites {
+                    return Result.Ok(StreamFds {
+                        child: fds[1], parent: fds[0]
+                    }
+                    )
+                }
+                return Result.Ok(StreamFds {
+                    child: fds[0], parent: fds[1]
+                }
+                )
+            }
+            Stdio.Null => {
+                let flags = if childWrites {
+                    oWriteCreateTrunc()
+                } else {
+                    0
+                }
+                let fd = open(devNullPath(), flags, 420)
+                if fd < 0 {
+                    return Result.Err("open(" + devNullPath() + ") for " + label + " failed")
+                }
+                return Result.Ok(StreamFds {
+                    child: fd, parent: -1
+                }
+                )
+            }
+            Stdio.Read(path) => {
+                if childWrites {
+                    return Result.Err(label + " cannot be Stdio.Read — the child writes it")
+                }
+                let fd = open(path, 0)
+                if fd < 0 {
+                    return Result.Err("open(" + path + ") for " + label + " failed")
+                }
+                return Result.Ok(StreamFds {
+                    child: fd, parent: -1
+                }
+                )
+            }
+            Stdio.Write(path) => {
+                if !childWrites {
+                    return Result.Err(label + " cannot be Stdio.Write — the child reads it")
+                }
+                let fd = open(path, oWriteCreateTrunc(), 420)
+                if fd < 0 {
+                    return Result.Err("open(" + path + ") for " + label + " failed")
+                }
+                return Result.Ok(StreamFds {
+                    child: fd, parent: -1
+                }
+                )
+            }
+            Stdio.Append(path) => {
+                if !childWrites {
+                    return Result.Err(label + " cannot be Stdio.Append — the child reads it")
+                }
+                let fd = open(path, oWriteCreateAppend(), 420)
+                if fd < 0 {
+                    return Result.Err("open(" + path + ") for " + label + " failed")
+                }
+                return Result.Ok(StreamFds {
+                    child: fd, parent: -1
+                }
+                )
+            }
+            Stdio.Merge => {
+                return Result.Err(label + " cannot be Stdio.Merge — only stderr can merge")
+            }
+        }
+    }
+}
 
-        let plen = program.len
-        let pcopy = malloc(plen + 1)
-        memcpy(pcopy, program as *u8, plen)
-        memset((pcopy as i64 + plen) as *u8, 0, 1)
-        memcpy(argv, (pcopy.addrOf()) as *u8, 8)
+fn closeStreamFds(fds: &StreamFds): void {
+    if fds.child >= 0 {
+        close(fds.child)
+    }
+    if fds.parent >= 0 {
+        close(fds.parent)
+    }
+}
 
-        for i in 0..args.len {
-            let arg = args[i]
-            let alen = arg.len
-            let acopy = malloc(alen + 1)
-            memcpy(acopy, arg as *u8, alen)
-            memset((acopy as i64 + alen) as *u8, 0, 1)
-            memcpy((argv as i64 + (i + 1) * 8) as *u8, (acopy.addrOf()) as *u8, 8)
+fn commandSpawn(cmd: &Command): Result<Child> {
+    unsafe {
+        let inFds = match openStdio(cmd.inMode, false, "stdin") {
+            Result.Ok(f) => {
+                f
+            }
+            Result.Err(e) => {
+                return Result.Err(e)
+            }
+        }
+        let outFds = match openStdio(cmd.outMode, true, "stdout") {
+            Result.Ok(f) => {
+                f
+            }
+            Result.Err(e) => {
+                closeStreamFds(inFds)
+                return Result.Err(e)
+            }
+        }
+        var mergeErr = false
+        match cmd.errMode {
+            Stdio.Merge => {
+                mergeErr = true
+            }
+            _ => {
+            }
+        }
+        var errFds = noStreamFds()
+        if !mergeErr {
+            match openStdio(cmd.errMode, true, "stderr") {
+                Result.Ok(f) => {
+                    errFds = f
+                }
+                Result.Err(e) => {
+                    closeStreamFds(inFds)
+                    closeStreamFds(outFds)
+                    return Result.Err(e)
+                }
+            }
         }
 
-        var nullPtr: *u8 = 0 as *u8
-        memcpy((argv as i64 + (argc - 1) * 8) as *u8, (nullPtr.addrOf()) as *u8, 8)
-        return argv
+        // Everything the child needs is built here, before the fork: between fork and
+        // exec a process with other OS threads must not allocate, and String/Vec do.
+        let argv = buildArgv(cmd.program, cmd.argv)
+        let argc = cmd.argv.len + 2
+        let envp = match buildEnvp(cmd) {
+            Result.Ok(p) => {
+                p
+            }
+            Result.Err(e) => {
+                closeStreamFds(inFds)
+                closeStreamFds(outFds)
+                closeStreamFds(errFds)
+                freeArgv(argv, argc)
+                return Result.Err(e)
+            }
+        }
+
+        let pid = fork()
+        if pid < 0 {
+            closeStreamFds(inFds)
+            closeStreamFds(outFds)
+            closeStreamFds(errFds)
+            freeArgv(argv, argc)
+            freeEnvp(envp)
+            return Result.Err("fork() failed")
+        }
+
+        if pid == 0 {
+            if inFds.child >= 0 {
+                dup2(inFds.child, 0)
+            }
+            if outFds.child >= 0 {
+                dup2(outFds.child, 1)
+            }
+            if mergeErr {
+                dup2(1, 2)
+            } else {
+                if errFds.child >= 0 {
+                    dup2(errFds.child, 2)
+                }
+            }
+            if cmd.workDir.len > 0 {
+                if chdir(cmd.workDir) != 0 {
+                    exit(126)
+                }
+            }
+            // Close every inherited fd except the dup'd stdio. Without this
+            // the child leaks the parent's fds — listening sockets, client
+            // connections, the green runtime's kqueue — into the exec'd
+            // program. Some children (e.g. lldb-dap) then wedge or misbehave,
+            // and it's a descriptor leak regardless. The dup'd 0/1/2 stay open.
+            var extraFd: i32 = 3
+            while extraFd < 1024 {
+                close(extraFd)
+                extraFd = extraFd + 1
+            }
+            var prog0: *u8 = 0 as *u8
+            memcpy((prog0.addrOf()) as *u8, argv, 8)
+            if envp as i64 == 0 {
+                execvp(prog0, argv)
+            } else {
+                execvpWithEnv(prog0, argv, envp)
+            }
+            exit(127)
+        }
+
+        // Parent: close the child-side ends, keep the parent-side ends.
+        if inFds.child >= 0 {
+            close(inFds.child)
+        }
+        if outFds.child >= 0 {
+            close(outFds.child)
+        }
+        if errFds.child >= 0 {
+            close(errFds.child)
+        }
+        freeArgv(argv, argc)
+        freeEnvp(envp)
+        return Result.Ok(Child {
+            pid: pid,
+            stdinFd: inFds.parent,
+            stdoutFd: outFds.parent,
+            stderrFd: errFds.parent,
+        }
+        )
     }
+}
+
+// ── child environment ──
+
+// Bytes of `record` before the first '=', which is the variable's name. A record with
+// no '=' (Windows' "=C:" drive pseudo-vars, or anything odd libc left there) yields "",
+// which no valid change can match, so such records pass through untouched.
+fn envRecordName(record: &string): string {
+    var name = ""
+    for i in 0..record.len {
+        if record[i] == '=' {
+            return name
+        }
+        name.push(record[i])
+    }
+    return ""
+}
+
+// Index of the last change naming `name`, or -1. Last wins: two `.env("X", …)` calls on
+// one Command mean the second one, the same as assigning a variable twice.
+fn lastEnvChange(changes: &Vec<EnvChange>, name: &string): i64 {
+    var found: i64 = -1
+    for i in 0..changes.len {
+        if changes[i].name == name {
+            found = i
+        }
+    }
+    return found
+}
+
+// The child's environment as a NULL-terminated array of "NAME=VALUE" C strings. A null
+// pointer means "inherit the parent's environment untouched" — the overwhelmingly common
+// case, and the one where exec needs no envp at all.
+fn buildEnvp(cmd: &Command): Result<*u8> {
+    unsafe {
+        if cmd.inheritEnv && cmd.envChanges.len == 0 {
+            return Result.Ok(0 as *u8)
+        }
+        var records: Vec<string> = Vec.new()
+        if cmd.inheritEnv {
+            let block = environBlock()
+            // An unreadable environment must not spawn a child with an empty one: that
+            // child would run without PATH, HOME or anything else and fail in ways that
+            // point nowhere near here.
+            if block as i64 == 0 {
+                return Result.Err("cannot read this process's environment")
+            }
+            var i: i64 = 0
+            var going = true
+            while going {
+                let entry: *u8 = block[i]
+                if entry as i64 == 0 {
+                    going = false
+                } else {
+                    let record = _cstrToString(entry)
+                    // A name this Command sets or removes is re-emitted (or dropped)
+                    // from the change list below, so skip the inherited copy.
+                    if lastEnvChange(cmd.envChanges, envRecordName(record)) < 0 {
+                        records.push(record)
+                    }
+                    i = i + 1
+                }
+            }
+        }
+        for i in 0..cmd.envChanges.len {
+            let change = cmd.envChanges[i]
+            if !change.remove && lastEnvChange(cmd.envChanges, change.name) == i {
+                records.push(change.name + "=" + change.value)
+            }
+        }
+        return Result.Ok(buildCArray(records))
+    }
+}
+
+fn freeEnvp(envp: *u8): void {
+    unsafe {
+        if envp as i64 == 0 {
+            return
+        }
+        var count: i64 = 0
+        var going = true
+        while going {
+            var p: *u8 = 0 as *u8
+            memcpy((p.addrOf()) as *u8, (envp as i64 + count * 8) as *u8, 8)
+            if p as i64 == 0 {
+                going = false
+            } else {
+                count = count + 1
+            }
+        }
+        freeArgv(envp, count + 1)
+    }
+}
+
+// Build a NULL-terminated array of C strings, one malloc'd NUL-terminated copy per
+// item, so the whole thing stays valid across fork/exec (a milo string's buffer is
+// owned by the parent's allocator and carries no length the C side can read).
+// Caller frees with freeArgv(arr, items.len + 1).
+fn buildCArray(items: &Vec<string>): *u8 {
+    unsafe {
+        let slots = items.len + 1
+        let arr = malloc(slots * 8)
+        for i in 0..items.len {
+            let item = items[i]
+            let n = item.len
+            let copy = malloc(n + 1)
+            memcpy(copy, item as *u8, n)
+            memset((copy as i64 + n) as *u8, 0, 1)
+            memcpy((arr as i64 + i * 8) as *u8, (copy.addrOf()) as *u8, 8)
+        }
+        var nullPtr: *u8 = 0 as *u8
+        memcpy((arr as i64 + items.len * 8) as *u8, (nullPtr.addrOf()) as *u8, 8)
+        return arr
+    }
+}
+
+// Build a NULL-terminated argv: argv[0]=program, argv[1..n]=args, argv[n+1]=NULL.
+// Caller frees with freeArgv(argv, args.len + 2).
+fn buildArgv(program: &string, args: &Vec<string>): *u8 {
+    var items: Vec<string> = Vec.new()
+    items.push(program.clone())
+    for i in 0..args.len {
+        items.push(args[i].clone())
+    }
+    return buildCArray(items)
 }
 
 pub fn freeArgv(argv: *u8, argc: i64): void {

@@ -1,0 +1,66 @@
+// @skip-os: win32
+// std/crypto has no Windows arm (std/ws binds OpenSSL through it), and `pipe` is POSIX.
+
+// Frame encode → decode over a pipe. Locks WsOpcode's discriminant to the RFC 6455
+// wire nibble: sendText must put a 1 in the header, and recv must decode it back to
+// WsOpcode.Text. A drifted discriminant would still typecheck, so only a byte-level
+// round-trip catches it.
+
+// @expect: Text 1 hello ws
+// @expect: same variant: true
+// @expect: Binary 2 2
+// @expect: rejected: reserved opcode
+
+from "std/ws" import {
+    WsConn, WsOpcode
+}
+from "std/platform" import {
+    pipe
+}
+from "std/os" import {
+    writeFd
+}
+
+pub fn main(): i32 {
+    var fds: [i32; 2] = [0; 2]
+    unsafe {
+        if pipe(fds as *i32) != 0 {
+            return 1
+        }
+    }
+
+    // Client masks outgoing frames, server does not — so this also exercises the
+    // masked path. _closed: true on both so neither Drop closes the shared fds.
+    let sender = WsConn {
+        fd: fds[1], ssl: 0, _ctx: 0, _closed: true, _isClient: true
+    }
+    var receiver = WsConn {
+        fd: fds[0], ssl: 0, _ctx: 0, _closed: true, _isClient: false
+    }
+
+    let _ = sender.sendText("hello ws")
+    let msg = receiver.recv()!
+    print($"{msg.opcode} {msg.opcode as i32} {msg.payload}")
+    print($"same variant: {msg.opcode == WsOpcode.Text}")
+
+    let _ = sender.sendBinary("ab")
+    let msg2 = receiver.recv()!
+    print($"{msg2.opcode} {msg2.opcode as i32} {msg2.payload.len}")
+
+    // Hand-rolled frame carrying reserved opcode 3: FIN|0x03, unmasked, length 0.
+    // RFC 6455 §5.2 says the connection must fail rather than treat it as data.
+    var raw: string = ""
+    raw.push(131)
+    raw.push(0)
+    let _ = writeFd(fds[1], raw, raw.len)
+    match receiver.recv() {
+        Result.Ok(_) => {
+            print("BUG: reserved opcode accepted")
+        }
+        Result.Err(e) => {
+            print($"rejected: {e}")
+        }
+    }
+
+    return 0
+}

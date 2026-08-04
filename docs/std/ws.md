@@ -26,54 +26,6 @@ pub fn isWsUpgrade(raw: &string): bool
 
 Check if raw HTTP request bytes contain a WebSocket upgrade request.
 
-### `WS_BINARY`
-
-```milo
-pub fn WS_BINARY(): u8
-```
-
-_Undocumented._
-
-### `WS_CLOSE`
-
-```milo
-pub fn WS_CLOSE(): u8
-```
-
-_Undocumented._
-
-### `WS_CONTINUATION`
-
-```milo
-pub fn WS_CONTINUATION(): u8
-```
-
-_Undocumented._
-
-### `WS_PING`
-
-```milo
-pub fn WS_PING(): u8
-```
-
-_Undocumented._
-
-### `WS_PONG`
-
-```milo
-pub fn WS_PONG(): u8
-```
-
-_Undocumented._
-
-### `WS_TEXT`
-
-```milo
-pub fn WS_TEXT(): u8
-```
-
-_Undocumented._
-
 ### `wsAccept`
 
 ```milo

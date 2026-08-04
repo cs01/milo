@@ -33,7 +33,7 @@ from "std/runtime" import {
     Task, schedulerCurrent, schedulerWaitRead, schedulerYield, schedulerRunToCompletion
 }
 from "std/ws" import {
-    WsConn, WsMessage, wsAccept, isWsUpgrade, WS_TEXT, WS_CLOSE
+    WsConn, WsMessage, wsAccept, isWsUpgrade
 }
 from "std/sync" import {
     Channel, AtomicI64

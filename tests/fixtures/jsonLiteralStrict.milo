@@ -1,0 +1,29 @@
+// @expect: nope rejected
+// @expect: trux rejected
+// @expect: fals3 rejected
+// @expect: null accepted
+// The three bare literals used to be accepted on their first byte alone, so
+// `nope` parsed as null and `trux` as true — malformed text became a
+// plausible-looking value with no error.
+from "std/json" import {
+    Json
+}
+
+fn check(label: string, text: string) {
+    match Json.parse(text) {
+        Result.Ok(_d) => {
+            print(label + " accepted")
+        }
+        Result.Err(_e) => {
+            print(label + " rejected")
+        }
+    }
+}
+
+pub fn main(): i32 {
+    check("nope", "nope")
+    check("trux", "{\"a\":trux}")
+    check("fals3", "[fals3]")
+    check("null", "null")
+    return 0
+}

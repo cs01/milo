@@ -1,0 +1,19 @@
+// @error: carries a payload in 'Num'
+// Only payload-free enums have a JSON form (the variant name as a string). A
+// tagged union would need an encoding choice the derive is not entitled to make.
+enum Value {
+    Nothing,
+    Num(i64),
+}
+
+@derive(Json)
+struct Holder {
+    v: Value,
+}
+
+fn main() {
+    print(Holder {
+        v: Value.Nothing
+    }
+        .toJson())
+}

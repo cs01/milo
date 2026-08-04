@@ -1,0 +1,14 @@
+// @error: Option<Option<T>> has no distinct JSON encoding
+// `Some(None)` and an absent field both encode as null, so the outer layer
+// cannot survive a round trip. Refused rather than silently collapsed.
+@derive(Json)
+struct Row {
+    v: Option<Option<i64>>,
+}
+
+fn main() {
+    print(Row {
+        v: Option.None
+    }
+        .toJson())
+}

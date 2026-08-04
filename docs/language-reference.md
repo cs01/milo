@@ -1784,12 +1784,19 @@ trait Ord: Eq {
 
 ### @derive
 
-Auto-generate trait implementations:
+Auto-generate implementations:
 
 ```milo
 @derive(Eq)
 struct Point { x: i32, y: i32 }
+
+@derive(Json)
+struct Config { host: string, port: i32 }
 ```
+
+`Eq` synthesizes field-wise equality. `Json` synthesizes `toJson` / `fromJson` /
+`fromJsonNode` — see [JSON Serialization](#json-serialization). They compose:
+`@derive(Eq, Json)`.
 
 ---
 
@@ -2380,7 +2387,90 @@ fn main(): i32 {
 
 ## JSON Serialization
 
-`jsonStringify` is a built-in that serializes a flat struct to a JSON string. Supported field types: `string` (escaped automatically), integers, floats, and `bool` — anything else is a compile error:
+### `@derive(Json)` — struct ⇄ JSON
+
+`@derive(Json)` generates three methods on a struct:
+
+| Method | Signature |
+|---|---|
+| `toJson` | `fn toJson(self: &Self): string` |
+| `fromJson` | `fn fromJson(text: string): Result<T, JsonError>` |
+| `fromJsonNode` | `fn fromJsonNode(doc: &Json, cur: i64): Result<T, JsonError>` — decode a sub-node; what nested fields call |
+
+```milo
+@derive(Json)
+struct Address { city: string, zip: i64 }
+
+@derive(Json)
+struct User {
+    name: string,
+    age: i32,
+    email: Option<string>,
+    tags: Vec<string>,
+    address: Address,
+    @json("legacy_id") legacyId: u32,
+}
+
+var tags: Vec<string> = Vec.new()
+tags.push("math")
+let user = User {
+    name: "ada", age: 36, email: Option.None, tags: tags,
+    address: Address { city: "London", zip: 1 }, legacyId: 77,
+}
+let text = user.toJson()
+// {"name":"ada","age":36,"email":null,"tags":["math"],"address":{"city":"London","zip":1},"legacy_id":77}
+
+match User.fromJson(text) {
+    Result.Ok(u) => { print(u.name) }
+    Result.Err(e) => { print(e.message()) }   // "field 'address.zip': expected integer, got string"
+}
+```
+
+The import of `std/json` is injected for you — the attribute is self-contained. The
+derive emits ordinary Milo source and hands it back to the compiler, so it obeys the same
+move and borrow rules everything else does; `MILO_DUMP_DERIVES=1 milo build …` prints the
+generated impls to stderr.
+
+**Supported field types.** `string`, `bool`, every integer and float width, payload-free
+enums (encoded as the variant name), `Option<T>` (absent *and* `null` decode to `None`),
+`Vec<T>`, and any struct that also has a codec. They nest freely: `Vec<Vec<i64>>`,
+`Option<Vec<Address>>`. Anything else — `HashMap`, `Heap<T>`, a payload-carrying enum, a
+struct with no codec — is a compile error naming the field.
+
+**Decoding is strict.** A non-Option field that is absent is `JsonError.Missing`; a value
+of the wrong kind is `JsonError.Mismatch`. A `u8` field will not take `300` from the wire
+and store `44`, and an `i32` field will not take `1.5` and store `1`; both are
+`Mismatch`. Unknown keys in the document are ignored.
+
+```milo skip
+pub enum JsonError {
+    Syntax(string),         // the text was not JSON; the parser's message
+    Missing(string),        // dotted path of the absent field, e.g. "address.zip"
+    Mismatch(JsonMismatch), // { path, expected, actual }
+}
+```
+
+`e.path()` gives the dotted path (`"friends[3].city"`), `e.message()` a one-line
+description. Paths are built only on the failure path, so decoding a correct document
+allocates none.
+
+**Escape hatch.** A type whose wire form is not an object — a date that encodes as a
+string, say — can hand-write `toJson` and `fromJsonNode` with the same signatures, and
+deriving structs will embed it. Deriving a struct that already defines one of the three
+names is an error rather than a silent override.
+
+**Not covered:** `HashMap` fields, payload-carrying enums, `#[serde(default)]`-style
+defaults for non-Option fields, and rejecting unknown keys. An integer written in
+exponent form (`1e2`) does not decode into an integer field. `Option<Option<T>>` is
+rejected — `Some(None)` and an absent field are both `null`, so it cannot round-trip.
+
+A generic struct gets a codec per instantiation, and a generic field *inside* a derived
+struct decodes fine, but the top-level `Box<i64>.fromJson(…)` entry point is unreachable:
+a static call on a generic type has no spelling yet.
+
+### `jsonStringify`
+
+`jsonStringify` is a built-in that serializes a flat struct to a JSON string. Supported field types: `string` (escaped automatically), integers, floats, and `bool` — anything else is a compile error. Prefer `@derive(Json)`, which handles every field shape and can also read:
 
 ```milo
 struct User {
@@ -3490,7 +3580,8 @@ The parser auto-handles `--help`/`-h` and validates required args, integer forma
 | Cast | `expr as Type` |
 | Embed file | `@embedFile("path")` |
 | Target OS (compile-time) | `@targetOs()` → `"darwin"`/`"linux"`/`"windows"` |
-| JSON serialize | `jsonStringify(struct_val)` |
+| JSON serialize | `jsonStringify(struct_val)` (flat, scalars only) |
+| JSON struct codec | `@derive(Json)` → `v.toJson()`, `T.fromJson(text)` |
 | String slice | `s[start..end]` |
 | Vec / array slice | `v[start..end]` (non-owning `&[T]` view; works on `Vec` and fixed arrays) |
 | Number to string | `n.toString()` |

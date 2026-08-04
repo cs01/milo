@@ -1,0 +1,54 @@
+// @expect: missing field 'address.zip' | path=address.zip
+// @expect: field 'friends[1].zip': expected integer, got string | path=friends[1].zip
+// @expect: field 'tags': expected array, got object | path=tags
+// @expect: field 'code': expected u8, got out-of-range number | path=code
+// @expect: field 'code': expected integer, got number | path=code
+// @expect: field 'role': expected one of "Admin", "Guest", got "Wizard" | path=role
+// @expect: document root: expected object, got array | path=
+// @expect: invalid JSON: malformed json at byte 1 | path=
+// Every JsonError a derived decoder can raise, and the dotted path it carries.
+// The path is built bottom-up on the failure path only, so a correct decode
+// allocates no path strings.
+
+enum Role {
+    Admin,
+    Guest,
+}
+
+@derive(Json)
+struct Address {
+    city: string,
+    zip: i64,
+}
+
+@derive(Json)
+struct Doc {
+    role: Role,
+    code: u8,
+    tags: Vec<string>,
+    address: Address,
+    friends: Vec<Address>,
+}
+
+fn attempt(text: string) {
+    match Doc.fromJson(text) {
+        Result.Ok(v) => {
+            print("unexpected ok " + v.toJson())
+        }
+        Result.Err(e) => {
+            print(e.message() + " | path=" + e.path())
+        }
+    }
+}
+
+pub fn main(): i32 {
+    attempt("{\"role\":\"Admin\",\"code\":1,\"tags\":[],\"address\":{\"city\":\"a\"},\"friends\":[]}")
+    attempt("{\"role\":\"Admin\",\"code\":1,\"tags\":[],\"address\":{\"city\":\"a\",\"zip\":1},\"friends\":[{\"city\":\"b\",\"zip\":2},{\"city\":\"c\",\"zip\":\"no\"}]}")
+    attempt("{\"role\":\"Admin\",\"code\":1,\"tags\":{},\"address\":{\"city\":\"a\",\"zip\":1},\"friends\":[]}")
+    attempt("{\"role\":\"Admin\",\"code\":999,\"tags\":[],\"address\":{\"city\":\"a\",\"zip\":1},\"friends\":[]}")
+    attempt("{\"role\":\"Admin\",\"code\":1.5,\"tags\":[],\"address\":{\"city\":\"a\",\"zip\":1},\"friends\":[]}")
+    attempt("{\"role\":\"Wizard\",\"code\":1,\"tags\":[],\"address\":{\"city\":\"a\",\"zip\":1},\"friends\":[]}")
+    attempt("[]")
+    attempt("{oops}")
+    return 0
+}

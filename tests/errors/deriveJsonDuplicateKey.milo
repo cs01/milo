@@ -1,0 +1,15 @@
+// @error: two fields map to the JSON name 'id'
+// A rename that collides with another field would make the encoder emit a
+// duplicate key and the decoder read whichever the parser kept.
+@derive(Json)
+struct Row {
+    id: i64,
+    @json("id") rowId: i64,
+}
+
+fn main() {
+    print(Row {
+        id: 1, rowId: 2
+    }
+        .toJson())
+}

@@ -1,0 +1,20 @@
+// @error: struct 'Plain' has no JSON codec
+// A nested struct needs its own codec. Without this check the generated call to
+// Plain.fromJsonNode fails inside code the user never wrote.
+struct Plain {
+    x: i64,
+}
+
+@derive(Json)
+struct Wrapper {
+    inner: Plain,
+}
+
+fn main() {
+    print(Wrapper {
+        inner: Plain {
+            x: 1
+        }
+    }
+        .toJson())
+}

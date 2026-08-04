@@ -1,0 +1,75 @@
+// @expect: {"when":"2026-08-04","note":"hi"}
+// @expect: decoded 2026-08-04 hi
+// @expect: sink {"when":"2026-08-04","note":"hi"}
+// A hand-written codec satisfies the derive's nested-field requirement, so a
+// type with a wire form of its own (a date as a string, not an object) does not
+// have to be re-shaped to be embeddable. Also covers the `json`-named-method
+// call site, which routes through toJson when the struct has one.
+from "std/json" import {
+    Json, JsonError, JsonMismatch, jsonQuote, jsonKindName
+}
+
+struct Stamp {
+    text: string,
+}
+
+impl Stamp {
+    fn toJson(self: &Self): string {
+        return jsonQuote(self.text)
+    }
+
+    fn fromJsonNode(doc: &Json, cur: i64): Result<Stamp, JsonError> {
+        let Option.Some(s) = doc.curStr(cur) else {
+            return Result.Err(JsonError.Mismatch(JsonMismatch {
+                path: "", expected: "string", actual: jsonKindName(doc.curKind(cur))
+            }
+            ))
+        }
+        return Result.Ok(Stamp {
+            text: s
+        }
+        )
+    }
+}
+
+@derive(Json)
+struct Entry {
+    when: Stamp,
+    note: string,
+}
+
+struct Sink {
+    last: string,
+}
+
+impl Sink {
+    fn json(self: &mut Self, body: string) {
+        self.last = body
+    }
+}
+
+pub fn main(): i32 {
+    let e = Entry {
+        when: Stamp {
+            text: "2026-08-04"
+        }
+        , note: "hi"
+    }
+    let text = e.toJson()
+    print(text)
+    match Entry.fromJson(text.clone()) {
+        Result.Ok(back) => {
+            print("decoded " + back.when.text + " " + back.note)
+        }
+        Result.Err(err) => {
+            print("decode failed: " + err.message())
+            return 1
+        }
+    }
+    var sink = Sink {
+        last: ""
+    }
+    sink.json(e)
+    print("sink " + sink.last)
+    return 0
+}

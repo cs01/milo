@@ -159,11 +159,24 @@ Ranked by how often real programs hit them.
 - [ ] **No UDP.** Zero `SOCK_DGRAM` anywhere in `std/` (grepped). Go `net.UDPConn`, Rust
   `UdpSocket`, Node `dgram`. Blocks DNS, QUIC, game netcode, syslog, mDNS.
 
-- [ ] **No struct ⇄ JSON.** There is a checker special-case (`src/checker.ts:7181`) that
-  auto-stringifies a struct passed to a method *literally named* `json`, so `ctx.json(user)`
-  works — but there is no general `toJson`, and **no deserialization at all**. serde /
-  `encoding/json` struct tags / `JSON.parse` are table stakes. Largest single ergonomics delta
-  vs all three languages. `@derive` machinery already exists to hang it on.
+- [x] **No struct ⇄ JSON.** *`@derive(Json)` shipped — `toJson` / `fromJson` /
+  `fromJsonNode`, typed `JsonError` (Syntax / Missing / Mismatch) carrying a dotted path
+  built bottom-up so a correct decode allocates none. Covers scalars, payload-free enums,
+  `Option`, `Vec`, nested derived structs, all nesting freely, plus `@json("wire_name")`
+  renaming. The derive emits Milo **source** which the checker parses back, so generated
+  code obeys exactly the rules hand-written code does. Hand-written `toJson`/`fromJsonNode`
+  satisfy the nested-field requirement, so a type with a non-object wire form is still
+  embeddable. The `json`-named-method hack is retained but retargeted: a struct with a
+  codec routes through `toJson`, and the built-in fallback now **errors** on a field it
+  cannot serialize (it used to emit `"tags":` with no value — silently invalid JSON) and no
+  longer accepts scalars, which crashed codegen. Three latent std/json bugs fixed on the way:
+  `nope` parsed as `null` (bare literals were accepted on their first byte alone), integer
+  reads went through the parser's f64 so anything past 2^53 was silently truncated and `1.5`
+  read as `1` (now exact, re-scanning the literal's source span; `curUint` added for the top
+  half of u64), and `Json.i64` on a fractional value now answers `None` — `std/jwt`'s
+  `exp`/`nbf`/`iat` read as f64 because RFC 7519 NumericDate permits a fraction.
+  Deliberately out: `HashMap` fields (needs cursor key enumeration), payload-carrying enums
+  (no encoding the derive is entitled to pick), serde-style `default`, deny-unknown-keys.*
 
 - [x] **No binary / byte-order helpers.** *`std/binary` shipped — `Bytes` namespace, 37 methods:
   `read`/`write` × u8/i8/{u,i}{16,32,64} × Le/Be, f32/f64, plus `Bytes.has`. Out-of-bounds is

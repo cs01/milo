@@ -1170,7 +1170,10 @@ class LowerCtx {
             const jsonType = this.c.autoJsonStringify.get(a);
             let lowered = this.lowerExpr(a);
             if (jsonType) {
-              lowered = { kind: "JsonStringify", value: lowered, valueType: jsonType, type: { tag: "string" }, span: a.span };
+              const codec = this.c.autoJsonToJson.get(a);
+              lowered = codec
+                ? { kind: "Call", func: codec, args: [{ expr: lowered, passByRef: true, refMut: false }], type: { tag: "string" }, variadic: false, span: a.span }
+                : { kind: "JsonStringify", value: lowered, valueType: jsonType, type: { tag: "string" }, span: a.span };
             }
             // `h.m()` on a `Heap<T>` receiver means `(*h).m()`; make the deref
             // explicit so codegen passes the pointee, not the Heap slot's address.

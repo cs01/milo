@@ -11,6 +11,20 @@ last-verified: 2026-08-03
 Source-level breaks, newest first. Milo is pre-1.0 and does not promise
 compatibility, but every break belongs here with the migration spelled out.
 
+## `fs.isSymlink` now answers correctly on arm64 Linux (2026-08-04)
+
+Not a source-level break — no signature changed — but the answer changed on one platform.
+
+`isSymlink` tested the `S_IFLNK` bit at a fixed `st_mode` offset inside `struct stat`. That
+offset is 24 on x86_64 and 16 on arm64, and `std/platform` splits by **OS only**, with no
+arch axis — so on arm64 Linux it read a different field entirely and returned `false` for
+every symlink. It now uses `readlink` (EINVAL on a non-link), which is arch- and
+libc-independent. Code that accidentally relied on the always-false answer there will now
+take the symlink branch.
+
+`FileInfo.mode` / `lstatInfo(...).mode` still has the underlying offset bug and reads 0 on
+arm64 Linux. Do not build on that field until the platform split grows an arch dimension.
+
 ## `Duration` accessors became methods, and `Duration` is now nanoseconds (2026-08-04)
 
 `durationSecs(d)` / `durationMillis(d)` / `durationMicros(d)` are **removed**. They are

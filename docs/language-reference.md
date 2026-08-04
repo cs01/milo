@@ -1443,6 +1443,8 @@ var counts: HashMap<string, i64> = HashMap.withCapacity(1000)
 ### keys() and values()
 
 ```milo
+var m: HashMap<string, i64> = HashMap.new()
+m.insert("a", 1)
 var ks = m.keys()      // Vec<K>, a deep copy of every live key
 var vs = m.values()    // Vec<V>
 ks.sort()
@@ -1458,6 +1460,8 @@ table, and Milo's references are second-class — they cannot be returned. Count
 the two-lookup form instead:
 
 ```milo
+var m: HashMap<string, i64> = HashMap.new()
+let word = "hello"
 m.insert(word, m.getOrDefault(word, 0) + 1)
 ```
 

@@ -188,8 +188,19 @@ Ranked by how often real programs hit them.
   extern-variable syntax — `/proc/self/environ` is frozen at exec and would have gone stale
   the moment `Env.set` ran). Found and fixed alongside: the Windows arm's `read`/`write`/
   `close` handed a negative fd to the UCRT, whose invalid-parameter handler kills the
-  process where POSIX returns -1. **Deliberately not shipped**: `detached`/`setsid`, and
-  `output()`/`status()` convenience runners.* Original finding: `Child.spawn(program, args,
+  process where POSIX returns -1. Also fixed: `std/environ` on Linux read `/proc/self/environ`,
+  which is **frozen at exec** — harmless before, a lie the moment `Env.set` exists. **Deliberately
+  not shipped**: `detached`/`setsid`, and `output()`/`status()` convenience runners.*
+
+  **Design debt shipped with it — one `Stdio` enum can spell states the operation rejects.**
+  `stdin(Stdio.Merge)` and `stdout(Stdio.Read)` type-check and fail at *runtime*. That is
+  structurally the same wart Tier 1 of this audit is deleting — the total-**looking** spelling
+  being the lossy one — just moved up a level. Three direction-specific enums, or `Stdio::from(File)`
+  once a `File` can be moved into a `Command`, would make it a compile error; the latter is the
+  better follow-up because it deletes `Read`/`Write`/`Append` outright. Mitigated for now by an
+  error that names the stream and creates no child. Related: the new `requires` contracts on
+  `writeStdin`/`readStdout` only fire in `--debug`, so in release a read of a redirected-away
+  stream is still a silent -1. Original finding: `Child.spawn(program, args,
   mergeStderr)` is the whole surface (`std/process.milo:109`) — no cwd, no env, no stdio
   redirection, no detached. And `setenv`/`putenv` appear nowhere in `std/`, so a program cannot
   mutate even its own environment. Go `exec.Cmd{Dir,Env}`, Rust `Command::env/current_dir`,
@@ -249,6 +260,20 @@ Ranked by how often real programs hit them.
   now uses `readlink`, which is arch-independent. That bug would have made `removeAll` follow
   links there. `copyFile` cannot preserve mode verbatim for the same reason, so it propagates
   only the executable bit via `access(X_OK)`.*
+
+  **Left live, and worth its own entry: `FileInfo.mode` is still wrong on arm64 Linux.** The
+  `isSymlink` fix routed around the bad field rather than fixing it — `st_mode` sits at offset 24
+  on x86_64 and 16 on arm64, while `std/platform` splits by **OS only**, with no arch axis. So
+  `lstatInfo(p).mode` reads 0 on arm64 Linux and nothing warns. Any other `struct stat` field
+  read at a fixed offset has the same defect. The real fix is an arch dimension in the platform
+  split (or `@cLayout`-derived offsets), not another one-off.
+
+  Two hazards shipped with it: **`walkDir`'s allocation is bounded by the filesystem, not the
+  program** — `walkDir("/")` is an unbounded allocation with no signal, which on macOS is the
+  failure mode the guard rules exist for; a `maxEntries` cap was considered and rejected (silent
+  truncation is exactly what `readDir`'s `Result` exists to prevent, and erroring at a cap is a
+  knob no caller can set correctly). And **the arm64 fix has no CI fence** — `test-linux` runners
+  are x86_64, where old and new code both pass; arm64 was verified by hand under podman only.
 
 - [ ] **No HTTPS server.** TLS is client-side only (`fetch.TlsStream`); `http.serve` is
   plaintext. Also missing on the server: multipart/form-data, static file serving, body size

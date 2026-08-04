@@ -181,6 +181,26 @@ shipped entries are deleted). This file is a record of a single audit, not a liv
   and still worth doing: `TlsStream`, `Child`, `WsConn`, and `deflate`/`inflate` are
   unretrofitted — TLS needs an SSL_read-aware adapter rather than an fd one.*
 
+  **`FdStream` is an unchecked lifetime, and it is the weakest part of this change.** Verified
+  by probe: `BufReader<FdStream>.new(File.openRead(p)!.stream())` compiles and then reads a
+  **closed** descriptor — EBADF today, but with fd reuse it would silently read a different
+  file. The compiler cannot help: a descriptor is an integer, not a reference, so nothing ties
+  the stream's life to the `File` it came from. Mitigated, not closed — `File` and `TcpStream`
+  implement the traits directly so the owning form is available and preferred, the doc comment
+  puts the broken spelling next to the correct one, and the error names the fd. Same hazard
+  class as the pre-existing `rawFd()` / `fdChannel(fd)` / `FdReader`, so this widens an existing
+  hole rather than opening a new one.
+
+  Also honest: **there are now three ways to read a file** — `fs.readFile`, `File.readAll`,
+  `BufReader<File>` — and this item's own complaint was too many shapes. The new one is the only
+  *streaming* one; the two slurps were left un-deduplicated.
+
+  Constructors are turbofish (`BufReader<FdStream>.new(...)`) because bare `Type.new()` on a
+  generic struct is the known Tier-1 backlog gap; the compiler already emits a hint teaching the
+  spelling, and it becomes optional for free when that gap closes. Free-function constructors
+  were rejected — they would permanently violate the constructors-live-on-the-type convention to
+  work around a temporary hole.
+
   Original finding: Go's `io.Reader`/`io.Writer` and Rust's
   `Read`/`Write` are the spine their stdlibs hang on. Milo has interfaces *and* traits and
   uses neither here. Every source has a bespoke shape:

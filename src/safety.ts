@@ -431,6 +431,26 @@ function computeCyclomaticComplexity(stmts: Stmt[]): number {
       case "ExprStmt":
         complexity += countShortCircuit(stmt.expr);
         break;
+      case "LetElseStmt":
+        complexity += countShortCircuit(stmt.value);
+        complexity += computeCyclomaticComplexity(stmt.elseBody) - 1;
+        break;
+      case "UnsafeBlock":
+        complexity += computeCyclomaticComplexity(stmt.body) - 1;
+        break;
+      // No branches and no nested body. Listed rather than left to fall through so the
+      // guard below can be exhaustive.
+      case "BreakStmt": case "ContinueStmt":
+        break;
+      default: {
+        // `LetElseStmt` and `UnsafeBlock` were both missing, so every branch inside
+        // `let .. else { .. }` or `unsafe { .. }` counted as zero: a function 35% over the
+        // DAL A bound measured as complexity 2 and passed. The sibling walker in this file
+        // had the same hole for `let-else`; a rule that lives in one switch and not the
+        // next one over is not a rule. This makes the next unhandled kind a compile error.
+        const _exhaustive: never = stmt;
+        void _exhaustive;
+      }
     }
   }
   return complexity;

@@ -238,6 +238,16 @@ export function manglePackage(
         walkStmts(s.body, sc);
         sc.popValue();
         break;
+      // No names to bind and no nested scope. Listed rather than left to fall through so
+      // the guard below can be exhaustive.
+      case "BreakStmt": case "ContinueStmt": break;
+      default: {
+        // A statement kind nobody added an arm for is silently not walked, and a name that
+        // is never walked is never mangled — a wrong symbol rather than an error. This
+        // makes the next unhandled kind a compile error.
+        const _exhaustive: never = s;
+        void _exhaustive;
+      }
     }
   };
 

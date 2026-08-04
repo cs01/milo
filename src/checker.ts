@@ -4414,6 +4414,13 @@ export class TypeChecker {
         }
         break;
       }
+      default: {
+        // A statement kind with no arm is never checked — no type error, no move error, no
+        // diagnostic of any kind for anything inside it. This makes the next unhandled kind
+        // a compile error instead of a silent pass.
+        const _exhaustive: never = stmt;
+        void _exhaustive;
+      }
     }
   }
 

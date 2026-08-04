@@ -2007,6 +2007,17 @@ function visitStmtExprs(s: Stmt, cb: (e: Expr) => void) {
     case "UnsafeBlock":
       for (const st of s.body) visitStmtExprs(st, cb);
       break;
+    // No sub-expressions. Listed rather than left to fall through so the guard below can
+    // be exhaustive.
+    case "BreakStmt": case "ContinueStmt":
+      break;
+    default: {
+      // A statement kind with no arm is silently not visited, and everything built on this
+      // walker — hover, go-to-definition, diagnostics — just stops working inside it, with
+      // no error to say so. This makes the next unhandled kind a compile error.
+      const _exhaustive: never = s;
+      void _exhaustive;
+    }
   }
 }
 

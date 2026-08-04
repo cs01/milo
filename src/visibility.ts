@@ -225,6 +225,17 @@ export function checkVisibility(prog: Program): VisibilityViolation[] {
         walkStmts(s.body, sc, refFile);
         sc.popValue();
         break;
+      // Nothing to resolve and no nested scope. Listed rather than left to fall through so
+      // the guard below can be exhaustive.
+      case "BreakStmt": case "ContinueStmt": break;
+      default: {
+        // A missing arm here is a visibility violation that never gets reported — the
+        // walker simply doesn't look, and the check passes. Same shape as the `let-else`
+        // hole that let a DAL A safety profile pass an `unsafe` block. This makes the next
+        // unhandled statement kind a compile error.
+        const _exhaustive: never = s;
+        void _exhaustive;
+      }
     }
   };
 

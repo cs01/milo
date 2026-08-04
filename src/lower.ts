@@ -526,6 +526,13 @@ class LowerCtx {
           span: stmt.span,
         };
       }
+      default: {
+        // A statement kind with no arm falls out of lowering entirely: the code simply is not
+        // in the HIR, and codegen emits a program missing it. This makes the next unhandled
+        // kind a compile error instead of silently dropped code.
+        const _exhaustive: never = stmt;
+        throw new Error(`lowerStmt: unhandled statement kind '${(_exhaustive as { kind: string }).kind}'`);
+      }
     }
   }
 

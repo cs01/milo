@@ -237,3 +237,20 @@ fn main(): i32 { return 0 }`;
     expect(perFn("viaLetElse")).toContain(rule);
   }
 });
+
+// The sibling walker to the one above had the same hole. Branches inside `let .. else` and
+// `unsafe { }` counted as zero, so a function well over the DAL A bound measured as
+// complexity 2 and passed. A rule that holds in one switch and not the next one over is
+// not a rule — hence the never-guards, and tests/exhaustiveSwitchLint.test.ts.
+test("cyclomatic complexity counts branches inside let-else and unsafe", () => {
+  const branches = Array.from({ length: 25 }, (_, i) => `if n > ${i} { t = ${i} }`).join(" ");
+  const src = `fn get(v: i64): Option<i64> requires true { if v > 0 { return Option.Some(v) } return Option.None }
+fn viaIfElse(n: i64): i64 requires true ensures true { var t = 0 if n < 0 { ${branches} } return t }
+fn viaLetElse(n: i64): i64 requires true ensures true { var t = 0 let Option.Some(x) = get(n) else { ${branches} return t } return x }
+fn viaUnsafe(n: i64): i64 requires true ensures true { var t = 0 unsafe { ${branches} } return t }
+fn main(): i32 { return 0 }`;
+  const flagged = violations(src, "do178c-a")
+    .filter(v => v.rule === "max-complexity")
+    .map(v => v.message.match(/function '(\w+)'/)![1]);
+  for (const fn of ["viaIfElse", "viaLetElse", "viaUnsafe"]) expect(flagged).toContain(fn);
+});

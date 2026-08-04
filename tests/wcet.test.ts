@@ -57,3 +57,15 @@ test("formatted output is OTAWA-style and keys by source line", () => {
   expect(out).toContain(`loop SOURCE "prog.milo" LINE`);
   expect(out).toContain("COUNT 10");
 });
+
+// `default: break` swallowed `LetElseStmt`, so a loop inside `let .. else { .. }` produced
+// no flow fact and the emitted OTAWA facts described a bounded program that contained an
+// unbounded loop. For a timing artifact that is the worst direction to be wrong in.
+test("loops inside a let-else else-body still produce flow facts", () => {
+  const loop = `var i = 0 while i < n { t = t + 1 i = i + 1 }`;
+  const b = bounds(`fn get(v: i64): Option<i64> { if v > 0 { return Option.Some(v) } return Option.None }
+fn viaIfElse(n: i64): i64 { var t = 0 if n < 0 { ${loop} } return t }
+fn viaLetElse(n: i64): i64 { var t = 0 let Option.Some(x) = get(n) else { ${loop} return t } return x }`);
+  expect(b.length).toBe(2);
+  expect(b.every(x => x.kind === "unresolved")).toBe(true);
+});

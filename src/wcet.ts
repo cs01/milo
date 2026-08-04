@@ -96,8 +96,23 @@ function collectFromStmt(fn: string, s: Stmt, out: LoopBound[]) {
     case "UnsafeBlock":
       collectFromStmts(fn, s.body, out);
       break;
-    default:
+    case "LetElseStmt":
+      collectFromStmts(fn, s.elseBody, out);
       break;
+    // No nested statements, so no loops to bound. Listed rather than left to a silent
+    // default so the guard below can be exhaustive.
+    case "LetDecl": case "VarDecl": case "Assign": case "Return": case "ExprStmt":
+    case "BreakStmt": case "ContinueStmt":
+      break;
+    default: {
+      // `default: break` was a SILENT skip, and `LetElseStmt` was the one it swallowed: a
+      // `while` inside `let .. else { .. }` produced no flow fact at all, so the emitted
+      // OTAWA facts described a bounded program that contained an unbounded loop. For a
+      // timing artifact that is the worst possible direction to be wrong in. This makes
+      // the next unhandled statement kind a compile error instead.
+      const _exhaustive: never = s;
+      void _exhaustive;
+    }
   }
 }
 

@@ -56,6 +56,16 @@ function stepLabel(s: PlaceStep): string {
   return s.tag === "index" ? "[…]" : stepKey(s);
 }
 
+// One variable's move state at a point in the program: the whole binding, plus the
+// places inside it that have already left. Both halves have to be saved and merged
+// together — a branch that moves `p.a` and a branch that moves `p` are the same kind
+// of fact about what is left, and flow merging that only knew about the second one
+// reported a move on a path that returns before reaching the use (examples/tools/java-dap).
+interface MoveSnapshot {
+  moved: boolean;
+  places: string[];
+}
+
 export interface VarInfo {
   type: TypeKind;
   mutable: boolean;
@@ -69,6 +79,16 @@ export interface VarInfo {
   // the arm's end). Non-Copy payloads bound by value are MOVED instead — the binding owns
   // the value, so writes are real and this stays false.
   copyBind?: boolean;
+  // Places inside this variable whose value has already been moved out, as field
+  // chains (".a", ".a.b"). `moved` answers the question for the whole binding; this
+  // answers it for a part, which nothing did before — `let x = p.a` marked the
+  // expression so codegen would zero the field, and then a second `let y = p.a`
+  // compiled and handed back the zeroed slot as an empty string. Safe, and wrong.
+  //
+  // Only static field chains live here. An index step is a runtime value, so `v[i]`
+  // twice cannot be settled at compile time; that case keeps the move-zeroing, which
+  // is memory-safe on its own.
+  movedPlaces?: Set<string>;
   // For a ref/slice binding: the source vars this binding's borrow froze.
   // Released (borrowed=false) when the binding's scope pops, so a slice in an
   // inner block doesn't freeze its source for the rest of the function.
@@ -251,6 +271,16 @@ interface InterfaceMethodInfo {
 interface InterfaceInfo {
   name: string;
   methods: Map<string, InterfaceMethodInfo>;
+}
+
+// Thrown by `TypeChecker.fatal`, caught by `TypeChecker.recover`. Carries no
+// message: the diagnostic is already in `diagnostics` by the time this is thrown,
+// and this type exists only to unwind. It is deliberately NOT exported — an
+// escape past the outermost boundary is a checker bug, not a user-visible error.
+class CheckAbort extends Error {
+  constructor() {
+    super("check aborted");
+  }
 }
 
 export class TypeChecker {
@@ -497,6 +527,44 @@ export class TypeChecker {
       case "vec": case "array": case "hashmap": case "string": return ["len"];
       case "struct": return this.structs.get(bare.name)?.fields.map(f => f.name) ?? [];
       default: return [];
+    }
+  }
+
+  // Report and STOP. For the sites where the invariant the rest of the code needs
+  // is exactly the one that just failed: a struct that isn't declared, a field
+  // that doesn't exist, an expression that isn't a place. `error()` returns void,
+  // so each of those had to remember its own `return`, and the ones that forgot
+  // ran on a value the diagnostic had just proved absent. Throwing removes the
+  // choice — and removes the `| null` from the signatures that had to encode it.
+  //
+  // Recovery is not lost: the throw unwinds to the nearest boundary (`recover`),
+  // one per statement inside a function body and one per declaration above that,
+  // so a run still reports an error in every statement that has one.
+  private fatal(msg: string, span?: Span, hint?: string): never {
+    this.error(msg, span, hint);
+    throw new CheckAbort();
+  }
+
+  // A `fatal()` recovery boundary. Absorbs the unwind and rewinds the stacks the
+  // abandoned work had pushed onto — a scope, an `unsafe` block, a loop body left
+  // open would otherwise leak into whatever is checked next and misreport it.
+  private recover(f: () => void) {
+    const scopeDepth = this.scopes.length;
+    const unsafeDepth = this.unsafeDepth;
+    const unsafeUsed = this.unsafeUsedStack.length;
+    const loopDepth = this.loopDepth;
+    const closureDepth = this.closureScopeDepth;
+    const captures = this.currentClosureCaptures;
+    try {
+      f();
+    } catch (e) {
+      if (!(e instanceof CheckAbort)) throw e;
+      this.scopes.length = scopeDepth;
+      this.unsafeDepth = unsafeDepth;
+      this.unsafeUsedStack.length = unsafeUsed;
+      this.loopDepth = loopDepth;
+      this.closureScopeDepth = closureDepth;
+      this.currentClosureCaptures = captures;
     }
   }
 
@@ -1205,16 +1273,51 @@ export class TypeChecker {
     }
   }
 
-  private snapshotMoveState(): Map<VarInfo, boolean> {
-    const snap = new Map<VarInfo, boolean>();
+  private snapshotMoveState(): Map<VarInfo, MoveSnapshot> {
+    const snap = new Map<VarInfo, MoveSnapshot>();
     for (const scope of this.scopes) {
-      for (const [, info] of scope) snap.set(info, info.moved);
+      for (const [, info] of scope) snap.set(info, { moved: info.moved, places: [...info.movedPlaces ?? []] });
     }
     return snap;
   }
 
-  private restoreMoveState(snap: Map<VarInfo, boolean>) {
-    for (const [info, moved] of snap) info.moved = moved;
+  private restoreMoveState(snap: Map<VarInfo, MoveSnapshot>) {
+    for (const [info, s] of snap) {
+      info.moved = s.moved;
+      // Rebuilt rather than reused: the snapshot is taken once and restored to at each
+      // arm, so handing back the same Set would let one arm's moves reach the next.
+      info.movedPlaces = s.places.length > 0 ? new Set(s.places) : undefined;
+    }
+  }
+
+  // Union a branch's end state into the current one: a value moved on any path that
+  // falls through is unusable after, whichever path actually ran.
+  private mergeMoveState(snap: Map<VarInfo, MoveSnapshot>) {
+    for (const [info, s] of snap) {
+      if (s.moved) info.moved = true;
+      for (const p of s.places) this.markPlaceMoved(info, p);
+    }
+  }
+
+  // After a loop body: a move inside it would run a second time on the next iteration,
+  // so it is an error unless the only path that moved also left the loop. Applies one
+  // level down too — a field moved out in the body is just as gone on iteration two.
+  private checkLoopMoves(pre: Map<VarInfo, MoveSnapshot>, returnMoves: Set<VarInfo>, sp: Span | undefined) {
+    for (const scope of this.scopes) {
+      for (const [name, info] of scope) {
+        const before = pre.get(info);
+        if (!before) continue;
+        if (!before.moved && info.moved) {
+          if (returnMoves.has(info)) info.moved = false;
+          else this.error(`cannot move '${name}' out of a loop`, sp);
+        }
+        for (const p of [...info.movedPlaces ?? []]) {
+          if (before.places.includes(p)) continue;
+          if (returnMoves.has(info)) info.movedPlaces!.delete(p);
+          else this.error(`cannot move '${name}${p}' out of a loop`, sp);
+        }
+      }
+    }
   }
 
   // Index of the innermost scope belonging to the function currently being
@@ -1300,6 +1403,63 @@ export class TypeChecker {
   }
 
   check(program: Program): CheckResult {
+    // Outermost `fatal()` boundary. Everything below has a finer one, so reaching
+    // here means a fatal fired in a pass that has no per-item recovery (a
+    // registration sweep, a whole-program lint). The diagnostic is already
+    // recorded, so the caller still gets a real error instead of a stack trace —
+    // which matters most in the LSP, where the checker runs on half-typed code
+    // and an escaped throw means the file shows no diagnostics at all.
+    try {
+      this.checkProgram(program);
+    } catch (e) {
+      if (!(e instanceof CheckAbort)) throw e;
+    }
+    return {
+      diagnostics: this.diagnostics,
+      exprTypes: this.exprTypes,
+      patternBindingTypes: this.patternBindingTypes,
+      autoBorrowed: this.autoBorrowed,
+      matchSubjectRef: this.matchSubjectRef,
+      rewrittenCalls: this.rewrittenCalls,
+      rewrittenEnums: this.rewrittenEnums,
+      staticCalls: this.staticCalls,
+      rewrittenStructLits: this.rewrittenStructLits,
+      movedExprs: this.movedExprs,
+      borrowedExprs: this.borrowedExprs,
+      autoWrappedOption: this.autoWrappedOption,
+      arrayToVecCoercions: this.arrayToVecCoercions,
+      functions: this.functions,
+      structs: this.structs,
+      enums: this.enums,
+      dropImpls: this.dropImpls,
+      monomorphizedFns: this.monomorphizedFns,
+      monomorphizedEnums: this.monomorphizedDecls,
+      monomorphizedStructs: this.monomorphizedStructDecls,
+      closureCaptures: this.closureCaptures,
+      closureCalls: this.closureCalls,
+      cfnCalls: this.cfnCalls,
+      resolvedMethods: this.resolvedMethods,
+      heapMethodReceivers: this.heapMethodReceivers,
+      resolvedOperators: this.resolvedOperators,
+      fnFieldCalls: this.fnFieldCalls,
+      propagateConversions: this.propagateConversions,
+      rangeCheckedExprs: this.rangeCheckedExprs,
+      sizeOfTypes: this.sizeOfTypes,
+      cSigs: this.cSigs,
+      cValues: this.cValues,
+      offsetOfFields: this.offsetOfFields,
+      interfaces: this.interfaces,
+      interfaceCoercions: this.interfaceCoercions,
+      interfaceMethodCalls: this.interfaceMethodCalls,
+      autoJsonStringify: this.autoJsonStringify,
+      anonStructs: this.anonStructs,
+      globalTypes: this._globalTypes,
+      iteratorForIns: this.iteratorForIns,
+      stringViewForIns: this.stringViewForIns,
+    };
+  }
+
+  private checkProgram(program: Program): void {
     this._userFnNames = program.userFnNames;
     this.entryFile = program.entryFile;
     for (const u of program.unusedImports ?? []) {
@@ -1762,20 +1922,22 @@ export class TypeChecker {
     }
     this._globalTypes = globalTypes;
 
+    // The outer `recover` per function catches a `fatal()` fired in the signature
+    // or contracts, before the per-statement boundaries inside the body exist.
     for (const fn of program.functions) {
-      if (!fn.isExtern && fn.typeParams.length === 0) this.checkFunction(fn);
+      if (!fn.isExtern && fn.typeParams.length === 0) this.recover(() => this.checkFunction(fn));
     }
 
     // type-check impl method bodies after all registrations
     for (const fn of implFnsToCheck) {
-      this.checkFunction(fn);
+      this.recover(() => this.checkFunction(fn));
     }
 
     // drain deferred impl fns from generic impl monomorphization
     while (this._pendingImplFns.length > 0) {
       const batch = this._pendingImplFns.splice(0);
       for (const fn of batch) {
-        this.checkFunction(fn);
+        this.recover(() => this.checkFunction(fn));
       }
     }
 
@@ -1808,49 +1970,6 @@ export class TypeChecker {
       });
     }
 
-    return {
-      diagnostics: this.diagnostics,
-      exprTypes: this.exprTypes,
-      patternBindingTypes: this.patternBindingTypes,
-      autoBorrowed: this.autoBorrowed,
-      matchSubjectRef: this.matchSubjectRef,
-      rewrittenCalls: this.rewrittenCalls,
-      rewrittenEnums: this.rewrittenEnums,
-      staticCalls: this.staticCalls,
-      rewrittenStructLits: this.rewrittenStructLits,
-      movedExprs: this.movedExprs,
-      borrowedExprs: this.borrowedExprs,
-      autoWrappedOption: this.autoWrappedOption,
-      arrayToVecCoercions: this.arrayToVecCoercions,
-      functions: this.functions,
-      structs: this.structs,
-      enums: this.enums,
-      dropImpls: this.dropImpls,
-      monomorphizedFns: this.monomorphizedFns,
-      monomorphizedEnums: this.monomorphizedDecls,
-      monomorphizedStructs: this.monomorphizedStructDecls,
-      closureCaptures: this.closureCaptures,
-      closureCalls: this.closureCalls,
-      cfnCalls: this.cfnCalls,
-      resolvedMethods: this.resolvedMethods,
-      heapMethodReceivers: this.heapMethodReceivers,
-      resolvedOperators: this.resolvedOperators,
-      fnFieldCalls: this.fnFieldCalls,
-      propagateConversions: this.propagateConversions,
-      rangeCheckedExprs: this.rangeCheckedExprs,
-      sizeOfTypes: this.sizeOfTypes,
-      cSigs: this.cSigs,
-      cValues: this.cValues,
-      offsetOfFields: this.offsetOfFields,
-      interfaces: this.interfaces,
-      interfaceCoercions: this.interfaceCoercions,
-      interfaceMethodCalls: this.interfaceMethodCalls,
-      autoJsonStringify: this.autoJsonStringify,
-      anonStructs: this.anonStructs,
-      globalTypes: this._globalTypes,
-      iteratorForIns: this.iteratorForIns,
-      stringViewForIns: this.stringViewForIns,
-    };
   }
 
   private processDerives(program: Program): import("./ast").ImplDecl[] {
@@ -3224,14 +3343,7 @@ export class TypeChecker {
     this.popScope();
     if (rootInfo) this.unfreeze(rootInfo);
     const returnMoves = this.returnOnlyMovesStack.pop()!;
-    for (const scope of this.scopes) {
-      for (const [name, info] of scope) {
-        if (preMoves.get(info) === false && info.moved) {
-          if (returnMoves.has(info)) { info.moved = false; }
-          else { this.error(`cannot move '${name}' out of a loop`, sp); }
-        }
-      }
-    }
+    this.checkLoopMoves(preMoves, returnMoves, sp);
   }
 
   // The call site freezes the receiver and nothing else, so a returned view must point
@@ -3304,6 +3416,19 @@ export class TypeChecker {
     const savedIsUser = this.currentFnIsUser;
     const savedRetType = this.currentFnRetType;
     const savedScopeFloor = this.fnScopeFloor;
+    // The restore is a `finally` because a `fatal()` anywhere below unwinds past
+    // it — leaving currentFnRetType pointing at an abandoned function would make
+    // the NEXT function's `return`/`?` check answer against the wrong signature.
+    try {
+      this.checkFunctionBody(fn);
+    } finally {
+      this.currentFnIsUser = savedIsUser;
+      this.currentFnRetType = savedRetType;
+      this.fnScopeFloor = savedScopeFloor;
+    }
+  }
+
+  private checkFunctionBody(fn: Function) {
     this.currentFnIsUser = this.fnIsUserCode(fn.name);
     this.pushScope();
     this.fnScopeFloor = this.scopes.length - 1;
@@ -3328,7 +3453,9 @@ export class TypeChecker {
       this.popScope();
     }
 
-    for (const stmt of fn.body) this.checkStmt(stmt, retType);
+    // One boundary per statement: a `fatal()` abandons the statement it fired in,
+    // not the function, so a body with three independent errors still reports three.
+    for (const stmt of fn.body) this.recover(() => this.checkStmt(stmt, retType));
     this.scanUnreachable(fn.body);
 
     // Lint: warn if a non-ref, non-Copy param was never moved — suggest &T
@@ -3359,9 +3486,6 @@ export class TypeChecker {
     }
 
     this.popScope();
-    this.currentFnIsUser = savedIsUser;
-    this.currentFnRetType = savedRetType;
-    this.fnScopeFloor = savedScopeFloor;
   }
 
   private checkStmt(stmt: Stmt, fnRetType: TypeKind) {
@@ -3479,10 +3603,19 @@ export class TypeChecker {
       }
       case "Assign": {
         const targetInfo = this.resolveAssignTarget(stmt.target);
-        if (!targetInfo) break;
         if (!targetInfo.mutable) {
           this.error(`cannot assign to immutable variable '${this.describeExpr(stmt.target)}'`, sp, `declare with 'var' instead of 'let' to make it mutable`);
           break;
+        }
+        // Assignment puts a value back, so whatever was moved out of this place is
+        // live again. An Ident target replaces the whole variable and clears all of it.
+        if (stmt.target.kind === "Ident") {
+          const whole = this.lookup(stmt.target.name);
+          if (whole) this.clearMovedPlace(whole, null);
+        } else {
+          const place = this.staticFieldPath(stmt.target);
+          const rootInfo = place ? this.lookup(place.root) : null;
+          if (place && rootInfo) this.clearMovedPlace(rootInfo, place.path);
         }
         this.markCaptureMutated(stmt.target);
         // reject reassignment while a borrow (slice, iteration ref) is live
@@ -3586,12 +3719,8 @@ export class TypeChecker {
           // don't leak their moves to code after the if)
           const afterElse = this.snapshotMoveState();
           this.restoreMoveState(preMoves);
-          for (const [info, m] of afterThen) {
-            if (m && !thenReturns) info.moved = true;
-          }
-          for (const [info, m] of afterElse) {
-            if (m && !elseReturns) info.moved = true;
-          }
+          if (!thenReturns) this.mergeMoveState(afterThen);
+          if (!elseReturns) this.mergeMoveState(afterElse);
         } else if (thenReturns) {
           // No else and the then-branch always returns: control flow only continues past
           // the if if the condition was false, so moves inside thenBody don't apply here.
@@ -3613,14 +3742,7 @@ export class TypeChecker {
         this.loopDepth--;
         this.popScope();
         const returnMoves = this.returnOnlyMovesStack.pop()!;
-        for (const scope of this.scopes) {
-          for (const [name, info] of scope) {
-            if (preMoves.get(info) === false && info.moved) {
-              if (returnMoves.has(info)) { info.moved = false; }
-              else { this.error(`cannot move '${name}' out of a loop`, sp); }
-            }
-          }
-        }
+        this.checkLoopMoves(preMoves, returnMoves, sp);
         break;
       }
       case "ForInStmt": {
@@ -3654,14 +3776,7 @@ export class TypeChecker {
           this.loopDepth--;
           this.popScope();
           const returnMoves = this.returnOnlyMovesStack.pop()!;
-          for (const scope of this.scopes) {
-            for (const [name, info] of scope) {
-              if (preMoves.get(info) === false && info.moved) {
-                if (returnMoves.has(info)) { info.moved = false; }
-                else { this.error(`cannot move '${name}' out of a loop`, sp); }
-              }
-            }
-          }
+          this.checkLoopMoves(preMoves, returnMoves, sp);
         } else {
           // `for line in text.lines()` / `for f in text.splitView(",")` — a text pass that
           // allocates nothing. Handled here and nowhere else: the yielded `&string` views
@@ -3700,14 +3815,7 @@ export class TypeChecker {
             this.popScope();
             if (vecBorrowInfo) this.unfreeze(vecBorrowInfo);
             const returnMoves = this.returnOnlyMovesStack.pop()!;
-            for (const scope of this.scopes) {
-              for (const [name, info] of scope) {
-                if (preMoves.get(info) === false && info.moved) {
-                  if (returnMoves.has(info)) { info.moved = false; }
-                  else { this.error(`cannot move '${name}' out of a loop`, sp); }
-                }
-              }
-            }
+            this.checkLoopMoves(preMoves, returnMoves, sp);
           } else if (iterType.tag === "string") {
             const byteType: TypeKind = { tag: "int", bits: 8, signed: false };
             const preMoves = this.snapshotMoveState();
@@ -3726,14 +3834,7 @@ export class TypeChecker {
             this.loopDepth--;
             this.popScope();
             const returnMoves3 = this.returnOnlyMovesStack.pop()!;
-            for (const scope of this.scopes) {
-              for (const [name, info] of scope) {
-                if (preMoves.get(info) === false && info.moved) {
-                  if (returnMoves3.has(info)) { info.moved = false; }
-                  else { this.error(`cannot move '${name}' out of a loop`, sp); }
-                }
-              }
-            }
+            this.checkLoopMoves(preMoves, returnMoves3, sp);
           } else if (iterType.tag === "hashmap") {
             const keyRef: TypeKind = { tag: "ref", inner: iterType.key, mutable: false };
             const valRef: TypeKind = { tag: "ref", inner: iterType.value, mutable: false };
@@ -3757,14 +3858,7 @@ export class TypeChecker {
             this.popScope();
             if (mapBorrowInfo) this.unfreeze(mapBorrowInfo);
             const returnMoves4 = this.returnOnlyMovesStack.pop()!;
-            for (const scope of this.scopes) {
-              for (const [name, info] of scope) {
-                if (preMoves.get(info) === false && info.moved) {
-                  if (returnMoves4.has(info)) { info.moved = false; }
-                  else { this.error(`cannot move '${name}' out of a loop`, sp); }
-                }
-              }
-            }
+            this.checkLoopMoves(preMoves, returnMoves4, sp);
           } else if (iterType.tag === "array") {
             const elemRef: TypeKind = { tag: "ref", inner: iterType.element, mutable: false };
             let arrBorrowInfo: import("./checker").VarInfo | null = null;
@@ -3789,14 +3883,7 @@ export class TypeChecker {
             this.popScope();
             if (arrBorrowInfo) this.unfreeze(arrBorrowInfo);
             const returnMoves5 = this.returnOnlyMovesStack.pop()!;
-            for (const scope of this.scopes) {
-              for (const [name, info] of scope) {
-                if (preMoves.get(info) === false && info.moved) {
-                  if (returnMoves5.has(info)) { info.moved = false; }
-                  else { this.error(`cannot move '${name}' out of a loop`, sp); }
-                }
-              }
-            }
+            this.checkLoopMoves(preMoves, returnMoves5, sp);
           } else if (iterType.tag === "struct" || iterType.tag === "enum") {
             // iterator protocol: type has next(&mut Self): Option<T>
             const resolved = this.resolveMethod(iterType.name, "next");
@@ -3858,14 +3945,7 @@ export class TypeChecker {
                 this.loopDepth--;
                 this.popScope();
                 const returnMovesIter = this.returnOnlyMovesStack.pop()!;
-                for (const scope of this.scopes) {
-                  for (const [name, info] of scope) {
-                    if (preMoves.get(info) === false && info.moved) {
-                      if (returnMovesIter.has(info)) { info.moved = false; }
-                      else { this.error(`cannot move '${name}' out of a loop`, sp); }
-                    }
-                  }
-                }
+                this.checkLoopMoves(preMoves, returnMovesIter, sp);
               }
             }
           } else if (iterType.tag !== "unknown") {
@@ -4431,6 +4511,16 @@ export class TypeChecker {
             `a closure capture, or a live view or loop over this variable, still points into it — moving it would leave that borrow dangling`);
           return;
         }
+        // Partial move: a field already left, so the struct sitting here is no longer
+        // the whole value. Handing it on would pass a zeroed field off as real data —
+        // the same silent-empty-string result as re-moving the field, one level up.
+        const partial = info.movedPlaces && info.movedPlaces.size > 0
+          ? [...info.movedPlaces][0]! : null;
+        if (partial) {
+          this.error(`cannot move '${expr.name}' because '${expr.name}${partial}' was already moved out of it`, expr.span,
+            `move the remaining fields individually, or clone '${expr.name}${partial}' at the point it was transferred so '${expr.name}' stays whole`);
+          return;
+        }
         info.moved = true;
         this.movedExprs.add(expr);
         if (this.loopDepth > 0 && this.returnOnlyMovesStack.length > 0) {
@@ -4493,6 +4583,12 @@ export class TypeChecker {
       if (fieldType && !isCopy(fieldType, (n) => this.isAllCopyEnum(n), (n) => this.isAllCopyStruct(n))) {
         const base = this.borrowBasePath(expr);
         if (base === null) {
+          // Owned root: the field really is handed over, so record WHICH field left.
+          // Reading it again is caught at the read (checkExpr), not here — a move
+          // position reads first, so checking in both places would double-report.
+          const place = this.staticFieldPath(expr);
+          const rootInfo = place ? this.lookup(place.root) : null;
+          if (place && rootInfo) this.markPlaceMoved(rootInfo, place.path);
           this.movedExprs.add(expr);
         } else if (this.keyExtractorDepth === 0) {
           // `replace` is only offered for `&mut`: it swaps something in, which needs write
@@ -4539,11 +4635,15 @@ export class TypeChecker {
     return p ? this.borrowBaseOfPlace(p) : null;
   }
 
-  private resolveAssignTarget(expr: Expr): { type: TypeKind; mutable: boolean } | null {
+  // Never returns null: every failure path is `fatal()`, because there is no such
+  // thing as a half-resolved assignment target — the callers that used to null-check
+  // had nothing to do with the answer but bail, and one that forgot would assign
+  // through a place the diagnostic had just said does not exist.
+  private resolveAssignTarget(expr: Expr): { type: TypeKind; mutable: boolean } {
     const sp = expr.span;
     if (expr.kind === "Ident") {
       const info = this.lookup(expr.name);
-      if (!info) { this.error(`undefined variable '${expr.name}'`, sp, this.nameHint(expr.name)); return null; }
+      if (!info) this.fatal(`undefined variable '${expr.name}'`, sp, this.nameHint(expr.name));
       if (info.type.tag === "ref" && info.type.mutable) {
         this.setType(expr, info.type.inner);
         return { type: info.type.inner, mutable: true };
@@ -4568,15 +4668,14 @@ export class TypeChecker {
       }
       if (objType.tag === "struct") {
         const info = this.structs.get(objType.name);
-        if (!info) { this.error(`unknown struct '${objType.name}'`, sp); return null; }
+        if (!info) this.fatal(`unknown struct '${objType.name}'`, sp);
         const field = info.fields.find(f => f.name === expr.field);
-        if (!field) { this.error(`struct '${objType.name}' has no field '${expr.field}'`, sp, memberHint(expr.field, this.fieldCandidates(objType))); return null; }
+        if (!field) this.fatal(`struct '${objType.name}' has no field '${expr.field}'`, sp, memberHint(expr.field, this.fieldCandidates(objType)));
         this.setType(expr, field.type);
         const mutable = throughPtr ? true : this.isRootMutable(expr.object);
         return { type: field.type, mutable };
       }
-      this.error(`cannot access field on non-struct type ${typeName(objType)}`, sp);
-      return null;
+      this.fatal(`cannot access field on non-struct type ${typeName(objType)}`, sp);
     }
     if (expr.kind === "IndexAccess") {
       const objType = this.checkExpr(expr.object);
@@ -4595,8 +4694,7 @@ export class TypeChecker {
         this.setType(expr, objType.inner);
         return { type: objType.inner, mutable: true };
       }
-      this.error(`cannot index non-array type ${typeName(objType)}`, sp);
-      return null;
+      this.fatal(`cannot index non-array type ${typeName(objType)}`, sp);
     }
     if (expr.kind === "UnaryOp" && expr.op === "*") {
       const ot = this.checkExpr(expr.operand);
@@ -4608,8 +4706,7 @@ export class TypeChecker {
         this.setType(expr, ot.inner);
         return { type: ot.inner, mutable: true };
       }
-      this.error(`cannot dereference type '${typeName(ot)}' for assignment`, sp);
-      return null;
+      this.fatal(`cannot dereference type '${typeName(ot)}' for assignment`, sp);
     }
     // `STORE.field = x` where STORE is a capitalized *variable* (typically a
     // module-level `var`) parses as an EnumLit — the parser can't know STORE
@@ -4619,8 +4716,7 @@ export class TypeChecker {
     if (expr.kind === "EnumLit" && this.rewriteStaticToMember(expr)) {
       return this.resolveAssignTarget(expr);
     }
-    this.error("invalid assignment target", sp);
-    return null;
+    this.fatal("invalid assignment target", sp);
   }
 
   // Walk to the root identifier of an lvalue; if it is a closure capture being
@@ -4953,6 +5049,40 @@ export class TypeChecker {
       if (p.tag !== "path" || p.root !== first.root || !stepsEq(p.steps, first.steps)) return null;
     }
     return { root: first.root, steps: first.steps };
+  }
+
+  // A field-only path off a named binding — the only shape whose move state can be
+  // decided at compile time. Any index/deref/payload step means the storage the
+  // expression names depends on a runtime value, so there is no place to mark.
+  private staticFieldPath(e: Expr): { root: string; path: string } | null {
+    const p = this.soloPath(e);
+    if (!p || p.steps.length === 0) return null;
+    if (p.steps.some(s => s.tag !== "field")) return null;
+    return { root: p.root, path: p.steps.map(stepKey).join("") };
+  }
+
+  // The moved place that covers `path`: the path itself, or any prefix of it —
+  // once `p.a` is gone so is `p.a.b`, because the buffer they share left with it.
+  private movedPlaceCovering(info: VarInfo, path: string): string | null {
+    if (!info.movedPlaces) return null;
+    for (const m of info.movedPlaces) {
+      if (path === m || path.startsWith(`${m}.`)) return m;
+    }
+    return null;
+  }
+
+  // Assigning to a place puts a value back: it and everything under it are live
+  // again. Without this, `p.a = "new"` would leave `p.a` permanently unusable.
+  private markPlaceMoved(info: VarInfo, path: string) {
+    (info.movedPlaces ??= new Set()).add(path);
+  }
+
+  private clearMovedPlace(info: VarInfo, path: string | null) {
+    if (!info.movedPlaces) return;
+    if (path === null) { info.movedPlaces.clear(); return; }
+    for (const m of [...info.movedPlaces]) {
+      if (m === path || m.startsWith(`${path}.`)) info.movedPlaces.delete(m);
+    }
   }
 
   // Index-aware access path: each step is a field name (".f") or an opaque index
@@ -5520,7 +5650,6 @@ export class TypeChecker {
         if (expr.func === "replace" && !this.functions.has("replace")) {
           if (expr.args.length !== 2) { this.error(`replace(place, value) takes exactly two arguments`, sp); return this.setType(expr, { tag: "unknown" }); }
           const place = this.resolveAssignTarget(expr.args[0]);
-          if (!place) return this.setType(expr, { tag: "unknown" });
           if (!place.mutable) this.error(`cannot replace through an immutable place`, expr.args[0].span, `declare it with 'var'`);
           // value moves in, old occupant moves out to the caller — the place stays valid,
           // so it is NOT invalidated here (only the by-value argument is consumed).
@@ -5535,7 +5664,6 @@ export class TypeChecker {
           if (expr.args.length !== 2) { this.error(`swap(a, b) takes exactly two arguments`, sp); return this.setType(expr, { tag: "void" }); }
           const a = this.resolveAssignTarget(expr.args[0]);
           const b = this.resolveAssignTarget(expr.args[1]);
-          if (!a || !b) return this.setType(expr, { tag: "void" });
           if (!a.mutable) this.error(`cannot swap through an immutable place`, expr.args[0].span, `declare it with 'var'`);
           if (!b.mutable) this.error(`cannot swap through an immutable place`, expr.args[1].span, `declare it with 'var'`);
           if (a.type.tag !== "unknown" && b.type.tag !== "unknown" && !typeEq(a.type, b.type)) {
@@ -6054,7 +6182,22 @@ export class TypeChecker {
           if (!info) { this.error(`unknown struct '${objType.name}'`, sp); return this.setType(expr, { tag: "unknown" }); }
           const field = info.fields.find(f => f.name === expr.field);
           if (!field) { this.error(`struct '${objType.name}' has no field '${expr.field}'`, sp, memberHint(expr.field, this.fieldCandidates(objType))); return this.setType(expr, { tag: "unknown" }); }
-          return this.setType(expr, field.type);
+          this.setType(expr, field.type);
+          // The field's own move state, the counterpart of the `info.moved` check on a
+          // plain identifier. `setType` first: `staticFieldPath` reads the recorded
+          // types to walk the place, so the answer depends on this node having one.
+          const place = this.staticFieldPath(expr);
+          const rootInfo = place ? this.lookup(place.root) : null;
+          if (place && rootInfo) {
+            const gone = this.movedPlaceCovering(rootInfo, place.path);
+            if (gone) {
+              this.error(`use of moved value '${place.root}${place.path}'`, sp,
+                gone === place.path
+                  ? `ownership of '${place.root}${place.path}' was transferred earlier — the field is empty now. Clone it at the point of transfer: '${place.root}${place.path}.clone()'.`
+                  : `'${place.root}${gone}' was moved out earlier, which took '${place.root}${place.path}' with it. Clone at the point of transfer: '${place.root}${gone}.clone()'.`);
+            }
+          }
+          return field.type;
         }
         if (objType.tag === "enum") {
           this.error(`cannot access field on enum '${objType.name}' — use match to extract values`, sp);
@@ -7503,8 +7646,8 @@ export class TypeChecker {
 
         const afterElse = this.snapshotMoveState();
         this.restoreMoveState(preMoves);
-        for (const [info, m] of afterThen) { if (m) info.moved = true; }
-        for (const [info, m] of afterElse) { if (m) info.moved = true; }
+        this.mergeMoveState(afterThen);
+        this.mergeMoveState(afterElse);
 
         // As-a-value if: coerce a const-int arm to the expected width so
         // `let h: i64 = if c { 16 } else { 8 }` doesn't leave both arms at the
@@ -7715,7 +7858,7 @@ export class TypeChecker {
     if (isLiteralType) {
       let hasWildcard = false;
       const preMoves = this.snapshotMoveState();
-      const mergedMoves = new Map<typeof preMoves extends Map<infer K, infer V> ? K : never, boolean>();
+      const mergedMoves = new Map<VarInfo, MoveSnapshot>();
       for (const arm of arms) {
         if (arm.pattern.kind === "WildcardPattern") {
           hasWildcard = true;
@@ -7742,13 +7885,17 @@ export class TypeChecker {
         // An arm that always exits never falls through to the code after the match,
         // so its moves must not reach there — same rule the if-statement uses.
         if (!this.bodyAlwaysReturns(arm.body)) {
-          for (const [info, moved] of this.snapshotMoveState()) {
-            if (moved) mergedMoves.set(info, true);
+          for (const [info, st] of this.snapshotMoveState()) {
+            const prior = mergedMoves.get(info);
+            mergedMoves.set(info, {
+              moved: st.moved || (prior?.moved ?? false),
+              places: [...new Set([...st.places, ...prior?.places ?? []])],
+            });
           }
         }
       }
       this.restoreMoveState(preMoves);
-      for (const [info] of mergedMoves) info.moved = true;
+      this.mergeMoveState(mergedMoves);
       if (!hasWildcard && subjType.tag === "bool") {
         const hasTrueArm = arms.some(a => a.pattern.kind === "LiteralPattern" && a.pattern.value === true);
         const hasFalseArm = arms.some(a => a.pattern.kind === "LiteralPattern" && a.pattern.value === false);
@@ -7767,7 +7914,7 @@ export class TypeChecker {
       const covered = new Set<string>();
       let hasWildcard = false;
       const preMoves = this.snapshotMoveState();
-      const mergedMoves = new Map<typeof preMoves extends Map<infer K, infer V> ? K : never, boolean>();
+      const mergedMoves = new Map<VarInfo, MoveSnapshot>();
       for (const arm of arms) {
         if (arm.pattern.kind === "WildcardPattern") {
           hasWildcard = true;
@@ -7832,13 +7979,17 @@ export class TypeChecker {
         // An arm that always exits never falls through to the code after the match,
         // so its moves must not reach there — same rule the if-statement uses.
         if (!this.bodyAlwaysReturns(arm.body)) {
-          for (const [info, moved] of this.snapshotMoveState()) {
-            if (moved) mergedMoves.set(info, true);
+          for (const [info, st] of this.snapshotMoveState()) {
+            const prior = mergedMoves.get(info);
+            mergedMoves.set(info, {
+              moved: st.moved || (prior?.moved ?? false),
+              places: [...new Set([...st.places, ...prior?.places ?? []])],
+            });
           }
         }
       }
       this.restoreMoveState(preMoves);
-      for (const [info] of mergedMoves) info.moved = true;
+      this.mergeMoveState(mergedMoves);
       if (!hasWildcard) {
         for (const [name] of enumInfo.variants) {
           if (!covered.has(name)) {

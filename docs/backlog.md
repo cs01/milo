@@ -3,7 +3,7 @@ system: planning
 purpose: ROI/difficulty-ranked lens over outstanding work; a prioritization view, NOT the source of truth for status
 key-files: docs/roadmap.md (canonical status), docs/safety-roadmap.md
 update-when: an item ships (flip in roadmap.md, then DELETE it here) or a new item is triaged
-last-verified: 2026-08-03 (the eight ad-hoc place-walkers collapsed into one total, fail-closed `placesOf`; two double-frees closed with it — move-out-of-borrow and use-after-move, both through if/match/`??` tails, which no walker recognized. Left behind: the `fatal(): never` residue, now its own entry, and one more spelling reaching Tier 1 #7. Earlier: added three from the visibility/linkage keyword review: package-scoped `pub` (T2, has a deadline — before packages ship), the `@externalLinkage`-without-`pub` lint (T1), and `extern struct` being misnamed (T3); earlier same day: the void-`return` miscompile and print buffering, both found writing examples/games/apsis; earlier: full probe audit: deleted the shipped overflow-default flip, re-scoped the &mut-slice entry to dynamic splitMut only, added the indirect-closure-escape UAF and the generic-static turbofish gap)
+last-verified: 2026-08-03 (`checker.fatal(): never` landed with per-statement/per-function/per-program recovery boundaries, closing the `error()`-then-continue entry; `scripts/fuzz-ownership.ts` landed and immediately found one: moving out of a struct field twice compiled and returned an empty string, now tracked per place (`VarInfo.movedPlaces`) and merged through branches. Two new entries left behind: borrowing a partially-moved struct, and the fuzzer's single generated shape. Earlier: the eight ad-hoc place-walkers collapsed into one total, fail-closed `placesOf`; two double-frees closed with it — move-out-of-borrow and use-after-move, both through if/match/`??` tails, which no walker recognized. Left behind: the `fatal(): never` residue, now its own entry, and one more spelling reaching Tier 1 #7. Earlier: added three from the visibility/linkage keyword review: package-scoped `pub` (T2, has a deadline — before packages ship), the `@externalLinkage`-without-`pub` lint (T1), and `extern struct` being misnamed (T3); earlier same day: the void-`return` miscompile and print buffering, both found writing examples/games/apsis; earlier: full probe audit: deleted the shipped overflow-default flip, re-scoped the &mut-slice entry to dynamic splitMut only, added the indirect-closure-escape UAF and the generic-static turbofish gap)
 -->
 
 # Backlog — prioritized
@@ -63,14 +63,20 @@ ROI / Effort: **H**igh / **M**edium / **L**ow. Tiers = the quadrant that matters
 
 ## Tier 1 — landed 2026-08-03, residue only
 
-- **`checker.error()` returns `void`, so the checker reports and continues.** ~15
-  sites do it; the ones that then dereferenced have been patched individually and
-  the rest survive only because someone wrote `else`. A `fatal(): never` deletes
-  the class — but it changes error *recovery*, since throwing at the first error
-  would report one diagnostic where today a run reports many. Wants a catch at
-  the function boundary so multi-error reporting survives, which is the actual
-  work. Left out of the place-walker change deliberately (`src/checker.ts`,
-  worksheet `2026-08-03-fail-closed-places`)
+- **A struct read through a borrow after one of its fields was moved out.**
+  `borrow(p)` after `let x = p.a` hands the callee a struct with a zeroed field.
+  *Moving* a partially-moved struct is now rejected, which covers the case where
+  the zeroed field is passed on as data; the borrow case only reads it. Rust
+  rejects both. Closing it needs partial-move state to survive a reference
+  crossing, and nothing has hit it yet — the field-level rule that made this
+  visible landed with no corpus fallout (`src/checker.ts`, worksheet
+  `2026-08-03-fatal-and-ownership-fuzzer`)
+
+- **The ownership fuzzer generates one shape.** `scripts/fuzz-ownership.ts`
+  covers string payloads in one two-field struct, a `Vec`, and an `Option`.
+  Vec-of-struct, enum payloads, move-capturing closures, and types with a `Drop`
+  impl are untried ground — each is a new entry in `SHAPES`, not a redesign, and
+  `Drop` is the one most likely to be carrying something (`scripts/fuzz-ownership.ts`)
 
 ## Tier 3 — backlog (niche, deferred, or lower ROI)
 

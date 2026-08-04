@@ -1,0 +1,21 @@
+// Once a field has left, the struct is no longer the whole value. Passing it on
+// anyway hands the next owner a zeroed field dressed up as real data — the same
+// silent-empty-string result as re-moving the field, one level up.
+// @error: was already moved out of it
+struct Pair {
+    a: string,
+    b: string,
+}
+
+fn take(p: Pair): i64 {
+    return p.b.len()
+}
+
+fn main() {
+    let p = Pair {
+        a: "delta", b: "papa"
+    }
+    let stolen = p.a
+    print(stolen)
+    print(take(p))
+}

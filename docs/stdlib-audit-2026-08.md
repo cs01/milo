@@ -209,7 +209,15 @@ Ranked by how often real programs hit them.
 
 ## Tier 4 — container gaps
 
-- [ ] **`HashSet` is unusable as a set.** Probed:
+- [x] **`HashSet` is unusable as a set.** *Fixed by a new language feature rather than a set
+  method: `@iter` on a struct field delegates `for x in wrapper` to that field, so `HashSet`
+  enumerates through its backing `HashMap` with nothing allocated and no snapshot. A set could
+  not have written a `next` method at all — the iterator would have to hold a reference into the
+  set, and references are second-class. At most one `@iter` field per struct (two makes the loop
+  ambiguous; `tests/errors/iterDelegateTwoFields.milo`). Plus union/intersect/difference,
+  `fromVec`/`toVec`. Documented in `docs/language-reference.md` and `docs/grammar.ebnf`.*
+
+  Original finding:
   ```
   for x in s      → error: cannot iterate over type 'HashSet_i64': no 'next' method found
   HashSet.new()   → error: 'HashSet' is generic — spell its type arguments
@@ -219,9 +227,13 @@ Ranked by how often real programs hit them.
   ops) and Go's `map[T]struct{}` idiom all enumerate. A set you cannot enumerate is a bloom
   filter. The turbofish half is `backlog.md` Tier 1 #5. Ref: `std/set.milo`.
 
-- [ ] **`HashMap` is missing `keys()`, `values()`, `entry`/`getOrInsert`, `withCapacity`,
+- [x] **`HashMap` is missing `keys()`, `values()`, `entry`/`getOrInsert`, `withCapacity`,
   `retain`, and `clear()`** — `Vec` has `clear`, `HashMap` does not. Ref:
-  `src/suggest.ts HASHMAP_MEMBERS`.
+  `src/suggest.ts HASHMAP_MEMBERS`. *Shipped `keys`, `values`, `clear`, `clone`, `isEmpty`,
+  `withCapacity`. Still missing: `retain`, and `entry`/`getOrInsert` — the latter's whole value
+  is handing back a reference into the map that stays live across an insert, which second-class
+  references forbid, so it needs a different shape (a `getOrInsertWith(k, f)` that returns a
+  value, not a handle) before it can ship.*
 
 - [x] **`for k, v in map` works but is undocumented.** *Documented in
   `docs/language-reference.md` §HashMap (new "Iteration" subsection). Probing it turned up a
@@ -231,7 +243,10 @@ Ranked by how often real programs hit them.
   Also documented that iteration order is deliberately unstable run-to-run (per-process
   `getentropy` hash seed, HashDoS defense) — an entry-by-entry test of a map is a CI flake.*
 
-- [ ] **`Vec` gaps:** `extend`/`append`, `dedup`, `retain` (in place — `filter` allocates),
+- [x] **`Vec` gaps:** *Shipped `get`, `first`, `last`, `min`, `max`, `indexOf`, `position`,
+  `extend`, `retain` (in place), `capacity`, `reserve`. Remaining and not shipped: `dedup`,
+  `binarySearch`, `swapRemove`, `chunks`/`windows`, `zip`, `flatMap`, `resize`.* Original list:
+  `extend`/`append`, `dedup`, `retain` (in place — `filter` allocates),
   `first`/`last`, `min`/`max` (**`sum` exists**, which makes the omission an asymmetry rather
   than a scope decision), `indexOf`/`position` (`find` returns the value, not the index),
   `binarySearch`, `swapRemove`, `chunks`/`windows`, `zip`, `flatMap`, `capacity`/`reserve`,
@@ -244,8 +259,9 @@ Ranked by how often real programs hit them.
   aggressive inlining and drags associated types into the trait system). Left here as a measured
   cost, not a proposal; reopen only with allocation numbers.
 
-- [ ] **Slices do not print.** `print(v.slice(0,1))` → `<unprintable>` while `print(v)` →
-  `[1, 3]`. Inconsistent with the container-printing work that just shipped.
+- [x] **Slices do not print.** `print(v.slice(0,1))` → `<unprintable>` while `print(v)` →
+  `[1, 3]`. Inconsistent with the container-printing work that just shipped. *Fixed — a slice
+  now prints like the Vec it views. Fixture `printSlice.milo`.*
 
 ---
 

@@ -8,6 +8,7 @@ Generated from `std/**/*.milo` doc-comments — do not edit by hand.
 - [std/args](./args.md)
 - [std/base32](./base32.md)
 - [std/base64](./base64.md)
+- [std/binary](./binary.md)
 - [std/checksum](./checksum.md)
 - [std/color](./color.md)
 - [std/crypto.darwin](./crypto.darwin.md)

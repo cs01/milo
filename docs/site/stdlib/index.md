@@ -46,6 +46,7 @@ Most utilities are **namespaced**: call a static on the namespace (`Path.join`, 
 | [`std/toml`](toml) | TOML config parsing — `Toml.parse`, then `.str()`, `.i64()`, `.table()` |
 | [`std/base64`](base64) | Base64 encode/decode — `Base64.encode`, `Base64.decode` |
 | [`std/hex`](hex) | Hex encode/decode — `Hex.encode`, `Hex.decode` |
+| [`std/binary`](binary) | Fixed-width int/float codecs — `Bytes.readU32Le`, `Bytes.writeI16Be`, both byte orders |
 
 ## Date, Time & IDs
 

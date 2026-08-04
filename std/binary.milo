@@ -1,0 +1,362 @@
+// std/binary — fixed-width integer and float codecs over a byte buffer.
+//
+// Milo's `string` is an owned byte buffer, and it is what every file-format parser
+// in `std/` already carries its bytes in, so that is the buffer type here: reads
+// take `&string` plus a byte offset, writes append to a `&mut string`.
+//
+// Reads return `Option<T>` rather than aborting. `src[i]` is an index — a claim by
+// the programmer that the position is valid, and a bad claim is a bug worth a trap.
+// A decode at an offset that came out of the data being decoded is the opposite
+// situation: the input is untrusted, and truncation is an ordinary thing for a file
+// or a network frame to be. `Option.None` lets a parser answer a truncated input
+// with a parse error instead of killing the process, and — unlike a zero-filled
+// read — it cannot be mistaken for a value that was really there.
+//
+// Writes cannot fail (they append to a growable buffer), so they return void.
+//
+// Everything lives on the `Bytes` namespace rather than as free functions: Milo
+// compiles all modules into one namespace, and `readU32Le`/`writeU8` are names a
+// user program is entitled to want for itself.
+
+// Bytes — fixed-width codecs over a byte buffer.
+//
+// Reads take a byte offset from the start of `src` and yield `Option.None` when
+// fewer than the needed bytes remain there, or when the offset is negative — a
+// negative offset is out of bounds, not an index from the end. The signed forms
+// are the two's-complement reinterpretation of the same bytes, so `readI16Be` over
+// `ff ff` is `-1`, not `65535`.
+//
+// Writes append to `out` and never fail. Pass the value at its declared width
+// (`Bytes.writeU32Le(out, n as u32)`) — that cast is where a value too large for
+// the field gets truncated, and spelling it at the call site is what keeps the
+// truncation visible.
+pub struct Bytes {
+}
+
+impl Bytes {
+    // Whether `n` bytes are readable at `off`. False for a negative `off`.
+    //
+    // Written as `src.len - off` rather than `off + n <= src.len` because
+    // arithmetic is checked: an offset near i64 max would trap on the addition
+    // before the bounds test could reject it.
+    fn has(src: &string, off: i64, n: i64): bool {
+        if off < 0 {
+            return false
+        }
+        return src.len - off >= n
+    }
+
+    // ── float bit reinterpretation ──
+
+    // The IEEE-754 bit pattern of `v`, in host representation.
+    //
+    // `as` between a float and an integer converts the *value*; serializing
+    // IEEE-754 needs the *bits*. Milo has no bitcast operator, so this reads the
+    // value's own storage through a repointed pointer. That is in bounds by
+    // construction (f64 and u64 are both 8 bytes, f32 and u32 both 4), and the
+    // caller writes the result out in whichever byte order it asked for, so the
+    // encoding is right on a big-endian host too.
+    fn f64ToBits(v: f64): u64 {
+        var bits: u64 = 0
+        unsafe {
+            bits = *(v.addrOf() as *u64)
+        }
+        return bits
+    }
+
+    // The f64 whose host bit pattern is `b`. Inverse of `f64ToBits`.
+    fn f64FromBits(b: u64): f64 {
+        var v: f64 = 0.0
+        unsafe {
+            v = *(b.addrOf() as *f64)
+        }
+        return v
+    }
+
+    // The IEEE-754 bit pattern of `v`, in host representation.
+    fn f32ToBits(v: f32): u32 {
+        var bits: u32 = 0
+        unsafe {
+            bits = *(v.addrOf() as *u32)
+        }
+        return bits
+    }
+
+    // The f32 whose host bit pattern is `b`. Inverse of `f32ToBits`.
+    fn f32FromBits(b: u32): f32 {
+        var v: f32 = 0.0 as f32
+        unsafe {
+            v = *(b.addrOf() as *f32)
+        }
+        return v
+    }
+
+    // ── reads ──
+
+    // The byte at `off`, or None if `off` is not in `src`.
+    fn readU8(src: &string, off: i64): Option<u8> {
+        if !Bytes.has(src, off, 1) {
+            return Option.None
+        }
+        return Option.Some(src[off])
+    }
+
+    // The byte at `off` as a signed value, or None if `off` is not in `src`.
+    fn readI8(src: &string, off: i64): Option<i8> {
+        if !Bytes.has(src, off, 1) {
+            return Option.None
+        }
+        return Option.Some(src[off] as i8)
+    }
+
+    // The little-endian u16 at `off`, or None if 2 bytes do not remain there.
+    fn readU16Le(src: &string, off: i64): Option<u16> {
+        if !Bytes.has(src, off, 2) {
+            return Option.None
+        }
+        return Option.Some((src[off] as u16) | ((src[off + 1] as u16) << 8))
+    }
+
+    // The big-endian u16 at `off`, or None if 2 bytes do not remain there.
+    fn readU16Be(src: &string, off: i64): Option<u16> {
+        if !Bytes.has(src, off, 2) {
+            return Option.None
+        }
+        return Option.Some(((src[off] as u16) << 8) | (src[off + 1] as u16))
+    }
+
+    // The little-endian i16 at `off`, or None if 2 bytes do not remain there.
+    fn readI16Le(src: &string, off: i64): Option<i16> {
+        let Option.Some(v) = Bytes.readU16Le(src, off) else {
+            return Option.None
+        }
+        return Option.Some(v as i16)
+    }
+
+    // The big-endian i16 at `off`, or None if 2 bytes do not remain there.
+    fn readI16Be(src: &string, off: i64): Option<i16> {
+        let Option.Some(v) = Bytes.readU16Be(src, off) else {
+            return Option.None
+        }
+        return Option.Some(v as i16)
+    }
+
+    // The little-endian u32 at `off`, or None if 4 bytes do not remain there.
+    fn readU32Le(src: &string, off: i64): Option<u32> {
+        if !Bytes.has(src, off, 4) {
+            return Option.None
+        }
+        return Option.Some((src[off] as u32) | ((src[off + 1] as u32) << 8) | ((src[off + 2] as u32) << 16) | ((src[off + 3] as u32) << 24))
+    }
+
+    // The big-endian u32 at `off`, or None if 4 bytes do not remain there.
+    fn readU32Be(src: &string, off: i64): Option<u32> {
+        if !Bytes.has(src, off, 4) {
+            return Option.None
+        }
+        return Option.Some(((src[off] as u32) << 24) | ((src[off + 1] as u32) << 16) | ((src[off + 2] as u32) << 8) | (src[off + 3] as u32))
+    }
+
+    // The little-endian i32 at `off`, or None if 4 bytes do not remain there.
+    fn readI32Le(src: &string, off: i64): Option<i32> {
+        let Option.Some(v) = Bytes.readU32Le(src, off) else {
+            return Option.None
+        }
+        return Option.Some(v as i32)
+    }
+
+    // The big-endian i32 at `off`, or None if 4 bytes do not remain there.
+    fn readI32Be(src: &string, off: i64): Option<i32> {
+        let Option.Some(v) = Bytes.readU32Be(src, off) else {
+            return Option.None
+        }
+        return Option.Some(v as i32)
+    }
+
+    // The little-endian u64 at `off`, or None if 8 bytes do not remain there.
+    fn readU64Le(src: &string, off: i64): Option<u64> {
+        if !Bytes.has(src, off, 8) {
+            return Option.None
+        }
+        var v: u64 = 0
+        var i: i64 = 7
+        while i >= 0 {
+            v = (v << 8) | (src[off + i] as u64)
+            i = i - 1
+        }
+        return Option.Some(v)
+    }
+
+    // The big-endian u64 at `off`, or None if 8 bytes do not remain there.
+    fn readU64Be(src: &string, off: i64): Option<u64> {
+        if !Bytes.has(src, off, 8) {
+            return Option.None
+        }
+        var v: u64 = 0
+        for i in 0..8 {
+            v = (v << 8) | (src[off + i] as u64)
+        }
+        return Option.Some(v)
+    }
+
+    // The little-endian i64 at `off`, or None if 8 bytes do not remain there.
+    fn readI64Le(src: &string, off: i64): Option<i64> {
+        let Option.Some(v) = Bytes.readU64Le(src, off) else {
+            return Option.None
+        }
+        return Option.Some(v as i64)
+    }
+
+    // The big-endian i64 at `off`, or None if 8 bytes do not remain there.
+    fn readI64Be(src: &string, off: i64): Option<i64> {
+        let Option.Some(v) = Bytes.readU64Be(src, off) else {
+            return Option.None
+        }
+        return Option.Some(v as i64)
+    }
+
+    // The little-endian IEEE-754 f32 at `off`, or None if 4 bytes do not remain.
+    fn readF32Le(src: &string, off: i64): Option<f32> {
+        let Option.Some(v) = Bytes.readU32Le(src, off) else {
+            return Option.None
+        }
+        return Option.Some(Bytes.f32FromBits(v))
+    }
+
+    // The big-endian IEEE-754 f32 at `off`, or None if 4 bytes do not remain.
+    fn readF32Be(src: &string, off: i64): Option<f32> {
+        let Option.Some(v) = Bytes.readU32Be(src, off) else {
+            return Option.None
+        }
+        return Option.Some(Bytes.f32FromBits(v))
+    }
+
+    // The little-endian IEEE-754 f64 at `off`, or None if 8 bytes do not remain.
+    fn readF64Le(src: &string, off: i64): Option<f64> {
+        let Option.Some(v) = Bytes.readU64Le(src, off) else {
+            return Option.None
+        }
+        return Option.Some(Bytes.f64FromBits(v))
+    }
+
+    // The big-endian IEEE-754 f64 at `off`, or None if 8 bytes do not remain.
+    fn readF64Be(src: &string, off: i64): Option<f64> {
+        let Option.Some(v) = Bytes.readU64Be(src, off) else {
+            return Option.None
+        }
+        return Option.Some(Bytes.f64FromBits(v))
+    }
+
+    // ── writes ──
+
+    // Append `v` as one byte.
+    fn writeU8(out: &mut string, v: u8): void {
+        out.push(v)
+    }
+
+    // Append `v` as one byte, two's complement.
+    fn writeI8(out: &mut string, v: i8): void {
+        out.push(v as u8)
+    }
+
+    // Append `v` as 2 little-endian bytes.
+    fn writeU16Le(out: &mut string, v: u16): void {
+        out.push(v as u8)
+        out.push((v >> 8) as u8)
+    }
+
+    // Append `v` as 2 big-endian bytes.
+    fn writeU16Be(out: &mut string, v: u16): void {
+        out.push((v >> 8) as u8)
+        out.push(v as u8)
+    }
+
+    // Append `v` as 2 little-endian bytes, two's complement.
+    fn writeI16Le(out: &mut string, v: i16): void {
+        Bytes.writeU16Le(out, v as u16)
+    }
+
+    // Append `v` as 2 big-endian bytes, two's complement.
+    fn writeI16Be(out: &mut string, v: i16): void {
+        Bytes.writeU16Be(out, v as u16)
+    }
+
+    // Append `v` as 4 little-endian bytes.
+    fn writeU32Le(out: &mut string, v: u32): void {
+        out.push(v as u8)
+        out.push((v >> 8) as u8)
+        out.push((v >> 16) as u8)
+        out.push((v >> 24) as u8)
+    }
+
+    // Append `v` as 4 big-endian bytes.
+    fn writeU32Be(out: &mut string, v: u32): void {
+        out.push((v >> 24) as u8)
+        out.push((v >> 16) as u8)
+        out.push((v >> 8) as u8)
+        out.push(v as u8)
+    }
+
+    // Append `v` as 4 little-endian bytes, two's complement.
+    fn writeI32Le(out: &mut string, v: i32): void {
+        Bytes.writeU32Le(out, v as u32)
+    }
+
+    // Append `v` as 4 big-endian bytes, two's complement.
+    fn writeI32Be(out: &mut string, v: i32): void {
+        Bytes.writeU32Be(out, v as u32)
+    }
+
+    // Append `v` as 8 little-endian bytes.
+    fn writeU64Le(out: &mut string, v: u64): void {
+        var rest = v
+        for _i in 0..8 {
+            out.push(rest as u8)
+            rest = rest >> 8
+        }
+    }
+
+    // Append `v` as 8 big-endian bytes.
+    fn writeU64Be(out: &mut string, v: u64): void {
+        var shift: u64 = 56
+        for _i in 0..8 {
+            out.push((v >> shift) as u8)
+            // the final iteration would underflow an unsigned subtraction, and
+            // arithmetic is checked, so stop shifting once the low byte is out
+            if shift == 0 {
+                return
+            }
+            shift = shift - 8
+        }
+    }
+
+    // Append `v` as 8 little-endian bytes, two's complement.
+    fn writeI64Le(out: &mut string, v: i64): void {
+        Bytes.writeU64Le(out, v as u64)
+    }
+
+    // Append `v` as 8 big-endian bytes, two's complement.
+    fn writeI64Be(out: &mut string, v: i64): void {
+        Bytes.writeU64Be(out, v as u64)
+    }
+
+    // Append `v` as 4 little-endian IEEE-754 bytes.
+    fn writeF32Le(out: &mut string, v: f32): void {
+        Bytes.writeU32Le(out, Bytes.f32ToBits(v))
+    }
+
+    // Append `v` as 4 big-endian IEEE-754 bytes.
+    fn writeF32Be(out: &mut string, v: f32): void {
+        Bytes.writeU32Be(out, Bytes.f32ToBits(v))
+    }
+
+    // Append `v` as 8 little-endian IEEE-754 bytes.
+    fn writeF64Le(out: &mut string, v: f64): void {
+        Bytes.writeU64Le(out, Bytes.f64ToBits(v))
+    }
+
+    // Append `v` as 8 big-endian IEEE-754 bytes.
+    fn writeF64Be(out: &mut string, v: f64): void {
+        Bytes.writeU64Be(out, Bytes.f64ToBits(v))
+    }
+}

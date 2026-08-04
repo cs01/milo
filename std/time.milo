@@ -1,7 +1,14 @@
-// std/time — wall clock, monotonic timing, sleep
+// std/time — wall clock, elapsed time, Duration arithmetic, sleep.
+//
+// Timers, tickers and timeouts live in std/timer, which builds on this module
+// and on std/select.
 
 from "std/runtime" import {
-    schedulerCurrent, schedulerYield
+    schedulerCurrent, schedulerYield, schedulerExists, schedulerEnsureInit
+}
+
+from "std/select" import {
+    Select
 }
 
 from "std/platform" import {
@@ -50,18 +57,481 @@ pub fn epochSecs(): i64 {
     return t.sec
 }
 
-// ── Duration — elapsed time between two Instants ──
+// ── Duration ──
 
+// Nanoseconds per unit. Free functions rather than globals so they fold at the
+// call site and can't be reassigned.
+fn nsPerUs(): i64 {
+    return 1000
+}
+
+fn nsPerMs(): i64 {
+    return 1000000
+}
+
+fn nsPerSec(): i64 {
+    return 1000000000
+}
+
+fn nsPerMin(): i64 {
+    return 60000000000
+}
+
+fn nsPerHour(): i64 {
+    return 3600000000000
+}
+
+fn nsPerDay(): i64 {
+    return 86400000000000
+}
+
+fn maxNanos(): i64 {
+    return 9223372036854775807
+}
+
+fn minNanos(): i64 {
+    return -9223372036854775807 - 1
+}
+
+// A signed span of time, stored as i64 nanoseconds.
+//
+// RANGE: ±9223372036854775807 ns ≈ ±292.47 years, with 1 ns resolution. This is
+// Go's representation and it is the deliberate trade: nanosecond resolution is
+// what benchmarks and profilers need, and no program measures a span longer than
+// a human lifetime. Anything that does (a certificate horizon, an astronomical
+// interval) is a *date* problem — use epoch seconds and std/datetime.
+//
+// Construction and arithmetic past the range trap like any other i64 overflow —
+// Milo is checked by default and a duration that wrapped to negative is exactly
+// the silent nonsense that causes. `Duration.parse` is the one exception: it
+// takes untrusted text, so it reports overflow as `None` instead of aborting.
+//
+// The clock behind `now()` is the wall clock, so a `Duration` measured across an
+// NTP step or a manual clock change inherits that step. There is no monotonic
+// clock in std yet.
+@derive(Eq)
 pub struct Duration {
-    totalUsec: i64,
+    _nanos: i64,
+}
+
+impl Add for Duration {
+    fn add(self: &Self, other: &Self): Self {
+        return Duration {
+            _nanos: self._nanos + other._nanos
+        }
+    }
+}
+
+impl Sub for Duration {
+    fn sub(self: &Self, other: &Self): Self {
+        return Duration {
+            _nanos: self._nanos - other._nanos
+        }
+    }
+}
+
+impl Duration {
+    // ── constructors ──
+
+    fn zero(): Duration {
+        return Duration {
+            _nanos: 0
+        }
+    }
+
+    fn nanos(n: i64): Duration {
+        return Duration {
+            _nanos: n
+        }
+    }
+
+    fn micros(n: i64): Duration {
+        return Duration {
+            _nanos: n * nsPerUs()
+        }
+    }
+
+    fn millis(n: i64): Duration {
+        return Duration {
+            _nanos: n * nsPerMs()
+        }
+    }
+
+    fn secs(n: i64): Duration {
+        return Duration {
+            _nanos: n * nsPerSec()
+        }
+    }
+
+    fn mins(n: i64): Duration {
+        return Duration {
+            _nanos: n * nsPerMin()
+        }
+    }
+
+    fn hours(n: i64): Duration {
+        return Duration {
+            _nanos: n * nsPerHour()
+        }
+    }
+
+    fn days(n: i64): Duration {
+        return Duration {
+            _nanos: n * nsPerDay()
+        }
+    }
+
+    // ── accessors, truncating toward zero ──
+
+    fn toNanos(self: &Self): i64 {
+        return self._nanos
+    }
+
+    fn toMicros(self: &Self): i64 {
+        return self._nanos / nsPerUs()
+    }
+
+    fn toMillis(self: &Self): i64 {
+        return self._nanos / nsPerMs()
+    }
+
+    fn toSecs(self: &Self): i64 {
+        return self._nanos / nsPerSec()
+    }
+
+    fn toMins(self: &Self): i64 {
+        return self._nanos / nsPerMin()
+    }
+
+    fn toHours(self: &Self): i64 {
+        return self._nanos / nsPerHour()
+    }
+
+    // Fractional seconds — the spelling for reporting a measurement.
+    fn toSecsF64(self: &Self): f64 {
+        return (self._nanos as f64) / 1000000000.0
+    }
+
+    fn toMillisF64(self: &Self): f64 {
+        return (self._nanos as f64) / 1000000.0
+    }
+
+    // ── arithmetic ──
+
+    // Scale by an integer factor. Milo's operator overloading is homogeneous
+    // (`Mul` is `Self × Self`), and a Duration times a Duration is meaningless,
+    // so scaling is a method rather than `*`.
+    fn times(self: &Self, k: i64): Duration {
+        return Duration {
+            _nanos: self._nanos * k
+        }
+    }
+
+    // Divide by an integer factor, truncating toward zero. `k == 0` traps like
+    // any other division by zero.
+    fn dividedBy(self: &Self, k: i64): Duration {
+        return Duration {
+            _nanos: self._nanos / k
+        }
+    }
+
+    // How many times `other` fits in self, as a ratio. The answer to "divide a
+    // duration by a duration", which has no Duration result.
+    fn ratio(self: &Self, other: &Duration): f64 {
+        return (self._nanos as f64) / (other._nanos as f64)
+    }
+
+    fn negated(self: &Self): Duration {
+        return Duration {
+            _nanos: 0 - self._nanos
+        }
+    }
+
+    fn abs(self: &Self): Duration {
+        if self._nanos < 0 {
+            return self.negated()
+        }
+        return Duration {
+            _nanos: self._nanos
+        }
+    }
+
+    // ── comparison ──
+
+    // -1, 0 or 1. `==` and `!=` come from @derive(Eq); Milo has no Ord trait, so
+    // ordering is spelled out.
+    fn compare(self: &Self, other: &Duration): i64 {
+        if self._nanos < other._nanos {
+            return -1
+        }
+        if self._nanos > other._nanos {
+            return 1
+        }
+        return 0
+    }
+
+    fn isLess(self: &Self, other: &Duration): bool {
+        return self._nanos < other._nanos
+    }
+
+    fn isGreater(self: &Self, other: &Duration): bool {
+        return self._nanos > other._nanos
+    }
+
+    fn isZero(self: &Self): bool {
+        return self._nanos == 0
+    }
+
+    fn isNegative(self: &Self): bool {
+        return self._nanos < 0
+    }
+
+    // ── text ──
+
+    // Go-style: "0s", "1.5ms", "2m3.5s", "1h30m0s". Round-trips through
+    // Duration.parse.
+    //
+    // Deviation from Go: microseconds print as "us", not "µs", so the output is
+    // ASCII everywhere it lands (log lines, filenames, terminals with a broken
+    // locale). Parse accepts both.
+    fn toString(self: &Self): string {
+        if self._nanos == 0 {
+            return "0s"
+        }
+        // -2^63 has no positive counterpart; negating it would trap, so the one
+        // value that can't go through the shared path is spelled out.
+        if self._nanos == minNanos() {
+            return "-2562047h47m16.854775808s"
+        }
+        if self._nanos < 0 {
+            return "-" + fmtPositive(0 - self._nanos)
+        }
+        return fmtPositive(self._nanos)
+    }
+
+    // Parse a Go-style duration: a sign, then one or more `<number><unit>`
+    // components, e.g. "300ms", "1h30m", "-1.5h", "2h45m10.5s". Units are ns,
+    // us (or µs), ms, s, m, h and d. "0" alone is accepted.
+    //
+    // Returns Option, not Result: every way this fails — a stray character, a
+    // missing unit, a value past ±292 years — leaves the caller with the same
+    // move (reject the input and echo it back), and a duration string is short
+    // enough that a byte offset tells a user nothing their own eyes don't.
+    fn parse(text: &string): Option<Duration> {
+        return parseDurationText(text)
+    }
+}
+
+// Nanoseconds → text, for a strictly positive value.
+fn fmtPositive(n: i64): string {
+    if n < nsPerUs() {
+        return n.toString() + "ns"
+    }
+    if n < nsPerMs() {
+        return (n / nsPerUs()).toString() + fracText(n % nsPerUs(), 3) + "us"
+    }
+    if n < nsPerSec() {
+        return (n / nsPerMs()).toString() + fracText(n % nsPerMs(), 6) + "ms"
+    }
+
+    let secsPart = (n / nsPerSec()) % 60
+    let tail = secsPart.toString() + fracText(n % nsPerSec(), 9) + "s"
+    let totalMins = n / nsPerMin()
+    if totalMins == 0 {
+        return tail
+    }
+    let minsPart = totalMins % 60
+    let hoursPart = n / nsPerHour()
+    if hoursPart == 0 {
+        return minsPart.toString() + "m" + tail
+    }
+    return hoursPart.toString() + "h" + minsPart.toString() + "m" + tail
+}
+
+// ".5", ".000001", or "" when the remainder is zero. `digits` is the width of
+// the fractional field; trailing zeros are trimmed.
+fn fracText(rem: i64, digits: i64): string {
+    if rem == 0 {
+        return ""
+    }
+    var buf: [u8; 16] = [0; 16]
+    var v = rem
+    var i = digits
+    while i > 0 {
+        i = i - 1
+        buf[i] = ((v % 10) as u8) + 48
+        v = v / 10
+    }
+    var end = digits
+    while end > 0 && buf[end - 1] == 48 {
+        end = end - 1
+    }
+    var out = "."
+    var k: i64 = 0
+    while k < end {
+        out.push(buf[k])
+        k = k + 1
+    }
+    return out
+}
+
+// A unit suffix and where it ends. `ok` is false when the text at `start` is not
+// a unit.
+struct UnitScan {
+    scale: i64,
+    next: i64,
+    ok: bool,
+}
+
+fn scanUnit(s: &string, start: i64): UnitScan {
+    let bad = UnitScan {
+        scale: 0, next: start, ok: false
+    }
+    if start >= s.len {
+        return bad
+    }
+    let c = s[start]
+    // two-byte units first: "ns"/"us"/"ms" would otherwise be read as "m" + junk
+    if start + 1 < s.len && s[start + 1] == 115 {
+        if c == 110 {
+            return UnitScan {
+                scale: 1, next: start + 2, ok: true
+            }
+        }
+        if c == 117 {
+            return UnitScan {
+                scale: nsPerUs(), next: start + 2, ok: true
+            }
+        }
+        if c == 109 {
+            return UnitScan {
+                scale: nsPerMs(), next: start + 2, ok: true
+            }
+        }
+    }
+    // "µs" — U+00B5 is two UTF-8 bytes (0xC2 0xB5)
+    if start + 2 < s.len && c == 194 && s[start + 1] == 181 && s[start + 2] == 115 {
+        return UnitScan {
+            scale: nsPerUs(), next: start + 3, ok: true
+        }
+    }
+    if c == 115 {
+        return UnitScan {
+            scale: nsPerSec(), next: start + 1, ok: true
+        }
+    }
+    if c == 109 {
+        return UnitScan {
+            scale: nsPerMin(), next: start + 1, ok: true
+        }
+    }
+    if c == 104 {
+        return UnitScan {
+            scale: nsPerHour(), next: start + 1, ok: true
+        }
+    }
+    if c == 100 {
+        return UnitScan {
+            scale: nsPerDay(), next: start + 1, ok: true
+        }
+    }
+    return bad
+}
+
+fn parseDurationText(text: &string): Option<Duration> {
+    if text.len == 0 {
+        return Option.None
+    }
+    var i: i64 = 0
+    var neg = false
+    if text[0] == 45 {
+        neg = true
+        i = 1
+    } else if text[0] == 43 {
+        i = 1
+    }
+    if i >= text.len {
+        return Option.None
+    }
+    // "0" with no unit is the one unitless spelling, as in Go.
+    if text.len == i + 1 && text[i] == 48 {
+        return Option.Some(Duration.zero())
+    }
+
+    var total: i64 = 0
+    while i < text.len {
+        var whole: i64 = 0
+        var sawDigit = false
+        while i < text.len && text[i] >= 48 && text[i] <= 57 {
+            let d = (text[i] - 48) as i64
+            // guard before the multiply: checked arithmetic would abort the
+            // process, and this input came from a user
+            if whole > (maxNanos() - d) / 10 {
+                return Option.None
+            }
+            whole = whole * 10 + d
+            sawDigit = true
+            i = i + 1
+        }
+
+        var fracDigits: [u8; 20] = [0; 20]
+        var fracCount: i64 = 0
+        if i < text.len && text[i] == 46 {
+            i = i + 1
+            while i < text.len && text[i] >= 48 && text[i] <= 57 {
+                if fracCount < 20 {
+                    fracDigits[fracCount] = text[i] - 48
+                    fracCount = fracCount + 1
+                }
+                sawDigit = true
+                i = i + 1
+            }
+        }
+        if !sawDigit {
+            return Option.None
+        }
+
+        let unit = scanUnit(text, i)
+        if !unit.ok {
+            return Option.None
+        }
+        i = unit.next
+
+        if whole > maxNanos() / unit.scale {
+            return Option.None
+        }
+        var part = whole * unit.scale
+        // Fraction digit by digit, shrinking the scale each step: a digit past
+        // the unit's resolution contributes 0 instead of overflowing an
+        // intermediate product.
+        var scale = unit.scale
+        var f: i64 = 0
+        var k: i64 = 0
+        while k < fracCount {
+            scale = scale / 10
+            f = f + (fracDigits[k] as i64) * scale
+            k = k + 1
+        }
+        if part > maxNanos() - f {
+            return Option.None
+        }
+        part = part + f
+        if total > maxNanos() - part {
+            return Option.None
+        }
+        total = total + part
+    }
+
+    if neg {
+        return Option.Some(Duration.nanos(0 - total))
+    }
+    return Option.Some(Duration.nanos(total))
 }
 
 // Elapsed time between two instants.
 pub fn elapsed(start: Instant, end: Instant): Duration {
     let usec = (end.sec - start.sec) * 1000000 + (end.usec - start.usec)
-    return Duration {
-        totalUsec: usec
-    }
+    return Duration.micros(usec)
 }
 
 // Elapsed time since an instant.
@@ -69,35 +539,73 @@ pub fn since(start: Instant): Duration {
     return elapsed(start, now())
 }
 
-// Duration accessors.
-pub fn durationSecs(d: &Duration): i64 {
-    return d.totalUsec / 1000000
-}
-
-pub fn durationMillis(d: &Duration): i64 {
-    return d.totalUsec / 1000
-}
-
-pub fn durationMicros(d: &Duration): i64 {
-    return d.totalUsec
-}
-
 // ── Sleep ──
 
+// usleep takes a u32, so anything past ~71 minutes truncates into a short nap.
+// Sleep in one-second bites instead.
+fn usleepLong(us: i64): void {
+    var left = us
+    while left > 0 {
+        var chunk = left
+        if chunk > 1000000 {
+            chunk = 1000000
+        }
+        usleep(chunk as u32)
+        left = left - chunk
+    }
+}
+
 // Sleep for the given number of milliseconds.
-// Inside a green thread, yields cooperatively so other tasks keep running.
+//
+// With a scheduler running, this parks on a select timer arm: the caller is off
+// the run queue for the whole interval and every other green task keeps running.
+// Without one, it is a plain usleep.
 pub fn sleepMs(ms: i64): void {
-    if schedulerCurrent() as i64 != 0 {
-        let deadline = epochMillis() + ms
-        while epochMillis() < deadline {
+    if ms <= 0 {
+        // A green caller still owes the scheduler a turn — sleep(0) is the
+        // idiomatic yield.
+        if schedulerCurrent() as i64 != 0 {
             schedulerYield()
         }
         return
     }
-    usleep((ms * 1000) as u32)
+    if schedulerExists() {
+        var sel = Select.new()
+        sel.onTimeout(ms)
+        sel.wait()
+        sel.destroy()
+        return
+    }
+    usleepLong(ms * 1000)
 }
 
 // Sleep for the given number of seconds.
 pub fn sleepSecs(secs: i64): void {
     sleepMs(secs * 1000)
+}
+
+// Sleep for a Duration. Sub-millisecond spans round up to 1 ms once a scheduler
+// exists — the event loop's deadlines are milliseconds, and rounding down would
+// turn a 100 µs sleep into a busy spin.
+pub fn sleepFor(d: &Duration): void {
+    if d.isNegative() || d.isZero() {
+        sleepMs(0)
+        return
+    }
+    if !schedulerExists() {
+        usleepLong(d.toMicros())
+        return
+    }
+    var ms = d.toMillis()
+    if ms <= 0 {
+        ms = 1
+    }
+    sleepMs(ms)
+}
+
+// Make the green scheduler exist so timer and fd arms are live even on a program
+// that has not spawned a task. std/timer's timeouts call this; it is exported for
+// callers that arm a Select on the main context themselves.
+pub fn ensureTimersLive(): void {
+    schedulerEnsureInit()
 }

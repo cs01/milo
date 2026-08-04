@@ -85,6 +85,7 @@ Generated from `std/**/*.milo` doc-comments — do not edit by hand.
 - [std/term.windows](./term.windows.md)
 - [std/testing](./testing.md)
 - [std/time](./time.md)
+- [std/timer](./timer.md)
 - [std/toml](./toml.md)
 - [std/totp](./totp.md)
 - [std/unicode](./unicode.md)

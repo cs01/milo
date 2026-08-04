@@ -1,0 +1,112 @@
+// Timer, Ticker and recvTimeout, on a main context that never spawned a green
+// task of its own — the case std/select documents as inert, where a timer arm
+// looks like protection and isn't. std/timer makes the scheduler exist first.
+//
+// Nothing here asserts an exact elapsed time: only ordering, "at least the
+// interval", and generous ceilings that a loaded machine still clears.
+
+// @expect: timer fired true
+// @expect: timer waited true
+// @expect: ticks 3 monotonic true
+// @expect: ticker spanned true
+// @expect: stopped ticker drains true
+// @expect: timeout none true
+// @expect: timeout waited true
+// @expect: recv got 7
+// @expect: select arm 0
+// @expect: dropped ticker ok
+
+from "std/time" import {
+    Duration, now, since, sleepFor
+}
+
+from "std/timer" import {
+    Ticker, Timer, recvTimeout
+}
+
+from "std/sync" import {
+    Channel
+}
+
+from "std/select" import {
+    Select, selectRecv
+}
+
+from "std/runtime" import {
+    Task
+}
+
+// A ticker dropped without stop() must cancel its task, not tick forever.
+fn dropWithoutStop(): void {
+    var tk = Ticker.every(Duration.millis(5))
+    let _first = tk.recv()
+}
+
+pub fn main(): i32 {
+    let started = now()
+    var timer = Timer.after(Duration.millis(60))
+    print("timer fired ", timer.recv().isSome())
+    print("timer waited ", since(started).toMillis() >= 55)
+
+    var tk = Ticker.every(Duration.millis(20))
+    let tickStart = now()
+    var ticks = 0
+    var monotonic = true
+    var prev: i64 = 0
+    while ticks < 3 {
+        match tk.recv() {
+            Option.Some(t) => {
+                let ms = since(tickStart).toMillis()
+                if ms < prev {
+                    monotonic = false
+                }
+                prev = ms
+                ticks = ticks + 1
+            }
+            Option.None => {
+                break
+            }
+        }
+    }
+    print("ticks ", ticks, " monotonic ", monotonic)
+    print("ticker spanned ", since(tickStart).toMillis() >= 55)
+    tk.stop()
+    // stop() lets the task exit at its next wake; the channel closes and recv
+    // reports the end instead of blocking forever.
+    sleepFor(Duration.millis(60))
+    var drained = 0
+    while drained < 4 {
+        if tk.recv().isNone() {
+            break
+        }
+        drained = drained + 1
+    }
+    print("stopped ticker drains ", drained < 4)
+
+    let ch = Channel<i64>.new(1)!
+    let waitStart = now()
+    print("timeout none ", recvTimeout(ch, Duration.millis(40)).isNone())
+    print("timeout waited ", since(waitStart).toMillis() >= 35)
+
+    let producer = ch.clone()
+    let _task = Task.spawn(move(): void => {
+        sleepFor(Duration.millis(10))
+        producer.trySend(7)
+    }
+    )
+    print("recv got ", recvTimeout(ch, Duration.secs(5))!)
+
+    var tk2 = Ticker.every(Duration.millis(15))
+    let tickChannel = tk2.channel()
+    var sel = Select.new()
+    selectRecv(sel, tickChannel)
+    sel.onTimeout(5000)
+    print("select arm ", sel.wait())
+    sel.destroy()
+    tk2.stop()
+
+    dropWithoutStop()
+    sleepFor(Duration.millis(30))
+    print("dropped ticker ok")
+    return 0
+}

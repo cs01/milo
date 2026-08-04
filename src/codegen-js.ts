@@ -483,6 +483,11 @@ export class CodegenJS {
           this.indent--;
           this.emit("}");
           break;
+        } else if (stmt.varName2) {
+          // `for i, x in v` over a Vec/array binds (index, value) — dropping the second
+          // binding here emitted a loop whose body referenced an undeclared variable, so
+          // the JS died at runtime instead of the backend refusing up front.
+          this.emit(`for (const [${stmt.varName}, ${stmt.varName2}] of ${iter}.entries()) {`);
         } else {
           this.emit(`for (const ${stmt.varName} of ${iter}) {`);
         }
@@ -703,6 +708,30 @@ export class CodegenJS {
         const def = this.genExpr(expr.default);
         const t = this.nextTemp();
         return `((${t}) => ${t}.tag === 0 ? ${t}.data[0] : ${def})(${operand})`;
+      }
+      case "VecSort": {
+        // In place and ascending, like native. JS's default sort is lexicographic even
+        // for numbers ([10,9] stays [10,9]), so the comparator is required, not a
+        // nicety. Byte-strings compare the same way native's memcmp ordering does.
+        const el = expr.elementType;
+        if (el.tag !== "int" && el.tag !== "float" && el.tag !== "string") {
+          throw new Error(`codegen-js: sort on ${el.tag} elements unsupported`);
+        }
+        return `${this.genExpr(expr.object)}.sort((a, b) => a < b ? -1 : a > b ? 1 : 0)`;
+      }
+      case "VecMinMax": {
+        const el = expr.elementType;
+        if (el.tag !== "int" && el.tag !== "float" && el.tag !== "string") {
+          throw new Error(`codegen-js: min/max on ${el.tag} elements unsupported`);
+        }
+        const v = this.nextTemp();
+        const pick = expr.isMax ? "b > a ? b : a" : "b < a ? b : a";
+        return `((${v}) => ${v}.length === 0 ? {tag: 1} : {tag: 0, data: [${v}.reduce((a, b) => ${pick})]})(${this.genExpr(expr.object)})`;
+      }
+      case "VecGetOpt": {
+        const v = this.nextTemp();
+        const i = this.nextTemp();
+        return `((${v}, ${i}) => ${i} >= 0 && ${i} < ${v}.length ? {tag: 0, data: [${v}[${i}]]} : {tag: 1})(${this.genExpr(expr.object)}, ${this.genExpr(expr.index)})`;
       }
       case "MatchExpr":
         return this.genMatchExpr(expr);

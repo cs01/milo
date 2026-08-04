@@ -20,6 +20,17 @@ const BASELINE = join(import.meta.dir, "emitJsParity.baseline.json");
 
 type Status = "agree" | "mismatch" | "crash" | "noEmit";
 
+// `noEmit` and `crash` are the same outcome — the fixture does not run under the JS
+// backend — differing only in whether the backend refused up front or the emitted
+// file failed to load. Which one you get is platform-dependent: std has per-OS arms,
+// and stdRandom hits `addrOf` (refused at emit) on Linux but not on darwin, so one
+// shared baseline cannot name both. They collapse to one bucket. `mismatch` stays
+// distinct because running and producing the WRONG answer is the dangerous outcome,
+// and `agree` obviously so.
+function bucket(s: Status): "agree" | "mismatch" | "unsupported" {
+  return s === "agree" || s === "mismatch" ? s : "unsupported";
+}
+
 // Fixtures that need argv, a network, or otherwise can't be driven headlessly. They
 // tell us nothing about the backend either way.
 const SKIP = new Set<string>([]);
@@ -63,7 +74,7 @@ test.skipIf(!enabled)("emit-js: whole-corpus parity against native", () => {
   const base: Record<string, Status> = JSON.parse(readFileSync(BASELINE, "utf8"));
   // Regressions are what this test exists for: a fixture that used to agree and now
   // doesn't, or one that degraded (mismatch -> crash).
-  const regressed = Object.keys(now).filter(f => !base[f] || base[f] !== now[f]);
+  const regressed = Object.keys(now).filter(f => !base[f] || bucket(base[f]) !== bucket(now[f]));
   expect({ regressed, detail: regressed.map(f => `${f}: ${base[f] ?? "agree"} -> ${now[f]}`) })
     .toEqual({ regressed: [], detail: [] });
 

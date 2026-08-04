@@ -5,10 +5,12 @@
 // @expect: is upgrade: true
 // @expect: not upgrade: false
 // @expect: key: dGhlIHNhbXBsZSBub25jZQ==
-// @expect: WS_TEXT: 1
+// @expect: opcode: Text 1
+// @expect: pong from wire: true
+// @expect: reserved opcode 3: rejected
 
 from "std/ws" import {
-    isWsUpgrade, extractWsKey, WS_TEXT, computeAcceptKey
+    isWsUpgrade, extractWsKey, WsOpcode, computeAcceptKey
 }
 
 pub fn main(): i32 {
@@ -23,7 +25,24 @@ pub fn main(): i32 {
     print($"is upgrade: {isWsUpgrade(wsReq)}")
     print($"not upgrade: {isWsUpgrade(httpReq)}")
     print($"key: {extractWsKey(wsReq)}")
-    print($"WS_TEXT: {WS_TEXT()}")
+
+    // Opcodes are an integer-repr enum: the discriminant is the RFC 6455 wire nibble.
+    print($"opcode: {WsOpcode.Text} {WsOpcode.Text as i32}")
+
+    let Option.Some(fromWire) = WsOpcode.tryFrom(10) else {
+        return 1
+    }
+    print($"pong from wire: {fromWire == WsOpcode.Pong}")
+
+    // Reserved opcodes have no variant, so they can't be mistaken for a data frame.
+    match WsOpcode.tryFrom(3) {
+        Option.Some(_) => {
+            return 2
+        }
+        Option.None => {
+            print("reserved opcode 3: rejected")
+        }
+    }
 
     return 0
 }

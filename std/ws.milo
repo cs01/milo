@@ -40,34 +40,22 @@ from "std/random" import {
 
 // ── Frame opcodes ──
 
-pub fn WS_CONTINUATION(): u8 {
-    return 0
-}
-
-pub fn WS_TEXT(): u8 {
-    return 1
-}
-
-pub fn WS_BINARY(): u8 {
-    return 2
-}
-
-pub fn WS_CLOSE(): u8 {
-    return 8
-}
-
-pub fn WS_PING(): u8 {
-    return 9
-}
-
-pub fn WS_PONG(): u8 {
-    return 10
+// RFC 6455 §5.2 opcode nibble. The discriminant IS the wire value, so `op as i32`
+// is what goes in the frame header and `WsOpcode.tryFrom(nibble)` rejects the
+// reserved codes (3–7, 11–15) that the spec says must fail the connection.
+pub enum WsOpcode: i32 {
+    Continuation = 0,
+    Text = 1,
+    Binary = 2,
+    Close = 8,
+    Ping = 9,
+    Pong = 10,
 }
 
 // ── Types ──
 
 pub struct WsMessage {
-    opcode: u8,
+    opcode: WsOpcode,
     payload: string,
 }
 
@@ -192,7 +180,7 @@ impl WsConn {
     // Read next WebSocket message. Handles fragmentation, responds to ping automatically.
     fn recv(self: &mut Self): Result<WsMessage, string> {
         var resultPayload: string = ""
-        var resultOpcode: u8 = 0
+        var resultOpcode: WsOpcode = WsOpcode.Continuation
 
         while true {
             var header: [u8; 2] = [0; 2]
@@ -201,7 +189,12 @@ impl WsConn {
             }
 
             let fin = (header[0] & 128) != 0
-            let opcode = header[0] & 15
+            let rawOpcode = (header[0] & 15) as i32
+            // RFC 6455 §5.2: a reserved opcode must fail the connection, not be
+            // forwarded to the caller as if it were a data frame.
+            let Option.Some(opcode) = WsOpcode.tryFrom(rawOpcode) else {
+                return Result.Err("reserved opcode")
+            }
             let masked = (header[1] & 128) != 0
             var payloadLen: i64 = (header[1] & 127) as i64
 
@@ -254,21 +247,21 @@ impl WsConn {
             }
 
             // handle control frames inline
-            if opcode == WS_PING() {
-                let _ = self._sendFrame(WS_PONG(), payload, true)
+            if opcode == WsOpcode.Ping {
+                let _ = self._sendFrame(WsOpcode.Pong, payload, true)
                 continue
             }
-            if opcode == WS_PONG() {
+            if opcode == WsOpcode.Pong {
                 continue
             }
-            if opcode == WS_CLOSE() {
+            if opcode == WsOpcode.Close {
                 self._closed = true
-                let _ = self._sendFrame(WS_CLOSE(), "", true)
+                let _ = self._sendFrame(WsOpcode.Close, "", true)
                 return Result.Err("close")
             }
 
             // data frame
-            if opcode != WS_CONTINUATION() {
+            if opcode != WsOpcode.Continuation {
                 resultOpcode = opcode
                 resultPayload = payload
             } else {
@@ -288,29 +281,29 @@ impl WsConn {
 
     // Send a text message.
     fn sendText(self: &Self, msg: &string): Result<i32, string> {
-        return self._sendFrame(WS_TEXT(), msg, true)
+        return self._sendFrame(WsOpcode.Text, msg, true)
     }
 
     // Send a binary message.
     fn sendBinary(self: &Self, data: &string): Result<i32, string> {
-        return self._sendFrame(WS_BINARY(), data, true)
+        return self._sendFrame(WsOpcode.Binary, data, true)
     }
 
     // Send a ping.
     fn ping(self: &Self): Result<i32, string> {
-        return self._sendFrame(WS_PING(), "", true)
+        return self._sendFrame(WsOpcode.Ping, "", true)
     }
 
     // Send close frame and mark connection closed.
     fn close(self: &mut Self): void {
         if !self._closed {
-            let _ = self._sendFrame(WS_CLOSE(), "", true)
+            let _ = self._sendFrame(WsOpcode.Close, "", true)
             self._closed = true
             close(self.fd)
         }
     }
 
-    fn _sendFrame(self: &Self, opcode: u8, payload: &string, fin: bool): Result<i32, string> {
+    fn _sendFrame(self: &Self, opcode: WsOpcode, payload: &string, fin: bool): Result<i32, string> {
         // header: 1 (fin+op) + 1..9 (len) + 4 (mask key, client only)
         var headerLen: i64 = 2
         if payload.len >= 126 && payload.len < 65536 {
@@ -338,7 +331,7 @@ impl WsConn {
             var pos: i64 = 0
 
             // byte 0: FIN + opcode
-            var b0: u8 = opcode
+            var b0: u8 = (opcode as i32) as u8
             if fin {
                 b0 = b0 | 128
             }

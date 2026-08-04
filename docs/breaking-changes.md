@@ -1,7 +1,7 @@
 <!-- doc-meta
 system: breaking-changes
 purpose: source-level breaks users have to act on, with the migration and the reason a compat shim was impossible
-key-files: std/platform.*.milo, std/os.milo, std/string.milo, std/strconv.milo
+key-files: std/platform.*.milo, std/os.milo, std/string.milo, std/strconv.milo, std/uuid.milo, std/ws.milo
 update-when: a public stdlib name moves, is renamed, or changes signature
 last-verified: 2026-08-03
 -->
@@ -51,6 +51,38 @@ No compat shim was possible under the one-spelling rule: a `Uuid.v4(): string`
 alongside `Uuid.v4(): Uuid` cannot coexist, and keeping the string spelling for
 v4 while v7 returned a value would make the module's two constructors disagree
 about what a UUID is. The private `uuidV4()` free function is gone with it.
+
+## `std/ws` opcodes are an enum, not six functions (2026-08-03)
+
+`WS_CONTINUATION()`, `WS_TEXT()`, `WS_BINARY()`, `WS_CLOSE()`, `WS_PING()` and
+`WS_PONG()` are gone. They were zero-argument functions returning a `u8` —
+constants faked with a call, in a language that has integer-repr enums.
+
+| Before | After |
+|---|---|
+| `WS_CONTINUATION()` | `WsOpcode.Continuation` |
+| `WS_TEXT()` | `WsOpcode.Text` |
+| `WS_BINARY()` | `WsOpcode.Binary` |
+| `WS_CLOSE()` | `WsOpcode.Close` |
+| `WS_PING()` | `WsOpcode.Ping` |
+| `WS_PONG()` | `WsOpcode.Pong` |
+
+`WsMessage.opcode` is now a `WsOpcode` rather than a `u8`. Compare it against a
+variant (`msg.opcode == WsOpcode.Text`) or `match` on it; `msg.opcode as i32`
+still gives the RFC 6455 wire nibble, and `WsOpcode.tryFrom(n)` is the partial
+reverse.
+
+**Behaviour change.** `WsConn.recv()` now returns `Err("reserved opcode")` when
+a frame carries an opcode with no variant (3–7, 11–15). Previously those were
+handed to the caller as if they were data frames, which RFC 6455 §5.2 forbids —
+the type change is what forced the case to be considered at all.
+
+**Why no shim.** A `u8` opcode and a `WsOpcode` opcode cannot both be the type
+of `WsMessage.opcode`, and Milo's flat namespace has no deprecation attribute
+for a function name. Hard break.
+
+**Failure mode if you miss one.** A build error: `'WS_TEXT' not found in
+'std/ws'`, or a type mismatch on the comparison. Nothing silently keeps working.
 
 ## Shadowing is rejected (2026-08-01)
 

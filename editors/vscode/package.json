@@ -13,7 +13,7 @@
   "engines": { "vscode": "^1.75.0" },
   "categories": ["Programming Languages", "Formatters"],
   "main": "./out/extension.js",
-  "activationEvents": ["onLanguage:milo"],
+  "activationEvents": ["onLanguage:milo", "onDebugResolve:milo"],
   "contributes": {
     "languages": [{
       "id": "milo",
@@ -28,8 +28,69 @@
     }],
     "commands": [
       { "command": "milo.runFile", "title": "Milo: Run Current File" },
+      { "command": "milo.debugFile", "title": "Milo: Debug Current File" },
       { "command": "milo.restartServer", "title": "Milo: Restart Language Server" }
     ],
+    "breakpoints": [{ "language": "milo" }],
+    "debuggers": [{
+      "type": "milo",
+      "label": "Milo",
+      "languages": ["milo"],
+      "configurationAttributes": {
+        "launch": {
+          "required": ["program"],
+          "properties": {
+            "program": {
+              "type": "string",
+              "description": "Path to a .milo source file (compiled with `-g --debug` before launch) or to an already-built executable.",
+              "default": "${file}"
+            },
+            "args": {
+              "type": "array",
+              "items": { "type": "string" },
+              "description": "Command-line arguments passed to the program.",
+              "default": []
+            },
+            "cwd": {
+              "type": "string",
+              "description": "Working directory. Defaults to the directory containing the source file.",
+              "default": "${workspaceFolder}"
+            },
+            "env": {
+              "type": "object",
+              "description": "Environment variables for the debuggee.",
+              "default": {}
+            },
+            "stopOnEntry": {
+              "type": "boolean",
+              "description": "Break at the program's entry point.",
+              "default": false
+            },
+            "runInTerminal": {
+              "type": "boolean",
+              "description": "Run the program in VS Code's integrated terminal instead of the Debug Console (needed for programs that read stdin).",
+              "default": false
+            }
+          }
+        }
+      },
+      "initialConfigurations": [{
+        "type": "milo",
+        "request": "launch",
+        "name": "Debug Milo file",
+        "program": "${file}"
+      }],
+      "configurationSnippets": [{
+        "label": "Milo: Debug the active file",
+        "description": "Build the active .milo file with -g --debug and launch it under lldb-dap",
+        "body": {
+          "type": "milo",
+          "request": "launch",
+          "name": "Debug Milo file",
+          "program": "^\"\\${file}\""
+        }
+      }]
+    }],
     "configurationDefaults": {
       "[milo]": {
         "editor.formatOnSave": true,
@@ -48,6 +109,11 @@
           "type": "string",
           "default": "",
           "markdownDescription": "Dev-only fallback: absolute path to a Milo compiler checkout (the dir containing `src/main.ts`), run via `bun`. Only consulted when no `milo` executable is found — set `milo.path` instead unless you're working on the compiler itself."
+        },
+        "milo.lldbDapPath": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Absolute path to `lldb-dap` (the debug adapter). Leave empty to search Homebrew LLVM, the Xcode Command Line Tools, `PATH`, `/usr/lib/llvm-*/bin`, then `xcrun`."
         },
         "milo.debug": {
           "type": "boolean",

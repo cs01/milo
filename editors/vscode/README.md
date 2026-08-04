@@ -6,11 +6,21 @@ Language support for [Milo](https://milo-language.github.io/milo/) — a memory-
 - Diagnostics from the real compiler (type errors, move errors, warnings) as you type
 - Hover types and go-to-definition, including into the standard library
 - Format on save, using the same formatter `milo fmt` runs
-- `Milo: Run Current File` and `Milo: Restart Language Server` commands
+- **▶ Run** and **🐞 Debug** CodeLenses above `fn main()`
+- Source-level debugging: gutter breakpoints, stepping, call stack, and locals
+- `Milo: Run Current File`, `Milo: Debug Current File` and `Milo: Restart Language Server` commands
+
+## Debugging
+
+Click **🐞 Debug** above `fn main()` (or press <kbd>F5</kbd>). The file is built with `-g --debug` and launched under `lldb-dap` — no `launch.json` needed. Breakpoints work from the gutter of any `.milo` file.
+
+For arguments, a working directory, or a prebuilt binary, add a `milo` launch config; `program` takes either a `.milo` source or an executable. See [Debugging](https://milo-language.github.io/milo/getting-started/debugging).
 
 ## Requirements
 
 The [`milo` compiler](https://milo-language.github.io/milo/getting-started/installation) must be installed. The extension starts `milo lsp`; it searches `~/.local/bin`, `~/.milo/bin`, Homebrew, `/usr/local/bin`, then `PATH`. If your install lives elsewhere, set `milo.path`.
+
+Debugging additionally needs `lldb-dap`, which ships with LLVM (`brew install llvm`) and with the Xcode Command Line Tools. The extension searches Homebrew's LLVM, `/Library/Developer/CommandLineTools`, `PATH`, `/usr/lib/llvm-*/bin`, then `xcrun`; set `milo.lldbDapPath` if yours is elsewhere.
 
 ## Settings
 
@@ -18,6 +28,7 @@ The [`milo` compiler](https://milo-language.github.io/milo/getting-started/insta
 |---------|---------|---------|
 | `milo.path` | `""` | Absolute path to the `milo` executable. Empty = search the locations above. |
 | `milo.compilerRoot` | `""` | Dev-only fallback: a Milo compiler checkout, run via `bun`. Only consulted when no `milo` executable is found. |
+| `milo.lldbDapPath` | `""` | Absolute path to `lldb-dap`. Empty = search the locations above. |
 | `milo.debug` | `false` | Verbose LSP tracing (`MILO_LSP_DEBUG=1`). Run `Milo: Restart Language Server` after changing. |
 
 ## Developing the extension

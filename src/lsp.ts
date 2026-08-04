@@ -1568,13 +1568,12 @@ function handleCodeLens(uri: string): object[] {
   const lines = source.split("\n");
   const filePath = uri.startsWith("file://") ? fileURLToPath(uri) : uri;
 
-  // "▶ Run" on fn main()
+  // "▶ Run" / "🐞 Debug" on fn main()
   for (let i = 0; i < lines.length; i++) {
     if (/\bfn\s+main\s*\(/.test(lines[i])) {
-      lenses.push({
-        range: { start: { line: i, character: 0 }, end: { line: i, character: 0 } },
-        command: { title: "▶ Run", command: "milo.runFile", arguments: [filePath] },
-      });
+      const range = { start: { line: i, character: 0 }, end: { line: i, character: 0 } };
+      lenses.push({ range, command: { title: "▶ Run", command: "milo.runFile", arguments: [filePath] } });
+      lenses.push({ range, command: { title: "🐞 Debug", command: "milo.debugFile", arguments: [filePath] } });
       break;
     }
   }

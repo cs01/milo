@@ -1,10 +1,18 @@
 import * as path from "path";
 import * as fs from "fs";
 import * as os from "os";
-import { workspace, window, commands, type ExtensionContext } from "vscode";
+import { execFile, execFileSync } from "child_process";
+import {
+  workspace, window, commands, debug, Uri, ProgressLocation, DebugAdapterExecutable,
+  type ExtensionContext, type DebugConfiguration, type DebugConfigurationProvider,
+  type DebugAdapterDescriptorFactory, type DebugAdapterDescriptor, type DebugSession,
+  type WorkspaceFolder, type ProviderResult,
+} from "vscode";
 import { LanguageClient, TransportKind, type LanguageClientOptions, type ServerOptions } from "vscode-languageclient/node";
 
 let client: LanguageClient | undefined;
+
+const DEBUG_TYPE = "milo";
 
 // How the language server gets launched. A published install runs the `milo`
 // binary, which is self-contained (the stdlib is embedded, `milo lsp` needs
@@ -41,7 +49,175 @@ export async function activate(context: ExtensionContext) {
       terminal.show();
       terminal.sendText(shellCommand(server, ["run", doc.fileName]));
     }),
+    // The CodeLens passes the file path; the palette entry falls back to the active editor.
+    commands.registerCommand("milo.debugFile", async (filePath?: string) => {
+      const file = filePath ?? activeMiloFile();
+      if (!file) { window.showWarningMessage("Milo: no .milo file is active."); return; }
+      const open = workspace.textDocuments.find(d => d.fileName === file);
+      if (open?.isDirty) await open.save();
+      await debug.startDebugging(workspace.getWorkspaceFolder(Uri.file(file)), {
+        type: DEBUG_TYPE,
+        request: "launch",
+        name: `Debug ${path.basename(file)}`,
+        program: file,
+      });
+    }),
+    debug.registerDebugConfigurationProvider(DEBUG_TYPE, new MiloDebugConfigurationProvider(server)),
+    debug.registerDebugAdapterDescriptorFactory(DEBUG_TYPE, new LldbDapFactory()),
   );
+}
+
+function activeMiloFile(): string | undefined {
+  const doc = window.activeTextEditor?.document;
+  return doc?.languageId === "milo" ? doc.fileName : undefined;
+}
+
+// ── Debugging ──
+//
+// Milo needs no bespoke debug adapter: `-g` emits ordinary DWARF, so `lldb-dap`
+// (shipped with LLVM and with the macOS Command Line Tools) debugs the binary
+// directly. We contribute a `milo` debug type purely so the user can point at a
+// `.milo` *source* file — the provider compiles it with `-g --debug` and swaps
+// `program` for the resulting executable before the adapter ever sees it.
+class MiloDebugConfigurationProvider implements DebugConfigurationProvider {
+  constructor(private readonly server: Server) {}
+
+  // F5 with no launch.json hands us an empty config.
+  resolveDebugConfiguration(
+    _folder: WorkspaceFolder | undefined,
+    config: DebugConfiguration,
+  ): ProviderResult<DebugConfiguration> {
+    if (!config.type && !config.request && !config.name) {
+      const file = activeMiloFile();
+      if (!file) { void window.showWarningMessage("Milo: no .milo file is active."); return undefined; }
+      return { type: DEBUG_TYPE, request: "launch", name: `Debug ${path.basename(file)}`, program: file };
+    }
+    return config;
+  }
+
+  // Runs after ${file}/${workspaceFolder} expansion, so `program` is a real path here.
+  async resolveDebugConfigurationWithSubstitutedVariables(
+    _folder: WorkspaceFolder | undefined,
+    config: DebugConfiguration,
+  ): Promise<DebugConfiguration | undefined> {
+    const program: string | undefined = config.program;
+    if (!program) {
+      void window.showErrorMessage("Milo: debug configuration has no `program`.");
+      return undefined;
+    }
+    // A prebuilt binary is passed through untouched — only sources get compiled.
+    if (!program.endsWith(".milo")) return config;
+
+    const binary = await buildForDebug(this.server, program);
+    if (!binary) return undefined;  // build failed; error already surfaced
+
+    return { ...config, program: binary, cwd: config.cwd ?? path.dirname(program) };
+  }
+}
+
+class LldbDapFactory implements DebugAdapterDescriptorFactory {
+  createDebugAdapterDescriptor(_session: DebugSession): ProviderResult<DebugAdapterDescriptor> {
+    const dap = findLldbDap();
+    if (!dap) {
+      void window.showErrorMessage(
+        "Milo: `lldb-dap` not found. Install LLVM (`brew install llvm`) or the Xcode Command Line Tools, " +
+        "or set `milo.lldbDapPath`.",
+      );
+      return undefined;
+    }
+    return new DebugAdapterExecutable(dap, []);
+  }
+}
+
+// Debug builds land in a scratch dir, not next to the source: on Mach-O `-g`
+// also drops a sibling `.dSYM` bundle, and lldb only finds it beside the binary.
+function debugOutputPath(source: string): string {
+  const dir = path.join(os.tmpdir(), "milo-debug");
+  fs.mkdirSync(dir, { recursive: true });
+  return path.join(dir, path.basename(source, ".milo"));
+}
+
+async function buildForDebug(server: Server, source: string): Promise<string | null> {
+  const out = debugOutputPath(source);
+  // -O0 so every local stays in an alloca the DWARF binds by name; at higher
+  // levels LLVM promotes them to registers and `frame variable` reports nothing.
+  const args = [...server.args, "build", source, "-o", out, "-g", "--debug"];
+
+  const failure = await window.withProgress(
+    { location: ProgressLocation.Notification, title: `Milo: building ${path.basename(source)} with debug info…` },
+    () => new Promise<string | null>(resolve => {
+      execFile(server.command, args, { cwd: path.dirname(source) }, (err, _stdout, stderr) => {
+        resolve(err ? (stderr.trim() || err.message) : null);
+      });
+    }),
+  );
+
+  if (failure) {
+    const firstLine = failure.split("\n").find(l => l.trim()) ?? "build failed";
+    void window.showErrorMessage(`Milo: debug build failed — ${firstLine}`, "Show Output")
+      .then(choice => { if (choice) showBuildFailure(source, failure); });
+    return null;
+  }
+  return out;
+}
+
+function showBuildFailure(source: string, text: string) {
+  const channel = window.createOutputChannel("Milo Debug Build");
+  channel.appendLine(`$ milo build ${source} -g --debug`);
+  channel.appendLine(text);
+  channel.show();
+}
+
+function findLldbDap(): string | null {
+  const configured = workspace.getConfiguration("milo").get<string>("lldbDapPath")?.trim();
+  if (configured) {
+    if (isExecutable(configured)) return configured;
+    window.showWarningMessage(`Milo: milo.lldbDapPath="${configured}" is not an executable file.`);
+    return null;
+  }
+
+  const exe = process.platform === "win32" ? "lldb-dap.exe" : "lldb-dap";
+  const candidates = [
+    "/opt/homebrew/opt/llvm/bin/" + exe,
+    "/usr/local/opt/llvm/bin/" + exe,
+    "/Library/Developer/CommandLineTools/usr/bin/" + exe,
+  ];
+  for (const c of candidates) if (isExecutable(c)) return c;
+
+  const found = onPath(exe) ?? llvmVersionedOnDisk(exe);
+  if (found) return found;
+
+  // Xcode-only installs keep lldb-dap inside the active developer dir.
+  if (process.platform === "darwin") {
+    try {
+      const p = execFileSync("xcrun", ["-f", "lldb-dap"], { encoding: "utf8" }).trim();
+      if (p && isExecutable(p)) return p;
+    } catch { /* no xcrun, or no such tool */ }
+  }
+  return null;
+}
+
+// Debian/Ubuntu installs LLVM per-version and puts nothing on PATH.
+function llvmVersionedOnDisk(exe: string): string | null {
+  const roots = ["/usr/lib", "/usr/local/lib"];
+  const hits: string[] = [];
+  for (const root of roots) {
+    let entries: string[];
+    try { entries = fs.readdirSync(root); } catch { continue; }
+    for (const e of entries) {
+      if (!e.startsWith("llvm-")) continue;
+      const p = path.join(root, e, "bin", exe);
+      if (isExecutable(p)) hits.push(p);
+    }
+  }
+  // Highest version wins.
+  hits.sort((a, b) => llvmVersion(a) - llvmVersion(b));
+  return hits.pop() ?? null;
+}
+
+function llvmVersion(p: string): number {
+  const m = /llvm-(\d+)/.exec(p);
+  return m ? Number(m[1]) : 0;
 }
 
 async function start(server: Server) {

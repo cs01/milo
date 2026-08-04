@@ -2,6 +2,30 @@
 
 Milo emits standard DWARF debug info, so any DWARF-aware debugger — `lldb`, `gdb`, or [dapweb](https://github.com/milo-language/dapweb) — can set breakpoints on Milo source lines and inspect Milo values.
 
+## VS Code
+
+The [Milo extension](https://marketplace.visualstudio.com/items?itemName=milo-language.milo-lang) puts a **🐞 Debug** CodeLens above `fn main()`, next to **▶ Run**. Clicking it saves the file, builds it with `-g --debug`, and launches it under `lldb-dap` — breakpoints, stepping, call stack, and locals, with no `launch.json` to write.
+
+Set breakpoints by clicking the gutter in any `.milo` file. Pressing <kbd>F5</kbd> on an open `.milo` file does the same thing as the lens.
+
+The adapter is `lldb-dap`, which ships with LLVM and with the Xcode Command Line Tools; the extension finds it in Homebrew's LLVM, `/Library/Developer/CommandLineTools`, `PATH`, `/usr/lib/llvm-*/bin`, then via `xcrun`. Point `milo.lldbDapPath` at it if yours lives elsewhere. Debug builds go to a scratch directory (`$TMPDIR/milo-debug`) so the `.dSYM` bundle stays beside its binary and out of your source tree.
+
+For a checked-in configuration — arguments, a working directory, or debugging a prebuilt binary — add a `milo` launch config:
+
+```json
+{
+  "type": "milo",
+  "request": "launch",
+  "name": "Debug Milo file",
+  "program": "${file}",
+  "args": ["--verbose"],
+  "stopOnEntry": false,
+  "runInTerminal": false
+}
+```
+
+`program` accepts either a `.milo` source (compiled with `-g --debug` first) or an already-built executable, which is passed through untouched. Set `runInTerminal` for programs that read stdin — the Debug Console is output-only.
+
 ## Graphical debugging with dapweb
 
 [dapweb](https://github.com/milo-language/dapweb) is a web + AI debugger written in Milo itself. It drives any DAP backend (`lldb-dap`, `debugpy`, `delve`), so it debugs Milo binaries directly — same DWARF, no plugin.

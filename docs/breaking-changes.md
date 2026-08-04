@@ -11,6 +11,55 @@ last-verified: 2026-08-03
 Source-level breaks, newest first. Milo is pre-1.0 and does not promise
 compatibility, but every break belongs here with the migration spelled out.
 
+## `Jwt.verifyHS256` returns the validated claims, not a bool (2026-08-03)
+
+`Jwt.verifyHS256(token, secret) -> bool` checked the signature and nothing else: no
+`exp`, no `nbf`, no `aud`, and no way to read the payload at all. Every caller writing
+`if Jwt.verifyHS256(…)` accepted tokens that expired years ago. `httpmw.verifyBearer`
+inherited the same hole.
+
+Verification now returns `Result<JwtClaims, JwtError>` and validates the registered
+time claims (`exp`, `nbf`, `iat`) with 60 s of clock-skew leeway. The `alg` header must
+equal the algorithm the *verifier* asked for, so `alg: none` and algorithm confusion are
+`JwtError.UnsupportedAlg` rather than a success. Signature comparison moved to
+`std/subtle`'s `constantTimeEq` over the raw MAC, and a non-canonical base64url
+signature — same MAC bytes, different token text — is rejected instead of accepted.
+
+There is no compat shim: the point of the break is that `if verify(...)` must stop
+compiling. `.isOk()` is a caller who saw the claims and chose to discard them; the old
+spelling was a caller who never knew there were claims.
+
+```milo
+// before
+if Jwt.verifyHS256(token, secret) {
+    handle(request)                      // token may have expired in 2021
+}
+if verifyBearer(ctx, secret) { … }
+
+// after
+match Jwt.verifyHS256(token, secret) {
+    Result.Ok(claims) => { handle(request, claims.subject()) }
+    Result.Err(e) => { log(jwtErrorMessage(e)) }   // Expired vs BadSignature vs WrongAudience
+}
+if verifyBearer(ctx, secret).isOk() { … }          // when the claims genuinely are not needed
+
+// audience, issuer, a fixed clock, or a mandatory exp
+let claims = JwtVerifier.new(JwtAlg.HS256, secret)
+    .audience("api.example")
+    .issuer("auth.example")
+    .requireExpiry()
+    .verify(token)?
+```
+
+`httpmw.verifyBearer` returns the same `Result`, and now distinguishes "no
+Authorization header" from "an Authorization header that is not a Bearer token".
+
+New in the same change: `std/subtle` (`constantTimeEq`), `std/sha512` (`Sha512`,
+`Sha384`), `std/hkdf` (RFC 5869), `std/pbkdf2` (RFC 8018), `Hmac.sha384Bytes` /
+`.sha512Bytes` / `.sha512`, `Jwt.signHS384` / `.signHS512` / `.verifyHS384` /
+`.verifyHS512`, and `Totp.verify`. No existing name in those modules changed, and
+HS256 token output is byte-identical to before.
+
 ## HTTP, fetch and argparse lookups return `Option<string>` (2026-08-03)
 
 "Absent" and "present with an empty value" were the same value (`""`) across the

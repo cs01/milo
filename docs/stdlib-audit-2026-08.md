@@ -97,13 +97,29 @@ shipped entries are deleted). This file is a record of a single audit, not a liv
   deletable. Ref: `src/suggest.ts OPTION_MEMBERS`/`RESULT_MEMBERS`,
   `docs/language-reference.md` §Option Combinators.
 
-- [ ] **JWT verification does not validate claims.** `Jwt.verifyHS256(token, secret) -> bool`
+- [x] **JWT verification does not validate claims.** *`verifyHS256/384/512` now return
+  `Result<JwtClaims, JwtError>` — 10 variants, no `Other(string)` catch-all — validating
+  `exp`/`nbf`/`iat` with 60 s leeway, plus a `JwtVerifier` builder for `aud`/`iss`/fixed clock/
+  `requireExpiry`. Algorithm comes from the verifier, never the token, so algorithm confusion is
+  `UnsupportedAlg`. Signature compared constant-time on raw bytes, and a **non-canonical
+  base64url signature** (same MAC, different token text — walks past a replay blocklist) is now
+  rejected. Verified against RFC 7515 A.1's literal token. **Audit correction:** `alg: none` was
+  already rejected, but incidentally — the old code recomputed the MAC over the token's own
+  header bytes; nothing checked `alg`, so an HS512 token would have verified as HS256.* `Jwt.verifyHS256(token, secret) -> bool`
   checks the signature and nothing else — no `exp`, no `nbf`, no `aud`, and no way to read the
   payload at all. Every user writing `if Jwt.verifyHS256(…)` accepts expired tokens forever.
   `httpmw.verifyBearer` inherits it. HS256 is also the only algorithm. Ref: `std/jwt.milo`,
   `std/httpmw.milo`.
 
-- [ ] **No constant-time comparison.** Ships HMAC, JWT and AES-GCM, but `constantTimeEq` does
+- [x] **No constant-time comparison.** *`std/subtle.constantTimeEq` (own module so "I'm comparing
+  a secret" shows at the import line), `std/sha512` (Sha512+Sha384), `std/hkdf` (RFC 5869),
+  `std/pbkdf2` (RFC 8018), `Hmac.sha384Bytes`/`sha512Bytes`, `Totp.verify`. All verified against
+  published vectors (FIPS 180-4, RFC 4231, 5869, 6070, 7914), cross-checked against Python
+  hashlib. A correct `constEq` already existed inside `std/jwt` but was unexported — every other
+  user was on their own. **bcrypt/argon2/scrypt deliberately declined**: eksblowfish, the
+  `$2a`/`$2b` sign-extension bug, 72-byte truncation, and memory-hard cores all weaken silently
+  when wrong, and a wrong password hash is worse than none. PBKDF2 is the answer, documented with
+  OWASP iteration floors and its honest weakness (compute-hard, not memory-hard).* Ships HMAC, JWT and AES-GCM, but `constantTimeEq` does
   not exist — so every user-written MAC check will be `==`. Also missing: sha512, HKDF,
   PBKDF2/bcrypt/argon2. A stdlib with an HTTP server, cookies and JWT has no password hashing.
   Ref: `std/crypto.*.milo`, `std/hmac.milo`.

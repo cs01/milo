@@ -1,4 +1,4 @@
-// @proven: 3
+// @proven: 5
 // @failed: 1
 // @unknown: 1
 // A struct invariant is a property of the TYPE, so it is in force wherever a value of that

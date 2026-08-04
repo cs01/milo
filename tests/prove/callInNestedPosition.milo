@@ -1,0 +1,50 @@
+// @failed: 2
+// A call-site precondition is an obligation wherever the call is, not only where the
+// collector happened to look. The collector used to name the expression fields it knew
+// about, and `fields` was not among them — so `Box { v: half(x) }` produced NO obligation
+// at all while the identical `half(x)` written bare was refuted. Silent, and on the side
+// that reports success.
+//
+// Both spellings below violate `half`'s `requires` and both must be refuted. `viaMatchArm`
+// is the deliberate counterpart: an arm is guarded by a pattern test the SMT translator has
+// no encoding for, so recording the call with only the enclosing conditions would assert it
+// runs unconditionally and cry wolf on correct code. It is pruned on purpose — a stated
+// reason rather than a forgotten field — which is why the tally here is 2 and not 3.
+pub fn half(n: i64): i64
+requires n >= 0
+{
+    return n / 2
+}
+
+struct Box {
+    v: i64
+}
+
+// Bare call. Always was refuted.
+pub fn direct(x: i64): i64 {
+    return half(x)
+}
+
+// Same violated call, inside a struct-literal field.
+pub fn viaStructLit(x: i64): Box {
+    return Box {
+        v: half(x)
+    }
+}
+
+// Same violated call, inside a match-expression arm: pruned by design, see above.
+pub fn viaMatchArm(x: i64): i64 {
+    return match x {
+        0 => {
+            0
+        }
+        _ => {
+            half(x)
+        }
+    }
+}
+
+pub fn main(): i32 {
+    print(direct(4) + viaStructLit(4).v + viaMatchArm(4))
+    return 0
+}

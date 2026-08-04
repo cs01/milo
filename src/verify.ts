@@ -512,43 +512,90 @@ interface CallSite {
   conditions: string[];
 }
 
+// walkNodes' totality rule, plus the path conditions in force at each node.
+//
+// Same reason it exists: the two collectors below each named the fields they happened to
+// know about, so an obligation sitting in a field nobody listed was silently not an
+// obligation at all. `Box { v: half(x) }` never checked `half`'s `requires` — the identical
+// call written bare was refuted — because `fields` was not on the list.
+//
+// Where a subtree's conditions CANNOT be reconstructed this prunes EXPLICITLY and says why.
+// That is the whole difference from the key lists it replaces: not collecting is still a
+// coverage gap, but it is now a decision with a stated reason rather than a field someone
+// forgot, and a node kind added to the AST is covered instead of quietly skipped.
+//
+// Direction of danger, since it governs every choice here: an obligation recorded with
+// FEWER conditions than really hold is harder to discharge than reality, so it cries wolf
+// on correct code — and a check that cries wolf gets switched off. Pruning costs coverage;
+// guessing costs the check itself.
+function walkGuarded(
+  node: unknown,
+  conds: string[],
+  env: Map<string, string>,
+  visit: (n: any, conds: string[]) => void,
+): void {
+  if (!node || typeof node !== "object") return;
+  if (Array.isArray(node)) {
+    for (const x of node) walkGuarded(x, conds, env, visit);
+    return;
+  }
+  const n = node as Record<string, any>;
+  if (typeof n.kind === "string") {
+    visit(n, conds);
+    // A closure body runs where the closure is CALLED, under conditions and bindings that
+    // are not in scope at the definition site. An obligation recorded here would be
+    // attached to the wrong state entirely — worse than not recording it.
+    if (n.kind === "Closure") return;
+    // A match arm is guarded by a pattern test over an enum tag, which this translator has
+    // no encoding for. The subject is evaluated unconditionally, so it still walks.
+    if (n.kind === "MatchExpr" || n.kind === "MatchStmt") {
+      walkGuarded(n.subject, conds, env, visit);
+      return;
+    }
+    // An if-expression arm is exactly as conditional as an if-statement branch, and gets
+    // the same path condition the statement walker builds for one. A guard that does not
+    // translate is pruned rather than dropped: descending with the enclosing conditions
+    // alone would assert the arm runs unconditionally.
+    if (n.kind === "IfExpr") {
+      walkGuarded(n.cond, conds, env, visit);
+      const guard = exprToSmtWithEnv(n.cond, env);
+      if (/UNSUPPORTED/.test(guard)) return;
+      walkGuarded(n.thenBody, [...conds, guard], env, visit);
+      walkGuarded(n.elseBody, [...conds, `(not ${guard})`], env, visit);
+      return;
+    }
+  }
+  for (const key of Object.keys(n)) {
+    if (key === "span") continue;
+    walkGuarded(n[key], conds, env, visit);
+  }
+}
+
 // Every struct literal reachable from an expression. A literal is where a type's invariant
 // stops being an assumption and becomes an obligation: everything downstream gets to assume
 // it, so something has to establish it, and construction is that something.
 function collectStructLitsInExpr(expr: Expr, conds: string[], env: Map<string, string>, out: StructLitSite[]): void {
-  if (!expr || typeof expr !== "object") return;
-  const e = expr as any;
-  if (e.kind === "StructLit" && typeof e.name === "string" && STRUCT_INVARIANTS.has(e.name)) {
+  walkGuarded(expr, conds, env, (n, active) => {
+    if (n.kind !== "StructLit" || typeof n.name !== "string" || !STRUCT_INVARIANTS.has(n.name)) return;
     const fields = new Map<string, string>();
-    for (const f of e.fields ?? []) fields.set(f.name, exprToSmtWithEnv(f.value, env));
-    out.push({ struct: e.name, fields, conditions: [...conds] });
-  }
-  for (const v of Object.values(e)) {
-    if (Array.isArray(v)) v.forEach(x => { if (x && (x as any).kind) collectStructLitsInExpr(x as Expr, conds, env, out); else if (x && (x as any).value?.kind) collectStructLitsInExpr((x as any).value, conds, env, out); });
-    else if (v && typeof v === "object" && (v as any).kind) collectStructLitsInExpr(v as Expr, conds, env, out);
-  }
+    for (const f of n.fields ?? []) fields.set(f.name, exprToSmtWithEnv(f.value, env));
+    out.push({ struct: n.name, fields, conditions: [...active] });
+  });
 }
 
 // Every call reachable from an expression, paired with the conditions in force. Only
 // direct calls to named fns matter — that is all a `requires` can hang off.
 function collectCallsInExpr(expr: Expr, conds: string[], env: Map<string, string>, out: CallSite[]): void {
-  if (!expr) return;
-  const e = expr as any;
-  if (e.kind === "Call" && typeof e.func === "string") {
-    const callee = FN_TABLE.get(e.func);
+  walkGuarded(expr, conds, env, (n, active) => {
+    if (n.kind !== "Call" || typeof n.func !== "string") return;
+    const callee = FN_TABLE.get(n.func);
     out.push({
-      name: e.func,
-      args: (e.args ?? []).map((a: Expr) => exprToSmtWithEnv(a, env)),
-      fields: callee ? fieldBindings(callee.params, e.args ?? [], env) : new Map(),
-      conditions: [...conds],
+      name: n.func,
+      args: (n.args ?? []).map((a: Expr) => exprToSmtWithEnv(a, env)),
+      fields: callee ? fieldBindings(callee.params, n.args ?? [], env) : new Map(),
+      conditions: [...active],
     });
-  }
-  for (const key of ["left", "right", "operand", "object", "index", "cond", "value", "start", "end", "default"]) {
-    if (e[key] && typeof e[key] === "object" && e[key].kind) collectCallsInExpr(e[key], conds, env, out);
-  }
-  for (const key of ["args", "elements"]) {
-    if (Array.isArray(e[key])) for (const a of e[key]) if (a && a.kind) collectCallsInExpr(a, conds, env, out);
-  }
+  });
 }
 
 // A static/associated method call `Type.method(args)` parses as an EnumLit (the parser

@@ -5,6 +5,14 @@ itself, and the bootstrap converges. This doc is written to be executable by an
 implementing agent with no other context: every milestone has a command-line
 acceptance test, and the rules in "Working Agreement" are mandatory.
 
+> **Why self-host at all — decided 2026-08-04.** For *proof*, not correctness. A rewrite of
+> `src/` into Milo would NOT produce a more correct compiler: the dominant defect class in
+> the TS compiler is incomplete traversal reporting success, which no language prevents.
+> See [plans/compiler-host-language.md](plans/compiler-host-language.md) for the evidence,
+> the one place Milo genuinely wins (index access), the costs (second-class refs vs.
+> graph-shaped IR, bootstrap paradox, compile time), and the port order if this restarts —
+> **codegen first, checker last, differential harness green at every step.**
+
 ## STATUS: bootstrap converges at -O2 (M5 done)
 
 `milo0` compiles its own source to a byte-identical fixed point at the

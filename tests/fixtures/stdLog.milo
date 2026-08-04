@@ -1,14 +1,67 @@
+// std/log — level filtering, structured fields, named loggers, both formats.
+//
+// The sink starts at stderr, so every line below arriving on stdout is itself
+// the redirection test: none of this is asserted unless setSinkFd took effect.
+// Timestamps are off so the output is byte-reproducible.
+
+// @expect: INFO  default threshold is info
+// @expect: WARN  default threshold is info
+// @expect: ERROR default threshold is info
+// @expect: DEBUG debug now passes
+// @expect: INFO  upload path="/var/tmp/a b" bytes=42 ok=true ratio=1.5
+// @expect: INFO  bare values path=/var/tmp/plain n=-7
+// @expect: INFO  empty renders quoted note=""
+// @expect: INFO  multi\nline stays one record body="a\nb"
+// @expect: WARN  warn threshold
+// @expect: ERROR error threshold
+// @expect: INFO  [http] listening port=8080
+// @expect: {"level":"INFO","msg":"json record","path":"a\"b","n":7,"ok":false}
+// @expect: {"level":"WARN","logger":"http","msg":"slow","ms":1200}
 // @expect: done
 
 from "std/log" import {
-    logDebug, logError, logInfo, logWarn
+    Log, LogFormat, LogLevel, Logger
 }
 
 pub fn main(): i32 {
-    logInfo("server starting")
-    logWarn("disk space low")
-    logError("connection failed")
-    logDebug("trace info")
+    Log.setSinkFd(1)
+    Log.setTimestamps(false)
+
+    Log.debug("suppressed by the default threshold")
+    Log.info("default threshold is info")
+    Log.warn("default threshold is info")
+    Log.error("default threshold is info")
+
+    Log.setLevel(LogLevel.Debug)
+    Log.debug("debug now passes")
+
+    Log.str("path", "/var/tmp/a b").int("bytes", 42).bool("ok", true).float("ratio", 1.5).info("upload")
+    Log.str("path", "/var/tmp/plain").int("n", -7).info("bare values")
+    Log.str("note", "").info("empty renders quoted")
+    Log.str("body", "a\nb").info("multi\nline stays one record")
+
+    Log.setLevel(LogLevel.Warn)
+    Log.info("suppressed at warn")
+    Log.warn("warn threshold")
+
+    Log.setLevel(LogLevel.Error)
+    Log.warn("suppressed at error")
+    Log.error("error threshold")
+
+    Log.setLevel(LogLevel.Info)
+    let http = Logger.new("http")
+    http.debug("suppressed for named loggers too")
+    http.int("port", 8080).info("listening")
+
+    Log.setFormat(LogFormat.Json)
+    Log.str("path", "a\"b").int("n", 7).bool("ok", false).info("json record")
+    http.int("ms", 1200).warn("slow")
+
+    Log.setLevel(LogLevel.Off)
+    Log.error("off silences every level")
+
+    Log.setLevel(LogLevel.Info)
+    Log.setFormat(LogFormat.Text)
     print("done")
     return 0
 }

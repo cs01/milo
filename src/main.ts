@@ -1265,7 +1265,7 @@ Import with \`from "std/<name>" import { ... }\`. Key modules:
 | \`std/sort\` | Sorting | \`sort\` for Vec with comparator |
 | \`std/set\` | Hash set | \`Set<T>\` |
 | \`std/url\` | URL parsing | \`parseUrl\`, \`Url\` |
-| \`std/log\` | Logging | \`logInfo\`, \`logWarn\`, \`logError\`, \`logDebug\` |
+| \`std/log\` | Logging | \`Log.info\`, \`Log.setLevel\`, \`Log.setSinkPath\`, \`Log.str(k,v).int(k,v).warn(msg)\`, \`Logger\` |
 | \`std/signal\` | OS signal handling | \`onSignal\` |
 | \`std/process\` | Process management | \`exec\`, \`spawn\`, \`ProcessResult\` |
 | \`std/thread\` | Threading | \`spawn\` (thread), \`Thread\` |

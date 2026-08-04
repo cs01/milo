@@ -1,26 +1,459 @@
-// std/log — logging to stderr with level tags
+// std/log — leveled, structured logging to a redirectable sink.
+//
+// One record renders to one complete line and reaches the sink through exactly
+// one `write(2)`. That is the whole concurrency story: Milo has no mutex, so
+// nothing here serializes writers. What it does instead is never split a record
+// across syscalls, which is what actually matters — POSIX makes a single write
+// to a pipe or terminal atomic up to PIPE_BUF (4096 bytes) and a single write to
+// a file opened O_APPEND atomic at any size. Records from concurrent tasks
+// therefore interleave whole, in some order, and only a record longer than
+// PIPE_BUF on a pipe can tear. Keep records under 4 KiB and log from as many
+// tasks as you like.
+//
+// Configuration (`setLevel`, `setFormat`, `setSinkFd`, `setSinkPath`,
+// `setTimestamps`) is process-wide mutable state meant to be set once at
+// startup. Reconfiguring while other tasks are logging cannot corrupt anything —
+// each setting is a single machine word — but concurrent readers may observe the
+// old value for an unbounded time, and a `setSinkPath` that closes the previous
+// owned fd can race a write already in flight. Configure before you spawn.
 
+from "std/datetime" import {
+    DateTime
+}
+from "std/fmt" import {
+    padRight,
+    zeroPad
+}
+from "std/io" import {
+    IoError,
+    ioError
+}
+from "std/json" import {
+    jsonEscapeStr
+}
+from "std/math" import {
+    Math
+}
+from "std/os" import {
+    fflush,
+    writeFd
+}
+from "std/platform" import {
+    close,
+    open,
+    oWriteCreateAppend
+}
 from "std/time" import {
-    epochSecs
+    epochMillis
 }
 
-fn logMsg(tag: string, msg: string): void {
-    let ts = epochSecs()
-    eprint($"{tag} {ts.toString()} {msg}")
+// Severity, ordered least to most urgent. `Off` is not a record level — it is
+// only meaningful as a threshold, where it discards everything.
+pub enum LogLevel: i32 {
+    Debug,
+    Info,
+    Warn,
+    Error,
+    Off,
 }
 
-pub fn logDebug(msg: string): void {
-    logMsg("[DEBUG]", msg)
+// How a record is rendered. `Text` is logfmt-style for humans, `Json` is one
+// JSON object per line for log shippers.
+pub enum LogFormat: i32 {
+    Text,
+    Json,
 }
 
-pub fn logInfo(msg: string): void {
-    logMsg("[INFO] ", msg)
+// Process-wide configuration. See the header note on concurrent reconfiguration.
+var gMinLevel: LogLevel = LogLevel.Info
+var gFormat: LogFormat = LogFormat.Text
+var gTimestamps: bool = true
+var gSinkFd: i32 = 2
+// True only when this module opened the sink and must close it on replacement.
+// A caller-supplied fd stays the caller's to close.
+var gSinkOwned: bool = false
+
+fn logLevelName(level: LogLevel): string {
+    match level {
+        LogLevel.Debug => {
+            return "DEBUG"
+        }
+        LogLevel.Info => {
+            return "INFO"
+        }
+        LogLevel.Warn => {
+            return "WARN"
+        }
+        LogLevel.Error => {
+            return "ERROR"
+        }
+        _ => {
+            return "OFF"
+        }
+    }
 }
 
-pub fn logWarn(msg: string): void {
-    logMsg("[WARN] ", msg)
+// ISO-8601 UTC with milliseconds, e.g. 2026-08-04T05:06:40.123Z.
+fn logTimestamp(): string {
+    let ms = epochMillis()
+    var secs = ms / 1000
+    var frac = ms % 1000
+    // Truncating division rounds toward zero, so a pre-1970 clock would other-
+    // wise render a negative millisecond field.
+    if frac < 0 {
+        frac = frac + 1000
+        secs = secs - 1
+    }
+    return DateTime.fromEpoch(secs).format() + "." + zeroPad(frac, 3) + "Z"
 }
 
-pub fn logError(msg: string): void {
-    logMsg("[ERROR]", msg)
+// logfmt leaves a value bare unless it would be ambiguous to a reader.
+fn logNeedsQuote(v: &string): bool {
+    if v.len == 0 {
+        return true
+    }
+    var i: i64 = 0
+    while i < v.len {
+        let c = v[i]
+        if c == ' ' || c == '"' || c == '=' || c == '\\' || (c as i64) < 32 {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+// Text records are one line by construction, so a control byte in a message,
+// logger name, or key has to be escaped rather than emitted — a raw newline
+// would split one record into several as far as any reader is concerned. Values
+// are already covered: they are either quoted (and escaped) or provably clean.
+fn logOneLine(s: &string): string {
+    var i: i64 = 0
+    while i < s.len {
+        if (s[i] as i64) < 32 {
+            return jsonEscapeStr(s)
+        }
+        i = i + 1
+    }
+    return s.clone()
+}
+
+fn logWriteLine(line: &string): void {
+    // print/eprint go through stdio's buffer; this goes straight at the fd. Drain
+    // first or a log line redirected to stdout lands before output already
+    // written. fflush on an empty buffer is not a syscall.
+    unsafe {
+        fflush(0 as *u8)
+    }
+    writeFd(gSinkFd, line, line.len)
+}
+
+fn logRenderText(f: &LogFields, level: LogLevel, msg: &string): string {
+    var line: string = ""
+    if gTimestamps {
+        line = line + logTimestamp() + " "
+    }
+    line = line + padRight(logLevelName(level), 5, ' ')
+    if f.name.len > 0 {
+        line = line + " [" + logOneLine(f.name) + "]"
+    }
+    line = line + " " + logOneLine(msg)
+    var i: i64 = 0
+    while i < f.keys.len() {
+        line = line + " " + logOneLine(f.keys[i]) + "="
+        if f.quoted[i] && logNeedsQuote(f.vals[i]) {
+            line = line + "\"" + jsonEscapeStr(f.vals[i]) + "\""
+        } else {
+            line = line + f.vals[i]
+        }
+        i = i + 1
+    }
+    return line + "\n"
+}
+
+fn logRenderJson(f: &LogFields, level: LogLevel, msg: &string): string {
+    var line: string = "{"
+    if gTimestamps {
+        line = line + "\"time\":\"" + logTimestamp() + "\","
+    }
+    line = line + "\"level\":\"" + logLevelName(level) + "\""
+    if f.name.len > 0 {
+        line = line + ",\"logger\":\"" + jsonEscapeStr(f.name) + "\""
+    }
+    line = line + ",\"msg\":\"" + jsonEscapeStr(msg) + "\""
+    var i: i64 = 0
+    while i < f.keys.len() {
+        line = line + ",\"" + jsonEscapeStr(f.keys[i]) + "\":"
+        if f.quoted[i] {
+            line = line + "\"" + jsonEscapeStr(f.vals[i]) + "\""
+        } else {
+            line = line + f.vals[i]
+        }
+        i = i + 1
+    }
+    return line + "}\n"
+}
+
+fn logEmit(f: &LogFields, level: LogLevel, msg: &string): void {
+    if (level as i32) < (gMinLevel as i32) {
+        return
+    }
+    match gFormat {
+        LogFormat.Json => {
+            logWriteLine(logRenderJson(f, level, msg))
+        }
+        _ => {
+            logWriteLine(logRenderText(f, level, msg))
+        }
+    }
+}
+
+fn logRecord(name: &string): LogFields {
+    return LogFields {
+        name: name.clone(), keys: Vec.new(), vals: Vec.new(), quoted: Vec.new()
+    }
+}
+
+// A record under construction: an optional logger name plus ordered key/value
+// pairs. Built by the `str`/`int`/`float`/`bool` entry points on `Log` or a
+// `Logger`, chained, and consumed by a level method that emits it.
+//
+//     Log.str("path", p).int("bytes", n).info("upload complete")
+//
+// `quoted` records whether a value is textual (and so needs quoting in JSON and
+// possibly in text) rather than an already-valid numeric or boolean literal.
+pub struct LogFields {
+    name: string,
+    keys: Vec<string>,
+    vals: Vec<string>,
+    quoted: Vec<bool>,
+}
+
+impl LogFields {
+    // Append a text field. The value is copied, and quoted on output whenever
+    // bare text would be ambiguous.
+    fn str(self: LogFields, key: &string, val: &string): LogFields {
+        var f = self
+        f.keys.push(key.clone())
+        f.vals.push(val.clone())
+        f.quoted.push(true)
+        return f
+    }
+
+    // Append an integer field, rendered unquoted in both formats.
+    fn int(self: LogFields, key: &string, val: i64): LogFields {
+        var f = self
+        f.keys.push(key.clone())
+        f.vals.push(val.toString())
+        f.quoted.push(false)
+        return f
+    }
+
+    // Append a floating-point field, rendered unquoted in both formats. A NaN or
+    // infinite value is quoted instead, since JSON has no literal for it.
+    fn float(self: LogFields, key: &string, val: f64): LogFields {
+        var f = self
+        f.keys.push(key.clone())
+        f.vals.push(val.toString())
+        f.quoted.push(!Math.isFinite(val))
+        return f
+    }
+
+    // Append a boolean field, rendered as `true`/`false` unquoted.
+    fn bool(self: LogFields, key: &string, val: bool): LogFields {
+        var f = self
+        f.keys.push(key.clone())
+        f.vals.push(val.toString())
+        f.quoted.push(false)
+        return f
+    }
+
+    // Emit the record at debug level, consuming it.
+    fn debug(self: LogFields, msg: &string): void {
+        logEmit(self, LogLevel.Debug, msg)
+    }
+
+    // Emit the record at info level, consuming it.
+    fn info(self: LogFields, msg: &string): void {
+        logEmit(self, LogLevel.Info, msg)
+    }
+
+    // Emit the record at warn level, consuming it.
+    fn warn(self: LogFields, msg: &string): void {
+        logEmit(self, LogLevel.Warn, msg)
+    }
+
+    // Emit the record at error level, consuming it.
+    fn error(self: LogFields, msg: &string): void {
+        logEmit(self, LogLevel.Error, msg)
+    }
+}
+
+// A named logger. The name is a routing/grep tag rendered as `[name]` in text
+// and as `"logger"` in JSON; filtering stays process-wide, so a `Logger` is a
+// label, not an independently configurable channel.
+pub struct Logger {
+    name: string,
+}
+
+impl Logger {
+    // Create a logger tagging every record with `name`. Cheap enough to keep one
+    // per subsystem in a global or a struct field.
+    fn new(name: &string): Logger {
+        return Logger {
+            name: name.clone()
+        }
+    }
+
+    // Start a named record with a text field.
+    fn str(self: &Logger, key: &string, val: &string): LogFields {
+        return logRecord(self.name).str(key, val)
+    }
+
+    // Start a named record with an integer field.
+    fn int(self: &Logger, key: &string, val: i64): LogFields {
+        return logRecord(self.name).int(key, val)
+    }
+
+    // Start a named record with a floating-point field.
+    fn float(self: &Logger, key: &string, val: f64): LogFields {
+        return logRecord(self.name).float(key, val)
+    }
+
+    // Start a named record with a boolean field.
+    fn bool(self: &Logger, key: &string, val: bool): LogFields {
+        return logRecord(self.name).bool(key, val)
+    }
+
+    // Log a field-less debug record under this logger's name.
+    fn debug(self: &Logger, msg: &string): void {
+        logEmit(logRecord(self.name), LogLevel.Debug, msg)
+    }
+
+    // Log a field-less info record under this logger's name.
+    fn info(self: &Logger, msg: &string): void {
+        logEmit(logRecord(self.name), LogLevel.Info, msg)
+    }
+
+    // Log a field-less warn record under this logger's name.
+    fn warn(self: &Logger, msg: &string): void {
+        logEmit(logRecord(self.name), LogLevel.Warn, msg)
+    }
+
+    // Log a field-less error record under this logger's name.
+    fn error(self: &Logger, msg: &string): void {
+        logEmit(logRecord(self.name), LogLevel.Error, msg)
+    }
+}
+
+// The unnamed process logger: configuration plus the four level methods and the
+// field entry points that start a record.
+pub struct Log {
+}
+
+impl Log {
+    // Discard records below `level`. Defaults to `Info`; `LogLevel.Off` silences
+    // the logger entirely.
+    fn setLevel(level: LogLevel): void {
+        gMinLevel = level
+    }
+
+    // The current threshold.
+    fn level(): LogLevel {
+        return gMinLevel
+    }
+
+    // True when a record at `level` would be emitted. Check this before building
+    // an expensive message or field set; the level methods check it themselves,
+    // but only after their arguments have been evaluated.
+    fn isEnabled(level: LogLevel): bool {
+        return (level as i32) >= (gMinLevel as i32)
+    }
+
+    // Choose how records render. Defaults to `LogFormat.Text`.
+    fn setFormat(format: LogFormat): void {
+        gFormat = format
+    }
+
+    // The current record format.
+    fn format(): LogFormat {
+        return gFormat
+    }
+
+    // Prepend an ISO-8601 UTC timestamp to every record. On by default; turn it
+    // off when the sink already stamps lines (journald, a container runtime) or
+    // when output must be byte-for-byte reproducible.
+    fn setTimestamps(enabled: bool): void {
+        gTimestamps = enabled
+    }
+
+    // Send records to an already-open descriptor — 2 (the default) for stderr,
+    // 1 for stdout, or a descriptor you opened. The descriptor stays yours: this
+    // module never closes it, and it must outlive the last record.
+    fn setSinkFd(fd: i32): void {
+        if gSinkOwned {
+            close(gSinkFd)
+        }
+        gSinkFd = fd
+        gSinkOwned = false
+    }
+
+    // Append records to `path`, creating it if absent. The descriptor is opened
+    // and owned here for the life of the process (or until the sink is replaced).
+    // O_APPEND is what makes concurrent whole-record writes atomic at any size.
+    fn setSinkPath(path: &string): Result<Unit, IoError> {
+        let fd = open(path, oWriteCreateAppend(), 420)
+        if fd < 0 {
+            return Result.Err(ioError(path))
+        }
+        if gSinkOwned {
+            close(gSinkFd)
+        }
+        gSinkFd = fd
+        gSinkOwned = true
+        return Result.Ok(Unit {
+        }
+        )
+    }
+
+    // Start an unnamed record with a text field, e.g.
+    // `Log.str("path", p).int("bytes", n).info("uploaded")`.
+    fn str(key: &string, val: &string): LogFields {
+        return logRecord("").str(key, val)
+    }
+
+    // Start an unnamed record with an integer field.
+    fn int(key: &string, val: i64): LogFields {
+        return logRecord("").int(key, val)
+    }
+
+    // Start an unnamed record with a floating-point field.
+    fn float(key: &string, val: f64): LogFields {
+        return logRecord("").float(key, val)
+    }
+
+    // Start an unnamed record with a boolean field.
+    fn bool(key: &string, val: bool): LogFields {
+        return logRecord("").bool(key, val)
+    }
+
+    // Log a field-less debug record.
+    fn debug(msg: &string): void {
+        logEmit(logRecord(""), LogLevel.Debug, msg)
+    }
+
+    // Log a field-less info record.
+    fn info(msg: &string): void {
+        logEmit(logRecord(""), LogLevel.Info, msg)
+    }
+
+    // Log a field-less warn record.
+    fn warn(msg: &string): void {
+        logEmit(logRecord(""), LogLevel.Warn, msg)
+    }
+
+    // Log a field-less error record.
+    fn error(msg: &string): void {
+        logEmit(logRecord(""), LogLevel.Error, msg)
+    }
 }

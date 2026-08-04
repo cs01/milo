@@ -93,7 +93,7 @@ Most utilities are **namespaced**: call a static on the namespace (`Path.join`, 
 | [`std/regex`](regex) | Regular expression matching — `Regex.compile`, `.isMatch`, `.find` |
 | [`std/sort`](sort) | Sorting for Vec — `sortI32`, `sortI64`, `sortStrings` |
 | [`std/testing`](testing) | `assert`, `assertEqual`, `assertStrEqual` |
-| [`std/log`](log) | Leveled logging to stderr — `logDebug`, `logInfo`, `logWarn`, `logError` |
+| [`std/log`](log) | Leveled structured logging — `Log`, `Logger`, `LogLevel`, `LogFormat` |
 | [`std/mem`](mem) | `mmapAnon`, `mmapFile`, bump-allocator arena |
 
 ## Cryptography

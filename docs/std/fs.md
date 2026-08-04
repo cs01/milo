@@ -18,6 +18,27 @@ pub fn changeDir(path: &string): Result<Unit, IoError>
 
 _Undocumented._
 
+### `copyFile`
+
+```milo
+pub fn copyFile(src: &string, dst: &string): Result<Unit, IoError>
+```
+
+Copy the contents of `src` onto `dst`, creating or truncating `dst`.
+
+Streams through a 64 KiB buffer, so a file larger than memory copies fine.
+Copying a directory is an error, not a recursive copy.
+
+Permissions are not copied verbatim: `dst` is created 0644 (the same mode
+writeFile uses), then set to 0755 when `src` is executable. Reading a file's
+mode bits portably is not possible today — see FileInfo.mode — and quietly
+dropping the executable bit off a copied program is the worse failure. **The
+consequence is that copying a 0600 file yields a 0644 one**: chmod `dst`
+yourself when the copy has to stay private. Timestamps, xattrs and ACLs are
+not copied either, and a sparse file is copied dense.
+
+On failure `dst` is left truncated or partially written, not removed.
+
 ### `currentDir`
 
 ```milo
@@ -60,6 +81,54 @@ pub fn fileSizePath(path: &string): Option<i64>
 
 Get file size in bytes.
 
+### `glob`
+
+```milo
+pub fn glob(root: &string, pattern: &string): Result<Vec<string>, IoError>
+```
+
+Every path under `root` whose path *relative to root* matches `pattern`.
+Returned paths are root-prefixed and ready to open; the list is sorted, so a
+build that globs its inputs is reproducible.
+
+Because matching is on the relative path, `glob(dir, "*.milo")` finds only the
+top level and `glob(dir, "**/*.milo")` finds every depth. Directories are
+matched too — `glob(dir, "**")` lists the whole tree.
+
+Walks the whole tree first (see walkDir): the pattern does not prune the walk,
+so `glob("/", "*")` reads the entire disk. Inherits walkDir's failure mode —
+one unreadable directory fails the call rather than silently shortening the
+list.
+
+### `globMatch`
+
+```milo
+pub fn globMatch(pattern: &string, text: &string): bool
+```
+
+Match a glob pattern against a path-like string.
+
+Pure — it never touches the filesystem, so it works on anything "/"-separated:
+archive members, object-store keys, route tables. `glob` is this function plus
+a `walkDir`.
+
+| Pattern | Matches |
+|---|---|
+| `?` | one byte, never `/` |
+| `*` | any run of bytes inside one segment, never `/` |
+| `**` | as a whole segment: zero or more segments |
+| `[abc]` `[a-z]` | one byte from the set |
+| `[!a-z]` `[^a-z]` | one byte outside the set |
+| `\*` | a literal `*` |
+
+`**` is only special as a complete segment: `src/**/*.milo` crosses
+directories, `src/**.milo` is just `src/*.milo`. A trailing `/` leaves an
+empty final segment that no path can match, so "everything under src" is
+`src/**`, never `src/**/`. Matching is bytewise, so a range like `[à-ø]` over
+multibyte UTF-8 compares bytes, not code points.
+Nothing here is anchored to a filesystem, so a leading `/`, `.`, or `..` is an
+ordinary segment and dotfiles are not special-cased.
+
 ### `hardLink`
 
 ```milo
@@ -94,7 +163,8 @@ distinction the callers actually need is exact.
 pub fn isSymlink(path: &string): bool
 ```
 
-_Undocumented._
+Check if a path is a symbolic link. Does not follow it — a dangling link is
+still a link.
 
 ### `lstatInfo`
 
@@ -118,7 +188,49 @@ _Undocumented._
 pub fn makeTempDir(prefix: &string): Result<string, IoError>
 ```
 
-_Undocumented._
+Create a new directory with a unique name and return its path. `prefix` is a
+path prefix, not a parent directory: makeTempDir("/tmp/build-") creates
+something like "/tmp/build-a1B2c3".
+
+The directory is created 0700 and is the caller's to remove — nothing cleans
+it up at exit. `removeAll` is the usual companion.
+
+Needs POSIX mkdtemp, so it does not link on Windows.
+
+### `makeTempFile`
+
+```milo
+pub fn makeTempFile(prefix: &string): Result<string, IoError>
+```
+
+Create a new empty file with a unique name and return its path. `prefix` is a
+path prefix, not a parent directory: makeTempFile("/tmp/build-") creates
+something like "/tmp/build-a1B2c3".
+
+The file is created 0600 and returned closed — open it with File.openWrite.
+It is the caller's to remove; nothing cleans it up at exit. Reopening by name
+is safe against the classic /tmp attack because the file already exists and is
+owned by this process; an attacker cannot substitute their own file for it in
+a sticky directory.
+
+Pairs with makeTempDir, and like it needs POSIX mkstemp, so it does not link
+on Windows.
+
+### `mkdirAll`
+
+```milo
+pub fn mkdirAll(path: &string, mode: i32): Result<Unit, IoError>
+```
+
+Create `path` and every missing parent, like `mkdir -p`.
+
+Succeeds when the directory already exists. Fails when a component exists as
+something other than a directory, or cannot be created. `mode` applies only to
+directories this call creates and is filtered by the process umask; an
+existing directory keeps the mode it has.
+
+Intermediate directories briefly exist before the leaf does, so a failure part
+way through leaves the prefix it managed to create.
 
 ### `pathExists`
 
@@ -168,6 +280,32 @@ pub fn realPath(path: &string): Result<string, IoError>
 ```
 
 _Undocumented._
+
+### `removeAll`
+
+```milo
+pub fn removeAll(path: &string): Result<Unit, IoError>
+```
+
+Recursively delete `path` and everything under it, like `rm -rf`.
+
+**Symlinks are removed, never followed.** `removeAll(link)` where link points
+at /etc unlinks the link and leaves /etc untouched, and the same holds for
+every link found inside the tree. This is the whole reason the walk here does
+not reuse walkDir's entry list.
+
+A path that does not exist is success: the postcondition — it is gone —
+already holds, matching `rm -rf`.
+
+Failure is **not** all-or-nothing. This deletes depth-first and returns the
+IoError of the first entry it cannot remove, leaving everything not yet
+visited in place. A caller that needs the tree actually gone must check the
+result; a partially emptied tree is a real outcome.
+
+Not safe against another process mutating the tree underneath you — the
+classic rm -rf TOCTOU race applies. Use it on trees you own, such as a build
+output or a makeTempDir scratch space. Like walkDir it builds absolute paths,
+so it cannot empty a tree deeper than the OS path limit.
 
 ### `removeDir`
 
@@ -272,6 +410,32 @@ pub fn truncateFile(path: &string, length: i64): Result<Unit, IoError>
 ```
 
 _Undocumented._
+
+### `walkDir`
+
+```milo
+pub fn walkDir(root: &string): Result<Vec<WalkEntry>, IoError>
+```
+
+Walk the tree under `root`, returning every entry below it. The root itself is
+not included. A directory always appears before its contents; order within one
+directory is whatever the filesystem reports, so sort the result if you need
+determinism (`glob` already does).
+
+Symlinks are never followed. A link to a directory comes back with
+`isDir: false` and no children, so a link cycle cannot hang the walk.
+
+Eager, not lazy. Milo has no lazy iterators, and a cursor type would not pay
+for itself here: every entry name is an owned string either way, so laziness
+would save the result Vec and none of the syscalls, while adding a stateful
+type whose interrupted state is a new thing to get wrong. Walk a subtree
+instead of the whole disk if the entry list would be too large to hold.
+
+The first unreadable directory aborts the walk with its IoError. Returning a
+short list that silently omitted a permission-denied subtree is exactly the
+failure this signature exists to prevent. Paths are built absolute, so a tree
+deeper than the OS path limit fails here rather than being traversed; `rm -rf`
+avoids that with openat, this does not.
 
 ### `writeFile`
 

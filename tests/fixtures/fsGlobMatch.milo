@@ -1,0 +1,69 @@
+// @skip-os: win32
+// std/fs reaches directories through POSIX opendir/readdir, which the MSVC CRT
+// does not export, so nothing importing std/fs links on Windows yet — including
+// globMatch, which is pure and would otherwise run anywhere.
+// @expect: literal yes
+// @expect: star yes
+// @expect: star-no-slash no
+// @expect: question yes
+// @expect: question-one-byte no
+// @expect: doublestar yes
+// @expect: doublestar-dotted-dir yes
+// @expect: doublestar-zero yes
+// @expect: doublestar-trailing yes
+// @expect: doublestar-inline no
+// @expect: doublestar-collapsed yes
+// @expect: doublestar-collapsed-miss no
+// @expect: class yes
+// @expect: class-range yes
+// @expect: class-negated yes
+// @expect: class-negated-hit no
+// @expect: class-unterminated yes
+// @expect: escape yes
+// @expect: escape-not-wild no
+// @expect: empty yes
+// @expect: star-empty yes
+// @expect: backtrack yes
+// @expect: not-anchored yes
+from "std/fs" import {
+    globMatch
+}
+
+fn check(label: &string, got: bool): void {
+    if got {
+        print(label + " yes")
+    } else {
+        print(label + " no")
+    }
+}
+
+pub fn main(): i32 {
+    check("literal", globMatch("a/b.txt", "a/b.txt"))
+    check("star", globMatch("*.txt", "note.txt"))
+    check("star-no-slash", globMatch("*.txt", "a/note.txt"))
+    check("question", globMatch("a?c", "abc"))
+    check("question-one-byte", globMatch("a?c", "ac"))
+    check("doublestar", globMatch("**/*.txt", "a/b/c.txt"))
+    // The single-backtrack shortcut is wrong here: the trailing "*" cannot cross
+    // the "." segment, so "**" has to widen after a later star already failed.
+    check("doublestar-dotted-dir", globMatch("**/*.txt", "a/b.c/d.txt"))
+    check("doublestar-zero", globMatch("a/**/b", "a/b"))
+    check("doublestar-trailing", globMatch("src/**", "src/deep/file"))
+    check("doublestar-inline", globMatch("a**b", "a/b"))
+    // Adjacent "**" segments collapse — same answer, no multiplied search.
+    check("doublestar-collapsed", globMatch("**/**/*.txt", "a/b/c/d.txt"))
+    check("doublestar-collapsed-miss", globMatch("**/**/*.txt", "a/b/c/d.dat"))
+    check("class", globMatch("[abc]x", "bx"))
+    check("class-range", globMatch("[a-c]x", "cx"))
+    check("class-negated", globMatch("[!a-c]x", "zx"))
+    check("class-negated-hit", globMatch("[^a-c]x", "bx"))
+    check("class-unterminated", globMatch("[abc", "[abc"))
+    check("escape", globMatch("a\\*b", "a*b"))
+    check("escape-not-wild", globMatch("a\\*b", "azb"))
+    check("empty", globMatch("", ""))
+    check("star-empty", globMatch("*", ""))
+    check("backtrack", globMatch("*a*b", "xaybzab"))
+    // Nothing here is filesystem-anchored: a leading dot is an ordinary byte.
+    check("not-anchored", globMatch("*", ".hidden"))
+    return 0
+}

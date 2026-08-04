@@ -11,6 +11,16 @@ last-verified: 2026-08-03
 Source-level breaks, newest first. Milo is pre-1.0 and does not promise
 compatibility, but every break belongs here with the migration spelled out.
 
+## `std/zip` and `std/png` report corrupt input instead of aborting (2026-08-03)
+
+A truncated or corrupt archive/image previously ran a header read off the end of the
+buffer and hit the bounds-check abort. Both now return `Result.Err` ("zip: truncated
+archive", "png: truncated chunk"). Code that relied on the process dying on malformed
+input must handle the `Err` arm.
+
+No public name changed — `Zip.read` and `Png.decode` already returned `Result`; they
+just could not reach the `Err` arm for this class of input.
+
 ## `std/log` — namespace object, levels, fields, sinks (2026-08-03)
 
 The four free functions are replaced by the `Log` namespace object. Logging is

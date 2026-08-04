@@ -140,9 +140,15 @@ Ranked by how often real programs hit them.
   `encoding/json` struct tags / `JSON.parse` are table stakes. Largest single ergonomics delta
   vs all three languages. `@derive` machinery already exists to hang it on.
 
-- [ ] **No binary / byte-order helpers.** No `readU32LE`, no `Buffer` equivalent, no
-  `encoding/binary`. Strings double as byte buffers with no accessors, so every emulator and
-  file-format parser under `examples/` hand-rolls it.
+- [x] **No binary / byte-order helpers.** *`std/binary` shipped — `Bytes` namespace, 37 methods:
+  `read`/`write` × u8/i8/{u,i}{16,32,64} × Le/Be, f32/f64, plus `Bytes.has`. Out-of-bounds is
+  `Option.None`, not a trap: `src[i]` is a programmer's claim about a position, but a decode at
+  an offset that came out of the untrusted data is ordinary truncation. No cursor type — second-class
+  refs mean a cursor can't hold the buffer, so it degrades to passing `(pos, src)` anyway.
+  Migrated `std/zip` (13 header fields read at archive-supplied offsets with **no bounds check** —
+  a truncated `.docx` killed the process from inside a function whose type promised `Result`) and
+  `std/png`. Two audit details were stale: `examples/emulators/` has moved to its own repo, and
+  the hand-rolling was worse inside `std/` than in `examples/`.*
 
 - [ ] **No child-process env or cwd, and no `setenv` at all.** `Child.spawn(program, args,
   mergeStderr)` is the whole surface (`std/process.milo:109`) — no cwd, no env, no stdio

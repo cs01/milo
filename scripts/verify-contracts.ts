@@ -87,7 +87,13 @@ export function gateSolver(): "z3" | "native" {
 
 export async function proveFile(miloc: string, file: string, solver = gateSolver()): Promise<FileResult> {
   const args = solver === "z3" ? ["prove", file, "--solver=z3"] : ["prove", file];
-  const r = await guardedRun(miloc, args, { timeoutMs: 120000 });
+  // MILO_ROOT is not optional here: the gate runs a miloc compiled into a tmpdir, so the
+  // binary has no repo to resolve `std/` against and every file that imports another std
+  // module dies at `cannot open 'std/os'`. That surfaced as noReport — the file was simply
+  // not checked — which is how a REFUTED contract in std/mem.milo sat unnoticed behind a
+  // gate whose whole job is to catch exactly that. A gate that silently skips its inputs
+  // is worse than no gate, because it reports success.
+  const r = await guardedRun(miloc, args, { timeoutMs: 120000, env: { ...process.env, MILO_ROOT: ROOT } });
   const out = (r.stdout + "\n" + r.stderr).replace(/\x1b\[[0-9;]*m/g, "");
   const m = out.match(/proven:\s*(\d+)\s+failed:\s*(\d+)\s+unknown:\s*(\d+)\s+errors:\s*(\d+)/);
   const rel = file.replace(ROOT + "/", "");

@@ -27,7 +27,10 @@ shipped entries are deleted). This file is a record of a single audit, not a liv
 
 ## Tier 1 — correctness. Cheap, and they change the language's character
 
-- [ ] **`"…".parseInt()` / `.parseF64()` silently return junk.** Probed: `"42x".parseInt()`
+- [x] **`"…".parseInt()` / `.parseF64()` silently return junk.** *Landed b46ce593: both builtins
+  return `Option<T>`, strict + range-checked; `strconv.parseInt`/`parseFloat` now forward to them
+  (one parser); redeclaring builtin `Option`/`Result` is now a checker error. Also fixed a
+  pre-existing read-past-the-view in `parseF64` on `&string` views.* Probed: `"42x".parseInt()`
   → `42`; `"abc".parseF64()` → `0`, indistinguishable from a real `0`. Meanwhile
   `strconv.parseInt` returns `Option<i64>`. Two parsers, opposite failure models, and the
   builtin — the spelling everyone reaches for first — is the JS `parseInt` wart. Go returns

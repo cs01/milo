@@ -9243,7 +9243,10 @@ export class Codegen {
       tempBufs.push(buf);
       return;
     }
-    if (tk.tag === "vec" || (tk.tag === "array" && tk.size !== null)) {
+    // A slice (`array` with size null) shares the Vec's %Vec runtime rep, so the
+    // same runtime-length loop renders it — a slice printing as <unprintable>
+    // while the Vec it views prints fine was the only gap here.
+    if (tk.tag === "vec" || tk.tag === "array") {
       const buf = this.emitSeqDisplay(tk, val, lines);
       partFmts.push("%s");
       partArgs.push({ val: buf, type: "ptr" });

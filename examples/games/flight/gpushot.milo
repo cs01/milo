@@ -243,7 +243,7 @@ pub fn main(): i32 {
 
 // Stand off from a landmark and look at it, at an angle that shows a cliff face
 // rather than the top of one.
-fn aimAtMark(w: &mut World, place: &string, i: i64, dist: f64) {
+fn aimAtMark(w: &mut World, _place: &string, i: i64, dist: f64) {
     let marks = marksFor(w.city.name)
     if marks.len == 0 || i >= marks.len {
         return

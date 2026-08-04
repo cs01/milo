@@ -484,7 +484,7 @@ fn costRow(ui: &mut Ui, x: f64, y: f64, w: f64, u: f64, name: &string, value: &s
     ui.textRight(x + w, y, 10.0 * u, value, c)
 }
 
-fn drawPlanPanel(ui: &mut Ui, g: &Game, u: f64, w: f64, h: f64) {
+fn drawPlanPanel(ui: &mut Ui, g: &Game, u: f64, _w: f64, _h: f64) {
     let panelW = 470.0 * u
     let x = 64.0 * u
     let panelH = 312.0 * u
@@ -569,7 +569,7 @@ fn drawPlanPanel(ui: &mut Ui, g: &Game, u: f64, w: f64, h: f64) {
     ui.textTracked(x + pad, by + 78.0 * u, 7.0 * u, 1.4 * u, "S  JUMP TO THE CHEAPEST PLAN (THE GREEN MARKS)", fade(colDim(), 0.9))
 }
 
-fn drawCostPanel(ui: &mut Ui, g: &Game, u: f64, w: f64, h: f64) {
+fn drawCostPanel(ui: &mut Ui, g: &Game, u: f64, _w: f64, _h: f64) {
     if !g.plan.ok {
         return
     }
@@ -715,7 +715,7 @@ fn drawCinematic(ui: &mut Ui, g: &Game, u: f64, h: f64) {
 
 // ── flight ────────────────────────────────────────────────────────────────────
 
-fn drawFlightHud(ui: &mut Ui, g: &Game, u: f64, w: f64, h: f64) {
+fn drawFlightHud(ui: &mut Ui, g: &Game, u: f64, _w: f64, _h: f64) {
     let panelW = 470.0 * u
     let x = 64.0 * u
     let panelH = 96.0 * u
@@ -743,7 +743,7 @@ fn drawFlightHud(ui: &mut Ui, g: &Game, u: f64, w: f64, h: f64) {
     ui.textTracked(x + pad, y + panelH + 12.0 * u, 7.0 * u, 2.0 * u, "[ ]  TIME     SPACE  HOLD     DRAG  LOOK     SCROLL  ZOOM", fade(colDim(), 0.75))
 }
 
-fn drawFuel(ui: &mut Ui, g: &Game, u: f64, w: f64, h: f64) {
+fn drawFuel(ui: &mut Ui, g: &Game, u: f64, _w: f64, _h: f64) {
     let x = 64.0 * u
     let y = 372.0 * u
     let panelW = 470.0 * u
@@ -766,7 +766,7 @@ fn drawFuel(ui: &mut Ui, g: &Game, u: f64, w: f64, h: f64) {
 
 // ── arrival ───────────────────────────────────────────────────────────────────
 
-fn drawArrived(ui: &mut Ui, g: &Game, u: f64, w: f64, h: f64) {
+fn drawArrived(ui: &mut Ui, g: &Game, u: f64, _w: f64, h: f64) {
     let cardW = 470.0 * u
     let x = 64.0 * u
     let cardH = 268.0 * u

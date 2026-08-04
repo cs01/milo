@@ -1962,7 +1962,7 @@ fn rayHitsGround(w: &World, v: &View, px: f64, py: f64, pz: f64): bool {
     return false
 }
 
-fn drawBirds(c: &mut Canvas, s: &Scene, w: &World, v: &View) {
+fn drawBirds(c: &mut Canvas, _s: &Scene, w: &World, v: &View) {
     for i in 0..w.flocks.len {
         let f = w.flocks[i]
         // fade in and out so a flock does not blink into existence

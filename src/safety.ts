@@ -728,7 +728,20 @@ function walkExprs(stmts: Stmt[], onExpr: (e: Expr) => void, onStmt?: (s: Stmt) 
         case "ForInStmt": ex(s.iterable); st(s.body); break;
         case "MatchStmt": ex(s.subject); s.arms.forEach(a => st(a.body)); break;
         case "IfLetStmt": ex(s.subject); st(s.thenBody); if (s.elseBody) st(s.elseBody); break;
+        case "LetElseStmt": ex(s.value); st(s.elseBody); break;
         case "UnsafeBlock": st(s.body); break;
+        // No sub-nodes. Listed rather than left to fall through so the guard below can be
+        // exhaustive.
+        case "BreakStmt": case "ContinueStmt": break;
+        default: {
+          // Same failure as the expression switch, and it had it too: `LetElseStmt` was
+          // missing, so an `unsafe` block or a float inside `let .. else { .. }` was never
+          // looked at and DO-178C DAL A reported "pass" on code that contained one. A
+          // safety gate that skips its input silently is worse than no gate. This makes
+          // the next unhandled statement kind a compile error instead.
+          const _exhaustive: never = s;
+          void _exhaustive;
+        }
       }
     }
   };

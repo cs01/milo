@@ -219,3 +219,21 @@ fn main(): i32 { return 0 }`;
   expect(rs).not.toContain("no-recursion");
   expect(rs).not.toContain("no-unsafe");
 });
+
+// Statements nest inside `let .. else`, and the statement walker used to have no arm for
+// it — so an `unsafe` block or a heap allocation in the else-body was never looked at and
+// DO-178C DAL A reported "pass" on code that contained one. The `if-else` control is the
+// point: the two bodies are the same code, and only the walker told them apart.
+test("safety checks reach into a let-else else-body", () => {
+  const body = `let v: Vec<i64> = Vec.new() unsafe { let x = 1 } return 0`;
+  const src = `fn get(v: i64): Option<i64> requires true { if v > 0 { return Option.Some(v) } return Option.None }
+fn viaIfElse(n: i64): i64 requires true ensures true { if n < 0 { ${body} } return n }
+fn viaLetElse(n: i64): i64 requires true ensures true { let Option.Some(x) = get(n) else { ${body} } return x }
+fn main(): i32 { return 0 }`;
+  const perFn = (name: string) =>
+    violations(src, "do178c-a").filter(v => v.message.includes(`'${name}'`)).map(v => v.rule);
+  for (const rule of ["no-unsafe", "no-dynamic-alloc"]) {
+    expect(perFn("viaIfElse")).toContain(rule);
+    expect(perFn("viaLetElse")).toContain(rule);
+  }
+});

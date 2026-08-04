@@ -11,6 +11,46 @@ last-verified: 2026-08-03
 Source-level breaks, newest first. Milo is pre-1.0 and does not promise
 compatibility, but every break belongs here with the migration spelled out.
 
+## `std/json` drops its fixed-shape accessors (2026-08-04)
+
+**Deleted: `Json.strAt` `i64At` `f64At` `boolAt` `getAt` `childStrAt` `childI64At`
+`childF64At` `childBoolAt` `childLen`.** These were ten hard-coded *navigation shapes* —
+"array index then key", "key then array index then key" — one method per shape per value
+type. The family was never closable: there is no `childChildStrAt`, so any walk three
+levels deep already had to leave it.
+
+Two replacements, both already present. For a walk over an owned value, chain with the new
+`Option.andThen`:
+
+    doc.strAt(i, "name")                        // was
+    doc.at(i).andThen((j) => j.str("name"))     // now
+
+    doc.childI64At("items", i, "id")            // was
+    doc.get("items").andThen((a) => a.at(i)).andThen((e) => e.i64("id"))   // now
+
+Each hop deep-clones the subtree, which the deleted methods did not. For a hot loop or a
+large document use the cursor API instead — same shapes, zero allocation:
+
+    let items = doc.curField(doc.curRoot(), "items")
+    doc.curInt(doc.curField(doc.curChild(items, i), "id"))
+
+`childLen(k)` is `curLen(curField(curRoot(), k))`. When the path is literal,
+`strPath("items[0].name")` is shorter than both.
+
+Not deleted: `get`/`str`/`i64`/`f64`/`bool`/`at`, the `*Path` family, the `cur*` cursors,
+`as*`, and the type checks. Those are one method per *value type*, not per *shape*, and
+`andThen` cannot collapse them.
+
+## `Option` and `Result` gain `andThen`, `orElse`, `unwrapOrElse` (2026-08-04)
+
+Additive, with one behavioral sharp edge worth knowing: **`Option.orElse` and `Result.orElse`
+consume a non-Copy receiver**, because the success side is the one they forward. Before this
+change there was no way to accidentally consume an `Option`. The use-after-move error fires at
+the *next* use of the variable, not at the `orElse` call.
+
+`Result.unwrapOrElse` is Copy-`T`-only, the same gate `unwrapOr` already has, because it loads
+the Ok payload out. `andThen` has no such gate — it takes the payload by reference.
+
 ## `std/strconv` gains `parseBool`, `quoteString`, `unquoteString` (2026-08-04)
 
 Additive, but Milo compiles every module into one flat namespace, so a program that imports

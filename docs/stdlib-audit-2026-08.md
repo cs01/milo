@@ -105,9 +105,20 @@ shipped entries are deleted). This file is a record of a single audit, not a liv
   readable owned-value spelling and, more importantly, removes the pressure to keep adding
   shapes, which is the actual wart: there is no `childChildStrAt`, so anything 3 deep already
   had to leave the family. Also closed a pre-existing leak found on the way: `Option.map` over
-  a temporary receiver (`doc.get(k).map(f)`) never dropped the receiver's payload. Ref:
-  `src/suggest.ts OPTION_MEMBERS`/`RESULT_MEMBERS`, `docs/language-reference.md`
-  §Option Combinators.*
+  a temporary receiver (`doc.get(k).map(f)`) never dropped the receiver's payload — 400 B per
+  hop for a 23-byte document. Ref: `src/suggest.ts OPTION_MEMBERS`/`RESULT_MEMBERS`,
+  `docs/language-reference.md` §Option Combinators.*
+
+  **Top follow-up: that leak fix is deliberately partial, and unpredictably so.** It covers
+  `map`/`andThen` only (gated on `optionOpDropsReceiver`) — the two whose result provably shares
+  no buffer with the receiver. `orElse` and every `Result` combinator forward a payload, so
+  dropping there would double-free; they still leak an owned temporary. Narrow was the right call
+  under time pressure (a double-free is a safety bug, a leak is not), but the result is one
+  combinator clean and its neighbour not, with no rule a reader could infer. **Finish it.**
+
+  Two smaller sharp edges, both pre-existing and both shared with already-shipped `mapErr`: an
+  explicitly-typed by-value callback param (`(e: string) => …`) bypasses the `&E` hint on every
+  error-side combinator, and `?? <owned>` into `print` leaks the collapsed string.
   ```
   Option: isSome isNone unwrapOr unwrapOrElse map
   Result: isOk   isErr  unwrapOr               map mapErr andThen

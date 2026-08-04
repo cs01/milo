@@ -1,0 +1,12 @@
+// @error: use of moved variable 'o'
+// orElse forwards the receiver's Some payload into its result, so for a non-Copy T the
+// receiver and the result would both own one heap buffer and both free it. The combinator
+// consumes the receiver instead — the same rule Result.map/andThen use for their forwarded
+// Err payload. Clone at the call site to keep the original.
+fn main() {
+    var s = ""
+    s.pushStr("hi")
+    let o: Option<string> = Option.Some(s)
+    let _first = o.orElse(() => Option.None)
+    let _second = o.orElse(() => Option.None)
+}

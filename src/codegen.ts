@@ -11106,6 +11106,19 @@ export class Codegen {
     return this.needsDropCg(expr.type) && expr.operand.kind === "Ident";
   }
 
+  // Whether an Option.map/andThen has to free its receiver. True only when the receiver
+  // is a temporary nobody else owns: a call result, or another map/andThen — the only two
+  // combinators whose result provably shares no buffer with their receiver. orElse and the
+  // Result combinators forward a payload through, so their results are NOT unshared and a
+  // chain built on them stays the caller's problem rather than risking a double free.
+  private optionOpDropsReceiver(expr: HIRExpr & { kind: "OptionOp" }): boolean {
+    if (expr.op !== "map" && expr.op !== "optionAndThen") return false;
+    if (!this.needsDropCg(expr.value.type)) return false;
+    const v = expr.value;
+    if (v.kind === "OptionOp") return v.op === "map" || v.op === "optionAndThen";
+    return this.isOwnedTempExpr(v);
+  }
+
   private isOwnedTempExpr(expr: HIRExpr): boolean {
     // A discarded small-type `replace(...)` result is dropped here (SSA path). A big-agg
     // replace drops its own moved-out value inside genExpr, so it must NOT double-drop here.
@@ -11791,10 +11804,13 @@ export class Codegen {
       lines.push(`  ${r} = xor i1 ${isSome}, true`);
       return [lines, r, "i1"];
     }
-    // map(f): Option<T> -> Option<U>. Handled before the payload load below, because for
-    // map `expr.type` is the RESULT enum, not the payload type.
-    if (expr.op === "map") {
-      if (expr.type.tag !== "enum") throw new Error("Option.map result is not an enum");
+    // map/andThen/orElse: Option in, Option out. Handled before the payload load below,
+    // because for these `expr.type` is the RESULT enum, not the payload type.
+    //   map      Some -> Some(f(&T)),  None -> None
+    //   andThen  Some -> f(&T) verbatim (already an Option), None -> None
+    //   orElse   Some -> the receiver verbatim, None -> f()
+    if (expr.op === "map" || expr.op === "optionAndThen" || expr.op === "optionOrElse") {
+      if (expr.type.tag !== "enum") throw new Error(`Option.${expr.op} result is not an enum`);
       const resEnum = expr.type.name;
       const resTy = `%${resEnum}`;
       const resLayout = this.enumLayouts.get(resEnum);
@@ -11824,49 +11840,76 @@ export class Codegen {
       lines.push(`  br i1 ${isSome}, label %${someLabel}, label %${noneLabel}`);
 
       lines.push(`${someLabel}:`);
-      const srcPayloadPtr = this.nextTemp();
-      lines.push(`  ${srcPayloadPtr} = getelementptr ${enumTy}, ptr ${addr}, i32 0, i32 1`);
-      // The checker types the callback param as &T, so the payload is passed by pointer —
-      // that is what keeps a non-Copy inner from being moved out of the receiver.
-      const cbType = expr.default!.type;
-      const paramIsRef = cbType.tag === "fn" && cbType.params.length > 0 && cbType.params[0].tag === "ref";
-      let callArg = srcPayloadPtr;
-      let callArgTy = "ptr";
-      if (!paramIsRef) {
-        const srcTy = srcSome.fieldTypes[0] ?? "i64";
-        const loaded = this.nextTemp();
-        lines.push(`  ${loaded} = load ${srcTy}, ptr ${srcPayloadPtr}`);
-        callArg = loaded;
-        callArgTy = srcTy;
+      if (expr.op === "optionOrElse") {
+        // Result type == receiver type here, so forwarding Some is a whole-enum copy.
+        lines.push(`  store ${resTy} ${vv}, ptr ${resAddr}`);
+      } else {
+        const srcPayloadPtr = this.nextTemp();
+        lines.push(`  ${srcPayloadPtr} = getelementptr ${enumTy}, ptr ${addr}, i32 0, i32 1`);
+        // The checker types the callback param as &T, so the payload is passed by pointer —
+        // that is what keeps a non-Copy inner from being moved out of the receiver.
+        const cbType = expr.default!.type;
+        const paramIsRef = cbType.tag === "fn" && cbType.params.length > 0 && cbType.params[0].tag === "ref";
+        let callArg = srcPayloadPtr;
+        let callArgTy = "ptr";
+        if (!paramIsRef) {
+          const srcTy = srcSome.fieldTypes[0] ?? "i64";
+          const loaded = this.nextTemp();
+          lines.push(`  ${loaded} = load ${srcTy}, ptr ${srcPayloadPtr}`);
+          callArg = loaded;
+          callArgTy = srcTy;
+        }
+        if (expr.op === "optionAndThen") {
+          // the callback already returns the whole Option — store it wholesale, no re-tagging
+          const called = this.nextTemp();
+          lines.push(`  ${called} = call ${resTy} ${fnPtr}(ptr ${envPtr}, ${callArgTy} ${callArg})`);
+          lines.push(`  store ${resTy} ${called}, ptr ${resAddr}`);
+        } else {
+          const resPayloadTy = resSome.fieldTypes[0] ?? "i64";
+          const called = this.nextTemp();
+          lines.push(`  ${called} = call ${resPayloadTy} ${fnPtr}(ptr ${envPtr}, ${callArgTy} ${callArg})`);
+          const someTagPtr = this.nextTemp();
+          lines.push(`  ${someTagPtr} = getelementptr ${resTy}, ptr ${resAddr}, i32 0, i32 0`);
+          lines.push(`  store i32 ${resSome.tag}, ptr ${someTagPtr}`);
+          const resPayloadPtr = this.nextTemp();
+          lines.push(`  ${resPayloadPtr} = getelementptr ${resTy}, ptr ${resAddr}, i32 0, i32 1`);
+          lines.push(`  store ${resPayloadTy} ${called}, ptr ${resPayloadPtr}`);
+        }
       }
-      const resPayloadTy = resSome.fieldTypes[0] ?? "i64";
-      const called = this.nextTemp();
-      lines.push(`  ${called} = call ${resPayloadTy} ${fnPtr}(ptr ${envPtr}, ${callArgTy} ${callArg})`);
-      const someTagPtr = this.nextTemp();
-      lines.push(`  ${someTagPtr} = getelementptr ${resTy}, ptr ${resAddr}, i32 0, i32 0`);
-      lines.push(`  store i32 ${resSome.tag}, ptr ${someTagPtr}`);
-      const resPayloadPtr = this.nextTemp();
-      lines.push(`  ${resPayloadPtr} = getelementptr ${resTy}, ptr ${resAddr}, i32 0, i32 1`);
-      lines.push(`  store ${resPayloadTy} ${called}, ptr ${resPayloadPtr}`);
       lines.push(`  br label %${contLabel}`);
 
       lines.push(`${noneLabel}:`);
-      const noneTagPtr = this.nextTemp();
-      lines.push(`  ${noneTagPtr} = getelementptr ${resTy}, ptr ${resAddr}, i32 0, i32 0`);
-      lines.push(`  store i32 ${resNone.tag}, ptr ${noneTagPtr}`);
+      if (expr.op === "optionOrElse") {
+        const called = this.nextTemp();
+        lines.push(`  ${called} = call ${resTy} ${fnPtr}(ptr ${envPtr})`);
+        lines.push(`  store ${resTy} ${called}, ptr ${resAddr}`);
+      } else {
+        const noneTagPtr = this.nextTemp();
+        lines.push(`  ${noneTagPtr} = getelementptr ${resTy}, ptr ${resAddr}, i32 0, i32 0`);
+        lines.push(`  store i32 ${resNone.tag}, ptr ${noneTagPtr}`);
+      }
       lines.push(`  br label %${contLabel}`);
 
       lines.push(`${contLabel}:`);
       const out = this.nextTemp();
       lines.push(`  ${out} = load ${resTy}, ptr ${resAddr}`);
+      // After map/andThen the receiver's payload is dead: the callback only borrowed it
+      // (the checker types the param as &T, so it cannot have been moved out) and None
+      // carries nothing to forward, so the result shares no buffer with it. A NAMED
+      // receiver still owns it and drops at scope end, but a temporary — `doc.get(k).map(f)`
+      // — has no other owner, and without this the whole payload leaks on every hop.
+      // Deliberately not done for orElse or the Result combinators: those forward the
+      // untouched variant's payload into the result, so dropping here would double-free.
+      if (this.optionOpDropsReceiver(expr)) this.emitDropValue(lines, addr, expr.value.type);
       return [lines, out, resTy];
     }
 
-    // Result map/mapErr/andThen. Unlike Option.map, the branch that does NOT run the
+    // Result map/mapErr/andThen/orElse. Unlike Option.map, the branch that does NOT run the
     // callback still carries a payload, and it must be copied from the source enum into the
     // result enum — skipping it leaves the zeroinitializer, i.e. `map` over an Err would
     // silently produce a zeroed error value instead of the real one.
-    if (expr.op === "resultMap" || expr.op === "resultMapErr" || expr.op === "resultAndThen") {
+    if (expr.op === "resultMap" || expr.op === "resultMapErr" || expr.op === "resultAndThen"
+        || expr.op === "resultOrElse") {
       if (expr.type.tag !== "enum") throw new Error(`Result.${expr.op} result is not an enum`);
       const resEnum = expr.type.name;
       const resTy = `%${resEnum}`;
@@ -11935,7 +11978,7 @@ export class Codegen {
       };
 
       lines.push(`${okLabel}:`);
-      if (expr.op === "resultMapErr") {
+      if (expr.op === "resultMapErr" || expr.op === "resultOrElse") {
         copyThrough(srcOk.fieldTypes[0], resOk.tag);
       } else if (expr.op === "resultAndThen") {
         // the callback already returns the whole Result — store it wholesale, no re-tagging
@@ -11961,6 +12004,12 @@ export class Codegen {
         lines.push(`  ${called} = call ${outTy} ${fnPtr}(ptr ${envPtr}, ${argTy} ${arg})`);
         storeTag(resErr.tag);
         storePayload(outTy, called);
+      } else if (expr.op === "resultOrElse") {
+        // mirror of andThen on the other side: the callback returns the whole Result
+        const [arg, argTy] = callArgOf(srcErr.fieldTypes[0] ?? "i64");
+        const called = this.nextTemp();
+        lines.push(`  ${called} = call ${resTy} ${fnPtr}(ptr ${envPtr}, ${argTy} ${arg})`);
+        lines.push(`  store ${resTy} ${called}, ptr ${resAddr}`);
       } else {
         copyThrough(srcErr.fieldTypes[0], resErr.tag);
       }
@@ -11981,7 +12030,7 @@ export class Codegen {
 
     // unwrapOrElse must BRANCH, not select: select evaluates both arms, which would call
     // the closure even when Some — the exact thing the caller chose unwrapOrElse to avoid.
-    if (expr.op === "unwrapOrElse") {
+    if (expr.op === "unwrapOrElse" || expr.op === "resultUnwrapOrElse") {
       const someLabel = this.nextLabel("uoe.some");
       const noneLabel = this.nextLabel("uoe.none");
       const contLabel = this.nextLabel("uoe.cont");
@@ -11995,8 +12044,24 @@ export class Codegen {
       lines.push(`  ${fnPtr} = extractvalue { ptr, ptr } ${cv}, 0`);
       const envPtr = this.nextTemp();
       lines.push(`  ${envPtr} = extractvalue { ptr, ptr } ${cv}, 1`);
+      // Result's version is handed the error, so it reads the Err payload out of the
+      // same slot the Ok payload came from — by pointer when the param is `&E`.
+      let errArgs = "";
+      if (expr.op === "resultUnwrapOrElse") {
+        const srcErr = this.enumLayouts.get(expr.enumName)?.variants.get("Err");
+        const cbType = expr.default!.type;
+        const paramIsRef = cbType.tag === "fn" && cbType.params.length > 0 && cbType.params[0].tag === "ref";
+        if (paramIsRef) {
+          errArgs = `, ptr ${payloadPtr}`;
+        } else {
+          const srcErrTy = srcErr?.fieldTypes[0] ?? "i64";
+          const loaded = this.nextTemp();
+          lines.push(`  ${loaded} = load ${srcErrTy}, ptr ${payloadPtr}`);
+          errArgs = `, ${srcErrTy} ${loaded}`;
+        }
+      }
       const called = this.nextTemp();
-      lines.push(`  ${called} = call ${payloadTy} ${fnPtr}(ptr ${envPtr})`);
+      lines.push(`  ${called} = call ${payloadTy} ${fnPtr}(ptr ${envPtr}${errArgs})`);
       // The closure body may itself branch, so the incoming block for the phi is
       // wherever control actually ended up — not noneLabel.
       const noneEnd = this.nextLabel("uoe.none.end");

@@ -1,0 +1,10 @@
+// @error: 'unwrapOrElse' on a non-Copy Result<string>
+// Same gate as unwrapOr: the Ok payload is LOADED out of the enum, not moved, so an owned
+// payload would end up with two owners and two frees. `match` moves it out safely, and `??`
+// collapses the Option form without the restriction.
+fn main() {
+    var s = ""
+    s.pushStr("hi")
+    let r: Result<string, i64> = Result.Ok(s)
+    let _bad = r.unwrapOrElse((e) => "fallback")
+}

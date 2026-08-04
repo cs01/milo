@@ -1,0 +1,59 @@
+// Option.andThen(f): Option<T> -> Option<U>, where f itself returns an Option.
+//
+// The chaining form: without it a walk of fallible steps nests one Option per level and
+// every level needs its own match. Three things this pins that map() does not:
+//   - the Some branch stores the callback's returned enum WHOLESALE (it is already an
+//     Option); re-tagging it as Some would wrap a None back into a Some.
+//   - a None ANYWHERE in the chain short-circuits, and the callback must not run.
+//   - the callback takes the payload by REF, so a non-Copy T is not moved out and the
+//     receiver stays usable afterwards. (Result.andThen consumes its receiver for a
+//     non-Copy E because it forwards the Err payload; None carries no payload, so the
+//     asymmetry is real, not an oversight.)
+//
+// Strings are built with pushStr, never written as literals: a literal has cap == 0,
+// marking a static buffer that drop glue skips, which would hide a double-free.
+pub fn heapStr(tail: &string): string {
+    var s = ""
+    s.pushStr(tail)
+    s.pushStr("!")
+    return s
+}
+
+pub fn halve(n: &i64): Option<i64> {
+    if n % 2 != 0 {
+        return Option.None
+    }
+    return Option.Some(n / 2)
+}
+
+pub fn main() {
+    let a: Option<i64> = Option.Some(16)
+    // @expect: 4
+    print(a.andThen((n) => halve(n)).andThen((n) => halve(n)) ?? -1)
+
+    // short-circuits in the middle — the second halve sees nothing
+    let b: Option<i64> = Option.Some(6)
+    // @expect: -1
+    print(b.andThen((n) => halve(n)).andThen((n) => halve(n)) ?? -1)
+
+    // receiver already None: the callback must not run at all
+    let c: Option<i64> = Option.None
+    // @expect: -1
+    print(c.andThen((n) => {
+        print("ran")
+        return halve(n)
+    }
+    ) ?? -1)
+
+    // U need not equal T, and the heap receiver survives the call
+    let s: Option<string> = Option.Some(heapStr("hi"))
+    // @expect: 3
+    print(s.andThen((v) => Option.Some(v.len)) ?? -1)
+    // @expect: hi!
+    print(s ?? "gone")
+
+    // a callback returning None is stored as None, not wrapped in Some
+    let d: Option<i64> = Option.Some(5)
+    // @expect: true
+    print(d.andThen((n) => halve(n)).isNone())
+}

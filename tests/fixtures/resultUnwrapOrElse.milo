@@ -1,0 +1,46 @@
+// Result.unwrapOrElse(f) — unwrapOr with the default computed only on Err.
+//
+// It differs from Option.unwrapOrElse in the one place the two types genuinely differ:
+// Result's failure carries information, so the callback RECEIVES THE ERROR (by ref,
+// so nothing is moved out of the receiver). Option's failure carries nothing, so its
+// callback takes no arguments.
+//
+// The other half of the point is laziness: unwrapOr lowers to a `select`, which
+// evaluates both arms. Reusing that here would call f even on Ok — asserted below by
+// output ordering, since "recovering" must appear only for the Err case.
+//
+// Errors are built with pushStr, never written as literals: a literal has cap == 0,
+// marking a static buffer that drop glue skips, which would hide a double-free.
+pub fn heapStr(tail: &string): string {
+    var s = ""
+    s.pushStr(tail)
+    s.pushStr("!")
+    return s
+}
+
+pub fn recover(e: &string): i64 {
+    print("recovering")
+    return e.len
+}
+
+pub fn main() {
+    let bad: Result<i64, string> = Result.Err(heapStr("boom"))
+    // @expect: recovering
+    // @expect: 5
+    print(bad.unwrapOrElse((e) => recover(e)))
+
+    let ok: Result<i64, string> = Result.Ok(42)
+    // @expect: 42
+    print(ok.unwrapOrElse((e) => recover(e)))
+
+    // a Copy error type works the same way
+    let coded: Result<i64, i64> = Result.Err(-3)
+    // @expect: 3
+    print(coded.unwrapOrElse((e) => 0 - e))
+
+    // closures capture, same as anywhere else
+    let base = 7
+    let bad2: Result<i64, i64> = Result.Err(2)
+    // @expect: 14
+    print(bad2.unwrapOrElse((e) => base * e))
+}

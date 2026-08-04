@@ -1,0 +1,8 @@
+// @error: 'andThen': callback must return an Option, got i64
+// andThen stores the callback's return value into the result slot verbatim, because it is
+// already an Option. A bare value there would be read back as a tag+payload pair — so the
+// shape has to be checked, not inferred. Use map when the callback returns a plain value.
+fn main() {
+    let o: Option<i64> = Option.Some(4)
+    let _bad = o.andThen((n) => n * 2)
+}

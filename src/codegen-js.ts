@@ -1216,12 +1216,17 @@ export class CodegenJS {
     switch (expr.op) {
       case "unwrapOr":     return wrap(`${t}.tag === 0 ? ${t}.data[0] : ${arg}`);
       case "unwrapOrElse": return wrap(`${t}.tag === 0 ? ${t}.data[0] : (${arg})()`);
-      // Option.map drops to a payload-less None; the Result combinators carry the
+      // Result's unwrapOrElse is handed the error; Option's failure carries nothing.
+      case "resultUnwrapOrElse": return wrap(`${t}.tag === 0 ? ${t}.data[0] : (${arg})(${t}.data[0])`);
+      // Option.map/andThen drop to a payload-less None; the Result combinators carry the
       // untouched side's payload through, so they return the operand itself.
       case "map":          return wrap(`${t}.tag === 0 ? {tag: 0, data: [(${arg})(${t}.data[0])]} : {tag: 1}`);
+      case "optionAndThen":return wrap(`${t}.tag === 0 ? (${arg})(${t}.data[0]) : {tag: 1}`);
+      case "optionOrElse": return wrap(`${t}.tag === 0 ? ${t} : (${arg})()`);
       case "resultMap":    return wrap(`${t}.tag === 0 ? {tag: 0, data: [(${arg})(${t}.data[0])]} : ${t}`);
       case "resultMapErr": return wrap(`${t}.tag === 0 ? ${t} : {tag: 1, data: [(${arg})(${t}.data[0])]}`);
       case "resultAndThen":return wrap(`${t}.tag === 0 ? (${arg})(${t}.data[0]) : ${t}`);
+      case "resultOrElse": return wrap(`${t}.tag === 0 ? ${t} : (${arg})(${t}.data[0])`);
     }
     throw new Error(`codegen-js: unhandled OptionOp '${expr.op}'`);
   }

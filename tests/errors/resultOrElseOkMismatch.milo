@@ -1,0 +1,12 @@
+// @error: 'orElse': callback's ok type must be i64, got string
+// orElse forwards the receiver's Ok payload verbatim on the short-circuit path, so there is
+// nowhere to convert it. Only the ERROR type is free to change — that is the whole
+// difference from andThen, which pins E and lets T vary.
+fn main() {
+    let bad: Result<i64, i64> = Result.Err(1)
+    let _worse = bad.orElse((e) => {
+        let r: Result<string, i64> = Result.Err(e)
+        return r
+    }
+    )
+}

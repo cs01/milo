@@ -994,12 +994,19 @@ error at 12:38: connection refused
 Builtin methods on any `Option<T>`, for the cases where `!`/`?`/`??` don't fit:
 
 ```milo
+fn half(n: &i32): Option<i32> {
+    if n % 2 != 0 { return Option.None }
+    return Option.Some(n / 2)
+}
+
 fn combinators(opt: i32?): void {
-    print(opt.isSome())                // bool
-    print(opt.isNone())                // bool
-    print(opt.unwrapOr(0))             // T — the default is evaluated eagerly
-    print(opt.unwrapOrElse(() => 0))   // T — the closure runs ONLY if None
-    print(opt.map((n) => n * 2)!)      // Option<U> — Some(42); None maps to None
+    print(opt.isSome())                       // bool
+    print(opt.isNone())                       // bool
+    print(opt.unwrapOr(0))                    // T — the default is evaluated eagerly
+    print(opt.unwrapOrElse(() => 0))          // T — the closure runs ONLY if None
+    print(opt.map((n) => n * 2)!)             // Option<U> — Some(42); None maps to None
+    print(opt.andThen((n) => half(n))!)       // Option<U> — f returns an Option; None short-circuits
+    print(opt.orElse(() => Option.Some(1))!)  // Option<T> — f runs ONLY if None
 }
 ```
 
@@ -1007,13 +1014,29 @@ fn combinators(opt: i32?): void {
 it has no Copy restriction — `opt ?? "d"` works on an `Option<string>` where
 `opt.unwrapOr("d")` is rejected.
 
-Two rules worth knowing, both consequences of how the payload is reached:
+`map` transforms the payload; `andThen` is for a callback that is *itself* fallible, so
+the result stays one `Option` deep instead of nesting. That is what makes a multi-step
+lookup a chain rather than a pyramid of `match`:
+
+```milo
+from "std/json" import { Json }
+
+fn name(doc: &Json): string {
+    return doc.get("user").andThen((u) => u.str("name")) ?? "anonymous"
+}
+```
+
+`orElse` is the mirror on the empty side: the callback runs only when the receiver is
+`None`, and it returns a whole `Option`, so alternatives chain left to right and the first
+`Some` wins. Use `??` instead when you want to leave `Option` and land on a value.
+
+Three rules worth knowing, all consequences of how the payload is reached:
 
 - **`unwrapOr`/`unwrapOrElse` require a Copy inner.** They load the payload out, so for an
   owned type (`string`, `Vec<T>`) that would produce a second owner and a double free. The
   compiler rejects it and points you at `match`, which can move the value out safely.
-- **`map` has no such restriction.** Its callback receives the payload by reference, so
-  nothing is moved out of the receiver — the original stays usable afterwards:
+- **`map` and `andThen` have no such restriction.** Their callbacks receive the payload by
+  reference, so nothing is moved out of the receiver — the original stays usable afterwards:
 
 ```milo
 let s: string? = Option.Some("hello")
@@ -1021,13 +1044,24 @@ let n = s.map((v) => v.len).unwrapOr(0)   // 5
 match s { Option.Some(v) => { print(v) } Option.None => {} }   // still owns "hello"
 ```
 
+- **`orElse` consumes a non-Copy receiver.** Its `Some` branch forwards the receiver's
+  payload into the result, so for an owned `T` both would own one buffer; the receiver is
+  moved instead, and using it afterwards is a use-after-move error. Clone at the call site
+  to keep it. This is the same rule the Result combinators use for their forwarded side.
+
 `map`'s result type is independent of `T` — `Option<i64>.map((n) => n > 5)` is
-`Option<bool>`.
+`Option<bool>`. `andThen`'s is whatever `Option` the callback returns; `orElse`'s is always
+the receiver's own type.
 
 ### Result Combinators
 
-`isOk`/`isErr`/`unwrapOr` mirror the Option versions on `Result`, plus three that thread the
-error through:
+`Result` carries the same seven combinators as `Option` — `isOk`/`isErr` for
+`isSome`/`isNone`, then `unwrapOr`, `unwrapOrElse`, `map`, `andThen`, `orElse` — plus
+`mapErr`, which has no Option analogue because `None` carries no payload to map.
+
+The one place the two shapes differ is where the types genuinely differ: **a Result's
+failure carries information**, so every callback on the error side receives it.
+`Option.unwrapOrElse` takes no arguments; `Result.unwrapOrElse` is handed the error.
 
 ```milo
 fn halve(n: &i64): Result<i64, string> {
@@ -1044,6 +1078,7 @@ fn combinators(r: Result<i64, string>): void {
     print(r.isOk())                          // bool
     print(r.isErr())                         // bool
     print(r.unwrapOr(0))                     // T — Copy inner only, like Option
+    print(r.unwrapOrElse((e) => e.len))      // T — the closure runs ONLY on Err, and sees it
     // E is `string` (non-Copy), so map/andThen each consume `r` — one call per value.
     print(r.map((n) => n * 2).isOk())        // Result<U,E> — Ok payload transformed, Err passed through unchanged
 }
@@ -1053,27 +1088,41 @@ fn copyErr(r: Result<i64, i64>): void {
     print(r.map((n) => n * 2).isOk())        // Result<U,E>
     print(r.mapErr((e) => e * 2).isErr())    // Result<T,F> — Err payload transformed, Ok passed through unchanged
     print(r.andThen((n) => halveI(n)).isOk()) // Result<U,E> — f returns a Result; an Err receiver short-circuits
+    print(r.orElse((e) => halveI(e)).isOk())  // Result<T,F> — the Err-side andThen: recover, or retype the error
 }
 ```
 
-`map` and `andThen` pass the Ok payload to the callback by reference; `mapErr` does the same
-with the Err payload. Nothing is moved out of the receiver on the callback's side, so there
-is no Copy gate on it.
+`map` and `andThen` pass the Ok payload to the callback by reference; `mapErr`, `orElse` and
+`unwrapOrElse` do the same with the Err payload. Nothing is moved out of the receiver on the
+callback's side, so there is no Copy gate on it. `unwrapOrElse` is the exception, for the
+same reason `unwrapOr` is: it *loads the Ok payload out*, so it needs a Copy `T`.
 
 The *other* side is different. Each combinator forwards the variant it does not transform
-into its result untouched — `map` and `andThen` carry the Err payload through, `mapErr`
-carries the Ok payload through. When that forwarded payload is non-Copy the receiver and the
-result would both own one heap buffer and both free it, so the combinator **consumes the
-receiver** in that case: use it afterwards and you get a use-after-move error. Clone at the
-call site to keep it. When the forwarded payload is Copy, duplicating it is sound and the
-receiver stays usable — the same Copy gate `unwrapOr` uses.
+into its result untouched — `map` and `andThen` carry the Err payload through, `mapErr` and
+`orElse` carry the Ok payload through. When that forwarded payload is non-Copy the receiver
+and the result would both own one heap buffer and both free it, so the combinator
+**consumes the receiver** in that case: use it afterwards and you get a use-after-move
+error. Clone at the call site to keep it. When the forwarded payload is Copy, duplicating it
+is sound and the receiver stays usable — the same Copy gate `unwrapOr` uses.
 
-`Option.map` needs no such rule: the variant it forwards is `None`, which carries no
-payload, so there is never anything to double-own.
+`Option.map` and `Option.andThen` need no such rule: the variant they forward is `None`,
+which carries no payload, so there is never anything to double-own. `Option.orElse` does
+need it — `Some` is the variant it forwards.
 
-`andThen`'s callback must return a `Result` whose error type equals the receiver's — the
-short-circuit path forwards the receiver's error verbatim, so there is no conversion
-available.
+The forwarded side is also what pins each combinator's free type parameter. `andThen`'s
+callback must return a `Result` whose **error** type equals the receiver's, because the
+short-circuit path forwards the receiver's error verbatim and there is no conversion
+available there. `orElse` is the mirror: its callback is free to change the error type but
+its **ok** type must match, since that is the side being forwarded.
+
+Five combinators from Rust are deliberately absent. `ok()`/`err()` discard the other
+variant's payload, and with no GC that payload has to be dropped somewhere — a combinator
+that silently frees half its input is the wrong place, so `match` stays the conversion.
+`okOr()` is covered by `let else`, which does the same job without `unwrapOr`'s Copy gate.
+`expect()` would be `!` plus a message, but it loads the payload out, so it would be
+rejected on exactly the owned payloads where `!` works. `filter()` forwards the payload,
+so it would consume a non-Copy receiver to answer a question — `opt.map(pred) ?? false`
+asks it without taking anything.
 
 `!`, `?` and `??` also work with `Result`. Writing `Result<T>` with one type argument defaults the error type to `string` — `Result<i32>` is `Result<i32, string>`:
 

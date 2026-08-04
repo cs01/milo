@@ -170,6 +170,17 @@ data.strPath("headers.Host") ?? "(none)"
 `Option<Json>` when you need to keep going. A missing key, an out-of-range `[n]`, or a
 value of the wrong kind all give `None` — the walk is total for any document.
 
+When the walk isn't a dotted path — a runtime index, a key containing `.` or `[` —
+chain the owned accessors with `Option.andThen` instead:
+
+```milo
+doc.at(i).andThen((row) => row.str("name")) ?? "(none)"
+```
+
+Each hop deep-clones the subtree, so for a hot loop over a large document use the cursor
+API (`curRoot`/`curChild`/`curField`/`curStr`), which walks the same shapes with zero
+allocation.
+
 Note `unwrapOr`/`unwrapOrElse` are rejected on non-Copy payloads (`string`, `Vec<T>`) because they'd alias the heap buffer; `??` has no such restriction. Prefer `??`.
 
 ### Reading the match subject inside its own arm

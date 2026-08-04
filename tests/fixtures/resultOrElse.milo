@@ -1,0 +1,91 @@
+// Result.orElse(f): Result<T,E> -> Result<T,F> — the Err-side andThen. f receives the
+// error and returns a whole Result, so a failed step can be recovered, retried, or have
+// its error retyped without leaving Result.
+//
+// What this pins:
+//   - the Err branch stores the callback's returned enum WHOLESALE; re-tagging it as Err
+//     would turn a successful recovery back into a failure.
+//   - an Ok receiver short-circuits and forwards its payload untouched, so a non-Copy T
+//     CONSUMES the receiver (mirror of andThen, which forwards the Err payload).
+//   - F need not equal E — that is the whole difference from andThen, where the error
+//     type is pinned because it is the forwarded side.
+//
+// Strings are built with pushStr, never written as literals: a literal has cap == 0,
+// marking a static buffer that drop glue skips, which would hide a double-free.
+pub fn heapStr(tail: &string): string {
+    var s = ""
+    s.pushStr(tail)
+    s.pushStr("!")
+    return s
+}
+
+pub fn describe(r: Result<i64, i64>): string {
+    match r {
+        Result.Ok(v) => {
+            return "ok:" + v.toString()
+        }
+        Result.Err(e) => {
+            return "err:" + e.toString()
+        }
+    }
+}
+
+pub fn main() {
+    // recovers, and retypes the error string into an i64 code
+    let bad: Result<i64, string> = Result.Err(heapStr("boom"))
+    // @expect: ok:5
+    print(describe(bad.orElse((e) => {
+        let r: Result<i64, i64> = Result.Ok(e.len)
+        return r
+    }
+    )))
+
+    // the callback may fail again — that Err must come back as an Err, not an Ok
+    let bad2: Result<i64, string> = Result.Err(heapStr("nope"))
+    // @expect: err:-1
+    print(describe(bad2.orElse((e) => {
+        let r: Result<i64, i64> = Result.Err(-1)
+        return r
+    }
+    )))
+
+    // Ok short-circuits: the callback must not run, and the payload survives intact
+    let good: Result<i64, string> = Result.Ok(3)
+    // @expect: ok:3
+    print(describe(good.orElse((e) => {
+        print("ran")
+        let r: Result<i64, i64> = Result.Err(-2)
+        return r
+    }
+    )))
+
+    // heap Ok payload: orElse forwards it, so the receiver is consumed and the buffer
+    // is freed exactly once
+    let okStr: Result<string, i64> = Result.Ok(heapStr("kept"))
+    match okStr.orElse((e) => {
+        let r: Result<string, string> = Result.Err(heapStr("other"))
+        return r
+    }
+    ) {
+        Result.Ok(v) => {
+            // @expect: kept!
+            print(v)
+        }
+        Result.Err(e) => {
+            print("unreachable")
+        }
+    }
+
+    // chaining: the first recovery that succeeds wins
+    let start: Result<i64, i64> = Result.Err(1)
+    // @expect: ok:8
+    print(describe(start.orElse((e) => {
+        let r: Result<i64, i64> = Result.Err(e + 1)
+        return r
+    }
+    ).orElse((e) => {
+        let r: Result<i64, i64> = Result.Ok(e * 4)
+        return r
+    }
+    )))
+}

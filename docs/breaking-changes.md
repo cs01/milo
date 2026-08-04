@@ -11,6 +11,23 @@ last-verified: 2026-08-03
 Source-level breaks, newest first. Milo is pre-1.0 and does not promise
 compatibility, but every break belongs here with the migration spelled out.
 
+## `pub` on structs is now actually enforced across files (2026-08-04)
+
+A non-`pub` struct used from another file has always been an error by the rules. It was
+never *reported*, because `checkVisibility` attributes a declaration to its file via
+`decl.span?.file` and `StructDecl` was the one declaration kind the parser built without a
+span — so `s.span?.file` was `undefined`, the struct was filed under no file at all, and
+the cross-file check could not fire. Every non-`pub` struct in every project was silently
+importable from anywhere.
+
+`StructDecl` gained a span (added so `@derive(Json)` could point diagnostics at a struct),
+which turned the existing check on. Functions, enums, traits, interfaces and type aliases
+were unaffected — they always carried spans and were always enforced.
+
+Migration: mark the struct `pub` where it is defined. The error names the struct and the
+file. In this org, `milo-emulators` was the only repo affected — `Ppu`, `Apu` and `Fx`
+were being imported across files without `pub`.
+
 ## `std/json` integer reads are exact; bare literals are validated (2026-08-04)
 
 **`Json.i64` / `i64At` / `i64Path` / `asI64` / `curInt` now answer `None` where they used

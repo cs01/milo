@@ -238,14 +238,22 @@ Ranked by how often real programs hit them.
   and nothing else — no `setLevel`, no structured fields, no output redirection, no logger
   instances. Compare Go `log/slog`, Rust `log`/`tracing`.
 
-- [ ] **Encapsulation leaks.** `std/fetch` exports `hexDigit`, `startsWith`, `strEqNocase`,
+- [x] **Encapsulation leaks.** *Landed: `std/fetch` public surface 34 → 29 (13 internals now
+  file-private), `fetch.startsWith` deleted for the builtin, `std/zstd` down to `Zstd` + 3
+  methods from 19 exports. `strEqNocase` and `hexDigit` were **not** builtin duplicates and
+  stayed (offset-anchored compare; `-1` sentinel that `hex._hexVal` maps to `0`) — private now,
+  with comments saying why. Nothing needed package-scoped `pub`, so #1b stayed unbuilt.*
+  Original finding: `std/fetch` exports `hexDigit`, `startsWith`, `strEqNocase`,
   `schemeOffset`, `parseRawHeaders`, `parseStatus` as `pub` — and `fetch.startsWith` duplicates
   the builtin `string.startsWith`. `std/zstd` exports 15 internal structs (`BitCS`, `FseCTable`,
   `HufTableResult`, `Rev`, `Seq3`, …). Interacts with `backlog.md` Tier 2 #1b (package-scoped
   `pub`): several of these want package visibility, not private and not public.
 
-- [ ] **`std/ws` constants are functions.** `WS_TEXT()`, `WS_BINARY()`, `WS_CLOSE()`,
-  `WS_PING()`, `WS_PONG()`, `WS_CONTINUATION()` — Milo has integer-repr enums.
+- [x] **`std/ws` constants are functions.** *Replaced by `enum WsOpcode: i32`;
+  `WsMessage.opcode` is now `WsOpcode`, not `u8`. The type change surfaced a real bug: reserved
+  opcodes (3–7, 11–15) used to be handed to the caller as data frames, which RFC 6455 §5.2
+  forbids — `recv()` now returns `Err("reserved opcode")`. Wire-level round-trip fixture locks
+  the discriminants to the actual header byte.*
 
 - [ ] **Duplicated functionality across modules.**
   - `sysinfo.cwd`/`setCwd` vs `fs.currentDir`/`changeDir` — and different error models
@@ -258,8 +266,12 @@ Ranked by how often real programs hit them.
   (`Vec`), no f64 flag, and `getString` returns bare `string` (see Tier 1). Compare Go
   `flag`/cobra, Rust clap, Node commander.
 
-- [ ] **`Uuid` is a namespace with one function.** `Uuid.v4(): string` — no `Uuid` value type,
-  no v7 (time-ordered, now the usual recommendation), no parse or validate.
+- [x] **`Uuid` is a namespace with one function.** *Now a 16-byte Copy value type with `v4`,
+  `v7` (RFC 9562 §6.2 monotonic-random, counter reseeds per millisecond), `parse -> Option<Uuid>`,
+  `nil`, `toString`, `isNil`, `version`, `variant`, `timestampMs`, `Eq`. `Uuid.v4()` returns
+  `Uuid` not `string` — breaking. Known bound: the v7 monotonic counter is unsynchronized global
+  state, so concurrent green tasks can lose **ordering** (never uniqueness — 62 random bits
+  remain); documented in-source and in the reference.*
 
 ---
 

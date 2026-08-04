@@ -54,7 +54,16 @@ shipped entries are deleted). This file is a record of a single audit, not a liv
   Breaking change; worth it. Ref: `src/checker.ts` (`method === "parseInt"` / `"parseF64"`),
   `std/strconv.milo`.
 
-- [ ] **Decoders that cannot report failure.** `Base64.decode`, `Base32.decode`, `Hex.decode`
+- [x] **Decoders that cannot report failure.** *All four now return `Result` with a byte offset.
+  Probed pre-fix: `Base64.decode("!!!!")` → 3 NUL bytes; `Base32.decode("MZXW6YT1")` → `"foob"`,
+  a silently shortened secret; `Csv.parse` on an unterminated quote swallowed the rest of the
+  file into one field. `Base64.decode` no longer accepts whitespace (MIME/PEM never worked — it
+  decoded `\n` as symbol 0); `Base32.decodeLoose` keeps the pasted-authenticator-secret case
+  under a name that advertises it. `Hex`'s `pub _hexVal` footgun removed. New `Base64.urlDecode`
+  — `urlEncode` had no inverse. Ragged CSV rows deliberately still accepted (not a syntax error;
+  indexing already bounds-checks). Note: the audit's implication that `std/jwt` base64url-decodes
+  is **false** — jwt only encodes and verifies by recompute.* Original finding:
+  `Base64.decode`, `Base32.decode`, `Hex.decode`
   return bare `string`; `Csv.parse` returns `Vec<Vec<string>>`. Malformed input yields
   garbage with no signal — an auth header that fails to decode becomes a plausible-looking
   string. Go returns `([]byte, error)`, Rust returns `Result`. Should be `Result` on all four.

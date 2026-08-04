@@ -1,7 +1,7 @@
 <!-- doc-meta
 system: breaking-changes
 purpose: source-level breaks users have to act on, with the migration and the reason a compat shim was impossible
-key-files: std/platform.*.milo, std/os.milo, std/string.milo, std/strconv.milo, std/uuid.milo, std/ws.milo, std/fetch.milo, std/zstd.milo
+key-files: std/platform.*.milo, std/os.milo, std/string.milo, std/strconv.milo, std/uuid.milo, std/ws.milo, std/fetch.milo, std/zstd.milo, std/base64.milo, std/base32.milo, std/hex.milo, std/csv.milo
 update-when: a public stdlib name moves, is renamed, or changes signature
 last-verified: 2026-08-03
 -->
@@ -10,6 +10,45 @@ last-verified: 2026-08-03
 
 Source-level breaks, newest first. Milo is pre-1.0 and does not promise
 compatibility, but every break belongs here with the migration spelled out.
+
+## `Base64.decode`, `Base32.decode`, `Hex.decode`, `Csv.parse` return `Result` (2026-08-03)
+
+All four silently produced plausible output from malformed input: a bad character
+decoded as bit pattern 0, a wrong length truncated the payload, an unterminated CSV
+quote swallowed the rest of the file into one field. A corrupt auth header became a
+real-looking string with no signal. They are now fallible and report the byte offset.
+
+`Hex`'s `pub _hexVal` (which mapped any non-digit to 0) is removed; it is now a
+private helper returning -1.
+
+```milo
+// before
+let bytes = Base64.decode(header)
+let rows  = Csv.parse(text)
+
+// after — propagate
+let bytes = Base64.decode(header)?
+let rows  = Csv.parse(text)?
+// or abort at the decode site
+let bytes = Base64.decode(header)!
+```
+
+`Base32.decode` is now strict RFC 4648. The old tolerance for whitespace, `-` and
+missing padding — the "secret pasted from an authenticator app" case — moved to
+`Base32.decodeLoose`, which still rejects non-alphabet bytes:
+
+```milo
+// before
+let key = Base32.decode("JBSW Y3DP EHPK 3PXP")
+// after
+let key = Base32.decodeLoose("JBSW Y3DP EHPK 3PXP")!
+```
+
+`Base64.decode` no longer accepts whitespace or newlines. MIME/PEM-wrapped base64
+must be unwrapped by the caller — previously it "worked" only by decoding `\n` as
+symbol 0 and producing corrupt bytes.
+
+New: `Base64.urlDecode` — the inverse of `Base64.urlEncode`, which had none.
 
 ## `s.parseInt()` / `s.parseF64()` return `Option` (2026-08-03)
 

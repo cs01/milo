@@ -58,58 +58,10 @@ fn Json.bool(self: &Json, key: &string): Option<bool>
 
 _Undocumented._
 
-### `Json.boolAt`
-
-```milo
-fn Json.boolAt(self: &Json, index: i64, key: &string): Option<bool>
-```
-
-_Undocumented._
-
 ### `Json.boolPath`
 
 ```milo
 fn Json.boolPath(self: &Json, p: &string): Option<bool>
-```
-
-_Undocumented._
-
-### `Json.childBoolAt`
-
-```milo
-fn Json.childBoolAt(self: &Json, key: &string, index: i64, subKey: &string): Option<bool>
-```
-
-_Undocumented._
-
-### `Json.childF64At`
-
-```milo
-fn Json.childF64At(self: &Json, key: &string, index: i64, subKey: &string): Option<f64>
-```
-
-_Undocumented._
-
-### `Json.childI64At`
-
-```milo
-fn Json.childI64At(self: &Json, key: &string, index: i64, subKey: &string): Option<i64>
-```
-
-_Undocumented._
-
-### `Json.childLen`
-
-```milo
-fn Json.childLen(self: &Json, key: &string): i64
-```
-
-_Undocumented._
-
-### `Json.childStrAt`
-
-```milo
-fn Json.childStrAt(self: &Json, key: &string, index: i64, subKey: &string): Option<string>
 ```
 
 _Undocumented._
@@ -198,6 +150,12 @@ materialize (just that one string). Start at `curRoot()` and chain:
   let user = doc.curField(doc.curChild(doc.curRoot(), 0), "name")
   match doc.curStr(user) { Option.Some(s) => ..., Option.None => ... }
 
+This is one of two ways to reach a nested value. The other is to chain the
+owned accessors with `Option.andThen` — `doc.at(0).andThen((j) => j.str("name"))`
+— which reads better but pays one deep clone per hop. Both replaced the family
+of fixed-shape accessors (`strAt`, `childI64At`, …) this module used to carry;
+see docs/breaking-changes.md.
+
 ### `Json.curStr`
 
 ```milo
@@ -222,14 +180,6 @@ fn Json.f64(self: &Json, key: &string): Option<f64>
 
 _Undocumented._
 
-### `Json.f64At`
-
-```milo
-fn Json.f64At(self: &Json, index: i64, key: &string): Option<f64>
-```
-
-_Undocumented._
-
 ### `Json.f64Path`
 
 ```milo
@@ -246,26 +196,10 @@ fn Json.get(self: &Json, key: &string): Option<Json>
 
 _Undocumented._
 
-### `Json.getAt`
-
-```milo
-fn Json.getAt(self: &Json, index: i64, key: &string): Option<Json>
-```
-
-_Undocumented._
-
 ### `Json.i64`
 
 ```milo
 fn Json.i64(self: &Json, key: &string): Option<i64>
-```
-
-_Undocumented._
-
-### `Json.i64At`
-
-```milo
-fn Json.i64At(self: &Json, index: i64, key: &string): Option<i64>
 ```
 
 _Undocumented._
@@ -386,14 +320,6 @@ _Undocumented._
 
 ```milo
 fn Json.str(self: &Json, key: &string): Option<string>
-```
-
-_Undocumented._
-
-### `Json.strAt`
-
-```milo
-fn Json.strAt(self: &Json, index: i64, key: &string): Option<string>
 ```
 
 _Undocumented._

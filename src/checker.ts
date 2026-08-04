@@ -5,7 +5,7 @@ import { typeFromAst, typeEq, typeName, isNumeric, isCopy, isScalar } from "./ty
 import type { Diagnostic, WarningConfig } from "./diagnostics";
 import { checkVisibility } from "./visibility";
 import { countCSigParams } from "./csig";
-import { memberHint, closest, importHint, stdExportNames, VEC_MEMBERS, HASHMAP_MEMBERS, STRING_MEMBERS } from "./suggest";
+import { memberHint, closest, importHint, stdExportNames, VEC_MEMBERS, HASHMAP_MEMBERS, STRING_MEMBERS, OPTION_MEMBERS, RESULT_MEMBERS } from "./suggest";
 import { deriveJsonSource, type JsonPlan, type JsonFieldPlan } from "./derive-json";
 import { Lexer } from "./lexer";
 import { Parser } from "./parser";
@@ -471,6 +471,14 @@ export class TypeChecker {
     const name = (bare as any).name;
     if (typeof name !== "string") return [];
     const out: string[] = [];
+    // Option/Result have no impl block — their combinators live in the checker, so
+    // without this the member tables are the only place that knows them and a typo
+    // gets no suggestion at all.
+    if (bare.tag === "enum") {
+      const base = this.enums.get(name)?.baseName;
+      if (base === "Option") out.push(...OPTION_MEMBERS);
+      if (base === "Result") out.push(...RESULT_MEMBERS);
+    }
     const inherent = this.inherentImpls.get(name);
     if (inherent) out.push(...inherent.methods.keys());
     for (const impl of this.traitImpls.get(name) ?? []) out.push(...impl.methods.keys());
@@ -7173,6 +7181,55 @@ export class TypeChecker {
         }
         return this.setType(expr, { tag: "unknown" });
       }
+      // andThen(f): Option<T> -> Option<U>, f returning the whole Option — the chaining
+      // form, so a walk of fallible steps stays one Option deep instead of nesting.
+      // Same two properties as map, for the same reasons: the callback takes the payload
+      // by ref (no Copy gate) and None carries no payload to forward (no consume).
+      if (expr.method === "andThen") {
+        if (expr.args.length !== 1) { this.error(`'andThen' expects 1 argument`, sp); return this.setType(expr, { tag: "unknown" }); }
+        const inner = this.unwrapableInner(objType);
+        if (!inner) return this.setType(expr, { tag: "unknown" });
+        const cbHint: TypeKind = { tag: "fn", params: [{ tag: "ref", inner, mutable: false }], ret: { tag: "unknown" } };
+        const cbType = this.checkExprWithHint(expr.args[0], cbHint);
+        if (cbType.tag !== "fn") {
+          this.error(`'andThen' argument must be a function`, sp);
+          return this.setType(expr, { tag: "unknown" });
+        }
+        const ret = cbType.ret;
+        if (ret.tag !== "enum" || this.enums.get(ret.name)?.baseName !== "Option") {
+          this.error(`'andThen': callback must return an Option, got ${typeName(ret)}`, sp);
+          return this.setType(expr, { tag: "unknown" });
+        }
+        return this.setType(expr, ret);
+      }
+      // orElse(f): Option<T> -> Option<T>, f: () -> Option<T> — the None-side andThen,
+      // for "try this source, else that one" without unwrapping in between. The Some
+      // branch forwards the receiver's payload into the result, so a non-Copy T consumes
+      // the receiver (same rule as Result.map/andThen).
+      if (expr.method === "orElse") {
+        if (expr.args.length !== 1) { this.error(`'orElse' expects 1 argument`, sp); return this.setType(expr, { tag: "unknown" }); }
+        const inner = this.unwrapableInner(objType);
+        if (!inner) return this.setType(expr, { tag: "unknown" });
+        const cbHint: TypeKind = { tag: "fn", params: [], ret: objType };
+        const cbType = this.checkExprWithHint(expr.args[0], cbHint);
+        if (cbType.tag !== "fn") {
+          this.error(`'orElse' argument must be a function`, sp);
+          return this.setType(expr, objType);
+        }
+        if (cbType.params.length !== 0) {
+          this.error(`'orElse': callback takes no arguments`, sp);
+        }
+        const ret = cbType.ret;
+        if (ret.tag !== "unknown") {
+          const cbInner = ret.tag === "enum" && this.enums.get(ret.name)?.baseName === "Option"
+            ? this.unwrapableInner(ret) : null;
+          if (!cbInner || !typeEq(cbInner, inner)) {
+            this.error(`'orElse': callback must return Option<${typeName(inner)}>, got ${typeName(ret)}`, sp);
+          }
+        }
+        this.consumeForwardedPayload(expr.object, inner);
+        return this.setType(expr, objType);
+      }
     }
     // Result combinators — isOk/isErr/unwrapOr, mirroring Option (Ok is tag 0).
     if (objType.tag === "enum" && this.enums.get(objType.name)?.baseName === "Result") {
@@ -7267,6 +7324,62 @@ export class TypeChecker {
         }
         // Like map, the Err payload is forwarded into the result untouched.
         this.consumeForwardedPayload(expr.object, errT);
+        return this.setType(expr, ret);
+      }
+      // unwrapOrElse(f) — unwrapOr with the default computed only on Err. Unlike Option's
+      // (whose failure carries nothing) the callback receives the error by ref, so the
+      // default can depend on what went wrong. Same Copy gate as unwrapOr: the Ok payload
+      // is loaded out, not moved.
+      if (expr.method === "unwrapOrElse") {
+        if (expr.args.length !== 1) { this.error(`'unwrapOrElse' expects 1 argument`, sp); return this.setType(expr, { tag: "unknown" }); }
+        const inner = this.unwrapableInner(objType);
+        const errT = this.unwrapableErr(objType);
+        if (inner && !isCopy(inner)) {
+          this.error(`'unwrapOrElse' on a non-Copy Result<${typeName(inner)}> — use 'match' to move the value out`, sp);
+          return this.setType(expr, inner);
+        }
+        if (inner && errT) {
+          const cbHint: TypeKind = { tag: "fn", params: [{ tag: "ref", inner: errT, mutable: false }], ret: inner };
+          const cbType = this.checkExprWithHint(expr.args[0], cbHint);
+          if (cbType.tag !== "fn") {
+            this.error(`'unwrapOrElse' argument must be a function`, sp);
+            return this.setType(expr, inner);
+          }
+          if (cbType.params.length !== 1) {
+            this.error(`'unwrapOrElse': callback takes 1 argument, the error`, sp);
+          }
+          if (!typeEq(inner, cbType.ret) && cbType.ret.tag !== "unknown") {
+            this.error(`'unwrapOrElse': callback must return ${typeName(inner)}, got ${typeName(cbType.ret)}`, sp);
+          }
+          return this.setType(expr, inner);
+        }
+        return this.setType(expr, { tag: "unknown" });
+      }
+      // orElse(f): Result<T,E> -> Result<T,F> — the Err-side andThen. f receives the error
+      // and returns a whole Result, so a failed step can be recovered or its error retyped.
+      // The Ok payload is forwarded into the result, so a non-Copy T consumes the receiver.
+      if (expr.method === "orElse") {
+        if (expr.args.length !== 1) { this.error(`'orElse' expects 1 argument`, sp); return this.setType(expr, { tag: "unknown" }); }
+        const inner = this.unwrapableInner(objType);
+        const errT = this.unwrapableErr(objType);
+        if (!inner || !errT) return this.setType(expr, { tag: "unknown" });
+        const cbHint: TypeKind = { tag: "fn", params: [{ tag: "ref", inner: errT, mutable: false }], ret: { tag: "unknown" } };
+        const cbType = this.checkExprWithHint(expr.args[0], cbHint);
+        if (cbType.tag !== "fn") {
+          this.error(`'orElse' argument must be a function`, sp);
+          return this.setType(expr, { tag: "unknown" });
+        }
+        const ret = cbType.ret;
+        if (ret.tag !== "enum" || this.enums.get(ret.name)?.baseName !== "Result") {
+          this.error(`'orElse': callback must return a Result, got ${typeName(ret)}`, sp);
+          return this.setType(expr, { tag: "unknown" });
+        }
+        const cbOk = this.unwrapableInner(ret);
+        if (cbOk && !typeEq(cbOk, inner)) {
+          this.error(`'orElse': callback's ok type must be ${typeName(inner)}, got ${typeName(cbOk)}`, sp);
+          return this.setType(expr, { tag: "unknown" });
+        }
+        this.consumeForwardedPayload(expr.object, inner);
         return this.setType(expr, ret);
       }
     }

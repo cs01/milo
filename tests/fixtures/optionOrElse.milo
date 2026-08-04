@@ -1,0 +1,70 @@
+// Option.orElse(f): Option<T> -> Option<T> — the None-side andThen. "Try this source,
+// else that one", staying in Option so the chain can keep going.
+//
+// What this pins:
+//   - f runs ONLY on None; a Some receiver is forwarded verbatim and the fallback's own
+//     side effects (and allocations) never happen.
+//   - the Some branch forwards the receiver's payload into the result, so a non-Copy T
+//     CONSUMES the receiver — otherwise both would own one buffer and both free it.
+//     Asserted below by the fact that "kept!" comes back intact and exactly once.
+//
+// Strings are built with pushStr, never written as literals: a literal has cap == 0,
+// marking a static buffer that drop glue skips, which would hide a double-free.
+pub fn heapStr(tail: &string): string {
+    var s = ""
+    s.pushStr(tail)
+    s.pushStr("!")
+    return s
+}
+
+pub fn loud(): Option<i64> {
+    print("fallback ran")
+    return Option.Some(9)
+}
+
+pub fn main() {
+    let none: Option<i64> = Option.None
+    // @expect: fallback ran
+    // @expect: 9
+    print(none.orElse(() => loud()) ?? -1)
+
+    // Some short-circuits: loud() must not print
+    let some: Option<i64> = Option.Some(1)
+    // @expect: 1
+    print(some.orElse(() => loud()) ?? -1)
+
+    // chains left-to-right, first Some wins
+    let n1: Option<i64> = Option.None
+    // @expect: 7
+    print(n1.orElse(() => Option.None).orElse(() => Option.Some(7)) ?? -1)
+
+    // all None stays None
+    let n2: Option<i64> = Option.None
+    // @expect: true
+    print(n2.orElse(() => Option.None).isNone())
+
+    // Heap payload: the receiver is consumed, and the surviving buffer is freed once.
+    // Collapsed with `match` rather than `??` so the fixture runs leak-clean under
+    // `leaks --atExit` — `?? <owned>` into print has a leak of its own.
+    let g: Option<string> = Option.Some(heapStr("kept"))
+    match g.orElse(() => Option.Some(heapStr("fallback"))) {
+        Option.Some(v) => {
+            // @expect: kept!
+            print(v)
+        }
+        Option.None => {
+            print("unreachable")
+        }
+    }
+
+    let h: Option<string> = Option.None
+    match h.orElse(() => Option.Some(heapStr("fallback"))) {
+        Option.Some(v) => {
+            // @expect: fallback!
+            print(v)
+        }
+        Option.None => {
+            print("unreachable")
+        }
+    }
+}

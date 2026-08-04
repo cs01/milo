@@ -816,7 +816,7 @@ impl Sess {
                 let n = arr.len()
                 var i: i64 = 0
                 while i < n {
-                    match arr.i64At(i, "line") {
+                    match arr.curInt(arr.curField(arr.curChild(arr.curRoot(), i), "line")) {
                         Option.Some(l) => {
                             lines.push(l)
                         }

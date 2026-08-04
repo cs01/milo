@@ -1,8 +1,8 @@
 // JSON parse + walk using std/json
 from "std/json" import {
-    jsonParse, jsonNull
+    Json
 }
-from "std/io" import {
+from "std/fs" import {
     readFile
 }
 
@@ -21,8 +21,8 @@ fn main(): i32 {
             return 1
         }
     }
-    var doc = jsonNull()
-    match jsonParse(content) {
+    var doc = Json.parse("null")!
+    match Json.parse(content) {
         Result.Ok(d) => {
             doc = d
         }
@@ -33,17 +33,21 @@ fn main(): i32 {
     }
     var sum: f64 = 0.0
     var active: i64 = 0
-    let n = doc.childLen("items")
+    // Cursor navigation, so the benchmark still measures parsing rather than the
+    // deep clone an owned accessor would do per item.
+    let items = doc.curField(doc.curRoot(), "items")
+    let n = doc.curLen(items)
     var i: i64 = 0
     while i < n {
-        match doc.childF64At("items", i, "price") {
+        let item = doc.curChild(items, i)
+        match doc.curFloat(doc.curField(item, "price")) {
             Option.Some(p) => {
                 sum = sum + p
             }
             Option.None => {
             }
         }
-        match doc.childBoolAt("items", i, "active") {
+        match doc.curBool(doc.curField(item, "active")) {
             Option.Some(a) => {
                 if a {
                     active = active + 1

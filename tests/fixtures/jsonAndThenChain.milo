@@ -1,0 +1,39 @@
+// Chaining the owned Json accessors with Option.andThen.
+//
+// This is the replacement for the fixed-shape accessor family std/json used to carry
+// (strAt/i64At/boolAt/getAt/childStrAt/…): every navigation shape needed its own method
+// only because `get`/`at`/`path` returned an Option<Json> that could not be chained.
+// One combinator covers all of them, at any depth.
+//
+// The zero-allocation spelling of the same walks is the cursor API (see jsonCursor.milo);
+// each `get`/`at` hop deep-clones the subtree, which is the trade being made here.
+from "std/json" import {
+    Json
+}
+
+pub fn main() {
+    let doc = Json.parse("{\"user\":{\"name\":\"ada\",\"tags\":[{\"id\":7}]}}")!
+
+    // two-level object walk, ending in a leaf read
+    // @expect: ada
+    print(doc.get("user").andThen((u) => u.str("name")) ?? "missing")
+
+    // object -> array -> object, the shape childI64At used to hard-code
+    // @expect: 7
+    print(doc.get("user").andThen((u) => u.get("tags")).andThen((t) => t.at(0)).andThen((e) => e.i64("id")) ?? -1)
+
+    // a missing key anywhere short-circuits the whole chain
+    // @expect: missing
+    print(doc.get("nope").andThen((u) => u.str("name")) ?? "missing")
+    // @expect: -1
+    print(doc.get("user").andThen((u) => u.get("tags")).andThen((t) => t.at(9)).andThen((e) => e.i64("id")) ?? -1)
+
+    // a shape mismatch (string where an object was expected) is a None, not a trap
+    // @expect: missing
+    print(doc.get("user").andThen((u) => u.get("name")).andThen((n) => n.str("anything")) ?? "missing")
+
+    // orElse supplies the fallback source without leaving Option
+    let primary = doc.get("missing").andThen((u) => u.str("name"))
+    // @expect: ada
+    print(primary.orElse(() => doc.get("user").andThen((u) => u.str("name"))) ?? "none")
+}

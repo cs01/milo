@@ -84,7 +84,30 @@ shipped entries are deleted). This file is a record of a single audit, not a liv
   one stdlib. Rust returns `Option`, Node returns `undefined`; only Go shares this wart, and
   Go regrets it. Ref: `std/http.milo`, `std/fetch.milo`, `std/argparse.milo`.
 
-- [ ] **`Option` and `Result` are asymmetric, and it is damaging `std/json`.**
+- [x] **`Option` and `Result` are asymmetric, and it is damaging `std/json`.** *Closed by
+  adding `Option.andThen`, `Option.orElse`, `Result.unwrapOrElse` and `Result.orElse`. The
+  two surfaces are now identical on the seven shared combinators; `mapErr` stays Result-only
+  because `None` carries no payload to map. `Result.unwrapOrElse` takes the error (`&E`),
+  Option's takes nothing — the one asymmetry that reflects a real difference between the
+  types. **Declined:** `ok()`/`err()` (they discard the other variant's payload, which with
+  no GC must be dropped — a combinator that silently frees half its input is wrong;
+  `match` stays the conversion), `okOr()` (`let else` does it already, without `unwrapOr`'s
+  Copy gate), `expect()` (`!` plus a message, but it loads the payload out, so it would be
+  rejected on exactly the owned payloads where `!` works), `filter()` (one-sided, no Result
+  analogue, and it forwards the payload so it would consume a non-Copy receiver — `match`
+  is clearer). **Audit corrections, both to this entry's own claims:** (1) "half of
+  `json.milo`'s public surface becomes deletable" was wrong — the real number is **10 of
+  `Json`'s 49 methods (20%)**: `strAt`/`i64At`/`f64At`/`boolAt`/`getAt` and
+  `childStrAt`/`childI64At`/`childF64At`/`childBoolAt`/`childLen`, all deleted. The other
+  families are not navigation-shape combinatorics and stay. (2) `andThen` alone is not what
+  made them deletable — the zero-copy cursor API (`curField`/`curChild`/`curStr`, added after
+  those accessors) already covered every shape at zero allocation. `andThen` supplies the
+  readable owned-value spelling and, more importantly, removes the pressure to keep adding
+  shapes, which is the actual wart: there is no `childChildStrAt`, so anything 3 deep already
+  had to leave the family. Also closed a pre-existing leak found on the way: `Option.map` over
+  a temporary receiver (`doc.get(k).map(f)`) never dropped the receiver's payload. Ref:
+  `src/suggest.ts OPTION_MEMBERS`/`RESULT_MEMBERS`, `docs/language-reference.md`
+  §Option Combinators.*
   ```
   Option: isSome isNone unwrapOr unwrapOrElse map
   Result: isOk   isErr  unwrapOr               map mapErr andThen
@@ -94,8 +117,7 @@ shipped entries are deleted). This file is a record of a single audit, not a liv
   Not cosmetic: missing `Option.andThen` is *why* `std/json` carries ~20 accessor variants —
   `Json.get`/`at`/`path` all return `Option<Json>` but cannot be chained, so every navigation
   shape needs a bespoke method. Add `andThen` and half of `json.milo`'s public surface becomes
-  deletable. Ref: `src/suggest.ts OPTION_MEMBERS`/`RESULT_MEMBERS`,
-  `docs/language-reference.md` §Option Combinators.
+  deletable.
 
 - [x] **JWT verification does not validate claims.** *`verifyHS256/384/512` now return
   `Result<JwtClaims, JwtError>` — 10 variants, no `Other(string)` catch-all — validating
@@ -484,7 +506,7 @@ Ranked by how often real programs hit them.
   | `std/testing` | `assertEqual`(i32)/`assertEqual64`/`assertStrEqual`/`assertBool` | nothing — needs one generic `assertEq` |
   | `std/math` | `maxI32`/`maxI64`/`maxF64`/`minI32`/… | nothing — needs a bounded generic |
   | `std/random`, `std/rng` | `shuffleI64` only | nothing — cannot shuffle `Vec<string>` at all |
-  | `std/json` | `bool`/`boolAt`/`boolPath`/`childBoolAt`/`curBool` × 4 types ≈ 20 accessors | `Option.andThen` (Tier 1) |
+  | `std/json` | ~~`bool`/`boolAt`/`boolPath`/`childBoolAt`/`curBool` × 4 types ≈ 20 accessors~~ | partly done: the `*At`/`child*At` shapes (10 methods) are deleted, see Tier 1. `bool`/`boolPath`/`curBool` × 4 types remain — one per *value type* per *addressing mode*, which `andThen` cannot collapse; that needs a generic `Json.as<T>()` |
 
   `std/fmt` is now ~100% redundant. `std/sort` is redundant except `sortStringsByFreq`.
 

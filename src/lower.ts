@@ -907,14 +907,19 @@ class LowerCtx {
         }
         if (objType?.tag === "enum" && this.c.enums.get(objType.name)?.baseName === "Option"
             && (expr.method === "isSome" || expr.method === "isNone" || expr.method === "unwrapOr"
-                || expr.method === "unwrapOrElse" || expr.method === "map")) {
+                || expr.method === "unwrapOrElse" || expr.method === "map"
+                || expr.method === "andThen" || expr.method === "orElse")) {
+          // andThen/orElse get Option-qualified op names because the Result versions
+          // share the method name but not the codegen path.
+          const op = expr.method === "andThen" ? "optionAndThen"
+            : expr.method === "orElse" ? "optionOrElse" : expr.method;
           return {
-            kind: "OptionOp", op: expr.method, value: this.lowerExpr(expr.object),
-            // For unwrapOrElse and map the slot carries the CLOSURE, not a value — codegen
-            // calls it only on the Some/None branch that needs it. `type` already names the
-            // result enum (Option<U> for map), so no extra field is needed.
-            default: (expr.method === "unwrapOr" || expr.method === "unwrapOrElse" || expr.method === "map")
-              ? this.lowerExpr(expr.args[0]) : undefined,
+            kind: "OptionOp", op, value: this.lowerExpr(expr.object),
+            // For every op but isSome/isNone the slot carries the CLOSURE (or, for
+            // unwrapOr, the default value) — codegen evaluates it only on the branch
+            // that needs it. `type` already names the result enum, so no extra field.
+            default: expr.method === "isSome" || expr.method === "isNone"
+              ? undefined : this.lowerExpr(expr.args[0]),
             enumName: objType.name, type, span: expr.span,
           };
         }
@@ -929,12 +934,24 @@ class LowerCtx {
             enumName: objType.name, type, span: expr.span,
           };
         }
-        // map/mapErr/andThen get their OWN ops rather than reusing Option's "map": all three
+        // Result's unwrapOrElse differs from Option's by one thing codegen has to know:
+        // the callback is handed the Err payload, so it takes an argument.
+        if (objType?.tag === "enum" && this.c.enums.get(objType.name)?.baseName === "Result"
+            && expr.method === "unwrapOrElse") {
+          return {
+            kind: "OptionOp", op: "resultUnwrapOrElse", value: this.lowerExpr(expr.object),
+            default: this.lowerExpr(expr.args[0]),
+            enumName: objType.name, type, span: expr.span,
+          };
+        }
+        // map/mapErr/andThen/orElse get their OWN ops rather than reusing Option's: all four
         // must copy the untouched side's payload through to the result enum (Option's None
         // branch has no payload to carry), so the codegen paths differ.
         if (objType?.tag === "enum" && this.c.enums.get(objType.name)?.baseName === "Result"
-            && (expr.method === "map" || expr.method === "mapErr" || expr.method === "andThen")) {
-          const op = expr.method === "map" ? "resultMap" : expr.method === "mapErr" ? "resultMapErr" : "resultAndThen";
+            && (expr.method === "map" || expr.method === "mapErr" || expr.method === "andThen"
+                || expr.method === "orElse")) {
+          const op = expr.method === "map" ? "resultMap" : expr.method === "mapErr" ? "resultMapErr"
+            : expr.method === "andThen" ? "resultAndThen" : "resultOrElse";
           return {
             kind: "OptionOp", op, value: this.lowerExpr(expr.object),
             // the slot carries the CLOSURE; `type` already names the result enum

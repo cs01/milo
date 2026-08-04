@@ -639,6 +639,9 @@ const BUILTIN_DOCS: Record<string, { enum: string; variants: Record<string, stri
       "let m = x ?? 0          // 42  (0 if x were None)",
       "if let Option.Some(v) = x { ... }   // v is the value only when present",
       "```",
+      "",
+      "**Combinators**: `isSome` `isNone` `unwrapOr` `unwrapOrElse` `map` `andThen` `orElse`.",
+      "`andThen` chains a callback that is itself fallible; `orElse` supplies a fallback source.",
     ].join("\n"),
     variants: {
       Some: "Holds a value of type `T`.\n\n```milo\nlet x = Option.Some(42)\nlet v = x!   // 42 — panics if it were None\n```",
@@ -662,6 +665,9 @@ const BUILTIN_DOCS: Record<string, { enum: string; variants: Record<string, stri
       "let v = parse(\"x\")?     // the number, or bail out of this fn with the Err",
       "let v = parse(\"x\") ?? 0 // the number, or 0 if it failed",
       "```",
+      "",
+      "**Combinators**: `isOk` `isErr` `unwrapOr` `unwrapOrElse` `map` `mapErr` `andThen` `orElse`.",
+      "The same set `Option` carries, plus `mapErr`. Every error-side callback receives the error.",
     ].join("\n"),
     variants: {
       Ok: "Success — holds a value of type `T`.\n\n```milo\nlet r: Result<i64> = Result.Ok(42)\nlet v = r!   // 42 — panics if it were Err\nlet v = r?   // 42 here; if r were Err, this returns the Err from the fn\n```",
@@ -1368,14 +1374,45 @@ const MAP_BUILTIN_METHODS: { name: string; sig: string }[] = [
   { name: "clone", sig: "(): HashMap<K, V>" },
 ];
 
+const OPTION_BUILTIN_METHODS: { name: string; sig: string }[] = [
+  { name: "isSome", sig: "(): bool" },
+  { name: "isNone", sig: "(): bool" },
+  { name: "unwrapOr", sig: "(default: T): T — Copy T only; '??' has no such limit" },
+  { name: "unwrapOrElse", sig: "(f: () => T): T — Copy T only; f runs only on None" },
+  { name: "map", sig: "(f: (&T) => U): Option<U>" },
+  { name: "andThen", sig: "(f: (&T) => Option<U>): Option<U>" },
+  { name: "orElse", sig: "(f: () => Option<T>): Option<T> — consumes a non-Copy receiver" },
+];
+
+const RESULT_BUILTIN_METHODS: { name: string; sig: string }[] = [
+  { name: "isOk", sig: "(): bool" },
+  { name: "isErr", sig: "(): bool" },
+  { name: "unwrapOr", sig: "(default: T): T — Copy T only; '??' has no such limit" },
+  { name: "unwrapOrElse", sig: "(f: (&E) => T): T — Copy T only; f runs only on Err" },
+  { name: "map", sig: "(f: (&T) => U): Result<U, E>" },
+  { name: "mapErr", sig: "(f: (&E) => F): Result<T, F>" },
+  { name: "andThen", sig: "(f: (&T) => Result<U, E>): Result<U, E>" },
+  { name: "orElse", sig: "(f: (&E) => Result<T, F>): Result<T, F>" },
+];
+
 // Builtin methods available on a receiver of the given type, or null if the
 // type has no builtin method surface (e.g. a plain int, or a user struct whose
 // methods come from impl blocks, handled elsewhere).
-function builtinMethodsForType(tk: import("./types").TypeKind | undefined): { name: string; sig: string }[] | null {
+function builtinMethodsForType(
+  tk: import("./types").TypeKind | undefined,
+  enums?: Map<string, { baseName?: string }>,
+): { name: string; sig: string }[] | null {
   if (!tk) return null;
   if (tk.tag === "string") return STRING_BUILTIN_METHODS;
   if (tk.tag === "vec" || tk.tag === "array") return VEC_BUILTIN_METHODS;
   if (tk.tag === "hashmap") return MAP_BUILTIN_METHODS;
+  // Option/Result reach here as their monomorphized names (Option_i64), so the
+  // baseName from the checker is what identifies them, not the type name.
+  if (tk.tag === "enum") {
+    const base = enums?.get(tk.name)?.baseName;
+    if (base === "Option") return OPTION_BUILTIN_METHODS;
+    if (base === "Result") return RESULT_BUILTIN_METHODS;
+  }
   return null;
 }
 
@@ -1465,7 +1502,10 @@ function handleCompletion(uri: string, line: number, character: number): object 
         const parsed = new Parser(tokens).parse();
         let checkResult: CheckResult | null = null;
         try { checkResult = new TypeChecker().check(parsed); } catch {}
-        methods = builtinMethodsForType(receiverTypeForIdent(recvIdent, checkResult?.exprTypes ?? new Map()));
+        methods = builtinMethodsForType(
+          receiverTypeForIdent(recvIdent, checkResult?.exprTypes ?? new Map()),
+          checkResult?.enums,
+        );
       } catch { methods = null; }
     }
     if (methods) {

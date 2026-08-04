@@ -173,12 +173,15 @@ export const STRING_MEMBERS = [
   "substr", "slice", "parseInt", "parseF64", "codePoints", "clone", "cstr",
 ] as const;
 
+// The two lists differ only where the types genuinely differ: `mapErr` has no Option
+// analogue because None carries no payload to map. Everything else is deliberately
+// symmetric — see docs/language-reference.md §Option Combinators.
 export const OPTION_MEMBERS = [
-  "isSome", "isNone", "unwrapOr", "unwrapOrElse", "map",
+  "isSome", "isNone", "unwrapOr", "unwrapOrElse", "map", "andThen", "orElse",
 ] as const;
 
 export const RESULT_MEMBERS = [
-  "isOk", "isErr", "unwrapOr", "map", "mapErr", "andThen",
+  "isOk", "isErr", "unwrapOr", "unwrapOrElse", "map", "andThen", "orElse", "mapErr",
 ] as const;
 
 // The hint for a member that doesn't exist on `receiver`. `candidates` is the

@@ -1,21 +1,21 @@
 // @expect: ok: 99
 // @expect: err: -1
 
-pub enum Result {
+pub enum Outcome {
     Ok(i32),
     Err(i32),
 }
 
 pub fn main(): i32 {
-    let a = Result.Ok(99)
-    if let Result.Ok(v) = a {
+    let a = Outcome.Ok(99)
+    if let Outcome.Ok(v) = a {
         print("ok: ", v)
     } else {
         print("err branch")
     }
 
-    let b = Result.Err(-1)
-    if let Result.Ok(v) = b {
+    let b = Outcome.Err(-1)
+    if let Outcome.Ok(v) = b {
         print("ok branch")
     } else {
         print("err: ", -1)

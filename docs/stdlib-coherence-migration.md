@@ -68,8 +68,5 @@ completion (`Json.pa`→`parse`). Preconditions are checked at static-method cal
 - **P7 subdir regroup** — physically moving files into `text/ encoding/ crypto/ compress/ net/ …`
   and rewriting every import path. The resolver maps `std/x` → `std/x.milo` directly, so this is
   a repo-wide import-path rewrite (std + examples + tests + downstream repos); no API/behavior change.
-- **`s.toInt(): Option` / `s.toFloat(): Option`** — the current `s.parseInt()` / `s.parseF64()`
-  string methods return a raw value (silent `0` on failure); fold them to the `Option`-returning
-  `std/strconv` parsers to kill the sentinel.
 - **net/http typed errors** — `Result<T>` → `Result<T, HttpError/NetError>`.
 - **`fmt` → builtin** — collapse the `fmt` family into the compiler.

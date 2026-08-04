@@ -1,17 +1,17 @@
 // @expect: 42
 
-pub enum Option {
+pub enum Maybe {
     Some(i32),
     None,
 }
 
 pub fn main(): i32 {
-    let x = Option.Some(42)
+    let x = Maybe.Some(42)
     match x {
-        Option.Some(val) => {
+        Maybe.Some(val) => {
             print(val)
         }
-        Option.None => {
+        Maybe.None => {
             print("none")
         }
     }

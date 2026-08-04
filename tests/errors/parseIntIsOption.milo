@@ -1,0 +1,9 @@
+// parseInt is total now: it answers Option<i64>, never a silent 0. Using it as a
+// bare i64 has to say so, and say what to do about it.
+// @error: unwrap it with 'match'
+
+pub fn main(): i32 {
+    let n: i64 = "42".parseInt()
+    print(n)
+    return 0
+}

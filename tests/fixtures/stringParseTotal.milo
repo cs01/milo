@@ -1,0 +1,57 @@
+// `s.parseInt()` / `s.parseF64()` used to return a bare i64/f64 and answer 0 for
+// garbage, so "abc" and "0" were indistinguishable. Both are Option now, and the
+// same parser backs std/strconv (see stdStrconv.milo). i64 range edges live in
+// stringParseRange.milo — they can't round-trip through the JS backend's doubles.
+// @expect: Some(42)
+// @expect: None
+// @expect: None
+// @expect: Some(-7)
+// @expect: Some(7)
+// @expect: None
+// @expect: Some(3.14)
+// @expect: None
+// @expect: Some(1000)
+// @expect: Some(-0.5)
+// @expect: None
+// @expect: None
+// @expect: None
+
+fn showInt(v: Option<i64>) {
+    match v {
+        Option.Some(n) => {
+            print($"Some({n})")
+        }
+        Option.None => {
+            print("None")
+        }
+    }
+}
+
+fn showFloat(v: Option<f64>) {
+    match v {
+        Option.Some(x) => {
+            print($"Some({x})")
+        }
+        Option.None => {
+            print("None")
+        }
+    }
+}
+
+pub fn main(): i32 {
+    showInt("42".parseInt())
+    showInt("42x".parseInt())
+    showInt("".parseInt())
+    showInt("-7".parseInt())
+    showInt("+7".parseInt())
+    showInt("  12".parseInt())
+
+    showFloat("3.14".parseF64())
+    showFloat("abc".parseF64())
+    showFloat("1e3".parseF64())
+    showFloat("-.5".parseF64())
+    showFloat("1.2x".parseF64())
+    showFloat(" 1.2".parseF64())
+    showFloat("".parseF64())
+    return 0
+}

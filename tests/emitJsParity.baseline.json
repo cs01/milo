@@ -167,6 +167,7 @@
   "strDataPtr.milo": "crash",
   "stringCstr.milo": "crash",
   "stringIgnoreCase.milo": "crash",
+  "stringParseRange.milo": "mismatch",
   "stringSliceArg.milo": "crash",
   "stringUtils.milo": "noEmit",
   "stringViewSplitParity.milo": "crash",

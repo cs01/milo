@@ -1455,6 +1455,17 @@ export class TypeChecker {
     }
     for (const e of program.enums) this.validateAttributes(e.name, e.attributes, "enum");
 
+    // Option and Result are compiler builtins with dedicated syntax (`T?`, `!`, `??`,
+    // `?`-propagation) that a redeclaration does not rebind, and prelude signatures
+    // already name them. Overriding one used to be allowed and merely broke the
+    // prelude three files away; say so at the declaration instead.
+    for (const e of program.enums) {
+      if (e.name === "Option" || e.name === "Result") {
+        this.error(`'${e.name}' is a builtin enum and cannot be redeclared`, e.span,
+          `it already has the shape you are writing — delete this declaration, or rename it if you meant a different type`);
+      }
+    }
+
     // register enums — two passes so generic enums are available when resolving variant fields
     for (const e of program.enums) {
       if (e.typeParams.length > 0) {
@@ -3354,7 +3365,7 @@ export class TypeChecker {
           } else if (hint.tag === "vec" && valType.tag === "array" && typeEq(hint.element, valType.element)) {
             this.arrayToVecCoercions.add(stmt.value);
           } else if (!isStringToPtr && !this.tryInterfaceCoercion(stmt.value, valType, hint)) {
-            this.error(`type mismatch: '${stmt.name}' declared as ${typeName(hint)} but got ${typeName(valType)}`, sp);
+            this.error(`type mismatch: '${stmt.name}' declared as ${typeName(hint)} but got ${typeName(valType)}`, sp, this.optionUnwrapHint(hint, valType));
           }
         }
         // range checking for ranged integer types
@@ -3402,7 +3413,7 @@ export class TypeChecker {
           } else if (hint.tag === "vec" && valType.tag === "array" && typeEq(hint.element, valType.element)) {
             this.arrayToVecCoercions.add(stmt.value);
           } else if (!isStringToPtr && !this.tryInterfaceCoercion(stmt.value, valType, hint)) {
-            this.error(`type mismatch: '${stmt.name}' declared as ${typeName(hint)} but got ${typeName(valType)}`, sp);
+            this.error(`type mismatch: '${stmt.name}' declared as ${typeName(hint)} but got ${typeName(valType)}`, sp, this.optionUnwrapHint(hint, valType));
           }
         }
         if (hint?.tag === "int" && hint.min !== undefined && hint.max !== undefined) {
@@ -3988,6 +3999,16 @@ export class TypeChecker {
     const someVariant = info.variants.get("Some");
     if (!someVariant || someVariant.fields.length !== 1) return null;
     return someVariant.fields[0];
+  }
+
+  // A total API answers Option<T>, so "expected T, got Option_T" is the first thing
+  // a caller sees the moment a parser or lookup stops handing back a sentinel. The
+  // mangled name alone doesn't say what to do about it — name the three ways out.
+  private optionUnwrapHint(expected: TypeKind, actual: TypeKind): string | undefined {
+    const inner = this.optionInnerType(actual);
+    if (!inner || !typeEq(inner, expected)) return undefined;
+    return `${typeName(actual)} is Option<${typeName(inner)}> — unwrap it with 'match', `
+      + `'let Option.Some(x) = ... else { ... }', or '.unwrapOr(<default>)'`;
   }
 
   // auto-deref: &T → T, &mut T → T
@@ -5637,7 +5658,7 @@ export class TypeChecker {
             }
             if (!typeEq(paramType.inner, argType) && argType.tag !== "unknown") {
               if (!this.tryInterfaceCoercion(expr.args[i], argType, paramType)) {
-                this.error(`argument ${i + 1} of '${expr.func}': expected ${typeName(paramType)}, got ${typeName(argType)}`, expr.args[i].span);
+                this.error(`argument ${i + 1} of '${expr.func}': expected ${typeName(paramType)}, got ${typeName(argType)}`, expr.args[i].span, this.optionUnwrapHint(paramType, argType));
               }
             }
           } else if (!typeEq(paramType, argType) && argType.tag !== "unknown") {
@@ -5656,7 +5677,7 @@ export class TypeChecker {
               // resolved
             } else if (!isStringToPtr && !isArrayToPtr) {
               if (!this.tryInterfaceCoercion(expr.args[i], argType, paramType)) {
-                this.error(`argument ${i + 1} of '${expr.func}': expected ${typeName(paramType)}, got ${typeName(argType)}`, expr.args[i].span);
+                this.error(`argument ${i + 1} of '${expr.func}': expected ${typeName(paramType)}, got ${typeName(argType)}`, expr.args[i].span, this.optionUnwrapHint(paramType, argType));
               }
             }
           }
@@ -7007,7 +7028,7 @@ export class TypeChecker {
           }
           if (expr.method === "parseF64") {
             if (expr.args.length !== 0) { this.error(`'parseF64' takes no arguments`, sp); }
-            return this.setType(expr, { tag: "float", bits: 64 });
+            return this.setType(expr, { tag: "enum", name: this.monomorphizeEnum("Option", [{ tag: "float", bits: 64 }]) });
           }
           if (expr.method === "clone") {
             if (expr.args.length !== 0) { this.error(`'clone' takes no arguments`, sp); }
@@ -7072,7 +7093,7 @@ export class TypeChecker {
           }
           if (expr.method === "parseInt") {
             if (expr.args.length !== 0) { this.error(`'parseInt' takes no arguments`, sp); }
-            return this.setType(expr, { tag: "int", bits: 64, signed: true });
+            return this.setType(expr, { tag: "enum", name: this.monomorphizeEnum("Option", [{ tag: "int", bits: 64, signed: true }]) });
           }
           if (expr.method === "replace" || expr.method === "replaceFirst") {
             if (expr.args.length !== 2) { this.error(`'replace' expects 2 arguments, got ${expr.args.length}`, sp); return this.setType(expr, { tag: "string" }); }

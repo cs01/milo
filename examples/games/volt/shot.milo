@@ -194,10 +194,10 @@ pub fn main(): i32 {
             sheet("/tmp/volt-sheet.ppm")
             return 0
         } else if argv[i] == "--level" && i + 1 < argv.len {
-            level = argv[i + 1].parseInt()
+            level = argv[i + 1].parseInt().unwrapOr(level)
             i = i + 2
         } else if argv[i].len > 0 && argv[i][0] >= 48 && argv[i][0] <= 57 {
-            shots.push(argv[i].parseInt())
+            shots.push(argv[i].parseInt().unwrapOr(0))
             i = i + 1
         } else {
             prefix = argv[i]

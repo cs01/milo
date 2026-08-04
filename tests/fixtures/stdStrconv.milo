@@ -9,6 +9,9 @@
 // @expect: 101010
 // @expect: 3.14
 // @expect: 2.71828
+// @expect: none
+// @expect: none
+// @expect: none
 
 from "std/strconv" import {
     formatFloat, i64ToBin, i64ToHex, i64ToOct, parseFloat, parseInt, parseIntRadix
@@ -62,5 +65,32 @@ pub fn main(): i32 {
     print(i64ToBin(42))
     print(formatFloat(3.14159, 2))
     print(formatFloat(2.71828, 5))
+
+    // strconv forwards to the s.parseInt()/s.parseF64() builtins — one parser, so
+    // the strict answers have to match. parseIntRadix("zz", 16) used to be Some(0).
+    match parseInt("42x") {
+        Option.Some(n) => {
+            print(n)
+        }
+        Option.None => {
+            print("none")
+        }
+    }
+    match parseIntRadix("zz", 16) {
+        Option.Some(n) => {
+            print(n)
+        }
+        Option.None => {
+            print("none")
+        }
+    }
+    match parseFloat("abc") {
+        Option.Some(f) => {
+            print(f.toString())
+        }
+        Option.None => {
+            print("none")
+        }
+    }
     return 0
 }

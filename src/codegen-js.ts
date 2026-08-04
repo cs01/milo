@@ -699,8 +699,6 @@ export class CodegenJS {
       case "StringSlice":
         // Byte offsets — see the byte-string note in the runtime.
         return `${this.genExpr(expr.str)}.slice(${this.genExpr(expr.start)}, ${this.genExpr(expr.end)})`;
-      case "StringParseF64":
-        return `parseFloat(${this.genExpr(expr.str)})`;
       case "StringClone":
         return this.genExpr(expr.str);
       case "StringWithCapacity":
@@ -971,6 +969,11 @@ export class CodegenJS {
       }
       case "flush":
         return "__flush()";
+      // std/string's strParseF64 hands the decimal→binary conversion to libc; the JS
+      // backend has no FFI, so the one libc name the prelude reaches for gets a shim.
+      // The string is already validated by then, so parseFloat's leniency never shows.
+      case "atof":
+        return `parseFloat(${args[0]})`;
       case "exit":
         return `(() => { throw new Error("exit: " + ${args[0]}); })()`;
       case "assert":

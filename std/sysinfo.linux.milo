@@ -144,7 +144,7 @@ fn meminfoBytes(key: &string): i64 {
     if field.len() == 0 {
         return 0
     }
-    return _firstField(field).parseInt() * 1024
+    return _firstField(field).parseInt().unwrapOr(0) * 1024
 }
 
 pub fn totalMem(): i64 {

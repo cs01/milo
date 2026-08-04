@@ -1,17 +1,17 @@
 // @expect: error: 404
 
-pub enum Result<T, E> {
+pub enum Either<T, E> {
     Ok(T),
     Err(E),
 }
 
 pub fn main(): i32 {
-    let r: Result<i32, i32> = Result.Err(404)
+    let r: Either<i32, i32> = Either.Err(404)
     match r {
-        Result.Ok(val) => {
+        Either.Ok(val) => {
             print("ok: ", val)
         }
-        Result.Err(code) => {
+        Either.Err(code) => {
             print("error: ", code)
         }
     }

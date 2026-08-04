@@ -683,7 +683,8 @@ s.charAt(0)             // "H"
 s.reverse()             // "!dlroW ,olleH"
 s.replaceFirst("l", "L") // "HeLlo, World!"
 s.repeat(3)             // "Hello, World!Hello, World!Hello, World!"
-"42".parseInt()         // 42 (i64)
+"42".parseInt()         // Option<i64> — Some(42); "42x" and "" are None
+"3.14".parseF64()       // Option<f64> — Some(3.14); "abc" is None
 s.substr(0, 5)          // "Hello" (owned copy)
 ```
 
@@ -908,7 +909,12 @@ match s {
 
 ### Generic Enums
 
-```milo
+Both `Option` and `Result` are built into the language with special syntax support
+(see below) — the compiler registers them, no `.milo` file declares them. Their shapes,
+for reference only: redeclaring either one is a compile error, since the sugar stays
+bound to the builtin and prelude signatures already name it.
+
+```milo skip
 enum Option<T> {
     Some(T),
     None,
@@ -919,8 +925,6 @@ enum Result<T, E> {
     Err(E),
 }
 ```
-
-Both `Option` and `Result` are built into the language with special syntax support (see below).
 
 ---
 

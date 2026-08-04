@@ -1259,7 +1259,7 @@ Import with \`from "std/<name>" import { ... }\`. Key modules:
 | \`std/uuid\` | UUID generation | \`uuidV4\` |
 | \`std/math\` | Math functions | \`sqrt\`, \`abs\`, \`min\`, \`max\`, \`pow\`, \`floor\`, \`ceil\` |
 | \`std/string\` | String utilities | \`split\`, \`join\`, \`trim\`, \`padLeft\`, \`padRight\`, \`repeat\` |
-| \`std/strconv\` | String conversions | \`parseInt\`, \`parseFloat\` |
+| \`std/strconv\` | String conversions | \`parseInt\`, \`parseFloat\` (both \`Option\`; aliases for \`s.parseInt()\`/\`s.parseF64()\`) |
 | \`std/fmt\` | String formatting | \`fmt\`, \`fmtFloat\` |
 | \`std/color\` | Terminal colors | \`red\`, \`green\`, \`blue\`, \`bold\`, \`dim\`, \`reset\` |
 | \`std/sort\` | Sorting | \`sort\` for Vec with comparator |

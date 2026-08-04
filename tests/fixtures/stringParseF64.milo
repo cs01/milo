@@ -2,7 +2,13 @@
 
 pub fn main(): i32 {
     let s = "3.14"
-    let x: f64 = s.parseF64()
-    print(x)
+    match s.parseF64() {
+        Option.Some(x) => {
+            print(x)
+        }
+        Option.None => {
+            print("none")
+        }
+    }
     return 0
 }

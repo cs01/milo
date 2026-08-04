@@ -40,7 +40,8 @@ Octal text for `n`, no prefix.
 pub fn parseFloat(s: string): Option<f64>
 ```
 
-Parse a floating-point number, or None if the string isn't a valid float.
+Parse a floating-point number, or None if the string isn't a complete float
+literal. A named alias for the `s.parseF64()` builtin — same parser.
 
 ### `parseInt`
 
@@ -49,8 +50,11 @@ pub fn parseInt(s: string): Option<i64>
 ```
 
 Parse a base-10 integer strictly: Some(n) only if the whole string is an
-optionally-signed run of digits, else None. (Contrast str.strParseInt, which
-is lenient and returns 0 on bad input.)
+optionally-signed run of digits that fits in i64, else None.
+
+This is a named alias for the `s.parseInt()` builtin, not a second parser —
+the two used to disagree about what counts as a number, and one of them had
+to be the answer.
 
 ### `parseIntRadix`
 
@@ -58,4 +62,6 @@ is lenient and returns 0 on bad input.)
 pub fn parseIntRadix(s: string, base: i32): Option<i64>
 ```
 
-Parse an integer in `base` (2, 8, 10, or 16), or None if invalid.
+Parse an integer in `base` (2, 8, 10, or 16), or None if invalid. Every digit
+must be legal in `base` and the whole string must be consumed; strtoll on its
+own stops at the first bad byte and reports that as a successful 0.

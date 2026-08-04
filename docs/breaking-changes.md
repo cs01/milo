@@ -1,15 +1,44 @@
 <!-- doc-meta
 system: breaking-changes
 purpose: source-level breaks users have to act on, with the migration and the reason a compat shim was impossible
-key-files: std/platform.*.milo, std/os.milo
+key-files: std/platform.*.milo, std/os.milo, std/string.milo, std/strconv.milo
 update-when: a public stdlib name moves, is renamed, or changes signature
-last-verified: 2026-07-23
+last-verified: 2026-08-03
 -->
 
 # Breaking changes
 
 Source-level breaks, newest first. Milo is pre-1.0 and does not promise
 compatibility, but every break belongs here with the migration spelled out.
+
+## `s.parseInt()` / `s.parseF64()` return `Option` (2026-08-03)
+
+| Before | After |
+|---|---|
+| `let n: i64 = s.parseInt()` | `let Option.Some(n) = s.parseInt() else { … }` |
+| `let x: f64 = s.parseF64()` | `let x = s.parseF64().unwrapOr(0.0)` |
+
+`match` and `?` work too. The compiler names the fix in the hint on the type
+mismatch, so the migration is mechanical.
+
+No compat shim was possible: the break IS the fix. The old builtins returned a
+bare `i64`/`f64` and answered `0` for garbage — `"42x".parseInt()` was `42`,
+`"abc".parseF64()` was `0` and indistinguishable from parsing the string `"0"`.
+Meanwhile `std/strconv.parseInt` returned `Option<i64>` off a second, stricter
+implementation, so the language shipped two parsers with opposite failure models
+and the total-*looking* spelling was the lossy one. There is one parser now:
+`std/string.strParseInt` / `strParseF64` back the builtins, and
+`strconv.parseInt` / `parseFloat` are named aliases for them.
+
+Three behaviour changes ride along. `parseInt` rejects out-of-range input
+(`"9223372036854775808"` → `None`) instead of wrapping or trapping.
+`strconv.parseIntRadix` now validates every digit against the base:
+`parseIntRadix("zz", 16)` was `Some(0)`, now `None`. And `enum Option` / `enum
+Result` are now rejected outright — *"'Option' is a builtin enum and cannot be
+redeclared"*. Redeclaring one used to be allowed but never rebound the `T?`/`!`/
+`??`/`?` sugar; now that prelude signatures name `Option`, it also broke `std`
+three files away. Delete the declaration, or rename it if you meant a different
+type.
 
 ## Shadowing is rejected (2026-08-01)
 

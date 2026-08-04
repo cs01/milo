@@ -53,7 +53,7 @@ Most utilities are **namespaced**: call a static on the namespace (`Path.join`, 
 |--------|-----------------|
 | [`std/time`](time) | Wall clock, monotonic timing, sleep |
 | [`std/datetime`](datetime) | Date/time — `DateTime.now`/`.fromEpoch`, then `dt.format()`, `weekdayName` |
-| [`std/uuid`](uuid) | UUID v4 generation — `Uuid.v4` |
+| [`std/uuid`](uuid) | UUIDs — `Uuid.v4`, `Uuid.v7`, `Uuid.parse` |
 
 ## Concurrency
 

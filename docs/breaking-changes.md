@@ -40,6 +40,18 @@ redeclared"*. Redeclaring one used to be allowed but never rebound the `T?`/`!`/
 three files away. Delete the declaration, or rename it if you meant a different
 type.
 
+## `Uuid.v4()` returns a `Uuid`, not a `string` (2026-08-03)
+
+`std/uuid` grew a real value type: `Uuid` is 16 bytes (Copy, no heap), with
+`Uuid.v4()`, `Uuid.v7()`, `Uuid.parse()`, `Uuid.nil()`, `toString()`, `isNil()`,
+`version()`, `variant()`, `timestampMs()`, and `Eq`. Migration: append
+`.toString()` where a string was wanted (`Uuid.v4().toString()`).
+
+No compat shim was possible under the one-spelling rule: a `Uuid.v4(): string`
+alongside `Uuid.v4(): Uuid` cannot coexist, and keeping the string spelling for
+v4 while v7 returned a value would make the module's two constructors disagree
+about what a UUID is. The private `uuidV4()` free function is gone with it.
+
 ## Shadowing is rejected (2026-08-01)
 
 A binding may no longer reuse a name already in scope in the same function —

@@ -1256,7 +1256,7 @@ Import with \`from "std/<name>" import { ... }\`. Key modules:
 | \`std/datetime\` | Date and time | \`now\`, \`formatTime\`, \`DateTime\` |
 | \`std/time\` | Timing | \`sleep\`, \`clockMs\` |
 | \`std/random\` | Random numbers | \`randomI64\`, \`randomF64\`, \`randomRange\` |
-| \`std/uuid\` | UUID generation | \`uuidV4\` |
+| \`std/uuid\` | UUIDs | \`Uuid.v4\`, \`Uuid.v7\`, \`Uuid.parse\`, \`Uuid.nil\` |
 | \`std/math\` | Math functions | \`sqrt\`, \`abs\`, \`min\`, \`max\`, \`pow\`, \`floor\`, \`ceil\` |
 | \`std/string\` | String utilities | \`split\`, \`join\`, \`trim\`, \`padLeft\`, \`padRight\`, \`repeat\` |
 | \`std/strconv\` | String conversions | \`parseInt\`, \`parseFloat\` (both \`Option\`; aliases for \`s.parseInt()\`/\`s.parseF64()\`) |

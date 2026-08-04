@@ -1,0 +1,129 @@
+// @expect: 550e8400-e29b-41d4-a716-446655440000
+// @expect: 4
+// @expect: 2
+// @expect: true
+// @expect: true
+// @expect: false
+// @expect: 00000000-0000-0000-0000-000000000000
+// @expect: true
+// @expect: 0
+// @expect: 0
+// @expect: true
+// @expect: false
+// @expect: v4 ok
+// @expect: v7 ok
+// @expect: v7 ordered
+// @expect: rejects ok
+
+from "std/uuid" import {
+    Uuid
+}
+
+fn parseOrDie(s: string): Uuid {
+    let u = Uuid.parse(s)
+    if let Some(v) = u {
+        return v
+    }
+    print("parse failed: " + s)
+    return Uuid.nil()
+}
+
+pub fn main(): i32 {
+    // Canonical text round-trips byte-exactly, and the version/variant nibbles of
+    // a known v4 read back as 4 and 2 (RFC 4122/9562 variant).
+    let known = parseOrDie("550e8400-e29b-41d4-a716-446655440000")
+    print(known.toString())
+    print(known.version() as i64)
+    print(known.variant() as i64)
+
+    // Parsing is case-insensitive and yields the same value.
+    let upper = parseOrDie("550E8400-E29B-41D4-A716-446655440000")
+    print(upper == known)
+    print(upper.toString() == known.toString())
+    print(known.isNil())
+
+    let nil = Uuid.nil()
+    print(nil.toString())
+    print(nil.isNil())
+    print(nil.version() as i64)
+    print(nil.variant() as i64)
+    print(nil == Uuid.nil())
+    print(nil == known)
+
+    var i = 0
+    var v4ok = true
+    while i < 64 {
+        let u = Uuid.v4()
+        if u.version() != 4 || u.variant() != 2 || u.toString().len != 36 || u.isNil() {
+            v4ok = false
+        }
+        // Every generated id survives format -> parse unchanged.
+        if parseOrDie(u.toString()) != u {
+            v4ok = false
+        }
+        i = i + 1
+    }
+    if v4ok {
+        print("v4 ok")
+    } else {
+        print("v4 broken")
+    }
+
+    var v7ok = true
+    var ordered = true
+    var prev = Uuid.v7()
+    // 4096 ids exceeds the 12-bit counter, so this also exercises the
+    // wait-for-next-tick path that keeps ordering intact.
+    var j = 0
+    while j < 5000 {
+        let u = Uuid.v7()
+        if u.version() != 7 || u.variant() != 2 || u.timestampMs() < 1700000000000 {
+            v7ok = false
+        }
+        if parseOrDie(u.toString()) != u {
+            v7ok = false
+        }
+        // Time-ordered means the text form sorts by creation order.
+        if u.toString() <= prev.toString() {
+            ordered = false
+        }
+        if u.timestampMs() < prev.timestampMs() {
+            ordered = false
+        }
+        prev = u
+        j = j + 1
+    }
+    if v7ok {
+        print("v7 ok")
+    } else {
+        print("v7 broken")
+    }
+    if ordered {
+        print("v7 ordered")
+    } else {
+        print("v7 unordered")
+    }
+
+    // Only the canonical 8-4-4-4-12 form parses.
+    var bad: Vec<string> = Vec.new()
+    bad.push("")
+    bad.push("550e8400-e29b-41d4-a716-44665544000")
+    bad.push("550e8400e29b41d4a716446655440000")
+    bad.push("550e8400-e29b-41d4-a716-44665544000g")
+    bad.push("550e8400-e29b-41d4-a716+446655440000")
+    bad.push("550e8400-e29b-41d4-a716-446655440000 ")
+    bad.push("{550e8400-e29b-41d4-a716-446655440000}")
+    bad.push("urn:uuid:550e8400-e29b-41d4-a716-446655440000")
+    var rejects = true
+    for s in bad {
+        if Uuid.parse(s).isSome() {
+            rejects = false
+        }
+    }
+    if rejects {
+        print("rejects ok")
+    } else {
+        print("rejects broken")
+    }
+    return 0
+}

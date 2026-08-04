@@ -1,58 +1,228 @@
-// std/uuid — UUID v4 generation (random, RFC 4122)
-
+// std/uuid — RFC 9562 UUIDs as a 16-byte value type.
+//
+// `Uuid` is a plain 16-byte value (Copy, no heap, no resource), so it is passed
+// and stored like an integer; `toString()` is the only allocating operation.
+//
 // randBytes is the portable wrapper (darwin: arc4random_buf, linux: a getentropy loop).
 // This module used to import arc4random_buf directly — a darwin-only extern — so
 // std/uuid, and everything importing it, failed to compile on Linux.
 from "std/random" import {
     Random
 }
+from "std/time" import {
+    epochMillis,
+    sleepMs
+}
+from "std/hex" import {
+    hexChar
+}
 
-fn hexChar(n: u8): u8 {
-    if n < 10 {
-        return '0' + n
+fn _byteToHex(b: u8, out: &mut string): void {
+    out.push(hexChar(b >> 4))
+    out.push(hexChar(b & 15 as u8))
+}
+
+// Hex digit value, or -1 when `ch` is not a hex digit. Deliberately not std/hex's
+// `_hexVal`, which maps invalid input to 0 — a parser has to reject it instead.
+fn _hexNibble(ch: u8): i32 {
+    if ch >= '0' && ch <= '9' {
+        return (ch - '0') as i32
     }
-    return 'a' + (n - 10 as u8)
-}
-
-fn _byteToHex(b: u8): string {
-    var s = ""
-    s.push(hexChar(b >> 4))
-    s.push(hexChar(b & 15 as u8))
-    return s
-}
-
-// Generate a random UUID v4 string (e.g. "550e8400-e29b-41d4-a716-446655440000").
-fn uuidV4(): string {
-    var buf: [u8; 16] = [0 as u8; 16]
-    unsafe {
-        Random.bytes(buf as *u8, 16)
+    if ch >= 'a' && ch <= 'f' {
+        return (ch - 'a' + 10 as u8) as i32
     }
-
-    // version 4: high nibble of byte 6 = 0100
-    buf[6] = (buf[6] & 0x0f as u8) | 0x40 as u8
-    // variant 1: high bits of byte 8 = 10
-    buf[8] = (buf[8] & 0x3f as u8) | 0x80 as u8
-
-    var s = ""
-    s = s + _byteToHex(buf[0]) + _byteToHex(buf[1]) + _byteToHex(buf[2]) + _byteToHex(buf[3])
-    s = s + "-"
-    s = s + _byteToHex(buf[4]) + _byteToHex(buf[5])
-    s = s + "-"
-    s = s + _byteToHex(buf[6]) + _byteToHex(buf[7])
-    s = s + "-"
-    s = s + _byteToHex(buf[8]) + _byteToHex(buf[9])
-    s = s + "-"
-    s = s + _byteToHex(buf[10]) + _byteToHex(buf[11]) + _byteToHex(buf[12])
-    s = s + _byteToHex(buf[13]) + _byteToHex(buf[14]) + _byteToHex(buf[15])
-    return s
+    if ch >= 'A' && ch <= 'F' {
+        return (ch - 'A' + 10 as u8) as i32
+    }
+    return -1
 }
 
-// Uuid namespace — Uuid.v4() random UUID string.
+// Monotonic counter for v7 (RFC 9562 §6.2, "monotonic random" method): ids minted
+// inside the same millisecond still sort in creation order. Reseeded randomly with
+// headroom on each new millisecond so it is not a predictable sequence. Per
+// process, and not synchronized across threads — a racing thread can reuse a
+// counter value, which costs ordering but not uniqueness (the random tail still
+// separates the ids).
+var _v7LastMs: i64 = 0
+var _v7Seq: i64 = 0
+
+// Uuid — 16 bytes in big-endian (network) order. `bytes` is the canonical
+// representation: read it for binary interop, and build a Uuid from foreign bytes
+// with `Uuid { bytes: raw }`.
 pub struct Uuid {
+    bytes: [u8; 16]
 }
 
 impl Uuid {
-    fn v4(): string {
-        return uuidV4()
+    // The all-zero UUID, 00000000-0000-0000-0000-000000000000.
+    fn nil(): Uuid {
+        return Uuid {
+            bytes: [0 as u8; 16]
+        }
+    }
+
+    // Random UUID (version 4): 122 random bits.
+    fn v4(): Uuid {
+        var b: [u8; 16] = [0 as u8; 16]
+        unsafe {
+            Random.bytes(b as *u8, 16)
+        }
+        // version 4: high nibble of byte 6 = 0100
+        b[6] = (b[6] & 0x0f as u8) | 0x40 as u8
+        // variant 10xx: high bits of byte 8
+        b[8] = (b[8] & 0x3f as u8) | 0x80 as u8
+        return Uuid {
+            bytes: b
+        }
+    }
+
+    // Time-ordered UUID (version 7): 48-bit Unix-epoch millisecond prefix, a
+    // 12-bit monotonic counter, then random bits. Lexicographic order of the text
+    // form matches creation order, which is what makes v7 the better default for
+    // database keys.
+    fn v7(): Uuid {
+        var ms = epochMillis()
+        // Counter exhausted inside this millisecond: waiting for the next tick is
+        // the only way to stay ordered without borrowing bits from the future.
+        if ms == _v7LastMs && _v7Seq >= 4095 {
+            while epochMillis() == ms {
+                sleepMs(1)
+            }
+            ms = epochMillis()
+        }
+        var seq: i64 = 0
+        if ms == _v7LastMs {
+            _v7Seq = _v7Seq + 1
+            seq = _v7Seq
+        } else {
+            _v7LastMs = ms
+            // 11 random bits: leaves 2048 increments of headroom in this millisecond.
+            _v7Seq = (Random.u32() as i64) & 0x7ff
+            seq = _v7Seq
+        }
+
+        var b: [u8; 16] = [0 as u8; 16]
+        unsafe {
+            Random.bytes(b as *u8, 16)
+        }
+        b[0] = ((ms >> 40) & 0xff) as u8
+        b[1] = ((ms >> 32) & 0xff) as u8
+        b[2] = ((ms >> 24) & 0xff) as u8
+        b[3] = ((ms >> 16) & 0xff) as u8
+        b[4] = ((ms >> 8) & 0xff) as u8
+        b[5] = (ms & 0xff) as u8
+        // version 7 in the high nibble, top 4 counter bits in the low nibble
+        b[6] = 0x70 as u8 | (((seq >> 8) & 0x0f) as u8)
+        b[7] = (seq & 0xff) as u8
+        // variant 10xx, low 6 bits stay random
+        b[8] = (b[8] & 0x3f as u8) | 0x80 as u8
+        return Uuid {
+            bytes: b
+        }
+    }
+
+    // Parse the canonical 8-4-4-4-12 hex form, e.g.
+    // "550e8400-e29b-41d4-a716-446655440000". Case-insensitive. Returns None for
+    // anything else — no braces, no "urn:uuid:" prefix, no unhyphenated form.
+    fn parse(s: &string): Option<Uuid> {
+        if s.len != 36 {
+            return Option.None
+        }
+        var b: [u8; 16] = [0 as u8; 16]
+        var i: i64 = 0
+        var out: i64 = 0
+        while i < 36 {
+            if i == 8 || i == 13 || i == 18 || i == 23 {
+                if s[i] != '-' {
+                    return Option.None
+                }
+                i = i + 1
+            } else {
+                let hi = _hexNibble(s[i])
+                let lo = _hexNibble(s[i + 1])
+                if hi < 0 || lo < 0 {
+                    return Option.None
+                }
+                b[out] = ((hi << 4) | lo) as u8
+                out = out + 1
+                i = i + 2
+            }
+        }
+        let parsed = Uuid {
+            bytes: b
+        }
+        return Option.Some(parsed)
+    }
+
+    // Canonical lowercase text form, 36 characters.
+    fn toString(self: &Self): string {
+        var s = ""
+        var i: i64 = 0
+        while i < 16 {
+            if i == 4 || i == 6 || i == 8 || i == 10 {
+                s.push('-')
+            }
+            _byteToHex(self.bytes[i], s)
+            i = i + 1
+        }
+        return s
+    }
+
+    // True for the all-zero UUID, the conventional "no id yet" sentinel.
+    fn isNil(self: &Self): bool {
+        var i: i64 = 0
+        while i < 16 {
+            if self.bytes[i] != 0 {
+                return false
+            }
+            i = i + 1
+        }
+        return true
+    }
+
+    // Version nibble: 4 for v4, 7 for v7, 0 for the nil UUID.
+    fn version(self: &Self): i32 {
+        return (self.bytes[6] >> 4) as i32
+    }
+
+    // Variant field: 2 for the RFC 4122/9562 variant (10xx), 0 for the nil UUID
+    // and other NCS-reserved values, 6 for the legacy Microsoft variant, 7 reserved.
+    fn variant(self: &Self): i32 {
+        let b = self.bytes[8]
+        if (b & 0x80 as u8) == 0 {
+            return 0
+        }
+        if (b & 0x40 as u8) == 0 {
+            return 2
+        }
+        if (b & 0x20 as u8) == 0 {
+            return 6
+        }
+        return 7
+    }
+
+    // Unix-epoch milliseconds encoded in a v7 UUID. Meaningless for other
+    // versions, so check `version() == 7` first.
+    fn timestampMs(self: &Self): i64 {
+        var ms: i64 = 0
+        var i: i64 = 0
+        while i < 6 {
+            ms = (ms << 8) | (self.bytes[i] as i64)
+            i = i + 1
+        }
+        return ms
+    }
+}
+
+impl Eq for Uuid {
+    fn eq(self: &Self, other: &Self): bool {
+        var i: i64 = 0
+        while i < 16 {
+            if self.bytes[i] != other.bytes[i] {
+                return false
+            }
+            i = i + 1
+        }
+        return true
     }
 }

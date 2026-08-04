@@ -36,7 +36,7 @@ pub struct ArgParser {
 }
 
 // Parsed command-line arguments.
-// Access values with .getString(), .getI64(), .getU16(), .getBool().
+// Access values with .getString() (Option), .getI64(), .getU16(), .getBool().
 // Check presence with .has(). Positional args in .positional field.
 pub struct ParsedArgs {
     prog: string,
@@ -426,16 +426,26 @@ fn argparseIsNumeric(s: &string): bool {
 }
 
 impl ParsedArgs {
-    // Get the string value of a flag by its long name.
-    fn getString(self: &Self, name: &string): string {
+    // Value of the flag or positional `name`, or None if it has no value:
+    // either `name` was never declared, or it was declared with no default and
+    // not supplied. `--name ""` is supplied, so it is Some("").
+    //
+    // A declared default is the value when the flag is absent, so it comes back
+    // as Some. An empty default is how addString spells "no default" (helpText
+    // only prints a default when it is non-empty), which is why the check is on
+    // the value's length and not on a separate flag.
+    fn getString(self: &Self, name: &string): Option<string> {
         var i: i64 = 0
         while i < self.entries.len {
             if self.entries[i].name == name {
-                return self.entries[i].value.clone()
+                if self.entries[i].present || self.entries[i].value.len > 0 {
+                    return Option.Some(self.entries[i].value.clone())
+                }
+                return Option.None
             }
             i = i + 1
         }
-        return ""
+        return Option.None
     }
 
     // Get an integer value of a flag. Exits if the value is not numeric.

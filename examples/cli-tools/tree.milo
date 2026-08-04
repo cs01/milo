@@ -56,10 +56,7 @@ pub fn main(): i32 {
     parser.addI64("level", "L", "max display depth", 0)
     let args = parser.parse()
 
-    var root: string = "."
-    if args.has("dir") {
-        root = args.getString("dir")
-    }
+    let root: string = args.getString("dir") ?? "."
 
     let maxLevel = args.getI64("level")
 

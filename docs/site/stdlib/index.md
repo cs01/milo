@@ -131,7 +131,7 @@ fn homeHandler(ctx: &mut Context): Response {
 }
 
 fn jsonHandler(ctx: &mut Context): Response {
-    let name = ctx.query("name")
+    let name = ctx.query("name") ?? "world"
     return ctx.json($"\{\"hello\": \"{name}\"}")
 }
 

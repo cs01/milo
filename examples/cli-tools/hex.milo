@@ -48,7 +48,7 @@ pub fn main(): i32 {
     var maxLength: i64 = args.getI64("length")
     var skipBytes: i64 = args.getI64("skip")
 
-    let content = match readFile(args.getString("file")) {
+    let content = match readFile(args.getString("file") ?? "") {
         Result.Ok(data) => data
         Result.Err(e) => {
             print("hex: ", e)

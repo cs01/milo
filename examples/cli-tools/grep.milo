@@ -200,8 +200,8 @@ pub fn main(): i32 {
     parser.addBool("no-color", "C", "disable colored output")
     let args = parser.parse()
 
-    let pattern = args.getString("pattern")
-    let target = args.getString("file")
+    let pattern = args.getString("pattern") ?? ""
+    let target = args.getString("file") ?? ""
     let ignoreCase = args.getBool("ignore-case")
     let recursive = args.getBool("recursive")
 

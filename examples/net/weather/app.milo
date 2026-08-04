@@ -77,7 +77,7 @@ pub fn cityMatchesState(c: &City, stateQ: &string): bool {
 // it can't prefix-match ("red" never reaches Redwood City) — so the lookup that
 // actually drives the search box lives here.
 pub fn citiesHandler(ctx: &mut Context): Response {
-    let raw = (ctx.query("q").trim()).toLower()
+    let raw = ((ctx.query("q") ?? "").trim()).toLower()
     if raw.len == 0 {
         return ctx.json("[]")
     }

@@ -18,7 +18,7 @@ fn main(): i32 {
     parser.addOptionalPositional("title", "Optional title prefix")
 
     let args = parser.parse()
-    let name = args.getString("name")
+    let name = args.getString("name") ?? ""
 
     if args.getBool("loud") {
         print($"HELLO, {name}!")
@@ -193,10 +193,12 @@ struct ParsedArgs {
 ### getString
 
 ```milo
-fn getString(args: &ParsedArgs, key: &string): Option<string>
+fn ParsedArgs.getString(self: &ParsedArgs, name: &string): Option<string>
 ```
 
-Get a string value by flag name or positional name.
+Value of the flag or positional `name`. `None` when the name was never declared, or
+was declared with no default and not supplied; `--flag ""` is `Some("")`. A declared
+default is a value, so it comes back as `Some`. Use `?? "fallback"` to collapse.
 
 ### getI64
 

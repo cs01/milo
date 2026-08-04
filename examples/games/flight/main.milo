@@ -249,10 +249,10 @@ fn startIndex(o: &ParsedArgs): i64 {
     if o.getBool("procedural") {
         return 0 - 1
     }
-    if o.getString("city") != "" {
+    if (o.getString("city") ?? "") != "" {
         return 0 - 1
     }
-    let want = o.getString("place")
+    let want = o.getString("place") ?? ""
     if want == "" {
         // Open on San Francisco: it is the one with a landmark tour laid out.
         return placeIndex("sf")
@@ -274,7 +274,7 @@ fn placesFor(o: &ParsedArgs, idx: i64): Vec<City> {
         v.push(cityEmpty())
         return v
     }
-    let path = o.getString("city")
+    let path = o.getString("city") ?? ""
     if path != "" {
         v.push(loadFile(path))
         return v
@@ -335,7 +335,7 @@ pub fn main(): i32 {
     // spending it on San Francisco to then be asked which place you wanted is the
     // wrong order — `--place`, `--city` and `--procedural` all say the answer
     // already, so the screen only appears when nothing has.
-    if placeIdx >= 0 && o.getString("place") == "" {
+    if placeIdx >= 0 && (o.getString("place") ?? "") == "" {
         let pick = chooseRegion(scr, gw, c, s, inp, ev, placeIdx)
         if pick < 0 {
             gpuWorldFree(scr.gl, gw)

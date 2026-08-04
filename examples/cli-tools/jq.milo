@@ -325,12 +325,12 @@ pub fn main(): i32 {
     parser.addBool("raw-output", "r", "output raw strings without quotes")
     let args = parser.parse()
 
-    let filter = args.getString("filter")
+    let filter = args.getString("filter") ?? ""
     let raw = args.getBool("raw-output")
 
     var content: string = ""
     if args.has("file") {
-        content = match readFile(args.getString("file")) {
+        content = match readFile(args.getString("file") ?? "") {
             Result.Ok(data) => data
             Result.Err(e) => {
                 print($"jq: {e}")

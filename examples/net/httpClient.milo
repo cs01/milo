@@ -161,8 +161,8 @@ pub fn main(): i32 {
     parser.addBool("verbose", "v", "show method and URL before request")
     let args = parser.parse()
 
-    let url = args.getString("url")
-    let outputFile = args.getString("output")
+    let url = args.getString("url") ?? ""
+    let outputFile = args.getString("output") ?? ""
     let verbose = args.getBool("verbose")
 
     if verbose {

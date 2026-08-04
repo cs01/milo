@@ -74,10 +74,11 @@ _Undocumented._
 ### `findHeader`
 
 ```milo
-pub fn findHeader(headers: &string, name: &string): string
+pub fn findHeader(headers: &string, name: &string): Option<string>
 ```
 
-_Undocumented._
+Value of `name` in a CRLF-joined header block, or None if it is not there.
+A header sent with no value (`Accept:`) is present: Some("").
 
 ### `formEncode`
 
@@ -88,16 +89,6 @@ pub fn formEncode(fields: &Vec<FormField>): string
 Build an application/x-www-form-urlencoded body. Both halves of every pair are
 percent-encoded, so a value containing '&' or '=' can't split the body into
 extra fields.
-
-### `hasHeader`
-
-```milo
-pub fn hasHeader(headers: &string, name: &string): bool
-```
-
-Is `name` present as a header in a CRLF-joined header block? Unlike findHeader
-this distinguishes "absent" from "present but empty", which is what the
-default-header logic in buildRequest needs.
 
 ### `isHttps`
 
@@ -142,10 +133,11 @@ _Undocumented._
 ### `Response.header`
 
 ```milo
-fn Response.header(self: &Response, name: &string): string
+fn Response.header(self: &Response, name: &string): Option<string>
 ```
 
-Look up a response header by name (case-insensitive).
+Value of response header `name` (case-insensitive), or None if the
+response did not carry it. A header sent with an empty value is Some("").
 
 ### `Response.json`
 

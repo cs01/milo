@@ -244,8 +244,9 @@ impl Response {
         return self.status >= 200 && self.status < 300
     }
 
-    // Look up a response header by name (case-insensitive).
-    fn header(self: &Self, name: &string): string {
+    // Value of response header `name` (case-insensitive), or None if the
+    // response did not carry it. A header sent with an empty value is Some("").
+    fn header(self: &Self, name: &string): Option<string> {
         return findHeader(self.headers, name)
     }
 }
@@ -275,10 +276,14 @@ fn strEqNocase(a: &string, ai: i64, b: &string, blen: i64): bool {
     return true
 }
 
-pub fn findHeader(headers: &string, name: &string): string {
+// Value of `name` in a CRLF-joined header block, or None if it is not there.
+// A header sent with no value (`Accept:`) is present: Some("").
+pub fn findHeader(headers: &string, name: &string): Option<string> {
     // search for "Name: value" in headers (case-insensitive name match)
     var i: i64 = 0
-    while i + name.len + 1 < headers.len {
+    // Bound is `i + name.len`, not `+ 1`: the colon is the last byte that must
+    // exist, so a value-less header at the very end of the block still matches.
+    while i + name.len < headers.len {
         // check if we're at line start (i==0 or preceded by \n)
         if i == 0 || headers[i - 1] == '\n' {
             if strEqNocase(headers, i, name, name.len) && headers[i + name.len] == ':' {
@@ -291,28 +296,12 @@ pub fn findHeader(headers: &string, name: &string): string {
                 while end < headers.len && headers[end] != '\r' && headers[end] != '\n' {
                     end = end + 1
                 }
-                return headers.substr(start, end)
+                return Option.Some(headers.substr(start, end))
             }
         }
         i = i + 1
     }
-    return ""
-}
-
-// Is `name` present as a header in a CRLF-joined header block? Unlike findHeader
-// this distinguishes "absent" from "present but empty", which is what the
-// default-header logic in buildRequest needs.
-pub fn hasHeader(headers: &string, name: &string): bool {
-    var i: i64 = 0
-    while i + name.len < headers.len {
-        if i == 0 || headers[i - 1] == '\n' {
-            if strEqNocase(headers, i, name, name.len) && headers[i + name.len] == ':' {
-                return true
-            }
-        }
-        i = i + 1
-    }
-    return false
+    return Option.None
 }
 
 // Hex value of an ASCII hex digit, or -1. The -1 is load-bearing: decodeChunked
@@ -415,7 +404,7 @@ pub fn parseResponse(raw: string): Response {
     let headers = parseRawHeaders(raw)
     var body = parseBody(raw)
     // handle chunked transfer encoding
-    let te = findHeader(headers, "Transfer-Encoding")
+    let te = findHeader(headers, "Transfer-Encoding") ?? ""
     if te.startsWith("chunked") {
         body = decodeChunked(body)
     }
@@ -546,10 +535,10 @@ pub fn buildRequest(host: &string, path: &string, opts: &FetchOptions): string {
     if opts.headers.len > 0 {
         req = req + opts.headers.clone() + "\r\n"
     }
-    if !hasHeader(opts.headers, "Accept") {
+    if findHeader(opts.headers, "Accept").isNone() {
         req = req + "Accept: */*\r\n"
     }
-    if !hasHeader(opts.headers, "User-Agent") {
+    if findHeader(opts.headers, "User-Agent").isNone() {
         req = req + "User-Agent: milo/0.1\r\n"
     }
     if opts.body.len > 0 {
@@ -592,7 +581,8 @@ fn doFetch(url: string, opts: FetchOptions): Result<Response, NetError> {
 
     // follow redirects (301, 302, 307, 308)
     if r.status == 301 || r.status == 302 || r.status == 307 || r.status == 308 {
-        let loc = r.header("Location")
+        // An empty Location is as unfollowable as a missing one, so both collapse here.
+        let loc = r.header("Location") ?? ""
         if loc.len > 0 {
             var redirOpts = FetchOptions {
                 method: opts.method.clone(),

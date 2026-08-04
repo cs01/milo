@@ -32,7 +32,7 @@ pub fn main(): i32 {
 
     var content: string = ""
     if args.has("file") {
-        content = match readFile(args.getString("file")) {
+        content = match readFile(args.getString("file") ?? "") {
             Result.Ok(data) => data
             Result.Err(e) => {
                 print($"shuf: {e}")

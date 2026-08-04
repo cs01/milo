@@ -24,7 +24,7 @@ pub fn main(): i32 {
     let p = parseResponse(plain)
     print(p.status)
     print(p.text())
-    print(p.header("content-type"))
+    print(p.header("content-type") ?? "<absent>")
 
     // A Transfer-Encoding that merely *contains* "chunked" later on must not
     // trigger chunk decoding — the check is a prefix test, not a substring one.

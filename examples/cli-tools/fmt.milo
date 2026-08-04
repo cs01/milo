@@ -1285,7 +1285,7 @@ pub fn main(): i32 {
     var src: string = ""
     var path: string = ""
     if hasFile {
-        path = args.getString("file")
+        path = args.getString("file") ?? ""
         let result = readFile(path)
         src = result ?? ""
     } else {

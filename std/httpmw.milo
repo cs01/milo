@@ -20,7 +20,7 @@ from "std/deflate" import {
 // Token from an `Authorization: Bearer <token>` header; "" if absent or wrong
 // scheme. Scheme match is case-insensitive (RFC 7235 §2.1), the token is not.
 pub fn bearerToken(ctx: &Context): string {
-    let auth = ctx.header("Authorization")
+    let auth = ctx.header("Authorization") ?? ""
     let prefixLen: i64 = 7 // "Bearer "
     if auth.len <= prefixLen {
         return ""
@@ -87,7 +87,7 @@ pub fn acceptsGzip(headerVal: &string): bool {
 // recomputed from the (compressed) body downstream, so no manual length bookkeeping.
 pub fn gzip(ctx: &mut Context, next: (&mut Context) => Response): Response {
     let resp = next(ctx)
-    if !acceptsGzip(ctx.header("Accept-Encoding")) {
+    if !acceptsGzip(ctx.header("Accept-Encoding") ?? "") {
         return resp
     }
     // Flatten the response to (status, contentType, body); NotFound is too small to

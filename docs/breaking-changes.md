@@ -11,6 +11,41 @@ last-verified: 2026-08-03
 Source-level breaks, newest first. Milo is pre-1.0 and does not promise
 compatibility, but every break belongs here with the migration spelled out.
 
+## HTTP, fetch and argparse lookups return `Option<string>` (2026-08-03)
+
+"Absent" and "present with an empty value" were the same value (`""`) across the
+whole HTTP stack, so `?q=` was indistinguishable from no `?q=`, and a
+`Cookie: session=` from no cookie at all. `std/env` already answered this with
+`Option`; now the rest of the stdlib gives the same answer. Affects
+`Context.query/param/header/cookie`, `fetch.findHeader`, `Response.header` and
+`ParsedArgs.getString`.
+
+`fetch.hasHeader` is **removed** — it existed only to work around `findHeader`
+returning `""` for both cases, and is now exactly `findHeader(...).isSome()`.
+
+`findHeader` also no longer misses a value-less header at the very end of a block
+(`"A: b\r\nX-Empty:"` used to report absent).
+
+Note `unwrapOr` is Copy-only, so the collapse spelling is `??`, not `.unwrapOr("")`.
+
+```milo
+// before
+let q = ctx.query("q")
+if q.len == 0 { return badRequest() }
+let out = args.getString("output")
+if !hasHeader(hdrs, "Accept") { … }
+
+// after
+let Option.Some(q) = ctx.query("q") else { return badRequest() }  // absent
+if q.len == 0 { return badRequest() }                             // present but empty
+let out = args.getString("output") ?? ""
+if findHeader(hdrs, "Accept").isNone() { … }
+```
+
+`ParsedArgs.getString` is `None` when the name was never declared, or was declared
+with no default and not supplied; `--flag ""` is `Some("")`, and a declared default
+comes back as `Some(default)`. `has(name)` still answers "was it on the command line".
+
 ## `std/zip` and `std/png` report corrupt input instead of aborting (2026-08-03)
 
 A truncated or corrupt archive/image previously ran a header read off the end of the

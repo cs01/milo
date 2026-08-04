@@ -69,7 +69,16 @@ shipped entries are deleted). This file is a record of a single audit, not a liv
   string. Go returns `([]byte, error)`, Rust returns `Result`. Should be `Result` on all four.
   Ref: `std/base64.milo`, `std/base32.milo`, `std/hex.milo`, `std/csv.milo`.
 
-- [ ] **"Absent" collapses into "empty" across the HTTP stack.** `Context.query/param/header/cookie`,
+- [x] **"Absent" collapses into "empty" across the HTTP stack.** *All eight accessors now return
+  `Option<string>`; `?foo=` is `Some("")` and a missing `?foo` is `None`. `fetch.hasHeader`
+  deleted — it existed **only** because `findHeader` couldn't answer this, and said so in its own
+  doc comment. Found and fixed a latent bug the conflation had been hiding: `findHeader` missed a
+  value-less header at the end of a block (`"A: b\r\nX-Empty:"` read as absent). No `queryOr`
+  family added — `??` is the collapse spelling (`unwrapOr` is Copy-only, so `.unwrapOr("")` does
+  not compile on `Option<string>`). Two follow-ups left behind: `std/ws` has a **third** private
+  copy of header lookup returning bare `string`, and `std/http`'s `Response` enum collides with
+  `std/fetch`'s `Response` struct in the flat namespace — a file cannot import both today.*
+  Original finding: `Context.query/param/header/cookie`,
   `fetch.findHeader`, `Response.header` and `ParsedArgs.getString` all return bare `string`.
   Milo *has* `Option` and `Env.get` already uses it — so the same concept has two answers in
   one stdlib. Rust returns `Option`, Node returns `undefined`; only Go shares this wart, and

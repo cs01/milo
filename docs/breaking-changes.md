@@ -11,6 +11,33 @@ last-verified: 2026-08-03
 Source-level breaks, newest first. Milo is pre-1.0 and does not promise
 compatibility, but every break belongs here with the migration spelled out.
 
+## `std/json` integer reads are exact; bare literals are validated (2026-08-04)
+
+**`Json.i64` / `i64At` / `i64Path` / `asI64` / `curInt` now answer `None` where they used
+to answer a wrong number.** The parser accumulates every JSON number into an `f64` and
+these read through it, so anything past 2^53 came back truncated
+(`18446744073709551615` → `9223372036854775807`) and `1.5` came back as `1`. An integer
+read now re-scans the literal's own source span and answers `Some` only for a literal that
+is an integer and fits `i64`; fractional values, exponent forms (`1e2`) and out-of-range
+values are `None`. Migration for callers that want the old leniency: read `f64` and cast —
+`(doc.f64(k) ?? 0.0) as i64`. `std/jwt`'s `exp`/`nbf`/`iat` were migrated that way, because
+RFC 7519 NumericDate permits a fraction. New: `Json.curUint(cur): Option<u64>` for values
+above `i64::MAX`.
+
+**`Json.parse` rejects malformed bare literals.** `true`/`false`/`null` were matched on
+their first byte alone, so `nope` parsed as `null`, `trux` as `true` and `fals3` as
+`false`. All three are now `Err`.
+
+**A method literally named `json` no longer auto-stringifies a scalar argument.**
+`ctx.json(42)` type-checked and then crashed codegen; it is now an ordinary type error —
+write `ctx.json(n.toString())`. The same call site now also errors when the struct has a
+field the built-in stringifier cannot serialize; it previously emitted `"tags":` with no
+value at all, i.e. invalid JSON. Add `@derive(Json)` and the call routes through the
+derived `toJson`.
+
+**`@json` is now a reserved struct-field attribute** — it renames a field on the wire for
+`@derive(Json)`, and is an error on a struct that does not derive it.
+
 ## `fs.isSymlink` now answers correctly on arm64 Linux (2026-08-04)
 
 Not a source-level break — no signature changed — but the answer changed on one platform.

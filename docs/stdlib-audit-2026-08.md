@@ -176,7 +176,17 @@ Ranked by how often real programs hit them.
   half of u64), and `Json.i64` on a fractional value now answers `None` — `std/jwt`'s
   `exp`/`nbf`/`iat` read as f64 because RFC 7519 NumericDate permits a fraction.
   Deliberately out: `HashMap` fields (needs cursor key enumeration), payload-carrying enums
-  (no encoding the derive is entitled to pick), serde-style `default`, deny-unknown-keys.*
+  (no encoding the derive is entitled to pick), serde-style `default`, deny-unknown-keys.
+  `Option<Option<T>>` is **rejected**, not supported: `Some(None)` and an absent field both
+  encode as `null`, so it cannot round-trip — serde has the same hole, and refusing beats
+  collapsing.*
+
+  **Two hazards inherent to the design, worth knowing before leaning on it:** the derive
+  turns private field *names* into a wire contract, and renaming one changes the wire format
+  with no diagnostic (`@json` is the escape hatch, but you have to remember to reach for it).
+  And "absent = `None`" is a silent default, so a typo in a `@json` rename on an `Option`
+  field decodes to `None` forever rather than failing. Both are how every derive-based codec
+  works; neither is visible at the call site.
 
 - [x] **No binary / byte-order helpers.** *`std/binary` shipped — `Bytes` namespace, 37 methods:
   `read`/`write` × u8/i8/{u,i}{16,32,64} × Le/Be, f32/f64, plus `Bytes.has`. Out-of-bounds is

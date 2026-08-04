@@ -8,15 +8,22 @@ import type { TypeKind } from "./types";
 // exactly as native reads it. Escaping every non-printable byte also keeps the
 // emitted file plain ASCII, so it can't be corrupted by an encoding guess.
 const __utf8 = new TextEncoder();
+// Built in bounded chunks joined once, not one `out += ` per byte: an `@embedFile` asset
+// arrives here as one char per byte, so a multi-megabyte embed makes this the hottest loop
+// in the backend. Same shape as `escapeCString` in codegen.ts, which cost ~15s on
+// `examples/games/flight` before it was chunked.
 export function jsByteString(s: string): string {
-  let out = '"';
+  const parts: string[] = ['"'];
+  let chunk = "";
   for (const b of __utf8.encode(s)) {
-    if (b === 0x22) out += '\\"';
-    else if (b === 0x5c) out += "\\\\";
-    else if (b >= 0x20 && b < 0x7f) out += String.fromCharCode(b);
-    else out += "\\x" + b.toString(16).padStart(2, "0");
+    if (b === 0x22) chunk += '\\"';
+    else if (b === 0x5c) chunk += "\\\\";
+    else if (b >= 0x20 && b < 0x7f) chunk += String.fromCharCode(b);
+    else chunk += "\\x" + b.toString(16).padStart(2, "0");
+    if (chunk.length >= 65536) { parts.push(chunk); chunk = ""; }
   }
-  return out + '"';
+  parts.push(chunk, '"');
+  return parts.join("");
 }
 
 // Host-independent runtime helpers. Everything that does IO (`__print`, `__flush`,

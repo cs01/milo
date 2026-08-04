@@ -292,6 +292,10 @@ class CheckAbort extends Error {
   }
 }
 
+// Narrow an Expr union member by its `kind`, so an extracted arm keeps exactly the
+// type the switch gave it without importing every node interface.
+type ExprOf<K extends Expr["kind"]> = Extract<Expr, { kind: K }>;
+
 export class TypeChecker {
   private warningConfig: WarningConfig;
   private diagnostics: Diagnostic[] = [];
@@ -5661,6 +5665,12 @@ export class TypeChecker {
     return type;
   }
 
+  // Dispatch only. Every arm with a body of its own lives in a `check<Kind>Expr` method
+  // below, because the alternative was one 2,500-line scope in which twenty-five arms
+  // shared a set of locals and nothing said which arm was allowed to touch what. The
+  // ownership arms are the reason it matters: they are the ones that have to be readable
+  // in isolation to be reviewable at all. Arms that are a single `return` stay inline —
+  // extracting those buys no isolation and costs a jump.
   private checkExpr(expr: Expr): TypeKind {
     const sp = expr.span;
     switch (expr.kind) {
@@ -5678,2340 +5688,2345 @@ export class TypeChecker {
       case "StringLit":
         this.checkMissingInterpolation(expr);
         return this.setType(expr, { tag: "string" });
-      case "Ident": {
-        const info = this.lookup(expr.name);
-        if (!info) {
-          // named function used as a value (function pointer)
-          const fnSig = this.functions.get(expr.name);
-          if (fnSig) {
-            const fnType: TypeKind = { tag: "fn", params: fnSig.params.map(p => p.type), ret: fnSig.ret };
-            return this.setType(expr, fnType);
-          }
-          this.error(`undefined variable '${expr.name}'`, sp, this.nameHint(expr.name));
-          return this.setType(expr, { tag: "unknown" });
-        }
-        info.read = true;
-        // A use of the WHOLE value while one of its places is missing. Reading `p.b`
-        // after `p.a` left is fine — a different place — and that read reaches here
-        // with placeBaseDepth raised, because `p` is only the base of a narrower place.
-        // Anything else names the value itself: an argument, a receiver, a return, a
-        // print. Handing that on shows the zeroed field as if it were data.
-        if (this.placeBaseDepth === 0 && info.movedPlaces && info.movedPlaces.size > 0) {
-          const gone = [...info.movedPlaces][0]!;
-          this.error(`'${expr.name}' is incomplete: '${expr.name}${gone}' was moved out of it`, sp,
-            `using '${expr.name}' as a whole would show that field as empty — clone it at the point of transfer, or use the fields that are still there`);
-        }
-        if (info.moved) {
-          if (this.movedByPattern.has(info)) {
-            this.error(
-              `use of moved variable '${expr.name}'`,
-              sp,
-              `the pattern moved '${expr.name}''s payload out, so reading '${expr.name}' here would see a zeroed value. Use the pattern's binding instead, or compute what you need from '${expr.name}' before the match.`,
-            );
-          } else {
-            // A `@noCopy` handle is deliberately not clonable — duplicating one is how you
-            // get the double-free it exists to prevent — so the usual hint would name a fix
-            // that cannot be applied. Point at the ownership question instead.
-            const t = this.deref(info.type);
-            const noCopy = t.tag === "struct" && this.structs.get(t.name)?.noCopy === true;
-            this.error(
-              `use of moved variable '${expr.name}'`,
-              sp,
-              noCopy
-                // A type from a package is stored as `gl$Texture2D`; the hint tells the
-                // reader what to type, and what they type is the bare name they imported.
-                ? `'${expr.name}' is a @noCopy handle, so transferring it ended its life here — copying one would let the same resource be released twice. Borrow it (pass it to a '&${typeName(t).split("$").pop()}' parameter) instead of transferring, or reorder so the transfer is last.`
-                : `ownership of '${expr.name}' was transferred earlier and it can no longer be used here. To keep it alive, clone it at the point of transfer: '${expr.name}.clone()'.`,
-            );
-          }
-          return this.setType(expr, this.deref(info.type));
-        }
-        return this.setType(expr, this.deref(info.type));
+      case "Ident":
+        return this.checkIdentExpr(expr);
+      case "BinOp":
+        return this.checkBinOpExpr(expr);
+      case "UnaryOp":
+        return this.checkUnaryOpExpr(expr);
+      case "Call":
+        return this.checkCallExpr(expr);
+      case "StructLit":
+        return this.checkStructLitExpr(expr);
+      case "FieldAccess":
+        return this.checkFieldAccessExpr(expr);
+      case "ArrayLit":
+        return this.checkArrayLitExpr(expr);
+      case "ArrayRepeat":
+        return this.checkArrayRepeatExpr(expr);
+      case "IndexAccess":
+        return this.checkIndexAccessExpr(expr);
+      case "EnumLit":
+        return this.checkEnumLitExpr(expr);
+      case "Unwrap":
+        return this.checkUnwrapExpr(expr);
+      case "Propagate":
+        return this.checkPropagateExpr(expr);
+      case "DefaultValue":
+        return this.checkDefaultValueExpr(expr);
+      case "CastExpr":
+        return this.checkCastExprExpr(expr);
+      case "Closure":
+        return this.checkClosureExpr(expr);
+      case "MethodCall":
+        return this.checkMethodCallExpr(expr);
+      case "RangeExpr":
+        this.error("range expressions can only be used in 'for' loops", sp);
+        return this.setType(expr, { tag: "unknown" });
+      case "IsExpr":
+        return this.checkIsExprExpr(expr);
+      case "IfExpr":
+        return this.checkIfExprExpr(expr);
+      case "MatchExpr":
+        return this.checkMatchExprExpr(expr);
+    }
+  }
+
+  private checkIdentExpr(expr: ExprOf<"Ident">): TypeKind {
+    const sp = expr.span;
+    const info = this.lookup(expr.name);
+    if (!info) {
+      // named function used as a value (function pointer)
+      const fnSig = this.functions.get(expr.name);
+      if (fnSig) {
+        const fnType: TypeKind = { tag: "fn", params: fnSig.params.map(p => p.type), ret: fnSig.ret };
+        return this.setType(expr, fnType);
       }
-      case "BinOp": {
-        if (expr.op === "&&" || expr.op === "||") {
-          const lt = this.checkExpr(expr.left);
-          const rt = this.checkExpr(expr.right);
-          if (lt.tag !== "bool" && lt.tag !== "unknown") this.error(`operator '${expr.op}' requires bool, got ${typeName(lt)}`, sp);
-          if (rt.tag !== "bool" && rt.tag !== "unknown") this.error(`operator '${expr.op}' requires bool, got ${typeName(rt)}`, sp);
-          return this.setType(expr, { tag: "bool" });
-        }
-        let lt = this.checkExpr(expr.left);
-        let rt = this.checkExpr(expr.right);
-        // `x == f64.NAN` / `!=` is a dead comparison: NaN equals nothing, itself included,
-        // so the branch is unreachable (==) or always taken (!=). Steer to isNan.
-        if (expr.op === "==" || expr.op === "!=") {
-          const nanSide = [expr.left, expr.right].some(
-            e => e.kind === "FieldAccess" && floatNamespaceConst(e)?.value !== undefined && Number.isNaN(floatNamespaceConst(e)!.value));
-          if (nanSide) this.warn("nan-comparison",
-            `comparison with NaN is always ${expr.op === "==" ? "false" : "true"}`, sp,
-            "NaN is never equal to any value; use isNan(x) from std/math");
-        }
-        // Integer constant coercion: a constant-int operand (a literal, or an
-        // all-literal subexpression like `1 << 5` or `(a + 1)`) defaults to i32
-        // but should adopt the other operand's int width. Retype the constant
-        // subtree to match, so `i64var + 1 * 2` type-checks without an `as i64`.
-        if (lt.tag === "int" && rt.tag === "int" && !typeEq(lt, rt)) {
-          if (this.isConstIntExpr(expr.right)) {
-            this.retypeConstInt(expr.right, lt);
-            rt = lt;
-          } else if (this.isConstIntExpr(expr.left)) {
-            this.retypeConstInt(expr.left, rt);
-            lt = rt;
-          } else {
-            // A flexible const-int binding (`let m = if.. { const arms }`) used
-            // against a concrete int of another width adopts that width here —
-            // this is its first read, so nothing was committed at the default.
-            const rInfo = this.flexIntBinding(expr.right);
-            const lInfo = this.flexIntBinding(expr.left);
-            if (rInfo && this.resolveFlexInt(rInfo, lt, expr.right)) rt = lt;
-            else if (lInfo && this.resolveFlexInt(lInfo, rt, expr.left)) lt = rt;
-          }
-        }
-        // Same treatment for float widths: `1.0 - f32val` retypes the literal to
-        // f32 rather than demanding an annotated constant.
-        if (lt.tag === "float" && rt.tag === "float" && !typeEq(lt, rt)) {
-          if (this.isConstFloatExpr(expr.right)) {
-            this.retypeConstFloat(expr.right, lt);
-            rt = lt;
-          } else if (this.isConstFloatExpr(expr.left)) {
-            this.retypeConstFloat(expr.left, rt);
-            lt = rt;
-          }
-        }
-        const arithOps = ["+", "-", "*", "/", "%"];
-        const cmpOps = ["==", "!=", "<", ">", "<=", ">="];
-        const bitOps = ["&", "|", "^", "<<", ">>"];
-        if (expr.op === "+" && lt.tag === "string" && rt.tag === "string") {
-          return this.setType(expr, { tag: "string" });
-        }
-        if ((expr.op === "==" || expr.op === "!=") && lt.tag === "string" && rt.tag === "string") {
-          return this.setType(expr, { tag: "bool" });
-        }
-        if (arithOps.includes(expr.op)) {
-          // operator overloading for struct types
-          if (lt.tag === "struct" && rt.tag === "struct" && typeEq(lt, rt)) {
-            const opTraitMap: Record<string, string> = { "+": "Add", "-": "Sub", "*": "Mul", "/": "Div" };
-            const traitName = opTraitMap[expr.op];
-            if (traitName && this.typeImplementsTrait(lt.name, traitName)) {
-              const methodName = traitName.toLowerCase();
-              const mangled = `${lt.name}$${traitName}$${methodName}`;
-              this.resolvedOperators.set(expr, mangled);
-              this.autoBorrowed.set(expr.left, { mutable: false });
-              this.autoBorrowed.set(expr.right, { mutable: false });
-              return this.setType(expr, lt);
-            }
-          }
-          if (!isNumeric(lt) && lt.tag !== "unknown") this.error(`operator '${expr.op}' requires numeric type, got ${typeName(lt)}`, sp);
-          if (!typeEq(lt, rt) && lt.tag !== "unknown" && rt.tag !== "unknown") this.error(`type mismatch in '${expr.op}': ${typeName(lt)} vs ${typeName(rt)}`, sp);
-          if (lt.tag === "int" && expr.left.kind === "IntLit" && expr.right.kind === "IntLit") {
-            this.checkConstOverflow(expr.left.value, expr.right.value, expr.op, lt, sp);
-          }
-          // range propagation: compute output range from operand ranges
-          if (lt.tag === "int" && rt.tag === "int" && lt.min !== undefined && lt.max !== undefined && rt.min !== undefined && rt.max !== undefined) {
-            const propagated = this.propagateRange(lt, rt, expr.op);
-            if (propagated) return this.setType(expr, propagated);
-          }
+      this.error(`undefined variable '${expr.name}'`, sp, this.nameHint(expr.name));
+      return this.setType(expr, { tag: "unknown" });
+    }
+    info.read = true;
+    // A use of the WHOLE value while one of its places is missing. Reading `p.b`
+    // after `p.a` left is fine — a different place — and that read reaches here
+    // with placeBaseDepth raised, because `p` is only the base of a narrower place.
+    // Anything else names the value itself: an argument, a receiver, a return, a
+    // print. Handing that on shows the zeroed field as if it were data.
+    if (this.placeBaseDepth === 0 && info.movedPlaces && info.movedPlaces.size > 0) {
+      const gone = [...info.movedPlaces][0]!;
+      this.error(`'${expr.name}' is incomplete: '${expr.name}${gone}' was moved out of it`, sp,
+        `using '${expr.name}' as a whole would show that field as empty — clone it at the point of transfer, or use the fields that are still there`);
+    }
+    if (info.moved) {
+      if (this.movedByPattern.has(info)) {
+        this.error(
+          `use of moved variable '${expr.name}'`,
+          sp,
+          `the pattern moved '${expr.name}''s payload out, so reading '${expr.name}' here would see a zeroed value. Use the pattern's binding instead, or compute what you need from '${expr.name}' before the match.`,
+        );
+      } else {
+        // A `@noCopy` handle is deliberately not clonable — duplicating one is how you
+        // get the double-free it exists to prevent — so the usual hint would name a fix
+        // that cannot be applied. Point at the ownership question instead.
+        const t = this.deref(info.type);
+        const noCopy = t.tag === "struct" && this.structs.get(t.name)?.noCopy === true;
+        this.error(
+          `use of moved variable '${expr.name}'`,
+          sp,
+          noCopy
+            // A type from a package is stored as `gl$Texture2D`; the hint tells the
+            // reader what to type, and what they type is the bare name they imported.
+            ? `'${expr.name}' is a @noCopy handle, so transferring it ended its life here — copying one would let the same resource be released twice. Borrow it (pass it to a '&${typeName(t).split("$").pop()}' parameter) instead of transferring, or reorder so the transfer is last.`
+            : `ownership of '${expr.name}' was transferred earlier and it can no longer be used here. To keep it alive, clone it at the point of transfer: '${expr.name}.clone()'.`,
+        );
+      }
+      return this.setType(expr, this.deref(info.type));
+    }
+    return this.setType(expr, this.deref(info.type));
+  }
+
+  private checkBinOpExpr(expr: ExprOf<"BinOp">): TypeKind {
+    const sp = expr.span;
+    if (expr.op === "&&" || expr.op === "||") {
+      const lt = this.checkExpr(expr.left);
+      const rt = this.checkExpr(expr.right);
+      if (lt.tag !== "bool" && lt.tag !== "unknown") this.error(`operator '${expr.op}' requires bool, got ${typeName(lt)}`, sp);
+      if (rt.tag !== "bool" && rt.tag !== "unknown") this.error(`operator '${expr.op}' requires bool, got ${typeName(rt)}`, sp);
+      return this.setType(expr, { tag: "bool" });
+    }
+    let lt = this.checkExpr(expr.left);
+    let rt = this.checkExpr(expr.right);
+    // `x == f64.NAN` / `!=` is a dead comparison: NaN equals nothing, itself included,
+    // so the branch is unreachable (==) or always taken (!=). Steer to isNan.
+    if (expr.op === "==" || expr.op === "!=") {
+      const nanSide = [expr.left, expr.right].some(
+        e => e.kind === "FieldAccess" && floatNamespaceConst(e)?.value !== undefined && Number.isNaN(floatNamespaceConst(e)!.value));
+      if (nanSide) this.warn("nan-comparison",
+        `comparison with NaN is always ${expr.op === "==" ? "false" : "true"}`, sp,
+        "NaN is never equal to any value; use isNan(x) from std/math");
+    }
+    // Integer constant coercion: a constant-int operand (a literal, or an
+    // all-literal subexpression like `1 << 5` or `(a + 1)`) defaults to i32
+    // but should adopt the other operand's int width. Retype the constant
+    // subtree to match, so `i64var + 1 * 2` type-checks without an `as i64`.
+    if (lt.tag === "int" && rt.tag === "int" && !typeEq(lt, rt)) {
+      if (this.isConstIntExpr(expr.right)) {
+        this.retypeConstInt(expr.right, lt);
+        rt = lt;
+      } else if (this.isConstIntExpr(expr.left)) {
+        this.retypeConstInt(expr.left, rt);
+        lt = rt;
+      } else {
+        // A flexible const-int binding (`let m = if.. { const arms }`) used
+        // against a concrete int of another width adopts that width here —
+        // this is its first read, so nothing was committed at the default.
+        const rInfo = this.flexIntBinding(expr.right);
+        const lInfo = this.flexIntBinding(expr.left);
+        if (rInfo && this.resolveFlexInt(rInfo, lt, expr.right)) rt = lt;
+        else if (lInfo && this.resolveFlexInt(lInfo, rt, expr.left)) lt = rt;
+      }
+    }
+    // Same treatment for float widths: `1.0 - f32val` retypes the literal to
+    // f32 rather than demanding an annotated constant.
+    if (lt.tag === "float" && rt.tag === "float" && !typeEq(lt, rt)) {
+      if (this.isConstFloatExpr(expr.right)) {
+        this.retypeConstFloat(expr.right, lt);
+        rt = lt;
+      } else if (this.isConstFloatExpr(expr.left)) {
+        this.retypeConstFloat(expr.left, rt);
+        lt = rt;
+      }
+    }
+    const arithOps = ["+", "-", "*", "/", "%"];
+    const cmpOps = ["==", "!=", "<", ">", "<=", ">="];
+    const bitOps = ["&", "|", "^", "<<", ">>"];
+    if (expr.op === "+" && lt.tag === "string" && rt.tag === "string") {
+      return this.setType(expr, { tag: "string" });
+    }
+    if ((expr.op === "==" || expr.op === "!=") && lt.tag === "string" && rt.tag === "string") {
+      return this.setType(expr, { tag: "bool" });
+    }
+    if (arithOps.includes(expr.op)) {
+      // operator overloading for struct types
+      if (lt.tag === "struct" && rt.tag === "struct" && typeEq(lt, rt)) {
+        const opTraitMap: Record<string, string> = { "+": "Add", "-": "Sub", "*": "Mul", "/": "Div" };
+        const traitName = opTraitMap[expr.op];
+        if (traitName && this.typeImplementsTrait(lt.name, traitName)) {
+          const methodName = traitName.toLowerCase();
+          const mangled = `${lt.name}$${traitName}$${methodName}`;
+          this.resolvedOperators.set(expr, mangled);
+          this.autoBorrowed.set(expr.left, { mutable: false });
+          this.autoBorrowed.set(expr.right, { mutable: false });
           return this.setType(expr, lt);
         }
-        if (bitOps.includes(expr.op)) {
-          if (lt.tag !== "int" && lt.tag !== "unknown") this.error(`operator '${expr.op}' requires integer type, got ${typeName(lt)}`, sp);
-          if (!typeEq(lt, rt) && lt.tag !== "unknown" && rt.tag !== "unknown") this.error(`type mismatch in '${expr.op}': ${typeName(lt)} vs ${typeName(rt)}`, sp);
-          return this.setType(expr, lt);
-        }
-        if (cmpOps.includes(expr.op)) {
-          if (!typeEq(lt, rt) && lt.tag !== "unknown" && rt.tag !== "unknown") this.error(`type mismatch in '${expr.op}': ${typeName(lt)} vs ${typeName(rt)}`, sp);
-          if (expr.op === "==" || expr.op === "!=") {
-            if (lt.tag === "enum") {
-              const info = this.enums.get(lt.name);
-              if (info) {
-                let hasPayload = false;
-                for (const [, v] of info.variants) {
-                  if (v.fields.length > 0) { hasPayload = true; break; }
-                }
-                if (hasPayload) {
-                  this.error(`cannot use '${expr.op}' on enum '${lt.name}' with payload-bearing variants`, sp, `use 'match' to compare`);
-                }
-              }
-            } else if (lt.tag === "struct") {
-              if (this.typeImplementsTrait(lt.name, "Eq")) {
-                const mangled = `${lt.name}$Eq$eq`;
-                this.resolvedOperators.set(expr, mangled);
-                this.autoBorrowed.set(expr.left, { mutable: false });
-                this.autoBorrowed.set(expr.right, { mutable: false });
-              } else {
-                this.error(`cannot use '${expr.op}' on ${typeName(lt)}`, sp, `implement Eq trait or compare individual fields`);
-              }
-            } else if (lt.tag === "vec" || lt.tag === "hashmap" || lt.tag === "heap" || lt.tag === "array") {
-              this.error(`cannot use '${expr.op}' on ${typeName(lt)}`, sp, `compare individual fields or implement an eq method`);
+      }
+      if (!isNumeric(lt) && lt.tag !== "unknown") this.error(`operator '${expr.op}' requires numeric type, got ${typeName(lt)}`, sp);
+      if (!typeEq(lt, rt) && lt.tag !== "unknown" && rt.tag !== "unknown") this.error(`type mismatch in '${expr.op}': ${typeName(lt)} vs ${typeName(rt)}`, sp);
+      if (lt.tag === "int" && expr.left.kind === "IntLit" && expr.right.kind === "IntLit") {
+        this.checkConstOverflow(expr.left.value, expr.right.value, expr.op, lt, sp);
+      }
+      // range propagation: compute output range from operand ranges
+      if (lt.tag === "int" && rt.tag === "int" && lt.min !== undefined && lt.max !== undefined && rt.min !== undefined && rt.max !== undefined) {
+        const propagated = this.propagateRange(lt, rt, expr.op);
+        if (propagated) return this.setType(expr, propagated);
+      }
+      return this.setType(expr, lt);
+    }
+    if (bitOps.includes(expr.op)) {
+      if (lt.tag !== "int" && lt.tag !== "unknown") this.error(`operator '${expr.op}' requires integer type, got ${typeName(lt)}`, sp);
+      if (!typeEq(lt, rt) && lt.tag !== "unknown" && rt.tag !== "unknown") this.error(`type mismatch in '${expr.op}': ${typeName(lt)} vs ${typeName(rt)}`, sp);
+      return this.setType(expr, lt);
+    }
+    if (cmpOps.includes(expr.op)) {
+      if (!typeEq(lt, rt) && lt.tag !== "unknown" && rt.tag !== "unknown") this.error(`type mismatch in '${expr.op}': ${typeName(lt)} vs ${typeName(rt)}`, sp);
+      if (expr.op === "==" || expr.op === "!=") {
+        if (lt.tag === "enum") {
+          const info = this.enums.get(lt.name);
+          if (info) {
+            let hasPayload = false;
+            for (const [, v] of info.variants) {
+              if (v.fields.length > 0) { hasPayload = true; break; }
             }
+            if (hasPayload) {
+              this.error(`cannot use '${expr.op}' on enum '${lt.name}' with payload-bearing variants`, sp, `use 'match' to compare`);
+            }
+          }
+        } else if (lt.tag === "struct") {
+          if (this.typeImplementsTrait(lt.name, "Eq")) {
+            const mangled = `${lt.name}$Eq$eq`;
+            this.resolvedOperators.set(expr, mangled);
+            this.autoBorrowed.set(expr.left, { mutable: false });
+            this.autoBorrowed.set(expr.right, { mutable: false });
           } else {
-            // ordering ops: numeric or string
-            if (!isNumeric(lt) && lt.tag !== "string" && lt.tag !== "unknown") this.error(`operator '${expr.op}' requires numeric or string type, got ${typeName(lt)}`, sp);
+            this.error(`cannot use '${expr.op}' on ${typeName(lt)}`, sp, `implement Eq trait or compare individual fields`);
           }
-          return this.setType(expr, { tag: "bool" });
+        } else if (lt.tag === "vec" || lt.tag === "hashmap" || lt.tag === "heap" || lt.tag === "array") {
+          this.error(`cannot use '${expr.op}' on ${typeName(lt)}`, sp, `compare individual fields or implement an eq method`);
         }
-        this.error(`unknown operator '${expr.op}'`, sp);
+      } else {
+        // ordering ops: numeric or string
+        if (!isNumeric(lt) && lt.tag !== "string" && lt.tag !== "unknown") this.error(`operator '${expr.op}' requires numeric or string type, got ${typeName(lt)}`, sp);
+      }
+      return this.setType(expr, { tag: "bool" });
+    }
+    this.error(`unknown operator '${expr.op}'`, sp);
+    return this.setType(expr, { tag: "unknown" });
+  }
+
+  private checkUnaryOpExpr(expr: ExprOf<"UnaryOp">): TypeKind {
+    const sp = expr.span;
+    const ot = this.checkExpr(expr.operand);
+    if (expr.op === "*") {
+      if (ot.tag === "ref") return this.setType(expr, ot.inner);
+      if (ot.tag === "heap") return this.setType(expr, ot.inner);
+      if (ot.tag === "ptr") {
+        this.requireUnsafe(`pointer dereference requires 'unsafe' block`, sp);
+        return this.setType(expr, ot.inner);
+      }
+      if (ot.tag !== "unknown") this.error(`cannot dereference type '${typeName(ot)}' (expected &T, *T or Heap<T>)`, sp);
+      return this.setType(expr, { tag: "unknown" });
+    }
+    if (expr.op === "-") {
+      if (!isNumeric(ot) && ot.tag !== "unknown") this.error(`unary '-' requires numeric type, got ${typeName(ot)}`, sp);
+      if (ot.tag === "int" && expr.operand.kind === "IntLit") {
+        const result = -expr.operand.value;
+        const { bits, signed } = ot;
+        const min = signed ? -(2n ** BigInt(bits - 1)) : 0n;
+        const max = signed ? 2n ** BigInt(bits - 1) - 1n : 2n ** BigInt(bits) - 1n;
+        if (result < min || result > max) {
+          this.error(`negation of ${expr.operand.value} overflows ${signed ? "i" : "u"}${bits} (range ${min}..${max})`, sp);
+        }
+      }
+      return this.setType(expr, ot);
+    }
+    if (expr.op === "!") {
+      if (ot.tag !== "bool" && ot.tag !== "unknown") this.error(`unary '!' requires bool, got ${typeName(ot)}`, sp);
+      return this.setType(expr, { tag: "bool" });
+    }
+    if (expr.op === "~") {
+      if (ot.tag !== "int" && ot.tag !== "unknown") this.error(`unary '~' requires integer type, got ${typeName(ot)}`, sp);
+      return this.setType(expr, ot);
+    }
+    if (expr.op === "&") {
+      // `&` is a borrow marker that appears only in a TYPE (`&T` = a borrowed
+      // param). It is not an expression operator. Borrows are implicit (pass
+      // the value bare); a raw pointer comes from `v.ptr()` / `x.addrOf()`.
+      this.error(`'&x' is not an expression — borrows are implicit (pass 'x' bare). For a raw pointer use 'v.ptr()' (a collection's data) or 'x.addrOf()' (any value, in an unsafe block).`, sp);
+      return this.setType(expr, { tag: "ptr", inner: ot });
+    }
+    return this.setType(expr, { tag: "unknown" });
+  }
+
+  private checkCallExpr(expr: ExprOf<"Call">): TypeKind {
+    const sp = expr.span;
+    // `old(e)` is contract-only syntax, not a function: it names the value `e` held when
+    // the function was entered. Recognised before the name lookup so a body-local
+    // helper actually called `old` keeps working outside an `ensures`.
+    if (expr.func === "old" && !this.functions.has("old") && this.contractScope === "ensures") {
+      if (expr.args.length !== 1) { this.error(`old() takes exactly one argument`, sp); return this.setType(expr, { tag: "unknown" }); }
+      const inner = this.checkExpr(expr.args[0]!);
+      // A snapshot is a by-value copy taken at entry. Copying a Vec/string/struct there
+      // would either alias the caller's buffer or clone silently on every debug call, so
+      // the pre-state is restricted to what fits in a register — which is also the only
+      // fragment the SMT translator models.
+      if (inner.tag !== "int" && inner.tag !== "float" && inner.tag !== "bool" && inner.tag !== "unknown") {
+        this.error(`old() takes a scalar (integer, float, or bool), got ${typeName(inner)}`, sp,
+          `snapshot a scalar projection instead, e.g. old(v.len)`);
+      }
+      return this.setType(expr, inner);
+    }
+    if (expr.func === "old" && this.contractScope !== "ensures" && !this.functions.has("old")) {
+      this.error(`old() may only appear in an 'ensures' clause`, sp,
+        `there is no pre-state to name in a ${this.contractScope === null ? "function body" : `'${this.contractScope}' clause`}`);
+      return this.setType(expr, { tag: "unknown" });
+    }
+    if (expr.func === "sizeOf") {
+      if (!expr.typeArgs || expr.typeArgs.length !== 1) { this.error(`sizeOf requires exactly one type argument`, sp); return this.setType(expr, { tag: "unknown" }); }
+      if (expr.args.length !== 0) { this.error(`sizeOf takes no value arguments`, sp); return this.setType(expr, { tag: "unknown" }); }
+      const resolved = this.resolve(expr.typeArgs[0]);
+      this.sizeOfTypes.set(expr, resolved);
+      return this.setType(expr, { tag: "int", bits: 64, signed: true });
+    }
+    if (expr.func === "offsetOf") {
+      if (!expr.typeArgs || expr.typeArgs.length !== 1) { this.error(`offsetOf requires exactly one type argument`, sp); return this.setType(expr, { tag: "unknown" }); }
+      if (expr.args.length !== 1 || expr.args[0].kind !== "StringLit") { this.error(`offsetOf requires one string argument (field name)`, sp); return this.setType(expr, { tag: "unknown" }); }
+      const resolved = this.resolve(expr.typeArgs[0]);
+      if (resolved.tag !== "struct") { this.error(`offsetOf requires a struct type`, sp); return this.setType(expr, { tag: "unknown" }); }
+      const info = this.structs.get(resolved.name);
+      const fieldName = (expr.args[0] as import("./ast").StringLit).value;
+      if (info && !info.fields.find(f => f.name === fieldName)) {
+        this.error(`struct '${resolved.name}' has no field '${fieldName}'`, sp);
+      }
+      this.sizeOfTypes.set(expr, resolved);
+      this.offsetOfFields.set(expr, fieldName);
+      return this.setType(expr, { tag: "int", bits: 64, signed: true });
+    }
+    if (expr.func === "zeroed") {
+      if (!expr.typeArgs || expr.typeArgs.length !== 1) { this.error(`zeroed requires exactly one type argument`, sp); return this.setType(expr, { tag: "unknown" }); }
+      if (expr.args.length !== 0) { this.error(`zeroed takes no value arguments`, sp); return this.setType(expr, { tag: "unknown" }); }
+      this.requireUnsafe(`zeroed<T>() can only be used in unsafe blocks`, sp);
+      const resolved = this.resolve(expr.typeArgs[0]);
+      this.sizeOfTypes.set(expr, resolved);
+      return this.setType(expr, resolved);
+    }
+    // `replace(place, value)` and `swap(a, b)`: memory intrinsics whose bodies cannot be
+    // written in safe Milo (they move a value out of a place and refill it). From the
+    // caller's view the move rules are ordinary — a `&mut` borrow of the place(s) plus a
+    // by-value move of `value` — so they need no exclusivity machinery, only load/store
+    // codegen. Gated on the name being otherwise unbound, so a user fn of the same name wins.
+    if (expr.func === "replace" && !this.functions.has("replace")) {
+      if (expr.args.length !== 2) { this.error(`replace(place, value) takes exactly two arguments`, sp); return this.setType(expr, { tag: "unknown" }); }
+      const place = this.resolveAssignTarget(expr.args[0]);
+      if (!place.mutable) this.error(`cannot replace through an immutable place`, expr.args[0].span, `declare it with 'var'`);
+      // value moves in, old occupant moves out to the caller — the place stays valid,
+      // so it is NOT invalidated here (only the by-value argument is consumed).
+      const vt = this.checkExprWithHint(expr.args[1], place.type);
+      if (vt.tag !== "unknown" && place.type.tag !== "unknown" && !typeEq(vt, place.type)) {
+        this.error(`replace: value type ${typeName(vt)} does not match place type ${typeName(place.type)}`, expr.args[1].span);
+      }
+      this.tryMove(expr.args[1]);
+      return this.setType(expr, place.type);
+    }
+    if (expr.func === "swap" && !this.functions.has("swap")) {
+      if (expr.args.length !== 2) { this.error(`swap(a, b) takes exactly two arguments`, sp); return this.setType(expr, { tag: "void" }); }
+      const a = this.resolveAssignTarget(expr.args[0]);
+      const b = this.resolveAssignTarget(expr.args[1]);
+      if (!a.mutable) this.error(`cannot swap through an immutable place`, expr.args[0].span, `declare it with 'var'`);
+      if (!b.mutable) this.error(`cannot swap through an immutable place`, expr.args[1].span, `declare it with 'var'`);
+      if (a.type.tag !== "unknown" && b.type.tag !== "unknown" && !typeEq(a.type, b.type)) {
+        this.error(`swap: operands have different types ${typeName(a.type)} and ${typeName(b.type)}`, sp);
+      }
+      return this.setType(expr, { tag: "void" });
+    }
+    if (expr.func === "Heap") {
+      if (expr.args.length !== 1) { this.error(`Heap() expects 1 argument, got ${expr.args.length}`, sp); return this.setType(expr, { tag: "unknown" }); }
+      const argType = this.checkExpr(expr.args[0]);
+      this.tryMove(expr.args[0]);
+      return this.setType(expr, { tag: "heap", inner: argType });
+    }
+    if (expr.func === "embedFile") {
+      // Bare `embedFile(...)` reads like an ordinary call but is compile-time-only:
+      // the argument must be a literal and the file is inlined during compilation.
+      // `@` is how Milo already marks compiler-level constructs (@cLayout, @link).
+      if (!expr.sigil) {
+        this.warn("bare-embedfile",
+          `'embedFile' is a compile-time builtin — write '@embedFile(...)'`,
+          sp, `the '@' marks it as compiler magic, not a runtime call`, "embedFile".length);
+      }
+      if (expr.args.length !== 1) { this.error(`embedFile() expects 1 argument, got ${expr.args.length}`, sp); return this.setType(expr, { tag: "unknown" }); }
+      const arg = expr.args[0];
+      if (arg.kind !== "StringLit") { this.error(`embedFile() argument must be a string literal`, sp); return this.setType(expr, { tag: "unknown" }); }
+      return this.setType(expr, { tag: "string" });
+    }
+    if (expr.func === "targetOs") {
+      // Compile-time constant string naming the target OS ("darwin"/"linux"/
+      // "windows"), resolved during lowering. Like @embedFile it is compiler
+      // magic, not a runtime call, so it wants the `@` sigil; both arms of an
+      // `if @targetOs() == "..."` type-check, only the dead one is folded away.
+      if (!expr.sigil) {
+        this.warn("bare-targetos",
+          `'targetOs' is a compile-time builtin — write '@targetOs()'`,
+          sp, `the '@' marks it as compiler magic, not a runtime call`, "targetOs".length);
+      }
+      if (expr.args.length !== 0) { this.error(`targetOs() takes no arguments, got ${expr.args.length}`, sp); return this.setType(expr, { tag: "unknown" }); }
+      return this.setType(expr, { tag: "string" });
+    }
+    if (expr.func === "jsonStringify") {
+      if (expr.args.length !== 1) { this.error(`jsonStringify() expects 1 argument, got ${expr.args.length}`, sp); return this.setType(expr, { tag: "unknown" }); }
+      const argType = this.checkExpr(expr.args[0]);
+      if (argType.tag !== "struct" && argType.tag !== "string" && argType.tag !== "bool" && argType.tag !== "int" && argType.tag !== "float") {
+        this.error(`jsonStringify: unsupported type '${typeName(argType)}'`, sp);
+      }
+      // codegen only serializes scalar fields — anything else silently
+      // produced invalid JSON before this guard existed
+      if (argType.tag === "struct") {
+        const si = this.structs.get(argType.name);
+        for (const f of si?.fields ?? []) {
+          if (f.type.tag !== "string" && f.type.tag !== "bool" && f.type.tag !== "int" && f.type.tag !== "float") {
+            this.error(`jsonStringify: field '${f.name}' has unsupported type '${typeName(f.type)}'`, sp,
+              `only string, bool, integer, and float fields are supported — for nested or dynamic JSON use the std/json builders (jsonObj/jsonArr)`);
+          }
+        }
+      }
+      this.autoBorrowed.set(expr.args[0], { mutable: false });
+      return this.setType(expr, { tag: "string" });
+    }
+    // Generic function — infer type params from args, monomorphize
+    const genericFn = this.genericFns.get(expr.func);
+    if (genericFn) {
+      const argTypes: TypeKind[] = [];
+      for (const arg of expr.args) argTypes.push(this.checkExpr(arg));
+
+      if (expr.args.length !== genericFn.decl.params.length) {
+        this.error(`function '${expr.func}' expects ${genericFn.decl.params.length} args, got ${expr.args.length}`, sp);
         return this.setType(expr, { tag: "unknown" });
       }
-      case "UnaryOp": {
-        const ot = this.checkExpr(expr.operand);
-        if (expr.op === "*") {
-          if (ot.tag === "ref") return this.setType(expr, ot.inner);
-          if (ot.tag === "heap") return this.setType(expr, ot.inner);
-          if (ot.tag === "ptr") {
-            this.requireUnsafe(`pointer dereference requires 'unsafe' block`, sp);
-            return this.setType(expr, ot.inner);
-          }
-          if (ot.tag !== "unknown") this.error(`cannot dereference type '${typeName(ot)}' (expected &T, *T or Heap<T>)`, sp);
-          return this.setType(expr, { tag: "unknown" });
+
+      const typeMap = new Map<string, TypeKind>();
+      const literalInferred = new Set<string>();
+      // Explicit turbofish type args (promiseAll<T>(x)) seed the map up front;
+      // inference below fills any the caller left off. This is the only way to
+      // pin a param that appears nested past what inference walks (e.g. T in
+      // Vec<Promise<T>>).
+      if (expr.typeArgs && expr.typeArgs.length > 0) {
+        if (expr.typeArgs.length > genericFn.typeParams.length) {
+          this.error(`'${expr.func}' expects at most ${genericFn.typeParams.length} type argument(s), got ${expr.typeArgs.length}`, sp);
         }
-        if (expr.op === "-") {
-          if (!isNumeric(ot) && ot.tag !== "unknown") this.error(`unary '-' requires numeric type, got ${typeName(ot)}`, sp);
-          if (ot.tag === "int" && expr.operand.kind === "IntLit") {
-            const result = -expr.operand.value;
-            const { bits, signed } = ot;
-            const min = signed ? -(2n ** BigInt(bits - 1)) : 0n;
-            const max = signed ? 2n ** BigInt(bits - 1) - 1n : 2n ** BigInt(bits) - 1n;
-            if (result < min || result > max) {
-              this.error(`negation of ${expr.operand.value} overflows ${signed ? "i" : "u"}${bits} (range ${min}..${max})`, sp);
-            }
-          }
-          return this.setType(expr, ot);
+        for (let i = 0; i < expr.typeArgs.length && i < genericFn.typeParams.length; i++) {
+          typeMap.set(genericFn.typeParams[i], this.resolve(expr.typeArgs[i]));
         }
-        if (expr.op === "!") {
-          if (ot.tag !== "bool" && ot.tag !== "unknown") this.error(`unary '!' requires bool, got ${typeName(ot)}`, sp);
-          return this.setType(expr, { tag: "bool" });
-        }
-        if (expr.op === "~") {
-          if (ot.tag !== "int" && ot.tag !== "unknown") this.error(`unary '~' requires integer type, got ${typeName(ot)}`, sp);
-          return this.setType(expr, ot);
-        }
-        if (expr.op === "&") {
-          // `&` is a borrow marker that appears only in a TYPE (`&T` = a borrowed
-          // param). It is not an expression operator. Borrows are implicit (pass
-          // the value bare); a raw pointer comes from `v.ptr()` / `x.addrOf()`.
-          this.error(`'&x' is not an expression — borrows are implicit (pass 'x' bare). For a raw pointer use 'v.ptr()' (a collection's data) or 'x.addrOf()' (any value, in an unsafe block).`, sp);
-          return this.setType(expr, { tag: "ptr", inner: ot });
-        }
-        return this.setType(expr, { tag: "unknown" });
       }
-      case "Call": {
-        // `old(e)` is contract-only syntax, not a function: it names the value `e` held when
-        // the function was entered. Recognised before the name lookup so a body-local
-        // helper actually called `old` keeps working outside an `ensures`.
-        if (expr.func === "old" && !this.functions.has("old") && this.contractScope === "ensures") {
-          if (expr.args.length !== 1) { this.error(`old() takes exactly one argument`, sp); return this.setType(expr, { tag: "unknown" }); }
-          const inner = this.checkExpr(expr.args[0]!);
-          // A snapshot is a by-value copy taken at entry. Copying a Vec/string/struct there
-          // would either alias the caller's buffer or clone silently on every debug call, so
-          // the pre-state is restricted to what fits in a register — which is also the only
-          // fragment the SMT translator models.
-          if (inner.tag !== "int" && inner.tag !== "float" && inner.tag !== "bool" && inner.tag !== "unknown") {
-            this.error(`old() takes a scalar (integer, float, or bool), got ${typeName(inner)}`, sp,
-              `snapshot a scalar projection instead, e.g. old(v.len)`);
-          }
-          return this.setType(expr, inner);
-        }
-        if (expr.func === "old" && this.contractScope !== "ensures" && !this.functions.has("old")) {
-          this.error(`old() may only appear in an 'ensures' clause`, sp,
-            `there is no pre-state to name in a ${this.contractScope === null ? "function body" : `'${this.contractScope}' clause`}`);
-          return this.setType(expr, { tag: "unknown" });
-        }
-        if (expr.func === "sizeOf") {
-          if (!expr.typeArgs || expr.typeArgs.length !== 1) { this.error(`sizeOf requires exactly one type argument`, sp); return this.setType(expr, { tag: "unknown" }); }
-          if (expr.args.length !== 0) { this.error(`sizeOf takes no value arguments`, sp); return this.setType(expr, { tag: "unknown" }); }
-          const resolved = this.resolve(expr.typeArgs[0]);
-          this.sizeOfTypes.set(expr, resolved);
-          return this.setType(expr, { tag: "int", bits: 64, signed: true });
-        }
-        if (expr.func === "offsetOf") {
-          if (!expr.typeArgs || expr.typeArgs.length !== 1) { this.error(`offsetOf requires exactly one type argument`, sp); return this.setType(expr, { tag: "unknown" }); }
-          if (expr.args.length !== 1 || expr.args[0].kind !== "StringLit") { this.error(`offsetOf requires one string argument (field name)`, sp); return this.setType(expr, { tag: "unknown" }); }
-          const resolved = this.resolve(expr.typeArgs[0]);
-          if (resolved.tag !== "struct") { this.error(`offsetOf requires a struct type`, sp); return this.setType(expr, { tag: "unknown" }); }
-          const info = this.structs.get(resolved.name);
-          const fieldName = (expr.args[0] as import("./ast").StringLit).value;
-          if (info && !info.fields.find(f => f.name === fieldName)) {
-            this.error(`struct '${resolved.name}' has no field '${fieldName}'`, sp);
-          }
-          this.sizeOfTypes.set(expr, resolved);
-          this.offsetOfFields.set(expr, fieldName);
-          return this.setType(expr, { tag: "int", bits: 64, signed: true });
-        }
-        if (expr.func === "zeroed") {
-          if (!expr.typeArgs || expr.typeArgs.length !== 1) { this.error(`zeroed requires exactly one type argument`, sp); return this.setType(expr, { tag: "unknown" }); }
-          if (expr.args.length !== 0) { this.error(`zeroed takes no value arguments`, sp); return this.setType(expr, { tag: "unknown" }); }
-          this.requireUnsafe(`zeroed<T>() can only be used in unsafe blocks`, sp);
-          const resolved = this.resolve(expr.typeArgs[0]);
-          this.sizeOfTypes.set(expr, resolved);
-          return this.setType(expr, resolved);
-        }
-        // `replace(place, value)` and `swap(a, b)`: memory intrinsics whose bodies cannot be
-        // written in safe Milo (they move a value out of a place and refill it). From the
-        // caller's view the move rules are ordinary — a `&mut` borrow of the place(s) plus a
-        // by-value move of `value` — so they need no exclusivity machinery, only load/store
-        // codegen. Gated on the name being otherwise unbound, so a user fn of the same name wins.
-        if (expr.func === "replace" && !this.functions.has("replace")) {
-          if (expr.args.length !== 2) { this.error(`replace(place, value) takes exactly two arguments`, sp); return this.setType(expr, { tag: "unknown" }); }
-          const place = this.resolveAssignTarget(expr.args[0]);
-          if (!place.mutable) this.error(`cannot replace through an immutable place`, expr.args[0].span, `declare it with 'var'`);
-          // value moves in, old occupant moves out to the caller — the place stays valid,
-          // so it is NOT invalidated here (only the by-value argument is consumed).
-          const vt = this.checkExprWithHint(expr.args[1], place.type);
-          if (vt.tag !== "unknown" && place.type.tag !== "unknown" && !typeEq(vt, place.type)) {
-            this.error(`replace: value type ${typeName(vt)} does not match place type ${typeName(place.type)}`, expr.args[1].span);
-          }
-          this.tryMove(expr.args[1]);
-          return this.setType(expr, place.type);
-        }
-        if (expr.func === "swap" && !this.functions.has("swap")) {
-          if (expr.args.length !== 2) { this.error(`swap(a, b) takes exactly two arguments`, sp); return this.setType(expr, { tag: "void" }); }
-          const a = this.resolveAssignTarget(expr.args[0]);
-          const b = this.resolveAssignTarget(expr.args[1]);
-          if (!a.mutable) this.error(`cannot swap through an immutable place`, expr.args[0].span, `declare it with 'var'`);
-          if (!b.mutable) this.error(`cannot swap through an immutable place`, expr.args[1].span, `declare it with 'var'`);
-          if (a.type.tag !== "unknown" && b.type.tag !== "unknown" && !typeEq(a.type, b.type)) {
-            this.error(`swap: operands have different types ${typeName(a.type)} and ${typeName(b.type)}`, sp);
-          }
-          return this.setType(expr, { tag: "void" });
-        }
-        if (expr.func === "Heap") {
-          if (expr.args.length !== 1) { this.error(`Heap() expects 1 argument, got ${expr.args.length}`, sp); return this.setType(expr, { tag: "unknown" }); }
-          const argType = this.checkExpr(expr.args[0]);
-          this.tryMove(expr.args[0]);
-          return this.setType(expr, { tag: "heap", inner: argType });
-        }
-        if (expr.func === "embedFile") {
-          // Bare `embedFile(...)` reads like an ordinary call but is compile-time-only:
-          // the argument must be a literal and the file is inlined during compilation.
-          // `@` is how Milo already marks compiler-level constructs (@cLayout, @link).
-          if (!expr.sigil) {
-            this.warn("bare-embedfile",
-              `'embedFile' is a compile-time builtin — write '@embedFile(...)'`,
-              sp, `the '@' marks it as compiler magic, not a runtime call`, "embedFile".length);
-          }
-          if (expr.args.length !== 1) { this.error(`embedFile() expects 1 argument, got ${expr.args.length}`, sp); return this.setType(expr, { tag: "unknown" }); }
-          const arg = expr.args[0];
-          if (arg.kind !== "StringLit") { this.error(`embedFile() argument must be a string literal`, sp); return this.setType(expr, { tag: "unknown" }); }
-          return this.setType(expr, { tag: "string" });
-        }
-        if (expr.func === "targetOs") {
-          // Compile-time constant string naming the target OS ("darwin"/"linux"/
-          // "windows"), resolved during lowering. Like @embedFile it is compiler
-          // magic, not a runtime call, so it wants the `@` sigil; both arms of an
-          // `if @targetOs() == "..."` type-check, only the dead one is folded away.
-          if (!expr.sigil) {
-            this.warn("bare-targetos",
-              `'targetOs' is a compile-time builtin — write '@targetOs()'`,
-              sp, `the '@' marks it as compiler magic, not a runtime call`, "targetOs".length);
-          }
-          if (expr.args.length !== 0) { this.error(`targetOs() takes no arguments, got ${expr.args.length}`, sp); return this.setType(expr, { tag: "unknown" }); }
-          return this.setType(expr, { tag: "string" });
-        }
-        if (expr.func === "jsonStringify") {
-          if (expr.args.length !== 1) { this.error(`jsonStringify() expects 1 argument, got ${expr.args.length}`, sp); return this.setType(expr, { tag: "unknown" }); }
-          const argType = this.checkExpr(expr.args[0]);
-          if (argType.tag !== "struct" && argType.tag !== "string" && argType.tag !== "bool" && argType.tag !== "int" && argType.tag !== "float") {
-            this.error(`jsonStringify: unsupported type '${typeName(argType)}'`, sp);
-          }
-          // codegen only serializes scalar fields — anything else silently
-          // produced invalid JSON before this guard existed
-          if (argType.tag === "struct") {
-            const si = this.structs.get(argType.name);
-            for (const f of si?.fields ?? []) {
-              if (f.type.tag !== "string" && f.type.tag !== "bool" && f.type.tag !== "int" && f.type.tag !== "float") {
-                this.error(`jsonStringify: field '${f.name}' has unsupported type '${typeName(f.type)}'`, sp,
-                  `only string, bool, integer, and float fields are supported — for nested or dynamic JSON use the std/json builders (jsonObj/jsonArr)`);
-              }
+      for (let i = 0; i < argTypes.length; i++) {
+        const paramTy = declaredType(genericFn.decl.params[i]);
+        const argIsLiteral = expr.args[i].kind === "IntLit" || expr.args[i].kind === "CharLit" || expr.args[i].kind === "FloatLit";
+        // Direct match: param type IS a type param (e.g. val: T)
+        if (genericFn.typeParams.includes(paramTy.name)) {
+          const existing = typeMap.get(paramTy.name);
+          if (existing && !typeEq(existing, argTypes[i])) {
+            // numeric literal coercion: flex the literal to match the existing inference
+            if (argIsLiteral && existing.tag === argTypes[i].tag) {
+              this.exprTypes.set(expr.args[i], existing);
+              argTypes[i] = existing;
+            } else if (literalInferred.has(paramTy.name) && existing.tag === argTypes[i].tag) {
+              typeMap.set(paramTy.name, argTypes[i]);
+              literalInferred.delete(paramTy.name);
+            } else {
+              this.error(`conflicting inference for type parameter '${paramTy.name}'`, sp);
             }
+          } else if (!existing) {
+            typeMap.set(paramTy.name, argTypes[i]);
+            if (argIsLiteral) literalInferred.add(paramTy.name);
           }
-          this.autoBorrowed.set(expr.args[0], { mutable: false });
-          return this.setType(expr, { tag: "string" });
         }
-        // Generic function — infer type params from args, monomorphize
-        const genericFn = this.genericFns.get(expr.func);
-        if (genericFn) {
-          const argTypes: TypeKind[] = [];
-          for (const arg of expr.args) argTypes.push(this.checkExpr(arg));
-
-          if (expr.args.length !== genericFn.decl.params.length) {
-            this.error(`function '${expr.func}' expects ${genericFn.decl.params.length} args, got ${expr.args.length}`, sp);
-            return this.setType(expr, { tag: "unknown" });
-          }
-
-          const typeMap = new Map<string, TypeKind>();
-          const literalInferred = new Set<string>();
-          // Explicit turbofish type args (promiseAll<T>(x)) seed the map up front;
-          // inference below fills any the caller left off. This is the only way to
-          // pin a param that appears nested past what inference walks (e.g. T in
-          // Vec<Promise<T>>).
-          if (expr.typeArgs && expr.typeArgs.length > 0) {
-            if (expr.typeArgs.length > genericFn.typeParams.length) {
-              this.error(`'${expr.func}' expects at most ${genericFn.typeParams.length} type argument(s), got ${expr.typeArgs.length}`, sp);
-            }
-            for (let i = 0; i < expr.typeArgs.length && i < genericFn.typeParams.length; i++) {
-              typeMap.set(genericFn.typeParams[i], this.resolve(expr.typeArgs[i]));
-            }
-          }
-          for (let i = 0; i < argTypes.length; i++) {
-            const paramTy = declaredType(genericFn.decl.params[i]);
-            const argIsLiteral = expr.args[i].kind === "IntLit" || expr.args[i].kind === "CharLit" || expr.args[i].kind === "FloatLit";
-            // Direct match: param type IS a type param (e.g. val: T)
-            if (genericFn.typeParams.includes(paramTy.name)) {
-              const existing = typeMap.get(paramTy.name);
-              if (existing && !typeEq(existing, argTypes[i])) {
-                // numeric literal coercion: flex the literal to match the existing inference
-                if (argIsLiteral && existing.tag === argTypes[i].tag) {
-                  this.exprTypes.set(expr.args[i], existing);
-                  argTypes[i] = existing;
-                } else if (literalInferred.has(paramTy.name) && existing.tag === argTypes[i].tag) {
-                  typeMap.set(paramTy.name, argTypes[i]);
-                  literalInferred.delete(paramTy.name);
-                } else {
-                  this.error(`conflicting inference for type parameter '${paramTy.name}'`, sp);
-                }
-              } else if (!existing) {
-                typeMap.set(paramTy.name, argTypes[i]);
-                if (argIsLiteral) literalInferred.add(paramTy.name);
-              }
-            }
-            // Nested match: param type contains type params (e.g. &Arena<T>, Vec<T>)
-            if (paramTy.typeArgs) {
-              let argResolved = argTypes[i];
-              if (argResolved.tag === "ref") argResolved = argResolved.inner;
-              if (argResolved.tag === "struct") {
-                const info = this.structs.get(argResolved.name);
-                if (info?.baseName && info.typeArgs) {
-                  const gs = this.genericStructs.get(info.baseName);
-                  if (gs && info.baseName === paramTy.name) {
-                    for (let j = 0; j < paramTy.typeArgs.length && j < info.typeArgs.length; j++) {
-                      const ta = paramTy.typeArgs[j];
-                      if (genericFn.typeParams.includes(ta.name) && (!typeMap.has(ta.name) || literalInferred.has(ta.name))) {
-                        typeMap.set(ta.name, info.typeArgs[j]);
-                        literalInferred.delete(ta.name);
-                      }
-                    }
+        // Nested match: param type contains type params (e.g. &Arena<T>, Vec<T>)
+        if (paramTy.typeArgs) {
+          let argResolved = argTypes[i];
+          if (argResolved.tag === "ref") argResolved = argResolved.inner;
+          if (argResolved.tag === "struct") {
+            const info = this.structs.get(argResolved.name);
+            if (info?.baseName && info.typeArgs) {
+              const gs = this.genericStructs.get(info.baseName);
+              if (gs && info.baseName === paramTy.name) {
+                for (let j = 0; j < paramTy.typeArgs.length && j < info.typeArgs.length; j++) {
+                  const ta = paramTy.typeArgs[j];
+                  if (genericFn.typeParams.includes(ta.name) && (!typeMap.has(ta.name) || literalInferred.has(ta.name))) {
+                    typeMap.set(ta.name, info.typeArgs[j]);
+                    literalInferred.delete(ta.name);
                   }
                 }
               }
             }
-            // Function-typed param (e.g. f: (&T) => R): infer type params that
-            // appear only inside a closure's signature — notably R in arenaWith,
-            // which no other argument constrains. Strip matching refs and never
-            // overwrite a param already bound by an earlier argument.
-            if (paramTy.isFn && argTypes[i].tag === "fn") {
-              const argFn = argTypes[i] as Extract<TypeKind, { tag: "fn" }>;
-              const unifyFn = (mt: MiloType | undefined, tk: TypeKind | undefined) => {
-                if (!mt || !tk) return;
-                let t = tk;
-                if ((mt.isRef || mt.isRefMut) && t.tag === "ref") t = t.inner;
-                if (genericFn.typeParams.includes(mt.name)) {
-                  if (!typeMap.has(mt.name)) typeMap.set(mt.name, t);
-                  return;
-                }
-                if (mt.typeArgs) this.inferTypeParamsFromHint(mt, t, genericFn.typeParams, typeMap);
-              };
-              if (paramTy.fnParams) {
-                for (let k = 0; k < paramTy.fnParams.length && k < argFn.params.length; k++) {
-                  unifyFn(paramTy.fnParams[k], argFn.params[k]);
-                }
-              }
-              unifyFn(paramTy.fnRet, argFn.ret);
-            }
           }
-
-          // infer missing type params from return type hint
-          let missing = genericFn.typeParams.filter(p => !typeMap.has(p));
-          if (missing.length > 0 && this.returnHint) {
-            this.inferTypeParamsFromHint(genericFn.decl.retType, this.returnHint, genericFn.typeParams, typeMap);
-            missing = genericFn.typeParams.filter(p => !typeMap.has(p));
-          }
-          if (missing.length > 0) {
-            this.error(`cannot infer type parameter(s) '${missing.join("', '")}' for ${expr.func}`, sp);
-            return this.setType(expr, { tag: "unknown" });
-          }
-
-          const typeArgs = genericFn.typeParams.map(p => typeMap.get(p)!);
-          const mangled = this.monomorphizeFn(expr.func, typeArgs);
-          this.rewrittenCalls.set(expr, mangled);
-
-          const concreteSig = this.functions.get(mangled)!;
-          for (let i = 0; i < expr.args.length; i++) {
-            const sigParamTy = i < concreteSig.params.length ? concreteSig.params[i].type : undefined;
-            if (sigParamTy?.tag === "ref") {
-              this.setAutoBorrowChecked(expr.args[i], sigParamTy.mutable, sp);
-              continue;
-            }
-            // Auto-move closure args (parity with the non-generic call path):
-            // without this, a closure passed to a generic fn keeps its non-Copy
-            // captures owned by the enclosing scope, which then drops them while
-            // the closure still references them — a use-after-free. Skip when the
-            // closure mutates a capture (it must write back to the original).
-            if (expr.args[i].kind === "Closure" && i < concreteSig.params.length
-                && concreteSig.params[i].type.tag === "fn" && !(expr.args[i] as any).isMove) {
-              const caps = this.closureCaptures.get(expr.args[i]);
-              // A capture mutated in place needs write-back, so it cannot be
-              // move-captured; one merely read or moved-out is safe to move.
-              if (!caps?.some(c => c.mutatedInClosure)) (expr.args[i] as any).isMove = true;
-            }
-            this.tryMove(expr.args[i]);
-          }
-          // check requires contracts at call site (generic fn)
-          if (genericFn.decl) this.checkCallSiteContracts(genericFn.decl, expr.args, sp);
-
-          return this.setType(expr, this.functions.get(mangled)!.ret);
         }
+        // Function-typed param (e.g. f: (&T) => R): infer type params that
+        // appear only inside a closure's signature — notably R in arenaWith,
+        // which no other argument constrains. Strip matching refs and never
+        // overwrite a param already bound by an earlier argument.
+        if (paramTy.isFn && argTypes[i].tag === "fn") {
+          const argFn = argTypes[i] as Extract<TypeKind, { tag: "fn" }>;
+          const unifyFn = (mt: MiloType | undefined, tk: TypeKind | undefined) => {
+            if (!mt || !tk) return;
+            let t = tk;
+            if ((mt.isRef || mt.isRefMut) && t.tag === "ref") t = t.inner;
+            if (genericFn.typeParams.includes(mt.name)) {
+              if (!typeMap.has(mt.name)) typeMap.set(mt.name, t);
+              return;
+            }
+            if (mt.typeArgs) this.inferTypeParamsFromHint(mt, t, genericFn.typeParams, typeMap);
+          };
+          if (paramTy.fnParams) {
+            for (let k = 0; k < paramTy.fnParams.length && k < argFn.params.length; k++) {
+              unifyFn(paramTy.fnParams[k], argFn.params[k]);
+            }
+          }
+          unifyFn(paramTy.fnRet, argFn.ret);
+        }
+      }
 
-        // A callable in the local scope wins over a global of the same name. Globals used
-        // to be consulted first, so a parameter could never shadow one — which meant a
-        // user defining `fn handler` broke std/http's *internal* `handler(ctx)` call
-        // against its own param, reporting a type error inside a file the user never
-        // opened. Innermost binding wins, as everywhere else in the language.
-        const localCallable = this.lookup(expr.func);
-        const sig = (localCallable && (localCallable.type.tag === "fn" || localCallable.type.tag === "cfn")) ? undefined : this.functions.get(expr.func);
-        if (!sig) {
-          const varInfo = localCallable;
-          if (varInfo && (varInfo.type.tag === "fn" || varInfo.type.tag === "cfn")) {
-            varInfo.read = true;
-            const fnType = varInfo.type;
-            if (expr.args.length !== fnType.params.length) {
-              this.error(`closure expects ${fnType.params.length} args, got ${expr.args.length}`, sp);
-            }
-            for (let i = 0; i < Math.min(expr.args.length, fnType.params.length); i++) {
-              const paramType = fnType.params[i];
-              const hint = paramType.tag === "ref" ? paramType.inner : paramType;
-              const argType = this.checkExprWithHint(expr.args[i], hint);
-              if (paramType.tag === "ref") {
-                if (argType.tag === "ref" && typeEq(paramType.inner, argType.inner)) {
-                  continue;
-                }
-                this.setAutoBorrowChecked(expr.args[i], paramType.mutable, sp);
-                if (!typeEq(paramType.inner, argType) && argType.tag !== "unknown") {
-                  this.error(`closure argument ${i + 1}: expected ${typeName(paramType)}, got ${typeName(argType)}`, expr.args[i].span);
-                }
-              } else if (!typeEq(paramType, argType) && argType.tag !== "unknown") {
-                this.error(`closure argument ${i + 1}: expected ${typeName(paramType)}, got ${typeName(argType)}`, expr.args[i].span);
-              }
-            }
-            for (let i = 0; i < Math.min(expr.args.length, fnType.params.length); i++) {
-              if (fnType.params[i].tag === "ref") continue;
-              if (expr.args[i].kind === "Closure" && fnType.params[i].tag === "fn" && !(expr.args[i] as any).isMove) {
-                const caps = this.closureCaptures.get(expr.args[i]);
-                if (!caps?.some(c => c.mutable)) (expr.args[i] as any).isMove = true;
-              }
-              this.tryMove(expr.args[i]);
-            }
-            if (fnType.tag === "cfn") this.cfnCalls.set(expr, fnType);
-            else this.closureCalls.set(expr, fnType);
-            return this.setType(expr, fnType.ret);
-          }
-          // Promise(fn) → Promise<T>.run(fn) with T inferred from closure return type
-          if (expr.func === "Promise" && this.genericStructs.has("Promise") && expr.args.length === 1) {
-            const argType = this.checkExprWithHint(expr.args[0], { tag: "fn", params: [], ret: { tag: "unknown" } });
-            if (argType.tag !== "fn") {
-              this.error(`Promise() argument must be a function`, sp);
-              return this.setType(expr, { tag: "unknown" });
-            }
-            const mangled = this.monomorphizeStruct("Promise", [argType.ret]);
-            while (this._pendingImplFns.length > 0) {
-              const fn = this._pendingImplFns.shift()!;
-              this.checkFunction(fn);
-            }
-            const inherent = this.inherentImpls.get(mangled);
-            const runSig = inherent?.methods.get("run");
-            if (!runSig) {
-              this.error(`'${mangled}' has no 'run' method`, sp);
-              return this.setType(expr, { tag: "unknown" });
-            }
-            if (expr.args[0].kind === "Closure" && !(expr.args[0] as any).isMove) {
-              const caps = this.closureCaptures.get(expr.args[0]);
-              if (!caps?.some(c => c.mutable)) (expr.args[0] as any).isMove = true;
-            }
-            this.tryMove(expr.args[0]);
-            this.rewrittenCalls.set(expr, `${mangled}$run`);
-            return this.setType(expr, runSig.ret);
-          }
-          this.error(`undefined function '${expr.func}'`, sp); return this.setType(expr, { tag: "unknown" });
+      // infer missing type params from return type hint
+      let missing = genericFn.typeParams.filter(p => !typeMap.has(p));
+      if (missing.length > 0 && this.returnHint) {
+        this.inferTypeParamsFromHint(genericFn.decl.retType, this.returnHint, genericFn.typeParams, typeMap);
+        missing = genericFn.typeParams.filter(p => !typeMap.has(p));
+      }
+      if (missing.length > 0) {
+        this.error(`cannot infer type parameter(s) '${missing.join("', '")}' for ${expr.func}`, sp);
+        return this.setType(expr, { tag: "unknown" });
+      }
+
+      const typeArgs = genericFn.typeParams.map(p => typeMap.get(p)!);
+      const mangled = this.monomorphizeFn(expr.func, typeArgs);
+      this.rewrittenCalls.set(expr, mangled);
+
+      const concreteSig = this.functions.get(mangled)!;
+      for (let i = 0; i < expr.args.length; i++) {
+        const sigParamTy = i < concreteSig.params.length ? concreteSig.params[i].type : undefined;
+        if (sigParamTy?.tag === "ref") {
+          this.setAutoBorrowChecked(expr.args[i], sigParamTy.mutable, sp);
+          continue;
         }
-        if (expr.func === "assert") {
-          if (expr.args.length < 1 || expr.args.length > 2) {
-            this.error(`assert() expects 1-2 arguments, got ${expr.args.length}`, sp);
-            return this.setType(expr, { tag: "void" });
-          }
-          const condType = this.checkExpr(expr.args[0]);
-          if (condType.tag !== "bool" && condType.tag !== "unknown") {
-            this.error(`assert() condition must be bool, got ${typeName(condType)}`, sp);
-          }
-          if (expr.args.length === 2) {
-            const msgType = this.checkExpr(expr.args[1]);
-            if (msgType.tag !== "string" && msgType.tag !== "unknown") {
-              this.error(`assert() message must be a string, got ${typeName(msgType)}`, sp);
-            }
-          }
-          return this.setType(expr, { tag: "void" });
+        // Auto-move closure args (parity with the non-generic call path):
+        // without this, a closure passed to a generic fn keeps its non-Copy
+        // captures owned by the enclosing scope, which then drops them while
+        // the closure still references them — a use-after-free. Skip when the
+        // closure mutates a capture (it must write back to the original).
+        if (expr.args[i].kind === "Closure" && i < concreteSig.params.length
+            && concreteSig.params[i].type.tag === "fn" && !(expr.args[i] as any).isMove) {
+          const caps = this.closureCaptures.get(expr.args[i]);
+          // A capture mutated in place needs write-back, so it cannot be
+          // move-captured; one merely read or moved-out is safe to move.
+          if (!caps?.some(c => c.mutatedInClosure)) (expr.args[i] as any).isMove = true;
         }
-        if (expr.func === "max" || expr.func === "min") {
-          if (expr.args.length !== 2) {
-            this.error(`${expr.func}() expects 2 arguments, got ${expr.args.length}`, sp);
-            return this.setType(expr, { tag: "unknown" });
-          }
-          const aType = this.checkExpr(expr.args[0]);
-          const bType = this.checkExpr(expr.args[1]);
-          if (aType.tag !== "int" && aType.tag !== "float" && aType.tag !== "unknown") {
-            this.error(`${expr.func}() arguments must be numeric`, sp);
-            return this.setType(expr, { tag: "unknown" });
-          }
-          if (!typeEq(aType, bType) && bType.tag !== "unknown" && aType.tag !== "unknown") {
-            this.error(`${expr.func}() arguments must be the same type, got ${typeName(aType)} and ${typeName(bType)}`, sp);
-          }
-          return this.setType(expr, aType.tag !== "unknown" ? aType : bType);
+        this.tryMove(expr.args[i]);
+      }
+      // check requires contracts at call site (generic fn)
+      if (genericFn.decl) this.checkCallSiteContracts(genericFn.decl, expr.args, sp);
+
+      return this.setType(expr, this.functions.get(mangled)!.ret);
+    }
+
+    // A callable in the local scope wins over a global of the same name. Globals used
+    // to be consulted first, so a parameter could never shadow one — which meant a
+    // user defining `fn handler` broke std/http's *internal* `handler(ctx)` call
+    // against its own param, reporting a type error inside a file the user never
+    // opened. Innermost binding wins, as everywhere else in the language.
+    const localCallable = this.lookup(expr.func);
+    const sig = (localCallable && (localCallable.type.tag === "fn" || localCallable.type.tag === "cfn")) ? undefined : this.functions.get(expr.func);
+    if (!sig) {
+      const varInfo = localCallable;
+      if (varInfo && (varInfo.type.tag === "fn" || varInfo.type.tag === "cfn")) {
+        varInfo.read = true;
+        const fnType = varInfo.type;
+        if (expr.args.length !== fnType.params.length) {
+          this.error(`closure expects ${fnType.params.length} args, got ${expr.args.length}`, sp);
         }
-        if (sig.variadic) {
-          if (expr.args.length < sig.params.length) this.error(`function '${expr.func}' expects at least ${sig.params.length} args, got ${expr.args.length}`, sp);
-        } else if (expr.args.length !== sig.params.length) {
-          this.error(`function '${expr.func}' expects ${sig.params.length} args, got ${expr.args.length}`, sp);
-        }
-        for (let i = 0; i < Math.min(expr.args.length, sig.params.length); i++) {
-          const paramType = sig.params[i].type;
+        for (let i = 0; i < Math.min(expr.args.length, fnType.params.length); i++) {
+          const paramType = fnType.params[i];
           const hint = paramType.tag === "ref" ? paramType.inner : paramType;
           const argType = this.checkExprWithHint(expr.args[i], hint);
           if (paramType.tag === "ref") {
             if (argType.tag === "ref" && typeEq(paramType.inner, argType.inner)) {
-              // A `&[T]` slice is a %Vec *value*, not a bare pointer. To match the `ptr`
-              // param ABI it must be passed by reference (its address materialized) —
-              // otherwise a slice rvalue (`f(v[a..b])`, `f(c.view())`) is passed by value
-              // and the callee reads a garbage length. Other refs are already pointers.
-              if (paramType.inner.tag === "array" && paramType.inner.size === null) {
-                this.setAutoBorrowChecked(expr.args[i], paramType.mutable, sp);
-              }
               continue;
             }
             this.setAutoBorrowChecked(expr.args[i], paramType.mutable, sp);
-            // Vec<T> auto-coerces to &[T] / &mut [T] (same {ptr,len,cap} layout; callee
-            // ignores cap). For &mut the setAutoBorrowChecked above already rejected an
-            // immutable source and froze the Vec exclusively for the borrow's life.
-            if (paramType.inner.tag === "array" && paramType.inner.size === null
-                && argType.tag === "vec" && typeEq(paramType.inner.element, argType.element)) {
-              continue;
-            }
             if (!typeEq(paramType.inner, argType) && argType.tag !== "unknown") {
-              if (!this.tryInterfaceCoercion(expr.args[i], argType, paramType)) {
-                this.error(`argument ${i + 1} of '${expr.func}': expected ${typeName(paramType)}, got ${typeName(argType)}`, expr.args[i].span, this.optionUnwrapHint(paramType, argType));
-              }
+              this.error(`closure argument ${i + 1}: expected ${typeName(paramType)}, got ${typeName(argType)}`, expr.args[i].span);
             }
           } else if (!typeEq(paramType, argType) && argType.tag !== "unknown") {
-            // String auto-coerces to *u8 for FFI/builtins
-            const isStringToPtr = argType.tag === "string" && paramType.tag === "ptr" && paramType.inner.tag === "int" && paramType.inner.bits === 8;
-            // [T; N] auto-decays to *T for FFI (array → ptr-to-element)
-            const isArrayToPtr = argType.tag === "array" && paramType.tag === "ptr" && typeEq(argType.element, paramType.inner);
-            // T auto-wraps to Option<T> (Some(value))
-            const optInner = this.optionInnerType(paramType);
-            const isOptionWrap = optInner !== null && typeEq(optInner, argType) && paramType.tag === "enum";
-            // A flexible const-int binding adopts the param's int width (first use).
-            const flexInfo = paramType.tag === "int" ? this.flexIntBinding(expr.args[i]) : null;
-            if (isOptionWrap) {
-              this.autoWrappedOption.set(expr.args[i], paramType.name);
-            } else if (flexInfo && this.resolveFlexInt(flexInfo, paramType, expr.args[i])) {
-              // resolved
-            } else if (!isStringToPtr && !isArrayToPtr) {
-              if (!this.tryInterfaceCoercion(expr.args[i], argType, paramType)) {
-                this.error(`argument ${i + 1} of '${expr.func}': expected ${typeName(paramType)}, got ${typeName(argType)}`, expr.args[i].span, this.optionUnwrapHint(paramType, argType));
-              }
-            }
-          }
-          // A ranged-int parameter (`p: i32(0..100)`) enforces its bound on the argument —
-          // statically for a literal, else a runtime range check. Previously unchecked.
-          if (paramType.tag === "int") this.enforceRangeInto(expr.args[i], argType, paramType, expr.args[i].span);
-        }
-        for (let i = sig.params.length; i < expr.args.length; i++) {
-          const vt = this.checkExpr(expr.args[i]);
-          // a struct in the variadic (...) tail has no defined C ABI classification — reject
-          if (sig.isExtern && vt.tag === "struct") {
-            this.error(`argument ${i + 1} of '${expr.func}': struct '${vt.name}' cannot be passed in a variadic position`, expr.args[i].span,
-              `pass it by reference (&${vt.name}) instead`);
+            this.error(`closure argument ${i + 1}: expected ${typeName(paramType)}, got ${typeName(argType)}`, expr.args[i].span);
           }
         }
-        for (let i = 0; i < Math.min(expr.args.length, sig.params.length); i++) {
-          if (sig.params[i].type.tag === "ref") continue;
-          // String→*u8 auto-coercion borrows the ptr, doesn't move the String
-          const argType = this.exprTypes.get(expr.args[i]);
-          const paramType = sig.params[i].type;
-          if (argType?.tag === "string" && paramType.tag === "ptr") continue;
-          if (argType?.tag === "array" && paramType.tag === "ptr") continue;
-          // auto-move: closure literal passed to owned fn param (skip if closure mutates captures)
-          if (expr.args[i].kind === "Closure" && paramType.tag === "fn" && !(expr.args[i] as any).isMove) {
+        for (let i = 0; i < Math.min(expr.args.length, fnType.params.length); i++) {
+          if (fnType.params[i].tag === "ref") continue;
+          if (expr.args[i].kind === "Closure" && fnType.params[i].tag === "fn" && !(expr.args[i] as any).isMove) {
             const caps = this.closureCaptures.get(expr.args[i]);
             if (!caps?.some(c => c.mutable)) (expr.args[i] as any).isMove = true;
           }
           this.tryMove(expr.args[i]);
         }
-        this.checkCallSiteExclusivity(expr.args, sp);
-        // safe extern call: no unsafe needed if all args are safe-passable and return is scalar/void.
-        // Compute safety unconditionally (not just at depth 0) so an unsafe-requiring extern call
-        // marks its enclosing block used, while a safe one leaves the block flagged unused.
-        if (sig.isExtern) {
-          // an extern struct is POD (whitelisted fields, no drop glue) — passing/returning
-          // it by value is a plain bit copy with no provenance, so no unsafe is needed
-          const retSafe = isScalar(sig.ret) || this.isExternStructType(sig.ret);
-          let argsSafe = retSafe;
-          if (argsSafe) {
-            for (let i = 0; i < Math.min(expr.args.length, sig.params.length); i++) {
-              const paramType = sig.params[i].type;
-              const argType = this.exprTypes.get(expr.args[i]);
-              if (isScalar(paramType)) continue;
-              if (paramType.tag === "ref") continue;
-              // by-value extern struct arg with an exact type match — safe POD copy
-              if (this.isExternStructType(paramType) && argType && typeEq(paramType, argType)) continue;
-              // fn param with matching fn arg — safe (caller provides valid function)
-              if (paramType.tag === "fn" && argType?.tag === "fn") continue;
-              // *T param with matching *T, string, or [T;N] arg
-              if (paramType.tag === "ptr" && argType) {
-                if (argType.tag === "ptr" && typeEq(argType.inner, paramType.inner)) continue;
-                if (argType.tag === "string" && paramType.inner.tag === "int" && paramType.inner.bits === 8) continue;
-                if (argType.tag === "array" && typeEq(argType.element, paramType.inner)) continue;
-              }
-              argsSafe = false;
-              break;
-            }
+        if (fnType.tag === "cfn") this.cfnCalls.set(expr, fnType);
+        else this.closureCalls.set(expr, fnType);
+        return this.setType(expr, fnType.ret);
+      }
+      // Promise(fn) → Promise<T>.run(fn) with T inferred from closure return type
+      if (expr.func === "Promise" && this.genericStructs.has("Promise") && expr.args.length === 1) {
+        const argType = this.checkExprWithHint(expr.args[0], { tag: "fn", params: [], ret: { tag: "unknown" } });
+        if (argType.tag !== "fn") {
+          this.error(`Promise() argument must be a function`, sp);
+          return this.setType(expr, { tag: "unknown" });
+        }
+        const mangled = this.monomorphizeStruct("Promise", [argType.ret]);
+        while (this._pendingImplFns.length > 0) {
+          const fn = this._pendingImplFns.shift()!;
+          this.checkFunction(fn);
+        }
+        const inherent = this.inherentImpls.get(mangled);
+        const runSig = inherent?.methods.get("run");
+        if (!runSig) {
+          this.error(`'${mangled}' has no 'run' method`, sp);
+          return this.setType(expr, { tag: "unknown" });
+        }
+        if (expr.args[0].kind === "Closure" && !(expr.args[0] as any).isMove) {
+          const caps = this.closureCaptures.get(expr.args[0]);
+          if (!caps?.some(c => c.mutable)) (expr.args[0] as any).isMove = true;
+        }
+        this.tryMove(expr.args[0]);
+        this.rewrittenCalls.set(expr, `${mangled}$run`);
+        return this.setType(expr, runSig.ret);
+      }
+      this.error(`undefined function '${expr.func}'`, sp); return this.setType(expr, { tag: "unknown" });
+    }
+    if (expr.func === "assert") {
+      if (expr.args.length < 1 || expr.args.length > 2) {
+        this.error(`assert() expects 1-2 arguments, got ${expr.args.length}`, sp);
+        return this.setType(expr, { tag: "void" });
+      }
+      const condType = this.checkExpr(expr.args[0]);
+      if (condType.tag !== "bool" && condType.tag !== "unknown") {
+        this.error(`assert() condition must be bool, got ${typeName(condType)}`, sp);
+      }
+      if (expr.args.length === 2) {
+        const msgType = this.checkExpr(expr.args[1]);
+        if (msgType.tag !== "string" && msgType.tag !== "unknown") {
+          this.error(`assert() message must be a string, got ${typeName(msgType)}`, sp);
+        }
+      }
+      return this.setType(expr, { tag: "void" });
+    }
+    if (expr.func === "max" || expr.func === "min") {
+      if (expr.args.length !== 2) {
+        this.error(`${expr.func}() expects 2 arguments, got ${expr.args.length}`, sp);
+        return this.setType(expr, { tag: "unknown" });
+      }
+      const aType = this.checkExpr(expr.args[0]);
+      const bType = this.checkExpr(expr.args[1]);
+      if (aType.tag !== "int" && aType.tag !== "float" && aType.tag !== "unknown") {
+        this.error(`${expr.func}() arguments must be numeric`, sp);
+        return this.setType(expr, { tag: "unknown" });
+      }
+      if (!typeEq(aType, bType) && bType.tag !== "unknown" && aType.tag !== "unknown") {
+        this.error(`${expr.func}() arguments must be the same type, got ${typeName(aType)} and ${typeName(bType)}`, sp);
+      }
+      return this.setType(expr, aType.tag !== "unknown" ? aType : bType);
+    }
+    if (sig.variadic) {
+      if (expr.args.length < sig.params.length) this.error(`function '${expr.func}' expects at least ${sig.params.length} args, got ${expr.args.length}`, sp);
+    } else if (expr.args.length !== sig.params.length) {
+      this.error(`function '${expr.func}' expects ${sig.params.length} args, got ${expr.args.length}`, sp);
+    }
+    for (let i = 0; i < Math.min(expr.args.length, sig.params.length); i++) {
+      const paramType = sig.params[i].type;
+      const hint = paramType.tag === "ref" ? paramType.inner : paramType;
+      const argType = this.checkExprWithHint(expr.args[i], hint);
+      if (paramType.tag === "ref") {
+        if (argType.tag === "ref" && typeEq(paramType.inner, argType.inner)) {
+          // A `&[T]` slice is a %Vec *value*, not a bare pointer. To match the `ptr`
+          // param ABI it must be passed by reference (its address materialized) —
+          // otherwise a slice rvalue (`f(v[a..b])`, `f(c.view())`) is passed by value
+          // and the callee reads a garbage length. Other refs are already pointers.
+          if (paramType.inner.tag === "array" && paramType.inner.size === null) {
+            this.setAutoBorrowChecked(expr.args[i], paramType.mutable, sp);
           }
-          if (!argsSafe) {
-            // teach the rule, not just the verdict — it's otherwise learned by trial-and-error
-            const why = !retSafe
-              ? `it returns ${typeName(sig.ret)} (non-scalar)`
-              : `an argument doesn't auto-coerce`;
-            this.requireUnsafe(`calling extern function '${expr.func}' requires an unsafe block`, sp,
-              `extern calls are safe only when every arg is scalar, &T, fn, string/array→*T, or a by-value extern struct, AND the return is scalar/void/extern-struct — here ${why}`);
+          continue;
+        }
+        this.setAutoBorrowChecked(expr.args[i], paramType.mutable, sp);
+        // Vec<T> auto-coerces to &[T] / &mut [T] (same {ptr,len,cap} layout; callee
+        // ignores cap). For &mut the setAutoBorrowChecked above already rejected an
+        // immutable source and froze the Vec exclusively for the borrow's life.
+        if (paramType.inner.tag === "array" && paramType.inner.size === null
+            && argType.tag === "vec" && typeEq(paramType.inner.element, argType.element)) {
+          continue;
+        }
+        if (!typeEq(paramType.inner, argType) && argType.tag !== "unknown") {
+          if (!this.tryInterfaceCoercion(expr.args[i], argType, paramType)) {
+            this.error(`argument ${i + 1} of '${expr.func}': expected ${typeName(paramType)}, got ${typeName(argType)}`, expr.args[i].span, this.optionUnwrapHint(paramType, argType));
           }
         }
-        // check requires contracts at call site
-        const fnDecl = this.fnDecls.get(expr.func);
-        if (fnDecl) this.checkCallSiteContracts(fnDecl, expr.args, sp);
+      } else if (!typeEq(paramType, argType) && argType.tag !== "unknown") {
+        // String auto-coerces to *u8 for FFI/builtins
+        const isStringToPtr = argType.tag === "string" && paramType.tag === "ptr" && paramType.inner.tag === "int" && paramType.inner.bits === 8;
+        // [T; N] auto-decays to *T for FFI (array → ptr-to-element)
+        const isArrayToPtr = argType.tag === "array" && paramType.tag === "ptr" && typeEq(argType.element, paramType.inner);
+        // T auto-wraps to Option<T> (Some(value))
+        const optInner = this.optionInnerType(paramType);
+        const isOptionWrap = optInner !== null && typeEq(optInner, argType) && paramType.tag === "enum";
+        // A flexible const-int binding adopts the param's int width (first use).
+        const flexInfo = paramType.tag === "int" ? this.flexIntBinding(expr.args[i]) : null;
+        if (isOptionWrap) {
+          this.autoWrappedOption.set(expr.args[i], paramType.name);
+        } else if (flexInfo && this.resolveFlexInt(flexInfo, paramType, expr.args[i])) {
+          // resolved
+        } else if (!isStringToPtr && !isArrayToPtr) {
+          if (!this.tryInterfaceCoercion(expr.args[i], argType, paramType)) {
+            this.error(`argument ${i + 1} of '${expr.func}': expected ${typeName(paramType)}, got ${typeName(argType)}`, expr.args[i].span, this.optionUnwrapHint(paramType, argType));
+          }
+        }
+      }
+      // A ranged-int parameter (`p: i32(0..100)`) enforces its bound on the argument —
+      // statically for a literal, else a runtime range check. Previously unchecked.
+      if (paramType.tag === "int") this.enforceRangeInto(expr.args[i], argType, paramType, expr.args[i].span);
+    }
+    for (let i = sig.params.length; i < expr.args.length; i++) {
+      const vt = this.checkExpr(expr.args[i]);
+      // a struct in the variadic (...) tail has no defined C ABI classification — reject
+      if (sig.isExtern && vt.tag === "struct") {
+        this.error(`argument ${i + 1} of '${expr.func}': struct '${vt.name}' cannot be passed in a variadic position`, expr.args[i].span,
+          `pass it by reference (&${vt.name}) instead`);
+      }
+    }
+    for (let i = 0; i < Math.min(expr.args.length, sig.params.length); i++) {
+      if (sig.params[i].type.tag === "ref") continue;
+      // String→*u8 auto-coercion borrows the ptr, doesn't move the String
+      const argType = this.exprTypes.get(expr.args[i]);
+      const paramType = sig.params[i].type;
+      if (argType?.tag === "string" && paramType.tag === "ptr") continue;
+      if (argType?.tag === "array" && paramType.tag === "ptr") continue;
+      // auto-move: closure literal passed to owned fn param (skip if closure mutates captures)
+      if (expr.args[i].kind === "Closure" && paramType.tag === "fn" && !(expr.args[i] as any).isMove) {
+        const caps = this.closureCaptures.get(expr.args[i]);
+        if (!caps?.some(c => c.mutable)) (expr.args[i] as any).isMove = true;
+      }
+      this.tryMove(expr.args[i]);
+    }
+    this.checkCallSiteExclusivity(expr.args, sp);
+    // safe extern call: no unsafe needed if all args are safe-passable and return is scalar/void.
+    // Compute safety unconditionally (not just at depth 0) so an unsafe-requiring extern call
+    // marks its enclosing block used, while a safe one leaves the block flagged unused.
+    if (sig.isExtern) {
+      // an extern struct is POD (whitelisted fields, no drop glue) — passing/returning
+      // it by value is a plain bit copy with no provenance, so no unsafe is needed
+      const retSafe = isScalar(sig.ret) || this.isExternStructType(sig.ret);
+      let argsSafe = retSafe;
+      if (argsSafe) {
+        for (let i = 0; i < Math.min(expr.args.length, sig.params.length); i++) {
+          const paramType = sig.params[i].type;
+          const argType = this.exprTypes.get(expr.args[i]);
+          if (isScalar(paramType)) continue;
+          if (paramType.tag === "ref") continue;
+          // by-value extern struct arg with an exact type match — safe POD copy
+          if (this.isExternStructType(paramType) && argType && typeEq(paramType, argType)) continue;
+          // fn param with matching fn arg — safe (caller provides valid function)
+          if (paramType.tag === "fn" && argType?.tag === "fn") continue;
+          // *T param with matching *T, string, or [T;N] arg
+          if (paramType.tag === "ptr" && argType) {
+            if (argType.tag === "ptr" && typeEq(argType.inner, paramType.inner)) continue;
+            if (argType.tag === "string" && paramType.inner.tag === "int" && paramType.inner.bits === 8) continue;
+            if (argType.tag === "array" && typeEq(argType.element, paramType.inner)) continue;
+          }
+          argsSafe = false;
+          break;
+        }
+      }
+      if (!argsSafe) {
+        // teach the rule, not just the verdict — it's otherwise learned by trial-and-error
+        const why = !retSafe
+          ? `it returns ${typeName(sig.ret)} (non-scalar)`
+          : `an argument doesn't auto-coerce`;
+        this.requireUnsafe(`calling extern function '${expr.func}' requires an unsafe block`, sp,
+          `extern calls are safe only when every arg is scalar, &T, fn, string/array→*T, or a by-value extern struct, AND the return is scalar/void/extern-struct — here ${why}`);
+      }
+    }
+    // check requires contracts at call site
+    const fnDecl = this.fnDecls.get(expr.func);
+    if (fnDecl) this.checkCallSiteContracts(fnDecl, expr.args, sp);
 
-        return this.setType(expr, sig.ret);
+    return this.setType(expr, sig.ret);
+  }
+
+  private checkStructLitExpr(expr: ExprOf<"StructLit">): TypeKind {
+    const sp = expr.span;
+    // anonymous struct literal: { field: value, ... }
+    if (expr.name === "") {
+      if (expr.fields.length === 0) { this.error(`anonymous struct literal must have at least one field`, sp); return this.setType(expr, { tag: "unknown" }); }
+      const fields: { name: string; type: TypeKind }[] = [];
+      for (const f of expr.fields) {
+        const valType = this.checkExpr(f.value);
+        fields.push({ name: f.name, type: valType });
+        this.tryMove(f.value);
       }
-      case "StructLit": {
-        // anonymous struct literal: { field: value, ... }
-        if (expr.name === "") {
-          if (expr.fields.length === 0) { this.error(`anonymous struct literal must have at least one field`, sp); return this.setType(expr, { tag: "unknown" }); }
-          const fields: { name: string; type: TypeKind }[] = [];
-          for (const f of expr.fields) {
-            const valType = this.checkExpr(f.value);
-            fields.push({ name: f.name, type: valType });
-            this.tryMove(f.value);
-          }
-          const anonName = `__Anon${this.anonStructCounter++}`;
-          this.structs.set(anonName, { fields });
-          this.anonStructs.push({ name: anonName, fields });
-          this.rewrittenStructLits.set(expr, anonName);
-          return this.setType(expr, { tag: "struct", name: anonName });
-        }
-        const genericInfo = this.genericStructs.get(expr.name);
-        if (genericInfo) {
-          const typeMap = new Map<string, TypeKind>();
-          for (const f of expr.fields) {
-            const declField = genericInfo.decl.fields.find(d => d.name === f.name);
-            if (!declField) { this.error(`struct '${expr.name}' has no field '${f.name}'`, sp, memberHint(f.name, genericInfo.decl.fields.map(d => d.name))); continue; }
-            const valType = this.checkExpr(f.value);
-            // Infer type params from the field's declared (unsubstituted) type against the
-            // argument's concrete type — recursively, so `Vec<T>`/`[T]`/nested generics
-            // resolve, not just a bare `T` field.
-            this.inferTypeParamsFromHint(declField.type, valType, genericInfo.typeParams, typeMap);
-          }
-          const missing = genericInfo.typeParams.filter(p => !typeMap.has(p));
-          if (missing.length > 0) {
-            this.error(`cannot infer type parameter(s) '${missing.join("', '")}' for struct '${expr.name}'`, sp);
-            return this.setType(expr, { tag: "unknown" });
-          }
-          const typeArgs = genericInfo.typeParams.map(p => typeMap.get(p)!);
-          const mangled = this.monomorphizeStruct(expr.name, typeArgs);
-          this.rewrittenStructLits.set(expr, mangled);
-          const info = this.structs.get(mangled)!;
-          for (const f of expr.fields) {
-            const fieldDef = info.fields.find(d => d.name === f.name);
-            if (!fieldDef) continue;
-            const valType = this.exprTypes.get(f.value)!;
-            if (!typeEq(fieldDef.type, valType) && valType.tag !== "unknown") {
-              this.error(`field '${f.name}' of '${expr.name}': expected ${typeName(fieldDef.type)}, got ${typeName(valType)}`, sp);
-            }
-            // Record the move of the field value out of its source. Without this a non-Copy
-            // value (Vec/String/…) moved into a *generic* struct field was never marked moved,
-            // so its source kept its alive-flag and was dropped again at scope exit — a
-            // double-free. The non-generic and anonymous branches already do this.
-            this.tryMove(f.value);
-          }
-          for (const d of info.fields) {
-            if (!expr.fields.find(f => f.name === d.name)) {
-              this.error(`missing field '${d.name}' in struct '${expr.name}'`, sp);
-            }
-          }
-          return this.setType(expr, { tag: "struct", name: mangled });
-        }
-        const info = this.structs.get(expr.name);
-        if (!info) { this.error(`unknown struct '${expr.name}'`, sp); return this.setType(expr, { tag: "unknown" }); }
-        for (const f of expr.fields) {
-          const fieldDef = info.fields.find(d => d.name === f.name);
-          if (!fieldDef) { this.error(`struct '${expr.name}' has no field '${f.name}'`, sp, memberHint(f.name, info.fields.map(d => d.name))); continue; }
-          let valType = this.checkExprWithHint(f.value, fieldDef.type);
-          if (fieldDef.type.tag === "int" && valType.tag === "int" && !typeEq(fieldDef.type, valType) && this.isConstIntExpr(f.value)) {
-            this.retypeConstInt(f.value, fieldDef.type);
-            valType = fieldDef.type;
-          }
-          if (!typeEq(fieldDef.type, valType) && valType.tag !== "unknown" && !this.tryInterfaceCoercion(f.value, valType, fieldDef.type)) {
-            this.error(`field '${f.name}' of '${expr.name}': expected ${typeName(fieldDef.type)}, got ${typeName(valType)}`, sp);
-          }
-          this.tryMove(f.value);
-        }
-        for (const d of info.fields) {
-          if (!expr.fields.find(f => f.name === d.name)) {
-            this.error(`missing field '${d.name}' in struct '${expr.name}'`, sp);
-          }
-        }
-        return this.setType(expr, { tag: "struct", name: expr.name });
+      const anonName = `__Anon${this.anonStructCounter++}`;
+      this.structs.set(anonName, { fields });
+      this.anonStructs.push({ name: anonName, fields });
+      this.rewrittenStructLits.set(expr, anonName);
+      return this.setType(expr, { tag: "struct", name: anonName });
+    }
+    const genericInfo = this.genericStructs.get(expr.name);
+    if (genericInfo) {
+      const typeMap = new Map<string, TypeKind>();
+      for (const f of expr.fields) {
+        const declField = genericInfo.decl.fields.find(d => d.name === f.name);
+        if (!declField) { this.error(`struct '${expr.name}' has no field '${f.name}'`, sp, memberHint(f.name, genericInfo.decl.fields.map(d => d.name))); continue; }
+        const valType = this.checkExpr(f.value);
+        // Infer type params from the field's declared (unsubstituted) type against the
+        // argument's concrete type — recursively, so `Vec<T>`/`[T]`/nested generics
+        // resolve, not just a bare `T` field.
+        this.inferTypeParamsFromHint(declField.type, valType, genericInfo.typeParams, typeMap);
       }
-      case "FieldAccess": {
-        // Float namespace constants resolve before the object is checked: `f64` is a type,
-        // not a variable, so checkExpr(object) would report it undefined.
-        const fnc = floatNamespaceConst(expr);
-        if (fnc) return this.setType(expr, { tag: "float", bits: fnc.bits });
-        this.placeBaseDepth++;
-        let objType = this.checkExpr(expr.object);
-        this.placeBaseDepth--;
-        // auto-deref through references for field access
-        if (objType.tag === "ref") objType = objType.inner;
-        // auto-deref through pointers for field access (requires unsafe)
-        if (objType.tag === "ptr" && objType.inner.tag === "struct") {
-          this.requireUnsafe(`pointer field access requires 'unsafe' block`, sp);
-          objType = objType.inner;
-        }
-        if (objType.tag === "struct") {
-          const info = this.structs.get(objType.name);
-          if (!info) { this.error(`unknown struct '${objType.name}'`, sp); return this.setType(expr, { tag: "unknown" }); }
-          const field = info.fields.find(f => f.name === expr.field);
-          if (!field) { this.error(`struct '${objType.name}' has no field '${expr.field}'`, sp, memberHint(expr.field, this.fieldCandidates(objType))); return this.setType(expr, { tag: "unknown" }); }
-          this.setType(expr, field.type);
-          // The field's own move state, the counterpart of the `info.moved` check on a
-          // plain identifier. `setType` first: `staticFieldPath` reads the recorded
-          // types to walk the place, so the answer depends on this node having one.
-          const place = this.staticFieldPath(expr);
-          const rootInfo = place ? this.lookup(place.root) : null;
-          if (place && rootInfo) {
-            const gone = this.movedPlaceCovering(rootInfo, place.path);
-            if (gone) {
-              this.error(`use of moved value '${place.root}${place.path}'`, sp,
-                gone === place.path
-                  ? `ownership of '${place.root}${place.path}' was transferred earlier — the field is empty now. Clone it at the point of transfer: '${place.root}${place.path}.clone()'.`
-                  : `'${place.root}${gone}' was moved out earlier, which took '${place.root}${place.path}' with it. Clone at the point of transfer: '${place.root}${gone}.clone()'.`);
-            }
-          }
-          return field.type;
-        }
-        if (objType.tag === "enum") {
-          this.error(`cannot access field on enum '${objType.name}' — use match to extract values`, sp);
-          return this.setType(expr, { tag: "unknown" });
-        }
-        if (objType.tag === "array" && expr.field === "len") {
-          // fixed arrays: compile-time i32 constant; slices: runtime i64 (matches Vec)
-          return this.setType(expr, { tag: "int", bits: objType.size !== null ? 32 : 64, signed: true });
-        }
-        if (objType.tag === "string" && expr.field === "len") {
-          return this.setType(expr, { tag: "int", bits: 64, signed: true });
-        }
-        if (objType.tag === "vec" && expr.field === "len") {
-          return this.setType(expr, { tag: "int", bits: 64, signed: true });
-        }
-        if (objType.tag === "hashmap" && expr.field === "len") {
-          return this.setType(expr, { tag: "int", bits: 64, signed: true });
-        }
-        this.error(`cannot access field '${expr.field}' on type ${typeName(objType)}`, sp,
-          memberHint(expr.field, this.fieldCandidates(objType)));
+      const missing = genericInfo.typeParams.filter(p => !typeMap.has(p));
+      if (missing.length > 0) {
+        this.error(`cannot infer type parameter(s) '${missing.join("', '")}' for struct '${expr.name}'`, sp);
         return this.setType(expr, { tag: "unknown" });
       }
-      case "ArrayLit": {
-        if (expr.elements.length === 0) {
-          this.error("cannot infer type of empty array literal", sp);
-          return this.setType(expr, { tag: "unknown" });
+      const typeArgs = genericInfo.typeParams.map(p => typeMap.get(p)!);
+      const mangled = this.monomorphizeStruct(expr.name, typeArgs);
+      this.rewrittenStructLits.set(expr, mangled);
+      const info = this.structs.get(mangled)!;
+      for (const f of expr.fields) {
+        const fieldDef = info.fields.find(d => d.name === f.name);
+        if (!fieldDef) continue;
+        const valType = this.exprTypes.get(f.value)!;
+        if (!typeEq(fieldDef.type, valType) && valType.tag !== "unknown") {
+          this.error(`field '${f.name}' of '${expr.name}': expected ${typeName(fieldDef.type)}, got ${typeName(valType)}`, sp);
         }
-        const elemType = this.checkExpr(expr.elements[0]);
-        for (let i = 1; i < expr.elements.length; i++) {
-          const t = this.checkExpr(expr.elements[i]);
-          if (!typeEq(elemType, t) && t.tag !== "unknown") {
-            this.error(`array element ${i}: expected ${typeName(elemType)}, got ${typeName(t)}`, expr.elements[i].span);
+        // Record the move of the field value out of its source. Without this a non-Copy
+        // value (Vec/String/…) moved into a *generic* struct field was never marked moved,
+        // so its source kept its alive-flag and was dropped again at scope exit — a
+        // double-free. The non-generic and anonymous branches already do this.
+        this.tryMove(f.value);
+      }
+      for (const d of info.fields) {
+        if (!expr.fields.find(f => f.name === d.name)) {
+          this.error(`missing field '${d.name}' in struct '${expr.name}'`, sp);
+        }
+      }
+      return this.setType(expr, { tag: "struct", name: mangled });
+    }
+    const info = this.structs.get(expr.name);
+    if (!info) { this.error(`unknown struct '${expr.name}'`, sp); return this.setType(expr, { tag: "unknown" }); }
+    for (const f of expr.fields) {
+      const fieldDef = info.fields.find(d => d.name === f.name);
+      if (!fieldDef) { this.error(`struct '${expr.name}' has no field '${f.name}'`, sp, memberHint(f.name, info.fields.map(d => d.name))); continue; }
+      let valType = this.checkExprWithHint(f.value, fieldDef.type);
+      if (fieldDef.type.tag === "int" && valType.tag === "int" && !typeEq(fieldDef.type, valType) && this.isConstIntExpr(f.value)) {
+        this.retypeConstInt(f.value, fieldDef.type);
+        valType = fieldDef.type;
+      }
+      if (!typeEq(fieldDef.type, valType) && valType.tag !== "unknown" && !this.tryInterfaceCoercion(f.value, valType, fieldDef.type)) {
+        this.error(`field '${f.name}' of '${expr.name}': expected ${typeName(fieldDef.type)}, got ${typeName(valType)}`, sp);
+      }
+      this.tryMove(f.value);
+    }
+    for (const d of info.fields) {
+      if (!expr.fields.find(f => f.name === d.name)) {
+        this.error(`missing field '${d.name}' in struct '${expr.name}'`, sp);
+      }
+    }
+    return this.setType(expr, { tag: "struct", name: expr.name });
+  }
+
+  private checkFieldAccessExpr(expr: ExprOf<"FieldAccess">): TypeKind {
+    const sp = expr.span;
+    // Float namespace constants resolve before the object is checked: `f64` is a type,
+    // not a variable, so checkExpr(object) would report it undefined.
+    const fnc = floatNamespaceConst(expr);
+    if (fnc) return this.setType(expr, { tag: "float", bits: fnc.bits });
+    this.placeBaseDepth++;
+    let objType = this.checkExpr(expr.object);
+    this.placeBaseDepth--;
+    // auto-deref through references for field access
+    if (objType.tag === "ref") objType = objType.inner;
+    // auto-deref through pointers for field access (requires unsafe)
+    if (objType.tag === "ptr" && objType.inner.tag === "struct") {
+      this.requireUnsafe(`pointer field access requires 'unsafe' block`, sp);
+      objType = objType.inner;
+    }
+    if (objType.tag === "struct") {
+      const info = this.structs.get(objType.name);
+      if (!info) { this.error(`unknown struct '${objType.name}'`, sp); return this.setType(expr, { tag: "unknown" }); }
+      const field = info.fields.find(f => f.name === expr.field);
+      if (!field) { this.error(`struct '${objType.name}' has no field '${expr.field}'`, sp, memberHint(expr.field, this.fieldCandidates(objType))); return this.setType(expr, { tag: "unknown" }); }
+      this.setType(expr, field.type);
+      // The field's own move state, the counterpart of the `info.moved` check on a
+      // plain identifier. `setType` first: `staticFieldPath` reads the recorded
+      // types to walk the place, so the answer depends on this node having one.
+      const place = this.staticFieldPath(expr);
+      const rootInfo = place ? this.lookup(place.root) : null;
+      if (place && rootInfo) {
+        const gone = this.movedPlaceCovering(rootInfo, place.path);
+        if (gone) {
+          this.error(`use of moved value '${place.root}${place.path}'`, sp,
+            gone === place.path
+              ? `ownership of '${place.root}${place.path}' was transferred earlier — the field is empty now. Clone it at the point of transfer: '${place.root}${place.path}.clone()'.`
+              : `'${place.root}${gone}' was moved out earlier, which took '${place.root}${place.path}' with it. Clone at the point of transfer: '${place.root}${gone}.clone()'.`);
+        }
+      }
+      return field.type;
+    }
+    if (objType.tag === "enum") {
+      this.error(`cannot access field on enum '${objType.name}' — use match to extract values`, sp);
+      return this.setType(expr, { tag: "unknown" });
+    }
+    if (objType.tag === "array" && expr.field === "len") {
+      // fixed arrays: compile-time i32 constant; slices: runtime i64 (matches Vec)
+      return this.setType(expr, { tag: "int", bits: objType.size !== null ? 32 : 64, signed: true });
+    }
+    if (objType.tag === "string" && expr.field === "len") {
+      return this.setType(expr, { tag: "int", bits: 64, signed: true });
+    }
+    if (objType.tag === "vec" && expr.field === "len") {
+      return this.setType(expr, { tag: "int", bits: 64, signed: true });
+    }
+    if (objType.tag === "hashmap" && expr.field === "len") {
+      return this.setType(expr, { tag: "int", bits: 64, signed: true });
+    }
+    this.error(`cannot access field '${expr.field}' on type ${typeName(objType)}`, sp,
+      memberHint(expr.field, this.fieldCandidates(objType)));
+    return this.setType(expr, { tag: "unknown" });
+  }
+
+  private checkArrayLitExpr(expr: ExprOf<"ArrayLit">): TypeKind {
+    const sp = expr.span;
+    if (expr.elements.length === 0) {
+      this.error("cannot infer type of empty array literal", sp);
+      return this.setType(expr, { tag: "unknown" });
+    }
+    const elemType = this.checkExpr(expr.elements[0]);
+    for (let i = 1; i < expr.elements.length; i++) {
+      const t = this.checkExpr(expr.elements[i]);
+      if (!typeEq(elemType, t) && t.tag !== "unknown") {
+        this.error(`array element ${i}: expected ${typeName(elemType)}, got ${typeName(t)}`, expr.elements[i].span);
+      }
+    }
+    return this.setType(expr, { tag: "array", element: elemType, size: expr.elements.length });
+  }
+
+  private checkArrayRepeatExpr(expr: ExprOf<"ArrayRepeat">): TypeKind {
+    const elemType = this.checkExprWithHint(expr.value, null);
+    return this.setType(expr, { tag: "array", element: elemType, size: expr.count });
+  }
+
+  private checkIndexAccessExpr(expr: ExprOf<"IndexAccess">): TypeKind {
+    const sp = expr.span;
+    this.placeBaseDepth++;
+    const rawObjType = this.checkExpr(expr.object);
+    this.placeBaseDepth--;
+    const objType = rawObjType.tag === "ref" ? rawObjType.inner : rawObjType;
+    const idxType = this.checkExpr(expr.index);
+    if (idxType.tag !== "int" && idxType.tag !== "unknown") {
+      this.error(`array index must be integer, got ${typeName(idxType)}`, sp);
+    }
+    if (objType.tag === "array") return this.setType(expr, objType.element);
+    if (objType.tag === "vec") return this.setType(expr, objType.element);
+    if (objType.tag === "string") return this.setType(expr, { tag: "int", bits: 8, signed: false });
+    if (objType.tag === "ptr") {
+      this.requireUnsafe(`pointer indexing requires 'unsafe' block`, sp);
+      return this.setType(expr, objType.inner);
+    }
+    this.error(`cannot index type ${typeName(objType)}`, sp);
+    return this.setType(expr, { tag: "unknown" });
+  }
+
+  private checkEnumLitExpr(expr: ExprOf<"EnumLit">): TypeKind {
+    const sp = expr.span;
+    // Promise.all(args) / Promise.race(args) → promiseAll(args) / promiseRace(args)
+    if (expr.enumName === "Promise" && (expr.variant === "all" || expr.variant === "race")) {
+      const fnName = expr.variant === "all" ? "promiseAll" : "promiseRace";
+      const genericFn = this.genericFns.get(fnName);
+      if (genericFn && expr.args.length === 1) {
+        const argType = this.checkExpr(expr.args[0]);
+        const typeMap = new Map<string, TypeKind>();
+        const literalInferred = new Set<string>();
+        for (let i = 0; i < Math.min(1, genericFn.decl.params.length); i++) {
+          const paramTy = declaredType(genericFn.decl.params[i]);
+          if (paramTy.typeArgs) {
+            let argResolved = argType;
+            if (argResolved.tag === "ref") argResolved = argResolved.inner;
+            if (argResolved.tag === "vec" && argResolved.element.tag === "struct") {
+              const info = this.structs.get(argResolved.element.name);
+              if (info?.typeArgs && info.typeArgs.length > 0) {
+                typeMap.set(genericFn.typeParams[0], info.typeArgs[0]);
+              }
+            }
           }
         }
-        return this.setType(expr, { tag: "array", element: elemType, size: expr.elements.length });
-      }
-      case "ArrayRepeat": {
-        const elemType = this.checkExprWithHint(expr.value, null);
-        return this.setType(expr, { tag: "array", element: elemType, size: expr.count });
-      }
-      case "IndexAccess": {
-        this.placeBaseDepth++;
-        const rawObjType = this.checkExpr(expr.object);
-        this.placeBaseDepth--;
-        const objType = rawObjType.tag === "ref" ? rawObjType.inner : rawObjType;
-        const idxType = this.checkExpr(expr.index);
-        if (idxType.tag !== "int" && idxType.tag !== "unknown") {
-          this.error(`array index must be integer, got ${typeName(idxType)}`, sp);
+        if (typeMap.size > 0) {
+          const typeArgs = genericFn.typeParams.map(p => typeMap.get(p)!);
+          const mangled = this.monomorphizeFn(fnName, typeArgs);
+          this.rewrittenCalls.set(expr as any, mangled);
+          const concreteSig = this.functions.get(mangled)!;
+          if (concreteSig.params[0]?.type.tag === "ref") {
+            this.autoBorrowed.set(expr.args[0], { mutable: false });
+          } else {
+            this.tryMove(expr.args[0]);
+          }
+          return this.setType(expr, concreteSig.ret);
         }
-        if (objType.tag === "array") return this.setType(expr, objType.element);
-        if (objType.tag === "vec") return this.setType(expr, objType.element);
-        if (objType.tag === "string") return this.setType(expr, { tag: "int", bits: 8, signed: false });
-        if (objType.tag === "ptr") {
-          this.requireUnsafe(`pointer indexing requires 'unsafe' block`, sp);
-          return this.setType(expr, objType.inner);
+      }
+    }
+    // `Kind.tryFrom(n)` on a repr'd enum → Option<Kind>. The partial reverse of `k as i32`;
+    // most integers are not a variant, so the honest signature is Option, not a trap.
+    {
+      const reprInfo = this.enums.get(expr.enumName);
+      if (expr.variant === "tryFrom" && reprInfo?.reprType) {
+        if (expr.args.length !== 1) { this.error(`'${expr.enumName}.tryFrom' expects 1 argument, got ${expr.args.length}`, sp); return this.setType(expr, { tag: "unknown" }); }
+        const argType = this.checkExpr(expr.args[0]);
+        if (argType.tag !== "int" && argType.tag !== "unknown") this.error(`'${expr.enumName}.tryFrom': expected an integer, got ${typeName(argType)}`, sp);
+        return this.setType(expr, this.resolveOptionForValue({ tag: "enum", name: expr.enumName }, sp));
+      }
+    }
+    if (expr.enumName === "String" && expr.variant === "withCapacity") {
+      if (expr.args.length !== 1) { this.error(`'String.withCapacity' expects 1 argument, got ${expr.args.length}`, sp); return this.setType(expr, { tag: "unknown" }); }
+      const argType = this.checkExpr(expr.args[0]);
+      if (argType.tag !== "int" && argType.tag !== "unknown") this.error(`'String.withCapacity': expected integer, got ${typeName(argType)}`, sp);
+      return this.setType(expr, { tag: "string" });
+    }
+    if (expr.enumName === "Vec" && expr.variant === "new") {
+      if (expr.args.length !== 0) this.error(`'Vec.new' takes no arguments`, sp);
+      this.error(`cannot infer Vec element type — add a type annotation: 'let v: Vec<T> = Vec.new()'`, sp);
+      return this.setType(expr, { tag: "unknown" });
+    }
+    if (expr.enumName === "Vec" && (expr.variant === "withCapacity" || expr.variant === "filled")) {
+      this.error(`cannot infer Vec element type — add a type annotation: 'let v: Vec<T> = Vec.${expr.variant}(...)'`, sp);
+      return this.setType(expr, { tag: "unknown" });
+    }
+    if (expr.enumName === "HashMap" && (expr.variant === "new" || expr.variant === "withCapacity")) {
+      if (expr.variant === "new" && expr.args.length !== 0) this.error(`'HashMap.new' takes no arguments`, sp);
+      this.error(`cannot infer HashMap types — add a type annotation: 'let m: HashMap<K, V> = HashMap.${expr.variant}(${expr.variant === "new" ? "" : "n"})'`, sp);
+      return this.setType(expr, { tag: "unknown" });
+    }
+    const genericInfo = this.genericEnums.get(expr.enumName);
+    if (genericInfo) {
+      const variant = genericInfo.variants.get(expr.variant);
+      if (!variant) { this.error(`enum '${expr.enumName}' has no variant '${expr.variant}'`, sp); return this.setType(expr, { tag: "unknown" }); }
+      if (expr.args.length !== variant.fields.length) {
+        this.error(`variant '${expr.enumName}.${expr.variant}' expects ${variant.fields.length} args, got ${expr.args.length}`, sp);
+      }
+      const typeMap = new Map<string, TypeKind>();
+      for (let i = 0; i < Math.min(expr.args.length, variant.fields.length); i++) {
+        const field = variant.fields[i];
+        let argType = this.checkExpr(expr.args[i]);
+        if (field.tag === "int" && argType.tag === "int" && !typeEq(field, argType) && this.isConstIntExpr(expr.args[i])) {
+          this.retypeConstInt(expr.args[i], field);
+          argType = field;
         }
-        this.error(`cannot index type ${typeName(objType)}`, sp);
+        if (field.tag === "struct" && genericInfo.typeParams.includes(field.name)) {
+          const existing = typeMap.get(field.name);
+          if (existing && !typeEq(existing, argType)) {
+            this.error(`conflicting inference for type parameter '${field.name}'`, sp);
+          } else {
+            typeMap.set(field.name, argType);
+          }
+        } else if (!typeEq(field, argType) && argType.tag !== "unknown") {
+          this.error(`argument ${i + 1} of '${expr.enumName}.${expr.variant}': expected ${typeName(field)}, got ${typeName(argType)}`, expr.args[i].span);
+        }
+        this.tryMove(expr.args[i]);
+      }
+      // fill uninferred type params from defaults
+      if (genericInfo.typeParamDefaults) {
+        for (let i = 0; i < genericInfo.typeParams.length; i++) {
+          const p = genericInfo.typeParams[i];
+          if (!typeMap.has(p) && genericInfo.typeParamDefaults[i]) {
+            typeMap.set(p, genericInfo.typeParamDefaults[i]!);
+          }
+        }
+      }
+      const missing = genericInfo.typeParams.filter(p => !typeMap.has(p));
+      if (missing.length > 0) {
+        this.error(`cannot infer type parameter(s) '${missing.join("', '")}' for ${expr.enumName}.${expr.variant}`, sp);
         return this.setType(expr, { tag: "unknown" });
       }
-      case "EnumLit": {
-        // Promise.all(args) / Promise.race(args) → promiseAll(args) / promiseRace(args)
-        if (expr.enumName === "Promise" && (expr.variant === "all" || expr.variant === "race")) {
-          const fnName = expr.variant === "all" ? "promiseAll" : "promiseRace";
-          const genericFn = this.genericFns.get(fnName);
-          if (genericFn && expr.args.length === 1) {
-            const argType = this.checkExpr(expr.args[0]);
-            const typeMap = new Map<string, TypeKind>();
-            const literalInferred = new Set<string>();
-            for (let i = 0; i < Math.min(1, genericFn.decl.params.length); i++) {
-              const paramTy = declaredType(genericFn.decl.params[i]);
-              if (paramTy.typeArgs) {
-                let argResolved = argType;
-                if (argResolved.tag === "ref") argResolved = argResolved.inner;
-                if (argResolved.tag === "vec" && argResolved.element.tag === "struct") {
-                  const info = this.structs.get(argResolved.element.name);
-                  if (info?.typeArgs && info.typeArgs.length > 0) {
-                    typeMap.set(genericFn.typeParams[0], info.typeArgs[0]);
-                  }
-                }
-              }
-            }
-            if (typeMap.size > 0) {
-              const typeArgs = genericFn.typeParams.map(p => typeMap.get(p)!);
-              const mangled = this.monomorphizeFn(fnName, typeArgs);
-              this.rewrittenCalls.set(expr as any, mangled);
-              const concreteSig = this.functions.get(mangled)!;
-              if (concreteSig.params[0]?.type.tag === "ref") {
-                this.autoBorrowed.set(expr.args[0], { mutable: false });
-              } else {
-                this.tryMove(expr.args[0]);
-              }
-              return this.setType(expr, concreteSig.ret);
-            }
+      const typeArgs = genericInfo.typeParams.map(p => typeMap.get(p)!);
+      const mangled = this.monomorphizeEnum(expr.enumName, typeArgs);
+      this.rewrittenEnums.set(expr, mangled);
+      return this.setType(expr, { tag: "enum", name: mangled });
+    }
+    // generic struct static call: Struct<T>.method(args) with explicit type args
+    if (expr.typeArgs && expr.typeArgs.length > 0 && this.genericStructs.has(expr.enumName)) {
+      const typeArgs = expr.typeArgs.map(ta => this.resolve(ta));
+      const mangled = this.monomorphizeStruct(expr.enumName, typeArgs);
+      // process pending impl methods that monomorphization may have generated
+      while (this._pendingImplFns.length > 0) {
+        const fn = this._pendingImplFns.shift()!;
+        this.checkFunction(fn);
+      }
+      const inherent = this.inherentImpls.get(mangled);
+      if (inherent) {
+        const sig = inherent.methods.get(expr.variant);
+        if (sig) {
+          const mangledMethod = `${mangled}$${expr.variant}`;
+          const paramOffset = (sig.params.length > 0 && sig.params[0].name === "self") ? 1 : 0;
+          const expectedParams = sig.params.slice(paramOffset);
+          if (expr.args.length !== expectedParams.length) {
+            this.error(`'${expr.enumName}.${expr.variant}' expects ${expectedParams.length} args, got ${expr.args.length}`, sp);
           }
-        }
-        // `Kind.tryFrom(n)` on a repr'd enum → Option<Kind>. The partial reverse of `k as i32`;
-        // most integers are not a variant, so the honest signature is Option, not a trap.
-        {
-          const reprInfo = this.enums.get(expr.enumName);
-          if (expr.variant === "tryFrom" && reprInfo?.reprType) {
-            if (expr.args.length !== 1) { this.error(`'${expr.enumName}.tryFrom' expects 1 argument, got ${expr.args.length}`, sp); return this.setType(expr, { tag: "unknown" }); }
-            const argType = this.checkExpr(expr.args[0]);
-            if (argType.tag !== "int" && argType.tag !== "unknown") this.error(`'${expr.enumName}.tryFrom': expected an integer, got ${typeName(argType)}`, sp);
-            return this.setType(expr, this.resolveOptionForValue({ tag: "enum", name: expr.enumName }, sp));
-          }
-        }
-        if (expr.enumName === "String" && expr.variant === "withCapacity") {
-          if (expr.args.length !== 1) { this.error(`'String.withCapacity' expects 1 argument, got ${expr.args.length}`, sp); return this.setType(expr, { tag: "unknown" }); }
-          const argType = this.checkExpr(expr.args[0]);
-          if (argType.tag !== "int" && argType.tag !== "unknown") this.error(`'String.withCapacity': expected integer, got ${typeName(argType)}`, sp);
-          return this.setType(expr, { tag: "string" });
-        }
-        if (expr.enumName === "Vec" && expr.variant === "new") {
-          if (expr.args.length !== 0) this.error(`'Vec.new' takes no arguments`, sp);
-          this.error(`cannot infer Vec element type — add a type annotation: 'let v: Vec<T> = Vec.new()'`, sp);
-          return this.setType(expr, { tag: "unknown" });
-        }
-        if (expr.enumName === "Vec" && (expr.variant === "withCapacity" || expr.variant === "filled")) {
-          this.error(`cannot infer Vec element type — add a type annotation: 'let v: Vec<T> = Vec.${expr.variant}(...)'`, sp);
-          return this.setType(expr, { tag: "unknown" });
-        }
-        if (expr.enumName === "HashMap" && (expr.variant === "new" || expr.variant === "withCapacity")) {
-          if (expr.variant === "new" && expr.args.length !== 0) this.error(`'HashMap.new' takes no arguments`, sp);
-          this.error(`cannot infer HashMap types — add a type annotation: 'let m: HashMap<K, V> = HashMap.${expr.variant}(${expr.variant === "new" ? "" : "n"})'`, sp);
-          return this.setType(expr, { tag: "unknown" });
-        }
-        const genericInfo = this.genericEnums.get(expr.enumName);
-        if (genericInfo) {
-          const variant = genericInfo.variants.get(expr.variant);
-          if (!variant) { this.error(`enum '${expr.enumName}' has no variant '${expr.variant}'`, sp); return this.setType(expr, { tag: "unknown" }); }
-          if (expr.args.length !== variant.fields.length) {
-            this.error(`variant '${expr.enumName}.${expr.variant}' expects ${variant.fields.length} args, got ${expr.args.length}`, sp);
-          }
-          const typeMap = new Map<string, TypeKind>();
-          for (let i = 0; i < Math.min(expr.args.length, variant.fields.length); i++) {
-            const field = variant.fields[i];
-            let argType = this.checkExpr(expr.args[i]);
-            if (field.tag === "int" && argType.tag === "int" && !typeEq(field, argType) && this.isConstIntExpr(expr.args[i])) {
-              this.retypeConstInt(expr.args[i], field);
-              argType = field;
-            }
-            if (field.tag === "struct" && genericInfo.typeParams.includes(field.name)) {
-              const existing = typeMap.get(field.name);
-              if (existing && !typeEq(existing, argType)) {
-                this.error(`conflicting inference for type parameter '${field.name}'`, sp);
-              } else {
-                typeMap.set(field.name, argType);
-              }
-            } else if (!typeEq(field, argType) && argType.tag !== "unknown") {
-              this.error(`argument ${i + 1} of '${expr.enumName}.${expr.variant}': expected ${typeName(field)}, got ${typeName(argType)}`, expr.args[i].span);
-            }
-            this.tryMove(expr.args[i]);
-          }
-          // fill uninferred type params from defaults
-          if (genericInfo.typeParamDefaults) {
-            for (let i = 0; i < genericInfo.typeParams.length; i++) {
-              const p = genericInfo.typeParams[i];
-              if (!typeMap.has(p) && genericInfo.typeParamDefaults[i]) {
-                typeMap.set(p, genericInfo.typeParamDefaults[i]!);
-              }
-            }
-          }
-          const missing = genericInfo.typeParams.filter(p => !typeMap.has(p));
-          if (missing.length > 0) {
-            this.error(`cannot infer type parameter(s) '${missing.join("', '")}' for ${expr.enumName}.${expr.variant}`, sp);
-            return this.setType(expr, { tag: "unknown" });
-          }
-          const typeArgs = genericInfo.typeParams.map(p => typeMap.get(p)!);
-          const mangled = this.monomorphizeEnum(expr.enumName, typeArgs);
-          this.rewrittenEnums.set(expr, mangled);
-          return this.setType(expr, { tag: "enum", name: mangled });
-        }
-        // generic struct static call: Struct<T>.method(args) with explicit type args
-        if (expr.typeArgs && expr.typeArgs.length > 0 && this.genericStructs.has(expr.enumName)) {
-          const typeArgs = expr.typeArgs.map(ta => this.resolve(ta));
-          const mangled = this.monomorphizeStruct(expr.enumName, typeArgs);
-          // process pending impl methods that monomorphization may have generated
-          while (this._pendingImplFns.length > 0) {
-            const fn = this._pendingImplFns.shift()!;
-            this.checkFunction(fn);
-          }
-          const inherent = this.inherentImpls.get(mangled);
-          if (inherent) {
-            const sig = inherent.methods.get(expr.variant);
-            if (sig) {
-              const mangledMethod = `${mangled}$${expr.variant}`;
-              const paramOffset = (sig.params.length > 0 && sig.params[0].name === "self") ? 1 : 0;
-              const expectedParams = sig.params.slice(paramOffset);
-              if (expr.args.length !== expectedParams.length) {
-                this.error(`'${expr.enumName}.${expr.variant}' expects ${expectedParams.length} args, got ${expr.args.length}`, sp);
-              }
-              for (let i = 0; i < Math.min(expr.args.length, expectedParams.length); i++) {
-                const paramType = expectedParams[i].type;
-                const hint = paramType.tag === "ref" ? paramType.inner : paramType;
-                const argType = this.checkExprWithHint(expr.args[i], hint);
-                if (paramType.tag === "ref") {
-                  if (!(argType.tag === "ref" && typeEq(paramType.inner, argType.inner))) {
-                    this.setAutoBorrowChecked(expr.args[i], paramType.mutable, sp);
-                    if (!typeEq(paramType.inner, argType) && argType.tag !== "unknown") {
-                      this.error(`'${expr.variant}' argument ${i + 1}: expected ${typeName(paramType)}, got ${typeName(argType)}`, expr.args[i].span);
-                    }
-                  }
-                } else if (!typeEq(paramType, argType) && argType.tag !== "unknown") {
+          for (let i = 0; i < Math.min(expr.args.length, expectedParams.length); i++) {
+            const paramType = expectedParams[i].type;
+            const hint = paramType.tag === "ref" ? paramType.inner : paramType;
+            const argType = this.checkExprWithHint(expr.args[i], hint);
+            if (paramType.tag === "ref") {
+              if (!(argType.tag === "ref" && typeEq(paramType.inner, argType.inner))) {
+                this.setAutoBorrowChecked(expr.args[i], paramType.mutable, sp);
+                if (!typeEq(paramType.inner, argType) && argType.tag !== "unknown") {
                   this.error(`'${expr.variant}' argument ${i + 1}: expected ${typeName(paramType)}, got ${typeName(argType)}`, expr.args[i].span);
                 }
-                if (expr.args[i].kind === "Closure" && paramType.tag === "fn" && !(expr.args[i] as any).isMove) {
-                  const caps = this.closureCaptures.get(expr.args[i]);
-                  if (!caps?.some(c => c.mutable)) (expr.args[i] as any).isMove = true;
-                }
-                if (paramType.tag !== "ref") this.tryMove(expr.args[i]);
               }
-              this.staticCalls.set(expr, mangledMethod);
-              // Send enforcement: Promise.blocking() runs the closure on a real
-              // OS thread, so all captures must be Send.
-              if (expr.enumName === "Promise" && expr.variant === "blocking" && expr.args.length === 1 && expr.args[0].kind === "Closure") {
-                const captures = this.closureCaptures.get(expr.args[0]);
-                if (captures) {
-                  for (const cap of captures) {
-                    if (!this.isSend(cap.type)) {
-                      this.error(
-                        `cannot send '${cap.name}' of type '${typeName(cap.type)}' across threads — type does not implement Send`,
-                        expr.args[0].span,
-                        this.whyNotSend(cap.type),
-                      );
-                    }
-                  }
+            } else if (!typeEq(paramType, argType) && argType.tag !== "unknown") {
+              this.error(`'${expr.variant}' argument ${i + 1}: expected ${typeName(paramType)}, got ${typeName(argType)}`, expr.args[i].span);
+            }
+            if (expr.args[i].kind === "Closure" && paramType.tag === "fn" && !(expr.args[i] as any).isMove) {
+              const caps = this.closureCaptures.get(expr.args[i]);
+              if (!caps?.some(c => c.mutable)) (expr.args[i] as any).isMove = true;
+            }
+            if (paramType.tag !== "ref") this.tryMove(expr.args[i]);
+          }
+          this.staticCalls.set(expr, mangledMethod);
+          // Send enforcement: Promise.blocking() runs the closure on a real
+          // OS thread, so all captures must be Send.
+          if (expr.enumName === "Promise" && expr.variant === "blocking" && expr.args.length === 1 && expr.args[0].kind === "Closure") {
+            const captures = this.closureCaptures.get(expr.args[0]);
+            if (captures) {
+              for (const cap of captures) {
+                if (!this.isSend(cap.type)) {
+                  this.error(
+                    `cannot send '${cap.name}' of type '${typeName(cap.type)}' across threads — type does not implement Send`,
+                    expr.args[0].span,
+                    this.whyNotSend(cap.type),
+                  );
                 }
               }
-              return this.setType(expr, sig.ret);
             }
           }
-          const asMethod2 = this.staticCallOnVariable(expr, sp);
-          if (asMethod2) return asMethod2;
-          this.error(`'${expr.enumName}<...>' has no static method '${expr.variant}'`, sp);
-          return this.setType(expr, { tag: "unknown" });
+          return this.setType(expr, sig.ret);
         }
-        const info = this.enums.get(expr.enumName);
-        if (!info) {
-          // static method call: Struct.method(args)
-          const inherent = this.inherentImpls.get(expr.enumName);
-          if (inherent) {
-            const sig = inherent.methods.get(expr.variant);
-            if (sig) {
-              const mangled = `${expr.enumName}$${expr.variant}`;
-              // static methods have no self param — check args directly
-              const paramOffset = (sig.params.length > 0 && sig.params[0].name === "self") ? 1 : 0;
-              const expectedParams = sig.params.slice(paramOffset);
-              if (expr.args.length !== expectedParams.length) {
-                this.error(`'${expr.enumName}.${expr.variant}' expects ${expectedParams.length} args, got ${expr.args.length}`, sp);
-              }
-              for (let i = 0; i < Math.min(expr.args.length, expectedParams.length); i++) {
-                const paramType = expectedParams[i].type;
-                const hint = paramType.tag === "ref" ? paramType.inner : paramType;
-                const argType = this.checkExprWithHint(expr.args[i], hint);
-                if (paramType.tag === "ref") {
-                  if (!(argType.tag === "ref" && typeEq(paramType.inner, argType.inner))) {
-                    this.setAutoBorrowChecked(expr.args[i], paramType.mutable, sp);
-                    if (!typeEq(paramType.inner, argType) && argType.tag !== "unknown") {
-                      this.error(`'${expr.variant}' argument ${i + 1}: expected ${typeName(paramType)}, got ${typeName(argType)}`, expr.args[i].span);
-                    }
-                  }
-                } else if (!typeEq(paramType, argType) && argType.tag !== "unknown") {
+      }
+      const asMethod2 = this.staticCallOnVariable(expr, sp);
+      if (asMethod2) return asMethod2;
+      this.error(`'${expr.enumName}<...>' has no static method '${expr.variant}'`, sp);
+      return this.setType(expr, { tag: "unknown" });
+    }
+    const info = this.enums.get(expr.enumName);
+    if (!info) {
+      // static method call: Struct.method(args)
+      const inherent = this.inherentImpls.get(expr.enumName);
+      if (inherent) {
+        const sig = inherent.methods.get(expr.variant);
+        if (sig) {
+          const mangled = `${expr.enumName}$${expr.variant}`;
+          // static methods have no self param — check args directly
+          const paramOffset = (sig.params.length > 0 && sig.params[0].name === "self") ? 1 : 0;
+          const expectedParams = sig.params.slice(paramOffset);
+          if (expr.args.length !== expectedParams.length) {
+            this.error(`'${expr.enumName}.${expr.variant}' expects ${expectedParams.length} args, got ${expr.args.length}`, sp);
+          }
+          for (let i = 0; i < Math.min(expr.args.length, expectedParams.length); i++) {
+            const paramType = expectedParams[i].type;
+            const hint = paramType.tag === "ref" ? paramType.inner : paramType;
+            const argType = this.checkExprWithHint(expr.args[i], hint);
+            if (paramType.tag === "ref") {
+              if (!(argType.tag === "ref" && typeEq(paramType.inner, argType.inner))) {
+                this.setAutoBorrowChecked(expr.args[i], paramType.mutable, sp);
+                if (!typeEq(paramType.inner, argType) && argType.tag !== "unknown") {
                   this.error(`'${expr.variant}' argument ${i + 1}: expected ${typeName(paramType)}, got ${typeName(argType)}`, expr.args[i].span);
                 }
-                if (expr.args[i].kind === "Closure" && paramType.tag === "fn" && !(expr.args[i] as any).isMove) {
-                  const caps = this.closureCaptures.get(expr.args[i]);
-                  if (!caps?.some(c => c.mutable)) (expr.args[i] as any).isMove = true;
+              }
+            } else if (!typeEq(paramType, argType) && argType.tag !== "unknown") {
+              this.error(`'${expr.variant}' argument ${i + 1}: expected ${typeName(paramType)}, got ${typeName(argType)}`, expr.args[i].span);
+            }
+            if (expr.args[i].kind === "Closure" && paramType.tag === "fn" && !(expr.args[i] as any).isMove) {
+              const caps = this.closureCaptures.get(expr.args[i]);
+              if (!caps?.some(c => c.mutable)) (expr.args[i] as any).isMove = true;
+            }
+            if (paramType.tag !== "ref") this.tryMove(expr.args[i]);
+          }
+          this.staticCalls.set(expr, mangled);
+          // Precondition checking on a static method call (Math.sqrt(-1.0) etc).
+          // Only when there is no `self` param, so args align 1:1 with the sig's
+          // params the way checkCallSiteContracts expects.
+          if (paramOffset === 0 && sig.contracts && sig.contracts.length > 0) {
+            this.checkCallSiteContracts({ params: sig.params, contracts: sig.contracts } as any, expr.args, sp);
+          }
+          // Send enforcement: Thread.spawn() requires all closure captures to be Send
+          if (expr.enumName === "Thread" && expr.variant === "spawn" && expr.args.length === 1 && expr.args[0].kind === "Closure") {
+            const captures = this.closureCaptures.get(expr.args[0]);
+            if (captures) {
+              for (const cap of captures) {
+                if (!this.isSend(cap.type)) {
+                  this.error(
+                    `cannot send '${cap.name}' of type '${typeName(cap.type)}' across threads — type does not implement Send`,
+                    expr.args[0].span,
+                    this.whyNotSend(cap.type),
+                  );
                 }
-                if (paramType.tag !== "ref") this.tryMove(expr.args[i]);
               }
-              this.staticCalls.set(expr, mangled);
-              // Precondition checking on a static method call (Math.sqrt(-1.0) etc).
-              // Only when there is no `self` param, so args align 1:1 with the sig's
-              // params the way checkCallSiteContracts expects.
-              if (paramOffset === 0 && sig.contracts && sig.contracts.length > 0) {
-                this.checkCallSiteContracts({ params: sig.params, contracts: sig.contracts } as any, expr.args, sp);
-              }
-              // Send enforcement: Thread.spawn() requires all closure captures to be Send
-              if (expr.enumName === "Thread" && expr.variant === "spawn" && expr.args.length === 1 && expr.args[0].kind === "Closure") {
-                const captures = this.closureCaptures.get(expr.args[0]);
-                if (captures) {
-                  for (const cap of captures) {
-                    if (!this.isSend(cap.type)) {
-                      this.error(
-                        `cannot send '${cap.name}' of type '${typeName(cap.type)}' across threads — type does not implement Send`,
-                        expr.args[0].span,
-                        this.whyNotSend(cap.type),
-                      );
-                    }
-                  }
-                }
-              }
-              return this.setType(expr, sig.ret);
             }
           }
-          const asMethod = this.staticCallOnVariable(expr, sp);
-          if (asMethod) return asMethod;
-          this.errorUnknownStatic(expr.enumName, expr.variant, sp);
-          return this.setType(expr, { tag: "unknown" });
+          return this.setType(expr, sig.ret);
         }
-        const variant = info.variants.get(expr.variant);
-        if (!variant) { this.error(`enum '${expr.enumName}' has no variant '${expr.variant}'`, sp); return this.setType(expr, { tag: "unknown" }); }
-        if (expr.args.length !== variant.fields.length) {
-          this.error(`variant '${expr.enumName}.${expr.variant}' expects ${variant.fields.length} args, got ${expr.args.length}`, sp);
-        }
-        for (let i = 0; i < Math.min(expr.args.length, variant.fields.length); i++) {
-          let argType = this.checkExprWithHint(expr.args[i], variant.fields[i]);
-          if (variant.fields[i].tag === "int" && argType.tag === "int" && !typeEq(variant.fields[i], argType) && this.isConstIntExpr(expr.args[i])) {
-            this.retypeConstInt(expr.args[i], variant.fields[i]);
-            argType = variant.fields[i];
-          }
-          if (!typeEq(variant.fields[i], argType) && argType.tag !== "unknown") {
-            this.error(`argument ${i + 1} of '${expr.enumName}.${expr.variant}': expected ${typeName(variant.fields[i])}, got ${typeName(argType)}`, expr.args[i].span);
-          }
-          this.tryMove(expr.args[i]);
-        }
-        return this.setType(expr, { tag: "enum", name: expr.enumName });
       }
-      case "Unwrap": {
-        const operandType = this.checkExpr(expr.operand);
-        const inner = this.unwrapableInner(operandType);
-        if (!inner) {
-          this.error(`'!' requires Option or Result type, got ${typeName(operandType)}`, sp);
-          return this.setType(expr, { tag: "unknown" });
-        }
-        // `!` moves the payload out and codegen zeros the source slot; mark the
-        // operand moved so a later use is a compile error, not a silent read of
-        // the zeroed value. tryMove no-ops on Copy operands.
-        this.tryMove(expr.operand);
-        return this.setType(expr, inner);
+      const asMethod = this.staticCallOnVariable(expr, sp);
+      if (asMethod) return asMethod;
+      this.errorUnknownStatic(expr.enumName, expr.variant, sp);
+      return this.setType(expr, { tag: "unknown" });
+    }
+    const variant = info.variants.get(expr.variant);
+    if (!variant) { this.error(`enum '${expr.enumName}' has no variant '${expr.variant}'`, sp); return this.setType(expr, { tag: "unknown" }); }
+    if (expr.args.length !== variant.fields.length) {
+      this.error(`variant '${expr.enumName}.${expr.variant}' expects ${variant.fields.length} args, got ${expr.args.length}`, sp);
+    }
+    for (let i = 0; i < Math.min(expr.args.length, variant.fields.length); i++) {
+      let argType = this.checkExprWithHint(expr.args[i], variant.fields[i]);
+      if (variant.fields[i].tag === "int" && argType.tag === "int" && !typeEq(variant.fields[i], argType) && this.isConstIntExpr(expr.args[i])) {
+        this.retypeConstInt(expr.args[i], variant.fields[i]);
+        argType = variant.fields[i];
       }
-      case "Propagate": {
-        const operandType = this.checkExpr(expr.operand);
-        const inner = this.unwrapableInner(operandType);
-        if (!inner) {
-          this.error(`'?' requires Option or Result type, got ${typeName(operandType)}`, sp);
-          return this.setType(expr, { tag: "unknown" });
+      if (!typeEq(variant.fields[i], argType) && argType.tag !== "unknown") {
+        this.error(`argument ${i + 1} of '${expr.enumName}.${expr.variant}': expected ${typeName(variant.fields[i])}, got ${typeName(argType)}`, expr.args[i].span);
+      }
+      this.tryMove(expr.args[i]);
+    }
+    return this.setType(expr, { tag: "enum", name: expr.enumName });
+  }
+
+  private checkUnwrapExpr(expr: ExprOf<"Unwrap">): TypeKind {
+    const sp = expr.span;
+    const operandType = this.checkExpr(expr.operand);
+    const inner = this.unwrapableInner(operandType);
+    if (!inner) {
+      this.error(`'!' requires Option or Result type, got ${typeName(operandType)}`, sp);
+      return this.setType(expr, { tag: "unknown" });
+    }
+    // `!` moves the payload out and codegen zeros the source slot; mark the
+    // operand moved so a later use is a compile error, not a silent read of
+    // the zeroed value. tryMove no-ops on Copy operands.
+    this.tryMove(expr.operand);
+    return this.setType(expr, inner);
+  }
+
+  private checkPropagateExpr(expr: ExprOf<"Propagate">): TypeKind {
+    const sp = expr.span;
+    const operandType = this.checkExpr(expr.operand);
+    const inner = this.unwrapableInner(operandType);
+    if (!inner) {
+      this.error(`'?' requires Option or Result type, got ${typeName(operandType)}`, sp);
+      return this.setType(expr, { tag: "unknown" });
+    }
+    // `?` consumes the operand (Err returns it, Ok extracts the payload and
+    // codegen zeros the slot); mark it moved so a later use errors instead of
+    // silently reading the zeroed value. tryMove no-ops on Copy operands.
+    this.tryMove(expr.operand);
+    const retInner = this.unwrapableInner(this.currentFnRetType);
+    if (!retInner) {
+      this.error(`'?' requires function to return Option or Result, but returns ${typeName(this.currentFnRetType)}`, sp);
+      return this.setType(expr, inner);
+    }
+    // Option ? in Option fn, or Result ? in Result fn — match error side only
+    const operandIsOption = this.isOptionLike(operandType);
+    const retIsOption = this.isOptionLike(this.currentFnRetType);
+    if (operandIsOption !== retIsOption) {
+      this.error(`'?' on ${operandIsOption ? "Option" : "Result"} requires function to return ${operandIsOption ? "Option" : "Result"}, but returns ${typeName(this.currentFnRetType)}`, sp);
+    } else if (!operandIsOption) {
+      // both Result-like: Err types must match, or From conversion must exist
+      const operandErr = this.unwrapableErr(operandType);
+      const retErr = this.unwrapableErr(this.currentFnRetType);
+      if (operandErr && retErr && !typeEq(operandErr, retErr)) {
+        const conversion = this.findFromConversion(operandErr, retErr);
+        if (conversion) {
+          this.propagateConversions.set(expr, conversion);
+        } else {
+          this.error(`'?' error type mismatch: '${typeName(operandErr)}' cannot convert to '${typeName(retErr)}' (no wrapping variant found)`, sp);
         }
-        // `?` consumes the operand (Err returns it, Ok extracts the payload and
-        // codegen zeros the slot); mark it moved so a later use errors instead of
-        // silently reading the zeroed value. tryMove no-ops on Copy operands.
-        this.tryMove(expr.operand);
-        const retInner = this.unwrapableInner(this.currentFnRetType);
-        if (!retInner) {
-          this.error(`'?' requires function to return Option or Result, but returns ${typeName(this.currentFnRetType)}`, sp);
+      }
+    }
+    return this.setType(expr, inner);
+  }
+
+  private checkDefaultValueExpr(expr: ExprOf<"DefaultValue">): TypeKind {
+    const sp = expr.span;
+    const operandType = this.checkExpr(expr.operand);
+    const inner = this.unwrapableInner(operandType);
+    if (!inner) {
+      this.error(`'??' requires Option or Result type, got ${typeName(operandType)}`, sp);
+      return this.setType(expr, { tag: "unknown" });
+    }
+    const defaultType = this.checkExprWithHint(expr.default, inner);
+    if (!typeEq(inner, defaultType) && defaultType.tag !== "unknown") {
+      this.error(`'??' default type mismatch: expected ${typeName(inner)}, got ${typeName(defaultType)}`, sp);
+    }
+    return this.setType(expr, inner);
+  }
+
+  private checkCastExprExpr(expr: ExprOf<"CastExpr">): TypeKind {
+    const sp = expr.span;
+    const fromType = this.checkExpr(expr.operand);
+    const toType = this.resolve(expr.targetType);
+    // A repr'd (C-like) enum casts to its integer value — always defined, since every
+    // variant has a discriminant. Only to an integer type: `Kind.tryFrom` is the reverse.
+    const fromReprEnum = fromType.tag === "enum" && !!this.enums.get(fromType.name)?.reprType;
+    if (fromReprEnum && toType.tag !== "int") {
+      this.error(`enum '${fromType.name}' casts only to an integer type, not ${typeName(toType)}`, sp);
+    }
+    const fromOk = isNumeric(fromType) || fromType.tag === "bool" || fromType.tag === "ptr" || fromType.tag === "array" || fromType.tag === "fn" || fromType.tag === "cfn" || fromType.tag === "string" || fromType.tag === "unknown" || fromReprEnum;
+    // ptr -> cfn is how a dlsym result becomes callable; cfn -> ptr passes one back out
+    const toOk = isNumeric(toType) || toType.tag === "ptr" || toType.tag === "cfn";
+    if (!fromOk) {
+      this.error(`cannot cast from ${typeName(fromType)}`, sp);
+    }
+    if (!toOk) {
+      this.error(`cannot cast to ${typeName(toType)}`, sp);
+    }
+    const isNullPtrConst = toType.tag === "ptr" && expr.operand.kind === "IntLit" && expr.operand.value === 0n;
+    if (toType.tag === "ptr" && !isNullPtrConst) {
+      this.requireUnsafe(`cast to pointer type requires 'unsafe' block`, sp);
+    }
+    return this.setType(expr, toType);
+  }
+
+  private checkClosureExpr(expr: ExprOf<"Closure">): TypeKind {
+    const sp = expr.span;
+    const paramHints = this.closureParamHints;
+    this.closureParamHints = null;
+    const retHint = this.closureRetHint;
+    this.closureRetHint = null;
+    const savedClosureScopeDepth = this.closureScopeDepth;
+    const savedClosureCaptures = this.currentClosureCaptures;
+    this.currentClosureCaptures = new Map();
+    this.pushScope();
+    this.closureScopeDepth = this.scopes.length - 1;
+    const paramTypes: TypeKind[] = [];
+    for (let i = 0; i < expr.params.length; i++) {
+      const p = expr.params[i];
+      let pType: TypeKind;
+      if (p.type) {
+        pType = this.resolve(p.type);
+      } else if (paramHints && i < paramHints.length) {
+        pType = paramHints[i];
+      } else {
+        this.error(`cannot infer type for parameter '${p.name}'; add a type annotation`, sp);
+        pType = { tag: "unknown" };
+      }
+      paramTypes.push(pType);
+      this.declare(p.name, { type: pType, mutable: pType.tag === "ref" && pType.mutable, moved: false, borrowed: false, read: false });
+    }
+    // An explicit annotation always wins; otherwise take the caller's expected return
+    // type so literals in the body get coerced against it (`() => 0` against an
+    // Option<i32> is i32, not i64). Falls back to inferring from the body, which is
+    // what a hint of `unknown` (e.g. Vec.map, whose U is whatever you return) leaves.
+    let inferredRet: TypeKind = expr.retType
+      ? this.resolve(expr.retType)
+      : (retHint && retHint.tag !== "unknown" ? retHint : { tag: "unknown" });
+    const savedRetType = this.currentFnRetType;
+    this.currentFnRetType = inferredRet;
+    for (const s of expr.body) this.checkStmt(s, inferredRet);
+    if (inferredRet.tag === "unknown" && expr.body.length > 0) {
+      const lastStmt = expr.body[expr.body.length - 1];
+      if (lastStmt.kind === "Return" && lastStmt.value) {
+        inferredRet = this.exprTypes.get(lastStmt.value) ?? { tag: "void" };
+      } else if (lastStmt.kind === "ExprStmt") {
+        inferredRet = { tag: "void" };
+      } else {
+        inferredRet = { tag: "void" };
+      }
+    }
+    this.currentFnRetType = savedRetType;
+    this.popScope();
+    const captures = Array.from(this.currentClosureCaptures.values());
+    this.closureCaptures.set(expr, captures);
+    for (const cap of captures) {
+      for (let i = this.scopes.length - 1; i >= 0; i--) {
+        const info = this.scopes[i].get(cap.name);
+        if (info) {
+          // A closure env is storage, and references are second-class. Capturing a
+          // view outlived its source once the closure escaped the frame that owned
+          // the Vec — `let s = v[0..2]; return move () => s[0]` read freed memory.
+          if (info.type.tag === "ref") {
+            this.error(`cannot capture '${cap.name}' in a closure`, expr.span,
+              `'${cap.name}' is a reference — a closure stores its captures, and a closure can outlive the storage this points into; capture an owned value (.clone() it) instead`);
+          }
+          this.freeze(info, null);
+          break;
+        }
+      }
+    }
+    this.closureScopeDepth = savedClosureScopeDepth;
+    this.currentClosureCaptures = savedClosureCaptures;
+    return this.setType(expr, { tag: "fn", params: paramTypes, ret: inferredRet });
+  }
+
+  private checkMethodCallExpr(expr: ExprOf<"MethodCall">): TypeKind {
+    const sp = expr.span;
+    const rawObjType = this.checkExpr(expr.object);
+    // auto-deref `&T` for method dispatch (mutating methods still need !isRootMutable to allow)
+    const objType = rawObjType.tag === "ref" ? rawObjType.inner : rawObjType;
+    if ((objType.tag === "int" || objType.tag === "float" || objType.tag === "bool") && expr.method === "toString") {
+      if (expr.args.length !== 0) { this.error(`'toString' takes no arguments`, sp); }
+      return this.setType(expr, { tag: "string" });
+    }
+    // x.addrOf(): *T — raw address of any lvalue (the replacement for `&x`).
+    // Universal (any receiver), lvalue-only, requires unsafe. Lowers to the
+    // same address-of the old `&x` emitted (see lower.ts) → IR unchanged.
+    if (expr.method === "addrOf") {
+      if (expr.args.length !== 0) { this.error(`'addrOf' takes no arguments`, sp); }
+      this.requireUnsafe(`'addrOf' (raw address-of) requires 'unsafe' block`, sp);
+      if (expr.object.kind !== "Ident" && expr.object.kind !== "FieldAccess" && expr.object.kind !== "IndexAccess")
+        this.error(`'addrOf' requires an lvalue (variable, field, or index)`, sp);
+      return this.setType(expr, { tag: "ptr", inner: objType });
+    }
+    // v.ptr(): *T — a Vec's backing DATA pointer (first element). Safe to
+    // obtain (mirrors string.cstr); the Vec stays live in the caller. Fixed
+    // arrays already auto-coerce to *T (pass bare), so this is Vec-only.
+    if (objType.tag === "vec" && expr.method === "ptr") {
+      if (expr.args.length !== 0) { this.error(`'ptr' takes no arguments`, sp); }
+      return this.setType(expr, { tag: "ptr", inner: objType.element });
+    }
+    // Option combinators — isSome/isNone/unwrapOr. Gated on baseName so a user
+    // enum's own impl method of the same name still resolves normally below.
+    if (objType.tag === "enum" && this.enums.get(objType.name)?.baseName === "Option") {
+      if (expr.method === "isSome" || expr.method === "isNone") {
+        if (expr.args.length !== 0) { this.error(`'${expr.method}' takes no arguments`, sp); }
+        return this.setType(expr, { tag: "bool" });
+      }
+      if (expr.method === "unwrapOr") {
+        if (expr.args.length !== 1) { this.error(`'unwrapOr' expects 1 argument`, sp); return this.setType(expr, { tag: "unknown" }); }
+        const inner = this.unwrapableInner(objType);
+        if (inner && !isCopy(inner)) {
+          // select-based lowering copies the payload; for owned types that would
+          // alias the heap buffer (double-free). Move-out needs match.
+          this.error(`'unwrapOr' on a non-Copy Option<${typeName(inner)}> — use 'match' to move the value out`, sp);
           return this.setType(expr, inner);
         }
-        // Option ? in Option fn, or Result ? in Result fn — match error side only
-        const operandIsOption = this.isOptionLike(operandType);
-        const retIsOption = this.isOptionLike(this.currentFnRetType);
-        if (operandIsOption !== retIsOption) {
-          this.error(`'?' on ${operandIsOption ? "Option" : "Result"} requires function to return ${operandIsOption ? "Option" : "Result"}, but returns ${typeName(this.currentFnRetType)}`, sp);
-        } else if (!operandIsOption) {
-          // both Result-like: Err types must match, or From conversion must exist
-          const operandErr = this.unwrapableErr(operandType);
-          const retErr = this.unwrapableErr(this.currentFnRetType);
-          if (operandErr && retErr && !typeEq(operandErr, retErr)) {
-            const conversion = this.findFromConversion(operandErr, retErr);
-            if (conversion) {
-              this.propagateConversions.set(expr, conversion);
-            } else {
-              this.error(`'?' error type mismatch: '${typeName(operandErr)}' cannot convert to '${typeName(retErr)}' (no wrapping variant found)`, sp);
-            }
+        if (inner) {
+          const at = this.checkExprWithHint(expr.args[0], inner);
+          if (!typeEq(inner, at) && at.tag !== "unknown") {
+            this.error(`'unwrapOr': default must be ${typeName(inner)}, got ${typeName(at)}`, sp);
           }
+          return this.setType(expr, inner);
         }
-        return this.setType(expr, inner);
+        return this.setType(expr, { tag: "unknown" });
       }
-      case "DefaultValue": {
-        const operandType = this.checkExpr(expr.operand);
-        const inner = this.unwrapableInner(operandType);
-        if (!inner) {
-          this.error(`'??' requires Option or Result type, got ${typeName(operandType)}`, sp);
+      // map(f): Option<T> -> Option<U>. The callback takes the payload BY REF, which is
+      // why this needs no Copy gate (unlike unwrapOr/unwrapOrElse, which load the
+      // payload out): nothing is moved out of the receiver, so an owned inner can't be
+      // aliased into two owners.
+      //
+      // Nor does this consume the receiver, unlike Result.map/mapErr/andThen. Those
+      // forward the OTHER variant's payload into the result untouched, so receiver and
+      // result would both own one buffer. Option's other variant is None, which carries
+      // no payload — there is nothing to forward, so the asymmetry is real, not an
+      // oversight.
+      if (expr.method === "map") {
+        if (expr.args.length !== 1) { this.error(`'map' expects 1 argument`, sp); return this.setType(expr, { tag: "unknown" }); }
+        const inner = this.unwrapableInner(objType);
+        if (!inner) return this.setType(expr, { tag: "unknown" });
+        const cbHint: TypeKind = { tag: "fn", params: [{ tag: "ref", inner, mutable: false }], ret: { tag: "unknown" } };
+        const cbType = this.checkExprWithHint(expr.args[0], cbHint);
+        if (cbType.tag !== "fn") {
+          this.error(`'map' argument must be a function`, sp);
           return this.setType(expr, { tag: "unknown" });
         }
-        const defaultType = this.checkExprWithHint(expr.default, inner);
-        if (!typeEq(inner, defaultType) && defaultType.tag !== "unknown") {
-          this.error(`'??' default type mismatch: expected ${typeName(inner)}, got ${typeName(defaultType)}`, sp);
-        }
-        return this.setType(expr, inner);
-      }
-      case "CastExpr": {
-        const fromType = this.checkExpr(expr.operand);
-        const toType = this.resolve(expr.targetType);
-        // A repr'd (C-like) enum casts to its integer value — always defined, since every
-        // variant has a discriminant. Only to an integer type: `Kind.tryFrom` is the reverse.
-        const fromReprEnum = fromType.tag === "enum" && !!this.enums.get(fromType.name)?.reprType;
-        if (fromReprEnum && toType.tag !== "int") {
-          this.error(`enum '${fromType.name}' casts only to an integer type, not ${typeName(toType)}`, sp);
-        }
-        const fromOk = isNumeric(fromType) || fromType.tag === "bool" || fromType.tag === "ptr" || fromType.tag === "array" || fromType.tag === "fn" || fromType.tag === "cfn" || fromType.tag === "string" || fromType.tag === "unknown" || fromReprEnum;
-        // ptr -> cfn is how a dlsym result becomes callable; cfn -> ptr passes one back out
-        const toOk = isNumeric(toType) || toType.tag === "ptr" || toType.tag === "cfn";
-        if (!fromOk) {
-          this.error(`cannot cast from ${typeName(fromType)}`, sp);
-        }
-        if (!toOk) {
-          this.error(`cannot cast to ${typeName(toType)}`, sp);
-        }
-        const isNullPtrConst = toType.tag === "ptr" && expr.operand.kind === "IntLit" && expr.operand.value === 0n;
-        if (toType.tag === "ptr" && !isNullPtrConst) {
-          this.requireUnsafe(`cast to pointer type requires 'unsafe' block`, sp);
-        }
-        return this.setType(expr, toType);
-      }
-      case "Closure": {
-        const paramHints = this.closureParamHints;
-        this.closureParamHints = null;
-        const retHint = this.closureRetHint;
-        this.closureRetHint = null;
-        const savedClosureScopeDepth = this.closureScopeDepth;
-        const savedClosureCaptures = this.currentClosureCaptures;
-        this.currentClosureCaptures = new Map();
-        this.pushScope();
-        this.closureScopeDepth = this.scopes.length - 1;
-        const paramTypes: TypeKind[] = [];
-        for (let i = 0; i < expr.params.length; i++) {
-          const p = expr.params[i];
-          let pType: TypeKind;
-          if (p.type) {
-            pType = this.resolve(p.type);
-          } else if (paramHints && i < paramHints.length) {
-            pType = paramHints[i];
-          } else {
-            this.error(`cannot infer type for parameter '${p.name}'; add a type annotation`, sp);
-            pType = { tag: "unknown" };
-          }
-          paramTypes.push(pType);
-          this.declare(p.name, { type: pType, mutable: pType.tag === "ref" && pType.mutable, moved: false, borrowed: false, read: false });
-        }
-        // An explicit annotation always wins; otherwise take the caller's expected return
-        // type so literals in the body get coerced against it (`() => 0` against an
-        // Option<i32> is i32, not i64). Falls back to inferring from the body, which is
-        // what a hint of `unknown` (e.g. Vec.map, whose U is whatever you return) leaves.
-        let inferredRet: TypeKind = expr.retType
-          ? this.resolve(expr.retType)
-          : (retHint && retHint.tag !== "unknown" ? retHint : { tag: "unknown" });
-        const savedRetType = this.currentFnRetType;
-        this.currentFnRetType = inferredRet;
-        for (const s of expr.body) this.checkStmt(s, inferredRet);
-        if (inferredRet.tag === "unknown" && expr.body.length > 0) {
-          const lastStmt = expr.body[expr.body.length - 1];
-          if (lastStmt.kind === "Return" && lastStmt.value) {
-            inferredRet = this.exprTypes.get(lastStmt.value) ?? { tag: "void" };
-          } else if (lastStmt.kind === "ExprStmt") {
-            inferredRet = { tag: "void" };
-          } else {
-            inferredRet = { tag: "void" };
-          }
-        }
-        this.currentFnRetType = savedRetType;
-        this.popScope();
-        const captures = Array.from(this.currentClosureCaptures.values());
-        this.closureCaptures.set(expr, captures);
-        for (const cap of captures) {
-          for (let i = this.scopes.length - 1; i >= 0; i--) {
-            const info = this.scopes[i].get(cap.name);
-            if (info) {
-              // A closure env is storage, and references are second-class. Capturing a
-              // view outlived its source once the closure escaped the frame that owned
-              // the Vec — `let s = v[0..2]; return move () => s[0]` read freed memory.
-              if (info.type.tag === "ref") {
-                this.error(`cannot capture '${cap.name}' in a closure`, expr.span,
-                  `'${cap.name}' is a reference — a closure stores its captures, and a closure can outlive the storage this points into; capture an owned value (.clone() it) instead`);
-              }
-              this.freeze(info, null);
-              break;
-            }
-          }
-        }
-        this.closureScopeDepth = savedClosureScopeDepth;
-        this.currentClosureCaptures = savedClosureCaptures;
-        return this.setType(expr, { tag: "fn", params: paramTypes, ret: inferredRet });
-      }
-      case "MethodCall": {
-        const rawObjType = this.checkExpr(expr.object);
-        // auto-deref `&T` for method dispatch (mutating methods still need !isRootMutable to allow)
-        const objType = rawObjType.tag === "ref" ? rawObjType.inner : rawObjType;
-        if ((objType.tag === "int" || objType.tag === "float" || objType.tag === "bool") && expr.method === "toString") {
-          if (expr.args.length !== 0) { this.error(`'toString' takes no arguments`, sp); }
-          return this.setType(expr, { tag: "string" });
-        }
-        // x.addrOf(): *T — raw address of any lvalue (the replacement for `&x`).
-        // Universal (any receiver), lvalue-only, requires unsafe. Lowers to the
-        // same address-of the old `&x` emitted (see lower.ts) → IR unchanged.
-        if (expr.method === "addrOf") {
-          if (expr.args.length !== 0) { this.error(`'addrOf' takes no arguments`, sp); }
-          this.requireUnsafe(`'addrOf' (raw address-of) requires 'unsafe' block`, sp);
-          if (expr.object.kind !== "Ident" && expr.object.kind !== "FieldAccess" && expr.object.kind !== "IndexAccess")
-            this.error(`'addrOf' requires an lvalue (variable, field, or index)`, sp);
-          return this.setType(expr, { tag: "ptr", inner: objType });
-        }
-        // v.ptr(): *T — a Vec's backing DATA pointer (first element). Safe to
-        // obtain (mirrors string.cstr); the Vec stays live in the caller. Fixed
-        // arrays already auto-coerce to *T (pass bare), so this is Vec-only.
-        if (objType.tag === "vec" && expr.method === "ptr") {
-          if (expr.args.length !== 0) { this.error(`'ptr' takes no arguments`, sp); }
-          return this.setType(expr, { tag: "ptr", inner: objType.element });
-        }
-        // Option combinators — isSome/isNone/unwrapOr. Gated on baseName so a user
-        // enum's own impl method of the same name still resolves normally below.
-        if (objType.tag === "enum" && this.enums.get(objType.name)?.baseName === "Option") {
-          if (expr.method === "isSome" || expr.method === "isNone") {
-            if (expr.args.length !== 0) { this.error(`'${expr.method}' takes no arguments`, sp); }
-            return this.setType(expr, { tag: "bool" });
-          }
-          if (expr.method === "unwrapOr") {
-            if (expr.args.length !== 1) { this.error(`'unwrapOr' expects 1 argument`, sp); return this.setType(expr, { tag: "unknown" }); }
-            const inner = this.unwrapableInner(objType);
-            if (inner && !isCopy(inner)) {
-              // select-based lowering copies the payload; for owned types that would
-              // alias the heap buffer (double-free). Move-out needs match.
-              this.error(`'unwrapOr' on a non-Copy Option<${typeName(inner)}> — use 'match' to move the value out`, sp);
-              return this.setType(expr, inner);
-            }
-            if (inner) {
-              const at = this.checkExprWithHint(expr.args[0], inner);
-              if (!typeEq(inner, at) && at.tag !== "unknown") {
-                this.error(`'unwrapOr': default must be ${typeName(inner)}, got ${typeName(at)}`, sp);
-              }
-              return this.setType(expr, inner);
-            }
-            return this.setType(expr, { tag: "unknown" });
-          }
-          // map(f): Option<T> -> Option<U>. The callback takes the payload BY REF, which is
-          // why this needs no Copy gate (unlike unwrapOr/unwrapOrElse, which load the
-          // payload out): nothing is moved out of the receiver, so an owned inner can't be
-          // aliased into two owners.
-          //
-          // Nor does this consume the receiver, unlike Result.map/mapErr/andThen. Those
-          // forward the OTHER variant's payload into the result untouched, so receiver and
-          // result would both own one buffer. Option's other variant is None, which carries
-          // no payload — there is nothing to forward, so the asymmetry is real, not an
-          // oversight.
-          if (expr.method === "map") {
-            if (expr.args.length !== 1) { this.error(`'map' expects 1 argument`, sp); return this.setType(expr, { tag: "unknown" }); }
-            const inner = this.unwrapableInner(objType);
-            if (!inner) return this.setType(expr, { tag: "unknown" });
-            const cbHint: TypeKind = { tag: "fn", params: [{ tag: "ref", inner, mutable: false }], ret: { tag: "unknown" } };
-            const cbType = this.checkExprWithHint(expr.args[0], cbHint);
-            if (cbType.tag !== "fn") {
-              this.error(`'map' argument must be a function`, sp);
-              return this.setType(expr, { tag: "unknown" });
-            }
-            if (cbType.ret.tag === "void") {
-              this.error(`'map': callback must return a value — use 'match' for a side effect`, sp);
-              return this.setType(expr, { tag: "unknown" });
-            }
-            return this.setType(expr, { tag: "enum", name: this.monomorphizeEnum("Option", [cbType.ret]) });
-          }
-          // unwrapOrElse(f) — like unwrapOr but the default is computed only when None.
-          // Same Copy gate as unwrapOr, for the same reason: the payload is loaded, not
-          // moved out.
-          if (expr.method === "unwrapOrElse") {
-            if (expr.args.length !== 1) { this.error(`'unwrapOrElse' expects 1 argument`, sp); return this.setType(expr, { tag: "unknown" }); }
-            const inner = this.unwrapableInner(objType);
-            if (inner && !isCopy(inner)) {
-              this.error(`'unwrapOrElse' on a non-Copy Option<${typeName(inner)}> — use 'match' to move the value out`, sp);
-              return this.setType(expr, inner);
-            }
-            if (inner) {
-              const cbHint: TypeKind = { tag: "fn", params: [], ret: inner };
-              const cbType = this.checkExprWithHint(expr.args[0], cbHint);
-              if (cbType.tag !== "fn") {
-                this.error(`'unwrapOrElse' argument must be a function`, sp);
-                return this.setType(expr, inner);
-              }
-              if (cbType.params.length !== 0) {
-                this.error(`'unwrapOrElse': callback takes no arguments`, sp);
-              }
-              if (!typeEq(inner, cbType.ret) && cbType.ret.tag !== "unknown") {
-                this.error(`'unwrapOrElse': callback must return ${typeName(inner)}, got ${typeName(cbType.ret)}`, sp);
-              }
-              return this.setType(expr, inner);
-            }
-            return this.setType(expr, { tag: "unknown" });
-          }
-        }
-        // Result combinators — isOk/isErr/unwrapOr, mirroring Option (Ok is tag 0).
-        if (objType.tag === "enum" && this.enums.get(objType.name)?.baseName === "Result") {
-          if (expr.method === "isOk" || expr.method === "isErr") {
-            if (expr.args.length !== 0) { this.error(`'${expr.method}' takes no arguments`, sp); }
-            return this.setType(expr, { tag: "bool" });
-          }
-          if (expr.method === "unwrapOr") {
-            if (expr.args.length !== 1) { this.error(`'unwrapOr' expects 1 argument`, sp); return this.setType(expr, { tag: "unknown" }); }
-            const inner = this.unwrapableInner(objType);
-            if (inner && !isCopy(inner)) {
-              this.error(`'unwrapOr' on a non-Copy Result<${typeName(inner)}> — use 'match' to move the value out`, sp);
-              return this.setType(expr, inner);
-            }
-            if (inner) {
-              const at = this.checkExprWithHint(expr.args[0], inner);
-              if (!typeEq(inner, at) && at.tag !== "unknown") {
-                this.error(`'unwrapOr': default must be ${typeName(inner)}, got ${typeName(at)}`, sp);
-              }
-              return this.setType(expr, inner);
-            }
-            return this.setType(expr, { tag: "unknown" });
-          }
-          // map(f): Result<T,E> -> Result<U,E>. Like Option.map the callback takes the
-          // payload BY REF, which is why there is no Copy gate: nothing is moved out of
-          // the receiver, so an owned Ok payload can't end up with two owners.
-          // The Err payload IS forwarded into the result untouched though, so a non-Copy
-          // E must consume the receiver — see the consume block below.
-          if (expr.method === "map") {
-            if (expr.args.length !== 1) { this.error(`'map' expects 1 argument`, sp); return this.setType(expr, { tag: "unknown" }); }
-            const inner = this.unwrapableInner(objType);
-            const errT = this.unwrapableErr(objType);
-            if (!inner || !errT) return this.setType(expr, { tag: "unknown" });
-            const cbHint: TypeKind = { tag: "fn", params: [{ tag: "ref", inner, mutable: false }], ret: { tag: "unknown" } };
-            const cbType = this.checkExprWithHint(expr.args[0], cbHint);
-            if (cbType.tag !== "fn") {
-              this.error(`'map' argument must be a function`, sp);
-              return this.setType(expr, { tag: "unknown" });
-            }
-            if (cbType.ret.tag === "void") {
-              this.error(`'map': callback must return a value — use 'match' for a side effect`, sp);
-              return this.setType(expr, { tag: "unknown" });
-            }
-            // Err payload is copied through into the result. Owned E would then be
-            // reachable from both the receiver and the result, and both get drop glue.
-            this.consumeForwardedPayload(expr.object, errT);
-            return this.setType(expr, { tag: "enum", name: this.monomorphizeEnum("Result", [cbType.ret, errT]) });
-          }
-          // mapErr(f): Result<T,E> -> Result<T,F> — the mirror of map, callback on the Err side.
-          if (expr.method === "mapErr") {
-            if (expr.args.length !== 1) { this.error(`'mapErr' expects 1 argument`, sp); return this.setType(expr, { tag: "unknown" }); }
-            const inner = this.unwrapableInner(objType);
-            const errT = this.unwrapableErr(objType);
-            if (!inner || !errT) return this.setType(expr, { tag: "unknown" });
-            const cbHint: TypeKind = { tag: "fn", params: [{ tag: "ref", inner: errT, mutable: false }], ret: { tag: "unknown" } };
-            const cbType = this.checkExprWithHint(expr.args[0], cbHint);
-            if (cbType.tag !== "fn") {
-              this.error(`'mapErr' argument must be a function`, sp);
-              return this.setType(expr, { tag: "unknown" });
-            }
-            if (cbType.ret.tag === "void") {
-              this.error(`'mapErr': callback must return a value — use 'match' for a side effect`, sp);
-              return this.setType(expr, { tag: "unknown" });
-            }
-            // Mirror of map: mapErr forwards the OK payload through untouched.
-            this.consumeForwardedPayload(expr.object, inner);
-            return this.setType(expr, { tag: "enum", name: this.monomorphizeEnum("Result", [inner, cbType.ret]) });
-          }
-          // andThen(f): Result<T,E> -> Result<U,E>, f returning the whole Result. The Err
-          // type must match the receiver's: the Err branch forwards the receiver's payload
-          // unchanged, so there is no conversion available for a mismatched E.
-          if (expr.method === "andThen") {
-            if (expr.args.length !== 1) { this.error(`'andThen' expects 1 argument`, sp); return this.setType(expr, { tag: "unknown" }); }
-            const inner = this.unwrapableInner(objType);
-            const errT = this.unwrapableErr(objType);
-            if (!inner || !errT) return this.setType(expr, { tag: "unknown" });
-            const cbHint: TypeKind = { tag: "fn", params: [{ tag: "ref", inner, mutable: false }], ret: { tag: "unknown" } };
-            const cbType = this.checkExprWithHint(expr.args[0], cbHint);
-            if (cbType.tag !== "fn") {
-              this.error(`'andThen' argument must be a function`, sp);
-              return this.setType(expr, { tag: "unknown" });
-            }
-            const ret = cbType.ret;
-            if (ret.tag !== "enum" || this.enums.get(ret.name)?.baseName !== "Result") {
-              this.error(`'andThen': callback must return a Result, got ${typeName(ret)}`, sp);
-              return this.setType(expr, { tag: "unknown" });
-            }
-            const cbErr = this.unwrapableErr(ret);
-            if (cbErr && !typeEq(cbErr, errT)) {
-              this.error(`'andThen': callback's error type must be ${typeName(errT)}, got ${typeName(cbErr)}`, sp);
-              return this.setType(expr, { tag: "unknown" });
-            }
-            // Like map, the Err payload is forwarded into the result untouched.
-            this.consumeForwardedPayload(expr.object, errT);
-            return this.setType(expr, ret);
-          }
-        }
-        // wrapping/saturating/checked arithmetic methods on integers
-        if (objType.tag === "int") {
-          const wrappingMethods = ["wrappingAdd", "wrappingSub", "wrappingMul"];
-          const saturatingMethods = ["saturatingAdd", "saturatingSub", "saturatingMul"];
-          const checkedMethods = ["checkedAdd", "checkedSub", "checkedMul", "checkedDiv", "checkedRem"];
-          if (wrappingMethods.includes(expr.method) || saturatingMethods.includes(expr.method)) {
-            // Must return, not fall through: `this.error` accumulates a diagnostic
-            // and keeps going, so with zero args the `args[0]` below is undefined.
-            if (expr.args.length !== 1) { this.error(`'${expr.method}' expects 1 argument`, sp); return this.setType(expr, { tag: "unknown" }); }
-            const argType = this.checkExprWithHint(expr.args[0], objType);
-            if (!typeEq(objType, argType) && argType.tag !== "unknown") {
-              this.error(`'${expr.method}': expected ${typeName(objType)}, got ${typeName(argType)}`, sp);
-            }
-            return this.setType(expr, objType);
-          }
-          if (checkedMethods.includes(expr.method)) {
-            if (expr.args.length !== 1) { this.error(`'${expr.method}' expects 1 argument`, sp); return this.setType(expr, { tag: "unknown" }); }
-            const argType = this.checkExprWithHint(expr.args[0], objType);
-            if (!typeEq(objType, argType) && argType.tag !== "unknown") {
-              this.error(`'${expr.method}': expected ${typeName(objType)}, got ${typeName(argType)}`, sp);
-            }
-            return this.setType(expr, this.resolveOptionForValue(objType, sp));
-          }
-          // unary negation — desugars to sub(0, x) in lowering, so overflow
-          // semantics (None only at signed INT_MIN / unsigned nonzero) fall out for free
-          if (expr.method === "wrappingNeg") {
-            if (expr.args.length !== 0) { this.error(`'wrappingNeg' takes no arguments`, sp); }
-            return this.setType(expr, objType);
-          }
-          if (expr.method === "checkedNeg") {
-            if (expr.args.length !== 0) { this.error(`'checkedNeg' takes no arguments`, sp); }
-            return this.setType(expr, this.resolveOptionForValue(objType, sp));
-          }
-          // bit-counting intrinsics — 0-arg, count fits any width so result is i64
-          const bitCountMethods = ["countOnes", "leadingZeros", "trailingZeros"];
-          if (bitCountMethods.includes(expr.method)) {
-            if (expr.args.length !== 0) { this.error(`'${expr.method}' takes no arguments`, sp); }
-            return this.setType(expr, { tag: "int", bits: 64, signed: true });
-          }
-          // rotate: 1-arg shift (mod bit-width), returns same type
-          if (expr.method === "rotateLeft" || expr.method === "rotateRight") {
-            if (expr.args.length !== 1) { this.error(`'${expr.method}' expects 1 argument`, sp); }
-            else {
-              const at = this.checkExprWithHint(expr.args[0], objType);
-              if (!typeEq(objType, at) && at.tag !== "unknown") {
-                this.error(`'${expr.method}': shift amount must be ${typeName(objType)}, got ${typeName(at)}`, sp);
-              }
-            }
-            return this.setType(expr, objType);
-          }
-          // reverseBits — 0-arg, returns same type
-          if (expr.method === "reverseBits") {
-            if (expr.args.length !== 0) { this.error(`'reverseBits' takes no arguments`, sp); }
-            return this.setType(expr, objType);
-          }
-        }
-        // frozen-collection guard: reject realloc/free-capable builtins on a borrowed receiver
-        if ((objType.tag === "vec" || objType.tag === "hashmap" || objType.tag === "string")
-            && MUTATING_COLLECTION_METHODS.has(expr.method)) {
-          this.errorIfFrozen(expr.object, `call '${expr.method}' on`, sp);
-        }
-        // slices: `v[a..b]` desugars to `.slice(a,b)`; a slice is `&[T]` — a ref to an
-        // unsized array, runtime rep = non-owning %Vec (cap=0, drop glue skips free)
-        if ((objType.tag === "vec" || objType.tag === "array") && expr.method === "slice") {
-          // fixed-size arrays slice into their own storage (view built in codegen);
-          // the frozen-source rule below keeps the array alive for the view's life
-          const refSlice: TypeKind = { tag: "ref", inner: { tag: "array", element: objType.element, size: null }, mutable: false };
-          if (expr.args.length !== 2) { this.error(`'slice' expects 2 arguments, got ${expr.args.length}`, sp); return this.setType(expr, refSlice); }
-          const startType = this.checkExpr(expr.args[0]);
-          const endType = this.checkExpr(expr.args[1]);
-          if (startType.tag !== "int" && startType.tag !== "unknown") this.error(`slice start: expected integer, got ${typeName(startType)}`, sp);
-          if (endType.tag !== "int" && endType.tag !== "unknown") this.error(`slice end: expected integer, got ${typeName(endType)}`, sp);
-          // freeze the source — mutation could realloc/free the memory this view points into
-          let root: Expr = expr.object;
-          while (root.kind === "FieldAccess" || root.kind === "IndexAccess") root = root.object;
-          if (root.kind === "Ident") {
-            const info = this.lookup(root.name);
-            if (info) this.freeze(info, expr.object);
-          }
-          this.borrowedExprs.add(expr);
-          return this.setType(expr, refSlice);
-        }
-        if (objType.tag === "array" && objType.size === null && expr.method === "len") {
-          if (expr.args.length !== 0) this.error(`'len' takes no arguments`, sp);
-          return this.setType(expr, { tag: "int", bits: 64, signed: true });
-        }
-        if (objType.tag === "vec") {
-          if (expr.method === "push") {
-            if (expr.args.length !== 1) { this.error(`'push' expects 1 argument, got ${expr.args.length}`, sp); return this.setType(expr, { tag: "void" }); }
-            if (!this.isRootMutable(expr.object)) {
-              this.error(`cannot push to immutable Vec`, sp, `declare with 'var' to make it mutable`);
-            }
-            // Deferred-inference Vec (`var v = Vec.new()`): first push fixes the
-            // element type. Resolve the shared placeholder object in place so the
-            // binding, its exprType, and every later use all see the real element.
-            if (this.inferVecElems.has(objType.element as object)) {
-              const argType = this.checkExprWithHint(expr.args[0], null);
-              // A pushed borrow would outlive the scope that owns the borrowed
-              // value — the Vec survives it. Same rule as a struct field.
-              if (argType.tag === "ref") {
-                this.error(`push: cannot store a reference in a Vec`, sp, `references are second-class — push an owned value (clone it if needed)`);
-              }
-              this.inferVecElems.delete(objType.element as object);
-              Object.assign(objType.element as object, argType);
-              this.tryMove(expr.args[0]);
-              return this.setType(expr, { tag: "void" });
-            }
-            const argType = this.checkExprWithHint(expr.args[0], objType.element);
-            if (argType.tag === "ref") {
-              this.error(`push: cannot store a reference in a Vec`, sp, `references are second-class — push an owned value (clone it if needed)`);
-            }
-            if (!typeEq(objType.element, argType) && argType.tag !== "unknown") {
-              if (!this.tryInterfaceCoercion(expr.args[0], argType, objType.element)) {
-                this.error(`push: expected ${typeName(objType.element)}, got ${typeName(argType)}`, sp);
-              }
-            }
-            this.tryMove(expr.args[0]);
-            return this.setType(expr, { tag: "void" });
-          }
-          if (expr.method === "clear" || expr.method === "truncate") {
-            // truncate(n) drops everything at index >= n; clear() is truncate(0).
-            const want = expr.method === "clear" ? 0 : 1;
-            if (expr.args.length !== want) {
-              this.error(`'${expr.method}' expects ${want} argument${want === 1 ? "" : "s"}, got ${expr.args.length}`, sp);
-            }
-            if (want === 1 && expr.args.length === 1) {
-              const nType = this.checkExpr(expr.args[0]);
-              if (nType.tag !== "int" && nType.tag !== "unknown") {
-                this.error(`'truncate': expected an integer length, got ${typeName(nType)}`, sp);
-              }
-            }
-            if (!this.isRootMutable(expr.object)) {
-              this.error(`cannot ${expr.method} an immutable Vec`, sp, `declare with 'var' to make it mutable`);
-            }
-            return this.setType(expr, { tag: "void" });
-          }
-          if (expr.method === "pop") {
-            if (expr.args.length !== 0) { this.error(`'pop' takes no arguments`, sp); }
-            if (!this.isRootMutable(expr.object)) {
-              this.error(`cannot pop from immutable Vec`, sp, `declare with 'var' to make it mutable`);
-            }
-            // Returns Option<T> — Some(last) or None when empty; caller picks the
-            // failure policy via `!`/`?`/`??`. Mirrors HashMap.get / Vec.find.
-            return this.setType(expr, this.resolveOptionForValue(objType.element, sp));
-          }
-          if (expr.method === "map") {
-            if (expr.args.length !== 1) { this.error(`'map' expects 1 argument`, sp); return this.setType(expr, { tag: "unknown" }); }
-            const elemRef: TypeKind = { tag: "ref", inner: objType.element, mutable: false };
-            const cbHint: TypeKind = { tag: "fn", params: [elemRef], ret: { tag: "unknown" } };
-            const cbBorrow = this.borrowDuringCallback(expr.object);
-            const cbType = this.checkExprWithHint(expr.args[0], cbHint);
-            if (cbBorrow) this.unfreeze(cbBorrow);
-            if (cbType.tag !== "fn") { this.error(`'map' argument must be a function`, sp); return this.setType(expr, { tag: "unknown" }); }
-            return this.setType(expr, { tag: "vec", element: cbType.ret });
-          }
-          if (expr.method === "filter") {
-            if (expr.args.length !== 1) { this.error(`'filter' expects 1 argument`, sp); return this.setType(expr, { tag: "unknown" }); }
-            const elemRef: TypeKind = { tag: "ref", inner: objType.element, mutable: false };
-            const cbHint: TypeKind = { tag: "fn", params: [elemRef], ret: { tag: "bool" } };
-            const cbBorrow = this.borrowDuringCallback(expr.object);
-            const cbType = this.checkExprWithHint(expr.args[0], cbHint);
-            if (cbBorrow) this.unfreeze(cbBorrow);
-            if (cbType.tag !== "fn") { this.error(`'filter' argument must be a function`, sp); return this.setType(expr, { tag: "unknown" }); }
-            return this.setType(expr, { tag: "vec", element: objType.element });
-          }
-          if (expr.method === "each") {
-            if (expr.args.length !== 1) { this.error(`'each' expects 1 argument`, sp); return this.setType(expr, { tag: "unknown" }); }
-            const elemRef: TypeKind = { tag: "ref", inner: objType.element, mutable: false };
-            const cbHint: TypeKind = { tag: "fn", params: [elemRef], ret: { tag: "void" } };
-            const cbBorrow = this.borrowDuringCallback(expr.object);
-            this.checkExprWithHint(expr.args[0], cbHint);
-            if (cbBorrow) this.unfreeze(cbBorrow);
-            return this.setType(expr, { tag: "void" });
-          }
-          if (expr.method === "enumerate") {
-            if (expr.args.length !== 1) { this.error(`'enumerate' expects 1 argument`, sp); return this.setType(expr, { tag: "unknown" }); }
-            const elemRef: TypeKind = { tag: "ref", inner: objType.element, mutable: false };
-            const cbHint: TypeKind = { tag: "fn", params: [{ tag: "int", bits: 64, signed: true }, elemRef], ret: { tag: "void" } };
-            const cbBorrow = this.borrowDuringCallback(expr.object);
-            this.checkExprWithHint(expr.args[0], cbHint);
-            if (cbBorrow) this.unfreeze(cbBorrow);
-            return this.setType(expr, { tag: "void" });
-          }
-          if (expr.method === "find") {
-            if (expr.args.length !== 1) { this.error(`'find' expects 1 argument`, sp); return this.setType(expr, { tag: "unknown" }); }
-            const elemRef: TypeKind = { tag: "ref", inner: objType.element, mutable: false };
-            const cbHint: TypeKind = { tag: "fn", params: [elemRef], ret: { tag: "bool" } };
-            const cbBorrow = this.borrowDuringCallback(expr.object);
-            const cbType = this.checkExprWithHint(expr.args[0], cbHint);
-            if (cbBorrow) this.unfreeze(cbBorrow);
-            if (cbType.tag !== "fn") { this.error(`'find' argument must be a function`, sp); return this.setType(expr, { tag: "unknown" }); }
-            return this.setType(expr, this.resolveOptionForValue(objType.element, sp));
-          }
-          if (expr.method === "any") {
-            if (expr.args.length !== 1) { this.error(`'any' expects 1 argument`, sp); return this.setType(expr, { tag: "unknown" }); }
-            const elemRef: TypeKind = { tag: "ref", inner: objType.element, mutable: false };
-            const cbHint: TypeKind = { tag: "fn", params: [elemRef], ret: { tag: "bool" } };
-            const cbBorrow = this.borrowDuringCallback(expr.object);
-            this.checkExprWithHint(expr.args[0], cbHint);
-            if (cbBorrow) this.unfreeze(cbBorrow);
-            return this.setType(expr, { tag: "bool" });
-          }
-          if (expr.method === "all") {
-            if (expr.args.length !== 1) { this.error(`'all' expects 1 argument`, sp); return this.setType(expr, { tag: "unknown" }); }
-            const elemRef: TypeKind = { tag: "ref", inner: objType.element, mutable: false };
-            const cbHint: TypeKind = { tag: "fn", params: [elemRef], ret: { tag: "bool" } };
-            const cbBorrow = this.borrowDuringCallback(expr.object);
-            this.checkExprWithHint(expr.args[0], cbHint);
-            if (cbBorrow) this.unfreeze(cbBorrow);
-            return this.setType(expr, { tag: "bool" });
-          }
-          if (expr.method === "join") {
-            if (expr.args.length !== 1) { this.error(`'join' expects 1 argument (separator)`, sp); return this.setType(expr, { tag: "unknown" }); }
-            if (objType.element.tag !== "string") { this.error(`'join' is only available on Vec<string>`, sp); return this.setType(expr, { tag: "unknown" }); }
-            const sepType = this.checkExpr(expr.args[0]);
-            if (sepType.tag !== "string" && sepType.tag !== "unknown") { this.error(`'join' separator must be a string, got ${typeName(sepType)}`, sp); }
-            return this.setType(expr, { tag: "string" });
-          }
-          if (expr.method === "isEmpty") {
-            if (expr.args.length !== 0) { this.error(`'isEmpty' takes no arguments`, sp); }
-            return this.setType(expr, { tag: "bool" });
-          }
-          // fold(init, (acc, elem) => acc) — the accumulate half of the functional
-          // set. `reduce` is accepted as the same operation because that is what
-          // the majority of readers will type; the suggestion table points at
-          // `fold` when neither spelling is a method (a non-Vec receiver).
-          if (expr.method === "fold" || expr.method === "reduce") {
-            if (expr.args.length !== 2) {
-              this.error(`'${expr.method}' expects 2 arguments (initial value, callback)`, sp);
-              return this.setType(expr, { tag: "unknown" });
-            }
-            let accType = this.checkExpr(expr.args[0]);
-            // A bare `0` seed defaults to i64, which would make every fold over a
-            // narrower Vec a width mismatch the writer has to spell around. When the
-            // callback annotates its accumulator, that annotation is the real type —
-            // adopt it before checking the callback, or the closure body reports the
-            // mismatch first and the seed never gets a chance to widen. Only for a
-            // constant seed, where re-typing loses nothing.
-            const cb = expr.args[1];
-            if (accType.tag === "int" && this.isConstIntExpr(expr.args[0]) &&
-                cb.kind === "Closure" && cb.params.length > 0) {
-              // A closure param may legitimately have no annotation, so read the
-              // field directly rather than through declaredType (which throws).
-              const declared = cb.params[0].type;
-              if (declared) {
-                const annotated = this.resolve(declared);
-                if (annotated.tag === "int" && !typeEq(annotated, accType)) {
-                  this.retypeConstInt(expr.args[0], annotated);
-                  accType = annotated;
-                }
-              }
-            }
-            const elemRef: TypeKind = { tag: "ref", inner: objType.element, mutable: false };
-            const cbHint: TypeKind = { tag: "fn", params: [accType, elemRef], ret: accType };
-            const cbBorrow = this.borrowDuringCallback(expr.object);
-            const cbType = this.checkExprWithHint(expr.args[1], cbHint);
-            if (cbBorrow) this.unfreeze(cbBorrow);
-            if (cbType.tag !== "fn") { this.error(`'${expr.method}' argument 2 must be a function`, sp); return this.setType(expr, { tag: "unknown" }); }
-            if (!typeEq(cbType.ret, accType) && cbType.ret.tag !== "unknown" && accType.tag !== "unknown") {
-              this.error(`'${expr.method}' callback must return ${typeName(accType)} to match the initial value, got ${typeName(cbType.ret)}`, sp);
-            }
-            return this.setType(expr, accType);
-          }
-          if (expr.method === "sum") {
-            if (expr.args.length !== 0) { this.error(`'sum' takes no arguments`, sp); }
-            if (objType.element.tag !== "int" && objType.element.tag !== "float") {
-              this.error(`'sum' requires a Vec of integers or floats, got Vec<${typeName(objType.element)}>`, sp);
-              return this.setType(expr, { tag: "unknown" });
-            }
-            return this.setType(expr, objType.element);
-          }
-          if (expr.method === "contains") {
-            if (expr.args.length !== 1) { this.error(`'contains' expects 1 argument`, sp); return this.setType(expr, { tag: "bool" }); }
-            const argType = this.checkExprWithHint(expr.args[0], objType.element);
-            if (!typeEq(objType.element, argType) && argType.tag !== "unknown") {
-              this.error(`'contains': expected ${typeName(objType.element)}, got ${typeName(argType)}`, sp);
-            }
-            return this.setType(expr, { tag: "bool" });
-          }
-          if (expr.method === "reverse") {
-            if (expr.args.length !== 0) { this.error(`'reverse' takes no arguments`, sp); }
-            if (!this.isRootMutable(expr.object)) {
-              this.error(`cannot reverse immutable Vec`, sp, `declare with 'var' to make it mutable`);
-            }
-            return this.setType(expr, { tag: "void" });
-          }
-          if (expr.method === "swap") {
-            if (expr.args.length !== 2) { this.error(`'swap' expects 2 arguments (index a, index b)`, sp); return this.setType(expr, { tag: "void" }); }
-            if (!this.isRootMutable(expr.object)) {
-              this.error(`cannot swap on immutable Vec`, sp, `declare with 'var' to make it mutable`);
-            }
-            const aType = this.checkExpr(expr.args[0]);
-            const bType = this.checkExpr(expr.args[1]);
-            if (aType.tag !== "int" && aType.tag !== "unknown") { this.error(`'swap' index must be an integer, got ${typeName(aType)}`, sp); }
-            if (bType.tag !== "int" && bType.tag !== "unknown") { this.error(`'swap' index must be an integer, got ${typeName(bType)}`, sp); }
-            return this.setType(expr, { tag: "void" });
-          }
-          if (expr.method === "insert") {
-            if (expr.args.length !== 2) { this.error(`'insert' expects 2 arguments (index, value)`, sp); return this.setType(expr, { tag: "void" }); }
-            if (!this.isRootMutable(expr.object)) {
-              this.error(`cannot insert into immutable Vec`, sp, `declare with 'var' to make it mutable`);
-            }
-            const idxType = this.checkExpr(expr.args[0]);
-            if (idxType.tag !== "int" && idxType.tag !== "unknown") { this.error(`'insert' index must be an integer, got ${typeName(idxType)}`, sp); }
-            const valType = this.checkExprWithHint(expr.args[1], objType.element);
-            if (!typeEq(objType.element, valType) && valType.tag !== "unknown") {
-              this.error(`'insert' value: expected ${typeName(objType.element)}, got ${typeName(valType)}`, sp);
-            }
-            this.tryMove(expr.args[1]);
-            return this.setType(expr, { tag: "void" });
-          }
-          if (expr.method === "remove") {
-            if (expr.args.length !== 1) { this.error(`'remove' expects 1 argument (index)`, sp); return this.setType(expr, objType.element); }
-            if (!this.isRootMutable(expr.object)) {
-              this.error(`cannot remove from immutable Vec`, sp, `declare with 'var' to make it mutable`);
-            }
-            const idxType = this.checkExpr(expr.args[0]);
-            if (idxType.tag !== "int" && idxType.tag !== "unknown") { this.error(`'remove' index must be an integer, got ${typeName(idxType)}`, sp); }
-            return this.setType(expr, objType.element);
-          }
-          if (expr.method === "sort") {
-            if (expr.args.length !== 0) { this.error(`'sort' takes no arguments`, sp); }
-            if (!this.isRootMutable(expr.object)) {
-              this.error(`cannot sort immutable Vec`, sp, `declare with 'var' to make it mutable`);
-            }
-            const el = objType.element;
-            if (el.tag !== "int" && el.tag !== "float" && el.tag !== "string" && el.tag !== "bool") {
-              this.error(`'sort' requires Vec of a comparable type (int, float, string, bool)`, sp);
-            }
-            return this.setType(expr, { tag: "void" });
-          }
-          if (expr.method === "sortBy") {
-            if (expr.args.length !== 1) { this.error(`'sortBy' expects 1 argument (comparator)`, sp); return this.setType(expr, { tag: "unknown" }); }
-            if (!this.isRootMutable(expr.object)) {
-              this.error(`cannot sort immutable Vec`, sp, `declare with 'var' to make it mutable`);
-            }
-            const elemRef: TypeKind = { tag: "ref", inner: objType.element, mutable: false };
-            const cbHint: TypeKind = { tag: "fn", params: [elemRef, elemRef], ret: { tag: "int", bits: 32, signed: true } };
-            const cbBorrow = this.borrowDuringCallback(expr.object);
-            const cbType = this.checkExprWithHint(expr.args[0], cbHint);
-            if (cbBorrow) this.unfreeze(cbBorrow);
-            if (cbType.tag !== "fn") { this.error(`'sortBy' argument must be a comparator function`, sp); }
-            return this.setType(expr, { tag: "void" });
-          }
-          if (expr.method === "sortByKey") {
-            if (expr.args.length !== 1) { this.error(`'sortByKey' expects 1 argument (key extractor)`, sp); return this.setType(expr, { tag: "unknown" }); }
-            if (!this.isRootMutable(expr.object)) {
-              this.error(`cannot sort immutable Vec`, sp, `declare with 'var' to make it mutable`);
-            }
-            const elemRef: TypeKind = { tag: "ref", inner: objType.element, mutable: false };
-            const cbHint: TypeKind = { tag: "fn", params: [elemRef], ret: { tag: "unknown" } };
-            const cbBorrow = this.borrowDuringCallback(expr.object);
-            // The one position where a closure may hand back a field of its borrowed
-            // parameter: the sort reads the key to compare it and never stores or drops it.
-            this.keyExtractorDepth++;
-            const cbType = this.checkExprWithHint(expr.args[0], cbHint);
-            this.keyExtractorDepth--;
-            if (cbBorrow) this.unfreeze(cbBorrow);
-            if (cbType.tag !== "fn") { this.error(`'sortByKey' argument must be a function`, sp); return this.setType(expr, { tag: "void" }); }
-            const keyType = cbType.ret;
-            if (keyType.tag !== "int" && keyType.tag !== "float" && keyType.tag !== "string" && keyType.tag !== "bool") {
-              this.error(`'sortByKey' key must be a comparable type (int, float, string, bool), got ${typeName(keyType)}`, sp);
-            }
-            return this.setType(expr, { tag: "void" });
-          }
-          if (expr.method === "len") {
-            if (expr.args.length !== 0) { this.error(`'len' takes no arguments`, sp); }
-            return this.setType(expr, { tag: "int", bits: 64, signed: true });
-          }
-          if (expr.method === "clone") {
-            if (expr.args.length !== 0) { this.error(`'clone' takes no arguments`, sp); }
-            // An interface value's itable has no clone slot, and a closure's
-            // captured environment has no copy path — neither can be duplicated.
-            const el = objType.element;
-            if (el.tag === "interface") {
-              this.error(`cannot clone Vec<${typeName(el)}>: an interface value has no clone`, sp,
-                `the concrete type is erased and the itable carries no clone slot — build a new Vec from the concrete values instead`);
-            } else if (el.tag === "fn") {
-              this.error(`cannot clone Vec<${typeName(el)}>: closures cannot be cloned`, sp);
-            }
-            return this.setType(expr, objType);
-          }
-          // `v[i]` panics out of range; get/first/last are the total reads. The
-          // element comes back cloned — a reference into the buffer could not
-          // outlive a later push.
-          if (expr.method === "get" || expr.method === "first" || expr.method === "last") {
-            const want = expr.method === "get" ? 1 : 0;
-            if (expr.args.length !== want) {
-              this.error(`'${expr.method}' expects ${want} argument${want === 1 ? " (index)" : "s"}, got ${expr.args.length}`, sp);
-            }
-            if (want === 1 && expr.args.length === 1) {
-              const idxType = this.checkExpr(expr.args[0]);
-              if (idxType.tag !== "int" && idxType.tag !== "unknown") { this.error(`'get' index must be an integer, got ${typeName(idxType)}`, sp); }
-            }
-            return this.setType(expr, this.resolveOptionForValue(objType.element, sp));
-          }
-          // Same comparable-element gate `sort` uses. Milo has no ordering trait, so
-          // rather than invent an ordering for structs (which would be an opinion, not
-          // a fact — see the HashMap key note) min/max are refused on them outright.
-          if (expr.method === "min" || expr.method === "max") {
-            if (expr.args.length !== 0) { this.error(`'${expr.method}' takes no arguments`, sp); }
-            const el = objType.element;
-            if (el.tag !== "int" && el.tag !== "float" && el.tag !== "string" && el.tag !== "bool") {
-              this.error(`'${expr.method}' requires a Vec of a comparable type (int, float, string, bool), got Vec<${typeName(el)}>`, sp,
-                `there is no ordering on ${typeName(el)} — use 'fold' with your own comparison, or 'sortByKey' then 'first'`);
-              return this.setType(expr, { tag: "unknown" });
-            }
-            return this.setType(expr, this.resolveOptionForValue(el, sp));
-          }
-          // `find` answers "which value"; `indexOf`/`position` answer "where".
-          if (expr.method === "indexOf") {
-            if (expr.args.length !== 1) { this.error(`'indexOf' expects 1 argument`, sp); return this.setType(expr, { tag: "unknown" }); }
-            const el = objType.element;
-            if (el.tag !== "int" && el.tag !== "float" && el.tag !== "string" && el.tag !== "bool") {
-              this.error(`'indexOf' requires a Vec of a comparable type (int, float, string, bool), got Vec<${typeName(el)}>`, sp,
-                `use 'position' with a predicate instead`);
-              return this.setType(expr, { tag: "unknown" });
-            }
-            const argType = this.checkExprWithHint(expr.args[0], el);
-            if (!typeEq(el, argType) && argType.tag !== "unknown") {
-              this.error(`'indexOf': expected ${typeName(el)}, got ${typeName(argType)}`, sp);
-            }
-            return this.setType(expr, this.resolveOptionForValue({ tag: "int", bits: 64, signed: true }, sp));
-          }
-          if (expr.method === "position") {
-            if (expr.args.length !== 1) { this.error(`'position' expects 1 argument`, sp); return this.setType(expr, { tag: "unknown" }); }
-            const elemRef: TypeKind = { tag: "ref", inner: objType.element, mutable: false };
-            const cbHint: TypeKind = { tag: "fn", params: [elemRef], ret: { tag: "bool" } };
-            const cbBorrow = this.borrowDuringCallback(expr.object);
-            const cbType = this.checkExprWithHint(expr.args[0], cbHint);
-            if (cbBorrow) this.unfreeze(cbBorrow);
-            if (cbType.tag !== "fn") { this.error(`'position' argument must be a function`, sp); return this.setType(expr, { tag: "unknown" }); }
-            return this.setType(expr, this.resolveOptionForValue({ tag: "int", bits: 64, signed: true }, sp));
-          }
-          // extend moves the other Vec in — its elements are transplanted, not copied,
-          // so there is no clone and no way to touch the source afterwards.
-          if (expr.method === "extend") {
-            if (expr.args.length !== 1) { this.error(`'extend' expects 1 argument (a Vec to append)`, sp); return this.setType(expr, { tag: "void" }); }
-            if (!this.isRootMutable(expr.object)) {
-              this.error(`cannot extend an immutable Vec`, sp, `declare with 'var' to make it mutable`);
-            }
-            const otherType = this.checkExprWithHint(expr.args[0], objType);
-            if (otherType.tag === "ref") {
-              this.error(`'extend' takes ownership of the other Vec`, sp, `clone it if you still need it: 'v.extend(other.clone())'`);
-            } else if (!typeEq(objType, otherType) && otherType.tag !== "unknown") {
-              this.error(`'extend': expected ${typeName(objType)}, got ${typeName(otherType)}`, sp);
-            }
-            this.tryMove(expr.args[0]);
-            return this.setType(expr, { tag: "void" });
-          }
-          // retain is filter's in-place twin: no second buffer, and the rejected
-          // elements are dropped rather than leaked.
-          if (expr.method === "retain") {
-            if (expr.args.length !== 1) { this.error(`'retain' expects 1 argument (predicate)`, sp); return this.setType(expr, { tag: "void" }); }
-            if (!this.isRootMutable(expr.object)) {
-              this.error(`cannot retain on an immutable Vec`, sp, `declare with 'var' to make it mutable`);
-            }
-            const elemRef: TypeKind = { tag: "ref", inner: objType.element, mutable: false };
-            const cbHint: TypeKind = { tag: "fn", params: [elemRef], ret: { tag: "bool" } };
-            const cbBorrow = this.borrowDuringCallback(expr.object);
-            const cbType = this.checkExprWithHint(expr.args[0], cbHint);
-            if (cbBorrow) this.unfreeze(cbBorrow);
-            if (cbType.tag !== "fn") { this.error(`'retain' argument must be a predicate function`, sp); }
-            return this.setType(expr, { tag: "void" });
-          }
-          if (expr.method === "capacity") {
-            if (expr.args.length !== 0) { this.error(`'capacity' takes no arguments`, sp); }
-            return this.setType(expr, { tag: "int", bits: 64, signed: true });
-          }
-          if (expr.method === "reserve") {
-            if (expr.args.length !== 1) { this.error(`'reserve' expects 1 argument (extra capacity)`, sp); return this.setType(expr, { tag: "void" }); }
-            if (!this.isRootMutable(expr.object)) {
-              this.error(`cannot reserve on an immutable Vec`, sp, `declare with 'var' to make it mutable`);
-            }
-            const nType = this.checkExpr(expr.args[0]);
-            if (nType.tag !== "int" && nType.tag !== "unknown") { this.error(`'reserve': expected an integer, got ${typeName(nType)}`, sp); }
-            return this.setType(expr, { tag: "void" });
-          }
-          this.error(`Vec has no method '${expr.method}'`, sp, memberHint(expr.method, VEC_MEMBERS));
+        if (cbType.ret.tag === "void") {
+          this.error(`'map': callback must return a value — use 'match' for a side effect`, sp);
           return this.setType(expr, { tag: "unknown" });
         }
-        if (objType.tag === "hashmap") {
-          if (expr.method === "insert") {
-            if (expr.args.length !== 2) { this.error(`'insert' expects 2 arguments, got ${expr.args.length}`, sp); return this.setType(expr, { tag: "void" }); }
-            if (!this.isRootMutable(expr.object)) {
-              this.error(`cannot insert into immutable HashMap`, sp, `declare with 'var' to make it mutable`);
-            }
-            const keyType = this.checkExprWithHint(expr.args[0], objType.key);
-            if (!typeEq(objType.key, keyType) && keyType.tag !== "unknown") {
-              this.error(`insert key: expected ${typeName(objType.key)}, got ${typeName(keyType)}`, sp);
-            }
-            const valType = this.checkExprWithHint(expr.args[1], objType.value);
-            if (!typeEq(objType.value, valType) && valType.tag !== "unknown") {
-              this.error(`insert value: expected ${typeName(objType.value)}, got ${typeName(valType)}`, sp);
-            }
-            this.tryMove(expr.args[0]);
-            this.tryMove(expr.args[1]);
-            return this.setType(expr, { tag: "void" });
+        return this.setType(expr, { tag: "enum", name: this.monomorphizeEnum("Option", [cbType.ret]) });
+      }
+      // unwrapOrElse(f) — like unwrapOr but the default is computed only when None.
+      // Same Copy gate as unwrapOr, for the same reason: the payload is loaded, not
+      // moved out.
+      if (expr.method === "unwrapOrElse") {
+        if (expr.args.length !== 1) { this.error(`'unwrapOrElse' expects 1 argument`, sp); return this.setType(expr, { tag: "unknown" }); }
+        const inner = this.unwrapableInner(objType);
+        if (inner && !isCopy(inner)) {
+          this.error(`'unwrapOrElse' on a non-Copy Option<${typeName(inner)}> — use 'match' to move the value out`, sp);
+          return this.setType(expr, inner);
+        }
+        if (inner) {
+          const cbHint: TypeKind = { tag: "fn", params: [], ret: inner };
+          const cbType = this.checkExprWithHint(expr.args[0], cbHint);
+          if (cbType.tag !== "fn") {
+            this.error(`'unwrapOrElse' argument must be a function`, sp);
+            return this.setType(expr, inner);
           }
-          if (expr.method === "get") {
-            if (expr.args.length !== 1) { this.error(`'get' expects 1 argument, got ${expr.args.length}`, sp); return this.setType(expr, { tag: "unknown" }); }
-            const keyType = this.checkExprWithHint(expr.args[0], objType.key);
-            if (!typeEq(objType.key, keyType) && keyType.tag !== "unknown") {
-              this.error(`get key: expected ${typeName(objType.key)}, got ${typeName(keyType)}`, sp);
-            }
-            const optionType = this.resolveOptionForValue(objType.value, sp);
-            return this.setType(expr, optionType);
+          if (cbType.params.length !== 0) {
+            this.error(`'unwrapOrElse': callback takes no arguments`, sp);
           }
-          if (expr.method === "getOrDefault") {
-            if (expr.args.length !== 2) { this.error(`'getOrDefault' expects 2 arguments, got ${expr.args.length}`, sp); return this.setType(expr, { tag: "unknown" }); }
-            const keyType = this.checkExprWithHint(expr.args[0], objType.key);
-            if (!typeEq(objType.key, keyType) && keyType.tag !== "unknown") {
-              this.error(`getOrDefault key: expected ${typeName(objType.key)}, got ${typeName(keyType)}`, sp);
-            }
-            const valType = this.checkExprWithHint(expr.args[1], objType.value);
-            if (!typeEq(objType.value, valType) && valType.tag !== "unknown") {
-              this.error(`getOrDefault default: expected ${typeName(objType.value)}, got ${typeName(valType)}`, sp);
-            }
-            return this.setType(expr, objType.value);
+          if (!typeEq(inner, cbType.ret) && cbType.ret.tag !== "unknown") {
+            this.error(`'unwrapOrElse': callback must return ${typeName(inner)}, got ${typeName(cbType.ret)}`, sp);
           }
-          if (expr.method === "contains") {
-            if (expr.args.length !== 1) { this.error(`'contains' expects 1 argument, got ${expr.args.length}`, sp); return this.setType(expr, { tag: "unknown" }); }
-            const keyType = this.checkExprWithHint(expr.args[0], objType.key);
-            if (!typeEq(objType.key, keyType) && keyType.tag !== "unknown") {
-              this.error(`contains key: expected ${typeName(objType.key)}, got ${typeName(keyType)}`, sp);
-            }
-            return this.setType(expr, { tag: "bool" });
+          return this.setType(expr, inner);
+        }
+        return this.setType(expr, { tag: "unknown" });
+      }
+    }
+    // Result combinators — isOk/isErr/unwrapOr, mirroring Option (Ok is tag 0).
+    if (objType.tag === "enum" && this.enums.get(objType.name)?.baseName === "Result") {
+      if (expr.method === "isOk" || expr.method === "isErr") {
+        if (expr.args.length !== 0) { this.error(`'${expr.method}' takes no arguments`, sp); }
+        return this.setType(expr, { tag: "bool" });
+      }
+      if (expr.method === "unwrapOr") {
+        if (expr.args.length !== 1) { this.error(`'unwrapOr' expects 1 argument`, sp); return this.setType(expr, { tag: "unknown" }); }
+        const inner = this.unwrapableInner(objType);
+        if (inner && !isCopy(inner)) {
+          this.error(`'unwrapOr' on a non-Copy Result<${typeName(inner)}> — use 'match' to move the value out`, sp);
+          return this.setType(expr, inner);
+        }
+        if (inner) {
+          const at = this.checkExprWithHint(expr.args[0], inner);
+          if (!typeEq(inner, at) && at.tag !== "unknown") {
+            this.error(`'unwrapOr': default must be ${typeName(inner)}, got ${typeName(at)}`, sp);
           }
-          if (expr.method === "remove") {
-            if (expr.args.length !== 1) { this.error(`'remove' expects 1 argument, got ${expr.args.length}`, sp); return this.setType(expr, { tag: "unknown" }); }
-            if (!this.isRootMutable(expr.object)) {
-              this.error(`cannot remove from immutable HashMap`, sp, `declare with 'var' to make it mutable`);
-            }
-            const keyType = this.checkExprWithHint(expr.args[0], objType.key);
-            if (!typeEq(objType.key, keyType) && keyType.tag !== "unknown") {
-              this.error(`remove key: expected ${typeName(objType.key)}, got ${typeName(keyType)}`, sp);
-            }
-            return this.setType(expr, { tag: "void" });
-          }
-          if (expr.method === "len") {
-            if (expr.args.length !== 0) { this.error(`'len' takes no arguments`, sp); }
-            return this.setType(expr, { tag: "int", bits: 64, signed: true });
-          }
-          if (expr.method === "isEmpty") {
-            if (expr.args.length !== 0) { this.error(`'isEmpty' takes no arguments`, sp); }
-            return this.setType(expr, { tag: "bool" });
-          }
-          if (expr.method === "clear") {
-            if (expr.args.length !== 0) { this.error(`'clear' takes no arguments`, sp); }
-            if (!this.isRootMutable(expr.object)) {
-              this.error(`cannot clear an immutable HashMap`, sp, `declare with 'var' to make it mutable`);
-            }
-            return this.setType(expr, { tag: "void" });
-          }
-          if (expr.method === "clone") {
-            if (expr.args.length !== 0) { this.error(`'clone' takes no arguments`, sp); }
-            for (const [what, t] of [["key", objType.key], ["value", objType.value]] as const) {
-              if (t.tag === "interface") {
-                this.error(`cannot clone a HashMap with ${what} type ${typeName(t)}: an interface value has no clone`, sp,
-                  `the concrete type is erased and the itable carries no clone slot`);
-              } else if (t.tag === "fn") {
-                this.error(`cannot clone a HashMap with ${what} type ${typeName(t)}: closures cannot be cloned`, sp);
-              }
-            }
-            return this.setType(expr, objType);
-          }
-          // keys()/values() snapshot into a Vec. Iteration order is unspecified and
-          // varies per process (the hash seed is randomized), so the snapshot is the
-          // supported way to get a stable order: collect, then sort.
-          if (expr.method === "keys" || expr.method === "values") {
-            if (expr.args.length !== 0) { this.error(`'${expr.method}' takes no arguments`, sp); }
-            const el = expr.method === "keys" ? objType.key : objType.value;
-            if (el.tag === "interface" || el.tag === "fn") {
-              this.error(`'${expr.method}' cannot copy ${typeName(el)} out of the map`, sp,
-                `iterate with 'for k, v in map' instead — it borrows rather than copies`);
-              return this.setType(expr, { tag: "unknown" });
-            }
-            return this.setType(expr, { tag: "vec", element: el });
-          }
-          this.error(`HashMap has no method '${expr.method}'`, sp, memberHint(expr.method, HASHMAP_MEMBERS));
+          return this.setType(expr, inner);
+        }
+        return this.setType(expr, { tag: "unknown" });
+      }
+      // map(f): Result<T,E> -> Result<U,E>. Like Option.map the callback takes the
+      // payload BY REF, which is why there is no Copy gate: nothing is moved out of
+      // the receiver, so an owned Ok payload can't end up with two owners.
+      // The Err payload IS forwarded into the result untouched though, so a non-Copy
+      // E must consume the receiver — see the consume block below.
+      if (expr.method === "map") {
+        if (expr.args.length !== 1) { this.error(`'map' expects 1 argument`, sp); return this.setType(expr, { tag: "unknown" }); }
+        const inner = this.unwrapableInner(objType);
+        const errT = this.unwrapableErr(objType);
+        if (!inner || !errT) return this.setType(expr, { tag: "unknown" });
+        const cbHint: TypeKind = { tag: "fn", params: [{ tag: "ref", inner, mutable: false }], ret: { tag: "unknown" } };
+        const cbType = this.checkExprWithHint(expr.args[0], cbHint);
+        if (cbType.tag !== "fn") {
+          this.error(`'map' argument must be a function`, sp);
           return this.setType(expr, { tag: "unknown" });
         }
-        if (objType.tag === "string") {
-          if (expr.method === "push") {
-            if (expr.args.length !== 1) { this.error(`'push' expects 1 argument, got ${expr.args.length}`, sp); return this.setType(expr, { tag: "void" }); }
-            if (!this.isRootMutable(expr.object)) {
-              this.error(`cannot push to immutable string`, sp, `declare with 'var' to make it mutable`);
-            }
-            // Hint the arg with u8 so an int literal coerces — `s.push(65)` demanded an
-            // explicit `as u8` only because this checked without a hint, unlike Vec.push.
-            // An out-of-range literal is still rejected by the coercion itself.
-            const u8t: TypeKind = { tag: "int", bits: 8, signed: false };
-            const argType = this.checkExprWithHint(expr.args[0], u8t);
-            if (!typeEq(u8t, argType) && argType.tag !== "unknown") {
-              this.error(`string.push: expected u8, got ${typeName(argType)}`, sp);
-            }
-            return this.setType(expr, { tag: "void" });
-          }
-          if (expr.method === "pushStr") {
-            if (expr.args.length !== 1) { this.error(`'pushStr' expects 1 argument, got ${expr.args.length}`, sp); return this.setType(expr, { tag: "void" }); }
-            if (!this.isRootMutable(expr.object)) {
-              this.error(`cannot push to immutable string`, sp, `declare with 'var' to make it mutable`);
-            }
-            const argType = this.checkExpr(expr.args[0]);
-            const argInner = this.deref(argType);
-            if (argInner.tag !== "string" && argInner.tag !== "unknown") {
-              this.error(`string.pushStr: expected string, got ${typeName(argType)}`, sp);
-            }
-            this.setAutoBorrowChecked(expr.args[0], false);
-            return this.setType(expr, { tag: "void" });
-          }
-          if (expr.method === "substr") {
-            if (expr.args.length !== 2) { this.error(`'substr' expects 2 arguments, got ${expr.args.length}`, sp); return this.setType(expr, { tag: "string" }); }
-            const startType = this.checkExpr(expr.args[0]);
-            const endType = this.checkExpr(expr.args[1]);
-            if (startType.tag !== "int" && startType.tag !== "unknown") this.error(`substr start: expected integer, got ${typeName(startType)}`, sp);
-            if (endType.tag !== "int" && endType.tag !== "unknown") this.error(`substr end: expected integer, got ${typeName(endType)}`, sp);
-            return this.setType(expr, { tag: "string" });
-          }
-          if (expr.method === "slice") {
-            const refStr: TypeKind = { tag: "ref", inner: { tag: "string" }, mutable: false };
-            if (expr.args.length !== 2) { this.error(`'slice' expects 2 arguments, got ${expr.args.length}`, sp); return this.setType(expr, refStr); }
-            const startType = this.checkExpr(expr.args[0]);
-            const endType = this.checkExpr(expr.args[1]);
-            if (startType.tag !== "int" && startType.tag !== "unknown") this.error(`slice start: expected integer, got ${typeName(startType)}`, sp);
-            if (endType.tag !== "int" && endType.tag !== "unknown") this.error(`slice end: expected integer, got ${typeName(endType)}`, sp);
-            // mark source as borrowed — prevents mutation/move while slice is live.
-            // Walk to the root variable: `buf.data[a..b]` views storage owned by `buf`,
-            // so replacing any part of `buf` can free what this points into.
-            let strRoot: Expr = expr.object;
-            while (strRoot.kind === "FieldAccess" || strRoot.kind === "IndexAccess") strRoot = strRoot.object;
-            if (strRoot.kind === "Ident") {
-              const info = this.lookup(strRoot.name);
-              if (info) this.freeze(info, expr.object);
-            }
-            this.borrowedExprs.add(expr);
-            return this.setType(expr, refStr);
-          }
-          if (expr.method === "parseF64") {
-            if (expr.args.length !== 0) { this.error(`'parseF64' takes no arguments`, sp); }
-            return this.setType(expr, { tag: "enum", name: this.monomorphizeEnum("Option", [{ tag: "float", bits: 64 }]) });
-          }
-          if (expr.method === "clone") {
-            if (expr.args.length !== 0) { this.error(`'clone' takes no arguments`, sp); }
-            return this.setType(expr, { tag: "string" });
-          }
-          // string methods delegated to std/string runtime functions
-          if (expr.method === "contains" || expr.method === "startsWith" || expr.method === "endsWith") {
-            if (expr.args.length !== 1) { this.error(`'${expr.method}' expects 1 argument, got ${expr.args.length}`, sp); return this.setType(expr, { tag: "bool" }); }
-            const argType = this.checkExpr(expr.args[0]);
-            if (argType.tag !== "string" && argType.tag !== "unknown") this.error(`'${expr.method}': expected string, got ${typeName(argType)}`, sp);
-            return this.setType(expr, { tag: "bool" });
-          }
-          if (expr.method === "indexOf" || expr.method === "lastIndexOf") {
-            const optionI64: TypeKind = { tag: "enum", name: this.monomorphizeEnum("Option", [{ tag: "int", bits: 64, signed: true }]) };
-            if (expr.args.length !== 1) { this.error(`'${expr.method}' expects 1 argument, got ${expr.args.length}`, sp); return this.setType(expr, optionI64); }
-            const argType = this.checkExpr(expr.args[0]);
-            if (argType.tag !== "string" && argType.tag !== "unknown") this.error(`'${expr.method}': expected string, got ${typeName(argType)}`, sp);
-            return this.setType(expr, optionI64);
-          }
-          // like indexOf but starts the search at byte offset `from`
-          if (expr.method === "indexOfFrom") {
-            const optionI64: TypeKind = { tag: "enum", name: this.monomorphizeEnum("Option", [{ tag: "int", bits: 64, signed: true }]) };
-            if (expr.args.length !== 2) { this.error(`'indexOfFrom' expects 2 arguments (needle, from), got ${expr.args.length}`, sp); return this.setType(expr, optionI64); }
-            const nType = this.checkExpr(expr.args[0]);
-            if (nType.tag !== "string" && nType.tag !== "unknown") this.error(`'indexOfFrom' arg 1: expected string, got ${typeName(nType)}`, sp);
-            const fromType = this.checkExpr(expr.args[1]);
-            if (fromType.tag !== "int" && fromType.tag !== "unknown") this.error(`'indexOfFrom' arg 2: expected integer, got ${typeName(fromType)}`, sp);
-            return this.setType(expr, optionI64);
-          }
-          if (expr.method === "split") {
-            if (expr.args.length !== 1) { this.error(`'split' expects 1 argument, got ${expr.args.length}`, sp); return this.setType(expr, { tag: "vec", element: { tag: "string" } }); }
-            const argType = this.checkExpr(expr.args[0]);
-            if (argType.tag !== "string" && argType.tag !== "unknown") this.error(`'split': expected string, got ${typeName(argType)}`, sp);
-            return this.setType(expr, { tag: "vec", element: { tag: "string" } });
-          }
-          if (expr.method === "isEmpty") {
-            if (expr.args.length !== 0) { this.error(`'isEmpty' takes no arguments`, sp); }
-            return this.setType(expr, { tag: "bool" });
-          }
-          // Loop-only: each piece is a `&string` view into the receiver, and a view has no
-          // storage to live in outside the loop that freezes the receiver for it.
-          if (expr.method === "lines" || expr.method === "splitView") {
-            const owned = expr.method === "lines" ? `split("\\n")` : `split(sep)`;
-            const call = expr.method === "lines" ? `lines()` : `splitView(sep)`;
-            this.error(`'${expr.method}' is only valid as the iterable of a 'for ... in' loop over a named string`, sp,
-              `it yields borrowed views, which cannot be stored — bind the string first ('let text = ...') and write 'for piece in text.${call}', or use '${owned}' for owned copies`);
-            return this.setType(expr, { tag: "unknown" });
-          }
-          if (expr.method === "splitWords" || expr.method === "splitWhitespace") {
-            if (expr.args.length !== 0) { this.error(`'${expr.method}' takes no arguments`, sp); }
-            return this.setType(expr, { tag: "vec", element: { tag: "string" } });
-          }
-          if (expr.method === "trim" || expr.method === "trimStart" || expr.method === "trimEnd" || expr.method === "toLower" || expr.method === "toUpper" || expr.method === "reverse") {
-            if (expr.args.length !== 0) { this.error(`'${expr.method}' takes no arguments`, sp); }
-            return this.setType(expr, { tag: "string" });
-          }
-          if (expr.method === "charAt") {
-            if (expr.args.length !== 1) { this.error(`'charAt' expects 1 argument, got ${expr.args.length}`, sp); return this.setType(expr, { tag: "string" }); }
-            const argType = this.checkExpr(expr.args[0]);
-            if (argType.tag !== "int" && argType.tag !== "unknown") this.error(`'charAt': expected integer, got ${typeName(argType)}`, sp);
-            return this.setType(expr, { tag: "string" });
-          }
-          if (expr.method === "parseInt") {
-            if (expr.args.length !== 0) { this.error(`'parseInt' takes no arguments`, sp); }
-            return this.setType(expr, { tag: "enum", name: this.monomorphizeEnum("Option", [{ tag: "int", bits: 64, signed: true }]) });
-          }
-          if (expr.method === "replace" || expr.method === "replaceFirst") {
-            if (expr.args.length !== 2) { this.error(`'replace' expects 2 arguments, got ${expr.args.length}`, sp); return this.setType(expr, { tag: "string" }); }
-            const a1 = this.checkExpr(expr.args[0]);
-            const a2 = this.checkExpr(expr.args[1]);
-            if (a1.tag !== "string" && a1.tag !== "unknown") this.error(`'replace' arg 1: expected string, got ${typeName(a1)}`, sp);
-            if (a2.tag !== "string" && a2.tag !== "unknown") this.error(`'replace' arg 2: expected string, got ${typeName(a2)}`, sp);
-            return this.setType(expr, { tag: "string" });
-          }
-          if (expr.method === "repeat") {
-            if (expr.args.length !== 1) { this.error(`'repeat' expects 1 argument, got ${expr.args.length}`, sp); return this.setType(expr, { tag: "string" }); }
-            const argType = this.checkExpr(expr.args[0]);
-            if (argType.tag !== "int" && argType.tag !== "unknown") this.error(`'repeat': expected integer, got ${typeName(argType)}`, sp);
-            return this.setType(expr, { tag: "string" });
-          }
-          if (expr.method === "padStart" || expr.method === "padEnd") {
-            if (expr.args.length !== 2) { this.error(`'${expr.method}' expects 2 arguments (targetLen, padStr), got ${expr.args.length}`, sp); return this.setType(expr, { tag: "string" }); }
-            const lenType = this.checkExpr(expr.args[0]);
-            const padType = this.checkExpr(expr.args[1]);
-            if (lenType.tag !== "int" && lenType.tag !== "unknown") this.error(`'${expr.method}' arg 1: expected integer, got ${typeName(lenType)}`, sp);
-            if (padType.tag !== "string" && padType.tag !== "unknown") this.error(`'${expr.method}' arg 2: expected string, got ${typeName(padType)}`, sp);
-            return this.setType(expr, { tag: "string" });
-          }
-          if (expr.method === "len") {
-            if (expr.args.length !== 0) { this.error(`'len' takes no arguments`, sp); }
-            return this.setType(expr, { tag: "int", bits: 64, signed: true });
-          }
-          if (expr.method === "cstr") {
-            if (expr.args.length !== 0) { this.error(`'cstr' takes no arguments`, sp); }
-            return this.setType(expr, { tag: "ptr", inner: { tag: "int", bits: 8, signed: false } });
-          }
-          // fall through to trait/inherent lookup for String
+        if (cbType.ret.tag === "void") {
+          this.error(`'map': callback must return a value — use 'match' for a side effect`, sp);
+          return this.setType(expr, { tag: "unknown" });
         }
+        // Err payload is copied through into the result. Owned E would then be
+        // reachable from both the receiver and the result, and both get drop glue.
+        this.consumeForwardedPayload(expr.object, errT);
+        return this.setType(expr, { tag: "enum", name: this.monomorphizeEnum("Result", [cbType.ret, errT]) });
+      }
+      // mapErr(f): Result<T,E> -> Result<T,F> — the mirror of map, callback on the Err side.
+      if (expr.method === "mapErr") {
+        if (expr.args.length !== 1) { this.error(`'mapErr' expects 1 argument`, sp); return this.setType(expr, { tag: "unknown" }); }
+        const inner = this.unwrapableInner(objType);
+        const errT = this.unwrapableErr(objType);
+        if (!inner || !errT) return this.setType(expr, { tag: "unknown" });
+        const cbHint: TypeKind = { tag: "fn", params: [{ tag: "ref", inner: errT, mutable: false }], ret: { tag: "unknown" } };
+        const cbType = this.checkExprWithHint(expr.args[0], cbHint);
+        if (cbType.tag !== "fn") {
+          this.error(`'mapErr' argument must be a function`, sp);
+          return this.setType(expr, { tag: "unknown" });
+        }
+        if (cbType.ret.tag === "void") {
+          this.error(`'mapErr': callback must return a value — use 'match' for a side effect`, sp);
+          return this.setType(expr, { tag: "unknown" });
+        }
+        // Mirror of map: mapErr forwards the OK payload through untouched.
+        this.consumeForwardedPayload(expr.object, inner);
+        return this.setType(expr, { tag: "enum", name: this.monomorphizeEnum("Result", [inner, cbType.ret]) });
+      }
+      // andThen(f): Result<T,E> -> Result<U,E>, f returning the whole Result. The Err
+      // type must match the receiver's: the Err branch forwards the receiver's payload
+      // unchanged, so there is no conversion available for a mismatched E.
+      if (expr.method === "andThen") {
+        if (expr.args.length !== 1) { this.error(`'andThen' expects 1 argument`, sp); return this.setType(expr, { tag: "unknown" }); }
+        const inner = this.unwrapableInner(objType);
+        const errT = this.unwrapableErr(objType);
+        if (!inner || !errT) return this.setType(expr, { tag: "unknown" });
+        const cbHint: TypeKind = { tag: "fn", params: [{ tag: "ref", inner, mutable: false }], ret: { tag: "unknown" } };
+        const cbType = this.checkExprWithHint(expr.args[0], cbHint);
+        if (cbType.tag !== "fn") {
+          this.error(`'andThen' argument must be a function`, sp);
+          return this.setType(expr, { tag: "unknown" });
+        }
+        const ret = cbType.ret;
+        if (ret.tag !== "enum" || this.enums.get(ret.name)?.baseName !== "Result") {
+          this.error(`'andThen': callback must return a Result, got ${typeName(ret)}`, sp);
+          return this.setType(expr, { tag: "unknown" });
+        }
+        const cbErr = this.unwrapableErr(ret);
+        if (cbErr && !typeEq(cbErr, errT)) {
+          this.error(`'andThen': callback's error type must be ${typeName(errT)}, got ${typeName(cbErr)}`, sp);
+          return this.setType(expr, { tag: "unknown" });
+        }
+        // Like map, the Err payload is forwarded into the result untouched.
+        this.consumeForwardedPayload(expr.object, errT);
+        return this.setType(expr, ret);
+      }
+    }
+    // wrapping/saturating/checked arithmetic methods on integers
+    if (objType.tag === "int") {
+      const wrappingMethods = ["wrappingAdd", "wrappingSub", "wrappingMul"];
+      const saturatingMethods = ["saturatingAdd", "saturatingSub", "saturatingMul"];
+      const checkedMethods = ["checkedAdd", "checkedSub", "checkedMul", "checkedDiv", "checkedRem"];
+      if (wrappingMethods.includes(expr.method) || saturatingMethods.includes(expr.method)) {
+        // Must return, not fall through: `this.error` accumulates a diagnostic
+        // and keeps going, so with zero args the `args[0]` below is undefined.
+        if (expr.args.length !== 1) { this.error(`'${expr.method}' expects 1 argument`, sp); return this.setType(expr, { tag: "unknown" }); }
+        const argType = this.checkExprWithHint(expr.args[0], objType);
+        if (!typeEq(objType, argType) && argType.tag !== "unknown") {
+          this.error(`'${expr.method}': expected ${typeName(objType)}, got ${typeName(argType)}`, sp);
+        }
+        return this.setType(expr, objType);
+      }
+      if (checkedMethods.includes(expr.method)) {
+        if (expr.args.length !== 1) { this.error(`'${expr.method}' expects 1 argument`, sp); return this.setType(expr, { tag: "unknown" }); }
+        const argType = this.checkExprWithHint(expr.args[0], objType);
+        if (!typeEq(objType, argType) && argType.tag !== "unknown") {
+          this.error(`'${expr.method}': expected ${typeName(objType)}, got ${typeName(argType)}`, sp);
+        }
+        return this.setType(expr, this.resolveOptionForValue(objType, sp));
+      }
+      // unary negation — desugars to sub(0, x) in lowering, so overflow
+      // semantics (None only at signed INT_MIN / unsigned nonzero) fall out for free
+      if (expr.method === "wrappingNeg") {
+        if (expr.args.length !== 0) { this.error(`'wrappingNeg' takes no arguments`, sp); }
+        return this.setType(expr, objType);
+      }
+      if (expr.method === "checkedNeg") {
+        if (expr.args.length !== 0) { this.error(`'checkedNeg' takes no arguments`, sp); }
+        return this.setType(expr, this.resolveOptionForValue(objType, sp));
+      }
+      // bit-counting intrinsics — 0-arg, count fits any width so result is i64
+      const bitCountMethods = ["countOnes", "leadingZeros", "trailingZeros"];
+      if (bitCountMethods.includes(expr.method)) {
+        if (expr.args.length !== 0) { this.error(`'${expr.method}' takes no arguments`, sp); }
+        return this.setType(expr, { tag: "int", bits: 64, signed: true });
+      }
+      // rotate: 1-arg shift (mod bit-width), returns same type
+      if (expr.method === "rotateLeft" || expr.method === "rotateRight") {
+        if (expr.args.length !== 1) { this.error(`'${expr.method}' expects 1 argument`, sp); }
+        else {
+          const at = this.checkExprWithHint(expr.args[0], objType);
+          if (!typeEq(objType, at) && at.tag !== "unknown") {
+            this.error(`'${expr.method}': shift amount must be ${typeName(objType)}, got ${typeName(at)}`, sp);
+          }
+        }
+        return this.setType(expr, objType);
+      }
+      // reverseBits — 0-arg, returns same type
+      if (expr.method === "reverseBits") {
+        if (expr.args.length !== 0) { this.error(`'reverseBits' takes no arguments`, sp); }
+        return this.setType(expr, objType);
+      }
+    }
+    // frozen-collection guard: reject realloc/free-capable builtins on a borrowed receiver
+    if ((objType.tag === "vec" || objType.tag === "hashmap" || objType.tag === "string")
+        && MUTATING_COLLECTION_METHODS.has(expr.method)) {
+      this.errorIfFrozen(expr.object, `call '${expr.method}' on`, sp);
+    }
+    // slices: `v[a..b]` desugars to `.slice(a,b)`; a slice is `&[T]` — a ref to an
+    // unsized array, runtime rep = non-owning %Vec (cap=0, drop glue skips free)
+    if ((objType.tag === "vec" || objType.tag === "array") && expr.method === "slice") {
+      // fixed-size arrays slice into their own storage (view built in codegen);
+      // the frozen-source rule below keeps the array alive for the view's life
+      const refSlice: TypeKind = { tag: "ref", inner: { tag: "array", element: objType.element, size: null }, mutable: false };
+      if (expr.args.length !== 2) { this.error(`'slice' expects 2 arguments, got ${expr.args.length}`, sp); return this.setType(expr, refSlice); }
+      const startType = this.checkExpr(expr.args[0]);
+      const endType = this.checkExpr(expr.args[1]);
+      if (startType.tag !== "int" && startType.tag !== "unknown") this.error(`slice start: expected integer, got ${typeName(startType)}`, sp);
+      if (endType.tag !== "int" && endType.tag !== "unknown") this.error(`slice end: expected integer, got ${typeName(endType)}`, sp);
+      // freeze the source — mutation could realloc/free the memory this view points into
+      let root: Expr = expr.object;
+      while (root.kind === "FieldAccess" || root.kind === "IndexAccess") root = root.object;
+      if (root.kind === "Ident") {
+        const info = this.lookup(root.name);
+        if (info) this.freeze(info, expr.object);
+      }
+      this.borrowedExprs.add(expr);
+      return this.setType(expr, refSlice);
+    }
+    if (objType.tag === "array" && objType.size === null && expr.method === "len") {
+      if (expr.args.length !== 0) this.error(`'len' takes no arguments`, sp);
+      return this.setType(expr, { tag: "int", bits: 64, signed: true });
+    }
+    if (objType.tag === "vec") {
+      if (expr.method === "push") {
+        if (expr.args.length !== 1) { this.error(`'push' expects 1 argument, got ${expr.args.length}`, sp); return this.setType(expr, { tag: "void" }); }
+        if (!this.isRootMutable(expr.object)) {
+          this.error(`cannot push to immutable Vec`, sp, `declare with 'var' to make it mutable`);
+        }
+        // Deferred-inference Vec (`var v = Vec.new()`): first push fixes the
+        // element type. Resolve the shared placeholder object in place so the
+        // binding, its exprType, and every later use all see the real element.
+        if (this.inferVecElems.has(objType.element as object)) {
+          const argType = this.checkExprWithHint(expr.args[0], null);
+          // A pushed borrow would outlive the scope that owns the borrowed
+          // value — the Vec survives it. Same rule as a struct field.
+          if (argType.tag === "ref") {
+            this.error(`push: cannot store a reference in a Vec`, sp, `references are second-class — push an owned value (clone it if needed)`);
+          }
+          this.inferVecElems.delete(objType.element as object);
+          Object.assign(objType.element as object, argType);
+          this.tryMove(expr.args[0]);
+          return this.setType(expr, { tag: "void" });
+        }
+        const argType = this.checkExprWithHint(expr.args[0], objType.element);
+        if (argType.tag === "ref") {
+          this.error(`push: cannot store a reference in a Vec`, sp, `references are second-class — push an owned value (clone it if needed)`);
+        }
+        if (!typeEq(objType.element, argType) && argType.tag !== "unknown") {
+          if (!this.tryInterfaceCoercion(expr.args[0], argType, objType.element)) {
+            this.error(`push: expected ${typeName(objType.element)}, got ${typeName(argType)}`, sp);
+          }
+        }
+        this.tryMove(expr.args[0]);
+        return this.setType(expr, { tag: "void" });
+      }
+      if (expr.method === "clear" || expr.method === "truncate") {
+        // truncate(n) drops everything at index >= n; clear() is truncate(0).
+        const want = expr.method === "clear" ? 0 : 1;
+        if (expr.args.length !== want) {
+          this.error(`'${expr.method}' expects ${want} argument${want === 1 ? "" : "s"}, got ${expr.args.length}`, sp);
+        }
+        if (want === 1 && expr.args.length === 1) {
+          const nType = this.checkExpr(expr.args[0]);
+          if (nType.tag !== "int" && nType.tag !== "unknown") {
+            this.error(`'truncate': expected an integer length, got ${typeName(nType)}`, sp);
+          }
+        }
+        if (!this.isRootMutable(expr.object)) {
+          this.error(`cannot ${expr.method} an immutable Vec`, sp, `declare with 'var' to make it mutable`);
+        }
+        return this.setType(expr, { tag: "void" });
+      }
+      if (expr.method === "pop") {
+        if (expr.args.length !== 0) { this.error(`'pop' takes no arguments`, sp); }
+        if (!this.isRootMutable(expr.object)) {
+          this.error(`cannot pop from immutable Vec`, sp, `declare with 'var' to make it mutable`);
+        }
+        // Returns Option<T> — Some(last) or None when empty; caller picks the
+        // failure policy via `!`/`?`/`??`. Mirrors HashMap.get / Vec.find.
+        return this.setType(expr, this.resolveOptionForValue(objType.element, sp));
+      }
+      if (expr.method === "map") {
+        if (expr.args.length !== 1) { this.error(`'map' expects 1 argument`, sp); return this.setType(expr, { tag: "unknown" }); }
+        const elemRef: TypeKind = { tag: "ref", inner: objType.element, mutable: false };
+        const cbHint: TypeKind = { tag: "fn", params: [elemRef], ret: { tag: "unknown" } };
+        const cbBorrow = this.borrowDuringCallback(expr.object);
+        const cbType = this.checkExprWithHint(expr.args[0], cbHint);
+        if (cbBorrow) this.unfreeze(cbBorrow);
+        if (cbType.tag !== "fn") { this.error(`'map' argument must be a function`, sp); return this.setType(expr, { tag: "unknown" }); }
+        return this.setType(expr, { tag: "vec", element: cbType.ret });
+      }
+      if (expr.method === "filter") {
+        if (expr.args.length !== 1) { this.error(`'filter' expects 1 argument`, sp); return this.setType(expr, { tag: "unknown" }); }
+        const elemRef: TypeKind = { tag: "ref", inner: objType.element, mutable: false };
+        const cbHint: TypeKind = { tag: "fn", params: [elemRef], ret: { tag: "bool" } };
+        const cbBorrow = this.borrowDuringCallback(expr.object);
+        const cbType = this.checkExprWithHint(expr.args[0], cbHint);
+        if (cbBorrow) this.unfreeze(cbBorrow);
+        if (cbType.tag !== "fn") { this.error(`'filter' argument must be a function`, sp); return this.setType(expr, { tag: "unknown" }); }
+        return this.setType(expr, { tag: "vec", element: objType.element });
+      }
+      if (expr.method === "each") {
+        if (expr.args.length !== 1) { this.error(`'each' expects 1 argument`, sp); return this.setType(expr, { tag: "unknown" }); }
+        const elemRef: TypeKind = { tag: "ref", inner: objType.element, mutable: false };
+        const cbHint: TypeKind = { tag: "fn", params: [elemRef], ret: { tag: "void" } };
+        const cbBorrow = this.borrowDuringCallback(expr.object);
+        this.checkExprWithHint(expr.args[0], cbHint);
+        if (cbBorrow) this.unfreeze(cbBorrow);
+        return this.setType(expr, { tag: "void" });
+      }
+      if (expr.method === "enumerate") {
+        if (expr.args.length !== 1) { this.error(`'enumerate' expects 1 argument`, sp); return this.setType(expr, { tag: "unknown" }); }
+        const elemRef: TypeKind = { tag: "ref", inner: objType.element, mutable: false };
+        const cbHint: TypeKind = { tag: "fn", params: [{ tag: "int", bits: 64, signed: true }, elemRef], ret: { tag: "void" } };
+        const cbBorrow = this.borrowDuringCallback(expr.object);
+        this.checkExprWithHint(expr.args[0], cbHint);
+        if (cbBorrow) this.unfreeze(cbBorrow);
+        return this.setType(expr, { tag: "void" });
+      }
+      if (expr.method === "find") {
+        if (expr.args.length !== 1) { this.error(`'find' expects 1 argument`, sp); return this.setType(expr, { tag: "unknown" }); }
+        const elemRef: TypeKind = { tag: "ref", inner: objType.element, mutable: false };
+        const cbHint: TypeKind = { tag: "fn", params: [elemRef], ret: { tag: "bool" } };
+        const cbBorrow = this.borrowDuringCallback(expr.object);
+        const cbType = this.checkExprWithHint(expr.args[0], cbHint);
+        if (cbBorrow) this.unfreeze(cbBorrow);
+        if (cbType.tag !== "fn") { this.error(`'find' argument must be a function`, sp); return this.setType(expr, { tag: "unknown" }); }
+        return this.setType(expr, this.resolveOptionForValue(objType.element, sp));
+      }
+      if (expr.method === "any") {
+        if (expr.args.length !== 1) { this.error(`'any' expects 1 argument`, sp); return this.setType(expr, { tag: "unknown" }); }
+        const elemRef: TypeKind = { tag: "ref", inner: objType.element, mutable: false };
+        const cbHint: TypeKind = { tag: "fn", params: [elemRef], ret: { tag: "bool" } };
+        const cbBorrow = this.borrowDuringCallback(expr.object);
+        this.checkExprWithHint(expr.args[0], cbHint);
+        if (cbBorrow) this.unfreeze(cbBorrow);
+        return this.setType(expr, { tag: "bool" });
+      }
+      if (expr.method === "all") {
+        if (expr.args.length !== 1) { this.error(`'all' expects 1 argument`, sp); return this.setType(expr, { tag: "unknown" }); }
+        const elemRef: TypeKind = { tag: "ref", inner: objType.element, mutable: false };
+        const cbHint: TypeKind = { tag: "fn", params: [elemRef], ret: { tag: "bool" } };
+        const cbBorrow = this.borrowDuringCallback(expr.object);
+        this.checkExprWithHint(expr.args[0], cbHint);
+        if (cbBorrow) this.unfreeze(cbBorrow);
+        return this.setType(expr, { tag: "bool" });
+      }
+      if (expr.method === "join") {
+        if (expr.args.length !== 1) { this.error(`'join' expects 1 argument (separator)`, sp); return this.setType(expr, { tag: "unknown" }); }
+        if (objType.element.tag !== "string") { this.error(`'join' is only available on Vec<string>`, sp); return this.setType(expr, { tag: "unknown" }); }
+        const sepType = this.checkExpr(expr.args[0]);
+        if (sepType.tag !== "string" && sepType.tag !== "unknown") { this.error(`'join' separator must be a string, got ${typeName(sepType)}`, sp); }
+        return this.setType(expr, { tag: "string" });
+      }
+      if (expr.method === "isEmpty") {
+        if (expr.args.length !== 0) { this.error(`'isEmpty' takes no arguments`, sp); }
+        return this.setType(expr, { tag: "bool" });
+      }
+      // fold(init, (acc, elem) => acc) — the accumulate half of the functional
+      // set. `reduce` is accepted as the same operation because that is what
+      // the majority of readers will type; the suggestion table points at
+      // `fold` when neither spelling is a method (a non-Vec receiver).
+      if (expr.method === "fold" || expr.method === "reduce") {
+        if (expr.args.length !== 2) {
+          this.error(`'${expr.method}' expects 2 arguments (initial value, callback)`, sp);
+          return this.setType(expr, { tag: "unknown" });
+        }
+        let accType = this.checkExpr(expr.args[0]);
+        // A bare `0` seed defaults to i64, which would make every fold over a
+        // narrower Vec a width mismatch the writer has to spell around. When the
+        // callback annotates its accumulator, that annotation is the real type —
+        // adopt it before checking the callback, or the closure body reports the
+        // mismatch first and the seed never gets a chance to widen. Only for a
+        // constant seed, where re-typing loses nothing.
+        const cb = expr.args[1];
+        if (accType.tag === "int" && this.isConstIntExpr(expr.args[0]) &&
+            cb.kind === "Closure" && cb.params.length > 0) {
+          // A closure param may legitimately have no annotation, so read the
+          // field directly rather than through declaredType (which throws).
+          const declared = cb.params[0].type;
+          if (declared) {
+            const annotated = this.resolve(declared);
+            if (annotated.tag === "int" && !typeEq(annotated, accType)) {
+              this.retypeConstInt(expr.args[0], annotated);
+              accType = annotated;
+            }
+          }
+        }
+        const elemRef: TypeKind = { tag: "ref", inner: objType.element, mutable: false };
+        const cbHint: TypeKind = { tag: "fn", params: [accType, elemRef], ret: accType };
+        const cbBorrow = this.borrowDuringCallback(expr.object);
+        const cbType = this.checkExprWithHint(expr.args[1], cbHint);
+        if (cbBorrow) this.unfreeze(cbBorrow);
+        if (cbType.tag !== "fn") { this.error(`'${expr.method}' argument 2 must be a function`, sp); return this.setType(expr, { tag: "unknown" }); }
+        if (!typeEq(cbType.ret, accType) && cbType.ret.tag !== "unknown" && accType.tag !== "unknown") {
+          this.error(`'${expr.method}' callback must return ${typeName(accType)} to match the initial value, got ${typeName(cbType.ret)}`, sp);
+        }
+        return this.setType(expr, accType);
+      }
+      if (expr.method === "sum") {
+        if (expr.args.length !== 0) { this.error(`'sum' takes no arguments`, sp); }
+        if (objType.element.tag !== "int" && objType.element.tag !== "float") {
+          this.error(`'sum' requires a Vec of integers or floats, got Vec<${typeName(objType.element)}>`, sp);
+          return this.setType(expr, { tag: "unknown" });
+        }
+        return this.setType(expr, objType.element);
+      }
+      if (expr.method === "contains") {
+        if (expr.args.length !== 1) { this.error(`'contains' expects 1 argument`, sp); return this.setType(expr, { tag: "bool" }); }
+        const argType = this.checkExprWithHint(expr.args[0], objType.element);
+        if (!typeEq(objType.element, argType) && argType.tag !== "unknown") {
+          this.error(`'contains': expected ${typeName(objType.element)}, got ${typeName(argType)}`, sp);
+        }
+        return this.setType(expr, { tag: "bool" });
+      }
+      if (expr.method === "reverse") {
+        if (expr.args.length !== 0) { this.error(`'reverse' takes no arguments`, sp); }
+        if (!this.isRootMutable(expr.object)) {
+          this.error(`cannot reverse immutable Vec`, sp, `declare with 'var' to make it mutable`);
+        }
+        return this.setType(expr, { tag: "void" });
+      }
+      if (expr.method === "swap") {
+        if (expr.args.length !== 2) { this.error(`'swap' expects 2 arguments (index a, index b)`, sp); return this.setType(expr, { tag: "void" }); }
+        if (!this.isRootMutable(expr.object)) {
+          this.error(`cannot swap on immutable Vec`, sp, `declare with 'var' to make it mutable`);
+        }
+        const aType = this.checkExpr(expr.args[0]);
+        const bType = this.checkExpr(expr.args[1]);
+        if (aType.tag !== "int" && aType.tag !== "unknown") { this.error(`'swap' index must be an integer, got ${typeName(aType)}`, sp); }
+        if (bType.tag !== "int" && bType.tag !== "unknown") { this.error(`'swap' index must be an integer, got ${typeName(bType)}`, sp); }
+        return this.setType(expr, { tag: "void" });
+      }
+      if (expr.method === "insert") {
+        if (expr.args.length !== 2) { this.error(`'insert' expects 2 arguments (index, value)`, sp); return this.setType(expr, { tag: "void" }); }
+        if (!this.isRootMutable(expr.object)) {
+          this.error(`cannot insert into immutable Vec`, sp, `declare with 'var' to make it mutable`);
+        }
+        const idxType = this.checkExpr(expr.args[0]);
+        if (idxType.tag !== "int" && idxType.tag !== "unknown") { this.error(`'insert' index must be an integer, got ${typeName(idxType)}`, sp); }
+        const valType = this.checkExprWithHint(expr.args[1], objType.element);
+        if (!typeEq(objType.element, valType) && valType.tag !== "unknown") {
+          this.error(`'insert' value: expected ${typeName(objType.element)}, got ${typeName(valType)}`, sp);
+        }
+        this.tryMove(expr.args[1]);
+        return this.setType(expr, { tag: "void" });
+      }
+      if (expr.method === "remove") {
+        if (expr.args.length !== 1) { this.error(`'remove' expects 1 argument (index)`, sp); return this.setType(expr, objType.element); }
+        if (!this.isRootMutable(expr.object)) {
+          this.error(`cannot remove from immutable Vec`, sp, `declare with 'var' to make it mutable`);
+        }
+        const idxType = this.checkExpr(expr.args[0]);
+        if (idxType.tag !== "int" && idxType.tag !== "unknown") { this.error(`'remove' index must be an integer, got ${typeName(idxType)}`, sp); }
+        return this.setType(expr, objType.element);
+      }
+      if (expr.method === "sort") {
+        if (expr.args.length !== 0) { this.error(`'sort' takes no arguments`, sp); }
+        if (!this.isRootMutable(expr.object)) {
+          this.error(`cannot sort immutable Vec`, sp, `declare with 'var' to make it mutable`);
+        }
+        const el = objType.element;
+        if (el.tag !== "int" && el.tag !== "float" && el.tag !== "string" && el.tag !== "bool") {
+          this.error(`'sort' requires Vec of a comparable type (int, float, string, bool)`, sp);
+        }
+        return this.setType(expr, { tag: "void" });
+      }
+      if (expr.method === "sortBy") {
+        if (expr.args.length !== 1) { this.error(`'sortBy' expects 1 argument (comparator)`, sp); return this.setType(expr, { tag: "unknown" }); }
+        if (!this.isRootMutable(expr.object)) {
+          this.error(`cannot sort immutable Vec`, sp, `declare with 'var' to make it mutable`);
+        }
+        const elemRef: TypeKind = { tag: "ref", inner: objType.element, mutable: false };
+        const cbHint: TypeKind = { tag: "fn", params: [elemRef, elemRef], ret: { tag: "int", bits: 32, signed: true } };
+        const cbBorrow = this.borrowDuringCallback(expr.object);
+        const cbType = this.checkExprWithHint(expr.args[0], cbHint);
+        if (cbBorrow) this.unfreeze(cbBorrow);
+        if (cbType.tag !== "fn") { this.error(`'sortBy' argument must be a comparator function`, sp); }
+        return this.setType(expr, { tag: "void" });
+      }
+      if (expr.method === "sortByKey") {
+        if (expr.args.length !== 1) { this.error(`'sortByKey' expects 1 argument (key extractor)`, sp); return this.setType(expr, { tag: "unknown" }); }
+        if (!this.isRootMutable(expr.object)) {
+          this.error(`cannot sort immutable Vec`, sp, `declare with 'var' to make it mutable`);
+        }
+        const elemRef: TypeKind = { tag: "ref", inner: objType.element, mutable: false };
+        const cbHint: TypeKind = { tag: "fn", params: [elemRef], ret: { tag: "unknown" } };
+        const cbBorrow = this.borrowDuringCallback(expr.object);
+        // The one position where a closure may hand back a field of its borrowed
+        // parameter: the sort reads the key to compare it and never stores or drops it.
+        this.keyExtractorDepth++;
+        const cbType = this.checkExprWithHint(expr.args[0], cbHint);
+        this.keyExtractorDepth--;
+        if (cbBorrow) this.unfreeze(cbBorrow);
+        if (cbType.tag !== "fn") { this.error(`'sortByKey' argument must be a function`, sp); return this.setType(expr, { tag: "void" }); }
+        const keyType = cbType.ret;
+        if (keyType.tag !== "int" && keyType.tag !== "float" && keyType.tag !== "string" && keyType.tag !== "bool") {
+          this.error(`'sortByKey' key must be a comparable type (int, float, string, bool), got ${typeName(keyType)}`, sp);
+        }
+        return this.setType(expr, { tag: "void" });
+      }
+      if (expr.method === "len") {
+        if (expr.args.length !== 0) { this.error(`'len' takes no arguments`, sp); }
+        return this.setType(expr, { tag: "int", bits: 64, signed: true });
+      }
+      if (expr.method === "clone") {
+        if (expr.args.length !== 0) { this.error(`'clone' takes no arguments`, sp); }
+        // An interface value's itable has no clone slot, and a closure's
+        // captured environment has no copy path — neither can be duplicated.
+        const el = objType.element;
+        if (el.tag === "interface") {
+          this.error(`cannot clone Vec<${typeName(el)}>: an interface value has no clone`, sp,
+            `the concrete type is erased and the itable carries no clone slot — build a new Vec from the concrete values instead`);
+        } else if (el.tag === "fn") {
+          this.error(`cannot clone Vec<${typeName(el)}>: closures cannot be cloned`, sp);
+        }
+        return this.setType(expr, objType);
+      }
+      // `v[i]` panics out of range; get/first/last are the total reads. The
+      // element comes back cloned — a reference into the buffer could not
+      // outlive a later push.
+      if (expr.method === "get" || expr.method === "first" || expr.method === "last") {
+        const want = expr.method === "get" ? 1 : 0;
+        if (expr.args.length !== want) {
+          this.error(`'${expr.method}' expects ${want} argument${want === 1 ? " (index)" : "s"}, got ${expr.args.length}`, sp);
+        }
+        if (want === 1 && expr.args.length === 1) {
+          const idxType = this.checkExpr(expr.args[0]);
+          if (idxType.tag !== "int" && idxType.tag !== "unknown") { this.error(`'get' index must be an integer, got ${typeName(idxType)}`, sp); }
+        }
+        return this.setType(expr, this.resolveOptionForValue(objType.element, sp));
+      }
+      // Same comparable-element gate `sort` uses. Milo has no ordering trait, so
+      // rather than invent an ordering for structs (which would be an opinion, not
+      // a fact — see the HashMap key note) min/max are refused on them outright.
+      if (expr.method === "min" || expr.method === "max") {
+        if (expr.args.length !== 0) { this.error(`'${expr.method}' takes no arguments`, sp); }
+        const el = objType.element;
+        if (el.tag !== "int" && el.tag !== "float" && el.tag !== "string" && el.tag !== "bool") {
+          this.error(`'${expr.method}' requires a Vec of a comparable type (int, float, string, bool), got Vec<${typeName(el)}>`, sp,
+            `there is no ordering on ${typeName(el)} — use 'fold' with your own comparison, or 'sortByKey' then 'first'`);
+          return this.setType(expr, { tag: "unknown" });
+        }
+        return this.setType(expr, this.resolveOptionForValue(el, sp));
+      }
+      // `find` answers "which value"; `indexOf`/`position` answer "where".
+      if (expr.method === "indexOf") {
+        if (expr.args.length !== 1) { this.error(`'indexOf' expects 1 argument`, sp); return this.setType(expr, { tag: "unknown" }); }
+        const el = objType.element;
+        if (el.tag !== "int" && el.tag !== "float" && el.tag !== "string" && el.tag !== "bool") {
+          this.error(`'indexOf' requires a Vec of a comparable type (int, float, string, bool), got Vec<${typeName(el)}>`, sp,
+            `use 'position' with a predicate instead`);
+          return this.setType(expr, { tag: "unknown" });
+        }
+        const argType = this.checkExprWithHint(expr.args[0], el);
+        if (!typeEq(el, argType) && argType.tag !== "unknown") {
+          this.error(`'indexOf': expected ${typeName(el)}, got ${typeName(argType)}`, sp);
+        }
+        return this.setType(expr, this.resolveOptionForValue({ tag: "int", bits: 64, signed: true }, sp));
+      }
+      if (expr.method === "position") {
+        if (expr.args.length !== 1) { this.error(`'position' expects 1 argument`, sp); return this.setType(expr, { tag: "unknown" }); }
+        const elemRef: TypeKind = { tag: "ref", inner: objType.element, mutable: false };
+        const cbHint: TypeKind = { tag: "fn", params: [elemRef], ret: { tag: "bool" } };
+        const cbBorrow = this.borrowDuringCallback(expr.object);
+        const cbType = this.checkExprWithHint(expr.args[0], cbHint);
+        if (cbBorrow) this.unfreeze(cbBorrow);
+        if (cbType.tag !== "fn") { this.error(`'position' argument must be a function`, sp); return this.setType(expr, { tag: "unknown" }); }
+        return this.setType(expr, this.resolveOptionForValue({ tag: "int", bits: 64, signed: true }, sp));
+      }
+      // extend moves the other Vec in — its elements are transplanted, not copied,
+      // so there is no clone and no way to touch the source afterwards.
+      if (expr.method === "extend") {
+        if (expr.args.length !== 1) { this.error(`'extend' expects 1 argument (a Vec to append)`, sp); return this.setType(expr, { tag: "void" }); }
+        if (!this.isRootMutable(expr.object)) {
+          this.error(`cannot extend an immutable Vec`, sp, `declare with 'var' to make it mutable`);
+        }
+        const otherType = this.checkExprWithHint(expr.args[0], objType);
+        if (otherType.tag === "ref") {
+          this.error(`'extend' takes ownership of the other Vec`, sp, `clone it if you still need it: 'v.extend(other.clone())'`);
+        } else if (!typeEq(objType, otherType) && otherType.tag !== "unknown") {
+          this.error(`'extend': expected ${typeName(objType)}, got ${typeName(otherType)}`, sp);
+        }
+        this.tryMove(expr.args[0]);
+        return this.setType(expr, { tag: "void" });
+      }
+      // retain is filter's in-place twin: no second buffer, and the rejected
+      // elements are dropped rather than leaked.
+      if (expr.method === "retain") {
+        if (expr.args.length !== 1) { this.error(`'retain' expects 1 argument (predicate)`, sp); return this.setType(expr, { tag: "void" }); }
+        if (!this.isRootMutable(expr.object)) {
+          this.error(`cannot retain on an immutable Vec`, sp, `declare with 'var' to make it mutable`);
+        }
+        const elemRef: TypeKind = { tag: "ref", inner: objType.element, mutable: false };
+        const cbHint: TypeKind = { tag: "fn", params: [elemRef], ret: { tag: "bool" } };
+        const cbBorrow = this.borrowDuringCallback(expr.object);
+        const cbType = this.checkExprWithHint(expr.args[0], cbHint);
+        if (cbBorrow) this.unfreeze(cbBorrow);
+        if (cbType.tag !== "fn") { this.error(`'retain' argument must be a predicate function`, sp); }
+        return this.setType(expr, { tag: "void" });
+      }
+      if (expr.method === "capacity") {
+        if (expr.args.length !== 0) { this.error(`'capacity' takes no arguments`, sp); }
+        return this.setType(expr, { tag: "int", bits: 64, signed: true });
+      }
+      if (expr.method === "reserve") {
+        if (expr.args.length !== 1) { this.error(`'reserve' expects 1 argument (extra capacity)`, sp); return this.setType(expr, { tag: "void" }); }
+        if (!this.isRootMutable(expr.object)) {
+          this.error(`cannot reserve on an immutable Vec`, sp, `declare with 'var' to make it mutable`);
+        }
+        const nType = this.checkExpr(expr.args[0]);
+        if (nType.tag !== "int" && nType.tag !== "unknown") { this.error(`'reserve': expected an integer, got ${typeName(nType)}`, sp); }
+        return this.setType(expr, { tag: "void" });
+      }
+      this.error(`Vec has no method '${expr.method}'`, sp, memberHint(expr.method, VEC_MEMBERS));
+      return this.setType(expr, { tag: "unknown" });
+    }
+    if (objType.tag === "hashmap") {
+      if (expr.method === "insert") {
+        if (expr.args.length !== 2) { this.error(`'insert' expects 2 arguments, got ${expr.args.length}`, sp); return this.setType(expr, { tag: "void" }); }
+        if (!this.isRootMutable(expr.object)) {
+          this.error(`cannot insert into immutable HashMap`, sp, `declare with 'var' to make it mutable`);
+        }
+        const keyType = this.checkExprWithHint(expr.args[0], objType.key);
+        if (!typeEq(objType.key, keyType) && keyType.tag !== "unknown") {
+          this.error(`insert key: expected ${typeName(objType.key)}, got ${typeName(keyType)}`, sp);
+        }
+        const valType = this.checkExprWithHint(expr.args[1], objType.value);
+        if (!typeEq(objType.value, valType) && valType.tag !== "unknown") {
+          this.error(`insert value: expected ${typeName(objType.value)}, got ${typeName(valType)}`, sp);
+        }
+        this.tryMove(expr.args[0]);
+        this.tryMove(expr.args[1]);
+        return this.setType(expr, { tag: "void" });
+      }
+      if (expr.method === "get") {
+        if (expr.args.length !== 1) { this.error(`'get' expects 1 argument, got ${expr.args.length}`, sp); return this.setType(expr, { tag: "unknown" }); }
+        const keyType = this.checkExprWithHint(expr.args[0], objType.key);
+        if (!typeEq(objType.key, keyType) && keyType.tag !== "unknown") {
+          this.error(`get key: expected ${typeName(objType.key)}, got ${typeName(keyType)}`, sp);
+        }
+        const optionType = this.resolveOptionForValue(objType.value, sp);
+        return this.setType(expr, optionType);
+      }
+      if (expr.method === "getOrDefault") {
+        if (expr.args.length !== 2) { this.error(`'getOrDefault' expects 2 arguments, got ${expr.args.length}`, sp); return this.setType(expr, { tag: "unknown" }); }
+        const keyType = this.checkExprWithHint(expr.args[0], objType.key);
+        if (!typeEq(objType.key, keyType) && keyType.tag !== "unknown") {
+          this.error(`getOrDefault key: expected ${typeName(objType.key)}, got ${typeName(keyType)}`, sp);
+        }
+        const valType = this.checkExprWithHint(expr.args[1], objType.value);
+        if (!typeEq(objType.value, valType) && valType.tag !== "unknown") {
+          this.error(`getOrDefault default: expected ${typeName(objType.value)}, got ${typeName(valType)}`, sp);
+        }
+        return this.setType(expr, objType.value);
+      }
+      if (expr.method === "contains") {
+        if (expr.args.length !== 1) { this.error(`'contains' expects 1 argument, got ${expr.args.length}`, sp); return this.setType(expr, { tag: "unknown" }); }
+        const keyType = this.checkExprWithHint(expr.args[0], objType.key);
+        if (!typeEq(objType.key, keyType) && keyType.tag !== "unknown") {
+          this.error(`contains key: expected ${typeName(objType.key)}, got ${typeName(keyType)}`, sp);
+        }
+        return this.setType(expr, { tag: "bool" });
+      }
+      if (expr.method === "remove") {
+        if (expr.args.length !== 1) { this.error(`'remove' expects 1 argument, got ${expr.args.length}`, sp); return this.setType(expr, { tag: "unknown" }); }
+        if (!this.isRootMutable(expr.object)) {
+          this.error(`cannot remove from immutable HashMap`, sp, `declare with 'var' to make it mutable`);
+        }
+        const keyType = this.checkExprWithHint(expr.args[0], objType.key);
+        if (!typeEq(objType.key, keyType) && keyType.tag !== "unknown") {
+          this.error(`remove key: expected ${typeName(objType.key)}, got ${typeName(keyType)}`, sp);
+        }
+        return this.setType(expr, { tag: "void" });
+      }
+      if (expr.method === "len") {
+        if (expr.args.length !== 0) { this.error(`'len' takes no arguments`, sp); }
+        return this.setType(expr, { tag: "int", bits: 64, signed: true });
+      }
+      if (expr.method === "isEmpty") {
+        if (expr.args.length !== 0) { this.error(`'isEmpty' takes no arguments`, sp); }
+        return this.setType(expr, { tag: "bool" });
+      }
+      if (expr.method === "clear") {
+        if (expr.args.length !== 0) { this.error(`'clear' takes no arguments`, sp); }
+        if (!this.isRootMutable(expr.object)) {
+          this.error(`cannot clear an immutable HashMap`, sp, `declare with 'var' to make it mutable`);
+        }
+        return this.setType(expr, { tag: "void" });
+      }
+      if (expr.method === "clone") {
+        if (expr.args.length !== 0) { this.error(`'clone' takes no arguments`, sp); }
+        for (const [what, t] of [["key", objType.key], ["value", objType.value]] as const) {
+          if (t.tag === "interface") {
+            this.error(`cannot clone a HashMap with ${what} type ${typeName(t)}: an interface value has no clone`, sp,
+              `the concrete type is erased and the itable carries no clone slot`);
+          } else if (t.tag === "fn") {
+            this.error(`cannot clone a HashMap with ${what} type ${typeName(t)}: closures cannot be cloned`, sp);
+          }
+        }
+        return this.setType(expr, objType);
+      }
+      // keys()/values() snapshot into a Vec. Iteration order is unspecified and
+      // varies per process (the hash seed is randomized), so the snapshot is the
+      // supported way to get a stable order: collect, then sort.
+      if (expr.method === "keys" || expr.method === "values") {
+        if (expr.args.length !== 0) { this.error(`'${expr.method}' takes no arguments`, sp); }
+        const el = expr.method === "keys" ? objType.key : objType.value;
+        if (el.tag === "interface" || el.tag === "fn") {
+          this.error(`'${expr.method}' cannot copy ${typeName(el)} out of the map`, sp,
+            `iterate with 'for k, v in map' instead — it borrows rather than copies`);
+          return this.setType(expr, { tag: "unknown" });
+        }
+        return this.setType(expr, { tag: "vec", element: el });
+      }
+      this.error(`HashMap has no method '${expr.method}'`, sp, memberHint(expr.method, HASHMAP_MEMBERS));
+      return this.setType(expr, { tag: "unknown" });
+    }
+    if (objType.tag === "string") {
+      if (expr.method === "push") {
+        if (expr.args.length !== 1) { this.error(`'push' expects 1 argument, got ${expr.args.length}`, sp); return this.setType(expr, { tag: "void" }); }
+        if (!this.isRootMutable(expr.object)) {
+          this.error(`cannot push to immutable string`, sp, `declare with 'var' to make it mutable`);
+        }
+        // Hint the arg with u8 so an int literal coerces — `s.push(65)` demanded an
+        // explicit `as u8` only because this checked without a hint, unlike Vec.push.
+        // An out-of-range literal is still rejected by the coercion itself.
+        const u8t: TypeKind = { tag: "int", bits: 8, signed: false };
+        const argType = this.checkExprWithHint(expr.args[0], u8t);
+        if (!typeEq(u8t, argType) && argType.tag !== "unknown") {
+          this.error(`string.push: expected u8, got ${typeName(argType)}`, sp);
+        }
+        return this.setType(expr, { tag: "void" });
+      }
+      if (expr.method === "pushStr") {
+        if (expr.args.length !== 1) { this.error(`'pushStr' expects 1 argument, got ${expr.args.length}`, sp); return this.setType(expr, { tag: "void" }); }
+        if (!this.isRootMutable(expr.object)) {
+          this.error(`cannot push to immutable string`, sp, `declare with 'var' to make it mutable`);
+        }
+        const argType = this.checkExpr(expr.args[0]);
+        const argInner = this.deref(argType);
+        if (argInner.tag !== "string" && argInner.tag !== "unknown") {
+          this.error(`string.pushStr: expected string, got ${typeName(argType)}`, sp);
+        }
+        this.setAutoBorrowChecked(expr.args[0], false);
+        return this.setType(expr, { tag: "void" });
+      }
+      if (expr.method === "substr") {
+        if (expr.args.length !== 2) { this.error(`'substr' expects 2 arguments, got ${expr.args.length}`, sp); return this.setType(expr, { tag: "string" }); }
+        const startType = this.checkExpr(expr.args[0]);
+        const endType = this.checkExpr(expr.args[1]);
+        if (startType.tag !== "int" && startType.tag !== "unknown") this.error(`substr start: expected integer, got ${typeName(startType)}`, sp);
+        if (endType.tag !== "int" && endType.tag !== "unknown") this.error(`substr end: expected integer, got ${typeName(endType)}`, sp);
+        return this.setType(expr, { tag: "string" });
+      }
+      if (expr.method === "slice") {
+        const refStr: TypeKind = { tag: "ref", inner: { tag: "string" }, mutable: false };
+        if (expr.args.length !== 2) { this.error(`'slice' expects 2 arguments, got ${expr.args.length}`, sp); return this.setType(expr, refStr); }
+        const startType = this.checkExpr(expr.args[0]);
+        const endType = this.checkExpr(expr.args[1]);
+        if (startType.tag !== "int" && startType.tag !== "unknown") this.error(`slice start: expected integer, got ${typeName(startType)}`, sp);
+        if (endType.tag !== "int" && endType.tag !== "unknown") this.error(`slice end: expected integer, got ${typeName(endType)}`, sp);
+        // mark source as borrowed — prevents mutation/move while slice is live.
+        // Walk to the root variable: `buf.data[a..b]` views storage owned by `buf`,
+        // so replacing any part of `buf` can free what this points into.
+        let strRoot: Expr = expr.object;
+        while (strRoot.kind === "FieldAccess" || strRoot.kind === "IndexAccess") strRoot = strRoot.object;
+        if (strRoot.kind === "Ident") {
+          const info = this.lookup(strRoot.name);
+          if (info) this.freeze(info, expr.object);
+        }
+        this.borrowedExprs.add(expr);
+        return this.setType(expr, refStr);
+      }
+      if (expr.method === "parseF64") {
+        if (expr.args.length !== 0) { this.error(`'parseF64' takes no arguments`, sp); }
+        return this.setType(expr, { tag: "enum", name: this.monomorphizeEnum("Option", [{ tag: "float", bits: 64 }]) });
+      }
+      if (expr.method === "clone") {
+        if (expr.args.length !== 0) { this.error(`'clone' takes no arguments`, sp); }
+        return this.setType(expr, { tag: "string" });
+      }
+      // string methods delegated to std/string runtime functions
+      if (expr.method === "contains" || expr.method === "startsWith" || expr.method === "endsWith") {
+        if (expr.args.length !== 1) { this.error(`'${expr.method}' expects 1 argument, got ${expr.args.length}`, sp); return this.setType(expr, { tag: "bool" }); }
+        const argType = this.checkExpr(expr.args[0]);
+        if (argType.tag !== "string" && argType.tag !== "unknown") this.error(`'${expr.method}': expected string, got ${typeName(argType)}`, sp);
+        return this.setType(expr, { tag: "bool" });
+      }
+      if (expr.method === "indexOf" || expr.method === "lastIndexOf") {
+        const optionI64: TypeKind = { tag: "enum", name: this.monomorphizeEnum("Option", [{ tag: "int", bits: 64, signed: true }]) };
+        if (expr.args.length !== 1) { this.error(`'${expr.method}' expects 1 argument, got ${expr.args.length}`, sp); return this.setType(expr, optionI64); }
+        const argType = this.checkExpr(expr.args[0]);
+        if (argType.tag !== "string" && argType.tag !== "unknown") this.error(`'${expr.method}': expected string, got ${typeName(argType)}`, sp);
+        return this.setType(expr, optionI64);
+      }
+      // like indexOf but starts the search at byte offset `from`
+      if (expr.method === "indexOfFrom") {
+        const optionI64: TypeKind = { tag: "enum", name: this.monomorphizeEnum("Option", [{ tag: "int", bits: 64, signed: true }]) };
+        if (expr.args.length !== 2) { this.error(`'indexOfFrom' expects 2 arguments (needle, from), got ${expr.args.length}`, sp); return this.setType(expr, optionI64); }
+        const nType = this.checkExpr(expr.args[0]);
+        if (nType.tag !== "string" && nType.tag !== "unknown") this.error(`'indexOfFrom' arg 1: expected string, got ${typeName(nType)}`, sp);
+        const fromType = this.checkExpr(expr.args[1]);
+        if (fromType.tag !== "int" && fromType.tag !== "unknown") this.error(`'indexOfFrom' arg 2: expected integer, got ${typeName(fromType)}`, sp);
+        return this.setType(expr, optionI64);
+      }
+      if (expr.method === "split") {
+        if (expr.args.length !== 1) { this.error(`'split' expects 1 argument, got ${expr.args.length}`, sp); return this.setType(expr, { tag: "vec", element: { tag: "string" } }); }
+        const argType = this.checkExpr(expr.args[0]);
+        if (argType.tag !== "string" && argType.tag !== "unknown") this.error(`'split': expected string, got ${typeName(argType)}`, sp);
+        return this.setType(expr, { tag: "vec", element: { tag: "string" } });
+      }
+      if (expr.method === "isEmpty") {
+        if (expr.args.length !== 0) { this.error(`'isEmpty' takes no arguments`, sp); }
+        return this.setType(expr, { tag: "bool" });
+      }
+      // Loop-only: each piece is a `&string` view into the receiver, and a view has no
+      // storage to live in outside the loop that freezes the receiver for it.
+      if (expr.method === "lines" || expr.method === "splitView") {
+        const owned = expr.method === "lines" ? `split("\\n")` : `split(sep)`;
+        const call = expr.method === "lines" ? `lines()` : `splitView(sep)`;
+        this.error(`'${expr.method}' is only valid as the iterable of a 'for ... in' loop over a named string`, sp,
+          `it yields borrowed views, which cannot be stored — bind the string first ('let text = ...') and write 'for piece in text.${call}', or use '${owned}' for owned copies`);
+        return this.setType(expr, { tag: "unknown" });
+      }
+      if (expr.method === "splitWords" || expr.method === "splitWhitespace") {
+        if (expr.args.length !== 0) { this.error(`'${expr.method}' takes no arguments`, sp); }
+        return this.setType(expr, { tag: "vec", element: { tag: "string" } });
+      }
+      if (expr.method === "trim" || expr.method === "trimStart" || expr.method === "trimEnd" || expr.method === "toLower" || expr.method === "toUpper" || expr.method === "reverse") {
+        if (expr.args.length !== 0) { this.error(`'${expr.method}' takes no arguments`, sp); }
+        return this.setType(expr, { tag: "string" });
+      }
+      if (expr.method === "charAt") {
+        if (expr.args.length !== 1) { this.error(`'charAt' expects 1 argument, got ${expr.args.length}`, sp); return this.setType(expr, { tag: "string" }); }
+        const argType = this.checkExpr(expr.args[0]);
+        if (argType.tag !== "int" && argType.tag !== "unknown") this.error(`'charAt': expected integer, got ${typeName(argType)}`, sp);
+        return this.setType(expr, { tag: "string" });
+      }
+      if (expr.method === "parseInt") {
+        if (expr.args.length !== 0) { this.error(`'parseInt' takes no arguments`, sp); }
+        return this.setType(expr, { tag: "enum", name: this.monomorphizeEnum("Option", [{ tag: "int", bits: 64, signed: true }]) });
+      }
+      if (expr.method === "replace" || expr.method === "replaceFirst") {
+        if (expr.args.length !== 2) { this.error(`'replace' expects 2 arguments, got ${expr.args.length}`, sp); return this.setType(expr, { tag: "string" }); }
+        const a1 = this.checkExpr(expr.args[0]);
+        const a2 = this.checkExpr(expr.args[1]);
+        if (a1.tag !== "string" && a1.tag !== "unknown") this.error(`'replace' arg 1: expected string, got ${typeName(a1)}`, sp);
+        if (a2.tag !== "string" && a2.tag !== "unknown") this.error(`'replace' arg 2: expected string, got ${typeName(a2)}`, sp);
+        return this.setType(expr, { tag: "string" });
+      }
+      if (expr.method === "repeat") {
+        if (expr.args.length !== 1) { this.error(`'repeat' expects 1 argument, got ${expr.args.length}`, sp); return this.setType(expr, { tag: "string" }); }
+        const argType = this.checkExpr(expr.args[0]);
+        if (argType.tag !== "int" && argType.tag !== "unknown") this.error(`'repeat': expected integer, got ${typeName(argType)}`, sp);
+        return this.setType(expr, { tag: "string" });
+      }
+      if (expr.method === "padStart" || expr.method === "padEnd") {
+        if (expr.args.length !== 2) { this.error(`'${expr.method}' expects 2 arguments (targetLen, padStr), got ${expr.args.length}`, sp); return this.setType(expr, { tag: "string" }); }
+        const lenType = this.checkExpr(expr.args[0]);
+        const padType = this.checkExpr(expr.args[1]);
+        if (lenType.tag !== "int" && lenType.tag !== "unknown") this.error(`'${expr.method}' arg 1: expected integer, got ${typeName(lenType)}`, sp);
+        if (padType.tag !== "string" && padType.tag !== "unknown") this.error(`'${expr.method}' arg 2: expected string, got ${typeName(padType)}`, sp);
+        return this.setType(expr, { tag: "string" });
+      }
+      if (expr.method === "len") {
+        if (expr.args.length !== 0) { this.error(`'len' takes no arguments`, sp); }
+        return this.setType(expr, { tag: "int", bits: 64, signed: true });
+      }
+      if (expr.method === "cstr") {
+        if (expr.args.length !== 0) { this.error(`'cstr' takes no arguments`, sp); }
+        return this.setType(expr, { tag: "ptr", inner: { tag: "int", bits: 8, signed: false } });
+      }
+      // fall through to trait/inherent lookup for String
+    }
 
-        // user-defined method resolution: inherent first, then traits.
-        // A `Heap<T>` receiver resolves to T's method; record it so lower can
-        // insert the deref. Without it codegen passes the address of the Heap
-        // slot (a ptr-to-ptr) as `&T`.
-        if (objType.tag === "heap") this.heapMethodReceivers.add(expr);
-        const derefOnce = objType.tag === "ref" ? objType.inner : objType.tag === "heap" ? objType.inner : objType;
-        const bareObjType = derefOnce.tag === "ref" ? derefOnce.inner : derefOnce;
-        // interface method dispatch — virtual call through itable
-        if (bareObjType.tag === "interface") {
-          const iface = this.interfaces.get(bareObjType.name);
-          if (iface) {
-            const ifaceMethod = iface.methods.get(expr.method);
-            if (ifaceMethod) {
-              // self is always borrowed for interface calls
-              this.autoBorrowed.set(expr.object, { mutable: ifaceMethod.params[0]?.type.tag === "ref" && (ifaceMethod.params[0].type as any).mutable });
-              if (expr.args.length !== ifaceMethod.params.length - 1) {
-                this.error(`'${expr.method}' expects ${ifaceMethod.params.length - 1} argument(s), got ${expr.args.length}`, sp);
-              }
-              for (let i = 0; i < expr.args.length; i++) {
-                const expected = ifaceMethod.params[i + 1];
-                if (!expected) break;
-                const bare = expected.type.tag === "ref" ? expected.type.inner : expected.type;
-                const argType = this.checkExprWithHint(expr.args[i], bare);
-                if (!typeEq(bare, argType) && argType.tag !== "unknown") {
-                  this.error(`'${expr.method}' argument ${i + 1}: expected ${typeName(bare)}, got ${typeName(argType)}`, expr.args[i].span);
-                }
-                if (expected.type.tag === "ref") {
-                  this.setAutoBorrowChecked(expr.args[i], expected.type.mutable, sp);
-                } else {
-                  this.tryMove(expr.args[i]);
-                }
-              }
-              // compute method index for itable slot
-              let methodIndex = 0;
-              for (const [name] of iface.methods) {
-                if (name === expr.method) break;
-                methodIndex++;
-              }
-              this.interfaceMethodCalls.set(expr, { ifaceName: bareObjType.name, methodName: expr.method, methodIndex });
-              return this.setType(expr, ifaceMethod.ret);
-            }
-            this.error(`interface '${bareObjType.name}' has no method '${expr.method}'`, sp);
-            return this.setType(expr, { tag: "unknown" });
-          }
-        }
-        const objTName = typeName(bareObjType);
-        const resolved = this.resolveMethod(objTName, expr.method);
-        if (resolved) {
-          const { mangled, sig } = resolved;
-          // args: self is expr.object, rest are expr.args
-          // first param is self — check remaining args
-          const selfParam = sig.params[0];
-          if (selfParam) {
-            if (selfParam.type.tag === "ref") {
-              // a `&var self` method may mutate the receiver — same hazard as builtins
-              if (selfParam.type.mutable) this.errorIfFrozen(expr.object, `call '${expr.method}' on`, sp);
-              if (selfParam.type.mutable) this.errorIfCopyBind(expr.object, expr.method, sp);
-              this.autoBorrowed.set(expr.object, { mutable: selfParam.type.mutable });
-            } else {
-              this.tryMove(expr.object);
-            }
-          }
-          if (expr.args.length !== sig.params.length - 1) {
-            this.error(`'${expr.method}' expects ${sig.params.length - 1} argument(s), got ${expr.args.length}`, sp);
+    // user-defined method resolution: inherent first, then traits.
+    // A `Heap<T>` receiver resolves to T's method; record it so lower can
+    // insert the deref. Without it codegen passes the address of the Heap
+    // slot (a ptr-to-ptr) as `&T`.
+    if (objType.tag === "heap") this.heapMethodReceivers.add(expr);
+    const derefOnce = objType.tag === "ref" ? objType.inner : objType.tag === "heap" ? objType.inner : objType;
+    const bareObjType = derefOnce.tag === "ref" ? derefOnce.inner : derefOnce;
+    // interface method dispatch — virtual call through itable
+    if (bareObjType.tag === "interface") {
+      const iface = this.interfaces.get(bareObjType.name);
+      if (iface) {
+        const ifaceMethod = iface.methods.get(expr.method);
+        if (ifaceMethod) {
+          // self is always borrowed for interface calls
+          this.autoBorrowed.set(expr.object, { mutable: ifaceMethod.params[0]?.type.tag === "ref" && (ifaceMethod.params[0].type as any).mutable });
+          if (expr.args.length !== ifaceMethod.params.length - 1) {
+            this.error(`'${expr.method}' expects ${ifaceMethod.params.length - 1} argument(s), got ${expr.args.length}`, sp);
           }
           for (let i = 0; i < expr.args.length; i++) {
-            const expected = sig.params[i + 1];
+            const expected = ifaceMethod.params[i + 1];
             if (!expected) break;
-            const argType = this.checkExprWithHint(expr.args[i], expected.type.tag === "ref" ? expected.type.inner : expected.type);
             const bare = expected.type.tag === "ref" ? expected.type.inner : expected.type;
+            const argType = this.checkExprWithHint(expr.args[i], bare);
             if (!typeEq(bare, argType) && argType.tag !== "unknown") {
-              // Only a struct: codegen's stringifier has no scalar path, so the
-              // bool/int/float arms this used to accept crashed the compiler.
-              if (expr.method === "json" && bare.tag === "string" && argType.tag === "struct") {
-                // `ctx.json(user)` auto-stringifies. A struct with a real codec
-                // routes through it, so a Vec/Option/nested field serializes
-                // properly; the built-in fallback only knows scalar fields and
-                // used to emit `"tags":` with no value at all for the rest.
-                const codec = argType.tag === "struct" ? this.resolveMethod(argType.name, "toJson") : null;
-                if (codec) {
-                  this.autoJsonToJson.set(expr.args[i], codec.mangled);
-                } else if (argType.tag === "struct") {
-                  const si = this.structs.get(argType.name);
-                  for (const f of si?.fields ?? []) {
-                    if (f.type.tag !== "string" && f.type.tag !== "bool" && f.type.tag !== "int" && f.type.tag !== "float") {
-                      this.error(`'json': '${argType.name}.${f.name}' has type ${typeName(f.type)}, which the built-in stringifier cannot serialize`,
-                        expr.args[i].span, `add '@derive(Json)' to '${argType.name}' — the derived codec handles nested structs, Vec and Option`);
-                    }
-                  }
-                }
-                this.autoJsonStringify.set(expr.args[i], argType);
-              } else {
-                this.error(`'${expr.method}' argument ${i + 1}: expected ${typeName(bare)}, got ${typeName(argType)}`, expr.args[i].span);
-              }
+              this.error(`'${expr.method}' argument ${i + 1}: expected ${typeName(bare)}, got ${typeName(argType)}`, expr.args[i].span);
             }
             if (expected.type.tag === "ref") {
               this.setAutoBorrowChecked(expr.args[i], expected.type.mutable, sp);
@@ -8019,161 +8034,231 @@ export class TypeChecker {
               this.tryMove(expr.args[i]);
             }
           }
-          this.resolvedMethods.set(expr, mangled);
-          if (this.isViewReturn(sig.ret)) this.freezeViewSource(expr.object, sp, this.viewReturnFields.get(mangled));
-          return this.setType(expr, sig.ret);
-        }
-
-        // fn-typed struct field call: h.apply(args) where apply: fn(...): T
-        const structType = bareObjType.tag === "struct" ? bareObjType : null;
-        if (structType) {
-          const sdef = this.structs.get(structType.name);
-          if (sdef) {
-            const field = sdef.fields.find(f => f.name === expr.method);
-            if (field && field.type.tag === "fn") {
-              const fnType = field.type;
-              if (expr.args.length !== fnType.params.length) {
-                this.error(`'${expr.method}' expects ${fnType.params.length} argument(s), got ${expr.args.length}`, sp);
-              }
-              for (let i = 0; i < expr.args.length; i++) {
-                const expected = fnType.params[i];
-                if (!expected) break;
-                const bare = expected.tag === "ref" ? expected.inner : expected;
-                const argType = this.checkExprWithHint(expr.args[i], bare);
-                if (!typeEq(bare, argType) && argType.tag !== "unknown") {
-                  this.error(`'${expr.method}' argument ${i + 1}: expected ${typeName(bare)}, got ${typeName(argType)}`, expr.args[i].span);
-                }
-                if (expected.tag === "ref") {
-                  this.setAutoBorrowChecked(expr.args[i], expected.mutable, sp);
-                } else {
-                  this.tryMove(expr.args[i]);
-                }
-              }
-              this.fnFieldCalls = this.fnFieldCalls || new Set();
-              this.fnFieldCalls.add(expr);
-              return this.setType(expr, fnType.ret);
-            }
+          // compute method index for itable slot
+          let methodIndex = 0;
+          for (const [name] of iface.methods) {
+            if (name === expr.method) break;
+            methodIndex++;
           }
+          this.interfaceMethodCalls.set(expr, { ifaceName: bareObjType.name, methodName: expr.method, methodIndex });
+          return this.setType(expr, ifaceMethod.ret);
         }
-
-        // `.clone()` on a Copy scalar is the identity. It exists so generic code
-        // can be written once: `fn get<T>(w: &Wrapper<T>): T { return w.val.clone() }`
-        // has to compile for T = i64 as well as T = string, and the move-out-of-
-        // a-borrow rule leaves clone as the only way to spell it.
-        if (expr.method === "clone" && expr.args.length === 0 &&
-            isCopy(objType, (n) => this.isAllCopyEnum(n), (n) => this.isAllCopyStruct(n))) {
-          return this.setType(expr, objType);
-        }
-
-        this.error(`type '${typeName(objType)}' has no method '${expr.method}'`, sp,
-          memberHint(expr.method, this.methodCandidates(objType)));
+        this.error(`interface '${bareObjType.name}' has no method '${expr.method}'`, sp);
         return this.setType(expr, { tag: "unknown" });
-      }
-      case "RangeExpr":
-        this.error("range expressions can only be used in 'for' loops", sp);
-        return this.setType(expr, { tag: "unknown" });
-      case "IsExpr": {
-        const opType = this.checkExpr(expr.operand);
-        this.bindElidedPattern(expr.pattern, opType.tag === "ref" ? opType.inner : opType);
-        if (expr.pattern.kind === "EnumPattern") {
-          if (opType.tag !== "enum" && opType.tag !== "unknown") {
-            this.error(`'is' pattern requires an enum type, got ${typeName(opType)}`, sp);
-          }
-        }
-        return this.setType(expr, { tag: "bool" });
-      }
-      case "IfExpr": {
-        const condType = this.checkExpr(expr.cond);
-        if (condType.tag !== "bool" && condType.tag !== "unknown") {
-          this.error(`if condition must be bool, got ${typeName(condType)}`, sp);
-        }
-        const fnRetType = this.currentFnRetType;
-        const preMoves = this.snapshotMoveState();
-
-        this.pushScope();
-        for (const s of expr.thenBody) this.checkStmt(s, fnRetType);
-        this.popScope();
-        const thenType = this.blockExprType(expr.thenBody);
-
-        const afterThen = this.snapshotMoveState();
-        this.restoreMoveState(preMoves);
-
-        this.pushScope();
-        for (const s of expr.elseBody) this.checkStmt(s, fnRetType);
-        this.popScope();
-        const elseType = this.blockExprType(expr.elseBody);
-
-        const afterElse = this.snapshotMoveState();
-        this.restoreMoveState(preMoves);
-        this.mergeMoveState(afterThen);
-        this.mergeMoveState(afterElse);
-
-        // As-a-value if: coerce a const-int arm to the expected width so
-        // `let h: i64 = if c { 16 } else { 8 }` doesn't leave both arms at the
-        // i32 literal default and then error on the binding. Target is the outer
-        // int hint if present, else the concrete non-literal arm's type (so
-        // `if c { u8var } else { 0 }` unifies with no annotation). Same const-int
-        // retype machinery as enum payloads / struct fields / return.
-        const [thenTail, elseTail] = [this.tailExprOf(expr.thenBody), this.tailExprOf(expr.elseBody)];
-        const hint = this.returnHint;
-        let target: TypeKind | null = hint?.tag === "int" ? hint : null;
-        if (!target && thenType.tag === "int" && elseType.tag === "int" && !typeEq(thenType, elseType)) {
-          if (thenTail && this.isConstIntExpr(thenTail) && !(elseTail && this.isConstIntExpr(elseTail))) target = elseType;
-          else if (elseTail && this.isConstIntExpr(elseTail) && !(thenTail && this.isConstIntExpr(thenTail))) target = thenType;
-        }
-        let finalThen = thenType, finalElse = elseType;
-        if (target) {
-          if (thenTail && thenType.tag === "int" && !typeEq(thenType, target) && this.isConstIntExpr(thenTail)) {
-            this.retypeConstInt(thenTail, target); finalThen = target;
-          }
-          if (elseTail && elseType.tag === "int" && !typeEq(elseType, target) && this.isConstIntExpr(elseTail)) {
-            this.retypeConstInt(elseTail, target); finalElse = target;
-          }
-        }
-
-        if (finalThen.tag !== "unknown" && finalElse.tag !== "unknown" && !typeEq(finalThen, finalElse)) {
-          this.error(`if-else branches have mismatched types: '${typeName(finalThen)}' vs '${typeName(finalElse)}'`, sp);
-        }
-        return this.setType(expr, finalThen.tag !== "unknown" ? finalThen : finalElse);
-      }
-      case "MatchExpr": {
-        const armTypes = this.checkMatchLike(expr.subject, expr.arms, sp, this.currentFnRetType);
-        // Unify arm value types. Coerce const-int arms to an int target (the
-        // outer hint, else the first concrete non-literal arm) so
-        // `match x { A => 1, B => 2 }` in an i64 slot doesn't stall at i32 —
-        // same const-int retype path as if-expression arms.
-        const armTails = expr.arms.map(a => this.tailExprOf(a.body));
-        const hint = this.returnHint;
-        let target: TypeKind | null = hint?.tag === "int" ? hint : null;
-        if (!target) {
-          for (let i = 0; i < armTypes.length; i++) {
-            const tail = armTails[i];
-            if (armTypes[i].tag === "int" && !(tail && this.isConstIntExpr(tail))) { target = armTypes[i]; break; }
-          }
-        }
-        const finalTypes: TypeKind[] = [];
-        for (let i = 0; i < armTypes.length; i++) {
-          let t = armTypes[i];
-          const tail = armTails[i];
-          if (target && t.tag === "int" && !typeEq(t, target) && tail && this.isConstIntExpr(tail)) {
-            this.retypeConstInt(tail, target); t = target;
-          }
-          finalTypes.push(t);
-        }
-        // Result is the first concrete (non-unknown) arm type; report a mismatch
-        // if a later concrete arm disagrees.
-        let result: TypeKind = { tag: "unknown" };
-        for (const t of finalTypes) {
-          if (t.tag === "unknown" || t.tag === "void") continue;
-          if (result.tag === "unknown") { result = t; continue; }
-          if (!typeEq(result, t)) {
-            this.error(`match arms have mismatched types: '${typeName(result)}' vs '${typeName(t)}'`, sp);
-          }
-        }
-        if (result.tag === "unknown" && finalTypes.some(t => t.tag === "void")) result = { tag: "void" };
-        return this.setType(expr, result);
       }
     }
+    const objTName = typeName(bareObjType);
+    const resolved = this.resolveMethod(objTName, expr.method);
+    if (resolved) {
+      const { mangled, sig } = resolved;
+      // args: self is expr.object, rest are expr.args
+      // first param is self — check remaining args
+      const selfParam = sig.params[0];
+      if (selfParam) {
+        if (selfParam.type.tag === "ref") {
+          // a `&var self` method may mutate the receiver — same hazard as builtins
+          if (selfParam.type.mutable) this.errorIfFrozen(expr.object, `call '${expr.method}' on`, sp);
+          if (selfParam.type.mutable) this.errorIfCopyBind(expr.object, expr.method, sp);
+          this.autoBorrowed.set(expr.object, { mutable: selfParam.type.mutable });
+        } else {
+          this.tryMove(expr.object);
+        }
+      }
+      if (expr.args.length !== sig.params.length - 1) {
+        this.error(`'${expr.method}' expects ${sig.params.length - 1} argument(s), got ${expr.args.length}`, sp);
+      }
+      for (let i = 0; i < expr.args.length; i++) {
+        const expected = sig.params[i + 1];
+        if (!expected) break;
+        const argType = this.checkExprWithHint(expr.args[i], expected.type.tag === "ref" ? expected.type.inner : expected.type);
+        const bare = expected.type.tag === "ref" ? expected.type.inner : expected.type;
+        if (!typeEq(bare, argType) && argType.tag !== "unknown") {
+          // Only a struct: codegen's stringifier has no scalar path, so the
+          // bool/int/float arms this used to accept crashed the compiler.
+          if (expr.method === "json" && bare.tag === "string" && argType.tag === "struct") {
+            // `ctx.json(user)` auto-stringifies. A struct with a real codec
+            // routes through it, so a Vec/Option/nested field serializes
+            // properly; the built-in fallback only knows scalar fields and
+            // used to emit `"tags":` with no value at all for the rest.
+            const codec = argType.tag === "struct" ? this.resolveMethod(argType.name, "toJson") : null;
+            if (codec) {
+              this.autoJsonToJson.set(expr.args[i], codec.mangled);
+            } else if (argType.tag === "struct") {
+              const si = this.structs.get(argType.name);
+              for (const f of si?.fields ?? []) {
+                if (f.type.tag !== "string" && f.type.tag !== "bool" && f.type.tag !== "int" && f.type.tag !== "float") {
+                  this.error(`'json': '${argType.name}.${f.name}' has type ${typeName(f.type)}, which the built-in stringifier cannot serialize`,
+                    expr.args[i].span, `add '@derive(Json)' to '${argType.name}' — the derived codec handles nested structs, Vec and Option`);
+                }
+              }
+            }
+            this.autoJsonStringify.set(expr.args[i], argType);
+          } else {
+            this.error(`'${expr.method}' argument ${i + 1}: expected ${typeName(bare)}, got ${typeName(argType)}`, expr.args[i].span);
+          }
+        }
+        if (expected.type.tag === "ref") {
+          this.setAutoBorrowChecked(expr.args[i], expected.type.mutable, sp);
+        } else {
+          this.tryMove(expr.args[i]);
+        }
+      }
+      this.resolvedMethods.set(expr, mangled);
+      if (this.isViewReturn(sig.ret)) this.freezeViewSource(expr.object, sp, this.viewReturnFields.get(mangled));
+      return this.setType(expr, sig.ret);
+    }
+
+    // fn-typed struct field call: h.apply(args) where apply: fn(...): T
+    const structType = bareObjType.tag === "struct" ? bareObjType : null;
+    if (structType) {
+      const sdef = this.structs.get(structType.name);
+      if (sdef) {
+        const field = sdef.fields.find(f => f.name === expr.method);
+        if (field && field.type.tag === "fn") {
+          const fnType = field.type;
+          if (expr.args.length !== fnType.params.length) {
+            this.error(`'${expr.method}' expects ${fnType.params.length} argument(s), got ${expr.args.length}`, sp);
+          }
+          for (let i = 0; i < expr.args.length; i++) {
+            const expected = fnType.params[i];
+            if (!expected) break;
+            const bare = expected.tag === "ref" ? expected.inner : expected;
+            const argType = this.checkExprWithHint(expr.args[i], bare);
+            if (!typeEq(bare, argType) && argType.tag !== "unknown") {
+              this.error(`'${expr.method}' argument ${i + 1}: expected ${typeName(bare)}, got ${typeName(argType)}`, expr.args[i].span);
+            }
+            if (expected.tag === "ref") {
+              this.setAutoBorrowChecked(expr.args[i], expected.mutable, sp);
+            } else {
+              this.tryMove(expr.args[i]);
+            }
+          }
+          this.fnFieldCalls = this.fnFieldCalls || new Set();
+          this.fnFieldCalls.add(expr);
+          return this.setType(expr, fnType.ret);
+        }
+      }
+    }
+
+    // `.clone()` on a Copy scalar is the identity. It exists so generic code
+    // can be written once: `fn get<T>(w: &Wrapper<T>): T { return w.val.clone() }`
+    // has to compile for T = i64 as well as T = string, and the move-out-of-
+    // a-borrow rule leaves clone as the only way to spell it.
+    if (expr.method === "clone" && expr.args.length === 0 &&
+        isCopy(objType, (n) => this.isAllCopyEnum(n), (n) => this.isAllCopyStruct(n))) {
+      return this.setType(expr, objType);
+    }
+
+    this.error(`type '${typeName(objType)}' has no method '${expr.method}'`, sp,
+      memberHint(expr.method, this.methodCandidates(objType)));
+    return this.setType(expr, { tag: "unknown" });
+  }
+
+  private checkIsExprExpr(expr: ExprOf<"IsExpr">): TypeKind {
+    const sp = expr.span;
+    const opType = this.checkExpr(expr.operand);
+    this.bindElidedPattern(expr.pattern, opType.tag === "ref" ? opType.inner : opType);
+    if (expr.pattern.kind === "EnumPattern") {
+      if (opType.tag !== "enum" && opType.tag !== "unknown") {
+        this.error(`'is' pattern requires an enum type, got ${typeName(opType)}`, sp);
+      }
+    }
+    return this.setType(expr, { tag: "bool" });
+  }
+
+  private checkIfExprExpr(expr: ExprOf<"IfExpr">): TypeKind {
+    const sp = expr.span;
+    const condType = this.checkExpr(expr.cond);
+    if (condType.tag !== "bool" && condType.tag !== "unknown") {
+      this.error(`if condition must be bool, got ${typeName(condType)}`, sp);
+    }
+    const fnRetType = this.currentFnRetType;
+    const preMoves = this.snapshotMoveState();
+
+    this.pushScope();
+    for (const s of expr.thenBody) this.checkStmt(s, fnRetType);
+    this.popScope();
+    const thenType = this.blockExprType(expr.thenBody);
+
+    const afterThen = this.snapshotMoveState();
+    this.restoreMoveState(preMoves);
+
+    this.pushScope();
+    for (const s of expr.elseBody) this.checkStmt(s, fnRetType);
+    this.popScope();
+    const elseType = this.blockExprType(expr.elseBody);
+
+    const afterElse = this.snapshotMoveState();
+    this.restoreMoveState(preMoves);
+    this.mergeMoveState(afterThen);
+    this.mergeMoveState(afterElse);
+
+    // As-a-value if: coerce a const-int arm to the expected width so
+    // `let h: i64 = if c { 16 } else { 8 }` doesn't leave both arms at the
+    // i32 literal default and then error on the binding. Target is the outer
+    // int hint if present, else the concrete non-literal arm's type (so
+    // `if c { u8var } else { 0 }` unifies with no annotation). Same const-int
+    // retype machinery as enum payloads / struct fields / return.
+    const [thenTail, elseTail] = [this.tailExprOf(expr.thenBody), this.tailExprOf(expr.elseBody)];
+    const hint = this.returnHint;
+    let target: TypeKind | null = hint?.tag === "int" ? hint : null;
+    if (!target && thenType.tag === "int" && elseType.tag === "int" && !typeEq(thenType, elseType)) {
+      if (thenTail && this.isConstIntExpr(thenTail) && !(elseTail && this.isConstIntExpr(elseTail))) target = elseType;
+      else if (elseTail && this.isConstIntExpr(elseTail) && !(thenTail && this.isConstIntExpr(thenTail))) target = thenType;
+    }
+    let finalThen = thenType, finalElse = elseType;
+    if (target) {
+      if (thenTail && thenType.tag === "int" && !typeEq(thenType, target) && this.isConstIntExpr(thenTail)) {
+        this.retypeConstInt(thenTail, target); finalThen = target;
+      }
+      if (elseTail && elseType.tag === "int" && !typeEq(elseType, target) && this.isConstIntExpr(elseTail)) {
+        this.retypeConstInt(elseTail, target); finalElse = target;
+      }
+    }
+
+    if (finalThen.tag !== "unknown" && finalElse.tag !== "unknown" && !typeEq(finalThen, finalElse)) {
+      this.error(`if-else branches have mismatched types: '${typeName(finalThen)}' vs '${typeName(finalElse)}'`, sp);
+    }
+    return this.setType(expr, finalThen.tag !== "unknown" ? finalThen : finalElse);
+  }
+
+  private checkMatchExprExpr(expr: ExprOf<"MatchExpr">): TypeKind {
+    const sp = expr.span;
+    const armTypes = this.checkMatchLike(expr.subject, expr.arms, sp, this.currentFnRetType);
+    // Unify arm value types. Coerce const-int arms to an int target (the
+    // outer hint, else the first concrete non-literal arm) so
+    // `match x { A => 1, B => 2 }` in an i64 slot doesn't stall at i32 —
+    // same const-int retype path as if-expression arms.
+    const armTails = expr.arms.map(a => this.tailExprOf(a.body));
+    const hint = this.returnHint;
+    let target: TypeKind | null = hint?.tag === "int" ? hint : null;
+    if (!target) {
+      for (let i = 0; i < armTypes.length; i++) {
+        const tail = armTails[i];
+        if (armTypes[i].tag === "int" && !(tail && this.isConstIntExpr(tail))) { target = armTypes[i]; break; }
+      }
+    }
+    const finalTypes: TypeKind[] = [];
+    for (let i = 0; i < armTypes.length; i++) {
+      let t = armTypes[i];
+      const tail = armTails[i];
+      if (target && t.tag === "int" && !typeEq(t, target) && tail && this.isConstIntExpr(tail)) {
+        this.retypeConstInt(tail, target); t = target;
+      }
+      finalTypes.push(t);
+    }
+    // Result is the first concrete (non-unknown) arm type; report a mismatch
+    // if a later concrete arm disagrees.
+    let result: TypeKind = { tag: "unknown" };
+    for (const t of finalTypes) {
+      if (t.tag === "unknown" || t.tag === "void") continue;
+      if (result.tag === "unknown") { result = t; continue; }
+      if (!typeEq(result, t)) {
+        this.error(`match arms have mismatched types: '${typeName(result)}' vs '${typeName(t)}'`, sp);
+      }
+    }
+    if (result.tag === "unknown" && finalTypes.some(t => t.tag === "void")) result = { tag: "void" };
+    return this.setType(expr, result);
   }
 
   // Borrow-detection for if-let/let-else subjects, mirroring checkMatchLike: a

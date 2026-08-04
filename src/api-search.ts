@@ -11,6 +11,7 @@ import { readFileSync, readdirSync, existsSync, statSync, mkdirSync, writeFileSy
 import { fileURLToPath } from "url";
 import { resolve, dirname, relative, join } from "path";
 import { STDLIB_DIR, readStd, bundledStdPaths } from "./stdlibBundle";
+import { must } from "./must";
 
 interface Entry {
   kind: "function" | "type";
@@ -238,7 +239,7 @@ function renderMarkdown(entries: Entry[]): string {
   const out: string[] = [];
   for (const module of [...byModule.keys()].sort()) {
     out.push(`## ${module}\n`);
-    const es = byModule.get(module)!.sort((a, b) => a.name.localeCompare(b.name));
+    const es = must(byModule, module, "by module").sort((a, b) => a.name.localeCompare(b.name));
     for (const e of es) {
       out.push(`### \`${e.name}\`\n`);
       out.push("```milo\n" + e.signature + "\n```\n");
@@ -277,7 +278,7 @@ export function runMiloDoc(args: string[]): number {
     return 1;
   }
   if (!outDir) {
-    process.stdout.write([...docs.keys()].sort().map(k => docs.get(k)!).join("\n"));
+    process.stdout.write([...docs.keys()].sort().map(k => must(docs, k, "docs")).join("\n"));
     return 0;
   }
   for (const [module, md] of docs) {

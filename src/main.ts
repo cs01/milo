@@ -23,6 +23,7 @@ import { extractFlowFacts, formatFlowFacts } from "./wcet";
 import { estimateLoopCycles, formatCycleEstimate } from "./wcet-cycles";
 import { PKG_COMMANDS, ensureDepsInstalled } from "./pkgcli";
 import { ensureFmtBinary } from "./fmtbin";
+import { must } from "./must";
 
 function frontendToHIR(source: string, target: TargetInfo, filePath?: string, warningConfig?: WarningConfig) {
   const sourceDir = filePath ? dirname(resolve(filePath)) : process.cwd();
@@ -1450,7 +1451,7 @@ var counts: HashMap<string, i64> = HashMap.new()
 counts.set("apples", 5)
 counts.set("oranges", 3)
 if counts.has("apples") {
-    let n = counts.get("apples")!
+    let n = must(counts, "apples", "counts")
     print($"apples: {n}")
 }
 \`\`\`

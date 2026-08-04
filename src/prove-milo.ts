@@ -12,6 +12,7 @@ import { join } from "path";
 import { tmpdir } from "os";
 import type { VerifyResult, ProveResult, SolverResult } from "./verify";
 import { untranslatable, untranslatableDetail } from "./verify";
+import { must } from "./must";
 
 // ---- S-expression parser ----
 
@@ -246,7 +247,7 @@ function serialize(f: FNode, idx: Map<string, number>, nvars: number, atoms: str
   if (f.op === "false") { nodes.push({ kind: 3, kids: [] }); return nodes.length - 1; }
   if (f.op === "atom") {
     const row = new Array(nvars).fill(0);
-    for (const [k, v] of f.lin.coeffs) row[idx.get(k)!] = v;
+    for (const [k, v] of f.lin.coeffs) row[must(idx, k, "idx")] = v;
     const scaled = scaleToIntegers([...row, f.lin.konst]);
     if (!scaled) throw new UnscalableAtom();
     const ai = atoms.length;

@@ -10,6 +10,7 @@ import { deriveJsonSource, type JsonPlan, type JsonFieldPlan } from "./derive-js
 import { Lexer } from "./lexer";
 import { Parser } from "./parser";
 import { basename } from "path";
+import { must } from "./must";
 
 // One hop from a place to a place inside it. `index` is deliberately opaque —
 // two index steps may or may not select the same element, and nothing here tries
@@ -1046,7 +1047,7 @@ export class TypeChecker {
     const mangled = `${baseName}_${typeArgs.map(a => this.mangleTypeName(a)).join("_")}`;
     if (this.enums.has(mangled)) return mangled;
 
-    const generic = this.genericEnums.get(baseName)!;
+    const generic = must(this.genericEnums, baseName, "generic enums");
     const typeMap = new Map<string, TypeKind>();
     generic.typeParams.forEach((p, i) => typeMap.set(p, typeArgs[i]));
 
@@ -1103,7 +1104,7 @@ export class TypeChecker {
     const mangled = `${baseName}_${typeArgs.map(a => this.mangleTypeName(a)).join("_")}`;
     if (this.structs.has(mangled)) return mangled;
 
-    const generic = this.genericStructs.get(baseName)!;
+    const generic = must(this.genericStructs, baseName, "generic structs");
     const typeMap = new Map<string, TypeKind>();
     generic.typeParams.forEach((p, i) => typeMap.set(p, typeArgs[i]));
 
@@ -1183,7 +1184,7 @@ export class TypeChecker {
   }
 
   private substituteTypeKind(t: TypeKind, typeMap: Map<string, TypeKind>): TypeKind {
-    if (t.tag === "struct" && typeMap.has(t.name)) return typeMap.get(t.name)!;
+    if (t.tag === "struct" && typeMap.has(t.name)) return must(typeMap, t.name, "type map");
     if (t.tag === "array") return { ...t, element: this.substituteTypeKind(t.element, typeMap) };
     if (t.tag === "ref") return { ...t, inner: this.substituteTypeKind(t.inner, typeMap) };
     if (t.tag === "ptr") return { ...t, inner: this.substituteTypeKind(t.inner, typeMap) };
@@ -1256,7 +1257,7 @@ export class TypeChecker {
     }
     this.monoDepth++;
     try {
-    const generic = this.genericFns.get(baseName)!;
+    const generic = must(this.genericFns, baseName, "generic fns");
     const typeMap = new Map<string, TypeKind>();
     generic.typeParams.forEach((p, i) => typeMap.set(p, typeArgs[i]));
 
@@ -3286,7 +3287,7 @@ export class TypeChecker {
       // inherent impl
       if (this.inherentImpls.has(typeName)) {
         // merge methods into existing
-        const existing = this.inherentImpls.get(typeName)!;
+        const existing = must(this.inherentImpls, typeName, "inherent impls");
         for (const m of impl.methods) {
           const mangled = `${typeName}$${m.name}`;
           const concreteFn: Function = {
@@ -4305,7 +4306,7 @@ export class TypeChecker {
           break;
         }
         if (subjType.tag === "enum" && stmt.pattern.kind === "EnumPattern") {
-          const enumInfo = this.enums.get(subjType.name)!;
+          const enumInfo = must(this.enums, subjType.name, "enums");
           const ps = stmt.pattern.span;
           if (stmt.pattern.enumName !== subjType.name && enumInfo.baseName !== stmt.pattern.enumName) {
             this.error(`pattern enum '${stmt.pattern.enumName}' does not match subject type '${subjType.name}'`, ps);
@@ -4375,7 +4376,7 @@ export class TypeChecker {
           this.error(`let-else block must diverge (return/break/continue) — it runs when the pattern doesn't match`, sp);
         }
         if (subjType.tag === "enum" && stmt.pattern.kind === "EnumPattern") {
-          const enumInfo = this.enums.get(subjType.name)!;
+          const enumInfo = must(this.enums, subjType.name, "enums");
           const ps = stmt.pattern.span;
           if (stmt.pattern.enumName !== subjType.name && enumInfo.baseName !== stmt.pattern.enumName) {
             this.error(`pattern enum '${stmt.pattern.enumName}' does not match value type '${subjType.name}'`, ps);
@@ -6262,11 +6263,11 @@ export class TypeChecker {
         return this.setType(expr, { tag: "unknown" });
       }
 
-      const typeArgs = genericFn.typeParams.map(p => typeMap.get(p)!);
+      const typeArgs = genericFn.typeParams.map(p => must(typeMap, p, "type map"));
       const mangled = this.monomorphizeFn(expr.func, typeArgs);
       this.rewrittenCalls.set(expr, mangled);
 
-      const concreteSig = this.functions.get(mangled)!;
+      const concreteSig = must(this.functions, mangled, "functions");
       for (let i = 0; i < expr.args.length; i++) {
         const sigParamTy = i < concreteSig.params.length ? concreteSig.params[i].type : undefined;
         if (sigParamTy?.tag === "ref") {
@@ -6290,7 +6291,7 @@ export class TypeChecker {
       // check requires contracts at call site (generic fn)
       if (genericFn.decl) this.checkCallSiteContracts(genericFn.decl, expr.args, sp);
 
-      return this.setType(expr, this.functions.get(mangled)!.ret);
+      return this.setType(expr, must(this.functions, mangled, "functions").ret);
     }
 
     // A callable in the local scope wins over a global of the same name. Globals used
@@ -6555,14 +6556,14 @@ export class TypeChecker {
         this.error(`cannot infer type parameter(s) '${missing.join("', '")}' for struct '${expr.name}'`, sp);
         return this.setType(expr, { tag: "unknown" });
       }
-      const typeArgs = genericInfo.typeParams.map(p => typeMap.get(p)!);
+      const typeArgs = genericInfo.typeParams.map(p => must(typeMap, p, "type map"));
       const mangled = this.monomorphizeStruct(expr.name, typeArgs);
       this.rewrittenStructLits.set(expr, mangled);
-      const info = this.structs.get(mangled)!;
+      const info = must(this.structs, mangled, "structs");
       for (const f of expr.fields) {
         const fieldDef = info.fields.find(d => d.name === f.name);
         if (!fieldDef) continue;
-        const valType = this.exprTypes.get(f.value)!;
+        const valType = must(this.exprTypes, f.value, "expr types");
         if (!typeEq(fieldDef.type, valType) && valType.tag !== "unknown") {
           this.error(`field '${f.name}' of '${expr.name}': expected ${typeName(fieldDef.type)}, got ${typeName(valType)}`, sp);
         }
@@ -6728,10 +6729,10 @@ export class TypeChecker {
           }
         }
         if (typeMap.size > 0) {
-          const typeArgs = genericFn.typeParams.map(p => typeMap.get(p)!);
+          const typeArgs = genericFn.typeParams.map(p => must(typeMap, p, "type map"));
           const mangled = this.monomorphizeFn(fnName, typeArgs);
           this.rewrittenCalls.set(expr as any, mangled);
-          const concreteSig = this.functions.get(mangled)!;
+          const concreteSig = must(this.functions, mangled, "functions");
           if (concreteSig.params[0]?.type.tag === "ref") {
             this.autoBorrowed.set(expr.args[0], { mutable: false });
           } else {
@@ -6813,7 +6814,7 @@ export class TypeChecker {
         this.error(`cannot infer type parameter(s) '${missing.join("', '")}' for ${expr.enumName}.${expr.variant}`, sp);
         return this.setType(expr, { tag: "unknown" });
       }
-      const typeArgs = genericInfo.typeParams.map(p => typeMap.get(p)!);
+      const typeArgs = genericInfo.typeParams.map(p => must(typeMap, p, "type map"));
       const mangled = this.monomorphizeEnum(expr.enumName, typeArgs);
       this.rewrittenEnums.set(expr, mangled);
       return this.setType(expr, { tag: "enum", name: mangled });
@@ -8630,7 +8631,7 @@ export class TypeChecker {
     } else if (isEnum && subjType.tag === "enum") {
       // The tag test is redundant — `subjType` is not reassigned after `isEnum` is
       // computed — but it is what narrows `subjType` for the enum accesses below.
-      const enumInfo = this.enums.get(subjType.name)!;
+      const enumInfo = must(this.enums, subjType.name, "enums");
       const covered = new Set<string>();
       let hasWildcard = false;
       const preMoves = this.snapshotMoveState();

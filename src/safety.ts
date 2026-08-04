@@ -1,6 +1,7 @@
 // Compiler-enforced safety profiles for domain-specific certification standards
 import type { Program, Function, Stmt, Expr, MiloType } from "./ast";
 import type { Span } from "./ast";
+import { must } from "./must";
 
 export type SafetyLevel =
   | "do178c-a"    // DAL A — catastrophic failure condition (fly-by-wire, flight control)
@@ -562,7 +563,7 @@ function checkRecursionCycles(program: Program, violations: SafetyViolation[], l
   const dfs = (name: string) => {
     color.set(name, GRAY);
     stack.push(name);
-    for (const c of callees(fnByName.get(name)!)) {
+    for (const c of callees(must(fnByName, name, "fn by name"))) {
       if (color.get(c) === GRAY) {
         const cycle = stack.slice(stack.indexOf(c)).concat(c);
         const key = [...new Set(cycle)].sort().join(",");
@@ -611,11 +612,11 @@ function checkCallDepth(program: Program, maxDepth: number, violations: SafetyVi
   const memo = new Map<string, number>();
   const onStack = new Set<string>();
   const depth = (name: string): number => {
-    if (memo.has(name)) return memo.get(name)!;
+    if (memo.has(name)) return must(memo, name, "memo");
     if (onStack.has(name)) return Infinity; // cycle — treat as unbounded
     onStack.add(name);
     let max = 0;
-    for (const c of callees(fnByName.get(name)!)) max = Math.max(max, depth(c));
+    for (const c of callees(must(fnByName, name, "fn by name"))) max = Math.max(max, depth(c));
     onStack.delete(name);
     const d = 1 + max;
     memo.set(name, d);

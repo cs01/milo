@@ -1,6 +1,7 @@
 // Verification condition generator — produces SMT-LIB2 from contract annotations
 // and symbolically executes function bodies to prove postconditions.
 import type { Program, Function, Contract, Expr, Stmt, MiloType } from "./ast";
+import { must } from "./must";
 
 export interface VerificationCondition {
   fn: string;
@@ -1168,7 +1169,7 @@ function collectPaths(stmts: Stmt[], env: Map<string, string>, types?: Map<strin
         if (stmt.iterable.kind === "RangeExpr") {
           const lo = exprToSmtWithEnv(stmt.iterable.start, localEnv);
           const hi = exprToSmtWithEnv(stmt.iterable.end, localEnv);
-          const i0 = havocEnv.get(idxName)!;
+          const i0 = must(havocEnv, idxName, "havoc env");
           if (!/UNSUPPORTED/.test(lo) && !/UNSUPPORTED/.test(hi)) {
             guard = `(and (>= ${i0} ${lo}) (< ${i0} ${hi}))`;
             entryEnv.set(idxName, lo);
@@ -1185,7 +1186,7 @@ function collectPaths(stmts: Stmt[], env: Map<string, string>, types?: Map<strin
           if (/^[A-Za-z_][A-Za-z0-9_]*$/.test(base)) {
             const lenSym = `${base}_len`;
             FIELD_REFS?.add(lenSym);
-            const i0 = havocEnv.get(idxName)!;
+            const i0 = must(havocEnv, idxName, "havoc env");
             guard = `(and (>= ${i0} 0) (< ${i0} ${lenSym}))`;
             entryEnv.set(idxName, "0");
             nextPatch.set(idxName, `(+ ${i0} 1)`);
@@ -1675,7 +1676,7 @@ export function generateVerificationConditions(program: Program, opts?: { onlyFi
     const assumedInvariants = new Set<string>();
     const invariantParams = fn.params.filter(p => p.type?.name && STRUCT_INVARIANTS.has(p.type.name));
     for (const p of invariantParams) {
-      for (const inv of STRUCT_INVARIANTS.get(p.type!.name)!) {
+      for (const inv of must(STRUCT_INVARIANTS, p.type!.name, "s t r u c t  i n v a r i a n t s")) {
         const fieldEnv = new Map<string, string>();
         for (const f of STRUCT_FIELDS.get(p.type!.name) ?? []) {
           const sym = `${p.name}_${f}`;
@@ -1825,7 +1826,7 @@ export function generateVerificationConditions(program: Program, opts?: { onlyFi
     for (const p of invariantParams) {
       if (!p.type?.isRefMut && !p.type?.isPtr) continue;
       const fields = STRUCT_FIELDS.get(p.type.name) ?? [];
-      for (const inv of STRUCT_INVARIANTS.get(p.type.name)!) {
+      for (const inv of must(STRUCT_INVARIANTS, p.type.name, "s t r u c t  i n v a r i a n t s")) {
         // Every exit, not just the fall-through ones: a mutator that ends in `return true`
         // has no final env at all, and reading only those would have silently checked
         // nothing for exactly the functions most likely to break the invariant.

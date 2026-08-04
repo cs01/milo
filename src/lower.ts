@@ -9,6 +9,7 @@ import type { TypeKind } from "./types";
 import { typeFromAst } from "./types";
 import { readFileSync, existsSync, statSync } from "fs";
 import { resolve, dirname } from "path";
+import { must } from "./must";
 
 export function lower(program: Program, checked: CheckResult, sourceDir?: string, targetOs?: string): HIRModule {
   // Default to the host OS so callers that don't thread a target (none today) still
@@ -1268,7 +1269,7 @@ class LowerCtx {
         // user-defined method (trait or inherent)
         const resolved = this.c.resolvedMethods.get(expr);
         if (resolved) {
-          const sig = this.c.functions.get(resolved)!;
+          const sig = must(this.c.functions, resolved, "functions");
           const heapRecv = this.c.heapMethodReceivers.has(expr);
           const allExprs = [expr.object, ...expr.args];
           const args: HIRArg[] = allExprs.map((a, i) => {

@@ -7,6 +7,7 @@ import { cSigParams, headerLabel } from "./csig";
 import { classifyArg, classifyRet, AbiError, type ArgClass, type RetClass, type AbiStruct, type AbiLeaf } from "./abi";
 import { resolve, dirname, basename, relative, isAbsolute } from "path";
 import { STDLIB_DIR } from "./stdlibBundle";
+import { must } from "./must";
 
 // `.` can't appear in a Milo identifier, so this never collides with a user function.
 const GLOBAL_INIT_FN = "__milo.global_init";
@@ -703,7 +704,7 @@ export class Codegen {
     }
     const enumMatch = ty.match(/^%(.+)$/);
     if (enumMatch && this.enumLayouts.has(enumMatch[1])) {
-      const layout = this.enumLayouts.get(enumMatch[1])!;
+      const layout = must(this.enumLayouts, enumMatch[1], "enum layouts");
       // i64 payload array requires 8-byte alignment, so the i32 tag is padded to 8.
       // Without this, malloc undersizes by 4 bytes and store %Enum overruns the buffer.
       return layout.payloadSlots > 0 ? 8 + layout.payloadSlots * 8 : 4;
@@ -777,7 +778,7 @@ export class Codegen {
         return;
       }
       if (expr.kind === "StructLit" && this.structLayouts.has(expr.name)) {
-        const layout = this.structLayouts.get(expr.name)!;
+        const layout = must(this.structLayouts, expr.name, "struct layouts");
         for (const f of expr.fields) {
           const idx = layout.fields.findIndex(lf => lf.name === f.name);
           const fieldTy = layout.fields[idx].type;
@@ -834,7 +835,7 @@ export class Codegen {
   }
 
   private structNeedsDrop(name: string): boolean {
-    if (this.structDropCache.has(name)) return this.structDropCache.get(name)!;
+    if (this.structDropCache.has(name)) return must(this.structDropCache, name, "struct drop cache");
     // guard against recursion (recursive structs use Heap, not direct embedding)
     this.structDropCache.set(name, false);
     let result = this.dropImpls.has(name);
@@ -870,7 +871,7 @@ export class Codegen {
     }
     const enumMatch = ty.match(/^%(.+)$/);
     if (enumMatch && this.enumLayouts.has(enumMatch[1])) {
-      const layout = this.enumLayouts.get(enumMatch[1])!;
+      const layout = must(this.enumLayouts, enumMatch[1], "enum layouts");
       return layout.payloadSlots > 0 ? 8 : 4;
     }
     return 8;
@@ -885,7 +886,7 @@ export class Codegen {
   // Flatten a struct's scalar leaves (offset/size/float-ness) for ABI classification —
   // HFA detection and SysV eightbyte SSE/INTEGER merging need per-leaf info, not just size.
   private abiLeaves(name: string, base: number): AbiLeaf[] {
-    const layout = this.structLayouts.get(name)!;
+    const layout = must(this.structLayouts, name, "struct layouts");
     const fieldTypes = layout.fields.map(f => f.type);
     const out: AbiLeaf[] = [];
     layout.fields.forEach((f, i) => out.push(...this.leavesOf(f.typeKind, base + this.structFieldOffset(fieldTypes, i))));
@@ -911,7 +912,7 @@ export class Codegen {
   }
 
   private abiStructOf(name: string): AbiStruct {
-    const layout = this.structLayouts.get(name)!;
+    const layout = must(this.structLayouts, name, "struct layouts");
     const fieldTypes = layout.fields.map(f => f.type);
     return {
       name,
@@ -926,8 +927,8 @@ export class Codegen {
   // call site — an sret/byval attr present on one but not the other silently miscompiles
   // on x86_64 — so both go through this single source of truth.
   private externLoweredSig(name: string): { params: string[]; ret: string } {
-    const abi = this.externAbi.get(name)!;
-    const sig = this.fnSigs.get(name)!;
+    const abi = must(this.externAbi, name, "extern abi");
+    const sig = must(this.fnSigs, name, "fn sigs");
     const params: string[] = [];
     let ret = sig.retType;
     if (abi.ret.kind === "sret") {
@@ -949,8 +950,8 @@ export class Codegen {
   // argVals hold the Milo-level argument values (struct params are whole %T values);
   // here we reinterpret each into the register/indirect/sret form the ABI demands.
   private emitExternAbiCall(expr: HIRExpr & { kind: "Call" }, argVals: { val: string; type: string }[], lines: string[]): [string[], string, string] {
-    const abi = this.externAbi.get(expr.func)!;
-    const sig = this.fnSigs.get(expr.func)!;
+    const abi = must(this.externAbi, expr.func, "extern abi");
+    const sig = must(this.fnSigs, expr.func, "fn sigs");
     const lowered = this.externLoweredSig(expr.func);
     const finalArgs: string[] = [];
 
@@ -1043,7 +1044,7 @@ export class Codegen {
       "#include <stddef.h>",
     ];
     for (const h of orderGuardIncludes(headers, this.target.os)) {
-      const macro = hdrMacro.get(h)!;
+      const macro = must(hdrMacro, h, "hdr macro");
       // Alternates ("OpenGL/gl3.h|GL/glcorearb.h"): the same C entity under different
       // spellings per platform, for a header std can't assume one name for. First hit wins.
       // An alternate may prefix feature macros the header needs to declare anything at all
@@ -1065,7 +1066,7 @@ export class Codegen {
     for (const s of this.cLayoutStructs) {
       const { cType } = s.cLayout!;
       const fieldTypes = s.fields.map(f => this.llvmType(f.type));
-      out.push(`#ifdef ${hdrMacro.get(s.cLayout!.header)!}`);
+      out.push(`#ifdef ${must(hdrMacro, s.cLayout!.header, "hdr macro")}`);
       out.push(`// ${s.name} — declared in Milo as ${cType}`);
       s.fields.forEach((f, i) => {
         // @cOpaque: filler with no C counterpart. `offsetof(struct rusage, _p0)` is
@@ -1097,7 +1098,7 @@ export class Codegen {
       );
     }
     for (const cs of cSigs) {
-      out.push(`#ifdef ${hdrMacro.get(cs.header)!}`, ...this.cSigGuard(cs), "#endif", "");
+      out.push(`#ifdef ${must(hdrMacro, cs.header, "hdr macro")}`, ...this.cSigGuard(cs), "#endif", "");
     }
     for (const cv of cValues) {
       // Cast both sides to one 64-bit type so the comparison can't be decided by C's
@@ -1105,7 +1106,7 @@ export class Codegen {
       // promote the macro to unsigned and pass on a bit pattern rather than a value.
       const cast = cv.signed ? "long long" : "unsigned long long";
       out.push(
-        `#ifdef ${hdrMacro.get(cv.header)!}`,
+        `#ifdef ${must(hdrMacro, cv.header, "hdr macro")}`,
         `// ${cv.global} — declared in ${cv.header} as ${cv.cName}`,
         `_Static_assert((${cast})(${cv.cName}) == (${cast})(${cv.value}), ` +
         `"${cv.global}: Milo says ${cv.value}, ${headerLabel(cv.header)} defines ${cv.cName} as something else");`,
@@ -1267,7 +1268,7 @@ export class Codegen {
     for (let pass = 0; pass <= module.enums.length; pass++) {
       let changed = false;
       for (const e of module.enums) {
-        const layout = this.enumLayouts.get(e.name)!;
+        const layout = must(this.enumLayouts, e.name, "enum layouts");
         let maxPayload = 0;
         for (const v of layout.variants.values()) {
           maxPayload = Math.max(maxPayload, this.structPayloadSize(v.fieldTypes));
@@ -1561,7 +1562,7 @@ export class Codegen {
 
     // insert extern declarations
     for (const ext of externs) {
-      const sig = this.fnSigs.get(ext.name)!;
+      const sig = must(this.fnSigs, ext.name, "fn sigs");
       let retType = sig.retType;
       let paramTypes: string[];
       if (this.externAbi.has(ext.name)) {
@@ -2097,7 +2098,7 @@ export class Codegen {
         const [objLines, objVal] = this.genExpr(expr.object);
         lines.push(...objLines);
         const structName = expr.object.type.inner.name;
-        const layout = this.structLayouts.get(structName)!;
+        const layout = must(this.structLayouts, structName, "struct layouts");
         const idx = layout.fields.findIndex(f => f.name === expr.field);
         const fieldTy = layout.fields[idx].type;
         const tmp = this.nextTemp();
@@ -2108,7 +2109,7 @@ export class Codegen {
       lines.push(...objLines);
       const structName = this.getStructName(objTy);
       if (structName) {
-        const layout = this.structLayouts.get(structName)!;
+        const layout = must(this.structLayouts, structName, "struct layouts");
         const idx = layout.fields.findIndex(f => f.name === expr.field);
         const fieldTy = layout.fields[idx].type;
         const tmp = this.nextTemp();
@@ -3538,8 +3539,8 @@ export class Codegen {
     const layout = this.enumLayouts.get(stmt.optionEnumName);
     if (!layout) throw new Error(`enum layout not found for ${stmt.optionEnumName}`);
 
-    const someVariant = layout.variants.get("Some")!;
-    const noneVariant = layout.variants.get("None")!;
+    const someVariant = must(layout.variants, "Some", "variants");
+    const noneVariant = must(layout.variants, "None", "variants");
     const elemTy = this.llvmType(stmt.varType);
 
     const varAddr = this.allocaName(stmt.varName);
@@ -3813,7 +3814,7 @@ export class Codegen {
       subjAddr = heapVal;
       subjTy = this.llvmType(stmt.subject.type);
     } else if (stmt.subject.kind === "Ident" && this.locals.has(stmt.subject.name)) {
-      const local = this.locals.get(stmt.subject.name)!;
+      const local = must(this.locals, stmt.subject.name, "locals");
       subjAddr = this.localAddr(stmt.subject.name);
       subjTy = local.type;
     } else if (stmt.subjectIsRef && this.placeRootedAtImmutableRef(stmt.subject)) {
@@ -3845,7 +3846,7 @@ export class Codegen {
     const tag = this.nextTemp();
     lines.push(`  ${tag} = load i32, ptr ${tagPtr}`);
 
-    const layout = this.enumLayouts.get(stmt.enumName)!;
+    const layout = must(this.enumLayouts, stmt.enumName, "enum layouts");
     const endLabel = this.nextLabel("match.end");
     const defaultLabel = this.nextLabel("match.default");
 
@@ -3869,7 +3870,7 @@ export class Codegen {
       lines.push(`${label}:`);
       const armDropStart = this.droppableLocals.length;
       if (arm.pattern.kind === "EnumPattern" && arm.pattern.bindings.length > 0) {
-        const variant = layout.variants.get(arm.pattern.variant)!;
+        const variant = must(layout.variants, arm.pattern.variant, "variants");
         this.extractBindings(lines, subjAddr, subjTy, variant, arm.pattern, !!stmt.subjectIsRef);
       }
       const armTerminated = this.emitMatchArmBody(lines, arm.body, resultSlot);
@@ -4742,7 +4743,7 @@ export class Codegen {
     if (!local) {
       // named function used as value — generate trampoline with closure calling convention
       if (this.fnSigs.has(expr.name)) {
-        const sig = this.fnSigs.get(expr.name)!;
+        const sig = must(this.fnSigs, expr.name, "fn sigs");
         const trampolineName = `__trampoline_${expr.name}`;
         if (!this.fnSigs.has(trampolineName)) {
           const paramNames = sig.paramTypes.map((_, i) => `p${i}`);
@@ -5050,7 +5051,7 @@ export class Codegen {
   }
 
   private genStructLit(expr: HIRExpr & { kind: "StructLit" }, lines: string[]): [string[], string, string] {
-    const layout = this.structLayouts.get(expr.name)!;
+    const layout = must(this.structLayouts, expr.name, "struct layouts");
     const structTy = `%${expr.name}`;
     const alloca = this.nextTemp();
     lines.push(`  ${alloca} = alloca ${structTy}`);
@@ -5230,8 +5231,8 @@ export class Codegen {
   }
 
   private genEnumLit(expr: HIRExpr & { kind: "EnumLit" }, lines: string[]): [string[], string, string] {
-    const layout = this.enumLayouts.get(expr.enumName)!;
-    const variant = layout.variants.get(expr.variant)!;
+    const layout = must(this.enumLayouts, expr.enumName, "enum layouts");
+    const variant = must(layout.variants, expr.variant, "variants");
     const enumTy = `%${expr.enumName}`;
     const alloca = this.nextTemp();
     lines.push(`  ${alloca} = alloca ${enumTy}`);
@@ -5300,9 +5301,9 @@ export class Codegen {
       else { const o = this.nextTemp(); lines.push(`  ${o} = or i1 ${valid}, ${eq}`); valid = o; }
     }
     const optTy = `%${expr.optionEnumName}`;
-    const optLayout = this.enumLayouts.get(expr.optionEnumName)!;
-    const someTag = optLayout.variants.get("Some")!.tag;
-    const noneTag = optLayout.variants.get("None")!.tag;
+    const optLayout = must(this.enumLayouts, expr.optionEnumName, "enum layouts");
+    const someTag = must(optLayout.variants, "Some", "variants").tag;
+    const noneTag = must(optLayout.variants, "None", "variants").tag;
     const res = this.nextTemp();
     lines.push(`  ${res} = alloca ${optTy}`);
     const someBB = this.nextLabel("tryfrom.some");
@@ -5869,7 +5870,7 @@ export class Codegen {
     const [ol, ov, ot] = this.genExpr(expr.operand);
     lines.push(...ol);
 
-    const layout = this.enumLayouts.get(expr.enumName)!;
+    const layout = must(this.enumLayouts, expr.enumName, "enum layouts");
     const enumTy = `%${expr.enumName}`;
     const resultTy = this.llvmType(expr.type);
 
@@ -5946,7 +5947,7 @@ export class Codegen {
     const [ol, ov, ot] = this.genExpr(expr.operand);
     lines.push(...ol);
 
-    const layout = this.enumLayouts.get(expr.enumName)!;
+    const layout = must(this.enumLayouts, expr.enumName, "enum layouts");
     const enumTy = `%${expr.enumName}`;
     const resultTy = this.llvmType(expr.type);
     const retTy = this.llvmType(expr.retType);
@@ -5993,7 +5994,7 @@ export class Codegen {
 
       if (expr.fromConversion && srcErrFieldTy) {
         // From conversion: wrap source err in target error enum variant
-        const convLayout = this.enumLayouts.get(expr.fromConversion.targetEnumName)!;
+        const convLayout = must(this.enumLayouts, expr.fromConversion.targetEnumName, "enum layouts");
         const convEnumTy = `%${expr.fromConversion.targetEnumName}`;
         const srcPayload = this.nextTemp();
         lines.push(`  ${srcPayload} = load ${srcErrFieldTy}, ptr ${errPayloadPtr}`);
@@ -6021,7 +6022,7 @@ export class Codegen {
       lines.push(`  ${retAlloca} = alloca ${retEnumTy}`);
       const retTagPtr = this.nextTemp();
       lines.push(`  ${retTagPtr} = getelementptr ${retEnumTy}, ptr ${retAlloca}, i32 0, i32 0`);
-      const retLayout = this.enumLayouts.get(retEnumName)!;
+      const retLayout = must(this.enumLayouts, retEnumName, "enum layouts");
       const retErrVariant = retLayout.variants.get("Err") || retLayout.variants.get("None");
       const retErrTag = retErrVariant ? retErrVariant.tag : 1;
       lines.push(`  store i32 ${retErrTag}, ptr ${retTagPtr}`);
@@ -6501,7 +6502,7 @@ export class Codegen {
       const [objLines, objVal] = this.genExpr(expr.object);
       lines.push(...objLines);
       const structName = expr.object.type.inner.name;
-      const layout = this.structLayouts.get(structName)!;
+      const layout = must(this.structLayouts, structName, "struct layouts");
       const idx = layout.fields.findIndex(f => f.name === expr.field);
       const fieldTy = layout.fields[idx].type;
       const ptr = this.nextTemp();
@@ -6524,7 +6525,7 @@ export class Codegen {
     }
     const structName = this.getStructName(finalTy);
     if (structName) {
-      const layout = this.structLayouts.get(structName)!;
+      const layout = must(this.structLayouts, structName, "struct layouts");
       const idx = layout.fields.findIndex(f => f.name === expr.field);
       const fieldTy = layout.fields[idx].type;
       const ptr = this.nextTemp();
@@ -9824,7 +9825,7 @@ export class Codegen {
     lines.push(`  ${someAlloca} = alloca ${optionTy}`);
     const someTagPtr = this.nextTemp();
     lines.push(`  ${someTagPtr} = getelementptr ${optionTy}, ptr ${someAlloca}, i32 0, i32 0`);
-    const someTag = optionLayout.variants.get("Some")!.tag;
+    const someTag = must(optionLayout.variants, "Some", "variants").tag;
     lines.push(`  store i32 ${someTag}, ptr ${someTagPtr}`);
     const somePayloadPtr = this.nextTemp();
     lines.push(`  ${somePayloadPtr} = getelementptr ${optionTy}, ptr ${someAlloca}, i32 0, i32 1`);
@@ -9846,7 +9847,7 @@ export class Codegen {
     lines.push(`  call ptr @memset(ptr ${noneAlloca}, i32 0, i64 ${optionSizeI})`);
     const noneTagPtr = this.nextTemp();
     lines.push(`  ${noneTagPtr} = getelementptr ${optionTy}, ptr ${noneAlloca}, i32 0, i32 0`);
-    const noneTag = optionLayout.variants.get("None")!.tag;
+    const noneTag = must(optionLayout.variants, "None", "variants").tag;
     lines.push(`  store i32 ${noneTag}, ptr ${noneTagPtr}`);
     const noneVal = this.nextTemp();
     lines.push(`  ${noneVal} = load ${optionTy}, ptr ${noneAlloca}`);
@@ -10356,7 +10357,7 @@ export class Codegen {
   private emitStructDisplay(structName: string, structVal: string, lines: string[]): string {
     this.needsSnprintf = true;
     this.needsMalloc = true;
-    const layout = this.structLayouts.get(structName)!;
+    const layout = must(this.structLayouts, structName, "struct layouts");
     // Stage the struct value into an alloca so we can GEP each field.
     const stagePtr = this.nextTemp();
     lines.push(`  ${stagePtr} = alloca %${structName}`);
@@ -10521,7 +10522,7 @@ export class Codegen {
       throw new Error(`jsonStringify: unsupported type '${valueType.tag}'`);
     }
 
-    const layout = this.structLayouts.get(valueType.name)!;
+    const layout = must(this.structLayouts, valueType.name, "struct layouts");
     const [ptrLines, structPtr] = this.genLValueForArg(expr.value);
     lines.push(...ptrLines);
 
@@ -11077,7 +11078,7 @@ export class Codegen {
     if (this.generatedEnumCloneHelpers.has(enumName)) return;
     this.generatedEnumCloneHelpers.add(enumName);
 
-    const layout = this.enumLayouts.get(enumName)!;
+    const layout = must(this.enumLayouts, enumName, "enum layouts");
     const enumTy = `%${enumName}`;
     const helperName = `milo.clone.${enumName}`;
     const savedTemp = this.tempCounter;
@@ -11218,7 +11219,7 @@ export class Codegen {
       case "HashMapEntries":
       // Option-returning Vec reads: the payload is either cloned out of the buffer
       // (get/first/last/min/max/find) or moved out of it (pop). Either way nothing
-      // else owns it, so `print(v.get(0)!)` used to leak one copy per call.
+      // else owns it, so `print(must(v, 0, "v"))` used to leak one copy per call.
       case "VecGetOpt":
       case "VecMinMax":
       case "VecPop":
@@ -11449,7 +11450,7 @@ export class Codegen {
     if (this.generatedDropHelpers.has(enumName)) return;
     this.generatedDropHelpers.add(enumName);
 
-    const layout = this.enumLayouts.get(enumName)!;
+    const layout = must(this.enumLayouts, enumName, "enum layouts");
     const enumTy = `%${enumName}`;
     const helperName = `milo.drop.${enumName}`;
     const savedTemp = this.tempCounter;
@@ -11520,7 +11521,7 @@ export class Codegen {
     if (this.generatedStructCloneHelpers.has(structName)) return;
     this.generatedStructCloneHelpers.add(structName);
 
-    const layout = this.structLayouts.get(structName)!;
+    const layout = must(this.structLayouts, structName, "struct layouts");
     const structTy = `%${structName}`;
     const helperName = `milo.clone.struct.${structName}`;
     const savedTemp = this.tempCounter;
@@ -11553,7 +11554,7 @@ export class Codegen {
     if (this.generatedStructDropHelpers.has(structName)) return;
     this.generatedStructDropHelpers.add(structName);
 
-    const layout = this.structLayouts.get(structName)!;
+    const layout = must(this.structLayouts, structName, "struct layouts");
     const helperName = `milo.drop.struct.${structName}`;
     const savedTemp = this.tempCounter;
     const savedLabel = this.labelCounter;
@@ -11686,8 +11687,8 @@ export class Codegen {
     const optionTy = `%${expr.optionEnumName}`;
     const optionLayout = this.enumLayouts.get(expr.optionEnumName);
     if (!optionLayout) throw new Error(`Option enum '${expr.optionEnumName}' not found`);
-    const someTag = optionLayout.variants.get("Some")!.tag;
-    const noneTag = optionLayout.variants.get("None")!.tag;
+    const someTag = must(optionLayout.variants, "Some", "variants").tag;
+    const noneTag = must(optionLayout.variants, "None", "variants").tag;
 
     const okLabel = this.nextLabel("checked.ok");
     const overflowLabel = this.nextLabel("checked.overflow");
@@ -11747,8 +11748,8 @@ export class Codegen {
     const optionTy = `%${expr.optionEnumName}`;
     const optionLayout = this.enumLayouts.get(expr.optionEnumName);
     if (!optionLayout) throw new Error(`Option enum '${expr.optionEnumName}' not found`);
-    const someTag = optionLayout.variants.get("Some")!.tag;
-    const noneTag = optionLayout.variants.get("None")!.tag;
+    const someTag = must(optionLayout.variants, "Some", "variants").tag;
+    const noneTag = must(optionLayout.variants, "None", "variants").tag;
 
     const zeroCmp = this.nextTemp();
     lines.push(`  ${zeroCmp} = icmp eq ${lt} ${rv}, 0`);

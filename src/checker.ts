@@ -1173,12 +1173,15 @@ export class TypeChecker {
   // checked. Shadowing is judged relative to this, not to the whole stack.
   private fnScopeFloor = 0;
 
-  private declare(name: string, info: VarInfo) {
+  // `span` is the binding site to point diagnostics at; VarInfo carries one for the
+  // binding forms that record it, and callers that don't (for-in, params) pass it here.
+  private declare(name: string, info: VarInfo, span?: Span) {
+    const at = span ?? info.span;
     const scope = this.scopes[this.scopes.length - 1];
     // `_` is a discard, not a name: `let _ = f()` twice in one scope is the
     // conventional way to ignore two results, so each one rebinds rather than
     // colliding. Everything else still gets the shadowing error.
-    if (name !== "_" && scope.has(name)) { this.error(`variable '${name}' already declared in this scope`); return; }
+    if (name !== "_" && scope.has(name)) { this.error(`variable '${name}' already declared in this scope`, at); return; }
     // Shadowing an ENCLOSING binding is rejected too, not just a same-scope
     // redeclaration. Rust allows it; Milo does not, because the reader of
     // `for row in nums` a screen below `let row = 5` has no way to tell which
@@ -1196,7 +1199,7 @@ export class TypeChecker {
     if (name !== "_" && !name.startsWith("_")) {
       for (let i = this.scopes.length - 2; i >= this.fnScopeFloor; i--) {
         if (this.scopes[i].has(name)) {
-          this.error(`'${name}' shadows an outer binding — pick a different name`);
+          this.error(`'${name}' shadows an outer binding — pick a different name`, at);
           break;
         }
       }
@@ -3164,10 +3167,10 @@ export class TypeChecker {
     this.pushScope();
     if (stmt.varName2) {
       // enumerate: `for i, line in text.lines()`
-      this.declare(stmt.varName, { type: { tag: "int", bits: 64, signed: true }, mutable: false, moved: false, borrowed: false, read: false });
-      this.declare(stmt.varName2, { type: viewType, mutable: false, moved: false, borrowed: false, read: false });
+      this.declare(stmt.varName, { type: { tag: "int", bits: 64, signed: true }, mutable: false, moved: false, borrowed: false, read: false }, stmt.span);
+      this.declare(stmt.varName2, { type: viewType, mutable: false, moved: false, borrowed: false, read: false }, stmt.span);
     } else {
-      this.declare(stmt.varName, { type: viewType, mutable: false, moved: false, borrowed: false, read: false });
+      this.declare(stmt.varName, { type: viewType, mutable: false, moved: false, borrowed: false, read: false }, stmt.span);
     }
     for (const inv of stmt.invariants ?? []) this.checkContractClause(inv);
     this.loopDepth++;
@@ -3600,7 +3603,7 @@ export class TypeChecker {
           const preMoves = this.snapshotMoveState();
           this.returnOnlyMovesStack.push(new Set());
           this.pushScope();
-          this.declare(stmt.varName, { type: varType, mutable: false, moved: false, borrowed: false, read: false });
+          this.declare(stmt.varName, { type: varType, mutable: false, moved: false, borrowed: false, read: false }, stmt.span);
           for (const inv of stmt.invariants ?? []) this.checkContractClause(inv);
           this.loopDepth++;
           for (const s of stmt.body) this.checkStmt(s, fnRetType);
@@ -3641,10 +3644,10 @@ export class TypeChecker {
             if (stmt.varName2) {
               // enumerate: for i, val in vec
               const idxType: TypeKind = { tag: "int", bits: 64, signed: true };
-              this.declare(stmt.varName, { type: idxType, mutable: false, moved: false, borrowed: false, read: false });
-              this.declare(stmt.varName2, { type: elemRef, mutable: false, moved: false, borrowed: false, read: false });
+              this.declare(stmt.varName, { type: idxType, mutable: false, moved: false, borrowed: false, read: false }, stmt.span);
+              this.declare(stmt.varName2, { type: elemRef, mutable: false, moved: false, borrowed: false, read: false }, stmt.span);
             } else {
-              this.declare(stmt.varName, { type: elemRef, mutable: false, moved: false, borrowed: false, read: false });
+              this.declare(stmt.varName, { type: elemRef, mutable: false, moved: false, borrowed: false, read: false }, stmt.span);
             }
             for (const inv of stmt.invariants ?? []) this.checkContractClause(inv);
             this.loopDepth++;
@@ -3668,10 +3671,10 @@ export class TypeChecker {
             this.pushScope();
             if (stmt.varName2) {
               const idxType: TypeKind = { tag: "int", bits: 64, signed: true };
-              this.declare(stmt.varName, { type: idxType, mutable: false, moved: false, borrowed: false, read: false });
-              this.declare(stmt.varName2, { type: byteType, mutable: false, moved: false, borrowed: false, read: false });
+              this.declare(stmt.varName, { type: idxType, mutable: false, moved: false, borrowed: false, read: false }, stmt.span);
+              this.declare(stmt.varName2, { type: byteType, mutable: false, moved: false, borrowed: false, read: false }, stmt.span);
             } else {
-              this.declare(stmt.varName, { type: byteType, mutable: false, moved: false, borrowed: false, read: false });
+              this.declare(stmt.varName, { type: byteType, mutable: false, moved: false, borrowed: false, read: false }, stmt.span);
             }
             for (const inv of stmt.invariants ?? []) this.checkContractClause(inv);
             this.loopDepth++;
@@ -3699,9 +3702,9 @@ export class TypeChecker {
             const preMoves = this.snapshotMoveState();
             this.returnOnlyMovesStack.push(new Set());
             this.pushScope();
-            this.declare(stmt.varName, { type: keyRef, mutable: false, moved: false, borrowed: false, read: false });
+            this.declare(stmt.varName, { type: keyRef, mutable: false, moved: false, borrowed: false, read: false }, stmt.span);
             if (stmt.varName2) {
-              this.declare(stmt.varName2, { type: valRef, mutable: false, moved: false, borrowed: false, read: false });
+              this.declare(stmt.varName2, { type: valRef, mutable: false, moved: false, borrowed: false, read: false }, stmt.span);
             }
             for (const inv of stmt.invariants ?? []) this.checkContractClause(inv);
             this.loopDepth++;
@@ -3730,10 +3733,10 @@ export class TypeChecker {
             this.pushScope();
             if (stmt.varName2) {
               const idxType: TypeKind = { tag: "int", bits: 64, signed: true };
-              this.declare(stmt.varName, { type: idxType, mutable: false, moved: false, borrowed: false, read: false });
-              this.declare(stmt.varName2, { type: elemRef, mutable: false, moved: false, borrowed: false, read: false });
+              this.declare(stmt.varName, { type: idxType, mutable: false, moved: false, borrowed: false, read: false }, stmt.span);
+              this.declare(stmt.varName2, { type: elemRef, mutable: false, moved: false, borrowed: false, read: false }, stmt.span);
             } else {
-              this.declare(stmt.varName, { type: elemRef, mutable: false, moved: false, borrowed: false, read: false });
+              this.declare(stmt.varName, { type: elemRef, mutable: false, moved: false, borrowed: false, read: false }, stmt.span);
             }
             for (const inv of stmt.invariants ?? []) this.checkContractClause(inv);
             this.loopDepth++;
@@ -3764,7 +3767,7 @@ export class TypeChecker {
                 if (info) this.freeze(info, stmt.iterable);
               }
               this.pushScope();
-              this.declare(stmt.varName, { type: { tag: "unknown" }, mutable: false, moved: false, borrowed: false, read: false });
+              this.declare(stmt.varName, { type: { tag: "unknown" }, mutable: false, moved: false, borrowed: false, read: false }, stmt.span);
               for (const inv of stmt.invariants ?? []) this.checkContractClause(inv);
               this.loopDepth++;
               for (const s of stmt.body) this.checkStmt(s, fnRetType);
@@ -3804,7 +3807,7 @@ export class TypeChecker {
                 const preMoves = this.snapshotMoveState();
                 this.returnOnlyMovesStack.push(new Set());
                 this.pushScope();
-                this.declare(stmt.varName, { type: elemType, mutable: false, moved: false, borrowed: false, read: false });
+                this.declare(stmt.varName, { type: elemType, mutable: false, moved: false, borrowed: false, read: false }, stmt.span);
                 for (const inv of stmt.invariants ?? []) this.checkContractClause(inv);
                 this.loopDepth++;
                 for (const s of stmt.body) this.checkStmt(s, fnRetType);

@@ -370,156 +370,21 @@ export class CodegenJS {
 
   private genStmt(stmt: HIRStmt) {
     switch (stmt.kind) {
-      case "Let": {
-        // Initializer first, THEN the rename — see the note on `fnNames`.
-        const val = this.genExpr(stmt.value);
-        const js = this.bindLocal(stmt.name);
-        if (this.boxed.has(stmt.name)) {
-          // ref-taken primitive local: box it so callees mutating `&mut name` write back.
-          this.emit(`const ${js} = {v: ${val}};`);
-          break;
-        }
-        const kw = stmt.mutable ? "let" : "const";
-        this.emit(`${kw} ${js} = ${val};`);
-        break;
-      }
-      case "Assign": {
-        // A direct `v[i] = x` needs the bounds check on the store side too, and a
-        // checked store can't be an assignment target — hence the helper call.
-        const t = stmt.target;
-        if (t.kind === "IndexAccess" && t.object.type.tag !== "string" && t.object.type.tag !== "hashmap") {
-          this.emit(`__idxSet(${this.genExpr(t.object)}, ${this.genExpr(t.index)}, ${this.genExpr(stmt.value)});`);
-          break;
-        }
-        const target = this.genLValue(stmt.target);
-        const val = this.genExpr(stmt.value);
-        this.emit(`${target} = ${val};`);
-        break;
-      }
-      case "Return": {
-        const value = stmt.value ? this.genExpr(stmt.value) : "undefined";
-        // Inside a match-expression arm a plain `return` would only leave the IIFE
-        // that arm lives in. Throw a sentinel the function boundary turns back into
-        // a real return — the same trick `?` already uses.
-        if (this.inMatchExprArm > 0) {
-          this.usedMatchReturn = true;
-          this.emit(`throw {__milo_ret: [${value}]};`);
-        } else if (stmt.value) {
-          this.emit(`return ${value};`);
-        } else {
-          this.emit("return;");
-        }
-        break;
-      }
-      case "If": {
-        this.emit(`if (${this.genExpr(stmt.cond)}) {`);
-        this.indent++;
-        for (const s of stmt.thenBody) this.genStmt(s);
-        this.indent--;
-        if (stmt.elseBody && stmt.elseBody.length > 0) {
-          this.emit("} else {");
-          this.indent++;
-          for (const s of stmt.elseBody) this.genStmt(s);
-          this.indent--;
-        }
-        this.emit("}");
-        break;
-      }
-      case "While": {
-        this.emit(`while (${this.genExpr(stmt.cond)}) {`);
-        this.indent++;
-        for (const s of stmt.body) this.genStmt(s);
-        this.indent--;
-        this.emit("}");
-        break;
-      }
-      case "Break": {
-        this.emit("break;");
-        break;
-      }
-      case "Continue": {
-        this.emit("continue;");
-        break;
-      }
-      case "ExprStmt": {
-        const val = this.genExpr(stmt.expr);
-        this.emit(`${val};`);
-        break;
-      }
-      case "Match": {
-        this.genMatch(stmt);
-        break;
-      }
-      case "ForRange": {
-        // Both bounds are evaluated once, before the loop, exactly as native does —
-        // inlining `end` into the JS condition re-evaluates it every iteration, so a
-        // body that mutates it (or merely calls something costly) diverges.
-        const start = this.nextTemp();
-        const end = this.nextTemp();
-        this.emit(`const ${start} = ${this.genExpr(stmt.start)};`);
-        this.emit(`const ${end} = ${this.genExpr(stmt.end)};`);
-        this.emit(`for (let ${stmt.varName} = ${start}; ${stmt.varName} < ${end}; ${stmt.varName}++) {`);
-        this.indent++;
-        for (const s of stmt.body) this.genStmt(s);
-        this.indent--;
-        this.emit("}");
-        break;
-      }
-      case "ForEach": {
-        const iter = this.genExpr(stmt.iterable);
-        if (stmt.iterableKind === "hashmap") {
-          const k = stmt.varName;
-          const v = stmt.varName2 ?? "_";
-          this.emit(`for (const [${k}, ${v}] of ${iter}) {`);
-        } else if (stmt.iterableKind === "string") {
-          // milo iterates a string by UTF-8 byte (u8); JS `of` yields code points.
-          const sv = this.nextTemp();
-          const ix = this.nextTemp();
-          this.emit(`const ${sv} = ${iter};`);
-          this.emit(`for (let ${ix} = 0; ${ix} < ${sv}.length; ${ix}++) {`);
-          this.indent++;
-          this.emit(`const ${stmt.varName} = ${sv}.charCodeAt(${ix});`);
-          for (const s of stmt.body) this.genStmt(s);
-          this.indent--;
-          this.emit("}");
-          break;
-        } else if (stmt.varName2) {
-          // `for i, x in v` over a Vec/array binds (index, value) — dropping the second
-          // binding here emitted a loop whose body referenced an undeclared variable, so
-          // the JS died at runtime instead of the backend refusing up front.
-          this.emit(`for (const [${stmt.varName}, ${stmt.varName2}] of ${iter}.entries()) {`);
-        } else {
-          this.emit(`for (const ${stmt.varName} of ${iter}) {`);
-        }
-        this.indent++;
-        for (const s of stmt.body) this.genStmt(s);
-        this.indent--;
-        this.emit("}");
-        break;
-      }
-      case "ForStrView": {
-        // No views in JS — the pieces are substrings. Same sequence, same emptiness rules;
-        // only the zero-copy part is lost, which JS strings cannot express anyway.
-        const sv = this.nextTemp();
-        const parts = this.nextTemp();
-        this.emit(`const ${sv} = ${this.genExpr(stmt.src)};`);
-        if (stmt.mode === "lines") {
-          this.emit(`const ${parts} = ${sv}.length === 0 ? [] : ${sv}.replace(/\\n$/, "").split("\\n").map(l => l.endsWith("\\r") ? l.slice(0, -1) : l);`);
-        } else {
-          this.emit(`const ${parts} = ${sv}.split(${this.genExpr(stmt.sep!)});`);
-        }
-        if (stmt.varName2) this.emit(`for (const [${stmt.varName}, ${stmt.varName2}] of ${parts}.entries()) {`);
-        else this.emit(`for (const ${stmt.varName} of ${parts}) {`);
-        this.indent++;
-        for (const s of stmt.body) this.genStmt(s);
-        this.indent--;
-        this.emit("}");
-        break;
-      }
-      case "UnsafeBlock": {
-        for (const s of stmt.body) this.genStmt(s);
-        break;
-      }
+      case "Let":         return this.genLet(stmt);
+      case "Assign":      return this.genAssign(stmt);
+      case "Return":      return this.genReturn(stmt);
+      case "If":          return this.genIf(stmt);
+      case "While":       return this.genWhile(stmt);
+      case "Break":       return this.emit("break;");
+      case "Continue":    return this.emit("continue;");
+      case "ExprStmt":    return this.emit(`${this.genExpr(stmt.expr)};`);
+      case "Match":       return this.genMatch(stmt);
+      case "ForRange":    return this.genForRange(stmt);
+      case "ForEach":     return this.genForEach(stmt);
+      case "ForStrView":  return this.genForStrView(stmt);
+      case "ForIterator": return this.genForIterator(stmt);
+      // No `unsafe` in JS — there are no raw pointers to guard. The block is its body.
+      case "UnsafeBlock": return this.genStmts(stmt.body);
       default:
         // `genExpr` next door already fails loudly on an unhandled kind; this one returns
         // void, so TypeScript enforces nothing and an unhandled statement was simply not
@@ -527,6 +392,143 @@ export class CodegenJS {
         // has to surface at compile time, not as a missing side effect at runtime.
         throw new Error(`codegen-js: unhandled HIR statement kind '${(stmt as { kind: string }).kind}'`);
     }
+  }
+
+  private genStmts(body: HIRStmt[]) {
+    for (const s of body) this.genStmt(s);
+  }
+
+  // Body of an already-open brace: indent, emit, close. Every block statement ends this
+  // way, and hand-rolling it per arm is how an indent++ loses its indent--.
+  private genBlockBody(body: HIRStmt[]) {
+    this.indent++;
+    this.genStmts(body);
+    this.indent--;
+    this.emit("}");
+  }
+
+  private genLet(stmt: HIRStmt & { kind: "Let" }) {
+    // Initializer first, THEN the rename — see the note on `fnNames`.
+    const val = this.genExpr(stmt.value);
+    const js = this.bindLocal(stmt.name);
+    // ref-taken primitive local: box it so callees mutating `&mut name` write back.
+    if (this.boxed.has(stmt.name)) return this.emit(`const ${js} = {v: ${val}};`);
+    this.emit(`${stmt.mutable ? "let" : "const"} ${js} = ${val};`);
+  }
+
+  private genAssign(stmt: HIRStmt & { kind: "Assign" }) {
+    // A direct `v[i] = x` needs the bounds check on the store side too, and a
+    // checked store can't be an assignment target — hence the helper call.
+    const t = stmt.target;
+    if (t.kind === "IndexAccess" && t.object.type.tag !== "string" && t.object.type.tag !== "hashmap") {
+      return this.emit(`__idxSet(${this.genExpr(t.object)}, ${this.genExpr(t.index)}, ${this.genExpr(stmt.value)});`);
+    }
+    const target = this.genLValue(stmt.target);
+    this.emit(`${target} = ${this.genExpr(stmt.value)};`);
+  }
+
+  private genReturn(stmt: HIRStmt & { kind: "Return" }) {
+    const value = stmt.value ? this.genExpr(stmt.value) : "undefined";
+    // Inside a match-expression arm a plain `return` would only leave the IIFE
+    // that arm lives in. Throw a sentinel the function boundary turns back into
+    // a real return — the same trick `?` already uses.
+    if (this.inMatchExprArm > 0) {
+      this.usedMatchReturn = true;
+      this.emit(`throw {__milo_ret: [${value}]};`);
+    } else if (stmt.value) {
+      this.emit(`return ${value};`);
+    } else {
+      this.emit("return;");
+    }
+  }
+
+  private genIf(stmt: HIRStmt & { kind: "If" }) {
+    this.emit(`if (${this.genExpr(stmt.cond)}) {`);
+    this.indent++;
+    this.genStmts(stmt.thenBody);
+    this.indent--;
+    if (stmt.elseBody && stmt.elseBody.length > 0) {
+      this.emit("} else {");
+      this.genBlockBody(stmt.elseBody);
+      return;
+    }
+    this.emit("}");
+  }
+
+  private genWhile(stmt: HIRStmt & { kind: "While" }) {
+    this.emit(`while (${this.genExpr(stmt.cond)}) {`);
+    this.genBlockBody(stmt.body);
+  }
+
+  private genForRange(stmt: HIRStmt & { kind: "ForRange" }) {
+    // Both bounds are evaluated once, before the loop, exactly as native does —
+    // inlining `end` into the JS condition re-evaluates it every iteration, so a
+    // body that mutates it (or merely calls something costly) diverges.
+    const start = this.nextTemp();
+    const end = this.nextTemp();
+    this.emit(`const ${start} = ${this.genExpr(stmt.start)};`);
+    this.emit(`const ${end} = ${this.genExpr(stmt.end)};`);
+    this.emit(`for (let ${stmt.varName} = ${start}; ${stmt.varName} < ${end}; ${stmt.varName}++) {`);
+    this.genBlockBody(stmt.body);
+  }
+
+  private genForEach(stmt: HIRStmt & { kind: "ForEach" }) {
+    const iter = this.genExpr(stmt.iterable);
+    if (stmt.iterableKind === "hashmap") {
+      this.emit(`for (const [${stmt.varName}, ${stmt.varName2 ?? "_"}] of ${iter}) {`);
+    } else if (stmt.iterableKind === "string") {
+      // milo iterates a string by UTF-8 byte (u8); JS `of` yields code points.
+      const sv = this.nextTemp();
+      const ix = this.nextTemp();
+      this.emit(`const ${sv} = ${iter};`);
+      this.emit(`for (let ${ix} = 0; ${ix} < ${sv}.length; ${ix}++) {`);
+      this.indent++;
+      this.emit(`const ${stmt.varName} = ${sv}.charCodeAt(${ix});`);
+      this.indent--;
+      this.genBlockBody(stmt.body);
+      return;
+    } else if (stmt.varName2) {
+      // `for i, x in v` over a Vec/array binds (index, value) — dropping the second
+      // binding here emitted a loop whose body referenced an undeclared variable, so
+      // the JS died at runtime instead of the backend refusing up front.
+      this.emit(`for (const [${stmt.varName}, ${stmt.varName2}] of ${iter}.entries()) {`);
+    } else {
+      this.emit(`for (const ${stmt.varName} of ${iter}) {`);
+    }
+    this.genBlockBody(stmt.body);
+  }
+
+  private genForStrView(stmt: HIRStmt & { kind: "ForStrView" }) {
+    // No views in JS — the pieces are substrings. Same sequence, same emptiness rules;
+    // only the zero-copy part is lost, which JS strings cannot express anyway.
+    const sv = this.nextTemp();
+    const parts = this.nextTemp();
+    this.emit(`const ${sv} = ${this.genExpr(stmt.src)};`);
+    if (stmt.mode === "lines") {
+      this.emit(`const ${parts} = ${sv}.length === 0 ? [] : ${sv}.replace(/\\n$/, "").split("\\n").map(l => l.endsWith("\\r") ? l.slice(0, -1) : l);`);
+    } else {
+      this.emit(`const ${parts} = ${sv}.split(${this.genExpr(stmt.sep!)});`);
+    }
+    if (stmt.varName2) this.emit(`for (const [${stmt.varName}, ${stmt.varName2}] of ${parts}.entries()) {`);
+    else this.emit(`for (const ${stmt.varName} of ${parts}) {`);
+    this.genBlockBody(stmt.body);
+  }
+
+  private genForIterator(stmt: HIRStmt & { kind: "ForIterator" }) {
+    // User iterator protocol: call next(&mut it) until it answers None. The iterable is
+    // bound once — next() mutates it in place, and JS objects are references, so an
+    // lvalue iterable advances exactly as native's does.
+    const it = this.nextTemp();
+    const res = this.nextTemp();
+    const noneTag = this.enumVariants.get(stmt.optionEnumName)?.find(v => v.name === "None")?.tag ?? 1;
+    this.emit(`const ${it} = ${this.genExpr(stmt.iterable)};`);
+    this.emit("for (;;) {");
+    this.indent++;
+    this.emit(`const ${res} = ${stmt.nextMethod}(${it});`);
+    this.emit(`if (${res}.tag === ${noneTag}) break;`);
+    this.emit(`const ${stmt.varName} = ${res}.data[0];`);
+    this.indent--;
+    this.genBlockBody(stmt.body);
   }
 
   // `resultVar` turns the arms into value producers: all but the tail statement run

@@ -33,7 +33,7 @@ function indexedAccessErrors(): number {
     return 0; // clean — time to flip the flag on in tsconfig.json and delete this test
   } catch (e: any) {
     const out = (e.stdout ?? "") + (e.stderr ?? "");
-    return out.split("\n").filter(l => /^src\/.*error TS/.test(l)).length;
+    return out.split("\n").filter((l: string) => /^src\/.*error TS/.test(l)).length;
   }
 }
 

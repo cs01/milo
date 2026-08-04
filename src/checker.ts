@@ -2686,6 +2686,11 @@ export class TypeChecker {
             for (const a of n.args as Expr[]) check(a, bound, "collection");
           }
           break;
+        default:
+          // Deliberately partial, and safe because of the line below: this switch only
+          // ADDS knowledge for the few node kinds that can store a closure. Every other
+          // kind is still descended into structurally, so nothing is skipped.
+          break;
       }
       for (const k of Object.keys(n)) { if (k !== "span" && k !== "type") visit(n[k], bound); }
     };
@@ -5800,6 +5805,11 @@ export class TypeChecker {
       case "MatchExpr":
         return this.checkMatchExprExpr(expr);
     }
+    // A missing arm here is a SILENT skip: the walker simply does not descend, and every
+    // analysis built on it stops seeing that subtree with no error to say so. Binding the
+    // scrutinee to `never` makes the next unhandled expression kind a compile error.
+    const _exhaustive: never = expr;
+    throw new Error(`checkExpr: unhandled expression kind '${(_exhaustive as { kind: string }).kind}'`);
   }
 
   private checkIdentExpr(expr: ExprOf<"Ident">): TypeKind {

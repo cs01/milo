@@ -1403,6 +1403,11 @@ class LowerCtx {
         };
       }
     }
+    // A missing arm here is a SILENT skip: the walker simply does not descend, and every
+    // analysis built on it stops seeing that subtree with no error to say so. Binding the
+    // scrutinee to `never` makes the next unhandled expression kind a compile error.
+    const _exhaustive: never = expr;
+    throw new Error(`lowerExprRaw: unhandled expression kind '${(_exhaustive as { kind: string }).kind}'`);
   }
 
   private typeOf(expr: Expr): TypeKind | undefined {

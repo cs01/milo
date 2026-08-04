@@ -170,6 +170,17 @@ export function manglePackage(
           sc.popValue();
         }
         break;
+      // Leaves: nothing inside to visit. Listed rather than left to fall through so
+      // the guard below can be exhaustive.
+      case "IntLit": case "FloatLit": case "BoolLit": case "StringLit": case "CharLit":
+        break;
+      default: {
+        // A missing arm is a SILENT skip: the walker does not descend, and everything
+        // built on it stops seeing that subtree with no error to say so. This makes the
+        // next unhandled expression kind a compile error.
+        const _exhaustive: never = e;
+        void _exhaustive;
+      }
     }
   };
 

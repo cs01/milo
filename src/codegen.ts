@@ -2075,6 +2075,11 @@ export class Codegen {
       case "ForStrView":
         return this.genForStrView(stmt);
     }
+    // Every arm above returns, so this is unreachable — and that is the point: it is
+    // what makes a newly-added HIR kind a compile error here rather than a value that
+    // quietly never gets generated.
+    const _exhaustive: never = stmt;
+    throw new Error(`genStmtRaw: unhandled HIR kind '${(_exhaustive as { kind: string }).kind}'`);
   }
 
   public genLValue(expr: HIRExpr): [string[], string, string] {
@@ -4719,6 +4724,11 @@ export class Codegen {
       case "InterfaceMethodCall":
         return this.genInterfaceMethodCall(expr, lines);
     }
+    // Every arm above returns, so this is unreachable — and that is the point: it is
+    // what makes a newly-added HIR kind a compile error here rather than a value that
+    // quietly never gets generated.
+    const _exhaustive: never = expr;
+    throw new Error(`genExpr: unhandled HIR kind '${(_exhaustive as { kind: string }).kind}'`);
   }
 
   private genStringWithCapacity(expr: HIRExpr & { kind: "StringWithCapacity" }, lines: string[]): [string[], string, string] {

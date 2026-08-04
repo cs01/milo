@@ -520,6 +520,12 @@ export class CodegenJS {
         for (const s of stmt.body) this.genStmt(s);
         break;
       }
+      default:
+        // `genExpr` next door already fails loudly on an unhandled kind; this one returns
+        // void, so TypeScript enforces nothing and an unhandled statement was simply not
+        // emitted — the JS ran and quietly did less than the program said. A backend gap
+        // has to surface at compile time, not as a missing side effect at runtime.
+        throw new Error(`codegen-js: unhandled HIR statement kind '${(stmt as { kind: string }).kind}'`);
     }
   }
 

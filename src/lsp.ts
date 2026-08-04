@@ -1969,6 +1969,17 @@ function visitExpr(e: Expr, cb: (e: Expr) => void) {
       visitExpr(e.subject, cb);
       for (const arm of e.arms) for (const s of arm.body) visitStmtExprs(s, cb);
       break;
+    // Leaves: nothing inside to visit. Listed rather than left to fall through so
+    // the guard below can be exhaustive.
+    case "IntLit": case "FloatLit": case "BoolLit": case "StringLit": case "CharLit": case "Ident":
+      break;
+    default: {
+      // A missing arm is a SILENT skip: the walker does not descend, and everything
+      // built on it stops seeing that subtree with no error to say so. This makes the
+      // next unhandled expression kind a compile error.
+      const _exhaustive: never = e;
+      void _exhaustive;
+    }
   }
 }
 

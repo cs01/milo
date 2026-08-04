@@ -372,13 +372,11 @@ pub extern fn proc_pidpath(pid: i32, buf: *u8, bufsize: u32): i32
 
 // Absolute path of the running executable into `buf`. Returns bytes written, or -1.
 pub fn exePathInto(buf: *u8, bufsize: i64): i64 {
-    unsafe {
-        let n = proc_pidpath(getpid(), buf, bufsize as u32)
-        if n <= 0 {
-            return -1
-        }
-        return n as i64
+    let n = proc_pidpath(getpid(), buf, bufsize as u32)
+    if n <= 0 {
+        return -1
     }
+    return n as i64
 }
 
 // ── environment ──
@@ -399,16 +397,12 @@ pub extern fn _NSGetEnviron(): ***u8
 
 // Set `name` to `value`, replacing any existing value. 0 on success.
 pub fn envSet(name: *u8, value: *u8): i32 {
-    unsafe {
-        return setenv(name, value, 1)
-    }
+    return setenv(name, value, 1)
 }
 
 // Remove `name` from the environment. 0 on success; removing an unset name succeeds.
 pub fn envUnset(name: *u8): i32 {
-    unsafe {
-        return unsetenv(name)
-    }
+    return unsetenv(name)
 }
 
 // The live NULL-terminated `NAME=VALUE` array, reflecting every setenv/unsetenv so far.

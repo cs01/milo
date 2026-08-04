@@ -227,9 +227,7 @@ pub fn musicTick(s: &Sound) {
         return
     }
     var queued: u32 = 0
-    unsafe {
-        queued = SDL_GetQueuedAudioSize(s.musicDev)
-    }
+    queued = SDL_GetQueuedAudioSize(s.musicDev)
     // two seconds of stereo-free 16-bit mono is RATE*2 bytes per second
     if (queued as i64) > RATE * 2 {
         return
@@ -242,9 +240,7 @@ pub fn musicTick(s: &Sound) {
 pub fn musicToggle(s: &mut Sound) {
     s.musicOn = !s.musicOn
     if !s.musicOn {
-        unsafe {
-            SDL_ClearQueuedAudio(s.musicDev)
-        }
+        SDL_ClearQueuedAudio(s.musicDev)
     }
 }
 
@@ -276,9 +272,7 @@ pub fn playMiss(s: &Sound) {
 pub fn playBoost(s: &Sound) {
     // Don't stack rushes if the key is held through a lockout and back.
     var queued: u32 = 0
-    unsafe {
-        queued = SDL_GetQueuedAudioSize(s.dev)
-    }
+    queued = SDL_GetQueuedAudioSize(s.dev)
     if queued > 40000 {
         return
     }

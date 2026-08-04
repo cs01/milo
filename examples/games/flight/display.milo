@@ -185,9 +185,7 @@ pub fn screenBegin(s: &mut Screen): Size {
 pub fn screenPresent(s: &mut Screen, c: &mut Canvas, v: &View, sc: &Scene, cov: &CoverGrid, cover: &Vec<f32>, coverDirty: bool, hasSea: bool, time: f64, bloomGain: f64, exposure: f64) {
     let d = drawableOf(s.win)
     postFinish(s.post, c, v, sc, cov, cover, coverDirty, hasSea, time, bloomGain, exposure, d.w, d.h)
-    unsafe {
-        SDL_GL_SwapWindow(s.win)
-    }
+    SDL_GL_SwapWindow(s.win)
     canvasClear(c)
 }
 
@@ -196,12 +194,10 @@ pub fn screenPresent(s: &mut Screen, c: &mut Canvas, v: &View, sc: &Scene, cov: 
 // GlContext`. Call sites pass `scr.gl` directly, which is the same borrow without
 // the function in the middle.
 pub fn screenFullscreen(s: &Screen, on: bool) {
-    unsafe {
-        if on {
-            let _ = SDL_SetWindowFullscreen(s.win, SDL_WINDOW_FULLSCREEN_DESKTOP)
-        } else {
-            let _ = SDL_SetWindowFullscreen(s.win, 0)
-        }
+    if on {
+        let _ = SDL_SetWindowFullscreen(s.win, SDL_WINDOW_FULLSCREEN_DESKTOP)
+    } else {
+        let _ = SDL_SetWindowFullscreen(s.win, 0)
     }
 }
 
@@ -226,8 +222,6 @@ pub fn screenClose(s: Screen) {
     // Anything the game forgot goes here, before the context it belongs to is
     // destroyed two lines down.
     own.gl.free()
-    unsafe {
-        SDL_GL_DeleteContext(own.ctx)
-        SDL_DestroyWindow(own.win)
-    }
+    SDL_GL_DeleteContext(own.ctx)
+    SDL_DestroyWindow(own.win)
 }

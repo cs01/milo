@@ -271,9 +271,7 @@ pub fn musicTick(s: &Sound) {
         return
     }
     var queued: u32 = 0
-    unsafe {
-        queued = SDL_GetQueuedAudioSize(s.musicDev)
-    }
+    queued = SDL_GetQueuedAudioSize(s.musicDev)
     if (queued as i64) > RATE * 2 {
         return
     }
@@ -285,9 +283,7 @@ pub fn musicTick(s: &Sound) {
 pub fn musicToggle(s: &mut Sound) {
     s.musicOn = !s.musicOn
     if !s.musicOn {
-        unsafe {
-            SDL_ClearQueuedAudio(s.musicDev)
-        }
+        SDL_ClearQueuedAudio(s.musicDev)
     }
 }
 
@@ -298,9 +294,7 @@ fn play(s: &Sound, buf: &Vec<i16>) {
     // Effects queue rather than mix, so a backlog would drift out of sync with
     // what is on screen. Past a threshold, drop the sound instead.
     var queued: u32 = 0
-    unsafe {
-        queued = SDL_GetQueuedAudioSize(s.dev)
-    }
+    queued = SDL_GetQueuedAudioSize(s.dev)
     if (queued as i64) > 26000 {
         return
     }

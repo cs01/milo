@@ -712,9 +712,7 @@ fn strParseF64(s: &string): Option<f64> {
     // its own length, so the copy is what bounds the read.
     let owned = s.substr(0, s.len)
     var v: f64 = 0.0
-    unsafe {
-        v = atof(owned.cstr())
-    }
+    v = atof(owned.cstr())
     return Option.Some(v)
 }
 

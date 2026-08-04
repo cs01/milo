@@ -29,13 +29,11 @@ pub fn readFrame(fd: i32): Result<string> {
 // than retried, preserving that all-or-nothing framing.
 pub fn writeFrameFd(fd: i32, payload: &string): i64 {
     let msg = $"Content-Length: {payload.len}\r\n\r\n" + payload
-    unsafe {
-        let n = write(fd, msg, msg.len)
-        if n < msg.len as i64 {
-            return (-1 as i64)
-        }
-        return n
+    let n = write(fd, msg, msg.len)
+    if n < msg.len as i64 {
+        return (-1 as i64)
     }
+    return n
 }
 
 // Read the frame header, returning the declared Content-Length or -1 on EOF.

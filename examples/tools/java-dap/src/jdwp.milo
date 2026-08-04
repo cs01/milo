@@ -423,13 +423,11 @@ pub fn jdwpAttach(host: &string, port: u16, eventCh: Channel<Packet>): Result<Jd
 }
 
 pub fn writeAllFd(fd: i32, data: &string): Result<i64> {
-    unsafe {
-        let n = write(fd, data, data.len)
-        if n < data.len as i64 {
-            return Result.Err("short write to JVM socket")
-        }
-        return Result.Ok(n)
+    let n = write(fd, data, data.len)
+    if n < data.len as i64 {
+        return Result.Err("short write to JVM socket")
     }
+    return Result.Ok(n)
 }
 
 impl JdwpIo {

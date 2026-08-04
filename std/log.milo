@@ -142,9 +142,7 @@ fn logWriteLine(line: &string): void {
     // print/eprint go through stdio's buffer; this goes straight at the fd. Drain
     // first or a log line redirected to stdout lands before output already
     // written. fflush on an empty buffer is not a syscall.
-    unsafe {
-        fflush(0 as *u8)
-    }
+    fflush(0 as *u8)
     writeFd(gSinkFd, line, line.len)
 }
 

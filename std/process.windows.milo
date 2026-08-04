@@ -120,18 +120,16 @@ fn stdHandleId(stream: i32): u32 {
 
 // Execute a shell command and return its exit code.
 pub fn run(cmd: &string): Result<i32> {
-    unsafe {
-        // system() reads a C string; a milo string is not guaranteed NUL-terminated.
-        let buf = cstrCopy(cmd)
-        let status = system(buf)
-        free(buf)
-        if status < 0 {
-            return Result.Err("system() failed")
-        }
-        // Windows system() returns the command's exit code directly — no wait()-status
-        // bit-packing to unwrap the way POSIX needs.
-        return Result.Ok(status)
+    // system() reads a C string; a milo string is not guaranteed NUL-terminated.
+    let buf = cstrCopy(cmd)
+    let status = system(buf)
+    free(buf)
+    if status < 0 {
+        return Result.Err("system() failed")
     }
+    // Windows system() returns the command's exit code directly — no wait()-status
+    // bit-packing to unwrap the way POSIX needs.
+    return Result.Ok(status)
 }
 
 // ── Process with lifecycle management ──
@@ -147,9 +145,7 @@ pub struct Process {
 impl Process {
     fn spawn(path: &string): Result<Process> {
         var args: Vec<string> = Vec.new()
-        unsafe {
-            return createProcess(path, args, -1, -1, -1, false, 0 as *u8, 0 as *u8)
-        }
+        return createProcess(path, args, -1, -1, -1, false, 0 as *u8, 0 as *u8)
     }
 
     fn wait(self: &Self): Result<i32> {
@@ -352,9 +348,7 @@ fn createProcess(program: &string, args: &Vec<string>, childIn: i32, childOut: i
 }
 
 fn makeInheritable(fd: i32): void {
-    unsafe {
-        SetHandleInformation(_get_osfhandle(fd), handleFlagInherit(), handleFlagInherit())
-    }
+    SetHandleInformation(_get_osfhandle(fd), handleFlagInherit(), handleFlagInherit())
 }
 
 // ── Command ──
@@ -601,109 +595,107 @@ fn closeStreamFds(fds: &StreamFds): void {
 }
 
 fn commandSpawn(cmd: &Command): Result<Child> {
-    unsafe {
-        let inFds = match openStdio(cmd.inMode, false, "stdin") {
+    let inFds = match openStdio(cmd.inMode, false, "stdin") {
+        Result.Ok(f) => {
+            f
+        }
+        Result.Err(e) => {
+            return Result.Err(e)
+        }
+    }
+    let outFds = match openStdio(cmd.outMode, true, "stdout") {
+        Result.Ok(f) => {
+            f
+        }
+        Result.Err(e) => {
+            closeStreamFds(inFds)
+            return Result.Err(e)
+        }
+    }
+    var mergeErr = false
+    match cmd.errMode {
+        Stdio.Merge => {
+            mergeErr = true
+        }
+        _ => {
+        }
+    }
+    var errFds = noStreamFds()
+    if !mergeErr {
+        match openStdio(cmd.errMode, true, "stderr") {
             Result.Ok(f) => {
-                f
-            }
-            Result.Err(e) => {
-                return Result.Err(e)
-            }
-        }
-        let outFds = match openStdio(cmd.outMode, true, "stdout") {
-            Result.Ok(f) => {
-                f
-            }
-            Result.Err(e) => {
-                closeStreamFds(inFds)
-                return Result.Err(e)
-            }
-        }
-        var mergeErr = false
-        match cmd.errMode {
-            Stdio.Merge => {
-                mergeErr = true
-            }
-            _ => {
-            }
-        }
-        var errFds = noStreamFds()
-        if !mergeErr {
-            match openStdio(cmd.errMode, true, "stderr") {
-                Result.Ok(f) => {
-                    errFds = f
-                }
-                Result.Err(e) => {
-                    closeStreamFds(inFds)
-                    closeStreamFds(outFds)
-                    return Result.Err(e)
-                }
-            }
-        }
-
-        let envBlock = match buildEnvBlock(cmd) {
-            Result.Ok(p) => {
-                p
+                errFds = f
             }
             Result.Err(e) => {
                 closeStreamFds(inFds)
                 closeStreamFds(outFds)
-                closeStreamFds(errFds)
                 return Result.Err(e)
             }
         }
-        let curDir = if cmd.workDir.len > 0 {
-            cstrCopy(cmd.workDir)
-        } else {
-            0 as *u8
-        }
-        let childErr = if mergeErr {
-            outFds.child
-        } else {
-            errFds.child
-        }
-        let res = createProcess(cmd.program, cmd.argv, inFds.child, outFds.child, childErr, mergeErr, envBlock, curDir)
-        if envBlock as i64 != 0 {
-            free(envBlock)
-        }
-        if curDir as i64 != 0 {
-            free(curDir)
-        }
+    }
 
-        // The parent no longer needs the child-side ends regardless of outcome.
-        if inFds.child >= 0 {
-            close(inFds.child)
+    let envBlock = match buildEnvBlock(cmd) {
+        Result.Ok(p) => {
+            p
         }
-        if outFds.child >= 0 {
-            close(outFds.child)
+        Result.Err(e) => {
+            closeStreamFds(inFds)
+            closeStreamFds(outFds)
+            closeStreamFds(errFds)
+            return Result.Err(e)
         }
-        if errFds.child >= 0 {
-            close(errFds.child)
-        }
+    }
+    let curDir = if cmd.workDir.len > 0 {
+        cstrCopy(cmd.workDir)
+    } else {
+        0 as *u8
+    }
+    let childErr = if mergeErr {
+        outFds.child
+    } else {
+        errFds.child
+    }
+    let res = createProcess(cmd.program, cmd.argv, inFds.child, outFds.child, childErr, mergeErr, envBlock, curDir)
+    if envBlock as i64 != 0 {
+        free(envBlock)
+    }
+    if curDir as i64 != 0 {
+        free(curDir)
+    }
 
-        match res {
-            Result.Err(msg) => {
-                if inFds.parent >= 0 {
-                    close(inFds.parent)
-                }
-                if outFds.parent >= 0 {
-                    close(outFds.parent)
-                }
-                if errFds.parent >= 0 {
-                    close(errFds.parent)
-                }
-                return Result.Err(msg)
+    // The parent no longer needs the child-side ends regardless of outcome.
+    if inFds.child >= 0 {
+        close(inFds.child)
+    }
+    if outFds.child >= 0 {
+        close(outFds.child)
+    }
+    if errFds.child >= 0 {
+        close(errFds.child)
+    }
+
+    match res {
+        Result.Err(msg) => {
+            if inFds.parent >= 0 {
+                close(inFds.parent)
             }
-            Result.Ok(proc) => {
-                return Result.Ok(Child {
-                    pid: proc.pid,
-                    handle: proc.handle,
-                    stdinFd: inFds.parent,
-                    stdoutFd: outFds.parent,
-                    stderrFd: errFds.parent,
-                }
-                )
+            if outFds.parent >= 0 {
+                close(outFds.parent)
             }
+            if errFds.parent >= 0 {
+                close(errFds.parent)
+            }
+            return Result.Err(msg)
+        }
+        Result.Ok(proc) => {
+            return Result.Ok(Child {
+                pid: proc.pid,
+                handle: proc.handle,
+                stdinFd: inFds.parent,
+                stdoutFd: outFds.parent,
+                stderrFd: errFds.parent,
+            }
+            )
         }
     }
 }

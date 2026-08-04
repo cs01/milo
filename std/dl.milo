@@ -112,8 +112,6 @@ impl Lib {
     // still-running thread the library started keeps running — closing does not
     // stop it.
     fn close(self: &Lib): bool {
-        unsafe {
-            return dlclose(self.handle) == 0
-        }
+        return dlclose(self.handle) == 0
     }
 }

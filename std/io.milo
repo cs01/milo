@@ -118,9 +118,7 @@ pub trait Writer {
 // buffer first or the two interleave in the wrong order. fflush on an already-empty
 // buffer is not a syscall, so a program that only ever uses this pays nothing.
 pub fn writeStdout(s: &string): void {
-    unsafe {
-        fflush(0 as *u8)
-    }
+    fflush(0 as *u8)
     writeFd(1, s, s.len)
 }
 

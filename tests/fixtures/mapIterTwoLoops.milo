@@ -1,0 +1,49 @@
+// Two `for k, v in map` loops in one function used to make the second loop's
+// value binding read an unwritten slot — codegen stored through a hardcoded
+// `%<name>.addr` while reads went to the uniqued `%<name>.N.addr`.
+// Sums, not per-entry prints: iteration order is unspecified.
+
+fn main() {
+    var a: HashMap<i64, i64> = HashMap.new()
+    a.insert(1, 100)
+    a.insert(2, 200)
+
+    var sumA: i64 = 0
+    for k, v in a {
+        sumA = sumA + k * 1000 + v
+    }
+    print("a=", sumA)
+
+    var b: HashMap<i64, i64> = HashMap.new()
+    b.insert(3, 300)
+    b.insert(4, 400)
+
+    var sumB: i64 = 0
+    for k, v in b {
+        sumB = sumB + k * 1000 + v
+    }
+    print("b=", sumB)
+
+    // A third loop, and one over a differently-typed map, to be sure the fix
+    // isn't just "the second one now works".
+    var c: HashMap<string, i32> = HashMap.new()
+    c.insert("x", 7)
+    c.insert("y", 9)
+
+    var sumC: i64 = 0
+    for k, v in c {
+        sumC = sumC + v as i64 + k.len()
+    }
+    print("c=", sumC)
+
+    var sumD: i64 = 0
+    for k, v in a {
+        sumD = sumD + k * 1000 + v
+    }
+    print("d=", sumD)
+}
+
+// @expect: a=3300
+// @expect: b=7700
+// @expect: c=18
+// @expect: d=3300

@@ -1363,6 +1363,34 @@ let v = m.getOrDefault("hello", 0)  // returns i32 directly (0 if missing)
 m.remove("hello")
 ```
 
+### Iteration
+
+`for` over a map yields keys; the two-binding form yields key and value together:
+
+```milo
+for k in m {
+    print(k)
+}
+
+for k, v in m {
+    print(k, " -> ", v)
+}
+```
+
+Both bindings are **by reference**, like every other `for-in` — no copy is made, and
+neither is assignable inside the loop body.
+
+**Iteration order is unspecified, and deliberately varies run to run.** It follows the
+table's internal bucket layout, and the hash is seeded from the OS entropy source once per
+process — so the same program over the same keys enumerates in a different order on every
+run. That is a HashDoS defense, not an accident: an attacker who picks your keys cannot
+force every one of them into the same bucket. Consequences:
+
+- Do not print a map entry-by-entry and compare the output — a test written that way passes
+  locally and fails in CI. Accumulate into a sum, or collect into a `Vec` and sort first.
+- Do not persist or transmit anything derived from the order or from a hash value.
+- Do not mutate the map while iterating it.
+
 ### Keys
 
 A key type must be **hashable**: an integer, `bool`, `string`, or a **struct all of whose fields are hashable** (recursively). Struct keys are hashed and compared *structurally* — field by field — so newtypes and small value types work as keys with no boilerplate:

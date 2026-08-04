@@ -168,8 +168,13 @@ Ranked by how often real programs hit them.
   `retain`, and `clear()`** — `Vec` has `clear`, `HashMap` does not. Ref:
   `src/suggest.ts HASHMAP_MEMBERS`.
 
-- [ ] **`for k, v in map` works but is undocumented.** Probed working; absent from
-  `docs/language-reference.md` §HashMap.
+- [x] **`for k, v in map` works but is undocumented.** *Documented in
+  `docs/language-reference.md` §HashMap (new "Iteration" subsection). Probing it turned up a
+  real codegen bug, now fixed: a **second** `for k, v in map` in the same function bound `v` to
+  the key — the value store went through a hardcoded `%<name>.addr` while reads resolved to the
+  uniqued `%<name>.N.addr`. Silent wrong values, no diagnostic. Fixture `mapIterTwoLoops.milo`.
+  Also documented that iteration order is deliberately unstable run-to-run (per-process
+  `getentropy` hash seed, HashDoS defense) — an entry-by-entry test of a map is a CI flake.*
 
 - [ ] **`Vec` gaps:** `extend`/`append`, `dedup`, `retain` (in place — `filter` allocates),
   `first`/`last`, `min`/`max` (**`sum` exists**, which makes the omission an asymmetry rather

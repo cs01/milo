@@ -3187,8 +3187,9 @@ export class Codegen {
       this.entryAllocas.push(`  ${keyVarAddr} = alloca ptr`);
       const savedLoopLocals = [this.bindLoopLocal(stmt.varName, { type: keyTy, typeKind: stmt.varType, mutable: false, isRef: true, addr: keyVarAddr })];
 
+      let valVarAddr = "";
       if (stmt.varName2 && stmt.varType2) {
-        const valVarAddr = this.allocaName(stmt.varName2);
+        valVarAddr = this.allocaName(stmt.varName2);
         this.entryAllocas.push(`  ${valVarAddr} = alloca ptr`);
         savedLoopLocals.push(this.bindLoopLocal(stmt.varName2, { type: valTy, typeKind: stmt.varType2, mutable: false, isRef: true, addr: valVarAddr }));
       }
@@ -3231,7 +3232,10 @@ export class Codegen {
       if (stmt.varName2) {
         const valPtr = this.nextTemp();
         lines.push(`  ${valPtr} = getelementptr ${entryTy}, ptr ${entryPtr}, i32 0, i32 2`);
-        lines.push(`  store ptr ${valPtr}, ptr %${stmt.varName2}.addr`);
+        // Must be the uniqued alloca, not `%<name>.addr` — a second `for k, v in map`
+        // in the same function gets `%v.N.addr`, and spelling the plain name here wrote
+        // the value into the FIRST loop's slot while reads came from an unwritten one.
+        lines.push(`  store ptr ${valPtr}, ptr ${valVarAddr}`);
       }
 
       this.emitLoopInvariants(lines, stmt.invariants);

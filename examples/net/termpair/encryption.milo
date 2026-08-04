@@ -77,7 +77,7 @@ requires key.len == 16
 pub fn decryptWithKey(key: &string, wireB64: &string): Result<string, string>
 requires key.len == 16
 {
-    let wire = Base64.decode(wireB64)
+    let wire = Base64.decode(wireB64)?
     // 12-byte IV + 16-byte GCM tag is the minimum; reject anything shorter.
     if wire.len < 28 {
         return Result.Err("ciphertext too short")

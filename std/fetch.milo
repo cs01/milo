@@ -316,8 +316,8 @@ pub fn hasHeader(headers: &string, name: &string): bool {
 }
 
 // Hex value of an ASCII hex digit, or -1. The -1 is load-bearing: decodeChunked
-// uses it to find the end of a chunk-size field, so std/hex's `_hexVal` (which
-// returns 0 for a non-digit) cannot stand in for this.
+// uses it to find the end of a chunk-size field. std/hex's equivalent is private
+// to that module, so this is a local copy rather than an import.
 fn hexDigit(c: u8): i64 {
     if c >= '0' && c <= '9' {
         return (c - '0') as i64

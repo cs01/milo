@@ -1,0 +1,51 @@
+// Csv.parse rejects the three quoting mistakes that silently move field
+// boundaries, and deliberately accepts ragged row widths (see std/csv.milo for why).
+// @expect: basic=a;b;|c;d;|
+// @expect: quoted=a;b,c;d"e;|
+// @expect: noeol=a;b;|
+// @expect: empty=
+// @expect: crlf=a;b;|c;d;|
+// @expect: emptyquoted=;x;|
+// @expect: quotednewline=a;line1
+// @expect: line2;|
+// @expect: ragged=a;b;c;|d;e;|
+// @expect: unterminated=csv: unterminated quoted field starting at byte 2
+// @expect: bareQuote=csv: bare '"' in unquoted field at byte 3
+// @expect: afterQuote=csv: unexpected text after closing quote at byte 5
+
+from "std/csv" import {
+    Csv
+}
+
+fn show(r: Result<Vec<Vec<string>>>): string {
+    match r {
+        Result.Ok(rows) => {
+            var out = ""
+            for ri in 0..rows.len {
+                for ci in 0..rows[ri].len {
+                    out = out + rows[ri][ci] + ";"
+                }
+                out = out + "|"
+            }
+            return out
+        }
+        Result.Err(e) => {
+            return e
+        }
+    }
+}
+
+pub fn main(): i32 {
+    print("basic=", show(Csv.parse("a,b\nc,d\n")))
+    print("quoted=", show(Csv.parse("a,\"b,c\",\"d\"\"e\"\n")))
+    print("noeol=", show(Csv.parse("a,b")))
+    print("empty=", show(Csv.parse("")))
+    print("crlf=", show(Csv.parse("a,b\r\nc,d\r\n")))
+    print("emptyquoted=", show(Csv.parse("\"\",x\n")))
+    print("quotednewline=", show(Csv.parse("a,\"line1\nline2\"\n")))
+    print("ragged=", show(Csv.parse("a,b,c\nd,e\n")))
+    print("unterminated=", show(Csv.parse("a,\"unterminated\nb,c\n")))
+    print("bareQuote=", show(Csv.parse("a,b\"c,d\n")))
+    print("afterQuote=", show(Csv.parse("a,\"b\"c\n")))
+    return 0
+}

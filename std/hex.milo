@@ -1,4 +1,11 @@
-// std/hex — hex encode/decode for strings
+// std/hex — hex encode/decode for byte strings (RFC 4648 §8 base16).
+//
+// `encode` emits lowercase, the near-universal convention. `decode` is
+// case-insensitive but otherwise strict: the input must be an even number of hex
+// digits and nothing else — no whitespace, no "0x" prefix, no separators. Malformed
+// hex is corrupt input, not a shorter payload, so `decode` returns an `Err` naming
+// the offending byte offset rather than substituting a zero nibble and handing back
+// a plausible-looking string.
 
 pub fn hexChar(val: u8): u8 {
     if val < 10 {
@@ -7,20 +14,22 @@ pub fn hexChar(val: u8): u8 {
     return val - 10 + 97
 }
 
-pub fn _hexVal(ch: u8): u8 {
+// Value of an ASCII hex digit, or -1 when `ch` is not one. The -1 is load-bearing:
+// a decoder has to be able to tell "digit zero" from "not a digit".
+fn hexNibble(ch: u8): i64 {
     if ch >= 48 && ch <= 57 {
-        return ch - 48
+        return (ch - 48) as i64
     }
     if ch >= 97 && ch <= 102 {
-        return ch - 97 + 10
+        return (ch - 97) as i64 + 10
     }
     if ch >= 65 && ch <= 70 {
-        return ch - 65 + 10
+        return (ch - 65) as i64 + 10
     }
-    return 0
+    return -1
 }
 
-// Encode a string as hex (each byte becomes two hex chars).
+// Encode a string as lowercase hex (each byte becomes two hex chars).
 fn hexEncode(input: &string): string {
     var result = ""
     for b in input {
@@ -30,17 +39,27 @@ fn hexEncode(input: &string): string {
     return result
 }
 
-// Decode a hex string back to bytes.
-fn hexDecode(input: &string): string {
+// Decode a hex string back to bytes. Errs on an odd length or any byte that is not
+// an ASCII hex digit; whitespace and separators are not digits, so they are rejected.
+fn hexDecode(input: &string): Result<string> {
+    if input.len % 2 != 0 {
+        return Result.Err("hex: odd input length " + input.len.toString())
+    }
     var result = ""
     var i: i64 = 0
-    while i + 1 < input.len {
-        let hi = _hexVal(input[i])
-        let lo = _hexVal(input[i + 1])
+    while i < input.len {
+        let hi = hexNibble(input[i])
+        if hi < 0 {
+            return Result.Err("hex: invalid digit at byte " + i.toString())
+        }
+        let lo = hexNibble(input[i + 1])
+        if lo < 0 {
+            return Result.Err("hex: invalid digit at byte " + (i + 1).toString())
+        }
         result.push(((hi << 4) | lo) as u8)
         i = i + 2
     }
-    return result
+    return Result.Ok(result)
 }
 
 // Hex namespace — call as Hex.encode(...), Hex.decode(...).
@@ -48,11 +67,14 @@ pub struct Hex {
 }
 
 impl Hex {
+    // Encode each byte as two lowercase hex digits.
     fn encode(input: &string): string {
         return hexEncode(input)
     }
 
-    fn decode(input: &string): string {
+    // Decode a hex string. Case-insensitive, but errs on an odd length or any byte
+    // that is not an ASCII hex digit — no whitespace, "0x" prefix, or separators.
+    fn decode(input: &string): Result<string> {
         return hexDecode(input)
     }
 }

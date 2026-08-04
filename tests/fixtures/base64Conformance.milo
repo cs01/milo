@@ -23,7 +23,7 @@ pub fn main(): i32 {
     print("foob=", Base64.encode("foob"))
     print("fooba=", Base64.encode("fooba"))
     print("foobar=", Base64.encode("foobar"))
-    print("rt=", Base64.decode("Zm9vYmFy"))
+    print("rt=", Base64.decode("Zm9vYmFy")!)
     print("url_foob=", Base64.urlEncode("foob"))
     print("url_fo=", Base64.urlEncode("fo"))
     return 0

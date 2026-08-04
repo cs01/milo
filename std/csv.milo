@@ -1,11 +1,36 @@
-// std/csv — CSV parse and write with quoting/escaping
+// std/csv — CSV parse and write with quoting/escaping (RFC 4180 shape).
+//
+// `parse` is strict about quoting, because every quoting mistake silently changes
+// where the field boundaries are: an unterminated quote swallows the rest of the
+// file into one field, and a bare quote mid-field absorbs the following commas and
+// newlines. Both used to produce a smaller-but-plausible table with no signal, so
+// both are now errors carrying the byte offset.
+//
+// Row widths are deliberately *not* checked. A ragged file still parsed
+// unambiguously — the width a caller expects is schema policy, and this parser has
+// no header or schema concept to check it against. Indexing past a short row is a
+// bounds check, which fails loudly on its own. Go and Rust both let you switch
+// their width check off for the same reason; Milo just never turns it on.
 
 // Parse a CSV string into a Vec of rows, each row a Vec of fields.
-fn csvParse(input: &string): Vec<Vec<string>> {
+// Errs on an unterminated quoted field, a bare '"' inside an unquoted field, or
+// stray text after a field's closing quote. A lone '\r' outside a quoted field is
+// dropped (so CRLF files parse); inside one it is data and is kept.
+fn csvParse(input: &string): Result<Vec<Vec<string>>> {
     var rows: Vec<Vec<string>> = Vec.new()
     var row: Vec<string> = Vec.new()
     var field = ""
+    // fieldStart: nothing consumed in the current field yet, so a '"' here opens a
+    // quoted field rather than being stray data.
+    var fieldStart = true
+    // quoted: this field opened with '"'. Stays set after the closing quote so the
+    // trailing-garbage check below can fire.
+    var quoted = false
     var inQuote = false
+    var quoteAt: i64 = 0
+    // pending: a record is in progress and must be flushed at EOF. Distinguishes a
+    // file ending in "\n" (nothing pending) from one ending mid-record.
+    var pending = false
     var i: i64 = 0
     while i < input.len {
         let ch = input[i]
@@ -21,34 +46,62 @@ fn csvParse(input: &string): Vec<Vec<string>> {
             } else {
                 field.push(ch)
             }
+        } else if quoted {
+            if ch == 44 {
+                row.push(field)
+                field = ""
+                fieldStart = true
+                quoted = false
+                pending = true
+            } else if ch == 10 {
+                row.push(field)
+                field = ""
+                fieldStart = true
+                quoted = false
+                rows.push(row)
+                row = Vec.new()
+                pending = false
+            } else if ch != 13 {
+                return Result.Err("csv: unexpected text after closing quote at byte " + i.toString())
+            }
         } else {
             if ch == 34 {
-                inQuote = true
-            } else {
-                if ch == 44 {
-                    row.push(field)
-                    field = ""
-                } else {
-                    if ch == 10 {
-                        row.push(field)
-                        field = ""
-                        rows.push(row)
-                        row = Vec.new()
-                    } else {
-                        if ch != 13 {
-                            field.push(ch)
-                        }
-                    }
+                if !fieldStart {
+                    return Result.Err("csv: bare '\"' in unquoted field at byte " + i.toString())
                 }
+                quoted = true
+                inQuote = true
+                quoteAt = i
+                fieldStart = false
+                pending = true
+            } else if ch == 44 {
+                row.push(field)
+                field = ""
+                fieldStart = true
+                pending = true
+            } else if ch == 10 {
+                row.push(field)
+                field = ""
+                fieldStart = true
+                rows.push(row)
+                row = Vec.new()
+                pending = false
+            } else if ch != 13 {
+                field.push(ch)
+                fieldStart = false
+                pending = true
             }
         }
         i = i + 1
     }
-    if field.len > 0 || row.len > 0 {
+    if inQuote {
+        return Result.Err("csv: unterminated quoted field starting at byte " + quoteAt.toString())
+    }
+    if pending {
         row.push(field)
         rows.push(row)
     }
-    return rows
+    return Result.Ok(rows)
 }
 
 // Quote a field if it contains commas, quotes, or newlines.
@@ -95,9 +148,14 @@ pub struct Csv {
 }
 
 impl Csv {
-    fn parse(input: &string): Vec<Vec<string>> {
+    // Parse CSV text into rows of fields. Errs on an unterminated quoted field, a
+    // bare '"' inside an unquoted field, or text after a field's closing quote.
+    // Ragged row widths are accepted — see the module comment for why.
+    fn parse(input: &string): Result<Vec<Vec<string>>> {
         return csvParse(input)
     }
+
+    // Serialize rows to CSV, quoting any field containing ',', '"', CR or LF.
     fn stringify(rows: &Vec<Vec<string>>): string {
         return csvStringify(rows)
     }

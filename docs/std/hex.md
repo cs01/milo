@@ -5,10 +5,11 @@
 ### `Hex.decode`
 
 ```milo
-fn Hex.decode(input: &string): string
+fn Hex.decode(input: &string): Result<string>
 ```
 
-_Undocumented._
+Decode a hex string. Case-insensitive, but errs on an odd length or any byte
+that is not an ASCII hex digit — no whitespace, "0x" prefix, or separators.
 
 ### `Hex.encode`
 
@@ -16,7 +17,7 @@ _Undocumented._
 fn Hex.encode(input: &string): string
 ```
 
-_Undocumented._
+Encode each byte as two lowercase hex digits.
 
 ### `hexChar`
 

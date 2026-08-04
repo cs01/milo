@@ -1,0 +1,47 @@
+// Base32.decode is strict RFC 4648; Base32.decodeLoose is the human-transcribed-
+// secret path. Both reject non-alphabet bytes — leniency covers formatting only.
+// Previously every failing line here silently skipped the offending byte and
+// returned a shorter secret, which HOTP then turned into wrong-but-valid codes.
+// @expect: rt=fooba
+// @expect: empty=[]
+// @expect: lower=fooba
+// @expect: badchar=base32: invalid character at byte 7
+// @expect: space=base32: invalid character at byte 5
+// @expect: shortlen=base32: length 3 is not a multiple of 8
+// @expect: badpad=base32: 2 padding characters is not a valid amount
+// @expect: loosespaced=MZXW6YTBOI======
+// @expect: loosedash=fooba
+// @expect: loosedangling=base32: truncated input, 3 symbols leaves a dangling fragment
+// @expect: loosebadchar=base32: invalid character at byte 7
+
+from "std/base32" import {
+    Base32
+}
+
+fn show(r: Result<string>): string {
+    match r {
+        Result.Ok(v) => {
+            return v
+        }
+        Result.Err(e) => {
+            return e
+        }
+    }
+}
+
+pub fn main(): i32 {
+    print("rt=", show(Base32.decode(Base32.encode("fooba"))))
+    print("empty=[", show(Base32.decode("")), "]")
+    print("lower=", show(Base32.decode("mzxw6ytb")))
+    print("badchar=", show(Base32.decode("MZXW6YT1")))
+    print("space=", show(Base32.decode("MZXW6 TB")))
+    print("shortlen=", show(Base32.decode("MZX")))
+    print("badpad=", show(Base32.decode("MZXW6Y==")))
+
+    // A secret pasted from an authenticator app: spaces, no padding.
+    print("loosespaced=", Base32.encode(show(Base32.decodeLoose("MZXW 6YTB OI"))))
+    print("loosedash=", show(Base32.decodeLoose("MZXW-6YTB")))
+    print("loosedangling=", show(Base32.decodeLoose("MZX")))
+    print("loosebadchar=", show(Base32.decodeLoose("MZXW6YT1")))
+    return 0
+}

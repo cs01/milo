@@ -1,0 +1,14 @@
+// The point of making the decoders fallible: you cannot use the decoded bytes
+// without first dealing with the failure. Binding Base64.decode's Result straight
+// into a string has to be rejected at compile time.
+// @error: declared as string but got Result
+
+from "std/base64" import {
+    Base64
+}
+
+pub fn main(): i32 {
+    let bytes: string = Base64.decode("!!!!")
+    print(bytes.len.toString())
+    return 0
+}

@@ -27,8 +27,9 @@ fn Totp.generate(secret: &string, unixTime: i64, step: i64, digits: i64): string
 TOTP value for a Unix timestamp (RFC 6238): HOTP over `floor(unixTime / step)`. Use `step = 30`, `digits = 6` for the common authenticator-app setup.
 
 ```milo
-from "std/base32" import { base32Decode }
+from "std/base32" import { Base32 }
 
-let key = base32Decode(&"JBSWY3DPEHPK3PXP")
-let code = Totp.generate(&key, 1_700_000_000, 30, 6)
+// decodeLoose tolerates the spaces and missing padding a pasted secret usually has
+let key = Base32.decodeLoose("JBSWY3DPEHPK3PXP")!
+let code = Totp.generate(key, 1_700_000_000, 30, 6)
 ```

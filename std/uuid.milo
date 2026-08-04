@@ -22,8 +22,8 @@ fn _byteToHex(b: u8, out: &mut string): void {
     out.push(hexChar(b & 15 as u8))
 }
 
-// Hex digit value, or -1 when `ch` is not a hex digit. Deliberately not std/hex's
-// `_hexVal`, which maps invalid input to 0 — a parser has to reject it instead.
+// Hex digit value, or -1 when `ch` is not a hex digit. std/hex has the same helper
+// but keeps it private, so this is a local copy rather than an import.
 fn _hexNibble(ch: u8): i32 {
     if ch >= '0' && ch <= '9' {
         return (ch - '0') as i32

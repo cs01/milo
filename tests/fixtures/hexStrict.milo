@@ -1,0 +1,38 @@
+// Hex.decode is strict: even length, hex digits only. It used to map any non-digit
+// to nibble 0 and drop a trailing odd digit, so "6 6f" and "zz" both decoded to
+// bytes that looked like real data.
+// @expect: rt=Hello
+// @expect: empty=[]
+// @expect: upper=foo
+// @expect: badchar=hex: invalid digit at byte 0
+// @expect: badsecond=hex: invalid digit at byte 3
+// @expect: odd=hex: odd input length 3
+// @expect: space=hex: odd input length 5
+// @expect: prefix=hex: invalid digit at byte 1
+
+from "std/hex" import {
+    Hex
+}
+
+fn show(r: Result<string>): string {
+    match r {
+        Result.Ok(v) => {
+            return v
+        }
+        Result.Err(e) => {
+            return e
+        }
+    }
+}
+
+pub fn main(): i32 {
+    print("rt=", show(Hex.decode(Hex.encode("Hello"))))
+    print("empty=[", show(Hex.decode("")), "]")
+    print("upper=", show(Hex.decode("666F6F")))
+    print("badchar=", show(Hex.decode("zz")))
+    print("badsecond=", show(Hex.decode("66az")))
+    print("odd=", show(Hex.decode("666")))
+    print("space=", show(Hex.decode("66 6f")))
+    print("prefix=", show(Hex.decode("0x66")))
+    return 0
+}

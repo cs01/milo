@@ -10,10 +10,10 @@ from "std/hex" import {
 pub fn main(): i32 {
     let e1 = Hex.encode("Hello")
     print(e1)
-    print(Hex.decode(e1))
+    print(Hex.decode(e1)!)
 
     let e2 = Hex.encode("AB")
     print(e2)
-    print(Hex.decode(e2))
+    print(Hex.decode(e2)!)
     return 0
 }

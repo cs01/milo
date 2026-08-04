@@ -12,14 +12,14 @@ from "std/base64" import {
 pub fn main(): i32 {
     let e1 = Base64.encode("Hello, World!")
     print(e1)
-    print(Base64.decode(e1))
+    print(Base64.decode(e1)!)
 
     let e2 = Base64.encode("ab")
     print(e2)
-    print(Base64.decode(e2))
+    print(Base64.decode(e2)!)
 
     let e3 = Base64.encode("a")
     print(e3)
-    print(Base64.decode(e3))
+    print(Base64.decode(e3)!)
     return 0
 }

@@ -327,6 +327,29 @@ Ranked by how often real programs hit them.
   `free(NULL)`; a `Drop` that dereferences (`Once`, `WaitGroup`) segfaulted before `main`.
   `HIRStmt.Assign` now carries `isInit`.
 
+  **Found and NOT fixed — a compiler bug worth its own ticket.** A nested closure that captures
+  an *outer closure's* capture emits invalid IR (`use of undefined value '%n.addr'`):
+  ```milo
+  fn callIt(f: () => void): void { f() }
+  pub fn main(): i32 {
+      let n: i64 = 7
+      let outer = move(): void => { callIt((): void => { print(n) }) }
+      outer(); return 0
+  }
+  ```
+  Unrelated to `std/sync`, but it bounds it: `Once.run` inside a `Task`/`Promise.blocking`
+  closure is limited to initializers that touch globals rather than the worker's own captures —
+  which is the shape the docs recommend anyway, so the bug is currently invisible.
+
+  Two hazards left standing: **`add`/`sub` wrap silently** in a checked-arithmetic language
+  (`x + 1` traps, `counter.add(1)` does not, and nothing in the source shows the difference —
+  there is no checked atomic RMW instruction, so the alternatives were a `cas`-loop `Option` API
+  nobody would use for a counter, or not shipping the types; `addChecked -> Option` can be added
+  later without breaking anything). And **the documented lazy-static idiom is not compiler-guided**:
+  reading `gTable` without first calling `ensureTable()` silently yields an empty `Vec`. `Lazy<T>`
+  would catch it but cannot be expressed; the real fix is lazily-initialized globals in the
+  language.
+
   Original finding:
   ```
   No `Once`/lazy statics. Atomics are `AtomicBool` and `AtomicI64` only — no `AtomicI32`,

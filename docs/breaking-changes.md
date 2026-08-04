@@ -11,6 +11,15 @@ last-verified: 2026-08-03
 Source-level breaks, newest first. Milo is pre-1.0 and does not promise
 compatibility, but every break belongs here with the migration spelled out.
 
+## `std/strconv` gains `parseBool`, `quoteString`, `unquoteString` (2026-08-04)
+
+Additive, but Milo compiles every module into one flat namespace, so a program that imports
+`std/strconv` **and** defines its own top-level `fn parseBool`, `fn quoteString` or
+`fn unquoteString` now fails to compile with "defined in two modules with different bodies".
+
+Rename yours, or delete it and use the std one: `parseBool` is `Option<bool>` over
+`true`/`t`/`1`/`false`/`f`/`0`, ASCII-case-insensitive, with no trimming.
+
 ## `pub` on structs is now actually enforced across files (2026-08-04)
 
 A non-`pub` struct used from another file has always been an error by the rules. It was

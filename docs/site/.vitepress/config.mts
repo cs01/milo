@@ -181,6 +181,7 @@ export default defineConfig({
                 { text: 'std/toml', link: '/stdlib/toml' },
                 { text: 'std/base64', link: '/stdlib/base64' },
                 { text: 'std/hex', link: '/stdlib/hex' },
+                { text: 'std/binary', link: '/stdlib/binary' },
               ]
             },
             {

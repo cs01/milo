@@ -1,0 +1,219 @@
+// std/binary — write→read round trip for every width in both byte orders, the
+// byte layout each order actually produces, signed reinterpretation, and the
+// Option.None that a short or negative offset returns instead of aborting.
+from "std/binary" import {
+    Bytes
+}
+
+// @expect: 15
+// @expect: u8 171
+// @expect: u16le 4660
+// @expect: u32le 3735928559
+// @expect: u64le 81985529216486895
+// @expect: 14
+// @expect: u16be 4660
+// @expect: u32be 3735928559
+// @expect: u64be 81985529216486895
+// @expect: 4433221111223344
+// @expect: 29
+// @expect: i8 -1
+// @expect: i16le -2
+// @expect: i16be -2
+// @expect: i32le -3
+// @expect: i32be -3
+// @expect: i64le -4
+// @expect: i64be -4
+// @expect: i16le-as-u16 65534
+// @expect: 24
+// @expect: 1.5
+// @expect: 1.5
+// @expect: -0.15625
+// @expect: -0.15625
+// @expect: exact 4294967295
+// @expect: short none
+// @expect: atEnd none
+// @expect: negative none
+// @expect: huge none
+// @expect: empty none
+// @expect: true
+// @expect: false
+// @expect: false
+// @expect: 4609434218613702656
+// @expect: 1.5
+// @expect: 1069547520
+// @expect: 1.5
+
+fn widenU8(o: Option<u8>): Option<u64> {
+    let Option.Some(v) = o else {
+        return Option.None
+    }
+    return Option.Some(v as u64)
+}
+
+fn widenU16(o: Option<u16>): Option<u64> {
+    let Option.Some(v) = o else {
+        return Option.None
+    }
+    return Option.Some(v as u64)
+}
+
+fn widenU32(o: Option<u32>): Option<u64> {
+    let Option.Some(v) = o else {
+        return Option.None
+    }
+    return Option.Some(v as u64)
+}
+
+fn widenI8(o: Option<i8>): Option<i64> {
+    let Option.Some(v) = o else {
+        return Option.None
+    }
+    return Option.Some(v as i64)
+}
+
+fn widenI16(o: Option<i16>): Option<i64> {
+    let Option.Some(v) = o else {
+        return Option.None
+    }
+    return Option.Some(v as i64)
+}
+
+fn widenI32(o: Option<i32>): Option<i64> {
+    let Option.Some(v) = o else {
+        return Option.None
+    }
+    return Option.Some(v as i64)
+}
+
+fn showU(label: &string, got: Option<u64>): void {
+    match got {
+        Option.Some(v) => {
+            print(label + " " + v.toString())
+        }
+        Option.None => {
+            print(label + " none")
+        }
+    }
+}
+
+fn showI(label: &string, got: Option<i64>): void {
+    match got {
+        Option.Some(v) => {
+            print(label + " " + v.toString())
+        }
+        Option.None => {
+            print(label + " none")
+        }
+    }
+}
+
+fn showF(got: Option<f64>): void {
+    match got {
+        Option.Some(v) => {
+            print(v)
+        }
+        Option.None => {
+            print("none")
+        }
+    }
+}
+
+fn widenF32(o: Option<f32>): Option<f64> {
+    let Option.Some(v) = o else {
+        return Option.None
+    }
+    return Option.Some(v as f64)
+}
+
+fn hexDump(b: &string): string {
+    let digits: string = "0123456789abcdef"
+    var out: string = ""
+    for i in 0..b.len {
+        let v = b[i] as i64
+        out.push(digits[v >> 4])
+        out.push(digits[v & 15])
+    }
+    return out
+}
+
+fn main(): void {
+    // ── unsigned round trips, little endian ──
+    var le: string = ""
+    Bytes.writeU8(le, 0xab as u8)
+    Bytes.writeU16Le(le, 0x1234 as u16)
+    Bytes.writeU32Le(le, 0xdeadbeef as u32)
+    Bytes.writeU64Le(le, 0x0123456789abcdef as u64)
+    print(le.len)
+    showU("u8", widenU8(Bytes.readU8(le, 0)))
+    showU("u16le", widenU16(Bytes.readU16Le(le, 1)))
+    showU("u32le", widenU32(Bytes.readU32Le(le, 3)))
+    showU("u64le", Bytes.readU64Le(le, 7))
+
+    // ── unsigned round trips, big endian ──
+    var be: string = ""
+    Bytes.writeU16Be(be, 0x1234 as u16)
+    Bytes.writeU32Be(be, 0xdeadbeef as u32)
+    Bytes.writeU64Be(be, 0x0123456789abcdef as u64)
+    print(be.len)
+    showU("u16be", widenU16(Bytes.readU16Be(be, 0)))
+    showU("u32be", widenU32(Bytes.readU32Be(be, 2)))
+    showU("u64be", Bytes.readU64Be(be, 6))
+
+    // ── the orders really are different on the wire ──
+    var o1: string = ""
+    Bytes.writeU32Le(o1, 0x11223344 as u32)
+    Bytes.writeU32Be(o1, 0x11223344 as u32)
+    print(hexDump(o1))
+
+    // ── signed forms reinterpret the same bytes ──
+    var neg: string = ""
+    Bytes.writeI8(neg, -1 as i8)
+    Bytes.writeI16Le(neg, -2 as i16)
+    Bytes.writeI16Be(neg, -2 as i16)
+    Bytes.writeI32Le(neg, -3 as i32)
+    Bytes.writeI32Be(neg, -3 as i32)
+    Bytes.writeI64Le(neg, -4)
+    Bytes.writeI64Be(neg, -4)
+    print(neg.len)
+    showI("i8", widenI8(Bytes.readI8(neg, 0)))
+    showI("i16le", widenI16(Bytes.readI16Le(neg, 1)))
+    showI("i16be", widenI16(Bytes.readI16Be(neg, 3)))
+    showI("i32le", widenI32(Bytes.readI32Le(neg, 5)))
+    showI("i32be", widenI32(Bytes.readI32Be(neg, 9)))
+    showI("i64le", Bytes.readI64Le(neg, 13))
+    showI("i64be", Bytes.readI64Be(neg, 21))
+    // the unsigned view of the same two bytes
+    showU("i16le-as-u16", widenU16(Bytes.readU16Le(neg, 1)))
+
+    // ── floats ──
+    var fl: string = ""
+    Bytes.writeF32Le(fl, 1.5 as f32)
+    Bytes.writeF32Be(fl, 1.5 as f32)
+    Bytes.writeF64Le(fl, -0.15625)
+    Bytes.writeF64Be(fl, -0.15625)
+    print(fl.len)
+    showF(widenF32(Bytes.readF32Le(fl, 0)))
+    showF(widenF32(Bytes.readF32Be(fl, 4)))
+    showF(Bytes.readF64Le(fl, 8))
+    showF(Bytes.readF64Be(fl, 16))
+
+    // ── out of bounds is Option.None, not a trap and not a zero ──
+    var four: string = ""
+    Bytes.writeU32Le(four, 0xffffffff as u32)
+    showU("exact", widenU32(Bytes.readU32Le(four, 0)))
+    showU("short", widenU32(Bytes.readU32Le(four, 1)))
+    showU("atEnd", widenU8(Bytes.readU8(four, 4)))
+    showU("negative", widenU16(Bytes.readU16Be(four, -1)))
+    // an offset near i64 max must be rejected, not overflow the bounds check
+    showU("huge", Bytes.readU64Le(four, 9223372036854775807))
+    showU("empty", widenU8(Bytes.readU8("", 0)))
+
+    // ── the bounds predicate and the raw IEEE-754 bits ──
+    print(Bytes.has(four, 0, 4))
+    print(Bytes.has(four, 1, 4))
+    print(Bytes.has(four, -1, 0))
+    print(Bytes.f64ToBits(1.5))
+    print(Bytes.f64FromBits(4609434218613702656))
+    print(Bytes.f32ToBits(1.5 as f32) as i64)
+    print(Bytes.f32FromBits(1069547520) as f64)
+}

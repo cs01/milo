@@ -16,6 +16,9 @@ from "std/deflate" import {
 from "std/checksum" import {
     Checksum
 }
+from "std/binary" import {
+    Bytes
+}
 
 pub struct PngImage {
     width: i64,
@@ -24,8 +27,14 @@ pub struct PngImage {
     pixels: string, // row-major, channels bytes per pixel, top-down
 }
 
-fn be32(src: &string, p: i64): i64 {
-    return ((src[p] as i64) << 24) | ((src[p + 1] as i64) << 16) | ((src[p + 2] as i64) << 8) | (src[p + 3] as i64)
+// PNG is big-endian throughout. Chunk lengths and IHDR dimensions are read out of
+// the file being decoded, so the read is fallible by nature and the truncation
+// check belongs in the type rather than in a comment above each call site.
+fn be32(src: &string, p: i64): Result<i64, string> {
+    let Option.Some(v) = Bytes.readU32Be(src, p) else {
+        return Result.Err("png: truncated chunk")
+    }
+    return Result.Ok(v as i64)
 }
 
 // Paeth predictor (RFC 2083 §6.6): pick whichever of a/b/c the initial estimate
@@ -70,7 +79,7 @@ fn decodePng(src: &string): Result<PngImage, string> {
     var pos: i64 = 8
     var sawIhdr = false
     while pos + 8 <= src.len {
-        let clen = be32(src, pos)
+        let clen = be32(src, pos)?
         let t0 = src[pos + 4]
         let t1 = src[pos + 5]
         let t2 = src[pos + 6]
@@ -89,8 +98,8 @@ fn decodePng(src: &string): Result<PngImage, string> {
             if clen < 13 {
                 return Result.Err("png: short IHDR")
             }
-            width = be32(src, dataStart)
-            height = be32(src, dataStart + 4)
+            width = be32(src, dataStart)?
+            height = be32(src, dataStart + 4)?
             // Bounded before they reach the stride arithmetic below: width and
             // height are attacker-chosen 32-bit values, and `height * (stride +
             // 1)` on two of them overflows i64, which traps rather than
@@ -181,24 +190,17 @@ fn decodePng(src: &string): Result<PngImage, string> {
 
 // ── encoding ──────────────────────────────────────────────────────────────────
 
-fn pushBe32(out: &mut string, v: i64) {
-    out.push(((v >> 24) & 255) as u8)
-    out.push(((v >> 16) & 255) as u8)
-    out.push(((v >> 8) & 255) as u8)
-    out.push((v & 255) as u8)
-}
-
 // One PNG chunk: length, type, payload, and a CRC over the TYPE AND PAYLOAD but
 // not the length. Getting that span wrong produces a file every decoder rejects
 // with a checksum error and no hint as to which half was wrong.
 fn chunk(out: &mut string, kind: &string, body: &string) {
-    pushBe32(out, body.len)
+    Bytes.writeU32Be(out, body.len as u32)
     var crcInput = ""
     crcInput.pushStr(kind)
     crcInput.pushStr(body)
     out.pushStr(kind)
     out.pushStr(body)
-    pushBe32(out, Checksum.crc32(crcInput))
+    Bytes.writeU32Be(out, Checksum.crc32(crcInput) as u32)
 }
 
 // Encode 8-bit truecolour (3 channels) or truecolour+alpha (4) to a PNG.
@@ -246,8 +248,8 @@ pub fn encodePng(pixels: &string, width: i64, height: i64, channels: i64): Resul
     out.push(10 as u8)
 
     var ihdr = ""
-    pushBe32(ihdr, width)
-    pushBe32(ihdr, height)
+    Bytes.writeU32Be(ihdr, width as u32)
+    Bytes.writeU32Be(ihdr, height as u32)
     ihdr.push(8 as u8) // bit depth
     if channels == 3 {
         ihdr.push(2 as u8) // truecolour

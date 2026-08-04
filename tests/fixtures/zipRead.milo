@@ -1,5 +1,6 @@
 // @expect: greet.txt=36
 // @expect: nums.txt=44
+// @expect: zip: truncated archive
 from "std/zip" import {
     Zip
 }
@@ -19,6 +20,30 @@ pub fn main(): i32 {
                 let en = entries[i]
                 print($"{en.name}={en.data.len}")
             }
+        }
+        Result.Err(e) => {
+            print(e)
+        }
+    }
+
+    // Every offset in a zip comes out of the archive itself. Point the
+    // end-of-central-directory record's directory offset just past the last byte
+    // and the parse has to say so — reading through Option is what turns a
+    // corrupt archive into an error instead of a bounds abort.
+    let cdOffField = 243 - 22 + 16
+    var bad = ""
+    for i in 0..243 {
+        if i == cdOffField {
+            bad.push(240 as u8)
+        } else if i > cdOffField && i < cdOffField + 4 {
+            bad.push(0 as u8)
+        } else {
+            bad.push(bytes[i] as u8)
+        }
+    }
+    match Zip.read(bad) {
+        Result.Ok(entries) => {
+            print($"unexpectedly parsed {entries.len} entries")
         }
         Result.Err(e) => {
             print(e)

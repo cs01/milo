@@ -221,15 +221,21 @@ function stdExports(): Map<string, string[]> {
   const files: string[] = [];
   try {
     if (existsSync(stdDir)) walkMilo(stdDir, files);
-    else files.push(...bundledStdPaths().filter(p => p.includes("/std/")));
+    // bundledStdPaths resolves through the platform separator, so match on both.
+    else files.push(...bundledStdPaths().filter(p => p.includes("/std/") || p.includes("\\std\\")));
   } catch { return index; }
   const decl = /^pub\s+(?:fn|struct|enum|type|const|trait)\s+([A-Za-z_][A-Za-z0-9_]*)/gm;
   for (const f of files) {
     const src = readStd(f);
     if (src === null) continue;
     // std/platform.darwin.milo is imported as "std/platform" — the suffix picks
-    // the arm at resolve time and never appears in source.
-    const mod = relative(STDLIB_DIR, f).replace(/\.milo$/, "").replace(/\.(darwin|linux|windows)$/, "");
+    // the arm at resolve time and never appears in source. Separators are forced to
+    // '/' because this string goes straight into an import path the user will paste,
+    // and `relative` hands back backslashes on Windows.
+    const mod = relative(STDLIB_DIR, f)
+      .replace(/\\/g, "/")
+      .replace(/\.milo$/, "")
+      .replace(/\.(darwin|linux|windows)$/, "");
     for (const m of src.matchAll(decl)) {
       const list = index.get(m[1]);
       if (!list) index.set(m[1], [mod]);

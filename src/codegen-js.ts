@@ -58,7 +58,11 @@ export const JS_RUNTIME_HELPERS: string = [
   `function __propagate(r) { if (r.tag !== 0) throw { __milo_prop: r }; return r.data[0]; }`,
   // Display formatting to match native: structs as `Name { f: v, … }`, enums as
   // `Variant(a, …)`/`Variant`, strings quoted, floats via %g.
-  `function __displayVal(v) { if (typeof v === 'string') return JSON.stringify(v); if (typeof v === 'boolean') return String(v); if (typeof v === 'number') return Number.isInteger(v) ? String(v) : __fmtG(v); if (v && typeof v === 'object' && v.constructor && v.constructor.name !== 'Object') return __displayStruct(v); return String(v); }`,
+  // Array/Map are checked before the struct fallback: their constructor name is not
+  // 'Object', so they would otherwise be rendered field-by-field as a struct.
+  `function __displayVal(v) { if (typeof v === 'string') return JSON.stringify(v); if (typeof v === 'boolean') return String(v); if (typeof v === 'number') return Number.isInteger(v) ? String(v) : __fmtG(v); if (Array.isArray(v)) return __displaySeq(v); if (v instanceof Map) return __displayMap(v); if (v && typeof v === 'object' && v.constructor && v.constructor.name !== 'Object') return __displayStruct(v); return String(v); }`,
+  `function __displaySeq(v) { return '[' + v.map(__displayVal).join(', ') + ']'; }`,
+  `function __displayMap(v) { const out = []; for (const [k, val] of v) out.push(__displayVal(k) + ': ' + __displayVal(val)); return '{' + out.join(', ') + '}'; }`,
   `function __displayStruct(v) { const ks = Object.keys(v); return v.constructor.name + ' { ' + ks.map(k => k + ': ' + __displayVal(v[k])).join(', ') + ' }'; }`,
   `function __displayEnum(v, name) { const e = __enumMeta[name][v.tag]; return e[1] === 0 ? e[0] : e[0] + '(' + v.data.map(__displayVal).join(', ') + ')'; }`,
   // Maps need the explicit branch: Object.keys of a Map is empty, so the
@@ -1044,6 +1048,10 @@ export class CodegenJS {
     if (expr.type.tag === "float") return `__fmtG(${val})`;
     if (expr.type.tag === "int") return `String(${val})`;
     if (expr.type.tag === "struct") return `__displayStruct(${val})`;
+    // Containers render structurally, matching the native backend — the default JS
+    // stringification would give "1,2,3" for a Vec and "[object Map]" for a HashMap.
+    if (expr.type.tag === "vec" || expr.type.tag === "array") return `__displaySeq(${val})`;
+    if (expr.type.tag === "hashmap") return `__displayMap(${val})`;
     if (expr.type.tag === "enum") return `__displayEnum(${val}, ${JSON.stringify(expr.type.name)})`;
     return `String(${val})`;
   }

@@ -71,6 +71,13 @@ test("importHint names the std module that exports a type", () => {
   expect(importHint("NoSuchTypeAnywhere")).toBeUndefined();
 });
 
+test("the import line uses '/' separators on every host", () => {
+  // The hint is a line the reader pastes into their source, and an import path is
+  // always '/'-separated. `relative` hands back backslashes on Windows, which shipped
+  // `from "std\json" import { Json }` and failed the Windows fixture lane.
+  expect(importHint("Json")).not.toContain("\\");
+});
+
 test("hints reach the real diagnostics", () => {
   expect(hintFor(`fn main() {\n  let v: Vec<i64> = [1]\n  print(v.length)\n}\n`)).toBe("did you mean 'len'?");
   expect(hintFor(`fn main() {\n  let s = "a"\n  print(s.toUpperCase())\n}\n`)).toBe("did you mean 'toUpper'?");

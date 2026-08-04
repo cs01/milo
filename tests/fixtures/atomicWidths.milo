@@ -1,0 +1,68 @@
+// @expect: 7
+// @expect: 7
+// @expect: 12
+// @expect: 12
+// @expect: 9
+// @expect: -100
+// @expect: 2147483647
+// @expect: -2147483648
+// @expect: 0
+// @expect: 0
+// @expect: 18446744073709551615
+// @expect: 18446744073709551615
+// @expect: 0
+// @expect: 5
+// @expect: 4
+// @expect: 4
+// @expect: 4
+// @expect: 41
+// @expect: 42
+// @expect: 43
+// @expect: true
+// @expect: false
+
+from "std/sync" import {
+    AtomicI32, AtomicU64, AtomicI64, AtomicBool
+}
+
+pub fn main(): i32 {
+    let a = AtomicI32.new(7)
+    print(a.load())
+    print(a.add(5))
+    print(a.load())
+    print(a.sub(3))
+    print(a.load())
+    a.store(-100)
+    print(a.load())
+
+    // an atomic read-modify-write wraps; ordinary Milo arithmetic would trap here
+    a.store(2147483647)
+    print(a.load())
+    a.add(1)
+    print(a.load())
+
+    let u = AtomicU64.new(0)
+    print(u.load())
+    print(u.sub(1))
+    print(u.load())
+    print(u.add(1))
+    print(u.load())
+
+    u.store(5)
+    print(u.swap(4))
+    print(u.load())
+    // cas returns the value that was there, so a miss leaves it untouched
+    print(u.cas(9, 100))
+    print(u.load())
+
+    let i = AtomicI64.new(41)
+    print(i.swap(42))
+    print(i.cas(42, 43))
+    print(i.load())
+
+    let b = AtomicBool.new(false)
+    print(b.cas(false, true) == false)
+    print(b.cas(false, true) == false)
+
+    return 0
+}

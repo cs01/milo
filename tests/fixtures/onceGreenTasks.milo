@@ -1,0 +1,48 @@
+// @expect: 1
+// @expect: 42
+// @expect: 4
+
+// Four green tasks race on one Once. The winner yields twice mid-initializer so the
+// other three are guaranteed to arrive while it is still RUNNING and have to park.
+from "std/sync" import {
+    AtomicI64, Once, WaitGroup
+}
+from "std/runtime" import {
+    Task, schedulerYield
+}
+
+var gInitCount: i64 = 0
+var gValue: i64 = 0
+var gOnce: Once = Once.new()
+
+pub fn main(): i32 {
+    let wg = WaitGroup.new()
+    let seen = AtomicI64.new(0)
+    var i: i64 = 0
+    while i < 4 {
+        wg.add(1)
+        let w = wg.clone()
+        let s = seen.clone()
+        Task.spawn(move(): void => {
+            gOnce.run((): void => {
+                gInitCount = gInitCount + 1
+                schedulerYield()
+                schedulerYield()
+                gValue = 42
+            }
+            )
+            // every waiter must observe the finished value, not a half-built one
+            if gValue == 42 {
+                s.add(1)
+            }
+            w.done()
+        }
+        )
+        i = i + 1
+    }
+    wg.wait()
+    print(gInitCount)
+    print(gValue)
+    print(seen.load())
+    return 0
+}

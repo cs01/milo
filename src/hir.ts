@@ -133,7 +133,10 @@ export interface HIRArg {
 
 export type HIRStmt =
   | { kind: "Let"; name: string; type: TypeKind; value: HIRExpr; mutable: boolean; span?: Span }
-  | { kind: "Assign"; target: HIRExpr; value: HIRExpr; span?: Span }
+  // `isInit` marks a first write into a slot that holds no value yet (the generated
+  // module-global initializer). The slot is still zeroinitializer, so running Drop on
+  // it would hand a null pointer to a `drop` that dereferences.
+  | { kind: "Assign"; target: HIRExpr; value: HIRExpr; isInit?: boolean; span?: Span }
   | { kind: "Return"; value: HIRExpr | null; retType: TypeKind; span?: Span }
   | { kind: "If"; cond: HIRExpr; thenBody: HIRStmt[]; elseBody: HIRStmt[] | null; span?: Span }
   | { kind: "While"; cond: HIRExpr; body: HIRStmt[]; invariants?: HIRContract[]; span?: Span }

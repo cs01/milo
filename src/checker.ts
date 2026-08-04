@@ -1538,10 +1538,18 @@ export class TypeChecker {
     this.functions.set("_atomicStoreI64", { params: [{ type: ptrU8, name: "ptr" }, { type: i64t, name: "val" }], ret: { tag: "void" }, variadic: false });
     this.functions.set("_atomicAddI64", { params: [{ type: ptrU8, name: "ptr" }, { type: i64t, name: "val" }], ret: i64t, variadic: false });
     this.functions.set("_atomicSubI64", { params: [{ type: ptrU8, name: "ptr" }, { type: i64t, name: "val" }], ret: i64t, variadic: false });
+    this.functions.set("_atomicSwapI64", { params: [{ type: ptrU8, name: "ptr" }, { type: i64t, name: "val" }], ret: i64t, variadic: false });
     this.functions.set("_atomicCasI64", { params: [{ type: ptrU8, name: "ptr" }, { type: i64t, name: "expected" }, { type: i64t, name: "desired" }], ret: i64t, variadic: false });
+    this.functions.set("_atomicLoadI32", { params: [{ type: ptrU8, name: "ptr" }], ret: i32t, variadic: false });
+    this.functions.set("_atomicStoreI32", { params: [{ type: ptrU8, name: "ptr" }, { type: i32t, name: "val" }], ret: { tag: "void" }, variadic: false });
+    this.functions.set("_atomicAddI32", { params: [{ type: ptrU8, name: "ptr" }, { type: i32t, name: "val" }], ret: i32t, variadic: false });
+    this.functions.set("_atomicSubI32", { params: [{ type: ptrU8, name: "ptr" }, { type: i32t, name: "val" }], ret: i32t, variadic: false });
+    this.functions.set("_atomicSwapI32", { params: [{ type: ptrU8, name: "ptr" }, { type: i32t, name: "val" }], ret: i32t, variadic: false });
+    this.functions.set("_atomicCasI32", { params: [{ type: ptrU8, name: "ptr" }, { type: i32t, name: "expected" }, { type: i32t, name: "desired" }], ret: i32t, variadic: false });
     this.functions.set("_atomicLoadBool", { params: [{ type: ptrU8, name: "ptr" }], ret: { tag: "bool" }, variadic: false });
     this.functions.set("_atomicStoreBool", { params: [{ type: ptrU8, name: "ptr" }, { type: { tag: "bool" }, name: "val" }], ret: { tag: "void" }, variadic: false });
     this.functions.set("_atomicSwapBool", { params: [{ type: ptrU8, name: "ptr" }, { type: { tag: "bool" }, name: "val" }], ret: { tag: "bool" }, variadic: false });
+    this.functions.set("_atomicCasBool", { params: [{ type: ptrU8, name: "ptr" }, { type: { tag: "bool" }, name: "expected" }, { type: { tag: "bool" }, name: "desired" }], ret: { tag: "bool" }, variadic: false });
     // Scheduler global access — green thread runtime
     this.functions.set("_schedulerGet", { params: [], ret: ptrU8, variadic: false });
     this.functions.set("_schedulerSet", { params: [{ type: ptrU8, name: "ptr" }], ret: { tag: "void" }, variadic: false });

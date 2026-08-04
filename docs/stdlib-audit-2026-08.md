@@ -302,9 +302,38 @@ Ranked by how often real programs hit them.
   plaintext. Also missing on the server: multipart/form-data, static file serving, body size
   limits, request timeouts, chunked response streaming.
 
-- [ ] **Concurrency primitives are thin.** No `Once`/lazy statics. Atomics are `AtomicBool` and
-  `AtomicI64` only — no `AtomicI32`, `AtomicU64`, `AtomicPtr`. (Mutex/RwLock are *deliberately*
-  absent per the concurrency-simplification decision — not a gap, do not re-add.)
+- [x] **Concurrency primitives are thin.** *Fixed. `std/sync` gains `Once` (three-branch wait
+  matching `WaitGroup`: a green waiter parks, an OS-thread waiter cond-waits, main with a live
+  scheduler bounded-polls — so it is correct under green tasks AND `Promise.blocking` threads),
+  plus `AtomicI32` and `AtomicU64`, plus the fill-ins that made the existing matrix ragged
+  (`AtomicI64.swap`, `AtomicBool.cas`). Ordering is now stated rather than discovered: every
+  operation is `seq_cst` on both cmpxchg orderings, there is no ordering parameter, and
+  `add`/`sub` wrap where ordinary Milo arithmetic traps.*
+
+  *Three deliberate non-ships.* **`AtomicPtr`**: a raw pointer is only dereferenceable in
+  `unsafe`, so it would be `AtomicI64` plus a cast with no safety added — and Milo cannot state
+  that the pointee outlives the load, so a safe-looking `AtomicPtr` is a lifetime claim nothing
+  checks. **`Lazy<T>`/`OnceCell<T>`**: a getter cannot return `&T` (references are
+  second-class), so every `get()` would deep-copy the cached value — a cache that allocates per
+  access. **Eager lazy-statics**: nothing was needed. A module-level `var` already runs a real
+  initializer in dependency order before `main`, so `Once` is only for work deferred past the
+  start of `main`; the expressible shape is a global plus a guard function, documented as such.
+
+  Reentrancy — an initializer calling `run` on its own `Once` — aborts with the reason instead
+  of hanging, since waiting is the only other option and a hang has no stack to read.
+
+  Found and fixed on the way: **the generated module-global initializer ran `Drop` on the
+  zeroinitializer it was about to overwrite.** Latent because `Vec`/`String` drop through
+  `free(NULL)`; a `Drop` that dereferences (`Once`, `WaitGroup`) segfaulted before `main`.
+  `HIRStmt.Assign` now carries `isInit`.
+
+  Original finding:
+  ```
+  No `Once`/lazy statics. Atomics are `AtomicBool` and `AtomicI64` only — no `AtomicI32`,
+  `AtomicU64`, `AtomicPtr`.
+  ```
+  (Mutex/RwLock are *deliberately* absent per the concurrency-simplification decision — not a
+  gap, do not re-add.)
 
 - [ ] **No BigInt / arbitrary-precision decimal.** Node and Go have both; Rust punts to crates.
 

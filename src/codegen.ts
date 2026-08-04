@@ -162,7 +162,28 @@ export class Codegen {
   private closureCounter = 0;
   public scopeCounter = 0;
   public entryAllocas: string[] = [];
-  private static BUILTINS = new Set(["print", "eprint", "format", "flush", "exit", "assert", "max", "min", "_miloArgCount", "_miloArgAt", "_cstrToString", "_bytesToString", "_strDataPtr", "_putByte", "_loadU8", "_loadI32", "_callClosureVoid", "_atomicLoadI64", "_atomicStoreI64", "_atomicAddI64", "_atomicSubI64", "_atomicCasI64", "_atomicLoadBool", "_atomicStoreBool", "_atomicSwapBool", "_schedulerGet", "_schedulerSet"]);
+  // Every atomic intrinsic is sequentially consistent (seq_cst on both the success and
+  // failure orderings of a cmpxchg). Milo deliberately exposes no ordering parameter —
+  // see docs/site/language/concurrency.md. `bool` widths hold an i1 in a byte of memory.
+  private static ATOMIC_INTRINSICS: Record<string, { kind: "load" | "store" | "rmw" | "cas"; rmwOp?: string; ty: string; align: number; isBool?: boolean }> = {
+    _atomicLoadI64: { kind: "load", ty: "i64", align: 8 },
+    _atomicStoreI64: { kind: "store", ty: "i64", align: 8 },
+    _atomicAddI64: { kind: "rmw", rmwOp: "add", ty: "i64", align: 8 },
+    _atomicSubI64: { kind: "rmw", rmwOp: "sub", ty: "i64", align: 8 },
+    _atomicSwapI64: { kind: "rmw", rmwOp: "xchg", ty: "i64", align: 8 },
+    _atomicCasI64: { kind: "cas", ty: "i64", align: 8 },
+    _atomicLoadI32: { kind: "load", ty: "i32", align: 4 },
+    _atomicStoreI32: { kind: "store", ty: "i32", align: 4 },
+    _atomicAddI32: { kind: "rmw", rmwOp: "add", ty: "i32", align: 4 },
+    _atomicSubI32: { kind: "rmw", rmwOp: "sub", ty: "i32", align: 4 },
+    _atomicSwapI32: { kind: "rmw", rmwOp: "xchg", ty: "i32", align: 4 },
+    _atomicCasI32: { kind: "cas", ty: "i32", align: 4 },
+    _atomicLoadBool: { kind: "load", ty: "i8", align: 1, isBool: true },
+    _atomicStoreBool: { kind: "store", ty: "i8", align: 1, isBool: true },
+    _atomicSwapBool: { kind: "rmw", rmwOp: "xchg", ty: "i8", align: 1, isBool: true },
+    _atomicCasBool: { kind: "cas", ty: "i8", align: 1, isBool: true },
+  };
+  private static BUILTINS = new Set(["print", "eprint", "format", "flush", "exit", "assert", "max", "min", "_miloArgCount", "_miloArgAt", "_cstrToString", "_bytesToString", "_strDataPtr", "_putByte", "_loadU8", "_loadI32", "_callClosureVoid", ...Object.keys(Codegen.ATOMIC_INTRINSICS), "_schedulerGet", "_schedulerSet"]);
   private needsArgGlobals = false;
   private usesSchedulerGlobal = false;
   private currentFnName = "";
@@ -1354,6 +1375,7 @@ export class Codegen {
         kind: "Assign" as const,
         target: { kind: "Ident" as const, name: g.name, type: g.type },
         value: g.value,
+        isInit: true,
       })),
       isExtern: false,
       isVariadic: false,
@@ -1935,7 +1957,8 @@ export class Codegen {
           const [tl, tPtr] = this.genLValue(stmt.target);
           lines.push(...tl);
           const isLValueTgt =
-            stmt.target.kind === "Ident" || stmt.target.kind === "FieldAccess" || stmt.target.kind === "IndexAccess";
+            !stmt.isInit &&
+            (stmt.target.kind === "Ident" || stmt.target.kind === "FieldAccess" || stmt.target.kind === "IndexAccess");
           if (isLValueTgt && this.needsDropCg(stmt.target.type) && !this.lvalueMatches(stmt.value, stmt.target)) {
             this.emitDropValue(lines, tPtr, stmt.target.type);
           }
@@ -1951,7 +1974,8 @@ export class Codegen {
         // a non-Copy field/element leaks its old buffer. Skip identity self-assign
         // (`p = p`), where `val` still aliases the slot's live data.
         const isLValueTarget =
-          stmt.target.kind === "Ident" || stmt.target.kind === "FieldAccess" || stmt.target.kind === "IndexAccess";
+          !stmt.isInit &&
+          (stmt.target.kind === "Ident" || stmt.target.kind === "FieldAccess" || stmt.target.kind === "IndexAccess");
         if (isLValueTarget && this.needsDropCg(stmt.target.type) && !this.lvalueMatches(stmt.value, stmt.target)) {
           this.emitDropValue(lines, targetPtr, stmt.target.type);
         }
@@ -4260,84 +4284,8 @@ export class Codegen {
       return [lines, dataPtr, "ptr"];
     }
     // ── Atomic intrinsics ──
-    if (expr.func === "_atomicLoadI64") {
-      const [al, pv] = this.genExpr(expr.args[0].expr);
-      lines.push(...al);
-      const val = this.nextTemp();
-      lines.push(`  ${val} = load atomic i64, ptr ${pv} seq_cst, align 8`);
-      return [lines, val, "i64"];
-    }
-    if (expr.func === "_atomicStoreI64") {
-      const [al, pv] = this.genExpr(expr.args[0].expr);
-      lines.push(...al);
-      const [al2, vv] = this.genExpr(expr.args[1].expr);
-      lines.push(...al2);
-      lines.push(`  store atomic i64 ${vv}, ptr ${pv} seq_cst, align 8`);
-      return [lines, "void", "void"];
-    }
-    if (expr.func === "_atomicAddI64") {
-      const [al, pv] = this.genExpr(expr.args[0].expr);
-      lines.push(...al);
-      const [al2, vv] = this.genExpr(expr.args[1].expr);
-      lines.push(...al2);
-      const old = this.nextTemp();
-      lines.push(`  ${old} = atomicrmw add ptr ${pv}, i64 ${vv} seq_cst, align 8`);
-      return [lines, old, "i64"];
-    }
-    if (expr.func === "_atomicSubI64") {
-      const [al, pv] = this.genExpr(expr.args[0].expr);
-      lines.push(...al);
-      const [al2, vv] = this.genExpr(expr.args[1].expr);
-      lines.push(...al2);
-      const old = this.nextTemp();
-      lines.push(`  ${old} = atomicrmw sub ptr ${pv}, i64 ${vv} seq_cst, align 8`);
-      return [lines, old, "i64"];
-    }
-    if (expr.func === "_atomicCasI64") {
-      const [al, pv] = this.genExpr(expr.args[0].expr);
-      lines.push(...al);
-      const [al2, ev] = this.genExpr(expr.args[1].expr);
-      lines.push(...al2);
-      const [al3, dv] = this.genExpr(expr.args[2].expr);
-      lines.push(...al3);
-      const pair = this.nextTemp();
-      lines.push(`  ${pair} = cmpxchg ptr ${pv}, i64 ${ev}, i64 ${dv} seq_cst seq_cst, align 8`);
-      const old = this.nextTemp();
-      lines.push(`  ${old} = extractvalue { i64, i1 } ${pair}, 0`);
-      return [lines, old, "i64"];
-    }
-    if (expr.func === "_atomicLoadBool") {
-      const [al, pv] = this.genExpr(expr.args[0].expr);
-      lines.push(...al);
-      const raw = this.nextTemp();
-      lines.push(`  ${raw} = load atomic i8, ptr ${pv} seq_cst, align 1`);
-      const val = this.nextTemp();
-      lines.push(`  ${val} = trunc i8 ${raw} to i1`);
-      return [lines, val, "i1"];
-    }
-    if (expr.func === "_atomicStoreBool") {
-      const [al, pv] = this.genExpr(expr.args[0].expr);
-      lines.push(...al);
-      const [al2, bv] = this.genExpr(expr.args[1].expr);
-      lines.push(...al2);
-      const ext = this.nextTemp();
-      lines.push(`  ${ext} = zext i1 ${bv} to i8`);
-      lines.push(`  store atomic i8 ${ext}, ptr ${pv} seq_cst, align 1`);
-      return [lines, "void", "void"];
-    }
-    if (expr.func === "_atomicSwapBool") {
-      const [al, pv] = this.genExpr(expr.args[0].expr);
-      lines.push(...al);
-      const [al2, bv] = this.genExpr(expr.args[1].expr);
-      lines.push(...al2);
-      const ext = this.nextTemp();
-      lines.push(`  ${ext} = zext i1 ${bv} to i8`);
-      const old = this.nextTemp();
-      lines.push(`  ${old} = atomicrmw xchg ptr ${pv}, i8 ${ext} seq_cst, align 1`);
-      const val = this.nextTemp();
-      lines.push(`  ${val} = trunc i8 ${old} to i1`);
-      return [lines, val, "i1"];
-    }
+    const atomicSpec = Codegen.ATOMIC_INTRINSICS[expr.func];
+    if (atomicSpec) return this.genAtomicIntrinsic(expr, atomicSpec, lines);
     if (expr.func === "_miloArgAt") {
       this.needsArgGlobals = true;
       this.needsMalloc = true;
@@ -4373,6 +4321,59 @@ export class Codegen {
       return [lines, s3, "%String"];
     }
     return [lines, "void", "void"];
+  }
+
+  // One lowering for every `_atomic*` intrinsic; the width/op table is ATOMIC_INTRINSICS.
+  private genAtomicIntrinsic(
+    expr: HIRExpr & { kind: "Call" },
+    spec: { kind: "load" | "store" | "rmw" | "cas"; rmwOp?: string; ty: string; align: number; isBool?: boolean },
+    lines: string[],
+  ): [string[], string, string] {
+    const { ty, align, isBool } = spec;
+    const [pl, pv] = this.genExpr(expr.args[0].expr);
+    lines.push(...pl);
+    // an i1 argument has to be widened to the byte it actually occupies in memory
+    const argAt = (i: number): string => {
+      const [al, v] = this.genExpr(expr.args[i].expr);
+      lines.push(...al);
+      if (!isBool) return v;
+      const ext = this.nextTemp();
+      lines.push(`  ${ext} = zext i1 ${v} to i8`);
+      return ext;
+    };
+    const narrow = (v: string): [string[], string, string] => {
+      if (!isBool) return [lines, v, ty];
+      const b = this.nextTemp();
+      lines.push(`  ${b} = trunc i8 ${v} to i1`);
+      return [lines, b, "i1"];
+    };
+    switch (spec.kind) {
+      case "load": {
+        const raw = this.nextTemp();
+        lines.push(`  ${raw} = load atomic ${ty}, ptr ${pv} seq_cst, align ${align}`);
+        return narrow(raw);
+      }
+      case "store": {
+        const v = argAt(1);
+        lines.push(`  store atomic ${ty} ${v}, ptr ${pv} seq_cst, align ${align}`);
+        return [lines, "void", "void"];
+      }
+      case "rmw": {
+        const v = argAt(1);
+        const old = this.nextTemp();
+        lines.push(`  ${old} = atomicrmw ${spec.rmwOp} ptr ${pv}, ${ty} ${v} seq_cst, align ${align}`);
+        return narrow(old);
+      }
+      case "cas": {
+        const ev = argAt(1);
+        const dv = argAt(2);
+        const pair = this.nextTemp();
+        lines.push(`  ${pair} = cmpxchg ptr ${pv}, ${ty} ${ev}, ${ty} ${dv} seq_cst seq_cst, align ${align}`);
+        const old = this.nextTemp();
+        lines.push(`  ${old} = extractvalue { ${ty}, i1 } ${pair}, 0`);
+        return narrow(old);
+      }
+    }
   }
 
   // sretDest: only honored when `expr` itself is a direct call to an

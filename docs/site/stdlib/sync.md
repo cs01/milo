@@ -1,12 +1,16 @@
 # std/sync
 
-Channel, wait-group, and atomic primitives for coordinating green tasks and `Promise.blocking` workers.
+Channel, wait-group, once, and atomic primitives for coordinating green tasks and `Promise.blocking` workers.
 
 ```milo
-from "std/sync" import { Channel, WaitGroup, AtomicI64, AtomicBool }
+from "std/sync" import { Channel, WaitGroup, Once, AtomicI64, AtomicI32, AtomicU64, AtomicBool }
 ```
 
 There is no `Mutex` or `RwLock`: green tasks never run in parallel, and parallel `Promise.blocking` workers share state through channels (pass ownership) or atomics (lock-free counters and flags). See [Concurrency](/language/concurrency).
+
+Every type here is a reference-counted handle. `.clone()` gives another task or worker its own owner, and the shared object frees itself when the last owner drops — there is no `destroy`.
+
+**Every atomic operation on every type below is sequentially consistent (`seq_cst`)**, including both the success and failure orderings of a `cas`. There is no ordering parameter and no acquire/release/relaxed form. `add`/`sub` wrap on overflow, unlike ordinary Milo arithmetic, which traps.
 
 ## Types
 
@@ -30,6 +34,16 @@ struct WaitGroup {
 
 Counting barrier — `add` before spawning, `done` from each task, `wait` for the counter to reach zero.
 
+### Once
+
+```milo
+struct Once {
+    _p: *u8,
+}
+```
+
+Run-exactly-once initialization guard. Correct under green tasks and `Promise.blocking` threads alike — a green waiter parks, an OS-thread waiter blocks on a condition variable, and the main thread with a live scheduler drives it.
+
 ### AtomicI64
 
 ```milo
@@ -38,7 +52,27 @@ struct AtomicI64 {
 }
 ```
 
-Lock-free 64-bit atomic integer. All operations use sequential consistency.
+Lock-free signed 64-bit atomic integer.
+
+### AtomicI32
+
+```milo
+struct AtomicI32 {
+    _ptr: *u8,
+}
+```
+
+Lock-free signed 32-bit atomic integer.
+
+### AtomicU64
+
+```milo
+struct AtomicU64 {
+    _ptr: *u8,
+}
+```
+
+Lock-free unsigned 64-bit atomic integer. Rides the same instructions as `AtomicI64` — 64-bit atomics are bit-level operations with no notion of sign — so `add`/`sub` wrap through the full u64 range.
 
 ### AtomicBool
 
@@ -48,7 +82,9 @@ struct AtomicBool {
 }
 ```
 
-Lock-free atomic boolean. All operations use sequential consistency.
+Lock-free atomic boolean.
+
+There is no `AtomicPtr`. A raw pointer is only dereferenceable inside `unsafe`, so an `AtomicPtr` would be `AtomicI64` plus a cast with no safety added — and Milo cannot state that the pointee outlives the load, so a safe-looking `AtomicPtr` would be a lifetime claim nothing checks. Share an index into a `Vec` or an arena `Handle` instead.
 
 ## Channel Methods
 
@@ -100,13 +136,13 @@ fn len(self: &Channel): i64
 
 Current number of items in the channel.
 
-### ch.destroy
+### ch.clone
 
 ```milo
-fn destroy(self: &Channel): void
+fn clone(self: &Channel): Channel
 ```
 
-Free the underlying channel resource.
+Give another owner (a producer task, a worker thread) its own handle. The queue is torn down when the last one drops.
 
 ## WaitGroup Methods
 
@@ -142,13 +178,49 @@ fn wait(self: &WaitGroup): void
 
 Block until the counter reaches zero.
 
-### wg.destroy
+### wg.clone
 
 ```milo
-fn destroy(self: &WaitGroup): void
+fn clone(self: &WaitGroup): WaitGroup
 ```
 
-Free the underlying wait-group resource.
+Give a worker its own owner. `add`/`done`/`wait` take `&Self`, so most uses need no clone.
+
+## Once Methods
+
+### Once.new
+
+```milo
+fn Once.new(): Once
+```
+
+Create a guard whose initializer has not run yet.
+
+### o.run
+
+```milo
+fn run(self: &Once, f: () => void): void
+```
+
+Run `f` if nobody has yet; otherwise block until whoever did is finished. Returns only once the initializer has completed exactly once, process-wide, and every caller that returns has seen its writes.
+
+Re-entering `run` from inside its own initializer would wait for itself forever; it aborts with that message rather than hanging.
+
+### o.isDone
+
+```milo
+fn isDone(self: &Once): bool
+```
+
+True once the initializer has completed. Still false while it is running, so this is a progress hint, never a substitute for `run`.
+
+### o.clone
+
+```milo
+fn clone(self: &Once): Once
+```
+
+Give another owner its own handle. `run` takes `&Self`, so a module-level `Once` never needs a clone.
 
 ## AtomicI64 Methods
 
@@ -182,7 +254,7 @@ Atomic write.
 fn add(self: &AtomicI64, v: i64): i64
 ```
 
-Atomic add. Returns old value.
+Atomic add, wrapping. Returns old value.
 
 ### a.sub
 
@@ -190,7 +262,15 @@ Atomic add. Returns old value.
 fn sub(self: &AtomicI64, v: i64): i64
 ```
 
-Atomic subtract. Returns old value.
+Atomic subtract, wrapping. Returns old value.
+
+### a.swap
+
+```milo
+fn swap(self: &AtomicI64, v: i64): i64
+```
+
+Atomic swap. Returns old value.
 
 ### a.cas
 
@@ -198,15 +278,23 @@ Atomic subtract. Returns old value.
 fn cas(self: &AtomicI64, expected: i64, desired: i64): i64
 ```
 
-Compare-and-swap. Returns old value.
+Compare-and-swap. Returns the value that was there — equal to `expected` exactly when the swap happened.
 
-### a.destroy
+### a.clone
 
 ```milo
-fn destroy(self: &AtomicI64): void
+fn clone(self: &AtomicI64): AtomicI64
 ```
 
-Free the atomic resource.
+Give another owner its own handle; the storage frees when the last one drops.
+
+## AtomicI32 Methods
+
+`AtomicI32` carries the same surface as `AtomicI64` at 32 bits: `AtomicI32.new(v: i32)`, `load`, `store`, `add`, `sub`, `swap`, `cas`, `clone`.
+
+## AtomicU64 Methods
+
+`AtomicU64` carries the same surface as `AtomicI64` over `u64`: `AtomicU64.new(v: u64)`, `load`, `store`, `add`, `sub`, `swap`, `cas`, `clone`.
 
 ## AtomicBool Methods
 
@@ -242,13 +330,40 @@ fn swap(self: &AtomicBool, v: bool): bool
 
 Atomic swap. Returns old value.
 
-### a.destroy
+### a.cas
 
 ```milo
-fn destroy(self: &AtomicBool): void
+fn cas(self: &AtomicBool, expected: bool, desired: bool): bool
 ```
 
-Free the atomic resource.
+Compare-and-swap. Returns the value that was there, which is how a caller claims a one-shot flag: `f.cas(false, true) == false`.
+
+### a.clone
+
+```milo
+fn clone(self: &AtomicBool): AtomicBool
+```
+
+Give another owner its own handle; the storage frees when the last one drops.
+
+## Example: Lazy static
+
+A module-level `var` already runs a real initializer in dependency order before `main`, so an *eager* static needs no `Once` at all. Reach for `Once` when the work must be deferred past the start of `main` or is expensive and usually unwanted. The shape is a global plus a guard function, because a getter cannot hand back a `&T`:
+
+```milo
+from "std/sync" import { Once }
+
+var gTable: Vec<i64> = []
+var gTableOnce: Once = Once.new()
+
+pub fn ensureTable(): void {
+    gTableOnce.run((): void => {
+        gTable = buildTable()
+    })
+}
+```
+
+Callers do `ensureTable()` and then read `gTable` directly. There is no `Lazy<T>` or `OnceCell<T>`: with no way to return a reference, every `get()` would deep-copy the cached value.
 
 ## Example: Producer-Consumer
 
@@ -274,7 +389,6 @@ fn main(): i32 {
     }
 
     producer.await()!
-    ch.destroy()
     print("done")
     return 0
 }

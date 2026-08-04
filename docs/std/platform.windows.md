@@ -552,6 +552,16 @@ pub fn pthread_rwlock_wrlock(rwlock: *u8): i32
 
 _Undocumented._
 
+### `pthread_self`
+
+```milo
+pub fn pthread_self(): i64
+```
+
+Not the HANDLE pthread_create hands back — a thread id is what callers actually want
+here (they only compare it for equality to recognize "this same thread"), and unlike
+GetCurrentThread()'s pseudo-handle it is unique process-wide.
+
 ### `read`
 
 ```milo

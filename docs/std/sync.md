@@ -2,6 +2,15 @@
 
 ## std/sync
 
+### `AtomicBool.cas`
+
+```milo
+fn AtomicBool.cas(self: &AtomicBool, expected: bool, desired: bool): bool
+```
+
+Returns the value that was there — equal to `expected` exactly when the swap
+happened, which is how a caller claims a one-shot flag: `f.cas(false, true) == false`.
+
 ### `AtomicBool.clone`
 
 ```milo
@@ -42,6 +51,71 @@ fn AtomicBool.swap(self: &AtomicBool, val: bool): bool
 
 _Undocumented._
 
+### `AtomicI32.add`
+
+```milo
+fn AtomicI32.add(self: &AtomicI32, val: i32): i32
+```
+
+Returns the OLD value. Wraps on overflow.
+
+### `AtomicI32.cas`
+
+```milo
+fn AtomicI32.cas(self: &AtomicI32, expected: i32, desired: i32): i32
+```
+
+Store `desired` only if the current value is `expected`. Returns the value that
+was there — equal to `expected` exactly when the swap happened.
+
+### `AtomicI32.clone`
+
+```milo
+fn AtomicI32.clone(self: &AtomicI32): AtomicI32
+```
+
+Share this atomic with another owner; freed when the last owner drops.
+
+### `AtomicI32.load`
+
+```milo
+fn AtomicI32.load(self: &AtomicI32): i32
+```
+
+_Undocumented._
+
+### `AtomicI32.new`
+
+```milo
+fn AtomicI32.new(initial: i32): AtomicI32
+```
+
+_Undocumented._
+
+### `AtomicI32.store`
+
+```milo
+fn AtomicI32.store(self: &AtomicI32, val: i32): void
+```
+
+_Undocumented._
+
+### `AtomicI32.sub`
+
+```milo
+fn AtomicI32.sub(self: &AtomicI32, val: i32): i32
+```
+
+Returns the OLD value. Wraps on underflow.
+
+### `AtomicI32.swap`
+
+```milo
+fn AtomicI32.swap(self: &AtomicI32, val: i32): i32
+```
+
+_Undocumented._
+
 ### `AtomicI64.add`
 
 ```milo
@@ -56,7 +130,8 @@ _Undocumented._
 fn AtomicI64.cas(self: &AtomicI64, expected: i64, desired: i64): i64
 ```
 
-_Undocumented._
+Store `desired` only if the current value is `expected`. Returns the value that
+was there — equal to `expected` exactly when the swap happened.
 
 ### `AtomicI64.clone`
 
@@ -95,6 +170,79 @@ _Undocumented._
 
 ```milo
 fn AtomicI64.sub(self: &AtomicI64, val: i64): i64
+```
+
+_Undocumented._
+
+### `AtomicI64.swap`
+
+```milo
+fn AtomicI64.swap(self: &AtomicI64, val: i64): i64
+```
+
+_Undocumented._
+
+### `AtomicU64.add`
+
+```milo
+fn AtomicU64.add(self: &AtomicU64, val: u64): u64
+```
+
+Returns the OLD value. Wraps on overflow.
+
+### `AtomicU64.cas`
+
+```milo
+fn AtomicU64.cas(self: &AtomicU64, expected: u64, desired: u64): u64
+```
+
+Store `desired` only if the current value is `expected`. Returns the value that
+was there — equal to `expected` exactly when the swap happened.
+
+### `AtomicU64.clone`
+
+```milo
+fn AtomicU64.clone(self: &AtomicU64): AtomicU64
+```
+
+Share this atomic with another owner; freed when the last owner drops.
+
+### `AtomicU64.load`
+
+```milo
+fn AtomicU64.load(self: &AtomicU64): u64
+```
+
+_Undocumented._
+
+### `AtomicU64.new`
+
+```milo
+fn AtomicU64.new(initial: u64): AtomicU64
+```
+
+_Undocumented._
+
+### `AtomicU64.store`
+
+```milo
+fn AtomicU64.store(self: &AtomicU64, val: u64): void
+```
+
+_Undocumented._
+
+### `AtomicU64.sub`
+
+```milo
+fn AtomicU64.sub(self: &AtomicU64, val: u64): u64
+```
+
+Returns the OLD value. Wraps on underflow.
+
+### `AtomicU64.swap`
+
+```milo
+fn AtomicU64.swap(self: &AtomicU64, val: u64): u64
 ```
 
 _Undocumented._
@@ -191,6 +339,41 @@ fn ChannelHandle.retain(self: &ChannelHandle): ChannelHandle
 ```
 
 _Undocumented._
+
+### `Once.clone`
+
+```milo
+fn Once.clone(self: &Once): Once
+```
+
+Share this Once with another owner (a worker task/thread); freed when the last
+owner drops. `run` takes &Self, so a module-level Once never needs a clone.
+
+### `Once.isDone`
+
+```milo
+fn Once.isDone(self: &Once): bool
+```
+
+True once the initializer has completed. Still false while it is running, so
+this is a progress hint, never a substitute for `run`.
+
+### `Once.new`
+
+```milo
+fn Once.new(): Once
+```
+
+_Undocumented._
+
+### `Once.run`
+
+```milo
+fn Once.run(self: &Once, f: () => void): void
+```
+
+Run `f` if nobody has yet, otherwise block until whoever did is finished.
+Returns only once the initializer has completed exactly once, process-wide.
 
 ### `WaitGroup.add`
 

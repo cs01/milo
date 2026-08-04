@@ -1,0 +1,12 @@
+// @error: use of moved variable 'a'
+// A binding consumed on either arm of a fork is unusable afterwards — which arm
+// ran is a runtime fact. This used to compile and double-free: neither arm was
+// marked moved, so both slots were still dropped at scope exit.
+fn main() {
+    var a = "aaa" + ""
+    var b = "bbb" + ""
+    let c = true
+    let s = if c { a } else { b }
+    print(s)
+    print(a)
+}

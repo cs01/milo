@@ -1,0 +1,14 @@
+// @error: cannot move 'd.a' out of the borrowed 'd'
+// A fork owns nothing itself — it evaluates to one of its tails, so consuming it
+// consumes whichever tail ran. `return d.a` was always rejected; spelled through
+// an if-expression it used to compile and double-free at runtime.
+struct Doc { a: string, b: string }
+
+fn pick(d: &Doc, c: bool): string {
+    return if c { d.a } else { d.b }
+}
+
+fn main() {
+    var d = Doc { a: "aaa" + "", b: "bbb" + "" }
+    print(pick(d, true))
+}

@@ -1,0 +1,552 @@
+// Differential falsifier for the OWNERSHIP checker. Hunts for FALSE ACCEPTS — a
+// program the checker compiles that then frees the same buffer twice, reads one it
+// already freed, or prints something other than what it owns.
+//
+// The asymmetry is the whole point, and it is the mirror of scripts/prove-soundness-fuzz.ts.
+// A false REJECT costs you a program you have to rewrite; you find out immediately and
+// the compiler tells you where. A false ACCEPT costs you the guarantee the language is
+// built on, and you find out at a customer's site, if at all. So the harness spends its
+// budget on the accepting direction and only counts the rejecting one.
+//
+// The oracle is execution. Every generated program carries its own predicted stdout,
+// computed here in TypeScript from the same ownership model that emitted it, so three
+// distinct failures are visible without a reference implementation:
+//
+//     compiled + aborted            =>  double free / corrupt heap
+//     compiled + wrong stdout       =>  read of freed or clobbered memory
+//     compiled + used-after-move    =>  the checker missed a move it should have seen
+//
+// Generation is biased toward the shapes where a move is spelled indirectly, because
+// that is where every ownership hole in this compiler's history has lived: the value
+// tail of an `if`, of a `match`, of `??`, a field moved out of a struct, an argument
+// moved by a method call. Eight separate ad-hoc walkers each recognised a different
+// subset of those spellings, and the two double-frees fixed on 2026-08-03 were both a
+// move the checker could not see because it was written as a fork (see
+// docs/worksheets/2026-08-03-fail-closed-places.md). A generator that only emitted
+// `let b = a` would have found neither.
+//
+// Runs with MallocScribble=1: macOS fills freed blocks with 0x55 on release, which turns
+// a silent use-after-free into a visible wrong string. Without it a UAF on this platform
+// usually prints the right answer out of memory that has not been reused yet, and the
+// stdout oracle sees nothing (docs: project_uaf_proof_technique).
+//
+// Usage: bun scripts/fuzz-ownership.ts [--cases N] [--seed N] [--steps N] [--keep] [--verbose]
+import { mkdtempSync, writeFileSync, rmSync } from "fs";
+import { execSync } from "child_process";
+import { tmpdir } from "os";
+import { join } from "path";
+
+const ROOT = join(import.meta.dir, "..");
+const MILO = join(ROOT, "src", "main.ts");
+const argOf = (flag: string, dflt: number) => {
+  const i = process.argv.indexOf(flag);
+  return i >= 0 && process.argv[i + 1] ? parseInt(process.argv[i + 1]!, 10) : dflt;
+};
+const CASES = argOf("--cases", 40);
+const SEED = argOf("--seed", 1);
+const STEPS = argOf("--steps", 9);
+const KEEP = process.argv.includes("--keep");
+const VERBOSE = process.argv.includes("--verbose");
+
+// Seeded PRNG so a finding is reproducible from the seed in the report.
+let state = SEED >>> 0 || 1;
+function rnd(): number {
+  state ^= state << 13; state >>>= 0;
+  state ^= state >> 17;
+  state ^= state << 5; state >>>= 0;
+  return state / 0x100000000;
+}
+const pick = <T>(xs: T[]): T => xs[Math.floor(rnd() * xs.length)]!;
+const chance = (p: number) => rnd() < p;
+
+// Distinct lengths so a slot that gets swapped for another is visible in the
+// `borrow` output too, not only in the printed text.
+const WORDS = ["alfa", "bravo", "charlie", "delta", "echo", "foxtrot", "golf", "hotel",
+  "india", "juliett", "kilo", "lima", "mike", "november", "oscar", "papa"];
+
+// ── the ownership model ───────────────────────────────────────────────────────
+//
+// One `Slot` per owned string buffer in the generated program. `ref` is how the
+// program names it — `v3` for a binding, `s1.a` for a struct field — so a move out
+// of a field and a move out of a binding are the same operation to the generator,
+// which is exactly the distinction the checker keeps getting wrong.
+interface Slot { ref: string; word: string; live: boolean }
+
+class Program {
+  lines: string[] = [];
+  expected: string[] = [];
+  slots: Slot[] = [];
+  conds: { name: string; value: boolean }[] = [];
+  vecs: string[] = [];
+  private n = 0;
+  private indent = 1;
+
+  fresh(prefix: string) { return `${prefix}${this.n++}`; }
+  emit(line: string) { this.lines.push("    ".repeat(this.indent) + line); }
+  open(line: string) { this.emit(line); this.indent++; }
+  close() { this.indent--; this.emit("}"); }
+
+  live() { return this.slots.filter(s => s.live); }
+  dead() { return this.slots.filter(s => !s.live); }
+  take(s: Slot) { s.live = false; }
+
+  // A bool the generator knows the value of, so it can predict which arm of a fork
+  // actually runs while the checker still has to assume either might.
+  cond(): { name: string; value: boolean } {
+    if (this.conds.length > 0 && chance(0.5)) return pick(this.conds);
+    const c = { name: this.fresh("c"), value: chance(0.5) };
+    this.emit(`let ${c.name} = ${c.value}`);
+    this.conds.push(c);
+    return c;
+  }
+
+  source(): string {
+    return `struct Pair {
+    a: string,
+    b: string,
+}
+
+// A type whose destructor is observable. Its output is part of the predicted stdout,
+// so a drop that does not run, runs twice, or runs at the wrong point is a mismatch.
+// Added after a partial move out of a Drop type turned out to skip the destructor
+// entirely — a silent resource leak the string-only shapes could not express.
+struct Res {
+    name: string,
+}
+
+impl Drop for Res {
+    fn drop(self: &mut Self) {
+        print("drop " + self.name)
+    }
+}
+
+fn consume(s: string): i64 {
+    return s.len()
+}
+
+fn borrow(s: &string): i64 {
+    return s.len()
+}
+
+fn main() {
+${this.lines.join("\n")}
+}
+`;
+  }
+}
+
+// ── the shapes ────────────────────────────────────────────────────────────────
+//
+// Each takes a program and either applies (returning true) or declines because its
+// preconditions are not met. All of them keep the model and the emitted code in
+// lockstep: a shape that consumes a slot in the program must mark it dead here, or
+// the harness starts reporting its own bookkeeping as compiler bugs.
+type Shape = { name: string; apply: (p: Program) => boolean };
+
+const SHAPES: Shape[] = [
+  {
+    name: "declare",
+    apply(p) {
+      const v = p.fresh("v"), word = pick(WORDS);
+      p.emit(`let ${v} = "${word}"`);
+      p.slots.push({ ref: v, word, live: true });
+      return true;
+    },
+  },
+  {
+    name: "read-borrow",
+    apply(p) {
+      const s = p.live()[0] ? pick(p.live()) : null;
+      if (!s) return false;
+      p.emit(`print(borrow(${s.ref}))`);
+      p.expected.push(String(s.word.length));
+      return true;
+    },
+  },
+  {
+    name: "print",
+    apply(p) {
+      const live = p.live();
+      if (live.length === 0) return false;
+      const s = pick(live);
+      p.emit(`print(${s.ref})`);
+      p.expected.push(s.word);
+      return true;
+    },
+  },
+  {
+    name: "move-to-call",
+    apply(p) {
+      const live = p.live();
+      if (live.length === 0) return false;
+      const s = pick(live);
+      p.emit(`print(consume(${s.ref}))`);
+      p.expected.push(String(s.word.length));
+      p.take(s);
+      return true;
+    },
+  },
+  {
+    name: "move-to-binding",
+    apply(p) {
+      const live = p.live();
+      if (live.length === 0) return false;
+      const s = pick(live), v = p.fresh("v");
+      p.emit(`let ${v} = ${s.ref}`);
+      p.take(s);
+      p.slots.push({ ref: v, word: s.word, live: true });
+      return true;
+    },
+  },
+  {
+    // The spelling that hid two double-frees: a value moved out of the tail of a
+    // fork. Both arms are consumed at compile time — which arm runs is a runtime
+    // fact — so a checker that only marks the taken one leaves the other droppable
+    // twice.
+    name: "move-through-if",
+    apply(p) {
+      const live = p.live();
+      if (live.length < 2) return false;
+      const x = pick(live);
+      const y = pick(live.filter(s => s !== x));
+      const c = p.cond(), v = p.fresh("v");
+      p.emit(`let ${v} = if ${c.name} { ${x.ref} } else { ${y.ref} }`);
+      p.take(x); p.take(y);
+      p.slots.push({ ref: v, word: c.value ? x.word : y.word, live: true });
+      return true;
+    },
+  },
+  {
+    name: "move-through-match",
+    apply(p) {
+      const live = p.live();
+      if (live.length < 2) return false;
+      const x = pick(live);
+      const y = pick(live.filter(s => s !== x));
+      const c = p.cond(), v = p.fresh("v");
+      p.open(`let ${v} = match ${c.name} {`);
+      p.emit(`true => ${x.ref},`);
+      p.emit(`false => ${y.ref},`);
+      p.close();
+      p.take(x); p.take(y);
+      p.slots.push({ ref: v, word: c.value ? x.word : y.word, live: true });
+      return true;
+    },
+  },
+  {
+    // Into a struct, then back out field-wise. A field is a place like any other:
+    // the same rule that governs `v3` has to govern `s1.a`, and for a long time it
+    // did not (docs/memory-safety-vs-rust.md, the field-move-out-of-borrow UAF).
+    name: "move-into-struct",
+    apply(p) {
+      const live = p.live();
+      if (live.length < 2) return false;
+      const x = pick(live);
+      const y = pick(live.filter(s => s !== x));
+      const s = p.fresh("s");
+      p.emit(`let ${s} = Pair { a: ${x.ref}, b: ${y.ref} }`);
+      p.take(x); p.take(y);
+      p.slots.push({ ref: `${s}.a`, word: x.word, live: true });
+      p.slots.push({ ref: `${s}.b`, word: y.word, live: true });
+      return true;
+    },
+  },
+  {
+    // A method call that consumes its argument. `push` is the one every program
+    // writes, and it moves — a checker that treats method arguments differently from
+    // free-function arguments has a hole exactly the width of the standard library.
+    name: "move-into-vec",
+    apply(p) {
+      const live = p.live();
+      if (live.length === 0) return false;
+      const s = pick(live);
+      let q = p.vecs.length > 0 && chance(0.6) ? pick(p.vecs) : null;
+      if (!q) {
+        q = p.fresh("q");
+        p.emit(`var ${q}: Vec<string> = Vec.new()`);
+        p.vecs.push(q);
+      }
+      p.emit(`${q}.push(${s.ref})`);
+      p.take(s);
+      return true;
+    },
+  },
+  {
+    // `??` unwraps by consuming: the Option dies and its payload becomes the result.
+    // A move through it was one of the slots the use-after-move fix had to cover.
+    name: "move-through-option",
+    apply(p) {
+      const live = p.live();
+      if (live.length === 0) return false;
+      const s = pick(live), o = p.fresh("o"), v = p.fresh("v");
+      const fallback = pick(WORDS);
+      p.emit(`let ${o}: Option<string> = Option.Some(${s.ref})`);
+      p.take(s);
+      p.emit(`let ${v} = ${o} ?? "${fallback}"`);
+      // Always Some, so the fallback never runs — the point is the move, not the branch.
+      p.slots.push({ ref: v, word: s.word, live: true });
+      return true;
+    },
+  },
+  {
+    // A move inside a branch that may not run. The value is dead afterwards either
+    // way; whether the buffer was actually handed over is a runtime fact, and the
+    // drop at scope exit has to agree with it.
+    name: "move-inside-branch",
+    apply(p) {
+      const live = p.live();
+      if (live.length === 0) return false;
+      const s = pick(live), c = p.cond();
+      p.open(`if ${c.name} {`);
+      p.emit(`print(consume(${s.ref}))`);
+      if (c.value) p.expected.push(String(s.word.length));
+      p.close();
+      p.take(s);
+      return true;
+    },
+  },
+  {
+    // A destructor whose position in the output is knowable. The value lives in a
+    // taken branch with nothing else in it, so its drop fires at one unambiguous
+    // point — no general drop-ordering model needed, and a missing or duplicated
+    // destructor shows up as a stdout mismatch like any other wrong value.
+    name: "drop-scope",
+    apply(p) {
+      const c = p.cond();
+      if (!c.value) return false;   // an untaken branch would print nothing to check
+      const r = p.fresh("r"), word = pick(WORDS);
+      p.open(`if ${c.name} {`);
+      p.emit(`let ${r} = Res { name: "${word}" }`);
+      p.emit(`print(borrow(${r}.name))`);
+      p.expected.push(String(word.length));
+      p.close();
+      p.expected.push(`drop ${word}`);
+      return true;
+    },
+  },
+  {
+    // `.clone()` is the escape hatch the diagnostics point at, so it has to actually
+    // produce an independent buffer. If it aliased, this shape would double-free.
+    name: "clone",
+    apply(p) {
+      const live = p.live();
+      if (live.length === 0) return false;
+      const s = pick(live), v = p.fresh("v");
+      p.emit(`let ${v} = ${s.ref}.clone()`);
+      p.slots.push({ ref: v, word: s.word, live: true });
+      return true;
+    },
+  },
+];
+
+// ── generation ────────────────────────────────────────────────────────────────
+
+interface Case {
+  src: string;
+  expected: string[];
+  invalid: null | { ref: string; spelling: string };
+}
+
+function generate(invalidate: boolean): Case {
+  const p = new Program();
+  // Two slots up front: most shapes need a pair, and starting empty wastes cases on
+  // a body that is nothing but `declare`.
+  SHAPES[0]!.apply(p);
+  SHAPES[0]!.apply(p);
+  for (let i = 0; i < STEPS; i++) {
+    // Try a few shapes before giving up on this step — most decline when the model
+    // has run out of live slots, which happens naturally as moves accumulate.
+    for (let attempt = 0; attempt < 6; attempt++) {
+      if (pick(SHAPES).apply(p)) break;
+    }
+  }
+
+  let invalid: Case["invalid"] = null;
+  if (invalidate) {
+    const dead = p.dead();
+    if (dead.length > 0) {
+      const s = pick(dead);
+      // The last spelling is the interesting one: the use is buried in a fork tail,
+      // which is precisely the shape the checker used to walk straight past.
+      const spelling = pick(["borrow", "print", "consume", "rebind", "fork", "whole", "drop-partial"]);
+      const live = p.live();
+      switch (spelling) {
+        case "borrow": p.emit(`print(borrow(${s.ref}))`); break;
+        case "print": p.emit(`print(${s.ref})`); break;
+        case "consume": p.emit(`print(consume(${s.ref}))`); break;
+        case "rebind": p.emit(`let ${p.fresh("v")} = ${s.ref}`); break;
+        case "fork": {
+          const other = live.length > 0 ? pick(live).ref : `"${pick(WORDS)}"`;
+          p.emit(`let ${p.fresh("v")} = if ${p.cond().name} { ${s.ref} } else { ${other} }`);
+          break;
+        }
+        // Use of the WHOLE value while one of its places is gone. Only meaningful when
+        // the dead slot is a struct FIELD — a plain binding cannot be missing a part and
+        // still exist — so a non-field slot falls back to an ordinary use-after-move.
+        case "whole": {
+          if (!s.ref.includes(".")) { p.emit(`print(borrow(${s.ref}))`); break; }
+          p.emit(`print(${s.ref.split(".")[0]!})`);
+          break;
+        }
+        // A field taken out of a type with a destructor. Self-contained, because the
+        // bug it encodes needs no prior state: the move used to compile and the drop
+        // then never ran at all.
+        case "drop-partial": {
+          const r = p.fresh("r");
+          p.emit(`let ${r} = Res { name: "${pick(WORDS)}" }`);
+          p.emit(`let ${p.fresh("v")} = ${r}.name`);
+          break;
+        }
+      }
+      invalid = { ref: s.ref, spelling };
+    }
+  }
+  return { src: p.source(), expected: p.expected, invalid };
+}
+
+// ── the oracles ───────────────────────────────────────────────────────────────
+
+interface Run { ok: boolean; stdout: string; stderr: string; status: number }
+
+function sh(cmd: string, env?: Record<string, string>): Run {
+  try {
+    const stdout = execSync(cmd, {
+      encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"], timeout: 120000,
+      env: { ...process.env, ...env },
+    });
+    return { ok: true, stdout, stderr: "", status: 0 };
+  } catch (e: any) {
+    return { ok: false, stdout: String(e.stdout ?? ""), stderr: String(e.stderr ?? ""), status: Number(e.status ?? -1) };
+  }
+}
+
+// The checker's verdict, without paying for clang. `emit-hir` runs lexer → parser →
+// checker → lowering and exits nonzero on any error diagnostic.
+function accepts(file: string) {
+  const r = sh(`bun ${MILO} emit-hir ${file}`);
+  const clean = (r.stderr + r.stdout).replace(/\x1b\[[0-9;]*m/g, "");
+  return { accepted: r.ok, output: clean };
+}
+
+// An internal exception is not a diagnostic — it is the compiler falling over, and in
+// the LSP it means the file shows no errors at all rather than the wrong ones. This is
+// the oracle that `fatal()`'s recovery boundaries have to hold up under.
+const INTERNAL_CRASH = /TypeError|ReferenceError|Cannot read propert|is not a function|at TypeChecker\.|at Object\.<anonymous>/;
+
+interface Finding {
+  kind: "false-accept" | "unsound-accept" | "miscompile" | "compiler-crash" | "false-reject";
+  detail: string;
+  file: string;
+}
+
+const dir = mkdtempSync(join(tmpdir(), "milo-ownfuzz-"));
+const findings: Finding[] = [];
+let validAccepted = 0, validTotal = 0, invalidRejected = 0, invalidTotal = 0, noInjection = 0;
+
+function keep(i: number, src: string) {
+  const kept = join(ROOT, `ownership-finding-${i}.milo`);
+  writeFileSync(kept, src);
+  return kept;
+}
+
+for (let i = 0; i < CASES; i++) {
+  // Half the population is written to be correct and half has a use-after-move spliced
+  // in. Both directions are needed: the invalid half is what can expose a false accept,
+  // and the valid half is what proves the checker has not simply started rejecting
+  // everything — a compiler that rejects all programs has no false accepts either.
+  const invalidate = i % 2 === 1;
+  const c = generate(invalidate);
+  const file = join(dir, `case${i}.milo`);
+  writeFileSync(file, c.src);
+  if (VERBOSE) console.log(`\n── case ${i} (${invalidate ? "invalid" : "valid"})\n${c.src}`);
+
+  const verdict = accepts(file);
+  if (INTERNAL_CRASH.test(verdict.output)) {
+    findings.push({
+      kind: "compiler-crash",
+      detail: verdict.output.split("\n").find(l => INTERNAL_CRASH.test(l))?.trim() ?? "internal error",
+      file: keep(i, c.src),
+    });
+    continue;
+  }
+
+  if (c.invalid) {
+    invalidTotal++;
+    if (!verdict.accepted) { invalidRejected++; continue; }
+    // Accepted a program that uses a value it already gave away. Run it: an abort or a
+    // wrong string turns "the checker has a gap" into "the gap is exploitable", which
+    // is the difference between a backlog entry and a stop-everything bug.
+    const run = sh(`bun ${MILO} run ${file}`, { MallocScribble: "1" });
+    const aborted = run.status !== 0 || /malloc|double free|pointer being freed/i.test(run.stderr);
+    findings.push({
+      kind: aborted ? "unsound-accept" : "false-accept",
+      detail: `use-after-move of '${c.invalid.ref}' spelled '${c.invalid.spelling}' compiled` +
+        (aborted ? ` and the program died: ${(run.stderr.split("\n").find(l => l.trim()) ?? `exit ${run.status}`).trim()}` : " (ran to completion — a gap, not yet a crash)"),
+      file: keep(i, c.src),
+    });
+    continue;
+  }
+
+  validTotal++;
+  if (!verdict.accepted) {
+    // Low severity by design: a rejected valid program is loud and recoverable. Still
+    // reported, because a rule that over-rejects is how a language becomes unusable,
+    // and because it is usually the generator that is wrong — which is worth knowing.
+    findings.push({
+      kind: "false-reject",
+      detail: (verdict.output.split("\n").find(l => l.includes("error")) ?? "rejected").trim(),
+      file: keep(i, c.src),
+    });
+    continue;
+  }
+  validAccepted++;
+
+  const run = sh(`bun ${MILO} run ${file}`, { MallocScribble: "1" });
+  const got = run.stdout.split("\n").filter(l => l !== "");
+  if (run.status !== 0) {
+    findings.push({
+      kind: "miscompile",
+      detail: `exit ${run.status}: ${(run.stderr.split("\n").find(l => l.trim()) ?? "").trim()}`,
+      file: keep(i, c.src),
+    });
+  } else if (got.join("\n") !== c.expected.join("\n")) {
+    findings.push({
+      kind: "miscompile",
+      detail: `stdout mismatch\n      expected: ${JSON.stringify(c.expected)}\n      got:      ${JSON.stringify(got)}`,
+      file: keep(i, c.src),
+    });
+  }
+}
+
+// ── report ────────────────────────────────────────────────────────────────────
+
+console.log(`seed ${SEED}, ${CASES} cases (${STEPS} steps each)`);
+console.log(`valid programs accepted:   ${validAccepted}/${validTotal}`);
+console.log(`invalid programs rejected: ${invalidRejected}/${invalidTotal}`);
+if (noInjection > 0) console.log(`(${noInjection} invalid cases had no moved value to reuse)`);
+
+// A run where nothing compiled and nothing executed proves nothing about a checker that
+// accepts too much. Exit distinctly so a green CI line can never mean "tested nothing".
+if (validAccepted === 0 || invalidTotal === 0) {
+  console.log("VACUOUS RUN: no valid program reached execution, so no acceptance was tested.");
+  process.exit(2);
+}
+
+if (findings.length === 0) {
+  console.log("no findings: every accepted program ran and printed exactly what it owns");
+  if (!KEEP) rmSync(dir, { recursive: true, force: true });
+  process.exit(0);
+}
+
+const order: Finding["kind"][] = ["unsound-accept", "miscompile", "compiler-crash", "false-accept", "false-reject"];
+console.log(`\nFINDINGS (${findings.length}):`);
+for (const kind of order) {
+  for (const f of findings.filter(x => x.kind === kind)) {
+    console.log(`  [${f.kind}] ${f.detail}`);
+    console.log(`    repro: ${f.file}`);
+  }
+}
+if (!KEEP) rmSync(dir, { recursive: true, force: true });
+// A false reject alone is not a failure of the thing this harness exists to test.
+const severe = findings.filter(f => f.kind !== "false-reject");
+process.exit(severe.length === 0 ? 0 : 1);

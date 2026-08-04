@@ -1,0 +1,9 @@
+// @error: use of moved variable 'a'
+fn main() {
+    var a = "aaa" + ""
+    var b = "bbb" + ""
+    let n = 0
+    let s = match n { 0 => a, _ => b }
+    print(s)
+    print(a)
+}

@@ -1,0 +1,13 @@
+// @error: cannot move 'd.a' out of the borrowed 'd'
+// Same rule as the if-expression form: every arm tail is a candidate result and
+// each one has to answer the move-out-of-borrow question.
+struct Doc { a: string, b: string }
+
+fn pick(d: &Doc, n: i64): string {
+    return match n { 0 => d.a, _ => d.b }
+}
+
+fn main() {
+    var d = Doc { a: "aaa" + "", b: "bbb" + "" }
+    print(pick(d, 0))
+}

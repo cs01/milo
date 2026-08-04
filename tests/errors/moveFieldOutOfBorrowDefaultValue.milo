@@ -1,0 +1,13 @@
+// @error: cannot move 'd.a' out of the borrowed 'd'
+// `??` forks the same way: the result is either the payload — which lives in the
+// borrowed value's storage — or the default.
+struct Doc { a: string }
+
+fn pick(d: &Doc, o: Option<string>): string {
+    return o ?? d.a
+}
+
+fn main() {
+    var d = Doc { a: "aaa" + "" }
+    print(pick(d, Option.None))
+}

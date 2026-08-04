@@ -1,0 +1,27 @@
+// The other half of per-field move tracking: a field that has been given a new value
+// is live again, and moving a DIFFERENT field never made the first one unusable.
+// Tracking moves per place is only correct if it also forgets them on assignment.
+// @expect: delta
+// @expect: papa
+// @expect: echo
+// @expect: 4
+struct Pair {
+    a: string,
+    b: string,
+}
+
+fn main() {
+    var p = Pair {
+        a: "delta", b: "papa"
+    }
+    let first = p.a
+    print(first)
+    // A different field was never touched by that move.
+    let other = p.b
+    print(other)
+    // Putting a value back makes the place usable again.
+    p.a = "echo"
+    let again = p.a
+    print(again)
+    print(again.len())
+}

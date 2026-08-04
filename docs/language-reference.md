@@ -1476,6 +1476,104 @@ Primitive types (`i32`, `bool`, `f64`, etc.) are copied, not moved.
 
 A struct whose fields are all Copy is itself Copy, and so is never move-tracked.
 
+Ownership is tracked per **place**, not per variable, so a field can be moved out on
+its own and the rest of the struct stays usable:
+
+```milo
+struct Pair {
+    a: string,
+    b: string,
+}
+
+fn main() {
+    var p = Pair { a: "one", b: "two" }
+    let x = p.a        // p.a is moved out; p.b is untouched
+    print(x)
+    print(p.b)         // fine — a different place
+    p.a = "three"      // assignment puts a value back
+    print(p.a)         // fine again
+}
+```
+
+Using the field after it was moved is an error, the same as for a whole variable:
+
+```milo error
+struct Pair {
+    a: string,
+    b: string,
+}
+
+fn main() {
+    let p = Pair { a: "one", b: "two" }
+    let x = p.a
+    print(x)
+    print(p.a)         // error: use of moved value 'p.a'
+}
+```
+
+And once a field has left, the struct is no longer whole, so passing it on is an
+error too — it would hand the next owner an empty field dressed up as data:
+
+```milo error
+struct Pair {
+    a: string,
+    b: string,
+}
+
+fn take(p: Pair): i64 {
+    return p.b.len()
+}
+
+fn main() {
+    let p = Pair { a: "one", b: "two" }
+    let x = p.a
+    print(x)
+    print(take(p))     // error: 'p.a' was already moved out of it
+}
+```
+
+Using the struct **as a whole** while a field is missing is an error as well, since it
+would show the emptied field as if it were data:
+
+```milo error
+struct Pair {
+    a: string,
+    b: string,
+}
+
+fn main() {
+    let p = Pair { a: "one", b: "two" }
+    let x = p.a
+    print(x)
+    print(p)           // error: 'p' is incomplete: 'p.a' was moved out of it
+}
+```
+
+A type with a `Drop` impl cannot be taken apart at all. `drop` runs against the whole
+value, so a destructor that found one of its fields already gone would be reading an
+empty one:
+
+```milo error
+struct Res {
+    name: string,
+}
+
+impl Drop for Res {
+    fn drop(self: &mut Self) {
+        print("dropping " + self.name)
+    }
+}
+
+fn main() {
+    let r = Res { name: "alpha" }
+    let stolen = r.name    // error: cannot move 'r.name' out of 'Res', which implements Drop
+    print(stolen)
+}
+```
+
+An index is a runtime value, so `v[i]` is not tracked this way — see
+[docs/backlog.md](backlog.md) on the container-dependent answer.
+
 ### `@noCopy` — move-tracked handles
 
 That rule is wrong for one important shape: the **resource handle**. A GL texture name,

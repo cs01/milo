@@ -732,14 +732,11 @@ let MUTABLE_NAMES = new Set<string>();
 function collectMutableNames(fn: Function): Set<string> {
   const out = new Set<string>();
   for (const p of fn.params) if (p.type?.isRefMut || p.type?.isPtr) out.add(p.name);
-  const scan = (stmts: Stmt[]): void => {
-    for (const s of stmts as any[]) {
-      if (s.kind === "VarDecl") out.add(s.name);
-      for (const key of ["body", "thenBody", "elseBody"]) if (Array.isArray(s[key])) scan(s[key]);
-      if (Array.isArray(s.arms)) for (const arm of s.arms) if (Array.isArray(arm.body)) scan(arm.body);
-    }
-  };
-  scan(fn.body);
+  // Every `var`, wherever it is written. This gates havoc — a name missing here is a name
+  // `collectMutations` declines to forget — so the statement-shaped scan this replaced was
+  // the same false-proof shape as the assigned-vars walker: it never entered an expression,
+  // and a `var` declared inside a closure body or an if-expr arm was simply not mutable.
+  walkNodes(fn.body, n => { if (n.kind === "VarDecl") out.add(n.name); });
   return out;
 }
 
@@ -753,6 +750,26 @@ interface MutatingCall {
   // needs both: the parameter is the name the contract is written in, the base is where the
   // post-call symbols live.
   mutTargets: Map<string, string>;
+}
+
+// The expressions a statement evaluates ITSELF. Nested statement bodies are excluded on
+// purpose — walkCapture reaches those on its own, under their own path conditions — and
+// they exclude themselves for free, since a body is an array and an array carries no
+// `kind`. Types exclude themselves the same way (MiloType is keyed by `name`).
+//
+// Derived by exclusion rather than by naming the fields, which is the whole point: the
+// three lists this replaced said `value, expr, cond, subject[, target]`, so a ForInStmt's
+// `iterable` was on none of them and `for x in makeRange(n)` never had its callee's
+// `requires` checked. A statement kind that gains an expression field is now covered
+// instead of quietly skipped.
+function ownExprs(stmt: any): Expr[] {
+  const out: Expr[] = [];
+  for (const key of Object.keys(stmt)) {
+    if (key === "span") continue;
+    const v = stmt[key];
+    if (v && typeof v === "object" && !Array.isArray(v) && typeof v.kind === "string") out.push(v as Expr);
+  }
+  return out;
 }
 
 function collectMutatingCalls(node: any, out: MutatingCall[]): void {
@@ -992,21 +1009,18 @@ function collectPaths(stmts: Stmt[], env: Map<string, string>, types?: Map<strin
       // walker at all, so calls inside them are never recorded — missed coverage rather
       // than a VC built on conditions we cannot see.
       const st = stmt as any;
-      for (const key of ["value", "expr", "cond", "subject"]) {
-        if (st[key] && st[key].kind) collectCallsInExpr(st[key], pathConds, localEnv, calls);
-        if (st[key] && st[key].kind) collectStructLitsInExpr(st[key], pathConds, localEnv, structLits);
+      const own = ownExprs(st);
+      for (const e of own) {
+        collectCallsInExpr(e, pathConds, localEnv, calls);
+        collectStructLitsInExpr(e, pathConds, localEnv, structLits);
       }
 
       // What this statement's own expressions mutate out from under the walker. Nested
       // bodies are excluded — walkCapture reaches those statements itself.
       const mutated = new Set<string>();
-      for (const key of ["value", "expr", "cond", "subject", "target"]) {
-        if (st[key] && st[key].kind) collectMutations(st[key], mutated);
-      }
+      for (const e of own) collectMutations(e, mutated);
       const mutCalls: MutatingCall[] = [];
-      for (const key of ["value", "expr", "cond", "subject", "target"]) {
-        if (st[key] && st[key].kind) collectMutatingCalls(st[key], mutCalls);
-      }
+      for (const e of own) collectMutatingCalls(e, mutCalls);
       // Applied AFTER the statement's own env update, so the call's arguments are still
       // lowered in the pre-call state while everything downstream sees the unknown.
       const applyMutations = () => {
@@ -1260,14 +1274,9 @@ function lengthNonNeg(refs: Set<string>, fn: Function): string[] {
     if (t && (t.name === "string" || t.name === "Vec" || t.isArray)) lenBearing.add(name);
   };
   for (const p of fn.params) consider(p.name, p.type);
-  const scan = (stmts: Stmt[]): void => {
-    for (const s of stmts as any[]) {
-      if ((s.kind === "LetDecl" || s.kind === "VarDecl") && s.type) consider(s.name, s.type);
-      for (const key of ["body", "thenBody", "elseBody"]) if (Array.isArray(s[key])) scan(s[key]);
-      if (Array.isArray(s.arms)) for (const arm of s.arms) if (Array.isArray(arm.body)) scan(arm.body);
-    }
-  };
-  scan(fn.body);
+  walkNodes(fn.body, n => {
+    if ((n.kind === "LetDecl" || n.kind === "VarDecl") && n.type) consider(n.name, n.type);
+  });
   return [...refs]
     .filter(r => r.endsWith("_len") && lenBearing.has(r.slice(0, -"_len".length)))
     .map(r => `(assert (>= ${r} 0))`);
@@ -2047,15 +2056,15 @@ function patched(env: Map<string, string>, patch: Map<string, string> | undefine
   return out;
 }
 
+// Whether the function is worth building VCs for at all. A miss here is not a wrong answer
+// but no answer: the caller `continue`s past the function entirely, so an invariant written
+// inside an expression-nested loop was silently never checked.
 function hasLoopInvariants(stmts: Stmt[]): boolean {
-  for (const stmt of stmts as any[]) {
-    if ((stmt.kind === "WhileStmt" || stmt.kind === "ForInStmt") && stmt.invariants?.length > 0) return true;
-    for (const key of ["body", "thenBody", "elseBody"]) {
-      if (Array.isArray(stmt[key]) && hasLoopInvariants(stmt[key])) return true;
-    }
-    if (Array.isArray(stmt.arms) && stmt.arms.some((a: any) => hasLoopInvariants(a.body))) return true;
-  }
-  return false;
+  let found = false;
+  walkNodes(stmts, n => {
+    if ((n.kind === "WhileStmt" || n.kind === "ForInStmt") && n.invariants?.length > 0) found = true;
+  });
+  return found;
 }
 
 function exprToSmt(expr: Expr): string {

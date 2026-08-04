@@ -1,7 +1,7 @@
 <!-- doc-meta
 system: breaking-changes
 purpose: source-level breaks users have to act on, with the migration and the reason a compat shim was impossible
-key-files: std/platform.*.milo, std/os.milo, std/string.milo, std/strconv.milo, std/uuid.milo, std/ws.milo
+key-files: std/platform.*.milo, std/os.milo, std/string.milo, std/strconv.milo, std/uuid.milo, std/ws.milo, std/fetch.milo, std/zstd.milo
 update-when: a public stdlib name moves, is renamed, or changes signature
 last-verified: 2026-08-03
 -->
@@ -83,6 +83,27 @@ for a function name. Hard break.
 
 **Failure mode if you miss one.** A build error: `'WS_TEXT' not found in
 'std/ws'`, or a type mismatch on the comparison. Nothing silently keeps working.
+
+## `std/fetch` and `std/zstd` internals are file-private (2026-08-03)
+
+Both modules were exporting their implementation. They now export only their API.
+
+`std/fetch` no longer exports `startsWith` (deleted — use the builtin
+`s.startsWith(prefix)` method), nor `strEqNocase`, `hexDigit`, `parseStatus`,
+`parseRawHeaders`, `parseBody`, `decodeChunked`, `schemeOffset`, `httpDo`,
+`httpsDo`, `doFetch`, `SSL_VERIFY_PEER`, `X509_V_OK`. Migration: `doFetch(url,
+opts)` is `fetchWith(url, opts)`; raw responses still parse via `parseResponse`,
+requests still serialize via `buildRequest`, and `findHeader`/`hasHeader`/
+`isHttps`/`parseHost`/`parsePort`/`parsePath`/`urlEncode`/`formEncode` are
+unchanged. The rest were bytes-level steps of those, with no standalone contract.
+
+`std/zstd` no longer exports `BitCS`, `BlockResult`, `FseCTable`, `FseHdr`,
+`FseTable`, `HufTable`, `HufTableResult`, `LzResult`, `Rev`, `Seq`, `Seq3`,
+`SeqCodes`, `StreamPlan`, `ZDec`, `ZstdHeader` — FSE/Huffman coder state, not an
+API. `Zstd.compress` / `.compressRaw` / `.decompress` are the whole module.
+
+No compat shim was possible: `pub` is the only visibility knob, so re-exporting
+these would be the bug this change fixes.
 
 ## Shadowing is rejected (2026-08-01)
 

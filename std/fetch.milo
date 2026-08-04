@@ -43,9 +43,9 @@ from "std/event" import {
 
 // openssl/ssl.h: SSL_VERIFY_PEER. Makes the handshake fail on an untrusted chain
 // instead of silently accepting it (the client default is SSL_VERIFY_NONE).
-pub let SSL_VERIFY_PEER: i32 = 1
+let SSL_VERIFY_PEER: i32 = 1
 // openssl/x509_vfy.h: X509_V_OK.
-pub let X509_V_OK: i64 = 0
+let X509_V_OK: i64 = 0
 
 // ── TLS Stream ──
 
@@ -252,7 +252,10 @@ impl Response {
 
 // ── String helpers ──
 
-pub fn strEqNocase(a: &string, ai: i64, b: &string, blen: i64): bool {
+// Case-insensitive compare of `blen` bytes of `b` against `a` starting at `ai`.
+// Anchored at an offset, which is what header scanning needs and what
+// std/string's strIndexOfFromIgnoreCase does not give.
+fn strEqNocase(a: &string, ai: i64, b: &string, blen: i64): bool {
     var i: i64 = 0
     while i < blen {
         var ca: u8 = a[ai + i]
@@ -312,21 +315,10 @@ pub fn hasHeader(headers: &string, name: &string): bool {
     return false
 }
 
-pub fn startsWith(s: &string, prefix: &string): bool {
-    if s.len < prefix.len {
-        return false
-    }
-    var i: i64 = 0
-    while i < prefix.len {
-        if s[i] != prefix[i] {
-            return false
-        }
-        i = i + 1
-    }
-    return true
-}
-
-pub fn hexDigit(c: u8): i64 {
+// Hex value of an ASCII hex digit, or -1. The -1 is load-bearing: decodeChunked
+// uses it to find the end of a chunk-size field, so std/hex's `_hexVal` (which
+// returns 0 for a non-digit) cannot stand in for this.
+fn hexDigit(c: u8): i64 {
     if c >= '0' && c <= '9' {
         return (c - '0') as i64
     }
@@ -341,7 +333,7 @@ pub fn hexDigit(c: u8): i64 {
 
 // ── HTTP parsing ──
 
-pub fn parseStatus(raw: &string): i32 {
+fn parseStatus(raw: &string): i32 {
     if raw.len < 12 {
         return 0
     }
@@ -354,7 +346,7 @@ pub fn parseStatus(raw: &string): i32 {
     return code
 }
 
-pub fn parseRawHeaders(raw: &string): string {
+fn parseRawHeaders(raw: &string): string {
     var start: i64 = 0
     var i: i64 = 0
     while i + 1 < raw.len {
@@ -371,7 +363,7 @@ pub fn parseRawHeaders(raw: &string): string {
     return ""
 }
 
-pub fn parseBody(raw: &string): string {
+fn parseBody(raw: &string): string {
     var i: i64 = 0
     while i + 3 < raw.len {
         if raw[i] == '\r' && raw[i + 1] == '\n' && raw[i + 2] == '\r' && raw[i + 3] == '\n' {
@@ -382,7 +374,7 @@ pub fn parseBody(raw: &string): string {
     return raw.clone()
 }
 
-pub fn decodeChunked(rawBody: &string): string {
+fn decodeChunked(rawBody: &string): string {
     var result: string = ""
     var i: i64 = 0
     while i < rawBody.len {
@@ -424,8 +416,7 @@ pub fn parseResponse(raw: string): Response {
     var body = parseBody(raw)
     // handle chunked transfer encoding
     let te = findHeader(headers, "Transfer-Encoding")
-    let chunked: string = "chunked"
-    if startsWith(te, chunked) {
+    if te.startsWith("chunked") {
         body = decodeChunked(body)
     }
     return Response {
@@ -439,7 +430,7 @@ pub fn isHttps(url: &string): bool {
     return url.len > 8 && url[0] == 'h' && url[4] == 's' && url[5] == ':' && url[6] == '/' && url[7] == '/'
 }
 
-pub fn schemeOffset(url: &string): i64 {
+fn schemeOffset(url: &string): i64 {
     if isHttps(url) {
         return 8
     }
@@ -569,21 +560,21 @@ pub fn buildRequest(host: &string, path: &string, opts: &FetchOptions): string {
     return req
 }
 
-pub fn httpDo(ip: u32, port: u16, host: string, path: string, opts: &FetchOptions): Result<Response, NetError> {
+fn httpDo(ip: u32, port: u16, host: string, path: string, opts: &FetchOptions): Result<Response, NetError> {
     let stream = TcpStream.connect(ip, port)?
     stream.send(buildRequest(host, path, opts))?
     let raw = stream.recv()?
     return Result.Ok(parseResponse(raw))
 }
 
-pub fn httpsDo(ip: u32, port: u16, host: string, path: string, opts: &FetchOptions): Result<Response, NetError> {
+fn httpsDo(ip: u32, port: u16, host: string, path: string, opts: &FetchOptions): Result<Response, NetError> {
     let stream = TlsStream.connect(ip, port, host)?
     stream.send(buildRequest(host, path, opts))?
     let raw = stream.recv()?
     return Result.Ok(parseResponse(raw))
 }
 
-pub fn doFetch(url: string, opts: FetchOptions): Result<Response, NetError> {
+fn doFetch(url: string, opts: FetchOptions): Result<Response, NetError> {
     let useTls = isHttps(url)
     let host = parseHost(url)
     let port = parsePort(url)

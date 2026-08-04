@@ -210,6 +210,10 @@ export interface HIREnum {
 
 export interface HIRGlobal {
   name: string;
+  // Declaring file, same role as HIRFunction.sourceFile: the partition key. A global must
+  // be DEFINED in exactly one object file and declared external in the others, so per-module
+  // codegen cannot work without knowing which module owns it.
+  sourceFile?: string;
   type: TypeKind;
   value: HIRExpr;
   mutable: boolean;

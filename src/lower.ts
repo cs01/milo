@@ -144,6 +144,7 @@ class LowerCtx {
         value: this.lowerExpr(g.value),
         mutable: g.mutable,
         threadLocal: g.threadLocal,
+        ...(g.span?.file && { sourceFile: g.span.file }),
       });
     }
 

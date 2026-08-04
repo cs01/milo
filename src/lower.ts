@@ -697,10 +697,8 @@ class LowerCtx {
           // superlinear pathology in the type checker until the input was measured in bytes
           // rather than source lines.
           const codes = new Uint16Array(bytes.length);
-          for (let i = 0; i < bytes.length; i++) {
-            const b = bytes[i] as number;
-            codes[i] = b < 0x80 ? b : 0xF700 + b;
-          }
+          let n = 0;
+          for (const b of bytes) codes[n++] = b < 0x80 ? b : 0xF700 + b;
           // 8192 stays well under the argument-count limit that makes `fromCharCode(...all)`
           // overflow the stack on a large asset.
           const CHUNK = 8192;

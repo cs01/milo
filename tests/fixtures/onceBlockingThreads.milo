@@ -1,0 +1,46 @@
+// @expect: 1
+// @expect: 99
+// @expect: 396
+
+// Four real OS threads race on one Once. The winner sleeps mid-initializer so the
+// others are still inside `run` when it publishes. Each worker returns the global it
+// read *after* run() came back: the total is 4*99 only if Once published the writes.
+from "std/sync" import {
+    Once
+}
+from "std/runtime" import {
+    Promise
+}
+from "std/time" import {
+    sleepMs
+}
+
+var gInitCount: i64 = 0
+var gValue: i64 = 0
+var gOnce: Once = Once.new()
+
+pub fn main(): i32 {
+    var ps: Vec<Promise<i64>> = Vec.new()
+    var i: i64 = 0
+    while i < 4 {
+        ps.push(Promise<i64>.blocking(move(): i64 => {
+            gOnce.run((): void => {
+                gInitCount = gInitCount + 1
+                sleepMs(50)
+                gValue = 99
+            }
+            )
+            return gValue
+        }
+        ))
+        i = i + 1
+    }
+    var total: i64 = 0
+    for p in ps {
+        total = total + p.await()!
+    }
+    print(gInitCount)
+    print(gValue)
+    print(total)
+    return 0
+}

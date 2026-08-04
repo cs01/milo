@@ -1,0 +1,38 @@
+// @expect: false
+// @expect: 1
+// @expect: true
+// @expect: 3
+// @expect: 30
+// @expect: 1
+
+// The lazy-static shape: a module-level `var` plus a `Once` guard function.
+from "std/sync" import {
+    Once
+}
+
+var gInitCount: i64 = 0
+var gTable: Vec<i64> = []
+var gTableOnce: Once = Once.new()
+
+fn ensureTable(): void {
+    gTableOnce.run((): void => {
+        gInitCount = gInitCount + 1
+        gTable.push(10)
+        gTable.push(20)
+        gTable.push(30)
+    }
+    )
+}
+
+pub fn main(): i32 {
+    print(gTableOnce.isDone())
+    ensureTable()
+    print(gInitCount)
+    print(gTableOnce.isDone())
+    ensureTable()
+    ensureTable()
+    print(gTable.len)
+    print(gTable[2])
+    print(gInitCount)
+    return 0
+}

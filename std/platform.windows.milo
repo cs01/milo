@@ -478,6 +478,8 @@ pub extern fn WaitForSingleObject(handle: i64, ms: u32): u32
 
 pub extern fn CloseHandle(handle: i64): i32
 
+pub extern fn GetCurrentThreadId(): u32
+
 pub fn pthread_mutex_init(mutex: *u8, _attr: *u8): i32 {
     InitializeSRWLock(mutex)
     return 0
@@ -549,6 +551,13 @@ pub fn pthread_join(thread: i64, _retval: *u8): i32 {
 pub fn pthread_detach(thread: i64): i32 {
     CloseHandle(thread)
     return 0
+}
+
+// Not the HANDLE pthread_create hands back — a thread id is what callers actually want
+// here (they only compare it for equality to recognize "this same thread"), and unlike
+// GetCurrentThread()'s pseudo-handle it is unique process-wide.
+pub fn pthread_self(): i64 {
+    return GetCurrentThreadId() as i64
 }
 
 pub fn pthread_rwlock_init(rwlock: *u8, _attr: *u8): i32 {

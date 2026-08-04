@@ -3239,7 +3239,7 @@ Green tasks never run in parallel, so plain sequencing protects task-to-task sta
 Lock-free atomic types for cross-thread counters and flags. No mutex needed.
 
 ```milo
-from "std/sync" import { AtomicI64, AtomicBool }
+from "std/sync" import { AtomicI64, AtomicI32, AtomicU64, AtomicBool }
 
 let counter = AtomicI64.new(0)
 counter.add(1)                  // returns old value
@@ -3253,7 +3253,61 @@ let prev = flag.swap(false)     // returns old value
 // no destroy: counter and flag free themselves when their last owner drops
 ```
 
-All atomic operations use sequential consistency (seq_cst). `AtomicI64` and `AtomicBool` use audited `unsafe impl Send` / `Sync` markers because their raw-pointer internals are accessed only through those atomic operations. To share one across `Promise.blocking` workers, `.clone()` it — the handle is a reference-counted owner (Arc-style), and the storage frees when the last owner drops. No manual `destroy`.
+Four types: `AtomicI64`, `AtomicI32`, `AtomicU64`, `AtomicBool`. The integer ones carry `load`, `store`, `add`, `sub`, `swap`, `cas`; `AtomicBool` carries `load`, `store`, `swap`, `cas`. Every mutating operation returns the **old** value.
+
+**All atomic operations use sequential consistency (`seq_cst`)** — a `cas` is seq_cst on both its success and its failure ordering. There is no ordering parameter and there are no acquire/release/relaxed forms: the cheaper orderings are a correctness cliff invisible in the source, and nothing in std or its consumers has been bound by the difference. Read every atomic call as a full barrier.
+
+`add`/`sub` **wrap** on overflow, unlike ordinary Milo arithmetic, which traps. No atomic read-modify-write instruction has a checked form; to detect overflow, write a `cas` loop and inspect the old value.
+
+There is no `AtomicPtr`. A raw pointer is only dereferenceable inside `unsafe`, so an `AtomicPtr` would be `AtomicI64` plus a cast with no safety added — and Milo has no way to state that the pointee outlives the load, so a safe-looking `AtomicPtr` would be a lifetime claim the compiler cannot check. Share an index into a `Vec` or an arena `Handle` instead.
+
+All four use audited `unsafe impl Send` / `Sync` markers because their raw-pointer internals are accessed only through those atomic operations. To share one across `Promise.blocking` workers, `.clone()` it — the handle is a reference-counted owner (Arc-style), and the storage frees when the last owner drops. No manual `destroy`.
+
+### Once and lazy statics
+
+`Once` runs one initializer exactly once, however many green tasks or `Promise.blocking` threads reach it at the same time. The losers block until the winner finishes, so every caller that returns from `run` has seen the initializer's writes. A green waiter parks (the scheduler keeps running), an OS-thread waiter blocks on a condition variable, and the main thread with a live scheduler drives it. Re-entering `run` from inside its own initializer would wait for itself forever, so it aborts with that message rather than hanging.
+
+A module-level `var` already runs a real initializer, in dependency order, before `main` — so an *eager* static needs no `Once`:
+
+```milo
+fn buildTable(): Vec<i64> {
+    return [1, 2, 3]
+}
+
+var gTable: Vec<i64> = buildTable()   // runs before main
+
+fn main(): i32 {
+    print(gTable.len)
+    return 0
+}
+```
+
+Reach for `Once` when initialization must be deferred past the start of `main` (it needs argv or a config file) or is expensive and usually unwanted. The shape is a global plus a guard function, because a getter cannot hand back a `&T` — references are second-class:
+
+```milo
+from "std/sync" import { Once }
+
+fn buildTable(): Vec<i64> {
+    return [1, 2, 3]
+}
+
+var gTable: Vec<i64> = []
+var gTableOnce: Once = Once.new()
+
+fn ensureTable(): void {
+    gTableOnce.run((): void => {
+        gTable = buildTable()
+    })
+}
+
+fn main(): i32 {
+    ensureTable()
+    print(gTable.len)
+    return 0
+}
+```
+
+Callers do `ensureTable()` and then read `gTable` directly. There is no `Lazy<T>` or `OnceCell<T>`: with no way to return a reference, every `get()` would deep-copy the cached value, turning a cache into a per-access allocation.
 
 ### Pitfalls
 
@@ -3261,7 +3315,7 @@ All atomic operations use sequential consistency (seq_cst). `AtomicI64` and `Ato
 2. **Call `Task.join()` immediately after `spawn`.** The registration must land before the task can complete; joining after you've yielded or blocked elsewhere is a lost wakeup.
 3. **The green scheduler is single-threaded and cooperative.** A task that spins on CPU or calls blocking FFI starves every other task — nothing preempts it. Move that work to `Promise.blocking`; long compute loops that must stay on a task should `schedulerYield()` periodically.
 4. **`Promise.blocking` is the only OS thread.** Its closure runs in parallel and its captures must be `Send`; a plain `Promise`/`Task` closure stays on the scheduler and has no such requirement. Use `blocking` only for CPU-bound work or blocking FFI — ordinary I/O already yields on a green task.
-5. **`Channel`, `WaitGroup`, and atomics are reference-counted handles — `.clone()` to share, no manual free.** They are move-only owners; cloning gives another owner and the storage frees when the last owner drops (Arc-style). A worker task takes its own `.clone()`. (`Promise` also frees itself on `await` — nothing to clone or destroy.)
+5. **`Channel`, `WaitGroup`, `Once`, and atomics are reference-counted handles — `.clone()` to share, no manual free.** They are move-only owners; cloning gives another owner and the storage frees when the last owner drops (Arc-style). A worker task takes its own `.clone()`. (`Promise` also frees itself on `await` — nothing to clone or destroy.)
 6. **Channels must be `close()`d** or the consumer's `for val in ch` never ends. `send` on a closed channel returns `Result.Err`, not a panic. Bounded `send` blocking when full is backpressure, not a bug — poll with `trySend`/`tryRecv`.
 7. **Move closures capture copies.** Mutating a captured `var` inside a task or worker is invisible outside. Communicate results through a `Channel`/`Promise`, or share through an atomic — never through captured locals.
 
@@ -3286,13 +3340,16 @@ All atomic operations use sequential consistency (seq_cst). `AtomicI64` and `Ato
 | `WaitGroup.new()` | Create a wait group |
 | `wg.add(n)` / `wg.done()` / `wg.wait()` | Track and await a fleet of tasks |
 | `wg.clone()` | Owning handle to share with a task (frees at last drop) |
-| `AtomicI64.new(v)` / `AtomicBool.new(v)` | Create atomic |
+| `AtomicI64.new(v)` / `AtomicI32.new(v)` / `AtomicU64.new(v)` / `AtomicBool.new(v)` | Create atomic |
 | `a.load()` | Atomic read |
 | `a.store(v)` | Atomic write |
-| `a.add(v)` / `a.sub(v)` | Atomic add/sub (returns old) |
+| `a.add(v)` / `a.sub(v)` | Atomic add/sub, wrapping (returns old) |
 | `a.cas(exp, des)` | Compare-and-swap (returns old) |
 | `a.swap(v)` | Atomic swap (returns old) |
 | `a.clone()` | Owning handle to share with a worker (frees at last drop) |
+| `Once.new()` | Create a run-exactly-once guard |
+| `o.run(fn)` | Run `fn` once; later callers block until it finishes |
+| `o.isDone()` | True once the initializer has completed |
 
 ---
 

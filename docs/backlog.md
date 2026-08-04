@@ -3,7 +3,7 @@ system: planning
 purpose: ROI/difficulty-ranked lens over outstanding work; a prioritization view, NOT the source of truth for status
 key-files: docs/roadmap.md (canonical status), docs/safety-roadmap.md
 update-when: an item ships (flip in roadmap.md, then DELETE it here) or a new item is triaged
-last-verified: 2026-08-02 (added three from the visibility/linkage keyword review: package-scoped `pub` (T2, has a deadline — before packages ship), the `@externalLinkage`-without-`pub` lint (T1), and `extern struct` being misnamed (T3); earlier same day: the void-`return` miscompile and print buffering, both found writing examples/games/apsis; earlier: full probe audit: deleted the shipped overflow-default flip, re-scoped the &mut-slice entry to dynamic splitMut only, added the indirect-closure-escape UAF and the generic-static turbofish gap)
+last-verified: 2026-08-03 (linked the stdlib audit tracker — its items live there, not here, so this file stays a compiler/language lens; earlier 2026-08-02: added three from the visibility/linkage keyword review: package-scoped `pub` (T2, has a deadline — before packages ship), the `@externalLinkage`-without-`pub` lint (T1), and `extern struct` being misnamed (T3); earlier same day: the void-`return` miscompile and print buffering, both found writing examples/games/apsis; earlier: full probe audit: deleted the shipped overflow-default flip, re-scoped the &mut-slice entry to dynamic splitMut only, added the indirect-closure-escape UAF and the generic-static turbofish gap)
 -->
 
 # Backlog — prioritized
@@ -13,6 +13,8 @@ A **do-next ordering** across the open work. Status source of truth is [roadmap.
 **Refs name things, never line numbers.** Every `roadmap.md:NNN` in here had rotted — `:115` pointed at an unrelated shipped item, `:109`/`:123` at blank lines. A ref that silently points somewhere plausible is worse than none. Same for `#N` cross-references: renumbering after a deletion left one item pointing at itself and another at a deleted entry, so prefer naming the item.
 
 **Verify before working an entry.** These are written from intent and rot as code lands: three entries here (LSP rename, `milo doc`, the parser bug's diagnosis) turned out already shipped or misdiagnosed, and two more (iterators' "needs associated types", Option's "needs closures") named blockers that no longer existed. The full audit then found three more shipped entries still listed (SIGWINCH select arm, shuf/Promise ergonomics, benchmarking harness). Check the code first; correct the entry when it lies.
+
+**Stdlib work lives in its own tracker.** The 2026-08-03 comparative sweep against Go/Rust/Node is [stdlib-audit-2026-08.md](stdlib-audit-2026-08.md) — checkbox items, tiered the same way. It is not duplicated here; this file stays a compiler/language lens. Three of its entries name a blocker that IS here (generic-static turbofish → T1 #5, package-scoped `pub` → T2 #1b, lazy iterators → T2 #6, declined).
 
 **Shipped items are deleted from this file, not struck through** — git history and roadmap.md keep the record. If an entry ships but leaves real work behind, only the leftover survives here, rewritten as its own item.
 

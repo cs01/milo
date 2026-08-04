@@ -52,7 +52,8 @@ Most utilities are **namespaced**: call a static on the namespace (`Path.join`, 
 
 | Module | What it provides |
 |--------|-----------------|
-| [`std/time`](time) | Wall clock, monotonic timing, sleep |
+| [`std/time`](time) | Wall clock, elapsed time, `Duration` arithmetic/parse/format, sleep |
+| [`std/timer`](timer) | `Timer`, `Ticker`, `recvTimeout`, `waitReadable`/`waitWritable` |
 | [`std/datetime`](datetime) | Date/time — `DateTime.now`/`.fromEpoch`, then `dt.format()`, `weekdayName` |
 | [`std/uuid`](uuid) | UUIDs — `Uuid.v4`, `Uuid.v7`, `Uuid.parse` |
 

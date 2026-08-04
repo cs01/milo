@@ -4,7 +4,7 @@ from "std/os" import {
     fork, waitpid, kill, exit, system
 }
 from "std/time" import {
-    sleepMs, epochMillis
+    Duration, sleepMs, epochMillis
 }
 from "std/args" import {
     args
@@ -41,28 +41,14 @@ pub fn printHelp(): void {
     print("  127  COMMAND not found")
 }
 
+// Seconds from a GNU-timeout duration: "30", "30s", "5m", "2h". A bare number is
+// seconds, which std's parser rejects on purpose, so that case is handled here.
+// 0 means "not a duration" — main already treats non-positive as an error.
 pub fn parseDuration(s: &string): i64 {
-    var num: i64 = 0
-    var i: i64 = 0
-    while i < s.len {
-        let ch = s[i]
-        if ch >= 48 && ch <= 57 {
-            num = num * 10 + (ch as i64 - 48)
-            i = i + 1
-        } else {
-            if ch == 115 {
-                return num
-            }
-            if ch == 109 {
-                return num * 60
-            }
-            if ch == 104 {
-                return num * 3600
-            }
-            return num
-        }
+    if let Option.Some(d) = Duration.parse(s) {
+        return d.toSecs()
     }
-    return num
+    return s.parseInt() ?? 0
 }
 
 pub fn parseSignal(s: &string): i32 {

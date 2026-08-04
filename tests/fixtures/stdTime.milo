@@ -4,7 +4,7 @@
 // @expect: micros ok
 
 from "std/time" import {
-    durationMicros, durationMillis, durationSecs, epochMillis, now, since, sleepMs
+    epochMillis, now, since, sleepMs
 }
 
 pub fn main(): i32 {
@@ -16,16 +16,13 @@ pub fn main(): i32 {
 
     sleepMs(50)
     let d = since(start)
-    let ms = durationMillis(d)
-    if ms >= 40 {
+    if d.toMillis() >= 40 {
         print("sleep ok")
     }
 
-    let secs = durationSecs(d)
-    print(secs.toString())
+    print(d.toSecs().toString())
 
-    let micros = durationMicros(d)
-    if micros >= 40000 {
+    if d.toMicros() >= 40000 {
         print("micros ok")
     }
     return 0

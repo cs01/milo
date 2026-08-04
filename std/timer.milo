@@ -1,0 +1,239 @@
+// std/timer — one-shot timers, repeating tickers, and timeouts.
+//
+// Everything here is a thin layer over machinery that already exists: a green
+// task (std/runtime), a Channel (std/sync), and a Select timer arm (std/select).
+// A Timer or Ticker is a task that sleeps and sends, so it composes with
+// `selectRecv` exactly like any other channel:
+//
+//   var tk = Ticker.every(Duration.millis(100))
+//   var sel = Select.new()
+//   selectRecv(sel, tk.channel())
+//   selectRecv(sel, work)
+//   match sel.wait() { ... }
+//   tk.stop()
+//
+// SCHEDULER: timer arms are driven by the scheduler's poll loop, so every entry
+// point here calls `ensureTimersLive()` first. That makes a timeout honest on the
+// main context of a program that never spawned a green task — the case std/select
+// documents as inert, where `sel.onTimeout` looks like protection and isn't.
+
+from "std/time" import {
+    Duration, Instant, ensureTimersLive, now, sleepFor
+}
+
+from "std/runtime" import {
+    Task
+}
+
+from "std/sync" import {
+    AtomicBool, Channel
+}
+
+from "std/select" import {
+    Select, selectRecv
+}
+
+// ── Timer — fires once ──
+
+pub struct Timer {
+    _ch: Channel<Instant>,
+    _stopped: AtomicBool,
+}
+
+impl Timer {
+    // Start a timer that delivers one Instant after `d`. The clock starts now,
+    // not at the first recv.
+    fn after(d: &Duration): Timer {
+        ensureTimersLive()
+        let ch = Channel<Instant>.new(1)!
+        let stopped = AtomicBool.new(false)
+        // Closures can't hold a `&Duration` (second-class refs), so the span
+        // crosses into the task as a plain i64.
+        let ns = d.toNanos()
+        let chTask = ch.clone()
+        let stopTask = stopped.clone()
+        let _task = Task.spawn(move(): void => {
+            sleepFor(Duration.nanos(ns))
+            if !stopTask.load() {
+                chTask.trySend(now())
+            }
+            chTask.close()
+        }
+        )
+        return Timer {
+            _ch: ch, _stopped: stopped
+        }
+    }
+
+    // The delivery channel, for arming in a Select alongside other sources.
+    fn channel(self: &Self): Channel<Instant> {
+        return self._ch.clone()
+    }
+
+    // Block until the timer fires. None if it was stopped first.
+    fn recv(self: &Self): Option<Instant> {
+        match self._ch.recv() {
+            Result.Ok(t) => {
+                return Option.Some(t)
+            }
+            Result.Err(_e) => {
+                return Option.None
+            }
+        }
+    }
+
+    // Cancel. Idempotent; a timer that already fired is unaffected (its value is
+    // still waiting in the channel).
+    fn stop(self: &Self): void {
+        self._stopped.store(true)
+    }
+}
+
+impl Drop for Timer {
+    fn drop(self: &mut Self): void {
+        // Without this, a dropped-but-unfired timer's task sleeps out the full
+        // span and sends into a channel nobody holds.
+        self._stopped.store(true)
+    }
+}
+
+// ── Ticker — fires repeatedly ──
+
+pub struct Ticker {
+    _ch: Channel<Instant>,
+    _stopped: AtomicBool,
+}
+
+impl Ticker {
+    // Deliver an Instant every `period`. A slow receiver does not accumulate a
+    // backlog: the buffer holds one tick and the sender drops any it can't
+    // deposit, which is Go's behavior and the only one that can't grow without
+    // bound.
+    //
+    // A period of zero or less would be a hot loop, so it yields a Ticker that
+    // never fires.
+    fn every(period: &Duration): Ticker {
+        ensureTimersLive()
+        let ch = Channel<Instant>.new(1)!
+        let stopped = AtomicBool.new(false)
+        let ns = period.toNanos()
+        if ns <= 0 {
+            ch.close()
+            stopped.store(true)
+            return Ticker {
+                _ch: ch, _stopped: stopped
+            }
+        }
+        let chTask = ch.clone()
+        let stopTask = stopped.clone()
+        let _task = Task.spawn(move(): void => {
+            while !stopTask.load() {
+                sleepFor(Duration.nanos(ns))
+                if stopTask.load() {
+                    break
+                }
+                chTask.trySend(now())
+            }
+            chTask.close()
+        }
+        )
+        return Ticker {
+            _ch: ch, _stopped: stopped
+        }
+    }
+
+    // The tick channel, for arming in a Select.
+    fn channel(self: &Self): Channel<Instant> {
+        return self._ch.clone()
+    }
+
+    // Block for the next tick. None once the ticker is stopped and drained.
+    fn recv(self: &Self): Option<Instant> {
+        match self._ch.recv() {
+            Result.Ok(t) => {
+                return Option.Some(t)
+            }
+            Result.Err(_e) => {
+                return Option.None
+            }
+        }
+    }
+
+    // Stop ticking. The task exits at its next wake, so up to one period later.
+    // Idempotent.
+    fn stop(self: &Self): void {
+        self._stopped.store(true)
+    }
+}
+
+impl Drop for Ticker {
+    fn drop(self: &mut Self): void {
+        self._stopped.store(true)
+    }
+}
+
+// ── Timeouts ──
+
+// Receive from `ch`, giving up after `d`. None means the timeout won or the
+// channel closed empty.
+//
+// A free function, not a method: Milo has no method-level generics, which is the
+// same reason `selectRecv` is one.
+pub fn recvTimeout<T>(ch: &Channel<T>, d: &Duration): Option<T> {
+    if let Option.Some(v) = ch.tryRecv() {
+        return Option.Some(v)
+    }
+    ensureTimersLive()
+    var sel = Select.new()
+    selectRecv(sel, ch)
+    sel.onTimeout(timeoutMs(d))
+    let winner = sel.wait()
+    sel.destroy()
+    if winner == 0 {
+        // The recv arm was claimed for this waiter, so the value is ours; single
+        // consumer is Select's standing contract.
+        return ch.tryRecv()
+    }
+    return Option.None
+}
+
+// Wait until `fd` is readable, or `d` elapses. False on timeout.
+//
+// This is the timeout under a blocking read: check first, then read knowing the
+// read won't park forever. It reads nothing itself.
+pub fn waitReadable(fd: i32, d: &Duration): bool {
+    return waitFd(fd, d, true)
+}
+
+// Wait until `fd` accepts a write without blocking, or `d` elapses.
+pub fn waitWritable(fd: i32, d: &Duration): bool {
+    return waitFd(fd, d, false)
+}
+
+fn waitFd(fd: i32, d: &Duration, forRead: bool): bool {
+    ensureTimersLive()
+    var sel = Select.new()
+    if forRead {
+        sel.onRead(fd)
+    } else {
+        sel.onWrite(fd)
+    }
+    sel.onTimeout(timeoutMs(d))
+    let winner = sel.wait()
+    sel.destroy()
+    return winner == 0
+}
+
+// Durations are nanoseconds; the event loop's deadlines are milliseconds. Round a
+// non-zero span up so a sub-millisecond timeout is a short wait, not an instant
+// expiry, and clamp a negative one to "already expired".
+fn timeoutMs(d: &Duration): i64 {
+    if d.isNegative() {
+        return 0
+    }
+    let ms = d.toMillis()
+    if ms <= 0 && !d.isZero() {
+        return 1
+    }
+    return ms
+}

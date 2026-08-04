@@ -1,0 +1,107 @@
+// Duration construction, arithmetic, comparison, formatting and parsing.
+// No wall-clock reads — everything here is deterministic.
+
+// @expect: 1h30m0s
+// @expect: 1m30s
+// @expect: 1.5s
+// @expect: 1.5ms
+// @expect: 1.5us
+// @expect: 999ns
+// @expect: 0s
+// @expect: -1m30s
+// @expect: -2562047h47m16.854775808s
+// @expect: 168h0m0s
+// @expect: 30s 2.5s 9.999s
+// @expect: cmp 1 -1 0
+// @expect: less true greater false eq true
+// @expect: zero true negative true abs 1m0s
+// @expect: secs 1.5 millis 1500 ratio 2.5
+// @expect: 1h30m -> 5400000000000 -> 1h30m0s
+// @expect: 300ms -> 300000000 -> 300ms
+// @expect: -1.5h -> -5400000000000 -> -1h30m0s
+// @expect: 2h45m10.5s -> 9910500000000 -> 2h45m10.5s
+// @expect: 1us -> 1000 -> 1us
+// @expect: 1µs -> 1000 -> 1us
+// @expect: 1ns -> 1 -> 1ns
+// @expect: 7d -> 604800000000000 -> 168h0m0s
+// @expect: 0 -> 0 -> 0s
+// @expect: +2m -> 120000000000 -> 2m0s
+// @expect: 1.0000000005s -> 1000000000 -> 1s
+// @expect: rejected: 5
+
+from "std/time" import {
+    Duration
+}
+
+fn show(text: &string): void {
+    match Duration.parse(text) {
+        Option.Some(d) => {
+            print(text, " -> ", d.toNanos(), " -> ", d.toString())
+        }
+        Option.None => {
+            print(text, " -> none")
+        }
+    }
+}
+
+fn rejects(text: &string): bool {
+    return Duration.parse(text).isNone()
+}
+
+pub fn main(): i32 {
+    print((Duration.hours(1) + Duration.mins(30)).toString())
+    print(Duration.secs(90).toString())
+    print(Duration.millis(1500).toString())
+    print(Duration.micros(1500).toString())
+    print(Duration.nanos(1500).toString())
+    print(Duration.nanos(999).toString())
+    print(Duration.zero().toString())
+    print(Duration.secs(-90).toString())
+    // i64::MIN nanoseconds — the one value that can't be negated
+    print(Duration.nanos(-9223372036854775807 - 1).toString())
+    print(Duration.days(7).toString())
+
+    print(Duration.secs(10).times(3).toString(), " ", Duration.secs(10).dividedBy(4).toString(), " ", (Duration.secs(10) - Duration.millis(1)).toString())
+
+    print("cmp ", Duration.secs(1).compare(Duration.millis(999)), " ", Duration.secs(1).compare(Duration.secs(2)), " ", Duration.secs(1).compare(Duration.millis(1000)))
+
+    print("less ", Duration.secs(1).isLess(Duration.secs(2)), " greater ", Duration.secs(1).isGreater(Duration.secs(2)), " eq ", Duration.secs(1) == Duration.millis(1000))
+
+    print("zero ", Duration.zero().isZero(), " negative ", Duration.secs(-1).isNegative(), " abs ", Duration.mins(-1).abs().toString())
+
+    print("secs ", Duration.millis(1500).toSecsF64(), " millis ", Duration.millis(1500).toMillis(), " ratio ", Duration.secs(10).ratio(Duration.secs(4)))
+
+    show("1h30m")
+    show("300ms")
+    show("-1.5h")
+    show("2h45m10.5s")
+    show("1us")
+    show("1µs")
+    show("1ns")
+    show("7d")
+    show("0")
+    show("+2m")
+    // digits past nanosecond resolution are dropped, as in Go
+    show("1.0000000005s")
+
+    // parse failures are None, never a plausible-looking Duration
+    var bad = 0
+    if rejects("") {
+        bad = bad + 1
+    }
+    if rejects("abc") {
+        bad = bad + 1
+    }
+    if rejects("10") {
+        bad = bad + 1
+    }
+    if rejects("1h30") {
+        bad = bad + 1
+    }
+    // overflow past ±292 years is a rejection, not an abort
+    if rejects("9999999999999999999999h") {
+        bad = bad + 1
+    }
+    print("rejected: ", bad)
+    return 0
+}

@@ -181,10 +181,25 @@ Ranked by how often real programs hit them.
   mutate even its own environment. Go `exec.Cmd{Dir,Env}`, Rust `Command::env/current_dir`,
   Node `spawn(opts)`.
 
-- [ ] **`Duration` is read-only; no timers, tickers or timeouts.** Only
-  `durationSecs`/`Millis`/`Micros`. No add/sub/mul, no `parseDuration("1h30m")`, no
-  `Timer`/`Ticker`, no `withTimeout` on IO. Go's `time` is ~10× this. Green threads and
-  `select` already shipped, so a timeout channel is close at hand.
+- [x] **`Duration` is read-only; no timers, tickers or timeouts.** *`Duration` is now i64
+  nanoseconds (±292.47 years, documented range; construction/arithmetic past it traps like
+  any other checked i64 overflow) with `+`/`-` via the Add/Sub traits, `==` via
+  `@derive(Eq)`, `times`/`dividedBy`/`ratio`/`negated`/`abs`, `compare`/`isLess`/
+  `isGreater`, eight constructors (`zero`/`nanos`/`micros`/`millis`/`secs`/`mins`/`hours`/
+  `days`), `toNanos`…`toHours` plus `toSecsF64`/`toMillisF64`, Go-style `toString`
+  ("1h30m0s", "1.5ms") and `Duration.parse` → `Option` (ns/us/µs/ms/s/m/h/d, fractions,
+  sign; overflow is None, never an abort — it takes untrusted text). The three free
+  `durationSecs`/`Millis`/`Micros` accessors are **removed** in favor of methods.
+  New `std/timer`: `Timer.after`, `Ticker.every` (one-slot buffer, ticks dropped not
+  queued, Drop cancels the task), `recvTimeout<T>`, `waitReadable`/`waitWritable`.
+  All of it is a layer over the existing green task + Channel + Select timer arm — no new
+  runtime machinery. Two things fixed on the way: a green `sleepMs` **busy-yielded** the
+  whole span (it now parks on a select timer arm, so the sleeper is off the run queue), and
+  `sleepMs` truncated its `usleep` arg to u32 (silently short-slept past ~71 min). Every
+  `std/timer` entry point calls `ensureTimersLive()` first, which closes the trap
+  `std/select` documents — a timeout on a main context that never spawned a green task used
+  to be armed and inert.* Left out: monotonic clock, `sendTimeout`, `context.Context`-style
+  cancellation (its own audit entry), `Instant` arithmetic.
 
 - [ ] **No cancellation.** No `context.Context` analogue. `select.onTimeout(ms)` exists but
   nothing propagates cancellation down a call tree.

@@ -189,6 +189,7 @@ export default defineConfig({
               collapsed: true,
               items: [
                 { text: 'std/time', link: '/stdlib/time' },
+                { text: 'std/timer', link: '/stdlib/timer' },
                 { text: 'std/datetime', link: '/stdlib/datetime' },
                 { text: 'std/uuid', link: '/stdlib/uuid' },
               ]

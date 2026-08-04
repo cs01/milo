@@ -2701,12 +2701,12 @@ Middleware wraps handlers with a next-function pattern:
 
 ```milo
 from "std/http" import { Context, Response, Router }
-from "std/time" import { now, since, durationMillis }
+from "std/time" import { now, since }
 
 fn timing(ctx: &mut Context, next: (&mut Context) => Response): Response {
     let start = now()
     let resp = next(ctx)
-    let ms = durationMillis(since(start))
+    let ms = since(start).toMillis()
     ctx.setHeader("X-Response-Time", ms.toString() + "ms")
     return resp
 }

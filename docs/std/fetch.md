@@ -13,22 +13,6 @@ servers reject requests without them: Overpass 406s an Accept-less client, and
 several public APIs 403 an anonymous one. Both are only supplied when the
 caller has not set their own, so an explicit header always wins.
 
-### `decodeChunked`
-
-```milo
-pub fn decodeChunked(rawBody: &string): string
-```
-
-_Undocumented._
-
-### `doFetch`
-
-```milo
-pub fn doFetch(url: string, opts: FetchOptions): Result<Response, NetError>
-```
-
-_Undocumented._
-
 ### `fetch`
 
 ```milo
@@ -115,42 +99,10 @@ Is `name` present as a header in a CRLF-joined header block? Unlike findHeader
 this distinguishes "absent" from "present but empty", which is what the
 default-header logic in buildRequest needs.
 
-### `hexDigit`
-
-```milo
-pub fn hexDigit(c: u8): i64
-```
-
-_Undocumented._
-
-### `httpDo`
-
-```milo
-pub fn httpDo(ip: u32, port: u16, host: string, path: string, opts: &FetchOptions): Result<Response, NetError>
-```
-
-_Undocumented._
-
-### `httpsDo`
-
-```milo
-pub fn httpsDo(ip: u32, port: u16, host: string, path: string, opts: &FetchOptions): Result<Response, NetError>
-```
-
-_Undocumented._
-
 ### `isHttps`
 
 ```milo
 pub fn isHttps(url: &string): bool
-```
-
-_Undocumented._
-
-### `parseBody`
-
-```milo
-pub fn parseBody(raw: &string): string
 ```
 
 _Undocumented._
@@ -179,26 +131,10 @@ pub fn parsePort(url: &string): u16
 
 _Undocumented._
 
-### `parseRawHeaders`
-
-```milo
-pub fn parseRawHeaders(raw: &string): string
-```
-
-_Undocumented._
-
 ### `parseResponse`
 
 ```milo
 pub fn parseResponse(raw: string): Response
-```
-
-_Undocumented._
-
-### `parseStatus`
-
-```milo
-pub fn parseStatus(raw: &string): i32
 ```
 
 _Undocumented._
@@ -234,30 +170,6 @@ fn Response.text(self: &Response): string
 ```
 
 Return the response body as a string.
-
-### `schemeOffset`
-
-```milo
-pub fn schemeOffset(url: &string): i64
-```
-
-_Undocumented._
-
-### `startsWith`
-
-```milo
-pub fn startsWith(s: &string, prefix: &string): bool
-```
-
-_Undocumented._
-
-### `strEqNocase`
-
-```milo
-pub fn strEqNocase(a: &string, ai: i64, b: &string, blen: i64): bool
-```
-
-_Undocumented._
 
 ### `TlsStream.connect`
 

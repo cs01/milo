@@ -53,7 +53,7 @@ fn highestSetBit(n: i64): i64 {
 
 // ── Reverse bitstream reader (FSE/Huffman streams are consumed back-to-front) ──
 
-pub struct Rev {
+struct Rev {
     off: i64, // current bit offset from the start of the stream
 }
 
@@ -105,7 +105,7 @@ fn streamRead(src: &string, bits: i64, r: &mut Rev): i64 {
 
 // ── FSE decoding ──
 
-pub struct FseTable {
+struct FseTable {
     symbols: Vec<i64>,
     numBits: Vec<i64>,
     newStateBase: Vec<i64>,
@@ -170,7 +170,7 @@ fn fseBuildRle(symb: i64): FseTable {
 }
 
 // Result of decoding an in-stream FSE distribution header.
-pub struct FseHdr {
+struct FseHdr {
     table: FseTable,
     bytesUsed: i64, // bytes the header occupied (it is byte-aligned at the end)
     ok: bool,
@@ -293,7 +293,7 @@ fn mlExtraBits(): Vec<i64> {
 // One decoded sequence: how many literals to emit, then a match of `matchLen` bytes
 // at `offset` back in the output. `offset` here is the raw offset value (pre repeat
 // resolution).
-pub struct Seq {
+struct Seq {
     litLen: i64,
     matchLen: i64,
     offset: i64,
@@ -333,7 +333,7 @@ fn computeOffset(rawOffset: i64, litLen: i64, hist: &mut Vec<i64>): i64 {
 
 // ── Huffman literals ──
 
-pub struct HufTable {
+struct HufTable {
     symbols: Vec<i64>,
     numBits: Vec<i64>,
     maxBits: i64,
@@ -466,7 +466,7 @@ fn slice(src: &string, from: i64, to: i64): string {
     return s
 }
 
-pub struct HufTableResult {
+struct HufTableResult {
     table: HufTable,
     bytesUsed: i64,
 }
@@ -529,7 +529,7 @@ fn dummyHuf(): HufTable {
 // Per-frame decoder state that outlives a single block: the repeat-offset history and
 // the entropy tables that Treeless literals (huf) and Repeat-mode sequences (ll/of/ml)
 // reuse from an earlier block in the same frame.
-pub struct ZDec {
+struct ZDec {
     hist: Vec<i64>,
     huf: HufTable,
     hasHuf: bool,
@@ -829,7 +829,7 @@ fn decompressCompressed(src: &string, blockStart: i64, blockSize: i64, out: &mut
 // Parsed zstd frame header (RFC 8878 §3.1.1). `headerLen` is the byte length of the
 // whole header (magic + descriptor + optional window/dict-id/content-size fields), so
 // the first block begins at `headerLen`.
-pub struct ZstdHeader {
+struct ZstdHeader {
     headerLen: i64,
     hasChecksum: bool,
 }
@@ -1040,7 +1040,7 @@ fn zstdCompressRaw(src: &string): string {
 // Forward little-endian bit writer. Bits accumulate LSB-first; the backward reader in the
 // decoder (`_streamRead`) consumes them in reverse, so write order here is the reverse of
 // decode read order (mirrors zstd's BIT_CStream).
-pub struct BitCS {
+struct BitCS {
     bytes: string,
     acc: i64,
     nb: i64,
@@ -1083,7 +1083,7 @@ fn bcAlign(b: &mut BitCS) {
 // FSE compression table: `stateTable` maps (state>>nbBits)+deltaFindState → next encoder
 // value in [size, 2*size); the low `accuracyLog` bits of that value are the decoder's
 // state index. `deltaNbBits`/`deltaFindState` are the standard FSE symbol transforms.
-pub struct FseCTable {
+struct FseCTable {
     stateTable: Vec<i64>,
     deltaNbBits: Vec<i64>,
     deltaFindState: Vec<i64>,
@@ -1293,13 +1293,13 @@ fn mlCodeTable(): Vec<i64> {
 }
 
 // One LZ77 sequence: emit `litLen` literals, then copy `matchLen` bytes from `offset` back.
-pub struct Seq3 {
+struct Seq3 {
     litLen: i64,
     matchLen: i64,
     offset: i64,
 }
 
-pub struct LzResult {
+struct LzResult {
     seqs: Vec<Seq3>,
     literals: string,
 }
@@ -1384,7 +1384,7 @@ fn lz77(block: &string): LzResult {
 
 // Per-sequence FSE symbols and their extra-bit payloads, computed once and shared by both
 // the histogram/table-selection pass and the bitstream encoder.
-pub struct SeqCodes {
+struct SeqCodes {
     ll: Vec<i64>,
     of: Vec<i64>,
     ml: Vec<i64>,
@@ -1500,7 +1500,7 @@ fn encSeqBitstream(c: &SeqCodes, llCT: &FseCTable, ofCT: &FseCTable, mlCT: &FseC
 }
 
 // A chosen encoding for one of the three sequence code streams.
-pub struct StreamPlan {
+struct StreamPlan {
     mode: i64, // 0 = Predefined, 2 = FSE-compressed (custom table)
     ct: FseCTable,
     header: string, // FSE distribution header bytes (empty for Predefined)
@@ -1847,7 +1847,7 @@ fn encBlockHeader(out: &mut string, size: i64, blockType: i64, last: bool) {
     out.push(((bh >> 16) & 0xff) as u8)
 }
 
-pub struct BlockResult {
+struct BlockResult {
     ok: bool,
     data: string,
 }

@@ -1,0 +1,36 @@
+// std/fetch response parsing through the public surface only. The chunked branch
+// is the reason this exists: parseResponse used to detect it with a module-local
+// `startsWith` helper that shadowed the builtin string method, and dropping that
+// duplicate rewrote the condition.
+
+from "std/fetch" import {
+    parseResponse
+}
+
+// @expect: 200
+// @expect: hello world
+// @expect: 404
+// @expect: xyz
+// @expect: text/plain
+// @expect: 200
+// @expect: chunkedish
+pub fn main(): i32 {
+    let chunked = "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n6\r\n world\r\n0\r\n\r\n"
+    let r = parseResponse(chunked)
+    print(r.status)
+    print(r.text())
+
+    let plain = "HTTP/1.1 404 Not Found\r\nContent-Type: text/plain\r\nContent-Length: 3\r\n\r\nxyz"
+    let p = parseResponse(plain)
+    print(p.status)
+    print(p.text())
+    print(p.header("content-type"))
+
+    // A Transfer-Encoding that merely *contains* "chunked" later on must not
+    // trigger chunk decoding — the check is a prefix test, not a substring one.
+    let notChunked = "HTTP/1.1 200 OK\r\nTransfer-Encoding: identity\r\n\r\nchunkedish"
+    let n = parseResponse(notChunked)
+    print(n.status)
+    print(n.text())
+    return 0
+}

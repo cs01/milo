@@ -6,6 +6,9 @@ import type { Diagnostic, WarningConfig } from "./diagnostics";
 import { checkVisibility } from "./visibility";
 import { countCSigParams } from "./csig";
 import { memberHint, closest, importHint, stdExportNames, VEC_MEMBERS, HASHMAP_MEMBERS, STRING_MEMBERS } from "./suggest";
+import { deriveJsonSource, type JsonPlan, type JsonFieldPlan } from "./derive-json";
+import { Lexer } from "./lexer";
+import { Parser } from "./parser";
 import { basename } from "path";
 
 // One hop from a place to a place inside it. `index` is deliberately opaque —
@@ -224,6 +227,7 @@ export interface CheckResult {
   interfaceCoercions: Map<Expr, { fromType: string; ifaceName: string }>;
   interfaceMethodCalls: Map<Expr, { ifaceName: string; methodName: string; methodIndex: number }>;
   autoJsonStringify: Map<Expr, TypeKind>;
+  autoJsonToJson: Map<Expr, string>;
   anonStructs: { name: string; fields: { name: string; type: TypeKind }[] }[];
   globalTypes?: Map<string, TypeKind>;
   iteratorForIns: Map<Stmt, { nextMethod: string; elemType: TypeKind; optionEnumName: string }>;
@@ -404,6 +408,9 @@ export class TypeChecker {
   private interfaceCoercions = new Map<Expr, { fromType: string; ifaceName: string }>();
   private interfaceMethodCalls = new Map<Expr, { ifaceName: string; methodName: string; methodIndex: number }>();
   private autoJsonStringify = new Map<Expr, TypeKind>();
+  // Subset of the above whose struct has a `toJson`: the mangled name to call
+  // instead of the built-in stringifier.
+  private autoJsonToJson = new Map<Expr, string>();
   private anonStructCounter = 0;
   private anonStructs: { name: string; fields: { name: string; type: TypeKind }[] }[] = [];
   private _userFnNames?: Set<string>;
@@ -1468,6 +1475,7 @@ export class TypeChecker {
       interfaceCoercions: this.interfaceCoercions,
       interfaceMethodCalls: this.interfaceMethodCalls,
       autoJsonStringify: this.autoJsonStringify,
+      autoJsonToJson: this.autoJsonToJson,
       anonStructs: this.anonStructs,
       globalTypes: this._globalTypes,
       iteratorForIns: this.iteratorForIns,
@@ -2004,6 +2012,22 @@ export class TypeChecker {
   private processDerives(program: Program): import("./ast").ImplDecl[] {
     const result: import("./ast").ImplDecl[] = [];
     const explicitEq = new Set<string>();
+    // Derives run before impls are registered, so the user's own methods are not
+    // in `this.functions` yet — read them off the AST.
+    for (const im of program.impls) {
+      for (const m of im.methods) this.jsonUserMethods.add(`${im.typeName}.${m.name}`);
+    }
+    // A struct is a legal Json field type if it derives the codec or hand-wrote
+    // one. Collected up front so field validation does not depend on which
+    // struct the derive loop reaches first.
+    for (const s of program.structs) {
+      if (s.attributes?.some(a => a.name === "derive" && a.args.includes("Json"))) {
+        this.jsonCapableStructs.add(s.name);
+      }
+    }
+    for (const key of this.jsonUserMethods) {
+      if (key.endsWith(".fromJsonNode")) this.jsonCapableStructs.add(key.slice(0, -".fromJsonNode".length));
+    }
     for (const s of program.structs) {
       if (!s.attributes || s.typeParams.length > 0) continue;
       for (const attr of s.attributes) {
@@ -2060,8 +2084,156 @@ export class TypeChecker {
 
   private synthesizeDeriveImpl(s: import("./ast").StructDecl, traitName: string): import("./ast").ImplDecl | null {
     if (traitName === "Eq") return this.deriveEq(s);
-    this.error(`cannot derive '${traitName}' — only Eq is supported`);
+    if (traitName === "Json") return this.deriveJson(s);
+    this.error(`cannot derive '${traitName}' — only Eq and Json are supported`, s.span);
     return null;
+  }
+
+  // Structs whose `toJson`/`fromJsonNode` exist: derived, or hand-written by the
+  // user. A nested field type must be in this set, otherwise the generated call
+  // fails deep inside code the user never wrote.
+  private jsonCapableStructs = new Set<string>();
+  // "Type.method" for every method the user actually wrote.
+  private jsonUserMethods = new Set<string>();
+
+  // Milo spelling of a type, for the `var x: T = …` lines the generator emits.
+  // Different from `typeName` in one place that matters: an Option is a
+  // monomorphized enum whose *name* is mangled, but its written form is not.
+  private jsonTypeSpelling(t: TypeKind): string {
+    if (t.tag === "vec") return `Vec<${this.jsonTypeSpelling(t.element)}>`;
+    if (t.tag === "enum") {
+      const inner = this.optionInnerType(t);
+      if (inner) return `Option<${this.jsonTypeSpelling(inner)}>`;
+    }
+    return typeName(t);
+  }
+
+  // Reduce a field type to a generator plan, or return why it cannot be one.
+  private jsonPlanFor(t: TypeKind): JsonPlan | { err: string } {
+    switch (t.tag) {
+      case "string": return { k: "string" };
+      case "bool": return { k: "bool" };
+      case "int": {
+        // Not typeName: a refinement type prints as `i32(0..10)`, which is a
+        // diagnostic spelling, not one the parser accepts back.
+        const ty = `${t.signed ? "i" : "u"}${t.bits}`;
+        if (!t.signed && t.bits === 64) return { k: "int", ty, unsigned64: true };
+        if (t.signed && t.bits === 64) return { k: "int", ty, unsigned64: false };
+        // Narrower than the i64 the cursor hands back: the value has to be range
+        // checked before the cast, or the wire silently rewrites it.
+        const hi = t.signed ? (1n << BigInt(t.bits - 1)) - 1n : (1n << BigInt(t.bits)) - 1n;
+        const lo = t.signed ? -(1n << BigInt(t.bits - 1)) : 0n;
+        return { k: "int", ty, unsigned64: false, range: { lo: lo.toString(), hi: hi.toString() } };
+      }
+      case "float": return { k: "float", ty: `f${t.bits}` };
+      case "struct": {
+        if (!this.jsonCapableStructs.has(t.name)) {
+          return { err: `struct '${t.name}' has no JSON codec — add @derive(Json) to it` };
+        }
+        return { k: "struct", name: t.name };
+      }
+      case "enum": {
+        const inner = this.optionInnerType(t);
+        if (inner) {
+          const p = this.jsonPlanFor(inner);
+          if ("err" in p) return p;
+          // Both `Some(None)` and an absent field encode as `null`, so the outer
+          // layer cannot survive a round trip. serde has the same hole; refusing
+          // it is cheaper than a silently-collapsing field.
+          if (p.k === "option") return { err: `Option<Option<T>> has no distinct JSON encoding — 'Some(None)' and an absent field are both null` };
+          return { k: "option", ty: this.jsonTypeSpelling(t), inner: p };
+        }
+        const info = this.enums.get(t.name);
+        if (!info) return { err: `unknown enum '${t.name}'` };
+        const variants: string[] = [];
+        for (const [name, v] of info.variants) {
+          if (v.fields.length > 0) {
+            return { err: `enum '${t.name}' carries a payload in '${name}' — only payload-free enums have a JSON form (the variant name as a string)` };
+          }
+          variants.push(name);
+        }
+        if (variants.length === 0) return { err: `enum '${t.name}' has no variants` };
+        return { k: "unitEnum", name: t.name, variants };
+      }
+      case "vec": {
+        const p = this.jsonPlanFor(t.element);
+        if ("err" in p) return p;
+        return { k: "vec", ty: this.jsonTypeSpelling(t), elem: p };
+      }
+      default:
+        return { err: `type '${typeName(t)}' has no JSON form` };
+    }
+  }
+
+  private deriveJson(s: import("./ast").StructDecl): import("./ast").ImplDecl | null {
+    // An extern struct's fields are a C memory layout, and an opaque one has no
+    // fields to read at all — a codec over either describes nothing a peer sends.
+    if (s.isExtern || s.isOpaque) {
+      this.error(`cannot derive Json for '${s.name}': it is a foreign type`, s.span,
+        `an extern struct mirrors a C layout; write a Milo struct for the wire shape and convert`);
+      return null;
+    }
+    // A monomorphized generic reaches this path without going through the
+    // collection pass in processDerives.
+    this.jsonCapableStructs.add(s.name);
+    const fields: JsonFieldPlan[] = [];
+    for (const f of s.fields) {
+      const t = this.resolve(f.type);
+      const plan = this.jsonPlanFor(t);
+      if ("err" in plan) {
+        this.error(`cannot derive Json for '${s.name}': field '${f.name}': ${plan.err}`, s.span);
+        return null;
+      }
+      // `@json("wire_name")` renames one field on the wire. Everything else about
+      // the codec follows the declaration, so this is the whole mapping surface.
+      let key = f.name;
+      const rename = f.attributes?.find(a => a.name === "json");
+      if (rename) {
+        const arg = rename.args[0];
+        if (rename.args.length !== 1 || rename.argKinds?.[0] !== "string") {
+          this.error(`@json on '${s.name}.${f.name}': expects one string, e.g. @json("user_id")`, s.span);
+          return null;
+        }
+        // The name is emitted straight into a JSON string literal, so anything
+        // needing an escape would have to be escaped in two grammars at once.
+        if (arg === undefined || arg.length === 0 || /["\\\x00-\x1f]/.test(arg)) {
+          this.error(`@json on '${s.name}.${f.name}': the name must be non-empty and free of quotes, backslashes and control characters`, s.span);
+          return null;
+        }
+        key = arg;
+      }
+      fields.push({ field: f.name, key, plan });
+    }
+    const dupe = fields.find((f, i) => fields.findIndex(g => g.key === f.key) !== i);
+    if (dupe) {
+      this.error(`cannot derive Json for '${s.name}': two fields map to the JSON name '${dupe.key}'`, s.span);
+      return null;
+    }
+    for (const name of ["toJson", "fromJson", "fromJsonNode"]) {
+      if (this.jsonUserMethods.has(`${s.name}.${name}`)) {
+        this.error(`cannot derive Json for '${s.name}': it already defines '${name}'`, s.span);
+        return null;
+      }
+    }
+
+    const src = deriveJsonSource(s.name, fields);
+    // The one way to read code the user never wrote. Without it a diagnostic
+    // pointing into "<derive Json for User>" names a file nobody can open.
+    if (process.env.MILO_DUMP_DERIVES) process.stderr.write(`// ${s.name}: @derive(Json)\n${src}\n`);
+    let parsed: Program;
+    try {
+      parsed = new Parser(new Lexer(src).tokenize(), src, `<derive Json for ${s.name}>`).parse();
+    } catch (e) {
+      this.error(`internal error: generated Json codec for '${s.name}' did not parse: ${e instanceof Error ? e.message : String(e)}`, s.span);
+      return null;
+    }
+    const impl = parsed.impls[0];
+    if (!impl) {
+      this.error(`internal error: generated Json codec for '${s.name}' produced no impl`, s.span);
+      return null;
+    }
+    for (const m of impl.methods) m.sourceFile = s.span?.file;
+    return impl;
   }
 
   private deriveEq(s: import("./ast").StructDecl, skipValidation = false): import("./ast").ImplDecl {
@@ -2767,10 +2939,12 @@ export class TypeChecker {
   // `@cOpaque` marks a field as filler with no C counterpart, so @cLayout skips it —
   // needed for structs padded out to a size C dictates (getrusage writes 144 bytes into
   // a struct whose named fields only cover 32). It still counts toward Milo's own layout,
-  // so the size assert stays meaningful. Anything else on a field is rejected: a silently
-  // ignored attribute is the failure this whole feature exists to close.
+  // so the size assert stays meaningful. `@json("name")` renames a field on the wire.
+  // Anything else on a field is rejected: a silently ignored attribute is the failure
+  // this whole feature exists to close.
   private validateFieldAttributes(s: StructDecl): void {
     let iterFields = 0;
+    const derivesJson = s.attributes?.some(a => a.name === "derive" && a.args.includes("Json")) ?? false;
     for (const f of s.fields) {
       if (!f.attributes) continue;
       for (const attr of f.attributes) {
@@ -2795,9 +2969,16 @@ export class TypeChecker {
             this.error(`@iter on '${s.name}.${f.name}': '${ft.name}' is not iterable`, s.span,
               `mark a Vec, HashMap, array, or string field`);
           }
+        } else if (attr.name === "json") {
+          // Arity and content are validated in deriveJson, where the error can
+          // name the generated codec. Here only the "nothing consumes it" case.
+          if (!derivesJson) {
+            this.error(`@json on '${s.name}.${f.name}': the struct does not derive Json`, s.span,
+              `add '@derive(Json)' to '${s.name}', or drop the field attribute — nothing else reads it`);
+          }
         } else if (attr.name !== "cOpaque") {
           this.error(`'@${attr.name}' is not supported on a struct field — '${s.name}.${f.name}'`, s.span,
-            `only '@cOpaque' and '@iter' apply to a field`);
+            `only '@cOpaque', '@iter' and '@json' apply to a field`);
         } else if (!s.isExtern) {
           this.error(`@cOpaque on '${s.name}.${f.name}': only an 'extern struct' field can be C-invisible`, s.span,
             `a Milo struct has no C layout to be opaque against`);
@@ -7808,7 +7989,25 @@ export class TypeChecker {
             const argType = this.checkExprWithHint(expr.args[i], expected.type.tag === "ref" ? expected.type.inner : expected.type);
             const bare = expected.type.tag === "ref" ? expected.type.inner : expected.type;
             if (!typeEq(bare, argType) && argType.tag !== "unknown") {
-              if (expr.method === "json" && bare.tag === "string" && (argType.tag === "struct" || argType.tag === "bool" || argType.tag === "int" || argType.tag === "float")) {
+              // Only a struct: codegen's stringifier has no scalar path, so the
+              // bool/int/float arms this used to accept crashed the compiler.
+              if (expr.method === "json" && bare.tag === "string" && argType.tag === "struct") {
+                // `ctx.json(user)` auto-stringifies. A struct with a real codec
+                // routes through it, so a Vec/Option/nested field serializes
+                // properly; the built-in fallback only knows scalar fields and
+                // used to emit `"tags":` with no value at all for the rest.
+                const codec = argType.tag === "struct" ? this.resolveMethod(argType.name, "toJson") : null;
+                if (codec) {
+                  this.autoJsonToJson.set(expr.args[i], codec.mangled);
+                } else if (argType.tag === "struct") {
+                  const si = this.structs.get(argType.name);
+                  for (const f of si?.fields ?? []) {
+                    if (f.type.tag !== "string" && f.type.tag !== "bool" && f.type.tag !== "int" && f.type.tag !== "float") {
+                      this.error(`'json': '${argType.name}.${f.name}' has type ${typeName(f.type)}, which the built-in stringifier cannot serialize`,
+                        expr.args[i].span, `add '@derive(Json)' to '${argType.name}' — the derived codec handles nested structs, Vec and Option`);
+                    }
+                  }
+                }
                 this.autoJsonStringify.set(expr.args[i], argType);
               } else {
                 this.error(`'${expr.method}' argument ${i + 1}: expected ${typeName(bare)}, got ${typeName(argType)}`, expr.args[i].span);

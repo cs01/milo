@@ -1,0 +1,71 @@
+// @expect: {"name":"root","children":[{"name":"a","children":[{"name":"a1","children":[]}]},{"name":"b","children":[]}]}
+// @expect: round-trip identical
+// @expect: field 'children[0].children[0].name': expected string, got number
+// @expect: pair-eq true
+// A struct whose Vec element is itself: the generated fromJsonNode recurses,
+// and the error path names the exact node three levels down. Also checks that
+// @derive takes more than one argument.
+@derive(Json)
+struct Node {
+    name: string,
+    children: Vec<Node>,
+}
+
+@derive(Eq, Json)
+struct Pair {
+    a: i64,
+    b: string,
+}
+
+fn node(name: string, children: Vec<Node>): Node {
+    return Node {
+        name: name, children: children
+    }
+}
+
+pub fn main(): i32 {
+    var deep: Vec<Node> = Vec.new()
+    deep.push(node("a1", Vec.new()))
+    var top: Vec<Node> = Vec.new()
+    top.push(node("a", deep))
+    top.push(node("b", Vec.new()))
+    let root = node("root", top)
+    let text = root.toJson()
+    print(text)
+    match Node.fromJson(text.clone()) {
+        Result.Ok(back) => {
+            if back.toJson() == text {
+                print("round-trip identical")
+            } 
+            else {
+                print("round-trip differs: " + back.toJson())
+            }
+        }
+        Result.Err(e) => {
+            print("decode failed: " + e.message())
+            return 1
+        }
+    }
+    match Node.fromJson("{\"name\":\"r\",\"children\":[{\"name\":\"c\",\"children\":[{\"name\":1,\"children\":[]}]}]}") {
+        Result.Ok(_x) => {
+            print("unexpected ok")
+            return 1
+        }
+        Result.Err(e) => {
+            print(e.message())
+        }
+    }
+    let p = Pair {
+        a: 1, b: "x"
+    }
+    match Pair.fromJson(p.toJson()) {
+        Result.Ok(q) => {
+            print("pair-eq " + (p == q).toString())
+        }
+        Result.Err(e) => {
+            print("decode failed: " + e.message())
+            return 1
+        }
+    }
+    return 0
+}

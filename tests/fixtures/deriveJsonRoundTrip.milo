@@ -1,0 +1,77 @@
+// @expect: {"name":"ada \"lovelace\"","age":36,"score":99.5,"active":true,"role":"Admin","email":"ada@example.com","tags":["math","engine"],"address":{"city":"London","zip":12345},"friends":[{"city":"Paris","zip":75001}],"legacy_id":77}
+// @expect: round-trip identical
+// @expect: none-and-empty {"name":"x","age":0,"score":0,"active":false,"role":"Guest","email":null,"tags":[],"address":{"city":"","zip":0},"friends":[],"legacy_id":0}
+// @derive(Json) generates toJson/fromJson/fromJsonNode. Covers every supported
+// field shape in one struct: scalars, a payload-free enum, Option, Vec, a nested
+// derived struct, a Vec of nested structs, and a @json rename.
+
+enum Role {
+    Admin,
+    Guest,
+}
+
+@derive(Json)
+struct Address {
+    city: string,
+    zip: i64,
+}
+
+@derive(Json)
+struct User {
+    name: string,
+    age: i32,
+    score: f64,
+    active: bool,
+    role: Role,
+    email: Option<string>,
+    tags: Vec<string>,
+    address: Address,
+    friends: Vec<Address>,
+    @json("legacy_id") legacyId: u32,
+}
+
+pub fn main(): i32 {
+    var tags: Vec<string> = Vec.new()
+    tags.push("math")
+    tags.push("engine")
+    var friends: Vec<Address> = Vec.new()
+    friends.push(Address {
+        city: "Paris", zip: 75001
+    }
+    )
+    let u = User {
+        name: "ada \"lovelace\"", age: 36, score: 99.5, active: true, role: Role.Admin, email: Option.Some("ada@example.com"), tags: tags, address: Address {
+            city: "London", zip: 12345
+        }
+        , friends: friends, legacyId: 77
+    }
+    let text = u.toJson()
+    print(text)
+
+    match User.fromJson(text.clone()) {
+        Result.Ok(back) => {
+            if back.toJson() == text {
+                print("round-trip identical")
+            } 
+            else {
+                print("round-trip differs: " + back.toJson())
+            }
+        }
+        Result.Err(e) => {
+            print("decode failed: " + e.message())
+            return 1
+        }
+    }
+
+    // Absent Option, empty arrays, and defaults for everything else.
+    match User.fromJson("{\"name\":\"x\",\"age\":0,\"score\":0.0,\"active\":false,\"role\":\"Guest\",\"tags\":[],\"address\":{\"city\":\"\",\"zip\":0},\"friends\":[],\"legacy_id\":0}") {
+        Result.Ok(v) => {
+            print("none-and-empty " + v.toJson())
+        }
+        Result.Err(e) => {
+            print("decode failed: " + e.message())
+            return 1
+        }
+    }
+    return 0
+}

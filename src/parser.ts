@@ -369,6 +369,7 @@ export class Parser {
   // ── Struct ──
 
   private parseStruct(): StructDecl {
+    const start = this.peek();
     this.expect(TokenKind.Struct);
     const name = this.expect(TokenKind.Ident).value;
     const typeParams = this.parseTypeParams();
@@ -390,7 +391,7 @@ export class Parser {
     // relative to its signature. `decreases` is meaningless on a type; the checker rejects it
     // rather than the grammar, so the error names the clause instead of the token.
     const invariants = this.parseContracts();
-    return { kind: "StructDecl", name, typeParams, fields, ...(invariants.length > 0 && { invariants }) };
+    return { kind: "StructDecl", name, typeParams, fields, span: this.span(start), ...(invariants.length > 0 && { invariants }) };
   }
 
   // ── Enum ──

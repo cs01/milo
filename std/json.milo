@@ -88,6 +88,85 @@ fn jsonHexVal(c: u8): i64 {
     return 0
 }
 
+// Exact integer read of a number node.
+//
+// The parser accumulates every number into an f64, which is lossy past 2^53 and
+// silently truncating for `1.5`. Both directions are data loss with no signal,
+// so an integer read re-scans the literal's own source span instead: only a
+// literal that is an integer AND fits i64 answers Some. Out of range, fractional
+// and exponent forms answer None, which the caller already has to handle.
+// (i64::MIN reads as None — its magnitude is one past what this accumulates.)
+fn jsonNodeInt(source: &string, n: &JsonNode): Option<i64> {
+    if n.strLen <= 0 {
+        return Option.None
+    }
+    var i: i64 = n.strStart
+    let end = n.strStart + n.strLen
+    var neg: bool = false
+    if i < end && source[i] == '-' {
+        neg = true
+        i = i + 1
+    }
+    if i >= end {
+        return Option.None
+    }
+    var acc: i64 = 0
+    while i < end {
+        let c = source[i]
+        if c < '0' || c > '9' {
+            return Option.None
+        }
+        if acc > 922337203685477580 {
+            return Option.None
+        }
+        acc = acc * 10
+        let d = (c as i64) - 48
+        if acc > 9223372036854775807 - d {
+            return Option.None
+        }
+        acc = acc + d
+        i = i + 1
+    }
+    if neg {
+        return Option.Some(0 - acc)
+    }
+    return Option.Some(acc)
+}
+
+// Same rules as jsonNodeInt, for the half of u64 that i64 cannot hold. A `u64`
+// field would otherwise be writable but not readable.
+fn jsonNodeUint(source: &string, n: &JsonNode): Option<u64> {
+    if n.strLen <= 0 {
+        return Option.None
+    }
+    var i: i64 = n.strStart
+    let end = n.strStart + n.strLen
+    if i < end && source[i] == '-' {
+        return Option.None
+    }
+    if i >= end {
+        return Option.None
+    }
+    var acc: u64 = 0
+    while i < end {
+        let c = source[i]
+        if c < '0' || c > '9' {
+            return Option.None
+        }
+        if acc > 1844674407370955161 {
+            return Option.None
+        }
+        acc = acc * 10
+        let d = (c as i64) as u64 - 48
+        if acc > 18446744073709551615 - d {
+            return Option.None
+        }
+        acc = acc + d
+        i = i + 1
+    }
+    return Option.Some(acc)
+}
+
 fn jsonMaterializeStr(source: &string, start: i64, len: i64): string {
     var hasEscape: bool = false
     var i: i64 = 0
@@ -232,7 +311,7 @@ impl Json {
             if jsonKeyEq(self.source, self.keyOffsets[node.keyStart + i], self.keyLens[node.keyStart + i], key) {
                 let child = self.nodes[self.childIdx[node.childStart + i]]
                 if child.kind == 2 {
-                    return Option.Some(child.numVal as i64)
+                    return jsonNodeInt(self.source, child)
                 }
                 return Option.None
             }
@@ -352,7 +431,19 @@ impl Json {
         }
         let node = self.nodes[cur]
         if node.kind == 2 {
-            return Option.Some(node.numVal as i64)
+            return jsonNodeInt(self.source, node)
+        }
+        return Option.None
+    }
+
+    // Unsigned read, for values above i64::MAX that `curInt` must reject.
+    fn curUint(self: &Self, cur: i64): Option<u64> {
+        if cur < 0 {
+            return Option.None
+        }
+        let node = self.nodes[cur]
+        if node.kind == 2 {
+            return jsonNodeUint(self.source, node)
         }
         return Option.None
     }
@@ -431,7 +522,7 @@ impl Json {
             if jsonKeyEq(self.source, self.keyOffsets[obj.keyStart + i], self.keyLens[obj.keyStart + i], key) {
                 let child = self.nodes[self.childIdx[obj.childStart + i]]
                 if child.kind == 2 {
-                    return Option.Some(child.numVal as i64)
+                    return jsonNodeInt(self.source, child)
                 }
                 return Option.None
             }
@@ -653,7 +744,7 @@ impl Json {
                     if jsonKeyEq(self.source, self.keyOffsets[obj.keyStart + j], self.keyLens[obj.keyStart + j], subKey) {
                         let val = self.nodes[self.childIdx[obj.childStart + j]]
                         if val.kind == 2 {
-                            return Option.Some(val.numVal as i64)
+                            return jsonNodeInt(self.source, val)
                         }
                         return Option.None
                     }
@@ -679,7 +770,7 @@ impl Json {
     fn asI64(self: &Self): Option<i64> {
         let node = self.nodes[self.root]
         if node.kind == 2 {
-            return Option.Some(node.numVal as i64)
+            return jsonNodeInt(self.source, node)
         }
         return Option.None
     }
@@ -1063,6 +1154,23 @@ fn jsonScratchPush(scratch: &mut Vec<i64>, scratchLen: &mut i64, v: i64) {
     scratchLen = scratchLen + 1
 }
 
+// The three bare literals were previously accepted on their first byte alone, so
+// `nope` parsed as null and `trux` as true — malformed text became a plausible
+// value with no error.
+fn jsonLitAt(s: &string, pos: i64, lit: &string): bool {
+    if pos + lit.len > s.len {
+        return false
+    }
+    var i: i64 = 0
+    while i < lit.len {
+        if s[pos + i] != lit[i] {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
 fn jsonParseValue(s: &string, pos: &mut i64, nodes: &mut Vec<JsonNode>, childIdx: &mut Vec<i64>, keyOffsets: &mut Vec<i64>, keyLens: &mut Vec<i64>, scratch: &mut Vec<i64>, scratchLen: &mut i64, err: &mut bool): i64 {
     jsonSkipWs(s, pos)
     if pos >= s.len {
@@ -1085,6 +1193,9 @@ fn jsonParseValue(s: &string, pos: &mut i64, nodes: &mut Vec<JsonNode>, childIdx
         return jsonParseArray(s, pos, nodes, childIdx, keyOffsets, keyLens, scratch, scratchLen, err)
     }
     if c == 't' {
+        if !jsonLitAt(s, pos, "true") {
+            err = true
+        }
         pos = pos + 4
         let idx = nodes.len()
         nodes.push(JsonNode {
@@ -1094,6 +1205,9 @@ fn jsonParseValue(s: &string, pos: &mut i64, nodes: &mut Vec<JsonNode>, childIdx
         return idx
     }
     if c == 'f' {
+        if !jsonLitAt(s, pos, "false") {
+            err = true
+        }
         pos = pos + 5
         let idx = nodes.len()
         nodes.push(JsonNode {
@@ -1103,6 +1217,9 @@ fn jsonParseValue(s: &string, pos: &mut i64, nodes: &mut Vec<JsonNode>, childIdx
         return idx
     }
     if c == 'n' {
+        if !jsonLitAt(s, pos, "null") {
+            err = true
+        }
         pos = pos + 4
         let idx = nodes.len()
         nodes.push(JsonNode {
@@ -1910,4 +2027,133 @@ impl JsonPull {
         }
         return jsonTok(JsonEvent.Error)
     }
+}
+
+// ---------------------------------------------------------------------------
+// Typed decode errors and the runtime half of @derive(Json)
+//
+// The generated toJson/fromJson methods call only the names below plus the
+// cursor API above. Nothing here is derive-only — hand-written decoders are
+// welcome to reuse it.
+
+// Where a decode failed and what was found instead. `expected` and `actual`
+// share one vocabulary: null, bool, number, string, array, object, "missing".
+pub struct JsonMismatch {
+    path: string,
+    expected: string,
+    actual: string,
+}
+
+pub enum JsonError {
+    // The text was not JSON at all — the parser's own message. Path is empty.
+    Syntax(string),
+    // A required field was absent. Payload is the dotted path.
+    Missing(string),
+    // A value was present at the path but of the wrong JSON kind.
+    Mismatch(JsonMismatch),
+}
+
+// Prefix `rest` with one path segment. Array indices already carry their own
+// brackets, so they abut rather than take a dot: ("friends", "[3].city").
+fn jsonPathJoin(seg: string, rest: &string): string {
+    if rest.len == 0 {
+        return seg
+    }
+    if rest[0] == '[' {
+        return seg + rest
+    }
+    return seg + "." + rest
+}
+
+// Human-readable name for a `curKind` result, including -1 for "no such node".
+pub fn jsonKindName(kind: i32): string {
+    if kind == 0 {
+        return "null"
+    }
+    if kind == 1 {
+        return "bool"
+    }
+    if kind == 2 {
+        return "number"
+    }
+    if kind == 3 {
+        return "string"
+    }
+    if kind == 4 {
+        return "array"
+    }
+    if kind == 5 {
+        return "object"
+    }
+    return "missing"
+}
+
+impl JsonError {
+    // Dotted path to the offending value, "" for a syntax error.
+    fn path(self: &Self): string {
+        match self {
+            JsonError.Syntax(_m) => {
+                return ""
+            }
+            JsonError.Missing(p) => {
+                return p.clone()
+            }
+            JsonError.Mismatch(m) => {
+                return m.path.clone()
+            }
+        }
+    }
+
+    fn message(self: &Self): string {
+        match self {
+            JsonError.Syntax(m) => {
+                return "invalid JSON: " + m
+            }
+            JsonError.Missing(p) => {
+                return "missing field '" + p + "'"
+            }
+            JsonError.Mismatch(m) => {
+                if m.path.len == 0 {
+                    return "document root: expected " + m.expected + ", got " + m.actual
+                }
+                return "field '" + m.path + "': expected " + m.expected + ", got " + m.actual
+            }
+        }
+    }
+
+    // Re-root the error one level up. Decoders build paths bottom-up so the
+    // success path never allocates a path string.
+    fn under(self: JsonError, seg: string): JsonError {
+        match self {
+            JsonError.Syntax(m) => {
+                return JsonError.Syntax(m)
+            }
+            JsonError.Missing(p) => {
+                return JsonError.Missing(jsonPathJoin(seg, p))
+            }
+            JsonError.Mismatch(m) => {
+                return JsonError.Mismatch(JsonMismatch {
+                    path: jsonPathJoin(seg, m.path), expected: m.expected, actual: m.actual
+                }
+                )
+            }
+        }
+    }
+
+    fn underIndex(self: JsonError, index: i64): JsonError {
+        return self.under("[" + index.toString() + "]")
+    }
+}
+
+// Quote and escape a string as a JSON string literal, brackets included.
+pub fn jsonQuote(s: &string): string {
+    return "\"" + jsonEscapeStr(s) + "\""
+}
+
+// `true`/`false` as JSON text.
+pub fn jsonBoolStr(b: bool): string {
+    if b {
+        return "true"
+    }
+    return "false"
 }

@@ -195,17 +195,17 @@ impl JwtClaims {
 
     // `exp` — expiry, seconds since the Unix epoch (§4.1.4).
     fn expiresAt(self: &Self): Option<i64> {
-        return self.doc.i64("exp")
+        return numericDate(self.doc, "exp")
     }
 
     // `nbf` — not-before, seconds since the Unix epoch (§4.1.5).
     fn notBefore(self: &Self): Option<i64> {
-        return self.doc.i64("nbf")
+        return numericDate(self.doc, "nbf")
     }
 
     // `iat` — issued-at, seconds since the Unix epoch (§4.1.6).
     fn issuedAt(self: &Self): Option<i64> {
-        return self.doc.i64("iat")
+        return numericDate(self.doc, "iat")
     }
 
     // True iff the `aud` claim is `want`, or is an array containing it. RFC 7519
@@ -218,6 +218,21 @@ impl JwtClaims {
 
 // -1 no `aud` claim at all, 0 present but no match, 1 match. Three outcomes because
 // the caller reports "missing claim" and "wrong audience" differently.
+// RFC 7519 §2: a NumericDate is a JSON number and MAY carry a fractional part.
+// `Json.i64` rejects `1735689600.5` rather than silently truncate it, so a date
+// claim reads as f64 and drops the sub-second part here, where doing so is the
+// spec's own rounding and not data loss.
+fn numericDate(doc: &Json, key: &string): Option<i64> {
+    match doc.f64(key) {
+        Option.Some(v) => {
+            return Option.Some(v as i64)
+        }
+        Option.None => {
+            return Option.None
+        }
+    }
+}
+
 fn audienceMatches(doc: &Json, want: &string): i64 {
     let cur = doc.curField(doc.curRoot(), "aud")
     let kind = doc.curKind(cur)
@@ -463,7 +478,7 @@ fn jwtVerify(v: &JwtVerifier, token: &string): Result<JwtClaims, JwtError> {
     }
     let skew = v.leewaySecs
 
-    match doc.i64("exp") {
+    match numericDate(doc, "exp") {
         Option.Some(exp) => {
             if now - skew >= exp {
                 return Result.Err(JwtError.Expired(exp))
@@ -475,7 +490,7 @@ fn jwtVerify(v: &JwtVerifier, token: &string): Result<JwtClaims, JwtError> {
             }
         }
     }
-    match doc.i64("nbf") {
+    match numericDate(doc, "nbf") {
         Option.Some(nbf) => {
             if now + skew < nbf {
                 return Result.Err(JwtError.NotYetValid(nbf))
@@ -484,7 +499,7 @@ fn jwtVerify(v: &JwtVerifier, token: &string): Result<JwtClaims, JwtError> {
         Option.None => {
         }
     }
-    match doc.i64("iat") {
+    match numericDate(doc, "iat") {
         Option.Some(iat) => {
             if now + skew < iat {
                 return Result.Err(JwtError.IssuedInFuture(iat))

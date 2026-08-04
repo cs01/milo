@@ -1,0 +1,46 @@
+// @expect: i64max 9223372036854775807
+// @expect: u64max 18446744073709551615
+// @expect: fractional rejected
+// @expect: overflow rejected
+// @expect: exponent rejected
+// @expect: negative -42
+// An integer read re-scans the literal's source span. The parser accumulates
+// every number into an f64, so reading through numVal loses everything past
+// 2^53 and silently truncates 1.5 to 1 — both are data loss with no signal.
+from "std/json" import {
+    Json
+}
+
+fn doc(text: string): Json {
+    match Json.parse(text) {
+        Result.Ok(d) => {
+            return d
+        }
+        Result.Err(_e) => {
+            print("parse failed")
+            return Json.parse("{}")!
+        }
+    }
+}
+
+pub fn main(): i32 {
+    let a = doc("{\"v\":9223372036854775807}")
+    print("i64max " + (a.i64("v") ?? 0).toString())
+    let b = doc("{\"v\":18446744073709551615}")
+    print("u64max " + (b.curUint(b.curField(b.curRoot(), "v")) ?? 0).toString())
+    let c = doc("{\"v\":1.5}")
+    if c.i64("v").isNone() {
+        print("fractional rejected")
+    }
+    let d = doc("{\"v\":18446744073709551615}")
+    if d.i64("v").isNone() {
+        print("overflow rejected")
+    }
+    let e = doc("{\"v\":1e2}")
+    if e.i64("v").isNone() {
+        print("exponent rejected")
+    }
+    let f = doc("{\"v\":-42}")
+    print("negative " + (f.i64("v") ?? 0).toString())
+    return 0
+}

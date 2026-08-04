@@ -1,0 +1,13 @@
+// @error: the struct does not derive Json
+// @json only means something to the derived codec. Accepted silently, a rename
+// on a hand-written serializer would read as applied when nothing consumes it.
+struct User {
+    @json("user_id") userId: i64,
+}
+
+fn main() {
+    print(User {
+        userId: 1
+    }
+        .userId.toString())
+}

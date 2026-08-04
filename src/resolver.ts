@@ -4,7 +4,7 @@
 import { readFileSync, existsSync } from "fs";
 import { resolve, dirname } from "path";
 import { cacheRoot } from "./pkg";
-import type { Program, Span, DeclOrigins, DeclOrigin } from "./ast";
+import type { Program, Span, DeclOrigins, DeclOrigin, ImportDecl } from "./ast";
 import { ParseError } from "./diagnostics";
 import type { TargetInfo } from "./target";
 import { Lexer } from "./lexer";
@@ -266,7 +266,18 @@ export function resolveImports(program: Program, sourceDir: string, target: Targ
   }
 
   function processImports(prog: Program, dir: string, pkg: string, unit: Unit) {
-    for (const imp of prog.imports) {
+    // `@derive(Json)` synthesizes method bodies that call std/json (the cursor
+    // API, JsonError, jsonQuote…). Pulling the module in here keeps the attribute
+    // self-contained: a derive that silently required an unrelated import line
+    // would report "unknown type 'Json'" pointing at code the user never wrote.
+    // Not appended to prog.imports — the unused-import lint reads that list and
+    // would flag an import nobody typed.
+    const derivesJson = prog.structs.some(s =>
+      s.attributes?.some(a => a.name === "derive" && a.args.includes("Json")));
+    const synthetic: ImportDecl[] = derivesJson && !prog.imports.some(i => i.path === "std/json")
+      ? [{ kind: "ImportDecl", path: "std/json", names: ["Json"] }]
+      : [];
+    for (const imp of [...prog.imports, ...synthetic]) {
       const resolved = resolvePath(dir, imp.path, pkg);
       const absPath = resolved.path;
       if (resolved.pkg !== "" && imp.names) {

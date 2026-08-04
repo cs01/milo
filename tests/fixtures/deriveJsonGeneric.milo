@@ -1,0 +1,38 @@
+// @expect: {"box":{"value":7,"label":"seven"},"tag":"t"}
+// @expect: {"box":{"value":7,"label":"seven"},"tag":"t"}
+// A derive on a generic struct is synthesized per monomorphization, so a
+// generic field inside a derived struct encodes and decodes. The top-level
+// Box<i64>.fromJson entry point is unreachable — a static call on a generic
+// type has no spelling — which is why this goes through Holder.
+@derive(Json)
+struct Box<T> {
+    value: T,
+    label: string,
+}
+
+@derive(Json)
+struct Holder {
+    box: Box<i64>,
+    tag: string,
+}
+
+pub fn main(): i32 {
+    let h = Holder {
+        box: Box {
+            value: 7, label: "seven"
+        }
+        , tag: "t"
+    }
+    let text = h.toJson()
+    print(text)
+    match Holder.fromJson(text) {
+        Result.Ok(back) => {
+            print(back.toJson())
+        }
+        Result.Err(e) => {
+            print("decode failed: " + e.message())
+            return 1
+        }
+    }
+    return 0
+}

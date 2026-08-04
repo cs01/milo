@@ -4411,349 +4411,21 @@ export class Codegen {
         lines.push(`  ${s2} = insertvalue %String ${s1}, i64 0, 2`);
         return [lines, s2, "%String"];
       }
-      case "StringWithCapacity": {
-        this.hasStringType = true;
-        this.needsMalloc = true;
-        const [capLines, capVal] = this.genExpr(expr.capacity);
-        lines.push(...capLines);
-        this.emitNonNegativeCheck(lines, capVal, "capacity", expr.span);
-        const buf = this.nextTemp();
-        lines.push(`  ${buf} = call ptr @malloc(i64 ${capVal})`);
-        const s0 = this.nextTemp();
-        lines.push(`  ${s0} = insertvalue %String undef, ptr ${buf}, 0`);
-        const s1 = this.nextTemp();
-        lines.push(`  ${s1} = insertvalue %String ${s0}, i64 0, 1`);
-        const s2 = this.nextTemp();
-        lines.push(`  ${s2} = insertvalue %String ${s1}, i64 ${capVal}, 2`);
-        return [lines, s2, "%String"];
-      }
-      case "Ident": {
-        const local = this.locals.get(expr.name);
-        if (!local) {
-          // named function used as value — generate trampoline with closure calling convention
-          if (this.fnSigs.has(expr.name)) {
-            const sig = this.fnSigs.get(expr.name)!;
-            const trampolineName = `__trampoline_${expr.name}`;
-            if (!this.fnSigs.has(trampolineName)) {
-              const paramNames = sig.paramTypes.map((_, i) => `p${i}`);
-              const trampolineParams = [`ptr %env`, ...sig.paramTypes.map((t, i) => `${t} %${paramNames[i]}`)].join(", ");
-              const fwdArgs = sig.paramTypes.map((t, i) => `${t} %${paramNames[i]}`).join(", ");
-              const body: string[] = [];
-              body.push(`define ${sig.retType} @${trampolineName}(${trampolineParams}) {`);
-              body.push("entry.bb:");
-              if (this.sretFns.has(expr.name)) {
-                // callee is sret-lowered; trampoline keeps the closure convention
-                // (returns the aggregate) and bridges via a local slot
-                body.push(`  %slot = alloca ${sig.retType}`);
-                body.push(`  call void @${expr.name}(${fwdArgs ? `ptr %slot, ${fwdArgs}` : "ptr %slot"})`);
-                body.push(`  %r = load ${sig.retType}, ptr %slot`);
-                body.push(`  ret ${sig.retType} %r`);
-              } else if (sig.retType === "void") {
-                body.push(`  call void @${expr.name}(${fwdArgs})`);
-                body.push("  ret void");
-              } else {
-                body.push(`  %r = call ${sig.retType} @${expr.name}(${fwdArgs})`);
-                body.push(`  ret ${sig.retType} %r`);
-              }
-              body.push("}");
-              this.closureBodies.push(body);
-              this.fnSigs.set(trampolineName, sig);
-            }
-            const alloca = this.nextTemp();
-            lines.push(`  ${alloca} = alloca { ptr, ptr }`);
-            const fpSlot = this.nextTemp();
-            lines.push(`  ${fpSlot} = getelementptr { ptr, ptr }, ptr ${alloca}, i32 0, i32 0`);
-            lines.push(`  store ptr @${trampolineName}, ptr ${fpSlot}`);
-            const envSlot = this.nextTemp();
-            lines.push(`  ${envSlot} = getelementptr { ptr, ptr }, ptr ${alloca}, i32 0, i32 1`);
-            lines.push(`  store ptr null, ptr ${envSlot}`);
-            const val = this.nextTemp();
-            lines.push(`  ${val} = load { ptr, ptr }, ptr ${alloca}`);
-            return [lines, val, "{ ptr, ptr }"];
-          }
-          const globalInfo = this.globalVars.get(expr.name);
-          if (globalInfo) {
-            const val = this.nextTemp();
-            lines.push(`  ${val} = load ${globalInfo.type}, ptr @${expr.name}`);
-            // Moving a global out by value (checker cleared its moved flag, so a
-            // later reassignment will drop the slot) must zero the source, exactly
-            // like the local-move path below — otherwise the reassign's drop frees
-            // the buffer the callee already owns/freed. Double-free that compiled
-            // clean before this. No alive-flag: globals aren't in droppableLocals.
-            if (expr.isMove && this.needsDropCg(globalInfo.typeKind)) {
-              lines.push(this.zeroStore(globalInfo.type, `@${expr.name}`));
-            }
-            return [lines, val, globalInfo.type];
-          }
-          console.error(`error[codegen]: undefined variable '${expr.name}'`); process.exit(1);
-        }
-        if (local.isRef) {
-          const ptr = this.nextTemp();
-          lines.push(`  ${ptr} = load ptr, ptr ${this.localAddr(expr.name)}`);
-          const val = this.nextTemp();
-          lines.push(`  ${val} = load ${local.type}, ptr ${ptr}`);
-          return [lines, val, local.type];
-        }
-        const addr = this.localAddr(expr.name);
-        const tmp = this.nextTemp();
-        lines.push(`  ${tmp} = load ${local.type}, ptr ${addr}`);
-        if (expr.isMove && this.needsDropCg(local.typeKind)) {
-          lines.push(this.zeroStore(local.type, addr));
-          const dl = this.droppableLocals.find(d => d.addr === addr);
-          if (dl) lines.push(`  store i1 0, ptr ${dl.aliveFlag}`);
-        }
-        return [lines, tmp, local.type];
-      }
+      case "StringWithCapacity":
+        return this.genStringWithCapacity(expr, lines);
+      case "Ident":
+        return this.genIdent(expr, lines);
       case "CharLit": {
         return [lines, String(expr.value), "i8"];
       }
-      case "BinOp": {
-        if (expr.op === "&&" || expr.op === "||") {
-          return this.genShortCircuit(expr, lines);
-        }
-        const [ll, lv, llt] = this.genExpr(expr.left);
-        const [rl, rv] = this.genExpr(expr.right);
-        lines.push(...ll, ...rl);
-
-        if (llt === "%String") {
-          // These all read out of their operands into a fresh result, so an
-          // operand that was a call temporary (`mk(a) + mk(b)`) has no owner
-          // afterwards and would otherwise never be freed.
-          const dropOperands = (out: string[]) => {
-            this.dropOwnedTemp(out, lv, llt, expr.left);
-            this.dropOwnedTemp(out, rv, llt, expr.right);
-          };
-          if (expr.op === "+") {
-            const [cl, cv, ct] = this.genStringConcat(lines, lv, rv);
-            dropOperands(cl);
-            return [cl, cv, ct];
-          }
-          if (expr.op === "==" || expr.op === "!=") {
-            const [cl, cv, ct] = this.genStringCmp(lines, lv, rv, expr.op === "==");
-            dropOperands(cl);
-            return [cl, cv, ct];
-          }
-          if (expr.op === "<" || expr.op === ">" || expr.op === "<=" || expr.op === ">=") {
-            const [cl, cv, ct] = this.genStringOrd(lines, lv, rv, expr.op);
-            dropOperands(cl);
-            return [cl, cv, ct];
-          }
-        }
-
-        // enum equality: compare tag field only (checker rejects payload-bearing enums)
-        if ((expr.op === "==" || expr.op === "!=") && llt.startsWith("%") && this.enumLayouts.has(llt.slice(1))) {
-          const lTag = this.nextTemp();
-          const rTag = this.nextTemp();
-          const cmp = this.nextTemp();
-          lines.push(`  ${lTag} = extractvalue ${llt} ${lv}, 0`);
-          lines.push(`  ${rTag} = extractvalue ${llt} ${rv}, 0`);
-          lines.push(`  ${cmp} = icmp ${expr.op === "==" ? "eq" : "ne"} i32 ${lTag}, ${rTag}`);
-          return [lines, cmp, "i1"];
-        }
-
-        const tmp = this.nextTemp();
-        const isFloat = llt === "float" || llt === "double";
-        const unsigned = !isFloat && this.isUnsigned(expr.left.type);
-        const intOps: Record<string, string> = unsigned
-          ? { "+": "add", "-": "sub", "*": "mul", "/": "udiv", "%": "urem", "&": "and", "|": "or", "^": "xor", "<<": "shl", ">>": "lshr" }
-          : { "+": "add", "-": "sub", "*": "mul", "/": "sdiv", "%": "srem", "&": "and", "|": "or", "^": "xor", "<<": "shl", ">>": "ashr" };
-        const floatOps: Record<string, string> = { "+": "fadd", "-": "fsub", "*": "fmul", "/": "fdiv", "%": "frem" };
-        const intCmps: Record<string, string> = unsigned
-          ? { "==": "eq", "!=": "ne", "<": "ult", ">": "ugt", "<=": "ule", ">=": "uge" }
-          : { "==": "eq", "!=": "ne", "<": "slt", ">": "sgt", "<=": "sle", ">=": "sge" };
-        // "!=" must be `une` (unordered-or-not-equal), not `one`: for NaN operands
-        // `one` is false, which would make both `x == x` and `x != x` false.
-        const floatCmps: Record<string, string> = { "==": "oeq", "!=": "une", "<": "olt", ">": "ogt", "<=": "ole", ">=": "oge" };
-        if (expr.op in intOps) {
-          const op = isFloat ? floatOps[expr.op] : intOps[expr.op];
-          const checkedOps: Record<string, string> = { "+": "add", "-": "sub", "*": "mul" };
-          // A @wrapping fn skips the overflow trap and takes the plain (defined, two's-
-          // complement) op below. Everything else — div-by-zero, bounds — still traps.
-          if (this.trapOnOverflow && !this.currentFnWrapping && !isFloat && expr.op in checkedOps && expr.span) {
-            const val = this.emitCheckedArith(lines, checkedOps[expr.op], unsigned, llt, lv, rv, expr.span);
-            return [lines, val, llt];
-          }
-          // Integer division/remainder by zero (and signed INT_MIN / -1) is UB — trap it in
-          // every mode. Under @wrapping the INT_MIN/-1 overflow wraps (→ INT_MIN, rem 0), but
-          // division by zero still traps: there is no modular value for x/0.
-          if (!isFloat && (expr.op === "/" || expr.op === "%")) {
-            const signed = !unsigned;
-            const bits = expr.left.type.tag === "int" ? expr.left.type.bits : 32;
-            if (this.currentFnWrapping && signed) {
-              const val = this.emitWrappingSignedDivRem(lines, expr.op, lv, rv, llt, bits, expr.span);
-              return [lines, val, llt];
-            }
-            this.emitDivByZeroCheck(lines, rv, lv, llt, signed, bits, expr.span);
-          }
-          // A shift by >= the operand's bit width (or a negative amount, huge as unsigned) is
-          // LLVM poison. Default: trap. @wrapping: mask the amount to [0,width) — defined,
-          // matches Rust `wrapping_shl` / C.
-          if (!isFloat && (expr.op === "<<" || expr.op === ">>")) {
-            const bits = expr.left.type.tag === "int" ? expr.left.type.bits : 32;
-            if (this.currentFnWrapping) {
-              const masked = this.nextTemp();
-              lines.push(`  ${masked} = and ${llt} ${rv}, ${bits - 1}`);
-              lines.push(`  ${tmp} = ${op} ${llt} ${lv}, ${masked}`);
-              return [lines, tmp, llt];
-            }
-            this.emitShiftCheck(lines, rv, llt, bits, expr.span);
-          }
-          lines.push(`  ${tmp} = ${op} ${llt} ${lv}, ${rv}`);
-          return [lines, tmp, llt];
-        }
-        if (expr.op in intCmps) {
-          if (isFloat) lines.push(`  ${tmp} = fcmp ${floatCmps[expr.op]} ${llt} ${lv}, ${rv}`);
-          else lines.push(`  ${tmp} = icmp ${intCmps[expr.op]} ${llt} ${lv}, ${rv}`);
-          return [lines, tmp, "i1"];
-        }
-        console.error(`error[codegen]: unknown binary op '${expr.op}'`); process.exit(1);
-      }
-      case "UnaryOp": {
-        if (expr.op === "&") {
-          const [al, addr] = this.genLValue(expr.operand);
-          lines.push(...al);
-          return [lines, addr, "ptr"];
-        }
-        // Negating an integer literal is a compile-time constant — fold it. Without this,
-        // a legitimate negative literal like i32 INT_MIN (-2147483648, lexed as the unary
-        // minus of 2147483648) would emit a runtime checked-neg and trap on the INT_MIN
-        // overflow now that overflow checks are on in every build.
-        if (expr.op === "-" && expr.operand.kind === "IntLit"
-            && expr.operand.type.tag === "int" && expr.operand.type.signed) {
-          return [lines, (-(expr.operand.value as bigint)).toString(), this.llvmType(expr.operand.type)];
-        }
-        const [ol, ov, ot] = this.genExpr(expr.operand);
-        lines.push(...ol);
-        const tmp = this.nextTemp();
-        if (expr.op === "-") {
-          if (ot === "float" || ot === "double") lines.push(`  ${tmp} = fneg ${ot} ${ov}`);
-          else if (this.trapOnOverflow && !this.currentFnWrapping && expr.span) {
-            const unsigned = this.isUnsigned(expr.operand.type);
-            const val = this.emitCheckedArith(lines, "sub", unsigned, ot, "0", ov, expr.span);
-            return [lines, val, ot];
-          } else lines.push(`  ${tmp} = sub ${ot} 0, ${ov}`);
-          return [lines, tmp, ot];
-        }
-        if (expr.op === "!") { lines.push(`  ${tmp} = xor i1 ${ov}, 1`); return [lines, tmp, "i1"]; }
-        if (expr.op === "~") { lines.push(`  ${tmp} = xor ${ot} ${ov}, -1`); return [lines, tmp, ot]; }
-        console.error(`error[codegen]: unknown unary op '${expr.op}'`); process.exit(1);
-      }
-      case "Call": {
-        if (Codegen.BUILTINS.has(expr.func) && !this.userDeclaredFns.has(expr.func)) {
-          return this.genBuiltinCall(expr, lines);
-        }
-        const sig = this.fnSigs.get(expr.func);
-        const tempMark = this.argTempDrops.length;
-        const argVals: { val: string; type: string }[] = [];
-        const refPtrs: { ptr: string; mut: boolean }[] = [];
-        for (let i = 0; i < expr.args.length; i++) {
-          const arg = expr.args[i];
-          if (arg.passByRef) {
-            const [al, aPtr] = this.genLValueForArg(arg.expr);
-            lines.push(...al);
-            argVals.push({ val: aPtr, type: "ptr" });
-            refPtrs.push({ ptr: aPtr, mut: arg.refMut });
-          } else {
-            // [T; N] → *T decay: pass the array's address as a ptr
-            const argTk = arg.expr.type;
-            const paramExpectsPtr = sig && i < sig.paramTypes.length && sig.paramTypes[i] === "ptr";
-            if (argTk.tag === "array" && paramExpectsPtr) {
-              const [al, aPtr] = this.genLValueForArg(arg.expr);
-              lines.push(...al);
-              argVals.push({ val: aPtr, type: "ptr" });
-              continue;
-            }
-            // fn → ptr coercion: bare function name passed to extern fn ptr param
-            if (argTk.tag === "fn" && paramExpectsPtr && arg.expr.kind === "Ident" && this.fnSigs.has(arg.expr.name)) {
-              argVals.push({ val: `@${arg.expr.name}`, type: "ptr" });
-              continue;
-            }
-            const [al, av, at] = this.genExpr(arg.expr);
-            lines.push(...al);
-            // String → char* coercion, for extern/FFI calls ONLY (including variadic args).
-            // The `paramTypes[i] === "ptr"` test alone is not enough to identify one: a
-            // Milo `&string` param lowers to `ptr` too, and it wants the address of the
-            // %String struct, not the bytes. Coercing there handed strTrim(&string) the
-            // character buffer, which it then read a length/capacity out of — silently
-            // returning "" instead of the trimmed text, with no crash and no diagnostic.
-            // Only a slice or other non-lvalue reached this path; an lvalue arg is
-            // auto-borrowed upstream and goes through genLValueForArg.
-            // A `&string` param wants the address of the %String struct. Only a
-            // non-lvalue reaches here (a slice, a temporary) — an lvalue is auto-borrowed
-            // upstream and goes via genLValueForArg — so materialise it and pass that.
-            const wantsAddr = at === "%String" && !!sig?.wantsStringAddr?.[i];
-            if (at === "%String" && sig && !wantsAddr && (i >= sig.paramTypes.length || sig.paramTypes[i] === "ptr")) {
-              const dataPtr = this.nextTemp();
-              lines.push(`  ${dataPtr} = extractvalue %String ${av}, 0`);
-              argVals.push({ val: dataPtr, type: "ptr" });
-            } else if (wantsAddr) {
-              const slot = this.nextTemp();
-              lines.push(`  ${slot} = alloca %String`);
-              lines.push(`  store %String ${av}, ptr ${slot}`);
-              argVals.push({ val: slot, type: "ptr" });
-            // fn closure → ptr coercion: extract fn ptr from closure tuple for extern calls
-            } else if (at === "{ ptr, ptr }" && paramExpectsPtr) {
-              const fnPtr = this.nextTemp();
-              lines.push(`  ${fnPtr} = extractvalue { ptr, ptr } ${av}, 0`);
-              argVals.push({ val: fnPtr, type: "ptr" });
-            } else {
-              argVals.push({ val: av, type: at });
-            }
-          }
-        }
-        this.emitAliasGuards(lines, refPtrs, expr.span);
-        // extern fns passing/returning a struct by value need native-ABI lowering:
-        // coerce args into registers, byval/indirect big ones, sret the return.
-        if (this.externAbi.has(expr.func)) {
-          const r = this.emitExternAbiCall(expr, argVals, lines);
-          this.flushArgTempDrops(r[0], tempMark);
-          return r;
-        }
-        const argsStr = argVals.map(a => `${a.type} ${a.val}`).join(", ");
-        const retTy = sig?.retType ?? "i32";
-        if (this.sretFns.has(expr.func)) {
-          const dest = sretDest ?? this.nextTemp();
-          if (!sretDest) lines.push(`  ${dest} = alloca ${retTy}`);
-          lines.push(`  call void @${expr.func}(${argsStr ? `ptr ${dest}, ${argsStr}` : `ptr ${dest}`})`);
-          this.flushArgTempDrops(lines, tempMark);
-          if (sretDest) return [lines, "undef", retTy];
-          // no direct destination: fall back to a first-class value for generic
-          // consumers (rare — slower to compile at -O2, but correct)
-          const tmp = this.nextTemp();
-          lines.push(`  ${tmp} = load ${retTy}, ptr ${dest}`);
-          return [lines, tmp, retTy];
-        }
-        let callPrefix = retTy;
-        if (expr.variadic) {
-          const paramStr = sig!.paramTypes.join(", ");
-          callPrefix = `${retTy} (${paramStr}, ...)`;
-        }
-        if (retTy === "void") {
-          lines.push(`  call ${callPrefix} @${expr.func}(${argsStr})`);
-          this.flushArgTempDrops(lines, tempMark);
-          return [lines, "void", "void"];
-        }
-        const tmp = this.nextTemp();
-        lines.push(`  ${tmp} = call ${callPrefix} @${expr.func}(${argsStr})`);
-        this.flushArgTempDrops(lines, tempMark);
-        return [lines, tmp, retTy];
-      }
-      case "StructLit": {
-        const layout = this.structLayouts.get(expr.name)!;
-        const structTy = `%${expr.name}`;
-        const alloca = this.nextTemp();
-        lines.push(`  ${alloca} = alloca ${structTy}`);
-        for (const f of expr.fields) {
-          const idx = layout.fields.findIndex(lf => lf.name === f.name);
-          const fieldTy = layout.fields[idx].type;
-          const ptr = this.nextTemp();
-          lines.push(`  ${ptr} = getelementptr ${structTy}, ptr ${alloca}, i32 0, i32 ${idx}`);
-          this.genStoreInto(lines, ptr, fieldTy, f.value);
-        }
-        const val = this.nextTemp();
-        lines.push(`  ${val} = load ${structTy}, ptr ${alloca}`);
-        return [lines, val, structTy];
-      }
+      case "BinOp":
+        return this.genBinOp(expr, lines);
+      case "UnaryOp":
+        return this.genUnaryOp(expr, lines);
+      case "Call":
+        return this.genCall(expr, lines, sretDest);
+      case "StructLit":
+        return this.genStructLit(expr, lines);
       case "FieldAccess": {
         const [ptrLines, ptr, fieldTy] = this.genFieldPtr(expr);
         lines.push(...ptrLines);
@@ -4767,21 +4439,8 @@ export class Codegen {
         }
         return [lines, val, fieldTy];
       }
-      case "ArrayLen": {
-        const objType = expr.object.type.tag === "ref" ? expr.object.type.inner : expr.object.type;
-        if (objType.tag === "array" && objType.size !== null) {
-          return [lines, String(objType.size), "i32"];
-        }
-        if (objType.tag === "array" && objType.size === null) {
-          // slice: runtime length from the %Vec view
-          const [ol, ov] = this.genExpr(expr.object);
-          lines.push(...ol);
-          const len = this.nextTemp();
-          lines.push(`  ${len} = extractvalue %Vec ${ov}, 1`);
-          return [lines, len, "i64"];
-        }
-        return [lines, "0", "i32"];
-      }
+      case "ArrayLen":
+        return this.genArrayLen(expr, lines);
       case "StringLen": {
         const [ol, ov] = this.genExpr(expr.object);
         lines.push(...ol);
@@ -4806,181 +4465,14 @@ export class Codegen {
         lines.push(`  ${dataPtr} = extractvalue %Vec ${ov}, 0`);
         return [lines, dataPtr, "ptr"];
       }
-      case "ArrayLit": {
-        // Vec literal: `[a, b, c]` with Vec<T> type hint. Emit malloc + N stores, build %Vec struct.
-        if (expr.type.tag === "vec") {
-          this.hasVecType = true;
-          const vecElemTy = this.llvmType(expr.type.element);
-          const n = expr.elements.length;
-          if (n === 0) {
-            const s0 = this.nextTemp();
-            lines.push(`  ${s0} = insertvalue %Vec undef, ptr null, 0`);
-            const s1 = this.nextTemp();
-            lines.push(`  ${s1} = insertvalue %Vec ${s0}, i64 0, 1`);
-            const s2 = this.nextTemp();
-            lines.push(`  ${s2} = insertvalue %Vec ${s1}, i64 0, 2`);
-            return [lines, s2, "%Vec"];
-          }
-          this.needsMalloc = true;
-          const elemSize = this.typeSizeOf(expr.type.element);
-          const bytes = n * elemSize;
-          const buf = this.nextTemp();
-          lines.push(`  ${buf} = call ptr @malloc(i64 ${bytes})`);
-          for (let i = 0; i < n; i++) {
-            const [el, ev] = this.genExpr(expr.elements[i]);
-            lines.push(...el);
-            const pi = this.nextTemp();
-            lines.push(`  ${pi} = getelementptr ${vecElemTy}, ptr ${buf}, i64 ${i}`);
-            lines.push(`  store ${vecElemTy} ${ev}, ptr ${pi}`);
-          }
-          const v0 = this.nextTemp();
-          lines.push(`  ${v0} = insertvalue %Vec undef, ptr ${buf}, 0`);
-          const v1 = this.nextTemp();
-          lines.push(`  ${v1} = insertvalue %Vec ${v0}, i64 ${n}, 1`);
-          const v2 = this.nextTemp();
-          lines.push(`  ${v2} = insertvalue %Vec ${v1}, i64 ${n}, 2`);
-          return [lines, v2, "%Vec"];
-        }
-        if (expr.elements.length === 0) return [lines, "zeroinitializer", "[0 x i32]"];
-        const elemTy = expr.type.tag === "array" ? this.llvmType(expr.type.element) : "i32";
-        const [firstLines, firstVal] = this.genExpr(expr.elements[0]);
-        lines.push(...firstLines);
-        const arrTy = `[${expr.elements.length} x ${elemTy}]`;
-        const alloca = this.nextTemp();
-        lines.push(`  ${alloca} = alloca ${arrTy}`);
-        const ptr0 = this.nextTemp();
-        lines.push(`  ${ptr0} = getelementptr ${arrTy}, ptr ${alloca}, i32 0, i32 0`);
-        lines.push(`  store ${elemTy} ${firstVal}, ptr ${ptr0}`);
-        for (let i = 1; i < expr.elements.length; i++) {
-          const [el, ev] = this.genExpr(expr.elements[i]);
-          lines.push(...el);
-          const pi = this.nextTemp();
-          lines.push(`  ${pi} = getelementptr ${arrTy}, ptr ${alloca}, i32 0, i32 ${i}`);
-          lines.push(`  store ${elemTy} ${ev}, ptr ${pi}`);
-        }
-        const val = this.nextTemp();
-        lines.push(`  ${val} = load ${arrTy}, ptr ${alloca}`);
-        return [lines, val, arrTy];
-      }
-      case "ArrayRepeat": {
-        const elemKind = expr.type.tag === "array" ? expr.type.element : { tag: "int" as const, bits: 32, signed: true };
-        const elemTy = this.llvmType(elemKind);
-        const arrTy = `[${expr.count} x ${elemTy}]`;
-        const [vl, vv] = this.genExpr(expr.value);
-        lines.push(...vl);
-        if (vv === "0" || vv === "0.0" || vv === "false") {
-          return [lines, "zeroinitializer", arrTy];
-        }
-        const alloca = this.nextTemp();
-        lines.push(`  ${alloca} = alloca ${arrTy}`);
-        if (this.needsDropCg(elemKind)) {
-          // Non-Copy types: deep-clone each element so they own independent heap data
-          const srcPtr = this.nextTemp();
-          lines.push(`  ${srcPtr} = alloca ${elemTy}`);
-          lines.push(`  store ${elemTy} ${vv}, ptr ${srcPtr}`);
-          for (let i = 0; i < expr.count; i++) {
-            const pi = this.nextTemp();
-            lines.push(`  ${pi} = getelementptr ${arrTy}, ptr ${alloca}, i32 0, i32 ${i}`);
-            const cloned = this.emitDeepCloneFromPtr(lines, srcPtr, elemKind);
-            lines.push(`  store ${elemTy} ${cloned}, ptr ${pi}`);
-          }
-        } else {
-          for (let i = 0; i < expr.count; i++) {
-            const pi = this.nextTemp();
-            lines.push(`  ${pi} = getelementptr ${arrTy}, ptr ${alloca}, i32 0, i32 ${i}`);
-            lines.push(`  store ${elemTy} ${vv}, ptr ${pi}`);
-          }
-        }
-        const val = this.nextTemp();
-        lines.push(`  ${val} = load ${arrTy}, ptr ${alloca}`);
-        return [lines, val, arrTy];
-      }
-      case "IndexAccess": {
-        const objTag = expr.object.type.tag === "ref" ? expr.object.type.inner.tag : expr.object.type.tag;
-        if (objTag === "string") {
-          return this.genStringIndex(expr, lines);
-        }
-        if (expr.object.type.tag === "ptr") {
-          const [objLines, objVal] = this.genExpr(expr.object);
-          lines.push(...objLines);
-          const [idxLines, idxVal] = this.genExpr(expr.index);
-          lines.push(...idxLines);
-          const elemTy = this.llvmType(expr.type);
-          const gep = this.nextTemp();
-          lines.push(`  ${gep} = getelementptr ${elemTy}, ptr ${objVal}, i64 ${idxVal}`);
-          const val = this.nextTemp();
-          lines.push(`  ${val} = load ${elemTy}, ptr ${gep}`);
-          return [lines, val, elemTy];
-        }
-        {
-        const effObj = expr.object.type.tag === "ref" ? expr.object.type.inner : expr.object.type;
-        // Indexing a temporary container (`worlds()[i]`) materializes it into a slot
-        // that nothing else owns. Drop it once the element is safely out — after the
-        // load, or after the deep clone — never before, or the element pointer would
-        // outlive its buffer.
-        const tempMark = this.argTempDrops.length;
-        if (effObj.tag === "vec" || (effObj.tag === "array" && effObj.size === null)) {
-          const [ptrLines, ptr, elemTy] = this.genVecBoundsCheckedPtr(expr, lines);
-          const elemKind = effObj.element;
-          // Auto-clone non-Copy elements so the Vec stays intact. The user-facing
-          // semantics: Vec[i] always returns an independent value.
-          if (this.needsDropCg(elemKind)) {
-            const cloned = this.emitDeepCloneFromPtr(lines, ptr, elemKind);
-            this.flushArgTempDrops(lines, tempMark);
-            return [lines, cloned, elemTy];
-          }
-          const val = this.nextTemp();
-          lines.push(`  ${val} = load ${elemTy}, ptr ${ptr}`);
-          this.flushArgTempDrops(lines, tempMark);
-          return [lines, val, elemTy];
-        }
-        const [ptrLines, ptr, elemTy] = this.genBoundsCheckedPtr(expr, lines);
-        // Sized arrays clone non-Copy elements for the same reason Vec does: a
-        // bare load hands out a second owner of the same buffer, and both free
-        // it at scope exit. `fn peek(a: &[string; 2]) { return a[0] }` aborted
-        // on a double free.
-        if (effObj.tag === "array" && this.needsDropCg(expr.type)) {
-          const cloned = this.emitDeepCloneFromPtr(lines, ptr, expr.type);
-          this.flushArgTempDrops(lines, tempMark);
-          return [lines, cloned, elemTy];
-        }
-        const val = this.nextTemp();
-        lines.push(`  ${val} = load ${elemTy}, ptr ${ptr}`);
-        this.flushArgTempDrops(lines, tempMark);
-        return [lines, val, elemTy];
-        }
-      }
-      case "EnumLit": {
-        const layout = this.enumLayouts.get(expr.enumName)!;
-        const variant = layout.variants.get(expr.variant)!;
-        const enumTy = `%${expr.enumName}`;
-        const alloca = this.nextTemp();
-        lines.push(`  ${alloca} = alloca ${enumTy}`);
-        const tagPtr = this.nextTemp();
-        lines.push(`  ${tagPtr} = getelementptr ${enumTy}, ptr ${alloca}, i32 0, i32 0`);
-        lines.push(`  store i32 ${variant.tag}, ptr ${tagPtr}`);
-        if (expr.args.length > 0) {
-          const payloadPtr = this.nextTemp();
-          lines.push(`  ${payloadPtr} = getelementptr ${enumTy}, ptr ${alloca}, i32 0, i32 1`);
-          if (expr.args.length === 1) {
-            const [argLines, argVal, argTy] = this.genExpr(expr.args[0]);
-            lines.push(...argLines);
-            lines.push(`  store ${argTy} ${argVal}, ptr ${payloadPtr}`);
-          } else {
-            const payloadStructTy = `{ ${variant.fieldTypes.join(", ")} }`;
-            for (let i = 0; i < expr.args.length; i++) {
-              const [argLines, argVal, argTy] = this.genExpr(expr.args[i]);
-              lines.push(...argLines);
-              const fieldPtr = this.nextTemp();
-              lines.push(`  ${fieldPtr} = getelementptr ${payloadStructTy}, ptr ${payloadPtr}, i32 0, i32 ${i}`);
-              lines.push(`  store ${argTy} ${argVal}, ptr ${fieldPtr}`);
-            }
-          }
-        }
-        const val = this.nextTemp();
-        lines.push(`  ${val} = load ${enumTy}, ptr ${alloca}`);
-        return [lines, val, enumTy];
-      }
+      case "ArrayLit":
+        return this.genArrayLit(expr, lines);
+      case "ArrayRepeat":
+        return this.genArrayRepeat(expr, lines);
+      case "IndexAccess":
+        return this.genIndexAccess(expr, lines);
+      case "EnumLit":
+        return this.genEnumLit(expr, lines);
       case "SizeOf": {
         const size = this.typeSizeOf(expr.sizeType);
         return [lines, `${size}`, "i64"];
@@ -5005,105 +4497,12 @@ export class Codegen {
         return this.genPropagate(expr, lines);
       case "DefaultValue":
         return this.genDefaultValue(expr, lines);
-      case "MemReplace": {
-        const [pl, placePtr, placeTy] = this.genLValue(expr.place);
-        lines.push(...pl);
-        if (this.isBigAgg(placeTy)) {
-          // Old value moves out by memcpy — never load a ≥128-byte aggregate as an SSA
-          // value (see isBigAgg). It lands in the caller's slot (bound `let old = ...`
-          // supplies sretDest) or a scratch slot dropped here when the result is discarded.
-          let dest = sretDest;
-          if (!dest) { dest = this.nextTemp(); this.entryAllocas.push(`  ${dest} = alloca ${placeTy}`); }
-          this.emitMemcpy(lines, dest, placePtr, placeTy);
-          this.genStoreInto(lines, placePtr, placeTy, expr.value);   // store new; does NOT drop old
-          if (!sretDest && this.needsDropCg(expr.type)) this.emitDropValue(lines, dest, expr.type);
-          return [lines, dest, placeTy];
-        }
-        const old = this.nextTemp();
-        lines.push(`  ${old} = load ${placeTy}, ptr ${placePtr}`);   // move old out
-        this.genStoreInto(lines, placePtr, placeTy, expr.value);     // store new; old is not dropped
-        return [lines, old, placeTy];
-      }
-      case "EnumTryFrom": {
-        const [vl, nv, nTy] = this.genExpr(expr.value);
-        lines.push(...vl);
-        // Compare in i64 (every discriminant fits). Sign-extend a signed source, zero-extend
-        // an unsigned one, so e.g. a u8 200 matches discriminant 200 instead of wrapping.
-        let n64 = nv;
-        if (nTy !== "i64") {
-          const signed = expr.value.type.tag === "int" ? expr.value.type.signed : true;
-          n64 = this.nextTemp();
-          lines.push(`  ${n64} = ${signed ? "sext" : "zext"} ${nTy} ${nv} to i64`);
-        }
-        let valid = "0";   // i1 false when the enum somehow has no variants
-        for (const d of expr.discriminants) {
-          const eq = this.nextTemp();
-          lines.push(`  ${eq} = icmp eq i64 ${n64}, ${d}`);
-          if (valid === "0") { valid = eq; }
-          else { const o = this.nextTemp(); lines.push(`  ${o} = or i1 ${valid}, ${eq}`); valid = o; }
-        }
-        const optTy = `%${expr.optionEnumName}`;
-        const optLayout = this.enumLayouts.get(expr.optionEnumName)!;
-        const someTag = optLayout.variants.get("Some")!.tag;
-        const noneTag = optLayout.variants.get("None")!.tag;
-        const res = this.nextTemp();
-        lines.push(`  ${res} = alloca ${optTy}`);
-        const someBB = this.nextLabel("tryfrom.some");
-        const noneBB = this.nextLabel("tryfrom.none");
-        const doneBB = this.nextLabel("tryfrom.done");
-        lines.push(`  br i1 ${valid}, label %${someBB}, label %${noneBB}`);
-        lines.push(`${someBB}:`);
-        const sTagPtr = this.nextTemp();
-        lines.push(`  ${sTagPtr} = getelementptr ${optTy}, ptr ${res}, i32 0, i32 0`);
-        lines.push(`  store i32 ${someTag}, ptr ${sTagPtr}`);
-        // Payload IS the matched variant: a fieldless enum's value is its i32 tag, and here
-        // the tag equals the matched integer. Written as the payload's leading i32.
-        const n32 = this.nextTemp();
-        lines.push(`  ${n32} = trunc i64 ${n64} to i32`);
-        const payloadPtr = this.nextTemp();
-        lines.push(`  ${payloadPtr} = getelementptr ${optTy}, ptr ${res}, i32 0, i32 1`);
-        lines.push(`  store i32 ${n32}, ptr ${payloadPtr}`);
-        lines.push(`  br label %${doneBB}`);
-        lines.push(`${noneBB}:`);
-        const nTagPtr = this.nextTemp();
-        lines.push(`  ${nTagPtr} = getelementptr ${optTy}, ptr ${res}, i32 0, i32 0`);
-        lines.push(`  store i32 ${noneTag}, ptr ${nTagPtr}`);
-        lines.push(`  br label %${doneBB}`);
-        lines.push(`${doneBB}:`);
-        const out = this.nextTemp();
-        lines.push(`  ${out} = load ${optTy}, ptr ${res}`);
-        return [lines, out, optTy];
-      }
-      case "MemSwap": {
-        const [al, aPtr, aTy] = this.genLValue(expr.a);
-        lines.push(...al);
-        const [bl, bPtr] = this.genLValue(expr.b);
-        lines.push(...bl);
-        if (this.isBigAgg(aTy)) {
-          const tmp = this.nextTemp();
-          this.entryAllocas.push(`  ${tmp} = alloca ${aTy}`);
-          const same = this.nextTemp();
-          const swapLabel = this.nextLabel("swap.copy");
-          const doneLabel = this.nextLabel("swap.done");
-          lines.push(`  ${same} = icmp eq ptr ${aPtr}, ${bPtr}`);
-          lines.push(`  br i1 ${same}, label %${doneLabel}, label %${swapLabel}`);
-          lines.push(`${swapLabel}:`);
-          this.emitMemcpy(lines, tmp, aPtr, aTy);
-          this.emitMemcpy(lines, aPtr, bPtr, aTy);
-          this.emitMemcpy(lines, bPtr, tmp, aTy);
-          lines.push(`  br label %${doneLabel}`);
-          lines.push(`${doneLabel}:`);
-          return [lines, "", "void"];
-        }
-        // Load both before storing either — the places may alias (swap(v[i], v[j])).
-        const ta = this.nextTemp();
-        lines.push(`  ${ta} = load ${aTy}, ptr ${aPtr}`);
-        const tb = this.nextTemp();
-        lines.push(`  ${tb} = load ${aTy}, ptr ${bPtr}`);
-        lines.push(this.valStore(aTy, tb, aPtr));
-        lines.push(this.valStore(aTy, ta, bPtr));
-        return [lines, "", "void"];
-      }
+      case "MemReplace":
+        return this.genMemReplace(expr, lines, sretDest);
+      case "EnumTryFrom":
+        return this.genEnumTryFrom(expr, lines);
+      case "MemSwap":
+        return this.genMemSwap(expr, lines);
       case "Cast":
         return this.genCast(expr, lines);
       case "IsCheck": {
@@ -5149,73 +4548,10 @@ export class Codegen {
         lines.push(`  ${s2} = insertvalue %Vec ${s1}, i64 0, 2`);
         return [lines, s2, "%Vec"];
       }
-      case "VecWithCapacity": {
-        this.hasVecType = true;
-        this.needsMalloc = true;
-        const elemSize = this.typeSizeOf(expr.elementType);
-        const [capLines, capVal] = this.genExpr(expr.capacity);
-        lines.push(...capLines);
-        this.emitNonNegativeCheck(lines, capVal, "capacity", expr.span);
-        // malloc(cap * elemSize); empty (len=0) but pre-sized so pushes up to
-        // cap don't realloc. cap==0 still allocates 0 bytes — harmless, matches
-        // the "buffer or null" invariant push checks (null only when cap==0).
-        const bytes = this.nextTemp();
-        lines.push(`  ${bytes} = mul i64 ${capVal}, ${elemSize}`);
-        const buf = this.nextTemp();
-        lines.push(`  ${buf} = call ptr @malloc(i64 ${bytes})`);
-        const v0 = this.nextTemp();
-        lines.push(`  ${v0} = insertvalue %Vec undef, ptr ${buf}, 0`);
-        const v1 = this.nextTemp();
-        lines.push(`  ${v1} = insertvalue %Vec ${v0}, i64 0, 1`);
-        const v2 = this.nextTemp();
-        lines.push(`  ${v2} = insertvalue %Vec ${v1}, i64 ${capVal}, 2`);
-        return [lines, v2, "%Vec"];
-      }
-      case "VecFilled": {
-        this.hasVecType = true;
-        this.needsMalloc = true;
-        const elemSize = this.typeSizeOf(expr.elementType);
-        const elemTy = this.llvmType(expr.elementType);
-        const [cntLines, cntVal] = this.genExpr(expr.count);
-        lines.push(...cntLines);
-        this.emitNonNegativeCheck(lines, cntVal, "length", expr.span);
-        const [valLines, valVal] = this.genExpr(expr.value);
-        lines.push(...valLines);
-        const bytes = this.nextTemp();
-        lines.push(`  ${bytes} = mul i64 ${cntVal}, ${elemSize}`);
-        const buf = this.nextTemp();
-        lines.push(`  ${buf} = call ptr @malloc(i64 ${bytes})`);
-        // fill loop: for i in 0..count { buf[i] = value }
-        const idxSlot = this.nextTemp();
-        lines.push(`  ${idxSlot} = alloca i64`);
-        lines.push(`  store i64 0, ptr ${idxSlot}`);
-        const condL = this.nextLabel("vecfill.cond");
-        const bodyL = this.nextLabel("vecfill.body");
-        const endL = this.nextLabel("vecfill.end");
-        lines.push(`  br label %${condL}`);
-        lines.push(`${condL}:`);
-        const iv = this.nextTemp();
-        lines.push(`  ${iv} = load i64, ptr ${idxSlot}`);
-        const more = this.nextTemp();
-        lines.push(`  ${more} = icmp ult i64 ${iv}, ${cntVal}`);
-        lines.push(`  br i1 ${more}, label %${bodyL}, label %${endL}`);
-        lines.push(`${bodyL}:`);
-        const slot = this.nextTemp();
-        lines.push(`  ${slot} = getelementptr ${elemTy}, ptr ${buf}, i64 ${iv}`);
-        lines.push(`  store ${elemTy} ${valVal}, ptr ${slot}`);
-        const inc = this.nextTemp();
-        lines.push(`  ${inc} = add i64 ${iv}, 1`);
-        lines.push(`  store i64 ${inc}, ptr ${idxSlot}`);
-        lines.push(`  br label %${condL}`);
-        lines.push(`${endL}:`);
-        const v0 = this.nextTemp();
-        lines.push(`  ${v0} = insertvalue %Vec undef, ptr ${buf}, 0`);
-        const v1 = this.nextTemp();
-        lines.push(`  ${v1} = insertvalue %Vec ${v0}, i64 ${cntVal}, 1`);
-        const v2 = this.nextTemp();
-        lines.push(`  ${v2} = insertvalue %Vec ${v1}, i64 ${cntVal}, 2`);
-        return [lines, v2, "%Vec"];
-      }
+      case "VecWithCapacity":
+        return this.genVecWithCapacity(expr, lines);
+      case "VecFilled":
+        return this.genVecFilled(expr, lines);
       case "VecPush":
         return this.genVecPush(expr, lines);
       case "VecPop":
@@ -5367,430 +4703,1164 @@ export class Codegen {
         return this.genOptionOp(expr, lines);
       case "JsonStringify":
         return this.genJsonStringify(expr, lines);
-      case "Closure": {
-        const closureName = `__closure_${this.closureCounter++}`;
-        const captures = expr.captures;
-        const retTy = this.llvmType(expr.retType);
+      case "Closure":
+        return this.genClosure(expr, lines);
+      case "CFnCall":
+        return this.genCFnCall(expr, lines);
+      case "ClosureCall":
+        return this.genClosureCall(expr, lines);
+      case "InterfaceCoerce":
+        return this.genInterfaceCoerce(expr, lines);
+      case "IfExpr":
+        return this.genIfExpr(expr, lines);
+      case "MatchExpr":
+        return this.genMatchExpr(expr, lines);
+      case "InterfaceMethodCall":
+        return this.genInterfaceMethodCall(expr, lines);
+    }
+  }
 
-        const isMove = !!(expr as any).isMove;
-        // by-ref closures: env holds ptrs to original allocas
-        // move closures: env holds copies of captured values
-        const envStructTy = captures.length > 0
-          ? (isMove
-            ? `{ ${captures.map(c => this.llvmType(c.type)).join(", ")} }`
-            : `{ ${captures.map(() => "ptr").join(", ")} }`)
-          : "{}";
+  private genStringWithCapacity(expr: HIRExpr & { kind: "StringWithCapacity" }, lines: string[]): [string[], string, string] {
+    this.hasStringType = true;
+    this.needsMalloc = true;
+    const [capLines, capVal] = this.genExpr(expr.capacity);
+    lines.push(...capLines);
+    this.emitNonNegativeCheck(lines, capVal, "capacity", expr.span);
+    const buf = this.nextTemp();
+    lines.push(`  ${buf} = call ptr @malloc(i64 ${capVal})`);
+    const s0 = this.nextTemp();
+    lines.push(`  ${s0} = insertvalue %String undef, ptr ${buf}, 0`);
+    const s1 = this.nextTemp();
+    lines.push(`  ${s1} = insertvalue %String ${s0}, i64 0, 1`);
+    const s2 = this.nextTemp();
+    lines.push(`  ${s2} = insertvalue %String ${s1}, i64 ${capVal}, 2`);
+    return [lines, s2, "%String"];
+  }
 
-        // save codegen state
-        const savedTemp = this.tempCounter;
-        const savedLabel = this.labelCounter;
-        const savedLocals = this.locals;
-        const savedDroppable = this.droppableLocals;
-        const savedLoopHeader = this.loopHeader;
-        const savedLoopExit = this.loopExit;
-        const savedEntryAllocas = this.entryAllocas;
-        const savedEmittedAddrs = this.emittedAddrs;
-        const savedFnName = this.currentFnName;
-        const savedEnsures = this.currentEnsures;
-        this.tempCounter = 0;
-        this.labelCounter = 0;
-        this.locals = new Map();
-        this.droppableLocals = [];
-        this.entryAllocas = [];
-        this.emittedAddrs = new Set();
-        this.loopHeader = null;
-        this.loopExit = null;
-        // a Return inside the closure body must not assert the enclosing fn's ensures
-        this.currentEnsures = [];
-        this.currentFnName = closureName;
-        // closure bodies carry no subprogram (M1/M2); suppress dbg.declare so its locals
-        // aren't scoped to the enclosing fn (the closure define lacks !dbg anyway)
-        const savedSubprogram = this.currentSubprogramId;
-        this.currentSubprogramId = null;
-
-        // generate closure function: @__closure_N(ptr %env, params...)
-        const closureBody: string[] = [];
-        // Closure params carry the full type (top-level fns split it into inner + isRef),
-        // and the prologue below spills every ref param as a pointer. `&string` lowers to
-        // %String by value in return position, so ask for the pointer explicitly here.
-        const closureParamTy = (t: TypeKind) =>
-          t.tag === "ref" && t.inner.tag === "string" ? "ptr" : this.llvmType(t);
-        const closureParams = [`ptr %env`, ...expr.params.map(p => `${closureParamTy(p.type)} %${p.name}`)].join(", ");
-        closureBody.push(`define ${retTy} @${closureName}(${closureParams}) {`);
-        closureBody.push("entry.bb:");
-
-        // load captures from env struct
-        for (let i = 0; i < captures.length; i++) {
-          const cap = captures[i];
-          const capTy = this.llvmType(cap.type);
-          const gepPtr = this.nextTemp();
-          closureBody.push(`  ${gepPtr} = getelementptr ${envStructTy}, ptr %env, i32 0, i32 ${i}`);
-          if (isMove) {
-            // move closure: env holds the value directly — treat as local alloca
-            this.locals.set(cap.name, { type: capTy, typeKind: cap.type, mutable: cap.mutable, isRef: false });
-            closureBody.push(`  %${cap.name}.addr = alloca ${capTy}`);
-            const loaded = this.nextTemp();
-            closureBody.push(`  ${loaded} = load ${capTy}, ptr ${gepPtr}`);
-            closureBody.push(`  store ${capTy} ${loaded}, ptr %${cap.name}.addr`);
+  private genIdent(expr: HIRExpr & { kind: "Ident" }, lines: string[]): [string[], string, string] {
+    const local = this.locals.get(expr.name);
+    if (!local) {
+      // named function used as value — generate trampoline with closure calling convention
+      if (this.fnSigs.has(expr.name)) {
+        const sig = this.fnSigs.get(expr.name)!;
+        const trampolineName = `__trampoline_${expr.name}`;
+        if (!this.fnSigs.has(trampolineName)) {
+          const paramNames = sig.paramTypes.map((_, i) => `p${i}`);
+          const trampolineParams = [`ptr %env`, ...sig.paramTypes.map((t, i) => `${t} %${paramNames[i]}`)].join(", ");
+          const fwdArgs = sig.paramTypes.map((t, i) => `${t} %${paramNames[i]}`).join(", ");
+          const body: string[] = [];
+          body.push(`define ${sig.retType} @${trampolineName}(${trampolineParams}) {`);
+          body.push("entry.bb:");
+          if (this.sretFns.has(expr.name)) {
+            // callee is sret-lowered; trampoline keeps the closure convention
+            // (returns the aggregate) and bridges via a local slot
+            body.push(`  %slot = alloca ${sig.retType}`);
+            body.push(`  call void @${expr.name}(${fwdArgs ? `ptr %slot, ${fwdArgs}` : "ptr %slot"})`);
+            body.push(`  %r = load ${sig.retType}, ptr %slot`);
+            body.push(`  ret ${sig.retType} %r`);
+          } else if (sig.retType === "void") {
+            body.push(`  call void @${expr.name}(${fwdArgs})`);
+            body.push("  ret void");
           } else {
-            const loadedPtr = this.nextTemp();
-            closureBody.push(`  ${loadedPtr} = load ptr, ptr ${gepPtr}`);
-            // the capture is a pointer to the original variable's alloca
-            this.locals.set(cap.name, { type: capTy, typeKind: cap.type, mutable: cap.mutable, isRef: true, addr: `${gepPtr}.ref` });
-            closureBody.push(`  ${gepPtr}.ref = alloca ptr`);
-            closureBody.push(`  store ptr ${loadedPtr}, ptr ${gepPtr}.ref`);
+            body.push(`  %r = call ${sig.retType} @${expr.name}(${fwdArgs})`);
+            body.push(`  ret ${sig.retType} %r`);
           }
+          body.push("}");
+          this.closureBodies.push(body);
+          this.fnSigs.set(trampolineName, sig);
         }
-
-        // set up params
-        for (const p of expr.params) {
-          const isRefParam = p.type.tag === "ref";
-          if (isRefParam && p.type.tag === "ref") {
-            const innerTy = this.llvmType(p.type.inner);
-            closureBody.push(`  %${p.name}.addr = alloca ptr`);
-            closureBody.push(`  store ptr %${p.name}, ptr %${p.name}.addr`);
-            this.locals.set(p.name, { type: innerTy, typeKind: p.type, mutable: false, isRef: true });
-          } else {
-            const lt = this.llvmType(p.type);
-            closureBody.push(`  %${p.name}.addr = alloca ${lt}`);
-            closureBody.push(`  store ${lt} %${p.name}, ptr %${p.name}.addr`);
-            this.locals.set(p.name, { type: lt, typeKind: p.type, mutable: false, isRef: false });
-          }
-        }
-
-        // generate body
-        const closureAllocaInsertPoint = closureBody.length;
-        let hasTerminator = false;
-        for (const stmt of expr.body) {
-          const [stmtLines, terminated] = this.genStmt(stmt);
-          closureBody.push(...stmtLines);
-          if (terminated) { hasTerminator = true; break; }
-        }
-        if (!hasTerminator) {
-          if (retTy === "void") closureBody.push("  ret void");
-          else closureBody.push(`  ret ${retTy} 0`);
-        }
-        if (this.entryAllocas.length > 0) {
-          closureBody.splice(closureAllocaInsertPoint, 0, ...this.entryAllocas);
-        }
-        this.hoistAllocas(closureBody, closureAllocaInsertPoint);
-        closureBody.push("}");
-        this.closureBodies.push(closureBody);
-
-        // restore codegen state
-        this.tempCounter = savedTemp;
-        this.labelCounter = savedLabel;
-        this.locals = savedLocals;
-        this.droppableLocals = savedDroppable;
-        this.entryAllocas = savedEntryAllocas;
-        this.emittedAddrs = savedEmittedAddrs;
-        this.loopHeader = savedLoopHeader;
-        this.loopExit = savedLoopExit;
-        this.currentFnName = savedFnName;
-        this.currentSubprogramId = savedSubprogram;
-        this.currentEnsures = savedEnsures;
-
-        // at the call site: build env struct and closure pair
-        if (captures.length > 0) {
-          const envAddr = this.nextTemp();
-          if (isMove) {
-            // heap-allocate env for move closures (safe to send to other threads)
-            const envSize = this.structPayloadSize(captures.map(c => this.llvmType(c.type)));
-            lines.push(`  ${envAddr} = call ptr @malloc(i64 ${Math.max(envSize, 8)})`);
-          } else {
-            lines.push(`  ${envAddr} = alloca ${envStructTy}`);
-          }
-          for (let i = 0; i < captures.length; i++) {
-            const cap = captures[i];
-            const capAddr = this.localAddr(cap.name);
-            const local = this.locals.get(cap.name);
-            const capTy = this.llvmType(cap.type);
-            const gepSlot = this.nextTemp();
-            lines.push(`  ${gepSlot} = getelementptr ${envStructTy}, ptr ${envAddr}, i32 0, i32 ${i}`);
-            if (isMove) {
-              // copy the VALUE into the env
-              const loaded = this.nextTemp();
-              if (local?.isRef) {
-                const innerPtr = this.nextTemp();
-                lines.push(`  ${innerPtr} = load ptr, ptr ${capAddr}`);
-                const val = this.nextTemp();
-                lines.push(`  ${val} = load ${capTy}, ptr ${innerPtr}`);
-                lines.push(`  store ${capTy} ${val}, ptr ${gepSlot}`);
-              } else {
-                lines.push(`  ${loaded} = load ${capTy}, ptr ${capAddr}`);
-                lines.push(`  store ${capTy} ${loaded}, ptr ${gepSlot}`);
-                // zero source so parent's drop glue won't free moved data
-                if (this.needsDropCg(cap.type)) {
-                  lines.push(this.zeroStore(capTy, capAddr));
-                  const dl = this.droppableLocals.find(d => d.addr === capAddr);
-                  if (dl) lines.push(`  store i1 0, ptr ${dl.aliveFlag}`);
-                }
-              }
-            } else if (local?.isRef) {
-              // variable is already a ref (ptr to ptr) — load the inner ptr
-              const innerPtr = this.nextTemp();
-              lines.push(`  ${innerPtr} = load ptr, ptr ${capAddr}`);
-              lines.push(`  store ptr ${innerPtr}, ptr ${gepSlot}`);
-            } else {
-              // variable is a value — store pointer to its alloca
-              lines.push(`  store ptr ${capAddr}, ptr ${gepSlot}`);
-            }
-          }
-          // build { ptr fn_ptr, ptr env_ptr }
-          const closurePair = this.nextTemp();
-          lines.push(`  ${closurePair} = insertvalue { ptr, ptr } undef, ptr @${closureName}, 0`);
-          const closurePair2 = this.nextTemp();
-          lines.push(`  ${closurePair2} = insertvalue { ptr, ptr } ${closurePair}, ptr ${envAddr}, 1`);
-          return [lines, closurePair2, "{ ptr, ptr }"];
-        } else {
-          const closurePair = this.nextTemp();
-          lines.push(`  ${closurePair} = insertvalue { ptr, ptr } undef, ptr @${closureName}, 0`);
-          const closurePair2 = this.nextTemp();
-          lines.push(`  ${closurePair2} = insertvalue { ptr, ptr } ${closurePair}, ptr null, 1`);
-          return [lines, closurePair2, "{ ptr, ptr }"];
-        }
+        const alloca = this.nextTemp();
+        lines.push(`  ${alloca} = alloca { ptr, ptr }`);
+        const fpSlot = this.nextTemp();
+        lines.push(`  ${fpSlot} = getelementptr { ptr, ptr }, ptr ${alloca}, i32 0, i32 0`);
+        lines.push(`  store ptr @${trampolineName}, ptr ${fpSlot}`);
+        const envSlot = this.nextTemp();
+        lines.push(`  ${envSlot} = getelementptr { ptr, ptr }, ptr ${alloca}, i32 0, i32 1`);
+        lines.push(`  store ptr null, ptr ${envSlot}`);
+        const val = this.nextTemp();
+        lines.push(`  ${val} = load { ptr, ptr }, ptr ${alloca}`);
+        return [lines, val, "{ ptr, ptr }"];
       }
-      case "CFnCall": {
-        // a bare C function pointer: call it directly, with no env prepended
-        const [calLines, calVal] = this.genExpr(expr.callee);
-        lines.push(...calLines);
-        const cTempMark = this.argTempDrops.length;
-        const argVals: { val: string; type: string }[] = [];
-        for (const arg of expr.args) {
-          if (arg.passByRef) {
-            const [al, aPtr] = this.genLValueForArg(arg.expr);
-            lines.push(...al);
-            argVals.push({ val: aPtr, type: "ptr" });
-          } else {
-            const [al, av, at] = this.genExpr(arg.expr);
-            lines.push(...al);
-            argVals.push({ val: av, type: at });
-          }
+      const globalInfo = this.globalVars.get(expr.name);
+      if (globalInfo) {
+        const val = this.nextTemp();
+        lines.push(`  ${val} = load ${globalInfo.type}, ptr @${expr.name}`);
+        // Moving a global out by value (checker cleared its moved flag, so a
+        // later reassignment will drop the slot) must zero the source, exactly
+        // like the local-move path below — otherwise the reassign's drop frees
+        // the buffer the callee already owns/freed. Double-free that compiled
+        // clean before this. No alive-flag: globals aren't in droppableLocals.
+        if (expr.isMove && this.needsDropCg(globalInfo.typeKind)) {
+          lines.push(this.zeroStore(globalInfo.type, `@${expr.name}`));
         }
-        const cArgsStr = argVals.map(a => `${a.type} ${a.val}`).join(", ");
-        const cRetTy = this.llvmType(expr.type);
-        if (cRetTy === "void") {
-          lines.push(`  call void ${calVal}(${cArgsStr})`);
-          this.flushArgTempDrops(lines, cTempMark);
-          return [lines, "void", "void"];
-        }
-        const cResult = this.nextTemp();
-        lines.push(`  ${cResult} = call ${cRetTy} ${calVal}(${cArgsStr})`);
-        this.flushArgTempDrops(lines, cTempMark);
-        return [lines, cResult, cRetTy];
+        return [lines, val, globalInfo.type];
       }
-      case "ClosureCall": {
-        // load the { fn_ptr, env_ptr } pair from the callee
-        const [calLines, calVal] = this.genExpr(expr.callee);
-        lines.push(...calLines);
-        const fnPtr = this.nextTemp();
-        lines.push(`  ${fnPtr} = extractvalue { ptr, ptr } ${calVal}, 0`);
-        const envPtr = this.nextTemp();
-        lines.push(`  ${envPtr} = extractvalue { ptr, ptr } ${calVal}, 1`);
+      console.error(`error[codegen]: undefined variable '${expr.name}'`); process.exit(1);
+    }
+    if (local.isRef) {
+      const ptr = this.nextTemp();
+      lines.push(`  ${ptr} = load ptr, ptr ${this.localAddr(expr.name)}`);
+      const val = this.nextTemp();
+      lines.push(`  ${val} = load ${local.type}, ptr ${ptr}`);
+      return [lines, val, local.type];
+    }
+    const addr = this.localAddr(expr.name);
+    const tmp = this.nextTemp();
+    lines.push(`  ${tmp} = load ${local.type}, ptr ${addr}`);
+    if (expr.isMove && this.needsDropCg(local.typeKind)) {
+      lines.push(this.zeroStore(local.type, addr));
+      const dl = this.droppableLocals.find(d => d.addr === addr);
+      if (dl) lines.push(`  store i1 0, ptr ${dl.aliveFlag}`);
+    }
+    return [lines, tmp, local.type];
+  }
 
-        // evaluate args
-        const clTempMark = this.argTempDrops.length;
-        const argVals: { val: string; type: string }[] = [{ val: envPtr, type: "ptr" }];
-        const refPtrs: { ptr: string; mut: boolean }[] = [];
-        for (const arg of expr.args) {
-          if (arg.passByRef) {
-            const [al, aPtr] = this.genLValueForArg(arg.expr);
-            lines.push(...al);
-            argVals.push({ val: aPtr, type: "ptr" });
-            refPtrs.push({ ptr: aPtr, mut: arg.refMut });
-          } else {
-            const [al, av, at] = this.genExpr(arg.expr);
-            lines.push(...al);
-            argVals.push({ val: av, type: at });
-          }
-        }
-        this.emitAliasGuards(lines, refPtrs, expr.span);
+  private genBinOp(expr: HIRExpr & { kind: "BinOp" }, lines: string[]): [string[], string, string] {
+    if (expr.op === "&&" || expr.op === "||") {
+      return this.genShortCircuit(expr, lines);
+    }
+    const [ll, lv, llt] = this.genExpr(expr.left);
+    const [rl, rv] = this.genExpr(expr.right);
+    lines.push(...ll, ...rl);
 
-        const argsStr = argVals.map(a => `${a.type} ${a.val}`).join(", ");
-        const retTy = this.llvmType(expr.type);
-        if (retTy === "void") {
-          lines.push(`  call void ${fnPtr}(${argsStr})`);
-          this.flushArgTempDrops(lines, clTempMark);
-          return [lines, "void", "void"];
-        }
-        const result = this.nextTemp();
-        lines.push(`  ${result} = call ${retTy} ${fnPtr}(${argsStr})`);
-        this.flushArgTempDrops(lines, clTempMark);
-        return [lines, result, retTy];
+    if (llt === "%String") {
+      // These all read out of their operands into a fresh result, so an
+      // operand that was a call temporary (`mk(a) + mk(b)`) has no owner
+      // afterwards and would otherwise never be freed.
+      const dropOperands = (out: string[]) => {
+        this.dropOwnedTemp(out, lv, llt, expr.left);
+        this.dropOwnedTemp(out, rv, llt, expr.right);
+      };
+      if (expr.op === "+") {
+        const [cl, cv, ct] = this.genStringConcat(lines, lv, rv);
+        dropOperands(cl);
+        return [cl, cv, ct];
       }
-      case "InterfaceCoerce": {
-        // build fat pointer { ptr data, ptr itable }
-        const isHeapCoerce = expr.type.tag === "heap";
-        let dataPtr: string;
-        if (isHeapCoerce) {
-          // Heap<T> → Heap<Interface>: data ptr is the heap pointer value
-          const [valLines, valVal] = this.genExpr(expr.value);
-          lines.push(...valLines);
-          dataPtr = valVal;
-        } else {
-          // &T → &Interface: data ptr is address of the concrete value
-          const [addrLines, addrVal] = this.genLValueForArg(expr.value);
-          lines.push(...addrLines);
-          dataPtr = addrVal;
-        }
-        const itableKey = `${expr.fromType}.${expr.ifaceName}`;
-        const itableInfo = this.itableLayouts.get(itableKey);
-        const itableGlobal = itableInfo?.globalName ?? `@itable.${expr.fromType}.${expr.ifaceName}`;
-        const s0 = this.nextTemp();
-        lines.push(`  ${s0} = insertvalue { ptr, ptr } undef, ptr ${dataPtr}, 0`);
-        const s1 = this.nextTemp();
-        lines.push(`  ${s1} = insertvalue { ptr, ptr } ${s0}, ptr ${itableGlobal}, 1`);
-        return [lines, s1, "{ ptr, ptr }"];
+      if (expr.op === "==" || expr.op === "!=") {
+        const [cl, cv, ct] = this.genStringCmp(lines, lv, rv, expr.op === "==");
+        dropOperands(cl);
+        return [cl, cv, ct];
       }
-      case "IfExpr": {
-        const resultTy = this.llvmType(expr.type);
-        const resultAddr = `%__ifexpr.${this.scopeCounter++}.addr`;
-        this.entryAllocas.push(`  ${resultAddr} = alloca ${resultTy}`);
-
-        const [condLines, condVal] = this.genExpr(expr.cond);
-        lines.push(...condLines);
-
-        const thenLabel = this.nextLabel("ife.then");
-        const elseLabel = this.nextLabel("ife.else");
-        const endLabel = this.nextLabel("ife.end");
-        lines.push(`  br i1 ${condVal}, label %${thenLabel}, label %${elseLabel}`);
-
-        lines.push(`${thenLabel}:`);
-        let thenTerminated = false;
-        for (let i = 0; i < expr.thenBody.length - 1; i++) {
-          const [sl, t] = this.genStmt(expr.thenBody[i]);
-          lines.push(...sl);
-          if (t) { thenTerminated = true; break; }
-        }
-        if (!thenTerminated && expr.thenBody.length > 0) {
-          const last = expr.thenBody[expr.thenBody.length - 1];
-          if (last.kind === "ExprStmt") {
-            const [vl, vv] = this.genExpr(last.expr);
-            lines.push(...vl);
-            if (vv !== "void") lines.push(`  store ${resultTy} ${vv}, ptr ${resultAddr}`);
-          } else {
-            const [sl, t] = this.genStmt(last);
-            lines.push(...sl);
-            if (t) thenTerminated = true;
-          }
-        }
-        if (!thenTerminated) lines.push(`  br label %${endLabel}`);
-
-        lines.push(`${elseLabel}:`);
-        let elseTerminated = false;
-        for (let i = 0; i < expr.elseBody.length - 1; i++) {
-          const [sl, t] = this.genStmt(expr.elseBody[i]);
-          lines.push(...sl);
-          if (t) { elseTerminated = true; break; }
-        }
-        if (!elseTerminated && expr.elseBody.length > 0) {
-          const last = expr.elseBody[expr.elseBody.length - 1];
-          if (last.kind === "ExprStmt") {
-            const [vl, vv] = this.genExpr(last.expr);
-            lines.push(...vl);
-            if (vv !== "void") lines.push(`  store ${resultTy} ${vv}, ptr ${resultAddr}`);
-          } else {
-            const [sl, t] = this.genStmt(last);
-            lines.push(...sl);
-            if (t) elseTerminated = true;
-          }
-        }
-        if (!elseTerminated) lines.push(`  br label %${endLabel}`);
-
-        lines.push(`${endLabel}:`);
-        if (thenTerminated && elseTerminated) {
-          lines.push(`  unreachable`);
-          return [lines, "void", "void"];
-        }
-        const result = this.nextTemp();
-        lines.push(`  ${result} = load ${resultTy}, ptr ${resultAddr}`);
-        return [lines, result, resultTy];
-      }
-      case "MatchExpr": {
-        const resultTy = this.llvmType(expr.type);
-        const resultAddr = `%__matchexpr.${this.scopeCounter++}.addr`;
-        this.entryAllocas.push(`  ${resultAddr} = alloca ${resultTy}`);
-        // Reuse the statement match generator, passing a result slot so each
-        // arm's tail value is stored instead of discarded.
-        const asStmt = {
-          kind: "Match" as const,
-          subject: expr.subject,
-          arms: expr.arms,
-          enumName: expr.enumName,
-          subjectIsRef: expr.subjectIsRef,
-          span: expr.span,
-        };
-        const [ml, allTerminated] = this.genMatch(asStmt, { addr: resultAddr, ty: resultTy });
-        lines.push(...ml);
-        // Every arm diverged (return/break) — genMatch already closed endLabel
-        // with `unreachable`, so a load here would follow a terminator. The
-        // value is never observed; hand back a poison of the right type.
-        if (allTerminated) return [lines, `poison`, resultTy];
-        const result = this.nextTemp();
-        lines.push(`  ${result} = load ${resultTy}, ptr ${resultAddr}`);
-        return [lines, result, resultTy];
-      }
-      case "InterfaceMethodCall": {
-        // object is { ptr data, ptr itable } — either directly or loaded from alloca
-        let objVal: string;
-        const recv = expr.object;
-        if (recv.kind === "IndexAccess" && recv.object.type.tag === "vec") {
-          // Borrow the fat pointer straight from the Vec slot. Dispatch only
-          // reads data+itable, so don't deep-clone the element — an interface
-          // value can't be cloned (the itable carries no clone slot), and
-          // cloning it as a thin Heap mis-handles the fat pointer.
-          const [, slotPtr] = this.genVecBoundsCheckedPtr(recv, lines);
-          objVal = this.nextTemp();
-          lines.push(`  ${objVal} = load { ptr, ptr }, ptr ${slotPtr}`);
-        } else {
-          const [objLines, ov] = this.genExpr(recv);
-          lines.push(...objLines);
-          objVal = ov;
-        }
-
-        // extract data ptr and itable ptr
-        const dataPtr = this.nextTemp();
-        lines.push(`  ${dataPtr} = extractvalue { ptr, ptr } ${objVal}, 0`);
-        const itablePtr = this.nextTemp();
-        lines.push(`  ${itablePtr} = extractvalue { ptr, ptr } ${objVal}, 1`);
-
-        // load fn ptr from itable slot — GEP with ptr element type strides by 8 bytes
-        const fnSlot = this.nextTemp();
-        lines.push(`  ${fnSlot} = getelementptr ptr, ptr ${itablePtr}, i32 ${expr.methodIndex}`);
-        const fnPtr = this.nextTemp();
-        lines.push(`  ${fnPtr} = load ptr, ptr ${fnSlot}`);
-
-        // build args: data ptr as self, then user args
-        const imTempMark = this.argTempDrops.length;
-        const argVals: { val: string; type: string }[] = [{ val: dataPtr, type: "ptr" }];
-        const refPtrs: { ptr: string; mut: boolean }[] = [];
-        for (const arg of expr.args) {
-          if (arg.passByRef) {
-            const [al, aPtr] = this.genLValueForArg(arg.expr);
-            lines.push(...al);
-            argVals.push({ val: aPtr, type: "ptr" });
-            refPtrs.push({ ptr: aPtr, mut: arg.refMut });
-          } else {
-            const [al, av, at] = this.genExpr(arg.expr);
-            lines.push(...al);
-            argVals.push({ val: av, type: at });
-          }
-        }
-        this.emitAliasGuards(lines, refPtrs, expr.span);
-
-        const argsStr = argVals.map(a => `${a.type} ${a.val}`).join(", ");
-        const retTy = this.llvmType(expr.type);
-        if (retTy === "void") {
-          lines.push(`  call void ${fnPtr}(${argsStr})`);
-          this.flushArgTempDrops(lines, imTempMark);
-          return [lines, "void", "void"];
-        }
-        const result = this.nextTemp();
-        lines.push(`  ${result} = call ${retTy} ${fnPtr}(${argsStr})`);
-        this.flushArgTempDrops(lines, imTempMark);
-        return [lines, result, retTy];
+      if (expr.op === "<" || expr.op === ">" || expr.op === "<=" || expr.op === ">=") {
+        const [cl, cv, ct] = this.genStringOrd(lines, lv, rv, expr.op);
+        dropOperands(cl);
+        return [cl, cv, ct];
       }
     }
+
+    // enum equality: compare tag field only (checker rejects payload-bearing enums)
+    if ((expr.op === "==" || expr.op === "!=") && llt.startsWith("%") && this.enumLayouts.has(llt.slice(1))) {
+      const lTag = this.nextTemp();
+      const rTag = this.nextTemp();
+      const cmp = this.nextTemp();
+      lines.push(`  ${lTag} = extractvalue ${llt} ${lv}, 0`);
+      lines.push(`  ${rTag} = extractvalue ${llt} ${rv}, 0`);
+      lines.push(`  ${cmp} = icmp ${expr.op === "==" ? "eq" : "ne"} i32 ${lTag}, ${rTag}`);
+      return [lines, cmp, "i1"];
+    }
+
+    const tmp = this.nextTemp();
+    const isFloat = llt === "float" || llt === "double";
+    const unsigned = !isFloat && this.isUnsigned(expr.left.type);
+    const intOps: Record<string, string> = unsigned
+      ? { "+": "add", "-": "sub", "*": "mul", "/": "udiv", "%": "urem", "&": "and", "|": "or", "^": "xor", "<<": "shl", ">>": "lshr" }
+      : { "+": "add", "-": "sub", "*": "mul", "/": "sdiv", "%": "srem", "&": "and", "|": "or", "^": "xor", "<<": "shl", ">>": "ashr" };
+    const floatOps: Record<string, string> = { "+": "fadd", "-": "fsub", "*": "fmul", "/": "fdiv", "%": "frem" };
+    const intCmps: Record<string, string> = unsigned
+      ? { "==": "eq", "!=": "ne", "<": "ult", ">": "ugt", "<=": "ule", ">=": "uge" }
+      : { "==": "eq", "!=": "ne", "<": "slt", ">": "sgt", "<=": "sle", ">=": "sge" };
+    // "!=" must be `une` (unordered-or-not-equal), not `one`: for NaN operands
+    // `one` is false, which would make both `x == x` and `x != x` false.
+    const floatCmps: Record<string, string> = { "==": "oeq", "!=": "une", "<": "olt", ">": "ogt", "<=": "ole", ">=": "oge" };
+    if (expr.op in intOps) {
+      const op = isFloat ? floatOps[expr.op] : intOps[expr.op];
+      const checkedOps: Record<string, string> = { "+": "add", "-": "sub", "*": "mul" };
+      // A @wrapping fn skips the overflow trap and takes the plain (defined, two's-
+      // complement) op below. Everything else — div-by-zero, bounds — still traps.
+      if (this.trapOnOverflow && !this.currentFnWrapping && !isFloat && expr.op in checkedOps && expr.span) {
+        const val = this.emitCheckedArith(lines, checkedOps[expr.op], unsigned, llt, lv, rv, expr.span);
+        return [lines, val, llt];
+      }
+      // Integer division/remainder by zero (and signed INT_MIN / -1) is UB — trap it in
+      // every mode. Under @wrapping the INT_MIN/-1 overflow wraps (→ INT_MIN, rem 0), but
+      // division by zero still traps: there is no modular value for x/0.
+      if (!isFloat && (expr.op === "/" || expr.op === "%")) {
+        const signed = !unsigned;
+        const bits = expr.left.type.tag === "int" ? expr.left.type.bits : 32;
+        if (this.currentFnWrapping && signed) {
+          const val = this.emitWrappingSignedDivRem(lines, expr.op, lv, rv, llt, bits, expr.span);
+          return [lines, val, llt];
+        }
+        this.emitDivByZeroCheck(lines, rv, lv, llt, signed, bits, expr.span);
+      }
+      // A shift by >= the operand's bit width (or a negative amount, huge as unsigned) is
+      // LLVM poison. Default: trap. @wrapping: mask the amount to [0,width) — defined,
+      // matches Rust `wrapping_shl` / C.
+      if (!isFloat && (expr.op === "<<" || expr.op === ">>")) {
+        const bits = expr.left.type.tag === "int" ? expr.left.type.bits : 32;
+        if (this.currentFnWrapping) {
+          const masked = this.nextTemp();
+          lines.push(`  ${masked} = and ${llt} ${rv}, ${bits - 1}`);
+          lines.push(`  ${tmp} = ${op} ${llt} ${lv}, ${masked}`);
+          return [lines, tmp, llt];
+        }
+        this.emitShiftCheck(lines, rv, llt, bits, expr.span);
+      }
+      lines.push(`  ${tmp} = ${op} ${llt} ${lv}, ${rv}`);
+      return [lines, tmp, llt];
+    }
+    if (expr.op in intCmps) {
+      if (isFloat) lines.push(`  ${tmp} = fcmp ${floatCmps[expr.op]} ${llt} ${lv}, ${rv}`);
+      else lines.push(`  ${tmp} = icmp ${intCmps[expr.op]} ${llt} ${lv}, ${rv}`);
+      return [lines, tmp, "i1"];
+    }
+    console.error(`error[codegen]: unknown binary op '${expr.op}'`); process.exit(1);
+  }
+
+  private genUnaryOp(expr: HIRExpr & { kind: "UnaryOp" }, lines: string[]): [string[], string, string] {
+    if (expr.op === "&") {
+      const [al, addr] = this.genLValue(expr.operand);
+      lines.push(...al);
+      return [lines, addr, "ptr"];
+    }
+    // Negating an integer literal is a compile-time constant — fold it. Without this,
+    // a legitimate negative literal like i32 INT_MIN (-2147483648, lexed as the unary
+    // minus of 2147483648) would emit a runtime checked-neg and trap on the INT_MIN
+    // overflow now that overflow checks are on in every build.
+    if (expr.op === "-" && expr.operand.kind === "IntLit"
+        && expr.operand.type.tag === "int" && expr.operand.type.signed) {
+      return [lines, (-(expr.operand.value as bigint)).toString(), this.llvmType(expr.operand.type)];
+    }
+    const [ol, ov, ot] = this.genExpr(expr.operand);
+    lines.push(...ol);
+    const tmp = this.nextTemp();
+    if (expr.op === "-") {
+      if (ot === "float" || ot === "double") lines.push(`  ${tmp} = fneg ${ot} ${ov}`);
+      else if (this.trapOnOverflow && !this.currentFnWrapping && expr.span) {
+        const unsigned = this.isUnsigned(expr.operand.type);
+        const val = this.emitCheckedArith(lines, "sub", unsigned, ot, "0", ov, expr.span);
+        return [lines, val, ot];
+      } else lines.push(`  ${tmp} = sub ${ot} 0, ${ov}`);
+      return [lines, tmp, ot];
+    }
+    if (expr.op === "!") { lines.push(`  ${tmp} = xor i1 ${ov}, 1`); return [lines, tmp, "i1"]; }
+    if (expr.op === "~") { lines.push(`  ${tmp} = xor ${ot} ${ov}, -1`); return [lines, tmp, ot]; }
+    console.error(`error[codegen]: unknown unary op '${expr.op}'`); process.exit(1);
+  }
+
+  private genCall(expr: HIRExpr & { kind: "Call" }, lines: string[], sretDest?: string): [string[], string, string] {
+    if (Codegen.BUILTINS.has(expr.func) && !this.userDeclaredFns.has(expr.func)) {
+      return this.genBuiltinCall(expr, lines);
+    }
+    const sig = this.fnSigs.get(expr.func);
+    const tempMark = this.argTempDrops.length;
+    const argVals: { val: string; type: string }[] = [];
+    const refPtrs: { ptr: string; mut: boolean }[] = [];
+    for (let i = 0; i < expr.args.length; i++) {
+      const arg = expr.args[i];
+      if (arg.passByRef) {
+        const [al, aPtr] = this.genLValueForArg(arg.expr);
+        lines.push(...al);
+        argVals.push({ val: aPtr, type: "ptr" });
+        refPtrs.push({ ptr: aPtr, mut: arg.refMut });
+      } else {
+        // [T; N] → *T decay: pass the array's address as a ptr
+        const argTk = arg.expr.type;
+        const paramExpectsPtr = sig && i < sig.paramTypes.length && sig.paramTypes[i] === "ptr";
+        if (argTk.tag === "array" && paramExpectsPtr) {
+          const [al, aPtr] = this.genLValueForArg(arg.expr);
+          lines.push(...al);
+          argVals.push({ val: aPtr, type: "ptr" });
+          continue;
+        }
+        // fn → ptr coercion: bare function name passed to extern fn ptr param
+        if (argTk.tag === "fn" && paramExpectsPtr && arg.expr.kind === "Ident" && this.fnSigs.has(arg.expr.name)) {
+          argVals.push({ val: `@${arg.expr.name}`, type: "ptr" });
+          continue;
+        }
+        const [al, av, at] = this.genExpr(arg.expr);
+        lines.push(...al);
+        // String → char* coercion, for extern/FFI calls ONLY (including variadic args).
+        // The `paramTypes[i] === "ptr"` test alone is not enough to identify one: a
+        // Milo `&string` param lowers to `ptr` too, and it wants the address of the
+        // %String struct, not the bytes. Coercing there handed strTrim(&string) the
+        // character buffer, which it then read a length/capacity out of — silently
+        // returning "" instead of the trimmed text, with no crash and no diagnostic.
+        // Only a slice or other non-lvalue reached this path; an lvalue arg is
+        // auto-borrowed upstream and goes through genLValueForArg.
+        // A `&string` param wants the address of the %String struct. Only a
+        // non-lvalue reaches here (a slice, a temporary) — an lvalue is auto-borrowed
+        // upstream and goes via genLValueForArg — so materialise it and pass that.
+        const wantsAddr = at === "%String" && !!sig?.wantsStringAddr?.[i];
+        if (at === "%String" && sig && !wantsAddr && (i >= sig.paramTypes.length || sig.paramTypes[i] === "ptr")) {
+          const dataPtr = this.nextTemp();
+          lines.push(`  ${dataPtr} = extractvalue %String ${av}, 0`);
+          argVals.push({ val: dataPtr, type: "ptr" });
+        } else if (wantsAddr) {
+          const slot = this.nextTemp();
+          lines.push(`  ${slot} = alloca %String`);
+          lines.push(`  store %String ${av}, ptr ${slot}`);
+          argVals.push({ val: slot, type: "ptr" });
+        // fn closure → ptr coercion: extract fn ptr from closure tuple for extern calls
+        } else if (at === "{ ptr, ptr }" && paramExpectsPtr) {
+          const fnPtr = this.nextTemp();
+          lines.push(`  ${fnPtr} = extractvalue { ptr, ptr } ${av}, 0`);
+          argVals.push({ val: fnPtr, type: "ptr" });
+        } else {
+          argVals.push({ val: av, type: at });
+        }
+      }
+    }
+    this.emitAliasGuards(lines, refPtrs, expr.span);
+    // extern fns passing/returning a struct by value need native-ABI lowering:
+    // coerce args into registers, byval/indirect big ones, sret the return.
+    if (this.externAbi.has(expr.func)) {
+      const r = this.emitExternAbiCall(expr, argVals, lines);
+      this.flushArgTempDrops(r[0], tempMark);
+      return r;
+    }
+    const argsStr = argVals.map(a => `${a.type} ${a.val}`).join(", ");
+    const retTy = sig?.retType ?? "i32";
+    if (this.sretFns.has(expr.func)) {
+      const dest = sretDest ?? this.nextTemp();
+      if (!sretDest) lines.push(`  ${dest} = alloca ${retTy}`);
+      lines.push(`  call void @${expr.func}(${argsStr ? `ptr ${dest}, ${argsStr}` : `ptr ${dest}`})`);
+      this.flushArgTempDrops(lines, tempMark);
+      if (sretDest) return [lines, "undef", retTy];
+      // no direct destination: fall back to a first-class value for generic
+      // consumers (rare — slower to compile at -O2, but correct)
+      const tmp = this.nextTemp();
+      lines.push(`  ${tmp} = load ${retTy}, ptr ${dest}`);
+      return [lines, tmp, retTy];
+    }
+    let callPrefix = retTy;
+    if (expr.variadic) {
+      const paramStr = sig!.paramTypes.join(", ");
+      callPrefix = `${retTy} (${paramStr}, ...)`;
+    }
+    if (retTy === "void") {
+      lines.push(`  call ${callPrefix} @${expr.func}(${argsStr})`);
+      this.flushArgTempDrops(lines, tempMark);
+      return [lines, "void", "void"];
+    }
+    const tmp = this.nextTemp();
+    lines.push(`  ${tmp} = call ${callPrefix} @${expr.func}(${argsStr})`);
+    this.flushArgTempDrops(lines, tempMark);
+    return [lines, tmp, retTy];
+  }
+
+  private genStructLit(expr: HIRExpr & { kind: "StructLit" }, lines: string[]): [string[], string, string] {
+    const layout = this.structLayouts.get(expr.name)!;
+    const structTy = `%${expr.name}`;
+    const alloca = this.nextTemp();
+    lines.push(`  ${alloca} = alloca ${structTy}`);
+    for (const f of expr.fields) {
+      const idx = layout.fields.findIndex(lf => lf.name === f.name);
+      const fieldTy = layout.fields[idx].type;
+      const ptr = this.nextTemp();
+      lines.push(`  ${ptr} = getelementptr ${structTy}, ptr ${alloca}, i32 0, i32 ${idx}`);
+      this.genStoreInto(lines, ptr, fieldTy, f.value);
+    }
+    const val = this.nextTemp();
+    lines.push(`  ${val} = load ${structTy}, ptr ${alloca}`);
+    return [lines, val, structTy];
+  }
+
+  private genArrayLen(expr: HIRExpr & { kind: "ArrayLen" }, lines: string[]): [string[], string, string] {
+    const objType = expr.object.type.tag === "ref" ? expr.object.type.inner : expr.object.type;
+    if (objType.tag === "array" && objType.size !== null) {
+      return [lines, String(objType.size), "i32"];
+    }
+    if (objType.tag === "array" && objType.size === null) {
+      // slice: runtime length from the %Vec view
+      const [ol, ov] = this.genExpr(expr.object);
+      lines.push(...ol);
+      const len = this.nextTemp();
+      lines.push(`  ${len} = extractvalue %Vec ${ov}, 1`);
+      return [lines, len, "i64"];
+    }
+    return [lines, "0", "i32"];
+  }
+
+  private genArrayLit(expr: HIRExpr & { kind: "ArrayLit" }, lines: string[]): [string[], string, string] {
+    // Vec literal: `[a, b, c]` with Vec<T> type hint. Emit malloc + N stores, build %Vec struct.
+    if (expr.type.tag === "vec") {
+      this.hasVecType = true;
+      const vecElemTy = this.llvmType(expr.type.element);
+      const n = expr.elements.length;
+      if (n === 0) {
+        const s0 = this.nextTemp();
+        lines.push(`  ${s0} = insertvalue %Vec undef, ptr null, 0`);
+        const s1 = this.nextTemp();
+        lines.push(`  ${s1} = insertvalue %Vec ${s0}, i64 0, 1`);
+        const s2 = this.nextTemp();
+        lines.push(`  ${s2} = insertvalue %Vec ${s1}, i64 0, 2`);
+        return [lines, s2, "%Vec"];
+      }
+      this.needsMalloc = true;
+      const elemSize = this.typeSizeOf(expr.type.element);
+      const bytes = n * elemSize;
+      const buf = this.nextTemp();
+      lines.push(`  ${buf} = call ptr @malloc(i64 ${bytes})`);
+      for (let i = 0; i < n; i++) {
+        const [el, ev] = this.genExpr(expr.elements[i]);
+        lines.push(...el);
+        const pi = this.nextTemp();
+        lines.push(`  ${pi} = getelementptr ${vecElemTy}, ptr ${buf}, i64 ${i}`);
+        lines.push(`  store ${vecElemTy} ${ev}, ptr ${pi}`);
+      }
+      const v0 = this.nextTemp();
+      lines.push(`  ${v0} = insertvalue %Vec undef, ptr ${buf}, 0`);
+      const v1 = this.nextTemp();
+      lines.push(`  ${v1} = insertvalue %Vec ${v0}, i64 ${n}, 1`);
+      const v2 = this.nextTemp();
+      lines.push(`  ${v2} = insertvalue %Vec ${v1}, i64 ${n}, 2`);
+      return [lines, v2, "%Vec"];
+    }
+    if (expr.elements.length === 0) return [lines, "zeroinitializer", "[0 x i32]"];
+    const elemTy = expr.type.tag === "array" ? this.llvmType(expr.type.element) : "i32";
+    const [firstLines, firstVal] = this.genExpr(expr.elements[0]);
+    lines.push(...firstLines);
+    const arrTy = `[${expr.elements.length} x ${elemTy}]`;
+    const alloca = this.nextTemp();
+    lines.push(`  ${alloca} = alloca ${arrTy}`);
+    const ptr0 = this.nextTemp();
+    lines.push(`  ${ptr0} = getelementptr ${arrTy}, ptr ${alloca}, i32 0, i32 0`);
+    lines.push(`  store ${elemTy} ${firstVal}, ptr ${ptr0}`);
+    for (let i = 1; i < expr.elements.length; i++) {
+      const [el, ev] = this.genExpr(expr.elements[i]);
+      lines.push(...el);
+      const pi = this.nextTemp();
+      lines.push(`  ${pi} = getelementptr ${arrTy}, ptr ${alloca}, i32 0, i32 ${i}`);
+      lines.push(`  store ${elemTy} ${ev}, ptr ${pi}`);
+    }
+    const val = this.nextTemp();
+    lines.push(`  ${val} = load ${arrTy}, ptr ${alloca}`);
+    return [lines, val, arrTy];
+  }
+
+  private genArrayRepeat(expr: HIRExpr & { kind: "ArrayRepeat" }, lines: string[]): [string[], string, string] {
+    const elemKind = expr.type.tag === "array" ? expr.type.element : { tag: "int" as const, bits: 32, signed: true };
+    const elemTy = this.llvmType(elemKind);
+    const arrTy = `[${expr.count} x ${elemTy}]`;
+    const [vl, vv] = this.genExpr(expr.value);
+    lines.push(...vl);
+    if (vv === "0" || vv === "0.0" || vv === "false") {
+      return [lines, "zeroinitializer", arrTy];
+    }
+    const alloca = this.nextTemp();
+    lines.push(`  ${alloca} = alloca ${arrTy}`);
+    if (this.needsDropCg(elemKind)) {
+      // Non-Copy types: deep-clone each element so they own independent heap data
+      const srcPtr = this.nextTemp();
+      lines.push(`  ${srcPtr} = alloca ${elemTy}`);
+      lines.push(`  store ${elemTy} ${vv}, ptr ${srcPtr}`);
+      for (let i = 0; i < expr.count; i++) {
+        const pi = this.nextTemp();
+        lines.push(`  ${pi} = getelementptr ${arrTy}, ptr ${alloca}, i32 0, i32 ${i}`);
+        const cloned = this.emitDeepCloneFromPtr(lines, srcPtr, elemKind);
+        lines.push(`  store ${elemTy} ${cloned}, ptr ${pi}`);
+      }
+    } else {
+      for (let i = 0; i < expr.count; i++) {
+        const pi = this.nextTemp();
+        lines.push(`  ${pi} = getelementptr ${arrTy}, ptr ${alloca}, i32 0, i32 ${i}`);
+        lines.push(`  store ${elemTy} ${vv}, ptr ${pi}`);
+      }
+    }
+    const val = this.nextTemp();
+    lines.push(`  ${val} = load ${arrTy}, ptr ${alloca}`);
+    return [lines, val, arrTy];
+  }
+
+  private genIndexAccess(expr: HIRExpr & { kind: "IndexAccess" }, lines: string[]): [string[], string, string] {
+    const objTag = expr.object.type.tag === "ref" ? expr.object.type.inner.tag : expr.object.type.tag;
+    if (objTag === "string") {
+      return this.genStringIndex(expr, lines);
+    }
+    if (expr.object.type.tag === "ptr") {
+      const [objLines, objVal] = this.genExpr(expr.object);
+      lines.push(...objLines);
+      const [idxLines, idxVal] = this.genExpr(expr.index);
+      lines.push(...idxLines);
+      const elemTy = this.llvmType(expr.type);
+      const gep = this.nextTemp();
+      lines.push(`  ${gep} = getelementptr ${elemTy}, ptr ${objVal}, i64 ${idxVal}`);
+      const val = this.nextTemp();
+      lines.push(`  ${val} = load ${elemTy}, ptr ${gep}`);
+      return [lines, val, elemTy];
+    }
+    {
+    const effObj = expr.object.type.tag === "ref" ? expr.object.type.inner : expr.object.type;
+    // Indexing a temporary container (`worlds()[i]`) materializes it into a slot
+    // that nothing else owns. Drop it once the element is safely out — after the
+    // load, or after the deep clone — never before, or the element pointer would
+    // outlive its buffer.
+    const tempMark = this.argTempDrops.length;
+    if (effObj.tag === "vec" || (effObj.tag === "array" && effObj.size === null)) {
+      const [ptrLines, ptr, elemTy] = this.genVecBoundsCheckedPtr(expr, lines);
+      const elemKind = effObj.element;
+      // Auto-clone non-Copy elements so the Vec stays intact. The user-facing
+      // semantics: Vec[i] always returns an independent value.
+      if (this.needsDropCg(elemKind)) {
+        const cloned = this.emitDeepCloneFromPtr(lines, ptr, elemKind);
+        this.flushArgTempDrops(lines, tempMark);
+        return [lines, cloned, elemTy];
+      }
+      const val = this.nextTemp();
+      lines.push(`  ${val} = load ${elemTy}, ptr ${ptr}`);
+      this.flushArgTempDrops(lines, tempMark);
+      return [lines, val, elemTy];
+    }
+    const [ptrLines, ptr, elemTy] = this.genBoundsCheckedPtr(expr, lines);
+    // Sized arrays clone non-Copy elements for the same reason Vec does: a
+    // bare load hands out a second owner of the same buffer, and both free
+    // it at scope exit. `fn peek(a: &[string; 2]) { return a[0] }` aborted
+    // on a double free.
+    if (effObj.tag === "array" && this.needsDropCg(expr.type)) {
+      const cloned = this.emitDeepCloneFromPtr(lines, ptr, expr.type);
+      this.flushArgTempDrops(lines, tempMark);
+      return [lines, cloned, elemTy];
+    }
+    const val = this.nextTemp();
+    lines.push(`  ${val} = load ${elemTy}, ptr ${ptr}`);
+    this.flushArgTempDrops(lines, tempMark);
+    return [lines, val, elemTy];
+    }
+  }
+
+  private genEnumLit(expr: HIRExpr & { kind: "EnumLit" }, lines: string[]): [string[], string, string] {
+    const layout = this.enumLayouts.get(expr.enumName)!;
+    const variant = layout.variants.get(expr.variant)!;
+    const enumTy = `%${expr.enumName}`;
+    const alloca = this.nextTemp();
+    lines.push(`  ${alloca} = alloca ${enumTy}`);
+    const tagPtr = this.nextTemp();
+    lines.push(`  ${tagPtr} = getelementptr ${enumTy}, ptr ${alloca}, i32 0, i32 0`);
+    lines.push(`  store i32 ${variant.tag}, ptr ${tagPtr}`);
+    if (expr.args.length > 0) {
+      const payloadPtr = this.nextTemp();
+      lines.push(`  ${payloadPtr} = getelementptr ${enumTy}, ptr ${alloca}, i32 0, i32 1`);
+      if (expr.args.length === 1) {
+        const [argLines, argVal, argTy] = this.genExpr(expr.args[0]);
+        lines.push(...argLines);
+        lines.push(`  store ${argTy} ${argVal}, ptr ${payloadPtr}`);
+      } else {
+        const payloadStructTy = `{ ${variant.fieldTypes.join(", ")} }`;
+        for (let i = 0; i < expr.args.length; i++) {
+          const [argLines, argVal, argTy] = this.genExpr(expr.args[i]);
+          lines.push(...argLines);
+          const fieldPtr = this.nextTemp();
+          lines.push(`  ${fieldPtr} = getelementptr ${payloadStructTy}, ptr ${payloadPtr}, i32 0, i32 ${i}`);
+          lines.push(`  store ${argTy} ${argVal}, ptr ${fieldPtr}`);
+        }
+      }
+    }
+    const val = this.nextTemp();
+    lines.push(`  ${val} = load ${enumTy}, ptr ${alloca}`);
+    return [lines, val, enumTy];
+  }
+
+  private genMemReplace(expr: HIRExpr & { kind: "MemReplace" }, lines: string[], sretDest?: string): [string[], string, string] {
+    const [pl, placePtr, placeTy] = this.genLValue(expr.place);
+    lines.push(...pl);
+    if (this.isBigAgg(placeTy)) {
+      // Old value moves out by memcpy — never load a ≥128-byte aggregate as an SSA
+      // value (see isBigAgg). It lands in the caller's slot (bound `let old = ...`
+      // supplies sretDest) or a scratch slot dropped here when the result is discarded.
+      let dest = sretDest;
+      if (!dest) { dest = this.nextTemp(); this.entryAllocas.push(`  ${dest} = alloca ${placeTy}`); }
+      this.emitMemcpy(lines, dest, placePtr, placeTy);
+      this.genStoreInto(lines, placePtr, placeTy, expr.value);   // store new; does NOT drop old
+      if (!sretDest && this.needsDropCg(expr.type)) this.emitDropValue(lines, dest, expr.type);
+      return [lines, dest, placeTy];
+    }
+    const old = this.nextTemp();
+    lines.push(`  ${old} = load ${placeTy}, ptr ${placePtr}`);   // move old out
+    this.genStoreInto(lines, placePtr, placeTy, expr.value);     // store new; old is not dropped
+    return [lines, old, placeTy];
+  }
+
+  private genEnumTryFrom(expr: HIRExpr & { kind: "EnumTryFrom" }, lines: string[]): [string[], string, string] {
+    const [vl, nv, nTy] = this.genExpr(expr.value);
+    lines.push(...vl);
+    // Compare in i64 (every discriminant fits). Sign-extend a signed source, zero-extend
+    // an unsigned one, so e.g. a u8 200 matches discriminant 200 instead of wrapping.
+    let n64 = nv;
+    if (nTy !== "i64") {
+      const signed = expr.value.type.tag === "int" ? expr.value.type.signed : true;
+      n64 = this.nextTemp();
+      lines.push(`  ${n64} = ${signed ? "sext" : "zext"} ${nTy} ${nv} to i64`);
+    }
+    let valid = "0";   // i1 false when the enum somehow has no variants
+    for (const d of expr.discriminants) {
+      const eq = this.nextTemp();
+      lines.push(`  ${eq} = icmp eq i64 ${n64}, ${d}`);
+      if (valid === "0") { valid = eq; }
+      else { const o = this.nextTemp(); lines.push(`  ${o} = or i1 ${valid}, ${eq}`); valid = o; }
+    }
+    const optTy = `%${expr.optionEnumName}`;
+    const optLayout = this.enumLayouts.get(expr.optionEnumName)!;
+    const someTag = optLayout.variants.get("Some")!.tag;
+    const noneTag = optLayout.variants.get("None")!.tag;
+    const res = this.nextTemp();
+    lines.push(`  ${res} = alloca ${optTy}`);
+    const someBB = this.nextLabel("tryfrom.some");
+    const noneBB = this.nextLabel("tryfrom.none");
+    const doneBB = this.nextLabel("tryfrom.done");
+    lines.push(`  br i1 ${valid}, label %${someBB}, label %${noneBB}`);
+    lines.push(`${someBB}:`);
+    const sTagPtr = this.nextTemp();
+    lines.push(`  ${sTagPtr} = getelementptr ${optTy}, ptr ${res}, i32 0, i32 0`);
+    lines.push(`  store i32 ${someTag}, ptr ${sTagPtr}`);
+    // Payload IS the matched variant: a fieldless enum's value is its i32 tag, and here
+    // the tag equals the matched integer. Written as the payload's leading i32.
+    const n32 = this.nextTemp();
+    lines.push(`  ${n32} = trunc i64 ${n64} to i32`);
+    const payloadPtr = this.nextTemp();
+    lines.push(`  ${payloadPtr} = getelementptr ${optTy}, ptr ${res}, i32 0, i32 1`);
+    lines.push(`  store i32 ${n32}, ptr ${payloadPtr}`);
+    lines.push(`  br label %${doneBB}`);
+    lines.push(`${noneBB}:`);
+    const nTagPtr = this.nextTemp();
+    lines.push(`  ${nTagPtr} = getelementptr ${optTy}, ptr ${res}, i32 0, i32 0`);
+    lines.push(`  store i32 ${noneTag}, ptr ${nTagPtr}`);
+    lines.push(`  br label %${doneBB}`);
+    lines.push(`${doneBB}:`);
+    const out = this.nextTemp();
+    lines.push(`  ${out} = load ${optTy}, ptr ${res}`);
+    return [lines, out, optTy];
+  }
+
+  private genMemSwap(expr: HIRExpr & { kind: "MemSwap" }, lines: string[]): [string[], string, string] {
+    const [al, aPtr, aTy] = this.genLValue(expr.a);
+    lines.push(...al);
+    const [bl, bPtr] = this.genLValue(expr.b);
+    lines.push(...bl);
+    if (this.isBigAgg(aTy)) {
+      const tmp = this.nextTemp();
+      this.entryAllocas.push(`  ${tmp} = alloca ${aTy}`);
+      const same = this.nextTemp();
+      const swapLabel = this.nextLabel("swap.copy");
+      const doneLabel = this.nextLabel("swap.done");
+      lines.push(`  ${same} = icmp eq ptr ${aPtr}, ${bPtr}`);
+      lines.push(`  br i1 ${same}, label %${doneLabel}, label %${swapLabel}`);
+      lines.push(`${swapLabel}:`);
+      this.emitMemcpy(lines, tmp, aPtr, aTy);
+      this.emitMemcpy(lines, aPtr, bPtr, aTy);
+      this.emitMemcpy(lines, bPtr, tmp, aTy);
+      lines.push(`  br label %${doneLabel}`);
+      lines.push(`${doneLabel}:`);
+      return [lines, "", "void"];
+    }
+    // Load both before storing either — the places may alias (swap(v[i], v[j])).
+    const ta = this.nextTemp();
+    lines.push(`  ${ta} = load ${aTy}, ptr ${aPtr}`);
+    const tb = this.nextTemp();
+    lines.push(`  ${tb} = load ${aTy}, ptr ${bPtr}`);
+    lines.push(this.valStore(aTy, tb, aPtr));
+    lines.push(this.valStore(aTy, ta, bPtr));
+    return [lines, "", "void"];
+  }
+
+  private genVecWithCapacity(expr: HIRExpr & { kind: "VecWithCapacity" }, lines: string[]): [string[], string, string] {
+    this.hasVecType = true;
+    this.needsMalloc = true;
+    const elemSize = this.typeSizeOf(expr.elementType);
+    const [capLines, capVal] = this.genExpr(expr.capacity);
+    lines.push(...capLines);
+    this.emitNonNegativeCheck(lines, capVal, "capacity", expr.span);
+    // malloc(cap * elemSize); empty (len=0) but pre-sized so pushes up to
+    // cap don't realloc. cap==0 still allocates 0 bytes — harmless, matches
+    // the "buffer or null" invariant push checks (null only when cap==0).
+    const bytes = this.nextTemp();
+    lines.push(`  ${bytes} = mul i64 ${capVal}, ${elemSize}`);
+    const buf = this.nextTemp();
+    lines.push(`  ${buf} = call ptr @malloc(i64 ${bytes})`);
+    const v0 = this.nextTemp();
+    lines.push(`  ${v0} = insertvalue %Vec undef, ptr ${buf}, 0`);
+    const v1 = this.nextTemp();
+    lines.push(`  ${v1} = insertvalue %Vec ${v0}, i64 0, 1`);
+    const v2 = this.nextTemp();
+    lines.push(`  ${v2} = insertvalue %Vec ${v1}, i64 ${capVal}, 2`);
+    return [lines, v2, "%Vec"];
+  }
+
+  private genVecFilled(expr: HIRExpr & { kind: "VecFilled" }, lines: string[]): [string[], string, string] {
+    this.hasVecType = true;
+    this.needsMalloc = true;
+    const elemSize = this.typeSizeOf(expr.elementType);
+    const elemTy = this.llvmType(expr.elementType);
+    const [cntLines, cntVal] = this.genExpr(expr.count);
+    lines.push(...cntLines);
+    this.emitNonNegativeCheck(lines, cntVal, "length", expr.span);
+    const [valLines, valVal] = this.genExpr(expr.value);
+    lines.push(...valLines);
+    const bytes = this.nextTemp();
+    lines.push(`  ${bytes} = mul i64 ${cntVal}, ${elemSize}`);
+    const buf = this.nextTemp();
+    lines.push(`  ${buf} = call ptr @malloc(i64 ${bytes})`);
+    // fill loop: for i in 0..count { buf[i] = value }
+    const idxSlot = this.nextTemp();
+    lines.push(`  ${idxSlot} = alloca i64`);
+    lines.push(`  store i64 0, ptr ${idxSlot}`);
+    const condL = this.nextLabel("vecfill.cond");
+    const bodyL = this.nextLabel("vecfill.body");
+    const endL = this.nextLabel("vecfill.end");
+    lines.push(`  br label %${condL}`);
+    lines.push(`${condL}:`);
+    const iv = this.nextTemp();
+    lines.push(`  ${iv} = load i64, ptr ${idxSlot}`);
+    const more = this.nextTemp();
+    lines.push(`  ${more} = icmp ult i64 ${iv}, ${cntVal}`);
+    lines.push(`  br i1 ${more}, label %${bodyL}, label %${endL}`);
+    lines.push(`${bodyL}:`);
+    const slot = this.nextTemp();
+    lines.push(`  ${slot} = getelementptr ${elemTy}, ptr ${buf}, i64 ${iv}`);
+    lines.push(`  store ${elemTy} ${valVal}, ptr ${slot}`);
+    const inc = this.nextTemp();
+    lines.push(`  ${inc} = add i64 ${iv}, 1`);
+    lines.push(`  store i64 ${inc}, ptr ${idxSlot}`);
+    lines.push(`  br label %${condL}`);
+    lines.push(`${endL}:`);
+    const v0 = this.nextTemp();
+    lines.push(`  ${v0} = insertvalue %Vec undef, ptr ${buf}, 0`);
+    const v1 = this.nextTemp();
+    lines.push(`  ${v1} = insertvalue %Vec ${v0}, i64 ${cntVal}, 1`);
+    const v2 = this.nextTemp();
+    lines.push(`  ${v2} = insertvalue %Vec ${v1}, i64 ${cntVal}, 2`);
+    return [lines, v2, "%Vec"];
+  }
+
+  private genClosure(expr: HIRExpr & { kind: "Closure" }, lines: string[]): [string[], string, string] {
+    const lt = this.llvmType(expr.type);
+    const closureName = `__closure_${this.closureCounter++}`;
+    const captures = expr.captures;
+    const retTy = this.llvmType(expr.retType);
+
+    const isMove = !!(expr as any).isMove;
+    // by-ref closures: env holds ptrs to original allocas
+    // move closures: env holds copies of captured values
+    const envStructTy = captures.length > 0
+      ? (isMove
+        ? `{ ${captures.map(c => this.llvmType(c.type)).join(", ")} }`
+        : `{ ${captures.map(() => "ptr").join(", ")} }`)
+      : "{}";
+
+    // save codegen state
+    const savedTemp = this.tempCounter;
+    const savedLabel = this.labelCounter;
+    const savedLocals = this.locals;
+    const savedDroppable = this.droppableLocals;
+    const savedLoopHeader = this.loopHeader;
+    const savedLoopExit = this.loopExit;
+    const savedEntryAllocas = this.entryAllocas;
+    const savedEmittedAddrs = this.emittedAddrs;
+    const savedFnName = this.currentFnName;
+    const savedEnsures = this.currentEnsures;
+    this.tempCounter = 0;
+    this.labelCounter = 0;
+    this.locals = new Map();
+    this.droppableLocals = [];
+    this.entryAllocas = [];
+    this.emittedAddrs = new Set();
+    this.loopHeader = null;
+    this.loopExit = null;
+    // a Return inside the closure body must not assert the enclosing fn's ensures
+    this.currentEnsures = [];
+    this.currentFnName = closureName;
+    // closure bodies carry no subprogram (M1/M2); suppress dbg.declare so its locals
+    // aren't scoped to the enclosing fn (the closure define lacks !dbg anyway)
+    const savedSubprogram = this.currentSubprogramId;
+    this.currentSubprogramId = null;
+
+    // generate closure function: @__closure_N(ptr %env, params...)
+    const closureBody: string[] = [];
+    // Closure params carry the full type (top-level fns split it into inner + isRef),
+    // and the prologue below spills every ref param as a pointer. `&string` lowers to
+    // %String by value in return position, so ask for the pointer explicitly here.
+    const closureParamTy = (t: TypeKind) =>
+      t.tag === "ref" && t.inner.tag === "string" ? "ptr" : this.llvmType(t);
+    const closureParams = [`ptr %env`, ...expr.params.map(p => `${closureParamTy(p.type)} %${p.name}`)].join(", ");
+    closureBody.push(`define ${retTy} @${closureName}(${closureParams}) {`);
+    closureBody.push("entry.bb:");
+
+    // load captures from env struct
+    for (let i = 0; i < captures.length; i++) {
+      const cap = captures[i];
+      const capTy = this.llvmType(cap.type);
+      const gepPtr = this.nextTemp();
+      closureBody.push(`  ${gepPtr} = getelementptr ${envStructTy}, ptr %env, i32 0, i32 ${i}`);
+      if (isMove) {
+        // move closure: env holds the value directly — treat as local alloca
+        this.locals.set(cap.name, { type: capTy, typeKind: cap.type, mutable: cap.mutable, isRef: false });
+        closureBody.push(`  %${cap.name}.addr = alloca ${capTy}`);
+        const loaded = this.nextTemp();
+        closureBody.push(`  ${loaded} = load ${capTy}, ptr ${gepPtr}`);
+        closureBody.push(`  store ${capTy} ${loaded}, ptr %${cap.name}.addr`);
+      } else {
+        const loadedPtr = this.nextTemp();
+        closureBody.push(`  ${loadedPtr} = load ptr, ptr ${gepPtr}`);
+        // the capture is a pointer to the original variable's alloca
+        this.locals.set(cap.name, { type: capTy, typeKind: cap.type, mutable: cap.mutable, isRef: true, addr: `${gepPtr}.ref` });
+        closureBody.push(`  ${gepPtr}.ref = alloca ptr`);
+        closureBody.push(`  store ptr ${loadedPtr}, ptr ${gepPtr}.ref`);
+      }
+    }
+
+    // set up params
+    for (const p of expr.params) {
+      const isRefParam = p.type.tag === "ref";
+      if (isRefParam && p.type.tag === "ref") {
+        const innerTy = this.llvmType(p.type.inner);
+        closureBody.push(`  %${p.name}.addr = alloca ptr`);
+        closureBody.push(`  store ptr %${p.name}, ptr %${p.name}.addr`);
+        this.locals.set(p.name, { type: innerTy, typeKind: p.type, mutable: false, isRef: true });
+      } else {
+        const lt = this.llvmType(p.type);
+        closureBody.push(`  %${p.name}.addr = alloca ${lt}`);
+        closureBody.push(`  store ${lt} %${p.name}, ptr %${p.name}.addr`);
+        this.locals.set(p.name, { type: lt, typeKind: p.type, mutable: false, isRef: false });
+      }
+    }
+
+    // generate body
+    const closureAllocaInsertPoint = closureBody.length;
+    let hasTerminator = false;
+    for (const stmt of expr.body) {
+      const [stmtLines, terminated] = this.genStmt(stmt);
+      closureBody.push(...stmtLines);
+      if (terminated) { hasTerminator = true; break; }
+    }
+    if (!hasTerminator) {
+      if (retTy === "void") closureBody.push("  ret void");
+      else closureBody.push(`  ret ${retTy} 0`);
+    }
+    if (this.entryAllocas.length > 0) {
+      closureBody.splice(closureAllocaInsertPoint, 0, ...this.entryAllocas);
+    }
+    this.hoistAllocas(closureBody, closureAllocaInsertPoint);
+    closureBody.push("}");
+    this.closureBodies.push(closureBody);
+
+    // restore codegen state
+    this.tempCounter = savedTemp;
+    this.labelCounter = savedLabel;
+    this.locals = savedLocals;
+    this.droppableLocals = savedDroppable;
+    this.entryAllocas = savedEntryAllocas;
+    this.emittedAddrs = savedEmittedAddrs;
+    this.loopHeader = savedLoopHeader;
+    this.loopExit = savedLoopExit;
+    this.currentFnName = savedFnName;
+    this.currentSubprogramId = savedSubprogram;
+    this.currentEnsures = savedEnsures;
+
+    // at the call site: build env struct and closure pair
+    if (captures.length > 0) {
+      const envAddr = this.nextTemp();
+      if (isMove) {
+        // heap-allocate env for move closures (safe to send to other threads)
+        const envSize = this.structPayloadSize(captures.map(c => this.llvmType(c.type)));
+        lines.push(`  ${envAddr} = call ptr @malloc(i64 ${Math.max(envSize, 8)})`);
+      } else {
+        lines.push(`  ${envAddr} = alloca ${envStructTy}`);
+      }
+      for (let i = 0; i < captures.length; i++) {
+        const cap = captures[i];
+        const capAddr = this.localAddr(cap.name);
+        const local = this.locals.get(cap.name);
+        const capTy = this.llvmType(cap.type);
+        const gepSlot = this.nextTemp();
+        lines.push(`  ${gepSlot} = getelementptr ${envStructTy}, ptr ${envAddr}, i32 0, i32 ${i}`);
+        if (isMove) {
+          // copy the VALUE into the env
+          const loaded = this.nextTemp();
+          if (local?.isRef) {
+            const innerPtr = this.nextTemp();
+            lines.push(`  ${innerPtr} = load ptr, ptr ${capAddr}`);
+            const val = this.nextTemp();
+            lines.push(`  ${val} = load ${capTy}, ptr ${innerPtr}`);
+            lines.push(`  store ${capTy} ${val}, ptr ${gepSlot}`);
+          } else {
+            lines.push(`  ${loaded} = load ${capTy}, ptr ${capAddr}`);
+            lines.push(`  store ${capTy} ${loaded}, ptr ${gepSlot}`);
+            // zero source so parent's drop glue won't free moved data
+            if (this.needsDropCg(cap.type)) {
+              lines.push(this.zeroStore(capTy, capAddr));
+              const dl = this.droppableLocals.find(d => d.addr === capAddr);
+              if (dl) lines.push(`  store i1 0, ptr ${dl.aliveFlag}`);
+            }
+          }
+        } else if (local?.isRef) {
+          // variable is already a ref (ptr to ptr) — load the inner ptr
+          const innerPtr = this.nextTemp();
+          lines.push(`  ${innerPtr} = load ptr, ptr ${capAddr}`);
+          lines.push(`  store ptr ${innerPtr}, ptr ${gepSlot}`);
+        } else {
+          // variable is a value — store pointer to its alloca
+          lines.push(`  store ptr ${capAddr}, ptr ${gepSlot}`);
+        }
+      }
+      // build { ptr fn_ptr, ptr env_ptr }
+      const closurePair = this.nextTemp();
+      lines.push(`  ${closurePair} = insertvalue { ptr, ptr } undef, ptr @${closureName}, 0`);
+      const closurePair2 = this.nextTemp();
+      lines.push(`  ${closurePair2} = insertvalue { ptr, ptr } ${closurePair}, ptr ${envAddr}, 1`);
+      return [lines, closurePair2, "{ ptr, ptr }"];
+    } else {
+      const closurePair = this.nextTemp();
+      lines.push(`  ${closurePair} = insertvalue { ptr, ptr } undef, ptr @${closureName}, 0`);
+      const closurePair2 = this.nextTemp();
+      lines.push(`  ${closurePair2} = insertvalue { ptr, ptr } ${closurePair}, ptr null, 1`);
+      return [lines, closurePair2, "{ ptr, ptr }"];
+    }
+  }
+
+  private genCFnCall(expr: HIRExpr & { kind: "CFnCall" }, lines: string[]): [string[], string, string] {
+    // a bare C function pointer: call it directly, with no env prepended
+    const [calLines, calVal] = this.genExpr(expr.callee);
+    lines.push(...calLines);
+    const cTempMark = this.argTempDrops.length;
+    const argVals: { val: string; type: string }[] = [];
+    for (const arg of expr.args) {
+      if (arg.passByRef) {
+        const [al, aPtr] = this.genLValueForArg(arg.expr);
+        lines.push(...al);
+        argVals.push({ val: aPtr, type: "ptr" });
+      } else {
+        const [al, av, at] = this.genExpr(arg.expr);
+        lines.push(...al);
+        argVals.push({ val: av, type: at });
+      }
+    }
+    const cArgsStr = argVals.map(a => `${a.type} ${a.val}`).join(", ");
+    const cRetTy = this.llvmType(expr.type);
+    if (cRetTy === "void") {
+      lines.push(`  call void ${calVal}(${cArgsStr})`);
+      this.flushArgTempDrops(lines, cTempMark);
+      return [lines, "void", "void"];
+    }
+    const cResult = this.nextTemp();
+    lines.push(`  ${cResult} = call ${cRetTy} ${calVal}(${cArgsStr})`);
+    this.flushArgTempDrops(lines, cTempMark);
+    return [lines, cResult, cRetTy];
+  }
+
+  private genClosureCall(expr: HIRExpr & { kind: "ClosureCall" }, lines: string[]): [string[], string, string] {
+    // load the { fn_ptr, env_ptr } pair from the callee
+    const [calLines, calVal] = this.genExpr(expr.callee);
+    lines.push(...calLines);
+    const fnPtr = this.nextTemp();
+    lines.push(`  ${fnPtr} = extractvalue { ptr, ptr } ${calVal}, 0`);
+    const envPtr = this.nextTemp();
+    lines.push(`  ${envPtr} = extractvalue { ptr, ptr } ${calVal}, 1`);
+
+    // evaluate args
+    const clTempMark = this.argTempDrops.length;
+    const argVals: { val: string; type: string }[] = [{ val: envPtr, type: "ptr" }];
+    const refPtrs: { ptr: string; mut: boolean }[] = [];
+    for (const arg of expr.args) {
+      if (arg.passByRef) {
+        const [al, aPtr] = this.genLValueForArg(arg.expr);
+        lines.push(...al);
+        argVals.push({ val: aPtr, type: "ptr" });
+        refPtrs.push({ ptr: aPtr, mut: arg.refMut });
+      } else {
+        const [al, av, at] = this.genExpr(arg.expr);
+        lines.push(...al);
+        argVals.push({ val: av, type: at });
+      }
+    }
+    this.emitAliasGuards(lines, refPtrs, expr.span);
+
+    const argsStr = argVals.map(a => `${a.type} ${a.val}`).join(", ");
+    const retTy = this.llvmType(expr.type);
+    if (retTy === "void") {
+      lines.push(`  call void ${fnPtr}(${argsStr})`);
+      this.flushArgTempDrops(lines, clTempMark);
+      return [lines, "void", "void"];
+    }
+    const result = this.nextTemp();
+    lines.push(`  ${result} = call ${retTy} ${fnPtr}(${argsStr})`);
+    this.flushArgTempDrops(lines, clTempMark);
+    return [lines, result, retTy];
+  }
+
+  private genInterfaceCoerce(expr: HIRExpr & { kind: "InterfaceCoerce" }, lines: string[]): [string[], string, string] {
+    // build fat pointer { ptr data, ptr itable }
+    const isHeapCoerce = expr.type.tag === "heap";
+    let dataPtr: string;
+    if (isHeapCoerce) {
+      // Heap<T> → Heap<Interface>: data ptr is the heap pointer value
+      const [valLines, valVal] = this.genExpr(expr.value);
+      lines.push(...valLines);
+      dataPtr = valVal;
+    } else {
+      // &T → &Interface: data ptr is address of the concrete value
+      const [addrLines, addrVal] = this.genLValueForArg(expr.value);
+      lines.push(...addrLines);
+      dataPtr = addrVal;
+    }
+    const itableKey = `${expr.fromType}.${expr.ifaceName}`;
+    const itableInfo = this.itableLayouts.get(itableKey);
+    const itableGlobal = itableInfo?.globalName ?? `@itable.${expr.fromType}.${expr.ifaceName}`;
+    const s0 = this.nextTemp();
+    lines.push(`  ${s0} = insertvalue { ptr, ptr } undef, ptr ${dataPtr}, 0`);
+    const s1 = this.nextTemp();
+    lines.push(`  ${s1} = insertvalue { ptr, ptr } ${s0}, ptr ${itableGlobal}, 1`);
+    return [lines, s1, "{ ptr, ptr }"];
+  }
+
+  private genIfExpr(expr: HIRExpr & { kind: "IfExpr" }, lines: string[]): [string[], string, string] {
+    const resultTy = this.llvmType(expr.type);
+    const resultAddr = `%__ifexpr.${this.scopeCounter++}.addr`;
+    this.entryAllocas.push(`  ${resultAddr} = alloca ${resultTy}`);
+
+    const [condLines, condVal] = this.genExpr(expr.cond);
+    lines.push(...condLines);
+
+    const thenLabel = this.nextLabel("ife.then");
+    const elseLabel = this.nextLabel("ife.else");
+    const endLabel = this.nextLabel("ife.end");
+    lines.push(`  br i1 ${condVal}, label %${thenLabel}, label %${elseLabel}`);
+
+    lines.push(`${thenLabel}:`);
+    let thenTerminated = false;
+    for (let i = 0; i < expr.thenBody.length - 1; i++) {
+      const [sl, t] = this.genStmt(expr.thenBody[i]);
+      lines.push(...sl);
+      if (t) { thenTerminated = true; break; }
+    }
+    if (!thenTerminated && expr.thenBody.length > 0) {
+      const last = expr.thenBody[expr.thenBody.length - 1];
+      if (last.kind === "ExprStmt") {
+        const [vl, vv] = this.genExpr(last.expr);
+        lines.push(...vl);
+        if (vv !== "void") lines.push(`  store ${resultTy} ${vv}, ptr ${resultAddr}`);
+      } else {
+        const [sl, t] = this.genStmt(last);
+        lines.push(...sl);
+        if (t) thenTerminated = true;
+      }
+    }
+    if (!thenTerminated) lines.push(`  br label %${endLabel}`);
+
+    lines.push(`${elseLabel}:`);
+    let elseTerminated = false;
+    for (let i = 0; i < expr.elseBody.length - 1; i++) {
+      const [sl, t] = this.genStmt(expr.elseBody[i]);
+      lines.push(...sl);
+      if (t) { elseTerminated = true; break; }
+    }
+    if (!elseTerminated && expr.elseBody.length > 0) {
+      const last = expr.elseBody[expr.elseBody.length - 1];
+      if (last.kind === "ExprStmt") {
+        const [vl, vv] = this.genExpr(last.expr);
+        lines.push(...vl);
+        if (vv !== "void") lines.push(`  store ${resultTy} ${vv}, ptr ${resultAddr}`);
+      } else {
+        const [sl, t] = this.genStmt(last);
+        lines.push(...sl);
+        if (t) elseTerminated = true;
+      }
+    }
+    if (!elseTerminated) lines.push(`  br label %${endLabel}`);
+
+    lines.push(`${endLabel}:`);
+    if (thenTerminated && elseTerminated) {
+      lines.push(`  unreachable`);
+      return [lines, "void", "void"];
+    }
+    const result = this.nextTemp();
+    lines.push(`  ${result} = load ${resultTy}, ptr ${resultAddr}`);
+    return [lines, result, resultTy];
+  }
+
+  private genMatchExpr(expr: HIRExpr & { kind: "MatchExpr" }, lines: string[]): [string[], string, string] {
+    const resultTy = this.llvmType(expr.type);
+    const resultAddr = `%__matchexpr.${this.scopeCounter++}.addr`;
+    this.entryAllocas.push(`  ${resultAddr} = alloca ${resultTy}`);
+    // Reuse the statement match generator, passing a result slot so each
+    // arm's tail value is stored instead of discarded.
+    const asStmt = {
+      kind: "Match" as const,
+      subject: expr.subject,
+      arms: expr.arms,
+      enumName: expr.enumName,
+      subjectIsRef: expr.subjectIsRef,
+      span: expr.span,
+    };
+    const [ml, allTerminated] = this.genMatch(asStmt, { addr: resultAddr, ty: resultTy });
+    lines.push(...ml);
+    // Every arm diverged (return/break) — genMatch already closed endLabel
+    // with `unreachable`, so a load here would follow a terminator. The
+    // value is never observed; hand back a poison of the right type.
+    if (allTerminated) return [lines, `poison`, resultTy];
+    const result = this.nextTemp();
+    lines.push(`  ${result} = load ${resultTy}, ptr ${resultAddr}`);
+    return [lines, result, resultTy];
+  }
+
+  private genInterfaceMethodCall(expr: HIRExpr & { kind: "InterfaceMethodCall" }, lines: string[]): [string[], string, string] {
+    // object is { ptr data, ptr itable } — either directly or loaded from alloca
+    let objVal: string;
+    const recv = expr.object;
+    if (recv.kind === "IndexAccess" && recv.object.type.tag === "vec") {
+      // Borrow the fat pointer straight from the Vec slot. Dispatch only
+      // reads data+itable, so don't deep-clone the element — an interface
+      // value can't be cloned (the itable carries no clone slot), and
+      // cloning it as a thin Heap mis-handles the fat pointer.
+      const [, slotPtr] = this.genVecBoundsCheckedPtr(recv, lines);
+      objVal = this.nextTemp();
+      lines.push(`  ${objVal} = load { ptr, ptr }, ptr ${slotPtr}`);
+    } else {
+      const [objLines, ov] = this.genExpr(recv);
+      lines.push(...objLines);
+      objVal = ov;
+    }
+
+    // extract data ptr and itable ptr
+    const dataPtr = this.nextTemp();
+    lines.push(`  ${dataPtr} = extractvalue { ptr, ptr } ${objVal}, 0`);
+    const itablePtr = this.nextTemp();
+    lines.push(`  ${itablePtr} = extractvalue { ptr, ptr } ${objVal}, 1`);
+
+    // load fn ptr from itable slot — GEP with ptr element type strides by 8 bytes
+    const fnSlot = this.nextTemp();
+    lines.push(`  ${fnSlot} = getelementptr ptr, ptr ${itablePtr}, i32 ${expr.methodIndex}`);
+    const fnPtr = this.nextTemp();
+    lines.push(`  ${fnPtr} = load ptr, ptr ${fnSlot}`);
+
+    // build args: data ptr as self, then user args
+    const imTempMark = this.argTempDrops.length;
+    const argVals: { val: string; type: string }[] = [{ val: dataPtr, type: "ptr" }];
+    const refPtrs: { ptr: string; mut: boolean }[] = [];
+    for (const arg of expr.args) {
+      if (arg.passByRef) {
+        const [al, aPtr] = this.genLValueForArg(arg.expr);
+        lines.push(...al);
+        argVals.push({ val: aPtr, type: "ptr" });
+        refPtrs.push({ ptr: aPtr, mut: arg.refMut });
+      } else {
+        const [al, av, at] = this.genExpr(arg.expr);
+        lines.push(...al);
+        argVals.push({ val: av, type: at });
+      }
+    }
+    this.emitAliasGuards(lines, refPtrs, expr.span);
+
+    const argsStr = argVals.map(a => `${a.type} ${a.val}`).join(", ");
+    const retTy = this.llvmType(expr.type);
+    if (retTy === "void") {
+      lines.push(`  call void ${fnPtr}(${argsStr})`);
+      this.flushArgTempDrops(lines, imTempMark);
+      return [lines, "void", "void"];
+    }
+    const result = this.nextTemp();
+    lines.push(`  ${result} = call ${retTy} ${fnPtr}(${argsStr})`);
+    this.flushArgTempDrops(lines, imTempMark);
+    return [lines, result, retTy];
   }
 
   private genUnwrap(expr: HIRExpr & { kind: "Unwrap" }, lines: string[]): [string[], string, string] {

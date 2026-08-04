@@ -337,8 +337,38 @@ Ranked by how often real programs hit them.
 
 - [ ] **No BigInt / arbitrary-precision decimal.** Node and Go have both; Rust punts to crates.
 
-- [ ] **Smaller absences:** HTML escaping, MIME type table, multipart parsing, zip *write*
-  (read only today), cookie jar, `strconv` quote/unquote, `strconv.parseBool`.
+- [ ] **Smaller absences:** ~~HTML escaping~~, ~~MIME type table~~, ~~multipart parsing~~,
+  zip *write* (read only today), cookie jar, ~~`strconv` quote/unquote~~,
+  ~~`strconv.parseBool`~~.
+
+  *Four of the six shipped. `std/html` — `Html.escapeText` (element text and quoted
+  attributes), `Html.escapeAttr` (safe under any quoting, including none, which costs
+  `&#32;` for spaces), `Html.unescape` (five predefined entities plus numeric refs only —
+  `&nbsp;` stays literal), `Html.isSafeUrl` (scheme allowlist; rejects any C0/DEL byte
+  outright because browsers strip some of them before resolving the scheme). Every doc
+  comment states the contexts the function is **not** safe for, and there is deliberately no
+  function for `<script>`/`<style>`/URL-component contexts, where escaping is the wrong tool.
+  `std/mime` — extension → type, `contentType` appending `; charset=utf-8` for textual types,
+  unknown = `Option.None` rather than a built-in `octet-stream` default. `std/multipart` —
+  `Multipart.parse`/`parseWithLimits`/`boundary`/`field`, `Part.isFile`/`safeFilename`, a
+  `Limits` struct (256 parts, 8 MiB per body, 16 KiB per header block) applied by default, and
+  an 11-variant `MultipartError` carrying byte offsets. `Part.filename` is left raw and named
+  as untrusted; `safeFilename` rejects rather than repairs (last path component only, no
+  `.`/`..`, no controls or Windows-special bytes, no trailing dot or space, no DOS device
+  names). `strconv` gained `parseBool` (`true`/`t`/`1`/`false`/`f`/`0`, ASCII-case-insensitive,
+  no trimming) and `quoteString`/`unquoteString` — `Option`, matching the module's existing
+  convention; `unquoteString` is strict where the compiler's own lexer is lenient, because a
+  decoder over untrusted text must not silently delete a backslash.*
+
+  **Not shipped, with reasons.** Zip *write* was left alone deliberately — `std/zip` was being
+  touched by concurrent work. The **cookie jar** is a design blocker, not a time one: a
+  client-side jar's whole security job is deciding whether a `Set-Cookie` may claim a domain,
+  and without a public-suffix list the best available rule is the pre-PSL "must be a suffix of
+  the request host and contain a dot" heuristic, which happily lets a site set a cookie for
+  `.co.uk`. Shipping that under the name "cookie jar" is exactly the failure mode this tier's
+  HTML entry exists to avoid. Go's answer — make the caller inject a `PublicSuffixList` and
+  document that `nil` means no protection — is the precedent to copy, but that is an API
+  decision worth making on purpose rather than as the tail of a six-item bullet.
 
 ---
 

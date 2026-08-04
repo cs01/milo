@@ -152,6 +152,9 @@ export default defineConfig({
               items: [
                 { text: 'std/net', link: '/stdlib/net' },
                 { text: 'std/http', link: '/stdlib/http' },
+                { text: 'std/html', link: '/stdlib/html' },
+                { text: 'std/mime', link: '/stdlib/mime' },
+                { text: 'std/multipart', link: '/stdlib/multipart' },
               ]
             },
             {

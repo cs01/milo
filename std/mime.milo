@@ -1,0 +1,375 @@
+// std/mime — filename extension to media type, for serving static files.
+//
+// A lookup table, nothing more. It reads the extension and answers what that
+// extension conventionally means; it does not open the file, does not sniff the
+// bytes, and cannot tell you what a file actually contains. A `.png` full of
+// HTML is still `image/png` here.
+//
+// That distinction matters when the filename came from a user. Labeling an
+// upload with the type its extension claims is how a stored .html gets served
+// back as text/html and runs as the origin — decide the type of untrusted
+// content from your own policy (or serve it from a separate origin with
+// `Content-Disposition: attachment` and `X-Content-Type-Options: nosniff`), not
+// from the name the uploader chose.
+//
+// Unknown extensions are `Option.None` rather than a default. A caller serving
+// files should reach for `application/octet-stream` explicitly, because the
+// safe default depends on what it is serving — a static-site server and an
+// upload bucket want different answers, and only the caller knows which it is.
+
+// Mime — media types by filename extension.
+pub struct Mime {
+}
+
+impl Mime {
+    // Media type for `ext`, or None if the extension is not in the table.
+    //
+    // `ext` may be spelled with or without a leading dot and in any case:
+    // "html", ".HTML" and "HtMl" all answer text/html. The answer is the bare
+    // type with no parameters — see contentType for a full header value.
+    fn fromExtension(ext: &string): Option<string> {
+        var norm = ""
+        var i: i64 = 0
+        if ext.len > 0 && ext[0] == '.' {
+            i = 1
+        }
+        while i < ext.len {
+            var b = ext[i]
+            if b >= 'A' && b <= 'Z' {
+                b = b + 32
+            }
+            norm.push(b)
+            i = i + 1
+        }
+        return lookupExtension(norm)
+    }
+
+    // Media type for the extension of `path`, or None if it has no extension or
+    // the extension is unknown.
+    //
+    // The extension is the text after the last '.' in the last path segment, so
+    // "/var/www/.htaccess" and "/etc/conf.d/app" have none — a leading dot is a
+    // hidden-file marker, not an extension, and a dot in a parent directory
+    // belongs to that directory.
+    fn fromPath(path: &string): Option<string> {
+        match extensionOf(path) {
+            Option.Some(ext) => {
+                return Mime.fromExtension(ext)
+            }
+            Option.None => {
+                return Option.None
+            }
+        }
+    }
+
+    // Full `Content-Type` header value for `path`: the media type, plus
+    // "; charset=utf-8" when the type is textual.
+    //
+    // The charset is not decoration. A text/html response with no declared
+    // charset lets the browser guess, and a guess an attacker can steer (the
+    // classic case is UTF-7) turns escaped output back into markup. Send this,
+    // not the bare type, on anything a browser will render.
+    fn contentType(path: &string): Option<string> {
+        match Mime.fromPath(path) {
+            Option.Some(t) => {
+                if Mime.isTextual(t) {
+                    return Option.Some(t + "; charset=utf-8")
+                }
+                return Option.Some(t)
+            }
+            Option.None => {
+                return Option.None
+            }
+        }
+    }
+
+    // Whether `mediaType` names text: any "text/..." type, or a structured
+    // syntax that is text in practice (+json, +xml, and the handful of
+    // application/... types that predate the suffix convention).
+    //
+    // Accepts a bare type or a full header value — parameters after the first
+    // ';' are ignored, so "text/html" and "text/html; charset=utf-8" agree. The
+    // match is on the type name only; it is not a claim that the bytes decode.
+    fn isTextual(mediaType: &string): bool {
+        var end = mediaType.len
+        for i in 0..mediaType.len {
+            if mediaType[i] == ';' && end == mediaType.len {
+                end = i
+            }
+        }
+        while end > 0 && (mediaType[end - 1] == ' ' || mediaType[end - 1] == 9) {
+            end = end - 1
+        }
+        let base = mediaType[0..end]
+        if base.startsWith("text/") {
+            return true
+        }
+        if base.endsWith("+json") || base.endsWith("+xml") {
+            return true
+        }
+        return base == "application/json"
+        || base == "application/javascript"
+        || base == "application/xml"
+        || base == "application/xhtml+xml"
+        || base == "application/x-sh"
+        || base == "application/sql"
+        || base == "application/toml"
+        || base == "application/yaml"
+        || base == "image/svg+xml"
+    }
+}
+
+// Extension of the last path segment, lowercase-insensitive and without the dot,
+// or None when the segment has no dot past its first byte.
+fn extensionOf(path: &string): Option<string> {
+    var segStart: i64 = 0
+    for i in 0..path.len {
+        if path[i] == '/' || path[i] == '\\' {
+            segStart = i + 1
+        }
+    }
+    var dot: i64 = -1
+    var i = segStart
+    while i < path.len {
+        if path[i] == '.' {
+            dot = i
+        }
+        i = i + 1
+    }
+    if dot <= segStart || dot + 1 >= path.len {
+        return Option.None
+    }
+    return Option.Some(path[dot + 1..path.len].clone())
+}
+
+// The table. Lowercase, dotless extension in, bare media type out.
+fn lookupExtension(ext: &string): Option<string> {
+    // markup and web
+    if ext == "html" || ext == "htm" {
+        return Option.Some("text/html")
+    }
+    if ext == "css" {
+        return Option.Some("text/css")
+    }
+    if ext == "js" || ext == "mjs" || ext == "cjs" {
+        return Option.Some("text/javascript")
+    }
+    if ext == "json" || ext == "map" {
+        return Option.Some("application/json")
+    }
+    if ext == "jsonld" {
+        return Option.Some("application/ld+json")
+    }
+    if ext == "xml" {
+        return Option.Some("application/xml")
+    }
+    if ext == "xhtml" {
+        return Option.Some("application/xhtml+xml")
+    }
+    if ext == "wasm" {
+        return Option.Some("application/wasm")
+    }
+    if ext == "webmanifest" {
+        return Option.Some("application/manifest+json")
+    }
+    if ext == "rss" {
+        return Option.Some("application/rss+xml")
+    }
+    if ext == "atom" {
+        return Option.Some("application/atom+xml")
+    }
+
+    // plain text and source
+    if ext == "txt" || ext == "text" || ext == "log" {
+        return Option.Some("text/plain")
+    }
+    if ext == "md" || ext == "markdown" {
+        return Option.Some("text/markdown")
+    }
+    if ext == "csv" {
+        return Option.Some("text/csv")
+    }
+    if ext == "tsv" {
+        return Option.Some("text/tab-separated-values")
+    }
+    if ext == "ics" {
+        return Option.Some("text/calendar")
+    }
+    if ext == "vcf" {
+        return Option.Some("text/vcard")
+    }
+    if ext == "toml" {
+        return Option.Some("application/toml")
+    }
+    if ext == "yaml" || ext == "yml" {
+        return Option.Some("application/yaml")
+    }
+    if ext == "sh" {
+        return Option.Some("application/x-sh")
+    }
+    if ext == "sql" {
+        return Option.Some("application/sql")
+    }
+    // ".ts" is deliberately absent here: the registry and every other server
+    // read it as an MPEG transport stream, and quietly disagreeing with them
+    // would be worse than not answering for TypeScript source.
+    if ext == "milo" || ext == "rs" || ext == "go" || ext == "py" || ext == "c"
+    || ext == "h" || ext == "cpp" || ext == "hpp" || ext == "tsx" {
+        return Option.Some("text/plain")
+    }
+
+    // images
+    if ext == "png" {
+        return Option.Some("image/png")
+    }
+    if ext == "jpg" || ext == "jpeg" || ext == "jpe" {
+        return Option.Some("image/jpeg")
+    }
+    if ext == "gif" {
+        return Option.Some("image/gif")
+    }
+    if ext == "webp" {
+        return Option.Some("image/webp")
+    }
+    if ext == "avif" {
+        return Option.Some("image/avif")
+    }
+    if ext == "svg" || ext == "svgz" {
+        return Option.Some("image/svg+xml")
+    }
+    if ext == "ico" {
+        return Option.Some("image/x-icon")
+    }
+    if ext == "bmp" {
+        return Option.Some("image/bmp")
+    }
+    if ext == "tif" || ext == "tiff" {
+        return Option.Some("image/tiff")
+    }
+    if ext == "heic" {
+        return Option.Some("image/heic")
+    }
+
+    // fonts
+    if ext == "woff" {
+        return Option.Some("font/woff")
+    }
+    if ext == "woff2" {
+        return Option.Some("font/woff2")
+    }
+    if ext == "ttf" {
+        return Option.Some("font/ttf")
+    }
+    if ext == "otf" {
+        return Option.Some("font/otf")
+    }
+    if ext == "eot" {
+        return Option.Some("application/vnd.ms-fontobject")
+    }
+
+    // audio and video
+    if ext == "mp3" {
+        return Option.Some("audio/mpeg")
+    }
+    if ext == "wav" {
+        return Option.Some("audio/wav")
+    }
+    if ext == "ogg" || ext == "oga" {
+        return Option.Some("audio/ogg")
+    }
+    if ext == "opus" {
+        return Option.Some("audio/opus")
+    }
+    if ext == "flac" {
+        return Option.Some("audio/flac")
+    }
+    if ext == "aac" {
+        return Option.Some("audio/aac")
+    }
+    if ext == "m4a" {
+        return Option.Some("audio/mp4")
+    }
+    if ext == "mp4" || ext == "m4v" {
+        return Option.Some("video/mp4")
+    }
+    if ext == "webm" {
+        return Option.Some("video/webm")
+    }
+    if ext == "ogv" {
+        return Option.Some("video/ogg")
+    }
+    if ext == "mov" {
+        return Option.Some("video/quicktime")
+    }
+    if ext == "avi" {
+        return Option.Some("video/x-msvideo")
+    }
+    if ext == "mkv" {
+        return Option.Some("video/x-matroska")
+    }
+    if ext == "mpg" || ext == "mpeg" {
+        return Option.Some("video/mpeg")
+    }
+    if ext == "ts" {
+        return Option.Some("video/mp2t")
+    }
+
+    // documents and archives
+    if ext == "pdf" {
+        return Option.Some("application/pdf")
+    }
+    if ext == "zip" {
+        return Option.Some("application/zip")
+    }
+    if ext == "gz" {
+        return Option.Some("application/gzip")
+    }
+    if ext == "bz2" {
+        return Option.Some("application/x-bzip2")
+    }
+    if ext == "xz" {
+        return Option.Some("application/x-xz")
+    }
+    if ext == "zst" {
+        return Option.Some("application/zstd")
+    }
+    if ext == "tar" {
+        return Option.Some("application/x-tar")
+    }
+    if ext == "7z" {
+        return Option.Some("application/x-7z-compressed")
+    }
+    if ext == "rar" {
+        return Option.Some("application/vnd.rar")
+    }
+    if ext == "doc" {
+        return Option.Some("application/msword")
+    }
+    if ext == "docx" {
+        return Option.Some("application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+    }
+    if ext == "xls" {
+        return Option.Some("application/vnd.ms-excel")
+    }
+    if ext == "xlsx" {
+        return Option.Some("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+    }
+    if ext == "ppt" {
+        return Option.Some("application/vnd.ms-powerpoint")
+    }
+    if ext == "pptx" {
+        return Option.Some("application/vnd.openxmlformats-officedocument.presentationml.presentation")
+    }
+    if ext == "epub" {
+        return Option.Some("application/epub+zip")
+    }
+    if ext == "rtf" {
+        return Option.Some("application/rtf")
+    }
+
+    // binaries
+    if ext == "bin" || ext == "exe" || ext == "dll" || ext == "so" || ext == "dylib" {
+        return Option.Some("application/octet-stream")
+    }
+    return Option.None
+}

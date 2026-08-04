@@ -1,0 +1,99 @@
+// @expect: cwd-ok
+// @expect: from-file
+// @expect: to-file
+// @expect: []
+
+// @skip-os: win32
+// Skipped on Windows only because std/fs makeTempDir is POSIX-only (mkdtemp has no
+// Windows implementation yet — see docs/roadmap.md), not because Command's cwd or file
+// redirection are missing there; commandEnv.milo exercises Command on every platform.
+
+// Command's cwd and file redirection, over a temp directory so nothing depends on where
+// the test runs. Every observed line is produced by the redirection.
+
+from "std/process" import {
+    Command, Stdio, Child
+}
+from "std/fs" import {
+    makeTempDir, readFile, removeDir, removeFile, writeFile
+}
+from "std/path" import {
+    Path
+}
+from "std/env" import {
+    Env
+}
+
+// Read a child's stdout to EOF.
+fn drain(child: &Child): string {
+    var out: string = String.withCapacity(64)
+    var buf: [u8; 256] = [0; 256]
+    while true {
+        var n: i64 = 0
+        unsafe {
+            n = child.readStdout(buf as *u8, 256)
+        }
+        if n <= 0 {
+            break
+        }
+        for i in 0..n {
+            if buf[i] != 10 {
+                out.push(buf[i])
+            }
+        }
+    }
+    return out
+}
+
+fn runAndPrint(cmd: Command): void {
+    match cmd.spawn() {
+        Result.Ok(c) => {
+            var child = c
+            let text = drain(child)
+            let _s = child.wait()
+            print(text)
+            child.close()
+        }
+        Result.Err(msg) => {
+            print($"spawn error: {msg}")
+        }
+    }
+}
+
+pub fn main(): i32 {
+    let dir = makeTempDir("miloCmd")!
+    let probe = Path.join(dir, "probe.txt")
+    let outPath = Path.join(dir, "out.txt")
+
+    // cwd: the child reads probe.txt by a relative name, which only resolves in `dir`.
+    let _w = writeFile(probe, "cwd-ok\n")!
+    runAndPrint(Command.new("sh").arg("-c").arg("cat probe.txt").dir(dir))
+
+    // stdin from a file.
+    let _w2 = writeFile(probe, "from-file\n")!
+    runAndPrint(Command.new("cat").stdin(Stdio.Read(probe.clone())))
+
+    // stdout to a file: nothing comes back on the pipe, the bytes land in out.txt.
+    match Command.new("sh").arg("-c").arg("echo to-file").stdout(Stdio.Write(outPath.clone())).spawn() {
+        Result.Ok(c) => {
+            var child = c
+            let _s = child.wait()
+            child.close()
+            print(readFile(outPath)!.trim())
+        }
+        Result.Err(msg) => {
+            print($"spawn error: {msg}")
+        }
+    }
+
+    // envRemove drops an inherited variable: the child sees nothing between the
+    // brackets, which is not what an unset-but-inherited variable would print.
+    let _s2 = Env.set("MILO_BUILDER_VAR", "present")!
+    runAndPrint(Command.new("sh").arg("-c").arg("echo [$MILO_BUILDER_VAR]").envRemove("MILO_BUILDER_VAR"))
+    let _r0 = Env.remove("MILO_BUILDER_VAR")!
+
+    let _r1 = removeFile(probe)
+    let _r2 = removeFile(outPath)
+    let _r3 = removeDir(dir)
+    return 0
+}

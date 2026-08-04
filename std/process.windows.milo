@@ -19,7 +19,15 @@ from "std/platform" import {
     close,
     read,
     write,
+    open,
+    devNullPath,
+    oWriteCreateTrunc,
+    oWriteCreateAppend,
+    environBlock,
     exePathInto
+}
+from "std/sort" import {
+    sortStrings
 }
 from "std/io" import {
     fdChannel
@@ -58,6 +66,11 @@ pub extern fn TerminateProcess(handle: i64, exitCode: u32): i32
 @cSig("windows.h", "BOOL CloseHandle(HANDLE)")
 pub extern fn CloseHandle(handle: i64): i32
 
+// Returns *u8, not i64 like the HANDLE-taking calls above: a HANDLE is a void* and the
+// @cSig guard rejects an integer return for one.
+@cSig("windows.h", "HANDLE GetStdHandle(DWORD)")
+pub extern fn GetStdHandle(which: u32): *u8
+
 pub extern fn malloc(size: i64): *u8
 
 pub extern fn free(ptr: *u8): void
@@ -81,6 +94,26 @@ fn startfUseStdHandles(): u32 {
 // HANDLE_FLAG_INHERIT.
 fn handleFlagInherit(): u32 {
     return 1
+}
+
+// _O_RDONLY|_O_BINARY. The plain _O_RDONLY std/io opens files with would put the fd in
+// text mode, and the CRT would strip a \r from every \r\n the child reads.
+fn oReadBinary(): i32 {
+    return 32768
+}
+
+// STD_INPUT_HANDLE / STD_OUTPUT_HANDLE / STD_ERROR_HANDLE, i.e. (DWORD)-10/-11/-12.
+// Needed because STARTF_USESTDHANDLES is all-or-nothing: once any stream is redirected,
+// a stream left "inherited" must be spelled out with the parent's own handle or the
+// child gets a NULL one.
+fn stdHandleId(stream: i32): u32 {
+    if stream == 0 {
+        return 4294967286 as u32
+    }
+    if stream == 1 {
+        return 4294967285 as u32
+    }
+    return 4294967284 as u32
 }
 
 // ── Simple command execution ──
@@ -114,7 +147,9 @@ pub struct Process {
 impl Process {
     fn spawn(path: &string): Result<Process> {
         var args: Vec<string> = Vec.new()
-        return createProcess(path, args, -1, -1, -1)
+        unsafe {
+            return createProcess(path, args, -1, -1, -1, false, 0 as *u8, 0 as *u8)
+        }
     }
 
     fn wait(self: &Self): Result<i32> {
@@ -145,88 +180,41 @@ pub struct Child {
 }
 
 impl Child {
+    // Spawn with both stdio pipes and nothing else configured. Shorthand for
+    // `Command.new(program).args(args).stderr(...)` — use Command when the child needs
+    // a working directory, an environment, or a stream pointed anywhere but a pipe.
     fn spawn(program: &string, args: &Vec<string>, mergeStderr: bool): Result<Child> {
-        unsafe {
-            var inP: [i32; 2] = [0; 2]
-            var outP: [i32; 2] = [0; 2]
-            var errP: [i32; 2] = [-1; 2]
-            if _pipe(inP as *i32, 4096 as u32, pipeFlags()) != 0 {
-                return Result.Err("pipe(stdin) failed")
-            }
-            if _pipe(outP as *i32, 4096 as u32, pipeFlags()) != 0 {
-                close(inP[0])
-                close(inP[1])
-                return Result.Err("pipe(stdout) failed")
-            }
-            if !mergeStderr {
-                if _pipe(errP as *i32, 4096 as u32, pipeFlags()) != 0 {
-                    close(inP[0])
-                    close(inP[1])
-                    close(outP[0])
-                    close(outP[1])
-                    return Result.Err("pipe(stderr) failed")
-                }
-            }
-
-            // The child reads inP[0] and writes outP[1]/errP[1]; make exactly those
-            // inheritable. The parent's ends stay non-inheritable (from _O_NOINHERIT),
-            // so the child cannot keep the read end of its own stdout open.
-            makeInheritable(inP[0])
-            makeInheritable(outP[1])
-            let childErr = if mergeStderr {
-                outP[1]
-            } else {
-                errP[1]
-            }
-            if !mergeStderr {
-                makeInheritable(errP[1])
-            }
-
-            let res = createProcess(program, args, inP[0], outP[1], childErr)
-
-            // Parent no longer needs the child-side ends regardless of outcome.
-            close(inP[0])
-            close(outP[1])
-            var errRead: i32 = -1
-            if !mergeStderr {
-                close(errP[1])
-                errRead = errP[0]
-            }
-
-            match res {
-                Result.Err(msg) => {
-                    close(inP[1])
-                    close(outP[0])
-                    if !mergeStderr {
-                        close(errP[0])
-                    }
-                    return Result.Err(msg)
-                }
-                Result.Ok(proc) => {
-                    return Result.Ok(Child {
-                        pid: proc.pid,
-                        handle: proc.handle,
-                        stdinFd: inP[1],
-                        stdoutFd: outP[0],
-                        stderrFd: errRead,
-                    }
-                    )
-                }
-            }
+        let errMode = if mergeStderr {
+            Stdio.Merge
+        } else {
+            Stdio.Pipe
         }
+        return Command.new(program).args(args).stderr(errMode).spawn()
     }
 
-    fn writeStdin(self: &Self, buf: *u8, len: i64): i64 {
+    // Only valid while stdin is a pipe: Stdio.Inherit/Null/Read leave nothing for the
+    // parent to write, and closeStdin() has already sent EOF.
+    fn writeStdin(self: &Self, buf: *u8, len: i64): i64
+    requires
+    self.stdinFd >= 0
+    {
         return write(self.stdinFd, buf, len)
     }
 
-    fn writeStdinStr(self: &Self, s: &string): i64 {
+    fn writeStdinStr(self: &Self, s: &string): i64
+    requires
+    self.stdinFd >= 0
+    {
         unsafe {
             return write(self.stdinFd, s as *u8, s.len)
         }
     }
 
-    fn readStdout(self: &Self, buf: *u8, len: i64): i64 {
+    // Only valid when stdout is a pipe (the default) rather than redirected elsewhere.
+    fn readStdout(self: &Self, buf: *u8, len: i64): i64
+    requires
+    self.stdoutFd >= 0
+    {
         return read(self.stdoutFd, buf, len)
     }
 
@@ -237,7 +225,11 @@ impl Child {
         return read(self.stderrFd, buf, len)
     }
 
-    fn stdout(self: &Self): Channel<string> {
+    // Only valid when stdout is a pipe (the default).
+    fn stdout(self: &Self): Channel<string>
+    requires
+    self.stdoutFd >= 0
+    {
         return fdChannel(self.stdoutFd)
     }
 
@@ -296,9 +288,11 @@ fn waitHandle(handle: i64): Result<i32> {
 }
 
 // Core CreateProcess wrapper. childIn/Out/Err are child-side CRT fds already marked
-// inheritable, or -1 to leave that stream at the parent's (inherited console). Returns a
-// Process holding dwProcessId and the process HANDLE.
-fn createProcess(program: &string, args: &Vec<string>, childIn: i32, childOut: i32, childErr: i32): Result<Process> {
+// inheritable, or -1 to leave that stream at the parent's. envBlock is a sorted, double
+// -NUL-terminated environment block or null to inherit; curDir is a NUL-terminated
+// directory or null for the parent's. Returns a Process holding dwProcessId and the
+// process HANDLE.
+fn createProcess(program: &string, args: &Vec<string>, childIn: i32, childOut: i32, childErr: i32, errFromStdout: bool, envBlock: *u8, curDir: *u8): Result<Process> {
     unsafe {
         let cmdLine = buildCmdLine(program, args)
 
@@ -306,20 +300,32 @@ fn createProcess(program: &string, args: &Vec<string>, childIn: i32, childOut: i
         // at 80/88/96. Zero it, then fill only what we use.
         var si: [u8; 104] = [0; 104]
         (si as *u32) [0] = 104 as u32
-        var useHandles = false
-        if childIn >= 0 {
-            (si as *i64) [10] = _get_osfhandle(childIn)
-            useHandles = true
-        }
-        if childOut >= 0 {
-            (si as *i64) [11] = _get_osfhandle(childOut)
-            useHandles = true
-        }
-        if childErr >= 0 {
-            (si as *i64) [12] = _get_osfhandle(childErr)
-            useHandles = true
-        }
+        let useHandles = childIn >= 0 || childOut >= 0 || childErr >= 0 || errFromStdout
         if useHandles {
+            // STARTF_USESTDHANDLES replaces all three at once, so a stream left alone
+            // still has to be handed the parent's own handle explicitly.
+            (si as *i64) [10] = if childIn >= 0 {
+                _get_osfhandle(childIn)
+            } else {
+                GetStdHandle(stdHandleId(0)) as i64
+            }
+            (si as *i64) [11] = if childOut >= 0 {
+                _get_osfhandle(childOut)
+            } else {
+                GetStdHandle(stdHandleId(1)) as i64
+            }
+            // Merging stderr means "wherever stdout ended up", which for an inherited
+            // stdout is the parent's stdout handle — not its stderr handle, which is a
+            // different device whenever either one is redirected.
+            (si as *i64) [12] = if errFromStdout {
+                (si as *i64) [11]
+            } else {
+                if childErr >= 0 {
+                    _get_osfhandle(childErr)
+                } else {
+                    GetStdHandle(stdHandleId(2)) as i64
+                }
+            }
             (si as *u32) [15] = startfUseStdHandles()
         }
 
@@ -329,7 +335,7 @@ fn createProcess(program: &string, args: &Vec<string>, childIn: i32, childOut: i
         // appName NULL => the first token of cmdLine is the program and the standard
         // search (including PATH) applies, matching execvp. inherit=TRUE so the marked
         // pipe ends cross into the child.
-        let ok = CreateProcessA(0 as *u8, cmdLine, 0 as *u8, 0 as *u8, 1, 0 as u32, 0 as *u8, 0 as *u8, si as *u8, pi as *u8)
+        let ok = CreateProcessA(0 as *u8, cmdLine, 0 as *u8, 0 as *u8, 1, 0 as u32, envBlock, curDir, si as *u8, pi as *u8)
         free(cmdLine)
         if ok == 0 {
             // A missing or unlaunchable program lands here — the Windows analogue of the
@@ -348,6 +354,444 @@ fn createProcess(program: &string, args: &Vec<string>, childIn: i32, childOut: i
 fn makeInheritable(fd: i32): void {
     unsafe {
         SetHandleInformation(_get_osfhandle(fd), handleFlagInherit(), handleFlagInherit())
+    }
+}
+
+// ── Command ──
+//
+// Same surface and same defaults as the POSIX arm in std/process.milo — see there for
+// the API description. The differences are all mechanism: streams are wired by handing
+// CreateProcess inheritable HANDLEs instead of dup2'ing after a fork, the environment is
+// one sorted double-NUL-terminated block rather than an argv-shaped array, and a bad
+// working directory fails spawn() here instead of failing the child with exit code 126.
+
+// Where one of a child's standard streams comes from, or goes to.
+pub enum Stdio {
+    // A pipe the parent holds the other end of: Child.writeStdin / stdout() / stderr().
+    Pipe,
+    // The parent's own stream, unchanged — the child shares the console.
+    Inherit,
+    // NUL, the bit bucket.
+    Null,
+    // stderr only: whatever stdout was pointed at, so both arrive interleaved.
+    Merge,
+    // stdin only: read the file at this path.
+    Read(string),
+    // stdout/stderr only: create or truncate the file at this path.
+    Write(string),
+    // stdout/stderr only: create or append to the file at this path.
+    Append(string),
+}
+
+struct EnvChange {
+    name: string,
+    value: string,
+    remove: bool,
+}
+
+pub struct Command {
+    program: string,
+    argv: Vec<string>,
+    workDir: string,
+    envChanges: Vec<EnvChange>,
+    inheritEnv: bool,
+    inMode: Stdio,
+    outMode: Stdio,
+    errMode: Stdio,
+}
+
+impl Command {
+    fn new(program: &string): Command {
+        return Command {
+            program: program.clone(),
+            argv: Vec.new(),
+            workDir: "",
+            envChanges: Vec.new(),
+            inheritEnv: true,
+            inMode: Stdio.Pipe,
+            outMode: Stdio.Pipe,
+            errMode: Stdio.Merge,
+        }
+    }
+
+    fn arg(self: Command, value: &string): Command {
+        var c = self
+        c.argv.push(value.clone())
+        return c
+    }
+
+    fn args(self: Command, values: &Vec<string>): Command {
+        var c = self
+        for i in 0..values.len {
+            c.argv.push(values[i].clone())
+        }
+        return c
+    }
+
+    // Run the child in `path`. Unlike POSIX, a directory the child cannot enter fails
+    // spawn() itself — CreateProcess validates it before the process exists.
+    fn dir(self: Command, path: &string): Command {
+        var c = self
+        c.workDir = path.clone()
+        return c
+    }
+
+    fn env(self: Command, name: &string, value: &string): Command {
+        var c = self
+        c.envChanges.push(EnvChange {
+            name: name.clone(), value: value.clone(), remove: false
+        }
+        )
+        return c
+    }
+
+    fn envRemove(self: Command, name: &string): Command {
+        var c = self
+        c.envChanges.push(EnvChange {
+            name: name.clone(), value: "", remove: true
+        }
+        )
+        return c
+    }
+
+    fn envClear(self: Command): Command {
+        var c = self
+        c.inheritEnv = false
+        return c
+    }
+
+    fn stdin(self: Command, mode: Stdio): Command {
+        var c = self
+        c.inMode = mode
+        return c
+    }
+
+    fn stdout(self: Command, mode: Stdio): Command {
+        var c = self
+        c.outMode = mode
+        return c
+    }
+
+    fn stderr(self: Command, mode: Stdio): Command {
+        var c = self
+        c.errMode = mode
+        return c
+    }
+
+    fn spawn(self: &Self): Result<Child> {
+        return commandSpawn(self)
+    }
+}
+
+// `child` is the child-side CRT fd handed to CreateProcess and closed in the parent
+// afterwards; `parent` is the pipe end the parent keeps. -1 means "none".
+struct StreamFds {
+    child: i32,
+    parent: i32,
+}
+
+fn noStreamFds(): StreamFds {
+    return StreamFds {
+        child: -1, parent: -1
+    }
+}
+
+fn openStdio(mode: &Stdio, childWrites: bool, label: string): Result<StreamFds> {
+    unsafe {
+        match mode {
+            Stdio.Inherit => {
+                return Result.Ok(noStreamFds())
+            }
+            Stdio.Pipe => {
+                var fds: [i32; 2] = [0; 2]
+                if _pipe(fds as *i32, 4096 as u32, pipeFlags()) != 0 {
+                    return Result.Err("pipe(" + label + ") failed")
+                }
+                // Only the child's end becomes inheritable; the parent's end stays
+                // private (from _O_NOINHERIT) so the child cannot hold it open and
+                // defeat EOF.
+                let childEnd = if childWrites {
+                    fds[1]
+                } else {
+                    fds[0]
+                }
+                let parentEnd = if childWrites {
+                    fds[0]
+                } else {
+                    fds[1]
+                }
+                makeInheritable(childEnd)
+                return Result.Ok(StreamFds {
+                    child: childEnd, parent: parentEnd
+                }
+                )
+            }
+            Stdio.Null => {
+                let flags = if childWrites {
+                    oWriteCreateTrunc()
+                } else {
+                    oReadBinary()
+                }
+                let fd = open(devNullPath(), flags, 420)
+                if fd < 0 {
+                    return Result.Err("open(" + devNullPath() + ") for " + label + " failed")
+                }
+                makeInheritable(fd)
+                return Result.Ok(StreamFds {
+                    child: fd, parent: -1
+                }
+                )
+            }
+            Stdio.Read(path) => {
+                if childWrites {
+                    return Result.Err(label + " cannot be Stdio.Read — the child writes it")
+                }
+                let fd = open(path, oReadBinary())
+                if fd < 0 {
+                    return Result.Err("open(" + path + ") for " + label + " failed")
+                }
+                makeInheritable(fd)
+                return Result.Ok(StreamFds {
+                    child: fd, parent: -1
+                }
+                )
+            }
+            Stdio.Write(path) => {
+                if !childWrites {
+                    return Result.Err(label + " cannot be Stdio.Write — the child reads it")
+                }
+                let fd = open(path, oWriteCreateTrunc(), 420)
+                if fd < 0 {
+                    return Result.Err("open(" + path + ") for " + label + " failed")
+                }
+                makeInheritable(fd)
+                return Result.Ok(StreamFds {
+                    child: fd, parent: -1
+                }
+                )
+            }
+            Stdio.Append(path) => {
+                if !childWrites {
+                    return Result.Err(label + " cannot be Stdio.Append — the child reads it")
+                }
+                let fd = open(path, oWriteCreateAppend(), 420)
+                if fd < 0 {
+                    return Result.Err("open(" + path + ") for " + label + " failed")
+                }
+                makeInheritable(fd)
+                return Result.Ok(StreamFds {
+                    child: fd, parent: -1
+                }
+                )
+            }
+            Stdio.Merge => {
+                return Result.Err(label + " cannot be Stdio.Merge — only stderr can merge")
+            }
+        }
+    }
+}
+
+fn closeStreamFds(fds: &StreamFds): void {
+    if fds.child >= 0 {
+        close(fds.child)
+    }
+    if fds.parent >= 0 {
+        close(fds.parent)
+    }
+}
+
+fn commandSpawn(cmd: &Command): Result<Child> {
+    unsafe {
+        let inFds = match openStdio(cmd.inMode, false, "stdin") {
+            Result.Ok(f) => {
+                f
+            }
+            Result.Err(e) => {
+                return Result.Err(e)
+            }
+        }
+        let outFds = match openStdio(cmd.outMode, true, "stdout") {
+            Result.Ok(f) => {
+                f
+            }
+            Result.Err(e) => {
+                closeStreamFds(inFds)
+                return Result.Err(e)
+            }
+        }
+        var mergeErr = false
+        match cmd.errMode {
+            Stdio.Merge => {
+                mergeErr = true
+            }
+            _ => {
+            }
+        }
+        var errFds = noStreamFds()
+        if !mergeErr {
+            match openStdio(cmd.errMode, true, "stderr") {
+                Result.Ok(f) => {
+                    errFds = f
+                }
+                Result.Err(e) => {
+                    closeStreamFds(inFds)
+                    closeStreamFds(outFds)
+                    return Result.Err(e)
+                }
+            }
+        }
+
+        let envBlock = match buildEnvBlock(cmd) {
+            Result.Ok(p) => {
+                p
+            }
+            Result.Err(e) => {
+                closeStreamFds(inFds)
+                closeStreamFds(outFds)
+                closeStreamFds(errFds)
+                return Result.Err(e)
+            }
+        }
+        let curDir = if cmd.workDir.len > 0 {
+            cstrCopy(cmd.workDir)
+        } else {
+            0 as *u8
+        }
+        let childErr = if mergeErr {
+            outFds.child
+        } else {
+            errFds.child
+        }
+        let res = createProcess(cmd.program, cmd.argv, inFds.child, outFds.child, childErr, mergeErr, envBlock, curDir)
+        if envBlock as i64 != 0 {
+            free(envBlock)
+        }
+        if curDir as i64 != 0 {
+            free(curDir)
+        }
+
+        // The parent no longer needs the child-side ends regardless of outcome.
+        if inFds.child >= 0 {
+            close(inFds.child)
+        }
+        if outFds.child >= 0 {
+            close(outFds.child)
+        }
+        if errFds.child >= 0 {
+            close(errFds.child)
+        }
+
+        match res {
+            Result.Err(msg) => {
+                if inFds.parent >= 0 {
+                    close(inFds.parent)
+                }
+                if outFds.parent >= 0 {
+                    close(outFds.parent)
+                }
+                if errFds.parent >= 0 {
+                    close(errFds.parent)
+                }
+                return Result.Err(msg)
+            }
+            Result.Ok(proc) => {
+                return Result.Ok(Child {
+                    pid: proc.pid,
+                    handle: proc.handle,
+                    stdinFd: inFds.parent,
+                    stdoutFd: outFds.parent,
+                    stderrFd: errFds.parent,
+                }
+                )
+            }
+        }
+    }
+}
+
+// ── child environment ──
+
+// Bytes of `record` before the first '=', which is the variable's name. Windows' "=C:"
+// drive pseudo-vars have their '=' first and so yield "", which no valid change can
+// match — they pass through to the child untouched, as they must.
+fn envRecordName(record: &string): string {
+    var name = ""
+    for i in 0..record.len {
+        if record[i] == '=' {
+            return name
+        }
+        name.push(record[i])
+    }
+    return ""
+}
+
+// Index of the last change naming `name`, or -1. Last wins.
+fn lastEnvChange(changes: &Vec<EnvChange>, name: &string): i64 {
+    var found: i64 = -1
+    for i in 0..changes.len {
+        if changes[i].name == name {
+            found = i
+        }
+    }
+    return found
+}
+
+// The child's environment as CreateProcess wants it: consecutive NUL-terminated
+// NAME=VALUE records closed by one more NUL. A null pointer means "inherit the parent's
+// block". Caller frees.
+fn buildEnvBlock(cmd: &Command): Result<*u8> {
+    unsafe {
+        if cmd.inheritEnv && cmd.envChanges.len == 0 {
+            return Result.Ok(0 as *u8)
+        }
+        var records: Vec<string> = Vec.new()
+        if cmd.inheritEnv {
+            let block = environBlock()
+            // An unreadable environment must not spawn a child with an empty one: that
+            // child would run without PATH, SystemRoot or anything else and fail in ways
+            // that point nowhere near here.
+            if block as i64 == 0 {
+                return Result.Err("cannot read this process's environment")
+            }
+            var i: i64 = 0
+            var going = true
+            while going {
+                let entry: *u8 = block[i]
+                if entry as i64 == 0 {
+                    going = false
+                } else {
+                    let record = _cstrToString(entry)
+                    if lastEnvChange(cmd.envChanges, envRecordName(record)) < 0 {
+                        records.push(record)
+                    }
+                    i = i + 1
+                }
+            }
+        }
+        for i in 0..cmd.envChanges.len {
+            let change = cmd.envChanges[i]
+            if !change.remove && lastEnvChange(cmd.envChanges, change.name) == i {
+                records.push(change.name + "=" + change.value)
+            }
+        }
+        // CreateProcess documents the block as sorted; this is byte order rather than the
+        // case-insensitive order the docs describe, which no Windows version enforces.
+        sortStrings(records)
+
+        var flat = ""
+        for i in 0..records.len {
+            flat.pushStr(records[i])
+            flat.push(0 as u8)
+        }
+        // An entirely empty environment still needs its own record terminator, or the
+        // trailing NUL below would be read as the block's first (empty) record.
+        if records.len == 0 {
+            flat.push(0 as u8)
+        }
+        let n = flat.len
+        let buf = malloc(n + 1)
+        memcpy(buf, flat as *u8, n)
+        memset((buf as i64 + n) as *u8, 0, 1)
+        return Result.Ok(buf)
     }
 }
 

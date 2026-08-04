@@ -1,0 +1,87 @@
+// @expect: envset
+// @expect: inherited
+// @expect: second
+
+// Command's environment, observed from inside the child on every platform: an
+// override the parent never had, a value the parent set with Env.set, and the
+// last-wins rule when one name is set twice. Every line is echoed by the child.
+
+from "std/process" import {
+    Command, Child
+}
+from "std/env" import {
+    Env
+}
+
+fn shell(): string {
+    if @targetOs() == "windows" {
+        return "cmd"
+    }
+    return "sh"
+}
+
+fn shellFlag(): string {
+    if @targetOs() == "windows" {
+        return "/c"
+    }
+    return "-c"
+}
+
+// `echo $NAME` for the platform's shell.
+fn echoVar(name: string): string {
+    if @targetOs() == "windows" {
+        return "echo %" + name + "%"
+    }
+    return "echo $" + name
+}
+
+// Read a child's stdout to EOF. Blocking single reads, so it works on every platform
+// (Windows pipe readiness has no green-scheduler path yet).
+fn drain(child: &Child): string {
+    var out: string = String.withCapacity(64)
+    var buf: [u8; 256] = [0; 256]
+    while true {
+        var n: i64 = 0
+        unsafe {
+            n = child.readStdout(buf as *u8, 256)
+        }
+        if n <= 0 {
+            break
+        }
+        for i in 0..n {
+            // Drop CR and LF: cmd.exe ends lines with \r\n, sh with \n.
+            if buf[i] != 10 && buf[i] != 13 {
+                out.push(buf[i])
+            }
+        }
+    }
+    return out
+}
+
+fn runAndPrint(cmd: Command): void {
+    match cmd.spawn() {
+        Result.Ok(c) => {
+            var child = c
+            let text = drain(child)
+            let _s = child.wait()
+            print(text)
+            child.close()
+        }
+        Result.Err(msg) => {
+            print($"spawn error: {msg}")
+        }
+    }
+}
+
+pub fn main(): i32 {
+    runAndPrint(Command.new(shell()).arg(shellFlag()).arg(echoVar("MILO_FIXTURE_A")).env("MILO_FIXTURE_A", "envset"))
+
+    // Env.set changes this process's environment, and a child spawned afterwards
+    // inherits it — the whole point of having both APIs.
+    let _s = Env.set("MILO_FIXTURE_B", "inherited")!
+    runAndPrint(Command.new(shell()).arg(shellFlag()).arg(echoVar("MILO_FIXTURE_B")))
+    let _r = Env.remove("MILO_FIXTURE_B")!
+
+    runAndPrint(Command.new(shell()).arg(shellFlag()).arg(echoVar("MILO_FIXTURE_C")).env("MILO_FIXTURE_C", "first").env("MILO_FIXTURE_C", "second"))
+    return 0
+}

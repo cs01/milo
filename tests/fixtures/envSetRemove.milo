@@ -1,0 +1,53 @@
+// @expect: before: <unset>
+// @expect: after: set-by-milo
+// @expect: replaced: second
+// @expect: removed: <unset>
+// @expect: remove-missing-ok
+// @expect: invalid name
+
+// Env.set / Env.remove against the process's own environment. The variable name is
+// specific to this fixture so nothing on the machine can be holding it already.
+
+from "std/env" import {
+    Env, EnvError
+}
+
+pub fn main(): i32 {
+    print("before: " + Env.getOr("MILO_ENV_FIXTURE", "<unset>"))
+
+    let _a = Env.set("MILO_ENV_FIXTURE", "set-by-milo")!
+    print("after: " + Env.getOr("MILO_ENV_FIXTURE", "<unset>"))
+
+    let _b = Env.set("MILO_ENV_FIXTURE", "second")!
+    print("replaced: " + Env.getOr("MILO_ENV_FIXTURE", "<unset>"))
+
+    let _c = Env.remove("MILO_ENV_FIXTURE")!
+    print("removed: " + Env.getOr("MILO_ENV_FIXTURE", "<unset>"))
+
+    // Removing a name that is not set is not an error on any platform.
+    match Env.remove("MILO_ENV_FIXTURE") {
+        Result.Ok(_) => {
+            print("remove-missing-ok")
+        }
+        Result.Err(_) => {
+            print("remove-missing-failed")
+        }
+    }
+
+    match Env.set("HAS=EQUALS", "x") {
+        Result.Ok(_) => {
+            print("accepted a name with '='")
+        }
+        Result.Err(e) => {
+            match e {
+                EnvError.InvalidName => {
+                    print("invalid name")
+                }
+                EnvError.Failed => {
+                    print("failed")
+                }
+            }
+        }
+    }
+    return 0
+}

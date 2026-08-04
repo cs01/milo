@@ -1,13 +1,18 @@
 from "std/fs" import {
     readFile
 }
+from "std/platform" import {
+    environBlock
+}
 // std/environ — enumerate the whole process environment.
 //
 // getEnv reads one variable by name; this lists every variable, which is what a
 // language runtime needs to expose something like Node's process.env.
 //
-// Linux exposes the environment as NUL-separated NAME=VALUE records in
-// /proc/self/environ, which avoids needing the `environ` global symbol.
+// The live environment is the `environ` array (std/platform's environBlock). Linux also
+// publishes it as NUL-separated NAME=VALUE records in /proc/self/environ, but that copy
+// is FROZEN at exec: it never reflects a later Env.set, so it is only the fallback for
+// the case where the `environ` symbol cannot be resolved (a fully static binary).
 
 pub struct EnvEntry {
     name: string,
@@ -17,6 +22,50 @@ pub struct EnvEntry {
 // Every variable in the process environment, in the order the OS supplies them.
 pub fn envVars(): Vec<EnvEntry> {
     var out: Vec<EnvEntry> = Vec.new()
+    unsafe {
+        let block = environBlock()
+        if block as i64 != 0 {
+            var b: i64 = 0
+            var going = true
+            while going {
+                let entry: *u8 = block[b]
+                if (entry as i64) == 0 {
+                    going = false
+                } else {
+                    let text = _cstrToString(entry)
+                    // entries are NAME=VALUE; a value may itself contain '='
+                    var eq: i64 = -1
+                    var k: i64 = 0
+                    while k < text.len() && eq < 0 {
+                        if text[k] == '=' {
+                            eq = k
+                        }
+                        k = k + 1
+                    }
+                    if eq > 0 {
+                        var name = String.withCapacity(eq)
+                        var n: i64 = 0
+                        while n < eq {
+                            name.push(text[n])
+                            n = n + 1
+                        }
+                        var value = String.withCapacity(text.len() - eq)
+                        var v = eq + 1
+                        while v < text.len() {
+                            value.push(text[v])
+                            v = v + 1
+                        }
+                        out.push(EnvEntry {
+                            name: name, value: value
+                        }
+                        )
+                    }
+                    b = b + 1
+                }
+            }
+            return out
+        }
+    }
     match readFile("/proc/self/environ") {
         Result.Ok(blob) => {
             var start: i64 = 0

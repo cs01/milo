@@ -4,9 +4,11 @@
 // language runtime needs to expose something like Node's process.env.
 //
 // macOS does not export `environ` to a shared library, so the supported route is
-// _NSGetEnviron(), which returns a pointer to it.
+// _NSGetEnviron(), which std/platform wraps as environBlock().
 
-extern fn _NSGetEnviron(): ***u8
+from "std/platform" import {
+    environBlock
+}
 
 pub struct EnvEntry {
     name: string,
@@ -17,7 +19,7 @@ pub struct EnvEntry {
 pub fn envVars(): Vec<EnvEntry> {
     var out: Vec<EnvEntry> = Vec.new()
     unsafe {
-        let envp: **u8 = *_NSGetEnviron()
+        let envp: **u8 = environBlock()
         var i: i64 = 0
         var going = true
         while going {

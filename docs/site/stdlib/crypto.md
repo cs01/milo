@@ -6,7 +6,7 @@ Cryptographic hashing and authenticated encryption, backed by the platform crypt
 from "std/crypto" import { Crypto }
 ```
 
-For dependency-free, constant-time implementations and higher-level primitives, see the pure-Milo companions: [`std/sha256`](sha256), [`std/sha1`](sha1), [`std/hmac`](hmac), [`std/jwt`](jwt), [`std/totp`](totp), and [`std/base32`](base32).
+For dependency-free, constant-time implementations and higher-level primitives, see the pure-Milo companions: [`std/sha256`](sha256), [`std/sha512`](sha512), [`std/sha1`](sha1), [`std/hmac`](hmac), [`std/subtle`](subtle), [`std/hkdf`](hkdf), [`std/pbkdf2`](pbkdf2), [`std/jwt`](jwt), [`std/totp`](totp), and [`std/base32`](base32).
 
 ## Hashing
 

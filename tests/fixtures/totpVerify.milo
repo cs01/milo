@@ -1,0 +1,34 @@
+// @expect: current true
+// @expect: previous-step-in-window true
+// @expect: next-step-in-window true
+// @expect: two-steps-away false
+// @expect: no-window-neighbour false
+// @expect: wrong-code false
+// @expect: wrong-length false
+from "std/totp" import {
+    Totp
+}
+
+fn check(label: &string, ok: bool): void {
+    print(label + " " + ok.toString())
+}
+
+// Totp.verify exists so that nobody writes `Totp.generate(...) == code`. The window
+// arithmetic is what the fixture pins: RFC 6238 §5.2 lets a validator accept the
+// adjacent steps for the user who typed a code as it rolled over, and one step
+// either side must mean exactly that — not two.
+pub fn main(): i32 {
+    let secret = "12345678901234567890"
+    let now: i64 = 1111111109
+    let step: i64 = 30
+    let code = Totp.generate(secret, now, step, 8)
+
+    check("current", Totp.verify(secret, code, now, step, 8, 1))
+    check("previous-step-in-window", Totp.verify(secret, code, now + step, step, 8, 1))
+    check("next-step-in-window", Totp.verify(secret, code, now - step, step, 8, 1))
+    check("two-steps-away", Totp.verify(secret, code, now + step * 2, step, 8, 1))
+    check("no-window-neighbour", Totp.verify(secret, code, now + step, step, 8, 0))
+    check("wrong-code", Totp.verify(secret, "00000000", now, step, 8, 1))
+    check("wrong-length", Totp.verify(secret, "1234", now, step, 8, 1))
+    return 0
+}

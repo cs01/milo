@@ -1,0 +1,50 @@
+// @expect: identical true
+// @expect: empty true
+// @expect: differ-first false
+// @expect: differ-last false
+// @expect: prefix false
+// @expect: longer false
+// @expect: high-bytes true
+// @expect: nul-bytes true
+// @expect: nul-differs false
+from "std/subtle" import {
+    constantTimeEq
+}
+
+fn check(label: &string, a: &string, b: &string): void {
+    print(label + " " + constantTimeEq(a, b).toString())
+}
+
+// constantTimeEq has to agree with `==` on every input — it only differs in *when*
+// it stops looking. The two byte-level cases that catch a lazy implementation are
+// bytes above 0x7f (a signed-char comparison gets these wrong) and embedded NULs (a
+// C-string comparison stops early and calls two different buffers equal).
+pub fn main(): i32 {
+    check("identical", "the same bytes", "the same bytes")
+    check("empty", "", "")
+    check("differ-first", "Xbcdef", "abcdef")
+    check("differ-last", "abcdeX", "abcdef")
+    check("prefix", "abc", "abcdef")
+    check("longer", "abcdefg", "abcdef")
+
+    var high = ""
+    var high2 = ""
+    for i in 0..32 {
+        high.push((0x80 + i) as u8)
+        high2.push((0x80 + i) as u8)
+    }
+    check("high-bytes", high, high2)
+
+    var withNul = "ab"
+    withNul.push(0 as u8)
+    withNul.push('c')
+    var sameNul = "ab"
+    sameNul.push(0 as u8)
+    sameNul.push('c')
+    var otherNul = "ab"
+    otherNul.push(0 as u8)
+    otherNul.push('d')
+    check("nul-bytes", withNul, sameNul)
+    check("nul-differs", withNul, otherNul)
+    return 0
+}

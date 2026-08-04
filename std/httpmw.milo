@@ -9,7 +9,7 @@ from "std/http" import {
     Context, Response, eqIgnoreCase
 }
 from "std/jwt" import {
-    Jwt
+    Jwt, JwtClaims, JwtError
 }
 from "std/deflate" import {
     Deflate
@@ -39,12 +39,30 @@ pub fn bearerToken(ctx: &Context): string {
     return token
 }
 
-// True iff the request carries a bearer token with a valid HS256 signature for
-// `secret`. Signature check is constant-time (see std/jwt); does not decode claims.
-pub fn verifyBearer(ctx: &Context, secret: &string): bool {
+// The claims of the request's bearer token, if it carries one with a valid HS256
+// signature for `secret` that is in its validity window right now.
+//
+// Returns the claims rather than a bool because "is this request authenticated" is
+// not a question a handler can answer without them: the subject, the scopes, and
+// the audience all live in the payload, and a bool tempts the caller to trust a
+// token that expired years ago. `JwtError.Expired` and `JwtError.BadSignature` are
+// different situations — the first is a refresh, the second is an attack — so the
+// reason is preserved.
+//
+// "No Authorization header" and "an Authorization header that is not a Bearer
+// token" are also kept apart: the first is an unauthenticated request and the
+// second is a misconfigured client, and the log line is the only place anyone ever
+// finds that out.
+//
+// For an audience or issuer requirement, or a non-HS256 algorithm, build a
+// `JwtVerifier` and hand it `bearerToken(ctx)` yourself.
+pub fn verifyBearer(ctx: &Context, secret: &string): Result<JwtClaims, JwtError> {
+    if ctx.header("Authorization").isNone() {
+        return Result.Err(JwtError.Malformed("no Authorization header"))
+    }
     let token = bearerToken(ctx)
     if token.len == 0 {
-        return false
+        return Result.Err(JwtError.Malformed("Authorization header is not a Bearer token"))
     }
     return Jwt.verifyHS256(token, secret)
 }
@@ -56,7 +74,7 @@ pub fn verifyBearer(ctx: &Context, secret: &string): bool {
 //
 //   let secret = loadSecret()
 //   router.use((ctx: &mut Context, next: (&mut Context) => Response) => {
-//       if verifyBearer(ctx, secret) { return next(ctx) }
+//       if verifyBearer(ctx, secret).isOk() { return next(ctx) }
 //       ctx.setStatus(401)
 //       return ctx.text("unauthorized")
 //   })

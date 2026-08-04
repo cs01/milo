@@ -12,6 +12,9 @@
 from "std/hmac" import {
     Hmac
 }
+from "std/subtle" import {
+    constantTimeEq
+}
 
 fn pow10(n: i64): i64 {
     var p: i64 = 1
@@ -77,5 +80,30 @@ impl Totp {
     }
     fn generate(secret: &string, unixTime: i64, step: i64, digits: i64): string {
         return totp(secret, unixTime, step, digits)
+    }
+
+    // Check a user-supplied code against the codes valid at `unixTime`, accepting
+    // `window` steps either side (RFC 6238 §5.2 — one step of tolerance is usual,
+    // for the user who typed the code as it rolled over).
+    //
+    // Exists so that nobody writes `Totp.generate(...) == code`: string equality
+    // stops at the first wrong digit, which turns a 6-digit code into six
+    // independent 10-way guesses. This comparison is constant-time.
+    fn verify(secret: &string, code: &string, unixTime: i64, step: i64, digits: i64, window: i64): bool {
+        if code.len != digits {
+            return false
+        }
+        var ok = false
+        let counter = unixTime / step
+        var offset = -window
+        while offset <= window {
+            // No early exit: checking every candidate keeps the running time
+            // independent of *which* step matched.
+            if constantTimeEq(code, hotp(secret, counter + offset, digits)) {
+                ok = true
+            }
+            offset = offset + 1
+        }
+        return ok
     }
 }

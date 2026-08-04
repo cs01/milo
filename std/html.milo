@@ -1,0 +1,257 @@
+// std/html — escaping untrusted text for HTML output.
+//
+// Escaping is context-sensitive: the same bytes are inert in one place in a
+// document and executable a few characters away. Each function here names the
+// one context it is correct for, and none of them is a sanitizer. Nothing in
+// this module parses markup, strips tags, or makes attacker-supplied *HTML*
+// safe to insert as HTML — that needs a parser and an element/attribute
+// allowlist, which this module deliberately is not. These functions take text
+// that should appear literally and make it appear literally.
+//
+// Where the output is safe:
+//
+//   Html.escapeText  element text, RCDATA (<title>, <textarea>), and any
+//                    attribute value that you quoted with " or '
+//   Html.escapeAttr  an attribute value under any quoting, including none
+//
+// Where it is NOT safe — escaping is the wrong tool and there is no function
+// here that makes these safe:
+//
+//   inside <script> or <style>       HTML entities are not decoded there, so
+//                                    escaping changes nothing an attacker cares
+//                                    about, and "</script>" still ends the
+//                                    element. Emit data as JSON in a
+//                                    <script type="application/json"> block or
+//                                    a data- attribute and read it from JS.
+//   as an href/src/action value      escaping does not stop "javascript:".
+//                                    Check the scheme with Html.isSafeUrl.
+//   as a tag or attribute *name*     only a fixed set you control belongs there.
+//   inside an HTML comment           "--" and ">" have meaning escaping misses.
+//   as CSS, or as a URL component    use the CSS/URL encoder for those.
+//
+// Html.unescape is a decoder for display, not a security function; read its
+// contract before using it on anything that will be re-emitted.
+
+from "std/unicode" import {
+    encodeCodepoint
+}
+
+// Html — HTML escaping and URL-scheme checking.
+pub struct Html {
+}
+
+impl Html {
+    // Escape `s` for HTML element text: `&`, `<`, `>`, `"` and `'` become
+    // character references, every other byte is copied unchanged (so UTF-8
+    // passes through intact).
+    //
+    // Safe in element text, in RCDATA elements such as <title> and <textarea>,
+    // and in an attribute value **you wrote quotes around**. Quotes are escaped
+    // even though element text does not need it, so that the common mistake of
+    // reaching for the text escaper inside a quoted attribute is still safe.
+    //
+    // Not safe inside <script>/<style>, in an unquoted attribute value (use
+    // escapeAttr), or as a URL (see isSafeUrl). See the module comment.
+    fn escapeText(s: &string): string {
+        return escapeInto(s, false)
+    }
+
+    // Escape `s` for an HTML attribute value under any quoting — double, single,
+    // or none. Everything escapeText escapes, plus the bytes that can terminate
+    // or extend an *unquoted* attribute value: space, tab, LF, FF, CR, `=` and
+    // backtick (old IE treats a backtick as an attribute delimiter).
+    //
+    // The cost is noise: `title=` with a space in the value comes out as
+    // `hello&#32;world`. That is the same string to a browser, and the reason to
+    // pay it is that correctness here must not depend on the caller having
+    // remembered quotes at a call site the escaper cannot see. If your template
+    // always quotes its attributes, escapeText produces cleaner output and is
+    // equally safe.
+    //
+    // Still not safe as an href/src/action value — see isSafeUrl — nor as an
+    // event-handler attribute (onclick=…), whose value is script, not text.
+    fn escapeAttr(s: &string): string {
+        return escapeInto(s, true)
+    }
+
+    // Decode the five predefined HTML entities (&amp; &lt; &gt; &quot; &apos;)
+    // and numeric character references (&#39; and &#x27;), leaving every other
+    // `&`-sequence exactly as it was.
+    //
+    // This is a *display* decoder, not a full HTML5 named-entity table: `&nbsp;`
+    // comes back as the literal seven characters `&nbsp;`. Numeric references to
+    // surrogates, out-of-range code points, or U+0000 decode to U+FFFD rather
+    // than producing bytes that would not decode back as UTF-8 — or, for
+    // `&#0;`, a NUL that would truncate the string wherever it is next written.
+    //
+    // Do not decode and then re-emit into HTML without escaping again, and never
+    // decode before a security check — running a scheme or content check on
+    // unescaped text and then emitting the *escaped* original is the classic way
+    // to get a check and a renderer to disagree.
+    fn unescape(s: &string): string {
+        var out = ""
+        var i: i64 = 0
+        while i < s.len {
+            if s[i] != '&' {
+                out.push(s[i])
+                i = i + 1
+                continue
+            }
+            let consumed = decodeEntity(s, i, out)
+            if consumed == 0 {
+                out.push(s[i])
+                i = i + 1
+            } else {
+                i = i + consumed
+            }
+        }
+        return out
+    }
+
+    // Whether `url` is safe to place in an href/src/action attribute: true for a
+    // relative URL, or an absolute one whose scheme is http, https, mailto or
+    // tel. False for `javascript:`, `data:`, `vbscript:`, `file:` and anything
+    // else — including any input containing a C0 control byte or DEL, because
+    // browsers strip some of those before resolving the scheme and
+    // "java\tscript:x" navigates exactly where "javascript:x" does.
+    //
+    // A scheme allowlist is all this is. It says nothing about *where* the URL
+    // points, so it is not an open-redirect check and not an SSRF check; for
+    // those, compare the parsed host against your own allowlist. A true answer
+    // also does not remove the need to escape: run the value through escapeAttr
+    // on the way into the document.
+    fn isSafeUrl(url: &string): bool {
+        for i in 0..url.len {
+            if url[i] < 32 || url[i] == 127 {
+                return false
+            }
+        }
+        var i: i64 = 0
+        while i < url.len && url[i] == ' ' {
+            i = i + 1
+        }
+        var scheme = ""
+        while i < url.len {
+            let b = url[i]
+            if b == ':' {
+                return scheme == "http" || scheme == "https"
+                || scheme == "mailto" || scheme == "tel"
+            }
+            // A delimiter before any colon means the colon, if there is one at
+            // all, belongs to a path or query segment: the URL is relative.
+            if b == '/' || b == '?' || b == '#' || b == '\\' {
+                return true
+            }
+            scheme.push(lowerAscii(b))
+            i = i + 1
+        }
+        return true
+    }
+}
+
+fn lowerAscii(b: u8): u8 {
+    if b >= 'A' && b <= 'Z' {
+        return b + 32
+    }
+    return b
+}
+
+fn escapeInto(s: &string, forAttr: bool): string {
+    var out = ""
+    for i in 0..s.len {
+        let b = s[i]
+        if b == '&' {
+            out.pushStr("&amp;")
+        } else if b == '<' {
+            out.pushStr("&lt;")
+        } else if b == '>' {
+            out.pushStr("&gt;")
+        } else if b == '"' {
+            out.pushStr("&quot;")
+        } else if b == '\'' {
+            // &apos; is HTML5-only; the numeric form works in every parser.
+            out.pushStr("&#39;")
+        } else if forAttr && (b == ' ' || b == 9 || b == 10 || b == 12 || b == 13 || b == '=' || b == '`') {
+            out.pushStr("&#")
+            out.pushStr((b as i64).toString())
+            out.push(';')
+        } else {
+            out.push(b)
+        }
+    }
+    return out
+}
+
+// Decode the entity starting at `s[at]` (which is '&') into `out`, returning how
+// many input bytes it consumed, or 0 if this is not an entity we decode — in
+// which case `out` is untouched and the caller copies the '&' literally.
+fn decodeEntity(s: &string, at: i64, out: &mut string): i64 {
+    if s[at + 1..s.len].startsWith("amp;") {
+        out.push('&')
+        return 5
+    }
+    if s[at + 1..s.len].startsWith("lt;") {
+        out.push('<')
+        return 4
+    }
+    if s[at + 1..s.len].startsWith("gt;") {
+        out.push('>')
+        return 4
+    }
+    if s[at + 1..s.len].startsWith("quot;") {
+        out.push('"')
+        return 6
+    }
+    if s[at + 1..s.len].startsWith("apos;") {
+        out.push('\'')
+        return 6
+    }
+    if at + 2 >= s.len || s[at + 1] != '#' {
+        return 0
+    }
+    var i = at + 2
+    var radix: i64 = 10
+    if s[i] == 'x' || s[i] == 'X' {
+        radix = 16
+        i = i + 1
+    }
+    let digitsStart = i
+    var value: i64 = 0
+    while i < s.len {
+        let d = hexValue(s[i])
+        if d < 0 || d >= radix {
+            break
+        }
+        // Saturate rather than trap: the reference is attacker-controlled text
+        // and anything past the Unicode range is invalid regardless of by how
+        // much, so there is nothing to learn from letting it overflow.
+        if value <= 1114111 {
+            value = value * radix + d
+        }
+        i = i + 1
+    }
+    if i == digitsStart || i >= s.len || s[i] != ';' {
+        return 0
+    }
+    // U+0000 joins the out-of-range cases as U+FFFD, which is what HTML5 does
+    // with `&#0;` — and it keeps a decoded NUL out of a string that later gets
+    // written somewhere that treats NUL as a terminator.
+    if value > 1114111 || value == 0 {
+        value = 65533
+    }
+    encodeCodepoint(out, value as i32)
+    return i + 1 - at
+}
+
+fn hexValue(b: u8): i64 {
+    if b >= '0' && b <= '9' {
+        return (b - 48) as i64
+    }
+    if b >= 'a' && b <= 'f' {
+        return (b - 97) as i64 + 10
+    }
+    if b >= 'A' && b <= 'F' {
+        return (b - 65) as i64 + 10
+    }
+    return -1
+}

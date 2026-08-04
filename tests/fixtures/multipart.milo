@@ -1,0 +1,213 @@
+from "std/multipart" import {
+    Multipart, Part, Limits, MultipartError
+}
+
+let CT = "multipart/form-data; boundary=----WebKitFormBoundary7MA4"
+
+fn describe(p: &Part): string {
+    var s = p.name.clone()
+    match p.filename {
+        Option.Some(f) => {
+            s = s + " file=[" + f + "]"
+        }
+        Option.None => {
+            s = s + " field"
+        }
+    }
+    if p.contentType.len > 0 {
+        s = s + " ct=" + p.contentType
+    }
+    return s + " body=[" + p.body.replace("\r", "\\r").replace("\n", "\\n") + "]"
+}
+
+fn show(body: &string, contentType: &string): void {
+    showWith(body, contentType, Limits.new())
+}
+
+fn showWith(body: &string, contentType: &string, limits: Limits): void {
+    match Multipart.parseWithLimits(body, contentType, limits) {
+        Result.Ok(parts) => {
+            var s = parts.len.toString() + ":"
+            for i in 0..parts.len {
+                s = s + " {" + describe(parts[i]) + "}"
+            }
+            print(s)
+        }
+        Result.Err(e) => {
+            print("err: " + e.message())
+        }
+    }
+}
+
+fn showSafeName(filename: string): void {
+    let body = "--B\r\nContent-Disposition: form-data; name=\"f\"; filename=\"" + filename + "\"\r\n\r\nx\r\n--B--\r\n"
+    match Multipart.parseWithLimits(body, "multipart/form-data; boundary=B", Limits.new()) {
+        Result.Ok(parts) => {
+            match parts[0].safeFilename() {
+                Option.Some(n) => {
+                    print("safe: " + n)
+                }
+                Option.None => {
+                    print("safe: (rejected)")
+                }
+            }
+        }
+        Result.Err(e) => {
+            print("err: " + e.message())
+        }
+    }
+}
+
+fn main(): void {
+    // ── the ordinary case ──
+    let ok = "preamble junk\r\n"
+    + "------WebKitFormBoundary7MA4\r\n"
+    + "Content-Disposition: form-data; name=\"title\"\r\n"
+    + "\r\n"
+    + "Hello\r\n"
+    + "------WebKitFormBoundary7MA4\r\n"
+    + "Content-Disposition: form-data; name=\"upload\"; filename=\"notes.txt\"\r\n"
+    + "Content-Type: text/plain\r\n"
+    + "\r\n"
+    + "line one\r\nline two\r\n"
+    + "------WebKitFormBoundary7MA4--\r\n"
+    + "epilogue junk"
+    show(ok, CT)
+    // @expect: 2: {title field body=[Hello]} {upload file=[notes.txt] ct=text/plain body=[line one\r\nline two]}
+
+    // duplicate names are kept; field() answers the first
+    let dup = "--B\r\nContent-Disposition: form-data; name=\"c\"\r\n\r\none\r\n"
+    + "--B\r\nContent-Disposition: form-data; name=\"c\"\r\n\r\ntwo\r\n--B--\r\n"
+    show(dup, "multipart/form-data; boundary=B")
+    // @expect: 2: {c field body=[one]} {c field body=[two]}
+    match Multipart.parse(dup, "multipart/form-data; boundary=B") {
+        Result.Ok(parts) => {
+            match Multipart.field(parts, "c") {
+                Option.Some(v) => {
+                    print("field c = " + v)
+                }
+                Option.None => {
+                    print("field c missing")
+                }
+            }
+        }
+        Result.Err(e) => {
+            print("err: " + e.message())
+        }
+    }
+    // @expect: field c = one
+
+    // empty part body, and a body that itself contains the boundary text mid-line
+    show("--B\r\nContent-Disposition: form-data; name=\"e\"\r\n\r\n\r\n--B--\r\n", "multipart/form-data; boundary=B")
+    // @expect: 1: {e field body=[]}
+    show("--B\r\nContent-Disposition: form-data; name=\"e\"\r\n\r\nsee --B here\r\n--B--\r\n", "multipart/form-data; boundary=B")
+    // @expect: 1: {e field body=[see --B here]}
+    // a line that STARTS with the boundary but runs past it is data, not a
+    // delimiter — boundary "B" must not match inside "--BB"
+    show("--B\r\nContent-Disposition: form-data; name=\"e\"\r\n\r\nx\r\n--BB\r\ny\r\n--B--\r\n", "multipart/form-data; boundary=B")
+    // @expect: 1: {e field body=[x\r\n--BB\r\ny]}
+    // ...including where the opening delimiter is looked for
+    show("--BB\r\n--B\r\nContent-Disposition: form-data; name=\"e\"\r\n\r\nz\r\n--B--\r\n", "multipart/form-data; boundary=B")
+    // @expect: 1: {e field body=[z]}
+
+    // bare-LF line endings (RFC wants CRLF; real clients and curl -F both stray)
+    show("--B\nContent-Disposition: form-data; name=\"n\"\n\nvalue\n--B--\n", "multipart/form-data; boundary=B")
+    // @expect: 1: {n field body=[value]}
+
+    // a quoted parameter value containing the parameter separator
+    show("--B\r\nContent-Disposition: form-data; name=\"f\"; filename=\"a;b=c.txt\"\r\n\r\nx\r\n--B--\r\n", "multipart/form-data; boundary=B")
+    // @expect: 1: {f file=[a;b=c.txt] body=[x]}
+
+    // ── content type problems ──
+    show(ok, "application/json")
+    // @expect: err: content type is not multipart
+    show(ok, "multipart/form-data")
+    // @expect: err: multipart content type has no boundary parameter
+    show(ok, "multipart/form-data; boundary=")
+    // @expect: err: multipart boundary is empty, too long, or has illegal bytes
+    show(ok, "multipart/form-data; boundary=\"has\tcontrol\"")
+    // @expect: err: multipart boundary is empty, too long, or has illegal bytes
+    show(ok, "multipart/form-data; boundary=nowhere-in-the-body")
+    // @expect: err: multipart body has no opening boundary delimiter
+
+    // ── hostile bodies ──
+    // no closing delimiter at all
+    show("--B\r\nContent-Disposition: form-data; name=\"a\"\r\n\r\nhello", "multipart/form-data; boundary=B")
+    // @expect: err: unterminated multipart part starting at byte 5
+    // header block never ends
+    show("--B\r\nContent-Disposition: form-data; name=\"a\"\r\n", "multipart/form-data; boundary=B")
+    // @expect: err: unterminated multipart part starting at byte 5
+    // truncated right after the opening delimiter
+    show("--B", "multipart/form-data; boundary=B")
+    // @expect: err: unterminated multipart part starting at byte 3
+    // a part with no headers at all
+    show("--B\r\n\r\nbody\r\n--B--\r\n", "multipart/form-data; boundary=B")
+    // @expect: err: part at byte 5 is not form-data
+    // a header line with no colon
+    show("--B\r\nContent-Disposition form-data\r\n\r\nx\r\n--B--\r\n", "multipart/form-data; boundary=B")
+    // @expect: err: malformed part header at byte 5
+    // form-data with no name
+    show("--B\r\nContent-Disposition: form-data; filename=\"x\"\r\n\r\nx\r\n--B--\r\n", "multipart/form-data; boundary=B")
+    // @expect: err: part at byte 5 has no name parameter
+    // a disposition that is not form-data
+    show("--B\r\nContent-Disposition: attachment; name=\"a\"\r\n\r\nx\r\n--B--\r\n", "multipart/form-data; boundary=B")
+    // @expect: err: part at byte 5 is not form-data
+
+    // ── limits ──
+    var fewParts = Limits.new()
+    fewParts.maxParts = 1
+    showWith(dup, "multipart/form-data; boundary=B", fewParts)
+    // @expect: err: more parts than the limit of 1
+    var smallBody = Limits.new()
+    smallBody.maxPartBytes = 2
+    showWith(dup, "multipart/form-data; boundary=B", smallBody)
+    // @expect: err: part body over the limit of 2 bytes
+    var smallHeaders = Limits.new()
+    smallHeaders.maxHeaderBytes = 8
+    showWith(dup, "multipart/form-data; boundary=B", smallHeaders)
+    // @expect: err: part headers over the limit of 8 bytes
+
+    // ── the filename is the client's, not yours ──
+    showSafeName("notes.txt")
+    // @expect: safe: notes.txt
+    showSafeName("../../etc/passwd")
+    // @expect: safe: passwd
+    showSafeName("....//....//etc/passwd")
+    // @expect: safe: passwd
+    showSafeName("/etc/shadow")
+    // @expect: safe: shadow
+    showSafeName("C:\\\\Windows\\\\System32\\\\evil.dll")
+    // @expect: safe: evil.dll
+    showSafeName("..")
+    // @expect: safe: (rejected)
+    showSafeName("subdir/..")
+    // @expect: safe: (rejected)
+    showSafeName(".")
+    // @expect: safe: (rejected)
+    showSafeName("")
+    // @expect: safe: (rejected)
+    showSafeName("trailing/")
+    // @expect: safe: (rejected)
+    showSafeName("evil.php.")
+    // @expect: safe: (rejected)
+    showSafeName("evil.php ")
+    // @expect: safe: (rejected)
+    showSafeName("CON")
+    // @expect: safe: (rejected)
+    showSafeName("lpt1.txt")
+    // @expect: safe: (rejected)
+    showSafeName("nul.jpg")
+    // @expect: safe: (rejected)
+    showSafeName("stream:$DATA")
+    // @expect: safe: (rejected)
+    showSafeName("wild*card?.txt")
+    // @expect: safe: (rejected)
+    // a leading dot is a hidden file, not a traversal — allowed
+    showSafeName(".bashrc")
+    // @expect: safe: .bashrc
+    // an empty <input type=file> still declares itself a file
+    show("--B\r\nContent-Disposition: form-data; name=\"f\"; filename=\"\"\r\n\r\n\r\n--B--\r\n", "multipart/form-data; boundary=B")
+    // @expect: 1: {f file=[] body=[]}
+    showSafeName("")
+    // @expect: safe: (rejected)
+}

@@ -20,6 +20,9 @@ Most utilities are **namespaced**: call a static on the namespace (`Path.join`, 
 |--------|-----------------|
 | [`std/net`](net) | TCP, DNS, `fetch` with TLS |
 | [`std/http`](http) | HTTP server with Hono-style router, context, middleware |
+| [`std/html`](html) | HTML escaping — `Html.escapeText`, `Html.escapeAttr`, `Html.isSafeUrl` |
+| [`std/mime`](mime) | Media types by extension — `Mime.fromPath`, `Mime.contentType` |
+| [`std/multipart`](multipart) | `multipart/form-data` parsing — `Multipart.parse`, `Part.safeFilename` |
 
 ## Data
 
@@ -77,7 +80,7 @@ Most utilities are **namespaced**: call a static on the namespace (`Path.join`, 
 |--------|-----------------|
 | [`std/string`](string) | String **methods** — `s.contains`, `s.split`, `s.replace`, `s.trim`, case conversion |
 | [`std/fmt`](fmt) | Template formatting (`fmt1`–`fmt4`), `padLeft`/`padRight`, `join` |
-| [`std/strconv`](strconv) | `parseInt`, `parseFloat`, radix conversions, `formatFloat` |
+| [`std/strconv`](strconv) | `parseInt`, `parseFloat`, `parseBool`, radix conversions, `formatFloat`, `quoteString`/`unquoteString` |
 | [`std/unicode`](unicode) | Character classification — `asciiIsDigit`, `asciiIsAlpha`, `asciiToLower` |
 
 ## Math & Random

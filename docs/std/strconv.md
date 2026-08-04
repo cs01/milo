@@ -34,6 +34,20 @@ pub fn i64ToOct(n: i64): string
 
 Octal text for `n`, no prefix.
 
+### `parseBool`
+
+```milo
+pub fn parseBool(s: &string): Option<bool>
+```
+
+Parse a boolean, or None if `s` is not one of the accepted spellings.
+
+Accepted, ASCII-case-insensitively and with no surrounding whitespace:
+"true", "t", "1" for true and "false", "f", "0" for false. Nothing else —
+"yes", "on", "" and " true" are all None. Trim before calling if your input
+can carry whitespace; a parser that silently trims cannot tell you that the
+field it read had a stray space in a config file.
+
 ### `parseFloat`
 
 ```milo
@@ -65,3 +79,38 @@ pub fn parseIntRadix(s: string, base: i32): Option<i64>
 Parse an integer in `base` (2, 8, 10, or 16), or None if invalid. Every digit
 must be legal in `base` and the whole string must be consumed; strtoll on its
 own stops at the first bad byte and reports that as a successful 0.
+
+### `quoteString`
+
+```milo
+pub fn quoteString(s: &string): string
+```
+
+A double-quoted string literal whose escapes are exactly Milo's: `\\`, `\"`,
+`\n`, `\r`, `\t`, `\0`, and `\xHH` for every other byte below 0x20 or equal to
+0x7F. The result always parses back to `s` through unquoteString.
+
+Bytes at or above 0x80 are copied through unchanged, so valid UTF-8 stays
+readable rather than becoming a wall of hex. That means the output is only
+safe to embed in a context that is byte-transparent — it is a *literal*, not
+an escaping function for a document format. HTML, shell and SQL each need
+their own escaper; this one is for source text, log lines and REPL echo.
+
+### `unquoteString`
+
+```milo
+pub fn unquoteString(s: &string): Option<string>
+```
+
+The inverse of quoteString: the bytes of a double-quoted literal, or None if
+`s` is not one.
+
+Strict on purpose. `s` must start and end with `"`, contain no unescaped `"`
+and no raw byte below 0x20, and use only the escapes quoteString emits — an
+unknown escape such as `\q` is None, not a literal `q`. (The compiler's own
+lexer is lenient there; a decoder over untrusted text should not be, because
+the lenient reading silently deletes a backslash the author meant to keep.)
+
+`\xHH` yields that raw byte, so a hand-written literal can decode to bytes
+that are not valid UTF-8. quoteString never emits such an escape, so a
+round trip cannot produce one.

@@ -1,0 +1,591 @@
+// std/multipart — parsing `multipart/form-data` request bodies (RFC 7578).
+//
+// This is the format a browser posts an <input type="file"> with, which means
+// every byte of it is attacker-controlled: the boundary, the number of parts,
+// each part's headers, the declared content type, and the filename. The parser
+// is written on that assumption.
+//
+//   * Nothing here is unbounded by the *input*. `Limits` caps the part count,
+//     the per-part body size and the per-part header block, and
+//     `Multipart.parse` applies defaults rather than making the caller remember
+//     to. Exceeding a limit is an error naming the limit, never a
+//     truncated-but-plausible parse. The parser's own allocation is at most
+//     about one more copy of the body you hand it, so the real ceiling is how
+//     much you read off the socket — see below.
+//   * `Part.filename` is the raw string the client sent, and the type does not
+//     pretend otherwise. It can be "../../etc/passwd", ".", a name with a NUL
+//     or a newline in it, or 4 KB long. `Part.safeFilename` is the only thing
+//     here you may join onto a path, and it answers `None` when nothing safe
+//     is left — at which point generate your own name.
+//   * `Part.contentType` is a claim by the client, not a measurement. Do not
+//     decide how to handle a file from it, and do not echo it back as the
+//     `Content-Type` of a download.
+//
+// The whole body must already be in memory; this is not a streaming parser, so
+// the caller is still the one that has to bound how much it reads off the
+// socket before calling in.
+//
+// One deliberate deviation from RFC 7578, which is worth knowing if you ever
+// *compose* a multipart body rather than only parsing one: a bare LF ends a
+// delimiter line here, not only CRLF, because hand-rolled clients send LF and
+// rejecting them produces an error a server author cannot act on. The RFC puts
+// the burden of choosing a boundary that does not appear in the encapsulated
+// content on the composer, and this makes that burden slightly heavier — a part
+// body containing a line that begins "--<boundary>" splits the part whether the
+// line ended CRLF or LF. Generate boundaries with `Uuid.v4` or `Random`, never
+// from anything the content could predict.
+
+// Part — one form field or uploaded file from a multipart body.
+pub struct Part {
+    // The form field name, from the `name` parameter of Content-Disposition.
+    // Required: a part without one is a parse error, not a nameless part.
+    name: string,
+    // The client-supplied filename, present exactly when the client sent a
+    // `filename` parameter. **Untrusted and unvalidated** — see safeFilename.
+    filename: Option<string>,
+    // The part's declared Content-Type, or "" when it sent none. A claim, not
+    // a measurement.
+    contentType: string,
+    // The part's bytes, with the terminating CRLF removed. Binary-safe.
+    body: string,
+}
+
+impl Part {
+    // Whether the client sent this part as a file upload (it carried a
+    // `filename` parameter). An empty filename still counts as a file — that
+    // is what browsers send for an empty <input type="file">.
+    fn isFile(self: &Self): bool {
+        match self.filename {
+            Option.Some(_f) => {
+                return true
+            }
+            Option.None => {
+                return false
+            }
+        }
+    }
+
+    // The client's filename reduced to something safe to use as a single path
+    // component, or None when nothing safe is left.
+    //
+    // Rejects, rather than repairs: everything up to the last '/' or '\' is
+    // dropped (so "../../etc/passwd" and "C:\evil\x.txt" become "passwd" and
+    // "x.txt"), and the remainder must then be non-empty, at most 255 bytes,
+    // not "." or "..", free of C0 controls, DEL and the bytes Windows treats
+    // specially (`: * ? " < > |`), not end in a space or a dot (Windows strips
+    // those, which is how "evil.php." defeats an extension check), and not be a
+    // Windows reserved device name such as CON or LPT1 — those are devices on
+    // every drive and in every directory.
+    //
+    // What this is not: it does not make the *content* safe, does not stop a
+    // caller from overwriting an existing file of the same name, and does not
+    // constrain the extension. Join it onto a directory you chose, and prefer
+    // a name you generated over one an uploader picked.
+    fn safeFilename(self: &Self): Option<string> {
+        match self.filename {
+            Option.Some(raw) => {
+                return sanitizeUploadFilename(raw)
+            }
+            Option.None => {
+                return Option.None
+            }
+        }
+    }
+}
+
+// Limits — bounds the parser enforces against a hostile body.
+//
+// Construct with `Limits.new()` for the defaults and adjust the fields you care
+// about. All three are hard caps: crossing one aborts the parse with the
+// matching error rather than dropping data.
+pub struct Limits {
+    // Maximum number of parts. Default 256.
+    maxParts: i64,
+    // Maximum bytes in one part's body. Default 8 MiB.
+    maxPartBytes: i64,
+    // Maximum bytes in one part's header block. Default 16 KiB. A part is
+    // allowed very few headers; this exists so a body made entirely of header
+    // lines cannot make the parser walk megabytes per part.
+    maxHeaderBytes: i64,
+}
+
+impl Limits {
+    // The defaults: 256 parts, 8 MiB per part body, 16 KiB per part header
+    // block. Sized for an ordinary form post; raise maxPartBytes deliberately
+    // if you accept large uploads, and lower it if you do not.
+    fn new(): Limits {
+        return Limits {
+            maxParts: 256,
+            maxPartBytes: 8388608,
+            maxHeaderBytes: 16384,
+        }
+    }
+}
+
+// MultipartError — why a body did not parse. Every offset is a byte offset into
+// the body that was passed in, pointing at the construct that failed.
+pub enum MultipartError {
+    // The Content-Type was not multipart/*.
+    NotMultipart,
+    // The Content-Type had no `boundary` parameter.
+    MissingBoundary,
+    // The `boundary` parameter was empty, longer than 70 bytes, or contained a
+    // byte RFC 2046 does not allow in one.
+    InvalidBoundary,
+    // The body never contains the opening `--boundary` delimiter at all.
+    NoOpeningDelimiter,
+    // Input ran out mid-part: no closing delimiter, or a truncated header
+    // block. Payload is where the unterminated part began.
+    Unterminated(i64),
+    // A header line with no ':'. Payload is the line's offset.
+    MalformedHeader(i64),
+    // A part whose Content-Disposition is absent or is not `form-data`.
+    NotFormData(i64),
+    // A `form-data` part with no `name` parameter.
+    MissingName(i64),
+    // More parts than Limits.maxParts. Payload is that limit.
+    TooManyParts(i64),
+    // A part body over Limits.maxPartBytes. Payload is that limit.
+    PartTooLarge(i64),
+    // A part header block over Limits.maxHeaderBytes. Payload is that limit.
+    HeadersTooLarge(i64),
+}
+
+impl MultipartError {
+    fn message(self: &Self): string {
+        match self {
+            MultipartError.NotMultipart => {
+                return "content type is not multipart"
+            }
+            MultipartError.MissingBoundary => {
+                return "multipart content type has no boundary parameter"
+            }
+            MultipartError.InvalidBoundary => {
+                return "multipart boundary is empty, too long, or has illegal bytes"
+            }
+            MultipartError.NoOpeningDelimiter => {
+                return "multipart body has no opening boundary delimiter"
+            }
+            MultipartError.Unterminated(at) => {
+                return "unterminated multipart part starting at byte " + at.toString()
+            }
+            MultipartError.MalformedHeader(at) => {
+                return "malformed part header at byte " + at.toString()
+            }
+            MultipartError.NotFormData(at) => {
+                return "part at byte " + at.toString() + " is not form-data"
+            }
+            MultipartError.MissingName(at) => {
+                return "part at byte " + at.toString() + " has no name parameter"
+            }
+            MultipartError.TooManyParts(limit) => {
+                return "more parts than the limit of " + limit.toString()
+            }
+            MultipartError.PartTooLarge(limit) => {
+                return "part body over the limit of " + limit.toString() + " bytes"
+            }
+            MultipartError.HeadersTooLarge(limit) => {
+                return "part headers over the limit of " + limit.toString() + " bytes"
+            }
+        }
+    }
+}
+
+// Multipart — parsing a multipart/form-data body.
+pub struct Multipart {
+}
+
+impl Multipart {
+    // The `boundary` parameter of `contentType`, or None when it is absent or
+    // not a legal boundary.
+    //
+    // A probe: it deliberately does not distinguish "no boundary" from "illegal
+    // boundary", because a caller that only wants to know whether a request is
+    // parseable cannot act on the difference. `parse` reports them separately.
+    fn boundary(contentType: &string): Option<string> {
+        match multipartHeaderParam(contentType, "boundary") {
+            Option.Some(b) => {
+                if isLegalBoundary(b) {
+                    return Option.Some(b.clone())
+                }
+                return Option.None
+            }
+            Option.None => {
+                return Option.None
+            }
+        }
+    }
+
+    // Parse `body` as the multipart entity described by the `Content-Type`
+    // header value `contentType`, under `Limits.new()`.
+    //
+    // Parts come back in the order they appeared; duplicate field names are
+    // kept, because a form with several checkboxes of one name is normal. The
+    // preamble before the first delimiter and the epilogue after the closing
+    // one are discarded, as RFC 2046 requires.
+    fn parse(body: &string, contentType: &string): Result<Vec<Part>, MultipartError> {
+        return Multipart.parseWithLimits(body, contentType, Limits.new())
+    }
+
+    // Parse as `parse` does, under caller-chosen limits.
+    fn parseWithLimits(body: &string, contentType: &string, limits: &Limits): Result<Vec<Part>, MultipartError> {
+        if !startsWithAsciiIgnoreCase(contentType, "multipart/") {
+            return Result.Err(MultipartError.NotMultipart)
+        }
+        let bound = match multipartHeaderParam(contentType, "boundary") {
+            Option.Some(b) => b.clone(),
+            Option.None => {
+                return Result.Err(MultipartError.MissingBoundary)
+            }
+        }
+        if !isLegalBoundary(bound) {
+            return Result.Err(MultipartError.InvalidBoundary)
+        }
+        return parseMultipartBody(body, bound, limits)
+    }
+
+    // The body of the first part named `name`, or None if there is none.
+    //
+    // Returns an owned copy. File parts are included: this asks about the field
+    // name, not about whether the value came from a file input.
+    fn field(parts: &Vec<Part>, name: &string): Option<string> {
+        for i in 0..parts.len {
+            if parts[i].name == name {
+                return Option.Some(parts[i].body.clone())
+            }
+        }
+        return Option.None
+    }
+}
+
+fn parseMultipartBody(body: &string, boundary: &string, limits: &Limits): Result<Vec<Part>, MultipartError> {
+    let delim = "--" + boundary
+    let lineDelim = "\n" + delim
+    // The opening delimiter is at the very start or on its own line; a
+    // "--boundary" appearing mid-line is part of the preamble, not a delimiter.
+    var p: i64 = 0
+    if body.startsWith(delim) && endsDelimiterLine(body, delim.len) {
+        p = delim.len
+    } else {
+        match findDelimiterLine(body, lineDelim, 0) {
+            Option.Some(at) => {
+                p = at + 1 + delim.len
+            }
+            Option.None => {
+                return Result.Err(MultipartError.NoOpeningDelimiter)
+            }
+        }
+    }
+
+    var parts: Vec<Part> = Vec.new()
+    while true {
+        // "--boundary--" closes the entity; whatever follows is epilogue.
+        if p + 1 < body.len && body[p] == '-' && body[p + 1] == '-' {
+            return Result.Ok(parts)
+        }
+        // Transport padding is allowed between the delimiter and its CRLF.
+        while p < body.len && (body[p] == ' ' || body[p] == 9) {
+            p = p + 1
+        }
+        if p < body.len && body[p] == '\r' {
+            p = p + 1
+        }
+        if p >= body.len || body[p] != '\n' {
+            return Result.Err(MultipartError.Unterminated(p))
+        }
+        p = p + 1
+
+        let headerStart = p
+        var disposition = ""
+        var haveDisposition = false
+        var partType = ""
+        var headerBytes: i64 = 0
+        while true {
+            if p >= body.len {
+                return Result.Err(MultipartError.Unterminated(headerStart))
+            }
+            var e = p
+            while e < body.len && body[e] != '\n' {
+                e = e + 1
+            }
+            if e >= body.len {
+                return Result.Err(MultipartError.Unterminated(headerStart))
+            }
+            var lineEnd = e
+            if lineEnd > p && body[lineEnd - 1] == '\r' {
+                lineEnd = lineEnd - 1
+            }
+            headerBytes = headerBytes + (e + 1 - p)
+            if headerBytes > limits.maxHeaderBytes {
+                return Result.Err(MultipartError.HeadersTooLarge(limits.maxHeaderBytes))
+            }
+            let lineStart = p
+            p = e + 1
+            if lineEnd == lineStart {
+                break
+            }
+            let line = body[lineStart..lineEnd]
+            let colon = match line.indexOf(":") {
+                Option.Some(c) => c,
+                Option.None => {
+                    return Result.Err(MultipartError.MalformedHeader(lineStart))
+                }
+            }
+            let hname = line[0..colon]
+            let hvalue = line[colon + 1..line.len].trim()
+            if eqAsciiIgnoreCase(hname, "content-disposition") {
+                disposition = hvalue.clone()
+                haveDisposition = true
+            } else if eqAsciiIgnoreCase(hname, "content-type") {
+                partType = hvalue.clone()
+            }
+        }
+
+        let bodyStart = p
+        let sep = match findDelimiterLine(body, lineDelim, bodyStart) {
+            Option.Some(at) => at,
+            Option.None => {
+                return Result.Err(MultipartError.Unterminated(headerStart))
+            }
+        }
+        var bodyEnd = sep
+        if bodyEnd > bodyStart && body[bodyEnd - 1] == '\r' {
+            bodyEnd = bodyEnd - 1
+        }
+        if bodyEnd - bodyStart > limits.maxPartBytes {
+            return Result.Err(MultipartError.PartTooLarge(limits.maxPartBytes))
+        }
+
+        if !haveDisposition || !startsWithAsciiIgnoreCase(disposition, "form-data") {
+            return Result.Err(MultipartError.NotFormData(headerStart))
+        }
+        let fieldName = match multipartHeaderParam(disposition, "name") {
+            Option.Some(n) => n.clone(),
+            Option.None => {
+                return Result.Err(MultipartError.MissingName(headerStart))
+            }
+        }
+        if parts.len >= limits.maxParts {
+            return Result.Err(MultipartError.TooManyParts(limits.maxParts))
+        }
+        parts.push(Part {
+            name: fieldName,
+            filename: multipartHeaderParam(disposition, "filename"),
+            contentType: partType,
+            body: body[bodyStart..bodyEnd].clone(),
+        }
+        )
+        p = sep + 1 + delim.len
+    }
+    return Result.Ok(parts)
+}
+
+// Offset of the next real delimiter line at or after `from`, or None.
+//
+// `indexOfFrom` alone is not enough: with boundary "B", the text "--BB" contains
+// "--B", and treating that as a delimiter would abort the parse on a part body
+// that merely starts a line with a longer boundary-looking string. A match only
+// counts when what follows it ends the delimiter line.
+fn findDelimiterLine(body: &string, lineDelim: &string, from: i64): Option<i64> {
+    var at = from
+    while true {
+        match body.indexOfFrom(lineDelim, at) {
+            Option.Some(hit) => {
+                if endsDelimiterLine(body, hit + lineDelim.len) {
+                    return Option.Some(hit)
+                }
+                at = hit + 1
+            }
+            Option.None => {
+                return Option.None
+            }
+        }
+    }
+    return Option.None
+}
+
+// Whether offset `q`, just past a candidate delimiter, ends its line: the "--"
+// of a closing delimiter, optional transport padding then a line break, or the
+// end of input (which the caller reports as an unterminated part).
+fn endsDelimiterLine(body: &string, q: i64): bool {
+    if q >= body.len {
+        return true
+    }
+    if body[q] == '-' && q + 1 < body.len && body[q + 1] == '-' {
+        return true
+    }
+    var r = q
+    while r < body.len && (body[r] == ' ' || body[r] == 9) {
+        r = r + 1
+    }
+    if r >= body.len {
+        return true
+    }
+    return body[r] == '\n' || (body[r] == '\r' && r + 1 < body.len && body[r + 1] == '\n')
+}
+
+// Value of the `key` parameter in a header value such as
+// `form-data; name="x"; filename="a;b.txt"`, or None if it is absent.
+//
+// Walks the string once respecting quoted-strings, so a ';' or '=' inside
+// quotes does not end a parameter. RFC 5987's `key*=` extended form is a
+// different key and is deliberately not matched: decoding it is charset work,
+// and silently treating `filename*` as `filename` would let a client pick which
+// of two spellings a server reads.
+fn multipartHeaderParam(header: &string, key: &string): Option<string> {
+    var i: i64 = 0
+    while i < header.len && header[i] != ';' {
+        i = i + 1
+    }
+    while i < header.len {
+        i = i + 1
+        while i < header.len && (header[i] == ' ' || header[i] == 9) {
+            i = i + 1
+        }
+        let keyStart = i
+        while i < header.len && header[i] != '=' && header[i] != ';' {
+            i = i + 1
+        }
+        let thisKey = header[keyStart..i].trim()
+        var value = ""
+        if i < header.len && header[i] == '=' {
+            i = i + 1
+            while i < header.len && (header[i] == ' ' || header[i] == 9) {
+                i = i + 1
+            }
+            if i < header.len && header[i] == '"' {
+                i = i + 1
+                while i < header.len && header[i] != '"' {
+                    if header[i] == '\\' && i + 1 < header.len {
+                        i = i + 1
+                    }
+                    value.push(header[i])
+                    i = i + 1
+                }
+                if i < header.len {
+                    i = i + 1
+                }
+                while i < header.len && header[i] != ';' {
+                    i = i + 1
+                }
+            } else {
+                let valStart = i
+                while i < header.len && header[i] != ';' {
+                    i = i + 1
+                }
+                value = header[valStart..i].trim().clone()
+            }
+        }
+        if eqAsciiIgnoreCase(thisKey, key) {
+            return Option.Some(value)
+        }
+    }
+    return Option.None
+}
+
+// RFC 2046 bchars: 1..70 bytes, and a boundary may not end in a space.
+fn isLegalBoundary(b: &string): bool {
+    if b.len == 0 || b.len > 70 {
+        return false
+    }
+    if b[b.len - 1] == ' ' {
+        return false
+    }
+    for i in 0..b.len {
+        let c = b[i]
+        let ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+        || (c >= '0' && c <= '9')
+        || c == '\'' || c == '(' || c == ')' || c == '+' || c == '_'
+        || c == ',' || c == '-' || c == '.' || c == '/' || c == ':'
+        || c == '=' || c == '?' || c == ' '
+        if !ok {
+            return false
+        }
+    }
+    return true
+}
+
+fn sanitizeUploadFilename(raw: &string): Option<string> {
+    var start: i64 = 0
+    for i in 0..raw.len {
+        if raw[i] == '/' || raw[i] == '\\' {
+            start = i + 1
+        }
+    }
+    let name = raw[start..raw.len]
+    if name.len == 0 || name.len > 255 {
+        return Option.None
+    }
+    if name == "." || name == ".." {
+        return Option.None
+    }
+    // Windows silently strips these, so "evil.php." would be stored as
+    // "evil.php" after any extension check had already passed.
+    if name[name.len - 1] == '.' || name[name.len - 1] == ' ' {
+        return Option.None
+    }
+    for i in 0..name.len {
+        let c = name[i]
+        if c < 32 || c == 127 {
+            return Option.None
+        }
+        if c == ':' || c == '*' || c == '?' || c == '"' || c == '<' || c == '>' || c == '|' {
+            return Option.None
+        }
+    }
+    var stem = ""
+    var i: i64 = 0
+    while i < name.len && name[i] != '.' {
+        stem.push(name[i])
+        i = i + 1
+    }
+    if isReservedDeviceName(stem) {
+        return Option.None
+    }
+    return Option.Some(name.clone())
+}
+
+// DOS device names still resolve in every directory on Windows, so a file named
+// "CON" or "LPT1.txt" opens the device rather than a file.
+fn isReservedDeviceName(stem: &string): bool {
+    if eqAsciiIgnoreCase(stem, "con") || eqAsciiIgnoreCase(stem, "prn") || eqAsciiIgnoreCase(stem, "aux")
+    || eqAsciiIgnoreCase(stem, "nul") {
+        return true
+    }
+    if stem.len == 4 && (stem[3] >= '1' && stem[3] <= '9') {
+        let prefix = stem[0..3]
+        return eqAsciiIgnoreCase(prefix, "com") || eqAsciiIgnoreCase(prefix, "lpt")
+    }
+    return false
+}
+
+fn eqAsciiIgnoreCase(a: &string, b: &string): bool {
+    if a.len != b.len {
+        return false
+    }
+    for i in 0..a.len {
+        if toLowerAsciiByte(a[i]) != toLowerAsciiByte(b[i]) {
+            return false
+        }
+    }
+    return true
+}
+
+fn startsWithAsciiIgnoreCase(s: &string, prefix: &string): bool {
+    if s.len < prefix.len {
+        return false
+    }
+    for i in 0..prefix.len {
+        if toLowerAsciiByte(s[i]) != toLowerAsciiByte(prefix[i]) {
+            return false
+        }
+    }
+    return true
+}
+
+fn toLowerAsciiByte(b: u8): u8 {
+    if b >= 'A' && b <= 'Z' {
+        return b + 32
+    }
+    return b
+}

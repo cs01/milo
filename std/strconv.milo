@@ -58,6 +58,159 @@ pub fn parseFloat(s: string): Option<f64> {
     return s.parseF64()
 }
 
+// Parse a boolean, or None if `s` is not one of the accepted spellings.
+//
+// Accepted, ASCII-case-insensitively and with no surrounding whitespace:
+// "true", "t", "1" for true and "false", "f", "0" for false. Nothing else —
+// "yes", "on", "" and " true" are all None. Trim before calling if your input
+// can carry whitespace; a parser that silently trims cannot tell you that the
+// field it read had a stray space in a config file.
+pub fn parseBool(s: &string): Option<bool> {
+    if eqAsciiFold(s, "true") || eqAsciiFold(s, "t") || s == "1" {
+        return Option.Some(true)
+    }
+    if eqAsciiFold(s, "false") || eqAsciiFold(s, "f") || s == "0" {
+        return Option.Some(false)
+    }
+    return Option.None
+}
+
+fn eqAsciiFold(a: &string, b: &string): bool {
+    if a.len != b.len {
+        return false
+    }
+    for i in 0..a.len {
+        var ca = a[i]
+        if ca >= 'A' && ca <= 'Z' {
+            ca = ca + 32
+        }
+        if ca != b[i] {
+            return false
+        }
+    }
+    return true
+}
+
+// A double-quoted string literal whose escapes are exactly Milo's: `\\`, `\"`,
+// `\n`, `\r`, `\t`, `\0`, and `\xHH` for every other byte below 0x20 or equal to
+// 0x7F. The result always parses back to `s` through unquoteString.
+//
+// Bytes at or above 0x80 are copied through unchanged, so valid UTF-8 stays
+// readable rather than becoming a wall of hex. That means the output is only
+// safe to embed in a context that is byte-transparent — it is a *literal*, not
+// an escaping function for a document format. HTML, shell and SQL each need
+// their own escaper; this one is for source text, log lines and REPL echo.
+pub fn quoteString(s: &string): string {
+    var out = "\""
+    for i in 0..s.len {
+        let b = s[i]
+        if b == '\\' {
+            out.pushStr("\\\\")
+        } else if b == '"' {
+            out.pushStr("\\\"")
+        } else if b == 10 {
+            out.pushStr("\\n")
+        } else if b == 13 {
+            out.pushStr("\\r")
+        } else if b == 9 {
+            out.pushStr("\\t")
+        } else if b == 0 {
+            out.pushStr("\\0")
+        } else if b < 32 || b == 127 {
+            out.pushStr("\\x")
+            out.push(lowerHexDigit(b >> 4))
+            out.push(lowerHexDigit(b & 15))
+        } else {
+            out.push(b)
+        }
+    }
+    out.push('"')
+    return out
+}
+
+// The inverse of quoteString: the bytes of a double-quoted literal, or None if
+// `s` is not one.
+//
+// Strict on purpose. `s` must start and end with `"`, contain no unescaped `"`
+// and no raw byte below 0x20, and use only the escapes quoteString emits — an
+// unknown escape such as `\q` is None, not a literal `q`. (The compiler's own
+// lexer is lenient there; a decoder over untrusted text should not be, because
+// the lenient reading silently deletes a backslash the author meant to keep.)
+//
+// `\xHH` yields that raw byte, so a hand-written literal can decode to bytes
+// that are not valid UTF-8. quoteString never emits such an escape, so a
+// round trip cannot produce one.
+pub fn unquoteString(s: &string): Option<string> {
+    if s.len < 2 || s[0] != '"' || s[s.len - 1] != '"' {
+        return Option.None
+    }
+    var out = ""
+    var i: i64 = 1
+    let end = s.len - 1
+    while i < end {
+        let b = s[i]
+        if b < 32 || b == '"' {
+            return Option.None
+        }
+        if b != '\\' {
+            out.push(b)
+            i = i + 1
+            continue
+        }
+        if i + 1 >= end {
+            return Option.None
+        }
+        let esc = s[i + 1]
+        if esc == 'n' {
+            out.push(10)
+        } else if esc == 'r' {
+            out.push(13)
+        } else if esc == 't' {
+            out.push(9)
+        } else if esc == '0' {
+            out.push(0)
+        } else if esc == '\\' || esc == '"' || esc == '\'' {
+            out.push(esc)
+        } else if esc == 'x' {
+            if i + 3 >= end {
+                return Option.None
+            }
+            let hi = hexDigitValue(s[i + 2])
+            let lo = hexDigitValue(s[i + 3])
+            if hi < 0 || lo < 0 {
+                return Option.None
+            }
+            out.push((hi * 16 + lo) as u8)
+            i = i + 4
+            continue
+        } else {
+            return Option.None
+        }
+        i = i + 2
+    }
+    return Option.Some(out)
+}
+
+fn lowerHexDigit(v: u8): u8 {
+    if v < 10 {
+        return v + 48
+    }
+    return v - 10 + 97
+}
+
+fn hexDigitValue(b: u8): i64 {
+    if b >= '0' && b <= '9' {
+        return (b - 48) as i64
+    }
+    if b >= 'a' && b <= 'f' {
+        return (b - 97) as i64 + 10
+    }
+    if b >= 'A' && b <= 'F' {
+        return (b - 65) as i64 + 10
+    }
+    return -1
+}
+
 // Convert i64 to hexadecimal string (lowercase).
 
 // Lowercase hexadecimal text for `n`, no "0x" prefix.

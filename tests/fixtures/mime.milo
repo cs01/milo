@@ -1,0 +1,67 @@
+from "std/mime" import {
+    Mime
+}
+
+fn show(label: string, v: Option<string>): void {
+    match v {
+        Option.Some(t) => {
+            print(label + " -> " + t)
+        }
+        Option.None => {
+            print(label + " -> (none)")
+        }
+    }
+}
+
+fn main(): void {
+    show("html", Mime.fromExtension("html"))
+    // @expect: html -> text/html
+    show(".HTML", Mime.fromExtension(".HTML"))
+    // @expect: .HTML -> text/html
+    show("PnG", Mime.fromExtension("PnG"))
+    // @expect: PnG -> image/png
+    show("nope", Mime.fromExtension("nope"))
+    // @expect: nope -> (none)
+    show("empty", Mime.fromExtension(""))
+    // @expect: empty -> (none)
+    show("dot", Mime.fromExtension("."))
+    // @expect: dot -> (none)
+
+    show("/a/b/index.html", Mime.fromPath("/a/b/index.html"))
+    // @expect: /a/b/index.html -> text/html
+    show("app.min.js", Mime.fromPath("app.min.js"))
+    // @expect: app.min.js -> text/javascript
+    // a dot in a parent directory is not the file's extension
+    show("/etc/conf.d/app", Mime.fromPath("/etc/conf.d/app"))
+    // @expect: /etc/conf.d/app -> (none)
+    // a leading dot marks a hidden file, it is not an extension
+    show("/home/u/.htaccess", Mime.fromPath("/home/u/.htaccess"))
+    // @expect: /home/u/.htaccess -> (none)
+    show("trailing.", Mime.fromPath("trailing."))
+    // @expect: trailing. -> (none)
+    show("noext", Mime.fromPath("noext"))
+    // @expect: noext -> (none)
+
+    show("ct html", Mime.contentType("/index.html"))
+    // @expect: ct html -> text/html; charset=utf-8
+    show("ct json", Mime.contentType("data.json"))
+    // @expect: ct json -> application/json; charset=utf-8
+    show("ct svg", Mime.contentType("logo.svg"))
+    // @expect: ct svg -> image/svg+xml; charset=utf-8
+    show("ct png", Mime.contentType("logo.png"))
+    // @expect: ct png -> image/png
+    show("ct unknown", Mime.contentType("archive.qqq"))
+    // @expect: ct unknown -> (none)
+
+    print(Mime.isTextual("text/plain").toString())
+    // @expect: true
+    print(Mime.isTextual("application/vnd.api+json").toString())
+    // @expect: true
+    print(Mime.isTextual("image/png").toString())
+    // @expect: false
+    // a full header value works too — parameters are ignored
+    print(Mime.isTextual("text/html; charset=utf-8").toString())
+    // @expect: true
+    print(Mime.isTextual("application/octet-stream").toString())
+    // @expect: false
+}

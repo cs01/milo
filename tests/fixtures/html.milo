@@ -1,0 +1,93 @@
+from "std/html" import {
+    Html
+}
+
+fn main(): void {
+    // element text
+    print(Html.escapeText("plain"))
+    // @expect: plain
+    print(Html.escapeText("<script>alert(1)</script>"))
+    // @expect: &lt;script&gt;alert(1)&lt;/script&gt;
+    print(Html.escapeText("a & b"))
+    // @expect: a &amp; b
+    print(Html.escapeText("already &amp; escaped"))
+    // @expect: already &amp;amp; escaped
+    // quotes are escaped by the text escaper too, so using it inside a quoted
+    // attribute is still safe
+    print(Html.escapeText("\" onmouseover=x"))
+    // @expect: &quot; onmouseover=x
+    print(Html.escapeText("' onmouseover=x"))
+    // @expect: &#39; onmouseover=x
+    // UTF-8 passes through
+    print(Html.escapeText("héllo → ok"))
+    // @expect: héllo → ok
+    print(Html.escapeText(""))
+    // @expect:
+
+    // attribute values: breaking out of single quotes
+    print(Html.escapeAttr("x' onerror='alert(1)"))
+    // @expect: x&#39;&#32;onerror&#61;&#39;alert(1)
+    // breaking out of an UNQUOTED attribute value
+    print(Html.escapeAttr("x onerror=alert(1)"))
+    // @expect: x&#32;onerror&#61;alert(1)
+    print(Html.escapeAttr("a\tb\nc"))
+    // @expect: a&#9;b&#10;c
+    print(Html.escapeAttr("`backtick`"))
+    // @expect: &#96;backtick&#96;
+
+    // unescape: the five predefined entities and numeric references
+    print(Html.unescape("&lt;b&gt;hi&lt;/b&gt;"))
+    // @expect: <b>hi</b>
+    print(Html.unescape("&amp;amp;"))
+    // @expect: &amp;
+    print(Html.unescape("&#39;&#x27;&quot;&apos;"))
+    // @expect: ''"'
+    print(Html.unescape("&#8594;"))
+    // @expect: →
+    // unknown entities are left alone, not swallowed
+    print(Html.unescape("&nbsp;&frac12;"))
+    // @expect: &nbsp;&frac12;
+    // unterminated / malformed references stay literal
+    print(Html.unescape("&#39 &# &#x &amp"))
+    // @expect: &#39 &# &#x &amp
+    print(Html.unescape("100% & rising"))
+    // @expect: 100% & rising
+    // out of range and surrogates become U+FFFD, never invalid UTF-8
+    print(Html.unescape("&#1114112;"))
+    // @expect: �
+    print(Html.unescape("&#xD800;"))
+    // @expect: �
+    // a decoded NUL would truncate the string wherever it was next written
+    print(Html.unescape("a&#0;b"))
+    // @expect: a�b
+    print(Html.unescape("&#99999999999999999999;"))
+    // @expect: �
+    print(Html.unescape("&"))
+    // @expect: &
+
+    // URL scheme allowlist
+    print(Html.isSafeUrl("https://example.com/a?b=1"))
+    // @expect: true
+    print(Html.isSafeUrl("/relative/path"))
+    // @expect: true
+    print(Html.isSafeUrl("mailto:a@b.c"))
+    // @expect: true
+    print(Html.isSafeUrl("page.html?x=a:b"))
+    // @expect: true
+    print(Html.isSafeUrl("javascript:alert(1)"))
+    // @expect: false
+    print(Html.isSafeUrl("JaVaScRiPt:alert(1)"))
+    // @expect: false
+    print(Html.isSafeUrl("  javascript:alert(1)"))
+    // @expect: false
+    print(Html.isSafeUrl("java\tscript:alert(1)"))
+    // @expect: false
+    print(Html.isSafeUrl("data:text/html,<script>alert(1)</script>"))
+    // @expect: false
+    print(Html.isSafeUrl("vbscript:msgbox(1)"))
+    // @expect: false
+    print(Html.isSafeUrl(":nonsense"))
+    // @expect: false
+    print(Html.isSafeUrl(""))
+    // @expect: true
+}

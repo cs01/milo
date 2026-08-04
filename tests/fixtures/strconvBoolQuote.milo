@@ -1,0 +1,93 @@
+from "std/strconv" import {
+    parseBool, quoteString, unquoteString
+}
+
+fn showBool(s: string): void {
+    match parseBool(s) {
+        Option.Some(b) => {
+            print(s + " -> " + b.toString())
+        }
+        Option.None => {
+            print(s + " -> none")
+        }
+    }
+}
+
+fn showUnquote(s: string): void {
+    match unquoteString(s) {
+        Option.Some(v) => {
+            print("ok " + quoteString(v))
+        }
+        Option.None => {
+            print("none")
+        }
+    }
+}
+
+fn main(): void {
+    showBool("true")
+    // @expect: true -> true
+    showBool("TRUE")
+    // @expect: TRUE -> true
+    showBool("True")
+    // @expect: True -> true
+    showBool("t")
+    // @expect: t -> true
+    showBool("1")
+    // @expect: 1 -> true
+    showBool("false")
+    // @expect: false -> false
+    showBool("F")
+    // @expect: F -> false
+    showBool("0")
+    // @expect: 0 -> false
+    showBool("yes")
+    // @expect: yes -> none
+    showBool(" true")
+    // @expect:  true -> none
+    showBool("")
+    // @expect:  -> none
+    showBool("truex")
+    // @expect: truex -> none
+
+    print(quoteString("hi"))
+    // @expect: "hi"
+    print(quoteString("a\"b\\c"))
+    // @expect: "a\"b\\c"
+    print(quoteString("tab\there\nnl"))
+    // @expect: "tab\there\nnl"
+    print(quoteString("héllo"))
+    // @expect: "héllo"
+    print(quoteString(""))
+    // @expect: ""
+
+    showUnquote("\"hi\"")
+    // @expect: ok "hi"
+    showUnquote("\"a\\\"b\\\\c\"")
+    // @expect: ok "a\"b\\c"
+    showUnquote("\"tab\\there\"")
+    // @expect: ok "tab\there"
+    showUnquote("\"\\x41\\x7f\"")
+    // @expect: ok "A\x7f"
+    showUnquote("\"\"")
+    // @expect: ok ""
+    // not a literal at all
+    showUnquote("hi")
+    // @expect: none
+    showUnquote("\"")
+    // @expect: none
+    // unescaped interior quote ends the literal early
+    showUnquote("\"a\"b\"")
+    // @expect: none
+    // trailing backslash swallows the closing quote
+    showUnquote("\"a\\\"")
+    // @expect: none
+    // unknown escape is rejected, not silently unwrapped
+    showUnquote("\"a\\qb\"")
+    // @expect: none
+    // truncated / non-hex \x
+    showUnquote("\"\\x4\"")
+    // @expect: none
+    showUnquote("\"\\xzz\"")
+    // @expect: none
+}

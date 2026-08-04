@@ -105,9 +105,13 @@ OpenSSL-backed hashing plus pure-Milo hashing, MAC, and token modules (no C code
 |--------|-----------------|
 | [`std/crypto`](crypto) | `Crypto.sha256`, `Crypto.sha1`, `Crypto.md5`, and `Crypto.aesGcmEncrypt`/`.aesGcmDecrypt` (128/256-bit AES-GCM) |
 | [`std/sha256`](sha256) | Pure-Milo SHA-256 — `Sha256.hash`, `Sha256.bytes` |
+| [`std/sha512`](sha512) | Pure-Milo SHA-512 / SHA-384 — `Sha512.hash`, `Sha384.bytes` |
 | [`std/sha1`](sha1) | Pure-Milo SHA-1 — `Sha1.hash`, `Sha1.bytes` |
-| [`std/hmac`](hmac) | HMAC-SHA256 / HMAC-SHA1 — `Hmac.sha256`, `Hmac.sha1Bytes` |
-| [`std/jwt`](jwt) | JWT sign/verify (HS256) — `Jwt.signHS256`, `Jwt.verifyHS256` |
+| [`std/hmac`](hmac) | HMAC-SHA256 / 384 / 512 / SHA-1 — `Hmac.sha256`, `Hmac.sha512Bytes` |
+| [`std/subtle`](subtle) | Constant-time comparison — `constantTimeEq` |
+| [`std/hkdf`](hkdf) | HKDF extract-and-expand (RFC 5869) — `Hkdf.sha256` |
+| [`std/pbkdf2`](pbkdf2) | Password-based KDF (RFC 8018) — `Pbkdf2.sha256` |
+| [`std/jwt`](jwt) | JWT sign/verify (HS256/384/512) with claim validation — `Jwt.signHS256`, `Jwt.verifyHS256`, `JwtVerifier` |
 | [`std/totp`](totp) | RFC 6238 TOTP / RFC 4226 HOTP one-time passwords — `Totp.generate`, `Totp.hotp` |
 | [`std/base32`](base32) | Base32 encode/decode (RFC 4648) — `Base32.encode`, `Base32.decode` |
 

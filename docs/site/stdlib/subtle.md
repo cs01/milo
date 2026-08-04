@@ -1,0 +1,32 @@
+# std/subtle
+
+Comparisons that do not leak *where* two secrets differ.
+
+```milo
+from "std/subtle" import { constantTimeEq }
+```
+
+`a == b` on strings stops at the first differing byte. That is right for text and wrong for a MAC, a session token, or a password digest: how long the comparison takes tells an attacker how many leading bytes were correct, which turns a 2^256 forgery into a byte-at-a-time search. Anything compared against a value derived from a secret goes through `constantTimeEq`.
+
+The name follows Go's `crypto/subtle` and Rust's `subtle` crate. It is a module of its own so that "I am comparing something secret" is visible at the import line.
+
+## Functions
+
+### constantTimeEq
+
+```milo
+pub fn constantTimeEq(a: &string, b: &string): bool
+```
+
+Byte-for-byte equality whose running time depends only on the lengths of the inputs, never on their contents: every byte of both buffers is read and folded into one accumulator, with no early exit.
+
+Lengths are treated as public — a length mismatch returns `false` immediately, because MAC and digest lengths are fixed by the algorithm and known to the attacker anyway. Do not use this to compare values whose *length* is the secret.
+
+```milo
+let expected = Hmac.sha256Bytes(secret, body)
+if !constantTimeEq(receivedMac, expected) {
+    return Result.Err("bad webhook signature")
+}
+```
+
+Used inside the standard library by [`std/jwt`](jwt) for the JWS signature check and by [`std/totp`](totp) for `Totp.verify`.

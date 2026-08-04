@@ -1,0 +1,103 @@
+// std/pbkdf2 — PBKDF2, the iterated password-based KDF (RFC 8018 §5.2).
+//
+// This is the module to reach for when the input is a *password* — something a
+// human chose, with maybe 30 bits of entropy behind it. A plain hash of a password
+// is a rounding error to a GPU. PBKDF2 makes each guess cost `iterations` HMACs,
+// so the defender picks the attacker's price.
+//
+// Two rules the type system cannot enforce for you:
+//   * every password gets its own random salt (std/random), stored alongside the
+//     hash — a shared or absent salt lets one rainbow table break every account;
+//   * compare stored and recomputed digests with std/subtle's `constantTimeEq`,
+//     never `==`.
+//
+// PBKDF2 is the weakest of the accepted password KDFs: it is compute-hard but not
+// *memory*-hard, so custom hardware gets a large constant-factor advantage that
+// scrypt and Argon2 deny it. It is still FIPS-approved and NIST-recommended
+// (SP 800-63B), and it is what this standard library ships because a correct
+// PBKDF2 beats a subtly wrong Argon2. Use a high iteration count: OWASP's 2023
+// floor is 600000 for HMAC-SHA256 and 210000 for HMAC-SHA512.
+
+from "std/hmac" import {
+    Hmac
+}
+
+// F(P, S, c, i) = U1 ^ U2 ^ ... ^ Uc, with U1 = PRF(P, S || INT32BE(i)).
+// Appends the whole block to `out`; the caller truncates the last one.
+fn pbkdf2Block(password: &string, salt: &string, iterations: i64, index: i64, mac: (&string, &string) => string, out: &mut string): void {
+    var seed = ""
+    for i in 0..salt.len {
+        seed.push(salt[i])
+    }
+    seed.push(((index >> 24) & 0xff) as u8)
+    seed.push(((index >> 16) & 0xff) as u8)
+    seed.push(((index >> 8) & 0xff) as u8)
+    seed.push((index & 0xff) as u8)
+
+    var u = mac(password, seed)
+    // The running XOR needs element assignment, which a string (an immutable-in-
+    // place byte buffer) does not offer, so the accumulator is a Vec<u8>.
+    var acc: Vec<u8> = Vec.new()
+    for i in 0..u.len {
+        acc.push(u[i])
+    }
+    for _round in 1..iterations {
+        u = mac(password, u)
+        for i in 0..acc.len {
+            acc[i] = acc[i] ^ u[i]
+        }
+    }
+    for i in 0..acc.len {
+        out.push(acc[i])
+    }
+}
+
+fn pbkdf2Core(password: &string, salt: &string, iterations: i64, dkLen: i64, hashLen: i64, mac: (&string, &string) => string): Result<string> {
+    if iterations < 1 {
+        return Result.Err("pbkdf2: iteration count must be at least 1, got " + iterations.toString())
+    }
+    if dkLen < 1 {
+        return Result.Err("pbkdf2: derived key length must be at least 1, got " + dkLen.toString())
+    }
+    // RFC 8018 §5.2: the block counter is a 32-bit integer, so the derived key
+    // cannot exceed (2^32 - 1) * hLen bytes.
+    let maxLen = 4294967295 * hashLen
+    if dkLen > maxLen {
+        return Result.Err("pbkdf2: derived key length " + dkLen.toString() + " exceeds (2^32-1)*hLen")
+    }
+    var out = ""
+    var index: i64 = 1
+    while out.len < dkLen {
+        pbkdf2Block(password, salt, iterations, index, mac, out)
+        index = index + 1
+    }
+    var dk = ""
+    for i in 0..dkLen {
+        dk.push(out[i])
+    }
+    return Result.Ok(dk)
+}
+
+// Pbkdf2 namespace — Pbkdf2.sha256(password, salt, iterations, dkLen) and friends,
+// each returning `dkLen` raw derived bytes.
+pub struct Pbkdf2 {
+}
+
+impl Pbkdf2 {
+    // PBKDF2-HMAC-SHA256. The default choice for new password storage.
+    fn sha256(password: &string, salt: &string, iterations: i64, dkLen: i64): Result<string> {
+        return pbkdf2Core(password, salt, iterations, dkLen, 32, (k: &string, m: &string) => Hmac.sha256Bytes(k, m))
+    }
+
+    // PBKDF2-HMAC-SHA512.
+    fn sha512(password: &string, salt: &string, iterations: i64, dkLen: i64): Result<string> {
+        return pbkdf2Core(password, salt, iterations, dkLen, 64, (k: &string, m: &string) => Hmac.sha512Bytes(k, m))
+    }
+
+    // PBKDF2-HMAC-SHA1. Present for interoperating with existing stores (WPA2,
+    // older Django/OpenSSL formats) and because RFC 6070's test vectors are
+    // specified on it. Do not choose it for new password storage.
+    fn sha1(password: &string, salt: &string, iterations: i64, dkLen: i64): Result<string> {
+        return pbkdf2Core(password, salt, iterations, dkLen, 20, (k: &string, m: &string) => Hmac.sha1Bytes(k, m))
+    }
+}

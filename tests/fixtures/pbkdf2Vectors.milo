@@ -1,0 +1,79 @@
+// @expect: 0c60c80f961f0e71f3a9b524af6012062fe037a6
+// @expect: ea6c014dc72d6f8ccd1ed92ace1d41f0d8de8957
+// @expect: 4b007901b765489abead49d926f721d065a429c1
+// @expect: 3d2eec4fe41c849b80c8d83662c0e44a8b291a964cf2f07038
+// @expect: 56fa6aa75548099dcc37d7f03425e0c3
+// @expect: 55ac046e56e3089fec1691c22544b605f94185216dde0465e68b9d57c20dacbc49ca9cccf179b645991664b39d77ef317c71b845b1e30bd509112041d3a19783
+// @expect: 4ddcd8f60b98be21830cee5ef22701f9641a4418d04c0414aeff08876b34ab56a1d425a1225833549adb841b51c9b3176a272bdebba1d078478f62b397f33c8d
+// @expect: zero iterations rejected
+// @expect: same-password digests match
+// @expect: wrong-password digest rejected
+from "std/pbkdf2" import {
+    Pbkdf2
+}
+from "std/hex" import {
+    Hex
+}
+from "std/subtle" import {
+    constantTimeEq
+}
+
+fn show(r: Result<string>): void {
+    match r {
+        Result.Ok(dk) => {
+            print(Hex.encode(dk))
+        }
+        Result.Err(e) => {
+            print("ERR " + e)
+        }
+    }
+}
+
+fn derive(password: &string): string {
+    // A real store uses a fresh random salt per password and a far higher
+    // iteration count; both are fixed here so the fixture is deterministic and fast.
+    match Pbkdf2.sha256(password, "fixed-salt-for-the-test", 1000, 32) {
+        Result.Ok(dk) => {
+            return dk
+        }
+        Result.Err(_e) => {
+            return ""
+        }
+    }
+}
+
+// RFC 6070 test cases 1-4 (PBKDF2-HMAC-SHA1) plus the RFC 7914 §11 PBKDF2-HMAC-
+// SHA256 vectors. Case 5 of RFC 6070 (16777216 iterations) is deliberately omitted:
+// it takes minutes and proves nothing case 3 does not.
+pub fn main(): i32 {
+    show(Pbkdf2.sha1("password", "salt", 1, 20))
+    show(Pbkdf2.sha1("password", "salt", 2, 20))
+    show(Pbkdf2.sha1("password", "salt", 4096, 20))
+    show(Pbkdf2.sha1("passwordPASSWORDpassword", "saltSALTsaltSALTsaltSALTsaltSALTsalt", 4096, 25))
+    show(Pbkdf2.sha1("pass\0word", "sa\0lt", 4096, 16))
+    show(Pbkdf2.sha256("passwd", "salt", 1, 64))
+    show(Pbkdf2.sha256("Password", "NaCl", 80000, 64))
+
+    match Pbkdf2.sha256("password", "salt", 0, 32) {
+        Result.Ok(_dk) => {
+            print("zero iterations ACCEPTED")
+        }
+        Result.Err(_e) => {
+            print("zero iterations rejected")
+        }
+    }
+
+    // The shape a password store actually has: derive, then compare in constant time.
+    let stored = derive("correct horse battery staple")
+    if constantTimeEq(stored, derive("correct horse battery staple")) {
+        print("same-password digests match")
+    } else {
+        print("same-password digests DIFFER")
+    }
+    if constantTimeEq(stored, derive("Correct horse battery staple")) {
+        print("wrong-password digest ACCEPTED")
+    } else {
+        print("wrong-password digest rejected")
+    }
+    return 0
+}

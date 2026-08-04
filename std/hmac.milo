@@ -1,9 +1,15 @@
-// std/hmac — HMAC-SHA256 (RFC 2104 / FIPS 198-1) on the pure-Milo SHA-256.
+// std/hmac — HMAC (RFC 2104 / FIPS 198-1) over the pure-Milo hashes.
 //
 // HMAC(K, m) = H((K' ^ opad) || H((K' ^ ipad) || m)), where K' is the key sized to
-// the 64-byte block: hashed first if longer, zero-padded otherwise. Built on
-// sha256Bytes so the inner digest stays raw for the outer hash — no hex round-trip.
-// Used for JWT (HS256), AWS SigV4, webhook signatures.
+// the hash's block: hashed first if longer, zero-padded otherwise. Built on the
+// `*.bytes` entry points so the inner digest stays raw for the outer hash — no hex
+// round-trip. Used for JWT (HS256/384/512), HKDF, PBKDF2, AWS SigV4, webhook
+// signatures, and TOTP.
+//
+// The block size is a property of the hash, not of HMAC: 64 bytes for SHA-1 and
+// SHA-256, 128 for SHA-384 and SHA-512. Getting it wrong still produces a stable,
+// plausible-looking MAC that no other implementation agrees with, which is why
+// `hmacCore` takes it as an explicit argument alongside the hash.
 
 from "std/sha256" import {
     Sha256
@@ -11,8 +17,13 @@ from "std/sha256" import {
 from "std/sha1" import {
     Sha1
 }
+from "std/sha512" import {
+    Sha512,
+    Sha384
+}
 
 let BLOCK: i64 = 64
+let BLOCK_LONG: i64 = 128
 
 fn _hexNibble(v: i64): u8 {
     if v < 10 {
@@ -21,11 +32,11 @@ fn _hexNibble(v: i64): u8 {
     return (v - 10 + 97) as u8
 }
 
-// Normalize the key to exactly BLOCK bytes (RFC 2104 §2).
-fn blockKey(key: &string): string {
+// Normalize the key to exactly `block` bytes (RFC 2104 §2).
+fn blockKey(key: &string, block: i64, hash: (&string) => string): string {
     var k = ""
-    if key.len > BLOCK {
-        let h = Sha256.bytes(key)
+    if key.len > block {
+        let h = hash(key)
         for i in 0..h.len {
             k.push(h[i])
         }
@@ -34,37 +45,35 @@ fn blockKey(key: &string): string {
             k.push(key[i])
         }
     }
-    while k.len < BLOCK {
+    while k.len < block {
         k.push(0 as u8)
     }
     return k
 }
 
-// HMAC-SHA256, returning the 32 raw digest bytes.
-fn hmacSha256Bytes(key: &string, msg: &string): string {
-    let k = blockKey(key)
+// HMAC over any of the block-based hashes, returning the raw digest.
+fn hmacCore(key: &string, msg: &string, block: i64, hash: (&string) => string): string {
+    let k = blockKey(key, block, hash)
     var inner = ""
-    for i in 0..BLOCK {
+    for i in 0..block {
         inner.push(((k[i] as i64) ^ 0x36) as u8)
     }
     for i in 0..msg.len {
         inner.push(msg[i])
     }
-    let innerDigest = Sha256.bytes(inner)
+    let innerDigest = hash(inner)
 
     var outer = ""
-    for i in 0..BLOCK {
+    for i in 0..block {
         outer.push(((k[i] as i64) ^ 0x5c) as u8)
     }
     for i in 0..innerDigest.len {
         outer.push(innerDigest[i])
     }
-    return Sha256.bytes(outer)
+    return hash(outer)
 }
 
-// HMAC-SHA256 as a 64-char lowercase hex string.
-fn hmacSha256(key: &string, msg: &string): string {
-    let digest = hmacSha256Bytes(key, msg)
+fn toHex(digest: &string): string {
     var out = ""
     for i in 0..digest.len {
         let byte = digest[i] as i64
@@ -74,54 +83,60 @@ fn hmacSha256(key: &string, msg: &string): string {
     return out
 }
 
-// HMAC-SHA1 (RFC 2104), returning 20 raw digest bytes. SHA-1's block size is also
-// 64 bytes, so the same key-normalization applies. Needed by HOTP/TOTP (std/totp),
-// which are specified on HMAC-SHA1.
-fn hmacSha1Bytes(key: &string, msg: &string): string {
-    var k = ""
-    if key.len > BLOCK {
-        let h = Sha1.bytes(key)
-        for i in 0..h.len {
-            k.push(h[i])
-        }
-    } else {
-        for i in 0..key.len {
-            k.push(key[i])
-        }
-    }
-    while k.len < BLOCK {
-        k.push(0 as u8)
-    }
-    var inner = ""
-    for i in 0..BLOCK {
-        inner.push(((k[i] as i64) ^ 0x36) as u8)
-    }
-    for i in 0..msg.len {
-        inner.push(msg[i])
-    }
-    let innerDigest = Sha1.bytes(inner)
-    var outer = ""
-    for i in 0..BLOCK {
-        outer.push(((k[i] as i64) ^ 0x5c) as u8)
-    }
-    for i in 0..innerDigest.len {
-        outer.push(innerDigest[i])
-    }
-    return Sha1.bytes(outer)
+// HMAC-SHA256, returning the 32 raw digest bytes.
+fn hmacSha256Bytes(key: &string, msg: &string): string {
+    return hmacCore(key, msg, BLOCK, (s: &string) => Sha256.bytes(s))
 }
 
-// Hmac namespace — Hmac.sha256(key,msg) hex, .sha256Bytes/.sha1Bytes raw digests.
+// HMAC-SHA256 as a 64-char lowercase hex string.
+fn hmacSha256(key: &string, msg: &string): string {
+    return toHex(hmacSha256Bytes(key, msg))
+}
+
+// HMAC-SHA1 (RFC 2104), returning 20 raw digest bytes. Needed by HOTP/TOTP
+// (std/totp) and by PBKDF2-HMAC-SHA1, both of which are specified on SHA-1.
+fn hmacSha1Bytes(key: &string, msg: &string): string {
+    return hmacCore(key, msg, BLOCK, (s: &string) => Sha1.bytes(s))
+}
+
+// HMAC-SHA512, returning 64 raw digest bytes.
+fn hmacSha512Bytes(key: &string, msg: &string): string {
+    return hmacCore(key, msg, BLOCK_LONG, (s: &string) => Sha512.bytes(s))
+}
+
+// HMAC-SHA384, returning 48 raw digest bytes.
+fn hmacSha384Bytes(key: &string, msg: &string): string {
+    return hmacCore(key, msg, BLOCK_LONG, (s: &string) => Sha384.bytes(s))
+}
+
+// Hmac namespace — Hmac.sha256(key,msg) hex, .sha256Bytes/.sha384Bytes/
+// .sha512Bytes/.sha1Bytes raw digests.
 pub struct Hmac {
 }
 
 impl Hmac {
+    // HMAC-SHA256 as 64-char lowercase hex.
     fn sha256(key: &string, msg: &string): string {
         return hmacSha256(key, msg)
     }
+    // HMAC-SHA256, 32 raw bytes.
     fn sha256Bytes(key: &string, msg: &string): string {
         return hmacSha256Bytes(key, msg)
     }
+    // HMAC-SHA1, 20 raw bytes.
     fn sha1Bytes(key: &string, msg: &string): string {
         return hmacSha1Bytes(key, msg)
+    }
+    // HMAC-SHA384, 48 raw bytes.
+    fn sha384Bytes(key: &string, msg: &string): string {
+        return hmacSha384Bytes(key, msg)
+    }
+    // HMAC-SHA512, 64 raw bytes.
+    fn sha512Bytes(key: &string, msg: &string): string {
+        return hmacSha512Bytes(key, msg)
+    }
+    // HMAC-SHA512 as 128-char lowercase hex.
+    fn sha512(key: &string, msg: &string): string {
+        return toHex(hmacSha512Bytes(key, msg))
     }
 }

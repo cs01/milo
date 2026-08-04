@@ -1,0 +1,160 @@
+// @expect: fresh ok
+// @expect: expired err: token expired at 1500000000
+// @expect: expired-within-leeway ok
+// @expect: notYetValid err: token not valid before 1600000000
+// @expect: issuedInFuture err: token issued in the future, at 1600000000
+// @expect: algNoneEmptySig err: unsupported or unexpected algorithm 'none'
+// @expect: algNoneWithSig err: unsupported or unexpected algorithm 'none'
+// @expect: algConfusion err: unsupported or unexpected algorithm 'HS512'
+// @expect: tamperedSig err: signature does not match
+// @expect: tamperedPayload err: signature does not match
+// @expect: nonCanonicalSig err: malformed token: signature is not canonical base64url
+// @expect: critHeader err: header requires an unsupported 'crit' extension
+// @expect: twoSegments err: malformed token: expected 3 segments, found 2
+// @expect: fourSegments err: malformed token: expected 3 segments, found 4
+// @expect: emptySignature err: malformed token: empty segment
+// @expect: audString ok
+// @expect: audArray ok
+// @expect: audWrong err: token audience does not include 'billing'
+// @expect: audMissing err: missing required claim 'aud'
+// @expect: issOk ok
+// @expect: issWrong err: token issuer is not 'other'
+// @expect: expRequired err: missing required claim 'exp'
+from "std/jwt" import {
+    Jwt,
+    JwtAlg,
+    JwtClaims,
+    JwtError,
+    JwtVerifier,
+    jwtErrorMessage
+}
+from "std/base64" import {
+    Base64
+}
+
+fn report(label: &string, r: Result<JwtClaims, JwtError>): void {
+    match r {
+        Result.Ok(_c) => {
+            print(label + " ok")
+        }
+        Result.Err(e) => {
+            print(label + " err: " + jwtErrorMessage(e))
+        }
+    }
+}
+
+// Replace the byte at `at` with `ch`.
+fn poke(s: &string, at: i64, ch: u8): string {
+    var out = ""
+    for i in 0..s.len {
+        if i == at {
+            out.push(ch)
+        } else {
+            out.push(s[i])
+        }
+    }
+    return out
+}
+
+// 6-bit value of a base64url symbol, and its inverse.
+fn b64Value(ch: u8): i64 {
+    if ch >= 'A' && ch <= 'Z' {
+        return (ch - 'A') as i64
+    }
+    if ch >= 'a' && ch <= 'z' {
+        return (ch - 'a') as i64 + 26
+    }
+    if ch >= '0' && ch <= '9' {
+        return (ch - '0') as i64 + 52
+    }
+    if ch == '-' {
+        return 62
+    }
+    return 63
+}
+
+fn b64Char(v: i64): u8 {
+    if v < 26 {
+        return ('A' as i64 + v) as u8
+    }
+    if v < 52 {
+        return ('a' as i64 + v - 26) as u8
+    }
+    if v < 62 {
+        return ('0' as i64 + v - 52) as u8
+    }
+    if v == 62 {
+        return '-'
+    }
+    return '_'
+}
+
+// Every rejection this verifier owes a caller, spelled out. The clock is pinned via
+// `.at()` so the time-based cases mean the same thing in 2040 as today.
+pub fn main(): i32 {
+    let secret = "the-shared-secret"
+    let now: i64 = 1550000000
+
+    let live = Jwt.signHS256("{\"sub\":\"a\",\"exp\":1600000000}", secret)
+    report("fresh", JwtVerifier.new(JwtAlg.HS256, secret).at(now).verify(live))
+
+    let dead = Jwt.signHS256("{\"sub\":\"a\",\"exp\":1500000000}", secret)
+    report("expired", JwtVerifier.new(JwtAlg.HS256, secret).at(now).verify(dead))
+    // 50000000 seconds of leeway is absurd for a real deployment; it is here to show
+    // that the tolerance is applied to exp rather than ignored.
+    report("expired-within-leeway", JwtVerifier.new(JwtAlg.HS256, secret).at(now).leeway(50000001).verify(dead))
+
+    let early = Jwt.signHS256("{\"sub\":\"a\",\"nbf\":1600000000}", secret)
+    report("notYetValid", JwtVerifier.new(JwtAlg.HS256, secret).at(now).verify(early))
+
+    let future = Jwt.signHS256("{\"sub\":\"a\",\"iat\":1600000000}", secret)
+    report("issuedInFuture", JwtVerifier.new(JwtAlg.HS256, secret).at(now).verify(future))
+
+    // The classic forgery: strip the signature and claim the token is unsigned.
+    let unsignedPayload = Base64.urlEncode("{\"sub\":\"admin\",\"exp\":1600000000}")
+    let noneHeader = Base64.urlEncode("{\"alg\":\"none\",\"typ\":\"JWT\"}")
+    report("algNoneEmptySig", JwtVerifier.new(JwtAlg.HS256, secret).at(now).verify(noneHeader + "." + unsignedPayload + ".x"))
+    // ...and the variant that keeps a real-looking signature so a shape check passes.
+    report("algNoneWithSig", JwtVerifier.new(JwtAlg.HS256, secret).at(now).verify(noneHeader + "." + unsignedPayload + ".AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"))
+
+    // Algorithm confusion: a token signed with a different primitive must not be
+    // validated just because the verifier can compute that primitive too.
+    let hs512 = Jwt.signHS512("{\"sub\":\"a\",\"exp\":1600000000}", secret)
+    report("algConfusion", JwtVerifier.new(JwtAlg.HS256, secret).at(now).verify(hs512))
+
+    // One flipped byte in the signature, and one in the payload.
+    report("tamperedSig", JwtVerifier.new(JwtAlg.HS256, secret).at(now).verify(poke(live, live.len - 1, 'A')))
+    report("tamperedPayload", JwtVerifier.new(JwtAlg.HS256, secret).at(now).verify(poke(live, 40, 'A')))
+
+    // Same 32 MAC bytes, different text. A 32-byte digest is 43 base64url symbols,
+    // and the last one carries only 4 significant bits — flipping its low bit leaves
+    // the decoded MAC untouched but changes the token string.
+    report("nonCanonicalSig", JwtVerifier.new(JwtAlg.HS256, secret).at(now).verify(poke(live, live.len - 1, b64Char(b64Value(live[live.len - 1]) ^ 1))))
+
+    // RFC 7515 §4.1.11: a `crit` header we do not understand must be rejected, not
+    // ignored — the whole point of the field is that ignoring it is unsafe.
+    let critHeader = Base64.urlEncode("{\"alg\":\"HS256\",\"typ\":\"JWT\",\"crit\":[\"exp\"]}")
+    let critPayload = Base64.urlEncode("{\"sub\":\"a\",\"exp\":1600000000}")
+    let critSi = critHeader + "." + critPayload
+    report("critHeader", JwtVerifier.new(JwtAlg.HS256, secret).at(now).verify(critSi + "." + Base64.urlEncode(Jwt.signHS256("", secret))))
+
+    report("twoSegments", JwtVerifier.new(JwtAlg.HS256, secret).at(now).verify("aaa.bbb"))
+    report("fourSegments", JwtVerifier.new(JwtAlg.HS256, secret).at(now).verify(live + ".extra"))
+    report("emptySignature", JwtVerifier.new(JwtAlg.HS256, secret).at(now).verify(noneHeader + "." + unsignedPayload + "."))
+
+    // RFC 7519 §4.1.3 allows `aud` to be a string or an array of strings.
+    let audOne = Jwt.signHS256("{\"aud\":\"api\",\"exp\":1600000000}", secret)
+    let audMany = Jwt.signHS256("{\"aud\":[\"web\",\"api\"],\"exp\":1600000000}", secret)
+    report("audString", JwtVerifier.new(JwtAlg.HS256, secret).at(now).audience("api").verify(audOne))
+    report("audArray", JwtVerifier.new(JwtAlg.HS256, secret).at(now).audience("api").verify(audMany))
+    report("audWrong", JwtVerifier.new(JwtAlg.HS256, secret).at(now).audience("billing").verify(audMany))
+    report("audMissing", JwtVerifier.new(JwtAlg.HS256, secret).at(now).audience("api").verify(live))
+
+    let issued = Jwt.signHS256("{\"iss\":\"auth.example\",\"exp\":1600000000}", secret)
+    report("issOk", JwtVerifier.new(JwtAlg.HS256, secret).at(now).issuer("auth.example").verify(issued))
+    report("issWrong", JwtVerifier.new(JwtAlg.HS256, secret).at(now).issuer("other").verify(issued))
+
+    let noExp = Jwt.signHS256("{\"sub\":\"a\"}", secret)
+    report("expRequired", JwtVerifier.new(JwtAlg.HS256, secret).at(now).requireExpiry().verify(noExp))
+    return 0
+}

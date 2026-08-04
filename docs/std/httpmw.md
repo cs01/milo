@@ -34,8 +34,23 @@ recomputed from the (compressed) body downstream, so no manual length bookkeepin
 ### `verifyBearer`
 
 ```milo
-pub fn verifyBearer(ctx: &Context, secret: &string): bool
+pub fn verifyBearer(ctx: &Context, secret: &string): Result<JwtClaims, JwtError>
 ```
 
-True iff the request carries a bearer token with a valid HS256 signature for
-`secret`. Signature check is constant-time (see std/jwt); does not decode claims.
+The claims of the request's bearer token, if it carries one with a valid HS256
+signature for `secret` that is in its validity window right now.
+
+Returns the claims rather than a bool because "is this request authenticated" is
+not a question a handler can answer without them: the subject, the scopes, and
+the audience all live in the payload, and a bool tempts the caller to trust a
+token that expired years ago. `JwtError.Expired` and `JwtError.BadSignature` are
+different situations — the first is a refresh, the second is an attack — so the
+reason is preserved.
+
+"No Authorization header" and "an Authorization header that is not a Bearer
+token" are also kept apart: the first is an unauthenticated request and the
+second is a misconfigured client, and the log line is the only place anyone ever
+finds that out.
+
+For an audience or issuer requirement, or a non-HS256 algorithm, build a
+`JwtVerifier` and hand it `bearerToken(ctx)` yourself.

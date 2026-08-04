@@ -8,7 +8,7 @@ from "std/httpmw" import {
     verifyBearer, gzip
 }
 from "std/jwt" import {
-    Jwt
+    Jwt, JwtClaims, JwtError, jwtErrorMessage
 }
 from "std/inflate" import {
     Inflate
@@ -43,26 +43,48 @@ pub fn authHeader(value: string): Vec<Param> {
 // `jwtGuard(secret)` factory — `secret` stays a live local, so the closure capture
 // is sound. Returns the eventual status a router would send.
 pub fn guardStatus(ctx: &mut Context, secret: &string): i32 {
-    if verifyBearer(ctx, secret) {
+    if verifyBearer(ctx, secret).isOk() {
         return 200
     }
     return 401
+}
+
+fn describe(r: Result<JwtClaims, JwtError>): string {
+    match r {
+        Result.Ok(c) => {
+            match c.subject() {
+                Option.Some(s) => {
+                    return "ok sub=" + s
+                }
+                Option.None => {
+                    return "ok"
+                }
+            }
+        }
+        Result.Err(e) => {
+            return jwtErrorMessage(e)
+        }
+    }
 }
 
 pub fn main() {
     let secret = "s3cr3t"
     let token = Jwt.signHS256("{\"sub\":\"alice\"}", secret)
 
-    // verifyBearer: valid / tampered / missing
+    // verifyBearer hands back the claims, so a handler can act on the subject
+    // instead of on a bool that only ever meant "the signature parsed".
     let ctxOk = mkCtx(authHeader("Bearer " + token))
-    // @expect: true
-    print(verifyBearer(ctxOk, secret))
+    // @expect: ok sub=alice
+    print(describe(verifyBearer(ctxOk, secret)))
     let ctxBad = mkCtx(authHeader("Bearer " + token + "x"))
-    // @expect: false
-    print(verifyBearer(ctxBad, secret))
+    // @expect: signature does not match
+    print(describe(verifyBearer(ctxBad, secret)))
     let ctxNone = mkCtx([])
-    // @expect: false
-    print(verifyBearer(ctxNone, secret))
+    // @expect: malformed token: no Authorization header
+    print(describe(verifyBearer(ctxNone, secret)))
+    let ctxBasic = mkCtx(authHeader("Basic dXNlcjpwYXNz"))
+    // @expect: malformed token: Authorization header is not a Bearer token
+    print(describe(verifyBearer(ctxBasic, secret)))
 
     // inline guard: passes a valid request, 401s an invalid one
     var g1 = mkCtx(authHeader("Bearer " + token))

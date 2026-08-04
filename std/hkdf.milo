@@ -1,0 +1,116 @@
+// std/hkdf — HKDF, the HMAC-based extract-and-expand KDF (RFC 5869).
+//
+// Turns one high-entropy-but-not-uniform secret — an ECDH shared secret, a master
+// key, a token — into any number of independent, uniformly distributed subkeys.
+// Two steps, and the split matters:
+//
+//   extract(salt, ikm) -> prk    concentrate whatever entropy the input has
+//   expand(prk, info, len) -> okm  spread it over `len` bytes bound to `info`
+//
+// `info` is the domain separator: derive your encryption key with info "enc" and
+// your MAC key with info "mac" from the same PRK and the two are computationally
+// unrelated, so leaking one says nothing about the other. Using the same bytes for
+// both is the mistake this module exists to prevent.
+//
+// HKDF is NOT a password KDF. Its cost is one HMAC per output block, which is
+// exactly what you do not want against a password guesser — use std/pbkdf2 there.
+
+from "std/hmac" import {
+    Hmac
+}
+
+// RFC 5869 §2.3 caps the output at 255 blocks because the counter appended to each
+// T(i) is a single byte.
+fn hkdfExpandCore(prk: &string, info: &string, length: i64, hashLen: i64, mac: (&string, &string) => string): Result<string> {
+    if length < 0 {
+        return Result.Err("hkdf: negative output length " + length.toString())
+    }
+    let maxLen = 255 * hashLen
+    if length > maxLen {
+        return Result.Err("hkdf: output length " + length.toString() + " exceeds 255*HashLen (" + maxLen.toString() + ")")
+    }
+    var okm = ""
+    var prev = ""
+    var counter: i64 = 1
+    while okm.len < length {
+        var block = ""
+        for i in 0..prev.len {
+            block.push(prev[i])
+        }
+        for i in 0..info.len {
+            block.push(info[i])
+        }
+        block.push(counter as u8)
+        let t = mac(prk, block)
+        for i in 0..t.len {
+            if okm.len < length {
+                okm.push(t[i])
+            }
+        }
+        prev = t
+        counter = counter + 1
+    }
+    return Result.Ok(okm)
+}
+
+// Hkdf namespace — Hkdf.sha256(salt, ikm, info, length) for the common one-shot,
+// or extract/expand separately when the PRK is reused across several subkeys.
+pub struct Hkdf {
+}
+
+impl Hkdf {
+    // HKDF-Extract with SHA-256: a 32-byte pseudorandom key.
+    //
+    // An empty `salt` is the RFC's default of HashLen zero bytes — HMAC zero-pads a
+    // short key to the block size, so the two inputs produce the same PRK. A salt
+    // need not be secret, and a random one is what makes the extract step provably
+    // a randomness extractor rather than just a hash.
+    fn extractSha256(salt: &string, ikm: &string): string {
+        return Hmac.sha256Bytes(salt, ikm)
+    }
+
+    // HKDF-Expand with SHA-256. `length` is in bytes and may not exceed 255*32.
+    // `info` binds the output to a purpose; pass "" only when there is exactly one.
+    fn expandSha256(prk: &string, info: &string, length: i64): Result<string> {
+        return hkdfExpandCore(prk, info, length, 32, (k: &string, m: &string) => Hmac.sha256Bytes(k, m))
+    }
+
+    // Extract then expand, SHA-256. The usual entry point.
+    fn sha256(salt: &string, ikm: &string, info: &string, length: i64): Result<string> {
+        let prk = Hkdf.extractSha256(salt, ikm)
+        return Hkdf.expandSha256(prk, info, length)
+    }
+
+    // HKDF-Extract with SHA-512: a 64-byte pseudorandom key.
+    fn extractSha512(salt: &string, ikm: &string): string {
+        return Hmac.sha512Bytes(salt, ikm)
+    }
+
+    // HKDF-Expand with SHA-512. `length` may not exceed 255*64.
+    fn expandSha512(prk: &string, info: &string, length: i64): Result<string> {
+        return hkdfExpandCore(prk, info, length, 64, (k: &string, m: &string) => Hmac.sha512Bytes(k, m))
+    }
+
+    // Extract then expand, SHA-512.
+    fn sha512(salt: &string, ikm: &string, info: &string, length: i64): Result<string> {
+        let prk = Hkdf.extractSha512(salt, ikm)
+        return Hkdf.expandSha512(prk, info, length)
+    }
+
+    // HKDF-Extract with SHA-1: a 20-byte PRK. Present because RFC 5869's own test
+    // vectors cover it and older protocols specify it; prefer the SHA-256 pair.
+    fn extractSha1(salt: &string, ikm: &string): string {
+        return Hmac.sha1Bytes(salt, ikm)
+    }
+
+    // HKDF-Expand with SHA-1. `length` may not exceed 255*20.
+    fn expandSha1(prk: &string, info: &string, length: i64): Result<string> {
+        return hkdfExpandCore(prk, info, length, 20, (k: &string, m: &string) => Hmac.sha1Bytes(k, m))
+    }
+
+    // Extract then expand, SHA-1.
+    fn sha1(salt: &string, ikm: &string, info: &string, length: i64): Result<string> {
+        let prk = Hkdf.extractSha1(salt, ikm)
+        return Hkdf.expandSha1(prk, info, length)
+    }
+}

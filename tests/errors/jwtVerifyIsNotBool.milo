@@ -1,0 +1,17 @@
+// @error: if condition must be bool, got Result_JwtClaims_JwtError
+from "std/jwt" import {
+    Jwt
+}
+
+// `if Jwt.verifyHS256(token, secret)` was the whole problem: it checks the signature
+// and silently accepts a token that expired years ago, or was minted for another
+// audience. Verification returns the claims, so the old spelling has to stop
+// compiling — a caller who wants a yes/no answer writes `.isOk()` and has at least
+// looked at what they are throwing away.
+pub fn main(): i32 {
+    let token = Jwt.signHS256("{\"sub\":\"a\"}", "secret")
+    if Jwt.verifyHS256(token, "secret") {
+        print("authenticated")
+    }
+    return 0
+}

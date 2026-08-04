@@ -1,25 +1,98 @@
 // @expect: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6Im1pbG8iLCJhZG1pbiI6dHJ1ZX0.cLOXONWvn9tpjd1TwQp_UfP_gDAtFrUZA_l2a0l0N9w
-// @expect: verify-ok
-// @expect: badkey-rejected
+// @expect: eyJhbGciOiJIUzM4NCIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6Im1pbG8iLCJhZG1pbiI6dHJ1ZX0.ketcfh3ux3HkAJL9YsxzlxCr8prubkBlvql5llWj1gVmbPm_jj9kAhgHN2ooSeB8
+// @expect: eyJhbGciOiJIUzUxMiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6Im1pbG8iLCJhZG1pbiI6dHJ1ZX0.SiMM5MkMTuHjQkr_9CvhTE8rfTH4b-vyAoYOzrsX8wZZwkhkrYv2ruJDI041ZHpj56x3Pb9dCXPzi9bOtpd_zQ
+// @expect: verify-ok sub=1234567890 admin=true
+// @expect: hs384 ok
+// @expect: hs512 ok
+// @expect: badkey err: signature does not match
+// @expect: rfc7515-a1 ok iss=joe exp=1300819380
+// @expect: rfc7515-a1-later err: token expired at 1300819380
 from "std/jwt" import {
-    Jwt
+    Jwt,
+    JwtAlg,
+    JwtClaims,
+    JwtError,
+    JwtVerifier,
+    jwtErrorMessage
+}
+from "std/base64" import {
+    Base64
 }
 
-// Token is byte-identical to PyJWT/jsonwebtoken for this header+payload+secret.
+fn strOr(v: Option<string>, fallback: &string): string {
+    match v {
+        Option.Some(s) => {
+            return s
+        }
+        Option.None => {
+            return fallback.clone()
+        }
+    }
+}
+
+fn i64Or(v: Option<i64>, fallback: i64): i64 {
+    match v {
+        Option.Some(n) => {
+            return n
+        }
+        Option.None => {
+            return fallback
+        }
+    }
+}
+
+fn report(label: &string, r: Result<JwtClaims, JwtError>): void {
+    match r {
+        Result.Ok(_c) => {
+            print(label + " ok")
+        }
+        Result.Err(e) => {
+            print(label + " err: " + jwtErrorMessage(e))
+        }
+    }
+}
+
+// Tokens are byte-identical to PyJWT/jsonwebtoken for this header+payload+secret,
+// and the RFC 7515 Appendix A.1 example token is verified against the JWK octet key
+// the RFC publishes alongside it — including its CRLF-formatted header, which no
+// round-trip test would ever produce.
 pub fn main(): i32 {
     let secret = "my-secret-key"
     let payload = "{\"sub\":\"1234567890\",\"name\":\"milo\",\"admin\":true}"
     let tok = Jwt.signHS256(payload, secret)
     print(tok)
-    if Jwt.verifyHS256(tok, secret) {
-        print("verify-ok")
-    } else {
-        print("verify-FAIL")
+    print(Jwt.signHS384(payload, secret))
+    print(Jwt.signHS512(payload, secret))
+
+    match Jwt.verifyHS256(tok, secret) {
+        Result.Ok(c) => {
+            print("verify-ok sub=" + strOr(c.subject(), "?") + " admin=" + c.bool("admin").unwrapOr(false).toString())
+        }
+        Result.Err(e) => {
+            print("verify-FAIL " + jwtErrorMessage(e))
+        }
     }
-    if Jwt.verifyHS256(tok, "wrong-key") {
-        print("badkey-FAIL")
-    } else {
-        print("badkey-rejected")
+    report("hs384", Jwt.verifyHS384(Jwt.signHS384(payload, secret), secret))
+    report("hs512", Jwt.verifyHS512(Jwt.signHS512(payload, secret), secret))
+    report("badkey", Jwt.verifyHS256(tok, "wrong-key"))
+
+    // RFC 7515 Appendix A.1: the example HS256 token and the base64url-encoded
+    // 64-byte JWK `k` value that signs it.
+    let rfcToken = "eyJ0eXAiOiJKV1QiLA0KICJhbGciOiJIUzI1NiJ9.eyJpc3MiOiJqb2UiLA0KICJleHAiOjEzMDA4MTkzODAsDQogImh0dHA6Ly9leGFtcGxlLmNvbS9pc19yb290Ijp0cnVlfQ.dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"
+    let Result.Ok(rfcKey) = Base64.urlDecode("AyM1SysPpbyDfgZld3umj1qzKObwVMkoqQ-EstJQLr_T-1qS0gZH75aKtMN3Yj0iPS4hcgUuTwjAzZr1Z9CAow") else {
+        print("rfc key decode FAILED")
+        return 1
     }
+    // `exp` in the RFC's example is 2011-03-22, so the clock is pinned: a fixed
+    // instant is the only way a claim test stays true tomorrow.
+    match JwtVerifier.new(JwtAlg.HS256, rfcKey).at(1300000000).verify(rfcToken) {
+        Result.Ok(c) => {
+            print("rfc7515-a1 ok iss=" + strOr(c.issuer(), "?") + " exp=" + i64Or(c.expiresAt(), 0).toString())
+        }
+        Result.Err(e) => {
+            print("rfc7515-a1 FAIL " + jwtErrorMessage(e))
+        }
+    }
+    report("rfc7515-a1-later", JwtVerifier.new(JwtAlg.HS256, rfcKey).at(1400000000).verify(rfcToken))
     return 0
 }

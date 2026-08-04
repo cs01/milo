@@ -1,0 +1,30 @@
+// std/subtle — comparisons that do not leak *where* two secrets differ.
+//
+// `a == b` on strings stops at the first differing byte. That is the right
+// behaviour for text and the wrong one for a MAC, a session token, or a password
+// digest: the time it takes to fail tells an attacker how many leading bytes were
+// right, which turns a 2^256 forgery into a byte-at-a-time search. Anything you
+// compare against a value derived from a secret goes through `constantTimeEq`.
+//
+// The name follows Go's `crypto/subtle` and Rust's `subtle` crate — this is the
+// same primitive, and it is deliberately in its own module so that "I am comparing
+// something secret" is visible at the import line.
+
+// Byte-for-byte equality whose running time depends only on the *lengths* of the
+// inputs, never on their contents: every byte of both buffers is read and folded
+// into one accumulator, with no early exit.
+//
+// Lengths are treated as public — a length mismatch returns false immediately,
+// because MAC and digest lengths are fixed by the algorithm and known to the
+// attacker anyway. Do not use this to compare values whose length is itself the
+// secret.
+pub fn constantTimeEq(a: &string, b: &string): bool {
+    if a.len != b.len {
+        return false
+    }
+    var diff: i64 = 0
+    for i in 0..a.len {
+        diff = diff | ((a[i] as i64) ^ (b[i] as i64))
+    }
+    return diff == 0
+}

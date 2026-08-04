@@ -1,0 +1,184 @@
+// std/sha512 — pure-Milo SHA-512 and SHA-384 (FIPS 180-4), no platform crypto.
+//
+// Same shape as std/sha256, one size up: 64-bit lanes, a 128-byte block, 80 rounds,
+// and a 128-bit length field. SHA-384 is the identical compression function with a
+// different initial state, truncated to 48 bytes — the truncation is what makes it
+// resistant to the length-extension attack SHA-512 admits.
+//
+// Lanes are `u64`, so `>>` is logical and `.rotateRight` is a single instruction;
+// `@!wrapping` covers the whole file because every add here is mod 2^64 by design
+// (Milo traps on overflow otherwise). Like std/sha256, every branch and memory
+// access is on public data — round index and message length — so the trace is
+// input-independent.
+@!wrapping
+
+let BLOCK512: i64 = 128
+let PAD_TO512: i64 = 112
+
+fn sha512InitH(): [u64; 8] {
+    return [0x6a09e667f3bcc908, 0xbb67ae8584caa73b, 0x3c6ef372fe94f82b, 0xa54ff53a5f1d36f1, 0x510e527fade682d1, 0x9b05688c2b3e6c1f, 0x1f83d9abfb41bd6b, 0x5be0cd19137e2179]
+}
+
+fn sha384InitH(): [u64; 8] {
+    return [0xcbbb9d5dc1059ed8, 0x629a292a367cd507, 0x9159015a3070dd17, 0x152fecd8f70e5939, 0x67332667ffc00b31, 0x8eb44a8768581511, 0xdb0c2e0d64f98fa7, 0x47b5481dbefa4fa4]
+}
+
+fn roundK512(): [u64; 80] {
+    return [0x428a2f98d728ae22, 0x7137449123ef65cd, 0xb5c0fbcfec4d3b2f, 0xe9b5dba58189dbbc, 0x3956c25bf348b538, 0x59f111f1b605d019, 0x923f82a4af194f9b, 0xab1c5ed5da6d8118, 0xd807aa98a3030242, 0x12835b0145706fbe, 0x243185be4ee4b28c, 0x550c7dc3d5ffb4e2, 0x72be5d74f27b896f, 0x80deb1fe3b1696b1, 0x9bdc06a725c71235, 0xc19bf174cf692694, 0xe49b69c19ef14ad2, 0xefbe4786384f25e3, 0x0fc19dc68b8cd5b5, 0x240ca1cc77ac9c65, 0x2de92c6f592b0275, 0x4a7484aa6ea6e483, 0x5cb0a9dcbd41fbd4, 0x76f988da831153b5, 0x983e5152ee66dfab, 0xa831c66d2db43210, 0xb00327c898fb213f, 0xbf597fc7beef0ee4, 0xc6e00bf33da88fc2, 0xd5a79147930aa725, 0x06ca6351e003826f, 0x142929670a0e6e70, 0x27b70a8546d22ffc, 0x2e1b21385c26c926, 0x4d2c6dfc5ac42aed, 0x53380d139d95b3df, 0x650a73548baf63de, 0x766a0abb3c77b2a8, 0x81c2c92e47edaee6, 0x92722c851482353b, 0xa2bfe8a14cf10364, 0xa81a664bbc423001, 0xc24b8b70d0f89791, 0xc76c51a30654be30, 0xd192e819d6ef5218, 0xd69906245565a910, 0xf40e35855771202a, 0x106aa07032bbd1b8, 0x19a4c116b8d2d0c8, 0x1e376c085141ab53, 0x2748774cdf8eeb99, 0x34b0bcb5e19b48a8, 0x391c0cb3c5c95a63, 0x4ed8aa4ae3418acb, 0x5b9cca4f7763e373, 0x682e6ff3d6b2b8a3, 0x748f82ee5defb2fc, 0x78a5636f43172f60, 0x84c87814a1f0ab72, 0x8cc702081a6439ec, 0x90befffa23631e28, 0xa4506cebde82bde9, 0xbef9a3f7b2c67915, 0xc67178f2e372532b, 0xca273eceea26619c, 0xd186b8c721c0c207, 0xeada7dd6cde0eb1e, 0xf57d4f7fee6ed178, 0x06f067aa72176fba, 0x0a637dc5a2c898a6, 0x113f9804bef90dae, 0x1b710b35131c471b, 0x28db77f523047d84, 0x32caab7b40c72493, 0x3c9ebe0a15c9bebc, 0x431d67c49c100d4c, 0x4cc5d4becb3e42b6, 0x597f299cfc657e2a, 0x5fcb6fab3ad6faec, 0x6c44198c4a475817]
+}
+
+// Pad per FIPS 180-4 §5.1.2: append 0x80, zero-fill to 112 mod 128, then the
+// message length as a 128-bit big-endian bit count. The high 64 bits are always
+// zero — a 2^64-bit message is not addressable — but they are emitted so the
+// padding is spec-exact.
+fn _pad512(input: &string): string {
+    var m = ""
+    for i in 0..input.len {
+        m.push(input[i])
+    }
+    m.push(0x80 as u8)
+    while m.len % BLOCK512 != PAD_TO512 {
+        m.push(0 as u8)
+    }
+    for _i in 0..8 {
+        m.push(0 as u8)
+    }
+    let bits = input.len * 8
+    for i in 0..8 {
+        let shift = (7 - i) * 8
+        m.push(((bits >> shift) & 0xff) as u8)
+    }
+    return m
+}
+
+fn _sha512HexNibble(v: i64): u8 {
+    if v < 10 {
+        return (v + 48) as u8
+    }
+    return (v - 10 + 97) as u8
+}
+
+// The shared compression function. `h` is the caller's initial state, which is the
+// only thing separating SHA-512 from SHA-384.
+fn sha512Compress(input: &string, initial: [u64; 8]): [u64; 8] {
+    let m = _pad512(input)
+    var h = initial
+    let k = roundK512()
+
+    var w: Vec<u64> = Vec.new()
+    for _i in 0..80 {
+        w.push(0)
+    }
+
+    let nblocks = m.len / BLOCK512
+    for blk in 0..nblocks {
+        let base = blk * BLOCK512
+        for t in 0..16 {
+            let o = base + t * 8
+            var word: u64 = 0
+            for b in 0..8 {
+                word = (word << 8) | (m[o + b] as u64)
+            }
+            w[t] = word
+        }
+        for t in 16..80 {
+            let x15 = w[t - 15]
+            let s0 = x15.rotateRight(1) ^ x15.rotateRight(8) ^ (x15 >> 7)
+            let x2 = w[t - 2]
+            let s1 = x2.rotateRight(19) ^ x2.rotateRight(61) ^ (x2 >> 6)
+            w[t] = w[t - 16] + s0 + w[t - 7] + s1
+        }
+
+        var a = h[0]
+        var b = h[1]
+        var c = h[2]
+        var d = h[3]
+        var e = h[4]
+        var f = h[5]
+        var g = h[6]
+        var hh = h[7]
+
+        for t in 0..80 {
+            let bigS1 = e.rotateRight(14) ^ e.rotateRight(18) ^ e.rotateRight(41)
+            let ch = (e & f) ^ ((e ^ 0xffffffffffffffff) & g)
+            let t1 = hh + bigS1 + ch + k[t] + w[t]
+            let bigS0 = a.rotateRight(28) ^ a.rotateRight(34) ^ a.rotateRight(39)
+            let maj = (a & b) ^ (a & c) ^ (b & c)
+            let t2 = bigS0 + maj
+            hh = g
+            g = f
+            f = e
+            e = d + t1
+            d = c
+            c = b
+            b = a
+            a = t1 + t2
+        }
+
+        h[0] = h[0] + a
+        h[1] = h[1] + b
+        h[2] = h[2] + c
+        h[3] = h[3] + d
+        h[4] = h[4] + e
+        h[5] = h[5] + f
+        h[6] = h[6] + g
+        h[7] = h[7] + hh
+    }
+    return h
+}
+
+// Serialize the first `nbytes` of the state big-endian.
+fn sha512Serialize(h: &[u64; 8], nbytes: i64): string {
+    var out = ""
+    for i in 0..nbytes {
+        let word = h[i / 8]
+        let shift = ((7 - (i % 8)) * 8) as u64
+        out.push(((word >> shift) & 0xff) as u8)
+    }
+    return out
+}
+
+fn sha512Hex(digest: &string): string {
+    var out = ""
+    for i in 0..digest.len {
+        let byte = digest[i] as i64
+        out.push(_sha512HexNibble((byte >> 4) & 0xf))
+        out.push(_sha512HexNibble(byte & 0xf))
+    }
+    return out
+}
+
+// Sha512 namespace — Sha512.hash(input) 128-char hex, Sha512.bytes(input) 64 raw bytes.
+pub struct Sha512 {
+}
+
+impl Sha512 {
+    // 64-byte SHA-512 digest as 128-char lowercase hex.
+    fn hash(input: &string): string {
+        return sha512Hex(Sha512.bytes(input))
+    }
+
+    // Raw 64-byte SHA-512 digest. Use this when the digest feeds further bytes
+    // (HMAC, key derivation) rather than a display string.
+    fn bytes(input: &string): string {
+        let h = sha512Compress(input, sha512InitH())
+        return sha512Serialize(h, 64)
+    }
+}
+
+// Sha384 namespace — SHA-512 truncated to 48 bytes with a different initial state.
+pub struct Sha384 {
+}
+
+impl Sha384 {
+    // 48-byte SHA-384 digest as 96-char lowercase hex.
+    fn hash(input: &string): string {
+        return sha512Hex(Sha384.bytes(input))
+    }
+
+    // Raw 48-byte SHA-384 digest.
+    fn bytes(input: &string): string {
+        let h = sha512Compress(input, sha384InitH())
+        return sha512Serialize(h, 48)
+    }
+}

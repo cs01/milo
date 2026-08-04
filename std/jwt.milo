@@ -1,11 +1,30 @@
-// std/jwt — JSON Web Tokens, HS256 (RFC 7519 / 7515), pure Milo.
+// std/jwt — JSON Web Tokens (RFC 7519 / 7515) over HMAC-SHA2, pure Milo.
 //
-// Signs and verifies `base64url(header).base64url(payload).base64url(HMAC-SHA256)`
-// on std/hmac + std/base64. HS256 is deterministic, so a token produced here is
-// byte-identical to PyJWT / jsonwebtoken for the same header, payload, and secret.
-// The payload is passed and returned as its raw JSON string — this module owns the
-// JOSE framing, not the claim schema. Verification recomputes the signature and
-// compares constant-time; alg is pinned to HS256 (no "alg":"none" downgrade).
+// Signs and verifies `base64url(header).base64url(payload).base64url(HMAC)` on
+// std/hmac + std/base64. HS256/384/512 are deterministic, so a token produced here
+// is byte-identical to PyJWT / jsonwebtoken for the same header, payload, and
+// secret.
+//
+// Verification returns the **claims**, not a bool. That is deliberate: a verifier
+// that answers yes/no invites `if verify(token, secret) { ... }`, which accepts a
+// token that expired three years ago, was issued for a different audience, or was
+// minted by a different service. The claims are the only thing a caller can act on,
+// and `Result<JwtClaims, JwtError>` makes "I checked the signature" and "I checked
+// that this token is valid right now" the same line of code.
+//
+// Three attacks are handled explicitly rather than incidentally:
+//   * `alg: none` — the header algorithm must equal the one the caller asked for,
+//     so an unsigned token is `UnsupportedAlg("none")`, never a success;
+//   * algorithm confusion — the algorithm comes from the *verifier*, never from the
+//     token, so an attacker cannot pick which primitive validates their forgery;
+//   * signature timing — the recomputed MAC is compared with std/subtle's
+//     `constantTimeEq` on raw bytes, so a forgery leaks nothing about how close it
+//     came, and a re-encoded (non-canonical) base64 signature does not slip past a
+//     text comparison.
+//
+// This module handles HMAC algorithms only. RS*/ES*/PS* need public-key crypto that
+// std does not have; a token carrying one is rejected as unsupported rather than
+// silently downgraded.
 
 from "std/hmac" import {
     Hmac
@@ -13,42 +32,359 @@ from "std/hmac" import {
 from "std/base64" import {
     Base64
 }
-
-// Fixed compact header for HS256; matches the {"alg":"HS256","typ":"JWT"} that
-// mainstream libraries emit, so signatures line up byte-for-byte. A function rather
-// than a module-scope `let` because Milo disallows runtime global initializers.
-fn hs256Header(): string {
-    return "{\"alg\":\"HS256\",\"typ\":\"JWT\"}"
+from "std/json" import {
+    Json
+}
+from "std/subtle" import {
+    constantTimeEq
+}
+from "std/time" import {
+    epochSecs
 }
 
-fn signingInput(payload: &string): string {
-    return Base64.urlEncode(hs256Header()) + "." + Base64.urlEncode(payload)
+// ── Algorithms ──
+
+// The JOSE `alg` values this module can verify. Named, not stringly-typed, so a
+// caller cannot accidentally ask for "none".
+pub enum JwtAlg {
+    HS256,
+    HS384,
+    HS512,
 }
 
-// Sign a JSON payload string with HS256, returning a compact JWS.
-fn jwtSignHS256(payload: &string, secret: &string): string {
-    let si = signingInput(payload)
-    let sig = Base64.urlEncode(Hmac.sha256Bytes(secret, si))
-    return si + "." + sig
-}
-
-// Byte-for-byte string equality that does not short-circuit on the first mismatch,
-// so verification does not leak where a forged signature diverges.
-fn constEq(a: &string, b: &string): bool {
-    if a.len != b.len {
-        return false
+// The JOSE registry name, as it appears in the header.
+pub fn jwtAlgName(alg: &JwtAlg): string {
+    match alg {
+        JwtAlg.HS256 => {
+            return "HS256"
+        }
+        JwtAlg.HS384 => {
+            return "HS384"
+        }
+        JwtAlg.HS512 => {
+            return "HS512"
+        }
     }
-    var diff: i64 = 0
-    for i in 0..a.len {
-        diff = diff | ((a[i] as i64) ^ (b[i] as i64))
-    }
-    return diff == 0
 }
 
-// Verify a compact HS256 JWS against the secret. Returns true iff the token has the
-// exact header.payload.signature shape and the signature matches.
-fn jwtVerifyHS256(token: &string, secret: &string): bool {
-    // Locate the two dots; reject anything that isn't exactly three segments.
+fn jwtMac(alg: &JwtAlg, secret: &string, msg: &string): string {
+    match alg {
+        JwtAlg.HS256 => {
+            return Hmac.sha256Bytes(secret, msg)
+        }
+        JwtAlg.HS384 => {
+            return Hmac.sha384Bytes(secret, msg)
+        }
+        JwtAlg.HS512 => {
+            return Hmac.sha512Bytes(secret, msg)
+        }
+    }
+}
+
+// ── Errors ──
+
+// Why a token was rejected. Callers genuinely recover differently: `Expired` means
+// "refresh and retry", `BadSignature` means "this is an attack or the wrong key",
+// `WrongAudience` means "this token is for another service" — collapsing them into
+// `false` throws away the only information the caller needs.
+pub enum JwtError {
+    // Not three base64url segments, or a segment is not valid base64url / JSON.
+    Malformed(string),
+    // The header's `alg` is not the one the verifier requires. Carries the value
+    // found in the token, so "none" shows up in the log verbatim.
+    UnsupportedAlg(string),
+    // The header carries a `crit` extension this implementation does not understand
+    // (RFC 7515 §4.1.11 requires rejection rather than ignoring it).
+    UnsupportedCritical,
+    // The MAC did not match. No detail: there is nothing safe to report.
+    BadSignature,
+    // `exp` has passed. Carries the expiry, in seconds since the Unix epoch.
+    Expired(i64),
+    // `nbf` is in the future. Carries the not-before time.
+    NotYetValid(i64),
+    // `iat` is in the future — the issuer's clock is wrong or the token is forged.
+    IssuedInFuture(i64),
+    // A required claim (`exp`, or the `aud`/`iss` the verifier demands) is absent.
+    MissingClaim(string),
+    // `aud` is present but does not contain the audience the verifier requires.
+    WrongAudience(string),
+    // `iss` is present but is not the issuer the verifier requires.
+    WrongIssuer(string),
+}
+
+// One-line, log-safe description of a rejection.
+pub fn jwtErrorMessage(err: &JwtError): string {
+    match err {
+        JwtError.Malformed(why) => {
+            return "malformed token: " + why
+        }
+        JwtError.UnsupportedAlg(found) => {
+            return "unsupported or unexpected algorithm '" + found + "'"
+        }
+        JwtError.UnsupportedCritical => {
+            return "header requires an unsupported 'crit' extension"
+        }
+        JwtError.BadSignature => {
+            return "signature does not match"
+        }
+        JwtError.Expired(at) => {
+            return "token expired at " + at.toString()
+        }
+        JwtError.NotYetValid(at) => {
+            return "token not valid before " + at.toString()
+        }
+        JwtError.IssuedInFuture(at) => {
+            return "token issued in the future, at " + at.toString()
+        }
+        JwtError.MissingClaim(name) => {
+            return "missing required claim '" + name + "'"
+        }
+        JwtError.WrongAudience(want) => {
+            return "token audience does not include '" + want + "'"
+        }
+        JwtError.WrongIssuer(want) => {
+            return "token issuer is not '" + want + "'"
+        }
+    }
+}
+
+// ── Claims ──
+
+// The verified payload of a token. Only ever produced by a successful `verify`, so
+// holding one *is* the proof that the signature and the time window checked out.
+pub struct JwtClaims {
+    payload: string,
+    doc: Json,
+}
+
+impl JwtClaims {
+    // The payload segment as its raw JSON text.
+    fn raw(self: &Self): string {
+        return self.payload.clone()
+    }
+
+    // A string-valued claim, or None if absent or not a string.
+    fn str(self: &Self, key: &string): Option<string> {
+        return self.doc.str(key)
+    }
+
+    // An integer-valued claim, or None if absent or not a number.
+    fn i64(self: &Self, key: &string): Option<i64> {
+        return self.doc.i64(key)
+    }
+
+    // A boolean-valued claim, or None if absent or not a boolean.
+    fn bool(self: &Self, key: &string): Option<bool> {
+        return self.doc.bool(key)
+    }
+
+    // `sub` — the subject the token is about (RFC 7519 §4.1.2).
+    fn subject(self: &Self): Option<string> {
+        return self.doc.str("sub")
+    }
+
+    // `iss` — who minted the token (§4.1.1).
+    fn issuer(self: &Self): Option<string> {
+        return self.doc.str("iss")
+    }
+
+    // `jti` — the token's unique id, for replay tracking (§4.1.7).
+    fn tokenId(self: &Self): Option<string> {
+        return self.doc.str("jti")
+    }
+
+    // `exp` — expiry, seconds since the Unix epoch (§4.1.4).
+    fn expiresAt(self: &Self): Option<i64> {
+        return self.doc.i64("exp")
+    }
+
+    // `nbf` — not-before, seconds since the Unix epoch (§4.1.5).
+    fn notBefore(self: &Self): Option<i64> {
+        return self.doc.i64("nbf")
+    }
+
+    // `iat` — issued-at, seconds since the Unix epoch (§4.1.6).
+    fn issuedAt(self: &Self): Option<i64> {
+        return self.doc.i64("iat")
+    }
+
+    // True iff the `aud` claim is `want`, or is an array containing it. RFC 7519
+    // §4.1.3 allows either shape, and a verifier that only understands the string
+    // form silently accepts every multi-audience token.
+    fn hasAudience(self: &Self, want: &string): bool {
+        return audienceMatches(self.doc, want) == 1
+    }
+}
+
+// -1 no `aud` claim at all, 0 present but no match, 1 match. Three outcomes because
+// the caller reports "missing claim" and "wrong audience" differently.
+fn audienceMatches(doc: &Json, want: &string): i64 {
+    let cur = doc.curField(doc.curRoot(), "aud")
+    let kind = doc.curKind(cur)
+    if kind < 0 {
+        return -1
+    }
+    if kind == 3 {
+        match doc.curStr(cur) {
+            Option.Some(v) => {
+                if v == want {
+                    return 1
+                }
+                return 0
+            }
+            Option.None => {
+                return 0
+            }
+        }
+    }
+    if kind == 4 {
+        for i in 0..doc.curLen(cur) {
+            match doc.curStr(doc.curChild(cur, i)) {
+                Option.Some(v) => {
+                    if v == want {
+                        return 1
+                    }
+                }
+                Option.None => {
+                }
+            }
+        }
+        return 0
+    }
+    return 0
+}
+
+// ── Signing ──
+
+// Compact header for `alg`; matches the {"alg":...,"typ":"JWT"} that mainstream
+// libraries emit, so signatures line up byte-for-byte. A function rather than a
+// module-scope `let` because Milo disallows runtime global initializers.
+fn joseHeader(alg: &JwtAlg): string {
+    return "{\"alg\":\"" + jwtAlgName(alg) + "\",\"typ\":\"JWT\"}"
+}
+
+fn signingInput(alg: &JwtAlg, payload: &string): string {
+    return Base64.urlEncode(joseHeader(alg)) + "." + Base64.urlEncode(payload)
+}
+
+fn jwtSign(alg: &JwtAlg, payload: &string, secret: &string): string {
+    let si = signingInput(alg, payload)
+    return si + "." + Base64.urlEncode(jwtMac(alg, secret, si))
+}
+
+// ── Verification ──
+
+// Default tolerance, in seconds, for the two clocks involved being out of step.
+// Small enough that an expired token is not usable for long, large enough that a
+// machine whose NTP drifted by a few seconds does not reject every token.
+pub let JWT_DEFAULT_LEEWAY: i64 = 60
+
+// A configured verifier: the algorithm and secret to require, plus which claims to
+// insist on. Build one with `JwtVerifier.new`, chain the options you need, and call
+// `verify`. Reusing a verifier is the point — the policy lives in one place instead
+// of being re-spelled at every call site.
+pub struct JwtVerifier {
+    secret: string,
+    alg: JwtAlg,
+    leewaySecs: i64,
+    // Seconds since the epoch, or -1 to read the system clock at verify time.
+    // A fixed value makes claim validation deterministic in tests.
+    nowSecs: i64,
+    // "" means "do not check". An empty audience or issuer is not meaningful, so
+    // there is no ambiguity between "unset" and "must equal the empty string".
+    audience: string,
+    issuer: string,
+    requireExp: bool,
+}
+
+impl JwtVerifier {
+    // A verifier that requires `alg` and `secret`, allows JWT_DEFAULT_LEEWAY of
+    // clock skew, and validates whatever of `exp`/`nbf`/`iat` the token carries.
+    //
+    // The secret is borrowed and copied in: a verifier is usually built per request
+    // from one long-lived secret, and taking ownership would move that secret out
+    // of the caller's variable on first use.
+    fn new(alg: JwtAlg, secret: &string): JwtVerifier {
+        return JwtVerifier {
+            secret: secret.clone(),
+            alg: alg,
+            leewaySecs: JWT_DEFAULT_LEEWAY,
+            nowSecs: -1,
+            audience: "",
+            issuer: "",
+            requireExp: false,
+        }
+    }
+
+    // Tolerate `secs` of clock skew in both directions on exp/nbf/iat.
+    fn leeway(self: JwtVerifier, secs: i64): JwtVerifier {
+        var v = self
+        v.leewaySecs = secs
+        return v
+    }
+
+    // Evaluate the time claims against a fixed instant instead of the system clock.
+    // Seconds since the Unix epoch. This is what makes a claim test reproducible.
+    fn at(self: JwtVerifier, unixSecs: i64): JwtVerifier {
+        var v = self
+        v.nowSecs = unixSecs
+        return v
+    }
+
+    // Require an `aud` claim naming `want` (string or array form).
+    fn audience(self: JwtVerifier, want: string): JwtVerifier {
+        var v = self
+        v.audience = want
+        return v
+    }
+
+    // Require an `iss` claim equal to `want`.
+    fn issuer(self: JwtVerifier, want: string): JwtVerifier {
+        var v = self
+        v.issuer = want
+        return v
+    }
+
+    // Reject a token that carries no `exp` at all. Off by default because the claim
+    // is optional in RFC 7519; turn it on for anything session-shaped, where a
+    // token that never expires is a permanent credential.
+    fn requireExpiry(self: JwtVerifier): JwtVerifier {
+        var v = self
+        v.requireExp = true
+        return v
+    }
+
+    // Check the signature and the claims, and hand back the payload.
+    fn verify(self: &Self, token: &string): Result<JwtClaims, JwtError> {
+        return jwtVerify(self, token)
+    }
+}
+
+// Byte range [start, end) of `s` as its own string.
+fn jwtSegment(s: &string, start: i64, end: i64): string {
+    var out = ""
+    for i in start..end {
+        out.push(s[i])
+    }
+    return out
+}
+
+// base64url-decode one segment, turning a decode failure into a JwtError that names
+// which segment was bad. Separate so the verify path can use `?`.
+fn jwtDecodeSegment(seg: string, what: &string): Result<string, JwtError> {
+    match Base64.urlDecode(seg) {
+        Result.Ok(v) => {
+            return Result.Ok(v)
+        }
+        Result.Err(e) => {
+            return Result.Err(JwtError.Malformed(what + " segment: " + e))
+        }
+    }
+}
+
+fn jwtVerify(v: &JwtVerifier, token: &string): Result<JwtClaims, JwtError> {
+    // Exactly three segments. Counting every dot (rather than splitting on the
+    // first two) is what rejects a four-segment JWE handed to a JWS verifier.
     var firstDot: i64 = -1
     var lastDot: i64 = -1
     var dots: i64 = 0
@@ -62,29 +398,171 @@ fn jwtVerifyHS256(token: &string, secret: &string): bool {
         }
     }
     if dots != 2 {
-        return false
+        return Result.Err(JwtError.Malformed("expected 3 segments, found " + (dots + 1).toString()))
     }
-    var signingInput = ""
-    for i in 0..lastDot {
-        signingInput.push(token[i])
+    if firstDot == 0 || lastDot == firstDot + 1 || lastDot == token.len - 1 {
+        return Result.Err(JwtError.Malformed("empty segment"))
     }
-    var sig = ""
-    for i in (lastDot + 1)..token.len {
-        sig.push(token[i])
+
+    // Header: decode, parse, and settle the algorithm question before touching the
+    // signature, so an `alg: none` token is named as such in the error.
+    let headerText = jwtDecodeSegment(jwtSegment(token, 0, firstDot), "header")?
+    let Result.Ok(header) = Json.parse(headerText) else {
+        return Result.Err(JwtError.Malformed("header is not valid JSON"))
     }
-    let expected = Base64.urlEncode(Hmac.sha256Bytes(secret, signingInput))
-    return constEq(sig, expected)
+    if !header.isObject() {
+        return Result.Err(JwtError.Malformed("header is not a JSON object"))
+    }
+    if header.curKind(header.curField(header.curRoot(), "crit")) >= 0 {
+        return Result.Err(JwtError.UnsupportedCritical)
+    }
+    let want = jwtAlgName(v.alg)
+    match header.str("alg") {
+        Option.Some(found) => {
+            if found != want {
+                return Result.Err(JwtError.UnsupportedAlg(found))
+            }
+        }
+        Option.None => {
+            return Result.Err(JwtError.Malformed("header has no 'alg'"))
+        }
+    }
+
+    // Signature: recompute over the exact bytes the token presented, and compare the
+    // raw MACs. Decoding the signature (rather than re-encoding ours) also rejects
+    // a non-canonical base64url encoding of an otherwise valid MAC.
+    let sigSegment = jwtSegment(token, lastDot + 1, token.len)
+    let presented = jwtDecodeSegment(sigSegment.clone(), "signature")?
+    let expected = jwtMac(v.alg, v.secret, jwtSegment(token, 0, lastDot))
+    if !constantTimeEq(presented, expected) {
+        return Result.Err(JwtError.BadSignature)
+    }
+    // base64url leaves the trailing bits of the last symbol unused, so several
+    // encodings decode to the same MAC. All but one are non-canonical, and
+    // accepting them would let an attacker mint distinct token *strings* that carry
+    // one valid signature — enough to walk past a replay blocklist keyed on the
+    // token text. Ordinary `==` is fine here: the MAC already matched, so this
+    // comparison is over bytes the caller just proved they hold.
+    if Base64.urlEncode(presented) != sigSegment {
+        return Result.Err(JwtError.Malformed("signature is not canonical base64url"))
+    }
+
+    // Only now is the payload worth parsing: everything below this line is data the
+    // holder of the secret vouched for.
+    let payloadText = jwtDecodeSegment(jwtSegment(token, firstDot + 1, lastDot), "payload")?
+    let Result.Ok(doc) = Json.parse(payloadText.clone()) else {
+        return Result.Err(JwtError.Malformed("payload is not valid JSON"))
+    }
+    if !doc.isObject() {
+        return Result.Err(JwtError.Malformed("payload is not a JSON object"))
+    }
+
+    var now = v.nowSecs
+    if now < 0 {
+        now = epochSecs()
+    }
+    let skew = v.leewaySecs
+
+    match doc.i64("exp") {
+        Option.Some(exp) => {
+            if now - skew >= exp {
+                return Result.Err(JwtError.Expired(exp))
+            }
+        }
+        Option.None => {
+            if v.requireExp {
+                return Result.Err(JwtError.MissingClaim("exp"))
+            }
+        }
+    }
+    match doc.i64("nbf") {
+        Option.Some(nbf) => {
+            if now + skew < nbf {
+                return Result.Err(JwtError.NotYetValid(nbf))
+            }
+        }
+        Option.None => {
+        }
+    }
+    match doc.i64("iat") {
+        Option.Some(iat) => {
+            if now + skew < iat {
+                return Result.Err(JwtError.IssuedInFuture(iat))
+            }
+        }
+        Option.None => {
+        }
+    }
+    if v.audience.len > 0 {
+        let m = audienceMatches(doc, v.audience)
+        if m < 0 {
+            return Result.Err(JwtError.MissingClaim("aud"))
+        }
+        if m == 0 {
+            return Result.Err(JwtError.WrongAudience(v.audience.clone()))
+        }
+    }
+    if v.issuer.len > 0 {
+        match doc.str("iss") {
+            Option.Some(iss) => {
+                if iss != v.issuer {
+                    return Result.Err(JwtError.WrongIssuer(v.issuer.clone()))
+                }
+            }
+            Option.None => {
+                return Result.Err(JwtError.MissingClaim("iss"))
+            }
+        }
+    }
+
+    return Result.Ok(JwtClaims {
+        payload: payloadText,
+        doc: doc,
+    }
+    )
 }
 
-// Jwt namespace — Jwt.signHS256(payload,secret), Jwt.verifyHS256(token,secret).
+// Jwt namespace — Jwt.signHS256(payload, secret) and Jwt.verifyHS256(token, secret)
+// for the common case; JwtVerifier when you need audience, issuer, or a fixed clock.
 pub struct Jwt {
 }
 
 impl Jwt {
-    fn signHS256(payload: &string, secret: &string): string {
-        return jwtSignHS256(payload, secret)
+    // Sign a JSON payload string with `alg`, returning a compact JWS.
+    fn sign(alg: JwtAlg, payload: &string, secret: &string): string {
+        return jwtSign(alg, payload, secret)
     }
-    fn verifyHS256(token: &string, secret: &string): bool {
-        return jwtVerifyHS256(token, secret)
+
+    // Sign with HMAC-SHA256 — the JWT default.
+    fn signHS256(payload: &string, secret: &string): string {
+        return jwtSign(JwtAlg.HS256, payload, secret)
+    }
+
+    // Sign with HMAC-SHA384.
+    fn signHS384(payload: &string, secret: &string): string {
+        return jwtSign(JwtAlg.HS384, payload, secret)
+    }
+
+    // Sign with HMAC-SHA512.
+    fn signHS512(payload: &string, secret: &string): string {
+        return jwtSign(JwtAlg.HS512, payload, secret)
+    }
+
+    // Verify an HS256 token against `secret` and return its claims. Rejects any
+    // other algorithm (including `none`), a bad signature, and a token that is
+    // expired or not yet valid, allowing JWT_DEFAULT_LEEWAY of clock skew.
+    // Use `JwtVerifier` to require an audience or issuer, or to fix the clock.
+    fn verifyHS256(token: &string, secret: &string): Result<JwtClaims, JwtError> {
+        return JwtVerifier.new(JwtAlg.HS256, secret).verify(token)
+    }
+
+    // Verify an HS384 token. Same checks as `verifyHS256`.
+    fn verifyHS384(token: &string, secret: &string): Result<JwtClaims, JwtError> {
+        return JwtVerifier.new(JwtAlg.HS384, secret).verify(token)
+    }
+
+    // Verify an HS512 token. Same checks as `verifyHS256`.
+    fn verifyHS512(token: &string, secret: &string): Result<JwtClaims, JwtError> {
+        return JwtVerifier.new(JwtAlg.HS512, secret).verify(token)
     }
 }

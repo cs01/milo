@@ -246,8 +246,12 @@ export default defineConfig({
               items: [
                 { text: 'std/crypto', link: '/stdlib/crypto' },
                 { text: 'std/sha256', link: '/stdlib/sha256' },
+                { text: 'std/sha512', link: '/stdlib/sha512' },
                 { text: 'std/sha1', link: '/stdlib/sha1' },
                 { text: 'std/hmac', link: '/stdlib/hmac' },
+                { text: 'std/subtle', link: '/stdlib/subtle' },
+                { text: 'std/hkdf', link: '/stdlib/hkdf' },
+                { text: 'std/pbkdf2', link: '/stdlib/pbkdf2' },
                 { text: 'std/jwt', link: '/stdlib/jwt' },
                 { text: 'std/totp', link: '/stdlib/totp' },
                 { text: 'std/base32', link: '/stdlib/base32' },

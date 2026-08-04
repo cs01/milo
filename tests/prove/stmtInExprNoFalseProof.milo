@@ -1,0 +1,74 @@
+// @failed: 3
+// Statements nest inside EXPRESSIONS in this language: the arms of an if-expr and a
+// match-expr, and a closure body, are all `Stmt[]`. A walker that descends only the
+// statement fields of a statement therefore never sees them.
+//
+// That was a FALSE PROOF, not a missed one. Loop havoc asks "what does this block assign"
+// to decide what it must forget; an assignment it cannot see leaves the pre-loop binding
+// in force, and every one of the three functions below PROVED `ensures result == 0` while
+// returning 100. Each writes 100 to `x` from a different expression-nested position, so
+// this fixture stays honest only while the walker is total — reachability, not a list of
+// the three spellings someone happened to think of.
+//
+// The `@proven`/`@unknown` tallies are deliberately unannotated: the refutations are the
+// claim here, and pinning the rest would couple this fixture to solver precision.
+
+// Assignment inside an if-expression arm.
+pub fn viaIfExpr(): i64
+ensures result == 0
+{
+    var x = 0
+    var i = 0
+    while i < 3 {
+        let d = if i > 0 {
+            x = 100
+            1
+        } else {
+            0
+        }
+        i = i + d + 1
+    }
+    return x
+}
+
+// Assignment inside a match-expression arm.
+pub fn viaMatchExpr(): i64
+ensures result == 0
+{
+    var x = 0
+    var i = 0
+    while i < 3 {
+        let d = match i {
+            1 => {
+                x = 100
+                7
+            }
+            _ => {
+                0
+            }
+        }
+        i = i + d + 1
+    }
+    return x
+}
+
+// Assignment inside a closure body.
+pub fn viaClosure(): i64
+ensures result == 0
+{
+    var x = 0
+    var i = 0
+    while i < 3 {
+        let bump = () => {
+            x = 100
+        }
+        bump()
+        i = i + 1
+    }
+    return x
+}
+
+pub fn main(): i32 {
+    print(viaIfExpr() + viaMatchExpr() + viaClosure())
+    return 0
+}

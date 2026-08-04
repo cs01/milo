@@ -41,6 +41,25 @@ test("`/` and `%` model Milo's truncation, not SMT-LIB's Euclidean division", ()
   expect(out).toMatch(/✗\s*\[postcondition\]\s*wrong/);
 });
 
+// A third failure mode: the walker never REACHING the code. Statements nest inside
+// expressions here (if-expr arms, match-expr arms, closure bodies are all `Stmt[]`), and a
+// walker that enumerated statement fields by hand never descended into any of them — so
+// loop havoc could not see `x = 100` and left `x` at its pre-loop value. All three
+// spellings proved `ensures result == 0` for a function returning 100.
+//
+// The fix was to route every "find X anywhere beneath" walker in verify.ts through one
+// total reflective descent, so reachability stops being a list someone has to maintain.
+// This test is the guard on that: it pins the three known spellings, but the property it
+// stands for is that a NEW expression-nested statement form needs no edit to be covered.
+test("statements nested in expressions are reachable by the walkers", () => {
+  const out = proveZ3(join(import.meta.dir, "prove", "stmtInExprNoFalseProof.milo"))
+    .replace(/\x1b\[[0-9;]*m/g, "");
+  expect(out).toMatch(/proven:\s*0\s+failed:\s*3\s+unknown:\s*0\s+errors:\s*0/);
+  for (const fn of ["viaIfExpr", "viaMatchExpr", "viaClosure"]) {
+    expect(out).toMatch(new RegExp(`✗\\s*\\[postcondition\\]\\s*${fn}`));
+  }
+});
+
 test("no false proofs: a `proven` contract survives execution", () => {
   let out = "";
   let failed = false;

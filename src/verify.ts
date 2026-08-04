@@ -400,33 +400,49 @@ function truncDivToSmt(op: string, leftStr: string, rightStr: string, rightConst
 // Every variable a statement list assigns to, including through nested control flow.
 // A loop's effect on the environment is unbounded, so these are the names that have to be
 // replaced by fresh unknowns (havoc) before execution can continue past it.
-function collectAssignedVars(stmts: Stmt[], out: Set<string>): void {
-  for (const stmt of stmts) {
-    switch (stmt.kind) {
-      case "Assign":
-        if (stmt.target.kind === "Ident") out.add(stmt.target.name);
-        else if (stmt.target.kind === "FieldAccess") {
-          const flat = flattenFieldAccess(stmt.target);
-          if (flat) out.add(flat);
-        }
-        break;
-      case "IfStmt":
-        collectAssignedVars(stmt.thenBody, out);
-        if (stmt.elseBody) collectAssignedVars(stmt.elseBody, out);
-        break;
-      case "IfLetStmt":
-        collectAssignedVars(stmt.thenBody, out);
-        if (stmt.elseBody) collectAssignedVars(stmt.elseBody, out);
-        break;
-      case "WhileStmt": collectAssignedVars(stmt.body, out); break;
-      case "ForInStmt": collectAssignedVars(stmt.body, out); break;
-      case "UnsafeBlock": collectAssignedVars(stmt.body, out); break;
-      case "LetElseStmt": collectAssignedVars(stmt.elseBody, out); break;
-      case "MatchStmt":
-        for (const arm of stmt.arms) collectAssignedVars(arm.body, out);
-        break;
-    }
+// The one definition of "what is inside this node". Every walker that has to find
+// something ANYWHERE beneath a node goes through here, because the alternative — each
+// walker naming the fields it happens to know about — is fail-OPEN: a field nobody listed
+// is silently not traversed, and in a prover "silently not traversed" is how a stale fact
+// survives into a proof.
+//
+// This file had four different answers to the question, and three of them were wrong in
+// different places. The costly one: statements nest inside EXPRESSIONS in this language
+// (`IfExpr`/`MatchExpr` arms and closure bodies are all `Stmt[]`), and the assigned-vars
+// walker only ever descended statement fields. So `x = 100` inside an if-expr arm was
+// invisible to loop havoc, and
+//     var x = 0; while .. { let d = if .. { x = 100 \n 1 } else { 0 } .. }; return x
+// PROVED `ensures result == 0` for a function that returns 100.
+//
+// Total by construction: every own property is descended except `span` (source positions
+// carry no nodes). An AST node kind added tomorrow is traversed with no edit here — which
+// is the actual point. `visit` returning false prunes that subtree; anything else descends.
+function walkNodes(node: unknown, visit: (n: any) => boolean | void, seen = new Set<unknown>()): void {
+  if (!node || typeof node !== "object" || seen.has(node)) return;
+  seen.add(node);
+  if (Array.isArray(node)) {
+    for (const x of node) walkNodes(x, visit, seen);
+    return;
   }
+  const n = node as Record<string, unknown>;
+  if (typeof n.kind === "string" && visit(n) === false) return;
+  // Read the keys AFTER visit: rewriteStaticCalls rewrites a node in place and relies on
+  // the descent seeing its new shape.
+  for (const key of Object.keys(n)) {
+    if (key === "span") continue;
+    walkNodes(n[key], visit, seen);
+  }
+}
+
+function collectAssignedVars(stmts: Stmt[], out: Set<string>): void {
+  walkNodes(stmts, n => {
+    if (n.kind !== "Assign") return;
+    if (n.target?.kind === "Ident") out.add(n.target.name);
+    else {
+      const flat = flattenFieldAccess(n.target);
+      if (flat) out.add(flat);
+    }
+  });
 }
 
 // A loop that needs establishment/preservation obligations proved, captured while walking
@@ -544,23 +560,16 @@ function collectCallsInExpr(expr: Expr, conds: string[], env: Map<string, string
 // set of `${typeName}.${method}`; enum-variant keys are excluded by the caller so a real
 // construction that happens to share a name is never rewritten.
 function rewriteStaticCalls(node: any, implKeys: Set<string>): void {
-  if (!node || typeof node !== "object") return;
-  if (Array.isArray(node)) { for (const x of node) rewriteStaticCalls(x, implKeys); return; }
-  if (node.kind === "EnumLit" && typeof node.enumName === "string" && typeof node.variant === "string"
-      && implKeys.has(`${node.enumName}.${node.variant}`)) {
-    const func = `${node.enumName}.${node.variant}`;
-    const args = node.args ?? [];
-    for (const k of Object.keys(node)) delete node[k];
-    node.kind = "Call";
-    node.func = func;
-    node.args = args;
-    rewriteStaticCalls(args, implKeys);
-    return;
-  }
-  for (const k of Object.keys(node)) {
-    if (k === "span") continue;
-    rewriteStaticCalls(node[k], implKeys);
-  }
+  walkNodes(node, n => {
+    if (n.kind !== "EnumLit" || typeof n.enumName !== "string" || typeof n.variant !== "string") return;
+    if (!implKeys.has(`${n.enumName}.${n.variant}`)) return;
+    const func = `${n.enumName}.${n.variant}`;
+    const args = n.args ?? [];
+    for (const k of Object.keys(n)) delete n[k];
+    n.kind = "Call";
+    n.func = func;
+    n.args = args;
+  });
 }
 
 // Every function in the program, for looking up a callee's parameter modes. Set once per
@@ -699,25 +708,19 @@ interface MutatingCall {
   mutTargets: Map<string, string>;
 }
 
-function collectMutatingCalls(node: any, out: MutatingCall[], seen = new Set<any>()): void {
-  if (!node || typeof node !== "object" || seen.has(node)) return;
-  seen.add(node);
-  if (node.kind === "Call" && typeof node.func === "string" && Array.isArray(node.args)) {
-    const callee = FN_TABLE.get(node.func);
-    if (callee && callee.contracts.some(c => c.kind === "ensures") && callee.params.length === node.args.length) {
-      const mutTargets = new Map<string, string>();
-      callee.params.forEach((p, i) => {
-        if (!p.type?.isRefMut && !p.type?.isPtr) return;
-        const base = mutationBase(node.args[i]);
-        if (base !== null && MUTABLE_NAMES.has(base)) mutTargets.set(p.name, base);
-      });
-      if (mutTargets.size > 0) out.push({ callee, args: node.args, mutTargets });
-    }
-  }
-  for (const v of Object.values(node)) {
-    if (Array.isArray(v)) v.forEach(x => collectMutatingCalls(x, out, seen));
-    else if (v && typeof v === "object") collectMutatingCalls(v, out, seen);
-  }
+function collectMutatingCalls(node: any, out: MutatingCall[]): void {
+  walkNodes(node, n => {
+    if (n.kind !== "Call" || typeof n.func !== "string" || !Array.isArray(n.args)) return;
+    const callee = FN_TABLE.get(n.func);
+    if (!callee || !callee.contracts.some(c => c.kind === "ensures") || callee.params.length !== n.args.length) return;
+    const mutTargets = new Map<string, string>();
+    callee.params.forEach((p, i) => {
+      if (!p.type?.isRefMut && !p.type?.isPtr) return;
+      const base = mutationBase(n.args[i]);
+      if (base !== null && MUTABLE_NAMES.has(base)) mutTargets.set(p.name, base);
+    });
+    if (mutTargets.size > 0) out.push({ callee, args: n.args, mutTargets });
+  });
 }
 
 // A struct argument is not one symbol on the caller side — each field it carries has its
@@ -758,9 +761,7 @@ function mutationBase(e: any): string | null {
 // A method call havocs its receiver unconditionally: resolving which `impl` a method comes
 // from (and whether it takes `&mut self`) needs the checker's tables, which are not
 // available here. Over-havocking costs precision; under-havocking costs correctness.
-function collectMutations(node: any, out: Set<string>, seen = new Set<any>()): void {
-  if (!node || typeof node !== "object" || seen.has(node)) return;
-  seen.add(node);
+function collectMutations(node: any, out: Set<string>): void {
   const target = (e: any): string | null => {
     const n = base(e);
     return n !== null && MUTABLE_NAMES.has(n) ? n : null;
@@ -780,35 +781,33 @@ function collectMutations(node: any, out: Set<string>, seen = new Set<any>()): v
     const flat = flattenFieldAccess(e as Expr);
     return flat;
   };
-  if (node.kind === "Call" && typeof node.func === "string" && Array.isArray(node.args)) {
-    const callee = FN_TABLE.get(node.func);
-    if (PURE_FN_NAMES.has(node.func)) {
-      // Nothing to havoc — but keep walking the arguments, which may themselves contain
-      // calls that do mutate.
-    } else if (callee) {
-      callee.params.forEach((p, i) => {
-        if (!p.type?.isRefMut && !p.type?.isPtr) return;
-        const n = target(node.args[i]);
-        if (n) out.add(n);
-      });
-    } else {
-      // Unknown callee (function pointer, closure, unresolved): assume the worst.
-      for (const a of node.args) { const n = target(a); if (n) out.add(n); }
+  walkNodes(node, n => {
+    if (n.kind === "Call" && typeof n.func === "string" && Array.isArray(n.args)) {
+      const callee = FN_TABLE.get(n.func);
+      if (PURE_FN_NAMES.has(n.func)) {
+        // Nothing to havoc — but keep walking the arguments, which may themselves contain
+        // calls that do mutate.
+      } else if (callee) {
+        callee.params.forEach((p, i) => {
+          if (!p.type?.isRefMut && !p.type?.isPtr) return;
+          const name = target(n.args[i]);
+          if (name) out.add(name);
+        });
+      } else {
+        // Unknown callee (function pointer, closure, unresolved): assume the worst.
+        for (const a of n.args) { const name = target(a); if (name) out.add(name); }
+      }
     }
-  }
-  if (node.kind === "MethodCall" && !PURE_METHOD_NAMES.has(node.method)) {
-    // Havoc the FIELD PATH the method was called on, not the whole receiver: `a.data.push(v)`
-    // cannot touch `a.live`, and wiping every field of `a` made a type invariant about a
-    // sibling field unprovable for every function that pushes to a vec — which is most of
-    // them. The root itself still goes, since the aggregate value did change.
-    const path = fieldPath(node.object);
-    if (path !== null) out.add(path);
-    else { const n = target(node.object); if (n) out.add(n); }
-  }
-  for (const v of Object.values(node)) {
-    if (Array.isArray(v)) v.forEach(x => collectMutations(x, out, seen));
-    else if (v && typeof v === "object") collectMutations(v, out, seen);
-  }
+    if (n.kind === "MethodCall" && !PURE_METHOD_NAMES.has(n.method)) {
+      // Havoc the FIELD PATH the method was called on, not the whole receiver: `a.data.push(v)`
+      // cannot touch `a.live`, and wiping every field of `a` made a type invariant about a
+      // sibling field unprovable for every function that pushes to a vec — which is most of
+      // them. The root itself still goes, since the aggregate value did change.
+      const path = fieldPath(n.object);
+      if (path !== null) out.add(path);
+      else { const name = target(n.object); if (name) out.add(name); }
+    }
+  });
 }
 
 // The declared type of an unannotated local, as far as its initializer reveals it. Only

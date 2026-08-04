@@ -11,6 +11,39 @@ last-verified: 2026-08-03
 Source-level breaks, newest first. Milo is pre-1.0 and does not promise
 compatibility, but every break belongs here with the migration spelled out.
 
+## `std/log` — namespace object, levels, fields, sinks (2026-08-03)
+
+The four free functions are replaced by the `Log` namespace object. Logging is
+now filtered (default threshold `Info`, so debug records need an explicit
+`setLevel`), can carry structured fields, and can be redirected off stderr.
+
+```milo
+// before
+from "std/log" import { logDebug, logInfo, logWarn, logError }
+logInfo("server starting")
+logDebug("trace info")            // always printed
+
+// after
+from "std/log" import { Log, LogLevel }
+Log.info("server starting")
+Log.setLevel(LogLevel.Debug)      // debug is below the default threshold
+Log.debug("trace info")
+Log.str("path", p).int("bytes", n).warn("upload retried")
+```
+
+`logDebug`/`logInfo`/`logWarn`/`logError` are removed with no alias: two
+spellings for one operation is the coherence defect this change exists to fix.
+
+Also new: `Log.setLevel`/`level`/`isEnabled`, `Log.setFormat(LogFormat.Json)`,
+`Log.setTimestamps(false)`, `Log.setSinkFd(fd)`, `Log.setSinkPath(path)`, and
+`Logger.new(name)` for per-subsystem tagging. Records now carry an ISO-8601 UTC
+timestamp by default; the old format printed a bare epoch-seconds integer.
+
+Configure at startup, before spawning tasks: the config globals are single-word
+and unsynchronized, and `setSinkPath` can close a descriptor under an in-flight
+write. Records themselves never tear — each renders once and reaches the sink in
+one `write(2)`, with control bytes escaped so a newline cannot fake a boundary.
+
 ## `Base64.decode`, `Base32.decode`, `Hex.decode`, `Csv.parse` return `Result` (2026-08-03)
 
 All four silently produced plausible output from malformed input: a bad character

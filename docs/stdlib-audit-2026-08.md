@@ -258,7 +258,13 @@ Ranked by how often real programs hit them.
   Compare Go `testing.T` (`t.Run`, benchmarks), Rust `assert_eq!` over any `Debug`, Node
   `node:test` `describe`/`it`.
 
-- [ ] **`std/log` has no levels, fields, or sinks.** `logDebug`/`logInfo`/`logWarn`/`logError`
+- [x] **`std/log` has no levels, fields, or sinks.** *Now `Log` namespace object: `LogLevel`
+  threshold (default `Info`), fluent structured fields (`Log.str(k,v).int(k,n).info(msg)`),
+  text/JSON formats, `setSinkFd`/`setSinkPath`, `Logger.new(name)`. Old free functions removed,
+  no alias. No `Mutex` re-added: a record renders once and lands in one `write(2)` with control
+  bytes escaped, so concurrent records interleave whole — verified 600/600 across 3 concurrent
+  tasks. Config mutation is documented startup-only; `setSinkFd` takes an fd whose lifetime the
+  type system can't check (second-class refs), documented as the caller's obligation.* `logDebug`/`logInfo`/`logWarn`/`logError`
   and nothing else — no `setLevel`, no structured fields, no output redirection, no logger
   instances. Compare Go `log/slog`, Rust `log`/`tracing`.
 

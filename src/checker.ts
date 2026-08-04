@@ -1302,6 +1302,11 @@ export class TypeChecker {
       // generic that declared them.
       ...(generic.decl.attributes && { attributes: generic.decl.attributes }),
       ...(generic.decl.fromWrappingModule && { fromWrappingModule: true }),
+      // The instance belongs to the file that DEFINED the generic, not the one that
+      // happened to instantiate it — its code is the generic's body. Unlike the impl-method
+      // paths below, this decl is built field by field rather than spread from the generic,
+      // so the origin has to be carried explicitly or the instance arrives with none.
+      ...(generic.decl.sourceFile && { sourceFile: generic.decl.sourceFile }),
     };
     this.monomorphizedFns.push(concreteDecl);
 
@@ -2156,6 +2161,20 @@ export class TypeChecker {
     return null;
   }
 
+  // A synthesized method has no source of its own, so it inherits the struct's file.
+  // Without this it reaches the HIR with no origin at all: invisible to DWARF (what the
+  // field is for) and to anything that groups definitions by module.
+  //
+  // Stamped in the generators rather than at the `@derive` call site because Eq is ALSO
+  // auto-derived for every eligible struct that never asked for it — that path calls
+  // `deriveEq` directly, and stamping only the explicit route left 40 of 1006 functions
+  // in `java-dap` with no origin.
+  private stampOrigin(impl: import("./ast").ImplDecl, s: StructDecl): import("./ast").ImplDecl {
+    const file = s.span?.file;
+    if (file) for (const m of impl.methods) m.sourceFile ??= file;
+    return impl;
+  }
+
   // Structs whose `toJson`/`fromJsonNode` exist: derived, or hand-written by the
   // user. A nested field type must be in this set, otherwise the generated call
   // fails deep inside code the user never wrote.
@@ -2300,7 +2319,7 @@ export class TypeChecker {
       return null;
     }
     for (const m of impl.methods) m.sourceFile = s.span?.file;
-    return impl;
+    return this.stampOrigin(impl, s);
   }
 
   private deriveEq(s: import("./ast").StructDecl, skipValidation = false): import("./ast").ImplDecl {
@@ -2352,13 +2371,13 @@ export class TypeChecker {
       isVariadic: false,
     };
 
-    return {
+    return this.stampOrigin({
       kind: "ImplDecl",
       traitName: "Eq",
       typeName: s.name,
       typeParams: [],
       methods: [eqFn],
-    };
+    }, s);
   }
 
   private registerBuiltinOption() {

@@ -208,6 +208,9 @@ class LowerCtx {
     const sig = this.c.functions.get(fn.name);
     return {
       name: fn.name,
+      // Externs were the gap: `lowerFunction` stamped the origin file but `lowerExtern`
+      // did not, so every `extern` declaration reached the HIR with no module to belong to.
+      ...(fn.sourceFile && { sourceFile: fn.sourceFile }),
       params: fn.params.map((p, i) => this.lowerParam(p, sig, i)),
       retType: sig?.ret ?? typeFromAst(fn.retType),
       body: [],
@@ -694,7 +697,7 @@ class LowerCtx {
           // rather than source lines.
           const codes = new Uint16Array(bytes.length);
           for (let i = 0; i < bytes.length; i++) {
-            const b = bytes[i]!;
+            const b = bytes[i] as number;
             codes[i] = b < 0x80 ? b : 0xF700 + b;
           }
           // 8192 stays well under the argument-count limit that makes `fromCharCode(...all)`

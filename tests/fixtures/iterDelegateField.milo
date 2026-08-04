@@ -1,0 +1,61 @@
+// @expect: 6
+// @expect: 0:1
+// @expect: 1:2
+// @expect: 2:3
+// @expect: 30
+// @expect: k=a
+// @expect: 3
+
+// `@iter` on a field says "iterating this struct means iterating this field", so a
+// newtype over a container keeps the container's for-in — same bindings, same
+// borrow, no snapshot. A `next` method could not do it: the iterator would have to
+// hold a reference into the wrapper, and references are second-class.
+struct Ids {
+    @iter v: Vec<i64>,
+}
+
+struct Bag<T> {
+    @iter inner: HashMap<T, bool>,
+}
+
+struct Named {
+    @iter entries: HashMap<string, i64>,
+    label: string,
+}
+
+pub fn main(): i32 {
+    let ids = Ids {
+        v: [1, 2, 3]
+    }
+    var sum = 0
+    for x in ids {
+        sum = sum + x
+    }
+    print(sum)
+    // the two-binding form comes through unchanged too
+    for i, x in ids {
+        print(i.toString() + ":" + x.toString())
+    }
+
+    var b: Bag<i64> = Bag {
+        inner: HashMap.new()
+    }
+    b.inner.insert(10, true)
+    b.inner.insert(20, true)
+    var total = 0
+    for k in b {
+        total = total + k
+    }
+    print(total)
+
+    // a delegate can sit beside ordinary fields
+    var n = Named {
+        entries: HashMap.new(), label: "x"
+    }
+    n.entries.insert("a", 3)
+    for k, val in n {
+        print("k=" + k)
+        print(val)
+    }
+    return 0
+}

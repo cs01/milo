@@ -1,0 +1,14 @@
+// @error: is not iterable
+
+// @iter only makes sense on a field for-in already knows how to walk.
+struct Bad {
+    @iter n: i64,
+}
+
+pub fn main(): i32 {
+    let b = Bad {
+        n: 1
+    }
+    print(b.n)
+    return 0
+}

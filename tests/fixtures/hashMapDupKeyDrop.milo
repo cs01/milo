@@ -1,0 +1,23 @@
+// @expect: 2
+// @expect: 1
+// @expect: new
+
+// Re-inserting a key the map already has: the map keeps its own key, so the one
+// handed in has no owner and must be dropped here. It used to leak its buffer on
+// every duplicate — a rebuild-in-a-loop grew without bound.
+pub fn main(): i32 {
+    var v: Vec<string> = ["a", "b", "a"]
+    var m: HashMap<string, string> = HashMap.new()
+    for x in v {
+        m.insert(x.clone(), "old".clone())
+    }
+    print(m.len())
+
+    // the displaced value is dropped too, and the new one wins
+    var one: HashMap<string, string> = HashMap.new()
+    one.insert("k".clone(), "old".clone())
+    one.insert("k".clone(), "new".clone())
+    print(one.len())
+    print(one.get("k")!)
+    return 0
+}

@@ -10,6 +10,22 @@ fn HashSet.add(self: &mut HashSet<T>, val: T): void
 
 Add a value to the set.
 
+### `HashSet.clear`
+
+```milo
+fn HashSet.clear(self: &mut HashSet<T>): void
+```
+
+Drop every element, keeping the table's capacity.
+
+### `HashSet.clone`
+
+```milo
+fn HashSet.clone(self: &HashSet<T>): HashSet<T>
+```
+
+_Undocumented._
+
 ### `HashSet.contains`
 
 ```milo
@@ -17,6 +33,46 @@ fn HashSet.contains(self: &HashSet<T>, val: T): bool
 ```
 
 Check if the set contains a value.
+
+### `HashSet.difference`
+
+```milo
+fn HashSet.difference(self: &HashSet<T>, other: &HashSet<T>): HashSet<T>
+```
+
+Everything in this set that is not in `other`.
+
+### `HashSet.fromVec`
+
+```milo
+fn HashSet.fromVec(items: Vec<T>): HashSet<T>
+```
+
+Collect a Vec into a set, dropping duplicates.
+
+### `HashSet.intersect`
+
+```milo
+fn HashSet.intersect(self: &HashSet<T>, other: &HashSet<T>): HashSet<T>
+```
+
+Everything in both sets.
+
+### `HashSet.isEmpty`
+
+```milo
+fn HashSet.isEmpty(self: &HashSet<T>): bool
+```
+
+_Undocumented._
+
+### `HashSet.isSubsetOf`
+
+```milo
+fn HashSet.isSubsetOf(self: &HashSet<T>, other: &HashSet<T>): bool
+```
+
+True when every element of this set is also in `other`.
 
 ### `HashSet.len`
 
@@ -41,3 +97,28 @@ fn HashSet.remove(self: &mut HashSet<T>, val: T): void
 ```
 
 Remove a value from the set.
+
+### `HashSet.toVec`
+
+```milo
+fn HashSet.toVec(self: &HashSet<T>): Vec<T>
+```
+
+Snapshot the elements into a Vec. Sort it if you need a stable order —
+`print` on a set would otherwise expose the randomized bucket order.
+
+### `HashSet.union`
+
+```milo
+fn HashSet.union(self: &HashSet<T>, other: &HashSet<T>): HashSet<T>
+```
+
+Everything in either set.
+
+### `HashSet.withCapacity`
+
+```milo
+fn HashSet.withCapacity(capacity: i64): HashSet<T>
+```
+
+Create an empty HashSet sized so `capacity` adds never rehash.

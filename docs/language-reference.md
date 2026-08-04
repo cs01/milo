@@ -478,6 +478,28 @@ To iterate a custom *container* without copying each element, hand out a slice v
 a non-owning fat pointer over the backing store) and iterate that: `for x in c.view()` where
 `fn view(self: &Self): &[T]`. The elements are borrowed, not cloned.
 
+**`@iter` — a newtype iterates its field.** A struct that wraps a container marks the
+field, and `for x in wrapper` walks that field exactly as the container itself would —
+same bindings, same borrow, nothing allocated:
+
+```milo
+struct Ids {
+    @iter v: Vec<i64>,
+}
+
+let ids = Ids { v: [1, 2, 3] }
+for x in ids { print(x) }        // 1, 2, 3 — x is &i64, as for any Vec
+for i, x in ids { print(i) }     // the two-binding form comes through too
+```
+
+Mark a `Vec`, `HashMap`, array, or `string` field, at most one per struct (two would make
+`for x in wrapper` ambiguous). `@iter` is what makes `HashSet` enumerable: a set cannot
+write a `next` method, because the iterator would have to hold a reference into the set,
+and references are second-class. Delegating to the backing `HashMap` costs nothing —
+without it, enumerating a set would mean snapshotting it into a `Vec` first.
+
+A struct with no `@iter` field falls back to the `next` protocol above.
+
 **The `Iterator` marker trait.** `impl Iterator for X {}` marks `X` as iterable so it
 satisfies an `<I: Iterator>` bound and can be named in a prover contract over "any
 iterator". It is a marker: the `next` contract above is what the `for` loop actually

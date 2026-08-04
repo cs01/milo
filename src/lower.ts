@@ -451,6 +451,26 @@ class LowerCtx {
           };
         }
         let iterType = this.typeOf(stmt.iterable);
+        // `@iter` field: the loop walks `wrapper.field`, so from here down this is an
+        // ordinary Vec/HashMap/array/string for-in — nothing else in the pipeline
+        // needs to know a struct was involved.
+        const delegateField = this.c.iterDelegates.get(stmt);
+        let iterableExpr: HIRExpr;
+        if (delegateField) {
+          const structTy = iterType?.tag === "ref" ? iterType.inner : iterType;
+          const info = structTy?.tag === "struct" ? this.c.structs.get(structTy.name) : undefined;
+          const fieldType = info?.fields.find(f => f.name === delegateField)?.type ?? { tag: "unknown" as const };
+          iterableExpr = {
+            kind: "FieldAccess",
+            object: this.lowerExpr(stmt.iterable),
+            field: delegateField,
+            type: fieldType,
+            span: stmt.span,
+          };
+          iterType = fieldType;
+        } else {
+          iterableExpr = this.lowerExpr(stmt.iterable);
+        }
         // slices (&[T]) and &Vec iterate like vecs — same non-owning %Vec layout
         if (iterType?.tag === "ref" && (iterType.inner.tag === "array" || iterType.inner.tag === "vec")) {
           iterType = iterType.inner;
@@ -499,7 +519,7 @@ class LowerCtx {
           varName2: stmt.varName2,
           varType,
           varType2,
-          iterable: this.lowerExpr(stmt.iterable),
+          iterable: iterableExpr,
           iterableKind,
           body: stmt.body.map(s => this.lowerStmt(s, fnRetType)),
           ...(forInvariants.length > 0 && { invariants: forInvariants }),

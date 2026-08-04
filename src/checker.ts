@@ -145,7 +145,10 @@ export interface FnSig {
 }
 
 export interface StructInfo {
-  fields: { name: string; type: TypeKind; cOpaque?: boolean }[];
+  // `iterDelegate`: `@iter` on the field — `for x in wrapper` iterates this field
+  // instead of looking for a `next` method. Lets a newtype keep the container's
+  // iteration without leaking the field or paying for a snapshot.
+  fields: { name: string; type: TypeKind; cOpaque?: boolean; iterDelegate?: boolean }[];
   baseName?: string;
   typeArgs?: TypeKind[];
   isExtern?: boolean;
@@ -225,6 +228,8 @@ export interface CheckResult {
   globalTypes?: Map<string, TypeKind>;
   iteratorForIns: Map<Stmt, { nextMethod: string; elemType: TypeKind; optionEnumName: string }>;
   stringViewForIns: Map<Stmt, { mode: "lines" | "split" }>;
+  // `for x in wrapper` where the struct has an `@iter` field: the field to walk instead.
+  iterDelegates: Map<Stmt, string>;
 }
 
 interface GenericEnumInfo {
@@ -391,6 +396,7 @@ export class TypeChecker {
   private heapMethodReceivers = new Set<Expr>();
   private iteratorForIns = new Map<Stmt, { nextMethod: string; elemType: TypeKind; optionEnumName: string }>();
   private stringViewForIns = new Map<Stmt, { mode: "lines" | "split" }>();
+  private iterDelegates = new Map<Stmt, string>();
   private resolvedOperators = new Map<Expr, string>();
   private fnFieldCalls = new Set<Expr>();
   private propagateConversions = new Map<Expr, { targetEnumName: string; wrapVariant: string; wrapTag: number }>();
@@ -1052,6 +1058,7 @@ export class TypeChecker {
     const fields = generic.decl.fields.map(f => ({
       name: f.name,
       type: this.resolve(this.substituteMiloType(f.type, generic.typeParams, typeArgs)),
+      ...(f.attributes?.some(a => a.name === "iter") ? { iterDelegate: true } : {}),
     }));
     this.structs.set(mangled, {
       fields, baseName, typeArgs,
@@ -1465,6 +1472,7 @@ export class TypeChecker {
       globalTypes: this._globalTypes,
       iteratorForIns: this.iteratorForIns,
       stringViewForIns: this.stringViewForIns,
+      iterDelegates: this.iterDelegates,
     };
   }
 
@@ -1573,6 +1581,7 @@ export class TypeChecker {
         const fields = s.fields.map(f => ({
           name: f.name, type: this.resolve(f.type),
           ...(f.attributes?.some(a => a.name === "cOpaque") ? { cOpaque: true } : {}),
+          ...(f.attributes?.some(a => a.name === "iter") ? { iterDelegate: true } : {}),
         }));
         for (const f of fields) {
           if (f.type.tag === "ref") {
@@ -2761,12 +2770,34 @@ export class TypeChecker {
   // so the size assert stays meaningful. Anything else on a field is rejected: a silently
   // ignored attribute is the failure this whole feature exists to close.
   private validateFieldAttributes(s: StructDecl): void {
+    let iterFields = 0;
     for (const f of s.fields) {
       if (!f.attributes) continue;
       for (const attr of f.attributes) {
-        if (attr.name !== "cOpaque") {
+        if (attr.name === "iter") {
+          if (attr.args.length !== 0) {
+            this.error(`@iter on '${s.name}.${f.name}': takes no arguments`, s.span);
+          }
+          // The delegate must itself be something `for-in` knows how to walk. A
+          // second one would make `for x in wrapper` ambiguous with no way to say
+          // which you meant, so one per struct.
+          if (++iterFields > 1) {
+            this.error(`'${s.name}' has more than one @iter field`, s.span,
+              `a struct iterates exactly one field — mark only the container that 'for x in ${s.name.toLowerCase()}' should walk`);
+          }
+          // Read the written type rather than resolving it: on a generic decl the
+          // field's type arguments are still type parameters, and resolving
+          // `HashMap<T, bool>` here would report T as an unhashable key.
+          const ft = f.type;
+          const iterable = !ft.isRef && !ft.isRefMut && !ft.isPtr &&
+            (ft.isArray || ft.name === "Vec" || ft.name === "HashMap" || ft.name === "string");
+          if (!iterable) {
+            this.error(`@iter on '${s.name}.${f.name}': '${ft.name}' is not iterable`, s.span,
+              `mark a Vec, HashMap, array, or string field`);
+          }
+        } else if (attr.name !== "cOpaque") {
           this.error(`'@${attr.name}' is not supported on a struct field — '${s.name}.${f.name}'`, s.span,
-            `only '@cOpaque' applies to a field; it marks C-invisible padding for @cLayout`);
+            `only '@cOpaque' and '@iter' apply to a field`);
         } else if (!s.isExtern) {
           this.error(`@cOpaque on '${s.name}.${f.name}': only an 'extern struct' field can be C-invisible`, s.span,
             `a Milo struct has no C layout to be opaque against`);
@@ -3808,6 +3839,21 @@ export class TypeChecker {
           // iterating a slice (&[T]) or &Vec: deref — the loop borrows the view, not a copy
           if (iterType.tag === "ref" && (iterType.inner.tag === "array" || iterType.inner.tag === "vec")) {
             iterType = iterType.inner;
+          }
+          // `@iter` on a field redirects the loop to that field. A newtype over a
+          // container (HashSet over HashMap) then iterates exactly as the container
+          // does — same bindings, same borrow, no snapshot — instead of needing a
+          // `next` method it cannot write (an iterator would have to hold a
+          // reference into the wrapper, and references are second-class).
+          {
+            const structTy = iterType.tag === "ref" && iterType.inner.tag === "struct" ? iterType.inner : iterType;
+            if (structTy.tag === "struct") {
+              const delegate = this.structs.get(structTy.name)?.fields.find(f => f.iterDelegate);
+              if (delegate) {
+                this.iterDelegates.set(stmt, delegate.name);
+                iterType = delegate.type;
+              }
+            }
           }
           if (iterType.tag === "vec") {
             const elemRef: TypeKind = { tag: "ref", inner: iterType.element, mutable: false };

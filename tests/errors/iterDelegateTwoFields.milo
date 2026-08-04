@@ -1,0 +1,15 @@
+// @error: has more than one @iter field
+
+// Two delegates would make `for x in pair` ambiguous with no way to say which.
+struct Pair {
+    @iter a: Vec<i64>,
+    @iter b: Vec<i64>,
+}
+
+pub fn main(): i32 {
+    let p = Pair {
+        a: [1], b: [2]
+    }
+    print(p.a.len())
+    return 0
+}

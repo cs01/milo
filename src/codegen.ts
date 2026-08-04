@@ -9181,6 +9181,15 @@ export class Codegen {
       this.emitDropValue(lines, existingValPtr, valueType);
     }
     lines.push(`  store ${valTy} ${valVal}, ptr ${existingValPtr}`);
+    // The map keeps the key it already has, so the one just handed in has no owner:
+    // the checker moved it out of the caller and this path never stores it. Without
+    // this, re-inserting a `String` key leaked its buffer on every duplicate.
+    if (this.needsDropCg(keyType)) {
+      const dupKeyAddr = this.nextTemp();
+      lines.push(`  ${dupKeyAddr} = alloca ${keyTy}`);
+      lines.push(`  store ${keyTy} ${keyVal}, ptr ${dupKeyAddr}`);
+      this.emitDropValue(lines, dupKeyAddr, keyType);
+    }
     lines.push(`  br label %${insertDone}`);
 
     // empty or tombstone: insert here
@@ -11130,6 +11139,10 @@ export class Codegen {
       case "VecMinMax":
       case "VecPop":
       case "VecFind":
+      // HashMap.get clones the value out of the table for the same reason. Its
+      // sibling getOrDefault is deliberately NOT here: on a miss it hands back the
+      // caller's own default, which the caller still owns.
+      case "HashMapGet":
         return true;
       case "BinOp":
         // string `+` only — the comparisons return bool

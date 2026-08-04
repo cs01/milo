@@ -3,7 +3,7 @@ system: milo-idioms
 purpose: canonical Milo patterns for text handling and ownership, and the papercuts that push agents toward non-idiomatic code
 key-files: std/string.milo, std/unicode.milo, docs/language-reference.md, CONVENTIONS.md
 update-when: a listed workaround stops being necessary, or a new papercut keeps producing the same non-idiomatic shape
-last-verified: 2026-07-18
+last-verified: 2026-08-03
 -->
 
 # Milo Idioms
@@ -80,6 +80,18 @@ out.push(byte)      // single u8
 `indexOf`/`indexOfFrom`/`lastIndexOf` return `Option<i64>` byte offsets. Match,
 use `!` when a preceding check proves the substring exists, or use `??` when a
 fallback offset is genuinely meaningful.
+
+### Parsing answers `Option`, so decide what bad input means
+
+`s.parseInt()` and `s.parseF64()` return `Option<i64>` / `Option<f64>`, and they
+are strict: the whole string must be the number. `"42x"`, `" 12"`, `""` and an
+out-of-range value are all `None`. `std/strconv`'s `parseInt`/`parseFloat` are
+named aliases for the same two parsers, not a second implementation.
+
+Pick the failure behaviour on purpose. `let Option.Some(n) = s.parseInt() else {
+continue }` skips a junk field; `.unwrapOr(0)` says the fallback is meaningful;
+`!` says a preceding check already proved the shape. Reaching for `.unwrapOr(0)`
+everywhere just rebuilds the silent-zero this API was changed to remove.
 
 ## Ownership
 

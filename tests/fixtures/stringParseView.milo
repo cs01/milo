@@ -1,0 +1,51 @@
+// parseF64 hands the conversion to libc atof, which reads to a NUL. A `&string`
+// view has no NUL at its own end, so an unbounded atof read "12345" out of a
+// two-byte view of it. The parse must see only the view.
+// @expect: Some(12)
+// @expect: Some(1.5)
+// @expect: Some(2.5)
+// @expect: Some(1)
+// @expect: Some(2)
+// @expect: Some(12)
+
+fn showInt(v: Option<i64>) {
+    match v {
+        Option.Some(n) => {
+            print($"Some({n})")
+        }
+        Option.None => {
+            print("None")
+        }
+    }
+}
+
+fn showFloat(v: Option<f64>) {
+    match v {
+        Option.Some(x) => {
+            print($"Some({x})")
+        }
+        Option.None => {
+            print("None")
+        }
+    }
+}
+
+pub fn main(): i32 {
+    let digits = "12345"
+    showFloat(digits.slice(0, 2).parseF64())
+
+    let text = "1.5\n2.5\n"
+    for line in text.lines() {
+        showFloat(line.parseF64())
+    }
+
+    // adjacent digits with no separator byte between the views
+    let packed = "1,2"
+    for piece in packed.splitView(",") {
+        showFloat(piece.parseF64())
+    }
+
+    // strParseInt is length-bounded Milo, so the int side never had the bug
+    showInt(digits.slice(0, 2).parseInt())
+    return 0
+}

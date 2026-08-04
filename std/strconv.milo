@@ -7,63 +7,55 @@ from "std/os" import {
 @cSig("stdlib.h", "long long strtoll(const char *, char **, int)")
 pub extern fn strtoll(str: *u8, endptr: **u8, base: i32): i64
 
-pub extern fn atof(str: *u8): f64
-
-// Parse a decimal integer string. Returns None if not a valid integer.
-
 // Parse a base-10 integer strictly: Some(n) only if the whole string is an
-// optionally-signed run of digits, else None. (Contrast str.strParseInt, which
-// is lenient and returns 0 on bad input.)
+// optionally-signed run of digits that fits in i64, else None.
+//
+// This is a named alias for the `s.parseInt()` builtin, not a second parser —
+// the two used to disagree about what counts as a number, and one of them had
+// to be the answer.
 pub fn parseInt(s: string): Option<i64> {
+    return s.parseInt()
+}
+
+// Parse an integer in `base` (2, 8, 10, or 16), or None if invalid. Every digit
+// must be legal in `base` and the whole string must be consumed; strtoll on its
+// own stops at the first bad byte and reports that as a successful 0.
+pub fn parseIntRadix(s: string, base: i32): Option<i64> {
+    if base == 10 {
+        return s.parseInt()
+    }
     if s.len == 0 {
         return Option.None
     }
-    var start: i64 = 0
+    var i: i64 = 0
     if s[0] == 45 || s[0] == 43 {
-        start = 1
+        i = 1
     }
-    if start >= s.len {
+    if i >= s.len {
         return Option.None
     }
-    var i = start
     while i < s.len {
-        if s[i] < 48 || s[i] > 57 {
+        let ch = s[i]
+        var digit: i64 = 99
+        if ch >= 48 && ch <= 57 {
+            digit = (ch - 48) as i64
+        } else if ch >= 97 && ch <= 122 {
+            digit = (ch - 97) as i64 + 10
+        } else if ch >= 65 && ch <= 90 {
+            digit = (ch - 65) as i64 + 10
+        }
+        if digit >= base as i64 {
             return Option.None
         }
         i = i + 1
     }
-    return Option.Some(strtoll(s, 0 as **u8, 10))
-}
-
-// Parse an integer string with a given base (2, 8, 10, 16).
-
-// Parse an integer in `base` (2, 8, 10, or 16), or None if invalid.
-pub fn parseIntRadix(s: string, base: i32): Option<i64> {
-    if s.len == 0 {
-        return Option.None
-    }
     return Option.Some(strtoll(s, 0 as **u8, base))
 }
 
-// Parse a floating-point string. Returns None if not a valid number.
-
-// Parse a floating-point number, or None if the string isn't a valid float.
+// Parse a floating-point number, or None if the string isn't a complete float
+// literal. A named alias for the `s.parseF64()` builtin — same parser.
 pub fn parseFloat(s: string): Option<f64> {
-    if s.len == 0 {
-        return Option.None
-    }
-    var start: i64 = 0
-    if s[0] == 45 || s[0] == 43 {
-        start = 1
-    }
-    if start >= s.len {
-        return Option.None
-    }
-    // must start with digit or dot
-    if (s[start] < 48 || s[start] > 57) && s[start] != 46 {
-        return Option.None
-    }
-    return Option.Some(atof(s))
+    return s.parseF64()
 }
 
 // Convert i64 to hexadecimal string (lowercase).

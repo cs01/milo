@@ -1,10 +1,5 @@
 // @error: requires function to return
 
-enum Option<T> {
-    Some(T),
-    None,
-}
-
 fn bad(opt: Option<i32>): i32 {
     let val = opt?
     return val

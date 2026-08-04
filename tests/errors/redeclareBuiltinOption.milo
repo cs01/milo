@@ -1,0 +1,16 @@
+// Option is a compiler builtin with dedicated syntax, and prelude signatures name
+// it. Redeclaring it used to be allowed and broke std three files away.
+// @error: 'Option' is a builtin enum and cannot be redeclared
+
+pub enum Option {
+    Some(i32),
+    None,
+}
+
+pub fn main(): i32 {
+    let x = Option.Some(42)
+    if let Option.Some(v) = x {
+        print(v)
+    }
+    return 0
+}

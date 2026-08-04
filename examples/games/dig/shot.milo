@@ -56,7 +56,10 @@ pub fn main(): i32 {
     }
     var shots: Vec<i64> = Vec.new()
     for i in 2..argv.len {
-        shots.push(argv[i].parseInt())
+        let Option.Some(frame) = argv[i].parseInt() else {
+            continue
+        }
+        shots.push(frame)
     }
     if shots.len == 0 {
         shots.push(300)

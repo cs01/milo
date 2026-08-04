@@ -1,19 +1,19 @@
 // @expect: got 42
 // @expect: done
 
-pub enum Option {
+pub enum Maybe {
     Some(i32),
     None,
 }
 
 pub fn main(): i32 {
-    let x = Option.Some(42)
-    if let Option.Some(val) = x {
+    let x = Maybe.Some(42)
+    if let Maybe.Some(val) = x {
         print("got ", val)
     }
 
-    let y = Option.None
-    if let Option.Some(val) = y {
+    let y = Maybe.None
+    if let Maybe.Some(val) = y {
         print("should not print")
     }
 

@@ -1090,9 +1090,6 @@ class LowerCtx {
           if (expr.method === "slice") {
             return { kind: "StringSlice", str: this.lowerExpr(expr.object), start: this.lowerExpr(expr.args[0]), end: this.lowerExpr(expr.args[1]), type, span: expr.span };
           }
-          if (expr.method === "parseF64") {
-            return { kind: "StringParseF64", str: this.lowerExpr(expr.object), type, span: expr.span };
-          }
           if (expr.method === "clone") {
             return { kind: "StringClone", str: this.lowerExpr(expr.object), type, span: expr.span };
           }
@@ -1123,7 +1120,8 @@ class LowerCtx {
             "toLower": "strToLower", "toUpper": "strToUpper", "reverse": "strReverse",
             "replace": "strReplace", "replaceFirst": "strReplaceFirst",
             "repeat": "strRepeat", "padStart": "strPadStart", "padEnd": "strPadEnd",
-            "isEmpty": "strIsEmpty", "charAt": "strCharAt", "parseInt": "strParseInt",
+            "isEmpty": "strIsEmpty", "charAt": "strCharAt",
+            "parseInt": "strParseInt", "parseF64": "strParseF64",
             "splitWords": "strSplitWords", "splitWhitespace": "strSplitWhitespace",
           };
           const fnName = strMethodMap[expr.method];

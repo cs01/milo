@@ -6,6 +6,9 @@ extern fn memchr(s: *u8, c: i32, n: i64): *u8
 
 extern fn memcmp(s1: *u8, s2: *u8, n: i64): i32
 
+@cSig("stdlib.h", "double atof(const char *)")
+extern fn atof(str: *u8): f64
+
 // Check if haystack contains needle.
 
 // True if `needle` occurs anywhere in `haystack` (empty needle → true).
@@ -612,30 +615,107 @@ ensures result.len == s.len
     return result
 }
 
-// Parse a leading (optionally '-' signed) run of ASCII digits to i64. Stops at
-// the first non-digit; returns 0 for empty/non-numeric input (no error — use a
-// stricter parser if you must distinguish "0" from invalid).
-fn strParseInt(s: &string): i64 {
-    var result: i64 = 0
+// The single base-10 integer parser: `s.parseInt()` lowers to this and
+// `std/strconv.parseInt` forwards to it. Some(n) only when the whole string is
+// an optionally-signed run of ASCII digits that fits in i64. Trailing junk,
+// surrounding whitespace, an empty string, and out-of-range values are all None.
+//
+// Digits accumulate NEGATIVE because the i64 range is asymmetric: i64::MIN has no
+// positive counterpart to build up in. Overflow is rejected here instead of being
+// left to the arithmetic trap — a parser fed hostile input must answer None, not
+// abort the process.
+fn strParseInt(s: &string): Option<i64> {
+    let minI64: i64 = -9223372036854775807 - 1
     var i: i64 = 0
     var negative: bool = false
-    if s.len > 0 && s[0] == 45 {
-        negative = true
+    if s.len > 0 && (s[0] == 45 || s[0] == 43) {
+        negative = s[0] == 45
         i = 1
     }
+    if i >= s.len {
+        return Option.None
+    }
+    var acc: i64 = 0
     while i < s.len {
         let ch = s[i]
         if ch < 48 || ch > 57 {
-            break
+            return Option.None
         }
         let digit: i64 = (ch - 48) as i64
-        result = result * 10 + digit
+        // acc*10 - digit must stay >= minI64. Signed division truncates toward
+        // zero, which for a negative quotient is exactly the ceiling this needs.
+        if acc < (minI64 + digit) / 10 {
+            return Option.None
+        }
+        acc = acc * 10 - digit
         i = i + 1
     }
     if negative {
-        return 0 - result
+        return Option.Some(acc)
     }
-    return result
+    if acc == minI64 {
+        return Option.None
+    }
+    return Option.Some(0 - acc)
+}
+
+// Strict float-literal shape for strParseF64: optional sign, digits with at most
+// one '.', optional exponent. atof stops at the first byte it can't use and
+// reports nothing, so the whole string has to be validated before it runs.
+fn _strIsFloatText(s: &string): bool {
+    var i: i64 = 0
+    if i < s.len && (s[i] == 43 || s[i] == 45) {
+        i = i + 1
+    }
+    var digits: i64 = 0
+    while i < s.len && s[i] >= 48 && s[i] <= 57 {
+        digits = digits + 1
+        i = i + 1
+    }
+    if i < s.len && s[i] == 46 {
+        i = i + 1
+        while i < s.len && s[i] >= 48 && s[i] <= 57 {
+            digits = digits + 1
+            i = i + 1
+        }
+    }
+    if digits == 0 {
+        return false
+    }
+    if i < s.len && (s[i] == 101 || s[i] == 69) {
+        i = i + 1
+        if i < s.len && (s[i] == 43 || s[i] == 45) {
+            i = i + 1
+        }
+        var expDigits: i64 = 0
+        while i < s.len && s[i] >= 48 && s[i] <= 57 {
+            expDigits = expDigits + 1
+            i = i + 1
+        }
+        if expDigits == 0 {
+            return false
+        }
+    }
+    return i == s.len
+}
+
+// The single float parser: `s.parseF64()` lowers to this and
+// `std/strconv.parseFloat` forwards to it. Some(x) only for a complete float
+// literal; "abc", "1.2x", " 1.2", "inf" and "nan" are all None.
+fn strParseF64(s: &string): Option<f64> {
+    if !_strIsFloatText(s) {
+        return Option.None
+    }
+    // atof reads to a NUL, and `s` may be a VIEW into a larger buffer (`s.slice(a, b)`,
+    // a `lines()` piece) whose byte at s.len is another digit — `"12345".slice(0, 2)`
+    // parsed as 12345 before this copy existed. An owned string is NUL-terminated at
+    // its own length, so the copy is what bounds the read.
+    let owned = s.substr(0, s.len)
+    var v: f64 = 0.0
+    unsafe {
+        v = atof(owned.cstr())
+    }
+    return Option.Some(v)
 }
 
 // Copy of `s` with only the first occurrence of `old` replaced by `newVal`.

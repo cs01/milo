@@ -5312,8 +5312,6 @@ export class Codegen {
         return this.genStringSlice(expr, lines);
       case "VecSlice":
         return this.genVecSlice(expr, lines);
-      case "StringParseF64":
-        return this.genStringParseF64(expr, lines);
       case "StringFind":
         return this.genStringFind(expr, lines);
       case "StringClone":
@@ -8074,18 +8072,6 @@ export class Codegen {
     const s2 = this.nextTemp();
     lines.push(`  ${s2} = insertvalue %String ${s1}, i64 ${allocSz}, 2`);
     return [lines, s2, "%String"];
-  }
-
-  private genStringParseF64(expr: HIRExpr & { kind: "StringParseF64" }, lines: string[]): [string[], string, string] {
-    this.needsStrtod = true;
-    this.hasStringType = true;
-    const [strLines, strVal] = this.genExpr(expr.str);
-    lines.push(...strLines);
-    const dataPtr = this.nextTemp();
-    lines.push(`  ${dataPtr} = extractvalue %String ${strVal}, 0`);
-    const result = this.nextTemp();
-    lines.push(`  ${result} = call double @strtod(ptr ${dataPtr}, ptr null)`);
-    return [lines, result, "double"];
   }
 
   private genStringFind(expr: HIRExpr & { kind: "StringFind" }, lines: string[]): [string[], string, string] {

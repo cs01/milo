@@ -1,0 +1,28 @@
+// parseInt checks range instead of wrapping or trapping: the i64 edges parse, one
+// past them is None. Separate from stringParseTotal.milo because the JS backend's
+// doubles can't represent these values.
+// @expect: Some(9223372036854775807)
+// @expect: Some(-9223372036854775808)
+// @expect: None
+// @expect: None
+// @expect: None
+
+fn showInt(v: Option<i64>) {
+    match v {
+        Option.Some(n) => {
+            print($"Some({n})")
+        }
+        Option.None => {
+            print("None")
+        }
+    }
+}
+
+pub fn main(): i32 {
+    showInt("9223372036854775807".parseInt())
+    showInt("-9223372036854775808".parseInt())
+    showInt("9223372036854775808".parseInt())
+    showInt("-9223372036854775809".parseInt())
+    showInt("99999999999999999999999".parseInt())
+    return 0
+}

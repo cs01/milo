@@ -47,36 +47,50 @@ pub struct Context {
 }
 
 impl Context {
-    fn param(self: &Self, name: &string): string {
+    // Value of the route parameter `name`, or None if the route has no such
+    // parameter. A matched-but-empty segment is Some("").
+    fn param(self: &Self, name: &string): Option<string> {
         for i in 0..self.params.len {
             if self.params[i].name == name {
-                return self.params[i].value.clone()
+                return Option.Some(self.params[i].value.clone())
             }
         }
-        return ""
+        return Option.None
     }
 
-    fn query(self: &Self, name: &string): string {
+    // Value of query-string parameter `name`, or None if it was not in the URL.
+    // `?name=` and `?name` are both present with an empty value: Some("").
+    fn query(self: &Self, name: &string): Option<string> {
         for i in 0..self.req.queryParams.len {
             if self.req.queryParams[i].name == name {
-                return self.req.queryParams[i].value.clone()
+                return Option.Some(self.req.queryParams[i].value.clone())
             }
         }
-        return ""
+        return Option.None
     }
 
-    fn header(self: &Self, name: &string): string {
+    // Value of request header `name` (case-insensitive), or None if the request
+    // did not carry it. A header sent with an empty value is Some("").
+    fn header(self: &Self, name: &string): Option<string> {
         for i in 0..self.req.headers.len {
             if eqIgnoreCase(self.req.headers[i].name, name) {
-                return self.req.headers[i].value.clone()
+                return Option.Some(self.req.headers[i].value.clone())
             }
         }
-        return ""
+        return Option.None
     }
 
-    fn cookie(self: &Self, name: &string): string {
-        let cookieHeader = self.header("Cookie")
-        return parseCookieValue(cookieHeader, name)
+    // Value of cookie `name`, or None if there is no Cookie header or it does
+    // not carry `name`. `name=` in the header is Some("").
+    fn cookie(self: &Self, name: &string): Option<string> {
+        match self.header("Cookie") {
+            Option.Some(cookieHeader) => {
+                return parseCookieValue(cookieHeader, name)
+            }
+            Option.None => {
+                return Option.None
+            }
+        }
     }
 
     fn setStatus(self: &mut Self, code: i32): void {
@@ -381,9 +395,11 @@ fn parseQueryString(qs: &string): Vec<Param> {
     return params
 }
 
-fn parseCookieValue(cookieHeader: string, name: &string): string {
+// None when `name` is not in the header; Some("") when it is present with no
+// value (`name=` or a bare `name`), which a caller may legitimately treat as set.
+fn parseCookieValue(cookieHeader: string, name: &string): Option<string> {
     if cookieHeader.len == 0 {
-        return ""
+        return Option.None
     }
     var i: i64 = 0
     while i < cookieHeader.len {
@@ -405,10 +421,10 @@ fn parseCookieValue(cookieHeader: string, name: &string): string {
             val = bufToStrFromString(cookieHeader, valStart, i)
         }
         if key == name {
-            return val
+            return Option.Some(val)
         }
     }
-    return ""
+    return Option.None
 }
 
 fn bufToStrFromString(s: &string, start: i64, end: i64): string {

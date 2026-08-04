@@ -100,7 +100,7 @@ pub fn jsonHandler(ctx: &mut Context): Response {
 }
 
 pub fn fibHandler(ctx: &mut Context): Response {
-    let n = parseInt(ctx.param("n"))!
+    let n = parseInt(ctx.param("n") ?? "")!
     return ctx.json({
         n: n, result: fibonacci(n)
     }
@@ -108,7 +108,7 @@ pub fn fibHandler(ctx: &mut Context): Response {
 }
 
 pub fn primeHandler(ctx: &mut Context): Response {
-    let n = parseInt(ctx.param("n"))!
+    let n = parseInt(ctx.param("n") ?? "")!
     return ctx.json({
         n: n, isPrime: isPrime(n)
     }
@@ -116,7 +116,7 @@ pub fn primeHandler(ctx: &mut Context): Response {
 }
 
 pub fn collatzHandler(ctx: &mut Context): Response {
-    let n = parseInt(ctx.param("n"))!
+    let n = parseInt(ctx.param("n") ?? "")!
     return ctx.json({
         start: n, steps: collatzSteps(n)
     }
@@ -124,16 +124,24 @@ pub fn collatzHandler(ctx: &mut Context): Response {
 }
 
 pub fn fizzbuzzHandler(ctx: &mut Context): Response {
-    let n = parseInt(ctx.param("n"))!
+    let n = parseInt(ctx.param("n") ?? "")!
     return ctx.text(fizzbuzzText(n))
 }
 
 pub fn searchHandler(ctx: &mut Context): Response {
-    let q = ctx.query("q")
-    if q.len == 0 {
+    // `?q=` is present with an empty value; no `?q=` at all is absent. They are
+    // different client mistakes, so they get different messages.
+    let Option.Some(q) = ctx.query("q") else {
         ctx.setStatus(400)
         return ctx.json({
             error: "missing ?q= parameter"
+        }
+        )
+    }
+    if q.len == 0 {
+        ctx.setStatus(400)
+        return ctx.json({
+            error: "empty ?q= parameter"
         }
         )
     }

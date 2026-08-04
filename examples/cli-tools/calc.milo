@@ -248,7 +248,7 @@ pub fn main(): i32 {
     var parser = ArgParser.new("calc", "evaluate arithmetic expressions")
     parser.addPositional("expression", "expression to evaluate (use quotes)")
     let args = parser.parse()
-    let input = args.getString("expression")
+    let input = args.getString("expression") ?? ""
 
     let tokens = tokenize(input)
     var p = Parser {

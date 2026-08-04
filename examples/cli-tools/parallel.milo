@@ -23,7 +23,7 @@ pub fn main(): i32 {
     parser.addPositional("command", "command template ({} is replaced with each line)")
     let args = parser.parse()
 
-    let template = args.getString("command")
+    let template = args.getString("command") ?? ""
     let numJobs = args.getI64("jobs")
     let dryRun = args.getBool("dry-run")
     let verbose = args.getBool("verbose")

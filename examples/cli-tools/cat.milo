@@ -250,11 +250,11 @@ pub fn main(): i32 {
     parser.addString("language", "l", "force language for highlighting", "")
     let args = parser.parse()
 
-    let filePath = args.getString("file")
+    let filePath = args.getString("file") ?? ""
     let plain = args.getBool("plain")
     let noColor = args.getBool("no-color")
-    let rangeStr = args.getString("range")
-    let forceLang = args.getString("language")
+    let rangeStr = args.getString("range") ?? ""
+    let forceLang = args.getString("language") ?? ""
 
     let content = match readFile(filePath) {
         Result.Ok(data) => data

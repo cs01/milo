@@ -48,10 +48,10 @@ Context is passed to route handlers and provides access to request data and resp
 
 | Method | Description |
 |--------|-------------|
-| `ctx.param("name")` | Extract path parameter (`:name` in pattern) |
-| `ctx.query("key")` | Extract query string value (`?key=value`) |
-| `ctx.header("name")` | Read request header (case-insensitive) |
-| `ctx.cookie("name")` | Read cookie value from request |
+| `ctx.param("name")` | Path parameter (`:name` in pattern) → `Option<string>` |
+| `ctx.query("key")` | Query string value (`?key=value`) → `Option<string>` |
+| `ctx.header("name")` | Request header, case-insensitive → `Option<string>` |
+| `ctx.cookie("name")` | Cookie value from the request → `Option<string>` |
 | `ctx.req.body` | Access raw request body |
 | `ctx.setStatus(code)` | Set response status code |
 | `ctx.setHeader(name, value)` | Add response header |
@@ -62,6 +62,11 @@ Context is passed to route handlers and provides access to request data and resp
 | `ctx.json(body)` | Return application/json response |
 | `ctx.html(body)` | Return text/html response |
 | `ctx.redirect(url)` | Return 302 redirect |
+
+The four lookups return `Option<string>` because absent and present-but-empty are
+different: `?q=` and a `Cookie: sid=` are *present* with an empty value. Collapse
+them with `??` when the distinction does not matter (`ctx.query("q") ?? ""`), and
+bind with `let … else` when it does.
 
 ### Response
 
@@ -122,12 +127,16 @@ Start an HTTP server using a Router. Context `respHeaders` are sent on the wire.
 from "std/http" import { Context, Response, Router, serveRouter }
 
 fn userHandler(ctx: &mut Context): Response {
-    let id = ctx.param("id")
+    let id = ctx.param("id") ?? ""
     return ctx.json($"\{\"userId\": \"{id}\"}")
 }
 
 fn searchHandler(ctx: &mut Context): Response {
-    let q = ctx.query("q")
+    // None only when there is no ?q= at all; `?q=` is Some("").
+    let Option.Some(q) = ctx.query("q") else {
+        ctx.setStatus(400)
+        return ctx.text("missing ?q=")
+    }
     return ctx.text($"searching for: {q}")
 }
 
@@ -170,8 +179,7 @@ fn loginHandler(ctx: &mut Context): Response {
 }
 
 fn profileHandler(ctx: &mut Context): Response {
-    let session = ctx.cookie("session")
-    if session.len == 0 {
+    let Option.Some(session) = ctx.cookie("session") else {
         ctx.setStatus(401)
         return ctx.json("{\"error\": \"not authenticated\"}")
     }

@@ -4,7 +4,7 @@
 // sysroot does not ship.
 
 from "std/fetch" import {
-    FetchOptions, FormField, buildRequest, formEncode, hasHeader, urlEncode
+    FetchOptions, FormField, buildRequest, findHeader, formEncode, urlEncode
 }
 
 fn get(headers: string): FetchOptions {
@@ -17,9 +17,9 @@ fn main(): void {
     // Servers like Overpass 406 a request with no Accept, so one is always sent.
     let plain = buildRequest("example.com", "/x", get(""))
     // @expect: default accept true
-    print("default accept " + hasHeader(plain, "Accept").toString())
+    print("default accept " + findHeader(plain, "Accept").isSome().toString())
     // @expect: default ua true
-    print("default ua " + hasHeader(plain, "User-Agent").toString())
+    print("default ua " + findHeader(plain, "User-Agent").isSome().toString())
 
     // A caller-supplied header must not be duplicated by the default.
     let custom = buildRequest("example.com", "/x", get("Accept: application/json"))
@@ -34,11 +34,16 @@ fn main(): void {
     // @expect: accept count 1
     print("accept count " + accepts.toString())
 
-    // A header block with an empty value still counts as present.
+    // A header block with an empty value still counts as present, and findHeader
+    // says so: Some("") for present-but-empty, None only for genuinely absent.
     // @expect: empty value present true
-    print("empty value present " + hasHeader("Accept:", "Accept").toString())
+    print("empty value present " + findHeader("Accept:", "Accept").isSome().toString())
+    // @expect: empty value is empty true
+    print("empty value is empty " + ((findHeader("Accept:", "Accept") ?? "x") == "").toString())
     // @expect: absent false
-    print("absent " + hasHeader("Accept: */*", "Authorization").toString())
+    print("absent " + findHeader("Accept: */*", "Authorization").isSome().toString())
+    // @expect: absent falls back x
+    print("absent falls back " + (findHeader("Accept: */*", "Authorization") ?? "x"))
 
     var withBody = FetchOptions {
         method: "POST",
@@ -47,7 +52,7 @@ fn main(): void {
     }
     let post = buildRequest("example.com", "/api", withBody)
     // @expect: content length true
-    print("content length " + hasHeader(post, "Content-Length").toString())
+    print("content length " + findHeader(post, "Content-Length").isSome().toString())
 
     // @expect: a%20b%2Bc%2Fd~e
     print(urlEncode("a b+c/d~e"))

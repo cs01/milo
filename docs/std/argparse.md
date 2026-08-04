@@ -131,10 +131,17 @@ Get an integer value of a flag. Exits if the value is not numeric.
 ### `ParsedArgs.getString`
 
 ```milo
-fn ParsedArgs.getString(self: &ParsedArgs, name: &string): string
+fn ParsedArgs.getString(self: &ParsedArgs, name: &string): Option<string>
 ```
 
-Get the string value of a flag by its long name.
+Value of the flag or positional `name`, or None if it has no value:
+either `name` was never declared, or it was declared with no default and
+not supplied. `--name ""` is supplied, so it is Some("").
+
+A declared default is the value when the flag is absent, so it comes back
+as Some. An empty default is how addString spells "no default" (helpText
+only prints a default when it is non-empty), which is why the check is on
+the value's length and not on a separate flag.
 
 ### `ParsedArgs.getU16`
 

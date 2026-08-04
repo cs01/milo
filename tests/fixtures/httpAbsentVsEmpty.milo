@@ -1,0 +1,97 @@
+// std/http request lookups distinguish "not there" from "there, with an empty
+// value". `?q=` and `X-Empty:` are *present* — collapsing both into "" is the bug
+// this locks out. Exercised without a socket by building a Context directly.
+
+from "std/http" import {
+    Context, Param, Request
+}
+
+fn show(label: string, o: Option<string>): void {
+    match o {
+        Option.Some(v) => {
+            print(label + " some:" + v)
+        }
+        Option.None => {
+            print(label + " none")
+        }
+    }
+}
+
+fn ctxWith(queryParams: Vec<Param>, headers: Vec<Param>, params: Vec<Param>): Context {
+    return Context {
+        req: Request {
+            method: "GET",
+            path: "/",
+            queryParams: queryParams,
+            headers: headers,
+            body: "",
+        }
+        ,
+        params: params,
+        statusCode: 200,
+        respHeaders: [],
+    }
+}
+
+pub fn main(): void {
+    var queryParams: Vec<Param> = []
+    queryParams.push(Param {
+        name: "empty", value: ""
+    }
+    )
+    queryParams.push(Param {
+        name: "full", value: "v"
+    }
+    )
+    var headers: Vec<Param> = []
+    headers.push(Param {
+        name: "X-Empty", value: ""
+    }
+    )
+    headers.push(Param {
+        name: "Cookie", value: "a=; b=2"
+    }
+    )
+    var params: Vec<Param> = []
+    params.push(Param {
+        name: "slug", value: ""
+    }
+    )
+    let ctx = ctxWith(queryParams, headers, params)
+
+    // @expect: query-empty some:
+    show("query-empty", ctx.query("empty"))
+    // @expect: query-full some:v
+    show("query-full", ctx.query("full"))
+    // @expect: query-absent none
+    show("query-absent", ctx.query("nope"))
+
+    // @expect: param-empty some:
+    show("param-empty", ctx.param("slug"))
+    // @expect: param-absent none
+    show("param-absent", ctx.param("nope"))
+
+    // Header lookup stays case-insensitive.
+    // @expect: header-empty some:
+    show("header-empty", ctx.header("x-empty"))
+    // @expect: header-absent none
+    show("header-absent", ctx.header("X-Missing"))
+
+    // @expect: cookie-empty some:
+    show("cookie-empty", ctx.cookie("a"))
+    // @expect: cookie-set some:2
+    show("cookie-set", ctx.cookie("b"))
+    // @expect: cookie-absent none
+    show("cookie-absent", ctx.cookie("zz"))
+
+    // No Cookie header at all is absence, not an empty cookie.
+    let bare = ctxWith([], [], [])
+    // @expect: cookie-no-header none
+    show("cookie-no-header", bare.cookie("a"))
+
+    // `??` is how a caller that does not care collapses the two.
+    // @expect: default-for-absent fallback
+    print("default-for-absent " + (ctx.query("nope") ?? "fallback"))
+    // @expect: default-for-empty [] preserved
+    print("default-for-empty [" + (ctx.query("empty") ?? "fallback") + "] preserved")
+}

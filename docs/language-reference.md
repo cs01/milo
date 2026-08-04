@@ -2535,13 +2535,17 @@ fn main(): i32 {
     })
 
     r.get("/users/:id", (ctx: &mut Context) => {
-        let id = ctx.param("id")
+        let id = ctx.param("id") ?? ""
         ctx.setHeader("X-User-Id", id.clone())
         return ctx.json($"\{\"id\": \"{id}\"}")
     })
 
     r.get("/search", (ctx: &mut Context) => {
-        let q = ctx.query("q")
+        // None only when there is no ?q= at all; `?q=` is Some("").
+        let Option.Some(q) = ctx.query("q") else {
+            ctx.setStatus(400)
+            return ctx.text("missing ?q=")
+        }
         return ctx.text($"results for: {q}")
     })
 
@@ -2571,10 +2575,10 @@ r.all("/things", handleReq)      // any method
 
 | Method | Description |
 |--------|-------------|
-| `ctx.param("name")` | Extract path parameter (`:name` in pattern) |
-| `ctx.query("key")` | Extract query string value (`?key=value`) |
-| `ctx.header("name")` | Read request header (case-insensitive) |
-| `ctx.cookie("name")` | Read cookie value from request |
+| `ctx.param("name")` | Path parameter (`:name` in pattern) → `Option<string>` |
+| `ctx.query("key")` | Query string value (`?key=value`) → `Option<string>` |
+| `ctx.header("name")` | Request header, case-insensitive → `Option<string>` |
+| `ctx.cookie("name")` | Cookie value from the request → `Option<string>` |
 | `ctx.req.body` | Access raw request body |
 | `ctx.setStatus(code)` | Set response status code |
 | `ctx.setHeader(name, value)` | Add response header |
@@ -2585,6 +2589,11 @@ r.all("/things", handleReq)      // any method
 | `ctx.json(body)` | Return application/json response |
 | `ctx.html(body)` | Return text/html response |
 | `ctx.redirect(url)` | Return 302 redirect |
+
+The four lookups return `Option<string>` because absent and present-but-empty are
+different: `?q=` and a `Cookie: sid=` are *present* with an empty value, and only
+`Option` can say so. Collapse them with `??` when the distinction does not matter
+(`ctx.query("q") ?? ""`), and bind with `let … else` when it does.
 
 ### Middleware
 
@@ -3405,12 +3414,12 @@ fn main(): i32 {
     parser.addRequired("token", "t", "API token")
     let args = parser.parse()
 
-    let file = args.getString("file")
-    let fmt = args.getString("format")
+    let file = args.getString("file") ?? ""
+    let fmt = args.getString("format") ?? "json"
     let verbose = args.getBool("verbose")
     let count = args.getI64("count")
-    if args.has("output") {
-        let out = args.getString("output")
+    if let Option.Some(out) = args.getString("output") {
+        print(out)
     }
     return 0
 }
@@ -3430,7 +3439,10 @@ fn main(): i32 {
 - `parseFrom(argv: Vec<string>)` — parse from a provided arg list (argv[0] = program name, skipped)
 
 **Query methods** (on `&ParsedArgs`):
-- `getString(name)`, `getI64(name)`, `getU16(name)`, `getBool(name)` — get typed values
+- `getString(name)` — `Option<string>`. `None` when the name was never declared, or
+  was declared with no default and not supplied; `--flag ""` is `Some("")`. A declared
+  default is a value, so it comes back as `Some`. Use `?? "fallback"` to collapse.
+- `getI64(name)`, `getU16(name)`, `getBool(name)` — get typed values
 - `has(name)` — check if flag/positional was provided
 - `.positional` — `Vec<string>` of remaining positional args
 

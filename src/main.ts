@@ -1308,15 +1308,15 @@ fn main(): i32 {
     let args = parser.parse()
 
     // 4. Read values
-    let file = args.getString("file")       // positional or flag by name
-    let fmt = args.getString("format")      // "text" if not provided
-    let verbose = args.getBool("verbose")   // false if not provided
-    let count = args.getI64("count")        // 100 if not provided
-    let token = args.getString("token")     // guaranteed present (required)
+    let file = args.getString("file") ?? ""      // Option: None if not provided
+    let fmt = args.getString("format") ?? "text" // Some("text") if not provided
+    let verbose = args.getBool("verbose")        // false if not provided
+    let count = args.getI64("count")             // 100 if not provided
+    let token = args.getString("token") ?? ""    // guaranteed present (required)
 
-    if args.has("output") {
-        let out = args.getString("output")
+    if let Option.Some(out) = args.getString("output") {
         // write to file...
+        print(out)
     }
 
     match readFile(file) {
@@ -1355,7 +1355,8 @@ mytool --help    # prints auto-generated usage
 - \`parseFrom(argv: Vec<string>)\` — parse from a provided arg list (argv[0] = program name, skipped)
 
 ### ParsedArgs Query Methods
-- \`getString(name)\` — get string value by long name
+- \`getString(name)\` — \`Option<string>\`; \`None\` if undeclared, or declared with no
+  default and not supplied. \`--flag ""\` is \`Some("")\`. Collapse with \`?? "fallback"\`.
 - \`getI64(name)\` — get integer value
 - \`getU16(name)\` — get u16 value (validated 0..65535)
 - \`getBool(name)\` — check boolean flag

@@ -163,10 +163,7 @@ pub fn main(): i32 {
     parser.addBool("quiet", "q", "suppress request logging")
     let args = parser.parse()
 
-    var root: string = "."
-    if args.has("dir") {
-        root = args.getString("dir")
-    }
+    let root: string = args.getString("dir") ?? "."
 
     let quiet = args.getBool("quiet")
     let port = args.getU16("port")

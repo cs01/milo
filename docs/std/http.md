@@ -5,10 +5,11 @@
 ### `Context.cookie`
 
 ```milo
-fn Context.cookie(self: &Context, name: &string): string
+fn Context.cookie(self: &Context, name: &string): Option<string>
 ```
 
-_Undocumented._
+Value of cookie `name`, or None if there is no Cookie header or it does
+not carry `name`. `name=` in the header is Some("").
 
 ### `Context.deleteCookie`
 
@@ -21,10 +22,11 @@ _Undocumented._
 ### `Context.header`
 
 ```milo
-fn Context.header(self: &Context, name: &string): string
+fn Context.header(self: &Context, name: &string): Option<string>
 ```
 
-_Undocumented._
+Value of request header `name` (case-insensitive), or None if the request
+did not carry it. A header sent with an empty value is Some("").
 
 ### `Context.html`
 
@@ -45,18 +47,20 @@ _Undocumented._
 ### `Context.param`
 
 ```milo
-fn Context.param(self: &Context, name: &string): string
+fn Context.param(self: &Context, name: &string): Option<string>
 ```
 
-_Undocumented._
+Value of the route parameter `name`, or None if the route has no such
+parameter. A matched-but-empty segment is Some("").
 
 ### `Context.query`
 
 ```milo
-fn Context.query(self: &Context, name: &string): string
+fn Context.query(self: &Context, name: &string): Option<string>
 ```
 
-_Undocumented._
+Value of query-string parameter `name`, or None if it was not in the URL.
+`?name=` and `?name` are both present with an empty value: Some("").
 
 ### `Context.redirect`
 

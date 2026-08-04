@@ -639,7 +639,7 @@ pub fn main(): i32 {
     parser.addString("type", "t", "filter by file extension (e.g. milo)", "")
     let args = parser.parse()
 
-    let pattern = args.getString("pattern")
+    let pattern = args.getString("pattern") ?? ""
     let ignoreCase = args.getBool("ignore-case")
 
     // REG_EXTENDED=1, REG_ICASE=2
@@ -683,7 +683,7 @@ pub fn main(): i32 {
         maxCount: args.getI64("max-count"),
         afterCtx: afterCtx,
         beforeCtx: beforeCtx,
-        fileType: args.getString("type"),
+        fileType: (args.getString("type") ?? ""),
         totalMatches: 0,
         needsSeparator: false,
         pattern: pattern.clone(),
@@ -691,7 +691,7 @@ pub fn main(): i32 {
         ignoreCase: ignoreCase,
     }
 
-    var target = args.getString("path")
+    var target = args.getString("path") ?? ""
     if target.len == 0 {
         target = "."
     }

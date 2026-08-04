@@ -1,0 +1,52 @@
+// ParsedArgs.getString distinguishes a flag that was not given from one given an
+// empty value (`--name ""`). A declared default is a value, so it comes back Some;
+// an undeclared name and a defaultless flag that was never supplied are None.
+
+from "std/argparse" import {
+    ArgParser
+}
+
+fn show(label: string, o: Option<string>): void {
+    match o {
+        Option.Some(v) => {
+            print(label + " some:" + v)
+        }
+        Option.None => {
+            print(label + " none")
+        }
+    }
+}
+
+pub fn main(): void {
+    var parser = ArgParser.new("probe", "absent vs empty")
+    parser.addString("name", "n", "a name", "")
+    parser.addString("out", "o", "output path", "out.txt")
+    parser.addString("skipped", "s", "never supplied", "")
+    parser.addOptionalPositional("extra", "optional positional")
+
+    var argv: Vec<string> = []
+    argv.push("probe")
+    argv.push("--name")
+    argv.push("")
+    let parsed = parser.parseFrom(argv)
+
+    // @expect: supplied-empty some:
+    show("supplied-empty", parsed.getString("name"))
+    // @expect: has-default some:out.txt
+    show("has-default", parsed.getString("out"))
+    // @expect: no-default-absent none
+    show("no-default-absent", parsed.getString("skipped"))
+    // @expect: undeclared none
+    show("undeclared", parsed.getString("whatever"))
+    // @expect: positional-absent none
+    show("positional-absent", parsed.getString("extra"))
+
+    // `has` still answers "was it on the command line", which a default cannot fake.
+    // @expect: has-name true
+    print("has-name " + parsed.has("name").toString())
+    // @expect: has-out false
+    print("has-out " + parsed.has("out").toString())
+
+    // @expect: collapsed [] and [fallback]
+    print("collapsed [" + (parsed.getString("name") ?? "fallback") + "] and [" + (parsed.getString("skipped") ?? "fallback") + "]")
+}

@@ -151,8 +151,8 @@ fn main(): i32 {
     parser.addBool("count", "c", "only print count of matching lines")
     let args = parser.parse()
 
-    let pattern = args.getString("pattern")
-    let filePath = args.getString("file")
+    let pattern = args.getString("pattern") ?? ""
+    let filePath = args.getString("file") ?? ""
 
     let content = readFile(filePath)!
     let lines = content.split("\n")

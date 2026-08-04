@@ -167,10 +167,10 @@ pub fn main(): i32 {
     parser.addBool("no-wait", "", "start sharing immediately instead of waiting for a keypress")
     let args = parser.parse()
 
-    let host = args.getString("host")
+    let host = args.getString("host") ?? ""
     let port = args.getU16("port")
-    let base = args.getString("base")
-    let shell = args.getString("shell")
+    let base = args.getString("base") ?? ""
+    let shell = args.getString("shell") ?? ""
     let isPublic = args.getBool("public")
     // Control only ever allowed on encrypted (private) sessions — same rule as termpair-rs.
     let allowControl = !isPublic && !args.getBool("read-only")

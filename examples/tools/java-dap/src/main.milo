@@ -50,7 +50,7 @@ pub fn main(): void {
         exit(0)
     }
 
-    let target = args.getString("attach")
+    let target = args.getString("attach") ?? ""
     if target.len == 0 {
         print("java-dap: --smoke needs --attach <host>:<port>")
         exit(2)

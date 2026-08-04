@@ -177,3 +177,48 @@ test("--heap-size rejects a malformed value", () => {
   expect(r.err).toContain("k/m suffix");
   unlinkSync(src);
 }, COMPILE_TIMEOUT);
+
+// Float math and 64-bit division compile to compiler-rt helper calls that a
+// freestanding link has no library to resolve. That's the declared scope of the
+// target, so it must read as a named limit — not as the raw "undefined symbol:
+// __aeabi_dmul" dump, which reads like a broken toolchain.
+test("float math on a bare-metal target names the integer-only limit", () => {
+  const src = join(DIR, "milo_bm_float.milo");
+  writeFileSync(src, `fn scale(a: f64, b: f64): f64 { return a * b }
+fn main(): i32 { return scale(3.5, 2.0) as i32 }
+`);
+  const r = milo(`build ${src} --target=cortex-m3 --debug -o ${join(DIR, "milo_bm_float.elf")}`);
+  expect(r.code).not.toBe(0);
+  expect(r.err).toContain("integer-only");
+  expect(r.err).toContain("fixed-point");
+  expect(r.err).not.toContain("undefined symbol");
+  unlinkSync(src);
+}, COMPILE_TIMEOUT);
+
+test("i64 division on a bare-metal target names the integer-only limit", () => {
+  const src = join(DIR, "milo_bm_div.milo");
+  writeFileSync(src, `fn q(a: i64, b: i64): i64 { return a / b }
+fn main(): i32 { return q(100, 7) as i32 }
+`);
+  const r = milo(`build ${src} --target=cortex-m3 --debug -o ${join(DIR, "milo_bm_div.elf")}`);
+  expect(r.code).not.toBe(0);
+  expect(r.err).toContain("64-bit division");
+  expect(r.err).not.toContain("undefined symbol");
+  unlinkSync(src);
+}, COMPILE_TIMEOUT);
+
+// The prelude is in every program, so a std function nobody calls must not drag a
+// libc symbol into the link. --gc-sections is what guarantees that at -O0, where no
+// optimizer pass removes it: std/string's parseF64 calls atof, and that alone used
+// to fail the link of a program that parses nothing.
+test("a program that parses nothing links despite the prelude's libc-calling parsers", () => {
+  const src = join(DIR, "milo_bm_prelude.milo");
+  writeFileSync(src, `fn noLoop(): i32 { return 7 }
+fn main(): i32 { return noLoop() }
+`);
+  const out = join(DIR, "milo_bm_prelude.elf");
+  const r = milo(`build ${src} --target=cortex-m3 --debug -o ${out}`);
+  expect(r.code).toBe(0);
+  expect(existsSync(out)).toBe(true);
+  unlinkSync(src);
+}, COMPILE_TIMEOUT);

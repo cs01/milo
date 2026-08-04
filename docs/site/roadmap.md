@@ -40,6 +40,7 @@ Primitive types, let/var bindings, if/else, while/for loops, functions, structs,
 - **`milo safety --list` / `--safety=<profile>`**: DO-178C DAL A/B/C, ISO 26262 ASIL A–D, NASA Class A/B, IEC 61508 SIL 3
 - **`milo wcet`**: OTAWA flow facts and loop cycle estimates
 - **Bare-metal targets**: Cortex-M0/M3/M4/M4F/M7 (with RP2040 and STM32 aliases), a `--heap-size` cap, and a working heap so `Vec`/`String` run on microcontrollers
+- **Bare metal is integer-only**: the freestanding link carries no compiler-rt, so float math and 64-bit division are refused with a diagnostic pointing at fixed-point. Integer-only is what keeps the WCET numbers clean
 
 ### Concurrency
 

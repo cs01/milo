@@ -440,10 +440,43 @@ function linkBareMetal(llFile: string, outFile: string, target: TargetInfo, optF
   // program never calls: std/string is in every program, and one of its parsers
   // calling libc's atof was enough to fail the link of a program that parses
   // nothing. The vector table is KEEP'd in mps2.ld, so it survives the sweep.
-  execSync(
-    `${tc.path}${tgt} ${opt}${heapDef} -ffunction-sections -fdata-sections -nostdlib -fuse-ld=lld -Wl,--gc-sections -Wl,-T,"${ldScript}" "${startup}" "${llFile}" -o "${outFile}" -Wno-override-module`,
-    { stdio: ["pipe", "pipe", "pipe"] }
-  );
+  try {
+    execSync(
+      `${tc.path}${tgt} ${opt}${heapDef} -ffunction-sections -fdata-sections -nostdlib -fuse-ld=lld -Wl,--gc-sections -Wl,-T,"${ldScript}" "${startup}" "${llFile}" -o "${outFile}" -Wno-override-module`,
+      { stdio: ["pipe", "pipe", "pipe"] }
+    );
+  } catch (e: any) {
+    // A named limit replaces the raw lld dump; anything else falls through to the
+    // caller's generic link error, which still prints the linker's own output.
+    if (reportMissingBuiltins((e.stderr?.toString() ?? "") + (e.stdout?.toString() ?? ""), target)) process.exit(1);
+    throw e;
+  }
+}
+
+// The compiler-rt/libgcc helper routines clang emits for operations the core has no
+// instruction for. A freestanding link has no builtins library to resolve them, so
+// they surface as raw "undefined symbol: __aeabi_dmul" — which reads like a compiler
+// bug rather than what it is: the declared edge of the bare-metal target. Cortex-M
+// support is integer-only, and this is where a program finds that out.
+const AEABI_FLOAT = /__aeabi_(d|f)[a-z0-9]+|__(add|sub|mul|div)(df|sf)3|__(fix|float)[a-z]*(df|sf)/;
+const AEABI_INT64 = /__aeabi_u?l(div|)mod|__[u]?divdi3|__[u]?moddi3|__muldi3/;
+
+function reportMissingBuiltins(stderr: string, target: TargetInfo): boolean {
+  const undef = stderr.match(/undefined symbol: (\S+)/g)?.map(m => m.slice("undefined symbol: ".length)) ?? [];
+  if (!undef.length) return false;
+  const floats = undef.filter(s => AEABI_FLOAT.test(s));
+  const int64s = undef.filter(s => AEABI_INT64.test(s));
+  if (!floats.length && !int64s.length) return false;
+  console.error(`error: unsupported operation for ${target.triple} — bare-metal Milo is integer-only`);
+  if (floats.length) {
+    console.error(`note: floating-point arithmetic needs the soft-float helpers (${floats.slice(0, 3).join(", ")}), which a freestanding link has no library to supply`);
+    console.error(`note: use fixed-point instead — see examples/embedded/pidStep.milo, a Q16.16 PID kernel`);
+  }
+  if (int64s.length) {
+    console.error(`note: 64-bit division needs a helper routine (${int64s.slice(0, 3).join(", ")}) this target cannot link — use i32 for divisors and quotients`);
+  }
+  console.error(`note: this is the scope of the target, not a missing toolchain; hosted targets have no such limit`);
+  return true;
 }
 
 // Cross-linking to Windows from a POSIX host: clang can emit COFF unaided, but it has

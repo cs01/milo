@@ -58,6 +58,7 @@ Known frontier (tracked in backlog Tier 1 #1–#3 and Tier 2 #2/#3/#12): **no qu
 - **`milo safety --list` / `--safety=<profile>`**: DO-178C DAL A/B/C, ISO 26262 ASIL A–D, NASA Class A/B, IEC 61508 SIL 3
 - **`milo wcet`**: OTAWA flow facts (loop bounds) plus cycle estimates
 - **Bare-metal targets**: `cortex-m0/m3/m4/m4f/m7` (plus `rp2040`/STM32 aliases) — freestanding, QEMU machine per target, `--heap-size=<N>` cap, working heap (`Vec`/`String` over a bump allocator), OOM surfaces as `ENOMEM`. A reclaiming allocator is deliberately not planned.
+- **Bare metal is integer-only.** The link is `-nostdlib` with no compiler-rt, so float arithmetic and 64-bit division — which clang lowers to helper calls (`__aeabi_dmul`, `__aeabi_ldivmod`) — have no library to resolve them. Both are refused with a named diagnostic pointing at fixed-point; `examples/embedded/pidStep.milo` is a Q16.16 PID kernel. Linking a builtins library is deliberately not planned: integer-only is what makes the WCET story clean.
 
 ### Concurrency
 

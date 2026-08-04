@@ -696,10 +696,11 @@ const BUILTIN_TYPE_HOVERS: Record<string, { doc: string; ctors: Record<string, s
       "```",
       "A hash map from keys of type `K` to values of type `V`.",
       "",
-      "**Construct:** `HashMap.new()`",
+      "**Construct:** `HashMap.new()`, `HashMap.withCapacity(n)`",
     ].join("\n"),
     ctors: {
       new: "```milo\nfn HashMap.new(): HashMap<K, V>\n```\nEmpty map. `K`/`V` are inferred from the binding's annotation.\n\n```milo\nlet m: HashMap<string, i32> = HashMap.new()\nm.insert(\"a\", 1)\n```",
+      withCapacity: "```milo\nfn HashMap.withCapacity(capacity: i64): HashMap<K, V>\n```\nEmpty map sized so `capacity` inserts never rehash.\n\n```milo\nvar m: HashMap<i64, string> = HashMap.withCapacity(1000)\n```",
     },
   },
   String: {
@@ -1350,6 +1351,9 @@ const MAP_BUILTIN_METHODS: { name: string; sig: string }[] = [
   { name: "contains", sig: "(key: K): bool" },
   { name: "remove", sig: "(key: K)" },
   { name: "getOrDefault", sig: "(key: K, fallback: V): V" },
+  { name: "keys", sig: "(): Vec<K>" },
+  { name: "values", sig: "(): Vec<V>" },
+  { name: "clear", sig: "()" },
   { name: "len", sig: ": i64" },
   { name: "isEmpty", sig: "(): bool" },
   { name: "clone", sig: "(): HashMap<K, V>" },

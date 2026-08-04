@@ -161,6 +161,7 @@ export const VEC_MEMBERS = [
 
 export const HASHMAP_MEMBERS = [
   "insert", "get", "getOrDefault", "remove", "contains", "len", "isEmpty", "clone",
+  "clear", "keys", "values",
 ] as const;
 
 export const STRING_MEMBERS = [

@@ -5321,6 +5321,15 @@ export class TypeChecker {
       this.exprTypes.set(expr, hint);
       return hint;
     }
+    if (expr.kind === "EnumLit" && expr.enumName === "HashMap" && expr.variant === "withCapacity" && hint?.tag === "hashmap") {
+      if (expr.args.length !== 1) { this.error(`'HashMap.withCapacity' expects 1 argument (capacity), got ${expr.args.length}`, expr.span); }
+      else {
+        const c = this.checkExpr(expr.args[0]);
+        if (c.tag !== "int" && c.tag !== "unknown") this.error(`'HashMap.withCapacity': capacity must be an integer, got ${typeName(c)}`, expr.span);
+      }
+      this.exprTypes.set(expr, hint);
+      return hint;
+    }
     if (hint && expr.kind === "ArrayLit" && hint.tag === "array") {
       for (const elem of expr.elements) {
         this.checkExprWithHint(elem, hint.element);
@@ -6390,9 +6399,9 @@ export class TypeChecker {
           this.error(`cannot infer Vec element type — add a type annotation: 'let v: Vec<T> = Vec.${expr.variant}(...)'`, sp);
           return this.setType(expr, { tag: "unknown" });
         }
-        if (expr.enumName === "HashMap" && expr.variant === "new") {
-          if (expr.args.length !== 0) this.error(`'HashMap.new' takes no arguments`, sp);
-          this.error(`cannot infer HashMap types — add a type annotation: 'let m: HashMap<K, V> = HashMap.new()'`, sp);
+        if (expr.enumName === "HashMap" && (expr.variant === "new" || expr.variant === "withCapacity")) {
+          if (expr.variant === "new" && expr.args.length !== 0) this.error(`'HashMap.new' takes no arguments`, sp);
+          this.error(`cannot infer HashMap types — add a type annotation: 'let m: HashMap<K, V> = HashMap.${expr.variant}(${expr.variant === "new" ? "" : "n"})'`, sp);
           return this.setType(expr, { tag: "unknown" });
         }
         const genericInfo = this.genericEnums.get(expr.enumName);
@@ -7388,6 +7397,42 @@ export class TypeChecker {
           if (expr.method === "len") {
             if (expr.args.length !== 0) { this.error(`'len' takes no arguments`, sp); }
             return this.setType(expr, { tag: "int", bits: 64, signed: true });
+          }
+          if (expr.method === "isEmpty") {
+            if (expr.args.length !== 0) { this.error(`'isEmpty' takes no arguments`, sp); }
+            return this.setType(expr, { tag: "bool" });
+          }
+          if (expr.method === "clear") {
+            if (expr.args.length !== 0) { this.error(`'clear' takes no arguments`, sp); }
+            if (!this.isRootMutable(expr.object)) {
+              this.error(`cannot clear an immutable HashMap`, sp, `declare with 'var' to make it mutable`);
+            }
+            return this.setType(expr, { tag: "void" });
+          }
+          if (expr.method === "clone") {
+            if (expr.args.length !== 0) { this.error(`'clone' takes no arguments`, sp); }
+            for (const [what, t] of [["key", objType.key], ["value", objType.value]] as const) {
+              if (t.tag === "interface") {
+                this.error(`cannot clone a HashMap with ${what} type ${typeName(t)}: an interface value has no clone`, sp,
+                  `the concrete type is erased and the itable carries no clone slot`);
+              } else if (t.tag === "fn") {
+                this.error(`cannot clone a HashMap with ${what} type ${typeName(t)}: closures cannot be cloned`, sp);
+              }
+            }
+            return this.setType(expr, objType);
+          }
+          // keys()/values() snapshot into a Vec. Iteration order is unspecified and
+          // varies per process (the hash seed is randomized), so the snapshot is the
+          // supported way to get a stable order: collect, then sort.
+          if (expr.method === "keys" || expr.method === "values") {
+            if (expr.args.length !== 0) { this.error(`'${expr.method}' takes no arguments`, sp); }
+            const el = expr.method === "keys" ? objType.key : objType.value;
+            if (el.tag === "interface" || el.tag === "fn") {
+              this.error(`'${expr.method}' cannot copy ${typeName(el)} out of the map`, sp,
+                `iterate with 'for k, v in map' instead — it borrows rather than copies`);
+              return this.setType(expr, { tag: "unknown" });
+            }
+            return this.setType(expr, { tag: "vec", element: el });
           }
           this.error(`HashMap has no method '${expr.method}'`, sp, memberHint(expr.method, HASHMAP_MEMBERS));
           return this.setType(expr, { tag: "unknown" });

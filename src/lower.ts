@@ -779,6 +779,9 @@ class LowerCtx {
         if (expr.enumName === "HashMap" && expr.variant === "new" && type.tag === "hashmap") {
           return { kind: "HashMapNew", keyType: type.key, valueType: type.value, type, span: expr.span };
         }
+        if (expr.enumName === "HashMap" && expr.variant === "withCapacity" && type.tag === "hashmap") {
+          return { kind: "HashMapWithCapacity", capacity: this.lowerExpr(expr.args[0]), keyType: type.key, valueType: type.value, type, span: expr.span };
+        }
         // `Kind.tryFrom(n)` → Option<Kind>. `type` is the Option enum the checker inferred.
         const reprInfo = this.c.enums.get(expr.enumName);
         if (expr.variant === "tryFrom" && reprInfo?.reprType && type.tag === "enum") {
@@ -1075,6 +1078,24 @@ class LowerCtx {
           }
           if (expr.method === "len") {
             return { kind: "HashMapLen", object: this.lowerExpr(expr.object), type, span: expr.span };
+          }
+          if (expr.method === "isEmpty") {
+            const i64: TypeKind = { tag: "int", bits: 64, signed: true };
+            return {
+              kind: "BinOp", op: "==",
+              left: { kind: "HashMapLen", object: this.lowerExpr(expr.object), type: i64, span: expr.span },
+              right: { kind: "IntLit", value: 0n, type: i64, span: expr.span },
+              type, span: expr.span,
+            };
+          }
+          if (expr.method === "clone") {
+            return { kind: "HashMapClone", object: this.lowerExpr(expr.object), type, span: expr.span };
+          }
+          if (expr.method === "clear") {
+            return { kind: "HashMapClear", object: this.lowerExpr(expr.object), type, span: expr.span };
+          }
+          if (expr.method === "keys" || expr.method === "values") {
+            return { kind: "HashMapEntries", object: this.lowerExpr(expr.object), field: expr.method === "keys" ? "key" : "value", type, span: expr.span };
           }
         }
         if (objType?.tag === "string") {

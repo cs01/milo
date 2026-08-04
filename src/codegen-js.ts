@@ -684,6 +684,15 @@ export class CodegenJS {
         return `${this.genExpr(expr.map)}.delete(${this.genExpr(expr.key)})`;
       case "HashMapLen":
         return `${this.genExpr(expr.object)}.size`;
+      case "HashMapWithCapacity":
+        // capacity is a native allocation hint; a JS Map needs none.
+        return `new Map()`;
+      case "HashMapClone":
+        return `__clone(${this.genExpr(expr.object)})`;
+      case "HashMapClear":
+        return `${this.genExpr(expr.object)}.clear()`;
+      case "HashMapEntries":
+        return `Array.from(${this.genExpr(expr.object)}.${expr.field === "key" ? "keys" : "values"}(), __clone)`;
       case "StringPush":
         // Known gap: correct for ASCII only. Milo pushes one UTF-8 byte, but a JS
         // string can't hold a partial code point, so pushing the two bytes of a

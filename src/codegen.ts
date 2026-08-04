@@ -5298,6 +5298,14 @@ export class Codegen {
         return this.genHashMapContains(expr, lines);
       case "HashMapRemove":
         return this.genHashMapRemove(expr, lines);
+      case "HashMapWithCapacity":
+        return this.genHashMapWithCapacity(expr, lines);
+      case "HashMapClone":
+        return this.genHashMapClone(expr, lines);
+      case "HashMapClear":
+        return this.genHashMapClear(expr, lines);
+      case "HashMapEntries":
+        return this.genHashMapEntries(expr, lines);
       case "HashMapLen": {
         this.hasHashMapType = true;
         const [ol, ov] = this.genExpr(expr.object);
@@ -8901,6 +8909,250 @@ export class Codegen {
     return [lines, "0", "void"];
   }
 
+  // HashMap.withCapacity(n): pre-size the table so inserting n entries never rehashes.
+  // Insert grows when (len+1)*4 >= cap*3, so the table must hold cap > 4(n+1)/3; the
+  // loop rounds that up to a power of two (the mask-based probe requires one).
+  private genHashMapWithCapacity(expr: HIRExpr & { kind: "HashMapWithCapacity" }, lines: string[]): [string[], string, string] {
+    this.hasHashMapType = true;
+    this.needsMalloc = true;
+    this.needsMemset = true;
+    const entryTy = this.hashMapEntryType(expr.keyType, expr.valueType);
+    const [capLines, nVal] = this.genExpr(expr.capacity);
+    lines.push(...capLines);
+    this.emitNonNegativeCheck(lines, nVal, "capacity", expr.span);
+
+    const nPlus1 = this.nextTemp();
+    lines.push(`  ${nPlus1} = add i64 ${nVal}, 1`);
+    const scaled = this.nextTemp();
+    lines.push(`  ${scaled} = mul i64 ${nPlus1}, 4`);
+    const wantDiv = this.nextTemp();
+    lines.push(`  ${wantDiv} = udiv i64 ${scaled}, 3`);
+    const want = this.nextTemp();
+    lines.push(`  ${want} = add i64 ${wantDiv}, 1`);
+
+    const capSlot = this.nextTemp();
+    lines.push(`  ${capSlot} = alloca i64`);
+    lines.push(`  store i64 8, ptr ${capSlot}`);
+    const roundCond = this.nextLabel("hmwc.cond");
+    const roundBody = this.nextLabel("hmwc.body");
+    const roundEnd = this.nextLabel("hmwc.end");
+    lines.push(`  br label %${roundCond}`);
+    lines.push(`${roundCond}:`);
+    const curCap = this.nextTemp();
+    lines.push(`  ${curCap} = load i64, ptr ${capSlot}`);
+    const tooSmall = this.nextTemp();
+    lines.push(`  ${tooSmall} = icmp ult i64 ${curCap}, ${want}`);
+    lines.push(`  br i1 ${tooSmall}, label %${roundBody}, label %${roundEnd}`);
+    lines.push(`${roundBody}:`);
+    const dbl = this.nextTemp();
+    lines.push(`  ${dbl} = shl i64 ${curCap}, 1`);
+    lines.push(`  store i64 ${dbl}, ptr ${capSlot}`);
+    lines.push(`  br label %${roundCond}`);
+    lines.push(`${roundEnd}:`);
+    const cap = this.nextTemp();
+    lines.push(`  ${cap} = load i64, ptr ${capSlot}`);
+
+    const entrySize = this.nextTemp();
+    lines.push(`  ${entrySize} = getelementptr ${entryTy}, ptr null, i32 1`);
+    const entrySizeI = this.nextTemp();
+    lines.push(`  ${entrySizeI} = ptrtoint ptr ${entrySize} to i64`);
+    const totalSize = this.nextTemp();
+    lines.push(`  ${totalSize} = mul i64 ${entrySizeI}, ${cap}`);
+    const dataPtr = this.nextTemp();
+    lines.push(`  ${dataPtr} = call ptr @malloc(i64 ${totalSize})`);
+    lines.push(`  call ptr @memset(ptr ${dataPtr}, i32 0, i64 ${totalSize})`);
+
+    const s0 = this.nextTemp();
+    lines.push(`  ${s0} = insertvalue %HashMap undef, ptr ${dataPtr}, 0`);
+    const s1 = this.nextTemp();
+    lines.push(`  ${s1} = insertvalue %HashMap ${s0}, i64 0, 1`);
+    const s2 = this.nextTemp();
+    lines.push(`  ${s2} = insertvalue %HashMap ${s1}, i64 ${cap}, 2`);
+    const s3 = this.nextTemp();
+    lines.push(`  ${s3} = insertvalue %HashMap ${s2}, i64 0, 3`);
+    return [lines, s3, "%HashMap"];
+  }
+
+  private genHashMapClone(expr: HIRExpr & { kind: "HashMapClone" }, lines: string[]): [string[], string, string] {
+    this.hasHashMapType = true;
+    const [ol, ov] = this.genExpr(expr.object);
+    lines.push(...ol);
+    // emitDeepCloneFromPtr reads through a pointer; the spill is a shallow copy
+    // that is never dropped — only the clone it produces is owned by the caller.
+    const slot = this.nextTemp();
+    lines.push(`  ${slot} = alloca %HashMap`);
+    lines.push(`  store %HashMap ${ov}, ptr ${slot}`);
+    const cloned = this.emitDeepCloneFromPtr(lines, slot, expr.object.type);
+    return [lines, cloned, "%HashMap"];
+  }
+
+  // Drop every live key/value, then zero the states. Capacity and the hash seed
+  // survive — clear() is "empty this map", not "give the memory back", so a
+  // rebuild after clear() reuses the table it already paid for (Vec.clear too).
+  private genHashMapClear(expr: HIRExpr & { kind: "HashMapClear" }, lines: string[]): [string[], string, string] {
+    this.hasHashMapType = true;
+    this.needsMemset = true;
+    const mapType = expr.object.type;
+    if (mapType.tag !== "hashmap") throw new Error("HashMapClear on non-hashmap");
+    const entryTy = this.hashMapEntryType(mapType.key, mapType.value);
+    const [mapPtrLines, mapPtr] = this.genLValue(expr.object);
+    lines.push(...mapPtrLines);
+
+    const dataFieldPtr = this.nextTemp();
+    lines.push(`  ${dataFieldPtr} = getelementptr %HashMap, ptr ${mapPtr}, i32 0, i32 0`);
+    const data = this.nextTemp();
+    lines.push(`  ${data} = load ptr, ptr ${dataFieldPtr}`);
+    const capPtr = this.nextTemp();
+    lines.push(`  ${capPtr} = getelementptr %HashMap, ptr ${mapPtr}, i32 0, i32 2`);
+    const cap = this.nextTemp();
+    lines.push(`  ${cap} = load i64, ptr ${capPtr}`);
+    const isNull = this.nextTemp();
+    lines.push(`  ${isNull} = icmp eq ptr ${data}, null`);
+    const doLabel = this.nextLabel("hmc.do");
+    const endLabel = this.nextLabel("hmc.end");
+    lines.push(`  br i1 ${isNull}, label %${endLabel}, label %${doLabel}`);
+    lines.push(`${doLabel}:`);
+
+    if (this.needsDropCg(mapType.key) || this.needsDropCg(mapType.value)) {
+      const cond = this.nextLabel("hmc.cond");
+      const body = this.nextLabel("hmc.body");
+      const dropIt = this.nextLabel("hmc.drop");
+      const step = this.nextLabel("hmc.step");
+      const loopEnd = this.nextLabel("hmc.loopend");
+      const iAddr = this.nextTemp();
+      lines.push(`  ${iAddr} = alloca i64`);
+      lines.push(`  store i64 0, ptr ${iAddr}`);
+      lines.push(`  br label %${cond}`);
+      lines.push(`${cond}:`);
+      const i = this.nextTemp();
+      lines.push(`  ${i} = load i64, ptr ${iAddr}`);
+      const more = this.nextTemp();
+      lines.push(`  ${more} = icmp ult i64 ${i}, ${cap}`);
+      lines.push(`  br i1 ${more}, label %${body}, label %${loopEnd}`);
+      lines.push(`${body}:`);
+      const entryPtr = this.nextTemp();
+      lines.push(`  ${entryPtr} = getelementptr ${entryTy}, ptr ${data}, i64 ${i}`);
+      const state = this.nextTemp();
+      lines.push(`  ${state} = load i8, ptr ${entryPtr}`);
+      const occupied = this.nextTemp();
+      lines.push(`  ${occupied} = icmp eq i8 ${state}, 1`);
+      lines.push(`  br i1 ${occupied}, label %${dropIt}, label %${step}`);
+      lines.push(`${dropIt}:`);
+      if (this.needsDropCg(mapType.key)) {
+        const kPtr = this.nextTemp();
+        lines.push(`  ${kPtr} = getelementptr ${entryTy}, ptr ${entryPtr}, i32 0, i32 1`);
+        this.emitDropValue(lines, kPtr, mapType.key);
+      }
+      if (this.needsDropCg(mapType.value)) {
+        const vPtr = this.nextTemp();
+        lines.push(`  ${vPtr} = getelementptr ${entryTy}, ptr ${entryPtr}, i32 0, i32 2`);
+        this.emitDropValue(lines, vPtr, mapType.value);
+      }
+      lines.push(`  br label %${step}`);
+      lines.push(`${step}:`);
+      const nextI = this.nextTemp();
+      lines.push(`  ${nextI} = add i64 ${i}, 1`);
+      lines.push(`  store i64 ${nextI}, ptr ${iAddr}`);
+      lines.push(`  br label %${cond}`);
+      lines.push(`${loopEnd}:`);
+    }
+
+    const entrySize = this.nextTemp();
+    lines.push(`  ${entrySize} = getelementptr ${entryTy}, ptr null, i32 1`);
+    const entrySizeI = this.nextTemp();
+    lines.push(`  ${entrySizeI} = ptrtoint ptr ${entrySize} to i64`);
+    const totalSize = this.nextTemp();
+    lines.push(`  ${totalSize} = mul i64 ${entrySizeI}, ${cap}`);
+    lines.push(`  call ptr @memset(ptr ${data}, i32 0, i64 ${totalSize})`);
+    const lenPtr = this.nextTemp();
+    lines.push(`  ${lenPtr} = getelementptr %HashMap, ptr ${mapPtr}, i32 0, i32 1`);
+    lines.push(`  store i64 0, ptr ${lenPtr}`);
+    lines.push(`  br label %${endLabel}`);
+    lines.push(`${endLabel}:`);
+    return [lines, "0", "void"];
+  }
+
+  // keys()/values() → a fresh Vec holding a deep clone of each occupied slot's
+  // key (or value). The map keeps its own copy, so the two never share a buffer.
+  private genHashMapEntries(expr: HIRExpr & { kind: "HashMapEntries" }, lines: string[]): [string[], string, string] {
+    this.hasVecType = true;
+    this.hasHashMapType = true;
+    this.needsMalloc = true;
+    const mapType = expr.object.type;
+    if (mapType.tag !== "hashmap") throw new Error("HashMapEntries on non-hashmap");
+    const elemType = expr.field === "key" ? mapType.key : mapType.value;
+    const fieldIdx = expr.field === "key" ? 1 : 2;
+    const entryTy = this.hashMapEntryType(mapType.key, mapType.value);
+    const elemTy = this.llvmType(elemType);
+    const elemSize = this.typeSizeOf(elemType);
+
+    const [ol, ov] = this.genExpr(expr.object);
+    lines.push(...ol);
+    const data = this.nextTemp();
+    lines.push(`  ${data} = extractvalue %HashMap ${ov}, 0`);
+    const len = this.nextTemp();
+    lines.push(`  ${len} = extractvalue %HashMap ${ov}, 1`);
+    const cap = this.nextTemp();
+    lines.push(`  ${cap} = extractvalue %HashMap ${ov}, 2`);
+    const bytes = this.nextTemp();
+    lines.push(`  ${bytes} = mul i64 ${len}, ${elemSize}`);
+    const buf = this.nextTemp();
+    lines.push(`  ${buf} = call ptr @malloc(i64 ${bytes})`);
+
+    const iAddr = this.nextTemp();
+    lines.push(`  ${iAddr} = alloca i64`);
+    lines.push(`  store i64 0, ptr ${iAddr}`);
+    const outAddr = this.nextTemp();
+    lines.push(`  ${outAddr} = alloca i64`);
+    lines.push(`  store i64 0, ptr ${outAddr}`);
+    const cond = this.nextLabel("hme.cond");
+    const body = this.nextLabel("hme.body");
+    const take = this.nextLabel("hme.take");
+    const step = this.nextLabel("hme.step");
+    const end = this.nextLabel("hme.end");
+    lines.push(`  br label %${cond}`);
+    lines.push(`${cond}:`);
+    const i = this.nextTemp();
+    lines.push(`  ${i} = load i64, ptr ${iAddr}`);
+    const more = this.nextTemp();
+    lines.push(`  ${more} = icmp ult i64 ${i}, ${cap}`);
+    lines.push(`  br i1 ${more}, label %${body}, label %${end}`);
+    lines.push(`${body}:`);
+    const entryPtr = this.nextTemp();
+    lines.push(`  ${entryPtr} = getelementptr ${entryTy}, ptr ${data}, i64 ${i}`);
+    const state = this.nextTemp();
+    lines.push(`  ${state} = load i8, ptr ${entryPtr}`);
+    const occupied = this.nextTemp();
+    lines.push(`  ${occupied} = icmp eq i8 ${state}, 1`);
+    lines.push(`  br i1 ${occupied}, label %${take}, label %${step}`);
+    lines.push(`${take}:`);
+    const srcPtr = this.nextTemp();
+    lines.push(`  ${srcPtr} = getelementptr ${entryTy}, ptr ${entryPtr}, i32 0, i32 ${fieldIdx}`);
+    const cloned = this.emitDeepCloneFromPtr(lines, srcPtr, elemType);
+    const outIdx = this.nextTemp();
+    lines.push(`  ${outIdx} = load i64, ptr ${outAddr}`);
+    const dstPtr = this.nextTemp();
+    lines.push(`  ${dstPtr} = getelementptr ${elemTy}, ptr ${buf}, i64 ${outIdx}`);
+    lines.push(`  store ${elemTy} ${cloned}, ptr ${dstPtr}`);
+    const nextOut = this.nextTemp();
+    lines.push(`  ${nextOut} = add i64 ${outIdx}, 1`);
+    lines.push(`  store i64 ${nextOut}, ptr ${outAddr}`);
+    lines.push(`  br label %${step}`);
+    lines.push(`${step}:`);
+    const nextI = this.nextTemp();
+    lines.push(`  ${nextI} = add i64 ${i}, 1`);
+    lines.push(`  store i64 ${nextI}, ptr ${iAddr}`);
+    lines.push(`  br label %${cond}`);
+    lines.push(`${end}:`);
+    const v0 = this.nextTemp();
+    lines.push(`  ${v0} = insertvalue %Vec undef, ptr ${buf}, 0`);
+    const v1 = this.nextTemp();
+    lines.push(`  ${v1} = insertvalue %Vec ${v0}, i64 ${len}, 1`);
+    const v2 = this.nextTemp();
+    lines.push(`  ${v2} = insertvalue %Vec ${v1}, i64 ${len}, 2`);
+    return [lines, v2, "%Vec"];
+  }
+
   private genHashMapGet(expr: HIRExpr & { kind: "HashMapGet" }, lines: string[]): [string[], string, string] {
     this.hasHashMapType = true;
     const mapType = expr.map.type;
@@ -10371,6 +10623,9 @@ export class Codegen {
       case "VecFilled":
       case "VecMap":
       case "VecFilter":
+      case "HashMapWithCapacity":
+      case "HashMapClone":
+      case "HashMapEntries":
         return true;
       case "BinOp":
         // string `+` only — the comparisons return bool

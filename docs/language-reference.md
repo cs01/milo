@@ -1361,6 +1361,37 @@ if let Option.Some(v) = val {
 let v = m.getOrDefault("hello", 0)  // returns i32 directly (0 if missing)
 
 m.remove("hello")
+
+print(m.isEmpty())
+let copy = m.clone()               // deep copy; the two share no heap data
+m.clear()                          // drop every entry, keep the table's capacity
+```
+
+`HashMap.withCapacity(n)` presizes the table so `n` inserts never rehash:
+
+```milo
+var counts: HashMap<string, i64> = HashMap.withCapacity(1000)
+```
+
+### keys() and values()
+
+```milo
+var ks = m.keys()      // Vec<K>, a deep copy of every live key
+var vs = m.values()    // Vec<V>
+ks.sort()
+```
+
+Both snapshot the map into a fresh `Vec`, so mutating the map afterwards does not
+disturb the snapshot. This is the supported way to get a **stable** order out of a
+map — collect, then sort (see the order note below). To read entries without
+copying, use `for k, v in m`, which borrows.
+
+There is no `entry` / `getOrInsert`. Both hand back a mutable reference *into* the
+table, and Milo's references are second-class — they cannot be returned. Count with
+the two-lookup form instead:
+
+```milo
+m.insert(word, m.getOrDefault(word, 0) + 1)
 ```
 
 ### Iteration

@@ -1,3 +1,7 @@
+// @skip-os: win32
+// Windows is skipped for the same reason as fetchRequestBuild: importing
+// std/fetch links OpenSSL, which the xwin sysroot does not ship.
+//
 // std/fetch response parsing through the public surface only. The chunked branch
 // is the reason this exists: parseResponse used to detect it with a module-local
 // `startsWith` helper that shadowed the builtin string method, and dropping that

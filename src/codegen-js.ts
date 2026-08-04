@@ -71,11 +71,34 @@ export const JS_RUNTIME_HELPERS: string = [
   `function __eq(a, b) { if (a === b) return true; if (a === null || b === null || typeof a !== 'object' || typeof b !== 'object') return a === b; if (Array.isArray(a)) return Array.isArray(b) && a.length === b.length && a.every((v, i) => __eq(v, b[i])); if (a instanceof Map || b instanceof Map) { if (!(a instanceof Map && b instanceof Map) || a.size !== b.size) return false; for (const [k, v] of a) { if (!b.has(k) || !__eq(v, b.get(k))) return false; } return true; } const ka = Object.keys(a), kb = Object.keys(b); return ka.length === kb.length && ka.every(k => __eq(a[k], b[k])); }`,
 ].join("\n");
 
+// True if `s` can `break`/`continue` a loop OUTSIDE the block it appears in. A loop
+// the block itself contains swallows its own jumps, so those bodies aren't searched.
+// `return` is not counted: a match-expression arm compiles it to a sentinel throw the
+// function boundary catches (see genFunction), so it does escape the arm correctly.
+function breaksOuterLoop(s: HIRStmt): boolean {
+  switch (s.kind) {
+    case "Break": case "Continue":
+      return true;
+    case "If":
+      return s.thenBody.some(breaksOuterLoop) || (s.elseBody?.some(breaksOuterLoop) ?? false);
+    case "Match":
+      return s.arms.some(a => a.body.some(breaksOuterLoop));
+    case "UnsafeBlock":
+      return s.body.some(breaksOuterLoop);
+    default:
+      return false;
+  }
+}
+
 export class CodegenJS {
   private output: string[] = [];
   private indent = 0;
   private tempCounter = 0;
   private usedPropagate = false;
+  // Depth of match-expression arms being generated, and whether any arm in the
+  // current function returned — see genMatchExpr.
+  private inMatchExprArm = 0;
+  private usedMatchReturn = false;
   // Names boxed as `{v: …}` in the current function: JS-immutable values (numbers,
   // strings, bools) that are taken by `&mut`/`&` must share mutations across the call,
   // which JS by-value passing can't do. Ref params + ref-taken locals become boxes.
@@ -88,6 +111,10 @@ export class CodegenJS {
   // generated, which is what lets the call in it still resolve to the function.
   private fnNames: Set<string> = new Set();
   private renamed: Map<string, string> = new Map();
+  // Field/variant layouts, so `zeroed<T>()` can build the same all-zero value the
+  // native backend gets from LLVM's zeroinitializer.
+  private structFields: Map<string, { name: string; type: TypeKind }[]> = new Map();
+  private enumVariants: Map<string, { name: string; tag: number; fields: TypeKind[] }[]> = new Map();
   // Set for the duration of a `@wrapping` function, mirroring codegen.ts: + - * and
   // unary neg use defined modular arithmetic instead of trapping, and an over-shift
   // is masked into range. Division by zero and bounds still trap.
@@ -161,11 +188,13 @@ export class CodegenJS {
   private emitBody(module: HIRModule) {
     // structs as classes
     for (const s of module.structs) {
+      this.structFields.set(s.name, s.fields);
       this.genStruct(s);
     }
 
     // enums as tagged objects
     for (const e of module.enums) {
+      this.enumVariants.set(e.name, e.variants);
       this.genEnum(e);
     }
 
@@ -295,10 +324,14 @@ export class CodegenJS {
     const lines: string[] = [];
     this.output = lines;
     const prevUsed = this.usedPropagate;
+    const prevMatchReturn = this.usedMatchReturn;
     this.usedPropagate = false;
+    this.usedMatchReturn = false;
     for (const stmt of fn.body) this.genStmt(stmt);
-    const used = this.usedPropagate;
+    const used = this.usedPropagate || this.usedMatchReturn;
+    const caughtMatchReturn = this.usedMatchReturn;
     this.usedPropagate = prevUsed;
+    this.usedMatchReturn = prevMatchReturn;
     this.output = prevOutput;
     this.boxed = prevBoxed;
     this.renamed = prevRenamed;
@@ -311,7 +344,8 @@ export class CodegenJS {
       if (used) {
         this.emit("try {");
         for (const l of lines) this.output.push(l);
-        this.emit("} catch (__e) { if (__e && __e.__milo_prop) return __e.__milo_prop; throw __e; }");
+        const matchRet = caughtMatchReturn ? " if (__e && __e.__milo_ret) return __e.__milo_ret[0];" : "";
+        this.emit(`} catch (__e) { if (__e && __e.__milo_prop) return __e.__milo_prop;${matchRet} throw __e; }`);
       } else {
         for (const l of lines) this.output.push(l);
       }
@@ -363,8 +397,15 @@ export class CodegenJS {
         break;
       }
       case "Return": {
-        if (stmt.value) {
-          this.emit(`return ${this.genExpr(stmt.value)};`);
+        const value = stmt.value ? this.genExpr(stmt.value) : "undefined";
+        // Inside a match-expression arm a plain `return` would only leave the IIFE
+        // that arm lives in. Throw a sentinel the function boundary turns back into
+        // a real return — the same trick `?` already uses.
+        if (this.inMatchExprArm > 0) {
+          this.usedMatchReturn = true;
+          this.emit(`throw {__milo_ret: [${value}]};`);
+        } else if (stmt.value) {
+          this.emit(`return ${value};`);
         } else {
           this.emit("return;");
         }
@@ -477,7 +518,10 @@ export class CodegenJS {
     }
   }
 
-  private genMatch(stmt: HIRStmt & { kind: "Match" }) {
+  // `resultVar` turns the arms into value producers: all but the tail statement run
+  // as statements and the tail ExprStmt assigns into the variable, mirroring how
+  // codegen.ts threads a result slot through the same generator.
+  private genMatch(stmt: HIRStmt & { kind: "Match" }, resultVar?: string) {
     const subj = this.genExpr(stmt.subject);
     const tmp = this.nextTemp();
     this.emit(`const ${tmp} = ${subj};`);
@@ -507,7 +551,7 @@ export class CodegenJS {
           this.emit(`${first ? "" : "} else "}if (${tmp} === ${val}) {`);
         }
         this.indent++;
-        for (const s of arm.body) this.genStmt(s);
+        this.genMatchArmBody(arm.body, resultVar);
         this.indent--;
         first = false;
       }
@@ -529,12 +573,57 @@ export class CodegenJS {
           this.indent--;
         }
         this.indent++;
-        for (const s of arm.body) this.genStmt(s);
+        this.genMatchArmBody(arm.body, resultVar);
         this.indent--;
         first = false;
       }
       this.emit("}");
     }
+  }
+
+  private genMatchArmBody(body: HIRStmt[], resultVar?: string) {
+    if (!resultVar) {
+      for (const s of body) this.genStmt(s);
+      return;
+    }
+    for (let i = 0; i < body.length - 1; i++) this.genStmt(body[i]);
+    const last = body[body.length - 1];
+    if (!last) return;
+    if (last.kind === "ExprStmt") {
+      this.emit(`${resultVar} = ${this.genExpr(last.expr)};`);
+    } else {
+      // A diverging tail (return/break/continue) produces no value — it leaves the
+      // enclosing function or loop, so the result variable is never read.
+      this.genStmt(last);
+    }
+  }
+
+  // A match used as a value. The arms become an IIFE assigning into one variable.
+  // An arm that `return`s belongs to the ENCLOSING function, not the IIFE — the
+  // `let x = match opt { Some(v) => v, None => { return err } }` shape is how std
+  // unwraps, so it has to work — and inMatchExprArm makes those returns compile to
+  // the sentinel throw genFunction unwinds. `break`/`continue` have no such escape
+  // hatch, so an arm that leaves an outer loop is refused instead of mis-emitted.
+  private genMatchExpr(expr: HIRExpr & { kind: "MatchExpr" }): string {
+    for (const arm of expr.arms) {
+      if (arm.body.some(breaksOuterLoop)) {
+        throw new Error("codegen-js: match-expression arm breaks out of the enclosing loop");
+      }
+    }
+    const result = this.nextTemp();
+    const lines: string[] = [];
+    const prevOutput = this.output;
+    const prevIndent = this.indent;
+    this.output = lines;
+    this.indent = 1;
+    this.inMatchExprArm++;
+    this.emit(`let ${result};`);
+    this.genMatch({ kind: "Match", subject: expr.subject, arms: expr.arms, enumName: expr.enumName, subjectIsRef: expr.subjectIsRef, span: expr.span }, result);
+    this.emit(`return ${result};`);
+    this.inMatchExprArm--;
+    this.output = prevOutput;
+    this.indent = prevIndent;
+    return `(() => {\n${lines.join("\n")}\n${"  ".repeat(this.indent)}})()`;
   }
 
   private genExpr(expr: HIRExpr): string {
@@ -561,6 +650,10 @@ export class CodegenJS {
           const [lo, hi] = this.intRange(expr.type);
           return this.currentFnWrapping ? this.maskInt(`(-${v})`, expr.type) : `__ovf((-${v}), ${lo}, ${hi})`;
         }
+        // `&x` (from x.addrOf()) has no JS meaning — there are no addresses here. It
+        // used to be spelled straight through, producing a file that failed to parse
+        // at load; refuse it so the gap reads as "outside the subset", not "broken output".
+        if (expr.op === "&") throw new Error("codegen-js: address-of (addrOf) unsupported — the JS backend has no pointers");
         return `(${expr.op}${v})`;
       }
       case "Call":
@@ -611,6 +704,12 @@ export class CodegenJS {
         const t = this.nextTemp();
         return `((${t}) => ${t}.tag === 0 ? ${t}.data[0] : ${def})(${operand})`;
       }
+      case "MatchExpr":
+        return this.genMatchExpr(expr);
+      case "OptionOp":
+        return this.genOptionOp(expr);
+      case "Zeroed":
+        return this.zeroValue(expr.zeroType);
       case "Cast":
         return this.genCast(expr);
       case "IsCheck":
@@ -1030,6 +1129,65 @@ export class CodegenJS {
     return val;
   }
 
+  // `zeroed<T>()` — the JS analogue of LLVM's zeroinitializer: every scalar 0/false,
+  // every field and element recursively zeroed. Pointers have no JS representation,
+  // so a zeroed one is null, matching how the backend models them elsewhere.
+  private zeroValue(t: TypeKind): string {
+    switch (t.tag) {
+      case "int": case "float": return "0";
+      case "bool": return "false";
+      case "string": return `""`;
+      case "vec": return "[]";
+      case "hashmap": return "new Map()";
+      case "array": {
+        // A fresh element per slot: `.fill(obj)` would alias one struct across the array.
+        const n = t.size ?? 0;
+        return `Array.from({length: ${n}}, () => ${this.zeroValue(t.element)})`;
+      }
+      case "struct": {
+        const fields = this.structFields.get(t.name);
+        if (!fields) return "null";
+        return `new ${t.name}(${fields.map(f => this.zeroValue(f.type)).join(", ")})`;
+      }
+      case "enum": {
+        // Tag 0 with a zeroed payload — the same bits zeroinitializer produces.
+        // Option/Result aren't in module.enums; both have a 1-field variant at tag 0.
+        const variants = this.enumVariants.get(t.name);
+        const v0 = variants?.find(v => v.tag === 0);
+        if (!v0) return `{tag: 0, data: [0]}`;
+        if (v0.fields.length === 0) return `{tag: 0}`;
+        return `{tag: 0, data: [${v0.fields.map(f => this.zeroValue(f)).join(", ")}]}`;
+      }
+      default: return "null";
+    }
+  }
+
+  // Option/Result combinators. Both enums are {tag, data} with the "success"
+  // variant (Some/Ok) at tag 0, so the same tag test serves isSome and isOk.
+  // The operand is bound to a temp because it may have side effects, and the
+  // default/closure slot stays inside the arrow so it is only evaluated on the
+  // branch that needs it — `x.unwrapOr(expensive())` must not call expensive()
+  // when x is Some.
+  private genOptionOp(expr: HIRExpr & { kind: "OptionOp" }): string {
+    const t = this.nextTemp();
+    const value = this.genExpr(expr.value);
+    const wrap = (body: string) => `((${t}) => ${body})(${value})`;
+    if (expr.op === "isSome") return wrap(`${t}.tag === 0`);
+    if (expr.op === "isNone") return wrap(`${t}.tag !== 0`);
+    const arg = expr.default ? this.genExpr(expr.default) : "undefined";
+    switch (expr.op) {
+      case "unwrapOr":     return wrap(`${t}.tag === 0 ? ${t}.data[0] : ${arg}`);
+      case "unwrapOrElse": return wrap(`${t}.tag === 0 ? ${t}.data[0] : (${arg})()`);
+      // Option.map drops to a payload-less None; the Result combinators carry the
+      // untouched side's payload through, so they return the operand itself.
+      case "map":          return wrap(`${t}.tag === 0 ? {tag: 0, data: [(${arg})(${t}.data[0])]} : {tag: 1}`);
+      case "resultMap":    return wrap(`${t}.tag === 0 ? {tag: 0, data: [(${arg})(${t}.data[0])]} : ${t}`);
+      case "resultMapErr": return wrap(`${t}.tag === 0 ? ${t} : {tag: 1, data: [(${arg})(${t}.data[0])]}`);
+      case "resultAndThen":return wrap(`${t}.tag === 0 ? (${arg})(${t}.data[0]) : ${t}`);
+    }
+    throw new Error(`codegen-js: unhandled OptionOp '${expr.op}'`);
+  }
+
   private genClosure(expr: HIRExpr & { kind: "Closure" }): string {
     const params = expr.params.map(p => p.name).join(", ");
     if (expr.body.length === 1 && expr.body[0].kind === "Return" && expr.body[0].value) {
@@ -1039,7 +1197,20 @@ export class CodegenJS {
     const lines: string[] = [];
     const prevOutput = this.output;
     this.output = lines;
+    // A `return` in the closure body leaves the CLOSURE, so it must not be turned
+    // into the enclosing function's sentinel throw even when this closure is being
+    // generated inside a match-expression arm.
+    const prevArmDepth = this.inMatchExprArm;
+    const prevMatchReturn = this.usedMatchReturn;
+    this.inMatchExprArm = 0;
+    this.usedMatchReturn = false;
     for (const s of expr.body) this.genStmt(s);
+    if (this.usedMatchReturn) {
+      // Would need its own catch wrapper around the arrow body; nothing emits one.
+      throw new Error("codegen-js: closure with a returning match-expression arm unsupported");
+    }
+    this.inMatchExprArm = prevArmDepth;
+    this.usedMatchReturn = prevMatchReturn;
     this.output = prevOutput;
     return `((${params}) => {\n${lines.join("\n")}\n${"  ".repeat(this.indent)}})`;
   }

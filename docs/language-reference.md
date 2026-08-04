@@ -1368,6 +1368,8 @@ m.remove("hello")
 `for` over a map yields keys; the two-binding form yields key and value together:
 
 ```milo
+var m: HashMap<string, i32> = HashMap.new()
+
 for k in m {
     print(k)
 }

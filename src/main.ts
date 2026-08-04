@@ -433,8 +433,15 @@ function linkBareMetal(llFile: string, outFile: string, target: TargetInfo, optF
   const heapDef = heapSize != null ? ` -DMILO_HEAP_SIZE=${heapSize}` : "";
   // -nostdlib: no libc/crt0. -Wl,-T,<script>: use our memory map. startup.c is
   // compiled and linked alongside the program IR in a single clang invocation.
+  //
+  // --gc-sections (with -f{function,data}-sections) drops functions nothing
+  // reaches, and lld only reports undefined symbols from sections that survive.
+  // That matters at -O0, where no optimizer pass removes the prelude functions a
+  // program never calls: std/string is in every program, and one of its parsers
+  // calling libc's atof was enough to fail the link of a program that parses
+  // nothing. The vector table is KEEP'd in mps2.ld, so it survives the sweep.
   execSync(
-    `${tc.path}${tgt} ${opt}${heapDef} -nostdlib -fuse-ld=lld -Wl,-T,"${ldScript}" "${startup}" "${llFile}" -o "${outFile}" -Wno-override-module`,
+    `${tc.path}${tgt} ${opt}${heapDef} -ffunction-sections -fdata-sections -nostdlib -fuse-ld=lld -Wl,--gc-sections -Wl,-T,"${ldScript}" "${startup}" "${llFile}" -o "${outFile}" -Wno-override-module`,
     { stdio: ["pipe", "pipe", "pipe"] }
   );
 }
@@ -1827,7 +1834,20 @@ async function main() {
     if (emitHeader) writeHeader(source!, obj.replace(/\.o$/, "") + ".h", target, warningConfig);
   } else if (cmd === "emit-js") {
     const src = readFileSync(source!, "utf-8");
-    const js = compileToJS(src, target, source!, warningConfig);
+    // The JS backend covers a subset (no FFI, no pointers, no threads, i64 to 2^53).
+    // Falling outside it is a fact about the program, not a compiler crash — print
+    // the one line that says which construct, not a stack trace.
+    let js: string;
+    try {
+      js = compileToJS(src, target, source!, warningConfig);
+    } catch (e: any) {
+      if (typeof e?.message === "string" && e.message.startsWith("codegen-js: ")) {
+        console.error(`error: ${e.message.slice("codegen-js: ".length)}`);
+        console.error("note: 'emit-js' supports a subset of Milo — no FFI, pointers or threads");
+        process.exit(1);
+      }
+      throw e;
+    }
     if (output) {
       writeFileSync(output, js);
       console.log(`wrote ${output}`);

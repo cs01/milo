@@ -750,6 +750,11 @@ pub fn isGenericOpen(tokens: &Vec<Token>, i: i64): bool {
         // `Vec<[u8; 4]>`, and Question covers `Option`-style shorthand.
         t.kind == TokKind.Star || t.kind == TokKind.LBracket ||
         t.kind == TokKind.RBracket || t.kind == TokKind.Int ||
+        // Colon/Plus are the trait bounds in `<R: Reader>` and `<T: A + B>`.
+        // Without them a bounded type param was not seen as a generic bracket at
+        // all, and `fn copyStream<R: Reader, W: Writer>(...)` came back out as
+        // `fn copyStream < R: Reader, W: Writer > (...)`.
+        t.kind == TokKind.Colon || t.kind == TokKind.Plus ||
         t.kind == TokKind.Semi || t.kind == TokKind.Question {
             // type-like tokens — keep scanning
         } else {

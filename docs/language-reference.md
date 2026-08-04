@@ -1927,6 +1927,19 @@ fn process<T: Eq + Hash>(a: &T, b: &T): i64 {
 }
 ```
 
+A generic struct can carry bounds too, and they are enforced at every
+instantiation — the bound is what makes the wrapper's own methods legal to write:
+
+```milo
+struct Buffered<R: Reader> {
+    inner: R,
+}
+```
+
+`Buffered<i64>` is then rejected where it is spelled, not deep inside the
+wrapper's body. Bounds on an `impl` block are parsed but carry no meaning; write
+the bound on the struct or enum declaration.
+
 ### Supertraits
 
 ```milo

@@ -3,6 +3,8 @@
 from "std/os" import {
     fflush,
     readFd,
+    recvFd,
+    sendFd,
     strerror,
     writeFd
 }
@@ -55,6 +57,59 @@ pub fn ioError(path: &string): IoError {
         let reason = _cstrToString(strerror(e))
         return IoError.Other("'" + path + "': " + reason)
     }
+}
+
+// Render an IoError as one line of prose. Private: error *display* is a whole
+// separate audit item, and a public formatter here would preempt it.
+fn ioReason(e: &IoError): string {
+    match e {
+        IoError.NotFound(what) => {
+            return "not found: " + what
+        }
+        IoError.PermissionDenied(what) => {
+            return "permission denied: " + what
+        }
+        IoError.IsDirectory(what) => {
+            return "is a directory: " + what
+        }
+        IoError.AlreadyExists(what) => {
+            return "already exists: " + what
+        }
+        IoError.Other(what) => {
+            return what.clone()
+        }
+    }
+}
+
+// ── Reader / Writer ──
+
+// The two byte-stream interfaces every source and sink in std composes against.
+//
+// They are *traits*, not `interface`s, and that is forced by the language rather
+// than chosen for speed: an `interface` value is a fat pointer that has to live
+// somewhere, and Milo references are second-class, so a stored `&Reader` cannot
+// exist. A trait is monomorphized into the holder — `BufReader<File>` is a real
+// struct containing a real `File` — which means the wrapper *owns* its source and
+// no lifetime ever escapes. The cost is that a `Vec<Reader>` of mixed sources is
+// not expressible; wrap the mixed case in an enum of concrete sources instead.
+//
+// Both use `IoError`. That is not a claim that every module's errors are unified
+// (they are not) — it is that a read or a write on a byte stream fails for kernel
+// reasons, and `IoError` is the enum that already carries them.
+pub trait Reader {
+    // Read up to `max` bytes. Blocks (or parks the green task) until at least one
+    // byte is available. An EMPTY result means end of stream — never "nothing yet".
+    fn read(self: &mut Self, max: i64): Result<string, IoError>
+}
+
+pub trait Writer {
+    // Write ALL of `data` or fail. There is no short-write return value to ignore,
+    // because ignoring one is the classic silent-truncation bug.
+    fn write(self: &mut Self, data: &string): Result<Unit, IoError>
+
+    // Push whatever this writer is holding one layer down. A writer with no buffer
+    // of its own implements this as a no-op; it is never a syscall-level fsync.
+    fn flush(self: &mut Self): Result<Unit, IoError>
 }
 
 // Write a string to stdout without appending a newline.
@@ -343,6 +398,77 @@ impl File {
         }
         return Result.Ok(n)
     }
+
+    // Borrow the fd without transferring ownership — the File still closes it on
+    // drop. For handing the fd to an fd-taking API; do not close it yourself.
+    fn rawFd(self: &Self): i32 {
+        return self.fd
+    }
+
+    // A non-owning Reader+Writer view of this file, for when the File itself must
+    // stay put (e.g. you want a BufReader and a BufWriter on the same handle).
+    // The File must outlive the view and the compiler does not check that — see
+    // FdStream. Prefer `BufReader<File>.new(f)`, which owns the handle outright.
+    fn stream(self: &Self): FdStream {
+        return FdStream.onFd(self.fd)
+    }
+
+    // Move the read/write cursor to an absolute byte offset. Returns the new
+    // offset. A BufReader over this file caches bytes past its own cursor, so
+    // seeking underneath one desynchronizes it — seek first, then wrap.
+    fn seek(self: &Self, pos: i64): Result<i64, IoError> {
+        let at = lseek(self.fd, pos, 0)
+        if at < 0 {
+            return Result.Err(IoError.Other("seek failed"))
+        }
+        return Result.Ok(at)
+    }
+
+    // Current cursor offset, or -1 for a stream that cannot report one (pipe, tty).
+    fn tell(self: &Self): i64 {
+        return lseek(self.fd, 0, 1)
+    }
+
+    // Close now instead of at drop, and report failure. Drop closes silently, which
+    // is fine for reads but hides a write error that only surfaces at close (NFS,
+    // full filesystems). After this the File is inert and its drop is a no-op.
+    fn close(self: &mut Self): Result<Unit, IoError> {
+        if self.fd <= 0 {
+            return Result.Ok(Unit {
+            }
+            )
+        }
+        let fd = self.fd
+        self.fd = 0 as i32
+        if close(fd) < 0 {
+            return Result.Err(ioError("close"))
+        }
+        return Result.Ok(Unit {
+        }
+        )
+    }
+}
+
+// A File is itself a byte stream, so `BufReader<File>.new(File.openRead(p)!)`
+// takes ownership and closes the fd when the reader goes out of scope.
+impl Reader for File {
+    fn read(self: &mut Self, max: i64): Result<string, IoError> {
+        return fdRead(self.fd, false, max)
+    }
+}
+
+impl Writer for File {
+    fn write(self: &mut Self, data: &string): Result<Unit, IoError> {
+        return fdWrite(self.fd, false, data)
+    }
+
+    // No-op: this layer holds no buffer. Use `syncFd` from std/fs to force the
+    // kernel's page cache out to the device.
+    fn flush(self: &mut Self): Result<Unit, IoError> {
+        return Result.Ok(Unit {
+        }
+        )
+    }
 }
 
 // Write a single byte to stdout.
@@ -398,4 +524,507 @@ pub fn readStdin(): string {
         }
     }
     return result
+}
+
+// ── fd-backed streams ──
+
+// errno for a descriptor we have no path for. The variant still carries context so
+// a caller printing it says which handle failed.
+fn fdError(op: &string, fd: i32): IoError {
+    let label = op + " on fd " + fd.toString()
+    return ioError(label)
+}
+
+// One read syscall's worth of bytes. `socket` picks the recv/send seam instead of
+// read/write: on Windows a SOCKET is not a CRT descriptor and _read fast-fails on
+// one, so the distinction is load-bearing, not cosmetic.
+fn fdRead(fd: i32, socket: bool, max: i64): Result<string, IoError> {
+    if max <= 0 {
+        return Result.Ok("")
+    }
+    // withCapacity, not filled: this buffer is only ever a landing pad for the
+    // kernel, so pre-zeroing it is a wasted memset of `max` bytes per read.
+    var raw: Vec<u8> = Vec.withCapacity(max)
+    let base = raw.ptr()
+    var n: i64 = 0
+    if socket {
+        n = recvFd(fd, base, max)
+    } else {
+        n = readFd(fd, base, max)
+    }
+    if n < 0 {
+        return Result.Err(fdError("read", fd))
+    }
+    return Result.Ok(_bytesToString(base, n))
+}
+
+fn fdWrite(fd: i32, socket: bool, data: &string): Result<Unit, IoError> {
+    if data.len == 0 {
+        return Result.Ok(Unit {
+        }
+        )
+    }
+    var n: i64 = 0
+    if socket {
+        n = sendFd(fd, data, data.len)
+    } else {
+        n = writeFd(fd, data, data.len)
+    }
+    // readFd/writeFd already loop over partial writes, so a short count here is a
+    // real failure rather than something to retry.
+    if n < 0 || n != data.len {
+        return Result.Err(fdError("write", fd))
+    }
+    return Result.Ok(Unit {
+    }
+    )
+}
+
+// A borrowed byte stream over an OS handle — the adapter that turns anything with
+// a descriptor (file, socket, pipe, pty, child stdio) into a Reader and a Writer.
+//
+// It does NOT own the handle and will never close it. Keep the owning value (File,
+// TcpStream, Pty, Child) alive and open for as long as the stream is in use; this
+// is the same rule `FdReader` and `fdChannel` already carry, and it is what makes
+// a simultaneous BufReader and BufWriter on one socket expressible at all.
+//
+// The compiler cannot check that rule — a descriptor number is an integer, not a
+// reference — so this is the one sharp edge in the streams API:
+//
+//     BufReader<FdStream>.new(File.openRead(p)!.stream())   // WRONG: the File is a
+//                                                           // temporary and closes
+//                                                           // at the end of the line
+//     var f = File.openRead(p)!                             // right: the handle has
+//     BufReader<FdStream>.new(f.stream())                   // a name and outlives it
+//
+// When you do not need the handle back, do not use a view at all: `File` implements
+// Reader and Writer itself, so `BufReader<File>.new(f)` takes ownership and the
+// question cannot arise.
+pub struct FdStream {
+    fd: i32,
+    socket: bool,
+}
+
+impl FdStream {
+    // A CRT file descriptor: file, pipe, tty, pty.
+    fn onFd(fd: i32): FdStream {
+        return FdStream {
+            fd: fd,
+            socket: false
+        }
+    }
+
+    // A socket handle. Not interchangeable with `onFd` on Windows.
+    fn onSocket(fd: i32): FdStream {
+        return FdStream {
+            fd: fd,
+            socket: true
+        }
+    }
+
+    fn stdin(): FdStream {
+        return FdStream.onFd(0)
+    }
+
+    // Writes here go straight at fd 1, bypassing the stdio buffer `print` uses, so
+    // the two interleave in the wrong order. Pick one per output session — that is
+    // why this does not fflush on your behalf: doing so per write would defeat the
+    // buffering you wrapped it in a BufWriter to get.
+    fn stdout(): FdStream {
+        return FdStream.onFd(1)
+    }
+
+    fn stderr(): FdStream {
+        return FdStream.onFd(2)
+    }
+
+    fn rawFd(self: &Self): i32 {
+        return self.fd
+    }
+}
+
+impl Reader for FdStream {
+    fn read(self: &mut Self, max: i64): Result<string, IoError> {
+        return fdRead(self.fd, self.socket, max)
+    }
+}
+
+impl Writer for FdStream {
+    fn write(self: &mut Self, data: &string): Result<Unit, IoError> {
+        return fdWrite(self.fd, self.socket, data)
+    }
+
+    // No-op: the kernel owns the buffering below this point.
+    fn flush(self: &mut Self): Result<Unit, IoError> {
+        return Result.Ok(Unit {
+        }
+        )
+    }
+}
+
+// ── in-memory streams ──
+
+// A Reader over bytes already in hand. Owns its buffer — there is no borrowing
+// variant, because a struct cannot hold a `&string`.
+pub struct BytesReader {
+    data: string,
+    pos: i64,
+}
+
+impl BytesReader {
+    fn new(data: string): BytesReader {
+        return BytesReader {
+            data: data,
+            pos: 0
+        }
+    }
+
+    fn remaining(self: &Self): i64 {
+        return self.data.len - self.pos
+    }
+}
+
+impl Reader for BytesReader {
+    fn read(self: &mut Self, max: i64): Result<string, IoError> {
+        if max <= 0 || self.pos >= self.data.len {
+            return Result.Ok("")
+        }
+        var end = self.pos + max
+        if end > self.data.len {
+            end = self.data.len
+        }
+        let out = self.data.substr(self.pos, end)
+        self.pos = end
+        return Result.Ok(out)
+    }
+}
+
+// A Writer that accumulates into memory — the sink for "render this to a string",
+// and the test double for anything that takes a Writer.
+pub struct BytesWriter {
+    buf: string,
+}
+
+impl BytesWriter {
+    fn new(): BytesWriter {
+        return BytesWriter {
+            buf: ""
+        }
+    }
+
+    fn len(self: &Self): i64 {
+        return self.buf.len
+    }
+
+    // Take the accumulated bytes out, leaving the writer empty and reusable.
+    fn take(self: &mut Self): string {
+        return replace(self.buf, "")
+    }
+}
+
+impl Writer for BytesWriter {
+    fn write(self: &mut Self, data: &string): Result<Unit, IoError> {
+        self.buf.pushStr(data)
+        return Result.Ok(Unit {
+        }
+        )
+    }
+
+    fn flush(self: &mut Self): Result<Unit, IoError> {
+        return Result.Ok(Unit {
+        }
+        )
+    }
+}
+
+// ── buffering ──
+
+// Default buffer size for BufReader/BufWriter. Big enough that per-byte and
+// per-line work amortizes to roughly one syscall per 64 KiB.
+pub fn defaultBufferSize(): i64 {
+    return 65536
+}
+
+// Buffered reads over any Reader, and the reason the Reader trait exists: without
+// it `readByte` is one read(2) per byte.
+//
+// It OWNS the source. `BufReader<File>.new(f)` consumes the File and closes it on
+// drop; `BufReader<FdStream>.new(sock.stream())` borrows the descriptor instead and
+// leaves the socket writable. Spell the type argument — a bare `BufReader.new(f)`
+// does not resolve on a generic struct today.
+pub struct BufReader<R: Reader> {
+    inner: R,
+    buf: string,
+    pos: i64,
+    cap: i64,
+    ended: bool,
+}
+
+impl BufReader<R> {
+    fn new(inner: R): BufReader<R> {
+        var b: BufReader<R> = BufReader {
+            inner: inner,
+            buf: "",
+            pos: 0,
+            cap: defaultBufferSize(),
+            ended: false
+        }
+        return b
+    }
+
+    fn withCapacity(inner: R, cap: i64): BufReader<R> {
+        var size = cap
+        if size < 1 {
+            size = 1
+        }
+        var b: BufReader<R> = BufReader {
+            inner: inner,
+            buf: "",
+            pos: 0,
+            cap: size,
+            ended: false
+        }
+        return b
+    }
+
+    // Ensure at least one buffered byte. False means end of stream. Refills only
+    // when fully drained, so a buffered byte is never dropped on the floor.
+    fn _fill(self: &mut Self): Result<bool, IoError> {
+        if self.pos < self.buf.len {
+            return Result.Ok(true)
+        }
+        if self.ended {
+            return Result.Ok(false)
+        }
+        let chunk = self.inner.read(self.cap)?
+        if chunk.len == 0 {
+            self.ended = true
+            return Result.Ok(false)
+        }
+        self.buf = chunk
+        self.pos = 0
+        return Result.Ok(true)
+    }
+
+    // Next byte as 0..255, or -1 at end of stream.
+    fn readByte(self: &mut Self): Result<i64, IoError> {
+        if !self._fill()? {
+            return Result.Ok(-1)
+        }
+        let b = self.buf[self.pos] as i64
+        self.pos = self.pos + 1
+        return Result.Ok(b)
+    }
+
+    // Bytes up to (and consuming) `delim`, with the delimiter itself stripped.
+    // None means the stream was already at its end; a final unterminated run comes
+    // back as Some, so no input is ever silently discarded.
+    fn readUntil(self: &mut Self, delim: u8): Result<Option<string>, IoError> {
+        var out = ""
+        var any = false
+        while self._fill()? {
+            any = true
+            while self.pos < self.buf.len {
+                let b = self.buf[self.pos]
+                self.pos = self.pos + 1
+                if b == delim {
+                    return Result.Ok(Option.Some(out))
+                }
+                out.push(b)
+            }
+        }
+        if any {
+            return Result.Ok(Option.Some(out))
+        }
+        return Result.Ok(Option.None)
+    }
+
+    // One line without its terminator. Strips a trailing CR so CRLF input reads the
+    // same as LF input. None at end of stream — the `while let` loop condition.
+    fn readLine(self: &mut Self): Result<Option<string>, IoError> {
+        let got = self.readUntil(10)?
+        match got {
+            Option.Some(line) => {
+                if line.len > 0 && line[line.len - 1] == 13 {
+                    return Result.Ok(Option.Some(line.substr(0, line.len - 1)))
+                }
+                return Result.Ok(Option.Some(line))
+            }
+            Option.None => {
+                return Result.Ok(Option.None)
+            }
+        }
+    }
+
+    // Exactly `n` bytes, or an error naming how many the stream actually had.
+    fn readExact(self: &mut Self, n: i64): Result<string, IoError> {
+        var out = String.withCapacity(n + 1)
+        var got: i64 = 0
+        while got < n {
+            if !self._fill()? {
+                return Result.Err(IoError.Other("readExact: stream ended after " + got.toString() + " of " + n.toString() + " bytes"))
+            }
+            var take = self.buf.len - self.pos
+            if take > n - got {
+                take = n - got
+            }
+            out.pushStr(self.buf.substr(self.pos, self.pos + take))
+            self.pos = self.pos + take
+            got = got + take
+        }
+        return Result.Ok(out)
+    }
+
+    // Everything left, to end of stream.
+    fn readAll(self: &mut Self): Result<string, IoError> {
+        var out = ""
+        while self._fill()? {
+            out.pushStr(self.buf.substr(self.pos, self.buf.len))
+            self.pos = self.buf.len
+        }
+        return Result.Ok(out)
+    }
+}
+
+// A BufReader is itself a Reader, so it composes: a decoder written against
+// `<R: Reader>` accepts one without knowing it is buffered.
+impl Reader for BufReader<R> {
+    fn read(self: &mut Self, max: i64): Result<string, IoError> {
+        if max <= 0 {
+            return Result.Ok("")
+        }
+        if !self._fill()? {
+            return Result.Ok("")
+        }
+        var end = self.pos + max
+        if end > self.buf.len {
+            end = self.buf.len
+        }
+        let out = self.buf.substr(self.pos, end)
+        self.pos = end
+        return Result.Ok(out)
+    }
+}
+
+// Buffered writes over any Writer, collapsing many small writes into one.
+//
+// **Unflushed bytes are not lost if you forget to flush**: drop flushes. If that
+// last flush fails there is nowhere to return the error to, so it goes to stderr
+// rather than vanishing. Call `flush()` explicitly wherever a write error is
+// something your program can act on — that is the only way to *handle* one.
+//
+// There is deliberately no `intoInner()`: a struct with a Drop impl cannot have a
+// field moved out of it, and giving up flush-on-drop to buy one back would be the
+// wrong trade.
+pub struct BufWriter<W: Writer> {
+    inner: W,
+    buf: string,
+    cap: i64,
+}
+
+impl BufWriter<W> {
+    fn new(inner: W): BufWriter<W> {
+        var b: BufWriter<W> = BufWriter {
+            inner: inner,
+            buf: "",
+            cap: defaultBufferSize()
+        }
+        return b
+    }
+
+    fn withCapacity(inner: W, cap: i64): BufWriter<W> {
+        var size = cap
+        if size < 1 {
+            size = 1
+        }
+        var b: BufWriter<W> = BufWriter {
+            inner: inner,
+            buf: "",
+            cap: size
+        }
+        return b
+    }
+
+    fn writeByte(self: &mut Self, b: u8): Result<Unit, IoError> {
+        self.buf.push(b)
+        if self.buf.len >= self.cap {
+            return self.flush()
+        }
+        return Result.Ok(Unit {
+        }
+        )
+    }
+
+    fn writeLine(self: &mut Self, line: &string): Result<Unit, IoError> {
+        self.write(line)?
+        return self.writeByte(10)
+    }
+
+    // Buffered bytes not yet handed down.
+    fn pending(self: &Self): i64 {
+        return self.buf.len
+    }
+}
+
+impl Writer for BufWriter<W> {
+    fn write(self: &mut Self, data: &string): Result<Unit, IoError> {
+        // A write at least as large as the buffer goes straight through: staging it
+        // would copy the bytes twice to save nothing.
+        if data.len >= self.cap {
+            self.flush()?
+            return self.inner.write(data)
+        }
+        if self.buf.len + data.len > self.cap {
+            self.flush()?
+        }
+        self.buf.pushStr(data)
+        return Result.Ok(Unit {
+        }
+        )
+    }
+
+    fn flush(self: &mut Self): Result<Unit, IoError> {
+        if self.buf.len > 0 {
+            // `replace` rather than passing self.buf: handing `&self.buf` to a method
+            // on `self.inner` borrows self twice. It also means a failed flush drops
+            // the pending bytes instead of leaving them to be written twice by a
+            // retry — the error says how many were lost.
+            let pending = replace(self.buf, "")
+            let n = pending.len
+            if let Result.Err(e) = self.inner.write(pending) {
+                return Result.Err(IoError.Other("flush lost " + n.toString() + " buffered bytes: " + ioReason(e)))
+            }
+        }
+        return self.inner.flush()
+    }
+}
+
+impl Drop for BufWriter<W> {
+    fn drop(self: &mut Self): void {
+        // Drop glue also runs on moved-from slots, which move-zeroing leaves all-zero.
+        // A zeroed BufWriter has an empty buffer, so this early return is what keeps
+        // the zero value from writing to a zeroed inner (fd 0).
+        if self.buf.len == 0 {
+            return
+        }
+        if let Result.Err(e) = self.flush() {
+            eprint("milo: BufWriter dropped with unflushed data: " + ioReason(e))
+        }
+    }
+}
+
+// Drain `src` into `dst`, returning the byte count. The pipe that makes any source
+// usable with any sink. Does NOT flush `dst` — a caller stacking more onto the same
+// writer should not pay for a flush per copy.
+pub fn copyStream<R: Reader, W: Writer>(src: &mut R, dst: &mut W): Result<i64, IoError> {
+    var total: i64 = 0
+    while true {
+        let chunk = src.read(defaultBufferSize())?
+        if chunk.len == 0 {
+            return Result.Ok(total)
+        }
+        total = total + chunk.len
+        dst.write(chunk)?
+    }
+    return Result.Ok(total)
 }

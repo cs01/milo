@@ -19,7 +19,7 @@ impl Counter {
 impl Iterator for Counter {
 }
 
-fn sumIter < I: Iterator > (it: I): i64 {
+fn sumIter<I: Iterator>(it: I): i64 {
     var s = 0
     var iter = it
     for x in iter {
@@ -28,7 +28,7 @@ fn sumIter < I: Iterator > (it: I): i64 {
     return s
 }
 
-fn countIter < I: Iterator > (it: I): i64 {
+fn countIter<I: Iterator>(it: I): i64 {
     var c = 0
     var iter = it
     for x in iter {

@@ -1,0 +1,109 @@
+// @skip-os: win32
+// Uses std/fs makeTempDir, which goes through POSIX mkdtemp — no MSVC CRT export.
+// Streaming file IO through the Reader/Writer spine: File as a source and a sink,
+// flush-on-drop, seek/tell, and a borrowed FdStream view.
+// @expect: wrote 3 lines
+// @expect: on disk: one
+// @expect: on disk: two
+// @expect: on disk: three
+// @expect: seek+read: two
+// @expect: tell 7
+// @expect: copied 14
+// @expect: fdstream: one
+// @expect: unflushed survives drop: 5
+
+from "std/fs" import {
+    makeTempDir,
+    readFile,
+    removeAll
+}
+from "std/io" import {
+    BufReader,
+    BufWriter,
+    BytesWriter,
+    File,
+    FdStream,
+    copyStream
+}
+from "std/path" import {
+    Path
+}
+
+fn writeLines(path: &string): void {
+    var w = BufWriter<File>.new(File.openWrite(path)!)
+    w.writeLine("one")!
+    w.writeLine("two")!
+    w.writeLine("three")!
+    print("wrote 3 lines")
+    // No explicit flush and no explicit close: the BufWriter's drop flushes and the
+    // File it owns closes right after. If that ever regresses the reads below fail.
+}
+
+fn readBack(path: &string): void {
+    var r = BufReader<File>.new(File.openRead(path)!)
+    while true {
+        let got = r.readLine()!
+        match got {
+            Option.Some(line) => {
+                print("on disk: " + line)
+            }
+            Option.None => {
+                return
+            }
+        }
+    }
+}
+
+fn seeking(path: &string): void {
+    var f = File.openRead(path)!
+    f.seek(4)!
+    print("seek+read: " + f.read(3)!)
+    print("tell " + f.tell().toString())
+    f.close()!
+}
+
+fn copying(path: &string): void {
+    var src = File.openRead(path)!
+    var sink = BytesWriter.new()
+    let n = copyStream(src, sink)!
+    print("copied " + n.toString())
+    sink.take()
+}
+
+fn borrowedView(path: &string): void {
+    let f = File.openRead(path)!
+    var r = BufReader<FdStream>.new(f.stream())
+    let first = r.readLine()!
+    match first {
+        Option.Some(line) => {
+            print("fdstream: " + line)
+        }
+        Option.None => {
+            print("fdstream: <empty>")
+        }
+    }
+}
+
+fn dropFlush(path: &string): void {
+    var w = BufWriter<File>.new(File.openWrite(path)!)
+    w.write("abcde")!
+    print("unflushed survives drop: " + w.pending().toString())
+}
+
+fn main(): void {
+    let dir = makeTempDir("miloio")!
+    let path = Path.join(dir, "stream.txt")
+    writeLines(path)
+    readBack(path)
+    seeking(path)
+    copying(path)
+    borrowedView(path)
+
+    let dropped = Path.join(dir, "dropped.txt")
+    dropFlush(dropped)
+    let back = readFile(dropped)!
+    if back != "abcde" {
+        print("DROP FLUSH LOST DATA: '" + back + "'")
+    }
+    removeAll(dir)!
+}

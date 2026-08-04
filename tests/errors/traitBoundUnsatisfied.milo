@@ -8,7 +8,7 @@ struct Empty {
     x: i32
 }
 
-fn printValue < T: HasValue > (thing: &T): i32 {
+fn printValue<T: HasValue>(thing: &T): i32 {
     return thing.value()
 }
 

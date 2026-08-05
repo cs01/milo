@@ -281,7 +281,14 @@ parse gap can hide a whole file's worth of real signal:
 | let-else | `let Option.Some(v) = e else { … }`. Desugars in the PARSER to `let tmp = e` / `if tmp.isNone() { … }` / `let v = tmp!` — three forms milo0 already had, so no new node threaded through checker, lowering and codegen. |
 | if-expression conditions | `let maxLen = if n - pos < MAX { … }` — the expression form forgot the no-struct-literal rule the statement form uses, so `MAX { n - pos }` parsed as a struct literal and died on the `-`. |
 
-Net: **242 → 227 fixtures milo0 cannot compile; 336 → 351 it can. Fixtures dying at the
+Third round found the same shape again — a parse gap masquerading as a missing feature:
+milo0's parser did not accept an attribute on an **impl method**, so `std/math.milo` never
+parsed and every `Math.*` call anywhere reported `unknown enum 'Math'`. Also fixed a genuine
+silent-success bug in milo0's resolver: an unreadable import merged an EMPTY module instead
+of failing, so a bad import path surfaced hundreds of lines later as a bogus "unknown struct"
+against the caller. It now reports and exits.
+
+Net: **242 → 223 fixtures milo0 cannot compile; 336 → 355 it can. Fixtures dying at the
 parser: 52 → 29.**
 
 Read that ratio carefully — it is the most useful thing on this page. Four features, one of
@@ -300,14 +307,19 @@ So the port does not have a lucky-fix shape. The remaining ranked head:
 | 12 | `Vec.clear`, `insert`, `remove`, `keys`, `sort` |
 | ~10 | string views: `lines`, `splitView`, `repeat`, `indexOfFrom` |
 | — | Option/Result closure combinators: `map`, `andThen`, `orElse`, `mapErr` |
-| — | the namespace-object model itself: `Math.absI64(x)` is still `unknown enum 'Math'` |
+| — | Option/Result closure combinators: `map`, `andThen`, `orElse`, `mapErr` |
 
-The last one is the big one and it is not on the fixture-count list because it fails
-*early*: milo0 predates the stdlib coherence overhaul, so the whole `Receiver.method()`
-namespace model is unimplemented. Every `Math.`, `Bytes.`, `Json.` call in std is a hole.
+**Correction to an earlier reading of this page:** the `Receiver.method()` namespace model
+was recorded here as unimplemented in milo0, on the strength of `Math.absI64(x)` reporting
+`unknown enum 'Math'`. That was wrong twice over. milo0 already had the static-method path;
+what actually broke was that its parser rejected an attribute on an *impl method*
+(`@pure fn sqrt`), so `std/math.milo` never parsed and `struct Math` never registered — one
+missing attribute loop, not a missing feature. The residual `unknown enum` in hand probes was
+a third thing again: `MILO_ROOT` unset, so the import could not be read at all. The model
+works; the port is that much cheaper than the previous revision of this page claimed.
 
-**Rate, measured over two rounds: roughly 3 fixtures per feature.** Eight features moved 242
-to 227. At that rate the remaining 227 is dozens of features — and the ones left are
+**Rate, measured over three rounds: roughly 3 fixtures per feature.** Ten features moved 242
+to 223. At that rate the remaining 223 is dozens of features — and the ones left are
 individually larger than the ones already done, because the cheap and highly-cited ones went
 first. That is the number to plan against.
 

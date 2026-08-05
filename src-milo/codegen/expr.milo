@@ -12,7 +12,7 @@ from "src-milo/codegen/types.milo" import {
     Cgen, Val, Local, CgFnSig, FieldInfo,
     nextTemp, emit, emitLabel, emitG, llType, isUnsigned, llTypeBytes, intBits,
     unwrapHeap, stripPercent, binOpInt, cmpOpInt, isArithOp, isCmpOp,
-    findLocal, hasLocal, genLoad, ensureMalloc, ensureMemcpy,
+    findLocal, hasLocal, genLoad, ensureMalloc, ensureMemcpy, ensurePutchar, ensureStringTy,
     lookupFnRet, lookupFieldIndex, lookupFieldType,
     lookupVariantTag, variantTagOpt, lookupVariantPayload, lookupEnumPayloadSlots
 }
@@ -5169,6 +5169,129 @@ pub fn genCall(cg: &mut Cgen, name: &string, args: &Vec<Heap<Expr>>, typeArgs: &
         emit(cg, "  " + aswv + " = trunc i8 " + aswo + " to i1\n")
         return Val {
             v: aswv, ty: "bool"
+        }
+    }
+    if name == "_atomicCasBool" {
+        let acbp = genExpr(cg, *args[0], locs, sigs, "")
+        let acbe = genExpr(cg, *args[1], locs, sigs, "bool")
+        let acbd = genExpr(cg, *args[2], locs, sigs, "bool")
+        let acbee = nextTemp(cg)
+        emit(cg, "  " + acbee + " = zext i1 " + acbe.v + " to i8\n")
+        let acbde = nextTemp(cg)
+        emit(cg, "  " + acbde + " = zext i1 " + acbd.v + " to i8\n")
+        let acbpair = nextTemp(cg)
+        emit(cg, "  " + acbpair + " = cmpxchg ptr " + acbp.v + ", i8 " + acbee + ", i8 " + acbde + " seq_cst seq_cst, align 1\n")
+        let acbo = nextTemp(cg)
+        emit(cg, "  " + acbo + " = extractvalue { i8, i1 } " + acbpair + ", 0\n")
+        let acbv = nextTemp(cg)
+        emit(cg, "  " + acbv + " = trunc i8 " + acbo + " to i1\n")
+        return Val {
+            v: acbv, ty: "bool"
+        }
+    }
+    // i64-width swap — same rmw-xchg shape as _atomicAddI64/_atomicSubI64 above,
+    // just missing until now (fell through to the generic call path, which
+    // defaulted the return type to i32 and emitted an invalid i32->i64 trunc).
+    if name == "_atomicSwapI64" {
+        let aswip = genExpr(cg, *args[0], locs, sigs, "")
+        let aswiv = genExpr(cg, *args[1], locs, sigs, "i64")
+        let aswio = nextTemp(cg)
+        emit(cg, "  " + aswio + " = atomicrmw xchg ptr " + aswip.v + ", i64 " + aswiv.v + " seq_cst, align 8\n")
+        return Val {
+            v: aswio, ty: "i64"
+        }
+    }
+    if name == "_atomicLoadI32" {
+        let ali32p = genExpr(cg, *args[0], locs, sigs, "")
+        let ali32v = nextTemp(cg)
+        emit(cg, "  " + ali32v + " = load atomic i32, ptr " + ali32p.v + " seq_cst, align 4\n")
+        return Val {
+            v: ali32v, ty: "i32"
+        }
+    }
+    if name == "_atomicStoreI32" {
+        let asi32p = genExpr(cg, *args[0], locs, sigs, "")
+        let asi32v = genExpr(cg, *args[1], locs, sigs, "i32")
+        emit(cg, "  store atomic i32 " + asi32v.v + ", ptr " + asi32p.v + " seq_cst, align 4\n")
+        return Val {
+            v: "0", ty: "void"
+        }
+    }
+    if name == "_atomicAddI32" {
+        let aai32p = genExpr(cg, *args[0], locs, sigs, "")
+        let aai32v = genExpr(cg, *args[1], locs, sigs, "i32")
+        let aai32o = nextTemp(cg)
+        emit(cg, "  " + aai32o + " = atomicrmw add ptr " + aai32p.v + ", i32 " + aai32v.v + " seq_cst, align 4\n")
+        return Val {
+            v: aai32o, ty: "i32"
+        }
+    }
+    if name == "_atomicSubI32" {
+        let asubi32p = genExpr(cg, *args[0], locs, sigs, "")
+        let asubi32v = genExpr(cg, *args[1], locs, sigs, "i32")
+        let asubi32o = nextTemp(cg)
+        emit(cg, "  " + asubi32o + " = atomicrmw sub ptr " + asubi32p.v + ", i32 " + asubi32v.v + " seq_cst, align 4\n")
+        return Val {
+            v: asubi32o, ty: "i32"
+        }
+    }
+    if name == "_atomicSwapI32" {
+        let aswi32p = genExpr(cg, *args[0], locs, sigs, "")
+        let aswi32v = genExpr(cg, *args[1], locs, sigs, "i32")
+        let aswi32o = nextTemp(cg)
+        emit(cg, "  " + aswi32o + " = atomicrmw xchg ptr " + aswi32p.v + ", i32 " + aswi32v.v + " seq_cst, align 4\n")
+        return Val {
+            v: aswi32o, ty: "i32"
+        }
+    }
+    if name == "_atomicCasI32" {
+        let aci32p = genExpr(cg, *args[0], locs, sigs, "")
+        let aci32e = genExpr(cg, *args[1], locs, sigs, "i32")
+        let aci32d = genExpr(cg, *args[2], locs, sigs, "i32")
+        let aci32pair = nextTemp(cg)
+        emit(cg, "  " + aci32pair + " = cmpxchg ptr " + aci32p.v + ", i32 " + aci32e.v + ", i32 " + aci32d.v + " seq_cst seq_cst, align 4\n")
+        let aci32o = nextTemp(cg)
+        emit(cg, "  " + aci32o + " = extractvalue { i32, i1 } " + aci32pair + ", 0\n")
+        return Val {
+            v: aci32o, ty: "i32"
+        }
+    }
+    // _bytesToString(ptr, len): like _cstrToString but the length is already known
+    // (source bytes may contain embedded NULs), matching the oracle's layout —
+    // len+1 capacity with a trailing NUL so the result can still reach a C API.
+    if name == "_bytesToString" {
+        ensureStringTy(cg)
+        ensureMalloc(cg)
+        ensureMemcpy(cg)
+        let btsp = genExpr(cg, *args[0], locs, sigs, "")
+        let btsl = genExpr(cg, *args[1], locs, sigs, "i64")
+        let btscap = nextTemp(cg)
+        emit(cg, "  " + btscap + " = add i64 " + btsl.v + ", 1\n")
+        let btsbuf = nextTemp(cg)
+        emit(cg, "  " + btsbuf + " = call ptr @malloc(i64 " + btscap + ")\n")
+        emit(cg, "  call ptr @memcpy(ptr " + btsbuf + ", ptr " + btsp.v + ", i64 " + btsl.v + ")\n")
+        let btsnul = nextTemp(cg)
+        emit(cg, "  " + btsnul + " = getelementptr i8, ptr " + btsbuf + ", i64 " + btsl.v + "\n")
+        emit(cg, "  store i8 0, ptr " + btsnul + "\n")
+        let bts0 = nextTemp(cg)
+        emit(cg, "  " + bts0 + " = insertvalue %String zeroinitializer, ptr " + btsbuf + ", 0\n")
+        let bts1 = nextTemp(cg)
+        emit(cg, "  " + bts1 + " = insertvalue %String " + bts0 + ", i64 " + btsl.v + ", 1\n")
+        let bts2 = nextTemp(cg)
+        emit(cg, "  " + bts2 + " = insertvalue %String " + bts1 + ", i64 " + btscap + ", 2\n")
+        return Val {
+            v: bts2, ty: "string"
+        }
+    }
+    // _putByte(b): freestanding-friendly single-byte stdout write via putchar.
+    if name == "_putByte" {
+        ensurePutchar(cg)
+        let pbv = genExpr(cg, *args[0], locs, sigs, "u8")
+        let pbe = nextTemp(cg)
+        emit(cg, "  " + pbe + " = zext i8 " + pbv.v + " to i32\n")
+        emit(cg, "  call i32 @putchar(i32 " + pbe + ")\n")
+        return Val {
+            v: "0", ty: "void"
         }
     }
 

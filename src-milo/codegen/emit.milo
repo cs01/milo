@@ -759,6 +759,16 @@ pub fn genFn(cg: &mut Cgen, f: &Function, sigs: &Vec<CgFnSig>) {
             }
             cg.declaredFree = true
         }
+        // the `flush()` builtin (expr.milo) also emits `declare @fflush`; share one
+        // dedup flag so std/os's `extern fn fflush` and the builtin never double-declare
+        // it — LLVM rejects a redefinition, which broke every program importing std/os
+        // AND calling the bare `flush()` builtin.
+        if f.name == "fflush" {
+            if cg.declaredFflush {
+                return
+            }
+            cg.declaredFflush = true
+        }
         // astTypeStr, not .name: a `*u8` return must stay a pointer (`.name` alone
         // drops pointer-ness, declaring e.g. strerror as returning i8 → truncated
         // pointer → strlen on garbage in the self-compiled build).

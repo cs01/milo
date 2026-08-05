@@ -294,14 +294,25 @@ pub fn parseImport(p: &mut Parser): ImportDecl {
         // from "path" import { a, b, c }
         expect(p, TokKind.LBrace)
         var names: Vec<string> = Vec.new()
+        var aliases: Vec<Option<string>> = Vec.new()
         while !at(p, TokKind.RBrace) {
             names.push(expect(p, TokKind.Ident).value)
+            // `import { foo as bar }` — bind the exported `foo` under local name
+            // `bar`. `as` is already a token kind (cast); reuse it in import
+            // position too (mirrors src/parser.ts's parseImport).
+            if at(p, TokKind.As) {
+                let _ = advance(p)
+                aliases.push(Option.Some(expect(p, TokKind.Ident).value))
+            } else {
+                aliases.push(Option.None)
+            }
             matchTok(p, TokKind.Comma)
         }
         expect(p, TokKind.RBrace)
         return ImportDecl {
             path: pathTok.value,
             names: Option.Some(names),
+            aliases: aliases,
             span: span(p, tok),
         }
     }
@@ -309,7 +320,7 @@ pub fn parseImport(p: &mut Parser): ImportDecl {
     let tok = advance(p)
     let pathTok = expect(p, TokKind.String)
     return ImportDecl {
-        path: pathTok.value, names: Option.None, span: span(p, tok)
+        path: pathTok.value, names: Option.None, aliases: Vec.new(), span: span(p, tok)
     }
 }
 
@@ -1890,7 +1901,7 @@ pub fn parse(p: &mut Parser): Program {
             unicodeNames.push("CodePoint")
             unicodeNames.push("decodeCodepoint")
             imports.push(ImportDecl {
-                path: "std/unicode", names: Option.Some(unicodeNames), span: Option.None
+                path: "std/unicode", names: Option.Some(unicodeNames), aliases: Vec.new(), span: Option.None
             }
             )
         }

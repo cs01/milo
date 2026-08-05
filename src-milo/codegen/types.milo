@@ -22,6 +22,14 @@ pub struct Local {
     // ref params are borrows — never dropped by this scope (a drop hook's own
     // &mut self param used to recurse into itself forever)
     isRef: bool,
+    // Declared as a fixed-size array (`[T; N]`) rather than a real growable Vec —
+    // both lower onto the same %Vec {ptr,len,cap} runtime shape (same `ty` string),
+    // so this bit is the ONLY way genOwnedArg can tell them apart at a pass-by-
+    // value site. The checker only accepts an array-typed binding whose element
+    // is Copy (tests/errors/arrayNonCopyMove.milo enforces the rest), so any
+    // local reaching codegen with this set is always safe to deep-clone instead
+    // of move.
+    isArr: bool,
 }
 
 // -- Function signature for call-site type lookup --

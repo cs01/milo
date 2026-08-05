@@ -26,7 +26,7 @@ from "src-milo/parser.milo" import {
 }
 from "src-milo/ast.milo" import {
     Program, StructDecl, EnumDecl, Function, ImportDecl, TraitDecl, ImplDecl,
-    GlobalDecl, cloneGlobal
+    GlobalDecl, cloneGlobal, renameFunction, renameGlobal
 }
 
 pub struct ResolverState {
@@ -463,6 +463,63 @@ pub fn checkDuplicateDecls(prog: &Program) {
     }
 }
 
+// `import { x as y }` binds a local alias `y` to a real declared name `x`.
+// src-milo merges every module into one flat namespace with no per-package
+// mangling to redirect through (see ImportDecl.aliases' doc comment in
+// ast.milo), so the binding is realized as a rewrite of the IMPORTING file's
+// own function/global bodies — collected here as (from, to) pairs, applied by
+// applyAliases{Func,Global} below, once per file, before anything from it is
+// pushed into the merged program. Shared by mergeImportedFile (every imported
+// file) and resolveImports (the entry file's own top-level imports).
+pub struct AliasPairs {
+    froms: Vec<string>,
+    tos: Vec<string>,
+}
+
+pub fn collectAliasPairs(imports: &Vec<ImportDecl>): AliasPairs {
+    var froms: Vec<string> = Vec.new()
+    var tos: Vec<string> = Vec.new()
+    for impI in 0..imports.len {
+        match imports[impI].names {
+            Option.Some(names) => {
+                for ni in 0..names.len {
+                    match imports[impI].aliases[ni] {
+                        Option.Some(alias) => {
+                            if alias != names[ni] {
+                                froms.push(alias.clone())
+                                tos.push(names[ni].clone())
+                            }
+                        }
+                        Option.None => {
+                        }
+                    }
+                }
+            }
+            Option.None => {
+            }
+        }
+    }
+    return AliasPairs {
+        froms: froms, tos: tos
+    }
+}
+
+pub fn applyAliasesFunc(f: Function, pairs: &AliasPairs): Function {
+    var out = f
+    for i in 0..pairs.froms.len {
+        out = renameFunction(out, pairs.froms[i], pairs.tos[i])
+    }
+    return out
+}
+
+pub fn applyAliasesGlobal(g: GlobalDecl, pairs: &AliasPairs): GlobalDecl {
+    var out = g
+    for i in 0..pairs.froms.len {
+        out = renameGlobal(out, pairs.froms[i], pairs.tos[i])
+    }
+    return out
+}
+
 // Recursively process imports from a parsed program.
 // Parse+merge one already-resolved file path, then recurse into ITS imports.
 // No-ops if already visited. Shared by the real import loop and the
@@ -474,6 +531,7 @@ pub fn mergeImportedFile(rs: &mut ResolverState, absPath: string) {
     rs.visited.insert(absPath.clone(), true)
     let imported = parseFile(absPath)
     checkDuplicateDecls(imported)
+    let aliasPairs = collectAliasPairs(imported.imports)
 
     for si in 0..imported.structs.len {
         rs.structs.push(imported.structs[si].clone())
@@ -482,7 +540,7 @@ pub fn mergeImportedFile(rs: &mut ResolverState, absPath: string) {
         rs.enums.push(imported.enums[ei].clone())
     }
     for fi in 0..imported.functions.len {
-        rs.functions.push(imported.functions[fi].clone())
+        rs.functions.push(applyAliasesFunc(imported.functions[fi].clone(), aliasPairs))
     }
     for ti in 0..imported.traits.len {
         rs.traits.push(imported.traits[ti].clone())
@@ -491,7 +549,7 @@ pub fn mergeImportedFile(rs: &mut ResolverState, absPath: string) {
         rs.impls.push(imported.impls[ii].clone())
     }
     for gi in 0..imported.globals.len {
-        rs.globals.push(cloneGlobal(imported.globals[gi]))
+        rs.globals.push(applyAliasesGlobal(cloneGlobal(imported.globals[gi]), aliasPairs))
     }
     for ai in 0..imported.typeAliases.len {
         rs.typeAliases.push(TypeAlias {
@@ -665,6 +723,9 @@ pub fn resolveImports(program: Program, sourceDir: string, stdlibDir: string, ta
     }
 
     checkDuplicateDecls(program)
+    // The entry file can itself write `import { x as y }` — same rewrite as
+    // mergeImportedFile applies to every OTHER file (see AliasPairs above).
+    let entryAliasPairs = collectAliasPairs(program.imports)
 
     // User code comes after prelude (last-wins dedup means user overrides)
     for si in 0..program.structs.len {
@@ -674,7 +735,7 @@ pub fn resolveImports(program: Program, sourceDir: string, stdlibDir: string, ta
         rs.enums.push(program.enums[ei].clone())
     }
     for fi in 0..program.functions.len {
-        rs.functions.push(program.functions[fi].clone())
+        rs.functions.push(applyAliasesFunc(program.functions[fi].clone(), entryAliasPairs))
     }
     for ti in 0..program.traits.len {
         rs.traits.push(program.traits[ti].clone())
@@ -683,7 +744,7 @@ pub fn resolveImports(program: Program, sourceDir: string, stdlibDir: string, ta
         rs.impls.push(program.impls[ii].clone())
     }
     for gi in 0..program.globals.len {
-        rs.globals.push(cloneGlobal(program.globals[gi]))
+        rs.globals.push(applyAliasesGlobal(cloneGlobal(program.globals[gi]), entryAliasPairs))
     }
     for ai in 0..program.typeAliases.len {
         rs.typeAliases.push(TypeAlias {

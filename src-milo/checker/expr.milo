@@ -3859,6 +3859,12 @@ pub fn checkHashMapMethod(ck: &mut Checker, obj: &Expr, key: &TypeKind, val: &Ty
         }
         return TypeKind.TInt(64, true)
     }
+    if method == "isEmpty" {
+        if args.len != 0 {
+            error(ck, "'isEmpty' takes no arguments", cloneSpan(span))
+        }
+        return tyBool()
+    }
     if method == "clear" {
         if args.len != 0 {
             error(ck, "'clear' takes no arguments", cloneSpan(span))

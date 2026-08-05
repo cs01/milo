@@ -964,6 +964,83 @@ pub fn genSizeOf(cg: &mut Cgen, llTy: &string): string {
 // everything off these strings (llType, unwrapVec, unwrapHeap), and a bare
 // `ty.name` drops the type arguments -- `Vec<string>` would arrive as "Vec" and
 // its elements would be sized as i64.
+// Mirrors checker/mono.milo's mangleTypeName (which mangles a *resolved*
+// TypeKind) but works off the raw MiloType AST, since codegen never sees the
+// checker's resolved types for a global's declared annotation (main.milo
+// hands codegen `resolved` — the pre-check AST — plus the checker's
+// monomorphized decls appended; globals themselves are never rewritten).
+// Always flat (Container_Arg1_Arg2, no angle brackets) — used both for a
+// user-generic's own args and, recursively, for Vec/Heap/HashMap when THEY
+// appear as an argument rather than the outermost type.
+pub fn mangleAstTypeArg(ty: &MiloType): string {
+    if ty.isFn {
+        var s = "fn"
+        for i in 0..ty.fnParams.len {
+            s = s + "_" + mangleAstTypeArg(ty.fnParams[i])
+        }
+        match ty.fnRet {
+            Option.Some(r) => {
+                s = s + "_ret_" + mangleAstTypeArg(*r)
+            }
+            Option.None => {
+                s = s + "_ret_void"
+            }
+        }
+        return s
+    }
+    if ty.isPtr {
+        var inner = ty.clone()
+        inner.isPtr = false
+        return "ptr_" + mangleAstTypeArg(inner)
+    }
+    if ty.isRef || ty.isRefMut {
+        var inner = ty.clone()
+        inner.isRef = false
+        inner.isRefMut = false
+        return "ref_" + mangleAstTypeArg(inner)
+    }
+    if ty.isArray {
+        var inner = ty.clone()
+        inner.isArray = false
+        var s = "arr_" + mangleAstTypeArg(inner)
+        match ty.arraySize {
+            Option.Some(n) => {
+                s = s + "_" + n.toString()
+            }
+            Option.None => {
+            }
+        }
+        return s
+    }
+    if ty.name == "Vec" && ty.typeArgs.len == 1 {
+        return "Vec_" + mangleAstTypeArg(ty.typeArgs[0])
+    }
+    if ty.name == "Heap" && ty.typeArgs.len == 1 {
+        return "Heap_" + mangleAstTypeArg(ty.typeArgs[0])
+    }
+    if ty.name == "HashMap" && ty.typeArgs.len == 2 {
+        return "HashMap_" + mangleAstTypeArg(ty.typeArgs[0]) + "_" + mangleAstTypeArg(ty.typeArgs[1])
+    }
+    if ty.typeArgs.len > 0 {
+        var s = ty.name.clone()
+        for i in 0..ty.typeArgs.len {
+            s = s + "_" + mangleAstTypeArg(ty.typeArgs[i])
+        }
+        return s
+    }
+    // scalar aliases canonicalize the same way checker/types.milo's typeFromName does
+    if ty.name == "int" {
+        return "i64"
+    }
+    if ty.name == "byte" {
+        return "u8"
+    }
+    if ty.name == "float" {
+        return "f64"
+    }
+    return ty.name.clone()
+}
+
 pub fn astTypeStr(ty: &MiloType): string {
     if ty.isFn {
         // carry the return type ("fn:Response") so an indirect closure call can
@@ -979,14 +1056,26 @@ pub fn astTypeStr(ty: &MiloType): string {
     }
     var base = ty.name.clone()
     if ty.typeArgs.len > 0 {
-        base = base + "<"
-        for i in 0..ty.typeArgs.len {
-            if i > 0 {
-                base = base + ","
+        if ty.name == "Vec" || ty.name == "Heap" || ty.name == "HashMap" {
+            base = base + "<"
+            for i in 0..ty.typeArgs.len {
+                if i > 0 {
+                    base = base + ","
+                }
+                base = base + astTypeStr(ty.typeArgs[i])
             }
-            base = base + astTypeStr(ty.typeArgs[i])
+            base = base + ">"
+        } else {
+            // A user generic struct/enum named directly (Arena<Node>, not
+            // nested in Vec/Heap/HashMap) has to spell the SAME flat name the
+            // checker already monomorphized it to (Arena_Node) — bracket
+            // syntax is only meaningful to the 3 builtin containers that
+            // llType pattern-matches on ("Vec<"/"Heap<"/"HashMap<"); emitted
+            // as LLVM syntax for anything else it is simply invalid ("%Arena<Node>").
+            for i in 0..ty.typeArgs.len {
+                base = base + "_" + mangleAstTypeArg(ty.typeArgs[i])
+            }
         }
-        base = base + ">"
     }
     // Fixed arrays lower onto the Vec runtime: same {ptr,len,cap} header, so
     // len/index/iterate/index-assign all reuse the Vec paths.

@@ -958,10 +958,20 @@ pub fn parsePattern(p: &mut Parser): Pattern {
             return Pattern.LiteralPattern("-" + numTok.value, litKind, s)
         }
     }
-    // Enum pattern: Name.Variant or Name.Variant(bindings)
-    let enumName = expect(p, TokKind.Ident).value
-    expect(p, TokKind.Dot)
-    let variant = expect(p, TokKind.Ident).value
+    // Enum pattern: Name.Variant or Name.Variant(bindings) — or, when the enum
+    // is obvious from the match subject, a bare Variant/Variant(bindings). An
+    // elided prefix is left blank here (the parser has no types to resolve it
+    // with) and filled in by the checker from the subject's real enum name;
+    // codegen never reads this field at all — it re-derives the mangled enum
+    // name from the subject's own codegen'd type, so leaving it blank is safe.
+    let first = expect(p, TokKind.Ident).value
+    var enumName = ""
+    var variant = first.clone()
+    if at(p, TokKind.Dot) {
+        advance(p)
+        enumName = first.clone()
+        variant = expect(p, TokKind.Ident).value
+    }
     var bindings: Vec<string> = Vec.new()
     if matchTok(p, TokKind.LParen) {
         while !at(p, TokKind.RParen) {

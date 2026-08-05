@@ -768,6 +768,16 @@ pub fn genFn(cg: &mut Cgen, f: &Function, sigs: &Vec<CgFnSig>) {
     // temp addresses (%.tN) are reused across functions (counter resets above),
     // so a moved-address record from a PRIOR function must not leak in here.
     cg.movedLocalAddrs = Vec.new()
+    // `@wrapping` (direct, or inherited from a file-level `@!wrapping` — see
+    // parser.milo) skips the checked-arith/shift traps below and takes the
+    // plain two's-complement instruction instead. Reset per function: this is
+    // NOT scope-nested, every genFn call is a fresh function.
+    cg.currentFnWrapping = false
+    for wi in 0..f.attributes.len {
+        if f.attributes[wi].name == "wrapping" {
+            cg.currentFnWrapping = true
+        }
+    }
     var locs: Vec<Local> = Vec.new()
     // C `main` is forced to `i32 (i32 argc, ptr argv)`: it stashes argc/argv into
     // globals that _miloArgCount/_miloArgAt read, and returns an exit code.

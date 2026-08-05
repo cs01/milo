@@ -348,6 +348,7 @@ pub fn synthesizeDefaultMethods(ck: &mut Checker, program: &Program) {
                             body: bodyStmts,
                             isExtern: false,
                             isVariadic: false,
+                            attributes: Vec.new(),
                         }
                         )
                     }
@@ -462,6 +463,7 @@ pub fn registerImpl(ck: &mut Checker, implDecl: &ImplDecl) {
                     body: cloneStmts(m.body),
                     isExtern: false,
                     isVariadic: false,
+                    attributes: m.attributes.clone(),
                 }
                 )
             }
@@ -541,6 +543,7 @@ pub fn registerImpl(ck: &mut Checker, implDecl: &ImplDecl) {
                     body: cloneStmts(m.body),
                     isExtern: false,
                     isVariadic: false,
+                    attributes: m.attributes.clone(),
                 }
                 )
             }
@@ -607,6 +610,7 @@ pub fn deriveEq(s: &StructDecl): Option<ImplDecl> {
         body: body,
         isExtern: false,
         isVariadic: false,
+        attributes: Vec.new(),
     }
     )
 

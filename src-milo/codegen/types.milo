@@ -202,6 +202,14 @@ pub struct Cgen {
     // string, mirroring checker's resolveAstType: the alias body is substituted, but
     // any `*`/ptrDepth wrapper at the USE site is preserved around the substitution.
     typeAliases: HashMap<string, MiloType>,
+    declaredAbort: bool,
+    // Whether the function CURRENTLY being generated carries `@wrapping` (directly, or
+    // inherited from a file-level `@!wrapping` — see parser.milo). Set at the top of
+    // genFn from `f.attributes`, read by every runtime-safety check below that has a
+    // defined wrapping behavior (checked arith skips its trap and falls through to the
+    // plain instruction; div-by-zero still traps, since there is no modular value for
+    // x/0; shift still traps too — mirrors src/codegen.ts's currentFnWrapping).
+    currentFnWrapping: bool,
 }
 
 pub fn cgenNew(): Cgen {
@@ -260,6 +268,8 @@ pub fn cgenNew(): Cgen {
         curLoopScopeLen: -1,
         declaredFpSat: Vec.new(),
         typeAliases: HashMap.new(),
+        declaredAbort: false,
+        currentFnWrapping: false,
     }
 }
 
@@ -1198,6 +1208,27 @@ pub fn ensureRealloc(cg: &mut Cgen) {
     if !cg.declaredRealloc {
         emitG(cg, "declare ptr @realloc(ptr, i64)\n")
         cg.declaredRealloc = true
+    }
+}
+
+pub fn ensureAbort(cg: &mut Cgen) {
+    if !cg.declaredAbort {
+        emitG(cg, "declare void @abort()\n")
+        cg.declaredAbort = true
+    }
+}
+
+pub fn ensureDprintf(cg: &mut Cgen) {
+    if !cg.declaredDprintf {
+        emitG(cg, "declare i32 @dprintf(i32, ptr, ...)\n")
+        cg.declaredDprintf = true
+    }
+}
+
+pub fn ensureFflush(cg: &mut Cgen) {
+    if !cg.declaredFflush {
+        emitG(cg, "declare i32 @fflush(ptr)\n")
+        cg.declaredFflush = true
     }
 }
 

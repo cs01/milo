@@ -5,7 +5,7 @@
 // wins" precedence real git uses.
 
 from "std/fs" import {
-    globMatch, isDir, isFile, readFile, realPath
+    globMatchSegment, globMatchSplitPattern, isDir, isFile, readFile, realPath
 }
 from "std/path" import {
     Path
@@ -31,6 +31,15 @@ pub fn kindGlob(): i64 {
     return 2
 }
 
+// A glob confined to one path segment — no '/' anywhere in the pattern. The text it is
+// tested against unanchored is a bare basename, which has no '/' either, so both sides
+// are a single segment and the segment matcher answers directly. This is what almost
+// every real gitignore line looks like ("*.o", "build*", "*.tmp.[0-9]"), and routing it
+// away from globMatch is what takes the split — and its allocation — off the walk.
+pub fn kindSegGlob(): i64 {
+    return 3
+}
+
 fn hasGlobMeta(s: &string): bool {
     for byte in s {
         if byte == '*' || byte == '?' || byte == '[' || byte == ']' || byte == '\\' {
@@ -50,6 +59,9 @@ fn classify(pattern: &string): i64 {
             return kindSuffix()
         }
     }
+    if !pattern.contains("/") {
+        return kindSegGlob()
+    }
     return kindGlob()
 }
 
@@ -62,6 +74,9 @@ pub struct IgnoreRule {
     // pattern minus its leading "*", for kindSuffix. Precomputed so the hot path does
     // not allocate a substring per entry per rule.
     suffix: string,
+    // pattern.split("/"), for kindGlob (and kindSegGlob's anchored fallback).
+    // Precomputed so the walk does not re-split the pattern per entry.
+    patSegs: Vec<string>,
 }
 
 // The pattern test, specialized by kind. Every branch agrees with `globMatch(pattern,
@@ -76,7 +91,13 @@ fn patternMatches(rule: &IgnoreRule, text: &string): bool {
     if rule.kind == kindSuffix() && !rule.anchored {
         return text.endsWith(rule.suffix)
     }
-    return globMatch(rule.pattern, text)
+    // A '/'-free glob only takes the segment-matcher shortcut when the text is a bare
+    // basename. An anchored rule matches against a relative path that CAN contain "/",
+    // and "*" must not cross that separator, so it falls through to the general path.
+    if rule.kind == kindSegGlob() && !rule.anchored {
+        return globMatchSegment(rule.pattern, text)
+    }
+    return globMatchSplitPattern(rule.patSegs, text)
 }
 
 pub struct IgnoreSet {
@@ -146,8 +167,10 @@ fn parseLine(raw: &string): Option<IgnoreRule> {
     if kind == kindSuffix() {
         suffix = line.substr(1, line.len)
     }
+    // Precompute here, before `line` moves into `pattern` below.
+    let patSegs = line.split("/")
     return Option.Some(IgnoreRule {
-        pattern: line, negate: negate, dirOnly: dirOnly, anchored: anchored, kind: kind, suffix: suffix,
+        pattern: line, negate: negate, dirOnly: dirOnly, anchored: anchored, kind: kind, suffix: suffix, patSegs: patSegs,
     }
     )
 }

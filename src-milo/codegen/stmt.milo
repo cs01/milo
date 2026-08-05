@@ -2225,6 +2225,21 @@ pub fn genClosure(cg: &mut Cgen, params: &Vec<Param>, retType: &Option<MiloType>
                 let gp = nextTemp(cg)
                 emit(cg, "  " + gp + " = getelementptr " + envTy + ", ptr " + ea + ", i32 0, i32 " + ci.toString() + "\n")
                 emit(cg, "  store " + cll + " " + cv + ", ptr " + gp + "\n")
+                // The bits now live in TWO places (this local's slot and the env
+                // slot just stored above) but ownership was only ever meant to
+                // transfer once — same move genOwnedArg performs for a by-value
+                // call arg. Without zeroing+recording the source here, whatever
+                // later drops this scope's locals (a loop-body end, a fn return)
+                // finds the slot still looking "alive" and drops it AGAIN: for a
+                // refcounted handle (AtomicI64, Channel, ...) that is an extra
+                // decrement/free racing the thread this closure was just handed
+                // to, which is exactly what turned battleConcurrency's atomic
+                // counter into a silent lost-update generator. A ref capture
+                // (isRef) borrows someone else's storage and must not be zeroed.
+                if !caps[ci].isRef && cgNeedsDrop(cg, caps[ci].ty) {
+                    zeroStore(cg, caps[ci].addr, caps[ci].ty)
+                    cg.movedLocalAddrs.push(caps[ci].addr.clone())
+                }
             }
         } else {
             ea = nextTemp(cg)

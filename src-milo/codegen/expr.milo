@@ -771,11 +771,64 @@ pub fn genHashMapNew(cg: &mut Cgen, hintTy: &string): Val {
 }
 
 // i1 temp that is true when two keys of keyTy compare equal
+// Structural equality for an aggregate: compare every field and AND the results. Returns
+// "" when some field has a type milo0 cannot compare, so callers fail loudly instead of
+// emitting `icmp` on an aggregate (not valid IR) or comparing field 0 alone (which calls
+// distinct values equal — the previous behaviour, which passed the fixtures only because
+// their differing values happened to differ in the first field).
+pub fn genAggregateEq(cg: &mut Cgen, aggLl: &string, a: &string, b: &string): string {
+    let aggName = stripPercent(aggLl.clone())
+    if !cg.structs.contains(aggName) {
+        return ""
+    }
+    let sf = cg.structs.get(aggName)!
+    var acc = ""
+    for fi in 0..sf.len {
+        let fll = llType(sf[fi].ty)
+        let ea = nextTemp(cg)
+        emit(cg, "  " + ea + " = extractvalue " + aggLl.clone() + " " + a.clone() + ", " + fi.toString() + "\n")
+        let eb = nextTemp(cg)
+        emit(cg, "  " + eb + " = extractvalue " + aggLl.clone() + " " + b.clone() + ", " + fi.toString() + "\n")
+        var one = ""
+        if fll == "%String" {
+            let r = genStringEq(cg, ea, eb, true)
+            one = r.v.clone()
+        } else if fll == "i1" || fll == "i8" || fll == "i16" || fll == "i32" || fll == "i64" || fll == "ptr" {
+            let t1 = nextTemp(cg)
+            emit(cg, "  " + t1 + " = icmp eq " + fll.clone() + " " + ea + ", " + eb + "\n")
+            one = t1
+        } else if fll == "double" || fll == "float" {
+            let t2 = nextTemp(cg)
+            emit(cg, "  " + t2 + " = fcmp oeq " + fll.clone() + " " + ea + ", " + eb + "\n")
+            one = t2
+        } else {
+            return ""
+        }
+        if acc.len == 0 {
+            acc = one
+        } else {
+            let t3 = nextTemp(cg)
+            emit(cg, "  " + t3 + " = and i1 " + acc.clone() + ", " + one + "\n")
+            acc = t3
+        }
+    }
+    return acc
+}
+
 pub fn genKeyEq(cg: &mut Cgen, keyTy: &string, a: &string, b: &string): string {
     let keyLl = llType(keyTy)
     if keyLl == "%String" {
         let r = genStringEq(cg, a, b, true)
         return r.v
+    }
+    // A struct key is an aggregate; `icmp` is not defined on aggregates.
+    if keyLl.len > 1 && keyLl[0] == 37 && cg.structs.contains(stripPercent(keyLl.clone())) {
+        let r = genAggregateEq(cg, keyLl, a, b)
+        if r.len == 0 {
+            eprint("codegen: HashMap key '" + stripPercent(keyLl.clone()) + "' has a field milo0 cannot compare")
+            exit(1)
+        }
+        return r
     }
     let t = nextTemp(cg)
     emit(cg, "  " + t + " = icmp eq " + keyLl + " " + a + ", " + b + "\n")
@@ -4687,21 +4740,42 @@ pub fn genExpr(cg: &mut Cgen, e: &Expr, locs: &Vec<Local>, sigs: &Vec<CgFnSig>, 
                     return genStringCmp(cg, lv.v, rv.v, op)
                 }
             }
-            // Enum tag compare
+            // Aggregate equality. An ENUM compares its i32 tag; a STRUCT compares every
+            // field. Using the tag path for structs compared field 0 alone and called
+            // distinct values equal — it passed the fixtures only because their values
+            // happened to differ in the first field.
             if (op == "==" || op == "!=") && lvLl.len > 1 && lvLl[0] == 37 {
-                let lt = nextTemp(cg)
-                emit(cg, "  " + lt + " = extractvalue " + lvLl + " " + lv.v + ", 0\n")
-                let rt = nextTemp(cg)
-                emit(cg, "  " + rt + " = extractvalue " + lvLl + " " + rv.v + ", 0\n")
-                let opn = if op == "==" {
-                    "eq"
-                } else {
-                    "ne"
+                let aggName = stripPercent(lvLl.clone())
+                if cg.enums.contains(aggName) {
+                    let lt = nextTemp(cg)
+                    emit(cg, "  " + lt + " = extractvalue " + lvLl + " " + lv.v + ", 0\n")
+                    let rt = nextTemp(cg)
+                    emit(cg, "  " + rt + " = extractvalue " + lvLl + " " + rv.v + ", 0\n")
+                    let opn = if op == "==" {
+                        "eq"
+                    } else {
+                        "ne"
+                    }
+                    let res = nextTemp(cg)
+                    emit(cg, "  " + res + " = icmp " + opn + " i32 " + lt + ", " + rt + "\n")
+                    return Val {
+                        v: res, ty: "bool"
+                    }
                 }
-                let res = nextTemp(cg)
-                emit(cg, "  " + res + " = icmp " + opn + " i32 " + lt + ", " + rt + "\n")
-                return Val {
-                    v: res, ty: "bool"
+                if cg.structs.contains(aggName) {
+                    let eqv = genAggregateEq(cg, lvLl, lv.v, rv.v)
+                    if eqv.len > 0 {
+                        if op == "==" {
+                            return Val {
+                                v: eqv, ty: "bool"
+                            }
+                        }
+                        let neg = nextTemp(cg)
+                        emit(cg, "  " + neg + " = xor i1 " + eqv + ", true\n")
+                        return Val {
+                            v: neg, ty: "bool"
+                        }
+                    }
                 }
             }
             // Operator overloading: struct <op> struct → the Type$..$<method> call

@@ -14,7 +14,7 @@ from "src-milo/checker/state.milo" import {
     normalizeEnumNames, stmtTerminates, snapshotMoves, restoreMoves, orMoves,
 }
 from "src-milo/checker/expr.milo" import {
-    intCoercible, arrayIntCoercible, checkExpr, tryMove, isRootMutable, deref
+    intCoercible, arrayIntCoercible, arrayToVecCoercible, checkExpr, tryMove, isRootMutable, deref
 }
 from "src-milo/checker/traits.milo" import {
     registerBuiltinTraits, registerAllImpls, synthesizeDefaultMethods, processDerives, typeImplementsTrait, resolveMethod
@@ -149,9 +149,13 @@ pub fn checkAssign(ck: &mut Checker, target: &Expr, value: &Expr, span: &Option<
             targetType = checkExpr(ck, target)
         }
     }
+    // Expose the target's type as the hint so an array literal RHS (`v = [a, b]`)
+    // coerces to Vec<T> when the target is one, same as let/var and struct fields.
+    ck.expectedType = Option.Some(targetType.clone())
     let valType = checkExpr(ck, value)
+    ck.expectedType = Option.None
     if !typeEq(targetType, valType) && !typeEq(valType, tyUnknown()) && !intCoercible(targetType, valType, value) &&
-    !optionIntWrapCoercible(ck, targetType, valType) {
+    !arrayToVecCoercible(targetType, valType) && !optionIntWrapCoercible(ck, targetType, valType) {
         error(ck, "type mismatch: cannot assign " + typeName(valType) + " to " + typeName(targetType), cloneSpan(span))
     }
 

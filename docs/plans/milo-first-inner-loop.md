@@ -265,10 +265,10 @@ item 5, it should be decided against 0/578, not against 20,826.
 
 | | |
 |---|---|
-| **behave correctly** | **341 / 578 (59%)** |
-| wrong output | 6 |
+| **behave correctly** | **344 / 578 (60%)** |
+| wrong output | 7 |
 | exits nonzero | 2 |
-| fails to link | 10 |
+| fails to link | 6 |
 | cannot be compiled at all | 219 |
 
 A caution about this table's own history: the first version of the harness did not link a
@@ -295,7 +295,14 @@ Two real defects fell out of chasing the wrong-output list, both of the same sha
   Now accumulated in u64, which covers every literal the language admits; the checker still
   decides whether the value fits the annotated type.
 
-Both are `feedback_silent_success` in miniature: a sentinel or fallback that reads as valid
+A third of the same kind, found by chasing link failures: **struct `==` compared only field
+zero.** The aggregate-comparison path assumed field 0 was an enum's i32 tag and applied that
+to every `%Struct`, so `Vec2{1,2} == Vec2{1,9}` was true. It passed the existing fixtures
+only because their unequal values happened to differ in the first field — a test suite
+agreeing with a bug. Now every field is compared and ANDed, recursing into strings; a field
+milo0 cannot compare fails loudly instead of silently answering.
+
+All are `feedback_silent_success` in miniature: a sentinel or fallback that reads as valid
 data. Worth noting the second one was introduced *during this work* and caught only because
 the behaviour harness existed — the IR-diff alone reported it as "compiles fine."
 

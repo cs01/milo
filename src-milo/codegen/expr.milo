@@ -4747,6 +4747,22 @@ pub fn genExpr(cg: &mut Cgen, e: &Expr, locs: &Vec<Local>, sigs: &Vec<CgFnSig>, 
             if isCmpOp(op) {
                 lHint = ""
             }
+            // A bare integer literal on the left has no width of its own and defaults to
+            // i64, which then dragged the RHS up with it: `0 - b` on an i32 `b` computed
+            // at i64 and printed 2147483648 where wrapping i32 gives INT_MIN. Take the
+            // width from the other operand instead.
+            if lHint.len == 0 {
+                match *l {
+                    Expr.IntLit(nlit, lsp) => {
+                        let rt = peekArgTy(*r, locs)
+                        if isIntLlType(llType(rt)) {
+                            lHint = rt
+                        }
+                    }
+                    _ => {
+                    }
+                }
+            }
             let lv = genExpr(cg, *l, locs, sigs, lHint)
             let rv = genExpr(cg, *r, locs, sigs, lv.ty.clone())
             let lvLl = llType(lv.ty)

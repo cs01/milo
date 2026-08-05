@@ -1054,6 +1054,27 @@ pub fn checkUnaryOp(ck: &mut Checker, op: &string, operand: &Expr, span: &Option
 
 // -- Function calls --
 
+// Is `name` bound in local scope to something callable (a closure/fn-typed
+// param or local)? Used to let a local shadow a same-named global function —
+// see checkCall's comment on the paramShadowsGlobal fixture.
+pub fn isLocalCallableFn(ck: &Checker, name: &string): bool {
+    match lookup(ck, name) {
+        Option.Some(v) => {
+            match v.ty {
+                TypeKind.TFn(params, ret) => {
+                    return true
+                }
+                _ => {
+                    return false
+                }
+            }
+        }
+        Option.None => {
+            return false
+        }
+    }
+}
+
 pub fn checkCall(ck: &mut Checker, func: &string, args: &Vec<Heap<Expr>>, typeArgs: &Vec<MiloType>, span: &Option<Span>): TypeKind {
     // Static method on an instantiated generic type: Type<Args>.method(...)
     var dotIdx: i64 = -1
@@ -1216,8 +1237,18 @@ pub fn checkCall(ck: &mut Checker, func: &string, args: &Vec<Heap<Expr>>, typeAr
         return aType
     }
 
-    // Regular function call
-    if !ck.functions.contains(func) {
+    // Regular function call. A callable in local scope wins over a global
+    // function of the same name — innermost binding, as everywhere else in the
+    // language. Globals used to be consulted first (this block only ran when
+    // `func` was NOT a global at all), so a parameter could never shadow one:
+    // a user defining `fn handler` broke std/http's *internal* `handler(ctx)`
+    // call against its own param, reporting a type error inside a file the
+    // user never opened (see the paramShadowsGlobal fixture). Widening entry
+    // into this block to "no global OR a local fn-typed var exists" lets the
+    // closure-variable check below win the race without disturbing anything
+    // else this block already handles (generic fns, sizeOf, replace, …) for
+    // the plain global-call case, which still skips this block entirely.
+    if !ck.functions.contains(func) || isLocalCallableFn(ck, func) {
         // Check if it's a closure variable
         let info = lookup(ck, func)
         match info {

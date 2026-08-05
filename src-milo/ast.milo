@@ -355,6 +355,15 @@ pub fn cloneOptType(o: &Option<MiloType>): Option<MiloType> {
     }
 }
 
+// Element type of an array MiloType — same name/typeArgs, array-ness stripped.
+// Struct-field registration uses this to build the inline `[N]elem` layout marker.
+pub fn arrayElemType(ty: &MiloType): MiloType {
+    var e = ty.clone()
+    e.isArray = false
+    e.arraySize = Option.None
+    return e
+}
+
 impl Clone for MiloType {
     fn clone(self: &Self): Self {
         var fnRet: Option<Heap<MiloType>> = Option.None

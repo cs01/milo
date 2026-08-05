@@ -146,6 +146,21 @@ pub struct Cgen {
     // method call. Empty = no hint (the ordinary unannotated-closure inference
     // path runs instead).
     closureRetHint: string,
+    // addresses of locals move-zeroed by genOwnedArg (Ident branch), within the
+    // CURRENT function only — reset at each genFn start alongside temp/label.
+    // A user `impl Drop` has no null/cap sentinel to guard on (unlike Vec/String/
+    // Heap, whose zeroed state IS "nothing to free"), so without this a value
+    // moved into a Vec/call/push and then scope-dropped at its old slot's exit
+    // runs the user's drop() a second time — dropAccounting's viaLocal-push
+    // shape counted 5 phantom drops from exactly this. Address strings are safe
+    // to compare only because the checker enforces no-partial-move: a program
+    // that type-checks never reads/re-drops a local on a path where it wasn't
+    // ALSO moved on every path reaching that point.
+    movedLocalAddrs: Vec<string>,
+    // locs.len at the innermost active loop's body start — break/continue drop
+    // everything pushed since then (mirrors emitScopeDrops at a normal loop-body
+    // end), same idea as curBreakLbl/curContLbl. -1 outside any loop.
+    curLoopScopeLen: i64,
 }
 
 pub fn cgenNew(): Cgen {
@@ -196,7 +211,19 @@ pub fn cgenNew(): Cgen {
         forceMoveClosures: Vec.new(),
         closureParamHint: Vec.new(),
         closureRetHint: "",
+        movedLocalAddrs: Vec.new(),
+        curLoopScopeLen: -1,
     }
+}
+
+// Has this address been recorded as move-zeroed (this function only)?
+pub fn addrWasMoved(cg: &Cgen, addr: &string): bool {
+    for i in 0..cg.movedLocalAddrs.len {
+        if cg.movedLocalAddrs[i] == addr {
+            return true
+        }
+    }
+    return false
 }
 
 // -- Helpers --
@@ -273,9 +300,42 @@ pub fn ensureFree(cg: &mut Cgen) {
     }
 }
 
+// -- Inline fixed-size array (struct FIELDS only — see astTypeStr) --
+//
+// A struct field of array type `[T; N]` lays out as a real LLVM `[N x T]`
+// blob inline in the struct (so sizeOf/offsetOf match C). Locals/params of
+// array type still lower onto the %Vec heap runtime (astTypeStr) — this
+// marker exists ONLY on struct-field type strings, built at struct
+// registration time (emit.milo). Encoding: "[" N "]" elemTyStr, e.g. "[3]i32".
+// Leading '[' cannot collide with any other type-string prefix in this file.
+pub fn isInlineArrTy(t: &string): bool {
+    return t.len > 0 && t[0] == 91 // '['
+}
+
+pub fn inlineArrLen(t: &string): i64 {
+    var i = 1
+    var n: i64 = 0
+    while i < t.len && t[i] != 93 { // ']'
+        n = n * 10 + (t[i] - 48) as i64
+        i = i + 1
+    }
+    return n
+}
+
+pub fn inlineArrElem(t: &string): string {
+    var i = 1
+    while i < t.len && t[i] != 93 { // ']'
+        i = i + 1
+    }
+    return t[i + 1..t.len].clone()
+}
+
 // -- LLVM type mapping --
 
 pub fn llType(t: &string): string {
+    if isInlineArrTy(t) {
+        return "[" + inlineArrLen(t).toString() + " x " + llType(inlineArrElem(t)) + "]"
+    }
     if t == "i1" {
         return "i1"
     }
@@ -386,6 +446,11 @@ pub fn llTypeBytes(ll: &string): i64 {
 // same inter-field padding LLVM does. Structs align to their widest field; enums
 // have an i64-array payload so align 8; scalars per their width.
 pub fn alignOf(cg: &Cgen, pt: &string): i64 {
+    // Array alignment == element alignment (C/LLVM: `[N x T]` has no extra
+    // alignment beyond T's own).
+    if isInlineArrTy(pt) {
+        return alignOf(cg, inlineArrElem(pt))
+    }
     let ll = llType(pt)
     if ll == "i1" || ll == "i8" {
         return 1
@@ -426,6 +491,11 @@ pub fn alignOf(cg: &Cgen, pt: &string): i64 {
 // sizes undersizes any struct with mixed alignment (e.g. MiloType's i1s before an
 // 8-aligned field), which overflows the enum payload slot and reads undef at -O2.
 pub fn payloadBytes(cg: &Cgen, pt: &string): i64 {
+    // Inline array: N contiguous elements, each padded to its own alignment
+    // already (elements are never individually padded beyond that in C/LLVM).
+    if isInlineArrTy(pt) {
+        return inlineArrLen(pt) * payloadBytes(cg, inlineArrElem(pt))
+    }
     let ll = llType(pt)
     if ll != "%String" && ll != "%Vec" && ll != "%HashMap" && ll.len > 0 && ll[0] == 37 {
         let raw = stripPercent(pt)

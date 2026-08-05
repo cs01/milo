@@ -9,7 +9,8 @@ from "src-milo/codegen/types.milo" import {
     nextTemp, nextLabel, emit, emitG, emitLabel, llType, stripPercent, resolveTyStr, ensureMalloc,
     findLocal, hasLocal, genLoad, isVecTy, unwrapVec,
     isHashMapTy, hashMapKeyTy, hashMapValTy, hmEntryTy,
-    lookupFieldIndex, lookupFieldType, lookupVariantTag, lookupVariantPayload, lookupFnRet
+    lookupFieldIndex, lookupFieldType, lookupVariantTag, lookupVariantPayload, lookupFnRet,
+    isInlineArrTy, inlineArrElem, addrWasMoved
 }
 from "src-milo/codegen/expr.milo" import {
     genExpr, genLvalue, variantStructTy, genOptionWrapIfNeeded, genInterfaceCoerceIfNeeded, genOwnedArg
@@ -178,6 +179,19 @@ pub fn genAssign(cg: &mut Cgen, target: &Expr, value: &Expr, locs: &mut Vec<Loca
                 emit(cg, "  " + slot + " = getelementptr " + elemLl + ", ptr " + base + ", i64 " + i64v + "\n")
                 let v = genExpr(cg, value, locs, sigs, elemTy)
                 emit(cg, "  store " + llType(v.ty) + " " + v.v + ", ptr " + slot + "\n")
+            } else if isInlineArrTy(lv.ty) {
+                // Inline struct-field array: lv.v is already the field's
+                // address (genLvalue GEP'd into the enclosing struct) — index
+                // it directly, no %Vec data ptr to extract.
+                let elemTy = inlineArrElem(lv.ty)
+                let elemLl = llType(elemTy)
+                let arrLl = llType(lv.ty)
+                let iv = genExpr(cg, *idx, locs, sigs, "i64")
+                let i64v = widenToI64(cg, iv)
+                let slot = nextTemp(cg)
+                emit(cg, "  " + slot + " = getelementptr " + arrLl + ", ptr " + lv.v + ", i32 0, i64 " + i64v + "\n")
+                let v = genOwnedArg(cg, value, elemTy, locs, sigs)
+                emit(cg, "  store " + llType(v.ty) + " " + v.v + ", ptr " + slot + "\n")
             } else {
                 eprint("codegen: cannot index-assign type " + lv.ty.clone())
                 exit(1)
@@ -196,6 +210,7 @@ pub fn genWhile(cg: &mut Cgen, cond: &Expr, body: &Vec<Heap<Stmt>>, locs: &mut V
     let endLbl = nextLabel(cg, "wend")
     let savedBreak = cg.curBreakLbl.clone()
     let savedCont = cg.curContLbl.clone()
+    let savedLoopScopeLen = cg.curLoopScopeLen
     cg.curBreakLbl = endLbl.clone()
     cg.curContLbl = condLbl.clone()
     emit(cg, "  br label %" + condLbl + "\n")
@@ -207,6 +222,7 @@ pub fn genWhile(cg: &mut Cgen, cond: &Expr, body: &Vec<Heap<Stmt>>, locs: &mut V
     // Same block scope as an if-branch, and doubly important in a loop: without it a
     // value declared in the body accumulates one un-dropped alloca per iteration.
     let bodyPreLen = locs.len
+    cg.curLoopScopeLen = bodyPreLen
     for bi in 0..body.len {
         if genStmt(cg, *body[bi], locs, sigs, retTy) {
             bodyTerm = true
@@ -224,6 +240,7 @@ pub fn genWhile(cg: &mut Cgen, cond: &Expr, body: &Vec<Heap<Stmt>>, locs: &mut V
     emit(cg, endLbl + ":\n")
     cg.curBreakLbl = savedBreak
     cg.curContLbl = savedCont
+    cg.curLoopScopeLen = savedLoopScopeLen
 }
 
 // -- For-in loops (M3a): range, Vec, string bytes --
@@ -312,6 +329,14 @@ pub fn genForIn(cg: &mut Cgen, varName: &string, varName2: &Option<string>, iter
     let endLbl = nextLabel(cg, "fend")
     let savedBreak = cg.curBreakLbl.clone()
     let savedCont = cg.curContLbl.clone()
+    let savedLoopScopeLen = cg.curLoopScopeLen
+    // for-in doesn't scope-drop its body at all yet (a separate, pre-existing
+    // gap — the loop-bound var is a borrow/copy, but a body-declared droppable
+    // local still leaks here every iteration). -1 keeps break/continue from
+    // guessing at a scope length this loop kind doesn't track, rather than
+    // reusing a stale value from an enclosing while and dropping the wrong
+    // locals on a nested break.
+    cg.curLoopScopeLen = -1
     cg.curBreakLbl = endLbl.clone()
     // continue must run the increment, unlike while where it re-tests directly
     cg.curContLbl = stepLbl.clone()
@@ -412,6 +437,7 @@ pub fn genForIn(cg: &mut Cgen, varName: &string, varName2: &Option<string>, iter
                 emitLabel(cg, endLbl)
                 cg.curBreakLbl = savedBreak
                 cg.curContLbl = savedCont
+                cg.curLoopScopeLen = savedLoopScopeLen
                 return
             }
             // iterator protocol: a struct with `Type$next(&mut Self): Option<T>` —
@@ -474,6 +500,7 @@ pub fn genForIn(cg: &mut Cgen, varName: &string, varName2: &Option<string>, iter
                 emitLabel(cg, endLbl)
                 cg.curBreakLbl = savedBreak
                 cg.curContLbl = savedCont
+                cg.curLoopScopeLen = savedLoopScopeLen
                 return
             }
             if isHashMapTy(obj.ty) {
@@ -488,6 +515,7 @@ pub fn genForIn(cg: &mut Cgen, varName: &string, varName2: &Option<string>, iter
                 emit(cg, endLbl + ":\n")
                 cg.curBreakLbl = savedBreak
                 cg.curContLbl = savedCont
+                cg.curLoopScopeLen = savedLoopScopeLen
                 return
             }
             var elemTy = "u8"
@@ -572,6 +600,7 @@ pub fn genForIn(cg: &mut Cgen, varName: &string, varName2: &Option<string>, iter
     emit(cg, endLbl + ":\n")
     cg.curBreakLbl = savedBreak
     cg.curContLbl = savedCont
+    cg.curLoopScopeLen = savedLoopScopeLen
 }
 
 // -- If statement --
@@ -940,6 +969,14 @@ pub fn genMatch(cg: &mut Cgen, subject: &Expr, arms: &Vec<MatchArm>, locs: &mut 
                 armTerm = true
             }
         }
+        // A payload binding (`Result.Ok(t) => { out = t.id }`) is arm-scoped: it
+        // dies at the arm's end, same as any other block. A terminated arm
+        // (return/break/…) already dropped its own scope on the way out
+        // (Stmt.Return walks all enclosing locals) — dropping again here would
+        // double-count.
+        if !armTerm {
+            emitScopeDrops(cg, locs, locsPreLen, "")
+        }
         // Pop bindings
         while locs.len > locsPreLen {
             let _ = locs.pop()
@@ -972,6 +1009,13 @@ pub fn emitScopeDrops(cg: &mut Cgen, locs: &Vec<Local>, fromLen: i64, skipName: 
             continue
         }
         if locs[i].name == skipName {
+            continue
+        }
+        // Already moved out (push/call/reassign zeroed this slot) — the user's
+        // drop() must not run twice on a value that no longer lives here. Plain
+        // structs have no null/cap sentinel of their own to catch this, unlike
+        // Vec/String/Heap.
+        if addrWasMoved(cg, locs[i].addr) {
             continue
         }
         let dropFn = stripPercent(locs[i].ty) + "$Drop$drop"
@@ -1116,6 +1160,12 @@ pub fn genStmt(cg: &mut Cgen, s: &Stmt, locs: &mut Vec<Local>, sigs: &Vec<CgFnSi
         }
         Stmt.BreakStmt(span) => {
             if cg.curBreakLbl.len > 0 {
+                // Leaving the loop body early still owns whatever it declared —
+                // same locals a normal iteration-end would drop (loopBreak in
+                // dropAccounting: the live `t` at the break point was leaking).
+                if cg.curLoopScopeLen >= 0 {
+                    emitScopeDrops(cg, locs, cg.curLoopScopeLen, "")
+                }
                 emit(cg, "  br label %" + cg.curBreakLbl + "\n")
                 let after = nextLabel(cg, "afterBreak")
                 emit(cg, after + ":\n")
@@ -1124,6 +1174,11 @@ pub fn genStmt(cg: &mut Cgen, s: &Stmt, locs: &mut Vec<Local>, sigs: &Vec<CgFnSi
         }
         Stmt.ContinueStmt(span) => {
             if cg.curContLbl.len > 0 {
+                // Same as break above: ending this iteration early still drops
+                // whatever it declared, same as reaching the bottom would.
+                if cg.curLoopScopeLen >= 0 {
+                    emitScopeDrops(cg, locs, cg.curLoopScopeLen, "")
+                }
                 emit(cg, "  br label %" + cg.curContLbl + "\n")
                 let after = nextLabel(cg, "afterCont")
                 emit(cg, after + ":\n")

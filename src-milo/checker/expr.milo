@@ -674,6 +674,15 @@ pub fn isConstIntExpr(e: &Expr): bool {
             }
             return false
         }
+        // `if c { 16 } else { 8 }` has no intrinsic width either, same as a bare
+        // literal — needed so `let u: u8 = if c {200} else {12}` coerces instead
+        // of reporting a bogus u8-vs-i64 mismatch against the whole if-expression
+        // (codegen already threads the outer hint into both arms unconditionally;
+        // only the checker was refusing to call this const). Recurses through an
+        // `else if` chain since its else-arm is itself an Expr.IfExpr.
+        Expr.IfExpr(cond, thenE, elseE, span) => {
+            return isConstIntExpr(*thenE) && isConstIntExpr(*elseE)
+        }
         _ => {
             return false
         }
@@ -1273,6 +1282,16 @@ pub fn checkCall(ck: &mut Checker, func: &string, args: &Vec<Heap<Expr>>, typeAr
                                     _ => {
                                     }
                                 }
+                            }
+                            // A bare int literal argument defaults to i64 (Expr.IntLit
+                            // always returns tyI64 — there is no hint-threading into it
+                            // the way a struct field or let-binding gets via ck.expectedType),
+                            // so calling an `(i32) => i32` closure with a plain `3` failed
+                            // here even though every other call site (fn params, struct
+                            // fields, let bindings) accepts the same literal via
+                            // intCoercible. Same fallback, applied here too.
+                            if !pMatch && intCoercible(params[i], argType, *args[i]) {
+                                pMatch = true
                             }
                             if !pMatch {
                                 error(ck, "closure argument " + (i + 1).toString() + ": expected " + typeName(params[i]) + ", got " + typeName(argType), cloneSpan(span))

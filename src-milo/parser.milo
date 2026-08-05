@@ -21,11 +21,15 @@ pub struct Parser {
     // for. `let P = E else {}` becomes three ordinary statements, and parseStmt can only
     // hand back one — parseStmts drains this after each call.
     pending: Vec<Heap<Stmt>>,
+    // Bumped each time `for .. in ..codePoints()` fires, both to mint unique cursor/
+    // decoded-value names (so nested loops can't collide) and to gate the implicit
+    // `std/unicode` import — only paid for when the construct is actually used.
+    codePointLoopCounter: i64,
 }
 
 pub fn newParser(tokens: Vec<Token>): Parser {
     return Parser {
-        tokens: tokens, pos: 0, noStructLit: false, pending: Vec.new()
+        tokens: tokens, pos: 0, noStructLit: false, pending: Vec.new(), codePointLoopCounter: 0
     }
 }
 
@@ -791,7 +795,114 @@ pub fn parseFor(p: &mut Parser): Stmt {
     expect(p, TokKind.LBrace)
     let body = parseStmts(p)
     expect(p, TokKind.RBrace)
+    let cpSubject = asCodePointsSubject(*iterable)
+    match cpSubject {
+        Option.Some(subj) => {
+            return desugarCodePointsLoop(p, varName, varName2, subj, body, s)
+        }
+        Option.None => {
+        }
+    }
     return Stmt.ForInStmt(varName, varName2, iterable, body, s)
+}
+
+// `for cp in EXPR.codePoints() { .. }` is the only shape this desugar fires on —
+// returns the receiver of a zero-arg `.codePoints()` call, or None otherwise.
+pub fn asCodePointsSubject(e: &Expr): Option<Expr> {
+    match e {
+        Expr.MethodCall(obj, m, a, sp) => {
+            if m == "codePoints" && a.len == 0 {
+                return Option.Some((*obj).clone())
+            }
+            return Option.None
+        }
+        _ => {
+            return Option.None
+        }
+    }
+}
+
+// A place expression is read in situ; anything else is a temporary that must be
+// bound once, or `.len` and each decode would re-evaluate it (and a borrow could
+// not be bound to a local at all).
+pub fn isPlaceExpr(e: &Expr): bool {
+    match e {
+        Expr.Ident(n, sp) => {
+            return true
+        }
+        Expr.FieldAccess(o, f, sp) => {
+            return true
+        }
+        Expr.IndexAccess(o, i, sp) => {
+            return true
+        }
+        _ => {
+            return false
+        }
+    }
+}
+
+// `for cp in s.codePoints() { .. }` -> a byte-cursor while loop over
+// decodeCodepoint (std/unicode). Iterating a string directly yields BYTES (the
+// right default for scanning ASCII delimiters); this form yields decoded
+// codepoints without materializing a Vec<i32> — no more expensive to write than
+// the byte shortcut. Mirrors src/parser.ts desugarCodePointsLoop.
+//
+// Desugared here rather than in the checker because `for` has no iterator
+// protocol to hook — every iterable shape is hardcoded per builtin type. The
+// cost is that `codePoints` is effectively reserved as a for-in iterable method
+// name: a user type defining one gets this rewrite instead.
+//
+// Wrapped in `if true { .. }` (there is no bare-block statement in milo0's AST)
+// so the cursor and any subject temporary stay scoped to the loop and cannot
+// leak into the enclosing block.
+pub fn desugarCodePointsLoop(p: &mut Parser, varName: string, varName2: Option<string>, subject: Expr, body: Vec<Heap<Stmt>>, s: Option<Span>): Stmt {
+    p.codePointLoopCounter = p.codePointLoopCounter + 1
+    let uid = p.codePointLoopCounter
+    let cursor = "__cpAt" + uid.toString()
+    let decoded = "__cp" + uid.toString()
+
+    var pre: Vec<Heap<Stmt>> = Vec.new()
+    var src = subject.clone()
+    if !isPlaceExpr(subject) {
+        let tmp = "__cpSrc" + uid.toString()
+        pre.push(Heap(Stmt.LetDecl(tmp.clone(), Option.None, Heap(subject), cloneSpan(s))))
+        src = Expr.Ident(tmp, cloneSpan(s))
+    }
+    pre.push(Heap(Stmt.VarDecl(cursor.clone(), Option.Some(simpleType("i64")), Heap(Expr.IntLit(0, cloneSpan(s))), cloneSpan(s))))
+
+    var loopBody: Vec<Heap<Stmt>> = Vec.new()
+    var decodeArgs: Vec<Heap<Expr>> = Vec.new()
+    decodeArgs.push(Heap(src.clone()))
+    decodeArgs.push(Heap(Expr.Ident(cursor.clone(), cloneSpan(s))))
+    var noTypeArgs: Vec<MiloType> = Vec.new()
+    loopBody.push(Heap(Stmt.LetDecl(decoded.clone(), Option.None, Heap(Expr.Call("decodeCodepoint", decodeArgs, noTypeArgs, cloneSpan(s))), cloneSpan(s))))
+
+    // The index binding is the offset of the codepoint just decoded, so it must
+    // be taken BEFORE the cursor advances.
+    match varName2 {
+        Option.Some(v2) => {
+            loopBody.push(Heap(Stmt.LetDecl(varName.clone(), Option.None, Heap(Expr.Ident(cursor.clone(), cloneSpan(s))), cloneSpan(s))))
+            loopBody.push(Heap(Stmt.LetDecl(v2, Option.None, Heap(Expr.FieldAccess(Heap(Expr.Ident(decoded.clone(), cloneSpan(s))), "value", cloneSpan(s))), cloneSpan(s))))
+        }
+        Option.None => {
+            loopBody.push(Heap(Stmt.LetDecl(varName.clone(), Option.None, Heap(Expr.FieldAccess(Heap(Expr.Ident(decoded.clone(), cloneSpan(s))), "value", cloneSpan(s))), cloneSpan(s))))
+        }
+    }
+
+    // Advance BEFORE the body: a `continue` in the body would otherwise skip the
+    // increment and spin forever.
+    let advance = Expr.BinOp("+", Heap(Expr.Ident(cursor.clone(), cloneSpan(s))), Heap(Expr.FieldAccess(Heap(Expr.Ident(decoded.clone(), cloneSpan(s))), "size", cloneSpan(s))), cloneSpan(s))
+    loopBody.push(Heap(Stmt.Assign(Heap(Expr.Ident(cursor.clone(), cloneSpan(s))), Heap(advance), cloneSpan(s))))
+
+    for i in 0..body.len {
+        loopBody.push(Heap((*body[i]).clone()))
+    }
+
+    let cond = Expr.BinOp("<", Heap(Expr.Ident(cursor.clone(), cloneSpan(s))), Heap(Expr.FieldAccess(Heap(src.clone()), "len", cloneSpan(s))), cloneSpan(s))
+    pre.push(Heap(Stmt.WhileStmt(Heap(cond), loopBody, cloneSpan(s))))
+
+    return Stmt.IfStmt(Heap(Expr.BoolLit(true, cloneSpan(s))), pre, Option.None, cloneSpan(s))
 }
 
 pub fn parseMatch(p: &mut Parser): Stmt {
@@ -1658,6 +1769,27 @@ pub fn parse(p: &mut Parser): Program {
         } else {
             // Skip unexpected token
             advance(p)
+        }
+    }
+
+    // Injected only when a `for .. in ..codePoints()` desugar actually fired —
+    // paying the parse/check cost of std/unicode on every module would be wasted
+    // for the vast majority that never use the construct.
+    if p.codePointLoopCounter > 0 {
+        var hasUnicodeImport = false
+        for i in 0..imports.len {
+            if imports[i].path == "std/unicode" {
+                hasUnicodeImport = true
+            }
+        }
+        if !hasUnicodeImport {
+            var unicodeNames: Vec<string> = Vec.new()
+            unicodeNames.push("CodePoint")
+            unicodeNames.push("decodeCodepoint")
+            imports.push(ImportDecl {
+                path: "std/unicode", names: Option.Some(unicodeNames), span: Option.None
+            }
+            )
         }
     }
 

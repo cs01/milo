@@ -2598,8 +2598,8 @@ pub fn checkMethodCall(ck: &mut Checker, obj: &Expr, method: &string, args: &Vec
         }
         return tyString()
     }
-    // x.checkedAdd/Sub/Mul(y) → Option<T>, None on overflow
-    if isInteger(objType) && (method == "checkedAdd" || method == "checkedSub" || method == "checkedMul") {
+    // x.checkedAdd/Sub/Mul/Div/Rem(y) → Option<T>, None on overflow (or div-by-zero)
+    if isInteger(objType) && (method == "checkedAdd" || method == "checkedSub" || method == "checkedMul" || method == "checkedDiv" || method == "checkedRem") {
         if args.len != 1 {
             error(ck, "'" + method.clone() + "' expects 1 argument", cloneSpan(span))
         }
@@ -2618,6 +2618,37 @@ pub fn checkMethodCall(ck: &mut Checker, obj: &Expr, method: &string, args: &Vec
         }
         if args.len >= 1 {
             checkExpr(ck, *args[0])
+        }
+        return objType.clone()
+    }
+    // x.wrappingNeg() → T (same int type); x.checkedNeg() → Option<T>, None only at
+    // signed INT_MIN (no representable positive) or on any nonzero unsigned value.
+    if isInteger(objType) && method == "wrappingNeg" {
+        if args.len != 0 {
+            error(ck, "'wrappingNeg' takes no arguments", cloneSpan(span))
+        }
+        return objType.clone()
+    }
+    if isInteger(objType) && method == "checkedNeg" {
+        if args.len != 0 {
+            error(ck, "'checkedNeg' takes no arguments", cloneSpan(span))
+        }
+        var oargs: Vec<TypeKind> = Vec.new()
+        oargs.push(objType.clone())
+        let mangled = monomorphizeEnum(ck, "Option", oargs)
+        return TypeKind.TEnum(mangled)
+    }
+    // x.countOnes/leadingZeros/trailingZeros() → i64 — 0-arg, count fits any width
+    if isInteger(objType) && (method == "countOnes" || method == "leadingZeros" || method == "trailingZeros") {
+        if args.len != 0 {
+            error(ck, "'" + method.clone() + "' takes no arguments", cloneSpan(span))
+        }
+        return tyI64()
+    }
+    // x.reverseBits() → T (same int type)
+    if isInteger(objType) && method == "reverseBits" {
+        if args.len != 0 {
+            error(ck, "'reverseBits' takes no arguments", cloneSpan(span))
         }
         return objType.clone()
     }

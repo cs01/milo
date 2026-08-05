@@ -2498,6 +2498,158 @@ pub fn sMax(bits: i64): string {
     return "9223372036854775807"
 }
 
+// smallest signed value for a bit width, as a decimal string (-(2^(bits-1)))
+pub fn sMin(bits: i64): string {
+    if bits == 8 {
+        return "-128"
+    }
+    if bits == 16 {
+        return "-32768"
+    }
+    if bits == 32 {
+        return "-2147483648"
+    }
+    return "-9223372036854775808"
+}
+
+// x.checkedDiv/checkedRem(y) → Option<T>, None on divide-by-zero or (signed)
+// INT_MIN/-1 (no representable result). div/rem have no *.with.overflow intrinsic
+// and LLVM's sdiv/udiv/srem/urem TRAP on those inputs, so the divide itself must
+// run only on the branch that already proved it's safe.
+pub fn genCheckedDivRem(cg: &mut Cgen, obj: &Val, method: &string, av: &Val): Val {
+    let lt = llType(obj.ty)
+    var op = "div"
+    if method == "checkedRem" {
+        op = "rem"
+    }
+    let signed = !isUnsigned(obj.ty)
+    let bits = intBits(lt)
+
+    let zeroCmp = nextTemp(cg)
+    emit(cg, "  " + zeroCmp + " = icmp eq " + lt + " " + av.v + ", 0\n")
+    var flag = zeroCmp.clone()
+
+    if signed {
+        let isMin = nextTemp(cg)
+        emit(cg, "  " + isMin + " = icmp eq " + lt + " " + obj.v + ", " + sMin(bits) + "\n")
+        let isNeg1 = nextTemp(cg)
+        emit(cg, "  " + isNeg1 + " = icmp eq " + lt + " " + av.v + ", -1\n")
+        let ovf = nextTemp(cg)
+        emit(cg, "  " + ovf + " = and i1 " + isMin + ", " + isNeg1 + "\n")
+        let combined = nextTemp(cg)
+        emit(cg, "  " + combined + " = or i1 " + zeroCmp + ", " + ovf + "\n")
+        flag = combined
+    }
+
+    let optName = "Option_" + obj.ty.clone()
+    let optTy = "%" + optName.clone()
+    let slot = nextTemp(cg)
+    emit(cg, "  " + slot + " = alloca " + optTy + "\n")
+    let okLbl = nextLabel(cg, "chk.ok")
+    let ovLbl = nextLabel(cg, "chk.ov")
+    let doneLbl = nextLabel(cg, "chk.done")
+    emit(cg, "  br i1 " + flag + ", label %" + ovLbl + ", label %" + okLbl + "\n")
+
+    emitLabel(cg, okLbl)
+    var llvmOp = "udiv"
+    if signed {
+        llvmOp = "sdiv"
+    }
+    if op == "rem" {
+        llvmOp = "urem"
+        if signed {
+            llvmOp = "srem"
+        }
+    }
+    let val = nextTemp(cg)
+    emit(cg, "  " + val + " = " + llvmOp + " " + lt + " " + obj.v + ", " + av.v + "\n")
+    let someV = genWrapSome(cg, Val {
+        v: val, ty: obj.ty.clone()
+    }
+    , optName)
+    emit(cg, "  store " + optTy + " " + someV.v + ", ptr " + slot + "\n")
+    emit(cg, "  br label %" + doneLbl + "\n")
+
+    emitLabel(cg, ovLbl)
+    let noneTag = lookupVariantTag(cg, optName, "None")
+    let tp = nextTemp(cg)
+    emit(cg, "  " + tp + " = getelementptr " + optTy + ", ptr " + slot + ", i32 0, i32 0\n")
+    emit(cg, "  store i32 " + noneTag.toString() + ", ptr " + tp + "\n")
+    emit(cg, "  br label %" + doneLbl + "\n")
+
+    emitLabel(cg, doneLbl)
+    let r = nextTemp(cg)
+    emit(cg, "  " + r + " = load " + optTy + ", ptr " + slot + "\n")
+    return Val {
+        v: r, ty: optName
+    }
+}
+
+// x.countOnes/leadingZeros/trailingZeros() → i64 via llvm.ctpop/ctlz/cttz, zero-
+// extended to i64 (the count fits any width so the result type is fixed at i64
+// regardless of the receiver's). x.reverseBits() → llvm.bitreverse, same width.
+pub fn genBitIntrinsic(cg: &mut Cgen, obj: &Val, method: &string): Val {
+    let lt = llType(obj.ty)
+    if method == "reverseBits" {
+        let intr = "llvm.bitreverse." + lt
+        var declared = false
+        for i in 0..cg.emittedThunks.len {
+            if cg.emittedThunks[i] == intr {
+                declared = true
+            }
+        }
+        if !declared {
+            cg.emittedThunks.push(intr.clone())
+            emitG(cg, "declare " + lt + " @" + intr + "(" + lt + ")\n")
+        }
+        let r = nextTemp(cg)
+        emit(cg, "  " + r + " = call " + lt + " @" + intr + "(" + lt + " " + obj.v + ")\n")
+        return Val {
+            v: r, ty: obj.ty.clone()
+        }
+    }
+
+    var name = "ctpop"
+    if method == "leadingZeros" {
+        name = "ctlz"
+    }
+    if method == "trailingZeros" {
+        name = "cttz"
+    }
+    let intr = "llvm." + name + "." + lt
+    var declared = false
+    for i in 0..cg.emittedThunks.len {
+        if cg.emittedThunks[i] == intr {
+            declared = true
+        }
+    }
+    if !declared {
+        cg.emittedThunks.push(intr.clone())
+        if name == "ctpop" {
+            emitG(cg, "declare " + lt + " @" + intr + "(" + lt + ")\n")
+        } else {
+            // ctlz/cttz take an i1 "is-zero-poison" flag; false = defined for 0 (returns bit width)
+            emitG(cg, "declare " + lt + " @" + intr + "(" + lt + ", i1)\n")
+        }
+    }
+    let raw = nextTemp(cg)
+    if name == "ctpop" {
+        emit(cg, "  " + raw + " = call " + lt + " @" + intr + "(" + lt + " " + obj.v + ")\n")
+    } else {
+        emit(cg, "  " + raw + " = call " + lt + " @" + intr + "(" + lt + " " + obj.v + ", i1 false)\n")
+    }
+    if lt == "i64" {
+        return Val {
+            v: raw, ty: "i64"
+        }
+    }
+    let wide = nextTemp(cg)
+    emit(cg, "  " + wide + " = zext " + lt + " " + raw + " to i64\n")
+    return Val {
+        v: wide, ty: "i64"
+    }
+}
+
 // Best-effort surface type of a simple payload arg WITHOUT emitting IR — used to
 // disambiguate which monomorphization of a generic enum literal to build.
 pub fn peekArgTy(e: &Expr, locs: &Vec<Local>): string {
@@ -4688,9 +4840,30 @@ pub fn genMethodCall(cg: &mut Cgen, object: &Expr, method: &string, args: &Vec<H
         let av = genExpr(cg, *args[0], locs, sigs, obj.ty.clone())
         return genCheckedArith(cg, obj, method, av)
     }
+    if intBits(objTyLl) > 0 && (method == "checkedDiv" || method == "checkedRem") {
+        let av = genExpr(cg, *args[0], locs, sigs, obj.ty.clone())
+        return genCheckedDivRem(cg, obj, method, av)
+    }
     if intBits(objTyLl) > 0 && (method == "wrappingAdd" || method == "wrappingSub" || method == "wrappingMul" || method == "saturatingAdd" || method == "saturatingSub" || method == "saturatingMul") {
         let av = genExpr(cg, *args[0], locs, sigs, obj.ty.clone())
         return genWrapSatArith(cg, obj, method, av)
+    }
+    // x.wrappingNeg() / x.checkedNeg() → wrapping/checked sub(0, x); reuses the
+    // existing sub codegen with a synthesized zero on the left (mirrors src/lower.ts).
+    if intBits(objTyLl) > 0 && method == "wrappingNeg" {
+        let zero = Val {
+            v: "0", ty: obj.ty.clone()
+        }
+        return genWrapSatArith(cg, zero, "wrappingSub", obj)
+    }
+    if intBits(objTyLl) > 0 && method == "checkedNeg" {
+        let zero = Val {
+            v: "0", ty: obj.ty.clone()
+        }
+        return genCheckedArith(cg, zero, "checkedSub", obj)
+    }
+    if intBits(objTyLl) > 0 && (method == "countOnes" || method == "leadingZeros" || method == "trailingZeros" || method == "reverseBits") {
+        return genBitIntrinsic(cg, obj, method)
     }
     if objTyLl == "i1" && method == "toString" {
         let t = genStringLit(cg, "true")

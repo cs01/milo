@@ -359,6 +359,16 @@ pub fn substExpr(e: &Expr, tps: &Vec<string>, tas: &Vec<TypeKind>): Expr {
         Expr.IfExpr(cond, thenE, elseE, span) => {
             return Expr.IfExpr(Heap(substExpr(*cond, tps, tas)), Heap(substExpr(*thenE, tps, tas)), Heap(substExpr(*elseE, tps, tas)), cloneSpan(span))
         }
+        Expr.MatchExpr(subject, arms, span) => {
+            var as2: Vec<MatchArm> = Vec.new()
+            for i in 0..arms.len {
+                as2.push(MatchArm {
+                    pattern: arms[i].pattern.clone(), body: substStmts(arms[i].body, tps, tas)
+                }
+                )
+            }
+            return Expr.MatchExpr(Heap(substExpr(*subject, tps, tas)), as2, cloneSpan(span))
+        }
         Expr.IntLit(v, span) => {
             return Expr.IntLit(v, cloneSpan(span))
         }

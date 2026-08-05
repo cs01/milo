@@ -18,7 +18,7 @@ from "src-milo/codegen/types.milo" import {
     isInlineArrTy, inlineArrLen, inlineArrElem
 }
 from "src-milo/codegen/stmt.milo" import {
-    genClosure, genClosureCall, widenToI64
+    genClosure, genClosureCall, widenToI64, genMatch, MatchGen
 }
 from "src-milo/codegen/drops.milo" import {
     cgNeedsDrop, zeroStore, emitDropValue
@@ -5125,10 +5125,66 @@ pub fn genCall(cg: &mut Cgen, name: &string, args: &Vec<Heap<Expr>>, typeArgs: &
         }
     }
 
+    // replace(place, value): move `value` into place, return the previous occupant.
+    // The checker enforces the move/borrow rules; codegen is a plain load-then-store.
+    if name == "replace" {
+        let rlv = genLvalue(cg, *args[0], locs, sigs)
+        let rll = llType(rlv.ty)
+        let rold = nextTemp(cg)
+        emit(cg, "  " + rold + " = load " + rll + ", ptr " + rlv.v + "\n")
+        let rnew = genExpr(cg, *args[1], locs, sigs, rlv.ty.clone())
+        emit(cg, "  store " + rll + " " + rnew.v + ", ptr " + rlv.v + "\n")
+        return Val {
+            v: rold, ty: rlv.ty
+        }
+    }
+    // swap(a, b): exchange the contents of two places of the same type.
+    if name == "swap" {
+        let slva = genLvalue(cg, *args[0], locs, sigs)
+        let slvb = genLvalue(cg, *args[1], locs, sigs)
+        let sll = llType(slva.ty)
+        let sva = nextTemp(cg)
+        emit(cg, "  " + sva + " = load " + sll + ", ptr " + slva.v + "\n")
+        let svb = nextTemp(cg)
+        emit(cg, "  " + svb + " = load " + sll + ", ptr " + slvb.v + "\n")
+        emit(cg, "  store " + sll + " " + svb + ", ptr " + slva.v + "\n")
+        emit(cg, "  store " + sll + " " + sva + ", ptr " + slvb.v + "\n")
+        return Val {
+            v: "0", ty: "void"
+        }
+    }
     // _cstrToString(ptr): copy a NUL-terminated C string into an owned %String.
     if name == "_cstrToString" {
         let cstrp = genExpr(cg, *args[0], locs, sigs, "")
         return genCstrToString(cg, cstrp.v)
+    }
+    // _bytesToString(ptr, len): copy an explicit-length byte run into an owned
+    // %String (std/io's readAll — the length comes from a read count, not a NUL).
+    // Same layout as _cstrToString (len+1 with trailing NUL) so the result can
+    // still be handed to C without another copy.
+    if name == "_bytesToString" {
+        let btsp = genExpr(cg, *args[0], locs, sigs, "")
+        let btsl = genExpr(cg, *args[1], locs, sigs, "i64")
+        ensureStringTy(cg)
+        ensureMalloc(cg)
+        ensureMemcpy(cg)
+        let btscap = nextTemp(cg)
+        emit(cg, "  " + btscap + " = add i64 " + btsl.v + ", 1\n")
+        let btsbuf = nextTemp(cg)
+        emit(cg, "  " + btsbuf + " = call ptr @malloc(i64 " + btscap + ")\n")
+        emit(cg, "  call ptr @memcpy(ptr " + btsbuf + ", ptr " + btsp.v + ", i64 " + btsl.v + ")\n")
+        let btsnul = nextTemp(cg)
+        emit(cg, "  " + btsnul + " = getelementptr i8, ptr " + btsbuf + ", i64 " + btsl.v + "\n")
+        emit(cg, "  store i8 0, ptr " + btsnul + "\n")
+        let bts0 = nextTemp(cg)
+        emit(cg, "  " + bts0 + " = insertvalue %String zeroinitializer, ptr " + btsbuf + ", 0\n")
+        let bts1 = nextTemp(cg)
+        emit(cg, "  " + bts1 + " = insertvalue %String " + bts0 + ", i64 " + btsl.v + ", 1\n")
+        let bts2 = nextTemp(cg)
+        emit(cg, "  " + bts2 + " = insertvalue %String " + bts1 + ", i64 " + btscap + ", 2\n")
+        return Val {
+            v: bts2, ty: "string"
+        }
     }
     // Runtime-support builtins (mirror the TS oracle's intrinsics).
     if name == "_miloArgCount" {
@@ -6463,6 +6519,14 @@ pub fn genExpr(cg: &mut Cgen, e: &Expr, locs: &Vec<Local>, sigs: &Vec<CgFnSig>, 
             return Val {
                 v: r, ty: av.ty.clone()
             }
+        }
+        Expr.MatchExpr(subject, arms, span) => {
+            // cg.curRetTy is the enclosing function's return type — needed so a
+            // diverging arm's `return` statement (genStmt, reached through
+            // genArmBody) emits the right `ret <ty> …`, same as any other return.
+            let retTyStr = cg.curRetTy.clone()
+            let mg = genMatch(cg, *subject, arms, locs, sigs, retTyStr, true, hintTy)
+            return mg.val
         }
         Expr.ArrayLit(elems, span) => {
             return genArrayLit(cg, elems, locs, sigs, hintTy)

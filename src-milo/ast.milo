@@ -106,6 +106,10 @@ pub enum Expr {
     RangeExpr(Heap<Expr>, Heap<Expr>, Option<Span>),
     IsExpr(Heap<Expr>, Heap<Pattern>, Option<Span>),
     IfExpr(Heap<Expr>, Heap<Expr>, Heap<Expr>, Option<Span>),
+    // match in expression position — reuses MatchArm (bare `P => v` arms get
+    // wrapped in a one-statement ExprStmt body by the parser, so bodies here are
+    // uniformly Vec<Heap<Stmt>>, same shape as Stmt.MatchStmt).
+    MatchExpr(Heap<Expr>, Vec<MatchArm>, Option<Span>),
     // anonymous JSON object literal `{ key: value, … }` — serializes to a JSON
     // string (used by `ctx.json({...})`).
     JsonObject(Vec<StructLitField>, Option<Span>),
@@ -538,6 +542,13 @@ impl Clone for Expr {
             }
             Expr.IsExpr(subject, pattern, span) => {
                 return Expr.IsExpr(Heap((*subject).clone()), Heap((*pattern).clone()), cloneSpan(span))
+            }
+            Expr.MatchExpr(subject, arms, span) => {
+                var armsOut: Vec<MatchArm> = Vec.new()
+                for i in 0..arms.len {
+                    armsOut.push(arms[i].clone())
+                }
+                return Expr.MatchExpr(Heap((*subject).clone()), armsOut, cloneSpan(span))
             }
         }
     }

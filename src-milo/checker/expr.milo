@@ -20,7 +20,7 @@ from "src-milo/checker/traits.milo" import {
     resolveMethod
 }
 from "src-milo/checker/stmt.milo" import {
-    checkStmt
+    checkStmt, checkMatchExpr
 }
 
 // -- Move tracking --
@@ -236,10 +236,22 @@ pub fn checkExpr(ck: &mut Checker, expr: &Expr): TypeKind {
             }
             let thenType = checkExpr(ck, *thenE)
             let elseType = checkExpr(ck, *elseE)
-            if !typeEq(thenType, elseType) && !containsUnknown(thenType) && !containsUnknown(elseType) {
+            // A bare int literal on the ELSE side (`if c { flags() } else { 0 }`) has no
+            // intrinsic width — codegen already coerces it (genExpr's IfExpr passes the
+            // THEN branch's type down as elseE's hint), so the checker must accept it
+            // too instead of reporting a bogus i32-vs-i64 mismatch. Only this direction:
+            // codegen's phi always takes its type from thenE, so a literal on the THEN
+            // side with a concrete elseE would build a phi with a mismatched incoming
+            // value — that stays a hard error rather than silently miscompiling.
+            if !typeEq(thenType, elseType) && !containsUnknown(thenType) && !containsUnknown(elseType)
+            && !intCoercible(thenType, elseType, *elseE) {
                 error(ck, "if-expression branches disagree: " + typeName(thenType) + " vs " + typeName(elseType), cloneSpan(span))
             }
             return thenType
+        }
+        Expr.MatchExpr(subject, arms, span) => {
+            let fnRetType = ck.currentFnRetType.clone()
+            return checkMatchExpr(ck, *subject, arms, fnRetType, span)
         }
     }
 }
@@ -874,10 +886,60 @@ pub fn checkCall(ck: &mut Checker, func: &string, args: &Vec<Heap<Expr>>, typeAr
         if func == "zeroed" && typeArgs.len == 1 {
             return normalizeEnumNames(ck, typeFromAst(typeArgs[0]))
         }
+        // `replace(place, value)` / `swap(a, b)`: memory intrinsics whose bodies can't be
+        // written in safe Milo (they move a value out of a place and refill it). Gated on
+        // the name being otherwise unbound so a user fn of the same name wins. std/io's
+        // BufReader/BufWriter flush paths use `replace` to swap out an owned buffer
+        // without a temporary; every fixture importing std/io hit "undefined function".
+        if func == "replace" {
+            if args.len != 2 {
+                error(ck, "replace(place, value) takes exactly two arguments", cloneSpan(span))
+                return tyUnknown()
+            }
+            if !isRootMutable(ck, *args[0]) {
+                error(ck, "cannot replace through an immutable place", cloneSpan(span))
+            }
+            let placeTy = checkExpr(ck, *args[0])
+            let valTy = checkExpr(ck, *args[1])
+            if !typeEq(valTy, placeTy) && !typeEq(valTy, tyUnknown()) && !typeEq(placeTy, tyUnknown()) && !intCoercible(placeTy, valTy, *args[1]) {
+                error(ck, "replace: value type " + typeName(valTy) + " does not match place type " + typeName(placeTy), cloneSpan(span))
+            }
+            tryMove(ck, *args[1])
+            return placeTy
+        }
+        if func == "swap" {
+            if args.len != 2 {
+                error(ck, "swap(a, b) takes exactly two arguments", cloneSpan(span))
+                return tyVoid()
+            }
+            if !isRootMutable(ck, *args[0]) {
+                error(ck, "cannot swap through an immutable place", cloneSpan(span))
+            }
+            if !isRootMutable(ck, *args[1]) {
+                error(ck, "cannot swap through an immutable place", cloneSpan(span))
+            }
+            let aTy = checkExpr(ck, *args[0])
+            let bTy = checkExpr(ck, *args[1])
+            if !typeEq(aTy, bTy) && !typeEq(aTy, tyUnknown()) && !typeEq(bTy, tyUnknown()) {
+                error(ck, "swap: operands have different types " + typeName(aTy) + " and " + typeName(bTy), cloneSpan(span))
+            }
+            return tyVoid()
+        }
         // _cstrToString(ptr) — compiler builtin at the extern cstr boundary
         if func == "_cstrToString" {
             if args.len >= 1 {
                 checkExpr(ck, *args[0])
+            }
+            return tyString()
+        }
+        // _bytesToString(ptr, len) — compiler builtin, (*u8, i64) -> string. std/io's
+        // readAll uses it and then pipes the result straight into `result.pushStr(...)`,
+        // which hard-requires a string arg; falling through to the generic underscore
+        // fallback below (which returns unknown) failed that check on every fixture
+        // that transitively imports std/io.
+        if func == "_bytesToString" {
+            for arg in args {
+                checkExpr(ck, *arg)
             }
             return tyString()
         }
@@ -1371,11 +1433,36 @@ pub fn checkEnumLit(ck: &mut Checker, enumName: &string, variant: &string, args:
         if args.len != 2 {
             error(ck, "'Vec.filled' expects 2 arguments", cloneSpan(span))
         }
+        // Capture the enclosing expected element type (`let x: Vec<u8> = Vec.filled(n, 0)`)
+        // before checking arg 0 clobbers ck.expectedType. Without this, the fill-value
+        // literal's own type (always i64, see Expr.IntLit) becomes the Vec's element type,
+        // so `Vec<u8> = Vec.filled(n, 0)` reports a bogus Vec<u8>-vs-Vec<i64> mismatch —
+        // std/io's read-buffer allocation does exactly this, so the bug cascaded into
+        // every fixture that transitively imports std/io.
+        var expectedElem = tyUnknown()
+        var haveExpectedElem = false
+        match ck.expectedType {
+            Option.Some(et) => {
+                match et {
+                    TypeKind.TVec(inner) => {
+                        expectedElem = (*inner).clone()
+                        haveExpectedElem = true
+                    }
+                    _ => {
+                    }
+                }
+            }
+            Option.None => {
+            }
+        }
         if args.len >= 1 {
             checkExpr(ck, *args[0])
         }
         if args.len >= 2 {
             let elemT = checkExpr(ck, *args[1])
+            if haveExpectedElem && intCoercible(expectedElem, elemT, *args[1]) {
+                return TypeKind.TVec(Heap(expectedElem))
+            }
             return TypeKind.TVec(Heap(elemT))
         }
         return tyUnknown()

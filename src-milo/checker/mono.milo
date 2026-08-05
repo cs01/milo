@@ -13,7 +13,7 @@ from "src-milo/checker/types.milo" import {
 from "src-milo/checker/state.milo" import {
     Checker, FnSig, FnParam, StructInfo, CkStructField,
     EnumInfo, VariantInfo, error, normalizeEnumNames,
-    GenericFnInfo, GenericStructInfo, GenericEnumInfo, StructInst,
+    GenericFnInfo, GenericStructInfo, GenericEnumInfo, StructInst, hasAttr,
 }
 from "src-milo/checker/derive_json.milo" import {
     deriveJson
@@ -661,7 +661,7 @@ pub fn monomorphizeStruct(ck: &mut Checker, baseName: &string, typeArgs: &Vec<Ty
     // Register the (empty) mangled struct first so a field that references it
     // recursively resolves; fields are filled in below.
     ck.structs.insert(mangled.clone(), StructInfo {
-        fields: Vec.new(), baseName: baseName.clone()
+        fields: Vec.new(), baseName: baseName.clone(), noCopy: hasAttr(generic.decl.attributes, "noCopy")
     }
     )
     for fi in 0..generic.fields.len {
@@ -680,7 +680,7 @@ pub fn monomorphizeStruct(ck: &mut Checker, baseName: &string, typeArgs: &Vec<Ty
     }
 
     ck.structs.insert(mangled.clone(), StructInfo {
-        fields: fields, baseName: baseName.clone()
+        fields: fields, baseName: baseName.clone(), noCopy: hasAttr(generic.decl.attributes, "noCopy")
     }
     )
 

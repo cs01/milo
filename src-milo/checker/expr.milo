@@ -25,6 +25,10 @@ from "src-milo/checker/stmt.milo" import {
 from "src-milo/checker/borrow.milo" import {
     rootIdentName, errorIfFrozenRoot, freezePlace, freezeViewMethodSource,
     borrowArgOf, checkCallSiteExclusivity, BorrowArg, borrowDuringCallback, unfreezeName,
+    accessPath,
+}
+from "src-milo/checker/moves.milo" import {
+    fieldPathString, staticFieldPlace, markFieldMoved, movedFieldCovering, firstMovedField,
 }
 
 // -- Move tracking --
@@ -45,14 +49,41 @@ pub fn tryMove(ck: &mut Checker, expr: &Expr) {
         Expr.Ident(name, span) => {
             match lookup(ck, name) {
                 Option.Some(v) => {
+                    // Moving in an owned position through a borrow (`&T`, T non-Copy)
+                    // would shallow-copy the pointee — e.g. a String's heap buffer —
+                    // aliasing it with the real owner and double-freeing on drop.
+                    match v.ty.clone() {
+                        TypeKind.TRef(inner, mutable) => {
+                            if !isCopyCk(ck, *inner) {
+                                errorHint(ck, "cannot move the borrowed value out of '" + name.clone() + "'", "'" + name.clone() + "' is a reference — call .clone() to take an owned copy", cloneSpan(span))
+                                return
+                            }
+                        }
+                        _ => {
+                        }
+                    }
                     if isCopyCk(ck, v.ty) {
                         return
+                    }
+                    // Partial move: a field already left, so the binding sitting here
+                    // is no longer the whole value. Handing it on would pass a zeroed
+                    // field off as real data.
+                    match firstMovedField(ck, name) {
+                        Option.Some(partial) => {
+                            errorHint(ck, "cannot move '" + name.clone() + "' because '" + name.clone() + partial.clone() + "' was already moved out of it", "move the remaining fields individually, or clone '" + name.clone() + partial.clone() + "' at the point it was transferred so '" + name.clone() + "' stays whole", cloneSpan(span))
+                            return
+                        }
+                        Option.None => {
+                        }
                     }
                     setVarMoved(ck, name, true)
                 }
                 Option.None => {
                 }
             }
+        }
+        Expr.FieldAccess(obj, field, span) => {
+            tryMoveField(ck, expr, span)
         }
         Expr.IfExpr(cond, thenE, elseE, span) => {
             tryMove(ck, *thenE)
@@ -86,6 +117,195 @@ pub fn tryMove(ck: &mut Checker, expr: &Expr) {
     }
 }
 
+// Struct field-chain resolution: walks `root`+`fields` (a field-only place)
+// through struct definitions, returning the chain's final type together with
+// the name of the first Drop-implementing struct found strictly ABOVE the
+// final field (an ancestor container, never the field's own type) — the two
+// facts every field-move check needs, computed in one walk. This checker
+// doesn't cache expression types, so this replays the oracle's exprTypes
+// lookup on demand instead.
+pub struct FieldChainInfo {
+    finalType: TypeKind,
+    dropAncestor: Option<string>,
+}
+
+fn resolveFieldChain(ck: &Checker, root: &string, fields: &Vec<string>): Option<FieldChainInfo> {
+    var curType = tyUnknown()
+    match lookup(ck, root) {
+        Option.Some(v) => {
+            curType = deref(v.ty)
+        }
+        Option.None => {
+            return Option.None
+        }
+    }
+    var dropAncestor: Option<string> = Option.None
+    var i: i64 = 0
+    while i < fields.len {
+        match curType.clone() {
+            TypeKind.TStruct(sname) => {
+                match dropAncestor {
+                    Option.None => {
+                        if ck.dropImpls.contains(sname) {
+                            dropAncestor = Option.Some(sname.clone())
+                        }
+                    }
+                    _ => {
+                    }
+                }
+                if !ck.structs.contains(sname) {
+                    return Option.None
+                }
+                let info = ck.structs.get(sname)!
+                var found = false
+                for fi in 0..info.fields.len {
+                    if info.fields[fi].name == fields[i] {
+                        curType = info.fields[fi].ty.clone()
+                        found = true
+                    }
+                }
+                if !found {
+                    return Option.None
+                }
+            }
+            _ => {
+                return Option.None
+            }
+        }
+        i = i + 1
+    }
+    return Option.Some(FieldChainInfo {
+        finalType: curType, dropAncestor: dropAncestor
+    }
+    )
+}
+
+// Whether `e` (a move position) is a field-only place off a `&T`/`&mut T`
+// binding — and if so, reports "cannot move '<place>' out of the borrowed
+// '<root>'" (unless exempted) and returns true, so callers know not to fall
+// through to the owned-move path. A Copy field is exempt outright (nothing is
+// owned to transfer); a sortByKey key extractor is exempt too — it reads the
+// key to compare and never stores or drops it, so a field taken from its
+// borrowed receiver never actually aliases anything past the call. Every other
+// closure combinator (map, filter, ...) DOES retain what its closure returns,
+// so the exemption stays keyed to sortByKey alone rather than to closures in
+// general (tests/fixtures/sortByKeyString.milo; mapMoveFieldOutOfBorrow is the
+// negative fixture proving `.map` does NOT get it).
+fn fieldMoveOutOfBorrow(ck: &mut Checker, e: &Expr, span: &Option<Span>): bool {
+    match staticFieldPlace(e) {
+        Option.Some(p) => {
+            match lookup(ck, p.root) {
+                Option.Some(v) => {
+                    match v.ty.clone() {
+                        TypeKind.TRef(inner, mutable) => {
+                            match resolveFieldChain(ck, p.root, p.fields) {
+                                Option.Some(info) => {
+                                    if isCopyCk(ck, info.finalType) {
+                                        return false
+                                    }
+                                }
+                                Option.None => {
+                                    return false
+                                }
+                            }
+                            if ck.keyExtractorDepth > 0 {
+                                return true
+                            }
+                            let path = fieldPathString(p.fields)
+                            var swap = ""
+                            if mutable {
+                                swap = ", or 'replace(" + p.root.clone() + path.clone() + ", ...)' to take the field and leave something in its place"
+                            }
+                            errorHint(ck, "cannot move '" + p.root.clone() + path.clone() + "' out of the borrowed '" + p.root.clone() + "'", "'" + p.root.clone() + "' is a reference — call .clone() to take an owned copy" + swap, cloneSpan(span))
+                            return true
+                        }
+                        _ => {
+                            return false
+                        }
+                    }
+                }
+                Option.None => {
+                    return false
+                }
+            }
+        }
+        Option.None => {
+            return false
+        }
+    }
+}
+
+// The owned-root counterpart of fieldMoveOutOfBorrow: `e` is a field-only
+// place whose root is NOT a borrow, so the field really is transferred out. A
+// Drop impl on any container along the chain makes that illegal outright (its
+// destructor runs against the whole value); otherwise record which field left
+// so a later whole-value use, or a later move of the SAME field, is caught
+// (checkIdent / checkFieldMoveState below).
+fn tryMoveField(ck: &mut Checker, e: &Expr, span: &Option<Span>) {
+    if fieldMoveOutOfBorrow(ck, e, span) {
+        return
+    }
+    match staticFieldPlace(e) {
+        Option.Some(p) => {
+            match resolveFieldChain(ck, p.root, p.fields) {
+                Option.Some(info) => {
+                    if isCopyCk(ck, info.finalType) {
+                        return
+                    }
+                    let path = fieldPathString(p.fields)
+                    match info.dropAncestor {
+                        Option.Some(tyname) => {
+                            errorHint(ck, "cannot move '" + p.root.clone() + path.clone() + "' out of '" + tyname.clone() + "', which implements Drop", "a Drop impl runs against the whole value, so taking a field out of it would leave the destructor reading an empty one — clone the field, or consume the '" + tyname.clone() + "' whole", cloneSpan(span))
+                            return
+                        }
+                        Option.None => {
+                        }
+                    }
+                    markFieldMoved(ck, p.root, path)
+                }
+                Option.None => {
+                }
+            }
+        }
+        Option.None => {
+        }
+    }
+}
+
+// The field's own move state, the counterpart of the whole-variable `moved`
+// check on a plain Ident. Called from every field READ (checkFieldAccess);
+// suppressed while checking an assignment's own target — the field about to
+// be overwritten doesn't care whether it was already moved, and checkAssign
+// clears the place right after (ck.inAssignTargetDepth).
+fn checkFieldMoveState(ck: &mut Checker, obj: &Expr, field: &string, span: &Option<Span>) {
+    if ck.inAssignTargetDepth > 0 {
+        return
+    }
+    match accessPath(obj) {
+        Option.Some(op) => {
+            if op.tainted {
+                return
+            }
+            var fields = op.fields.clone()
+            fields.push(field.clone())
+            let path = fieldPathString(fields)
+            match movedFieldCovering(ck, op.root, path) {
+                Option.Some(gone) => {
+                    if gone == path {
+                        errorHint(ck, "use of moved value '" + op.root.clone() + path.clone() + "'", "ownership of '" + op.root.clone() + path.clone() + "' was transferred earlier — the field is empty now. Clone it at the point of transfer: '" + op.root.clone() + path.clone() + ".clone()'.", cloneSpan(span))
+                    } else {
+                        errorHint(ck, "use of moved value '" + op.root.clone() + path.clone() + "'", "'" + op.root.clone() + gone.clone() + "' was moved out earlier, which took '" + op.root.clone() + path.clone() + "' with it. Clone at the point of transfer: '" + op.root.clone() + gone.clone() + ".clone()'.", cloneSpan(span))
+                    }
+                }
+                Option.None => {
+                }
+            }
+        }
+        Option.None => {
+        }
+    }
+}
+
 // A `&T` local (T non-Copy) moved into an owned position would shallow-copy
 // the pointee — e.g. a string-view for-in loop variable is second-class and
 // second-class means "lives inside the loop that borrowed it, nowhere else":
@@ -112,6 +332,9 @@ pub fn errorIfMovingBorrowedNonCopy(ck: &mut Checker, expr: &Expr, span: &Option
                 Option.None => {
                 }
             }
+        }
+        Expr.FieldAccess(obj, field, sp) => {
+            let _ = fieldMoveOutOfBorrow(ck, expr, span)
         }
         Expr.IfExpr(cond, thenE, elseE, sp) => {
             errorIfMovingBorrowedNonCopy(ck, *thenE, span)
@@ -376,6 +599,21 @@ pub fn checkIdent(ck: &mut Checker, name: &string, span: &Option<Span>): TypeKin
             if v.moved {
                 error(ck, "use of moved variable '" + name.clone() + "'", cloneSpan(span))
                 return deref(v.ty)
+            }
+            // A use of the WHOLE value while one of its places is missing. Reading
+            // `p.b` after `p.a` left is fine — a different place — and that read
+            // reaches here with placeBaseDepth raised, because `p` is only the base
+            // of a narrower place there. Anything else names the value itself: an
+            // argument, a receiver, a return, a print — handing that on shows the
+            // zeroed field as if it were data.
+            if ck.placeBaseDepth == 0 {
+                match firstMovedField(ck, name) {
+                    Option.Some(gone) => {
+                        errorHint(ck, "'" + name.clone() + "' is incomplete: '" + name.clone() + gone.clone() + "' was moved out of it", "using '" + name.clone() + "' as a whole would show that field as empty — clone it at the point of transfer, or use the fields that are still there", cloneSpan(span))
+                    }
+                    Option.None => {
+                    }
+                }
             }
             return deref(v.ty)
         }
@@ -1456,7 +1694,12 @@ pub fn checkFieldAccess(ck: &mut Checker, obj: &Expr, field: &string, span: &Opt
     if fbits > 0 {
         return TypeKind.TFloat(fbits)
     }
+    // Checking `obj` here is checking the BASE of this place, not a whole-value
+    // use of it — `p.b` must not trip `p`'s "used incomplete" diagnostic just
+    // because some OTHER field of `p` was moved.
+    ck.placeBaseDepth = ck.placeBaseDepth + 1
     var objType = checkExpr(ck, obj)
+    ck.placeBaseDepth = ck.placeBaseDepth - 1
     // auto-deref references; and raw pointers (`p.x` on a *Struct), which is an
     // unsafe-gated deref-and-access
     match objType.clone() {
@@ -1482,6 +1725,9 @@ pub fn checkFieldAccess(ck: &mut Checker, obj: &Expr, field: &string, span: &Opt
             let info = ck.structs.get(name)!
             for i in 0..info.fields.len {
                 if info.fields[i].name == field {
+                    // The field's own move state — the counterpart of the whole-
+                    // variable `moved` check on a plain Ident.
+                    checkFieldMoveState(ck, obj, field, span)
                     return info.fields[i].ty.clone()
                 }
             }
@@ -1617,7 +1863,9 @@ pub fn checkArrayLit(ck: &mut Checker, elements: &Vec<Heap<Expr>>, span: &Option
 // -- Index access --
 
 pub fn checkIndexAccess(ck: &mut Checker, obj: &Expr, index: &Expr, span: &Option<Span>): TypeKind {
+    ck.placeBaseDepth = ck.placeBaseDepth + 1
     var objType = checkExpr(ck, obj)
+    ck.placeBaseDepth = ck.placeBaseDepth - 1
     match objType.clone() {
         TypeKind.TRef(inner, mutable) => {
             objType = inner.clone()
@@ -3363,7 +3611,12 @@ pub fn checkVecMethod(ck: &mut Checker, obj: &Expr, elem: &TypeKind, method: &st
         var fparams: Vec<TypeKind> = Vec.new()
         fparams.push(TypeKind.TRef(Heap(elem.clone()), false))
         ck.expectedType = Option.Some(TypeKind.TFn(fparams, Heap(tyUnknown())))
+        // sortByKey reads the key to compare and never stores or drops it, so a
+        // field taken from its borrowed receiver never actually aliases anything
+        // past the call — see fieldMoveOutOfBorrow's exemption.
+        ck.keyExtractorDepth = ck.keyExtractorDepth + 1
         let cbType = checkExpr(ck, *args[0])
+        ck.keyExtractorDepth = ck.keyExtractorDepth - 1
         ck.expectedType = Option.None
         match cbType.clone() {
             TypeKind.TFn(cp, cr) => {
@@ -3890,17 +4143,21 @@ pub fn checkStructMethod(ck: &mut Checker, obj: &Expr, structName: &string, meth
             }
             // A `self: &mut Self` method may mutate the receiver — same hazard
             // a mutating builtin (push, etc) already rejects on a frozen var.
+            // A `self: Self` method CONSUMES it — same as any other by-value move
+            // position (the free-function call path below already does this for
+            // its args). Missing this let a @noCopy handle's `.close()`/`.free()`
+            // be called twice: the receiver was never marked moved, so the second
+            // call's "use of moved variable" check never fired.
             if sig.params.len > 0 {
-                var selfIsMut = false
                 match sig.params[0].ty.clone() {
                     TypeKind.TRef(sinner, smut) => {
-                        selfIsMut = smut
+                        if smut {
+                            errorIfFrozenRoot(ck, obj, "call '" + method.clone() + "' on", span)
+                        }
                     }
                     _ => {
+                        tryMove(ck, obj)
                     }
-                }
-                if selfIsMut {
-                    errorIfFrozenRoot(ck, obj, "call '" + method.clone() + "' on", span)
                 }
             }
             var i: i64 = 0

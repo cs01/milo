@@ -432,6 +432,96 @@ pub fn externLoweredRet(cg: &Cgen, f: &Function): string {
 }
 
 // Emit a single function definition or extern declaration.
+// Move fixed-size allocas to the entry block. LLVM only reclaims stack at function
+// return, so an `alloca` emitted inside a loop body allocates AGAIN every iteration:
+// sha256 over a megabyte segfaulted at ~1500 iterations while 800 worked. 27 functions in
+// a std-using program had allocas outside entry, `sha256Bytes` alone 29 of them.
+//
+// Safe by construction: entry dominates every block, and only allocas with no operands
+// move. A dynamically-sized `alloca T, i64 %n` is left alone — %n need not be available
+// at entry.
+pub fn hoistAllocas(fnText: &string): string {
+    var lines: Vec<string> = Vec.new()
+    var cur = ""
+    for i in 0..fnText.len {
+        let c = fnText[i]
+        if c == 10 {
+            lines.push(cur.clone())
+            cur = ""
+        } else {
+            cur.push(c)
+        }
+    }
+    lines.push(cur.clone())
+
+    // Index of the entry label; allocas already at or before it stay put.
+    var entryIdx: i64 = -1
+    for i in 0..lines.len {
+        if entryIdx < 0 && lines[i].len > 1 && lines[i][lines[i].len - 1] == 58 && lines[i][0] != 32 {
+            entryIdx = i
+        }
+    }
+    if entryIdx < 0 {
+        return fnText.clone()
+    }
+
+    var moved: Vec<string> = Vec.new()
+    var kept: Vec<string> = Vec.new()
+    var blockIdx: i64 = -1
+    for i in 0..lines.len {
+        let l = lines[i].clone()
+        if l.len > 1 && l[l.len - 1] == 58 && l[0] != 32 {
+            blockIdx = i
+        }
+        var isHoistable = false
+        if blockIdx > entryIdx && l.len > 4 && l[0] == 32 {
+            // `  %name = alloca <type>` with nothing after the type is fixed-size.
+            var seenAlloca = false
+            var hasComma = false
+            var j: i64 = 0
+            while j + 6 < l.len {
+                if l[j] == 97 && l[j + 1] == 108 && l[j + 2] == 108 && l[j + 3] == 111 && l[j + 4] == 99 && l[j + 5] == 97 {
+                    seenAlloca = true
+                }
+                if seenAlloca && l[j] == 44 {
+                    hasComma = true
+                }
+                j = j + 1
+            }
+            if seenAlloca && !hasComma {
+                isHoistable = true
+            }
+        }
+        if isHoistable {
+            moved.push(l)
+        } else {
+            kept.push(l)
+        }
+    }
+    if moved.len == 0 {
+        return fnText.clone()
+    }
+
+    var out = ""
+    var placed = false
+    for i in 0..kept.len {
+        out = out + kept[i].clone()
+        out.push(10 as u8)
+        if !placed && kept[i].len > 1 && kept[i][kept[i].len - 1] == 58 && kept[i][0] != 32 {
+            for m in 0..moved.len {
+                out = out + moved[m].clone()
+                out.push(10 as u8)
+            }
+            placed = true
+        }
+    }
+    // Drop the trailing newline this rebuild added beyond the original.
+    if out.len > 0 {
+        out = out[0..out.len - 1].clone()
+    }
+    return out
+}
+
 pub fn genFn(cg: &mut Cgen, f: &Function, sigs: &Vec<CgFnSig>) {
     if f.isExtern {
         cg.externFns.insert(f.name.clone(), true)
@@ -571,6 +661,7 @@ pub fn genFn(cg: &mut Cgen, f: &Function, sigs: &Vec<CgFnSig>) {
         hdr = hdr + pLl + " %" + f.params[pi].name
     }
     hdr = hdr + ") {\n"
+    let fnBodyStart = cg.body.len
     emit(cg, hdr)
     emit(cg, "entry:\n")
     if isMain {
@@ -620,6 +711,9 @@ pub fn genFn(cg: &mut Cgen, f: &Function, sigs: &Vec<CgFnSig>) {
         }
     }
     emit(cg, "}\n\n")
+    let fnText = cg.body[fnBodyStart..cg.body.len].clone()
+    let hoisted = hoistAllocas(fnText)
+    cg.body = cg.body[0..fnBodyStart].clone() + hoisted
 }
 
 // Register structs, enums, functions in Cgen tables, then emit all functions.

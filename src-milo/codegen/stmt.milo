@@ -1398,7 +1398,10 @@ pub fn genStmt(cg: &mut Cgen, s: &Stmt, locs: &mut Vec<Local>, sigs: &Vec<CgFnSi
             var hintTy = ""
             match ty {
                 Option.Some(t) => {
-                    hintTy = astTypeStr(t)
+                    // resolveTyStr, not bare astTypeStr: an alias-typed annotation
+                    // (`let c: Count = 21`) must hint the ALIASED type (i64), or an
+                    // untyped literal RHS defaults to i32 and silently mis-sizes.
+                    hintTy = resolveTyStr(cg, astTypeStr(t))
                 }
                 Option.None => {
                     hintTy = vecNewHint(cg, name, *value)
@@ -1423,7 +1426,9 @@ pub fn genStmt(cg: &mut Cgen, s: &Stmt, locs: &mut Vec<Local>, sigs: &Vec<CgFnSi
             var hintTy = ""
             match ty {
                 Option.Some(t) => {
-                    hintTy = astTypeStr(t)
+                    // see the LetDecl arm above: alias annotations must hint their
+                    // resolved base type, not the bare alias name.
+                    hintTy = resolveTyStr(cg, astTypeStr(t))
                 }
                 Option.None => {
                     hintTy = vecNewHint(cg, name, *value)

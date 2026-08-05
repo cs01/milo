@@ -185,6 +185,12 @@ pub struct Cgen {
     // names of emitted `llvm.fptosi.sat.*`/`llvm.fptoui.sat.*` declares (dedup) —
     // one per distinct (op, toTy, fromTy) combo actually used, mirrors emittedThunks.
     declaredFpSat: Vec<string>,
+    // `type Name = <base>` aliases, name -> raw (unresolved) base MiloType. astTypeStr
+    // has no alias awareness (it works off the bare AST, same as the checker's own
+    // typeFromAst) — resolveTyStr is what expands a bare alias NAME to its base type
+    // string, mirroring checker's resolveAstType: the alias body is substituted, but
+    // any `*`/ptrDepth wrapper at the USE site is preserved around the substitution.
+    typeAliases: HashMap<string, MiloType>,
 }
 
 pub fn cgenNew(): Cgen {
@@ -242,6 +248,7 @@ pub fn cgenNew(): Cgen {
         movedLocalAddrs: Vec.new(),
         curLoopScopeLen: -1,
         declaredFpSat: Vec.new(),
+        typeAliases: HashMap.new(),
     }
 }
 
@@ -1009,6 +1016,29 @@ pub fn resolveTyStr(cg: &Cgen, s: &string): string {
         }
     }
     if lt <= 0 {
+        // Type alias: the ptr depth belongs to the USE site (`*Board`), not the
+        // alias body — strip the use site's stars, expand the bare name, then
+        // reapply the same star depth (mirrors checker's resolveAstType). Ref-ness
+        // never reaches this string at all: astTypeStr drops isRef/isRefMut
+        // entirely, so a `&Board` param and a by-value `Board` already share this
+        // same bare string — nothing extra to reapply for that case.
+        var stars: i64 = 0
+        var si: i64 = 0
+        while si < s.len && s[si] == 42 {
+            stars = stars + 1
+            si = si + 1
+        }
+        let bare = s[si..s.len].clone()
+        if cg.typeAliases.contains(bare) {
+            let aliasBase = cg.typeAliases.get(bare)!
+            var resolved = resolveTyStr(cg, astTypeStr(aliasBase))
+            var k: i64 = 0
+            while k < stars {
+                resolved = "*" + resolved
+                k = k + 1
+            }
+            return resolved
+        }
         return s.clone()
     }
     let base = s[0..lt].clone()

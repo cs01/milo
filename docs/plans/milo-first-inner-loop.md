@@ -21,10 +21,12 @@ compiler-rebuild step is the whole risk, it is 95% clang, and it is only surviva
 parallel codegen units land first. Two of the three prerequisites pay for themselves for
 every Milo user whether or not the port ever finishes.
 
-**Status: prerequisites 1 and 2 shipped 2026-08-04** — parallel codegen units are in and
-measured (1.2–2.0x end-to-end, 5x on the clang step), and `milo test` is now a real runner
-(process-per-test isolation, parallel, `-t`, generic assertions). Next is un-rotting
-`src-milo` and standing up the IR differential harness.
+**Status 2026-08-04: prerequisites 1–4 all shipped.** Parallel codegen units (1.2–2.0x
+end-to-end, 5x on the clang step), a real `milo test`, `src-milo` compiling again, and the
+IR differential harness. **The harness immediately changed the estimate for prerequisite 5
+— see "What the differential says" below.** The inner-loop question is answered: rebuilding
+the 20.8k-line Milo compiler went from **8.01s to 2.06s**. The port's cost is now the open
+question, not its iteration speed.
 
 ---
 
@@ -212,22 +214,49 @@ already used for return hints is now applied to arguments too (fixture
    clang step alone, 824/824 tests green with it forced on every compile.
 2. ~~**A real `milo test`.**~~ **DONE 2026-08-04** — process-per-test isolation, parallel,
    `-t`, generic assertions; locked by `tests/miloTestRunner.test.ts`.
-3. **Un-rot `src-milo`.** Its parser cannot read post-coherence stdlib syntax (`Some(...)`
-   ctors, `Type.method()` calls), so all 168 manifest fixtures die at bundled-std line 427.
-   Bounded and mechanical.
-4. **A differential harness before any porting.** Byte-exact IR diff, `src-milo` vs
-   `src/codegen.ts`, over the fixture corpus, as a seconds-fast script. `src-milo` broke
-   silently once already precisely because this did not exist. It also produces the single
-   number — "N/339 byte-identical" — that tells you whether the port is converging before
-   you have spent months.
+3. ~~**Un-rot `src-milo`.**~~ **DONE 2026-08-04, and it was 7 errors, not a rewrite.** The
+   damage was one API drift (`parseInt`/`parseF64` now return `Option<T>`), one borrow that
+   outlived a field move, and one loop variable shadowing an outer `var i`. It builds in
+   2.06s and the resulting binary compiles and runs a program correctly.
+4. ~~**A differential harness before any porting.**~~ **DONE 2026-08-04** —
+   `scripts/ir-diff.ts`, byte-exact plus a canonical-reorder comparison, baseline recorded
+   in `tests/ir-diff.baseline.json`, regressions fail the run by name rather than by count.
 5. **Then port, codegen first, checker last.** Codegen is the most mechanical, least
    graph-shaped stage and it is the one with an exact oracle. The checker is the most
    reference-heavy and the worst fit for second-class refs; it goes last, when everything
    else is proven.
 
-Items 1–2 landed 2026-08-04 and were useful unconditionally, exactly as argued: both ship
-to every Milo user whether or not a port follows. Items 3–4 are next, and item 4 is the one
-that produces the number — "N/339 byte-identical" — that says whether to fund item 5.
+Items 1–4 landed 2026-08-04. Items 1–2 were useful unconditionally, exactly as argued: both
+ship to every Milo user whether or not a port follows. Item 4 then did its job immediately —
+it repriced item 5 before any porting effort was spent on it.
+
+## What the differential says — read this before funding the port
+
+First census, 578 fixtures, `src-milo` against the current `src/codegen.ts`:
+
+| bucket | count |
+|---|---|
+| byte-identical | **0** |
+| agree after canonical reordering | **0** |
+| differ | 336 |
+| `src-milo` cannot compile it | 242 |
+
+`src-milo` compiles **336/578 (58%)** of the corpus, and **none** of those 336 produce IR
+the current backend agrees with — not even after normalizing top-level ordering. The
+divergences are structural, not cosmetic: no `target triple` line at all, string constants
+labelled `@.str0` vs `@.str.0`, and 3,727 emitted lines against the oracle's 5,760 on a
+single arithmetic fixture.
+
+This matters because the historical record is easy to misread. `src-milo` **did** reach a
+byte-identical fixed point — on 2026-07-10, against the TS compiler *as it stood then*. The
+TS backend has moved a long way since, and `src-milo` has not. So the honest reading of
+"20,826 lines already written" is **coverage, not convergence**: the port is much closer to
+starting over than the line count suggests, and re-converging is a real project rather than
+the resync the parked-port framing implies.
+
+That is exactly the number the harness existed to produce, and it cost one afternoon
+instead of the months a port would have spent discovering it. Whatever is decided about
+item 5, it should be decided against 0/578, not against 20,826.
 
 ---
 

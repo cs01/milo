@@ -195,6 +195,11 @@ pub struct Function {
     body: Vec<Heap<Stmt>>,
     isExtern: bool,
     isVariadic: bool,
+    // `@wrapping` (direct) or inherited from a file-level `@!wrapping` directive —
+    // see parser.milo's top-level loop. Only "wrapping" is ever populated here;
+    // synthesized functions (monomorphized instances, trait-derived methods) default
+    // to empty, which is the safe direction (checked arithmetic, not silently wrapping).
+    attributes: Vec<Attribute>,
 }
 
 pub struct ImportDecl {
@@ -881,6 +886,10 @@ pub fn renameFunction(f: &Function, from: &string, to: &string): Function {
     for i in 0..f.params.len {
         params.push(f.params[i].clone())
     }
+    var attributes: Vec<Attribute> = Vec.new()
+    for i in 0..f.attributes.len {
+        attributes.push(f.attributes[i].clone())
+    }
     return Function {
         name: f.name.clone(),
         typeParams: typeParams,
@@ -889,6 +898,7 @@ pub fn renameFunction(f: &Function, from: &string, to: &string): Function {
         body: renameStmts(f.body, from, to),
         isExtern: f.isExtern,
         isVariadic: f.isVariadic,
+        attributes: attributes,
     }
 }
 
@@ -968,6 +978,10 @@ impl Clone for Function {
         for i in 0..self.params.len {
             params.push(self.params[i].clone())
         }
+        var attributes: Vec<Attribute> = Vec.new()
+        for i in 0..self.attributes.len {
+            attributes.push(self.attributes[i].clone())
+        }
         return Function {
             name: self.name.clone(),
             typeParams: typeParams,
@@ -976,6 +990,7 @@ impl Clone for Function {
             body: cloneStmts(self.body),
             isExtern: self.isExtern,
             isVariadic: self.isVariadic,
+            attributes: attributes,
         }
     }
 }

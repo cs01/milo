@@ -30,7 +30,7 @@ from "src-milo/codegen/abi.milo" import {
 from "src-milo/codegen/strings.milo" import {
     genStringLit, genStringClone, genStringConcat, genStringEq, genStringCmp,
     genIntToString, genFloatToString, genFloat32ToString, genStringIndex, genStringSlice, emitStringLit, genStringPush,
-    genStringAppendInPlace, formatF32Bits, floatDecimalStr
+    genStringAppendInPlace, formatF32Bits, floatDecimalStr, emitPanic
 }
 
 // -- Struct literal --
@@ -453,6 +453,7 @@ pub fn genVecWithCapacity(cg: &mut Cgen, hintTy: &string, capExpr: &Expr, locs: 
     // (padding and all) — same approach genArrayLit/genVecPush already use.
     let elemSz = genSizeOf(cg, elemLl)
     let capV = genExpr(cg, capExpr, locs, sigs, "i64")
+    emitNonNegativeCheck(cg, capV.v, "capacity")
     let bytes = nextTemp(cg)
     emit(cg, "  " + bytes + " = mul i64 " + capV.v.clone() + ", " + elemSz + "\n")
     let buf = nextTemp(cg)
@@ -2419,6 +2420,151 @@ pub fn genCheckedArith(cg: &mut Cgen, obj: &Val, method: &string, av: &Val): Val
     return Val {
         v: r, ty: optName
     }
+}
+
+// The implicit-default-mode counterpart of genCheckedArith above: same overflow
+// intrinsic, but a plain `+`/`-`/`*` (or unary negate, spelled as `sub 0, x`)
+// PANICS on overflow instead of returning an Option. `resultTy` is the SURFACE
+// milo type (e.g. "u32", not the LLVM "i32") the caller already computed —
+// threaded through explicitly rather than derived from `llTy`, since llTy alone
+// can't tell signed from unsigned and a wrong answer here would corrupt any
+// later isUnsigned() check on this result.
+pub fn emitCheckedArith(cg: &mut Cgen, op: &string, unsigned: bool, llTy: &string, lv: &string, rv: &string, resultTy: &string): Val {
+    var pfx = "s"
+    if unsigned {
+        pfx = "u"
+    }
+    let intr = "llvm." + pfx + op.clone() + ".with.overflow." + llTy.clone()
+    var declared = false
+    for i in 0..cg.emittedThunks.len {
+        if cg.emittedThunks[i] == intr {
+            declared = true
+        }
+    }
+    if !declared {
+        cg.emittedThunks.push(intr.clone())
+        emitG(cg, "declare {" + llTy.clone() + ", i1} @" + intr + "(" + llTy.clone() + ", " + llTy.clone() + ")\n")
+    }
+    let cr = nextTemp(cg)
+    emit(cg, "  " + cr + " = call {" + llTy.clone() + ", i1} @" + intr + "(" + llTy.clone() + " " + lv.clone() + ", " + llTy.clone() + " " + rv.clone() + ")\n")
+    let val = nextTemp(cg)
+    emit(cg, "  " + val + " = extractvalue {" + llTy.clone() + ", i1} " + cr + ", 0\n")
+    let flag = nextTemp(cg)
+    emit(cg, "  " + flag + " = extractvalue {" + llTy.clone() + ", i1} " + cr + ", 1\n")
+    let okLbl = nextLabel(cg, "overflow.ok")
+    let failLbl = nextLabel(cg, "overflow.fail")
+    emit(cg, "  br i1 " + flag + ", label %" + failLbl + ", label %" + okLbl + "\n")
+    emit(cg, failLbl + ":\n")
+    emitPanic(cg, "milo: integer overflow\n", "")
+    // emitLabel, not plain emit: this is the block execution actually falls
+    // through to, and any ENCLOSING phi node (an if/match-expression this
+    // arithmetic sits inside) picks its predecessor from cg.curBlock — leaving
+    // it stale here produced "PHI node entries do not match predecessors!"
+    // the first time a checked op landed inside a branch of one (deflateRoundtrip).
+    emitLabel(cg, okLbl)
+    return Val {
+        v: val, ty: resultTy.clone()
+    }
+}
+
+// The most negative representable value of a signed integer of `bits` width,
+// as an LLVM decimal literal. A literal table, not `-(2**(bits-1))` computed at
+// runtime: for bits=64 that computation is itself i64::MIN's own magnitude,
+// which does not fit as a positive i64 — computing it live would overflow (and
+// trap, now that this compiler's own arithmetic is checked-by-default too).
+fn minIntLiteral(bits: i64): string {
+    if bits == 8 {
+        return "-128"
+    }
+    if bits == 16 {
+        return "-32768"
+    }
+    if bits == 32 {
+        return "-2147483648"
+    }
+    return "-9223372036854775808"
+}
+
+// Integer `/` and `%` by zero are LLVM UB (unlike `+ - *`, which wrap): sdiv/udiv
+// on a zero divisor is undefined, not merely wrong, so it must trap in every
+// mode — including inside a `@wrapping fn`, which only changes the CHECKED-ARITH
+// behavior above (there is no modular value for x/0 to wrap to). Signed division
+// also traps INT_MIN / -1, the one signed division with no representable result.
+pub fn emitDivByZeroCheck(cg: &mut Cgen, divisor: &string, dividend: &string, llTy: &string, signed: bool, bits: i64) {
+    let isZero = nextTemp(cg)
+    let okLbl = nextLabel(cg, "divz.ok")
+    let zeroFail = nextLabel(cg, "divz.zero")
+    emit(cg, "  " + isZero + " = icmp eq " + llTy.clone() + " " + divisor.clone() + ", 0\n")
+    if signed {
+        let ovfCheck = nextLabel(cg, "divz.chkovf")
+        let ovfFail = nextLabel(cg, "divz.ovf")
+        emit(cg, "  br i1 " + isZero + ", label %" + zeroFail + ", label %" + ovfCheck + "\n")
+        emit(cg, ovfCheck + ":\n")
+        let minVal = minIntLiteral(bits)
+        let isMin = nextTemp(cg)
+        emit(cg, "  " + isMin + " = icmp eq " + llTy.clone() + " " + dividend.clone() + ", " + minVal + "\n")
+        let isNeg1 = nextTemp(cg)
+        emit(cg, "  " + isNeg1 + " = icmp eq " + llTy.clone() + " " + divisor.clone() + ", -1\n")
+        let ovf = nextTemp(cg)
+        emit(cg, "  " + ovf + " = and i1 " + isMin + ", " + isNeg1 + "\n")
+        emit(cg, "  br i1 " + ovf + ", label %" + ovfFail + ", label %" + okLbl + "\n")
+        emit(cg, ovfFail + ":\n")
+        // The two causes get their own messages — reporting the overflow as "division
+        // by zero" sends the reader hunting for a zero divisor that isn't there.
+        emitPanic(cg, "milo: division overflow (i" + bits.toString() + "::MIN / -1)\n", "")
+    } else {
+        emit(cg, "  br i1 " + isZero + ", label %" + zeroFail + ", label %" + okLbl + "\n")
+    }
+    emit(cg, zeroFail + ":\n")
+    emitPanic(cg, "milo: division by zero\n", "")
+    emitLabel(cg, okLbl)
+}
+
+// The one signed-division exception to "traps in every mode": under `@wrapping`,
+// INT_MIN / -1 wraps to INT_MIN (remainder 0) instead of trapping — unlike
+// division by zero (no value is "the modular zero-divisor answer", so that
+// still always traps), INT_MIN/-1 DOES have a defined modular result. LLVM's
+// sdiv/srem of exactly that pair is itself poison, so this routes around the
+// instruction with a select rather than feeding it the poison operands.
+pub fn emitWrappingSignedDivRem(cg: &mut Cgen, op: &string, lv: &string, rv: &string, llTy: &string, bits: i64): string {
+    // zero-only trap: signed=false skips emitDivByZeroCheck's own INT_MIN/-1 branch.
+    emitDivByZeroCheck(cg, rv, lv, llTy, false, bits)
+    let minVal = minIntLiteral(bits)
+    let isMin = nextTemp(cg)
+    emit(cg, "  " + isMin + " = icmp eq " + llTy.clone() + " " + lv.clone() + ", " + minVal + "\n")
+    let isNeg1 = nextTemp(cg)
+    emit(cg, "  " + isNeg1 + " = icmp eq " + llTy.clone() + " " + rv.clone() + ", -1\n")
+    let isOvf = nextTemp(cg)
+    emit(cg, "  " + isOvf + " = and i1 " + isMin + ", " + isNeg1 + "\n")
+    let safeDivisor = nextTemp(cg)
+    emit(cg, "  " + safeDivisor + " = select i1 " + isOvf + ", " + llTy.clone() + " 1, " + llTy.clone() + " " + rv.clone() + "\n")
+    var instr = "sdiv"
+    if op == "%" {
+        instr = "srem"
+    }
+    let raw = nextTemp(cg)
+    emit(cg, "  " + raw + " = " + instr + " " + llTy.clone() + " " + lv.clone() + ", " + safeDivisor + "\n")
+    var wrapped = minVal
+    if op == "%" {
+        wrapped = "0"
+    }
+    let res = nextTemp(cg)
+    emit(cg, "  " + res + " = select i1 " + isOvf + ", " + llTy.clone() + " " + wrapped + ", " + llTy.clone() + " " + raw + "\n")
+    return res
+}
+
+// A shift by >= the operand's bit width (or a negative amount, huge as unsigned)
+// is LLVM poison — trap it. `@wrapping fn` callers mask the amount instead (see
+// the BinOp choke point) and never reach this at all.
+pub fn emitShiftCheck(cg: &mut Cgen, amount: &string, llTy: &string, bits: i64) {
+    let bad = nextTemp(cg)
+    let okLbl = nextLabel(cg, "shift.ok")
+    let failLbl = nextLabel(cg, "shift.oob")
+    emit(cg, "  " + bad + " = icmp uge " + llTy.clone() + " " + amount.clone() + ", " + bits.toString() + "\n")
+    emit(cg, "  br i1 " + bad + ", label %" + failLbl + ", label %" + okLbl + "\n")
+    emit(cg, failLbl + ":\n")
+    emitPanic(cg, "milo: shift amount out of range (>= " + bits.toString() + ")\n", "")
+    emitLabel(cg, okLbl)
 }
 
 // x.wrapping{Add,Sub,Mul}(y): plain add/sub/mul (two's-complement wraps by def).
@@ -4752,7 +4898,12 @@ pub fn genMethodCall(cg: &mut Cgen, object: &Expr, method: &string, args: &Vec<H
     if objTyLl == "%String" && (method == "substr" || method == "slice") {
         let a = genExpr(cg, *args[0], locs, sigs, "i64")
         let b = genExpr(cg, *args[1], locs, sigs, "i64")
-        return genStringSlice(cg, obj.v, a.v, b.v)
+        // The "i64" hint above only steers a LITERAL bound's own type; an already-
+        // typed narrower local (`var a: i32 = 1; s.substr(a, b)`) comes back as
+        // i32 and would emit an invalid `icmp i64 %i32val` in the range check below.
+        let aw = widenToI64(cg, a)
+        let bw = widenToI64(cg, b)
+        return genStringSlice(cg, obj.v, aw, bw, method)
     }
     // v[a..b] → v.slice(a,b): a non-owning %Vec view {data+a*esz, b-a, cap=0}. milo0
     // never auto-frees Vec buffers (only user Drop$drop), so a cap=0 alias is safe.
@@ -5309,6 +5460,41 @@ pub fn genMethodCall(cg: &mut Cgen, object: &Expr, method: &string, args: &Vec<H
 
 // -- Index + Slice --
 
+// Trap on an out-of-range index. `idx`/`size` are i64 SSA values — a straight i64
+// compare, unlike the oracle's emitBoundsCheck (which truncates to i32 first for a
+// tighter hot-loop compare); simpler and still correct, at the cost of that one
+// perf optimization. Every array/Vec index — read (genIndex) and write/address
+// (genLvalue) — funnels through this so the check shape lives in one place.
+pub fn emitBoundsCheck(cg: &mut Cgen, idx: &string, size: &string) {
+    let cmp = nextTemp(cg)
+    let okLbl = nextLabel(cg, "bounds.ok")
+    let failLbl = nextLabel(cg, "bounds.fail")
+    emit(cg, "  " + cmp + " = icmp ult i64 " + idx.clone() + ", " + size.clone() + "\n")
+    emit(cg, "  br i1 " + cmp + ", label %" + okLbl + ", label %" + failLbl + "\n")
+    emit(cg, failLbl + ":\n")
+    emitPanic(cg, "milo: array index out of bounds: %lld/%lld\n", ", i64 " + idx.clone() + ", i64 " + size.clone())
+    // emitLabel, not plain emit — see emitCheckedArith's note: an enclosing
+    // phi node needs cg.curBlock to name the block this check actually falls
+    // through to, not whatever was current before the check.
+    emitLabel(cg, okLbl)
+}
+
+// Trap if a collection length/capacity is negative. Every index bounds check
+// above is an UNSIGNED compare, so a negative count (a literal -1, or a wrapped
+// overflow before overflow checks existed) sails through as a huge unsigned
+// bound and lets any index write past a mis-sized (or failed) allocation — an
+// OOB in code that never wrote an unsafe block. `val` is an i64 SSA value.
+pub fn emitNonNegativeCheck(cg: &mut Cgen, val: &string, what: &string) {
+    let neg = nextTemp(cg)
+    let okLbl = nextLabel(cg, "neglen.ok")
+    let failLbl = nextLabel(cg, "neglen.fail")
+    emit(cg, "  " + neg + " = icmp slt i64 " + val.clone() + ", 0\n")
+    emit(cg, "  br i1 " + neg + ", label %" + failLbl + ", label %" + okLbl + "\n")
+    emit(cg, failLbl + ":\n")
+    emitPanic(cg, "milo: negative " + what.clone() + ": %lld\n", ", i64 " + val.clone())
+    emitLabel(cg, okLbl)
+}
+
 pub fn genIndex(cg: &mut Cgen, obj: &Expr, idx: &Expr, locs: &Vec<Local>, sigs: &Vec<CgFnSig>): Val {
     // Inline struct-field array (see isInlineArrTy): there is no %Vec header to
     // pull a data ptr out of by value, so index the field's ADDRESS directly
@@ -5321,6 +5507,8 @@ pub fn genIndex(cg: &mut Cgen, obj: &Expr, idx: &Expr, locs: &Vec<Local>, sigs: 
         let arrLl = llType(addr.ty)
         let iv = genExpr(cg, idx, locs, sigs, "i64")
         let iw = widenToI64(cg, iv)
+        let size = inlineArrLen(addr.ty)
+        emitBoundsCheck(cg, iw, size.toString())
         let slot = nextTemp(cg)
         emit(cg, "  " + slot + " = getelementptr " + arrLl + ", ptr " + addr.v + ", i32 0, i64 " + iw + "\n")
         let v = nextTemp(cg)
@@ -5339,8 +5527,11 @@ pub fn genIndex(cg: &mut Cgen, obj: &Expr, idx: &Expr, locs: &Vec<Local>, sigs: 
         let elemLl = llType(elemTy)
         let d = nextTemp(cg)
         emit(cg, "  " + d + " = extractvalue %Vec " + o.v + ", 0\n")
+        let vlen = nextTemp(cg)
+        emit(cg, "  " + vlen + " = extractvalue %Vec " + o.v + ", 1\n")
         // a gep index must be i64; a narrower index (e.g. an i32 loop counter) is widened
         let iw = widenToI64(cg, i)
+        emitBoundsCheck(cg, iw, vlen)
         let slot = nextTemp(cg)
         emit(cg, "  " + slot + " = getelementptr " + elemLl + ", ptr " + d + ", i64 " + iw + "\n")
         let v = nextTemp(cg)
@@ -5374,7 +5565,7 @@ pub fn genSlice(cg: &mut Cgen, obj: &Expr, a: &Expr, b: &Expr, locs: &Vec<Local>
     let av = genExpr(cg, a, locs, sigs, "i64")
     let bv = genExpr(cg, b, locs, sigs, "i64")
     if llType(o.ty) == "%String" {
-        return genStringSlice(cg, o.v, av.v, bv.v)
+        return genStringSlice(cg, o.v, av.v, bv.v, "slice")
     }
     return Val {
         v: "0", ty: "i64"
@@ -7136,6 +7327,8 @@ pub fn genLvalue(cg: &mut Cgen, e: &Expr, locs: &Vec<Local>, sigs: &Vec<CgFnSig>
                 let arrLl = llType(addr.ty)
                 let iv2 = genExpr(cg, *idx, locs, sigs, "i64")
                 let iw2 = widenToI64(cg, iv2)
+                let size2 = inlineArrLen(addr.ty)
+                emitBoundsCheck(cg, iw2, size2.toString())
                 let slot = nextTemp(cg)
                 emit(cg, "  " + slot + " = getelementptr " + arrLl + ", ptr " + addr.v + ", i32 0, i64 " + iw2 + "\n")
                 return Val {
@@ -7149,6 +7342,9 @@ pub fn genLvalue(cg: &mut Cgen, e: &Expr, locs: &Vec<Local>, sigs: &Vec<CgFnSig>
                 let elemLl = llType(elemTy)
                 let d = nextTemp(cg)
                 emit(cg, "  " + d + " = extractvalue %Vec " + o.v + ", 0\n")
+                let vlen2 = nextTemp(cg)
+                emit(cg, "  " + vlen2 + " = extractvalue %Vec " + o.v + ", 1\n")
+                emitBoundsCheck(cg, iv.v, vlen2)
                 let slot = nextTemp(cg)
                 emit(cg, "  " + slot + " = getelementptr " + elemLl + ", ptr " + d + ", i64 " + iv.v + "\n")
                 return Val {
@@ -7319,6 +7515,22 @@ pub fn genExpr(cg: &mut Cgen, e: &Expr, locs: &Vec<Local>, sigs: &Vec<CgFnSig>, 
                     v: lv.v, ty: "ptr"
                 }
             }
+            // Negating an integer literal is a compile-time constant — fold it. Without
+            // this, a legitimate negative literal like i32 INT_MIN (-2147483648, lexed
+            // as the unary minus of 2147483648) would emit a runtime checked-negate and
+            // trap on the INT_MIN overflow now that negation is checked by default.
+            if op == "-" {
+                match *inner {
+                    Expr.IntLit(n, ilsp) => {
+                        let v0 = genExpr(cg, *inner, locs, sigs, hintTy)
+                        return Val {
+                            v: "-" + v0.v, ty: v0.ty
+                        }
+                    }
+                    _ => {
+                    }
+                }
+            }
             let v = genExpr(cg, *inner, locs, sigs, hintTy)
             let t = nextTemp(cg)
             if op == "-" {
@@ -7330,6 +7542,10 @@ pub fn genExpr(cg: &mut Cgen, e: &Expr, locs: &Vec<Local>, sigs: &Vec<CgFnSig>, 
                     return Val {
                         v: t, ty: v.ty
                     }
+                }
+                if !cg.currentFnWrapping && intBits(vll.clone()) > 0 {
+                    let unsigned = isUnsigned(v.ty)
+                    return emitCheckedArith(cg, "sub", unsigned, vll, "0", v.v, v.ty)
                 }
                 emit(cg, "  " + t + " = sub " + vll + " 0, " + v.v + "\n")
                 return Val {
@@ -7592,6 +7808,49 @@ pub fn genExpr(cg: &mut Cgen, e: &Expr, locs: &Vec<Local>, sigs: &Vec<CgFnSig>, 
                 }
             }
             if isArithOp(op) {
+                // Overflow-checked by default; `@wrapping fn` skips the trap and falls
+                // through to the plain two's-complement instruction below.
+                if !cg.currentFnWrapping && (op == "+" || op == "-" || op == "*") {
+                    var arithOp = "add"
+                    if op == "-" {
+                        arithOp = "sub"
+                    }
+                    if op == "*" {
+                        arithOp = "mul"
+                    }
+                    return emitCheckedArith(cg, arithOp, unsigned, opLl, lvv, rvv, resTy)
+                }
+                // Division/remainder by zero is UB — trap it in every mode, including
+                // @wrapping: there is no modular value for x/0. Signed INT_MIN / -1 is
+                // ALSO UB by default, but under @wrapping it has a defined modular
+                // result (wraps to INT_MIN) — see emitWrappingSignedDivRem.
+                if op == "/" || op == "%" {
+                    let dbits = intBits(opLl.clone())
+                    if cg.currentFnWrapping && !unsigned {
+                        let wres = emitWrappingSignedDivRem(cg, op, lvv, rvv, opLl, dbits)
+                        return Val {
+                            v: wres, ty: resTy
+                        }
+                    }
+                    emitDivByZeroCheck(cg, rvv, lvv, opLl, !unsigned, dbits)
+                }
+                // A shift by >= the operand's bit width (or a negative amount, huge as
+                // unsigned) is LLVM poison EITHER WAY — checked or not, the plain `shl`/
+                // `ashr`/`lshr` below cannot be handed a raw out-of-range amount. Default:
+                // trap. `@wrapping`: mask the amount into [0, bits) instead — defined,
+                // matches Rust's `wrapping_shl`/C's shift-amount masking (tests/fixtures/
+                // moduleWrapping.milo: `1i32 << 40` under `@!wrapping` must be `1 << 8`
+                // (256), not a trap and not the poison a bare `shl i32 1, 40` produces).
+                if op == "<<" || op == ">>" {
+                    let sbits = intBits(opLl.clone())
+                    if cg.currentFnWrapping {
+                        let masked = nextTemp(cg)
+                        emit(cg, "  " + masked + " = and " + opLl + " " + rvv + ", " + (sbits - 1).toString() + "\n")
+                        rvv = masked
+                    } else {
+                        emitShiftCheck(cg, rvv, opLl, sbits)
+                    }
+                }
                 let opname = binOpInt(op, unsigned)
                 emit(cg, "  " + t + " = " + opname + " " + opLl + " " + lvv + ", " + rvv + "\n")
                 return Val {
@@ -7670,6 +7929,7 @@ pub fn genExpr(cg: &mut Cgen, e: &Expr, locs: &Vec<Local>, sigs: &Vec<CgFnSig>, 
                 let elemTy = unwrapVec(resolveTyStr(cg, vecTy.clone()))
                 let elemLl = llType(elemTy.clone())
                 let n = genExpr(cg, *args[0], locs, sigs, "i64")
+                emitNonNegativeCheck(cg, n.v, "length")
                 // hint with the SURFACE elem type ("f32"), not its LLVM spelling: llType's
                 // milo "float" alias for f64 also stringifies to "float", so passing
                 // elemLl ("float", the true LLVM f32 type) collided with that alias and

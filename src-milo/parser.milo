@@ -28,11 +28,15 @@ pub struct Parser {
     // Stamped onto every span this parser produces (see span()) — the file a
     // diagnostic should render against, not necessarily the entry file.
     filePath: string,
+    // Set by a file-level `@!wrapping` directive — every (non-extern) fn parsed
+    // for the rest of this file gets an implicit `wrapping` attribute (see the
+    // top-level parse loop). Per-file: only fns parsed by THIS Parser see it.
+    moduleWrapping: bool,
 }
 
 pub fn newParser(tokens: Vec<Token>, filePath: string): Parser {
     return Parser {
-        tokens: tokens, pos: 0, noStructLit: false, pending: Vec.new(), codePointLoopCounter: 0, filePath: filePath
+        tokens: tokens, pos: 0, noStructLit: false, pending: Vec.new(), codePointLoopCounter: 0, filePath: filePath, moduleWrapping: false
     }
 }
 
@@ -471,6 +475,7 @@ pub fn parseExternFn(p: &mut Parser): Function {
         body: Vec.new(),
         isExtern: true,
         isVariadic: pl.variadic,
+        attributes: Vec.new(),
     }
 }
 
@@ -503,6 +508,7 @@ pub fn parseFn(p: &mut Parser): Function {
         body: body,
         isExtern: false,
         isVariadic: pl.variadic,
+        attributes: Vec.new(),
     }
 }
 
@@ -1784,17 +1790,21 @@ pub fn parse(p: &mut Parser): Program {
 
     while !at(p, TokKind.Eof) {
         // Collect attributes. `@!name` is a MODULE-level directive, not a declaration
-        // attribute — it attaches to the file, so it is consumed here and dropped.
-        // The only one in use is `@!wrapping` (std/sha512.milo), and dropping it is
-        // correct for milo0 specifically: milo0 emits no overflow traps for ordinary
-        // arithmetic, so wrapping is already what its generated code does. If milo0 ever
-        // gains checked arithmetic, this has to start setting a per-function flag instead.
+        // attribute — it attaches to the file, so it is consumed here. The only one in
+        // use is `@!wrapping` (std/sha512.milo): now that arithmetic IS checked by
+        // default, this sets p.moduleWrapping so every (non-extern) fn parsed for the
+        // rest of THIS file is stamped as if it carried a per-fn `@wrapping` — see the
+        // Fn/Extern dispatch below. Was previously dropped outright, back when milo0
+        // emitted no overflow traps at all and wrapping was every fn's behavior anyway.
         var attrs: Vec<Attribute> = Vec.new()
         while at(p, TokKind.At) {
             if peekN(p, 1).kind == TokKind.Bang {
                 advance(p)
                 advance(p)
-                expect(p, TokKind.Ident)
+                let directive = expect(p, TokKind.Ident).value
+                if directive == "wrapping" {
+                    p.moduleWrapping = true
+                }
             } else {
                 attrs.push(parseAttribute(p))
             }
@@ -1845,7 +1855,25 @@ pub fn parse(p: &mut Parser): Program {
                 functions.push(parseExternFn(p))
             }
         } else if at(p, TokKind.Fn) {
-            functions.push(parseFn(p))
+            var fnDecl = parseFn(p)
+            if attrs.len > 0 {
+                fnDecl.attributes = attrs
+            }
+            if p.moduleWrapping {
+                var hasWrapping = false
+                for wi in 0..fnDecl.attributes.len {
+                    if fnDecl.attributes[wi].name == "wrapping" {
+                        hasWrapping = true
+                    }
+                }
+                if !hasWrapping {
+                    fnDecl.attributes.push(Attribute {
+                        name: "wrapping", args: Vec.new()
+                    }
+                    )
+                }
+            }
+            functions.push(fnDecl)
         } else if at(p, TokKind.Trait) {
             traits.push(parseTraitDecl(p))
         } else if at(p, TokKind.Impl) {
@@ -1900,8 +1928,15 @@ pub fn parse(p: &mut Parser): Program {
             var unicodeNames: Vec<string> = Vec.new()
             unicodeNames.push("CodePoint")
             unicodeNames.push("decodeCodepoint")
+            // `aliases` must be index-aligned with `names` (see ImportDecl's doc
+            // comment) — an empty Vec here read past its end in collectAliasPairs
+            // (resolver.milo), silently tolerated only because nothing bounds-checked
+            // that read before this compiler had array bounds checks at all.
+            var unicodeAliases: Vec<Option<string>> = Vec.new()
+            unicodeAliases.push(Option.None)
+            unicodeAliases.push(Option.None)
             imports.push(ImportDecl {
-                path: "std/unicode", names: Option.Some(unicodeNames), aliases: Vec.new(), span: Option.None
+                path: "std/unicode", names: Option.Some(unicodeNames), aliases: unicodeAliases, span: Option.None
             }
             )
         }

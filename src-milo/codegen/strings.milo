@@ -1,7 +1,8 @@
 // String codegen: literals, concat, equality, clone, int-to-string
 from "src-milo/codegen/types.milo" import {
     ensureRealloc, nextLabel, ensureStrtod,
-    Cgen, Val, emit, emitG, nextTemp, ensureStringTy, ensureMalloc, ensureMemcpy, ensureMemcmp
+    Cgen, Val, emit, emitG, emitLabel, nextTemp, ensureStringTy, ensureMalloc, ensureMemcpy, ensureMemcmp,
+    ensureAbort, ensureDprintf, ensureFflush
 }
 from "std/binary" import {
     Bytes
@@ -113,6 +114,27 @@ pub fn emitStringLit(cg: &mut Cgen, raw: &string): string {
     let total = byteCount + 1
     emitG(cg, label + " = private unnamed_addr constant [" + total.toString() + " x i8] c\"" + encoded + "\"\n")
     return label
+}
+
+// Print `msg` (a fully-formatted panic message — file/line are baked in at compile
+// time, since spans are static in this AOT compiler, unlike the oracle's runtime
+// %s/%d file-pointer plumbing) to stderr, flush stdout (block-buffered under a
+// piped test harness — lost otherwise), then abort(): SIGABRT, not exit(1), so a
+// supervisor can tell an abnormal exit from an ordinary one and a debugger breaks
+// at the fault. `extraArgs` is a pre-formatted printf-style argument suffix (e.g.
+// ", i32 " + idx) for a message with %d holes — most panics have none ("").
+// Every runtime safety trap (overflow, bounds, div-by-zero, shift, negative
+// length) funnels through this so the abort/fflush shape lives in one place.
+pub fn emitPanic(cg: &mut Cgen, msg: &string, extraArgs: &string) {
+    ensureDprintf(cg)
+    ensureFflush(cg)
+    ensureAbort(cg)
+    let fl = emitStringLit(cg, msg)
+    emit(cg, "  call i32 (i32, ptr, ...) @dprintf(i32 2, ptr " + fl + extraArgs.clone() + ")\n")
+    let fc = nextTemp(cg)
+    emit(cg, "  " + fc + " = call i32 @fflush(ptr null)\n")
+    emit(cg, "  call void @abort()\n")
+    emit(cg, "  unreachable\n")
 }
 
 // Build %String aggregate { @.strN, len, 0 } for a string literal.
@@ -599,8 +621,40 @@ pub fn genStringIndex(cg: &mut Cgen, sv: &string, idx: &string): Val {
     }
 }
 
-// String slice: s[a..b] → owned copy (malloc + memcpy)
-pub fn genStringSlice(cg: &mut Cgen, sv: &string, av: &string, bv: &string): Val {
+// Validate a substr/slice range before using it: without this, an inverted or
+// out-of-range span becomes a negative length that malloc/memcpy/getelementptr
+// turn into a silent crash (or a bogus view) with no diagnostic. Mirrors the
+// oracle's emitStringRangeCheck (src/codegen.ts) — `what` names the operation
+// ("slice" or "substr") for the panic message, since src-milo unifies both
+// call shapes (and the `s[a..b]` operator) onto genStringSlice below, unlike
+// the oracle's two separate codegen fns.
+pub fn emitStringRangeCheck(cg: &mut Cgen, sv: &string, av: &string, bv: &string, what: &string) {
+    let len = nextTemp(cg)
+    emit(cg, "  " + len + " = extractvalue %String " + sv.clone() + ", 1\n")
+    let badStart = nextTemp(cg)
+    emit(cg, "  " + badStart + " = icmp slt i64 " + av.clone() + ", 0\n")
+    let badOrder = nextTemp(cg)
+    emit(cg, "  " + badOrder + " = icmp slt i64 " + bv.clone() + ", " + av.clone() + "\n")
+    let badEnd = nextTemp(cg)
+    emit(cg, "  " + badEnd + " = icmp sgt i64 " + bv.clone() + ", " + len + "\n")
+    let bad0 = nextTemp(cg)
+    emit(cg, "  " + bad0 + " = or i1 " + badStart + ", " + badOrder + "\n")
+    let bad = nextTemp(cg)
+    emit(cg, "  " + bad + " = or i1 " + bad0 + ", " + badEnd + "\n")
+    let panicLbl = nextLabel(cg, what.clone() + ".panic")
+    let okLbl = nextLabel(cg, what.clone() + ".ok")
+    emit(cg, "  br i1 " + bad + ", label %" + panicLbl + ", label %" + okLbl + "\n")
+    emit(cg, panicLbl + ":\n")
+    let msg = "milo: " + what.clone() + " range out of bounds: %lld..%lld (len %lld)\n"
+    emitPanic(cg, msg, ", i64 " + av.clone() + ", i64 " + bv.clone() + ", i64 " + len)
+    // emitLabel, not plain emit: an enclosing phi node picks its predecessor
+    // from cg.curBlock, which must name the block this check falls through to.
+    emitLabel(cg, okLbl)
+}
+
+// String slice: s[a..b] / .slice(a,b) / .substr(a,b) → owned copy (malloc + memcpy).
+pub fn genStringSlice(cg: &mut Cgen, sv: &string, av: &string, bv: &string, what: &string): Val {
+    emitStringRangeCheck(cg, sv, av, bv, what)
     ensureMalloc(cg)
     ensureMemcpy(cg)
     let data = nextTemp(cg)

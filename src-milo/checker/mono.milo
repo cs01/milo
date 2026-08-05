@@ -520,6 +520,7 @@ pub fn instantiateImpl(ck: &mut Checker, gi: &ImplDecl, mangled: &string, typeAr
             body: substStmts(gi.methods[mi].body, tps, tas2),
             isExtern: false,
             isVariadic: false,
+            attributes: gi.methods[mi].attributes.clone(),
         }
         )
     }
@@ -865,6 +866,7 @@ pub fn monomorphizeFn(ck: &mut Checker, baseName: &string, typeArgs: &Vec<TypeKi
         body: substStmts(generic.decl.body, generic.typeParams, typeArgs),
         isExtern: false,
         isVariadic: false,
+        attributes: generic.decl.attributes.clone(),
     }
     ck.monomorphizedFns.push(concreteDecl)
 

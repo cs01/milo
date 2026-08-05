@@ -912,6 +912,44 @@ pub fn checkForIn(ck: &mut Checker, varName: &string, varName2: &Option<string>,
         }
     }
 
+    // `@iter` on a field redirects the loop to that field: a newtype over a
+    // container (HashSet over HashMap) iterates exactly as the container does —
+    // same bindings, same borrow, no snapshot — instead of needing a `next`
+    // method it cannot write (an iterator would have to hold a reference into
+    // the wrapper, and references are second-class). Re-derived here from the
+    // struct's own field list rather than stashed in a side table keyed by this
+    // statement: codegen re-derives it the same way from the struct name, so
+    // there is nothing checker-only to thread through and no by-value VarInfo
+    // hazard to worry about.
+    var structTyForIter = iterType.clone()
+    match iterType.clone() {
+        TypeKind.TRef(inner, mutable) => {
+            match (*inner).clone() {
+                TypeKind.TStruct(sname) => {
+                    structTyForIter = (*inner).clone()
+                }
+                _ => {
+                }
+            }
+        }
+        _ => {
+        }
+    }
+    match structTyForIter {
+        TypeKind.TStruct(sname) => {
+            if ck.structs.contains(sname) {
+                let sinfo = ck.structs.get(sname)!
+                for fi in 0..sinfo.fields.len {
+                    if sinfo.fields[fi].iterDelegate {
+                        iterType = sinfo.fields[fi].ty.clone()
+                    }
+                }
+            }
+        }
+        _ => {
+        }
+    }
+
     // Iterating a Vec/Array/HashMap hands out element references into its own
     // storage; a push/insert mid-loop can realloc that storage out from under
     // them. Freeze the iterable's root for the loop body's life — same
@@ -1333,6 +1371,7 @@ pub fn registerFunction(ck: &mut Checker, func: &Function) {
 
 pub fn registerStruct(ck: &mut Checker, decl: &StructDecl) {
     var fields: Vec<CkStructField> = Vec.new()
+    var iterFieldCount = 0
     for field in decl.fields {
         let fty = resolveAstType(ck, field.ty)
         // References are second-class: they can only live in a param or a local
@@ -1354,9 +1393,17 @@ pub fn registerStruct(ck: &mut Checker, decl: &StructDecl) {
         } else if nestedRef(ck, fty) {
             error(ck, "struct '" + decl.name.clone() + "' field '" + field.name.clone() + "': references cannot be stored in a collection", Option.None)
         }
+        let isIterDelegate = hasAttr(field.attributes, "iter")
+        if isIterDelegate {
+            iterFieldCount = iterFieldCount + 1
+            if iterFieldCount > 1 {
+                error(ck, "'" + decl.name.clone() + "' has more than one @iter field", Option.None)
+            }
+        }
         fields.push(CkStructField {
             name: field.name.clone(),
             ty: fty,
+            iterDelegate: isIterDelegate,
         }
         )
     }
@@ -1660,6 +1707,7 @@ pub fn checkProgram(ck: &mut Checker, program: &Program) {
             newFields.push(CkStructField {
                 name: sInfo.fields[fi].name.clone(),
                 ty: normalizeEnumNames(ck, sInfo.fields[fi].ty),
+                iterDelegate: sInfo.fields[fi].iterDelegate,
             }
             )
         }

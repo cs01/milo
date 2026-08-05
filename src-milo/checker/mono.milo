@@ -675,6 +675,7 @@ pub fn monomorphizeStruct(ck: &mut Checker, baseName: &string, typeArgs: &Vec<Ty
         fields.push(CkStructField {
             name: generic.fields[fi].name.clone(),
             ty: fty,
+            iterDelegate: generic.fields[fi].iterDelegate,
         }
         )
     }
@@ -895,6 +896,7 @@ pub fn registerGenericStruct(ck: &mut Checker, s: &StructDecl) {
         fields.push(CkStructField {
             name: s.fields[j].name.clone(),
             ty: typeFromAst(s.fields[j].ty),
+            iterDelegate: hasAttr(s.fields[j].attributes, "iter"),
         }
         )
     }

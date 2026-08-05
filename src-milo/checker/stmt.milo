@@ -134,12 +134,19 @@ pub fn checkAssign(ck: &mut Checker, target: &Expr, value: &Expr, span: &Option<
     // A plain `x = ...` target is written, not read. Routing it through checkExpr
     // would hit checkIdent's use-after-move check and report "use of moved
     // variable 'x'" for the very statement that un-moves it.
+    // Two views of the target's type. `targetType` is dereferenced so writing
+    // *through* a `&mut T` param compares against T. `targetDeclType` keeps the
+    // wrapper, because a var can also legitimately HOLD a `&T` — a string/slice
+    // view (`var v = s[0..5]`) is rebindable to another view of the same type, and
+    // deref alone would report "cannot assign &string to string" on `v = s[6..11]`.
     var targetType = tyUnknown()
+    var targetDeclType = tyUnknown()
     match target {
         Expr.Ident(name, tspan) => {
             match lookup(ck, name) {
                 Option.Some(v) => {
                     targetType = deref(v.ty)
+                    targetDeclType = v.ty.clone()
                 }
                 Option.None => {
                     error(ck, "undefined variable '" + name.clone() + "'", cloneSpan(span))
@@ -148,6 +155,7 @@ pub fn checkAssign(ck: &mut Checker, target: &Expr, value: &Expr, span: &Option<
         }
         _ => {
             targetType = checkExpr(ck, target)
+            targetDeclType = targetType.clone()
         }
     }
     // Expose the target's type as the hint so an array literal RHS (`v = [a, b]`)
@@ -155,7 +163,8 @@ pub fn checkAssign(ck: &mut Checker, target: &Expr, value: &Expr, span: &Option<
     ck.expectedType = Option.Some(targetType.clone())
     let valType = checkExpr(ck, value)
     ck.expectedType = Option.None
-    if !typeEq(targetType, valType) && !typeEq(valType, tyUnknown()) && !intCoercible(targetType, valType, value) &&
+    if !typeEq(targetDeclType, valType) &&
+    !typeEq(targetType, valType) && !typeEq(valType, tyUnknown()) && !intCoercible(targetType, valType, value) &&
     !arrayToVecCoercible(targetType, valType) && !floatLitCoercible(targetType, valType, value) &&
     !optionIntWrapCoercible(ck, targetType, valType) {
         error(ck, "type mismatch: cannot assign " + typeName(valType) + " to " + typeName(targetType), cloneSpan(span))

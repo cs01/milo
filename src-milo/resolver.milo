@@ -104,55 +104,75 @@ pub fn parseFile(path: &string): Program {
 }
 
 // Recursively process imports from a parsed program.
+// Parse+merge one already-resolved file path, then recurse into ITS imports.
+// No-ops if already visited. Shared by the real import loop and the
+// synthetic std/json injection below.
+pub fn mergeImportedFile(rs: &mut ResolverState, absPath: string) {
+    if rs.visited.contains(absPath) {
+        return
+    }
+    rs.visited.insert(absPath.clone(), true)
+    let imported = parseFile(absPath)
+
+    for si in 0..imported.structs.len {
+        rs.structs.push(imported.structs[si].clone())
+    }
+    for ei in 0..imported.enums.len {
+        rs.enums.push(imported.enums[ei].clone())
+    }
+    for fi in 0..imported.functions.len {
+        rs.functions.push(imported.functions[fi].clone())
+    }
+    for ti in 0..imported.traits.len {
+        rs.traits.push(imported.traits[ti].clone())
+    }
+    for ii in 0..imported.impls.len {
+        rs.impls.push(imported.impls[ii].clone())
+    }
+    for gi in 0..imported.globals.len {
+        rs.globals.push(cloneGlobal(imported.globals[gi]))
+    }
+    for ai in 0..imported.typeAliases.len {
+        rs.typeAliases.push(TypeAlias {
+            name: imported.typeAliases[ai].name.clone(), base: imported.typeAliases[ai].base.clone()
+        }
+        )
+    }
+
+    // Recurse into this module's imports
+    let importDir = Path.dirname(absPath)
+    processImports(rs, imported, importDir)
+}
+
+// Whether any struct here has @derive(Json) — its synthesized methods call
+// std/json (the cursor API, JsonError, jsonQuote…). Mirrors the TS resolver's
+// derivesJson check: a derive that silently required an unrelated import
+// line would report "unknown type 'Json'" pointing at code the user never
+// wrote.
+pub fn programDerivesJson(structs: &Vec<StructDecl>): bool {
+    for i in 0..structs.len {
+        for j in 0..structs[i].attributes.len {
+            if structs[i].attributes[j].name == "derive" {
+                for k in 0..structs[i].attributes[j].args.len {
+                    if structs[i].attributes[j].args[k] == "Json" {
+                        return true
+                    }
+                }
+            }
+        }
+    }
+    return false
+}
+
 pub fn processImports(rs: &mut ResolverState, prog: &Program, dir: &string) {
+    if programDerivesJson(prog.structs) {
+        let jsonPath = resolvePath(rs, dir, "std/json")
+        mergeImportedFile(rs, jsonPath)
+    }
     for i in 0..prog.imports.len {
         let imp = prog.imports[i]
         let absPath = resolvePath(rs, dir, imp.path)
-
-        if !rs.visited.contains(absPath) {
-            rs.visited.insert(absPath.clone(), true)
-            let imported = parseFile(absPath)
-
-            // Validate named imports exist
-            match imp.names {
-                Option.Some(names) => {
-                    // TODO: validate names exist in imported module
-                    // For now, merge everything (flat compilation model)
-                }
-                Option.None => {
-                }
-            }
-
-            // Merge declarations
-            for si in 0..imported.structs.len {
-                rs.structs.push(imported.structs[si].clone())
-            }
-            for ei in 0..imported.enums.len {
-                rs.enums.push(imported.enums[ei].clone())
-            }
-            for fi in 0..imported.functions.len {
-                rs.functions.push(imported.functions[fi].clone())
-            }
-            for ti in 0..imported.traits.len {
-                rs.traits.push(imported.traits[ti].clone())
-            }
-            for ii in 0..imported.impls.len {
-                rs.impls.push(imported.impls[ii].clone())
-            }
-            for gi in 0..imported.globals.len {
-                rs.globals.push(cloneGlobal(imported.globals[gi]))
-            }
-            for ai in 0..imported.typeAliases.len {
-                rs.typeAliases.push(TypeAlias {
-                    name: imported.typeAliases[ai].name.clone(), base: imported.typeAliases[ai].base.clone()
-                }
-                )
-            }
-
-            // Recurse into this module's imports
-            let importDir = Path.dirname(absPath)
-            processImports(rs, imported, importDir)
-        }
+        mergeImportedFile(rs, absPath)
     }
 }
 

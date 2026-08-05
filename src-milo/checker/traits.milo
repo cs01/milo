@@ -12,6 +12,9 @@ from "src-milo/checker/state.milo" import {
     TraitInfo, TraitMethodInfo, ImplInfo,
     error, pushScope, popScope, declare, normalizeEnumNames,
 }
+from "src-milo/checker/derive_json.milo" import {
+    deriveJson
+}
 
 // -- Register builtin traits (Eq, Hash, Clone, Display, Add/Sub/Mul/Div, Drop) --
 
@@ -610,6 +613,22 @@ pub fn deriveEq(s: &StructDecl): Option<ImplDecl> {
 // -- Process @derive attributes --
 
 pub fn processDerives(ck: &mut Checker, program: &Program) {
+    // Pre-mark every @derive(Json) struct as JSON-capable before any derive body
+    // is generated — a struct whose own field refers to itself (or to a struct
+    // derived later in the file) otherwise can't validate that field, since the
+    // real toJson/fromJsonNode don't exist yet at that point.
+    for si in 0..program.structs.len {
+        let s = program.structs[si]
+        for j in 0..s.attributes.len {
+            if s.attributes[j].name == "derive" {
+                for k in 0..s.attributes[j].args.len {
+                    if s.attributes[j].args[k] == "Json" {
+                        ck.jsonCapableStructs.insert(s.name.clone(), true)
+                    }
+                }
+            }
+        }
+    }
     var i: i64 = 0
     while i < program.structs.len {
         let s = program.structs[i]
@@ -622,6 +641,16 @@ pub fn processDerives(ck: &mut Checker, program: &Program) {
                 for k in 0..s.attributes[j].args.len {
                     if s.attributes[j].args[k] == "Eq" {
                         let implDecl = deriveEq(s)
+                        match implDecl {
+                            Option.Some(decl) => {
+                                registerImpl(ck, decl)
+                            }
+                            Option.None => {
+                            }
+                        }
+                    }
+                    if s.attributes[j].args[k] == "Json" {
+                        let implDecl = deriveJson(ck, s)
                         match implDecl {
                             Option.Some(decl) => {
                                 registerImpl(ck, decl)

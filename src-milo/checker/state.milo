@@ -148,6 +148,13 @@ pub struct Checker {
     // Return type captured while checking an unannotated closure body (a Return
     // whose enclosing fnRetType is unknown records its value type here).
     pendingClosureRet: Option<TypeKind>,
+    // Structs that are (or will be) JSON-capable: every struct with
+    // @derive(Json), pre-marked before any derive body is generated. Without
+    // this a self-referential derive (a struct whose own field is Vec<Self>)
+    // can't validate its own field type, since its toJson/fromJsonNode don't
+    // exist yet at the point its plan is computed — mirrors the TS oracle's
+    // jsonCapableStructs pre-pass.
+    jsonCapableStructs: HashMap<string, bool>,
 }
 
 pub fn newChecker(): Checker {
@@ -176,6 +183,7 @@ pub fn newChecker(): Checker {
         inReturn: false,
         expectedType: Option.None,
         pendingClosureRet: Option.None,
+        jsonCapableStructs: HashMap.new(),
     }
 }
 

@@ -319,17 +319,18 @@ pub fn parseStruct(p: &mut Parser): StructDecl {
     expect(p, TokKind.LBrace)
     var fields: Vec<StructField> = Vec.new()
     while !at(p, TokKind.RBrace) {
-        // Field attributes (`@iter inner: HashMap<T, bool>` in std/set.milo). Parsed and
-        // dropped: StructField carries none, and the ones that appear only direct
-        // iteration, which milo0 does not implement.
+        // Field attributes (`@iter inner: HashMap<T, bool>` in std/set.milo, or
+        // `@json("wire_name")` for a @derive(Json) rename). Kept only for the
+        // deriver to read — codegen/most of the checker still ignores them.
+        var fieldAttrs: Vec<Attribute> = Vec.new()
         while at(p, TokKind.At) {
-            parseAttribute(p)
+            fieldAttrs.push(parseAttribute(p))
         }
         let fieldName = expect(p, TokKind.Ident).value
         expect(p, TokKind.Colon)
         let fieldType = parseType(p)
         fields.push(StructField {
-            name: fieldName, ty: fieldType
+            name: fieldName, ty: fieldType, attributes: fieldAttrs
         }
         )
         matchTok(p, TokKind.Comma)
@@ -1707,6 +1708,17 @@ pub fn parse(p: &mut Parser): Program {
             } else {
                 attrs.push(parseAttribute(p))
             }
+        }
+
+        // `pub` carries no meaning for milo0 (visibility is oracle-only), so it is
+        // dropped here rather than modeled as a keyword. It must be skipped BEFORE
+        // the dispatch below, not after: previously an unrecognized leading `pub`
+        // fell through to the "skip unexpected token" catch-all, which restarted
+        // the loop and silently dropped any attrs (e.g. `@derive(Eq)`) already
+        // collected above — attrs are local to one iteration and only get attached
+        // to a decl parsed in that same iteration.
+        if at(p, TokKind.Ident) && peek(p).value == "pub" {
+            advance(p)
         }
 
         if at(p, TokKind.Import) || atFromKeyword(p) {

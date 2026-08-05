@@ -668,7 +668,7 @@ fn globStep(pat: &string, p: i64, ch: u8): Option<i64> {
 // Match one path segment (no '/' inside either side). Single backtrack point,
 // which is enough because the segment has no separator constraint to violate:
 // if a later '*' fails, widening an earlier '*' can never help.
-fn globMatchSegment(pat: &string, text: &string): bool {
+pub fn globMatchSegment(pat: &string, text: &string): bool {
     var p: i64 = 0
     var s: i64 = 0
     var starP: i64 = -1
@@ -763,6 +763,13 @@ fn globMatchSegments(pat: &Vec<string>, pi: i64, text: &Vec<string>, ti: i64): b
 // ordinary segment and dotfiles are not special-cased.
 pub fn globMatch(pattern: &string, text: &string): bool {
     let patSegs = pattern.split("/")
+    return globMatchSplitPattern(patSegs, text)
+}
+
+// The same match with the pattern's segments already split out. A caller testing one
+// pattern against thousands of paths — an ignore-rule set against a directory walk —
+// splits the pattern once instead of once per path.
+pub fn globMatchSplitPattern(patSegs: &Vec<string>, text: &string): bool {
     let textSegs = text.split("/")
     return globMatchSegments(patSegs, 0, textSegs, 0)
 }

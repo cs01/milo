@@ -26,6 +26,12 @@ from "std/string" import {
 from "std/os" import {
     isatty
 }
+from "std/env" import {
+    Env
+}
+from "std/strconv" import {
+    parseInt
+}
 from "./rgignore" import {
     IgnoreSet, inGitRepo, loadIgnoreSet, stackIgnores
 }
@@ -661,7 +667,27 @@ pub fn scanChunk(paths: Vec<string>, opts: RgOpts): Vec<ChunkItem> {
 // order and refilled one at a time, a slow chunk no longer stalls the other workers,
 // so throughput no longer needs oversubscription to hide stragglers.
 pub fn maxInflight(): i64 {
-    return 4
+    return inflightSetting()
+}
+
+// The knob exists so the basin above can be re-measured without a rebuild — the
+// optimum moves whenever the amount of work a worker does changes.
+pub fn inflightSetting(): i64 {
+    let raw = Env.getOr("MILO_RG_THREADS", "")
+    if raw.len == 0 {
+        return 4
+    }
+    match parseInt(raw) {
+        Option.Some(n) => {
+            if n > 0 {
+                return n
+            }
+            return 4
+        }
+        Option.None => {
+            return 4
+        }
+    }
 }
 
 // Files per chunk, once the pipeline is up to speed. Chunks start far smaller (see

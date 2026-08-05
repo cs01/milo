@@ -122,6 +122,23 @@ pub struct Cgen {
     abiExterns: HashMap<string, bool>,
     // names of emitted drop-helper fns (milo.drop.struct.X / .enum.X) — dedup
     dropHelpers: Vec<string>,
+    // Param-type hint for the closure about to be gen'd (index-aligned with its
+    // params), set by a caller that knows the expected type (e.g. Option/Result
+    // combinators know the payload type) right before genExpr on the closure expr.
+    // genClosure falls back to this ONLY for an unannotated param — codegen has no
+    // HIR carrying the checker's inferred type, so without this an untyped closure
+    // param silently defaults to i32 (wrong for anything wider, and fatal for a
+    // struct/string field access, which is exactly what these combinators need).
+    closureParamHint: Vec<string>,
+    // Whole-closure RETURN-type hint, for the rare case where the caller knows the
+    // exact expected type even though the closure itself is unannotated (e.g.
+    // Option<T>.orElse's callback must return this SAME Option<T> — T can't
+    // change). Needed because an unannotated `() => Option.None` has zero payload
+    // args, so genEnumLit's own bottom-up "infer from the payload" fallback has
+    // nothing to look at and would otherwise misroute to a nonexistent static
+    // method call. Empty = no hint (the ordinary unannotated-closure inference
+    // path runs instead).
+    closureRetHint: string,
 }
 
 pub fn cgenNew(): Cgen {
@@ -169,6 +186,8 @@ pub fn cgenNew(): Cgen {
         arch: "aarch64",
         abiExterns: HashMap.new(),
         dropHelpers: Vec.new(),
+        closureParamHint: Vec.new(),
+        closureRetHint: "",
     }
 }
 

@@ -2154,7 +2154,22 @@ pub fn checkOptionResultMethod(ck: &mut Checker, obj: &Expr, objType: &TypeKind,
                     }
                 }
                 consumeForwardedPayload(ck, obj, t)
-                return Option.Some(objType.clone())
+                // The result type is the CALLBACK's return type, not the receiver's own
+                // — that's the whole point of orElse for Result (F can legitimately
+                // differ from E). Returning objType here silently kept the OLD error
+                // type on any retype, which the checker would then wrongly accept.
+                //
+                // checkClosure never threads ck.expectedType's return side into an
+                // unannotated closure's own body walk (only params), so a bare
+                // zero-arg variant (`() => Option.None`) can't infer T bottom-up and
+                // comes back tyUnknown() here. For OPTION specifically that's still a
+                // sound answer — T can't change across orElse — so fall back to the
+                // receiver's own (T is exact); for Result, F genuinely can differ, so
+                // there's nothing safe to substitute and unknown must propagate.
+                if typeEq(retTy, tyUnknown()) && !isResult {
+                    return Option.Some(objType.clone())
+                }
+                return Option.Some(retTy)
             }
         }
     }

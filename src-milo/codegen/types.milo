@@ -1023,6 +1023,32 @@ pub fn resolveTyStr(cg: &Cgen, s: &string): string {
     return s.clone()
 }
 
+// Prefer the checker's own monomorphization key — built structurally from the AST
+// type, array size included — over the bracket-string round-trip in resolveTyStr.
+// astTypeStr lowers a fixed array to "Vec<T>" for RUNTIME-representation purposes
+// (a fixed array behaves like a %Vec at the value level), which loses the size and
+// so produces a different string than the checker's "arr_T_N" mangling when the
+// array sits inside a generic argument: `Option<[u8;16]>` must resolve to
+// "Option_arr_u8_16" (what checker/mono.milo registered), but resolveTyStr's scan
+// of the already-Vec-wrapped string can only reconstruct "Option_Vec_u8", which was
+// never registered — the `define`/`global` line then fell through to the raw
+// unresolved "Option<Vec<u8>>", which isn't valid LLVM. mangleAstTypeArg mirrors the
+// checker's mangleTypeName exactly (including "arr_" + size), so try it FIRST and
+// only fall back to the string path when it doesn't name a registered decl — Vec/
+// Heap/HashMap keep their built-in (non-mangled) runtime representation.
+pub fn resolveAstTy(cg: &Cgen, ty: &MiloType): string {
+    if ty.typeArgs.len > 0 && ty.name != "Vec" && ty.name != "Heap" && ty.name != "HashMap" {
+        let candidate = mangleAstTypeArg(ty)
+        if cg.structs.contains(candidate) {
+            return candidate
+        }
+        if cg.enums.contains(candidate) {
+            return candidate
+        }
+    }
+    return resolveTyStr(cg, astTypeStr(ty))
+}
+
 pub fn resolveFnName(cg: &Cgen, base: &string): string {
     if cg.fnRets.contains(base) {
         return base.clone()

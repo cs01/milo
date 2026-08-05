@@ -1,0 +1,79 @@
+// A generic function whose type parameter appears only INSIDE a container param must
+// infer it from the argument. Before this, `f<T>(v: Vec<T>)` called with a `Vec<i32>`
+// reported "cannot infer type parameter 'T'" and every call site needed a turbofish.
+
+fn countOf<T>(items: &Vec<T>): i64 {
+    return items.len()
+}
+
+fn sameLength<T>(a: &Vec<T>, b: &Vec<T>): bool {
+    return a.len() == b.len()
+}
+
+fn elementsEqual<T>(a: &Vec<T>, b: &Vec<T>): bool {
+    if a.len() != b.len() {
+        return false
+    }
+    for i in 0..a.len() {
+        if a[i] != b[i] {
+            return false
+        }
+    }
+    return true
+}
+
+fn takesByValue<T>(items: Vec<T>): i64 {
+    return items.len()
+}
+
+struct Pair<A, B> {
+    first: A,
+    second: B,
+}
+
+// Nested: T is two containers deep.
+fn firstLen<T>(pairs: &Vec<Pair<T, i64>>): i64 {
+    return pairs.len()
+}
+
+fn main(): void {
+    var nums: Vec<i32> = Vec.new()
+    nums.push(10)
+    nums.push(20)
+
+    var same: Vec<i32> = Vec.new()
+    same.push(10)
+    same.push(20)
+
+    var words: Vec<string> = Vec.new()
+    words.push("alpha")
+
+    print($"{countOf(nums)}")
+    print($"{countOf(words)}")
+    print($"{sameLength(nums, same)}")
+    print($"{elementsEqual(nums, same)}")
+
+    var different: Vec<i32> = Vec.new()
+    different.push(10)
+    different.push(99)
+    print($"{elementsEqual(nums, different)}")
+
+    var owned: Vec<i64> = Vec.new()
+    owned.push(1)
+    print($"{takesByValue(owned)}")
+
+    var pairs: Vec<Pair<string, i64>> = Vec.new()
+    let pair: Pair<string, i64> = Pair {
+        first: "x", second: 1
+    }
+    pairs.push(pair)
+    print($"{firstLen(pairs)}")
+}
+
+// @expect: 2
+// @expect: 1
+// @expect: true
+// @expect: true
+// @expect: false
+// @expect: 1
+// @expect: 1

@@ -2,7 +2,7 @@
 system: milo-first-inner-loop
 purpose: whether a Milo-hosted compiler can have a fast edit/test loop, and the prerequisites that decide it
 key-files: src/main.ts, src/codegen.ts, tests/run.test.ts, src-milo/, docs/plans/compiler-host-language.md
-update-when: parallel codegen units land, `milo test` gains a real runner, or a port slice actually starts
+update-when: `src-milo` is un-rotted, the IR differential harness lands, or a port slice actually starts
 last-verified: 2026-08-04
 -->
 
@@ -21,8 +21,10 @@ compiler-rebuild step is the whole risk, it is 95% clang, and it is only surviva
 parallel codegen units land first. Two of the three prerequisites pay for themselves for
 every Milo user whether or not the port ever finishes.
 
-**Status: prerequisite 1 shipped 2026-08-04** — parallel codegen units are in and measured
-(1.2–2.0x end-to-end, 5x on the clang step). Prerequisite 2, a real `milo test`, is next.
+**Status: prerequisites 1 and 2 shipped 2026-08-04** — parallel codegen units are in and
+measured (1.2–2.0x end-to-end, 5x on the clang step), and `milo test` is now a real runner
+(process-per-test isolation, parallel, `-t`, generic assertions). Next is un-rotting
+`src-milo` and standing up the IR differential harness.
 
 ---
 
@@ -176,20 +178,31 @@ sweep costs the same modulo per-invocation overhead — where a native Milo bina
 ~1ms against bun's ~28ms, across 577 invocations. The test cycle is not an argument against
 the port.
 
-**What is missing is a runner.** `milo test` today:
+**The runner — SHIPPED 2026-08-04.** `milo test` was previously a regex scrape of
+`fn testX(` plus a generated `main` that ran every test in one process, serially, with no
+name filter: one trap ended the file and the count was papered over with
+`totalPassed += Math.max(0, testFns.length - 1)`. It is now:
 
-- discovers `*_test.milo`, scrapes `fn testX(` with a **regex**, appends a generated `main`
-- runs files **serially**, one binary each, no parallelism
-- **no name filter** — no `-t` equivalent, so there is no targeted-run story at all
-- **no per-test isolation**: a trap kills the rest of the file, and the runner papers over
-  the count with `totalPassed += Math.max(0, testFns.length - 1)`
-- `std/testing` offers 6 helpers — `assert`, `assertMsg`, `assertBool`, `assertEqual` (i32),
-  `assertEqual64`, `assertStrEqual`. No floats, no containers, no generic equality.
-- **zero `*_test.milo` files exist in this repo.** It is unused infrastructure.
+- **Discovery from the parsed AST**, not the source text — a `fn testFoo(` in a comment or
+  string is not a test, and one written unusually is not missed. A `test*` function that
+  cannot run (takes parameters, is generic) is **reported as skipped with a reason**.
+- **One compile per file, one process per test.** That is what buys isolation: a failed
+  assert, overflow, out-of-bounds or unwrap-on-`None` fails only its own test. Locked by
+  `tests/miloTestRunner.test.ts`, which asserts a trapping file still reports 2 pass / 2 fail.
+- **Parallel**, pool sized like the rest of the repo's fan-out (`MILO_TEST_JOBS`), every
+  child guarded with a memory cap and a 30s timeout.
+- **`-t <pattern>`**, substring or regex, and a pattern matching nothing exits 1 rather
+  than reporting a vacuous green run.
+- **Generic assertions** in `std/testing`: `assertEq`/`assertNe` work on any type `==`
+  accepts and print both sides, `assertNear` for floats, `assertVecEq` for containers,
+  plus `assertTrue`/`assertFalse`/`assertContains`. All take `&T`, so asserting on a value
+  does not move it.
 
-You cannot host a compiler's own suite on that. It needs: process-per-test isolation,
-parallel execution, a name filter, and generic assertions. That is a real project, and it
-is the prerequisite everyone forgets when they say "just rewrite it in Milo".
+`assertVecEq` needed a checker fix to be callable at all: generic inference only matched
+the top level of a parameter type, so `fn f<T>(v: &Vec<T>)` could not infer `T` from a
+`Vec<i32>` and every call site needed a turbofish. The structural unifier the checker
+already used for return hints is now applied to arguments too (fixture
+`genericContainerInfer`).
 
 ---
 
@@ -197,8 +210,8 @@ is the prerequisite everyone forgets when they say "just rewrite it in Milo".
 
 1. ~~**Parallel codegen units.**~~ **DONE 2026-08-04** — 1.2–2.0x end-to-end, 5x on the
    clang step alone, 824/824 tests green with it forced on every compile.
-2. **A real `milo test`.** Isolation, parallelism, `-t`, generic assertions. Also
-   independent, and it is the thing that lets Milo projects outside this repo test at all.
+2. ~~**A real `milo test`.**~~ **DONE 2026-08-04** — process-per-test isolation, parallel,
+   `-t`, generic assertions; locked by `tests/miloTestRunner.test.ts`.
 3. **Un-rot `src-milo`.** Its parser cannot read post-coherence stdlib syntax (`Some(...)`
    ctors, `Type.method()` calls), so all 168 manifest fixtures die at bundled-std line 427.
    Bounded and mechanical.
@@ -212,8 +225,9 @@ is the prerequisite everyone forgets when they say "just rewrite it in Milo".
    reference-heavy and the worst fit for second-class refs; it goes last, when everything
    else is proven.
 
-Items 1–2 are the ones to fund now. They are useful unconditionally, and they are precisely
-what converts "Milo-first" from a tarpit into a decision you can reverse cheaply.
+Items 1–2 landed 2026-08-04 and were useful unconditionally, exactly as argued: both ship
+to every Milo user whether or not a port follows. Items 3–4 are next, and item 4 is the one
+that produces the number — "N/339 byte-identical" — that says whether to fund item 5.
 
 ---
 

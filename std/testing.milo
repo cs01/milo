@@ -1,7 +1,17 @@
-// std/testing — test assertion functions
+// std/testing — assertions for `milo test`.
+//
+// A test is a top-level `fn test*()` taking no parameters, in a file named `*_test.milo`.
+// `milo test` compiles the file once and runs each test in its OWN process, so an
+// assertion failure (or a trap: overflow, bounds, unwrap-on-None) ends only that test.
+//
+// Assertions take `&T`, not `T`, so asserting on a value does not move it — a test can
+// keep using the thing it just checked.
 
 from "std/os" import {
     exit
+}
+from "std/math" import {
+    Math
 }
 
 fn testFail(): void {
@@ -22,6 +32,68 @@ pub fn assertMsg(cond: bool, msg: string): void {
     }
 }
 
+pub fn assertTrue(cond: bool): void {
+    if !cond {
+        eprint("  assertTrue failed: expected true, got false")
+        testFail()
+    }
+}
+
+pub fn assertFalse(cond: bool): void {
+    if cond {
+        eprint("  assertFalse failed: expected false, got true")
+        testFail()
+    }
+}
+
+// The general equality assertion: works for any type `==` accepts, and prints both sides.
+// Prefer this over the width-specific helpers below, which predate it.
+pub fn assertEq<T>(got: &T, expected: &T): void {
+    if got != expected {
+        eprint($"  assertEq failed: got {got}, expected {expected}")
+        testFail()
+    }
+}
+
+pub fn assertNe<T>(got: &T, unexpected: &T): void {
+    if got == unexpected {
+        eprint($"  assertNe failed: both sides are {got}")
+        testFail()
+    }
+}
+
+// Floats: never compare with `==`. `0.1 + 0.2 != 0.3` in binary floating point, so an
+// exact assertion on computed floats fails for a program that is correct.
+pub fn assertNear(got: f64, expected: f64, tolerance: f64): void {
+    let delta = Math.abs(got - expected)
+    if delta > tolerance {
+        eprint($"  assertNear failed: got {got}, expected {expected} (off by {delta}, tolerance {tolerance})")
+        testFail()
+    }
+}
+
+pub fn assertVecEq<T>(got: &Vec<T>, expected: &Vec<T>): void {
+    if got.len() != expected.len() {
+        eprint($"  assertVecEq failed: got {got.len()} element(s), expected {expected.len()}")
+        testFail()
+        return
+    }
+    for i in 0..got.len() {
+        if got[i] != expected[i] {
+            eprint($"  assertVecEq failed at index {i}: got {got[i]}, expected {expected[i]}")
+            testFail()
+            return
+        }
+    }
+}
+
+pub fn assertContains(haystack: &string, needle: &string): void {
+    if !haystack.contains(needle) {
+        eprint($"  assertContains failed: '{haystack}' does not contain '{needle}'")
+        testFail()
+    }
+}
+
 pub fn assertEqual(got: i32, expected: i32): void {
     if got != expected {
         eprint($"  assertEqual failed: got {got}, expected {expected}")
@@ -38,14 +110,14 @@ pub fn assertEqual64(got: i64, expected: i64): void {
 
 pub fn assertStrEqual(got: &string, expected: &string): void {
     if got != expected {
-        eprint("  assertStrEqual failed")
+        eprint($"  assertStrEqual failed: got '{got}', expected '{expected}'")
         testFail()
     }
 }
 
 pub fn assertBool(got: bool, expected: bool): void {
     if got != expected {
-        eprint("  assertBool failed")
+        eprint($"  assertBool failed: got {got}, expected {expected}")
         testFail()
     }
 }

@@ -988,60 +988,159 @@ function collectTestFiles(dir: string): string[] {
   return out.sort();
 }
 
-async function runTests(testFiles: string[], target: TargetInfo, optFlag: string, warningConfig?: WarningConfig) {
-  let totalPassed = 0;
-  let totalFailed = 0;
-  const failures: string[] = [];
+// A test is a top-level `fn test*()` taking no parameters. Discovered from the parsed AST,
+// never by scanning the text: a regex over source counts `fn testFoo(` inside a comment or
+// a string literal, and — worse — misses one written differently, which is a test silently
+// not running. Anything named `test*` that is NOT a valid test is reported, not skipped.
+type TestDiscovery = { tests: string[]; rejected: { name: string; why: string }[] };
+
+function discoverTests(source: string, file: string): TestDiscovery {
+  const tokens = new Lexer(source).tokenize();
+  const program = new Parser(tokens, source, file).parse();
+  const tests: string[] = [];
+  const rejected: { name: string; why: string }[] = [];
+  for (const fn of program.functions) {
+    if (!fn.name.startsWith("test")) continue;
+    if (fn.isExtern) continue;
+    if (fn.typeParams.length > 0) { rejected.push({ name: fn.name, why: "generic functions cannot be run as tests" }); continue; }
+    if (fn.params.length > 0) { rejected.push({ name: fn.name, why: `takes ${fn.params.length} parameter(s); a test takes none` }); continue; }
+    tests.push(fn.name);
+  }
+  return { tests, rejected };
+}
+
+/**
+ * A `main` that runs ONE test, named by argv[1]. One compile per file, one process per
+ * test: that is what buys isolation, because a test that traps (overflow, bounds, failed
+ * assert) takes down only its own process and the rest of the file still reports.
+ * The import is aliased so it cannot collide with the test file's own imports — a
+ * duplicate declaration in one file is a resolver error.
+ */
+function testHarnessMain(tests: string[]): string {
+  const dispatch = tests.map(name =>
+    `    if __miloTestName == "${name}" {\n        ${name}()\n        return 0\n    }`).join("\n");
+  return [
+    ``,
+    `from "std/args" import { args as __miloTestArgv }`,
+    ``,
+    `fn main(): i32 {`,
+    `    let __miloTestArgs = __miloTestArgv()`,
+    `    if __miloTestArgs.len() < 2 {`,
+    `        eprint("milo test harness: expected a test name")`,
+    `        return 2`,
+    `    }`,
+    `    let __miloTestName = __miloTestArgs[1]`,
+    dispatch,
+    `    eprint($"milo test harness: no such test {__miloTestName}")`,
+    `    return 2`,
+    `}`,
+    ``,
+  ].join("\n");
+}
+
+const TEST_TIMEOUT_MS = 30_000;
+const TEST_MEM_MB = 2048;
+
+async function mapPool<T>(items: T[], limit: number, fn: (item: T, index: number) => Promise<void>): Promise<void> {
+  let next = 0;
+  const worker = async () => { while (next < items.length) { const i = next++; await fn(items[i]!, i); } };
+  await Promise.all(Array.from({ length: Math.max(1, Math.min(limit, items.length)) }, worker));
+}
+
+type TestOutcome = { file: string; name: string; ok: boolean; ms: number; output: string };
+
+async function runTests(
+  testFiles: string[],
+  target: TargetInfo,
+  optFlag: string,
+  warningConfig?: WarningConfig,
+  filter?: string,
+) {
+  let re: RegExp | null = null;
+  if (filter) {
+    try { re = new RegExp(filter); } catch { re = null; }
+  }
+  const matches = (file: string, name: string) =>
+    !filter || (re ? re.test(name) || re.test(`${file} > ${name}`) : name.includes(filter));
+
+  // Test binaries are milo-built and can hang or run away, so every child stays guarded
+  // and the pool is sized the same way the rest of the repo sizes clang fan-out.
+  const jobs = Number(process.env.MILO_TEST_JOBS)
+    || Math.min(8, Math.max(2, (navigator.hardwareConcurrency ?? 8) - 2));
+
+  const outcomes: TestOutcome[] = [];
+  const compileErrors: { file: string; message: string }[] = [];
+  let skipped = 0;
+  const started = Date.now();
 
   for (const file of testFiles) {
     const source = readFileSync(file, "utf-8");
-    const testFnRegex = /^fn\s+(test\w+)\s*\(/gm;
-    const testFns: string[] = [];
-    let m;
-    while ((m = testFnRegex.exec(source)) !== null) testFns.push(m[1]);
-    if (testFns.length === 0) continue;
-
-    console.log(`\n${file}`);
-
-    // generate main that calls each test, one at a time
-    let mainSrc = "\nfn main(): i32 {\n";
-    for (const name of testFns) {
-      mainSrc += `    eprint("  ${name} ... ")\n`;
-      mainSrc += `    ${name}()\n`;
-      mainSrc += `    eprint("ok")\n`;
+    let found: TestDiscovery;
+    try {
+      found = discoverTests(source, file);
+    } catch (e: any) {
+      compileErrors.push({ file, message: e.message ?? String(e) });
+      continue;
     }
-    mainSrc += "    return 0\n}\n";
+    for (const r of found.rejected) {
+      console.log(`${DIM}  ${file}: skipping ${r.name} — ${r.why}${RESET}`);
+    }
+    const selected = found.tests.filter(name => matches(file, name));
+    skipped += found.tests.length - selected.length;
+    if (selected.length === 0) continue;
 
-    const fullSource = source + mainSrc;
     let bin: string;
     try {
-      bin = compileSourceToBinary(fullSource, file, target, optFlag, warningConfig);
+      bin = compileSourceToBinary(source + testHarnessMain(found.tests), file, target, optFlag, warningConfig);
     } catch (e: any) {
-      console.error(`  compile error: ${e.message}`);
-      totalFailed += testFns.length;
+      compileErrors.push({ file, message: e.message ?? String(e) });
       continue;
     }
 
+    console.log(`\n${BOLD}${file}${RESET}`);
+    const fileOutcomes: TestOutcome[] = new Array(selected.length);
     try {
-      // guardedRun, not spawnSync: test binaries are milo-built and untrusted
-      const result = await guardedRun(bin, [], { timeoutMs: 30000, memMb: 2048 });
-      if (result.stderr) process.stderr.write(result.stderr);
-      if (result.code === 0) {
-        totalPassed += testFns.length;
-      } else {
-        totalFailed++;
-        totalPassed += Math.max(0, testFns.length - 1);
-        failures.push(file);
-      }
+      await mapPool(selected, jobs, async (name, i) => {
+        const t0 = Date.now();
+        const r = await guardedRun(bin, [name], { timeoutMs: TEST_TIMEOUT_MS, memMb: TEST_MEM_MB });
+        fileOutcomes[i] = {
+          file, name, ok: r.code === 0, ms: Date.now() - t0,
+          output: `${r.stdout ?? ""}${r.stderr ?? ""}`,
+        };
+      });
     } finally {
       try { unlinkSync(bin); } catch {}
     }
+    // Printed after the pool so concurrent tests cannot interleave their lines.
+    for (const o of fileOutcomes) {
+      if (!o) continue;
+      console.log(o.ok ? `  ${GREEN}✓${RESET} ${o.name} ${DIM}[${o.ms}ms]${RESET}`
+                       : `  ✗ ${o.name} ${DIM}[${o.ms}ms]${RESET}`);
+      if (!o.ok && o.output.trim()) {
+        for (const line of o.output.trimEnd().split("\n")) console.log(`      ${line}`);
+      }
+      outcomes.push(o);
+    }
   }
 
-  console.log(`\nresults: ${totalPassed} passed, ${totalFailed} failed, ${totalPassed + totalFailed} total`);
-  if (totalFailed > 0) {
+  const passed = outcomes.filter(o => o.ok).length;
+  const failed = outcomes.length - passed;
+  const elapsed = ((Date.now() - started) / 1000).toFixed(2);
+  console.log("");
+  if (compileErrors.length) {
+    for (const c of compileErrors) console.log(`${c.file}: compile error\n  ${c.message.split("\n").join("\n  ")}`);
+  }
+  const skipNote = skipped > 0 ? `, ${skipped} filtered out` : "";
+  const noun = outcomes.length === 1 ? "test" : "tests";
+  console.log(`${passed} pass, ${failed} fail${skipNote} — ${outcomes.length} ${noun} in ${elapsed}s`);
+  if (failed > 0) {
     console.log("failures:");
-    for (const f of failures) console.log(`  ${f}`);
+    for (const o of outcomes) if (!o.ok) console.log(`  ${o.file} > ${o.name}`);
+  }
+  if (failed > 0 || compileErrors.length > 0) process.exit(1);
+  // A filter that matched nothing is a mistyped pattern, not a green run.
+  if (outcomes.length === 0 && filter) {
+    console.log(`no test matched '${filter}'`);
     process.exit(1);
   }
 }
@@ -1632,6 +1731,9 @@ async function main() {
     console.log("  run <file> [args]      compile and run (no artifacts left behind)");
     console.log("  build <file> [-o out]  compile to executable");
     console.log("  test [file|dir...]     run tests (*_test.milo, recursive in a dir; cwd by default)");
+    console.log("                         a test is a top-level `fn test*()` with no parameters;");
+    console.log("                         each runs in its own process, so a trap fails only that test");
+    console.log("                         -t <pattern>  run only tests matching (substring or regex)");
     console.log("  emit-ast <file>        emit the parsed AST as JSON (--all imports, --spans keep spans)");
     console.log("  emit-hir <file>        emit the typed HIR as JSON (--all full module, --spans keep spans)");
     console.log("  emit-ir <file>         emit LLVM IR");
@@ -1830,7 +1932,23 @@ async function main() {
   // Ahead of the source check below: `milo test` takes files OR directories, and a bare
   // `milo test` (no positional at all) means "this directory".
   if (cmd === "test") {
-    const testArgs = args.slice(1);
+    let testArgs = args.slice(1);
+    // `-t <pattern>` / `--test-name-pattern <pattern>` filter, stripped before parseArgs so
+    // the pattern is never mistaken for the source positional.
+    let testFilter: string | undefined;
+    const filtered: string[] = [];
+    for (let i = 0; i < testArgs.length; i++) {
+      const a = testArgs[i]!;
+      if (a === "-t" || a === "--test-name-pattern") {
+        if (i + 1 >= testArgs.length) { console.error(`error: ${a} expects a pattern`); process.exit(1); }
+        testFilter = testArgs[++i];
+      } else if (a.startsWith("--test-name-pattern=")) {
+        testFilter = a.slice("--test-name-pattern=".length);
+      } else {
+        filtered.push(a);
+      }
+    }
+    testArgs = filtered;
     const { source: testSource, rest: testRest, optFlag: testOpt, warningConfig: testWc } = parseArgs(testArgs);
     const roots = [testSource, ...testRest].filter((a): a is string => a != null && !a.startsWith("-"));
     const files: string[] = [];
@@ -1845,7 +1963,7 @@ async function main() {
       }
     }
     if (files.length === 0) { console.error("no test files found"); process.exit(1); }
-    await runTests(files, target, testOpt, testWc);
+    await runTests(files, target, testOpt, testWc, testFilter);
     return;
   }
 

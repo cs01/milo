@@ -3119,6 +3119,472 @@ pub fn genVecSortByKeyCg(cg: &mut Cgen, lv: &Val, elemTy: &string, keyTy: &strin
     }
 }
 
+// get(i)/first()/last() -> Option<T>: the total reads. `idxV` is a pre-widened
+// i64 temp for "get" (ignored for first/last, which compute their own index).
+// Mirrors genVecPop's Option-build shape but never shrinks the Vec — the
+// element is deep-cloned out (genCloneOfLoaded) so a String/Vec/struct element
+// isn't left aliased between the live Vec slot and the returned Option.
+pub fn genVecGetOpt(cg: &mut Cgen, obj: &Val, elemTy: &string, mode: &string, idxV: &string): Val {
+    let elemLl = llType(elemTy)
+    let d = nextTemp(cg)
+    emit(cg, "  " + d + " = extractvalue %Vec " + obj.v + ", 0\n")
+    let len = nextTemp(cg)
+    emit(cg, "  " + len + " = extractvalue %Vec " + obj.v + ", 1\n")
+
+    var idx = idxV.clone()
+    if mode == "first" {
+        idx = "0"
+    } else if mode == "last" {
+        let li = nextTemp(cg)
+        emit(cg, "  " + li + " = sub i64 " + len + ", 1\n")
+        idx = li
+    }
+
+    let optName = stripPercent(resolveTyStr(cg, "Option<" + elemTy.clone() + ">"))
+    let optTy = "%" + optName
+    let someTag = lookupVariantTag(cg, optName, "Some")
+    let noneTag = lookupVariantTag(cg, optName, "None")
+    let resAddr = nextTemp(cg)
+    emit(cg, "  " + resAddr + " = alloca " + optTy + "\n")
+    let tagPtr = nextTemp(cg)
+    emit(cg, "  " + tagPtr + " = getelementptr " + optTy + ", ptr " + resAddr + ", i32 0, i32 0\n")
+    emit(cg, "  store i32 " + noneTag.toString() + ", ptr " + tagPtr + "\n")
+
+    // Unsigned bounds check: for last() on an empty Vec, idx = 0 - 1 wraps to
+    // u64::MAX, which still fails `< len` — no separate empty-check needed.
+    let inBounds = nextTemp(cg)
+    emit(cg, "  " + inBounds + " = icmp ult i64 " + idx + ", " + len + "\n")
+    let someLbl = nextLabel(cg, "vecget.some")
+    let endLbl = nextLabel(cg, "vecget.end")
+    emit(cg, "  br i1 " + inBounds + ", label %" + someLbl + ", label %" + endLbl + "\n")
+    emitLabel(cg, someLbl)
+    let elemPtr = nextTemp(cg)
+    emit(cg, "  " + elemPtr + " = getelementptr " + elemLl + ", ptr " + d + ", i64 " + idx + "\n")
+    let ev = nextTemp(cg)
+    emit(cg, "  " + ev + " = load " + elemLl + ", ptr " + elemPtr + "\n")
+    let evc = genCloneOfLoaded(cg, ev, elemTy)
+    emit(cg, "  store i32 " + someTag.toString() + ", ptr " + tagPtr + "\n")
+    let payPtr = nextTemp(cg)
+    emit(cg, "  " + payPtr + " = getelementptr " + optTy + ", ptr " + resAddr + ", i32 0, i32 1\n")
+    let pfp = nextTemp(cg)
+    emit(cg, "  " + pfp + " = getelementptr { " + elemLl + " }, ptr " + payPtr + ", i32 0, i32 0\n")
+    emit(cg, "  store " + elemLl + " " + evc + ", ptr " + pfp + "\n")
+    emit(cg, "  br label %" + endLbl + "\n")
+    emitLabel(cg, endLbl)
+    let r = nextTemp(cg)
+    emit(cg, "  " + r + " = load " + optTy + ", ptr " + resAddr + "\n")
+    return Val {
+        v: r, ty: optName
+    }
+}
+
+// min()/max() -> Option<T>: a linear scan tracking the winning INDEX (not the
+// value), so a String winner is cloned once at the end instead of on every
+// improvement — same trick genVecSortByKeyCg's caller and genKeyGt already
+// use for comparisons. `wantMax` picks the direction; "a beats b" for min is
+// just genKeyGt with the operands swapped (b > a), no separate "lt" needed.
+pub fn genVecMinMax(cg: &mut Cgen, obj: &Val, elemTy: &string, wantMax: bool): Val {
+    let elemLl = llType(elemTy)
+    let d = nextTemp(cg)
+    emit(cg, "  " + d + " = extractvalue %Vec " + obj.v + ", 0\n")
+    let len = nextTemp(cg)
+    emit(cg, "  " + len + " = extractvalue %Vec " + obj.v + ", 1\n")
+
+    let optName = stripPercent(resolveTyStr(cg, "Option<" + elemTy.clone() + ">"))
+    let optTy = "%" + optName
+    let someTag = lookupVariantTag(cg, optName, "Some")
+    let noneTag = lookupVariantTag(cg, optName, "None")
+    let resAddr = nextTemp(cg)
+    emit(cg, "  " + resAddr + " = alloca " + optTy + "\n")
+    let tagPtr = nextTemp(cg)
+    emit(cg, "  " + tagPtr + " = getelementptr " + optTy + ", ptr " + resAddr + ", i32 0, i32 0\n")
+    emit(cg, "  store i32 " + noneTag.toString() + ", ptr " + tagPtr + "\n")
+
+    let empty = nextTemp(cg)
+    emit(cg, "  " + empty + " = icmp eq i64 " + len + ", 0\n")
+    let scanLbl = nextLabel(cg, "vecmm.scan")
+    let endLbl = nextLabel(cg, "vecmm.end")
+    emit(cg, "  br i1 " + empty + ", label %" + endLbl + ", label %" + scanLbl + "\n")
+    emitLabel(cg, scanLbl)
+
+    let bestAddr = nextTemp(cg)
+    emit(cg, "  " + bestAddr + " = alloca i64\n")
+    emit(cg, "  store i64 0, ptr " + bestAddr + "\n")
+    let iAddr = nextTemp(cg)
+    emit(cg, "  " + iAddr + " = alloca i64\n")
+    emit(cg, "  store i64 1, ptr " + iAddr + "\n")
+    let condLbl = nextLabel(cg, "vecmm.cond")
+    let bodyLbl = nextLabel(cg, "vecmm.body")
+    let betterLbl = nextLabel(cg, "vecmm.better")
+    let stepLbl = nextLabel(cg, "vecmm.step")
+    let doneLbl = nextLabel(cg, "vecmm.done")
+    emit(cg, "  br label %" + condLbl + "\n")
+    emitLabel(cg, condLbl)
+    let i = nextTemp(cg)
+    emit(cg, "  " + i + " = load i64, ptr " + iAddr + "\n")
+    let more = nextTemp(cg)
+    emit(cg, "  " + more + " = icmp ult i64 " + i + ", " + len + "\n")
+    emit(cg, "  br i1 " + more + ", label %" + bodyLbl + ", label %" + doneLbl + "\n")
+    emitLabel(cg, bodyLbl)
+    let curPtr = nextTemp(cg)
+    emit(cg, "  " + curPtr + " = getelementptr " + elemLl + ", ptr " + d + ", i64 " + i + "\n")
+    let cur = nextTemp(cg)
+    emit(cg, "  " + cur + " = load " + elemLl + ", ptr " + curPtr + "\n")
+    let bestIdx = nextTemp(cg)
+    emit(cg, "  " + bestIdx + " = load i64, ptr " + bestAddr + "\n")
+    let bestPtr = nextTemp(cg)
+    emit(cg, "  " + bestPtr + " = getelementptr " + elemLl + ", ptr " + d + ", i64 " + bestIdx + "\n")
+    let best = nextTemp(cg)
+    emit(cg, "  " + best + " = load " + elemLl + ", ptr " + bestPtr + "\n")
+    var wins = ""
+    if wantMax {
+        wins = genKeyGt(cg, elemTy, elemLl, cur, best)
+    } else {
+        wins = genKeyGt(cg, elemTy, elemLl, best, cur)
+    }
+    emit(cg, "  br i1 " + wins + ", label %" + betterLbl + ", label %" + stepLbl + "\n")
+    emitLabel(cg, betterLbl)
+    emit(cg, "  store i64 " + i + ", ptr " + bestAddr + "\n")
+    emit(cg, "  br label %" + stepLbl + "\n")
+    emitLabel(cg, stepLbl)
+    let iNext = nextTemp(cg)
+    emit(cg, "  " + iNext + " = add i64 " + i + ", 1\n")
+    emit(cg, "  store i64 " + iNext + ", ptr " + iAddr + "\n")
+    emit(cg, "  br label %" + condLbl + "\n")
+    emitLabel(cg, doneLbl)
+    let winIdx = nextTemp(cg)
+    emit(cg, "  " + winIdx + " = load i64, ptr " + bestAddr + "\n")
+    let winPtr = nextTemp(cg)
+    emit(cg, "  " + winPtr + " = getelementptr " + elemLl + ", ptr " + d + ", i64 " + winIdx + "\n")
+    let winVal = nextTemp(cg)
+    emit(cg, "  " + winVal + " = load " + elemLl + ", ptr " + winPtr + "\n")
+    let winC = genCloneOfLoaded(cg, winVal, elemTy)
+    emit(cg, "  store i32 " + someTag.toString() + ", ptr " + tagPtr + "\n")
+    let payPtr = nextTemp(cg)
+    emit(cg, "  " + payPtr + " = getelementptr " + optTy + ", ptr " + resAddr + ", i32 0, i32 1\n")
+    let pfp = nextTemp(cg)
+    emit(cg, "  " + pfp + " = getelementptr { " + elemLl + " }, ptr " + payPtr + ", i32 0, i32 0\n")
+    emit(cg, "  store " + elemLl + " " + winC + ", ptr " + pfp + "\n")
+    emit(cg, "  br label %" + endLbl + "\n")
+    emitLabel(cg, endLbl)
+    let r = nextTemp(cg)
+    emit(cg, "  " + r + " = load " + optTy + ", ptr " + resAddr + "\n")
+    return Val {
+        v: r, ty: optName
+    }
+}
+
+// indexOf(needle) -> Option<i64>: linear scan for the first equal element
+// (`find` answers "which value", this answers "where"). Gated by the checker
+// to comparable element types only, so the equality test never has to handle
+// a struct.
+pub fn genVecIndexOf(cg: &mut Cgen, obj: &Val, elemTy: &string, needle: &Val): Val {
+    let elemLl = llType(elemTy)
+    let d = nextTemp(cg)
+    emit(cg, "  " + d + " = extractvalue %Vec " + obj.v + ", 0\n")
+    let len = nextTemp(cg)
+    emit(cg, "  " + len + " = extractvalue %Vec " + obj.v + ", 1\n")
+
+    let optName = stripPercent(resolveTyStr(cg, "Option<i64>"))
+    let optTy = "%" + optName
+    let someTag = lookupVariantTag(cg, optName, "Some")
+    let noneTag = lookupVariantTag(cg, optName, "None")
+    let resAddr = nextTemp(cg)
+    emit(cg, "  " + resAddr + " = alloca " + optTy + "\n")
+    let tagPtr = nextTemp(cg)
+    emit(cg, "  " + tagPtr + " = getelementptr " + optTy + ", ptr " + resAddr + ", i32 0, i32 0\n")
+    emit(cg, "  store i32 " + noneTag.toString() + ", ptr " + tagPtr + "\n")
+
+    let iAddr = nextTemp(cg)
+    emit(cg, "  " + iAddr + " = alloca i64\n")
+    emit(cg, "  store i64 0, ptr " + iAddr + "\n")
+    let condLbl = nextLabel(cg, "vecidx.cond")
+    let bodyLbl = nextLabel(cg, "vecidx.body")
+    let foundLbl = nextLabel(cg, "vecidx.found")
+    let stepLbl = nextLabel(cg, "vecidx.step")
+    let endLbl = nextLabel(cg, "vecidx.end")
+    emit(cg, "  br label %" + condLbl + "\n")
+    emitLabel(cg, condLbl)
+    let i = nextTemp(cg)
+    emit(cg, "  " + i + " = load i64, ptr " + iAddr + "\n")
+    let more = nextTemp(cg)
+    emit(cg, "  " + more + " = icmp ult i64 " + i + ", " + len + "\n")
+    emit(cg, "  br i1 " + more + ", label %" + bodyLbl + ", label %" + endLbl + "\n")
+    emitLabel(cg, bodyLbl)
+    let elemPtr = nextTemp(cg)
+    emit(cg, "  " + elemPtr + " = getelementptr " + elemLl + ", ptr " + d + ", i64 " + i + "\n")
+    let elemVal = nextTemp(cg)
+    emit(cg, "  " + elemVal + " = load " + elemLl + ", ptr " + elemPtr + "\n")
+    var eq = ""
+    if elemLl == "%String" {
+        eq = genStringEq(cg, elemVal, needle.v, true).v
+    } else if elemLl == "double" || elemLl == "float" {
+        let fe = nextTemp(cg)
+        emit(cg, "  " + fe + " = fcmp oeq " + elemLl + " " + elemVal + ", " + needle.v + "\n")
+        eq = fe
+    } else {
+        let ie = nextTemp(cg)
+        emit(cg, "  " + ie + " = icmp eq " + elemLl + " " + elemVal + ", " + needle.v + "\n")
+        eq = ie
+    }
+    emit(cg, "  br i1 " + eq + ", label %" + foundLbl + ", label %" + stepLbl + "\n")
+    emitLabel(cg, foundLbl)
+    emit(cg, "  store i32 " + someTag.toString() + ", ptr " + tagPtr + "\n")
+    let payPtr = nextTemp(cg)
+    emit(cg, "  " + payPtr + " = getelementptr " + optTy + ", ptr " + resAddr + ", i32 0, i32 1\n")
+    emit(cg, "  store i64 " + i + ", ptr " + payPtr + "\n")
+    emit(cg, "  br label %" + endLbl + "\n")
+    emitLabel(cg, stepLbl)
+    let iNext = nextTemp(cg)
+    emit(cg, "  " + iNext + " = add i64 " + i + ", 1\n")
+    emit(cg, "  store i64 " + iNext + ", ptr " + iAddr + "\n")
+    emit(cg, "  br label %" + condLbl + "\n")
+    emitLabel(cg, endLbl)
+    let r = nextTemp(cg)
+    emit(cg, "  " + r + " = load " + optTy + ", ptr " + resAddr + "\n")
+    return Val {
+        v: r, ty: optName
+    }
+}
+
+// position(pred) -> Option<i64>: like genVecFindAnyAll's find mode, but the
+// payload is the index that matched rather than a clone of the element.
+pub fn genVecPosition(cg: &mut Cgen, obj: &Val, clv: &Val): Val {
+    let inElemLl = llType(unwrapVec(resolveTyStr(cg, obj.ty)))
+    let d = nextTemp(cg)
+    emit(cg, "  " + d + " = extractvalue %Vec " + obj.v + ", 0\n")
+    let len = nextTemp(cg)
+    emit(cg, "  " + len + " = extractvalue %Vec " + obj.v + ", 1\n")
+    let fp = nextTemp(cg)
+    emit(cg, "  " + fp + " = extractvalue %Closure " + clv.v + ", 0\n")
+    let env = nextTemp(cg)
+    emit(cg, "  " + env + " = extractvalue %Closure " + clv.v + ", 1\n")
+
+    let optName = stripPercent(resolveTyStr(cg, "Option<i64>"))
+    let optTy = "%" + optName
+    let someTag = lookupVariantTag(cg, optName, "Some")
+    let noneTag = lookupVariantTag(cg, optName, "None")
+    let resAddr = nextTemp(cg)
+    emit(cg, "  " + resAddr + " = alloca " + optTy + "\n")
+    let tagPtr = nextTemp(cg)
+    emit(cg, "  " + tagPtr + " = getelementptr " + optTy + ", ptr " + resAddr + ", i32 0, i32 0\n")
+    emit(cg, "  store i32 " + noneTag.toString() + ", ptr " + tagPtr + "\n")
+
+    let iAddr = nextTemp(cg)
+    emit(cg, "  " + iAddr + " = alloca i64\n")
+    emit(cg, "  store i64 0, ptr " + iAddr + "\n")
+    let condLbl = nextLabel(cg, "vecpos.cond")
+    let bodyLbl = nextLabel(cg, "vecpos.body")
+    let hitLbl = nextLabel(cg, "vecpos.hit")
+    let stepLbl = nextLabel(cg, "vecpos.step")
+    let endLbl = nextLabel(cg, "vecpos.end")
+    emit(cg, "  br label %" + condLbl + "\n")
+    emitLabel(cg, condLbl)
+    let i = nextTemp(cg)
+    emit(cg, "  " + i + " = load i64, ptr " + iAddr + "\n")
+    let lt = nextTemp(cg)
+    emit(cg, "  " + lt + " = icmp slt i64 " + i + ", " + len + "\n")
+    emit(cg, "  br i1 " + lt + ", label %" + bodyLbl + ", label %" + endLbl + "\n")
+    emitLabel(cg, bodyLbl)
+    let slot = nextTemp(cg)
+    emit(cg, "  " + slot + " = getelementptr " + inElemLl + ", ptr " + d + ", i64 " + i + "\n")
+    let hit = nextTemp(cg)
+    emit(cg, "  " + hit + " = call i1 " + fp + "(ptr " + env + ", ptr " + slot + ")\n")
+    emit(cg, "  br i1 " + hit + ", label %" + hitLbl + ", label %" + stepLbl + "\n")
+    emitLabel(cg, hitLbl)
+    emit(cg, "  store i32 " + someTag.toString() + ", ptr " + tagPtr + "\n")
+    let payPtr = nextTemp(cg)
+    emit(cg, "  " + payPtr + " = getelementptr " + optTy + ", ptr " + resAddr + ", i32 0, i32 1\n")
+    emit(cg, "  store i64 " + i + ", ptr " + payPtr + "\n")
+    emit(cg, "  br label %" + endLbl + "\n")
+    emitLabel(cg, stepLbl)
+    let iNext = nextTemp(cg)
+    emit(cg, "  " + iNext + " = add i64 " + i + ", 1\n")
+    emit(cg, "  store i64 " + iNext + ", ptr " + iAddr + "\n")
+    emit(cg, "  br label %" + condLbl + "\n")
+    emitLabel(cg, endLbl)
+    let r = nextTemp(cg)
+    emit(cg, "  " + r + " = load " + optTy + ", ptr " + resAddr + "\n")
+    return Val {
+        v: r, ty: optName
+    }
+}
+
+// retain(pred): filter's in-place twin — one pass, compacting keepers toward
+// the front; rejected elements are dropped where they sit (drop glue runs
+// exactly once per discard, matching truncate/clear above).
+pub fn genVecRetain(cg: &mut Cgen, addr: &string, vecTy: &string, clv: &Val): Val {
+    let elemTy = unwrapVec(resolveTyStr(cg, vecTy))
+    let elemLl = llType(elemTy)
+    let dataPtr = nextTemp(cg)
+    emit(cg, "  " + dataPtr + " = getelementptr %Vec, ptr " + addr + ", i32 0, i32 0\n")
+    let data = nextTemp(cg)
+    emit(cg, "  " + data + " = load ptr, ptr " + dataPtr + "\n")
+    let lenPtr = nextTemp(cg)
+    emit(cg, "  " + lenPtr + " = getelementptr %Vec, ptr " + addr + ", i32 0, i32 1\n")
+    let len = nextTemp(cg)
+    emit(cg, "  " + len + " = load i64, ptr " + lenPtr + "\n")
+    let fp = nextTemp(cg)
+    emit(cg, "  " + fp + " = extractvalue %Closure " + clv.v + ", 0\n")
+    let env = nextTemp(cg)
+    emit(cg, "  " + env + " = extractvalue %Closure " + clv.v + ", 1\n")
+
+    let iAddr = nextTemp(cg)
+    emit(cg, "  " + iAddr + " = alloca i64\n")
+    emit(cg, "  store i64 0, ptr " + iAddr + "\n")
+    let keptAddr = nextTemp(cg)
+    emit(cg, "  " + keptAddr + " = alloca i64\n")
+    emit(cg, "  store i64 0, ptr " + keptAddr + "\n")
+
+    let condLbl = nextLabel(cg, "vecret.cond")
+    let bodyLbl = nextLabel(cg, "vecret.body")
+    let keepLbl = nextLabel(cg, "vecret.keep")
+    let dropLbl = nextLabel(cg, "vecret.drop")
+    let stepLbl = nextLabel(cg, "vecret.step")
+    let endLbl = nextLabel(cg, "vecret.end")
+    emit(cg, "  br label %" + condLbl + "\n")
+    emitLabel(cg, condLbl)
+    let i = nextTemp(cg)
+    emit(cg, "  " + i + " = load i64, ptr " + iAddr + "\n")
+    let more = nextTemp(cg)
+    emit(cg, "  " + more + " = icmp ult i64 " + i + ", " + len + "\n")
+    emit(cg, "  br i1 " + more + ", label %" + bodyLbl + ", label %" + endLbl + "\n")
+    emitLabel(cg, bodyLbl)
+    let elemPtr = nextTemp(cg)
+    emit(cg, "  " + elemPtr + " = getelementptr " + elemLl + ", ptr " + data + ", i64 " + i + "\n")
+    let hit = nextTemp(cg)
+    emit(cg, "  " + hit + " = call i1 " + fp + "(ptr " + env + ", ptr " + elemPtr + ")\n")
+    emit(cg, "  br i1 " + hit + ", label %" + keepLbl + ", label %" + dropLbl + "\n")
+    emitLabel(cg, keepLbl)
+    let kept = nextTemp(cg)
+    emit(cg, "  " + kept + " = load i64, ptr " + keptAddr + "\n")
+    let dstSlot = nextTemp(cg)
+    emit(cg, "  " + dstSlot + " = getelementptr " + elemLl + ", ptr " + data + ", i64 " + kept + "\n")
+    let val = nextTemp(cg)
+    emit(cg, "  " + val + " = load " + elemLl + ", ptr " + elemPtr + "\n")
+    emit(cg, "  store " + elemLl + " " + val + ", ptr " + dstSlot + "\n")
+    let keptNext = nextTemp(cg)
+    emit(cg, "  " + keptNext + " = add i64 " + kept + ", 1\n")
+    emit(cg, "  store i64 " + keptNext + ", ptr " + keptAddr + "\n")
+    emit(cg, "  br label %" + stepLbl + "\n")
+    emitLabel(cg, dropLbl)
+    if cgNeedsDrop(cg, elemTy) {
+        emitDropValue(cg, elemPtr, elemTy)
+    }
+    emit(cg, "  br label %" + stepLbl + "\n")
+    emitLabel(cg, stepLbl)
+    let iNext = nextTemp(cg)
+    emit(cg, "  " + iNext + " = add i64 " + i + ", 1\n")
+    emit(cg, "  store i64 " + iNext + ", ptr " + iAddr + "\n")
+    emit(cg, "  br label %" + condLbl + "\n")
+    emitLabel(cg, endLbl)
+    let finalLen = nextTemp(cg)
+    emit(cg, "  " + finalLen + " = load i64, ptr " + keptAddr + "\n")
+    emit(cg, "  store i64 " + finalLen + ", ptr " + lenPtr + "\n")
+    return Val {
+        v: "0", ty: "void"
+    }
+}
+
+// extend(other): `other`'s elements move across bitwise (load+store through
+// genVecPush's amortized growth, one per element) — nothing is cloned, so
+// nothing needs dropping on the source side. Only `other`'s spine buffer is
+// freed once, and only if it owned one (a slice view has cap 0).
+pub fn genVecExtend(cg: &mut Cgen, dstAddr: &string, dstVecTy: &string, srcVal: &Val): Val {
+    ensureFree(cg)
+    let elemTy = unwrapVec(resolveTyStr(cg, dstVecTy))
+    let elemLl = llType(elemTy)
+    let srcData = nextTemp(cg)
+    emit(cg, "  " + srcData + " = extractvalue %Vec " + srcVal.v + ", 0\n")
+    let srcLen = nextTemp(cg)
+    emit(cg, "  " + srcLen + " = extractvalue %Vec " + srcVal.v + ", 1\n")
+    let srcCap = nextTemp(cg)
+    emit(cg, "  " + srcCap + " = extractvalue %Vec " + srcVal.v + ", 2\n")
+
+    let iAddr = nextTemp(cg)
+    emit(cg, "  " + iAddr + " = alloca i64\n")
+    emit(cg, "  store i64 0, ptr " + iAddr + "\n")
+    let condLbl = nextLabel(cg, "vecext.cond")
+    let bodyLbl = nextLabel(cg, "vecext.body")
+    let endLbl = nextLabel(cg, "vecext.end")
+    emit(cg, "  br label %" + condLbl + "\n")
+    emitLabel(cg, condLbl)
+    let i = nextTemp(cg)
+    emit(cg, "  " + i + " = load i64, ptr " + iAddr + "\n")
+    let more = nextTemp(cg)
+    emit(cg, "  " + more + " = icmp ult i64 " + i + ", " + srcLen + "\n")
+    emit(cg, "  br i1 " + more + ", label %" + bodyLbl + ", label %" + endLbl + "\n")
+    emitLabel(cg, bodyLbl)
+    let elemPtr = nextTemp(cg)
+    emit(cg, "  " + elemPtr + " = getelementptr " + elemLl + ", ptr " + srcData + ", i64 " + i + "\n")
+    let val = nextTemp(cg)
+    emit(cg, "  " + val + " = load " + elemLl + ", ptr " + elemPtr + "\n")
+    genVecPush(cg, dstAddr, dstVecTy, Val {
+        v: val, ty: elemTy.clone()
+    }
+    )
+    let iNext = nextTemp(cg)
+    emit(cg, "  " + iNext + " = add i64 " + i + ", 1\n")
+    emit(cg, "  store i64 " + iNext + ", ptr " + iAddr + "\n")
+    emit(cg, "  br label %" + condLbl + "\n")
+    emitLabel(cg, endLbl)
+
+    let owns = nextTemp(cg)
+    emit(cg, "  " + owns + " = icmp ugt i64 " + srcCap + ", 0\n")
+    let freeLbl = nextLabel(cg, "vecext.free")
+    let doneLbl = nextLabel(cg, "vecext.done")
+    emit(cg, "  br i1 " + owns + ", label %" + freeLbl + ", label %" + doneLbl + "\n")
+    emitLabel(cg, freeLbl)
+    emit(cg, "  call void @free(ptr " + srcData + ")\n")
+    emit(cg, "  br label %" + doneLbl + "\n")
+    emitLabel(cg, doneLbl)
+    return Val {
+        v: "0", ty: "void"
+    }
+}
+
+// reserve(n): grow the buffer so it holds `len + n` without a further
+// realloc — same amortized-growth machinery genVecPush uses, just sized to
+// an explicit request instead of "one more".
+pub fn genVecReserve(cg: &mut Cgen, addr: &string, vecTy: &string, nVal: &Val): Val {
+    ensureRealloc(cg)
+    let elemTy = unwrapVec(resolveTyStr(cg, vecTy))
+    let elemLl = llType(elemTy)
+    let dPtr = nextTemp(cg)
+    emit(cg, "  " + dPtr + " = getelementptr %Vec, ptr " + addr + ", i32 0, i32 0\n")
+    let lPtr = nextTemp(cg)
+    emit(cg, "  " + lPtr + " = getelementptr %Vec, ptr " + addr + ", i32 0, i32 1\n")
+    let cPtr = nextTemp(cg)
+    emit(cg, "  " + cPtr + " = getelementptr %Vec, ptr " + addr + ", i32 0, i32 2\n")
+    let d = nextTemp(cg)
+    emit(cg, "  " + d + " = load ptr, ptr " + dPtr + "\n")
+    let l = nextTemp(cg)
+    emit(cg, "  " + l + " = load i64, ptr " + lPtr + "\n")
+    let cap = nextTemp(cg)
+    emit(cg, "  " + cap + " = load i64, ptr " + cPtr + "\n")
+    let nI = widenToI64(cg, nVal)
+    let need = nextTemp(cg)
+    emit(cg, "  " + need + " = add i64 " + l + ", " + nI + "\n")
+    let enough = nextTemp(cg)
+    emit(cg, "  " + enough + " = icmp uge i64 " + cap + ", " + need + "\n")
+    let growLbl = nextLabel(cg, "vecrsv.grow")
+    let doneLbl = nextLabel(cg, "vecrsv.done")
+    emit(cg, "  br i1 " + enough + ", label %" + doneLbl + ", label %" + growLbl + "\n")
+    emitLabel(cg, growLbl)
+    let esz = genSizeOf(cg, elemLl)
+    let bytes = nextTemp(cg)
+    emit(cg, "  " + bytes + " = mul i64 " + need + ", " + esz + "\n")
+    let nd = nextTemp(cg)
+    emit(cg, "  " + nd + " = call ptr @realloc(ptr " + d + ", i64 " + bytes + ")\n")
+    emit(cg, "  store ptr " + nd + ", ptr " + dPtr + "\n")
+    emit(cg, "  store i64 " + need + ", ptr " + cPtr + "\n")
+    emit(cg, "  br label %" + doneLbl + "\n")
+    emitLabel(cg, doneLbl)
+    return Val {
+        v: "0", ty: "void"
+    }
+}
+
 pub fn genMethodCall(cg: &mut Cgen, object: &Expr, method: &string, args: &Vec<Heap<Expr>>, locs: &Vec<Local>, sigs: &Vec<CgFnSig>): Val {
     // x.addrOf(): the raw address of the receiver lvalue — identical to the old
     // `&x` (see the UnaryOp `&` arm). Resolve the lvalue, don't load a value.
@@ -3216,6 +3682,33 @@ pub fn genMethodCall(cg: &mut Cgen, object: &Expr, method: &string, args: &Vec<H
             return genHashMapRemove(cg, lv.v, lv.ty, kv)
         }
     }
+    // retain(pred) mutates the receiver in place → needs its address, same as
+    // insert/remove above.
+    if method == "retain" {
+        let lv = genLvalue(cg, object, locs, sigs)
+        if isVecTy(lv.ty) {
+            let clv = genExpr(cg, *args[0], locs, sigs, "")
+            return genVecRetain(cg, lv.v, lv.ty, clv)
+        }
+    }
+    // extend(other) grows the receiver in place → needs its address. `other`
+    // is consumed by move (genOwnedArg zeroes it if it's a bare local ident),
+    // matching push's ownership transfer.
+    if method == "extend" {
+        let lv = genLvalue(cg, object, locs, sigs)
+        if isVecTy(lv.ty) {
+            let sv = genOwnedArg(cg, *args[0], lv.ty.clone(), locs, sigs)
+            return genVecExtend(cg, lv.v, lv.ty, sv)
+        }
+    }
+    // reserve(n) grows the receiver's buffer in place → needs its address.
+    if method == "reserve" {
+        let lv = genLvalue(cg, object, locs, sigs)
+        if isVecTy(lv.ty) {
+            let nv = genExpr(cg, *args[0], locs, sigs, "i64")
+            return genVecReserve(cg, lv.v, lv.ty, nv)
+        }
+    }
     // `.each(fn)` — call the closure once per element, passing the element address
     // (uniform closure ABI: env + by-ptr arg).
     if method == "map" || method == "filter" {
@@ -3246,6 +3739,41 @@ pub fn genMethodCall(cg: &mut Cgen, object: &Expr, method: &string, args: &Vec<H
             let elem = unwrapVec(resolveTyStr(cg, ov.ty))
             let clv = genExpr(cg, *args[0], locs, sigs, "")
             return genVecFindAnyAll(cg, ov, elem, clv, method)
+        }
+    }
+    // get/first/last -> Option<T>: the total reads.
+    if method == "get" || method == "first" || method == "last" {
+        let ov = genExpr(cg, object, locs, sigs, "")
+        if isVecTy(ov.ty) {
+            let elem = unwrapVec(resolveTyStr(cg, ov.ty))
+            if method == "get" {
+                let iv = genExpr(cg, *args[0], locs, sigs, "i64")
+                let iw = widenToI64(cg, iv)
+                return genVecGetOpt(cg, ov, elem, method, iw)
+            }
+            return genVecGetOpt(cg, ov, elem, method, "")
+        }
+    }
+    if method == "min" || method == "max" {
+        let ov = genExpr(cg, object, locs, sigs, "")
+        if isVecTy(ov.ty) {
+            let elem = unwrapVec(resolveTyStr(cg, ov.ty))
+            return genVecMinMax(cg, ov, elem, method == "max")
+        }
+    }
+    if method == "indexOf" {
+        let ov = genExpr(cg, object, locs, sigs, "")
+        if isVecTy(ov.ty) {
+            let elem = unwrapVec(resolveTyStr(cg, ov.ty))
+            let nv = genExpr(cg, *args[0], locs, sigs, elem.clone())
+            return genVecIndexOf(cg, ov, elem, nv)
+        }
+    }
+    if method == "position" {
+        let ov = genExpr(cg, object, locs, sigs, "")
+        if isVecTy(ov.ty) {
+            let clv = genExpr(cg, *args[0], locs, sigs, "")
+            return genVecPosition(cg, ov, clv)
         }
     }
     if method == "each" {
@@ -3303,6 +3831,17 @@ pub fn genMethodCall(cg: &mut Cgen, object: &Expr, method: &string, args: &Vec<H
             }
             let r = nextTemp(cg)
             emit(cg, "  " + r + " = extractvalue " + container + " " + ov.v + ", 1\n")
+            return Val {
+                v: r, ty: "i64"
+            }
+        }
+    }
+    // `.capacity()` — the cap word of the Vec's 3-word header.
+    if method == "capacity" {
+        let ov = genExpr(cg, object, locs, sigs, "")
+        if isVecTy(ov.ty) {
+            let r = nextTemp(cg)
+            emit(cg, "  " + r + " = extractvalue %Vec " + ov.v + ", 2\n")
             return Val {
                 v: r, ty: "i64"
             }

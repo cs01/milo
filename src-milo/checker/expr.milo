@@ -438,6 +438,24 @@ pub fn isRootMutable(ck: &Checker, expr: &Expr): bool {
             }
             return false
         }
+        // A capitalized *variable* followed by `.field` parses identically to a
+        // static enum-literal/struct-call — the parser has no type info to tell
+        // them apart (see checkEnumLit's own "variable fallback", which this
+        // mirrors). Without this case, `STORE.inner.n = x` and `STORE.items.push(x)`
+        // fell through to the `_` arm below and reported every module-level
+        // struct/Vec global as immutable, however it was declared.
+        Expr.EnumLit(enumName, variant, args, espan) => {
+            if !ck.enums.contains(enumName) {
+                match lookup(ck, enumName) {
+                    Option.Some(v) => {
+                        return v.mutable
+                    }
+                    Option.None => {
+                    }
+                }
+            }
+            return false
+        }
         _ => {
             return false
         }

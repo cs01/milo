@@ -99,7 +99,7 @@ pub fn parseFile(path: &string): Program {
         }
     }
     let tokens = tokenize(source)
-    var p = newParser(tokens)
+    var p = newParser(tokens, path.clone())
     return parse(p)
 }
 

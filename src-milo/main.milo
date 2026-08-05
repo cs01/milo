@@ -106,7 +106,7 @@ pub fn compile(path: string): string {
     let tokens = tokenize(source)
 
     // Parse
-    var parser = newParser(tokens)
+    var parser = newParser(tokens, path.clone())
     let program = parse(parser)
 
     // Resolve imports
@@ -125,7 +125,10 @@ pub fn compile(path: string): string {
                 var loc = ""
                 match d.span {
                     Option.Some(s) => {
-                        loc = path.clone() + ":" + s.line.toString() + ":" + s.col.toString() + ": "
+                        // s.file is the span's OWN file — a diagnostic from an imported
+                        // module (e.g. std/strconv.milo) must render against that file,
+                        // not the entry point `path`, or the location lies.
+                        loc = s.file.clone() + ":" + s.line.toString() + ":" + s.col.toString() + ": "
                     }
                     Option.None => {
                     }
@@ -235,7 +238,7 @@ pub fn main() {
             }
         }
         let tokens = tokenize(src)
-        var parser = newParser(tokens)
+        var parser = newParser(tokens, source.clone())
         let program = parse(parser)
         let target = getHostTarget()
         let sourceDir = Path.dirname(source.clone())
@@ -250,7 +253,9 @@ pub fn main() {
                     var loc = ""
                     match d.span {
                         Option.Some(sp) => {
-                            loc = sp.line.toString() + ":" + sp.col.toString() + ": "
+                            // sp.file — the span's own file, not necessarily `source`
+                            // (the entry point) — see the `compile()` diagnostic loop.
+                            loc = sp.file.clone() + ":" + sp.line.toString() + ":" + sp.col.toString() + ": "
                         }
                         Option.None => {
                         }

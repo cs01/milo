@@ -1715,6 +1715,13 @@ pub fn genClosure(cg: &mut Cgen, params: &Vec<Param>, retType: &Option<MiloType>
     let savedRet = cg.curRetTy.clone()
     let savedClosRet = cg.closureRetTy.clone()
     let savedForceMove = cg.forceMoveClosures.clone()
+    // A closure is lifted to its OWN top-level function, so it must not land in the
+    // enclosing function's buffer. Save and clear both, or `emit` writes the closure body
+    // into the caller's fnBuf and the lifted function comes out with an empty body.
+    let savedFnBuf = cg.fnBuf.clone()
+    let savedInFn = cg.inFn
+    cg.inFn = false
+    cg.fnBuf = ""
     cg.body = ""
     cg.temp = 0
     cg.label = 0
@@ -1792,6 +1799,8 @@ pub fn genClosure(cg: &mut Cgen, params: &Vec<Param>, retType: &Option<MiloType>
     hdr = hdr + ") {\n"
     let closureIR = hdr + cg.body.clone() + "}\n\n"
     cg.body = savedBody
+    cg.fnBuf = savedFnBuf
+    cg.inFn = savedInFn
     cg.temp = savedTemp
     cg.label = savedLabel
     cg.curRetTy = savedRet

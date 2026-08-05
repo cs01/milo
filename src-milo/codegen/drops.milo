@@ -215,6 +215,12 @@ pub fn ensureStructDropHelper(cg: &mut Cgen, name: &string) {
     let savedBody = cg.body.clone()
     let savedTemp = cg.temp
     let savedLabel = cg.label
+    // A drop helper is its own top-level function — it must not land in the enclosing
+    // function's buffer, or it is emitted with an empty body.
+    let savedFnBuf = cg.fnBuf.clone()
+    let savedInFn = cg.inFn
+    cg.inFn = false
+    cg.fnBuf = ""
     cg.body = ""
     cg.temp = 0
     cg.label = 0
@@ -230,6 +236,8 @@ pub fn ensureStructDropHelper(cg: &mut Cgen, name: &string) {
     emit(cg, "  ret void\n")
     let helperIR = "define void @" + hn + "(ptr %self) {\n" + cg.body.clone() + "}\n\n"
     cg.body = savedBody
+    cg.fnBuf = savedFnBuf
+    cg.inFn = savedInFn
     cg.temp = savedTemp
     cg.label = savedLabel
     cg.globals = cg.globals + helperIR
@@ -248,6 +256,12 @@ pub fn ensureEnumDropHelper(cg: &mut Cgen, name: &string) {
     let savedBody = cg.body.clone()
     let savedTemp = cg.temp
     let savedLabel = cg.label
+    // A drop helper is its own top-level function — it must not land in the enclosing
+    // function's buffer, or it is emitted with an empty body.
+    let savedFnBuf = cg.fnBuf.clone()
+    let savedInFn = cg.inFn
+    cg.inFn = false
+    cg.fnBuf = ""
     cg.body = ""
     cg.temp = 0
     cg.label = 0
@@ -301,6 +315,8 @@ pub fn ensureEnumDropHelper(cg: &mut Cgen, name: &string) {
     emit(cg, done + ":\n  ret void\n")
     let helperIR = "define void @" + hn + "(ptr %self) {\n" + cg.body.clone() + "}\n\n"
     cg.body = savedBody
+    cg.fnBuf = savedFnBuf
+    cg.inFn = savedInFn
     cg.temp = savedTemp
     cg.label = savedLabel
     cg.globals = cg.globals + helperIR

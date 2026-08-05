@@ -813,7 +813,8 @@ pub fn genFn(cg: &mut Cgen, f: &Function, sigs: &Vec<CgFnSig>) {
         hdr = hdr + pLl + " %" + f.params[pi].name
     }
     hdr = hdr + ") {\n"
-    let fnBodyStart = cg.body.len
+    cg.fnBuf = ""
+    cg.inFn = true
     emit(cg, hdr)
     // "entry.bb", not "entry": a PARAMETER named `entry` (std/fs's directory walker has
     // one) becomes `%entry`, which collides with a block label spelled `entry` and LLVM
@@ -870,9 +871,12 @@ pub fn genFn(cg: &mut Cgen, f: &Function, sigs: &Vec<CgFnSig>) {
         }
     }
     emit(cg, "}\n\n")
-    let fnText = cg.body[fnBodyStart..cg.body.len].clone()
-    let hoisted = hoistAllocas(fnText)
-    cg.body = cg.body[0..fnBodyStart].clone() + hoisted
+    cg.inFn = false
+    // One append of one function's text. `body = body + x` hits the in-place append
+    // peephole (amortized realloc), so the accumulated module is never re-copied.
+    let hoisted = hoistAllocas(cg.fnBuf)
+    cg.body = cg.body + hoisted
+    cg.fnBuf = ""
 }
 
 // Register structs, enums, functions in Cgen tables, then emit all functions.

@@ -38,7 +38,7 @@ from "src-milo/checker/types.milo" import {
     TypeKind
 }
 from "src-milo/checker/state.milo" import {
-    Checker, newChecker, hasErrors
+    Checker, newChecker, hasErrors, Diagnostic
 }
 from "src-milo/checker/stmt.milo" import {
     checkProgram
@@ -48,6 +48,12 @@ from "src-milo/codegen/emit.milo" import {
 }
 from "src-milo/target.milo" import {
     getHostTarget
+}
+from "std/json" import {
+    Json, JsonObj
+}
+from "src-milo/lsp/server.milo" import {
+    startServer
 }
 
 // The stdlib root is the directory *containing* `std/` (resolvePath joins it with
@@ -198,11 +204,46 @@ pub fn linkIr(irFile: &string, output: &string, libs: &string, extra: &string): 
     }
 }
 
+// A checker Diagnostic, as one JSON object — the wire format `check-lsp` prints
+// on stdout for the LSP server (see src-milo/lsp/diagnostics.milo) to consume
+// from a guarded child process. JSON instead of the `check` command's
+// human-readable stderr lines because a subprocess boundary is the only way
+// to survive a fatal lex error (src-milo/lexer.milo's lexError calls exit(1)
+// directly — an in-process lex of a mid-edit buffer can hit that on every
+// keystroke that leaves a string unterminated) without taking the whole LSP
+// session down with it, and free-text scraping across three different
+// lex/parse/check error formats is far more fragile than one JSON shape.
+//
+// Hoisting (see hoistIfImported in src-milo/lsp/diagnostics.milo, mirroring
+// src/lsp.ts) happens here rather than in the parent process: this is where
+// the span's own file is still cheaply comparable to docPath, before it is
+// flattened to text. A hoisted diagnostic reports at line 1 col 1 with the
+// real location folded into the message — never a raw sentinel line/col that
+// could be mistaken for "diagnostic at line 1 col 1 of THIS file".
+pub fn diagnosticToJsonObj(d: Diagnostic, docPath: &string): JsonObj {
+    var line: i64 = 1
+    var col: i64 = 1
+    var message = d.message.clone()
+    match d.span {
+        Option.Some(sp) => {
+            if sp.file == docPath {
+                line = sp.line as i64
+                col = sp.col as i64
+            } else {
+                message = "in imported file " + sp.file.clone() + ":" + sp.line.toString() + ":" + sp.col.toString() + ": " + d.message.clone()
+            }
+        }
+        Option.None => {
+        }
+    }
+    return Json.obj().str("severity", d.severity.clone()).str("message", message).str("hint", d.hint.clone()).int("line", line).int("col", col)
+}
+
 pub fn main() {
     let argv = args()
     if argv.len < 2 {
         print("usage: milo <command> <file> [options]")
-        print("commands: build, run, emit-ir, check")
+        print("commands: build, run, emit-ir, check, lsp")
         exit(1)
     }
 
@@ -217,6 +258,12 @@ pub fn main() {
         print("  run <file>             compile and run")
         print("  emit-ir <file>         print LLVM IR to stdout")
         print("  check <file>           type-check only")
+        print("  lsp                    start the language server (stdio, JSON-RPC)")
+        exit(0)
+    }
+
+    if cmd == "lsp" {
+        startServer()
         exit(0)
     }
 
@@ -226,6 +273,49 @@ pub fn main() {
     }
 
     let source = argv[2].clone()
+
+    if cmd == "check-lsp" {
+        // Internal: `check-lsp <buffer-file> <doc-path>` — read the (possibly
+        // unsaved) buffer from `buffer-file` but label every span with
+        // `doc-path`, the real on-disk location, so imports resolve from the
+        // real directory and hoistIfImported's file comparison means something.
+        // Always exits 0 with a JSON array on stdout (even a single-element
+        // array of one hard error) — a nonzero exit here means the pipeline
+        // itself died (lex/parse hard failure), which the LSP-side caller
+        // detects by the absence of parseable JSON, not by exit code.
+        if argv.len < 4 {
+            eprint("error: check-lsp requires <buffer-file> <doc-path>")
+            exit(1)
+        }
+        let bufferPath = argv[2].clone()
+        let docPath = argv[3].clone()
+        var src = ""
+        match readFile(bufferPath.clone()) {
+            Result.Ok(s) => {
+                src = s
+            }
+            Result.Err(e) => {
+                eprint("error: cannot read buffer file '" + bufferPath + "'")
+                exit(1)
+            }
+        }
+        let tokens = tokenize(src)
+        var parser = newParser(tokens, docPath.clone())
+        let program = parse(parser)
+        let target = getHostTarget()
+        let sourceDir = Path.dirname(docPath.clone())
+        let stdlibDir = findStdlibRoot(sourceDir.clone())
+        let resolved = resolveImports(program, sourceDir, stdlibDir, target.os)
+        var checker = newChecker()
+        checkProgram(checker, resolved)
+        var arr = Json.arr()
+        for i in 0..checker.diagnostics.len {
+            let d = checker.diagnostics[i]
+            arr = arr.obj(diagnosticToJsonObj(d, docPath))
+        }
+        print(arr.build())
+        exit(0)
+    }
 
     if cmd == "check" {
         // Type-check only, no codegen

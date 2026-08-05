@@ -110,6 +110,31 @@ pub fn disambiguateStructLit(cg: &Cgen, base: &string, fields: &Vec<StructLitFie
     return base.clone()
 }
 
+// A `[T;N]`-typed local/param is represented at runtime as a %Vec ({ptr,len,cap})
+// so index/iterate reuse the Vec paths — see the doc comment on astTypeStr's
+// isArray rule. A STRUCT FIELD of the same declared type is laid out INLINE
+// (`[N x T]`, matching a real C array for @cLayout/offsetOf; see the array-field
+// branch in emit.milo's struct registration). Storing a Vec-backed value straight
+// into such a field wrote the raw %Vec bytes (a 24-byte {ptr,i64,i64}) over a slot
+// that is really N*sizeof(T) bytes — wrong size, wrong shape, corrupting whatever
+// stack memory followed (Uuid's `bytes: [u8;16]` field came back as garbage after
+// `Uuid { bytes: b }` from a local `var b: [u8;16]`). Copy the Vec's N live
+// elements into the field's own memory instead. Returns true when it fully wrote
+// `destPtr` itself (the caller must not also emit a normal `store`).
+pub fn genInlineArrCoerceIfNeeded(cg: &mut Cgen, v: &Val, fieldTy: &string, destPtr: &string): bool {
+    if !isInlineArrTy(fieldTy) || !isVecTy(v.ty) {
+        return false
+    }
+    let n = inlineArrLen(fieldTy)
+    let elemLl = llType(inlineArrElem(fieldTy))
+    let dataPtr = nextTemp(cg)
+    emit(cg, "  " + dataPtr + " = extractvalue %Vec " + v.v.clone() + ", 0\n")
+    let totalBytes = n * llTypeBytes(elemLl)
+    ensureMemcpy(cg)
+    emit(cg, "  call ptr @memcpy(ptr " + destPtr.clone() + ", ptr " + dataPtr + ", i64 " + totalBytes.toString() + ")\n")
+    return true
+}
+
 pub fn genStructLit(cg: &mut Cgen, name: &string, fields: &Vec<StructLitField>, locs: &Vec<Local>, sigs: &Vec<CgFnSig>, hintTy: &string): Val {
     // a bare generic name (`Handle` from a monomorphized body) resolves to its
     // sole instantiation (`Handle_Expr`); a concrete struct name passes through.
@@ -139,7 +164,9 @@ pub fn genStructLit(cg: &mut Cgen, name: &string, fields: &Vec<StructLitField>, 
         let fv = genInterfaceCoerceIfNeeded(cg, fv0, fty)
         let fp = nextTemp(cg)
         emit(cg, "  " + fp + " = getelementptr " + structTy + ", ptr " + alloc + ", i32 0, i32 " + idx.toString() + "\n")
-        emit(cg, "  store " + llType(fv.ty) + " " + fv.v + ", ptr " + fp + "\n")
+        if !genInlineArrCoerceIfNeeded(cg, fv, fty, fp) {
+            emit(cg, "  store " + llType(fv.ty) + " " + fv.v + ", ptr " + fp + "\n")
+        }
     }
     let loaded = nextTemp(cg)
     emit(cg, "  " + loaded + " = load " + structTy + ", ptr " + alloc + "\n")
@@ -785,6 +812,57 @@ pub fn genHashMapNew(cg: &mut Cgen, hintTy: &string): Val {
 // emitting `icmp` on an aggregate (not valid IR) or comparing field 0 alone (which calls
 // distinct values equal — the previous behaviour, which passed the fixtures only because
 // their differing values happened to differ in the first field).
+// Field-wise equality for an INLINE fixed-array struct field (`[N x T]` in the
+// LLVM struct layout, not the {ptr,len,cap} %Vec runtime representation locals/
+// params use — see the marker-string comment on isInlineArrTy). `extractvalue`
+// only takes a struct/array VALUE and an index; there is no `icmp` on an
+// aggregate, so the only way to compare one is to unroll it element-wise and fold
+// with `and`, exactly like genAggregateEq does for a struct's own fields.
+// Uuid's 16-byte `bytes: [u8;16]` field is exactly this shape — unhandled, it left
+// genAggregateEq unable to compare the struct at all, and the BinOp handler fell
+// through to a raw `icmp eq %Uuid ...`, which LLVM rejects on any aggregate.
+pub fn genInlineArrEq(cg: &mut Cgen, arrTy: &string, a: &string, b: &string): string {
+    let n = inlineArrLen(arrTy)
+    let elemTy = inlineArrElem(arrTy)
+    let elemLl = llType(elemTy)
+    let arrLl = llType(arrTy)
+    var acc = ""
+    var i: i64 = 0
+    while i < n {
+        let ea = nextTemp(cg)
+        emit(cg, "  " + ea + " = extractvalue " + arrLl.clone() + " " + a.clone() + ", " + i.toString() + "\n")
+        let eb = nextTemp(cg)
+        emit(cg, "  " + eb + " = extractvalue " + arrLl.clone() + " " + b.clone() + ", " + i.toString() + "\n")
+        var one = ""
+        if elemLl == "i1" || elemLl == "i8" || elemLl == "i16" || elemLl == "i32" || elemLl == "i64" || elemLl == "ptr" {
+            let t1 = nextTemp(cg)
+            emit(cg, "  " + t1 + " = icmp eq " + elemLl.clone() + " " + ea + ", " + eb + "\n")
+            one = t1
+        } else if elemLl == "double" || elemLl == "float" {
+            let t2 = nextTemp(cg)
+            emit(cg, "  " + t2 + " = fcmp oeq " + elemLl.clone() + " " + ea + ", " + eb + "\n")
+            one = t2
+        } else {
+            // element itself an aggregate (nested array/struct) — not needed by any
+            // fixture yet; fail closed rather than emit an invalid comparison.
+            return ""
+        }
+        if acc.len == 0 {
+            acc = one
+        } else {
+            let t3 = nextTemp(cg)
+            emit(cg, "  " + t3 + " = and i1 " + acc.clone() + ", " + one + "\n")
+            acc = t3
+        }
+        i = i + 1
+    }
+    // A zero-length fixed array has nothing to disagree on.
+    if acc.len == 0 {
+        return "true"
+    }
+    return acc
+}
+
 pub fn genAggregateEq(cg: &mut Cgen, aggLl: &string, a: &string, b: &string): string {
     let aggName = stripPercent(aggLl.clone())
     if !cg.structs.contains(aggName) {
@@ -793,7 +871,8 @@ pub fn genAggregateEq(cg: &mut Cgen, aggLl: &string, a: &string, b: &string): st
     let sf = cg.structs.get(aggName)!
     var acc = ""
     for fi in 0..sf.len {
-        let fll = llType(sf[fi].ty)
+        let fty = sf[fi].ty.clone()
+        let fll = llType(fty)
         let ea = nextTemp(cg)
         emit(cg, "  " + ea + " = extractvalue " + aggLl.clone() + " " + a.clone() + ", " + fi.toString() + "\n")
         let eb = nextTemp(cg)
@@ -810,6 +889,18 @@ pub fn genAggregateEq(cg: &mut Cgen, aggLl: &string, a: &string, b: &string): st
             let t2 = nextTemp(cg)
             emit(cg, "  " + t2 + " = fcmp oeq " + fll.clone() + " " + ea + ", " + eb + "\n")
             one = t2
+        } else if isInlineArrTy(fty) {
+            let r = genInlineArrEq(cg, fty, ea, eb)
+            if r.len == 0 {
+                return ""
+            }
+            one = r
+        } else if fll.len > 1 && fll[0] == 37 && cg.structs.contains(stripPercent(fll.clone())) {
+            let r = genAggregateEq(cg, fll, ea, eb)
+            if r.len == 0 {
+                return ""
+            }
+            one = r
         } else {
             return ""
         }
@@ -5244,7 +5335,7 @@ pub fn genCall(cg: &mut Cgen, name: &string, args: &Vec<Heap<Expr>>, typeArgs: &
     }
     // sizeOf<T>() — byte size of the instantiated type
     if name == "sizeOf" && typeArgs.len == 1 {
-        let ll = llType(resolveTyStr(cg, astTypeStr(typeArgs[0])))
+        let ll = llType(resolveAstTy(cg, typeArgs[0]))
         let sz = genSizeOf(cg, ll)
         return Val {
             v: sz, ty: "i64"
@@ -5252,7 +5343,7 @@ pub fn genCall(cg: &mut Cgen, name: &string, args: &Vec<Heap<Expr>>, typeArgs: &
     }
     // offsetOf<T>("field") — byte offset of a field within a struct type
     if name == "offsetOf" && typeArgs.len == 1 && args.len == 1 {
-        let sname = stripPercent(resolveTyStr(cg, astTypeStr(typeArgs[0])))
+        let sname = stripPercent(resolveAstTy(cg, typeArgs[0]))
         var fieldName = ""
         match *args[0] {
             Expr.StringLit(s, sp) => {
@@ -5268,7 +5359,7 @@ pub fn genCall(cg: &mut Cgen, name: &string, args: &Vec<Heap<Expr>>, typeArgs: &
     }
     // zeroed<T>() — llvm zeroinitializer of the instantiated type
     if name == "zeroed" && typeArgs.len == 1 {
-        let zt = resolveTyStr(cg, astTypeStr(typeArgs[0]))
+        let zt = resolveAstTy(cg, typeArgs[0])
         return Val {
             v: "zeroinitializer", ty: zt
         }

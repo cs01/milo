@@ -136,6 +136,17 @@ pub struct Cgen {
     // single forward pass — already knows to heap-allocate its captures instead of
     // pointing them at a frame that is about to be torn down.
     forceMoveClosures: Vec<string>,
+    // Element type (Milo source syntax, e.g. "i64" / "string" / "ZipEntry") for an
+    // unannotated `var v = Vec.new()` / `Vec.withCapacity(n)`, keyed by local name.
+    // Populated by a pre-scan (see inferVecPushHints) before the body is walked, for
+    // the same single-forward-pass reason as forceMoveClosures above: the LetDecl/
+    // VarDecl that creates the Vec runs BEFORE the later `v.push(x)` that reveals its
+    // element type. Without this, an unannotated Vec.new() always got %Vec's default
+    // element (i64) baked into its declared type, so pushing anything else compiled
+    // to a byte-width mismatch instead of a diagnostic — the checker independently
+    // agrees on the SAME first-push inference (checker/expr.milo checkMethodCall), so
+    // the two disagreeing here would be a silent memory-layout bug, not a rejection.
+    vecPushHints: HashMap<string, string>,
     // Param-type hint for the closure about to be gen'd (index-aligned with its
     // params), set by a caller that knows the expected type (e.g. Option/Result
     // combinators know the payload type) right before genExpr on the closure expr.
@@ -218,6 +229,7 @@ pub fn cgenNew(): Cgen {
         abiExterns: HashMap.new(),
         dropHelpers: Vec.new(),
         forceMoveClosures: Vec.new(),
+        vecPushHints: HashMap.new(),
         closureParamHint: Vec.new(),
         closureRetHint: "",
         movedLocalAddrs: Vec.new(),

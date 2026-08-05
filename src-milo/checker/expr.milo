@@ -1307,31 +1307,15 @@ pub fn checkFieldAccess(ck: &mut Checker, obj: &Expr, field: &string, span: &Opt
 // -- Array literals --
 
 pub fn checkArrayLit(ck: &mut Checker, elements: &Vec<Heap<Expr>>, span: &Option<Span>): TypeKind {
-    if elements.len == 0 {
-        // an empty `[]` carries no element type — adopt the annotation's Vec/Array
-        // type from the enclosing let/assignment (`var xs: Vec<string> = []`).
-        match ck.expectedType {
-            Option.Some(et) => {
-                match et {
-                    TypeKind.TVec(ve) => {
-                        return et.clone()
-                    }
-                    TypeKind.TArray(ae, asz) => {
-                        return et.clone()
-                    }
-                    _ => {
-                    }
-                }
-            }
-            Option.None => {
-            }
-        }
-        error(ck, "cannot infer type of empty array literal", cloneSpan(span))
-        return tyUnknown()
-    }
-    // an annotation (`[i64; N] = [...]`) fixes the element type up front, so
-    // int-literal elements coerce to it instead of pinning it to the first
-    // element's default width.
+    // A Vec<T>-typed hint (let/var annotation, struct field, call/push arg,
+    // assignment RHS, return) turns `[a, b, c]` into a Vec literal instead of a
+    // fixed [T; N] — mirrors the TS oracle's checkExprWithHint ArrayLit branch.
+    // Capture what the hint says BEFORE touching ck.expectedType again below:
+    // leaving the OUTER hint live while checking each element would misattribute
+    // it one level too shallow for nested literals (`Vec<Vec<string>>`'s inner
+    // `["x"]` would see the outer Vec<Vec<string>> hint instead of its own
+    // element's Vec<string>).
+    var isVecHint = false
     var elemType: TypeKind = tyUnknown()
     var haveTarget = false
     match ck.expectedType {
@@ -1340,6 +1324,7 @@ pub fn checkArrayLit(ck: &mut Checker, elements: &Vec<Heap<Expr>>, span: &Option
                 TypeKind.TVec(ve) => {
                     elemType = (*ve).clone()
                     haveTarget = true
+                    isVecHint = true
                 }
                 TypeKind.TArray(ae, asz) => {
                     elemType = (*ae).clone()
@@ -1352,8 +1337,30 @@ pub fn checkArrayLit(ck: &mut Checker, elements: &Vec<Heap<Expr>>, span: &Option
         Option.None => {
         }
     }
+    ck.expectedType = Option.None
+
+    if elements.len == 0 {
+        // an empty `[]` carries no element type — adopt the annotation's Vec/Array
+        // type from the enclosing let/assignment (`var xs: Vec<string> = []`).
+        if haveTarget {
+            if isVecHint {
+                return TypeKind.TVec(Heap(elemType))
+            }
+            return TypeKind.TArray(Heap(elemType), Option.Some(0))
+        }
+        error(ck, "cannot infer type of empty array literal", cloneSpan(span))
+        return tyUnknown()
+    }
+    // an annotation (`[i64; N] = [...]`, `Vec<T> = [...]`) fixes the element type
+    // up front, so int-literal elements coerce to it (and nested array-literal
+    // elements see THEIR OWN element hint) instead of pinning it to the first
+    // element's default width/shape.
     for i in 0..elements.len {
+        if haveTarget {
+            ck.expectedType = Option.Some(elemType.clone())
+        }
         let t = checkExpr(ck, *elements[i])
+        ck.expectedType = Option.None
         if !haveTarget && i == 0 {
             elemType = t.clone()
         }
@@ -1361,6 +1368,15 @@ pub fn checkArrayLit(ck: &mut Checker, elements: &Vec<Heap<Expr>>, span: &Option
         !(isConstIntExpr(*elements[i]) && isInteger(elemType)) {
             error(ck, "array element " + i.toString() + ": expected " + typeName(elemType) + ", got " + typeName(t), cloneSpan(span))
         }
+        // A Vec literal's elements move into the Vec's heap storage — same as a
+        // push loop would. The fixed-array literal path never did this (its
+        // elements copy into stack slots), so it's scoped to the Vec branch only.
+        if isVecHint {
+            tryMove(ck, *elements[i])
+        }
+    }
+    if isVecHint {
+        return TypeKind.TVec(Heap(elemType))
     }
     return TypeKind.TArray(Heap(elemType), Option.Some(elements.len))
 }
@@ -2654,28 +2670,46 @@ pub fn checkMethodCall(ck: &mut Checker, obj: &Expr, method: &string, args: &Vec
     // inference the Vec stayed <unknown> and every later use produced a cascade of errors
     // against the CALLER of those modules rather than against the line at fault.
     //
-    // Restricted to elements whose LLVM type is i64: codegen defaults an un-annotated
-    // `Vec.new()` to Vec<i64> and does NOT see this inference, so accepting a narrower
-    // element here would agree in the checker and silently disagree about element SIZE in
-    // the generated code. Erroring on those is the honest half-measure until codegen
-    // learns the same inference.
+    // Restricted to a push argument codegen can ALSO statically re-derive without
+    // running the checker (collectVecPushHintsInto in codegen/stmt.milo, which reads
+    // the AST directly): a bare int/bool/string literal, or a concrete struct literal
+    // whose name matches the checked type exactly (rules out a generic struct literal
+    // whose element got resolved through inference codegen's simpler pass can't repeat).
+    // Accepting a wider shape here would make codegen agree on the TYPE while silently
+    // disagreeing about the runtime element SIZE — the checker and codegen must decide
+    // this from the same evidence, or one of them is lying to the other.
     if method == "push" && args.len == 1 {
         match obj {
             Expr.Ident(vname, vsp) => {
                 match objType {
                     TypeKind.TUnknown => {
                         let elemT = checkExpr(ck, *args[0])
-                        var elemIsI64 = false
-                        match elemT.clone() {
-                            TypeKind.TInt(bits, signed) => {
-                                if bits == 64 && signed {
-                                    elemIsI64 = true
+                        var codegenCanSeeIt = false
+                        match *args[0] {
+                            Expr.IntLit(iv, isp) => {
+                                codegenCanSeeIt = true
+                            }
+                            Expr.BoolLit(bv, bsp) => {
+                                codegenCanSeeIt = true
+                            }
+                            Expr.StringLit(sv, ssp) => {
+                                codegenCanSeeIt = true
+                            }
+                            Expr.StructLit(sname, sfields, slsp) => {
+                                match elemT.clone() {
+                                    TypeKind.TStruct(rn) => {
+                                        if rn == sname {
+                                            codegenCanSeeIt = true
+                                        }
+                                    }
+                                    _ => {
+                                    }
                                 }
                             }
                             _ => {
                             }
                         }
-                        if elemIsI64 {
+                        if codegenCanSeeIt {
                             setVarType(ck, vname, TypeKind.TVec(Heap(elemT)))
                             return tyVoid()
                         }

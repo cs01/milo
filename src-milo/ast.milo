@@ -156,11 +156,6 @@ pub struct StructDecl {
 pub struct EnumVariant {
     name: string,
     fields: Vec<MiloType>,
-    // `LDA = 169` on an integer-repr enum. None means "one past the previous variant",
-    // which is also how counting RESUMES after an explicit value (`STA = 141, NOP` puts
-    // NOP at 142). Dropping this silently gave every variant its positional index, so a
-    // C-like enum compiled to plausible-looking wrong numbers.
-    discriminant: Option<i64>,
 }
 
 pub struct EnumDecl {
@@ -613,7 +608,7 @@ impl Clone for StructDecl {
 impl Clone for EnumVariant {
     fn clone(self: &Self): Self {
         return EnumVariant {
-            name: self.name.clone(), fields: cloneTypes(self.fields), discriminant: cloneOptI64(self.discriminant)
+            name: self.name.clone(), fields: cloneTypes(self.fields)
         }
     }
 }

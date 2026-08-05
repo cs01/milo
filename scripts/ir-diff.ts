@@ -8,12 +8,6 @@
 //   bun scripts/ir-diff.ts --build          # (re)build milo-self first
 //   bun scripts/ir-diff.ts --write          # record the current result as the baseline
 //   bun scripts/ir-diff.ts --show name      # print the first differing lines for one fixture
-//   bun scripts/ir-diff.ts --exec           # also RUN what milo-self emitted and check stdout
-//
-// `--exec` answers the question byte-identity does not: differing IR is expected between two
-// independent backends, but differing BEHAVIOUR is a bug. It links milo-self's IR with clang
-// and compares stdout against the fixture's `@expect` lines — the same contract
-// tests/run.test.ts holds the TS compiler to.
 //
 // Why IR and not execution: no clang, no linking, no running untrusted output — so it is
 // fast enough to sit in the edit loop, and a difference points at the exact emitted line
@@ -22,9 +16,7 @@
 //
 // Every milo-self invocation goes through guardedRun: the binary under test is milo-built
 // and has known memory bugs (scripts/guard.ts, docs/self-hosting.md).
-import { readdirSync, readFileSync, writeFileSync, existsSync, mkdirSync, mkdtempSync, rmSync } from "fs";
-import { tmpdir } from "os";
-import { parseExpected } from "../tests/annotations";
+import { readdirSync, readFileSync, writeFileSync, existsSync, mkdirSync } from "fs";
 import { join } from "path";
 import { spawnSync } from "child_process";
 import { guardedRun } from "./guard";
@@ -41,16 +33,15 @@ const SELF_MEM_MB = 1536;
 const SELF_TIMEOUT_S = 60;
 
 type Bucket = "identical" | "canonical" | "differs" | "self-failed" | "oracle-failed" | "both-failed";
-type ExecResult = "match" | "mismatch" | "link-failed" | "ran-nonzero";
-type Row = { name: string; bucket: Bucket; detail?: string; failure?: string; exec?: ExecResult };
+type Row = { name: string; bucket: Bucket; detail?: string; failure?: string };
 
-function args(): { filter?: string; build: boolean; write: boolean; show?: string; exec: boolean } {
+function args(): { filter?: string; build: boolean; write: boolean; show?: string } {
   const a = process.argv.slice(2);
   const valueOf = (flag: string) => {
     const i = a.indexOf(flag);
     return i >= 0 && i + 1 < a.length ? a[i + 1] : undefined;
   };
-  return { filter: valueOf("--filter"), build: a.includes("--build"), write: a.includes("--write"), show: valueOf("--show"), exec: a.includes("--exec") };
+  return { filter: valueOf("--filter"), build: a.includes("--build"), write: a.includes("--write"), show: valueOf("--show") };
 }
 
 function buildSelf() {
@@ -147,34 +138,6 @@ function firstDifference(a: string, b: string): string {
   return `identical text, ${la.length} vs ${lb.length} lines`;
 }
 
-/**
- * Link milo-self's IR and run it, comparing stdout to the fixture's `@expect` lines.
- * -O0 only: this is a correctness oracle, not a benchmark, and -O0 keeps the link honest
- * about symbols an optimizer would otherwise delete.
- */
-async function runEmitted(name: string, ir: string, source: string): Promise<ExecResult> {
-  const expected = parseExpected(source);
-  if (expected.length === 0) return "match";
-  const dir = mkdtempSync(join(tmpdir(), `irdiff-${name}-`));
-  try {
-    const ll = join(dir, `${name}.ll`);
-    const bin = join(dir, name);
-    writeFileSync(ll, ir);
-    const link = spawnSync("clang", ["-O0", "-w", ll, "-o", bin, "-lm",
-      "-L/opt/homebrew/opt/openssl@3/lib", "-lssl", "-lcrypto",
-      "-L/opt/homebrew/opt/sqlite/lib", "-lsqlite3"], { encoding: "utf-8" });
-    if (link.status !== 0) return "link-failed";
-    const r = await guardedRun(bin, [], { timeoutMs: 30000, memMb: 512 });
-    if (r.code !== 0) return "ran-nonzero";
-    const actual = (r.stdout ?? "").trim().split("\n").map(l => l.trim());
-    return actual.join("\n") === expected.join("\n") ? "match" : "mismatch";
-  } catch {
-    return "link-failed";
-  } finally {
-    try { rmSync(dir, { recursive: true, force: true }); } catch {}
-  }
-}
-
 async function mapPool<T>(items: T[], limit: number, fn: (item: T, i: number) => Promise<void>) {
   let next = 0;
   const worker = async () => { while (next < items.length) { const i = next++; await fn(items[i]!, i); } };
@@ -214,7 +177,6 @@ await mapPool(fixtures, CONCURRENCY, async (f, idx) => {
       ? { name, bucket: "canonical" }
       : { name, bucket: "differs", detail: firstDifference(ca, cb) };
   }
-  if (opts.exec && b !== null) row.exec = await runEmitted(name, b, readFileSync(path, "utf-8"));
   rows[idx] = row;
   done++;
   if (!opts.show && done % 25 === 0) process.stderr.write(`  ${done}/${fixtures.length}\r`);
@@ -242,18 +204,6 @@ const agreeing = identical + by("canonical").length;
 const pct = (n: number) => comparable > 0 ? ` (${((n / comparable) * 100).toFixed(1)}%)` : "";
 console.log(`\n  ${identical}/${comparable} byte-identical${pct(identical)}`);
 console.log(`  ${agreeing}/${comparable} agree after canonical reordering${pct(agreeing)}`);
-
-if (opts.exec) {
-  const ran = rows.filter(r => r.exec !== undefined);
-  const tally = (k: ExecResult) => ran.filter(r => r.exec === k).length;
-  console.log(`\nBEHAVIOUR — milo-self's output linked and run against the @expect contract:\n`);
-  for (const k of ["match", "mismatch", "ran-nonzero", "link-failed"] as ExecResult[]) {
-    if (tally(k) > 0) console.log(`  ${String(tally(k)).padStart(4)}  ${k}`);
-  }
-  console.log(`\n  ${tally("match")}/${rows.length} fixtures BEHAVE correctly when compiled by milo-self`);
-  const wrong = ran.filter(r => r.exec === "mismatch").map(r => r.name);
-  if (wrong.length) console.log(`\n  wrong output: ${wrong.slice(0, 12).join(", ")}${wrong.length > 12 ? ` …+${wrong.length - 12}` : ""}`);
-}
 
 // The actionable output: what milo0 is missing, ranked by how many fixtures it blocks.
 const failures = by("self-failed");

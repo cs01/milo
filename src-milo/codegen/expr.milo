@@ -14,7 +14,7 @@ from "src-milo/codegen/types.milo" import {
     unwrapHeap, stripPercent, binOpInt, cmpOpInt, isArithOp, isCmpOp,
     findLocal, hasLocal, genLoad, ensureMalloc, ensureMemcpy,
     lookupFnRet, lookupFieldIndex, lookupFieldType,
-    lookupVariantTag, variantTagOr, lookupVariantPayload, lookupEnumPayloadSlots
+    lookupVariantTag, lookupVariantPayload, lookupEnumPayloadSlots
 }
 from "src-milo/codegen/stmt.milo" import {
     genClosure, genClosureCall, widenToI64
@@ -522,8 +522,8 @@ pub fn genVecFindAnyAll(cg: &mut Cgen, obj: &Val, elemTy: &string, clv: &Val, mo
     if isFind {
         optName = stripPercent(resolveTyStr(cg, "Option<" + elemTy.clone() + ">"))
         optTy = "%" + optName
-        someTag = variantTagOr(cg, optName, "Some", 0)
-        let noneTag = variantTagOr(cg, optName, "None", 0)
+        someTag = lookupVariantTag(cg, optName, "Some")
+        let noneTag = lookupVariantTag(cg, optName, "None")
         emit(cg, "  " + resAddr + " = alloca " + optTy + "\n")
         let tagPtr = nextTemp(cg)
         emit(cg, "  " + tagPtr + " = getelementptr " + optTy + ", ptr " + resAddr + ", i32 0, i32 0\n")
@@ -938,8 +938,8 @@ pub fn genHashMapGet(cg: &mut Cgen, obj: &Val, keyVal: &Val): Val {
     // Option_Vec<ImplInfo>).
     let optName = stripPercent(resolveTyStr(cg, "Option<" + valTy + ">"))
     let optTy = "%" + optName
-    let someTag = variantTagOr(cg, optName, "Some", 0)
-    let noneTag = variantTagOr(cg, optName, "None", 0)
+    let someTag = lookupVariantTag(cg, optName, "Some")
+    let noneTag = lookupVariantTag(cg, optName, "None")
     let resAddr = nextTemp(cg)
     emit(cg, "  " + resAddr + " = alloca " + optTy + "\n")
     let tagPtr = nextTemp(cg)
@@ -1175,9 +1175,10 @@ pub fn genUnwrap(cg: &mut Cgen, inner: &Expr, span: &Option<Span>, locs: &Vec<Lo
     let v = genExpr(cg, inner, locs, sigs, "")
     let enumName = resolveEnumName(cg, resolveTyStr(cg, stripPercent(v.ty)))
     let enumTy = "%" + enumName
+    let someTag = lookupVariantTag(cg, enumName, "Some")
     var okVariant = "Some"
     var failWord = "None"
-    if lookupVariantTag(cg, enumName, "Some").isNone() {
+    if someTag < 0 {
         okVariant = "Ok"
         failWord = "Err"
     }
@@ -1207,7 +1208,7 @@ pub fn genUnwrap(cg: &mut Cgen, inner: &Expr, span: &Option<Span>, locs: &Vec<Lo
     emit(cg, "  " + tagPtr + " = getelementptr " + enumTy + ", ptr " + addr + ", i32 0, i32 0\n")
     let tag = nextTemp(cg)
     emit(cg, "  " + tag + " = load i32, ptr " + tagPtr + "\n")
-    let okTag = variantTagOr(cg, enumName, okVariant, 0)
+    let okTag = lookupVariantTag(cg, enumName, okVariant)
     let isOk = nextTemp(cg)
     emit(cg, "  " + isOk + " = icmp eq i32 " + tag + ", " + okTag.toString() + "\n")
     let okLbl = nextLabel(cg, "unwrap.ok")
@@ -1268,7 +1269,7 @@ pub fn genPropagate(cg: &mut Cgen, inner: &Expr, locs: &Vec<Local>, sigs: &Vec<C
     let srcTy = "%" + srcEnum
     var okVariant = "Some"
     var failVariant = "None"
-    if lookupVariantTag(cg, srcEnum, "Some").isNone() {
+    if lookupVariantTag(cg, srcEnum, "Some") < 0 {
         okVariant = "Ok"
         failVariant = "Err"
     }
@@ -1289,7 +1290,7 @@ pub fn genPropagate(cg: &mut Cgen, inner: &Expr, locs: &Vec<Local>, sigs: &Vec<C
     emit(cg, "  " + tagPtr + " = getelementptr " + srcTy + ", ptr " + addr + ", i32 0, i32 0\n")
     let tag = nextTemp(cg)
     emit(cg, "  " + tag + " = load i32, ptr " + tagPtr + "\n")
-    let okTag = variantTagOr(cg, srcEnum, okVariant, 0)
+    let okTag = lookupVariantTag(cg, srcEnum, okVariant)
     let isOk = nextTemp(cg)
     emit(cg, "  " + isOk + " = icmp eq i32 " + tag + ", " + okTag.toString() + "\n")
     let okLbl = nextLabel(cg, "prop.ok")
@@ -1302,11 +1303,11 @@ pub fn genPropagate(cg: &mut Cgen, inner: &Expr, locs: &Vec<Local>, sigs: &Vec<C
         emit(cg, "  " + whole + " = load " + srcTy + ", ptr " + addr + "\n")
         emit(cg, "  ret " + srcTy + " " + whole + "\n")
     } else {
-        if lookupVariantTag(cg, retEnum, failVariant).isNone() {
+        let retFail = lookupVariantTag(cg, retEnum, failVariant)
+        if retFail < 0 {
             eprint("codegen: '?' cannot propagate " + srcEnum.clone() + " into fn returning " + retEnum.clone())
             exit(1)
         }
-        let retFail = variantTagOr(cg, retEnum, failVariant, 0)
         let retAddr = nextTemp(cg)
         emit(cg, "  " + retAddr + " = alloca " + retTy + "\n")
         let rTagPtr = nextTemp(cg)
@@ -1408,7 +1409,7 @@ pub fn genDefaultValue(cg: &mut Cgen, inner: &Expr, defaultE: &Expr, locs: &Vec<
     let enumName = resolveEnumName(cg, resolveTyStr(cg, stripPercent(v.ty)))
     let enumTy = "%" + enumName
     var okVariant = "Some"
-    if lookupVariantTag(cg, enumName, "Some").isNone() {
+    if lookupVariantTag(cg, enumName, "Some") < 0 {
         okVariant = "Ok"
     }
     let payloadTypes = lookupVariantPayload(cg, enumName, okVariant)
@@ -1429,7 +1430,7 @@ pub fn genDefaultValue(cg: &mut Cgen, inner: &Expr, defaultE: &Expr, locs: &Vec<
     emit(cg, "  " + tagPtr + " = getelementptr " + enumTy + ", ptr " + addr + ", i32 0, i32 0\n")
     let tag = nextTemp(cg)
     emit(cg, "  " + tag + " = load i32, ptr " + tagPtr + "\n")
-    let okTag = variantTagOr(cg, enumName, okVariant, 0)
+    let okTag = lookupVariantTag(cg, enumName, okVariant)
     let isOk = nextTemp(cg)
     emit(cg, "  " + isOk + " = icmp eq i32 " + tag + ", " + okTag.toString() + "\n")
     let okLbl = nextLabel(cg, "dflt.some")
@@ -1462,7 +1463,7 @@ pub fn genIsExpr(cg: &mut Cgen, subject: &Expr, pattern: &Pattern, locs: &Vec<Lo
     emit(cg, "  " + tag + " = extractvalue " + svLl + " " + sv.v + ", 0\n")
     match pattern {
         Pattern.EnumPattern(enumName, variant, bindings, span) => {
-            let vtag = variantTagOr(cg, rawName, variant, 0)
+            let vtag = lookupVariantTag(cg, rawName, variant)
             let res = nextTemp(cg)
             emit(cg, "  " + res + " = icmp eq i32 " + tag + ", " + vtag.toString() + "\n")
             return Val {
@@ -1561,10 +1562,10 @@ pub fn genOptionWrapIfNeeded(cg: &mut Cgen, v: &Val, hintTy: &string): Val {
     if llType(v.ty) == "%" + rp.clone() {
         return asis
     }
-    if lookupVariantTag(cg, rp, "Some").isNone() {
+    let stag = lookupVariantTag(cg, rp, "Some")
+    if stag < 0 {
         return asis
     }
-    let stag = variantTagOr(cg, rp, "Some", 0)
     let pl = lookupVariantPayload(cg, rp, "Some")
     if pl.len != 1 {
         return asis
@@ -1617,7 +1618,7 @@ pub fn genInterfaceCoerceIfNeeded(cg: &mut Cgen, v: &Val, hintTy: &string): Val 
 }
 
 pub fn genWrapSome(cg: &mut Cgen, innerVal: &Val, rEnum: &string): Val {
-    let tag = variantTagOr(cg, rEnum, "Some", 0)
+    let tag = lookupVariantTag(cg, rEnum, "Some")
     let structTy = "%" + rEnum.clone()
     let alloc = nextTemp(cg)
     emit(cg, "  " + alloc + " = alloca " + structTy + "\n")
@@ -1704,7 +1705,7 @@ pub fn genCheckedArith(cg: &mut Cgen, obj: &Val, method: &string, av: &Val): Val
     emit(cg, "  store " + optTy + " " + someV.v + ", ptr " + slot + "\n")
     emit(cg, "  br label %" + doneLbl + "\n")
     emitLabel(cg, ovLbl)
-    let noneTag = variantTagOr(cg, optName, "None", 0)
+    let noneTag = lookupVariantTag(cg, optName, "None")
     let tp = nextTemp(cg)
     emit(cg, "  " + tp + " = getelementptr " + optTy + ", ptr " + slot + ", i32 0, i32 0\n")
     emit(cg, "  store i32 " + noneTag.toString() + ", ptr " + tp + "\n")
@@ -1853,15 +1854,14 @@ pub fn peekArgTy(e: &Expr, locs: &Vec<Local>): string {
 pub fn genEnumLit(cg: &mut Cgen, enumName: &string, variant: &string, args: &Vec<Heap<Expr>>, locs: &Vec<Local>, sigs: &Vec<CgFnSig>, hintTy: &string): Val {
     // Generic enums are registered under their mangled name
     var rEnum = resolveEnumName(cg, enumName)
-    var tagOpt = lookupVariantTag(cg, rEnum, variant)
-    var tag = variantTagOr(cg, rEnum, variant, 0)
+    var tag = lookupVariantTag(cg, rEnum, variant)
     // A generic enum literal (`Result.Ok(x)`) can't pick its instantiation from
     // the base name alone when several exist; the expected type supplies it.
-    if tagOpt.isNone() && hintTy.len > 0 {
+    if tag < 0 && hintTy.len > 0 {
         let he = stripPercent(resolveTyStr(cg, stripPercent(hintTy)))
-        if he.startsWith(enumName + "_") && lookupVariantTag(cg, he, variant).isSome() {
+        if he.startsWith(enumName + "_") && lookupVariantTag(cg, he, variant) >= 0 {
             rEnum = he.clone()
-            tag = variantTagOr(cg, he, variant, 0)
+            tag = lookupVariantTag(cg, he, variant)
         }
     }
     // No hint (`let a = Maybe.Just(42)`): pick the monomorphization of this generic
@@ -1870,7 +1870,7 @@ pub fn genEnumLit(cg: &mut Cgen, enumName: &string, variant: &string, args: &Vec
     if tag < 0 {
         var cands: Vec<string> = Vec.new()
         for k, v in cg.enums {
-            if k.startsWith(enumName + "_") && lookupVariantTag(cg, k, variant).isSome() {
+            if k.startsWith(enumName + "_") && lookupVariantTag(cg, k, variant) >= 0 {
                 cands.push(k.clone())
             }
         }
@@ -1890,7 +1890,7 @@ pub fn genEnumLit(cg: &mut Cgen, enumName: &string, variant: &string, args: &Vec
         }
         if chosen.len > 0 {
             rEnum = chosen
-            tag = variantTagOr(cg, rEnum, variant, 0)
+            tag = lookupVariantTag(cg, rEnum, variant)
         }
     }
     // `Type.method(...)` with no matching variant is a static method on a struct
@@ -2259,8 +2259,8 @@ pub fn genVecPop(cg: &mut Cgen, addr: &string, vecTy: &string): Val {
     // enum the checker registered (see genHashMapGet).
     let optName = stripPercent(resolveTyStr(cg, "Option<" + elemTy + ">"))
     let optTy = "%" + optName
-    let someTag = variantTagOr(cg, optName, "Some", 0)
-    let noneTag = variantTagOr(cg, optName, "None", 0)
+    let someTag = lookupVariantTag(cg, optName, "Some")
+    let noneTag = lookupVariantTag(cg, optName, "None")
     let resAddr = nextTemp(cg)
     emit(cg, "  " + resAddr + " = alloca " + optTy + "\n")
     emit(cg, "  store " + optTy + " zeroinitializer, ptr " + resAddr + "\n")
@@ -2535,11 +2535,11 @@ pub fn genMethodCall(cg: &mut Cgen, object: &Expr, method: &string, args: &Vec<H
             if method == "isOk" || method == "isErr" {
                 okVariant = "Ok"
             }
-            if method == "unwrapOr" && lookupVariantTag(cg, enumName, "Some").isNone() {
+            if method == "unwrapOr" && lookupVariantTag(cg, enumName, "Some") < 0 {
                 okVariant = "Ok"
             }
-            if lookupVariantTag(cg, enumName, okVariant).isSome() {
-                let okTag = variantTagOr(cg, enumName, okVariant, 0)
+            let okTag = lookupVariantTag(cg, enumName, okVariant)
+            if okTag >= 0 {
                 let enumTy = "%" + enumName.clone()
                 let addr = nextTemp(cg)
                 emit(cg, "  " + addr + " = alloca " + enumTy.clone() + "\n")
@@ -4128,7 +4128,8 @@ pub fn genCall(cg: &mut Cgen, name: &string, args: &Vec<Heap<Expr>>, typeArgs: &
             if i < paramHints.len {
                 let rp = stripPercent(resolveTyStr(cg, stripPercent(paramHints[i])))
                 if cg.enums.contains(rp) && llType(av.ty) != ("%" + rp) {
-                    if lookupVariantTag(cg, rp, "Some").isSome() {
+                    let stag = lookupVariantTag(cg, rp, "Some")
+                    if stag >= 0 {
                         let pl = lookupVariantPayload(cg, rp, "Some")
                         if pl.len == 1 && llType(pl[0]) == llType(av.ty) {
                             av = genWrapSome(cg, av, rp)

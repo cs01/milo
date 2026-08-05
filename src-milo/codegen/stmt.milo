@@ -352,7 +352,7 @@ pub fn genForIn(cg: &mut Cgen, varName: &string, varName2: &Option<string>, iter
                 let recvName = obj.ty.clone() + "$recv"
                 let resultTy = stripPercent(resolveTyStr(cg, lookupFnRet(cg, recvName)))
                 let resultLl = "%" + resultTy.clone()
-                let okTag = variantTagOr(cg, resultTy, "Ok", 0)
+                let okTag = lookupVariantTag(cg, resultTy, "Ok")
                 let chSlot = nextTemp(cg)
                 emit(cg, "  " + chSlot + " = alloca " + objLl + "\n")
                 emit(cg, "  store " + objLl + " " + obj.v + ", ptr " + chSlot + "\n")
@@ -411,7 +411,7 @@ pub fn genForIn(cg: &mut Cgen, varName: &string, varName2: &Option<string>, iter
             if cg.structs.contains(itRaw) && cg.fnRets.contains(itNext) {
                 let optTy = stripPercent(resolveTyStr(cg, lookupFnRet(cg, itNext)))
                 let optLl = "%" + optTy.clone()
-                let someTag = variantTagOr(cg, optTy, "Some", 0)
+                let someTag = lookupVariantTag(cg, optTy, "Some")
                 let payTypes = lookupVariantPayload(cg, optTy, "Some")
                 let itElemTy = payTypes[0].clone()
                 let itElemLl = llType(itElemTy)
@@ -626,7 +626,7 @@ pub fn genIfLet(cg: &mut Cgen, pattern: &Pattern, subject: &Expr, thenBody: &Vec
         Pattern.EnumPattern(enumName, variant, bindings, span) => {
             // variant tables are keyed by the subject's (mangled) enum name,
             // not the pattern's base name
-            let tg = variantTagOr(cg, rawName, variant, 0)
+            let tg = lookupVariantTag(cg, rawName, variant)
             let eq = nextTemp(cg)
             emit(cg, "  " + eq + " = icmp eq i32 " + tag + ", " + tg.toString() + "\n")
             emit(cg, "  br i1 " + eq + ", label %" + thenLbl + ", label %" + elseLbl + "\n")
@@ -860,7 +860,7 @@ pub fn genMatch(cg: &mut Cgen, subject: &Expr, arms: &Vec<MatchArm>, locs: &mut 
         match arms[i].pattern {
             Pattern.EnumPattern(enumName, variant, bindings, span) => {
                 // keyed by the subject's mangled name, not the pattern's base name
-                let tg = variantTagOr(cg, rawName, variant, 0)
+                let tg = lookupVariantTag(cg, rawName, variant)
                 switchCases = switchCases + "i32 " + tg.toString() + ", label %" + armLbl + " "
             }
             _ => {

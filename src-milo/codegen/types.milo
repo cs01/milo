@@ -489,35 +489,17 @@ pub fn lookupFieldType(cg: &Cgen, structName: &string, idx: i64): string {
     return "i32"
 }
 
-// Option, not a -1 sentinel: an explicit discriminant may legitimately BE -1
-// (`enum Signed: i32 { Neg = -1, … }`), and with a sentinel that variant read as "not
-// found" — its constructor compiled to a call to an undefined function. The type is what
-// makes that unrepresentable; a second `hasVariant` predicate would just be another rule
-// callers have to remember.
-pub fn lookupVariantTag(cg: &Cgen, enumName: &string, variantName: &string): Option<i32> {
+pub fn lookupVariantTag(cg: &Cgen, enumName: &string, variantName: &string): i32 {
     if !cg.enums.contains(enumName) {
-        return Option.None
+        return -1
     }
     let info = cg.enums.get(enumName)!
     for i in 0..info.variants.len {
         if info.variants[i].name == variantName {
-            return Option.Some(info.variants[i].tag)
+            return info.variants[i].tag
         }
     }
-    return Option.None
-}
-
-// The tag of a variant the caller has already established exists. Kept separate so the
-// "does it exist" question and the "what is its tag" question cannot be conflated.
-pub fn variantTagOr(cg: &Cgen, enumName: &string, variantName: &string, fallback: i32): i32 {
-    match lookupVariantTag(cg, enumName, variantName) {
-        Option.Some(t) => {
-            return t
-        }
-        Option.None => {
-            return fallback
-        }
-    }
+    return -1
 }
 
 pub fn lookupVariantPayload(cg: &Cgen, enumName: &string, variantName: &string): Vec<string> {

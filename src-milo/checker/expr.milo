@@ -1283,6 +1283,16 @@ pub fn checkCall(ck: &mut Checker, func: &string, args: &Vec<Heap<Expr>>, typeAr
                                     }
                                 }
                             }
+                            // A bare int literal argument defaults to i64 (Expr.IntLit
+                            // always returns tyI64 — there is no hint-threading into it
+                            // the way a struct field or let-binding gets via ck.expectedType),
+                            // so calling an `(i32) => i32` closure with a plain `3` failed
+                            // here even though every other call site (fn params, struct
+                            // fields, let bindings) accepts the same literal via
+                            // intCoercible. Same fallback, applied here too.
+                            if !pMatch && intCoercible(params[i], argType, *args[i]) {
+                                pMatch = true
+                            }
                             if !pMatch {
                                 error(ck, "closure argument " + (i + 1).toString() + ": expected " + typeName(params[i]) + ", got " + typeName(argType), cloneSpan(span))
                             }

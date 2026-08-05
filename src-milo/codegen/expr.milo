@@ -1349,7 +1349,8 @@ pub fn genPropagate(cg: &mut Cgen, inner: &Expr, locs: &Vec<Local>, sigs: &Vec<C
     let errLbl = nextLabel(cg, "prop.err")
     emit(cg, "  br i1 " + isOk + ", label %" + okLbl + ", label %" + errLbl + "\n")
 
-    emit(cg, errLbl + ":\n")
+    // emitLabel, not a raw emit: cg.curBlock must track that control is now in errLbl.
+    emitLabel(cg, errLbl)
     if srcEnum == retEnum {
         let whole = nextTemp(cg)
         emit(cg, "  " + whole + " = load " + srcTy + ", ptr " + addr + "\n")
@@ -1443,7 +1444,11 @@ pub fn genPropagate(cg: &mut Cgen, inner: &Expr, locs: &Vec<Local>, sigs: &Vec<C
         emit(cg, "  ret " + retTy + " " + rWhole + "\n")
     }
 
-    emit(cg, okLbl + ":\n")
+    // emitLabel, not a raw emit. genPropagate's CALLER may still believe control is in
+    // the block that branched into the propagate sequence; a PHI built by an enclosing
+    // if-expression then names that stale block as its predecessor, and LLVM rejects the
+    // module with "PHI node entries do not match predecessors".
+    emitLabel(cg, okLbl)
     let payPtr = nextTemp(cg)
     emit(cg, "  " + payPtr + " = getelementptr " + srcTy + ", ptr " + addr + ", i32 0, i32 1\n")
     let fp = nextTemp(cg)

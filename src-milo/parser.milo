@@ -524,6 +524,17 @@ pub fn parseImplDecl(p: &mut Parser, isUnsafe: bool): ImplDecl {
     expect(p, TokKind.LBrace)
     var methods: Vec<Function> = Vec.new()
     while !at(p, TokKind.RBrace) && !at(p, TokKind.Eof) {
+        // Attributes are legal on an impl method (`@pure fn sqrt`), not just on top-level
+        // declarations. Without this the FIRST `@pure` in std/math.milo was a parse error,
+        // which meant `struct Math` never registered and every `Math.abs(x)` in any program
+        // reported "unknown enum 'Math'" — the namespace-object model looked unimplemented
+        // when it was one missing attribute loop.
+        // Parsed and dropped: milo0's Function carries no attributes (top-level fns
+        // discard them too), and the only ones that appear on methods are verification
+        // hints like @pure, which milo0 does not act on.
+        while at(p, TokKind.At) {
+            parseAttribute(p)
+        }
         methods.push(parseFn(p))
     }
     expect(p, TokKind.RBrace)

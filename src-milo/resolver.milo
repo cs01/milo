@@ -1,5 +1,8 @@
 // Import resolver — recursively parse imported files and merge into a single Program
 
+from "std/process" import {
+    exit
+}
 from "std/fs" import {
     pathExists, readFile
 }
@@ -86,6 +89,13 @@ pub fn parseFile(path: &string): Program {
             source = s
         }
         Result.Err(e) => {
+            // Do NOT parse "" and merge an empty module: an unreadable import then looks
+            // like a module that legitimately declares nothing, and the failure surfaces
+            // hundreds of lines later as "unknown struct 'Math'" pointing at the CALLER.
+            // Exactly that cost an afternoon of chasing a namespace-model bug that did not
+            // exist — the real cause was an import path that could not be read.
+            eprint("error: cannot read import '" + path.clone() + "'")
+            exit(1)
         }
     }
     let tokens = tokenize(source)

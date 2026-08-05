@@ -1101,7 +1101,35 @@ pub fn checkStructLit(ck: &mut Checker, name: &string, fields: &Vec<StructLitFie
 
 // -- Field access --
 
+// `f64.NAN` / `f64.INF` / `f64.NEG_INF` (and f32) are FieldAccess nodes whose object is a
+// TYPE name, not a variable — so they have to be recognized before the object is checked,
+// or `f64` resolves as an undefined variable. Mirrors `floatNamespaceConst` in the oracle's
+// ast.ts; the two must agree on the exact IEEE value.
+pub fn floatNamespaceBits(obj: &Expr, field: &string): i32 {
+    match obj {
+        Expr.Ident(name, _sp) => {
+            if field != "NAN" && field != "INF" && field != "NEG_INF" {
+                return 0
+            }
+            if name == "f64" {
+                return 64
+            }
+            if name == "f32" {
+                return 32
+            }
+            return 0
+        }
+        _ => {
+            return 0
+        }
+    }
+}
+
 pub fn checkFieldAccess(ck: &mut Checker, obj: &Expr, field: &string, span: &Option<Span>): TypeKind {
+    let fbits = floatNamespaceBits(obj, field)
+    if fbits > 0 {
+        return TypeKind.TFloat(fbits)
+    }
     var objType = checkExpr(ck, obj)
     // auto-deref references; and raw pointers (`p.x` on a *Struct), which is an
     // unsafe-gated deref-and-access

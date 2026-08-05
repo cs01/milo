@@ -148,7 +148,50 @@ pub fn genStructLit(cg: &mut Cgen, name: &string, fields: &Vec<StructLitField>, 
 
 // -- Field access --
 
+// `f64.INF` / `f64.NEG_INF` / `f64.NAN` (and f32) — a FieldAccess whose object is a TYPE
+// name. LLVM has no textual spelling for these, so they are emitted as the IEEE bit
+// patterns; note LLVM writes an f32 constant as the DOUBLE that the float rounds to, which
+// is why the f32 arms carry the same hex as the f64 ones.
+pub fn floatNamespaceLit(object: &Expr, field: &string): string {
+    match object {
+        Expr.Ident(name, _sp) => {
+            if name != "f64" && name != "f32" {
+                return ""
+            }
+            if field == "INF" {
+                return "0x7FF0000000000000"
+            }
+            if field == "NEG_INF" {
+                return "0xFFF0000000000000"
+            }
+            if field == "NAN" {
+                return "0x7FF8000000000000"
+            }
+            return ""
+        }
+        _ => {
+            return ""
+        }
+    }
+}
+
 pub fn genFieldAccess(cg: &mut Cgen, object: &Expr, field: &string, locs: &Vec<Local>, sigs: &Vec<CgFnSig>): Val {
+    let nsLit = floatNamespaceLit(object, field)
+    if nsLit.len > 0 {
+        var fty = "double"
+        match object {
+            Expr.Ident(nm, _s2) => {
+                if nm == "f32" {
+                    fty = "float"
+                }
+            }
+            _ => {
+            }
+        }
+        return Val {
+            v: nsLit, ty: fty
+        }
+    }
     let lv = genLvalue(cg, object, locs, sigs)
     let lvTyLl = llType(lv.ty)
     // Built-in: string.len

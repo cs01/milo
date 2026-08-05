@@ -265,8 +265,8 @@ item 5, it should be decided against 0/578, not against 20,826.
 
 | | |
 |---|---|
-| **behave correctly** | **347 / 578 (60%)** |
-| wrong output | 8 |
+| **behave correctly** | **350 / 578 (61%)** |
+| wrong output | 5 |
 | exits nonzero | 2 |
 | fails to link | **2** |
 | cannot be compiled at all | 219 |
@@ -319,6 +319,18 @@ Chasing the rest of the link failures turned up four more defects of the same fa
 - **Global initializers did no constant folding**, so `let A: f64 = 3.0 / 2.0` fell through
   to a zero fallback — which additionally spelled the zero as the integer `0`, invalid for a
   `double`. Literal arithmetic now folds, and the fallback zero is typed.
+
+Three more of the same species turned up finishing the list:
+
+- **Printing a float used a bare `%g`** — six significant digits — while `.toString()` used
+  the round-trip helper. The two paths disagreed about the same value. f32 also needed its
+  own helper: the shortest string that round-trips a `float` is not the shortest that
+  round-trips the `double` it widens to (9 significant digits, read back through `strtof`).
+- **Narrow signed integers zero-extended when printed**, so an `i8` of -128 printed 128.
+- **A float-to-int cast returned the LLVM spelling instead of the surface type**, so
+  `x as u8` was indistinguishable from a signed `i8` downstream and 255 printed as -1. That
+  one only became visible *because* the sign-extension fix above was correct — the two bugs
+  had been cancelling.
 
 All are `feedback_silent_success` in miniature: a sentinel or fallback that reads as valid
 data. Worth noting the second one was introduced *during this work* and caught only because

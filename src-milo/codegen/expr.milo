@@ -2673,6 +2673,23 @@ pub fn genMethodCall(cg: &mut Cgen, object: &Expr, method: &string, args: &Vec<H
             v: lenT, ty: "i64"
         }
     }
+    // `clear` on a Vec or HashMap: length to zero, buffer kept so the capacity survives.
+    // The elements are not dropped — milo0 does not run element drop glue on truncation
+    // anywhere else either, and doing it here only would be inconsistent.
+    if method == "clear" && (isVecTy(obj.ty) || isHashMapTy(obj.ty)) {
+        let lv = genLvalue(cg, object, locs, sigs)
+        let contTy = if isVecTy(obj.ty) {
+            "%Vec"
+        } else {
+            "%HashMap"
+        }
+        let lenPtr = nextTemp(cg)
+        emit(cg, "  " + lenPtr + " = getelementptr " + contTy + ", ptr " + lv.v + ", i32 0, i32 1\n")
+        emit(cg, "  store i64 0, ptr " + lenPtr + "\n")
+        return Val {
+            v: "0", ty: "void"
+        }
+    }
     if isVecTy(obj.ty) && method == "len" {
         let lenT = nextTemp(cg)
         emit(cg, "  " + lenT + " = extractvalue %Vec " + obj.v + ", 1\n")

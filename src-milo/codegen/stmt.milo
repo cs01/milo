@@ -1156,6 +1156,7 @@ pub fn genStmt(cg: &mut Cgen, s: &Stmt, locs: &mut Vec<Local>, sigs: &Vec<CgFnSi
                     hintTy = astTypeStr(t)
                 }
                 Option.None => {
+                    hintTy = vecNewHint(cg, name, *value)
                 }
             }
             // RHS is moved into the new binding → zero a source place (var→var move)
@@ -1180,6 +1181,7 @@ pub fn genStmt(cg: &mut Cgen, s: &Stmt, locs: &mut Vec<Local>, sigs: &Vec<CgFnSi
                     hintTy = astTypeStr(t)
                 }
                 Option.None => {
+                    hintTy = vecNewHint(cg, name, *value)
                 }
             }
             // RHS is moved into the new binding → zero a source place (var→var move)
@@ -1637,6 +1639,138 @@ pub fn returnEscapedIdents(body: &Vec<Heap<Stmt>>): Vec<string> {
     return out
 }
 
+// The Milo source-syntax type name of a push argument, when it's cheap to read off
+// the AST without evaluating anything (a literal, or a concrete struct literal's own
+// name). Anything else (an Ident, a call, ...) returns "" — the pre-scan below just
+// skips that push and leaves the Vec's element type to the existing i64 default,
+// which is always safe: it never disagrees with what the checker already accepted
+// (checker/expr.milo's push-on-unknown inference has this exact same blind spot).
+pub fn pushArgStaticTy(e: &Expr): string {
+    match e {
+        Expr.IntLit(n, s) => {
+            return "i64"
+        }
+        Expr.BoolLit(b, s) => {
+            return "bool"
+        }
+        Expr.StringLit(v, s) => {
+            return "string"
+        }
+        Expr.StructLit(name, fields, s) => {
+            return name.clone()
+        }
+        _ => {
+            return ""
+        }
+    }
+}
+
+// `var v = Vec.new()` / `Vec.withCapacity(n)` with no type annotation carries no
+// element type yet — take it from the first `v.push(x)` found anywhere later in this
+// body, same rule the checker already applies (checker/expr.milo checkMethodCall's
+// push-on-unknown branch). Recurses into every nested block a push could hide in,
+// same shape as collectReturnEscapedIdentsInto above and for the same reason: this
+// is a single forward pass, so the LetDecl/VarDecl needs the answer before it's seen
+// the push that supplies it.
+pub fn collectVecPushHintsInto(body: &Vec<Heap<Stmt>>, out: &mut HashMap<string, string>) {
+    for i in 0..body.len {
+        match *body[i] {
+            Stmt.ExprStmt(expr, span) => {
+                match *expr {
+                    Expr.MethodCall(object, method, args, mspan) => {
+                        if method == "push" && args.len == 1 {
+                            match *object {
+                                Expr.Ident(vname, ispan) => {
+                                    if !out.contains(vname) {
+                                        let et = pushArgStaticTy(*args[0])
+                                        if et.len > 0 {
+                                            out.insert(vname.clone(), et)
+                                        }
+                                    }
+                                }
+                                _ => {
+                                }
+                            }
+                        }
+                    }
+                    _ => {
+                    }
+                }
+            }
+            Stmt.IfStmt(cond, thenBody, elseBody, span) => {
+                collectVecPushHintsInto(thenBody, out)
+                match elseBody {
+                    Option.Some(eb) => {
+                        collectVecPushHintsInto(eb, out)
+                    }
+                    Option.None => {
+                    }
+                }
+            }
+            Stmt.WhileStmt(cond, wbody, span) => {
+                collectVecPushHintsInto(wbody, out)
+            }
+            Stmt.MatchStmt(subject, arms, span) => {
+                for ai in 0..arms.len {
+                    collectVecPushHintsInto(arms[ai].body, out)
+                }
+            }
+            Stmt.IfLetStmt(pattern, subject, thenBody, elseBody, span) => {
+                collectVecPushHintsInto(thenBody, out)
+                match elseBody {
+                    Option.Some(eb) => {
+                        collectVecPushHintsInto(eb, out)
+                    }
+                    Option.None => {
+                    }
+                }
+            }
+            Stmt.UnsafeBlock(ubody, span) => {
+                collectVecPushHintsInto(ubody, out)
+            }
+            Stmt.ForInStmt(vname, vname2, iterable, fbody, span) => {
+                collectVecPushHintsInto(fbody, out)
+            }
+            _ => {
+            }
+        }
+    }
+}
+
+pub fn inferVecPushHints(body: &Vec<Heap<Stmt>>): HashMap<string, string> {
+    var out: HashMap<string, string> = HashMap.new()
+    collectVecPushHintsInto(body, out)
+    return out
+}
+
+// A manual key/value rebuild rather than `.clone()` — mirrors snapshotMoves/
+// restoreMoves in checker/state.milo, the existing convention for saving a
+// HashMap<string, _> across a nested codegen scope in this codebase.
+pub fn cloneStrMap(m: &HashMap<string, string>): HashMap<string, string> {
+    var out: HashMap<string, string> = HashMap.new()
+    for k, v in m {
+        out.insert(k.clone(), v.clone())
+    }
+    return out
+}
+
+// hintTy for an unannotated `let`/`var` whose value is `Vec.new()`/`Vec.withCapacity`:
+// the pre-scanned element type if one was found, else "" (existing i64 default).
+pub fn vecNewHint(cg: &Cgen, name: &string, value: &Expr): string {
+    match value {
+        Expr.EnumLit(enumName, variant, args, span) => {
+            if enumName == "Vec" && (variant == "new" || variant == "withCapacity") {
+                if cg.vecPushHints.contains(name) {
+                    return "Vec<" + cg.vecPushHints.get(name)! + ">"
+                }
+            }
+        }
+        _ => {
+        }
+    }
+    return ""
+}
+
 // A non-move closure literal, forced to `move` so genClosure heap-owns its
 // captures instead of pointing them at a frame about to be torn down. Anything
 // else (including an already-move closure) is returned unchanged.
@@ -1715,6 +1849,7 @@ pub fn genClosure(cg: &mut Cgen, params: &Vec<Param>, retType: &Option<MiloType>
     let savedRet = cg.curRetTy.clone()
     let savedClosRet = cg.closureRetTy.clone()
     let savedForceMove = cg.forceMoveClosures.clone()
+    let savedVecPushHints = cloneStrMap(cg.vecPushHints)
     // A closure is lifted to its OWN top-level function, so it must not land in the
     // enclosing function's buffer. Save and clear both, or `emit` writes the closure body
     // into the caller's fnBuf and the lifted function comes out with an empty body.
@@ -1731,6 +1866,7 @@ pub fn genClosure(cg: &mut Cgen, params: &Vec<Param>, retType: &Option<MiloType>
     // returns a locally-bound closure needs the same treatment, and it must not see
     // the enclosing function's set (a same-named local would be a false hit).
     cg.forceMoveClosures = returnEscapedIdents(body)
+    cg.vecPushHints = inferVecPushHints(body)
 
     emit(cg, "entry.bb:\n")
     var clocs: Vec<Local> = Vec.new()
@@ -1806,6 +1942,7 @@ pub fn genClosure(cg: &mut Cgen, params: &Vec<Param>, retType: &Option<MiloType>
     cg.curRetTy = savedRet
     cg.closureRetTy = savedClosRet
     cg.forceMoveClosures = savedForceMove
+    cg.vecPushHints = savedVecPushHints
     cg.globals = cg.globals + closureIR
 
     // build the env at the call site, then the { fnptr, env } pair

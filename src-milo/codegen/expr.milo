@@ -1677,7 +1677,9 @@ pub fn genOptionWrapIfNeeded(cg: &mut Cgen, v: &Val, hintTy: &string): Val {
     if llType(v.ty) == "%" + rp.clone() {
         return asis
     }
-    let stag = lookupVariantTag(cg, rp, "Some")
+    // Existence first, then the tag — the two questions are separate (a discriminant can
+    // legitimately BE -1, which is why lookupVariantTag's sentinel must never be used as a
+    // presence test).
     if variantTagOpt(cg, rp, "Some").isNone() {
         return asis
     }
@@ -5773,7 +5775,6 @@ pub fn genCall(cg: &mut Cgen, name: &string, args: &Vec<Heap<Expr>>, typeArgs: &
             if i < paramHints.len {
                 let rp = stripPercent(resolveTyStr(cg, stripPercent(paramHints[i])))
                 if cg.enums.contains(rp) && llType(av.ty) != ("%" + rp) {
-                    let stag = lookupVariantTag(cg, rp, "Some")
                     if variantTagOpt(cg, rp, "Some").isSome() {
                         let pl = lookupVariantPayload(cg, rp, "Some")
                         if pl.len == 1 && llType(pl[0]) == llType(av.ty) {

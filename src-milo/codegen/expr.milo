@@ -5066,9 +5066,16 @@ pub fn genMethodCall(cg: &mut Cgen, object: &Expr, method: &string, args: &Vec<H
         return genHeapClone(cg, obj.v, obj.ty)
     }
     if objTyLl == "%String" && (method == "substr" || method == "slice") {
+        // The "i64" hint above only steers a bare LITERAL's inferred width — an
+        // i32 local passed as `a`/`b` (e.g. `s[a..b]` with `var a: i32`) still
+        // comes back i32 from genExpr, and genStringSlice's `sub i64 av, bv`
+        // then mismatches its own instruction's type. widenToI64 (already used
+        // by the Vec.slice case right below) makes both sides actually i64.
         let a = genExpr(cg, *args[0], locs, sigs, "i64")
+        let aI = widenToI64(cg, a)
         let b = genExpr(cg, *args[1], locs, sigs, "i64")
-        return genStringSlice(cg, obj.v, a.v, b.v)
+        let bI = widenToI64(cg, b)
+        return genStringSlice(cg, obj.v, aI, bI)
     }
     // v[a..b] → v.slice(a,b): a non-owning %Vec view {data+a*esz, b-a, cap=0}. milo0
     // never auto-frees Vec buffers (only user Drop$drop), so a cap=0 alias is safe.

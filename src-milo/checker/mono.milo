@@ -160,8 +160,10 @@ pub fn typeKindToMiloType(t: &TypeKind): MiloType {
             return r
         }
         TypeKind.TPtr(inner) => {
+            // Recursion already accumulates depth: a nested TPtr(TPtr(u8))
+            // walks in twice, incrementing once per level.
             var r = typeKindToMiloType(*inner)
-            r.isPtr = true
+            r.ptrDepth = r.ptrDepth + 1
             return r
         }
         TypeKind.TRef(inner, mutable) => {
@@ -200,9 +202,9 @@ pub fn substituteMiloType(ty: &MiloType, typeParams: &Vec<string>, typeArgs: &Ve
             // faithful nested MiloType; monomorphization then subsumes any user-generic
             // args into the mangled name (Box<T> -> Box_string) via resolveMonoType.
             var result = typeKindToMiloType(typeArgs[i])
-            // carry the spelled ptr/ref-ness of the param slot (`&T`, `*T`)
-            if ty.isPtr {
-                result.isPtr = true
+            // carry the spelled ptr/ref-ness of the param slot (`&T`, `*T`, `**T`)
+            if ty.ptrDepth > 0 {
+                result.ptrDepth = result.ptrDepth + ty.ptrDepth
             }
             if ty.isRef {
                 result.isRef = true
@@ -734,8 +736,13 @@ pub fn resolveMonoType(ck: &mut Checker, ty: &MiloType): TypeKind {
             if ty.isRefMut {
                 return TypeKind.TRef(Heap(base), true)
             }
-            if ty.isPtr {
-                return TypeKind.TPtr(Heap(base))
+            if ty.ptrDepth > 0 {
+                var i: i32 = 0
+                while i < ty.ptrDepth {
+                    base = TypeKind.TPtr(Heap(base))
+                    i = i + 1
+                }
+                return base
             }
             return base
         }

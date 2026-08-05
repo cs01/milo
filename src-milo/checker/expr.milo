@@ -1482,7 +1482,7 @@ pub fn inferInto(typeParams: &Vec<string>, declTy: &TypeKind, argTy: &TypeKind, 
 pub fn inferFromAst(ck: &Checker, typeParams: &Vec<string>, declAst: &MiloType, argTy: &TypeKind, inferred: &mut HashMap<string, TypeKind>) {
     // Unwrap a declared ref (&Arena<T>) against a possibly-TRef argument.
     var concrete = argTy.clone()
-    if declAst.isRef || declAst.isRefMut || declAst.isPtr {
+    if declAst.isRef || declAst.isRefMut || declAst.ptrDepth > 0 {
         match argTy {
             TypeKind.TRef(inner, m) => {
                 concrete = (*inner).clone()

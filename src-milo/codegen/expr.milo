@@ -2195,15 +2195,30 @@ pub fn genAsCast(cg: &mut Cgen, inner: &Expr, targetTy: &string, locs: &Vec<Loca
 
 pub fn genHeapDeref(cg: &mut Cgen, inner: &Expr, locs: &Vec<Local>, sigs: &Vec<CgFnSig>): Val {
     let v = genExpr(cg, inner, locs, sigs, "")
-    var innerRaw = unwrapHeap(v.ty)
-    if innerRaw.len == 0 {
-        innerRaw = "i64"
+    let heapInner = unwrapHeap(v.ty)
+    if heapInner.len > 0 {
+        let innerLl = llType(heapInner)
+        let loaded = nextTemp(cg)
+        emit(cg, "  " + loaded + " = load " + innerLl + ", ptr " + v.v + "\n")
+        return Val {
+            v: loaded, ty: innerLl
+        }
     }
-    let innerLl = llType(innerRaw)
+    // Raw pointer deref (*T, **T, ...). Mirror genLvalue's UnaryOp('*') case:
+    // strip exactly one leading '*' to get the pointee's AST-form type string.
+    // Returning the AST form (not llType'd) — instead of the old unconditional
+    // "i64" fallback this replaced — is what lets `let p = *pp` on a `**T` keep
+    // enough type info for a second `*p` to find ITS pointee correctly.
+    if v.ty.len == 0 || v.ty[0] != 42 {
+        eprint("codegen: '*' deref on non-pointer, non-Heap type '" + v.ty.clone() + "'")
+        exit(1)
+    }
+    let ptrInner = v.ty[1..v.ty.len].clone()
+    let innerLl = llType(ptrInner)
     let loaded = nextTemp(cg)
     emit(cg, "  " + loaded + " = load " + innerLl + ", ptr " + v.v + "\n")
     return Val {
-        v: loaded, ty: innerLl
+        v: loaded, ty: ptrInner
     }
 }
 

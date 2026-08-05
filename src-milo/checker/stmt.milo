@@ -762,9 +762,14 @@ pub fn registerBuiltinGenericEnums(ck: &mut Checker) {
 pub fn resolveAstType(ck: &mut Checker, ty: &MiloType): TypeKind {
     // resolve a type alias name to its base (preserving any &/&mut/* wrapper)
     if !ty.isFn && ty.typeArgs.len == 0 && ck.typeAliases.contains(ty.name) {
-        let base = ck.typeAliases.get(ty.name)!
-        if ty.isPtr {
-            return TypeKind.TPtr(Heap(base))
+        var base = ck.typeAliases.get(ty.name)!
+        if ty.ptrDepth > 0 {
+            var i: i32 = 0
+            while i < ty.ptrDepth {
+                base = TypeKind.TPtr(Heap(base))
+                i = i + 1
+            }
+            return base
         }
         if ty.isRef {
             return TypeKind.TRef(Heap(base), false)
@@ -822,8 +827,13 @@ pub fn resolveAstType(ck: &mut Checker, ty: &MiloType): TypeKind {
             if ty.isArray {
                 base = TypeKind.TArray(Heap(base), ty.arraySize)
             }
-            if ty.isPtr {
-                return TypeKind.TPtr(Heap(base))
+            if ty.ptrDepth > 0 {
+                var i: i32 = 0
+                while i < ty.ptrDepth {
+                    base = TypeKind.TPtr(Heap(base))
+                    i = i + 1
+                }
+                return base
             }
             if ty.isRef {
                 return TypeKind.TRef(Heap(base), false)

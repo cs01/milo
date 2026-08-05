@@ -8,7 +8,9 @@ pub struct Span {
 pub struct MiloType {
     name: string,
     typeArgs: Vec<MiloType>,
-    isPtr: bool,
+    // Number of leading '*' on the annotation (*T = 1, **T = 2, ...). A bare
+    // bool here used to collapse **T to *T — see std/platform's environBlock.
+    ptrDepth: i32,
     isRef: bool,
     isRefMut: bool,
     isArray: bool,
@@ -22,7 +24,7 @@ pub fn simpleType(name: string): MiloType {
     return MiloType {
         name: name,
         typeArgs: Vec.new(),
-        isPtr: false,
+        ptrDepth: 0,
         isRef: false,
         isRefMut: false,
         isArray: false,
@@ -37,7 +39,7 @@ pub fn ptrType(name: string): MiloType {
     return MiloType {
         name: name,
         typeArgs: Vec.new(),
-        isPtr: true,
+        ptrDepth: 1,
         isRef: false,
         isRefMut: false,
         isArray: false,
@@ -362,7 +364,7 @@ impl Clone for MiloType {
         return MiloType {
             name: self.name.clone(),
             typeArgs: cloneTypes(self.typeArgs),
-            isPtr: self.isPtr,
+            ptrDepth: self.ptrDepth,
             isRef: self.isRef,
             isRefMut: self.isRefMut,
             isArray: self.isArray,

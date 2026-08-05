@@ -119,8 +119,14 @@ pub fn typeFromAst(ty: &MiloType): TypeKind {
     if ty.isArray {
         base = TypeKind.TArray(Heap(base), ty.arraySize)
     }
-    if ty.isPtr {
-        return TypeKind.TPtr(Heap(base))
+    // Wrap once per '*' — **u8 must nest TPtr(TPtr(u8)), not collapse to *u8.
+    if ty.ptrDepth > 0 {
+        var i: i32 = 0
+        while i < ty.ptrDepth {
+            base = TypeKind.TPtr(Heap(base))
+            i = i + 1
+        }
+        return base
     }
     if ty.isRef {
         return TypeKind.TRef(Heap(base), false)

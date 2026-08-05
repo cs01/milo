@@ -128,10 +128,12 @@ pub fn parseType(p: &mut Parser): MiloType {
         }
         return inner
     }
-    // *T
+    // *T, **T, ... — the lexer emits one Star token per '*', so **T is two
+    // Star tokens; recursing and incrementing (not just setting a bool)
+    // is what lets depth > 1 survive instead of collapsing to *T.
     if matchTok(p, TokKind.Star) {
         var inner = parseType(p)
-        inner.isPtr = true
+        inner.ptrDepth = inner.ptrDepth + 1
         return inner
     }
     // [T] or [T; N]
@@ -163,7 +165,7 @@ pub fn parseType(p: &mut Parser): MiloType {
         return MiloType {
             name: "fn",
             typeArgs: Vec.new(),
-            isPtr: false,
+            ptrDepth: 0,
             isRef: false,
             isRefMut: false,
             isArray: false,
@@ -186,7 +188,7 @@ pub fn parseType(p: &mut Parser): MiloType {
     var result = MiloType {
         name: tok.value,
         typeArgs: typeArgs,
-        isPtr: false,
+        ptrDepth: 0,
         isRef: false,
         isRefMut: false,
         isArray: false,
@@ -202,7 +204,7 @@ pub fn parseType(p: &mut Parser): MiloType {
         result = MiloType {
             name: "Option",
             typeArgs: optArgs,
-            isPtr: false,
+            ptrDepth: 0,
             isRef: false,
             isRefMut: false,
             isArray: false,

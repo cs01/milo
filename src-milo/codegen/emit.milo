@@ -367,7 +367,7 @@ pub fn buildFnTable(prog: &Program): Vec<CgFnSig> {
 // True when `t` is a bare (non-ref, non-pointer, non-array) struct type — the only
 // shape that crosses a C extern boundary by value and needs ABI classification.
 pub fn isByValStruct(cg: &Cgen, t: &MiloType): bool {
-    if t.isPtr || t.isRef || t.isRefMut || t.isArray || t.isFn {
+    if t.ptrDepth > 0 || t.isRef || t.isRefMut || t.isArray || t.isFn {
         return false
     }
     let raw = stripPercent(resolveTyStr(cg, astTypeStr(t)))

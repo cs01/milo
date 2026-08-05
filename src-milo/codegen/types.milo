@@ -58,6 +58,13 @@ pub struct CgEnumInfo {
 // -- Codegen state --
 
 pub struct Cgen {
+    // The CURRENT function's text. genFn emits here instead of straight into `body` so the
+    // alloca-hoisting rewrite only ever touches one function's worth of string, then
+    // appends it once. Rewriting in place inside `body` meant copying the whole accumulated
+    // module per function — quadratic, and it leaked every intermediate buffer (measured:
+    // 4.4 MB of `realloc in emit` plus 4.6 MB of `malloc in genFn` on a 7-line fixture).
+    fnBuf: string,
+    inFn: bool,
     // Target OS, used to fold `@targetOs()` to a literal at codegen time. milo0 does not
     // cross-compile, so this is the host.
     targetOs: string,
@@ -165,6 +172,8 @@ pub struct Cgen {
 
 pub fn cgenNew(): Cgen {
     return Cgen {
+        fnBuf: "",
+        inFn: false,
         targetOs: "",
         body: "",
         globals: "",
@@ -244,12 +253,18 @@ pub fn nextLabel(cg: &mut Cgen, base: string): string {
 }
 
 pub fn emit(cg: &mut Cgen, s: &string) {
+    if cg.inFn {
+        cg.fnBuf = cg.fnBuf + s
+        return
+    }
     cg.body = cg.body + s
 }
 
 // Open a basic block and record it as the current block (for phi predecessors).
 pub fn emitLabel(cg: &mut Cgen, lbl: &string) {
-    cg.body = cg.body + lbl.clone() + ":\n"
+    // Must go through emit(), not straight to `body`: inside a function the text belongs in
+    // fnBuf, and writing here directly dumped block labels at module top level.
+    emit(cg, lbl.clone() + ":\n")
     cg.curBlock = lbl.clone()
 }
 

@@ -7739,6 +7739,24 @@ pub fn genExpr(cg: &mut Cgen, e: &Expr, locs: &Vec<Local>, sigs: &Vec<CgFnSig>, 
             }
             if isArithOp(op) {
                 let opname = binOpInt(op, unsigned)
+                // A shift amount >= the operand's bit width (or negative, huge as
+                // unsigned) is LLVM POISON, not a defined wraparound. src-milo has no
+                // checked-shift trap to fall back on — it emits no overflow traps for
+                // ordinary arithmetic at all (see parser.milo's @!wrapping note) — so
+                // this masks unconditionally, matching what the oracle does under
+                // @wrapping (Rust's wrapping_shl/C's masked shift): `1i32 << 40`
+                // becomes `1 << (40 & 31)` = 256, not undefined.
+                if (op == "<<" || op == ">>") && opLl != "double" && opLl != "float" {
+                    let bits = intBits(opLl)
+                    if bits > 0 {
+                        let maskT = nextTemp(cg)
+                        emit(cg, "  " + maskT + " = and " + opLl + " " + rvv + ", " + (bits - 1).toString() + "\n")
+                        emit(cg, "  " + t + " = " + opname + " " + opLl + " " + lvv + ", " + maskT + "\n")
+                        return Val {
+                            v: t, ty: resTy
+                        }
+                    }
+                }
                 emit(cg, "  " + t + " = " + opname + " " + opLl + " " + lvv + ", " + rvv + "\n")
                 return Val {
                     v: t, ty: resTy

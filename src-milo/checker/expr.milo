@@ -2809,6 +2809,9 @@ pub fn checkMethodCall(ck: &mut Checker, obj: &Expr, method: &string, args: &Vec
                             Expr.StringLit(sv, ssp) => {
                                 codegenCanSeeIt = true
                             }
+                            Expr.FloatLit(fv, fsp) => {
+                                codegenCanSeeIt = true
+                            }
                             Expr.StructLit(sname, sfields, slsp) => {
                                 match elemT.clone() {
                                     TypeKind.TStruct(rn) => {
@@ -2817,6 +2820,26 @@ pub fn checkMethodCall(ck: &mut Checker, obj: &Expr, method: &string, args: &Vec
                                         }
                                     }
                                     _ => {
+                                    }
+                                }
+                            }
+                            // `-1` is a negation of a literal, not a literal. The
+                            // sentinel-fill loop `for _ in 0..n { v.push(-1) }` is how
+                            // several std modules give an un-annotated Vec its element
+                            // type, so rejecting it left those Vecs <unknown>. codegen's
+                            // pushArgStaticTy recurses through unary `-` for exactly
+                            // this reason — the two gates must accept the same set.
+                            Expr.UnaryOp(uop, uoperand, usp) => {
+                                if uop == "-" {
+                                    match *uoperand {
+                                        Expr.IntLit(niv, nisp) => {
+                                            codegenCanSeeIt = true
+                                        }
+                                        Expr.FloatLit(nfv, nfsp) => {
+                                            codegenCanSeeIt = true
+                                        }
+                                        _ => {
+                                        }
                                     }
                                 }
                             }

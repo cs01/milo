@@ -2984,13 +2984,96 @@ pub fn genMethodCall(cg: &mut Cgen, object: &Expr, method: &string, args: &Vec<H
     // the first arg. parseInt/toInt alias strParseInt; parseF64 is a strtod call.
     if objTyLl == "%String" {
         if method == "parseF64" || method == "parseFloat" || method == "toFloat" {
+            // TOTAL parse: strtod alone answers 0 for garbage and stops happily at the
+            // first bad character, so "abc" and "0" were indistinguishable and "3.14.5"
+            // silently became 3.14. Pass an endptr and demand it reached the end of a
+            // non-empty string; otherwise the answer is None.
             ensureStrtod(cg)
+            ensureStringTy(cg)
             let dp = nextTemp(cg)
-            emit(cg, "  " + dp + " = extractvalue %String " + obj.v + ", 0\n")
+            emit(cg, "  " + dp + " = extractvalue %String " + obj.v.clone() + ", 0\n")
+            let slen = nextTemp(cg)
+            emit(cg, "  " + slen + " = extractvalue %String " + obj.v.clone() + ", 1\n")
+            let endSlot = nextTemp(cg)
+            emit(cg, "  " + endSlot + " = alloca ptr\n")
             let r = nextTemp(cg)
-            emit(cg, "  " + r + " = call double @strtod(ptr " + dp + ", ptr null)\n")
+            emit(cg, "  " + r + " = call double @strtod(ptr " + dp + ", ptr " + endSlot + ")\n")
+            let endP = nextTemp(cg)
+            emit(cg, "  " + endP + " = load ptr, ptr " + endSlot + "\n")
+            let startI = nextTemp(cg)
+            emit(cg, "  " + startI + " = ptrtoint ptr " + dp + " to i64\n")
+            let endI = nextTemp(cg)
+            emit(cg, "  " + endI + " = ptrtoint ptr " + endP + " to i64\n")
+            let used = nextTemp(cg)
+            emit(cg, "  " + used + " = sub i64 " + endI + ", " + startI + "\n")
+            let allUsed = nextTemp(cg)
+            emit(cg, "  " + allUsed + " = icmp eq i64 " + used + ", " + slen + "\n")
+            let nonEmpty = nextTemp(cg)
+            emit(cg, "  " + nonEmpty + " = icmp sgt i64 " + slen + ", 0\n")
+            // strtod also SKIPS leading whitespace, so " 1.2" consumed every byte and
+            // looked total. Reject a leading blank explicitly.
+            let b0 = nextTemp(cg)
+            emit(cg, "  " + b0 + " = load i8, ptr " + dp + "\n")
+            let isSp = nextTemp(cg)
+            emit(cg, "  " + isSp + " = icmp eq i8 " + b0 + ", 32\n")
+            let isTab = nextTemp(cg)
+            emit(cg, "  " + isTab + " = icmp eq i8 " + b0 + ", 9\n")
+            let isNl = nextTemp(cg)
+            emit(cg, "  " + isNl + " = icmp eq i8 " + b0 + ", 10\n")
+            let isCr = nextTemp(cg)
+            emit(cg, "  " + isCr + " = icmp eq i8 " + b0 + ", 13\n")
+            let ws1 = nextTemp(cg)
+            emit(cg, "  " + ws1 + " = or i1 " + isSp + ", " + isTab + "\n")
+            let ws2 = nextTemp(cg)
+            emit(cg, "  " + ws2 + " = or i1 " + isNl + ", " + isCr + "\n")
+            let anyWs = nextTemp(cg)
+            emit(cg, "  " + anyWs + " = or i1 " + ws1 + ", " + ws2 + "\n")
+            let notWs = nextTemp(cg)
+            emit(cg, "  " + notWs + " = xor i1 " + anyWs + ", true\n")
+            let okLen = nextTemp(cg)
+            emit(cg, "  " + okLen + " = and i1 " + allUsed + ", " + nonEmpty + "\n")
+            let okBoth = nextTemp(cg)
+            emit(cg, "  " + okBoth + " = and i1 " + okLen + ", " + notWs + "\n")
+
+            // The monomorphized Option the checker will have registered for this call.
+            // If it is absent the program never used an Option<f64>, so fall back to the
+            // bare double rather than referencing a type that was never declared.
+            let optName = "Option_f64"
+            if !cg.enums.contains(optName) {
+                return Val {
+                    v: r, ty: "double"
+                }
+            }
+            let optTy = "%" + optName.clone()
+            let slot = nextTemp(cg)
+            emit(cg, "  " + slot + " = alloca " + optTy.clone() + "\n")
+            let someLbl = nextLabel(cg, "parse.some")
+            let noneLbl = nextLabel(cg, "parse.none")
+            let endLbl = nextLabel(cg, "parse.end")
+            emit(cg, "  br i1 " + okBoth + ", label %" + someLbl.clone() + ", label %" + noneLbl.clone() + "\n")
+            emit(cg, someLbl.clone() + ":\n")
+            let rv = Val {
+                v: r, ty: "f64"
+            }
+            let someV = genWrapSome(cg, rv, optName)
+            emit(cg, "  store " + optTy.clone() + " " + someV.v + ", ptr " + slot.clone() + "\n")
+            emit(cg, "  br label %" + endLbl.clone() + "\n")
+            emit(cg, noneLbl.clone() + ":\n")
+            let noneTag = lookupVariantTag(cg, optName, "None")
+            let nslot = nextTemp(cg)
+            emit(cg, "  " + nslot + " = alloca " + optTy.clone() + "\n")
+            let ntagPtr = nextTemp(cg)
+            emit(cg, "  " + ntagPtr + " = getelementptr " + optTy.clone() + ", ptr " + nslot + ", i32 0, i32 0\n")
+            emit(cg, "  store i32 " + noneTag.toString() + ", ptr " + ntagPtr + "\n")
+            let nval = nextTemp(cg)
+            emit(cg, "  " + nval + " = load " + optTy.clone() + ", ptr " + nslot + "\n")
+            emit(cg, "  store " + optTy.clone() + " " + nval + ", ptr " + slot.clone() + "\n")
+            emit(cg, "  br label %" + endLbl.clone() + "\n")
+            emit(cg, endLbl.clone() + ":\n")
+            let outv = nextTemp(cg)
+            emit(cg, "  " + outv + " = load " + optTy.clone() + ", ptr " + slot.clone() + "\n")
             return Val {
-                v: r, ty: "double"
+                v: outv, ty: optName
             }
         }
         var sfn = ""

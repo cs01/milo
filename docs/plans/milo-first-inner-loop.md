@@ -258,6 +258,59 @@ That is exactly the number the harness existed to produce, and it cost one after
 instead of the months a port would have spent discovering it. Whatever is decided about
 item 5, it should be decided against 0/578, not against 20,826.
 
+## SELF-HOSTING REACHED — 2026-08-05
+
+**milo0 compiles itself.** Verified end to end:
+
+1. the TS oracle compiles `src-milo/main.milo` → stage 1
+2. stage 1 compiles its own source → 343,806 lines of IR, exit 0
+3. that IR links → a 2.29 MB stage-2 binary
+4. stage 2 compiles `examples/hello.milo`, and the program runs and prints correctly
+
+Three fixes separated "almost" from "working", and all three were the same species this
+page has been cataloguing — a generated name or an internal disagreement, not a missing
+feature:
+
+- **`parseF64` was typed `f64` by the checker and `Option<f64>` by codegen.** `?? 0.0` on
+  the result was rejected as "`??` on an f64". Self-inflicted, from an earlier fix that
+  changed one side only.
+- **`Vec.contains` / `Vec.clone` missing from codegen.** `clone` needed a real deep copy —
+  a header copy aliases the buffer and double-frees it.
+- **A parameter named `entry` collided with the `entry:` block label**, and LLVM refuses the
+  module. Identical in kind to the `%t0` temp collision fixed earlier the same day; the
+  oracle already emits `entry.bb` for exactly this reason. Any generated name must be one
+  the source language cannot produce.
+
+### What still blocks the fixed point
+
+`stage2 == stage3` (stage 2 compiling itself byte-identically) is NOT reached. Stage 3
+exceeded a 4 GB guard cap.
+
+**Diagnosed, with measurements.** Stage-2 peak RSS against input size:
+
+| input | source lines | peak RSS |
+|---|---|---|
+| `examples/hello.milo` | 5 | 27 MB |
+| `tests/fixtures/arithmetic.milo` | 7 | 27 MB |
+| `examples/cli-tools/fmt.milo` | 1,321 | **1,081 MB** |
+
+That is ~0.8 MB retained per source line, which extrapolates to roughly 17 GB for
+`src-milo`'s 21k lines — hence the cap kill.
+
+**Root cause: milo0 never frees owned string temporaries.** The oracle does (`tempBufs` in
+`src/codegen.ts`, each followed by `call void @free`); `src-milo/codegen/` has no equivalent
+— zero matches for any temp-tracking. Every `emit(cg, "  " + a + " = " + b + "\n")` builds
+several intermediate buffers and leaks all of them, and codegen runs that pattern millions
+of times during a self-compile.
+
+Ruled out first, so nobody re-checks them: the `s = s + x` append peephole DOES fire, including
+for a field target through a `&mut` param (verified: emitted IR uses `realloc`, not
+malloc+copy), so the historical O(n²) accumulator bug is not the cause.
+
+**The fix is the oracle's shape**: track owned temporaries per site and free them once
+consumed. It is a real ownership feature across codegen, not a patch — which is why it was
+left rather than attempted at the end of a session.
+
 ### The number that actually matters: behaviour, not byte-identity
 
 `scripts/ir-diff.ts --exec` links what milo-self emitted and runs it against each fixture's

@@ -1820,7 +1820,7 @@ pub fn genClosure(cg: &mut Cgen, params: &Vec<Param>, retType: &Option<MiloType>
     var retTyStr = "void"
     match retType {
         Option.Some(rt) => {
-            retTyStr = resolveTyStr(cg, astTypeStr(rt))
+            retTyStr = resolveAstTy(cg, rt)
             annotated = true
         }
         Option.None => {
@@ -1894,7 +1894,7 @@ pub fn genClosure(cg: &mut Cgen, params: &Vec<Param>, retType: &Option<MiloType>
         }
     }
     for pj in 0..params.len {
-        var pty = resolveTyStr(cg, astTypeStr(params[pj].ty))
+        var pty = resolveAstTy(cg, params[pj].ty)
         // Unannotated param, no inferred type from the AST (empty string) — fall
         // back to the caller's hint (see closureParamHint's doc comment).
         if pty.len == 0 && pj < paramHints.len && paramHints[pj].len > 0 {

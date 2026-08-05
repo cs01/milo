@@ -492,7 +492,7 @@ pub fn isByValStruct(cg: &Cgen, t: &MiloType): bool {
     if t.ptrDepth > 0 || t.isRef || t.isRefMut || t.isArray || t.isFn {
         return false
     }
-    let raw = stripPercent(resolveTyStr(cg, astTypeStr(t)))
+    let raw = stripPercent(resolveAstTy(cg, t))
     if !cg.structs.contains(raw) {
         return false
     }
@@ -509,7 +509,7 @@ pub fn isByValStruct(cg: &Cgen, t: &MiloType): bool {
 pub fn externLoweredParams(cg: &Cgen, f: &Function): Vec<string> {
     var params: Vec<string> = Vec.new()
     if isByValStruct(cg, f.retType) {
-        let rname = stripPercent(resolveTyStr(cg, astTypeStr(f.retType)))
+        let rname = stripPercent(resolveAstTy(cg, f.retType))
         let rc = classifyRet(cg.arch, abiStructOf(cg, rname))
         if rc.kind == "sret" {
             params.push("ptr sret(%" + rc.name.clone() + ") align " + rc.align.toString())
@@ -519,7 +519,7 @@ pub fn externLoweredParams(cg: &Cgen, f: &Function): Vec<string> {
         if f.params[i].ty.isFn {
             params.push("ptr")
         } else if isByValStruct(cg, f.params[i].ty) {
-            let pname = stripPercent(resolveTyStr(cg, astTypeStr(f.params[i].ty)))
+            let pname = stripPercent(resolveAstTy(cg, f.params[i].ty))
             let ac = classifyArg(cg.arch, abiStructOf(cg, pname))
             if ac.kind == "coerce" {
                 for r in 0..ac.regs.len {
@@ -533,7 +533,7 @@ pub fn externLoweredParams(cg: &Cgen, f: &Function): Vec<string> {
                 }
             }
         } else {
-            params.push(llType(astTypeStr(f.params[i].ty)))
+            params.push(llType(resolveAstTy(cg, f.params[i].ty)))
         }
     }
     return params
@@ -541,7 +541,7 @@ pub fn externLoweredParams(cg: &Cgen, f: &Function): Vec<string> {
 
 pub fn externLoweredRet(cg: &Cgen, f: &Function): string {
     if isByValStruct(cg, f.retType) {
-        let rname = stripPercent(resolveTyStr(cg, astTypeStr(f.retType)))
+        let rname = stripPercent(resolveAstTy(cg, f.retType))
         let rc = classifyRet(cg.arch, abiStructOf(cg, rname))
         if rc.kind == "sret" {
             return "void"
@@ -550,7 +550,7 @@ pub fn externLoweredRet(cg: &Cgen, f: &Function): string {
             return rc.retTy.clone()
         }
     }
-    return llType(astTypeStr(f.retType))
+    return llType(resolveAstTy(cg, f.retType))
 }
 
 // Emit a single function definition or extern declaration.
@@ -668,7 +668,7 @@ pub fn genFn(cg: &mut Cgen, f: &Function, sigs: &Vec<CgFnSig>) {
                 if f.params[i].ty.isFn {
                     ps = ps + "ptr"
                 } else {
-                    ps = ps + llType(astTypeStr(f.params[i].ty))
+                    ps = ps + llType(resolveAstTy(cg, f.params[i].ty))
                 }
             }
         }
@@ -755,7 +755,7 @@ pub fn genFn(cg: &mut Cgen, f: &Function, sigs: &Vec<CgFnSig>) {
         // astTypeStr, not .name: a `*u8` return must stay a pointer (`.name` alone
         // drops pointer-ness, declaring e.g. strerror as returning i8 → truncated
         // pointer → strlen on garbage in the self-compiled build).
-        var declRet = llType(astTypeStr(f.retType))
+        var declRet = llType(resolveAstTy(cg, f.retType))
         if cg.abiExterns.contains(f.name) {
             declRet = externLoweredRet(cg, f)
         }
@@ -772,7 +772,7 @@ pub fn genFn(cg: &mut Cgen, f: &Function, sigs: &Vec<CgFnSig>) {
     // C `main` is forced to `i32 (i32 argc, ptr argv)`: it stashes argc/argv into
     // globals that _miloArgCount/_miloArgAt read, and returns an exit code.
     let isMain = f.name == "main"
-    var retTyStr = resolveTyStr(cg, astTypeStr(f.retType))
+    var retTyStr = resolveAstTy(cg, f.retType)
     if isMain {
         retTyStr = "i32"
     }
@@ -791,7 +791,7 @@ pub fn genFn(cg: &mut Cgen, f: &Function, sigs: &Vec<CgFnSig>) {
         let piRef = f.params[pi].ty.isRef || f.params[pi].ty.isRefMut
         var pLl = "ptr"
         if !piRef {
-            pLl = llType(resolveTyStr(cg, astTypeStr(f.params[pi].ty)))
+            pLl = llType(resolveAstTy(cg, f.params[pi].ty))
         }
         hdr = hdr + pLl + " %" + f.params[pi].name
     }
@@ -817,7 +817,7 @@ pub fn genFn(cg: &mut Cgen, f: &Function, sigs: &Vec<CgFnSig>) {
     // what makes mutation-through-&mut visible to the caller. Value params spill
     // to a fresh alloca as usual.
     for pj in 0..f.params.len {
-        let pTyStr = resolveTyStr(cg, astTypeStr(f.params[pj].ty))
+        let pTyStr = resolveAstTy(cg, f.params[pj].ty)
         let pIsRef = f.params[pj].ty.isRef || f.params[pj].ty.isRefMut
         if pIsRef {
             locs.push(Local {
@@ -1012,7 +1012,7 @@ pub fn genProgram(prog: Program, sourceDir: string): string {
                 match fty.arraySize {
                     Option.Some(n) => {
                         let elem = arrayElemType(fty)
-                        tyStr = "[" + n.toString() + "]" + resolveTyStr(cg, astTypeStr(elem))
+                        tyStr = "[" + n.toString() + "]" + resolveAstTy(cg, elem)
                     }
                     Option.None => {
                         eprint("codegen: struct field '" + s.fields[fi].name.clone() + "' on " + s.name.clone() + " has array type with no fixed size")
@@ -1020,7 +1020,7 @@ pub fn genProgram(prog: Program, sourceDir: string): string {
                     }
                 }
             } else {
-                tyStr = resolveTyStr(cg, astTypeStr(fty))
+                tyStr = resolveAstTy(cg, fty)
             }
             fields.push(FieldInfo {
                 name: s.fields[fi].name.clone(), ty: tyStr
@@ -1118,7 +1118,11 @@ pub fn genProgram(prog: Program, sourceDir: string): string {
         var surfaceTy = "i64"
         match prog.globals[gi].ty {
             Option.Some(t) => {
-                surfaceTy = astTypeStr(t)
+                // resolveAstTy, not astTypeStr: struct/enum decls are registered by this
+                // point, so a generic global (`var pool: Arena<Node>`) resolves to the
+                // checker's mangled decl name ("Arena_Node") instead of emitting the raw
+                // "%Arena<Node>" bracket form, which isn't valid LLVM.
+                surfaceTy = resolveAstTy(cg, t)
             }
             Option.None => {
             }
@@ -1247,7 +1251,7 @@ pub fn genProgram(prog: Program, sourceDir: string): string {
             var surfaceTy = "i64"
             match prog.globals[gi].ty {
                 Option.Some(t) => {
-                    surfaceTy = astTypeStr(t)
+                    surfaceTy = resolveAstTy(cg, t)
                 }
                 Option.None => {
                 }

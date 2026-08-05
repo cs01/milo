@@ -3236,8 +3236,15 @@ pub fn checkStringMethod(ck: &mut Checker, obj: &Expr, method: &string, args: &V
     if method == "toInt" || method == "parseInt" {
         return TypeKind.TInt(64, true)
     }
+    // Option<f64>, matching the oracle and — critically — matching what CODEGEN emits.
+    // These disagreed: codegen was returning an Option while the checker said bare f64, so
+    // `s.parseF64() ?? 0.0` type-checked as "?? on an f64" and was rejected. Registering
+    // the monomorphization here is what makes `Option_f64` exist for codegen to build.
     if method == "toFloat" || method == "parseFloat" || method == "parseF64" {
-        return TypeKind.TFloat(64)
+        var fOptArgs: Vec<TypeKind> = Vec.new()
+        fOptArgs.push(TypeKind.TFloat(64))
+        let fMangled = monomorphizeEnum(ck, "Option", fOptArgs)
+        return TypeKind.TEnum(fMangled)
     }
     if method == "chars" || method == "bytes" {
         return TypeKind.TVec(Heap(tyU8()))

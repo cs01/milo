@@ -1725,7 +1725,7 @@ pub fn genClosure(cg: &mut Cgen, params: &Vec<Param>, retType: &Option<MiloType>
     // the enclosing function's set (a same-named local would be a false hit).
     cg.forceMoveClosures = returnEscapedIdents(body)
 
-    emit(cg, "entry:\n")
+    emit(cg, "entry.bb:\n")
     var clocs: Vec<Local> = Vec.new()
     for ci in 0..caps.len {
         let gp = nextTemp(cg)

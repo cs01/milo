@@ -815,7 +815,11 @@ pub fn genFn(cg: &mut Cgen, f: &Function, sigs: &Vec<CgFnSig>) {
     hdr = hdr + ") {\n"
     let fnBodyStart = cg.body.len
     emit(cg, hdr)
-    emit(cg, "entry:\n")
+    // "entry.bb", not "entry": a PARAMETER named `entry` (std/fs's directory walker has
+    // one) becomes `%entry`, which collides with a block label spelled `entry` and LLVM
+    // refuses the module. Same class as the `%.t` temp prefix — a generated name must be
+    // one the source language cannot produce.
+    emit(cg, "entry.bb:\n")
     if isMain {
         emit(cg, "  store i32 %_milo_argc, ptr @_milo_argc_global\n")
         emit(cg, "  store ptr %_milo_argv, ptr @_milo_argv_global\n")
@@ -1246,7 +1250,7 @@ pub fn genProgram(prog: Program, sourceDir: string): string {
             }
         }
         emit(cg, "define void @_milo_init_globals() {\n")
-        emit(cg, "entry:\n")
+        emit(cg, "entry.bb:\n")
         var initLocs: Vec<Local> = Vec.new()
         for oi in 0..ordered.len {
             let gi = ordered[oi]

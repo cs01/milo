@@ -3500,6 +3500,127 @@ pub fn genMethodCall(cg: &mut Cgen, object: &Expr, method: &string, args: &Vec<H
             v: "0", ty: "void"
         }
     }
+    // Vec<T>.clone(): a real deep copy. Copying only the {ptr,len,cap} header would alias
+    // the original's buffer, so a later push into either one would be visible in both and
+    // the two would double-free the same allocation.
+    if isVecTy(obj.ty) && method == "clone" && args.len == 0 {
+        ensureMalloc(cg)
+        let elemTy = unwrapVec(resolveTyStr(cg, obj.ty))
+        let elemLl = llType(elemTy.clone())
+        let esz = llTypeBytes(elemLl.clone())
+        let srcP = nextTemp(cg)
+        emit(cg, "  " + srcP + " = extractvalue %Vec " + obj.v.clone() + ", 0\n")
+        let lenV = nextTemp(cg)
+        emit(cg, "  " + lenV + " = extractvalue %Vec " + obj.v.clone() + ", 1\n")
+        let bytes = nextTemp(cg)
+        emit(cg, "  " + bytes + " = mul i64 " + lenV + ", " + esz.toString() + "\n")
+        let dst = nextTemp(cg)
+        emit(cg, "  " + dst + " = call ptr @malloc(i64 " + bytes + ")\n")
+        let ictr = nextTemp(cg)
+        emit(cg, "  " + ictr + " = alloca i64\n")
+        emit(cg, "  store i64 0, ptr " + ictr + "\n")
+        let condL = nextLabel(cg, "vclone.cond")
+        let bodyL = nextLabel(cg, "vclone.body")
+        let endL = nextLabel(cg, "vclone.end")
+        emit(cg, "  br label %" + condL.clone() + "\n")
+        emitLabel(cg, condL)
+        let iv = nextTemp(cg)
+        emit(cg, "  " + iv + " = load i64, ptr " + ictr + "\n")
+        let more = nextTemp(cg)
+        emit(cg, "  " + more + " = icmp slt i64 " + iv + ", " + lenV + "\n")
+        emit(cg, "  br i1 " + more + ", label %" + bodyL.clone() + ", label %" + endL.clone() + "\n")
+        emitLabel(cg, bodyL)
+        let sslot = nextTemp(cg)
+        emit(cg, "  " + sslot + " = getelementptr " + elemLl.clone() + ", ptr " + srcP + ", i64 " + iv + "\n")
+        let cur = nextTemp(cg)
+        emit(cg, "  " + cur + " = load " + elemLl.clone() + ", ptr " + sslot + "\n")
+        // Each ELEMENT is cloned too — a shallow element copy would leave two Vecs sharing
+        // the same string buffers.
+        let cloned = genCloneOfLoaded(cg, cur, elemTy.clone())
+        let dslot = nextTemp(cg)
+        emit(cg, "  " + dslot + " = getelementptr " + elemLl.clone() + ", ptr " + dst + ", i64 " + iv + "\n")
+        emit(cg, "  store " + elemLl.clone() + " " + cloned + ", ptr " + dslot + "\n")
+        let inext = nextTemp(cg)
+        emit(cg, "  " + inext + " = add i64 " + iv + ", 1\n")
+        emit(cg, "  store i64 " + inext + ", ptr " + ictr + "\n")
+        emit(cg, "  br label %" + condL.clone() + "\n")
+        emitLabel(cg, endL)
+        let v0 = nextTemp(cg)
+        emit(cg, "  " + v0 + " = insertvalue %Vec undef, ptr " + dst + ", 0\n")
+        let v1 = nextTemp(cg)
+        emit(cg, "  " + v1 + " = insertvalue %Vec " + v0 + ", i64 " + lenV + ", 1\n")
+        let v2 = nextTemp(cg)
+        emit(cg, "  " + v2 + " = insertvalue %Vec " + v1 + ", i64 " + lenV + ", 2\n")
+        return Val {
+            v: v2, ty: obj.ty.clone()
+        }
+    }
+    // Vec<T>.contains(x): linear scan. Elements are compared the same way `==` compares
+    // them — memcmp for %String, icmp/fcmp for scalars — so a Vec<string> lookup does not
+    // silently degrade to pointer identity.
+    if isVecTy(obj.ty) && method == "contains" && args.len == 1 {
+        let elemTy = unwrapVec(resolveTyStr(cg, obj.ty))
+        let elemLl = llType(elemTy.clone())
+        let needle = genExpr(cg, *args[0], locs, sigs, elemLl.clone())
+        let dataP = nextTemp(cg)
+        emit(cg, "  " + dataP + " = extractvalue %Vec " + obj.v.clone() + ", 0\n")
+        let lenV = nextTemp(cg)
+        emit(cg, "  " + lenV + " = extractvalue %Vec " + obj.v.clone() + ", 1\n")
+        let res = nextTemp(cg)
+        emit(cg, "  " + res + " = alloca i1\n")
+        emit(cg, "  store i1 false, ptr " + res + "\n")
+        let ictr = nextTemp(cg)
+        emit(cg, "  " + ictr + " = alloca i64\n")
+        emit(cg, "  store i64 0, ptr " + ictr + "\n")
+        let condL = nextLabel(cg, "vcontains.cond")
+        let bodyL = nextLabel(cg, "vcontains.body")
+        let hitL = nextLabel(cg, "vcontains.hit")
+        let stepL = nextLabel(cg, "vcontains.step")
+        let endL = nextLabel(cg, "vcontains.end")
+        emit(cg, "  br label %" + condL.clone() + "\n")
+        emitLabel(cg, condL)
+        let iv = nextTemp(cg)
+        emit(cg, "  " + iv + " = load i64, ptr " + ictr + "\n")
+        let more = nextTemp(cg)
+        emit(cg, "  " + more + " = icmp slt i64 " + iv + ", " + lenV + "\n")
+        emit(cg, "  br i1 " + more + ", label %" + bodyL.clone() + ", label %" + endL.clone() + "\n")
+        emitLabel(cg, bodyL)
+        let slot = nextTemp(cg)
+        emit(cg, "  " + slot + " = getelementptr " + elemLl.clone() + ", ptr " + dataP + ", i64 " + iv + "\n")
+        let cur = nextTemp(cg)
+        emit(cg, "  " + cur + " = load " + elemLl.clone() + ", ptr " + slot + "\n")
+        var eqv = ""
+        if elemLl == "%String" {
+            let r = genStringEq(cg, cur, needle.v.clone(), true)
+            eqv = r.v.clone()
+        } else if elemLl == "double" || elemLl == "float" {
+            let t = nextTemp(cg)
+            emit(cg, "  " + t + " = fcmp oeq " + elemLl.clone() + " " + cur + ", " + needle.v.clone() + "\n")
+            eqv = t
+        } else if intBits(elemLl.clone()) > 0 || elemLl == "ptr" {
+            let t = nextTemp(cg)
+            emit(cg, "  " + t + " = icmp eq " + elemLl.clone() + " " + cur + ", " + needle.v.clone() + "\n")
+            eqv = t
+        } else {
+            eprint("codegen: Vec.contains on element type " + elemLl.clone() + " is not supported in milo0")
+            exit(1)
+        }
+        emit(cg, "  br i1 " + eqv + ", label %" + hitL.clone() + ", label %" + stepL.clone() + "\n")
+        emitLabel(cg, hitL)
+        emit(cg, "  store i1 true, ptr " + res + "\n")
+        emit(cg, "  br label %" + endL.clone() + "\n")
+        emitLabel(cg, stepL)
+        let inext = nextTemp(cg)
+        emit(cg, "  " + inext + " = add i64 " + iv + ", 1\n")
+        emit(cg, "  store i64 " + inext + ", ptr " + ictr + "\n")
+        emit(cg, "  br label %" + condL.clone() + "\n")
+        emitLabel(cg, endL)
+        let out = nextTemp(cg)
+        emit(cg, "  " + out + " = load i1, ptr " + res + "\n")
+        return Val {
+            v: out, ty: "bool"
+        }
+    }
     if isVecTy(obj.ty) && method == "len" {
         let lenT = nextTemp(cg)
         emit(cg, "  " + lenT + " = extractvalue %Vec " + obj.v + ", 1\n")

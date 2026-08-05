@@ -218,7 +218,7 @@ pub fn ensureStructDropHelper(cg: &mut Cgen, name: &string) {
     cg.body = ""
     cg.temp = 0
     cg.label = 0
-    emit(cg, "entry:\n")
+    emit(cg, "entry.bb:\n")
     let fields = cg.structs.get(name)!
     for i in 0..fields.len {
         if cgNeedsDrop(cg, fields[i].ty) {
@@ -251,7 +251,7 @@ pub fn ensureEnumDropHelper(cg: &mut Cgen, name: &string) {
     cg.body = ""
     cg.temp = 0
     cg.label = 0
-    emit(cg, "entry:\n")
+    emit(cg, "entry.bb:\n")
     let tp = nextTemp(cg)
     emit(cg, "  " + tp + " = getelementptr %" + name.clone() + ", ptr %self, i32 0, i32 0\n")
     let tag = nextTemp(cg)

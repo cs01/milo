@@ -265,11 +265,47 @@ item 5, it should be decided against 0/578, not against 20,826.
 
 | | |
 |---|---|
-| **behave correctly** | **361 / 578 (62%)** |
-| wrong output | 4 |
-| exits nonzero | 4 |
-| fails to link | 2 |
-| cannot be compiled at all | **207** |
+| **behave correctly** | **388 / 578 (67%)** |
+| wrong output | **2** |
+| fails to link | 76 |
+| cannot be compiled at all | **112** |
+
+Started this sweep at 324 correct / 219 uncompilable. The link-failure count LOOKS worse than
+its earlier low of 2 — it is not a regression. Fixing double-pointer support unlocked ~75
+fixtures that previously could not be compiled at all; they moved one stage forward, into
+link failures, and are being worked from there.
+
+### What parallel agents changed about the method
+
+Nine Sonnet subagents, each in an isolated git worktree owning a disjoint cluster, with the
+orchestrator integrating serially and running the full behaviour census after every merge.
+That split matters: the expensive part (reading emitted IR, bisecting to minimal repros) is
+genuinely parallel, while shared-file merges and whole-corpus verification are not.
+
+Findings worth keeping from that round:
+
+- **The single biggest defect was `MiloType.isPtr` being a `bool`.** `**u8` collapsed to
+  `*u8`, which broke `std/platform` → `std/os` → most of the standard library. Compounded by
+  a raw-pointer deref that silently loaded `i64` regardless of the real pointee type. One
+  fix, ~75 fixtures.
+- **A user function named `flush` was being hijacked by the `fflush` builtin.** Every call to
+  `std/deflate`'s private bit-writer flush silently became `fflush(NULL)`, dropping the last
+  byte of every compressed stream — gzip output that looked plausible and was corrupt.
+- **Returned closures had stack-allocated captures** — a use-after-return, confirmed under
+  lldb.
+- **`llTypeBytes` defaulted to 8 bytes** for any struct it did not recognise, silently
+  truncating a 32-byte struct copy inside a sort.
+
+Every one of those is the same species this page has been cataloguing: a fallback or
+sentinel that yields a plausible wrong value rather than failing.
+
+**Cost worth recording:** the worktrees branched from `main`, which was 52 commits behind the
+working branch, so one agent spent its entire budget re-fixing work that already existed and
+six others had to merge mid-flight. Agents also share the git stash stack — two reported work
+vanishing, one recovered it via `git fsck`. Brief every parallel agent to use WIP commits, and
+make sure `main` is current before spawning any worktree.
+
+### Earlier: the feature tail
 
 The feature tail finally moved, and how it moved is the lesson: adding `Vec.clear` /
 `HashMap.clear` unblocked **zero** fixtures, while two things that were not on the

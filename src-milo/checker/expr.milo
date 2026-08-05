@@ -2590,7 +2590,12 @@ pub fn checkVecMethod(ck: &mut Checker, obj: &Expr, elem: &TypeKind, method: &st
         if !isRootMutable(ck, obj) {
             error(ck, "cannot push to immutable Vec", cloneSpan(span))
         }
+        // Give the element type as context so a phantom-typed generic struct
+        // literal (Handle<T>'s T isn't stored in any field) can infer its type
+        // arg from the Vec's declared element type instead of failing to unknown.
+        ck.expectedType = Option.Some(elem.clone())
         let argType = checkExpr(ck, *args[0])
+        ck.expectedType = Option.None
         if !typeEq(elem, argType) && !typeEq(argType, tyUnknown()) &&
         !(isConstIntExpr(*args[0]) && isInteger(elem)) && !interfaceCoercible(ck, elem, argType) {
             error(ck, "push: expected " + typeName(elem) + ", got " + typeName(argType), cloneSpan(span))

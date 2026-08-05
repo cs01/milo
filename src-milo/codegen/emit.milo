@@ -52,6 +52,145 @@ pub fn structLitConst(cg: &Cgen, gllTy: &string, value: &Expr): string {
     }
 }
 
+// Const element list for a global initialized by an Expr.ArrayLit/ArrayRepeat,
+// else empty (falls back to zeroinit + runtime init). Takes `value` by
+// reference for the same reason constStructBody does — see its comment.
+pub fn constArrayElems(cg: &Cgen, value: &Expr, elemLl: &string, structElem: bool): Vec<string> {
+    var kind = ""
+    var litElems: Vec<Heap<Expr>> = Vec.new()
+    var repeatVal: Expr = Expr.IntLit(0, Option.None)
+    var repeatCount: i64 = 0
+    match value {
+        Expr.ArrayLit(elements, sp) => {
+            kind = "lit"
+            for i in 0..elements.len {
+                litElems.push(Heap((*elements[i]).clone()))
+            }
+        }
+        Expr.ArrayRepeat(val, count, sp) => {
+            kind = "repeat"
+            repeatVal = (*val).clone()
+            repeatCount = count
+        }
+        _ => {
+        }
+    }
+    var elems: Vec<string> = Vec.new()
+    var elemOk = true
+    if kind == "lit" {
+        for ei in 0..litElems.len {
+            if structElem {
+                let sc = structLitConst(cg, elemLl, *litElems[ei])
+                if sc.len == 0 {
+                    elemOk = false
+                } else {
+                    elems.push(elemLl.clone() + " " + sc)
+                }
+            } else {
+                elems.push(elemLl.clone() + " " + constInitOf(*litElems[ei], elemLl))
+            }
+        }
+    } else if kind == "repeat" {
+        var one = ""
+        if structElem {
+            one = structLitConst(cg, elemLl, repeatVal)
+            if one.len == 0 {
+                elemOk = false
+            }
+        } else {
+            one = constInitOf(repeatVal, elemLl)
+        }
+        for ci in 0..repeatCount {
+            elems.push(elemLl.clone() + " " + one.clone())
+        }
+    }
+    if !elemOk {
+        return Vec.new()
+    }
+    return elems
+}
+
+// A struct-literal field initialized by an empty container constructor
+// (`Vec.new()`) is still all-zero bytes, hence const. Takes `&Expr` (a
+// borrow) — see constStructBody's comment for why that matters here.
+pub fn isEmptyCtorInit(e: &Expr): bool {
+    match e {
+        Expr.EnumLit(en, vn, eargs, esp) => {
+            return vn == "new" && eargs.len == 0
+        }
+        _ => {
+            return false
+        }
+    }
+}
+
+// The LLVM struct-constant body ("{ ... }") for a global whose initializer is
+// an all-const-scalar Expr.StructLit, else None (falls back to zeroinit +
+// runtime init). MUST take `value` by reference: this used to be inlined as
+// `match *prog.globals[gi].value { Expr.StructLit(...) => ..., _ => {} }` —
+// dereferencing the global's Heap<Expr> MOVES it out of the box for the
+// match's duration, and a non-StructLit initializer (e.g. a generic call
+// like `arenaNew<Node>()`) fell into the wildcard arm, dropping that owned
+// temporary — freeing the global's OWN AST node in place. The runtime-init
+// pass then re-read the same (now-freed) Heap<Expr> and got back garbage
+// that happened to decode as Expr.IntLit(0), silently emitting `store %T 0`
+// instead of the real initializer call.
+pub fn constStructBody(_cg: &Cgen, value: &Expr, sfields: &Vec<FieldInfo>): Option<string> {
+    var isLit = false
+    var litFields: Vec<StructLitField> = Vec.new()
+    match value {
+        Expr.StructLit(n, fs, sp) => {
+            isLit = true
+            for i in 0..fs.len {
+                litFields.push(fs[i].clone())
+            }
+        }
+        _ => {
+        }
+    }
+    if !isLit {
+        return Option.None
+    }
+    var parts: Vec<string> = Vec.new()
+    var allConst = true
+    // emit in declared field order, matching the literal by name
+    for fi in 0..sfields.len {
+        let fll = llType(sfields[fi].ty)
+        let scalar = fll == "i1" || fll == "i8" || fll == "i16" || fll == "i32" || fll == "i64" || fll == "double" || fll == "float"
+        var fval = "0"
+        var fieldConst = scalar
+        for lf in 0..litFields.len {
+            if litFields[lf].name == sfields[fi].name {
+                if scalar {
+                    fval = constInitOf(*litFields[lf].value, fll)
+                } else if isEmptyCtorInit(*litFields[lf].value) {
+                    // An EMPTY container is still a constant: `Vec.new()` is all-zero
+                    // bytes. Bailing on it zero-initialized the WHOLE struct, so a
+                    // `Vec` field silently discarded every scalar field beside it.
+                    fval = "zeroinitializer"
+                    fieldConst = true
+                }
+            }
+        }
+        if !fieldConst {
+            allConst = false
+        }
+        parts.push(fll + " " + fval)
+    }
+    if !allConst {
+        return Option.None
+    }
+    var body = "{ "
+    for pi in 0..parts.len {
+        if pi > 0 {
+            body = body + ", "
+        }
+        body = body + parts[pi].clone()
+    }
+    body = body + " }"
+    return Option.Some(body)
+}
+
 // Can this initializer be spelled as an LLVM constant? Anything else needs the runtime
 // initializer. Deliberately conservative: a shape not listed here gets runtime init, which
 // is always correct, where guessing "constant" would silently emit a zero.
@@ -967,43 +1106,7 @@ pub fn genProgram(prog: Program, sourceDir: string): string {
             let scalarElem = elemLl == "i1" || elemLl == "i8" || elemLl == "i16" || elemLl == "i32" || elemLl == "i64" || elemLl == "double" || elemLl == "float"
             let structElem = elemLl.len > 0 && elemLl[0] == 37 && cg.structs.contains(stripPercent(elemLl))
             if scalarElem || structElem {
-                var elems: Vec<string> = Vec.new()
-                var elemOk = true
-                match *prog.globals[gi].value {
-                    Expr.ArrayLit(elements, sp) => {
-                        for ei in 0..elements.len {
-                            if structElem {
-                                let sc = structLitConst(cg, elemLl, *elements[ei])
-                                if sc.len == 0 {
-                                    elemOk = false
-                                } else {
-                                    elems.push(elemLl + " " + sc)
-                                }
-                            } else {
-                                elems.push(elemLl + " " + constInitOf(*elements[ei], elemLl))
-                            }
-                        }
-                    }
-                    Expr.ArrayRepeat(val, count, sp) => {
-                        var one = ""
-                        if structElem {
-                            one = structLitConst(cg, elemLl, *val)
-                            if one.len == 0 {
-                                elemOk = false
-                            }
-                        } else {
-                            one = constInitOf(*val, elemLl)
-                        }
-                        for ci in 0..count {
-                            elems.push(elemLl + " " + one.clone())
-                        }
-                    }
-                    _ => {
-                    }
-                }
-                if !elemOk {
-                    elems = Vec.new()
-                }
+                let elems = constArrayElems(cg, *prog.globals[gi].value, elemLl, structElem)
                 if elems.len > 0 {
                     var dataC = "["
                     for ei in 0..elems.len {
@@ -1027,57 +1130,12 @@ pub fn genProgram(prog: Program, sourceDir: string): string {
         if !arrayHandled && isStructG {
             let sname = stripPercent(gllTy)
             let sfields = cg.structs.get(sname)!
-            match *prog.globals[gi].value {
-                Expr.StructLit(lname, litFields, sp) => {
-                    var parts: Vec<string> = Vec.new()
-                    var allConst = true
-                    // emit in declared field order, matching the literal by name
-                    for fi in 0..sfields.len {
-                        let fll = llType(sfields[fi].ty)
-                        let scalar = fll == "i1" || fll == "i8" || fll == "i16" || fll == "i32" || fll == "i64" || fll == "double" || fll == "float"
-                        var fval = "0"
-                        var fieldConst = scalar
-                        for lf in 0..litFields.len {
-                            if litFields[lf].name == sfields[fi].name {
-                                if scalar {
-                                    fval = constInitOf(*litFields[lf].value, fll)
-                                } else {
-                                    // An EMPTY container is still a constant: `Vec.new()`
-                                    // is all-zero bytes. Bailing on it zero-initialized the
-                                    // WHOLE struct, so a `Vec` field silently discarded
-                                    // every scalar field's initializer beside it.
-                                    match *litFields[lf].value {
-                                        Expr.EnumLit(en, vn, eargs, esp) => {
-                                            if vn == "new" && eargs.len == 0 {
-                                                fval = "zeroinitializer"
-                                                fieldConst = true
-                                            }
-                                        }
-                                        _ => {
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        if !fieldConst {
-                            allConst = false
-                        }
-                        parts.push(fll + " " + fval)
-                    }
-                    if allConst {
-                        var body = "{ "
-                        for pi in 0..parts.len {
-                            if pi > 0 {
-                                body = body + ", "
-                            }
-                            body = body + parts[pi].clone()
-                        }
-                        body = body + " }"
-                        emitG(cg, "@" + gname.clone() + " = global " + gllTy + " " + body + "\n")
-                        structHandled = true
-                    }
+            match constStructBody(cg, *prog.globals[gi].value, sfields) {
+                Option.Some(body) => {
+                    emitG(cg, "@" + gname.clone() + " = global " + gllTy + " " + body + "\n")
+                    structHandled = true
                 }
-                _ => {
+                Option.None => {
                 }
             }
         }

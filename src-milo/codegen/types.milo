@@ -171,7 +171,10 @@ pub fn cgenNew(): Cgen {
 pub fn nextTemp(cg: &mut Cgen): string {
     let n = cg.temp
     cg.temp = cg.temp + 1
-    return "%t" + n.toString()
+    // Leading dot: LLVM accepts it in a local name, Milo does not accept it in an
+    // identifier. Without it a parameter named `t0` collided with the temp counter's
+    // `%t0` and LLVM rejected the whole module.
+    return "%.t" + n.toString()
 }
 
 pub fn nextLabel(cg: &mut Cgen, base: string): string {

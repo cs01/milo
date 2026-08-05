@@ -24,6 +24,46 @@ import { estimateLoopCycles, formatCycleEstimate } from "./wcet-cycles";
 import { PKG_COMMANDS, ensureDepsInstalled } from "./pkgcli";
 import { ensureFmtBinary } from "./fmtbin";
 import { must } from "./must";
+import { splitModule, type SplitStats } from "./cgu";
+
+// `--cgus=N` (also MILO_CGUS): how many codegen units to hand clang. Module-level rather
+// than threaded through compileToBinary's parameter list, which is already at its limit —
+// linkIR is the only reader and it already consults process state (MILO_VERBOSE) here.
+// null = auto.
+let cguOverride: number | null = null;
+
+// Measured 2026-08-04: at ~5.7k IR lines splitting LOSES ~0.03s (clang startup and the
+// duplicated preamble outweigh the parallelism); by ~49k lines it wins 1.9x. This sits
+// deliberately below the observed crossover but well above the small programs that would
+// only pay the overhead.
+const CGU_MIN_IR_LINES = 20_000;
+// More units is uniformly better above the threshold — 8 beat 4 beat 2 on every program
+// measured, including 55k-line ones — so unit count tracks available cores rather than
+// module size. Sizing by lines/N instead starved a 55k-line module to 2 units and made it
+// SLOWER than not splitting at all.
+const CGU_MAX_UNITS = 8;
+
+/**
+ * How many codegen units this build should use. clang is ~95% of build time and
+ * parallelises near-linearly across processes, but splitting costs cross-unit inlining —
+ * so this is a dev-loop optimization that release builds opt out of.
+ */
+function cguCount(irLineCount: number, optFlag: string, emitDebug: boolean): number {
+  // cmd.exe has no `&`/`wait`, so the parallel driver below cannot run there.
+  if (process.platform === "win32") return 1;
+  // Promotion renames module-local symbols, but a DISubprogram's `linkageName` would keep
+  // the old one — a debugger would then fail to match frames to functions. Debug builds
+  // are -O0 and already fast, so decline rather than half-fix the metadata.
+  if (emitDebug) return 1;
+  const explicit = cguOverride ?? (process.env.MILO_CGUS ? Number(process.env.MILO_CGUS) : null);
+  if (explicit !== null && Number.isFinite(explicit)) return Math.max(1, Math.floor(explicit));
+  // -O3 means the user asked for the best code we can produce; whole-module inlining is
+  // part of that answer.
+  if (optFlag === "-O3") return 1;
+  if (irLineCount < CGU_MIN_IR_LINES) return 1;
+  const cores = Math.max(1, (navigator.hardwareConcurrency ?? 8) - 2);
+  return Math.max(2, Math.min(CGU_MAX_UNITS, cores));
+}
 
 function frontendToHIR(source: string, target: TargetInfo, filePath?: string, warningConfig?: WarningConfig) {
   const sourceDir = filePath ? dirname(resolve(filePath)) : process.cwd();
@@ -514,6 +554,54 @@ function windowsIncludeFlags(): string {
     .map(d => `-isystem "${root}/${d}"`).join(" ");
 }
 
+/**
+ * Compile `llFile` as N codegen units in parallel processes and link the objects.
+ * Returns false when the build was not split, leaving the caller's single-module path to
+ * run — including when the split path itself fails. That fallback is what makes this safe
+ * to have on by default: the split is a pure optimization, so abandoning it can cost time
+ * but can never turn a buildable program into a failed build, and a genuine error in the
+ * user's IR still gets reported by the single-module path with its normal diagnostics.
+ */
+function compileSplit(cc: string, llFile: string, ccFlags: string, linkFlags: string, optFlag: string, emitDebug: boolean): boolean {
+  const ir = readFileSync(llFile, "utf-8");
+  let irLines = 1;
+  for (let i = 0; i < ir.length; i++) if (ir.charCodeAt(i) === 10) irLines++;
+  const units = cguCount(irLines, optFlag, emitDebug);
+  if (units < 2) return false;
+
+  const stats: { out?: SplitStats } = {};
+  const mods = splitModule(ir, units, stats);
+  if (!mods) return false;
+
+  const base = llFile.replace(/\.ll$/, "");
+  const lls = mods.map((_, i) => `${base}.cgu${i}.ll`);
+  const objs = mods.map((_, i) => `${base}.cgu${i}.o`);
+  try {
+    mods.forEach((m, i) => writeFileSync(lls[i]!, m));
+    // One `sh` that backgrounds every unit, then waits on each PID individually: bare
+    // `wait` reports only the last job's status, so a failed unit would go unnoticed and
+    // resurface as a confusing undefined-symbol error at link time.
+    const jobs = lls.map((f, i) =>
+      `${cc} ${ccFlags} -c ${f} -o ${objs[i]} -Wno-override-module & pids="$pids $!"`).join("\n");
+    const script = `pids=""\n${jobs}\nfor p in $pids; do wait $p || exit 1; done`;
+    if (process.env.MILO_VERBOSE === "1") {
+      console.error(`cgu: ${units} units, ${stats.out?.promoted ?? 0} symbols promoted, ${irLines} IR lines`);
+    }
+    execSync(script, { stdio: ["pipe", "pipe", "pipe"] });
+    const linkCmd = `${cc} ${ccFlags} ${objs.join(" ")} ${linkFlags}`;
+    if (process.env.MILO_VERBOSE === "1") console.error(`link: ${linkCmd}`);
+    execSync(linkCmd, { stdio: ["pipe", "pipe", "pipe"] });
+    return true;
+  } catch (e: any) {
+    if (process.env.MILO_VERBOSE === "1") {
+      console.error(`cgu: split build failed, falling back to a single module:\n${e.stderr?.toString() ?? e.message}`);
+    }
+    return false;
+  } finally {
+    for (const f of [...lls, ...objs]) { try { unlinkSync(f); } catch {} }
+  }
+}
+
 function linkIR(llFile: string, outFile: string, optFlag: string, libs: string, extra: string = "", sanitize: boolean = false, emitDebug = false, target?: TargetInfo) {
   const tc = detectToolchain();
   const san = sanitize ? " -fsanitize=address" : "";
@@ -553,6 +641,8 @@ function linkIR(llFile: string, outFile: string, optFlag: string, libs: string, 
         try { unlinkSync(obj); } catch {}
       }
     } else {
+      const linkFlags = `-o ${outFile}${libs}${extra}${mathLink}${linuxLink}`;
+      if (compileSplit(tc.path, llFile, `${tgt}${winSysroot}${opt}${san}`, linkFlags, optFlag, emitDebug)) return;
       // -lm: numToStr and other std math call floor/pow from libm. macOS folds
       // libm into libSystem so clang links it implicitly; Linux does not, so
       // without this the link fails with `undefined reference to 'floor'` for
@@ -898,60 +988,159 @@ function collectTestFiles(dir: string): string[] {
   return out.sort();
 }
 
-async function runTests(testFiles: string[], target: TargetInfo, optFlag: string, warningConfig?: WarningConfig) {
-  let totalPassed = 0;
-  let totalFailed = 0;
-  const failures: string[] = [];
+// A test is a top-level `fn test*()` taking no parameters. Discovered from the parsed AST,
+// never by scanning the text: a regex over source counts `fn testFoo(` inside a comment or
+// a string literal, and — worse — misses one written differently, which is a test silently
+// not running. Anything named `test*` that is NOT a valid test is reported, not skipped.
+type TestDiscovery = { tests: string[]; rejected: { name: string; why: string }[] };
+
+function discoverTests(source: string, file: string): TestDiscovery {
+  const tokens = new Lexer(source).tokenize();
+  const program = new Parser(tokens, source, file).parse();
+  const tests: string[] = [];
+  const rejected: { name: string; why: string }[] = [];
+  for (const fn of program.functions) {
+    if (!fn.name.startsWith("test")) continue;
+    if (fn.isExtern) continue;
+    if (fn.typeParams.length > 0) { rejected.push({ name: fn.name, why: "generic functions cannot be run as tests" }); continue; }
+    if (fn.params.length > 0) { rejected.push({ name: fn.name, why: `takes ${fn.params.length} parameter(s); a test takes none` }); continue; }
+    tests.push(fn.name);
+  }
+  return { tests, rejected };
+}
+
+/**
+ * A `main` that runs ONE test, named by argv[1]. One compile per file, one process per
+ * test: that is what buys isolation, because a test that traps (overflow, bounds, failed
+ * assert) takes down only its own process and the rest of the file still reports.
+ * The import is aliased so it cannot collide with the test file's own imports — a
+ * duplicate declaration in one file is a resolver error.
+ */
+function testHarnessMain(tests: string[]): string {
+  const dispatch = tests.map(name =>
+    `    if __miloTestName == "${name}" {\n        ${name}()\n        return 0\n    }`).join("\n");
+  return [
+    ``,
+    `from "std/args" import { args as __miloTestArgv }`,
+    ``,
+    `fn main(): i32 {`,
+    `    let __miloTestArgs = __miloTestArgv()`,
+    `    if __miloTestArgs.len() < 2 {`,
+    `        eprint("milo test harness: expected a test name")`,
+    `        return 2`,
+    `    }`,
+    `    let __miloTestName = __miloTestArgs[1]`,
+    dispatch,
+    `    eprint($"milo test harness: no such test {__miloTestName}")`,
+    `    return 2`,
+    `}`,
+    ``,
+  ].join("\n");
+}
+
+const TEST_TIMEOUT_MS = 30_000;
+const TEST_MEM_MB = 2048;
+
+async function mapPool<T>(items: T[], limit: number, fn: (item: T, index: number) => Promise<void>): Promise<void> {
+  let next = 0;
+  const worker = async () => { while (next < items.length) { const i = next++; await fn(items[i]!, i); } };
+  await Promise.all(Array.from({ length: Math.max(1, Math.min(limit, items.length)) }, worker));
+}
+
+type TestOutcome = { file: string; name: string; ok: boolean; ms: number; output: string };
+
+async function runTests(
+  testFiles: string[],
+  target: TargetInfo,
+  optFlag: string,
+  warningConfig?: WarningConfig,
+  filter?: string,
+) {
+  let re: RegExp | null = null;
+  if (filter) {
+    try { re = new RegExp(filter); } catch { re = null; }
+  }
+  const matches = (file: string, name: string) =>
+    !filter || (re ? re.test(name) || re.test(`${file} > ${name}`) : name.includes(filter));
+
+  // Test binaries are milo-built and can hang or run away, so every child stays guarded
+  // and the pool is sized the same way the rest of the repo sizes clang fan-out.
+  const jobs = Number(process.env.MILO_TEST_JOBS)
+    || Math.min(8, Math.max(2, (navigator.hardwareConcurrency ?? 8) - 2));
+
+  const outcomes: TestOutcome[] = [];
+  const compileErrors: { file: string; message: string }[] = [];
+  let skipped = 0;
+  const started = Date.now();
 
   for (const file of testFiles) {
     const source = readFileSync(file, "utf-8");
-    const testFnRegex = /^fn\s+(test\w+)\s*\(/gm;
-    const testFns: string[] = [];
-    let m;
-    while ((m = testFnRegex.exec(source)) !== null) testFns.push(m[1]);
-    if (testFns.length === 0) continue;
-
-    console.log(`\n${file}`);
-
-    // generate main that calls each test, one at a time
-    let mainSrc = "\nfn main(): i32 {\n";
-    for (const name of testFns) {
-      mainSrc += `    eprint("  ${name} ... ")\n`;
-      mainSrc += `    ${name}()\n`;
-      mainSrc += `    eprint("ok")\n`;
+    let found: TestDiscovery;
+    try {
+      found = discoverTests(source, file);
+    } catch (e: any) {
+      compileErrors.push({ file, message: e.message ?? String(e) });
+      continue;
     }
-    mainSrc += "    return 0\n}\n";
+    for (const r of found.rejected) {
+      console.log(`${DIM}  ${file}: skipping ${r.name} — ${r.why}${RESET}`);
+    }
+    const selected = found.tests.filter(name => matches(file, name));
+    skipped += found.tests.length - selected.length;
+    if (selected.length === 0) continue;
 
-    const fullSource = source + mainSrc;
     let bin: string;
     try {
-      bin = compileSourceToBinary(fullSource, file, target, optFlag, warningConfig);
+      bin = compileSourceToBinary(source + testHarnessMain(found.tests), file, target, optFlag, warningConfig);
     } catch (e: any) {
-      console.error(`  compile error: ${e.message}`);
-      totalFailed += testFns.length;
+      compileErrors.push({ file, message: e.message ?? String(e) });
       continue;
     }
 
+    console.log(`\n${BOLD}${file}${RESET}`);
+    const fileOutcomes: TestOutcome[] = new Array(selected.length);
     try {
-      // guardedRun, not spawnSync: test binaries are milo-built and untrusted
-      const result = await guardedRun(bin, [], { timeoutMs: 30000, memMb: 2048 });
-      if (result.stderr) process.stderr.write(result.stderr);
-      if (result.code === 0) {
-        totalPassed += testFns.length;
-      } else {
-        totalFailed++;
-        totalPassed += Math.max(0, testFns.length - 1);
-        failures.push(file);
-      }
+      await mapPool(selected, jobs, async (name, i) => {
+        const t0 = Date.now();
+        const r = await guardedRun(bin, [name], { timeoutMs: TEST_TIMEOUT_MS, memMb: TEST_MEM_MB });
+        fileOutcomes[i] = {
+          file, name, ok: r.code === 0, ms: Date.now() - t0,
+          output: `${r.stdout ?? ""}${r.stderr ?? ""}`,
+        };
+      });
     } finally {
       try { unlinkSync(bin); } catch {}
     }
+    // Printed after the pool so concurrent tests cannot interleave their lines.
+    for (const o of fileOutcomes) {
+      if (!o) continue;
+      console.log(o.ok ? `  ${GREEN}✓${RESET} ${o.name} ${DIM}[${o.ms}ms]${RESET}`
+                       : `  ✗ ${o.name} ${DIM}[${o.ms}ms]${RESET}`);
+      if (!o.ok && o.output.trim()) {
+        for (const line of o.output.trimEnd().split("\n")) console.log(`      ${line}`);
+      }
+      outcomes.push(o);
+    }
   }
 
-  console.log(`\nresults: ${totalPassed} passed, ${totalFailed} failed, ${totalPassed + totalFailed} total`);
-  if (totalFailed > 0) {
+  const passed = outcomes.filter(o => o.ok).length;
+  const failed = outcomes.length - passed;
+  const elapsed = ((Date.now() - started) / 1000).toFixed(2);
+  console.log("");
+  if (compileErrors.length) {
+    for (const c of compileErrors) console.log(`${c.file}: compile error\n  ${c.message.split("\n").join("\n  ")}`);
+  }
+  const skipNote = skipped > 0 ? `, ${skipped} filtered out` : "";
+  const noun = outcomes.length === 1 ? "test" : "tests";
+  console.log(`${passed} pass, ${failed} fail${skipNote} — ${outcomes.length} ${noun} in ${elapsed}s`);
+  if (failed > 0) {
     console.log("failures:");
-    for (const f of failures) console.log(`  ${f}`);
+    for (const o of outcomes) if (!o.ok) console.log(`  ${o.file} > ${o.name}`);
+  }
+  if (failed > 0 || compileErrors.length > 0) process.exit(1);
+  // A filter that matched nothing is a mistyped pattern, not a green run.
+  if (outcomes.length === 0 && filter) {
+    console.log(`no test matched '${filter}'`);
     process.exit(1);
   }
 }
@@ -1073,6 +1262,14 @@ function parseArgs(args: string[]): { output: string | null; source: string | nu
     // A later explicit --overflow-checks still wins (the loop is order-sensitive).
     else if (args[i] === "--fast") { optFlag = "-O0"; overflowChecks = false; contractChecks = false; }
     else if (args[i] === "-g") { emitDebug = true; } // DWARF line info, composes with any -O
+    // Codegen units: clang is ~95% of build time and parallelises across processes.
+    // `--cgus=1` forces the single module back (the shape release builds and -g already
+    // get), `--cgus=N` forces N regardless of size or opt level.
+    else if (args[i]?.startsWith("--cgus=")) {
+      const n = Number(args[i]!.slice("--cgus=".length));
+      if (!Number.isFinite(n) || n < 1) { console.error(`error: --cgus expects a positive integer, got '${args[i]!.slice(7)}'`); process.exit(1); }
+      cguOverride = Math.floor(n);
+    }
     else if (args[i] === "--no-entry") { noEntry = true; }
     else if (args[i] === "--sanitize") { sanitize = true; }
     else if (args[i] === "--static-deps") { staticDeps = true; }
@@ -1534,6 +1731,9 @@ async function main() {
     console.log("  run <file> [args]      compile and run (no artifacts left behind)");
     console.log("  build <file> [-o out]  compile to executable");
     console.log("  test [file|dir...]     run tests (*_test.milo, recursive in a dir; cwd by default)");
+    console.log("                         a test is a top-level `fn test*()` with no parameters;");
+    console.log("                         each runs in its own process, so a trap fails only that test");
+    console.log("                         -t <pattern>  run only tests matching (substring or regex)");
     console.log("  emit-ast <file>        emit the parsed AST as JSON (--all imports, --spans keep spans)");
     console.log("  emit-hir <file>        emit the typed HIR as JSON (--all full module, --spans keep spans)");
     console.log("  emit-ir <file>         emit LLVM IR");
@@ -1577,6 +1777,7 @@ async function main() {
     console.log("  --no-contract-checks  drop those asserts at any -O (e.g. fast -O0 builds)");
     console.log("  --strip-panic-locations  blank source paths out of runtime panic messages (-g still embeds them)");
     console.log("  --fast                quick edit-loop build: -O0, wrapping (~2x faster compile)");
+    console.log("  --cgus=<n>             codegen units compiled in parallel (default: auto, 1 for --release/-g)");
     console.log("  --deny=<warning>       treat warning as error (e.g. --deny=unused-variable)");
     console.log("  --allow=<warning>      suppress warning (e.g. --allow=unused-result)");
     console.log("  --deny-all             treat all warnings as errors");
@@ -1731,7 +1932,23 @@ async function main() {
   // Ahead of the source check below: `milo test` takes files OR directories, and a bare
   // `milo test` (no positional at all) means "this directory".
   if (cmd === "test") {
-    const testArgs = args.slice(1);
+    let testArgs = args.slice(1);
+    // `-t <pattern>` / `--test-name-pattern <pattern>` filter, stripped before parseArgs so
+    // the pattern is never mistaken for the source positional.
+    let testFilter: string | undefined;
+    const filtered: string[] = [];
+    for (let i = 0; i < testArgs.length; i++) {
+      const a = testArgs[i]!;
+      if (a === "-t" || a === "--test-name-pattern") {
+        if (i + 1 >= testArgs.length) { console.error(`error: ${a} expects a pattern`); process.exit(1); }
+        testFilter = testArgs[++i];
+      } else if (a.startsWith("--test-name-pattern=")) {
+        testFilter = a.slice("--test-name-pattern=".length);
+      } else {
+        filtered.push(a);
+      }
+    }
+    testArgs = filtered;
     const { source: testSource, rest: testRest, optFlag: testOpt, warningConfig: testWc } = parseArgs(testArgs);
     const roots = [testSource, ...testRest].filter((a): a is string => a != null && !a.startsWith("-"));
     const files: string[] = [];
@@ -1746,7 +1963,7 @@ async function main() {
       }
     }
     if (files.length === 0) { console.error("no test files found"); process.exit(1); }
-    await runTests(files, target, testOpt, testWc);
+    await runTests(files, target, testOpt, testWc, testFilter);
     return;
   }
 

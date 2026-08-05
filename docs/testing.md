@@ -16,6 +16,55 @@ bun test tests/run.test.ts -t "arithmetic"      # one fixture by @name/descripti
 bun test tests/safety.test.ts                   # one file
 ```
 
+`-t` is cheap: the fixture/error/runtime-error lanes narrow their `beforeAll` compile
+fan-out to the same pattern, so a targeted run builds only what it will execute (one
+fixture is ~1s, not the ~34s it cost when every lane compiled all 577 first). Bun scrubs
+`-t` from `process.argv` before a test file loads, so the pattern is recovered from the
+process's own command line — set `MILO_TEST_FILTER` instead if you are invoking the suite
+in a way that hides it. Both fail open: no pattern found means compile everything.
+
+## `milo test` — tests written in Milo
+
+The compiler's own suite is the TS driver above. `milo test` is the runner **Milo programs**
+use, including packages outside this repo.
+
+```bash
+milo test                          # sweep cwd for *_test.milo, recursively
+milo test path/to/foo_test.milo    # one file (any filename works when named explicitly)
+milo test tests/ -t "Parser"       # only tests matching a substring or regex
+```
+
+A test is a **top-level `fn test*()` taking no parameters**, in a file named
+`*_test.milo`. Tests are discovered from the parsed AST, not by scanning text, so a
+`fn testFoo(` inside a comment or string is not a test and one written unusually is not
+missed. Anything named `test*` that cannot be run — it takes parameters, or it is generic —
+is **reported as skipped with a reason**, never dropped quietly.
+
+Each file compiles once, then **every test runs in its own process**. That is what makes a
+trap (failed assert, overflow, out-of-bounds, unwrap-on-`None`) fail only its own test
+instead of ending the file. Runs are parallel (`MILO_TEST_JOBS` to size the pool) and every
+child is guarded with a memory cap and a 30s timeout. A `-t` pattern that matches nothing
+exits 1 — a mistyped filter is not a green run.
+
+Assertions live in `std/testing`. `assertEq`/`assertNe` are generic and print both sides;
+they take `&T`, so asserting on a value does not move it:
+
+```milo
+from "std/testing" import { assertEq, assertNear, assertVecEq }
+
+fn testDoubling(): void {
+    assertEq(double(21), 42)
+}
+```
+
+Use `assertNear` for floats — `0.1 + 0.2 != 0.3` in binary floating point, so an exact
+comparison fails a correct program.
+
+`tests/milo-tests/` holds the runner's own coverage, driven by
+`tests/miloTestRunner.test.ts`. Its deliberately-failing cases live in
+`isolationCases.milo` — *not* `*_test.milo` — so a repo-wide `milo test` sweep stays green
+while the driver can still run them by explicit path.
+
 ## The fixture protocol (no code changes to add a test)
 `tests/run.test.ts` walks two directories:
 - `tests/fixtures/*.milo` — **compiled + executed.** stdout must match the `// @expect: <line>` annotations, one per expected output line.

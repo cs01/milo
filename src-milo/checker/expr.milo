@@ -10,7 +10,7 @@ from "src-milo/checker/types.milo" import {
 from "src-milo/checker/state.milo" import {
     Checker, VarInfo, FnSig, FnParam, StructInfo, CkStructField,
     EnumInfo, VariantInfo, Diagnostic,
-    error, errorHint, warn, pushScope, popScope, declare, lookup, setVarMoved, setVarRead, hasErrors,
+    error, errorHint, warn, pushScope, popScope, declare, lookup, setVarMoved, setVarType, setVarRead, hasErrors,
     isCopyCk, normalizeEnumNames, snapshotMoves, restoreMoves,
 }
 from "src-milo/checker/mono.milo" import {
@@ -741,6 +741,13 @@ pub fn checkCall(ck: &mut Checker, func: &string, args: &Vec<Heap<Expr>>, typeAr
     }
     // embedFile("path"): compile-time file embed → string literal (codegen reads
     // the file relative to the source dir). Argument must be a string literal.
+    // `@targetOs()` is a compile-time constant string; codegen folds it to a literal.
+    if func == "targetOs" {
+        if args.len != 0 {
+            error(ck, "'targetOs' takes no arguments", cloneSpan(span))
+        }
+        return tyString()
+    }
     if func == "embedFile" {
         if args.len != 1 {
             error(ck, "embedFile() expects 1 argument, got " + args.len.toString(), cloneSpan(span))
@@ -1101,7 +1108,35 @@ pub fn checkStructLit(ck: &mut Checker, name: &string, fields: &Vec<StructLitFie
 
 // -- Field access --
 
+// `f64.NAN` / `f64.INF` / `f64.NEG_INF` (and f32) are FieldAccess nodes whose object is a
+// TYPE name, not a variable — so they have to be recognized before the object is checked,
+// or `f64` resolves as an undefined variable. Mirrors `floatNamespaceConst` in the oracle's
+// ast.ts; the two must agree on the exact IEEE value.
+pub fn floatNamespaceBits(obj: &Expr, field: &string): i32 {
+    match obj {
+        Expr.Ident(name, _sp) => {
+            if field != "NAN" && field != "INF" && field != "NEG_INF" {
+                return 0
+            }
+            if name == "f64" {
+                return 64
+            }
+            if name == "f32" {
+                return 32
+            }
+            return 0
+        }
+        _ => {
+            return 0
+        }
+    }
+}
+
 pub fn checkFieldAccess(ck: &mut Checker, obj: &Expr, field: &string, span: &Option<Span>): TypeKind {
+    let fbits = floatNamespaceBits(obj, field)
+    if fbits > 0 {
+        return TypeKind.TFloat(fbits)
+    }
     var objType = checkExpr(ck, obj)
     // auto-deref references; and raw pointers (`p.x` on a *Struct), which is an
     // unsafe-gated deref-and-access
@@ -1283,6 +1318,31 @@ pub fn checkEnumLit(ck: &mut Checker, enumName: &string, variant: &string, args:
     if enumName == "Vec" && variant == "new" {
         if args.len != 0 {
             error(ck, "'Vec.new' takes no arguments", cloneSpan(span))
+        }
+        return tyUnknown()
+    }
+    // `Vec.withCapacity(n)` and `Vec.filled(n, v)`. std/io uses both, so without them
+    // every program that touches std/io lost its Vec types and produced a cascade of
+    // "no method 'push' on <unknown>" against the CALLER.
+    if enumName == "Vec" && variant == "withCapacity" {
+        if args.len != 1 {
+            error(ck, "'Vec.withCapacity' expects 1 argument", cloneSpan(span))
+        }
+        if args.len >= 1 {
+            checkExpr(ck, *args[0])
+        }
+        return tyUnknown()
+    }
+    if enumName == "Vec" && variant == "filled" {
+        if args.len != 2 {
+            error(ck, "'Vec.filled' expects 2 arguments", cloneSpan(span))
+        }
+        if args.len >= 1 {
+            checkExpr(ck, *args[0])
+        }
+        if args.len >= 2 {
+            let elemT = checkExpr(ck, *args[1])
+            return TypeKind.TVec(Heap(elemT))
         }
         return tyUnknown()
     }
@@ -1814,6 +1874,15 @@ pub fn checkCast(ck: &mut Checker, operand: &Expr, targetType: &MiloType, span: 
         _ => {
         }
     }
+    // A payload-free (integer-repr) enum casts to an integer: the value IS its
+    // discriminant, which milo0 already stores as the i32 tag in field 0.
+    match fromType.clone() {
+        TypeKind.TEnum(ename) => {
+            fromCastable = true
+        }
+        _ => {
+        }
+    }
     let fromOk = isNumeric(fromType) || typeEq(fromType, tyBool()) || fromCastable
     var toCastable = false
     match toType.clone() {
@@ -1884,6 +1953,30 @@ pub fn checkMethodCall(ck: &mut Checker, obj: &Expr, method: &string, args: &Vec
         return TypeKind.TPtr(Heap(objType.clone()))
     }
 
+    // bool.toString() — prints "true"/"false", same as interpolating one.
+    if method == "toString" {
+        match objType {
+            TypeKind.TBool => {
+                if args.len != 0 {
+                    error(ck, "'toString' takes no arguments", cloneSpan(span))
+                }
+                return tyString()
+            }
+            _ => {
+            }
+        }
+    }
+    // Bit rotation. Distinct from a shift: the bits that fall off one end come back in
+    // the other, so the WIDTH of the receiver is part of the semantics.
+    if isInteger(objType) && (method == "rotateLeft" || method == "rotateRight") {
+        if args.len != 1 {
+            error(ck, "'" + method.clone() + "' expects 1 argument", cloneSpan(span))
+        }
+        if args.len >= 1 {
+            checkExpr(ck, *args[0])
+        }
+        return objType.clone()
+    }
     // numeric.toString()
     if (isInteger(objType) || isFloat(objType)) && method == "toString" {
         if args.len != 0 {
@@ -1978,6 +2071,45 @@ pub fn checkMethodCall(ck: &mut Checker, obj: &Expr, method: &string, args: &Vec
         }
     }
 
+    // `var w = Vec.new()` with no annotation has no element type yet; take it from the
+    // first `push`. std/sha1, std/hmac and std/totp all open this way, and without the
+    // inference the Vec stayed <unknown> and every later use produced a cascade of errors
+    // against the CALLER of those modules rather than against the line at fault.
+    //
+    // Restricted to elements whose LLVM type is i64: codegen defaults an un-annotated
+    // `Vec.new()` to Vec<i64> and does NOT see this inference, so accepting a narrower
+    // element here would agree in the checker and silently disagree about element SIZE in
+    // the generated code. Erroring on those is the honest half-measure until codegen
+    // learns the same inference.
+    if method == "push" && args.len == 1 {
+        match obj {
+            Expr.Ident(vname, vsp) => {
+                match objType {
+                    TypeKind.TUnknown => {
+                        let elemT = checkExpr(ck, *args[0])
+                        var elemIsI64 = false
+                        match elemT.clone() {
+                            TypeKind.TInt(bits, signed) => {
+                                if bits == 64 && signed {
+                                    elemIsI64 = true
+                                }
+                            }
+                            _ => {
+                            }
+                        }
+                        if elemIsI64 {
+                            setVarType(ck, vname, TypeKind.TVec(Heap(elemT)))
+                            return tyVoid()
+                        }
+                    }
+                    _ => {
+                    }
+                }
+            }
+            _ => {
+            }
+        }
+    }
     error(ck, "no method '" + method.clone() + "' on type " + typeName(objType), cloneSpan(span))
     return tyUnknown()
 }
@@ -2188,6 +2320,15 @@ pub fn checkVecMethod(ck: &mut Checker, obj: &Expr, elem: &TypeKind, method: &st
         }
         return tyVoid()
     }
+    if method == "clear" {
+        if args.len != 0 {
+            error(ck, "'clear' takes no arguments", cloneSpan(span))
+        }
+        if !isRootMutable(ck, obj) {
+            error(ck, "cannot clear an immutable Vec", cloneSpan(span))
+        }
+        return tyVoid()
+    }
     error(ck, "no method '" + method.clone() + "' on Vec", cloneSpan(span))
     return tyUnknown()
 }
@@ -2279,6 +2420,15 @@ pub fn checkHashMapMethod(ck: &mut Checker, obj: &Expr, key: &TypeKind, val: &Ty
             error(ck, "'len' takes no arguments", cloneSpan(span))
         }
         return TypeKind.TInt(64, true)
+    }
+    if method == "clear" {
+        if args.len != 0 {
+            error(ck, "'clear' takes no arguments", cloneSpan(span))
+        }
+        if !isRootMutable(ck, obj) {
+            error(ck, "cannot clear an immutable HashMap", cloneSpan(span))
+        }
+        return tyVoid()
     }
     error(ck, "no method '" + method.clone() + "' on HashMap", cloneSpan(span))
     return tyUnknown()
@@ -2402,6 +2552,22 @@ pub fn checkStringMethod(ck: &mut Checker, obj: &Expr, method: &string, args: &V
         }
         return tyVoid()
     }
+    // `s.pushStr(other)` appends a whole string in place; `push` appends one byte.
+    if method == "pushStr" {
+        if args.len != 1 {
+            error(ck, "'pushStr' expects 1 argument", cloneSpan(span))
+        }
+        if !isRootMutable(ck, obj) {
+            error(ck, "cannot pushStr to immutable string", cloneSpan(span))
+        }
+        if args.len >= 1 {
+            let argTy = checkExpr(ck, *args[0])
+            if !typeEq(argTy, tyString()) {
+                error(ck, "string.pushStr: expected string", cloneSpan(span))
+            }
+        }
+        return tyVoid()
+    }
     if method == "toInt" || method == "parseInt" {
         return TypeKind.TInt(64, true)
     }
@@ -2522,6 +2688,47 @@ pub fn checkStructMethod(ck: &mut Checker, structName: &string, method: &string,
         }
         error(ck, "interface '" + structName.clone() + "' has no method '" + method.clone() + "'", cloneSpan(span))
         return tyUnknown()
+    }
+
+    // Option/Result queries. These are monomorphized enums (Option_i64, Result_i32_string),
+    // so they arrive here as TStruct(mangled) and would otherwise be "no method on struct".
+    // Payload-free predicates plus `unwrapOr` only: the combinators that take a closure
+    // (map/andThen/orElse) need generic closure typing and are deliberately left out
+    // rather than half-supported.
+    if ck.enums.contains(structName) {
+        let einfo = ck.enums.get(structName)!
+        let base = einfo.baseName.clone()
+        if base == "Option" || base == "Result" {
+            var okName = "Some"
+            var isYes = "isSome"
+            var isNo = "isNone"
+            if base == "Result" {
+                okName = "Ok"
+                isYes = "isOk"
+                isNo = "isErr"
+            }
+            if method == isYes || method == isNo {
+                if args.len != 0 {
+                    error(ck, "'" + method.clone() + "' takes no arguments", cloneSpan(span))
+                }
+                return tyBool()
+            }
+            if method == "unwrapOr" {
+                if args.len != 1 {
+                    error(ck, "'unwrapOr' expects 1 argument", cloneSpan(span))
+                }
+                if args.len >= 1 {
+                    checkExpr(ck, *args[0])
+                }
+                if einfo.variants.contains(okName) {
+                    let vi = einfo.variants.get(okName)!
+                    if vi.fields.len > 0 {
+                        return vi.fields[0].clone()
+                    }
+                }
+                return tyUnknown()
+            }
+        }
     }
 
     error(ck, "no method '" + method.clone() + "' on struct '" + structName.clone() + "'", cloneSpan(span))

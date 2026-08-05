@@ -122,6 +122,13 @@ pub struct Cgen {
     abiExterns: HashMap<string, bool>,
     // names of emitted drop-helper fns (milo.drop.struct.X / .enum.X) — dedup
     dropHelpers: Vec<string>,
+    // locals, scoped to the function/closure body currently being generated, that a
+    // `return <name>` escapes by identity (bound to a closure literal earlier in the
+    // same body). Populated by a pre-scan before the body is walked, so the LetDecl
+    // that creates the closure — which runs BEFORE the later Return is seen in this
+    // single forward pass — already knows to heap-allocate its captures instead of
+    // pointing them at a frame that is about to be torn down.
+    forceMoveClosures: Vec<string>,
 }
 
 pub fn cgenNew(): Cgen {
@@ -169,6 +176,7 @@ pub fn cgenNew(): Cgen {
         arch: "aarch64",
         abiExterns: HashMap.new(),
         dropHelpers: Vec.new(),
+        forceMoveClosures: Vec.new(),
     }
 }
 

@@ -735,8 +735,11 @@ pub fn checkCall(ck: &mut Checker, func: &string, args: &Vec<Heap<Expr>>, typeAr
         return tyString()
     }
 
-    // flush() — flush stdout (fflush(null)); a void builtin.
-    if func == "flush" {
+    // flush() — flush stdout (fflush(null)); a void builtin. Guarded on there being
+    // no user function of the same name: a module-private `fn flush(...)` (std/deflate's
+    // bit-writer flush, for one) would otherwise always resolve to this builtin instead —
+    // wrong arg count silently accepted, wrong (empty) behavior codegen'd, no diagnostic.
+    if func == "flush" && !ck.functions.contains(func) {
         return tyVoid()
     }
     // embedFile("path"): compile-time file embed → string literal (codegen reads

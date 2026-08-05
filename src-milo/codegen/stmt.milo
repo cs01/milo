@@ -1,6 +1,7 @@
 // Statement codegen: let/var, assign, if, while, for, match, break/continue
 from "src-milo/ast.milo" import {
-    Expr, Stmt, Pattern, MatchArm, Param, MiloType, StructLitField, LiteralKind
+    Expr, Stmt, Pattern, MatchArm, Param, MiloType, StructLitField, LiteralKind,
+    cloneOptType, cloneSpan, cloneParams, cloneStmts
 }
 from "src-milo/codegen/types.milo" import {
     astTypeStr,
@@ -996,7 +997,8 @@ pub fn genStmt(cg: &mut Cgen, s: &Stmt, locs: &mut Vec<Local>, sigs: &Vec<CgFnSi
                 }
             }
             // RHS is moved into the new binding → zero a source place (var→var move)
-            let v0 = genOwnedArg(cg, *value, hintTy.clone(), locs, sigs)
+            let forcedValue = forceMoveIfEscaping(cg, name, *value)
+            let v0 = genOwnedArg(cg, forcedValue, hintTy.clone(), locs, sigs)
             let v1 = genOptionWrapIfNeeded(cg, v0, hintTy.clone())
             let v = genInterfaceCoerceIfNeeded(cg, v1, hintTy)
             let vtyLl = llType(v.ty)
@@ -1019,7 +1021,8 @@ pub fn genStmt(cg: &mut Cgen, s: &Stmt, locs: &mut Vec<Local>, sigs: &Vec<CgFnSi
                 }
             }
             // RHS is moved into the new binding → zero a source place (var→var move)
-            let v0 = genOwnedArg(cg, *value, hintTy.clone(), locs, sigs)
+            let forcedValue = forceMoveIfEscaping(cg, name, *value)
+            let v0 = genOwnedArg(cg, forcedValue, hintTy.clone(), locs, sigs)
             let v1 = genOptionWrapIfNeeded(cg, v0, hintTy.clone())
             let v = genInterfaceCoerceIfNeeded(cg, v1, hintTy)
             let vtyLl = llType(v.ty)
@@ -1054,7 +1057,11 @@ pub fn genStmt(cg: &mut Cgen, s: &Stmt, locs: &mut Vec<Local>, sigs: &Vec<CgFnSi
             }
             match value {
                 Option.Some(expr) => {
-                    let v00 = genExpr(cg, *expr, locs, sigs, retTy.clone())
+                    // A directly-returned closure literal escapes this frame right here —
+                    // force it to `move` so its captures are heap-owned, not aliased into
+                    // the frame that's about to unwind (see forcedMoveClosure).
+                    let forcedRet = forcedMoveClosure(*expr)
+                    let v00 = genExpr(cg, forcedRet, locs, sigs, retTy.clone())
                     let v = genInterfaceCoerceIfNeeded(cg, v00, retTy)
                     emitScopeDrops(cg, locs, 0, skipName)
                     // unannotated closure body: the return type IS the value's type;
@@ -1379,6 +1386,103 @@ pub fn closureMoveEnvTy(caps: &Vec<Local>): string {
     return ty + " }"
 }
 
+// `return <name>` escapes whatever closure literal `name` was bound to earlier in
+// this same body — that closure must own its captures (heap, not a pointer into
+// this frame) same as a directly-returned closure literal. Recurses into every
+// nested block a Return can hide in; codegen is a single forward pass over a
+// function's statements, so this pre-scan is what lets the EARLIER `let f = ...`
+// see the promotion before it emits the closure's env.
+pub fn collectReturnEscapedIdentsInto(body: &Vec<Heap<Stmt>>, out: &mut Vec<string>) {
+    for i in 0..body.len {
+        match *body[i] {
+            Stmt.Return(value, span) => {
+                match value {
+                    Option.Some(expr) => {
+                        match *expr {
+                            Expr.Ident(n, ispan) => {
+                                out.push(n.clone())
+                            }
+                            _ => {
+                            }
+                        }
+                    }
+                    Option.None => {
+                    }
+                }
+            }
+            Stmt.IfStmt(cond, thenBody, elseBody, span) => {
+                collectReturnEscapedIdentsInto(thenBody, out)
+                match elseBody {
+                    Option.Some(eb) => {
+                        collectReturnEscapedIdentsInto(eb, out)
+                    }
+                    Option.None => {
+                    }
+                }
+            }
+            Stmt.WhileStmt(cond, wbody, span) => {
+                collectReturnEscapedIdentsInto(wbody, out)
+            }
+            Stmt.MatchStmt(subject, arms, span) => {
+                for ai in 0..arms.len {
+                    collectReturnEscapedIdentsInto(arms[ai].body, out)
+                }
+            }
+            Stmt.IfLetStmt(pattern, subject, thenBody, elseBody, span) => {
+                collectReturnEscapedIdentsInto(thenBody, out)
+                match elseBody {
+                    Option.Some(eb) => {
+                        collectReturnEscapedIdentsInto(eb, out)
+                    }
+                    Option.None => {
+                    }
+                }
+            }
+            Stmt.UnsafeBlock(ubody, span) => {
+                collectReturnEscapedIdentsInto(ubody, out)
+            }
+            Stmt.ForInStmt(vname, vname2, iterable, fbody, span) => {
+                collectReturnEscapedIdentsInto(fbody, out)
+            }
+            _ => {
+            }
+        }
+    }
+}
+
+pub fn returnEscapedIdents(body: &Vec<Heap<Stmt>>): Vec<string> {
+    var out: Vec<string> = Vec.new()
+    collectReturnEscapedIdentsInto(body, out)
+    return out
+}
+
+// A non-move closure literal, forced to `move` so genClosure heap-owns its
+// captures instead of pointing them at a frame about to be torn down. Anything
+// else (including an already-move closure) is returned unchanged.
+pub fn forcedMoveClosure(value: &Expr): Expr {
+    match value {
+        Expr.Closure(params, retType, body, isMove, span) => {
+            if isMove {
+                return value.clone()
+            }
+            return Expr.Closure(cloneParams(params), cloneOptType(retType), cloneStmts(body), true, cloneSpan(span))
+        }
+        _ => {
+            return value.clone()
+        }
+    }
+}
+
+// If `name` is a local this body's pre-scan found escaping via `return name`, and
+// `value` is a non-move closure literal, force it to `move` so genClosure heap-owns
+// the captures. Otherwise returns `value` unchanged (cheap: only clones on the hit).
+pub fn forceMoveIfEscaping(cg: &Cgen, name: &string, value: &Expr): Expr {
+    if !cg.forceMoveClosures.contains(name) {
+        return value.clone()
+    }
+    return forcedMoveClosure(value)
+}
+
 // Lift a closure to a top-level `@__closure_N(ptr %__env, <ptr params>)` and return
 // a %Closure { fnptr, env }. Uniform ABI: params AND captures arrive by pointer.
 pub fn genClosure(cg: &mut Cgen, params: &Vec<Param>, retType: &Option<MiloType>, body: &Vec<Heap<Stmt>>, isMove: bool, locs: &Vec<Local>, sigs: &Vec<CgFnSig>): Val {
@@ -1413,11 +1517,16 @@ pub fn genClosure(cg: &mut Cgen, params: &Vec<Param>, retType: &Option<MiloType>
     let savedLabel = cg.label
     let savedRet = cg.curRetTy.clone()
     let savedClosRet = cg.closureRetTy.clone()
+    let savedForceMove = cg.forceMoveClosures.clone()
     cg.body = ""
     cg.temp = 0
     cg.label = 0
     cg.curRetTy = retTyStr.clone()
     cg.closureRetTy = "void"
+    // this closure's OWN body gets its own escape pre-scan — a closure that itself
+    // returns a locally-bound closure needs the same treatment, and it must not see
+    // the enclosing function's set (a same-named local would be a false hit).
+    cg.forceMoveClosures = returnEscapedIdents(body)
 
     emit(cg, "entry:\n")
     var clocs: Vec<Local> = Vec.new()
@@ -1485,6 +1594,7 @@ pub fn genClosure(cg: &mut Cgen, params: &Vec<Param>, retType: &Option<MiloType>
     cg.label = savedLabel
     cg.curRetTy = savedRet
     cg.closureRetTy = savedClosRet
+    cg.forceMoveClosures = savedForceMove
     cg.globals = cg.globals + closureIR
 
     // build the env at the call site, then the { fnptr, env } pair

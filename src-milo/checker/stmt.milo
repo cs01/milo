@@ -258,7 +258,17 @@ pub fn checkReturn(ck: &mut Checker, value: &Option<Heap<Expr>>, fnRetType: &Typ
             if !typeEq(fnRetType, tyUnknown()) {
                 ck.expectedType = Option.Some(fnRetType.clone())
             }
+            // A borrow taken to compute the return value (`self.data[0..n]`
+            // inside a view-returning method) is consumed within this
+            // statement — the function exits, nothing after can observe it —
+            // so it must not leak past this check. Unlike moved-state this
+            // side table isn't per-call-instance, so an unreleased freeze here
+            // would otherwise survive into the NEXT function checked that
+            // happens to reuse the same local/param name (e.g. every method's
+            // "self").
+            let frozenBeforeReturn = snapshotFrozenNames(ck)
             let valType = checkExpr(ck, *expr)
+            releaseOrRetainFreezes(ck, frozenBeforeReturn, false)
             ck.expectedType = Option.None
             ck.inReturn = false
             // inside an unannotated closure (fnRetType unknown) this Return's type
@@ -293,7 +303,12 @@ pub fn checkReturn(ck: &mut Checker, value: &Option<Heap<Expr>>, fnRetType: &Typ
 // -- If statement --
 
 pub fn checkIf(ck: &mut Checker, cond: &Expr, thenBody: &Vec<Heap<Stmt>>, elseBody: &Option<Vec<Heap<Stmt>>>, fnRetType: &TypeKind, span: &Option<Span>) {
+    // A borrow taken to compute the condition (`s.slice(0,1).len > 0`) is
+    // consumed evaluating the bool — no binding outlives it — so it must not
+    // leak into the branches, let alone past this whole statement.
+    let frozenBeforeCond = snapshotFrozenNames(ck)
     let condType = checkExpr(ck, cond)
+    releaseOrRetainFreezes(ck, frozenBeforeCond, false)
     if !typeEq(condType, tyBool()) && !typeEq(condType, tyUnknown()) {
         error(ck, "if condition must be bool, got " + typeName(condType), cloneSpan(span))
     }
@@ -340,7 +355,12 @@ pub fn checkIf(ck: &mut Checker, cond: &Expr, thenBody: &Vec<Heap<Stmt>>, elseBo
 // -- While statement --
 
 pub fn checkWhile(ck: &mut Checker, cond: &Expr, body: &Vec<Heap<Stmt>>, fnRetType: &TypeKind, span: &Option<Span>) {
+    // Same reasoning as checkIf's condition: a borrow taken to compute a
+    // `while` condition is re-evaluated fresh each iteration at runtime, so
+    // nothing should carry it forward past this one static check either.
+    let frozenBeforeCond = snapshotFrozenNames(ck)
     let condType = checkExpr(ck, cond)
+    releaseOrRetainFreezes(ck, frozenBeforeCond, false)
     if !typeEq(condType, tyBool()) && !typeEq(condType, tyUnknown()) {
         error(ck, "while condition must be bool, got " + typeName(condType), cloneSpan(span))
     }
@@ -357,7 +377,11 @@ pub fn checkWhile(ck: &mut Checker, cond: &Expr, body: &Vec<Heap<Stmt>>, fnRetTy
 // -- Match statement --
 
 pub fn checkMatch(ck: &mut Checker, subject: &Expr, arms: &Vec<MatchArm>, fnRetType: &TypeKind) {
+    // Same reasoning as checkIf's condition — a borrow taken to compute the
+    // subject must not leak past this statement.
+    let frozenBeforeSubj = snapshotFrozenNames(ck)
     let subjType = checkExpr(ck, subject)
+    releaseOrRetainFreezes(ck, frozenBeforeSubj, false)
 
     // Arms are mutually exclusive: each checks from the pre-state, then the
     // join keeps any-path moves (terminated arms drop out) — same rules as
@@ -561,7 +585,11 @@ pub fn checkMatchExpr(ck: &mut Checker, subject: &Expr, arms: &Vec<MatchArm>, fn
 // -- If-let statement --
 
 pub fn checkIfLet(ck: &mut Checker, pattern: &Pattern, expr: &Expr, thenBody: &Vec<Heap<Stmt>>, elseBody: &Option<Vec<Heap<Stmt>>>, fnRetType: &TypeKind) {
+    // Same reasoning as checkIf's condition — a borrow taken to compute the
+    // scrutinee must not leak past this statement.
+    let frozenBeforeScrutinee = snapshotFrozenNames(ck)
     let exprType = checkExpr(ck, expr)
+    releaseOrRetainFreezes(ck, frozenBeforeScrutinee, false)
 
     pushScope(ck)
 
@@ -1423,9 +1451,15 @@ pub fn registerBuiltinGenericEnums(ck: &mut Checker) {
 // Annotation-side generic instantiation: `Option<i32>` must resolve to the
 // monomorphized enum/struct, not TStruct("Option").
 pub fn resolveAstType(ck: &mut Checker, ty: &MiloType): TypeKind {
-    // resolve a type alias name to its base (preserving any &/&mut/* wrapper)
+    // Resolve a type alias name to its base (preserving any &/&mut/* wrapper the
+    // USE site spelled). The base is resolved lazily, through this SAME function,
+    // so an aliased generic enum (`type Parsed = Result<i32, AppError>`) goes
+    // through the typeArgs>0 branch below and comes back correctly monomorphized
+    // — unlike resolving it once eagerly at registration (Phase 0, before enums
+    // exist), which can only ever produce a bare, non-generic TStruct.
     if !ty.isFn && ty.typeArgs.len == 0 && ck.typeAliases.contains(ty.name) {
-        var base = ck.typeAliases.get(ty.name)!
+        let rawBase = ck.typeAliases.get(ty.name)!
+        var base = resolveAstType(ck, rawBase)
         if ty.ptrDepth > 0 {
             var i: i32 = 0
             while i < ty.ptrDepth {
@@ -1514,9 +1548,13 @@ pub fn checkProgram(ck: &mut Checker, program: &Program) {
     // Phase 0: register builtin traits and generic types
     registerBuiltinTraits(ck)
     registerBuiltinGenericEnums(ck)
-    // type aliases (`type Altitude = i32(0..N)`) resolve to their base type
+    // type aliases (`type Altitude = i32(0..N)`) — store the RAW base AST; it is
+    // resolved lazily by resolveAstType at each use site (see that fn's alias
+    // branch), same as any other annotation. Eagerly resolving here with
+    // typeFromAst ran before enums/generics exist and cannot express generics
+    // at all — see the field comment on Checker.typeAliases.
     for ai in 0..program.typeAliases.len {
-        ck.typeAliases.insert(program.typeAliases[ai].name.clone(), typeFromAst(program.typeAliases[ai].base))
+        ck.typeAliases.insert(program.typeAliases[ai].name.clone(), program.typeAliases[ai].base.clone())
     }
     // Register user-declared traits/interfaces BEFORE structs/fns so a trait name used
     // as a type (`&Iface`, `Heap<Iface>` struct fields) resolves during registration.
@@ -1668,6 +1706,13 @@ pub fn checkProgram(ck: &mut Checker, program: &Program) {
         }
         )
     }
+
+    // Defensive reset: nothing checked so far (impl registration, derive
+    // synthesis, the view-provenance pre-pass, global initializers) should
+    // have a live borrow outlive it — this side table has no scope of its
+    // own to bound it the way ck.scopes does, so it is only ever as clean as
+    // every checker of an expression remembers to leave it.
+    ck.borrowedPaths = HashMap.new()
 
     // Phase 3: check function bodies
     i = 0

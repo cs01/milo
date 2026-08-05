@@ -200,6 +200,12 @@ pub struct Function {
 pub struct ImportDecl {
     path: string,
     names: Option<Vec<string>>,
+    // Index-aligned with `names`' inner Vec (empty when names is None). `import {
+    // foo as bar }` binds the real declared `foo` under the local name `bar` —
+    // Option.None at an index means that name has no alias. See ast.milo's
+    // renameExpr/renameStmt and resolver.milo's mergeImportedFile for where the
+    // binding is actually realized (a rewrite of the importing file's own AST).
+    aliases: Vec<Option<string>>,
     span: Option<Span>,
 }
 
@@ -628,6 +634,279 @@ impl Clone for Stmt {
                 return Stmt.ForInStmt(varName.clone(), cloneOptString(idxName), Heap((*iterable).clone()), cloneStmts(body), cloneSpan(span))
             }
         }
+    }
+}
+
+// -- Import-alias rename --
+//
+// `from "std/fs" import { readFile as readFileRaw }` binds a LOCAL name to a
+// REAL declared one. src-milo merges every module into one flat global
+// namespace with no per-package mangling (see resolver.milo — there is no
+// mangled prefix to redirect an alias to, unlike the oracle's
+// src/mangle.ts), so the alias is realized here instead: every reference to
+// it in the IMPORTING FILE's own AST is rewritten to the real name, once,
+// right after that file is parsed and before it is merged into the Program.
+// Everything downstream (checker, lowering, codegen) then sees only the real
+// name and needs no alias awareness of its own.
+//
+// This is otherwise a plain structural clone (mirrors the Clone impls right
+// above) — the only two arms that actually substitute are Ident and Call,
+// since both a plain call (`readFileRaw(...)`) and a namespace-style static
+// call (`M.clampI64(...)`, whose receiver parses as an ordinary Expr.Ident)
+// bottom out in one of those two shapes. Scoped to Stmt/Expr trees (function
+// bodies, global initializers) — type-position uses (`let x: Alias = …`)
+// are not rewritten; nothing in this compiler's own source needs that yet.
+pub fn renameExprs(v: &Vec<Heap<Expr>>, from: &string, to: &string): Vec<Heap<Expr>> {
+    var out: Vec<Heap<Expr>> = Vec.new()
+    for i in 0..v.len {
+        out.push(Heap(renameExpr(*v[i], from, to)))
+    }
+    return out
+}
+
+pub fn renameStmts(v: &Vec<Heap<Stmt>>, from: &string, to: &string): Vec<Heap<Stmt>> {
+    var out: Vec<Heap<Stmt>> = Vec.new()
+    for i in 0..v.len {
+        out.push(Heap(renameStmt(*v[i], from, to)))
+    }
+    return out
+}
+
+pub fn renameOptStmts(o: &Option<Vec<Heap<Stmt>>>, from: &string, to: &string): Option<Vec<Heap<Stmt>>> {
+    match o {
+        Option.Some(b) => {
+            return Option.Some(renameStmts(b, from, to))
+        }
+        Option.None => {
+            return Option.None
+        }
+    }
+}
+
+pub fn renameMatchArm(a: &MatchArm, from: &string, to: &string): MatchArm {
+    return MatchArm {
+        pattern: a.pattern.clone(), body: renameStmts(a.body, from, to)
+    }
+}
+
+pub fn renameExpr(e: &Expr, from: &string, to: &string): Expr {
+    match e {
+        Expr.IntLit(val, span) => {
+            return Expr.IntLit(val, cloneSpan(span))
+        }
+        Expr.FloatLit(val, span) => {
+            return Expr.FloatLit(val, cloneSpan(span))
+        }
+        Expr.BoolLit(val, span) => {
+            return Expr.BoolLit(val, cloneSpan(span))
+        }
+        Expr.StringLit(val, span) => {
+            return Expr.StringLit(val.clone(), cloneSpan(span))
+        }
+        Expr.CharLit(val, span) => {
+            return Expr.CharLit(val, cloneSpan(span))
+        }
+        Expr.Ident(name, span) => {
+            if name == from {
+                return Expr.Ident(to.clone(), cloneSpan(span))
+            }
+            return Expr.Ident(name.clone(), cloneSpan(span))
+        }
+        Expr.BinOp(op, left, right, span) => {
+            return Expr.BinOp(op.clone(), Heap(renameExpr(*left, from, to)), Heap(renameExpr(*right, from, to)), cloneSpan(span))
+        }
+        Expr.UnaryOp(op, operand, span) => {
+            return Expr.UnaryOp(op.clone(), Heap(renameExpr(*operand, from, to)), cloneSpan(span))
+        }
+        Expr.Call(func, args, typeArgs, span) => {
+            var funcName = func.clone()
+            if func == from {
+                funcName = to.clone()
+            }
+            return Expr.Call(funcName, renameExprs(args, from, to), cloneTypes(typeArgs), cloneSpan(span))
+        }
+        Expr.StructLit(name, fields, span) => {
+            var nm = name.clone()
+            if name == from {
+                nm = to.clone()
+            }
+            var fs: Vec<StructLitField> = Vec.new()
+            for i in 0..fields.len {
+                fs.push(StructLitField {
+                    name: fields[i].name.clone(), value: Heap(renameExpr(*fields[i].value, from, to))
+                }
+                )
+            }
+            return Expr.StructLit(nm, fs, cloneSpan(span))
+        }
+        Expr.JsonObject(fields, span) => {
+            var fs: Vec<StructLitField> = Vec.new()
+            for i in 0..fields.len {
+                fs.push(StructLitField {
+                    name: fields[i].name.clone(), value: Heap(renameExpr(*fields[i].value, from, to))
+                }
+                )
+            }
+            return Expr.JsonObject(fs, cloneSpan(span))
+        }
+        Expr.FieldAccess(obj, field, span) => {
+            return Expr.FieldAccess(Heap(renameExpr(*obj, from, to)), field.clone(), cloneSpan(span))
+        }
+        Expr.ArrayLit(elems, span) => {
+            return Expr.ArrayLit(renameExprs(elems, from, to), cloneSpan(span))
+        }
+        Expr.ArrayRepeat(value, count, span) => {
+            return Expr.ArrayRepeat(Heap(renameExpr(*value, from, to)), count, cloneSpan(span))
+        }
+        Expr.IndexAccess(obj, index, span) => {
+            return Expr.IndexAccess(Heap(renameExpr(*obj, from, to)), Heap(renameExpr(*index, from, to)), cloneSpan(span))
+        }
+        Expr.EnumLit(enumName, variant, args, span) => {
+            var en = enumName.clone()
+            if enumName == from {
+                en = to.clone()
+            }
+            return Expr.EnumLit(en, variant.clone(), renameExprs(args, from, to), cloneSpan(span))
+        }
+        Expr.Unwrap(operand, span) => {
+            return Expr.Unwrap(Heap(renameExpr(*operand, from, to)), cloneSpan(span))
+        }
+        Expr.Propagate(operand, span) => {
+            return Expr.Propagate(Heap(renameExpr(*operand, from, to)), cloneSpan(span))
+        }
+        Expr.DefaultValue(operand, default, span) => {
+            return Expr.DefaultValue(Heap(renameExpr(*operand, from, to)), Heap(renameExpr(*default, from, to)), cloneSpan(span))
+        }
+        Expr.CastExpr(operand, targetType, span) => {
+            return Expr.CastExpr(Heap(renameExpr(*operand, from, to)), targetType.clone(), cloneSpan(span))
+        }
+        Expr.MethodCall(obj, method, args, span) => {
+            return Expr.MethodCall(Heap(renameExpr(*obj, from, to)), method.clone(), renameExprs(args, from, to), cloneSpan(span))
+        }
+        Expr.Closure(params, retType, body, isMove, span) => {
+            var ps: Vec<Param> = Vec.new()
+            for i in 0..params.len {
+                ps.push(params[i].clone())
+            }
+            return Expr.Closure(ps, cloneOptType(retType), renameStmts(body, from, to), isMove, cloneSpan(span))
+        }
+        Expr.RangeExpr(start, end, span) => {
+            return Expr.RangeExpr(Heap(renameExpr(*start, from, to)), Heap(renameExpr(*end, from, to)), cloneSpan(span))
+        }
+        Expr.IfExpr(cond, thenE, elseE, span) => {
+            return Expr.IfExpr(Heap(renameExpr(*cond, from, to)), Heap(renameExpr(*thenE, from, to)), Heap(renameExpr(*elseE, from, to)), cloneSpan(span))
+        }
+        Expr.IsExpr(subject, pattern, span) => {
+            return Expr.IsExpr(Heap(renameExpr(*subject, from, to)), Heap((*pattern).clone()), cloneSpan(span))
+        }
+        Expr.MatchExpr(subject, arms, span) => {
+            var armsOut: Vec<MatchArm> = Vec.new()
+            for i in 0..arms.len {
+                armsOut.push(renameMatchArm(arms[i], from, to))
+            }
+            return Expr.MatchExpr(Heap(renameExpr(*subject, from, to)), armsOut, cloneSpan(span))
+        }
+    }
+}
+
+pub fn renameStmt(s: &Stmt, from: &string, to: &string): Stmt {
+    match s {
+        Stmt.LetDecl(name, typeAnno, value, span) => {
+            return Stmt.LetDecl(name.clone(), cloneOptType(typeAnno), Heap(renameExpr(*value, from, to)), cloneSpan(span))
+        }
+        Stmt.VarDecl(name, typeAnno, value, span) => {
+            return Stmt.VarDecl(name.clone(), cloneOptType(typeAnno), Heap(renameExpr(*value, from, to)), cloneSpan(span))
+        }
+        Stmt.Assign(target, value, span) => {
+            return Stmt.Assign(Heap(renameExpr(*target, from, to)), Heap(renameExpr(*value, from, to)), cloneSpan(span))
+        }
+        Stmt.Return(value, span) => {
+            var v: Option<Heap<Expr>> = Option.None
+            match value {
+                Option.Some(e) => {
+                    v = Option.Some(Heap(renameExpr(*e, from, to)))
+                }
+                Option.None => {
+                }
+            }
+            return Stmt.Return(v, cloneSpan(span))
+        }
+        Stmt.IfStmt(cond, thenBody, elseBody, span) => {
+            return Stmt.IfStmt(Heap(renameExpr(*cond, from, to)), renameStmts(thenBody, from, to), renameOptStmts(elseBody, from, to), cloneSpan(span))
+        }
+        Stmt.WhileStmt(cond, body, span) => {
+            return Stmt.WhileStmt(Heap(renameExpr(*cond, from, to)), renameStmts(body, from, to), cloneSpan(span))
+        }
+        Stmt.ExprStmt(expr, span) => {
+            return Stmt.ExprStmt(Heap(renameExpr(*expr, from, to)), cloneSpan(span))
+        }
+        Stmt.MatchStmt(subject, arms, span) => {
+            var armsOut: Vec<MatchArm> = Vec.new()
+            for i in 0..arms.len {
+                armsOut.push(renameMatchArm(arms[i], from, to))
+            }
+            return Stmt.MatchStmt(Heap(renameExpr(*subject, from, to)), armsOut, cloneSpan(span))
+        }
+        Stmt.BreakStmt(span) => {
+            return Stmt.BreakStmt(cloneSpan(span))
+        }
+        Stmt.ContinueStmt(span) => {
+            return Stmt.ContinueStmt(cloneSpan(span))
+        }
+        Stmt.IfLetStmt(pattern, subject, thenBody, elseBody, span) => {
+            return Stmt.IfLetStmt(Heap((*pattern).clone()), Heap(renameExpr(*subject, from, to)), renameStmts(thenBody, from, to), renameOptStmts(elseBody, from, to), cloneSpan(span))
+        }
+        Stmt.UnsafeBlock(body, span) => {
+            return Stmt.UnsafeBlock(renameStmts(body, from, to), cloneSpan(span))
+        }
+        Stmt.ForInStmt(varName, idxName, iterable, body, span) => {
+            return Stmt.ForInStmt(varName.clone(), cloneOptString(idxName), Heap(renameExpr(*iterable, from, to)), renameStmts(body, from, to), cloneSpan(span))
+        }
+    }
+}
+
+// Function/global counterparts of renameStmt/renameExpr above — applied by the
+// resolver when merging a file that imports under an alias (see resolver.milo's
+// mergeImportedFile). Only these two decl kinds are covered: the compiler's own
+// source has exactly one `as`-alias import today (src-milo/lsp/diagnostics.milo),
+// used from a plain function body. Impl/trait method bodies are NOT rewritten —
+// if an alias is ever used from inside one, it will surface as an "undefined
+// function" here rather than silently doing the wrong thing.
+pub fn renameFunction(f: &Function, from: &string, to: &string): Function {
+    var typeParams: Vec<TypeParam> = Vec.new()
+    for i in 0..f.typeParams.len {
+        typeParams.push(f.typeParams[i].clone())
+    }
+    var params: Vec<Param> = Vec.new()
+    for i in 0..f.params.len {
+        params.push(f.params[i].clone())
+    }
+    return Function {
+        name: f.name.clone(),
+        typeParams: typeParams,
+        params: params,
+        retType: f.retType.clone(),
+        body: renameStmts(f.body, from, to),
+        isExtern: f.isExtern,
+        isVariadic: f.isVariadic,
+    }
+}
+
+pub fn renameGlobal(g: &GlobalDecl, from: &string, to: &string): GlobalDecl {
+    var ty: Option<MiloType> = Option.None
+    match g.ty {
+        Option.Some(t) => {
+            ty = Option.Some(t.clone())
+        }
+        Option.None => {
+        }
+    }
+    return GlobalDecl {
+        name: g.name.clone(),
+        ty: ty,
+        value: Heap(renameExpr(*g.value, from, to)),
+        mutable: g.mutable,
+        span: cloneSpan(g.span),
     }
 }
 

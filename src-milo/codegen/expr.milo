@@ -4468,6 +4468,15 @@ pub fn genMethodCall(cg: &mut Cgen, object: &Expr, method: &string, args: &Vec<H
             v: lenT, ty: "i64"
         }
     }
+    if isHashMapTy(obj.ty) && method == "isEmpty" {
+        let lenT = nextTemp(cg)
+        emit(cg, "  " + lenT + " = extractvalue %HashMap " + obj.v + ", 1\n")
+        let eq = nextTemp(cg)
+        emit(cg, "  " + eq + " = icmp eq i64 " + lenT + ", 0\n")
+        return Val {
+            v: eq, ty: "bool"
+        }
+    }
     // `clear`/`truncate` on a Vec: elements at index >= n are OWNED by the Vec, so
     // shortening the length without running their drop glue would leak every
     // string, nested Vec, or Drop-implementing struct above the cut. clear() is

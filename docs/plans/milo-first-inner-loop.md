@@ -288,8 +288,19 @@ silent-success bug in milo0's resolver: an unreadable import merged an EMPTY mod
 of failing, so a bad import path surfaced hundreds of lines later as a bogus "unknown struct"
 against the caller. It now reports and exits.
 
-Net: **242 → 223 fixtures milo0 cannot compile; 336 → 355 it can. Fixtures dying at the
-parser: 52 → 29.**
+Rest of the round went after the remaining parse gaps, since each blocks a whole file:
+`f64.INF`/`NEG_INF`/`NAN` (a FieldAccess whose object is a TYPE name — mirrors
+`floatNamespaceConst` in the oracle's `ast.ts`, and LLVM needs the hex IEEE forms),
+attributes on struct fields (`@iter inner: …` in std/set), integer-repr enums
+(`enum LogLevel: i32 { … }`) with explicit discriminants, and `enum as i32/i64` (the
+discriminant IS the i32 tag milo0 already stores in field 0).
+
+Net: **242 → 222 fixtures milo0 cannot compile; 336 → 356 it can. Fixtures dying at the
+parser: 52 → 12**, and the remaining twelve are all singletons — `targetOs()` comptime, a
+float exponent (`1e16`), an import alias, a bare-variant match arm.
+
+That last ratio is the useful one: **parse gaps were 40 of the 52 blocked files and they
+were cheap**; what remains is the long tail of real semantics.
 
 Read that ratio carefully — it is the most useful thing on this page. Four features, one of
 them the *most-cited* blocker in the corpus, moved the needle by nine fixtures. The reason
@@ -318,8 +329,8 @@ missing attribute loop, not a missing feature. The residual `unknown enum` in ha
 a third thing again: `MILO_ROOT` unset, so the import could not be read at all. The model
 works; the port is that much cheaper than the previous revision of this page claimed.
 
-**Rate, measured over three rounds: roughly 3 fixtures per feature.** Ten features moved 242
-to 223. At that rate the remaining 223 is dozens of features — and the ones left are
+**Rate, measured over three rounds: roughly 3 fixtures per feature.** Sixteen features moved
+242 to 222. At that rate the remaining 222 is dozens of features — and the ones left are
 individually larger than the ones already done, because the cheap and highly-cited ones went
 first. That is the number to plan against.
 

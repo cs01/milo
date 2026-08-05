@@ -18,6 +18,11 @@ for resetting a 40k-line codebase to zero maturity. Self-hosting stays worth doi
 **proof, not safety** — and stays parked until it is done incrementally behind a
 differential harness. See [self-hosting.md](../self-hosting.md) for the parked plan.
 
+**Companion, different question.** This page asks whether a rewrite buys *correctness*.
+[milo-first-inner-loop.md](milo-first-inner-loop.md) asks whether, if we go Milo-first
+anyway for dogfooding and proof, the edit/test loop survives — measured 2026-08-04, the
+answer is yes but conditional on parallel codegen units landing first.
+
 ---
 
 ## The measurement that decides it

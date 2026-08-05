@@ -203,10 +203,19 @@ pub fn genWhile(cg: &mut Cgen, cond: &Expr, body: &Vec<Heap<Stmt>>, locs: &mut V
     emit(cg, "  br i1 " + cv.v + ", label %" + bodyLbl + ", label %" + endLbl + "\n")
     emit(cg, bodyLbl + ":\n")
     var bodyTerm = false
+    // Same block scope as an if-branch, and doubly important in a loop: without it a
+    // value declared in the body accumulates one un-dropped alloca per iteration.
+    let bodyPreLen = locs.len
     for bi in 0..body.len {
         if genStmt(cg, *body[bi], locs, sigs, retTy) {
             bodyTerm = true
         }
+    }
+    if !bodyTerm {
+        emitScopeDrops(cg, locs, bodyPreLen, "")
+    }
+    while locs.len > bodyPreLen {
+        let _ = locs.pop()
     }
     if !bodyTerm {
         emit(cg, "  br label %" + condLbl + "\n")
@@ -574,16 +583,25 @@ pub fn genIf(cg: &mut Cgen, cond: &Expr, thenBody: &Vec<Heap<Stmt>>, elseBody: &
     emit(cg, "  br i1 " + cv.v + ", label %" + thenLbl + ", label %" + elseLbl + "\n")
     emit(cg, thenLbl + ":\n")
     var thenTerm = false
+    // Block scope: a value declared inside the branch dies at the branch's end, not at
+    // the function epilogue. Dropping it at the epilogue was also invalid IR — its alloca
+    // lives in a conditional block, which does not dominate the epilogue.
+    let thenPreLen = locs.len
     for ti in 0..thenBody.len {
         if genStmt(cg, *thenBody[ti], locs, sigs, retTy) {
             thenTerm = true
         }
     }
     if !thenTerm {
+        emitScopeDrops(cg, locs, thenPreLen, "")
         emit(cg, "  br label %" + endLbl + "\n")
+    }
+    while locs.len > thenPreLen {
+        let _ = locs.pop()
     }
     emit(cg, elseLbl + ":\n")
     var elseTerm = false
+    let elsePreLen = locs.len
     match elseBody {
         Option.Some(stmts) => {
             for ei in 0..stmts.len {
@@ -596,7 +614,11 @@ pub fn genIf(cg: &mut Cgen, cond: &Expr, thenBody: &Vec<Heap<Stmt>>, elseBody: &
         }
     }
     if !elseTerm {
+        emitScopeDrops(cg, locs, elsePreLen, "")
         emit(cg, "  br label %" + endLbl + "\n")
+    }
+    while locs.len > elsePreLen {
+        let _ = locs.pop()
     }
     emit(cg, endLbl + ":\n")
     if thenTerm && elseTerm {

@@ -17,11 +17,15 @@ pub struct Parser {
     // consume the block brace as a struct-literal body (Rust's no-struct-literal
     // restriction). Restored before the body is parsed.
     noStructLit: bool,
+    // Statements a desugaring produced that the caller must emit after the one it asked
+    // for. `let P = E else {}` becomes three ordinary statements, and parseStmt can only
+    // hand back one — parseStmts drains this after each call.
+    pending: Vec<Heap<Stmt>>,
 }
 
 pub fn newParser(tokens: Vec<Token>): Parser {
     return Parser {
-        tokens: tokens, pos: 0, noStructLit: false
+        tokens: tokens, pos: 0, noStructLit: false, pending: Vec.new()
     }
 }
 
@@ -136,9 +140,7 @@ pub fn parseType(p: &mut Parser): MiloType {
         var arraySize: Option<i64> = Option.None
         if matchTok(p, TokKind.Semicolon) {
             let sizeTok = expect(p, TokKind.Int)
-            // lexer only emits TokKind.Int for digit text, so parseInt() is
-            // infallible here — `!` panics loudly if that invariant ever breaks
-            arraySize = Option.Some(sizeTok.value.parseInt()!)
+            arraySize = sizeTok.value.parseInt()
         }
         expect(p, TokKind.RBracket)
         inner.isArray = true
@@ -271,8 +273,12 @@ pub fn parseAttribute(p: &mut Parser): Attribute {
 
 // -- Import --
 
+pub fn atFromKeyword(p: &Parser): bool {
+    return at(p, TokKind.Ident) && peek(p).value == "from" && peekN(p, 1).kind == TokKind.String
+}
+
 pub fn parseImport(p: &mut Parser): ImportDecl {
-    if at(p, TokKind.From) {
+    if atFromKeyword(p) {
         let tok = advance(p)
         let pathTok = expect(p, TokKind.String)
         expect(p, TokKind.Import)
@@ -307,6 +313,12 @@ pub fn parseStruct(p: &mut Parser): StructDecl {
     expect(p, TokKind.LBrace)
     var fields: Vec<StructField> = Vec.new()
     while !at(p, TokKind.RBrace) {
+        // Field attributes (`@iter inner: HashMap<T, bool>` in std/set.milo). Parsed and
+        // dropped: StructField carries none, and the ones that appear only direct
+        // iteration, which milo0 does not implement.
+        while at(p, TokKind.At) {
+            parseAttribute(p)
+        }
         let fieldName = expect(p, TokKind.Ident).value
         expect(p, TokKind.Colon)
         let fieldType = parseType(p)
@@ -331,10 +343,30 @@ pub fn parseEnum(p: &mut Parser): EnumDecl {
     expect(p, TokKind.Enum)
     let name = expect(p, TokKind.Ident).value
     let typeParams = parseTypeParams(p)
+    // Integer-repr enum: `enum LogLevel: i32 { … }`. The repr type is consumed and
+    // dropped — milo0 lays every enum out as { i32 tag, payload } already, so the tag it
+    // emits matches an i32 repr; a narrower repr would differ and is not used in std.
+    if matchTok(p, TokKind.Colon) {
+        parseType(p)
+    }
     expect(p, TokKind.LBrace)
     var variants: Vec<EnumVariant> = Vec.new()
     while !at(p, TokKind.RBrace) {
         let variantName = expect(p, TokKind.Ident).value
+        // Explicit discriminant (`LDA = 169`, `Neg = -1`).
+        var disc: Option<i64> = Option.None
+        if matchTok(p, TokKind.Eq) {
+            var neg = false
+            if matchTok(p, TokKind.Minus) {
+                neg = true
+            }
+            let numTok = expect(p, TokKind.Int)
+            var dv = intLiteralBits(numTok.value)
+            if neg {
+                dv = 0 - dv
+            }
+            disc = Option.Some(dv)
+        }
         var fields: Vec<MiloType> = Vec.new()
         if matchTok(p, TokKind.LParen) {
             while !at(p, TokKind.RParen) {
@@ -344,7 +376,7 @@ pub fn parseEnum(p: &mut Parser): EnumDecl {
             expect(p, TokKind.RParen)
         }
         variants.push(EnumVariant {
-            name: variantName, fields: fields
+            name: variantName, fields: fields, discriminant: disc
         }
         )
         matchTok(p, TokKind.Comma)
@@ -518,6 +550,17 @@ pub fn parseImplDecl(p: &mut Parser, isUnsafe: bool): ImplDecl {
     expect(p, TokKind.LBrace)
     var methods: Vec<Function> = Vec.new()
     while !at(p, TokKind.RBrace) && !at(p, TokKind.Eof) {
+        // Attributes are legal on an impl method (`@pure fn sqrt`), not just on top-level
+        // declarations. Without this the FIRST `@pure` in std/math.milo was a parse error,
+        // which meant `struct Math` never registered and every `Math.abs(x)` in any program
+        // reported "unknown enum 'Math'" — the namespace-object model looked unimplemented
+        // when it was one missing attribute loop.
+        // Parsed and dropped: milo0's Function carries no attributes (top-level fns
+        // discard them too), and the only ones that appear on methods are verification
+        // hints like @pure, which milo0 does not act on.
+        while at(p, TokKind.At) {
+            parseAttribute(p)
+        }
         methods.push(parseFn(p))
     }
     expect(p, TokKind.RBrace)
@@ -537,13 +580,96 @@ pub fn parseStmts(p: &mut Parser): Vec<Heap<Stmt>> {
     var stmts: Vec<Heap<Stmt>> = Vec.new()
     while !at(p, TokKind.RBrace) && !at(p, TokKind.Eof) {
         stmts.push(Heap(parseStmt(p)))
+        if p.pending.len > 0 {
+            let drained = cloneStmts(p.pending)
+            p.pending = Vec.new()
+            for i in 0..drained.len {
+                stmts.push(Heap((*drained[i]).clone()))
+            }
+        }
     }
     return stmts
+}
+
+// `let Option.Some(v) = E else { B }` desugars into three statements milo0 already has:
+//
+//     let __letelse_N = E
+//     if __letelse_N.isNone() { B }
+//     let v = __letelse_N!
+//
+// which is why this is a parser change rather than a new Stmt threaded through checker,
+// lowering and codegen. Only Option and Result are handled — for any other enum the
+// `isNone`/`isErr` guard does not exist, so this reports the limitation instead of
+// desugaring into something that would not type-check.
+//
+// One gap versus the real compiler: the TS checker REQUIRES the else block to diverge.
+// Here a non-diverging block falls through to the `!`, which aborts at runtime instead of
+// being a compile error.
+// Decimal digits to the i64 BIT PATTERN, accumulating in u64. `parseInt()` tops out at
+// i64, so `18446744073709551615` (u64 max) and the magnitude of i64 MIN both fell off the
+// end — and with a `?? 0` fallback they became a silent zero, which is worse than the
+// compile error they used to be. u64 covers every literal the language admits; the
+// checker is what decides whether the value fits the annotated type.
+pub fn intLiteralBits(digits: &string): i64 {
+    var acc: u64 = 0
+    for i in 0..digits.len {
+        let c = digits[i]
+        if c >= 48 && c <= 57 {
+            acc = acc * 10 + (c - 48) as u64
+        }
+    }
+    return acc as i64
+}
+
+pub fn parseLetElse(p: &mut Parser, s: Option<Span>): Stmt {
+    let enumName = expect(p, TokKind.Ident).value
+    expect(p, TokKind.Dot)
+    // The variant name is consumed but unused: the desugaring keys off the ENUM
+    // (Option -> isNone, Result -> isErr), and `!` unwraps the success variant either way.
+    let _variant = expect(p, TokKind.Ident).value
+    expect(p, TokKind.LParen)
+    let binding = expect(p, TokKind.Ident).value
+    expect(p, TokKind.RParen)
+    expect(p, TokKind.Eq)
+    let subject = parseExpr(p)
+    expect(p, TokKind.Else)
+    expect(p, TokKind.LBrace)
+    let elseBody = parseStmts(p)
+    expect(p, TokKind.RBrace)
+
+    var emptyName = "isNone"
+    if enumName == "Result" {
+        emptyName = "isErr"
+    }
+    if enumName != "Option" && enumName != "Result" {
+        eprint("parse error: let-else on '" + enumName.clone() + "' is not supported in milo0 (Option and Result only) at line " + peek(p).line.toString())
+    }
+
+    // Unique per source position, so two let-else statements in one scope cannot collide.
+    var tmp = "__letelse"
+    match s {
+        Option.Some(sp) => {
+            tmp = tmp + "_" + sp.line.toString() + "_" + sp.col.toString()
+        }
+        Option.None => {
+        }
+    }
+
+    var noArgs: Vec<Heap<Expr>> = Vec.new()
+    let guard = Expr.MethodCall(Heap(Expr.Ident(tmp.clone(), cloneSpan(s))), emptyName, noArgs, cloneSpan(s))
+    p.pending.push(Heap(Stmt.IfStmt(Heap(guard), elseBody, Option.None, cloneSpan(s))))
+    let bound = Expr.Unwrap(Heap(Expr.Ident(tmp.clone(), cloneSpan(s))), cloneSpan(s))
+    p.pending.push(Heap(Stmt.LetDecl(binding, Option.None, Heap(bound), cloneSpan(s))))
+    return Stmt.LetDecl(tmp, Option.None, Heap(subject), s)
 }
 
 pub fn parseLet(p: &mut Parser): Stmt {
     let s = span(peek(p))
     expect(p, TokKind.Let)
+    // `let Enum.Variant(x) = ... else { ... }` — a destructuring bind, not a name.
+    if at(p, TokKind.Ident) && peekN(p, 1).kind == TokKind.Dot {
+        return parseLetElse(p, s)
+    }
     let name = expect(p, TokKind.Ident).value
     var ty: Option<MiloType> = Option.None
     if matchTok(p, TokKind.Colon) {
@@ -648,7 +774,11 @@ pub fn parseFor(p: &mut Parser): Stmt {
     if matchTok(p, TokKind.Comma) {
         varName2 = Option.Some(expect(p, TokKind.Ident).value)
     }
-    expect(p, TokKind.In)
+    if at(p, TokKind.Ident) && peek(p).value == "in" {
+        advance(p)
+    } else {
+        eprint("parse error: expected 'in' in for-loop at line " + peek(p).line.toString() + ":" + peek(p).col.toString())
+    }
     let savedNS = p.noStructLit
     p.noStructLit = true
     let iterableOrStart = parseExpr(p)
@@ -971,9 +1101,9 @@ pub fn parseUnary(p: &mut Parser): Expr {
     peek(p).kind == TokKind.Amp {
         let tok = advance(p)
         let operand = parseUnary(p)
-        // compute span before tok.value is moved into UnaryOp below
-        let sp = span(tok)
-        return Expr.UnaryOp(tok.value, Heap(operand), sp)
+        // span() borrows tok, so take it before tok.value moves out of the struct.
+        let s = span(tok)
+        return Expr.UnaryOp(tok.value, Heap(operand), s)
     }
     return parsePostfix(p)
 }
@@ -1093,7 +1223,7 @@ pub fn parsePrimary(p: &mut Parser): Expr {
     // `@embedFile("path")` — sigil spelling of the compile-time embed builtin.
     // Drop the '@' and re-enter: the bare and sigil forms lower identically, and
     // the deprecation warning for the bare form lives in the TS checker only.
-    if tok.kind == TokKind.At && peekN(p, 1).kind == TokKind.Ident && peekN(p, 1).value == "embedFile" {
+    if tok.kind == TokKind.At && peekN(p, 1).kind == TokKind.Ident && (peekN(p, 1).value == "embedFile" || peekN(p, 1).value == "targetOs") {
         advance(p)
         return parsePrimary(p)
     }
@@ -1101,7 +1231,13 @@ pub fn parsePrimary(p: &mut Parser): Expr {
     // if-else expression: if cond { expr } else { expr }
     if tok.kind == TokKind.If {
         advance(p)
+        // Same no-struct-literal rule the STATEMENT form uses, which this arm was
+        // missing: without it `if n - pos < MAXMATCH {` reads `MAXMATCH { n - pos }` as a
+        // struct literal and dies on the `-`, so every `let x = if …` in std failed.
+        let savedNoStruct = p.noStructLit
+        p.noStructLit = true
         let cond = parseExpr(p)
+        p.noStructLit = savedNoStruct
         expect(p, TokKind.LBrace)
         let thenE = parseExpr(p)
         expect(p, TokKind.RBrace)
@@ -1120,13 +1256,11 @@ pub fn parsePrimary(p: &mut Parser): Expr {
 
     if tok.kind == TokKind.Int {
         advance(p)
-        // lexer-guaranteed digit text — parseInt() is infallible here
-        return Expr.IntLit(tok.value.parseInt()!, s)
+        return Expr.IntLit(intLiteralBits(tok.value), s)
     }
     if tok.kind == TokKind.Float {
         advance(p)
-        // lexer-guaranteed numeric text — parseF64() is infallible here
-        return Expr.FloatLit(tok.value.parseF64()!, s)
+        return Expr.FloatLit(tok.value.parseF64() ?? 0.0, s)
     }
     if tok.kind == TokKind.True {
         advance(p)
@@ -1152,8 +1286,7 @@ pub fn parsePrimary(p: &mut Parser): Expr {
     }
     if tok.kind == TokKind.Char {
         advance(p)
-        // lexer-guaranteed digit text — parseInt() is infallible here
-        return Expr.CharLit(tok.value.parseInt()!as i32, s)
+        return Expr.CharLit(intLiteralBits(tok.value) as i32, s)
     }
     if tok.kind == TokKind.Ident {
         advance(p)
@@ -1363,8 +1496,7 @@ pub fn parseArrayLit(p: &mut Parser): Expr {
         if elements.len == 1 && matchTok(p, TokKind.Semicolon) {
             let countTok = expect(p, TokKind.Int)
             expect(p, TokKind.RBracket)
-            // lexer-guaranteed digit text — parseInt() is infallible here
-            return Expr.ArrayRepeat(elements[0], countTok.value.parseInt()!, s)
+            return Expr.ArrayRepeat(elements[0], intLiteralBits(countTok.value), s)
         }
         matchTok(p, TokKind.Comma)
     }
@@ -1437,13 +1569,24 @@ pub fn parse(p: &mut Parser): Program {
     var typeAliases: Vec<TypeAlias> = Vec.new()
 
     while !at(p, TokKind.Eof) {
-        // Collect attributes
+        // Collect attributes. `@!name` is a MODULE-level directive, not a declaration
+        // attribute — it attaches to the file, so it is consumed here and dropped.
+        // The only one in use is `@!wrapping` (std/sha512.milo), and dropping it is
+        // correct for milo0 specifically: milo0 emits no overflow traps for ordinary
+        // arithmetic, so wrapping is already what its generated code does. If milo0 ever
+        // gains checked arithmetic, this has to start setting a per-function flag instead.
         var attrs: Vec<Attribute> = Vec.new()
         while at(p, TokKind.At) {
-            attrs.push(parseAttribute(p))
+            if peekN(p, 1).kind == TokKind.Bang {
+                advance(p)
+                advance(p)
+                expect(p, TokKind.Ident)
+            } else {
+                attrs.push(parseAttribute(p))
+            }
         }
 
-        if at(p, TokKind.Import) || at(p, TokKind.From) {
+        if at(p, TokKind.Import) || atFromKeyword(p) {
             imports.push(parseImport(p))
         } else if at(p, TokKind.Struct) {
             var s = parseStruct(p)

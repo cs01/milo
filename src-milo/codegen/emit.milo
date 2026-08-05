@@ -1,4 +1,7 @@
 // Top-level codegen: function emission, program registration, IR assembly
+from "src-milo/target.milo" import {
+    getHostTarget
+}
 from "src-milo/ast.milo" import {
     Function, Program, StructDecl, EnumDecl, Expr, StructLitField
 }
@@ -49,6 +52,80 @@ pub fn structLitConst(cg: &Cgen, gllTy: &string, value: &Expr): string {
     }
 }
 
+// Can this initializer be spelled as an LLVM constant? Anything else needs the runtime
+// initializer. Deliberately conservative: a shape not listed here gets runtime init, which
+// is always correct, where guessing "constant" would silently emit a zero.
+// An aggregate initializer that IS all-zero bytes, so the static zeroinitializer is
+// already the right answer and no runtime store is needed.
+pub fn isEmptyAggInit(e: &Expr): bool {
+    match e {
+        Expr.EnumLit(en, vn, args, span) => {
+            return vn == "new" && args.len == 0
+        }
+        _ => {
+            return false
+        }
+    }
+}
+
+pub fn isConstInit(e: &Expr): bool {
+    match e {
+        Expr.IntLit(n, span) => {
+            return true
+        }
+        Expr.FloatLit(f, span) => {
+            return true
+        }
+        Expr.BoolLit(b, span) => {
+            return true
+        }
+        Expr.CharLit(c, span) => {
+            return true
+        }
+        Expr.StringLit(v, span) => {
+            return true
+        }
+        Expr.UnaryOp(op, operand, span) => {
+            if op == "-" {
+                return isConstInit(*operand)
+            }
+            return false
+        }
+        Expr.BinOp(op, lhs, rhs, span) => {
+            // Only NUMERIC folding exists; string concatenation has to run at runtime.
+            let f = constFoldNum(e)
+            return f.ok
+        }
+        Expr.ArrayLit(elements, span) => {
+            for i in 0..elements.len {
+                if !isConstInit(*elements[i]) {
+                    return false
+                }
+            }
+            return true
+        }
+        Expr.ArrayRepeat(val, count, span) => {
+            return isConstInit(*val)
+        }
+        Expr.StructLit(name, fields, span) => {
+            for i in 0..fields.len {
+                if !isConstInit(*fields[i].value) {
+                    return false
+                }
+            }
+            return true
+        }
+        Expr.EnumLit(en, vn, args, span) => {
+            // `Vec.new()` / `HashMap.new()` are the empty-container constructors, which
+            // are all-zero bytes.
+            return vn == "new" && args.len == 0
+        }
+        _ => {
+            return false
+        }
+    }
+}
+
 pub fn constInitOf(e: &Expr, llTy: &string): string {
     // a pointer global can only be a compile-time-constant null (`0 as *T`); LLVM
     // rejects `global ptr 0`, the null pointer constant is spelled `null`.
@@ -88,11 +165,161 @@ pub fn constInitOf(e: &Expr, llTy: &string): string {
             if op == "-" {
                 return "-" + constInitOf(*operand, llTy)
             }
-            return "0"
+            return zeroOf(llTy)
+        }
+        // Arithmetic on literals is folded here. Without it `let A: f64 = 3.0 / 2.0`
+        // fell through to the zero fallback and emitted `global double 0` — both the
+        // wrong VALUE and, since `0` is an integer constant, not even valid IR for a
+        // double.
+        Expr.BinOp(op, lhs, rhs, span) => {
+            let lf = constFoldNum(*lhs)
+            let rf = constFoldNum(*rhs)
+            if lf.ok && rf.ok {
+                let folded = applyConstOp(op, lf, rf)
+                if folded.ok {
+                    if llTy == "double" || llTy == "float" {
+                        return floatConstStr(folded.f)
+                    }
+                    return folded.i.toString()
+                }
+            }
+            return zeroOf(llTy)
         }
         _ => {
-            return "0"
+            return zeroOf(llTy)
         }
+    }
+}
+
+// The zero an LLVM type actually accepts: `0` is an integer constant and a `double`
+// global spelled `global double 0` is rejected outright.
+pub fn zeroOf(llTy: &string): string {
+    if llTy == "double" || llTy == "float" {
+        return "0.000000e+00"
+    }
+    if llTy == "ptr" {
+        return "null"
+    }
+    return "0"
+}
+
+pub struct ConstNum {
+    ok: bool,
+    isFloat: bool,
+    i: i64,
+    f: f64,
+}
+
+pub fn floatConstStr(f: f64): string {
+    var fs = f.toString()
+    var hasPt = false
+    for i in 0..fs.len {
+        if fs[i] == 46 || fs[i] == 101 || fs[i] == 69 {
+            hasPt = true
+        }
+    }
+    if !hasPt {
+        fs = fs + ".0"
+    }
+    return fs
+}
+
+pub fn constFoldNum(e: &Expr): ConstNum {
+    match e {
+        Expr.IntLit(n, span) => {
+            return ConstNum {
+                ok: true, isFloat: false, i: n, f: n as f64
+            }
+        }
+        Expr.FloatLit(f, span) => {
+            return ConstNum {
+                ok: true, isFloat: true, i: f as i64, f: f
+            }
+        }
+        Expr.UnaryOp(op, operand, span) => {
+            if op == "-" {
+                let inner = constFoldNum(*operand)
+                if inner.ok {
+                    return ConstNum {
+                        ok: true, isFloat: inner.isFloat, i: 0 - inner.i, f: 0.0 - inner.f
+                    }
+                }
+            }
+            return ConstNum {
+                ok: false, isFloat: false, i: 0, f: 0.0
+            }
+        }
+        Expr.BinOp(op, lhs, rhs, span) => {
+            let l = constFoldNum(*lhs)
+            let r = constFoldNum(*rhs)
+            if l.ok && r.ok {
+                return applyConstOp(op, l, r)
+            }
+            return ConstNum {
+                ok: false, isFloat: false, i: 0, f: 0.0
+            }
+        }
+        _ => {
+            return ConstNum {
+                ok: false, isFloat: false, i: 0, f: 0.0
+            }
+        }
+    }
+}
+
+pub fn applyConstOp(op: &string, l: ConstNum, r: ConstNum): ConstNum {
+    let isF = l.isFloat || r.isFloat
+    var oi: i64 = 0
+    var of: f64 = 0.0
+    if op == "+" {
+        oi = l.i + r.i
+        of = l.f + r.f
+    } else if op == "-" {
+        oi = l.i - r.i
+        of = l.f - r.f
+    } else if op == "*" {
+        oi = l.i * r.i
+        of = l.f * r.f
+    } else if op == "/" {
+        if isF {
+            if r.f == 0.0 {
+                return ConstNum {
+                    ok: false, isFloat: false, i: 0, f: 0.0
+                }
+            }
+            of = l.f / r.f
+        } else {
+            if r.i == 0 {
+                return ConstNum {
+                    ok: false, isFloat: false, i: 0, f: 0.0
+                }
+            }
+            oi = l.i / r.i
+        }
+    } else if op == "%" && !isF {
+        if r.i == 0 {
+            return ConstNum {
+                ok: false, isFloat: false, i: 0, f: 0.0
+            }
+        }
+        oi = l.i % r.i
+    } else if op == "<<" && !isF {
+        oi = l.i << r.i
+    } else if op == ">>" && !isF {
+        oi = l.i >> r.i
+    } else if op == "|" && !isF {
+        oi = l.i | r.i
+    } else if op == "&" && !isF {
+        oi = l.i & r.i
+    } else if op == "^" && !isF {
+        oi = l.i ^ r.i
+    } else {
+        return ConstNum {
+            ok: false, isFloat: false, i: 0, f: 0.0
+        }
+    }
+    return ConstNum {
+        ok: true, isFloat: isF, i: oi, f: of
     }
 }
 from "src-milo/codegen/types.milo" import {
@@ -102,7 +329,7 @@ from "src-milo/codegen/types.milo" import {
     ensureStringTy, ensureVecTy,
 }
 from "src-milo/codegen/stmt.milo" import {
-    genStmt, emitScopeDrops
+    genStmt, emitScopeDrops, collectIdentsExpr
 }
 from "src-milo/codegen/abi.milo" import {
     AbiStruct, ArgClass, RetClass, AbiReg,
@@ -205,6 +432,96 @@ pub fn externLoweredRet(cg: &Cgen, f: &Function): string {
 }
 
 // Emit a single function definition or extern declaration.
+// Move fixed-size allocas to the entry block. LLVM only reclaims stack at function
+// return, so an `alloca` emitted inside a loop body allocates AGAIN every iteration:
+// sha256 over a megabyte segfaulted at ~1500 iterations while 800 worked. 27 functions in
+// a std-using program had allocas outside entry, `sha256Bytes` alone 29 of them.
+//
+// Safe by construction: entry dominates every block, and only allocas with no operands
+// move. A dynamically-sized `alloca T, i64 %n` is left alone — %n need not be available
+// at entry.
+pub fn hoistAllocas(fnText: &string): string {
+    var lines: Vec<string> = Vec.new()
+    var cur = ""
+    for i in 0..fnText.len {
+        let c = fnText[i]
+        if c == 10 {
+            lines.push(cur.clone())
+            cur = ""
+        } else {
+            cur.push(c)
+        }
+    }
+    lines.push(cur.clone())
+
+    // Index of the entry label; allocas already at or before it stay put.
+    var entryIdx: i64 = -1
+    for i in 0..lines.len {
+        if entryIdx < 0 && lines[i].len > 1 && lines[i][lines[i].len - 1] == 58 && lines[i][0] != 32 {
+            entryIdx = i
+        }
+    }
+    if entryIdx < 0 {
+        return fnText.clone()
+    }
+
+    var moved: Vec<string> = Vec.new()
+    var kept: Vec<string> = Vec.new()
+    var blockIdx: i64 = -1
+    for i in 0..lines.len {
+        let l = lines[i].clone()
+        if l.len > 1 && l[l.len - 1] == 58 && l[0] != 32 {
+            blockIdx = i
+        }
+        var isHoistable = false
+        if blockIdx > entryIdx && l.len > 4 && l[0] == 32 {
+            // `  %name = alloca <type>` with nothing after the type is fixed-size.
+            var seenAlloca = false
+            var hasComma = false
+            var j: i64 = 0
+            while j + 6 < l.len {
+                if l[j] == 97 && l[j + 1] == 108 && l[j + 2] == 108 && l[j + 3] == 111 && l[j + 4] == 99 && l[j + 5] == 97 {
+                    seenAlloca = true
+                }
+                if seenAlloca && l[j] == 44 {
+                    hasComma = true
+                }
+                j = j + 1
+            }
+            if seenAlloca && !hasComma {
+                isHoistable = true
+            }
+        }
+        if isHoistable {
+            moved.push(l)
+        } else {
+            kept.push(l)
+        }
+    }
+    if moved.len == 0 {
+        return fnText.clone()
+    }
+
+    var out = ""
+    var placed = false
+    for i in 0..kept.len {
+        out = out + kept[i].clone()
+        out.push(10 as u8)
+        if !placed && kept[i].len > 1 && kept[i][kept[i].len - 1] == 58 && kept[i][0] != 32 {
+            for m in 0..moved.len {
+                out = out + moved[m].clone()
+                out.push(10 as u8)
+            }
+            placed = true
+        }
+    }
+    // Drop the trailing newline this rebuild added beyond the original.
+    if out.len > 0 {
+        out = out[0..out.len - 1].clone()
+    }
+    return out
+}
+
 pub fn genFn(cg: &mut Cgen, f: &Function, sigs: &Vec<CgFnSig>) {
     if f.isExtern {
         cg.externFns.insert(f.name.clone(), true)
@@ -344,11 +661,15 @@ pub fn genFn(cg: &mut Cgen, f: &Function, sigs: &Vec<CgFnSig>) {
         hdr = hdr + pLl + " %" + f.params[pi].name
     }
     hdr = hdr + ") {\n"
+    let fnBodyStart = cg.body.len
     emit(cg, hdr)
     emit(cg, "entry:\n")
     if isMain {
         emit(cg, "  store i32 %_milo_argc, ptr @_milo_argc_global\n")
         emit(cg, "  store ptr %_milo_argv, ptr @_milo_argv_global\n")
+        if cg.needsGlobalInit {
+            emit(cg, "  call void @_milo_init_globals()\n")
+        }
     }
 
     // Bind parameters. A ref param arrives as a `ptr` to the pointee, so it IS
@@ -390,12 +711,16 @@ pub fn genFn(cg: &mut Cgen, f: &Function, sigs: &Vec<CgFnSig>) {
         }
     }
     emit(cg, "}\n\n")
+    let fnText = cg.body[fnBodyStart..cg.body.len].clone()
+    let hoisted = hoistAllocas(fnText)
+    cg.body = cg.body[0..fnBodyStart].clone() + hoisted
 }
 
 // Register structs, enums, functions in Cgen tables, then emit all functions.
 pub fn genProgram(prog: Program, sourceDir: string): string {
     var cg = cgenNew()
     cg.sourceDir = sourceDir
+    cg.targetOs = getHostTarget().os
 
     // Runtime-support globals: argc/argv (read by _miloArgCount/_miloArgAt) and
     // the current green scheduler (read/written by _schedulerGet/_schedulerSet).
@@ -479,6 +804,10 @@ pub fn genProgram(prog: Program, sourceDir: string): string {
         }
         let e = prog.enums[ei].clone()
         var variants: Vec<CgVariantInfo> = Vec.new()
+        // Explicit discriminants set the tag and counting resumes from them. The checker
+        // side (mono.milo) does the same and the two MUST agree, or a match arm compares
+        // against a tag the constructor never stored.
+        var nextEnumTag: i64 = 0
         for vi in 0..e.variants.len {
             let v = e.variants[vi].clone()
             var payloadTypes: Vec<string> = Vec.new()
@@ -487,10 +816,18 @@ pub fn genProgram(prog: Program, sourceDir: string): string {
                 // mangles at read-time, once all mono decls exist).
                 payloadTypes.push(astTypeStr(v.fields[fi]))
             }
+            match v.discriminant {
+                Option.Some(d) => {
+                    nextEnumTag = d
+                }
+                Option.None => {
+                }
+            }
             variants.push(CgVariantInfo {
-                name: v.name.clone(), tag: vi as i32, payloadTypes: payloadTypes
+                name: v.name.clone(), tag: nextEnumTag as i32, payloadTypes: payloadTypes
             }
             )
+            nextEnumTag = nextEnumTag + 1
         }
         cg.enums.insert(e.name.clone(), CgEnumInfo {
             name: e.name.clone(), variants: variants, payloadSlots: 0
@@ -604,7 +941,9 @@ pub fn genProgram(prog: Program, sourceDir: string): string {
     }
 
     // Module-level global initializers — emitted here so struct/enum/%Vec/%String
-    // types they reference are already declared above.
+    // types they reference are already declared above. Anything the static paths below
+    // cannot express is collected for the runtime initializer.
+    var dynIdx: Vec<i64> = Vec.new()
     for gi in 0..prog.globals.len {
         var surfaceTy = "i64"
         match prog.globals[gi].ty {
@@ -693,14 +1032,32 @@ pub fn genProgram(prog: Program, sourceDir: string): string {
                     for fi in 0..sfields.len {
                         let fll = llType(sfields[fi].ty)
                         let scalar = fll == "i1" || fll == "i8" || fll == "i16" || fll == "i32" || fll == "i64" || fll == "double" || fll == "float"
-                        if !scalar {
-                            allConst = false
-                        }
                         var fval = "0"
+                        var fieldConst = scalar
                         for lf in 0..litFields.len {
                             if litFields[lf].name == sfields[fi].name {
-                                fval = constInitOf(*litFields[lf].value, fll)
+                                if scalar {
+                                    fval = constInitOf(*litFields[lf].value, fll)
+                                } else {
+                                    // An EMPTY container is still a constant: `Vec.new()`
+                                    // is all-zero bytes. Bailing on it zero-initialized the
+                                    // WHOLE struct, so a `Vec` field silently discarded
+                                    // every scalar field's initializer beside it.
+                                    match *litFields[lf].value {
+                                        Expr.EnumLit(en, vn, eargs, esp) => {
+                                            if vn == "new" && eargs.len == 0 {
+                                                fval = "zeroinitializer"
+                                                fieldConst = true
+                                            }
+                                        }
+                                        _ => {
+                                        }
+                                    }
+                                }
                             }
+                        }
+                        if !fieldConst {
+                            allConst = false
                         }
                         parts.push(fll + " " + fval)
                     }
@@ -724,15 +1081,96 @@ pub fn genProgram(prog: Program, sourceDir: string): string {
         if !arrayHandled && !structHandled {
             // aggregate globals (%String/%Vec/struct) zero-init; scalars take a const.
             var gval = "zeroinitializer"
-            if !(gllTy.len > 0 && gllTy[0] == 37) {
+            let isAgg = gllTy.len > 0 && gllTy[0] == 37
+            if !isAgg {
                 gval = constInitOf(*prog.globals[gi].value, gllTy)
+                if !isConstInit(*prog.globals[gi].value) {
+                    dynIdx.push(gi)
+                }
+            } else if !isEmptyAggInit(*prog.globals[gi].value) {
+                // A %String or %Vec built from anything other than an empty constructor
+                // cannot be an LLVM constant, so zeroinitializer here is a placeholder —
+                // the real value has to be computed at startup. Without this a
+                // `pub let TAIL: string = "tail"` stayed the empty string forever.
+                dynIdx.push(gi)
             }
             emitG(cg, "@" + gname.clone() + " = global " + gllTy + " " + gval + "\n")
         }
     }
 
-    // Emit all functions (generic templates excluded — see registration above)
+    // Globals whose initializer is not a compile-time constant get a runtime initializer,
+    // run from main before any user code. Emitted in DEPENDENCY order, not source order:
+    // `let FRAG = "head|" + TAIL` may be written above `TAIL`, and evaluating it first
+    // would read a zeroed string. Without this whole pass such a global stayed
+    // zeroinitializer forever and printed as empty — a silent wrong answer, not an error.
     let sigs = buildFnTable(prog)
+    if dynIdx.len > 0 {
+        cg.needsGlobalInit = true
+        // Insertion sort by dependency: a global is emitted only once every global it
+        // names has been emitted. A cycle cannot be ordered, so the remaining ones go in
+        // source order rather than looping forever — the checker is what should reject a
+        // cyclic initializer.
+        var ordered: Vec<i64> = Vec.new()
+        var placed: HashMap<string, bool> = HashMap.new()
+        var remaining = dynIdx.len
+        while remaining > 0 {
+            var progressed = false
+            for k in 0..dynIdx.len {
+                let gi = dynIdx[k]
+                let nm = prog.globals[gi].name.clone()
+                if placed.contains(nm) {
+                    continue
+                }
+                var refs: Vec<string> = Vec.new()
+                collectIdentsExpr(*prog.globals[gi].value, refs)
+                var ready = true
+                for ri in 0..refs.len {
+                    for k2 in 0..dynIdx.len {
+                        let g2 = dynIdx[k2]
+                        if prog.globals[g2].name == refs[ri] && !placed.contains(refs[ri]) {
+                            ready = false
+                        }
+                    }
+                }
+                if ready {
+                    ordered.push(gi)
+                    placed.insert(nm, true)
+                    remaining = remaining - 1
+                    progressed = true
+                }
+            }
+            if !progressed {
+                for k in 0..dynIdx.len {
+                    let gi = dynIdx[k]
+                    if !placed.contains(prog.globals[gi].name) {
+                        ordered.push(gi)
+                        placed.insert(prog.globals[gi].name.clone(), true)
+                        remaining = remaining - 1
+                    }
+                }
+            }
+        }
+        emit(cg, "define void @_milo_init_globals() {\n")
+        emit(cg, "entry:\n")
+        var initLocs: Vec<Local> = Vec.new()
+        for oi in 0..ordered.len {
+            let gi = ordered[oi]
+            var surfaceTy = "i64"
+            match prog.globals[gi].ty {
+                Option.Some(t) => {
+                    surfaceTy = astTypeStr(t)
+                }
+                Option.None => {
+                }
+            }
+            let v = genExpr(cg, *prog.globals[gi].value, initLocs, sigs, surfaceTy.clone())
+            emit(cg, "  store " + llType(surfaceTy) + " " + v.v + ", ptr @" + prog.globals[gi].name.clone() + "\n")
+        }
+        emit(cg, "  ret void\n")
+        emit(cg, "}\n\n")
+    }
+
+    // Emit all functions (generic templates excluded — see registration above)
     for j in 0..prog.functions.len {
         if prog.functions[j].typeParams.len > 0 {
             continue

@@ -594,7 +594,7 @@ pub fn monomorphizeEnum(ck: &mut Checker, baseName: &string, typeArgsIn: &Vec<Ty
             monoFields.push(substituteMiloType(v.fields[fi], generic.typeParams, typeArgs))
         }
         monoVariants.push(EnumVariant {
-            name: v.name.clone(), fields: monoFields
+            name: v.name.clone(), fields: monoFields, discriminant: cloneOptI64(v.discriminant)
         }
         )
     }
@@ -789,10 +789,10 @@ pub fn monomorphizeFn(ck: &mut Checker, baseName: &string, typeArgs: &Vec<TypeKi
 
     // Create concrete function declaration
     var monoParams: Vec<Param> = Vec.new()
-    for mpi in 0..generic.decl.params.len {
+    for pi in 0..generic.decl.params.len {
         monoParams.push(Param {
-            name: generic.decl.params[mpi].name.clone(),
-            ty: substituteMiloType(generic.decl.params[mpi].ty, generic.typeParams, typeArgs),
+            name: generic.decl.params[pi].name.clone(),
+            ty: substituteMiloType(generic.decl.params[pi].ty, generic.typeParams, typeArgs),
         }
         )
     }
@@ -852,15 +852,24 @@ pub fn registerGenericEnum(ck: &mut Checker, e: &EnumDecl) {
         typeParams.push(e.typeParams[i].name.clone())
     }
     var variants: HashMap<string, VariantInfo> = HashMap.new()
+    var nextTag: i64 = 0
     for vi in 0..e.variants.len {
         var fields: Vec<TypeKind> = Vec.new()
         for fi in 0..e.variants[vi].fields.len {
             fields.push(typeFromAst(e.variants[vi].fields[fi]))
         }
+        match e.variants[vi].discriminant {
+            Option.Some(d) => {
+                nextTag = d
+            }
+            Option.None => {
+            }
+        }
         variants.insert(e.variants[vi].name.clone(), VariantInfo {
-            tag: vi as i32, fields: fields
+            tag: nextTag as i32, fields: fields
         }
         )
+        nextTag = nextTag + 1
     }
     ck.genericEnums.insert(e.name.clone(), GenericEnumInfo {
         typeParams: typeParams,

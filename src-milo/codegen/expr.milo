@@ -14,7 +14,7 @@ from "src-milo/codegen/types.milo" import {
     unwrapHeap, stripPercent, binOpInt, cmpOpInt, isArithOp, isCmpOp,
     findLocal, hasLocal, genLoad, ensureMalloc, ensureMemcpy,
     lookupFnRet, lookupFieldIndex, lookupFieldType,
-    lookupVariantTag, lookupVariantPayload, lookupEnumPayloadSlots
+    lookupVariantTag, variantTagOpt, lookupVariantPayload, lookupEnumPayloadSlots
 }
 from "src-milo/codegen/stmt.milo" import {
     genClosure, genClosureCall, widenToI64
@@ -28,7 +28,7 @@ from "src-milo/codegen/abi.milo" import {
 
 from "src-milo/codegen/strings.milo" import {
     genStringLit, genStringClone, genStringConcat, genStringEq, genStringCmp,
-    genIntToString, genFloatToString, genStringIndex, genStringSlice, emitStringLit, genStringPush
+    genIntToString, genFloatToString, genFloat32ToString, genStringIndex, genStringSlice, emitStringLit, genStringPush
 }
 
 // -- Struct literal --
@@ -148,7 +148,50 @@ pub fn genStructLit(cg: &mut Cgen, name: &string, fields: &Vec<StructLitField>, 
 
 // -- Field access --
 
+// `f64.INF` / `f64.NEG_INF` / `f64.NAN` (and f32) — a FieldAccess whose object is a TYPE
+// name. LLVM has no textual spelling for these, so they are emitted as the IEEE bit
+// patterns; note LLVM writes an f32 constant as the DOUBLE that the float rounds to, which
+// is why the f32 arms carry the same hex as the f64 ones.
+pub fn floatNamespaceLit(object: &Expr, field: &string): string {
+    match object {
+        Expr.Ident(name, _sp) => {
+            if name != "f64" && name != "f32" {
+                return ""
+            }
+            if field == "INF" {
+                return "0x7FF0000000000000"
+            }
+            if field == "NEG_INF" {
+                return "0xFFF0000000000000"
+            }
+            if field == "NAN" {
+                return "0x7FF8000000000000"
+            }
+            return ""
+        }
+        _ => {
+            return ""
+        }
+    }
+}
+
 pub fn genFieldAccess(cg: &mut Cgen, object: &Expr, field: &string, locs: &Vec<Local>, sigs: &Vec<CgFnSig>): Val {
+    let nsLit = floatNamespaceLit(object, field)
+    if nsLit.len > 0 {
+        var fty = "double"
+        match object {
+            Expr.Ident(nm, _s2) => {
+                if nm == "f32" {
+                    fty = "float"
+                }
+            }
+            _ => {
+            }
+        }
+        return Val {
+            v: nsLit, ty: fty
+        }
+    }
     let lv = genLvalue(cg, object, locs, sigs)
     let lvTyLl = llType(lv.ty)
     // Built-in: string.len
@@ -728,11 +771,64 @@ pub fn genHashMapNew(cg: &mut Cgen, hintTy: &string): Val {
 }
 
 // i1 temp that is true when two keys of keyTy compare equal
+// Structural equality for an aggregate: compare every field and AND the results. Returns
+// "" when some field has a type milo0 cannot compare, so callers fail loudly instead of
+// emitting `icmp` on an aggregate (not valid IR) or comparing field 0 alone (which calls
+// distinct values equal — the previous behaviour, which passed the fixtures only because
+// their differing values happened to differ in the first field).
+pub fn genAggregateEq(cg: &mut Cgen, aggLl: &string, a: &string, b: &string): string {
+    let aggName = stripPercent(aggLl.clone())
+    if !cg.structs.contains(aggName) {
+        return ""
+    }
+    let sf = cg.structs.get(aggName)!
+    var acc = ""
+    for fi in 0..sf.len {
+        let fll = llType(sf[fi].ty)
+        let ea = nextTemp(cg)
+        emit(cg, "  " + ea + " = extractvalue " + aggLl.clone() + " " + a.clone() + ", " + fi.toString() + "\n")
+        let eb = nextTemp(cg)
+        emit(cg, "  " + eb + " = extractvalue " + aggLl.clone() + " " + b.clone() + ", " + fi.toString() + "\n")
+        var one = ""
+        if fll == "%String" {
+            let r = genStringEq(cg, ea, eb, true)
+            one = r.v.clone()
+        } else if fll == "i1" || fll == "i8" || fll == "i16" || fll == "i32" || fll == "i64" || fll == "ptr" {
+            let t1 = nextTemp(cg)
+            emit(cg, "  " + t1 + " = icmp eq " + fll.clone() + " " + ea + ", " + eb + "\n")
+            one = t1
+        } else if fll == "double" || fll == "float" {
+            let t2 = nextTemp(cg)
+            emit(cg, "  " + t2 + " = fcmp oeq " + fll.clone() + " " + ea + ", " + eb + "\n")
+            one = t2
+        } else {
+            return ""
+        }
+        if acc.len == 0 {
+            acc = one
+        } else {
+            let t3 = nextTemp(cg)
+            emit(cg, "  " + t3 + " = and i1 " + acc.clone() + ", " + one + "\n")
+            acc = t3
+        }
+    }
+    return acc
+}
+
 pub fn genKeyEq(cg: &mut Cgen, keyTy: &string, a: &string, b: &string): string {
     let keyLl = llType(keyTy)
     if keyLl == "%String" {
         let r = genStringEq(cg, a, b, true)
         return r.v
+    }
+    // A struct key is an aggregate; `icmp` is not defined on aggregates.
+    if keyLl.len > 1 && keyLl[0] == 37 && cg.structs.contains(stripPercent(keyLl.clone())) {
+        let r = genAggregateEq(cg, keyLl, a, b)
+        if r.len == 0 {
+            eprint("codegen: HashMap key '" + stripPercent(keyLl.clone()) + "' has a field milo0 cannot compare")
+            exit(1)
+        }
+        return r
     }
     let t = nextTemp(cg)
     emit(cg, "  " + t + " = icmp eq " + keyLl + " " + a + ", " + b + "\n")
@@ -1132,10 +1228,9 @@ pub fn genUnwrap(cg: &mut Cgen, inner: &Expr, span: &Option<Span>, locs: &Vec<Lo
     let v = genExpr(cg, inner, locs, sigs, "")
     let enumName = resolveEnumName(cg, resolveTyStr(cg, stripPercent(v.ty)))
     let enumTy = "%" + enumName
-    let someTag = lookupVariantTag(cg, enumName, "Some")
     var okVariant = "Some"
     var failWord = "None"
-    if someTag < 0 {
+    if variantTagOpt(cg, enumName, "Some").isNone() {
         okVariant = "Ok"
         failWord = "Err"
     }
@@ -1226,7 +1321,7 @@ pub fn genPropagate(cg: &mut Cgen, inner: &Expr, locs: &Vec<Local>, sigs: &Vec<C
     let srcTy = "%" + srcEnum
     var okVariant = "Some"
     var failVariant = "None"
-    if lookupVariantTag(cg, srcEnum, "Some") < 0 {
+    if variantTagOpt(cg, srcEnum, "Some").isNone() {
         okVariant = "Ok"
         failVariant = "Err"
     }
@@ -1261,7 +1356,7 @@ pub fn genPropagate(cg: &mut Cgen, inner: &Expr, locs: &Vec<Local>, sigs: &Vec<C
         emit(cg, "  ret " + srcTy + " " + whole + "\n")
     } else {
         let retFail = lookupVariantTag(cg, retEnum, failVariant)
-        if retFail < 0 {
+        if variantTagOpt(cg, retEnum, failVariant).isNone() {
             eprint("codegen: '?' cannot propagate " + srcEnum.clone() + " into fn returning " + retEnum.clone())
             exit(1)
         }
@@ -1366,7 +1461,7 @@ pub fn genDefaultValue(cg: &mut Cgen, inner: &Expr, defaultE: &Expr, locs: &Vec<
     let enumName = resolveEnumName(cg, resolveTyStr(cg, stripPercent(v.ty)))
     let enumTy = "%" + enumName
     var okVariant = "Some"
-    if lookupVariantTag(cg, enumName, "Some") < 0 {
+    if variantTagOpt(cg, enumName, "Some").isNone() {
         okVariant = "Ok"
     }
     let payloadTypes = lookupVariantPayload(cg, enumName, okVariant)
@@ -1520,7 +1615,7 @@ pub fn genOptionWrapIfNeeded(cg: &mut Cgen, v: &Val, hintTy: &string): Val {
         return asis
     }
     let stag = lookupVariantTag(cg, rp, "Some")
-    if stag < 0 {
+    if variantTagOpt(cg, rp, "Some").isNone() {
         return asis
     }
     let pl = lookupVariantPayload(cg, rp, "Some")
@@ -1811,23 +1906,27 @@ pub fn peekArgTy(e: &Expr, locs: &Vec<Local>): string {
 pub fn genEnumLit(cg: &mut Cgen, enumName: &string, variant: &string, args: &Vec<Heap<Expr>>, locs: &Vec<Local>, sigs: &Vec<CgFnSig>, hintTy: &string): Val {
     // Generic enums are registered under their mangled name
     var rEnum = resolveEnumName(cg, enumName)
+    // `found` answers "is this a variant at all"; `tag` is only its number. They must stay
+    // separate — a variant whose discriminant is -1 is a perfectly good variant, and
+    // folding the two questions together routed it to the static-method path, emitting a
+    // call to a function that does not exist.
+    var found = variantTagOpt(cg, rEnum, variant).isSome()
     var tag = lookupVariantTag(cg, rEnum, variant)
-    // A generic enum literal (`Result.Ok(x)`) can't pick its instantiation from
-    // the base name alone when several exist; the expected type supplies it.
-    if tag < 0 && hintTy.len > 0 {
+    if !found && hintTy.len > 0 {
         let he = stripPercent(resolveTyStr(cg, stripPercent(hintTy)))
-        if he.startsWith(enumName + "_") && lookupVariantTag(cg, he, variant) >= 0 {
+        if he.startsWith(enumName + "_") && variantTagOpt(cg, he, variant).isSome() {
             rEnum = he.clone()
             tag = lookupVariantTag(cg, he, variant)
+            found = true
         }
     }
     // No hint (`let a = Maybe.Just(42)`): pick the monomorphization of this generic
     // enum that carries the variant — the sole one, or (if several) the one whose
     // variant payload type matches the first payload argument.
-    if tag < 0 {
+    if !found {
         var cands: Vec<string> = Vec.new()
         for k, v in cg.enums {
-            if k.startsWith(enumName + "_") && lookupVariantTag(cg, k, variant) >= 0 {
+            if k.startsWith(enumName + "_") && variantTagOpt(cg, k, variant).isSome() {
                 cands.push(k.clone())
             }
         }
@@ -1848,12 +1947,13 @@ pub fn genEnumLit(cg: &mut Cgen, enumName: &string, variant: &string, args: &Vec
         if chosen.len > 0 {
             rEnum = chosen
             tag = lookupVariantTag(cg, rEnum, variant)
+            found = true
         }
     }
     // `Type.method(...)` with no matching variant is a static method on a struct
     // (e.g. File.openRead) — the parser lands both on the enum-literal form. It is
     // registered as `Type$method`; route it to the plain call path.
-    if tag < 0 {
+    if !found {
         var emptyTA: Vec<MiloType> = Vec.new()
         return genCall(cg, rEnum + "$" + variant, args, emptyTA, locs, sigs, "")
     }
@@ -1924,6 +2024,29 @@ pub fn genAsCast(cg: &mut Cgen, inner: &Expr, targetTy: &string, locs: &Vec<Loca
     let v = genExpr(cg, inner, locs, sigs, targetTy.clone())
     let fromLl = llType(v.ty)
     let toLl = llType(targetTy)
+
+    // Integer-repr enum to an integer: the discriminant IS the value, and milo0 stores it
+    // as the i32 tag in field 0. Self-contained (extract, then widen/narrow to the target)
+    // so it cannot interact with the pointer and float paths below.
+    if intBits(toLl.clone()) > 0 && cg.enums.contains(stripPercent(resolveTyStr(cg, stripPercent(v.ty)))) {
+        let raw = nextTemp(cg)
+        emit(cg, "  " + raw + " = extractvalue " + fromLl.clone() + " " + v.v.clone() + ", 0\n")
+        let want = intBits(toLl.clone())
+        if want == 32 {
+            return Val {
+                v: raw, ty: targetTy.clone()
+            }
+        }
+        let conv = nextTemp(cg)
+        var op = "sext"
+        if want < 32 {
+            op = "trunc"
+        }
+        emit(cg, "  " + conv + " = " + op + " i32 " + raw + " to " + toLl.clone() + "\n")
+        return Val {
+            v: conv, ty: targetTy.clone()
+        }
+    }
     // Pointer target (`x as *T`, or a bare `ptr`): the value is an opaque `ptr`,
     // but carry the SURFACE `*T` so index/index-assign can recover element type T.
     let toIsPtr = (targetTy.len > 0 && targetTy[0] == 42) || toLl == "ptr"
@@ -2027,8 +2150,11 @@ pub fn genAsCast(cg: &mut Cgen, inner: &Expr, targetTy: &string, locs: &Vec<Loca
             op = "fptoui"
         }
         emit(cg, "  " + ci + " = " + op + " " + fromLl + " " + v.v + " to " + toLl + "\n")
+        // The SURFACE type, not the LLVM spelling: `x as u8` typed as plain `i8` is
+        // indistinguishable from a signed i8 downstream, and printing then sign-extended
+        // a u8 of 255 into -1.
         return Val {
-            v: ci, ty: toLl
+            v: ci, ty: targetTy.clone()
         }
     }
     if fromIsFloat && toIsFloat {
@@ -2272,6 +2398,18 @@ pub fn genMethodCall(cg: &mut Cgen, object: &Expr, method: &string, args: &Vec<H
             return genStringPush(cg, lv.v, bv)
         }
     }
+    // `s.pushStr(other)` — append a whole string in place. Reuses the same amortized
+    // growth path the `s = s + x` peephole uses, so the two cannot drift apart.
+    if method == "pushStr" {
+        let lv = genLvalue(cg, object, locs, sigs)
+        if llType(lv.ty) == "%String" {
+            let ev = genExpr(cg, *args[0], locs, sigs, "%String")
+            genStringAppendInPlace(cg, lv.v, ev.v)
+            return Val {
+                v: "0", ty: "void"
+            }
+        }
+    }
     // Vec.reverse mutates in place → needs the receiver address. (String.reverse
     // is a different method — it falls through to the strReverse mapping below.)
     if method == "reverse" {
@@ -2447,6 +2585,74 @@ pub fn genMethodCall(cg: &mut Cgen, object: &Expr, method: &string, args: &Vec<H
 
     let obj = genExpr(cg, object, locs, sigs, "")
     let objTyLl = llType(obj.ty)
+
+    // Option/Result queries. The receiver is a monomorphized enum value, so the tag is
+    // field 0 and the payload is field 1 — same layout the `!` unwrap path reads.
+    if method == "isSome" || method == "isNone" || method == "isOk" || method == "isErr" || method == "unwrapOr" {
+        let enumName = stripPercent(resolveTyStr(cg, stripPercent(obj.ty)))
+        if cg.enums.contains(enumName) {
+            var okVariant = "Some"
+            if method == "isOk" || method == "isErr" {
+                okVariant = "Ok"
+            }
+            if method == "unwrapOr" && lookupVariantTag(cg, enumName, "Some") < 0 {
+                okVariant = "Ok"
+            }
+            let okTag = lookupVariantTag(cg, enumName, okVariant)
+            if okTag >= 0 {
+                let enumTy = "%" + enumName.clone()
+                let addr = nextTemp(cg)
+                emit(cg, "  " + addr + " = alloca " + enumTy.clone() + "\n")
+                emit(cg, "  store " + enumTy.clone() + " " + obj.v.clone() + ", ptr " + addr.clone() + "\n")
+                let tagPtr = nextTemp(cg)
+                emit(cg, "  " + tagPtr + " = getelementptr " + enumTy.clone() + ", ptr " + addr.clone() + ", i32 0, i32 0\n")
+                let tag = nextTemp(cg)
+                emit(cg, "  " + tag + " = load i32, ptr " + tagPtr + "\n")
+                if method != "unwrapOr" {
+                    var cmp = "eq"
+                    if method == "isNone" || method == "isErr" {
+                        cmp = "ne"
+                    }
+                    let r = nextTemp(cg)
+                    emit(cg, "  " + r + " = icmp " + cmp + " i32 " + tag.clone() + ", " + okTag.toString() + "\n")
+                    return Val {
+                        v: r, ty: "i1"
+                    }
+                }
+                let payloadTypes = lookupVariantPayload(cg, enumName, okVariant)
+                if payloadTypes.len == 1 {
+                    let payTy = payloadTypes[0].clone()
+                    let payLl = llType(payTy)
+                    // The default is evaluated before the branch: `unwrapOr(x)` takes x
+                    // eagerly, so evaluating it on the present path too would be wrong.
+                    let dv = genExpr(cg, *args[0], locs, sigs, payLl.clone())
+                    let isOkT = nextTemp(cg)
+                    emit(cg, "  " + isOkT + " = icmp eq i32 " + tag.clone() + ", " + okTag.toString() + "\n")
+                    let haveLbl = nextLabel(cg, "unwrapor.have")
+                    let defLbl = nextLabel(cg, "unwrapor.default")
+                    let endLbl = nextLabel(cg, "unwrapor.end")
+                    emit(cg, "  br i1 " + isOkT + ", label %" + haveLbl.clone() + ", label %" + defLbl.clone() + "\n")
+                    emit(cg, haveLbl.clone() + ":\n")
+                    let payPtr = nextTemp(cg)
+                    emit(cg, "  " + payPtr + " = getelementptr " + enumTy.clone() + ", ptr " + addr.clone() + ", i32 0, i32 1\n")
+                    let fp = nextTemp(cg)
+                    emit(cg, "  " + fp + " = getelementptr { " + payLl.clone() + " }, ptr " + payPtr + ", i32 0, i32 0\n")
+                    let got = nextTemp(cg)
+                    emit(cg, "  " + got + " = load " + payLl.clone() + ", ptr " + fp + "\n")
+                    emit(cg, "  br label %" + endLbl.clone() + "\n")
+                    emit(cg, defLbl.clone() + ":\n")
+                    emit(cg, "  br label %" + endLbl.clone() + "\n")
+                    emit(cg, endLbl.clone() + ":\n")
+                    let r2 = nextTemp(cg)
+                    emit(cg, "  " + r2 + " = phi " + payLl.clone() + " [ " + got + ", %" + haveLbl.clone() + " ], [ " + dv.v.clone() + ", %" + defLbl.clone() + " ]\n")
+                    return Val {
+                        v: r2, ty: payTy
+                    }
+                }
+            }
+        }
+    }
+
     if isHashMapTy(obj.ty) && method == "contains" {
         let kv = genExpr(cg, *args[0], locs, sigs, hashMapKeyTy(obj.ty))
         return genHashMapContains(cg, obj, kv)
@@ -2465,6 +2671,23 @@ pub fn genMethodCall(cg: &mut Cgen, object: &Expr, method: &string, args: &Vec<H
         emit(cg, "  " + lenT + " = extractvalue %HashMap " + obj.v + ", 1\n")
         return Val {
             v: lenT, ty: "i64"
+        }
+    }
+    // `clear` on a Vec or HashMap: length to zero, buffer kept so the capacity survives.
+    // The elements are not dropped — milo0 does not run element drop glue on truncation
+    // anywhere else either, and doing it here only would be inconsistent.
+    if method == "clear" && (isVecTy(obj.ty) || isHashMapTy(obj.ty)) {
+        let lv = genLvalue(cg, object, locs, sigs)
+        let contTy = if isVecTy(obj.ty) {
+            "%Vec"
+        } else {
+            "%HashMap"
+        }
+        let lenPtr = nextTemp(cg)
+        emit(cg, "  " + lenPtr + " = getelementptr " + contTy + ", ptr " + lv.v + ", i32 0, i32 1\n")
+        emit(cg, "  store i64 0, ptr " + lenPtr + "\n")
+        return Val {
+            v: "0", ty: "void"
         }
     }
     if isVecTy(obj.ty) && method == "len" {
@@ -2539,6 +2762,55 @@ pub fn genMethodCall(cg: &mut Cgen, object: &Expr, method: &string, args: &Vec<H
     if intBits(objTyLl) > 0 && (method == "wrappingAdd" || method == "wrappingSub" || method == "wrappingMul" || method == "saturatingAdd" || method == "saturatingSub" || method == "saturatingMul") {
         let av = genExpr(cg, *args[0], locs, sigs, obj.ty.clone())
         return genWrapSatArith(cg, obj, method, av)
+    }
+    if objTyLl == "i1" && method == "toString" {
+        let t = genStringLit(cg, "true")
+        let f = genStringLit(cg, "false")
+        let r = nextTemp(cg)
+        emit(cg, "  " + r + " = select i1 " + obj.v + ", %String " + t.v + ", %String " + f.v + "\n")
+        return Val {
+            v: r, ty: "string"
+        }
+    }
+    // Rotate via the funnel-shift intrinsics: fshl/fshr with both operands set to the
+    // same value IS a rotate, and LLVM lowers it to the single machine instruction.
+    if method == "rotateLeft" || method == "rotateRight" {
+        if intBits(objTyLl.clone()) > 0 {
+            let w = objTyLl.clone()
+            let av = genExpr(cg, *args[0], locs, sigs, w.clone())
+            var amt = av.v.clone()
+            // The shift amount must match the value's width or LLVM rejects the call.
+            let avLl = llType(av.ty)
+            if avLl != w {
+                let c = nextTemp(cg)
+                var castOp = "zext"
+                if intBits(avLl.clone()) > intBits(w.clone()) {
+                    castOp = "trunc"
+                }
+                emit(cg, "  " + c + " = " + castOp + " " + avLl.clone() + " " + av.v + " to " + w.clone() + "\n")
+                amt = c
+            }
+            var shiftFn = "llvm.fshl."
+            if method == "rotateRight" {
+                shiftFn = "llvm.fshr."
+            }
+            let intr = shiftFn + w.clone()
+            var declared = false
+            for i in 0..cg.emittedThunks.len {
+                if cg.emittedThunks[i] == intr {
+                    declared = true
+                }
+            }
+            if !declared {
+                cg.emittedThunks.push(intr.clone())
+                emitG(cg, "declare " + w.clone() + " @" + intr.clone() + "(" + w.clone() + ", " + w.clone() + ", " + w.clone() + ")\n")
+            }
+            let r = nextTemp(cg)
+            emit(cg, "  " + r + " = call " + w.clone() + " @" + intr.clone() + "(" + w.clone() + " " + obj.v.clone() + ", " + w.clone() + " " + obj.v.clone() + ", " + w.clone() + " " + amt + ")\n")
+            return Val {
+                v: r, ty: obj.ty.clone()
+            }
+        }
     }
     if objTyLl == "i64" && method == "toString" {
         return genIntToString(cg, obj.v, isUnsigned(obj.ty))
@@ -2729,13 +3001,96 @@ pub fn genMethodCall(cg: &mut Cgen, object: &Expr, method: &string, args: &Vec<H
     // the first arg. parseInt/toInt alias strParseInt; parseF64 is a strtod call.
     if objTyLl == "%String" {
         if method == "parseF64" || method == "parseFloat" || method == "toFloat" {
+            // TOTAL parse: strtod alone answers 0 for garbage and stops happily at the
+            // first bad character, so "abc" and "0" were indistinguishable and "3.14.5"
+            // silently became 3.14. Pass an endptr and demand it reached the end of a
+            // non-empty string; otherwise the answer is None.
             ensureStrtod(cg)
+            ensureStringTy(cg)
             let dp = nextTemp(cg)
-            emit(cg, "  " + dp + " = extractvalue %String " + obj.v + ", 0\n")
+            emit(cg, "  " + dp + " = extractvalue %String " + obj.v.clone() + ", 0\n")
+            let slen = nextTemp(cg)
+            emit(cg, "  " + slen + " = extractvalue %String " + obj.v.clone() + ", 1\n")
+            let endSlot = nextTemp(cg)
+            emit(cg, "  " + endSlot + " = alloca ptr\n")
             let r = nextTemp(cg)
-            emit(cg, "  " + r + " = call double @strtod(ptr " + dp + ", ptr null)\n")
+            emit(cg, "  " + r + " = call double @strtod(ptr " + dp + ", ptr " + endSlot + ")\n")
+            let endP = nextTemp(cg)
+            emit(cg, "  " + endP + " = load ptr, ptr " + endSlot + "\n")
+            let startI = nextTemp(cg)
+            emit(cg, "  " + startI + " = ptrtoint ptr " + dp + " to i64\n")
+            let endI = nextTemp(cg)
+            emit(cg, "  " + endI + " = ptrtoint ptr " + endP + " to i64\n")
+            let used = nextTemp(cg)
+            emit(cg, "  " + used + " = sub i64 " + endI + ", " + startI + "\n")
+            let allUsed = nextTemp(cg)
+            emit(cg, "  " + allUsed + " = icmp eq i64 " + used + ", " + slen + "\n")
+            let nonEmpty = nextTemp(cg)
+            emit(cg, "  " + nonEmpty + " = icmp sgt i64 " + slen + ", 0\n")
+            // strtod also SKIPS leading whitespace, so " 1.2" consumed every byte and
+            // looked total. Reject a leading blank explicitly.
+            let b0 = nextTemp(cg)
+            emit(cg, "  " + b0 + " = load i8, ptr " + dp + "\n")
+            let isSp = nextTemp(cg)
+            emit(cg, "  " + isSp + " = icmp eq i8 " + b0 + ", 32\n")
+            let isTab = nextTemp(cg)
+            emit(cg, "  " + isTab + " = icmp eq i8 " + b0 + ", 9\n")
+            let isNl = nextTemp(cg)
+            emit(cg, "  " + isNl + " = icmp eq i8 " + b0 + ", 10\n")
+            let isCr = nextTemp(cg)
+            emit(cg, "  " + isCr + " = icmp eq i8 " + b0 + ", 13\n")
+            let ws1 = nextTemp(cg)
+            emit(cg, "  " + ws1 + " = or i1 " + isSp + ", " + isTab + "\n")
+            let ws2 = nextTemp(cg)
+            emit(cg, "  " + ws2 + " = or i1 " + isNl + ", " + isCr + "\n")
+            let anyWs = nextTemp(cg)
+            emit(cg, "  " + anyWs + " = or i1 " + ws1 + ", " + ws2 + "\n")
+            let notWs = nextTemp(cg)
+            emit(cg, "  " + notWs + " = xor i1 " + anyWs + ", true\n")
+            let okLen = nextTemp(cg)
+            emit(cg, "  " + okLen + " = and i1 " + allUsed + ", " + nonEmpty + "\n")
+            let okBoth = nextTemp(cg)
+            emit(cg, "  " + okBoth + " = and i1 " + okLen + ", " + notWs + "\n")
+
+            // The monomorphized Option the checker will have registered for this call.
+            // If it is absent the program never used an Option<f64>, so fall back to the
+            // bare double rather than referencing a type that was never declared.
+            let optName = "Option_f64"
+            if !cg.enums.contains(optName) {
+                return Val {
+                    v: r, ty: "double"
+                }
+            }
+            let optTy = "%" + optName.clone()
+            let slot = nextTemp(cg)
+            emit(cg, "  " + slot + " = alloca " + optTy.clone() + "\n")
+            let someLbl = nextLabel(cg, "parse.some")
+            let noneLbl = nextLabel(cg, "parse.none")
+            let endLbl = nextLabel(cg, "parse.end")
+            emit(cg, "  br i1 " + okBoth + ", label %" + someLbl.clone() + ", label %" + noneLbl.clone() + "\n")
+            emit(cg, someLbl.clone() + ":\n")
+            let rv = Val {
+                v: r, ty: "f64"
+            }
+            let someV = genWrapSome(cg, rv, optName)
+            emit(cg, "  store " + optTy.clone() + " " + someV.v + ", ptr " + slot.clone() + "\n")
+            emit(cg, "  br label %" + endLbl.clone() + "\n")
+            emit(cg, noneLbl.clone() + ":\n")
+            let noneTag = lookupVariantTag(cg, optName, "None")
+            let nslot = nextTemp(cg)
+            emit(cg, "  " + nslot + " = alloca " + optTy.clone() + "\n")
+            let ntagPtr = nextTemp(cg)
+            emit(cg, "  " + ntagPtr + " = getelementptr " + optTy.clone() + ", ptr " + nslot + ", i32 0, i32 0\n")
+            emit(cg, "  store i32 " + noneTag.toString() + ", ptr " + ntagPtr + "\n")
+            let nval = nextTemp(cg)
+            emit(cg, "  " + nval + " = load " + optTy.clone() + ", ptr " + nslot + "\n")
+            emit(cg, "  store " + optTy.clone() + " " + nval + ", ptr " + slot.clone() + "\n")
+            emit(cg, "  br label %" + endLbl.clone() + "\n")
+            emit(cg, endLbl.clone() + ":\n")
+            let outv = nextTemp(cg)
+            emit(cg, "  " + outv + " = load " + optTy.clone() + ", ptr " + slot.clone() + "\n")
             return Val {
-                v: r, ty: "double"
+                v: outv, ty: optName
             }
         }
         var sfn = ""
@@ -3531,6 +3886,9 @@ pub fn genCall(cg: &mut Cgen, name: &string, args: &Vec<Heap<Expr>>, typeArgs: &
     }
     // embedFile("path"): read the file at compile time (relative to the source
     // dir) and emit its contents as a string literal.
+    if name == "targetOs" && args.len == 0 {
+        return genStringLit(cg, cg.targetOs.clone())
+    }
     if name == "embedFile" && args.len == 1 {
         var path = ""
         match *args[0] {
@@ -3728,7 +4086,11 @@ pub fn genCall(cg: &mut Cgen, name: &string, args: &Vec<Heap<Expr>>, typeArgs: &
         }
     }
     if name == "_strDataPtr" {
-        let sdp = genExpr(cg, *args[0], locs, sigs, "")
+        // The ADDRESS of the %String, not its value. genExpr on a `&string` parameter
+        // yields the loaded aggregate, and GEPing that emits
+        // `getelementptr %String, ptr <an SSA %String>` — invalid IR, so any function
+        // taking `s: &string` and asking for its data pointer failed to compile.
+        let sdp = genLvalue(cg, *args[0], locs, sigs)
         let sdg = nextTemp(cg)
         emit(cg, "  " + sdg + " = getelementptr %String, ptr " + sdp.v + ", i32 0, i32 0\n")
         let sdd = nextTemp(cg)
@@ -3931,7 +4293,7 @@ pub fn genCall(cg: &mut Cgen, name: &string, args: &Vec<Heap<Expr>>, typeArgs: &
                 let rp = stripPercent(resolveTyStr(cg, stripPercent(paramHints[i])))
                 if cg.enums.contains(rp) && llType(av.ty) != ("%" + rp) {
                     let stag = lookupVariantTag(cg, rp, "Some")
-                    if stag >= 0 {
+                    if variantTagOpt(cg, rp, "Some").isSome() {
                         let pl = lookupVariantPayload(cg, rp, "Some")
                         if pl.len == 1 && llType(pl[0]) == llType(av.ty) {
                             av = genWrapSome(cg, av, rp)
@@ -3969,17 +4331,23 @@ pub fn genCall(cg: &mut Cgen, name: &string, args: &Vec<Heap<Expr>>, typeArgs: &
                 let p = nextTemp(cg)
                 emit(cg, "  " + p + " = extractvalue %String " + argVals[ai].v + ", 0\n")
                 argStr = argStr + ", ptr " + p
-            } else if elemLl == "double" {
-                // %g (not %f) to match the oracle: trims trailing zeros
-                // (3.141590 → 3.14159) and shares double.toString()'s format.
-                fmt = fmt + "%g"
-                argStr = argStr + ", double " + argVals[ai].v
-            } else if elemLl == "float" {
-                // printf varargs promote float→double; fpext so the %g matches.
-                let fd = nextTemp(cg)
-                emit(cg, "  " + fd + " = fpext float " + argVals[ai].v + " to double\n")
-                fmt = fmt + "%g"
-                argStr = argStr + ", double " + fd
+            } else if elemLl == "double" || elemLl == "float" {
+                // Format through the same round-trip helper `.toString()` uses, then print
+                // the bytes with %s. A bare %g here was 6 significant digits, so PRINTING a
+                // float silently truncated it even though `.toString()` did not — the two
+                // paths disagreed on the same value.
+                // Only ONE of these may be emitted: calling the f64 helper and then
+                // overwriting the result left a dead `@milo.fmt.f64(double <a float>)`
+                // in the stream, which LLVM rejects even though nothing reads it.
+                let fstr = if elemLl == "float" {
+                    genFloat32ToString(cg, argVals[ai].v)
+                } else {
+                    genFloatToString(cg, argVals[ai].v)
+                }
+                fmt = fmt + "%s"
+                let fp = nextTemp(cg)
+                emit(cg, "  " + fp + " = extractvalue %String " + fstr.v + ", 0\n")
+                argStr = argStr + ", ptr " + fp
             } else if elemLl == "i64" {
                 // u64 prints unsigned (%llu) — else 18446744073709551615 → -1
                 if isUnsigned(argVals[ai].ty) {
@@ -4015,10 +4383,23 @@ pub fn genCall(cg: &mut Cgen, name: &string, args: &Vec<Heap<Expr>>, typeArgs: &
                 emit(cg, "  " + dp + " = extractvalue %String " + ds.v + ", 0\n")
                 argStr = argStr + ", ptr " + dp
             } else {
-                // i8/i16 — printf varargs promote to int
+                // i8/i16 — printf varargs promote to int. SIGN-extend a signed type:
+                // zext turned an i8 of -128 into 128, so every negative narrow integer
+                // printed as its unsigned bit pattern.
+                // Sign-extend only when the surface type is POSITIVELY known signed.
+                // `isUnsigned` reads the first character of the type string, and a value
+                // whose type has been reduced to the LLVM spelling (`i8`) is
+                // indistinguishable from a genuine `i8` — so a `u8` of 255 would sign-
+                // extend to -1. Defaulting to zext keeps unsigned and unknown correct,
+                // and the explicit list fixes the signed case (an i8 of -128 printed 128).
+                let sty = argVals[ai].ty.clone()
+                var ext = "zext"
+                if sty == "i8" || sty == "i16" || sty == "i32" || sty == "i64" {
+                    ext = "sext"
+                }
                 fmt = fmt + "%d"
                 let z = nextTemp(cg)
-                emit(cg, "  " + z + " = zext " + elemLl + " " + argVals[ai].v + " to i32\n")
+                emit(cg, "  " + z + " = " + ext + " " + elemLl + " " + argVals[ai].v + " to i32\n")
                 argStr = argStr + ", i32 " + z
             }
         }
@@ -4466,6 +4847,22 @@ pub fn genExpr(cg: &mut Cgen, e: &Expr, locs: &Vec<Local>, sigs: &Vec<CgFnSig>, 
             if isCmpOp(op) {
                 lHint = ""
             }
+            // A bare integer literal on the left has no width of its own and defaults to
+            // i64, which then dragged the RHS up with it: `0 - b` on an i32 `b` computed
+            // at i64 and printed 2147483648 where wrapping i32 gives INT_MIN. Take the
+            // width from the other operand instead.
+            if lHint.len == 0 {
+                match *l {
+                    Expr.IntLit(nlit, lsp) => {
+                        let rt = peekArgTy(*r, locs)
+                        if isIntLlType(llType(rt)) {
+                            lHint = rt
+                        }
+                    }
+                    _ => {
+                    }
+                }
+            }
             let lv = genExpr(cg, *l, locs, sigs, lHint)
             let rv = genExpr(cg, *r, locs, sigs, lv.ty.clone())
             let lvLl = llType(lv.ty)
@@ -4481,21 +4878,42 @@ pub fn genExpr(cg: &mut Cgen, e: &Expr, locs: &Vec<Local>, sigs: &Vec<CgFnSig>, 
                     return genStringCmp(cg, lv.v, rv.v, op)
                 }
             }
-            // Enum tag compare
+            // Aggregate equality. An ENUM compares its i32 tag; a STRUCT compares every
+            // field. Using the tag path for structs compared field 0 alone and called
+            // distinct values equal — it passed the fixtures only because their values
+            // happened to differ in the first field.
             if (op == "==" || op == "!=") && lvLl.len > 1 && lvLl[0] == 37 {
-                let lt = nextTemp(cg)
-                emit(cg, "  " + lt + " = extractvalue " + lvLl + " " + lv.v + ", 0\n")
-                let rt = nextTemp(cg)
-                emit(cg, "  " + rt + " = extractvalue " + lvLl + " " + rv.v + ", 0\n")
-                let opn = if op == "==" {
-                    "eq"
-                } else {
-                    "ne"
+                let aggName = stripPercent(lvLl.clone())
+                if cg.enums.contains(aggName) {
+                    let lt = nextTemp(cg)
+                    emit(cg, "  " + lt + " = extractvalue " + lvLl + " " + lv.v + ", 0\n")
+                    let rt = nextTemp(cg)
+                    emit(cg, "  " + rt + " = extractvalue " + lvLl + " " + rv.v + ", 0\n")
+                    let opn = if op == "==" {
+                        "eq"
+                    } else {
+                        "ne"
+                    }
+                    let res = nextTemp(cg)
+                    emit(cg, "  " + res + " = icmp " + opn + " i32 " + lt + ", " + rt + "\n")
+                    return Val {
+                        v: res, ty: "bool"
+                    }
                 }
-                let res = nextTemp(cg)
-                emit(cg, "  " + res + " = icmp " + opn + " i32 " + lt + ", " + rt + "\n")
-                return Val {
-                    v: res, ty: "bool"
+                if cg.structs.contains(aggName) {
+                    let eqv = genAggregateEq(cg, lvLl, lv.v, rv.v)
+                    if eqv.len > 0 {
+                        if op == "==" {
+                            return Val {
+                                v: eqv, ty: "bool"
+                            }
+                        }
+                        let neg = nextTemp(cg)
+                        emit(cg, "  " + neg + " = xor i1 " + eqv + ", true\n")
+                        return Val {
+                            v: neg, ty: "bool"
+                        }
+                    }
                 }
             }
             // Operator overloading: struct <op> struct → the Type$..$<method> call
@@ -4599,8 +5017,12 @@ pub fn genExpr(cg: &mut Cgen, e: &Expr, locs: &Vec<Local>, sigs: &Vec<CgFnSig>, 
                 }
                 if isCmpOp(op) {
                     var fp = "oeq"
+                    // `une`, not `one`: IEEE 754 says every comparison with NaN is false
+                    // EXCEPT `!=`, which is true. `one` is the ordered form, which makes
+                    // both `x == x` and `x != x` false for NaN — so `!(x == x)` and
+                    // `x != x` disagree, and NaN stops being detectable.
                     if op == "!=" {
-                        fp = "one"
+                        fp = "une"
                     } 
                     else if op == "<" {
                         fp = "olt"
@@ -4678,6 +5100,63 @@ pub fn genExpr(cg: &mut Cgen, e: &Expr, locs: &Vec<Local>, sigs: &Vec<CgFnSig>, 
             }
             if enumName == "HashMap" && variant == "new" {
                 return genHashMapNew(cg, hintTy)
+            }
+            // Capacity is only a growth hint, so an empty Vec is semantically equivalent —
+            // `push` mallocs on first use. Matches how String.withCapacity is handled.
+            if enumName == "Vec" && variant == "withCapacity" {
+                if args.len == 1 {
+                    let _ = genExpr(cg, *args[0], locs, sigs, "i64")
+                }
+                return genVecNew(cg, hintTy)
+            }
+            // `Vec.filled(n, v)`: allocate n slots and store v into each.
+            if enumName == "Vec" && variant == "filled" && args.len == 2 {
+                ensureVecTy(cg)
+                ensureMalloc(cg)
+                var vecTy = hintTy.clone()
+                if !isVecTy(vecTy) {
+                    vecTy = "Vec<i64>"
+                }
+                let elemTy = unwrapVec(resolveTyStr(cg, vecTy.clone()))
+                let elemLl = llType(elemTy.clone())
+                let n = genExpr(cg, *args[0], locs, sigs, "i64")
+                let fill = genExpr(cg, *args[1], locs, sigs, elemLl.clone())
+                let esz = llTypeBytes(elemLl.clone())
+                let bytes = nextTemp(cg)
+                emit(cg, "  " + bytes + " = mul i64 " + n.v.clone() + ", " + esz.toString() + "\n")
+                let data = nextTemp(cg)
+                emit(cg, "  " + data + " = call ptr @malloc(i64 " + bytes + ")\n")
+                let ictr = nextTemp(cg)
+                emit(cg, "  " + ictr + " = alloca i64\n")
+                emit(cg, "  store i64 0, ptr " + ictr + "\n")
+                let condL = nextLabel(cg, "vfill.cond")
+                let bodyL = nextLabel(cg, "vfill.body")
+                let endL = nextLabel(cg, "vfill.end")
+                emit(cg, "  br label %" + condL.clone() + "\n")
+                emit(cg, condL.clone() + ":\n")
+                let iv = nextTemp(cg)
+                emit(cg, "  " + iv + " = load i64, ptr " + ictr + "\n")
+                let more = nextTemp(cg)
+                emit(cg, "  " + more + " = icmp slt i64 " + iv + ", " + n.v.clone() + "\n")
+                emit(cg, "  br i1 " + more + ", label %" + bodyL.clone() + ", label %" + endL.clone() + "\n")
+                emit(cg, bodyL.clone() + ":\n")
+                let slot = nextTemp(cg)
+                emit(cg, "  " + slot + " = getelementptr " + elemLl.clone() + ", ptr " + data + ", i64 " + iv + "\n")
+                emit(cg, "  store " + elemLl.clone() + " " + fill.v.clone() + ", ptr " + slot + "\n")
+                let inext = nextTemp(cg)
+                emit(cg, "  " + inext + " = add i64 " + iv + ", 1\n")
+                emit(cg, "  store i64 " + inext + ", ptr " + ictr + "\n")
+                emit(cg, "  br label %" + condL.clone() + "\n")
+                emit(cg, endL.clone() + ":\n")
+                let v0 = nextTemp(cg)
+                emit(cg, "  " + v0 + " = insertvalue %Vec undef, ptr " + data + ", 0\n")
+                let v1 = nextTemp(cg)
+                emit(cg, "  " + v1 + " = insertvalue %Vec " + v0 + ", i64 " + n.v.clone() + ", 1\n")
+                let v2 = nextTemp(cg)
+                emit(cg, "  " + v2 + " = insertvalue %Vec " + v1 + ", i64 " + n.v.clone() + ", 2\n")
+                return Val {
+                    v: v2, ty: vecTy
+                }
             }
             if enumName == "String" && variant == "withCapacity" {
                 // capacity is a growth hint; an empty string (cap 0 = literal

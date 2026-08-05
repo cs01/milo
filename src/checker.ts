@@ -6256,6 +6256,19 @@ export class TypeChecker {
             }
           }
         }
+        // Everything the block above does not reach: `Vec<T>`, `[T]`, and generic structs
+        // nested inside either. `inferTypeParamsFromHint` already walks those shapes for
+        // return hints and closure signatures — it was simply never applied to ordinary
+        // arguments, so a generic function over any CONTAINER of T could not infer T at
+        // all (`fn f<T>(v: Vec<T>)` called with a `Vec<i32>` reported "cannot infer type
+        // parameter 'T'", and a turbofish at every call site was the only way through).
+        // Non-destructive: it fills unbound parameters only, so a turbofish and the
+        // direct-match branch above both still win.
+        if (paramTy.typeArgs?.length || paramTy.isArray) {
+          let argResolved = argTypes[i];
+          if (argResolved.tag === "ref") argResolved = argResolved.inner;
+          this.inferTypeParamsFromHint(paramTy, argResolved, genericFn.typeParams, typeMap);
+        }
         // Function-typed param (e.g. f: (&T) => R): infer type params that
         // appear only inside a closure's signature — notably R in arenaWith,
         // which no other argument constrains. Strip matching refs and never

@@ -1,0 +1,29 @@
+// NOT named `*_test.milo` on purpose: these tests are SUPPOSED to fail, and a bare
+// `milo test` sweep of the repo must stay green. tests/miloTestRunner.test.ts runs this
+// file by explicit path, which `milo test <file>` accepts regardless of the name.
+//
+// A trapping test must not take the rest of the file with it. `milo test` compiles once
+// and runs each test in its own process precisely so this file reports 2 pass / 2 fail
+// rather than dying at the first trap.
+from "std/testing" import {
+    assert, assertEq
+}
+
+fn testPassesBeforeTheTrap(): void {
+    assert(true)
+}
+
+fn testFailedAssertion(): void {
+    assertEq(41, 42)
+}
+
+fn testHardTrap(): void {
+    var v: Vec<i32> = Vec.new()
+    v.push(1)
+    let bad = v[99]
+    assert(bad == 0)
+}
+
+fn testStillRunsAfterTheTrap(): void {
+    assert(true)
+}

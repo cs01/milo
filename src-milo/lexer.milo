@@ -318,18 +318,23 @@ pub fn lexFString(lex: &mut Lexer, line: i32, col: i32): Token {
     }
 }
 
+// Accumulate in u64, not i64: a 64-bit constant like 0xFFFFFFFFFFFFFFFF is a legal thing
+// to WRITE (the checker is what decides whether it fits the annotated type, and says so
+// with a range diagnostic). Accumulating in i64 made the lexer itself trap on overflow
+// while converting, so the program died before that diagnostic could be produced — and
+// with checked arithmetic on by default, that is a crash, not a wrong number.
 pub fn hexToDecStr(raw: &string): string {
-    var val: i64 = 0
+    var val: u64 = 0
     for i in 0..raw.len {
-        val = val * 16 + hexVal(raw[i])
+        val = val * 16 + hexVal(raw[i]) as u64
     }
     return val.toString()
 }
 
 pub fn binToDecStr(raw: &string): string {
-    var val: i64 = 0
+    var val: u64 = 0
     for i in 0..raw.len {
-        val = val * 2 + (raw[i] - 48) as i64
+        val = val * 2 + (raw[i] - 48) as u64
     }
     return val.toString()
 }
@@ -390,8 +395,39 @@ pub fn lexNumber(lex: &mut Lexer, line: i32, col: i32): Token {
                 value.push(c)
             }
         }
+        // `1.5e-3` — the exponent belongs to the fractional form too, not only to `1e16`.
+        if peekChar(lex) == 101 || peekChar(lex) == 69 {
+            let sgn = peekCharAt(lex, 1)
+            if isDigit(sgn) || ((sgn == 43 || sgn == 45) && isDigit(peekCharAt(lex, 2))) {
+                value.push(advanceChar(lex))
+                if peekChar(lex) == 43 || peekChar(lex) == 45 {
+                    value.push(advanceChar(lex))
+                }
+                while lex.pos < lex.src.len && isDigit(peekChar(lex)) {
+                    value.push(advanceChar(lex))
+                }
+            }
+        }
         return Token {
             kind: TokKind.Float, value: value, line: line, col: col, leadingTrivia: lt, trailingTrivia: tt
+        }
+    }
+    // Exponent form with no decimal point (`1e16`, `2E+8`): still a float. Without this
+    // the lexer stopped at the digits and handed the parser a stray `e16` identifier.
+    if peekChar(lex) == 101 || peekChar(lex) == 69 {
+        let signCh = peekCharAt(lex, 1)
+        let afterSign = peekCharAt(lex, 2)
+        if isDigit(signCh) || ((signCh == 43 || signCh == 45) && isDigit(afterSign)) {
+            value.push(advanceChar(lex))
+            if peekChar(lex) == 43 || peekChar(lex) == 45 {
+                value.push(advanceChar(lex))
+            }
+            while lex.pos < lex.src.len && isDigit(peekChar(lex)) {
+                value.push(advanceChar(lex))
+            }
+            return Token {
+                kind: TokKind.Float, value: value, line: line, col: col, leadingTrivia: lt, trailingTrivia: tt
+            }
         }
     }
     return Token {

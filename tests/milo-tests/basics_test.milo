@@ -1,0 +1,39 @@
+// Exercised by tests/miloTestRunner.test.ts, which drives `milo test` over this directory.
+// Every test here must PASS; the failure/isolation behaviour lives in isolation_test.milo.
+from "std/testing" import {
+    assertEq, assertNe, assertTrue, assertFalse, assertNear, assertVecEq, assertContains
+}
+
+fn double(x: i32): i32 {
+    return x * 2
+}
+
+fn testGenericEqualityAcrossTypes(): void {
+    assertEq(double(21), 42)
+    assertEq(2.5, 2.5)
+    assertEq(true, true)
+    let word = "hello"
+    assertEq(word, "hello")
+    // &T means the assertion did not consume `word`.
+    assertContains(word, "ell")
+}
+
+fn testInequality(): void {
+    assertNe(1, 2)
+    assertTrue(1 < 2)
+    assertFalse(2 < 1)
+}
+
+fn testFloatsUseTolerance(): void {
+    assertNear(0.1 + 0.2, 0.3, 0.000001)
+}
+
+fn testVectorEquality(): void {
+    var got: Vec<i32> = Vec.new()
+    got.push(1)
+    got.push(2)
+    var want: Vec<i32> = Vec.new()
+    want.push(1)
+    want.push(2)
+    assertVecEq(got, want)
+}

@@ -9,6 +9,12 @@ from "std/fs" import {
 from "std/path" import {
     Path
 }
+from "std/env" import {
+    Env
+}
+from "std/json" import {
+    Json
+}
 from "src-milo/tokens.milo" import {
     Token
 }
@@ -34,9 +40,15 @@ pub struct ResolverState {
     typeAliases: Vec<TypeAlias>,
     stdlibDir: string,
     targetOs: string,
+    // The entry project's milo.json `deps` map (package name -> spec, e.g.
+    // "github.com/milo-language/milo-gl@v0.2.0"), read ONCE from the entry file's
+    // directory upward — mirrors src/resolver.ts, which resolves every import in the
+    // whole graph (including a package's own internal imports) against the root
+    // project's manifest, not a per-file one. There is no diamond-dependency story.
+    deps: HashMap<string, string>,
 }
 
-pub fn newResolver(stdlibDir: string, targetOs: string): ResolverState {
+pub fn newResolver(stdlibDir: string, targetOs: string, deps: HashMap<string, string>): ResolverState {
     return ResolverState {
         visited: HashMap.new(),
         structs: Vec.new(),
@@ -48,12 +60,287 @@ pub fn newResolver(stdlibDir: string, targetOs: string): ResolverState {
         typeAliases: Vec.new(),
         stdlibDir: stdlibDir,
         targetOs: targetOs,
+        deps: deps,
     }
 }
 
+// Collapse "." and ".." segments so two different spellings of a path that name the
+// SAME file always produce the SAME string. Without this, e.g. reaching a file via
+// "a/b/./c.milo" (one import chain) and "a/b/c.milo" (another) leaves the `visited`
+// set unable to tell they're the same file — and impls, which have no by-name dedup
+// (unlike structs/enums/fns), get merged twice: LLVM then rejects the duplicate
+// method definition. See AGENTS.md lane notes on flybyGeometry.
+pub fn normalizePath(p: &string): string {
+    let absolute = p.len > 0 && p[0] == '/'
+    var parts: Vec<string> = Vec.new()
+    var start: i64 = 0
+    var i: i64 = 0
+    while i <= p.len {
+        if i == p.len || p[i] == '/' {
+            if i > start {
+                let seg = p.substr(start, i)
+                if seg == "." {
+                    // drop: refers to the current segment
+                } else if seg == ".." {
+                    if parts.len > 0 && parts[parts.len - 1] != ".." {
+                        let _ = parts.pop()
+                    } else if !absolute {
+                        parts.push(seg)
+                    }
+                    // an absolute path can't climb above root; drop silently, same as
+                    // node's path.resolve/normalize.
+                } else {
+                    parts.push(seg)
+                }
+            }
+            start = i + 1
+        }
+        i = i + 1
+    }
+    var result = ""
+    for j in 0..parts.len {
+        if j > 0 {
+            result = result + "/"
+        }
+        result = result + parts[j]
+    }
+    if absolute {
+        result = "/" + result
+    }
+    if result.len == 0 {
+        if absolute {
+            result = "/"
+        } else {
+            result = "."
+        }
+    }
+    return result
+}
+
+// A dependency source spec, parsed. Mirrors src/pkg.ts's `Source` (git variant only —
+// this resolver never fetches, so giturl/tarball specs are out of scope; a bare
+// git-host-shorthand or local-path spec is all `milo.json` deps use in practice).
+pub struct PkgUrl {
+    host: string,
+    path: string,
+    version: string,
+}
+
+// Parse "github.com/user/repo@v1.0" or a local "./path[@version]" into host/path/version.
+// Mirrors src/resolver.ts:parsePkgUrl exactly (NOT src/pkg.ts:parseSource, which is
+// richer but is the installer's own parser and deliberately not what the resolver
+// reads by). None means the spec has no '/' and isn't a local path — malformed.
+pub fn parsePkgUrl(url: &string): Option<PkgUrl> {
+    var version = "main"
+    var fullPath = url.clone()
+    match url.indexOf("@") {
+        Option.Some(atIdx) => {
+            version = url.substr(atIdx + 1, url.len)
+            fullPath = url.substr(0, atIdx)
+        }
+        Option.None => {
+        }
+    }
+    if fullPath.len > 0 && (fullPath[0] == '/' || fullPath[0] == '.') {
+        let safe = fullPath.replace("/", "_")
+        return Option.Some(PkgUrl {
+            host: "local", path: safe, version: version
+        }
+        )
+    }
+    match fullPath.indexOf("/") {
+        Option.Some(slashIdx) => {
+            return Option.Some(PkgUrl {
+                host: fullPath.substr(0, slashIdx), path: fullPath.substr(slashIdx + 1, fullPath.len), version: version
+            }
+            )
+        }
+        Option.None => {
+            return Option.None
+        }
+    }
+}
+
+// Root of the extracted-package cache: honors XDG_CACHE_HOME, else ~/.milo/cache.
+// MUST stay byte-for-byte in step with src/pkg.ts:cacheRoot — that's what actually
+// populated the cache this reads from.
+pub fn cacheRoot(): string {
+    match Env.get("XDG_CACHE_HOME") {
+        Option.Some(xdg) => {
+            if xdg.len > 0 {
+                return Path.join(xdg, "milo")
+            }
+        }
+        Option.None => {
+        }
+    }
+    let home = Env.getOr("HOME", "")
+    return Path.join(Path.join(home, ".milo"), "cache")
+}
+
+// Find the nearest milo.json walking up from `startDir` (20-level cap, matching
+// src/resolver.ts:findManifest) and return its `deps` map. Empty map — never a hard
+// error — when no manifest exists or it declares no deps: a bare import name that
+// doesn't match any key here just falls through to local/stdlib resolution below,
+// exactly as the TS oracle does.
+pub fn findManifestDeps(startDir: string): HashMap<string, string> {
+    var deps: HashMap<string, string> = HashMap.new()
+    var dir = startDir
+    var i: i64 = 0
+    while i < 20 {
+        let manifestPath = Path.join(dir, "milo.json")
+        if pathExists(manifestPath) {
+            match readFile(manifestPath) {
+                Result.Ok(text) => {
+                    match Json.parseJsonc(text) {
+                        Result.Ok(doc) => {
+                            match doc.get("deps") {
+                                Option.Some(depsNode) => {
+                                    let keys = depsNode.keys()
+                                    for ki in 0..keys.len {
+                                        match depsNode.str(keys[ki]) {
+                                            Option.Some(v) => {
+                                                deps.insert(keys[ki].clone(), v)
+                                            }
+                                            Option.None => {
+                                            }
+                                        }
+                                    }
+                                }
+                                Option.None => {
+                                }
+                            }
+                        }
+                        Result.Err(_) => {
+                        }
+                    }
+                }
+                Result.Err(_) => {
+                }
+            }
+            return deps
+        }
+        let parent = Path.dirname(dir)
+        if parent == dir {
+            break
+        }
+        dir = parent
+        i = i + 1
+    }
+    return deps
+}
+
+// Resolve one candidate inside a package's cache directory ("<cacheBase>/<rel>"),
+// returning it only if the file actually exists — never a plausible-looking path
+// that happens not to be there.
+fn pkgCandidate(cacheBase: &string, rel: string): Option<string> {
+    let full = Path.join(cacheBase, rel)
+    if pathExists(full) {
+        return Option.Some(full)
+    }
+    return Option.None
+}
+
+// Resolve a bare `from "pkgName[/sub]" import {...}` against the entry project's
+// milo.json deps, reading only what's already in the local package cache — this
+// resolver never fetches. Mirrors src/resolver.ts:resolvePath's package branch,
+// with ONE deliberate divergence: the TS oracle falls through to local/stdlib
+// resolution when the package's manifest entry doesn't resolve to a file on disk;
+// this fails closed instead; naming the package and what was expected, rather than
+// silently trying a local path that happens to share the name (see AGENTS.md — an
+// import resolver that can't find a package must error naming it, never guess).
+fn resolvePkgImport(rs: &ResolverState, importPath: &string, pkgName: &string, spec: string): string {
+    var parsed = PkgUrl {
+        host: "", path: "", version: ""
+    }
+    match parsePkgUrl(spec) {
+        Option.Some(p) => {
+            parsed = p
+        }
+        Option.None => {
+            eprint("error: milo.json dependency '" + pkgName.clone() + "' has a malformed spec '" + spec + "' (expected 'host/org/repo[@ref]' or a local './path')")
+            exit(1)
+            // Unreachable (exit terminates the process) — but the checker's move
+            // analysis only excludes a match arm from the post-match merge when it
+            // sees an explicit control-flow exit, so this keeps `spec`'s move here
+            // from leaking into the arms below as a false "already moved".
+            return ""
+        }
+    }
+    let cacheBase = Path.join(Path.join(Path.join(cacheRoot(), parsed.host), parsed.path), parsed.version)
+
+    let firstSlash = importPath.indexOf("/")
+    var subPath = ""
+    match firstSlash {
+        Option.Some(idx) => {
+            subPath = importPath.substr(idx + 1, importPath.len)
+        }
+        Option.None => {
+        }
+    }
+
+    if subPath.len > 0 {
+        match pkgCandidate(cacheBase, subPath + ".milo") {
+            Option.Some(p) => {
+                return normalizePath(p)
+            }
+            Option.None => {
+            }
+        }
+        match pkgCandidate(cacheBase, subPath + "." + rs.targetOs + ".milo") {
+            Option.Some(p) => {
+                return normalizePath(p)
+            }
+            Option.None => {
+            }
+        }
+        eprint("error: package '" + pkgName.clone() + "' (" + spec + ") has no module '" + subPath + "' — expected " + Path.join(cacheBase, subPath + ".milo") + " in the local package cache")
+        exit(1)
+        return ""
+    }
+
+    match pkgCandidate(cacheBase, "lib.milo") {
+        Option.Some(p) => {
+            return normalizePath(p)
+        }
+        Option.None => {
+        }
+    }
+    match pkgCandidate(cacheBase, pkgName.clone() + ".milo") {
+        Option.Some(p) => {
+            return normalizePath(p)
+        }
+        Option.None => {
+        }
+    }
+    eprint("error: package '" + pkgName.clone() + "' (" + spec + ") not found in the local package cache — expected " + Path.join(cacheBase, "lib.milo") + " (run `milo install` to fetch it)")
+    exit(1)
+    return ""
+}
+
 // Resolve an import path to an absolute file path.
-// Search order: relative to source dir, then stdlib dir, then platform-specific.
+// Search order: a package named in milo.json's deps (fail-closed if its manifest
+// entry doesn't resolve to a file already in the cache — see resolvePkgImport),
+// then relative to source dir, then stdlib dir, then platform-specific.
 pub fn resolvePath(rs: &ResolverState, dir: &string, importPath: &string): string {
+    if !rs.deps.isEmpty() {
+        var pkgName = importPath.clone()
+        match importPath.indexOf("/") {
+            Option.Some(idx) => {
+                pkgName = importPath.substr(0, idx)
+            }
+            Option.None => {
+            }
+        }
+        match rs.deps.get(pkgName) {
+            Option.Some(spec) => {
+                return resolvePkgImport(rs, importPath, pkgName, spec)
+            }
+            Option.None => {
+            }
+        }
+    }
+
     var withExt = importPath.clone()
     if !withExt.endsWith(".milo") {
         withExt = withExt + ".milo"
@@ -62,23 +349,34 @@ pub fn resolvePath(rs: &ResolverState, dir: &string, importPath: &string): strin
     // Try relative to current file's directory
     let absPath = Path.join(dir, withExt)
     if pathExists(absPath) {
-        return absPath
+        return normalizePath(absPath)
+    }
+
+    let base = withExt[0..withExt.len - 5] // strip .milo
+
+    // Try a platform-specific sibling of the importing file itself (e.g. a package
+    // importing its own "./link" finds "link.darwin.milo" next to it). Mirrors
+    // src/resolver.ts's separate `localPlatform` check — a package binding a system
+    // library needs this as much as std does, and without it the filename-suffix
+    // platform mechanism only worked for stdlib imports, never a package's own.
+    let localPlatform = Path.join(dir, base + "." + rs.targetOs + ".milo")
+    if pathExists(localPlatform) {
+        return normalizePath(localPlatform)
     }
 
     // Try platform-specific variant (e.g. platform.darwin.milo)
-    let base = withExt[0..withExt.len - 5] // strip .milo
     let platformPath = Path.join(rs.stdlibDir, base + "." + rs.targetOs + ".milo")
     if pathExists(platformPath) {
-        return platformPath
+        return normalizePath(platformPath)
     }
 
     // Try stdlib path
     let stdPath = Path.join(rs.stdlibDir, withExt)
     if pathExists(stdPath) {
-        return stdPath
+        return normalizePath(stdPath)
     }
 
-    return absPath
+    return normalizePath(absPath)
 }
 
 // Parse a source file and return its Program AST.
@@ -326,7 +624,11 @@ pub fn dedupTraits(arr: Vec<TraitDecl>): Vec<TraitDecl> {
 
 // Main entry point: resolve all imports and produce a merged Program.
 pub fn resolveImports(program: Program, sourceDir: string, stdlibDir: string, targetOs: string): Program {
-    var rs = newResolver(stdlibDir, targetOs)
+    // Read once, from the entry file's directory upward — every import in the whole
+    // graph (including a package's own internal imports) resolves against the root
+    // project's manifest, matching src/resolver.ts (see ResolverState.deps).
+    let deps = findManifestDeps(sourceDir.clone())
+    var rs = newResolver(stdlibDir, targetOs, deps)
 
     // Inject prelude before user code
     let preludePath = Path.join(rs.stdlibDir, "std/prelude.milo")

@@ -155,6 +155,20 @@ pub struct Checker {
     // exist yet at the point its plan is computed — mirrors the TS oracle's
     // jsonCapableStructs pre-pass.
     jsonCapableStructs: HashMap<string, bool>,
+    // Borrow-liveness tracking for views (&[T]/&string) — see checker/borrow.milo.
+    // Name-keyed rather than living on VarInfo: VarInfo is looked up BY VALUE
+    // (lookup returns a copy; mutation goes through setVar*-and-reinsert), so a
+    // side table here avoids threading two more fields through every VarInfo
+    // literal in the file. Value is the list of field-paths borrowed off that
+    // root; an empty inner path means "whole variable, or an imprecise (index)
+    // borrow" — both collapse to the same "conflicts with everything" answer.
+    borrowedPaths: HashMap<string, Vec<Vec<string>>>,
+    // Index-aligned with `scopes`. A freeze taken to compute a let/var RHS is
+    // released immediately UNLESS the binding itself is a view type, in which
+    // case it transfers to the new binding's lifetime — release deferred to
+    // when the scope holding that binding pops. Mirrors the oracle's
+    // VarInfo.freezes, keyed by scope depth instead of by binding identity.
+    scopeFreezes: Vec<Vec<string>>,
 }
 
 pub fn newChecker(): Checker {
@@ -184,6 +198,8 @@ pub fn newChecker(): Checker {
         expectedType: Option.None,
         pendingClosureRet: Option.None,
         jsonCapableStructs: HashMap.new(),
+        borrowedPaths: HashMap.new(),
+        scopeFreezes: Vec.new(),
     }
 }
 
@@ -223,10 +239,27 @@ pub fn warn(ck: &mut Checker, msg: string, span: Option<Span>) {
 
 pub fn pushScope(ck: &mut Checker) {
     ck.scopes.push(HashMap.new())
+    ck.scopeFreezes.push(Vec.new())
 }
 
 pub fn popScope(ck: &mut Checker) {
     let _ = ck.scopes.pop()
+    // Release any freeze a view binding declared in this scope was holding —
+    // the analog of the oracle's `for (const src of vi.freezes) unfreeze(src)`
+    // at scope pop, keyed by name here instead of by VarInfo identity.
+    match ck.scopeFreezes.pop() {
+        Option.Some(names) => {
+            // Insert-empty rather than HashMap.remove: this checker (compiled
+            // by the oracle, not itself) has no other caller of
+            // HashMap<_, Vec<_>>.remove, and it miscompiles the value's drop
+            // glue into a bogus void alloca — see borrow.milo's unfreezeName.
+            for i in 0..names.len {
+                ck.borrowedPaths.insert(names[i].clone(), Vec.new())
+            }
+        }
+        Option.None => {
+        }
+    }
 }
 
 pub fn declare(ck: &mut Checker, name: string, info: VarInfo) {
@@ -495,6 +528,58 @@ pub fn isCopyCk(ck: &Checker, t: &TypeKind): bool {
                     return false
                 }
             }
+            return true
+        }
+        _ => {
+            return false
+        }
+    }
+}
+
+// Whether `t` stores a reference somewhere inside a collection/box (Vec<&T>,
+// [&T;N], Heap<&T>, HashMap<_,&T>, or an enum payload like Option<&T>) — a
+// reference stored this way outlives whatever freeze the call site took for
+// it, since nothing marks the CONTAINER as borrowed the way a bare `&T`
+// binding is. A DIRECT `&T` at the top level is a different, narrower rule
+// (checked separately at the call site — "references cannot be stored in
+// structs" vs this one's "...in a collection").
+pub fn nestedRef(ck: &Checker, t: &TypeKind): bool {
+    match t {
+        TypeKind.TVec(inner) => {
+            return isRefTy(*inner) || nestedRef(ck, *inner)
+        }
+        TypeKind.TArray(inner, size) => {
+            return isRefTy(*inner) || nestedRef(ck, *inner)
+        }
+        TypeKind.THeap(inner) => {
+            return isRefTy(*inner) || nestedRef(ck, *inner)
+        }
+        TypeKind.THashMap(k, v) => {
+            return isRefTy(*k) || isRefTy(*v) || nestedRef(ck, *k) || nestedRef(ck, *v)
+        }
+        TypeKind.TEnum(name) => {
+            if !ck.enums.contains(name) {
+                return false
+            }
+            let info = ck.enums.get(name)!
+            for vn, vi in info.variants {
+                for i in 0..vi.fields.len {
+                    if isRefTy(vi.fields[i]) || nestedRef(ck, vi.fields[i]) {
+                        return true
+                    }
+                }
+            }
+            return false
+        }
+        _ => {
+            return false
+        }
+    }
+}
+
+fn isRefTy(t: &TypeKind): bool {
+    match t {
+        TypeKind.TRef(inner, mutable) => {
             return true
         }
         _ => {

@@ -22,6 +22,10 @@ from "src-milo/checker/traits.milo" import {
 from "src-milo/checker/stmt.milo" import {
     checkStmt, checkMatchExpr
 }
+from "src-milo/checker/borrow.milo" import {
+    rootIdentName, errorIfFrozenRoot, freezePlace, freezeViewMethodSource,
+    borrowArgOf, checkCallSiteExclusivity, BorrowArg, borrowDuringCallback, unfreezeName,
+}
 
 // -- Move tracking --
 
@@ -1151,6 +1155,52 @@ pub fn checkCall(ck: &mut Checker, func: &string, args: &Vec<Heap<Expr>>, typeAr
                 // auto-borrow: don't type-error, just check inner matches
                 if !ifaceOk && !arrOk && !refPassThrough && !typeEq(*inner, argType) && !typeEq(argType, tyUnknown()) && !intCoercible(*inner, argType, *args[i]) {
                     error(ck, "argument " + (i + 1).toString() + " of '" + func.clone() + "': expected " + ptName + ", got " + typeName(argType), cloneSpan(span))
+                }
+                // Auto-borrowing a `&mut` param mutates the source through the
+                // call — same hazard a mutating method receiver already rejects.
+                // A `let` binding claims immutability; feeding it to `&mut`
+                // would let the callee write through it anyway. Also reject
+                // passing a var that's frozen by a live slice/loop borrow: the
+                // callee may realloc/free it out from under that borrow.
+                if mutable {
+                    match rootIdentName(*args[i]) {
+                        Option.Some(rname) => {
+                            match lookup(ck, rname) {
+                                Option.Some(rinfo) => {
+                                    var isRefTy = false
+                                    match rinfo.ty.clone() {
+                                        TypeKind.TRef(rinner, rmut) => {
+                                            isRefTy = true
+                                        }
+                                        _ => {
+                                        }
+                                    }
+                                    if !rinfo.mutable && !isRefTy {
+                                        error(ck, "cannot pass immutable '" + rname.clone() + "' as a '&mut' argument", cloneSpan(span))
+                                    }
+                                }
+                                Option.None => {
+                                }
+                            }
+                        }
+                        Option.None => {
+                        }
+                    }
+                    // An argument that is ALREADY a reference (a slice like
+                    // `v[0..2]`) is not competing with the freeze, it IS one —
+                    // checkCallSiteExclusivity below is what decides whether two
+                    // of them may coexist.
+                    var argIsRef = false
+                    match argType.clone() {
+                        TypeKind.TRef(ainner, amut) => {
+                            argIsRef = true
+                        }
+                        _ => {
+                        }
+                    }
+                    if !argIsRef {
+                        errorIfFrozenRoot(ck, *args[i], "pass", span)
+                    }
                 }
             }
             _ => {

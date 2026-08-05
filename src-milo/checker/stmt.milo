@@ -11,7 +11,7 @@ from "src-milo/checker/types.milo" import {
 from "src-milo/checker/state.milo" import {
     Checker, VarInfo, FnSig, FnParam, StructInfo, EnumInfo, VariantInfo,
     Diagnostic, error, errorHint, warn, pushScope, popScope, declare, lookup, setVarMoved, setVarRead, hasErrors,
-    normalizeEnumNames, stmtTerminates, snapshotMoves, restoreMoves, orMoves,
+    normalizeEnumNames, stmtTerminates, snapshotMoves, restoreMoves, orMoves, nestedRef,
 }
 from "src-milo/checker/expr.milo" import {
     intCoercible, floatLitCoercible, arrayIntCoercible, arrayToVecCoercible, checkExpr, tryMove, isRootMutable, deref
@@ -21,6 +21,12 @@ from "src-milo/checker/traits.milo" import {
 }
 from "src-milo/checker/mono.milo" import {
     registerGenericFn, registerGenericStruct, registerGenericEnum, monomorphizeFn, monomorphizeStruct, monomorphizeEnum
+}
+from "src-milo/checker/borrow.milo" import {
+    accessPath, rootIdentName, freezeName, unfreezeName, isFrozen, frozenAgainst,
+    freezePlace, freezeViewMethodSource, errorIfFrozenRoot, describePlace,
+    assignTargetPath, errorIfAssignFrozen, borrowDuringCallback, BorrowArg,
+    borrowArgOf, checkCallSiteExclusivity,
 }
 
 // -- Statement checker --
@@ -94,6 +100,13 @@ pub fn checkLetDecl(ck: &mut Checker, name: &string, typeAnno: &Option<MiloType>
         }
         Option.None => {
         }
+    }
+    // A reference stored inside a local collection (Vec<&T> etc) outlives
+    // whatever freeze the call site took for it — a bare `&T` local is fine
+    // (second-class, can't escape the function), but nothing marks a
+    // CONTAINER as borrowed the way a plain reference binding is.
+    if hasHint && nestedRef(ck, hint) {
+        error(ck, "'" + name.clone() + "': references cannot be stored in a collection", cloneSpan(span))
     }
     if hasHint {
         ck.expectedType = Option.Some(hint.clone())
@@ -992,9 +1005,29 @@ pub fn registerFunction(ck: &mut Checker, func: &Function) {
 pub fn registerStruct(ck: &mut Checker, decl: &StructDecl) {
     var fields: Vec<CkStructField> = Vec.new()
     for field in decl.fields {
+        let fty = resolveAstType(ck, field.ty)
+        // References are second-class: they can only live in a param or a local
+        // binding, never in storage that outlives the call that took the borrow.
+        // A struct field is exactly that kind of storage, direct or nested
+        // (Vec<&T> etc — see nestedRef). Checked against a clone: matching `fty`
+        // itself would move its payload out of the TRef arm, leaving it unusable
+        // below for the field record and the nestedRef fallback.
+        var isDirectRef = false
+        match fty.clone() {
+            TypeKind.TRef(inner, mutable) => {
+                isDirectRef = true
+            }
+            _ => {
+            }
+        }
+        if isDirectRef {
+            error(ck, "struct '" + decl.name.clone() + "' field '" + field.name.clone() + "': references cannot be stored in structs", Option.None)
+        } else if nestedRef(ck, fty) {
+            error(ck, "struct '" + decl.name.clone() + "' field '" + field.name.clone() + "': references cannot be stored in a collection", Option.None)
+        }
         fields.push(CkStructField {
             name: field.name.clone(),
-            ty: resolveAstType(ck, field.ty),
+            ty: fty,
         }
         )
     }

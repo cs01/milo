@@ -52,6 +52,116 @@ pub fn structLitConst(cg: &Cgen, gllTy: &string, value: &Expr): string {
     }
 }
 
+// LLVM constant element list for a global's fixed-array/Vec initializer, when it
+// const-folds (`[a, b, …]` or `[v; n]` of scalar/struct-const elements). Returns an
+// empty Vec when it doesn't (caller falls back to the runtime initializer).
+//
+// `value` MUST be matched here, as the parameter — not by having the caller match
+// `*prog.globals[gi].value` directly. Matching a dereferenced Heap<Expr> field MOVES
+// the Expr out of its box; the global's slot is left holding the moved-out (zeroed)
+// representation, which decodes as enum tag 0 — Expr.IntLit(0) — on every later read
+// of that same global. That silently turned `var gTable: Vec<i64> = []` into an
+// `i64` initializer by the time the runtime-init pass got to it. Matching a `&Expr`
+// function parameter instead only borrows, because the caller passes the bare
+// dereferenced value to a ref param — an auto-borrow, not a move (see genArrayLit's
+// call site for the same idiom, and structLitConst above for the same match-on-ref
+// shape already used safely).
+pub fn constArrayElemsOf(cg: &mut Cgen, value: &Expr, elemLl: &string, structElem: bool): Vec<string> {
+    var elems: Vec<string> = Vec.new()
+    var elemOk = true
+    match value {
+        Expr.ArrayLit(elements, sp) => {
+            for ei in 0..elements.len {
+                if structElem {
+                    let sc = structLitConst(cg, elemLl, *elements[ei])
+                    if sc.len == 0 {
+                        elemOk = false
+                    } else {
+                        elems.push(elemLl.clone() + " " + sc)
+                    }
+                } else {
+                    elems.push(elemLl.clone() + " " + constInitOf(*elements[ei], elemLl))
+                }
+            }
+        }
+        Expr.ArrayRepeat(val, count, sp) => {
+            var one = ""
+            if structElem {
+                one = structLitConst(cg, elemLl, *val)
+                if one.len == 0 {
+                    elemOk = false
+                }
+            } else {
+                one = constInitOf(*val, elemLl)
+            }
+            for ci in 0..count {
+                elems.push(elemLl.clone() + " " + one.clone())
+            }
+        }
+        _ => {
+        }
+    }
+    if !elemOk {
+        return Vec.new()
+    }
+    return elems
+}
+
+// LLVM aggregate constant `%Struct { … }` for a global whose initializer is a
+// struct literal with every field const (scalar, or an empty container). Returns ""
+// when it isn't (caller falls back to zeroinit + runtime init).
+//
+// Same move hazard as constArrayElemsOf above: `value` must be matched as this
+// function's `&Expr` parameter, never by the caller matching a dereferenced
+// Heap<Expr> global field directly.
+pub fn structGlobalConst(value: &Expr, sfields: &Vec<FieldInfo>): string {
+    match value {
+        Expr.StructLit(lname, litFields, sp) => {
+            var parts: Vec<string> = Vec.new()
+            var allConst = true
+            // emit in declared field order, matching the literal by name
+            for fi in 0..sfields.len {
+                let fll = llType(sfields[fi].ty)
+                let scalar = fll == "i1" || fll == "i8" || fll == "i16" || fll == "i32" || fll == "i64" || fll == "double" || fll == "float"
+                var fval = "0"
+                var fieldConst = scalar
+                for lf in 0..litFields.len {
+                    if litFields[lf].name == sfields[fi].name {
+                        if scalar {
+                            fval = constInitOf(*litFields[lf].value, fll)
+                        } else if isEmptyAggInit(*litFields[lf].value) {
+                            // An EMPTY container is still a constant: `Vec.new()`
+                            // is all-zero bytes. Bailing on it zero-initialized the
+                            // WHOLE struct, so a `Vec` field silently discarded
+                            // every scalar field's initializer beside it.
+                            fval = "zeroinitializer"
+                            fieldConst = true
+                        }
+                    }
+                }
+                if !fieldConst {
+                    allConst = false
+                }
+                parts.push(fll + " " + fval)
+            }
+            if !allConst {
+                return ""
+            }
+            var body = "{ "
+            for pi in 0..parts.len {
+                if pi > 0 {
+                    body = body + ", "
+                }
+                body = body + parts[pi].clone()
+            }
+            return body + " }"
+        }
+        _ => {
+            return ""
+        }
+    }
+}
+
 // Can this initializer be spelled as an LLVM constant? Anything else needs the runtime
 // initializer. Deliberately conservative: a shape not listed here gets runtime init, which
 // is always correct, where guessing "constant" would silently emit a zero.
@@ -620,6 +730,16 @@ pub fn genFn(cg: &mut Cgen, f: &Function, sigs: &Vec<CgFnSig>) {
             }
             cg.declaredFree = true
         }
+        // the `flush()` builtin (expr.milo) also emits `declare @fflush`; share one
+        // dedup flag so std/os's `extern fn fflush` and the builtin never double-declare
+        // it — LLVM rejects a redefinition, which broke every program importing std/os
+        // AND calling the bare `flush()` builtin.
+        if f.name == "fflush" {
+            if cg.declaredFflush {
+                return
+            }
+            cg.declaredFflush = true
+        }
         // astTypeStr, not .name: a `*u8` return must stay a pointer (`.name` alone
         // drops pointer-ness, declaring e.g. strerror as returning i8 → truncated
         // pointer → strlen on garbage in the self-compiled build).
@@ -964,43 +1084,7 @@ pub fn genProgram(prog: Program, sourceDir: string): string {
             let scalarElem = elemLl == "i1" || elemLl == "i8" || elemLl == "i16" || elemLl == "i32" || elemLl == "i64" || elemLl == "double" || elemLl == "float"
             let structElem = elemLl.len > 0 && elemLl[0] == 37 && cg.structs.contains(stripPercent(elemLl))
             if scalarElem || structElem {
-                var elems: Vec<string> = Vec.new()
-                var elemOk = true
-                match *prog.globals[gi].value {
-                    Expr.ArrayLit(elements, sp) => {
-                        for ei in 0..elements.len {
-                            if structElem {
-                                let sc = structLitConst(cg, elemLl, *elements[ei])
-                                if sc.len == 0 {
-                                    elemOk = false
-                                } else {
-                                    elems.push(elemLl + " " + sc)
-                                }
-                            } else {
-                                elems.push(elemLl + " " + constInitOf(*elements[ei], elemLl))
-                            }
-                        }
-                    }
-                    Expr.ArrayRepeat(val, count, sp) => {
-                        var one = ""
-                        if structElem {
-                            one = structLitConst(cg, elemLl, *val)
-                            if one.len == 0 {
-                                elemOk = false
-                            }
-                        } else {
-                            one = constInitOf(*val, elemLl)
-                        }
-                        for ci in 0..count {
-                            elems.push(elemLl + " " + one.clone())
-                        }
-                    }
-                    _ => {
-                    }
-                }
-                if !elemOk {
-                    elems = Vec.new()
-                }
+                let elems = constArrayElemsOf(cg, *prog.globals[gi].value, elemLl, structElem)
                 if elems.len > 0 {
                     var dataC = "["
                     for ei in 0..elems.len {
@@ -1024,58 +1108,10 @@ pub fn genProgram(prog: Program, sourceDir: string): string {
         if !arrayHandled && isStructG {
             let sname = stripPercent(gllTy)
             let sfields = cg.structs.get(sname)!
-            match *prog.globals[gi].value {
-                Expr.StructLit(lname, litFields, sp) => {
-                    var parts: Vec<string> = Vec.new()
-                    var allConst = true
-                    // emit in declared field order, matching the literal by name
-                    for fi in 0..sfields.len {
-                        let fll = llType(sfields[fi].ty)
-                        let scalar = fll == "i1" || fll == "i8" || fll == "i16" || fll == "i32" || fll == "i64" || fll == "double" || fll == "float"
-                        var fval = "0"
-                        var fieldConst = scalar
-                        for lf in 0..litFields.len {
-                            if litFields[lf].name == sfields[fi].name {
-                                if scalar {
-                                    fval = constInitOf(*litFields[lf].value, fll)
-                                } else {
-                                    // An EMPTY container is still a constant: `Vec.new()`
-                                    // is all-zero bytes. Bailing on it zero-initialized the
-                                    // WHOLE struct, so a `Vec` field silently discarded
-                                    // every scalar field's initializer beside it.
-                                    match *litFields[lf].value {
-                                        Expr.EnumLit(en, vn, eargs, esp) => {
-                                            if vn == "new" && eargs.len == 0 {
-                                                fval = "zeroinitializer"
-                                                fieldConst = true
-                                            }
-                                        }
-                                        _ => {
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        if !fieldConst {
-                            allConst = false
-                        }
-                        parts.push(fll + " " + fval)
-                    }
-                    if allConst {
-                        var body = "{ "
-                        for pi in 0..parts.len {
-                            if pi > 0 {
-                                body = body + ", "
-                            }
-                            body = body + parts[pi].clone()
-                        }
-                        body = body + " }"
-                        emitG(cg, "@" + gname.clone() + " = global " + gllTy + " " + body + "\n")
-                        structHandled = true
-                    }
-                }
-                _ => {
-                }
+            let body = structGlobalConst(*prog.globals[gi].value, sfields)
+            if body.len > 0 {
+                emitG(cg, "@" + gname.clone() + " = global " + gllTy + " " + body + "\n")
+                structHandled = true
             }
         }
         if !arrayHandled && !structHandled {

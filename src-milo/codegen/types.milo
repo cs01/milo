@@ -231,6 +231,13 @@ pub fn ensureMemcmp(cg: &mut Cgen) {
     }
 }
 
+pub fn ensurePutchar(cg: &mut Cgen) {
+    if !cg.declaredPutchar {
+        emitG(cg, "declare i32 @putchar(i32)\n")
+        cg.declaredPutchar = true
+    }
+}
+
 // `declare @free`, shared with any explicit `extern fn free` via declaredFree.
 pub fn ensureFree(cg: &mut Cgen) {
     if !cg.declaredFree {
@@ -862,13 +869,20 @@ pub fn resolveTyStr(cg: &Cgen, s: &string): string {
     }
     // Exact mangling first: "Result<i32,string>" → "Result_i32_string" is the
     // checker's mangling scheme, so a registered decl matches directly even
-    // when several instantiations exist.
+    // when several instantiations exist. A pointer type ARG mangles to "ptr_" +
+    // inner (mono.milo's mangleTypeName), not a literal '*' — a type arg like
+    // `Result<*u8,string>` naively kept its star, producing "Result_*u8_string",
+    // which never matched the checker's registered "Result_ptr_u8_string": the
+    // `define` line for any fn returning such a type fell through to the raw
+    // unmangled `%Result<*u8,string>`, which isn't valid LLVM syntax.
     var mangled = ""
     for i in 0..s.len {
         let c = s[i]
         if c == 60 || c == 44 {
             mangled = mangled + "_"
         } else if c == 62 || c == 32 {
+        } else if c == 42 {
+            mangled = mangled + "ptr_"
         } else {
             mangled.push(c)
         }

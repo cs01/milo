@@ -1,6 +1,6 @@
 // Checker state — scopes, variable info, diagnostic tracking, type tables
 from "src-milo/ast.milo" import {
-    Span, Function, StructDecl, EnumDecl, Program, Stmt, ImplDecl
+    Span, Function, StructDecl, EnumDecl, Program, Stmt, ImplDecl, MiloType
 }
 from "src-milo/checker/types.milo" import {
     TypeKind, typeEq, typeName, tyVoid, isCopy
@@ -122,7 +122,13 @@ pub struct Checker {
     traits: HashMap<string, TraitInfo>,
     traitImpls: HashMap<string, Vec<ImplInfo>>,
     inherentImpls: HashMap<string, ImplInfo>,
-    typeAliases: HashMap<string, TypeKind>,
+    // Raw (unresolved) alias base — resolveAstType expands it LAZILY, at each use
+    // site, the same way it resolves any other type annotation. Pre-resolving here
+    // with typeFromAst (as this used to) ran during Phase 0, before enums/generic
+    // enums are registered, so an aliased enum (`type Parsed = Result<i32, E>`)
+    // came back tagged TStruct("Result") with its type args silently dropped —
+    // typeFromAst only understands non-generic base types.
+    typeAliases: HashMap<string, MiloType>,
     scopes: Vec<HashMap<string, VarInfo>>,
     currentFnRetType: TypeKind,
     loopDepth: i32,

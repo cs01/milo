@@ -1404,9 +1404,15 @@ pub fn registerBuiltinGenericEnums(ck: &mut Checker) {
 // Annotation-side generic instantiation: `Option<i32>` must resolve to the
 // monomorphized enum/struct, not TStruct("Option").
 pub fn resolveAstType(ck: &mut Checker, ty: &MiloType): TypeKind {
-    // resolve a type alias name to its base (preserving any &/&mut/* wrapper)
+    // Resolve a type alias name to its base (preserving any &/&mut/* wrapper the
+    // USE site spelled). The base is resolved lazily, through this SAME function,
+    // so an aliased generic enum (`type Parsed = Result<i32, AppError>`) goes
+    // through the typeArgs>0 branch below and comes back correctly monomorphized
+    // — unlike resolving it once eagerly at registration (Phase 0, before enums
+    // exist), which can only ever produce a bare, non-generic TStruct.
     if !ty.isFn && ty.typeArgs.len == 0 && ck.typeAliases.contains(ty.name) {
-        var base = ck.typeAliases.get(ty.name)!
+        let rawBase = ck.typeAliases.get(ty.name)!
+        var base = resolveAstType(ck, rawBase)
         if ty.ptrDepth > 0 {
             var i: i32 = 0
             while i < ty.ptrDepth {
@@ -1495,9 +1501,13 @@ pub fn checkProgram(ck: &mut Checker, program: &Program) {
     // Phase 0: register builtin traits and generic types
     registerBuiltinTraits(ck)
     registerBuiltinGenericEnums(ck)
-    // type aliases (`type Altitude = i32(0..N)`) resolve to their base type
+    // type aliases (`type Altitude = i32(0..N)`) — store the RAW base AST; it is
+    // resolved lazily by resolveAstType at each use site (see that fn's alias
+    // branch), same as any other annotation. Eagerly resolving here with
+    // typeFromAst ran before enums/generics exist and cannot express generics
+    // at all — see the field comment on Checker.typeAliases.
     for ai in 0..program.typeAliases.len {
-        ck.typeAliases.insert(program.typeAliases[ai].name.clone(), typeFromAst(program.typeAliases[ai].base))
+        ck.typeAliases.insert(program.typeAliases[ai].name.clone(), program.typeAliases[ai].base.clone())
     }
     // Register user-declared traits/interfaces BEFORE structs/fns so a trait name used
     // as a type (`&Iface`, `Heap<Iface>` struct fields) resolves during registration.

@@ -771,11 +771,6 @@ pub struct MatchGen {
 // diverging return/break/continue, which runs as an ordinary statement and
 // contributes no value — never silently coerced to a zero/void Val).
 pub fn genArmBody(cg: &mut Cgen, body: &Vec<Heap<Stmt>>, locs: &mut Vec<Local>, sigs: &Vec<CgFnSig>, retTy: &string, wantValue: bool, hintTy: string): MatchGen {
-    // A payload binding (`Result.Ok(t) => { … }`) is ARM-SCOPED: it dies at the arm's end
-    // like any other block, and without this the fixture pinning exact drop counts comes up
-    // one short. A terminated arm (return/break) already dropped its scope on the way out,
-    // so dropping again there would double-count.
-    let armPreLen = locs.len
     var terminated = false
     var produced = false
     var val = Val {
@@ -809,9 +804,6 @@ pub fn genArmBody(cg: &mut Cgen, body: &Vec<Heap<Stmt>>, locs: &mut Vec<Local>, 
         // synthesize a plausible-looking value if that guarantee ever slips.
         eprint("codegen: match-expression arm produced no value and did not diverge")
         exit(1)
-    }
-    if !terminated {
-        emitScopeDrops(cg, locs, armPreLen, "")
     }
     return MatchGen {
         terminated: terminated, val: val
@@ -1083,6 +1075,14 @@ pub fn genMatch(cg: &mut Cgen, subject: &Expr, arms: &Vec<MatchArm>, locs: &mut 
             }
         }
         let res = genArmBody(cg, arms[ai].body, locs, sigs, retTy, wantValue, resultTy.clone())
+        // A payload binding (`Result.Ok(t) => { … }`) is ARM-SCOPED: it dies at the arm's
+        // end like any other block. locsPreLen is captured BEFORE the bindings are pushed,
+        // which is why the drop belongs here and not inside genArmBody. A terminated arm
+        // (return/break) already dropped its scope on the way out — dropping again would
+        // double-count.
+        if !res.terminated {
+            emitScopeDrops(cg, locs, locsPreLen, "")
+        }
         // Pop bindings
         while locs.len > locsPreLen {
             let _ = locs.pop()

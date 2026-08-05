@@ -44,8 +44,8 @@ from "std/process" import {
 from "std/time" import {
     sleepMs
 }
-from "framing" import {
-    readFrame, writeFrameFd
+from "json-rpc/frame" import {
+    readFrame, writeFrame
 }
 from "jdwp" import {
     JdwpIo, jdwpAttach, Packet, synthPacket, Location, zeroLocation,
@@ -62,9 +62,12 @@ pub struct DapOut {
 
 impl DapOut {
     fn sendRaw(_self: &mut DapOut, json: &string): void {
-        let n = writeFrameFd(1, json)
-        if n < 0 {
-            eprint("[java-dap] short write on DAP stdout\n")
+        match writeFrame(1, json) {
+            Result.Ok(_n) => {
+            }
+            Result.Err(_e) => {
+                eprint("[java-dap] short write on DAP stdout\n")
+            }
         }
     }
 

@@ -1,0 +1,12 @@
+{
+  "lockVersion": 1,
+  "packages": {
+    "json-rpc": {
+      "url": "../../../../milo-language/milo-json-rpc",
+      "version": "main",
+      "commit": "local",
+      "hash": "sha256:41aff75ac2c389974f8cbcf5a2f6568922cf453be9fa30790730199bdbb5eb54",
+      "deps": []
+    }
+  }
+}

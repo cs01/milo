@@ -265,11 +265,16 @@ item 5, it should be decided against 0/578, not against 20,826.
 
 | | |
 |---|---|
-| **behave correctly** | **353 / 578 (61%)** |
-| wrong output | **2** |
-| exits nonzero | 2 |
-| fails to link | **2** |
-| cannot be compiled at all | 219 |
+| **behave correctly** | **361 / 578 (62%)** |
+| wrong output | 4 |
+| exits nonzero | 4 |
+| fails to link | 2 |
+| cannot be compiled at all | **207** |
+
+The feature tail finally moved, and how it moved is the lesson: adding `Vec.clear` /
+`HashMap.clear` unblocked **zero** fixtures, while two things that were not on the
+missing-method list at all unblocked twelve. Rank by what a fix actually releases, not by
+how often a symbol appears in the error log.
 
 Mismatches started at 15 and link failures at 19; both buckets are now essentially closed.
 Everything remaining is either the 219 that do not compile, or three named behaviour bugs.

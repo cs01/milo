@@ -1074,6 +1074,11 @@ pub fn checkCall(ck: &mut Checker, func: &string, args: &Vec<Heap<Expr>>, typeAr
         error(ck, "function '" + func.clone() + "' expects " + paramCount.toString() + " args, got " + args.len.toString(), cloneSpan(span))
     }
 
+    // Call-site exclusivity: every arg landing in a `&`/`&mut` param below is a
+    // borrow taken FOR THIS CALL — collected here, checked once all args are
+    // seen (see checkCallSiteExclusivity).
+    var callMuts: Vec<BorrowArg> = Vec.new()
+    var callShared: Vec<BorrowArg> = Vec.new()
     var i: i64 = 0
     while i < args.len && i < paramCount {
         let paramType = ownedParams[i].clone()
@@ -1202,6 +1207,17 @@ pub fn checkCall(ck: &mut Checker, func: &string, args: &Vec<Heap<Expr>>, typeAr
                         errorIfFrozenRoot(ck, *args[i], "pass", span)
                     }
                 }
+                match borrowArgOf(*args[i]) {
+                    Option.Some(ba) => {
+                        if mutable {
+                            callMuts.push(ba)
+                        } else {
+                            callShared.push(ba)
+                        }
+                    }
+                    Option.None => {
+                    }
+                }
             }
             _ => {
                 if !typeEq(paramType, argType) && !typeEq(argType, tyUnknown()) && !intCoercible(paramType, argType, *args[i]) &&
@@ -1217,6 +1233,7 @@ pub fn checkCall(ck: &mut Checker, func: &string, args: &Vec<Heap<Expr>>, typeAr
         }
         i = i + 1
     }
+    checkCallSiteExclusivity(ck, callMuts, callShared, span)
 
     // Check remaining variadic args
     while i < args.len {

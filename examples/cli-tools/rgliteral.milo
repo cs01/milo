@@ -1,0 +1,150 @@
+// rgliteral — extract a required-substring prefilter from a regex pattern
+//
+// ripgrep's trick: a substring that every matching string must contain lets a
+// whole-file memmem reject stand in front of the (much slower) regex engine, the
+// same way rg.milo's isPlainLiteral reject does for plain literals. This file
+// generalizes that to patterns containing regex metacharacters, as long as the
+// required substring can be proven safe.
+
+// Index of the ']' that closes the bracket expression opened at `pat[start]`
+// ('start' points at the '['), or None if unterminated.
+//
+// POSIX quirk: a ']' in the first content position (right after '[' or '[^') is a
+// literal member of the class, not the closer — `[]]` matches only ']'. A `\]`
+// is treated as escaped too, even though POSIX bracket expressions don't really
+// give backslash any special meaning inside `[...]` — honouring it anyway is the
+// conservative-safe reading, never the wrong one.
+fn findClassEnd(pat: &string, start: i64): Option<i64> {
+    var j = start + 1
+    if j < pat.len && pat[j] == '^' {
+        j = j + 1
+    }
+    if j < pat.len && pat[j] == ']' {
+        j = j + 1
+    }
+    while j < pat.len {
+        if pat[j] == '\\' && j + 1 < pat.len {
+            j = j + 2
+        } else if pat[j] == ']' {
+            return Option.Some(j)
+        } else {
+            j = j + 1
+        }
+    }
+    return Option.None
+}
+
+// Index of the '}' that closes the bound opened at `pat[start]` ('start' points
+// at the '{'), or None if unterminated.
+fn findBraceEnd(pat: &string, start: i64): Option<i64> {
+    var j = start + 1
+    while j < pat.len {
+        if pat[j] == '}' {
+            return Option.Some(j)
+        }
+        j = j + 1
+    }
+    return Option.None
+}
+
+// The longest substring that every string matching `pat` is guaranteed to contain,
+// or "" when no such substring can be established. Callers use a non-empty result as
+// a whole-file reject: a file not containing it cannot contain a match.
+pub fn requiredLiteral(pat: &string): string {
+    // Alternation and groups can make any part of the match optional (or make a
+    // second branch required instead of this one) — proving what survives every
+    // branch is not worth the false-positive risk, so bail out entirely.
+    for byte in pat {
+        if byte == '|' || byte == '(' {
+            return ""
+        }
+    }
+
+    var run: string = ""
+    var longest: string = ""
+    var i: i64 = 0
+    while i < pat.len {
+        let ch = pat[i]
+        if ch == '\\' {
+            // `>=` (not `>`) so a later run of equal length wins ties — see the
+            // `abc+def` row in the driver, which pins this choice.
+            if run.len >= longest.len {
+                longest = run.clone()
+            }
+            run = ""
+            i = i + 2
+        } else if ch == '[' {
+            if run.len >= longest.len {
+                longest = run.clone()
+            }
+            run = ""
+            let Option.Some(close) = findClassEnd(pat, i) else {
+                return ""
+            }
+            i = close + 1
+            if i < pat.len {
+                let q = pat[i]
+                if q == '*' || q == '+' || q == '?' {
+                    i = i + 1
+                } else if q == '{' {
+                    let Option.Some(brace) = findBraceEnd(pat, i) else {
+                        return ""
+                    }
+                    i = brace + 1
+                }
+            }
+        } else if ch == '.' || ch == '^' || ch == '$' {
+            if run.len >= longest.len {
+                longest = run.clone()
+            }
+            run = ""
+            i = i + 1
+        } else if ch == '*' || ch == '?' {
+            // The byte this quantifier applies to was optional, so it can't be part
+            // of a required run. Only pop when the run actually ends in that byte
+            // (it won't when the quantifier follows `.`/a class, which already
+            // ended the run themselves).
+            if run.len > 0 {
+                run = run.substr(0, run.len - 1)
+            }
+            if run.len >= longest.len {
+                longest = run.clone()
+            }
+            run = ""
+            i = i + 1
+        } else if ch == '+' {
+            // The byte is required at least once, but nothing after it is
+            // contiguous with it anymore.
+            if run.len >= longest.len {
+                longest = run.clone()
+            }
+            run = ""
+            i = i + 1
+        } else if ch == '{' {
+            // A bound can allow zero repeats ({0,3}), so the preceding byte is
+            // never guaranteed.
+            if run.len > 0 {
+                run = run.substr(0, run.len - 1)
+            }
+            if run.len >= longest.len {
+                longest = run.clone()
+            }
+            run = ""
+            let Option.Some(brace) = findBraceEnd(pat, i) else {
+                return ""
+            }
+            i = brace + 1
+        } else {
+            run.push(ch)
+            i = i + 1
+        }
+    }
+    if run.len >= longest.len {
+        longest = run.clone()
+    }
+
+    if longest.len >= 3 {
+        return longest
+    }
+    return ""
+}

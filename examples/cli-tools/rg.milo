@@ -23,38 +23,25 @@ from "std/runtime" import {
 from "std/string" import {
     strContainsIgnoreCase, strIndexOfFromIgnoreCase
 }
+from "std/os" import {
+    isatty
+}
+from "./rgignore" import {
+    IgnoreSet, inGitRepo, loadIgnoreSet, stackIgnores
+}
+from "./rgliteral" import {
+    requiredLiteral
+}
 
 // ── helpers ──
 
+// Only the VCS metadata directories are skipped unconditionally. This list used to
+// also carry node_modules/target/build/dist/__pycache__/.cache as a stand-in for
+// .gitignore, which is both too coarse and too blunt: it silently dropped every match
+// under llvm-project's `lldb/test/API/commands/target/`, a directory nobody ignores.
+// With real ignore-file support in the walk, guessing by name has nothing left to do.
 pub fn shouldSkipDir(name: &string): bool {
-    if name == ".git" {
-        return true
-    }
-    if name == ".hg" {
-        return true
-    }
-    if name == ".svn" {
-        return true
-    }
-    if name == "node_modules" {
-        return true
-    }
-    if name == "target" {
-        return true
-    }
-    if name == "build" {
-        return true
-    }
-    if name == "dist" {
-        return true
-    }
-    if name == "__pycache__" {
-        return true
-    }
-    if name == ".cache" {
-        return true
-    }
-    return false
+    return name == ".git" || name == ".hg" || name == ".svn"
 }
 
 pub fn matchesType(path: &string, fileType: &string): bool {
@@ -93,6 +80,13 @@ pub struct RgOpts {
     // the whole-file reject below does not recompute it per file.
     pattern: string,
     literal: bool,
+    // A substring every match must contain, or "" when none could be proven. For a
+    // plain literal it is the pattern itself; for a regex it comes from
+    // `requiredLiteral`. Everything downstream keys off this rather than off
+    // `literal`, which is what lets a regex search use the same whole-file reject and
+    // the same parallel prescan the literal path has always had — the regex engine
+    // then only ever runs on files that could possibly match.
+    prefilter: string,
     // -i has to reach the literal matcher, not just the regex flags. It used to stop
     // at the flags, so `rg -i foo` prefiltered case-SENSITIVELY and silently dropped
     // every match that differed in case — a wrong answer, not a slow one.
@@ -101,6 +95,16 @@ pub struct RgOpts {
     // scan), not by lowercasing a copy of every file — that copy cost more than the
     // search it fed.
     ignoreCase: bool,
+    // Honour .gitignore/.ignore during the walk. Not honouring them is not just a
+    // different result set — on a checkout with build directories it is most of the
+    // work: `rg clang .` over llvm-project reads 3.9 GB of object files nothing asked
+    // for, and prints ten times the matches real rg does.
+    useIgnore: bool,
+    // Split from useIgnore because .ignore and .gitignore have different scopes: rg
+    // applies a .gitignore only inside a git checkout (its --require-git default),
+    // while a .ignore file is honoured anywhere. Searching a plain directory that
+    // happens to contain a .gitignore must not silently drop files from the results.
+    useGitIgnore: bool,
 }
 
 // Next occurrence of the literal at or after `from`, honouring -i.
@@ -180,6 +184,19 @@ pub fn isPlainLiteral(pat: &string): bool {
     return true
 }
 
+// A NUL byte means the buffer is not text. ripgrep skips such a file silently on a
+// recursive search; without this, one walk into a build directory printed megabytes
+// of object-file and archive garbage — and paid to read and scan it first.
+//
+// The check is one memchr over the whole buffer, ahead of the literal search rather
+// than after it, so a 40 MB `.a` costs a memchr instead of a memmem.
+pub fn isBinary(content: &string): bool {
+    if let Option.Some(_) = content.indexOf("\0") {
+        return true
+    }
+    return false
+}
+
 pub fn getMatches(re: &mut Regex, line: &string, wordBound: bool): Vec<RegexMatch> {
     if wordBound {
         return filterWordBounds(line, re.findAll(line))
@@ -210,6 +227,14 @@ pub fn highlightLine(line: &string, matches: &Vec<RegexMatch>, noColor: bool): s
 // ── output formatting ──
 
 pub fn formatLine(content: &string, lineNum: i64, isMatch: bool, filePath: &string, multiFile: bool, opts: &RgOpts): string {
+    // grep's convention, which rg follows: a matched line is delimited by ":", a
+    // context line by "-". That applies to the path delimiter as well as the line
+    // number one — with line numbers off (the default when piped) the path delimiter
+    // is the only thing distinguishing a -A/-B context line from a hit.
+    var delim = ":"
+    if !isMatch {
+        delim = "-"
+    }
     var out: string = ""
     if multiFile && opts.noHeading {
         if opts.noColor {
@@ -217,7 +242,7 @@ pub fn formatLine(content: &string, lineNum: i64, isMatch: bool, filePath: &stri
         } else {
             out = out + Color.magenta(filePath)
         }
-        out = out + ":"
+        out = out + delim
     }
     if !opts.noLineNum {
         let num = (lineNum + 1).toString()
@@ -226,11 +251,7 @@ pub fn formatLine(content: &string, lineNum: i64, isMatch: bool, filePath: &stri
         } else {
             out = out + Color.green(num)
         }
-        if isMatch {
-            out = out + ":"
-        } else {
-            out = out + "-"
-        }
+        out = out + delim
     }
     out = out + content
     return out
@@ -256,10 +277,24 @@ pub fn searchFile(filePath: &string, re: &mut Regex, opts: &mut RgOpts, multiFil
 // this buffer — re-running the whole-file reject there would scan every matching
 // file twice for an answer it has.
 pub fn searchContent(content: &string, filePath: &string, re: &mut Regex, opts: &mut RgOpts, multiFile: bool, knownMatch: bool): void {
-    // Whole-file reject: if the pattern is a literal and the file does not contain
-    // it anywhere, there is nothing to split, allocate or scan line by line. One
-    // memchr pass over the buffer replaces N regex runs.
-    if !knownMatch && opts.literal && !opts.invert && !literalIn(content, opts.pattern, opts.ignoreCase) {
+    if !knownMatch && isBinary(content) {
+        return
+    }
+    // Whole-file reject: if every match must contain `prefilter` and the file does not
+    // contain it anywhere, there is nothing to split, allocate or scan line by line.
+    // One memmem pass over the buffer replaces N regex runs. -v is excluded because a
+    // non-matching line can sit in a file the prefilter never appears in.
+    if !knownMatch && !opts.invert && opts.prefilter.len > 0 && !literalIn(content, opts.prefilter, opts.ignoreCase) {
+        return
+    }
+
+    // -l asks only "does this file match at all", which the whole-file reject above —
+    // or the parallel prescan, when it set knownMatch — has already answered. Falling
+    // through to the line-by-line regex loop to rediscover it made `-l` 3x slower than
+    // the search that prints every match.
+    if opts.filesOnly && opts.literal && !opts.invert {
+        print(filePath)
+        opts.totalMatches = opts.totalMatches + 1
         return
     }
 
@@ -277,10 +312,13 @@ pub fn searchContent(content: &string, filePath: &string, re: &mut Regex, opts: 
     if opts.literal && !opts.invert && opts.beforeCtx == 0 && opts.afterCtx == 0 && !opts.filesOnly {
         var matchCountF: i64 = 0
         var headerPrintedF: bool = false
-        // The newline walk is what locates the start of the matching line, so it is
-        // needed by anything that prints the line — but -c prints only a tally, and
-        // skips it entirely.
-        let needLineNo = !opts.countOnly
+        // Counting lines means touching every newline in the file up to the last match,
+        // which is a scan of the whole file — the one thing the buffer search exists to
+        // avoid. Only a printed line *number* actually needs the count; the line's own
+        // text needs nothing but its start, and that is a backward scan bounded by the
+        // length of one line. -c needs neither.
+        let needLineNo = !opts.countOnly && !opts.noLineNum
+        let needLineText = !opts.countOnly
         var lineNo: i64 = 0
         var lineStart: i64 = 0
         var pos: i64 = 0
@@ -301,6 +339,16 @@ pub fn searchContent(content: &string, filePath: &string, re: &mut Regex, opts: 
                     }
                     lineStart = nl + 1
                     lineNo = lineNo + 1
+                }
+            } else if needLineText {
+                lineStart = 0
+                var b = at
+                while b > 0 {
+                    if content[b - 1] == 10 {
+                        lineStart = b
+                        break
+                    }
+                    b = b - 1
                 }
             }
             var lineEnd = content.len
@@ -383,6 +431,8 @@ pub fn searchContent(content: &string, filePath: &string, re: &mut Regex, opts: 
         if isMatch {
             matchCount = matchCount + 1
 
+            let hasCtx = opts.beforeCtx > 0 || opts.afterCtx > 0
+
             if !opts.countOnly && !opts.filesOnly {
                 // file header for grouped output
                 if !headerPrinted && multiFile && !opts.noHeading {
@@ -397,6 +447,17 @@ pub fn searchContent(content: &string, filePath: &string, re: &mut Regex, opts: 
                     headerPrinted = true
                     opts.needsSeparator = true
                 }
+                // Grouped output separates files with a blank line; ungrouped output
+                // separates them the same way it separates context groups, with "--".
+                // needsSeparator carries across files, so the very first group of the
+                // whole run is not preceded by one.
+                if hasCtx && multiFile && opts.noHeading && !headerPrinted {
+                    if opts.needsSeparator {
+                        print("--")
+                    }
+                    headerPrinted = true
+                    opts.needsSeparator = true
+                }
 
                 // before-context lines
                 var ctxStart: i64 = i - opts.beforeCtx
@@ -407,7 +468,11 @@ pub fn searchContent(content: &string, filePath: &string, re: &mut Regex, opts: 
                     ctxStart = lastPrinted + 1
                 }
 
-                if lastPrinted >= 0 && ctxStart > lastPrinted + 1 {
+                // "--" separates context *groups*. With no -A/-B/-C there are no
+                // groups to separate, and emitting it between any two non-adjacent
+                // matching lines put thousands of stray "--" lines into the output of
+                // an ordinary regex search — 55 lines where ripgrep prints 31.
+                if hasCtx && lastPrinted >= 0 && ctxStart > lastPrinted + 1 {
                     print("--")
                 }
 
@@ -450,11 +515,22 @@ pub fn searchContent(content: &string, filePath: &string, re: &mut Regex, opts: 
 // ── directory search ──
 
 // Walk the tree once, collecting file paths. Same skip rules as searchDir.
-pub fn collectFiles(dirPath: &string, opts: &RgOpts, out: &mut Vec<string>): void {
+//
+// `sets` is the stack of ignore files seen from the walk root down to `dirPath`; this
+// function pushes its own directory's onto it and pops before returning, so callers
+// hand in whatever stack applies above them.
+pub fn collectFiles(dirPath: &string, opts: &RgOpts, sets: &mut Vec<IgnoreSet>, out: &mut Vec<string>): void {
     // A dir we can't open (permissions, a dangling symlink) is skipped, not fatal —
     // one unreadable subdir under /var must not kill the whole walk.
     let Result.Ok(entries) = readDir(dirPath) else {
         return
+    }
+    var pushed = false
+    if opts.useIgnore {
+        if let Option.Some(set) = loadIgnoreSet(dirPath, opts.useGitIgnore) {
+            sets.push(set)
+            pushed = true
+        }
     }
     for i in 0..entries.len {
         let name = entries[i].name.clone()
@@ -465,16 +541,19 @@ pub fn collectFiles(dirPath: &string, opts: &RgOpts, out: &mut Vec<string>): voi
         }
         let fullPath = Path.join(dirPath, name)
         if entryIsDir {
-            if !shouldSkipDir(name) {
-                collectFiles(fullPath, opts, out)
+            if !shouldSkipDir(name) && !stackIgnores(sets, fullPath, name, true) {
+                collectFiles(fullPath, opts, sets, out)
             }
         } else if entryIsFile {
             // Apply -t here, not in searchFile: a file the type filter rejects must
             // never reach the prescan, or the threads read it for nothing.
-            if matchesType(fullPath, opts.fileType) {
+            if matchesType(fullPath, opts.fileType) && !stackIgnores(sets, fullPath, name, false) {
                 out.push(fullPath)
             }
         }
+    }
+    if pushed {
+        let _ = sets.pop()
     }
 }
 
@@ -498,7 +577,7 @@ pub fn scanChunk(paths: Vec<string>, needle: string, ci: bool): Vec<Hit> {
     for i in 0..paths.len {
         match readFile(paths[i]) {
             Result.Ok(data) => {
-                if literalIn(data, needle, ci) {
+                if !isBinary(data) && literalIn(data, needle, ci) {
                     hits.push(Hit {
                         path: paths[i].clone(), content: data
                     }
@@ -512,19 +591,67 @@ pub fn scanChunk(paths: Vec<string>, needle: string, ci: bool): Vec<Hit> {
     return hits
 }
 
+// Files handed to the workers per prescan round.
+//
+// The prescan returns the *bytes* of every file that matched, so scanning the whole
+// tree in one round holds the entire matching set in memory at once — 4.6 GB on
+// llvm-project, which puts a 16 GB machine into page compression and loses more time
+// there than the search itself takes. Rounds bound the live set to whatever matched
+// among one round's worth of files while still keeping every worker fed. Measured on
+// llvm-project, anything from 512 to 8192 lands within noise of each other; the run is
+// bound by read(2), not by how the rounds are cut.
+pub fn roundSize(): i64 {
+    return 2048
+}
+
+// One worker per core. The prescan is dominated by read(2), so the useful count is
+// set by how many reads the kernel will overlap, not by arithmetic width.
+pub fn workerCount(): i64 {
+    return 10
+}
+
+// Prescan files [base, end) on `workerCount()` threads. Round-robin, not contiguous
+// blocks: big files cluster in a tree (one deep subdirectory of generated headers),
+// and a contiguous split hands that whole subdirectory to one worker while the rest
+// finish early. Striding interleaves any such run across all of them, and order is
+// still recoverable — see the merge in searchDirParallel.
+//
+// Every worker gets a promise even when its stride is empty, so the merge can index
+// by position within the round.
+fn spawnRound(files: &Vec<string>, base: i64, end: i64, needle: &string, ci: bool): Vec<Promise<Vec<Hit>>> {
+    var ps: Vec<Promise<Vec<Hit>>> = Vec.new()
+    for w in 0..workerCount() {
+        var chunk: Vec<string> = Vec.new()
+        var i = base + w
+        while i < end {
+            chunk.push(files[i].clone())
+            i = i + workerCount()
+        }
+        let n = needle.clone()
+        ps.push(Promise<Vec<Hit>>.blocking(move(): Vec<Hit> => {
+            return scanChunk(chunk, n, ci)
+        }
+        ))
+    }
+    return ps
+}
+
 // Literal search over a directory, in parallel.
 //
-// Only the "which files contain this at all" pass is parallel — it is the whole
-// cost on a tree (most files do not match) and it produces no output, so there is
-// nothing to order. Printing then happens sequentially over the surviving files,
-// in walk order, so the output is byte-identical to the serial path. Threads that
-// print interleave; threads that answer a boolean do not.
+// Only the "which files contain this at all" pass is parallel — it is the whole cost
+// on a tree (most files do not match) and it produces no output, so there is nothing
+// to order. Printing then happens sequentially over the surviving files, in walk
+// order, so the output is byte-identical to the serial path. Threads that print
+// interleave; threads that answer a boolean do not.
+//
+// Overlapping the printing with the next round's reads (double-buffering the rounds)
+// was tried and measured no faster on llvm-project, so the straightforward loop stays.
 pub fn searchDirParallel(dirPath: &string, re: &mut Regex, opts: &mut RgOpts): void {
     var files: Vec<string> = Vec.new()
-    collectFiles(dirPath, opts, files)
+    var sets: Vec<IgnoreSet> = Vec.new()
+    collectFiles(dirPath, opts, sets, files)
 
-    let workers: i64 = 8
-    if files.len < workers * 4 {
+    if files.len < workerCount() * 4 {
         // too few files to be worth the threads
         for i in 0..files.len {
             searchFile(files[i], re, opts, true)
@@ -532,56 +659,56 @@ pub fn searchDirParallel(dirPath: &string, re: &mut Regex, opts: &mut RgOpts): v
         return
     }
 
-    // Round-robin, not contiguous blocks. Big files cluster in a tree (one deep
-    // subdirectory of generated headers), and a contiguous split hands that whole
-    // subdirectory to one worker while the rest finish early. Striding interleaves
-    // any such run across all of them. Order is still recoverable — see below.
-    var ps: Vec<Promise<Vec<Hit>>> = Vec.new()
-    for w in 0..workers {
-        var chunk: Vec<string> = Vec.new()
-        var i = w
-        while i < files.len {
-            chunk.push(files[i].clone())
-            i = i + workers
+    let ci = opts.ignoreCase
+    var base: i64 = 0
+    while base < files.len {
+        var end = base + roundSize()
+        if end > files.len {
+            end = files.len
         }
-        // Even an empty chunk is submitted: the merge below indexes parts by
-        // `idx % workers`, so the list must stay exactly `workers` long.
-        let needle = opts.pattern.clone()
-        let ci = opts.ignoreCase
-        ps.push(Promise<Vec<Hit>>.blocking(move(): Vec<Hit> => {
-            return scanChunk(chunk, needle, ci)
+        let ps = spawnRound(files, base, end, opts.prefilter, ci)
+
+        // Scoped to the round so the buffers it carries are freed before the next one
+        // reads more — that release is the whole point of rounds.
+        let parts = Promise.all(ps).await()!
+        // Each worker's hits are in walk order among themselves, and worker w held
+        // round offsets w, w+10, w+20… — so a merge across the lists by original index
+        // reproduces exact walk order. Tracking the index explicitly would need a field
+        // on Hit; instead, walk the file list and pop from the worker that owned each
+        // index, which is the same merge without the bookkeeping.
+        var cursors: Vec<i64> = Vec.new()
+        for _ in 0..parts.len {
+            cursors.push(0)
         }
-        ))
-    }
-    let parts = Promise.all(ps).await()!
-    // Each worker's hits are in walk order among themselves, and worker w held
-    // indices w, w+8, w+16… — so a merge across the 8 lists by original index
-    // reproduces exact walk order. Tracking the index explicitly would need a field
-    // on Hit; instead, walk the file list and pop from the worker that owned each
-    // index, which is the same merge without the bookkeeping.
-    var cursors: Vec<i64> = Vec.new()
-    for _ in 0..parts.len {
-        cursors.push(0)
-    }
-    for idx in 0..files.len {
-        let w = idx % parts.len
-        let c = cursors[w]
-        if c >= parts[w].len {
-            continue
+        for idx in base..end {
+            let w = (idx - base) % parts.len
+            let c = cursors[w]
+            if c >= parts[w].len {
+                continue
+            }
+            // Its owner skipped this index (binary, no match, or unreadable) if the
+            // head of that worker's hit list is some later file.
+            if parts[w][c].path != files[idx] {
+                continue
+            }
+            cursors[w] = c + 1
+            searchContent(parts[w][c].content, files[idx], re, opts, true, true)
         }
-        // Its owner skipped this index (no match, or unreadable) if the head of that
-        // worker's hit list is some later file.
-        if parts[w][c].path != files[idx] {
-            continue
-        }
-        cursors[w] = c + 1
-        searchContent(parts[w][c].content, files[idx], re, opts, true, true)
+
+        base = end
     }
 }
 
-pub fn searchDir(dirPath: &string, re: &mut Regex, opts: &mut RgOpts): void {
+pub fn searchDir(dirPath: &string, re: &mut Regex, opts: &mut RgOpts, sets: &mut Vec<IgnoreSet>): void {
     let Result.Ok(entries) = readDir(dirPath) else {
         return
+    }
+    var pushed = false
+    if opts.useIgnore {
+        if let Option.Some(set) = loadIgnoreSet(dirPath, opts.useGitIgnore) {
+            sets.push(set)
+            pushed = true
+        }
     }
     for i in 0..entries.len {
         let name = entries[i].name.clone()
@@ -594,27 +721,42 @@ pub fn searchDir(dirPath: &string, re: &mut Regex, opts: &mut RgOpts): void {
 
         let fullPath = Path.join(dirPath, name)
         if entryIsDir {
-            if !shouldSkipDir(name) {
-                searchDir(fullPath, re, opts)
+            if !shouldSkipDir(name) && !stackIgnores(sets, fullPath, name, true) {
+                searchDir(fullPath, re, opts, sets)
             }
         } else if entryIsFile {
-            searchFile(fullPath, re, opts, true)
+            if !stackIgnores(sets, fullPath, name, false) {
+                searchFile(fullPath, re, opts, true)
+            }
         }
+    }
+    if pushed {
+        let _ = sets.pop()
     }
 }
 
-pub fn searchPath(path: &string, re: &mut Regex, opts: &mut RgOpts): void {
+// True when the search ran; false when `path` does not exist. The distinction has to
+// reach main: "I searched and found nothing" and "you named a path that isn't there"
+// are different outcomes, and collapsing both onto exit 1 means no script can tell
+// them apart. rg uses 2 for the second, and puts the message on stderr.
+pub fn searchPath(path: &string, re: &mut Regex, opts: &mut RgOpts): bool {
     if isDir(path) {
-        if opts.literal && !opts.invert {
+        // The prescan asks "does this file contain the prefilter", which is a sound
+        // question for a regex too — so a regex with a provable required substring
+        // gets the parallel walk, not just a plain literal.
+        if opts.prefilter.len > 0 && !opts.invert {
             searchDirParallel(path, re, opts)
         } else {
-            searchDir(path, re, opts)
+            var sets: Vec<IgnoreSet> = Vec.new()
+            searchDir(path, re, opts, sets)
         }
     } else if isFile(path) {
         searchFile(path, re, opts, false)
     } else {
-        print($"rg: {path}: no such file or directory")
+        eprint($"rg: {path}: no such file or directory")
+        return false
     }
+    return true
 }
 
 // ── main ──
@@ -630,8 +772,11 @@ pub fn main(): i32 {
     parser.addBool("word-regexp", "w", "match whole words only")
     parser.addBool("no-color", "p", "disable colored output")
     parser.addBool("no-line-number", "N", "hide line numbers")
+    parser.addBool("line-number", "n", "show line numbers even when output is not a terminal")
     parser.addBool("no-heading", "g", "grep-style output (no file grouping)")
     parser.addBool("hidden", "H", "search hidden files and directories")
+    parser.addBool("no-ignore", "u", "do not respect .gitignore/.ignore files")
+    parser.addBool("color", "k", "force color even when output is not a terminal")
     parser.addI64("after-context", "A", "lines to show after match", 0)
     parser.addI64("before-context", "B", "lines to show before match", 0)
     parser.addI64("context", "C", "lines to show before and after match", 0)
@@ -671,14 +816,39 @@ pub fn main(): i32 {
         beforeCtx = beforeVal
     }
 
+    // Colour codes, per-file heading blocks and line numbers are for a human at a terminal. Piped
+    // into a file or another program they are noise the consumer has to strip — and
+    // on a big search they are also bytes we spend the whole run building. All three
+    // default to off when stdout is not a tty, which is what real rg does; -k/-n force
+    // them back on, -p/-g/-N pin them off.
+    let interactive = isatty(1) != 0
+    let forceColor = args.getBool("color")
+
+    // -w narrows a literal to whole words, which the buffer-walk print path cannot
+    // express — so the pattern stops being "plain" for that path. It stays a perfectly
+    // good *prefilter* though, which is why the two are computed separately.
+    // requiredLiteral has a minimum length below which a prefilter costs more than it
+    // saves, but a whole pattern that is already a literal is exact rather than a
+    // heuristic — take it at any length.
+    let plainLiteral = isPlainLiteral(pattern) && !args.getBool("word-regexp")
+    var prefilter = requiredLiteral(pattern)
+    if isPlainLiteral(pattern) {
+        prefilter = pattern.clone()
+    }
+
+    var target = args.getString("path") ?? ""
+    if target.len == 0 {
+        target = "."
+    }
+
     var opts = RgOpts {
         countOnly: args.getBool("count"),
         filesOnly: args.getBool("files-with-matches"),
         invert: args.getBool("invert-match"),
         wordBound: args.getBool("word-regexp"),
-        noColor: args.getBool("no-color"),
-        noLineNum: args.getBool("no-line-number"),
-        noHeading: args.getBool("no-heading"),
+        noColor: args.getBool("no-color") || (!interactive && !forceColor),
+        noLineNum: args.getBool("no-line-number") || (!interactive && !args.getBool("line-number")),
+        noHeading: args.getBool("no-heading") || !interactive,
         searchHidden: args.getBool("hidden"),
         maxCount: args.getI64("max-count"),
         afterCtx: afterCtx,
@@ -687,16 +857,16 @@ pub fn main(): i32 {
         totalMatches: 0,
         needsSeparator: false,
         pattern: pattern.clone(),
-        literal: isPlainLiteral(pattern) && !args.getBool("word-regexp"),
+        literal: plainLiteral,
+        prefilter: prefilter,
         ignoreCase: ignoreCase,
+        useIgnore:!args.getBool("no-ignore"),
+        useGitIgnore:!args.getBool("no-ignore") && inGitRepo(target),
     }
 
-    var target = args.getString("path") ?? ""
-    if target.len == 0 {
-        target = "."
+    if !searchPath(target, re, opts) {
+        return 2
     }
-
-    searchPath(target, re, opts)
 
     if opts.totalMatches == 0 {
         return 1

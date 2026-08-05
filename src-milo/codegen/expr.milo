@@ -5098,6 +5098,51 @@ pub fn emitExternAbiCall(cg: &mut Cgen, name: &string, argVals: &Vec<Val>, param
     }
 }
 
+// Does this expression denote existing storage, or is it a freshly materialized value?
+// Only the latter may be freed after being lent to a callee. Conservative: anything not
+// positively recognized as a temporary counts as a place and is left alone, because
+// freeing a place would be a use-after-free of the caller's own data.
+// Free the string temporaries lent to a call. cap==0 marks a literal living in .rodata,
+// which must never be freed — the same sentinel genStringPush already relies on.
+pub fn emitTempFrees(cg: &mut Cgen, frees: &Vec<string>) {
+    if frees.len == 0 {
+        return
+    }
+    ensureFree(cg)
+    for i in 0..frees.len {
+        let parts = frees[i].split("|")
+        if parts.len == 2 {
+            let skipLbl = nextLabel(cg, "tmpfree.skip")
+            let doLbl = nextLabel(cg, "tmpfree.do")
+            let isHeap = nextTemp(cg)
+            emit(cg, "  " + isHeap + " = icmp ne i64 " + parts[1].clone() + ", 0\n")
+            emit(cg, "  br i1 " + isHeap + ", label %" + doLbl.clone() + ", label %" + skipLbl.clone() + "\n")
+            emitLabel(cg, doLbl)
+            emit(cg, "  call void @free(ptr " + parts[0].clone() + ")\n")
+            emit(cg, "  br label %" + skipLbl.clone() + "\n")
+            emitLabel(cg, skipLbl)
+        }
+    }
+}
+
+pub fn isPlaceExprForFree(e: &Expr): bool {
+    match e {
+        Expr.BinOp(op, l, r, sp) => {
+            // A concat builds a fresh buffer; every other binop on strings does too.
+            return false
+        }
+        Expr.MethodCall(o, m, a, sp) => {
+            return false
+        }
+        Expr.Call(n, a, ta, sp) => {
+            return false
+        }
+        _ => {
+            return true
+        }
+    }
+}
+
 pub fn genCall(cg: &mut Cgen, name: &string, args: &Vec<Heap<Expr>>, typeArgs: &Vec<MiloType>, locs: &Vec<Local>, sigs: &Vec<CgFnSig>, hintTy: &string): Val {
     if name == "format" {
         return genFormat(cg, args, locs, sigs)
@@ -5605,6 +5650,8 @@ pub fn genCall(cg: &mut Cgen, name: &string, args: &Vec<Heap<Expr>>, typeArgs: &
     // for ref args, the lvalue's pointee type (kept parallel to argVals) so generic
     // disambiguation can tell `&Wrapper<i64>` from `&Wrapper<string>` — both pass as ptr.
     var argPointees: Vec<string> = Vec.new()
+    // "<dataPtr>|<cap>" per lent string temporary, freed immediately after the call.
+    var tempFrees: Vec<string> = Vec.new()
     for i in 0..args.len {
         var hint = ""
         if i < paramHints.len {
@@ -5654,6 +5701,24 @@ pub fn genCall(cg: &mut Cgen, name: &string, args: &Vec<Heap<Expr>>, typeArgs: &
                 )
                 argPointees.push("")
             } else {
+                // A STRING TEMPORARY passed to a `&string` param can be freed right after
+                // the call, and this is sound because of second-class references: a `&T`
+                // cannot be stored in a struct or returned, so the callee provably holds no
+                // copy of it once it returns. Without this every
+                // `emit(cg, "  " + a + " = " + b)` leaks its intermediates — measured at
+                // ~0.8 MB retained per source line, which is what put self-compilation of
+                // src-milo past a 4 GB cap.
+                if llType(lv.ty) == "%String" && !isPlaceExprForFree(*args[i]) {
+                    let dp = nextTemp(cg)
+                    emit(cg, "  " + dp + " = getelementptr %String, ptr " + lv.v + ", i32 0, i32 0\n")
+                    let dv = nextTemp(cg)
+                    emit(cg, "  " + dv + " = load ptr, ptr " + dp + "\n")
+                    let cp = nextTemp(cg)
+                    emit(cg, "  " + cp + " = getelementptr %String, ptr " + lv.v + ", i32 0, i32 2\n")
+                    let cv = nextTemp(cg)
+                    emit(cg, "  " + cv + " = load i64, ptr " + cp + "\n")
+                    tempFrees.push(dv + "|" + cv)
+                }
                 argVals.push(Val {
                     v: lv.v, ty: "ptr"
                 }
@@ -5953,12 +6018,14 @@ pub fn genCall(cg: &mut Cgen, name: &string, args: &Vec<Heap<Expr>>, typeArgs: &
     // A void call must NOT be named (`%t = call void ...` is invalid IR).
     if retLl == "void" {
         emit(cg, "  call " + sigStr + " @" + emitName + "(" + argStr + ")\n")
+        emitTempFrees(cg, tempFrees)
         return Val {
             v: "0", ty: "void"
         }
     }
     let t = nextTemp(cg)
     emit(cg, "  " + t + " = call " + sigStr + " @" + emitName + "(" + argStr + ")\n")
+    emitTempFrees(cg, tempFrees)
 
     // carry the SURFACE type (Vec<string>, not %Vec) so field/method resolution
     // on the result (`.len`, index, isVecTy) still works; llType(retTy)==retLl

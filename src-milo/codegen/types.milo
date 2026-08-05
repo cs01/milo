@@ -1015,9 +1015,12 @@ pub fn mangleAstTypeArg(ty: &MiloType): string {
         }
         return s
     }
-    if ty.isPtr {
+    // ptrDepth, not a bool: `**u8` must mangle to two levels. An `isPtr` flag here would
+    // give `*u8` and `**u8` the SAME mangled name and silently merge two distinct
+    // monomorphizations.
+    if ty.ptrDepth > 0 {
         var inner = ty.clone()
-        inner.isPtr = false
+        inner.ptrDepth = ty.ptrDepth - 1
         return "ptr_" + mangleAstTypeArg(inner)
     }
     if ty.isRef || ty.isRefMut {
@@ -1083,26 +1086,23 @@ pub fn astTypeStr(ty: &MiloType): string {
     }
     var base = ty.name.clone()
     if ty.typeArgs.len > 0 {
-        if ty.name == "Vec" || ty.name == "Heap" || ty.name == "HashMap" {
-            base = base + "<"
-            for i in 0..ty.typeArgs.len {
-                if i > 0 {
-                    base = base + ","
-                }
-                base = base + astTypeStr(ty.typeArgs[i])
+        // Bracket form for EVERY generic, builtin or user-defined.
+        //
+        // A flat mangled spelling (Arena<Node> -> Arena_Node) was tried here to make a
+        // directly-named user generic emit valid LLVM. It broke twenty fixtures: the
+        // mangled name must match what the CHECKER registered, and this function cannot
+        // know that. `Result<string>` has one written type argument but monomorphizes to
+        // `Result_string_string` because E defaults — so the hand-rolled name referenced a
+        // type that was never declared. Any future attempt must consult the checker's own
+        // mangling rather than reconstruct it.
+        base = base + "<"
+        for i in 0..ty.typeArgs.len {
+            if i > 0 {
+                base = base + ","
             }
-            base = base + ">"
-        } else {
-            // A user generic struct/enum named directly (Arena<Node>, not
-            // nested in Vec/Heap/HashMap) has to spell the SAME flat name the
-            // checker already monomorphized it to (Arena_Node) — bracket
-            // syntax is only meaningful to the 3 builtin containers that
-            // llType pattern-matches on ("Vec<"/"Heap<"/"HashMap<"); emitted
-            // as LLVM syntax for anything else it is simply invalid ("%Arena<Node>").
-            for i in 0..ty.typeArgs.len {
-                base = base + "_" + mangleAstTypeArg(ty.typeArgs[i])
-            }
+            base = base + astTypeStr(ty.typeArgs[i])
         }
+        base = base + ">"
     }
     // Fixed arrays lower onto the Vec runtime: same {ptr,len,cap} header, so
     // len/index/iterate/index-assign all reuse the Vec paths.

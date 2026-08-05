@@ -6,21 +6,28 @@ from "src-milo/ast.milo" import {
 from "src-milo/checker/types.milo" import {
     TypeKind, typeEq, typeName, typeFromAst, typeFromName,
     tyI32, tyI64, tyU8, tyBool, tyVoid, tyString, tyUnknown,
-    isNumeric, isInteger, isFloat, isCopy, needsDrop, containsUnknown,
+    isNumeric, isInteger, isFloat, isCopy, needsDrop, containsUnknown, isViewReturnType,
 }
 from "src-milo/checker/state.milo" import {
     Checker, VarInfo, FnSig, FnParam, StructInfo, EnumInfo, VariantInfo,
     Diagnostic, error, errorHint, warn, pushScope, popScope, declare, lookup, setVarMoved, setVarRead, hasErrors,
-    normalizeEnumNames, stmtTerminates, snapshotMoves, restoreMoves, orMoves,
+    normalizeEnumNames, stmtTerminates, snapshotMoves, restoreMoves, orMoves, nestedRef,
 }
 from "src-milo/checker/expr.milo" import {
-    intCoercible, floatLitCoercible, arrayIntCoercible, arrayToVecCoercible, checkExpr, tryMove, isRootMutable, deref
+    intCoercible, floatLitCoercible, arrayIntCoercible, arrayToVecCoercible, checkExpr, tryMove, isRootMutable, deref,
+    errorIfMovingBorrowedNonCopy,
 }
 from "src-milo/checker/traits.milo" import {
     registerBuiltinTraits, registerAllImpls, synthesizeDefaultMethods, processDerives, typeImplementsTrait, resolveMethod
 }
 from "src-milo/checker/mono.milo" import {
     registerGenericFn, registerGenericStruct, registerGenericEnum, monomorphizeFn, monomorphizeStruct, monomorphizeEnum
+}
+from "src-milo/checker/borrow.milo" import {
+    accessPath, rootIdentName, freezeName, unfreezeName, isFrozen, frozenAgainst,
+    freezePlace, freezeViewMethodSource, errorIfFrozenRoot, describePlace,
+    assignTargetPath, errorIfAssignFrozen, borrowDuringCallback, BorrowArg,
+    borrowArgOf, checkCallSiteExclusivity, snapshotFrozenNames, releaseOrRetainFreezes,
 }
 
 // -- Statement checker --
@@ -46,7 +53,13 @@ pub fn checkStmt(ck: &mut Checker, stmt: &Stmt, fnRetType: &TypeKind) {
             checkWhile(ck, *cond, body, fnRetType, span)
         }
         Stmt.ExprStmt(expr, span) => {
+            // A view produced by a discarded expression (`print(lx.word(0, 5))`)
+            // has no binding to outlive the statement, so its freeze must not
+            // survive it either — same reasoning as the RHS snapshot in
+            // checkAssign/checkLetDecl, which this mirrors.
+            let frozenBefore = snapshotFrozenNames(ck)
             checkExpr(ck, *expr)
+            releaseOrRetainFreezes(ck, frozenBefore, false)
         }
         Stmt.MatchStmt(subject, arms, span) => {
             checkMatch(ck, *subject, arms, fnRetType)
@@ -95,9 +108,22 @@ pub fn checkLetDecl(ck: &mut Checker, name: &string, typeAnno: &Option<MiloType>
         Option.None => {
         }
     }
+    // A reference stored inside a local collection (Vec<&T> etc) outlives
+    // whatever freeze the call site took for it — a bare `&T` local is fine
+    // (second-class, can't escape the function), but nothing marks a
+    // CONTAINER as borrowed the way a plain reference binding is.
+    if hasHint && nestedRef(ck, hint) {
+        error(ck, "'" + name.clone() + "': references cannot be stored in a collection", cloneSpan(span))
+    }
     if hasHint {
         ck.expectedType = Option.Some(hint.clone())
     }
+    // A borrow taken to compute the RHS (`s[0..n]`, `lx.word(...)`) is eager —
+    // freezePlace/freezeViewMethodSource fire on every slice/view-method check,
+    // not just ones that land in a binding. Snapshot what's already frozen so
+    // only what THIS statement newly froze is in scope for the keep/release
+    // decision below.
+    let frozenBefore = snapshotFrozenNames(ck)
     var valType = checkExpr(ck, value)
     ck.expectedType = Option.None
 
@@ -110,6 +136,19 @@ pub fn checkLetDecl(ck: &mut Checker, name: &string, typeAnno: &Option<MiloType>
         }
         valType = hint
     }
+
+    // A view-typed binding (`let view = s[0..5]`) keeps whatever it froze
+    // alive for its own scope's life; anything else (the borrow was fully
+    // consumed within this statement, e.g. `s[0..n].len`) releases now.
+    var isRefBinding = false
+    match valType.clone() {
+        TypeKind.TRef(vinner, vmut) => {
+            isRefBinding = true
+        }
+        _ => {
+        }
+    }
+    releaseOrRetainFreezes(ck, frozenBefore, isRefBinding)
 
     declare(ck, name.clone(), VarInfo {
         ty: valType,
@@ -130,6 +169,10 @@ pub fn checkAssign(ck: &mut Checker, target: &Expr, value: &Expr, span: &Option<
         error(ck, "cannot assign to immutable variable", cloneSpan(span))
         return
     }
+    // Whole-place assignment (`x = ...`, `x.f = ...`) drops the old value and
+    // frees its buffer, so a live view into it would dangle. An in-place
+    // element write (`v[i] = x`) is exempt — see errorIfAssignFrozen.
+    errorIfAssignFrozen(ck, target, span)
 
     // A plain `x = ...` target is written, not read. Routing it through checkExpr
     // would hit checkIdent's use-after-move check and report "use of moved
@@ -161,8 +204,13 @@ pub fn checkAssign(ck: &mut Checker, target: &Expr, value: &Expr, span: &Option<
     // Expose the target's type as the hint so an array literal RHS (`v = [a, b]`)
     // coerces to Vec<T> when the target is one, same as let/var and struct fields.
     ck.expectedType = Option.Some(targetType.clone())
+    // A borrow the RHS takes to compute its value (`s[0..n].clone()`) is
+    // consumed within this statement — no binding outlives it — so it must
+    // not leak a freeze onto the next statement.
+    let frozenBeforeRhs = snapshotFrozenNames(ck)
     let valType = checkExpr(ck, value)
     ck.expectedType = Option.None
+    releaseOrRetainFreezes(ck, frozenBeforeRhs, false)
     if !typeEq(targetDeclType, valType) &&
     !typeEq(targetType, valType) && !typeEq(valType, tyUnknown()) && !intCoercible(targetType, valType, value) &&
     !arrayToVecCoercible(targetType, valType) && !floatLitCoercible(targetType, valType, value) &&
@@ -209,6 +257,12 @@ pub fn checkReturn(ck: &mut Checker, value: &Option<Heap<Expr>>, fnRetType: &Typ
             // (`if cond { return result }` ... `result.push(x)`), which is exactly
             // what the TS checker's returnOnlyMoves bookkeeping exists to avoid.
             // The function exits, so nothing after can observe the move.
+            // The borrowed-value-escape check is still needed though — a `&T` loop
+            // variable (e.g. `for line in s.lines()`) is second-class and lives only
+            // inside the loop that borrowed it; unlike ordinary move tracking this
+            // only reports, it never marks anything moved, so it can't poison later
+            // reads the same way.
+            errorIfMovingBorrowedNonCopy(ck, *expr, span)
         }
         Option.None => {
             if !typeEq(fnRetType, tyVoid()) {
@@ -659,6 +713,19 @@ pub fn checkStringViewForIn(ck: &mut Checker, varName: &string, varName2: &Optio
     }
 
     let viewType = TypeKind.TRef(Heap(tyString()), false)
+    // Every piece points into the receiver's buffer, so it must not be
+    // mutated, moved or reallocated for the whole loop — same freeze a
+    // `s[a..b]` slice takes, held for the loop body's life instead of one
+    // statement's.
+    var frozenRoot: Option<string> = Option.None
+    match accessPath(recv) {
+        Option.Some(p) => {
+            freezeName(ck, p.root, p.fields)
+            frozenRoot = Option.Some(p.root)
+        }
+        Option.None => {
+        }
+    }
     pushScope(ck)
     match varName2 {
         Option.Some(name2) => {
@@ -684,6 +751,13 @@ pub fn checkStringViewForIn(ck: &mut Checker, varName: &string, varName2: &Optio
     }
     ck.loopDepth = ck.loopDepth - 1
     popScope(ck)
+    match frozenRoot {
+        Option.Some(r) => {
+            unfreezeName(ck, r)
+        }
+        Option.None => {
+        }
+    }
 }
 
 pub fn checkForIn(ck: &mut Checker, varName: &string, varName2: &Option<string>, iterable: &Expr, body: &Vec<Heap<Stmt>>, fnRetType: &TypeKind, span: &Option<Span>) {
@@ -789,6 +863,38 @@ pub fn checkForIn(ck: &mut Checker, varName: &string, varName2: &Option<string>,
             }
         }
         _ => {
+        }
+    }
+
+    // Iterating a Vec/Array/HashMap hands out element references into its own
+    // storage; a push/insert mid-loop can realloc that storage out from under
+    // them. Freeze the iterable's root for the loop body's life — same
+    // mechanism a slice takes, held longer. Not applied to a byte-iterated
+    // string (no element references escape a copy) or a user `next()`
+    // iterator (owned values, not borrows).
+    var iterFrozenRoot: Option<string> = Option.None
+    var needsIterFreeze = false
+    match iterType.clone() {
+        TypeKind.TVec(e) => {
+            needsIterFreeze = true
+        }
+        TypeKind.TArray(e, s) => {
+            needsIterFreeze = true
+        }
+        TypeKind.THashMap(k, v) => {
+            needsIterFreeze = true
+        }
+        _ => {
+        }
+    }
+    if needsIterFreeze {
+        match accessPath(iterable) {
+            Option.Some(p) => {
+                freezeName(ck, p.root, p.fields)
+                iterFrozenRoot = Option.Some(p.root)
+            }
+            Option.None => {
+            }
         }
     }
 
@@ -929,14 +1035,204 @@ pub fn checkForIn(ck: &mut Checker, varName: &string, varName2: &Option<string>,
 
     ck.loopDepth = ck.loopDepth - 1
     popScope(ck)
+    match iterFrozenRoot {
+        Option.Some(r) => {
+            unfreezeName(ck, r)
+        }
+        Option.None => {
+        }
+    }
 }
 
 // -- Top-level: check a function body --
+
+// A reference tucked inside a return type's storage (Option<&[T]>, a Vec<&T>
+// return, ...) outlives whatever freeze the call site took for the call
+// itself — nothing marks the OUTER value as borrowed the way a bare `&T`
+// return does. `outer` is the enum's source name for a nicer message
+// ("...inside 'Option'" rather than the mangled "...inside 'Option_i64'").
+fn errorIfNestedRefReturn(ck: &mut Checker, func: &Function, retType: &TypeKind) {
+    match retType {
+        TypeKind.TRef(inner, mutable) => {
+            return
+        }
+        _ => {
+        }
+    }
+    if !nestedRef(ck, retType) {
+        return
+    }
+    var outer = typeName(retType)
+    match retType {
+        TypeKind.TEnum(name) => {
+            if ck.enums.contains(name) {
+                outer = ck.enums.get(name)!.baseName.clone()
+            }
+        }
+        _ => {
+        }
+    }
+    error(ck, "function '" + func.name.clone() + "': cannot return a reference stored inside '" + outer + "'", Option.None)
+}
+
+// A view-returning method (`&[T]`/`&string` receiver getter) may only hand
+// back storage reachable from `self` — the call site freezes the receiver
+// and nothing else, so a view into a method-local or another param would
+// dangle the moment that storage goes away. AST-level walk (not through the
+// type-checked expression path): only needs the raw shape of each `return`.
+fn viewReturnRoot(e: &Expr): Option<string> {
+    match e {
+        Expr.Ident(name, sp) => {
+            return Option.Some(name.clone())
+        }
+        Expr.FieldAccess(obj, field, sp) => {
+            return viewReturnRoot(*obj)
+        }
+        Expr.IndexAccess(obj, idx, sp) => {
+            return viewReturnRoot(*obj)
+        }
+        Expr.MethodCall(obj, method, args, sp) => {
+            return viewReturnRoot(*obj)
+        }
+        _ => {
+            return Option.None
+        }
+    }
+}
+
+// The field chain from `self` a return value points into (`self.a[0..n]` ->
+// `["a"]`, `self.data` -> `["data"]`, bare `self` -> `[]`). None when the
+// value isn't rooted at self at all — that's already an error, reported by
+// checkViewReturnStmt separately, so provenance recording just declines.
+fn viewFieldChain(e: &Expr): Option<Vec<string>> {
+    match e {
+        Expr.Ident(name, sp) => {
+            if name == "self" {
+                return Option.Some(Vec.new())
+            }
+            return Option.None
+        }
+        Expr.FieldAccess(obj, field, sp) => {
+            match viewFieldChain(*obj) {
+                Option.Some(fs) => {
+                    var nf = fs.clone()
+                    nf.push(field.clone())
+                    return Option.Some(nf)
+                }
+                Option.None => {
+                    return Option.None
+                }
+            }
+        }
+        Expr.IndexAccess(obj, idx, sp) => {
+            return viewFieldChain(*obj)
+        }
+        Expr.MethodCall(obj, method, args, sp) => {
+            return viewFieldChain(*obj)
+        }
+        _ => {
+            return Option.None
+        }
+    }
+}
+
+fn stringVecEq(a: &Vec<string>, b: &Vec<string>): bool {
+    if a.len != b.len {
+        return false
+    }
+    for i in 0..a.len {
+        if a[i] != b[i] {
+            return false
+        }
+    }
+    return true
+}
+
+fn checkViewReturnStmt(ck: &mut Checker, s: &Stmt, chains: &mut Vec<Vec<string>>) {
+    match s {
+        Stmt.Return(v, sp) => {
+            match v {
+                Option.Some(e) => {
+                    match viewReturnRoot(*e) {
+                        Option.Some(root) => {
+                            if root != "self" {
+                                error(ck, "cannot return a view of '" + root.clone() + "'", cloneSpan(sp))
+                            }
+                        }
+                        Option.None => {
+                        }
+                    }
+                    match viewFieldChain(*e) {
+                        Option.Some(chain) => {
+                            chains.push(chain)
+                        }
+                        Option.None => {
+                        }
+                    }
+                }
+                Option.None => {
+                }
+            }
+        }
+        Stmt.IfStmt(cond, thenBody, elseBody, sp) => {
+            for s2 in thenBody {
+                checkViewReturnStmt(ck, *s2, chains)
+            }
+            match elseBody {
+                Option.Some(eb) => {
+                    for s2 in eb {
+                        checkViewReturnStmt(ck, *s2, chains)
+                    }
+                }
+                Option.None => {
+                }
+            }
+        }
+        Stmt.MatchStmt(subj, arms, sp) => {
+            for a in arms {
+                for s2 in a.body {
+                    checkViewReturnStmt(ck, *s2, chains)
+                }
+            }
+        }
+        _ => {
+        }
+    }
+}
+
+fn checkViewReturnProvenance(ck: &mut Checker, func: &Function, retType: &TypeKind) {
+    if !isViewReturnType(retType) {
+        return
+    }
+    if func.params.len == 0 || func.params[0].name != "self" {
+        return
+    }
+    var chains: Vec<Vec<string>> = Vec.new()
+    for s in func.body {
+        checkViewReturnStmt(ck, *s, chains)
+    }
+    // Record provenance only when every `return` agrees on the same field
+    // chain — a fork whose arms return different fields has no single answer,
+    // so the call site falls back to freezing the whole receiver (still sound,
+    // just less precise).
+    if chains.len > 0 {
+        var allSame = true
+        for i in 1..chains.len {
+            if !stringVecEq(chains[0], chains[i]) {
+                allSame = false
+            }
+        }
+        if allSame {
+            ck.viewReturnFields.insert(func.name.clone(), chains[0].clone())
+        }
+    }
+}
 
 pub fn checkFunction(ck: &mut Checker, func: &Function) {
     pushScope(ck)
     let retType = resolveAstType(ck, func.retType)
     ck.currentFnRetType = retType.clone()
+    errorIfNestedRefReturn(ck, func, retType)
 
     // Declare parameters
     for param in func.params {
@@ -992,9 +1288,29 @@ pub fn registerFunction(ck: &mut Checker, func: &Function) {
 pub fn registerStruct(ck: &mut Checker, decl: &StructDecl) {
     var fields: Vec<CkStructField> = Vec.new()
     for field in decl.fields {
+        let fty = resolveAstType(ck, field.ty)
+        // References are second-class: they can only live in a param or a local
+        // binding, never in storage that outlives the call that took the borrow.
+        // A struct field is exactly that kind of storage, direct or nested
+        // (Vec<&T> etc — see nestedRef). Checked against a clone: matching `fty`
+        // itself would move its payload out of the TRef arm, leaving it unusable
+        // below for the field record and the nestedRef fallback.
+        var isDirectRef = false
+        match fty.clone() {
+            TypeKind.TRef(inner, mutable) => {
+                isDirectRef = true
+            }
+            _ => {
+            }
+        }
+        if isDirectRef {
+            error(ck, "struct '" + decl.name.clone() + "' field '" + field.name.clone() + "': references cannot be stored in structs", Option.None)
+        } else if nestedRef(ck, fty) {
+            error(ck, "struct '" + decl.name.clone() + "' field '" + field.name.clone() + "': references cannot be stored in a collection", Option.None)
+        }
         fields.push(CkStructField {
             name: field.name.clone(),
-            ty: resolveAstType(ck, field.ty),
+            ty: fty,
         }
         )
     }
@@ -1298,6 +1614,21 @@ pub fn checkProgram(ck: &mut Checker, program: &Program) {
     registerAllImpls(ck, program)
     synthesizeDefaultMethods(ck, program)
     processDerives(ck, program)
+
+    // Phase 2.5: record view-return provenance (which field a `&[T]`/`&string`
+    // getter method reads off `self`) for every impl method BEFORE any body is
+    // checked. A caller in Phase 3 (`t.items()` inside `main`) needs the
+    // answer already on file — recording it lazily inside checkFunction only
+    // helped a CALLER that happens to be checked later than its callee, which
+    // free-function/impl-method ordering does not guarantee (mirrors the
+    // oracle's recordViewProvenance pre-pass over implFnsToCheck).
+    var vi: i64 = 0
+    while vi < ck.monomorphizedFns.len {
+        let vfn = ck.monomorphizedFns[vi].clone()
+        let vRetType = resolveAstType(ck, vfn.retType)
+        checkViewReturnProvenance(ck, vfn, vRetType)
+        vi = vi + 1
+    }
 
     // Register module-level globals in a persistent scope below every function
     // scope, so function bodies can reference them (e.g. `if key == KEY_QUIT`).

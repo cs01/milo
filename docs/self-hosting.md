@@ -47,6 +47,24 @@ MILO_ROOT=$PWD bun scripts/guard.ts --mem-mb 4096 --timeout-s 800 -- \
 cmp /tmp/stage2.ll /tmp/stage3.ll
 ```
 
+### The stronger check: is the self-built compiler as CORRECT as the oracle-built one?
+
+A fixed point alone is not proof of correctness — a compiler with a consistent bug reproduces
+itself perfectly. So the fixture census was re-run with the STAGE 2 binary swapped in for
+stage 1:
+
+| compiler running the corpus | fixtures behaving correctly |
+|---|---|
+| stage 1 (oracle-built milo0) | 503–504 / 578 |
+| **stage 2 (self-built milo0)** | **504 / 578** |
+
+Identical. The ±1 is `battleConcurrency`, a known race that flips buckets between runs. So
+milo0 compiled by itself is functionally equivalent to milo0 compiled by the TS oracle across
+the whole corpus — not merely self-reproducing.
+
+To repeat it: build stage 2, `cp` it over `.selfhost/milo-self.bin`, run
+`bun scripts/ir-diff.ts --exec`, then restore the original binary.
+
 **This does NOT re-gate anything.** Per `feedback_no_selfhost_gate`, self-host parity must
 never block a change in `src/`. This is a measured state, not a CI requirement.
 

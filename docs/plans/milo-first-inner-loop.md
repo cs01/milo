@@ -258,6 +258,41 @@ That is exactly the number the harness existed to produce, and it cost one after
 instead of the months a port would have spent discovering it. Whatever is decided about
 item 5, it should be decided against 0/578, not against 20,826.
 
+### The work list the harness produced
+
+`scripts/ir-diff.ts` buckets every `self-failed` fixture by cause, so "what does milo0 still
+need" is a ranked list rather than a guess. First pass closed four of them:
+
+| fixed | was blocking | what it was |
+|---|---|---|
+| 64-bit hex in the lexer | 10 | `hexToDecStr` accumulated in `i64`, so `0x…` constants in `std/sha512` **trapped the lexer itself** — a crash instead of the checker's range diagnostic. Now `u64`. |
+| `@!wrapping` module directive | ~10 | Unparseable, and one parse error cascades into dozens of bogus `<unknown>` type errors. Dropping it is correct for milo0 *specifically*: it emits no overflow traps, so wrapping is already its semantics. |
+| `string.pushStr` | 43 | The single most-cited missing method. `genStringAppendInPlace` already existed for the `s = s + x` peephole, so this was wiring. |
+| `bool.toString`, integer `rotateLeft`/`rotateRight` | 23 | `select` over two string literals; `llvm.fshl`/`fshr` with both operands equal. |
+
+Net: **242 → 233 fixtures milo0 cannot compile; 336 → 345 it can.**
+
+Read that ratio carefully — it is the most useful thing on this page. Four features, one of
+them the *most-cited* blocker in the corpus, moved the needle by nine fixtures. The reason
+is that the per-method counts are "fixtures where this method appears among the errors",
+not "fixtures unblocked by fixing it": most failing fixtures are blocked by several
+independent gaps at once. Measured distribution over the 94 fixtures failing on missing
+methods: **40 blocked by exactly one, 27 by two, 17 by three, and 10 by four or more.**
+
+So the port does not have a lucky-fix shape. The remaining ranked head:
+
+| fixtures | gap |
+|---|---|
+| 30 | Option/Result methods on a struct receiver — milo0 has **no** `isSome`/`isNone`/`isOk`/`isErr`/`unwrapOr`/`map`/`andThen`/`orElse`/`mapErr` at all; `Option` is reachable only through `match` |
+| 20 | `<unknown>.push` — cascades from an earlier failure in the same file |
+| 12 | `Vec.clear`, `insert`, `remove`, `keys`, `sort` |
+| 11 | let-else with a namespaced enum pattern (`let Option.Some(x) = e else { }`) — milo0's AST has **no let-else node**, so it is a parser+checker+lower+codegen feature, not a parse fix |
+| ~10 | string views: `lines`, `splitView`, `repeat`, `indexOfFrom` |
+
+The two structural items there — Option/Result methods and let-else — are each multi-file
+changes through parser, checker, lowering and codegen. That is the honest unit of work for
+this port, and there are dozens of them.
+
 ---
 
 ## The pitfalls, named so they can be avoided

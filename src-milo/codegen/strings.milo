@@ -335,30 +335,79 @@ pub fn genIntToString(cg: &mut Cgen, val: &string, unsigned: bool): Val {
 }
 
 // double.toString() — snprintf("%g") into an owned heap buffer
-pub fn genFloatToString(cg: &mut Cgen, val: &string): Val {
-    ensureStringTy(cg)
-    ensureMalloc(cg)
+// The shortest decimal string that reads back as the bit-identical value — the same
+// algorithm the oracle emits (codegen.ts ensureFloatFormatHelper), because the two must
+// agree digit for digit. Plain "%g" is 6 significant digits and silently destroys data:
+// pi printed as 3.14159, 123456789.123456 as 1.23457e+08.
+//
+// Two loops. The first counts integer digits by walking powers of ten; the second raises
+// "%.*g" precision until the text parses back equal. Precision must START at the
+// integer-digit count, not at 1: %g switches to exponent form once the exponent reaches
+// the precision, so %.1g of 100.0 is the round-tripping but unreadable "1e+02".
+//
+// The digit walk uses only comparisons and a multiply, so it needs no libm. NaN makes
+// every fcmp false, so it takes dig=1, never compares equal, and falls out at the cap as
+// "nan"; infinity saturates the walk and prints "inf".
+fn ensureFloatFmt(cg: &mut Cgen) {
+    if cg.declaredFloatFmt {
+        return
+    }
+    cg.declaredFloatFmt = true
     if !cg.declaredSnprintf {
         emitG(cg, "declare i32 @snprintf(ptr, i64, ptr, ...)\n")
         cg.declaredSnprintf = true
     }
-    let fmt = emitStringLit(cg, "%g")
-    let len = nextTemp(cg)
-    emit(cg, "  " + len + " = call i32 (ptr, i64, ptr, ...) @snprintf(ptr null, i64 0, ptr " + fmt + ", double " + val + ")\n")
-    let len64 = nextTemp(cg)
-    emit(cg, "  " + len64 + " = sext i32 " + len + " to i64\n")
-    let sz = nextTemp(cg)
-    emit(cg, "  " + sz + " = add i64 " + len64 + ", 1\n")
+    emitG(cg, "declare double @strtod(ptr, ptr)\n")
+    let fmt = emitStringLit(cg, "%.*g")
+    emitG(cg, "define private i64 @milo.fmt.f64(double %v, ptr %buf) {\n")
+    emitG(cg, "entry.bb:\n")
+    emitG(cg, "  %d = fadd double %v, 0.000000e+00\n")
+    emitG(cg, "  %isneg = fcmp olt double %d, 0.000000e+00\n")
+    emitG(cg, "  %negd = fneg double %d\n")
+    emitG(cg, "  %av = select i1 %isneg, double %negd, double %d\n")
+    emitG(cg, "  br label %dloop\n")
+    emitG(cg, "dloop:\n")
+    emitG(cg, "  %dig = phi i32 [ 1, %entry.bb ], [ %dignext, %dnext ]\n")
+    emitG(cg, "  %pow = phi double [ 1.000000e+01, %entry.bb ], [ %pownext, %dnext ]\n")
+    emitG(cg, "  %room = icmp slt i32 %dig, 17\n")
+    emitG(cg, "  %over = fcmp oge double %av, %pow\n")
+    emitG(cg, "  %grow = and i1 %room, %over\n")
+    emitG(cg, "  br i1 %grow, label %dnext, label %ploop\n")
+    emitG(cg, "dnext:\n")
+    emitG(cg, "  %dignext = add i32 %dig, 1\n")
+    emitG(cg, "  %pownext = fmul double %pow, 1.000000e+01\n")
+    emitG(cg, "  br label %dloop\n")
+    emitG(cg, "ploop:\n")
+    emitG(cg, "  %p = phi i32 [ %dig, %dloop ], [ %pnext, %again ]\n")
+    emitG(cg, "  %n = call i32 (ptr, i64, ptr, ...) @snprintf(ptr %buf, i64 64, ptr " + fmt + ", i32 %p, double %d)\n")
+    emitG(cg, "  %back = call double @strtod(ptr %buf, ptr null)\n")
+    emitG(cg, "  %exact = fcmp oeq double %back, %v\n")
+    emitG(cg, "  %last = icmp sge i32 %p, 17\n")
+    emitG(cg, "  %stop = or i1 %exact, %last\n")
+    emitG(cg, "  br i1 %stop, label %fin, label %again\n")
+    emitG(cg, "again:\n")
+    emitG(cg, "  %pnext = add i32 %p, 1\n")
+    emitG(cg, "  br label %ploop\n")
+    emitG(cg, "fin:\n")
+    emitG(cg, "  %n64 = sext i32 %n to i64\n")
+    emitG(cg, "  ret i64 %n64\n")
+    emitG(cg, "}\n")
+}
+
+pub fn genFloatToString(cg: &mut Cgen, val: &string): Val {
+    ensureStringTy(cg)
+    ensureMalloc(cg)
+    ensureFloatFmt(cg)
     let buf = nextTemp(cg)
-    emit(cg, "  " + buf + " = call ptr @malloc(i64 " + sz + ")\n")
-    emit(cg, "  call i32 (ptr, i64, ptr, ...) @snprintf(ptr " + buf + ", i64 " + sz + ", ptr " + fmt + ", double " + val + ")\n")
+    emit(cg, "  " + buf + " = call ptr @malloc(i64 64)\n")
+    let len64 = nextTemp(cg)
+    emit(cg, "  " + len64 + " = call i64 @milo.fmt.f64(double " + val.clone() + ", ptr " + buf + ")\n")
     let s0 = nextTemp(cg)
     emit(cg, "  " + s0 + " = insertvalue %String undef, ptr " + buf + ", 0\n")
     let s1 = nextTemp(cg)
     emit(cg, "  " + s1 + " = insertvalue %String " + s0 + ", i64 " + len64 + ", 1\n")
-    // cap = allocated bytes so a later in-place append knows the true capacity.
     let s2 = nextTemp(cg)
-    emit(cg, "  " + s2 + " = insertvalue %String " + s1 + ", i64 " + sz + ", 2\n")
+    emit(cg, "  " + s2 + " = insertvalue %String " + s1 + ", i64 64, 2\n")
     return Val {
         v: s2, ty: "string"
     }

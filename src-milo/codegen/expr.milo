@@ -4801,8 +4801,12 @@ pub fn genExpr(cg: &mut Cgen, e: &Expr, locs: &Vec<Local>, sigs: &Vec<CgFnSig>, 
                 }
                 if isCmpOp(op) {
                     var fp = "oeq"
+                    // `une`, not `one`: IEEE 754 says every comparison with NaN is false
+                    // EXCEPT `!=`, which is true. `one` is the ordered form, which makes
+                    // both `x == x` and `x != x` false for NaN — so `!(x == x)` and
+                    // `x != x` disagree, and NaN stops being detectable.
                     if op == "!=" {
-                        fp = "one"
+                        fp = "une"
                     } 
                     else if op == "<" {
                         fp = "olt"

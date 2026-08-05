@@ -16,6 +16,13 @@ bun test tests/run.test.ts -t "arithmetic"      # one fixture by @name/descripti
 bun test tests/safety.test.ts                   # one file
 ```
 
+`-t` is cheap: the fixture/error/runtime-error lanes narrow their `beforeAll` compile
+fan-out to the same pattern, so a targeted run builds only what it will execute (one
+fixture is ~1s, not the ~34s it cost when every lane compiled all 577 first). Bun scrubs
+`-t` from `process.argv` before a test file loads, so the pattern is recovered from the
+process's own command line — set `MILO_TEST_FILTER` instead if you are invoking the suite
+in a way that hides it. Both fail open: no pattern found means compile everything.
+
 ## The fixture protocol (no code changes to add a test)
 `tests/run.test.ts` walks two directories:
 - `tests/fixtures/*.milo` — **compiled + executed.** stdout must match the `// @expect: <line>` annotations, one per expected output line.

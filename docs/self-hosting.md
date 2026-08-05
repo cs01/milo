@@ -12,6 +12,12 @@ acceptance test, and the rules in "Working Agreement" are mandatory.
 > the one place Milo genuinely wins (index access), the costs (second-class refs vs.
 > graph-shaped IR, bootstrap paradox, compile time), and the port order if this restarts —
 > **codegen first, checker last, differential harness green at every step.**
+>
+> **Can the inner loop survive it — decided 2026-08-04.** Yes, conditionally. A 40k-LOC
+> Milo compiler costs ~0.8s frontend + ~15s clang `-O2` per edit, and clang is 95% of that.
+> Parallel codegen units (measured 3.4x on this box) plus `--fast` bring it to ~1–2s; the
+> test cycle is host-independent and mildly favours native. Prerequisites, evidence and the
+> named pitfalls: [plans/milo-first-inner-loop.md](plans/milo-first-inner-loop.md).
 
 ## STATUS: bootstrap converges at -O2 (M5 done)
 

@@ -1,6 +1,6 @@
 import { test, expect, describe, beforeAll, afterAll } from "bun:test";
 import { readdirSync, readFileSync, unlinkSync, existsSync, mkdtempSync, rmSync } from "fs";
-import { execSync } from "child_process";
+import { execSync, spawnSync } from "child_process";
 import { tmpdir, devNull } from "os";
 import { join } from "path";
 import { parseExpected, parseExpectedError, parseExpectedRuntimeError } from "./annotations";
@@ -100,8 +100,50 @@ function skippedHere(dir: string, file: string): boolean {
   return m[1].split(",").map(s => s.trim()).includes(process.platform);
 }
 
+// `bun test -t <pat>` is consumed by the runner and scrubbed from `process.argv` before a
+// test file loads (verified on bun 1.3.10 — argv holds only the executable and the file),
+// so the pattern has to be read back off the real command line. Fails open: any trouble
+// here means "no filter", i.e. compile everything, which is only slow, never wrong.
+function bunTestNamePattern(): string | undefined {
+  let cmdline: string;
+  try {
+    const r = spawnSync("ps", ["-o", "args=", "-p", String(process.pid)], { encoding: "utf-8" });
+    cmdline = r.stdout ?? "";
+  } catch { return undefined; }
+  // The pattern may contain spaces (`-t "green threads"`), which `ps` renders unquoted —
+  // so take everything up to the next flag rather than the next whitespace.
+  const m = cmdline.match(/(?:^|\s)(?:-t|--test-name-pattern)[= ](.+?)(?=\s+-{1,2}[A-Za-z]|\s*$)/);
+  return m?.[1]?.trim() || undefined;
+}
+
+// Bun's `-t` decides which tests RUN, but the compile fan-out below is ours and runs in
+// `beforeAll` — so without this, `-t "arithmetic"` still built all 577 fixtures and cost
+// 34s to execute one test. Mirroring the filter here is what makes a targeted run cheap.
+// It only ever narrows the SAME `files` list that generates the tests, so a pattern this
+// reads differently from bun can under-generate tests but can never leave a generated
+// test without its build.
+const nameMatches: (describeName: string, testName: string) => boolean = (() => {
+  const pattern = process.env.MILO_TEST_FILTER || bunTestNamePattern();
+  if (!pattern) return () => true;
+  let re: RegExp | null = null;
+  try { re = new RegExp(pattern); } catch { re = null; }
+  const hit = (s: string) => (re ? re.test(s) : s.includes(pattern));
+  // Match permissively: bun tests the full "describe > test" name, but a pattern aimed at
+  // the leaf alone is the common case and must not silently compile nothing.
+  return (d, t) => hit(t) || hit(`${d} > ${t}`);
+})();
+
+function lane(dir: string, describeName: string): string[] {
+  let entries: string[] = [];
+  try { entries = readdirSync(dir); } catch { return []; }
+  return entries.filter(f =>
+    f.endsWith(".milo")
+    && !skippedHere(dir, f)
+    && nameMatches(describeName, f.replace(".milo", "")));
+}
+
 describe("fixtures (compile + run)", () => {
-  const files = readdirSync(FIXTURES_DIR).filter(f => f.endsWith(".milo") && !skippedHere(FIXTURES_DIR, f));
+  const files = lane(FIXTURES_DIR, "fixtures (compile + run)");
   const builds = new Map<string, RunResult>();
 
   beforeAll(async () => {
@@ -138,7 +180,7 @@ describe("errors (type checker rejects)", () => {
   // Same @skip-os contract as the fixture lane: a negative test can be as
   // platform-bound as a positive one — asserting on a diagnostic that quotes a
   // POSIX header proves nothing where that header doesn't exist.
-  const files = readdirSync(ERRORS_DIR).filter(f => f.endsWith(".milo") && !skippedHere(ERRORS_DIR, f));
+  const files = lane(ERRORS_DIR, "errors (type checker rejects)");
   const results = new Map<string, RunResult>();
 
   // Compile-only lane: the compile IS the test, so results are captured in the
@@ -164,8 +206,7 @@ describe("errors (type checker rejects)", () => {
 });
 
 describe("runtime errors (debug mode traps)", () => {
-  let files: string[] = [];
-  try { files = readdirSync(RUNTIME_ERRORS_DIR).filter(f => f.endsWith(".milo") && !skippedHere(RUNTIME_ERRORS_DIR, f)); } catch {}
+  const files = lane(RUNTIME_ERRORS_DIR, "runtime errors (debug mode traps)");
   const builds = new Map<string, RunResult>();
 
   beforeAll(async () => {

@@ -103,6 +103,68 @@ pub fn parseFile(path: &string): Program {
     return parse(p)
 }
 
+// A name declared twice at the top level of ONE file. The flat-namespace merge
+// (dedup* below) is last-wins, so the two copies would silently collapse to
+// whichever the merge happened to pick, and every call site runs that one —
+// the classic bad-merge / duplicated-block bug. Milo has no overloading, so a
+// same-file redefinition never has a legitimate reading. Mirrors the TS
+// resolver's checkDuplicateDecls, scoped to exactly one file's own Program
+// (before it is merged with anything else) — cross-file collisions are a
+// separate, deliberately laxer story (see dedup* below).
+//
+// Values and types live in separate namespaces (`struct Point` next to `fn
+// Point` is odd but not a redefinition); impl methods are namespaced by
+// (type, trait) so an inherent `Foo.bar` and a `Trait for Foo` `bar` are
+// distinct symbols, but two inherent `Foo.bar`s collide.
+fn checkDupKey(seen: &mut HashMap<string, bool>, key: string, label: string) {
+    if seen.contains(key) {
+        eprint("error: '" + label + "' is defined twice in this file")
+        exit(1)
+    }
+    seen.insert(key, true)
+}
+
+pub fn checkDuplicateDecls(prog: &Program) {
+    var seen: HashMap<string, bool> = HashMap.new()
+    for i in 0..prog.functions.len {
+        checkDupKey(seen, "value:" + prog.functions[i].name.clone(), "fn " + prog.functions[i].name.clone())
+    }
+    for i in 0..prog.globals.len {
+        var kind = "let "
+        if prog.globals[i].mutable {
+            kind = "var "
+        }
+        checkDupKey(seen, "value:" + prog.globals[i].name.clone(), kind + prog.globals[i].name.clone())
+    }
+    for i in 0..prog.structs.len {
+        checkDupKey(seen, "type:" + prog.structs[i].name.clone(), "struct " + prog.structs[i].name.clone())
+    }
+    for i in 0..prog.enums.len {
+        checkDupKey(seen, "type:" + prog.enums[i].name.clone(), "enum " + prog.enums[i].name.clone())
+    }
+    for i in 0..prog.traits.len {
+        checkDupKey(seen, "type:" + prog.traits[i].name.clone(), "trait " + prog.traits[i].name.clone())
+    }
+    for i in 0..prog.typeAliases.len {
+        checkDupKey(seen, "type:" + prog.typeAliases[i].name.clone(), "type " + prog.typeAliases[i].name.clone())
+    }
+    for i in 0..prog.impls.len {
+        var traitPart = ""
+        match prog.impls[i].traitName {
+            Option.Some(t) => {
+                traitPart = t.clone()
+            }
+            Option.None => {
+            }
+        }
+        for j in 0..prog.impls[i].methods.len {
+            let key = "impl:" + prog.impls[i].typeName.clone() + ":" + traitPart.clone() + ":" + prog.impls[i].methods[j].name.clone()
+            let label = "fn " + prog.impls[i].typeName.clone() + "." + prog.impls[i].methods[j].name.clone()
+            checkDupKey(seen, key, label)
+        }
+    }
+}
+
 // Recursively process imports from a parsed program.
 // Parse+merge one already-resolved file path, then recurse into ITS imports.
 // No-ops if already visited. Shared by the real import loop and the
@@ -113,6 +175,7 @@ pub fn mergeImportedFile(rs: &mut ResolverState, absPath: string) {
     }
     rs.visited.insert(absPath.clone(), true)
     let imported = parseFile(absPath)
+    checkDuplicateDecls(imported)
 
     for si in 0..imported.structs.len {
         rs.structs.push(imported.structs[si].clone())
@@ -270,6 +333,7 @@ pub fn resolveImports(program: Program, sourceDir: string, stdlibDir: string, ta
     if pathExists(preludePath) && !rs.visited.contains(preludePath) {
         rs.visited.insert(preludePath.clone(), true)
         let prelude = parseFile(preludePath)
+        checkDuplicateDecls(prelude)
         for si in 0..prelude.structs.len {
             rs.structs.push(prelude.structs[si].clone())
         }
@@ -297,6 +361,8 @@ pub fn resolveImports(program: Program, sourceDir: string, stdlibDir: string, ta
         let preludeDir = Path.dirname(preludePath)
         processImports(rs, prelude, preludeDir)
     }
+
+    checkDuplicateDecls(program)
 
     // User code comes after prelude (last-wins dedup means user overrides)
     for si in 0..program.structs.len {

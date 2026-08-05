@@ -44,7 +44,12 @@ if (!existsSync(MILO_SELF)) {
   process.exit(1);
 }
 
-type Verdict = "ok" | "accepted" | "wrong-message" | "build-failed" | "did-not-trap";
+// "unmeasured" is not a verdict about the compiler — it means the guard killed the child
+// (watchdog or system memory pressure) before it could answer. Folding those into
+// "wrong-message" is how a harness reports a confident number it did not actually measure;
+// an early version of this script did exactly that and produced 204 bogus failures while
+// six compiler builds were competing for RAM. Run this with the machine otherwise idle.
+type Verdict = "ok" | "accepted" | "wrong-message" | "build-failed" | "did-not-trap" | "unmeasured";
 type Outcome = { name: string; lane: string; verdict: Verdict; detail: string };
 
 function names(dir: string): string[] {
@@ -68,6 +73,7 @@ async function checkReject(name: string, tmpDir: string): Promise<Outcome> {
     { env: CHILD_ENV, timeoutMs: 60_000, memMb: 1536 });
   const out = r.stderr + r.stdout;
 
+  if (r.guardKill) return { name, lane: "errors", verdict: "unmeasured", detail: r.guardKill };
   if (r.code === 0) return { name, lane: "errors", verdict: "accepted", detail: "compiled clean — the bug this fixture guards is not caught" };
   if (want && !out.includes(want)) {
     return { name, lane: "errors", verdict: "wrong-message", detail: `want "${want}" — got "${out.trim().split("\n").find(l => l.trim())?.slice(0, 110) ?? ""}"` };
@@ -83,12 +89,16 @@ async function checkTrap(name: string, tmpDir: string): Promise<Outcome> {
 
   const build = await guardedRun(MILO_SELF, ["build", src, "--debug", "-o", bin],
     { env: CHILD_ENV, timeoutMs: 60_000, memMb: 1536 });
+  if (build.guardKill) return { name, lane: "runtime-errors", verdict: "unmeasured", detail: build.guardKill };
   if (build.code !== 0) {
     return { name, lane: "runtime-errors", verdict: "build-failed", detail: (build.stderr + build.stdout).trim().split("\n").find(l => l.trim())?.slice(0, 130) ?? "" };
   }
 
   const r = await guardedRun(bin, [], { env: CHILD_ENV, timeoutMs: 30_000, memMb: 512 });
-  if (r.code === 0 && !r.signal && !r.guardKill) {
+  // A guard kill is not a trap — the watchdog fired, the program's own bounds check may
+  // never have run. Do not count it as the fixture passing.
+  if (r.guardKill) return { name, lane: "runtime-errors", verdict: "unmeasured", detail: r.guardKill };
+  if (r.code === 0 && !r.signal) {
     return { name, lane: "runtime-errors", verdict: "did-not-trap", detail: "exited 0 — the trap this fixture guards did not fire" };
   }
   const out = r.stderr + r.stdout;
@@ -118,16 +128,24 @@ await Promise.all(Array.from({ length: CONCURRENCY }, async () => {
 results.sort((a, b) => (a.lane + a.name).localeCompare(b.lane + b.name));
 
 const ok = results.filter(r => r.verdict === "ok");
-console.log(`${ok.length}/${results.length} negative tests behave correctly under milo-self (${skips} skipped for this OS)\n`);
+const unmeasured = results.filter(r => r.verdict === "unmeasured");
+const measured = results.length - unmeasured.length;
+console.log(`${ok.length}/${measured} negative tests behave correctly under milo-self (${skips} skipped for this OS)`);
+if (unmeasured.length) {
+  console.log(`WARNING: ${unmeasured.length} of ${results.length} were NOT MEASURED — the guard killed them. ` +
+    `Re-run with the machine idle; these numbers are incomplete, not a compiler verdict.`);
+}
+console.log();
 
-const order: Verdict[] = ["accepted", "did-not-trap", "wrong-message", "build-failed"];
+const order: Verdict[] = ["accepted", "did-not-trap", "wrong-message", "build-failed", "unmeasured"];
 for (const v of order) {
   const rs = results.filter(r => r.verdict === v);
   if (!rs.length) continue;
   const gloss = v === "accepted" ? "  <-- UNSOUND: milo-self compiles a program it must reject"
     : v === "did-not-trap" ? "  <-- UNSOUND: the runtime check did not fire"
     : v === "wrong-message" ? "  (rejected, but for a different reason — the fixture is no longer testing what it names)"
-    : "  (rejected at build time, but this lane's programs are supposed to BUILD and then trap)";
+    : v === "build-failed" ? "  (rejected at build time, but this lane's programs are supposed to BUILD and then trap)"
+    : "  (guard kill — no verdict; the machine was busy)";
   console.log(`${String(rs.length).padStart(5)}  ${v}${gloss}`);
   for (const r of rs) console.log(`         ${r.name}: ${r.detail}`);
   console.log();

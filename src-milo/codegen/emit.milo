@@ -483,6 +483,10 @@ pub fn genProgram(prog: Program, sourceDir: string): string {
         }
         let e = prog.enums[ei].clone()
         var variants: Vec<CgVariantInfo> = Vec.new()
+        // Explicit discriminants set the tag and counting resumes from them; the checker
+        // side (mono.milo) does the same, and the two MUST agree or a match arm compares
+        // against a tag the constructor never stored.
+        var nextEnumTag: i64 = 0
         for vi in 0..e.variants.len {
             let v = e.variants[vi].clone()
             var payloadTypes: Vec<string> = Vec.new()
@@ -491,10 +495,18 @@ pub fn genProgram(prog: Program, sourceDir: string): string {
                 // mangles at read-time, once all mono decls exist).
                 payloadTypes.push(astTypeStr(v.fields[fi]))
             }
+            match v.discriminant {
+                Option.Some(d) => {
+                    nextEnumTag = d
+                }
+                Option.None => {
+                }
+            }
             variants.push(CgVariantInfo {
-                name: v.name.clone(), tag: vi as i32, payloadTypes: payloadTypes
+                name: v.name.clone(), tag: nextEnumTag as i32, payloadTypes: payloadTypes
             }
             )
+            nextEnumTag = nextEnumTag + 1
         }
         cg.enums.insert(e.name.clone(), CgEnumInfo {
             name: e.name.clone(), variants: variants, payloadSlots: 0

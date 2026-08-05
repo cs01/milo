@@ -353,10 +353,19 @@ pub fn parseEnum(p: &mut Parser): EnumDecl {
     var variants: Vec<EnumVariant> = Vec.new()
     while !at(p, TokKind.RBrace) {
         let variantName = expect(p, TokKind.Ident).value
-        // Explicit discriminant (`Null = 3`): parsed and dropped, since the tag milo0
-        // assigns is positional.
+        // Explicit discriminant (`LDA = 169`, `Neg = -1`).
+        var disc: Option<i64> = Option.None
         if matchTok(p, TokKind.Eq) {
-            parseExpr(p)
+            var neg = false
+            if matchTok(p, TokKind.Minus) {
+                neg = true
+            }
+            let numTok = expect(p, TokKind.Int)
+            var dv = numTok.value.parseInt() ?? 0
+            if neg {
+                dv = 0 - dv
+            }
+            disc = Option.Some(dv)
         }
         var fields: Vec<MiloType> = Vec.new()
         if matchTok(p, TokKind.LParen) {
@@ -367,7 +376,7 @@ pub fn parseEnum(p: &mut Parser): EnumDecl {
             expect(p, TokKind.RParen)
         }
         variants.push(EnumVariant {
-            name: variantName, fields: fields
+            name: variantName, fields: fields, discriminant: disc
         }
         )
         matchTok(p, TokKind.Comma)

@@ -706,11 +706,11 @@ pub fn registerBuiltinGenericEnums(ck: &mut Checker) {
     someFields.push(simpleType("T"))
     var optVariants: Vec<EnumVariant> = Vec.new()
     optVariants.push(EnumVariant {
-        name: "Some", fields: someFields
+        name: "Some", fields: someFields, discriminant: Option.None
     }
     )
     optVariants.push(EnumVariant {
-        name: "None", fields: Vec.new()
+        name: "None", fields: Vec.new(), discriminant: Option.None
     }
     )
     var optParams: Vec<TypeParam> = Vec.new()
@@ -732,11 +732,11 @@ pub fn registerBuiltinGenericEnums(ck: &mut Checker) {
     errFields.push(simpleType("E"))
     var resVariants: Vec<EnumVariant> = Vec.new()
     resVariants.push(EnumVariant {
-        name: "Ok", fields: okFields
+        name: "Ok", fields: okFields, discriminant: Option.None
     }
     )
     resVariants.push(EnumVariant {
-        name: "Err", fields: errFields
+        name: "Err", fields: errFields, discriminant: Option.None
     }
     )
     var resParams: Vec<TypeParam> = Vec.new()

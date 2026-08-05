@@ -502,7 +502,24 @@ pub fn stmtTerminates(s: &Stmt): bool {
     }
 }
 
-pub fn snapshotMoves(ck: &Checker): Vec<HashMap<string, bool>> {
+// A branch's whole move state: the per-scope `moved` bools (as before) PLUS a
+// copy of the name-keyed movedFields table. Both have to travel together —
+// movedFields is flat/global on the Checker (not scope-indexed), so without
+// its own copy here a move recorded inside one `if` arm would leak straight
+// past restoreMoves into the sibling arm's read of the same place: `if !have {
+// x = res.ty } else if ... res.ty ...` in checkMatchExpr's own arm-join loop
+// marked '.ty' moved in the THEN arm, and the ELSE arm (checked from the
+// restored, pre-branch state for everything else) still saw it as gone —
+// milo-self rejected its own source over this. Same class of bug as the
+// borrow lane's name-keyed freeze table: a side table keyed by name rather
+// than by VarInfo identity has no scope boundary for free, so every place
+// that resets/restores/joins move state has to carry it explicitly.
+pub struct MoveSnapshot {
+    scopeMoved: Vec<HashMap<string, bool>>,
+    movedFields: HashMap<string, Vec<string>>,
+}
+
+pub fn snapshotMoves(ck: &Checker): MoveSnapshot {
     var out: Vec<HashMap<string, bool>> = Vec.new()
     for i in 0..ck.scopes.len {
         var m: HashMap<string, bool> = HashMap.new()
@@ -511,13 +528,15 @@ pub fn snapshotMoves(ck: &Checker): Vec<HashMap<string, bool>> {
         }
         out.push(m)
     }
-    return out
+    return MoveSnapshot {
+        scopeMoved: out, movedFields: ck.movedFields.clone()
+    }
 }
 
-pub fn restoreMoves(ck: &mut Checker, snap: &Vec<HashMap<string, bool>>) {
+pub fn restoreMoves(ck: &mut Checker, snap: &MoveSnapshot) {
     var i: i64 = 0
-    while i < ck.scopes.len && i < snap.len {
-        for name, moved in snap[i] {
+    while i < ck.scopes.len && i < snap.scopeMoved.len {
+        for name, moved in snap.scopeMoved[i] {
             match ck.scopes[i].get(name) {
                 Option.Some(v) => {
                     var updated = v
@@ -530,14 +549,16 @@ pub fn restoreMoves(ck: &mut Checker, snap: &Vec<HashMap<string, bool>>) {
         }
         i = i + 1
     }
+    ck.movedFields = snap.movedFields.clone()
 }
 
 // Re-apply a branch's moves on top of the current state (any-path-moved
-// stays moved after the join).
-pub fn orMoves(ck: &mut Checker, snap: &Vec<HashMap<string, bool>>) {
+// stays moved after the join) — both the whole-variable bools and the
+// per-field places.
+pub fn orMoves(ck: &mut Checker, snap: &MoveSnapshot) {
     var i: i64 = 0
-    while i < ck.scopes.len && i < snap.len {
-        for name, moved in snap[i] {
+    while i < ck.scopes.len && i < snap.scopeMoved.len {
+        for name, moved in snap.scopeMoved[i] {
             if moved {
                 match ck.scopes[i].get(name) {
                     Option.Some(v) => {
@@ -551,6 +572,22 @@ pub fn orMoves(ck: &mut Checker, snap: &Vec<HashMap<string, bool>>) {
             }
         }
         i = i + 1
+    }
+    for root, paths in snap.movedFields {
+        var existing: Vec<string> = Vec.new()
+        match ck.movedFields.get(root) {
+            Option.Some(v) => {
+                existing = v
+            }
+            Option.None => {
+            }
+        }
+        for k in 0..paths.len {
+            if !vecContainsStr(existing, paths[k]) {
+                existing.push(paths[k].clone())
+            }
+        }
+        ck.movedFields.insert(root.clone(), existing)
     }
 }
 

@@ -11,7 +11,7 @@ from "src-milo/checker/types.milo" import {
 from "src-milo/checker/state.milo" import {
     Checker, VarInfo, FnSig, FnParam, StructInfo, EnumInfo, VariantInfo,
     Diagnostic, error, errorHint, warn, pushScope, popScope, declare, lookup, setVarMoved, setVarRead, hasErrors,
-    normalizeEnumNames, stmtTerminates, snapshotMoves, restoreMoves, orMoves, nestedRef, hasAttr,
+    normalizeEnumNames, stmtTerminates, snapshotMoves, restoreMoves, orMoves, nestedRef, hasAttr, MoveSnapshot,
 }
 from "src-milo/checker/expr.milo" import {
     intCoercible, floatLitCoercible, arrayIntCoercible, arrayToVecCoercible, checkExpr, tryMove, isRootMutable, deref,
@@ -363,7 +363,7 @@ pub fn checkMatch(ck: &mut Checker, subject: &Expr, arms: &Vec<MatchArm>, fnRetT
     // join keeps any-path moves (terminated arms drop out) — same rules as
     // if/else branches.
     let preSnap = snapshotMoves(ck)
-    var armSnaps: Vec<Vec<HashMap<string, bool>>> = Vec.new()
+    var armSnaps: Vec<MoveSnapshot> = Vec.new()
     var armTerms: Vec<bool> = Vec.new()
     for i in 0..arms.len {
         restoreMoves(ck, preSnap)
@@ -527,7 +527,7 @@ pub fn checkMatchExpr(ck: &mut Checker, subject: &Expr, arms: &Vec<MatchArm>, fn
     let subjType = checkExpr(ck, subject)
 
     let preSnap = snapshotMoves(ck)
-    var armSnaps: Vec<Vec<HashMap<string, bool>>> = Vec.new()
+    var armSnaps: Vec<MoveSnapshot> = Vec.new()
     var armTerms: Vec<bool> = Vec.new()
     var resultTy = tyUnknown()
     var haveResult = false

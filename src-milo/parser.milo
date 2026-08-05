@@ -1564,6 +1564,7 @@ pub fn parsePrimary(p: &mut Parser): Expr {
             return parseClosure(p, s, true)
         }
         // error: move must precede closure
+        eprint("parse error: " + p.filePath.clone() + ":" + tok.line.toString() + ":" + tok.col.toString() + ": 'move' must precede a closure")
         return Expr.Ident("error_move", s)
     }
     // Parenthesized expr or closure
@@ -1586,7 +1587,14 @@ pub fn parsePrimary(p: &mut Parser): Expr {
         }
     }
 
-    // Fallback — should not reach here in valid input
+    // Fallback — should not reach here in valid input. This used to return the
+    // sentinel silently: no diagnostic here meant the ONLY signal was a later
+    // "undefined variable 'error_unexpected'" from the checker — confusing, and
+    // worse, a program that genuinely declares a variable named `error_unexpected`
+    // would have this sentinel silently resolve to it instead of erroring at all
+    // (the "generated names a user could also write" defect species). Report the
+    // real cause here, same wording as expect()'s mismatch diagnostic.
+    eprint("parse error: " + p.filePath.clone() + ":" + tok.line.toString() + ":" + tok.col.toString() + ": unexpected token '" + tok.value + "'")
     advance(p)
     return Expr.Ident("error_unexpected", s)
 }

@@ -19,7 +19,48 @@ acceptance test, and the rules in "Working Agreement" are mandatory.
 > test cycle is host-independent and mildly favours native. Prerequisites, evidence and the
 > named pitfalls: [plans/milo-first-inner-loop.md](plans/milo-first-inner-loop.md).
 
-## STATUS: bootstrap converges at -O2 (M5 done)
+## STATUS 2026-08-05: SELF-HOSTING RECONVERGED — byte-identical fixed point
+
+`src-milo` was parked and lagging for months. It is now converged again, verified end to end:
+
+```
+stage 1   TS oracle compiles src-milo/main.milo   -> .selfhost/milo-self.bin
+stage 2   stage 1 compiles src-milo/main.milo     -> 362,056 lines IR -> 2.42 MB binary
+stage 3   stage 2 compiles src-milo/main.milo     -> 362,056 lines IR
+          cmp stage2 stage3                       -> BYTE-IDENTICAL
+```
+
+Stage 2 also compiles and runs ordinary programs (`examples/hello.milo` prints correctly),
+and milo0 compiles-and-runs **504 of 578** language fixtures matching the oracle exactly,
+with **zero** wrong-output fixtures.
+
+Reproduce (always guarded — an unguarded self-compile has crashed this machine twice):
+
+```bash
+./milo build src-milo/main.milo -o .selfhost/milo-self.bin
+MILO_ROOT=$PWD bun scripts/guard.ts --mem-mb 4096 --timeout-s 600 -- \
+  .selfhost/milo-self.bin emit-ir src-milo/main.milo > /tmp/stage2.ll
+clang -O0 -w /tmp/stage2.ll -o /tmp/stage2.bin -lm \
+  -L/opt/homebrew/opt/openssl@3/lib -lssl -lcrypto -L/opt/homebrew/opt/sqlite/lib -lsqlite3
+MILO_ROOT=$PWD bun scripts/guard.ts --mem-mb 4096 --timeout-s 800 -- \
+  /tmp/stage2.bin emit-ir src-milo/main.milo > /tmp/stage3.ll
+cmp /tmp/stage2.ll /tmp/stage3.ll
+```
+
+**This does NOT re-gate anything.** Per `feedback_no_selfhost_gate`, self-host parity must
+never block a change in `src/`. This is a measured state, not a CI requirement.
+
+The last blocker was a 20x memory blowup that put stage 3 past a 4 GB cap: the
+alloca-hoisting pass copied the whole accumulated module twice per function (quadratic, and
+every intermediate leaked). Each function now builds in its own buffer and is appended once
+— 1,081 MB to 52 MB on a 1.3k-line input. `leaks --atExit --groupByType` attributed it in
+minutes after a guessed fix had wasted much longer; measure first.
+
+Behaviour parity is tracked by `scripts/ir-diff.ts --exec`, which links milo0's output and
+runs it against each fixture's `@expect` lines. Byte-identity of IR against the TS backend is
+NOT the metric — the two backends legitimately differ; behaviour is what matters.
+
+## HISTORY: bootstrap converges at -O2 (M5 done)
 
 `milo0` compiles its own source to a byte-identical fixed point at the
 production `-O2` level: `stage1 == stage2 == stage3`. Verified empirically

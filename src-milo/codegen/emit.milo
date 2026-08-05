@@ -113,10 +113,18 @@ pub fn constArrayElems(cg: &Cgen, value: &Expr, elemLl: &string, structElem: boo
 // A struct-literal field initialized by an empty container constructor
 // (`Vec.new()`) is still all-zero bytes, hence const. Takes `&Expr` (a
 // borrow) — see constStructBody's comment for why that matters here.
+//
+// Gated on the TYPE name, not just the variant/method name: `vn == "new"` alone
+// also matches `Once.new()`, `Mutex.new()` and friends, whose ".new()" allocates
+// real resources (malloc + pthread_mutex_init for Once) and is nothing like
+// all-zero bytes. Treating that as a constant zero-inits the global and skips
+// its real runtime initializer entirely — the struct's pointer field stays
+// null forever, and the first `.run()`/`.isDone()` dereferences it and
+// segfaults. Only Vec/HashMap's `.new()` is genuinely the empty/zeroed state.
 pub fn isEmptyCtorInit(e: &Expr): bool {
     match e {
         Expr.EnumLit(en, vn, eargs, esp) => {
-            return vn == "new" && eargs.len == 0
+            return (en == "Vec" || en == "HashMap") && vn == "new" && eargs.len == 0
         }
         _ => {
             return false
@@ -196,10 +204,16 @@ pub fn constStructBody(_cg: &Cgen, value: &Expr, sfields: &Vec<FieldInfo>): Opti
 // is always correct, where guessing "constant" would silently emit a zero.
 // An aggregate initializer that IS all-zero bytes, so the static zeroinitializer is
 // already the right answer and no runtime store is needed.
+//
+// Same type-name gate as isEmptyCtorInit above and for the same reason: a bare
+// `vn == "new"` also fires on `Once.new()`, whose zero bytes are NOT its real
+// initial state (a null `_p` instead of a live malloc'd mutex/cond pair) —
+// skipping its runtime init left every `Once` global permanently unusable and
+// crashed on first use.
 pub fn isEmptyAggInit(e: &Expr): bool {
     match e {
         Expr.EnumLit(en, vn, args, span) => {
-            return vn == "new" && args.len == 0
+            return (en == "Vec" || en == "HashMap") && vn == "new" && args.len == 0
         }
         _ => {
             return false
@@ -256,8 +270,11 @@ pub fn isConstInit(e: &Expr): bool {
         }
         Expr.EnumLit(en, vn, args, span) => {
             // `Vec.new()` / `HashMap.new()` are the empty-container constructors, which
-            // are all-zero bytes.
-            return vn == "new" && args.len == 0
+            // are all-zero bytes — but only those two; `en` must be checked too, or
+            // `Once.new()` (real malloc'd state behind a struct that only LOOKS like
+            // an empty container) is wrongly treated as constant zero. See
+            // isEmptyAggInit's comment for the crash this caused.
+            return (en == "Vec" || en == "HashMap") && vn == "new" && args.len == 0
         }
         _ => {
             return false

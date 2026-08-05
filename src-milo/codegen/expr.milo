@@ -2150,8 +2150,11 @@ pub fn genAsCast(cg: &mut Cgen, inner: &Expr, targetTy: &string, locs: &Vec<Loca
             op = "fptoui"
         }
         emit(cg, "  " + ci + " = " + op + " " + fromLl + " " + v.v + " to " + toLl + "\n")
+        // The SURFACE type, not the LLVM spelling: `x as u8` typed as plain `i8` is
+        // indistinguishable from a signed i8 downstream, and printing then sign-extended
+        // a u8 of 255 into -1.
         return Val {
-            v: ci, ty: toLl
+            v: ci, ty: targetTy.clone()
         }
     }
     if fromIsFloat && toIsFloat {
@@ -4280,10 +4283,23 @@ pub fn genCall(cg: &mut Cgen, name: &string, args: &Vec<Heap<Expr>>, typeArgs: &
                 emit(cg, "  " + dp + " = extractvalue %String " + ds.v + ", 0\n")
                 argStr = argStr + ", ptr " + dp
             } else {
-                // i8/i16 — printf varargs promote to int
+                // i8/i16 — printf varargs promote to int. SIGN-extend a signed type:
+                // zext turned an i8 of -128 into 128, so every negative narrow integer
+                // printed as its unsigned bit pattern.
+                // Sign-extend only when the surface type is POSITIVELY known signed.
+                // `isUnsigned` reads the first character of the type string, and a value
+                // whose type has been reduced to the LLVM spelling (`i8`) is
+                // indistinguishable from a genuine `i8` — so a `u8` of 255 would sign-
+                // extend to -1. Defaulting to zext keeps unsigned and unknown correct,
+                // and the explicit list fixes the signed case (an i8 of -128 printed 128).
+                let sty = argVals[ai].ty.clone()
+                var ext = "zext"
+                if sty == "i8" || sty == "i16" || sty == "i32" || sty == "i64" {
+                    ext = "sext"
+                }
                 fmt = fmt + "%d"
                 let z = nextTemp(cg)
-                emit(cg, "  " + z + " = zext " + elemLl + " " + argVals[ai].v + " to i32\n")
+                emit(cg, "  " + z + " = " + ext + " " + elemLl + " " + argVals[ai].v + " to i32\n")
                 argStr = argStr + ", i32 " + z
             }
         }

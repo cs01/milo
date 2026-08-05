@@ -1174,7 +1174,13 @@ pub fn parsePrimary(p: &mut Parser): Expr {
     // if-else expression: if cond { expr } else { expr }
     if tok.kind == TokKind.If {
         advance(p)
+        // Same no-struct-literal rule the STATEMENT form uses, which this arm was
+        // missing: without it `if n - pos < MAXMATCH {` reads `MAXMATCH { n - pos }` as a
+        // struct literal and dies on the `-`, so every `let x = if …` in std failed.
+        let savedNoStruct = p.noStructLit
+        p.noStructLit = true
         let cond = parseExpr(p)
+        p.noStructLit = savedNoStruct
         expect(p, TokKind.LBrace)
         let thenE = parseExpr(p)
         expect(p, TokKind.RBrace)

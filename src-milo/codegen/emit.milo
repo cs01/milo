@@ -879,13 +879,20 @@ pub fn genProgram(prog: Program, sourceDir: string): string {
     // closure/fn value = { fn pointer, environment pointer }
     emitG(cg, "%Closure = type { ptr, ptr }\n")
 
+    // Register type aliases FIRST — every astTypeStr(...)/resolveTyStr(...) call
+    // below (global types, fn return types, struct fields) needs the alias table
+    // already populated to expand a bare alias name like `Board` to its base type.
+    for ai in 0..prog.typeAliases.len {
+        cg.typeAliases.insert(prog.typeAliases[ai].name.clone(), prog.typeAliases[ai].base.clone())
+    }
+
     // An aggregate global (`var xs: Vec<T> = []`, `var s: string = ""`) zero-inits
     // a %Vec/%String, so those type decls must precede it in the module text.
     var hasAggGlobal = false
     for gi in 0..prog.globals.len {
         match prog.globals[gi].ty {
             Option.Some(t) => {
-                let gl = llType(astTypeStr(t))
+                let gl = llType(resolveTyStr(cg, astTypeStr(t)))
                 if gl.len > 0 && gl[0] == 37 {
                     hasAggGlobal = true
                 }
@@ -906,7 +913,7 @@ pub fn genProgram(prog: Program, sourceDir: string): string {
         var surfaceTy = "i64"
         match prog.globals[gi].ty {
             Option.Some(t) => {
-                surfaceTy = astTypeStr(t)
+                surfaceTy = resolveTyStr(cg, astTypeStr(t))
             }
             Option.None => {
             }

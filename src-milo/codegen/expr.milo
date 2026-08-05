@@ -3930,7 +3930,11 @@ pub fn genCall(cg: &mut Cgen, name: &string, args: &Vec<Heap<Expr>>, typeArgs: &
         }
     }
     if name == "_strDataPtr" {
-        let sdp = genExpr(cg, *args[0], locs, sigs, "")
+        // The ADDRESS of the %String, not its value. genExpr on a `&string` parameter
+        // yields the loaded aggregate, and GEPing that emits
+        // `getelementptr %String, ptr <an SSA %String>` — invalid IR, so any function
+        // taking `s: &string` and asking for its data pointer failed to compile.
+        let sdp = genLvalue(cg, *args[0], locs, sigs)
         let sdg = nextTemp(cg)
         emit(cg, "  " + sdg + " = getelementptr %String, ptr " + sdp.v + ", i32 0, i32 0\n")
         let sdd = nextTemp(cg)

@@ -1,6 +1,6 @@
 // String codegen: literals, concat, equality, clone, int-to-string
 from "src-milo/codegen/types.milo" import {
-    ensureRealloc, nextLabel,
+    ensureRealloc, nextLabel, ensureStrtod,
     Cgen, Val, emit, emitG, nextTemp, ensureStringTy, ensureMalloc, ensureMemcpy, ensureMemcmp
 }
 
@@ -357,7 +357,9 @@ fn ensureFloatFmt(cg: &mut Cgen) {
         emitG(cg, "declare i32 @snprintf(ptr, i64, ptr, ...)\n")
         cg.declaredSnprintf = true
     }
-    emitG(cg, "declare double @strtod(ptr, ptr)\n")
+    // Reuse the shared guard: emitting the declaration unconditionally collided with the
+    // one ensureStrtod already emits, and LLVM rejects a redefinition.
+    ensureStrtod(cg)
     let fmt = emitStringLit(cg, "%.*g")
     emitG(cg, "define private i64 @milo.fmt.f64(double %v, ptr %buf) {\n")
     emitG(cg, "entry.bb:\n")

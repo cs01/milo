@@ -1,3 +1,11 @@
+<!-- doc-meta
+system: self-hosting
+purpose: status and reproduction steps for the Milo compiler written in Milo (src-milo), including the bootstrap fixed point
+key-files: src-milo/, scripts/selfhost.sh, scripts/selfhost-fixpoint.sh, scripts/ir-diff.ts
+update-when: the bootstrap converges or diverges, or the fixture parity number moves materially
+last-verified: 2026-08-05 (stage2 == stage3 byte-identical; self-built compiler passes 504/578, same as oracle-built)
+-->
+
 # Self-Hosting Plan (v2 — 2026-07-08)
 
 Goal: `milo-self` (the Milo compiler written in Milo, in `src-milo/`) compiles

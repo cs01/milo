@@ -423,10 +423,20 @@ pub fn genVecWithCapacity(cg: &mut Cgen, hintTy: &string, capExpr: &Expr, locs: 
     }
     let elemTy = unwrapVec(resolveTyStr(cg, ty.clone()))
     let elemLl = llType(elemTy)
-    let elemSz = llTypeBytes(elemLl)
+    // llTypeBytes is a naive literal-shape lookup that only knows scalars and the
+    // three built-in {ptr,i64,i64} containers — every other named struct (Handle,
+    // Triple, any user type) falls through its default `return 8`. That undersized
+    // the malloc for any non-scalar element (arenaHandles' `Vec<Handle<T>>`, 8 bytes
+    // instead of Handle's real size): `cap` in the returned %Vec is still the
+    // element COUNT, so push() never sees len==cap and never grows — every push
+    // after the first couple wrote straight past the too-small buffer, corrupting
+    // the heap (observed as a SIGBUS well downstream of the actual overflow).
+    // genSizeOf asks LLVM itself via the GEP-null trick, so it's exact for structs
+    // (padding and all) — same approach genArrayLit/genVecPush already use.
+    let elemSz = genSizeOf(cg, elemLl)
     let capV = genExpr(cg, capExpr, locs, sigs, "i64")
     let bytes = nextTemp(cg)
-    emit(cg, "  " + bytes + " = mul i64 " + capV.v.clone() + ", " + elemSz.toString() + "\n")
+    emit(cg, "  " + bytes + " = mul i64 " + capV.v.clone() + ", " + elemSz + "\n")
     let buf = nextTemp(cg)
     emit(cg, "  " + buf + " = call ptr @malloc(i64 " + bytes + ")\n")
     let a = nextTemp(cg)

@@ -265,11 +265,17 @@ item 5, it should be decided against 0/578, not against 20,826.
 
 | | |
 |---|---|
-| **behave correctly** | **328 / 578 (57%)** |
-| wrong output | 11 |
+| **behave correctly** | **341 / 578 (59%)** |
+| wrong output | 6 |
 | exits nonzero | 2 |
-| fails to link | 18 |
+| fails to link | 10 |
 | cannot be compiled at all | 219 |
+
+A caution about this table's own history: the first version of the harness did not link a
+fixture's companion `<name>.c` ABI peer, so all nine `externStruct*` fixtures reported as
+link failures that were entirely an artifact of the measurement. Every figure below 341 that
+this page previously quoted was understated by about eight. A harness is code and gets the
+same scrutiny as the compiler.
 
 Read that against **0/578 byte-identical IR**. Two independently written backends emitting
 different IR is expected and says nothing; the same program producing different *answers* is

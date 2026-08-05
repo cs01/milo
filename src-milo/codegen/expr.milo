@@ -14,7 +14,8 @@ from "src-milo/codegen/types.milo" import {
     unwrapHeap, stripPercent, binOpInt, cmpOpInt, isArithOp, isCmpOp,
     findLocal, hasLocal, genLoad, ensureMalloc, ensureMemcpy,
     lookupFnRet, lookupFieldIndex, lookupFieldType,
-    lookupVariantTag, variantTagOpt, lookupVariantPayload, lookupEnumPayloadSlots
+    lookupVariantTag, variantTagOpt, lookupVariantPayload, lookupEnumPayloadSlots,
+    isInlineArrTy, inlineArrLen, inlineArrElem
 }
 from "src-milo/codegen/stmt.milo" import {
     genClosure, genClosureCall, widenToI64
@@ -326,6 +327,13 @@ pub fn genOwnedArg(cg: &mut Cgen, e: &Expr, hintTy: string, locs: &Vec<Local>, s
                     let v = nextTemp(cg)
                     emit(cg, "  " + v + " = load " + ll + ", ptr " + lv.v + "\n")
                     zeroStore(cg, lv.v, lv.ty)
+                    // Record the move: zeroing the bytes is enough to make a later
+                    // Vec/String/Heap drop a safe no-op (their zero state IS "nothing
+                    // to free"), but a plain struct with a user `impl Drop` has no such
+                    // sentinel — its drop() runs the user's side effect unconditionally.
+                    // Without this record, a later scope/reassign drop of this same
+                    // slot calls that side effect a second time on a moved-out value.
+                    cg.movedLocalAddrs.push(lv.v.clone())
                     return Val {
                         v: v, ty: lv.ty.clone()
                     }
@@ -1123,6 +1131,33 @@ pub fn genHashMapRemove(cg: &mut Cgen, addr: &string, mapTy: &string, keyVal: &V
 // Fixed arrays lower onto the Vec runtime (see astTypeStr): a literal is a
 // malloc'd buffer with a {ptr, n, n} header.
 pub fn genArrayLit(cg: &mut Cgen, elems: &Vec<Heap<Expr>>, locs: &Vec<Local>, sigs: &Vec<CgFnSig>, hintTy: &string): Val {
+    // Struct-field array (hintTy = the "[N]elem" inline marker, see
+    // codegen/types.milo): build the real `[N x T]` aggregate via an alloca +
+    // GEP + store sequence, not a malloc'd %Vec — there is no separate heap
+    // buffer, the bytes live inline in the enclosing struct.
+    if isInlineArrTy(hintTy) {
+        let n = inlineArrLen(hintTy)
+        if elems.len != n {
+            eprint("codegen: array literal has " + elems.len.toString() + " elements, field expects " + n.toString())
+            exit(1)
+        }
+        let elemTy = inlineArrElem(hintTy)
+        let elemLl = llType(elemTy)
+        let arrLl = llType(hintTy)
+        let alloc = nextTemp(cg)
+        emit(cg, "  " + alloc + " = alloca " + arrLl + "\n")
+        for i in 0..elems.len {
+            let v = genExpr(cg, *elems[i], locs, sigs, elemTy.clone())
+            let slot = nextTemp(cg)
+            emit(cg, "  " + slot + " = getelementptr " + arrLl + ", ptr " + alloc + ", i32 0, i32 " + i.toString() + "\n")
+            emit(cg, "  store " + elemLl + " " + v.v + ", ptr " + slot + "\n")
+        }
+        let loaded = nextTemp(cg)
+        emit(cg, "  " + loaded + " = load " + arrLl + ", ptr " + alloc + "\n")
+        return Val {
+            v: loaded, ty: hintTy.clone()
+        }
+    }
     ensureVecTy(cg)
     ensureMalloc(cg)
     var elemTy = "i64"
@@ -1169,6 +1204,28 @@ pub fn genArrayLit(cg: &mut Cgen, elems: &Vec<Heap<Expr>>, locs: &Vec<Local>, si
 
 // [x; N] — evaluate once, fill N slots with an emitted loop (N can be large).
 pub fn genArrayRepeat(cg: &mut Cgen, value: &Expr, count: i64, locs: &Vec<Local>, sigs: &Vec<CgFnSig>, hintTy: &string): Val {
+    // Struct-field array — same inline-aggregate treatment as genArrayLit above.
+    // Unrolled (count is always compile-time known for a fixed-size field).
+    if isInlineArrTy(hintTy) {
+        let elemTy = inlineArrElem(hintTy)
+        let elemLl = llType(elemTy)
+        let arrLl = llType(hintTy)
+        let v = genExpr(cg, value, locs, sigs, elemTy.clone())
+        let alloc = nextTemp(cg)
+        emit(cg, "  " + alloc + " = alloca " + arrLl + "\n")
+        var i: i64 = 0
+        while i < count {
+            let slot = nextTemp(cg)
+            emit(cg, "  " + slot + " = getelementptr " + arrLl + ", ptr " + alloc + ", i32 0, i32 " + i.toString() + "\n")
+            emit(cg, "  store " + elemLl + " " + v.v + ", ptr " + slot + "\n")
+            i = i + 1
+        }
+        let loaded = nextTemp(cg)
+        emit(cg, "  " + loaded + " = load " + arrLl + ", ptr " + alloc + "\n")
+        return Val {
+            v: loaded, ty: hintTy.clone()
+        }
+    }
     ensureVecTy(cg)
     ensureMalloc(cg)
     var elemTy = "i64"
@@ -3216,6 +3273,25 @@ pub fn genMethodCall(cg: &mut Cgen, object: &Expr, method: &string, args: &Vec<H
 // -- Index + Slice --
 
 pub fn genIndex(cg: &mut Cgen, obj: &Expr, idx: &Expr, locs: &Vec<Local>, sigs: &Vec<CgFnSig>): Val {
+    // Inline struct-field array (see isInlineArrTy): there is no %Vec header to
+    // pull a data ptr out of by value, so index the field's ADDRESS directly
+    // via genLvalue + GEP[0, i] instead of the by-value genExpr path below.
+    let objPlaceTy = placeTypeStr(cg, obj, locs)
+    if isInlineArrTy(objPlaceTy) {
+        let addr = genLvalue(cg, obj, locs, sigs)
+        let elemTy = inlineArrElem(addr.ty)
+        let elemLl = llType(elemTy)
+        let arrLl = llType(addr.ty)
+        let iv = genExpr(cg, idx, locs, sigs, "i64")
+        let iw = widenToI64(cg, iv)
+        let slot = nextTemp(cg)
+        emit(cg, "  " + slot + " = getelementptr " + arrLl + ", ptr " + addr.v + ", i32 0, i64 " + iw + "\n")
+        let v = nextTemp(cg)
+        emit(cg, "  " + v + " = load " + elemLl + ", ptr " + slot + "\n")
+        return Val {
+            v: v, ty: elemTy
+        }
+    }
     let o = genExpr(cg, obj, locs, sigs, "")
     let i = genExpr(cg, idx, locs, sigs, "i64")
     if llType(o.ty) == "%String" {
@@ -4320,6 +4396,19 @@ pub fn genCall(cg: &mut Cgen, name: &string, args: &Vec<Heap<Expr>>, typeArgs: &
                 )
                 argPointees.push(lv.ty.clone())
             }
+        } else if cg.externFns.contains(name) && hint.len > 0 && hint[0] == 42 && isInlineArrTy(placeTypeStr(cg, *args[i], locs)) {
+            // A struct-field array passed to a raw-pointer extern param decays to
+            // its data address (C's `T arr[N]` → `T*` argument rule) — e.g. regcomp's
+            // `_preg: *u8` out-param. Must be the field's REAL address (genLvalue),
+            // not a value loaded by genFieldAccess: an out-param writes through this
+            // pointer into the caller's struct, which a loaded-then-discarded copy
+            // would silently lose.
+            let lv = genLvalue(cg, *args[i], locs, sigs)
+            argVals.push(Val {
+                v: lv.v, ty: "ptr"
+            }
+            )
+            argPointees.push("")
         } else if cg.externFns.contains(name) && llType(hint) == "%Closure" && isBareFnName(cg, *args[i], locs) {
             // a bare fn name passed to a C extern's fn-ptr param is the RAW function
             // address (@cmpI32, C signature), NOT milo's %Closure/env thunk.
@@ -4666,6 +4755,21 @@ pub fn genLvalue(cg: &mut Cgen, e: &Expr, locs: &Vec<Local>, sigs: &Vec<CgFnSig>
         }
         Expr.IndexAccess(obj, idx, span) => {
             // `a[i]` as an lvalue — needed for `a[i].field = x` and `&a[i]`.
+            // Inline struct-field array: index the field's address directly
+            // (mirrors genIndex above — no %Vec header to extract a data ptr from).
+            let objPlaceTy = placeTypeStr(cg, *obj, locs)
+            if isInlineArrTy(objPlaceTy) {
+                let addr = genLvalue(cg, *obj, locs, sigs)
+                let elemTy = inlineArrElem(addr.ty)
+                let arrLl = llType(addr.ty)
+                let iv2 = genExpr(cg, *idx, locs, sigs, "i64")
+                let iw2 = widenToI64(cg, iv2)
+                let slot = nextTemp(cg)
+                emit(cg, "  " + slot + " = getelementptr " + arrLl + ", ptr " + addr.v + ", i32 0, i64 " + iw2 + "\n")
+                return Val {
+                    v: slot, ty: elemTy
+                }
+            }
             let o = genExpr(cg, *obj, locs, sigs, "")
             let iv = genExpr(cg, *idx, locs, sigs, "i64")
             if isVecTy(o.ty) {

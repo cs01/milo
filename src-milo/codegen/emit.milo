@@ -3,7 +3,7 @@ from "src-milo/target.milo" import {
     getHostTarget
 }
 from "src-milo/ast.milo" import {
-    Function, Program, StructDecl, EnumDecl, Expr, StructLitField
+    Function, Program, StructDecl, EnumDecl, Expr, StructLitField, arrayElemType
 }
 
 // Constant initializer text for a module-global's value expression. Globals must
@@ -633,6 +633,9 @@ pub fn genFn(cg: &mut Cgen, f: &Function, sigs: &Vec<CgFnSig>) {
 
     cg.temp = 0
     cg.label = 0
+    // temp addresses (%.tN) are reused across functions (counter resets above),
+    // so a moved-address record from a PRIOR function must not leak in here.
+    cg.movedLocalAddrs = Vec.new()
     var locs: Vec<Local> = Vec.new()
     // C `main` is forced to `i32 (i32 argc, ptr argv)`: it stashes argc/argv into
     // globals that _miloArgCount/_miloArgAt read, and returns an exit code.
@@ -852,8 +855,29 @@ pub fn genProgram(prog: Program, sourceDir: string): string {
         let s = prog.structs[si].clone()
         var fields: Vec<FieldInfo> = Vec.new()
         for fi in 0..s.fields.len {
+            let fty = s.fields[fi].ty.clone()
+            // A struct-field array lays out INLINE (`[N x T]` in the LLVM struct),
+            // not the Vec<T> heap runtime locals/params use (astTypeStr) — C
+            // structs with array fields (extern layout, offsetOf) need the real
+            // size/offset, which a 24-byte %Vec header can never produce. Marker:
+            // "[" N "]" elemTyStr — see isInlineArrTy in codegen/types.milo.
+            var tyStr = ""
+            if fty.isArray {
+                match fty.arraySize {
+                    Option.Some(n) => {
+                        let elem = arrayElemType(fty)
+                        tyStr = "[" + n.toString() + "]" + resolveTyStr(cg, astTypeStr(elem))
+                    }
+                    Option.None => {
+                        eprint("codegen: struct field '" + s.fields[fi].name.clone() + "' on " + s.name.clone() + " has array type with no fixed size")
+                        exit(1)
+                    }
+                }
+            } else {
+                tyStr = resolveTyStr(cg, astTypeStr(fty))
+            }
             fields.push(FieldInfo {
-                name: s.fields[fi].name.clone(), ty: resolveTyStr(cg, astTypeStr(s.fields[fi].ty))
+                name: s.fields[fi].name.clone(), ty: tyStr
             }
             )
         }

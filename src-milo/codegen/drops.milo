@@ -15,6 +15,7 @@ from "src-milo/codegen/types.milo" import {
     emit, emitG, nextTemp, nextLabel, llType, isVecTy, unwrapVec, isHashMapTy,
     unwrapHeap, stripPercent, resolveTyStr, lookupFieldIndex, lookupFieldType,
     lookupVariantPayload, hasLocal, findLocal, ensureFree,
+    isInlineArrTy, inlineArrElem, addrWasMoved,
 }
 
 // A type owns heap that must be freed. HashMap is deferred to a later slice
@@ -25,6 +26,18 @@ from "src-milo/codegen/types.milo" import {
 // recursing into its pointee.
 pub fn cgNeedsDrop(cg: &Cgen, tyRaw: &string): bool {
     let ty = resolveTyStr(cg, tyRaw)
+    // Inline struct-field array (see isInlineArrTy): its bytes live inside the
+    // enclosing struct, not a separate heap buffer, so there is nothing here to
+    // free. But an element type that itself owns heap (e.g. a hypothetical
+    // `[Tracked; 3]`) would need each slot dropped individually — unimplemented,
+    // so refuse loudly instead of silently leaking/skipping it.
+    if isInlineArrTy(ty) {
+        if cgNeedsDrop(cg, inlineArrElem(ty)) {
+            eprint("codegen: struct field array of a Drop-needing element type is not supported (inline array elements are never dropped)")
+            exit(1)
+        }
+        return false
+    }
     if ty == "string" {
         return true
     }
@@ -72,6 +85,13 @@ pub fn zeroStore(cg: &mut Cgen, addr: &string, ty: &string) {
 // Emit code that drops the value stored at `addr` (a pointer to a value of type
 // `tyRaw`). Guarded so a zeroed/uninitialized slot is a safe no-op.
 pub fn emitDropValue(cg: &mut Cgen, addr: &string, tyRaw: &string) {
+    // This exact slot was already move-zeroed by genOwnedArg. Vec/String/Heap
+    // would catch this via their own null/cap check below, but a plain struct
+    // with a user `impl Drop` has no such sentinel — it must not run the
+    // user's drop() a second time on a value that no longer lives here.
+    if addrWasMoved(cg, addr) {
+        return
+    }
     ensureFree(cg)
     let ty = resolveTyStr(cg, tyRaw)
     if ty == "string" {

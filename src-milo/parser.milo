@@ -361,7 +361,7 @@ pub fn parseEnum(p: &mut Parser): EnumDecl {
                 neg = true
             }
             let numTok = expect(p, TokKind.Int)
-            var dv = numTok.value.parseInt() ?? 0
+            var dv = intLiteralBits(numTok.value)
             if neg {
                 dv = 0 - dv
             }
@@ -605,6 +605,22 @@ pub fn parseStmts(p: &mut Parser): Vec<Heap<Stmt>> {
 // One gap versus the real compiler: the TS checker REQUIRES the else block to diverge.
 // Here a non-diverging block falls through to the `!`, which aborts at runtime instead of
 // being a compile error.
+// Decimal digits to the i64 BIT PATTERN, accumulating in u64. `parseInt()` tops out at
+// i64, so `18446744073709551615` (u64 max) and the magnitude of i64 MIN both fell off the
+// end — and with a `?? 0` fallback they became a silent zero, which is worse than the
+// compile error they used to be. u64 covers every literal the language admits; the
+// checker is what decides whether the value fits the annotated type.
+pub fn intLiteralBits(digits: &string): i64 {
+    var acc: u64 = 0
+    for i in 0..digits.len {
+        let c = digits[i]
+        if c >= 48 && c <= 57 {
+            acc = acc * 10 + (c - 48) as u64
+        }
+    }
+    return acc as i64
+}
+
 pub fn parseLetElse(p: &mut Parser, s: Option<Span>): Stmt {
     let enumName = expect(p, TokKind.Ident).value
     expect(p, TokKind.Dot)
@@ -1240,7 +1256,7 @@ pub fn parsePrimary(p: &mut Parser): Expr {
 
     if tok.kind == TokKind.Int {
         advance(p)
-        return Expr.IntLit(tok.value.parseInt() ?? 0, s)
+        return Expr.IntLit(intLiteralBits(tok.value), s)
     }
     if tok.kind == TokKind.Float {
         advance(p)
@@ -1270,7 +1286,7 @@ pub fn parsePrimary(p: &mut Parser): Expr {
     }
     if tok.kind == TokKind.Char {
         advance(p)
-        return Expr.CharLit((tok.value.parseInt() ?? 0) as i32, s)
+        return Expr.CharLit(intLiteralBits(tok.value) as i32, s)
     }
     if tok.kind == TokKind.Ident {
         advance(p)
@@ -1480,7 +1496,7 @@ pub fn parseArrayLit(p: &mut Parser): Expr {
         if elements.len == 1 && matchTok(p, TokKind.Semicolon) {
             let countTok = expect(p, TokKind.Int)
             expect(p, TokKind.RBracket)
-            return Expr.ArrayRepeat(elements[0], countTok.value.parseInt() ?? 0, s)
+            return Expr.ArrayRepeat(elements[0], intLiteralBits(countTok.value), s)
         }
         matchTok(p, TokKind.Comma)
     }

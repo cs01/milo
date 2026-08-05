@@ -242,6 +242,58 @@ pub fn formatLine(content: &string, lineNum: i64, isMatch: bool, filePath: &stri
 
 // ── file search ──
 
+// What separates this file's output from the previous file's. Which one applies is a
+// property of the *run*, not of the file — the first file to produce output gets none —
+// so the choice is made here and applied by the printer, which is the only thing that
+// knows what came before it.
+pub enum LeadSep {
+    None,
+    Blank,
+    Dashes,
+}
+
+// One file's finished output: the exact lines to write, and nothing that still needs
+// deciding. Producing this is all of the per-match work — the regex, the word-boundary
+// filter, the highlight escapes, the line reconstruction, the path/line-number prefix —
+// and none of it touches shared state, which is what lets it run on a worker thread
+// while the main thread is busy writing some earlier file's lines.
+pub struct FileResult {
+    lines: Vec<string>,
+    matchCount: i64,
+    leadSep: LeadSep,
+}
+
+pub fn emptyResult(): FileResult {
+    return FileResult {
+        lines: Vec.new(), matchCount: 0, leadSep: LeadSep.None
+    }
+}
+
+// Write a finished result. The only ordering-sensitive step in the whole search, and
+// the only one that has to happen on one thread.
+pub fn emitResult(res: &FileResult, opts: &mut RgOpts): void {
+    match res.leadSep {
+        LeadSep.None => {
+        }
+        LeadSep.Blank => {
+            if opts.needsSeparator {
+                print("")
+            }
+            opts.needsSeparator = true
+        }
+        LeadSep.Dashes => {
+            if opts.needsSeparator {
+                print("--")
+            }
+            opts.needsSeparator = true
+        }
+    }
+    for i in 0..res.lines.len {
+        print(res.lines[i])
+    }
+    opts.totalMatches = opts.totalMatches + res.matchCount
+}
+
 pub fn searchFile(filePath: &string, re: &mut Regex, opts: &mut RgOpts, multiFile: bool): void {
     if !matchesType(filePath, opts.fileType) {
         return
@@ -253,32 +305,50 @@ pub fn searchFile(filePath: &string, re: &mut Regex, opts: &mut RgOpts, multiFil
             return
         }
     }
-    searchContent(content, filePath, re, opts, multiFile, false)
+    let res = searchContent(content, filePath, re, opts, multiFile, false)
+    emitResult(res, opts)
 }
 
 // `knownMatch` is set by the parallel path, which already proved the literal is in
 // this buffer — re-running the whole-file reject there would scan every matching
 // file twice for an answer it has.
-pub fn searchContent(content: &string, filePath: &string, re: &mut Regex, opts: &mut RgOpts, multiFile: bool, knownMatch: bool): void {
+//
+// Returns the file's output rather than printing it: on the parallel path this runs on
+// a worker thread, where printing would both interleave with other workers and put the
+// formatting cost back on the critical path it was moved off of.
+pub fn searchContent(content: &string, filePath: &string, re: &mut Regex, opts: &RgOpts, multiFile: bool, knownMatch: bool): FileResult {
+    var res = emptyResult()
     if !knownMatch && isBinary(content) {
-        return
+        return res
     }
     // Whole-file reject: if every match must contain `prefilter` and the file does not
     // contain it anywhere, there is nothing to split, allocate or scan line by line.
     // One memmem pass over the buffer replaces N regex runs. -v is excluded because a
     // non-matching line can sit in a file the prefilter never appears in.
     if !knownMatch && !opts.invert && opts.prefilter.len > 0 && !literalIn(content, opts.prefilter, opts.ignoreCase) {
-        return
+        return res
     }
 
-    // -l asks only "does this file match at all", which the whole-file reject above —
-    // or the parallel prescan, when it set knownMatch — has already answered. Falling
-    // through to the line-by-line regex loop to rediscover it made `-l` 3x slower than
-    // the search that prints every match.
-    if opts.filesOnly && opts.literal && !opts.invert {
-        print(filePath)
-        opts.totalMatches = opts.totalMatches + 1
-        return
+    if workerCanFormat(opts) {
+        return searchLiteral(content, filePath, opts, multiFile)
+    }
+
+    return searchWithRegex(content, filePath, re, opts, multiFile)
+}
+
+// The half of the search that never touches the regex engine, split out so a worker
+// thread can run it — see workerCanFormat for why that split has to exist.
+pub fn searchLiteral(content: &string, filePath: &string, opts: &RgOpts, multiFile: bool): FileResult {
+    var res = emptyResult()
+
+    // -l asks only "does this file match at all", which the whole-file reject — or the
+    // parallel prescan, when it set knownMatch — has already answered. Falling through
+    // to the line-by-line regex loop to rediscover it made `-l` 3x slower than the
+    // search that prints every match.
+    if opts.filesOnly {
+        res.lines.push(filePath.clone())
+        res.matchCount = 1
+        return res
     }
 
     // Literal pattern, no context to print: search the file buffer, not its lines.
@@ -342,16 +412,13 @@ pub fn searchContent(content: &string, filePath: &string, re: &mut Regex, opts: 
             matchCountF = matchCountF + 1
             if !opts.countOnly {
                 if !headerPrintedF && multiFile && !opts.noHeading {
-                    if opts.needsSeparator {
-                        print("")
-                    }
+                    res.leadSep = LeadSep.Blank
                     if opts.noColor {
-                        print(filePath)
+                        res.lines.push(filePath.clone())
                     } else {
-                        print(Color.magenta(filePath))
+                        res.lines.push(Color.magenta(filePath))
                     }
                     headerPrintedF = true
-                    opts.needsSeparator = true
                 }
                 // Every occurrence on this line, as offsets within the line.
                 var lineMatches: Vec<RegexMatch> = Vec.new()
@@ -371,7 +438,7 @@ pub fn searchContent(content: &string, filePath: &string, re: &mut Regex, opts: 
                 }
                 let lineText = content.substr(lineStart, lineEnd)
                 let hlF = highlightLine(lineText, lineMatches, opts.noColor || opts.invert)
-                print(formatLine(hlF, lineNo, true, filePath, multiFile, opts))
+                res.lines.push(formatLine(hlF, lineNo, true, filePath, multiFile, opts))
             }
             if opts.maxCount > 0 && matchCountF >= opts.maxCount {
                 break
@@ -384,14 +451,22 @@ pub fn searchContent(content: &string, filePath: &string, re: &mut Regex, opts: 
         }
         if opts.countOnly && matchCountF > 0 {
             if multiFile {
-                print(filePath + ":" + matchCountF.toString())
+                res.lines.push(filePath + ":" + matchCountF.toString())
             } else {
-                print(matchCountF.toString())
+                res.lines.push(matchCountF.toString())
             }
         }
-        opts.totalMatches = opts.totalMatches + matchCountF
-        return
+        res.matchCount = matchCountF
+        return res
     }
+    return res
+}
+
+// The line-by-line path: everything the buffer walk above cannot express — a real
+// regex, -w, -v, or context lines. Main-thread only, because regexec is not
+// thread-safe on macOS (see workerCanFormat).
+pub fn searchWithRegex(content: &string, filePath: &string, re: &mut Regex, opts: &RgOpts, multiFile: bool): FileResult {
+    var res = emptyResult()
 
     let lines = content.split("\n")
     var numLines = lines.len
@@ -419,27 +494,23 @@ pub fn searchContent(content: &string, filePath: &string, re: &mut Regex, opts: 
             if !opts.countOnly && !opts.filesOnly {
                 // file header for grouped output
                 if !headerPrinted && multiFile && !opts.noHeading {
-                    if opts.needsSeparator {
-                        print("")
-                    }
+                    res.leadSep = LeadSep.Blank
                     if opts.noColor {
-                        print(filePath)
+                        res.lines.push(filePath.clone())
                     } else {
-                        print(Color.magenta(filePath))
+                        res.lines.push(Color.magenta(filePath))
                     }
                     headerPrinted = true
-                    opts.needsSeparator = true
                 }
                 // Grouped output separates files with a blank line; ungrouped output
                 // separates them the same way it separates context groups, with "--".
-                // needsSeparator carries across files, so the very first group of the
-                // whole run is not preceded by one.
+                // The separator carries across files, so the very first group of the
+                // whole run is not preceded by one — which is why the choice is recorded
+                // here and applied by emitResult, the only place that knows the run's
+                // history.
                 if hasCtx && multiFile && opts.noHeading && !headerPrinted {
-                    if opts.needsSeparator {
-                        print("--")
-                    }
+                    res.leadSep = LeadSep.Dashes
                     headerPrinted = true
-                    opts.needsSeparator = true
                 }
 
                 // before-context lines
@@ -456,16 +527,16 @@ pub fn searchContent(content: &string, filePath: &string, re: &mut Regex, opts: 
                 // matching lines put thousands of stray "--" lines into the output of
                 // an ordinary regex search — 55 lines where ripgrep prints 31.
                 if hasCtx && lastPrinted >= 0 && ctxStart > lastPrinted + 1 {
-                    print("--")
+                    res.lines.push("--")
                 }
 
                 for j in ctxStart..i {
-                    print(formatLine(lines[j], j, false, filePath, multiFile, opts))
+                    res.lines.push(formatLine(lines[j], j, false, filePath, multiFile, opts))
                 }
 
                 // match line with highlighting
                 let hl = highlightLine(lines[i], matches, opts.noColor || opts.invert)
-                print(formatLine(hl, i, true, filePath, multiFile, opts))
+                res.lines.push(formatLine(hl, i, true, filePath, multiFile, opts))
                 lastPrinted = i
                 afterRemaining = opts.afterCtx
             }
@@ -474,7 +545,7 @@ pub fn searchContent(content: &string, filePath: &string, re: &mut Regex, opts: 
                 break
             }
         } else if afterRemaining > 0 {
-            print(formatLine(lines[i], i, false, filePath, multiFile, opts))
+            res.lines.push(formatLine(lines[i], i, false, filePath, multiFile, opts))
             lastPrinted = i
             afterRemaining = afterRemaining - 1
         }
@@ -482,53 +553,97 @@ pub fn searchContent(content: &string, filePath: &string, re: &mut Regex, opts: 
 
     if opts.countOnly && matchCount > 0 {
         if multiFile {
-            print($"{filePath}:{matchCount}")
+            res.lines.push($"{filePath}:{matchCount}")
         } else {
-            print(matchCount)
+            res.lines.push(matchCount.toString())
         }
     }
 
     if opts.filesOnly && matchCount > 0 {
-        print(filePath)
+        res.lines.push(filePath.clone())
     }
 
-    opts.totalMatches = opts.totalMatches + matchCount
+    res.matchCount = matchCount
+    return res
 }
 
 // ── directory search ──
 
 // A file that survived the prescan, carrying the bytes the prescan already read.
-pub struct Hit {
-    path: string,
-    content: string,
+// Read these files and produce their finished output.
+//
+// Everything here is per-file and touches no shared state, which is what makes it safe
+// on an OS thread: the read, the binary check, the whole-file literal reject, and — the
+// part that used to be the main thread's problem — the regex, the highlighting and the
+// line formatting. Only the writing is left for the caller.
+//
+// Formatting on this side also means the file's *bytes* die here. Handing back a 40 MB
+// buffer so the main thread could format 3 lines out of it was the reason peak RSS
+// tracked the size of the matching set rather than the size of the output.
+//
+// The prescan and the matcher must agree on case, or the prescan silently drops files
+// the matcher would have printed — so both go through literalIn/literalFrom.
+// Can a worker turn this file's bytes into finished output by itself, or does that
+// need the regex engine?
+//
+// It matters because **POSIX regexec is not thread-safe on macOS**. Not "not safe on a
+// shared regex_t" — not safe at all: four threads each running regexec on a regex_t
+// they compiled themselves, over the same corpus, disagree on the match count, and
+// regcomp itself intermittently fails. Reproduced in plain C with no Milo involved
+// (scratchpad/regprobe.c), so this is a libc property, not something rg or std/regex
+// can be restructured around. The symptom is silently *missing* matches — a wrong
+// answer, not a crash — which is the worst possible way for it to show up.
+//
+// So the regex stays on one thread. What can move is every pattern that never reaches
+// the engine: a plain literal with no context lines, which is the common case and the
+// expensive one.
+pub fn workerCanFormat(opts: &RgOpts): bool {
+    if !opts.literal || opts.invert {
+        return false
+    }
+    if opts.filesOnly {
+        return true
+    }
+    return opts.beforeCtx == 0 && opts.afterCtx == 0
 }
 
-// Which of these files contain the literal at all? Read-only, no output, no shared
-// state — which is what makes it safe to run on a pool of OS threads.
-//
-// The surviving file's buffer comes back with it. Answering the boolean requires
-// reading the whole file anyway, and dropping the buffer only to have the printing
-// pass open and read the same file a second time was pure waste — on a tree where
-// ~15% of files match, that second read is the entire serial tail.
-// The prescan and the matcher must agree on case, or the prescan silently drops
-// files the matcher would have printed — so both go through literalIn/literalFrom.
-pub fn scanChunk(paths: Vec<string>, needle: string, ci: bool): Vec<Hit> {
-    var hits: Vec<Hit> = Vec.new()
+// One file that survived the prescan. Either the worker formatted it outright, or the
+// pattern needs the regex and the bytes come back for the main thread to handle.
+pub struct ChunkItem {
+    path: string,
+    result: FileResult,
+    content: string,
+    formatted: bool,
+}
+
+pub fn scanChunk(paths: Vec<string>, opts: RgOpts): Vec<ChunkItem> {
+    var out: Vec<ChunkItem> = Vec.new()
+    let canFormat = workerCanFormat(opts)
     for i in 0..paths.len {
         match readFile(paths[i]) {
             Result.Ok(data) => {
-                if !isBinary(data) && literalIn(data, needle, ci) {
-                    hits.push(Hit {
-                        path: paths[i].clone(), content: data
+                if !isBinary(data) && literalIn(data, opts.prefilter, opts.ignoreCase) {
+                    if canFormat {
+                        let res = searchLiteral(data, paths[i], opts, true)
+                        if res.lines.len > 0 || res.matchCount > 0 {
+                            out.push(ChunkItem {
+                                path: paths[i].clone(), result: res, content: "", formatted: true
+                            }
+                            )
+                        }
+                    } else {
+                        out.push(ChunkItem {
+                            path: paths[i].clone(), result: emptyResult(), content: data, formatted: false
+                        }
+                        )
                     }
-                    )
                 }
             }
             Result.Err(_) => {
             }
         }
     }
-    return hits
+    return out
 }
 
 // How many prescan chunks are read concurrently.
@@ -563,10 +678,38 @@ pub fn firstChunk(): i64 {
     return 4
 }
 
-fn spawnChunk(chunk: Vec<string>, needle: &string, ci: bool): Promise<Vec<Hit>> {
-    let n = needle.clone()
-    return Promise<Vec<Hit>>.blocking(move(): Vec<Hit> => {
-        return scanChunk(chunk, n, ci)
+// The worker needs the whole option set, not just the needle, now that it formats. It
+// gets a copy: the live `opts` carries the run's running totals and separator state,
+// which belong to the printing thread and must not be touched from here.
+pub fn cloneOpts(o: &RgOpts): RgOpts {
+    return RgOpts {
+        countOnly: o.countOnly,
+        filesOnly: o.filesOnly,
+        invert: o.invert,
+        wordBound: o.wordBound,
+        noColor: o.noColor,
+        noLineNum: o.noLineNum,
+        noHeading: o.noHeading,
+        searchHidden: o.searchHidden,
+        maxCount: o.maxCount,
+        afterCtx: o.afterCtx,
+        beforeCtx: o.beforeCtx,
+        fileType: o.fileType.clone(),
+        totalMatches: 0,
+        needsSeparator: false,
+        pattern: o.pattern.clone(),
+        literal: o.literal,
+        prefilter: o.prefilter.clone(),
+        ignoreCase: o.ignoreCase,
+        useIgnore: o.useIgnore,
+        useGitIgnore: o.useGitIgnore,
+    }
+}
+
+fn spawnChunk(chunk: Vec<string>, opts: &RgOpts): Promise<Vec<ChunkItem>> {
+    let mine = cloneOpts(opts)
+    return Promise<Vec<ChunkItem>>.blocking(move(): Vec<ChunkItem> => {
+        return scanChunk(chunk, mine)
     }
     )
 }
@@ -589,9 +732,8 @@ fn spawnChunk(chunk: Vec<string>, needle: &string, ci: bool): Promise<Vec<Hit>> 
 // total 4.6 GB from paging the machine.
 pub fn searchDirParallel(dirPath: &string, re: &mut Regex, opts: &mut RgOpts): void {
     var walker = Walker.new(dirPath, opts.searchHidden, opts.useIgnore, opts.useGitIgnore, opts.fileType.clone())
-    let ci = opts.ignoreCase
 
-    var inflight: Vec<Promise<Vec<Hit>>> = Vec.new()
+    var inflight: Vec<Promise<Vec<ChunkItem>>> = Vec.new()
     var chunkSize = firstChunk()
 
     while inflight.len < maxInflight() {
@@ -599,7 +741,7 @@ pub fn searchDirParallel(dirPath: &string, re: &mut Regex, opts: &mut RgOpts): v
         if batch.len == 0 {
             break
         }
-        inflight.push(spawnChunk(batch, opts.prefilter, ci))
+        inflight.push(spawnChunk(batch, opts))
         chunkSize = chunkSize * 2
         if chunkSize > chunkCap() {
             chunkSize = chunkCap()
@@ -608,22 +750,30 @@ pub fn searchDirParallel(dirPath: &string, re: &mut Regex, opts: &mut RgOpts): v
 
     var head: i64 = 0
     while head < inflight.len {
-        let hits = inflight[head].await()!
+        let done = inflight[head].await()!
         head = head + 1
 
-        // Refill before printing, not after: the workers should be reading the next
-        // chunk while this thread formats and writes the current one.
+        // Refill before writing, not after: the workers should be reading and
+        // formatting the next chunk while this thread writes the current one.
         let batch = walker.nextBatch(chunkSize)
         if batch.len > 0 {
-            inflight.push(spawnChunk(batch, opts.prefilter, ci))
+            inflight.push(spawnChunk(batch, opts))
             chunkSize = chunkSize * 2
             if chunkSize > chunkCap() {
                 chunkSize = chunkCap()
             }
         }
 
-        for j in 0..hits.len {
-            searchContent(hits[j].content, hits[j].path, re, opts, true, true)
+        for j in 0..done.len {
+            if done[j].formatted {
+                emitResult(done[j].result, opts)
+            } else {
+                // The worker read it but could not format it — a regex pattern, and the
+                // engine only runs here. Same work as before, just no longer the whole
+                // job for every search.
+                let res = searchWithRegex(done[j].content, done[j].path, re, opts, true)
+                emitResult(res, opts)
+            }
         }
     }
 }

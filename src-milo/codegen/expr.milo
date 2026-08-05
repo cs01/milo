@@ -2272,6 +2272,18 @@ pub fn genMethodCall(cg: &mut Cgen, object: &Expr, method: &string, args: &Vec<H
             return genStringPush(cg, lv.v, bv)
         }
     }
+    // `s.pushStr(other)` — append a whole string in place. Reuses the same amortized
+    // growth path the `s = s + x` peephole uses, so the two cannot drift apart.
+    if method == "pushStr" {
+        let lv = genLvalue(cg, object, locs, sigs)
+        if llType(lv.ty) == "%String" {
+            let ev = genExpr(cg, *args[0], locs, sigs, "%String")
+            genStringAppendInPlace(cg, lv.v, ev.v)
+            return Val {
+                v: "0", ty: "void"
+            }
+        }
+    }
     // Vec.reverse mutates in place → needs the receiver address. (String.reverse
     // is a different method — it falls through to the strReverse mapping below.)
     if method == "reverse" {
@@ -2539,6 +2551,55 @@ pub fn genMethodCall(cg: &mut Cgen, object: &Expr, method: &string, args: &Vec<H
     if intBits(objTyLl) > 0 && (method == "wrappingAdd" || method == "wrappingSub" || method == "wrappingMul" || method == "saturatingAdd" || method == "saturatingSub" || method == "saturatingMul") {
         let av = genExpr(cg, *args[0], locs, sigs, obj.ty.clone())
         return genWrapSatArith(cg, obj, method, av)
+    }
+    if objTyLl == "i1" && method == "toString" {
+        let t = genStringLit(cg, "true")
+        let f = genStringLit(cg, "false")
+        let r = nextTemp(cg)
+        emit(cg, "  " + r + " = select i1 " + obj.v + ", %String " + t.v + ", %String " + f.v + "\n")
+        return Val {
+            v: r, ty: "string"
+        }
+    }
+    // Rotate via the funnel-shift intrinsics: fshl/fshr with both operands set to the
+    // same value IS a rotate, and LLVM lowers it to the single machine instruction.
+    if method == "rotateLeft" || method == "rotateRight" {
+        if intBits(objTyLl.clone()) > 0 {
+            let w = objTyLl.clone()
+            let av = genExpr(cg, *args[0], locs, sigs, w.clone())
+            var amt = av.v.clone()
+            // The shift amount must match the value's width or LLVM rejects the call.
+            let avLl = llType(av.ty)
+            if avLl != w {
+                let c = nextTemp(cg)
+                var castOp = "zext"
+                if intBits(avLl.clone()) > intBits(w.clone()) {
+                    castOp = "trunc"
+                }
+                emit(cg, "  " + c + " = " + castOp + " " + avLl.clone() + " " + av.v + " to " + w.clone() + "\n")
+                amt = c
+            }
+            var shiftFn = "llvm.fshl."
+            if method == "rotateRight" {
+                shiftFn = "llvm.fshr."
+            }
+            let intr = shiftFn + w.clone()
+            var declared = false
+            for i in 0..cg.emittedThunks.len {
+                if cg.emittedThunks[i] == intr {
+                    declared = true
+                }
+            }
+            if !declared {
+                cg.emittedThunks.push(intr.clone())
+                emitG(cg, "declare " + w.clone() + " @" + intr.clone() + "(" + w.clone() + ", " + w.clone() + ", " + w.clone() + ")\n")
+            }
+            let r = nextTemp(cg)
+            emit(cg, "  " + r + " = call " + w.clone() + " @" + intr.clone() + "(" + w.clone() + " " + obj.v.clone() + ", " + w.clone() + " " + obj.v.clone() + ", " + w.clone() + " " + amt + ")\n")
+            return Val {
+                v: r, ty: obj.ty.clone()
+            }
+        }
     }
     if objTyLl == "i64" && method == "toString" {
         return genIntToString(cg, obj.v, isUnsigned(obj.ty))

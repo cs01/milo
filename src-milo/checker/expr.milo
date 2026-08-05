@@ -1884,6 +1884,30 @@ pub fn checkMethodCall(ck: &mut Checker, obj: &Expr, method: &string, args: &Vec
         return TypeKind.TPtr(Heap(objType.clone()))
     }
 
+    // bool.toString() — prints "true"/"false", same as interpolating one.
+    if method == "toString" {
+        match objType {
+            TypeKind.TBool => {
+                if args.len != 0 {
+                    error(ck, "'toString' takes no arguments", cloneSpan(span))
+                }
+                return tyString()
+            }
+            _ => {
+            }
+        }
+    }
+    // Bit rotation. Distinct from a shift: the bits that fall off one end come back in
+    // the other, so the WIDTH of the receiver is part of the semantics.
+    if isInteger(objType) && (method == "rotateLeft" || method == "rotateRight") {
+        if args.len != 1 {
+            error(ck, "'" + method.clone() + "' expects 1 argument", cloneSpan(span))
+        }
+        if args.len >= 1 {
+            checkExpr(ck, *args[0])
+        }
+        return objType.clone()
+    }
     // numeric.toString()
     if (isInteger(objType) || isFloat(objType)) && method == "toString" {
         if args.len != 0 {
@@ -2399,6 +2423,22 @@ pub fn checkStringMethod(ck: &mut Checker, obj: &Expr, method: &string, args: &V
         }
         if args.len >= 1 {
             checkExpr(ck, *args[0])
+        }
+        return tyVoid()
+    }
+    // `s.pushStr(other)` appends a whole string in place; `push` appends one byte.
+    if method == "pushStr" {
+        if args.len != 1 {
+            error(ck, "'pushStr' expects 1 argument", cloneSpan(span))
+        }
+        if !isRootMutable(ck, obj) {
+            error(ck, "cannot pushStr to immutable string", cloneSpan(span))
+        }
+        if args.len >= 1 {
+            let argTy = checkExpr(ck, *args[0])
+            if !typeEq(argTy, tyString()) {
+                error(ck, "string.pushStr: expected string", cloneSpan(span))
+            }
         }
         return tyVoid()
     }

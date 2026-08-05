@@ -265,15 +265,12 @@ item 5, it should be decided against 0/578, not against 20,826.
 
 | | |
 |---|---|
-| **behave correctly** | **388 / 578 (67%)** |
-| wrong output | **2** |
-| fails to link | 76 |
-| cannot be compiled at all | **112** |
+| **behave correctly** | **468 / 578 (81%)** |
+| wrong output | 3 |
+| fails to link | **3** |
+| cannot be compiled at all | **99** |
 
-Started this sweep at 324 correct / 219 uncompilable. The link-failure count LOOKS worse than
-its earlier low of 2 — it is not a regression. Fixing double-pointer support unlocked ~75
-fixtures that previously could not be compiled at all; they moved one stage forward, into
-link failures, and are being worked from there.
+Started this sweep at 324 correct / 219 uncompilable / 19 link failures.
 
 ### What parallel agents changed about the method
 
@@ -284,7 +281,12 @@ genuinely parallel, while shared-file merges and whole-corpus verification are n
 
 Findings worth keeping from that round:
 
-- **The single biggest defect was `MiloType.isPtr` being a `bool`.** `**u8` collapsed to
+- **Two single defects each unblocked ~70 fixtures**, and both had the same shape: one
+  missing piece in a widely-imported std path cascading into every program downstream.
+  First, a missing `_atomicSwapI64` — and behind the same fallthrough, the entire
+  `_atomic*I32` family — silently absent from codegen, blocking 70 fixtures through
+  `std/sync`. Second:
+- **`MiloType.isPtr` being a `bool`.** `**u8` collapsed to
   `*u8`, which broke `std/platform` → `std/os` → most of the standard library. Compounded by
   a raw-pointer deref that silently loaded `i64` regardless of the real pointee type. One
   fix, ~75 fixtures.

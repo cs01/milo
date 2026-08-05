@@ -32,28 +32,11 @@ from "./rgignore" import {
 from "./rgliteral" import {
     requiredLiteral
 }
+from "./rgwalk" import {
+    Walker, matchesType, shouldSkipDir
+}
 
 // ── helpers ──
-
-// Only the VCS metadata directories are skipped unconditionally. This list used to
-// also carry node_modules/target/build/dist/__pycache__/.cache as a stand-in for
-// .gitignore, which is both too coarse and too blunt: it silently dropped every match
-// under llvm-project's `lldb/test/API/commands/target/`, a directory nobody ignores.
-// With real ignore-file support in the walk, guessing by name has nothing left to do.
-pub fn shouldSkipDir(name: &string): bool {
-    return name == ".git" || name == ".hg" || name == ".svn"
-}
-
-pub fn matchesType(path: &string, fileType: &string): bool {
-    if fileType.len == 0 {
-        return true
-    }
-    let ext = Path.ext(path)
-    if ext.len == 0 {
-        return false
-    }
-    return ext == "." + fileType
-}
 
 pub fn isWordChar(ch: u8): bool {
     return (ch >= 97 && ch <= 122) || (ch >= 65 && ch <= 90) || (ch >= 48 && ch <= 57) || ch == 95
@@ -514,49 +497,6 @@ pub fn searchContent(content: &string, filePath: &string, re: &mut Regex, opts: 
 
 // ── directory search ──
 
-// Walk the tree once, collecting file paths. Same skip rules as searchDir.
-//
-// `sets` is the stack of ignore files seen from the walk root down to `dirPath`; this
-// function pushes its own directory's onto it and pops before returning, so callers
-// hand in whatever stack applies above them.
-pub fn collectFiles(dirPath: &string, opts: &RgOpts, sets: &mut Vec<IgnoreSet>, out: &mut Vec<string>): void {
-    // A dir we can't open (permissions, a dangling symlink) is skipped, not fatal —
-    // one unreadable subdir under /var must not kill the whole walk.
-    let Result.Ok(entries) = readDir(dirPath) else {
-        return
-    }
-    var pushed = false
-    if opts.useIgnore {
-        if let Option.Some(set) = loadIgnoreSet(dirPath, opts.useGitIgnore) {
-            sets.push(set)
-            pushed = true
-        }
-    }
-    for i in 0..entries.len {
-        let name = entries[i].name.clone()
-        let entryIsDir = entries[i].isDir
-        let entryIsFile = entries[i].isFile
-        if !opts.searchHidden && name.len > 0 && name[0] == 46 {
-            continue
-        }
-        let fullPath = Path.join(dirPath, name)
-        if entryIsDir {
-            if !shouldSkipDir(name) && !stackIgnores(sets, fullPath, name, true) {
-                collectFiles(fullPath, opts, sets, out)
-            }
-        } else if entryIsFile {
-            // Apply -t here, not in searchFile: a file the type filter rejects must
-            // never reach the prescan, or the threads read it for nothing.
-            if matchesType(fullPath, opts.fileType) && !stackIgnores(sets, fullPath, name, false) {
-                out.push(fullPath)
-            }
-        }
-    }
-    if pushed {
-        let _ = sets.pop()
-    }
-}
-
 // A file that survived the prescan, carrying the bytes the prescan already read.
 pub struct Hit {
     path: string,
@@ -591,111 +531,100 @@ pub fn scanChunk(paths: Vec<string>, needle: string, ci: bool): Vec<Hit> {
     return hits
 }
 
-// Files handed to the workers per prescan round.
+// How many prescan chunks are read concurrently.
 //
-// The prescan returns the *bytes* of every file that matched, so scanning the whole
-// tree in one round holds the entire matching set in memory at once — 4.6 GB on
-// llvm-project, which puts a 16 GB machine into page compression and loses more time
-// there than the search itself takes. Rounds bound the live set to whatever matched
-// among one round's worth of files while still keeping every worker fed. Measured on
-// llvm-project, anything from 512 to 8192 lands within noise of each other; the run is
-// bound by read(2), not by how the rounds are cut.
-pub fn roundSize(): i64 {
-    return 2048
+// Fewer than you would guess. The old code ran one worker per logical core (10) and
+// the search got *faster* on the way down to 4: past that point the readers are
+// competing for the same page cache and memory bandwidth rather than overlapping
+// anything, and a big-core machine with slow little cores (4 performance + 6
+// efficiency here) also stops adding useful throughput once the performance cores are
+// busy. Measured on llvm-project, `rg clang .`: 16→3.3s, 8→2.9s, 4→2.5s, 3→2.5s,
+// 2→3.0s. It is a shallow basin, so 4 is picked over 3 for margin on a machine with
+// more cores, not because the two differ.
+//
+// This also stopped mattering as much as it used to: with chunks awaited in dispatch
+// order and refilled one at a time, a slow chunk no longer stalls the other workers,
+// so throughput no longer needs oversubscription to hide stragglers.
+pub fn maxInflight(): i64 {
+    return 4
 }
 
-// One worker per core. The prescan is dominated by read(2), so the useful count is
-// set by how many reads the kernel will overlap, not by arithmetic width.
-pub fn workerCount(): i64 {
-    return 10
+// Files per chunk, once the pipeline is up to speed. Chunks start far smaller (see
+// `firstChunk`) so the first result does not wait on a full one.
+pub fn chunkCap(): i64 {
+    return 128
 }
 
-// Prescan files [base, end) on `workerCount()` threads. Round-robin, not contiguous
-// blocks: big files cluster in a tree (one deep subdirectory of generated headers),
-// and a contiguous split hands that whole subdirectory to one worker while the rest
-// finish early. Striding interleaves any such run across all of them, and order is
-// still recoverable — see the merge in searchDirParallel.
-//
-// Every worker gets a promise even when its stride is empty, so the merge can index
-// by position within the round.
-fn spawnRound(files: &Vec<string>, base: i64, end: i64, needle: &string, ci: bool): Vec<Promise<Vec<Hit>>> {
-    var ps: Vec<Promise<Vec<Hit>>> = Vec.new()
-    for w in 0..workerCount() {
-        var chunk: Vec<string> = Vec.new()
-        var i = base + w
-        while i < end {
-            chunk.push(files[i].clone())
-            i = i + workerCount()
-        }
-        let n = needle.clone()
-        ps.push(Promise<Vec<Hit>>.blocking(move(): Vec<Hit> => {
-            return scanChunk(chunk, n, ci)
-        }
-        ))
+// The first chunks are tiny on purpose: time-to-first-line is what a human watching a
+// tree-wide search actually feels, and it is bounded by the *first* chunk to finish,
+// not by throughput. 4 files is a few milliseconds; doubling up to chunkCap() gets the
+// steady-state chunk size back within the first dozen dispatches.
+pub fn firstChunk(): i64 {
+    return 4
+}
+
+fn spawnChunk(chunk: Vec<string>, needle: &string, ci: bool): Promise<Vec<Hit>> {
+    let n = needle.clone()
+    return Promise<Vec<Hit>>.blocking(move(): Vec<Hit> => {
+        return scanChunk(chunk, n, ci)
     }
-    return ps
+    )
 }
 
-// Literal search over a directory, in parallel.
+// Literal search over a directory, pipelined.
 //
-// Only the "which files contain this at all" pass is parallel — it is the whole cost
-// on a tree (most files do not match) and it produces no output, so there is nothing
-// to order. Printing then happens sequentially over the surviving files, in walk
-// order, so the output is byte-identical to the serial path. Threads that print
-// interleave; threads that answer a boolean do not.
+// Only the "which files contain this at all" pass runs on threads — it is the whole
+// cost on a tree (most files do not match) and it produces no output, so there is
+// nothing to order. Printing happens on this thread over the surviving files in walk
+// order, so output order is the walk's, not the threads'.
 //
-// Overlapping the printing with the next round's reads (double-buffering the rounds)
-// was tried and measured no faster on llvm-project, so the straightforward loop stays.
+// The shape is a sliding window rather than rounds with a barrier: chunks are awaited
+// in dispatch order, and each completed chunk immediately dispatches another. Nothing
+// waits for a whole round to drain, so one slow chunk delays only its own position in
+// the output instead of stalling every worker. The walk runs on this thread in the
+// gaps between awaits, which is also what overlaps it with the reads it feeds.
+//
+// Live memory is bounded the way rounds bounded it — at most maxInflight() * chunkCap()
+// files' worth of matching bytes — which is what keeps a tree whose matching files
+// total 4.6 GB from paging the machine.
 pub fn searchDirParallel(dirPath: &string, re: &mut Regex, opts: &mut RgOpts): void {
-    var files: Vec<string> = Vec.new()
-    var sets: Vec<IgnoreSet> = Vec.new()
-    collectFiles(dirPath, opts, sets, files)
+    var walker = Walker.new(dirPath, opts.searchHidden, opts.useIgnore, opts.useGitIgnore, opts.fileType.clone())
+    let ci = opts.ignoreCase
 
-    if files.len < workerCount() * 4 {
-        // too few files to be worth the threads
-        for i in 0..files.len {
-            searchFile(files[i], re, opts, true)
+    var inflight: Vec<Promise<Vec<Hit>>> = Vec.new()
+    var chunkSize = firstChunk()
+
+    while inflight.len < maxInflight() {
+        let batch = walker.nextBatch(chunkSize)
+        if batch.len == 0 {
+            break
         }
-        return
+        inflight.push(spawnChunk(batch, opts.prefilter, ci))
+        chunkSize = chunkSize * 2
+        if chunkSize > chunkCap() {
+            chunkSize = chunkCap()
+        }
     }
 
-    let ci = opts.ignoreCase
-    var base: i64 = 0
-    while base < files.len {
-        var end = base + roundSize()
-        if end > files.len {
-            end = files.len
-        }
-        let ps = spawnRound(files, base, end, opts.prefilter, ci)
+    var head: i64 = 0
+    while head < inflight.len {
+        let hits = inflight[head].await()!
+        head = head + 1
 
-        // Scoped to the round so the buffers it carries are freed before the next one
-        // reads more — that release is the whole point of rounds.
-        let parts = Promise.all(ps).await()!
-        // Each worker's hits are in walk order among themselves, and worker w held
-        // round offsets w, w+10, w+20… — so a merge across the lists by original index
-        // reproduces exact walk order. Tracking the index explicitly would need a field
-        // on Hit; instead, walk the file list and pop from the worker that owned each
-        // index, which is the same merge without the bookkeeping.
-        var cursors: Vec<i64> = Vec.new()
-        for _ in 0..parts.len {
-            cursors.push(0)
-        }
-        for idx in base..end {
-            let w = (idx - base) % parts.len
-            let c = cursors[w]
-            if c >= parts[w].len {
-                continue
+        // Refill before printing, not after: the workers should be reading the next
+        // chunk while this thread formats and writes the current one.
+        let batch = walker.nextBatch(chunkSize)
+        if batch.len > 0 {
+            inflight.push(spawnChunk(batch, opts.prefilter, ci))
+            chunkSize = chunkSize * 2
+            if chunkSize > chunkCap() {
+                chunkSize = chunkCap()
             }
-            // Its owner skipped this index (binary, no match, or unreadable) if the
-            // head of that worker's hit list is some later file.
-            if parts[w][c].path != files[idx] {
-                continue
-            }
-            cursors[w] = c + 1
-            searchContent(parts[w][c].content, files[idx], re, opts, true, true)
         }
 
-        base = end
+        for j in 0..hits.len {
+            searchContent(hits[j].content, hits[j].path, re, opts, true, true)
+        }
     }
 }
 

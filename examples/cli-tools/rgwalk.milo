@@ -1,0 +1,140 @@
+// rgwalk — the directory walk, as a resumable iterator.
+//
+// Collecting the whole tree into a Vec before searching anything costs the search
+// its first result: on llvm-project that walk is ~0.5s during which nothing has been
+// read, let alone printed, and real rg has already emitted thousands of lines. An
+// iterator lets the caller pull a handful of paths, dispatch them, and print — so
+// the walk runs interleaved with the reads it feeds instead of ahead of them.
+
+from "std/fs" import {
+    DirEntry, readDir
+}
+from "std/path" import {
+    Path
+}
+from "./rgignore" import {
+    IgnoreSet, loadIgnoreSet, stackIgnores
+}
+
+// Only the VCS metadata directories are skipped unconditionally. This list used to
+// also carry node_modules/target/build/dist/__pycache__/.cache as a stand-in for
+// .gitignore, which is both too coarse and too blunt: it silently dropped every match
+// under llvm-project's `lldb/test/API/commands/target/`, a directory nobody ignores.
+// With real ignore-file support in the walk, guessing by name has nothing left to do.
+pub fn shouldSkipDir(name: &string): bool {
+    return name == ".git" || name == ".hg" || name == ".svn"
+}
+
+pub fn matchesType(path: &string, fileType: &string): bool {
+    if fileType.len == 0 {
+        return true
+    }
+    let ext = Path.ext(path)
+    if ext.len == 0 {
+        return false
+    }
+    return ext == "." + fileType
+}
+
+// One open directory: its entries and how far through them we are. `pushedIgnore`
+// records whether this directory contributed a set to the walker's ignore stack, so
+// the pop on the way out stays paired with the push on the way in.
+pub struct WalkFrame {
+    dirPath: string,
+    entries: Vec<DirEntry>,
+    idx: i64,
+    pushedIgnore: bool,
+}
+
+// Depth-first walk with an explicit stack. Yields the same paths in the same order a
+// recursive walk would — a directory is descended into at the point it is met, not
+// after its siblings — which is what keeps output in walk order.
+pub struct Walker {
+    stack: Vec<WalkFrame>,
+    sets: Vec<IgnoreSet>,
+    searchHidden: bool,
+    useIgnore: bool,
+    useGitIgnore: bool,
+    fileType: string,
+}
+
+impl Walker {
+    fn new(root: &string, searchHidden: bool, useIgnore: bool, useGitIgnore: bool, fileType: string): Walker {
+        var w = Walker {
+            stack: Vec.new(),
+            sets: Vec.new(),
+            searchHidden: searchHidden,
+            useIgnore: useIgnore,
+            useGitIgnore: useGitIgnore,
+            fileType: fileType,
+        }
+        w.pushDir(root)
+        return w
+    }
+
+    // A dir we can't open (permissions, a dangling symlink) is skipped, not fatal —
+    // one unreadable subdir under /var must not kill the whole walk.
+    fn pushDir(self: &mut Self, dirPath: &string): void {
+        let Result.Ok(entries) = readDir(dirPath) else {
+            return
+        }
+        var pushed = false
+        if self.useIgnore {
+            if let Option.Some(set) = loadIgnoreSet(dirPath, self.useGitIgnore) {
+                self.sets.push(set)
+                pushed = true
+            }
+        }
+        self.stack.push(WalkFrame {
+            dirPath: dirPath.clone(), entries: entries, idx: 0, pushedIgnore: pushed
+        }
+        )
+    }
+
+    fn next(self: &mut Self): Option<string> {
+        while self.stack.len > 0 {
+            let top = self.stack.len - 1
+            if self.stack[top].idx >= self.stack[top].entries.len {
+                if self.stack[top].pushedIgnore {
+                    let _ = self.sets.pop()
+                }
+                let _ = self.stack.pop()
+                continue
+            }
+            let i = self.stack[top].idx
+            self.stack[top].idx = i + 1
+            let name = self.stack[top].entries[i].name.clone()
+            let entryIsDir = self.stack[top].entries[i].isDir
+            let entryIsFile = self.stack[top].entries[i].isFile
+            if !self.searchHidden && name.len > 0 && name[0] == 46 {
+                continue
+            }
+            let dir = self.stack[top].dirPath.clone()
+            let fullPath = Path.join(dir, name)
+            if entryIsDir {
+                if !shouldSkipDir(name) && !stackIgnores(self.sets, fullPath, name, true) {
+                    self.pushDir(fullPath)
+                }
+            } else if entryIsFile {
+                // Apply -t here, not at search time: a file the type filter rejects
+                // must never reach the prescan, or the threads read it for nothing.
+                if matchesType(fullPath, self.fileType) && !stackIgnores(self.sets, fullPath, name, false) {
+                    return Option.Some(fullPath)
+                }
+            }
+        }
+        return Option.None
+    }
+
+    // Up to `n` more paths. Short (or empty) only at the end of the walk.
+    fn nextBatch(self: &mut Self, n: i64): Vec<string> {
+        var out: Vec<string> = Vec.new()
+        while out.len < n {
+            let Option.Some(p) = self.next() else {
+                break
+            }
+            out.push(p)
+        }
+        return out
+    }
+}

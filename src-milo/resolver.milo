@@ -482,7 +482,15 @@ pub fn collectAliasPairs(imports: &Vec<ImportDecl>): AliasPairs {
     for impI in 0..imports.len {
         match imports[impI].names {
             Option.Some(names) => {
+                // Defensive: aliases must be index-aligned with names (see
+                // ImportDecl.aliases' doc comment) — a construction site that
+                // forgets this (the synthetic std/unicode injection once did)
+                // must not crash the whole compile on an out-of-bounds index.
+                let aliasesLen = imports[impI].aliases.len
                 for ni in 0..names.len {
+                    if ni >= aliasesLen {
+                        continue
+                    }
                     match imports[impI].aliases[ni] {
                         Option.Some(alias) => {
                             if alias != names[ni] {

@@ -1900,8 +1900,13 @@ pub fn parse(p: &mut Parser): Program {
             var unicodeNames: Vec<string> = Vec.new()
             unicodeNames.push("CodePoint")
             unicodeNames.push("decodeCodepoint")
+            // aliases must stay index-aligned with names (see ImportDecl.aliases'
+            // doc comment) — one Option.None per injected name, not an empty Vec.
+            var unicodeAliases: Vec<Option<string>> = Vec.new()
+            unicodeAliases.push(Option.None)
+            unicodeAliases.push(Option.None)
             imports.push(ImportDecl {
-                path: "std/unicode", names: Option.Some(unicodeNames), aliases: Vec.new(), span: Option.None
+                path: "std/unicode", names: Option.Some(unicodeNames), aliases: unicodeAliases, span: Option.None
             }
             )
         }

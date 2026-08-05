@@ -1842,6 +1842,15 @@ pub fn checkCast(ck: &mut Checker, operand: &Expr, targetType: &MiloType, span: 
         _ => {
         }
     }
+    // A payload-free (integer-repr) enum casts to an integer: the value IS its
+    // discriminant, which milo0 already stores as the i32 tag in field 0.
+    match fromType.clone() {
+        TypeKind.TEnum(ename) => {
+            fromCastable = true
+        }
+        _ => {
+        }
+    }
     let fromOk = isNumeric(fromType) || typeEq(fromType, tyBool()) || fromCastable
     var toCastable = false
     match toType.clone() {

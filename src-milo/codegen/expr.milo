@@ -1967,6 +1967,29 @@ pub fn genAsCast(cg: &mut Cgen, inner: &Expr, targetTy: &string, locs: &Vec<Loca
     let v = genExpr(cg, inner, locs, sigs, targetTy.clone())
     let fromLl = llType(v.ty)
     let toLl = llType(targetTy)
+
+    // Integer-repr enum to an integer: the discriminant IS the value, and milo0 stores it
+    // as the i32 tag in field 0. Self-contained (extract, then widen/narrow to the target)
+    // so it cannot interact with the pointer and float paths below.
+    if intBits(toLl.clone()) > 0 && cg.enums.contains(stripPercent(resolveTyStr(cg, stripPercent(v.ty)))) {
+        let raw = nextTemp(cg)
+        emit(cg, "  " + raw + " = extractvalue " + fromLl.clone() + " " + v.v.clone() + ", 0\n")
+        let want = intBits(toLl.clone())
+        if want == 32 {
+            return Val {
+                v: raw, ty: targetTy.clone()
+            }
+        }
+        let conv = nextTemp(cg)
+        var op = "sext"
+        if want < 32 {
+            op = "trunc"
+        }
+        emit(cg, "  " + conv + " = " + op + " i32 " + raw + " to " + toLl.clone() + "\n")
+        return Val {
+            v: conv, ty: targetTy.clone()
+        }
+    }
     // Pointer target (`x as *T`, or a bare `ptr`): the value is an opaque `ptr`,
     // but carry the SURFACE `*T` so index/index-assign can recover element type T.
     let toIsPtr = (targetTy.len > 0 && targetTy[0] == 42) || toLl == "ptr"

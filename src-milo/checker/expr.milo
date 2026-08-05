@@ -1,6 +1,6 @@
 // Expression type checking
 from "src-milo/ast.milo" import {
-    Expr, Param, MiloType, Span, StructLitField, Pattern, Stmt
+    Expr, Param, MiloType, Span, StructLitField, Pattern, Stmt, MatchArm
 }
 from "src-milo/checker/types.milo" import {
     TypeKind, typeEq, typeName, typeFromAst, typeFromName,
@@ -11,7 +11,7 @@ from "src-milo/checker/state.milo" import {
     Checker, VarInfo, FnSig, FnParam, StructInfo, CkStructField,
     EnumInfo, VariantInfo, Diagnostic,
     error, errorHint, warn, pushScope, popScope, declare, lookup, setVarMoved, setVarType, setVarRead, hasErrors,
-    isCopyCk, normalizeEnumNames, snapshotMoves, restoreMoves,
+    isCopyCk, normalizeEnumNames, snapshotMoves, restoreMoves, orMoves,
 }
 from "src-milo/checker/mono.milo" import {
     monomorphizeEnum, monomorphizeFn, monomorphizeStruct, resolveMonoType
@@ -25,6 +25,14 @@ from "src-milo/checker/stmt.milo" import {
 
 // -- Move tracking --
 
+// Which variable(s) does moving `expr` actually consume? A fork (if/match
+// used as a value) doesn't own storage itself — which arm ran is a runtime
+// fact, so BOTH tails are moved: a binding consumed on either path is
+// unusable afterward, mirroring the oracle's moveTargets/tryMove split.
+// Pass-throughs (`!`, `?`, `??`) forward to the operand(s) whose storage the
+// result actually came from. Everything else either names storage directly
+// (Ident, handled as a leaf below) or is a fresh value with no upstream
+// owner to poison.
 pub fn tryMove(ck: &mut Checker, expr: &Expr) {
     if ck.inReturn {
         return
@@ -41,6 +49,33 @@ pub fn tryMove(ck: &mut Checker, expr: &Expr) {
                 Option.None => {
                 }
             }
+        }
+        Expr.IfExpr(cond, thenE, elseE, span) => {
+            tryMove(ck, *thenE)
+            tryMove(ck, *elseE)
+        }
+        Expr.MatchExpr(subject, arms, span) => {
+            for i in 0..arms.len {
+                if arms[i].body.len > 0 {
+                    match *arms[i].body[arms[i].body.len - 1] {
+                        Stmt.ExprStmt(e, espan) => {
+                            tryMove(ck, *e)
+                        }
+                        _ => {
+                        }
+                    }
+                }
+            }
+        }
+        Expr.Unwrap(operand, span) => {
+            tryMove(ck, *operand)
+        }
+        Expr.Propagate(operand, span) => {
+            tryMove(ck, *operand)
+        }
+        Expr.DefaultValue(operand, default, span) => {
+            tryMove(ck, *operand)
+            tryMove(ck, *default)
         }
         _ => {
         }
@@ -234,8 +269,21 @@ pub fn checkExpr(ck: &mut Checker, expr: &Expr): TypeKind {
             if !typeEq(condType, tyBool()) && !typeEq(condType, tyUnknown()) {
                 error(ck, "if-expression condition must be bool, got " + typeName(condType), cloneSpan(span))
             }
+            // Branches are checked in isolation from the pre-state (a move inside
+            // one arm must not poison the other arm's read of the same name —
+            // only one arm actually runs), then joined: either arm's moves must
+            // survive to the code after, since which one ran is a runtime fact.
+            // Mirrors checkIf's branch isolation (stmt.milo), generalized to
+            // fork-as-value.
+            let preSnap = snapshotMoves(ck)
             let thenType = checkExpr(ck, *thenE)
+            let afterThen = snapshotMoves(ck)
+            restoreMoves(ck, preSnap)
             let elseType = checkExpr(ck, *elseE)
+            let afterElse = snapshotMoves(ck)
+            restoreMoves(ck, preSnap)
+            orMoves(ck, afterThen)
+            orMoves(ck, afterElse)
             // A bare int literal on the ELSE side (`if c { flags() } else { 0 }`) has no
             // intrinsic width — codegen already coerces it (genExpr's IfExpr passes the
             // THEN branch's type down as elseE's hint), so the checker must accept it

@@ -749,7 +749,11 @@ pub fn parseFor(p: &mut Parser): Stmt {
     if matchTok(p, TokKind.Comma) {
         varName2 = Option.Some(expect(p, TokKind.Ident).value)
     }
-    expect(p, TokKind.In)
+    if at(p, TokKind.Ident) && peek(p).value == "in" {
+        advance(p)
+    } else {
+        eprint("parse error: expected 'in' in for-loop at line " + peek(p).line.toString() + ":" + peek(p).col.toString())
+    }
     let savedNS = p.noStructLit
     p.noStructLit = true
     let iterableOrStart = parseExpr(p)

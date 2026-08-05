@@ -396,6 +396,42 @@ fn ensureFloatFmt(cg: &mut Cgen) {
     emitG(cg, "}\n")
 }
 
+// Naive substring search shared by every `lines()`/`splitView()` for-in loop: returns
+// the byte offset of the needle in the haystack at or after `from`, or -1. Emitted
+// once per module (like the float formatters above) — a Milo-level strIndexOfFrom
+// can't be reused here because codegen cannot assume std/string is imported by the
+// program being compiled.
+pub fn ensureStrFind(cg: &mut Cgen) {
+    if cg.declaredStrFind {
+        return
+    }
+    cg.declaredStrFind = true
+    ensureMemcmp(cg)
+    emitG(cg, "define private i64 @milo.strfind(ptr %h, i64 %hlen, ptr %n, i64 %nlen, i64 %from) {\n")
+    emitG(cg, "entry:\n")
+    // negative when the needle is longer than the haystack, which makes the first
+    // comparison below fail and the search miss without a special case
+    emitG(cg, "  %limit = sub i64 %hlen, %nlen\n")
+    emitG(cg, "  br label %loop\n")
+    emitG(cg, "loop:\n")
+    emitG(cg, "  %i = phi i64 [ %from, %entry ], [ %inext, %next ]\n")
+    emitG(cg, "  %past = icmp sgt i64 %i, %limit\n")
+    emitG(cg, "  br i1 %past, label %miss, label %cmp\n")
+    emitG(cg, "cmp:\n")
+    emitG(cg, "  %p = getelementptr i8, ptr %h, i64 %i\n")
+    emitG(cg, "  %c = call i32 @memcmp(ptr %p, ptr %n, i64 %nlen)\n")
+    emitG(cg, "  %eq = icmp eq i32 %c, 0\n")
+    emitG(cg, "  br i1 %eq, label %hit, label %next\n")
+    emitG(cg, "next:\n")
+    emitG(cg, "  %inext = add i64 %i, 1\n")
+    emitG(cg, "  br label %loop\n")
+    emitG(cg, "hit:\n")
+    emitG(cg, "  ret i64 %i\n")
+    emitG(cg, "miss:\n")
+    emitG(cg, "  ret i64 -1\n")
+    emitG(cg, "}\n")
+}
+
 // f32 needs its own helper, not an fpext into the f64 one: the shortest string that
 // round-trips a FLOAT is not the shortest that round-trips the double it widens to.
 // 9 significant digits suffice for f32 (17 for f64), and the read-back must go through

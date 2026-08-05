@@ -533,6 +533,144 @@ pub fn checkIfLet(ck: &mut Checker, pattern: &Pattern, expr: &Expr, thenBody: &V
 
 // -- For-in statement --
 
+// One TRef unwrap. Kept separate from checker/expr.milo's `deref` so this file's
+// side-effect-free peek below never accidentally inherits a change made there for
+// some other caller's contract.
+fn peekDeref(t: TypeKind): TypeKind {
+    match t {
+        TypeKind.TRef(inner, mutable) => {
+            return (*inner).clone()
+        }
+        _ => {
+            return t
+        }
+    }
+}
+
+// Side-effect-free type of a variable/field/index path — used only to decide
+// whether `for x in EXPR` is the string-view loop form (`text.lines()` /
+// `text.splitView(sep)`) before EXPR is checked as an ordinary call, which would
+// report the wrong error. Deliberately partial: a None answer means "ask the real
+// checker", never "not a string".
+pub fn peekPathType(ck: &Checker, e: &Expr): Option<TypeKind> {
+    match e {
+        // a literal's bytes are a module constant, so views into it outlive any loop
+        Expr.StringLit(v, s) => {
+            return Option.Some(tyString())
+        }
+        Expr.Ident(name, s) => {
+            match lookup(ck, name) {
+                Option.Some(info) => {
+                    return Option.Some(info.ty)
+                }
+                Option.None => {
+                    return Option.None
+                }
+            }
+        }
+        Expr.FieldAccess(obj, field, s) => {
+            match peekPathType(ck, *obj) {
+                Option.Some(baseTy) => {
+                    match peekDeref(baseTy) {
+                        TypeKind.TStruct(sname) => {
+                            if ck.structs.contains(sname) {
+                                let info = ck.structs.get(sname)!
+                                for i in 0..info.fields.len {
+                                    if info.fields[i].name == field {
+                                        return Option.Some(info.fields[i].ty.clone())
+                                    }
+                                }
+                            }
+                            return Option.None
+                        }
+                        _ => {
+                            return Option.None
+                        }
+                    }
+                }
+                Option.None => {
+                    return Option.None
+                }
+            }
+        }
+        // `rows[i].lines()` — an element read, so the freeze on the root container
+        // still covers the storage the pieces point into
+        Expr.IndexAccess(obj, idx, s) => {
+            match peekPathType(ck, *obj) {
+                Option.Some(baseTy) => {
+                    match peekDeref(baseTy) {
+                        TypeKind.TVec(elem) => {
+                            return Option.Some((*elem).clone())
+                        }
+                        TypeKind.TArray(elem, size) => {
+                            return Option.Some((*elem).clone())
+                        }
+                        TypeKind.THashMap(key, val) => {
+                            return Option.Some((*val).clone())
+                        }
+                        _ => {
+                            return Option.None
+                        }
+                    }
+                }
+                Option.None => {
+                    return Option.None
+                }
+            }
+        }
+        _ => {
+            return Option.None
+        }
+    }
+}
+
+// `for line in text.lines()` / `for f in text.splitView(sep)`. Each piece is a
+// `&string` view into the receiver's own buffer — loop-only, matching the
+// second-class reference rule: a view can't travel through the `next(): Option<T>`
+// iterator protocol, since a reference inside an enum payload is a rejected return.
+pub fn checkStringViewForIn(ck: &mut Checker, varName: &string, varName2: &Option<string>, recv: &Expr, mode: &string, args: &Vec<Heap<Expr>>, body: &Vec<Heap<Stmt>>, fnRetType: &TypeKind, span: &Option<Span>) {
+    checkExpr(ck, recv)
+    if mode == "splitView" {
+        if args.len != 1 {
+            error(ck, "'splitView' expects 1 argument, got " + args.len.toString(), cloneSpan(span))
+        } else {
+            let sepType = checkExpr(ck, *args[0])
+            if !typeEq(sepType, tyString()) && !typeEq(sepType, tyUnknown()) {
+                error(ck, "'splitView': expected string, got " + typeName(sepType), cloneSpan(span))
+            }
+        }
+    } else if args.len != 0 {
+        error(ck, "'lines' takes no arguments", cloneSpan(span))
+    }
+
+    let viewType = TypeKind.TRef(Heap(tyString()), false)
+    pushScope(ck)
+    match varName2 {
+        Option.Some(name2) => {
+            declare(ck, varName.clone(), VarInfo {
+                ty: tyI64(), mutable: false, moved: false, borrowed: false, read: false, span: cloneSpan(span)
+            }
+            )
+            declare(ck, name2.clone(), VarInfo {
+                ty: viewType, mutable: false, moved: false, borrowed: false, read: false, span: cloneSpan(span)
+            }
+            )
+        }
+        Option.None => {
+            declare(ck, varName.clone(), VarInfo {
+                ty: viewType, mutable: false, moved: false, borrowed: false, read: false, span: cloneSpan(span)
+            }
+            )
+        }
+    }
+    ck.loopDepth = ck.loopDepth + 1
+    for s in body {
+        checkStmt(ck, *s, fnRetType)
+    }
+    ck.loopDepth = ck.loopDepth - 1
+    popScope(ck)
+}
+
 pub fn checkForIn(ck: &mut Checker, varName: &string, varName2: &Option<string>, iterable: &Expr, body: &Vec<Heap<Stmt>>, fnRetType: &TypeKind, span: &Option<Span>) {
     // Range expression handled specially
     match iterable {
@@ -586,7 +724,58 @@ pub fn checkForIn(ck: &mut Checker, varName: &string, varName2: &Option<string>,
         }
     }
 
-    let iterType = checkExpr(ck, iterable)
+    // `for line in text.lines()` / `for f in text.splitView(sep)` — a text pass that
+    // allocates nothing. The receiver type has to be known BEFORE the call is checked
+    // as an ordinary expression: checking the whole MethodCall generically would hit
+    // checkStringMethod and report "no method 'lines' on string" (lines/splitView are
+    // for-loop-only forms, not real methods) — peekPathType answers side-effect-free,
+    // without checking (and thereby misreporting on) the call itself.
+    match iterable {
+        Expr.MethodCall(mObj, mMethod, mArgs, mSpan) => {
+            if mMethod == "lines" || mMethod == "splitView" {
+                var recvIsString = false
+                match peekPathType(ck, *mObj) {
+                    Option.Some(t) => {
+                        match peekDeref(t) {
+                            TypeKind.TString => {
+                                recvIsString = true
+                            }
+                            _ => {
+                            }
+                        }
+                    }
+                    Option.None => {
+                    }
+                }
+                if recvIsString {
+                    checkStringViewForIn(ck, varName, varName2, *mObj, mMethod, mArgs, body, fnRetType, span)
+                    return
+                }
+            }
+        }
+        _ => {
+        }
+    }
+
+    var iterType = checkExpr(ck, iterable)
+    // slices (&[T]) and &Vec iterate like the owned collection — same loop shapes,
+    // just borrowed instead of moved.
+    match iterType.clone() {
+        TypeKind.TRef(inner, mutable) => {
+            match (*inner).clone() {
+                TypeKind.TArray(e, s) => {
+                    iterType = (*inner).clone()
+                }
+                TypeKind.TVec(e) => {
+                    iterType = (*inner).clone()
+                }
+                _ => {
+                }
+            }
+        }
+        _ => {
+        }
+    }
 
     pushScope(ck)
     ck.loopDepth = ck.loopDepth + 1

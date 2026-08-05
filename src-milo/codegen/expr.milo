@@ -15,7 +15,7 @@ from "src-milo/codegen/types.milo" import {
     findLocal, hasLocal, genLoad, ensureMalloc, ensureMemcpy, ensurePutchar, ensureStringTy,
     lookupFnRet, lookupFieldIndex, lookupFieldType,
     lookupVariantTag, variantTagOpt, lookupVariantPayload, lookupEnumPayloadSlots,
-    isInlineArrTy, inlineArrLen, inlineArrElem
+    isInlineArrTy, inlineArrLen, inlineArrElem, ensureFpSat
 }
 from "src-milo/codegen/stmt.milo" import {
     genClosure, genClosureCall, widenToI64, genMatch, MatchGen
@@ -30,7 +30,7 @@ from "src-milo/codegen/abi.milo" import {
 from "src-milo/codegen/strings.milo" import {
     genStringLit, genStringClone, genStringConcat, genStringEq, genStringCmp,
     genIntToString, genFloatToString, genFloat32ToString, genStringIndex, genStringSlice, emitStringLit, genStringPush,
-    genStringAppendInPlace
+    genStringAppendInPlace, formatF32Bits, floatDecimalStr
 }
 
 // -- Struct literal --
@@ -2412,6 +2412,33 @@ pub fn peekArgTy(e: &Expr, locs: &Vec<Local>): string {
     }
 }
 
+// AST-only mirror of the checker's isConstFloatExpr: true when `e` is a float
+// literal, or unary-minus / arithmetic built ONLY from float literals — such a
+// subtree has no width of its own and may adopt a context type. Used by BinOp
+// codegen below, same as the IntLit-only special case it sits beside.
+pub fn isFloatLitAstExpr(e: &Expr): bool {
+    match e {
+        Expr.FloatLit(f, s) => {
+            return true
+        }
+        Expr.UnaryOp(op, operand, s) => {
+            if op == "-" {
+                return isFloatLitAstExpr(*operand)
+            }
+            return false
+        }
+        Expr.BinOp(op, l, r, s) => {
+            if op == "+" || op == "-" || op == "*" || op == "/" || op == "%" {
+                return isFloatLitAstExpr(*l) && isFloatLitAstExpr(*r)
+            }
+            return false
+        }
+        _ => {
+            return false
+        }
+    }
+}
+
 pub fn genEnumLit(cg: &mut Cgen, enumName: &string, variant: &string, args: &Vec<Heap<Expr>>, locs: &Vec<Local>, sigs: &Vec<CgFnSig>, hintTy: &string): Val {
     // Generic enums are registered under their mangled name
     var rEnum = resolveEnumName(cg, enumName)
@@ -2547,6 +2574,50 @@ pub fn genEnumLit(cg: &mut Cgen, enumName: &string, variant: &string, args: &Vec
 
 // -- Cast --
 
+// Whether it is safe to feed the CAST's target type in as `inner`'s hint.
+// `0 as *T` needs the hint (so the IntLit branch spells it "null", not "0"),
+// and `0.1 as f32` needs it too (so the literal rounds through f32). But the
+// checker never gives a cast operand an expected-type hint (checkCast just
+// calls plain checkExpr on it — the whole point of `as` is bridging operand
+// types the checker did NOT unify) — so a cast operand with a REAL variable in
+// it, e.g. `(-1 - xs) as f64` with `xs: i64`, checks as a plain i64 subtraction.
+// Forwarding the f64 hint into that BinOp used to retype the bare `-1` literal
+// as a double while `xs` stayed i64, producing `fsub double %float, %i64` —
+// invalid IR. Only forward the hint when `inner` is built ENTIRELY from
+// literals (no Ident/Call/FieldAccess/…), matching what the checker itself
+// would have resolved unhinted.
+pub fn isHintSafeCastOperand(e: &Expr): bool {
+    match e {
+        Expr.IntLit(n, s) => {
+            return true
+        }
+        Expr.FloatLit(f, s) => {
+            return true
+        }
+        Expr.BoolLit(b, s) => {
+            return true
+        }
+        Expr.CharLit(c, s) => {
+            return true
+        }
+        Expr.UnaryOp(op, operand, s) => {
+            if op == "-" {
+                return isHintSafeCastOperand(*operand)
+            }
+            return false
+        }
+        Expr.BinOp(op, l, r, s) => {
+            if op == "+" || op == "-" || op == "*" || op == "/" || op == "%" {
+                return isHintSafeCastOperand(*l) && isHintSafeCastOperand(*r)
+            }
+            return false
+        }
+        _ => {
+            return false
+        }
+    }
+}
+
 pub fn genAsCast(cg: &mut Cgen, inner: &Expr, targetTy: &string, locs: &Vec<Local>, sigs: &Vec<CgFnSig>): Val {
     // A bare fn name cast to a raw pointer (`_osThreadTrampoline as *u8`) is the
     // fn's own address, NOT a closure thunk — pass @name directly.
@@ -2564,7 +2635,11 @@ pub fn genAsCast(cg: &mut Cgen, inner: &Expr, targetTy: &string, locs: &Vec<Loca
             }
         }
     }
-    let v = genExpr(cg, inner, locs, sigs, targetTy.clone())
+    var innerHint = ""
+    if isHintSafeCastOperand(inner) {
+        innerHint = targetTy.clone()
+    }
+    let v = genExpr(cg, inner, locs, sigs, innerHint)
     let fromLl = llType(v.ty)
     let toLl = llType(targetTy)
 
@@ -2682,17 +2757,27 @@ pub fn genAsCast(cg: &mut Cgen, inner: &Expr, targetTy: &string, locs: &Vec<Loca
             op = "uitofp"
         }
         emit(cg, "  " + cf + " = " + op + " " + fromLl + " " + v.v + " to " + toLl + "\n")
+        // SURFACE type ("f32"), not the LLVM spelling ("float"): llType's milo
+        // "float" alias for f64 also stringifies to "float", so a caller that
+        // re-derives the LLVM type from this Val.ty (llType(v.ty)) got "double"
+        // back for what is actually an LLVM `float` value — a real type/value
+        // mismatch downstream (`trunc double %x to float` on an already-float %x).
         return Val {
-            v: cf, ty: toLl
+            v: cf, ty: targetTy.clone()
         }
     }
     if fromIsFloat && toBits > 0 {
-        let ci = nextTemp(cg)
+        // Raw fptosi/fptoui is poison (UB) when the value overflows the target or is
+        // NaN — castFloatSaturate wants total, defined behavior (clamp to min/max,
+        // NaN -> 0), so route through LLVM's saturating intrinsic instead of the
+        // bare instruction. Matches the oracle (src/codegen.ts) exactly.
         var op = "fptosi"
         if isUnsigned(targetTy) {
             op = "fptoui"
         }
-        emit(cg, "  " + ci + " = " + op + " " + fromLl + " " + v.v + " to " + toLl + "\n")
+        let intrinsic = ensureFpSat(cg, op, toLl.clone(), fromLl.clone())
+        let ci = nextTemp(cg)
+        emit(cg, "  " + ci + " = call " + toLl + " @" + intrinsic + "(" + fromLl + " " + v.v + ")\n")
         // The SURFACE type, not the LLVM spelling: `x as u8` typed as plain `i8` is
         // indistinguishable from a signed i8 downstream, and printing then sign-extended
         // a u8 of 255 into -1.
@@ -2707,8 +2792,9 @@ pub fn genAsCast(cg: &mut Cgen, inner: &Expr, targetTy: &string, locs: &Vec<Loca
             op = "fptrunc"
         }
         emit(cg, "  " + cff + " = " + op + " " + fromLl + " " + v.v + " to " + toLl + "\n")
+        // SURFACE type, same reason as the int->float branch above.
         return Val {
-            v: cff, ty: toLl
+            v: cff, ty: targetTy.clone()
         }
     }
     if fromBits == 0 || toBits == 0 {
@@ -3426,7 +3512,11 @@ pub fn genMethodCall(cg: &mut Cgen, object: &Expr, method: &string, args: &Vec<H
                     let payLl = llType(payTy)
                     // The default is evaluated before the branch: `unwrapOr(x)` takes x
                     // eagerly, so evaluating it on the present path too would be wrong.
-                    let dv = genExpr(cg, *args[0], locs, sigs, payLl.clone())
+                    // Hint with the SURFACE payload type ("f32"), not its LLVM spelling
+                    // (llType's milo "float" alias for f64 also stringifies to "float",
+                    // so an f32 payload's hint collided with that and silently defaulted
+                    // a bare default-value literal to f64).
+                    let dv = genExpr(cg, *args[0], locs, sigs, payTy.clone())
                     let isOkT = nextTemp(cg)
                     emit(cg, "  " + isOkT + " = icmp eq i32 " + tag.clone() + ", " + okTag.toString() + "\n")
                     let haveLbl = nextLabel(cg, "unwrapor.have")
@@ -3563,7 +3653,9 @@ pub fn genMethodCall(cg: &mut Cgen, object: &Expr, method: &string, args: &Vec<H
     if isVecTy(obj.ty) && method == "contains" && args.len == 1 {
         let elemTy = unwrapVec(resolveTyStr(cg, obj.ty))
         let elemLl = llType(elemTy.clone())
-        let needle = genExpr(cg, *args[0], locs, sigs, elemLl.clone())
+        // SURFACE elem type, not its LLVM spelling — same "float" alias collision
+        // as Vec.filled's fill-value hint.
+        let needle = genExpr(cg, *args[0], locs, sigs, elemTy.clone())
         let dataP = nextTemp(cg)
         emit(cg, "  " + dataP + " = extractvalue %Vec " + obj.v.clone() + ", 0\n")
         let lenV = nextTemp(cg)
@@ -3949,6 +4041,13 @@ pub fn genMethodCall(cg: &mut Cgen, object: &Expr, method: &string, args: &Vec<H
     }
     if objTyLl == "double" && method == "toString" {
         return genFloatToString(cg, obj.v)
+    }
+    // f32 round-trips at f32 precision, not the promoted double's (floatRoundTrip) —
+    // genFloat32ToString already existed for f-string interpolation but was never
+    // wired into method-call dispatch, so `f.toString()` on an f32 fell through to
+    // "unsupported method" once float literals could actually type as f32.
+    if objTyLl == "float" && method == "toString" {
+        return genFloat32ToString(cg, obj.v)
     }
     // i8/i16/i32 (and their unsigned forms) → widen to i64 then format. Unsigned
     // types zero-extend so e.g. a u8 of 200 prints 200, not -56.
@@ -4387,6 +4486,9 @@ pub fn genDisplayString(cg: &mut Cgen, val: &string, ty: &string, locs: &Vec<Loc
     }
     if ll == "double" {
         return genFloatToString(cg, val.clone())
+    }
+    if ll == "float" {
+        return genFloat32ToString(cg, val.clone())
     }
     // A fixed array and a `.slice()`/`v[a..b]` view share the Vec's %Vec runtime
     // rep (see astTypeStr), so this one path renders Vec<T>, [T;N], and a slice.
@@ -6191,28 +6293,25 @@ pub fn genExpr(cg: &mut Cgen, e: &Expr, locs: &Vec<Local>, sigs: &Vec<CgFnSig>, 
             }
         }
         Expr.FloatLit(f, span) => {
-            // f.toString() drops the decimal for whole values (0.0 -> "0"), which
-            // LLVM rejects as a `double`/`float` constant. Ensure a '.' or exponent.
-            var fs = f.toString()
-            var hasPoint = false
-            for ci in 0..fs.len {
-                if fs[ci] == 46 || fs[ci] == 101 || fs[ci] == 69 {
-                    hasPoint = true
-                }
-            }
-            if !hasPoint {
-                fs = fs + ".0"
-            }
             // Honor an f32 field/arg hint: a bare float literal defaults to double,
-            // but in `float` position LLVM needs a `float` constant (same decimal
-            // syntax). Carry the SURFACE type "f32" (not "float" — llType maps the
-            // surface alias "float"→double, which would re-widen the store).
+            // but in `float` position LLVM needs a `float` constant. Carry the
+            // SURFACE type "f32" (not "float" — llType maps the surface alias
+            // "float"→double, which would re-widen the store).
             var fll = "double"
             if hintTy.len > 0 && llType(hintTy) == "float" {
                 fll = "f32"
             }
+            if fll == "f32" {
+                // A decimal literal at f64 precision (e.g. "0.1") doesn't reduce to
+                // an exactly-representable float32 value, and LLVM's parser hard-
+                // rejects a `float` operand written that way ("floating point
+                // constant invalid for type"). Use the hex bit-pattern form instead.
+                return Val {
+                    v: formatF32Bits(f), ty: fll
+                }
+            }
             return Val {
-                v: fs, ty: fll
+                v: floatDecimalStr(f), ty: fll
             }
         }
         Expr.BoolLit(b, span) => {
@@ -6359,6 +6458,19 @@ pub fn genExpr(cg: &mut Cgen, e: &Expr, locs: &Vec<Local>, sigs: &Vec<CgFnSig>, 
                         }
                     }
                     _ => {
+                        // Same idea for a float-literal subtree on the left with no
+                        // hint of its own (`(1.0 + 3.0) * w` — the parenthesized sum
+                        // has no width, but w does): peek the right operand's actual
+                        // type and adopt it if it's float. A lone `1.0 - t` is already
+                        // covered by an outer hint flowing down (return type, let
+                        // annotation, …); this only matters when there is none.
+                        if isFloatLitAstExpr(*l) {
+                            let rt = peekArgTy(*r, locs)
+                            let rll = llType(rt)
+                            if rll == "float" || rll == "double" {
+                                lHint = rt
+                            }
+                        }
                     }
                 }
             }
@@ -6619,7 +6731,11 @@ pub fn genExpr(cg: &mut Cgen, e: &Expr, locs: &Vec<Local>, sigs: &Vec<CgFnSig>, 
                 let elemTy = unwrapVec(resolveTyStr(cg, vecTy.clone()))
                 let elemLl = llType(elemTy.clone())
                 let n = genExpr(cg, *args[0], locs, sigs, "i64")
-                let fill = genExpr(cg, *args[1], locs, sigs, elemLl.clone())
+                // hint with the SURFACE elem type ("f32"), not its LLVM spelling: llType's
+                // milo "float" alias for f64 also stringifies to "float", so passing
+                // elemLl ("float", the true LLVM f32 type) collided with that alias and
+                // genExpr's FloatLit hint check silently treated it as an f64 hint.
+                let fill = genExpr(cg, *args[1], locs, sigs, elemTy.clone())
                 let esz = llTypeBytes(elemLl.clone())
                 let bytes = nextTemp(cg)
                 emit(cg, "  " + bytes + " = mul i64 " + n.v.clone() + ", " + esz.toString() + "\n")
@@ -6671,6 +6787,68 @@ pub fn genExpr(cg: &mut Cgen, e: &Expr, locs: &Vec<Local>, sigs: &Vec<CgFnSig>, 
                 }
                 var emptyTA: Vec<MiloType> = Vec.new()
                 return genCall(cg, pfn, args, emptyTA, locs, sigs, hintTy)
+            }
+            // `Kind.tryFrom(n)` on a payload-free enum -> Option<Kind>: Some(the
+            // matched variant) when `n` equals one of the enum's discriminants,
+            // None otherwise. Mirrors the oracle's genEnumTryFrom (src/codegen.ts) —
+            // a fieldless enum's value IS its i32 tag, so the payload write is just
+            // the matched integer, truncated.
+            if variant == "tryFrom" && cg.enums.contains(enumName) && args.len == 1 {
+                let srcInfo = cg.enums.get(enumName)!
+                let nv = genExpr(cg, *args[0], locs, sigs, "i64")
+                var n64 = nv.v.clone()
+                if llType(nv.ty) != "i64" {
+                    let w = nextTemp(cg)
+                    var op = "sext"
+                    if isUnsigned(nv.ty) {
+                        op = "zext"
+                    }
+                    emit(cg, "  " + w + " = " + op + " " + llType(nv.ty) + " " + n64 + " to i64\n")
+                    n64 = w
+                }
+                var valid = "0"
+                for vi in 0..srcInfo.variants.len {
+                    let eq = nextTemp(cg)
+                    emit(cg, "  " + eq + " = icmp eq i64 " + n64 + ", " + srcInfo.variants[vi].tag.toString() + "\n")
+                    if valid == "0" {
+                        valid = eq
+                    } else {
+                        let o = nextTemp(cg)
+                        emit(cg, "  " + o + " = or i1 " + valid + ", " + eq + "\n")
+                        valid = o
+                    }
+                }
+                let optName = "Option_" + enumName.clone()
+                let optTy = "%" + optName
+                let someTag = lookupVariantTag(cg, optName, "Some")
+                let noneTag = lookupVariantTag(cg, optName, "None")
+                let res = nextTemp(cg)
+                emit(cg, "  " + res + " = alloca " + optTy + "\n")
+                let someBB = nextLabel(cg, "tryfrom.some")
+                let noneBB = nextLabel(cg, "tryfrom.none")
+                let doneBB = nextLabel(cg, "tryfrom.done")
+                emit(cg, "  br i1 " + valid + ", label %" + someBB + ", label %" + noneBB + "\n")
+                emitLabel(cg, someBB)
+                let sTagPtr = nextTemp(cg)
+                emit(cg, "  " + sTagPtr + " = getelementptr " + optTy + ", ptr " + res + ", i32 0, i32 0\n")
+                emit(cg, "  store i32 " + someTag.toString() + ", ptr " + sTagPtr + "\n")
+                let n32 = nextTemp(cg)
+                emit(cg, "  " + n32 + " = trunc i64 " + n64 + " to i32\n")
+                let payloadPtr = nextTemp(cg)
+                emit(cg, "  " + payloadPtr + " = getelementptr " + optTy + ", ptr " + res + ", i32 0, i32 1\n")
+                emit(cg, "  store i32 " + n32 + ", ptr " + payloadPtr + "\n")
+                emit(cg, "  br label %" + doneBB + "\n")
+                emitLabel(cg, noneBB)
+                let nTagPtr = nextTemp(cg)
+                emit(cg, "  " + nTagPtr + " = getelementptr " + optTy + ", ptr " + res + ", i32 0, i32 0\n")
+                emit(cg, "  store i32 " + noneTag.toString() + ", ptr " + nTagPtr + "\n")
+                emit(cg, "  br label %" + doneBB + "\n")
+                emitLabel(cg, doneBB)
+                let out = nextTemp(cg)
+                emit(cg, "  " + out + " = load " + optTy + ", ptr " + res + "\n")
+                return Val {
+                    v: out, ty: optName
+                }
             }
             return genEnumLit(cg, enumName, variant, args, locs, sigs, hintTy)
         }

@@ -168,6 +168,9 @@ pub struct Cgen {
     // everything pushed since then (mirrors emitScopeDrops at a normal loop-body
     // end), same idea as curBreakLbl/curContLbl. -1 outside any loop.
     curLoopScopeLen: i64,
+    // names of emitted `llvm.fptosi.sat.*`/`llvm.fptoui.sat.*` declares (dedup) —
+    // one per distinct (op, toTy, fromTy) combo actually used, mirrors emittedThunks.
+    declaredFpSat: Vec<string>,
 }
 
 pub fn cgenNew(): Cgen {
@@ -222,6 +225,7 @@ pub fn cgenNew(): Cgen {
         closureRetHint: "",
         movedLocalAddrs: Vec.new(),
         curLoopScopeLen: -1,
+        declaredFpSat: Vec.new(),
     }
 }
 
@@ -313,6 +317,28 @@ pub fn ensureFree(cg: &mut Cgen) {
         emitG(cg, "declare void @free(ptr)\n")
         cg.declaredFree = true
     }
+}
+
+// A raw `fptosi`/`fptoui` is poison (UB) when the source doesn't fit the target
+// or is NaN — mirrors src/codegen.ts's fpSatIntrinsics: use LLVM's saturating
+// variant instead, so a float->int cast is total (out-of-range clamps to the
+// target's min/max, NaN -> 0), matching Rust's post-1.45 `as` semantics.
+// Returns the bare intrinsic name (no leading '@'); declares it once per
+// distinct (op, toTy, fromTy) combo.
+pub fn ensureFpSat(cg: &mut Cgen, opBase: string, toLl: string, fromLl: string): string {
+    var fpSuffix = "f32"
+    if fromLl == "double" {
+        fpSuffix = "f64"
+    }
+    let name = "llvm." + opBase.clone() + ".sat." + toLl.clone() + "." + fpSuffix
+    for i in 0..cg.declaredFpSat.len {
+        if cg.declaredFpSat[i] == name {
+            return name
+        }
+    }
+    cg.declaredFpSat.push(name.clone())
+    emitG(cg, "declare " + toLl.clone() + " @" + name.clone() + "(" + fromLl.clone() + ")\n")
+    return name
 }
 
 // -- Inline fixed-size array (struct FIELDS only — see astTypeStr) --

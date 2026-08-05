@@ -1715,6 +1715,439 @@ pub fn genWrapSome(cg: &mut Cgen, innerVal: &Val, rEnum: &string): Val {
     }
 }
 
+// -- Option/Result combinators (map/andThen/orElse/mapErr/unwrapOrElse) --
+//
+// isSome/isNone/isOk/isErr/unwrapOr live in genMethodCall directly (existing
+// code); these are the combinators that take a closure. All build/read the
+// receiver's {tag, payload} layout the same way `!`/`?`/`??` do: alloca a scratch
+// copy of the loaded enum value, then GEP into it — never `extractvalue` on the
+// payload field directly, since its slot is a raw byte union sized for the
+// largest variant.
+
+// Build an arbitrary single-payload variant value (generalizes genWrapSome,
+// which is hardcoded to "Some") — used to wrap a callback result into Some/Ok,
+// or to forward an already-loaded payload into a differently-monomorphized Err/Ok.
+pub fn genBuildVariant1(cg: &mut Cgen, innerVal: &Val, rEnum: &string, variant: &string): Val {
+    let tag = lookupVariantTag(cg, rEnum, variant)
+    let structTy = "%" + rEnum.clone()
+    let alloc = nextTemp(cg)
+    emit(cg, "  " + alloc + " = alloca " + structTy + "\n")
+    let tagPtr = nextTemp(cg)
+    emit(cg, "  " + tagPtr + " = getelementptr " + structTy + ", ptr " + alloc + ", i32 0, i32 0\n")
+    emit(cg, "  store i32 " + tag.toString() + ", ptr " + tagPtr + "\n")
+    let payloadTypes = lookupVariantPayload(cg, rEnum, variant)
+    if payloadTypes.len > 0 {
+        let payPtr = nextTemp(cg)
+        emit(cg, "  " + payPtr + " = getelementptr " + structTy + ", ptr " + alloc + ", i32 0, i32 1\n")
+        let vstructTy = variantStructTy(payloadTypes)
+        let ftyLl = llType(payloadTypes[0])
+        let fp = nextTemp(cg)
+        emit(cg, "  " + fp + " = getelementptr " + vstructTy + ", ptr " + payPtr + ", i32 0, i32 0\n")
+        var storeVal = innerVal.v.clone()
+        let fvLl = llType(innerVal.ty)
+        if fvLl != ftyLl && intBits(fvLl) > 0 && intBits(ftyLl) > 0 {
+            let w = nextTemp(cg)
+            if intBits(fvLl) > intBits(ftyLl) {
+                emit(cg, "  " + w + " = trunc " + fvLl + " " + innerVal.v + " to " + ftyLl + "\n")
+            } else {
+                var ext = "sext"
+                if isUnsigned(innerVal.ty) {
+                    ext = "zext"
+                }
+                emit(cg, "  " + w + " = " + ext + " " + fvLl + " " + innerVal.v + " to " + ftyLl + "\n")
+            }
+            storeVal = w
+        }
+        emit(cg, "  store " + ftyLl + " " + storeVal + ", ptr " + fp + "\n")
+    }
+    let loaded = nextTemp(cg)
+    emit(cg, "  " + loaded + " = load " + structTy + ", ptr " + alloc + "\n")
+    return Val {
+        v: loaded, ty: rEnum.clone()
+    }
+}
+
+// Build a payload-less variant value (None) of a possibly different monomorphized
+// enum than the receiver's — used when map/andThen short-circuit on None.
+pub fn genBuildVariant0(cg: &mut Cgen, rEnum: &string, variant: &string): Val {
+    let tag = lookupVariantTag(cg, rEnum, variant)
+    let structTy = "%" + rEnum.clone()
+    let alloc = nextTemp(cg)
+    emit(cg, "  " + alloc + " = alloca " + structTy + "\n")
+    let tagPtr = nextTemp(cg)
+    emit(cg, "  " + tagPtr + " = getelementptr " + structTy + ", ptr " + alloc + ", i32 0, i32 0\n")
+    emit(cg, "  store i32 " + tag.toString() + ", ptr " + tagPtr + "\n")
+    let loaded = nextTemp(cg)
+    emit(cg, "  " + loaded + " = load " + structTy + ", ptr " + alloc + "\n")
+    return Val {
+        v: loaded, ty: rEnum.clone()
+    }
+}
+
+// The tag word of an already-loaded enum value (field 0, always a plain i32 — no
+// alloca needed, unlike the payload).
+pub fn genEnumTag(cg: &mut Cgen, ov: &Val, enumName: &string): string {
+    let tag = nextTemp(cg)
+    emit(cg, "  " + tag + " = extractvalue %" + enumName.clone() + " " + ov.v.clone() + ", 0\n")
+    return tag
+}
+
+// A pointer to the receiver's payload field for the given variant — scratch-copies
+// `ov` into a fresh alloca first (same dance as `!`), then GEPs field 1 and the
+// variant's own sub-struct. This is what a by-ref combinator closure receives
+// directly as its argument pointer (map/andThen/mapErr/orElse never load the
+// payload themselves — only unwrapOr/unwrapOrElse do, since only those consume it).
+pub fn genPayloadPtr(cg: &mut Cgen, ov: &Val, enumName: &string, variant: &string): string {
+    let structTy = "%" + enumName.clone()
+    let addr = nextTemp(cg)
+    emit(cg, "  " + addr + " = alloca " + structTy + "\n")
+    emit(cg, "  store " + structTy + " " + ov.v.clone() + ", ptr " + addr + "\n")
+    let payloadTypes = lookupVariantPayload(cg, enumName, variant)
+    let payPtr = nextTemp(cg)
+    emit(cg, "  " + payPtr + " = getelementptr " + structTy + ", ptr " + addr + ", i32 0, i32 1\n")
+    let vstructTy = variantStructTy(payloadTypes)
+    let fp = nextTemp(cg)
+    emit(cg, "  " + fp + " = getelementptr " + vstructTy + ", ptr " + payPtr + ", i32 0, i32 0\n")
+    return fp
+}
+
+// unwrapOrElse(f) — unwrapOr with the default computed (and the closure called)
+// only on the fail branch. Option's f takes no args; Result's f takes the error
+// by ref, so it's appended to the call only when failVariant is "Err".
+pub fn genOptionResultUnwrapOrElse(cg: &mut Cgen, ov: &Val, enumName: &string, cbExpr: &Expr, locs: &Vec<Local>, sigs: &Vec<CgFnSig>): Val {
+    var okVariant = "Some"
+    var failVariant = "None"
+    if variantTagOpt(cg, enumName, "Ok").isSome() {
+        okVariant = "Ok"
+        failVariant = "Err"
+    }
+    let payloadTypes = lookupVariantPayload(cg, enumName, okVariant)
+    if payloadTypes.len != 1 {
+        eprint("codegen: 'unwrapOrElse' on non-unwrappable type " + enumName.clone())
+        exit(1)
+    }
+    let payTy = payloadTypes[0].clone()
+    let payLl = llType(payTy)
+    let resAddr = nextTemp(cg)
+    emit(cg, "  " + resAddr + " = alloca " + payLl + "\n")
+    let tag = genEnumTag(cg, ov, enumName)
+    let okTag = lookupVariantTag(cg, enumName, okVariant)
+    let isOk = nextTemp(cg)
+    emit(cg, "  " + isOk + " = icmp eq i32 " + tag + ", " + okTag.toString() + "\n")
+    let okLbl = nextLabel(cg, "uwoe.ok")
+    let failLbl = nextLabel(cg, "uwoe.fail")
+    let endLbl = nextLabel(cg, "uwoe.end")
+    emit(cg, "  br i1 " + isOk + ", label %" + okLbl + ", label %" + failLbl + "\n")
+
+    emitLabel(cg, okLbl)
+    let fp = genPayloadPtr(cg, ov, enumName, okVariant)
+    let pv = nextTemp(cg)
+    emit(cg, "  " + pv + " = load " + payLl + ", ptr " + fp + "\n")
+    emit(cg, "  store " + payLl + " " + pv + ", ptr " + resAddr + "\n")
+    emit(cg, "  br label %" + endLbl + "\n")
+
+    emitLabel(cg, failLbl)
+    var uwoeHints: Vec<string> = Vec.new()
+    if failVariant == "Err" {
+        uwoeHints.push(lookupVariantPayload(cg, enumName, "Err") [0].clone())
+    }
+    cg.closureParamHint = uwoeHints
+    let clv = genExpr(cg, cbExpr, locs, sigs, "")
+    cg.closureParamHint = Vec.new()
+    let cfp = nextTemp(cg)
+    emit(cg, "  " + cfp + " = extractvalue %Closure " + clv.v + ", 0\n")
+    let cenv = nextTemp(cg)
+    emit(cg, "  " + cenv + " = extractvalue %Closure " + clv.v + ", 1\n")
+    var callArgs = "ptr " + cenv
+    if failVariant == "Err" {
+        let efp = genPayloadPtr(cg, ov, enumName, "Err")
+        callArgs = callArgs + ", ptr " + efp
+    }
+    let cr = nextTemp(cg)
+    emit(cg, "  " + cr + " = call " + payLl + " " + cfp + "(" + callArgs + ")\n")
+    emit(cg, "  store " + payLl + " " + cr + ", ptr " + resAddr + "\n")
+    emit(cg, "  br label %" + endLbl + "\n")
+
+    emitLabel(cg, endLbl)
+    let r = nextTemp(cg)
+    emit(cg, "  " + r + " = load " + payLl + ", ptr " + resAddr + "\n")
+    return Val {
+        v: r, ty: payTy
+    }
+}
+
+// map(f): T -> U through the payload BY REF (the closure never consumes it).
+// Option<T> -> Option<U> forwards nothing on None; Result<T,E> -> Result<U,E>
+// forwards the receiver's Err payload untouched on the fail branch.
+pub fn genOptionResultMap(cg: &mut Cgen, ov: &Val, enumName: &string, isResult: bool, cbExpr: &Expr, locs: &Vec<Local>, sigs: &Vec<CgFnSig>): Val {
+    var okVariant = "Some"
+    if isResult {
+        okVariant = "Ok"
+    }
+    var mapHints: Vec<string> = Vec.new()
+    mapHints.push(lookupVariantPayload(cg, enumName, okVariant) [0].clone())
+    cg.closureParamHint = mapHints
+    let clv = genExpr(cg, cbExpr, locs, sigs, "")
+    cg.closureParamHint = Vec.new()
+    // genEnumLit (unlike genWrapSome/genBuildVariant1) stores the "%"-prefixed
+    // LLVM type in Val.ty, so a closure whose inferred return flows through an
+    // enum-literal `return` (like `return Result.Ok(...)`) carries a stray '%'
+    // here — strip it before treating this as a bare enum/type name below.
+    let newInnerTy = stripPercent(closureRetOf(clv.ty))
+    var newEnumTy = ""
+    if isResult {
+        let errTy = lookupVariantPayload(cg, enumName, "Err") [0].clone()
+        newEnumTy = stripPercent(resolveTyStr(cg, "Result<" + newInnerTy.clone() + "," + errTy.clone() + ">"))
+    } else {
+        newEnumTy = stripPercent(resolveTyStr(cg, "Option<" + newInnerTy.clone() + ">"))
+    }
+    let newStructTy = "%" + newEnumTy.clone()
+    let resAddr = nextTemp(cg)
+    emit(cg, "  " + resAddr + " = alloca " + newStructTy + "\n")
+    let tag = genEnumTag(cg, ov, enumName)
+    let okTag = lookupVariantTag(cg, enumName, okVariant)
+    let isOk = nextTemp(cg)
+    emit(cg, "  " + isOk + " = icmp eq i32 " + tag + ", " + okTag.toString() + "\n")
+    let okLbl = nextLabel(cg, "map.ok")
+    let failLbl = nextLabel(cg, "map.fail")
+    let endLbl = nextLabel(cg, "map.end")
+    emit(cg, "  br i1 " + isOk + ", label %" + okLbl + ", label %" + failLbl + "\n")
+
+    emitLabel(cg, okLbl)
+    let fp = genPayloadPtr(cg, ov, enumName, okVariant)
+    let cfp = nextTemp(cg)
+    emit(cg, "  " + cfp + " = extractvalue %Closure " + clv.v + ", 0\n")
+    let cenv = nextTemp(cg)
+    emit(cg, "  " + cenv + " = extractvalue %Closure " + clv.v + ", 1\n")
+    let newInnerLl = llType(newInnerTy)
+    let cr = nextTemp(cg)
+    emit(cg, "  " + cr + " = call " + newInnerLl + " " + cfp + "(ptr " + cenv + ", ptr " + fp + ")\n")
+    let someVal = genBuildVariant1(cg, Val {
+        v: cr, ty: newInnerTy.clone()
+    }
+    , newEnumTy, okVariant)
+    emit(cg, "  store " + newStructTy + " " + someVal.v + ", ptr " + resAddr + "\n")
+    emit(cg, "  br label %" + endLbl + "\n")
+
+    emitLabel(cg, failLbl)
+    if isResult {
+        let efp = genPayloadPtr(cg, ov, enumName, "Err")
+        let errTy = lookupVariantPayload(cg, enumName, "Err") [0].clone()
+        let ev = nextTemp(cg)
+        emit(cg, "  " + ev + " = load " + llType(errTy) + ", ptr " + efp + "\n")
+        let errVal = genBuildVariant1(cg, Val {
+            v: ev, ty: errTy
+        }
+        , newEnumTy, "Err")
+        emit(cg, "  store " + newStructTy + " " + errVal.v + ", ptr " + resAddr + "\n")
+    } else {
+        let noneVal = genBuildVariant0(cg, newEnumTy, "None")
+        emit(cg, "  store " + newStructTy + " " + noneVal.v + ", ptr " + resAddr + "\n")
+    }
+    emit(cg, "  br label %" + endLbl + "\n")
+
+    emitLabel(cg, endLbl)
+    let r = nextTemp(cg)
+    emit(cg, "  " + r + " = load " + newStructTy + ", ptr " + resAddr + "\n")
+    return Val {
+        v: r, ty: newEnumTy
+    }
+}
+
+// mapErr(f): Result<T,E> -> Result<T,F> — the mirror of map, callback on the Err
+// side. The Ok payload is forwarded through untouched.
+pub fn genOptionResultMapErr(cg: &mut Cgen, ov: &Val, enumName: &string, cbExpr: &Expr, locs: &Vec<Local>, sigs: &Vec<CgFnSig>): Val {
+    let innerTy = lookupVariantPayload(cg, enumName, "Ok") [0].clone()
+    var maperrHints: Vec<string> = Vec.new()
+    maperrHints.push(lookupVariantPayload(cg, enumName, "Err") [0].clone())
+    cg.closureParamHint = maperrHints
+    let clv = genExpr(cg, cbExpr, locs, sigs, "")
+    cg.closureParamHint = Vec.new()
+    // see genOptionResultMap's comment: strip a stray '%' from genEnumLit's convention
+    let newErrTy = stripPercent(closureRetOf(clv.ty))
+    let newEnumTy = stripPercent(resolveTyStr(cg, "Result<" + innerTy.clone() + "," + newErrTy.clone() + ">"))
+    let newStructTy = "%" + newEnumTy.clone()
+    let resAddr = nextTemp(cg)
+    emit(cg, "  " + resAddr + " = alloca " + newStructTy + "\n")
+    let tag = genEnumTag(cg, ov, enumName)
+    let okTag = lookupVariantTag(cg, enumName, "Ok")
+    let isOk = nextTemp(cg)
+    emit(cg, "  " + isOk + " = icmp eq i32 " + tag + ", " + okTag.toString() + "\n")
+    let okLbl = nextLabel(cg, "maperr.ok")
+    let errLbl = nextLabel(cg, "maperr.err")
+    let endLbl = nextLabel(cg, "maperr.end")
+    emit(cg, "  br i1 " + isOk + ", label %" + okLbl + ", label %" + errLbl + "\n")
+
+    emitLabel(cg, okLbl)
+    let ofp = genPayloadPtr(cg, ov, enumName, "Ok")
+    let okv = nextTemp(cg)
+    emit(cg, "  " + okv + " = load " + llType(innerTy) + ", ptr " + ofp + "\n")
+    let okVal = genBuildVariant1(cg, Val {
+        v: okv, ty: innerTy.clone()
+    }
+    , newEnumTy, "Ok")
+    emit(cg, "  store " + newStructTy + " " + okVal.v + ", ptr " + resAddr + "\n")
+    emit(cg, "  br label %" + endLbl + "\n")
+
+    emitLabel(cg, errLbl)
+    let efp = genPayloadPtr(cg, ov, enumName, "Err")
+    let cfp = nextTemp(cg)
+    emit(cg, "  " + cfp + " = extractvalue %Closure " + clv.v + ", 0\n")
+    let cenv = nextTemp(cg)
+    emit(cg, "  " + cenv + " = extractvalue %Closure " + clv.v + ", 1\n")
+    let newErrLl = llType(newErrTy)
+    let cr = nextTemp(cg)
+    emit(cg, "  " + cr + " = call " + newErrLl + " " + cfp + "(ptr " + cenv + ", ptr " + efp + ")\n")
+    let errVal = genBuildVariant1(cg, Val {
+        v: cr, ty: newErrTy.clone()
+    }
+    , newEnumTy, "Err")
+    emit(cg, "  store " + newStructTy + " " + errVal.v + ", ptr " + resAddr + "\n")
+    emit(cg, "  br label %" + endLbl + "\n")
+
+    emitLabel(cg, endLbl)
+    let r = nextTemp(cg)
+    emit(cg, "  " + r + " = load " + newStructTy + ", ptr " + resAddr + "\n")
+    return Val {
+        v: r, ty: newEnumTy
+    }
+}
+
+// andThen(f): T -> Option<U>/Result<U,E>, f itself returning the whole enum — the
+// chaining form. The result's mono type IS the closure's return type. Result's Err
+// payload is forwarded untouched on the fail branch (same as map).
+pub fn genOptionResultAndThen(cg: &mut Cgen, ov: &Val, enumName: &string, isResult: bool, cbExpr: &Expr, locs: &Vec<Local>, sigs: &Vec<CgFnSig>): Val {
+    var okVariant = "Some"
+    if isResult {
+        okVariant = "Ok"
+    }
+    var andThenHints: Vec<string> = Vec.new()
+    andThenHints.push(lookupVariantPayload(cg, enumName, okVariant) [0].clone())
+    cg.closureParamHint = andThenHints
+    let clv = genExpr(cg, cbExpr, locs, sigs, "")
+    cg.closureParamHint = Vec.new()
+    // see genOptionResultMap's comment: strip a stray '%' from genEnumLit's convention
+    let newEnumTy = stripPercent(closureRetOf(clv.ty))
+    let newStructTy = "%" + newEnumTy.clone()
+    let resAddr = nextTemp(cg)
+    emit(cg, "  " + resAddr + " = alloca " + newStructTy + "\n")
+    let tag = genEnumTag(cg, ov, enumName)
+    let okTag = lookupVariantTag(cg, enumName, okVariant)
+    let isOk = nextTemp(cg)
+    emit(cg, "  " + isOk + " = icmp eq i32 " + tag + ", " + okTag.toString() + "\n")
+    let okLbl = nextLabel(cg, "andthen.ok")
+    let failLbl = nextLabel(cg, "andthen.fail")
+    let endLbl = nextLabel(cg, "andthen.end")
+    emit(cg, "  br i1 " + isOk + ", label %" + okLbl + ", label %" + failLbl + "\n")
+
+    emitLabel(cg, okLbl)
+    let fp = genPayloadPtr(cg, ov, enumName, okVariant)
+    let cfp = nextTemp(cg)
+    emit(cg, "  " + cfp + " = extractvalue %Closure " + clv.v + ", 0\n")
+    let cenv = nextTemp(cg)
+    emit(cg, "  " + cenv + " = extractvalue %Closure " + clv.v + ", 1\n")
+    let cr = nextTemp(cg)
+    emit(cg, "  " + cr + " = call " + newStructTy + " " + cfp + "(ptr " + cenv + ", ptr " + fp + ")\n")
+    emit(cg, "  store " + newStructTy + " " + cr + ", ptr " + resAddr + "\n")
+    emit(cg, "  br label %" + endLbl + "\n")
+
+    emitLabel(cg, failLbl)
+    if isResult {
+        let efp = genPayloadPtr(cg, ov, enumName, "Err")
+        let errTy = lookupVariantPayload(cg, enumName, "Err") [0].clone()
+        let ev = nextTemp(cg)
+        emit(cg, "  " + ev + " = load " + llType(errTy) + ", ptr " + efp + "\n")
+        let errVal = genBuildVariant1(cg, Val {
+            v: ev, ty: errTy
+        }
+        , newEnumTy, "Err")
+        emit(cg, "  store " + newStructTy + " " + errVal.v + ", ptr " + resAddr + "\n")
+    } else {
+        let noneVal = genBuildVariant0(cg, newEnumTy, "None")
+        emit(cg, "  store " + newStructTy + " " + noneVal.v + ", ptr " + resAddr + "\n")
+    }
+    emit(cg, "  br label %" + endLbl + "\n")
+
+    emitLabel(cg, endLbl)
+    let r = nextTemp(cg)
+    emit(cg, "  " + r + " = load " + newStructTy + ", ptr " + resAddr + "\n")
+    return Val {
+        v: r, ty: newEnumTy
+    }
+}
+
+// orElse(f): the None/Err-side andThen — f: () -> Option<T> (Option) or
+// (&E) -> Result<T,F> (Result). The ok payload is forwarded through untouched on
+// the ok branch, into the (possibly re-typed-E) result.
+pub fn genOptionResultOrElse(cg: &mut Cgen, ov: &Val, enumName: &string, isResult: bool, cbExpr: &Expr, locs: &Vec<Local>, sigs: &Vec<CgFnSig>): Val {
+    var okVariant = "Some"
+    if isResult {
+        okVariant = "Ok"
+    }
+    var orElseHints: Vec<string> = Vec.new()
+    if isResult {
+        orElseHints.push(lookupVariantPayload(cg, enumName, "Err") [0].clone())
+    }
+    cg.closureParamHint = orElseHints
+    // Option<T>.orElse's callback returns the SAME Option<T> (T can't change) — an
+    // exact hint, unlike Result's F which the callback is free to retype. Without
+    // this, an unannotated `() => Option.None` (zero payload args) can't be
+    // disambiguated bottom-up when >1 Option_* monomorphization exists.
+    if !isResult {
+        cg.closureRetHint = enumName.clone()
+    }
+    let clv = genExpr(cg, cbExpr, locs, sigs, "")
+    cg.closureParamHint = Vec.new()
+    cg.closureRetHint = ""
+    // see genOptionResultMap's comment: strip a stray '%' from genEnumLit's convention
+    let newEnumTy = stripPercent(closureRetOf(clv.ty))
+    let newStructTy = "%" + newEnumTy.clone()
+    let resAddr = nextTemp(cg)
+    emit(cg, "  " + resAddr + " = alloca " + newStructTy + "\n")
+    let tag = genEnumTag(cg, ov, enumName)
+    let okTag = lookupVariantTag(cg, enumName, okVariant)
+    let isOk = nextTemp(cg)
+    emit(cg, "  " + isOk + " = icmp eq i32 " + tag + ", " + okTag.toString() + "\n")
+    let okLbl = nextLabel(cg, "orelse.ok")
+    let failLbl = nextLabel(cg, "orelse.fail")
+    let endLbl = nextLabel(cg, "orelse.end")
+    emit(cg, "  br i1 " + isOk + ", label %" + okLbl + ", label %" + failLbl + "\n")
+
+    emitLabel(cg, okLbl)
+    let fp = genPayloadPtr(cg, ov, enumName, okVariant)
+    let okTy = lookupVariantPayload(cg, enumName, okVariant) [0].clone()
+    let okv = nextTemp(cg)
+    emit(cg, "  " + okv + " = load " + llType(okTy) + ", ptr " + fp + "\n")
+    let okVal = genBuildVariant1(cg, Val {
+        v: okv, ty: okTy
+    }
+    , newEnumTy, okVariant)
+    emit(cg, "  store " + newStructTy + " " + okVal.v + ", ptr " + resAddr + "\n")
+    emit(cg, "  br label %" + endLbl + "\n")
+
+    emitLabel(cg, failLbl)
+    let cfp = nextTemp(cg)
+    emit(cg, "  " + cfp + " = extractvalue %Closure " + clv.v + ", 0\n")
+    let cenv = nextTemp(cg)
+    emit(cg, "  " + cenv + " = extractvalue %Closure " + clv.v + ", 1\n")
+    var callArgs = "ptr " + cenv
+    if isResult {
+        let efp = genPayloadPtr(cg, ov, enumName, "Err")
+        callArgs = callArgs + ", ptr " + efp
+    }
+    let cr = nextTemp(cg)
+    emit(cg, "  " + cr + " = call " + newStructTy + " " + cfp + "(" + callArgs + ")\n")
+    emit(cg, "  store " + newStructTy + " " + cr + ", ptr " + resAddr + "\n")
+    emit(cg, "  br label %" + endLbl + "\n")
+
+    emitLabel(cg, endLbl)
+    let r = nextTemp(cg)
+    emit(cg, "  " + r + " = load " + newStructTy + ", ptr " + resAddr + "\n")
+    return Val {
+        v: r, ty: newEnumTy
+    }
+}
+
 // x.checkedAdd/Sub/Mul(y) → Option<T> via an LLVM overflow intrinsic: Some(result)
 // on no overflow, None otherwise.
 pub fn genCheckedArith(cg: &mut Cgen, obj: &Val, method: &string, av: &Val): Val {
@@ -1900,6 +2333,17 @@ pub fn peekArgTy(e: &Expr, locs: &Vec<Local>): string {
         Expr.Ident(name, s) => {
             if hasLocal(locs, name) {
                 return findLocal(locs, name).ty.clone()
+            }
+            return ""
+        }
+        // `.len` is always i64 in this codebase (String/Vec/HashMap's length field)
+        // — a cheap syntax-only special case, since peekArgTy has no Cgen access
+        // for a full struct-field-type lookup. Exists so a generic-enum literal
+        // whose payload is a field access (`Option.Some(v.len)`, ambiguous without
+        // a hint) can still disambiguate by the payload's actual type below.
+        Expr.FieldAccess(obj, field, s) => {
+            if field == "len" {
+                return "i64"
             }
             return ""
         }
@@ -2693,6 +3137,15 @@ pub fn genMethodCall(cg: &mut Cgen, object: &Expr, method: &string, args: &Vec<H
             let r = closureRetOf(clv.ty)
             return genVecMapFilter(cg, ov, "Vec<" + r.clone() + ">", r, clv, false, locs, sigs)
         }
+        // Option<T>.map/Result<T,E>.map (there is no Option/Result "filter").
+        if method == "map" {
+            let enumName = stripPercent(resolveTyStr(cg, stripPercent(ov.ty)))
+            let isOptOrRes = variantTagOpt(cg, enumName, "Some").isSome() || variantTagOpt(cg, enumName, "Ok").isSome()
+            if isOptOrRes {
+                let isResult = variantTagOpt(cg, enumName, "Ok").isSome()
+                return genOptionResultMap(cg, ov, enumName, isResult, *args[0], locs, sigs)
+            }
+        }
     }
     if method == "find" || method == "any" || method == "all" {
         let ov = genExpr(cg, object, locs, sigs, "")
@@ -2809,6 +3262,32 @@ pub fn genMethodCall(cg: &mut Cgen, object: &Expr, method: &string, args: &Vec<H
             let clv = genExpr(cg, *args[0], locs, sigs, "")
             let keyTy = closureRetOf(clv.ty)
             return genVecSortByKeyCg(cg, lv, elemTy, keyTy, clv)
+        }
+    }
+
+    // Option/Result combinators that take a closure and aren't handled above
+    // (isSome/isNone/isOk/isErr/unwrapOr live earlier in this function; map is
+    // folded into the method=="map" block above). Structural gate — codegen has
+    // no baseName table, so "carries a Some/Ok variant" stands in for it, same as
+    // the isSome/unwrapOr block already does.
+    if method == "andThen" || method == "orElse" || method == "mapErr" || method == "unwrapOrElse" {
+        let ov = genExpr(cg, object, locs, sigs, "")
+        let enumName = stripPercent(resolveTyStr(cg, stripPercent(ov.ty)))
+        let isOptOrRes = variantTagOpt(cg, enumName, "Some").isSome() || variantTagOpt(cg, enumName, "Ok").isSome()
+        if isOptOrRes {
+            let isResult = variantTagOpt(cg, enumName, "Ok").isSome()
+            if method == "andThen" {
+                return genOptionResultAndThen(cg, ov, enumName, isResult, *args[0], locs, sigs)
+            }
+            if method == "orElse" {
+                return genOptionResultOrElse(cg, ov, enumName, isResult, *args[0], locs, sigs)
+            }
+            if method == "mapErr" && isResult {
+                return genOptionResultMapErr(cg, ov, enumName, *args[0], locs, sigs)
+            }
+            if method == "unwrapOrElse" {
+                return genOptionResultUnwrapOrElse(cg, ov, enumName, *args[0], locs, sigs)
+            }
         }
     }
 

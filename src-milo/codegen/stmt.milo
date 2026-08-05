@@ -1489,6 +1489,14 @@ pub fn genClosure(cg: &mut Cgen, params: &Vec<Param>, retType: &Option<MiloType>
     let cname = "__closure_" + cg.closureId.toString()
     cg.closureId = cg.closureId + 1
 
+    // Snapshot + clear the caller's param-type hint (if any) right away: it's
+    // meant for THIS closure's own unannotated params only, and must not leak
+    // into a closure literal nested in this one's body.
+    let paramHints = cg.closureParamHint.clone()
+    cg.closureParamHint = Vec.new()
+    let retHint = cg.closureRetHint.clone()
+    cg.closureRetHint = ""
+
     var annotated = false
     var retTyStr = "void"
     match retType {
@@ -1498,6 +1506,14 @@ pub fn genClosure(cg: &mut Cgen, params: &Vec<Param>, retType: &Option<MiloType>
         }
         Option.None => {
         }
+    }
+    // No AST annotation, but the caller knows the exact expected type (e.g.
+    // Option<T>.orElse's callback must return the SAME Option<T>) — treat it as
+    // if annotated so the body walks against a real type, not the unresolvable
+    // "__closureinfer__" sentinel.
+    if !annotated && retHint.len > 0 {
+        retTyStr = resolveTyStr(cg, retHint)
+        annotated = true
     }
 
     let caps = closureCaptures(params, body, locs)
@@ -1550,7 +1566,12 @@ pub fn genClosure(cg: &mut Cgen, params: &Vec<Param>, retType: &Option<MiloType>
         }
     }
     for pj in 0..params.len {
-        let pty = resolveTyStr(cg, astTypeStr(params[pj].ty))
+        var pty = resolveTyStr(cg, astTypeStr(params[pj].ty))
+        // Unannotated param, no inferred type from the AST (empty string) — fall
+        // back to the caller's hint (see closureParamHint's doc comment).
+        if pty.len == 0 && pj < paramHints.len && paramHints[pj].len > 0 {
+            pty = resolveTyStr(cg, paramHints[pj].clone())
+        }
         clocs.push(Local {
             name: params[pj].name.clone(), ty: pty, addr: "%" + params[pj].name.clone(), isRef: true
         }

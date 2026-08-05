@@ -709,14 +709,32 @@ pub fn genProgram(prog: Program, sourceDir: string): string {
                     for fi in 0..sfields.len {
                         let fll = llType(sfields[fi].ty)
                         let scalar = fll == "i1" || fll == "i8" || fll == "i16" || fll == "i32" || fll == "i64" || fll == "double" || fll == "float"
-                        if !scalar {
-                            allConst = false
-                        }
                         var fval = "0"
+                        var fieldConst = scalar
                         for lf in 0..litFields.len {
                             if litFields[lf].name == sfields[fi].name {
-                                fval = constInitOf(*litFields[lf].value, fll)
+                                if scalar {
+                                    fval = constInitOf(*litFields[lf].value, fll)
+                                } else {
+                                    // An EMPTY container is still a constant: `Vec.new()`
+                                    // is all-zero bytes. Bailing on it zero-initialized the
+                                    // WHOLE struct, so a `Vec` field silently discarded
+                                    // every scalar field's initializer beside it.
+                                    match *litFields[lf].value {
+                                        Expr.EnumLit(en, vn, eargs, esp) => {
+                                            if vn == "new" && eargs.len == 0 {
+                                                fval = "zeroinitializer"
+                                                fieldConst = true
+                                            }
+                                        }
+                                        _ => {
+                                        }
+                                    }
+                                }
                             }
+                        }
+                        if !fieldConst {
+                            allConst = false
                         }
                         parts.push(fll + " " + fval)
                     }

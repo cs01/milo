@@ -3365,7 +3365,21 @@ pub fn checkStructMethod(ck: &mut Checker, structName: &string, method: &string,
                 let ptName = typeName(paramType)
                 match paramType {
                     TypeKind.TRef(inner, mutable) => {
-                        if !typeEq(*inner, argType) && !typeEq(argType, tyUnknown()) && !intCoercible(*inner, argType, *args[i]) {
+                        // A view passed straight through (the arg is ALREADY a matching
+                        // &T, e.g. a method that returns &string/&[T]) has to be accepted
+                        // too — see the identical fix on the free-function call path
+                        // above for why comparing only the unwrapped inner rejects it.
+                        var refPassThrough = false
+                        match argType.clone() {
+                            TypeKind.TRef(argInner, argMutable) => {
+                                if typeEq(*inner, *argInner) && mutable == argMutable {
+                                    refPassThrough = true
+                                }
+                            }
+                            _ => {
+                            }
+                        }
+                        if !refPassThrough && !typeEq(*inner, argType) && !typeEq(argType, tyUnknown()) && !intCoercible(*inner, argType, *args[i]) {
                             error(ck, "argument " + (i + 1).toString() + " of '" + method.clone() + "': expected " + ptName + ", got " + typeName(argType), cloneSpan(span))
                         }
                     }

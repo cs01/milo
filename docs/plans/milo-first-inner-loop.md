@@ -21,6 +21,9 @@ compiler-rebuild step is the whole risk, it is 95% clang, and it is only surviva
 parallel codegen units land first. Two of the three prerequisites pay for themselves for
 every Milo user whether or not the port ever finishes.
 
+**Status: prerequisite 1 shipped 2026-08-04** — parallel codegen units are in and measured
+(1.2–2.0x end-to-end, 5x on the clang step). Prerequisite 2, a real `milo test`, is next.
+
 ---
 
 ## What the loop costs today (TS host)
@@ -69,7 +72,42 @@ on every edit, is not a loop anyone iterates in.
 
 ---
 
-## The lever that decides it: parallel codegen units
+## The lever that decides it: parallel codegen units — SHIPPED
+
+**Landed 2026-08-04** (`src/cgu.ts`, wired through `linkIR`). Auto-enabled above 20k IR
+lines; `--cgus=<n>` forces a count, `--cgus=1` restores the single module. Release (`-O3`)
+and `-g` builds keep one unit deliberately — see the gates below.
+
+| program | IR lines | single | split | |
+|---|---|---|---|---|
+| `examples/hello.milo` | 5,755 | 0.14s | 0.14s | not split, no overhead |
+| `examples/cli-tools/fmt.milo` | 55,780 | 0.53s | 0.44s | 1.2x |
+| `examples/games/neon` | 54,671 | 0.85s | 0.52s | 1.6x |
+| `examples/games/volt` | 49,496 | 0.92s | 0.51s | 1.8x |
+| `examples/tools/java-dap` | 115,813 | 1.41s | 0.70s | **2.0x** |
+
+Those are whole-`milo build` times, frontend included; the clang step alone goes 1.02s →
+0.20s (5x) on java-dap. **Verified by running all 824 fixture/error/runtime-error tests
+with `MILO_CGUS=4` forcing every single compile through the splitter: 824 pass, 0 fail.**
+
+Three findings worth keeping:
+
+- **Unit count must track cores, not module size.** Sizing units as `lines/25k` starved a
+  55k-line module to 2 units and made it *slower* than not splitting. More units was
+  uniformly better on every program measured, including small ones.
+- **Never scan byte-string payloads.** `examples/games/flight` emits a 147MB module with a
+  single 37MB line from `@embedFile` assets; a char-at-a-time symbol walk over it cost
+  708ms, more than the parallelism it was enabling. Both the reference scan and the rename
+  now skip `c"..."` payloads.
+- **Promotion must rename, not just unhide.** An `internal` Milo function can share a name
+  with a libc symbol (`read`, `open`); making it globally visible under that name would let
+  the linker resolve someone else's call into it. Promoted symbols become
+  `@__milo_cgu.<name>` consistently across every unit.
+
+The split path also falls back: any failure inside it re-runs the single-module build, so
+it can cost time but can never turn a buildable program into a failed one.
+
+### The original measurement
 
 The compiler emits **one** LLVM module and shells out to **one** clang. Measured, clang
 parallelises across processes almost linearly on this box:
@@ -157,8 +195,8 @@ is the prerequisite everyone forgets when they say "just rewrite it in Milo".
 
 ## Prerequisites, in order
 
-1. **Parallel codegen units.** Turns 15s/edit into ~2s. Benefits every user today.
-   Independent of the port — do it whether or not the port happens.
+1. ~~**Parallel codegen units.**~~ **DONE 2026-08-04** — 1.2–2.0x end-to-end, 5x on the
+   clang step alone, 824/824 tests green with it forced on every compile.
 2. **A real `milo test`.** Isolation, parallelism, `-t`, generic assertions. Also
    independent, and it is the thing that lets Milo projects outside this repo test at all.
 3. **Un-rot `src-milo`.** Its parser cannot read post-coherence stdlib syntax (`Some(...)`

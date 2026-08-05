@@ -91,11 +91,161 @@ pub fn constInitOf(e: &Expr, llTy: &string): string {
             if op == "-" {
                 return "-" + constInitOf(*operand, llTy)
             }
-            return "0"
+            return zeroOf(llTy)
+        }
+        // Arithmetic on literals is folded here. Without it `let A: f64 = 3.0 / 2.0`
+        // fell through to the zero fallback and emitted `global double 0` — both the
+        // wrong VALUE and, since `0` is an integer constant, not even valid IR for a
+        // double.
+        Expr.BinOp(op, lhs, rhs, span) => {
+            let lf = constFoldNum(*lhs)
+            let rf = constFoldNum(*rhs)
+            if lf.ok && rf.ok {
+                let folded = applyConstOp(op, lf, rf)
+                if folded.ok {
+                    if llTy == "double" || llTy == "float" {
+                        return floatConstStr(folded.f)
+                    }
+                    return folded.i.toString()
+                }
+            }
+            return zeroOf(llTy)
         }
         _ => {
-            return "0"
+            return zeroOf(llTy)
         }
+    }
+}
+
+// The zero an LLVM type actually accepts: `0` is an integer constant and a `double`
+// global spelled `global double 0` is rejected outright.
+pub fn zeroOf(llTy: &string): string {
+    if llTy == "double" || llTy == "float" {
+        return "0.000000e+00"
+    }
+    if llTy == "ptr" {
+        return "null"
+    }
+    return "0"
+}
+
+pub struct ConstNum {
+    ok: bool,
+    isFloat: bool,
+    i: i64,
+    f: f64,
+}
+
+pub fn floatConstStr(f: f64): string {
+    var fs = f.toString()
+    var hasPt = false
+    for i in 0..fs.len {
+        if fs[i] == 46 || fs[i] == 101 || fs[i] == 69 {
+            hasPt = true
+        }
+    }
+    if !hasPt {
+        fs = fs + ".0"
+    }
+    return fs
+}
+
+pub fn constFoldNum(e: &Expr): ConstNum {
+    match e {
+        Expr.IntLit(n, span) => {
+            return ConstNum {
+                ok: true, isFloat: false, i: n, f: n as f64
+            }
+        }
+        Expr.FloatLit(f, span) => {
+            return ConstNum {
+                ok: true, isFloat: true, i: f as i64, f: f
+            }
+        }
+        Expr.UnaryOp(op, operand, span) => {
+            if op == "-" {
+                let inner = constFoldNum(*operand)
+                if inner.ok {
+                    return ConstNum {
+                        ok: true, isFloat: inner.isFloat, i: 0 - inner.i, f: 0.0 - inner.f
+                    }
+                }
+            }
+            return ConstNum {
+                ok: false, isFloat: false, i: 0, f: 0.0
+            }
+        }
+        Expr.BinOp(op, lhs, rhs, span) => {
+            let l = constFoldNum(*lhs)
+            let r = constFoldNum(*rhs)
+            if l.ok && r.ok {
+                return applyConstOp(op, l, r)
+            }
+            return ConstNum {
+                ok: false, isFloat: false, i: 0, f: 0.0
+            }
+        }
+        _ => {
+            return ConstNum {
+                ok: false, isFloat: false, i: 0, f: 0.0
+            }
+        }
+    }
+}
+
+pub fn applyConstOp(op: &string, l: ConstNum, r: ConstNum): ConstNum {
+    let isF = l.isFloat || r.isFloat
+    var oi: i64 = 0
+    var of: f64 = 0.0
+    if op == "+" {
+        oi = l.i + r.i
+        of = l.f + r.f
+    } else if op == "-" {
+        oi = l.i - r.i
+        of = l.f - r.f
+    } else if op == "*" {
+        oi = l.i * r.i
+        of = l.f * r.f
+    } else if op == "/" {
+        if isF {
+            if r.f == 0.0 {
+                return ConstNum {
+                    ok: false, isFloat: false, i: 0, f: 0.0
+                }
+            }
+            of = l.f / r.f
+        } else {
+            if r.i == 0 {
+                return ConstNum {
+                    ok: false, isFloat: false, i: 0, f: 0.0
+                }
+            }
+            oi = l.i / r.i
+        }
+    } else if op == "%" && !isF {
+        if r.i == 0 {
+            return ConstNum {
+                ok: false, isFloat: false, i: 0, f: 0.0
+            }
+        }
+        oi = l.i % r.i
+    } else if op == "<<" && !isF {
+        oi = l.i << r.i
+    } else if op == ">>" && !isF {
+        oi = l.i >> r.i
+    } else if op == "|" && !isF {
+        oi = l.i | r.i
+    } else if op == "&" && !isF {
+        oi = l.i & r.i
+    } else if op == "^" && !isF {
+        oi = l.i ^ r.i
+    } else {
+        return ConstNum {
+            ok: false, isFloat: false, i: 0, f: 0.0
+        }
+    }
+    return ConstNum {
+        ok: true, isFloat: isF, i: oi, f: of
     }
 }
 from "src-milo/codegen/types.milo" import {

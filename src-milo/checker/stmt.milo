@@ -419,6 +419,17 @@ pub fn checkMatchArm(ck: &mut Checker, arm: &MatchArm, subjType: &TypeKind, fnRe
                         let enumInfo = ck.enums.get(name)!
                         if enumInfo.variants.contains(variant) {
                             let variantInfo = enumInfo.variants.get(variant)!
+                            // Binding-count mismatch used to bind silently up to
+                            // min(bindings.len, fields.len) with no diagnostic — an
+                            // extra binding stayed undeclared and use of it later
+                            // read as "undefined variable" (or, in the if-let sibling
+                            // below, reached codegen and indexed the payload array
+                            // out of bounds). Report it here, same as the oracle,
+                            // then keep the min-length bind so the rest of the arm
+                            // still type-checks against real slots.
+                            if bindings.len != variantInfo.fields.len {
+                                error(ck, "variant '" + variant.clone() + "' has " + variantInfo.fields.len.toString() + " fields, but pattern has " + bindings.len.toString() + " bindings", cloneSpan(pspan))
+                            }
                             var k: i64 = 0
                             while k < bindings.len && k < variantInfo.fields.len {
                                 if bindings[k] != "_" {
@@ -480,6 +491,9 @@ pub fn checkMatchArmValue(ck: &mut Checker, arm: &MatchArm, subjType: &TypeKind,
                         let enumInfo = ck.enums.get(name)!
                         if enumInfo.variants.contains(variant) {
                             let variantInfo = enumInfo.variants.get(variant)!
+                            if bindings.len != variantInfo.fields.len {
+                                error(ck, "variant '" + variant.clone() + "' has " + variantInfo.fields.len.toString() + " fields, but pattern has " + bindings.len.toString() + " bindings", cloneSpan(pspan))
+                            }
                             var k: i64 = 0
                             while k < bindings.len && k < variantInfo.fields.len {
                                 if bindings[k] != "_" {
@@ -602,6 +616,9 @@ pub fn checkIfLet(ck: &mut Checker, pattern: &Pattern, expr: &Expr, thenBody: &V
                         let enumInfo = ck.enums.get(name)!
                         if enumInfo.variants.contains(variant) {
                             let variantInfo = enumInfo.variants.get(variant)!
+                            if bindings.len != variantInfo.fields.len {
+                                error(ck, "variant '" + variant.clone() + "' has " + variantInfo.fields.len.toString() + " fields, but pattern has " + bindings.len.toString() + " bindings", cloneSpan(pspan))
+                            }
                             var k: i64 = 0
                             while k < bindings.len && k < variantInfo.fields.len {
                                 if bindings[k] != "_" {

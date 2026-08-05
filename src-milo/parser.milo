@@ -136,7 +136,9 @@ pub fn parseType(p: &mut Parser): MiloType {
         var arraySize: Option<i64> = Option.None
         if matchTok(p, TokKind.Semicolon) {
             let sizeTok = expect(p, TokKind.Int)
-            arraySize = Option.Some(sizeTok.value.parseInt())
+            // lexer only emits TokKind.Int for digit text, so parseInt() is
+            // infallible here — `!` panics loudly if that invariant ever breaks
+            arraySize = Option.Some(sizeTok.value.parseInt()!)
         }
         expect(p, TokKind.RBracket)
         inner.isArray = true
@@ -969,7 +971,9 @@ pub fn parseUnary(p: &mut Parser): Expr {
     peek(p).kind == TokKind.Amp {
         let tok = advance(p)
         let operand = parseUnary(p)
-        return Expr.UnaryOp(tok.value, Heap(operand), span(tok))
+        // compute span before tok.value is moved into UnaryOp below
+        let sp = span(tok)
+        return Expr.UnaryOp(tok.value, Heap(operand), sp)
     }
     return parsePostfix(p)
 }
@@ -1116,11 +1120,13 @@ pub fn parsePrimary(p: &mut Parser): Expr {
 
     if tok.kind == TokKind.Int {
         advance(p)
-        return Expr.IntLit(tok.value.parseInt(), s)
+        // lexer-guaranteed digit text — parseInt() is infallible here
+        return Expr.IntLit(tok.value.parseInt()!, s)
     }
     if tok.kind == TokKind.Float {
         advance(p)
-        return Expr.FloatLit(tok.value.parseF64(), s)
+        // lexer-guaranteed numeric text — parseF64() is infallible here
+        return Expr.FloatLit(tok.value.parseF64()!, s)
     }
     if tok.kind == TokKind.True {
         advance(p)
@@ -1146,7 +1152,8 @@ pub fn parsePrimary(p: &mut Parser): Expr {
     }
     if tok.kind == TokKind.Char {
         advance(p)
-        return Expr.CharLit(tok.value.parseInt() as i32, s)
+        // lexer-guaranteed digit text — parseInt() is infallible here
+        return Expr.CharLit(tok.value.parseInt()!as i32, s)
     }
     if tok.kind == TokKind.Ident {
         advance(p)
@@ -1356,7 +1363,8 @@ pub fn parseArrayLit(p: &mut Parser): Expr {
         if elements.len == 1 && matchTok(p, TokKind.Semicolon) {
             let countTok = expect(p, TokKind.Int)
             expect(p, TokKind.RBracket)
-            return Expr.ArrayRepeat(elements[0], countTok.value.parseInt(), s)
+            // lexer-guaranteed digit text — parseInt() is infallible here
+            return Expr.ArrayRepeat(elements[0], countTok.value.parseInt()!, s)
         }
         matchTok(p, TokKind.Comma)
     }

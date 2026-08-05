@@ -1726,6 +1726,417 @@ pub fn optionIntWrapCoercible(ck: &Checker, optType: &TypeKind, valType: &TypeKi
     }
 }
 
+// Err(E) variant's payload (Result<T,E> only) — mirrors unwrapableInner but reads
+// the "Err" variant instead of "Some"/"Ok".
+pub fn unwrapableErrType(ck: &Checker, t: &TypeKind): Option<TypeKind> {
+    match t {
+        TypeKind.TEnum(name) => {
+            if ck.enums.contains(name) {
+                let info = ck.enums.get(name)!
+                if info.variants.contains("Err") {
+                    let errVariant = info.variants.get("Err")!
+                    if errVariant.fields.len == 1 {
+                        return Option.Some(errVariant.fields[0].clone())
+                    }
+                }
+            }
+            return Option.None
+        }
+        _ => {
+            return Option.None
+        }
+    }
+}
+
+// The baseName of an enum type, if it is a (monomorphized) generic enum.
+pub fn enumBaseName(ck: &Checker, t: &TypeKind): Option<string> {
+    match t {
+        TypeKind.TEnum(name) => {
+            if ck.enums.contains(name) {
+                return Option.Some(ck.enums.get(name)!.baseName.clone())
+            }
+            return Option.None
+        }
+        _ => {
+            return Option.None
+        }
+    }
+}
+
+// A combinator that copies one variant's payload straight into its result leaves
+// that payload owned twice over (mirrors the oracle's consumeForwardedPayload).
+// Consuming the receiver keeps a single owner; a Copy payload is safe to
+// duplicate so it stays non-consuming there (same gate as unwrapOr).
+pub fn consumeForwardedPayload(ck: &mut Checker, obj: &Expr, forwarded: &TypeKind) {
+    if !isCopyCk(ck, forwarded) {
+        tryMove(ck, obj)
+    }
+}
+
+// -- Option/Result combinators --
+//
+// isSome/isNone/isOk/isErr/unwrapOr/map/andThen/orElse/mapErr/unwrapOrElse.
+// Gated on the receiver enum's baseName so a user enum's own inherent method of
+// the same name still resolves normally via checkStructMethod (the caller falls
+// through to it on Option.None here). Mirrors src/checker.ts's Option/Result
+// combinator block almost line for line.
+pub fn checkOptionResultMethod(ck: &mut Checker, obj: &Expr, objType: &TypeKind, method: &string, args: &Vec<Heap<Expr>>, span: &Option<Span>): Option<TypeKind> {
+    var enumName = ""
+    match objType {
+        TypeKind.TEnum(n) => {
+            enumName = n.clone()
+        }
+        _ => {
+            return Option.None
+        }
+    }
+    if !ck.enums.contains(enumName) {
+        return Option.None
+    }
+    let baseName = ck.enums.get(enumName)!.baseName.clone()
+    let isOption = baseName == "Option"
+    let isResult = baseName == "Result"
+    if !isOption && !isResult {
+        return Option.None
+    }
+
+    if isOption && (method == "isSome" || method == "isNone") {
+        if args.len != 0 {
+            error(ck, "'" + method.clone() + "' takes no arguments", cloneSpan(span))
+        }
+        return Option.Some(tyBool())
+    }
+    if isResult && (method == "isOk" || method == "isErr") {
+        if args.len != 0 {
+            error(ck, "'" + method.clone() + "' takes no arguments", cloneSpan(span))
+        }
+        return Option.Some(tyBool())
+    }
+
+    // unwrapOr(default): loads the payload out, so a non-Copy inner would end up
+    // with two owners (receiver's dropped copy + the loaded one) — reject.
+    if method == "unwrapOr" {
+        if args.len != 1 {
+            error(ck, "'unwrapOr' expects 1 argument", cloneSpan(span))
+            return Option.Some(tyUnknown())
+        }
+        let inner = unwrapableInner(ck, objType)
+        match inner {
+            Option.Some(t) => {
+                if !isCopyCk(ck, t) {
+                    error(ck, "'unwrapOr' on a non-Copy " + baseName.clone() + "<" + typeName(t) + "> — use 'match' to move the value out", cloneSpan(span))
+                    return Option.Some(t)
+                }
+                let at = checkExpr(ck, *args[0])
+                if !typeEq(t, at) && !typeEq(at, tyUnknown()) {
+                    error(ck, "'unwrapOr': default must be " + typeName(t) + ", got " + typeName(at), cloneSpan(span))
+                }
+                return Option.Some(t)
+            }
+            Option.None => {
+                return Option.Some(tyUnknown())
+            }
+        }
+    }
+
+    // unwrapOrElse(f): unwrapOr with a lazily-computed default. Option's f takes no
+    // args (None carries nothing); Result's f takes the error by ref. Same Copy
+    // gate as unwrapOr, for the same reason.
+    if method == "unwrapOrElse" {
+        if args.len != 1 {
+            error(ck, "'unwrapOrElse' expects 1 argument", cloneSpan(span))
+            return Option.Some(tyUnknown())
+        }
+        let inner = unwrapableInner(ck, objType)
+        match inner {
+            Option.Some(t) => {
+                if !isCopyCk(ck, t) {
+                    error(ck, "'unwrapOrElse' on a non-Copy " + baseName.clone() + "<" + typeName(t) + "> — use 'match' to move the value out", cloneSpan(span))
+                    return Option.Some(t)
+                }
+                var fparams: Vec<TypeKind> = Vec.new()
+                if isResult {
+                    let errT = unwrapableErrType(ck, objType)
+                    match errT {
+                        Option.Some(e) => {
+                            fparams.push(TypeKind.TRef(Heap(e), false))
+                        }
+                        Option.None => {
+                        }
+                    }
+                }
+                ck.expectedType = Option.Some(TypeKind.TFn(fparams, Heap(t.clone())))
+                let cbTy = checkExpr(ck, *args[0])
+                ck.expectedType = Option.None
+                match cbTy {
+                    TypeKind.TFn(cp, cr) => {
+                        if !typeEq(t, *cr) && !typeEq(*cr, tyUnknown()) {
+                            error(ck, "'unwrapOrElse': callback must return " + typeName(t) + ", got " + typeName(*cr), cloneSpan(span))
+                        }
+                    }
+                    _ => {
+                        error(ck, "'unwrapOrElse' argument must be a function", cloneSpan(span))
+                    }
+                }
+                return Option.Some(t)
+            }
+            Option.None => {
+                return Option.Some(tyUnknown())
+            }
+        }
+    }
+
+    // map(f): T -> U through the payload by REF — never moves it out, so no Copy
+    // gate. Option forwards nothing on None (no consume); Result forwards the Err
+    // payload untouched, so a non-Copy E consumes the receiver.
+    if method == "map" {
+        if args.len != 1 {
+            error(ck, "'map' expects 1 argument", cloneSpan(span))
+            return Option.Some(tyUnknown())
+        }
+        let inner = unwrapableInner(ck, objType)
+        match inner {
+            Option.None => {
+                return Option.Some(tyUnknown())
+            }
+            Option.Some(t) => {
+                var fparams: Vec<TypeKind> = Vec.new()
+                fparams.push(TypeKind.TRef(Heap(t.clone()), false))
+                ck.expectedType = Option.Some(TypeKind.TFn(fparams, Heap(tyUnknown())))
+                let cbTy = checkExpr(ck, *args[0])
+                ck.expectedType = Option.None
+                var retTy = tyUnknown()
+                match cbTy {
+                    TypeKind.TFn(cp, cr) => {
+                        retTy = (*cr).clone()
+                    }
+                    _ => {
+                        error(ck, "'map' argument must be a function", cloneSpan(span))
+                        return Option.Some(tyUnknown())
+                    }
+                }
+                if typeEq(retTy, tyVoid()) {
+                    error(ck, "'map': callback must return a value — use 'match' for a side effect", cloneSpan(span))
+                    return Option.Some(tyUnknown())
+                }
+                if isResult {
+                    let errT = unwrapableErrType(ck, objType)
+                    match errT {
+                        Option.Some(e) => {
+                            consumeForwardedPayload(ck, obj, e)
+                            var targs: Vec<TypeKind> = Vec.new()
+                            targs.push(retTy)
+                            targs.push(e)
+                            let mangled = monomorphizeEnum(ck, "Result", targs)
+                            return Option.Some(TypeKind.TEnum(mangled))
+                        }
+                        Option.None => {
+                            return Option.Some(tyUnknown())
+                        }
+                    }
+                }
+                var targs: Vec<TypeKind> = Vec.new()
+                targs.push(retTy)
+                let mangled = monomorphizeEnum(ck, "Option", targs)
+                return Option.Some(TypeKind.TEnum(mangled))
+            }
+        }
+    }
+
+    // mapErr(f): Result<T,E> -> Result<T,F> — the mirror of map, callback on the Err
+    // side. The Ok payload is forwarded untouched, so a non-Copy T consumes the
+    // receiver.
+    if isResult && method == "mapErr" {
+        if args.len != 1 {
+            error(ck, "'mapErr' expects 1 argument", cloneSpan(span))
+            return Option.Some(tyUnknown())
+        }
+        let inner = unwrapableInner(ck, objType)
+        let errT = unwrapableErrType(ck, objType)
+        match inner {
+            Option.None => {
+                return Option.Some(tyUnknown())
+            }
+            Option.Some(t) => {
+                match errT {
+                    Option.None => {
+                        return Option.Some(tyUnknown())
+                    }
+                    Option.Some(e) => {
+                        var fparams: Vec<TypeKind> = Vec.new()
+                        fparams.push(TypeKind.TRef(Heap(e), false))
+                        ck.expectedType = Option.Some(TypeKind.TFn(fparams, Heap(tyUnknown())))
+                        let cbTy = checkExpr(ck, *args[0])
+                        ck.expectedType = Option.None
+                        var retTy = tyUnknown()
+                        match cbTy {
+                            TypeKind.TFn(cp, cr) => {
+                                retTy = (*cr).clone()
+                            }
+                            _ => {
+                                error(ck, "'mapErr' argument must be a function", cloneSpan(span))
+                                return Option.Some(tyUnknown())
+                            }
+                        }
+                        if typeEq(retTy, tyVoid()) {
+                            error(ck, "'mapErr': callback must return a value — use 'match' for a side effect", cloneSpan(span))
+                            return Option.Some(tyUnknown())
+                        }
+                        consumeForwardedPayload(ck, obj, t)
+                        var targs: Vec<TypeKind> = Vec.new()
+                        targs.push(t)
+                        targs.push(retTy)
+                        let mangled = monomorphizeEnum(ck, "Result", targs)
+                        return Option.Some(TypeKind.TEnum(mangled))
+                    }
+                }
+            }
+        }
+    }
+
+    // andThen(f): T -> Option<U>/Result<U,E>, f itself returning the whole enum —
+    // the chaining form. Same no-Copy-gate/no-consume story as map for the ok
+    // payload; Result's Err payload is forwarded untouched (consume on non-Copy E).
+    if method == "andThen" {
+        if args.len != 1 {
+            error(ck, "'andThen' expects 1 argument", cloneSpan(span))
+            return Option.Some(tyUnknown())
+        }
+        let inner = unwrapableInner(ck, objType)
+        match inner {
+            Option.None => {
+                return Option.Some(tyUnknown())
+            }
+            Option.Some(t) => {
+                var fparams: Vec<TypeKind> = Vec.new()
+                fparams.push(TypeKind.TRef(Heap(t.clone()), false))
+                ck.expectedType = Option.Some(TypeKind.TFn(fparams, Heap(tyUnknown())))
+                let cbTy = checkExpr(ck, *args[0])
+                ck.expectedType = Option.None
+                var retTy = tyUnknown()
+                match cbTy {
+                    TypeKind.TFn(cp, cr) => {
+                        retTy = (*cr).clone()
+                    }
+                    _ => {
+                        error(ck, "'andThen' argument must be a function", cloneSpan(span))
+                        return Option.Some(tyUnknown())
+                    }
+                }
+                let retBase = enumBaseName(ck, retTy)
+                match retBase {
+                    Option.Some(rb) => {
+                        if isOption && rb != "Option" {
+                            error(ck, "'andThen': callback must return an Option, got " + typeName(retTy), cloneSpan(span))
+                            return Option.Some(tyUnknown())
+                        }
+                        if isResult && rb != "Result" {
+                            error(ck, "'andThen': callback must return a Result, got " + typeName(retTy), cloneSpan(span))
+                            return Option.Some(tyUnknown())
+                        }
+                    }
+                    Option.None => {
+                        error(ck, "'andThen': callback must return " + baseName.clone(), cloneSpan(span))
+                        return Option.Some(tyUnknown())
+                    }
+                }
+                if isResult {
+                    let errT = unwrapableErrType(ck, objType)
+                    match errT {
+                        Option.Some(e) => {
+                            let cbErr = unwrapableErrType(ck, retTy)
+                            match cbErr {
+                                Option.Some(ce) => {
+                                    if !typeEq(ce, e) {
+                                        error(ck, "'andThen': callback's error type must be " + typeName(e) + ", got " + typeName(ce), cloneSpan(span))
+                                        return Option.Some(tyUnknown())
+                                    }
+                                }
+                                Option.None => {
+                                }
+                            }
+                            consumeForwardedPayload(ck, obj, e)
+                        }
+                        Option.None => {
+                        }
+                    }
+                }
+                return Option.Some(retTy)
+            }
+        }
+    }
+
+    // orElse(f): the None/Err-side andThen — f: () -> Option<T> (Option) or
+    // (&E) -> Result<T,F> (Result). The ok payload is forwarded on the ok branch,
+    // so a non-Copy T consumes the receiver (same rule as map/andThen above).
+    if method == "orElse" {
+        if args.len != 1 {
+            error(ck, "'orElse' expects 1 argument", cloneSpan(span))
+            return Option.Some(tyUnknown())
+        }
+        let inner = unwrapableInner(ck, objType)
+        match inner {
+            Option.None => {
+                return Option.Some(tyUnknown())
+            }
+            Option.Some(t) => {
+                var fparams: Vec<TypeKind> = Vec.new()
+                if isResult {
+                    let errT = unwrapableErrType(ck, objType)
+                    match errT {
+                        Option.Some(e) => {
+                            fparams.push(TypeKind.TRef(Heap(e), false))
+                        }
+                        Option.None => {
+                        }
+                    }
+                }
+                ck.expectedType = Option.Some(TypeKind.TFn(fparams, Heap(tyUnknown())))
+                let cbTy = checkExpr(ck, *args[0])
+                ck.expectedType = Option.None
+                var retTy = tyUnknown()
+                match cbTy {
+                    TypeKind.TFn(cp, cr) => {
+                        retTy = (*cr).clone()
+                    }
+                    _ => {
+                        error(ck, "'orElse' argument must be a function", cloneSpan(span))
+                        return Option.Some(objType.clone())
+                    }
+                }
+                if !typeEq(retTy, tyUnknown()) {
+                    let cbOk = unwrapableInner(ck, retTy)
+                    var okMatches = false
+                    match cbOk {
+                        Option.Some(co) => {
+                            okMatches = typeEq(co, t)
+                        }
+                        Option.None => {
+                        }
+                    }
+                    let retBase = enumBaseName(ck, retTy)
+                    var baseMatches = false
+                    match retBase {
+                        Option.Some(rb) => {
+                            baseMatches = rb == baseName
+                        }
+                        Option.None => {
+                        }
+                    }
+                    if !okMatches || !baseMatches {
+                        error(ck, "'orElse': callback must return " + baseName.clone() + "<" + typeName(t) + ", ...>, got " + typeName(retTy), cloneSpan(span))
+                        return Option.Some(objType.clone())
+                    }
+                }
+                consumeForwardedPayload(ck, obj, t)
+                return Option.Some(objType.clone())
+            }
+        }
+    }
+
+    return Option.None
+}
+
 pub fn checkUnwrap(ck: &mut Checker, operand: &Expr, span: &Option<Span>): TypeKind {
     let operandType = checkExpr(ck, operand)
     let inner = unwrapableInner(ck, operandType)
@@ -1951,9 +2362,19 @@ pub fn checkMethodCall(ck: &mut Checker, obj: &Expr, method: &string, args: &Vec
         }
     }
 
-    // Enum methods resolve through the same name-keyed impl tables
+    // Enum methods resolve through the same name-keyed impl tables — but Option/
+    // Result get their combinators first (isSome/unwrapOr/map/andThen/orElse/
+    // mapErr/unwrapOrElse), gated on baseName so a user enum's own same-named
+    // inherent method still resolves via checkStructMethod below.
     match objType.clone() {
         TypeKind.TEnum(name) => {
+            match checkOptionResultMethod(ck, obj, objType, method, args, span) {
+                Option.Some(t) => {
+                    return t
+                }
+                Option.None => {
+                }
+            }
             return checkStructMethod(ck, name, method, args, span)
         }
         _ => {

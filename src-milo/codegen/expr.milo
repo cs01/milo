@@ -5304,6 +5304,18 @@ pub fn genMethodCall(cg: &mut Cgen, object: &Expr, method: &string, args: &Vec<H
         }
     }
 
+    // `.clone()` on a Copy scalar (int/float/bool) is the identity — the value is
+    // already loaded by value in `obj`, so there is nothing to actually copy. The
+    // checker only accepts this method call at all when isCopyCk(objType) held
+    // (see checker/expr.milo's clone-on-Copy fallback), so anything reaching here
+    // is a scalar, not a Vec/String/struct (those all have their own clone case
+    // above, which already returned before this point).
+    if method == "clone" && args.len == 0 {
+        return Val {
+            v: obj.v.clone(), ty: obj.ty.clone()
+        }
+    }
+
     // A silent placeholder here becomes invalid IR much later (`trunc i64 0 to
     // %String`), which is a miserable way to discover a missing method. Fail loud.
     eprint("codegen: unsupported method '" + method.clone() + "' on " + objTyLl.clone())

@@ -3336,6 +3336,15 @@ pub fn checkMethodCall(ck: &mut Checker, obj: &Expr, method: &string, args: &Vec
             }
         }
     }
+    // `.clone()` on a Copy scalar is the identity — it exists so generic code can
+    // be written once: `fn get<T>(w: &Wrapper<T>): T { return w.val.clone() }` has
+    // to compile for T = i64 as well as T = string, and the move-out-of-a-borrow
+    // rule leaves clone as the only way to spell it (mirrors the oracle's
+    // checker.ts:8366). Gated last, after every real method has had a chance to
+    // match, same as the oracle.
+    if method == "clone" && args.len == 0 && isCopyCk(ck, objType) {
+        return objType.clone()
+    }
     error(ck, "no method '" + method.clone() + "' on type " + typeName(objType), cloneSpan(span))
     return tyUnknown()
 }

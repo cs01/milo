@@ -5101,6 +5101,63 @@ pub fn genExpr(cg: &mut Cgen, e: &Expr, locs: &Vec<Local>, sigs: &Vec<CgFnSig>, 
             if enumName == "HashMap" && variant == "new" {
                 return genHashMapNew(cg, hintTy)
             }
+            // Capacity is only a growth hint, so an empty Vec is semantically equivalent —
+            // `push` mallocs on first use. Matches how String.withCapacity is handled.
+            if enumName == "Vec" && variant == "withCapacity" {
+                if args.len == 1 {
+                    let _ = genExpr(cg, *args[0], locs, sigs, "i64")
+                }
+                return genVecNew(cg, hintTy)
+            }
+            // `Vec.filled(n, v)`: allocate n slots and store v into each.
+            if enumName == "Vec" && variant == "filled" && args.len == 2 {
+                ensureVecTy(cg)
+                ensureMalloc(cg)
+                var vecTy = hintTy.clone()
+                if !isVecTy(vecTy) {
+                    vecTy = "Vec<i64>"
+                }
+                let elemTy = unwrapVec(resolveTyStr(cg, vecTy.clone()))
+                let elemLl = llType(elemTy.clone())
+                let n = genExpr(cg, *args[0], locs, sigs, "i64")
+                let fill = genExpr(cg, *args[1], locs, sigs, elemLl.clone())
+                let esz = llTypeBytes(elemLl.clone())
+                let bytes = nextTemp(cg)
+                emit(cg, "  " + bytes + " = mul i64 " + n.v.clone() + ", " + esz.toString() + "\n")
+                let data = nextTemp(cg)
+                emit(cg, "  " + data + " = call ptr @malloc(i64 " + bytes + ")\n")
+                let ictr = nextTemp(cg)
+                emit(cg, "  " + ictr + " = alloca i64\n")
+                emit(cg, "  store i64 0, ptr " + ictr + "\n")
+                let condL = nextLabel(cg, "vfill.cond")
+                let bodyL = nextLabel(cg, "vfill.body")
+                let endL = nextLabel(cg, "vfill.end")
+                emit(cg, "  br label %" + condL.clone() + "\n")
+                emit(cg, condL.clone() + ":\n")
+                let iv = nextTemp(cg)
+                emit(cg, "  " + iv + " = load i64, ptr " + ictr + "\n")
+                let more = nextTemp(cg)
+                emit(cg, "  " + more + " = icmp slt i64 " + iv + ", " + n.v.clone() + "\n")
+                emit(cg, "  br i1 " + more + ", label %" + bodyL.clone() + ", label %" + endL.clone() + "\n")
+                emit(cg, bodyL.clone() + ":\n")
+                let slot = nextTemp(cg)
+                emit(cg, "  " + slot + " = getelementptr " + elemLl.clone() + ", ptr " + data + ", i64 " + iv + "\n")
+                emit(cg, "  store " + elemLl.clone() + " " + fill.v.clone() + ", ptr " + slot + "\n")
+                let inext = nextTemp(cg)
+                emit(cg, "  " + inext + " = add i64 " + iv + ", 1\n")
+                emit(cg, "  store i64 " + inext + ", ptr " + ictr + "\n")
+                emit(cg, "  br label %" + condL.clone() + "\n")
+                emit(cg, endL.clone() + ":\n")
+                let v0 = nextTemp(cg)
+                emit(cg, "  " + v0 + " = insertvalue %Vec undef, ptr " + data + ", 0\n")
+                let v1 = nextTemp(cg)
+                emit(cg, "  " + v1 + " = insertvalue %Vec " + v0 + ", i64 " + n.v.clone() + ", 1\n")
+                let v2 = nextTemp(cg)
+                emit(cg, "  " + v2 + " = insertvalue %Vec " + v1 + ", i64 " + n.v.clone() + ", 2\n")
+                return Val {
+                    v: v2, ty: vecTy
+                }
+            }
             if enumName == "String" && variant == "withCapacity" {
                 // capacity is a growth hint; an empty string (cap 0 = literal
                 // convention, push mallocs) is semantically equivalent

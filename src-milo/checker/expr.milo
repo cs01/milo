@@ -10,7 +10,7 @@ from "src-milo/checker/types.milo" import {
 from "src-milo/checker/state.milo" import {
     Checker, VarInfo, FnSig, FnParam, StructInfo, CkStructField,
     EnumInfo, VariantInfo, Diagnostic,
-    error, errorHint, warn, pushScope, popScope, declare, lookup, setVarMoved, setVarRead, hasErrors,
+    error, errorHint, warn, pushScope, popScope, declare, lookup, setVarMoved, setVarType, setVarRead, hasErrors,
     isCopyCk, normalizeEnumNames, snapshotMoves, restoreMoves,
 }
 from "src-milo/checker/mono.milo" import {
@@ -1321,6 +1321,31 @@ pub fn checkEnumLit(ck: &mut Checker, enumName: &string, variant: &string, args:
         }
         return tyUnknown()
     }
+    // `Vec.withCapacity(n)` and `Vec.filled(n, v)`. std/io uses both, so without them
+    // every program that touches std/io lost its Vec types and produced a cascade of
+    // "no method 'push' on <unknown>" against the CALLER.
+    if enumName == "Vec" && variant == "withCapacity" {
+        if args.len != 1 {
+            error(ck, "'Vec.withCapacity' expects 1 argument", cloneSpan(span))
+        }
+        if args.len >= 1 {
+            checkExpr(ck, *args[0])
+        }
+        return tyUnknown()
+    }
+    if enumName == "Vec" && variant == "filled" {
+        if args.len != 2 {
+            error(ck, "'Vec.filled' expects 2 arguments", cloneSpan(span))
+        }
+        if args.len >= 1 {
+            checkExpr(ck, *args[0])
+        }
+        if args.len >= 2 {
+            let elemT = checkExpr(ck, *args[1])
+            return TypeKind.TVec(Heap(elemT))
+        }
+        return tyUnknown()
+    }
     if enumName == "HashMap" && variant == "new" {
         if args.len != 0 {
             error(ck, "'HashMap.new' takes no arguments", cloneSpan(span))
@@ -2046,6 +2071,45 @@ pub fn checkMethodCall(ck: &mut Checker, obj: &Expr, method: &string, args: &Vec
         }
     }
 
+    // `var w = Vec.new()` with no annotation has no element type yet; take it from the
+    // first `push`. std/sha1, std/hmac and std/totp all open this way, and without the
+    // inference the Vec stayed <unknown> and every later use produced a cascade of errors
+    // against the CALLER of those modules rather than against the line at fault.
+    //
+    // Restricted to elements whose LLVM type is i64: codegen defaults an un-annotated
+    // `Vec.new()` to Vec<i64> and does NOT see this inference, so accepting a narrower
+    // element here would agree in the checker and silently disagree about element SIZE in
+    // the generated code. Erroring on those is the honest half-measure until codegen
+    // learns the same inference.
+    if method == "push" && args.len == 1 {
+        match obj {
+            Expr.Ident(vname, vsp) => {
+                match objType {
+                    TypeKind.TUnknown => {
+                        let elemT = checkExpr(ck, *args[0])
+                        var elemIsI64 = false
+                        match elemT.clone() {
+                            TypeKind.TInt(bits, signed) => {
+                                if bits == 64 && signed {
+                                    elemIsI64 = true
+                                }
+                            }
+                            _ => {
+                            }
+                        }
+                        if elemIsI64 {
+                            setVarType(ck, vname, TypeKind.TVec(Heap(elemT)))
+                            return tyVoid()
+                        }
+                    }
+                    _ => {
+                    }
+                }
+            }
+            _ => {
+            }
+        }
+    }
     error(ck, "no method '" + method.clone() + "' on type " + typeName(objType), cloneSpan(span))
     return tyUnknown()
 }

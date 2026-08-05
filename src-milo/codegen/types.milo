@@ -993,8 +993,17 @@ pub fn astTypeStr(ty: &MiloType): string {
     if ty.isArray {
         base = "Vec<" + base + ">"
     }
-    if ty.isPtr {
-        return "*" + base
+    // llType only checks for a leading '*' (any count means "ptr" — LLVM's
+    // opaque ptr is depth-agnostic), but the star count still has to survive
+    // here so the string round-trips and downstream tooling reflects **T.
+    if ty.ptrDepth > 0 {
+        var stars = ""
+        var i: i32 = 0
+        while i < ty.ptrDepth {
+            stars = stars + "*"
+            i = i + 1
+        }
+        return stars + base
     }
     return base
 }

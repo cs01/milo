@@ -706,6 +706,19 @@ pub fn checkStringViewForIn(ck: &mut Checker, varName: &string, varName2: &Optio
     }
 
     let viewType = TypeKind.TRef(Heap(tyString()), false)
+    // Every piece points into the receiver's buffer, so it must not be
+    // mutated, moved or reallocated for the whole loop — same freeze a
+    // `s[a..b]` slice takes, held for the loop body's life instead of one
+    // statement's.
+    var frozenRoot: Option<string> = Option.None
+    match accessPath(recv) {
+        Option.Some(p) => {
+            freezeName(ck, p.root, p.fields)
+            frozenRoot = Option.Some(p.root)
+        }
+        Option.None => {
+        }
+    }
     pushScope(ck)
     match varName2 {
         Option.Some(name2) => {
@@ -731,6 +744,13 @@ pub fn checkStringViewForIn(ck: &mut Checker, varName: &string, varName2: &Optio
     }
     ck.loopDepth = ck.loopDepth - 1
     popScope(ck)
+    match frozenRoot {
+        Option.Some(r) => {
+            unfreezeName(ck, r)
+        }
+        Option.None => {
+        }
+    }
 }
 
 pub fn checkForIn(ck: &mut Checker, varName: &string, varName2: &Option<string>, iterable: &Expr, body: &Vec<Heap<Stmt>>, fnRetType: &TypeKind, span: &Option<Span>) {
@@ -836,6 +856,38 @@ pub fn checkForIn(ck: &mut Checker, varName: &string, varName2: &Option<string>,
             }
         }
         _ => {
+        }
+    }
+
+    // Iterating a Vec/Array/HashMap hands out element references into its own
+    // storage; a push/insert mid-loop can realloc that storage out from under
+    // them. Freeze the iterable's root for the loop body's life — same
+    // mechanism a slice takes, held longer. Not applied to a byte-iterated
+    // string (no element references escape a copy) or a user `next()`
+    // iterator (owned values, not borrows).
+    var iterFrozenRoot: Option<string> = Option.None
+    var needsIterFreeze = false
+    match iterType.clone() {
+        TypeKind.TVec(e) => {
+            needsIterFreeze = true
+        }
+        TypeKind.TArray(e, s) => {
+            needsIterFreeze = true
+        }
+        TypeKind.THashMap(k, v) => {
+            needsIterFreeze = true
+        }
+        _ => {
+        }
+    }
+    if needsIterFreeze {
+        match accessPath(iterable) {
+            Option.Some(p) => {
+                freezeName(ck, p.root, p.fields)
+                iterFrozenRoot = Option.Some(p.root)
+            }
+            Option.None => {
+            }
         }
     }
 
@@ -976,6 +1028,13 @@ pub fn checkForIn(ck: &mut Checker, varName: &string, varName2: &Option<string>,
 
     ck.loopDepth = ck.loopDepth - 1
     popScope(ck)
+    match iterFrozenRoot {
+        Option.Some(r) => {
+            unfreezeName(ck, r)
+        }
+        Option.None => {
+        }
+    }
 }
 
 // -- Top-level: check a function body --

@@ -157,6 +157,30 @@ pub fn processImports(rs: &mut ResolverState, prog: &Program, dir: &string) {
 }
 
 // Dedup declarations by name (last occurrence wins — user overrides prelude).
+// Last-wins dedup by name, matching what structs/enums/functions already do. Needed
+// because a module-private `let` is NOT private in milo0's flat merge: std/sha1 and
+// std/sha256 each declare `let MASK32`, and importing both emitted `@MASK32` twice, which
+// LLVM rejects outright.
+//
+// HAZARD this does not solve: two private globals sharing a name but holding DIFFERENT
+// values now silently collapse to one. The real fix is per-module namespacing (the flat
+// merge is milo0's design limit, backlog T2 #18); this only stops the duplicate-symbol
+// error for the case where they agree.
+pub fn dedupGlobals(arr: Vec<GlobalDecl>): Vec<GlobalDecl> {
+    var seen: HashMap<string, bool> = HashMap.new()
+    var result: Vec<GlobalDecl> = Vec.new()
+    var i: i64 = arr.len - 1
+    while i >= 0 {
+        if !seen.contains(arr[i].name) {
+            seen.insert(arr[i].name.clone(), true)
+            result.push(cloneGlobal(arr[i]))
+        }
+        i = i - 1
+    }
+    result.reverse()
+    return result
+}
+
 pub fn dedupStructs(arr: Vec<StructDecl>): Vec<StructDecl> {
     var seen: HashMap<string, bool> = HashMap.new()
     var result: Vec<StructDecl> = Vec.new()
@@ -291,7 +315,7 @@ pub fn resolveImports(program: Program, sourceDir: string, stdlibDir: string, ta
         imports: Vec.new(),
         traits: dedupTraits(rs.traits),
         impls: rs.impls,
-        globals: rs.globals,
+        globals: dedupGlobals(rs.globals),
         typeAliases: rs.typeAliases,
     }
 }

@@ -2564,6 +2564,47 @@ pub fn checkStructMethod(ck: &mut Checker, structName: &string, method: &string,
         return tyUnknown()
     }
 
+    // Option/Result queries. These are monomorphized enums (Option_i64, Result_i32_string),
+    // so they arrive here as TStruct(mangled) and would otherwise be "no method on struct".
+    // Payload-free predicates plus `unwrapOr` only: the combinators that take a closure
+    // (map/andThen/orElse) need generic closure typing and are deliberately left out
+    // rather than half-supported.
+    if ck.enums.contains(structName) {
+        let einfo = ck.enums.get(structName)!
+        let base = einfo.baseName.clone()
+        if base == "Option" || base == "Result" {
+            var okName = "Some"
+            var isYes = "isSome"
+            var isNo = "isNone"
+            if base == "Result" {
+                okName = "Ok"
+                isYes = "isOk"
+                isNo = "isErr"
+            }
+            if method == isYes || method == isNo {
+                if args.len != 0 {
+                    error(ck, "'" + method.clone() + "' takes no arguments", cloneSpan(span))
+                }
+                return tyBool()
+            }
+            if method == "unwrapOr" {
+                if args.len != 1 {
+                    error(ck, "'unwrapOr' expects 1 argument", cloneSpan(span))
+                }
+                if args.len >= 1 {
+                    checkExpr(ck, *args[0])
+                }
+                if einfo.variants.contains(okName) {
+                    let vi = einfo.variants.get(okName)!
+                    if vi.fields.len > 0 {
+                        return vi.fields[0].clone()
+                    }
+                }
+                return tyUnknown()
+            }
+        }
+    }
+
     error(ck, "no method '" + method.clone() + "' on struct '" + structName.clone() + "'", cloneSpan(span))
     return tyUnknown()
 }

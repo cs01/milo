@@ -2459,6 +2459,74 @@ pub fn genMethodCall(cg: &mut Cgen, object: &Expr, method: &string, args: &Vec<H
 
     let obj = genExpr(cg, object, locs, sigs, "")
     let objTyLl = llType(obj.ty)
+
+    // Option/Result queries. The receiver is a monomorphized enum value, so the tag is
+    // field 0 and the payload is field 1 — same layout the `!` unwrap path reads.
+    if method == "isSome" || method == "isNone" || method == "isOk" || method == "isErr" || method == "unwrapOr" {
+        let enumName = stripPercent(resolveTyStr(cg, stripPercent(obj.ty)))
+        if cg.enums.contains(enumName) {
+            var okVariant = "Some"
+            if method == "isOk" || method == "isErr" {
+                okVariant = "Ok"
+            }
+            if method == "unwrapOr" && lookupVariantTag(cg, enumName, "Some") < 0 {
+                okVariant = "Ok"
+            }
+            let okTag = lookupVariantTag(cg, enumName, okVariant)
+            if okTag >= 0 {
+                let enumTy = "%" + enumName.clone()
+                let addr = nextTemp(cg)
+                emit(cg, "  " + addr + " = alloca " + enumTy.clone() + "\n")
+                emit(cg, "  store " + enumTy.clone() + " " + obj.v.clone() + ", ptr " + addr.clone() + "\n")
+                let tagPtr = nextTemp(cg)
+                emit(cg, "  " + tagPtr + " = getelementptr " + enumTy.clone() + ", ptr " + addr.clone() + ", i32 0, i32 0\n")
+                let tag = nextTemp(cg)
+                emit(cg, "  " + tag + " = load i32, ptr " + tagPtr + "\n")
+                if method != "unwrapOr" {
+                    var cmp = "eq"
+                    if method == "isNone" || method == "isErr" {
+                        cmp = "ne"
+                    }
+                    let r = nextTemp(cg)
+                    emit(cg, "  " + r + " = icmp " + cmp + " i32 " + tag.clone() + ", " + okTag.toString() + "\n")
+                    return Val {
+                        v: r, ty: "i1"
+                    }
+                }
+                let payloadTypes = lookupVariantPayload(cg, enumName, okVariant)
+                if payloadTypes.len == 1 {
+                    let payTy = payloadTypes[0].clone()
+                    let payLl = llType(payTy)
+                    // The default is evaluated before the branch: `unwrapOr(x)` takes x
+                    // eagerly, so evaluating it on the present path too would be wrong.
+                    let dv = genExpr(cg, *args[0], locs, sigs, payLl.clone())
+                    let isOkT = nextTemp(cg)
+                    emit(cg, "  " + isOkT + " = icmp eq i32 " + tag.clone() + ", " + okTag.toString() + "\n")
+                    let haveLbl = nextLabel(cg, "unwrapor.have")
+                    let defLbl = nextLabel(cg, "unwrapor.default")
+                    let endLbl = nextLabel(cg, "unwrapor.end")
+                    emit(cg, "  br i1 " + isOkT + ", label %" + haveLbl.clone() + ", label %" + defLbl.clone() + "\n")
+                    emit(cg, haveLbl.clone() + ":\n")
+                    let payPtr = nextTemp(cg)
+                    emit(cg, "  " + payPtr + " = getelementptr " + enumTy.clone() + ", ptr " + addr.clone() + ", i32 0, i32 1\n")
+                    let fp = nextTemp(cg)
+                    emit(cg, "  " + fp + " = getelementptr { " + payLl.clone() + " }, ptr " + payPtr + ", i32 0, i32 0\n")
+                    let got = nextTemp(cg)
+                    emit(cg, "  " + got + " = load " + payLl.clone() + ", ptr " + fp + "\n")
+                    emit(cg, "  br label %" + endLbl.clone() + "\n")
+                    emit(cg, defLbl.clone() + ":\n")
+                    emit(cg, "  br label %" + endLbl.clone() + "\n")
+                    emit(cg, endLbl.clone() + ":\n")
+                    let r2 = nextTemp(cg)
+                    emit(cg, "  " + r2 + " = phi " + payLl.clone() + " [ " + got + ", %" + haveLbl.clone() + " ], [ " + dv.v.clone() + ", %" + defLbl.clone() + " ]\n")
+                    return Val {
+                        v: r2, ty: payTy
+                    }
+                }
+            }
+        }
+    }
+
     if isHashMapTy(obj.ty) && method == "contains" {
         let kv = genExpr(cg, *args[0], locs, sigs, hashMapKeyTy(obj.ty))
         return genHashMapContains(cg, obj, kv)

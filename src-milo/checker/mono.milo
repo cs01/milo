@@ -711,10 +711,24 @@ pub fn monomorphizeStruct(ck: &mut Checker, baseName: &string, typeArgs: &Vec<Ty
 // Resolve a MiloType to its monomorphized TypeKind, KEEPING user-generic type
 // args (Arena<Node> → TStruct("Arena_Node")) that typeFromAst flattens away.
 pub fn resolveMonoType(ck: &mut Checker, ty: &MiloType): TypeKind {
-    if ty.typeArgs.len > 0 && !ty.isFn && ty.name != "Vec" && ty.name != "Heap" && ty.name != "HashMap" {
+    if ty.typeArgs.len > 0 && !ty.isFn {
         var base = tyUnknown()
         var isGeneric = false
-        if ck.genericEnums.contains(ty.name) {
+        // Builtin containers must still recurse through resolveMonoType (not
+        // typeFromAst) on their element types, or a user generic nested inside
+        // one (Vec<Handle<T>>) never gets monomorphized: typeFromAst has no
+        // knowledge of genericStructs/genericEnums and just returns the raw
+        // unmangled base name (TStruct("Handle")) instead of Handle_string.
+        if ty.name == "Vec" && ty.typeArgs.len == 1 {
+            base = TypeKind.TVec(Heap(resolveMonoType(ck, ty.typeArgs[0])))
+            isGeneric = true
+        } else if ty.name == "Heap" && ty.typeArgs.len == 1 {
+            base = TypeKind.THeap(Heap(resolveMonoType(ck, ty.typeArgs[0])))
+            isGeneric = true
+        } else if ty.name == "HashMap" && ty.typeArgs.len == 2 {
+            base = TypeKind.THashMap(Heap(resolveMonoType(ck, ty.typeArgs[0])), Heap(resolveMonoType(ck, ty.typeArgs[1])))
+            isGeneric = true
+        } else if ck.genericEnums.contains(ty.name) {
             var targs: Vec<TypeKind> = Vec.new()
             for i in 0..ty.typeArgs.len {
                 targs.push(resolveMonoType(ck, ty.typeArgs[i]))

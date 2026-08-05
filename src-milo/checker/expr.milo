@@ -966,8 +966,39 @@ pub fn checkCall(ck: &mut Checker, func: &string, args: &Vec<Heap<Expr>>, typeAr
                     _ => {
                     }
                 }
+                // `&[T]` (an unsized-array slice param) also accepts a Vec<T> or a
+                // fixed [T;N] argument — a fixed array lowers onto the same %Vec
+                // runtime rep (see codegen astTypeStr), so at the call boundary
+                // they're interchangeable; only the element type has to line up.
+                var arrOk = false
+                match (*inner).clone() {
+                    TypeKind.TArray(reqElem, reqSize) => {
+                        match reqSize {
+                            Option.None => {
+                                match argType.clone() {
+                                    TypeKind.TVec(argElem) => {
+                                        if typeEq(*reqElem, *argElem) {
+                                            arrOk = true
+                                        }
+                                    }
+                                    TypeKind.TArray(argElem, argSize) => {
+                                        if typeEq(*reqElem, *argElem) {
+                                            arrOk = true
+                                        }
+                                    }
+                                    _ => {
+                                    }
+                                }
+                            }
+                            _ => {
+                            }
+                        }
+                    }
+                    _ => {
+                    }
+                }
                 // auto-borrow: don't type-error, just check inner matches
-                if !ifaceOk && !typeEq(*inner, argType) && !typeEq(argType, tyUnknown()) && !intCoercible(*inner, argType, *args[i]) {
+                if !ifaceOk && !arrOk && !typeEq(*inner, argType) && !typeEq(argType, tyUnknown()) && !intCoercible(*inner, argType, *args[i]) {
                     error(ck, "argument " + (i + 1).toString() + " of '" + func.clone() + "': expected " + ptName + ", got " + typeName(argType), cloneSpan(span))
                 }
             }
@@ -2026,6 +2057,29 @@ pub fn checkMethodCall(ck: &mut Checker, obj: &Expr, method: &string, args: &Vec
         }
     }
 
+    // Fixed-size array `.slice(a,b)` — the `arr[a..b]` range-index desugar
+    // (parser.milo). A fixed array lowers onto the Vec runtime (same {ptr,len,cap}
+    // header — see codegen astTypeStr), so the view is just a Vec<T>, exactly like
+    // Vec.slice; no separate codegen path is needed.
+    match objType.clone() {
+        TypeKind.TArray(elem, size) => {
+            if method == "slice" {
+                if args.len != 2 {
+                    error(ck, "'slice' expects 2 arguments (start, end)", cloneSpan(span))
+                }
+                for si in 0..args.len {
+                    let it = checkExpr(ck, *args[si])
+                    if !isInteger(it) && !typeEq(it, tyUnknown()) {
+                        error(ck, "'slice' bounds must be integer", cloneSpan(span))
+                    }
+                }
+                return TypeKind.TVec(elem)
+            }
+        }
+        _ => {
+        }
+    }
+
     // String methods
     match objType.clone() {
         TypeKind.TString => {
@@ -2329,6 +2383,79 @@ pub fn checkVecMethod(ck: &mut Checker, obj: &Expr, elem: &TypeKind, method: &st
         }
         return tyVoid()
     }
+    // truncate(n) drops everything at index >= n (a no-op past the end, empties on
+    // a negative n — codegen clamps). Mirrors 'clear' above but keeps the tail.
+    if method == "truncate" {
+        if args.len != 1 {
+            error(ck, "'truncate' expects 1 argument", cloneSpan(span))
+        }
+        if args.len == 1 {
+            let nType = checkExpr(ck, *args[0])
+            if !isInteger(nType) && !typeEq(nType, tyUnknown()) {
+                error(ck, "'truncate': expected an integer length, got " + typeName(nType), cloneSpan(span))
+            }
+        }
+        if !isRootMutable(ck, obj) {
+            error(ck, "cannot truncate an immutable Vec", cloneSpan(span))
+        }
+        return tyVoid()
+    }
+    // join(sep): Vec<string> only — concatenates elements with `sep` between them.
+    if method == "join" {
+        if args.len != 1 {
+            error(ck, "'join' expects 1 argument (separator)", cloneSpan(span))
+            return tyUnknown()
+        }
+        if !typeEq(elem, tyString()) {
+            error(ck, "'join' is only available on Vec<string>", cloneSpan(span))
+            return tyUnknown()
+        }
+        let sepType = checkExpr(ck, *args[0])
+        if !typeEq(sepType, tyString()) && !typeEq(sepType, tyUnknown()) {
+            error(ck, "'join' separator must be a string, got " + typeName(sepType), cloneSpan(span))
+        }
+        return tyString()
+    }
+    // sum(): accumulates every element — ints and floats only.
+    if method == "sum" {
+        if args.len != 0 {
+            error(ck, "'sum' takes no arguments", cloneSpan(span))
+        }
+        if !isInteger(elem) && !isFloat(elem) {
+            error(ck, "'sum' requires a Vec of integers or floats, got Vec<" + typeName(elem) + ">", cloneSpan(span))
+            return tyUnknown()
+        }
+        return elem.clone()
+    }
+    // sortByKey((&T) => K): sorts in place by a comparable key extracted from each
+    // element. The closure's param is hinted &T (like find/any/all); its inferred
+    // return type becomes the sort key and must itself be comparable.
+    if method == "sortByKey" {
+        if args.len != 1 {
+            error(ck, "'sortByKey' expects 1 argument (key extractor)", cloneSpan(span))
+            return tyUnknown()
+        }
+        if !isRootMutable(ck, obj) {
+            error(ck, "cannot sort immutable Vec", cloneSpan(span))
+        }
+        var fparams: Vec<TypeKind> = Vec.new()
+        fparams.push(TypeKind.TRef(Heap(elem.clone()), false))
+        ck.expectedType = Option.Some(TypeKind.TFn(fparams, Heap(tyUnknown())))
+        let cbType = checkExpr(ck, *args[0])
+        ck.expectedType = Option.None
+        match cbType.clone() {
+            TypeKind.TFn(cp, cr) => {
+                let keyType = (*cr).clone()
+                if !isInteger(keyType) && !isFloat(keyType) && !typeEq(keyType, tyString()) && !typeEq(keyType, tyBool()) {
+                    error(ck, "'sortByKey' key must be a comparable type (int, float, string, bool), got " + typeName(keyType), cloneSpan(span))
+                }
+            }
+            _ => {
+                error(ck, "'sortByKey' argument must be a function", cloneSpan(span))
+            }
+        }
+        return tyVoid()
+    }
     error(ck, "no method '" + method.clone() + "' on Vec", cloneSpan(span))
     return tyUnknown()
 }
@@ -2429,6 +2556,15 @@ pub fn checkHashMapMethod(ck: &mut Checker, obj: &Expr, key: &TypeKind, val: &Ty
             error(ck, "cannot clear an immutable HashMap", cloneSpan(span))
         }
         return tyVoid()
+    }
+    // keys(): snapshot the map's keys into a Vec — iteration order is unspecified
+    // (hash seed is randomized per process), so this is the supported way to get
+    // a stable order (collect, then sort).
+    if method == "keys" {
+        if args.len != 0 {
+            error(ck, "'keys' takes no arguments", cloneSpan(span))
+        }
+        return TypeKind.TVec(Heap(key.clone()))
     }
     error(ck, "no method '" + method.clone() + "' on HashMap", cloneSpan(span))
     return tyUnknown()

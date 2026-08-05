@@ -1388,6 +1388,39 @@ pub fn checkEnumLit(ck: &mut Checker, enumName: &string, variant: &string, args:
                 }
             }
         }
+        // A capitalized *variable* followed by `.thing` parses identically to a
+        // static enum-literal/struct-call (the parser has no type info to tell
+        // them apart). If enumName isn't a type at all but IS a bound variable,
+        // fall back to a real field/method access on its value. Field wins only
+        // when there's an exact field of that name and no call args — fields
+        // aren't callable, so any args mean it has to be a method.
+        match lookup(ck, enumName) {
+            Option.Some(v) => {
+                let objTy = deref(v.ty.clone())
+                let objExpr = Expr.Ident(enumName.clone(), cloneSpan(span))
+                var isField = false
+                match objTy.clone() {
+                    TypeKind.TStruct(sname) => {
+                        if ck.structs.contains(sname) {
+                            let info = ck.structs.get(sname)!
+                            for fi in 0..info.fields.len {
+                                if info.fields[fi].name == variant {
+                                    isField = true
+                                }
+                            }
+                        }
+                    }
+                    _ => {
+                    }
+                }
+                if isField && args.len == 0 {
+                    return checkFieldAccess(ck, objExpr, variant, span)
+                }
+                return checkMethodCall(ck, objExpr, variant, args, span)
+            }
+            Option.None => {
+            }
+        }
         error(ck, "unknown enum '" + enumName.clone() + "'", cloneSpan(span))
         return tyUnknown()
     }

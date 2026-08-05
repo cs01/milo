@@ -1954,6 +1954,40 @@ pub fn genEnumLit(cg: &mut Cgen, enumName: &string, variant: &string, args: &Vec
     // (e.g. File.openRead) — the parser lands both on the enum-literal form. It is
     // registered as `Type$method`; route it to the plain call path.
     if !found {
+        // A capitalized *variable* followed by `.thing` parses identically to a
+        // static call — the parser has no type info to disambiguate. The checker
+        // (checkEnumLit) already resolves this case to a real field/method access
+        // when enumName is a bound variable rather than a struct type; codegen has
+        // no access to that decision (it re-walks the raw, already-checked AST), so
+        // it re-derives it here the same way: struct-type name wins first (it's a
+        // disjoint namespace from locals in valid programs), else fall back to the
+        // variable's field/method, matching the checker's field-vs-method rule
+        // (field only when there's an exact field of that name and no call args).
+        let isVarLocal = hasLocal(locs, enumName)
+        let isVarGlobal = !isVarLocal && cg.globalVars.contains(enumName)
+        if !cg.structs.contains(enumName) && (isVarLocal || isVarGlobal) {
+            var varTy = ""
+            if isVarLocal {
+                varTy = findLocal(locs, enumName).ty
+            } else {
+                varTy = cg.globalVars.get(enumName)!
+            }
+            let varStructName = stripPercent(varTy) // struct-typed vars carry the '%' LLVM prefix; cg.structs keys on the bare name
+            var isField = false
+            if cg.structs.contains(varStructName) {
+                let sfields = cg.structs.get(varStructName)!
+                for fi in 0..sfields.len {
+                    if sfields[fi].name == variant {
+                        isField = true
+                    }
+                }
+            }
+            let objExpr = Expr.Ident(enumName.clone(), Option.None)
+            if isField && args.len == 0 {
+                return genFieldAccess(cg, objExpr, variant, locs, sigs)
+            }
+            return genMethodCall(cg, objExpr, variant, args, locs, sigs)
+        }
         var emptyTA: Vec<MiloType> = Vec.new()
         return genCall(cg, rEnum + "$" + variant, args, emptyTA, locs, sigs, "")
     }

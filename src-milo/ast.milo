@@ -56,6 +56,10 @@ pub struct Param {
 pub struct StructField {
     name: string,
     ty: MiloType,
+    // Only @derive(Json) reads this (the @json("wire_name") rename) — everything
+    // else that can attach to a field (e.g. @iter in std/set.milo) is still
+    // parsed-and-dropped at the call site.
+    attributes: Vec<Attribute>,
 }
 
 pub struct TypeParam {
@@ -384,8 +388,12 @@ impl Clone for Param {
 
 impl Clone for StructField {
     fn clone(self: &Self): Self {
+        var attributes: Vec<Attribute> = Vec.new()
+        for i in 0..self.attributes.len {
+            attributes.push(self.attributes[i].clone())
+        }
         return StructField {
-            name: self.name.clone(), ty: self.ty.clone()
+            name: self.name.clone(), ty: self.ty.clone(), attributes: attributes
         }
     }
 }

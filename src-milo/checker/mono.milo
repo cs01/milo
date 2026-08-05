@@ -1,7 +1,7 @@
 // Monomorphization — instantiate generic functions, structs, enums with concrete types
 from "src-milo/ast.milo" import {
     Function, Stmt, Expr, MiloType, StructDecl, EnumDecl, EnumVariant,
-    Param, StructField, TypeParam, Span, StructLitField, MatchArm, Pattern, ImplDecl,
+    Param, StructField, TypeParam, Span, StructLitField, MatchArm, Pattern, ImplDecl, Attribute,
 }
 from "src-milo/checker/traits.milo" import {
     registerImpl
@@ -14,6 +14,9 @@ from "src-milo/checker/state.milo" import {
     Checker, FnSig, FnParam, StructInfo, CkStructField,
     EnumInfo, VariantInfo, error, normalizeEnumNames,
     GenericFnInfo, GenericStructInfo, GenericEnumInfo, StructInst,
+}
+from "src-milo/checker/derive_json.milo" import {
+    deriveJson
 }
 
 pub fn cloneTypeArgs(v: &Vec<TypeKind>): Vec<TypeKind> {
@@ -672,24 +675,50 @@ pub fn monomorphizeStruct(ck: &mut Checker, baseName: &string, typeArgs: &Vec<Ty
     // Create monomorphized StructDecl
     var monoFields: Vec<StructField> = Vec.new()
     for si in 0..generic.decl.fields.len {
+        var fieldAttrs: Vec<Attribute> = Vec.new()
+        for ai in 0..generic.decl.fields[si].attributes.len {
+            fieldAttrs.push(generic.decl.fields[si].attributes[ai].clone())
+        }
         monoFields.push(StructField {
             name: generic.decl.fields[si].name.clone(),
             ty: substituteMiloType(generic.decl.fields[si].ty, generic.typeParams, typeArgs),
+            attributes: fieldAttrs,
         }
         )
     }
-    ck.monomorphizedStructs.push(StructDecl {
+    let monoDecl = StructDecl {
         name: mangled.clone(),
         typeParams: Vec.new(),
         fields: monoFields,
         attributes: Vec.new(),
     }
-    )
+    ck.monomorphizedStructs.push(monoDecl.clone())
 
     ck.structInsts.push(StructInst {
         base: baseName.clone(), mangled: mangled.clone(), args: cloneTypeArgs(typeArgs)
     }
     )
+
+    // @derive(Json) on a generic struct has to be resynthesized per
+    // monomorphization (Box<T> -> Box_i64): the derive body is field-by-field
+    // Milo source keyed to concrete types, and processDerives skips generic
+    // decls entirely (it runs before any instantiation exists to derive for).
+    for gdi in 0..generic.decl.attributes.len {
+        if generic.decl.attributes[gdi].name == "derive" {
+            for gdk in 0..generic.decl.attributes[gdi].args.len {
+                if generic.decl.attributes[gdi].args[gdk] == "Json" {
+                    ck.jsonCapableStructs.insert(mangled.clone(), true)
+                    match deriveJson(ck, monoDecl) {
+                        Option.Some(decl) => {
+                            registerImpl(ck, decl)
+                        }
+                        Option.None => {
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     // Instantiate any parked generic impls for this type
     var gii: i64 = 0

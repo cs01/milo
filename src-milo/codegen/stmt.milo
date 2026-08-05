@@ -726,12 +726,69 @@ pub fn genIfLet(cg: &mut Cgen, pattern: &Pattern, subject: &Expr, thenBody: &Vec
     return false
 }
 
+// Match-expression codegen result: a value-producing match (Expr.MatchExpr)
+// needs the arm's Val alongside the usual "did this block terminate" bool;
+// statement-mode match (Stmt.MatchStmt, wantValue=false) only ever reads
+// `.terminated` and leaves `.val` at its zero value.
+pub struct MatchGen {
+    terminated: bool,
+    val: Val,
+}
+
+// Runs one arm's body. In value mode (wantValue) the LAST statement supplies
+// the arm's value: a bare ExprStmt is evaluated for its Val instead of run as
+// a statement (the checker guarantees the only other legal tail is a
+// diverging return/break/continue, which runs as an ordinary statement and
+// contributes no value — never silently coerced to a zero/void Val).
+pub fn genArmBody(cg: &mut Cgen, body: &Vec<Heap<Stmt>>, locs: &mut Vec<Local>, sigs: &Vec<CgFnSig>, retTy: &string, wantValue: bool, hintTy: string): MatchGen {
+    var terminated = false
+    var produced = false
+    var val = Val {
+        v: "0", ty: "void"
+    }
+    var i: i64 = 0
+    while i < body.len {
+        let isLast = i == body.len - 1
+        if wantValue && isLast {
+            match *body[i] {
+                Stmt.ExprStmt(e, espan) => {
+                    val = genExpr(cg, *e, locs, sigs, hintTy.clone())
+                    produced = true
+                }
+                _ => {
+                    if genStmt(cg, *body[i], locs, sigs, retTy) {
+                        terminated = true
+                    }
+                }
+            }
+        } else {
+            if genStmt(cg, *body[i], locs, sigs, retTy) {
+                terminated = true
+            }
+        }
+        i = i + 1
+    }
+    if wantValue && !terminated && !produced {
+        // Should be unreachable — the checker rejects an arm whose tail is
+        // neither a value nor a diverging statement. Fail loudly rather than
+        // synthesize a plausible-looking value if that guarantee ever slips.
+        eprint("codegen: match-expression arm produced no value and did not diverge")
+        exit(1)
+    }
+    return MatchGen {
+        terminated: terminated, val: val
+    }
+}
+
 // `match s { "a" => …, _ => … }` on a string subject: a chain of string-eq
 // tests (literals are exclusive so a non-final wildcard is still the default).
-pub fn genStringMatch(cg: &mut Cgen, subjValV: &string, arms: &Vec<MatchArm>, locs: &mut Vec<Local>, sigs: &Vec<CgFnSig>, retTy: &string): bool {
+pub fn genStringMatch(cg: &mut Cgen, subjValV: &string, arms: &Vec<MatchArm>, locs: &mut Vec<Local>, sigs: &Vec<CgFnSig>, retTy: &string, wantValue: bool, hintTy: string): MatchGen {
     let endLbl = nextLabel(cg, "smatch.end")
     var allTerminated = true
     var wildIdx: i64 = -1
+    var phiVals: Vec<string> = Vec.new()
+    var phiPreds: Vec<string> = Vec.new()
+    var resultTy = hintTy.clone()
     for ai in 0..arms.len {
         match arms[ai].pattern {
             Pattern.LiteralPattern(val, kind, span) => {
@@ -740,18 +797,20 @@ pub fn genStringMatch(cg: &mut Cgen, subjValV: &string, arms: &Vec<MatchArm>, lo
                 let armLbl = nextLabel(cg, "smatch.arm")
                 let nextLbl = nextLabel(cg, "smatch.next")
                 emit(cg, "  br i1 " + eq.v + ", label %" + armLbl + ", label %" + nextLbl + "\n")
-                emit(cg, armLbl + ":\n")
-                var armTerm = false
-                for si in 0..arms[ai].body.len {
-                    if genStmt(cg, *arms[ai].body[si], locs, sigs, retTy) {
-                        armTerm = true
+                emitLabel(cg, armLbl)
+                let res = genArmBody(cg, arms[ai].body, locs, sigs, retTy, wantValue, resultTy.clone())
+                if !res.terminated {
+                    if wantValue {
+                        if resultTy.len == 0 {
+                            resultTy = res.val.ty.clone()
+                        }
+                        phiVals.push(res.val.v.clone())
+                        phiPreds.push(cg.curBlock.clone())
                     }
-                }
-                if !armTerm {
                     emit(cg, "  br label %" + endLbl + "\n")
                     allTerminated = false
                 }
-                emit(cg, nextLbl + ":\n")
+                emitLabel(cg, nextLbl)
             }
             _ => {
                 wildIdx = ai
@@ -759,13 +818,15 @@ pub fn genStringMatch(cg: &mut Cgen, subjValV: &string, arms: &Vec<MatchArm>, lo
         }
     }
     if wildIdx >= 0 {
-        var armTerm = false
-        for si in 0..arms[wildIdx].body.len {
-            if genStmt(cg, *arms[wildIdx].body[si], locs, sigs, retTy) {
-                armTerm = true
+        let res = genArmBody(cg, arms[wildIdx].body, locs, sigs, retTy, wantValue, resultTy.clone())
+        if !res.terminated {
+            if wantValue {
+                if resultTy.len == 0 {
+                    resultTy = res.val.ty.clone()
+                }
+                phiVals.push(res.val.v.clone())
+                phiPreds.push(cg.curBlock.clone())
             }
-        }
-        if !armTerm {
             emit(cg, "  br label %" + endLbl + "\n")
             allTerminated = false
         }
@@ -773,11 +834,46 @@ pub fn genStringMatch(cg: &mut Cgen, subjValV: &string, arms: &Vec<MatchArm>, lo
         // exhaustive per the checker → no-match is unreachable (see genIntMatch)
         emit(cg, "  unreachable\n")
     }
-    emit(cg, endLbl + ":\n")
+    emitLabel(cg, endLbl)
     if allTerminated {
         emit(cg, "  unreachable\n")
+        return MatchGen {
+            terminated: true, val: Val {
+                v: "0", ty: "void"
+            }
+        }
     }
-    return allTerminated
+    return finishMatchPhi(cg, wantValue, phiVals, phiPreds, resultTy)
+}
+
+// Shared phi emission for the value-producing forms of genStringMatch/genIntMatch/
+// genMatch: one incoming pair per arm that reached the join block (a diverging arm
+// never does, so it never appears here — same rule as if-expression branches).
+pub fn finishMatchPhi(cg: &mut Cgen, wantValue: bool, phiVals: &Vec<string>, phiPreds: &Vec<string>, resultTy: &string): MatchGen {
+    if !wantValue || phiVals.len == 0 {
+        return MatchGen {
+            terminated: false, val: Val {
+                v: "0", ty: "void"
+            }
+        }
+    }
+    let r = nextTemp(cg)
+    let ll = llType(resultTy)
+    var parts = ""
+    var pi: i64 = 0
+    while pi < phiVals.len {
+        parts = parts + "[" + phiVals[pi] + ", %" + phiPreds[pi] + "]"
+        if pi < phiVals.len - 1 {
+            parts = parts + ", "
+        }
+        pi = pi + 1
+    }
+    emit(cg, "  " + r + " = phi " + ll + " " + parts + "\n")
+    return MatchGen {
+        terminated: false, val: Val {
+            v: r, ty: resultTy.clone()
+        }
+    }
 }
 
 // The integer constant for a literal pattern (char code / int / bool → 0/1).
@@ -797,10 +893,13 @@ pub fn litIntConst(val: &string, kind: &LiteralKind): string {
 
 // match on an integer/char/bool subject: compare the value against each literal
 // pattern (a switch would also work, but a compare chain handles any width).
-pub fn genIntMatch(cg: &mut Cgen, subjV: &string, subjLl: &string, arms: &Vec<MatchArm>, locs: &mut Vec<Local>, sigs: &Vec<CgFnSig>, retTy: &string): bool {
+pub fn genIntMatch(cg: &mut Cgen, subjV: &string, subjLl: &string, arms: &Vec<MatchArm>, locs: &mut Vec<Local>, sigs: &Vec<CgFnSig>, retTy: &string, wantValue: bool, hintTy: string): MatchGen {
     let endLbl = nextLabel(cg, "imatch.end")
     var allTerminated = true
     var wildIdx: i64 = -1
+    var phiVals: Vec<string> = Vec.new()
+    var phiPreds: Vec<string> = Vec.new()
+    var resultTy = hintTy.clone()
     for ai in 0..arms.len {
         match arms[ai].pattern {
             Pattern.LiteralPattern(val, kind, span) => {
@@ -809,18 +908,20 @@ pub fn genIntMatch(cg: &mut Cgen, subjV: &string, subjLl: &string, arms: &Vec<Ma
                 let armLbl = nextLabel(cg, "imatch.arm")
                 let nextLbl = nextLabel(cg, "imatch.next")
                 emit(cg, "  br i1 " + eq + ", label %" + armLbl + ", label %" + nextLbl + "\n")
-                emit(cg, armLbl + ":\n")
-                var armTerm = false
-                for si in 0..arms[ai].body.len {
-                    if genStmt(cg, *arms[ai].body[si], locs, sigs, retTy) {
-                        armTerm = true
+                emitLabel(cg, armLbl)
+                let res = genArmBody(cg, arms[ai].body, locs, sigs, retTy, wantValue, resultTy.clone())
+                if !res.terminated {
+                    if wantValue {
+                        if resultTy.len == 0 {
+                            resultTy = res.val.ty.clone()
+                        }
+                        phiVals.push(res.val.v.clone())
+                        phiPreds.push(cg.curBlock.clone())
                     }
-                }
-                if !armTerm {
                     emit(cg, "  br label %" + endLbl + "\n")
                     allTerminated = false
                 }
-                emit(cg, nextLbl + ":\n")
+                emitLabel(cg, nextLbl)
             }
             _ => {
                 wildIdx = ai
@@ -828,13 +929,15 @@ pub fn genIntMatch(cg: &mut Cgen, subjV: &string, subjLl: &string, arms: &Vec<Ma
         }
     }
     if wildIdx >= 0 {
-        var armTerm = false
-        for si in 0..arms[wildIdx].body.len {
-            if genStmt(cg, *arms[wildIdx].body[si], locs, sigs, retTy) {
-                armTerm = true
+        let res = genArmBody(cg, arms[wildIdx].body, locs, sigs, retTy, wantValue, resultTy.clone())
+        if !res.terminated {
+            if wantValue {
+                if resultTy.len == 0 {
+                    resultTy = res.val.ty.clone()
+                }
+                phiVals.push(res.val.v.clone())
+                phiPreds.push(cg.curBlock.clone())
             }
-        }
-        if !armTerm {
             emit(cg, "  br label %" + endLbl + "\n")
             allTerminated = false
         }
@@ -844,26 +947,31 @@ pub fn genIntMatch(cg: &mut Cgen, subjV: &string, subjLl: &string, arms: &Vec<Ma
         // would hit the function's default `ret <T> 0` (invalid for aggregate returns).
         emit(cg, "  unreachable\n")
     }
-    emit(cg, endLbl + ":\n")
+    emitLabel(cg, endLbl)
     if allTerminated {
         emit(cg, "  unreachable\n")
+        return MatchGen {
+            terminated: true, val: Val {
+                v: "0", ty: "void"
+            }
+        }
     }
-    return allTerminated
+    return finishMatchPhi(cg, wantValue, phiVals, phiPreds, resultTy)
 }
 
-pub fn genMatch(cg: &mut Cgen, subject: &Expr, arms: &Vec<MatchArm>, locs: &mut Vec<Local>, sigs: &Vec<CgFnSig>, retTy: &string): bool {
+pub fn genMatch(cg: &mut Cgen, subject: &Expr, arms: &Vec<MatchArm>, locs: &mut Vec<Local>, sigs: &Vec<CgFnSig>, retTy: &string, wantValue: bool, hintTy: string): MatchGen {
     let subjLv = genLvalue(cg, subject, locs, sigs)
     if llType(subjLv.ty) == "%String" {
         let sv = nextTemp(cg)
         emit(cg, "  " + sv + " = load %String, ptr " + subjLv.v + "\n")
-        return genStringMatch(cg, sv, arms, locs, sigs, retTy)
+        return genStringMatch(cg, sv, arms, locs, sigs, retTy, wantValue, hintTy)
     }
     // integer/char/bool subject → compare against literal patterns
     let subjLl0 = llType(subjLv.ty)
     if subjLl0.len > 0 && subjLl0[0] == 105 {
         let iv = nextTemp(cg)
         emit(cg, "  " + iv + " = load " + subjLl0 + ", ptr " + subjLv.v + "\n")
-        return genIntMatch(cg, iv, subjLl0, arms, locs, sigs, retTy)
+        return genIntMatch(cg, iv, subjLl0, arms, locs, sigs, retTy, wantValue, hintTy)
     }
     let rawName = stripPercent(subjLv.ty)
     let structTy = "%" + rawName
@@ -901,8 +1009,11 @@ pub fn genMatch(cg: &mut Cgen, subject: &Expr, arms: &Vec<MatchArm>, locs: &mut 
     }
     emit(cg, "  switch i32 " + tag + ", label %" + defaultLbl + " [" + switchCases + "]\n")
     var allTerminated = true
+    var phiVals: Vec<string> = Vec.new()
+    var phiPreds: Vec<string> = Vec.new()
+    var resultTy = hintTy.clone()
     for ai in 0..arms.len {
-        emit(cg, armLabels[ai] + ":\n")
+        emitLabel(cg, armLabels[ai])
         let locsPreLen = locs.len
         // Extract payload bindings
         match arms[ai].pattern {
@@ -933,17 +1044,19 @@ pub fn genMatch(cg: &mut Cgen, subject: &Expr, arms: &Vec<MatchArm>, locs: &mut 
             _ => {
             }
         }
-        var armTerm = false
-        for si in 0..arms[ai].body.len {
-            if genStmt(cg, *arms[ai].body[si], locs, sigs, retTy) {
-                armTerm = true
-            }
-        }
+        let res = genArmBody(cg, arms[ai].body, locs, sigs, retTy, wantValue, resultTy.clone())
         // Pop bindings
         while locs.len > locsPreLen {
             let _ = locs.pop()
         }
-        if !armTerm {
+        if !res.terminated {
+            if wantValue {
+                if resultTy.len == 0 {
+                    resultTy = res.val.ty.clone()
+                }
+                phiVals.push(res.val.v.clone())
+                phiPreds.push(cg.curBlock.clone())
+            }
             emit(cg, "  br label %" + endLbl + "\n")
             allTerminated = false
         }
@@ -951,14 +1064,19 @@ pub fn genMatch(cg: &mut Cgen, subject: &Expr, arms: &Vec<MatchArm>, locs: &mut 
     // Only emit a synthetic unreachable default when there was no wildcard arm
     // (a wildcard arm already serves as the default and emits its own body).
     if emitUnreachableDefault {
-        emit(cg, defaultLbl + ":\n")
+        emitLabel(cg, defaultLbl)
         emit(cg, "  unreachable\n")
     }
-    emit(cg, endLbl + ":\n")
+    emitLabel(cg, endLbl)
     if allTerminated && arms.len > 0 {
         emit(cg, "  unreachable\n")
+        return MatchGen {
+            terminated: true, val: Val {
+                v: "0", ty: "void"
+            }
+        }
     }
-    return allTerminated && arms.len > 0
+    return finishMatchPhi(cg, wantValue, phiVals, phiPreds, resultTy)
 }
 
 // User Drop hooks: a local whose struct type has an `impl Drop` runs
@@ -1105,7 +1223,7 @@ pub fn genStmt(cg: &mut Cgen, s: &Stmt, locs: &mut Vec<Local>, sigs: &Vec<CgFnSi
             return false
         }
         Stmt.MatchStmt(subject, arms, span) => {
-            return genMatch(cg, *subject, arms, locs, sigs, retTy)
+            return genMatch(cg, *subject, arms, locs, sigs, retTy, false, "").terminated
         }
         Stmt.BreakStmt(span) => {
             if cg.curBreakLbl.len > 0 {
@@ -1220,6 +1338,14 @@ pub fn collectIdentsExpr(e: &Expr, out: &mut Vec<string>) {
             collectIdentsExpr(*c, out)
             collectIdentsExpr(*t, out)
             collectIdentsExpr(*f, out)
+        }
+        Expr.MatchExpr(subject, arms, span) => {
+            collectIdentsExpr(*subject, out)
+            for i in 0..arms.len {
+                for j in 0..arms[i].body.len {
+                    collectIdentsStmt(*arms[i].body[j], out)
+                }
+            }
         }
         _ => {
         }

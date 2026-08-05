@@ -6,7 +6,7 @@ from "src-milo/ast.milo" import {
 from "src-milo/checker/types.milo" import {
     TypeKind, typeEq, typeName, typeFromAst, typeFromName,
     tyI32, tyI64, tyU8, tyBool, tyVoid, tyString, tyUnknown,
-    isNumeric, isInteger, isFloat, isCopy, needsDrop,
+    isNumeric, isInteger, isFloat, isCopy, needsDrop, containsUnknown,
 }
 from "src-milo/checker/state.milo" import {
     Checker, VarInfo, FnSig, FnParam, StructInfo, EnumInfo, VariantInfo,
@@ -345,6 +345,130 @@ pub fn checkMatchArm(ck: &mut Checker, arm: &MatchArm, subjType: &TypeKind, fnRe
     }
 
     popScope(ck)
+}
+
+// -- Match expression --
+
+pub struct MatchArmCheck {
+    produced: bool,
+    ty: TypeKind,
+}
+
+// Like checkMatchArm, but the arm's LAST statement is the arm's value rather
+// than an ordinary statement: a bare ExprStmt supplies it, a diverging stmt
+// (return/break/continue) supplies none (the arm never reaches the join), and
+// anything else is a real error — no silent "treat as void" fallback.
+pub fn checkMatchArmValue(ck: &mut Checker, arm: &MatchArm, subjType: &TypeKind, fnRetType: &TypeKind, span: &Option<Span>): MatchArmCheck {
+    pushScope(ck)
+
+    match arm.pattern {
+        Pattern.EnumPattern(enumName, variant, bindings, pspan) => {
+            match subjType {
+                TypeKind.TEnum(name) => {
+                    if ck.enums.contains(name) {
+                        let enumInfo = ck.enums.get(name)!
+                        if enumInfo.variants.contains(variant) {
+                            let variantInfo = enumInfo.variants.get(variant)!
+                            var k: i64 = 0
+                            while k < bindings.len && k < variantInfo.fields.len {
+                                if bindings[k] != "_" {
+                                    declare(ck, bindings[k].clone(), VarInfo {
+                                        ty: variantInfo.fields[k].clone(),
+                                        mutable: false,
+                                        moved: false,
+                                        borrowed: false,
+                                        read: false,
+                                        span: cloneSpan(pspan),
+                                    }
+                                    )
+                                }
+                                k = k + 1
+                            }
+                        } else {
+                            error(ck, "enum '" + name.clone() + "' has no variant '" + variant.clone() + "'", cloneSpan(pspan))
+                        }
+                    }
+                }
+                _ => {
+                    error(ck, "cannot use enum pattern when matching on " + typeName(subjType), cloneSpan(pspan))
+                }
+            }
+        }
+        Pattern.LiteralPattern(value, kind, pspan) => {
+        }
+        Pattern.WildcardPattern(pspan) => {
+        }
+    }
+
+    var result = MatchArmCheck {
+        produced: false, ty: tyUnknown()
+    }
+    var i: i64 = 0
+    while i < arm.body.len {
+        let isLast = i == arm.body.len - 1
+        if isLast {
+            match *arm.body[i] {
+                Stmt.ExprStmt(e, espan) => {
+                    result = MatchArmCheck {
+                        produced: true, ty: checkExpr(ck, *e)
+                    }
+                }
+                _ => {
+                    if stmtTerminates(*arm.body[i]) {
+                        checkStmt(ck, *arm.body[i], fnRetType)
+                    } else {
+                        error(ck, "match-expression arm must end in a value or return/break/continue", cloneSpan(span))
+                        checkStmt(ck, *arm.body[i], fnRetType)
+                    }
+                }
+            }
+        } else {
+            checkStmt(ck, *arm.body[i], fnRetType)
+        }
+        i = i + 1
+    }
+
+    popScope(ck)
+    return result
+}
+
+// match in expression position. Reuses statement-match's per-arm move
+// snapshot/join (an arm that diverges must not poison post-match moves), but
+// additionally unifies each producing arm's value type — same rule as
+// if-expression branches, with the same const-int coercion.
+pub fn checkMatchExpr(ck: &mut Checker, subject: &Expr, arms: &Vec<MatchArm>, fnRetType: &TypeKind, span: &Option<Span>): TypeKind {
+    let subjType = checkExpr(ck, subject)
+
+    let preSnap = snapshotMoves(ck)
+    var armSnaps: Vec<Vec<HashMap<string, bool>>> = Vec.new()
+    var armTerms: Vec<bool> = Vec.new()
+    var resultTy = tyUnknown()
+    var haveResult = false
+    for i in 0..arms.len {
+        restoreMoves(ck, preSnap)
+        let res = checkMatchArmValue(ck, arms[i], subjType, fnRetType, span)
+        armSnaps.push(snapshotMoves(ck))
+        var term = false
+        if arms[i].body.len > 0 {
+            term = stmtTerminates(*arms[i].body[arms[i].body.len - 1])
+        }
+        armTerms.push(term)
+        if res.produced {
+            if !haveResult {
+                resultTy = res.ty
+                haveResult = true
+            } else if !typeEq(resultTy, res.ty) && !containsUnknown(resultTy) && !containsUnknown(res.ty) {
+                error(ck, "match-expression arms disagree: " + typeName(resultTy) + " vs " + typeName(res.ty), cloneSpan(span))
+            }
+        }
+    }
+    restoreMoves(ck, preSnap)
+    for i in 0..armSnaps.len {
+        if !armTerms[i] {
+            orMoves(ck, armSnaps[i])
+        }
+    }
+    return resultTy
 }
 
 // -- If-let statement --

@@ -356,6 +356,16 @@ pub fn substExpr(e: &Expr, tps: &Vec<string>, tas: &Vec<TypeKind>): Expr {
         Expr.IfExpr(cond, thenE, elseE, span) => {
             return Expr.IfExpr(Heap(substExpr(*cond, tps, tas)), Heap(substExpr(*thenE, tps, tas)), Heap(substExpr(*elseE, tps, tas)), cloneSpan(span))
         }
+        Expr.MatchExpr(subject, arms, span) => {
+            var as2: Vec<MatchArm> = Vec.new()
+            for i in 0..arms.len {
+                as2.push(MatchArm {
+                    pattern: arms[i].pattern.clone(), body: substStmts(arms[i].body, tps, tas)
+                }
+                )
+            }
+            return Expr.MatchExpr(Heap(substExpr(*subject, tps, tas)), as2, cloneSpan(span))
+        }
         Expr.IntLit(v, span) => {
             return Expr.IntLit(v, cloneSpan(span))
         }
@@ -711,10 +721,28 @@ pub fn monomorphizeStruct(ck: &mut Checker, baseName: &string, typeArgs: &Vec<Ty
 // Resolve a MiloType to its monomorphized TypeKind, KEEPING user-generic type
 // args (Arena<Node> → TStruct("Arena_Node")) that typeFromAst flattens away.
 pub fn resolveMonoType(ck: &mut Checker, ty: &MiloType): TypeKind {
-    if ty.typeArgs.len > 0 && !ty.isFn && ty.name != "Vec" && ty.name != "Heap" && ty.name != "HashMap" {
+    if ty.typeArgs.len > 0 && !ty.isFn {
         var base = tyUnknown()
         var isGeneric = false
-        if ck.genericEnums.contains(ty.name) {
+        // Vec<T>/Heap<T>/HashMap<K,V> can themselves nest a user-generic struct/enum
+        // in their type args (Vec<Handle<T>> monomorphized to Vec<Handle<i32>>).
+        // These used to be excluded from this whole branch and fall through to
+        // typeFromAst below, which flattens a generic element to its bare name
+        // (TStruct("Handle"), dropping the "i32") — every Vec<UserGeneric<T>>
+        // return type came back one mangling short, so e.g. Arena<T>.handles()'s
+        // `Vec<Handle<T>>` return type-checked as `Vec<Handle>` against the
+        // caller's real `Vec<Handle_i32>`. Route them through the same recursive
+        // resolveMonoType as the enum/struct cases instead.
+        if ty.name == "Vec" && ty.typeArgs.len == 1 {
+            base = TypeKind.TVec(Heap(resolveMonoType(ck, ty.typeArgs[0])))
+            isGeneric = true
+        } else if ty.name == "Heap" && ty.typeArgs.len == 1 {
+            base = TypeKind.THeap(Heap(resolveMonoType(ck, ty.typeArgs[0])))
+            isGeneric = true
+        } else if ty.name == "HashMap" && ty.typeArgs.len == 2 {
+            base = TypeKind.THashMap(Heap(resolveMonoType(ck, ty.typeArgs[0])), Heap(resolveMonoType(ck, ty.typeArgs[1])))
+            isGeneric = true
+        } else if ck.genericEnums.contains(ty.name) {
             var targs: Vec<TypeKind> = Vec.new()
             for i in 0..ty.typeArgs.len {
                 targs.push(resolveMonoType(ck, ty.typeArgs[i]))

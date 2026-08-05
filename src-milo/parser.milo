@@ -753,9 +753,35 @@ pub fn parseIfLet(p: &mut Parser, s: Option<Span>): Stmt {
     return Stmt.IfLetStmt(Heap(pattern), Heap(subject), thenBody, elseBody, s)
 }
 
+// `while let P = subj { body }` loops while subj matches P, rebinding the
+// payload each iteration. Desugars straight to existing statements (no new
+// checker/codegen support needed): `while true { if let P = subj { body }
+// else { break } }`.
+pub fn parseWhileLet(p: &mut Parser, s: Option<Span>): Stmt {
+    expect(p, TokKind.Let)
+    let pattern = parsePattern(p)
+    expect(p, TokKind.Eq)
+    let savedNS = p.noStructLit
+    p.noStructLit = true
+    let subject = parseExpr(p)
+    p.noStructLit = savedNS
+    expect(p, TokKind.LBrace)
+    let thenBody = parseStmts(p)
+    expect(p, TokKind.RBrace)
+    var breakBody: Vec<Heap<Stmt>> = Vec.new()
+    breakBody.push(Heap(Stmt.BreakStmt(cloneSpan(s))))
+    let ifLet = Stmt.IfLetStmt(Heap(pattern), Heap(subject), thenBody, Option.Some(breakBody), cloneSpan(s))
+    var loopBody: Vec<Heap<Stmt>> = Vec.new()
+    loopBody.push(Heap(ifLet))
+    return Stmt.WhileStmt(Heap(Expr.BoolLit(true, cloneSpan(s))), loopBody, s)
+}
+
 pub fn parseWhile(p: &mut Parser): Stmt {
     let s = span(peek(p))
     expect(p, TokKind.While)
+    if at(p, TokKind.Let) {
+        return parseWhileLet(p, s)
+    }
     let savedNS = p.noStructLit
     p.noStructLit = true
     let cond = parseExpr(p)
@@ -1071,10 +1097,20 @@ pub fn parsePattern(p: &mut Parser): Pattern {
             return Pattern.LiteralPattern("-" + numTok.value, litKind, s)
         }
     }
-    // Enum pattern: Name.Variant or Name.Variant(bindings)
-    let enumName = expect(p, TokKind.Ident).value
-    expect(p, TokKind.Dot)
-    let variant = expect(p, TokKind.Ident).value
+    // Enum pattern: Name.Variant or Name.Variant(bindings) — or a BARE variant
+    // name (`Dot`, `Line(n)`) when the enum is clear from the match subject.
+    // The enumName field is never read on this path anyway (checker/codegen both
+    // key variant lookup off the SUBJECT's own type, not the pattern's prefix —
+    // see checkMatchArm/genMatch), so a bare variant needs no placeholder lookup,
+    // only a parser change: no `.` after the first ident means the ident itself
+    // is the variant.
+    let firstIdent = expect(p, TokKind.Ident).value
+    var enumName = ""
+    var variant = firstIdent.clone()
+    if matchTok(p, TokKind.Dot) {
+        enumName = firstIdent
+        variant = expect(p, TokKind.Ident).value
+    }
     var bindings: Vec<string> = Vec.new()
     if matchTok(p, TokKind.LParen) {
         while !at(p, TokKind.RParen) {
@@ -1365,6 +1401,45 @@ pub fn parsePrimary(p: &mut Parser): Expr {
             expect(p, TokKind.RBrace)
         }
         return Expr.IfExpr(Heap(cond), Heap(thenE), Heap(elseE), s)
+    }
+
+    // match expression: each arm yields a value — bare `P => v` (wrapped in a
+    // one-statement ExprStmt body, same shape checker/codegen already handle for
+    // Stmt.MatchStmt) or a braced block `P => { .. v }` whose LAST statement is the
+    // value (an ExprStmt) or a diverging stmt (return/break/continue), which simply
+    // contributes no value — mirrors the statement-match arm-body shape exactly, so
+    // pattern binding, exhaustiveness and move-checking are reused, not reimplemented.
+    if tok.kind == TokKind.Match {
+        advance(p)
+        let savedNoStruct = p.noStructLit
+        p.noStructLit = true
+        let subject = parseExpr(p)
+        p.noStructLit = savedNoStruct
+        expect(p, TokKind.LBrace)
+        var arms: Vec<MatchArm> = Vec.new()
+        while !at(p, TokKind.RBrace) {
+            let pattern = parsePattern(p)
+            expect(p, TokKind.FatArrow)
+            var body: Vec<Heap<Stmt>> = Vec.new()
+            if at(p, TokKind.LBrace) {
+                advance(p)
+                body = parseStmts(p)
+                expect(p, TokKind.RBrace)
+            } else {
+                let es = span(peek(p))
+                let ve = parseExpr(p)
+                body.push(Heap(Stmt.ExprStmt(Heap(ve), es)))
+            }
+            arms.push(MatchArm {
+                pattern: pattern, body: body
+            }
+            )
+            // optional separator between bare arms (`0 => "zero", 1 => "one"`);
+            // braced arms need none, so this is a no-op when absent.
+            matchTok(p, TokKind.Comma)
+        }
+        expect(p, TokKind.RBrace)
+        return Expr.MatchExpr(Heap(subject), arms, s)
     }
 
     if tok.kind == TokKind.Int {

@@ -552,27 +552,59 @@ pub fn isCopyCk(ck: &Checker, t: &TypeKind): bool {
 // (checked separately at the call site — "references cannot be stored in
 // structs" vs this one's "...in a collection").
 pub fn nestedRef(ck: &Checker, t: &TypeKind): bool {
+    let seen: Vec<string> = Vec.new()
+    return nestedRefSeen(ck, t, seen)
+}
+
+fn vecContainsStr(v: &Vec<string>, target: &string): bool {
+    for i in 0..v.len {
+        if v[i] == target {
+            return true
+        }
+    }
+    return false
+}
+
+// `seen` guards a self-referential enum reached through Heap — exactly
+// JsonValue's shape (`Object(HashMap<string, Heap<JsonValue>>)`): Object's
+// field is a HashMap whose VALUE recurses back into JsonValue, and unlike a
+// struct (whose isCopyCk deliberately stops at THeap) this walk has to look
+// INSIDE the Heap, because that is exactly where a smuggled `&T` would hide.
+// Without the guard this recursed until the call stack for `milo-self check`
+// itself segfaulted — a real crash, not a slow pass, so this has to be fixed
+// here rather than papered over with a recursion-depth cap: a depth cap would
+// have to pick an arbitrary cutoff and then either false-negative (silently
+// stop looking, letting a reference-in-storage slip through — the fail-open
+// direction this checker's whole ethos rejects) or false-positive (report an
+// error against a legitimately deep but acyclic type). A cycle in the TYPE
+// GRAPH is decidable exactly, so decide it exactly instead of bounding it.
+fn nestedRefSeen(ck: &Checker, t: &TypeKind, seen: &Vec<string>): bool {
     match t {
         TypeKind.TVec(inner) => {
-            return isRefTy(*inner) || nestedRef(ck, *inner)
+            return isRefTy(*inner) || nestedRefSeen(ck, *inner, seen)
         }
         TypeKind.TArray(inner, size) => {
-            return isRefTy(*inner) || nestedRef(ck, *inner)
+            return isRefTy(*inner) || nestedRefSeen(ck, *inner, seen)
         }
         TypeKind.THeap(inner) => {
-            return isRefTy(*inner) || nestedRef(ck, *inner)
+            return isRefTy(*inner) || nestedRefSeen(ck, *inner, seen)
         }
         TypeKind.THashMap(k, v) => {
-            return isRefTy(*k) || isRefTy(*v) || nestedRef(ck, *k) || nestedRef(ck, *v)
+            return isRefTy(*k) || isRefTy(*v) || nestedRefSeen(ck, *k, seen) || nestedRefSeen(ck, *v, seen)
         }
         TypeKind.TEnum(name) => {
+            if vecContainsStr(seen, name) {
+                return false
+            }
             if !ck.enums.contains(name) {
                 return false
             }
+            var seen2 = seen.clone()
+            seen2.push(name.clone())
             let info = ck.enums.get(name)!
             for vn, vi in info.variants {
                 for i in 0..vi.fields.len {
-                    if isRefTy(vi.fields[i]) || nestedRef(ck, vi.fields[i]) {
+                    if isRefTy(vi.fields[i]) || nestedRefSeen(ck, vi.fields[i], seen2) {
                         return true
                     }
                 }

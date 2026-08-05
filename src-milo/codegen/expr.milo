@@ -4961,9 +4961,21 @@ pub fn disambiguatePass(cg: &Cgen, base: &string, argVals: &Vec<Val>, argPointee
             // arg's pointee type is known, match on the POINTEE so `getVal_i64` and
             // `getVal_string` (both `ptr` params) stay distinguishable.
             if isRef && pi < argPointees.len && argPointees[pi].len > 0 {
-                let want = llType(resolveTyStr(cg, sigs[si].paramTys[pi]))
-                let got = llType(resolveTyStr(cg, argPointees[pi]))
+                let wantSurf = resolveTyStr(cg, sigs[si].paramTys[pi])
+                let gotSurf = resolveTyStr(cg, argPointees[pi])
+                let want = llType(wantSurf)
+                let got = llType(gotSurf)
                 if want != got {
+                    ok = false
+                } else if (isVecTy(wantSurf) || isHashMapTy(wantSurf)) && wantSurf != gotSurf {
+                    // llType alone can't tell `&Vec<i32>` from `&Vec<string>` apart — both
+                    // collapse to the same "%Vec" runtime shape regardless of element type
+                    // (same for %HashMap). Without this, disambiguating `countOf(&Vec<T>)`
+                    // over a `Vec<i32>` arg matched BOTH countOf_i32 and countOf_string,
+                    // went ambiguous (count>1), and fell back to the unmangled base name —
+                    // which was never declared ("use of undefined value '@countOf'").
+                    // Compare the resolved surface types (element types included) to
+                    // break the tie.
                     ok = false
                 }
                 continue

@@ -1,0 +1,317 @@
+// rgignore — .gitignore matcher for rg's directory walk
+//
+// Implements the practical gitignore subset: comments, negation, dir-only
+// patterns, anchoring, and the "last matching rule in the deepest ignore file
+// wins" precedence real git uses.
+
+from "std/fs" import {
+    globMatch, isDir, isFile, readFile, realPath
+}
+from "std/path" import {
+    Path
+}
+
+// How a rule's pattern can be tested. Every rule is correct under `kindGlob`; the
+// other two are shortcuts for the shapes that dominate real ignore files.
+//
+// This matters because the walk tests every directory entry against every rule on the
+// stack — 175k entries against llvm-project's ~50 root rules is 8.75M match calls, and
+// running the general glob engine for all of them is a measurable slice of the walk.
+// Classifying once at parse time turns most of those into a length check plus memcmp.
+pub fn kindExact(): i64 {
+    return 0
+}
+
+// "*suffix": no other metacharacter, so an endsWith answers it.
+pub fn kindSuffix(): i64 {
+    return 1
+}
+
+pub fn kindGlob(): i64 {
+    return 2
+}
+
+fn hasGlobMeta(s: &string): bool {
+    for byte in s {
+        if byte == '*' || byte == '?' || byte == '[' || byte == ']' || byte == '\\' {
+            return true
+        }
+    }
+    return false
+}
+
+fn classify(pattern: &string): i64 {
+    if !hasGlobMeta(pattern) {
+        return kindExact()
+    }
+    if pattern.len > 1 && pattern[0] == '*' {
+        let rest = pattern.substr(1, pattern.len)
+        if !hasGlobMeta(rest) {
+            return kindSuffix()
+        }
+    }
+    return kindGlob()
+}
+
+pub struct IgnoreRule {
+    pattern: string,
+    negate: bool,
+    dirOnly: bool,
+    anchored: bool,
+    kind: i64,
+    // pattern minus its leading "*", for kindSuffix. Precomputed so the hot path does
+    // not allocate a substring per entry per rule.
+    suffix: string,
+}
+
+// The pattern test, specialized by kind. Every branch agrees with `globMatch(pattern,
+// text)` — a disagreement here silently changes which files get searched.
+fn patternMatches(rule: &IgnoreRule, text: &string): bool {
+    if rule.kind == kindExact() {
+        return text == rule.pattern
+    }
+    // A glob "*" never crosses a "/", so endsWith is only equivalent to it when the
+    // text is a bare basename. Anchored rules match against a relative path that can
+    // contain separators, where "/*.log" must not match "a/b/x.log".
+    if rule.kind == kindSuffix() && !rule.anchored {
+        return text.endsWith(rule.suffix)
+    }
+    return globMatch(rule.pattern, text)
+}
+
+pub struct IgnoreSet {
+    // Directory the ignore file lives in, spelled exactly as it appears in the
+    // paths the walker builds (e.g. "." or "./llvm/lib"). Used to make paths
+    // relative before matching.
+    base: string,
+    rules: Vec<IgnoreRule>,
+    hasAnchored: bool,
+}
+
+// One line of a gitignore file, or None for blank/comment lines that produce
+// no rule. `.lines()` already normalizes '\r\n', so there is no separate CR
+// strip here.
+fn parseLine(raw: &string): Option<IgnoreRule> {
+    var line = raw.clone()
+
+    // Trailing spaces are ignored unless escaped with a backslash — stop as
+    // soon as we hit an escaped one instead of trimming through it.
+    while line.len > 0 && line[line.len - 1] == ' ' {
+        if line.len >= 2 && line[line.len - 2] == '\\' {
+            break
+        }
+        line = line.substr(0, line.len - 1)
+    }
+
+    if line.len == 0 {
+        return Option.None
+    }
+    if line[0] == '#' {
+        return Option.None
+    }
+
+    var negate = false
+    if line.startsWith("\\!") {
+        // literal '!' — only the backslash is stripped
+        line = line.substr(1, line.len)
+    } else if line.startsWith("!") {
+        negate = true
+        line = line.substr(1, line.len)
+    }
+    if line.len == 0 {
+        return Option.None
+    }
+
+    var dirOnly = false
+    if line.endsWith("/") {
+        dirOnly = true
+        line = line.substr(0, line.len - 1)
+    }
+
+    var anchored = false
+    if line.startsWith("/") {
+        anchored = true
+        line = line.substr(1, line.len)
+    } else if line.contains("/") {
+        // an embedded (non-trailing) slash anchors the pattern to base, same
+        // as a leading slash — only a bare basename stays unanchored
+        anchored = true
+    }
+    if line.len == 0 {
+        return Option.None
+    }
+
+    let kind = classify(line)
+    var suffix = ""
+    if kind == kindSuffix() {
+        suffix = line.substr(1, line.len)
+    }
+    return Option.Some(IgnoreRule {
+        pattern: line, negate: negate, dirOnly: dirOnly, anchored: anchored, kind: kind, suffix: suffix,
+    }
+    )
+}
+
+fn appendRules(content: &string, rules: &mut Vec<IgnoreRule>): void {
+    for raw in content.lines() {
+        if let Option.Some(rule) = parseLine(raw) {
+            rules.push(rule)
+        }
+    }
+}
+
+// Only an anchored rule needs the entry's path relative to the ignore file, and
+// building that relative path allocates. Most ignore files are all bare basenames, so
+// recording whether any rule wants it lets the common set skip the allocation on every
+// one of the tree's entries.
+fn anyAnchored(rules: &Vec<IgnoreRule>): bool {
+    for rule in rules {
+        if rule.anchored {
+            return true
+        }
+    }
+    return false
+}
+
+// Parse one ignore file's text. `base` is stored on the set verbatim.
+pub fn parseIgnore(content: &string, base: &string): IgnoreSet {
+    var rules: Vec<IgnoreRule> = Vec.new()
+    appendRules(content, rules)
+    let anchored = anyAnchored(rules)
+    return IgnoreSet {
+        base: base.clone(), rules: rules, hasAnchored: anchored
+    }
+}
+
+// Read `<dirPath>/.gitignore` and `<dirPath>/.ignore` (either may be absent) and
+// return their merged rules, .gitignore first. Returns Option.None when neither
+// file exists or both are empty of real rules.
+//
+// `useGit` mirrors ripgrep's --require-git default: a .gitignore outside a git
+// checkout describes nothing git is tracking, so rg does not apply it there. A
+// .ignore file has no such tie and is always honoured.
+pub fn loadIgnoreSet(dirPath: &string, useGit: bool): Option<IgnoreSet> {
+    var rules: Vec<IgnoreRule> = Vec.new()
+
+    if useGit {
+        let gitignorePath = Path.join(dirPath, ".gitignore")
+        if isFile(gitignorePath) {
+            if let Result.Ok(content) = readFile(gitignorePath) {
+                appendRules(content, rules)
+            }
+        }
+    }
+
+    let ignorePath = Path.join(dirPath, ".ignore")
+    if isFile(ignorePath) {
+        if let Result.Ok(content) = readFile(ignorePath) {
+            appendRules(content, rules)
+        }
+    }
+
+    if rules.len == 0 {
+        return Option.None
+    }
+    let anchored = anyAnchored(rules)
+    return Option.Some(IgnoreSet {
+        base: dirPath.clone(), rules: rules, hasAnchored: anchored
+    }
+    )
+}
+
+// `fullPath` relative to `set.base`, with the joining "/" removed — "." + "./a/b"
+// -> "a/b". Falls back to the full path when base isn't actually a prefix (should
+// not happen given how the walker builds paths, but matching nothing beats a
+// panic).
+// Is `path` inside a git checkout? Walks up looking for a `.git` entry, which is a
+// directory in a normal clone and a file in a worktree or submodule.
+pub fn inGitRepo(path: &string): bool {
+    // Relative paths have to be resolved first or the upward walk stops at "." and
+    // never sees the repo root above the current directory.
+    let Result.Ok(start) = realPath(path) else {
+        return false
+    }
+    var dir = start
+    while dir.len > 0 {
+        let dotGit = Path.join(dir, ".git")
+        if isFile(dotGit) || isDir(dotGit) {
+            return true
+        }
+        let parent = Path.dirname(dir)
+        if parent == dir {
+            return false
+        }
+        dir = parent
+    }
+    return false
+}
+
+fn relativePath(base: &string, fullPath: &string): string {
+    if fullPath.startsWith(base) {
+        var rel = fullPath.substr(base.len, fullPath.len)
+        if rel.startsWith("/") {
+            rel = rel.substr(1, rel.len)
+        }
+        return rel
+    }
+    return fullPath.clone()
+}
+
+// Does `rel` name something *inside* the directory `pattern`? git ignores every
+// descendant of an ignored directory, and the walker asks about them one at a time.
+// Spelled out rather than `rel.startsWith(pattern + "/")` because this runs once per
+// rule per directory entry, and that concatenation allocated on every one of them.
+fn underDir(rel: &string, pattern: &string): bool {
+    if rel.len <= pattern.len {
+        return false
+    }
+    if rel[pattern.len] != '/' {
+        return false
+    }
+    return rel.startsWith(pattern)
+}
+
+fn ruleMatches(rule: &IgnoreRule, rel: &string, name: &string, isDir: bool): bool {
+    if rule.dirOnly && !isDir {
+        return false
+    }
+    if rule.anchored {
+        return patternMatches(rule, rel) || underDir(rel, rule.pattern)
+    }
+    return patternMatches(rule, name)
+}
+
+// Last matching rule in this set wins; None means the set had no opinion.
+fn decideForSet(set: &IgnoreSet, fullPath: &string, name: &string, isDir: bool): Option<bool> {
+    // Hoisted out of the rule loop: relativePath allocates, and every rule in the set
+    // wants the same answer. A set with no anchored rule never reads it.
+    var rel = ""
+    if set.hasAnchored {
+        rel = relativePath(set.base, fullPath)
+    }
+    var decision: Option<bool> = Option.None
+    for rule in set.rules {
+        if ruleMatches(rule, rel, name, isDir) {
+            decision = Option.Some(!rule.negate)
+        }
+    }
+    return decision
+}
+
+// Should this entry be skipped? `sets` is the stack of ignore files from the walk
+// root (index 0) down to the current directory (last index). `fullPath` is the
+// entry's path as the walker built it, `name` its basename, `isDir` whether it is
+// a directory.
+pub fn stackIgnores(sets: &Vec<IgnoreSet>, fullPath: &string, name: &string, isDir: bool): bool {
+    // The deepest set with an opinion decides. Walking shallow-to-deep and
+    // overwriting on every match lands on the same result as walking
+    // deep-to-shallow and stopping at the first match, without needing
+    // reverse indexing (which would clone each IgnoreSet).
+    var result = false
+    for set in sets {
+        if let Option.Some(v) = decideForSet(set, fullPath, name, isDir) {
+            result = v
+        }
+    }
+    return result
+}

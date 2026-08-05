@@ -1,43 +1,12 @@
-// Shared helpers for the LSP feature modules (hover, definition). Small and
-// duplicated from main.milo's findStdlibRoot rather than imported from it:
-// main.milo imports src-milo/lsp/server.milo (for the `lsp` subcommand),
-// which imports these feature modules, so importing main.milo back from here
-// would be a cycle.
-from "std/fs" import {
-    pathExists
-}
-from "std/path" import {
-    Path
-}
-from "std/env" import {
-    Env
-}
-
-// MILO_ROOT wins, else walk up from sourceDir looking for std/prelude.milo —
-// mirrors src/resolver.ts and main.milo's own findStdlibRoot exactly.
-pub fn findStdlibRoot(sourceDir: string): string {
-    match Env.get("MILO_ROOT") {
-        Option.Some(root) => {
-            return root
-        }
-        Option.None => {
-        }
-    }
-    var dir = sourceDir.clone()
-    var depth: i64 = 0
-    while depth < 32 {
-        if pathExists(Path.join(dir.clone(), "std/prelude.milo")) {
-            return dir
-        }
-        let parent = Path.dirname(dir.clone())
-        if parent == dir {
-            break
-        }
-        dir = parent
-        depth = depth + 1
-    }
-    return sourceDir.clone()
-}
+// Shared helpers for the LSP feature modules (hover, definition).
+//
+// findStdlibRoot deliberately does NOT live here as a duplicate of
+// main.milo's: Milo compiles every reachable module into one flat namespace,
+// so two `pub fn findStdlibRoot` bodies anywhere in the graph is a hard
+// compile error, not a shadowing warning — hover.milo/definition.milo should
+// import it straight from "src-milo/main.milo" when they need it (the
+// resolver already tolerates import cycles via a visited set, the same way
+// std/os <-> std/runtime does).
 
 // Strip a file:// prefix down to a plain filesystem path. Not full URI
 // decoding (no %XX unescape) — editors send plain paths with no special

@@ -213,7 +213,15 @@ function windowsRun(cmd: string, args: string[], opts: GuardOpts, timeoutMs: num
     const child = spawn(cmd, args, {
       cwd: opts.cwd,
       env: opts.env ?? process.env,
-      stdio: ["ignore", opts.inheritStdio ? "inherit" : "pipe", opts.inheritStdio ? "inherit" : "pipe"],
+      // stdin follows the same inheritStdio switch as stdout/stderr: CLI mode
+      // (guard.ts invoked as `bun scripts/guard.ts -- cmd args`) always sets
+      // it, so a guarded interactive process (e.g. `milo-self lsp`, which
+      // reads JSON-RPC off stdin) gets a real stdin instead of silently
+      // reading EOF forever. Programmatic guardedRun() callers (test
+      // harnesses, selfhost-sweep) don't pass inheritStdio and keep the
+      // original "ignore" — a batch build/run has no business blocking on
+      // stdin, and this must not change their behavior.
+      stdio: [opts.inheritStdio ? "inherit" : "ignore", opts.inheritStdio ? "inherit" : "pipe", opts.inheritStdio ? "inherit" : "pipe"],
     });
     let stdout = "";
     let stderr = "";
@@ -290,7 +298,15 @@ exec "$@"`;
       cwd: opts.cwd,
       env: opts.env ?? process.env,
       detached: true,
-      stdio: ["ignore", opts.inheritStdio ? "inherit" : "pipe", opts.inheritStdio ? "inherit" : "pipe"],
+      // stdin follows the same inheritStdio switch as stdout/stderr: CLI mode
+      // (guard.ts invoked as `bun scripts/guard.ts -- cmd args`) always sets
+      // it, so a guarded interactive process (e.g. `milo-self lsp`, which
+      // reads JSON-RPC off stdin) gets a real stdin instead of silently
+      // reading EOF forever. Programmatic guardedRun() callers (test
+      // harnesses, selfhost-sweep) don't pass inheritStdio and keep the
+      // original "ignore" — a batch build/run has no business blocking on
+      // stdin, and this must not change their behavior.
+      stdio: [opts.inheritStdio ? "inherit" : "ignore", opts.inheritStdio ? "inherit" : "pipe", opts.inheritStdio ? "inherit" : "pipe"],
     });
 
     let stdout = "";

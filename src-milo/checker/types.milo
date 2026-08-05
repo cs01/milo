@@ -54,6 +54,39 @@ pub fn tyUnknown(): TypeKind {
     return TypeKind.TUnknown
 }
 
+// A method may hand back a `&[T]` (unsized array slice) or `&string` view of
+// its own receiver's storage — the documented zero-copy container idiom. Every
+// other reference return stays banned (checked separately: the call site
+// freezes the receiver for exactly this shape, and only a method can promise
+// the view points into `self`).
+pub fn isViewReturnType(t: &TypeKind): bool {
+    match t {
+        TypeKind.TRef(inner, mutable) => {
+            match *inner {
+                TypeKind.TArray(elem, size) => {
+                    match size {
+                        Option.None => {
+                            return true
+                        }
+                        Option.Some(n) => {
+                            return false
+                        }
+                    }
+                }
+                TypeKind.TString => {
+                    return true
+                }
+                _ => {
+                    return false
+                }
+            }
+        }
+        _ => {
+            return false
+        }
+    }
+}
+
 // An unknown ANYWHERE in a type means some upstream inference gave up; treat
 // the whole type as unknown for mismatch purposes (Heap<unknown> vs Heap<Expr>
 // must not error — the top-level tyUnknown() guards miss nested cases).

@@ -6,7 +6,7 @@ from "src-milo/ast.milo" import {
 from "src-milo/checker/types.milo" import {
     TypeKind, typeEq, typeName, typeFromAst, typeFromName,
     tyI32, tyI64, tyU8, tyBool, tyVoid, tyString, tyUnknown,
-    isNumeric, isInteger, isFloat, isCopy, needsDrop, containsUnknown,
+    isNumeric, isInteger, isFloat, isCopy, needsDrop, containsUnknown, isViewReturnType,
 }
 from "src-milo/checker/state.milo" import {
     Checker, VarInfo, FnSig, FnParam, StructInfo, EnumInfo, VariantInfo,
@@ -946,10 +946,123 @@ pub fn checkForIn(ck: &mut Checker, varName: &string, varName2: &Option<string>,
 
 // -- Top-level: check a function body --
 
+// A reference tucked inside a return type's storage (Option<&[T]>, a Vec<&T>
+// return, ...) outlives whatever freeze the call site took for the call
+// itself — nothing marks the OUTER value as borrowed the way a bare `&T`
+// return does. `outer` is the enum's source name for a nicer message
+// ("...inside 'Option'" rather than the mangled "...inside 'Option_i64'").
+fn errorIfNestedRefReturn(ck: &mut Checker, func: &Function, retType: &TypeKind) {
+    match retType {
+        TypeKind.TRef(inner, mutable) => {
+            return
+        }
+        _ => {
+        }
+    }
+    if !nestedRef(ck, retType) {
+        return
+    }
+    var outer = typeName(retType)
+    match retType {
+        TypeKind.TEnum(name) => {
+            if ck.enums.contains(name) {
+                outer = ck.enums.get(name)!.baseName.clone()
+            }
+        }
+        _ => {
+        }
+    }
+    error(ck, "function '" + func.name.clone() + "': cannot return a reference stored inside '" + outer + "'", Option.None)
+}
+
+// A view-returning method (`&[T]`/`&string` receiver getter) may only hand
+// back storage reachable from `self` — the call site freezes the receiver
+// and nothing else, so a view into a method-local or another param would
+// dangle the moment that storage goes away. AST-level walk (not through the
+// type-checked expression path): only needs the raw shape of each `return`.
+fn viewReturnRoot(e: &Expr): Option<string> {
+    match e {
+        Expr.Ident(name, sp) => {
+            return Option.Some(name.clone())
+        }
+        Expr.FieldAccess(obj, field, sp) => {
+            return viewReturnRoot(*obj)
+        }
+        Expr.IndexAccess(obj, idx, sp) => {
+            return viewReturnRoot(*obj)
+        }
+        Expr.MethodCall(obj, method, args, sp) => {
+            return viewReturnRoot(*obj)
+        }
+        _ => {
+            return Option.None
+        }
+    }
+}
+
+fn checkViewReturnStmt(ck: &mut Checker, s: &Stmt) {
+    match s {
+        Stmt.Return(v, sp) => {
+            match v {
+                Option.Some(e) => {
+                    match viewReturnRoot(*e) {
+                        Option.Some(root) => {
+                            if root != "self" {
+                                error(ck, "cannot return a view of '" + root.clone() + "'", cloneSpan(sp))
+                            }
+                        }
+                        Option.None => {
+                        }
+                    }
+                }
+                Option.None => {
+                }
+            }
+        }
+        Stmt.IfStmt(cond, thenBody, elseBody, sp) => {
+            for s2 in thenBody {
+                checkViewReturnStmt(ck, *s2)
+            }
+            match elseBody {
+                Option.Some(eb) => {
+                    for s2 in eb {
+                        checkViewReturnStmt(ck, *s2)
+                    }
+                }
+                Option.None => {
+                }
+            }
+        }
+        Stmt.MatchStmt(subj, arms, sp) => {
+            for a in arms {
+                for s2 in a.body {
+                    checkViewReturnStmt(ck, *s2)
+                }
+            }
+        }
+        _ => {
+        }
+    }
+}
+
+fn checkViewReturnProvenance(ck: &mut Checker, func: &Function, retType: &TypeKind) {
+    if !isViewReturnType(retType) {
+        return
+    }
+    if func.params.len == 0 || func.params[0].name != "self" {
+        return
+    }
+    for s in func.body {
+        checkViewReturnStmt(ck, *s)
+    }
+}
+
 pub fn checkFunction(ck: &mut Checker, func: &Function) {
     pushScope(ck)
     let retType = resolveAstType(ck, func.retType)
     ck.currentFnRetType = retType.clone()
+    errorIfNestedRefReturn(ck, func, retType)
+    checkViewReturnProvenance(ck, func, retType)
 
     // Declare parameters
     for param in func.params {

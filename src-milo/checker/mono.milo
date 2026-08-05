@@ -789,10 +789,10 @@ pub fn monomorphizeFn(ck: &mut Checker, baseName: &string, typeArgs: &Vec<TypeKi
 
     // Create concrete function declaration
     var monoParams: Vec<Param> = Vec.new()
-    for i in 0..generic.decl.params.len {
+    for pi in 0..generic.decl.params.len {
         monoParams.push(Param {
-            name: generic.decl.params[i].name.clone(),
-            ty: substituteMiloType(generic.decl.params[i].ty, generic.typeParams, typeArgs),
+            name: generic.decl.params[pi].name.clone(),
+            ty: substituteMiloType(generic.decl.params[pi].ty, generic.typeParams, typeArgs),
         }
         )
     }

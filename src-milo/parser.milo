@@ -136,7 +136,7 @@ pub fn parseType(p: &mut Parser): MiloType {
         var arraySize: Option<i64> = Option.None
         if matchTok(p, TokKind.Semicolon) {
             let sizeTok = expect(p, TokKind.Int)
-            arraySize = Option.Some(sizeTok.value.parseInt())
+            arraySize = sizeTok.value.parseInt()
         }
         expect(p, TokKind.RBracket)
         inner.isArray = true
@@ -969,7 +969,9 @@ pub fn parseUnary(p: &mut Parser): Expr {
     peek(p).kind == TokKind.Amp {
         let tok = advance(p)
         let operand = parseUnary(p)
-        return Expr.UnaryOp(tok.value, Heap(operand), span(tok))
+        // span() borrows tok, so take it before tok.value moves out of the struct.
+        let s = span(tok)
+        return Expr.UnaryOp(tok.value, Heap(operand), s)
     }
     return parsePostfix(p)
 }
@@ -1116,11 +1118,11 @@ pub fn parsePrimary(p: &mut Parser): Expr {
 
     if tok.kind == TokKind.Int {
         advance(p)
-        return Expr.IntLit(tok.value.parseInt(), s)
+        return Expr.IntLit(tok.value.parseInt() ?? 0, s)
     }
     if tok.kind == TokKind.Float {
         advance(p)
-        return Expr.FloatLit(tok.value.parseF64(), s)
+        return Expr.FloatLit(tok.value.parseF64() ?? 0.0, s)
     }
     if tok.kind == TokKind.True {
         advance(p)
@@ -1146,7 +1148,7 @@ pub fn parsePrimary(p: &mut Parser): Expr {
     }
     if tok.kind == TokKind.Char {
         advance(p)
-        return Expr.CharLit(tok.value.parseInt() as i32, s)
+        return Expr.CharLit((tok.value.parseInt() ?? 0) as i32, s)
     }
     if tok.kind == TokKind.Ident {
         advance(p)
@@ -1356,7 +1358,7 @@ pub fn parseArrayLit(p: &mut Parser): Expr {
         if elements.len == 1 && matchTok(p, TokKind.Semicolon) {
             let countTok = expect(p, TokKind.Int)
             expect(p, TokKind.RBracket)
-            return Expr.ArrayRepeat(elements[0], countTok.value.parseInt(), s)
+            return Expr.ArrayRepeat(elements[0], countTok.value.parseInt() ?? 0, s)
         }
         matchTok(p, TokKind.Comma)
     }

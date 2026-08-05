@@ -10,7 +10,7 @@ from "src-milo/codegen/types.milo" import {
     findLocal, hasLocal, genLoad, isVecTy, unwrapVec,
     isHashMapTy, hashMapKeyTy, hashMapValTy, hmEntryTy,
     lookupFieldIndex, lookupFieldType, lookupVariantTag, lookupVariantPayload, lookupFnRet,
-    isInlineArrTy, inlineArrElem, addrWasMoved
+    isInlineArrTy, inlineArrElem, addrWasMoved, ensureStringTy
 }
 from "src-milo/codegen/expr.milo" import {
     genExpr, genLvalue, variantStructTy, genOptionWrapIfNeeded, genInterfaceCoerceIfNeeded, genOwnedArg
@@ -19,7 +19,7 @@ from "src-milo/codegen/drops.milo" import {
     emitDropValue, cgNeedsDrop
 }
 from "src-milo/codegen/strings.milo" import {
-    genStringAppendInPlace, genStringEq, genStringLit
+    genStringAppendInPlace, genStringEq, genStringLit, emitStringLit, ensureStrFind
 }
 
 // -- Assignment --
@@ -326,6 +326,229 @@ pub fn genForInHashMap(cg: &mut Cgen, varName: &string, varName2: &Option<string
     }
 }
 
+// `for line in text.lines()` / `for f in text.splitView(sep)`. Each iteration stores
+// a non-owning %String (cap 0, so drop glue skips it) pointing straight into the
+// receiver's own buffer — the checker has frozen it for the whole loop (checked in
+// checker/stmt.milo checkStringViewForIn, though this codegen doesn't itself enforce
+// that; there is no freeze/unfreeze mechanism in this checker yet, so a program that
+// mutates the receiver mid-loop is not rejected the way the TS oracle rejects it).
+// Reuses the caller's (genForIn's) own labels — this is a full self-contained loop
+// body, like the channel-drain and iterator-protocol branches above, because its
+// step is "jump to the next found separator", not a plain index +1.
+pub fn genForStrView(cg: &mut Cgen, varName: &string, varName2: &Option<string>, recvExpr: &Expr, mode: &string, sepArgs: &Vec<Heap<Expr>>, body: &Vec<Heap<Stmt>>, locs: &mut Vec<Local>, sigs: &Vec<CgFnSig>, retTy: &string, condLbl: &string, bodyLbl: &string, stepLbl: &string, endLbl: &string) {
+    ensureStringTy(cg)
+    let isSplit = mode == "splitView"
+
+    let srcVal = genExpr(cg, recvExpr, locs, sigs, "")
+    let dataP = nextTemp(cg)
+    emit(cg, "  " + dataP + " = extractvalue %String " + srcVal.v + ", 0\n")
+    let lenV = nextTemp(cg)
+    emit(cg, "  " + lenV + " = extractvalue %String " + srcVal.v + ", 1\n")
+
+    // the separator: an explicit argument for splitView, a literal newline for lines
+    var sepPtr = ""
+    var sepLen = "1"
+    if isSplit {
+        let sepVal = genExpr(cg, *sepArgs[0], locs, sigs, "")
+        let sp = nextTemp(cg)
+        emit(cg, "  " + sp + " = extractvalue %String " + sepVal.v + ", 0\n")
+        sepPtr = sp
+        let sl = nextTemp(cg)
+        emit(cg, "  " + sl + " = extractvalue %String " + sepVal.v + ", 1\n")
+        sepLen = sl
+    } else {
+        let nlLabel = emitStringLit(cg, "\n")
+        let sp = nextTemp(cg)
+        emit(cg, "  " + sp + " = getelementptr [2 x i8], ptr " + nlLabel + ", i32 0, i32 0\n")
+        sepPtr = sp
+        sepLen = "1"
+    }
+    ensureStrFind(cg)
+
+    let posAddr = nextTemp(cg)
+    emit(cg, "  " + posAddr + " = alloca i64\n")
+    emit(cg, "  store i64 0, ptr " + posAddr + "\n")
+    let nextAddr = nextTemp(cg)
+    emit(cg, "  " + nextAddr + " = alloca i64\n")
+    let viewAddr = nextTemp(cg)
+    emit(cg, "  " + viewAddr + " = alloca %String\n")
+
+    // enumerate form: `for i, line in text.lines()` binds the piece to the second name
+    var idxAddr = ""
+    match varName2 {
+        Option.Some(viewName) => {
+            let ia = nextTemp(cg)
+            emit(cg, "  " + ia + " = alloca i64\n")
+            emit(cg, "  store i64 0, ptr " + ia + "\n")
+            idxAddr = ia
+        }
+        Option.None => {
+        }
+    }
+
+    emit(cg, "  br label %" + condLbl.clone() + "\n")
+    emitLabel(cg, condLbl)
+    let pos = nextTemp(cg)
+    emit(cg, "  " + pos + " = load i64, ptr " + posAddr + "\n")
+    var more = ""
+    if !isSplit {
+        // a trailing newline ends the last line, it does not start an empty one
+        let m = nextTemp(cg)
+        emit(cg, "  " + m + " = icmp slt i64 " + pos + ", " + lenV + "\n")
+        more = m
+    } else {
+        // `pos == len` still yields the piece after a trailing separator ("a," -> "a", "")
+        let inRange = nextTemp(cg)
+        emit(cg, "  " + inRange + " = icmp sle i64 " + pos + ", " + lenV + "\n")
+        // an empty separator splits into single bytes, which run out one step earlier
+        let sepEmpty = nextTemp(cg)
+        emit(cg, "  " + sepEmpty + " = icmp eq i64 " + sepLen + ", 0\n")
+        let emptyDone = nextTemp(cg)
+        emit(cg, "  " + emptyDone + " = icmp sge i64 " + pos + ", " + lenV + "\n")
+        let notEmptyDone = nextTemp(cg)
+        emit(cg, "  " + notEmptyDone + " = xor i1 " + emptyDone + ", true\n")
+        let okEmpty = nextTemp(cg)
+        emit(cg, "  " + okEmpty + " = select i1 " + sepEmpty + ", i1 " + notEmptyDone + ", i1 true\n")
+        let m = nextTemp(cg)
+        emit(cg, "  " + m + " = and i1 " + inRange + ", " + okEmpty + "\n")
+        more = m
+    }
+    emit(cg, "  br i1 " + more + ", label %" + bodyLbl.clone() + ", label %" + endLbl.clone() + "\n")
+
+    emitLabel(cg, bodyLbl)
+    let found = nextTemp(cg)
+    emit(cg, "  " + found + " = call i64 @milo.strfind(ptr " + dataP + ", i64 " + lenV + ", ptr " + sepPtr + ", i64 " + sepLen + ", i64 " + pos + ")\n")
+    var sepIdx = found.clone()
+    if isSplit {
+        // an empty needle matches at `pos` and would never advance; treat the next byte
+        // boundary as the separator instead, which is what strSplit("") yields
+        let sepEmpty2 = nextTemp(cg)
+        emit(cg, "  " + sepEmpty2 + " = icmp eq i64 " + sepLen + ", 0\n")
+        let posPlus1 = nextTemp(cg)
+        emit(cg, "  " + posPlus1 + " = add i64 " + pos + ", 1\n")
+        let chosen = nextTemp(cg)
+        emit(cg, "  " + chosen + " = select i1 " + sepEmpty2 + ", i64 " + posPlus1 + ", i64 " + found + "\n")
+        sepIdx = chosen
+    }
+    let hasSep = nextTemp(cg)
+    emit(cg, "  " + hasSep + " = icmp sge i64 " + sepIdx + ", 0\n")
+    let pieceEnd = nextTemp(cg)
+    emit(cg, "  " + pieceEnd + " = select i1 " + hasSep + ", i64 " + sepIdx + ", i64 " + lenV + "\n")
+
+    var viewEnd = pieceEnd.clone()
+    if !isSplit {
+        // CRLF: the '\r' belongs to the line ending, not to the line
+        let nonEmpty = nextTemp(cg)
+        emit(cg, "  " + nonEmpty + " = icmp sgt i64 " + pieceEnd + ", " + pos + "\n")
+        let prevIdx = nextTemp(cg)
+        emit(cg, "  " + prevIdx + " = sub i64 " + pieceEnd + ", 1\n")
+        // clamped so the load stays inside the buffer when the line is empty
+        let probeIdx = nextTemp(cg)
+        emit(cg, "  " + probeIdx + " = select i1 " + nonEmpty + ", i64 " + prevIdx + ", i64 " + pos + "\n")
+        let probePtr = nextTemp(cg)
+        emit(cg, "  " + probePtr + " = getelementptr i8, ptr " + dataP + ", i64 " + probeIdx + "\n")
+        let probe = nextTemp(cg)
+        emit(cg, "  " + probe + " = load i8, ptr " + probePtr + "\n")
+        let isCR = nextTemp(cg)
+        emit(cg, "  " + isCR + " = icmp eq i8 " + probe + ", 13\n")
+        let strip = nextTemp(cg)
+        emit(cg, "  " + strip + " = and i1 " + nonEmpty + ", " + isCR + "\n")
+        let stripped = nextTemp(cg)
+        emit(cg, "  " + stripped + " = select i1 " + strip + ", i64 " + prevIdx + ", i64 " + pieceEnd + "\n")
+        viewEnd = stripped
+    }
+
+    // A real zero-copy view (bare pointer into `data`, no NUL at its own end) would
+    // match the TS oracle exactly, but this codegen's `print` always emits a plain
+    // libc "%s" for a %String argument (codegen/expr.milo genCall) — printf then
+    // reads past the view's end to the SOURCE buffer's own terminator, printing every
+    // remaining line instead of just this piece. Until print is made length-aware,
+    // each piece has to be its own NUL-terminated copy, same as genStringSlice.
+    // cap=0 (not sz): nothing takes ownership of a for-in loop var beyond the body,
+    // and for-in doesn't scope-drop its locals yet (a separate, pre-existing gap —
+    // see genForIn) — so this leaks per iteration either way. cap=0 at least keeps
+    // it from ever being double-freed if that gap is closed later.
+    ensureMalloc(cg)
+    ensureMemcpy(cg)
+    let viewLen = nextTemp(cg)
+    emit(cg, "  " + viewLen + " = sub i64 " + viewEnd + ", " + pos + "\n")
+    let sz = nextTemp(cg)
+    emit(cg, "  " + sz + " = add i64 " + viewLen + ", 1\n")
+    let buf = nextTemp(cg)
+    emit(cg, "  " + buf + " = call ptr @malloc(i64 " + sz + ")\n")
+    let srcP = nextTemp(cg)
+    emit(cg, "  " + srcP + " = getelementptr i8, ptr " + dataP + ", i64 " + pos + "\n")
+    emit(cg, "  call ptr @memcpy(ptr " + buf + ", ptr " + srcP + ", i64 " + viewLen + ")\n")
+    let np = nextTemp(cg)
+    emit(cg, "  " + np + " = getelementptr i8, ptr " + buf + ", i64 " + viewLen + "\n")
+    emit(cg, "  store i8 0, ptr " + np + "\n")
+    let v0 = nextTemp(cg)
+    emit(cg, "  " + v0 + " = insertvalue %String undef, ptr " + buf + ", 0\n")
+    let v1 = nextTemp(cg)
+    emit(cg, "  " + v1 + " = insertvalue %String " + v0 + ", i64 " + viewLen + ", 1\n")
+    let v2 = nextTemp(cg)
+    emit(cg, "  " + v2 + " = insertvalue %String " + v1 + ", i64 0, 2\n")
+    emit(cg, "  store %String " + v2 + ", ptr " + viewAddr + "\n")
+
+    // Computed here, where the search result is live, and read back in the increment
+    // block — which `continue` can also reach, from blocks that do not see these values.
+    let afterSep = nextTemp(cg)
+    emit(cg, "  " + afterSep + " = add i64 " + pieceEnd + ", " + sepLen + "\n")
+    let past = nextTemp(cg)
+    emit(cg, "  " + past + " = add i64 " + lenV + ", 1\n")
+    let nextPos = nextTemp(cg)
+    emit(cg, "  " + nextPos + " = select i1 " + hasSep + ", i64 " + afterSep + ", i64 " + past + "\n")
+    emit(cg, "  store i64 " + nextPos + ", ptr " + nextAddr + "\n")
+
+    let locsPreLen = locs.len
+    match varName2 {
+        Option.Some(viewName) => {
+            locs.push(Local {
+                name: varName.clone(), ty: "i64", addr: idxAddr.clone(), isRef: false
+            }
+            )
+            locs.push(Local {
+                name: viewName.clone(), ty: "string", addr: viewAddr.clone(), isRef: false
+            }
+            )
+        }
+        Option.None => {
+            locs.push(Local {
+                name: varName.clone(), ty: "string", addr: viewAddr.clone(), isRef: false
+            }
+            )
+        }
+    }
+
+    var bodyTerm = false
+    for bi in 0..body.len {
+        if genStmt(cg, *body[bi], locs, sigs, retTy) {
+            bodyTerm = true
+        }
+    }
+    while locs.len > locsPreLen {
+        let _ = locs.pop()
+    }
+    if !bodyTerm {
+        emit(cg, "  br label %" + stepLbl.clone() + "\n")
+    }
+
+    emitLabel(cg, stepLbl)
+    let advanced = nextTemp(cg)
+    emit(cg, "  " + advanced + " = load i64, ptr " + nextAddr + "\n")
+    emit(cg, "  store i64 " + advanced + ", ptr " + posAddr + "\n")
+    if idxAddr != "" {
+        let curIdx = nextTemp(cg)
+        emit(cg, "  " + curIdx + " = load i64, ptr " + idxAddr + "\n")
+        let nextIdx = nextTemp(cg)
+        emit(cg, "  " + nextIdx + " = add i64 " + curIdx + ", 1\n")
+        emit(cg, "  store i64 " + nextIdx + ", ptr " + idxAddr + "\n")
+    }
+    emit(cg, "  br label %" + condLbl.clone() + "\n")
+
+    emitLabel(cg, endLbl)
+}
+
 pub fn genForIn(cg: &mut Cgen, varName: &string, varName2: &Option<string>, iterable: &Expr, body: &Vec<Heap<Stmt>>, locs: &mut Vec<Local>, sigs: &Vec<CgFnSig>, retTy: &string) {
     let condLbl = nextLabel(cg, "fcond")
     let bodyLbl = nextLabel(cg, "fbody")
@@ -382,6 +605,24 @@ pub fn genForIn(cg: &mut Cgen, varName: &string, varName2: &Option<string>, iter
             }
         }
         _ => {
+            // `for line in text.lines()` / `for f in text.splitView(sep)` — checked
+            // and typed specially (checker/stmt.milo checkStringViewForIn), so it has
+            // to be recognized here too rather than falling into the generic
+            // genExpr(iterable) below, which would try (and fail) to codegen
+            // "lines"/"splitView" as an ordinary method call.
+            match iterable {
+                Expr.MethodCall(mObj, mMethod, mArgs, mSpan) => {
+                    if mMethod == "lines" || mMethod == "splitView" {
+                        genForStrView(cg, varName, varName2, *mObj, mMethod, mArgs, body, locs, sigs, retTy, condLbl, bodyLbl, stepLbl, endLbl)
+                        cg.curBreakLbl = savedBreak
+                        cg.curContLbl = savedCont
+                        cg.curLoopScopeLen = savedLoopScopeLen
+                        return
+                    }
+                }
+                _ => {
+                }
+            }
             // Vec, string, or HashMap: copy the 3-word header, walk by index.
             let obj = genExpr(cg, iterable, locs, sigs, "")
             let objLl = llType(obj.ty)

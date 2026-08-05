@@ -102,6 +102,9 @@ pub struct Cgen {
     declaredSnprintf: bool,
     declaredFloatFmt: bool,
     declaredFloatFmt32: bool,
+    // @milo.strfind — naive substring search shared by every `lines()`/`splitView()`
+    // for-in loop
+    declaredStrFind: bool,
     // Set when some global has an initializer that is not a compile-time constant, so
     // main knows to call the runtime initializer before any user code runs.
     needsGlobalInit: bool,
@@ -214,6 +217,7 @@ pub fn cgenNew(): Cgen {
         declaredSnprintf: false,
         declaredFloatFmt: false,
         declaredFloatFmt32: false,
+        declaredStrFind: false,
         needsGlobalInit: false,
         declaredVecTy: false,
         declaredRealloc: false,

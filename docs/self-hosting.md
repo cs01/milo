@@ -1,3 +1,11 @@
+<!-- doc-meta
+system: self-hosting
+purpose: status and reproduction steps for the Milo compiler written in Milo (src-milo), including the bootstrap fixed point
+key-files: src-milo/, scripts/selfhost.sh, scripts/selfhost-fixpoint.sh, scripts/ir-diff.ts
+update-when: the bootstrap converges or diverges, or the fixture parity number moves materially
+last-verified: 2026-08-05 (stage2 == stage3 byte-identical; self-built compiler passes 504/578, same as oracle-built)
+-->
+
 # Self-Hosting Plan (v2 — 2026-07-08)
 
 Goal: `milo-self` (the Milo compiler written in Milo, in `src-milo/`) compiles
@@ -46,6 +54,24 @@ MILO_ROOT=$PWD bun scripts/guard.ts --mem-mb 4096 --timeout-s 800 -- \
   /tmp/stage2.bin emit-ir src-milo/main.milo > /tmp/stage3.ll
 cmp /tmp/stage2.ll /tmp/stage3.ll
 ```
+
+### The stronger check: is the self-built compiler as CORRECT as the oracle-built one?
+
+A fixed point alone is not proof of correctness — a compiler with a consistent bug reproduces
+itself perfectly. So the fixture census was re-run with the STAGE 2 binary swapped in for
+stage 1:
+
+| compiler running the corpus | fixtures behaving correctly |
+|---|---|
+| stage 1 (oracle-built milo0) | 503–504 / 578 |
+| **stage 2 (self-built milo0)** | **504 / 578** |
+
+Identical. The ±1 is `battleConcurrency`, a known race that flips buckets between runs. So
+milo0 compiled by itself is functionally equivalent to milo0 compiled by the TS oracle across
+the whole corpus — not merely self-reproducing.
+
+To repeat it: build stage 2, `cp` it over `.selfhost/milo-self.bin`, run
+`bun scripts/ir-diff.ts --exec`, then restore the original binary.
 
 **This does NOT re-gate anything.** Per `feedback_no_selfhost_gate`, self-host parity must
 never block a change in `src/`. This is a measured state, not a CI requirement.

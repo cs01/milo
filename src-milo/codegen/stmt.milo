@@ -672,7 +672,27 @@ pub fn genForIn(cg: &mut Cgen, varName: &string, varName2: &Option<string>, iter
                 }
             }
             // Vec, string, or HashMap: copy the 3-word header, walk by index.
-            let obj = genExpr(cg, iterable, locs, sigs, "")
+            var obj = genExpr(cg, iterable, locs, sigs, "")
+            // `@iter` on a field redirects the loop to that field's runtime value —
+            // re-derived here from the struct's own field table (lookupIterDelegateField),
+            // same as the checker does from its own copy. A newtype over a container
+            // (HashSet over HashMap) then falls straight into the ordinary Vec/HashMap/
+            // string dispatch below, unaware a struct was ever involved.
+            let iterStructName = stripPercent(resolveTyStr(cg, obj.ty))
+            match lookupIterDelegateField(cg, iterStructName) {
+                Option.Some(delegateField) => {
+                    let fidx = lookupFieldIndex(cg, iterStructName, delegateField)
+                    let fty = lookupFieldType(cg, iterStructName, fidx)
+                    let ftyLl = llType(fty)
+                    let fv = nextTemp(cg)
+                    emit(cg, "  " + fv + " = extractvalue %" + iterStructName + " " + obj.v + ", " + fidx.toString() + "\n")
+                    obj = Val {
+                        v: fv, ty: fty
+                    }
+                }
+                Option.None => {
+                }
+            }
             let objLl = llType(obj.ty)
             // `for x in channel` — drain via recv() until it returns Err (closed).
             if obj.ty.len > 8 && obj.ty[0] == 67 && obj.ty[1] == 104 && obj.ty[2] == 97 && obj.ty[3] == 110 && obj.ty[4] == 110 && obj.ty[5] == 101 && obj.ty[6] == 108 && obj.ty[7] == 95 {

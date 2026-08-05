@@ -47,6 +47,9 @@ pub struct CgFnSig {
 pub struct FieldInfo {
     name: string,
     ty: string,
+    // `@iter` on this field: `for x in wrapper` walks this field's runtime value
+    // instead of the wrapper struct's. See lookupIterDelegateField / genForIn.
+    iterDelegate: bool,
 }
 
 // -- Enum variant info --
@@ -674,6 +677,22 @@ pub fn lookupFieldType(cg: &Cgen, structName: &string, idx: i64): string {
         return fields[idx].ty.clone()
     }
     return "i32"
+}
+
+// The `@iter` field name on this struct, if it has one — `for x in wrapper`
+// should walk this field's runtime value instead of the wrapper itself. See
+// genForIn, which extracts the field from the already-evaluated struct Val.
+pub fn lookupIterDelegateField(cg: &Cgen, structName: &string): Option<string> {
+    if !cg.structs.contains(structName) {
+        return Option.None
+    }
+    let fields = cg.structs.get(structName)!
+    for i in 0..fields.len {
+        if fields[i].iterDelegate {
+            return Option.Some(fields[i].name.clone())
+        }
+    }
+    return Option.None
 }
 
 // Does this enum have this variant, and what is its tag? Option, not a -1 sentinel: an

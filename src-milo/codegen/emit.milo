@@ -941,7 +941,7 @@ pub fn genProgram(prog: Program, sourceDir: string): string {
         var slots: Vec<FieldInfo> = Vec.new()
         for mi in 0..prog.traits[ti].methods.len {
             slots.push(FieldInfo {
-                name: prog.traits[ti].methods[mi].name.clone(), ty: resolveTyStr(cg, astTypeStr(prog.traits[ti].methods[mi].retType))
+                name: prog.traits[ti].methods[mi].name.clone(), ty: resolveTyStr(cg, astTypeStr(prog.traits[ti].methods[mi].retType)), iterDelegate: false
             }
             )
         }
@@ -1030,8 +1030,14 @@ pub fn genProgram(prog: Program, sourceDir: string): string {
             } else {
                 tyStr = resolveAstTy(cg, fty)
             }
+            var isIterDelegate = false
+            for ai in 0..s.fields[fi].attributes.len {
+                if s.fields[fi].attributes[ai].name == "iter" {
+                    isIterDelegate = true
+                }
+            }
             fields.push(FieldInfo {
-                name: s.fields[fi].name.clone(), ty: tyStr
+                name: s.fields[fi].name.clone(), ty: tyStr, iterDelegate: isIterDelegate
             }
             )
         }

@@ -45,6 +45,9 @@ pub struct FnParam {
 pub struct CkStructField {
     name: string,
     ty: TypeKind,
+    // `@iter` on this field: `for x in wrapper` walks this field instead of
+    // requiring a `next` method — see checkForIn's iterDelegate substitution.
+    iterDelegate: bool,
 }
 
 pub struct StructInfo {

@@ -258,6 +258,41 @@ That is exactly the number the harness existed to produce, and it cost one after
 instead of the months a port would have spent discovering it. Whatever is decided about
 item 5, it should be decided against 0/578, not against 20,826.
 
+### The number that actually matters: behaviour, not byte-identity
+
+`scripts/ir-diff.ts --exec` links what milo-self emitted and runs it against each fixture's
+`@expect` lines — the same contract `tests/run.test.ts` holds the TS compiler to.
+
+| | |
+|---|---|
+| **behave correctly** | **328 / 578 (57%)** |
+| wrong output | 11 |
+| exits nonzero | 2 |
+| fails to link | 18 |
+| cannot be compiled at all | 219 |
+
+Read that against **0/578 byte-identical IR**. Two independently written backends emitting
+different IR is expected and says nothing; the same program producing different *answers* is
+a bug. By the metric that matters the port is far healthier than byte-identity implied — but
+57% is not close to done either, and this is the number to track from here.
+
+Two real defects fell out of chasing the wrong-output list, both of the same shape:
+
+- **`lookupVariantTag` returned -1 for "no such variant"** — a discriminant that legitimately
+  *is* -1 (`enum Signed: i32 { Neg = -1, … }`) was then indistinguishable from absent, so the
+  constructor compiled to a call to an undefined function. Fixed by making existence an
+  `Option`, not the sign of a number. The first attempt at this added a second `hasVariant`
+  predicate alongside the sentinel — smaller diff, same trap, and it left twelve call sites
+  still asking the wrong question. The type is what makes the mistake unrepresentable.
+- **Integer literals fell back to `0`** when they exceeded i64 (`18446744073709551615`, and
+  the magnitude of i64 MIN). A `?? 0` had turned a compile error into a silent wrong answer.
+  Now accumulated in u64, which covers every literal the language admits; the checker still
+  decides whether the value fits the annotated type.
+
+Both are `feedback_silent_success` in miniature: a sentinel or fallback that reads as valid
+data. Worth noting the second one was introduced *during this work* and caught only because
+the behaviour harness existed — the IR-diff alone reported it as "compiles fine."
+
 ### The work list the harness produced
 
 `scripts/ir-diff.ts` buckets every `self-failed` fixture by cause, so "what does milo0 still

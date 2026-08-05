@@ -160,7 +160,11 @@ async function runEmitted(name: string, ir: string, source: string): Promise<Exe
     const ll = join(dir, `${name}.ll`);
     const bin = join(dir, name);
     writeFileSync(ll, ir);
-    const link = spawnSync("clang", ["-O0", "-w", ll, "-o", bin, "-lm",
+    // A `<name>.c` beside the fixture is a C ABI peer that tests/run.test.ts links in;
+    // omitting it made all nine externStruct* fixtures report as link failures that were
+    // entirely an artifact of this harness, not of milo-self.
+    const peer = join(FIXTURES_DIR, `${name}.c`);
+    const link = spawnSync("clang", ["-O0", "-w", ll, ...(existsSync(peer) ? [peer] : []), "-o", bin, "-lm",
       "-L/opt/homebrew/opt/openssl@3/lib", "-lssl", "-lcrypto",
       "-L/opt/homebrew/opt/sqlite/lib", "-lsqlite3"], { encoding: "utf-8" });
     if (link.status !== 0) return "link-failed";
@@ -253,6 +257,12 @@ if (opts.exec) {
   console.log(`\n  ${tally("match")}/${rows.length} fixtures BEHAVE correctly when compiled by milo-self`);
   const wrong = ran.filter(r => r.exec === "mismatch").map(r => r.name);
   if (wrong.length) console.log(`\n  wrong output: ${wrong.slice(0, 12).join(", ")}${wrong.length > 12 ? ` …+${wrong.length - 12}` : ""}`);
+  // Named too: a link failure is a codegen bug (an emitted reference to a symbol that was
+  // never defined), not a missing feature, so these are usually the cheapest real fixes.
+  const nolink = ran.filter(r => r.exec === "link-failed").map(r => r.name);
+  if (nolink.length) console.log(`\n  link failures: ${nolink.join(", ")}`);
+  const nonzero = ran.filter(r => r.exec === "ran-nonzero").map(r => r.name);
+  if (nonzero.length) console.log(`\n  exited nonzero: ${nonzero.join(", ")}`);
 }
 
 // The actionable output: what milo0 is missing, ranked by how many fixtures it blocks.

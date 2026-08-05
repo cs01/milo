@@ -86,6 +86,65 @@ pub fn tryMove(ck: &mut Checker, expr: &Expr) {
     }
 }
 
+// A `&T` local (T non-Copy) moved into an owned position would shallow-copy
+// the pointee — e.g. a string-view for-in loop variable is second-class and
+// second-class means "lives inside the loop that borrowed it, nowhere else":
+// `for line in s.lines() { return line }` would hand back a `&string` whose
+// receiver's freeze ends the moment the loop (and the function) exits.
+// Separate from tryMove (which also marks the variable moved for later
+// use-after-move checks): checkReturn deliberately never calls tryMove — see
+// its own comment — so this only ever REPORTS, never mutates move state.
+pub fn errorIfMovingBorrowedNonCopy(ck: &mut Checker, expr: &Expr, span: &Option<Span>) {
+    match expr {
+        Expr.Ident(name, sp) => {
+            match lookup(ck, name) {
+                Option.Some(v) => {
+                    match v.ty.clone() {
+                        TypeKind.TRef(inner, mutable) => {
+                            if !isCopyCk(ck, *inner) {
+                                error(ck, "cannot move the borrowed value out of '" + name.clone() + "'", cloneSpan(span))
+                            }
+                        }
+                        _ => {
+                        }
+                    }
+                }
+                Option.None => {
+                }
+            }
+        }
+        Expr.IfExpr(cond, thenE, elseE, sp) => {
+            errorIfMovingBorrowedNonCopy(ck, *thenE, span)
+            errorIfMovingBorrowedNonCopy(ck, *elseE, span)
+        }
+        Expr.MatchExpr(subject, arms, sp) => {
+            for i in 0..arms.len {
+                if arms[i].body.len > 0 {
+                    match *arms[i].body[arms[i].body.len - 1] {
+                        Stmt.ExprStmt(e, espan) => {
+                            errorIfMovingBorrowedNonCopy(ck, *e, span)
+                        }
+                        _ => {
+                        }
+                    }
+                }
+            }
+        }
+        Expr.Unwrap(operand, sp) => {
+            errorIfMovingBorrowedNonCopy(ck, *operand, span)
+        }
+        Expr.Propagate(operand, sp) => {
+            errorIfMovingBorrowedNonCopy(ck, *operand, span)
+        }
+        Expr.DefaultValue(operand, default, sp) => {
+            errorIfMovingBorrowedNonCopy(ck, *operand, span)
+            errorIfMovingBorrowedNonCopy(ck, *default, span)
+        }
+        _ => {
+        }
+    }
+}
+
 pub fn isRootMutable(ck: &Checker, expr: &Expr): bool {
     match expr {
         Expr.Ident(name, span) => {
@@ -3552,6 +3611,15 @@ pub fn checkHashMapMethod(ck: &mut Checker, obj: &Expr, key: &TypeKind, val: &Ty
 // -- String methods --
 
 pub fn checkStringMethod(ck: &mut Checker, obj: &Expr, method: &string, args: &Vec<Heap<Expr>>, span: &Option<Span>): TypeKind {
+    // `lines`/`splitView` are loop-only forms (checkForIn's peekPathType
+    // intercepts them there, before this generic method dispatch ever runs).
+    // Reaching them here means they were used OUTSIDE a `for ... in` — each
+    // piece is a `&string` view into the receiver, with nowhere to live once
+    // the loop that would have frozen the receiver for it doesn't exist.
+    if method == "lines" || method == "splitView" {
+        error(ck, "'" + method.clone() + "' is only valid as the iterable of a 'for ... in' loop over a named string", cloneSpan(span))
+        return tyUnknown()
+    }
     if method == "clone" {
         if args.len != 0 {
             error(ck, "'clone' takes no arguments", cloneSpan(span))

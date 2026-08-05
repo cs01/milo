@@ -265,11 +265,14 @@ item 5, it should be decided against 0/578, not against 20,826.
 
 | | |
 |---|---|
-| **behave correctly** | **350 / 578 (61%)** |
-| wrong output | 5 |
+| **behave correctly** | **352 / 578 (61%)** |
+| wrong output | **3** |
 | exits nonzero | 2 |
 | fails to link | **2** |
 | cannot be compiled at all | 219 |
+
+Mismatches started at 15 and link failures at 19; both buckets are now essentially closed.
+Everything remaining is either the 219 that do not compile, or three named behaviour bugs.
 
 Link failures started at 19 and are down to two. They were the cheapest bucket by a wide
 margin — every one was a concrete codegen defect with a one-line reproduction, not a missing
@@ -331,6 +334,17 @@ Three more of the same species turned up finishing the list:
   `x as u8` was indistinguishable from a signed `i8` downstream and 255 printed as -1. That
   one only became visible *because* the sign-extension fix above was correct — the two bugs
   had been cancelling.
+
+Two structural gaps closed after those:
+
+- **Globals had no runtime initializer at all.** Anything not expressible as an LLVM
+  constant — `pub let TAIL: string = "tail"`, or `FRAG = "head|" + TAIL` — stayed
+  `zeroinitializer` forever and printed empty. There is now an init pass that runs from
+  main before user code, ordered by dependency rather than source position, so a global may
+  reference one declared below it.
+- **An integer literal forced its operand to i64.** `0 - b` on an `i32` computed at i64
+  width, so a wrapping subtraction printed 2147483648 instead of INT_MIN. The literal now
+  takes its width from the other operand.
 
 All are `feedback_silent_success` in miniature: a sentinel or fallback that reads as valid
 data. Worth noting the second one was introduced *during this work* and caught only because

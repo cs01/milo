@@ -3072,6 +3072,142 @@ pub fn checkVecMethod(ck: &mut Checker, obj: &Expr, elem: &TypeKind, method: &st
         }
         return tyVoid()
     }
+    // `v[i]` panics out of range; get/first/last are the total reads. The
+    // element comes back cloned — a reference into the buffer could not
+    // outlive a later push (matches the oracle's Vec.get/first/last).
+    if method == "get" || method == "first" || method == "last" {
+        var want: i64 = 0
+        if method == "get" {
+            want = 1
+        }
+        if args.len != want {
+            error(ck, "'" + method.clone() + "' expects " + want.toString() + " argument(s), got " + args.len.toString(), cloneSpan(span))
+        }
+        if method == "get" && args.len >= 1 {
+            let idxType = checkExpr(ck, *args[0])
+            if !isInteger(idxType) && !typeEq(idxType, tyUnknown()) {
+                error(ck, "'get' index must be an integer, got " + typeName(idxType), cloneSpan(span))
+            }
+        }
+        var readOptArgs: Vec<TypeKind> = Vec.new()
+        readOptArgs.push(elem.clone())
+        let readMangled = monomorphizeEnum(ck, "Option", readOptArgs)
+        return TypeKind.TEnum(readMangled)
+    }
+    // Same comparable-element gate `sort` uses. Milo has no ordering trait, so
+    // rather than invent an ordering for structs, min/max are refused on them
+    // outright (matches the oracle).
+    if method == "min" || method == "max" {
+        if args.len != 0 {
+            error(ck, "'" + method.clone() + "' takes no arguments", cloneSpan(span))
+        }
+        if !isInteger(elem) && !isFloat(elem) && !typeEq(elem, tyString()) && !typeEq(elem, tyBool()) {
+            error(ck, "'" + method.clone() + "' requires a Vec of a comparable type (int, float, string, bool), got Vec<" + typeName(elem) + ">", cloneSpan(span))
+            return tyUnknown()
+        }
+        var mmOptArgs: Vec<TypeKind> = Vec.new()
+        mmOptArgs.push(elem.clone())
+        let mmMangled = monomorphizeEnum(ck, "Option", mmOptArgs)
+        return TypeKind.TEnum(mmMangled)
+    }
+    // `find` answers "which value"; `indexOf`/`position` answer "where".
+    if method == "indexOf" {
+        if args.len != 1 {
+            error(ck, "'indexOf' expects 1 argument", cloneSpan(span))
+            return tyUnknown()
+        }
+        if !isInteger(elem) && !isFloat(elem) && !typeEq(elem, tyString()) && !typeEq(elem, tyBool()) {
+            error(ck, "'indexOf' requires a Vec of a comparable type (int, float, string, bool), got Vec<" + typeName(elem) + ">", cloneSpan(span))
+            return tyUnknown()
+        }
+        let idxArgType = checkExpr(ck, *args[0])
+        if !typeEq(elem, idxArgType) && !typeEq(idxArgType, tyUnknown()) {
+            error(ck, "'indexOf': expected " + typeName(elem) + ", got " + typeName(idxArgType), cloneSpan(span))
+        }
+        var idxOptArgs: Vec<TypeKind> = Vec.new()
+        idxOptArgs.push(TypeKind.TInt(64, true))
+        let idxMangled = monomorphizeEnum(ck, "Option", idxOptArgs)
+        return TypeKind.TEnum(idxMangled)
+    }
+    if method == "position" {
+        if args.len != 1 {
+            error(ck, "'position' expects 1 argument", cloneSpan(span))
+            return tyUnknown()
+        }
+        var posParams: Vec<TypeKind> = Vec.new()
+        posParams.push(TypeKind.TRef(Heap(elem.clone()), false))
+        ck.expectedType = Option.Some(TypeKind.TFn(posParams, Heap(tyBool())))
+        checkExpr(ck, *args[0])
+        ck.expectedType = Option.None
+        var posOptArgs: Vec<TypeKind> = Vec.new()
+        posOptArgs.push(TypeKind.TInt(64, true))
+        let posMangled = monomorphizeEnum(ck, "Option", posOptArgs)
+        return TypeKind.TEnum(posMangled)
+    }
+    // extend moves the other Vec in — its elements are transplanted, not copied,
+    // so there is no clone and no way to touch the source afterwards.
+    if method == "extend" {
+        if args.len != 1 {
+            error(ck, "'extend' expects 1 argument (a Vec to append)", cloneSpan(span))
+            return tyVoid()
+        }
+        if !isRootMutable(ck, obj) {
+            error(ck, "cannot extend an immutable Vec", cloneSpan(span))
+        }
+        let vecOfElem = TypeKind.TVec(Heap(elem.clone()))
+        ck.expectedType = Option.Some(vecOfElem.clone())
+        let otherType = checkExpr(ck, *args[0])
+        ck.expectedType = Option.None
+        match otherType {
+            TypeKind.TRef(inner, mutable) => {
+                error(ck, "'extend' takes ownership of the other Vec", cloneSpan(span))
+            }
+            _ => {
+                if !typeEq(vecOfElem, otherType) && !typeEq(otherType, tyUnknown()) {
+                    error(ck, "'extend': expected Vec<" + typeName(elem) + ">, got " + typeName(otherType), cloneSpan(span))
+                }
+            }
+        }
+        tryMove(ck, *args[0])
+        return tyVoid()
+    }
+    // retain is filter's in-place twin: one pass, no second buffer — the
+    // rejected elements are dropped where they sit rather than copied aside.
+    if method == "retain" {
+        if args.len != 1 {
+            error(ck, "'retain' expects 1 argument (predicate)", cloneSpan(span))
+            return tyVoid()
+        }
+        if !isRootMutable(ck, obj) {
+            error(ck, "cannot retain on an immutable Vec", cloneSpan(span))
+        }
+        var retParams: Vec<TypeKind> = Vec.new()
+        retParams.push(TypeKind.TRef(Heap(elem.clone()), false))
+        ck.expectedType = Option.Some(TypeKind.TFn(retParams, Heap(tyBool())))
+        checkExpr(ck, *args[0])
+        ck.expectedType = Option.None
+        return tyVoid()
+    }
+    if method == "capacity" {
+        if args.len != 0 {
+            error(ck, "'capacity' takes no arguments", cloneSpan(span))
+        }
+        return TypeKind.TInt(64, true)
+    }
+    if method == "reserve" {
+        if args.len != 1 {
+            error(ck, "'reserve' expects 1 argument (extra capacity)", cloneSpan(span))
+            return tyVoid()
+        }
+        if !isRootMutable(ck, obj) {
+            error(ck, "cannot reserve on an immutable Vec", cloneSpan(span))
+        }
+        let nType = checkExpr(ck, *args[0])
+        if !isInteger(nType) && !typeEq(nType, tyUnknown()) {
+            error(ck, "'reserve': expected an integer, got " + typeName(nType), cloneSpan(span))
+        }
+        return tyVoid()
+    }
     error(ck, "no method '" + method.clone() + "' on Vec", cloneSpan(span))
     return tyUnknown()
 }
@@ -3265,14 +3401,22 @@ pub fn checkStringMethod(ck: &mut Checker, obj: &Expr, method: &string, args: &V
         }
         return tyString()
     }
+    // Option<i64>, matching the oracle: -1 "not found" was a sentinel colliding
+    // with real data (nothing distinguishes "found at -1" from "not found" once
+    // the caller only sees a bare int). indexOfFrom already made this move below.
     if method == "indexOf" || method == "lastIndexOf" {
+        var idxOptArgs: Vec<TypeKind> = Vec.new()
+        idxOptArgs.push(TypeKind.TInt(64, true))
+        let idxMangled = monomorphizeEnum(ck, "Option", idxOptArgs)
         if args.len != 1 {
             error(ck, "'" + method.clone() + "' expects 1 argument", cloneSpan(span))
+            return TypeKind.TEnum(idxMangled)
         }
-        if args.len >= 1 {
-            checkExpr(ck, *args[0])
+        let idxArgType = checkExpr(ck, *args[0])
+        if !typeEq(idxArgType, tyString()) && !typeEq(idxArgType, tyUnknown()) {
+            error(ck, "'" + method.clone() + "': expected string, got " + typeName(idxArgType), cloneSpan(span))
         }
-        return TypeKind.TInt(64, true)
+        return TypeKind.TEnum(idxMangled)
     }
     if method == "len" {
         if args.len != 0 {
@@ -3320,8 +3464,23 @@ pub fn checkStringMethod(ck: &mut Checker, obj: &Expr, method: &string, args: &V
         }
         return tyVoid()
     }
-    if method == "toInt" || method == "parseInt" {
+    // toInt is a dead legacy alias (unused anywhere in std/examples/tests) — left
+    // as a bare i64 rather than risking a signature no caller depends on.
+    if method == "toInt" {
         return TypeKind.TInt(64, true)
+    }
+    // Option<i64>, matching the oracle and — critically — matching what CODEGEN
+    // emits: the call goes to std/string.milo's strParseInt, which already
+    // returns Option<i64> (same disagreement class as parseF64/toFloat below —
+    // codegen was right, the checker was declaring a bare i64).
+    if method == "parseInt" {
+        if args.len != 0 {
+            error(ck, "'parseInt' takes no arguments", cloneSpan(span))
+        }
+        var iOptArgs: Vec<TypeKind> = Vec.new()
+        iOptArgs.push(TypeKind.TInt(64, true))
+        let iMangled = monomorphizeEnum(ck, "Option", iOptArgs)
+        return TypeKind.TEnum(iMangled)
     }
     // Option<f64>, matching the oracle and — critically — matching what CODEGEN emits.
     // These disagreed: codegen was returning an Option while the checker said bare f64, so

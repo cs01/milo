@@ -25,11 +25,14 @@ pub struct Parser {
     // decoded-value names (so nested loops can't collide) and to gate the implicit
     // `std/unicode` import — only paid for when the construct is actually used.
     codePointLoopCounter: i64,
+    // Stamped onto every span this parser produces (see span()) — the file a
+    // diagnostic should render against, not necessarily the entry file.
+    filePath: string,
 }
 
-pub fn newParser(tokens: Vec<Token>): Parser {
+pub fn newParser(tokens: Vec<Token>, filePath: string): Parser {
     return Parser {
-        tokens: tokens, pos: 0, noStructLit: false, pending: Vec.new(), codePointLoopCounter: 0
+        tokens: tokens, pos: 0, noStructLit: false, pending: Vec.new(), codePointLoopCounter: 0, filePath: filePath
     }
 }
 
@@ -63,9 +66,9 @@ pub fn advance(p: &mut Parser): Token {
     return tok
 }
 
-pub fn span(tok: &Token): Option<Span> {
+pub fn span(p: &Parser, tok: &Token): Option<Span> {
     return Option.Some(Span {
-        line: tok.line, col: tok.col
+        line: tok.line, col: tok.col, file: p.filePath.clone()
     }
     )
 }
@@ -91,7 +94,7 @@ pub fn expect(p: &mut Parser, kind: TokKind): Token {
     // errors per self-build. Include the token text: a bare line:col names neither the
     // file nor the token, which is most of what made that one hard to place.
     if !(tok.kind == kind) {
-        eprint("parse error: unexpected token '" + tok.value + "' at line " + tok.line.toString() + ":" + tok.col.toString())
+        eprint("parse error: " + p.filePath.clone() + ":" + tok.line.toString() + ":" + tok.col.toString() + ": unexpected token '" + tok.value + "'")
     }
     return tok
 }
@@ -299,14 +302,14 @@ pub fn parseImport(p: &mut Parser): ImportDecl {
         return ImportDecl {
             path: pathTok.value,
             names: Option.Some(names),
-            span: span(tok),
+            span: span(p, tok),
         }
     }
     // bare import "path" — error
     let tok = advance(p)
     let pathTok = expect(p, TokKind.String)
     return ImportDecl {
-        path: pathTok.value, names: Option.None, span: span(tok)
+        path: pathTok.value, names: Option.None, span: span(p, tok)
     }
 }
 
@@ -510,7 +513,7 @@ pub fn parseTraitMethod(p: &mut Parser): TraitMethod {
         params: pl.params,
         retType: retType,
         body: body,
-        span: span(tok),
+        span: span(p, tok),
     }
 }
 
@@ -536,7 +539,7 @@ pub fn parseTraitDecl(p: &mut Parser): TraitDecl {
         typeParams: typeParams,
         supertraits: supertraits,
         methods: methods,
-        span: span(tok),
+        span: span(p, tok),
     }
 }
 
@@ -577,7 +580,7 @@ pub fn parseImplDecl(p: &mut Parser, isUnsafe: bool): ImplDecl {
         typeParams: typeParams,
         methods: methods,
         isUnsafe: isUnsafe,
-        span: span(tok),
+        span: span(p, tok),
     }
 }
 
@@ -628,7 +631,7 @@ pub fn intLiteralBits(digits: &string): i64 {
     return acc as i64
 }
 
-pub fn parseLetElse(p: &mut Parser, s: Option<Span>): Stmt {
+pub fn parseLetElse(p: &mut Parser, s: &Option<Span>): Stmt {
     let enumName = expect(p, TokKind.Ident).value
     expect(p, TokKind.Dot)
     // The variant name is consumed but unused: the desugaring keys off the ENUM
@@ -649,7 +652,7 @@ pub fn parseLetElse(p: &mut Parser, s: Option<Span>): Stmt {
         emptyName = "isErr"
     }
     if enumName != "Option" && enumName != "Result" {
-        eprint("parse error: let-else on '" + enumName.clone() + "' is not supported in milo0 (Option and Result only) at line " + peek(p).line.toString())
+        eprint("parse error: " + p.filePath.clone() + ":" + peek(p).line.toString() + ": let-else on '" + enumName.clone() + "' is not supported in milo0 (Option and Result only)")
     }
 
     // Unique per source position, so two let-else statements in one scope cannot collide.
@@ -667,11 +670,11 @@ pub fn parseLetElse(p: &mut Parser, s: Option<Span>): Stmt {
     p.pending.push(Heap(Stmt.IfStmt(Heap(guard), elseBody, Option.None, cloneSpan(s))))
     let bound = Expr.Unwrap(Heap(Expr.Ident(tmp.clone(), cloneSpan(s))), cloneSpan(s))
     p.pending.push(Heap(Stmt.LetDecl(binding, Option.None, Heap(bound), cloneSpan(s))))
-    return Stmt.LetDecl(tmp, Option.None, Heap(subject), s)
+    return Stmt.LetDecl(tmp, Option.None, Heap(subject), cloneSpan(s))
 }
 
 pub fn parseLet(p: &mut Parser): Stmt {
-    let s = span(peek(p))
+    let s = span(p, peek(p))
     expect(p, TokKind.Let)
     // `let Enum.Variant(x) = ... else { ... }` — a destructuring bind, not a name.
     if at(p, TokKind.Ident) && peekN(p, 1).kind == TokKind.Dot {
@@ -688,7 +691,7 @@ pub fn parseLet(p: &mut Parser): Stmt {
 }
 
 pub fn parseVar(p: &mut Parser): Stmt {
-    let s = span(peek(p))
+    let s = span(p, peek(p))
     expect(p, TokKind.Var)
     let name = expect(p, TokKind.Ident).value
     var ty: Option<MiloType> = Option.None
@@ -701,7 +704,7 @@ pub fn parseVar(p: &mut Parser): Stmt {
 }
 
 pub fn parseReturn(p: &mut Parser): Stmt {
-    let s = span(peek(p))
+    let s = span(p, peek(p))
     expect(p, TokKind.Return)
     if at(p, TokKind.RBrace) {
         return Stmt.Return(Option.None, s)
@@ -710,7 +713,7 @@ pub fn parseReturn(p: &mut Parser): Stmt {
 }
 
 pub fn parseIf(p: &mut Parser): Stmt {
-    let s = span(peek(p))
+    let s = span(p, peek(p))
     expect(p, TokKind.If)
     if at(p, TokKind.Let) {
         return parseIfLet(p, s)
@@ -778,7 +781,7 @@ pub fn parseWhileLet(p: &mut Parser, s: Option<Span>): Stmt {
 }
 
 pub fn parseWhile(p: &mut Parser): Stmt {
-    let s = span(peek(p))
+    let s = span(p, peek(p))
     expect(p, TokKind.While)
     if at(p, TokKind.Let) {
         return parseWhileLet(p, s)
@@ -800,7 +803,7 @@ pub fn parseWhile(p: &mut Parser): Stmt {
 }
 
 pub fn parseFor(p: &mut Parser): Stmt {
-    let s = span(peek(p))
+    let s = span(p, peek(p))
     expect(p, TokKind.For)
     let varName = expect(p, TokKind.Ident).value
     var varName2: Option<string> = Option.None
@@ -810,7 +813,7 @@ pub fn parseFor(p: &mut Parser): Stmt {
     if at(p, TokKind.Ident) && peek(p).value == "in" {
         advance(p)
     } else {
-        eprint("parse error: expected 'in' in for-loop at line " + peek(p).line.toString() + ":" + peek(p).col.toString())
+        eprint("parse error: " + p.filePath.clone() + ":" + peek(p).line.toString() + ":" + peek(p).col.toString() + ": expected 'in' in for-loop")
     }
     let savedNS = p.noStructLit
     p.noStructLit = true
@@ -935,7 +938,7 @@ pub fn desugarCodePointsLoop(p: &mut Parser, varName: string, varName2: Option<s
 }
 
 pub fn parseMatch(p: &mut Parser): Stmt {
-    let s = span(peek(p))
+    let s = span(p, peek(p))
     expect(p, TokKind.Match)
     let savedNS = p.noStructLit
     p.noStructLit = true
@@ -981,22 +984,22 @@ pub fn parseStmt(p: &mut Parser): Stmt {
         return parseMatch(p)
     }
     if at(p, TokKind.Break) {
-        let s = span(advance(p))
+        let s = span(p, advance(p))
         return Stmt.BreakStmt(s)
     }
     if at(p, TokKind.Continue) {
-        let s = span(advance(p))
+        let s = span(p, advance(p))
         return Stmt.ContinueStmt(s)
     }
     if at(p, TokKind.Unsafe) {
-        let s = span(advance(p))
+        let s = span(p, advance(p))
         expect(p, TokKind.LBrace)
         let body = parseStmts(p)
         expect(p, TokKind.RBrace)
         return Stmt.UnsafeBlock(body, s)
     }
 
-    let s0 = span(peek(p))
+    let s0 = span(p, peek(p))
     let expr = parseExpr(p)
     // assignment
     if at(p, TokKind.Eq) {
@@ -1052,7 +1055,7 @@ pub fn compoundOp(k: TokKind): string {
 
 pub fn parsePattern(p: &mut Parser): Pattern {
     let tok = peek(p)
-    let s = span(tok)
+    let s = span(p, tok)
 
     // Wildcard _
     if tok.kind == TokKind.Ident && tok.value == "_" {
@@ -1252,14 +1255,14 @@ pub fn parseUnary(p: &mut Parser): Expr {
         let tok = advance(p)
         let operand = parseUnary(p)
         // span() borrows tok, so take it before tok.value moves out of the struct.
-        let s = span(tok)
+        let s = span(p, tok)
         return Expr.UnaryOp(tok.value, Heap(operand), s)
     }
     return parsePostfix(p)
 }
 
 pub fn parsePostfix(p: &mut Parser): Expr {
-    let startSpan = span(peek(p))
+    let startSpan = span(p, peek(p))
     var expr = parsePrimary(p)
     while true {
         if at(p, TokKind.Dot) {
@@ -1368,7 +1371,7 @@ pub fn parseClosure(p: &mut Parser, s: Option<Span>, isMove: bool): Expr {
 
 pub fn parsePrimary(p: &mut Parser): Expr {
     let tok = peek(p)
-    let s = span(tok)
+    let s = span(p, tok)
 
     // `@embedFile("path")` — sigil spelling of the compile-time embed builtin.
     // Drop the '@' and re-enter: the bare and sigil forms lower identically, and
@@ -1427,7 +1430,7 @@ pub fn parsePrimary(p: &mut Parser): Expr {
                 body = parseStmts(p)
                 expect(p, TokKind.RBrace)
             } else {
-                let es = span(peek(p))
+                let es = span(p, peek(p))
                 let ve = parseExpr(p)
                 body.push(Heap(Stmt.ExprStmt(Heap(ve), es)))
             }
@@ -1577,7 +1580,7 @@ pub fn parseStructLit(p: &mut Parser, name: string, s: Option<Span>): Expr {
     while !at(p, TokKind.RBrace) {
         let nameTok = expect(p, TokKind.Ident)
         // Span captured before moving `.value` out — partial move would bar the borrow.
-        let fieldSpan = span(nameTok)
+        let fieldSpan = span(p, nameTok)
         let fieldName = nameTok.value
         // Field shorthand: `{ x }` desugars to `{ x: x }` (value is the binding named `x`).
         let value = if matchTok(p, TokKind.Colon) {
@@ -1605,7 +1608,7 @@ pub fn parseJsonObject(p: &mut Parser, s: Option<Span>): Expr {
             break
         }
         let nameTok = expect(p, TokKind.Ident)
-        let fieldSpan = span(nameTok)
+        let fieldSpan = span(p, nameTok)
         let fieldName = nameTok.value
         let value = if matchTok(p, TokKind.Colon) {
             parseExpr(p)
@@ -1676,7 +1679,7 @@ pub fn isTypeArgCall(p: &Parser): bool {
 }
 
 pub fn parseArrayLit(p: &mut Parser): Expr {
-    let s = span(peek(p))
+    let s = span(p, peek(p))
     expect(p, TokKind.LBracket)
     var elements: Vec<Heap<Expr>> = Vec.new()
     while !at(p, TokKind.RBracket) {
@@ -1694,16 +1697,27 @@ pub fn parseArrayLit(p: &mut Parser): Expr {
 }
 
 // F-string: $"hello {name}" → format("hello ", name)
-pub fn parseFString(raw: string, s: Option<Span>): Expr {
+pub fn parseFString(raw: string, s: &Option<Span>): Expr {
     var args: Vec<Heap<Expr>> = Vec.new()
     var lit = ""
     var hadInterp = false
     var i: i64 = 0
+    // The embedded `${expr}` gets its own sub-parser (see below); it inherits
+    // the f-string's own file rather than defaulting to "" so a diagnostic
+    // inside the interpolation still attributes correctly.
+    var subFile = ""
+    match s {
+        Option.Some(sp) => {
+            subFile = sp.file.clone()
+        }
+        Option.None => {
+        }
+    }
     while i < raw.len {
         if raw[i] == 123 { // '{'
             hadInterp = true
             if lit.len > 0 {
-                args.push(Heap(Expr.StringLit(lit, s)))
+                args.push(Heap(Expr.StringLit(lit, cloneSpan(s))))
                 lit = ""
             }
             i = i + 1
@@ -1725,7 +1739,7 @@ pub fn parseFString(raw: string, s: Option<Span>): Expr {
             }
             // Re-lex and parse the embedded expression
             let exprTokens = tokenize(exprStr)
-            var subParser = newParser(exprTokens)
+            var subParser = newParser(exprTokens, subFile.clone())
             args.push(Heap(parseExpr(subParser)))
         } else {
             lit.push(raw[i])
@@ -1733,7 +1747,7 @@ pub fn parseFString(raw: string, s: Option<Span>): Expr {
         }
     }
     if lit.len > 0 {
-        args.push(Heap(Expr.StringLit(lit, s)))
+        args.push(Heap(Expr.StringLit(lit, cloneSpan(s))))
     }
     // Only short-circuit a pure-text f-string (`$"hello"` → "hello"). A single
     // INTERPOLATION (`$"{x}"`) must still go through format() to stringify x —
@@ -1742,7 +1756,7 @@ pub fn parseFString(raw: string, s: Option<Span>): Expr {
         return *args[0]
     }
     var typeArgs: Vec<MiloType> = Vec.new()
-    return Expr.Call("format", args, typeArgs, s)
+    return Expr.Call("format", args, typeArgs, cloneSpan(s))
 }
 
 // -- Top-level parse entry point --
@@ -1896,7 +1910,7 @@ pub fn parse(p: &mut Parser): Program {
 
 // Module-scope `let NAME[: T] = <const-expr>`.
 pub fn parseGlobal(p: &mut Parser): GlobalDecl {
-    let s = span(peek(p))
+    let s = span(p, peek(p))
     var mutable = false
     if at(p, TokKind.Var) {
         expect(p, TokKind.Var)

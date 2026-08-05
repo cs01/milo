@@ -678,7 +678,9 @@ pub fn deriveJson(ck: &mut Checker, s: &StructDecl): Option<ImplDecl> {
 
     let src = jsonDeriveSource(s.name, fields)
     var tokens = tokenize(src)
-    var p = newParser(tokens)
+    // Synthesized source has no real file — label it rather than silently
+    // inheriting whatever the caller's filePath happened to be.
+    var p = newParser(tokens, "<derive(Json)>")
     // Parse just the impl block, not a full top-level parse() — cheaper, and
     // avoids building a whole Program (structs/enums/functions/imports/
     // globals, all empty here) that would just be dropped unused right after.

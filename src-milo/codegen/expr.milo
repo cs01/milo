@@ -7757,6 +7757,40 @@ pub fn genExpr(cg: &mut Cgen, e: &Expr, locs: &Vec<Local>, sigs: &Vec<CgFnSig>, 
                         }
                     }
                 }
+                // Signed INT_MIN / -1 (and the matching %) has no representable quotient —
+                // LLVM's sdiv/srem is POISON on that exact operand pair, same class of bug
+                // as the unmasked shift above. src-milo has no div-by-zero/overflow trap to
+                // fall back on for ordinary arithmetic, so — mirroring the shift fix —
+                // this routes the poison pair around the instruction with a select instead
+                // of trapping: divide by 1 when the pair would overflow, then select the
+                // wrapped answer (MIN for '/', 0 for '%') over the bogus div-by-1 result.
+                // Matches the oracle's @wrapping semantics (Rust's wrapping_div/wrapping_rem).
+                // Division by zero is unrelated (still whatever the hardware does) and out
+                // of scope here — this only removes the poison, not adds a zero-check.
+                if (op == "/" || op == "%") && !unsigned && opLl != "double" && opLl != "float" {
+                    let bits = intBits(opLl)
+                    if bits > 0 {
+                        let minVal = sMin(bits)
+                        let isMin = nextTemp(cg)
+                        emit(cg, "  " + isMin + " = icmp eq " + opLl + " " + lvv + ", " + minVal + "\n")
+                        let isNeg1 = nextTemp(cg)
+                        emit(cg, "  " + isNeg1 + " = icmp eq " + opLl + " " + rvv + ", -1\n")
+                        let isOvf = nextTemp(cg)
+                        emit(cg, "  " + isOvf + " = and i1 " + isMin + ", " + isNeg1 + "\n")
+                        let safeDivisor = nextTemp(cg)
+                        emit(cg, "  " + safeDivisor + " = select i1 " + isOvf + ", " + opLl + " 1, " + opLl + " " + rvv + "\n")
+                        let raw = nextTemp(cg)
+                        emit(cg, "  " + raw + " = " + opname + " " + opLl + " " + lvv + ", " + safeDivisor + "\n")
+                        var wrapped = minVal
+                        if op == "%" {
+                            wrapped = "0"
+                        }
+                        emit(cg, "  " + t + " = select i1 " + isOvf + ", " + opLl + " " + wrapped + ", " + opLl + " " + raw + "\n")
+                        return Val {
+                            v: t, ty: resTy
+                        }
+                    }
+                }
                 emit(cg, "  " + t + " = " + opname + " " + opLl + " " + lvv + ", " + rvv + "\n")
                 return Val {
                     v: t, ty: resTy

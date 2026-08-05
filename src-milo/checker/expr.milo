@@ -741,6 +741,13 @@ pub fn checkCall(ck: &mut Checker, func: &string, args: &Vec<Heap<Expr>>, typeAr
     }
     // embedFile("path"): compile-time file embed → string literal (codegen reads
     // the file relative to the source dir). Argument must be a string literal.
+    // `@targetOs()` is a compile-time constant string; codegen folds it to a literal.
+    if func == "targetOs" {
+        if args.len != 0 {
+            error(ck, "'targetOs' takes no arguments", cloneSpan(span))
+        }
+        return tyString()
+    }
     if func == "embedFile" {
         if args.len != 1 {
             error(ck, "embedFile() expects 1 argument, got " + args.len.toString(), cloneSpan(span))

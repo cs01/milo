@@ -58,6 +58,9 @@ pub struct CgEnumInfo {
 // -- Codegen state --
 
 pub struct Cgen {
+    // Target OS, used to fold `@targetOs()` to a literal at codegen time. milo0 does not
+    // cross-compile, so this is the host.
+    targetOs: string,
     body: string,
     globals: string,
     temp: i64,
@@ -118,6 +121,7 @@ pub struct Cgen {
 
 pub fn cgenNew(): Cgen {
     return Cgen {
+        targetOs: "",
         body: "",
         globals: "",
         temp: 0,

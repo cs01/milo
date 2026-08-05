@@ -1198,7 +1198,7 @@ pub fn parsePrimary(p: &mut Parser): Expr {
     // `@embedFile("path")` — sigil spelling of the compile-time embed builtin.
     // Drop the '@' and re-enter: the bare and sigil forms lower identically, and
     // the deprecation warning for the bare form lives in the TS checker only.
-    if tok.kind == TokKind.At && peekN(p, 1).kind == TokKind.Ident && peekN(p, 1).value == "embedFile" {
+    if tok.kind == TokKind.At && peekN(p, 1).kind == TokKind.Ident && (peekN(p, 1).value == "embedFile" || peekN(p, 1).value == "targetOs") {
         advance(p)
         return parsePrimary(p)
     }

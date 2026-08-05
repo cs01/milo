@@ -1,4 +1,7 @@
 // Top-level codegen: function emission, program registration, IR assembly
+from "src-milo/target.milo" import {
+    getHostTarget
+}
 from "src-milo/ast.milo" import {
     Function, Program, StructDecl, EnumDecl, Expr, StructLitField
 }
@@ -396,6 +399,7 @@ pub fn genFn(cg: &mut Cgen, f: &Function, sigs: &Vec<CgFnSig>) {
 pub fn genProgram(prog: Program, sourceDir: string): string {
     var cg = cgenNew()
     cg.sourceDir = sourceDir
+    cg.targetOs = getHostTarget().os
 
     // Runtime-support globals: argc/argv (read by _miloArgCount/_miloArgAt) and
     // the current green scheduler (read/written by _schedulerGet/_schedulerSet).

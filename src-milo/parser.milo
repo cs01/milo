@@ -313,6 +313,12 @@ pub fn parseStruct(p: &mut Parser): StructDecl {
     expect(p, TokKind.LBrace)
     var fields: Vec<StructField> = Vec.new()
     while !at(p, TokKind.RBrace) {
+        // Field attributes (`@iter inner: HashMap<T, bool>` in std/set.milo). Parsed and
+        // dropped: StructField carries none, and the ones that appear only direct
+        // iteration, which milo0 does not implement.
+        while at(p, TokKind.At) {
+            parseAttribute(p)
+        }
         let fieldName = expect(p, TokKind.Ident).value
         expect(p, TokKind.Colon)
         let fieldType = parseType(p)
@@ -337,10 +343,21 @@ pub fn parseEnum(p: &mut Parser): EnumDecl {
     expect(p, TokKind.Enum)
     let name = expect(p, TokKind.Ident).value
     let typeParams = parseTypeParams(p)
+    // Integer-repr enum: `enum LogLevel: i32 { … }`. The repr type is consumed and
+    // dropped — milo0 lays every enum out as { i32 tag, payload } already, so the tag it
+    // emits matches an i32 repr; a narrower repr would differ and is not used in std.
+    if matchTok(p, TokKind.Colon) {
+        parseType(p)
+    }
     expect(p, TokKind.LBrace)
     var variants: Vec<EnumVariant> = Vec.new()
     while !at(p, TokKind.RBrace) {
         let variantName = expect(p, TokKind.Ident).value
+        // Explicit discriminant (`Null = 3`): parsed and dropped, since the tag milo0
+        // assigns is positional.
+        if matchTok(p, TokKind.Eq) {
+            parseExpr(p)
+        }
         var fields: Vec<MiloType> = Vec.new()
         if matchTok(p, TokKind.LParen) {
             while !at(p, TokKind.RParen) {

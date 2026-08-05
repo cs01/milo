@@ -265,8 +265,8 @@ item 5, it should be decided against 0/578, not against 20,826.
 
 | | |
 |---|---|
-| **behave correctly** | **352 / 578 (61%)** |
-| wrong output | **3** |
+| **behave correctly** | **353 / 578 (61%)** |
+| wrong output | **2** |
 | exits nonzero | 2 |
 | fails to link | **2** |
 | cannot be compiled at all | 219 |

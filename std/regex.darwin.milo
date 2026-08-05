@@ -1,4 +1,23 @@
 // std/regex — regular expression matching (wraps POSIX regex.h)
+//
+// THREAD SAFETY: a Regex must be used from one thread at a time — and on macOS, only
+// one thread in the whole process may be inside the engine at all.
+//
+// Apple's libc regex is not thread-safe for patterns containing a bracket expression
+// (`[A-Z]`, `[0-9]`, …), and not in the way you can design around: four threads each
+// running `regexec` over the same corpus with a `regex_t` **they compiled themselves**
+// disagree on the match count, and `regcomp` intermittently fails outright. Sharing one
+// compiled regex is no worse and no better — both race. Reproduced in plain C with no
+// Milo involved; a bracket-free pattern (`Tok.*Info`) is clean over the same trials,
+// and forcing `setlocale(LC_ALL, "C")` plus a single-threaded warm-up compile does not
+// help, which points at an unsynchronized process-global collation/character-class
+// cache inside libSystem. ThreadSanitizer cannot see it — the racing memory lives in an
+// uninstrumented system library — so a clean tsan run proves nothing here.
+//
+// The symptom is *silently missing matches*, not a crash. If you are fanning work out
+// with `Promise.blocking`, keep the regex on one thread: split the work so the threads
+// do the reading and any literal scanning, and the matcher runs where the results are
+// consumed. `examples/cli-tools/rg.milo` (`workerCanFormat`) is the worked example.
 
 pub extern fn regcomp(_preg: *u8, _regex: *u8, _cflags: i32): i32
 

@@ -349,6 +349,24 @@ pub fn genOwnedArg(cg: &mut Cgen, e: &Expr, hintTy: string, locs: &Vec<Local>, s
             let isLocal = hasLocal(locs, name)
             if (isLocal && !findLocal(locs, name).isRef) || (!isLocal && cg.globalVars.contains(name)) {
                 let tyStr = placeTypeStr(cg, e, locs)
+                // A fixed-size Copy array (`[T;N]`) lowers onto the SAME %Vec runtime
+                // shape as a real growable Vec — nothing in the `ty` string tells them
+                // apart, only the Local's isArr bit does (see its doc comment). Passing
+                // one "by value" has to deep-clone, not move: the checker only accepts
+                // an array-typed binding when its element is Copy
+                // (tests/errors/arrayNonCopyMove.milo enforces the rest), so moving —
+                // zeroing the source's {ptr,len,cap} header — left a SECOND read of the
+                // same local dereferencing a null buffer.
+                if isLocal && findLocal(locs, name).isArr && tyStr.len > 0 && isVecTy(tyStr) {
+                    let lv = genLvalue(cg, e, locs, sigs)
+                    let ll = llType(resolveTyStr(cg, lv.ty))
+                    let loaded = nextTemp(cg)
+                    emit(cg, "  " + loaded + " = load " + ll + ", ptr " + lv.v + "\n")
+                    let srcVal = Val {
+                        v: loaded, ty: lv.ty.clone()
+                    }
+                    return genDeepCloneVecVal(cg, srcVal)
+                }
                 if tyStr.len > 0 && cgNeedsDrop(cg, tyStr) {
                     let lv = genLvalue(cg, e, locs, sigs)
                     let ll = llType(resolveTyStr(cg, lv.ty))
@@ -3958,6 +3976,66 @@ pub fn genVecReserve(cg: &mut Cgen, addr: &string, vecTy: &string, nVal: &Val): 
     }
 }
 
+// A real deep copy of a %Vec-shaped value: fresh malloc'd buffer, every element
+// cloned in (not just the {ptr,len,cap} header — that would alias the source
+// buffer, so a later push/mutate through either value would corrupt the other
+// and a scope-exit drop of both would free the same allocation twice). Shared
+// by `Vec<T>.clone()` and by passing a fixed-size Copy array by value (see
+// genOwnedArg's Ident branch): a `[T;N]` local lowers onto this same %Vec
+// runtime representation, so "pass by value" has to mean THIS, not a move.
+pub fn genDeepCloneVecVal(cg: &mut Cgen, obj: &Val): Val {
+    ensureMalloc(cg)
+    let elemTy = unwrapVec(resolveTyStr(cg, obj.ty))
+    let elemLl = llType(elemTy.clone())
+    let esz = llTypeBytes(elemLl.clone())
+    let srcP = nextTemp(cg)
+    emit(cg, "  " + srcP + " = extractvalue %Vec " + obj.v.clone() + ", 0\n")
+    let lenV = nextTemp(cg)
+    emit(cg, "  " + lenV + " = extractvalue %Vec " + obj.v.clone() + ", 1\n")
+    let bytes = nextTemp(cg)
+    emit(cg, "  " + bytes + " = mul i64 " + lenV + ", " + esz.toString() + "\n")
+    let dst = nextTemp(cg)
+    emit(cg, "  " + dst + " = call ptr @malloc(i64 " + bytes + ")\n")
+    let ictr = nextTemp(cg)
+    emit(cg, "  " + ictr + " = alloca i64\n")
+    emit(cg, "  store i64 0, ptr " + ictr + "\n")
+    let condL = nextLabel(cg, "vclone.cond")
+    let bodyL = nextLabel(cg, "vclone.body")
+    let endL = nextLabel(cg, "vclone.end")
+    emit(cg, "  br label %" + condL.clone() + "\n")
+    emitLabel(cg, condL)
+    let iv = nextTemp(cg)
+    emit(cg, "  " + iv + " = load i64, ptr " + ictr + "\n")
+    let more = nextTemp(cg)
+    emit(cg, "  " + more + " = icmp slt i64 " + iv + ", " + lenV + "\n")
+    emit(cg, "  br i1 " + more + ", label %" + bodyL.clone() + ", label %" + endL.clone() + "\n")
+    emitLabel(cg, bodyL)
+    let sslot = nextTemp(cg)
+    emit(cg, "  " + sslot + " = getelementptr " + elemLl.clone() + ", ptr " + srcP + ", i64 " + iv + "\n")
+    let cur = nextTemp(cg)
+    emit(cg, "  " + cur + " = load " + elemLl.clone() + ", ptr " + sslot + "\n")
+    // Each ELEMENT is cloned too — a shallow element copy would leave two Vecs sharing
+    // the same string buffers.
+    let cloned = genCloneOfLoaded(cg, cur, elemTy.clone())
+    let dslot = nextTemp(cg)
+    emit(cg, "  " + dslot + " = getelementptr " + elemLl.clone() + ", ptr " + dst + ", i64 " + iv + "\n")
+    emit(cg, "  store " + elemLl.clone() + " " + cloned + ", ptr " + dslot + "\n")
+    let inext = nextTemp(cg)
+    emit(cg, "  " + inext + " = add i64 " + iv + ", 1\n")
+    emit(cg, "  store i64 " + inext + ", ptr " + ictr + "\n")
+    emit(cg, "  br label %" + condL.clone() + "\n")
+    emitLabel(cg, endL)
+    let v0 = nextTemp(cg)
+    emit(cg, "  " + v0 + " = insertvalue %Vec undef, ptr " + dst + ", 0\n")
+    let v1 = nextTemp(cg)
+    emit(cg, "  " + v1 + " = insertvalue %Vec " + v0 + ", i64 " + lenV + ", 1\n")
+    let v2 = nextTemp(cg)
+    emit(cg, "  " + v2 + " = insertvalue %Vec " + v1 + ", i64 " + lenV + ", 2\n")
+    return Val {
+        v: v2, ty: obj.ty.clone()
+    }
+}
+
 pub fn genMethodCall(cg: &mut Cgen, object: &Expr, method: &string, args: &Vec<Heap<Expr>>, locs: &Vec<Local>, sigs: &Vec<CgFnSig>): Val {
     // x.addrOf(): the raw address of the receiver lvalue — identical to the old
     // `&x` (see the UnaryOp `&` arm). Resolve the lvalue, don't load a value.
@@ -4422,56 +4500,7 @@ pub fn genMethodCall(cg: &mut Cgen, object: &Expr, method: &string, args: &Vec<H
     // the original's buffer, so a later push into either one would be visible in both and
     // the two would double-free the same allocation.
     if isVecTy(obj.ty) && method == "clone" && args.len == 0 {
-        ensureMalloc(cg)
-        let elemTy = unwrapVec(resolveTyStr(cg, obj.ty))
-        let elemLl = llType(elemTy.clone())
-        let esz = llTypeBytes(elemLl.clone())
-        let srcP = nextTemp(cg)
-        emit(cg, "  " + srcP + " = extractvalue %Vec " + obj.v.clone() + ", 0\n")
-        let lenV = nextTemp(cg)
-        emit(cg, "  " + lenV + " = extractvalue %Vec " + obj.v.clone() + ", 1\n")
-        let bytes = nextTemp(cg)
-        emit(cg, "  " + bytes + " = mul i64 " + lenV + ", " + esz.toString() + "\n")
-        let dst = nextTemp(cg)
-        emit(cg, "  " + dst + " = call ptr @malloc(i64 " + bytes + ")\n")
-        let ictr = nextTemp(cg)
-        emit(cg, "  " + ictr + " = alloca i64\n")
-        emit(cg, "  store i64 0, ptr " + ictr + "\n")
-        let condL = nextLabel(cg, "vclone.cond")
-        let bodyL = nextLabel(cg, "vclone.body")
-        let endL = nextLabel(cg, "vclone.end")
-        emit(cg, "  br label %" + condL.clone() + "\n")
-        emitLabel(cg, condL)
-        let iv = nextTemp(cg)
-        emit(cg, "  " + iv + " = load i64, ptr " + ictr + "\n")
-        let more = nextTemp(cg)
-        emit(cg, "  " + more + " = icmp slt i64 " + iv + ", " + lenV + "\n")
-        emit(cg, "  br i1 " + more + ", label %" + bodyL.clone() + ", label %" + endL.clone() + "\n")
-        emitLabel(cg, bodyL)
-        let sslot = nextTemp(cg)
-        emit(cg, "  " + sslot + " = getelementptr " + elemLl.clone() + ", ptr " + srcP + ", i64 " + iv + "\n")
-        let cur = nextTemp(cg)
-        emit(cg, "  " + cur + " = load " + elemLl.clone() + ", ptr " + sslot + "\n")
-        // Each ELEMENT is cloned too — a shallow element copy would leave two Vecs sharing
-        // the same string buffers.
-        let cloned = genCloneOfLoaded(cg, cur, elemTy.clone())
-        let dslot = nextTemp(cg)
-        emit(cg, "  " + dslot + " = getelementptr " + elemLl.clone() + ", ptr " + dst + ", i64 " + iv + "\n")
-        emit(cg, "  store " + elemLl.clone() + " " + cloned + ", ptr " + dslot + "\n")
-        let inext = nextTemp(cg)
-        emit(cg, "  " + inext + " = add i64 " + iv + ", 1\n")
-        emit(cg, "  store i64 " + inext + ", ptr " + ictr + "\n")
-        emit(cg, "  br label %" + condL.clone() + "\n")
-        emitLabel(cg, endL)
-        let v0 = nextTemp(cg)
-        emit(cg, "  " + v0 + " = insertvalue %Vec undef, ptr " + dst + ", 0\n")
-        let v1 = nextTemp(cg)
-        emit(cg, "  " + v1 + " = insertvalue %Vec " + v0 + ", i64 " + lenV + ", 1\n")
-        let v2 = nextTemp(cg)
-        emit(cg, "  " + v2 + " = insertvalue %Vec " + v1 + ", i64 " + lenV + ", 2\n")
-        return Val {
-            v: v2, ty: obj.ty.clone()
-        }
+        return genDeepCloneVecVal(cg, obj)
     }
     // Vec<T>.contains(x): linear scan. Elements are compared the same way `==` compares
     // them — memcmp for %String, icmp/fcmp for scalars — so a Vec<string> lookup does not

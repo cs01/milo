@@ -819,9 +819,10 @@ pub fn genFn(cg: &mut Cgen, f: &Function, sigs: &Vec<CgFnSig>) {
     for pj in 0..f.params.len {
         let pTyStr = resolveAstTy(cg, f.params[pj].ty)
         let pIsRef = f.params[pj].ty.isRef || f.params[pj].ty.isRefMut
+        let pIsArr = f.params[pj].ty.isArray
         if pIsRef {
             locs.push(Local {
-                name: f.params[pj].name.clone(), ty: pTyStr, addr: "%" + f.params[pj].name, isRef: true
+                name: f.params[pj].name.clone(), ty: pTyStr, addr: "%" + f.params[pj].name, isRef: true, isArr: pIsArr
             }
             )
         } else {
@@ -830,7 +831,7 @@ pub fn genFn(cg: &mut Cgen, f: &Function, sigs: &Vec<CgFnSig>) {
             emit(cg, "  " + addr + " = alloca " + llt + "\n")
             emit(cg, "  store " + llt + " %" + f.params[pj].name + ", ptr " + addr + "\n")
             locs.push(Local {
-                name: f.params[pj].name.clone(), ty: pTyStr, addr: addr, isRef: false
+                name: f.params[pj].name.clone(), ty: pTyStr, addr: addr, isRef: false, isArr: pIsArr
             }
             )
         }

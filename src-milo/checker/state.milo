@@ -544,6 +544,12 @@ pub fn isCopyCk(ck: &Checker, t: &TypeKind): bool {
             }
             return true
         }
+        // A fixed-size array of Copy elements is itself Copy (Rust: `[T; N]: Copy
+        // where T: Copy`) — same no-heap, no-drop-glue reasoning as the struct case
+        // above, and it composes with it: `[Pt; 2]` is Copy exactly when Pt is.
+        TypeKind.TArray(inner, size) => {
+            return isCopyCk(ck, *inner)
+        }
         _ => {
             return false
         }

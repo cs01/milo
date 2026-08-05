@@ -164,7 +164,7 @@ pub fn parseType(p: &mut Parser): MiloType {
     if at(p, TokKind.LParen) && isFnType(p) {
         advance(p)
         var fnParams: Vec<MiloType> = Vec.new()
-        while !at(p, TokKind.RParen) {
+        while !at(p, TokKind.RParen) && !at(p, TokKind.Eof) {
             fnParams.push(parseType(p))
             if !at(p, TokKind.RParen) {
                 expect(p, TokKind.Comma)
@@ -299,7 +299,7 @@ pub fn parseImport(p: &mut Parser): ImportDecl {
         expect(p, TokKind.LBrace)
         var names: Vec<string> = Vec.new()
         var aliases: Vec<Option<string>> = Vec.new()
-        while !at(p, TokKind.RBrace) {
+        while !at(p, TokKind.RBrace) && !at(p, TokKind.Eof) {
             names.push(expect(p, TokKind.Ident).value)
             // `import { foo as bar }` — bind the exported `foo` under local name
             // `bar`. `as` is already a token kind (cast); reuse it in import
@@ -336,7 +336,7 @@ pub fn parseStruct(p: &mut Parser): StructDecl {
     let typeParams = parseTypeParams(p)
     expect(p, TokKind.LBrace)
     var fields: Vec<StructField> = Vec.new()
-    while !at(p, TokKind.RBrace) {
+    while !at(p, TokKind.RBrace) && !at(p, TokKind.Eof) {
         // Field attributes (`@iter inner: HashMap<T, bool>` in std/set.milo, or
         // `@json("wire_name")` for a @derive(Json) rename). Kept only for the
         // deriver to read — codegen/most of the checker still ignores them.
@@ -376,7 +376,7 @@ pub fn parseEnum(p: &mut Parser): EnumDecl {
     }
     expect(p, TokKind.LBrace)
     var variants: Vec<EnumVariant> = Vec.new()
-    while !at(p, TokKind.RBrace) {
+    while !at(p, TokKind.RBrace) && !at(p, TokKind.Eof) {
         let variantName = expect(p, TokKind.Ident).value
         // Explicit discriminant (`LDA = 169`, `Neg = -1`).
         var disc: Option<i64> = Option.None
@@ -394,7 +394,7 @@ pub fn parseEnum(p: &mut Parser): EnumDecl {
         }
         var fields: Vec<MiloType> = Vec.new()
         if matchTok(p, TokKind.LParen) {
-            while !at(p, TokKind.RParen) {
+            while !at(p, TokKind.RParen) && !at(p, TokKind.Eof) {
                 fields.push(parseType(p))
                 matchTok(p, TokKind.Comma)
             }
@@ -439,7 +439,7 @@ pub fn parseParamList(p: &mut Parser): ParamResult {
     expect(p, TokKind.LParen)
     var params: Vec<Param> = Vec.new()
     var variadic = false
-    while !at(p, TokKind.RParen) {
+    while !at(p, TokKind.RParen) && !at(p, TokKind.Eof) {
         if at(p, TokKind.DotDotDot) {
             advance(p)
             variadic = true
@@ -963,7 +963,7 @@ pub fn parseMatch(p: &mut Parser): Stmt {
     p.noStructLit = savedNS
     expect(p, TokKind.LBrace)
     var arms: Vec<MatchArm> = Vec.new()
-    while !at(p, TokKind.RBrace) {
+    while !at(p, TokKind.RBrace) && !at(p, TokKind.Eof) {
         let pattern = parsePattern(p)
         expect(p, TokKind.FatArrow)
         expect(p, TokKind.LBrace)
@@ -1134,7 +1134,7 @@ pub fn parsePattern(p: &mut Parser): Pattern {
     }
     var bindings: Vec<string> = Vec.new()
     if matchTok(p, TokKind.LParen) {
-        while !at(p, TokKind.RParen) {
+        while !at(p, TokKind.RParen) && !at(p, TokKind.Eof) {
             bindings.push(expect(p, TokKind.Ident).value)
             matchTok(p, TokKind.Comma)
         }
@@ -1288,7 +1288,7 @@ pub fn parsePostfix(p: &mut Parser): Expr {
             if at(p, TokKind.LParen) {
                 advance(p)
                 var args: Vec<Heap<Expr>> = Vec.new()
-                while !at(p, TokKind.RParen) {
+                while !at(p, TokKind.RParen) && !at(p, TokKind.Eof) {
                     args.push(Heap(parseExpr(p)))
                     matchTok(p, TokKind.Comma)
                 }
@@ -1362,7 +1362,7 @@ pub fn isArrowClosure(p: &mut Parser): bool {
 pub fn parseClosure(p: &mut Parser, s: Option<Span>, isMove: bool): Expr {
     expect(p, TokKind.LParen)
     var params: Vec<Param> = Vec.new()
-    while !at(p, TokKind.RParen) {
+    while !at(p, TokKind.RParen) && !at(p, TokKind.Eof) {
         params.push(parseParam(p))
         if !at(p, TokKind.RParen) {
             expect(p, TokKind.Comma)
@@ -1438,7 +1438,7 @@ pub fn parsePrimary(p: &mut Parser): Expr {
         p.noStructLit = savedNoStruct
         expect(p, TokKind.LBrace)
         var arms: Vec<MatchArm> = Vec.new()
-        while !at(p, TokKind.RBrace) {
+        while !at(p, TokKind.RBrace) && !at(p, TokKind.Eof) {
             let pattern = parsePattern(p)
             expect(p, TokKind.FatArrow)
             var body: Vec<Heap<Stmt>> = Vec.new()
@@ -1505,7 +1505,7 @@ pub fn parsePrimary(p: &mut Parser): Expr {
             let variant = expect(p, TokKind.Ident).value
             var args: Vec<Heap<Expr>> = Vec.new()
             if matchTok(p, TokKind.LParen) {
-                while !at(p, TokKind.RParen) {
+                while !at(p, TokKind.RParen) && !at(p, TokKind.Eof) {
                     args.push(Heap(parseExpr(p)))
                     matchTok(p, TokKind.Comma)
                 }
@@ -1541,7 +1541,7 @@ pub fn parsePrimary(p: &mut Parser): Expr {
             }
             expect(p, TokKind.LParen)
             var args: Vec<Heap<Expr>> = Vec.new()
-            while !at(p, TokKind.RParen) {
+            while !at(p, TokKind.RParen) && !at(p, TokKind.Eof) {
                 if at(p, TokKind.Eof) {
                     break
                 }
@@ -1594,7 +1594,7 @@ pub fn parsePrimary(p: &mut Parser): Expr {
 pub fn parseStructLit(p: &mut Parser, name: string, s: Option<Span>): Expr {
     expect(p, TokKind.LBrace)
     var fields: Vec<StructLitField> = Vec.new()
-    while !at(p, TokKind.RBrace) {
+    while !at(p, TokKind.RBrace) && !at(p, TokKind.Eof) {
         let nameTok = expect(p, TokKind.Ident)
         // Span captured before moving `.value` out — partial move would bar the borrow.
         let fieldSpan = span(p, nameTok)
@@ -1620,7 +1620,7 @@ pub fn parseStructLit(p: &mut Parser, name: string, s: Option<Span>): Expr {
 pub fn parseJsonObject(p: &mut Parser, s: Option<Span>): Expr {
     expect(p, TokKind.LBrace)
     var fields: Vec<StructLitField> = Vec.new()
-    while !at(p, TokKind.RBrace) {
+    while !at(p, TokKind.RBrace) && !at(p, TokKind.Eof) {
         if at(p, TokKind.Eof) {
             break
         }
@@ -1645,7 +1645,7 @@ pub fn parseJsonObject(p: &mut Parser, s: Option<Span>): Expr {
 pub fn parseCall(p: &mut Parser, name: string, s: Option<Span>): Expr {
     expect(p, TokKind.LParen)
     var args: Vec<Heap<Expr>> = Vec.new()
-    while !at(p, TokKind.RParen) {
+    while !at(p, TokKind.RParen) && !at(p, TokKind.Eof) {
         // a desynced parse must not spin at EOF forever
         if at(p, TokKind.Eof) {
             break
@@ -1699,7 +1699,7 @@ pub fn parseArrayLit(p: &mut Parser): Expr {
     let s = span(p, peek(p))
     expect(p, TokKind.LBracket)
     var elements: Vec<Heap<Expr>> = Vec.new()
-    while !at(p, TokKind.RBracket) {
+    while !at(p, TokKind.RBracket) && !at(p, TokKind.Eof) {
         elements.push(Heap(parseExpr(p)))
         // [value; count] repeat syntax
         if elements.len == 1 && matchTok(p, TokKind.Semicolon) {

@@ -3,6 +3,9 @@ from "src-milo/codegen/types.milo" import {
     ensureRealloc, nextLabel, ensureStrtod,
     Cgen, Val, emit, emitG, nextTemp, ensureStringTy, ensureMalloc, ensureMemcpy, ensureMemcmp
 }
+from "std/binary" import {
+    Bytes
+}
 
 // -- Hex encoding for string literal bytes --
 
@@ -18,6 +21,69 @@ pub fn hex2(b: u8): string {
     s.push(hexDigit(b >> 4))
     s.push(hexDigit(b & 15))
     return s
+}
+
+// 16 hex digits, most-significant byte first (matches LLVM's hex-float spelling).
+pub fn hexU64(bits: u64): string {
+    var s = ""
+    var shift: u64 = 56
+    for _i in 0..8 {
+        let byte = (bits >> shift) as u8
+        s = s + hex2(byte)
+        // the final iteration would underflow an unsigned subtraction, and
+        // arithmetic is checked, so stop shifting once the low byte is out
+        if shift == 0 {
+            return s
+        }
+        shift = shift - 8
+    }
+    return s
+}
+
+// The decimal spelling of an f64 CONSTANT for LLVM IR: f.toString() drops the
+// decimal point for whole values (0.0 -> "0") and uses bare exponential
+// notation for very large/small magnitudes (1e+21) — LLVM's grammar requires
+// an actual '.' before any exponent marker ("1e+21" is rejected as "integer
+// constant must have integer type"; it needs "1.0e+21"). Insert the missing
+// decimal point rather than just checking whether one is present anywhere in
+// the string. Shared by genExpr's FloatLit and the global-initializer/
+// const-fold paths in emit.milo — all three used to carry their own copy of
+// this, and only one had the exponent case fixed.
+pub fn floatDecimalStr(f: f64): string {
+    var fs = f.toString()
+    var dotPos = 0 - 1
+    var ePos = 0 - 1
+    for ci in 0..fs.len {
+        if fs[ci] == 46 {
+            dotPos = ci
+        }
+        if fs[ci] == 101 || fs[ci] == 69 {
+            ePos = ci
+        }
+    }
+    if dotPos < 0 {
+        if ePos >= 0 {
+            fs = fs[0..ePos].clone() + ".0" + fs[ePos..fs.len].clone()
+        } else {
+            fs = fs + ".0"
+        }
+    }
+    return fs
+}
+
+// LLVM's hex-float syntax always spells a `float`/`double` constant as the
+// 64-bit bit pattern of a DOUBLE — even a 32-bit `float` operand's hex form is
+// the double that value promotes to (LLVM langref quirk). A plain decimal
+// literal works for f64 (Milo's own f64.toString() is shortest round-trip, so
+// it re-parses to the exact same bits) but not for f32: the literal's
+// f64-precision decimal does not reduce to an exactly-representable float32
+// value, and LLVM's parser hard-rejects it with "floating point constant
+// invalid for type". Round through f32 first, then take the resulting
+// double's bits — mirrors the oracle's formatFloatBits (src/codegen.ts).
+pub fn formatF32Bits(v: f64): string {
+    let rounded: f64 = (v as f32) as f64
+    let bits = Bytes.f64ToBits(rounded)
+    return "0x" + hexU64(bits)
 }
 
 // Emit a global constant for a string literal. Returns @.strN label.

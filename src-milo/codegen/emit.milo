@@ -288,17 +288,7 @@ pub fn constInitOf(e: &Expr, llTy: &string): string {
             return c.toString()
         }
         Expr.FloatLit(f, span) => {
-            var fs = f.toString()
-            var hasPt = false
-            for i in 0..fs.len {
-                if fs[i] == 46 || fs[i] == 101 || fs[i] == 69 {
-                    hasPt = true
-                }
-            }
-            if !hasPt {
-                fs = fs + ".0"
-            }
-            return fs
+            return floatDecimalStr(f)
         }
         Expr.UnaryOp(op, operand, span) => {
             if op == "-" {
@@ -350,17 +340,7 @@ pub struct ConstNum {
 }
 
 pub fn floatConstStr(f: f64): string {
-    var fs = f.toString()
-    var hasPt = false
-    for i in 0..fs.len {
-        if fs[i] == 46 || fs[i] == 101 || fs[i] == 69 {
-            hasPt = true
-        }
-    }
-    if !hasPt {
-        fs = fs + ".0"
-    }
-    return fs
+    return floatDecimalStr(f)
 }
 
 pub fn constFoldNum(e: &Expr): ConstNum {
@@ -476,6 +456,9 @@ from "src-milo/codegen/abi.milo" import {
 }
 from "src-milo/target.milo" import {
     getHostTarget
+}
+from "src-milo/codegen/strings.milo" import {
+    floatDecimalStr
 }
 
 // Build function signature table from program declarations.

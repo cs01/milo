@@ -141,13 +141,17 @@ pub fn genAssign(cg: &mut Cgen, target: &Expr, value: &Expr, locs: &mut Vec<Loca
             }
             let idx = lookupFieldIndex(cg, rawName, field)
             let fty = lookupFieldType(cg, rawName, idx)
-            let ftyLl = llType(fty)
             let structTy = "%" + rawName
             let fp = nextTemp(cg)
             emit(cg, "  " + fp + " = getelementptr " + structTy + ", ptr " + structAddr + ", i32 0, i32 " + idx.toString() + "\n")
             // field takes ownership of the RHS → move it (zero the source place).
             // The old field value is not dropped yet (slice 2) — a leak, not a UAF.
-            let v = genOwnedArg(cg, value, ftyLl, locs, sigs)
+            // Hint with the SURFACE field type ("Vec<f64>"), not its LLVM spelling
+            // ("%Vec", which throws the element type away): `c.dem = Vec.filled(n,
+            // 0.0)` needs the real element type to reach genVecFilled's fill-value
+            // hint, or it silently fell back to Vec<i64> and stored a float literal
+            // into an i64 slot ("store i64 0.0" — invalid IR).
+            let v = genOwnedArg(cg, value, fty.clone(), locs, sigs)
             emit(cg, "  store " + llType(v.ty) + " " + v.v + ", ptr " + fp + "\n")
         }
         Expr.IndexAccess(obj, idx, span) => {

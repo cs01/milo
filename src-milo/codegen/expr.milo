@@ -7110,6 +7110,55 @@ pub fn genLvalue(cg: &mut Cgen, e: &Expr, locs: &Vec<Local>, sigs: &Vec<CgFnSig>
                 v: fp, ty: fty
             }
         }
+        // A capitalized *variable* followed by `.field` parses identically to a
+        // static enum-literal (see checker's isRootMutable/checkEnumLit "variable
+        // fallback", which this mirrors) — `STORE.inner.n = x` and
+        // `STORE.items.push(x)` used to fall to the generic `_` arm below, which
+        // materializes a FRESH TEMPORARY's address: both silently wrote into a
+        // copy that vanished at statement end, never touching the real `@STORE`
+        // global. Guarded on `cg.enums` + an actual local/global match — a
+        // GENUINE enum literal (`Color.Red`) must still fall through to the `_`
+        // arm; without the guard, looking a real enum name up as a local finds
+        // nothing and findLocal's documented "should not happen" fallback
+        // silently hands back locs[0] (some UNRELATED local), and every field/
+        // index computed on top of it is garbage.
+        Expr.EnumLit(enumName, variant, args, espan) => {
+            let isVar = !cg.enums.contains(enumName) && (hasLocal(locs, enumName) || cg.globalVars.contains(enumName))
+            if isVar {
+                // Plain string vars, not a reassigned Val — milo-self's own (still
+                // incomplete) borrow checker over-rejects "var v: Struct = …; if
+                // … { v = … }" as an escaping borrow (a known, separately-owned
+                // gap; see AGENTS.md). Reassigning strings sidesteps it.
+                var innerV = "0"
+                var innerTy = ""
+                if !hasLocal(locs, enumName) && cg.globalVars.contains(enumName) {
+                    let surf = cg.globalVars.get(enumName)!
+                    innerV = "@" + enumName.clone()
+                    innerTy = surf
+                } else {
+                    let local = findLocal(locs, enumName)
+                    innerV = local.addr.clone()
+                    innerTy = local.ty.clone()
+                }
+                let rawName = stripPercent(innerTy)
+                let idx = lookupFieldIndex(cg, rawName, variant)
+                let fty = lookupFieldType(cg, rawName, idx)
+                let structTy = "%" + rawName
+                let fp = nextTemp(cg)
+                emit(cg, "  " + fp + " = getelementptr " + structTy + ", ptr " + innerV + ", i32 0, i32 " + idx.toString() + "\n")
+                return Val {
+                    v: fp, ty: fty
+                }
+            }
+            let v = genExpr(cg, e, locs, sigs, "")
+            let ll = llType(v.ty)
+            let addr = nextTemp(cg)
+            emit(cg, "  " + addr + " = alloca " + ll + "\n")
+            emit(cg, "  store " + ll + " " + v.v + ", ptr " + addr + "\n")
+            return Val {
+                v: addr, ty: v.ty
+            }
+        }
         Expr.UnaryOp(op, operand, span) => {
             // `*p` as an lvalue: the pointee's address IS the pointer value, so
             // evaluate the operand (Heap<T> box ptr or raw `*T`) and return it

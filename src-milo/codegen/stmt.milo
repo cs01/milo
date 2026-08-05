@@ -154,6 +154,54 @@ pub fn genAssign(cg: &mut Cgen, target: &Expr, value: &Expr, locs: &mut Vec<Loca
             let v = genOwnedArg(cg, value, fty.clone(), locs, sigs)
             emit(cg, "  store " + llType(v.ty) + " " + v.v + ", ptr " + fp + "\n")
         }
+        // A capitalized *variable* followed by `.field = value` parses identically
+        // to a static enum-literal (mirrors genLvalue's own EnumLit case and the
+        // checker's isRootMutable fallback) — `STORE.name = "milo"` (single dot,
+        // no further FieldAccess wrapper around it) landed here as a bare EnumLit
+        // and this arm was MISSING entirely, so the assignment silently matched
+        // the `_` no-op below and did nothing: the field never changed and no
+        // diagnostic said why. Guarded the same way as genLvalue's EnumLit case —
+        // a GENUINE enum literal is never a legal assignment target (isRootMutable
+        // already rejects it), so this should only ever see the variable case in a
+        // program that type-checked, but the guard keeps that an invariant rather
+        // than a hope: without it, a real enum name resolves as a local via
+        // findLocal's "should not happen" fallback (locs[0], something unrelated)
+        // and writes through whatever garbage field index that finds.
+        Expr.EnumLit(enumName, variant, args, espan) => {
+            let isVar = !cg.enums.contains(enumName) && (hasLocal(locs, enumName) || cg.globalVars.contains(enumName))
+            if isVar {
+                // Plain string vars, not a reassigned Val — see genLvalue's EnumLit
+                // arm for why (milo-self's own borrow checker over-rejects the
+                // struct-reassignment shape; separately owned, not fixed here).
+                var lvV = "0"
+                var lvTy = ""
+                if !hasLocal(locs, enumName) && cg.globalVars.contains(enumName) {
+                    let surf = cg.globalVars.get(enumName)!
+                    lvV = "@" + enumName.clone()
+                    lvTy = surf
+                } else {
+                    let local = findLocal(locs, enumName)
+                    lvV = local.addr.clone()
+                    lvTy = local.ty.clone()
+                }
+                var structAddr = lvV.clone()
+                var rawName = stripPercent(lvTy)
+                if lvTy.len > 0 && lvTy[0] == 42 {
+                    let pointee = lvTy[1..lvTy.len].clone()
+                    rawName = stripPercent(resolveTyStr(cg, pointee))
+                    let sa = nextTemp(cg)
+                    emit(cg, "  " + sa + " = load ptr, ptr " + lvV + "\n")
+                    structAddr = sa
+                }
+                let idx = lookupFieldIndex(cg, rawName, variant)
+                let fty = lookupFieldType(cg, rawName, idx)
+                let structTy = "%" + rawName
+                let fp = nextTemp(cg)
+                emit(cg, "  " + fp + " = getelementptr " + structTy + ", ptr " + structAddr + ", i32 0, i32 " + idx.toString() + "\n")
+                let v = genOwnedArg(cg, value, fty.clone(), locs, sigs)
+                emit(cg, "  store " + llType(v.ty) + " " + v.v + ", ptr " + fp + "\n")
+            }
+        }
         Expr.IndexAccess(obj, idx, span) => {
             // M3e: v[i] = x for Vec receivers (fixed arrays still pending)
             let lv = genLvalue(cg, *obj, locs, sigs)

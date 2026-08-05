@@ -11,7 +11,7 @@ from "src-milo/checker/types.milo" import {
 from "src-milo/checker/state.milo" import {
     Checker, VarInfo, FnSig, FnParam, StructInfo, EnumInfo, VariantInfo,
     Diagnostic, error, errorHint, warn, pushScope, popScope, declare, lookup, setVarMoved, setVarRead, hasErrors,
-    normalizeEnumNames, stmtTerminates, snapshotMoves, restoreMoves, orMoves, nestedRef,
+    normalizeEnumNames, stmtTerminates, snapshotMoves, restoreMoves, orMoves, nestedRef, hasAttr,
 }
 from "src-milo/checker/expr.milo" import {
     intCoercible, floatLitCoercible, arrayIntCoercible, arrayToVecCoercible, checkExpr, tryMove, isRootMutable, deref,
@@ -28,6 +28,9 @@ from "src-milo/checker/borrow.milo" import {
     freezePlace, freezeViewMethodSource, errorIfFrozenRoot, describePlace,
     assignTargetPath, errorIfAssignFrozen, borrowDuringCallback, BorrowArg,
     borrowArgOf, checkCallSiteExclusivity, snapshotFrozenNames, releaseOrRetainFreezes,
+}
+from "src-milo/checker/moves.milo" import {
+    staticFieldPlace, clearMovedFields, fieldPathString,
 }
 
 // -- Statement checker --
@@ -197,7 +200,13 @@ pub fn checkAssign(ck: &mut Checker, target: &Expr, value: &Expr, span: &Option<
             }
         }
         _ => {
+            // A field target (`p.a = ...`) is written, not read, same reasoning as
+            // the Ident case above — the field about to be overwritten doesn't care
+            // whether it was already moved. checkFieldMoveState reads this depth to
+            // suppress its "use of moved value" check for exactly this walk.
+            ck.inAssignTargetDepth = ck.inAssignTargetDepth + 1
             targetType = checkExpr(ck, target)
+            ck.inAssignTargetDepth = ck.inAssignTargetDepth - 1
             targetDeclType = targetType.clone()
         }
     }
@@ -218,12 +227,21 @@ pub fn checkAssign(ck: &mut Checker, target: &Expr, value: &Expr, span: &Option<
         error(ck, "type mismatch: cannot assign " + typeName(valType) + " to " + typeName(targetType), cloneSpan(span))
     }
 
-    // Re-assigning un-moves the variable
+    // Re-assigning un-moves the variable — or, for a field target, un-moves just
+    // that place and anything nested under it (a different field was never
+    // touched by this write).
     match target {
         Expr.Ident(name, tspan) => {
             setVarMoved(ck, name, false)
         }
         _ => {
+            match staticFieldPlace(target) {
+                Option.Some(p) => {
+                    clearMovedFields(ck, p.root, Option.Some(fieldPathString(p.fields)))
+                }
+                Option.None => {
+                }
+            }
         }
     }
     tryMove(ck, value)
@@ -1345,6 +1363,7 @@ pub fn registerStruct(ck: &mut Checker, decl: &StructDecl) {
     let info = StructInfo {
         fields: fields,
         baseName: decl.name.clone(),
+        noCopy: hasAttr(decl.attributes, "noCopy"),
     }
     ck.structs.insert(decl.name.clone(), info)
 }

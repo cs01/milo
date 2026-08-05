@@ -1,6 +1,6 @@
 // Checker state — scopes, variable info, diagnostic tracking, type tables
 from "src-milo/ast.milo" import {
-    Span, Function, StructDecl, EnumDecl, Program, Stmt, ImplDecl, MiloType
+    Span, Function, StructDecl, EnumDecl, Program, Stmt, ImplDecl, MiloType, Attribute
 }
 from "src-milo/checker/types.milo" import {
     TypeKind, typeEq, typeName, tyVoid, isCopy
@@ -50,6 +50,23 @@ pub struct CkStructField {
 pub struct StructInfo {
     fields: Vec<CkStructField>,
     baseName: string,
+    // `@noCopy`: move-track this struct even though every field is itself Copy
+    // (a resource handle wrapping a bare integer, e.g. a file descriptor or a GL
+    // name). Without this, isCopyCk's all-fields-Copy rule makes the struct
+    // Copy too, and `f.close()` — a `self: Self` method that consumes the
+    // handle — never actually consumes it: the release-then-use double-free
+    // this attribute exists to catch would compile clean.
+    noCopy: bool,
+}
+
+// Whether `attrs` contains a bare attribute named `name` (`@noCopy`, no args).
+pub fn hasAttr(attrs: &Vec<Attribute>, name: &string): bool {
+    for i in 0..attrs.len {
+        if attrs[i].name == name {
+            return true
+        }
+    }
+    return false
 }
 
 // -- Enum info (post-resolution) --
@@ -182,6 +199,30 @@ pub struct Checker {
     // Absent means "unknown" (several disagreeing returns, or none at all) —
     // callers then fall back to freezing the whole receiver.
     viewReturnFields: HashMap<string, Vec<string>>,
+    // Field-only places moved out of an OWNED struct binding, keyed by the
+    // binding's name — the field-level counterpart of VarInfo.moved (which only
+    // answers the question for the WHOLE variable). Same by-value-VarInfo
+    // constraint as borrowedPaths above, so it's a second name-keyed side
+    // table rather than a field on VarInfo. Each entry is a dotted chain off
+    // the root (".a", ".inner.s") — see checker/moves.milo.
+    movedFields: HashMap<string, Vec<string>>,
+    // Depth counter raised while checking the OBJECT of a FieldAccess/IndexAccess
+    // — i.e. while `p` is only being used as the base of a narrower place like
+    // `p.b`, not read as a whole value. Mirrors the oracle's placeBaseDepth:
+    // without it, every `p.b` would first check `p` as an Ident and wrongly
+    // report "p is incomplete" even though only the untouched field is read.
+    placeBaseDepth: i32,
+    // Depth counter raised while checking an assignment's OWN target expression
+    // (`p.a = ...`) — the field about to be overwritten doesn't care whether it
+    // was already moved, so the read-time "use of moved value" check is
+    // suppressed for exactly that walk (checkAssign clears the place right after).
+    inAssignTargetDepth: i32,
+    // Depth counter raised while checking a `sortByKey` key extractor's body.
+    // sortByKey reads the key to compare and never stores or drops it, so
+    // taking a field out of its `&T` receiver never actually aliases anything
+    // past the call — the one exemption to the move-out-of-borrow rule (see
+    // checker/expr.milo's fieldMoveOutOfBorrow and tests/fixtures/sortByKeyString.milo).
+    keyExtractorDepth: i32,
 }
 
 pub fn newChecker(): Checker {
@@ -214,6 +255,10 @@ pub fn newChecker(): Checker {
         borrowedPaths: HashMap.new(),
         scopeFreezes: Vec.new(),
         viewReturnFields: HashMap.new(),
+        movedFields: HashMap.new(),
+        placeBaseDepth: 0,
+        inAssignTargetDepth: 0,
+        keyExtractorDepth: 0,
     }
 }
 
@@ -278,6 +323,11 @@ pub fn popScope(ck: &mut Checker) {
 
 pub fn declare(ck: &mut Checker, name: string, info: VarInfo) {
     let depth = ck.scopes.len - 1
+    // A fresh binding owns nothing moved yet. Without this reset, a name reused
+    // across two unrelated functions (`self`, `p`, ...) would see the PREVIOUS
+    // function's partial-move state, since movedFields is name-keyed rather
+    // than scope-keyed (see the field's doc comment on Checker).
+    ck.movedFields.insert(name.clone(), Vec.new())
     ck.scopes[depth].insert(name, info)
 }
 
@@ -537,6 +587,9 @@ pub fn isCopyCk(ck: &Checker, t: &TypeKind): bool {
                 return false
             }
             let info = ck.structs.get(name)!
+            if info.noCopy {
+                return false
+            }
             for i in 0..info.fields.len {
                 if !isCopyCk(ck, info.fields[i].ty) {
                     return false

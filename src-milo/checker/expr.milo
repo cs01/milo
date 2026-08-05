@@ -1054,6 +1054,27 @@ pub fn checkUnaryOp(ck: &mut Checker, op: &string, operand: &Expr, span: &Option
 
 // -- Function calls --
 
+// Is `name` bound in local scope to something callable (a closure/fn-typed
+// param or local)? Used to let a local shadow a same-named global function —
+// see checkCall's comment on the paramShadowsGlobal fixture.
+pub fn isLocalCallableFn(ck: &Checker, name: &string): bool {
+    match lookup(ck, name) {
+        Option.Some(v) => {
+            match v.ty {
+                TypeKind.TFn(params, ret) => {
+                    return true
+                }
+                _ => {
+                    return false
+                }
+            }
+        }
+        Option.None => {
+            return false
+        }
+    }
+}
+
 pub fn checkCall(ck: &mut Checker, func: &string, args: &Vec<Heap<Expr>>, typeArgs: &Vec<MiloType>, span: &Option<Span>): TypeKind {
     // Static method on an instantiated generic type: Type<Args>.method(...)
     var dotIdx: i64 = -1
@@ -1216,8 +1237,18 @@ pub fn checkCall(ck: &mut Checker, func: &string, args: &Vec<Heap<Expr>>, typeAr
         return aType
     }
 
-    // Regular function call
-    if !ck.functions.contains(func) {
+    // Regular function call. A callable in local scope wins over a global
+    // function of the same name — innermost binding, as everywhere else in the
+    // language. Globals used to be consulted first (this block only ran when
+    // `func` was NOT a global at all), so a parameter could never shadow one:
+    // a user defining `fn handler` broke std/http's *internal* `handler(ctx)`
+    // call against its own param, reporting a type error inside a file the
+    // user never opened (see the paramShadowsGlobal fixture). Widening entry
+    // into this block to "no global OR a local fn-typed var exists" lets the
+    // closure-variable check below win the race without disturbing anything
+    // else this block already handles (generic fns, sizeOf, replace, …) for
+    // the plain global-call case, which still skips this block entirely.
+    if !ck.functions.contains(func) || isLocalCallableFn(ck, func) {
         // Check if it's a closure variable
         let info = lookup(ck, func)
         match info {
@@ -3336,6 +3367,15 @@ pub fn checkMethodCall(ck: &mut Checker, obj: &Expr, method: &string, args: &Vec
             }
         }
     }
+    // `.clone()` on a Copy scalar is the identity — it exists so generic code can
+    // be written once: `fn get<T>(w: &Wrapper<T>): T { return w.val.clone() }` has
+    // to compile for T = i64 as well as T = string, and the move-out-of-a-borrow
+    // rule leaves clone as the only way to spell it (mirrors the oracle's
+    // checker.ts:8366). Gated last, after every real method has had a chance to
+    // match, same as the oracle.
+    if method == "clone" && args.len == 0 && isCopyCk(ck, objType) {
+        return objType.clone()
+    }
     error(ck, "no method '" + method.clone() + "' on type " + typeName(objType), cloneSpan(span))
     return tyUnknown()
 }
@@ -3617,6 +3657,38 @@ pub fn checkVecMethod(ck: &mut Checker, obj: &Expr, elem: &TypeKind, method: &st
         }
         return tyString()
     }
+    // fold(init, (acc, elem) => acc) — the accumulate half of the functional set.
+    // 'reduce' is accepted as the same operation (mirrors the oracle's checker.ts).
+    if method == "fold" || method == "reduce" {
+        if args.len != 2 {
+            error(ck, "'" + method.clone() + "' expects 2 arguments (initial value, callback)", cloneSpan(span))
+            return tyUnknown()
+        }
+        // The accumulator's type comes from the initial value. The oracle also
+        // retypes a bare-int seed from the callback's own annotation when the two
+        // disagree (`fold(0, (a: i64, b) => ...)` on a Vec<i32>) — skipped here:
+        // every seed this checker sees is a literal that already defaults to the
+        // width the callback declares, so the narrower case is a known, unhit gap.
+        let accType = checkExpr(ck, *args[0])
+        var fparams: Vec<TypeKind> = Vec.new()
+        fparams.push(accType.clone())
+        fparams.push(TypeKind.TRef(Heap(elem.clone()), false))
+        ck.expectedType = Option.Some(TypeKind.TFn(fparams, Heap(accType.clone())))
+        let cbType = checkExpr(ck, *args[1])
+        ck.expectedType = Option.None
+        match cbType.clone() {
+            TypeKind.TFn(cp, cr) => {
+                let retType = (*cr).clone()
+                if !typeEq(retType, accType) && !typeEq(retType, tyUnknown()) && !typeEq(accType, tyUnknown()) {
+                    error(ck, "'" + method.clone() + "' callback must return " + typeName(accType) + " to match the initial value, got " + typeName(retType), cloneSpan(span))
+                }
+            }
+            _ => {
+                error(ck, "'" + method.clone() + "' argument 2 must be a function", cloneSpan(span))
+            }
+        }
+        return accType
+    }
     // sum(): accumulates every element — ints and floats only.
     if method == "sum" {
         if args.len != 0 {
@@ -3627,6 +3699,44 @@ pub fn checkVecMethod(ck: &mut Checker, obj: &Expr, elem: &TypeKind, method: &st
             return tyUnknown()
         }
         return elem.clone()
+    }
+    // sort(): sorts a Vec of a directly-comparable element type in place.
+    if method == "sort" {
+        if args.len != 0 {
+            error(ck, "'sort' takes no arguments", cloneSpan(span))
+        }
+        if !isRootMutable(ck, obj) {
+            error(ck, "cannot sort immutable Vec", cloneSpan(span))
+        }
+        if !isInteger(elem) && !isFloat(elem) && !typeEq(elem, tyString()) && !typeEq(elem, tyBool()) {
+            error(ck, "'sort' requires Vec of a comparable type (int, float, string, bool)", cloneSpan(span))
+        }
+        return tyVoid()
+    }
+    // sortBy((&T, &T) => i32): sorts in place by a custom comparator, same
+    // contract as qsort/Ord::cmp — negative means the first arg sorts earlier.
+    if method == "sortBy" {
+        if args.len != 1 {
+            error(ck, "'sortBy' expects 1 argument (comparator)", cloneSpan(span))
+            return tyUnknown()
+        }
+        if !isRootMutable(ck, obj) {
+            error(ck, "cannot sort immutable Vec", cloneSpan(span))
+        }
+        var fparams: Vec<TypeKind> = Vec.new()
+        fparams.push(TypeKind.TRef(Heap(elem.clone()), false))
+        fparams.push(TypeKind.TRef(Heap(elem.clone()), false))
+        ck.expectedType = Option.Some(TypeKind.TFn(fparams, Heap(tyI32())))
+        let cbBorrowType = checkExpr(ck, *args[0])
+        ck.expectedType = Option.None
+        match cbBorrowType {
+            TypeKind.TFn(cp, cr) => {
+            }
+            _ => {
+                error(ck, "'sortBy' argument must be a comparator function", cloneSpan(span))
+            }
+        }
+        return tyVoid()
     }
     // sortByKey((&T) => K): sorts in place by a comparable key extracted from each
     // element. The closure's param is hinted &T (like find/any/all); its inferred
@@ -3913,6 +4023,13 @@ pub fn checkHashMapMethod(ck: &mut Checker, obj: &Expr, key: &TypeKind, val: &Ty
             error(ck, "'keys' takes no arguments", cloneSpan(span))
         }
         return TypeKind.TVec(Heap(key.clone()))
+    }
+    // values(): same snapshot-into-a-Vec deal as keys(), just the other column.
+    if method == "values" {
+        if args.len != 0 {
+            error(ck, "'values' takes no arguments", cloneSpan(span))
+        }
+        return TypeKind.TVec(Heap(val.clone()))
     }
     error(ck, "no method '" + method.clone() + "' on HashMap", cloneSpan(span))
     return tyUnknown()

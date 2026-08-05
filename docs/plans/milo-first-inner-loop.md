@@ -270,7 +270,19 @@ need" is a ranked list rather than a guess. First pass closed four of them:
 | `string.pushStr` | 43 | The single most-cited missing method. `genStringAppendInPlace` already existed for the `s = s + x` peephole, so this was wiring. |
 | `bool.toString`, integer `rotateLeft`/`rotateRight` | 23 | `select` over two string literals; `llvm.fshl`/`fshr` with both operands equal. |
 
-Net: **242 → 233 fixtures milo0 cannot compile; 336 → 345 it can.**
+Second round went after the *parse* failures instead, because one parse error desyncs
+milo0's parser and cascades into hundreds of bogus `<unknown>` type errors — so a single
+parse gap can hide a whole file's worth of real signal:
+
+| fixed | what it was |
+|---|---|
+| Option/Result queries | milo0 had **none** — `Option` was reachable only through `match`. Added `isSome`/`isNone`/`isOk`/`isErr`/`unwrapOr` (tag compare + a phi). The closure-taking combinators (`map`/`andThen`/`orElse`) are deliberately still absent rather than half-supported. |
+| `from` as a soft keyword | milo0 lexed it as a hard keyword, so every `fn slice(src, from, to)` in std was a parse error. Now it introduces an import only when a string literal follows — exactly the TS compiler's rule. |
+| let-else | `let Option.Some(v) = e else { … }`. Desugars in the PARSER to `let tmp = e` / `if tmp.isNone() { … }` / `let v = tmp!` — three forms milo0 already had, so no new node threaded through checker, lowering and codegen. |
+| if-expression conditions | `let maxLen = if n - pos < MAX { … }` — the expression form forgot the no-struct-literal rule the statement form uses, so `MAX { n - pos }` parsed as a struct literal and died on the `-`. |
+
+Net: **242 → 227 fixtures milo0 cannot compile; 336 → 351 it can. Fixtures dying at the
+parser: 52 → 29.**
 
 Read that ratio carefully — it is the most useful thing on this page. Four features, one of
 them the *most-cited* blocker in the corpus, moved the needle by nine fixtures. The reason
@@ -283,15 +295,21 @@ So the port does not have a lucky-fix shape. The remaining ranked head:
 
 | fixtures | gap |
 |---|---|
-| 30 | Option/Result methods on a struct receiver — milo0 has **no** `isSome`/`isNone`/`isOk`/`isErr`/`unwrapOr`/`map`/`andThen`/`orElse`/`mapErr` at all; `Option` is reachable only through `match` |
-| 20 | `<unknown>.push` — cascades from an earlier failure in the same file |
+| 29 | still die at the parser, now on a long tail: `@` attributes in member position, `:` in several spots, `targetOs()` comptime, float exponents like `1e16` |
+| ~20 | `<unknown>.*` — cascades from an earlier failure in the same file |
 | 12 | `Vec.clear`, `insert`, `remove`, `keys`, `sort` |
-| 11 | let-else with a namespaced enum pattern (`let Option.Some(x) = e else { }`) — milo0's AST has **no let-else node**, so it is a parser+checker+lower+codegen feature, not a parse fix |
 | ~10 | string views: `lines`, `splitView`, `repeat`, `indexOfFrom` |
+| — | Option/Result closure combinators: `map`, `andThen`, `orElse`, `mapErr` |
+| — | the namespace-object model itself: `Math.absI64(x)` is still `unknown enum 'Math'` |
 
-The two structural items there — Option/Result methods and let-else — are each multi-file
-changes through parser, checker, lowering and codegen. That is the honest unit of work for
-this port, and there are dozens of them.
+The last one is the big one and it is not on the fixture-count list because it fails
+*early*: milo0 predates the stdlib coherence overhaul, so the whole `Receiver.method()`
+namespace model is unimplemented. Every `Math.`, `Bytes.`, `Json.` call in std is a hole.
+
+**Rate, measured over two rounds: roughly 3 fixtures per feature.** Eight features moved 242
+to 227. At that rate the remaining 227 is dozens of features — and the ones left are
+individually larger than the ones already done, because the cheap and highly-cited ones went
+first. That is the number to plan against.
 
 ---
 

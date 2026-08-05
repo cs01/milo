@@ -1090,10 +1090,21 @@ pub fn checkCall(ck: &mut Checker, func: &string, args: &Vec<Heap<Expr>>, typeAr
                 // comparing only the unwrapped inner rejected it even when both sides
                 // print identically as "&string", because the arg's own ref wrapper
                 // was never stripped before the comparison.
+                //
+                // Mutability is deliberately NOT compared here — matches the oracle
+                // (src/checker.ts: `argType.tag === "ref" && typeEq(paramType.inner,
+                // argType.inner)`, no `.mutable` check). `.slice()` always returns an
+                // immutable-tagged &[T] regardless of the source's own mutability
+                // (checker/expr.milo `method == "slice"`, mirroring the TS oracle's
+                // hardcoded `mutable: false`), so a mutable Vec's own disjoint windows
+                // (`fill(v[0..2], v[2..4])` into two `&mut [T]` params) would otherwise
+                // be rejected as "&[T] where &mut [T] expected" even though the source
+                // is mutable. The oracle instead enforces real mutability (rejecting a
+                // `let`-rooted Vec passed as `&mut`) at the auto-borrow site, not here.
                 var refPassThrough = false
                 match argType.clone() {
                     TypeKind.TRef(argInner, argMutable) => {
-                        if typeEq(*inner, *argInner) && mutable == argMutable {
+                        if typeEq(*inner, *argInner) {
                             refPassThrough = true
                         }
                     }
@@ -1309,7 +1320,16 @@ pub fn checkFieldAccess(ck: &mut Checker, obj: &Expr, field: &string, span: &Opt
         }
         TypeKind.TArray(elem, size) => {
             if field == "len" {
-                return TypeKind.TInt(32, true)
+                // fixed arrays: compile-time i32 constant; slices (size None): runtime i64,
+                // matching the TS oracle (checker.ts FieldAccess "len").
+                match size {
+                    Option.Some(n) => {
+                        return TypeKind.TInt(32, true)
+                    }
+                    Option.None => {
+                        return TypeKind.TInt(64, true)
+                    }
+                }
             }
             error(ck, "cannot access field '" + field.clone() + "' on array", cloneSpan(span))
             return tyUnknown()
@@ -3668,11 +3688,12 @@ pub fn checkStructMethod(ck: &mut Checker, structName: &string, method: &string,
                         // A view passed straight through (the arg is ALREADY a matching
                         // &T, e.g. a method that returns &string/&[T]) has to be accepted
                         // too — see the identical fix on the free-function call path
-                        // above for why comparing only the unwrapped inner rejects it.
+                        // above for why comparing only the unwrapped inner rejects it,
+                        // and why mutability is deliberately not compared here.
                         var refPassThrough = false
                         match argType.clone() {
                             TypeKind.TRef(argInner, argMutable) => {
-                                if typeEq(*inner, *argInner) && mutable == argMutable {
+                                if typeEq(*inner, *argInner) {
                                     refPassThrough = true
                                 }
                             }

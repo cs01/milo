@@ -1,0 +1,553 @@
+// platform-specific constants and helpers for wasm64 (tools/wasm/runtime.c +
+// tools/wasm/run.mjs).
+//
+// This arm exports the IDENTICAL surface platform.darwin.milo does (same rule the
+// Windows arm follows — see CLAUDE.md's platform-split note): every `pub` name here
+// also exists there, with the same signature, so any module written against
+// `from "std/platform" import {...}` resolves on every target without an `#ifdef`.
+//
+// wasm64 is freestanding — no syscalls, no OS — so almost everything below is one of
+// two things:
+//   1. A pure constant/value-building helper (byte offsets, flag bits, sockaddr
+//      layouts). These do real, correct work on every target including wasm: nothing
+//      about them depends on an OS, they're just numbers and struct literals. Copied
+//      verbatim from platform.darwin.milo.
+//   2. A `pub extern fn` naming a real POSIX syscall (kqueue, pthread_*, mmap, open,
+//      dlopen, gettimeofday, ...) that tools/wasm/runtime.c does NOT define. These
+//      are also copied verbatim — the Windows-arm convention (CLAUDE.md) is "let the
+//      rest fail loudly": a program that never calls one links and runs fine
+//      (--gc-sections drops the unreferenced declare), and one that does gets an
+//      honest `undefined symbol` at link time naming exactly what's missing, never a
+//      plausible-looking wrong value. This is what makes std/sync, std/net, std/fs,
+//      std/dl, std/process, and green threads (std/runtime's scheduler) dead under
+//      wasm: every syscall they're built on lives in this bucket.
+//
+// The one exception is getcontext/makecontext/swapcontext: std/runtime's stackful-
+// coroutine scheduler is not just unimplemented but UNPORTABLE (there is no wasm
+// analog of swapping a raw machine stack — the closest thing, Asyncify/CPS, is a
+// whole-program rewrite, not a runtime shim), so rather than let it surface as a
+// generic "undefined symbol: swapcontext", these three are real Milo functions that
+// assert(false, ...) with a message naming the actual reason. Same pattern
+// platform.windows.milo already uses for execvpWithEnv.
+//
+// `write` is the other interesting case: it happens to be one syscall
+// tools/wasm/runtime.c DOES implement for real (as the host `fd_write` import), so a
+// program that calls it directly — not through std/io's scheduler-backed path — gets
+// working byte-exact output, not a link error. Kept as a plain `extern fn` like every
+// other arm; nothing about its declaration needs to change for that to be true.
+
+from "std/os" import {
+    htons,
+    execvp,
+    memcpy
+}
+
+// Fields carry C's spelling, not Milo camelCase — see platform.darwin.milo's comment.
+// Never verified against a real header on this target (verifyCDecls skips @cLayout/
+// @cSig entirely for freestanding targets, same as bare-metal ARM), but kept
+// byte-identical to the darwin layout so the struct at least has a sane, consistent
+// shape if something stages one in memory without ever handing it to a real socket
+// syscall (which, on wasm, cannot exist).
+pub extern type SockAddr
+
+@cLayout("struct sockaddr_in", "netinet/in.h")
+pub extern struct SockAddrIn {
+    sin_len: u8,
+    sin_family: u8,
+    sin_port: u16,
+    sin_addr: u32,
+    sin_zero: [u8; 8],
+}
+
+@cLayout("struct sockaddr_in6", "netinet/in.h")
+pub extern struct SockAddrIn6 {
+    sin6_len: u8,
+    sin6_family: u8,
+    sin6_port: u16,
+    sin6_flowinfo: u32,
+    sin6_addr: [u8; 16],
+    sin6_scope_id: u32,
+}
+
+@cLayout("struct sockaddr_un", "sys/un.h")
+pub extern struct SockAddrUn {
+    sun_len: u8,
+    sun_family: u8,
+    sun_path: [u8; 104],
+}
+
+@cLayout("struct sockaddr_storage", "sys/socket.h")
+pub extern struct SockAddrStorage {
+    ss_len: u8,
+    ss_family: u8,
+    __ss_pad1: [u8; 6],
+    __ss_align: i64,
+    __ss_pad2: [u8; 112],
+}
+
+pub fn makeZeroedSockaddrStorage(): SockAddrStorage {
+    unsafe {
+        return zeroed<SockAddrStorage>()
+    }
+}
+
+pub fn afInet6(): i32 {
+    return 30
+}
+
+pub fn makeSockaddr6(port: u16, addr: [u8; 16], scopeId: u32): SockAddrIn6 {
+    var a = SockAddrIn6 {
+        sin6_len: 28 as u8,
+        sin6_family: 30 as u8,
+        sin6_port: htons(port),
+        sin6_flowinfo: 0,
+        sin6_addr: [0; 16],
+        sin6_scope_id: scopeId,
+    }
+    var i: i64 = 0
+    while i < 16 {
+        a.sin6_addr[i] = addr[i]
+        i = i + 1
+    }
+    return a
+}
+
+pub fn sockAddrInLen(): u32 {
+    return 16
+}
+
+pub fn sockAddrIn6Len(): u32 {
+    return 28
+}
+
+pub fn makeSockaddrUn(path: &string): SockAddrUn {
+    var a = SockAddrUn {
+        sun_len: 106 as u8,
+        sun_family: 1 as u8,
+        sun_path: [0; 104],
+    }
+    var i: i64 = 0
+    while i < path.len && i < sockAddrUnMaxPath() {
+        a.sun_path[i] = path[i]
+        i = i + 1
+    }
+    return a
+}
+
+pub fn sockAddrUnLen(): u32 {
+    return 106
+}
+
+pub fn sockAddrUnMaxPath(): i64 {
+    return 103
+}
+
+pub fn sockAddrStorageLen(): u32 {
+    return 128
+}
+
+pub fn makeSockaddr(port: u16, addr: u32): SockAddrIn {
+    return SockAddrIn {
+        sin_len: 16 as u8,
+        sin_family: 2 as u8,
+        sin_port: htons(port),
+        sin_addr: addr,
+        sin_zero: [0; 8],
+    }
+}
+
+pub fn makeZeroedSockaddr(): SockAddrIn {
+    return SockAddrIn {
+        sin_len: 0, sin_family: 0, sin_port: 0, sin_addr: 0, sin_zero: [0; 8],
+    }
+}
+
+pub fn solSocket(): i32 {
+    return 65535
+}
+
+pub fn soReuseaddr(): i32 {
+    return 4
+}
+
+pub fn mapPrivateAnon(): i32 {
+    return 4098
+}
+
+pub fn oWriteCreateTrunc(): i32 {
+    return 1537
+}
+
+pub fn oWriteCreateAppend(): i32 {
+    return 521
+}
+
+pub fn addrinfoAddrOffset(): i64 {
+    return 32
+}
+
+pub fn statModeOffset(): i64 {
+    return 4
+}
+
+pub fn statSizeOffset(): i64 {
+    return 96
+}
+
+pub fn statBufSize(): i64 {
+    return 144
+}
+
+pub fn direntTypeOffset(): i64 {
+    return 20
+}
+
+pub fn direntNameOffset(): i64 {
+    return 21
+}
+
+// No wasm equivalent of errno or a per-thread `__error()` cell — nothing on this
+// target ever sets one, since every syscall that would is an unresolved extern
+// below. Kept as a real extern (not an abort) so a program that never actually
+// calls a syscall — and so never needs a meaningful errno — still links.
+extern fn __error(): *u8
+
+pub fn getErrno(): i32 {
+    unsafe {
+        return _loadI32(__error())
+    }
+}
+
+// ── kqueue ── (std/select, std/net's event loop — no wasm equivalent)
+
+pub extern fn kqueue(): i32
+
+pub extern fn kevent(kq: i32, changelist: *u8, nchanges: i32, eventlist: *u8, nevents: i32, timeout: *u8): i32
+
+pub struct Kevent {
+    ident: u64,
+    filter: i16,
+    flags: u16,
+    fflags: u32,
+    data: i64,
+    udata: *u8,
+}
+
+pub fn evfiltRead(): i16 {
+    return -1 as i16
+}
+
+pub fn evfiltWrite(): i16 {
+    return -2 as i16
+}
+
+pub fn evfiltUser(): i16 {
+    return -10 as i16
+}
+
+pub fn evAdd(): u16 {
+    return 1 as u16
+}
+
+pub fn evDelete(): u16 {
+    return 2 as u16
+}
+
+pub fn evEnable(): u16 {
+    return 4 as u16
+}
+
+pub fn evOneshot(): u16 {
+    return 16 as u16
+}
+
+pub fn evClear(): u16 {
+    return 32 as u16
+}
+
+pub fn noteTrigger(): u32 {
+    return 16777216
+}
+
+// ── signals ──
+
+pub fn sigchldNum(): i32 {
+    return 20
+}
+
+// ── fcntl / non-blocking ── (meaningless without real fds, kept for surface parity)
+
+pub extern fn fcntl(fd: i32, cmd: i32,...): i32
+
+pub fn fGetfl(): i32 {
+    return 3
+}
+
+pub fn fSetfl(): i32 {
+    return 4
+}
+
+pub fn oNonblock(): i32 {
+    return 4
+}
+
+pub fn eagain(): i32 {
+    return 35
+}
+
+pub fn einprogress(): i32 {
+    return 36
+}
+
+pub fn soError(): i32 {
+    return 4103
+}
+
+pub fn ensureNetInit(): void {
+}
+
+pub fn netErrno(): i32 {
+    return getErrno()
+}
+
+pub fn netEagain(): i32 {
+    return eagain()
+}
+
+pub fn netEinprogress(): i32 {
+    return einprogress()
+}
+
+pub fn closeSocket(fd: i32): i32 {
+    return close(fd)
+}
+
+// ── ucontext (stackful coroutines) ──
+//
+// UNPORTABLE, not just unimplemented: there is no wasm instruction that swaps a raw
+// machine stack out from under a running function the way ucontext does, so there is
+// no shim to write here short of an Asyncify/CPS whole-program rewrite (a codegen
+// project, not a platform-arm one). std/runtime's green-thread scheduler — and
+// everything built on it (std/io, std/sync, std/select, std/timer, std/net,
+// std/http, std/httpmw, std/fetch, std/ws, std/unix, std/process, std/pty) — is dead
+// on this target because of exactly these three symbols. Real Milo functions (not
+// externs) so the failure is a clear assert message naming the reason, not a bare
+// "undefined symbol: swapcontext" — same pattern platform.windows.milo uses for
+// execvpWithEnv.
+
+pub fn getcontext(ucp: *u8): i32 {
+    assert(false, "getcontext: wasm64 has no stackful coroutines (no wasm instruction swaps a raw machine stack) — std/runtime's green-thread scheduler cannot run on this target")
+    return -1
+}
+
+pub fn makecontext(ucp: *u8, func: *u8, argc: i32,...): void {
+    assert(false, "makecontext: wasm64 has no stackful coroutines — see getcontext")
+}
+
+pub fn swapcontext(oucp: *u8, ucp: *u8): i32 {
+    assert(false, "swapcontext: wasm64 has no stackful coroutines — see getcontext")
+    return -1
+}
+
+pub fn uctxSize(): i64 {
+    return 880
+}
+
+pub fn uctxStackPtrOffset(): i64 {
+    return 8
+}
+
+pub fn uctxStackSizeOffset(): i64 {
+    return 16
+}
+
+pub fn uctxLinkOffset(): i64 {
+    return 32
+}
+
+// ── mmap constants ──
+// The flag/prot values below are inert on this target (nothing calls a real mmap),
+// kept only so the two callers that reference them (std/mem's virtual-alloc path,
+// std/runtime's scheduler stacks) still type-check; both fail loudly at LINK time
+// via the unresolved `mmap` extern below if actually exercised.
+
+pub fn protRead(): i32 {
+    return 1
+}
+
+pub fn protWrite(): i32 {
+    return 2
+}
+
+pub fn protNone(): i32 {
+    return 0
+}
+
+pub fn mapPrivate(): i32 {
+    return 2
+}
+
+pub fn mapAnon(): i32 {
+    return 4096
+}
+
+// ── executable path ── (no wasm equivalent of a "running binary" path)
+
+pub extern fn proc_pidpath(pid: i32, buf: *u8, bufsize: u32): i32
+
+pub fn exePathInto(buf: *u8, bufsize: i64): i64 {
+    let n = proc_pidpath(getpid(), buf, bufsize as u32)
+    if n <= 0 {
+        return -1
+    }
+    return n as i64
+}
+
+// ── environment ── (no process environment on this target)
+
+@cSig("stdlib.h", "int setenv(const char *, const char *, int)")
+pub extern fn setenv(name: *u8, value: *u8, overwrite: i32): i32
+
+@cSig("stdlib.h", "int unsetenv(const char *)")
+pub extern fn unsetenv(name: *u8): i32
+
+@cSig("crt_externs.h", "char ***_NSGetEnviron(void)")
+pub extern fn _NSGetEnviron(): ***u8
+
+pub fn envSet(name: *u8, value: *u8): i32 {
+    return setenv(name, value, 1)
+}
+
+pub fn envUnset(name: *u8): i32 {
+    return unsetenv(name)
+}
+
+pub fn environBlock(): **u8 {
+    unsafe {
+        return *_NSGetEnviron()
+    }
+}
+
+pub fn execvpWithEnv(file: *u8, argv: *u8, envp: *u8): i32 {
+    unsafe {
+        var slot: *u8 = envp
+        memcpy(_NSGetEnviron() as *u8, (slot.addrOf()) as *u8, 8)
+        return execvp(file, argv)
+    }
+}
+
+// ── pthreads ── (std/sync — no threads on this target)
+
+pub extern fn pthread_create(thread: *u8, attr: *u8, start: *u8, arg: *u8): i32
+
+pub extern fn pthread_join(thread: i64, retval: *u8): i32
+
+pub extern fn pthread_detach(thread: i64): i32
+
+pub extern fn pthread_self(): u64
+
+pub extern fn pthread_mutex_init(mutex: *u8, attr: *u8): i32
+
+pub extern fn pthread_mutex_lock(mutex: *u8): i32
+
+pub extern fn pthread_mutex_unlock(mutex: *u8): i32
+
+pub extern fn pthread_mutex_destroy(mutex: *u8): i32
+
+pub extern fn pthread_cond_init(cond: *u8, attr: *u8): i32
+
+pub extern fn pthread_cond_wait(cond: *u8, mutex: *u8): i32
+
+pub extern fn pthread_cond_signal(cond: *u8): i32
+
+pub extern fn pthread_cond_broadcast(cond: *u8): i32
+
+pub extern fn pthread_cond_destroy(cond: *u8): i32
+
+pub extern fn pthread_rwlock_init(rwlock: *u8, attr: *u8): i32
+
+pub extern fn pthread_rwlock_rdlock(rwlock: *u8): i32
+
+pub extern fn pthread_rwlock_wrlock(rwlock: *u8): i32
+
+pub extern fn pthread_rwlock_unlock(rwlock: *u8): i32
+
+pub extern fn pthread_rwlock_destroy(rwlock: *u8): i32
+
+// ── mmap family ── (no virtual memory syscalls on this target)
+
+@cSig("sys/mman.h", "void *mmap(void *, size_t, int, int, int, off_t)")
+pub extern fn mmap(addr: *u8, len: i64, prot: i32, flags: i32, fd: i32, offset: i64): *u8
+
+@cSig("sys/mman.h", "int munmap(void *, size_t)")
+pub extern fn munmap(addr: *u8, len: i64): i32
+
+@cSig("sys/mman.h", "int mprotect(void *, size_t, int)")
+pub extern fn mprotect(addr: *u8, len: i64, prot: i32): i32
+
+// ── time ── (no wall clock on this target — no host import for it; see report)
+
+pub extern fn gettimeofday(tv: *u8, tz: *u8): i32
+
+pub extern fn usleep(usec: u32): i32
+
+// ── pipe(2) ── (no fds on this target)
+
+@cSig("unistd.h", "int pipe(int *)")
+pub extern fn pipe(fds: *i32): i32
+
+// ── fd I/O ──
+//
+// `write` is the interesting one: tools/wasm/runtime.c defines it for real (over the
+// `fd_write` host import), with exactly this signature, so a program calling it
+// directly gets working byte-exact output — this is genuinely NOT dead on wasm, only
+// its scheduler-mediated callers (std/io's async write path) are. `read` has no
+// runtime.c counterpart (no host import for reading anything back), so it stays an
+// unresolved extern like every other syscall on this arm.
+
+@cSig("unistd.h", "ssize_t read(int, void *, size_t)")
+pub extern fn read(fd: i32, buf: *u8, nbyte: i64): i64
+
+@cSig("unistd.h", "ssize_t write(int, const void *, size_t)")
+pub extern fn write(fd: i32, buf: *u8, nbyte: i64): i64
+
+pub fn sockRead(fd: i32, buf: *u8, nbyte: i64): i64 {
+    return read(fd, buf, nbyte)
+}
+
+pub fn sockWrite(fd: i32, buf: *u8, nbyte: i64): i64 {
+    return write(fd, buf, nbyte)
+}
+
+@cSig("fcntl.h", "int open(const char *, int, ...)")
+pub extern fn open(path: *u8, flags: i32,...): i32
+
+@cSig("unistd.h", "int close(int)")
+pub extern fn close(fd: i32): i32
+
+@cSig("unistd.h", "off_t lseek(int, off_t, int)")
+pub extern fn lseek(fd: i32, offset: i64, whence: i32): i64
+
+@cSig("unistd.h", "int access(const char *, int)")
+pub extern fn access(path: *u8, mode: i32): i32
+
+@cSig("unistd.h", "pid_t getpid(void)")
+pub extern fn getpid(): i32
+
+pub fn devNullPath(): string {
+    return "/dev/null"
+}
+
+// ── dynamic loading ── (no dynamic linker on this target)
+
+@cSig("dlfcn.h", "void *dlopen(const char *, int)")
+pub extern fn dlopen(_path: *u8, _flags: i32): *u8
+
+@cSig("dlfcn.h", "void *dlsym(void *, const char *)")
+pub extern fn dlsym(_handle: *u8, _symbol: *u8): *u8
+
+@cSig("dlfcn.h", "int dlclose(void *)")
+pub extern fn dlclose(_handle: *u8): i32
+
+@cSig("dlfcn.h", "char *dlerror(void)")
+pub extern fn dlerror(): *u8

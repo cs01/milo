@@ -4,11 +4,38 @@ import { arch, platform } from "os";
 
 export interface TargetInfo {
   triple: string;
-  // "none" = bare metal / freestanding (no OS, no syscalls); the stdlib
-  // platform split (darwin vs linux) does not apply — such targets use the
+  // "none" = bare metal / freestanding ARM (no OS, no syscalls); the stdlib
+  // platform split (darwin vs linux) does not apply there — it uses the
   // freestanding core subset and semihosting for I/O instead.
-  os: "darwin" | "linux" | "windows" | "none";
-  arch: "aarch64" | "x86_64" | "arm";
+  // "wasm" is a DIFFERENT freestanding target: also OS-less and also
+  // bareMetal (see that field's comment for why it reuses the flag), but
+  // unlike "none" it DOES get its own stdlib platform arm
+  // (std/platform.wasm.milo) because it has host I/O (via JS imports) and a
+  // real growable heap, just no libc/syscalls. `os` doubles as the stdlib
+  // platform-file suffix (resolver.ts resolves `${base}.${target.os}.milo`),
+  // which is exactly why "none" and "wasm" have to be distinct values even
+  // though both are freestanding.
+  os: "darwin" | "linux" | "windows" | "none" | "wasm";
+  arch: "aarch64" | "x86_64" | "arm" | "wasm64";
+  // True for every freestanding target (no OS, no libc, no crt0 — the
+  // compiler supplies its own startup + runtime and links with -nostdlib).
+  // Cortex-M and wasm64 are both bareMetal despite having very different
+  // consumers of the flag:
+  //   - verifyCDecls: skip @cLayout/@cSig (no host headers describe either)
+  //   - clangTargetFlags: add -ffreestanding
+  //   - the --heap-size CLI flag (both runtimes have a bump allocator that
+  //     honors -DMILO_HEAP_SIZE)
+  //   - the cross-link error hint (skip the "needs a sysroot" hint — neither
+  //     needs one, they both ship their own runtime with the compiler)
+  // wasm64 does NOT reuse linkBareMetal() itself (no linker script, no ARM
+  // vector table, and JS host imports instead of semihosting) — main.ts
+  // dispatches on `target.arch === "wasm64"` for the link/run step, checked
+  // BEFORE the bareMetal branch. Tried keeping wasm64 non-bareMetal instead;
+  // that meant re-deriving "-ffreestanding", the cLayout skip, and the
+  // heap-size gate all over again with an `|| target.arch === "wasm64"`
+  // added to each — reusing the flag and special-casing only the one place
+  // that's genuinely different (which link function runs) was less
+  // special-casing overall, not more.
   bareMetal?: boolean;
   // clang codegen flags for embedded cores: -mcpu selects the core (drives the
   // instruction subset and pipeline model), -mfloat-abi selects how floats are
@@ -43,6 +70,14 @@ const targets: Record<string, TargetInfo> = {
   "cortex-m4":  { triple: "thumbv7em-none-eabi",   os: "none", arch: "arm", bareMetal: true, mcpu: "cortex-m4",  floatAbi: "soft", qemuMachine: "mps2-an386" }, // M4 without FPU usage
   "cortex-m4f": { triple: "thumbv7em-none-eabihf", os: "none", arch: "arm", bareMetal: true, mcpu: "cortex-m4",  floatAbi: "hard", qemuMachine: "mps2-an386" }, // STM32F4; hardware FPU
   "cortex-m7":  { triple: "thumbv7em-none-eabihf", os: "none", arch: "arm", bareMetal: true, mcpu: "cortex-m7",  floatAbi: "hard", qemuMachine: "mps2-an500" }, // STM32F7/H7; hardware FPU
+
+  // ── wasm64 (freestanding; JS-host I/O via tools/wasm/runtime.c) ──
+  // wasm32 is deliberately absent: Milo's codegen assumes an 8-byte
+  // size_t/pointer everywhere (malloc/memcpy/memcmp/memchr/fwrite/write are
+  // all declared with i64 size params), which matches wasm64 and mismatches
+  // wasm32 on every one of those signatures. See tools/wasm/runtime.c's file
+  // header for the fuller rationale.
+  "wasm64": { triple: "wasm64-unknown-unknown", os: "wasm", arch: "wasm64", bareMetal: true },
 };
 
 // Aliases for chip families the user is more likely to name than the core.

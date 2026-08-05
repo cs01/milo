@@ -1,6 +1,7 @@
 // Native C ABI classification for passing/returning structs by value across an
 // extern (C) boundary. Covers AArch64 (AAPCS64) and x86_64 System V — the two ABIs
-// Milo targets for hosted code. Bare-metal ARM (AAPCS32) is rejected.
+// Milo targets for hosted code. Bare-metal ARM (AAPCS32) and wasm64 (freestanding,
+// no C ABI at all) are both rejected.
 //
 // The classifier is pure: codegen feeds it a struct's size/align plus its flattened
 // scalar leaves (byte offset, size, int-vs-float), all derived from Milo's manual
@@ -13,12 +14,12 @@
 // GP registers (integer coerce). SysV classifies each eightbyte independently as SSE
 // (all-float -> double, lone trailing f32 -> float) or INTEGER (-> i64).
 
-export type Arch = "aarch64" | "x86_64" | "arm";
+export type Arch = "aarch64" | "x86_64" | "arm" | "wasm64";
 
 // The ABI is a function of arch AND OS: x86_64 Windows uses Microsoft x64, not System V,
 // and the two disagree on every struct that isn't exactly 1/2/4/8 bytes. Windows on
 // aarch64 follows AAPCS64 (HFAs included), so only the x86_64 arm needs the split.
-export type Os = "darwin" | "linux" | "windows" | "none";
+export type Os = "darwin" | "linux" | "windows" | "none" | "wasm";
 
 export interface AbiLeaf {
   offset: number; // byte offset within the struct
@@ -55,9 +56,15 @@ function eightbytes(size: number): number {
   return Math.ceil(size / 8);
 }
 
-function armReject(name: string): never {
+// Both bare-metal ARM and wasm64 are freestanding — there's no C ABI spec to match
+// (AAPCS32 exists but Milo doesn't target it; wasm64 has no C ABI at all, just the
+// LLVM-internal convention runtime.c happens to link against), so struct-by-value
+// extern calls are rejected outright on both rather than guessing a lowering nothing
+// on the other side agrees with.
+function noStructAbi(arch: Arch, name: string): never {
+  const why = arch === "wasm64" ? "wasm64 (freestanding — no C ABI to match)" : "bare-metal ARM (AAPCS32)";
   throw new AbiError(
-    `struct-by-value extern calls are not supported on bare-metal ARM (AAPCS32) — pass &${name} instead`,
+    `struct-by-value extern calls are not supported on ${why} — pass &${name} instead`,
   );
 }
 
@@ -108,7 +115,7 @@ function win64RegTy(size: number): string {
 }
 
 export function classifyArg(arch: Arch, s: AbiStruct, os: Os = "linux"): ArgClass {
-  if (arch === "arm") armReject(s.name);
+  if (arch === "arm" || arch === "wasm64") noStructAbi(arch, s.name);
 
   if (arch === "x86_64" && os === "windows") {
     if (!win64InRegister(s.size)) {
@@ -140,7 +147,7 @@ export function classifyArg(arch: Arch, s: AbiStruct, os: Os = "linux"): ArgClas
 }
 
 export function classifyRet(arch: Arch, s: AbiStruct, os: Os = "linux"): RetClass {
-  if (arch === "arm") armReject(s.name);
+  if (arch === "arm" || arch === "wasm64") noStructAbi(arch, s.name);
 
   if (arch === "x86_64" && os === "windows") {
     if (!win64InRegister(s.size)) return { kind: "sret", align: s.align, name: s.name };

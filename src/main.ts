@@ -424,6 +424,34 @@ function detectToolchain(): Toolchain {
   return cachedToolchain;
 }
 
+// wasm64 needs a clang whose LLVM build actually has the WebAssembly backend
+// compiled in. detectToolchain() above prefers /usr/bin/clang unconditionally (for
+// its stability on every OTHER target), but Apple's bundled clang doesn't have one —
+// `clang --print-targets` on Xcode's clang 17 lists aarch64/arm/x86 only, no wasm32/
+// wasm64 — so this is a separate probe, not a variant of detectToolchain(). It checks
+// PATH's `clang` FIRST (unlike detectToolchain, which checks the absolute
+// /usr/bin/clang path first) specifically so that a user who follows the "put
+// Homebrew LLVM first on PATH" instructions (same pattern this repo already uses for
+// Windows cross-compiles) gets picked up rather than silently overridden.
+let cachedWasmClang: string | null | undefined;
+function detectWasmClang(): string | null {
+  if (cachedWasmClang !== undefined) return cachedWasmClang;
+  const candidates = ["clang", "/opt/homebrew/opt/llvm/bin/clang", "/usr/local/opt/llvm/bin/clang"];
+  for (const cc of candidates) {
+    try {
+      const targets = execSync(`${cc} --print-targets`, { encoding: "utf8", stdio: ["pipe", "pipe", "pipe"], timeout: 5000 });
+      if (!/\bwasm(32|64)\b/.test(targets)) continue;
+      const ver = execSync(`${cc} --version`, { encoding: "utf8", stdio: ["pipe", "pipe", "pipe"], timeout: 5000 });
+      const major = clangMajor(ver);
+      if (major !== null && major < MIN_CLANG_MAJOR) continue; // same IR-compatibility floor as detectToolchain
+      cachedWasmClang = cc;
+      return cachedWasmClang;
+    } catch {}
+  }
+  cachedWasmClang = null;
+  return null;
+}
+
 // clang codegen flags for a cross-compilation target. Empty for the host
 // (clang defaults to the host triple). Bare-metal targets get the thumb triple,
 // core selection, float ABI, and -ffreestanding (no hosted libc assumptions).
@@ -518,6 +546,52 @@ function reportMissingBuiltins(stderr: string, target: TargetInfo): boolean {
   }
   console.error(`note: this is the scope of the target, not a missing toolchain; hosted targets have no such limit`);
   return true;
+}
+
+// Directory holding the wasm64 freestanding runtime, resolved the same way as
+// embeddedDir() for Cortex-M.
+function wasmDir(): string {
+  return resolve(dirname(fileURLToPath(import.meta.url)), "..", "tools", "wasm");
+}
+
+// Link a wasm64 module: the Milo program's IR + tools/wasm/runtime.c (malloc, mem*/
+// str*, the printf family, __multi3, and the env.* host imports) -> a freestanding
+// .wasm. Unlike linkBareMetal there's no linker script and no vector table: wasm-ld
+// lays out linear memory itself, and the "entry point" is just an exported `main`
+// function that tools/wasm/run.mjs calls directly — no crt0/Reset_Handler equivalent
+// to link in.
+function linkWasm(llFile: string, outFile: string, target: TargetInfo, optFlag: string, heapSize: number | null = null) {
+  const cc = detectWasmClang();
+  if (!cc) {
+    console.error(`error: no clang with a wasm64 backend found on PATH or in the usual Homebrew locations`);
+    console.error(`hint: brew install llvm, then either put it first on PATH`);
+    console.error(`      (PATH="/opt/homebrew/opt/llvm/bin:$PATH" milo build ... --target=wasm64)`);
+    console.error(`      or just having it installed is enough — this check also looks there directly.`);
+    process.exit(1);
+  }
+  const runtime = join(wasmDir(), "runtime.c");
+  if (!existsSync(runtime)) {
+    console.error(`error: wasm64 runtime not found at ${runtime} (need runtime.c)`);
+    process.exit(1);
+  }
+  const opt = optFlag || "-O2";
+  const tgt = clangTargetFlags(target); // bareMetal=true gets us --target=wasm64-unknown-unknown -ffreestanding
+  // -DMILO_HEAP_SIZE caps runtime.c's bump allocator, same flag/semantics as
+  // linkBareMetal's heapDef.
+  const heapDef = heapSize != null ? ` -DMILO_HEAP_SIZE=${heapSize}` : "";
+  // -nostdlib: no libc/crt0, runtime.c supplies every symbol codegen can auto-declare.
+  // --no-entry: there is no _start; the host loader calls the exported `main` directly.
+  // --export=main is the one symbol tools/wasm/run.mjs needs — wasm-ld exports the
+  // module's linear memory by default, no flag needed for that.
+  // --gc-sections (+ -f{function,data}-sections): same reason as linkBareMetal's — at
+  // -O0 no optimizer pass strips the stdlib prelude a program never calls, and one of
+  // std/string's unused parsers referencing atof was enough to pull in a symbol this
+  // runtime deliberately aborts on rather than links against.
+  execSync(
+    `${cc}${tgt} ${opt}${heapDef} -ffunction-sections -fdata-sections -nostdlib -fuse-ld=lld ` +
+    `-Wl,--no-entry -Wl,--export=main -Wl,--gc-sections "${runtime}" "${llFile}" -o "${outFile}" -Wno-override-module`,
+    { stdio: ["pipe", "pipe", "pipe"] }
+  );
 }
 
 // Cross-linking to Windows from a POSIX host: clang can emit COFF unaided, but it has
@@ -922,7 +996,12 @@ function compileToBinary(sourcePath: string, outputPath: string | null, target: 
 
   try {
     writeFileSync(tmpLl, ir);
-    if (target.bareMetal) {
+    if (target.arch === "wasm64") {
+      // Also bareMetal (freestanding), but a different freestanding runtime/linker
+      // path than ARM Cortex-M — see linkWasm's comment and target.ts's bareMetal
+      // field comment for why this check runs before the bareMetal branch below.
+      linkWasm(tmpLl, out, target, optFlag, heapSize);
+    } else if (target.bareMetal) {
       // Freestanding link: program IR + startup runtime + linker script → ELF.
       linkBareMetal(tmpLl, out, target, optFlag, heapSize);
     } else {
@@ -1152,6 +1231,10 @@ async function runTests(
 async function runFile(sourcePath: string, extraArgs: string[], target: TargetInfo, optFlag: string = "", warningConfig?: WarningConfig, sanitize: boolean = false, emitDebug = false, heapSize: number | null = null, overflowChecks: boolean | null = null, contractChecks: boolean | null = null) {
   const bin = compileToBinary(sourcePath, null, target, optFlag, warningConfig, [], sanitize, emitDebug, heapSize, overflowChecks, false, contractChecks);
   try {
+    if (target.arch === "wasm64") {
+      runWasm(bin, extraArgs); // process.exit()s itself with the wasm program's exit code
+      return;
+    }
     if (target.bareMetal) {
       runBareMetalQemu(bin, target);
       return;
@@ -1217,6 +1300,26 @@ function runBareMetalQemu(bin: string, target: TargetInfo) {
   // program's stdout, so forward it there (not to our stderr).
   if (r.stdout) process.stdout.write(r.stdout);
   if (r.stderr) process.stdout.write(r.stderr);
+}
+
+// Run a wasm64 module through tools/wasm/run.mjs (the host env.* imports live there,
+// not here — see that file). Deliberately shells out to `node`, not `bun`, despite
+// this repo's usual rule: verified empirically that Bun 1.3.10 (JavaScriptCore)
+// rejects the module outright — "Memory64 is not enabled" — while Node 25 (V8)
+// instantiates and runs it with no flag at all (older V8/Node needed
+// --experimental-wasm-memory64; that flag no longer exists in Node 25 because the
+// feature shipped unflagged). This is a real engine capability gap, not a style
+// choice, and it matters beyond this CLI path: it's the same gap a browser embedding
+// would hit depending on which engine renders the page.
+function runWasm(bin: string, extraArgs: string[]) {
+  const loader = join(wasmDir(), "run.mjs");
+  if (!existsSync(loader)) {
+    console.error(`error: wasm64 loader not found at ${loader} (need run.mjs)`);
+    process.exit(1);
+  }
+  const r = spawnSync("node", [loader, bin, ...extraArgs], { stdio: "inherit" });
+  if (r.error) { console.error(`error: failed to run node ${loader}: ${r.error.message}`); process.exit(1); }
+  process.exit(r.status ?? 1);
 }
 
 // Parse a heap-size argument (bare-metal only): plain bytes, or a k/m suffix
@@ -1991,8 +2094,10 @@ async function main() {
     // --cycles: go past flow facts to an actual Cortex-M3 cycle bound by
     // disassembling the linked ELF and applying the core timing model.
     if (rest.includes("--cycles")) {
-      if (!target.bareMetal) {
-        console.error("error: --cycles requires a bare-metal target (e.g. --target=cortex-m3)");
+      // wasm64 is also bareMetal (see target.ts) but has no ARM core to disassemble
+      // against and no cycle timing model — estimateLoopCycles below assumes an ELF.
+      if (!target.bareMetal || target.arch === "wasm64") {
+        console.error("error: --cycles requires a bare-metal ARM target (e.g. --target=cortex-m3)");
         process.exit(1);
       }
       const elf = compileToBinary(source!, null, target, optFlag, warningConfig, [], false);

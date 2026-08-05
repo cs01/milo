@@ -674,6 +674,15 @@ pub fn isConstIntExpr(e: &Expr): bool {
             }
             return false
         }
+        // `if c { 16 } else { 8 }` has no intrinsic width either, same as a bare
+        // literal — needed so `let u: u8 = if c {200} else {12}` coerces instead
+        // of reporting a bogus u8-vs-i64 mismatch against the whole if-expression
+        // (codegen already threads the outer hint into both arms unconditionally;
+        // only the checker was refusing to call this const). Recurses through an
+        // `else if` chain since its else-arm is itself an Expr.IfExpr.
+        Expr.IfExpr(cond, thenE, elseE, span) => {
+            return isConstIntExpr(*thenE) && isConstIntExpr(*elseE)
+        }
         _ => {
             return false
         }

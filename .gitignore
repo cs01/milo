@@ -103,3 +103,4 @@ docs/site/public/install.sh
 
 # Fuzzer output — regenerated per run, never a source of truth.
 .fuzz-findings*/
+miloio*/

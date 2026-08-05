@@ -26,7 +26,7 @@ from "src-milo/checker/borrow.milo" import {
     accessPath, rootIdentName, freezeName, unfreezeName, isFrozen, frozenAgainst,
     freezePlace, freezeViewMethodSource, errorIfFrozenRoot, describePlace,
     assignTargetPath, errorIfAssignFrozen, borrowDuringCallback, BorrowArg,
-    borrowArgOf, checkCallSiteExclusivity,
+    borrowArgOf, checkCallSiteExclusivity, snapshotFrozenNames, releaseOrRetainFreezes,
 }
 
 // -- Statement checker --
@@ -52,7 +52,13 @@ pub fn checkStmt(ck: &mut Checker, stmt: &Stmt, fnRetType: &TypeKind) {
             checkWhile(ck, *cond, body, fnRetType, span)
         }
         Stmt.ExprStmt(expr, span) => {
+            // A view produced by a discarded expression (`print(lx.word(0, 5))`)
+            // has no binding to outlive the statement, so its freeze must not
+            // survive it either — same reasoning as the RHS snapshot in
+            // checkAssign/checkLetDecl, which this mirrors.
+            let frozenBefore = snapshotFrozenNames(ck)
             checkExpr(ck, *expr)
+            releaseOrRetainFreezes(ck, frozenBefore, false)
         }
         Stmt.MatchStmt(subject, arms, span) => {
             checkMatch(ck, *subject, arms, fnRetType)
@@ -111,6 +117,12 @@ pub fn checkLetDecl(ck: &mut Checker, name: &string, typeAnno: &Option<MiloType>
     if hasHint {
         ck.expectedType = Option.Some(hint.clone())
     }
+    // A borrow taken to compute the RHS (`s[0..n]`, `lx.word(...)`) is eager —
+    // freezePlace/freezeViewMethodSource fire on every slice/view-method check,
+    // not just ones that land in a binding. Snapshot what's already frozen so
+    // only what THIS statement newly froze is in scope for the keep/release
+    // decision below.
+    let frozenBefore = snapshotFrozenNames(ck)
     var valType = checkExpr(ck, value)
     ck.expectedType = Option.None
 
@@ -123,6 +135,19 @@ pub fn checkLetDecl(ck: &mut Checker, name: &string, typeAnno: &Option<MiloType>
         }
         valType = hint
     }
+
+    // A view-typed binding (`let view = s[0..5]`) keeps whatever it froze
+    // alive for its own scope's life; anything else (the borrow was fully
+    // consumed within this statement, e.g. `s[0..n].len`) releases now.
+    var isRefBinding = false
+    match valType.clone() {
+        TypeKind.TRef(vinner, vmut) => {
+            isRefBinding = true
+        }
+        _ => {
+        }
+    }
+    releaseOrRetainFreezes(ck, frozenBefore, isRefBinding)
 
     declare(ck, name.clone(), VarInfo {
         ty: valType,
@@ -143,6 +168,10 @@ pub fn checkAssign(ck: &mut Checker, target: &Expr, value: &Expr, span: &Option<
         error(ck, "cannot assign to immutable variable", cloneSpan(span))
         return
     }
+    // Whole-place assignment (`x = ...`, `x.f = ...`) drops the old value and
+    // frees its buffer, so a live view into it would dangle. An in-place
+    // element write (`v[i] = x`) is exempt — see errorIfAssignFrozen.
+    errorIfAssignFrozen(ck, target, span)
 
     // A plain `x = ...` target is written, not read. Routing it through checkExpr
     // would hit checkIdent's use-after-move check and report "use of moved
@@ -174,8 +203,13 @@ pub fn checkAssign(ck: &mut Checker, target: &Expr, value: &Expr, span: &Option<
     // Expose the target's type as the hint so an array literal RHS (`v = [a, b]`)
     // coerces to Vec<T> when the target is one, same as let/var and struct fields.
     ck.expectedType = Option.Some(targetType.clone())
+    // A borrow the RHS takes to compute its value (`s[0..n].clone()`) is
+    // consumed within this statement — no binding outlives it — so it must
+    // not leak a freeze onto the next statement.
+    let frozenBeforeRhs = snapshotFrozenNames(ck)
     let valType = checkExpr(ck, value)
     ck.expectedType = Option.None
+    releaseOrRetainFreezes(ck, frozenBeforeRhs, false)
     if !typeEq(targetDeclType, valType) &&
     !typeEq(targetType, valType) && !typeEq(valType, tyUnknown()) && !intCoercible(targetType, valType, value) &&
     !arrayToVecCoercible(targetType, valType) && !floatLitCoercible(targetType, valType, value) &&
@@ -1000,7 +1034,55 @@ fn viewReturnRoot(e: &Expr): Option<string> {
     }
 }
 
-fn checkViewReturnStmt(ck: &mut Checker, s: &Stmt) {
+// The field chain from `self` a return value points into (`self.a[0..n]` ->
+// `["a"]`, `self.data` -> `["data"]`, bare `self` -> `[]`). None when the
+// value isn't rooted at self at all — that's already an error, reported by
+// checkViewReturnStmt separately, so provenance recording just declines.
+fn viewFieldChain(e: &Expr): Option<Vec<string>> {
+    match e {
+        Expr.Ident(name, sp) => {
+            if name == "self" {
+                return Option.Some(Vec.new())
+            }
+            return Option.None
+        }
+        Expr.FieldAccess(obj, field, sp) => {
+            match viewFieldChain(*obj) {
+                Option.Some(fs) => {
+                    var nf = fs.clone()
+                    nf.push(field.clone())
+                    return Option.Some(nf)
+                }
+                Option.None => {
+                    return Option.None
+                }
+            }
+        }
+        Expr.IndexAccess(obj, idx, sp) => {
+            return viewFieldChain(*obj)
+        }
+        Expr.MethodCall(obj, method, args, sp) => {
+            return viewFieldChain(*obj)
+        }
+        _ => {
+            return Option.None
+        }
+    }
+}
+
+fn stringVecEq(a: &Vec<string>, b: &Vec<string>): bool {
+    if a.len != b.len {
+        return false
+    }
+    for i in 0..a.len {
+        if a[i] != b[i] {
+            return false
+        }
+    }
+    return true
+}
+
+fn checkViewReturnStmt(ck: &mut Checker, s: &Stmt, chains: &mut Vec<Vec<string>>) {
     match s {
         Stmt.Return(v, sp) => {
             match v {
@@ -1014,6 +1096,13 @@ fn checkViewReturnStmt(ck: &mut Checker, s: &Stmt) {
                         Option.None => {
                         }
                     }
+                    match viewFieldChain(*e) {
+                        Option.Some(chain) => {
+                            chains.push(chain)
+                        }
+                        Option.None => {
+                        }
+                    }
                 }
                 Option.None => {
                 }
@@ -1021,12 +1110,12 @@ fn checkViewReturnStmt(ck: &mut Checker, s: &Stmt) {
         }
         Stmt.IfStmt(cond, thenBody, elseBody, sp) => {
             for s2 in thenBody {
-                checkViewReturnStmt(ck, *s2)
+                checkViewReturnStmt(ck, *s2, chains)
             }
             match elseBody {
                 Option.Some(eb) => {
                     for s2 in eb {
-                        checkViewReturnStmt(ck, *s2)
+                        checkViewReturnStmt(ck, *s2, chains)
                     }
                 }
                 Option.None => {
@@ -1036,7 +1125,7 @@ fn checkViewReturnStmt(ck: &mut Checker, s: &Stmt) {
         Stmt.MatchStmt(subj, arms, sp) => {
             for a in arms {
                 for s2 in a.body {
-                    checkViewReturnStmt(ck, *s2)
+                    checkViewReturnStmt(ck, *s2, chains)
                 }
             }
         }
@@ -1052,8 +1141,24 @@ fn checkViewReturnProvenance(ck: &mut Checker, func: &Function, retType: &TypeKi
     if func.params.len == 0 || func.params[0].name != "self" {
         return
     }
+    var chains: Vec<Vec<string>> = Vec.new()
     for s in func.body {
-        checkViewReturnStmt(ck, *s)
+        checkViewReturnStmt(ck, *s, chains)
+    }
+    // Record provenance only when every `return` agrees on the same field
+    // chain — a fork whose arms return different fields has no single answer,
+    // so the call site falls back to freezing the whole receiver (still sound,
+    // just less precise).
+    if chains.len > 0 {
+        var allSame = true
+        for i in 1..chains.len {
+            if !stringVecEq(chains[0], chains[i]) {
+                allSame = false
+            }
+        }
+        if allSame {
+            ck.viewReturnFields.insert(func.name.clone(), chains[0].clone())
+        }
     }
 }
 
@@ -1062,7 +1167,6 @@ pub fn checkFunction(ck: &mut Checker, func: &Function) {
     let retType = resolveAstType(ck, func.retType)
     ck.currentFnRetType = retType.clone()
     errorIfNestedRefReturn(ck, func, retType)
-    checkViewReturnProvenance(ck, func, retType)
 
     // Declare parameters
     for param in func.params {
@@ -1444,6 +1548,21 @@ pub fn checkProgram(ck: &mut Checker, program: &Program) {
     registerAllImpls(ck, program)
     synthesizeDefaultMethods(ck, program)
     processDerives(ck, program)
+
+    // Phase 2.5: record view-return provenance (which field a `&[T]`/`&string`
+    // getter method reads off `self`) for every impl method BEFORE any body is
+    // checked. A caller in Phase 3 (`t.items()` inside `main`) needs the
+    // answer already on file — recording it lazily inside checkFunction only
+    // helped a CALLER that happens to be checked later than its callee, which
+    // free-function/impl-method ordering does not guarantee (mirrors the
+    // oracle's recordViewProvenance pre-pass over implFnsToCheck).
+    var vi: i64 = 0
+    while vi < ck.monomorphizedFns.len {
+        let vfn = ck.monomorphizedFns[vi].clone()
+        let vRetType = resolveAstType(ck, vfn.retType)
+        checkViewReturnProvenance(ck, vfn, vRetType)
+        vi = vi + 1
+    }
 
     // Register module-level globals in a persistent scope below every function
     // scope, so function bodies can reference them (e.g. `if key == KEY_QUIT`).

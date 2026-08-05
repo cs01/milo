@@ -115,6 +115,64 @@ pub fn pathsOverlap(a: &Vec<string>, b: &Vec<string>): bool {
     return true
 }
 
+fn vecContainsStr(v: &Vec<string>, target: &string): bool {
+    for i in 0..v.len {
+        if v[i] == target {
+            return true
+        }
+    }
+    return false
+}
+
+// Names currently frozen — used to detect what a `let`/`var`/assignment RHS
+// newly froze (freezing is eager, at every `.slice()`/view-method check, not
+// gated on being landed into a binding — see freezePlace/freezeViewMethodSource).
+// A `let`/`var` binding whose declared type is itself a view keeps the freeze
+// alive for its own scope's life (transferred — see scopeFreezes); anything
+// else releases it once the statement that took it is done. Mirrors the
+// oracle's frozenBeforeRhs/newlyFrozen snapshot pair, name-keyed instead of
+// VarInfo-identity-keyed.
+pub fn snapshotFrozenNames(ck: &Checker): Vec<string> {
+    var out: Vec<string> = Vec.new()
+    for k, v in ck.borrowedPaths {
+        if v.len > 0 {
+            out.push(k.clone())
+        }
+    }
+    return out
+}
+
+pub fn newlyFrozenNames(ck: &Checker, before: &Vec<string>): Vec<string> {
+    var out: Vec<string> = Vec.new()
+    for k, v in ck.borrowedPaths {
+        if v.len > 0 && !vecContainsStr(before, k) {
+            out.push(k.clone())
+        }
+    }
+    return out
+}
+
+// Whatever the RHS newly froze (relative to `before`) either transfers to the
+// CURRENT (innermost) scope's release list — when the binding it's landing in
+// is itself a view type, so the freeze must outlive this one statement — or
+// releases immediately, because the value that took the borrow was fully
+// consumed within the statement (e.g. `s[0..n].len`).
+pub fn releaseOrRetainFreezes(ck: &mut Checker, before: &Vec<string>, isRefBinding: bool) {
+    let newly = newlyFrozenNames(ck, before)
+    if isRefBinding {
+        let depth = ck.scopeFreezes.len - 1
+        if depth >= 0 {
+            for i in 0..newly.len {
+                ck.scopeFreezes[depth].push(newly[i].clone())
+            }
+        }
+    } else {
+        for i in 0..newly.len {
+            unfreezeName(ck, newly[i])
+        }
+    }
+}
+
 // -- Freeze state -------------------------------------------------------------
 
 // Presence with a non-empty path list means frozen; either absent or present-
@@ -197,10 +255,23 @@ pub fn freezePlace(ck: &mut Checker, place: &Expr) {
 // caller has already committed to using the view (a struct method's result,
 // not a raw slice expression), and a temporary's storage doesn't outlive the
 // call that produced it — mirrors the oracle's freezeViewSource.
-pub fn freezeViewMethodSource(ck: &mut Checker, obj: &Expr, sp: &Option<Span>) {
+// `extraFields` is the field chain the method's OWN body reads off `self`
+// (e.g. `["data"]` for `fn items(self: &Self): &[i64] { return self.data[..] }`)
+// — recorded per-method by checkViewReturnProvenance. Appended onto the
+// receiver's own path so `r.items()` freezes only `r.data`, not all of `r`
+// (tests/fixtures/viewFieldPrecision.milo). Skipped once the receiver path is
+// already imprecise (tainted): appending a field there would wrongly
+// re-narrow "conflicts with everything" down to one field.
+pub fn freezeViewMethodSource(ck: &mut Checker, obj: &Expr, extraFields: &Vec<string>, sp: &Option<Span>) {
     match accessPath(obj) {
         Option.Some(p) => {
-            freezeName(ck, p.root, p.fields)
+            var nf = p.fields.clone()
+            if !p.tainted {
+                for i in 0..extraFields.len {
+                    nf.push(extraFields[i].clone())
+                }
+            }
+            freezeName(ck, p.root, nf)
         }
         Option.None => {
             error(ck, "cannot take a view of a temporary", cloneSpan(sp))

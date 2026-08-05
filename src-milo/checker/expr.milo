@@ -5,7 +5,7 @@ from "src-milo/ast.milo" import {
 from "src-milo/checker/types.milo" import {
     TypeKind, typeEq, typeName, typeFromAst, typeFromName,
     tyI32, tyI64, tyU8, tyBool, tyVoid, tyString, tyUnknown,
-    isNumeric, isInteger, isFloat, isCopy, needsDrop, containsUnknown,
+    isNumeric, isInteger, isFloat, isCopy, needsDrop, containsUnknown, isViewReturnType,
 }
 from "src-milo/checker/state.milo" import {
     Checker, VarInfo, FnSig, FnParam, StructInfo, CkStructField,
@@ -2801,6 +2801,10 @@ pub fn checkMethodCall(ck: &mut Checker, obj: &Expr, method: &string, args: &Vec
                         error(ck, "'slice' bounds must be integer", cloneSpan(span))
                     }
                 }
+                // The view points into the array's own storage — mutating it
+                // (a var-typed fixed array can still e.g. be reassigned whole)
+                // while the view is live must be rejected.
+                freezePlace(ck, obj)
                 return TypeKind.TRef(Heap(TypeKind.TArray(elem, Option.None)), false)
             }
             // `.len()` (parens) is only offered on a slice (size None); a fixed-size
@@ -2834,7 +2838,7 @@ pub fn checkMethodCall(ck: &mut Checker, obj: &Expr, method: &string, args: &Vec
     // Struct/trait methods
     match objType.clone() {
         TypeKind.TStruct(name) => {
-            return checkStructMethod(ck, name, method, args, span)
+            return checkStructMethod(ck, obj, name, method, args, span)
         }
         _ => {
         }
@@ -2853,7 +2857,7 @@ pub fn checkMethodCall(ck: &mut Checker, obj: &Expr, method: &string, args: &Vec
                 Option.None => {
                 }
             }
-            return checkStructMethod(ck, name, method, args, span)
+            return checkStructMethod(ck, obj, name, method, args, span)
         }
         _ => {
         }
@@ -2864,10 +2868,10 @@ pub fn checkMethodCall(ck: &mut Checker, obj: &Expr, method: &string, args: &Vec
         TypeKind.THeap(inner) => {
             match *inner {
                 TypeKind.TStruct(name) => {
-                    return checkStructMethod(ck, name, method, args, span)
+                    return checkStructMethod(ck, obj, name, method, args, span)
                 }
                 TypeKind.TEnum(name) => {
-                    return checkStructMethod(ck, name, method, args, span)
+                    return checkStructMethod(ck, obj, name, method, args, span)
                 }
                 _ => {
                 }
@@ -2979,6 +2983,9 @@ pub fn checkVecMethod(ck: &mut Checker, obj: &Expr, elem: &TypeKind, method: &st
         if !isRootMutable(ck, obj) {
             error(ck, "cannot push to immutable Vec", cloneSpan(span))
         }
+        // A push may realloc — illegal while a slice/loop borrow into this
+        // Vec is live, since that borrow's memory could move out from under it.
+        errorIfFrozenRoot(ck, obj, "call 'push' on", span)
         // Give the element type as context so a phantom-typed generic struct
         // literal (Handle<T>'s T isn't stored in any field) can infer its type
         // arg from the Vec's declared element type instead of failing to unknown.
@@ -2999,6 +3006,7 @@ pub fn checkVecMethod(ck: &mut Checker, obj: &Expr, elem: &TypeKind, method: &st
         if !isRootMutable(ck, obj) {
             error(ck, "cannot reverse immutable Vec", cloneSpan(span))
         }
+        errorIfFrozenRoot(ck, obj, "call 'reverse' on", span)
         return tyVoid()
     }
     if method == "pop" {
@@ -3008,6 +3016,7 @@ pub fn checkVecMethod(ck: &mut Checker, obj: &Expr, elem: &TypeKind, method: &st
         if !isRootMutable(ck, obj) {
             error(ck, "cannot pop from immutable Vec", cloneSpan(span))
         }
+        errorIfFrozenRoot(ck, obj, "call 'pop' on", span)
         // pop returns Option<T> — Some(last) / None on empty, matching the TS oracle
         var optArgs: Vec<TypeKind> = Vec.new()
         optArgs.push(elem.clone())
@@ -3027,6 +3036,7 @@ pub fn checkVecMethod(ck: &mut Checker, obj: &Expr, elem: &TypeKind, method: &st
         if !isRootMutable(ck, obj) {
             error(ck, "cannot remove from immutable Vec", cloneSpan(span))
         }
+        errorIfFrozenRoot(ck, obj, "call 'remove' on", span)
         return elem.clone()
     }
     if method == "clone" {
@@ -3049,6 +3059,10 @@ pub fn checkVecMethod(ck: &mut Checker, obj: &Expr, elem: &TypeKind, method: &st
                 error(ck, "'slice' bounds must be integer", cloneSpan(span))
             }
         }
+        // Freeze the receiver's ROOT (walking through field/index steps) — the
+        // view points into whatever storage the root variable owns, so any
+        // mutation reachable from that root could realloc/free it.
+        freezePlace(ck, obj)
         return TypeKind.TRef(Heap(TypeKind.TArray(Heap(elem.clone()), Option.None)), false)
     }
     if method == "contains" {
@@ -3079,8 +3093,19 @@ pub fn checkVecMethod(ck: &mut Checker, obj: &Expr, elem: &TypeKind, method: &st
         if args.len != 1 {
             error(ck, "'each' expects 1 argument (callback)", cloneSpan(span))
         }
+        // The callback runs once per element by (shared) reference — mutating
+        // the receiver from inside it (e.g. a nested push) can realloc the
+        // buffer those element references point into.
+        let cbBorrow = borrowDuringCallback(ck, obj)
         if args.len >= 1 {
             checkExpr(ck, *args[0])
+        }
+        match cbBorrow {
+            Option.Some(bname) => {
+                unfreezeName(ck, bname)
+            }
+            Option.None => {
+            }
         }
         return tyVoid()
     }
@@ -3604,6 +3629,9 @@ pub fn checkStringMethod(ck: &mut Checker, obj: &Expr, method: &string, args: &V
                 error(ck, "slice end: expected integer, got " + typeName(endType), cloneSpan(span))
             }
         }
+        // Freeze the receiver's root: appending/pushing can realloc the buffer
+        // this view points into.
+        freezePlace(ck, obj)
         return TypeKind.TRef(Heap(tyString()), false)
     }
     // Option<i64>, matching the oracle: -1 "not found" was a sentinel colliding
@@ -3648,6 +3676,7 @@ pub fn checkStringMethod(ck: &mut Checker, obj: &Expr, method: &string, args: &V
         if !isRootMutable(ck, obj) {
             error(ck, "cannot push to immutable string", cloneSpan(span))
         }
+        errorIfFrozenRoot(ck, obj, "call 'push' on", span)
         if args.len >= 1 {
             checkExpr(ck, *args[0])
         }
@@ -3661,6 +3690,7 @@ pub fn checkStringMethod(ck: &mut Checker, obj: &Expr, method: &string, args: &V
         if !isRootMutable(ck, obj) {
             error(ck, "cannot pushStr to immutable string", cloneSpan(span))
         }
+        errorIfFrozenRoot(ck, obj, "call 'pushStr' on", span)
         if args.len >= 1 {
             let argTy = checkExpr(ck, *args[0])
             if !typeEq(argTy, tyString()) {
@@ -3742,7 +3772,7 @@ pub fn checkStringMethod(ck: &mut Checker, obj: &Expr, method: &string, args: &V
 
 // -- Struct/trait method calls --
 
-pub fn checkStructMethod(ck: &mut Checker, structName: &string, method: &string, args: &Vec<Heap<Expr>>, span: &Option<Span>): TypeKind {
+pub fn checkStructMethod(ck: &mut Checker, obj: &Expr, structName: &string, method: &string, args: &Vec<Heap<Expr>>, span: &Option<Span>): TypeKind {
     // Look up inherent implDecl method
     if ck.inherentImpls.contains(structName) {
         let implDecl = ck.inherentImpls.get(structName)!
@@ -3752,6 +3782,21 @@ pub fn checkStructMethod(ck: &mut Checker, structName: &string, method: &string,
             let userParams = sig.params.len - 1
             if args.len != userParams {
                 error(ck, "method '" + method.clone() + "' expects " + userParams.toString() + " args, got " + args.len.toString(), cloneSpan(span))
+            }
+            // A `self: &mut Self` method may mutate the receiver — same hazard
+            // a mutating builtin (push, etc) already rejects on a frozen var.
+            if sig.params.len > 0 {
+                var selfIsMut = false
+                match sig.params[0].ty.clone() {
+                    TypeKind.TRef(sinner, smut) => {
+                        selfIsMut = smut
+                    }
+                    _ => {
+                    }
+                }
+                if selfIsMut {
+                    errorIfFrozenRoot(ck, obj, "call '" + method.clone() + "' on", span)
+                }
             }
             var i: i64 = 0
             while i < args.len && (i + 1) < sig.params.len {
@@ -3789,6 +3834,22 @@ pub fn checkStructMethod(ck: &mut Checker, structName: &string, method: &string,
                     }
                 }
                 i = i + 1
+            }
+            // `lx.word(...)`: a `&[T]`/`&string` return is a view into the
+            // receiver's own storage — the call site freezes it for the
+            // result's life, same as `v[a..b]`. A receiver with no named
+            // root (a temporary) can't be frozen long enough to matter.
+            if isViewReturnType(sig.ret) {
+                let mangled = structName.clone() + "$" + method.clone()
+                var extraFields: Vec<string> = Vec.new()
+                match ck.viewReturnFields.get(mangled) {
+                    Option.Some(fs) => {
+                        extraFields = fs
+                    }
+                    Option.None => {
+                    }
+                }
+                freezeViewMethodSource(ck, obj, extraFields, span)
             }
             return sig.ret.clone()
         }

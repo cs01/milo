@@ -169,6 +169,13 @@ pub struct Checker {
     // when the scope holding that binding pops. Mirrors the oracle's
     // VarInfo.freezes, keyed by scope depth instead of by binding identity.
     scopeFreezes: Vec<Vec<string>>,
+    // Field chain (from `self`) a view-returning method's body actually reads,
+    // keyed by its mangled name ("Ring$items") — recorded by
+    // checkViewReturnProvenance before any CALL site is checked, so `r.items()`
+    // freezes only `r.data` and leaves `r.b` writable (viewFieldPrecision).
+    // Absent means "unknown" (several disagreeing returns, or none at all) —
+    // callers then fall back to freezing the whole receiver.
+    viewReturnFields: HashMap<string, Vec<string>>,
 }
 
 pub fn newChecker(): Checker {
@@ -200,6 +207,7 @@ pub fn newChecker(): Checker {
         jsonCapableStructs: HashMap.new(),
         borrowedPaths: HashMap.new(),
         scopeFreezes: Vec.new(),
+        viewReturnFields: HashMap.new(),
     }
 }
 

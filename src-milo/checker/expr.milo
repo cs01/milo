@@ -30,6 +30,9 @@ from "src-milo/checker/borrow.milo" import {
 from "src-milo/checker/moves.milo" import {
     fieldPathString, staticFieldPlace, markFieldMoved, movedFieldCovering, firstMovedField,
 }
+from "src-milo/checker/derive_json.milo" import {
+    jsonHasCodec
+}
 
 // -- Move tracking --
 
@@ -4364,7 +4367,60 @@ pub fn checkStructMethod(ck: &mut Checker, obj: &Expr, structName: &string, meth
                     }
                     _ => {
                         if !typeEq(paramType, argType) && !typeEq(argType, tyUnknown()) && !intCoercible(paramType, argType, *args[i]) && !ptrCoercible(paramType, argType) {
-                            error(ck, "argument " + (i + 1).toString() + " of '" + method.clone() + "': expected " + typeName(paramType) + ", got " + typeName(argType), cloneSpan(span))
+                            // `sink.json(entry)` auto-stringifies a struct argument
+                            // passed to a 'json'-named method's string param — mirrors
+                            // ctx.json(user) in the oracle (checker.ts). codegen
+                            // re-derives this exact condition itself (method name +
+                            // param/arg types) rather than reading a decision off a
+                            // side table, since src-milo has no Expr-keyed side table
+                            // to carry it (see derive_json's jsonHasCodec + genMethodCall's
+                            // "json"-named-method arm).
+                            var isJsonAutoStringify = false
+                            if method == "json" {
+                                match paramType.clone() {
+                                    TypeKind.TString => {
+                                        match argType.clone() {
+                                            TypeKind.TStruct(sn) => {
+                                                isJsonAutoStringify = true
+                                                if !jsonHasCodec(ck, sn) {
+                                                    if ck.structs.contains(sn) {
+                                                        let sinfo = ck.structs.get(sn)!
+                                                        for f in sinfo.fields {
+                                                            var scalar = false
+                                                            match f.ty {
+                                                                TypeKind.TString => {
+                                                                    scalar = true
+                                                                }
+                                                                TypeKind.TBool => {
+                                                                    scalar = true
+                                                                }
+                                                                TypeKind.TInt(bits, signed) => {
+                                                                    scalar = true
+                                                                }
+                                                                TypeKind.TFloat(bits) => {
+                                                                    scalar = true
+                                                                }
+                                                                _ => {
+                                                                }
+                                                            }
+                                                            if !scalar {
+                                                                errorHint(ck, "'json': '" + sn.clone() + "." + f.name.clone() + "' has type " + typeName(f.ty) + ", which the built-in stringifier cannot serialize", "add '@derive(Json)' to '" + sn.clone() + "' — the derived codec handles nested structs, Vec and Option", cloneSpan(span))
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                            _ => {
+                                            }
+                                        }
+                                    }
+                                    _ => {
+                                    }
+                                }
+                            }
+                            if !isJsonAutoStringify {
+                                error(ck, "argument " + (i + 1).toString() + " of '" + method.clone() + "': expected " + typeName(paramType) + ", got " + typeName(argType), cloneSpan(span))
+                            }
                         }
                         tryMove(ck, *args[i])
                     }

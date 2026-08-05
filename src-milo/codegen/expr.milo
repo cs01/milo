@@ -5569,6 +5569,13 @@ pub fn genMethodCall(cg: &mut Cgen, object: &Expr, method: &string, args: &Vec<H
                 } else {
                     av = genExpr(cg, *args[ai], locs, sigs, "")
                 }
+                // `sink.json(entry)` — see genJsonToStringVal's doc comment.
+                if method == "json" && stripPercent(mh) == "string" && llType(av.ty) != "%String" {
+                    let argStructName = stripPercent(resolveTyStr(cg, stripPercent(av.ty)))
+                    if cg.structs.contains(argStructName) {
+                        av = genJsonToStringVal(cg, av, locs, sigs)
+                    }
+                }
                 argStr = argStr + ", " + llType(av.ty) + " " + av.v
             }
         }
@@ -6369,6 +6376,14 @@ pub fn genJsonObject(cg: &mut Cgen, fields: &Vec<StructLitField>, locs: &Vec<Loc
 
 pub fn genJsonStringify(cg: &mut Cgen, arg: &Expr, locs: &Vec<Local>, sigs: &Vec<CgFnSig>): Val {
     let sv = genExpr(cg, arg, locs, sigs, "")
+    return genJsonStringifyFromVal(cg, sv, locs, sigs)
+}
+
+// Scalar-only built-in stringifier, factored out of genJsonStringify so the
+// "json"-named-method auto-stringify path (genJsonToStringVal below) can reuse
+// it against an already-evaluated Val instead of re-evaluating (and
+// re-moving) the source expression.
+pub fn genJsonStringifyFromVal(cg: &mut Cgen, sv: Val, locs: &Vec<Local>, sigs: &Vec<CgFnSig>): Val {
     let structName = stripPercent(sv.ty)
     let structTy = "%" + structName.clone()
     let stage = nextTemp(cg)
@@ -6404,6 +6419,31 @@ pub fn genJsonStringify(cg: &mut Cgen, arg: &Expr, locs: &Vec<Local>, sigs: &Vec
     let close = genStringLit(cg, "}")
     acc = genStringConcat(cg, acc.v, close.v)
     return acc
+}
+
+// `sink.json(entry)`: a struct argument passed to a 'json'-named method's
+// string param. Mirrors the oracle's autoJsonToJson/autoJsonStringify pair —
+// route through the struct's real toJson (hand-written or @derive(Json)) when
+// it has one, since that's the only path that recurses into non-scalar
+// fields; fall back to the scalar-only built-in stringifier otherwise. The
+// checker (checkStructMethod's "json" special case) already verified one of
+// these two is valid, so this re-derives rather than trusts a side table —
+// src-milo has no Expr-keyed side table to carry the checker's decision.
+pub fn genJsonToStringVal(cg: &mut Cgen, sv: Val, locs: &Vec<Local>, sigs: &Vec<CgFnSig>): Val {
+    let structName = stripPercent(resolveTyStr(cg, stripPercent(sv.ty)))
+    let toJsonFn = structName.clone() + "$toJson"
+    if cg.fnRets.contains(toJsonFn) {
+        let structTy = "%" + structName.clone()
+        let stage = nextTemp(cg)
+        emit(cg, "  " + stage + " = alloca " + structTy + "\n")
+        emit(cg, "  store " + structTy + " " + sv.v.clone() + ", ptr " + stage + "\n")
+        let t = nextTemp(cg)
+        emit(cg, "  " + t + " = call %String @" + toJsonFn + "(ptr " + stage + ")\n")
+        return Val {
+            v: t, ty: "string"
+        }
+    }
+    return genJsonStringifyFromVal(cg, sv, locs, sigs)
 }
 
 // Copy a NUL-terminated C string at `pv` into an owned %String {buf,len,len+1}.

@@ -57,7 +57,14 @@ async function sweepOne(name: string, tmpDir: string): Promise<Outcome> {
   const outBin = join(tmpDir, name);
   const source = readFileSync(src, "utf-8");
 
-  const build = await guardedRun(MILO_SELF, ["build", src, "-o", outBin], { env: CHILD_ENV, timeoutMs: 60000, memMb: COMPILE_MEM_MB });
+  // A companion `<name>.c` is the C ABI peer (struct-by-value tests). tests/run.test.ts
+  // links it; without it these fixtures fail at link with "Undefined symbols", which
+  // reads as a milo-self bug but is only a missing translation unit.
+  const buildArgs = ["build", src, "-o", outBin];
+  const companionC = join(FIXTURES_DIR, `${name}.c`);
+  if (existsSync(companionC)) buildArgs.push(companionC);
+
+  const build = await guardedRun(MILO_SELF, buildArgs, { env: CHILD_ENV, timeoutMs: 60000, memMb: COMPILE_MEM_MB });
   if (build.code !== 0) {
     const err = (build.stderr + build.stdout).trim();
     const hit = BUCKETS.find(([, re]) => re.test(err));

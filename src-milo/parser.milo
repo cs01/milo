@@ -1752,6 +1752,19 @@ pub fn parseFString(raw: string, s: &Option<Span>): Expr {
             let exprTokens = tokenize(exprStr)
             var subParser = newParser(exprTokens, subFile.clone())
             args.push(Heap(parseExpr(subParser)))
+        } else if i + 2 < raw.len && raw[i] == 0xEF && raw[i + 1] == 0x9D && (raw[i + 2] == 0xBB || raw[i + 2] == 0xBD) {
+            // Resolve the lexer's escaped-brace sentinel (U+F77B/U+F77D, UTF-8
+            // EF 9D BB / EF 9D BD — see lexFString) back to a real brace, but
+            // only here, in a literal run. Doing it earlier would put a real
+            // `{`/`}` back into `raw` and reopen the exact ambiguity the
+            // sentinel exists to remove (the brace-scan above would then treat
+            // an escaped `\{` as an interpolation opener again).
+            if raw[i + 2] == 0xBB {
+                lit.push(123 as u8)
+            } else {
+                lit.push(125 as u8)
+            }
+            i = i + 3
         } else {
             lit.push(raw[i])
             i = i + 1

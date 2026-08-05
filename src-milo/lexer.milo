@@ -282,10 +282,25 @@ pub fn lexFString(lex: &mut Lexer, line: i32, col: i32): Token {
                     value.push(0 as u8)
                 } 
                 else if esc == 123 {
-                    value.push(123 as u8)
+                    // `\{` must NOT become a literal `{` here: the parser's brace
+                    // scan (parseFString) re-walks this token's value looking for
+                    // '{'/'}' bytes to find interpolation openers, and a real `{`
+                    // is indistinguishable from one the author escaped. That made
+                    // `$"\{\"id\": \"{id}\"}"` swallow the whole JSON-looking
+                    // prefix as an expression instead of printing it literally.
+                    // Emit a private-use-area sentinel instead (U+F77B, UTF-8
+                    // EF 9D BB — same codepoint the oracle's lexer.ts uses); the
+                    // parser converts it back to a real `{` only when flushing a
+                    // literal run, never while brace-scanning.
+                    value.push(0xEF as u8)
+                    value.push(0x9D as u8)
+                    value.push(0xBB as u8)
                 } 
                 else if esc == 125 {
-                    value.push(125 as u8)
+                    // `\}` mirror of `\{` above — U+F77D, UTF-8 EF 9D BD.
+                    value.push(0xEF as u8)
+                    value.push(0x9D as u8)
+                    value.push(0xBD as u8)
                 } 
                 else {
                     value.push(esc)

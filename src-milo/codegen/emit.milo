@@ -6,6 +6,41 @@ from "src-milo/ast.milo" import {
     Function, Program, StructDecl, EnumDecl, Expr, StructLitField, arrayElemType
 }
 
+// The natural LLVM surface type for an UNANNOTATED global's literal-shaped
+// initializer (`let CT = "…"`, no `: string`), or "" for anything else (the
+// caller keeps its existing "i64" default). Every one of the three places
+// that need a global's type ahead of evaluating its initializer — registering
+// it in cg.globalVars, choosing its static `@name = global <ty> …` line, and
+// picking the store type in the runtime initializer — used to default a
+// type-less global straight to "i64" with no attempt to look at the
+// initializer at all. That's a sentinel colliding with real data: a bare
+// `let CT = "multipart/form-data; …"` global (tests/fixtures/multipart.milo)
+// got emitted as `@CT = global i64 0` and every read of it silently produced
+// an empty/garbage string instead of the literal. IntLit legitimately keeps
+// the i64 default (nothing to fix there), so it's not special-cased below.
+//
+// MUST take `e` by reference — see constStructBody's doc comment further down:
+// matching a dereferenced Heap<Expr> directly moves it out of the box and
+// frees the global's own AST node once the match's temporary drops. Call with
+// the bare `*prog.globals[gi].value` (auto-borrowed), never `match *value`
+// inline.
+pub fn literalGlobalTy(e: &Expr): string {
+    match e {
+        Expr.StringLit(sv, sp) => {
+            return "string"
+        }
+        Expr.BoolLit(bv, sp) => {
+            return "bool"
+        }
+        Expr.FloatLit(fv, sp) => {
+            return "f64"
+        }
+        _ => {
+            return ""
+        }
+    }
+}
+
 // Constant initializer text for a module-global's value expression. Globals must
 // be compile-time constants (int/bool/float/char literals, optionally negated).
 // Aggregate constant `%Struct { <f0>, <f1>, … }` for a struct literal whose fields
@@ -926,6 +961,12 @@ pub fn genProgram(prog: Program, sourceDir: string): string {
                 }
             }
             Option.None => {
+                // literalGlobalTy's only aggregate answer is "string" (a bare
+                // `let CT = "…"` global) — %String must be declared before its
+                // `zeroinitializer` placeholder line, same as the annotated case.
+                if literalGlobalTy(*prog.globals[gi].value) == "string" {
+                    hasAggGlobal = true
+                }
             }
         }
     }
@@ -944,6 +985,10 @@ pub fn genProgram(prog: Program, sourceDir: string): string {
                 surfaceTy = resolveTyStr(cg, astTypeStr(t))
             }
             Option.None => {
+                let lit = literalGlobalTy(*prog.globals[gi].value)
+                if lit.len > 0 {
+                    surfaceTy = lit
+                }
             }
         }
         cg.globalVars.insert(prog.globals[gi].name.clone(), surfaceTy.clone())
@@ -1166,6 +1211,10 @@ pub fn genProgram(prog: Program, sourceDir: string): string {
                 surfaceTy = resolveAstTy(cg, t)
             }
             Option.None => {
+                let lit = literalGlobalTy(*prog.globals[gi].value)
+                if lit.len > 0 {
+                    surfaceTy = lit
+                }
             }
         }
         let gllTy = llType(surfaceTy)
@@ -1295,6 +1344,10 @@ pub fn genProgram(prog: Program, sourceDir: string): string {
                     surfaceTy = resolveAstTy(cg, t)
                 }
                 Option.None => {
+                    let lit = literalGlobalTy(*prog.globals[gi].value)
+                    if lit.len > 0 {
+                        surfaceTy = lit
+                    }
                 }
             }
             let v = genExpr(cg, *prog.globals[gi].value, initLocs, sigs, surfaceTy.clone())

@@ -1478,6 +1478,7 @@ pub fn genStmt(cg: &mut Cgen, s: &Stmt, locs: &mut Vec<Local>, sigs: &Vec<CgFnSi
                 }
                 Option.None => {
                     hintTy = vecNewHint(cg, name, *value)
+                    isArrAnno = exprWrapsFixedArrayReturn(*value, sigs)
                 }
             }
             // RHS is moved into the new binding → zero a source place (var→var move)
@@ -1507,6 +1508,7 @@ pub fn genStmt(cg: &mut Cgen, s: &Stmt, locs: &mut Vec<Local>, sigs: &Vec<CgFnSi
                 }
                 Option.None => {
                     hintTy = vecNewHint(cg, name, *value)
+                    isArrAnno = exprWrapsFixedArrayReturn(*value, sigs)
                 }
             }
             // RHS is moved into the new binding → zero a source place (var→var move)
@@ -2092,6 +2094,39 @@ pub fn cloneStrMap(m: &HashMap<string, string>): HashMap<string, string> {
         out.insert(k.clone(), v.clone())
     }
     return out
+}
+
+// isArrAnno for an UNANNOTATED `let`/`var` (`let loopback = ip6("::1")!`, no `: [u8;16]`).
+// Local.isArr is normally recovered only from an explicit array type annotation (see the
+// LetDecl/VarDecl doc comment right below), because a fixed Copy array and a real growable
+// Vec share the same "Vec<T>" runtime type string once evaluated — nothing in `ty` tells
+// them apart. Without an annotation there is nothing to read UNLESS the RHS is (through any
+// number of `!`/`?' unwraps) a call to a known function whose declared return type carries
+// a fixed array as a generic payload (`Option<[u8;16]>`): astTypeStr mangles that array
+// arg to "arr_<elem>_<N>" (mirroring the checker's own mangleTypeName), a marker this can
+// detect in the callee's registered return-type string. Missing this made a second use of
+// such a binding read a MOVED-ZEROED value: genOwnedArg only deep-clones (instead of
+// move-zeroing) a %Vec-shaped local when Local.isArr says so, so `TcpListener.bind6(loopback,
+// 0)` correctly consumed it, but with isArr wrongly false the receiver's move-zero fired
+// anyway, and the LATER `TcpStream.connect6(loopback, ...)` indexed a zero-length array
+// ("array index out of bounds: 0/0").
+pub fn exprWrapsFixedArrayReturn(e: &Expr, sigs: &Vec<CgFnSig>): bool {
+    match e {
+        Expr.Unwrap(inner, span) => {
+            return exprWrapsFixedArrayReturn(*inner, sigs)
+        }
+        Expr.Call(name, args, typeArgs, span) => {
+            for si in 0..sigs.len {
+                if sigs[si].name == name {
+                    return sigs[si].retTy.contains("arr_")
+                }
+            }
+            return false
+        }
+        _ => {
+            return false
+        }
+    }
 }
 
 // hintTy for an unannotated `let`/`var` whose value is `Vec.new()`/`Vec.withCapacity`:

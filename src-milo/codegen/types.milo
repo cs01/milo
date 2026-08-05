@@ -1355,7 +1355,31 @@ pub fn astTypeStr(ty: &MiloType): string {
             if i > 0 {
                 base = base + ","
             }
-            base = base + astTypeStr(ty.typeArgs[i])
+            // A fixed-array typeArg mangles to "arr_<elem>_<N>" (the checker's
+            // mangleTypeName scheme, mirrored by mangleAstTypeArg below) — NOT the
+            // "Vec<elem>" RUNTIME-representation form the plain recursive astTypeStr
+            // call below produces for a top-level array (see the isArray branch
+            // after this loop). That form drops the array size, so e.g.
+            // `Option<[u8;16]>` mangled down to "Option<Vec<u8>>", a key the checker
+            // never registered any enum under — resolveTyStr's char-scan then passed
+            // through the unresolved "%Option<Vec<u8>>", and any method call on the
+            // value read that as an unknown type ("unsupported method 'isSome' on
+            // %Option<Vec<u8>>").
+            if ty.typeArgs[i].isArray {
+                var elem = ty.typeArgs[i].clone()
+                elem.isArray = false
+                var arrStr = "arr_" + astTypeStr(elem)
+                match ty.typeArgs[i].arraySize {
+                    Option.Some(n) => {
+                        arrStr = arrStr + "_" + n.toString()
+                    }
+                    Option.None => {
+                    }
+                }
+                base = base + arrStr
+            } else {
+                base = base + astTypeStr(ty.typeArgs[i])
+            }
         }
         base = base + ">"
     }

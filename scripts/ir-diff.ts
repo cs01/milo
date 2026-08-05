@@ -33,7 +33,7 @@ const SELF_MEM_MB = 1536;
 const SELF_TIMEOUT_S = 60;
 
 type Bucket = "identical" | "canonical" | "differs" | "self-failed" | "oracle-failed" | "both-failed";
-type Row = { name: string; bucket: Bucket; detail?: string };
+type Row = { name: string; bucket: Bucket; detail?: string; failure?: string };
 
 function args(): { filter?: string; build: boolean; write: boolean; show?: string } {
   const a = process.argv.slice(2);
@@ -66,11 +66,31 @@ function oracleIR(file: string): string | null {
   return r.status === 0 ? (r.stdout ?? "") : null;
 }
 
-async function selfIR(file: string): Promise<string | null> {
+async function selfIR(file: string): Promise<{ ir: string | null; err: string }> {
   const r = await guardedRun(MILO_SELF, ["emit-ir", file], {
     timeoutMs: SELF_TIMEOUT_S * 1000, memMb: SELF_MEM_MB, env: { ...process.env, MILO_ROOT },
   });
-  return r.code === 0 ? (r.stdout ?? "") : null;
+  return { ir: r.code === 0 ? (r.stdout ?? "") : null, err: (r.stderr ?? "").replace(/\x1b\[[0-9;]*m/g, "") };
+}
+
+/**
+ * Collapse a milo-self failure into a stable class so 242 individual failures become a
+ * ranked list of missing features. Identifiers, numbers and paths are erased because the
+ * question is "what does milo0 not implement", not "which fixture hit it".
+ */
+function failureClass(stderr: string): string {
+  const line = stderr.split("\n").map(l => l.trim()).find(l => l.startsWith("error")) ?? "";
+  if (!line) {
+    const first = stderr.split("\n").map(l => l.trim()).find(Boolean);
+    return first ? first.slice(0, 90) : "(no diagnostic — crash, timeout or guard kill)";
+  }
+  return line
+    .replace(/^error(\[[^\]]*\])?:\s*/, "")
+    .replace(/'[^']*'/g, "'X'")
+    .replace(/"[^"]*"/g, '"X"')
+    .replace(/\b\d+\b/g, "N")
+    .replace(/\S+\.milo/g, "F.milo")
+    .slice(0, 110);
 }
 
 /**
@@ -143,11 +163,13 @@ let done = 0;
 await mapPool(fixtures, CONCURRENCY, async (f, idx) => {
   const path = join(FIXTURES_DIR, f);
   const name = f.replace(".milo", "");
-  const [a, b] = [oracleIR(path), await selfIR(path)];
+  const a = oracleIR(path);
+  const self = await selfIR(path);
+  const b = self.ir;
   let row: Row;
   if (a === null && b === null) row = { name, bucket: "both-failed" };
   else if (a === null) row = { name, bucket: "oracle-failed" };
-  else if (b === null) row = { name, bucket: "self-failed" };
+  else if (b === null) row = { name, bucket: "self-failed", failure: failureClass(self.err) };
   else if (a === b) row = { name, bucket: "identical" };
   else {
     const [ca, cb] = [canonicalize(a), canonicalize(b)];
@@ -182,6 +204,23 @@ const agreeing = identical + by("canonical").length;
 const pct = (n: number) => comparable > 0 ? ` (${((n / comparable) * 100).toFixed(1)}%)` : "";
 console.log(`\n  ${identical}/${comparable} byte-identical${pct(identical)}`);
 console.log(`  ${agreeing}/${comparable} agree after canonical reordering${pct(agreeing)}`);
+
+// The actionable output: what milo0 is missing, ranked by how many fixtures it blocks.
+const failures = by("self-failed");
+if (failures.length > 0) {
+  const counts = new Map<string, string[]>();
+  for (const r of failures) {
+    const k = r.failure ?? "(unknown)";
+    counts.set(k, [...(counts.get(k) ?? []), r.name]);
+  }
+  const ranked = [...counts.entries()].sort((x, y) => y[1].length - x[1].length);
+  console.log(`\nwhat src-milo cannot compile, by cause (${failures.length} fixtures, ${ranked.length} distinct):\n`);
+  for (const [cause, names] of ranked.slice(0, 25)) {
+    console.log(`  ${String(names.length).padStart(4)}  ${cause}`);
+    console.log(`        e.g. ${names.slice(0, 3).join(", ")}`);
+  }
+  if (ranked.length > 25) console.log(`\n  ...and ${ranked.length - 25} more causes`);
+}
 
 const differs = by("differs");
 if (differs.length > 0) {

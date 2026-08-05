@@ -1431,10 +1431,21 @@ pub fn parse(p: &mut Parser): Program {
     var typeAliases: Vec<TypeAlias> = Vec.new()
 
     while !at(p, TokKind.Eof) {
-        // Collect attributes
+        // Collect attributes. `@!name` is a MODULE-level directive, not a declaration
+        // attribute — it attaches to the file, so it is consumed here and dropped.
+        // The only one in use is `@!wrapping` (std/sha512.milo), and dropping it is
+        // correct for milo0 specifically: milo0 emits no overflow traps for ordinary
+        // arithmetic, so wrapping is already what its generated code does. If milo0 ever
+        // gains checked arithmetic, this has to start setting a per-function flag instead.
         var attrs: Vec<Attribute> = Vec.new()
         while at(p, TokKind.At) {
-            attrs.push(parseAttribute(p))
+            if peekN(p, 1).kind == TokKind.Bang {
+                advance(p)
+                advance(p)
+                expect(p, TokKind.Ident)
+            } else {
+                attrs.push(parseAttribute(p))
+            }
         }
 
         if at(p, TokKind.Import) || at(p, TokKind.From) {

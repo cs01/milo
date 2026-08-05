@@ -73,6 +73,17 @@ pub fn registerBuiltinTraits(ck: &mut Checker) {
     }
     )
 
+    // Iterator marker trait. Milo has no associated types, so the element type
+    // can't be named in the trait method — instead the iteration contract
+    // (`next(&mut Self): Option<T>`) is checked structurally at each `for x in
+    // it` site (duck-typed on the method). `impl Iterator for X {}` marks X as
+    // iterable so it satisfies an `<I: Iterator>` bound. Zero methods — a pure
+    // marker, matching the oracle (checker.ts registerBuiltinTraits).
+    ck.traits.insert("Iterator", TraitInfo {
+        name: "Iterator", supertraits: Vec.new(), methods: HashMap.new()
+    }
+    )
+
     // Drop
     var dropMethods: HashMap<string, TraitMethodInfo> = HashMap.new()
     dropMethods.insert("drop", TraitMethodInfo {

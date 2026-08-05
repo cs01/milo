@@ -329,7 +329,7 @@ from "src-milo/codegen/types.milo" import {
     ensureStringTy, ensureVecTy,
 }
 from "src-milo/codegen/stmt.milo" import {
-    genStmt, emitScopeDrops, collectIdentsExpr
+    genStmt, emitScopeDrops, collectIdentsExpr, returnEscapedIdents
 }
 from "src-milo/codegen/abi.milo" import {
     AbiStruct, ArgClass, RetClass, AbiReg,
@@ -696,6 +696,9 @@ pub fn genFn(cg: &mut Cgen, f: &Function, sigs: &Vec<CgFnSig>) {
         }
     }
 
+    // Pre-scan for `let f = <closure>; ...; return f` — the escape has to be known
+    // before the LetDecl runs (see collectReturnEscapedIdentsInto's doc comment).
+    cg.forceMoveClosures = returnEscapedIdents(f.body)
     var terminated = false
     for si in 0..f.body.len {
         if genStmt(cg, *f.body[si], locs, sigs, retTyStr) {

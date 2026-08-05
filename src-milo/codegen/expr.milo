@@ -3914,7 +3914,10 @@ pub fn genCall(cg: &mut Cgen, name: &string, args: &Vec<Heap<Expr>>, typeArgs: &
         }
         return genStringLit(cg, contents)
     }
-    if name == "flush" {
+    // Same user-function-shadows-builtin guard as the checker (checkCall's "flush"
+    // branch) — without it, a module-private `fn flush(...)` sharing this name gets
+    // silently rewired to fflush(NULL) instead of its own body being called.
+    if name == "flush" && !cg.fnRets.contains(name) {
         if !cg.declaredFflush {
             emitG(cg, "declare i32 @fflush(ptr)\n")
             cg.declaredFflush = true

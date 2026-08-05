@@ -17,11 +17,15 @@ pub struct Parser {
     // consume the block brace as a struct-literal body (Rust's no-struct-literal
     // restriction). Restored before the body is parsed.
     noStructLit: bool,
+    // Statements a desugaring produced that the caller must emit after the one it asked
+    // for. `let P = E else {}` becomes three ordinary statements, and parseStmt can only
+    // hand back one — parseStmts drains this after each call.
+    pending: Vec<Heap<Stmt>>,
 }
 
 pub fn newParser(tokens: Vec<Token>): Parser {
     return Parser {
-        tokens: tokens, pos: 0, noStructLit: false
+        tokens: tokens, pos: 0, noStructLit: false, pending: Vec.new()
     }
 }
 
@@ -539,13 +543,80 @@ pub fn parseStmts(p: &mut Parser): Vec<Heap<Stmt>> {
     var stmts: Vec<Heap<Stmt>> = Vec.new()
     while !at(p, TokKind.RBrace) && !at(p, TokKind.Eof) {
         stmts.push(Heap(parseStmt(p)))
+        if p.pending.len > 0 {
+            let drained = cloneStmts(p.pending)
+            p.pending = Vec.new()
+            for i in 0..drained.len {
+                stmts.push(Heap((*drained[i]).clone()))
+            }
+        }
     }
     return stmts
+}
+
+// `let Option.Some(v) = E else { B }` desugars into three statements milo0 already has:
+//
+//     let __letelse_N = E
+//     if __letelse_N.isNone() { B }
+//     let v = __letelse_N!
+//
+// which is why this is a parser change rather than a new Stmt threaded through checker,
+// lowering and codegen. Only Option and Result are handled — for any other enum the
+// `isNone`/`isErr` guard does not exist, so this reports the limitation instead of
+// desugaring into something that would not type-check.
+//
+// One gap versus the real compiler: the TS checker REQUIRES the else block to diverge.
+// Here a non-diverging block falls through to the `!`, which aborts at runtime instead of
+// being a compile error.
+pub fn parseLetElse(p: &mut Parser, s: Option<Span>): Stmt {
+    let enumName = expect(p, TokKind.Ident).value
+    expect(p, TokKind.Dot)
+    // The variant name is consumed but unused: the desugaring keys off the ENUM
+    // (Option -> isNone, Result -> isErr), and `!` unwraps the success variant either way.
+    let _variant = expect(p, TokKind.Ident).value
+    expect(p, TokKind.LParen)
+    let binding = expect(p, TokKind.Ident).value
+    expect(p, TokKind.RParen)
+    expect(p, TokKind.Eq)
+    let subject = parseExpr(p)
+    expect(p, TokKind.Else)
+    expect(p, TokKind.LBrace)
+    let elseBody = parseStmts(p)
+    expect(p, TokKind.RBrace)
+
+    var emptyName = "isNone"
+    if enumName == "Result" {
+        emptyName = "isErr"
+    }
+    if enumName != "Option" && enumName != "Result" {
+        eprint("parse error: let-else on '" + enumName.clone() + "' is not supported in milo0 (Option and Result only) at line " + peek(p).line.toString())
+    }
+
+    // Unique per source position, so two let-else statements in one scope cannot collide.
+    var tmp = "__letelse"
+    match s {
+        Option.Some(sp) => {
+            tmp = tmp + "_" + sp.line.toString() + "_" + sp.col.toString()
+        }
+        Option.None => {
+        }
+    }
+
+    var noArgs: Vec<Heap<Expr>> = Vec.new()
+    let guard = Expr.MethodCall(Heap(Expr.Ident(tmp.clone(), cloneSpan(s))), emptyName, noArgs, cloneSpan(s))
+    p.pending.push(Heap(Stmt.IfStmt(Heap(guard), elseBody, Option.None, cloneSpan(s))))
+    let bound = Expr.Unwrap(Heap(Expr.Ident(tmp.clone(), cloneSpan(s))), cloneSpan(s))
+    p.pending.push(Heap(Stmt.LetDecl(binding, Option.None, Heap(bound), cloneSpan(s))))
+    return Stmt.LetDecl(tmp, Option.None, Heap(subject), s)
 }
 
 pub fn parseLet(p: &mut Parser): Stmt {
     let s = span(peek(p))
     expect(p, TokKind.Let)
+    // `let Enum.Variant(x) = ... else { ... }` — a destructuring bind, not a name.
+    if at(p, TokKind.Ident) && peekN(p, 1).kind == TokKind.Dot {
+        return parseLetElse(p, s)
+    }
     let name = expect(p, TokKind.Ident).value
     var ty: Option<MiloType> = Option.None
     if matchTok(p, TokKind.Colon) {

@@ -4873,8 +4873,14 @@ pub fn genMethodCall(cg: &mut Cgen, object: &Expr, method: &string, args: &Vec<H
     if objTyLl == "%Vec" && method == "ptr" {
         let p = nextTemp(cg)
         emit(cg, "  " + p + " = extractvalue %Vec " + obj.v + ", 0\n")
+        // *T, not the bare "ptr" placeholder: Vec<*u8>.ptr() must come back **u8
+        // (one MORE star than the element already carries), or a second index/
+        // deref through the result has no element type to work with — genIndex's
+        // raw-pointer branch strips exactly one leading '*' off `o.ty` and needs
+        // a real type string underneath, not the depth-erased "ptr".
+        let elemTy = unwrapVec(resolveTyStr(cg, obj.ty))
         return Val {
-            v: p, ty: "ptr"
+            v: p, ty: "*" + elemTy
         }
     }
     if objTyLl == "%String" && method == "len" {

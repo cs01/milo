@@ -5428,6 +5428,9 @@ pub fn genDisplayString(cg: &mut Cgen, val: &string, ty: &string, locs: &Vec<Loc
         let elemTy = unwrapVec(ty)
         return genVecDisplay(cg, val, elemTy, locs, sigs)
     }
+    if isHashMapTy(ty) {
+        return genHashMapDisplay(cg, val, ty, locs, sigs)
+    }
     if isIntLlType(ll) {
         var widened = val.clone()
         if ll != "i64" {
@@ -5516,6 +5519,94 @@ pub fn genVecDisplay(cg: &mut Cgen, val: &string, elemTy: &string, locs: &Vec<Lo
     emit(cg, "  " + out + " = load %String, ptr " + resAddr + "\n")
     return Val {
         v: out, ty: "string"
+    }
+}
+
+// "{k0: v0, k1: v1, ...}" — mirrors genVecDisplay above, but over %HashMap's
+// {key, val} entry pairs. src-milo's HashMap stores its `len` live entries
+// densely in `data[0..len]` (see .keys()'s codegen, which walks the same
+// range with no separate occupied/tombstone check) — there is no hole to
+// skip, unlike the oracle's open-addressed table.
+pub fn genHashMapDisplay(cg: &mut Cgen, val: &string, ty: &string, locs: &Vec<Local>, sigs: &Vec<CgFnSig>): Val {
+    let keyTy = hashMapKeyTy(ty)
+    let valTy = hashMapValTy(ty)
+    let entryTy = hmEntryTy(keyTy, valTy)
+    let keyLl = llType(keyTy)
+    let valLl = llType(valTy)
+    let resAddr = nextTemp(cg)
+    emit(cg, "  " + resAddr + " = alloca %String\n")
+    let open = genStringLit(cg, "{")
+    emit(cg, "  store %String " + open.v + ", ptr " + resAddr + "\n")
+
+    let d = nextTemp(cg)
+    emit(cg, "  " + d + " = extractvalue %HashMap " + val.clone() + ", 0\n")
+    let len = nextTemp(cg)
+    emit(cg, "  " + len + " = extractvalue %HashMap " + val.clone() + ", 1\n")
+    let iAddr = nextTemp(cg)
+    emit(cg, "  " + iAddr + " = alloca i64\n")
+    emit(cg, "  store i64 0, ptr " + iAddr + "\n")
+    let condLbl = nextLabel(cg, "dispm.cond")
+    let bodyLbl = nextLabel(cg, "dispm.body")
+    let sepLbl = nextLabel(cg, "dispm.sep")
+    let elemLbl = nextLabel(cg, "dispm.elem")
+    let endLbl = nextLabel(cg, "dispm.end")
+    emit(cg, "  br label %" + condLbl + "\n")
+    emitLabel(cg, condLbl)
+    let i = nextTemp(cg)
+    emit(cg, "  " + i + " = load i64, ptr " + iAddr + "\n")
+    let lt = nextTemp(cg)
+    emit(cg, "  " + lt + " = icmp slt i64 " + i + ", " + len + "\n")
+    emit(cg, "  br i1 " + lt + ", label %" + bodyLbl + ", label %" + endLbl + "\n")
+    emitLabel(cg, bodyLbl)
+    let notFirst = nextTemp(cg)
+    emit(cg, "  " + notFirst + " = icmp sgt i64 " + i + ", 0\n")
+    emit(cg, "  br i1 " + notFirst + ", label %" + sepLbl + ", label %" + elemLbl + "\n")
+    emitLabel(cg, sepLbl)
+    let sepLit = genStringLit(cg, ", ")
+    genStringAppendInPlace(cg, resAddr, sepLit.v)
+    emit(cg, "  br label %" + elemLbl + "\n")
+    emitLabel(cg, elemLbl)
+    let slot = nextTemp(cg)
+    emit(cg, "  " + slot + " = getelementptr " + entryTy + ", ptr " + d + ", i64 " + i + "\n")
+    let kp = nextTemp(cg)
+    emit(cg, "  " + kp + " = getelementptr " + entryTy + ", ptr " + slot + ", i32 0, i32 0\n")
+    let kv = nextTemp(cg)
+    emit(cg, "  " + kv + " = load " + keyLl + ", ptr " + kp + "\n")
+    if keyLl == "%String" {
+        let qk = genStringLit(cg, "\"")
+        genStringAppendInPlace(cg, resAddr, qk.v)
+        genStringAppendInPlace(cg, resAddr, kv)
+        genStringAppendInPlace(cg, resAddr, qk.v)
+    } else {
+        let kds = genDisplayString(cg, kv, keyTy, locs, sigs)
+        genStringAppendInPlace(cg, resAddr, kds.v)
+    }
+    let colon = genStringLit(cg, ": ")
+    genStringAppendInPlace(cg, resAddr, colon.v)
+    let vp = nextTemp(cg)
+    emit(cg, "  " + vp + " = getelementptr " + entryTy + ", ptr " + slot + ", i32 0, i32 1\n")
+    let vv = nextTemp(cg)
+    emit(cg, "  " + vv + " = load " + valLl + ", ptr " + vp + "\n")
+    if valLl == "%String" {
+        let qv = genStringLit(cg, "\"")
+        genStringAppendInPlace(cg, resAddr, qv.v)
+        genStringAppendInPlace(cg, resAddr, vv)
+        genStringAppendInPlace(cg, resAddr, qv.v)
+    } else {
+        let vds = genDisplayString(cg, vv, valTy, locs, sigs)
+        genStringAppendInPlace(cg, resAddr, vds.v)
+    }
+    let i1v = nextTemp(cg)
+    emit(cg, "  " + i1v + " = add i64 " + i + ", 1\n")
+    emit(cg, "  store i64 " + i1v + ", ptr " + iAddr + "\n")
+    emit(cg, "  br label %" + condLbl + "\n")
+    emitLabel(cg, endLbl)
+    let close2 = genStringLit(cg, "}")
+    genStringAppendInPlace(cg, resAddr, close2.v)
+    let out2 = nextTemp(cg)
+    emit(cg, "  " + out2 + " = load %String, ptr " + resAddr + "\n")
+    return Val {
+        v: out2, ty: "string"
     }
 }
 

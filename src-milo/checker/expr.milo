@@ -3178,14 +3178,22 @@ pub fn checkStringMethod(ck: &mut Checker, obj: &Expr, method: &string, args: &V
         }
         return tyString()
     }
+    // Option<i64>, matching the oracle: -1 "not found" was a sentinel colliding
+    // with real data (nothing distinguishes "found at -1" from "not found" once
+    // the caller only sees a bare int). indexOfFrom already made this move below.
     if method == "indexOf" || method == "lastIndexOf" {
+        var idxOptArgs: Vec<TypeKind> = Vec.new()
+        idxOptArgs.push(TypeKind.TInt(64, true))
+        let idxMangled = monomorphizeEnum(ck, "Option", idxOptArgs)
         if args.len != 1 {
             error(ck, "'" + method.clone() + "' expects 1 argument", cloneSpan(span))
+            return TypeKind.TEnum(idxMangled)
         }
-        if args.len >= 1 {
-            checkExpr(ck, *args[0])
+        let idxArgType = checkExpr(ck, *args[0])
+        if !typeEq(idxArgType, tyString()) && !typeEq(idxArgType, tyUnknown()) {
+            error(ck, "'" + method.clone() + "': expected string, got " + typeName(idxArgType), cloneSpan(span))
         }
-        return TypeKind.TInt(64, true)
+        return TypeKind.TEnum(idxMangled)
     }
     if method == "len" {
         if args.len != 0 {
@@ -3233,8 +3241,23 @@ pub fn checkStringMethod(ck: &mut Checker, obj: &Expr, method: &string, args: &V
         }
         return tyVoid()
     }
-    if method == "toInt" || method == "parseInt" {
+    // toInt is a dead legacy alias (unused anywhere in std/examples/tests) — left
+    // as a bare i64 rather than risking a signature no caller depends on.
+    if method == "toInt" {
         return TypeKind.TInt(64, true)
+    }
+    // Option<i64>, matching the oracle and — critically — matching what CODEGEN
+    // emits: the call goes to std/string.milo's strParseInt, which already
+    // returns Option<i64> (same disagreement class as parseF64/toFloat below —
+    // codegen was right, the checker was declaring a bare i64).
+    if method == "parseInt" {
+        if args.len != 0 {
+            error(ck, "'parseInt' takes no arguments", cloneSpan(span))
+        }
+        var iOptArgs: Vec<TypeKind> = Vec.new()
+        iOptArgs.push(TypeKind.TInt(64, true))
+        let iMangled = monomorphizeEnum(ck, "Option", iOptArgs)
+        return TypeKind.TEnum(iMangled)
     }
     // Option<f64>, matching the oracle and — critically — matching what CODEGEN emits.
     // These disagreed: codegen was returning an Option while the checker said bare f64, so

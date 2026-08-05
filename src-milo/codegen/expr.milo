@@ -3830,11 +3830,52 @@ pub fn genMethodCall(cg: &mut Cgen, object: &Expr, method: &string, args: &Vec<H
             v: p, ty: "ptr"
         }
     }
-    // .indexOfFrom(needle, from) -> Option<i64>: call strIndexOfFrom (already in
-    // std/string.milo, prelude-visible), then wrap the -1 sentinel as None/Some
-    // (mirrors src/codegen.ts genStringFind / genHashMapGet's Option-build shape).
-    // indexOf/lastIndexOf still fall through to the generic strXxx dispatch below
-    // and return a bare i64 — a pre-existing gap versus the oracle, out of scope.
+    // .indexOf(needle)/.lastIndexOf(needle) -> Option<i64>: call strIndexOf /
+    // strLastIndexOf (already in std/string.milo, prelude-visible), then wrap
+    // the -1 sentinel as None/Some. Same shape as .indexOfFrom just below —
+    // the checker now declares Option<i64> for these too, so codegen has to
+    // actually build one instead of falling through to the generic strXxx
+    // dispatch (which just forwards the raw i64).
+    if objTyLl == "%String" && (method == "indexOf" || method == "lastIndexOf") {
+        let recvLv = genLvalue(cg, object, locs, sigs)
+        let needleLv = genLvalue(cg, *args[0], locs, sigs)
+        var rfn = "strIndexOf"
+        if method == "lastIndexOf" {
+            rfn = "strLastIndexOf"
+        }
+        let idx = nextTemp(cg)
+        emit(cg, "  " + idx + " = call i64 @" + rfn + "(ptr " + recvLv.v + ", ptr " + needleLv.v + ")\n")
+
+        let optName = stripPercent(resolveTyStr(cg, "Option<i64>"))
+        let optTy = "%" + optName
+        let someTag = lookupVariantTag(cg, optName, "Some")
+        let noneTag = lookupVariantTag(cg, optName, "None")
+        let resAddr = nextTemp(cg)
+        emit(cg, "  " + resAddr + " = alloca " + optTy + "\n")
+        let tagPtr = nextTemp(cg)
+        emit(cg, "  " + tagPtr + " = getelementptr " + optTy + ", ptr " + resAddr + ", i32 0, i32 0\n")
+        let found = nextTemp(cg)
+        emit(cg, "  " + found + " = icmp sge i64 " + idx + ", 0\n")
+        let someLbl = nextLabel(cg, "str.idx.some")
+        let noneLbl = nextLabel(cg, "str.idx.none")
+        let endLbl = nextLabel(cg, "str.idx.end")
+        emit(cg, "  br i1 " + found + ", label %" + someLbl + ", label %" + noneLbl + "\n")
+        emit(cg, noneLbl + ":\n")
+        emit(cg, "  store i32 " + noneTag.toString() + ", ptr " + tagPtr + "\n")
+        emit(cg, "  br label %" + endLbl + "\n")
+        emit(cg, someLbl + ":\n")
+        emit(cg, "  store i32 " + someTag.toString() + ", ptr " + tagPtr + "\n")
+        let payPtr = nextTemp(cg)
+        emit(cg, "  " + payPtr + " = getelementptr " + optTy + ", ptr " + resAddr + ", i32 0, i32 1\n")
+        emit(cg, "  store i64 " + idx + ", ptr " + payPtr + "\n")
+        emit(cg, "  br label %" + endLbl + "\n")
+        emit(cg, endLbl + ":\n")
+        let r = nextTemp(cg)
+        emit(cg, "  " + r + " = load " + optTy + ", ptr " + resAddr + "\n")
+        return Val {
+            v: r, ty: optName
+        }
+    }
     if objTyLl == "%String" && method == "indexOfFrom" {
         let recvLv = genLvalue(cg, object, locs, sigs)
         let needleLv = genLvalue(cg, *args[0], locs, sigs)

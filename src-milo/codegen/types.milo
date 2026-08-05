@@ -489,17 +489,36 @@ pub fn lookupFieldType(cg: &Cgen, structName: &string, idx: i64): string {
     return "i32"
 }
 
-pub fn lookupVariantTag(cg: &Cgen, enumName: &string, variantName: &string): i32 {
+// Does this enum have this variant, and what is its tag? Option, not a -1 sentinel: an
+// explicit discriminant may legitimately BE -1 (`enum Signed: i32 { Neg = -1, … }`), and a
+// sentinel makes that variant indistinguishable from "no such variant" — its constructor
+// then compiles to a call to an undefined function, or silently to tag 0.
+//
+// EVERY existence test must go through this. `lookupVariantTag` below is the convenience
+// form for the many call sites that have already established the variant exists and only
+// want its number; it is never correct to test that result for existence.
+pub fn variantTagOpt(cg: &Cgen, enumName: &string, variantName: &string): Option<i32> {
     if !cg.enums.contains(enumName) {
-        return -1
+        return Option.None
     }
     let info = cg.enums.get(enumName)!
     for i in 0..info.variants.len {
         if info.variants[i].name == variantName {
-            return info.variants[i].tag
+            return Option.Some(info.variants[i].tag)
         }
     }
-    return -1
+    return Option.None
+}
+
+pub fn lookupVariantTag(cg: &Cgen, enumName: &string, variantName: &string): i32 {
+    match variantTagOpt(cg, enumName, variantName) {
+        Option.Some(t) => {
+            return t
+        }
+        Option.None => {
+            return -1
+        }
+    }
 }
 
 pub fn lookupVariantPayload(cg: &Cgen, enumName: &string, variantName: &string): Vec<string> {

@@ -14,7 +14,7 @@ from "src-milo/codegen/types.milo" import {
     unwrapHeap, stripPercent, binOpInt, cmpOpInt, isArithOp, isCmpOp,
     findLocal, hasLocal, genLoad, ensureMalloc, ensureMemcpy,
     lookupFnRet, lookupFieldIndex, lookupFieldType,
-    lookupVariantTag, lookupVariantPayload, lookupEnumPayloadSlots
+    lookupVariantTag, variantTagOpt, lookupVariantPayload, lookupEnumPayloadSlots
 }
 from "src-milo/codegen/stmt.milo" import {
     genClosure, genClosureCall, widenToI64
@@ -1175,10 +1175,9 @@ pub fn genUnwrap(cg: &mut Cgen, inner: &Expr, span: &Option<Span>, locs: &Vec<Lo
     let v = genExpr(cg, inner, locs, sigs, "")
     let enumName = resolveEnumName(cg, resolveTyStr(cg, stripPercent(v.ty)))
     let enumTy = "%" + enumName
-    let someTag = lookupVariantTag(cg, enumName, "Some")
     var okVariant = "Some"
     var failWord = "None"
-    if someTag < 0 {
+    if variantTagOpt(cg, enumName, "Some").isNone() {
         okVariant = "Ok"
         failWord = "Err"
     }
@@ -1269,7 +1268,7 @@ pub fn genPropagate(cg: &mut Cgen, inner: &Expr, locs: &Vec<Local>, sigs: &Vec<C
     let srcTy = "%" + srcEnum
     var okVariant = "Some"
     var failVariant = "None"
-    if lookupVariantTag(cg, srcEnum, "Some") < 0 {
+    if variantTagOpt(cg, srcEnum, "Some").isNone() {
         okVariant = "Ok"
         failVariant = "Err"
     }
@@ -1304,7 +1303,7 @@ pub fn genPropagate(cg: &mut Cgen, inner: &Expr, locs: &Vec<Local>, sigs: &Vec<C
         emit(cg, "  ret " + srcTy + " " + whole + "\n")
     } else {
         let retFail = lookupVariantTag(cg, retEnum, failVariant)
-        if retFail < 0 {
+        if variantTagOpt(cg, retEnum, failVariant).isNone() {
             eprint("codegen: '?' cannot propagate " + srcEnum.clone() + " into fn returning " + retEnum.clone())
             exit(1)
         }
@@ -1409,7 +1408,7 @@ pub fn genDefaultValue(cg: &mut Cgen, inner: &Expr, defaultE: &Expr, locs: &Vec<
     let enumName = resolveEnumName(cg, resolveTyStr(cg, stripPercent(v.ty)))
     let enumTy = "%" + enumName
     var okVariant = "Some"
-    if lookupVariantTag(cg, enumName, "Some") < 0 {
+    if variantTagOpt(cg, enumName, "Some").isNone() {
         okVariant = "Ok"
     }
     let payloadTypes = lookupVariantPayload(cg, enumName, okVariant)
@@ -1563,7 +1562,7 @@ pub fn genOptionWrapIfNeeded(cg: &mut Cgen, v: &Val, hintTy: &string): Val {
         return asis
     }
     let stag = lookupVariantTag(cg, rp, "Some")
-    if stag < 0 {
+    if variantTagOpt(cg, rp, "Some").isNone() {
         return asis
     }
     let pl = lookupVariantPayload(cg, rp, "Some")
@@ -1854,23 +1853,27 @@ pub fn peekArgTy(e: &Expr, locs: &Vec<Local>): string {
 pub fn genEnumLit(cg: &mut Cgen, enumName: &string, variant: &string, args: &Vec<Heap<Expr>>, locs: &Vec<Local>, sigs: &Vec<CgFnSig>, hintTy: &string): Val {
     // Generic enums are registered under their mangled name
     var rEnum = resolveEnumName(cg, enumName)
+    // `found` answers "is this a variant at all"; `tag` is only its number. They must stay
+    // separate — a variant whose discriminant is -1 is a perfectly good variant, and
+    // folding the two questions together routed it to the static-method path, emitting a
+    // call to a function that does not exist.
+    var found = variantTagOpt(cg, rEnum, variant).isSome()
     var tag = lookupVariantTag(cg, rEnum, variant)
-    // A generic enum literal (`Result.Ok(x)`) can't pick its instantiation from
-    // the base name alone when several exist; the expected type supplies it.
-    if tag < 0 && hintTy.len > 0 {
+    if !found && hintTy.len > 0 {
         let he = stripPercent(resolveTyStr(cg, stripPercent(hintTy)))
-        if he.startsWith(enumName + "_") && lookupVariantTag(cg, he, variant) >= 0 {
+        if he.startsWith(enumName + "_") && variantTagOpt(cg, he, variant).isSome() {
             rEnum = he.clone()
             tag = lookupVariantTag(cg, he, variant)
+            found = true
         }
     }
     // No hint (`let a = Maybe.Just(42)`): pick the monomorphization of this generic
     // enum that carries the variant — the sole one, or (if several) the one whose
     // variant payload type matches the first payload argument.
-    if tag < 0 {
+    if !found {
         var cands: Vec<string> = Vec.new()
         for k, v in cg.enums {
-            if k.startsWith(enumName + "_") && lookupVariantTag(cg, k, variant) >= 0 {
+            if k.startsWith(enumName + "_") && variantTagOpt(cg, k, variant).isSome() {
                 cands.push(k.clone())
             }
         }
@@ -1891,12 +1894,13 @@ pub fn genEnumLit(cg: &mut Cgen, enumName: &string, variant: &string, args: &Vec
         if chosen.len > 0 {
             rEnum = chosen
             tag = lookupVariantTag(cg, rEnum, variant)
+            found = true
         }
     }
     // `Type.method(...)` with no matching variant is a static method on a struct
     // (e.g. File.openRead) — the parser lands both on the enum-literal form. It is
     // registered as `Type$method`; route it to the plain call path.
-    if tag < 0 {
+    if !found {
         var emptyTA: Vec<MiloType> = Vec.new()
         return genCall(cg, rEnum + "$" + variant, args, emptyTA, locs, sigs, "")
     }
@@ -4129,7 +4133,7 @@ pub fn genCall(cg: &mut Cgen, name: &string, args: &Vec<Heap<Expr>>, typeArgs: &
                 let rp = stripPercent(resolveTyStr(cg, stripPercent(paramHints[i])))
                 if cg.enums.contains(rp) && llType(av.ty) != ("%" + rp) {
                     let stag = lookupVariantTag(cg, rp, "Some")
-                    if stag >= 0 {
+                    if variantTagOpt(cg, rp, "Some").isSome() {
                         let pl = lookupVariantPayload(cg, rp, "Some")
                         if pl.len == 1 && llType(pl[0]) == llType(av.ty) {
                             av = genWrapSome(cg, av, rp)

@@ -151,9 +151,10 @@ pub fn keywordKind(s: &string): TokKind {
     if s == "import" {
         return TokKind.Import
     }
-    if s == "from" {
-        return TokKind.From
-    }
+    // `from` is a SOFT keyword, exactly as in the TS compiler: it introduces an import
+    // only when a string literal follows it. Lexing it as a hard keyword made every
+    // `fn slice(src: &string, from: i64, to: i64)` in std a parse error, and one parse
+    // error cascades into hundreds of bogus <unknown> type errors downstream.
     if s == "break" {
         return TokKind.Break
     }

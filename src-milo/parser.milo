@@ -269,8 +269,12 @@ pub fn parseAttribute(p: &mut Parser): Attribute {
 
 // -- Import --
 
+pub fn atFromKeyword(p: &Parser): bool {
+    return at(p, TokKind.Ident) && peek(p).value == "from" && peekN(p, 1).kind == TokKind.String
+}
+
 pub fn parseImport(p: &mut Parser): ImportDecl {
-    if at(p, TokKind.From) {
+    if atFromKeyword(p) {
         let tok = advance(p)
         let pathTok = expect(p, TokKind.String)
         expect(p, TokKind.Import)
@@ -1448,7 +1452,7 @@ pub fn parse(p: &mut Parser): Program {
             }
         }
 
-        if at(p, TokKind.Import) || at(p, TokKind.From) {
+        if at(p, TokKind.Import) || atFromKeyword(p) {
             imports.push(parseImport(p))
         } else if at(p, TokKind.Struct) {
             var s = parseStruct(p)

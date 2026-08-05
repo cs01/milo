@@ -1454,6 +1454,47 @@ pub fn registerEnum(ck: &mut Checker, decl: &EnumDecl) {
     ck.enums.insert(decl.name.clone(), info)
 }
 
+// Whether struct `name` embeds itself BY VALUE, directly or through other
+// by-value structs or fixed-size arrays (mirrors the oracle's embedsSelf in
+// src/checker.ts). Heap<T>/Vec<T>/&T/*T fields all break the chain — those are
+// pointer-sized regardless of what they point to — so only TStruct and TArray
+// keep walking. `stack` is the set of struct names on the current walk; hitting
+// one already on it means an unindirected cycle, i.e. infinite size.
+pub fn structEmbedsSelf(ck: &Checker, name: &string, stack: &mut Vec<string>): bool {
+    for i in 0..stack.len {
+        if stack[i] == name {
+            return true
+        }
+    }
+    if !ck.structs.contains(name) {
+        return false
+    }
+    let info = ck.structs.get(name)!
+    stack.push(name.clone())
+    var found = false
+    for i in 0..info.fields.len {
+        if structFieldEmbedsSelf(ck, info.fields[i].ty, stack) {
+            found = true
+        }
+    }
+    let _ = stack.pop()
+    return found
+}
+
+fn structFieldEmbedsSelf(ck: &Checker, t: &TypeKind, stack: &mut Vec<string>): bool {
+    match t {
+        TypeKind.TArray(inner, size) => {
+            return structFieldEmbedsSelf(ck, *inner, stack)
+        }
+        TypeKind.TStruct(name) => {
+            return structEmbedsSelf(ck, name, stack)
+        }
+        _ => {
+            return false
+        }
+    }
+}
+
 // Option<T> and Result<T, E> are compiler builtins with no source declaration;
 // synthesize generic EnumDecls so the normal mono machinery instantiates them.
 pub fn registerBuiltinGenericEnums(ck: &mut Checker) {
@@ -1730,6 +1771,43 @@ pub fn checkProgram(ck: &mut Checker, program: &Program) {
         }
         sInfo.fields = newFields
         ck.structs.insert(structNames[si].clone(), sInfo)
+    }
+
+    // A struct/enum that embeds itself BY VALUE (directly, or through other
+    // by-value structs/fixed arrays) has infinite size and can't be laid out.
+    // Left unchecked, layout/codegen either recurses forever computing the size
+    // (a hang the memory guard has to kill) or hands LLVM a self-referential
+    // struct type it rejects with an opaque verifier error — neither is a
+    // diagnostic. Must run after Phase 1.5's TStruct(enumName) -> TEnum(enumName)
+    // normalization, or an enum's recursive field still reads as TStruct and
+    // this walk misses it entirely.
+    for si in 0..program.structs.len {
+        let s = program.structs[si]
+        if s.typeParams.len == 0 {
+            var stack: Vec<string> = Vec.new()
+            if structEmbedsSelf(ck, s.name, stack) {
+                errorHint(ck, "struct '" + s.name.clone() + "' is recursive by value and has infinite size", "a struct cannot contain itself by value — put the recursive field behind an indirection (e.g. 'Heap<" + s.name.clone() + ">' or 'Vec<" + s.name.clone() + ">')", Option.None)
+            }
+        }
+    }
+    for ei in 0..program.enums.len {
+        let e = program.enums[ei]
+        if e.typeParams.len == 0 && ck.enums.contains(e.name) {
+            let info = ck.enums.get(e.name)!
+            for vn, vi in info.variants {
+                for fi in 0..vi.fields.len {
+                    match vi.fields[fi] {
+                        TypeKind.TEnum(fname) => {
+                            if fname == e.name {
+                                errorHint(ck, "enum '" + e.name.clone() + "' has infinite size due to recursive field", "wrap the recursive field in Heap<" + e.name.clone() + "> for heap allocation", Option.None)
+                            }
+                        }
+                        _ => {
+                        }
+                    }
+                }
+            }
+        }
     }
 
     // Phase 2: register impls and derive macros

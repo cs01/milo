@@ -406,6 +406,40 @@ pub fn genVecNew(cg: &mut Cgen, hintTy: &string): Val {
     }
 }
 
+// `Vec.withCapacity(n)` must return a Vec whose `.ptr()` is a REAL, malloc'd
+// buffer of n elements — not just an empty Vec (data=null, cap=0) with capacity
+// treated as a discarded "growth hint". A caller that hands the pointer straight
+// to a syscall without ever pushing (`std/io`'s fdRead: `Vec.withCapacity(max);
+// let base = raw.ptr(); read(fd, base, max)`) got a null buffer, and the kernel
+// rejected it with EFAULT ("Bad address") — every std/net and std/fs read that
+// went through fdRead failed before a single byte moved. Mirrors
+// src/codegen.ts's genVecWithCapacity: malloc(cap*elemSize), len=0, cap=cap.
+pub fn genVecWithCapacity(cg: &mut Cgen, hintTy: &string, capExpr: &Expr, locs: &Vec<Local>, sigs: &Vec<CgFnSig>): Val {
+    ensureVecTy(cg)
+    ensureMalloc(cg)
+    var ty = hintTy.clone()
+    if !isVecTy(ty) {
+        ty = "Vec<i64>"
+    }
+    let elemTy = unwrapVec(resolveTyStr(cg, ty.clone()))
+    let elemLl = llType(elemTy)
+    let elemSz = llTypeBytes(elemLl)
+    let capV = genExpr(cg, capExpr, locs, sigs, "i64")
+    let bytes = nextTemp(cg)
+    emit(cg, "  " + bytes + " = mul i64 " + capV.v.clone() + ", " + elemSz.toString() + "\n")
+    let buf = nextTemp(cg)
+    emit(cg, "  " + buf + " = call ptr @malloc(i64 " + bytes + ")\n")
+    let a = nextTemp(cg)
+    emit(cg, "  " + a + " = insertvalue %Vec undef, ptr " + buf + ", 0\n")
+    let b = nextTemp(cg)
+    emit(cg, "  " + b + " = insertvalue %Vec " + a + ", i64 0, 1\n")
+    let c = nextTemp(cg)
+    emit(cg, "  " + c + " = insertvalue %Vec " + b + ", i64 " + capV.v.clone() + ", 2\n")
+    return Val {
+        v: c, ty: ty
+    }
+}
+
 // Append to a Vec through its address: growth has to be visible to the caller,
 // so this takes the receiver as an lvalue rather than a loaded value.
 pub fn genVecPush(cg: &mut Cgen, addr: &string, vecTy: &string, elemVal: &Val): Val {
@@ -6691,12 +6725,13 @@ pub fn genExpr(cg: &mut Cgen, e: &Expr, locs: &Vec<Local>, sigs: &Vec<CgFnSig>, 
             if enumName == "HashMap" && variant == "new" {
                 return genHashMapNew(cg, hintTy)
             }
-            // Capacity is only a growth hint, so an empty Vec is semantically equivalent —
-            // `push` mallocs on first use. Matches how String.withCapacity is handled.
+            // Real capacity, not just a growth hint: callers that write through
+            // `.ptr()` without ever pushing (fdRead's read-syscall landing pad) need
+            // an actually-allocated buffer — see genVecWithCapacity's doc comment.
+            if enumName == "Vec" && variant == "withCapacity" && args.len == 1 {
+                return genVecWithCapacity(cg, hintTy, *args[0], locs, sigs)
+            }
             if enumName == "Vec" && variant == "withCapacity" {
-                if args.len == 1 {
-                    let _ = genExpr(cg, *args[0], locs, sigs, "i64")
-                }
                 return genVecNew(cg, hintTy)
             }
             // `Vec.filled(n, v)`: allocate n slots and store v into each.

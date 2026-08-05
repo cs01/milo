@@ -52,6 +52,80 @@ pub fn structLitConst(cg: &Cgen, gllTy: &string, value: &Expr): string {
     }
 }
 
+// Can this initializer be spelled as an LLVM constant? Anything else needs the runtime
+// initializer. Deliberately conservative: a shape not listed here gets runtime init, which
+// is always correct, where guessing "constant" would silently emit a zero.
+// An aggregate initializer that IS all-zero bytes, so the static zeroinitializer is
+// already the right answer and no runtime store is needed.
+pub fn isEmptyAggInit(e: &Expr): bool {
+    match e {
+        Expr.EnumLit(en, vn, args, span) => {
+            return vn == "new" && args.len == 0
+        }
+        _ => {
+            return false
+        }
+    }
+}
+
+pub fn isConstInit(e: &Expr): bool {
+    match e {
+        Expr.IntLit(n, span) => {
+            return true
+        }
+        Expr.FloatLit(f, span) => {
+            return true
+        }
+        Expr.BoolLit(b, span) => {
+            return true
+        }
+        Expr.CharLit(c, span) => {
+            return true
+        }
+        Expr.StringLit(v, span) => {
+            return true
+        }
+        Expr.UnaryOp(op, operand, span) => {
+            if op == "-" {
+                return isConstInit(*operand)
+            }
+            return false
+        }
+        Expr.BinOp(op, lhs, rhs, span) => {
+            // Only NUMERIC folding exists; string concatenation has to run at runtime.
+            let f = constFoldNum(e)
+            return f.ok
+        }
+        Expr.ArrayLit(elements, span) => {
+            for i in 0..elements.len {
+                if !isConstInit(*elements[i]) {
+                    return false
+                }
+            }
+            return true
+        }
+        Expr.ArrayRepeat(val, count, span) => {
+            return isConstInit(*val)
+        }
+        Expr.StructLit(name, fields, span) => {
+            for i in 0..fields.len {
+                if !isConstInit(*fields[i].value) {
+                    return false
+                }
+            }
+            return true
+        }
+        Expr.EnumLit(en, vn, args, span) => {
+            // `Vec.new()` / `HashMap.new()` are the empty-container constructors, which
+            // are all-zero bytes.
+            return vn == "new" && args.len == 0
+        }
+        _ => {
+            return false
+        }
+    }
+}
+
 pub fn constInitOf(e: &Expr, llTy: &string): string {
     // a pointer global can only be a compile-time-constant null (`0 as *T`); LLVM
     // rejects `global ptr 0`, the null pointer constant is spelled `null`.
@@ -255,7 +329,7 @@ from "src-milo/codegen/types.milo" import {
     ensureStringTy, ensureVecTy,
 }
 from "src-milo/codegen/stmt.milo" import {
-    genStmt, emitScopeDrops
+    genStmt, emitScopeDrops, collectIdentsExpr
 }
 from "src-milo/codegen/abi.milo" import {
     AbiStruct, ArgClass, RetClass, AbiReg,
@@ -502,6 +576,9 @@ pub fn genFn(cg: &mut Cgen, f: &Function, sigs: &Vec<CgFnSig>) {
     if isMain {
         emit(cg, "  store i32 %_milo_argc, ptr @_milo_argc_global\n")
         emit(cg, "  store ptr %_milo_argv, ptr @_milo_argv_global\n")
+        if cg.needsGlobalInit {
+            emit(cg, "  call void @_milo_init_globals()\n")
+        }
     }
 
     // Bind parameters. A ref param arrives as a `ptr` to the pointee, so it IS
@@ -770,7 +847,9 @@ pub fn genProgram(prog: Program, sourceDir: string): string {
     }
 
     // Module-level global initializers — emitted here so struct/enum/%Vec/%String
-    // types they reference are already declared above.
+    // types they reference are already declared above. Anything the static paths below
+    // cannot express is collected for the runtime initializer.
+    var dynIdx: Vec<i64> = Vec.new()
     for gi in 0..prog.globals.len {
         var surfaceTy = "i64"
         match prog.globals[gi].ty {
@@ -908,15 +987,96 @@ pub fn genProgram(prog: Program, sourceDir: string): string {
         if !arrayHandled && !structHandled {
             // aggregate globals (%String/%Vec/struct) zero-init; scalars take a const.
             var gval = "zeroinitializer"
-            if !(gllTy.len > 0 && gllTy[0] == 37) {
+            let isAgg = gllTy.len > 0 && gllTy[0] == 37
+            if !isAgg {
                 gval = constInitOf(*prog.globals[gi].value, gllTy)
+                if !isConstInit(*prog.globals[gi].value) {
+                    dynIdx.push(gi)
+                }
+            } else if !isEmptyAggInit(*prog.globals[gi].value) {
+                // A %String or %Vec built from anything other than an empty constructor
+                // cannot be an LLVM constant, so zeroinitializer here is a placeholder —
+                // the real value has to be computed at startup. Without this a
+                // `pub let TAIL: string = "tail"` stayed the empty string forever.
+                dynIdx.push(gi)
             }
             emitG(cg, "@" + gname.clone() + " = global " + gllTy + " " + gval + "\n")
         }
     }
 
-    // Emit all functions (generic templates excluded — see registration above)
+    // Globals whose initializer is not a compile-time constant get a runtime initializer,
+    // run from main before any user code. Emitted in DEPENDENCY order, not source order:
+    // `let FRAG = "head|" + TAIL` may be written above `TAIL`, and evaluating it first
+    // would read a zeroed string. Without this whole pass such a global stayed
+    // zeroinitializer forever and printed as empty — a silent wrong answer, not an error.
     let sigs = buildFnTable(prog)
+    if dynIdx.len > 0 {
+        cg.needsGlobalInit = true
+        // Insertion sort by dependency: a global is emitted only once every global it
+        // names has been emitted. A cycle cannot be ordered, so the remaining ones go in
+        // source order rather than looping forever — the checker is what should reject a
+        // cyclic initializer.
+        var ordered: Vec<i64> = Vec.new()
+        var placed: HashMap<string, bool> = HashMap.new()
+        var remaining = dynIdx.len
+        while remaining > 0 {
+            var progressed = false
+            for k in 0..dynIdx.len {
+                let gi = dynIdx[k]
+                let nm = prog.globals[gi].name.clone()
+                if placed.contains(nm) {
+                    continue
+                }
+                var refs: Vec<string> = Vec.new()
+                collectIdentsExpr(*prog.globals[gi].value, refs)
+                var ready = true
+                for ri in 0..refs.len {
+                    for k2 in 0..dynIdx.len {
+                        let g2 = dynIdx[k2]
+                        if prog.globals[g2].name == refs[ri] && !placed.contains(refs[ri]) {
+                            ready = false
+                        }
+                    }
+                }
+                if ready {
+                    ordered.push(gi)
+                    placed.insert(nm, true)
+                    remaining = remaining - 1
+                    progressed = true
+                }
+            }
+            if !progressed {
+                for k in 0..dynIdx.len {
+                    let gi = dynIdx[k]
+                    if !placed.contains(prog.globals[gi].name) {
+                        ordered.push(gi)
+                        placed.insert(prog.globals[gi].name.clone(), true)
+                        remaining = remaining - 1
+                    }
+                }
+            }
+        }
+        emit(cg, "define void @_milo_init_globals() {\n")
+        emit(cg, "entry:\n")
+        var initLocs: Vec<Local> = Vec.new()
+        for oi in 0..ordered.len {
+            let gi = ordered[oi]
+            var surfaceTy = "i64"
+            match prog.globals[gi].ty {
+                Option.Some(t) => {
+                    surfaceTy = astTypeStr(t)
+                }
+                Option.None => {
+                }
+            }
+            let v = genExpr(cg, *prog.globals[gi].value, initLocs, sigs, surfaceTy.clone())
+            emit(cg, "  store " + llType(surfaceTy) + " " + v.v + ", ptr @" + prog.globals[gi].name.clone() + "\n")
+        }
+        emit(cg, "  ret void\n")
+        emit(cg, "}\n\n")
+    }
+
+    // Emit all functions (generic templates excluded — see registration above)
     for j in 0..prog.functions.len {
         if prog.functions[j].typeParams.len > 0 {
             continue

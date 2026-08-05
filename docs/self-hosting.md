@@ -1,10 +1,49 @@
 <!-- doc-meta
 system: self-hosting
 purpose: status and reproduction steps for the Milo compiler written in Milo (src-milo), including the bootstrap fixed point
-key-files: src-milo/, scripts/selfhost.sh, scripts/selfhost-fixpoint.sh, scripts/ir-diff.ts
+key-files: src-milo/, scripts/selfhost.sh, scripts/selfhost-selfcheck.sh, scripts/selfhost-fixpoint.sh, scripts/ir-diff.ts
 update-when: the bootstrap converges or diverges, or the fixture parity number moves materially
-last-verified: 2026-08-05 (stage2 == stage3 byte-identical; self-built compiler passes 504/578, same as oracle-built)
+last-verified: 2026-08-05 (self-check OK; 547/578 fixtures, 96/245 negative tests)
 -->
+
+## The three things that get measured, and the one that used to not be
+
+| harness | measures | catches |
+|---|---|---|
+| `scripts/selfhost-sweep.ts` | `tests/fixtures/` — must compile and print the right thing | missing features, miscompiles |
+| `scripts/selfhost-rejects.ts` | `tests/errors/` + `tests/runtime-errors/` — must be REJECTED or trap | unsoundness: programs accepted that must not be |
+| `scripts/selfhost-examples.ts` | `examples/` — must build | integration breakage |
+| **`scripts/selfhost-selfcheck.sh`** | **`milo-self check src-milo/main.milo`** | **over-rejection, and src-milo using a feature milo-self lacks** |
+
+The first three all measure milo-self against `tests/`. None of them looks at whether
+milo-self can still compile *its own source*, and on 2026-08-05 that property was broken
+for hours — four causes from three concurrent workstreams — while every census stayed
+green. Two failure shapes are invisible to `tests/` by construction:
+
+1. **src-milo uses a feature milo-self does not implement.** Two workstreams wrote compiler
+   source using an `as` import alias and `HashMap.isEmpty()` — both of which were sitting on
+   the failing-fixture list at that moment. The TS oracle compiles such code happily.
+2. **A new checker rule over-rejects.** src-milo is ~25k lines of real Milo and is a far
+   better over-rejection detector than the fixture corpus: a rule that no fixture exercises
+   still hits the compiler itself. Both borrow-tracking regressions that week surfaced only
+   this way.
+
+Run it before every commit that touches `src-milo/`. It is a `check`, not a build — seconds,
+not minutes. Per the project rule below it must never gate a change in `src/`; it gates
+changes to `src-milo/`, which is a different claim: a self-hosted compiler that cannot
+compile itself is not self-hosted.
+
+### Porting hazard: `VarInfo` is by-value here
+
+The TS checker holds a live `VarInfo` object. `src-milo`'s `lookup()` returns a **copy**.
+Object identity gives the oracle per-call scoping and branch isolation for free, so checker
+state it keeps on `VarInfo` needs no explicit release — and its source therefore never shows
+that a release is required. src-milo keeps the equivalent state in name-keyed side tables on
+`Checker`, which have no such boundary: state leaks into the next function that reuses a
+common local name (`self`, `ty`, `inner`, `res`), and past `snapshotMoves`/`restoreMoves`
+into the other arm of an `if`. The oracle needs 4 release points; the faithful port needed 9
+plus a phase reset. **Assume any new side table on `Checker` has this hole until proven
+otherwise**, and verify with the self-check above rather than with fixtures.
 
 # Self-Hosting Plan (v2 — 2026-07-08)
 

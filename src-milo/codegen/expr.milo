@@ -3085,6 +3085,21 @@ pub fn genAsCast(cg: &mut Cgen, inner: &Expr, targetTy: &string, locs: &Vec<Loca
             _ => {
             }
         }
+        // Inline struct-field array (see isInlineArrTy — e.g. `saved: [u8;80]` inside
+        // TermState) cast to a raw pointer is C's array-to-pointer decay: the field's
+        // OWN ADDRESS is the pointer value. This isn't Vec-backed (no {ptr,len,cap}
+        // header to extract a data pointer from — see genIndex's identical check), so
+        // the plain genExpr path below would LOAD the whole `[N x T]` as a value
+        // instead, and the catch-all `intBits(fromLl) == 0` fallback further down then
+        // mislabeled that aggregate `ptr` without converting it: `tcgetattr(0,
+        // state.saved as *u8)` passed a `[80 x i8]`-typed temporary where the extern
+        // declared `ptr`, and clang rejected the mismatched define.
+        if isInlineArrTy(placeTypeStr(cg, inner, locs)) {
+            let addr = genLvalue(cg, inner, locs, sigs)
+            return Val {
+                v: addr.v, ty: targetTy.clone()
+            }
+        }
     }
     var innerHint = ""
     if isHintSafeCastOperand(inner) {

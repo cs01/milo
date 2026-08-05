@@ -28,7 +28,7 @@ from "src-milo/codegen/abi.milo" import {
 
 from "src-milo/codegen/strings.milo" import {
     genStringLit, genStringClone, genStringConcat, genStringEq, genStringCmp,
-    genIntToString, genFloatToString, genStringIndex, genStringSlice, emitStringLit, genStringPush
+    genIntToString, genFloatToString, genFloat32ToString, genStringIndex, genStringSlice, emitStringLit, genStringPush
 }
 
 // -- Struct literal --
@@ -4228,17 +4228,23 @@ pub fn genCall(cg: &mut Cgen, name: &string, args: &Vec<Heap<Expr>>, typeArgs: &
                 let p = nextTemp(cg)
                 emit(cg, "  " + p + " = extractvalue %String " + argVals[ai].v + ", 0\n")
                 argStr = argStr + ", ptr " + p
-            } else if elemLl == "double" {
-                // %g (not %f) to match the oracle: trims trailing zeros
-                // (3.141590 → 3.14159) and shares double.toString()'s format.
-                fmt = fmt + "%g"
-                argStr = argStr + ", double " + argVals[ai].v
-            } else if elemLl == "float" {
-                // printf varargs promote float→double; fpext so the %g matches.
-                let fd = nextTemp(cg)
-                emit(cg, "  " + fd + " = fpext float " + argVals[ai].v + " to double\n")
-                fmt = fmt + "%g"
-                argStr = argStr + ", double " + fd
+            } else if elemLl == "double" || elemLl == "float" {
+                // Format through the same round-trip helper `.toString()` uses, then print
+                // the bytes with %s. A bare %g here was 6 significant digits, so PRINTING a
+                // float silently truncated it even though `.toString()` did not — the two
+                // paths disagreed on the same value.
+                // Only ONE of these may be emitted: calling the f64 helper and then
+                // overwriting the result left a dead `@milo.fmt.f64(double <a float>)`
+                // in the stream, which LLVM rejects even though nothing reads it.
+                let fstr = if elemLl == "float" {
+                    genFloat32ToString(cg, argVals[ai].v)
+                } else {
+                    genFloatToString(cg, argVals[ai].v)
+                }
+                fmt = fmt + "%s"
+                let fp = nextTemp(cg)
+                emit(cg, "  " + fp + " = extractvalue %String " + fstr.v + ", 0\n")
+                argStr = argStr + ", ptr " + fp
             } else if elemLl == "i64" {
                 // u64 prints unsigned (%llu) — else 18446744073709551615 → -1
                 if isUnsigned(argVals[ai].ty) {

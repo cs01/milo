@@ -1991,6 +1991,19 @@ pub fn checkEnumLit(ck: &mut Checker, enumName: &string, variant: &string, args:
         }
         return tyUnknown()
     }
+    // HashMap.withCapacity(n) — sized so `capacity` inserts never rehash. Same
+    // shape as HashMap.new above: no expected-type inference, just arity + arg
+    // checking (mirrors the oracle's checker.ts:6813, which treats new/withCapacity
+    // identically).
+    if enumName == "HashMap" && variant == "withCapacity" {
+        if args.len != 1 {
+            error(ck, "'HashMap.withCapacity' expects 1 argument", cloneSpan(span))
+        }
+        if args.len >= 1 {
+            checkExpr(ck, *args[0])
+        }
+        return tyUnknown()
+    }
     // String statics are compiler builtins
     if enumName == "String" && variant == "withCapacity" {
         if args.len >= 1 {

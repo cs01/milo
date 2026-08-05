@@ -7848,6 +7848,15 @@ pub fn genExpr(cg: &mut Cgen, e: &Expr, locs: &Vec<Local>, sigs: &Vec<CgFnSig>, 
             if enumName == "HashMap" && variant == "new" {
                 return genHashMapNew(cg, hintTy)
             }
+            // HashMap.withCapacity(n): the oracle's own HashMapNew HIR node carries
+            // no capacity field (src/lower.ts:823) — the argument is checked for a
+            // type error and then dropped, so withCapacity allocates the same fixed
+            // initial table as new. Mirror that exactly rather than "fixing" it here:
+            // self-host parity means matching the oracle's actual codegen, not the
+            // behavior its name implies.
+            if enumName == "HashMap" && variant == "withCapacity" {
+                return genHashMapNew(cg, hintTy)
+            }
             // Real capacity, not just a growth hint: callers that write through
             // `.ptr()` without ever pushing (fdRead's read-syscall landing pad) need
             // an actually-allocated buffer — see genVecWithCapacity's doc comment.

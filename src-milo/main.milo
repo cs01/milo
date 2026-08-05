@@ -183,9 +183,11 @@ pub fn detectLibs(ir: &string, os: &string): string {
 // Link LLVM IR with clang when available, otherwise mirror the TS driver's
 // llc + system C compiler path. Some Linux dev hosts ship LLVM tools without a
 // clang frontend; linking already-emitted IR does not require that frontend.
-pub fn linkIr(irFile: &string, output: &string, libs: &string): i32 {
+// `extra` mirrors src/main.ts's extraLinkFlags: raw, space-prefixed text spliced
+// straight into the link command (companion .c/.o/.a translation units, mainly).
+pub fn linkIr(irFile: &string, output: &string, libs: &string, extra: &string): i32 {
     let objFile = irFile.clone() + ".o"
-    let command = "if command -v clang >/dev/null 2>&1; then clang -Wno-override-module -O2 -o " + output.clone() + " " + irFile.clone() + libs.clone() + "; else llc -filetype=obj -O2 " + irFile.clone() + " -o " + objFile.clone() + " && cc -o " + output.clone() + " " + objFile + libs.clone() + "; fi"
+    let command = "if command -v clang >/dev/null 2>&1; then clang -Wno-override-module -O2 -o " + output.clone() + " " + irFile.clone() + libs.clone() + extra.clone() + "; else llc -filetype=obj -O2 " + irFile.clone() + " -o " + objFile.clone() + " && cc -o " + output.clone() + " " + objFile + libs.clone() + extra.clone() + "; fi"
     match run(command) {
         Result.Ok(code) => {
             return code
@@ -277,21 +279,26 @@ pub fn main() {
 
     if cmd == "build" {
         let ir = compile(source.clone())
-        // Determine output name
+        // Determine output name. Any other positional argument (companion .c/.o/.a/.cpp
+        // translation units — struct-by-value ABI tests link a C peer alongside the
+        // generated IR) is forwarded to the linker verbatim, mirroring src/main.ts's
+        // extraLinkFlags. Silently dropping these compiled fine but failed to link.
         var output = "a.out"
+        var extra = ""
         var i: i64 = 3
         while i < argv.len {
             if argv[i] == "-o" && (i + 1) < argv.len {
                 output = argv[i + 1].clone()
                 i = i + 2
             } else {
+                extra = extra + " " + argv[i].clone()
                 i = i + 1
             }
         }
         // Write IR to a temp file and link it with the available LLVM/C tools.
         let irFile = tmpPath("out", ".ll")
         let _ = writeFile(irFile, ir)
-        let status = linkIr(irFile, output, detectLibs(ir, getHostTarget().os))
+        let status = linkIr(irFile, output, detectLibs(ir, getHostTarget().os), extra)
         if status != 0 {
             eprint("error: linker failed (exit " + status.toString() + ")")
             exit(1)
@@ -305,21 +312,27 @@ pub fn main() {
         let irFile = tmpPath("out", ".ll")
         let _ = writeFile(irFile, ir)
         let binary = tmpPath("run", "")
-        let status = linkIr(irFile, binary, detectLibs(ir, getHostTarget().os))
-        if status != 0 {
-            eprint("error: linker failed")
-            exit(1)
-        }
-        // Forward args after the source (skipping a `--` separator) to the child,
-        // so `milo run prog -- a b` reaches prog's argv — otherwise a program that
-        // reads its file arg falls through to blocking on stdin.
+        // Split positionals the same way `build` does: a companion translation unit
+        // (.c/.o/.a/.cpp) is a link input, not something the running program should
+        // ever see on its argv. Everything else forwards to the child as before.
+        var extra = ""
         var childArgs = ""
         var ai: i64 = 3
         while ai < argv.len {
-            if argv[ai] != "--" {
-                childArgs = childArgs + " " + argv[ai].clone()
+            let a = argv[ai].clone()
+            if a == "--" {
+                // separator only — skip, don't forward or link it
+            } else if a.endsWith(".c") || a.endsWith(".o") || a.endsWith(".a") || a.endsWith(".cpp") {
+                extra = extra + " " + a
+            } else {
+                childArgs = childArgs + " " + a
             }
             ai = ai + 1
+        }
+        let status = linkIr(irFile, binary, detectLibs(ir, getHostTarget().os), extra)
+        if status != 0 {
+            eprint("error: linker failed")
+            exit(1)
         }
         var runStatus: i32 = 127
         match run(binary + childArgs) {

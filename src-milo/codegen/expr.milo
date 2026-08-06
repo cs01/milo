@@ -21,7 +21,7 @@ from "src-milo/codegen/types.milo" import {
     isInlineArrTy, inlineArrLen, inlineArrElem, ensureFpSat
 }
 from "src-milo/codegen/stmt.milo" import {
-    genClosure, genClosureCall, widenToI64, genMatch, genArmBody, MatchGen
+    genClosure, genClosureCall, widenToI64, genMatch, genArmBody, MatchGen, autoMoveClosureArg
 }
 from "src-milo/codegen/drops.milo" import {
     cgNeedsDrop, zeroStore, emitDropValue
@@ -339,18 +339,172 @@ pub fn placeTypeStr(cg: &Cgen, e: &Expr, locs: &Vec<Local>): string {
             }
             return ""
         }
+        // `*box` on a Heap<T> is the pointee's place; `*p` on a raw `*T` likewise.
+        // Without this the deref of an owned box read as "unknown type", which made
+        // every ownership decision about it (move? drop?) fall through to "no".
+        Expr.UnaryOp(op, operand, sp) => {
+            if op != "*" {
+                return ""
+            }
+            let ot = resolveTyStr(cg, placeTypeStr(cg, *operand, locs))
+            let inner = unwrapHeap(ot)
+            if inner.len > 0 {
+                return inner
+            }
+            if ot.len > 0 && ot[0] == 42 {
+                return ot[1..ot.len].clone()
+            }
+            return ""
+        }
         _ => {
             return ""
         }
     }
 }
 
+// Is this place rooted in an OWNED local/global (as opposed to a `&T` binding)?
+// A move may only zero storage this frame owns; a borrow's pointee belongs to
+// someone else, and the checker already rejects moving out of one.
+fn placeRootIsOwned(e: &Expr, cg: &Cgen, locs: &Vec<Local>): bool {
+    match e {
+        Expr.Ident(name, sp) => {
+            if hasLocal(locs, name) {
+                return !findLocal(locs, name).isRef
+            }
+            return cg.globalVars.contains(name)
+        }
+        Expr.FieldAccess(obj, field, sp) => {
+            return placeRootIsOwned(*obj, cg, locs)
+        }
+        Expr.UnaryOp(op, operand, sp) => {
+            if op == "*" {
+                return placeRootIsOwned(*operand, cg, locs)
+            }
+            return false
+        }
+        _ => {
+            return false
+        }
+    }
+}
+
+// Record that a receiver place was consumed, AFTER its value has already been
+// loaded — the same bookkeeping genOwnedArg does for an argument, split out for
+// the methods whose dispatch only learns they consume once the receiver's type is
+// known (Result.map forwards the Err payload into its result, so the receiver must
+// not be dropped again by the enclosing scope). Only whole owned places are
+// touched; a borrow's pointee belongs to someone else.
+pub fn markReceiverMoved(cg: &mut Cgen, e: &Expr, locs: &Vec<Local>, sigs: &Vec<CgFnSig>) {
+    let tyStr = placeTypeStr(cg, e, locs)
+    if tyStr.len == 0 {
+        return
+    }
+    if !cgNeedsDrop(cg, tyStr) {
+        return
+    }
+    if !placeRootIsOwned(e, cg, locs) {
+        return
+    }
+    match e {
+        Expr.Ident(name, sp) => {
+            let lv = genLvalue(cg, e, locs, sigs)
+            zeroStore(cg, lv.v, lv.ty)
+            cg.movedLocalAddrs.push(lv.v.clone())
+        }
+        Expr.FieldAccess(obj, field, sp) => {
+            let lv = genLvalue(cg, e, locs, sigs)
+            zeroStore(cg, lv.v, lv.ty)
+            cg.movedLocalAddrs.push(lv.v.clone())
+        }
+        _ => {
+        }
+    }
+}
+
 // Evaluate an expr in an OWNING position (a by-value arg, RHS, or field). If it
-// is a droppable local/global VARIABLE, load its value and zero the slot — the
-// move that keeps a later scope/reassign drop from double-freeing. Only bare
-// idents are moved: the checker (tryMove) treats field/index accesses as copies
-// (`let x = v[i]` leaves v[i] live), so zeroing those would corrupt the source.
+// is a droppable local/global place, load its value and zero the slot — the
+// move that keeps a later scope/reassign drop from double-freeing.
+//
+// Idents and struct FIELDS move (`let raw = msg.payload` takes the buffer with
+// it, and msg's own drop must not free it again — the oracle spells this as the
+// checker's isMove bit, which this compiler has no HIR to carry). Index accesses
+// do NOT: the checker treats `let x = v[i]` as a copy that leaves v[i] live, so
+// zeroing there would corrupt the source.
 pub fn genOwnedArg(cg: &mut Cgen, e: &Expr, hintTy: string, locs: &Vec<Local>, sigs: &Vec<CgFnSig>): Val {
+    match e {
+        Expr.Closure(cps, crt, cbody, cIsMove, csp) => {
+            let promoted = autoMoveClosureArg(e, locs)
+            match promoted {
+                Expr.Closure(p2, rt2, body2, isMove2, sp2) => {
+                    return genClosure(cg, p2, rt2, body2, isMove2, locs, sigs)
+                }
+                _ => {
+                }
+            }
+        }
+        _ => {
+        }
+    }
+    match e {
+        // `let d = dirs[i]` is a COPY, not a move (the checker leaves dirs[i] live),
+        // so a droppable element has to be deep-cloned here: a shallow header copy
+        // gives two owners of one buffer and whichever drops first empties the other.
+        // Mirrors the oracle's indexAccessClones.
+        Expr.IndexAccess(obj, idx, sp) => {
+            let elemTy = placeTypeStr(cg, e, locs)
+            if elemTy.len > 0 && cgNeedsDrop(cg, elemTy) {
+                let lv = genLvalue(cg, e, locs, sigs)
+                let ll = llType(resolveTyStr(cg, lv.ty))
+                let loaded = nextTemp(cg)
+                emit(cg, "  " + loaded + " = load " + ll + ", ptr " + lv.v + "\n")
+                let cloned = genCloneOfLoaded(cg, loaded, lv.ty)
+                return Val {
+                    v: cloned, ty: lv.ty.clone()
+                }
+            }
+        }
+        _ => {
+        }
+    }
+    match e {
+        // `*box` in an owning position hands the POINTEE on (`sum(*left)` on a
+        // Heap<Tree> payload): zero it so the box's own drop frees the box without
+        // recursing into a subtree the callee already took and dropped.
+        Expr.UnaryOp(op, operand, sp) => {
+            let tyStr = placeTypeStr(cg, e, locs)
+            if op == "*" && tyStr.len > 0 && cgNeedsDrop(cg, tyStr) && placeRootIsOwned(e, cg, locs) {
+                let lv = genLvalue(cg, e, locs, sigs)
+                let ll = llType(resolveTyStr(cg, lv.ty))
+                let v = nextTemp(cg)
+                emit(cg, "  " + v + " = load " + ll + ", ptr " + lv.v + "\n")
+                zeroStore(cg, lv.v, lv.ty)
+                cg.movedLocalAddrs.push(lv.v.clone())
+                return Val {
+                    v: v, ty: lv.ty.clone()
+                }
+            }
+        }
+        _ => {
+        }
+    }
+    match e {
+        Expr.FieldAccess(obj, field, sp) => {
+            let tyStr = placeTypeStr(cg, e, locs)
+            if tyStr.len > 0 && cgNeedsDrop(cg, tyStr) && placeRootIsOwned(e, cg, locs) {
+                let lv = genLvalue(cg, e, locs, sigs)
+                let ll = llType(resolveTyStr(cg, lv.ty))
+                let v = nextTemp(cg)
+                emit(cg, "  " + v + " = load " + ll + ", ptr " + lv.v + "\n")
+                zeroStore(cg, lv.v, lv.ty)
+                cg.movedLocalAddrs.push(lv.v.clone())
+                return Val {
+                    v: v, ty: lv.ty.clone()
+                }
+            }
+        }
+        _ => {
+        }
+    }
     match e {
         Expr.Ident(name, sp) => {
             let isLocal = hasLocal(locs, name)
@@ -4587,12 +4741,17 @@ pub fn genMethodCall(cg: &mut Cgen, object: &Expr, method: &string, args: &Vec<H
         }
         if isHashMapTy(lv.ty) {
             let keyTy = hashMapKeyTy(lv.ty)
-            let kv = genExpr(cg, *args[0], locs, sigs, keyTy)
             if method == "insert" {
+                // The map takes ownership of BOTH: move them (genOwnedArg), or the
+                // caller's binding drops the same buffer at scope end and the stored
+                // key/value dangles — jsonHashmap's keys all came back empty.
+                let kvOwned = genOwnedArg(cg, *args[0], keyTy, locs, sigs)
                 let valTy = hashMapValTy(lv.ty)
-                let vv = genExpr(cg, *args[1], locs, sigs, valTy)
-                return genHashMapInsert(cg, lv.v, lv.ty, kv, vv)
+                let vv = genOwnedArg(cg, *args[1], valTy, locs, sigs)
+                return genHashMapInsert(cg, lv.v, lv.ty, kvOwned, vv)
             }
+            // remove(key) only probes with the key; the caller keeps it.
+            let kv = genExpr(cg, *args[0], locs, sigs, keyTy)
             return genHashMapRemove(cg, lv.v, lv.ty, kv)
         }
     }
@@ -4643,6 +4802,12 @@ pub fn genMethodCall(cg: &mut Cgen, object: &Expr, method: &string, args: &Vec<H
             let isOptOrRes = variantTagOpt(cg, enumName, "Some").isSome() || variantTagOpt(cg, enumName, "Ok").isSome()
             if isOptOrRes {
                 let isResult = variantTagOpt(cg, enumName, "Ok").isSome()
+                // Result.map carries the Err payload into the mapped result, so a
+                // non-Copy E means the receiver is consumed. Option.map's None side
+                // has no payload, so its receiver stays live.
+                if isResult {
+                    markReceiverMoved(cg, object, locs, sigs)
+                }
                 return genOptionResultMap(cg, ov, enumName, isResult, *args[0], locs, sigs)
             }
         }
@@ -4834,7 +4999,20 @@ pub fn genMethodCall(cg: &mut Cgen, object: &Expr, method: &string, args: &Vec<H
     // no baseName table, so "carries a Some/Ok variant" stands in for it, same as
     // the isSome/unwrapOr block already does.
     if method == "andThen" || method == "orElse" || method == "mapErr" || method == "unwrapOrElse" {
-        let ov = genExpr(cg, object, locs, sigs, "")
+        // orElse's Some/Ok branch forwards the receiver's payload into its result, so a
+        // non-Copy payload is CONSUMED: load through genOwnedArg so a named receiver's
+        // slot is zeroed and the enclosing scope's drop doesn't free a buffer the result
+        // now owns. andThen/mapErr/unwrapOrElse hand the payload to the callback BY REF
+        // and leave the receiver usable (tests/fixtures/optionAndThen.milo,
+        // resultMapErr.milo both read it afterwards) — zeroing there reads back zeros.
+        var ov = Val {
+            v: "", ty: ""
+        }
+        if method == "orElse" {
+            ov = genOwnedArg(cg, object, "", locs, sigs)
+        } else {
+            ov = genExpr(cg, object, locs, sigs, "")
+        }
         let enumName = stripPercent(resolveTyStr(cg, stripPercent(ov.ty)))
         let isOptOrRes = variantTagOpt(cg, enumName, "Some").isSome() || variantTagOpt(cg, enumName, "Ok").isSome()
         if isOptOrRes {
@@ -5675,7 +5853,11 @@ pub fn genMethodCall(cg: &mut Cgen, object: &Expr, method: &string, args: &Vec<H
                 argStr = "ptr " + tmp
             }
         } else {
+            // A by-value `self` param TAKES the receiver (`fn under(self: JsonError, …)`):
+            // record the move so the caller's scope teardown does not drop a value the
+            // callee already owns and dropped.
             argStr = llType(obj.ty) + " " + obj.v
+            markReceiverMoved(cg, object, locs, sigs)
         }
         for ai in 0..args.len {
             var aRef = false
@@ -9088,13 +9270,23 @@ pub fn genExpr(cg: &mut Cgen, e: &Expr, locs: &Vec<Local>, sigs: &Vec<CgFnSig>, 
             return genArrayRepeat(cg, *value, count, locs, sigs, hintTy)
         }
         Expr.Unwrap(inner, span) => {
-            return genUnwrap(cg, *inner, span, locs, sigs)
+            // `x!` takes the payload OUT of x — including the temp the let-else
+            // desugar unwraps (`let v = __letelse_N!`). Without recording that move
+            // the enclosing scope drops x too and the payload the binding now owns is
+            // freed under it (letElse returned an empty string).
+            let uv = genUnwrap(cg, *inner, span, locs, sigs)
+            markReceiverMoved(cg, *inner, locs, sigs)
+            return uv
         }
         Expr.DefaultValue(inner, defaultE, span) => {
             return genDefaultValue(cg, *inner, *defaultE, locs, sigs)
         }
         Expr.Propagate(inner, span) => {
-            return genPropagate(cg, *inner, locs, sigs)
+            // `x?` moves the payload out on the success path and the error value into
+            // the early return — either way x no longer owns it (same as Unwrap above).
+            let pv = genPropagate(cg, *inner, locs, sigs)
+            markReceiverMoved(cg, *inner, locs, sigs)
+            return pv
         }
         Expr.IsExpr(subject, pattern, span) => {
             return genIsExpr(cg, *subject, *pattern, locs, sigs)

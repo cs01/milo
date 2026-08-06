@@ -17,7 +17,7 @@ from "src-milo/codegen/expr.milo" import {
     constFoldBool, emitRangeCheck
 }
 from "src-milo/codegen/drops.milo" import {
-    emitDropValue, cgNeedsDrop
+    emitDropValue, cgNeedsDrop, zeroStore
 }
 from "src-milo/codegen/strings.milo" import {
     genStringAppendInPlace, genStringEq, genStringLit, emitStringLit, ensureStrFind
@@ -331,6 +331,15 @@ pub fn widenToI64(cg: &mut Cgen, v: &Val): string {
     return w
 }
 
+// A for-in binding is a VIEW: the slot holds a shallow copy of an element whose
+// buffer the container still owns (for-in binds by reference — see the language
+// reference). Recording the slot as already-moved is what keeps scope teardown
+// from freeing the container's element out from under it; without it a `return`
+// inside `for part in parts` dropped both `part` and `parts`.
+fn markLoopBindingView(cg: &mut Cgen, addr: &string) {
+    cg.movedLocalAddrs.push(addr.clone())
+}
+
 // `for key, value in map`: walk the flat entry array; body sees copies bound
 // through hoisted allocas. Emits everything up to (not including) stepLbl.
 pub fn genForInHashMap(cg: &mut Cgen, varName: &string, varName2: &Option<string>, obj: &Val, body: &Vec<Heap<Stmt>>, locs: &mut Vec<Local>, sigs: &Vec<CgFnSig>, retTy: &string, condLbl: &string, bodyLbl: &string, stepLbl: &string, endLbl: &string, idxAddr: &string) {
@@ -373,12 +382,14 @@ pub fn genForInHashMap(cg: &mut Cgen, varName: &string, varName2: &Option<string
         name: varName.clone(), ty: keyTy.clone(), addr: keyAddr.clone(), isRef: false, isArr: false, range: noRange()
     }
     )
+    markLoopBindingView(cg, keyAddr)
     match varName2 {
         Option.Some(valName) => {
             locs.push(Local {
                 name: valName.clone(), ty: valTy.clone(), addr: valAddr.clone(), isRef: false, isArr: false, range: noRange()
             }
             )
+            markLoopBindingView(cg, valAddr)
         }
         Option.None => {
         }
@@ -578,16 +589,19 @@ pub fn genForStrView(cg: &mut Cgen, varName: &string, varName2: &Option<string>,
                 name: varName.clone(), ty: "i64", addr: idxAddr.clone(), isRef: false, isArr: false, range: noRange()
             }
             )
+            markLoopBindingView(cg, idxAddr)
             locs.push(Local {
                 name: viewName.clone(), ty: "string", addr: viewAddr.clone(), isRef: false, isArr: false, range: noRange()
             }
             )
+            markLoopBindingView(cg, viewAddr)
         }
         Option.None => {
             locs.push(Local {
                 name: varName.clone(), ty: "string", addr: viewAddr.clone(), isRef: false, isArr: false, range: noRange()
             }
             )
+            markLoopBindingView(cg, viewAddr)
         }
     }
 
@@ -662,6 +676,7 @@ pub fn genForIn(cg: &mut Cgen, varName: &string, varName2: &Option<string>, iter
                 name: varName.clone(), ty: "i64", addr: idxAddr.clone(), isRef: false, isArr: false, range: noRange()
             }
             )
+            markLoopBindingView(cg, idxAddr)
             var bodyTerm = false
             for bi in 0..body.len {
                 if genStmt(cg, *body[bi], locs, sigs, retTy) {
@@ -756,6 +771,7 @@ pub fn genForIn(cg: &mut Cgen, varName: &string, varName2: &Option<string>, iter
                     name: varName.clone(), ty: obj.ty[8..obj.ty.len].clone(), addr: valAddr.clone(), isRef: false, isArr: false, range: noRange()
                 }
                 )
+                markLoopBindingView(cg, valAddr)
                 var chTerm = false
                 for bi in 0..body.len {
                     if genStmt(cg, *body[bi], locs, sigs, retTy) {
@@ -819,6 +835,7 @@ pub fn genForIn(cg: &mut Cgen, varName: &string, varName2: &Option<string>, iter
                     name: varName.clone(), ty: itElemTy.clone(), addr: valAddr.clone(), isRef: false, isArr: false, range: noRange()
                 }
                 )
+                markLoopBindingView(cg, valAddr)
                 var itTerm = false
                 for bi in 0..body.len {
                     if genStmt(cg, *body[bi], locs, sigs, retTy) {
@@ -899,16 +916,19 @@ pub fn genForIn(cg: &mut Cgen, varName: &string, varName2: &Option<string>, iter
                         name: varName.clone(), ty: "i64", addr: idxAddr.clone(), isRef: false, isArr: false, range: noRange()
                     }
                     )
+                    markLoopBindingView(cg, idxAddr)
                     locs.push(Local {
                         name: valName.clone(), ty: elemTy.clone(), addr: elemAddr.clone(), isRef: false, isArr: false, range: noRange()
                     }
                     )
+                    markLoopBindingView(cg, elemAddr)
                 }
                 Option.None => {
                     locs.push(Local {
                         name: varName.clone(), ty: elemTy.clone(), addr: elemAddr.clone(), isRef: false, isArr: false, range: noRange()
                     }
                     )
+                    markLoopBindingView(cg, elemAddr)
                 }
             }
             var bodyTerm = false
@@ -1034,9 +1054,75 @@ pub fn genIf(cg: &mut Cgen, cond: &Expr, thenBody: &Vec<Heap<Stmt>>, elseBody: &
 
 // -- Match statement --
 
+// Does matching this subject BORROW it rather than consume it? Mirrors the
+// oracle's checker.enumSubjectBorrow: a `&enum` binding and an enum *place*
+// (s.field, v[i], *h) are read without being consumed, so a non-Copy payload
+// must bind as a view into the still-owned subject. Only a whole owned value
+// (a plain local or a temporary) hands its payload over.
+fn matchSubjectBorrows(subject: &Expr, locs: &Vec<Local>): bool {
+    match subject {
+        Expr.Ident(name, span) => {
+            if hasLocal(locs, name) {
+                return findLocal(locs, name).isRef
+            }
+            return false
+        }
+        Expr.FieldAccess(obj, field, span) => {
+            return true
+        }
+        Expr.IndexAccess(obj, idx, span) => {
+            return true
+        }
+        Expr.UnaryOp(op, operand, span) => {
+            return op == "*"
+        }
+        _ => {
+            return false
+        }
+    }
+}
+
+// Bind one arm's payload locals out of `payPtr` (the subject's payload slot).
+// Two ownership regimes, exactly as the oracle's extractBindings:
+//   * borrowed subject + droppable payload → bind a REF straight at the payload
+//     address. No load, no drop: the subject still owns the buffer.
+//   * owned subject + droppable payload → MOVE it: load into the binding's own
+//     slot and zero the source, so the subject's drop chain no longer sees it.
+// A Copy payload is a plain value copy under either regime.
+fn bindArmPayloads(cg: &mut Cgen, payPtr: &string, payloadTypes: &Vec<string>, bindings: &Vec<string>, subjBorrows: bool, locs: &mut Vec<Local>) {
+    let vstructTy = variantStructTy(payloadTypes)
+    for bi in 0..bindings.len {
+        let pty = payloadTypes[bi].clone()
+        let ftyLl = llType(pty)
+        let fp = nextTemp(cg)
+        emit(cg, "  " + fp + " = getelementptr " + vstructTy + ", ptr " + payPtr.clone() + ", i32 0, i32 " + bi.toString() + "\n")
+        let droppable = cgNeedsDrop(cg, pty)
+        if subjBorrows && droppable {
+            locs.push(Local {
+                name: bindings[bi].clone(), ty: pty.clone(), addr: fp, isRef: true, isArr: false, range: noRange()
+            }
+            )
+        } else {
+            let loaded = nextTemp(cg)
+            emit(cg, "  " + loaded + " = load " + ftyLl + ", ptr " + fp + "\n")
+            let bindAddr = nextTemp(cg)
+            emit(cg, "  " + bindAddr + " = alloca " + ftyLl + "\n")
+            emit(cg, "  store " + ftyLl + " " + loaded + ", ptr " + bindAddr + "\n")
+            if droppable {
+                zeroStore(cg, fp, pty)
+            }
+            locs.push(Local {
+                name: bindings[bi].clone(), ty: pty.clone(), addr: bindAddr, isRef: false, isArr: false, range: noRange()
+            }
+            )
+        }
+    }
+}
+
 // -- If-let (M3b): a one-pattern match with an else path --
 
 pub fn genIfLet(cg: &mut Cgen, pattern: &Pattern, subject: &Expr, thenBody: &Vec<Heap<Stmt>>, elseBody: &Option<Vec<Heap<Stmt>>>, locs: &mut Vec<Local>, sigs: &Vec<CgFnSig>, retTy: &string): bool {
+    let subjBorrows = matchSubjectBorrows(subject, locs)
     let subjLv = genLvalue(cg, subject, locs, sigs)
     let rawName = stripPercent(subjLv.ty)
     let structTy = "%" + rawName
@@ -1064,21 +1150,7 @@ pub fn genIfLet(cg: &mut Cgen, pattern: &Pattern, subject: &Expr, thenBody: &Vec
                 if payloadTypes.len > 0 {
                     let payPtr = nextTemp(cg)
                     emit(cg, "  " + payPtr + " = getelementptr " + structTy + ", ptr " + subjLv.v + ", i32 0, i32 1\n")
-                    let vstructTy = variantStructTy(payloadTypes)
-                    for bi in 0..bindings.len {
-                        let ftyLl = llType(payloadTypes[bi])
-                        let fp = nextTemp(cg)
-                        emit(cg, "  " + fp + " = getelementptr " + vstructTy + ", ptr " + payPtr + ", i32 0, i32 " + bi.toString() + "\n")
-                        let loaded = nextTemp(cg)
-                        emit(cg, "  " + loaded + " = load " + ftyLl + ", ptr " + fp + "\n")
-                        let bindAddr = nextTemp(cg)
-                        emit(cg, "  " + bindAddr + " = alloca " + ftyLl + "\n")
-                        emit(cg, "  store " + ftyLl + " " + loaded + ", ptr " + bindAddr + "\n")
-                        locs.push(Local {
-                            name: bindings[bi].clone(), ty: payloadTypes[bi].clone(), addr: bindAddr, isRef: false, isArr: false, range: noRange()
-                        }
-                        )
-                    }
+                    bindArmPayloads(cg, payPtr, payloadTypes, bindings, subjBorrows, locs)
                 }
             }
             for si in 0..thenBody.len {
@@ -1364,7 +1436,33 @@ pub fn genIntMatch(cg: &mut Cgen, subjV: &string, subjLl: &string, arms: &Vec<Ma
     return finishMatchPhi(cg, wantValue, phiVals, phiPreds, resultTy)
 }
 
+// The name a block YIELDS, when its value is just a binding (`Result.Ok(j) => j`).
+// Such an arm hands its payload binding to the match's result, so the arm-scope
+// teardown must not drop it — jsonCursor's `let doc = match … { Ok(j) => j }`
+// freed the document and then read it.
+fn trailingIdentName(body: &Vec<Heap<Stmt>>): string {
+    if body.len == 0 {
+        return ""
+    }
+    match *body[body.len - 1] {
+        Stmt.ExprStmt(e, span) => {
+            match *e {
+                Expr.Ident(name, isp) => {
+                    return name.clone()
+                }
+                _ => {
+                    return ""
+                }
+            }
+        }
+        _ => {
+            return ""
+        }
+    }
+}
+
 pub fn genMatch(cg: &mut Cgen, subject: &Expr, arms: &Vec<MatchArm>, locs: &mut Vec<Local>, sigs: &Vec<CgFnSig>, retTy: &string, wantValue: bool, hintTy: string): MatchGen {
+    let subjBorrows = matchSubjectBorrows(subject, locs)
     let subjLv = genLvalue(cg, subject, locs, sigs)
     if llType(subjLv.ty) == "%String" {
         let sv = nextTemp(cg)
@@ -1428,21 +1526,7 @@ pub fn genMatch(cg: &mut Cgen, subject: &Expr, arms: &Vec<MatchArm>, locs: &mut 
                     if payloadTypes.len > 0 {
                         let payPtr = nextTemp(cg)
                         emit(cg, "  " + payPtr + " = getelementptr " + structTy + ", ptr " + subjLv.v + ", i32 0, i32 1\n")
-                        let vstructTy = variantStructTy(payloadTypes)
-                        for bi in 0..bindings.len {
-                            let ftyLl = llType(payloadTypes[bi])
-                            let fp = nextTemp(cg)
-                            emit(cg, "  " + fp + " = getelementptr " + vstructTy + ", ptr " + payPtr + ", i32 0, i32 " + bi.toString() + "\n")
-                            let loaded = nextTemp(cg)
-                            emit(cg, "  " + loaded + " = load " + ftyLl + ", ptr " + fp + "\n")
-                            let bindAddr = nextTemp(cg)
-                            emit(cg, "  " + bindAddr + " = alloca " + ftyLl + "\n")
-                            emit(cg, "  store " + ftyLl + " " + loaded + ", ptr " + bindAddr + "\n")
-                            locs.push(Local {
-                                name: bindings[bi].clone(), ty: payloadTypes[bi].clone(), addr: bindAddr, isRef: false, isArr: false, range: noRange()
-                            }
-                            )
-                        }
+                        bindArmPayloads(cg, payPtr, payloadTypes, bindings, subjBorrows, locs)
                     }
                 }
             }
@@ -1456,7 +1540,11 @@ pub fn genMatch(cg: &mut Cgen, subject: &Expr, arms: &Vec<MatchArm>, locs: &mut 
         // (return/break) already dropped its scope on the way out — dropping again would
         // double-count.
         if !res.terminated {
-            emitScopeDrops(cg, locs, locsPreLen, "")
+            var armSkip = ""
+            if wantValue {
+                armSkip = trailingIdentName(arms[ai].body)
+            }
+            emitScopeDrops(cg, locs, locsPreLen, armSkip)
         }
         // Pop bindings
         while locs.len > locsPreLen {
@@ -1492,10 +1580,18 @@ pub fn genMatch(cg: &mut Cgen, subject: &Expr, arms: &Vec<MatchArm>, locs: &mut 
     return finishMatchPhi(cg, wantValue, phiVals, phiPreds, resultTy)
 }
 
-// User Drop hooks: a local whose struct type has an `impl Drop` runs
-// `Ty$Drop$drop(&mut self)` when it leaves scope. Declaration order matches
-// the oracle's observable behavior. skipName: a returned local is moved out
-// of the scope, not dropped.
+// Scope teardown: every owned local leaving this scope is dropped — builtin heap
+// (string/Vec/Heap and anything transitively holding one) via emitDropValue, and
+// a user `impl Drop` via the same path (emitDropValue calls Ty$Drop$drop and
+// stops). Declaration order matches the oracle's observable behavior. skipName:
+// a returned local is moved out of the scope, not dropped.
+//
+// Where the oracle keeps a per-local i1 alive-flag, this relies on the runtime
+// sentinel that move-out zeroing already leaves behind (cap==0 / null data —
+// see drops.milo's header) plus addrWasMoved for plain structs, which carry no
+// sentinel of their own. Zeroing after the drop is what makes the drop
+// idempotent: a `break` drops the loop-scoped locals and then falls through to
+// the function epilogue, which walks the same slots from 0.
 pub fn emitScopeDrops(cg: &mut Cgen, locs: &Vec<Local>, fromLen: i64, skipName: &string) {
     for i in fromLen..locs.len {
         if locs[i].isRef {
@@ -1511,11 +1607,9 @@ pub fn emitScopeDrops(cg: &mut Cgen, locs: &Vec<Local>, fromLen: i64, skipName: 
         if addrWasMoved(cg, locs[i].addr) {
             continue
         }
-        let dropFn = stripPercent(locs[i].ty) + "$Drop$drop"
-        if cg.fnRets.contains(dropFn) {
-            // Drop$drop takes `&mut self` → a `ptr` param, so pass the local's
-            // address directly (mutation-through-ref is now honored).
-            emit(cg, "  call void @" + dropFn + "(ptr " + locs[i].addr + ")\n")
+        if cgNeedsDrop(cg, locs[i].ty) {
+            emitDropValue(cg, locs[i].addr, locs[i].ty)
+            zeroStore(cg, locs[i].addr, locs[i].ty)
         }
     }
 }
@@ -1618,7 +1712,12 @@ pub fn genStmt(cg: &mut Cgen, s: &Stmt, locs: &mut Vec<Local>, sigs: &Vec<CgFnSi
                     // force it to `move` so its captures are heap-owned, not aliased into
                     // the frame that's about to unwind (see forcedMoveClosure).
                     let forcedRet = forcedMoveClosure(*expr)
-                    let v00 = genExpr(cg, forcedRet, locs, sigs, retTy.clone())
+                    // A returned PLACE is moved out of this frame: `return w.out` hands
+                    // the string to the caller, and without the move the scope teardown
+                    // below frees it (deflate returned a dangling buffer). A bare ident
+                    // is additionally covered by skipName above; zeroing it first is
+                    // harmless — its drop is already skipped.
+                    let v00 = genOwnedArg(cg, forcedRet, retTy.clone(), locs, sigs)
                     let v = genInterfaceCoerceIfNeeded(cg, v00, retTy)
                     let retRange = cg.curRetRange.clone()
                     emitRangeCheck(cg, v, retRange, span)
@@ -2245,6 +2344,263 @@ pub fn vecNewHint(cg: &Cgen, name: &string, value: &Expr): string {
 // A non-move closure literal, forced to `move` so genClosure heap-owns its
 // captures instead of pointing them at a frame about to be torn down. Anything
 // else (including an already-move closure) is returned unchanged.
+// Names this expression hands to someone else BY VALUE — a bare identifier in an
+// owning argument position (call/method arg, struct or enum payload). Used to
+// decide whether a closure literal must move-capture: a closure that passes a
+// captured heap value on (`b.items.push(s)`) transfers ownership out of the
+// enclosing frame, and if the capture stayed by-reference that frame's scope drop
+// would free a buffer the callee now owns. The oracle gets this from the
+// checker's isMove bit; with no HIR to carry one, it is re-derived here.
+//
+// Deliberately POSITIVE evidence: finding nothing means "no promotion", i.e. the
+// old by-reference capture. An unhandled shape can only cost a leak, never a
+// use-after-free. The arms are exhaustive for the same reason collectIdentsExpr's
+// are — a new Expr variant should fail to compile until it is traversed.
+fn collectMovedOutIdentsExpr(e: &Expr, out: &mut Vec<string>) {
+    match e {
+        Expr.Call(name, args, targs, span) => {
+            for i in 0..args.len {
+                pushIfBareIdent(*args[i], out)
+                collectMovedOutIdentsExpr(*args[i], out)
+            }
+        }
+        Expr.MethodCall(obj, m, args, span) => {
+            collectMovedOutIdentsExpr(*obj, out)
+            for i in 0..args.len {
+                pushIfBareIdent(*args[i], out)
+                collectMovedOutIdentsExpr(*args[i], out)
+            }
+        }
+        Expr.StructLit(name, fields, span) => {
+            for i in 0..fields.len {
+                pushIfBareIdent(*fields[i].value, out)
+                collectMovedOutIdentsExpr(*fields[i].value, out)
+            }
+        }
+        Expr.JsonObject(fields, span) => {
+            for i in 0..fields.len {
+                pushIfBareIdent(*fields[i].value, out)
+                collectMovedOutIdentsExpr(*fields[i].value, out)
+            }
+        }
+        Expr.EnumLit(en, va, args, span) => {
+            for i in 0..args.len {
+                pushIfBareIdent(*args[i], out)
+                collectMovedOutIdentsExpr(*args[i], out)
+            }
+        }
+        Expr.BinOp(op, l, r, span) => {
+            collectMovedOutIdentsExpr(*l, out)
+            collectMovedOutIdentsExpr(*r, out)
+        }
+        Expr.UnaryOp(op, x, span) => {
+            collectMovedOutIdentsExpr(*x, out)
+        }
+        Expr.FieldAccess(obj, field, span) => {
+            collectMovedOutIdentsExpr(*obj, out)
+        }
+        Expr.ArrayLit(elems, span) => {
+            for i in 0..elems.len {
+                pushIfBareIdent(*elems[i], out)
+                collectMovedOutIdentsExpr(*elems[i], out)
+            }
+        }
+        Expr.ArrayRepeat(x, n, span) => {
+            collectMovedOutIdentsExpr(*x, out)
+        }
+        Expr.IndexAccess(obj, idx, span) => {
+            collectMovedOutIdentsExpr(*obj, out)
+            collectMovedOutIdentsExpr(*idx, out)
+        }
+        Expr.Unwrap(x, span) => {
+            collectMovedOutIdentsExpr(*x, out)
+        }
+        Expr.Propagate(x, span) => {
+            collectMovedOutIdentsExpr(*x, out)
+        }
+        Expr.DefaultValue(x, d, span) => {
+            collectMovedOutIdentsExpr(*x, out)
+            collectMovedOutIdentsExpr(*d, out)
+        }
+        Expr.CastExpr(x, ty, span) => {
+            collectMovedOutIdentsExpr(*x, out)
+        }
+        Expr.Closure(params, rt, body, isMove, span) => {
+            for i in 0..body.len {
+                collectMovedOutIdentsStmt(*body[i], out)
+            }
+        }
+        Expr.RangeExpr(a, b, span) => {
+            collectMovedOutIdentsExpr(*a, out)
+            collectMovedOutIdentsExpr(*b, out)
+        }
+        Expr.IsExpr(x, pat, span) => {
+            collectMovedOutIdentsExpr(*x, out)
+        }
+        Expr.IfExpr(c, thenBody, elseBody, span) => {
+            collectMovedOutIdentsExpr(*c, out)
+            for i in 0..thenBody.len {
+                collectMovedOutIdentsStmt(*thenBody[i], out)
+            }
+            for i in 0..elseBody.len {
+                collectMovedOutIdentsStmt(*elseBody[i], out)
+            }
+        }
+        Expr.MatchExpr(subject, arms, span) => {
+            collectMovedOutIdentsExpr(*subject, out)
+            for i in 0..arms.len {
+                for j in 0..arms[i].body.len {
+                    collectMovedOutIdentsStmt(*arms[i].body[j], out)
+                }
+            }
+        }
+        Expr.Ident(name, span) => {
+        }
+        Expr.IntLit(n, span) => {
+        }
+        Expr.FloatLit(f, span) => {
+        }
+        Expr.BoolLit(b, span) => {
+        }
+        Expr.StringLit(s, span) => {
+        }
+        Expr.CharLit(c, span) => {
+        }
+    }
+}
+
+fn pushIfBareIdent(e: &Expr, out: &mut Vec<string>) {
+    match e {
+        Expr.Ident(name, span) => {
+            out.push(name.clone())
+        }
+        _ => {
+        }
+    }
+}
+
+fn collectMovedOutIdentsStmt(s: &Stmt, out: &mut Vec<string>) {
+    match s {
+        Stmt.LetDecl(name, ty, val, span) => {
+            pushIfBareIdent(*val, out)
+            collectMovedOutIdentsExpr(*val, out)
+        }
+        Stmt.VarDecl(name, ty, val, span) => {
+            pushIfBareIdent(*val, out)
+            collectMovedOutIdentsExpr(*val, out)
+        }
+        Stmt.Assign(target, val, span) => {
+            pushIfBareIdent(*val, out)
+            collectMovedOutIdentsExpr(*val, out)
+        }
+        Stmt.Return(value, span) => {
+            match value {
+                Option.Some(e) => {
+                    pushIfBareIdent(*e, out)
+                    collectMovedOutIdentsExpr(*e, out)
+                }
+                Option.None => {
+                }
+            }
+        }
+        Stmt.ExprStmt(e, span) => {
+            collectMovedOutIdentsExpr(*e, out)
+        }
+        Stmt.IfStmt(cond, thenB, elseB, span) => {
+            collectMovedOutIdentsExpr(*cond, out)
+            for i in 0..thenB.len {
+                collectMovedOutIdentsStmt(*thenB[i], out)
+            }
+            match elseB {
+                Option.Some(eb) => {
+                    for i in 0..eb.len {
+                        collectMovedOutIdentsStmt(*eb[i], out)
+                    }
+                }
+                Option.None => {
+                }
+            }
+        }
+        Stmt.WhileStmt(cond, body, span) => {
+            collectMovedOutIdentsExpr(*cond, out)
+            for i in 0..body.len {
+                collectMovedOutIdentsStmt(*body[i], out)
+            }
+        }
+        Stmt.ForInStmt(v1, v2, iter, body, span) => {
+            collectMovedOutIdentsExpr(*iter, out)
+            for i in 0..body.len {
+                collectMovedOutIdentsStmt(*body[i], out)
+            }
+        }
+        Stmt.MatchStmt(subj, arms, span) => {
+            collectMovedOutIdentsExpr(*subj, out)
+            for i in 0..arms.len {
+                for j in 0..arms[i].body.len {
+                    collectMovedOutIdentsStmt(*arms[i].body[j], out)
+                }
+            }
+        }
+        Stmt.IfLetStmt(pat, val, thenB, elseB, span) => {
+            collectMovedOutIdentsExpr(*val, out)
+            for i in 0..thenB.len {
+                collectMovedOutIdentsStmt(*thenB[i], out)
+            }
+            match elseB {
+                Option.Some(eb) => {
+                    for i in 0..eb.len {
+                        collectMovedOutIdentsStmt(*eb[i], out)
+                    }
+                }
+                Option.None => {
+                }
+            }
+        }
+        Stmt.UnsafeBlock(body, span) => {
+            for i in 0..body.len {
+                collectMovedOutIdentsStmt(*body[i], out)
+            }
+        }
+        _ => {
+        }
+    }
+}
+
+// A closure literal in an owning argument position that hands one of its own
+// captures on by value must move-capture (heap-own) them: by-reference captures
+// leave the value owned by a frame whose scope drop will free it out from under
+// whoever the closure gave it to. Mirrors the oracle's checker rule that auto-moves
+// a closure literal passed to an owned `fn` param, minus the mutated-capture
+// exemption — the positive move-out evidence below already excludes the
+// mutate-in-place shape that needs write-back.
+pub fn autoMoveClosureArg(value: &Expr, locs: &Vec<Local>): Expr {
+    match value {
+        Expr.Closure(params, retType, body, isMove, span) => {
+            if isMove {
+                return value.clone()
+            }
+            var moved: Vec<string> = Vec.new()
+            for i in 0..body.len {
+                collectMovedOutIdentsStmt(*body[i], moved)
+            }
+            let caps = closureCaptures(params, body, locs)
+            for ci in 0..caps.len {
+                if caps[ci].isRef {
+                    continue
+                }
+                if !moved.contains(caps[ci].name) {
+                    continue
+                }
+                return forcedMoveClosure(value)
+            }
+            return value.clone()
+        }
+        _ => {
+            return value.clone()
+        }
+    }
+}
+
 pub fn forcedMoveClosure(value: &Expr): Expr {
     match value {
         Expr.Closure(params, retType, body, isMove, span) => {
@@ -2315,6 +2671,10 @@ pub fn genClosure(cg: &mut Cgen, params: &Vec<Param>, retType: &Option<MiloType>
     // return type up front, but an unannotated closure only learns it from its
     // `return` — so emit the body first, then prepend the header.
     let savedBody = cg.body.clone()
+    // The lifted closure is a whole function emitted mid-stream; its emitLabel
+    // calls would otherwise leave cg.curBlock naming a block INSIDE the closure,
+    // and the interrupted caller then records that label as a phi predecessor.
+    let savedBlock = cg.curBlock.clone()
     let savedTemp = cg.temp
     let savedLabel = cg.label
     let savedRet = cg.curRetTy.clone()
@@ -2416,6 +2776,7 @@ pub fn genClosure(cg: &mut Cgen, params: &Vec<Param>, retType: &Option<MiloType>
     cg.curRetTy = savedRet
     cg.curRetRange = savedRetRange
     cg.closureRetTy = savedClosRet
+    cg.curBlock = savedBlock
     cg.forceMoveClosures = savedForceMove
     cg.vecPushHints = savedVecPushHints
     cg.globals = cg.globals + closureIR

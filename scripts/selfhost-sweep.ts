@@ -158,7 +158,9 @@ async function main() {
     for (const [bucket, rs] of [...byBucket].sort((a, b) => b[1].length - a[1].length)) {
       console.log(`  ${String(rs.length).padStart(3)}  ${bucket}`);
       for (const r of rs.slice(0, 3)) console.log(`         ${r.name}: ${r.detail}`);
-      if (rs.length > 3) console.log(`         … ${rs.length - 3} more`);
+      // Names (no detail) for the rest: triage needs the whole set, and re-running
+      // the sweep just to see who else is in a bucket costs minutes.
+      if (rs.length > 3) console.log(`         … ${rs.length - 3} more: ${rs.slice(3).map(r => r.name).join(", ")}`);
     }
 
     // The ratchet: every fixture the manifest claims milo-self can build must still

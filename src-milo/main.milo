@@ -19,6 +19,12 @@ from "std/process" import {
 from "std/args" import {
     args
 }
+from "std/time" import {
+    now, elapsed
+}
+from "std/pty" import {
+    fdIsTerminal
+}
 from "src-milo/tokens.milo" import {
     Token
 }
@@ -63,6 +69,36 @@ from "src-milo/lsp/server.milo" import {
 // fixtures concurrently, and a shared /tmp/milo_out.ll had every milo-self build
 // clobbering its neighbours.
 pub extern fn getpid(): i32
+
+// "compiled <src> -> <out> in <t>" with colour on a TTY, plain when piped or
+// redirected. Mirrors reportCompiled in src/main.ts — the two compilers are
+// supposed to be indistinguishable from the outside, and a missing timing plus
+// missing colour is the kind of difference a user notices immediately even
+// though no test compares CLI output.
+pub fn reportCompiled(source: &string, out: &string, elapsedMs: i64) {
+    var t = elapsedMs.toString() + "ms"
+    if elapsedMs >= 1000 {
+        // Two decimal places, without a float formatter: 7523ms -> "7.52s".
+        let whole = elapsedMs / 1000
+        let hundredths = (elapsedMs % 1000) / 10
+        var frac = hundredths.toString()
+        if hundredths < 10 {
+            frac = "0" + frac
+        }
+        t = whole.toString() + "." + frac + "s"
+    }
+    // fd 1 is stdout. Piping must stay plain so `| tail` and log capture do not
+    // collect escape codes.
+    if fdIsTerminal(1) {
+        let green = "\u{1b}[32m"
+        let bold = "\u{1b}[1m"
+        let dim = "\u{1b}[2m"
+        let reset = "\u{1b}[0m"
+        print(green + bold + "compiled" + reset + " " + source.clone() + " " + dim + "->" + reset + " " + bold + out.clone() + reset + " " + dim + "in" + reset + " " + green + t + reset)
+    } else {
+        print("compiled " + source.clone() + " -> " + out.clone() + " in " + t)
+    }
+}
 
 pub fn tmpPath(stem: &string, ext: &string): string {
     var p = "/tmp/milo_"
@@ -368,6 +404,7 @@ pub fn main() {
     }
 
     if cmd == "build" {
+        let buildStart = now()
         let ir = compile(source.clone())
         // Determine output name. Any other positional argument (companion .c/.o/.a/.cpp
         // translation units — struct-by-value ABI tests link a C peer alongside the
@@ -393,7 +430,7 @@ pub fn main() {
             eprint("error: linker failed (exit " + status.toString() + ")")
             exit(1)
         }
-        print("compiled " + source.clone() + " -> " + output)
+        reportCompiled(source.clone(), output, elapsed(buildStart, now()).toMillis())
         exit(0)
     }
 

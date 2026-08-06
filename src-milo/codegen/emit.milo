@@ -495,7 +495,7 @@ pub fn applyConstOp(op: &string, l: ConstNum, r: ConstNum): ConstNum {
 }
 from "src-milo/codegen/types.milo" import {
     astTypeStr,
-    Cgen, Val, Local, CgFnSig, FieldInfo, CgVariantInfo, CgEnumInfo,
+    Cgen, Val, Local, CgFnSig, FieldInfo, CgVariantInfo, CgEnumInfo, RangeAnno, noRange, rangeOfAnnotation, rangeOfOptAnnotation,
     cgenNew, nextTemp, emit, emitG, llType, llTypeBytes, payloadBytes, resolveTyStr, isVecTy, unwrapVec,
     ensureStringTy, ensureVecTy,
 }
@@ -514,7 +514,7 @@ from "src-milo/codegen/strings.milo" import {
 }
 
 // Build function signature table from program declarations.
-pub fn buildFnTable(prog: &Program): Vec<CgFnSig> {
+pub fn buildFnTable(cg: &Cgen, prog: &Program): Vec<CgFnSig> {
     var sigs: Vec<CgFnSig> = Vec.new()
     for i in 0..prog.functions.len {
         // Never bind `prog.functions[i]` to a local: that materializes an owned
@@ -522,9 +522,11 @@ pub fn buildFnTable(prog: &Program): Vec<CgFnSig> {
         // Read the fields through the borrow instead.
         var pts: Vec<string> = Vec.new()
         var prefs: Vec<bool> = Vec.new()
+        var pranges: Vec<RangeAnno> = Vec.new()
         for j in 0..prog.functions[i].params.len {
             pts.push(astTypeStr(prog.functions[i].params[j].ty))
             prefs.push(prog.functions[i].params[j].ty.isRef || prog.functions[i].params[j].ty.isRefMut)
+            pranges.push(rangeOfAnnotation(cg, prog.functions[i].params[j].ty))
         }
         sigs.push(CgFnSig {
             name: prog.functions[i].name.clone(),
@@ -532,6 +534,7 @@ pub fn buildFnTable(prog: &Program): Vec<CgFnSig> {
             paramTys: pts,
             paramRefs: prefs,
             isVariadic: prog.functions[i].isVariadic,
+            paramRanges: pranges,
         }
         )
     }
@@ -840,6 +843,13 @@ pub fn genFn(cg: &mut Cgen, f: &Function, sigs: &Vec<CgFnSig>) {
     }
     let retLl = llType(retTyStr)
     cg.curRetTy = retTyStr.clone()
+    // main is forced to i32 above, so a bound spelled on its return type is
+    // deliberately not carried — the exit code it produces is not that value.
+    if isMain {
+        cg.curRetRange = noRange()
+    } else {
+        cg.curRetRange = rangeOfAnnotation(cg, f.retType)
+    }
     var hdr = "define " + retLl + " @" + f.name + "("
     if isMain {
         hdr = hdr + "i32 %_milo_argc, ptr %_milo_argv"
@@ -884,7 +894,7 @@ pub fn genFn(cg: &mut Cgen, f: &Function, sigs: &Vec<CgFnSig>) {
         let pIsArr = f.params[pj].ty.isArray
         if pIsRef {
             locs.push(Local {
-                name: f.params[pj].name.clone(), ty: pTyStr, addr: "%" + f.params[pj].name, isRef: true, isArr: pIsArr
+                name: f.params[pj].name.clone(), ty: pTyStr, addr: "%" + f.params[pj].name, isRef: true, isArr: pIsArr, range: noRange()
             }
             )
         } else {
@@ -893,7 +903,7 @@ pub fn genFn(cg: &mut Cgen, f: &Function, sigs: &Vec<CgFnSig>) {
             emit(cg, "  " + addr + " = alloca " + llt + "\n")
             emit(cg, "  store " + llt + " %" + f.params[pj].name + ", ptr " + addr + "\n")
             locs.push(Local {
-                name: f.params[pj].name.clone(), ty: pTyStr, addr: addr, isRef: false, isArr: pIsArr
+                name: f.params[pj].name.clone(), ty: pTyStr, addr: addr, isRef: false, isArr: pIsArr, range: rangeOfAnnotation(cg, f.params[pj].ty)
             }
             )
         }
@@ -1013,7 +1023,7 @@ pub fn genProgram(prog: Program, sourceDir: string): string {
         var slots: Vec<FieldInfo> = Vec.new()
         for mi in 0..prog.traits[ti].methods.len {
             slots.push(FieldInfo {
-                name: prog.traits[ti].methods[mi].name.clone(), ty: resolveTyStr(cg, astTypeStr(prog.traits[ti].methods[mi].retType)), iterDelegate: false
+                name: prog.traits[ti].methods[mi].name.clone(), ty: resolveTyStr(cg, astTypeStr(prog.traits[ti].methods[mi].retType)), iterDelegate: false, range: noRange()
             }
             )
         }
@@ -1109,7 +1119,7 @@ pub fn genProgram(prog: Program, sourceDir: string): string {
                 }
             }
             fields.push(FieldInfo {
-                name: s.fields[fi].name.clone(), ty: tyStr, iterDelegate: isIterDelegate
+                name: s.fields[fi].name.clone(), ty: tyStr, iterDelegate: isIterDelegate, range: rangeOfAnnotation(cg, fty)
             }
             )
         }
@@ -1286,7 +1296,7 @@ pub fn genProgram(prog: Program, sourceDir: string): string {
     // `let FRAG = "head|" + TAIL` may be written above `TAIL`, and evaluating it first
     // would read a zeroed string. Without this whole pass such a global stayed
     // zeroinitializer forever and printed as empty — a silent wrong answer, not an error.
-    let sigs = buildFnTable(prog)
+    let sigs = buildFnTable(cg, prog)
     if dynIdx.len > 0 {
         cg.needsGlobalInit = true
         // Insertion sort by dependency: a global is emitted only once every global it

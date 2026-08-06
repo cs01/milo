@@ -7,7 +7,12 @@ from "src-milo/ast.milo" import {
 // Milo enums can't be recursive without Heap, so complex types use string names
 // and are looked up in the checker's tables.
 pub enum TypeKind {
-    TInt(i32, bool), // (bits, signed)
+    // (bits, signed, rangeMin, rangeMax). A ranged int (`i32(0..100)`) is the
+    // SAME tag as a plain one with the bounds attached, not a variant of its
+    // own — typeEq ignores the bounds, so a ranged value stays assignable
+    // wherever the plain type is accepted and only the explicit range checks
+    // read them.
+    TInt(i32, bool, Option<i64>, Option<i64>),
     TFloat(i32), // (bits)
     TBool,
     TVoid,
@@ -27,15 +32,15 @@ pub enum TypeKind {
 // -- Type constructors --
 
 pub fn tyI32(): TypeKind {
-    return TypeKind.TInt(32, true)
+    return TypeKind.TInt(32, true, Option.None, Option.None)
 }
 
 pub fn tyI64(): TypeKind {
-    return TypeKind.TInt(64, true)
+    return TypeKind.TInt(64, true, Option.None, Option.None)
 }
 
 pub fn tyU8(): TypeKind {
-    return TypeKind.TInt(8, false)
+    return TypeKind.TInt(8, false, Option.None, Option.None)
 }
 
 pub fn tyBool(): TypeKind {
@@ -149,6 +154,11 @@ pub fn typeFromAst(ty: &MiloType): TypeKind {
         base = TypeKind.THashMap(Heap(typeFromAst(ty.typeArgs[0])), Heap(typeFromAst(ty.typeArgs[1])))
     }
 
+    // `i32(0..100)` — fold the constraint onto the int itself. Applied before the
+    // array/ptr/ref wrappers so `[i32(0..9); 4]` keeps the bound on the element.
+    let ranged = withIntRange(base, ty.rangeMin, ty.rangeMax)
+    base = ranged
+
     if ty.isArray {
         base = TypeKind.TArray(Heap(base), ty.arraySize)
     }
@@ -172,28 +182,28 @@ pub fn typeFromAst(ty: &MiloType): TypeKind {
 
 pub fn typeFromName(name: &string): TypeKind {
     if name == "i8" {
-        return TypeKind.TInt(8, true)
+        return TypeKind.TInt(8, true, Option.None, Option.None)
     }
     if name == "i16" {
-        return TypeKind.TInt(16, true)
+        return TypeKind.TInt(16, true, Option.None, Option.None)
     }
     if name == "i32" {
-        return TypeKind.TInt(32, true)
+        return TypeKind.TInt(32, true, Option.None, Option.None)
     }
     if name == "int" || name == "i64" {
-        return TypeKind.TInt(64, true)
+        return TypeKind.TInt(64, true, Option.None, Option.None)
     }
     if name == "byte" || name == "u8" {
-        return TypeKind.TInt(8, false)
+        return TypeKind.TInt(8, false, Option.None, Option.None)
     }
     if name == "u16" {
-        return TypeKind.TInt(16, false)
+        return TypeKind.TInt(16, false, Option.None, Option.None)
     }
     if name == "u32" {
-        return TypeKind.TInt(32, false)
+        return TypeKind.TInt(32, false, Option.None, Option.None)
     }
     if name == "u64" {
-        return TypeKind.TInt(64, false)
+        return TypeKind.TInt(64, false, Option.None, Option.None)
     }
     if name == "f32" {
         return TypeKind.TFloat(32)
@@ -213,13 +223,119 @@ pub fn typeFromName(name: &string): TypeKind {
     return TypeKind.TStruct(name.clone())
 }
 
+// -- Ranged integers --
+
+// One struct rather than two loose Options: a range is always both ends or
+// neither, and a single value can't drift out of step with its partner.
+pub struct IntRange {
+    min: i64,
+    max: i64,
+}
+
+// Attach a range to an int type. A non-int base, or a half-written range, comes
+// back unchanged — the constraint is meaningless on anything else.
+pub fn withIntRange(base: &TypeKind, lo: &Option<i64>, hi: &Option<i64>): TypeKind {
+    match lo {
+        Option.Some(l) => {
+            match hi {
+                Option.Some(h) => {
+                    match base {
+                        TypeKind.TInt(bits, signed, _, _) => {
+                            return TypeKind.TInt(bits, signed, Option.Some(l), Option.Some(h))
+                        }
+                        _ => {
+                        }
+                    }
+                }
+                Option.None => {
+                }
+            }
+        }
+        Option.None => {
+        }
+    }
+    return base.clone()
+}
+
+// The bounds carried by an int type, if it has any.
+pub fn intRangeOf(t: &TypeKind): Option<IntRange> {
+    match t {
+        TypeKind.TInt(bits, signed, lo, hi) => {
+            match lo {
+                Option.Some(l) => {
+                    match hi {
+                        Option.Some(h) => {
+                            return Option.Some(IntRange {
+                                min: l, max: h
+                            }
+                            )
+                        }
+                        Option.None => {
+                        }
+                    }
+                }
+                Option.None => {
+                }
+            }
+        }
+        _ => {
+        }
+    }
+    return Option.None
+}
+
+// The widest value an int of this width can hold — the clamp applied to a
+// propagated range so it can never claim more than the representation allows.
+pub fn intTypeMin(bits: i32, signed: bool): i64 {
+    if !signed {
+        return 0
+    }
+    if bits == 8 {
+        return -128
+    }
+    if bits == 16 {
+        return -32768
+    }
+    if bits == 32 {
+        return -2147483648
+    }
+    return -9223372036854775807 - 1
+}
+
+pub fn intTypeMax(bits: i32, signed: bool): i64 {
+    if signed {
+        if bits == 8 {
+            return 127
+        }
+        if bits == 16 {
+            return 32767
+        }
+        if bits == 32 {
+            return 2147483647
+        }
+        return 9223372036854775807
+    }
+    if bits == 8 {
+        return 255
+    }
+    if bits == 16 {
+        return 65535
+    }
+    if bits == 32 {
+        return 4294967295
+    }
+    // u64's true maximum does not fit in the i64 these bounds are carried in;
+    // i64::MAX is the widest honest clamp and only ever under-claims.
+    return 9223372036854775807
+}
+
 // -- Type equality --
 
 pub fn typeEq(a: &TypeKind, b: &TypeKind): bool {
     match a {
-        TypeKind.TInt(bitsA, signedA) => {
+        TypeKind.TInt(bitsA, signedA, _, _) => {
             match b {
-                TypeKind.TInt(bitsB, signedB) => {
+                TypeKind.TInt(bitsB, signedB, _, _) => {
                     return bitsA == bitsB && signedA == signedB
                 }
                 _ => {
@@ -382,13 +498,27 @@ pub fn typeEq(a: &TypeKind, b: &TypeKind): bool {
 
 pub fn typeName(t: &TypeKind): string {
     match t {
-        TypeKind.TInt(bits, signed) => {
+        TypeKind.TInt(bits, signed, lo, hi) => {
             let prefix = if signed {
                 "i"
             } else {
                 "u"
             }
-            return prefix + bits.toString()
+            var s = prefix + bits.toString()
+            match lo {
+                Option.Some(l) => {
+                    match hi {
+                        Option.Some(h) => {
+                            s = s + "(" + l.toString() + ".." + h.toString() + ")"
+                        }
+                        Option.None => {
+                        }
+                    }
+                }
+                Option.None => {
+                }
+            }
+            return s
         }
         TypeKind.TFloat(bits) => {
             return "f" + bits.toString()
@@ -459,7 +589,7 @@ pub fn typeName(t: &TypeKind): string {
 
 pub fn isNumeric(t: &TypeKind): bool {
     match t {
-        TypeKind.TInt(bits, signed) => {
+        TypeKind.TInt(bits, signed, _, _) => {
             return true
         }
         TypeKind.TFloat(bits) => {
@@ -473,7 +603,7 @@ pub fn isNumeric(t: &TypeKind): bool {
 
 pub fn isInteger(t: &TypeKind): bool {
     match t {
-        TypeKind.TInt(bits, signed) => {
+        TypeKind.TInt(bits, signed, _, _) => {
             return true
         }
         _ => {
@@ -495,7 +625,7 @@ pub fn isFloat(t: &TypeKind): bool {
 
 pub fn isCopy(t: &TypeKind): bool {
     match t {
-        TypeKind.TInt(bits, signed) => {
+        TypeKind.TInt(bits, signed, _, _) => {
             return true
         }
         TypeKind.TFloat(bits) => {
@@ -544,8 +674,8 @@ pub fn needsDrop(t: &TypeKind): bool {
 impl Clone for TypeKind {
     fn clone(self: &Self): Self {
         match self {
-            TypeKind.TInt(bits, signed) => {
-                return TypeKind.TInt(bits, signed)
+            TypeKind.TInt(bits, signed, rmin, rmax) => {
+                return TypeKind.TInt(bits, signed, cloneOptI64(rmin), cloneOptI64(rmax))
             }
             TypeKind.TFloat(bits) => {
                 return TypeKind.TFloat(bits)

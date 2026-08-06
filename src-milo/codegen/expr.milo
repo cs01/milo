@@ -9,7 +9,7 @@ from "src-milo/codegen/types.milo" import {
     isVecTy, unwrapVec, ensureVecTy, ensureRealloc, genSizeOf,
     isHashMapTy, hashMapKeyTy, hashMapValTy, hmEntryTy, ensureHashMapTy, nextLabel,
     resolveEnumName, resolveFnName, resolveStructName, resolveTyStr, nameHasMonoPrefix, ensureExit, ensureStrtod, ensureStrlen, astTypeStr,
-    Cgen, Val, Local, CgFnSig, FieldInfo,
+    Cgen, Val, Local, CgFnSig, FieldInfo, RangeAnno, noRange, rangeOfAnnotation, rangeOfOptAnnotation,
     nextTemp, emit, emitLabel, emitG, llType, isUnsigned, llTypeBytes, intBits,
     unwrapHeap, stripPercent, binOpInt, cmpOpInt, isArithOp, isCmpOp,
     findLocal, hasLocal, genLoad, ensureMalloc, ensureMemcpy, ensurePutchar, ensureStringTy,
@@ -2976,7 +2976,8 @@ pub fn genEnumLit(cg: &mut Cgen, enumName: &string, variant: &string, args: &Vec
             return genMethodCall(cg, objExpr, variant, args, locs, sigs)
         }
         var emptyTA: Vec<MiloType> = Vec.new()
-        return genCall(cg, rEnum + "$" + variant, args, emptyTA, locs, sigs, "")
+        var noSpan: Option<Span> = Option.None
+        return genCall(cg, rEnum + "$" + variant, args, emptyTA, locs, sigs, "", noSpan)
     }
     let structTy = "%" + rEnum
     let alloc = nextTemp(cg)
@@ -5840,6 +5841,58 @@ pub fn emitBoundsCheck(cg: &mut Cgen, idx: &string, size: &string) {
     emitLabel(cg, okLbl)
 }
 
+// Trap on a value that escapes the bound its target declared (`i32(0..100)`).
+// A no-op unless the target actually carries a bound and the value is an
+// integer — this rides every flow into a ranged slot (let/var, assignment,
+// argument, return), so the bound constrains the VALUES that reach the slot,
+// not merely the declaration that names it. Unlike the bounds check this is a
+// correctness trap, not a memory-safety one, and it is deliberately on in every
+// build: the oracle emits it unconditionally too.
+pub fn emitRangeCheck(cg: &mut Cgen, v: &Val, r: &RangeAnno, span: &Option<Span>) {
+    if !r.has {
+        return
+    }
+    let llTy = llType(v.ty)
+    if llTy != "i8" && llTy != "i16" && llTy != "i32" && llTy != "i64" {
+        return
+    }
+    var cmpLo = "slt"
+    var cmpHi = "sgt"
+    if isUnsigned(v.ty) {
+        cmpLo = "ult"
+        cmpHi = "ugt"
+    }
+    let lo = nextTemp(cg)
+    let hi = nextTemp(cg)
+    let bad = nextTemp(cg)
+    let okLbl = nextLabel(cg, "range.ok")
+    let failLbl = nextLabel(cg, "range.fail")
+    emit(cg, "  " + lo + " = icmp " + cmpLo + " " + llTy.clone() + " " + v.v.clone() + ", " + r.min.toString() + "\n")
+    emit(cg, "  " + hi + " = icmp " + cmpHi + " " + llTy.clone() + " " + v.v.clone() + ", " + r.max.toString() + "\n")
+    emit(cg, "  " + bad + " = or i1 " + lo + ", " + hi + "\n")
+    emit(cg, "  br i1 " + bad + ", label %" + failLbl + ", label %" + okLbl + "\n")
+    emit(cg, failLbl + ":\n")
+    emitPanic(cg, "runtime error: value out of range" + spanSuffix(span) + "\n", "")
+    // emitLabel, not plain emit — see emitCheckedArith's note: an enclosing
+    // phi node needs cg.curBlock to name the block this check actually falls
+    // through to.
+    emitLabel(cg, okLbl)
+}
+
+// " at file:line" for a panic message, or "" when the span was dropped. Spans
+// are static in this AOT compiler, so the location is baked into the string
+// rather than passed as printf arguments the way the oracle does it.
+pub fn spanSuffix(span: &Option<Span>): string {
+    match span {
+        Option.Some(s) => {
+            return " at " + s.file.clone() + ":" + s.line.toString()
+        }
+        Option.None => {
+            return ""
+        }
+    }
+}
+
 // Trap if a collection length/capacity is negative. Every index bounds check
 // above is an UNSIGNED compare, so a negative count (a literal -1, or a wrapped
 // overflow before overflow checks existed) sails through as a huge unsigned
@@ -6997,7 +7050,7 @@ pub fn constFoldBool(cg: &Cgen, e: &Expr): Option<bool> {
     }
 }
 
-pub fn genCall(cg: &mut Cgen, name: &string, args: &Vec<Heap<Expr>>, typeArgs: &Vec<MiloType>, locs: &Vec<Local>, sigs: &Vec<CgFnSig>, hintTy: &string): Val {
+pub fn genCall(cg: &mut Cgen, name: &string, args: &Vec<Heap<Expr>>, typeArgs: &Vec<MiloType>, locs: &Vec<Local>, sigs: &Vec<CgFnSig>, hintTy: &string, callSpan: &Option<Span>): Val {
     if name == "format" {
         return genFormat(cg, args, locs, sigs)
     }
@@ -7486,6 +7539,7 @@ pub fn genCall(cg: &mut Cgen, name: &string, args: &Vec<Heap<Expr>>, typeArgs: &
     // resolves to the right instantiation instead of an unmangled Option$None.
     var paramHints: Vec<string> = Vec.new()
     var paramRefs: Vec<bool> = Vec.new()
+    var paramRanges: Vec<RangeAnno> = Vec.new()
     var calleeVariadic = false
     for si in 0..sigs.len {
         if sigs[si].name == name {
@@ -7494,6 +7548,9 @@ pub fn genCall(cg: &mut Cgen, name: &string, args: &Vec<Heap<Expr>>, typeArgs: &
             }
             for pi in 0..sigs[si].paramRefs.len {
                 paramRefs.push(sigs[si].paramRefs[pi])
+            }
+            for pi in 0..sigs[si].paramRanges.len {
+                paramRanges.push(sigs[si].paramRanges[pi])
             }
             if sigs[si].isVariadic {
                 calleeVariadic = true
@@ -7637,6 +7694,15 @@ pub fn genCall(cg: &mut Cgen, name: &string, args: &Vec<Heap<Expr>>, typeArgs: &
             }
             argVals.push(av)
             argPointees.push("")
+        }
+    }
+
+    // A ranged parameter constrains the ARGUMENT, not just the slot it lands in,
+    // so the check rides the call site. Ref/struct args fall out inside
+    // emitRangeCheck (nothing to compare on a pointer).
+    for i in 0..argVals.len {
+        if i < paramRanges.len {
+            emitRangeCheck(cg, argVals[i], paramRanges[i], callSpan)
         }
     }
 
@@ -8610,7 +8676,7 @@ pub fn genExpr(cg: &mut Cgen, e: &Expr, locs: &Vec<Local>, sigs: &Vec<CgFnSig>, 
                     return genClosureCall(cg, lc, args, locs, sigs, hintTy)
                 }
             }
-            return genCall(cg, name, args, typeArgs, locs, sigs, hintTy)
+            return genCall(cg, name, args, typeArgs, locs, sigs, hintTy, span)
         }
         Expr.StructLit(name, fields, span) => {
             return genStructLit(cg, name, fields, locs, sigs, hintTy)
@@ -8716,7 +8782,8 @@ pub fn genExpr(cg: &mut Cgen, e: &Expr, locs: &Vec<Local>, sigs: &Vec<CgFnSig>, 
                     pfn = "promiseRace"
                 }
                 var emptyTA: Vec<MiloType> = Vec.new()
-                return genCall(cg, pfn, args, emptyTA, locs, sigs, hintTy)
+                var noSpan2: Option<Span> = Option.None
+                return genCall(cg, pfn, args, emptyTA, locs, sigs, hintTy, noSpan2)
             }
             // `Kind.tryFrom(n)` on a payload-free enum -> Option<Kind>: Some(the
             // matched variant) when `n` equals one of the enum's discriminants,

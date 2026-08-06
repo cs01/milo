@@ -425,7 +425,7 @@ pub fn jsonPlanFor(ck: &mut Checker, t: &TypeKind, structName: &string, fieldNam
         TypeKind.TBool => {
             return Option.Some(JsonPlan.PBool)
         }
-        TypeKind.TInt(bits, signed) => {
+        TypeKind.TInt(bits, signed, _, _) => {
             var ty = "u" + bits.toString()
             if signed {
                 ty = "i" + bits.toString()

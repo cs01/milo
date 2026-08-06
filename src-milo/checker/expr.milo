@@ -6,6 +6,7 @@ from "src-milo/checker/types.milo" import {
     TypeKind, typeEq, typeName, typeFromAst, typeFromName,
     tyI32, tyI64, tyU8, tyBool, tyVoid, tyString, tyUnknown,
     isNumeric, isInteger, isFloat, isCopy, needsDrop, containsUnknown, isViewReturnType,
+    IntRange, intRangeOf, intTypeMin, intTypeMax,
 }
 from "src-milo/checker/state.milo" import {
     Checker, VarInfo, FnSig, FnParam, StructInfo, CkStructField,
@@ -744,6 +745,164 @@ pub fn checkIdent(ck: &mut Checker, name: &string, span: &Option<Span>): TypeKin
     }
 }
 
+// -- Ranged integers --
+
+// The literal value of `e`, when it is one. Deliberately narrower than
+// isConstIntExpr: a range violation is reported with the offending NUMBER, so
+// only forms whose value is knowable without folding qualify.
+pub fn constIntValue(e: &Expr): Option<i64> {
+    match e {
+        Expr.IntLit(v, span) => {
+            return Option.Some(v)
+        }
+        Expr.UnaryOp(op, operand, span) => {
+            if op == "-" {
+                match *operand {
+                    Expr.IntLit(v, ispan) => {
+                        return Option.Some(0 - v)
+                    }
+                    _ => {
+                    }
+                }
+            }
+            return Option.None
+        }
+        _ => {
+            return Option.None
+        }
+    }
+}
+
+// Enforce a ranged integer target against a value flowing into it — at a
+// let/var, an assignment, a call argument, or a `return`. A literal outside the
+// bound is a compile error here; anything else is left to codegen, which emits
+// the runtime check. Without this the bound would only ever constrain the
+// declaration it was written on, and `f(500)` into an `i32(0..100)` parameter
+// would pass silently.
+pub fn enforceRangeInto(ck: &mut Checker, value: &Expr, target: &TypeKind, span: &Option<Span>) {
+    match intRangeOf(target) {
+        Option.Some(r) => {
+            match constIntValue(value) {
+                Option.Some(v) => {
+                    if v < r.min || v > r.max {
+                        error(ck, "value " + v.toString() + " is out of range for " + typeName(target) + " (" + r.min.toString() + ".." + r.max.toString() + ")", cloneSpan(span))
+                    }
+                }
+                Option.None => {
+                }
+            }
+        }
+        Option.None => {
+        }
+    }
+}
+
+// The bounds an arithmetic result is known to satisfy, given both operands
+// carry bounds. Returns None when the operation can't be bounded (an unhandled
+// operator, or a divisor whose range spans zero).
+pub fn propagateRange(lt: &TypeKind, rt: &TypeKind, op: &string): TypeKind {
+    var bits: i32 = 0
+    var signed = false
+    match lt {
+        TypeKind.TInt(b, s, _, _) => {
+            bits = b
+            signed = s
+        }
+        _ => {
+            return tyUnknown()
+        }
+    }
+    var lo = IntRange {
+        min: 0, max: 0
+    }
+    var hi = IntRange {
+        min: 0, max: 0
+    }
+    match intRangeOf(lt) {
+        Option.Some(r) => {
+            lo = r
+        }
+        Option.None => {
+            return tyUnknown()
+        }
+    }
+    match intRangeOf(rt) {
+        Option.Some(r) => {
+            hi = r
+        }
+        Option.None => {
+            return tyUnknown()
+        }
+    }
+    var outMin: i64 = 0
+    var outMax: i64 = 0
+    if op == "+" {
+        outMin = lo.min + hi.min
+        outMax = lo.max + hi.max
+    } else if op == "-" {
+        outMin = lo.min - hi.max
+        outMax = lo.max - hi.min
+    } else if op == "*" {
+        let a = lo.min * hi.min
+        let b = lo.min * hi.max
+        let c = lo.max * hi.min
+        let d = lo.max * hi.max
+        outMin = minOf4(a, b, c, d)
+        outMax = maxOf4(a, b, c, d)
+    } else if op == "/" {
+        // A divisor range straddling zero says nothing about the quotient.
+        if hi.min <= 0 && hi.max >= 0 {
+            return tyUnknown()
+        }
+        let a = lo.min / hi.min
+        let b = lo.min / hi.max
+        let c = lo.max / hi.min
+        let d = lo.max / hi.max
+        outMin = minOf4(a, b, c, d)
+        outMax = maxOf4(a, b, c, d)
+    } else {
+        return tyUnknown()
+    }
+    // A propagated range can never outgrow what the representation holds.
+    let typMin = intTypeMin(bits, signed)
+    let typMax = intTypeMax(bits, signed)
+    if outMin < typMin {
+        outMin = typMin
+    }
+    if outMax > typMax {
+        outMax = typMax
+    }
+    return TypeKind.TInt(bits, signed, Option.Some(outMin), Option.Some(outMax))
+}
+
+pub fn minOf4(a: i64, b: i64, c: i64, d: i64): i64 {
+    var m = a
+    if b < m {
+        m = b
+    }
+    if c < m {
+        m = c
+    }
+    if d < m {
+        m = d
+    }
+    return m
+}
+
+pub fn maxOf4(a: i64, b: i64, c: i64, d: i64): i64 {
+    var m = a
+    if b > m {
+        m = b
+    }
+    if c > m {
+        m = c
+    }
+    if d > m {
+        m = d
+    }
+    return m
+}
+
 // -- Binary operators --
 
 // An integer literal (or a const expression built only from integer literals) has
@@ -860,7 +1019,7 @@ pub fn ptrCoercible(to: &TypeKind, src: &TypeKind): bool {
         TypeKind.TPtr(inner) => {
             // string data pointer at the cstr boundary
             match *inner {
-                TypeKind.TInt(bits, signed) => {
+                TypeKind.TInt(bits, signed, _, _) => {
                     if bits == 8 && typeEq(src, tyString()) {
                         return true
                     }
@@ -1081,6 +1240,12 @@ pub fn checkBinOp(ck: &mut Checker, op: &string, left: &Expr, right: &Expr, span
                 return rt.clone()
             }
             error(ck, "type mismatch in '" + op.clone() + "': " + typeName(lt) + " vs " + typeName(rt), cloneSpan(span))
+        }
+        // Both operands bounded → the result is bounded too, which is what lets
+        // `a + b` on two i32(0..100) land in an i32(0..200) without a check.
+        let propagated = propagateRange(lt, rt, op)
+        if !typeEq(propagated, tyUnknown()) {
+            return propagated
         }
         return lt
     }
@@ -1711,6 +1876,7 @@ pub fn checkCall(ck: &mut Checker, func: &string, args: &Vec<Heap<Expr>>, typeAr
                 !ptrCoercible(paramType, argType) && !optionWrapCoercible(ck, paramType, argType) {
                     error(ck, "argument " + (i + 1).toString() + " of '" + func.clone() + "': expected " + ptName + ", got " + typeName(argType), cloneSpan(span))
                 }
+                enforceRangeInto(ck, *args[i], paramType, span)
                 // pointer decay borrows the buffer; it must not move it
                 if !ptrCoercible(paramType, argType) {
                     tryMove(ck, *args[i])
@@ -1922,10 +2088,10 @@ pub fn checkFieldAccess(ck: &mut Checker, obj: &Expr, field: &string, span: &Opt
                 // matching the TS oracle (checker.ts FieldAccess "len").
                 match size {
                     Option.Some(n) => {
-                        return TypeKind.TInt(32, true)
+                        return TypeKind.TInt(32, true, Option.None, Option.None)
                     }
                     Option.None => {
-                        return TypeKind.TInt(64, true)
+                        return TypeKind.TInt(64, true, Option.None, Option.None)
                     }
                 }
             }
@@ -1934,21 +2100,21 @@ pub fn checkFieldAccess(ck: &mut Checker, obj: &Expr, field: &string, span: &Opt
         }
         TypeKind.TString => {
             if field == "len" {
-                return TypeKind.TInt(64, true)
+                return TypeKind.TInt(64, true, Option.None, Option.None)
             }
             error(ck, "cannot access field '" + field.clone() + "' on string", cloneSpan(span))
             return tyUnknown()
         }
         TypeKind.TVec(elem) => {
             if field == "len" {
-                return TypeKind.TInt(64, true)
+                return TypeKind.TInt(64, true, Option.None, Option.None)
             }
             error(ck, "cannot access field '" + field.clone() + "' on Vec", cloneSpan(span))
             return tyUnknown()
         }
         TypeKind.THashMap(key, val) => {
             if field == "len" {
-                return TypeKind.TInt(64, true)
+                return TypeKind.TInt(64, true, Option.None, Option.None)
             }
             error(ck, "cannot access field '" + field.clone() + "' on HashMap", cloneSpan(span))
             return tyUnknown()
@@ -3350,7 +3516,7 @@ pub fn checkMethodCall(ck: &mut Checker, obj: &Expr, method: &string, args: &Vec
                         if args.len != 0 {
                             error(ck, "'len' takes no arguments", cloneSpan(span))
                         }
-                        return TypeKind.TInt(64, true)
+                        return TypeKind.TInt(64, true, Option.None, Option.None)
                     }
                     Option.Some(n) => {
                     }
@@ -3709,7 +3875,7 @@ pub fn checkVecMethod(ck: &mut Checker, obj: &Expr, elem: &TypeKind, method: &st
         if args.len != 0 {
             error(ck, "'len' takes no arguments", cloneSpan(span))
         }
-        return TypeKind.TInt(64, true)
+        return TypeKind.TInt(64, true, Option.None, Option.None)
     }
     if method == "swap" {
         if args.len != 2 {
@@ -3954,7 +4120,7 @@ pub fn checkVecMethod(ck: &mut Checker, obj: &Expr, elem: &TypeKind, method: &st
             error(ck, "'indexOf': expected " + typeName(elem) + ", got " + typeName(idxArgType), cloneSpan(span))
         }
         var idxOptArgs: Vec<TypeKind> = Vec.new()
-        idxOptArgs.push(TypeKind.TInt(64, true))
+        idxOptArgs.push(TypeKind.TInt(64, true, Option.None, Option.None))
         let idxMangled = monomorphizeEnum(ck, "Option", idxOptArgs)
         return TypeKind.TEnum(idxMangled)
     }
@@ -3969,7 +4135,7 @@ pub fn checkVecMethod(ck: &mut Checker, obj: &Expr, elem: &TypeKind, method: &st
         checkExpr(ck, *args[0])
         ck.expectedType = Option.None
         var posOptArgs: Vec<TypeKind> = Vec.new()
-        posOptArgs.push(TypeKind.TInt(64, true))
+        posOptArgs.push(TypeKind.TInt(64, true, Option.None, Option.None))
         let posMangled = monomorphizeEnum(ck, "Option", posOptArgs)
         return TypeKind.TEnum(posMangled)
     }
@@ -4021,7 +4187,7 @@ pub fn checkVecMethod(ck: &mut Checker, obj: &Expr, elem: &TypeKind, method: &st
         if args.len != 0 {
             error(ck, "'capacity' takes no arguments", cloneSpan(span))
         }
-        return TypeKind.TInt(64, true)
+        return TypeKind.TInt(64, true, Option.None, Option.None)
     }
     if method == "reserve" {
         if args.len != 1 {
@@ -4127,7 +4293,7 @@ pub fn checkHashMapMethod(ck: &mut Checker, obj: &Expr, key: &TypeKind, val: &Ty
         if args.len != 0 {
             error(ck, "'len' takes no arguments", cloneSpan(span))
         }
-        return TypeKind.TInt(64, true)
+        return TypeKind.TInt(64, true, Option.None, Option.None)
     }
     if method == "isEmpty" {
         if args.len != 0 {
@@ -4280,7 +4446,7 @@ pub fn checkStringMethod(ck: &mut Checker, obj: &Expr, method: &string, args: &V
     // the caller only sees a bare int). indexOfFrom already made this move below.
     if method == "indexOf" || method == "lastIndexOf" {
         var idxOptArgs: Vec<TypeKind> = Vec.new()
-        idxOptArgs.push(TypeKind.TInt(64, true))
+        idxOptArgs.push(TypeKind.TInt(64, true, Option.None, Option.None))
         let idxMangled = monomorphizeEnum(ck, "Option", idxOptArgs)
         if args.len != 1 {
             error(ck, "'" + method.clone() + "' expects 1 argument", cloneSpan(span))
@@ -4296,7 +4462,7 @@ pub fn checkStringMethod(ck: &mut Checker, obj: &Expr, method: &string, args: &V
         if args.len != 0 {
             error(ck, "'len' takes no arguments", cloneSpan(span))
         }
-        return TypeKind.TInt(64, true)
+        return TypeKind.TInt(64, true, Option.None, Option.None)
     }
     if method == "replace" {
         if args.len != 2 {
@@ -4343,7 +4509,7 @@ pub fn checkStringMethod(ck: &mut Checker, obj: &Expr, method: &string, args: &V
     // toInt is a dead legacy alias (unused anywhere in std/examples/tests) — left
     // as a bare i64 rather than risking a signature no caller depends on.
     if method == "toInt" {
-        return TypeKind.TInt(64, true)
+        return TypeKind.TInt(64, true, Option.None, Option.None)
     }
     // Option<i64>, matching the oracle and — critically — matching what CODEGEN
     // emits: the call goes to std/string.milo's strParseInt, which already
@@ -4354,7 +4520,7 @@ pub fn checkStringMethod(ck: &mut Checker, obj: &Expr, method: &string, args: &V
             error(ck, "'parseInt' takes no arguments", cloneSpan(span))
         }
         var iOptArgs: Vec<TypeKind> = Vec.new()
-        iOptArgs.push(TypeKind.TInt(64, true))
+        iOptArgs.push(TypeKind.TInt(64, true, Option.None, Option.None))
         let iMangled = monomorphizeEnum(ck, "Option", iOptArgs)
         return TypeKind.TEnum(iMangled)
     }
@@ -4388,7 +4554,7 @@ pub fn checkStringMethod(ck: &mut Checker, obj: &Expr, method: &string, args: &V
     // pre-existing gap versus the oracle, out of scope for this change).
     if method == "indexOfFrom" {
         var optArgs: Vec<TypeKind> = Vec.new()
-        optArgs.push(TypeKind.TInt(64, true))
+        optArgs.push(TypeKind.TInt(64, true, Option.None, Option.None))
         let mangled = monomorphizeEnum(ck, "Option", optArgs)
         if args.len != 2 {
             error(ck, "'indexOfFrom' expects 2 arguments (needle, from)", cloneSpan(span))
@@ -4501,7 +4667,7 @@ pub fn checkStructMethod(ck: &mut Checker, obj: &Expr, structName: &string, meth
                                                                 TypeKind.TBool => {
                                                                     scalar = true
                                                                 }
-                                                                TypeKind.TInt(bits, signed) => {
+                                                                TypeKind.TInt(bits, signed, _, _) => {
                                                                     scalar = true
                                                                 }
                                                                 TypeKind.TFloat(bits) => {

@@ -75,6 +75,13 @@ else
   clang -O0 -w "$work/stage2.ll" -o "$work/stage2.bin" $libs || exit 1
 fi
 
+# The stack cap is raised for stage 3 only, and it is not papering over a bug: stage 2 is
+# linked at -O0 here (see above), where nothing coalesces the 44 per-variant `alloca %Expr`
+# slots in Expr$Clone$clone — a ~24 KB frame against the ~5.8 KB the shipped -O2 build has.
+# Cloning a 340-deep AST then exhausts the default 8 MB stack in a binary that is otherwise
+# healthy. macOS caps this at 64 MB; `ulimit -s` is silently ignored where it is unsupported.
+ulimit -s 65520 2>/dev/null || true
+
 echo "stage 3: stage 2 compiles itself"
 stage "stage 3 emit-ir" "$work/stage3.ll" \
   env MILO_ROOT="$root" bun "$root/scripts/guard.ts" --mem-mb 4096 --timeout-s 800 -- \

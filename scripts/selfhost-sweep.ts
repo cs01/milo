@@ -4,6 +4,10 @@
 //   bun scripts/selfhost-sweep.ts              # census, print buckets
 //   bun scripts/selfhost-sweep.ts --write      # also rewrite tests/selfhost-manifest.txt
 //   bun scripts/selfhost-sweep.ts --filter foo # only fixtures whose name contains foo
+//   bun scripts/selfhost-sweep.ts --check      # ratchet: exit 1 if a manifest fixture regressed
+//
+// Failures are always re-verified serially before being reported — milo-self is
+// nondeterministic under parallel load, so a single parallel verdict is not trustworthy.
 //
 // Every milo-self invocation goes through guardedRun: the binaries under test
 // are untrusted (see scripts/guard.ts).
@@ -28,8 +32,14 @@ const RUN_MEM_MB = 512;
 
 const args = process.argv.slice(2);
 const write = args.includes("--write");
+const check = args.includes("--check");
 const fi = args.indexOf("--filter");
 const filter = fi >= 0 ? args[fi + 1] : null;
+
+if (check && filter) {
+  console.error("--check ratchets against the whole manifest; it cannot be combined with --filter");
+  process.exit(2);
+}
 
 if (!existsSync(MILO_SELF)) {
   console.error(`missing ${MILO_SELF} — run scripts/selfhost.sh first`);
@@ -112,6 +122,21 @@ async function main() {
     }));
     results.sort((a, b) => a.name.localeCompare(b.name));
 
+    // milo-self is nondeterministic under parallel load — a fixture can fail from
+    // resource contention alone, which is why two parallel censuses of the same
+    // commit used to disagree by ~15 fixtures. Re-run every failure serially and
+    // trust that verdict. Only failures are re-run, so the cost is proportional to
+    // how broken things are, not to corpus size.
+    const failed = results.filter(r => !r.ok);
+    if (failed.length && CONCURRENCY > 1) {
+      console.error(`re-verifying ${failed.length} failure(s) serially…`);
+      for (const f of failed) Object.assign(f, await sweepOne(f.name, tmpDir));
+      const recovered = failed.filter(r => r.ok);
+      if (recovered.length) {
+        console.error(`  ${recovered.length} passed on retry (parallel-load flake): ${recovered.map(r => r.name).join(", ")}`);
+      }
+    }
+
     const passing = results.filter(r => r.ok).map(r => r.name);
     const byBucket = new Map<string, Outcome[]>();
     for (const r of results.filter(r => !r.ok)) {
@@ -124,6 +149,22 @@ async function main() {
       console.log(`  ${String(rs.length).padStart(3)}  ${bucket}`);
       for (const r of rs.slice(0, 3)) console.log(`         ${r.name}: ${r.detail}`);
       if (rs.length > 3) console.log(`         … ${rs.length - 3} more`);
+    }
+
+    // The ratchet: every fixture the manifest claims milo-self can build must still
+    // build. Exits nonzero on regression so a lane can gate on one number instead of
+    // the coordinator reading a diff.
+    if (check) {
+      const claimed = readFileSync(MANIFEST, "utf-8").split("\n")
+        .map(l => l.trim()).filter(l => l && !l.startsWith("#"));
+      const regressed = claimed.filter(n => !passing.includes(n));
+      const gained = passing.filter(n => !claimed.includes(n));
+      if (gained.length) console.log(`\nNEW: ${gained.length} fixture(s) now pass — rerun with --write to ratchet: ${gained.join(", ")}`);
+      if (regressed.length) {
+        console.error(`\nRATCHET FAILED: ${regressed.length} fixture(s) regressed:\n  ${regressed.join("\n  ")}`);
+        process.exit(1);
+      }
+      console.log(`\nRATCHET OK — all ${claimed.length} manifest fixtures still pass`);
     }
 
     if (write) {

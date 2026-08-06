@@ -4,6 +4,12 @@
 //   bun scripts/selfhost-rejects.ts                 # census
 //   bun scripts/selfhost-rejects.ts --filter move   # only names containing "move"
 //   bun scripts/selfhost-rejects.ts --verbose       # list accepted-but-shouldn't-be
+//   bun scripts/selfhost-rejects.ts --check         # soundness ratchet: exit 1 on regression
+//   bun scripts/selfhost-rejects.ts --write         # grow the ratchet manifest
+//
+// Non-ok results are always re-verified serially before being reported: under parallel
+// load contention can downgrade a genuine "accepted" (unsound) to "wrong-message",
+// which under-reports unsoundness in exactly the direction that matters.
 //
 // scripts/selfhost-sweep.ts measures only tests/fixtures — programs that must COMPILE and
 // print the right thing. It deliberately skips every negative test. That leaves the more
@@ -21,7 +27,7 @@
 //
 // THIS IS NOT A GATE. Self-host parity must never block a change in src/ — see
 // docs/self-hosting.md. Every milo-self invocation goes through guardedRun.
-import { readdirSync, readFileSync, mkdtempSync, existsSync } from "fs";
+import { readdirSync, readFileSync, writeFileSync, mkdtempSync, existsSync } from "fs";
 import { tmpdir } from "os";
 import { join, basename } from "path";
 import { parseExpectedError, parseExpectedRuntimeError } from "../tests/annotations";
@@ -36,6 +42,8 @@ const CONCURRENCY = Number(process.env.MILO_SWEEP_CONCURRENCY || 0) || 4;
 
 const argv = process.argv.slice(2);
 const verbose = argv.includes("--verbose");
+const check = argv.includes("--check");
+const write = argv.includes("--write");
 const fi = argv.indexOf("--filter");
 const filter = fi >= 0 ? argv[fi + 1] : null;
 
@@ -127,6 +135,20 @@ await Promise.all(Array.from({ length: CONCURRENCY }, async () => {
 }));
 results.sort((a, b) => (a.lane + a.name).localeCompare(b.lane + b.name));
 
+// Re-verify every non-ok result serially. milo-self is nondeterministic under
+// parallel load, and the failure modes here are not symmetric: contention can
+// turn a genuine "accepted" (unsound) into a lesser "wrong-message", which
+// under-reports unsoundness. A serial second opinion is the only trustworthy one.
+const suspect = results.filter(r => r.verdict !== "ok");
+if (suspect.length && CONCURRENCY > 1) {
+  console.error(`re-verifying ${suspect.length} non-ok result(s) serially…`);
+  for (const s of suspect) {
+    Object.assign(s, s.lane === "errors" ? await checkReject(s.name, tmpDir) : await checkTrap(s.name, tmpDir));
+  }
+  const recovered = suspect.filter(r => r.verdict === "ok");
+  if (recovered.length) console.error(`  ${recovered.length} correct on retry (parallel-load flake): ${recovered.map(r => r.name).join(", ")}`);
+}
+
 const ok = results.filter(r => r.verdict === "ok");
 const unmeasured = results.filter(r => r.verdict === "unmeasured");
 const measured = results.length - unmeasured.length;
@@ -151,4 +173,41 @@ for (const v of order) {
   console.log();
 }
 if (verbose) for (const r of ok) console.log(`  OK  ${r.lane}/${r.name}`);
+
+// The soundness ratchet. Unlike the fixture sweep, "everything passes" is a long
+// way off here, so the gate is a monotonic manifest: every negative test milo-self
+// already handles correctly must keep working. A lane gates on one line of output
+// instead of the coordinator reading its diff.
+const MANIFEST = join(MILO_ROOT, "tests", "selfhost-rejects-manifest.txt");
+const okNames = ok.map(r => `${r.lane}/${r.name}`).sort();
+if (check || write) {
+  const header = existsSync(MANIFEST)
+    ? readFileSync(MANIFEST, "utf-8").split("\n").filter(l => l.startsWith("#")).join("\n")
+    : "# Negative tests milo-self already handles correctly. Monotonic: entries are never removed\n# except by deleting the fixture. Grow with: bun scripts/selfhost-rejects.ts --write";
+  const claimed = existsSync(MANIFEST)
+    ? readFileSync(MANIFEST, "utf-8").split("\n").map(l => l.trim()).filter(l => l && !l.startsWith("#"))
+    : [];
+  // An unmeasured entry is a guard kill, not a regression — the machine was busy.
+  const unmeasuredNames = new Set(results.filter(r => r.verdict === "unmeasured").map(r => `${r.lane}/${r.name}`));
+  const regressed = claimed.filter(n => !okNames.includes(n) && !unmeasuredNames.has(n));
+  const gained = okNames.filter(n => !claimed.includes(n));
+
+  if (check) {
+    if (gained.length) console.log(`\nNEW: ${gained.length} negative test(s) now correct — rerun with --write to ratchet:\n  ${gained.join("\n  ")}`);
+    if (regressed.length) {
+      console.error(`\nSOUNDNESS RATCHET FAILED: ${regressed.length} negative test(s) regressed:\n  ${regressed.join("\n  ")}`);
+      process.exit(1);
+    }
+    console.log(`\nSOUNDNESS RATCHET OK — all ${claimed.length} manifest entries still behave correctly`);
+    process.exit(0);
+  }
+  if (regressed.length) {
+    console.error(`\nREFUSING TO WRITE: manifest would shrink — these regressed:\n  ${regressed.join("\n  ")}`);
+    process.exit(1);
+  }
+  writeFileSync(MANIFEST, `${header}\n${okNames.join("\n")}\n`);
+  console.log(`\nmanifest: ${claimed.length} → ${okNames.length} negative tests`);
+  process.exit(0);
+}
+
 process.exit(results.some(r => r.verdict !== "ok") ? 1 : 0);

@@ -13,8 +13,13 @@
 #      real Milo and is a far better over-rejection detector than any fixture — a borrow
 #      rule that no fixture exercises will still hit the compiler itself.
 #
-# This is cheap (a check, not a build) and is NOT the full fixed point. For that — stage2
-# and stage3 emitting byte-identical IR — use scripts/selfhost-fixpoint.sh (~2 min).
+# Two stages, because `check` alone is not enough. A gap that lives in codegen — a method
+# the checker knows and the emitter does not — type-checks clean and then dies at build.
+# This script used to stop after `check`, and that hole was found by a human running
+# `build` by hand. Pass --quick to skip the build stage when iterating on checker rules.
+#
+# This is NOT the full fixed point. For that — stage2 and stage3 emitting byte-identical
+# IR — use scripts/selfhost-fixpoint.sh (~2 min).
 #
 # Per docs/self-hosting.md this must never GATE a change in src/. It gates changes to
 # src-milo/, which is a different thing: a self-hosted compiler that cannot compile itself
@@ -32,21 +37,47 @@ if [ ! -x "$self" ]; then
   exit 1
 fi
 
+quick=0
+[ "$1" = "--quick" ] && quick=1
+
+explain() {
+  echo
+  echo "Three things this usually means:"
+  echo "  * src-milo uses a language/stdlib feature milo-self does not implement yet."
+  echo "    The TS oracle accepts it, so nothing else notices. Either implement the"
+  echo "    feature in src-milo, or stop using it in the compiler's own source."
+  echo "  * A checker rule you just added OVER-REJECTS. src-milo is 25k lines of real"
+  echo "    Milo; if a new rule is too strict, it shows up here long before any fixture."
+  echo "  * (build stage only) the checker knows a construct the emitter does not."
+}
+
 out=$(MILO_ROOT="$root" bun "$root/scripts/guard.ts" --mem-mb 4096 --timeout-s 300 -- \
   "$self" check "$root/src-milo/main.milo" 2>&1) && status=0 || status=$?
 
-if [ "$status" -eq 0 ]; then
-  echo "SELF-CHECK OK — milo-self type-checks its own source"
+if [ "$status" -ne 0 ]; then
+  echo "SELF-CHECK FAILED — milo-self cannot type-check src-milo:"
+  echo "$out" | head -20
+  explain
+  exit 1
+fi
+
+if [ "$quick" -eq 1 ]; then
+  echo "SELF-CHECK OK (--quick: type-check only, build stage skipped)"
   exit 0
 fi
 
-echo "SELF-CHECK FAILED — milo-self cannot type-check src-milo:"
-echo "$out" | head -20
-echo
-echo "Two things this usually means:"
-echo "  * src-milo uses a language/stdlib feature milo-self does not implement yet."
-echo "    The TS oracle accepts it, so nothing else notices. Either implement the"
-echo "    feature in src-milo, or stop using it in the compiler's own source."
-echo "  * A checker rule you just added OVER-REJECTS. src-milo is 25k lines of real"
-echo "    Milo; if a new rule is too strict, it shows up here long before any fixture."
-exit 1
+# The build needs more headroom than the check: codegen holds the whole module.
+probe=$(mktemp -t milo-selfbuild)
+trap 'rm -f "$probe"' EXIT
+out=$(MILO_ROOT="$root" bun "$root/scripts/guard.ts" --mem-mb 6144 --timeout-s 600 -- \
+  "$self" build "$root/src-milo/main.milo" -o "$probe" 2>&1) && status=0 || status=$?
+
+if [ "$status" -ne 0 ]; then
+  echo "SELF-BUILD FAILED — milo-self type-checks src-milo but cannot compile it:"
+  echo "$out" | head -20
+  explain
+  exit 1
+fi
+
+echo "SELF-CHECK OK — milo-self type-checks AND compiles its own source"
+exit 0

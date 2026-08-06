@@ -12,7 +12,12 @@
 // `--server=self` requires `.selfhost/milo-self` to already exist (run
 // `sh scripts/selfhost.sh` first) — it is spawned as-is, which is the guarded
 // wrapper, never the bare `.selfhost/milo-self.bin`.
-import { spawn, type ChildProcessWithoutNullStreams } from "child_process";
+import { spawn, type ChildProcessByStdio } from "child_process";
+import type { Readable, Writable } from "stream";
+
+// stderr is "inherit" so the server's own diagnostics reach the terminal — that makes
+// child.stderr null, which ChildProcessWithoutNullStreams does not model.
+type ProbeChild = ChildProcessByStdio<Writable, Readable, null>;
 import { existsSync } from "fs";
 import { resolve, dirname } from "path";
 import { fileURLToPath } from "url";
@@ -85,7 +90,7 @@ class FrameReader {
 }
 
 interface Server {
-  child: ChildProcessWithoutNullStreams;
+  child: ProbeChild;
   reader: FrameReader;
   send(obj: object): void;
   nextId(): number;
@@ -93,7 +98,7 @@ interface Server {
 }
 
 function startServer(kind: "ts" | "self"): Server {
-  let child: ChildProcessWithoutNullStreams;
+  let child: ProbeChild;
   if (kind === "ts") {
     child = spawn("bun", ["run", resolve(ROOT, "src/main.ts"), "lsp"], { cwd: ROOT, stdio: ["pipe", "pipe", "inherit"] });
   } else {

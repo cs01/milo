@@ -15,6 +15,34 @@ last-verified: 2026-08-05 (self-check OK; 547/578 fixtures, 96/245 negative test
 | `scripts/selfhost-examples.ts` | `examples/` — must build | integration breakage |
 | **`scripts/selfhost-selfcheck.sh`** | **`milo-self check src-milo/main.milo`** | **over-rejection, and src-milo using a feature milo-self lacks** |
 
+### Every census verdict is confirmed serially before it is reported
+
+milo-self is nondeterministic under parallel load: a fixture can fail from resource
+contention alone. Two parallel censuses of the same commit disagreed by ~15 fixtures,
+and each of them was individually confident. Worse, the error is not symmetric in
+`selfhost-rejects.ts` — contention can downgrade a genuine `accepted` (unsound: milo-self
+compiled a program it must reject) into the milder `wrong-message`, so the harness
+under-reports unsoundness in precisely the direction that matters.
+
+Both censuses therefore re-run every non-passing result serially before printing, and
+report how many recovered. Only failures are re-run, so the cost scales with how broken
+things are rather than with corpus size. **A number produced by a single parallel pass is
+not evidence** — if you are quoting a parity figure, it came from a run with this retry in it.
+
+### The ratchets
+
+Each census has a `--check` mode that exits nonzero on regression against a manifest, so a
+workstream can gate on one line of output instead of a reviewer reading its diff:
+
+```
+bun scripts/selfhost-sweep.ts --check      # every tests/selfhost-manifest.txt fixture still builds
+bun scripts/selfhost-rejects.ts --check    # every tests/selfhost-rejects-manifest.txt negative still behaves
+```
+
+Both manifests are monotonic and grow with `--write`, which refuses to shrink them. An
+`unmeasured` entry (guard kill — the watchdog fired, no verdict was reached) never counts
+as a regression; that is a busy machine, not a compiler claim.
+
 The first three all measure milo-self against `tests/`. None of them looks at whether
 milo-self can still compile *its own source*, and on 2026-08-05 that property was broken
 for hours — four causes from three concurrent workstreams — while every census stayed

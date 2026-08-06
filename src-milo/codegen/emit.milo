@@ -1155,17 +1155,15 @@ pub fn genProgram(prog: Program, sourceDir: string): string {
             continue
         }
         let einfo = cg.enums.get(ename)!
-        var maxBytes: i64 = 0
-        for vi in 0..einfo.variants.len {
-            var vBytes: i64 = 0
-            for pi in 0..einfo.variants[vi].payloadTypes.len {
-                vBytes = vBytes + payloadBytes(cg, resolveTyStr(cg, einfo.variants[vi].payloadTypes[pi]))
-            }
-            if vBytes > maxBytes {
-                maxBytes = vBytes
-            }
-        }
-        let slots = (maxBytes + 7) / 8
+        // Ask payloadBytes for the size instead of re-deriving it here. This loop
+        // used to walk the variants itself, which made two implementations of one
+        // rule — and they drifted: this copy resolved generic instance names before
+        // measuring and payloadBytes' own recursion did not, so the two disagreed
+        // about the size of the very same enum and Option<TypeKind> came out a slot
+        // short. One rule, one implementation, nothing left to keep in sync.
+        // payloadBytes returns the whole enum (payload rounded to a word + one tag
+        // word), so subtract the tag to get the payload slots.
+        let slots = (payloadBytes(cg, ename) - 8) / 8
         // move einfo's owned fields back in with the computed slot count (no clone)
         cg.enums.insert(ename.clone(), CgEnumInfo {
             name: einfo.name, variants: einfo.variants, payloadSlots: slots

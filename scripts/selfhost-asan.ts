@@ -6,6 +6,8 @@
 //   bun scripts/selfhost-asan.ts --verbose       # per-fixture verdicts + the first non-runtime frame
 //   bun scripts/selfhost-asan.ts --check         # ratchet: exit 1 if a clean fixture regresses
 //   bun scripts/selfhost-asan.ts --write         # shrink the known-bad manifest
+//   bun scripts/selfhost-asan.ts --examples      # sweep examples/ instead of tests/fixtures/
+//   bun scripts/selfhost-asan.ts --all           # both corpora (what --check should gate on)
 //   bun scripts/selfhost-asan.ts --rebuild       # force a fresh stage2 + ASan link
 //
 // scripts/selfhost-sweep.ts asks "does milo-self compile the corpus to programs that
@@ -45,7 +47,6 @@ const SELFHOST_DIR = join(MILO_ROOT, ".selfhost");
 const MILO_SELF = join(SELFHOST_DIR, "milo-self.bin");
 const STAGE2_LL = join(SELFHOST_DIR, "stage2.ll");
 const STAGE2_ASAN = join(SELFHOST_DIR, "milo-self-asan.bin");
-const FIXTURES_DIR = join(MILO_ROOT, "tests", "fixtures");
 const SRC_MILO = join(MILO_ROOT, "src-milo");
 const MANIFEST = join(MILO_ROOT, "tests", "selfhost-asan-manifest.txt");
 const CHILD_ENV = {
@@ -122,6 +123,8 @@ if (rebuild || !asanBinIsFresh()) await buildStage2Asan();
 else console.error(`reusing ${basename(STAGE2_ASAN)} (newer than milo-self and src-milo; --rebuild to force)`);
 
 type Verdict = "ok" | "memory-error" | "unmeasured";
+// `name` is the repo-relative path, not a basename: examples/ has a dozen different
+// main.milo files and a basename manifest would silently conflate them.
 type Outcome = { name: string; verdict: Verdict; kind: string; frame: string };
 
 // The frame that names the generated function is the lead. Everything inside the ASan
@@ -135,7 +138,7 @@ function firstOwnFrame(report: string): string {
 }
 
 async function checkFixture(name: string): Promise<Outcome> {
-  const src = join(FIXTURES_DIR, `${name}.milo`);
+  const src = join(MILO_ROOT, name);
   const r = await guardedRun(STAGE2_ASAN, ["emit-ir", src],
     { env: CHILD_ENV, timeoutMs: 60_000, memMb: 2048 });
   if (r.guardKill) return { name, verdict: "unmeasured", kind: r.guardKill, frame: "" };
@@ -147,8 +150,21 @@ async function checkFixture(name: string): Promise<Outcome> {
   return { name, verdict: "memory-error", kind: m[1]!, frame: firstOwnFrame(report) };
 }
 
-const fixtures = readdirSync(FIXTURES_DIR)
-  .filter(f => f.endsWith(".milo")).map(f => basename(f, ".milo"))
+// examples/ is worth sweeping too — they are the biggest real programs milo-self
+// compiles, so they reach codegen paths no fixture does. Nested, hence the walk.
+function miloFilesUnder(dir: string, rel: string): string[] {
+  const out: string[] = [];
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    if (entry.isDirectory()) out.push(...miloFilesUnder(join(dir, entry.name), `${rel}/${entry.name}`));
+    else if (entry.name.endsWith(".milo")) out.push(`${rel}/${entry.name}`);
+  }
+  return out;
+}
+
+const corpora = argv.includes("--examples") ? ["examples"]
+  : argv.includes("--all") ? ["tests/fixtures", "examples"]
+  : ["tests/fixtures"];
+const fixtures = corpora.flatMap(c => miloFilesUnder(join(MILO_ROOT, c), c))
   .filter(n => !filter || n.includes(filter)).sort();
 
 const results: Outcome[] = [];
@@ -216,9 +232,11 @@ if (check || write) {
     process.exit(0);
   }
   // Only a full run may rewrite the manifest: a filtered one has no opinion about the
-  // fixtures it never ran, and writing from it would silently drop them.
-  if (filter) {
-    console.error(`\nREFUSING TO WRITE: --write needs a full run, but --filter ${filter} ran ${fixtures.length} fixture(s)`);
+  // fixtures it never ran, and writing from it would silently drop them. Same reason a
+  // single-corpus run may not: it would drop the other corpus's entries.
+  if (filter || corpora.length < 2) {
+    console.error(`\nREFUSING TO WRITE: --write needs a full --all run; this one covered ${corpora.join(", ")}` +
+      `${filter ? ` filtered by "${filter}"` : ""} (${fixtures.length} file(s))`);
     process.exit(1);
   }
   writeFileSync(MANIFEST, `${header}\n${badNames.join("\n")}${badNames.length ? "\n" : ""}`);

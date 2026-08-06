@@ -1,9 +1,9 @@
 <!-- doc-meta
 system: self-hosting
 purpose: status and reproduction steps for the Milo compiler written in Milo (src-milo), including the bootstrap fixed point
-key-files: src-milo/, scripts/selfhost.sh, scripts/selfhost-selfcheck.sh, scripts/selfhost-fixpoint.sh, scripts/ir-diff.ts
+key-files: src-milo/, scripts/selfhost.sh, scripts/selfhost-selfcheck.sh, scripts/selfhost-fixpoint.sh, scripts/selfhost-asan.ts, scripts/ir-diff.ts
 update-when: the bootstrap converges or diverges, or the fixture parity number moves materially
-last-verified: 2026-08-05 (self-check OK; 547/578 fixtures, 96/245 negative tests)
+last-verified: 2026-08-06 (fixpoint HOLDS stage2==stage3; 586/586 fixtures; 750/750 ASan-clean; 117/247 negative tests)
 -->
 
 ## The three things that get measured, and the one that used to not be
@@ -41,10 +41,14 @@ Its ratchet runs the opposite direction from the others: `tests/selfhost-asan-ma
 lists what is still broken and may only *shrink*. Zero is the intended steady state.
 
 ```
-bun scripts/selfhost-asan.ts             # census
-bun scripts/selfhost-asan.ts --check     # exit 1 if a clean fixture starts corrupting the heap
-bun scripts/selfhost-asan.ts --write     # after a real fix, shrink the manifest
+bun scripts/selfhost-asan.ts                  # census over tests/fixtures/
+bun scripts/selfhost-asan.ts --all            # + examples/ — 750 files, the number to quote
+bun scripts/selfhost-asan.ts --all --check    # exit 1 if a clean file starts corrupting the heap
+bun scripts/selfhost-asan.ts --all --write    # after a real fix, shrink the manifest
 ```
+
+`examples/` is worth the extra minutes: they are the largest real programs milo-self
+compiles and reach codegen paths no fixture does. Current state: **750/750 clean.**
 
 ### Every census verdict is confirmed serially before it is reported
 

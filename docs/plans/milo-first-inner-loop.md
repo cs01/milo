@@ -111,6 +111,26 @@ Three findings worth keeping:
 The split path also falls back: any failure inside it re-runs the single-module build, so
 it can cost time but can never turn a buildable program into a failed one.
 
+### Porting it: the 18 undefined-handling decisions the TS original deferred
+
+`src/cgu.ts` has to reach src-milo before milo-self can be the daily compiler — today
+every self-build hands clang one 572k-line module (`scripts/selfhost-irsize.ts`). Harvested
+here before `tests/uncheckedIndexRatchet.test.ts` was retired: 18 non-null assertions in 377
+lines, the densest `!` concentration in the codebase. Each one is a place the TS author
+chose not to answer "what if this is missing", and the Milo port has to — as an `Option`
+handled at the use site, or an explicit panic that names what was absent. A wrong `!` in TS
+is a TypeError at runtime; the same spot in Milo is either a clean handle or an `unwrap`
+that aborts, so silence is not an option the port has.
+
+| kind | sites | what the port must decide |
+|---|---|---|
+| index inside a loop over the same array (`lines[i]!`, `text[i]!`, `mod.funcs[i]!`, `home[i]!`, `funcs[b]!`, `load[u]!`, `load[best]!`) | 123, 133, 179, 184, 186, 227, 266, 278, 357 | Mostly dissolves: `for x in xs` binds by reference and needs no index at all. Where the index is genuinely needed (parallel arrays: `home[i]` alongside `funcs[i]`), Milo's bounds check makes it safe but the *pairing invariant* is still unstated — the port should carry both in one struct rather than two Vecs. |
+| regex capture group (`m[0]!`, `m[1]!`, `m[2]!`) | 137, 141, 157, 159, 161, 241, 243 | The load-bearing group. A group that did not participate is absent, not empty, and the difference decides whether an unnamed `define` is skipped or mis-parsed as a symbol. Needs a real `match` per capture, with the "IR line we could not parse" case named — silently treating it as a non-function is how a whole CGU loses a symbol. |
+| map/set lookup (`globalHome.get(g.name)!`, `[...seen][0]!`) | 295, 345 | `HashMap.get` is already `Option<V>` in Milo. Both sites assert an invariant established elsewhere ("every global was assigned a home"); the port should either return the invariant as a type (a total map built in one pass) or panic with the symbol name, which is the one message that makes a mis-partition debuggable. |
+
+The two other `!` matches in that file (lines 56 and 148) are a regex literal and a string
+compare, not assertions.
+
 ### The original measurement
 
 The compiler emits **one** LLVM module and shells out to **one** clang. Measured, clang

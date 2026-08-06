@@ -1,0 +1,36 @@
+// A constant subexpression has no intrinsic width, so it must coerce to whatever
+// integer it meets — including when the operator that built it is bitwise.
+//
+// The rule used to be spelled as a list of "constant" operators covering only
+// + - * / %, which left `(0xFF << 24)` typed as i64. Meeting a u32 it produced
+// "type mismatch in '|': u32 vs i64", and since packing a pixel is written exactly
+// that way, every framebuffer example in the repo failed to compile.
+
+fn main() {
+    let r: u32 = 200
+    let g: u32 = 100
+    let b: u32 = 50
+
+    // The shifted constant is the operand that must coerce.
+    let px = r | (g << 8) | (b << 16) | (0xFF << 24)
+    print(px == 4281492680)
+    // @expect: true
+
+    // Every bitwise operator, not just the shift that first exposed this.
+    let masked: u32 = px & (0xFFFF | 0)
+    print(masked == 25800)
+    // @expect: true
+    let x: u32 = 6
+    print((x ^ (1 << 0)) == 7)
+    // @expect: true
+
+    // Narrower widths take the same path.
+    let small: u8 = 0b1010
+    print((small | (1 << 0)) == 11)
+    // @expect: true
+
+    // A char literal has no intrinsic width either.
+    let c: u8 = 'A'
+    print((c | 0) == 65)
+    // @expect: true
+}

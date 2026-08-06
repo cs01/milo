@@ -1902,6 +1902,7 @@ pub fn parse(p: &mut Parser): Program {
     var impls: Vec<ImplDecl> = Vec.new()
     var globals: Vec<GlobalDecl> = Vec.new()
     var typeAliases: Vec<TypeAlias> = Vec.new()
+    var linkLibs: Vec<string> = Vec.new()
 
     while !at(p, TokKind.Eof) {
         // Collect attributes. `@!name` is a MODULE-level directive, not a declaration
@@ -1921,7 +1922,17 @@ pub fn parse(p: &mut Parser): Program {
                     p.moduleWrapping = true
                 }
             } else {
-                attrs.push(parseAttribute(p))
+                let a = parseAttribute(p)
+                // `@link("SDL2")` names a library for the LINK step, so it belongs to
+                // the module rather than to whatever declaration happens to follow it.
+                // It still stays in `attrs` — dropping it here would change how the
+                // following decl is parsed.
+                if a.name == "link" {
+                    for ai in 0..a.args.len {
+                        linkLibs.push(a.args[ai].clone())
+                    }
+                }
+                attrs.push(a)
             }
         }
 
@@ -2066,6 +2077,7 @@ pub fn parse(p: &mut Parser): Program {
         impls: impls,
         globals: globals,
         typeAliases: typeAliases,
+        linkLibs: linkLibs,
     }
 }
 

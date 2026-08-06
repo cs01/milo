@@ -276,6 +276,12 @@ pub struct Program {
     impls: Vec<ImplDecl>,
     globals: Vec<GlobalDecl>,
     typeAliases: Vec<TypeAlias>,
+    // Libraries named by `@link("SDL2")`. A module declares what it needs to link
+    // against, and the resolver unions these across every imported file — the
+    // attribute usually sits in the binding module (a package's lib.milo), not in
+    // the program that imports it. Without this the driver had no way to learn
+    // about SDL2 at all and every SDL example died at link with undefined symbols.
+    linkLibs: Vec<string>,
 }
 
 // -- Clone impls --

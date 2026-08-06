@@ -38,6 +38,8 @@ pub struct ResolverState {
     impls: Vec<ImplDecl>,
     globals: Vec<GlobalDecl>,
     typeAliases: Vec<TypeAlias>,
+    // Unioned across every file in the import graph — see Program.linkLibs.
+    linkLibs: Vec<string>,
     stdlibDir: string,
     targetOs: string,
     // The entry project's milo.json `deps` map (package name -> spec, e.g.
@@ -46,6 +48,17 @@ pub struct ResolverState {
     // whole graph (including a package's own internal imports) against the root
     // project's manifest, not a per-file one. There is no diamond-dependency story.
     deps: HashMap<string, string>,
+}
+
+// `@link` names union across the whole import graph, deduped: a package linked by
+// two different modules must still produce a single -l flag.
+pub fn addLinkLib(rs: &mut ResolverState, name: &string) {
+    for i in 0..rs.linkLibs.len {
+        if rs.linkLibs[i] == name {
+            return
+        }
+    }
+    rs.linkLibs.push(name.clone())
 }
 
 pub fn newResolver(stdlibDir: string, targetOs: string, deps: HashMap<string, string>): ResolverState {
@@ -58,6 +71,7 @@ pub fn newResolver(stdlibDir: string, targetOs: string, deps: HashMap<string, st
         impls: Vec.new(),
         globals: Vec.new(),
         typeAliases: Vec.new(),
+        linkLibs: Vec.new(),
         stdlibDir: stdlibDir,
         targetOs: targetOs,
         deps: deps,
@@ -565,6 +579,9 @@ pub fn mergeImportedFile(rs: &mut ResolverState, absPath: string) {
         }
         )
     }
+    for li in 0..imported.linkLibs.len {
+        addLinkLib(rs, imported.linkLibs[li])
+    }
 
     // Recurse into this module's imports
     let importDir = Path.dirname(absPath)
@@ -760,6 +777,9 @@ pub fn resolveImports(program: Program, sourceDir: string, stdlibDir: string, ta
         }
         )
     }
+    for li in 0..program.linkLibs.len {
+        addLinkLib(rs, program.linkLibs[li])
+    }
 
     // Process user program's imports
     processImports(rs, program, sourceDir)
@@ -774,5 +794,6 @@ pub fn resolveImports(program: Program, sourceDir: string, stdlibDir: string, ta
         impls: rs.impls,
         globals: dedupGlobals(rs.globals),
         typeAliases: rs.typeAliases,
+        linkLibs: rs.linkLibs,
     }
 }

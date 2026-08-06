@@ -931,17 +931,23 @@ pub fn isConstIntExpr(e: &Expr): bool {
         Expr.IntLit(v, span) => {
             return true
         }
+        // A char literal has no intrinsic width either — `'A' as u8` and a bare
+        // 65 should coerce the same way.
+        Expr.CharLit(v, span) => {
+            return true
+        }
+        // ANY operator over constant ints, not just the arithmetic five. Listing
+        // operators here made this rule narrower than the property it stands for
+        // ("this subtree has no intrinsic width"), and the omitted ones were the
+        // bitwise operators — so `pixel | (0xFF << 24)` refused to coerce against a
+        // u32 and every framebuffer-packing example failed to compile. Widening a
+        // comparison in by accident is harmless: `1 < 2` types as bool, and every
+        // caller (intCoercible) requires the source type to be an integer first.
         Expr.UnaryOp(op, operand, span) => {
-            if op == "-" {
-                return isConstIntExpr(*operand)
-            }
-            return false
+            return isConstIntExpr(*operand)
         }
         Expr.BinOp(op, l, r, span) => {
-            if op == "+" || op == "-" || op == "*" || op == "/" || op == "%" {
-                return isConstIntExpr(*l) && isConstIntExpr(*r)
-            }
-            return false
+            return isConstIntExpr(*l) && isConstIntExpr(*r)
         }
         // `if c { 16 } else { 8 }` has no intrinsic width either, same as a bare
         // literal — needed so `let u: u8 = if c {200} else {12}` coerces instead

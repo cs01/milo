@@ -132,7 +132,16 @@ pub fn findStdlibRoot(sourceDir: &string): string {
     return sourceDir.clone()
 }
 
-pub fn compile(path: string): string {
+// compile() has to hand back more than the IR text: `@link` names are discovered
+// during resolution and are needed by the LINK step, which happens in the driver.
+// Returning them alongside keeps the discovery in one place rather than having the
+// driver re-scan emitted IR for library names it can only guess at.
+pub struct Compiled {
+    ir: string,
+    linkLibs: Vec<string>,
+}
+
+pub fn compile(path: string): Compiled {
     var source = ""
     match readFile(path.clone()) {
         Result.Ok(s) => {
@@ -195,13 +204,33 @@ pub fn compile(path: string): string {
     for i in 0..checker.monomorphizedFns.len {
         finalProg.functions.push(checker.monomorphizedFns[i].clone())
     }
-    return genProgram(finalProg, sourceDir)
+    let libs = finalProg.linkLibs.clone()
+    return Compiled {
+        ir: genProgram(finalProg, sourceDir), linkLibs: libs
+    }
 }
 
 // Scan the emitted IR for extern symbols that need a link library, mirroring the
 // TS driver's detectLibs. Only SSL/crypto/sqlite are auto-linked.
-pub fn detectLibs(ir: &string, os: &string): string {
+pub fn detectLibs(ir: &string, os: &string, declared: &Vec<string>, sdlFlags: &string): string {
     var libs = ""
+    // Libraries the SOURCE asked for via `@link("SDL2")`. Sniffing the IR for known
+    // symbol prefixes (below) can only ever recognise libraries the compiler was
+    // taught about by name; `@link` lets a program name its own, which is what every
+    // SDL example relies on. On darwin the Homebrew prefix is not on the default
+    // search path, so it has to be added or the -l resolves to nothing.
+    for i in 0..declared.len {
+        let name = declared[i].clone()
+        // sdl2-config knows the framework soup SDL2 needs on darwin; a bare -lSDL2
+        // links but leaves Cocoa/Metal symbols undefined.
+        if name == "SDL2" && sdlFlags.len > 0 {
+            libs = libs + " " + sdlFlags.clone()
+        } else if os == "darwin" {
+            libs = libs + " -L/opt/homebrew/lib -l" + name
+        } else {
+            libs = libs + " -l" + name
+        }
+    }
     if ir.contains("@SSL_") || ir.contains("@TLS_client_method") {
         if os == "darwin" {
             libs = libs + " -L/opt/homebrew/opt/openssl@3/lib -lssl -lcrypto"
@@ -220,6 +249,41 @@ pub fn detectLibs(ir: &string, os: &string): string {
         }
     }
     return libs
+}
+
+// `sdl2-config --libs` is the only reliable source for SDL2's darwin link line —
+// it expands to the Cocoa/Metal/CoreAudio frameworks the dylib actually needs.
+// Empty string when SDL2 was not requested or the tool is absent, in which case
+// detectLibs falls back to a plain -lSDL2.
+pub fn sdlConfigFlags(declared: &Vec<string>): string {
+    var wants = false
+    for i in 0..declared.len {
+        if declared[i] == "SDL2" {
+            wants = true
+        }
+    }
+    if !wants {
+        return ""
+    }
+    let out = tmpPath("sdlcfg", ".txt")
+    match run("sdl2-config --libs > " + out.clone() + " 2>/dev/null") {
+        Result.Ok(code) => {
+            if code != 0 {
+                return ""
+            }
+        }
+        Result.Err(_) => {
+            return ""
+        }
+    }
+    match readFile(out) {
+        Result.Ok(text) => {
+            return text.trim()
+        }
+        Result.Err(_) => {
+            return ""
+        }
+    }
 }
 
 // Link LLVM IR with clang when available, otherwise mirror the TS driver's
@@ -398,14 +462,14 @@ pub fn main() {
     }
 
     if cmd == "emit-ir" {
-        let ir = compile(source.clone())
-        print(ir)
+        let comp = compile(source.clone())
+        print(comp.ir)
         exit(0)
     }
 
     if cmd == "build" {
         let buildStart = now()
-        let ir = compile(source.clone())
+        let comp = compile(source.clone())
         // Determine output name. Any other positional argument (companion .c/.o/.a/.cpp
         // translation units — struct-by-value ABI tests link a C peer alongside the
         // generated IR) is forwarded to the linker verbatim, mirroring src/main.ts's
@@ -424,8 +488,8 @@ pub fn main() {
         }
         // Write IR to a temp file and link it with the available LLVM/C tools.
         let irFile = tmpPath("out", ".ll")
-        let _ = writeFile(irFile, ir)
-        let status = linkIr(irFile, output, detectLibs(ir, getHostTarget().os), extra)
+        let _ = writeFile(irFile, comp.ir)
+        let status = linkIr(irFile, output, detectLibs(comp.ir, getHostTarget().os, comp.linkLibs, sdlConfigFlags(comp.linkLibs)), extra)
         if status != 0 {
             eprint("error: linker failed (exit " + status.toString() + ")")
             exit(1)
@@ -435,9 +499,9 @@ pub fn main() {
     }
 
     if cmd == "run" {
-        let ir = compile(source.clone())
+        let comp = compile(source.clone())
         let irFile = tmpPath("out", ".ll")
-        let _ = writeFile(irFile, ir)
+        let _ = writeFile(irFile, comp.ir)
         let binary = tmpPath("run", "")
         // Split positionals the same way `build` does: a companion translation unit
         // (.c/.o/.a/.cpp) is a link input, not something the running program should
@@ -456,7 +520,7 @@ pub fn main() {
             }
             ai = ai + 1
         }
-        let status = linkIr(irFile, binary, detectLibs(ir, getHostTarget().os), extra)
+        let status = linkIr(irFile, binary, detectLibs(comp.ir, getHostTarget().os, comp.linkLibs, sdlConfigFlags(comp.linkLibs)), extra)
         if status != 0 {
             eprint("error: linker failed")
             exit(1)

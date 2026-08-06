@@ -87,6 +87,7 @@ commandEnv
 commandStdioDirection
 compoundAssign
 compoundBitwise
+constBitwiseCoerce
 contracts
 contractsCallSite
 cryptoAesGcm

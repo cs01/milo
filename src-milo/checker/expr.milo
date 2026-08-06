@@ -11,7 +11,7 @@ from "src-milo/checker/state.milo" import {
     Checker, VarInfo, FnSig, FnParam, StructInfo, CkStructField,
     EnumInfo, VariantInfo, Diagnostic,
     error, errorHint, warn, pushScope, popScope, declare, lookup, setVarMoved, setVarType, setVarRead, hasErrors,
-    isCopyCk, normalizeEnumNames, snapshotMoves, restoreMoves, orMoves,
+    isCopyCk, normalizeEnumNames, snapshotMoves, restoreMoves, orMoves, stmtTerminates,
 }
 from "src-milo/checker/mono.milo" import {
     monomorphizeEnum, monomorphizeFn, monomorphizeStruct, resolveMonoType
@@ -44,6 +44,79 @@ from "src-milo/checker/derive_json.milo" import {
 // result actually came from. Everything else either names storage directly
 // (Ident, handled as a leaf below) or is a fresh value with no upstream
 // owner to poison.
+// The value expression of a block arm, cloned out. Callers that only need to
+// inspect the tail should match it in place — this exists for the few spots that
+// must pass it on as an owned Expr.
+pub fn blockTailExpr(body: &Vec<Heap<Stmt>>): Option<Expr> {
+    if body.len > 0 {
+        match *body[body.len - 1] {
+            Stmt.ExprStmt(e, espan) => {
+                return Option.Some((*e).clone())
+            }
+            _ => {
+            }
+        }
+    }
+    return Option.None
+}
+
+// Type one if-expression arm: a statement block whose trailing ExprStmt supplies
+// the value. Any other tail must diverge (return/break/continue) and yields no
+// type, so the arm reports unknown and the other arm decides. Mirrors
+// checkMatchArmValue minus the pattern binding.
+pub fn checkIfArmValue(ck: &mut Checker, body: &Vec<Heap<Stmt>>, fnRetType: &TypeKind, span: &Option<Span>): TypeKind {
+    pushScope(ck)
+    var result = tyUnknown()
+    var i: i64 = 0
+    while i < body.len {
+        let isLast = i == body.len - 1
+        if isLast {
+            match *body[i] {
+                Stmt.ExprStmt(e, espan) => {
+                    result = checkExpr(ck, *e)
+                }
+                _ => {
+                    if !stmtTerminates(*body[i]) {
+                        error(ck, "if-expression arm must end in a value or return/break/continue", cloneSpan(span))
+                    }
+                    checkStmt(ck, *body[i], fnRetType)
+                }
+            }
+        } else {
+            checkStmt(ck, *body[i], fnRetType)
+        }
+        i = i + 1
+    }
+    popScope(ck)
+    return result
+}
+
+// The value an if-expression arm hands back is its trailing ExprStmt; any other
+// tail diverges and contributes nothing to move. Same rule match arms use.
+pub fn tryMoveBlockTail(ck: &mut Checker, body: &Vec<Heap<Stmt>>) {
+    if body.len > 0 {
+        match *body[body.len - 1] {
+            Stmt.ExprStmt(e, espan) => {
+                tryMove(ck, *e)
+            }
+            _ => {
+            }
+        }
+    }
+}
+
+pub fn errorIfMovingBlockTail(ck: &mut Checker, body: &Vec<Heap<Stmt>>, span: &Option<Span>) {
+    if body.len > 0 {
+        match *body[body.len - 1] {
+            Stmt.ExprStmt(e, espan) => {
+                errorIfMovingBorrowedNonCopy(ck, *e, span)
+            }
+            _ => {
+            }
+        }
+    }
+}
+
 pub fn tryMove(ck: &mut Checker, expr: &Expr) {
     if ck.inReturn {
         return
@@ -88,9 +161,9 @@ pub fn tryMove(ck: &mut Checker, expr: &Expr) {
         Expr.FieldAccess(obj, field, span) => {
             tryMoveField(ck, expr, span)
         }
-        Expr.IfExpr(cond, thenE, elseE, span) => {
-            tryMove(ck, *thenE)
-            tryMove(ck, *elseE)
+        Expr.IfExpr(cond, thenBody, elseBody, span) => {
+            tryMoveBlockTail(ck, thenBody)
+            tryMoveBlockTail(ck, elseBody)
         }
         Expr.MatchExpr(subject, arms, span) => {
             for i in 0..arms.len {
@@ -339,9 +412,9 @@ pub fn errorIfMovingBorrowedNonCopy(ck: &mut Checker, expr: &Expr, span: &Option
         Expr.FieldAccess(obj, field, sp) => {
             let _ = fieldMoveOutOfBorrow(ck, expr, span)
         }
-        Expr.IfExpr(cond, thenE, elseE, sp) => {
-            errorIfMovingBorrowedNonCopy(ck, *thenE, span)
-            errorIfMovingBorrowedNonCopy(ck, *elseE, span)
+        Expr.IfExpr(cond, thenBody, elseBody, sp) => {
+            errorIfMovingBlockTail(ck, thenBody, span)
+            errorIfMovingBlockTail(ck, elseBody, span)
         }
         Expr.MatchExpr(subject, arms, sp) => {
             for i in 0..arms.len {
@@ -571,7 +644,7 @@ pub fn checkExpr(ck: &mut Checker, expr: &Expr): TypeKind {
             checkExpr(ck, *operand)
             return tyBool()
         }
-        Expr.IfExpr(cond, thenE, elseE, span) => {
+        Expr.IfExpr(cond, thenBody, elseBody, span) => {
             let condType = checkExpr(ck, *cond)
             if !typeEq(condType, tyBool()) && !typeEq(condType, tyUnknown()) {
                 error(ck, "if-expression condition must be bool, got " + typeName(condType), cloneSpan(span))
@@ -582,11 +655,12 @@ pub fn checkExpr(ck: &mut Checker, expr: &Expr): TypeKind {
             // survive to the code after, since which one ran is a runtime fact.
             // Mirrors checkIf's branch isolation (stmt.milo), generalized to
             // fork-as-value.
+            let fnRetType = ck.currentFnRetType.clone()
             let preSnap = snapshotMoves(ck)
-            let thenType = checkExpr(ck, *thenE)
+            let thenType = checkIfArmValue(ck, thenBody, fnRetType, span)
             let afterThen = snapshotMoves(ck)
             restoreMoves(ck, preSnap)
-            let elseType = checkExpr(ck, *elseE)
+            let elseType = checkIfArmValue(ck, elseBody, fnRetType, span)
             let afterElse = snapshotMoves(ck)
             restoreMoves(ck, preSnap)
             orMoves(ck, afterThen)
@@ -598,9 +672,25 @@ pub fn checkExpr(ck: &mut Checker, expr: &Expr): TypeKind {
             // codegen's phi always takes its type from thenE, so a literal on the THEN
             // side with a concrete elseE would build a phi with a mismatched incoming
             // value — that stays a hard error rather than silently miscompiling.
-            if !typeEq(thenType, elseType) && !containsUnknown(thenType) && !containsUnknown(elseType)
-            && !intCoercible(thenType, elseType, *elseE) {
+            var disagree = !typeEq(thenType, elseType) && !containsUnknown(thenType) && !containsUnknown(elseType)
+            if disagree {
+                // The clone is why this is guarded: only the mismatch path pays it.
+                match blockTailExpr(elseBody) {
+                    Option.Some(tail) => {
+                        if intCoercible(thenType, elseType, tail) {
+                            disagree = false
+                        }
+                    }
+                    Option.None => {
+                    }
+                }
+            }
+            if disagree {
                 error(ck, "if-expression branches disagree: " + typeName(thenType) + " vs " + typeName(elseType), cloneSpan(span))
+            }
+            // A diverging arm types as unknown and lets the other arm decide.
+            if containsUnknown(thenType) {
+                return elseType
             }
             return thenType
         }
@@ -660,6 +750,23 @@ pub fn checkIdent(ck: &mut Checker, name: &string, span: &Option<Span>): TypeKin
 // no intrinsic width — it takes its type from the context. Mirrors the TS
 // checker's const-subexpression coercion, without which `pos + 1` on an i64 and
 // `b != 0` on a u8 are both type errors.
+// An if-expression arm is width-free only when it is a single const-int
+// expression — any leading statement means the arm does real work and its type
+// is whatever that work produced.
+fn isConstIntBlock(body: &Vec<Heap<Stmt>>): bool {
+    if body.len != 1 {
+        return false
+    }
+    match *body[0] {
+        Stmt.ExprStmt(e, span) => {
+            return isConstIntExpr(*e)
+        }
+        _ => {
+            return false
+        }
+    }
+}
+
 pub fn isConstIntExpr(e: &Expr): bool {
     match e {
         Expr.IntLit(v, span) => {
@@ -683,8 +790,8 @@ pub fn isConstIntExpr(e: &Expr): bool {
         // (codegen already threads the outer hint into both arms unconditionally;
         // only the checker was refusing to call this const). Recurses through an
         // `else if` chain since its else-arm is itself an Expr.IfExpr.
-        Expr.IfExpr(cond, thenE, elseE, span) => {
-            return isConstIntExpr(*thenE) && isConstIntExpr(*elseE)
+        Expr.IfExpr(cond, thenBody, elseBody, span) => {
+            return isConstIntBlock(thenBody) && isConstIntBlock(elseBody)
         }
         _ => {
             return false
@@ -1182,7 +1289,7 @@ pub fn checkCall(ck: &mut Checker, func: &string, args: &Vec<Heap<Expr>>, typeAr
     // `@targetOs()` is a compile-time constant string; codegen folds it to a literal.
     if func == "targetOs" {
         if args.len != 0 {
-            error(ck, "'targetOs' takes no arguments", cloneSpan(span))
+            error(ck, "targetOs() takes no arguments, got " + args.len.toString(), cloneSpan(span))
         }
         return tyString()
     }

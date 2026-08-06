@@ -13,7 +13,8 @@ from "src-milo/codegen/types.milo" import {
     isInlineArrTy, inlineArrElem, addrWasMoved, ensureStringTy
 }
 from "src-milo/codegen/expr.milo" import {
-    genExpr, genLvalue, variantStructTy, genOptionWrapIfNeeded, genInterfaceCoerceIfNeeded, genOwnedArg
+    genExpr, genLvalue, variantStructTy, genOptionWrapIfNeeded, genInterfaceCoerceIfNeeded, genOwnedArg,
+    constFoldBool
 }
 from "src-milo/codegen/drops.milo" import {
     emitDropValue, cgNeedsDrop
@@ -919,6 +920,45 @@ pub fn genForIn(cg: &mut Cgen, varName: &string, varName2: &Option<string>, iter
 // -- If statement --
 
 pub fn genIf(cg: &mut Cgen, cond: &Expr, thenBody: &Vec<Heap<Stmt>>, elseBody: &Option<Vec<Heap<Stmt>>>, locs: &mut Vec<Local>, sigs: &Vec<CgFnSig>, retTy: &string): bool {
+    // A statically-known condition (`@targetOs() == "…"`) emits ONLY the taken
+    // arm. Load-bearing, not an optimization: the dead arm may call a symbol
+    // that exists on no other target, and it must never reach the linker even
+    // though it type-checked.
+    let folded = constFoldBool(cg, cond)
+    match folded {
+        Option.Some(taken) => {
+            var foldTerm = false
+            let foldPreLen = locs.len
+            if taken {
+                for ti in 0..thenBody.len {
+                    if genStmt(cg, *thenBody[ti], locs, sigs, retTy) {
+                        foldTerm = true
+                    }
+                }
+            } else {
+                match elseBody {
+                    Option.Some(stmts) => {
+                        for ei in 0..stmts.len {
+                            if genStmt(cg, *stmts[ei], locs, sigs, retTy) {
+                                foldTerm = true
+                            }
+                        }
+                    }
+                    Option.None => {
+                    }
+                }
+            }
+            if !foldTerm {
+                emitScopeDrops(cg, locs, foldPreLen, "")
+            }
+            while locs.len > foldPreLen {
+                let _ = locs.pop()
+            }
+            return foldTerm
+        }
+        Option.None => {
+        }
+    }
     let cv = genExpr(cg, cond, locs, sigs, "bool")
     let thenLbl = nextLabel(cg, "then")
     let elseLbl = nextLabel(cg, "else")
@@ -1725,10 +1765,14 @@ pub fn collectIdentsExpr(e: &Expr, out: &mut Vec<string>) {
         Expr.IsExpr(x, pat, span) => {
             collectIdentsExpr(*x, out)
         }
-        Expr.IfExpr(c, t, f, span) => {
+        Expr.IfExpr(c, thenBody, elseBody, span) => {
             collectIdentsExpr(*c, out)
-            collectIdentsExpr(*t, out)
-            collectIdentsExpr(*f, out)
+            for i in 0..thenBody.len {
+                collectIdentsStmt(*thenBody[i], out)
+            }
+            for i in 0..elseBody.len {
+                collectIdentsStmt(*elseBody[i], out)
+            }
         }
         Expr.MatchExpr(subject, arms, span) => {
             collectIdentsExpr(*subject, out)

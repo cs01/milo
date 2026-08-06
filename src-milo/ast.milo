@@ -112,7 +112,10 @@ pub enum Expr {
     Closure(Vec<Param>, Option<MiloType>, Vec<Heap<Stmt>>, bool, Option<Span>),
     RangeExpr(Heap<Expr>, Heap<Expr>, Option<Span>),
     IsExpr(Heap<Expr>, Heap<Pattern>, Option<Span>),
-    IfExpr(Heap<Expr>, Heap<Expr>, Heap<Expr>, Option<Span>),
+    // if in expression position. Arms are statement blocks whose trailing
+    // ExprStmt supplies the value, same shape as MatchArm bodies — a single-
+    // expression arm is just the one-statement case.
+    IfExpr(Heap<Expr>, Vec<Heap<Stmt>>, Vec<Heap<Stmt>>, Option<Span>),
     // match in expression position — reuses MatchArm (bare `P => v` arms get
     // wrapped in a one-statement ExprStmt body by the parser, so bodies here are
     // uniformly Vec<Heap<Stmt>>, same shape as Stmt.MatchStmt).
@@ -559,8 +562,8 @@ impl Clone for Expr {
             Expr.RangeExpr(start, end, span) => {
                 return Expr.RangeExpr(Heap((*start).clone()), Heap((*end).clone()), cloneSpan(span))
             }
-            Expr.IfExpr(cond, thenE, elseE, span) => {
-                return Expr.IfExpr(Heap((*cond).clone()), Heap((*thenE).clone()), Heap((*elseE).clone()), cloneSpan(span))
+            Expr.IfExpr(cond, thenBody, elseBody, span) => {
+                return Expr.IfExpr(Heap((*cond).clone()), cloneStmts(thenBody), cloneStmts(elseBody), cloneSpan(span))
             }
             Expr.IsExpr(subject, pattern, span) => {
                 return Expr.IsExpr(Heap((*subject).clone()), Heap((*pattern).clone()), cloneSpan(span))
@@ -798,8 +801,8 @@ pub fn renameExpr(e: &Expr, from: &string, to: &string): Expr {
         Expr.RangeExpr(start, end, span) => {
             return Expr.RangeExpr(Heap(renameExpr(*start, from, to)), Heap(renameExpr(*end, from, to)), cloneSpan(span))
         }
-        Expr.IfExpr(cond, thenE, elseE, span) => {
-            return Expr.IfExpr(Heap(renameExpr(*cond, from, to)), Heap(renameExpr(*thenE, from, to)), Heap(renameExpr(*elseE, from, to)), cloneSpan(span))
+        Expr.IfExpr(cond, thenBody, elseBody, span) => {
+            return Expr.IfExpr(Heap(renameExpr(*cond, from, to)), renameStmts(thenBody, from, to), renameStmts(elseBody, from, to), cloneSpan(span))
         }
         Expr.IsExpr(subject, pattern, span) => {
             return Expr.IsExpr(Heap(renameExpr(*subject, from, to)), Heap((*pattern).clone()), cloneSpan(span))

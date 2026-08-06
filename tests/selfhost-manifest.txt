@@ -381,6 +381,7 @@ propagateSretBigAgg
 ptrDepth
 ptrFieldAccess
 pty
+ptyLifecycle
 ptySpawn
 pureFn
 qfliaSolver
@@ -505,6 +506,7 @@ structPackedLayout
 structs
 subtleConstantTimeEq
 swapDistinctIndex
+targetOs
 taskJoin
 taskJoinGreen
 taskJoinLate

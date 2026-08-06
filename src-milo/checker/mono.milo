@@ -356,8 +356,8 @@ pub fn substExpr(e: &Expr, tps: &Vec<string>, tas: &Vec<TypeKind>): Expr {
         Expr.IsExpr(subject, pattern, span) => {
             return Expr.IsExpr(Heap(substExpr(*subject, tps, tas)), Heap((*pattern).clone()), cloneSpan(span))
         }
-        Expr.IfExpr(cond, thenE, elseE, span) => {
-            return Expr.IfExpr(Heap(substExpr(*cond, tps, tas)), Heap(substExpr(*thenE, tps, tas)), Heap(substExpr(*elseE, tps, tas)), cloneSpan(span))
+        Expr.IfExpr(cond, thenBody, elseBody, span) => {
+            return Expr.IfExpr(Heap(substExpr(*cond, tps, tas)), substStmts(thenBody, tps, tas), substStmts(elseBody, tps, tas), cloneSpan(span))
         }
         Expr.MatchExpr(subject, arms, span) => {
             var as2: Vec<MatchArm> = Vec.new()

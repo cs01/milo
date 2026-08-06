@@ -18,7 +18,7 @@ from "src-milo/codegen/types.milo" import {
     isInlineArrTy, inlineArrLen, inlineArrElem, ensureFpSat
 }
 from "src-milo/codegen/stmt.milo" import {
-    genClosure, genClosureCall, widenToI64, genMatch, MatchGen
+    genClosure, genClosureCall, widenToI64, genMatch, genArmBody, MatchGen
 }
 from "src-milo/codegen/drops.milo" import {
     cgNeedsDrop, zeroStore, emitDropValue
@@ -6861,6 +6861,142 @@ pub fn isPlaceExprForFree(e: &Expr): bool {
     }
 }
 
+// A string operand the compiler already knows the value of: a literal, or the
+// `@targetOs()` builtin, which is a constant for the whole compilation.
+fn constString(cg: &Cgen, e: &Expr): Option<string> {
+    match e {
+        Expr.StringLit(v, span) => {
+            return Option.Some(v.clone())
+        }
+        Expr.Call(name, args, typeArgs, span) => {
+            if name == "targetOs" && args.len == 0 {
+                return Option.Some(cg.targetOs.clone())
+            }
+            return Option.None
+        }
+        _ => {
+            return Option.None
+        }
+    }
+}
+
+fn foldIsTrue(o: &Option<bool>): bool {
+    match o {
+        Option.Some(v) => {
+            return v
+        }
+        Option.None => {
+            return false
+        }
+    }
+}
+
+fn foldIsFalse(o: &Option<bool>): bool {
+    match o {
+        Option.Some(v) => {
+            return !v
+        }
+        Option.None => {
+            return false
+        }
+    }
+}
+
+// Compile-time value of a condition that rests entirely on constants — the
+// `@targetOs() == "…"` case, plus !/&&/|| over such values. None means "not
+// statically known", i.e. the ordinary runtime path. Deliberately conservative:
+// only constant operands fold, so no runtime condition is ever short-circuited
+// by accident.
+pub fn constFoldBool(cg: &Cgen, e: &Expr): Option<bool> {
+    match e {
+        Expr.BoolLit(v, span) => {
+            return Option.Some(v)
+        }
+        Expr.UnaryOp(op, operand, span) => {
+            if op == "!" {
+                match constFoldBool(cg, *operand) {
+                    Option.Some(inner) => {
+                        return Option.Some(!inner)
+                    }
+                    Option.None => {
+                        return Option.None
+                    }
+                }
+            }
+            return Option.None
+        }
+        Expr.BinOp(op, l, r, span) => {
+            if op == "&&" {
+                let lb = constFoldBool(cg, *l)
+                let rb = constFoldBool(cg, *r)
+                // One statically-false side settles it even when the other is
+                // unknown — matches the short-circuit the runtime would do.
+                if foldIsFalse(lb) || foldIsFalse(rb) {
+                    return Option.Some(false)
+                }
+                if foldIsTrue(lb) && foldIsTrue(rb) {
+                    return Option.Some(true)
+                }
+                return Option.None
+            }
+            if op == "||" {
+                let lb = constFoldBool(cg, *l)
+                let rb = constFoldBool(cg, *r)
+                if foldIsTrue(lb) || foldIsTrue(rb) {
+                    return Option.Some(true)
+                }
+                if foldIsFalse(lb) && foldIsFalse(rb) {
+                    return Option.Some(false)
+                }
+                return Option.None
+            }
+            if op == "==" || op == "!=" {
+                let ls = constString(cg, *l)
+                let rs = constString(cg, *r)
+                match ls {
+                    Option.Some(lv) => {
+                        match rs {
+                            Option.Some(rv) => {
+                                if op == "==" {
+                                    return Option.Some(lv == rv)
+                                }
+                                return Option.Some(lv != rv)
+                            }
+                            Option.None => {
+                            }
+                        }
+                    }
+                    Option.None => {
+                    }
+                }
+                let lb = constFoldBool(cg, *l)
+                let rb = constFoldBool(cg, *r)
+                match lb {
+                    Option.Some(lv) => {
+                        match rb {
+                            Option.Some(rv) => {
+                                if op == "==" {
+                                    return Option.Some(lv == rv)
+                                }
+                                return Option.Some(lv != rv)
+                            }
+                            Option.None => {
+                            }
+                        }
+                    }
+                    Option.None => {
+                    }
+                }
+                return Option.None
+            }
+            return Option.None
+        }
+        _ => {
+            return Option.None
+        }
+    }
+}
+
 pub fn genCall(cg: &mut Cgen, name: &string, args: &Vec<Heap<Expr>>, typeArgs: &Vec<MiloType>, locs: &Vec<Local>, sigs: &Vec<CgFnSig>, hintTy: &string): Val {
     if name == "format" {
         return genFormat(cg, args, locs, sigs)
@@ -8657,28 +8793,65 @@ pub fn genExpr(cg: &mut Cgen, e: &Expr, locs: &Vec<Local>, sigs: &Vec<CgFnSig>, 
         Expr.IndexAccess(obj, idx, span) => {
             return genIndex(cg, *obj, *idx, locs, sigs)
         }
-        Expr.IfExpr(cond, thenE, elseE, span) => {
+        Expr.IfExpr(cond, thenBody, elseBody, span) => {
+            // Same compile-time fold as the statement form (genIf): the value
+            // comes from the taken arm alone, and the dead arm is never emitted.
+            let folded = constFoldBool(cg, *cond)
+            match folded {
+                Option.Some(taken) => {
+                    let foldRetTy = cg.curRetTy.clone()
+                    if taken {
+                        return genArmBody(cg, thenBody, locs, sigs, foldRetTy, true, hintTy.clone()).val
+                    }
+                    return genArmBody(cg, elseBody, locs, sigs, foldRetTy, true, hintTy.clone()).val
+                }
+                Option.None => {
+                }
+            }
             let cv = genExpr(cg, *cond, locs, sigs, "bool")
             let thenLbl = nextLabel(cg, "ifx.then")
             let elseLbl = nextLabel(cg, "ifx.else")
             let endLbl = nextLabel(cg, "ifx.end")
+            let armRetTy = cg.curRetTy.clone()
             emit(cg, "  br i1 " + cv.v + ", label %" + thenLbl + ", label %" + elseLbl + "\n")
             emitLabel(cg, thenLbl)
-            let av = genExpr(cg, *thenE, locs, sigs, hintTy)
+            let a = genArmBody(cg, thenBody, locs, sigs, armRetTy, true, hintTy.clone())
             // the phi predecessor is wherever control actually is now — a nested
             // if-expr (`else if …`) ends in its OWN block, not thenLbl/elseLbl.
             let thenPred = cg.curBlock.clone()
-            emit(cg, "  br label %" + endLbl + "\n")
+            if !a.terminated {
+                emit(cg, "  br label %" + endLbl + "\n")
+            }
             emitLabel(cg, elseLbl)
-            let bv = genExpr(cg, *elseE, locs, sigs, av.ty.clone())
+            let b = genArmBody(cg, elseBody, locs, sigs, armRetTy, true, a.val.ty.clone())
             let elsePred = cg.curBlock.clone()
-            emit(cg, "  br label %" + endLbl + "\n")
+            if !b.terminated {
+                emit(cg, "  br label %" + endLbl + "\n")
+            }
             emitLabel(cg, endLbl)
+            if a.terminated && b.terminated {
+                emit(cg, "  unreachable\n")
+                return Val {
+                    v: "0", ty: "i64"
+                }
+            }
+            // A diverging arm contributes no incoming edge, so the phi takes the
+            // type — and the sole value — from the arm that survived.
+            var resTy = a.val.ty.clone()
+            if a.terminated {
+                resTy = b.val.ty.clone()
+            }
             let r = nextTemp(cg)
-            let ll = llType(av.ty)
-            emit(cg, "  " + r + " = phi " + ll + " [" + av.v + ", %" + thenPred + "], [" + bv.v + ", %" + elsePred + "]\n")
+            let ll = llType(resTy)
+            if a.terminated {
+                emit(cg, "  " + r + " = phi " + ll + " [" + b.val.v + ", %" + elsePred + "]\n")
+            } else if b.terminated {
+                emit(cg, "  " + r + " = phi " + ll + " [" + a.val.v + ", %" + thenPred + "]\n")
+            } else {
+                emit(cg, "  " + r + " = phi " + ll + " [" + a.val.v + ", %" + thenPred + "], [" + b.val.v + ", %" + elsePred + "]\n")
+            }
             return Val {
-                v: r, ty: av.ty.clone()
+                v: r, ty: resTy
             }
         }
         Expr.MatchExpr(subject, arms, span) => {

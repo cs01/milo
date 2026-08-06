@@ -1386,6 +1386,77 @@ pub fn parseClosure(p: &mut Parser, s: Option<Span>, isMove: bool): Expr {
     return Expr.Closure(params, retType, body, isMove, s)
 }
 
+// Rewrite a block's trailing statement-form if/else into an if-expression, in
+// place, recursing so deeply-nested arms convert too. Needed because an
+// if-expression arm is parsed as a statement block: a tail `if a {…} else {…}`
+// comes back as an IfStmt, which carries no value, yet in this position it is
+// the arm's value.
+fn valueTailToExpr(body: &mut Vec<Heap<Stmt>>) {
+    if body.len == 0 {
+        return
+    }
+    let lastIdx = body.len - 1
+    // Built inside the match but installed after it, so the scrutinee isn't
+    // written while it is still borrowed.
+    var rewritten: Option<Heap<Stmt>> = Option.None
+    match *body[lastIdx] {
+        Stmt.IfStmt(cond, thenB, elseB, sp) => {
+            match elseB {
+                Option.Some(eb) => {
+                    var t = cloneStmts(thenB)
+                    var e = cloneStmts(eb)
+                    valueTailToExpr(t)
+                    valueTailToExpr(e)
+                    let asExpr = Expr.IfExpr(Heap((*cond).clone()), t, e, cloneSpan(sp))
+                    rewritten = Option.Some(Heap(Stmt.ExprStmt(Heap(asExpr), cloneSpan(sp))))
+                }
+                Option.None => {
+                }
+            }
+        }
+        _ => {
+        }
+    }
+    match rewritten {
+        Option.Some(st) => {
+            body[lastIdx] = st
+        }
+        Option.None => {
+        }
+    }
+}
+
+// if-else in expression position: `if cond { stmts… value } else { … }`. Split
+// out of parsePrimary so an `else if` chain recurses straight back in rather
+// than round-tripping through primary dispatch.
+pub fn parseIfExprTail(p: &mut Parser, s: Option<Span>): Expr {
+    expect(p, TokKind.If)
+    // Same no-struct-literal rule the STATEMENT form uses, which this arm was
+    // missing: without it `if n - pos < MAXMATCH {` reads `MAXMATCH { n - pos }` as a
+    // struct literal and dies on the `-`, so every `let x = if …` in std failed.
+    let savedNoStruct = p.noStructLit
+    p.noStructLit = true
+    let cond = parseExpr(p)
+    p.noStructLit = savedNoStruct
+    expect(p, TokKind.LBrace)
+    var thenBody = parseStmts(p)
+    expect(p, TokKind.RBrace)
+    expect(p, TokKind.Else)
+    var elseBody: Vec<Heap<Stmt>> = Vec.new()
+    if at(p, TokKind.If) {
+        let innerSpan = span(p, peek(p))
+        let chained = parseIfExprTail(p, cloneSpan(innerSpan))
+        elseBody.push(Heap(Stmt.ExprStmt(Heap(chained), cloneSpan(innerSpan))))
+    } else {
+        expect(p, TokKind.LBrace)
+        elseBody = parseStmts(p)
+        expect(p, TokKind.RBrace)
+    }
+    valueTailToExpr(thenBody)
+    valueTailToExpr(elseBody)
+    return Expr.IfExpr(Heap(cond), thenBody, elseBody, s)
+}
+
 pub fn parsePrimary(p: &mut Parser): Expr {
     let tok = peek(p)
     let s = span(p, tok)
@@ -1398,30 +1469,8 @@ pub fn parsePrimary(p: &mut Parser): Expr {
         return parsePrimary(p)
     }
 
-    // if-else expression: if cond { expr } else { expr }
     if tok.kind == TokKind.If {
-        advance(p)
-        // Same no-struct-literal rule the STATEMENT form uses, which this arm was
-        // missing: without it `if n - pos < MAXMATCH {` reads `MAXMATCH { n - pos }` as a
-        // struct literal and dies on the `-`, so every `let x = if …` in std failed.
-        let savedNoStruct = p.noStructLit
-        p.noStructLit = true
-        let cond = parseExpr(p)
-        p.noStructLit = savedNoStruct
-        expect(p, TokKind.LBrace)
-        let thenE = parseExpr(p)
-        expect(p, TokKind.RBrace)
-        expect(p, TokKind.Else)
-        // `else if …` chains into another if-expression; otherwise `else { … }`
-        var elseE = Expr.IntLit(0, Option.None)
-        if at(p, TokKind.If) {
-            elseE = parsePrimary(p)
-        } else {
-            expect(p, TokKind.LBrace)
-            elseE = parseExpr(p)
-            expect(p, TokKind.RBrace)
-        }
-        return Expr.IfExpr(Heap(cond), Heap(thenE), Heap(elseE), s)
+        return parseIfExprTail(p, s)
     }
 
     // match expression: each arm yields a value — bare `P => v` (wrapped in a

@@ -1,0 +1,79 @@
+// A struct with droppable fields and no `impl Clone`, copied out of a container it
+// does not own. The copy must be a DEEP one: a shallow header copy leaves the
+// container's buffers aliased by a second owner, and whichever drops first frees
+// them out from under the other.
+//
+// milo-self used to emit the shallow copy here (genCloneOfLoaded's Copy fallback
+// swallowed any struct without a user Clone impl), which made examples/basics/
+// depgraph.milo abort inside libmalloc — the free came from arenaGet's returned
+// Option, whose payload still pointed at the arena's own element.
+
+pub struct Node {
+    name: string,
+    deps: Vec<i64>,
+}
+
+pub struct Store {
+    items: Vec<Node>,
+}
+
+// The shape that broke: index a container held behind a borrow, and hand the element
+// out inside an owned Option. The callee's copy is dropped at the end of the match
+// arm below, so any aliasing shows up as a double free rather than wrong output.
+pub fn get(s: &Store, i: i64): Option<Node> {
+    if i >= s.items.len {
+        return Option.None
+    }
+    return Option.Some(s.items[i])
+}
+
+pub fn nameAt(s: &Store, i: i64): string {
+    match get(s, i) {
+        Option.Some(n) => {
+            return n.name
+        }
+        Option.None => {
+            return "<none>"
+        }
+    }
+}
+
+fn main() {
+    var s = Store {
+        items: Vec.new(),
+    }
+    var d0: Vec<i64> = Vec.new()
+    d0.push(7)
+    s.items.push(Node {
+        name: "alpha", deps: d0,
+    }
+    )
+    var d1: Vec<i64> = Vec.new()
+    d1.push(8)
+    d1.push(9)
+    s.items.push(Node {
+        name: "beta", deps: d1,
+    }
+    )
+
+    // Read every element twice: the second pass only survives if the first pass's
+    // copies were independent of the store.
+    for pass in 0..2 {
+        var i: i64 = 0
+        while i < s.items.len {
+            print(nameAt(s, i))
+            i = i + 1
+        }
+    }
+
+    // The store itself must still be intact after all that copying.
+    print(s.items[0].deps.len.toString())
+    print(s.items[1].deps.len.toString())
+}
+
+// @expect: alpha
+// @expect: beta
+// @expect: alpha
+// @expect: beta
+// @expect: 1
+// @expect: 2

@@ -24,7 +24,7 @@ from "src-milo/codegen/stmt.milo" import {
     genClosure, genClosureCall, widenToI64, genMatch, genArmBody, MatchGen, autoMoveClosureArg
 }
 from "src-milo/codegen/drops.milo" import {
-    cgNeedsDrop, zeroStore, emitDropValue
+    cgNeedsDrop, zeroStore, emitDropValue, dropHelperEmitted
 }
 from "src-milo/codegen/abi.milo" import {
     AbiStruct, ArgClass, RetClass, AbiReg, abiStructOf, classifyArg, classifyRet, structFieldOffset
@@ -3541,6 +3541,65 @@ pub fn genVecReverse(cg: &mut Cgen, addr: &string, vecTy: &string): Val {
 // Clone a loaded value of surface type `ty` (already in register `v`), returning
 // the cloned register. Strings deep-copy; types with an `impl Clone` route to
 // their `Ty$..$clone` helper; Heap boxes recurse; Copy types pass through.
+// Emit `define %NAME @milo.clone.struct.NAME(ptr %self)` — a field-wise deep copy,
+// the mirror image of ensureStructDropHelper. Needed because a struct with droppable
+// fields and no user `impl Clone` used to fall through genCloneOfLoaded's Copy
+// fallback and get a shallow header copy: `arenaGet` then handed back an Option whose
+// payload aliased the arena's own element, and dropping the caller's copy freed
+// buffers the arena still owned (examples/basics/depgraph.milo, SIGTRAP in libmalloc).
+//
+// Same mid-stream emission dance as the drop helpers — save every buffer/counter the
+// enclosing function is mid-way through, and mark the name BEFORE emitting so a
+// self-referential struct (recursing through Heap<T>) terminates.
+pub fn ensureStructCloneHelper(cg: &mut Cgen, name: &string) {
+    let hn = "milo.clone.struct." + name.clone()
+    if dropHelperEmitted(cg, hn) {
+        return
+    }
+    cg.dropHelpers.push(hn.clone())
+    let savedBody = cg.body.clone()
+    let savedBlock = cg.curBlock.clone()
+    let savedTemp = cg.temp
+    let savedLabel = cg.label
+    let savedFnBuf = cg.fnBuf.clone()
+    let savedInFn = cg.inFn
+    cg.inFn = false
+    cg.fnBuf = ""
+    cg.body = ""
+    cg.temp = 0
+    cg.label = 0
+    emit(cg, "entry.bb:\n")
+    let structTy = "%" + name.clone()
+    let out = nextTemp(cg)
+    emit(cg, "  " + out + " = alloca " + structTy + "\n")
+    let fields = cg.structs.get(name)!
+    for i in 0..fields.len {
+        let fll = llType(resolveTyStr(cg, fields[i].ty))
+        let sp = nextTemp(cg)
+        emit(cg, "  " + sp + " = getelementptr " + structTy + ", ptr %self, i32 0, i32 " + i.toString() + "\n")
+        let fv = nextTemp(cg)
+        emit(cg, "  " + fv + " = load " + fll + ", ptr " + sp + "\n")
+        var stored = fv.clone()
+        if cgNeedsDrop(cg, fields[i].ty) {
+            stored = genCloneOfLoaded(cg, fv, fields[i].ty)
+        }
+        let dp = nextTemp(cg)
+        emit(cg, "  " + dp + " = getelementptr " + structTy + ", ptr " + out + ", i32 0, i32 " + i.toString() + "\n")
+        emit(cg, "  store " + fll + " " + stored + ", ptr " + dp + "\n")
+    }
+    let loaded = nextTemp(cg)
+    emit(cg, "  " + loaded + " = load " + structTy + ", ptr " + out + "\n")
+    emit(cg, "  ret " + structTy + " " + loaded + "\n")
+    let helperIR = "define " + structTy + " @" + hn + "(ptr %self) {\n" + cg.body.clone() + "}\n\n"
+    cg.body = savedBody
+    cg.curBlock = savedBlock
+    cg.fnBuf = savedFnBuf
+    cg.inFn = savedInFn
+    cg.temp = savedTemp
+    cg.label = savedLabel
+    cg.globals = cg.globals + helperIR
+}
+
 pub fn genCloneOfLoaded(cg: &mut Cgen, v: &string, ty: &string): string {
     let ll = llType(ty)
     if ll == "%String" {
@@ -3580,6 +3639,26 @@ pub fn genCloneOfLoaded(cg: &mut Cgen, v: &string, ty: &string): string {
         let t = nextTemp(cg)
         emit(cg, "  " + t + " = call " + ll + " @" + cloneFn + "(ptr " + slot + ")\n")
         return t
+    }
+    // A plain struct with droppable fields and no `impl Clone` still needs a real
+    // copy — the Copy fallback below would alias every buffer it holds.
+    if cg.structs.contains(rec) {
+        var anyDroppable = false
+        let recFields = cg.structs.get(rec)!
+        for i in 0..recFields.len {
+            if cgNeedsDrop(cg, recFields[i].ty) {
+                anyDroppable = true
+            }
+        }
+        if anyDroppable {
+            ensureStructCloneHelper(cg, rec)
+            let slot = nextTemp(cg)
+            emit(cg, "  " + slot + " = alloca " + ll + "\n")
+            emit(cg, "  store " + ll + " " + v + ", ptr " + slot + "\n")
+            let t = nextTemp(cg)
+            emit(cg, "  " + t + " = call " + ll + " @milo.clone.struct." + rec.clone() + "(ptr " + slot + ")\n")
+            return t
+        }
     }
     // Copy (ints/bool/ptr) or no clone helper: value copy is a faithful clone
     return v.clone()

@@ -14,6 +14,37 @@ last-verified: 2026-08-05 (self-check OK; 547/578 fixtures, 96/245 negative test
 | `scripts/selfhost-rejects.ts` | `tests/errors/` + `tests/runtime-errors/` — must be REJECTED or trap | unsoundness: programs accepted that must not be |
 | `scripts/selfhost-examples.ts` | `examples/` — must build | integration breakage |
 | **`scripts/selfhost-selfcheck.sh`** | **`milo-self check src-milo/main.milo`** | **over-rejection, and src-milo using a feature milo-self lacks** |
+| **`scripts/selfhost-asan.ts`** | **stage 2 under AddressSanitizer, compiling `tests/fixtures/`** | **memory bugs in the code milo-self EMITS: aliased copies, double frees, use-after-free** |
+
+### Why the ASan lane exists
+
+Every harness above judges milo-self by what its output *prints*. A double-free answers
+that question correctly: it happens after the bytes are written, the process still exits 0,
+and the sweep stays at 586/586. Three aliasing bugs in milo-self's codegen survived the
+entire fixture corpus that way — a struct field read out of a container it did not own, a
+`Heap<T>` box copied as a bare pointer, and `*box` on an indexed element. Each handed out a
+second owner of one allocation; none changed a line of expected output. The first ASan
+census flagged **77 of 585 fixtures**; those three fixes took it to 0.
+
+`scripts/selfhost-asan.ts` builds stage 2 — milo-self compiling src-milo — links it with
+`-fsanitize=address`, and runs that compiler over the corpus (`emit-ir` only; the fixture's
+own binary is never built or run, since the subject under test is the compiler). src-milo
+contains no unsafe code, so **an ASan report on stage 2 is a codegen bug by construction** —
+there is nothing else to blame and no false positives to triage.
+
+`-O1` is deliberate. At `-O0` nothing coalesces the 44 per-variant `alloca %Expr` slots in
+`Expr$Clone$clone` (a ~24 KB frame), and a 340-deep AST clone exhausts the 8 MB main-thread
+stack before ASan reports anything. At `-O2` the recursive clone chain inlines into itself
+and the frames stop naming the function that owns the bug.
+
+Its ratchet runs the opposite direction from the others: `tests/selfhost-asan-manifest.txt`
+lists what is still broken and may only *shrink*. Zero is the intended steady state.
+
+```
+bun scripts/selfhost-asan.ts             # census
+bun scripts/selfhost-asan.ts --check     # exit 1 if a clean fixture starts corrupting the heap
+bun scripts/selfhost-asan.ts --write     # after a real fix, shrink the manifest
+```
 
 ### Every census verdict is confirmed serially before it is reported
 

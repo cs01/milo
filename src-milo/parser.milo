@@ -1355,6 +1355,12 @@ pub fn parseUnary(p: &mut Parser): Expr {
 }
 
 pub fn parsePostfix(p: &mut Parser): Expr {
+    // Every node built below carries this span. They used to be built with
+    // Option.None while `startSpan` sat unused, so a diagnostic about a method call,
+    // field access, or index — "cannot call 'add' on 'h' because it is borrowed" —
+    // printed with no file or line at all, and had to be located by bisecting the
+    // source. The span is the whole postfix chain's start, which is what a reader
+    // needs to find the expression.
     let startSpan = span(p, peek(p))
     var expr = parsePrimary(p)
     while true {
@@ -1369,9 +1375,9 @@ pub fn parsePostfix(p: &mut Parser): Expr {
                     matchTok(p, TokKind.Comma)
                 }
                 expect(p, TokKind.RParen)
-                expr = Expr.MethodCall(Heap(expr), field, args, Option.None)
+                expr = Expr.MethodCall(Heap(expr), field, args, cloneSpan(startSpan))
             } else {
-                expr = Expr.FieldAccess(Heap(expr), field, Option.None)
+                expr = Expr.FieldAccess(Heap(expr), field, cloneSpan(startSpan))
             }
         } else if at(p, TokKind.LBracket) {
             advance(p)
@@ -1384,10 +1390,10 @@ pub fn parsePostfix(p: &mut Parser): Expr {
                 var sliceArgs: Vec<Heap<Expr>> = Vec.new()
                 sliceArgs.push(Heap(first))
                 sliceArgs.push(Heap(end))
-                expr = Expr.MethodCall(Heap(expr), "slice", sliceArgs, Option.None)
+                expr = Expr.MethodCall(Heap(expr), "slice", sliceArgs, cloneSpan(startSpan))
             } else {
                 expect(p, TokKind.RBracket)
-                expr = Expr.IndexAccess(Heap(expr), Heap(first), Option.None)
+                expr = Expr.IndexAccess(Heap(expr), Heap(first), cloneSpan(startSpan))
             }
         } else if at(p, TokKind.Bang) {
             // span of the whole unwrapped expression (its start), matching the

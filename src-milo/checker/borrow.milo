@@ -17,12 +17,17 @@ from "src-milo/checker/state.milo" import {
 
 // -- Field-collapsing access path -------------------------------------------
 //
-// root variable + chain of field names. An index/deref step taints the whole
-// chain: once one appears anywhere, `fields` collapses to [] and `tainted`
-// stays true for the rest of the walk. This matches the oracle's accessPath
-// (a null path once any non-field step appears) — an empty Vec plays the same
-// role as `null` there, because both mean "overlaps with everything" under
-// pathsOverlap's prefix check, so there's no need for a separate sentinel.
+// root variable + chain of field names. An index/deref step marks the path
+// `tainted`: the chain stops growing there (we cannot say WHICH element), but the
+// prefix already walked is kept, because it is exact. Freezing that prefix is still
+// a superset of the real borrow — pathsOverlap is a prefix check, so ["bps"]
+// conflicts with everything under self.bps — while leaving provably disjoint
+// siblings like self.io alone.
+//
+// This is deliberately MORE precise than the oracle, whose accessPath collapses to
+// a null path (equivalent to [] here, which overlaps everything) at the first
+// non-field step. Being a superset of the true borrow keeps it sound; the oracle
+// accepts the programs this used to reject anyway.
 pub struct AccessPath {
     root: string,
     fields: Vec<string>,
@@ -41,8 +46,15 @@ pub fn accessPath(e: &Expr): Option<AccessPath> {
             match accessPath(*obj) {
                 Option.Some(p) => {
                     if p.tainted {
+                        // Keep the prefix that IS known and stop extending it. The
+                        // field named here sits inside an element we cannot identify,
+                        // so appending it would claim precision we don't have — but
+                        // discarding the prefix too (as this used to) collapses the
+                        // borrow to the whole root, which is what made
+                        // `for rid in self.bps[i].reqIds { self.io.clear(..) }` a
+                        // conflict between two provably disjoint fields of self.
                         return Option.Some(AccessPath {
-                            root: p.root, fields: Vec.new(), tainted: true
+                            root: p.root, fields: p.fields, tainted: true
                         }
                         )
                     }
@@ -61,8 +73,12 @@ pub fn accessPath(e: &Expr): Option<AccessPath> {
         Expr.IndexAccess(obj, idx, sp) => {
             match accessPath(*obj) {
                 Option.Some(p) => {
+                    // `self.bps[i]` is imprecise about WHICH element, but the path to
+                    // the container is exact: freezing ["bps"] still covers every
+                    // element (pathsOverlap is prefix-matching, so it conflicts with
+                    // anything under self.bps) while leaving sibling fields free.
                     return Option.Some(AccessPath {
-                        root: p.root, fields: Vec.new(), tainted: true
+                        root: p.root, fields: p.fields, tainted: true
                     }
                     )
                 }

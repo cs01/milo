@@ -1,0 +1,74 @@
+// Iterating `self.items[i].ids` must not freeze all of `self`. The index makes the
+// path imprecise about WHICH element, but the path to the container — `items` — is
+// exact, so a call that mutates a sibling field (`self.log`) touches provably
+// disjoint storage and has to be allowed.
+//
+// milo-self used to collapse the whole access path to the bare root at the first
+// index step, so the loop below froze `self` entirely and `self.log.record(..)` was
+// rejected as "cannot call 'record' on 'self' because it is borrowed". That is what
+// kept examples/tools/java-dap from type-checking.
+//
+// The freeze is still a superset of the real borrow: anything reached through
+// `self.items` conflicts (see borrowIndexFieldAliases in tests/errors), only
+// siblings are freed.
+
+pub struct Log {
+    count: i64,
+}
+
+impl Log {
+    fn record(self: &mut Log, v: i64): void {
+        self.count = self.count + v
+    }
+}
+
+pub struct Group {
+    ids: Vec<i64>,
+}
+
+pub struct Store {
+    items: Vec<Group>,
+    log: Log,
+}
+
+impl Store {
+    // The shape that was rejected: a borrow of a field reached through an index,
+    // held across a `&mut` call on a sibling field.
+    fn drain(self: &mut Store, idx: i64): void {
+        for id in self.items[idx].ids {
+            self.log.record(id)
+        }
+    }
+}
+
+fn main() {
+    var g0 = Group {
+        ids: Vec.new(),
+    }
+    g0.ids.push(1)
+    g0.ids.push(2)
+    var g1 = Group {
+        ids: Vec.new(),
+    }
+    g1.ids.push(10)
+
+    var s = Store {
+        items: Vec.new(), log: Log {
+            count: 0,
+        }
+        ,
+    }
+    s.items.push(g0)
+    s.items.push(g1)
+
+    s.drain(0)
+    print(s.log.count.toString())
+    s.drain(1)
+    print(s.log.count.toString())
+    // The container itself is untouched by all that borrowing.
+    print(s.items[0].ids.len.toString())
+}
+
+// @expect: 3
+// @expect: 13
+// @expect: 2

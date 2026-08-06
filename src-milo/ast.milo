@@ -25,6 +25,10 @@ pub struct MiloType {
     isFn: bool,
     fnParams: Vec<MiloType>,
     fnRet: Option<Heap<MiloType>>,
+    // `i32(0..100)` — a range constraint written on an integer annotation. Both
+    // ends are present or neither is; typeFromAst folds them onto the TInt.
+    rangeMin: Option<i64>,
+    rangeMax: Option<i64>,
 }
 
 pub fn simpleType(name: string): MiloType {
@@ -39,6 +43,8 @@ pub fn simpleType(name: string): MiloType {
         isFn: false,
         fnParams: Vec.new(),
         fnRet: Option.None,
+        rangeMin: Option.None,
+        rangeMax: Option.None,
     }
 }
 
@@ -54,6 +60,8 @@ pub fn ptrType(name: string): MiloType {
         isFn: false,
         fnParams: Vec.new(),
         fnRet: Option.None,
+        rangeMin: Option.None,
+        rangeMax: Option.None,
     }
 }
 
@@ -411,6 +419,8 @@ impl Clone for MiloType {
             isFn: self.isFn,
             fnParams: cloneTypes(self.fnParams),
             fnRet: fnRet,
+            rangeMin: cloneOptI64(self.rangeMin),
+            rangeMax: cloneOptI64(self.rangeMax),
         }
     }
 }

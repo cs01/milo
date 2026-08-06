@@ -623,16 +623,16 @@ pub fn lowerExpr(expr: &Expr, ck: &Checker): HIRExpr {
             if field == "len" {
                 match objType {
                     TypeKind.TArray(elem, size) => {
-                        return HIRExpr.ArrayLen(Heap(hirObj), TypeKind.TInt(32, true), cloneSpan(span))
+                        return HIRExpr.ArrayLen(Heap(hirObj), TypeKind.TInt(32, true, Option.None, Option.None), cloneSpan(span))
                     }
                     TypeKind.TString => {
-                        return HIRExpr.StringLen(Heap(hirObj), TypeKind.TInt(64, true), cloneSpan(span))
+                        return HIRExpr.StringLen(Heap(hirObj), TypeKind.TInt(64, true, Option.None, Option.None), cloneSpan(span))
                     }
                     TypeKind.TVec(elem) => {
-                        return HIRExpr.VecLen(Heap(hirObj), TypeKind.TInt(64, true), cloneSpan(span))
+                        return HIRExpr.VecLen(Heap(hirObj), TypeKind.TInt(64, true, Option.None, Option.None), cloneSpan(span))
                     }
                     TypeKind.THashMap(key, val) => {
-                        return HIRExpr.HashMapLen(Heap(hirObj), TypeKind.TInt(64, true), cloneSpan(span))
+                        return HIRExpr.HashMapLen(Heap(hirObj), TypeKind.TInt(64, true, Option.None, Option.None), cloneSpan(span))
                     }
                     _ => {
                     }
@@ -776,7 +776,7 @@ pub fn lowerExpr(expr: &Expr, ck: &Checker): HIRExpr {
 
             // toString on numbers
             if (match objType {
-                TypeKind.TInt(b, s) => {
+                TypeKind.TInt(b, s, _, _) => {
                     true
                 }
                 TypeKind.TFloat(b) => {
@@ -799,7 +799,7 @@ pub fn lowerExpr(expr: &Expr, ck: &Checker): HIRExpr {
                         return HIRExpr.VecPop(Heap(hirObj), elem.clone(), cloneSpan(span))
                     }
                     if method == "len" {
-                        return HIRExpr.VecLen(Heap(hirObj), TypeKind.TInt(64, true), cloneSpan(span))
+                        return HIRExpr.VecLen(Heap(hirObj), TypeKind.TInt(64, true, Option.None, Option.None), cloneSpan(span))
                     }
                 }
                 _ => {
@@ -821,7 +821,7 @@ pub fn lowerExpr(expr: &Expr, ck: &Checker): HIRExpr {
                         return HIRExpr.HashMapRemove(Heap(hirObj), Heap(lowerExpr(*args[0], ck)), tyBool(), cloneSpan(span))
                     }
                     if method == "len" {
-                        return HIRExpr.HashMapLen(Heap(hirObj), TypeKind.TInt(64, true), cloneSpan(span))
+                        return HIRExpr.HashMapLen(Heap(hirObj), TypeKind.TInt(64, true, Option.None, Option.None), cloneSpan(span))
                     }
                 }
                 _ => {
@@ -842,7 +842,7 @@ pub fn lowerExpr(expr: &Expr, ck: &Checker): HIRExpr {
                         }
                     }
                     if method == "len" {
-                        return HIRExpr.StringLen(Heap(hirObj), TypeKind.TInt(64, true), cloneSpan(span))
+                        return HIRExpr.StringLen(Heap(hirObj), TypeKind.TInt(64, true, Option.None, Option.None), cloneSpan(span))
                     }
                 }
                 _ => {

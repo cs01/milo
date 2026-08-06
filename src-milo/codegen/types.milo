@@ -13,6 +13,78 @@ pub struct Val {
     ty: string,
 }
 
+// -- Range constraint carried by an annotation (`i32(0..100)`) --
+
+// Codegen only ever knows types as LLVM strings, which have nowhere to put a
+// bound — so the bound rides alongside, on whatever declared the value: the
+// local, the parameter slot, the enclosing function's return type.
+pub struct RangeAnno {
+    has: bool,
+    min: i64,
+    max: i64,
+}
+
+pub fn noRange(): RangeAnno {
+    return RangeAnno {
+        has: false, min: 0, max: 0
+    }
+}
+
+impl Clone for RangeAnno {
+    fn clone(self: &Self): Self {
+        return RangeAnno {
+            has: self.has, min: self.min, max: self.max
+        }
+    }
+}
+
+// The range a spelled annotation resolves to, following type aliases
+// (`type Altitude = i32(0..50000)`). A wrapper — array, pointer, reference —
+// means the value being stored is not the constrained scalar, so no range
+// applies. The depth cap is a guard against a cyclic alias chain, which the
+// checker should have rejected long before here.
+pub fn rangeOfAnnotation(cg: &Cgen, ty: &MiloType): RangeAnno {
+    var cur = ty.clone()
+    var depth = 0
+    while depth < 16 {
+        if cur.isArray || cur.ptrDepth > 0 || cur.isRef || cur.isRefMut || cur.isFn {
+            return noRange()
+        }
+        match cur.rangeMin {
+            Option.Some(lo) => {
+                match cur.rangeMax {
+                    Option.Some(hi) => {
+                        return RangeAnno {
+                            has: true, min: lo, max: hi
+                        }
+                    }
+                    Option.None => {
+                    }
+                }
+            }
+            Option.None => {
+            }
+        }
+        if cur.typeArgs.len > 0 || !cg.typeAliases.contains(cur.name) {
+            return noRange()
+        }
+        cur = cg.typeAliases.get(cur.name)!
+        depth = depth + 1
+    }
+    return noRange()
+}
+
+pub fn rangeOfOptAnnotation(cg: &Cgen, ty: &Option<MiloType>): RangeAnno {
+    match ty {
+        Option.Some(t) => {
+            return rangeOfAnnotation(cg, t)
+        }
+        Option.None => {
+            return noRange()
+        }
+    }
+}
+
 // -- Local variable in scope --
 
 pub struct Local {
@@ -30,6 +102,9 @@ pub struct Local {
     // local reaching codegen with this set is always safe to deep-clone instead
     // of move.
     isArr: bool,
+    // Bound this binding was declared with, so writing THROUGH the name
+    // (`p = x`) re-checks it, not just the initializer.
+    range: RangeAnno,
 }
 
 // -- Function signature for call-site type lookup --
@@ -40,6 +115,9 @@ pub struct CgFnSig {
     paramTys: Vec<string>,
     paramRefs: Vec<bool>,
     isVariadic: bool,
+    // Index-aligned with paramTys: the bound each parameter slot declared, so a
+    // call site can check the argument before it is passed.
+    paramRanges: Vec<RangeAnno>,
 }
 
 // -- Struct field info --
@@ -50,6 +128,9 @@ pub struct FieldInfo {
     // `@iter` on this field: `for x in wrapper` walks this field's runtime value
     // instead of the wrapper struct's. See lookupIterDelegateField / genForIn.
     iterDelegate: bool,
+    // Bound the field was declared with, checked when something is written into
+    // it (`p.pct = n`).
+    range: RangeAnno,
 }
 
 // -- Enum variant info --
@@ -98,6 +179,8 @@ pub struct Cgen {
     // enclosing fn's resolved return type string — `?` builds the early
     // return from it
     curRetTy: string,
+    // enclosing fn's declared return bound, checked at every `return`
+    curRetRange: RangeAnno,
     curContLbl: string,
     // the block label most recently opened via emitLabel — a branch value's phi
     // predecessor is wherever control actually is, not the static then/else label
@@ -231,6 +314,7 @@ pub fn cgenNew(): Cgen {
         globalVars: HashMap.new(),
         curBreakLbl: "",
         curRetTy: "",
+        curRetRange: noRange(),
         curContLbl: "",
         curBlock: "",
         declaredPrintf: false,
@@ -687,6 +771,17 @@ pub fn lookupFieldType(cg: &Cgen, structName: &string, idx: i64): string {
         return fields[idx].ty.clone()
     }
     return "i32"
+}
+
+pub fn lookupFieldRange(cg: &Cgen, structName: &string, idx: i64): RangeAnno {
+    if !cg.structs.contains(structName) {
+        return noRange()
+    }
+    let fields = cg.structs.get(structName)!
+    if idx >= 0 && idx < fields.len {
+        return fields[idx].range.clone()
+    }
+    return noRange()
 }
 
 // The `@iter` field name on this struct, if it has one — `for x in wrapper`

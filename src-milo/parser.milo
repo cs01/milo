@@ -184,6 +184,8 @@ pub fn parseType(p: &mut Parser): MiloType {
             isFn: true,
             fnParams: fnParams,
             fnRet: Option.Some(Heap(fnRet)),
+            rangeMin: Option.None,
+            rangeMax: Option.None,
         }
     }
     // Named type
@@ -196,6 +198,7 @@ pub fn parseType(p: &mut Parser): MiloType {
         }
         expect(p, TokKind.Gt)
     }
+    let hadTypeArgs = typeArgs.len > 0
     var result = MiloType {
         name: tok.value,
         typeArgs: typeArgs,
@@ -207,6 +210,20 @@ pub fn parseType(p: &mut Parser): MiloType {
         isFn: false,
         fnParams: Vec.new(),
         fnRet: Option.None,
+        rangeMin: Option.None,
+        rangeMax: Option.None,
+    }
+    // i32(0..100) — range constraint on an integer type. The same-line guard is
+    // what keeps a following statement that merely STARTS with '(' from being
+    // swallowed as a constraint (`let x: i32` newline `(a + b).foo()`).
+    if at(p, TokKind.LParen) && !hadTypeArgs && isRangeableIntName(result.name) && peek(p).line == tok.line {
+        advance(p)
+        let lo = parseRangeBound(p)
+        expect(p, TokKind.DotDot)
+        let hi = parseRangeBound(p)
+        expect(p, TokKind.RParen)
+        result.rangeMin = Option.Some(lo)
+        result.rangeMax = Option.Some(hi)
     }
     // T? desugars to Option<T>
     if matchTok(p, TokKind.Question) {
@@ -223,9 +240,37 @@ pub fn parseType(p: &mut Parser): MiloType {
             isFn: false,
             fnParams: Vec.new(),
             fnRet: Option.None,
+            rangeMin: Option.None,
+            rangeMax: Option.None,
         }
     }
     return result
+}
+
+// Only the built-in integer names can carry a range constraint — everything
+// else keeps '(' meaning whatever it meant before.
+pub fn isRangeableIntName(name: &string): bool {
+    return name == "i8" || name == "i16" || name == "i32" || name == "i64" ||
+    name == "u8" || name == "u16" || name == "u32" || name == "u64" ||
+    name == "int" || name == "byte"
+}
+
+// One end of a range constraint: an integer literal, optionally negated.
+pub fn parseRangeBound(p: &mut Parser): i64 {
+    let negative = matchTok(p, TokKind.Minus)
+    let tok = expect(p, TokKind.Int)
+    var n: i64 = 0
+    match tok.value.parseInt() {
+        Option.Some(v) => {
+            n = v
+        }
+        Option.None => {
+        }
+    }
+    if negative {
+        return 0 - n
+    }
+    return n
 }
 
 // -- Type parameters --

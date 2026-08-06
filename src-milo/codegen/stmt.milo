@@ -1,19 +1,19 @@
 // Statement codegen: let/var, assign, if, while, for, match, break/continue
 from "src-milo/ast.milo" import {
-    Expr, Stmt, Pattern, MatchArm, Param, MiloType, StructLitField, LiteralKind,
+    Expr, Stmt, Pattern, MatchArm, Param, MiloType, StructLitField, LiteralKind, Span,
     cloneOptType, cloneSpan, cloneParams, cloneStmts
 }
 from "src-milo/codegen/types.milo" import {
     astTypeStr,
-    Cgen, Val, Local, CgFnSig,
+    Cgen, Val, Local, CgFnSig, RangeAnno, noRange, rangeOfAnnotation, rangeOfOptAnnotation,
     nextTemp, nextLabel, emit, emitG, emitLabel, llType, stripPercent, resolveTyStr, ensureMalloc,
     findLocal, hasLocal, genLoad, isVecTy, unwrapVec,
     isHashMapTy, hashMapKeyTy, hashMapValTy, hmEntryTy,
-    lookupFieldIndex, lookupFieldType, lookupVariantTag, lookupVariantPayload, lookupFnRet,
+    lookupFieldIndex, lookupFieldType, lookupFieldRange, lookupVariantTag, lookupVariantPayload, lookupFnRet,
     isInlineArrTy, inlineArrElem, addrWasMoved, ensureStringTy
 }
 from "src-milo/codegen/expr.milo" import {
-    genExpr, genLvalue, variantStructTy, genOptionWrapIfNeeded, genInterfaceCoerceIfNeeded, genOwnedArg
+    genExpr, genLvalue, variantStructTy, genOptionWrapIfNeeded, genInterfaceCoerceIfNeeded, genOwnedArg, emitRangeCheck
 }
 from "src-milo/codegen/drops.milo" import {
     emitDropValue, cgNeedsDrop
@@ -82,7 +82,7 @@ pub fn lvalueTypeStr(cg: &mut Cgen, e: &Expr, locs: &Vec<Local>): string {
     }
 }
 
-pub fn genAssign(cg: &mut Cgen, target: &Expr, value: &Expr, locs: &mut Vec<Local>, sigs: &Vec<CgFnSig>) {
+pub fn genAssign(cg: &mut Cgen, target: &Expr, value: &Expr, locs: &mut Vec<Local>, sigs: &Vec<CgFnSig>, stmtSpan: &Option<Span>) {
     // Fast path: `place = place + rhs` for strings → amortized in-place append.
     // The naive store path re-concats (fresh alloc + leaked old buffer) every
     // time, making an accumulator like `cg.body = cg.body + s` O(n^2) in time
@@ -120,6 +120,7 @@ pub fn genAssign(cg: &mut Cgen, target: &Expr, value: &Expr, locs: &mut Vec<Loca
                 let lty = local.ty.clone()
                 let v0 = genOwnedArg(cg, value, lty.clone(), locs, sigs)
                 let v = genOptionWrapIfNeeded(cg, v0, lty)
+                emitRangeCheck(cg, v, local.range, stmtSpan)
                 if !local.isRef && cgNeedsDrop(cg, lty) && !lvalueMatches(target, value) {
                     emitDropValue(cg, local.addr, lty)
                 }
@@ -152,6 +153,8 @@ pub fn genAssign(cg: &mut Cgen, target: &Expr, value: &Expr, locs: &mut Vec<Loca
             // hint, or it silently fell back to Vec<i64> and stored a float literal
             // into an i64 slot ("store i64 0.0" — invalid IR).
             let v = genOwnedArg(cg, value, fty.clone(), locs, sigs)
+            let frange = lookupFieldRange(cg, rawName, idx)
+            emitRangeCheck(cg, v, frange, stmtSpan)
             emit(cg, "  store " + llType(v.ty) + " " + v.v + ", ptr " + fp + "\n")
         }
         // A capitalized *variable* followed by `.field = value` parses identically
@@ -347,13 +350,13 @@ pub fn genForInHashMap(cg: &mut Cgen, varName: &string, varName2: &Option<string
     emit(cg, "  store " + valLl + " " + v + ", ptr " + valAddr + "\n")
     let locsPreLen = locs.len
     locs.push(Local {
-        name: varName.clone(), ty: keyTy.clone(), addr: keyAddr.clone(), isRef: false, isArr: false
+        name: varName.clone(), ty: keyTy.clone(), addr: keyAddr.clone(), isRef: false, isArr: false, range: noRange()
     }
     )
     match varName2 {
         Option.Some(valName) => {
             locs.push(Local {
-                name: valName.clone(), ty: valTy.clone(), addr: valAddr.clone(), isRef: false, isArr: false
+                name: valName.clone(), ty: valTy.clone(), addr: valAddr.clone(), isRef: false, isArr: false, range: noRange()
             }
             )
         }
@@ -552,17 +555,17 @@ pub fn genForStrView(cg: &mut Cgen, varName: &string, varName2: &Option<string>,
     match varName2 {
         Option.Some(viewName) => {
             locs.push(Local {
-                name: varName.clone(), ty: "i64", addr: idxAddr.clone(), isRef: false, isArr: false
+                name: varName.clone(), ty: "i64", addr: idxAddr.clone(), isRef: false, isArr: false, range: noRange()
             }
             )
             locs.push(Local {
-                name: viewName.clone(), ty: "string", addr: viewAddr.clone(), isRef: false, isArr: false
+                name: viewName.clone(), ty: "string", addr: viewAddr.clone(), isRef: false, isArr: false, range: noRange()
             }
             )
         }
         Option.None => {
             locs.push(Local {
-                name: varName.clone(), ty: "string", addr: viewAddr.clone(), isRef: false, isArr: false
+                name: varName.clone(), ty: "string", addr: viewAddr.clone(), isRef: false, isArr: false, range: noRange()
             }
             )
         }
@@ -636,7 +639,7 @@ pub fn genForIn(cg: &mut Cgen, varName: &string, varName2: &Option<string>, iter
             emit(cg, bodyLbl + ":\n")
             let locsPreLen = locs.len
             locs.push(Local {
-                name: varName.clone(), ty: "i64", addr: idxAddr.clone(), isRef: false, isArr: false
+                name: varName.clone(), ty: "i64", addr: idxAddr.clone(), isRef: false, isArr: false, range: noRange()
             }
             )
             var bodyTerm = false
@@ -730,7 +733,7 @@ pub fn genForIn(cg: &mut Cgen, varName: &string, varName2: &Option<string>, iter
                 emit(cg, "  store " + elemLl + " " + pv + ", ptr " + valAddr + "\n")
                 let locsPre = locs.len
                 locs.push(Local {
-                    name: varName.clone(), ty: obj.ty[8..obj.ty.len].clone(), addr: valAddr.clone(), isRef: false, isArr: false
+                    name: varName.clone(), ty: obj.ty[8..obj.ty.len].clone(), addr: valAddr.clone(), isRef: false, isArr: false, range: noRange()
                 }
                 )
                 var chTerm = false
@@ -793,7 +796,7 @@ pub fn genForIn(cg: &mut Cgen, varName: &string, varName2: &Option<string>, iter
                 emit(cg, "  store " + itElemLl + " " + pv + ", ptr " + valAddr + "\n")
                 let locsPre = locs.len
                 locs.push(Local {
-                    name: varName.clone(), ty: itElemTy.clone(), addr: valAddr.clone(), isRef: false, isArr: false
+                    name: varName.clone(), ty: itElemTy.clone(), addr: valAddr.clone(), isRef: false, isArr: false, range: noRange()
                 }
                 )
                 var itTerm = false
@@ -873,17 +876,17 @@ pub fn genForIn(cg: &mut Cgen, varName: &string, varName2: &Option<string>, iter
             match varName2 {
                 Option.Some(valName) => {
                     locs.push(Local {
-                        name: varName.clone(), ty: "i64", addr: idxAddr.clone(), isRef: false, isArr: false
+                        name: varName.clone(), ty: "i64", addr: idxAddr.clone(), isRef: false, isArr: false, range: noRange()
                     }
                     )
                     locs.push(Local {
-                        name: valName.clone(), ty: elemTy.clone(), addr: elemAddr.clone(), isRef: false, isArr: false
+                        name: valName.clone(), ty: elemTy.clone(), addr: elemAddr.clone(), isRef: false, isArr: false, range: noRange()
                     }
                     )
                 }
                 Option.None => {
                     locs.push(Local {
-                        name: varName.clone(), ty: elemTy.clone(), addr: elemAddr.clone(), isRef: false, isArr: false
+                        name: varName.clone(), ty: elemTy.clone(), addr: elemAddr.clone(), isRef: false, isArr: false, range: noRange()
                     }
                     )
                 }
@@ -1013,7 +1016,7 @@ pub fn genIfLet(cg: &mut Cgen, pattern: &Pattern, subject: &Expr, thenBody: &Vec
                         emit(cg, "  " + bindAddr + " = alloca " + ftyLl + "\n")
                         emit(cg, "  store " + ftyLl + " " + loaded + ", ptr " + bindAddr + "\n")
                         locs.push(Local {
-                            name: bindings[bi].clone(), ty: payloadTypes[bi].clone(), addr: bindAddr, isRef: false, isArr: false
+                            name: bindings[bi].clone(), ty: payloadTypes[bi].clone(), addr: bindAddr, isRef: false, isArr: false, range: noRange()
                         }
                         )
                     }
@@ -1377,7 +1380,7 @@ pub fn genMatch(cg: &mut Cgen, subject: &Expr, arms: &Vec<MatchArm>, locs: &mut 
                             emit(cg, "  " + bindAddr + " = alloca " + ftyLl + "\n")
                             emit(cg, "  store " + ftyLl + " " + loaded + ", ptr " + bindAddr + "\n")
                             locs.push(Local {
-                                name: bindings[bi].clone(), ty: payloadTypes[bi].clone(), addr: bindAddr, isRef: false, isArr: false
+                                name: bindings[bi].clone(), ty: payloadTypes[bi].clone(), addr: bindAddr, isRef: false, isArr: false, range: noRange()
                             }
                             )
                         }
@@ -1486,12 +1489,14 @@ pub fn genStmt(cg: &mut Cgen, s: &Stmt, locs: &mut Vec<Local>, sigs: &Vec<CgFnSi
             let v0 = genOwnedArg(cg, forcedValue, hintTy.clone(), locs, sigs)
             let v1 = genOptionWrapIfNeeded(cg, v0, hintTy.clone())
             let v = genInterfaceCoerceIfNeeded(cg, v1, hintTy)
+            let lrange = rangeOfOptAnnotation(cg, ty)
+            emitRangeCheck(cg, v, lrange, span)
             let vtyLl = llType(v.ty)
             let addr = nextTemp(cg)
             emit(cg, "  " + addr + " = alloca " + vtyLl + "\n")
             emit(cg, "  store " + vtyLl + " " + v.v + ", ptr " + addr + "\n")
             locs.push(Local {
-                name: name.clone(), ty: v.ty.clone(), addr: addr, isRef: false, isArr: isArrAnno
+                name: name.clone(), ty: v.ty.clone(), addr: addr, isRef: false, isArr: isArrAnno, range: lrange
             }
             )
             return false
@@ -1516,18 +1521,20 @@ pub fn genStmt(cg: &mut Cgen, s: &Stmt, locs: &mut Vec<Local>, sigs: &Vec<CgFnSi
             let v0 = genOwnedArg(cg, forcedValue, hintTy.clone(), locs, sigs)
             let v1 = genOptionWrapIfNeeded(cg, v0, hintTy.clone())
             let v = genInterfaceCoerceIfNeeded(cg, v1, hintTy)
+            let lrange = rangeOfOptAnnotation(cg, ty)
+            emitRangeCheck(cg, v, lrange, span)
             let vtyLl = llType(v.ty)
             let addr = nextTemp(cg)
             emit(cg, "  " + addr + " = alloca " + vtyLl + "\n")
             emit(cg, "  store " + vtyLl + " " + v.v + ", ptr " + addr + "\n")
             locs.push(Local {
-                name: name.clone(), ty: v.ty.clone(), addr: addr, isRef: false, isArr: isArrAnno
+                name: name.clone(), ty: v.ty.clone(), addr: addr, isRef: false, isArr: isArrAnno, range: lrange
             }
             )
             return false
         }
         Stmt.Assign(target, value, span) => {
-            genAssign(cg, *target, *value, locs, sigs)
+            genAssign(cg, *target, *value, locs, sigs, span)
             return false
         }
         Stmt.Return(value, span) => {
@@ -1554,6 +1561,8 @@ pub fn genStmt(cg: &mut Cgen, s: &Stmt, locs: &mut Vec<Local>, sigs: &Vec<CgFnSi
                     let forcedRet = forcedMoveClosure(*expr)
                     let v00 = genExpr(cg, forcedRet, locs, sigs, retTy.clone())
                     let v = genInterfaceCoerceIfNeeded(cg, v00, retTy)
+                    let retRange = cg.curRetRange.clone()
+                    emitRangeCheck(cg, v, retRange, span)
                     emitScopeDrops(cg, locs, 0, skipName)
                     // unannotated closure body: the return type IS the value's type;
                     // record it (genClosure reads it for the define header) and emit
@@ -2222,6 +2231,7 @@ pub fn genClosure(cg: &mut Cgen, params: &Vec<Param>, retType: &Option<MiloType>
     let savedTemp = cg.temp
     let savedLabel = cg.label
     let savedRet = cg.curRetTy.clone()
+    let savedRetRange = cg.curRetRange.clone()
     let savedClosRet = cg.closureRetTy.clone()
     let savedForceMove = cg.forceMoveClosures.clone()
     let savedVecPushHints = cloneStrMap(cg.vecPushHints)
@@ -2236,6 +2246,8 @@ pub fn genClosure(cg: &mut Cgen, params: &Vec<Param>, retType: &Option<MiloType>
     cg.temp = 0
     cg.label = 0
     cg.curRetTy = retTyStr.clone()
+    // a closure body is not the enclosing fn: its returns answer to no declared bound
+    cg.curRetRange = noRange()
     cg.closureRetTy = "void"
     // this closure's OWN body gets its own escape pre-scan — a closure that itself
     // returns a locally-bound closure needs the same treatment, and it must not see
@@ -2251,7 +2263,7 @@ pub fn genClosure(cg: &mut Cgen, params: &Vec<Param>, retType: &Option<MiloType>
         if isMove {
             // env slot holds the value directly — gp IS the local's storage
             clocs.push(Local {
-                name: caps[ci].name.clone(), ty: caps[ci].ty.clone(), addr: gp, isRef: true, isArr: false
+                name: caps[ci].name.clone(), ty: caps[ci].ty.clone(), addr: gp, isRef: true, isArr: false, range: noRange()
             }
             )
         } else {
@@ -2259,7 +2271,7 @@ pub fn genClosure(cg: &mut Cgen, params: &Vec<Param>, retType: &Option<MiloType>
             let ca = nextTemp(cg)
             emit(cg, "  " + ca + " = load ptr, ptr " + gp + "\n")
             clocs.push(Local {
-                name: caps[ci].name.clone(), ty: caps[ci].ty.clone(), addr: ca, isRef: true, isArr: false
+                name: caps[ci].name.clone(), ty: caps[ci].ty.clone(), addr: ca, isRef: true, isArr: false, range: noRange()
             }
             )
         }
@@ -2272,7 +2284,7 @@ pub fn genClosure(cg: &mut Cgen, params: &Vec<Param>, retType: &Option<MiloType>
             pty = resolveTyStr(cg, paramHints[pj].clone())
         }
         clocs.push(Local {
-            name: params[pj].name.clone(), ty: pty, addr: "%" + params[pj].name.clone(), isRef: true, isArr: false
+            name: params[pj].name.clone(), ty: pty, addr: "%" + params[pj].name.clone(), isRef: true, isArr: false, range: noRange()
         }
         )
     }
@@ -2315,6 +2327,7 @@ pub fn genClosure(cg: &mut Cgen, params: &Vec<Param>, retType: &Option<MiloType>
     cg.temp = savedTemp
     cg.label = savedLabel
     cg.curRetTy = savedRet
+    cg.curRetRange = savedRetRange
     cg.closureRetTy = savedClosRet
     cg.forceMoveClosures = savedForceMove
     cg.vecPushHints = savedVecPushHints

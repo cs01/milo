@@ -38,7 +38,7 @@ pub fn registerBuiltinTraits(ck: &mut Checker) {
     var hashMethods: HashMap<string, TraitMethodInfo> = HashMap.new()
     hashMethods.insert("hash", TraitMethodInfo {
         params: Vec.new(),
-        ret: TypeKind.TInt(64, false),
+        ret: TypeKind.TInt(64, false, Option.None, Option.None),
         hasDefault: false,
     }
     )

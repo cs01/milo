@@ -2,6 +2,7 @@
 from "src-milo/ast.milo" import {
     Function, Stmt, Expr, MiloType, StructDecl, EnumDecl, EnumVariant,
     Param, StructField, TypeParam, Span, StructLitField, MatchArm, Pattern, ImplDecl, Attribute,
+    cloneOptI64,
 }
 from "src-milo/checker/traits.milo" import {
     registerImpl
@@ -31,7 +32,7 @@ pub fn cloneTypeArgs(v: &Vec<TypeKind>): Vec<TypeKind> {
 
 pub fn mangleTypeName(t: &TypeKind): string {
     match t {
-        TypeKind.TInt(bits, signed) => {
+        TypeKind.TInt(bits, signed, _, _) => {
             if signed {
                 return "i" + bits.toString()
             } 
@@ -190,7 +191,21 @@ pub fn typeKindToMiloType(t: &TypeKind): MiloType {
         TypeKind.TEnum(name) => {
             return simpleType(name.clone())
         }
-        // scalars (int/float/bool/void/string) have no angle-bracket forms
+        // Spelled out rather than left to the typeName fallback below: typeName
+        // renders a ranged int as "i32(0..100)", which is a type EXPRESSION, not
+        // a name — round-tripping it through simpleType would produce a MiloType
+        // nothing can resolve.
+        TypeKind.TInt(bits, signed, lo, hi) => {
+            var prefix = "u"
+            if signed {
+                prefix = "i"
+            }
+            var r = simpleType(prefix + bits.toString())
+            r.rangeMin = cloneOptI64(lo)
+            r.rangeMax = cloneOptI64(hi)
+            return r
+        }
+        // scalars (float/bool/void/string) have no angle-bracket forms
         _ => {
             return simpleType(typeName(t))
         }

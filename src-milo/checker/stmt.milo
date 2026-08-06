@@ -15,7 +15,7 @@ from "src-milo/checker/state.milo" import {
 }
 from "src-milo/checker/expr.milo" import {
     intCoercible, floatLitCoercible, arrayIntCoercible, arrayToVecCoercible, checkExpr, tryMove, isRootMutable, deref,
-    errorIfMovingBorrowedNonCopy,
+    errorIfMovingBorrowedNonCopy, enforceRangeInto,
 }
 from "src-milo/checker/traits.milo" import {
     registerBuiltinTraits, registerAllImpls, synthesizeDefaultMethods, processDerives, typeImplementsTrait, resolveMethod
@@ -137,6 +137,7 @@ pub fn checkLetDecl(ck: &mut Checker, name: &string, typeAnno: &Option<MiloType>
         !optionIntWrapCoercible(ck, hint, valType) && !interfaceCoercible(ck, hint, valType) {
             error(ck, "type mismatch: '" + name.clone() + "' declared as " + typeName(hint) + " but got " + typeName(valType), cloneSpan(span))
         }
+        enforceRangeInto(ck, value, hint, span)
         valType = hint
     }
 
@@ -226,6 +227,7 @@ pub fn checkAssign(ck: &mut Checker, target: &Expr, value: &Expr, span: &Option<
     !optionIntWrapCoercible(ck, targetType, valType) {
         error(ck, "type mismatch: cannot assign " + typeName(valType) + " to " + typeName(targetType), cloneSpan(span))
     }
+    enforceRangeInto(ck, value, targetType, span)
 
     // Re-assigning un-moves the variable — or, for a field target, un-moves just
     // that place and anything nested under it (a different field was never
@@ -280,6 +282,7 @@ pub fn checkReturn(ck: &mut Checker, value: &Option<Heap<Expr>>, fnRetType: &Typ
             && !intCoercible(fnRetType, valType, *expr) && !floatLitCoercible(fnRetType, valType, *expr) && !interfaceCoercible(ck, fnRetType, valType) {
                 error(ck, "return type mismatch: expected " + typeName(fnRetType) + ", got " + typeName(valType), cloneSpan(span))
             }
+            enforceRangeInto(ck, *expr, fnRetType, span)
             // Deliberately no tryMove here: this checker is flow-insensitive, so
             // marking the returned variable moved poisons every later use of it
             // (`if cond { return result }` ... `result.push(x)`), which is exactly
@@ -839,9 +842,9 @@ pub fn checkForIn(ck: &mut Checker, varName: &string, varName2: &Option<string>,
             // Use wider of start/end types
             var varType = startType.clone()
             match startType {
-                TypeKind.TInt(bitsA, signedA) => {
+                TypeKind.TInt(bitsA, signedA, _, _) => {
                     match endType {
-                        TypeKind.TInt(bitsB, signedB) => {
+                        TypeKind.TInt(bitsB, signedB, _, _) => {
                             if bitsB > bitsA {
                                 varType = endType.clone()
                             }

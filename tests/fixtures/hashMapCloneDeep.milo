@@ -1,0 +1,48 @@
+// HashMap.clone() must deep-copy. A value copy of the {ptr,len,cap} header emits
+// valid IR and passes any test that only reads the clone — the aliasing shows up
+// only when one map is mutated and the other is read, or when both drop.
+//
+// This is a regression lock for the bug that broke self-hosting: the self-hosted
+// compiler's checker does `ck.movedFields = snap.movedFields.clone()` to restore a
+// move snapshot. With an aliasing clone, that restore was a no-op, so moves leaked
+// out of one match arm into its sibling and the compiler rejected its own source.
+
+fn main() {
+    let a1: Vec<i64> = [1, 2]
+    let b1: Vec<i64> = [3]
+    var orig: HashMap<string, Vec<i64>> = HashMap.new()
+    orig.insert("a", a1)
+    orig.insert("b", b1)
+
+    var copy = orig.clone()
+
+    // Overwrite an EXISTING key first, before any insert that adds one. This is the
+    // check that actually discriminates: overwriting writes through the entry
+    // buffer in place, so an aliasing clone sees the new value. Adding a key
+    // instead can realloc the original's buffer and detach it from the clone by
+    // accident, which makes a broken clone look correct.
+    let a2: Vec<i64> = [7, 7, 7]
+    orig.insert("a", a2)
+    let ca = copy.get("a")!
+    print(ca.len == 2)
+    // @expect: true
+    print(ca[0] == 1 && ca[1] == 2)
+    // @expect: true
+
+    // Mutating through the clone must not reach back into the original either.
+    let b2: Vec<i64> = [42]
+    copy.insert("b", b2)
+    let ob = orig.get("b")!
+    print(ob[0] == 3)
+    // @expect: true
+
+    // Growth on one side stays on that side.
+    let c1: Vec<i64> = [9]
+    orig.insert("c", c1)
+    print(copy.len == 2)
+    // @expect: true
+    print(orig.len == 3)
+    // @expect: true
+    print(!copy.contains("c"))
+    // @expect: true
+}

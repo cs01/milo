@@ -3385,6 +3385,23 @@ pub fn genCloneOfLoaded(cg: &mut Cgen, v: &string, ty: &string): string {
     if ll == "%String" {
         return genStringClone(cg, v).v
     }
+    // A nested owning container needs the same deep copy the top level gets.
+    // Without these two, cloning a Vec<Vec<T>> or a Vec<HashMap<K,V>> copied the
+    // inner {ptr,len,cap} headers verbatim and the "clone" shared every inner
+    // buffer with the original — the fallback at the bottom of this function
+    // treats an unrecognized type as Copy, and both of these look Copy to it.
+    if isVecTy(ty) {
+        return genDeepCloneVecVal(cg, Val {
+            v: v.clone(), ty: ty.clone()
+        }
+        ).v
+    }
+    if isHashMapTy(ty) {
+        return genDeepCloneHashMapVal(cg, Val {
+            v: v.clone(), ty: ty.clone()
+        }
+        ).v
+    }
     // find an impl-Clone helper Ty$..$clone for this type
     let rec = stripPercent(resolveTyStr(cg, stripPercent(ty)))
     var cloneFn = ""
@@ -4388,6 +4405,88 @@ pub fn genDeepCloneVecVal(cg: &mut Cgen, obj: &Val): Val {
     }
 }
 
+// HashMap<K,V>.clone(): a real deep copy, entry by entry. The header is
+// {ptr,len,cap} — structurally identical to a Vec — so a plain value copy emits
+// valid IR and looks right while aliasing the entry buffer: a write through
+// either map is visible in both, and both free the same allocation on drop.
+//
+// This is exactly how the self-hosted compiler broke. `.clone()` on a HashMap
+// had no case here and fell through to the identity fallback at the bottom of
+// genMethodCall, so `ck.movedFields = snap.movedFields.clone()` in the checker's
+// restoreMoves aliased instead of copying. Two consequences, one cause: restoring
+// a move snapshot became a no-op (moves leaked out of an if-arm into its sibling
+// and the compiler rejected its own valid source), and once the snapshot dropped
+// and freed the shared buffer, ck.movedFields dangled.
+pub fn genDeepCloneHashMapVal(cg: &mut Cgen, obj: &Val): Val {
+    ensureMalloc(cg)
+    ensureHashMapTy(cg)
+    let mapTy = resolveTyStr(cg, obj.ty)
+    let keyTy = hashMapKeyTy(mapTy)
+    let valTy = hashMapValTy(mapTy)
+    let keyLl = llType(keyTy.clone())
+    let valLl = llType(valTy.clone())
+    let entLl = hmEntryTy(keyTy, valTy)
+    // GEP-null, not llTypeBytes: the entry is an anonymous struct literal, so its
+    // size is LLVM's to compute (padding included), not ours to guess.
+    let esz = genSizeOf(cg, entLl)
+    let srcP = nextTemp(cg)
+    emit(cg, "  " + srcP + " = extractvalue %HashMap " + obj.v.clone() + ", 0\n")
+    let lenV = nextTemp(cg)
+    emit(cg, "  " + lenV + " = extractvalue %HashMap " + obj.v.clone() + ", 1\n")
+    let bytes = nextTemp(cg)
+    emit(cg, "  " + bytes + " = mul i64 " + lenV + ", " + esz + "\n")
+    let dst = nextTemp(cg)
+    emit(cg, "  " + dst + " = call ptr @malloc(i64 " + bytes + ")\n")
+    let ictr = nextTemp(cg)
+    emit(cg, "  " + ictr + " = alloca i64\n")
+    emit(cg, "  store i64 0, ptr " + ictr + "\n")
+    let condL = nextLabel(cg, "hmclone.cond")
+    let bodyL = nextLabel(cg, "hmclone.body")
+    let endL = nextLabel(cg, "hmclone.end")
+    emit(cg, "  br label %" + condL.clone() + "\n")
+    emitLabel(cg, condL)
+    let iv = nextTemp(cg)
+    emit(cg, "  " + iv + " = load i64, ptr " + ictr + "\n")
+    let more = nextTemp(cg)
+    emit(cg, "  " + more + " = icmp slt i64 " + iv + ", " + lenV + "\n")
+    emit(cg, "  br i1 " + more + ", label %" + bodyL.clone() + ", label %" + endL.clone() + "\n")
+    emitLabel(cg, bodyL)
+    let sslot = nextTemp(cg)
+    emit(cg, "  " + sslot + " = getelementptr " + entLl.clone() + ", ptr " + srcP + ", i64 " + iv + "\n")
+    let ent = nextTemp(cg)
+    emit(cg, "  " + ent + " = load " + entLl.clone() + ", ptr " + sslot + "\n")
+    // Key AND value are cloned. A shallow key copy is the worse of the two: keys
+    // are the thing memcmp reads on every lookup, so a freed-and-reused key buffer
+    // shows up as a wrong hit rather than a clean crash.
+    let k0 = nextTemp(cg)
+    emit(cg, "  " + k0 + " = extractvalue " + entLl.clone() + " " + ent + ", 0\n")
+    let v0 = nextTemp(cg)
+    emit(cg, "  " + v0 + " = extractvalue " + entLl.clone() + " " + ent + ", 1\n")
+    let kc = genCloneOfLoaded(cg, k0, keyTy.clone())
+    let vc = genCloneOfLoaded(cg, v0, valTy.clone())
+    let e0 = nextTemp(cg)
+    emit(cg, "  " + e0 + " = insertvalue " + entLl.clone() + " undef, " + keyLl.clone() + " " + kc + ", 0\n")
+    let e1 = nextTemp(cg)
+    emit(cg, "  " + e1 + " = insertvalue " + entLl.clone() + " " + e0 + ", " + valLl.clone() + " " + vc + ", 1\n")
+    let dslot = nextTemp(cg)
+    emit(cg, "  " + dslot + " = getelementptr " + entLl.clone() + ", ptr " + dst + ", i64 " + iv + "\n")
+    emit(cg, "  store " + entLl.clone() + " " + e1 + ", ptr " + dslot + "\n")
+    let inext = nextTemp(cg)
+    emit(cg, "  " + inext + " = add i64 " + iv + ", 1\n")
+    emit(cg, "  store i64 " + inext + ", ptr " + ictr + "\n")
+    emit(cg, "  br label %" + condL.clone() + "\n")
+    emitLabel(cg, endL)
+    let h0 = nextTemp(cg)
+    emit(cg, "  " + h0 + " = insertvalue %HashMap undef, ptr " + dst + ", 0\n")
+    let h1 = nextTemp(cg)
+    emit(cg, "  " + h1 + " = insertvalue %HashMap " + h0 + ", i64 " + lenV + ", 1\n")
+    let h2 = nextTemp(cg)
+    emit(cg, "  " + h2 + " = insertvalue %HashMap " + h1 + ", i64 " + lenV + ", 2\n")
+    return Val {
+        v: h2, ty: obj.ty.clone()
+    }
+}
+
 pub fn genMethodCall(cg: &mut Cgen, object: &Expr, method: &string, args: &Vec<Heap<Expr>>, locs: &Vec<Local>, sigs: &Vec<CgFnSig>): Val {
     // x.addrOf(): the raw address of the receiver lvalue — identical to the old
     // `&x` (see the UnaryOp `&` arm). Resolve the lvalue, don't load a value.
@@ -4879,6 +4978,9 @@ pub fn genMethodCall(cg: &mut Cgen, object: &Expr, method: &string, args: &Vec<H
     // the two would double-free the same allocation.
     if isVecTy(obj.ty) && method == "clone" && args.len == 0 {
         return genDeepCloneVecVal(cg, obj)
+    }
+    if isHashMapTy(obj.ty) && method == "clone" && args.len == 0 {
+        return genDeepCloneHashMapVal(cg, obj)
     }
     // Vec<T>.contains(x): linear scan. Elements are compared the same way `==` compares
     // them — memcmp for %String, icmp/fcmp for scalars — so a Vec<string> lookup does not
@@ -5803,9 +5905,20 @@ pub fn genMethodCall(cg: &mut Cgen, object: &Expr, method: &string, args: &Vec<H
     // already loaded by value in `obj`, so there is nothing to actually copy. The
     // checker only accepts this method call at all when isCopyCk(objType) held
     // (see checker/expr.milo's clone-on-Copy fallback), so anything reaching here
-    // is a scalar, not a Vec/String/struct (those all have their own clone case
-    // above, which already returned before this point).
+    // should be a scalar, not a Vec/String/HashMap (those all have their own clone
+    // case above, which already returned before this point).
+    //
+    // "Should be" was load-bearing and unenforced, which is how HashMap.clone()
+    // became a silent aliasing copy: no case above matched, this arm accepted it,
+    // and a deep copy the source asked for by name never happened. An owning
+    // container that reaches here means its clone case is MISSING — say so instead
+    // of emitting a copy that is wrong in exactly the way `.clone()` was written to
+    // prevent. Scalars still take the identity path.
     if method == "clone" && args.len == 0 {
+        if objTyLl == "%Vec" || objTyLl == "%HashMap" || objTyLl == "%String" {
+            eprint("codegen: .clone() on " + objTyLl.clone() + " reached the scalar identity path — its deep-clone case is missing, and a shallow copy would alias the buffer")
+            exit(1)
+        }
         return Val {
             v: obj.v.clone(), ty: obj.ty.clone()
         }

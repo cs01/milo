@@ -1,17 +1,6 @@
-# Fixtures that milo-self must compile and run correctly.
-#
-# THE RATCHET: this list only grows. Every commit must keep it green.
-# A temporary shrink requires a `# SHRUNK: <reason>` line and a plan to restore.
-# See docs/self-hosting.md.
-#
-# One fixture name per line (no .milo extension). Blank lines and # comments
-# are ignored.
-# SHRUNK: stdStringSplit — rewritten to .repeat() in the stdlib coherence overhaul; milo-self's checker lacks the repeat string method. Restore when milo-self gains it.
-# SHRUNK: stringUtils — rewritten to .indexOfFrom()/.repeat() in the stdlib coherence overhaul; milo-self's checker lacks those string methods. Restore when milo-self gains them.
 addressOf
 aliasBehindRef
 aliasResultFromConversion
-arena_clear
 arenaBasic
 arenaContracts
 arenaCrossArena
@@ -19,23 +8,24 @@ arenaHandles
 arenaMethod
 arenaModify
 arenaWith
+arena_clear
 argparseAbsentVsEmpty
 arithmetic
-array_index_clone
 arrayCopy
 arrayLen
-arrayMutate
 arrayMutRef
+arrayMutate
 arrayRepeat
 arrayRepeatStruct
-arrays
 arraySlice
+array_index_clone
+arrays
 assertBuiltin
 assignI64Lit
 asyncCallOrdering
+atomicWidths
 atomics
 atomicsThreaded
-atomicWidths
 autoEq
 autoMove
 bandParallelBuffer
@@ -54,8 +44,12 @@ booleanLogic
 borrowMutateAfterLoop
 borrowValidSlice
 boundsElision
-break_drop
 breakContinue
+break_drop
+cLayout
+cLayoutOpaque
+cSig
+cValue
 capitalizedVarMethod
 cast
 castFloatSaturate
@@ -74,8 +68,6 @@ charLiterals
 checkedArith
 checkedDivRem
 checkedNeg
-cLayout
-cLayoutOpaque
 closureBasic
 closureBlock
 closureCapture
@@ -99,9 +91,7 @@ contracts
 contractsCallSite
 cryptoAesGcm
 cryptoSha1
-cSig
 csvStrict
-cValue
 dateTime
 dateTimeLocal
 defaultValue
@@ -122,26 +112,26 @@ dropString
 dropStringReturn
 dropUser
 dropWithFields
-dropZeroedFdSlot
 dropZeroFirstField
+dropZeroedFdSlot
 durationArith
 embedFile
 embedFileBare
 enumBasic
 enumCtorIntCoerce
-enumerate
 enumMultiPayload
 enumPayload
+enumPayloadOptionLayout
 enumRepr
 enumTryFrom
 enumWildcard
+enumerate
 envSetRemove
 eprint
 escapingClosureAutoMove
 escapingClosures
 eventLoop
 exePath
-externalLinkage
 externFwriteAndPrint
 externMutBuf
 externStructHFA
@@ -154,6 +144,7 @@ externStructSafeCall
 externStructSmallInt
 externStructTwoRegs
 externType
+externalLinkage
 f32Literal
 f64Literal
 fetchRequestBuild
@@ -201,8 +192,8 @@ genericEnumHint
 genericEnumUser
 genericFn
 genericFnPair
-genericIterator
 genericIterFn
+genericIterator
 genericRefClosure
 genericRefInfer
 genericResult
@@ -213,7 +204,6 @@ genericStructMulti
 genericStructVecField
 genericStructVecInfer
 genericTraitDrop
-global_ptr
 globalArrayInit
 globalConstFold
 globalInitOrder
@@ -221,21 +211,23 @@ globalRuntimeInit
 globalStructArray
 globalStructInit
 globalStructMutation
+global_ptr
 greenIoPipe
 greenStackSize
 greenThread
 greenThreadEcho
 greenThreadMany
 greenThreadYield
+hashMapCloneDeep
+hashMapDupKeyDrop
+hashMapIterate
+hashMapKeysValues
 hashmapBasic
 hashmapCloneNested
-hashMapDupKeyDrop
 hashmapGet
 hashmapGetOrDefault
 hashmapGrow
 hashmapInStruct
-hashMapIterate
-hashMapKeysValues
 hashmapOverwrite
 hashmapRemove
 hashmapStringKey
@@ -252,7 +244,6 @@ hmacSha2Vectors
 html
 httpAbsentVsEmpty
 httpMiddleware
-if_expr
 ifElse
 ifExprCoerce
 ifLetBasic
@@ -260,6 +251,7 @@ ifLetElse
 ifLetGeneric
 ifLetRefEnum
 ifLetResult
+if_expr
 importAliasNamespace
 importBasic
 importDedup
@@ -270,24 +262,23 @@ importTransitive
 indexCloneNoLeak
 inflateGzip
 intConstCoerce
+intLiteral64
+intLiteralDefaultI64
 interfaceBasic
 interfaceHeap
 interfaceMultiMethod
 interfaceVecHeap
-intLiteral64
-intLiteralDefaultI64
 ioFileStream
 ioReaderWriter
 ioSocketStream
 isPattern
-iteratorTrait
 iterDelegateField
+iteratorTrait
 jsonAndThenChain
 jsonApi
 jsonBuilder
 jsonBuilderOpt
 jsonConformance
-jsoncParse
 jsonCursor
 jsonExactInt
 jsonHashmap
@@ -301,6 +292,7 @@ jsonStringifyEmpty
 jsonStringifyEscape
 jsonUnicodeEscape
 jsonValidate
+jsoncParse
 jwtClaims
 jwtHs256
 keysDecode
@@ -325,13 +317,13 @@ matchScalarWildcard
 matchSubjectReadNonConsuming
 matchTempBindMutate
 mime
-module_globals
 moduleWrapping
+module_globals
 moveFieldThenReassign
 moveIfElse
 moveVarIntoEnumReturn
-multipart
 multiWidthTypes
+multipart
 mutSlice
 mutSliceDisjointArgs
 nestedCalls
@@ -356,8 +348,8 @@ paramShadowsGlobal
 parkUnpark
 parkUnparkCrossThread
 pbkdf2Vectors
-png_roundtrip
 pngDecode
+png_roundtrip
 poolAlloc
 preludeStringMethods
 printContainers
@@ -386,8 +378,8 @@ ptySpawn
 pureFn
 qfliaSolver
 rangeEnforced
-rangedIntegers
 rangePropagation
+rangedIntegers
 refHeap
 regexOnView
 replaceFieldOutOfMutBorrow
@@ -447,11 +439,9 @@ stdCsv
 stdFmt
 stdHex
 stdIoLines
-stdlibPrint
 stdLog
 stdLogSink
 stdMath
-stdoutOrder
 stdRandom
 stdRegex
 stdSet
@@ -464,9 +454,10 @@ stdTimer
 stdUnicode
 stdUnicodeStrings
 stdUuid
-strconvBoolQuote
+stdlibPrint
+stdoutOrder
 strDataPtr
-string_cast
+strconvBoolQuote
 stringBasic
 stringCodePoints
 stringConcat
@@ -494,7 +485,7 @@ stringViewIter
 stringViewReturn
 stringViewSplitParity
 stringWithCapacity
-struct_field_shorthand
+string_cast
 structCopy
 structFfiPtr
 structFieldIntCoerce
@@ -504,6 +495,7 @@ structFn
 structI64Field
 structMutate
 structPackedLayout
+struct_field_shorthand
 structs
 subtleConstantTimeEq
 swapDistinctIndex
@@ -529,8 +521,8 @@ traitMethodShadowsInherent
 traitObjectVec
 traitSupertrait
 turbofishFreeCall
-typedFnPtr
 typeHints
+typedFnPtr
 u64Arithmetic
 unicodeCodepoints
 unicodeDecode
@@ -539,12 +531,10 @@ unicodeReverse
 unicodeStringLiteral
 unixSocket
 unsigned
-unwrap_temp_no_leak
 unwrapOption
+unwrap_temp_no_leak
 urlParse
 variables
-vec_infer_from_push
-vec_swap
 vecAnyAll
 vecAssign
 vecBasic
@@ -568,6 +558,8 @@ vecSlice
 vecString
 vecStringLiveGrow
 vecSum
+vec_infer_from_push
+vec_swap
 viewFieldPrecision
 viewFreezeRelease
 voidMainExit

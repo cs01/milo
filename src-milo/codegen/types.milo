@@ -679,12 +679,23 @@ pub fn payloadBytes(cg: &Cgen, pt: &string): i64 {
                 var s: i64 = 0
                 var va: i64 = 1
                 for pi in 0..info.variants[vi].payloadTypes.len {
-                    let fa = alignOf(cg, info.variants[vi].payloadTypes[pi])
+                    // resolveTyStr FIRST — a payload written as a generic instance
+                    // ("Option<i64>") is registered under its mangled name
+                    // ("Option_i64"), so measuring the raw spelling finds neither an
+                    // enum nor a struct and silently falls through to llTypeBytes'
+                    // 8-byte default. The caller that emits the type decl already
+                    // resolves; this recursion did not, so the two disagreed about
+                    // the size of the very same type. TypeKind.TInt carries two
+                    // Option<i64>s, each measured as 8 instead of 16 — which sized
+                    // Option<TypeKind> one slot short and let a store run off the end
+                    // of its alloca into the neighbouring local.
+                    let pt2 = resolveTyStr(cg, info.variants[vi].payloadTypes[pi])
+                    let fa = alignOf(cg, pt2)
                     if fa > va {
                         va = fa
                     }
                     s = ((s + fa - 1) / fa) * fa
-                    s = s + payloadBytes(cg, info.variants[vi].payloadTypes[pi])
+                    s = s + payloadBytes(cg, pt2)
                 }
                 s = ((s + va - 1) / va) * va
                 if s > mx {
@@ -698,12 +709,15 @@ pub fn payloadBytes(cg: &Cgen, pt: &string): i64 {
             var maxAlign: i64 = 1
             let fields = cg.structs.get(raw)!
             for i in 0..fields.len {
-                let fa = alignOf(cg, fields[i].ty)
+                // Same resolve-before-measure rule as the enum branch above: a field
+                // typed with a generic instance is registered mangled.
+                let ft = resolveTyStr(cg, fields[i].ty)
+                let fa = alignOf(cg, ft)
                 if fa > maxAlign {
                     maxAlign = fa
                 }
                 total = ((total + fa - 1) / fa) * fa
-                total = total + payloadBytes(cg, fields[i].ty)
+                total = total + payloadBytes(cg, ft)
             }
             return ((total + maxAlign - 1) / maxAlign) * maxAlign
         }

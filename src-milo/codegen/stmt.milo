@@ -253,7 +253,26 @@ pub fn genAssign(cg: &mut Cgen, target: &Expr, value: &Expr, locs: &mut Vec<Loca
                 exit(1)
             }
         }
+        // `*p = v` through a raw `*T` or a Heap<T> box. genLvalue already knows
+        // this shape (it serves `(*p).field` and `&a[i]`), but genAssign had no
+        // arm for it, so every deref store matched the `_` below and emitted
+        // NOTHING — std/ws built an entire frame header that never reached the
+        // buffer, and the reader blocked forever on bytes the writer never sent.
+        Expr.UnaryOp(op, operand, uspan) => {
+            if op != "*" {
+                eprint("codegen: cannot assign through unary '" + op.clone() + "'")
+                exit(1)
+            }
+            let lv = genLvalue(cg, target, locs, sigs)
+            let v = genOwnedArg(cg, value, lv.ty.clone(), locs, sigs)
+            emit(cg, "  store " + llType(v.ty) + " " + v.v + ", ptr " + lv.v + "\n")
+        }
+        // Fail loudly. A place the checker accepted but codegen cannot lower is a
+        // missing arm, not a no-op — silently dropping the store is the worst
+        // possible outcome (see the UnaryOp arm above, which was exactly that).
         _ => {
+            eprint("codegen: unsupported assignment target")
+            exit(1)
         }
     }
 }
@@ -1723,6 +1742,14 @@ pub fn collectIdentsExpr(e: &Expr, out: &mut Vec<string>) {
                 collectIdentsExpr(*fields[i].value, out)
             }
         }
+        // Same shape as StructLit — its field values are arbitrary expressions, so a
+        // closure whose body builds a JSON object out of an enclosing local captured
+        // nothing and read a garbage frame slot.
+        Expr.JsonObject(fields, span) => {
+            for i in 0..fields.len {
+                collectIdentsExpr(*fields[i].value, out)
+            }
+        }
         Expr.FieldAccess(obj, field, span) => {
             collectIdentsExpr(*obj, out)
         }
@@ -1791,7 +1818,19 @@ pub fn collectIdentsExpr(e: &Expr, out: &mut Vec<string>) {
                 }
             }
         }
-        _ => {
+        // Literals hold no identifiers. Spelled out rather than left to a `_` arm:
+        // a capture walker that silently skips a new Expr variant produces a closure
+        // reading an uncaptured frame slot, with nothing to point at. Exhaustive here
+        // means adding a variant to the AST fails to compile until it is traversed.
+        Expr.IntLit(n, span) => {
+        }
+        Expr.FloatLit(f, span) => {
+        }
+        Expr.BoolLit(b, span) => {
+        }
+        Expr.StringLit(s, span) => {
+        }
+        Expr.CharLit(c, span) => {
         }
     }
 }
@@ -1875,7 +1914,11 @@ pub fn collectIdentsStmt(s: &Stmt, out: &mut Vec<string>) {
                 collectIdentsStmt(*body[i], out)
             }
         }
-        _ => {
+        // No idents to collect — exhaustive on purpose, same reason as
+        // collectIdentsExpr's literal arms.
+        Stmt.BreakStmt(span) => {
+        }
+        Stmt.ContinueStmt(span) => {
         }
     }
 }

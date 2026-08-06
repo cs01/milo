@@ -1,0 +1,55 @@
+// `*p = v` must actually emit a store. The self-hosted codegen had no assignment
+// arm for a deref target, so every one of these silently lowered to nothing —
+// no store, no diagnostic. std/ws built a whole frame header byte by byte into a
+// buffer that stayed zeroed, and the reader then blocked forever waiting on
+// bytes the writer believed it had sent.
+
+pub extern fn malloc(size: i64): *u8
+
+pub extern fn free(p: *u8): void
+
+pub fn main(): i32 {
+    unsafe {
+        let p = malloc(16)
+
+        // deref of a plain pointer variable
+        let vp = p
+        * vp = 11
+        let a = *vp
+        print($"varPtr={a as i64}")
+        // @expect: varPtr=11
+
+        // deref of a cast expression
+        *(p as *u8) = 22
+        let b = *vp
+        print($"castPtr={b as i64}")
+        // @expect: castPtr=22
+
+        // deref of pointer arithmetic, the shape a frame builder writes with
+        var pos: i64 = 0
+        * ((p as i64 + pos) as *u8) = 33
+        pos = pos + 1
+        * ((p as i64 + pos) as *u8) = 44
+        let c = *((p as i64 + 0) as *u8)
+        let d = *((p as i64 + 1) as *u8)
+        print($"arith={c as i64},{d as i64}")
+        // @expect: arith=33,44
+
+        // wider store through a deref
+        let q = malloc(16)
+        * (q as *i64) = 4242
+        let e = *(q as *i64)
+        print($"i64={e}")
+        // @expect: i64=4242
+
+        // read-modify-write, the masking loop's shape
+        *((p as i64 + 1) as *u8) = *((p as i64 + 1) as *u8) ^ 255
+        let f = *((p as i64 + 1) as *u8)
+        print($"xor={f as i64}")
+        // @expect: xor=211
+
+        free(p)
+        free(q)
+    }
+    return 0
+}

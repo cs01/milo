@@ -8381,6 +8381,15 @@ pub fn genExpr(cg: &mut Cgen, e: &Expr, locs: &Vec<Local>, sigs: &Vec<CgFnSig>, 
                 match *inner {
                     Expr.IntLit(n, ilsp) => {
                         let v0 = genExpr(cg, *inner, locs, sigs, hintTy)
+                        // i64 MIN is lexed as the negation of 9223372036854775808, a
+                        // magnitude i64 cannot hold — it already wrapped to
+                        // -9223372036854775808, which is exactly the value this negation
+                        // wants. Prefixing another '-' emits `--9223372036854775808`.
+                        if v0.v.startsWith("-") {
+                            return Val {
+                                v: v0.v.clone(), ty: v0.ty
+                            }
+                        }
                         return Val {
                             v: "-" + v0.v, ty: v0.ty
                         }

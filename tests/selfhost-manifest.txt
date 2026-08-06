@@ -97,6 +97,7 @@ dateTime
 dateTimeLocal
 defaultValue
 deflateRoundtrip
+derefStore
 deriveJsonErrors
 deriveJsonGeneric
 deriveJsonHandWritten
@@ -263,6 +264,7 @@ importTransitive
 indexCloneNoLeak
 inflateGzip
 intConstCoerce
+intMinLiteral
 intLiteral64
 intLiteralDefaultI64
 interfaceBasic
@@ -573,6 +575,7 @@ whileLoop
 wrappingArith
 wrappingFn
 wsBasic
+wsFrameRoundtrip
 xxh64
 zipRead
 zstdCompress

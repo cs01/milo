@@ -497,7 +497,7 @@ from "src-milo/codegen/types.milo" import {
     astTypeStr,
     Cgen, Val, Local, CgFnSig, FieldInfo, CgVariantInfo, CgEnumInfo, RangeAnno, noRange, rangeOfAnnotation, rangeOfOptAnnotation,
     cgenNew, nextTemp, emit, emitG, llType, llTypeBytes, payloadBytes, resolveTyStr, isVecTy, unwrapVec,
-    ensureStringTy, ensureVecTy,
+    ensureStringTy, ensureVecTy, ensureHashMapTy,
 }
 from "src-milo/codegen/stmt.milo" import {
     genStmt, emitScopeDrops, collectIdentsExpr, returnEscapedIdents, inferVecPushHints
@@ -959,31 +959,15 @@ pub fn genProgram(prog: Program, sourceDir: string): string {
         cg.typeAliases.insert(prog.typeAliases[ai].name.clone(), prog.typeAliases[ai].base.clone())
     }
 
-    // An aggregate global (`var xs: Vec<T> = []`, `var s: string = ""`) zero-inits
-    // a %Vec/%String, so those type decls must precede it in the module text.
-    var hasAggGlobal = false
-    for gi in 0..prog.globals.len {
-        match prog.globals[gi].ty {
-            Option.Some(t) => {
-                let gl = llType(resolveTyStr(cg, astTypeStr(t)))
-                if gl.len > 0 && gl[0] == 37 {
-                    hasAggGlobal = true
-                }
-            }
-            Option.None => {
-                // literalGlobalTy's only aggregate answer is "string" (a bare
-                // `let CT = "…"` global) — %String must be declared before its
-                // `zeroinitializer` placeholder line, same as the annotated case.
-                if literalGlobalTy(*prog.globals[gi].value) == "string" {
-                    hasAggGlobal = true
-                }
-            }
-        }
-    }
-    if hasAggGlobal {
-        ensureStringTy(cg)
-        ensureVecTy(cg)
-    }
+    // %String/%Vec/%HashMap are fixed-layout runtime types with no dependencies, so
+    // declare all three up front rather than on first use. LLVM's textual parser sizes
+    // a `getelementptr %S` at the point it reads it: a struct carrying a %HashMap field
+    // is UNSIZED until %HashMap is declared, and lazy declaration put %HashMap 2000
+    // lines below the drop helper that geps %Checker ("base element of getelementptr
+    // must be sized"). Three unused type lines is a cheap price for order-independence.
+    ensureStringTy(cg)
+    ensureVecTy(cg)
+    ensureHashMapTy(cg)
 
     // Register global var types NOW (functions reference them); the `@name = global`
     // lines are EMITTED LATER, after struct/enum type decls, so a struct-typed global

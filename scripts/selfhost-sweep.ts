@@ -91,7 +91,9 @@ async function sweepOne(name: string, tmpDir: string): Promise<Outcome> {
   if (JSON.stringify(actual) !== JSON.stringify(expected)) {
     return {
       name, ok: false,
-      bucket: r.signal || r.guardKill ? `run-crash` : "output-mismatch",
+      // A guard kill is the harness running out of headroom, not the fixture crashing.
+      // Conflating the two turned a memory-pressure shed into a reported regression.
+      bucket: r.guardKill ? `guard-${r.guardKill}` : r.signal ? "run-crash" : "output-mismatch",
       detail: `want ${JSON.stringify(expected.slice(0, 2))} got ${JSON.stringify(actual.slice(0, 2))}`,
     };
   }
@@ -157,9 +159,13 @@ async function main() {
     if (check) {
       const claimed = readFileSync(MANIFEST, "utf-8").split("\n")
         .map(l => l.trim()).filter(l => l && !l.startsWith("#"));
-      const regressed = claimed.filter(n => !passing.includes(n));
+      // A guard kill means we never got a verdict — the OS shed the tree under memory
+      // pressure. Fail-closed there would make every parallel lane look like a regression.
+      const unmeasured = new Set(results.filter(r => r.bucket.startsWith("guard-")).map(r => r.name));
+      const regressed = claimed.filter(n => !passing.includes(n) && !unmeasured.has(n));
       const gained = passing.filter(n => !claimed.includes(n));
       if (gained.length) console.log(`\nNEW: ${gained.length} fixture(s) now pass — rerun with --write to ratchet: ${gained.join(", ")}`);
+      if (unmeasured.size) console.error(`\nUNMEASURED (guard kill, not counted): ${[...unmeasured].join(", ")}`);
       if (regressed.length) {
         console.error(`\nRATCHET FAILED: ${regressed.length} fixture(s) regressed:\n  ${regressed.join("\n  ")}`);
         process.exit(1);

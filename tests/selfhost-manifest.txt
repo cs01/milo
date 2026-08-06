@@ -385,6 +385,7 @@ ptyLifecycle
 ptySpawn
 pureFn
 qfliaSolver
+rangeEnforced
 rangedIntegers
 rangePropagation
 refHeap

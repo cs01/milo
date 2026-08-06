@@ -22,6 +22,12 @@ jobs:
       # Checks every scalar-returning `extern fn` against this runner's real headers.
       # Needs no annotations; see the script's header for what it does and doesn't cover.
       - run: bun run scripts/audit-extern-returns.ts
+      # A fixture that leaks still prints the right bytes, so `bun test` cannot see one.
+      # That blind spot let the self-hosted compiler leak every owned local for months
+      # while the sweep stayed green. This ratchets against tests/leak-clean.txt.
+      # macOS gets `leaks -atExit`; LeakSanitizer does not exist on darwin/arm64.
+      - name: Leak ratchet
+        run: bun run scripts/leak-check.ts --check
 
   # Nothing has ever executed std/*.linux.milo — epoll, eventfd, the glibc paths — because
   # the suite above runs on macOS only. This job is the first thing that does.

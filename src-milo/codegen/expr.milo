@@ -24,7 +24,7 @@ from "src-milo/codegen/stmt.milo" import {
     genClosure, genClosureCall, widenToI64, genMatch, genArmBody, MatchGen, autoMoveClosureArg
 }
 from "src-milo/codegen/drops.milo" import {
-    cgNeedsDrop, zeroStore, emitDropValue, dropHelperEmitted
+    cgNeedsDrop, zeroStore, emitDropValue, dropHelperEmitted, variantStructTyDrop
 }
 from "src-milo/codegen/abi.milo" import {
     AbiStruct, ArgClass, RetClass, AbiReg, abiStructOf, classifyArg, classifyRet, structFieldOffset
@@ -472,15 +472,29 @@ pub fn genOwnedArg(cg: &mut Cgen, e: &Expr, hintTy: string, locs: &Vec<Local>, s
         // recursing into a subtree the callee already took and dropped.
         Expr.UnaryOp(op, operand, sp) => {
             let tyStr = placeTypeStr(cg, e, locs)
-            if op == "*" && tyStr.len > 0 && cgNeedsDrop(cg, tyStr) && placeRootIsOwned(e, cg, locs) {
-                let lv = genLvalue(cg, e, locs, sigs)
-                let ll = llType(resolveTyStr(cg, lv.ty))
-                let v = nextTemp(cg)
-                emit(cg, "  " + v + " = load " + ll + ", ptr " + lv.v + "\n")
-                zeroStore(cg, lv.v, lv.ty)
-                cg.movedLocalAddrs.push(lv.v.clone())
+            if op == "*" && tyStr.len > 0 && cgNeedsDrop(cg, tyStr) {
+                if placeRootIsOwned(e, cg, locs) {
+                    let lv = genLvalue(cg, e, locs, sigs)
+                    let ll = llType(resolveTyStr(cg, lv.ty))
+                    let v = nextTemp(cg)
+                    emit(cg, "  " + v + " = load " + ll + ", ptr " + lv.v + "\n")
+                    zeroStore(cg, lv.v, lv.ty)
+                    cg.movedLocalAddrs.push(lv.v.clone())
+                    return Val {
+                        v: v, ty: lv.ty.clone()
+                    }
+                }
+                // The box is reached through an index or a borrow, so the container
+                // still owns it and will free it: `return *args[0]` in parseFString
+                // handed back the pointee of a box the local `args` Vec dropped one
+                // instruction later. Copy the pointee out instead of aliasing it.
+                let lv2 = genLvalue(cg, e, locs, sigs)
+                let ll2 = llType(resolveTyStr(cg, lv2.ty))
+                let loaded2 = nextTemp(cg)
+                emit(cg, "  " + loaded2 + " = load " + ll2 + ", ptr " + lv2.v + "\n")
+                let cloned2 = genCloneOfLoaded(cg, loaded2, lv2.ty)
                 return Val {
-                    v: v, ty: lv.ty.clone()
+                    v: cloned2, ty: lv2.ty.clone()
                 }
             }
         }
@@ -490,15 +504,30 @@ pub fn genOwnedArg(cg: &mut Cgen, e: &Expr, hintTy: string, locs: &Vec<Local>, s
     match e {
         Expr.FieldAccess(obj, field, sp) => {
             let tyStr = placeTypeStr(cg, e, locs)
-            if tyStr.len > 0 && cgNeedsDrop(cg, tyStr) && placeRootIsOwned(e, cg, locs) {
-                let lv = genLvalue(cg, e, locs, sigs)
-                let ll = llType(resolveTyStr(cg, lv.ty))
-                let v = nextTemp(cg)
-                emit(cg, "  " + v + " = load " + ll + ", ptr " + lv.v + "\n")
-                zeroStore(cg, lv.v, lv.ty)
-                cg.movedLocalAddrs.push(lv.v.clone())
+            if tyStr.len > 0 && cgNeedsDrop(cg, tyStr) {
+                if placeRootIsOwned(e, cg, locs) {
+                    let lv = genLvalue(cg, e, locs, sigs)
+                    let ll = llType(resolveTyStr(cg, lv.ty))
+                    let v = nextTemp(cg)
+                    emit(cg, "  " + v + " = load " + ll + ", ptr " + lv.v + "\n")
+                    zeroStore(cg, lv.v, lv.ty)
+                    cg.movedLocalAddrs.push(lv.v.clone())
+                    return Val {
+                        v: v, ty: lv.ty.clone()
+                    }
+                }
+                // Root is NOT a whole owned local — it reaches through an index
+                // (`sig.params[i].ty`) or a borrow. The container keeps owning the
+                // field, so zeroing it would corrupt the source; handing back the
+                // loaded header would give two owners of one buffer. Deep-copy,
+                // exactly as the IndexAccess arm above does for `v[i]`.
+                let lv2 = genLvalue(cg, e, locs, sigs)
+                let ll2 = llType(resolveTyStr(cg, lv2.ty))
+                let loaded2 = nextTemp(cg)
+                emit(cg, "  " + loaded2 + " = load " + ll2 + ", ptr " + lv2.v + "\n")
+                let cloned2 = genCloneOfLoaded(cg, loaded2, lv2.ty)
                 return Val {
-                    v: v, ty: lv.ty.clone()
+                    v: cloned2, ty: lv2.ty.clone()
                 }
             }
         }
@@ -3600,6 +3629,108 @@ pub fn ensureStructCloneHelper(cg: &mut Cgen, name: &string) {
     cg.globals = cg.globals + helperIR
 }
 
+// Emit `define %NAME @milo.clone.enum.NAME(ptr %self)` — the mirror image of
+// ensureEnumDropHelper, for an enum that owns heap in some variant and has no user
+// `impl Clone`. Without it those enums took genCloneOfLoaded's Copy fallback and the
+// "clone" shared every payload buffer with the original (a JsonPlan payload string
+// was freed by both the local's scope drop and the enum's drop helper).
+//
+// The whole aggregate is copied first, so Copy payloads and the tag come along for
+// free; only droppable payload fields are overwritten with real clones.
+pub fn ensureEnumCloneHelper(cg: &mut Cgen, name: &string) {
+    let hn = "milo.clone.enum." + name.clone()
+    if dropHelperEmitted(cg, hn) {
+        return
+    }
+    // Marked BEFORE emitting so a self-referential enum (recursing through Heap<T>)
+    // terminates, same as the struct/drop helpers.
+    cg.dropHelpers.push(hn.clone())
+    let savedBody = cg.body.clone()
+    let savedBlock = cg.curBlock.clone()
+    let savedTemp = cg.temp
+    let savedLabel = cg.label
+    let savedFnBuf = cg.fnBuf.clone()
+    let savedInFn = cg.inFn
+    cg.inFn = false
+    cg.fnBuf = ""
+    cg.body = ""
+    cg.temp = 0
+    cg.label = 0
+    emit(cg, "entry.bb:\n")
+    let enumTy = "%" + name.clone()
+    let out = nextTemp(cg)
+    emit(cg, "  " + out + " = alloca " + enumTy + "\n")
+    let whole = nextTemp(cg)
+    emit(cg, "  " + whole + " = load " + enumTy + ", ptr %self\n")
+    emit(cg, "  store " + enumTy + " " + whole + ", ptr " + out + "\n")
+    let tp = nextTemp(cg)
+    emit(cg, "  " + tp + " = getelementptr " + enumTy + ", ptr %self, i32 0, i32 0\n")
+    let tag = nextTemp(cg)
+    emit(cg, "  " + tag + " = load i32, ptr " + tp + "\n")
+    let done = nextLabel(cg, "ecdone")
+
+    var caseLines = ""
+    var cloneIdx: Vec<i64> = Vec.new()
+    var cloneLbls: Vec<string> = Vec.new()
+    let info = cg.enums.get(name)!
+    for vi in 0..info.variants.len {
+        let payloadTypes = lookupVariantPayload(cg, name, info.variants[vi].name)
+        var anyDrop = false
+        for pi in 0..payloadTypes.len {
+            if cgNeedsDrop(cg, payloadTypes[pi]) {
+                anyDrop = true
+            }
+        }
+        if anyDrop {
+            let lbl = nextLabel(cg, "eclone")
+            caseLines = caseLines + "    i32 " + info.variants[vi].tag.toString() + ", label %" + lbl + "\n"
+            cloneIdx.push(vi)
+            cloneLbls.push(lbl)
+        }
+    }
+    if cloneIdx.len > 0 {
+        emit(cg, "  switch i32 " + tag + ", label %" + done + " [\n" + caseLines + "  ]\n")
+        for k in 0..cloneIdx.len {
+            let vi = cloneIdx[k]
+            emitLabel(cg, cloneLbls[k])
+            let payloadTypes = lookupVariantPayload(cg, name, info.variants[vi].name)
+            let srcPay = nextTemp(cg)
+            emit(cg, "  " + srcPay + " = getelementptr " + enumTy + ", ptr %self, i32 0, i32 1\n")
+            let dstPay = nextTemp(cg)
+            emit(cg, "  " + dstPay + " = getelementptr " + enumTy + ", ptr " + out + ", i32 0, i32 1\n")
+            let vstructTy = variantStructTyDrop(payloadTypes)
+            for pi in 0..payloadTypes.len {
+                if cgNeedsDrop(cg, payloadTypes[pi]) {
+                    let fll = llType(resolveTyStr(cg, payloadTypes[pi]))
+                    let sfp = nextTemp(cg)
+                    emit(cg, "  " + sfp + " = getelementptr " + vstructTy + ", ptr " + srcPay + ", i32 0, i32 " + pi.toString() + "\n")
+                    let fv = nextTemp(cg)
+                    emit(cg, "  " + fv + " = load " + fll + ", ptr " + sfp + "\n")
+                    let cloned = genCloneOfLoaded(cg, fv, payloadTypes[pi])
+                    let dfp = nextTemp(cg)
+                    emit(cg, "  " + dfp + " = getelementptr " + vstructTy + ", ptr " + dstPay + ", i32 0, i32 " + pi.toString() + "\n")
+                    emit(cg, "  store " + fll + " " + cloned + ", ptr " + dfp + "\n")
+                }
+            }
+            emit(cg, "  br label %" + done + "\n")
+        }
+    } else {
+        emit(cg, "  br label %" + done + "\n")
+    }
+    emitLabel(cg, done)
+    let loaded = nextTemp(cg)
+    emit(cg, "  " + loaded + " = load " + enumTy + ", ptr " + out + "\n")
+    emit(cg, "  ret " + enumTy + " " + loaded + "\n")
+    let helperIR = "define " + enumTy + " @" + hn + "(ptr %self) {\n" + cg.body.clone() + "}\n\n"
+    cg.body = savedBody
+    cg.curBlock = savedBlock
+    cg.fnBuf = savedFnBuf
+    cg.inFn = savedInFn
+    cg.temp = savedTemp
+    cg.label = savedLabel
+    cg.globals = cg.globals + helperIR
+}
+
 pub fn genCloneOfLoaded(cg: &mut Cgen, v: &string, ty: &string): string {
     let ll = llType(ty)
     if ll == "%String" {
@@ -3621,6 +3752,27 @@ pub fn genCloneOfLoaded(cg: &mut Cgen, v: &string, ty: &string): string {
             v: v.clone(), ty: ty.clone()
         }
         ).v
+    }
+    // A Heap<T> box is just a pointer. Copying it verbatim hands out a SECOND owner
+    // of one allocation: `Expr.ArrayRepeat(elements[0], …)` returned a box the
+    // element Vec still owned, so the Vec's scope drop freed a node the returned AST
+    // still pointed at (parseArrayLit → drop.struct.Program, 264-byte %Expr). Box a
+    // deep copy of the pointee instead.
+    let heapInner = unwrapHeap(resolveTyStr(cg, ty))
+    if heapInner.len > 0 {
+        let innerLl = llType(resolveTyStr(cg, heapInner))
+        let loadedInner = nextTemp(cg)
+        emit(cg, "  " + loadedInner + " = load " + innerLl + ", ptr " + v.clone() + "\n")
+        let clonedInner = genCloneOfLoaded(cg, loadedInner, heapInner)
+        let szPtr = nextTemp(cg)
+        emit(cg, "  " + szPtr + " = getelementptr " + innerLl + ", ptr null, i32 1\n")
+        let szInt = nextTemp(cg)
+        emit(cg, "  " + szInt + " = ptrtoint ptr " + szPtr + " to i64\n")
+        ensureMalloc(cg)
+        let boxPtr = nextTemp(cg)
+        emit(cg, "  " + boxPtr + " = call ptr @malloc(i64 " + szInt + ")\n")
+        emit(cg, "  store " + innerLl + " " + clonedInner + ", ptr " + boxPtr + "\n")
+        return boxPtr
     }
     // find an impl-Clone helper Ty$..$clone for this type
     let rec = stripPercent(resolveTyStr(cg, stripPercent(ty)))
@@ -3659,6 +3811,36 @@ pub fn genCloneOfLoaded(cg: &mut Cgen, v: &string, ty: &string): string {
             emit(cg, "  " + t + " = call " + ll + " @milo.clone.struct." + rec.clone() + "(ptr " + slot + ")\n")
             return t
         }
+    }
+    // An enum that owns heap in some variant and has no `impl Clone` needs the same
+    // treatment as a droppable struct — the Copy fallback below aliases its payload.
+    if cg.enums.contains(rec) {
+        var anyDroppable = false
+        let einfo = cg.enums.get(rec)!
+        for vi in 0..einfo.variants.len {
+            let payloadTypes = lookupVariantPayload(cg, rec, einfo.variants[vi].name)
+            for pi in 0..payloadTypes.len {
+                if cgNeedsDrop(cg, payloadTypes[pi]) {
+                    anyDroppable = true
+                }
+            }
+        }
+        if anyDroppable {
+            ensureEnumCloneHelper(cg, rec)
+            let slot = nextTemp(cg)
+            emit(cg, "  " + slot + " = alloca " + ll + "\n")
+            emit(cg, "  store " + ll + " " + v + ", ptr " + slot + "\n")
+            let t = nextTemp(cg)
+            emit(cg, "  " + t + " = call " + ll + " @milo.clone.enum." + rec.clone() + "(ptr " + slot + ")\n")
+            return t
+        }
+    }
+    // Fail closed. Reaching here with a type that owns heap means the value copy
+    // below would alias a buffer someone else frees — a silent double-free, the
+    // exact class this function keeps regrowing. Refuse to emit it instead.
+    if cgNeedsDrop(cg, ty) {
+        eprint("codegen: no deep-clone path for droppable type '" + resolveTyStr(cg, ty) + "' — refusing to emit an aliasing copy")
+        exit(1)
     }
     // Copy (ints/bool/ptr) or no clone helper: value copy is a faithful clone
     return v.clone()

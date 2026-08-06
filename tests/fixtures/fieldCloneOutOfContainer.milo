@@ -1,0 +1,97 @@
+// A droppable field read out of a container element (`sig.params[i].ty`) is a COPY,
+// not a move: the container keeps owning that field. Copying the header alone gives
+// two owners of one buffer, and whichever drops first leaves the other dangling —
+// milo-self's codegen did exactly that (the enclosing HashMap value and the local
+// copy both freed the same TStruct name string, aborting in libmalloc while the
+// compiler type-checked any method call with a struct-typed parameter).
+//
+// The reads are deliberately repeated: the first copy is dropped when its scope
+// ends, so a shallow copy makes every later read of the same element see freed bytes.
+enum TK {
+    TStruct(string),
+    TFlag(bool),
+    TVoid,
+}
+
+impl Clone for TK {
+    fn clone(self: &Self): Self {
+        match self {
+            TK.TStruct(n) => {
+                return TK.TStruct(n.clone())
+            }
+            TK.TFlag(b) => {
+                return TK.TFlag(b)
+            }
+            TK.TVoid => {
+                return TK.TVoid
+            }
+        }
+    }
+}
+
+struct ParamDecl {
+    ty: TK,
+}
+
+struct FnSig {
+    params: Vec<ParamDecl>,
+}
+
+fn nameOf(t: &TK): string {
+    match t {
+        TK.TStruct(n) => {
+            return n.clone()
+        }
+        TK.TFlag(b) => {
+            return "flag"
+        }
+        TK.TVoid => {
+            return "void"
+        }
+    }
+}
+
+fn sigWith(a: string, b: string): FnSig {
+    var ps: Vec<ParamDecl> = Vec.new()
+    ps.push(ParamDecl {
+        ty: TK.TStruct(a),
+    }
+    )
+    ps.push(ParamDecl {
+        ty: TK.TStruct(b),
+    }
+    )
+    return FnSig {
+        params: ps,
+    }
+}
+
+// Field of an indexed element, reached through a map value this function owns.
+fn firstParamName(m: &HashMap<string, FnSig>, key: string): string {
+    let sig = m.get(key)!
+    let paramType = sig.params[0].ty
+    return nameOf(paramType)
+}
+
+fn main(): i32 {
+    var m: HashMap<string, FnSig> = HashMap.new()
+    m.insert("alloc", sigWith("HandleOfString", "ArenaOfString"))
+
+    print(firstParamName(m, "alloc"))
+    // @expect: HandleOfString
+    print(firstParamName(m, "alloc"))
+    // @expect: HandleOfString
+
+    // Same shape with an owned local as the container.
+    let sig = sigWith("FirstOwned", "SecondOwned")
+    let t0 = sig.params[0].ty
+    print(nameOf(t0))
+    // @expect: FirstOwned
+    let t1 = sig.params[1].ty
+    print(nameOf(t1))
+    // @expect: SecondOwned
+    // NOTE: what `sig.params[0].ty` reads AFTER the copy above is deliberately not
+    // asserted — the TS compiler move-zeroes the source field there, milo-self
+    // deep-copies it. Both are memory-safe; they disagree on the leftover value.
+    return 0
+}

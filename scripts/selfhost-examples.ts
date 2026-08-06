@@ -84,7 +84,14 @@ async function sweepOne(file: string, tmpDir: string): Promise<Outcome> {
   if (!m) return { file, ok: true, bucket: "compile-only", detail: "" };
 
   const runArgs = m[1].trim().split(/\s+/).filter(Boolean);
-  const run = await guardedRun(bin, runArgs, { env: CHILD_ENV, timeoutMs: 60_000, memMb: RUN_MEM_MB });
+  // `// @stdin: <text>` — same annotation scripts/run-examples.ts honors. Without
+  // it a filter program (jq, wc, shuf) is run on an immediately-closed stdin and
+  // only ever exercises its empty-input error path, which then reads as a failure.
+  const stdinM = source.match(/^\s*\/\/\s*@stdin:(.*)$/m);
+  const run = await guardedRun(bin, runArgs, {
+    env: CHILD_ENV, timeoutMs: 60_000, memMb: RUN_MEM_MB,
+    ...(stdinM ? { stdinData: stdinM[1].trim() + "\n" } : {}),
+  });
   if (run.code !== 0) {
     return {
       file, ok: false,
@@ -111,6 +118,26 @@ await Promise.all(Array.from({ length: CONCURRENCY }, async () => {
     results.push(await sweepOne(f, tmpDir));
   }
 }));
+
+// Re-verify every failure serially before reporting it, exactly as
+// scripts/selfhost-sweep.ts does. Examples are far bigger than fixtures, so four
+// concurrent compiles routinely trip the per-child memory cap on a machine that
+// would compile any one of them comfortably — three such flakes were reported as
+// real failures (flight, neon, donut) before this existed. A parallel verdict of
+// "failed" is a hypothesis; only the serial re-run is evidence.
+const flaky: string[] = [];
+for (let i = 0; i < results.length; i++) {
+  const r = results[i]!;
+  if (r.ok) continue;
+  const retry = await sweepOne(r.file, tmpDir);
+  if (retry.ok) {
+    flaky.push(r.file.replace(MILO_ROOT + "/", ""));
+    results[i] = retry;
+  }
+}
+if (flaky.length) {
+  console.log(`re-verified serially: ${flaky.length} passed on retry (parallel-load flake): ${flaky.join(", ")}\n`);
+}
 results.sort((a, b) => a.file.localeCompare(b.file));
 
 const passing = results.filter(r => r.ok);

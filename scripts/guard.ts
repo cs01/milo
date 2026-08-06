@@ -199,6 +199,13 @@ export interface GuardOpts {
   virtualMemMb?: number;
   /** CLI mode: stream child output to this process instead of capturing. */
   inheritStdio?: boolean;
+  /**
+   * Feed this string to the child's stdin, then close it. Without this the child
+   * gets "ignore" (an immediate EOF), so a harness could never exercise a filter
+   * program on real input — every stdin-reading example was only ever tested on
+   * the empty-input error path.
+   */
+  stdinData?: string;
 }
 
 // Windows has none of the machinery the POSIX guard is built on — no fork/pgid,
@@ -306,8 +313,19 @@ exec "$@"`;
       // harnesses, selfhost-sweep) don't pass inheritStdio and keep the
       // original "ignore" — a batch build/run has no business blocking on
       // stdin, and this must not change their behavior.
-      stdio: [opts.inheritStdio ? "inherit" : "ignore", opts.inheritStdio ? "inherit" : "pipe", opts.inheritStdio ? "inherit" : "pipe"],
+      stdio: [
+        opts.inheritStdio ? "inherit" : opts.stdinData !== undefined ? "pipe" : "ignore",
+        opts.inheritStdio ? "inherit" : "pipe",
+        opts.inheritStdio ? "inherit" : "pipe",
+      ],
     });
+
+    if (opts.stdinData !== undefined && child.stdin) {
+      // EPIPE if the child exits without reading; that is the child's business,
+      // not a harness failure.
+      child.stdin.on("error", () => {});
+      child.stdin.end(opts.stdinData);
+    }
 
     let stdout = "";
     let stderr = "";

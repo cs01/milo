@@ -1,18 +1,9 @@
 // Checker state — scopes, variable info, diagnostic tracking, type tables
 from "src-milo/ast.milo" import {
-    Span, Function, StructDecl, EnumDecl, Program, Stmt, ImplDecl, MiloType, Attribute
+    Span, Function, StructDecl, EnumDecl, Program, Stmt, ImplDecl, MiloType, Attribute, Diagnostic
 }
 from "src-milo/checker/types.milo" import {
     TypeKind, typeEq, typeName, tyVoid, isCopy
-}
-
-// -- Diagnostics --
-
-pub struct Diagnostic {
-    severity: string, // "error" or "warning"
-    message: string,
-    hint: string,
-    span: Option<Span>,
 }
 
 // -- Variable info in scope --

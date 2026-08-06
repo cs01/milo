@@ -26,7 +26,7 @@ from "src-milo/parser.milo" import {
 }
 from "src-milo/ast.milo" import {
     Program, StructDecl, EnumDecl, Function, ImportDecl, TraitDecl, ImplDecl,
-    GlobalDecl, cloneGlobal, renameFunction, renameGlobal
+    GlobalDecl, cloneGlobal, renameFunction, renameGlobal, Diagnostic, cloneDiagnostic
 }
 
 pub struct ResolverState {
@@ -48,6 +48,22 @@ pub struct ResolverState {
     // whole graph (including a package's own internal imports) against the root
     // project's manifest, not a per-file one. There is no diamond-dependency story.
     deps: HashMap<string, string>,
+    // Parse errors collected over every imported file. A broken import is as fatal as
+    // a broken entry file — see Program.parseDiagnostics.
+    parseDiagnostics: Vec<Diagnostic>,
+}
+
+// Entry-file diagnostics first, then everything the import walk collected. Order is
+// the reading order a user expects: the file they named, then its dependencies.
+pub fn mergeParseDiagnostics(entry: &Vec<Diagnostic>, imported: &Vec<Diagnostic>): Vec<Diagnostic> {
+    var out: Vec<Diagnostic> = Vec.new()
+    for i in 0..entry.len {
+        out.push(cloneDiagnostic(entry[i]))
+    }
+    for i in 0..imported.len {
+        out.push(cloneDiagnostic(imported[i]))
+    }
+    return out
 }
 
 // `@link` names union across the whole import graph, deduped: a package linked by
@@ -75,6 +91,7 @@ pub fn newResolver(stdlibDir: string, targetOs: string, deps: HashMap<string, st
         stdlibDir: stdlibDir,
         targetOs: targetOs,
         deps: deps,
+        parseDiagnostics: Vec.new(),
     }
 }
 
@@ -552,6 +569,9 @@ pub fn mergeImportedFile(rs: &mut ResolverState, absPath: string) {
     }
     rs.visited.insert(absPath.clone(), true)
     let imported = parseFile(absPath)
+    for di in 0..imported.parseDiagnostics.len {
+        rs.parseDiagnostics.push(cloneDiagnostic(imported.parseDiagnostics[di]))
+    }
     checkDuplicateDecls(imported)
     let aliasPairs = collectAliasPairs(imported.imports)
 
@@ -718,6 +738,9 @@ pub fn resolveImports(program: Program, sourceDir: string, stdlibDir: string, ta
     if pathExists(preludePath) && !rs.visited.contains(preludePath) {
         rs.visited.insert(preludePath.clone(), true)
         let prelude = parseFile(preludePath)
+        for di in 0..prelude.parseDiagnostics.len {
+            rs.parseDiagnostics.push(cloneDiagnostic(prelude.parseDiagnostics[di]))
+        }
         checkDuplicateDecls(prelude)
         for si in 0..prelude.structs.len {
             rs.structs.push(prelude.structs[si].clone())
@@ -795,5 +818,6 @@ pub fn resolveImports(program: Program, sourceDir: string, stdlibDir: string, ta
         globals: dedupGlobals(rs.globals),
         typeAliases: rs.typeAliases,
         linkLibs: rs.linkLibs,
+        parseDiagnostics: mergeParseDiagnostics(program.parseDiagnostics, rs.parseDiagnostics),
     }
 }

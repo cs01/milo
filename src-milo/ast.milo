@@ -12,6 +12,17 @@ pub struct Span {
     file: string,
 }
 
+// One compiler error or warning. Declared here rather than in the checker because the
+// PARSER produces these too: `expect` recovers by printing and continuing, so without a
+// collected list a file with parse errors reached the checker as a Program built from
+// guesses and could be reported as clean. Every producer pushes; the driver renders once.
+pub struct Diagnostic {
+    severity: string, // "error" or "warning"
+    message: string,
+    hint: string,
+    span: Option<Span>,
+}
+
 pub struct MiloType {
     name: string,
     typeArgs: Vec<MiloType>,
@@ -282,6 +293,11 @@ pub struct Program {
     // the program that imports it. Without this the driver had no way to learn
     // about SDL2 at all and every SDL example died at link with undefined symbols.
     linkLibs: Vec<string>,
+    // Parse errors accumulated while producing this Program, in source order. The
+    // resolver concatenates the lists of every file it merges, so a broken import is
+    // as fatal as a broken entry file. Non-empty means the AST is a guess: the driver
+    // renders these and stops before type-checking.
+    parseDiagnostics: Vec<Diagnostic>,
 }
 
 // -- Clone impls --
@@ -301,6 +317,17 @@ pub fn cloneSpan(sp: &Option<Span>): Option<Span> {
         Option.None => {
             return Option.None
         }
+    }
+}
+
+// Same reason as cloneSpan: Diagnostic holds an Option<Span>, so it has no derived
+// `.clone()`.
+pub fn cloneDiagnostic(d: &Diagnostic): Diagnostic {
+    return Diagnostic {
+        severity: d.severity.clone(),
+        message: d.message.clone(),
+        hint: d.hint.clone(),
+        span: cloneSpan(d.span),
     }
 }
 

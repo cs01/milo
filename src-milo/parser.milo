@@ -1,12 +1,12 @@
 // Recursive descent parser — port of src/parser.ts
 from "src-milo/tokens.milo" import {
-    TokKind, Token
+    TokKind, Token, tokKindName
 }
 from "src-milo/ast.milo" import {
     MiloType, Param, Expr, Stmt, Function, Program, StructDecl, StructField,
     EnumDecl, EnumVariant, Pattern, MatchArm, Span, ImportDecl, TraitDecl,
     TraitMethod, ImplDecl, Attribute, TypeParam, StructLitField, LiteralKind,
-    GlobalDecl, simpleType, ptrType
+    GlobalDecl, simpleType, ptrType, Diagnostic, cloneDiagnostic
 }
 
 pub struct Parser {
@@ -32,11 +32,18 @@ pub struct Parser {
     // for the rest of this file gets an implicit `wrapping` attribute (see the
     // top-level parse loop). Per-file: only fns parsed by THIS Parser see it.
     moduleWrapping: bool,
+    // Parse errors seen so far, collected rather than printed at the point of failure.
+    // `expect` is deliberately soft — it recovers and keeps going — so nothing
+    // downstream could tell a clean parse from a broken one, and `check` once printed
+    // six parse errors followed by "ok — no errors" and exited 0. Collecting (like the
+    // checker does) also means these can be rendered with source context by
+    // formatDiagnostic and served to the LSP, neither of which a bare eprint allows.
+    diagnostics: Vec<Diagnostic>,
 }
 
 pub fn newParser(tokens: Vec<Token>, filePath: string): Parser {
     return Parser {
-        tokens: tokens, pos: 0, noStructLit: false, pending: Vec.new(), codePointLoopCounter: 0, filePath: filePath, moduleWrapping: false
+        tokens: tokens, pos: 0, noStructLit: false, pending: Vec.new(), codePointLoopCounter: 0, filePath: filePath, moduleWrapping: false, diagnostics: Vec.new()
     }
 }
 
@@ -77,6 +84,24 @@ pub fn span(p: &Parser, tok: &Token): Option<Span> {
     )
 }
 
+// Record a parse error against `tok`. Never prints: the driver renders the collected
+// list once, so ordering is stable and the LSP can serve the same values.
+pub fn parseError(p: &mut Parser, tok: &Token, message: string, hint: string) {
+    let sp = span(p, tok)
+    p.diagnostics.push(Diagnostic {
+        severity: "error", message: message, hint: hint, span: sp
+    }
+    )
+}
+
+pub fn cloneDiagnostics(ds: &Vec<Diagnostic>): Vec<Diagnostic> {
+    var out: Vec<Diagnostic> = Vec.new()
+    for i in 0..ds.len {
+        out.push(cloneDiagnostic(ds[i]))
+    }
+    return out
+}
+
 pub fn at(p: &Parser, kind: TokKind): bool {
     return peek(p).kind == kind
 }
@@ -98,7 +123,7 @@ pub fn expect(p: &mut Parser, kind: TokKind): Token {
     // errors per self-build. Include the token text: a bare line:col names neither the
     // file nor the token, which is most of what made that one hard to place.
     if !(tok.kind == kind) {
-        eprint("parse error: " + p.filePath.clone() + ":" + tok.line.toString() + ":" + tok.col.toString() + ": unexpected token '" + tok.value + "'")
+        parseError(p, tok, "unexpected token '" + tok.value.clone() + "'", "expected " + tokKindName(kind))
     }
     return tok
 }
@@ -528,11 +553,17 @@ pub fn parseExternFn(p: &mut Parser): Function {
 // its body. They are plain identifiers to milo0's lexer. milo0 neither verifies nor
 // emits contracts — the TS compiler does — but it must parse past them or the body
 // never starts, and the clause tokens get read as a bogus expression.
+// The clause expression is parsed with noStructLit set: `ensures result == SQUAD_DRONES`
+// followed by the body's `{` otherwise reads as a struct literal named SQUAD_DRONES and
+// swallows the whole function body.
 pub fn skipContractClauses(p: &mut Parser) {
+    let savedNS = p.noStructLit
     while at(p, TokKind.Ident) && (peek(p).value == "requires" || peek(p).value == "ensures") {
         advance(p)
+        p.noStructLit = true
         var discarded = parseExpr(p)
     }
+    p.noStructLit = savedNS
 }
 
 pub fn parseFn(p: &mut Parser): Function {
@@ -714,7 +745,7 @@ pub fn parseLetElse(p: &mut Parser, s: &Option<Span>): Stmt {
         emptyName = "isErr"
     }
     if enumName != "Option" && enumName != "Result" {
-        eprint("parse error: " + p.filePath.clone() + ":" + peek(p).line.toString() + ": let-else on '" + enumName.clone() + "' is not supported in milo0 (Option and Result only)")
+        parseError(p, peek(p), "let-else on '" + enumName.clone() + "' is not supported in milo0", "only Option and Result support let-else here")
     }
 
     // Unique per source position, so two let-else statements in one scope cannot collide.
@@ -875,7 +906,7 @@ pub fn parseFor(p: &mut Parser): Stmt {
     if at(p, TokKind.Ident) && peek(p).value == "in" {
         advance(p)
     } else {
-        eprint("parse error: " + p.filePath.clone() + ":" + peek(p).line.toString() + ":" + peek(p).col.toString() + ": expected 'in' in for-loop")
+        parseError(p, peek(p), "expected 'in' in for-loop", "")
     }
     let savedNS = p.noStructLit
     p.noStructLit = true
@@ -1658,7 +1689,7 @@ pub fn parsePrimary(p: &mut Parser): Expr {
             return parseClosure(p, s, true)
         }
         // error: move must precede closure
-        eprint("parse error: " + p.filePath.clone() + ":" + tok.line.toString() + ":" + tok.col.toString() + ": 'move' must precede a closure")
+        parseError(p, tok, "'move' must precede a closure", "")
         return Expr.Ident("error_move", s)
     }
     // Parenthesized expr or closure
@@ -1688,7 +1719,7 @@ pub fn parsePrimary(p: &mut Parser): Expr {
     // would have this sentinel silently resolve to it instead of erroring at all
     // (the "generated names a user could also write" defect species). Report the
     // real cause here, same wording as expect()'s mismatch diagnostic.
-    eprint("parse error: " + p.filePath.clone() + ":" + tok.line.toString() + ":" + tok.col.toString() + ": unexpected token '" + tok.value + "'")
+    parseError(p, tok, "unexpected token '" + tok.value.clone() + "'", "")
     advance(p)
     return Expr.Ident("error_unexpected", s)
 }
@@ -2078,6 +2109,7 @@ pub fn parse(p: &mut Parser): Program {
         globals: globals,
         typeAliases: typeAliases,
         linkLibs: linkLibs,
+        parseDiagnostics: cloneDiagnostics(p.diagnostics),
     }
 }
 

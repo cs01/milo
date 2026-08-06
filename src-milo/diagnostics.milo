@@ -1,9 +1,6 @@
 // Elm-style diagnostic formatting with source context and carets
 from "src-milo/ast.milo" import {
-    Span
-}
-from "src-milo/checker/state.milo" import {
-    Diagnostic
+    Span, Diagnostic
 }
 
 pub let RESET = "\x1b[0m"

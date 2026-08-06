@@ -32,7 +32,7 @@ from "src-milo/lexer.milo" import {
     Lexer, tokenize
 }
 from "src-milo/ast.milo" import {
-    Program
+    Program, Diagnostic, cloneDiagnostic
 }
 from "src-milo/parser.milo" import {
     Parser, newParser, parse
@@ -44,7 +44,10 @@ from "src-milo/checker/types.milo" import {
     TypeKind
 }
 from "src-milo/checker/state.milo" import {
-    Checker, newChecker, hasErrors, Diagnostic
+    Checker, newChecker, hasErrors
+}
+from "src-milo/diagnostics.milo" import {
+    formatDiagnostic, formatDiagnosticPlain
 }
 from "src-milo/checker/stmt.milo" import {
     checkProgram
@@ -141,6 +144,63 @@ pub struct Compiled {
     linkLibs: Vec<string>,
 }
 
+// Render the parse errors the parser collected, then stop. `expect` recovers by
+// continuing, so a file with parse errors still yields a Program — one built from
+// guesses. Type-checking that produces cascading nonsense at best and a clean bill of
+// health at worst: a broken file once printed six parse errors and then "ok — no
+// errors" and exited 0.
+//
+// Source context (carets) needs the file each span came from, which is not necessarily
+// the entry file — a broken import reports against its own path. Files are read lazily
+// and once each; a file that has since become unreadable degrades to the plain form
+// rather than losing the diagnostic.
+pub fn reportParseDiagnostics(diags: &Vec<Diagnostic>) {
+    let color = fdIsTerminal(2)
+    var seenFiles: Vec<string> = Vec.new()
+    var seenSources: Vec<string> = Vec.new()
+    for i in 0..diags.len {
+        let d = cloneDiagnostic(diags[i])
+        var file = ""
+        match d.span {
+            Option.Some(sp) => {
+                file = sp.file.clone()
+            }
+            Option.None => {
+            }
+        }
+        if !color || file.len == 0 {
+            eprint(formatDiagnosticPlain(d, file))
+        } else {
+            var src = ""
+            var found = false
+            for j in 0..seenFiles.len {
+                if seenFiles[j] == file {
+                    src = seenSources[j].clone()
+                    found = true
+                }
+            }
+            if !found {
+                match readFile(file.clone()) {
+                    Result.Ok(text) => {
+                        src = text
+                    }
+                    Result.Err(e) => {
+                        src = ""
+                    }
+                }
+                seenFiles.push(file.clone())
+                seenSources.push(src.clone())
+            }
+            if src.len == 0 {
+                eprint(formatDiagnosticPlain(d, file))
+            } else {
+                eprint(formatDiagnostic(d, src, file))
+            }
+        }
+    }
+    eprint("error: " + diags.len.toString() + " parse error(s); not type-checking")
+}
+
 pub fn compile(path: string): Compiled {
     var source = ""
     match readFile(path.clone()) {
@@ -165,6 +225,11 @@ pub fn compile(path: string): Compiled {
     let sourceDir = Path.dirname(path.clone())
     let stdlibDir = findStdlibRoot(sourceDir.clone())
     let resolved = resolveImports(program, sourceDir.clone(), stdlibDir, target.os)
+
+    if resolved.parseDiagnostics.len > 0 {
+        reportParseDiagnostics(resolved.parseDiagnostics)
+        exit(1)
+    }
 
     // Type check
     var checker = newChecker()
@@ -419,12 +484,22 @@ pub fn main() {
         let sourceDir = Path.dirname(docPath.clone())
         let stdlibDir = findStdlibRoot(sourceDir.clone())
         let resolved = resolveImports(program, sourceDir, stdlibDir, target.os)
-        var checker = newChecker()
-        checkProgram(checker, resolved)
         var arr = Json.arr()
-        for i in 0..checker.diagnostics.len {
-            let d = checker.diagnostics[i]
+        // Parse errors first, and INSTEAD of type-checking: the AST after a parse error
+        // is a guess, so the checker's opinion of it is noise that would bury the one
+        // diagnostic the editor should show. Reporting them at all is new — they used to
+        // go straight to the compiler's own stderr, where no LSP client ever saw them.
+        for i in 0..resolved.parseDiagnostics.len {
+            let d = resolved.parseDiagnostics[i]
             arr = arr.obj(diagnosticToJsonObj(d, docPath))
+        }
+        if resolved.parseDiagnostics.len == 0 {
+            var checker = newChecker()
+            checkProgram(checker, resolved)
+            for i in 0..checker.diagnostics.len {
+                let d = checker.diagnostics[i]
+                arr = arr.obj(diagnosticToJsonObj(d, docPath))
+            }
         }
         print(arr.build())
         exit(0)
@@ -449,6 +524,10 @@ pub fn main() {
         let sourceDir = Path.dirname(source.clone())
         let stdlibDir = findStdlibRoot(sourceDir)
         let resolved = resolveImports(program, sourceDir, stdlibDir, target.os)
+        if resolved.parseDiagnostics.len > 0 {
+            reportParseDiagnostics(resolved.parseDiagnostics)
+            exit(1)
+        }
         var checker = newChecker()
         checkProgram(checker, resolved)
         if hasErrors(checker) {

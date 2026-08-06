@@ -5864,8 +5864,12 @@ pub fn genMethodCall(cg: &mut Cgen, object: &Expr, method: &string, args: &Vec<H
             if (ai + 1) < mRefs.len {
                 aRef = mRefs[ai + 1]
             }
+            var mhRef = ""
+            if (ai + 1) < mHints.len {
+                mhRef = mHints[ai + 1].clone()
+            }
             if aRef {
-                let alv = genLvalue(cg, *args[ai], locs, sigs)
+                let alv = genLvalueWithHint(cg, *args[ai], locs, sigs, mhRef)
                 argStr = argStr + ", ptr " + alv.v
             } else {
                 // by-value method param takes ownership → move (unless `*T` decay)
@@ -7919,7 +7923,7 @@ pub fn genCall(cg: &mut Cgen, name: &string, args: &Vec<Heap<Expr>>, typeArgs: &
             )
             argPointees.push("")
         } else if isRefParam {
-            let lv = genLvalue(cg, *args[i], locs, sigs)
+            let lv = genLvalueWithHint(cg, *args[i], locs, sigs, hint.clone())
             // A `&mut [u8;N]` (fixed arrays lower to a Vec {ptr,len,cap}) passed to a C
             // extern must decay to its DATA pointer: the C side wants `u8*`, and writing
             // through the header's address would clobber len/cap instead of the buffer.
@@ -8278,6 +8282,15 @@ pub fn genCall(cg: &mut Cgen, name: &string, args: &Vec<Heap<Expr>>, typeArgs: &
 // -- Lvalue (address-of) --
 
 pub fn genLvalue(cg: &mut Cgen, e: &Expr, locs: &Vec<Local>, sigs: &Vec<CgFnSig>): Val {
+    return genLvalueWithHint(cg, e, locs, sigs, "")
+}
+
+// `hintTy` only reaches the rvalue-materialization arm at the bottom — every other arm
+// names an existing place whose type is already known. It matters for an rvalue passed
+// to a `&T` param: `Texture2D.rgb32f(.., Vec.filled(n, 0.0), ..)` against `pixels:
+// &Vec<f32>` had no way to learn the element type, defaulted to Vec<i64>, and emitted
+// `store i64 0.0` — IR LLVM rejects outright.
+pub fn genLvalueWithHint(cg: &mut Cgen, e: &Expr, locs: &Vec<Local>, sigs: &Vec<CgFnSig>, hintTy: string): Val {
     match e {
         Expr.Ident(name, span) => {
             // a module global's address is @name (used for push/field-store/etc.)
@@ -8344,7 +8357,7 @@ pub fn genLvalue(cg: &mut Cgen, e: &Expr, locs: &Vec<Local>, sigs: &Vec<CgFnSig>
                     v: fp, ty: fty
                 }
             }
-            let v = genExpr(cg, e, locs, sigs, "")
+            let v = genExpr(cg, e, locs, sigs, hintTy)
             let ll = llType(v.ty)
             let addr = nextTemp(cg)
             emit(cg, "  " + addr + " = alloca " + ll + "\n")

@@ -15,9 +15,18 @@
 # Run it when you have changed src-milo/ and want to know whether the bootstrap still
 # converges. Takes ~2 minutes.
 #
+# Pass --asan to build stage2 with AddressSanitizer. src-milo contains no unsafe code, so an
+# ASan report on it IS a compiler bug — there is nothing else to blame. That makes ASan a
+# zero-false-positive oracle here, and it is what turned a mystery SIGKILL into a named frame
+# when stage2 started dying in 0.5s. Costs ~2-3x; worth it the moment a stage misbehaves.
+#
 # Everything runs under scripts/guard.ts. An unguarded self-compile has crashed this machine
 # twice — macOS enforces no rlimits, so the guard is the only real cap.
-set -e
+#
+# NOTE: every stage checks its own exit status explicitly. `set -e` alone made this script die
+# after printing a progress line and no verdict, which reads as "still running" rather than
+# "failed" — and a caller that pipes this into `tail` sees the pipe's status, not the script's.
+set -u
 
 root=$(cd "$(dirname "$0")/.." && pwd)
 out="$root/.selfhost"
@@ -31,13 +40,44 @@ libs="-lm -L/opt/homebrew/opt/openssl@3/lib -lssl -lcrypto -L/opt/homebrew/opt/s
 echo "stage 1: oracle -> milo-self"
 sh "$root/scripts/selfhost.sh"
 
+asan=0
+[ "${1:-}" = "--asan" ] && asan=1
+
+# $1 label, $2 expected-nonempty output file, rest: command
+stage() {
+  label=$1; outfile=$2; shift 2
+  # `if ! cmd` would make $? the negation's status (always 0), not the command's.
+  "$@"
+  st=$?
+  if [ "$st" -ne 0 ]; then
+    echo "FIXED POINT FAILED at $label — exit $st" >&2
+    [ "$st" -eq 137 ] && echo "  (137 = SIGKILL: the guard's memory or timeout cap fired, or the child crashed)" >&2
+    echo "  Re-run with --asan to get a named frame instead of a bare kill." >&2
+    exit "$st"
+  fi
+  if [ ! -s "$outfile" ]; then
+    echo "FIXED POINT FAILED at $label — exited 0 but produced no output ($outfile is empty)" >&2
+    exit 1
+  fi
+}
+
 echo "stage 2: milo-self compiles itself"
-MILO_ROOT="$root" bun "$root/scripts/guard.ts" --mem-mb 4096 --timeout-s 600 -- \
+stage "stage 2 emit-ir" "$work/stage2.ll" \
+  env MILO_ROOT="$root" bun "$root/scripts/guard.ts" --mem-mb 4096 --timeout-s 600 -- \
   "$out/milo-self.bin" emit-ir "$root/src-milo/main.milo" > "$work/stage2.ll"
-clang -O0 -w "$work/stage2.ll" -o "$work/stage2.bin" $libs
+
+if [ "$asan" -eq 1 ]; then
+  echo "  (building stage2 with AddressSanitizer)"
+  clang -O0 -g -w -fsanitize=address "$work/stage2.ll" -o "$work/stage2.bin" $libs || exit 1
+  ASAN_OPTIONS=detect_leaks=0:allocator_may_return_null=1
+  export ASAN_OPTIONS
+else
+  clang -O0 -w "$work/stage2.ll" -o "$work/stage2.bin" $libs || exit 1
+fi
 
 echo "stage 3: stage 2 compiles itself"
-MILO_ROOT="$root" bun "$root/scripts/guard.ts" --mem-mb 4096 --timeout-s 800 -- \
+stage "stage 3 emit-ir" "$work/stage3.ll" \
+  env MILO_ROOT="$root" bun "$root/scripts/guard.ts" --mem-mb 4096 --timeout-s 800 -- \
   "$work/stage2.bin" emit-ir "$root/src-milo/main.milo" > "$work/stage3.ll"
 
 s2=$(wc -l < "$work/stage2.ll" | tr -d ' ')

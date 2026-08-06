@@ -558,6 +558,7 @@ vecRefFn
 vecSlice
 vecString
 vecStringLiveGrow
+vecStructElemStride
 vecSum
 vec_infer_from_push
 vec_swap

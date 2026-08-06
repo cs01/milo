@@ -10,7 +10,7 @@ from "src-milo/codegen/types.milo" import {
     isHashMapTy, hashMapKeyTy, hashMapValTy, hmEntryTy, ensureHashMapTy, nextLabel,
     resolveEnumName, resolveFnName, resolveStructName, resolveTyStr, nameHasMonoPrefix, ensureExit, ensureStrtod, ensureStrlen, astTypeStr,
     Cgen, Val, Local, CgFnSig, FieldInfo, RangeAnno, noRange, rangeOfAnnotation, rangeOfOptAnnotation,
-    nextTemp, emit, emitLabel, emitG, llType, isUnsigned, llTypeBytes, intBits,
+    nextTemp, emit, emitLabel, emitG, llType, isUnsigned, intBits,
     unwrapHeap, stripPercent, binOpInt, cmpOpInt, isArithOp, isCmpOp,
     findLocal, hasLocal, genLoad, ensureMalloc, ensureMemcpy, ensurePutchar, ensureStringTy,
     lookupFnRet, lookupFieldIndex, lookupFieldType,
@@ -129,9 +129,13 @@ pub fn genInlineArrCoerceIfNeeded(cg: &mut Cgen, v: &Val, fieldTy: &string, dest
     let elemLl = llType(inlineArrElem(fieldTy))
     let dataPtr = nextTemp(cg)
     emit(cg, "  " + dataPtr + " = extractvalue %Vec " + v.v.clone() + ", 0\n")
-    let totalBytes = n * llTypeBytes(elemLl)
+    // genSizeOf, not llTypeBytes: the latter defaults every named struct/enum to 8,
+    // which would under-copy a `[SomeStruct;N]` field and leave its tail undefined.
+    let esz = genSizeOf(cg, elemLl)
+    let totalBytes = nextTemp(cg)
+    emit(cg, "  " + totalBytes + " = mul i64 " + n.toString() + ", " + esz + "\n")
     ensureMemcpy(cg)
-    emit(cg, "  call ptr @memcpy(ptr " + destPtr.clone() + ", ptr " + dataPtr + ", i64 " + totalBytes.toString() + ")\n")
+    emit(cg, "  call ptr @memcpy(ptr " + destPtr.clone() + ", ptr " + dataPtr + ", i64 " + totalBytes + ")\n")
     return true
 }
 
@@ -4356,13 +4360,18 @@ pub fn genDeepCloneVecVal(cg: &mut Cgen, obj: &Val): Val {
     ensureMalloc(cg)
     let elemTy = unwrapVec(resolveTyStr(cg, obj.ty))
     let elemLl = llType(elemTy.clone())
-    let esz = llTypeBytes(elemLl.clone())
+    // The buffer is indexed with `getelementptr <elemLl>` below, so it must be
+    // allocated at THAT stride. llTypeBytes only knows scalars and the three
+    // {ptr,i64,i64} containers and defaults every named struct/enum to 8 — cloning
+    // a Vec<FieldInfo> mallocd len*8 and then strode len*sizeof(FieldInfo) over it,
+    // corrupting the heap. genSizeOf asks LLVM for the real size, padding included.
+    let esz = genSizeOf(cg, elemLl.clone())
     let srcP = nextTemp(cg)
     emit(cg, "  " + srcP + " = extractvalue %Vec " + obj.v.clone() + ", 0\n")
     let lenV = nextTemp(cg)
     emit(cg, "  " + lenV + " = extractvalue %Vec " + obj.v.clone() + ", 1\n")
     let bytes = nextTemp(cg)
-    emit(cg, "  " + bytes + " = mul i64 " + lenV + ", " + esz.toString() + "\n")
+    emit(cg, "  " + bytes + " = mul i64 " + lenV + ", " + esz + "\n")
     let dst = nextTemp(cg)
     emit(cg, "  " + dst + " = call ptr @malloc(i64 " + bytes + ")\n")
     let ictr = nextTemp(cg)
@@ -8845,9 +8854,12 @@ pub fn genExpr(cg: &mut Cgen, e: &Expr, locs: &Vec<Local>, sigs: &Vec<CgFnSig>, 
                 // elemLl ("float", the true LLVM f32 type) collided with that alias and
                 // genExpr's FloatLit hint check silently treated it as an f64 hint.
                 let fill = genExpr(cg, *args[1], locs, sigs, elemTy.clone())
-                let esz = llTypeBytes(elemLl.clone())
+                // genSizeOf, not llTypeBytes: the fill loop strides by elemLl, so a
+                // struct element sized at llTypeBytes' 8-byte default would run the
+                // stores clean off the end of the buffer.
+                let esz = genSizeOf(cg, elemLl.clone())
                 let bytes = nextTemp(cg)
-                emit(cg, "  " + bytes + " = mul i64 " + n.v.clone() + ", " + esz.toString() + "\n")
+                emit(cg, "  " + bytes + " = mul i64 " + n.v.clone() + ", " + esz + "\n")
                 let data = nextTemp(cg)
                 emit(cg, "  " + data + " = call ptr @malloc(i64 " + bytes + ")\n")
                 let ictr = nextTemp(cg)

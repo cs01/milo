@@ -1,0 +1,70 @@
+// A Vec buffer must be allocated at its ELEMENT's real stride, because every
+// index into it is a `getelementptr <elem>`. The self-hosted compiler sized
+// these mallocs with a naive shape lookup whose named-struct fallback is 8
+// bytes, so cloning a Vec<Field> allocated len*8 and then strode
+// len*sizeof(Field) across it — heap corruption that only surfaced once the
+// compiler cloned a struct table out of a HashMap and read back a null string.
+
+struct Field {
+    name: string
+    ty: string
+    isPub: bool
+}
+
+struct Point3 {
+    x: i64
+    y: i64
+    z: i64
+}
+
+fn main() {
+    var table: HashMap<string, Vec<Field>> = HashMap.new()
+    var fields: Vec<Field> = Vec.new()
+    let f0 = Field {
+        name: "alpha", ty: "i64", isPub: true
+    }
+    let f1 = Field {
+        name: "beta", ty: "string", isPub: false
+    }
+    let f2 = Field {
+        name: "gamma", ty: "bool", isPub: true
+    }
+    fields.push(f0)
+    fields.push(f1)
+    fields.push(f2)
+    table.insert("Rec", fields)
+
+    // HashMap.get hands back a deep copy — this is the clone that overflowed.
+    let got = table.get("Rec")!
+    for i in 0..got.len {
+        print(got[i].name + ":" + got[i].ty)
+    }
+    // @expect: alpha:i64
+    // @expect: beta:string
+    // @expect: gamma:bool
+
+    // An explicit clone must own its own buffer: pushing to it cannot disturb
+    // the original's length or contents.
+    var copy = got.clone()
+    let f3 = Field {
+        name: "delta", ty: "f64", isPub: false
+    }
+    copy.push(f3)
+    print(got.len.toString() + " " + copy.len.toString())
+    print(copy[3].name + " " + got[2].name)
+    // @expect: 3 4
+    // @expect: delta gamma
+
+    // Vec.filled strides by the element too, so a 24-byte struct needs 24 bytes
+    // per slot and not the fallback's 8.
+    let seed = Point3 {
+        x: 7, y: 8, z: 9
+    }
+    let pts: Vec<Point3> = Vec.filled(4, seed)
+    var sum: i64 = 0
+    for i in 0..pts.len {
+        sum = sum + pts[i].x + pts[i].y + pts[i].z
+    }
+    print(pts.len.toString() + " " + sum.toString())
+    // @expect: 4 96
+}

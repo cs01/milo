@@ -1315,9 +1315,17 @@ export class CodegenJS {
         if (expr.object.type.tag === "hashmap")
           return `${this.genExpr(expr.object)}[${this.genExpr(expr.index)}]`;
         return `__idx(${this.genExpr(expr.object)}, ${this.genExpr(expr.index)})`;
+      // A Heap box has no separate identity in JS — the box IS the value — so storing
+      // through `*box` is a store to the binding itself.
       case "HeapDeref":
-      case "PtrDeref":
         return this.genLValue(expr.operand);
+      // A raw pointer does. Falling through to the operand emitted `vp = 11` for
+      // `*vp = 11`: a store to the pointer VARIABLE, which throws when the binding is
+      // const and silently loses the write when it isn't. Refuse it the same way
+      // addrOf is refused — this backend has no addresses, and a wrong answer is worse
+      // than a named limit.
+      case "PtrDeref":
+        throw new Error("codegen-js: store through a raw pointer (*p = v) unsupported — the JS backend has no pointers");
       default:
         return this.genExpr(expr);
     }

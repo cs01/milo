@@ -64,6 +64,35 @@ report how many recovered. Only failures are re-run, so the cost scales with how
 things are rather than with corpus size. **A number produced by a single parallel pass is
 not evidence** — if you are quoting a parity figure, it came from a run with this retry in it.
 
+### IR size is the edit-loop metric
+
+clang is ~95% of a self-build's wall clock, and its cost tracks IR line count nearly
+linearly — measured on one machine at `-O2`: 362k lines → 4.68s, 512k → 6.30s,
+572k → 7.35s. Once milo-self is the daily compiler, IR size *is* the inner loop, and it
+is the kind of number that grows a few percent per commit and is never noticed.
+
+`bun scripts/selfhost-irsize.ts` reports it, splitting the two causes that need telling
+apart: **src LOC** (src-milo genuinely growing — not a codegen concern) and **IR per LOC**
+(codegen emitting more per source line — drop glue, clone glue, span plumbing; this one
+compounds against every future line of source).
+
+| commit | src-milo LOC | IR lines | IR/LOC | clang -O2 |
+|---|---|---|---|---|
+| `a4827167` 2026-08-05 | 26,486 | 362,056 | 13.67 | 4.68s |
+| `54a27f6e` before scope-drop glue | 34,195 | 511,637 | 14.96 | 6.30s |
+| `fe0dfe46` before the clone fixes | 35,384 | 566,955 | 16.02 | 7.28s |
+| `f5176655` | 35,566 | 572,059 | 16.08 | 7.35s |
+
+That 58% day is source +34% times expansion ratio +18%. The clone glue in `717573c6`
+accounts for 5,104 lines of it (+0.9%): the helpers are outlined — 175 call sites against
+29 definitions — so the cost is per *type*, not per call site.
+
+`--check` fails on more than 10% growth against `tests/selfhost-irsize.json`. It is a
+drift detector, not a budget: a codegen refactor that legitimately reshapes the IR should
+rebaseline with `--write`. The real lever when this gets uncomfortable is porting
+`src/cgu.ts` (parallel codegen units, measured 3.4x) — src-milo has no CGU support at all,
+so today every self-build hands clang one 572k-line module.
+
 ### The ratchets
 
 Each census has a `--check` mode that exits nonzero on regression against a manifest, so a
@@ -72,6 +101,7 @@ workstream can gate on one line of output instead of a reviewer reading its diff
 ```
 bun scripts/selfhost-sweep.ts --check      # every tests/selfhost-manifest.txt fixture still builds
 bun scripts/selfhost-rejects.ts --check    # every tests/selfhost-rejects-manifest.txt negative still behaves
+bun scripts/selfhost-irsize.ts --check     # the IR milo-self emits for itself has not ballooned
 ```
 
 Both manifests are monotonic and grow with `--write`, which refuses to shrink them. An

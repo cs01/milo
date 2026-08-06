@@ -221,9 +221,22 @@ pub fn detectLibs(ir: &string, os: &string, declared: &Vec<string>, sdlFlags: &s
     // search path, so it has to be added or the -l resolves to nothing.
     for i in 0..declared.len {
         let name = declared[i].clone()
-        // sdl2-config knows the framework soup SDL2 needs on darwin; a bare -lSDL2
-        // links but leaves Cocoa/Metal symbols undefined.
-        if name == "SDL2" && sdlFlags.len > 0 {
+        // `@link("framework:OpenGL")` is a darwin framework, not a `-l` name — it
+        // takes `-framework Foo`, and there is no archive to name so it is never
+        // static. Mirrors declaredLibSpec in src/main.ts. Emitting `-lframework:OpenGL`
+        // is what a partial port of that function produced, and ld reported it as a
+        // missing library named "framework:OpenGL".
+        if name.startsWith("framework:") {
+            let fw = name.substr(10, name.len)
+            if os != "darwin" {
+                eprint("error: @link(\"framework:" + fw.clone() + "\") targets " + os.clone() + ", but frameworks exist only on darwin")
+                eprint("  hint: put the framework link in a '.darwin.milo' arm and the '-l' spelling in the others")
+                exit(1)
+            }
+            libs = libs + " -framework " + fw
+        } else if name == "SDL2" && sdlFlags.len > 0 {
+            // sdl2-config knows the framework soup SDL2 needs on darwin; a bare
+            // -lSDL2 links but leaves Cocoa/Metal symbols undefined.
             libs = libs + " " + sdlFlags.clone()
         } else if os == "darwin" {
             libs = libs + " -L/opt/homebrew/lib -l" + name

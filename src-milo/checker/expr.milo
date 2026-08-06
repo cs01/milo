@@ -1664,6 +1664,80 @@ pub fn checkCall(ck: &mut Checker, func: &string, args: &Vec<Heap<Expr>>, typeAr
             }
             return tyString()
         }
+        // Builtins that codegen implements and the checker has to know the TYPE of.
+        // These all used to fall through to the catch-all underscore rule below and
+        // come back `unknown`, which is permissive enough to go unnoticed until
+        // something needs a real type: `_strDataPtr(s).addrOf()` produced
+        // `*<unknown>` instead of `**u8`, so every `glShaderSource` call in the GL
+        // package failed its extern argument check and no GPU example compiled.
+        // Signatures mirror src/checker.ts's registerBuiltins exactly.
+        if func == "_strDataPtr" {
+            for arg in args {
+                checkExpr(ck, *arg)
+            }
+            return TypeKind.TPtr(Heap(tyU8()))
+        }
+        if func == "_loadU8" {
+            for arg in args {
+                checkExpr(ck, *arg)
+            }
+            return tyU8()
+        }
+        if func == "_loadI32" {
+            for arg in args {
+                checkExpr(ck, *arg)
+            }
+            return tyI32()
+        }
+        if func == "_miloArgCount" {
+            return tyI64()
+        }
+        if func == "_miloArgAt" {
+            for arg in args {
+                checkExpr(ck, *arg)
+            }
+            return tyString()
+        }
+        if func == "_putByte" || func == "_callClosureVoid" {
+            for arg in args {
+                checkExpr(ck, *arg)
+            }
+            return tyVoid()
+        }
+        // Atomics and scheduler hooks. Note the compare-and-swap family does NOT
+        // return bool for the integer widths — Cas{I32,I64} return the OLD VALUE and
+        // only CasBool returns a bool. Taken from src/checker.ts rather than inferred
+        // from the names, which would have got exactly that wrong.
+        if func == "_atomicLoadI64" || func == "_atomicAddI64" || func == "_atomicSubI64"
+        || func == "_atomicSwapI64" || func == "_atomicCasI64" {
+            for arg in args {
+                checkExpr(ck, *arg)
+            }
+            return tyI64()
+        }
+        if func == "_atomicLoadI32" || func == "_atomicAddI32" || func == "_atomicSubI32"
+        || func == "_atomicSwapI32" || func == "_atomicCasI32" {
+            for arg in args {
+                checkExpr(ck, *arg)
+            }
+            return tyI32()
+        }
+        if func == "_atomicLoadBool" || func == "_atomicSwapBool" || func == "_atomicCasBool" {
+            for arg in args {
+                checkExpr(ck, *arg)
+            }
+            return tyBool()
+        }
+        if func == "_atomicStoreI64" || func == "_atomicStoreI32" || func == "_atomicStoreBool"
+        || func == "_schedulerSet" {
+            for arg in args {
+                checkExpr(ck, *arg)
+            }
+            return tyVoid()
+        }
+        if func == "_schedulerGet" {
+            return TypeKind.TPtr(Heap(tyU8()))
+        }
         // runtime-support builtins (_atomic*, _callClosure*, scheduler hooks)
         // exist in the oracle's codegen only; accept them so std checks
         if func.len > 1 && func[0] == 95 {

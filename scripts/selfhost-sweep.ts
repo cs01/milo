@@ -79,6 +79,7 @@ async function sweepOne(name: string, tmpDir: string): Promise<Outcome> {
     const err = (build.stderr + build.stdout).trim();
     const hit = BUCKETS.find(([, re]) => re.test(err));
     const bucket = build.guardKill ? `guard-${build.guardKill}`
+      : /\[guard\] (SIGKILL|killed)/.test(err) ? "guard-shed"
       : build.signal ? `signal-${build.signal}`
       : hit ? hit[0]
       : "other";
@@ -93,7 +94,14 @@ async function sweepOne(name: string, tmpDir: string): Promise<Outcome> {
       name, ok: false,
       // A guard kill is the harness running out of headroom, not the fixture crashing.
       // Conflating the two turned a memory-pressure shed into a reported regression.
-      bucket: r.guardKill ? `guard-${r.guardKill}` : r.signal ? "run-crash" : "output-mismatch",
+      // r.guardKill alone is not enough: when the OS sheds the tree under system
+      // pressure the child dies without this process attributing the kill, and the
+      // run then presents as a plain empty-output mismatch. The guard always says so
+      // on stderr, so that marker is the reliable signal.
+      bucket: r.guardKill ? `guard-${r.guardKill}`
+        : /\[guard\] (SIGKILL|killed)/.test(r.stderr) ? "guard-shed"
+        : r.signal ? "run-crash"
+        : "output-mismatch",
       detail: `want ${JSON.stringify(expected.slice(0, 2))} got ${JSON.stringify(actual.slice(0, 2))}`,
     };
   }

@@ -104,3 +104,13 @@ docs/site/public/install.sh
 # Fuzzer output — regenerated per run, never a source of truth.
 .fuzz-findings*/
 miloio*/
+
+# Generated game assets — 82 MB of downloaded terrain, imagery and planet maps.
+# Regenerate with scripts/fetch-assets.sh; that script (not this repo) is the
+# record of how each one was built. The wildcards also swallow the default-output
+# scratch a bare fetchcity run leaves behind (cities/city.city, city.ortho.png).
+examples/games/flight/cities/*.city
+examples/games/flight/cities/*.ortho.png
+examples/games/apsis/bodies/*.png
+# font.png is a hand-made bitmap font, not a fetched planet map — it stays.
+!examples/games/apsis/bodies/font.png

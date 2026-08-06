@@ -4,8 +4,12 @@ Fly SF, Manhattan, Yosemite, the Grand Canyon and Honolulu — real places from
 SRTM terrain, OSM buildings and aerial imagery, baked into the binary.
 
 ```bash
+scripts/fetch-assets.sh --cities   # the cities are downloaded, not in git
 milo build examples/games/flight/main.milo -o /tmp/flyby --release && /tmp/flyby
 ```
+
+The places are baked into the binary, so the build fails outright without them;
+fetching takes minutes the first time. See [cities/README.md](cities/README.md).
 
 UP/DOWN pitch (up dives; `--natural` flips), LEFT/RIGHT bank, SPACE burner,
 ENTER elsewhere, F fullscreen, ESC quit.

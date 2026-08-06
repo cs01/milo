@@ -29,6 +29,7 @@ last-verified: 2026-07-11
 |---|---|
 | `scripts/lint.ts` | repo linter — smells + auto-`--fix`; run by the pre-commit hook (`--staged`) and manually (`--all`) |
 | `scripts/run-examples.ts` | compiles every example entrypoint (hard gate) + runs those annotated `// @run:` — the "always run the app" gate |
+| `scripts/fetch-assets.sh` | redownloads the game assets that are not in git (FLYBY cities, APSIS planet maps); holds the parameters each committed city was built from |
 | `scripts/agent_review.sh` | cross-model / multi-persona review driver ([docs/agent-review.md](docs/agent-review.md)) |
 | `scripts/guard.ts` | mem/timeout watchdog wrapper for running milo binaries safely |
 | `scripts/selfhost.sh` | rebuild `milo-self` (required before selfhost work; `.bin` is gitignored) |

@@ -7,8 +7,12 @@ and how long you take — until the burn fits in the tank. Then fly the arc you
 drew.
 
 ```bash
+scripts/fetch-assets.sh --bodies   # the planet maps are downloaded, not in git
 milo build examples/games/apsis/main.milo -o /tmp/apsis --release && /tmp/apsis
 ```
+
+The maps are baked into the binary, so the build fails without them. See
+[bodies/README.md](bodies/README.md).
 
 `LEFT`/`RIGHT` sets the departure date and `UP`/`DOWN` the flight time; `S` finds
 the cheapest plan in the window, `ENTER` launches. In flight `[` and `]` change

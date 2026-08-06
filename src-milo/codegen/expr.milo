@@ -2,6 +2,9 @@
 from "std/fs" import {
     readFile
 }
+from "std/path" import {
+    Path
+}
 from "src-milo/ast.milo" import {
     Expr, Stmt, Pattern, StructLitField, Span, Param, MiloType
 }
@@ -7186,16 +7189,31 @@ pub fn genCall(cg: &mut Cgen, name: &string, args: &Vec<Heap<Expr>>, typeArgs: &
     }
     if name == "embedFile" && args.len == 1 {
         var path = ""
+        // Resolve against the file CONTAINING the call, not the entry file: an
+        // imported module embedding "bodies/x.png" means its own bodies/x.png.
+        // cg.sourceDir is the entry's directory, so it points at the wrong tree
+        // the moment the embedding module is reached through an import from
+        // another directory. Mirrors the oracle's lower.ts, which uses span.file.
+        var callerDir = cg.sourceDir.clone()
         match *args[0] {
             Expr.StringLit(s, sp) => {
                 path = s.clone()
+                match sp {
+                    Option.Some(spn) => {
+                        if spn.file.len > 0 {
+                            callerDir = Path.dirname(spn.file)
+                        }
+                    }
+                    Option.None => {
+                    }
+                }
             }
             _ => {
             }
         }
         var full = path.clone()
-        if cg.sourceDir.len > 0 {
-            full = cg.sourceDir.clone() + "/" + path.clone()
+        if callerDir.len > 0 {
+            full = callerDir.clone() + "/" + path.clone()
         }
         var contents = ""
         match readFile(full.clone()) {

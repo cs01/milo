@@ -1808,7 +1808,21 @@ pub fn checkCall(ck: &mut Checker, func: &string, args: &Vec<Heap<Expr>>, typeAr
         let ptName = typeName(paramType)
         // Steer const-int enum-lit payload widths to the param (see
         // checkGenericEnumLit); reset after, matching the struct-field idiom.
-        ck.expectedType = Option.Some(paramType.clone())
+        // Borrows are implicit, so an argument for a `&T`/`&mut T` param is
+        // written bare and the expression being checked has type T, not &T —
+        // hand the hint the pointee. Every consumer matches the bare shape, so
+        // an un-stripped TRef reads as "no hint": `f(v: &Vec<f32>)` called with
+        // `Vec.filled(n, 0.0)` fell back to the literal's own f64 and reported a
+        // Vec<f64>-vs-&Vec<f32> mismatch.
+        var hint = paramType.clone()
+        match paramType.clone() {
+            TypeKind.TRef(pointee, m) => {
+                hint = (*pointee).clone()
+            }
+            _ => {
+            }
+        }
+        ck.expectedType = Option.Some(hint)
         let argType = checkExpr(ck, *args[i])
         ck.expectedType = Option.None
         match paramType {

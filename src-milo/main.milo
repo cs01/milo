@@ -14,7 +14,7 @@ from "std/env" import {
     Env
 }
 from "std/process" import {
-    run
+    run, capture, exePath
 }
 from "std/args" import {
     args
@@ -26,7 +26,7 @@ from "std/pty" import {
     fdIsTerminal
 }
 from "src-milo/tokens.milo" import {
-    Token
+    Token, TriviaKind, tokKindName
 }
 from "src-milo/lexer.milo" import {
     Lexer, tokenize
@@ -101,6 +101,48 @@ pub fn reportCompiled(source: &string, out: &string, elapsedMs: i64) {
     } else {
         print("compiled " + source.clone() + " -> " + out.clone() + " in " + t)
     }
+}
+
+// Mirrors src/version.ts. MILO_BUILD is "dev" in a checkout; the release workflow
+// rewrites it. Unlike the TS driver we do NOT shell out to git for the commit — a
+// compiler that runs a subprocess just to print its own version is a surprise in
+// sandboxes and hooks, and "dev" alone is still true.
+pub let MILO_VERSION = "0.1.0"
+
+pub let MILO_BUILD = "dev"
+
+// Render a token's text on one line: the lex dump is tab-separated, so a raw
+// newline or tab inside a string literal would split one token across two rows.
+pub fn escapeTokenValue(v: &string): string {
+    var out = ""
+    for i in 0..v.len {
+        let c = v[i]
+        if c == 10 {
+            out = out + "\\n"
+        } else if c == 9 {
+            out = out + "\\t"
+        } else if c == 13 {
+            out = out + "\\r"
+        } else if c == 0 {
+            out = out + "\\0"
+        } else if c < 32 || c == 127 {
+            out = out + "\\x" + hexByte(c)
+        } else {
+            out = out + v[i..i + 1].clone()
+        }
+    }
+    return out
+}
+
+pub fn hexByte(c: u8): string {
+    let digits = "0123456789abcdef"
+    let hi = (c / 16) as i64
+    let lo = (c % 16) as i64
+    return digits[hi..hi + 1].clone() + digits[lo..lo + 1].clone()
+}
+
+pub fn versionString(): string {
+    return "milo " + MILO_VERSION + " (" + MILO_BUILD + ", self-hosted)"
 }
 
 pub fn tmpPath(stem: &string, ext: &string): string {
@@ -199,6 +241,154 @@ pub fn reportParseDiagnostics(diags: &Vec<Diagnostic>) {
         }
     }
     eprint("error: " + diags.len.toString() + " parse error(s); not type-checking")
+}
+
+// Parsed `build`/`run` command line. Anything the self-hosted compiler cannot
+// actually honour is REJECTED in parseBuildOpts rather than ignored: the TS driver
+// accepts a wider flag set, and quietly dropping the difference is how
+// `build --release` came to produce an -O2 binary while reporting success.
+pub struct BuildOpts {
+    output: string,
+    // "-O0".."-O3", passed to clang/llc.
+    optFlag: string,
+    emitDebug: bool,
+    sanitize: bool,
+    // Companion translation units (.c/.o/.a/.cpp) and raw linker flags, forwarded
+    // verbatim — the struct-by-value ABI tests link a C peer alongside the IR.
+    extra: string,
+    // `run` only: argv for the compiled program, everything after `--`.
+    childArgs: string,
+}
+
+// Flags the TS driver understands that this compiler does not implement. Naming them
+// individually (rather than falling through to "unknown flag") is the difference
+// between "milo-self can't do that yet" and "you typo'd", which are different bugs.
+pub fn unsupportedBuildFlag(a: &string): string {
+    if a == "--target" || a.startsWith("--target=") {
+        return "cross-compilation (no target selection in the self-hosted driver)"
+    }
+    if a == "--emit-header" {
+        return "C header generation"
+    }
+    if a == "--contract-checks" || a == "--no-contract-checks" {
+        return "contract checking (contract clauses are parsed and discarded)"
+    }
+    if a == "--strip-panic-locations" {
+        return "panic-location stripping"
+    }
+    if a == "--no-entry" {
+        return "entry-point suppression"
+    }
+    if a == "--heap-size" || a.startsWith("--heap-size=") {
+        return "bare-metal heap sizing"
+    }
+    if a == "--max-stack-array" || a.startsWith("--max-stack-array=") {
+        return "stack-array limits"
+    }
+    if a == "--safety" || a == "--allow" || a == "--deny" || a == "--deny-all" {
+        return "the capability/safety policy engine"
+    }
+    if a == "--overflow-checks" || a == "--no-overflow-checks" {
+        return "overflow-check selection (always on except in @wrapping fns)"
+    }
+    return ""
+}
+
+// `start` is the argv index of the first option (past the command and source file).
+// `forRun` splits trailing positionals into child argv instead of linker inputs.
+pub fn parseBuildOpts(argv: &Vec<string>, start: i64, forRun: bool): BuildOpts {
+    var o = BuildOpts {
+        output: "a.out", optFlag: "-O2", emitDebug: false, sanitize: false, extra: "", childArgs: "",
+    }
+    var i = start
+    var afterSep = false
+    while i < argv.len {
+        let a = argv[i].clone()
+        if afterSep {
+            o.childArgs = o.childArgs + " " + a
+            i = i + 1
+            continue
+        }
+        if a == "--" {
+            afterSep = true
+            i = i + 1
+            continue
+        }
+        if a == "-o" && (i + 1) < argv.len {
+            o.output = argv[i + 1].clone()
+            i = i + 2
+            continue
+        }
+        if a == "--release" {
+            o.optFlag = "-O3"
+            i = i + 1
+            continue
+        }
+        if a == "--debug" {
+            o.optFlag = "-O0"
+            i = i + 1
+            continue
+        }
+        // --fast is -O0 plus check elision in the TS driver; only the -O0 half is
+        // implemented here, so it is not offered under that name at all.
+        if a == "-O0" || a == "-O1" || a == "-O2" || a == "-O3" {
+            o.optFlag = a.clone()
+            i = i + 1
+            continue
+        }
+        if a == "-O" && (i + 1) < argv.len {
+            o.optFlag = "-O" + argv[i + 1].clone()
+            i = i + 2
+            continue
+        }
+        if a == "-g" {
+            o.emitDebug = true
+            i = i + 1
+            continue
+        }
+        if a == "--sanitize" {
+            o.sanitize = true
+            i = i + 1
+            continue
+        }
+        if a == "--static-deps" {
+            // Accepted and ignored: the self-hosted driver has no separate dynamic
+            // path to switch away from. Stated rather than silent.
+            eprint("note: --static-deps has no effect in the self-hosted driver")
+            i = i + 1
+            continue
+        }
+        let why = unsupportedBuildFlag(a)
+        if why.len > 0 {
+            eprint("error: '" + a + "' is not supported by the self-hosted compiler: " + why)
+            eprint("  hint: use the TypeScript driver (bun run src/main.ts) for this flag")
+            exit(2)
+        }
+        if a.len > 1 && a[0] == '-' {
+            // `run` forwards an unrecognized flag to the compiled program — it is far
+            // more likely to be the program's own option than a typo, and that is what
+            // the TS driver does. `build` has no child to forward to, so there the
+            // same token can only be a mistake.
+            if forRun {
+                o.childArgs = o.childArgs + " " + a
+                i = i + 1
+                continue
+            }
+            eprint("error: unknown option '" + a + "'")
+            exit(2)
+        }
+        // A bare positional: a link input for both commands, since a C peer is
+        // never something the child program should see on its argv.
+        if a.endsWith(".c") || a.endsWith(".o") || a.endsWith(".a") || a.endsWith(".cpp") {
+            o.extra = o.extra + " " + a
+        } else if forRun {
+            o.childArgs = o.childArgs + " " + a
+        } else {
+            o.extra = o.extra + " " + a
+        }
+        i = i + 1
+    }
+    return o
 }
 
 pub fn compile(path: string): Compiled {
@@ -369,9 +559,19 @@ pub fn sdlConfigFlags(declared: &Vec<string>): string {
 // clang frontend; linking already-emitted IR does not require that frontend.
 // `extra` mirrors src/main.ts's extraLinkFlags: raw, space-prefixed text spliced
 // straight into the link command (companion .c/.o/.a translation units, mainly).
-pub fn linkIr(irFile: &string, output: &string, libs: &string, extra: &string): i32 {
+// `optFlag` is "-O0".."-O3". It used to be hardcoded to -O2 here, which meant
+// `build --release` silently produced an -O2 binary: the flag parsed, the build
+// succeeded, and nothing said the request had been dropped.
+pub fn linkIr(irFile: &string, output: &string, libs: &string, extra: &string, optFlag: &string, emitDebug: bool, sanitize: bool): i32 {
     let objFile = irFile.clone() + ".o"
-    let command = "if command -v clang >/dev/null 2>&1; then clang -Wno-override-module -O2 -o " + output.clone() + " " + irFile.clone() + libs.clone() + extra.clone() + "; else llc -filetype=obj -O2 " + irFile.clone() + " -o " + objFile.clone() + " && cc -o " + output.clone() + " " + objFile + libs.clone() + extra.clone() + "; fi"
+    var cflags = optFlag.clone()
+    if emitDebug {
+        cflags = cflags + " -g"
+    }
+    if sanitize {
+        cflags = cflags + " -fsanitize=address,undefined -fno-omit-frame-pointer"
+    }
+    let command = "if command -v clang >/dev/null 2>&1; then clang -Wno-override-module " + cflags.clone() + " -o " + output.clone() + " " + irFile.clone() + libs.clone() + extra.clone() + "; else llc -filetype=obj " + optFlag.clone() + " " + irFile.clone() + " -o " + objFile.clone() + " && cc " + cflags + " -o " + output.clone() + " " + objFile + libs.clone() + extra.clone() + "; fi"
     match run(command) {
         Result.Ok(code) => {
             return code
@@ -426,6 +626,10 @@ pub fn main() {
     }
 
     let cmd = argv[1].clone()
+    if cmd == "version" || cmd == "--version" || cmd == "-V" {
+        print(versionString())
+        exit(0)
+    }
     if cmd == "help" || cmd == "--help" || cmd == "-h" {
         print("milo — self-hosted Milo compiler")
         print("")
@@ -433,16 +637,145 @@ pub fn main() {
         print("")
         print("commands:")
         print("  build <file> [-o out]  compile to executable")
-        print("  run <file>             compile and run")
+        print("  run <file> [-- args]   compile and run")
+        print("  emit-obj <file>        compile to a relocatable object (.o)")
         print("  emit-ir <file>         print LLVM IR to stdout")
         print("  check <file>           type-check only")
+        print("  lex <file>             print the token stream")
+        print("  fmt <file...>          format source files (-w to write in place)")
         print("  lsp                    start the language server (stdio, JSON-RPC)")
+        print("  version                print the compiler version")
+        print("")
+        print("build options:")
+        print("  -o <path>              output path")
+        print("  --release              -O3      --debug   -O0      -O0..-O3")
+        print("  -g                     emit debug info")
+        print("  --sanitize             link with ASan/UBSan")
+        print("")
+        // The gap is stated rather than left for a user to discover by having a flag
+        // silently do nothing. These are implemented in the TypeScript driver only.
+        print("not implemented here (use `bun run src/main.ts`):")
+        print("  emit-ast, emit-hir, emit-js, build-lib, test, prove, verify, wcet, safety")
+        print("  api, doc")
+        print("  --target, --emit-header, --heap-size, --safety/--allow/--deny")
         exit(0)
     }
 
     if cmd == "lsp" {
         startServer()
         exit(0)
+    }
+
+    // `fmt` shells out to the ONE formatter (examples/cli-tools/fmt.milo), never a
+    // second implementation — a divergent fallback silently rewrites source on save.
+    //
+    // The TS driver caches the built formatter in bin/milo-fmt and guards it with an
+    // mtime staleness check. std/fs exposes no mtime, so this driver cannot prove a
+    // cached binary is fresh — and a stale formatter is not a degraded formatter, it
+    // is a wrong one (one already shipped a bug into 16 files via the pre-commit
+    // hook). So it rebuilds every time and pays ~300ms rather than guess.
+    if cmd == "fmt" {
+        var files: Vec<string> = Vec.new()
+        var write = false
+        var fi: i64 = 2
+        while fi < argv.len {
+            if argv[fi] == "-w" {
+                write = true
+            } else if argv[fi].len > 1 && argv[fi][0] == '-' {
+                eprint("error: unknown option '" + argv[fi].clone() + "'")
+                exit(2)
+            } else {
+                files.push(argv[fi].clone())
+            }
+            fi = fi + 1
+        }
+        if files.len == 0 {
+            eprint("error: no files to format")
+            exit(1)
+        }
+        // The formatter source lives with the COMPILER, not with the file being
+        // formatted — `milo fmt /tmp/x.milo` must still find it. Try the file's own
+        // project root first (a checkout formatting its own sources), then walk up
+        // from this executable.
+        var fmtSrc = Path.join(findStdlibRoot(Path.dirname(files[0].clone())), "examples/cli-tools/fmt.milo")
+        if !pathExists(fmtSrc) {
+            match exePath() {
+                Result.Ok(exe) => {
+                    var dir = Path.dirname(exe)
+                    var depth: i64 = 0
+                    while depth < 32 {
+                        let candidate = Path.join(dir.clone(), "examples/cli-tools/fmt.milo")
+                        if pathExists(candidate) {
+                            fmtSrc = candidate
+                            break
+                        }
+                        let parent = Path.dirname(dir.clone())
+                        if parent == dir {
+                            break
+                        }
+                        dir = parent
+                        depth = depth + 1
+                    }
+                }
+                Result.Err(e) => {
+                }
+            }
+        }
+        if !pathExists(fmtSrc) {
+            eprint("error: formatter source (examples/cli-tools/fmt.milo) not found")
+            eprint("  hint: set MILO_ROOT to the checkout containing it")
+            exit(1)
+        }
+        let fmtBin = tmpPath("fmt", "")
+        let built = compile(fmtSrc.clone())
+        let fmtIr = tmpPath("fmtir", ".ll")
+        let _ = writeFile(fmtIr, built.ir)
+        let bstatus = linkIr(fmtIr, fmtBin, detectLibs(built.ir, getHostTarget().os, built.linkLibs, sdlConfigFlags(built.linkLibs)), "", "-O2", false, false)
+        if bstatus != 0 {
+            eprint("error: could not build the formatter from " + fmtSrc)
+            exit(1)
+        }
+        // Prove the formatter this compiler just built actually works before pointing
+        // it at the user's source. milo-self currently MISCOMPILES fmt.milo — the
+        // binary emits a run of NUL bytes instead of formatted text — and `fmt -w`
+        // rewrites in place, so an unchecked run would silently destroy every file
+        // named on the command line. Fail closed: a formatter that cannot reproduce a
+        // canonical probe is not a degraded formatter, it is a corrupting one.
+        let probePath = tmpPath("fmtprobe", ".milo")
+        let probe = "fn main() {\n    print(\"ok\")\n}\n"
+        let _p = writeFile(probePath, probe.clone())
+        var probeOut = ""
+        match capture(fmtBin.clone() + " " + probePath.clone()) {
+            Result.Ok(t) => {
+                probeOut = t
+            }
+            Result.Err(e) => {
+                probeOut = ""
+            }
+        }
+        if probeOut != probe {
+            eprint("error: the formatter built by this compiler failed its self-check")
+            eprint("  the built binary did not reproduce a canonical input, so running it")
+            eprint("  could corrupt your source (fmt -w rewrites files in place)")
+            eprint("  hint: format with the TypeScript driver — bun run src/main.ts fmt")
+            exit(1)
+        }
+        var cmdline = fmtBin.clone()
+        if write {
+            cmdline = cmdline + " -w"
+        }
+        for i in 0..files.len {
+            cmdline = cmdline + " " + files[i].clone()
+        }
+        var st: i32 = 127
+        match run(cmdline) {
+            Result.Ok(c) => {
+                st = c
+            }
+            Result.Err(e) => {
+            }
+        }
+        exit(st)
     }
 
     if argv.len < 3 {
@@ -505,6 +838,46 @@ pub fn main() {
         exit(0)
     }
 
+    // `lex` and `fmt` take a file but do not go through compile(), so they sit before
+    // the check/build family. Output format mirrors src/main.ts's `lex` exactly —
+    // tab-separated KIND, escaped value, line:col — because scripts diff the two.
+    if cmd == "lex" {
+        var src = ""
+        match readFile(source.clone()) {
+            Result.Ok(t) => {
+                src = t
+            }
+            Result.Err(e) => {
+                eprint("error: cannot read file '" + source + "'")
+                exit(1)
+            }
+        }
+        let toks = tokenize(src)
+        for i in 0..toks.len {
+            for t in 0..toks[i].leadingTrivia.len {
+                match toks[i].leadingTrivia[t].kind {
+                    TriviaKind.Blank => {
+                        print("L_BLANK\t\t" + toks[i].leadingTrivia[t].line.toString())
+                    }
+                    TriviaKind.Comment => {
+                        print("L_COMMENT\t" + escapeTokenValue(toks[i].leadingTrivia[t].text) + "\t" + toks[i].leadingTrivia[t].line.toString())
+                    }
+                }
+            }
+            print(tokKindName(toks[i].kind) + "\t" + escapeTokenValue(toks[i].value) + "\t" + toks[i].line.toString() + ":" + toks[i].col.toString())
+            for t in 0..toks[i].trailingTrivia.len {
+                match toks[i].trailingTrivia[t].kind {
+                    TriviaKind.Comment => {
+                        print("T_COMMENT\t" + escapeTokenValue(toks[i].trailingTrivia[t].text) + "\t" + toks[i].trailingTrivia[t].line.toString())
+                    }
+                    TriviaKind.Blank => {
+                    }
+                }
+            }
+        }
+        exit(0)
+    }
+
     if cmd == "check" {
         // Type-check only, no codegen
         var src = ""
@@ -561,58 +934,63 @@ pub fn main() {
 
     if cmd == "build" {
         let buildStart = now()
+        // Parse the command line BEFORE compiling: a rejected flag should fail in
+        // milliseconds, not after a full compile whose result is then discarded.
+        let opts = parseBuildOpts(argv, 3, false)
         let comp = compile(source.clone())
-        // Determine output name. Any other positional argument (companion .c/.o/.a/.cpp
-        // translation units — struct-by-value ABI tests link a C peer alongside the
-        // generated IR) is forwarded to the linker verbatim, mirroring src/main.ts's
-        // extraLinkFlags. Silently dropping these compiled fine but failed to link.
-        var output = "a.out"
-        var extra = ""
-        var i: i64 = 3
-        while i < argv.len {
-            if argv[i] == "-o" && (i + 1) < argv.len {
-                output = argv[i + 1].clone()
-                i = i + 2
-            } else {
-                extra = extra + " " + argv[i].clone()
-                i = i + 1
-            }
-        }
         // Write IR to a temp file and link it with the available LLVM/C tools.
         let irFile = tmpPath("out", ".ll")
         let _ = writeFile(irFile, comp.ir)
-        let status = linkIr(irFile, output, detectLibs(comp.ir, getHostTarget().os, comp.linkLibs, sdlConfigFlags(comp.linkLibs)), extra)
+        let status = linkIr(irFile, opts.output, detectLibs(comp.ir, getHostTarget().os, comp.linkLibs, sdlConfigFlags(comp.linkLibs)), opts.extra, opts.optFlag, opts.emitDebug, opts.sanitize)
         if status != 0 {
             eprint("error: linker failed (exit " + status.toString() + ")")
             exit(1)
         }
-        reportCompiled(source.clone(), output, elapsed(buildStart, now()).toMillis())
+        reportCompiled(source.clone(), opts.output, elapsed(buildStart, now()).toMillis())
+        exit(0)
+    }
+
+    // Compile to a relocatable object without linking, so a Milo module can be fed
+    // to someone else's link step.
+    if cmd == "emit-obj" {
+        let opts = parseBuildOpts(argv, 3, false)
+        var out = opts.output.clone()
+        if out == "a.out" {
+            out = Path.basename(source.clone())
+            if out.endsWith(".milo") {
+                out = out.substr(0, out.len - 5)
+            }
+            out = out + ".o"
+        }
+        let comp = compile(source.clone())
+        let irFile = tmpPath("out", ".ll")
+        let _ = writeFile(irFile, comp.ir)
+        let cmdline = "if command -v clang >/dev/null 2>&1; then clang -Wno-override-module " + opts.optFlag.clone() + " -c -o " + out.clone() + " " + irFile.clone() + "; else llc -filetype=obj " + opts.optFlag.clone() + " " + irFile.clone() + " -o " + out.clone() + "; fi"
+        var status: i32 = 127
+        match run(cmdline) {
+            Result.Ok(c) => {
+                status = c
+            }
+            Result.Err(e) => {
+            }
+        }
+        if status != 0 {
+            eprint("error: object emission failed (exit " + status.toString() + ")")
+            exit(1)
+        }
+        print("compiled " + source.clone() + " -> " + out)
         exit(0)
     }
 
     if cmd == "run" {
+        let opts = parseBuildOpts(argv, 3, true)
         let comp = compile(source.clone())
         let irFile = tmpPath("out", ".ll")
         let _ = writeFile(irFile, comp.ir)
         let binary = tmpPath("run", "")
-        // Split positionals the same way `build` does: a companion translation unit
-        // (.c/.o/.a/.cpp) is a link input, not something the running program should
-        // ever see on its argv. Everything else forwards to the child as before.
-        var extra = ""
-        var childArgs = ""
-        var ai: i64 = 3
-        while ai < argv.len {
-            let a = argv[ai].clone()
-            if a == "--" {
-                // separator only — skip, don't forward or link it
-            } else if a.endsWith(".c") || a.endsWith(".o") || a.endsWith(".a") || a.endsWith(".cpp") {
-                extra = extra + " " + a
-            } else {
-                childArgs = childArgs + " " + a
-            }
-            ai = ai + 1
-        }
-        let status = linkIr(irFile, binary, detectLibs(comp.ir, getHostTarget().os, comp.linkLibs, sdlConfigFlags(comp.linkLibs)), extra)
+        let extra = opts.extra.clone()
+        let childArgs = opts.childArgs.clone()
+        let status = linkIr(irFile, binary, detectLibs(comp.ir, getHostTarget().os, comp.linkLibs, sdlConfigFlags(comp.linkLibs)), extra, opts.optFlag, opts.emitDebug, opts.sanitize)
         if status != 0 {
             eprint("error: linker failed")
             exit(1)

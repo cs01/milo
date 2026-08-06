@@ -51,6 +51,7 @@ Generated from `std/**/*.milo` doc-comments — do not edit by hand.
 - [std/pbkdf2](./pbkdf2.md)
 - [std/platform.darwin](./platform.darwin.md)
 - [std/platform.linux](./platform.linux.md)
+- [std/platform.wasm](./platform.wasm.md)
 - [std/platform.windows](./platform.windows.md)
 - [std/png](./png.md)
 - [std/pool](./pool.md)

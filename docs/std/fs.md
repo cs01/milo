@@ -129,6 +129,26 @@ multibyte UTF-8 compares bytes, not code points.
 Nothing here is anchored to a filesystem, so a leading `/`, `.`, or `..` is an
 ordinary segment and dotfiles are not special-cased.
 
+### `globMatchSegment`
+
+```milo
+pub fn globMatchSegment(pat: &string, text: &string): bool
+```
+
+Match one path segment (no '/' inside either side). Single backtrack point,
+which is enough because the segment has no separator constraint to violate:
+if a later '*' fails, widening an earlier '*' can never help.
+
+### `globMatchSplitPattern`
+
+```milo
+pub fn globMatchSplitPattern(patSegs: &Vec<string>, text: &string): bool
+```
+
+The same match with the pattern's segments already split out. A caller testing one
+pattern against thousands of paths — an ignore-rule set against a directory walk —
+splits the pattern once instead of once per path.
+
 ### `hardLink`
 
 ```milo

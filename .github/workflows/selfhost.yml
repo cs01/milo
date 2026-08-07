@@ -71,18 +71,14 @@ jobs:
           MILO_SWEEP_CONCURRENCY: '1'
         run: bun scripts/selfhost-sweep.ts --check
 
-  # milo-self has never been built on Linux. Not "is known to fail" — never attempted, by
-  # anyone, anywhere. That is the single biggest hole in the claim that milo-self can
-  # outlive the TypeScript compiler: freezing src/ with one proven host strands every
-  # other platform.
-  #
-  # continue-on-error until it is green, deliberately: this is a probe whose job is to
-  # ANSWER a question, and a red main blocks unrelated work while it is being answered.
-  # The flag comes off the moment it passes — leaving it on after that would turn a real
-  # gate into decoration.
+  # Until 2026-08-07 milo-self had never been built on Linux — not "known to fail", never
+  # attempted, by anyone. That was the biggest hole in the claim that milo-self can outlive
+  # the TypeScript compiler: freezing src/ with one proven host strands every other
+  # platform. It passed on the first attempt and has been green since, so this is a real
+  # gate, not a probe. milo-self now has two proven hosts and this job is what keeps the
+  # second one honest.
   bootstrap-linux:
     runs-on: ubuntu-latest
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
       - uses: oven-sh/setup-bun@v2

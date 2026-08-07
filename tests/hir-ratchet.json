@@ -1,0 +1,13 @@
+{
+  "counts": {
+    "astTypeStr": 19,
+    "resolveAstTy": 21,
+    "placeTypeStr": 13,
+    "hintTy": 87,
+    "Unlowered": 0
+  },
+  "total": 140,
+  "commit": "832c4a49",
+  "reason": "",
+  "note": "src-milo backend sites that re-derive frontend knowledge. Monotone down to zero. bun scripts/hir-ratchet.ts --check"
+}

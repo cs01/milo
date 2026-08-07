@@ -95,6 +95,67 @@ pub struct ImplInfo {
     methods: HashMap<string, FnSig>,
 }
 
+// -- for-in classification --
+
+// Which loop shape a `for x in e` compiles to. The checker already decides this to
+// declare the binding's type; recording the answer is what stops the backend deciding
+// it a second time from the syntax (see docs/plans/hir-migration.md).
+pub enum ForInKind {
+    FRange,
+    FVec,
+    FString,
+    FHashMap,
+    FArray,
+    // a struct with `Type$next(&mut Self): Option<T>`
+    FIterator,
+    // `for x in ch` drains a Channel via recv() until it reports closed. src/hir.ts has
+    // no variant of its own for this — it lowers onto ForIterator, which is why
+    // okVariant exists below: the sentinel is Result.Ok here and Option.Some there.
+    FChannel,
+    // `for line in s.lines()` / `for f in s.splitView(sep)`
+    FStrView,
+}
+
+// Everything lowering needs to build the HStmt for a `for-in`, keyed by the ITERABLE
+// expression's node id. Statements have no id of their own, and the iterable is unique
+// per loop, so it stands in as the key.
+//
+// A missing entry is fail-closed, not a default: lowering aborts naming the loop rather
+// than guessing a shape, because every wrong guess here is a miscompile (iterating a
+// HashMap's raw slot array as if it were a Vec) and not a diagnostic.
+pub struct ForInInfo {
+    kind: ForInKind,
+    // the loop bindings, exactly as declared into the loop scope
+    varTy: TypeKind,
+    varTy2: Option<TypeKind>,
+    // FIterator/FChannel: the mangled advance method and the enum it hands back
+    nextMethod: string,
+    resultEnum: string,
+    // the variant that means "kept going" — "Some" for an iterator, "Ok" for a channel
+    okVariant: string,
+    // FStrView: "lines" or "splitView"
+    mode: string,
+    // `@iter`: the field the loop actually walks. Empty when the iterable is walked
+    // directly. Recorded rather than re-derived so a newtype over a container is
+    // resolved once, on the checker's own field table.
+    delegateField: string,
+    delegateFieldTy: TypeKind,
+}
+
+pub fn forInInfo(kind: ForInKind, varTy: TypeKind): ForInInfo {
+    return ForInInfo {
+        kind: kind,
+        varTy: varTy,
+        varTy2: Option.None,
+        nextMethod: "",
+        resultEnum: "",
+        okVariant: "",
+        mode: "",
+        delegateField: "",
+        delegateFieldTy: TypeKind.TUnknown,
+    }
+}
+
 // A monomorphized struct instantiation, recorded so generic impls that
 // register later (phase 2) can replay against it.
 pub struct StructInst {
@@ -179,6 +240,10 @@ pub struct Checker {
     // more than once (speculative re-walks) ends up with the type from its final walk,
     // which is the one the rest of the pass acted on.
     exprTypes: HashMap<u32, TypeKind>,
+    // The loop shape checkForIn picked, keyed by the ITERABLE expression's node id —
+    // see ForInInfo. Statements carry no id, and lowering needs this to choose between
+    // the four HStmt for-loop variants without re-running the classification.
+    forIns: HashMap<u32, ForInInfo>,
     // Borrow-liveness tracking for views (&[T]/&string) — see checker/borrow.milo.
     // Name-keyed rather than living on VarInfo: VarInfo is looked up BY VALUE
     // (lookup returns a copy; mutation goes through setVar*-and-reinsert), so a
@@ -254,6 +319,7 @@ pub fn newChecker(): Checker {
         pendingClosureRet: Option.None,
         jsonCapableStructs: HashMap.new(),
         exprTypes: HashMap.new(),
+        forIns: HashMap.new(),
         borrowedPaths: HashMap.new(),
         scopeFreezes: Vec.new(),
         viewReturnFields: HashMap.new(),

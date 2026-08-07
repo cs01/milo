@@ -9,7 +9,7 @@ from "src-milo/checker/types.milo" import {
     isNumeric, isInteger, isFloat, isCopy, needsDrop, containsUnknown, isViewReturnType,
 }
 from "src-milo/checker/state.milo" import {
-    Checker, VarInfo, FnSig, FnParam, StructInfo, EnumInfo, VariantInfo,
+    Checker, VarInfo, FnSig, FnParam, StructInfo, EnumInfo, VariantInfo, ForInKind, ForInInfo, forInInfo,
     Diagnostic, error, errorHint, warn, pushScope, popScope, declare, lookup, setVarMoved, setVarRead, hasErrors,
     normalizeEnumNames, stmtTerminates, snapshotMoves, restoreMoves, orMoves, nestedRef, hasAttr, MoveSnapshot,
 }
@@ -826,6 +826,28 @@ pub fn checkStringViewForIn(ck: &mut Checker, varName: &string, varName2: &Optio
     }
 }
 
+// Mangled name of the enum an inherent method returns ("Option_i64", "Result_u8_string").
+// Empty when the method or its enum return can't be found — the caller only reaches here
+// having already confirmed the method exists, so empty means the return isn't an enum at
+// all, which lowering treats as fatal rather than guessing a tag layout.
+fn enumNameOf(ck: &Checker, typeName: &string, method: &string): string {
+    if !ck.inherentImpls.contains(typeName) {
+        return ""
+    }
+    let impls = ck.inherentImpls.get(typeName)!
+    if !impls.methods.contains(method) {
+        return ""
+    }
+    match impls.methods.get(method)!.ret {
+        TypeKind.TEnum(n) => {
+            return n.clone()
+        }
+        _ => {
+            return ""
+        }
+    }
+}
+
 pub fn checkForIn(ck: &mut Checker, varName: &string, varName2: &Option<string>, iterable: &ExprNode, body: &Vec<Heap<Stmt>>, fnRetType: &TypeKind, span: &Option<Span>) {
     // Range expression handled specially
     match iterable.kind {
@@ -857,6 +879,7 @@ pub fn checkForIn(ck: &mut Checker, varName: &string, varName2: &Option<string>,
                 }
             }
 
+            ck.forIns.insert(iterable.id, forInInfo(ForInKind.FRange, varType.clone()))
             pushScope(ck)
             declare(ck, varName.clone(), VarInfo {
                 ty: varType,
@@ -903,6 +926,13 @@ pub fn checkForIn(ck: &mut Checker, varName: &string, varName2: &Option<string>,
                     }
                 }
                 if recvIsString {
+                    // Keyed by the METHOD CALL node even though that node is never
+                    // checked as an expression (lines/splitView are loop-only forms,
+                    // not real methods) — it is still the `iterable` lowering will
+                    // hand to this lookup.
+                    var svi = forInInfo(ForInKind.FStrView, TypeKind.TRef(Heap(tyString()), false))
+                    svi.mode = mMethod.clone()
+                    ck.forIns.insert(iterable.id, svi)
                     checkStringViewForIn(ck, varName, varName2, *mObj, mMethod, mArgs, body, fnRetType, span)
                     return
                 }
@@ -955,6 +985,8 @@ pub fn checkForIn(ck: &mut Checker, varName: &string, varName2: &Option<string>,
         _ => {
         }
     }
+    var delegField = ""
+    var delegFieldTy = tyUnknown()
     match structTyForIter {
         TypeKind.TStruct(sname) => {
             if ck.structs.contains(sname) {
@@ -962,6 +994,8 @@ pub fn checkForIn(ck: &mut Checker, varName: &string, varName2: &Option<string>,
                 for fi in 0..sinfo.fields.len {
                     if sinfo.fields[fi].iterDelegate {
                         iterType = sinfo.fields[fi].ty.clone()
+                        delegField = sinfo.fields[fi].name.clone()
+                        delegFieldTy = sinfo.fields[fi].ty.clone()
                     }
                 }
             }
@@ -1005,10 +1039,30 @@ pub fn checkForIn(ck: &mut Checker, varName: &string, varName2: &Option<string>,
     pushScope(ck)
     ck.loopDepth = ck.loopDepth + 1
 
+    // Filled in by whichever branch below claims this loop, then recorded against the
+    // iterable's node id. Seeded with the "cannot iterate" shape so a branch that
+    // errors out leaves no entry claiming a shape it never picked — lowering treats a
+    // missing entry as fatal, and an already-errored program never reaches lowering.
+    var finfo = forInInfo(ForInKind.FVec, tyUnknown())
+    var finfoValid = false
+    finfo.delegateField = delegField
+    finfo.delegateFieldTy = delegFieldTy
+
     // Determine loop variable type based on collection type
     match iterType {
         TypeKind.TVec(elem) => {
             let elemRef = TypeKind.TRef(Heap(elem.clone()), false)
+            finfoValid = true
+            finfo.kind = ForInKind.FVec
+            match varName2 {
+                Option.Some(name2) => {
+                    finfo.varTy = tyI64()
+                    finfo.varTy2 = Option.Some(elemRef.clone())
+                }
+                Option.None => {
+                    finfo.varTy = elemRef.clone()
+                }
+            }
             match varName2 {
                 Option.Some(name2) => {
                     declare(ck, varName.clone(), VarInfo {
@@ -1030,6 +1084,17 @@ pub fn checkForIn(ck: &mut Checker, varName: &string, varName2: &Option<string>,
         }
         TypeKind.TString => {
             let byteType = tyU8()
+            finfoValid = true
+            finfo.kind = ForInKind.FString
+            match varName2 {
+                Option.Some(name2) => {
+                    finfo.varTy = tyI64()
+                    finfo.varTy2 = Option.Some(tyU8())
+                }
+                Option.None => {
+                    finfo.varTy = tyU8()
+                }
+            }
             match varName2 {
                 Option.Some(name2) => {
                     declare(ck, varName.clone(), VarInfo {
@@ -1052,6 +1117,10 @@ pub fn checkForIn(ck: &mut Checker, varName: &string, varName2: &Option<string>,
         TypeKind.THashMap(key, val) => {
             let keyRef = TypeKind.TRef(Heap(key.clone()), false)
             let valRef = TypeKind.TRef(Heap(val.clone()), false)
+            finfoValid = true
+            finfo.kind = ForInKind.FHashMap
+            finfo.varTy = keyRef.clone()
+            finfo.varTy2 = Option.Some(valRef.clone())
             declare(ck, varName.clone(), VarInfo {
                 ty: keyRef, mutable: false, moved: false, borrowed: false, read: false, span: cloneSpan(span)
             }
@@ -1069,6 +1138,17 @@ pub fn checkForIn(ck: &mut Checker, varName: &string, varName2: &Option<string>,
         }
         TypeKind.TArray(elem, size) => {
             let elemRef = TypeKind.TRef(Heap(elem.clone()), false)
+            finfoValid = true
+            finfo.kind = ForInKind.FArray
+            match varName2 {
+                Option.Some(name2) => {
+                    finfo.varTy = tyI64()
+                    finfo.varTy2 = Option.Some(elemRef.clone())
+                }
+                Option.None => {
+                    finfo.varTy = elemRef.clone()
+                }
+            }
             match varName2 {
                 Option.Some(name2) => {
                     declare(ck, varName.clone(), VarInfo {
@@ -1101,6 +1181,12 @@ pub fn checkForIn(ck: &mut Checker, varName: &string, varName2: &Option<string>,
                 }
             }
             if isChan {
+                finfoValid = true
+                finfo.kind = ForInKind.FChannel
+                finfo.varTy = elemTy.clone()
+                finfo.nextMethod = sname.clone() + "$recv"
+                finfo.resultEnum = enumNameOf(ck, sname, "recv")
+                finfo.okVariant = "Ok"
                 declare(ck, varName.clone(), VarInfo {
                     ty: elemTy, mutable: false, moved: false, borrowed: false, read: false, span: cloneSpan(span)
                 }
@@ -1115,6 +1201,12 @@ pub fn checkForIn(ck: &mut Checker, varName: &string, varName2: &Option<string>,
                 }
                 match iterElem {
                     Option.Some(t) => {
+                        finfoValid = true
+                        finfo.kind = ForInKind.FIterator
+                        finfo.varTy = t.clone()
+                        finfo.nextMethod = sname.clone() + "$next"
+                        finfo.resultEnum = enumNameOf(ck, sname, "next")
+                        finfo.okVariant = "Some"
                         declare(ck, varName.clone(), VarInfo {
                             ty: t, mutable: false, moved: false, borrowed: false, read: false, span: cloneSpan(span)
                         }
@@ -1131,6 +1223,10 @@ pub fn checkForIn(ck: &mut Checker, varName: &string, varName2: &Option<string>,
                 error(ck, "cannot iterate over type '" + typeName(iterType) + "'", cloneSpan(span))
             }
         }
+    }
+
+    if finfoValid {
+        ck.forIns.insert(iterable.id, finfo)
     }
 
     for s in body {

@@ -5,6 +5,9 @@ from "src-milo/tokens.milo" import {
 from "src-milo/ast.milo" import {
     MiloType, StructDecl, EnumDecl, Function
 }
+from "src-milo/checker/types.milo" import {
+    TypeKind
+}
 
 // -- Value returned by expression codegen --
 
@@ -1510,4 +1513,100 @@ pub fn astTypeStr(ty: &MiloType): string {
         return stars + base
     }
     return base
+}
+
+// -- Checker type → backend type string --
+
+// The replacement for `resolveTyStr(cg, astTypeStr(t))`. Same output vocabulary as
+// astTypeStr ("i64", "string", "Vec<T>", "HashMap<K,V>", "Heap<T>", "*u8", "fn:R", and
+// a bare mangled struct/enum name) — but read off the type the CHECKER inferred instead
+// of reconstructed from the syntax that produced it.
+//
+// The difference that matters is generics. astTypeStr's own comment records that it
+// cannot reconstruct a monomorphized name: `Result<string>` is written with one type
+// argument and registers as `Result_string_string` because E defaults, so the syntactic
+// path has to guess and then be rescued by resolveTyStr's table lookups. TStruct/TEnum
+// already carry the mangled name the checker registered, so there is nothing to guess.
+//
+// Aborts on TUnknown rather than returning "". The empty string is the value 33 sites in
+// this backend produce on failure and that callers read as "skip" — reintroducing it here
+// would carry that silent-skip class straight into the typed pipeline. `what` names the
+// use site so the abort points at the code, not just the type.
+pub fn tyStr(cg: &Cgen, t: &TypeKind, what: &string): string {
+    match t {
+        TypeKind.TInt(bits, signed, lo, hi) => {
+            var pfx = "u"
+            if signed {
+                pfx = "i"
+            }
+            return pfx + bits.toString()
+        }
+        TypeKind.TFloat(bits) => {
+            return "f" + bits.toString()
+        }
+        TypeKind.TBool => {
+            return "bool"
+        }
+        TypeKind.TVoid => {
+            return "void"
+        }
+        TypeKind.TString => {
+            return "string"
+        }
+        // llType is depth-agnostic (any leading '*' is one opaque ptr), but the star
+        // count still has to survive so the string round-trips — same rule astTypeStr
+        // follows for ty.ptrDepth.
+        TypeKind.TPtr(inner) => {
+            return "*" + tyStr(cg, *inner, what)
+        }
+        // Ref-ness never reaches a backend type string: a `&Board` param and a by-value
+        // `Board` share one string today, and second-class references mean the backend
+        // never has to tell them apart at the type level.
+        TypeKind.TRef(inner, mutable) => {
+            return tyStr(cg, *inner, what)
+        }
+        // An interface name is already its own backend type (%Iface, the fat pointer),
+        // so structs and interfaces both pass through as the bare registered name.
+        TypeKind.TStruct(name) => {
+            return name.clone()
+        }
+        TypeKind.TEnum(name) => {
+            return name.clone()
+        }
+        // Heap<Interface> IS the interface fat pointer (its data ptr is heap-allocated),
+        // so it collapses to the interface — otherwise llType gives a plain ptr and the
+        // vtable slot is lost. Mirrors resolveTyStr's Heap branch.
+        TypeKind.THeap(inner) => {
+            let hinner = tyStr(cg, *inner, what)
+            if cg.interfaces.contains(hinner) {
+                return hinner
+            }
+            return "Heap<" + hinner + ">"
+        }
+        TypeKind.TVec(elem) => {
+            return "Vec<" + tyStr(cg, *elem, what) + ">"
+        }
+        TypeKind.THashMap(k, v) => {
+            return "HashMap<" + tyStr(cg, *k, what) + "," + tyStr(cg, *v, what) + ">"
+        }
+        // A fixed array lowers onto the Vec runtime — same {ptr,len,cap} header, so
+        // len/index/iterate/index-assign all reuse the Vec paths. The size is dropped
+        // here exactly as astTypeStr drops it; anything that needs the size reads the
+        // TArray directly rather than this string.
+        TypeKind.TArray(elem, size) => {
+            return "Vec<" + tyStr(cg, *elem, what) + ">"
+        }
+        // "fn:R" carries the return type so an indirect closure call can recover it —
+        // a fn-typed value otherwise loses R and defaults to i64.
+        TypeKind.TFn(params, ret) => {
+            return "fn:" + tyStr(cg, *ret, what)
+        }
+        TypeKind.TUnknown => {
+            eprint("internal error: no backend type for " + what.clone() + " (checker left it unknown)")
+            unsafe {
+                exit(1)
+            }
+            return ""
+        }
+    }
 }

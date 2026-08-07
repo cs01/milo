@@ -70,7 +70,12 @@ Source → Lexer → Parser → AST → Resolver (imports) → AST (merged) → 
 
 ## Key Rules
 
-- **Self-host is NOT a gate.** `src-milo/` (the self-hosted compiler) may lag the TS compiler in `src/`. Do NOT run selfhost checks (`scripts/selfhost.sh`, `tests/selfhost.test.ts`, `selfhost-sweep.ts`) or block a change on self-host parity — it's a tar pit and we move fast on `src/`. New language/stdlib features land in `src/` + `bun test tests/run.test.ts` only. (The memory-guard rules below still stand — they're OS-safety, not self-host.)
+- **Self-host never gates a `src/` change.** Blocking work in `src/` on self-host parity is a tar pit and is what got `src-milo/` parked for months. A new language/stdlib feature lands in `src/` + `bun test tests/run.test.ts`; `src-milo/` may lag it, and that is fine.
+
+  It DOES gate a `src-milo/` change. `.github/workflows/selfhost.yml` runs the fixpoint, the soundness ratchet and the HIR ratchet on any commit touching `src-milo/`, `std/`, or the selfhost scripts, and sweeps all 587 fixtures nightly — scoped by path precisely so a `src/`-only commit never triggers it. So when you change `src-milo/`, run the gates before pushing:
+  `sh scripts/selfhost.sh`, `sh scripts/selfhost-fixpoint.sh`, `bun scripts/selfhost-rejects.ts --check`, `bun scripts/selfhost-sweep.ts --check` (the sweep is ~48 min — run it once, at the end). The fixpoint is the real one.
+
+  (The memory-guard rules below still stand — they're OS-safety, not self-host.)
 
 - **Memory guards (macOS enforces no rlimits — a runaway allocation crashes the OS):**
   - `.selfhost/milo-self` is a self-guarding wrapper (RSS/timeout watchdog built in);

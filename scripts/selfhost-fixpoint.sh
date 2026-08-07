@@ -7,10 +7,15 @@
 #   stage 3   stage 2 compiles src-milo/main.milo     -> stage3.ll
 #   assert    stage2.ll == stage3.ll
 #
-# THIS IS NOT A GATE. Nothing in CI or `bun test` runs it, and nothing should: per
-# docs/self-hosting.md and long-standing project policy, self-host parity must never block a
-# change in src/. Chasing that parity is what got src-milo parked for months. This exists so
-# the state can be CHECKED cheaply and deliberately, not enforced.
+# This does not gate changes in src/, and must not: chasing self-host parity is what got
+# src-milo parked for months, and that rule stands. It IS run by .github/workflows/selfhost.yml,
+# which is scoped by path to src-milo/, std/ and these scripts — so a src/-only commit never
+# triggers it. What that workflow catches is a src-milo/ change that breaks the bootstrap,
+# which nothing caught while this was hand-run on one machine.
+#
+# Every guard cap below is explicit. The default is min(4096, RAM/4), which enforced a
+# different limit per machine and killed stage 1 on a 7 GB CI runner (cap 1792 MB) while
+# passing on a 16 GB dev Mac. Measured need is under 3 GB for every stage.
 #
 # Run it when you have changed src-milo/ and want to know whether the bootstrap still
 # converges. Takes ~2 minutes.
@@ -63,7 +68,7 @@ stage() {
 
 echo "stage 2: milo-self compiles itself"
 stage "stage 2 emit-ir" "$work/stage2.ll" \
-  env MILO_ROOT="$root" bun "$root/scripts/guard.ts" --mem-mb 4096 --timeout-s 600 -- \
+  env MILO_ROOT="$root" bun "$root/scripts/guard.ts" --mem-mb 3072 --timeout-s 600 -- \
   "$out/milo-self.bin" emit-ir "$root/src-milo/main.milo" > "$work/stage2.ll"
 
 if [ "$asan" -eq 1 ]; then
@@ -84,7 +89,7 @@ ulimit -s 65520 2>/dev/null || true
 
 echo "stage 3: stage 2 compiles itself"
 stage "stage 3 emit-ir" "$work/stage3.ll" \
-  env MILO_ROOT="$root" bun "$root/scripts/guard.ts" --mem-mb 4096 --timeout-s 800 -- \
+  env MILO_ROOT="$root" bun "$root/scripts/guard.ts" --mem-mb 3072 --timeout-s 800 -- \
   "$work/stage2.bin" emit-ir "$root/src-milo/main.milo" > "$work/stage3.ll"
 
 s2=$(wc -l < "$work/stage2.ll" | tr -d ' ')

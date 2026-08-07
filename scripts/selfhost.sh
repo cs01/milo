@@ -16,7 +16,17 @@ root=$(cd "$(dirname "$0")/.." && pwd)
 out="$root/.selfhost"
 mkdir -p "$out"
 
-bun "$root/scripts/guard.ts" --virtual-mem-mb 8192 --timeout-s 300 -- \
+# --mem-mb is explicit, not left to the guard's default. The default is
+# min(4096, RAM/4), so the SAME command enforced a different cap per machine: 4096 MB on a
+# 16 GB dev Mac, 1792 MB on a 7 GB CI runner — where it SIGKILLed this build, produced no
+# milo-self.bin, and surfaced as the fixpoint failing at stage 2 with "No such file or
+# directory". A build's memory need is a property of the build, not of whoever runs it.
+#
+# 3072 is at or below the previous effective cap on every machine that was passing, so this
+# tightens more hosts than it loosens, and it stays under the guard's own half-of-RAM
+# backstop on anything with 8 GB or more. Below that the backstop fires first, which is the
+# correct direction to fail.
+bun "$root/scripts/guard.ts" --mem-mb 3072 --virtual-mem-mb 8192 --timeout-s 300 -- \
   bun run "$root/src/main.ts" build "$root/src-milo/main.milo" -o "$out/milo-self.bin" "$@"
 
 cat > "$out/milo-self" <<EOF

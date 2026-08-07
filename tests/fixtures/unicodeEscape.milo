@@ -1,0 +1,29 @@
+// `\u{...}` is a Unicode scalar, encoded as UTF-8 bytes. It used to lex as a
+// dropped backslash — `"\u{1b}[32m"` became the literal text `u{1b}[32m`, which
+// only shows up as garbage in a terminal, never as a compile error.
+
+fn main() {
+    let esc = "\u{1b}[32mgreen\u{1b}[0m"
+    print(esc.len.toString())
+
+    // multi-byte: 2-byte, 3-byte, 4-byte scalars
+    let wide = "\u{e9}\u{20ac}\u{1F600}"
+    print(wide.len.toString())
+    print(wide)
+
+    // a char literal is one byte, so only the Latin-1 range has a form here
+    let c = '\u{41}'
+    print(c.toString())
+    print('\x7a'.toString())
+
+    // in an f-string, `\u{7b}` must stay literal text and not open interpolation
+    let n = 7
+    print($"{n} \u{7b}braced\u{7d} \u{2713}")
+}
+
+// @expect: 14
+// @expect: 9
+// @expect: é€😀
+// @expect: 65
+// @expect: 122
+// @expect: 7 {braced} ✓

@@ -1,0 +1,7 @@
+// @error: unknown escape sequence '\q'
+// An escape the lexer does not know used to drop its backslash silently, so a
+// typo'd `\u{1b}` shipped as visible garbage instead of failing to compile.
+
+fn main() {
+    print("\q")
+}

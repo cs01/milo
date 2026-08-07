@@ -248,12 +248,18 @@ impl Lexer {
     fn lexChar(self: &mut Self): string {
         self.advance()
         var s: string = "'"
-        if self.pos < self.src.len && self.peek() == 92 {
-            s.push(self.advance())
-            if self.pos < self.src.len {
+        // Run to the closing quote rather than assuming an escape is a backslash
+        // plus exactly one char: `'\u{41}'` and `'\x7a'` are longer than that, and
+        // stopping early spilled their tails back into the token stream as real
+        // tokens — the formatter then reflowed `'\u{41}'` into `'\u {` + a block.
+        while self.pos < self.src.len && self.peek() != 39 {
+            if self.peek() == 92 {
                 s.push(self.advance())
+                if self.pos < self.src.len {
+                    s.push(self.advance())
+                }
+                continue
             }
-        } else if self.pos < self.src.len {
             s.push(self.advance())
         }
         if self.pos < self.src.len && self.peek() == 39 {

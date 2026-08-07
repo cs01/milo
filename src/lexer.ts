@@ -98,7 +98,19 @@ export class Lexer {
       if (this.pos >= this.source.length) this.error("unterminated string", line, col);
       const ch = this.advance();
       if (braceDepth === 0) {
-        if (ch === "\\") { const esc = this.advance(); if (esc === "x") { value += this.lexHexEscape(); } else { value += escapes[esc] ?? esc; } continue; }
+        if (ch === "\\") {
+          const esc = this.advance();
+          if (esc === "x") { value += this.lexHexEscape(); }
+          else if (esc === "u") {
+            const cp = this.lexUnicodeEscape(line, col);
+            // A `\u{7b}` must land on the same sentinel a literal `\{` does, or it
+            // reopens the interpolation-swallowing hole the sentinels exist to close.
+            value += cp === 0x7b ? FSTRING_LBRACE : cp === 0x7d ? FSTRING_RBRACE : String.fromCodePoint(cp);
+          }
+          else if (esc in escapes) { value += escapes[esc]; }
+          else { this.error(`unknown escape sequence '\\${esc}'`, line, col); }
+          continue;
+        }
         if (ch === '"') break;
         if (ch === '{') { braceDepth++; value += ch; continue; }
         value += ch;
@@ -111,6 +123,27 @@ export class Lexer {
     const tok = this.token(TokenKind.FString, value, line, col);
     tok.raw = this.source.slice(start, this.pos);
     return tok;
+  }
+
+  // `\u{H..}` — a Unicode scalar, emitted as its UTF-8 bytes (source text outside a
+  // literal is already carried as codepoints and encoded the same way downstream).
+  // Distinct from `\xNN`, which names one raw byte and bypasses UTF-8 entirely.
+  private lexUnicodeEscape(line: number, col: number): number {
+    if (this.advance() !== "{") this.error("expected '{' after \\u", line, col);
+    let hex = "";
+    while (this.pos < this.source.length && this.peek() !== "}") hex += this.advance();
+    if (this.pos >= this.source.length) this.error("unterminated \\u{...} escape", line, col);
+    this.advance(); // }
+    if (hex.length === 0 || hex.length > 6 || !/^[0-9a-fA-F]+$/.test(hex)) {
+      this.error(`invalid \\u{${hex}}: expected 1-6 hex digits`, line, col);
+    }
+    const cp = parseInt(hex, 16);
+    // Surrogates are not scalars; UTF-8 has no encoding for them, so accepting one
+    // would emit bytes no decoder will accept back.
+    if (cp > 0x10ffff || (cp >= 0xd800 && cp <= 0xdfff)) {
+      this.error(`invalid \\u{${hex}}: not a Unicode scalar value`, line, col);
+    }
+    return cp;
   }
 
   private lexHexEscape(): string {
@@ -132,7 +165,9 @@ export class Lexer {
       if (ch === "\\") {
         const esc = this.advance();
         if (esc === "x") { value += this.lexHexEscape(); }
-        else { value += escapes[esc] ?? esc; }
+        else if (esc === "u") { value += String.fromCodePoint(this.lexUnicodeEscape(line, col)); }
+        else if (esc in escapes) { value += escapes[esc]; }
+        else { this.error(`unknown escape sequence '\\${esc}'`, line, col); }
       } else {
         value += ch;
       }
@@ -149,7 +184,17 @@ export class Lexer {
     if (this.peek() === "\\") {
       this.advance();
       const esc = this.advance();
-      value = escapes[esc] ?? esc.charCodeAt(0);
+      if (esc === "u") {
+        // A char is one byte, so only the Latin-1 range has a single-byte form.
+        const cp = this.lexUnicodeEscape(line, col);
+        if (cp > 0xff) this.error(`\\u{${cp.toString(16)}} does not fit in a char (one byte); use a string`, line, col);
+        value = cp;
+      }
+      // & 0xff strips the PUA offset lexHexEscape adds for bytes >= 0x80; a char is
+      // the byte itself, so it never needs the sentinel a string does.
+      else if (esc === "x") { value = this.lexHexEscape().codePointAt(0)! & 0xff; }
+      else if (esc in escapes) { value = escapes[esc]; }
+      else { this.error(`unknown escape sequence '\\${esc}'`, line, col); }
     } else {
       value = this.advance().charCodeAt(0);
     }

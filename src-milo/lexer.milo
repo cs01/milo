@@ -155,6 +155,76 @@ pub fn lexHexEscape(lex: &mut Lexer): u8 {
     return (hexVal(h1) * 16 + hexVal(h2)) as u8
 }
 
+// `\u{H..}` — a Unicode scalar, appended as its UTF-8 bytes. Distinct from `\xNN`,
+// which names one raw byte and bypasses UTF-8 entirely. Returns the scalar so the
+// char-literal caller can reject the ones that need more than a byte.
+pub fn lexUnicodeEscape(lex: &mut Lexer, line: i32, col: i32): i32 {
+    if advanceChar(lex) != 123 {
+        lexError("expected '{' after \\u", line, col)
+    }
+    var hex: string = ""
+    while lex.pos < lex.src.len && peekChar(lex) != 125 {
+        hex.push(advanceChar(lex))
+    }
+    if lex.pos >= lex.src.len {
+        lexError("unterminated \\u{...} escape", line, col)
+    }
+    advanceChar(lex)
+    if hex.len == 0 || hex.len > 6 {
+        lexError("invalid \\u{" + hex.clone() + "}: expected 1-6 hex digits", line, col)
+    }
+    var cp: i32 = 0
+    var hi: i64 = 0
+    while hi < hex.len {
+        let d = hex[hi]
+        if !((d >= 48 && d <= 57) || (d >= 97 && d <= 102) || (d >= 65 && d <= 70)) {
+            lexError("invalid \\u{" + hex.clone() + "}: expected 1-6 hex digits", line, col)
+        }
+        cp = cp * 16 + (hexVal(d) as i32)
+        hi = hi + 1
+    }
+    // Surrogates are not scalars; UTF-8 has no encoding for them, so accepting one
+    // would emit bytes no decoder will accept back.
+    if cp > 0x10FFFF || (cp >= 0xD800 && cp <= 0xDFFF) {
+        lexError("invalid \\u{" + hex.clone() + "}: not a Unicode scalar value", line, col)
+    }
+    return cp
+}
+
+pub fn pushUtf8(value: &mut string, cp: i32) {
+    if cp < 0x80 {
+        value.push(cp as u8)
+    } else if cp < 0x800 {
+        value.push((0xC0 + (cp / 64)) as u8)
+        value.push((0x80 + (cp % 64)) as u8)
+    } else if cp < 0x10000 {
+        value.push((0xE0 + (cp / 4096)) as u8)
+        value.push((0x80 + ((cp / 64) % 64)) as u8)
+        value.push((0x80 + (cp % 64)) as u8)
+    } else {
+        value.push((0xF0 + (cp / 262144)) as u8)
+        value.push((0x80 + ((cp / 4096) % 64)) as u8)
+        value.push((0x80 + ((cp / 64) % 64)) as u8)
+        value.push((0x80 + (cp % 64)) as u8)
+    }
+}
+
+// An escape this lexer does not know is a lex error, never a silently-dropped
+// backslash: `"\u{1b}[32m"` used to lex as the literal text `u{1b}[32m` and ship
+// escape codes into stdout as garbage, with nothing to look at but the output.
+pub fn isKnownEscape(c: u8, inFString: bool): bool {
+    if c == 110 || c == 116 || c == 114 || c == 92 || c == 34 || c == 48 || c == 120 || c == 117 {
+        return true
+    }
+    return inFString && (c == 123 || c == 125)
+}
+
+pub fn escapeName(c: u8): string {
+    var s: string = "\\"
+    s.push(c)
+    return s
+}
+
 pub fn resolveEscape(c: u8): u8 {
     if c == 110 {
         return 10
@@ -189,8 +259,12 @@ pub fn lexString(lex: &mut Lexer, line: i32, col: i32): Token {
             let esc = advanceChar(lex)
             if esc == 120 {
                 value.push(lexHexEscape(lex))
-            } else {
+            } else if esc == 117 {
+                pushUtf8(value, lexUnicodeEscape(lex, line, col))
+            } else if isKnownEscape(esc, false) {
                 value.push(resolveEscape(esc))
+            } else {
+                lexError("unknown escape sequence '" + escapeName(esc) + "'", line, col)
             }
         } else {
             value.push(ch)
@@ -231,8 +305,18 @@ pub fn lexChar(lex: &mut Lexer, line: i32, col: i32): Token {
         else if esc == 48 {
             value = 0
         } 
+        else if esc == 120 {
+            value = lexHexEscape(lex) as i32
+        } 
+        else if esc == 117 {
+            // A char is one byte, so only the Latin-1 range has a single-byte form.
+            value = lexUnicodeEscape(lex, line, col)
+            if value > 0xFF {
+                lexError("\\u{...} does not fit in a char (one byte); use a string", line, col)
+            }
+        } 
         else {
-            value = esc as i32
+            lexError("unknown escape sequence '" + escapeName(esc) + "'", line, col)
         }
     } else {
         value = advanceChar(lex) as i32
@@ -302,8 +386,24 @@ pub fn lexFString(lex: &mut Lexer, line: i32, col: i32): Token {
                     value.push(0x9D as u8)
                     value.push(0xBD as u8)
                 } 
+                else if esc == 117 {
+                    // A `\u{7b}` must land on the same sentinel `\{` does, or it
+                    // reopens the interpolation hole the sentinels exist to close.
+                    let cp = lexUnicodeEscape(lex, line, col)
+                    if cp == 0x7B {
+                        value.push(0xEF as u8)
+                        value.push(0x9D as u8)
+                        value.push(0xBB as u8)
+                    } else if cp == 0x7D {
+                        value.push(0xEF as u8)
+                        value.push(0x9D as u8)
+                        value.push(0xBD as u8)
+                    } else {
+                        pushUtf8(value, cp)
+                    }
+                } 
                 else {
-                    value.push(esc)
+                    lexError("unknown escape sequence '" + escapeName(esc) + "'", line, col)
                 }
                 continue
             }

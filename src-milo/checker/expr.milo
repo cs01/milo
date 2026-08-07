@@ -557,7 +557,15 @@ pub fn deref(t: &TypeKind): TypeKind {
 
 // -- Main expression checker --
 
+// Records the type before handing it back. The walk already computed it; dropping it on
+// the floor is why the backend has to reconstruct types from syntax.
 pub fn checkExpr(ck: &mut Checker, expr: &ExprNode): TypeKind {
+    let ty = checkExprInner(ck, expr)
+    ck.exprTypes.insert(expr.id, ty.clone())
+    return ty
+}
+
+fn checkExprInner(ck: &mut Checker, expr: &ExprNode): TypeKind {
     match expr.kind {
         Expr.IntLit(val) => {
             return tyI64()

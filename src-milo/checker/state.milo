@@ -172,6 +172,13 @@ pub struct Checker {
     // exist yet at the point its plan is computed — mirrors the TS oracle's
     // jsonCapableStructs pre-pass.
     jsonCapableStructs: HashMap<string, bool>,
+    // The type checkExpr computed for each expression, keyed by ExprNode.id. The backend
+    // otherwise re-derives this from syntax as a string, through a partial function whose
+    // failure value is read as "skip" — see docs/plans/hir-migration.md. Recorded here so
+    // lowering can hand it to codegen instead. Last write wins: a node the checker walks
+    // more than once (speculative re-walks) ends up with the type from its final walk,
+    // which is the one the rest of the pass acted on.
+    exprTypes: HashMap<u32, TypeKind>,
     // Borrow-liveness tracking for views (&[T]/&string) — see checker/borrow.milo.
     // Name-keyed rather than living on VarInfo: VarInfo is looked up BY VALUE
     // (lookup returns a copy; mutation goes through setVar*-and-reinsert), so a
@@ -246,6 +253,7 @@ pub fn newChecker(): Checker {
         expectedType: Option.None,
         pendingClosureRet: Option.None,
         jsonCapableStructs: HashMap.new(),
+        exprTypes: HashMap.new(),
         borrowedPaths: HashMap.new(),
         scopeFreezes: Vec.new(),
         viewReturnFields: HashMap.new(),

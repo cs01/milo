@@ -50,7 +50,10 @@ const COUNTERS = [
   ["resolveAstTy", "resolves an AST type to a backend type string"],
   ["placeTypeStr", "re-derives a place's type; returns \"\" on failure, read as \"skip\""],
   ["hintTy", "threads an expected type down the tree in place of a typed node"],
-  ["Unlowered", "the sanctioned AST escape hatch in HIR — must reach zero"],
+  // Construction sites only. Counting the identifier would also count the variant
+  // declaration, mkUnlowered's own body and its hexprKindName arm — a floor of 4 that
+  // says nothing about how much of codegen still runs on AST.
+  ["mkUnlowered", "the sanctioned AST escape hatch in HIR — must reach zero"],
 ] as const;
 
 function miloFiles(dir: string): string[] {
@@ -81,8 +84,11 @@ for (const [name] of COUNTERS) counts[name] = 0;
 for (const f of files) {
   const src = stripComments(readFileSync(f, "utf-8"));
   for (const [name] of COUNTERS) {
-    const n = (src.match(new RegExp(`\\b${name}\\b`, "g")) ?? []).length;
-    if (n === 0) continue;
+    // `fn mkUnlowered(` is the definition, not a use of the bridge.
+    const uses = src.match(new RegExp(`\\b${name}\\b`, "g")) ?? [];
+    const defs = src.match(new RegExp(`\\bfn\\s+${name}\\b`, "g")) ?? [];
+    const n = uses.length - defs.length;
+    if (n <= 0) continue;
     counts[name] += n;
     const rel = f.slice(MILO_ROOT.length + 1);
     (byFile[name] ??= {})[rel] = n;

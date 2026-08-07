@@ -1,13 +1,13 @@
 {
   "counts": {
-    "astTypeStr": 19,
-    "resolveAstTy": 21,
-    "placeTypeStr": 13,
+    "astTypeStr": 18,
+    "resolveAstTy": 20,
+    "placeTypeStr": 12,
     "hintTy": 87,
-    "Unlowered": 0
+    "mkUnlowered": 0
   },
-  "total": 140,
-  "commit": "832c4a49",
-  "reason": "",
+  "total": 137,
+  "commit": "8d4266b7",
+  "reason": "count call sites only: definitions are not uses, and Unlowered's 4 self-references in hir.milo said nothing about codegen",
   "note": "src-milo backend sites that re-derive frontend knowledge. Monotone down to zero. bun scripts/hir-ratchet.ts --check"
 }

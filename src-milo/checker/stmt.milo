@@ -139,6 +139,11 @@ pub fn checkLetDecl(ck: &mut Checker, name: &string, typeAnno: &Option<MiloType>
         }
         enforceRangeInto(ck, value, hint, span)
         valType = hint
+        // Re-record the initializer node's type as the DECLARED one. Lowering keys
+        // HStmt.Let's type off this node, and checkExpr answers a bare `5` with i64 no
+        // matter what is expected of it — so `let c: i32 = 5` would otherwise hand the
+        // backend an i64 and size the binding's slot wrong.
+        ck.exprTypes.insert(value.id, valType.clone())
     }
 
     // A view-typed binding (`let view = s[0..5]`) keeps whatever it froze
@@ -1534,16 +1539,29 @@ pub fn registerStruct(ck: &mut Checker, decl: &StructDecl) {
 pub fn registerEnum(ck: &mut Checker, decl: &EnumDecl) {
     var variants: HashMap<string, VariantInfo> = HashMap.new()
     var i: i64 = 0
+    // `LDA = 169` sets the tag and counting RESUMES from it — the same rule
+    // registerGenericEnum already applies, and the tag recorded here is the one codegen
+    // emits, so a positional index would make a match arm compare against a number the
+    // constructor never stored.
+    var nextTag: i64 = 0
     while i < decl.variants.len {
         var fields: Vec<TypeKind> = Vec.new()
         for vfield in decl.variants[i].fields {
             fields.push(resolveAstType(ck, vfield))
         }
+        match decl.variants[i].discriminant {
+            Option.Some(d) => {
+                nextTag = d
+            }
+            Option.None => {
+            }
+        }
         variants.insert(decl.variants[i].name.clone(), VariantInfo {
-            tag: i as i32,
+            tag: nextTag as i32,
             fields: fields,
         }
         )
+        nextTag = nextTag + 1
         i = i + 1
     }
     let info = EnumInfo {

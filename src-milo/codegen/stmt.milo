@@ -1,19 +1,30 @@
-// Statement codegen: let/var, assign, if, while, for, match, break/continue
+// Statement codegen: let/var, assign, if, while, for, match, break/continue.
+//
+// The walk is over HStmt — the checker already decided every type and every loop shape
+// here. Expressions still cross into the untyped walk through HExpr.Unlowered, and each
+// crossing is a single explicit match: milo cannot RETURN the `&ExprNode` inside the
+// bridge, so there is no one-line unwrap helper to hide it behind.
 from "src-milo/ast.milo" import {
-    Expr, Stmt, Pattern, MatchArm, Param, MiloType, StructLitField, LiteralKind, Span,
+    Expr, ExprNode, Param, MiloType, LiteralKind, Span,
     cloneOptType, cloneSpan, cloneParams, cloneStmts
 }
+from "src-milo/hir.milo" import {
+    HStmt, HExpr, HExprNode, HMatchArm, HPattern, HBinding, HIterKind, HStrViewMode,
+    hexprAbort
+}
+from "src-milo/checker/types.milo" import {
+    TypeKind, containsUnknown
+}
 from "src-milo/codegen/types.milo" import {
-    astTypeStr,
-    Cgen, Val, Local, CgFnSig, RangeAnno, noRange, rangeOfAnnotation, rangeOfOptAnnotation,
+    Cgen, Val, Local, CgFnSig, RangeAnno, noRange, rangeOfTyK, tyStr,
     nextTemp, nextLabel, emit, emitG, emitLabel, llType, stripPercent, resolveTyStr, ensureMalloc,
-    findLocal, hasLocal, genLoad, isVecTy, unwrapVec,
-    isHashMapTy, hashMapKeyTy, hashMapValTy, hmEntryTy,
-    lookupFieldIndex, lookupFieldType, lookupFieldRange, lookupVariantTag, lookupVariantPayload, lookupFnRet,
+    findLocal, hasLocal, genLoad, isVecTy, unwrapVec, hmEntryTy,
+    lookupFieldIndex, lookupFieldType, lookupFieldRange, lookupVariantTag, lookupVariantPayload,
     isInlineArrTy, inlineArrElem, addrWasMoved, ensureStringTy
 }
 from "src-milo/codegen/expr.milo" import {
-    genExpr, genLvalue, variantStructTy, genOptionWrapIfNeeded, genInterfaceCoerceIfNeeded, genOwnedArg,
+    genExpr, genLvalue, genHExpr, variantStructTy,
+    genOptionWrapIfNeeded, genInterfaceCoerceIfNeeded, genOwnedArg,
     constFoldBool, emitRangeCheck
 }
 from "src-milo/codegen/drops.milo" import {
@@ -83,7 +94,25 @@ pub fn lvalueTypeStr(cg: &mut Cgen, e: &ExprNode, locs: &Vec<Local>): string {
     }
 }
 
-pub fn genAssign(cg: &mut Cgen, target: &ExprNode, value: &ExprNode, locs: &mut Vec<Local>, sigs: &Vec<CgFnSig>, stmtSpan: &Option<Span>) {
+pub fn genAssign(cg: &mut Cgen, target: &HExprNode, value: &HExprNode, locs: &mut Vec<Local>, sigs: &Vec<CgFnSig>) {
+    match target.kind {
+        HExpr.Unlowered(t) => {
+            match value.kind {
+                HExpr.Unlowered(v) => {
+                    genAssignAst(cg, *t, *v, locs, sigs, target.span)
+                }
+                _ => {
+                    hexprAbort(value, "assignment value")
+                }
+            }
+        }
+        _ => {
+            hexprAbort(target, "assignment target")
+        }
+    }
+}
+
+fn genAssignAst(cg: &mut Cgen, target: &ExprNode, value: &ExprNode, locs: &mut Vec<Local>, sigs: &Vec<CgFnSig>, stmtSpan: &Option<Span>) {
     // Fast path: `place = place + rhs` for strings → amortized in-place append.
     // The naive store path re-concats (fresh alloc + leaked old buffer) every
     // time, making an accumulator like `cg.body = cg.body + s` O(n^2) in time
@@ -279,7 +308,7 @@ pub fn genAssign(cg: &mut Cgen, target: &ExprNode, value: &ExprNode, locs: &mut 
 
 // -- While loop --
 
-pub fn genWhile(cg: &mut Cgen, cond: &ExprNode, body: &Vec<Heap<Stmt>>, locs: &mut Vec<Local>, sigs: &Vec<CgFnSig>, retTy: &string) {
+pub fn genWhile(cg: &mut Cgen, cond: &HExprNode, body: &Vec<Heap<HStmt>>, locs: &mut Vec<Local>, sigs: &Vec<CgFnSig>, retTy: &string) {
     let condLbl = nextLabel(cg, "wcond")
     let bodyLbl = nextLabel(cg, "wbody")
     let endLbl = nextLabel(cg, "wend")
@@ -290,7 +319,7 @@ pub fn genWhile(cg: &mut Cgen, cond: &ExprNode, body: &Vec<Heap<Stmt>>, locs: &m
     cg.curContLbl = condLbl.clone()
     emit(cg, "  br label %" + condLbl + "\n")
     emit(cg, condLbl + ":\n")
-    let cv = genExpr(cg, cond, locs, sigs, "bool")
+    let cv = genHExpr(cg, cond, locs, sigs, "bool")
     emit(cg, "  br i1 " + cv.v + ", label %" + bodyLbl + ", label %" + endLbl + "\n")
     emit(cg, bodyLbl + ":\n")
     var bodyTerm = false
@@ -340,9 +369,135 @@ fn markLoopBindingView(cg: &mut Cgen, addr: &string) {
     cg.movedLocalAddrs.push(addr.clone())
 }
 
-// `for key, value in map`: walk the flat entry array; body sees copies bound
-// through hoisted allocas. Emits everything up to (not including) stepLbl.
-pub fn genForInHashMap(cg: &mut Cgen, varName: &string, varName2: &Option<string>, obj: &Val, body: &Vec<Heap<Stmt>>, locs: &mut Vec<Local>, sigs: &Vec<CgFnSig>, retTy: &string, condLbl: &string, bodyLbl: &string, stepLbl: &string, endLbl: &string, idxAddr: &string) {
+// Loop labels and the break/continue state one for-in shape saves for its enclosing loop.
+struct ForLbls {
+    cond: string,
+    body: string,
+    step: string,
+    end: string,
+    savedBreak: string,
+    savedCont: string,
+    savedScopeLen: i64,
+}
+
+fn enterForLoop(cg: &mut Cgen): ForLbls {
+    let l = ForLbls {
+        cond: nextLabel(cg, "fcond"),
+        body: nextLabel(cg, "fbody"),
+        step: nextLabel(cg, "fstep"),
+        end: nextLabel(cg, "fend"),
+        savedBreak: cg.curBreakLbl.clone(),
+        savedCont: cg.curContLbl.clone(),
+        savedScopeLen: cg.curLoopScopeLen,
+    }
+    // for-in doesn't scope-drop its body at all yet (a separate, pre-existing gap — the
+    // loop-bound var is a borrow/copy, but a body-declared droppable local still leaks
+    // here every iteration). -1 keeps break/continue from guessing at a scope length this
+    // loop kind doesn't track, rather than reusing a stale value from an enclosing while
+    // and dropping the wrong locals on a nested break.
+    cg.curLoopScopeLen = -1
+    cg.curBreakLbl = l.end.clone()
+    // continue must run the increment, unlike while where it re-tests directly
+    cg.curContLbl = l.step.clone()
+    return l
+}
+
+fn exitForLoop(cg: &mut Cgen, l: &ForLbls) {
+    cg.curBreakLbl = l.savedBreak.clone()
+    cg.curContLbl = l.savedCont.clone()
+    cg.curLoopScopeLen = l.savedScopeLen
+}
+
+// Emit one loop body, pop whatever it bound, and fall through to the step block unless
+// every path out of it already terminated.
+fn genLoopBody(cg: &mut Cgen, body: &Vec<Heap<HStmt>>, locs: &mut Vec<Local>, sigs: &Vec<CgFnSig>, retTy: &string, locsPreLen: i64, stepLbl: &string) {
+    var term = false
+    for bi in 0..body.len {
+        if genStmt(cg, *body[bi], locs, sigs, retTy) {
+            term = true
+        }
+    }
+    while locs.len > locsPreLen {
+        let _ = locs.pop()
+    }
+    if !term {
+        emit(cg, "  br label %" + stepLbl.clone() + "\n")
+    }
+}
+
+// The step block of an index-counted loop: ++idx, then re-test.
+fn emitIndexStep(cg: &mut Cgen, idxAddr: &string, stepLbl: &string, condLbl: &string) {
+    emitLabel(cg, stepLbl)
+    let cur = nextTemp(cg)
+    emit(cg, "  " + cur + " = load i64, ptr " + idxAddr.clone() + "\n")
+    let inc = nextTemp(cg)
+    emit(cg, "  " + inc + " = add i64 " + cur + ", 1\n")
+    emit(cg, "  store i64 " + inc + ", ptr " + idxAddr.clone() + "\n")
+    emit(cg, "  br label %" + condLbl.clone() + "\n")
+}
+
+// `for i in a..b`
+pub fn genForRange(cg: &mut Cgen, varName: &string, startE: &HExprNode, endE: &HExprNode, body: &Vec<Heap<HStmt>>, locs: &mut Vec<Local>, sigs: &Vec<CgFnSig>, retTy: &string) {
+    let l = enterForLoop(cg)
+    let idxAddr = nextTemp(cg)
+    emit(cg, "  " + idxAddr + " = alloca i64\n")
+    let sv = genHExpr(cg, startE, locs, sigs, "i64")
+    let ev = genHExpr(cg, endE, locs, sigs, "i64")
+    let s64 = widenToI64(cg, sv)
+    let e64 = widenToI64(cg, ev)
+    emit(cg, "  store i64 " + s64 + ", ptr " + idxAddr + "\n")
+    emit(cg, "  br label %" + l.cond + "\n")
+    emitLabel(cg, l.cond)
+    let cur = nextTemp(cg)
+    emit(cg, "  " + cur + " = load i64, ptr " + idxAddr + "\n")
+    let lt = nextTemp(cg)
+    emit(cg, "  " + lt + " = icmp slt i64 " + cur + ", " + e64 + "\n")
+    emit(cg, "  br i1 " + lt + ", label %" + l.body + ", label %" + l.end + "\n")
+    emitLabel(cg, l.body)
+    let locsPreLen = locs.len
+    // The counter's own slot IS the binding, so it is i64 whatever width the checker gave
+    // the loop variable — the bound compare and the increment are both i64.
+    locs.push(Local {
+        name: varName.clone(), ty: "i64", addr: idxAddr.clone(), isRef: false, isArr: false, range: noRange()
+    }
+    )
+    markLoopBindingView(cg, idxAddr)
+    genLoopBody(cg, body, locs, sigs, retTy, locsPreLen, l.step)
+    emitIndexStep(cg, idxAddr, l.step, l.cond)
+    emitLabel(cg, l.end)
+    exitForLoop(cg, l)
+}
+
+// `for x in <container>` / `for i, x in <container>`. Which container is NOT re-derived
+// here — lowering carries the shape the checker picked, along with the binding types it
+// declared. An `@iter` newtype has already been redirected to its delegate field, so
+// nothing below knows a wrapper struct was ever involved.
+pub fn genForEach(cg: &mut Cgen, varName: &string, varName2: &Option<string>, iterable: &HExprNode, kind: &HIterKind, body: &Vec<Heap<HStmt>>, locs: &mut Vec<Local>, sigs: &Vec<CgFnSig>, retTy: &string) {
+    let l = enterForLoop(cg)
+    let idxAddr = nextTemp(cg)
+    emit(cg, "  " + idxAddr + " = alloca i64\n")
+    let obj = genHExpr(cg, iterable, locs, sigs, "")
+    match kind {
+        HIterKind.IterHashMap => {
+            genForInHashMap(cg, varName, varName2, obj, body, locs, sigs, retTy, l, idxAddr)
+        }
+        _ => {
+            genForInIndexed(cg, varName, varName2, obj, kind, body, locs, sigs, retTy, l, idxAddr)
+        }
+    }
+    emitIndexStep(cg, idxAddr, l.step, l.cond)
+    emitLabel(cg, l.end)
+    exitForLoop(cg, l)
+}
+
+// `for key, value in map`: walk the flat entry array; body sees copies bound through
+// hoisted allocas.
+fn genForInHashMap(cg: &mut Cgen, varName: &string, varName2: &Option<string>, obj: &Val, body: &Vec<Heap<HStmt>>, locs: &mut Vec<Local>, sigs: &Vec<CgFnSig>, retTy: &string, l: &ForLbls, idxAddr: &string) {
+    // Key and value types come off the MAP's own type, not the binding types the checker
+    // declared: they size the entry slot this loop strides over, so they have to describe
+    // the memory that is actually there. The checker and the backend do not always agree
+    // on a container's element width (an inferred closure return can widen one), and where
+    // they differ it is the container that is right about its own layout.
     let keyTy = hashMapKeyTy(obj.ty)
     let valTy = hashMapValTy(obj.ty)
     let entryTy = hmEntryTy(keyTy, valTy)
@@ -357,14 +512,14 @@ pub fn genForInHashMap(cg: &mut Cgen, varName: &string, varName2: &Option<string
     let valAddr = nextTemp(cg)
     emit(cg, "  " + valAddr + " = alloca " + valLl + "\n")
     emit(cg, "  store i64 0, ptr " + idxAddr.clone() + "\n")
-    emit(cg, "  br label %" + condLbl.clone() + "\n")
-    emit(cg, condLbl.clone() + ":\n")
+    emit(cg, "  br label %" + l.cond.clone() + "\n")
+    emitLabel(cg, l.cond)
     let cur = nextTemp(cg)
     emit(cg, "  " + cur + " = load i64, ptr " + idxAddr.clone() + "\n")
     let lt = nextTemp(cg)
     emit(cg, "  " + lt + " = icmp slt i64 " + cur + ", " + count + "\n")
-    emit(cg, "  br i1 " + lt + ", label %" + bodyLbl.clone() + ", label %" + endLbl.clone() + "\n")
-    emit(cg, bodyLbl.clone() + ":\n")
+    emit(cg, "  br i1 " + lt + ", label %" + l.body.clone() + ", label %" + l.end.clone() + "\n")
+    emitLabel(cg, l.body)
     let slot = nextTemp(cg)
     emit(cg, "  " + slot + " = getelementptr " + entryTy + ", ptr " + data + ", i64 " + cur + "\n")
     let kp = nextTemp(cg)
@@ -394,18 +549,127 @@ pub fn genForInHashMap(cg: &mut Cgen, varName: &string, varName2: &Option<string
         Option.None => {
         }
     }
-    var bodyTerm = false
-    for bi in 0..body.len {
-        if genStmt(cg, *body[bi], locs, sigs, retTy) {
-            bodyTerm = true
+    genLoopBody(cg, body, locs, sigs, retTy, locsPreLen, l.step)
+}
+
+// Vec, fixed array, or string bytes: copy the 3-word header and walk by index.
+fn genForInIndexed(cg: &mut Cgen, varName: &string, varName2: &Option<string>, obj: &Val, kind: &HIterKind, body: &Vec<Heap<HStmt>>, locs: &mut Vec<Local>, sigs: &Vec<CgFnSig>, retTy: &string, l: &ForLbls, idxAddr: &string) {
+    // Element type off the CONTAINER, for the same reason genForInHashMap reads the map's:
+    // it is the stride of the buffer being walked. resolveTyStr collapses Heap<Interface>
+    // to Interface, so the element is the %Iface fat pointer, not a plain ptr.
+    var elemTy = "u8"
+    var container = "%String"
+    match kind {
+        HIterKind.IterString => {
+        }
+        _ => {
+            elemTy = unwrapVec(resolveTyStr(cg, obj.ty))
+            container = "%Vec"
         }
     }
-    while locs.len > locsPreLen {
-        let _ = locs.pop()
+    let elemLl = llType(elemTy)
+    let data = nextTemp(cg)
+    emit(cg, "  " + data + " = extractvalue " + container + " " + obj.v + ", 0\n")
+    let count = nextTemp(cg)
+    emit(cg, "  " + count + " = extractvalue " + container + " " + obj.v + ", 1\n")
+    // element slot, hoisted out of the loop so the body can rebind it
+    let elemAddr = nextTemp(cg)
+    emit(cg, "  " + elemAddr + " = alloca " + elemLl + "\n")
+    emit(cg, "  store i64 0, ptr " + idxAddr.clone() + "\n")
+    emit(cg, "  br label %" + l.cond.clone() + "\n")
+    emitLabel(cg, l.cond)
+    let cur = nextTemp(cg)
+    emit(cg, "  " + cur + " = load i64, ptr " + idxAddr.clone() + "\n")
+    let lt = nextTemp(cg)
+    emit(cg, "  " + lt + " = icmp slt i64 " + cur + ", " + count + "\n")
+    emit(cg, "  br i1 " + lt + ", label %" + l.body.clone() + ", label %" + l.end.clone() + "\n")
+    emitLabel(cg, l.body)
+    let slot = nextTemp(cg)
+    emit(cg, "  " + slot + " = getelementptr " + elemLl + ", ptr " + data + ", i64 " + cur + "\n")
+    let elem = nextTemp(cg)
+    emit(cg, "  " + elem + " = load " + elemLl + ", ptr " + slot + "\n")
+    emit(cg, "  store " + elemLl + " " + elem + ", ptr " + elemAddr + "\n")
+    let locsPreLen = locs.len
+    // two-var form is `for index, value in vec` (index first), matching the checker's
+    // binding order; single-var binds the element.
+    match varName2 {
+        Option.Some(valName) => {
+            locs.push(Local {
+                name: varName.clone(), ty: "i64", addr: idxAddr.clone(), isRef: false, isArr: false, range: noRange()
+            }
+            )
+            markLoopBindingView(cg, idxAddr)
+            locs.push(Local {
+                name: valName.clone(), ty: elemTy.clone(), addr: elemAddr.clone(), isRef: false, isArr: false, range: noRange()
+            }
+            )
+            markLoopBindingView(cg, elemAddr)
+        }
+        Option.None => {
+            locs.push(Local {
+                name: varName.clone(), ty: elemTy.clone(), addr: elemAddr.clone(), isRef: false, isArr: false, range: noRange()
+            }
+            )
+            markLoopBindingView(cg, elemAddr)
+        }
     }
-    if !bodyTerm {
-        emit(cg, "  br label %" + stepLbl.clone() + "\n")
+    genLoopBody(cg, body, locs, sigs, retTy, locsPreLen, l.step)
+}
+
+// `for x in <iterator>` and `for x in <channel>`. One loop for both: a channel's recv()
+// reports "kept going" as Result.Ok and an iterator's next() as Option.Some, and that
+// variant name — recorded by the checker, not sniffed off a type string here — is the
+// only difference between them.
+pub fn genForIterator(cg: &mut Cgen, varName: &string, iterable: &HExprNode, nextMethod: &string, resultEnum: &string, okVariant: &string, body: &Vec<Heap<HStmt>>, locs: &mut Vec<Local>, sigs: &Vec<CgFnSig>, retTy: &string) {
+    let l = enterForLoop(cg)
+    let obj = genHExpr(cg, iterable, locs, sigs, "")
+    let objLl = llType(obj.ty)
+    let resTy = stripPercent(resolveTyStr(cg, resultEnum.clone()))
+    let resLl = "%" + resTy.clone()
+    let okTag = lookupVariantTag(cg, resTy, okVariant)
+    // The payload slot of the variant being unpacked, not the binding type the checker
+    // declared: this is the width of the load, and it has to match the enum as laid out.
+    let payTypes = lookupVariantPayload(cg, resTy, okVariant)
+    let elemTy = payTypes[0].clone()
+    let elemLl = llType(elemTy)
+    let itSlot = nextTemp(cg)
+    emit(cg, "  " + itSlot + " = alloca " + objLl + "\n")
+    emit(cg, "  store " + objLl + " " + obj.v + ", ptr " + itSlot + "\n")
+    let valAddr = nextTemp(cg)
+    emit(cg, "  " + valAddr + " = alloca " + elemLl + "\n")
+    emit(cg, "  br label %" + l.cond + "\n")
+    emitLabel(cg, l.cond)
+    let r = nextTemp(cg)
+    emit(cg, "  " + r + " = call " + resLl + " @" + nextMethod.clone() + "(ptr " + itSlot + ")\n")
+    let rslot = nextTemp(cg)
+    emit(cg, "  " + rslot + " = alloca " + resLl + "\n")
+    emit(cg, "  store " + resLl + " " + r + ", ptr " + rslot + "\n")
+    let tagP = nextTemp(cg)
+    emit(cg, "  " + tagP + " = getelementptr " + resLl + ", ptr " + rslot + ", i32 0, i32 0\n")
+    let tag = nextTemp(cg)
+    emit(cg, "  " + tag + " = load i32, ptr " + tagP + "\n")
+    let isOk = nextTemp(cg)
+    emit(cg, "  " + isOk + " = icmp eq i32 " + tag + ", " + okTag.toString() + "\n")
+    emit(cg, "  br i1 " + isOk + ", label %" + l.body + ", label %" + l.end + "\n")
+    emitLabel(cg, l.body)
+    let payP = nextTemp(cg)
+    emit(cg, "  " + payP + " = getelementptr " + resLl + ", ptr " + rslot + ", i32 0, i32 1\n")
+    let fp = nextTemp(cg)
+    emit(cg, "  " + fp + " = getelementptr { " + elemLl + " }, ptr " + payP + ", i32 0, i32 0\n")
+    let pv = nextTemp(cg)
+    emit(cg, "  " + pv + " = load " + elemLl + ", ptr " + fp + "\n")
+    emit(cg, "  store " + elemLl + " " + pv + ", ptr " + valAddr + "\n")
+    let locsPreLen = locs.len
+    locs.push(Local {
+        name: varName.clone(), ty: elemTy.clone(), addr: valAddr.clone(), isRef: false, isArr: false, range: noRange()
     }
+    )
+    markLoopBindingView(cg, valAddr)
+    genLoopBody(cg, body, locs, sigs, retTy, locsPreLen, l.step)
+    emitLabel(cg, l.step)
+    emit(cg, "  br label %" + l.cond + "\n")
+    emitLabel(cg, l.end)
+    exitForLoop(cg, l)
 }
 
 // `for line in text.lines()` / `for f in text.splitView(sep)`. Each iteration stores
@@ -414,14 +678,21 @@ pub fn genForInHashMap(cg: &mut Cgen, varName: &string, varName2: &Option<string
 // checker/stmt.milo checkStringViewForIn, though this codegen doesn't itself enforce
 // that; there is no freeze/unfreeze mechanism in this checker yet, so a program that
 // mutates the receiver mid-loop is not rejected the way the TS oracle rejects it).
-// Reuses the caller's (genForIn's) own labels — this is a full self-contained loop
-// body, like the channel-drain and iterator-protocol branches above, because its
-// step is "jump to the next found separator", not a plain index +1.
-pub fn genForStrView(cg: &mut Cgen, varName: &string, varName2: &Option<string>, recvExpr: &ExprNode, mode: &string, sepArgs: &Vec<Heap<ExprNode>>, body: &Vec<Heap<Stmt>>, locs: &mut Vec<Local>, sigs: &Vec<CgFnSig>, retTy: &string, condLbl: &string, bodyLbl: &string, stepLbl: &string, endLbl: &string) {
+// A full self-contained loop, like the iterator drain above, because its step is "jump
+// to the next found separator", not a plain index +1.
+pub fn genForStrView(cg: &mut Cgen, varName: &string, varName2: &Option<string>, src: &HExprNode, sep: &Option<Heap<HExprNode>>, mode: &HStrViewMode, body: &Vec<Heap<HStmt>>, locs: &mut Vec<Local>, sigs: &Vec<CgFnSig>, retTy: &string) {
     ensureStringTy(cg)
-    let isSplit = mode == "splitView"
+    let l = enterForLoop(cg)
+    var isSplit = false
+    match mode {
+        HStrViewMode.ViewSplit => {
+            isSplit = true
+        }
+        HStrViewMode.ViewLines => {
+        }
+    }
 
-    let srcVal = genExpr(cg, recvExpr, locs, sigs, "")
+    let srcVal = genHExpr(cg, src, locs, sigs, "")
     let dataP = nextTemp(cg)
     emit(cg, "  " + dataP + " = extractvalue %String " + srcVal.v + ", 0\n")
     let lenV = nextTemp(cg)
@@ -430,20 +701,23 @@ pub fn genForStrView(cg: &mut Cgen, varName: &string, varName2: &Option<string>,
     // the separator: an explicit argument for splitView, a literal newline for lines
     var sepPtr = ""
     var sepLen = "1"
-    if isSplit {
-        let sepVal = genExpr(cg, *sepArgs[0], locs, sigs, "")
-        let sp = nextTemp(cg)
-        emit(cg, "  " + sp + " = extractvalue %String " + sepVal.v + ", 0\n")
-        sepPtr = sp
-        let sl = nextTemp(cg)
-        emit(cg, "  " + sl + " = extractvalue %String " + sepVal.v + ", 1\n")
-        sepLen = sl
-    } else {
-        let nlLabel = emitStringLit(cg, "\n")
-        let sp = nextTemp(cg)
-        emit(cg, "  " + sp + " = getelementptr [2 x i8], ptr " + nlLabel + ", i32 0, i32 0\n")
-        sepPtr = sp
-        sepLen = "1"
+    match sep {
+        Option.Some(sepExpr) => {
+            let sepVal = genHExpr(cg, *sepExpr, locs, sigs, "")
+            let sp = nextTemp(cg)
+            emit(cg, "  " + sp + " = extractvalue %String " + sepVal.v + ", 0\n")
+            sepPtr = sp
+            let sl = nextTemp(cg)
+            emit(cg, "  " + sl + " = extractvalue %String " + sepVal.v + ", 1\n")
+            sepLen = sl
+        }
+        Option.None => {
+            let nlLabel = emitStringLit(cg, "\n")
+            let sp = nextTemp(cg)
+            emit(cg, "  " + sp + " = getelementptr [2 x i8], ptr " + nlLabel + ", i32 0, i32 0\n")
+            sepPtr = sp
+            sepLen = "1"
+        }
     }
     ensureStrFind(cg)
 
@@ -468,8 +742,8 @@ pub fn genForStrView(cg: &mut Cgen, varName: &string, varName2: &Option<string>,
         }
     }
 
-    emit(cg, "  br label %" + condLbl.clone() + "\n")
-    emitLabel(cg, condLbl)
+    emit(cg, "  br label %" + l.cond + "\n")
+    emitLabel(cg, l.cond)
     let pos = nextTemp(cg)
     emit(cg, "  " + pos + " = load i64, ptr " + posAddr + "\n")
     var more = ""
@@ -495,9 +769,9 @@ pub fn genForStrView(cg: &mut Cgen, varName: &string, varName2: &Option<string>,
         emit(cg, "  " + m + " = and i1 " + inRange + ", " + okEmpty + "\n")
         more = m
     }
-    emit(cg, "  br i1 " + more + ", label %" + bodyLbl.clone() + ", label %" + endLbl.clone() + "\n")
+    emit(cg, "  br i1 " + more + ", label %" + l.body + ", label %" + l.end + "\n")
 
-    emitLabel(cg, bodyLbl)
+    emitLabel(cg, l.body)
     let found = nextTemp(cg)
     emit(cg, "  " + found + " = call i64 @milo.strfind(ptr " + dataP + ", i64 " + lenV + ", ptr " + sepPtr + ", i64 " + sepLen + ", i64 " + pos + ")\n")
     var sepIdx = found.clone()
@@ -548,7 +822,7 @@ pub fn genForStrView(cg: &mut Cgen, varName: &string, varName2: &Option<string>,
     // each piece has to be its own NUL-terminated copy, same as genStringSlice.
     // cap=0 (not sz): nothing takes ownership of a for-in loop var beyond the body,
     // and for-in doesn't scope-drop its locals yet (a separate, pre-existing gap —
-    // see genForIn) — so this leaks per iteration either way. cap=0 at least keeps
+    // see enterForLoop) — so this leaks per iteration either way. cap=0 at least keeps
     // it from ever being double-freed if that gap is closed later.
     ensureMalloc(cg)
     ensureMemcpy(cg)
@@ -605,20 +879,9 @@ pub fn genForStrView(cg: &mut Cgen, varName: &string, varName2: &Option<string>,
         }
     }
 
-    var bodyTerm = false
-    for bi in 0..body.len {
-        if genStmt(cg, *body[bi], locs, sigs, retTy) {
-            bodyTerm = true
-        }
-    }
-    while locs.len > locsPreLen {
-        let _ = locs.pop()
-    }
-    if !bodyTerm {
-        emit(cg, "  br label %" + stepLbl.clone() + "\n")
-    }
+    genLoopBody(cg, body, locs, sigs, retTy, locsPreLen, l.step)
 
-    emitLabel(cg, stepLbl)
+    emitLabel(cg, l.step)
     let advanced = nextTemp(cg)
     emit(cg, "  " + advanced + " = load i64, ptr " + nextAddr + "\n")
     emit(cg, "  store i64 " + advanced + ", ptr " + posAddr + "\n")
@@ -629,344 +892,29 @@ pub fn genForStrView(cg: &mut Cgen, varName: &string, varName2: &Option<string>,
         emit(cg, "  " + nextIdx + " = add i64 " + curIdx + ", 1\n")
         emit(cg, "  store i64 " + nextIdx + ", ptr " + idxAddr + "\n")
     }
-    emit(cg, "  br label %" + condLbl.clone() + "\n")
+    emit(cg, "  br label %" + l.cond + "\n")
 
-    emitLabel(cg, endLbl)
-}
-
-pub fn genForIn(cg: &mut Cgen, varName: &string, varName2: &Option<string>, iterable: &ExprNode, body: &Vec<Heap<Stmt>>, locs: &mut Vec<Local>, sigs: &Vec<CgFnSig>, retTy: &string) {
-    let condLbl = nextLabel(cg, "fcond")
-    let bodyLbl = nextLabel(cg, "fbody")
-    let stepLbl = nextLabel(cg, "fstep")
-    let endLbl = nextLabel(cg, "fend")
-    let savedBreak = cg.curBreakLbl.clone()
-    let savedCont = cg.curContLbl.clone()
-    let savedLoopScopeLen = cg.curLoopScopeLen
-    // for-in doesn't scope-drop its body at all yet (a separate, pre-existing
-    // gap — the loop-bound var is a borrow/copy, but a body-declared droppable
-    // local still leaks here every iteration). -1 keeps break/continue from
-    // guessing at a scope length this loop kind doesn't track, rather than
-    // reusing a stale value from an enclosing while and dropping the wrong
-    // locals on a nested break.
-    cg.curLoopScopeLen = -1
-    cg.curBreakLbl = endLbl.clone()
-    // continue must run the increment, unlike while where it re-tests directly
-    cg.curContLbl = stepLbl.clone()
-
-    let idxAddr = nextTemp(cg)
-    emit(cg, "  " + idxAddr + " = alloca i64\n")
-
-    match iterable.kind {
-        Expr.RangeExpr(startE, endE) => {
-            let sv = genExpr(cg, *startE, locs, sigs, "i64")
-            let ev = genExpr(cg, *endE, locs, sigs, "i64")
-            let s64 = widenToI64(cg, sv)
-            let e64 = widenToI64(cg, ev)
-            emit(cg, "  store i64 " + s64 + ", ptr " + idxAddr + "\n")
-            emit(cg, "  br label %" + condLbl + "\n")
-            emit(cg, condLbl + ":\n")
-            let cur = nextTemp(cg)
-            emit(cg, "  " + cur + " = load i64, ptr " + idxAddr + "\n")
-            let lt = nextTemp(cg)
-            emit(cg, "  " + lt + " = icmp slt i64 " + cur + ", " + e64 + "\n")
-            emit(cg, "  br i1 " + lt + ", label %" + bodyLbl + ", label %" + endLbl + "\n")
-            emit(cg, bodyLbl + ":\n")
-            let locsPreLen = locs.len
-            locs.push(Local {
-                name: varName.clone(), ty: "i64", addr: idxAddr.clone(), isRef: false, isArr: false, range: noRange()
-            }
-            )
-            markLoopBindingView(cg, idxAddr)
-            var bodyTerm = false
-            for bi in 0..body.len {
-                if genStmt(cg, *body[bi], locs, sigs, retTy) {
-                    bodyTerm = true
-                }
-            }
-            while locs.len > locsPreLen {
-                let _ = locs.pop()
-            }
-            if !bodyTerm {
-                emit(cg, "  br label %" + stepLbl + "\n")
-            }
-        }
-        _ => {
-            // `for line in text.lines()` / `for f in text.splitView(sep)` — checked
-            // and typed specially (checker/stmt.milo checkStringViewForIn), so it has
-            // to be recognized here too rather than falling into the generic
-            // genExpr(iterable) below, which would try (and fail) to codegen
-            // "lines"/"splitView" as an ordinary method call.
-            match iterable.kind {
-                Expr.MethodCall(mObj, mMethod, mArgs) => {
-                    if mMethod == "lines" || mMethod == "splitView" {
-                        genForStrView(cg, varName, varName2, *mObj, mMethod, mArgs, body, locs, sigs, retTy, condLbl, bodyLbl, stepLbl, endLbl)
-                        cg.curBreakLbl = savedBreak
-                        cg.curContLbl = savedCont
-                        cg.curLoopScopeLen = savedLoopScopeLen
-                        return
-                    }
-                }
-                _ => {
-                }
-            }
-            // Vec, string, or HashMap: copy the 3-word header, walk by index.
-            var obj = genExpr(cg, iterable, locs, sigs, "")
-            // `@iter` on a field redirects the loop to that field's runtime value —
-            // re-derived here from the struct's own field table (lookupIterDelegateField),
-            // same as the checker does from its own copy. A newtype over a container
-            // (HashSet over HashMap) then falls straight into the ordinary Vec/HashMap/
-            // string dispatch below, unaware a struct was ever involved.
-            let iterStructName = stripPercent(resolveTyStr(cg, obj.ty))
-            match lookupIterDelegateField(cg, iterStructName) {
-                Option.Some(delegateField) => {
-                    let fidx = lookupFieldIndex(cg, iterStructName, delegateField)
-                    let fty = lookupFieldType(cg, iterStructName, fidx)
-                    let ftyLl = llType(fty)
-                    let fv = nextTemp(cg)
-                    emit(cg, "  " + fv + " = extractvalue %" + iterStructName + " " + obj.v + ", " + fidx.toString() + "\n")
-                    obj = Val {
-                        v: fv, ty: fty
-                    }
-                }
-                Option.None => {
-                }
-            }
-            let objLl = llType(obj.ty)
-            // `for x in channel` — drain via recv() until it returns Err (closed).
-            if obj.ty.len > 8 && obj.ty[0] == 67 && obj.ty[1] == 104 && obj.ty[2] == 97 && obj.ty[3] == 110 && obj.ty[4] == 110 && obj.ty[5] == 101 && obj.ty[6] == 108 && obj.ty[7] == 95 {
-                let elemLl = llType(obj.ty[8..obj.ty.len].clone())
-                let recvName = obj.ty.clone() + "$recv"
-                let resultTy = stripPercent(resolveTyStr(cg, lookupFnRet(cg, recvName)))
-                let resultLl = "%" + resultTy.clone()
-                let okTag = lookupVariantTag(cg, resultTy, "Ok")
-                let chSlot = nextTemp(cg)
-                emit(cg, "  " + chSlot + " = alloca " + objLl + "\n")
-                emit(cg, "  store " + objLl + " " + obj.v + ", ptr " + chSlot + "\n")
-                let valAddr = nextTemp(cg)
-                emit(cg, "  " + valAddr + " = alloca " + elemLl + "\n")
-                emit(cg, "  br label %" + condLbl + "\n")
-                emitLabel(cg, condLbl)
-                let r = nextTemp(cg)
-                emit(cg, "  " + r + " = call " + resultLl + " @" + recvName + "(ptr " + chSlot + ")\n")
-                let rslot = nextTemp(cg)
-                emit(cg, "  " + rslot + " = alloca " + resultLl + "\n")
-                emit(cg, "  store " + resultLl + " " + r + ", ptr " + rslot + "\n")
-                let tagP = nextTemp(cg)
-                emit(cg, "  " + tagP + " = getelementptr " + resultLl + ", ptr " + rslot + ", i32 0, i32 0\n")
-                let tag = nextTemp(cg)
-                emit(cg, "  " + tag + " = load i32, ptr " + tagP + "\n")
-                let isOk = nextTemp(cg)
-                emit(cg, "  " + isOk + " = icmp eq i32 " + tag + ", " + okTag.toString() + "\n")
-                emit(cg, "  br i1 " + isOk + ", label %" + bodyLbl + ", label %" + endLbl + "\n")
-                emitLabel(cg, bodyLbl)
-                let payP = nextTemp(cg)
-                emit(cg, "  " + payP + " = getelementptr " + resultLl + ", ptr " + rslot + ", i32 0, i32 1\n")
-                let fp = nextTemp(cg)
-                emit(cg, "  " + fp + " = getelementptr { " + elemLl + " }, ptr " + payP + ", i32 0, i32 0\n")
-                let pv = nextTemp(cg)
-                emit(cg, "  " + pv + " = load " + elemLl + ", ptr " + fp + "\n")
-                emit(cg, "  store " + elemLl + " " + pv + ", ptr " + valAddr + "\n")
-                let locsPre = locs.len
-                locs.push(Local {
-                    name: varName.clone(), ty: obj.ty[8..obj.ty.len].clone(), addr: valAddr.clone(), isRef: false, isArr: false, range: noRange()
-                }
-                )
-                markLoopBindingView(cg, valAddr)
-                var chTerm = false
-                for bi in 0..body.len {
-                    if genStmt(cg, *body[bi], locs, sigs, retTy) {
-                        chTerm = true
-                    }
-                }
-                while locs.len > locsPre {
-                    let _ = locs.pop()
-                }
-                if !chTerm {
-                    emit(cg, "  br label %" + stepLbl + "\n")
-                }
-                emitLabel(cg, stepLbl)
-                emit(cg, "  br label %" + condLbl + "\n")
-                emitLabel(cg, endLbl)
-                cg.curBreakLbl = savedBreak
-                cg.curContLbl = savedCont
-                cg.curLoopScopeLen = savedLoopScopeLen
-                return
-            }
-            // iterator protocol: a struct with `Type$next(&mut Self): Option<T>` —
-            // drive next() until it yields None, binding the loop var to each Some(v).
-            let itRaw = stripPercent(resolveTyStr(cg, obj.ty))
-            let itNext = itRaw + "$next"
-            if cg.structs.contains(itRaw) && cg.fnRets.contains(itNext) {
-                let optTy = stripPercent(resolveTyStr(cg, lookupFnRet(cg, itNext)))
-                let optLl = "%" + optTy.clone()
-                let someTag = lookupVariantTag(cg, optTy, "Some")
-                let payTypes = lookupVariantPayload(cg, optTy, "Some")
-                let itElemTy = payTypes[0].clone()
-                let itElemLl = llType(itElemTy)
-                let itSlot = nextTemp(cg)
-                emit(cg, "  " + itSlot + " = alloca " + objLl + "\n")
-                emit(cg, "  store " + objLl + " " + obj.v + ", ptr " + itSlot + "\n")
-                let valAddr = nextTemp(cg)
-                emit(cg, "  " + valAddr + " = alloca " + itElemLl + "\n")
-                emit(cg, "  br label %" + condLbl + "\n")
-                emitLabel(cg, condLbl)
-                let r = nextTemp(cg)
-                emit(cg, "  " + r + " = call " + optLl + " @" + itNext + "(ptr " + itSlot + ")\n")
-                let rslot = nextTemp(cg)
-                emit(cg, "  " + rslot + " = alloca " + optLl + "\n")
-                emit(cg, "  store " + optLl + " " + r + ", ptr " + rslot + "\n")
-                let tagP = nextTemp(cg)
-                emit(cg, "  " + tagP + " = getelementptr " + optLl + ", ptr " + rslot + ", i32 0, i32 0\n")
-                let tag = nextTemp(cg)
-                emit(cg, "  " + tag + " = load i32, ptr " + tagP + "\n")
-                let isSome = nextTemp(cg)
-                emit(cg, "  " + isSome + " = icmp eq i32 " + tag + ", " + someTag.toString() + "\n")
-                emit(cg, "  br i1 " + isSome + ", label %" + bodyLbl + ", label %" + endLbl + "\n")
-                emitLabel(cg, bodyLbl)
-                let payP = nextTemp(cg)
-                emit(cg, "  " + payP + " = getelementptr " + optLl + ", ptr " + rslot + ", i32 0, i32 1\n")
-                let fp = nextTemp(cg)
-                emit(cg, "  " + fp + " = getelementptr { " + itElemLl + " }, ptr " + payP + ", i32 0, i32 0\n")
-                let pv = nextTemp(cg)
-                emit(cg, "  " + pv + " = load " + itElemLl + ", ptr " + fp + "\n")
-                emit(cg, "  store " + itElemLl + " " + pv + ", ptr " + valAddr + "\n")
-                let locsPre = locs.len
-                locs.push(Local {
-                    name: varName.clone(), ty: itElemTy.clone(), addr: valAddr.clone(), isRef: false, isArr: false, range: noRange()
-                }
-                )
-                markLoopBindingView(cg, valAddr)
-                var itTerm = false
-                for bi in 0..body.len {
-                    if genStmt(cg, *body[bi], locs, sigs, retTy) {
-                        itTerm = true
-                    }
-                }
-                while locs.len > locsPre {
-                    let _ = locs.pop()
-                }
-                if !itTerm {
-                    emit(cg, "  br label %" + stepLbl + "\n")
-                }
-                emitLabel(cg, stepLbl)
-                emit(cg, "  br label %" + condLbl + "\n")
-                emitLabel(cg, endLbl)
-                cg.curBreakLbl = savedBreak
-                cg.curContLbl = savedCont
-                cg.curLoopScopeLen = savedLoopScopeLen
-                return
-            }
-            if isHashMapTy(obj.ty) {
-                genForInHashMap(cg, varName, varName2, obj, body, locs, sigs, retTy, condLbl, bodyLbl, stepLbl, endLbl, idxAddr)
-                emit(cg, stepLbl + ":\n")
-                let hCur = nextTemp(cg)
-                emit(cg, "  " + hCur + " = load i64, ptr " + idxAddr + "\n")
-                let hInc = nextTemp(cg)
-                emit(cg, "  " + hInc + " = add i64 " + hCur + ", 1\n")
-                emit(cg, "  store i64 " + hInc + ", ptr " + idxAddr + "\n")
-                emit(cg, "  br label %" + condLbl + "\n")
-                emit(cg, endLbl + ":\n")
-                cg.curBreakLbl = savedBreak
-                cg.curContLbl = savedCont
-                cg.curLoopScopeLen = savedLoopScopeLen
-                return
-            }
-            var elemTy = "u8"
-            var container = "%String"
-            if isVecTy(obj.ty) {
-                // resolveTyStr collapses Heap<Interface> → Interface, so the element
-                // is the %Iface fat pointer (16 bytes), not a plain ptr.
-                elemTy = unwrapVec(resolveTyStr(cg, obj.ty))
-                container = "%Vec"
-            } else if objLl == "%String" {
-                elemTy = "u8"
-                container = "%String"
-            } else {
-                eprint("codegen: cannot iterate type " + obj.ty.clone())
-                exit(1)
-            }
-            let elemLl = llType(elemTy)
-            let data = nextTemp(cg)
-            emit(cg, "  " + data + " = extractvalue " + container + " " + obj.v + ", 0\n")
-            let count = nextTemp(cg)
-            emit(cg, "  " + count + " = extractvalue " + container + " " + obj.v + ", 1\n")
-            // element slot, hoisted out of the loop so the body can rebind it
-            let elemAddr = nextTemp(cg)
-            emit(cg, "  " + elemAddr + " = alloca " + elemLl + "\n")
-            emit(cg, "  store i64 0, ptr " + idxAddr + "\n")
-            emit(cg, "  br label %" + condLbl + "\n")
-            emit(cg, condLbl + ":\n")
-            let cur = nextTemp(cg)
-            emit(cg, "  " + cur + " = load i64, ptr " + idxAddr + "\n")
-            let lt = nextTemp(cg)
-            emit(cg, "  " + lt + " = icmp slt i64 " + cur + ", " + count + "\n")
-            emit(cg, "  br i1 " + lt + ", label %" + bodyLbl + ", label %" + endLbl + "\n")
-            emit(cg, bodyLbl + ":\n")
-            let slot = nextTemp(cg)
-            emit(cg, "  " + slot + " = getelementptr " + elemLl + ", ptr " + data + ", i64 " + cur + "\n")
-            let elem = nextTemp(cg)
-            emit(cg, "  " + elem + " = load " + elemLl + ", ptr " + slot + "\n")
-            emit(cg, "  store " + elemLl + " " + elem + ", ptr " + elemAddr + "\n")
-            let locsPreLen = locs.len
-            // two-var form is `for index, value in vec` (index first), matching the
-            // checker's binding order; single-var binds the element.
-            match varName2 {
-                Option.Some(valName) => {
-                    locs.push(Local {
-                        name: varName.clone(), ty: "i64", addr: idxAddr.clone(), isRef: false, isArr: false, range: noRange()
-                    }
-                    )
-                    markLoopBindingView(cg, idxAddr)
-                    locs.push(Local {
-                        name: valName.clone(), ty: elemTy.clone(), addr: elemAddr.clone(), isRef: false, isArr: false, range: noRange()
-                    }
-                    )
-                    markLoopBindingView(cg, elemAddr)
-                }
-                Option.None => {
-                    locs.push(Local {
-                        name: varName.clone(), ty: elemTy.clone(), addr: elemAddr.clone(), isRef: false, isArr: false, range: noRange()
-                    }
-                    )
-                    markLoopBindingView(cg, elemAddr)
-                }
-            }
-            var bodyTerm = false
-            for bi in 0..body.len {
-                if genStmt(cg, *body[bi], locs, sigs, retTy) {
-                    bodyTerm = true
-                }
-            }
-            while locs.len > locsPreLen {
-                let _ = locs.pop()
-            }
-            if !bodyTerm {
-                emit(cg, "  br label %" + stepLbl + "\n")
-            }
-        }
-    }
-
-    emit(cg, stepLbl + ":\n")
-    let stepCur = nextTemp(cg)
-    emit(cg, "  " + stepCur + " = load i64, ptr " + idxAddr + "\n")
-    let inc = nextTemp(cg)
-    emit(cg, "  " + inc + " = add i64 " + stepCur + ", 1\n")
-    emit(cg, "  store i64 " + inc + ", ptr " + idxAddr + "\n")
-    emit(cg, "  br label %" + condLbl + "\n")
-    emit(cg, endLbl + ":\n")
-    cg.curBreakLbl = savedBreak
-    cg.curContLbl = savedCont
-    cg.curLoopScopeLen = savedLoopScopeLen
+    emitLabel(cg, l.end)
+    exitForLoop(cg, l)
 }
 
 // -- If statement --
 
-pub fn genIf(cg: &mut Cgen, cond: &ExprNode, thenBody: &Vec<Heap<Stmt>>, elseBody: &Option<Vec<Heap<Stmt>>>, locs: &mut Vec<Local>, sigs: &Vec<CgFnSig>, retTy: &string): bool {
+pub fn genIf(cg: &mut Cgen, cond: &HExprNode, thenBody: &Vec<Heap<HStmt>>, elseBody: &Option<Vec<Heap<HStmt>>>, locs: &mut Vec<Local>, sigs: &Vec<CgFnSig>, retTy: &string): bool {
     // A statically-known condition (`@targetOs() == "…"`) emits ONLY the taken
     // arm. Load-bearing, not an optimization: the dead arm may call a symbol
     // that exists on no other target, and it must never reach the linker even
-    // though it type-checked.
-    let folded = constFoldBool(cg, cond)
+    // though it type-checked. The fold reads the SYNTAX, so it needs the AST node
+    // rather than the value the condition evaluates to.
+    var folded: Option<bool> = Option.None
+    match cond.kind {
+        HExpr.Unlowered(c) => {
+            folded = constFoldBool(cg, *c)
+        }
+        _ => {
+            hexprAbort(cond, "if condition")
+        }
+    }
     match folded {
         Option.Some(taken) => {
             var foldTerm = false
@@ -1001,7 +949,7 @@ pub fn genIf(cg: &mut Cgen, cond: &ExprNode, thenBody: &Vec<Heap<Stmt>>, elseBod
         Option.None => {
         }
     }
-    let cv = genExpr(cg, cond, locs, sigs, "bool")
+    let cv = genHExpr(cg, cond, locs, sigs, "bool")
     let thenLbl = nextLabel(cg, "then")
     let elseLbl = nextLabel(cg, "else")
     let endLbl = nextLabel(cg, "endif")
@@ -1089,7 +1037,7 @@ fn matchSubjectBorrows(subject: &ExprNode, locs: &Vec<Local>): bool {
 //   * owned subject + droppable payload → MOVE it: load into the binding's own
 //     slot and zero the source, so the subject's drop chain no longer sees it.
 // A Copy payload is a plain value copy under either regime.
-fn bindArmPayloads(cg: &mut Cgen, payPtr: &string, payloadTypes: &Vec<string>, bindings: &Vec<string>, subjBorrows: bool, locs: &mut Vec<Local>) {
+fn bindArmPayloads(cg: &mut Cgen, payPtr: &string, payloadTypes: &Vec<string>, bindings: &Vec<HBinding>, subjBorrows: bool, locs: &mut Vec<Local>) {
     let vstructTy = variantStructTy(payloadTypes)
     for bi in 0..bindings.len {
         let pty = payloadTypes[bi].clone()
@@ -1099,7 +1047,7 @@ fn bindArmPayloads(cg: &mut Cgen, payPtr: &string, payloadTypes: &Vec<string>, b
         let droppable = cgNeedsDrop(cg, pty)
         if subjBorrows && droppable {
             locs.push(Local {
-                name: bindings[bi].clone(), ty: pty.clone(), addr: fp, isRef: true, isArr: false, range: noRange()
+                name: bindings[bi].name.clone(), ty: pty.clone(), addr: fp, isRef: true, isArr: false, range: noRange()
             }
             )
         } else {
@@ -1112,95 +1060,11 @@ fn bindArmPayloads(cg: &mut Cgen, payPtr: &string, payloadTypes: &Vec<string>, b
                 zeroStore(cg, fp, pty)
             }
             locs.push(Local {
-                name: bindings[bi].clone(), ty: pty.clone(), addr: bindAddr, isRef: false, isArr: false, range: noRange()
+                name: bindings[bi].name.clone(), ty: pty.clone(), addr: bindAddr, isRef: false, isArr: false, range: noRange()
             }
             )
         }
     }
-}
-
-// -- If-let (M3b): a one-pattern match with an else path --
-
-pub fn genIfLet(cg: &mut Cgen, pattern: &Pattern, subject: &ExprNode, thenBody: &Vec<Heap<Stmt>>, elseBody: &Option<Vec<Heap<Stmt>>>, locs: &mut Vec<Local>, sigs: &Vec<CgFnSig>, retTy: &string): bool {
-    let subjBorrows = matchSubjectBorrows(subject, locs)
-    let subjLv = genLvalue(cg, subject, locs, sigs)
-    let rawName = stripPercent(subjLv.ty)
-    let structTy = "%" + rawName
-    let tagPtr = nextTemp(cg)
-    emit(cg, "  " + tagPtr + " = getelementptr " + structTy + ", ptr " + subjLv.v + ", i32 0, i32 0\n")
-    let tag = nextTemp(cg)
-    emit(cg, "  " + tag + " = load i32, ptr " + tagPtr + "\n")
-    let thenLbl = nextLabel(cg, "iflet.then")
-    let elseLbl = nextLabel(cg, "iflet.else")
-    let endLbl = nextLabel(cg, "iflet.end")
-
-    var thenTerm = false
-    match pattern {
-        Pattern.EnumPattern(enumName, variant, bindings, span) => {
-            // variant tables are keyed by the subject's (mangled) enum name,
-            // not the pattern's base name
-            let tg = lookupVariantTag(cg, rawName, variant)
-            let eq = nextTemp(cg)
-            emit(cg, "  " + eq + " = icmp eq i32 " + tag + ", " + tg.toString() + "\n")
-            emit(cg, "  br i1 " + eq + ", label %" + thenLbl + ", label %" + elseLbl + "\n")
-            emit(cg, thenLbl + ":\n")
-            let locsPreLen = locs.len
-            if bindings.len > 0 {
-                let payloadTypes = lookupVariantPayload(cg, rawName, variant)
-                if payloadTypes.len > 0 {
-                    let payPtr = nextTemp(cg)
-                    emit(cg, "  " + payPtr + " = getelementptr " + structTy + ", ptr " + subjLv.v + ", i32 0, i32 1\n")
-                    bindArmPayloads(cg, payPtr, payloadTypes, bindings, subjBorrows, locs)
-                }
-            }
-            for si in 0..thenBody.len {
-                if genStmt(cg, *thenBody[si], locs, sigs, retTy) {
-                    thenTerm = true
-                }
-            }
-            while locs.len > locsPreLen {
-                let _ = locs.pop()
-            }
-        }
-        _ => {
-            // non-enum pattern: checker should have rejected; take the then path
-            emit(cg, "  br label %" + thenLbl + "\n")
-            emit(cg, thenLbl + ":\n")
-            for si in 0..thenBody.len {
-                if genStmt(cg, *thenBody[si], locs, sigs, retTy) {
-                    thenTerm = true
-                }
-            }
-        }
-    }
-    if !thenTerm {
-        emit(cg, "  br label %" + endLbl + "\n")
-    }
-
-    emit(cg, elseLbl + ":\n")
-    var elseTerm = false
-    var hasElse = false
-    match elseBody {
-        Option.Some(stmts) => {
-            hasElse = true
-            for ei in 0..stmts.len {
-                if genStmt(cg, *stmts[ei], locs, sigs, retTy) {
-                    elseTerm = true
-                }
-            }
-        }
-        Option.None => {
-        }
-    }
-    if !elseTerm {
-        emit(cg, "  br label %" + endLbl + "\n")
-    }
-    emit(cg, endLbl + ":\n")
-    if thenTerm && elseTerm && hasElse {
-        emit(cg, "  unreachable\n")
-        return true
-    }
-    return false
 }
 
 // Match-expression codegen result: a value-producing match (Expr.MatchExpr)
@@ -1217,7 +1081,7 @@ pub struct MatchGen {
 // a statement (the checker guarantees the only other legal tail is a
 // diverging return/break/continue, which runs as an ordinary statement and
 // contributes no value — never silently coerced to a zero/void Val).
-pub fn genArmBody(cg: &mut Cgen, body: &Vec<Heap<Stmt>>, locs: &mut Vec<Local>, sigs: &Vec<CgFnSig>, retTy: &string, wantValue: bool, hintTy: string): MatchGen {
+pub fn genArmBody(cg: &mut Cgen, body: &Vec<Heap<HStmt>>, locs: &mut Vec<Local>, sigs: &Vec<CgFnSig>, retTy: &string, wantValue: bool, hintTy: string): MatchGen {
     var terminated = false
     var produced = false
     var val = Val {
@@ -1228,8 +1092,8 @@ pub fn genArmBody(cg: &mut Cgen, body: &Vec<Heap<Stmt>>, locs: &mut Vec<Local>, 
         let isLast = i == body.len - 1
         if wantValue && isLast {
             match *body[i] {
-                Stmt.ExprStmt(e, espan) => {
-                    val = genExpr(cg, *e, locs, sigs, hintTy.clone())
+                HStmt.ExprStmt(e) => {
+                    val = genHExpr(cg, *e, locs, sigs, hintTy.clone())
                     produced = true
                 }
                 _ => {
@@ -1259,7 +1123,7 @@ pub fn genArmBody(cg: &mut Cgen, body: &Vec<Heap<Stmt>>, locs: &mut Vec<Local>, 
 
 // `match s { "a" => …, _ => … }` on a string subject: a chain of string-eq
 // tests (literals are exclusive so a non-final wildcard is still the default).
-pub fn genStringMatch(cg: &mut Cgen, subjValV: &string, arms: &Vec<MatchArm>, locs: &mut Vec<Local>, sigs: &Vec<CgFnSig>, retTy: &string, wantValue: bool, hintTy: string): MatchGen {
+pub fn genStringMatch(cg: &mut Cgen, subjValV: &string, arms: &Vec<HMatchArm>, locs: &mut Vec<Local>, sigs: &Vec<CgFnSig>, retTy: &string, wantValue: bool, hintTy: string): MatchGen {
     let endLbl = nextLabel(cg, "smatch.end")
     var allTerminated = true
     var wildIdx: i64 = -1
@@ -1268,7 +1132,7 @@ pub fn genStringMatch(cg: &mut Cgen, subjValV: &string, arms: &Vec<MatchArm>, lo
     var resultTy = hintTy.clone()
     for ai in 0..arms.len {
         match arms[ai].pattern {
-            Pattern.LiteralPattern(val, kind, span) => {
+            HPattern.HLiteralPattern(val, kind) => {
                 let litV = genStringLit(cg, val.clone())
                 let eq = genStringEq(cg, subjValV.clone(), litV.v, true)
                 let armLbl = nextLabel(cg, "smatch.arm")
@@ -1370,7 +1234,7 @@ pub fn litIntConst(val: &string, kind: &LiteralKind): string {
 
 // match on an integer/char/bool subject: compare the value against each literal
 // pattern (a switch would also work, but a compare chain handles any width).
-pub fn genIntMatch(cg: &mut Cgen, subjV: &string, subjLl: &string, arms: &Vec<MatchArm>, locs: &mut Vec<Local>, sigs: &Vec<CgFnSig>, retTy: &string, wantValue: bool, hintTy: string): MatchGen {
+pub fn genIntMatch(cg: &mut Cgen, subjV: &string, subjLl: &string, arms: &Vec<HMatchArm>, locs: &mut Vec<Local>, sigs: &Vec<CgFnSig>, retTy: &string, wantValue: bool, hintTy: string): MatchGen {
     let endLbl = nextLabel(cg, "imatch.end")
     var allTerminated = true
     var wildIdx: i64 = -1
@@ -1379,7 +1243,7 @@ pub fn genIntMatch(cg: &mut Cgen, subjV: &string, subjLl: &string, arms: &Vec<Ma
     var resultTy = hintTy.clone()
     for ai in 0..arms.len {
         match arms[ai].pattern {
-            Pattern.LiteralPattern(val, kind, span) => {
+            HPattern.HLiteralPattern(val, kind) => {
                 let eq = nextTemp(cg)
                 emit(cg, "  " + eq + " = icmp eq " + subjLl.clone() + " " + subjV.clone() + ", " + litIntConst(val, kind) + "\n")
                 let armLbl = nextLabel(cg, "imatch.arm")
@@ -1440,15 +1304,22 @@ pub fn genIntMatch(cg: &mut Cgen, subjV: &string, subjLl: &string, arms: &Vec<Ma
 // Such an arm hands its payload binding to the match's result, so the arm-scope
 // teardown must not drop it — jsonCursor's `let doc = match … { Ok(j) => j }`
 // freed the document and then read it.
-fn trailingIdentName(body: &Vec<Heap<Stmt>>): string {
+fn trailingIdentName(body: &Vec<Heap<HStmt>>): string {
     if body.len == 0 {
         return ""
     }
     match *body[body.len - 1] {
-        Stmt.ExprStmt(e, span) => {
+        HStmt.ExprStmt(e) => {
             match (*e).kind {
-                Expr.Ident(name) => {
-                    return name.clone()
+                HExpr.Unlowered(a) => {
+                    match (*a).kind {
+                        Expr.Ident(name) => {
+                            return name.clone()
+                        }
+                        _ => {
+                            return ""
+                        }
+                    }
                 }
                 _ => {
                     return ""
@@ -1461,7 +1332,11 @@ fn trailingIdentName(body: &Vec<Heap<Stmt>>): string {
     }
 }
 
-pub fn genMatch(cg: &mut Cgen, subject: &ExprNode, arms: &Vec<MatchArm>, locs: &mut Vec<Local>, sigs: &Vec<CgFnSig>, retTy: &string, wantValue: bool, hintTy: string): MatchGen {
+pub fn genMatchAst(cg: &mut Cgen, subject: &ExprNode, arms: &Vec<HMatchArm>, locs: &mut Vec<Local>, sigs: &Vec<CgFnSig>, retTy: &string, wantValue: bool, hintTy: string): MatchGen {
+    // Whether the subject is BORROWED rather than consumed is a question about the place
+    // it names, which is still a syntactic one here — the checker records no equivalent of
+    // the oracle's matchSubjectRef set, so HStmt.Match's own isRef flag is weaker (it only
+    // reports a subject whose recorded type was still a `&T`) and is deliberately not used.
     let subjBorrows = matchSubjectBorrows(subject, locs)
     let subjLv = genLvalue(cg, subject, locs, sigs)
     if llType(subjLv.ty) == "%String" {
@@ -1491,8 +1366,10 @@ pub fn genMatch(cg: &mut Cgen, subject: &ExprNode, arms: &Vec<MatchArm>, locs: &
     for i in 0..arms.len {
         let armLbl = nextLabel(cg, "match.arm")
         match arms[i].pattern {
-            Pattern.EnumPattern(enumName, variant, bindings, span) => {
-                // keyed by the subject's mangled name, not the pattern's base name
+            HPattern.HEnumPattern(variant, bindings, tg0) => {
+                // Keyed by the subject's (mangled) enum name. The pattern's own recorded
+                // tag is NOT used: the checker numbers variants positionally and drops an
+                // explicit `= 169` discriminant, which cg.enums honours.
                 let tg = lookupVariantTag(cg, rawName, variant)
                 switchCases = switchCases + "i32 " + tg.toString() + ", label %" + armLbl + " "
             }
@@ -1520,7 +1397,7 @@ pub fn genMatch(cg: &mut Cgen, subject: &ExprNode, arms: &Vec<MatchArm>, locs: &
         let locsPreLen = locs.len
         // Extract payload bindings
         match arms[ai].pattern {
-            Pattern.EnumPattern(enumName, variant, bindings, span) => {
+            HPattern.HEnumPattern(variant, bindings, tg0) => {
                 if bindings.len > 0 {
                     let payloadTypes = lookupVariantPayload(cg, rawName, variant)
                     if payloadTypes.len > 0 {
@@ -1614,135 +1491,145 @@ pub fn emitScopeDrops(cg: &mut Cgen, locs: &Vec<Local>, fromLen: i64, skipName: 
     }
 }
 
+// The value form of `if`: both arms are expressions, so their bodies are walked for a
+// value and joined with a phi. Bodies come from the block arena — see blockBase.
+pub fn genIfExprValue(cg: &mut Cgen, cond: &ExprNode, thenBody: &Vec<Heap<HStmt>>, elseBody: &Vec<Heap<HStmt>>, locs: &mut Vec<Local>, sigs: &Vec<CgFnSig>, hintTy: string): Val {
+    // Same compile-time fold as the statement form (genIf): the value comes from the
+    // taken arm alone, and the dead arm is never emitted.
+    match constFoldBool(cg, cond) {
+        Option.Some(taken) => {
+            let foldRetTy = cg.curRetTy.clone()
+            if taken {
+                return genArmBody(cg, thenBody, locs, sigs, foldRetTy, true, hintTy.clone()).val
+            }
+            return genArmBody(cg, elseBody, locs, sigs, foldRetTy, true, hintTy.clone()).val
+        }
+        Option.None => {
+        }
+    }
+    let cv = genExpr(cg, cond, locs, sigs, "bool")
+    let thenLbl = nextLabel(cg, "ifx.then")
+    let elseLbl = nextLabel(cg, "ifx.else")
+    let endLbl = nextLabel(cg, "ifx.end")
+    let armRetTy = cg.curRetTy.clone()
+    emit(cg, "  br i1 " + cv.v + ", label %" + thenLbl + ", label %" + elseLbl + "\n")
+    emitLabel(cg, thenLbl)
+    let a = genArmBody(cg, thenBody, locs, sigs, armRetTy, true, hintTy.clone())
+    // the phi predecessor is wherever control actually is now — a nested if-expr
+    // (`else if …`) ends in its OWN block, not thenLbl/elseLbl.
+    let thenPred = cg.curBlock.clone()
+    if !a.terminated {
+        emit(cg, "  br label %" + endLbl + "\n")
+    }
+    emitLabel(cg, elseLbl)
+    let b = genArmBody(cg, elseBody, locs, sigs, armRetTy, true, a.val.ty.clone())
+    let elsePred = cg.curBlock.clone()
+    if !b.terminated {
+        emit(cg, "  br label %" + endLbl + "\n")
+    }
+    emitLabel(cg, endLbl)
+    if a.terminated && b.terminated {
+        emit(cg, "  unreachable\n")
+        return Val {
+            v: "0", ty: "i64"
+        }
+    }
+    // A diverging arm contributes no incoming edge, so the phi takes the type — and the
+    // sole value — from the arm that survived.
+    var resTy = a.val.ty.clone()
+    if a.terminated {
+        resTy = b.val.ty.clone()
+    }
+    let r = nextTemp(cg)
+    let ll = llType(resTy)
+    if a.terminated {
+        emit(cg, "  " + r + " = phi " + ll + " [" + b.val.v + ", %" + elsePred + "]\n")
+    } else if b.terminated {
+        emit(cg, "  " + r + " = phi " + ll + " [" + a.val.v + ", %" + thenPred + "]\n")
+    } else {
+        emit(cg, "  " + r + " = phi " + ll + " [" + a.val.v + ", %" + thenPred + "], [" + b.val.v + ", %" + elsePred + "]\n")
+    }
+    return Val {
+        v: r, ty: resTy
+    }
+}
+
+// -- Lifted statement blocks --
+//
+// A Closure/IfExpr/MatchExpr in expression position had its body moved into the module's
+// block arena at lowering, keyed by the node's id, and its AST body left empty. Codegen
+// reads it back from there.
+
+// Index of the FIRST block belonging to expression node `id`. Fatal on a miss: the AST
+// body is empty by construction, so falling back to it would emit an empty function body
+// and no diagnostic at all.
+pub fn blockBase(cg: &Cgen, id: u32, what: &string): i64 {
+    match cg.stmtBlockAt.get(id) {
+        Option.Some(i) => {
+            return i
+        }
+        Option.None => {
+            eprint("internal error: " + what.clone() + " #" + id.toString() + ": lowering lifted no statement block for it")
+            unsafe {
+                exit(1)
+            }
+            return 0
+        }
+    }
+}
+
+// Blocks are MOVED out to be walked and moved back, never copied: reading an HStmt tree
+// through a copy duplicates enum payloads whose variant the copy cannot see, which is one
+// buffer with two owners.
+pub fn takeBlock(cg: &mut Cgen, idx: i64): Vec<Heap<HStmt>> {
+    return replace(cg.stmtBlocks[idx].stmts, Vec.new())
+}
+
+pub fn putBlock(cg: &mut Cgen, idx: i64, b: Vec<Heap<HStmt>>) {
+    cg.stmtBlocks[idx].stmts = b
+}
+
+pub fn takeArms(cg: &mut Cgen, idx: i64): Vec<HMatchArm> {
+    return replace(cg.stmtBlocks[idx].arms, Vec.new())
+}
+
+pub fn putArms(cg: &mut Cgen, idx: i64, a: Vec<HMatchArm>) {
+    cg.stmtBlocks[idx].arms = a
+}
+
 // -- Main statement dispatch. Returns true if stmt terminates block. --
 
-pub fn genStmt(cg: &mut Cgen, s: &Stmt, locs: &mut Vec<Local>, sigs: &Vec<CgFnSig>, retTy: &string): bool {
+pub fn genStmt(cg: &mut Cgen, s: &HStmt, locs: &mut Vec<Local>, sigs: &Vec<CgFnSig>, retTy: &string): bool {
     match s {
-        Stmt.LetDecl(name, ty, value, span) => {
-            var hintTy = ""
-            // Fixed-size array annotation (`let raw: [u8;4] = …`) — see the Local.isArr
-            // doc comment: this is the only place codegen can recover "was this
-            // declared as an array" once it's lowered onto %Vec's runtime shape.
-            var isArrAnno = false
-            match ty {
-                Option.Some(t) => {
-                    // resolveTyStr, not bare astTypeStr: an alias-typed annotation
-                    // (`let c: Count = 21`) must hint the ALIASED type (i64), or an
-                    // untyped literal RHS defaults to i32 and silently mis-sizes.
-                    hintTy = resolveTyStr(cg, astTypeStr(t))
-                    isArrAnno = t.isArray
+        HStmt.Let(name, ty, value, mutable) => {
+            match (*value).kind {
+                HExpr.Unlowered(av) => {
+                    genLetBinding(cg, name, ty, *av, (*value).span, locs, sigs)
                 }
-                Option.None => {
-                    hintTy = vecNewHint(cg, name, *value)
-                    isArrAnno = exprWrapsFixedArrayReturn(*value, sigs)
+                _ => {
+                    hexprAbort(*value, "'" + name.clone() + "' initializer")
                 }
             }
-            // RHS is moved into the new binding → zero a source place (var→var move)
-            let forcedValue = forceMoveIfEscaping(cg, name, *value)
-            let v0 = genOwnedArg(cg, *forcedValue, hintTy.clone(), locs, sigs)
-            let v1 = genOptionWrapIfNeeded(cg, v0, hintTy.clone())
-            let v = genInterfaceCoerceIfNeeded(cg, v1, hintTy)
-            let lrange = rangeOfOptAnnotation(cg, ty)
-            emitRangeCheck(cg, v, lrange, span)
-            let vtyLl = llType(v.ty)
-            let addr = nextTemp(cg)
-            emit(cg, "  " + addr + " = alloca " + vtyLl + "\n")
-            emit(cg, "  store " + vtyLl + " " + v.v + ", ptr " + addr + "\n")
-            locs.push(Local {
-                name: name.clone(), ty: v.ty.clone(), addr: addr, isRef: false, isArr: isArrAnno, range: lrange
-            }
-            )
             return false
         }
-        Stmt.VarDecl(name, ty, value, span) => {
-            var hintTy = ""
-            var isArrAnno = false
-            match ty {
-                Option.Some(t) => {
-                    // see the LetDecl arm above: alias annotations must hint their
-                    // resolved base type, not the bare alias name.
-                    hintTy = resolveTyStr(cg, astTypeStr(t))
-                    isArrAnno = t.isArray
-                }
-                Option.None => {
-                    hintTy = vecNewHint(cg, name, *value)
-                    isArrAnno = exprWrapsFixedArrayReturn(*value, sigs)
-                }
-            }
-            // RHS is moved into the new binding → zero a source place (var→var move)
-            let forcedValue = forceMoveIfEscaping(cg, name, *value)
-            let v0 = genOwnedArg(cg, *forcedValue, hintTy.clone(), locs, sigs)
-            let v1 = genOptionWrapIfNeeded(cg, v0, hintTy.clone())
-            let v = genInterfaceCoerceIfNeeded(cg, v1, hintTy)
-            let lrange = rangeOfOptAnnotation(cg, ty)
-            emitRangeCheck(cg, v, lrange, span)
-            let vtyLl = llType(v.ty)
-            let addr = nextTemp(cg)
-            emit(cg, "  " + addr + " = alloca " + vtyLl + "\n")
-            emit(cg, "  store " + vtyLl + " " + v.v + ", ptr " + addr + "\n")
-            locs.push(Local {
-                name: name.clone(), ty: v.ty.clone(), addr: addr, isRef: false, isArr: isArrAnno, range: lrange
-            }
-            )
+        HStmt.Assign(target, value, isInit) => {
+            genAssign(cg, *target, *value, locs, sigs)
             return false
         }
-        Stmt.Assign(target, value, span) => {
-            genAssign(cg, *target, *value, locs, sigs, span)
-            return false
-        }
-        Stmt.Return(value, span) => {
-            // a returned local is moved out — everything else in scope drops
-            var skipName = ""
+        HStmt.Return(value, retType) => {
             match value {
-                Option.Some(expr) => {
-                    match (*expr).kind {
-                        Expr.Ident(n) => {
-                            skipName = n.clone()
+                Option.Some(hv) => {
+                    match (*hv).kind {
+                        HExpr.Unlowered(av) => {
+                            genReturnValue(cg, *av, (*hv).span, locs, sigs, retTy)
                         }
                         _ => {
+                            hexprAbort(*hv, "return value")
                         }
                     }
                 }
                 Option.None => {
-                }
-            }
-            match value {
-                Option.Some(expr) => {
-                    // A directly-returned closure literal escapes this frame right here —
-                    // force it to `move` so its captures are heap-owned, not aliased into
-                    // the frame that's about to unwind (see forcedMoveClosure).
-                    let forcedRet = forcedMoveClosure(*expr)
-                    // A returned PLACE is moved out of this frame: `return w.out` hands
-                    // the string to the caller, and without the move the scope teardown
-                    // below frees it (deflate returned a dangling buffer). A bare ident
-                    // is additionally covered by skipName above; zeroing it first is
-                    // harmless — its drop is already skipped.
-                    let v00 = genOwnedArg(cg, *forcedRet, retTy.clone(), locs, sigs)
-                    let v = genInterfaceCoerceIfNeeded(cg, v00, retTy)
-                    let retRange = cg.curRetRange.clone()
-                    emitRangeCheck(cg, v, retRange, span)
-                    emitScopeDrops(cg, locs, 0, skipName)
-                    // unannotated closure body: the return type IS the value's type;
-                    // record it (genClosure reads it for the define header) and emit
-                    // the ret with no coercion.
-                    if retTy == "__closureinfer__" {
-                        let vll = llType(v.ty)
-                        cg.closureRetTy = v.ty.clone()
-                        emit(cg, "  ret " + vll + " " + v.v + "\n")
-                        return true
-                    }
-                    let fnRetLl = llType(retTy)
-                    let valLl = llType(v.ty)
-                    if valLl == fnRetLl {
-                        emit(cg, "  ret " + valLl + " " + v.v + "\n")
-                    } else {
-                        let cast = nextTemp(cg)
-                        emit(cg, "  " + cast + " = trunc " + valLl + " " + v.v + " to " + fnRetLl + "\n")
-                        emit(cg, "  ret " + fnRetLl + " " + cast + "\n")
-                    }
-                }
-                Option.None => {
-                    emitScopeDrops(cg, locs, 0, skipName)
+                    emitScopeDrops(cg, locs, 0, "")
                     let fnRetLl = llType(retTy)
                     if fnRetLl == "void" {
                         emit(cg, "  ret void\n")
@@ -1754,25 +1641,45 @@ pub fn genStmt(cg: &mut Cgen, s: &Stmt, locs: &mut Vec<Local>, sigs: &Vec<CgFnSi
             }
             return true
         }
-        Stmt.ExprStmt(e, span) => {
-            genExpr(cg, *e, locs, sigs, "")
+        HStmt.ExprStmt(e) => {
+            let _ = genHExpr(cg, *e, locs, sigs, "")
             return false
         }
-        Stmt.IfStmt(cond, thenBody, elseBody, span) => {
+        HStmt.If(cond, thenBody, elseBody) => {
             return genIf(cg, *cond, thenBody, elseBody, locs, sigs, retTy)
         }
-        Stmt.WhileStmt(cond, body, span) => {
+        HStmt.While(cond, body, invariants) => {
             genWhile(cg, *cond, body, locs, sigs, retTy)
             return false
         }
-        Stmt.ForInStmt(varName, varName2, iterable, body, span) => {
-            genForIn(cg, varName, varName2, *iterable, body, locs, sigs, retTy)
+        HStmt.ForRange(varName, varTy, startE, endE, body, invariants) => {
+            genForRange(cg, varName, *startE, *endE, body, locs, sigs, retTy)
             return false
         }
-        Stmt.MatchStmt(subject, arms, span) => {
-            return genMatch(cg, *subject, arms, locs, sigs, retTy, false, "").terminated
+        HStmt.ForEach(varName, varName2, varTy, varTy2, iterable, kind, body, invariants) => {
+            genForEach(cg, varName, varName2, *iterable, kind, body, locs, sigs, retTy)
+            return false
         }
-        Stmt.BreakStmt(span) => {
+        HStmt.ForIterator(varName, varTy, iterable, nextMethod, resultEnum, body, invariants, okVariant) => {
+            genForIterator(cg, varName, *iterable, nextMethod, resultEnum, okVariant, body, locs, sigs, retTy)
+            return false
+        }
+        HStmt.ForStrView(varName, varName2, varTy, src, sep, mode, body, invariants) => {
+            genForStrView(cg, varName, varName2, *src, sep, mode, body, locs, sigs, retTy)
+            return false
+        }
+        HStmt.Match(subject, arms, enumName, isRef) => {
+            match (*subject).kind {
+                HExpr.Unlowered(sx) => {
+                    return genMatchAst(cg, *sx, arms, locs, sigs, retTy, false, "").terminated
+                }
+                _ => {
+                    hexprAbort(*subject, "match subject")
+                    return true
+                }
+            }
+        }
+        HStmt.Break => {
             if cg.curBreakLbl.len > 0 {
                 // Leaving the loop body early still owns whatever it declared —
                 // same locals a normal iteration-end would drop (loopBreak in
@@ -1786,7 +1693,7 @@ pub fn genStmt(cg: &mut Cgen, s: &Stmt, locs: &mut Vec<Local>, sigs: &Vec<CgFnSi
             }
             return false
         }
-        Stmt.ContinueStmt(span) => {
+        HStmt.Continue => {
             if cg.curContLbl.len > 0 {
                 // Same as break above: ending this iteration early still drops
                 // whatever it declared, same as reaching the bottom would.
@@ -1799,7 +1706,7 @@ pub fn genStmt(cg: &mut Cgen, s: &Stmt, locs: &mut Vec<Local>, sigs: &Vec<CgFnSi
             }
             return false
         }
-        Stmt.UnsafeBlock(body, span) => {
+        HStmt.UnsafeBlock(body) => {
             var term = false
             for i in 0..body.len {
                 if genStmt(cg, *body[i], locs, sigs, retTy) {
@@ -1808,37 +1715,142 @@ pub fn genStmt(cg: &mut Cgen, s: &Stmt, locs: &mut Vec<Local>, sigs: &Vec<CgFnSi
             }
             return term
         }
-        Stmt.IfLetStmt(pattern, subject, thenBody, elseBody, span) => {
-            return genIfLet(cg, *pattern, *subject, thenBody, elseBody, locs, sigs, retTy)
+    }
+}
+
+// `let`/`var`: evaluate the initializer in an owning position, range-check it, and bind
+// the result. `let` and `var` differ only in the checker, so they share one path here.
+// Every backend fact about the binding — its type, its bound, whether it is a fixed array
+// — is read off the ONE TypeKind the checker gave it, rather than reconstructed from the
+// annotation's syntax at three separate sites.
+fn genLetBinding(cg: &mut Cgen, name: &string, ty: &TypeKind, value: &ExprNode, span: &Option<Span>, locs: &mut Vec<Local>, sigs: &Vec<CgFnSig>) {
+    // Left open only where the checker itself left it open — an un-annotated `Vec.new()`
+    // whose element the first push supplies — and the push pre-scan answers that case.
+    var hintTy = ""
+    if !containsUnknown(ty) {
+        hintTy = tyStr(cg, ty, "'" + name.clone() + "'")
+    }
+    if hintTy.len == 0 {
+        hintTy = vecNewHint(cg, name, value)
+    }
+    // A fixed-size array and a growable Vec share one runtime shape, so this bit is what
+    // tells genOwnedArg to deep-clone instead of move at a by-value site. The checker
+    // knows which it is; nothing here infers it from a callee's mangled return-type string
+    // any more.
+    let isArrAnno = isFixedArrayTy(ty)
+    let lrange = rangeOfTyK(ty)
+    // RHS is moved into the new binding → zero a source place (var→var move)
+    var v0 = Val {
+        v: "0", ty: "void"
+    }
+    match forceMoveIfEscaping(cg, name, value) {
+        Option.Some(forced) => {
+            v0 = genOwnedArg(cg, *forced, hintTy.clone(), locs, sigs)
         }
+        Option.None => {
+            v0 = genOwnedArg(cg, value, hintTy.clone(), locs, sigs)
+        }
+    }
+    let v1 = genOptionWrapIfNeeded(cg, v0, hintTy.clone())
+    let v = genInterfaceCoerceIfNeeded(cg, v1, hintTy)
+    emitRangeCheck(cg, v, lrange, span)
+    let vtyLl = llType(v.ty)
+    let addr = nextTemp(cg)
+    emit(cg, "  " + addr + " = alloca " + vtyLl + "\n")
+    emit(cg, "  store " + vtyLl + " " + v.v + ", ptr " + addr + "\n")
+    locs.push(Local {
+        name: name.clone(), ty: v.ty.clone(), addr: addr, isRef: false, isArr: isArrAnno, range: lrange.clone()
+    }
+    )
+}
+
+fn genReturnValue(cg: &mut Cgen, expr: &ExprNode, span: &Option<Span>, locs: &mut Vec<Local>, sigs: &Vec<CgFnSig>, retTy: &string) {
+    // a returned local is moved out — everything else in scope drops
+    var skipName = ""
+    match expr.kind {
+        Expr.Ident(n) => {
+            skipName = n.clone()
+        }
+        _ => {
+        }
+    }
+    // A directly-returned closure literal escapes this frame right here — force it to
+    // `move` so its captures are heap-owned, not aliased into the frame that's about to
+    // unwind (see forcedMoveClosure).
+    //
+    // A returned PLACE is moved out of this frame too: `return w.out` hands the string to
+    // the caller, and without the move the scope teardown below frees it (deflate returned
+    // a dangling buffer). A bare ident is additionally covered by skipName above; zeroing
+    // it first is harmless — its drop is already skipped.
+    var v00 = Val {
+        v: "0", ty: "void"
+    }
+    match forcedMoveClosure(expr) {
+        Option.Some(forced) => {
+            v00 = genOwnedArg(cg, *forced, retTy.clone(), locs, sigs)
+        }
+        Option.None => {
+            v00 = genOwnedArg(cg, expr, retTy.clone(), locs, sigs)
+        }
+    }
+    let v = genInterfaceCoerceIfNeeded(cg, v00, retTy)
+    let retRange = cg.curRetRange.clone()
+    emitRangeCheck(cg, v, retRange, span)
+    emitScopeDrops(cg, locs, 0, skipName)
+    // unannotated closure body: the return type IS the value's type; record it
+    // (genClosure reads it for the define header) and emit the ret with no coercion.
+    if retTy == "__closureinfer__" {
+        let vll = llType(v.ty)
+        cg.closureRetTy = v.ty.clone()
+        emit(cg, "  ret " + vll + " " + v.v + "\n")
+        return
+    }
+    let fnRetLl = llType(retTy)
+    let valLl = llType(v.ty)
+    if valLl == fnRetLl {
+        emit(cg, "  ret " + valLl + " " + v.v + "\n")
+    } else {
+        let cast = nextTemp(cg)
+        emit(cg, "  " + cast + " = trunc " + valLl + " " + v.v + " to " + fnRetLl + "\n")
+        emit(cg, "  ret " + fnRetLl + " " + cast + "\n")
     }
 }
 
 // -- Closures --
 
+// Every block a lifted-body node owns, walked for identifiers.
+fn collectIdentsBlocks(cg: &Cgen, id: u32, count: i64, out: &mut Vec<string>) {
+    let base = blockBase(cg, id, "expression")
+    for b in 0..count {
+        for j in 0..cg.stmtBlocks[base + b].stmts.len {
+            collectIdentsStmt(cg, *cg.stmtBlocks[base + b].stmts[j], out)
+        }
+    }
+}
+
 // Collect every identifier name referenced in an expression (over-approximate:
 // the caller filters against the enclosing scope to find true captures).
-pub fn collectIdentsExpr(e: &ExprNode, out: &mut Vec<string>) {
+pub fn collectIdentsExpr(cg: &Cgen, e: &ExprNode, out: &mut Vec<string>) {
     match e.kind {
         Expr.Ident(name) => {
             out.push(name.clone())
         }
         Expr.BinOp(op, l, r) => {
-            collectIdentsExpr(*l, out)
-            collectIdentsExpr(*r, out)
+            collectIdentsExpr(cg, *l, out)
+            collectIdentsExpr(cg, *r, out)
         }
         Expr.UnaryOp(op, x) => {
-            collectIdentsExpr(*x, out)
+            collectIdentsExpr(cg, *x, out)
         }
         Expr.Call(name, args, targs) => {
             out.push(name.clone())
             for i in 0..args.len {
-                collectIdentsExpr(*args[i], out)
+                collectIdentsExpr(cg, *args[i], out)
             }
         }
         Expr.StructLit(name, fields) => {
             for i in 0..fields.len {
-                collectIdentsExpr(*fields[i].value, out)
+                collectIdentsExpr(cg, *fields[i].value, out)
             }
         }
         // Same shape as StructLit — its field values are arbitrary expressions, so a
@@ -1846,74 +1858,70 @@ pub fn collectIdentsExpr(e: &ExprNode, out: &mut Vec<string>) {
         // nothing and read a garbage frame slot.
         Expr.JsonObject(fields) => {
             for i in 0..fields.len {
-                collectIdentsExpr(*fields[i].value, out)
+                collectIdentsExpr(cg, *fields[i].value, out)
             }
         }
         Expr.FieldAccess(obj, field) => {
-            collectIdentsExpr(*obj, out)
+            collectIdentsExpr(cg, *obj, out)
         }
         Expr.ArrayLit(elems) => {
             for i in 0..elems.len {
-                collectIdentsExpr(*elems[i], out)
+                collectIdentsExpr(cg, *elems[i], out)
             }
         }
         Expr.ArrayRepeat(x, n) => {
-            collectIdentsExpr(*x, out)
+            collectIdentsExpr(cg, *x, out)
         }
         Expr.IndexAccess(obj, idx) => {
-            collectIdentsExpr(*obj, out)
-            collectIdentsExpr(*idx, out)
+            collectIdentsExpr(cg, *obj, out)
+            collectIdentsExpr(cg, *idx, out)
         }
         Expr.EnumLit(en, va, args) => {
             for i in 0..args.len {
-                collectIdentsExpr(*args[i], out)
+                collectIdentsExpr(cg, *args[i], out)
             }
         }
         Expr.Unwrap(x) => {
-            collectIdentsExpr(*x, out)
+            collectIdentsExpr(cg, *x, out)
         }
         Expr.Propagate(x) => {
-            collectIdentsExpr(*x, out)
+            collectIdentsExpr(cg, *x, out)
         }
         Expr.DefaultValue(x, d) => {
-            collectIdentsExpr(*x, out)
-            collectIdentsExpr(*d, out)
+            collectIdentsExpr(cg, *x, out)
+            collectIdentsExpr(cg, *d, out)
         }
         Expr.CastExpr(x, ty) => {
-            collectIdentsExpr(*x, out)
+            collectIdentsExpr(cg, *x, out)
         }
         Expr.MethodCall(obj, m, args) => {
-            collectIdentsExpr(*obj, out)
+            collectIdentsExpr(cg, *obj, out)
             for i in 0..args.len {
-                collectIdentsExpr(*args[i], out)
+                collectIdentsExpr(cg, *args[i], out)
             }
         }
+        // The three body-carrying shapes were emptied at lowering, so the walk follows
+        // the node's id into the block arena instead of its (now empty) AST body.
         Expr.Closure(params, rt, body, isMove) => {
-            for i in 0..body.len {
-                collectIdentsStmt(*body[i], out)
-            }
+            collectIdentsBlocks(cg, e.id, 1, out)
         }
         Expr.RangeExpr(a, b) => {
-            collectIdentsExpr(*a, out)
-            collectIdentsExpr(*b, out)
+            collectIdentsExpr(cg, *a, out)
+            collectIdentsExpr(cg, *b, out)
         }
         Expr.IsExpr(x, pat) => {
-            collectIdentsExpr(*x, out)
+            collectIdentsExpr(cg, *x, out)
         }
         Expr.IfExpr(c, thenBody, elseBody) => {
-            collectIdentsExpr(*c, out)
-            for i in 0..thenBody.len {
-                collectIdentsStmt(*thenBody[i], out)
-            }
-            for i in 0..elseBody.len {
-                collectIdentsStmt(*elseBody[i], out)
-            }
+            collectIdentsExpr(cg, *c, out)
+            collectIdentsBlocks(cg, e.id, 2, out)
         }
         Expr.MatchExpr(subject, arms) => {
-            collectIdentsExpr(*subject, out)
-            for i in 0..arms.len {
-                for j in 0..arms[i].body.len {
-                    collectIdentsStmt(*arms[i].body[j], out)
+            collectIdentsExpr(cg, *subject, out)
+            let base = blockBase(cg, e.id, "match-expression")
+            for ai in 0..cg.stmtBlocks[base].arms.len {
+                for j in 0..cg.stmtBlocks[base].arms[ai].body.len {
+                    collectIdentsStmt(cg, *cg.stmtBlocks[base].arms[ai].body[j], out)
                 }
             }
         }
@@ -1934,90 +1942,114 @@ pub fn collectIdentsExpr(e: &ExprNode, out: &mut Vec<string>) {
     }
 }
 
-pub fn collectIdentsStmt(s: &Stmt, out: &mut Vec<string>) {
+pub fn collectIdentsStmt(cg: &Cgen, s: &HStmt, out: &mut Vec<string>) {
     match s {
-        Stmt.LetDecl(name, ty, val, span) => {
-            collectIdentsExpr(*val, out)
+        HStmt.Let(name, ty, value, mutable) => {
+            collectIdentsHExpr(cg, *value, out)
         }
-        Stmt.VarDecl(name, ty, val, span) => {
-            collectIdentsExpr(*val, out)
+        HStmt.Assign(target, value, isInit) => {
+            collectIdentsHExpr(cg, *target, out)
+            collectIdentsHExpr(cg, *value, out)
         }
-        Stmt.Assign(target, val, span) => {
-            collectIdentsExpr(*target, out)
-            collectIdentsExpr(*val, out)
-        }
-        Stmt.Return(value, span) => {
+        HStmt.Return(value, retType) => {
             match value {
                 Option.Some(e) => {
-                    collectIdentsExpr(*e, out)
+                    collectIdentsHExpr(cg, *e, out)
                 }
                 Option.None => {
                 }
             }
         }
-        Stmt.IfStmt(cond, thenB, elseB, span) => {
-            collectIdentsExpr(*cond, out)
+        HStmt.If(cond, thenB, elseB) => {
+            collectIdentsHExpr(cg, *cond, out)
             for i in 0..thenB.len {
-                collectIdentsStmt(*thenB[i], out)
+                collectIdentsStmt(cg, *thenB[i], out)
             }
             match elseB {
                 Option.Some(eb) => {
                     for i in 0..eb.len {
-                        collectIdentsStmt(*eb[i], out)
+                        collectIdentsStmt(cg, *eb[i], out)
                     }
                 }
                 Option.None => {
                 }
             }
         }
-        Stmt.WhileStmt(cond, body, span) => {
-            collectIdentsExpr(*cond, out)
+        HStmt.While(cond, body, invariants) => {
+            collectIdentsHExpr(cg, *cond, out)
             for i in 0..body.len {
-                collectIdentsStmt(*body[i], out)
+                collectIdentsStmt(cg, *body[i], out)
             }
         }
-        Stmt.ExprStmt(e, span) => {
-            collectIdentsExpr(*e, out)
+        HStmt.ExprStmt(e) => {
+            collectIdentsHExpr(cg, *e, out)
         }
-        Stmt.MatchStmt(subj, arms, span) => {
-            collectIdentsExpr(*subj, out)
+        HStmt.Match(subj, arms, enumName, isRef) => {
+            collectIdentsHExpr(cg, *subj, out)
             for i in 0..arms.len {
                 for j in 0..arms[i].body.len {
-                    collectIdentsStmt(*arms[i].body[j], out)
+                    collectIdentsStmt(cg, *arms[i].body[j], out)
                 }
             }
         }
-        Stmt.IfLetStmt(pat, val, thenB, elseB, span) => {
-            collectIdentsExpr(*val, out)
-            for i in 0..thenB.len {
-                collectIdentsStmt(*thenB[i], out)
+        HStmt.UnsafeBlock(body) => {
+            for i in 0..body.len {
+                collectIdentsStmt(cg, *body[i], out)
             }
-            match elseB {
-                Option.Some(eb) => {
-                    for i in 0..eb.len {
-                        collectIdentsStmt(*eb[i], out)
-                    }
+        }
+        HStmt.ForRange(varName, varTy, startE, endE, body, invariants) => {
+            collectIdentsHExpr(cg, *startE, out)
+            collectIdentsHExpr(cg, *endE, out)
+            for i in 0..body.len {
+                collectIdentsStmt(cg, *body[i], out)
+            }
+        }
+        HStmt.ForEach(varName, varName2, varTy, varTy2, iterable, kind, body, invariants) => {
+            collectIdentsHExpr(cg, *iterable, out)
+            for i in 0..body.len {
+                collectIdentsStmt(cg, *body[i], out)
+            }
+        }
+        HStmt.ForIterator(varName, varTy, iterable, nextMethod, resultEnum, body, invariants, okVariant) => {
+            collectIdentsHExpr(cg, *iterable, out)
+            for i in 0..body.len {
+                collectIdentsStmt(cg, *body[i], out)
+            }
+        }
+        HStmt.ForStrView(varName, varName2, varTy, src, sep, mode, body, invariants) => {
+            collectIdentsHExpr(cg, *src, out)
+            match sep {
+                Option.Some(sx) => {
+                    collectIdentsHExpr(cg, *sx, out)
                 }
                 Option.None => {
                 }
             }
-        }
-        Stmt.UnsafeBlock(body, span) => {
             for i in 0..body.len {
-                collectIdentsStmt(*body[i], out)
-            }
-        }
-        Stmt.ForInStmt(v, idx, iter, body, span) => {
-            collectIdentsExpr(*iter, out)
-            for i in 0..body.len {
-                collectIdentsStmt(*body[i], out)
+                collectIdentsStmt(cg, *body[i], out)
             }
         }
         // No idents to collect — exhaustive on purpose, same reason as
         // collectIdentsExpr's literal arms.
-        Stmt.BreakStmt(span) => {
+        HStmt.Break => {
         }
-        Stmt.ContinueStmt(span) => {
+        HStmt.Continue => {
+        }
+    }
+}
+
+// The bridge, for the read-only pre-scans: a lowered node has no AST to walk, and the two
+// nodes lowering builds itself (an `@iter` delegate read) carry their receiver underneath.
+fn collectIdentsHExpr(cg: &Cgen, n: &HExprNode, out: &mut Vec<string>) {
+    match n.kind {
+        HExpr.Unlowered(e) => {
+            collectIdentsExpr(cg, *e, out)
+        }
+        HExpr.FieldAccess(obj, field, isRefRead) => {
+            collectIdentsHExpr(cg, *obj, out)
+        }
+        _ => {
+            hexprAbort(n, "expression in a capture pre-scan")
         }
     }
 }
@@ -2025,10 +2057,10 @@ pub fn collectIdentsStmt(s: &Stmt, out: &mut Vec<string>) {
 // Free variables of a closure body: referenced idents that live in the enclosing
 // scope and aren't the closure's own params. By-reference capture (env holds the
 // address of each), which is sound because these closures don't escape their call.
-pub fn closureCaptures(params: &Vec<Param>, body: &Vec<Heap<Stmt>>, locs: &Vec<Local>): Vec<Local> {
+pub fn closureCaptures(cg: &Cgen, params: &Vec<Param>, body: &Vec<Heap<HStmt>>, locs: &Vec<Local>): Vec<Local> {
     var idents: Vec<string> = Vec.new()
     for i in 0..body.len {
-        collectIdentsStmt(*body[i], idents)
+        collectIdentsStmt(cg, *body[i], idents)
     }
     var caps: Vec<Local> = Vec.new()
     var seen: Vec<string> = Vec.new()
@@ -2097,15 +2129,21 @@ pub fn closureMoveEnvTy(caps: &Vec<Local>): string {
 // nested block a Return can hide in; codegen is a single forward pass over a
 // function's statements, so this pre-scan is what lets the EARLIER `let f = ...`
 // see the promotion before it emits the closure's env.
-pub fn collectReturnEscapedIdentsInto(body: &Vec<Heap<Stmt>>, out: &mut Vec<string>) {
+pub fn collectReturnEscapedIdentsInto(body: &Vec<Heap<HStmt>>, out: &mut Vec<string>) {
     for i in 0..body.len {
         match *body[i] {
-            Stmt.Return(value, span) => {
+            HStmt.Return(value, retType) => {
                 match value {
-                    Option.Some(expr) => {
-                        match (*expr).kind {
-                            Expr.Ident(n) => {
-                                out.push(n.clone())
+                    Option.Some(hv) => {
+                        match (*hv).kind {
+                            HExpr.Unlowered(av) => {
+                                match (*av).kind {
+                                    Expr.Ident(n) => {
+                                        out.push(n.clone())
+                                    }
+                                    _ => {
+                                    }
+                                }
                             }
                             _ => {
                             }
@@ -2115,7 +2153,7 @@ pub fn collectReturnEscapedIdentsInto(body: &Vec<Heap<Stmt>>, out: &mut Vec<stri
                     }
                 }
             }
-            Stmt.IfStmt(cond, thenBody, elseBody, span) => {
+            HStmt.If(cond, thenBody, elseBody) => {
                 collectReturnEscapedIdentsInto(thenBody, out)
                 match elseBody {
                     Option.Some(eb) => {
@@ -2125,28 +2163,27 @@ pub fn collectReturnEscapedIdentsInto(body: &Vec<Heap<Stmt>>, out: &mut Vec<stri
                     }
                 }
             }
-            Stmt.WhileStmt(cond, wbody, span) => {
+            HStmt.While(cond, wbody, invariants) => {
                 collectReturnEscapedIdentsInto(wbody, out)
             }
-            Stmt.MatchStmt(subject, arms, span) => {
+            HStmt.Match(subject, arms, enumName, isRef) => {
                 for ai in 0..arms.len {
                     collectReturnEscapedIdentsInto(arms[ai].body, out)
                 }
             }
-            Stmt.IfLetStmt(pattern, subject, thenBody, elseBody, span) => {
-                collectReturnEscapedIdentsInto(thenBody, out)
-                match elseBody {
-                    Option.Some(eb) => {
-                        collectReturnEscapedIdentsInto(eb, out)
-                    }
-                    Option.None => {
-                    }
-                }
-            }
-            Stmt.UnsafeBlock(ubody, span) => {
+            HStmt.UnsafeBlock(ubody) => {
                 collectReturnEscapedIdentsInto(ubody, out)
             }
-            Stmt.ForInStmt(vname, vname2, iterable, fbody, span) => {
+            HStmt.ForRange(varName, varTy, startE, endE, fbody, invariants) => {
+                collectReturnEscapedIdentsInto(fbody, out)
+            }
+            HStmt.ForEach(varName, varName2, varTy, varTy2, iterable, kind, fbody, invariants) => {
+                collectReturnEscapedIdentsInto(fbody, out)
+            }
+            HStmt.ForIterator(varName, varTy, iterable, nextMethod, resultEnum, fbody, invariants, okVariant) => {
+                collectReturnEscapedIdentsInto(fbody, out)
+            }
+            HStmt.ForStrView(varName, varName2, varTy, src, sep, mode, fbody, invariants) => {
                 collectReturnEscapedIdentsInto(fbody, out)
             }
             _ => {
@@ -2155,7 +2192,7 @@ pub fn collectReturnEscapedIdentsInto(body: &Vec<Heap<Stmt>>, out: &mut Vec<stri
     }
 }
 
-pub fn returnEscapedIdents(body: &Vec<Heap<Stmt>>): Vec<string> {
+pub fn returnEscapedIdents(body: &Vec<Heap<HStmt>>): Vec<string> {
     var out: Vec<string> = Vec.new()
     collectReturnEscapedIdentsInto(body, out)
     return out
@@ -2209,24 +2246,30 @@ pub fn pushArgStaticTy(e: &ExprNode): string {
 // same shape as collectReturnEscapedIdentsInto above and for the same reason: this
 // is a single forward pass, so the LetDecl/VarDecl needs the answer before it's seen
 // the push that supplies it.
-pub fn collectVecPushHintsInto(body: &Vec<Heap<Stmt>>, out: &mut HashMap<string, string>) {
+pub fn collectVecPushHintsInto(body: &Vec<Heap<HStmt>>, out: &mut HashMap<string, string>) {
     for i in 0..body.len {
         match *body[i] {
-            Stmt.ExprStmt(expr, span) => {
-                match (*expr).kind {
-                    Expr.MethodCall(object, method, args) => {
-                        if method == "push" && args.len == 1 {
-                            match (*object).kind {
-                                Expr.Ident(vname) => {
-                                    if !out.contains(vname) {
-                                        let et = pushArgStaticTy(*args[0])
-                                        if et.len > 0 {
-                                            out.insert(vname.clone(), et)
+            HStmt.ExprStmt(e) => {
+                match (*e).kind {
+                    HExpr.Unlowered(av) => {
+                        match (*av).kind {
+                            Expr.MethodCall(object, method, args) => {
+                                if method == "push" && args.len == 1 {
+                                    match (*object).kind {
+                                        Expr.Ident(vname) => {
+                                            if !out.contains(vname) {
+                                                let et = pushArgStaticTy(*args[0])
+                                                if et.len > 0 {
+                                                    out.insert(vname.clone(), et)
+                                                }
+                                            }
+                                        }
+                                        _ => {
                                         }
                                     }
                                 }
-                                _ => {
-                                }
+                            }
+                            _ => {
                             }
                         }
                     }
@@ -2234,7 +2277,7 @@ pub fn collectVecPushHintsInto(body: &Vec<Heap<Stmt>>, out: &mut HashMap<string,
                     }
                 }
             }
-            Stmt.IfStmt(cond, thenBody, elseBody, span) => {
+            HStmt.If(cond, thenBody, elseBody) => {
                 collectVecPushHintsInto(thenBody, out)
                 match elseBody {
                     Option.Some(eb) => {
@@ -2244,28 +2287,27 @@ pub fn collectVecPushHintsInto(body: &Vec<Heap<Stmt>>, out: &mut HashMap<string,
                     }
                 }
             }
-            Stmt.WhileStmt(cond, wbody, span) => {
+            HStmt.While(cond, wbody, invariants) => {
                 collectVecPushHintsInto(wbody, out)
             }
-            Stmt.MatchStmt(subject, arms, span) => {
+            HStmt.Match(subject, arms, enumName, isRef) => {
                 for ai in 0..arms.len {
                     collectVecPushHintsInto(arms[ai].body, out)
                 }
             }
-            Stmt.IfLetStmt(pattern, subject, thenBody, elseBody, span) => {
-                collectVecPushHintsInto(thenBody, out)
-                match elseBody {
-                    Option.Some(eb) => {
-                        collectVecPushHintsInto(eb, out)
-                    }
-                    Option.None => {
-                    }
-                }
-            }
-            Stmt.UnsafeBlock(ubody, span) => {
+            HStmt.UnsafeBlock(ubody) => {
                 collectVecPushHintsInto(ubody, out)
             }
-            Stmt.ForInStmt(vname, vname2, iterable, fbody, span) => {
+            HStmt.ForRange(varName, varTy, startE, endE, fbody, invariants) => {
+                collectVecPushHintsInto(fbody, out)
+            }
+            HStmt.ForEach(varName, varName2, varTy, varTy2, iterable, kind, fbody, invariants) => {
+                collectVecPushHintsInto(fbody, out)
+            }
+            HStmt.ForIterator(varName, varTy, iterable, nextMethod, resultEnum, fbody, invariants, okVariant) => {
+                collectVecPushHintsInto(fbody, out)
+            }
+            HStmt.ForStrView(varName, varName2, varTy, src, sep, mode, fbody, invariants) => {
                 collectVecPushHintsInto(fbody, out)
             }
             _ => {
@@ -2274,7 +2316,7 @@ pub fn collectVecPushHintsInto(body: &Vec<Heap<Stmt>>, out: &mut HashMap<string,
     }
 }
 
-pub fn inferVecPushHints(body: &Vec<Heap<Stmt>>): HashMap<string, string> {
+pub fn inferVecPushHints(body: &Vec<Heap<HStmt>>): HashMap<string, string> {
     var out: HashMap<string, string> = HashMap.new()
     collectVecPushHintsInto(body, out)
     return out
@@ -2289,39 +2331,6 @@ pub fn cloneStrMap(m: &HashMap<string, string>): HashMap<string, string> {
         out.insert(k.clone(), v.clone())
     }
     return out
-}
-
-// isArrAnno for an UNANNOTATED `let`/`var` (`let loopback = ip6("::1")!`, no `: [u8;16]`).
-// Local.isArr is normally recovered only from an explicit array type annotation (see the
-// LetDecl/VarDecl doc comment right below), because a fixed Copy array and a real growable
-// Vec share the same "Vec<T>" runtime type string once evaluated — nothing in `ty` tells
-// them apart. Without an annotation there is nothing to read UNLESS the RHS is (through any
-// number of `!`/`?' unwraps) a call to a known function whose declared return type carries
-// a fixed array as a generic payload (`Option<[u8;16]>`): astTypeStr mangles that array
-// arg to "arr_<elem>_<N>" (mirroring the checker's own mangleTypeName), a marker this can
-// detect in the callee's registered return-type string. Missing this made a second use of
-// such a binding read a MOVED-ZEROED value: genOwnedArg only deep-clones (instead of
-// move-zeroing) a %Vec-shaped local when Local.isArr says so, so `TcpListener.bind6(loopback,
-// 0)` correctly consumed it, but with isArr wrongly false the receiver's move-zero fired
-// anyway, and the LATER `TcpStream.connect6(loopback, ...)` indexed a zero-length array
-// ("array index out of bounds: 0/0").
-pub fn exprWrapsFixedArrayReturn(e: &ExprNode, sigs: &Vec<CgFnSig>): bool {
-    match e.kind {
-        Expr.Unwrap(inner) => {
-            return exprWrapsFixedArrayReturn(*inner, sigs)
-        }
-        Expr.Call(name, args, typeArgs) => {
-            for si in 0..sigs.len {
-                if sigs[si].name == name {
-                    return sigs[si].retTy.contains("arr_")
-                }
-            }
-            return false
-        }
-        _ => {
-            return false
-        }
-    }
 }
 
 // hintTy for an unannotated `let`/`var` whose value is `Vec.new()`/`Vec.withCapacity`:
@@ -2341,9 +2350,6 @@ pub fn vecNewHint(cg: &Cgen, name: &string, value: &ExprNode): string {
     return ""
 }
 
-// A non-move closure literal, forced to `move` so genClosure heap-owns its
-// captures instead of pointing them at a frame about to be torn down. Anything
-// else (including an already-move closure) is returned unchanged.
 // Names this expression hands to someone else BY VALUE — a bare identifier in an
 // owning argument position (call/method arg, struct or enum payload). Used to
 // decide whether a closure literal must move-capture: a closure that passes a
@@ -2356,101 +2362,96 @@ pub fn vecNewHint(cg: &Cgen, name: &string, value: &ExprNode): string {
 // old by-reference capture. An unhandled shape can only cost a leak, never a
 // use-after-free. The arms are exhaustive for the same reason collectIdentsExpr's
 // are — a new Expr variant should fail to compile until it is traversed.
-fn collectMovedOutIdentsExpr(e: &ExprNode, out: &mut Vec<string>) {
+fn collectMovedOutIdentsExpr(cg: &Cgen, e: &ExprNode, out: &mut Vec<string>) {
     match e.kind {
         Expr.Call(name, args, targs) => {
             for i in 0..args.len {
                 pushIfBareIdent(*args[i], out)
-                collectMovedOutIdentsExpr(*args[i], out)
+                collectMovedOutIdentsExpr(cg, *args[i], out)
             }
         }
         Expr.MethodCall(obj, m, args) => {
-            collectMovedOutIdentsExpr(*obj, out)
+            collectMovedOutIdentsExpr(cg, *obj, out)
             for i in 0..args.len {
                 pushIfBareIdent(*args[i], out)
-                collectMovedOutIdentsExpr(*args[i], out)
+                collectMovedOutIdentsExpr(cg, *args[i], out)
             }
         }
         Expr.StructLit(name, fields) => {
             for i in 0..fields.len {
                 pushIfBareIdent(*fields[i].value, out)
-                collectMovedOutIdentsExpr(*fields[i].value, out)
+                collectMovedOutIdentsExpr(cg, *fields[i].value, out)
             }
         }
         Expr.JsonObject(fields) => {
             for i in 0..fields.len {
                 pushIfBareIdent(*fields[i].value, out)
-                collectMovedOutIdentsExpr(*fields[i].value, out)
+                collectMovedOutIdentsExpr(cg, *fields[i].value, out)
             }
         }
         Expr.EnumLit(en, va, args) => {
             for i in 0..args.len {
                 pushIfBareIdent(*args[i], out)
-                collectMovedOutIdentsExpr(*args[i], out)
+                collectMovedOutIdentsExpr(cg, *args[i], out)
             }
         }
         Expr.BinOp(op, l, r) => {
-            collectMovedOutIdentsExpr(*l, out)
-            collectMovedOutIdentsExpr(*r, out)
+            collectMovedOutIdentsExpr(cg, *l, out)
+            collectMovedOutIdentsExpr(cg, *r, out)
         }
         Expr.UnaryOp(op, x) => {
-            collectMovedOutIdentsExpr(*x, out)
+            collectMovedOutIdentsExpr(cg, *x, out)
         }
         Expr.FieldAccess(obj, field) => {
-            collectMovedOutIdentsExpr(*obj, out)
+            collectMovedOutIdentsExpr(cg, *obj, out)
         }
         Expr.ArrayLit(elems) => {
             for i in 0..elems.len {
                 pushIfBareIdent(*elems[i], out)
-                collectMovedOutIdentsExpr(*elems[i], out)
+                collectMovedOutIdentsExpr(cg, *elems[i], out)
             }
         }
         Expr.ArrayRepeat(x, n) => {
-            collectMovedOutIdentsExpr(*x, out)
+            collectMovedOutIdentsExpr(cg, *x, out)
         }
         Expr.IndexAccess(obj, idx) => {
-            collectMovedOutIdentsExpr(*obj, out)
-            collectMovedOutIdentsExpr(*idx, out)
+            collectMovedOutIdentsExpr(cg, *obj, out)
+            collectMovedOutIdentsExpr(cg, *idx, out)
         }
         Expr.Unwrap(x) => {
-            collectMovedOutIdentsExpr(*x, out)
+            collectMovedOutIdentsExpr(cg, *x, out)
         }
         Expr.Propagate(x) => {
-            collectMovedOutIdentsExpr(*x, out)
+            collectMovedOutIdentsExpr(cg, *x, out)
         }
         Expr.DefaultValue(x, d) => {
-            collectMovedOutIdentsExpr(*x, out)
-            collectMovedOutIdentsExpr(*d, out)
+            collectMovedOutIdentsExpr(cg, *x, out)
+            collectMovedOutIdentsExpr(cg, *d, out)
         }
         Expr.CastExpr(x, ty) => {
-            collectMovedOutIdentsExpr(*x, out)
+            collectMovedOutIdentsExpr(cg, *x, out)
         }
+        // Bodies were lifted at lowering — follow the id, same as collectIdentsExpr.
         Expr.Closure(params, rt, body, isMove) => {
-            for i in 0..body.len {
-                collectMovedOutIdentsStmt(*body[i], out)
-            }
+            collectMovedOutIdentsBlocks(cg, e.id, 1, out)
         }
         Expr.RangeExpr(a, b) => {
-            collectMovedOutIdentsExpr(*a, out)
-            collectMovedOutIdentsExpr(*b, out)
+            collectMovedOutIdentsExpr(cg, *a, out)
+            collectMovedOutIdentsExpr(cg, *b, out)
         }
         Expr.IsExpr(x, pat) => {
-            collectMovedOutIdentsExpr(*x, out)
+            collectMovedOutIdentsExpr(cg, *x, out)
         }
         Expr.IfExpr(c, thenBody, elseBody) => {
-            collectMovedOutIdentsExpr(*c, out)
-            for i in 0..thenBody.len {
-                collectMovedOutIdentsStmt(*thenBody[i], out)
-            }
-            for i in 0..elseBody.len {
-                collectMovedOutIdentsStmt(*elseBody[i], out)
-            }
+            collectMovedOutIdentsExpr(cg, *c, out)
+            collectMovedOutIdentsBlocks(cg, e.id, 2, out)
         }
         Expr.MatchExpr(subject, arms) => {
-            collectMovedOutIdentsExpr(*subject, out)
-            for i in 0..arms.len {
-                for j in 0..arms[i].body.len {
-                    collectMovedOutIdentsStmt(*arms[i].body[j], out)
+            collectMovedOutIdentsExpr(cg, *subject, out)
+            let base = blockBase(cg, e.id, "match-expression")
+            for ai in 0..cg.stmtBlocks[base].arms.len {
+                for j in 0..cg.stmtBlocks[base].arms[ai].body.len {
+                    collectMovedOutIdentsStmt(cg, *cg.stmtBlocks[base].arms[ai].body[j], out)
                 }
             }
         }
@@ -2469,6 +2470,15 @@ fn collectMovedOutIdentsExpr(e: &ExprNode, out: &mut Vec<string>) {
     }
 }
 
+fn collectMovedOutIdentsBlocks(cg: &Cgen, id: u32, count: i64, out: &mut Vec<string>) {
+    let base = blockBase(cg, id, "expression")
+    for b in 0..count {
+        for j in 0..cg.stmtBlocks[base + b].stmts.len {
+            collectMovedOutIdentsStmt(cg, *cg.stmtBlocks[base + b].stmts[j], out)
+        }
+    }
+}
+
 fn pushIfBareIdent(e: &ExprNode, out: &mut Vec<string>) {
     match e.kind {
         Expr.Ident(name) => {
@@ -2479,86 +2489,110 @@ fn pushIfBareIdent(e: &ExprNode, out: &mut Vec<string>) {
     }
 }
 
-fn collectMovedOutIdentsStmt(s: &Stmt, out: &mut Vec<string>) {
+fn pushIfBareIdentH(n: &HExprNode, out: &mut Vec<string>) {
+    match n.kind {
+        HExpr.Unlowered(e) => {
+            pushIfBareIdent(*e, out)
+        }
+        _ => {
+        }
+    }
+}
+
+fn collectMovedOutIdentsHExpr(cg: &Cgen, n: &HExprNode, out: &mut Vec<string>) {
+    match n.kind {
+        HExpr.Unlowered(e) => {
+            collectMovedOutIdentsExpr(cg, *e, out)
+        }
+        HExpr.FieldAccess(obj, field, isRefRead) => {
+            collectMovedOutIdentsHExpr(cg, *obj, out)
+        }
+        _ => {
+            hexprAbort(n, "expression in a move-out pre-scan")
+        }
+    }
+}
+
+fn collectMovedOutIdentsStmt(cg: &Cgen, s: &HStmt, out: &mut Vec<string>) {
     match s {
-        Stmt.LetDecl(name, ty, val, span) => {
-            pushIfBareIdent(*val, out)
-            collectMovedOutIdentsExpr(*val, out)
+        HStmt.Let(name, ty, value, mutable) => {
+            pushIfBareIdentH(*value, out)
+            collectMovedOutIdentsHExpr(cg, *value, out)
         }
-        Stmt.VarDecl(name, ty, val, span) => {
-            pushIfBareIdent(*val, out)
-            collectMovedOutIdentsExpr(*val, out)
+        HStmt.Assign(target, value, isInit) => {
+            pushIfBareIdentH(*value, out)
+            collectMovedOutIdentsHExpr(cg, *value, out)
         }
-        Stmt.Assign(target, val, span) => {
-            pushIfBareIdent(*val, out)
-            collectMovedOutIdentsExpr(*val, out)
-        }
-        Stmt.Return(value, span) => {
+        HStmt.Return(value, retType) => {
             match value {
                 Option.Some(e) => {
-                    pushIfBareIdent(*e, out)
-                    collectMovedOutIdentsExpr(*e, out)
+                    pushIfBareIdentH(*e, out)
+                    collectMovedOutIdentsHExpr(cg, *e, out)
                 }
                 Option.None => {
                 }
             }
         }
-        Stmt.ExprStmt(e, span) => {
-            collectMovedOutIdentsExpr(*e, out)
+        HStmt.ExprStmt(e) => {
+            collectMovedOutIdentsHExpr(cg, *e, out)
         }
-        Stmt.IfStmt(cond, thenB, elseB, span) => {
-            collectMovedOutIdentsExpr(*cond, out)
+        HStmt.If(cond, thenB, elseB) => {
+            collectMovedOutIdentsHExpr(cg, *cond, out)
             for i in 0..thenB.len {
-                collectMovedOutIdentsStmt(*thenB[i], out)
+                collectMovedOutIdentsStmt(cg, *thenB[i], out)
             }
             match elseB {
                 Option.Some(eb) => {
                     for i in 0..eb.len {
-                        collectMovedOutIdentsStmt(*eb[i], out)
+                        collectMovedOutIdentsStmt(cg, *eb[i], out)
                     }
                 }
                 Option.None => {
                 }
             }
         }
-        Stmt.WhileStmt(cond, body, span) => {
-            collectMovedOutIdentsExpr(*cond, out)
+        HStmt.While(cond, body, invariants) => {
+            collectMovedOutIdentsHExpr(cg, *cond, out)
             for i in 0..body.len {
-                collectMovedOutIdentsStmt(*body[i], out)
+                collectMovedOutIdentsStmt(cg, *body[i], out)
             }
         }
-        Stmt.ForInStmt(v1, v2, iter, body, span) => {
-            collectMovedOutIdentsExpr(*iter, out)
+        HStmt.ForRange(varName, varTy, startE, endE, body, invariants) => {
+            collectMovedOutIdentsHExpr(cg, *startE, out)
+            collectMovedOutIdentsHExpr(cg, *endE, out)
             for i in 0..body.len {
-                collectMovedOutIdentsStmt(*body[i], out)
+                collectMovedOutIdentsStmt(cg, *body[i], out)
             }
         }
-        Stmt.MatchStmt(subj, arms, span) => {
-            collectMovedOutIdentsExpr(*subj, out)
+        HStmt.ForEach(varName, varName2, varTy, varTy2, iterable, kind, body, invariants) => {
+            collectMovedOutIdentsHExpr(cg, *iterable, out)
+            for i in 0..body.len {
+                collectMovedOutIdentsStmt(cg, *body[i], out)
+            }
+        }
+        HStmt.ForIterator(varName, varTy, iterable, nextMethod, resultEnum, body, invariants, okVariant) => {
+            collectMovedOutIdentsHExpr(cg, *iterable, out)
+            for i in 0..body.len {
+                collectMovedOutIdentsStmt(cg, *body[i], out)
+            }
+        }
+        HStmt.ForStrView(varName, varName2, varTy, src, sep, mode, body, invariants) => {
+            collectMovedOutIdentsHExpr(cg, *src, out)
+            for i in 0..body.len {
+                collectMovedOutIdentsStmt(cg, *body[i], out)
+            }
+        }
+        HStmt.Match(subj, arms, enumName, isRef) => {
+            collectMovedOutIdentsHExpr(cg, *subj, out)
             for i in 0..arms.len {
                 for j in 0..arms[i].body.len {
-                    collectMovedOutIdentsStmt(*arms[i].body[j], out)
+                    collectMovedOutIdentsStmt(cg, *arms[i].body[j], out)
                 }
             }
         }
-        Stmt.IfLetStmt(pat, val, thenB, elseB, span) => {
-            collectMovedOutIdentsExpr(*val, out)
-            for i in 0..thenB.len {
-                collectMovedOutIdentsStmt(*thenB[i], out)
-            }
-            match elseB {
-                Option.Some(eb) => {
-                    for i in 0..eb.len {
-                        collectMovedOutIdentsStmt(*eb[i], out)
-                    }
-                }
-                Option.None => {
-                }
-            }
-        }
-        Stmt.UnsafeBlock(body, span) => {
+        HStmt.UnsafeBlock(body) => {
             for i in 0..body.len {
-                collectMovedOutIdentsStmt(*body[i], out)
+                collectMovedOutIdentsStmt(cg, *body[i], out)
             }
         }
         _ => {
@@ -2573,61 +2607,63 @@ fn collectMovedOutIdentsStmt(s: &Stmt, out: &mut Vec<string>) {
 // a closure literal passed to an owned `fn` param, minus the mutated-capture
 // exemption — the positive move-out evidence below already excludes the
 // mutate-in-place shape that needs write-back.
-pub fn autoMoveClosureArg(value: &ExprNode, locs: &Vec<Local>): Heap<ExprNode> {
-    match value.kind {
-        Expr.Closure(params, retType, body, isMove) => {
-            if isMove {
-                return Heap(value.clone())
-            }
-            var moved: Vec<string> = Vec.new()
-            for i in 0..body.len {
-                collectMovedOutIdentsStmt(*body[i], moved)
-            }
-            let caps = closureCaptures(params, body, locs)
-            for ci in 0..caps.len {
-                if caps[ci].isRef {
-                    continue
-                }
-                if !moved.contains(caps[ci].name) {
-                    continue
-                }
-                return forcedMoveClosure(value)
-            }
-            return Heap(value.clone())
-        }
-        _ => {
-            return Heap(value.clone())
-        }
+//
+// Answers with a bool rather than a rebuilt node: the promotion only flips the
+// capture mode, and rebuilding the node used to clone it, which mints a fresh id and
+// orphans the body lowering lifted under the old one.
+pub fn autoMoveClosureArg(cg: &Cgen, nodeId: u32, params: &Vec<Param>, locs: &Vec<Local>): bool {
+    let base = blockBase(cg, nodeId, "closure")
+    var moved: Vec<string> = Vec.new()
+    for i in 0..cg.stmtBlocks[base].stmts.len {
+        collectMovedOutIdentsStmt(cg, *cg.stmtBlocks[base].stmts[i], moved)
     }
+    let caps = closureCaptures(cg, params, cg.stmtBlocks[base].stmts, locs)
+    for ci in 0..caps.len {
+        if caps[ci].isRef {
+            continue
+        }
+        if !moved.contains(caps[ci].name) {
+            continue
+        }
+        return true
+    }
+    return false
 }
 
-pub fn forcedMoveClosure(value: &ExprNode): Heap<ExprNode> {
+// A non-move closure literal rebuilt with `move` set, or None when there is nothing to
+// promote. The rebuilt node KEEPS its id: its body was lifted into the block arena under
+// that id, and mkExpr/clone() both mint a fresh one, which would orphan it.
+pub fn forcedMoveClosure(value: &ExprNode): Option<Heap<ExprNode>> {
     match value.kind {
         Expr.Closure(params, retType, body, isMove) => {
             if isMove {
-                return Heap(value.clone())
+                return Option.None
             }
-            return mkExpr(Expr.Closure(cloneParams(params), cloneOptType(retType), cloneStmts(body), true), cloneSpan(value.span))
+            return Option.Some(Heap(ExprNode {
+                id: value.id,
+                kind: Expr.Closure(cloneParams(params), cloneOptType(retType), cloneStmts(body), true),
+                span: cloneSpan(value.span),
+            }
+            ))
         }
         _ => {
-            return Heap(value.clone())
+            return Option.None
         }
     }
 }
 
 // If `name` is a local this body's pre-scan found escaping via `return name`, and
-// `value` is a non-move closure literal, force it to `move` so genClosure heap-owns
-// the captures. Otherwise returns `value` unchanged (cheap: only clones on the hit).
-pub fn forceMoveIfEscaping(cg: &Cgen, name: &string, value: &ExprNode): Heap<ExprNode> {
+// `value` is a non-move closure literal, promote it. None means "emit it unchanged".
+pub fn forceMoveIfEscaping(cg: &Cgen, name: &string, value: &ExprNode): Option<Heap<ExprNode>> {
     if !cg.forceMoveClosures.contains(name) {
-        return Heap(value.clone())
+        return Option.None
     }
     return forcedMoveClosure(value)
 }
 
 // Lift a closure to a top-level `@__closure_N(ptr %__env, <ptr params>)` and return
 // a %Closure { fnptr, env }. Uniform ABI: params AND captures arrive by pointer.
-pub fn genClosure(cg: &mut Cgen, params: &Vec<Param>, retType: &Option<MiloType>, body: &Vec<Heap<Stmt>>, isMove: bool, locs: &Vec<Local>, sigs: &Vec<CgFnSig>): Val {
+pub fn genClosure(cg: &mut Cgen, nodeId: u32, params: &Vec<Param>, retType: &Option<MiloType>, isMove: bool, locs: &Vec<Local>, sigs: &Vec<CgFnSig>): Val {
     let cname = "__closure_" + cg.closureId.toString()
     cg.closureId = cg.closureId + 1
 
@@ -2658,7 +2694,11 @@ pub fn genClosure(cg: &mut Cgen, params: &Vec<Param>, retType: &Option<MiloType>
         annotated = true
     }
 
-    let caps = closureCaptures(params, body, locs)
+    // The body was lifted out of the AST at lowering; take it, walk it, put it back.
+    let bodyIdx = blockBase(cg, nodeId, "closure")
+    var body = takeBlock(cg, bodyIdx)
+
+    let caps = closureCaptures(cg, params, body, locs)
     // move closures heap-copy their captures (survive an escaping/threaded call);
     // by-ref closures point into the enclosing frame.
     var envTy = closureEnvTy(caps)
@@ -2699,8 +2739,10 @@ pub fn genClosure(cg: &mut Cgen, params: &Vec<Param>, retType: &Option<MiloType>
     // this closure's OWN body gets its own escape pre-scan — a closure that itself
     // returns a locally-bound closure needs the same treatment, and it must not see
     // the enclosing function's set (a same-named local would be a false hit).
-    cg.forceMoveClosures = returnEscapedIdents(body)
-    cg.vecPushHints = inferVecPushHints(body)
+    let escaped = returnEscapedIdents(body)
+    cg.forceMoveClosures = escaped
+    let pushHints = inferVecPushHints(body)
+    cg.vecPushHints = pushHints
 
     emit(cg, "entry.bb:\n")
     var clocs: Vec<Local> = Vec.new()
@@ -2780,6 +2822,7 @@ pub fn genClosure(cg: &mut Cgen, params: &Vec<Param>, retType: &Option<MiloType>
     cg.forceMoveClosures = savedForceMove
     cg.vecPushHints = savedVecPushHints
     cg.globals = cg.globals + closureIR
+    putBlock(cg, bodyIdx, body)
 
     // build the env at the call site, then the { fnptr, env } pair
     var envVal = "null"

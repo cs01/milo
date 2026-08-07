@@ -3,42 +3,13 @@ from "src-milo/target.milo" import {
     getHostTarget
 }
 from "src-milo/ast.milo" import {
-    Function, Program, StructDecl, EnumDecl, Expr, StructLitField, arrayElemType
+    ExprNode, Expr, StructLitField, Function
 }
-
-// The natural LLVM surface type for an UNANNOTATED global's literal-shaped
-// initializer (`let CT = "…"`, no `: string`), or "" for anything else (the
-// caller keeps its existing "i64" default). Every one of the three places
-// that need a global's type ahead of evaluating its initializer — registering
-// it in cg.globalVars, choosing its static `@name = global <ty> …` line, and
-// picking the store type in the runtime initializer — used to default a
-// type-less global straight to "i64" with no attempt to look at the
-// initializer at all. That's a sentinel colliding with real data: a bare
-// `let CT = "multipart/form-data; …"` global (tests/fixtures/multipart.milo)
-// got emitted as `@CT = global i64 0` and every read of it silently produced
-// an empty/garbage string instead of the literal. IntLit legitimately keeps
-// the i64 default (nothing to fix there), so it's not special-cased below.
-//
-// MUST take `e` by reference — see constStructBody's doc comment further down:
-// matching a dereferenced Heap<ExprNode> directly moves it out of the box and
-// frees the global's own AST node once the match's temporary drops. Call with
-// the bare `*prog.globals[gi].value` (auto-borrowed), never `match *value`
-// inline.
-pub fn literalGlobalTy(e: &ExprNode): string {
-    match e.kind {
-        Expr.StringLit(sv) => {
-            return "string"
-        }
-        Expr.BoolLit(bv) => {
-            return "bool"
-        }
-        Expr.FloatLit(fv) => {
-            return "f64"
-        }
-        _ => {
-            return ""
-        }
-    }
+from "src-milo/hir.milo" import {
+    HIRModule, HFunction, HExpr, hexprAbort
+}
+from "src-milo/checker/types.milo" import {
+    TypeKind
 }
 
 // Constant initializer text for a module-global's value expression. Globals must
@@ -494,13 +465,16 @@ pub fn applyConstOp(op: &string, l: ConstNum, r: ConstNum): ConstNum {
     }
 }
 from "src-milo/codegen/types.milo" import {
-    astTypeStr,
-    Cgen, Val, Local, CgFnSig, FieldInfo, CgVariantInfo, CgEnumInfo, RangeAnno, noRange, rangeOfAnnotation, rangeOfOptAnnotation,
+    astTypeStr, tyStr, rangeOfTyK, rangeOfAnnotation,
+    Cgen, Val, Local, CgFnSig, FieldInfo, CgVariantInfo, CgEnumInfo, RangeAnno, noRange,
     cgenNew, nextTemp, emit, emitG, llType, llTypeBytes, payloadBytes, resolveTyStr, isVecTy, unwrapVec,
-    ensureStringTy, ensureVecTy, ensureHashMapTy,
+    stripPercent, ensureStringTy, ensureVecTy, ensureHashMapTy,
 }
 from "src-milo/codegen/stmt.milo" import {
     genStmt, emitScopeDrops, collectIdentsExpr, returnEscapedIdents, inferVecPushHints
+}
+from "src-milo/codegen/expr.milo" import {
+    genHExpr
 }
 from "src-milo/codegen/abi.milo" import {
     AbiStruct, ArgClass, RetClass, AbiReg,
@@ -513,28 +487,49 @@ from "src-milo/codegen/strings.milo" import {
     floatDecimalStr
 }
 
-// Build function signature table from program declarations.
-pub fn buildFnTable(cg: &Cgen, prog: &Program): Vec<CgFnSig> {
+// Build the call-site signature table: every function that was lowered, plus the generic
+// templates that were not. A generic call names the TEMPLATE, so leaving those out drops
+// the by-reference flags for exactly the calls that need them most.
+pub fn buildFnTable(cg: &Cgen, fns: &Vec<HFunction>, generics: &Vec<Function>): Vec<CgFnSig> {
     var sigs: Vec<CgFnSig> = Vec.new()
-    for i in 0..prog.functions.len {
-        // Never bind `prog.functions[i]` to a local: that materializes an owned
-        // copy which is dropped at scope exit, freeing the AST `prog` still owns.
-        // Read the fields through the borrow instead.
+    for i in 0..fns.len {
         var pts: Vec<string> = Vec.new()
         var prefs: Vec<bool> = Vec.new()
         var pranges: Vec<RangeAnno> = Vec.new()
-        for j in 0..prog.functions[i].params.len {
-            pts.push(astTypeStr(prog.functions[i].params[j].ty))
-            prefs.push(prog.functions[i].params[j].ty.isRef || prog.functions[i].params[j].ty.isRefMut)
-            pranges.push(rangeOfAnnotation(cg, prog.functions[i].params[j].ty))
+        for j in 0..fns[i].params.len {
+            pts.push(tyStr(cg, fns[i].params[j].ty, "parameter '" + fns[i].params[j].name.clone() + "' of '" + fns[i].name.clone() + "'"))
+            prefs.push(fns[i].params[j].isRef || fns[i].params[j].isRefMut)
+            pranges.push(rangeOfTyK(fns[i].params[j].ty))
         }
         sigs.push(CgFnSig {
-            name: prog.functions[i].name.clone(),
-            retTy: astTypeStr(prog.functions[i].retType),
+            name: fns[i].name.clone(),
+            retTy: tyStr(cg, fns[i].retType, "return type of '" + fns[i].name.clone() + "'"),
             paramTys: pts,
             paramRefs: prefs,
-            isVariadic: prog.functions[i].isVariadic,
+            isVariadic: fns[i].isVariadic,
             paramRanges: pranges,
+        }
+        )
+    }
+    // A template's parameter types are still syntax — `T` names nothing the checker
+    // resolved — so these read the AST. They are hints and modes only; no instantiation
+    // is emitted from them.
+    for i in 0..generics.len {
+        var gts: Vec<string> = Vec.new()
+        var grefs: Vec<bool> = Vec.new()
+        var granges: Vec<RangeAnno> = Vec.new()
+        for j in 0..generics[i].params.len {
+            gts.push(astTypeStr(generics[i].params[j].ty))
+            grefs.push(generics[i].params[j].ty.isRef || generics[i].params[j].ty.isRefMut)
+            granges.push(rangeOfAnnotation(cg, generics[i].params[j].ty))
+        }
+        sigs.push(CgFnSig {
+            name: generics[i].name.clone(),
+            retTy: astTypeStr(generics[i].retType),
+            paramTys: gts,
+            paramRefs: grefs,
+            isVariadic: generics[i].isVariadic,
+            paramRanges: granges,
         }
         )
     }
@@ -543,11 +538,29 @@ pub fn buildFnTable(cg: &Cgen, prog: &Program): Vec<CgFnSig> {
 
 // True when `t` is a bare (non-ref, non-pointer, non-array) struct type — the only
 // shape that crosses a C extern boundary by value and needs ABI classification.
-pub fn isByValStruct(cg: &Cgen, t: &MiloType): bool {
-    if t.ptrDepth > 0 || t.isRef || t.isRefMut || t.isArray || t.isFn {
+// `byRef` is passed separately because HFnParam stores a `&T` param's INNER type with
+// the indirection on a flag beside it.
+pub fn isByValStruct(cg: &Cgen, t: &TypeKind, byRef: bool): bool {
+    if byRef {
         return false
     }
-    let raw = stripPercent(resolveAstTy(cg, t))
+    match t {
+        TypeKind.TPtr(inner) => {
+            return false
+        }
+        TypeKind.TRef(inner, mutable) => {
+            return false
+        }
+        TypeKind.TArray(elem, size) => {
+            return false
+        }
+        TypeKind.TFn(fparams, fret) => {
+            return false
+        }
+        _ => {
+        }
+    }
+    let raw = stripPercent(tyStr(cg, t, "extern by-value type"))
     if !cg.structs.contains(raw) {
         return false
     }
@@ -557,24 +570,38 @@ pub fn isByValStruct(cg: &Cgen, t: &MiloType): bool {
     return true
 }
 
+// A fn-typed param of a C extern is a raw function pointer, not milo's %Closure fat
+// pointer (qsort's cmp is `int(*)(…)`, no env).
+pub fn isCFnTy(t: &TypeKind): bool {
+    match t {
+        TypeKind.TFn(fparams, fret) => {
+            return true
+        }
+        _ => {
+            return false
+        }
+    }
+}
+
 // Lowered LLVM param/return signature for an extern with by-value struct params or
 // return. The SAME rendering must appear at the declare AND every call site (an
 // sret/byval attr on one but not the other silently miscompiles on x86_64), so both
 // go through this single source of truth. Returns (paramStrs, retStr).
-pub fn externLoweredParams(cg: &Cgen, f: &Function): Vec<string> {
+pub fn externLoweredParams(cg: &Cgen, f: &HFunction): Vec<string> {
     var params: Vec<string> = Vec.new()
-    if isByValStruct(cg, f.retType) {
-        let rname = stripPercent(resolveAstTy(cg, f.retType))
+    if isByValStruct(cg, f.retType, false) {
+        let rname = stripPercent(tyStr(cg, f.retType, "return type of '" + f.name.clone() + "'"))
         let rc = classifyRet(cg.arch, abiStructOf(cg, rname))
         if rc.kind == "sret" {
             params.push("ptr sret(%" + rc.name.clone() + ") align " + rc.align.toString())
         }
     }
     for i in 0..f.params.len {
-        if f.params[i].ty.isFn {
+        let byRef = f.params[i].isRef || f.params[i].isRefMut
+        if isCFnTy(f.params[i].ty) {
             params.push("ptr")
-        } else if isByValStruct(cg, f.params[i].ty) {
-            let pname = stripPercent(resolveAstTy(cg, f.params[i].ty))
+        } else if isByValStruct(cg, f.params[i].ty, byRef) {
+            let pname = stripPercent(tyStr(cg, f.params[i].ty, "parameter of '" + f.name.clone() + "'"))
             let ac = classifyArg(cg.arch, abiStructOf(cg, pname))
             if ac.kind == "coerce" {
                 for r in 0..ac.regs.len {
@@ -588,15 +615,22 @@ pub fn externLoweredParams(cg: &Cgen, f: &Function): Vec<string> {
                 }
             }
         } else {
-            params.push(llType(resolveAstTy(cg, f.params[i].ty)))
+            params.push(llType(paramTyStr(cg, f, i)))
         }
     }
     return params
 }
 
-pub fn externLoweredRet(cg: &Cgen, f: &Function): string {
-    if isByValStruct(cg, f.retType) {
-        let rname = stripPercent(resolveAstTy(cg, f.retType))
+// The backend type of parameter `i`, with the `&T`/`&mut T` indirection put back on: a
+// ref param is a `ptr` to the pointee, and HFnParam keeps the pointee type with the
+// indirection on a flag beside it.
+pub fn paramTyStr(cg: &Cgen, f: &HFunction, i: i64): string {
+    return tyStr(cg, f.params[i].ty, "parameter '" + f.params[i].name.clone() + "' of '" + f.name.clone() + "'")
+}
+
+pub fn externLoweredRet(cg: &Cgen, f: &HFunction): string {
+    if isByValStruct(cg, f.retType, false) {
+        let rname = stripPercent(tyStr(cg, f.retType, "return type of '" + f.name.clone() + "'"))
         let rc = classifyRet(cg.arch, abiStructOf(cg, rname))
         if rc.kind == "sret" {
             return "void"
@@ -605,7 +639,7 @@ pub fn externLoweredRet(cg: &Cgen, f: &Function): string {
             return rc.retTy.clone()
         }
     }
-    return llType(resolveAstTy(cg, f.retType))
+    return llType(tyStr(cg, f.retType, "return type of '" + f.name.clone() + "'"))
 }
 
 // Emit a single function definition or extern declaration.
@@ -699,7 +733,7 @@ pub fn hoistAllocas(fnText: &string): string {
     return out
 }
 
-pub fn genFn(cg: &mut Cgen, f: &Function, sigs: &Vec<CgFnSig>) {
+pub fn genFn(cg: &mut Cgen, f: &HFunction, sigs: &Vec<CgFnSig>) {
     if f.isExtern {
         cg.externFns.insert(f.name.clone(), true)
         var ps = ""
@@ -718,12 +752,10 @@ pub fn genFn(cg: &mut Cgen, f: &Function, sigs: &Vec<CgFnSig>) {
                 if i > 0 {
                     ps = ps + ", "
                 }
-                // a fn-typed param of a C extern is a raw function pointer, not milo's
-                // %Closure fat pointer (qsort's cmp is `int(*)(…)`, no env).
-                if f.params[i].ty.isFn {
+                if isCFnTy(f.params[i].ty) {
                     ps = ps + "ptr"
                 } else {
-                    ps = ps + llType(resolveAstTy(cg, f.params[i].ty))
+                    ps = ps + llType(paramTyStr(cg, f, i))
                 }
             }
         }
@@ -807,10 +839,10 @@ pub fn genFn(cg: &mut Cgen, f: &Function, sigs: &Vec<CgFnSig>) {
             }
             cg.declaredFflush = true
         }
-        // astTypeStr, not .name: a `*u8` return must stay a pointer (`.name` alone
-        // drops pointer-ness, declaring e.g. strerror as returning i8 → truncated
-        // pointer → strlen on garbage in the self-compiled build).
-        var declRet = llType(resolveAstTy(cg, f.retType))
+        // The checker's own return type, so a `*u8` stays a pointer: dropping the
+        // pointer-ness declared e.g. strerror as returning i8 → truncated pointer →
+        // strlen on garbage in the self-compiled build.
+        var declRet = llType(tyStr(cg, f.retType, "return type of '" + f.name.clone() + "'"))
         if cg.abiExterns.contains(f.name) {
             declRet = externLoweredRet(cg, f)
         }
@@ -827,17 +859,12 @@ pub fn genFn(cg: &mut Cgen, f: &Function, sigs: &Vec<CgFnSig>) {
     // parser.milo) skips the checked-arith/shift traps below and takes the
     // plain two's-complement instruction instead. Reset per function: this is
     // NOT scope-nested, every genFn call is a fresh function.
-    cg.currentFnWrapping = false
-    for wi in 0..f.attributes.len {
-        if f.attributes[wi].name == "wrapping" {
-            cg.currentFnWrapping = true
-        }
-    }
+    cg.currentFnWrapping = f.isWrapping
     var locs: Vec<Local> = Vec.new()
     // C `main` is forced to `i32 (i32 argc, ptr argv)`: it stashes argc/argv into
     // globals that _miloArgCount/_miloArgAt read, and returns an exit code.
     let isMain = f.name == "main"
-    var retTyStr = resolveAstTy(cg, f.retType)
+    var retTyStr = tyStr(cg, f.retType, "return type of '" + f.name.clone() + "'")
     if isMain {
         retTyStr = "i32"
     }
@@ -848,7 +875,7 @@ pub fn genFn(cg: &mut Cgen, f: &Function, sigs: &Vec<CgFnSig>) {
     if isMain {
         cg.curRetRange = noRange()
     } else {
-        cg.curRetRange = rangeOfAnnotation(cg, f.retType)
+        cg.curRetRange = rangeOfTyK(f.retType)
     }
     var hdr = "define " + retLl + " @" + f.name + "("
     if isMain {
@@ -860,10 +887,10 @@ pub fn genFn(cg: &mut Cgen, f: &Function, sigs: &Vec<CgFnSig>) {
         }
         // A `&T`/`&mut T` param is lowered as a `ptr` to the pointee, so mutations
         // through it are visible to the caller (milo threads `&mut Cgen` etc.).
-        let piRef = f.params[pi].ty.isRef || f.params[pi].ty.isRefMut
+        let piRef = f.params[pi].isRef || f.params[pi].isRefMut
         var pLl = "ptr"
         if !piRef {
-            pLl = llType(resolveAstTy(cg, f.params[pi].ty))
+            pLl = llType(paramTyStr(cg, f, pi))
         }
         hdr = hdr + pLl + " %" + f.params[pi].name
     }
@@ -889,9 +916,9 @@ pub fn genFn(cg: &mut Cgen, f: &Function, sigs: &Vec<CgFnSig>) {
     // what makes mutation-through-&mut visible to the caller. Value params spill
     // to a fresh alloca as usual.
     for pj in 0..f.params.len {
-        let pTyStr = resolveAstTy(cg, f.params[pj].ty)
-        let pIsRef = f.params[pj].ty.isRef || f.params[pj].ty.isRefMut
-        let pIsArr = f.params[pj].ty.isArray
+        let pTyStr = paramTyStr(cg, f, pj)
+        let pIsRef = f.params[pj].isRef || f.params[pj].isRefMut
+        let pIsArr = isFixedArrayTy(f.params[pj].ty)
         if pIsRef {
             locs.push(Local {
                 name: f.params[pj].name.clone(), ty: pTyStr, addr: "%" + f.params[pj].name, isRef: true, isArr: pIsArr, range: noRange()
@@ -903,7 +930,7 @@ pub fn genFn(cg: &mut Cgen, f: &Function, sigs: &Vec<CgFnSig>) {
             emit(cg, "  " + addr + " = alloca " + llt + "\n")
             emit(cg, "  store " + llt + " %" + f.params[pj].name + ", ptr " + addr + "\n")
             locs.push(Local {
-                name: f.params[pj].name.clone(), ty: pTyStr, addr: addr, isRef: false, isArr: pIsArr, range: rangeOfAnnotation(cg, f.params[pj].ty)
+                name: f.params[pj].name.clone(), ty: pTyStr, addr: addr, isRef: false, isArr: pIsArr, range: rangeOfTyK(f.params[pj].ty)
             }
             )
         }
@@ -911,10 +938,12 @@ pub fn genFn(cg: &mut Cgen, f: &Function, sigs: &Vec<CgFnSig>) {
 
     // Pre-scan for `let f = <closure>; ...; return f` — the escape has to be known
     // before the LetDecl runs (see collectReturnEscapedIdentsInto's doc comment).
-    cg.forceMoveClosures = returnEscapedIdents(f.body)
+    let escaped = returnEscapedIdents(f.body)
+    cg.forceMoveClosures = escaped
     // Pre-scan for `var v = Vec.new(); ...; v.push(x)` — the element type has to be
     // known before the VarDecl runs (see collectVecPushHintsInto's doc comment).
-    cg.vecPushHints = inferVecPushHints(f.body)
+    let pushHints = inferVecPushHints(f.body)
+    cg.vecPushHints = pushHints
     var terminated = false
     for si in 0..f.body.len {
         if genStmt(cg, *f.body[si], locs, sigs, retTyStr) {
@@ -938,11 +967,125 @@ pub fn genFn(cg: &mut Cgen, f: &Function, sigs: &Vec<CgFnSig>) {
     cg.fnBuf = ""
 }
 
+// A fixed-size `[T; N]` — the shape that shares %Vec's runtime layout but must be
+// deep-copied, not moved, at a by-value site. An unsized `&[T]` slice view is not one.
+pub fn isFixedArrayTy(t: &TypeKind): bool {
+    match t {
+        TypeKind.TArray(elem, size) => {
+            match size {
+                Option.Some(n) => {
+                    return true
+                }
+                Option.None => {
+                    return false
+                }
+            }
+        }
+        _ => {
+            return false
+        }
+    }
+}
+
+// A struct field's backend type. A fixed array lays out INLINE (`[N x T]` in the LLVM
+// struct), not as the Vec<T> heap header locals and params use — C structs with array
+// fields (extern layout, offsetOf) need the real size/offset, which a 24-byte %Vec
+// header can never produce. Marker: "[" N "]" elemTyStr — see isInlineArrTy.
+pub fn fieldTyStr(cg: &Cgen, sname: &string, fname: &string, t: &TypeKind): string {
+    match t {
+        TypeKind.TArray(elem, size) => {
+            match size {
+                Option.Some(n) => {
+                    return "[" + n.toString() + "]" + tyStr(cg, *elem, "field '" + fname.clone() + "' of " + sname.clone())
+                }
+                Option.None => {
+                }
+            }
+        }
+        _ => {
+        }
+    }
+    return tyStr(cg, t, "field '" + fname.clone() + "' of " + sname.clone())
+}
+
+// Emit a global's static initializer line. Returns true when the value cannot be spelled
+// as an LLVM constant and has to be computed by the runtime initializer instead.
+fn emitGlobalStatic(cg: &mut Cgen, gname: &string, surfaceTy: &string, value: &ExprNode): bool {
+    let gllTy = llType(surfaceTy)
+    // A fixed-array global with a literal initializer (`var xs: [i32;5] = [10,…]`)
+    // lowers to a %Vec — materialize the element data as a writable global and
+    // point the %Vec at it (zeroinit would leave it empty).
+    var arrayHandled = false
+    if isVecTy(surfaceTy) {
+        let elemLl = llType(unwrapVec(surfaceTy))
+        let scalarElem = elemLl == "i1" || elemLl == "i8" || elemLl == "i16" || elemLl == "i32" || elemLl == "i64" || elemLl == "double" || elemLl == "float"
+        let structElem = elemLl.len > 0 && elemLl[0] == 37 && cg.structs.contains(stripPercent(elemLl))
+        if scalarElem || structElem {
+            let elems = constArrayElems(cg, value, elemLl, structElem)
+            if elems.len > 0 {
+                var dataC = "["
+                for ei in 0..elems.len {
+                    if ei > 0 {
+                        dataC = dataC + ", "
+                    }
+                    dataC = dataC + elems[ei].clone()
+                }
+                dataC = dataC + "]"
+                let n = elems.len.toString()
+                emitG(cg, "@" + gname.clone() + "_data = global [" + n + " x " + elemLl + "] " + dataC + "\n")
+                emitG(cg, "@" + gname.clone() + " = global %Vec { ptr @" + gname.clone() + "_data, i64 " + n + ", i64 " + n + " }\n")
+                arrayHandled = true
+            }
+        }
+    }
+    if arrayHandled {
+        return false
+    }
+    // A struct global with an all-const-scalar literal (`var o: Point = Point{x,y}`)
+    // becomes an aggregate constant; otherwise aggregates zero-init.
+    let isStructG = gllTy.len > 0 && gllTy[0] == 37 && cg.structs.contains(stripPercent(gllTy))
+    if isStructG {
+        let sname = stripPercent(gllTy)
+        let sfields = cg.structs.get(sname)!
+        match constStructBody(cg, value, sfields) {
+            Option.Some(body) => {
+                emitG(cg, "@" + gname.clone() + " = global " + gllTy + " " + body + "\n")
+                return false
+            }
+            Option.None => {
+            }
+        }
+    }
+    // aggregate globals (%String/%Vec/struct) zero-init; scalars take a const.
+    var gval = "zeroinitializer"
+    var needsInit = false
+    let isAgg = gllTy.len > 0 && gllTy[0] == 37
+    if !isAgg {
+        gval = constInitOf(value, gllTy)
+        if !isConstInit(value) {
+            needsInit = true
+        }
+    } else if !isEmptyAggInit(value) {
+        // A %String or %Vec built from anything other than an empty constructor
+        // cannot be an LLVM constant, so zeroinitializer here is a placeholder —
+        // the real value has to be computed at startup. Without this a
+        // `pub let TAIL: string = "tail"` stayed the empty string forever.
+        needsInit = true
+    }
+    emitG(cg, "@" + gname.clone() + " = global " + gllTy + " " + gval + "\n")
+    return needsInit
+}
+
 // Register structs, enums, functions in Cgen tables, then emit all functions.
-pub fn genProgram(prog: Program, sourceDir: string): string {
+pub fn genProgram(m: HIRModule, sourceDir: string): string {
+    var mod = m
     var cg = cgenNew()
     cg.sourceDir = sourceDir
     cg.targetOs = getHostTarget().os
+    // The lifted-body arena moves in whole. Nothing below adds to it or removes from it:
+    // codegen only takes a block out to walk it and puts the same one back.
+    cg.stmtBlocks = replace(mod.stmtBlocks, Vec.new())
+    cg.stmtBlockAt = replace(mod.stmtBlockAt, HashMap.new())
 
     // Runtime-support globals: argc/argv (read by _miloArgCount/_miloArgAt) and
     // the current green scheduler (read/written by _schedulerGet/_schedulerSet).
@@ -952,11 +1095,11 @@ pub fn genProgram(prog: Program, sourceDir: string): string {
     // closure/fn value = { fn pointer, environment pointer }
     emitG(cg, "%Closure = type { ptr, ptr }\n")
 
-    // Register type aliases FIRST — every astTypeStr(...)/resolveTyStr(...) call
-    // below (global types, fn return types, struct fields) needs the alias table
-    // already populated to expand a bare alias name like `Board` to its base type.
-    for ai in 0..prog.typeAliases.len {
-        cg.typeAliases.insert(prog.typeAliases[ai].name.clone(), prog.typeAliases[ai].base.clone())
+    // Register type aliases FIRST — the astTypeStr(...)/resolveTyStr(...) calls that
+    // remain (trait method return types) need the alias table already populated to
+    // expand a bare alias name like `Board` to its base type.
+    for ai in 0..mod.astTypeAliases.len {
+        cg.typeAliases.insert(mod.astTypeAliases[ai].name.clone(), mod.astTypeAliases[ai].base.clone())
     }
 
     // %String/%Vec/%HashMap are fixed-layout runtime types with no dependencies, so
@@ -972,42 +1115,27 @@ pub fn genProgram(prog: Program, sourceDir: string): string {
     // Register global var types NOW (functions reference them); the `@name = global`
     // lines are EMITTED LATER, after struct/enum type decls, so a struct-typed global
     // (`var o: Point = …`) doesn't forward-reference an as-yet-undeclared %Point.
-    for gi in 0..prog.globals.len {
-        var surfaceTy = "i64"
-        match prog.globals[gi].ty {
-            Option.Some(t) => {
-                surfaceTy = resolveTyStr(cg, astTypeStr(t))
-            }
-            Option.None => {
-                let lit = literalGlobalTy(*prog.globals[gi].value)
-                if lit.len > 0 {
-                    surfaceTy = lit
-                }
-            }
-        }
-        cg.globalVars.insert(prog.globals[gi].name.clone(), surfaceTy.clone())
+    for gi in 0..mod.globals.len {
+        let surfaceTy = tyStr(cg, mod.globals[gi].ty, "global '" + mod.globals[gi].name.clone() + "'")
+        cg.globalVars.insert(mod.globals[gi].name.clone(), surfaceTy)
     }
 
-    // Register function return types. Generic templates never codegen — only
-    // their monomorphized copies (appended to the program by main.milo) do.
-    // Full astTypeStr, not just the name: "Result<i32,string>" must keep its
-    // args so use sites can resolve it to the mangled enum.
-    for i in 0..prog.functions.len {
-        if prog.functions[i].typeParams.len > 0 {
-            continue
-        }
-        cg.fnRets.insert(prog.functions[i].name.clone(), astTypeStr(prog.functions[i].retType))
+    // Register function return types. Generic templates never reach here — lowering
+    // emits only their monomorphized instantiations.
+    for i in 0..mod.functions.len {
+        cg.fnRets.insert(mod.functions[i].name.clone(), tyStr(cg, mod.functions[i].retType, "return type of '" + mod.functions[i].name.clone() + "'"))
     }
 
     // Register interfaces EARLY (name + itable-slot layout) so struct-field and other
-    // type resolution below collapses Heap<Interface> → the %Iface fat pointer.
-    for ti in 0..prog.traits.len {
-        let tn = prog.traits[ti].name.clone()
+    // type resolution below collapses Heap<Interface> → the %Iface fat pointer. Trait
+    // decls are still read as syntax: the checker keeps no per-slot method order.
+    for ti in 0..mod.astTraits.len {
+        let tn = mod.astTraits[ti].name.clone()
         cg.interfaces.insert(tn.clone(), true)
         var slots: Vec<FieldInfo> = Vec.new()
-        for mi in 0..prog.traits[ti].methods.len {
+        for mi in 0..mod.astTraits[ti].methods.len {
             slots.push(FieldInfo {
-                name: prog.traits[ti].methods[mi].name.clone(), ty: resolveTyStr(cg, astTypeStr(prog.traits[ti].methods[mi].retType)), iterDelegate: false, range: noRange()
+                name: mod.astTraits[ti].methods[mi].name.clone(), ty: resolveTyStr(cg, astTypeStr(mod.astTraits[ti].methods[mi].retType)), range: noRange()
             }
             )
         }
@@ -1021,120 +1149,67 @@ pub fn genProgram(prog: Program, sourceDir: string): string {
     // then sees every type regardless of declaration order.
 
     // (1) enum metadata — slots filled in phase 3
-    for ei in 0..prog.enums.len {
-        if prog.enums[ei].typeParams.len > 0 {
-            continue
-        }
-        let e = prog.enums[ei].clone()
+    for ei in 0..mod.enums.len {
         var variants: Vec<CgVariantInfo> = Vec.new()
-        // Explicit discriminants set the tag and counting resumes from them. The checker
-        // side (mono.milo) does the same and the two MUST agree, or a match arm compares
-        // against a tag the constructor never stored.
-        var nextEnumTag: i64 = 0
-        for vi in 0..e.variants.len {
-            let v = e.variants[vi].clone()
+        for vi in 0..mod.enums[ei].variants.len {
             var payloadTypes: Vec<string> = Vec.new()
-            for fi in 0..v.fields.len {
-                // full type, not just .name; store UNMANGLED (lookupVariantPayload
-                // mangles at read-time, once all mono decls exist).
-                payloadTypes.push(astTypeStr(v.fields[fi]))
-            }
-            match v.discriminant {
-                Option.Some(d) => {
-                    nextEnumTag = d
-                }
-                Option.None => {
-                }
+            for fi in 0..mod.enums[ei].variants[vi].fields.len {
+                payloadTypes.push(tyStr(cg, mod.enums[ei].variants[vi].fields[fi], "payload of " + mod.enums[ei].name.clone() + "." + mod.enums[ei].variants[vi].name.clone()))
             }
             variants.push(CgVariantInfo {
-                name: v.name.clone(), tag: nextEnumTag as i32, payloadTypes: payloadTypes
+                name: mod.enums[ei].variants[vi].name.clone(), tag: mod.enums[ei].variants[vi].tag as i32, payloadTypes: payloadTypes
             }
             )
-            nextEnumTag = nextEnumTag + 1
         }
-        cg.enums.insert(e.name.clone(), CgEnumInfo {
-            name: e.name.clone(), variants: variants, payloadSlots: 0
+        cg.enums.insert(mod.enums[ei].name.clone(), CgEnumInfo {
+            name: mod.enums[ei].name.clone(), variants: variants, payloadSlots: 0
         }
         )
     }
 
-    // (2) struct metadata (mangling needs enum names, registered above)
-    // Register all concrete struct NAMES first, so resolveTyStr can mangle a
-    // field that references a (monomorphized) struct defined later in the list
-    // (e.g. Dom { arena: Arena<Node> } before Arena_Node's own decl).
-    for si in 0..prog.structs.len {
-        if prog.structs[si].typeParams.len > 0 {
-            continue
-        }
-        cg.structs.insert(prog.structs[si].name.clone(), Vec.new())
+    // (2) struct metadata. Register all struct NAMES first, so a field that references
+    // a struct declared later in the list (e.g. Dom { arena: Arena<Node> } before
+    // Arena_Node's own decl) still resolves.
+    for si in 0..mod.structs.len {
+        cg.structs.insert(mod.structs[si].name.clone(), Vec.new())
     }
-    for si in 0..prog.structs.len {
-        if prog.structs[si].typeParams.len > 0 {
-            continue
-        }
-        let s = prog.structs[si].clone()
+    for si in 0..mod.structs.len {
+        let sname = mod.structs[si].name.clone()
         var fields: Vec<FieldInfo> = Vec.new()
-        for fi in 0..s.fields.len {
-            let fty = s.fields[fi].ty.clone()
-            // A struct-field array lays out INLINE (`[N x T]` in the LLVM struct),
-            // not the Vec<T> heap runtime locals/params use (astTypeStr) — C
-            // structs with array fields (extern layout, offsetOf) need the real
-            // size/offset, which a 24-byte %Vec header can never produce. Marker:
-            // "[" N "]" elemTyStr — see isInlineArrTy in codegen/types.milo.
-            var tyStr = ""
-            if fty.isArray {
-                match fty.arraySize {
-                    Option.Some(n) => {
-                        let elem = arrayElemType(fty)
-                        tyStr = "[" + n.toString() + "]" + resolveAstTy(cg, elem)
-                    }
-                    Option.None => {
-                        eprint("codegen: struct field '" + s.fields[fi].name.clone() + "' on " + s.name.clone() + " has array type with no fixed size")
-                        exit(1)
-                    }
-                }
-            } else {
-                tyStr = resolveAstTy(cg, fty)
-            }
-            var isIterDelegate = false
-            for ai in 0..s.fields[fi].attributes.len {
-                if s.fields[fi].attributes[ai].name == "iter" {
-                    isIterDelegate = true
-                }
-            }
+        for fi in 0..mod.structs[si].fields.len {
             fields.push(FieldInfo {
-                name: s.fields[fi].name.clone(), ty: tyStr, iterDelegate: isIterDelegate, range: rangeOfAnnotation(cg, fty)
+                name: mod.structs[si].fields[fi].name.clone(),
+                ty: fieldTyStr(cg, sname, mod.structs[si].fields[fi].name, mod.structs[si].fields[fi].ty),
+                range: rangeOfTyK(mod.structs[si].fields[fi].ty),
             }
             )
         }
-        cg.structs.insert(s.name.clone(), fields)
+        cg.structs.insert(sname, fields)
     }
 
     // Native struct-by-value C ABI: mark extern fns that pass/return a bare struct
     // by value (a `&Struct`/`*Struct`/`[N]Struct` crosses by reference already). Their
     // declares + call sites go through the abi.milo classifier (HFA/coerce/byval/sret).
     cg.arch = getHostTarget().arch
-    for i in 0..prog.functions.len {
-        if !prog.functions[i].isExtern {
+    for i in 0..mod.functions.len {
+        if !mod.functions[i].isExtern {
             continue
         }
-        var wantsAbi = isByValStruct(cg, prog.functions[i].retType)
-        for pi in 0..prog.functions[i].params.len {
-            if isByValStruct(cg, prog.functions[i].params[pi].ty) {
+        var wantsAbi = isByValStruct(cg, mod.functions[i].retType, false)
+        for pi in 0..mod.functions[i].params.len {
+            let byRef = mod.functions[i].params[pi].isRef || mod.functions[i].params[pi].isRefMut
+            if isByValStruct(cg, mod.functions[i].params[pi].ty, byRef) {
                 wantsAbi = true
             }
         }
         if wantsAbi {
-            cg.abiExterns.insert(prog.functions[i].name.clone(), true)
+            cg.abiExterns.insert(mod.functions[i].name.clone(), true)
         }
     }
 
     // (3) size enums (payloadBytes sees all metadata now) + emit their decls
-    for ei in 0..prog.enums.len {
-        if prog.enums[ei].typeParams.len > 0 {
-            continue
-        }
-        let ename = prog.enums[ei].name.clone()
+    for ei in 0..mod.enums.len {
+        let ename = mod.enums[ei].name.clone()
         if !cg.enums.contains(ename) {
             continue
         }
@@ -1161,11 +1236,8 @@ pub fn genProgram(prog: Program, sourceDir: string): string {
     }
 
     // (4) emit struct decls (reference enum types emitted in phase 3)
-    for si in 0..prog.structs.len {
-        if prog.structs[si].typeParams.len > 0 {
-            continue
-        }
-        let sname = prog.structs[si].name.clone()
+    for si in 0..mod.structs.len {
+        let sname = mod.structs[si].name.clone()
         if !cg.structs.contains(sname) {
             continue
         }
@@ -1184,92 +1256,26 @@ pub fn genProgram(prog: Program, sourceDir: string): string {
     // Interfaces (traits used as types) are trait objects — a fat pointer
     // `%Iface = type { ptr data, ptr itable }`. The name/slots were registered early
     // (before struct fields, so Heap<Iface> fields collapse); emit the type decl now.
-    for ti in 0..prog.traits.len {
-        emitG(cg, "%" + prog.traits[ti].name.clone() + " = type { ptr, ptr }\n")
+    for ti in 0..mod.astTraits.len {
+        emitG(cg, "%" + mod.astTraits[ti].name.clone() + " = type { ptr, ptr }\n")
     }
 
     // Module-level global initializers — emitted here so struct/enum/%Vec/%String
     // types they reference are already declared above. Anything the static paths below
     // cannot express is collected for the runtime initializer.
     var dynIdx: Vec<i64> = Vec.new()
-    for gi in 0..prog.globals.len {
-        var surfaceTy = "i64"
-        match prog.globals[gi].ty {
-            Option.Some(t) => {
-                // resolveAstTy, not astTypeStr: struct/enum decls are registered by this
-                // point, so a generic global (`var pool: Arena<Node>`) resolves to the
-                // checker's mangled decl name ("Arena_Node") instead of emitting the raw
-                // "%Arena<Node>" bracket form, which isn't valid LLVM.
-                surfaceTy = resolveAstTy(cg, t)
-            }
-            Option.None => {
-                let lit = literalGlobalTy(*prog.globals[gi].value)
-                if lit.len > 0 {
-                    surfaceTy = lit
-                }
-            }
-        }
-        let gllTy = llType(surfaceTy)
-        let gname = prog.globals[gi].name.clone()
-        // A fixed-array global with a literal initializer (`var xs: [i32;5] = [10,…]`)
-        // lowers to a %Vec — materialize the element data as a writable global and
-        // point the %Vec at it (zeroinit would leave it empty).
-        var arrayHandled = false
-        if isVecTy(surfaceTy) {
-            let elemLl = llType(unwrapVec(surfaceTy))
-            let scalarElem = elemLl == "i1" || elemLl == "i8" || elemLl == "i16" || elemLl == "i32" || elemLl == "i64" || elemLl == "double" || elemLl == "float"
-            let structElem = elemLl.len > 0 && elemLl[0] == 37 && cg.structs.contains(stripPercent(elemLl))
-            if scalarElem || structElem {
-                let elems = constArrayElems(cg, *prog.globals[gi].value, elemLl, structElem)
-                if elems.len > 0 {
-                    var dataC = "["
-                    for ei in 0..elems.len {
-                        if ei > 0 {
-                            dataC = dataC + ", "
-                        }
-                        dataC = dataC + elems[ei].clone()
-                    }
-                    dataC = dataC + "]"
-                    let n = elems.len.toString()
-                    emitG(cg, "@" + gname.clone() + "_data = global [" + n + " x " + elemLl + "] " + dataC + "\n")
-                    emitG(cg, "@" + gname.clone() + " = global %Vec { ptr @" + gname.clone() + "_data, i64 " + n + ", i64 " + n + " }\n")
-                    arrayHandled = true
-                }
-            }
-        }
-        // A struct global with an all-const-scalar literal (`var o: Point = Point{x,y}`)
-        // becomes an aggregate constant; otherwise aggregates zero-init.
-        var structHandled = false
-        let isStructG = gllTy.len > 0 && gllTy[0] == 37 && cg.structs.contains(stripPercent(gllTy))
-        if !arrayHandled && isStructG {
-            let sname = stripPercent(gllTy)
-            let sfields = cg.structs.get(sname)!
-            match constStructBody(cg, *prog.globals[gi].value, sfields) {
-                Option.Some(body) => {
-                    emitG(cg, "@" + gname.clone() + " = global " + gllTy + " " + body + "\n")
-                    structHandled = true
-                }
-                Option.None => {
-                }
-            }
-        }
-        if !arrayHandled && !structHandled {
-            // aggregate globals (%String/%Vec/struct) zero-init; scalars take a const.
-            var gval = "zeroinitializer"
-            let isAgg = gllTy.len > 0 && gllTy[0] == 37
-            if !isAgg {
-                gval = constInitOf(*prog.globals[gi].value, gllTy)
-                if !isConstInit(*prog.globals[gi].value) {
+    for gi in 0..mod.globals.len {
+        let surfaceTy = tyStr(cg, mod.globals[gi].ty, "global '" + mod.globals[gi].name.clone() + "'")
+        let gname = mod.globals[gi].name.clone()
+        match (*mod.globals[gi].value).kind {
+            HExpr.Unlowered(av) => {
+                if emitGlobalStatic(cg, gname, surfaceTy, *av) {
                     dynIdx.push(gi)
                 }
-            } else if !isEmptyAggInit(*prog.globals[gi].value) {
-                // A %String or %Vec built from anything other than an empty constructor
-                // cannot be an LLVM constant, so zeroinitializer here is a placeholder —
-                // the real value has to be computed at startup. Without this a
-                // `pub let TAIL: string = "tail"` stayed the empty string forever.
-                dynIdx.push(gi)
             }
-            emitG(cg, "@" + gname.clone() + " = global " + gllTy + " " + gval + "\n")
+            _ => {
+                hexprAbort(*mod.globals[gi].value, "global '" + gname.clone() + "' initializer")
+            }
         }
     }
 
@@ -1278,7 +1284,7 @@ pub fn genProgram(prog: Program, sourceDir: string): string {
     // `let FRAG = "head|" + TAIL` may be written above `TAIL`, and evaluating it first
     // would read a zeroed string. Without this whole pass such a global stayed
     // zeroinitializer forever and printed as empty — a silent wrong answer, not an error.
-    let sigs = buildFnTable(cg, prog)
+    let sigs = buildFnTable(cg, mod.functions, mod.astGenericFns)
     if dynIdx.len > 0 {
         cg.needsGlobalInit = true
         // Insertion sort by dependency: a global is emitted only once every global it
@@ -1292,17 +1298,23 @@ pub fn genProgram(prog: Program, sourceDir: string): string {
             var progressed = false
             for k in 0..dynIdx.len {
                 let gi = dynIdx[k]
-                let nm = prog.globals[gi].name.clone()
+                let nm = mod.globals[gi].name.clone()
                 if placed.contains(nm) {
                     continue
                 }
                 var refs: Vec<string> = Vec.new()
-                collectIdentsExpr(*prog.globals[gi].value, refs)
+                match (*mod.globals[gi].value).kind {
+                    HExpr.Unlowered(av) => {
+                        collectIdentsExpr(cg, *av, refs)
+                    }
+                    _ => {
+                    }
+                }
                 var ready = true
                 for ri in 0..refs.len {
                     for k2 in 0..dynIdx.len {
                         let g2 = dynIdx[k2]
-                        if prog.globals[g2].name == refs[ri] && !placed.contains(refs[ri]) {
+                        if mod.globals[g2].name == refs[ri] && !placed.contains(refs[ri]) {
                             ready = false
                         }
                     }
@@ -1317,9 +1329,9 @@ pub fn genProgram(prog: Program, sourceDir: string): string {
             if !progressed {
                 for k in 0..dynIdx.len {
                     let gi = dynIdx[k]
-                    if !placed.contains(prog.globals[gi].name) {
+                    if !placed.contains(mod.globals[gi].name) {
                         ordered.push(gi)
-                        placed.insert(prog.globals[gi].name.clone(), true)
+                        placed.insert(mod.globals[gi].name.clone(), true)
                         remaining = remaining - 1
                     }
                 }
@@ -1330,31 +1342,17 @@ pub fn genProgram(prog: Program, sourceDir: string): string {
         var initLocs: Vec<Local> = Vec.new()
         for oi in 0..ordered.len {
             let gi = ordered[oi]
-            var surfaceTy = "i64"
-            match prog.globals[gi].ty {
-                Option.Some(t) => {
-                    surfaceTy = resolveAstTy(cg, t)
-                }
-                Option.None => {
-                    let lit = literalGlobalTy(*prog.globals[gi].value)
-                    if lit.len > 0 {
-                        surfaceTy = lit
-                    }
-                }
-            }
-            let v = genExpr(cg, *prog.globals[gi].value, initLocs, sigs, surfaceTy.clone())
-            emit(cg, "  store " + llType(surfaceTy) + " " + v.v + ", ptr @" + prog.globals[gi].name.clone() + "\n")
+            let surfaceTy = tyStr(cg, mod.globals[gi].ty, "global '" + mod.globals[gi].name.clone() + "'")
+            let v = genHExpr(cg, *mod.globals[gi].value, initLocs, sigs, surfaceTy.clone())
+            emit(cg, "  store " + llType(surfaceTy) + " " + v.v + ", ptr @" + mod.globals[gi].name.clone() + "\n")
         }
         emit(cg, "  ret void\n")
         emit(cg, "}\n\n")
     }
 
-    // Emit all functions (generic templates excluded — see registration above)
-    for j in 0..prog.functions.len {
-        if prog.functions[j].typeParams.len > 0 {
-            continue
-        }
-        genFn(cg, prog.functions[j], sigs)
+    // Emit all functions
+    for j in 0..mod.functions.len {
+        genFn(cg, mod.functions[j], sigs)
     }
 
     return cg.globals + "\n" + cg.body

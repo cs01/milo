@@ -8,6 +8,9 @@ from "src-milo/ast.milo" import {
 from "src-milo/checker/types.milo" import {
     TypeKind
 }
+from "src-milo/hir.milo" import {
+    HStmtBlock
+}
 
 // -- Value returned by expression codegen --
 
@@ -77,6 +80,35 @@ pub fn rangeOfAnnotation(cg: &Cgen, ty: &MiloType): RangeAnno {
     return noRange()
 }
 
+// The bound a CHECKER type carries. A ranged int is the same TInt tag with its two ends
+// attached, so this is a read; rangeOfAnnotation, by contrast, has to chase the alias
+// table through the syntax to recover the same two numbers.
+pub fn rangeOfTyK(t: &TypeKind): RangeAnno {
+    match t {
+        TypeKind.TInt(bits, signed, lo, hi) => {
+            match lo {
+                Option.Some(l) => {
+                    match hi {
+                        Option.Some(h) => {
+                            return RangeAnno {
+                                has: true, min: l, max: h
+                            }
+                        }
+                        Option.None => {
+                        }
+                    }
+                }
+                Option.None => {
+                }
+            }
+            return noRange()
+        }
+        _ => {
+            return noRange()
+        }
+    }
+}
+
 pub fn rangeOfOptAnnotation(cg: &Cgen, ty: &Option<MiloType>): RangeAnno {
     match ty {
         Option.Some(t) => {
@@ -128,9 +160,6 @@ pub struct CgFnSig {
 pub struct FieldInfo {
     name: string,
     ty: string,
-    // `@iter` on this field: `for x in wrapper` walks this field's runtime value
-    // instead of the wrapper struct's. See lookupIterDelegateField / genForIn.
-    iterDelegate: bool,
     // Bound the field was declared with, checked when something is written into
     // it (`p.pct = n`).
     range: RangeAnno,
@@ -296,6 +325,12 @@ pub struct Cgen {
     // plain instruction; div-by-zero still traps, since there is no modular value for
     // x/0; shift still traps too — mirrors src/codegen.ts's currentFnWrapping).
     currentFnWrapping: bool,
+    // Statement blocks lifted out of expression-position Closure/IfExpr/MatchExpr nodes,
+    // moved here from the HIR module. Fixed for the whole run: codegen only ever takes a
+    // block out to walk it and puts the same one back.
+    stmtBlocks: Vec<HStmtBlock>,
+    // Owning ExprNode id -> index of its first block (see HIRModule.stmtBlockAt).
+    stmtBlockAt: HashMap<u32, i64>,
 }
 
 pub fn cgenNew(): Cgen {
@@ -357,6 +392,8 @@ pub fn cgenNew(): Cgen {
         typeAliases: HashMap.new(),
         declaredAbort: false,
         currentFnWrapping: false,
+        stmtBlocks: Vec.new(),
+        stmtBlockAt: HashMap.new(),
     }
 }
 
@@ -804,19 +841,6 @@ pub fn lookupFieldRange(cg: &Cgen, structName: &string, idx: i64): RangeAnno {
 // The `@iter` field name on this struct, if it has one — `for x in wrapper`
 // should walk this field's runtime value instead of the wrapper itself. See
 // genForIn, which extracts the field from the already-evaluated struct Val.
-pub fn lookupIterDelegateField(cg: &Cgen, structName: &string): Option<string> {
-    if !cg.structs.contains(structName) {
-        return Option.None
-    }
-    let fields = cg.structs.get(structName)!
-    for i in 0..fields.len {
-        if fields[i].iterDelegate {
-            return Option.Some(fields[i].name.clone())
-        }
-    }
-    return Option.None
-}
-
 // Does this enum have this variant, and what is its tag? Option, not a -1 sentinel: an
 // explicit discriminant may legitimately BE -1 (`enum Signed: i32 { Neg = -1, … }`), and a
 // sentinel makes that variant indistinguishable from "no such variant" — its constructor

@@ -2,7 +2,7 @@
 // Transcribed variant-for-variant from src/hir.ts, which is the spec: same taxonomy, same
 // names, so a milo-self bug can be diffed against the oracle on the same input.
 from "src-milo/ast.milo" import {
-    Span, ExprNode, LiteralKind, TypeAlias, TraitDecl, StructDecl
+    Span, ExprNode, LiteralKind, TypeAlias, TraitDecl, StructDecl, Function
 }
 from "src-milo/checker/types.milo" import {
     TypeKind
@@ -68,6 +68,18 @@ pub fn mkUnlowered(e: Heap<ExprNode>, span: Option<Span>): Heap<HExprNode> {
         ty: Option.None, kind: HExpr.Unlowered(e), span: span
     }
     )
+}
+
+// The one thing a backend path may do when the node it holds is NOT the bridge.
+// Milo cannot RETURN the `&ExprNode` inside an Unlowered — second-class references
+// — so every seam matches the variant inline and calls this on the other arm.
+// Never defaults: a lowered node reaching the untyped walk is a node whose type
+// that walk is about to reconstruct from syntax, which is the bug being removed.
+pub fn hexprAbort(n: &HExprNode, what: &string) {
+    eprint("internal error: " + what.clone() + " reached the untyped backend as a lowered " + hexprKindName(n.kind))
+    unsafe {
+        exit(1)
+    }
 }
 
 // -- Arguments --
@@ -393,6 +405,15 @@ pub struct HCValue {
     signed: bool,
 }
 
+// One slot of the lifted-body arena. A Closure or an IfExpr arm fills `stmts`; a
+// MatchExpr fills `arms` instead, since its bodies only mean anything paired with the
+// pattern that selects them. A named struct rather than bare inner Vecs so codegen can
+// `replace` a slot's contents out by naming the place.
+pub struct HStmtBlock {
+    stmts: Vec<Heap<HStmt>>,
+    arms: Vec<HMatchArm>,
+}
+
 pub struct HIRModule {
     structs: Vec<HStruct>,
     enums: Vec<HEnum>,
@@ -408,6 +429,21 @@ pub struct HIRModule {
     cValues: Vec<HCValue>,
     // From `@link("SDL2")` on extern fns: native libs to pass to the linker.
     linkLibs: Vec<string>,
+    // Statement blocks lifted out of the expression-position `Closure`, `IfExpr` and
+    // `MatchExpr` nodes reachable from an Unlowered subtree. They cannot be lowered
+    // later, on demand: lowering CONSUMES the AST and codegen only ever holds a
+    // borrow, so the bodies are moved out here and the AST node left with an empty
+    // one. An empty body in the AST is therefore not "no statements" but "look it up",
+    // and a missing entry is fatal — never an empty function quietly emitted.
+    //
+    // A flat arena plus an index, not a map straight to the blocks: HashMap.get hands
+    // back a deep COPY, and copying an HStmt means copying enum payloads whose variant
+    // the copy cannot see. Blocks are moved out and back, never cloned.
+    stmtBlocks: Vec<HStmtBlock>,
+    // Owning ExprNode id -> index of its FIRST slot. A node's slots are contiguous and in
+    // a fixed order: Closure = one slot (the body); IfExpr = two (then, else); MatchExpr =
+    // one, holding all its arms.
+    stmtBlockAt: HashMap<u32, i64>,
     // -- transitional --
     //
     // src-milo's backend resolves types as STRINGS, through
@@ -420,6 +456,12 @@ pub struct HIRModule {
     astTypeAliases: Vec<TypeAlias>,
     astTraits: Vec<TraitDecl>,
     astStructs: Vec<StructDecl>,
+    // Generic function TEMPLATES, unlowered. They have no body to emit — only their
+    // instantiations do — but a generic CALL still names the template, and the backend
+    // reads that declaration to learn which parameters are by-reference. Get it wrong and
+    // the call passes a struct where the callee's definition expects a pointer. Goes when
+    // HIRArg carries passByRef and the call site stops asking.
+    astGenericFns: Vec<Function>,
 }
 
 // Names the node an abort is about. Exhaustive by construction: a new HExpr variant

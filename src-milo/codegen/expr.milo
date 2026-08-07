@@ -6,7 +6,13 @@ from "std/path" import {
     Path
 }
 from "src-milo/ast.milo" import {
-    Expr, Stmt, Pattern, StructLitField, Span, Param, MiloType
+    Expr, ExprNode, Stmt, Pattern, StructLitField, Span, Param, MiloType
+}
+from "src-milo/hir.milo" import {
+    HExpr, HExprNode, hexprAbort, hirType
+}
+from "src-milo/checker/types.milo" import {
+    TypeKind
 }
 from "src-milo/codegen/types.milo" import {
     isVecTy, unwrapVec, ensureVecTy, ensureRealloc, genSizeOf,
@@ -21,7 +27,8 @@ from "src-milo/codegen/types.milo" import {
     isInlineArrTy, inlineArrLen, inlineArrElem, ensureFpSat
 }
 from "src-milo/codegen/stmt.milo" import {
-    genClosure, genClosureCall, widenToI64, genMatch, genArmBody, MatchGen, autoMoveClosureArg
+    genClosure, genClosureCall, widenToI64, genMatchAst, genArmBody, MatchGen,
+    autoMoveClosureArg, genIfExprValue, blockBase, takeBlock, putBlock, takeArms, putArms
 }
 from "src-milo/codegen/drops.milo" import {
     cgNeedsDrop, zeroStore, emitDropValue, dropHelperEmitted, variantStructTyDrop
@@ -163,11 +170,13 @@ pub fn genStructLit(cg: &mut Cgen, name: &string, fields: &Vec<StructLitField>, 
     let alloc = nextTemp(cg)
     emit(cg, "  " + alloc + " = alloca " + structTy + "\n")
     for fi in 0..fields.len {
-        let ef = fields[fi].clone()
-        let idx = lookupFieldIndex(cg, rname, ef.name)
+        // Read the field through the borrow. Cloning it here (which this used to do)
+        // rebuilds the value expression, and ExprNode::clone mints a fresh id — which
+        // orphans whatever lowering lifted out of it under the old one.
+        let idx = lookupFieldIndex(cg, rname, fields[fi].name)
         let fty = lookupFieldType(cg, rname, idx)
         // struct fields are owned → move the value (zero the source place)
-        let fv0 = genOwnedArg(cg, *ef.value, fty.clone(), locs, sigs)
+        let fv0 = genOwnedArg(cg, *fields[fi].value, fty.clone(), locs, sigs)
         let fv = genInterfaceCoerceIfNeeded(cg, fv0, fty)
         let fp = nextTemp(cg)
         emit(cg, "  " + fp + " = getelementptr " + structTy + ", ptr " + alloc + ", i32 0, i32 " + idx.toString() + "\n")
@@ -433,14 +442,11 @@ pub fn markReceiverMoved(cg: &mut Cgen, e: &ExprNode, locs: &Vec<Local>, sigs: &
 pub fn genOwnedArg(cg: &mut Cgen, e: &ExprNode, hintTy: string, locs: &Vec<Local>, sigs: &Vec<CgFnSig>): Val {
     match e.kind {
         Expr.Closure(cps, crt, cbody, cIsMove) => {
-            let promoted = autoMoveClosureArg(e, locs)
-            match (*promoted).kind {
-                Expr.Closure(p2, rt2, body2, isMove2) => {
-                    return genClosure(cg, p2, rt2, body2, isMove2, locs, sigs)
-                }
-                _ => {
-                }
+            var isMove = cIsMove
+            if !isMove {
+                isMove = autoMoveClosureArg(cg, e.id, cps, locs)
             }
+            return genClosure(cg, e.id, cps, crt, isMove, locs, sigs)
         }
         _ => {
         }
@@ -8715,6 +8721,38 @@ pub fn genLvalueWithHint(cg: &mut Cgen, e: &ExprNode, locs: &Vec<Local>, sigs: &
 
 // The result expression of an expression-bodied closure statement (`=> expr`
 // lowers to one Return/ExprStmt). Returns None when it isn't that shape.
+// The seam between the typed pipeline and the untyped one. Every HIR node still carrying
+// an AST subtree comes through here; anything else aborts naming the kind, because a node
+// that reached this walk already lowered is a node whose type the walk below is about to
+// reconstruct from syntax — the exact defect this migration exists to remove.
+pub fn genHExpr(cg: &mut Cgen, n: &HExprNode, locs: &Vec<Local>, sigs: &Vec<CgFnSig>, hintTy: string): Val {
+    match n.kind {
+        HExpr.Unlowered(e) => {
+            return genExpr(cg, *e, locs, sigs, hintTy)
+        }
+        // The one node lowering builds for itself: `@iter` on a field redirects a for-in
+        // to that field, and that read is genuinely lowered — it carries its own type, so
+        // nothing here has to look the field's type up again.
+        HExpr.FieldAccess(obj, field, isRefRead) => {
+            let sv = genHExpr(cg, *obj, locs, sigs, "")
+            let sname = stripPercent(resolveTyStr(cg, sv.ty))
+            let fidx = lookupFieldIndex(cg, sname, field)
+            let fty = hirType(n)
+            let fv = nextTemp(cg)
+            emit(cg, "  " + fv + " = extractvalue %" + sname + " " + sv.v + ", " + fidx.toString() + "\n")
+            return Val {
+                v: fv, ty: tyStr(cg, fty, "'@iter' delegate field '" + field.clone() + "'")
+            }
+        }
+        _ => {
+            hexprAbort(n, "expression")
+            return Val {
+                v: "0", ty: "void"
+            }
+        }
+    }
+}
+
 pub fn genExpr(cg: &mut Cgen, e: &ExprNode, locs: &Vec<Local>, sigs: &Vec<CgFnSig>, hintTy: string): Val {
     match e.kind {
         Expr.IntLit(n) => {
@@ -9293,7 +9331,7 @@ pub fn genExpr(cg: &mut Cgen, e: &ExprNode, locs: &Vec<Local>, sigs: &Vec<CgFnSi
             return genFieldAccess(cg, *object, field, locs, sigs)
         }
         Expr.Closure(params, retType, body, isMove) => {
-            return genClosure(cg, params, retType, body, isMove, locs, sigs)
+            return genClosure(cg, e.id, params, retType, isMove, locs, sigs)
         }
         Expr.EnumLit(enumName, variant, args) => {
             if enumName == "Vec" && variant == "new" {
@@ -9468,73 +9506,27 @@ pub fn genExpr(cg: &mut Cgen, e: &ExprNode, locs: &Vec<Local>, sigs: &Vec<CgFnSi
         Expr.IndexAccess(obj, idx) => {
             return genIndex(cg, *obj, *idx, locs, sigs)
         }
+        // Both body-carrying expression forms read their statements out of the block
+        // arena: lowering emptied the AST bodies, because they had to be lowered while
+        // lowering still OWNED the AST.
         Expr.IfExpr(cond, thenBody, elseBody) => {
-            // Same compile-time fold as the statement form (genIf): the value
-            // comes from the taken arm alone, and the dead arm is never emitted.
-            let folded = constFoldBool(cg, *cond)
-            match folded {
-                Option.Some(taken) => {
-                    let foldRetTy = cg.curRetTy.clone()
-                    if taken {
-                        return genArmBody(cg, thenBody, locs, sigs, foldRetTy, true, hintTy.clone()).val
-                    }
-                    return genArmBody(cg, elseBody, locs, sigs, foldRetTy, true, hintTy.clone()).val
-                }
-                Option.None => {
-                }
-            }
-            let cv = genExpr(cg, *cond, locs, sigs, "bool")
-            let thenLbl = nextLabel(cg, "ifx.then")
-            let elseLbl = nextLabel(cg, "ifx.else")
-            let endLbl = nextLabel(cg, "ifx.end")
-            let armRetTy = cg.curRetTy.clone()
-            emit(cg, "  br i1 " + cv.v + ", label %" + thenLbl + ", label %" + elseLbl + "\n")
-            emitLabel(cg, thenLbl)
-            let a = genArmBody(cg, thenBody, locs, sigs, armRetTy, true, hintTy.clone())
-            // the phi predecessor is wherever control actually is now — a nested
-            // if-expr (`else if …`) ends in its OWN block, not thenLbl/elseLbl.
-            let thenPred = cg.curBlock.clone()
-            if !a.terminated {
-                emit(cg, "  br label %" + endLbl + "\n")
-            }
-            emitLabel(cg, elseLbl)
-            let b = genArmBody(cg, elseBody, locs, sigs, armRetTy, true, a.val.ty.clone())
-            let elsePred = cg.curBlock.clone()
-            if !b.terminated {
-                emit(cg, "  br label %" + endLbl + "\n")
-            }
-            emitLabel(cg, endLbl)
-            if a.terminated && b.terminated {
-                emit(cg, "  unreachable\n")
-                return Val {
-                    v: "0", ty: "i64"
-                }
-            }
-            // A diverging arm contributes no incoming edge, so the phi takes the
-            // type — and the sole value — from the arm that survived.
-            var resTy = a.val.ty.clone()
-            if a.terminated {
-                resTy = b.val.ty.clone()
-            }
-            let r = nextTemp(cg)
-            let ll = llType(resTy)
-            if a.terminated {
-                emit(cg, "  " + r + " = phi " + ll + " [" + b.val.v + ", %" + elsePred + "]\n")
-            } else if b.terminated {
-                emit(cg, "  " + r + " = phi " + ll + " [" + a.val.v + ", %" + thenPred + "]\n")
-            } else {
-                emit(cg, "  " + r + " = phi " + ll + " [" + a.val.v + ", %" + thenPred + "], [" + b.val.v + ", %" + elsePred + "]\n")
-            }
-            return Val {
-                v: r, ty: resTy
-            }
+            let base = blockBase(cg, e.id, "if-expression")
+            var thenB = takeBlock(cg, base)
+            var elseB = takeBlock(cg, base + 1)
+            let v = genIfExprValue(cg, *cond, thenB, elseB, locs, sigs, hintTy.clone())
+            putBlock(cg, base, thenB)
+            putBlock(cg, base + 1, elseB)
+            return v
         }
         Expr.MatchExpr(subject, arms) => {
             // cg.curRetTy is the enclosing function's return type — needed so a
             // diverging arm's `return` statement (genStmt, reached through
             // genArmBody) emits the right `ret <ty> …`, same as any other return.
             let retTyStr = cg.curRetTy.clone()
-            let mg = genMatch(cg, *subject, arms, locs, sigs, retTyStr, true, hintTy)
+            let base = blockBase(cg, e.id, "match-expression")
+            var armsH = takeArms(cg, base)
+            let mg = genMatchAst(cg, *subject, armsH, locs, sigs, retTyStr, true, hintTy)
+            putArms(cg, base, armsH)
             return mg.val
         }
         Expr.ArrayLit(elems) => {

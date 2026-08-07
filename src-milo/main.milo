@@ -483,12 +483,15 @@ pub fn compile(path: string): Compiled {
         exit(1)
     }
 
-    // Codegen: monomorphized decls become ordinary program declarations
+    // Codegen: monomorphized decls become ordinary program declarations, then the whole
+    // program is lowered. lowerProgram CONSUMES the AST — after this line the only syntax
+    // left anywhere is what rides inside HExpr.Unlowered.
     var finalProg = resolved
     mergeMonomorphized(checker, finalProg)
-    let libs = finalProg.linkLibs.clone()
+    let hir = lowerProgram(finalProg, checker)
+    let libs = hir.linkLibs.clone()
     return Compiled {
-        ir: genProgram(finalProg, sourceDir), linkLibs: libs
+        ir: genProgram(hir, sourceDir), linkLibs: libs
     }
 }
 

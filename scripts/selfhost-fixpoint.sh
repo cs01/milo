@@ -43,7 +43,21 @@ trap 'rm -rf "$work"' EXIT
 libs="-lm -L/opt/homebrew/opt/openssl@3/lib -lssl -lcrypto -L/opt/homebrew/opt/sqlite/lib -lsqlite3"
 
 echo "stage 1: oracle -> milo-self"
+# Checked, because an unchecked stage 1 is worse than no stage 1: when the guard killed this
+# build, the script went on to compare stages 2 and 3 built from the PREVIOUS binary still
+# sitting in .selfhost/ and printed FIXED POINT HOLDS. A stale pass reads exactly like a real
+# one. Same reason milo-self.bin is removed first — a build that dies must leave no binary for
+# a later stage to pick up.
+rm -f "$out/milo-self.bin"
 sh "$root/scripts/selfhost.sh"
+st=$?
+if [ "$st" -ne 0 ] || [ ! -s "$out/milo-self.bin" ]; then
+  echo "FIXED POINT FAILED at stage 1 — the oracle did not produce milo-self.bin (exit $st)" >&2
+  [ "$st" -eq 137 ] && echo "  (137 = SIGKILL: the guard's memory or timeout cap fired)" >&2
+  # A missing binary after a clean exit still has to fail, so never exit on a 0 status here.
+  [ "$st" -eq 0 ] && st=1
+  exit "$st"
+fi
 
 asan=0
 [ "${1:-}" = "--asan" ] && asan=1

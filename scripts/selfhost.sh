@@ -22,11 +22,14 @@ mkdir -p "$out"
 # milo-self.bin, and surfaced as the fixpoint failing at stage 2 with "No such file or
 # directory". A build's memory need is a property of the build, not of whoever runs it.
 #
-# 3072 is at or below the previous effective cap on every machine that was passing, so this
-# tightens more hosts than it loosens, and it stays under the guard's own half-of-RAM
-# backstop on anything with 8 GB or more. Below that the backstop fires first, which is the
-# correct direction to fail.
-bun "$root/scripts/guard.ts" --mem-mb 3072 --virtual-mem-mb 8192 --timeout-s 300 -- \
+# The cap is on the process TREE, and this build's tree is not just bun: above ~40k IR lines
+# the driver splits into codegen units and backgrounds one clang per unit, min(cores-2, 8).
+# So peak tree RSS scales with the HOST's core count — 3072 held on a 2-core CI runner and
+# SIGKILLed every run on a 10-core Mac (8 clangs), where the fixpoint then compared stage 2
+# against a stale binary. Measured: bun peaks at 1.7 GB alone, the full tree fits in 4096 at
+# 8 units, and that still sits under the guard's half-of-RAM backstop from 8 GB up. A cap
+# meant to be a property of the build has to cover the widest host, not the narrowest.
+bun "$root/scripts/guard.ts" --mem-mb 4096 --virtual-mem-mb 8192 --timeout-s 300 -- \
   bun run "$root/src/main.ts" build "$root/src-milo/main.milo" -o "$out/milo-self.bin" "$@"
 
 cat > "$out/milo-self" <<EOF

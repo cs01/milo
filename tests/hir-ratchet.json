@@ -1,13 +1,13 @@
 {
   "counts": {
-    "astTypeStr": 15,
-    "resolveAstTy": 20,
+    "astTypeStr": 10,
+    "resolveAstTy": 5,
     "placeTypeStr": 12,
     "hintTy": 87,
     "mkUnlowered": 1
   },
-  "total": 135,
-  "commit": "2685334a",
-  "reason": "lowering lands: mkUnlowered 0->1 is the bridge's one construction site, the sanctioned raise. The other counters DROP because the census stopped counting import lists — an import names a symbol without using it, so every counter had a floor no migration could reach (the last call site could never census zero while the import making it callable survived). Metric correction, not progress.",
+  "total": 115,
+  "commit": "e69aec26",
+  "reason": "",
   "note": "src-milo backend sites that re-derive frontend knowledge. Monotone down to zero. bun scripts/hir-ratchet.ts --check"
 }

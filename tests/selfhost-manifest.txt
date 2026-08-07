@@ -132,6 +132,7 @@ enumTryFrom
 enumWildcard
 envSetRemove
 eprint
+escapeApostrophe
 escapingClosureAutoMove
 escapingClosures
 eventLoop

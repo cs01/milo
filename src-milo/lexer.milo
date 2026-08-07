@@ -213,7 +213,9 @@ pub fn pushUtf8(value: &mut string, cp: i32) {
 // backslash: `"\u{1b}[32m"` used to lex as the literal text `u{1b}[32m` and ship
 // escape codes into stdout as garbage, with nothing to look at but the output.
 pub fn isKnownEscape(c: u8, inFString: bool): bool {
-    if c == 110 || c == 116 || c == 114 || c == 92 || c == 34 || c == 48 || c == 120 || c == 117 {
+    // 39 is `\'`: pointless in a string but legal in Rust, and GLSL/shader source
+    // embedded as a Milo string carries it in prose comments.
+    if c == 110 || c == 116 || c == 114 || c == 92 || c == 34 || c == 39 || c == 48 || c == 120 || c == 117 {
         return true
     }
     return inFString && (c == 123 || c == 125)
@@ -361,6 +363,9 @@ pub fn lexFString(lex: &mut Lexer, line: i32, col: i32): Token {
                 } 
                 else if esc == 34 {
                     value.push(34 as u8)
+                } 
+                else if esc == 39 {
+                    value.push(39 as u8)
                 } 
                 else if esc == 48 {
                     value.push(0 as u8)

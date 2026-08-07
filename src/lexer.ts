@@ -93,7 +93,7 @@ export class Lexer {
     // made `$"\{\"k\": \"{v}\"}"` silently swallow the JSON as an expression and
     // emit garbage. The parser converts them back. PUA range as in lexHexEscape;
     // 0xF77B/0xF77D can't collide there because it only encodes bytes >= 0x80.
-    const escapes: Record<string, string> = { n: "\n", t: "\t", r: "\r", "\\": "\\", '"': '"', "0": "\0", "{": FSTRING_LBRACE, "}": FSTRING_RBRACE };
+    const escapes: Record<string, string> = { n: "\n", t: "\t", r: "\r", "\\": "\\", '"': '"', "'": "'", "0": "\0", "{": FSTRING_LBRACE, "}": FSTRING_RBRACE };
     while (true) {
       if (this.pos >= this.source.length) this.error("unterminated string", line, col);
       const ch = this.advance();
@@ -158,7 +158,9 @@ export class Lexer {
   private lexString(line: number, col: number): Token {
     this.advance(); // opening "
     let value = "";
-    const escapes: Record<string, string> = { n: "\n", t: "\t", r: "\r", "\\": "\\", '"': '"', "0": "\0" };
+    // `\'` is redundant in a string but legal in Rust, and shader source embedded as a
+    // Milo string carries it in prose comments.
+    const escapes: Record<string, string> = { n: "\n", t: "\t", r: "\r", "\\": "\\", '"': '"', "'": "'", "0": "\0" };
     while (this.peek() !== '"') {
       if (this.pos >= this.source.length) this.error("unterminated string", line, col);
       const ch = this.advance();

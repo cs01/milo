@@ -1,0 +1,12 @@
+// `\'` is redundant in a string but legal in Rust, and shader source embedded as a
+// Milo string carries it in its own prose comments.
+fn main() {
+    let s = "the DEM\'s water sheet"
+    print(s)
+    let f = $"a {1 + 1} b\'c"
+    print(f)
+    print($"{s.len}")
+}
+// @expect: the DEM's water sheet
+// @expect: a 2 b'c
+// @expect: 21

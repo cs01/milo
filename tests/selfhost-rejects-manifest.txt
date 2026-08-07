@@ -54,8 +54,10 @@ errors/propagateWrongRet
 errors/ptrDepthMismatch
 errors/ptrFieldNoUnsafe
 errors/rangeArg
+errors/rangeOverflowLiteral
 errors/rangeReassign
 errors/rangeReturn
+errors/rangeUnderflowLiteral
 errors/readPartiallyMovedStruct
 errors/recursiveEnumNoHeap
 errors/recursiveStructByValue
@@ -81,6 +83,7 @@ errors/targetOsArgs
 errors/typeMismatch
 errors/undefinedFn
 errors/undefinedVar
+errors/unknownEscape
 errors/unsafeImplNonMarker
 errors/unwrapUseAfterMove
 errors/useAfterMove
@@ -107,6 +110,9 @@ runtime-errors/integerOverflowAdd
 runtime-errors/integerOverflowMul
 runtime-errors/integerOverflowNeg
 runtime-errors/integerOverflowSub
+runtime-errors/rangeCheckFail
+runtime-errors/rangePropagationFail
+runtime-errors/rangeRuntime
 runtime-errors/shiftAmountOutOfRange
 runtime-errors/sliceRangeFail
 runtime-errors/substrRangeFail

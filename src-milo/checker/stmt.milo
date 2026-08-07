@@ -1970,6 +1970,12 @@ pub fn checkProgram(ck: &mut Checker, program: &Program) {
     while i < ck.monomorphizedFns.len {
         let monoFn = ck.monomorphizedFns[i].clone()
         checkFunction(ck, monoFn)
+        // Store back the body that was actually checked. Reading a Function out of the
+        // Vec copies it, and a copied ExprNode takes a FRESH id (see ast.milo's Clone
+        // impl) — so every type and loop shape recorded just now is keyed to nodes that
+        // die with this local, and the bodies codegen and lowering go on to walk have no
+        // entry at all in exprTypes or forIns.
+        ck.monomorphizedFns[i] = monoFn
         i = i + 1
     }
 }

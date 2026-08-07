@@ -1,0 +1,744 @@
+// AST + Checker → HIRModule. Transcribed function-for-function from src/lower.ts, which
+// is the spec, so a milo-self bug can be diffed against the oracle on the same input.
+//
+// This pass CONSUMES the AST. Nothing here clones an ExprNode: `impl Clone for ExprNode`
+// mints a fresh id, and every table the checker filled (exprTypes, forIns) is keyed by
+// that id — so a cloned node is a node with no recorded type and every lookup below
+// silently misses. Fields move out with `replace`, payloads move out by matching an
+// OWNED enum, and vectors drain through a scratch Vec to keep source order. TypeKind,
+// Span and plain strings carry no identity and are cloned freely.
+from "src-milo/ast.milo" import {
+    Program, Function, Stmt, Expr, ExprNode, Pattern, MatchArm, GlobalDecl, Span,
+    MiloType, cloneSpan
+}
+from "src-milo/hir.milo" import {
+    HIRModule, HStruct, HStructField, HEnum, HEnumVariant, HFunction, HFnParam, HGlobal,
+    HStmt, HExpr, HExprNode, HMatchArm, HPattern, HBinding, HIterKind, HStrViewMode,
+    mkHExpr, mkUnlowered
+}
+from "src-milo/checker/state.milo" import {
+    Checker, FnSig, ForInInfo, ForInKind, hasAttr, lookup
+}
+from "src-milo/checker/types.milo" import {
+    TypeKind, typeFromAst, tyUnknown
+}
+
+// -- fail-closed helpers --
+//
+// Every lookup in this file that can come back empty aborts instead of defaulting. A
+// lowering that guesses emits a program that is silently wrong — the wrong loop shape,
+// the wrong element type — where the compiler had the right answer and dropped it. Same
+// discipline as hir.milo's hirType, and the same shape: exit() runs, and the value after
+// it exists only because the checker does not know exit() diverges.
+fn lowerAbort(what: string) {
+    eprint("internal error: lowering " + what)
+    unsafe {
+        exit(1)
+    }
+}
+
+// Unreachable — only ever evaluated if exit() stopped working.
+fn deadStmt(): Heap<HStmt> {
+    return Heap(HStmt.Break)
+}
+
+// The type checkExpr recorded for this node. An expression the checker walked always has
+// one; a miss means lowering is looking at a node the checker never saw, which is exactly
+// the cloned-id failure this pass is built to avoid.
+fn exprTypeOf(ck: &Checker, e: &ExprNode): TypeKind {
+    match ck.exprTypes.get(e.id) {
+        Option.Some(t) => {
+            return t
+        }
+        Option.None => {
+            lowerAbort("expression #" + e.id.toString() + ": the checker recorded no type for it")
+            return TypeKind.TUnknown
+        }
+    }
+}
+
+// Lifts the syntax out of an owned node so its payloads can be moved. Matching `n.kind`
+// in place binds by REFERENCE — the payloads stay put and every use of them is a
+// borrow-move error — so the enum has to be an owned rvalue at the match.
+fn takeExprKind(e: Heap<ExprNode>): Expr {
+    var n = *e
+    return replace(n.kind, Expr.IntLit(0))
+}
+
+// The enum a match/if-let subject scrutinises, plus whether it was reached through a
+// reference. The oracle reads a matchSubjectRef set the checker fills; src-milo's checker
+// keeps none, so this reads the recorded type instead — which means a subject the checker
+// already auto-dereffed reports isRef=false here.
+fn subjectEnum(ck: &Checker, subject: &ExprNode): HSubject {
+    var ty = exprTypeOf(ck, subject)
+    var isRef = false
+    match ty.clone() {
+        TypeKind.TRef(inner, mutable) => {
+            isRef = true
+            ty = (*inner).clone()
+        }
+        _ => {
+        }
+    }
+    var name = ""
+    match ty {
+        TypeKind.TEnum(n) => {
+            name = n.clone()
+        }
+        _ => {
+        }
+    }
+    return HSubject {
+        enumName: name, isRef: isRef
+    }
+}
+
+struct HSubject {
+    enumName: string,
+    isRef: bool,
+}
+
+// -- expressions --
+
+// The migration's whole expression surface, until a later slice starts claiming node
+// kinds one at a time. The ONE construction site of the bridge (scripts/hir-ratchet.ts
+// censuses them, monotone to zero).
+fn lowerExpr(e: Heap<ExprNode>): Heap<HExprNode> {
+    let sp = cloneSpan((*e).span)
+    return mkUnlowered(e, sp)
+}
+
+// -- statements --
+
+fn lowerBlock(body: Vec<Heap<Stmt>>, fnRetType: &TypeKind, ck: &Checker): Vec<Heap<HStmt>> {
+    var src = body
+    var rev: Vec<Heap<Stmt>> = Vec.new()
+    while src.len > 0 {
+        rev.push(src.pop()!)
+    }
+    var out: Vec<Heap<HStmt>> = Vec.new()
+    while rev.len > 0 {
+        out.push(lowerStmt(rev.pop()!, fnRetType, ck))
+    }
+    return out
+}
+
+fn lowerOptBlock(body: Option<Vec<Heap<Stmt>>>, fnRetType: &TypeKind, ck: &Checker): Option<Vec<Heap<HStmt>>> {
+    match body {
+        Option.Some(b) => {
+            return Option.Some(lowerBlock(b, fnRetType, ck))
+        }
+        Option.None => {
+            return Option.None
+        }
+    }
+}
+
+fn lowerArms(arms: Vec<MatchArm>, subj: &HSubject, fnRetType: &TypeKind, ck: &Checker): Vec<HMatchArm> {
+    var src = arms
+    var rev: Vec<MatchArm> = Vec.new()
+    while src.len > 0 {
+        rev.push(src.pop()!)
+    }
+    var out: Vec<HMatchArm> = Vec.new()
+    while rev.len > 0 {
+        var arm = rev.pop()!
+        let pat = lowerPattern(arm.pattern, subj.enumName, ck)
+        let body = replace(arm.body, Vec.new())
+        out.push(HMatchArm {
+            pattern: pat, body: lowerBlock(body, fnRetType, ck)
+        }
+        )
+    }
+    return out
+}
+
+// Resolves the variant's tag and its bindings' types off the EnumInfo the checker built
+// for the subject's enum. The pattern carries an enum name of its own, but that one is
+// as written in source; `enumName` here is the mangled name ck.enums is keyed by.
+fn lowerPattern(p: &Pattern, enumName: &string, ck: &Checker): HPattern {
+    match p {
+        Pattern.WildcardPattern(sp) => {
+            return HPattern.HWildcardPattern
+        }
+        Pattern.LiteralPattern(value, kind, sp) => {
+            return HPattern.HLiteralPattern(value.clone(), kind)
+        }
+        Pattern.EnumPattern(patEnum, variant, bindings, sp) => {
+            if !ck.enums.contains(enumName) {
+                lowerAbort("pattern '" + variant.clone() + "': no enum registered for subject type '" + enumName.clone() + "'")
+                return HPattern.HWildcardPattern
+            }
+            let info = ck.enums.get(enumName)!
+            if !info.variants.contains(variant) {
+                lowerAbort("pattern '" + variant.clone() + "': enum '" + enumName.clone() + "' has no such variant")
+                return HPattern.HWildcardPattern
+            }
+            let vi = info.variants.get(variant)!
+            var bs: Vec<HBinding> = Vec.new()
+            for i in 0..bindings.len {
+                if i >= vi.fields.len {
+                    lowerAbort("pattern '" + variant.clone() + "': binds " + bindings.len.toString() + " values but the variant carries " + vi.fields.len.toString())
+                    return HPattern.HWildcardPattern
+                }
+                bs.push(HBinding {
+                    name: bindings[i].clone(), ty: vi.fields[i].clone()
+                }
+                )
+            }
+            return HPattern.HEnumPattern(variant.clone(), bs, vi.tag as i64)
+        }
+    }
+}
+
+fn lowerStmt(s: Heap<Stmt>, fnRetType: &TypeKind, ck: &Checker): Heap<HStmt> {
+    // Bound first: matching `*s` in place scrutinises a DEREF, whose arm bindings are
+    // references, and every payload this walk needs to move would be a borrow-move error.
+    var stmt = *s
+    match stmt {
+        Stmt.LetDecl(name, typeAnno, value, span) => {
+            // Read the id BEFORE the node moves into lowerExpr — afterwards there is
+            // nothing left to key the side table by.
+            let ty = exprTypeOf(ck, *value)
+            return Heap(HStmt.Let(name, ty, lowerExpr(value), false))
+        }
+        Stmt.VarDecl(name, typeAnno, value, span) => {
+            let ty = exprTypeOf(ck, *value)
+            return Heap(HStmt.Let(name, ty, lowerExpr(value), true))
+        }
+        Stmt.Assign(target, value, span) => {
+            let t = lowerExpr(target)
+            let v = lowerExpr(value)
+            // `isInit` is false for every source-level assignment: it marks a first write
+            // into a slot that still holds zeroinitializer, which only the generated
+            // module-global initializer produces, and this pass emits no such statement.
+            return Heap(HStmt.Assign(t, v, false))
+        }
+        Stmt.Return(value, span) => {
+            match value {
+                Option.Some(e) => {
+                    return Heap(HStmt.Return(Option.Some(lowerExpr(e)), fnRetType.clone()))
+                }
+                Option.None => {
+                    return Heap(HStmt.Return(Option.None, fnRetType.clone()))
+                }
+            }
+        }
+        Stmt.IfStmt(cond, thenBody, elseBody, span) => {
+            let c = lowerExpr(cond)
+            let t = lowerBlock(thenBody, fnRetType, ck)
+            return Heap(HStmt.If(c, t, lowerOptBlock(elseBody, fnRetType, ck)))
+        }
+        Stmt.WhileStmt(cond, body, span) => {
+            let c = lowerExpr(cond)
+            // src-milo's AST carries no loop contracts — the parser has no `invariant`
+            // clause — so there is nothing to attach.
+            return Heap(HStmt.While(c, lowerBlock(body, fnRetType, ck), Vec.new()))
+        }
+        Stmt.BreakStmt(span) => {
+            return Heap(HStmt.Break)
+        }
+        Stmt.ContinueStmt(span) => {
+            return Heap(HStmt.Continue)
+        }
+        Stmt.ExprStmt(expr, span) => {
+            return Heap(HStmt.ExprStmt(lowerExpr(expr)))
+        }
+        Stmt.MatchStmt(subject, arms, span) => {
+            let subj = subjectEnum(ck, *subject)
+            let sv = lowerExpr(subject)
+            let hArms = lowerArms(arms, subj, fnRetType, ck)
+            return Heap(HStmt.Match(sv, hArms, subj.enumName.clone(), subj.isRef))
+        }
+        Stmt.IfLetStmt(pattern, subject, thenBody, elseBody, span) => {
+            // Two arms, always: the pattern's, then a wildcard carrying the else-body —
+            // empty when there is none. Mirrors the oracle, which has no if-let in HIR.
+            let subj = subjectEnum(ck, *subject)
+            let pat = lowerPattern(*pattern, subj.enumName, ck)
+            let sv = lowerExpr(subject)
+            var hArms: Vec<HMatchArm> = Vec.new()
+            hArms.push(HMatchArm {
+                pattern: pat, body: lowerBlock(thenBody, fnRetType, ck)
+            }
+            )
+            var elseHir: Vec<Heap<HStmt>> = Vec.new()
+            match elseBody {
+                Option.Some(b) => {
+                    elseHir = lowerBlock(b, fnRetType, ck)
+                }
+                Option.None => {
+                }
+            }
+            hArms.push(HMatchArm {
+                pattern: HPattern.HWildcardPattern, body: elseHir
+            }
+            )
+            return Heap(HStmt.Match(sv, hArms, subj.enumName.clone(), subj.isRef))
+        }
+        Stmt.UnsafeBlock(body, span) => {
+            return Heap(HStmt.UnsafeBlock(lowerBlock(body, fnRetType, ck)))
+        }
+        Stmt.ForInStmt(varName, varName2, iterable, body, span) => {
+            return lowerForIn(varName, varName2, iterable, body, span, fnRetType, ck)
+        }
+    }
+}
+
+fn lowerForIn(varName: string, varName2: Option<string>, iterable: Heap<ExprNode>, body: Vec<Heap<Stmt>>, span: Option<Span>, fnRetType: &TypeKind, ck: &Checker): Heap<HStmt> {
+    let iterId = (*iterable).id
+    if !ck.forIns.contains(iterId) {
+        // Fatal, never a guess: the four for-loop shapes iterate different memory, so a
+        // wrong pick here is a miscompile (walking a HashMap's raw slot array as a Vec)
+        // rather than a diagnostic anyone would ever see.
+        lowerAbort("'for " + varName.clone() + "': the checker recorded no loop shape for this iterable")
+        return deadStmt()
+    }
+    let info = ck.forIns.get(iterId)!
+
+    match info.kind {
+        // Both shapes below take the iterable APART, so they are calls whose arm ends in
+        // `return`: an arm that ends in anything else has its moves joined into the state
+        // after the match, and `iterable` is still needed there by the value shapes.
+        ForInKind.FRange => {
+            return lowerForRange(varName, iterable, body, info, fnRetType, ck)
+        }
+        ForInKind.FStrView => {
+            return lowerForStrView(varName, varName2, iterable, body, info, fnRetType, ck)
+        }
+        _ => {
+        }
+    }
+
+    // Everything below walks the iterable as a value, so it lowers whole.
+    var iterExpr = lowerExpr(iterable)
+    if info.delegateField.len > 0 {
+        // `@iter` on a field: the loop walks THAT field, so from here down this is an
+        // ordinary container loop and nothing downstream needs to know a newtype was
+        // involved. mkHExpr, not the bridge — the field read is genuinely lowered.
+        iterExpr = mkHExpr(HExpr.FieldAccess(iterExpr, info.delegateField.clone(), false), info.delegateFieldTy.clone(), cloneSpan(span))
+    }
+
+    match info.kind {
+        ForInKind.FVec => {
+            return Heap(HStmt.ForEach(varName, varName2, info.varTy.clone(), cloneOptTy(info.varTy2), iterExpr, HIterKind.IterVec, lowerBlock(body, fnRetType, ck), Vec.new()))
+        }
+        ForInKind.FString => {
+            return Heap(HStmt.ForEach(varName, varName2, info.varTy.clone(), cloneOptTy(info.varTy2), iterExpr, HIterKind.IterString, lowerBlock(body, fnRetType, ck), Vec.new()))
+        }
+        ForInKind.FHashMap => {
+            return Heap(HStmt.ForEach(varName, varName2, info.varTy.clone(), cloneOptTy(info.varTy2), iterExpr, HIterKind.IterHashMap, lowerBlock(body, fnRetType, ck), Vec.new()))
+        }
+        ForInKind.FArray => {
+            return Heap(HStmt.ForEach(varName, varName2, info.varTy.clone(), cloneOptTy(info.varTy2), iterExpr, HIterKind.IterArray, lowerBlock(body, fnRetType, ck), Vec.new()))
+        }
+        ForInKind.FIterator => {
+            return Heap(HStmt.ForIterator(varName, info.varTy.clone(), iterExpr, info.nextMethod.clone(), info.resultEnum.clone(), lowerBlock(body, fnRetType, ck), Vec.new(), info.okVariant.clone()))
+        }
+        ForInKind.FChannel => {
+            return Heap(HStmt.ForIterator(varName, info.varTy.clone(), iterExpr, info.nextMethod.clone(), info.resultEnum.clone(), lowerBlock(body, fnRetType, ck), Vec.new(), info.okVariant.clone()))
+        }
+        _ => {
+            lowerAbort("'for " + varName.clone() + "': range and string-view shapes are handled above and cannot reach here")
+            return deadStmt()
+        }
+    }
+}
+
+// The RangeExpr node holds nothing lowering keeps — its two operands become the loop
+// bounds and the node itself is discarded.
+fn lowerForRange(varName: string, iterable: Heap<ExprNode>, body: Vec<Heap<Stmt>>, info: &ForInInfo, fnRetType: &TypeKind, ck: &Checker): Heap<HStmt> {
+    match takeExprKind(iterable) {
+        Expr.RangeExpr(start, end) => {
+            let s = lowerExpr(start)
+            let e = lowerExpr(end)
+            return Heap(HStmt.ForRange(varName, info.varTy.clone(), s, e, lowerBlock(body, fnRetType, ck), Vec.new()))
+        }
+        _ => {
+            lowerAbort("'for " + varName.clone() + "': recorded as a range loop over a non-range iterable")
+            return deadStmt()
+        }
+    }
+}
+
+// `for line in s.lines()` / `for f in s.splitView(sep)`: the receiver is the source the
+// views point into and the first argument, when there is one, is the separator. The
+// method-call node itself never reaches codegen — lines/splitView are loop-only forms.
+fn lowerForStrView(varName: string, varName2: Option<string>, iterable: Heap<ExprNode>, body: Vec<Heap<Stmt>>, info: &ForInInfo, fnRetType: &TypeKind, ck: &Checker): Heap<HStmt> {
+    match takeExprKind(iterable) {
+        Expr.MethodCall(recv, method, args) => {
+            let src = lowerExpr(recv)
+            var sep: Option<Heap<HExprNode>> = Option.None
+            var rest = args
+            if rest.len > 0 {
+                var rev: Vec<Heap<ExprNode>> = Vec.new()
+                while rest.len > 0 {
+                    rev.push(rest.pop()!)
+                }
+                sep = Option.Some(lowerExpr(rev.pop()!))
+            }
+            var mode = HStrViewMode.ViewLines
+            if info.mode == "splitView" {
+                mode = HStrViewMode.ViewSplit
+            }
+            return Heap(HStmt.ForStrView(varName, varName2, info.varTy.clone(), src, sep, mode, lowerBlock(body, fnRetType, ck), Vec.new()))
+        }
+        _ => {
+            lowerAbort("'for " + varName.clone() + "': recorded as a string-view loop over a non-method-call iterable")
+            return deadStmt()
+        }
+    }
+}
+
+fn cloneOptTy(o: &Option<TypeKind>): Option<TypeKind> {
+    match o {
+        Option.Some(t) => {
+            return Option.Some(t.clone())
+        }
+        Option.None => {
+            return Option.None
+        }
+    }
+}
+
+// -- functions --
+
+fn fnSigOf(ck: &Checker, name: &string): FnSig {
+    match ck.functions.get(name) {
+        Option.Some(sig) => {
+            return sig
+        }
+        Option.None => {
+            lowerAbort("function '" + name.clone() + "': the checker registered no signature for it")
+            return FnSig {
+                params: Vec.new(), ret: TypeKind.TVoid, variadic: false, isExtern: false
+            }
+        }
+    }
+}
+
+// A `&T` param stores its INNER type; the isRef/isRefMut flags carry the indirection,
+// exactly as the oracle's lowerParam does.
+fn lowerParam(name: string, astTy: &MiloType, sig: &FnSig, i: i64): HFnParam {
+    var resolved = typeFromAst(astTy)
+    if i < sig.params.len {
+        resolved = sig.params[i].ty.clone()
+    }
+    var inner = resolved.clone()
+    match resolved {
+        TypeKind.TRef(t, mutable) => {
+            inner = (*t).clone()
+        }
+        _ => {
+        }
+    }
+    return HFnParam {
+        name: name, ty: inner, isRef: astTy.isRef, isRefMut: astTy.isRefMut
+    }
+}
+
+// src-milo's Function carries no origin file and no span; the first body statement that
+// has one stands in for both, which is the same proxy the oracle uses for `line`.
+fn firstSpan(body: &Vec<Heap<Stmt>>): Option<Span> {
+    for i in 0..body.len {
+        let sp = stmtSpan(*body[i])
+        match sp {
+            Option.Some(s) => {
+                return Option.Some(s)
+            }
+            Option.None => {
+            }
+        }
+    }
+    return Option.None
+}
+
+fn stmtSpan(s: &Stmt): Option<Span> {
+    match s {
+        Stmt.LetDecl(name, typeAnno, value, span) => {
+            return cloneSpan(span)
+        }
+        Stmt.VarDecl(name, typeAnno, value, span) => {
+            return cloneSpan(span)
+        }
+        Stmt.Assign(target, value, span) => {
+            return cloneSpan(span)
+        }
+        Stmt.Return(value, span) => {
+            return cloneSpan(span)
+        }
+        Stmt.IfStmt(cond, thenBody, elseBody, span) => {
+            return cloneSpan(span)
+        }
+        Stmt.WhileStmt(cond, body, span) => {
+            return cloneSpan(span)
+        }
+        Stmt.ExprStmt(expr, span) => {
+            return cloneSpan(span)
+        }
+        Stmt.MatchStmt(subject, arms, span) => {
+            return cloneSpan(span)
+        }
+        Stmt.BreakStmt(span) => {
+            return cloneSpan(span)
+        }
+        Stmt.ContinueStmt(span) => {
+            return cloneSpan(span)
+        }
+        Stmt.IfLetStmt(pattern, subject, thenBody, elseBody, span) => {
+            return cloneSpan(span)
+        }
+        Stmt.UnsafeBlock(body, span) => {
+            return cloneSpan(span)
+        }
+        Stmt.ForInStmt(varName, varName2, iterable, body, span) => {
+            return cloneSpan(span)
+        }
+    }
+}
+
+fn lowerExtern(f: Function, ck: &Checker): HFunction {
+    var fn0 = f
+    let name = fn0.name.clone()
+    let sig = fnSigOf(ck, name)
+    var params: Vec<HFnParam> = Vec.new()
+    for i in 0..fn0.params.len {
+        params.push(lowerParam(fn0.params[i].name.clone(), fn0.params[i].ty, sig, i))
+    }
+    return HFunction {
+        name: name,
+        params: params,
+        retType: sig.ret.clone(),
+        body: Vec.new(),
+        // src-milo's AST has no contract clauses, so there is nothing to check at runtime
+        // and no `old(...)` to snapshot at entry.
+        contracts: Vec.new(),
+        oldSnapshots: Vec.new(),
+        isExtern: true,
+        isVariadic: fn0.isVariadic,
+        isWrapping: false,
+        // src-milo's Function records no visibility, so the C header generator cannot yet
+        // tell a published API from a helper.
+        isPub: false,
+        sourceFile: "",
+        line: 0,
+    }
+}
+
+fn lowerFn(f: Function, ck: &Checker): HFunction {
+    var fn0 = f
+    let name = fn0.name.clone()
+    let sig = fnSigOf(ck, name)
+    var params: Vec<HFnParam> = Vec.new()
+    for i in 0..fn0.params.len {
+        params.push(lowerParam(fn0.params[i].name.clone(), fn0.params[i].ty, sig, i))
+    }
+    let retType = sig.ret.clone()
+    let body = replace(fn0.body, Vec.new())
+    var sourceFile = ""
+    var line: i64 = 0
+    match firstSpan(body) {
+        Option.Some(sp) => {
+            sourceFile = sp.file.clone()
+            line = sp.line as i64
+        }
+        Option.None => {
+        }
+    }
+    return HFunction {
+        name: name,
+        params: params,
+        retType: retType.clone(),
+        body: lowerBlock(body, retType, ck),
+        contracts: Vec.new(),
+        oldSnapshots: Vec.new(),
+        isExtern: false,
+        isVariadic: fn0.isVariadic,
+        // Only "wrapping" is ever populated on a Function — a direct `@wrapping` or the
+        // file-level `@!wrapping` the parser folds into it.
+        isWrapping: hasAttr(fn0.attributes, "wrapping"),
+        isPub: false,
+        sourceFile: sourceFile,
+        line: line,
+    }
+}
+
+// -- module --
+
+pub fn lowerProgram(prog: Program, ck: &Checker): HIRModule {
+    var p = prog
+
+    // Monomorphized structs/enums/fns are NOT read off the Checker here: they can't be
+    // moved out of a `&Checker`, and copying them mints fresh ExprNode ids that orphan
+    // every side-table lookup in this file. The driver merges them into `prog` first.
+    var structs: Vec<HStruct> = Vec.new()
+    for i in 0..p.structs.len {
+        // A generic template has no layout; only its instantiations do.
+        if p.structs[i].typeParams.len > 0 {
+            continue
+        }
+        let sname = p.structs[i].name.clone()
+        // Mirrors the oracle: a struct the checker never registered has no field types to
+        // emit, so it contributes nothing rather than an empty body that would codegen.
+        if !ck.structs.contains(sname) {
+            continue
+        }
+        let info = ck.structs.get(sname)!
+        var fields: Vec<HStructField> = Vec.new()
+        for fi in 0..info.fields.len {
+            fields.push(HStructField {
+                name: info.fields[fi].name.clone(), ty: info.fields[fi].ty.clone(), cOpaque: false
+            }
+            )
+        }
+        structs.push(HStruct {
+            name: sname,
+            fields: fields,
+            // src-milo parses `extern struct` as an ordinary struct (its manual layout
+            // already targets the C ABI) and records no @cLayout, so neither fact
+            // survives to here.
+            isExtern: false,
+            cLayout: Option.None,
+        }
+        )
+    }
+
+    var enums: Vec<HEnum> = Vec.new()
+    for ename, einfo in ck.enums {
+        var variants: Vec<HEnumVariant> = Vec.new()
+        for vname, vinfo in einfo.variants {
+            var vfields: Vec<TypeKind> = Vec.new()
+            for i in 0..vinfo.fields.len {
+                vfields.push(vinfo.fields[i].clone())
+            }
+            variants.push(HEnumVariant {
+                name: vname.clone(), tag: vinfo.tag as i64, fields: vfields
+            }
+            )
+        }
+        enums.push(HEnum {
+            name: ename.clone(), variants: variants
+        }
+        )
+    }
+
+    var functions: Vec<HFunction> = Vec.new()
+    var userFnNames: Vec<string> = Vec.new()
+    var linkLibs: Vec<string> = Vec.new()
+    var fnRev: Vec<Function> = Vec.new()
+    while p.functions.len > 0 {
+        fnRev.push(p.functions.pop()!)
+    }
+    while fnRev.len > 0 {
+        let f = fnRev.pop()!
+        // @externalLinkage keeps a fn visible to a dlopen'd library that must resolve
+        // against this executable. src-milo's Program tracks no entry-file fn list, so
+        // this attribute is the only source of exported names.
+        if hasAttr(f.attributes, "externalLinkage") {
+            userFnNames.push(f.name.clone())
+        }
+        for ai in 0..f.attributes.len {
+            if f.attributes[ai].name == "link" {
+                for li in 0..f.attributes[ai].args.len {
+                    let lib = f.attributes[ai].args[li].clone()
+                    if !hasString(linkLibs, lib) {
+                        linkLibs.push(lib)
+                    }
+                }
+            }
+        }
+        if f.isExtern {
+            functions.push(lowerExtern(f, ck))
+            continue
+        }
+        // A generic template has no body to emit; its instantiations carry it.
+        if f.typeParams.len > 0 {
+            continue
+        }
+        functions.push(lowerFn(f, ck))
+    }
+
+    var globals: Vec<HGlobal> = Vec.new()
+    var gRev: Vec<GlobalDecl> = Vec.new()
+    while p.globals.len > 0 {
+        gRev.push(p.globals.pop()!)
+    }
+    while gRev.len > 0 {
+        var g = gRev.pop()!
+        let gname = g.name.clone()
+        // Globals live in a scope the checker pushes and never pops, so its recorded type
+        // is the resolved one — including for an ANNOTATED global, whose initializer the
+        // checker never walks and which therefore has no exprTypes entry at all.
+        var gty = tyUnknown()
+        match lookup(ck, gname) {
+            Option.Some(vi) => {
+                gty = vi.ty.clone()
+            }
+            Option.None => {
+                lowerAbort("global '" + gname.clone() + "': the checker recorded no type for it")
+            }
+        }
+        var gfile = ""
+        match g.span {
+            Option.Some(sp) => {
+                gfile = sp.file.clone()
+            }
+            Option.None => {
+            }
+        }
+        let value = g.value
+        globals.push(HGlobal {
+            name: gname,
+            sourceFile: gfile,
+            ty: gty,
+            value: lowerExpr(value),
+            mutable: g.mutable,
+            // src-milo has no `threadLocal` global form.
+            threadLocal: false,
+        }
+        )
+    }
+
+    var dropImpls: Vec<string> = Vec.new()
+    for dname, dhas in ck.dropImpls {
+        dropImpls.push(dname.clone())
+    }
+
+    // Libraries a module declared with @link that reached the Program through the
+    // resolver's union, on top of the ones read off the fn attributes above.
+    for i in 0..p.linkLibs.len {
+        let lib = p.linkLibs[i].clone()
+        if !hasString(linkLibs, lib) {
+            linkLibs.push(lib)
+        }
+    }
+
+    return HIRModule {
+        structs: structs,
+        enums: enums,
+        functions: functions,
+        globals: globals,
+        dropImpls: dropImpls,
+        // itables, opaqueTypes, cSigs and cValues have no checker table behind them:
+        // src-milo's backend still derives interface coercions, `extern type`
+        // forward declarations and the @cSig/@cValue guards from AST attributes at
+        // emit time. They move here when those derivations do.
+        itables: Vec.new(),
+        userFnNames: userFnNames,
+        opaqueTypes: Vec.new(),
+        cSigs: Vec.new(),
+        cValues: Vec.new(),
+        linkLibs: linkLibs,
+        astTypeAliases: replace(p.typeAliases, Vec.new()),
+        astTraits: replace(p.traits, Vec.new()),
+        astStructs: replace(p.structs, Vec.new()),
+    }
+}
+
+fn hasString(v: &Vec<string>, target: &string): bool {
+    for i in 0..v.len {
+        if v[i] == target {
+            return true
+        }
+    }
+    return false
+}

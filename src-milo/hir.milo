@@ -2,7 +2,7 @@
 // Transcribed variant-for-variant from src/hir.ts, which is the spec: same taxonomy, same
 // names, so a milo-self bug can be diffed against the oracle on the same input.
 from "src-milo/ast.milo" import {
-    Span, ExprNode, LiteralKind
+    Span, ExprNode, LiteralKind, TypeAlias, TraitDecl, StructDecl
 }
 from "src-milo/checker/types.milo" import {
     TypeKind
@@ -259,7 +259,12 @@ pub enum HStmt {
     UnsafeBlock(Vec<Heap<HStmt>>),
     ForRange(string, TypeKind, Heap<HExprNode>, Heap<HExprNode>, Vec<Heap<HStmt>>, Vec<HContract>),
     ForEach(string, Option<string>, TypeKind, Option<TypeKind>, Heap<HExprNode>, HIterKind, Vec<Heap<HStmt>>, Vec<HContract>),
-    ForIterator(string, TypeKind, Heap<HExprNode>, string, string, Vec<Heap<HStmt>>, Vec<HContract>),
+    // Trailing `okVariant` is a deliberate divergence from src/hir.ts, which has no
+    // channel loop at all. src-milo's `for x in ch` drains a Channel via recv() and stops
+    // on the closed report, so the sentinel that means "kept going" is Result.Ok there and
+    // Option.Some for an ordinary `next()` iterator. Both shapes are otherwise the same
+    // loop, so they share this variant rather than growing a second one.
+    ForIterator(string, TypeKind, Heap<HExprNode>, string, string, Vec<Heap<HStmt>>, Vec<HContract>, string),
     // `for line in text.lines()` / `for f in text.splitView(sep)`: the loop variable is a
     // `&string` view into src, so no piece is ever copied or allocated.
     ForStrView(string, Option<string>, TypeKind, Heap<HExprNode>, Option<Heap<HExprNode>>, HStrViewMode, Vec<Heap<HStmt>>, Vec<HContract>),
@@ -403,6 +408,18 @@ pub struct HIRModule {
     cValues: Vec<HCValue>,
     // From `@link("SDL2")` on extern fns: native libs to pass to the linker.
     linkLibs: Vec<string>,
+    // -- transitional --
+    //
+    // src-milo's backend resolves types as STRINGS, through
+    // `resolveTyStr(astTypeStr(...))`, and that pair needs the syntax a TypeKind no
+    // longer carries: the alias table to expand a named refinement, the trait decls to
+    // name a method's owner, and the per-struct/per-field attributes (@derive, @cLayout,
+    // @iter) the checker's StructInfo drops. Carried as the AST decls themselves so no
+    // new shape has to be kept in sync with the parser. Deleted when tyStr(cg, &TypeKind)
+    // replaces resolveTyStr(astTypeStr(...)) and the backend stops reading syntax.
+    astTypeAliases: Vec<TypeAlias>,
+    astTraits: Vec<TraitDecl>,
+    astStructs: Vec<StructDecl>,
 }
 
 // Names the node an abort is about. Exhaustive by construction: a new HExpr variant

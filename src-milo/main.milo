@@ -32,7 +32,10 @@ from "src-milo/lexer.milo" import {
     Lexer, tokenize
 }
 from "src-milo/ast.milo" import {
-    Program, Diagnostic, cloneDiagnostic
+    Program, Diagnostic, cloneDiagnostic, EnumDecl, StructDecl, Function
+}
+from "src-milo/lower.milo" import {
+    lowerProgram
 }
 from "src-milo/parser.milo" import {
     Parser, newParser, parse
@@ -391,6 +394,38 @@ pub fn parseBuildOpts(argv: &Vec<string>, start: i64, forRun: bool): BuildOpts {
     return o
 }
 
+// Hand the checker's monomorphized declarations to the program codegen and lowering
+// walk, in the order they were instantiated.
+//
+// This MOVES them. Cloning — which is what this used to do — mints a fresh ExprNode id
+// for every node in every copied body, and the checker's side tables (exprTypes, forIns)
+// are keyed by those ids, so every copied statement would arrive at lowering with no
+// recorded type and no recorded loop shape. Popping into a scratch Vec and popping back
+// out is a move that preserves declaration order.
+pub fn mergeMonomorphized(ck: &mut Checker, prog: &mut Program) {
+    var enumRev: Vec<EnumDecl> = Vec.new()
+    while ck.monomorphizedEnums.len > 0 {
+        enumRev.push(ck.monomorphizedEnums.pop()!)
+    }
+    while enumRev.len > 0 {
+        prog.enums.push(enumRev.pop()!)
+    }
+    var structRev: Vec<StructDecl> = Vec.new()
+    while ck.monomorphizedStructs.len > 0 {
+        structRev.push(ck.monomorphizedStructs.pop()!)
+    }
+    while structRev.len > 0 {
+        prog.structs.push(structRev.pop()!)
+    }
+    var fnRev: Vec<Function> = Vec.new()
+    while ck.monomorphizedFns.len > 0 {
+        fnRev.push(ck.monomorphizedFns.pop()!)
+    }
+    while fnRev.len > 0 {
+        prog.functions.push(fnRev.pop()!)
+    }
+}
+
 pub fn compile(path: string): Compiled {
     var source = ""
     match readFile(path.clone()) {
@@ -450,15 +485,7 @@ pub fn compile(path: string): Compiled {
 
     // Codegen: monomorphized decls become ordinary program declarations
     var finalProg = resolved
-    for i in 0..checker.monomorphizedEnums.len {
-        finalProg.enums.push(checker.monomorphizedEnums[i].clone())
-    }
-    for i in 0..checker.monomorphizedStructs.len {
-        finalProg.structs.push(checker.monomorphizedStructs[i].clone())
-    }
-    for i in 0..checker.monomorphizedFns.len {
-        finalProg.functions.push(checker.monomorphizedFns[i].clone())
-    }
+    mergeMonomorphized(checker, finalProg)
     let libs = finalProg.linkLibs.clone()
     return Compiled {
         ir: genProgram(finalProg, sourceDir), linkLibs: libs
@@ -640,6 +667,7 @@ pub fn main() {
         print("  run <file> [-- args]   compile and run")
         print("  emit-obj <file>        compile to a relocatable object (.o)")
         print("  emit-ir <file>         print LLVM IR to stdout")
+        print("  emit-hir <file>        print a typed-HIR summary (counts, per-fn stmts)")
         print("  check <file>           type-check only")
         print("  lex <file>             print the token stream")
         print("  fmt <file...>          format source files (-w to write in place)")
@@ -655,7 +683,7 @@ pub fn main() {
         // The gap is stated rather than left for a user to discover by having a flag
         // silently do nothing. These are implemented in the TypeScript driver only.
         print("not implemented here (use `bun run src/main.ts`):")
-        print("  emit-ast, emit-hir, emit-js, build-lib, test, prove, verify, wcet, safety")
+        print("  emit-ast, emit-js, build-lib, test, prove, verify, wcet, safety")
         print("  api, doc")
         print("  --target, --emit-header, --heap-size, --safety/--allow/--deny")
         exit(0)
@@ -923,6 +951,65 @@ pub fn main() {
             exit(1)
         }
         print("ok — no errors")
+        exit(0)
+    }
+
+    // A smoke command and a differential-debug hook for the HIR lowering pass, not a
+    // serializer: it proves lower.milo runs over a real program without aborting, and
+    // gives a place to compare shapes against the oracle's `emit-hir`. It re-checks the
+    // program rather than reusing compile(), which stays on the AST path until codegen
+    // itself takes an HIRModule.
+    if cmd == "emit-hir" {
+        var src = ""
+        match readFile(source.clone()) {
+            Result.Ok(s) => {
+                src = s
+            }
+            Result.Err(e) => {
+                eprint("error: cannot read file '" + source + "'")
+                exit(1)
+            }
+        }
+        let tokens = tokenize(src)
+        var parser = newParser(tokens, source.clone())
+        let program = parse(parser)
+        let target = getHostTarget()
+        let sourceDir = Path.dirname(source.clone())
+        let stdlibDir = findStdlibRoot(sourceDir)
+        let resolved = resolveImports(program, sourceDir, stdlibDir, target.os)
+        if resolved.parseDiagnostics.len > 0 {
+            reportParseDiagnostics(resolved.parseDiagnostics)
+            exit(1)
+        }
+        var checker = newChecker()
+        checkProgram(checker, resolved)
+        if hasErrors(checker) {
+            for i in 0..checker.diagnostics.len {
+                let d = checker.diagnostics[i]
+                if d.severity == "error" {
+                    var loc = ""
+                    match d.span {
+                        Option.Some(sp) => {
+                            loc = sp.file.clone() + ":" + sp.line.toString() + ":" + sp.col.toString() + ": "
+                        }
+                        Option.None => {
+                        }
+                    }
+                    eprint(loc + "error: " + d.message.clone())
+                }
+            }
+            exit(1)
+        }
+        var finalProg = resolved
+        mergeMonomorphized(checker, finalProg)
+        let hir = lowerProgram(finalProg, checker)
+        print("structs " + hir.structs.len.toString())
+        print("enums " + hir.enums.len.toString())
+        print("functions " + hir.functions.len.toString())
+        print("globals " + hir.globals.len.toString())
+        for i in 0..hir.functions.len {
+            print("fn " + hir.functions[i].name.clone() + " " + hir.functions[i].body.len.toString())
+        }
         exit(0)
     }
 

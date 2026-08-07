@@ -13,7 +13,8 @@
 // inherit handles. read/write then work on the parent-side fds unchanged.
 
 from "std/fs" import {
-    readFile
+    readFile,
+    removeFile
 }
 from "std/platform" import {
     close,
@@ -24,7 +25,8 @@ from "std/platform" import {
     oWriteCreateTrunc,
     oWriteCreateAppend,
     environBlock,
-    exePathInto
+    exePathInto,
+    getpid
 }
 from "std/sort" import {
     sortStrings
@@ -839,17 +841,24 @@ fn cstrCopy(s: &string): *u8 {
 pub fn capture(cmd: &string): Result<string> {
     // Relative temp file in the cwd; cmd.exe honours `> file 2>&1` redirection just as a
     // POSIX shell does, so the capture path is the same modulo the /tmp location.
-    let tmpPath: string = "milo_capture.tmp"
+    // Process-unique for the same reason as the POSIX arm (std/process.milo):
+    // a fixed name lets concurrent callers stomp each other's capture file.
+    let tmpPath: string = "milo_capture_" + getpid().toString() + ".tmp"
     let fullCmd = cmd + " > " + tmpPath + " 2>&1"
     let code = run(fullCmd)!
     if code != 0 {
+        // Unlink on every exit path, same as the posix arm: a per-process name
+        // that is never removed litters the cwd once per capture.
+        let _ = removeFile(tmpPath)
         return Result.Err("command failed with exit code")
     }
     match readFile(tmpPath) {
         Result.Ok(s) => {
+            let _ = removeFile(tmpPath)
             return Result.Ok(s)
         }
         Result.Err(_) => {
+            let _ = removeFile(tmpPath)
             return Result.Err("failed to read capture output")
         }
     }

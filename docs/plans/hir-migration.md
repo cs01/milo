@@ -3,7 +3,7 @@ system: src-milo-hir-migration
 purpose: why src-milo's backend needs a typed HIR instead of re-deriving types from the AST, the slice order, and the terms the Unlowered bridge lands on
 key-files: src-milo/ast.milo, src-milo/checker/expr.milo, src-milo/codegen/expr.milo, src/hir.ts, src/lower.ts, scripts/hir-ratchet.ts
 update-when: a slice lands, the ratchet baseline moves, or the Unlowered bridge changes terms
-last-verified: 2026-08-06
+last-verified: 2026-08-07
 -->
 
 # Putting a typed HIR between src-milo's checker and its backend

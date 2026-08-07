@@ -20,19 +20,19 @@ from "src-milo/ast.milo" import {
 // the i64 default (nothing to fix there), so it's not special-cased below.
 //
 // MUST take `e` by reference — see constStructBody's doc comment further down:
-// matching a dereferenced Heap<Expr> directly moves it out of the box and
+// matching a dereferenced Heap<ExprNode> directly moves it out of the box and
 // frees the global's own AST node once the match's temporary drops. Call with
 // the bare `*prog.globals[gi].value` (auto-borrowed), never `match *value`
 // inline.
-pub fn literalGlobalTy(e: &Expr): string {
-    match e {
-        Expr.StringLit(sv, sp) => {
+pub fn literalGlobalTy(e: &ExprNode): string {
+    match e.kind {
+        Expr.StringLit(sv) => {
             return "string"
         }
-        Expr.BoolLit(bv, sp) => {
+        Expr.BoolLit(bv) => {
             return "bool"
         }
-        Expr.FloatLit(fv, sp) => {
+        Expr.FloatLit(fv) => {
             return "f64"
         }
         _ => {
@@ -46,7 +46,7 @@ pub fn literalGlobalTy(e: &Expr): string {
 // Aggregate constant `%Struct { <f0>, <f1>, … }` for a struct literal whose fields
 // are all const scalars (int/float/bool). Returns "" if the value isn't such a
 // struct literal, or any field is non-scalar (String/Vec/nested struct).
-pub fn structLitConst(cg: &Cgen, gllTy: &string, value: &Expr): string {
+pub fn structLitConst(cg: &Cgen, gllTy: &string, value: &ExprNode): string {
     if !(gllTy.len > 0 && gllTy[0] == 37) {
         return ""
     }
@@ -55,8 +55,8 @@ pub fn structLitConst(cg: &Cgen, gllTy: &string, value: &Expr): string {
         return ""
     }
     let sfields = cg.structs.get(sname)!
-    match value {
-        Expr.StructLit(lname, litFields, sp) => {
+    match value.kind {
+        Expr.StructLit(lname, litFields) => {
             var parts: Vec<string> = Vec.new()
             for fi in 0..sfields.len {
                 let fll = llType(sfields[fi].ty)
@@ -90,21 +90,21 @@ pub fn structLitConst(cg: &Cgen, gllTy: &string, value: &Expr): string {
 // Const element list for a global initialized by an Expr.ArrayLit/ArrayRepeat,
 // else empty (falls back to zeroinit + runtime init). Takes `value` by
 // reference for the same reason constStructBody does — see its comment.
-pub fn constArrayElems(cg: &Cgen, value: &Expr, elemLl: &string, structElem: bool): Vec<string> {
+pub fn constArrayElems(cg: &Cgen, value: &ExprNode, elemLl: &string, structElem: bool): Vec<string> {
     var kind = ""
-    var litElems: Vec<Heap<Expr>> = Vec.new()
-    var repeatVal: Expr = Expr.IntLit(0, Option.None)
+    var litElems: Vec<Heap<ExprNode>> = Vec.new()
+    var repeatVal: Heap<ExprNode> = mkExpr(Expr.IntLit(0), Option.None)
     var repeatCount: i64 = 0
-    match value {
-        Expr.ArrayLit(elements, sp) => {
+    match value.kind {
+        Expr.ArrayLit(elements) => {
             kind = "lit"
             for i in 0..elements.len {
                 litElems.push(Heap((*elements[i]).clone()))
             }
         }
-        Expr.ArrayRepeat(val, count, sp) => {
+        Expr.ArrayRepeat(val, count) => {
             kind = "repeat"
-            repeatVal = (*val).clone()
+            repeatVal = Heap((*val).clone())
             repeatCount = count
         }
         _ => {
@@ -128,12 +128,12 @@ pub fn constArrayElems(cg: &Cgen, value: &Expr, elemLl: &string, structElem: boo
     } else if kind == "repeat" {
         var one = ""
         if structElem {
-            one = structLitConst(cg, elemLl, repeatVal)
+            one = structLitConst(cg, elemLl, *repeatVal)
             if one.len == 0 {
                 elemOk = false
             }
         } else {
-            one = constInitOf(repeatVal, elemLl)
+            one = constInitOf(*repeatVal, elemLl)
         }
         for ci in 0..repeatCount {
             elems.push(elemLl.clone() + " " + one.clone())
@@ -146,7 +146,7 @@ pub fn constArrayElems(cg: &Cgen, value: &Expr, elemLl: &string, structElem: boo
 }
 
 // A struct-literal field initialized by an empty container constructor
-// (`Vec.new()`) is still all-zero bytes, hence const. Takes `&Expr` (a
+// (`Vec.new()`) is still all-zero bytes, hence const. Takes `&ExprNode` (a
 // borrow) — see constStructBody's comment for why that matters here.
 //
 // Gated on the TYPE name, not just the variant/method name: `vn == "new"` alone
@@ -156,9 +156,9 @@ pub fn constArrayElems(cg: &Cgen, value: &Expr, elemLl: &string, structElem: boo
 // its real runtime initializer entirely — the struct's pointer field stays
 // null forever, and the first `.run()`/`.isDone()` dereferences it and
 // segfaults. Only Vec/HashMap's `.new()` is genuinely the empty/zeroed state.
-pub fn isEmptyCtorInit(e: &Expr): bool {
-    match e {
-        Expr.EnumLit(en, vn, eargs, esp) => {
+pub fn isEmptyCtorInit(e: &ExprNode): bool {
+    match e.kind {
+        Expr.EnumLit(en, vn, eargs) => {
             return (en == "Vec" || en == "HashMap") && vn == "new" && eargs.len == 0
         }
         _ => {
@@ -171,18 +171,18 @@ pub fn isEmptyCtorInit(e: &Expr): bool {
 // an all-const-scalar Expr.StructLit, else None (falls back to zeroinit +
 // runtime init). MUST take `value` by reference: this used to be inlined as
 // `match *prog.globals[gi].value { Expr.StructLit(...) => ..., _ => {} }` —
-// dereferencing the global's Heap<Expr> MOVES it out of the box for the
+// dereferencing the global's Heap<ExprNode> MOVES it out of the box for the
 // match's duration, and a non-StructLit initializer (e.g. a generic call
 // like `arenaNew<Node>()`) fell into the wildcard arm, dropping that owned
 // temporary — freeing the global's OWN AST node in place. The runtime-init
-// pass then re-read the same (now-freed) Heap<Expr> and got back garbage
+// pass then re-read the same (now-freed) Heap<ExprNode> and got back garbage
 // that happened to decode as Expr.IntLit(0), silently emitting `store %T 0`
 // instead of the real initializer call.
-pub fn constStructBody(_cg: &Cgen, value: &Expr, sfields: &Vec<FieldInfo>): Option<string> {
+pub fn constStructBody(_cg: &Cgen, value: &ExprNode, sfields: &Vec<FieldInfo>): Option<string> {
     var isLit = false
     var litFields: Vec<StructLitField> = Vec.new()
-    match value {
-        Expr.StructLit(n, fs, sp) => {
+    match value.kind {
+        Expr.StructLit(n, fs) => {
             isLit = true
             for i in 0..fs.len {
                 litFields.push(fs[i].clone())
@@ -245,9 +245,9 @@ pub fn constStructBody(_cg: &Cgen, value: &Expr, sfields: &Vec<FieldInfo>): Opti
 // initial state (a null `_p` instead of a live malloc'd mutex/cond pair) —
 // skipping its runtime init left every `Once` global permanently unusable and
 // crashed on first use.
-pub fn isEmptyAggInit(e: &Expr): bool {
-    match e {
-        Expr.EnumLit(en, vn, args, span) => {
+pub fn isEmptyAggInit(e: &ExprNode): bool {
+    match e.kind {
+        Expr.EnumLit(en, vn, args) => {
             return (en == "Vec" || en == "HashMap") && vn == "new" && args.len == 0
         }
         _ => {
@@ -256,35 +256,35 @@ pub fn isEmptyAggInit(e: &Expr): bool {
     }
 }
 
-pub fn isConstInit(e: &Expr): bool {
-    match e {
-        Expr.IntLit(n, span) => {
+pub fn isConstInit(e: &ExprNode): bool {
+    match e.kind {
+        Expr.IntLit(n) => {
             return true
         }
-        Expr.FloatLit(f, span) => {
+        Expr.FloatLit(f) => {
             return true
         }
-        Expr.BoolLit(b, span) => {
+        Expr.BoolLit(b) => {
             return true
         }
-        Expr.CharLit(c, span) => {
+        Expr.CharLit(c) => {
             return true
         }
-        Expr.StringLit(v, span) => {
+        Expr.StringLit(v) => {
             return true
         }
-        Expr.UnaryOp(op, operand, span) => {
+        Expr.UnaryOp(op, operand) => {
             if op == "-" {
                 return isConstInit(*operand)
             }
             return false
         }
-        Expr.BinOp(op, lhs, rhs, span) => {
+        Expr.BinOp(op, lhs, rhs) => {
             // Only NUMERIC folding exists; string concatenation has to run at runtime.
             let f = constFoldNum(e)
             return f.ok
         }
-        Expr.ArrayLit(elements, span) => {
+        Expr.ArrayLit(elements) => {
             for i in 0..elements.len {
                 if !isConstInit(*elements[i]) {
                     return false
@@ -292,10 +292,10 @@ pub fn isConstInit(e: &Expr): bool {
             }
             return true
         }
-        Expr.ArrayRepeat(val, count, span) => {
+        Expr.ArrayRepeat(val, count) => {
             return isConstInit(*val)
         }
-        Expr.StructLit(name, fields, span) => {
+        Expr.StructLit(name, fields) => {
             for i in 0..fields.len {
                 if !isConstInit(*fields[i].value) {
                     return false
@@ -303,7 +303,7 @@ pub fn isConstInit(e: &Expr): bool {
             }
             return true
         }
-        Expr.EnumLit(en, vn, args, span) => {
+        Expr.EnumLit(en, vn, args) => {
             // `Vec.new()` / `HashMap.new()` are the empty-container constructors, which
             // are all-zero bytes — but only those two; `en` must be checked too, or
             // `Once.new()` (real malloc'd state behind a struct that only LOOKS like
@@ -317,32 +317,32 @@ pub fn isConstInit(e: &Expr): bool {
     }
 }
 
-pub fn constInitOf(e: &Expr, llTy: &string): string {
+pub fn constInitOf(e: &ExprNode, llTy: &string): string {
     // a pointer global can only be a compile-time-constant null (`0 as *T`); LLVM
     // rejects `global ptr 0`, the null pointer constant is spelled `null`.
     if llTy == "ptr" {
         return "null"
     }
-    match e {
-        Expr.IntLit(n, span) => {
+    match e.kind {
+        Expr.IntLit(n) => {
             if llTy == "double" || llTy == "float" {
                 return n.toString() + ".0"
             }
             return n.toString()
         }
-        Expr.BoolLit(b, span) => {
+        Expr.BoolLit(b) => {
             if b {
                 return "1"
             }
             return "0"
         }
-        Expr.CharLit(c, span) => {
+        Expr.CharLit(c) => {
             return c.toString()
         }
-        Expr.FloatLit(f, span) => {
+        Expr.FloatLit(f) => {
             return floatDecimalStr(f)
         }
-        Expr.UnaryOp(op, operand, span) => {
+        Expr.UnaryOp(op, operand) => {
             if op == "-" {
                 return "-" + constInitOf(*operand, llTy)
             }
@@ -352,7 +352,7 @@ pub fn constInitOf(e: &Expr, llTy: &string): string {
         // fell through to the zero fallback and emitted `global double 0` — both the
         // wrong VALUE and, since `0` is an integer constant, not even valid IR for a
         // double.
-        Expr.BinOp(op, lhs, rhs, span) => {
+        Expr.BinOp(op, lhs, rhs) => {
             let lf = constFoldNum(*lhs)
             let rf = constFoldNum(*rhs)
             if lf.ok && rf.ok {
@@ -395,19 +395,19 @@ pub fn floatConstStr(f: f64): string {
     return floatDecimalStr(f)
 }
 
-pub fn constFoldNum(e: &Expr): ConstNum {
-    match e {
-        Expr.IntLit(n, span) => {
+pub fn constFoldNum(e: &ExprNode): ConstNum {
+    match e.kind {
+        Expr.IntLit(n) => {
             return ConstNum {
                 ok: true, isFloat: false, i: n, f: n as f64
             }
         }
-        Expr.FloatLit(f, span) => {
+        Expr.FloatLit(f) => {
             return ConstNum {
                 ok: true, isFloat: true, i: f as i64, f: f
             }
         }
-        Expr.UnaryOp(op, operand, span) => {
+        Expr.UnaryOp(op, operand) => {
             if op == "-" {
                 let inner = constFoldNum(*operand)
                 if inner.ok {
@@ -420,7 +420,7 @@ pub fn constFoldNum(e: &Expr): ConstNum {
                 ok: false, isFloat: false, i: 0, f: 0.0
             }
         }
-        Expr.BinOp(op, lhs, rhs, span) => {
+        Expr.BinOp(op, lhs, rhs) => {
             let l = constFoldNum(*lhs)
             let r = constFoldNum(*rhs)
             if l.ok && r.ok {

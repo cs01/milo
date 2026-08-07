@@ -104,44 +104,76 @@ pub struct Attribute {
 
 pub struct StructLitField {
     name: string,
-    value: Heap<Expr>,
+    value: Heap<ExprNode>,
 }
 
+// The syntactic shape of an expression, with no identity and no location of its
+// own — both of those live on the ExprNode that wraps it.
 pub enum Expr {
-    IntLit(i64, Option<Span>),
-    FloatLit(f64, Option<Span>),
-    BoolLit(bool, Option<Span>),
-    StringLit(string, Option<Span>),
-    CharLit(i32, Option<Span>),
-    Ident(string, Option<Span>),
-    BinOp(string, Heap<Expr>, Heap<Expr>, Option<Span>),
-    UnaryOp(string, Heap<Expr>, Option<Span>),
-    Call(string, Vec<Heap<Expr>>, Vec<MiloType>, Option<Span>),
-    StructLit(string, Vec<StructLitField>, Option<Span>),
-    FieldAccess(Heap<Expr>, string, Option<Span>),
-    ArrayLit(Vec<Heap<Expr>>, Option<Span>),
-    ArrayRepeat(Heap<Expr>, i64, Option<Span>),
-    IndexAccess(Heap<Expr>, Heap<Expr>, Option<Span>),
-    EnumLit(string, string, Vec<Heap<Expr>>, Option<Span>),
-    Unwrap(Heap<Expr>, Option<Span>),
-    Propagate(Heap<Expr>, Option<Span>),
-    DefaultValue(Heap<Expr>, Heap<Expr>, Option<Span>),
-    CastExpr(Heap<Expr>, MiloType, Option<Span>),
-    MethodCall(Heap<Expr>, string, Vec<Heap<Expr>>, Option<Span>),
-    Closure(Vec<Param>, Option<MiloType>, Vec<Heap<Stmt>>, bool, Option<Span>),
-    RangeExpr(Heap<Expr>, Heap<Expr>, Option<Span>),
-    IsExpr(Heap<Expr>, Heap<Pattern>, Option<Span>),
+    IntLit(i64),
+    FloatLit(f64),
+    BoolLit(bool),
+    StringLit(string),
+    CharLit(i32),
+    Ident(string),
+    BinOp(string, Heap<ExprNode>, Heap<ExprNode>),
+    UnaryOp(string, Heap<ExprNode>),
+    Call(string, Vec<Heap<ExprNode>>, Vec<MiloType>),
+    StructLit(string, Vec<StructLitField>),
+    FieldAccess(Heap<ExprNode>, string),
+    ArrayLit(Vec<Heap<ExprNode>>),
+    ArrayRepeat(Heap<ExprNode>, i64),
+    IndexAccess(Heap<ExprNode>, Heap<ExprNode>),
+    EnumLit(string, string, Vec<Heap<ExprNode>>),
+    Unwrap(Heap<ExprNode>),
+    Propagate(Heap<ExprNode>),
+    DefaultValue(Heap<ExprNode>, Heap<ExprNode>),
+    CastExpr(Heap<ExprNode>, MiloType),
+    MethodCall(Heap<ExprNode>, string, Vec<Heap<ExprNode>>),
+    Closure(Vec<Param>, Option<MiloType>, Vec<Heap<Stmt>>, bool),
+    RangeExpr(Heap<ExprNode>, Heap<ExprNode>),
+    IsExpr(Heap<ExprNode>, Heap<Pattern>),
     // if in expression position. Arms are statement blocks whose trailing
     // ExprStmt supplies the value, same shape as MatchArm bodies — a single-
     // expression arm is just the one-statement case.
-    IfExpr(Heap<Expr>, Vec<Heap<Stmt>>, Vec<Heap<Stmt>>, Option<Span>),
+    IfExpr(Heap<ExprNode>, Vec<Heap<Stmt>>, Vec<Heap<Stmt>>),
     // match in expression position — reuses MatchArm (bare `P => v` arms get
     // wrapped in a one-statement ExprStmt body by the parser, so bodies here are
     // uniformly Vec<Heap<Stmt>>, same shape as Stmt.MatchStmt).
-    MatchExpr(Heap<Expr>, Vec<MatchArm>, Option<Span>),
+    MatchExpr(Heap<ExprNode>, Vec<MatchArm>),
     // anonymous JSON object literal `{ key: value, … }` — serializes to a JSON
     // string (used by `ctx.json({...})`).
-    JsonObject(Vec<StructLitField>, Option<Span>),
+    JsonObject(Vec<StructLitField>),
+}
+
+// Program-unique expression id. A lowering pass keys its side tables by this, so
+// two live nodes must never share one — including the copies monomorphization
+// makes of a generic body. Allocation lives inside mkExpr precisely so there is
+// no way to build a node without one.
+var nextExprId: u32 = 0
+
+pub fn freshExprId(): u32 {
+    nextExprId = nextExprId + 1
+    return nextExprId
+}
+
+// An expression, its identity, and where it came from. `kind` holds the syntax;
+// nothing else may carry a span, or the two can disagree about the same node.
+pub struct ExprNode {
+    id: u32,
+    kind: Expr,
+    span: Option<Span>,
+}
+
+// The ONLY way to construct an expression node. Monomorphization rebuilds bodies
+// through here rather than cloning them, so each instantiation gets its own ids
+// for free — a clone would duplicate them and silently merge two nodes in any map
+// keyed by id.
+pub fn mkExpr(kind: Expr, span: Option<Span>): Heap<ExprNode> {
+    return Heap(ExprNode {
+        id: freshExprId(), kind: kind, span: span
+    }
+    )
 }
 
 // -- Patterns --
@@ -168,19 +200,19 @@ pub struct MatchArm {
 }
 
 pub enum Stmt {
-    LetDecl(string, Option<MiloType>, Heap<Expr>, Option<Span>),
-    VarDecl(string, Option<MiloType>, Heap<Expr>, Option<Span>),
-    Assign(Heap<Expr>, Heap<Expr>, Option<Span>),
-    Return(Option<Heap<Expr>>, Option<Span>),
-    IfStmt(Heap<Expr>, Vec<Heap<Stmt>>, Option<Vec<Heap<Stmt>>>, Option<Span>),
-    WhileStmt(Heap<Expr>, Vec<Heap<Stmt>>, Option<Span>),
-    ExprStmt(Heap<Expr>, Option<Span>),
-    MatchStmt(Heap<Expr>, Vec<MatchArm>, Option<Span>),
+    LetDecl(string, Option<MiloType>, Heap<ExprNode>, Option<Span>),
+    VarDecl(string, Option<MiloType>, Heap<ExprNode>, Option<Span>),
+    Assign(Heap<ExprNode>, Heap<ExprNode>, Option<Span>),
+    Return(Option<Heap<ExprNode>>, Option<Span>),
+    IfStmt(Heap<ExprNode>, Vec<Heap<Stmt>>, Option<Vec<Heap<Stmt>>>, Option<Span>),
+    WhileStmt(Heap<ExprNode>, Vec<Heap<Stmt>>, Option<Span>),
+    ExprStmt(Heap<ExprNode>, Option<Span>),
+    MatchStmt(Heap<ExprNode>, Vec<MatchArm>, Option<Span>),
     BreakStmt(Option<Span>),
     ContinueStmt(Option<Span>),
-    IfLetStmt(Heap<Pattern>, Heap<Expr>, Vec<Heap<Stmt>>, Option<Vec<Heap<Stmt>>>, Option<Span>),
+    IfLetStmt(Heap<Pattern>, Heap<ExprNode>, Vec<Heap<Stmt>>, Option<Vec<Heap<Stmt>>>, Option<Span>),
     UnsafeBlock(Vec<Heap<Stmt>>, Option<Span>),
-    ForInStmt(string, Option<string>, Heap<Expr>, Vec<Heap<Stmt>>, Option<Span>),
+    ForInStmt(string, Option<string>, Heap<ExprNode>, Vec<Heap<Stmt>>, Option<Span>),
 }
 
 // -- Top-level declarations --
@@ -266,7 +298,7 @@ pub struct ImplDecl {
 pub struct GlobalDecl {
     name: string,
     ty: Option<MiloType>,
-    value: Heap<Expr>,
+    value: Heap<ExprNode>,
     mutable: bool,
     span: Option<Span>,
 }
@@ -387,8 +419,8 @@ pub fn cloneTypes(v: &Vec<MiloType>): Vec<MiloType> {
     return out
 }
 
-pub fn cloneExprs(v: &Vec<Heap<Expr>>): Vec<Heap<Expr>> {
-    var out: Vec<Heap<Expr>> = Vec.new()
+pub fn cloneExprs(v: &Vec<Heap<ExprNode>>): Vec<Heap<ExprNode>> {
+    var out: Vec<Heap<ExprNode>> = Vec.new()
     for i in 0..v.len {
         out.push(Heap((*v[i]).clone()))
     }
@@ -521,102 +553,115 @@ impl Clone for Pattern {
     }
 }
 
+impl Clone for ExprNode {
+    fn clone(self: &Self): Self {
+        // A cloned node is a NEW node and takes a NEW id. Copying the id would let two
+        // distinct expressions collide in any map keyed by it — and every caller here
+        // (monomorphization instantiating a generic body, renameExpr, derive-generated
+        // code) wants a fresh subtree, never an alias. There is no caller that wants the
+        // id preserved, so this is the safe direction to fail in.
+        return ExprNode {
+            id: freshExprId(), kind: self.kind.clone(), span: cloneSpan(self.span)
+        }
+    }
+}
+
 impl Clone for Expr {
     fn clone(self: &Self): Self {
         match self {
-            Expr.IntLit(val, span) => {
-                return Expr.IntLit(val, cloneSpan(span))
+            Expr.IntLit(val) => {
+                return Expr.IntLit(val)
             }
-            Expr.FloatLit(val, span) => {
-                return Expr.FloatLit(val, cloneSpan(span))
+            Expr.FloatLit(val) => {
+                return Expr.FloatLit(val)
             }
-            Expr.BoolLit(val, span) => {
-                return Expr.BoolLit(val, cloneSpan(span))
+            Expr.BoolLit(val) => {
+                return Expr.BoolLit(val)
             }
-            Expr.StringLit(val, span) => {
-                return Expr.StringLit(val.clone(), cloneSpan(span))
+            Expr.StringLit(val) => {
+                return Expr.StringLit(val.clone())
             }
-            Expr.CharLit(val, span) => {
-                return Expr.CharLit(val, cloneSpan(span))
+            Expr.CharLit(val) => {
+                return Expr.CharLit(val)
             }
-            Expr.Ident(name, span) => {
-                return Expr.Ident(name.clone(), cloneSpan(span))
+            Expr.Ident(name) => {
+                return Expr.Ident(name.clone())
             }
-            Expr.BinOp(op, left, right, span) => {
-                return Expr.BinOp(op.clone(), Heap((*left).clone()), Heap((*right).clone()), cloneSpan(span))
+            Expr.BinOp(op, left, right) => {
+                return Expr.BinOp(op.clone(), Heap((*left).clone()), Heap((*right).clone()))
             }
-            Expr.UnaryOp(op, operand, span) => {
-                return Expr.UnaryOp(op.clone(), Heap((*operand).clone()), cloneSpan(span))
+            Expr.UnaryOp(op, operand) => {
+                return Expr.UnaryOp(op.clone(), Heap((*operand).clone()))
             }
-            Expr.Call(func, args, typeArgs, span) => {
-                return Expr.Call(func.clone(), cloneExprs(args), cloneTypes(typeArgs), cloneSpan(span))
+            Expr.Call(func, args, typeArgs) => {
+                return Expr.Call(func.clone(), cloneExprs(args), cloneTypes(typeArgs))
             }
-            Expr.StructLit(name, fields, span) => {
+            Expr.StructLit(name, fields) => {
                 var fs: Vec<StructLitField> = Vec.new()
                 for i in 0..fields.len {
                     fs.push(fields[i].clone())
                 }
-                return Expr.StructLit(name.clone(), fs, cloneSpan(span))
+                return Expr.StructLit(name.clone(), fs)
             }
-            Expr.JsonObject(fields, span) => {
+            Expr.JsonObject(fields) => {
                 var fs: Vec<StructLitField> = Vec.new()
                 for i in 0..fields.len {
                     fs.push(fields[i].clone())
                 }
-                return Expr.JsonObject(fs, cloneSpan(span))
+                return Expr.JsonObject(fs)
             }
-            Expr.FieldAccess(obj, field, span) => {
-                return Expr.FieldAccess(Heap((*obj).clone()), field.clone(), cloneSpan(span))
+            Expr.FieldAccess(obj, field) => {
+                return Expr.FieldAccess(Heap((*obj).clone()), field.clone())
             }
-            Expr.ArrayLit(elems, span) => {
-                return Expr.ArrayLit(cloneExprs(elems), cloneSpan(span))
+            Expr.ArrayLit(elems) => {
+                return Expr.ArrayLit(cloneExprs(elems))
             }
-            Expr.ArrayRepeat(value, count, span) => {
-                return Expr.ArrayRepeat(Heap((*value).clone()), count, cloneSpan(span))
+            Expr.ArrayRepeat(value, count) => {
+                return Expr.ArrayRepeat(Heap((*value).clone()), count)
             }
-            Expr.IndexAccess(obj, index, span) => {
-                return Expr.IndexAccess(Heap((*obj).clone()), Heap((*index).clone()), cloneSpan(span))
+            Expr.IndexAccess(obj, index) => {
+                return Expr.IndexAccess(Heap((*obj).clone()), Heap((*index).clone()))
             }
-            Expr.EnumLit(enumName, variant, args, span) => {
-                return Expr.EnumLit(enumName.clone(), variant.clone(), cloneExprs(args), cloneSpan(span))
+            Expr.EnumLit(enumName, variant, args) => {
+                return Expr.EnumLit(enumName.clone(), variant.clone(), cloneExprs(args))
             }
-            Expr.Unwrap(operand, span) => {
-                return Expr.Unwrap(Heap((*operand).clone()), cloneSpan(span))
+            Expr.Unwrap(operand) => {
+                return Expr.Unwrap(Heap((*operand).clone()))
             }
-            Expr.Propagate(operand, span) => {
-                return Expr.Propagate(Heap((*operand).clone()), cloneSpan(span))
+            Expr.Propagate(operand) => {
+                return Expr.Propagate(Heap((*operand).clone()))
             }
-            Expr.DefaultValue(operand, default, span) => {
-                return Expr.DefaultValue(Heap((*operand).clone()), Heap((*default).clone()), cloneSpan(span))
+            Expr.DefaultValue(operand, default) => {
+                return Expr.DefaultValue(Heap((*operand).clone()), Heap((*default).clone()))
             }
-            Expr.CastExpr(operand, targetType, span) => {
-                return Expr.CastExpr(Heap((*operand).clone()), targetType.clone(), cloneSpan(span))
+            Expr.CastExpr(operand, targetType) => {
+                return Expr.CastExpr(Heap((*operand).clone()), targetType.clone())
             }
-            Expr.MethodCall(obj, method, args, span) => {
-                return Expr.MethodCall(Heap((*obj).clone()), method.clone(), cloneExprs(args), cloneSpan(span))
+            Expr.MethodCall(obj, method, args) => {
+                return Expr.MethodCall(Heap((*obj).clone()), method.clone(), cloneExprs(args))
             }
-            Expr.Closure(params, retType, body, isMove, span) => {
+            Expr.Closure(params, retType, body, isMove) => {
                 var ps: Vec<Param> = Vec.new()
                 for i in 0..params.len {
                     ps.push(params[i].clone())
                 }
-                return Expr.Closure(ps, cloneOptType(retType), cloneStmts(body), isMove, cloneSpan(span))
+                return Expr.Closure(ps, cloneOptType(retType), cloneStmts(body), isMove)
             }
-            Expr.RangeExpr(start, end, span) => {
-                return Expr.RangeExpr(Heap((*start).clone()), Heap((*end).clone()), cloneSpan(span))
+            Expr.RangeExpr(start, end) => {
+                return Expr.RangeExpr(Heap((*start).clone()), Heap((*end).clone()))
             }
-            Expr.IfExpr(cond, thenBody, elseBody, span) => {
-                return Expr.IfExpr(Heap((*cond).clone()), cloneStmts(thenBody), cloneStmts(elseBody), cloneSpan(span))
+            Expr.IfExpr(cond, thenBody, elseBody) => {
+                return Expr.IfExpr(Heap((*cond).clone()), cloneStmts(thenBody), cloneStmts(elseBody))
             }
-            Expr.IsExpr(subject, pattern, span) => {
-                return Expr.IsExpr(Heap((*subject).clone()), Heap((*pattern).clone()), cloneSpan(span))
+            Expr.IsExpr(subject, pattern) => {
+                return Expr.IsExpr(Heap((*subject).clone()), Heap((*pattern).clone()))
             }
-            Expr.MatchExpr(subject, arms, span) => {
+            Expr.MatchExpr(subject, arms) => {
                 var armsOut: Vec<MatchArm> = Vec.new()
                 for i in 0..arms.len {
                     armsOut.push(arms[i].clone())
                 }
-                return Expr.MatchExpr(Heap((*subject).clone()), armsOut, cloneSpan(span))
+                return Expr.MatchExpr(Heap((*subject).clone()), armsOut)
             }
         }
     }
@@ -643,7 +688,7 @@ impl Clone for Stmt {
                 return Stmt.Assign(Heap((*target).clone()), Heap((*value).clone()), cloneSpan(span))
             }
             Stmt.Return(value, span) => {
-                var v: Option<Heap<Expr>> = Option.None
+                var v: Option<Heap<ExprNode>> = Option.None
                 match value {
                     Option.Some(e) => {
                         v = Option.Some(Heap((*e).clone()))
@@ -707,10 +752,10 @@ impl Clone for Stmt {
 // bottom out in one of those two shapes. Scoped to Stmt/Expr trees (function
 // bodies, global initializers) — type-position uses (`let x: Alias = …`)
 // are not rewritten; nothing in this compiler's own source needs that yet.
-pub fn renameExprs(v: &Vec<Heap<Expr>>, from: &string, to: &string): Vec<Heap<Expr>> {
-    var out: Vec<Heap<Expr>> = Vec.new()
+pub fn renameExprs(v: &Vec<Heap<ExprNode>>, from: &string, to: &string): Vec<Heap<ExprNode>> {
+    var out: Vec<Heap<ExprNode>> = Vec.new()
     for i in 0..v.len {
-        out.push(Heap(renameExpr(*v[i], from, to)))
+        out.push((renameExpr(*v[i], from, to)))
     }
     return out
 }
@@ -740,122 +785,126 @@ pub fn renameMatchArm(a: &MatchArm, from: &string, to: &string): MatchArm {
     }
 }
 
-pub fn renameExpr(e: &Expr, from: &string, to: &string): Expr {
-    match e {
-        Expr.IntLit(val, span) => {
-            return Expr.IntLit(val, cloneSpan(span))
+// Returns a fresh node tree. The rename is a rewrite, not an edit in place, so the
+// result gets new ids the same way any other rebuilt subtree does.
+pub fn renameExpr(e: &ExprNode, from: &string, to: &string): Heap<ExprNode> {
+    let sp = cloneSpan(e.span)
+    match e.kind {
+        Expr.IntLit(val) => {
+            return mkExpr(Expr.IntLit(val), sp)
         }
-        Expr.FloatLit(val, span) => {
-            return Expr.FloatLit(val, cloneSpan(span))
+        Expr.FloatLit(val) => {
+            return mkExpr(Expr.FloatLit(val), sp)
         }
-        Expr.BoolLit(val, span) => {
-            return Expr.BoolLit(val, cloneSpan(span))
+        Expr.BoolLit(val) => {
+            return mkExpr(Expr.BoolLit(val), sp)
         }
-        Expr.StringLit(val, span) => {
-            return Expr.StringLit(val.clone(), cloneSpan(span))
+        Expr.StringLit(val) => {
+            return mkExpr(Expr.StringLit(val.clone()), sp)
         }
-        Expr.CharLit(val, span) => {
-            return Expr.CharLit(val, cloneSpan(span))
+        Expr.CharLit(val) => {
+            return mkExpr(Expr.CharLit(val), sp)
         }
-        Expr.Ident(name, span) => {
+        Expr.Ident(name) => {
+            var n = name.clone()
             if name == from {
-                return Expr.Ident(to.clone(), cloneSpan(span))
+                n = to.clone()
             }
-            return Expr.Ident(name.clone(), cloneSpan(span))
+            return mkExpr(Expr.Ident(n), sp)
         }
-        Expr.BinOp(op, left, right, span) => {
-            return Expr.BinOp(op.clone(), Heap(renameExpr(*left, from, to)), Heap(renameExpr(*right, from, to)), cloneSpan(span))
+        Expr.BinOp(op, left, right) => {
+            return mkExpr(Expr.BinOp(op.clone(), renameExpr(*left, from, to), renameExpr(*right, from, to)), sp)
         }
-        Expr.UnaryOp(op, operand, span) => {
-            return Expr.UnaryOp(op.clone(), Heap(renameExpr(*operand, from, to)), cloneSpan(span))
+        Expr.UnaryOp(op, operand) => {
+            return mkExpr(Expr.UnaryOp(op.clone(), renameExpr(*operand, from, to)), sp)
         }
-        Expr.Call(func, args, typeArgs, span) => {
+        Expr.Call(func, args, typeArgs) => {
             var funcName = func.clone()
             if func == from {
                 funcName = to.clone()
             }
-            return Expr.Call(funcName, renameExprs(args, from, to), cloneTypes(typeArgs), cloneSpan(span))
+            return mkExpr(Expr.Call(funcName, renameExprs(args, from, to), cloneTypes(typeArgs)), sp)
         }
-        Expr.StructLit(name, fields, span) => {
-            var nm = name.clone()
+        Expr.StructLit(name, fields) => {
+            var n = name.clone()
             if name == from {
-                nm = to.clone()
+                n = to.clone()
             }
             var fs: Vec<StructLitField> = Vec.new()
             for i in 0..fields.len {
                 fs.push(StructLitField {
-                    name: fields[i].name.clone(), value: Heap(renameExpr(*fields[i].value, from, to))
+                    name: fields[i].name.clone(), value: renameExpr(*fields[i].value, from, to)
                 }
                 )
             }
-            return Expr.StructLit(nm, fs, cloneSpan(span))
+            return mkExpr(Expr.StructLit(n, fs), sp)
         }
-        Expr.JsonObject(fields, span) => {
+        Expr.JsonObject(fields) => {
             var fs: Vec<StructLitField> = Vec.new()
             for i in 0..fields.len {
                 fs.push(StructLitField {
-                    name: fields[i].name.clone(), value: Heap(renameExpr(*fields[i].value, from, to))
+                    name: fields[i].name.clone(), value: renameExpr(*fields[i].value, from, to)
                 }
                 )
             }
-            return Expr.JsonObject(fs, cloneSpan(span))
+            return mkExpr(Expr.JsonObject(fs), sp)
         }
-        Expr.FieldAccess(obj, field, span) => {
-            return Expr.FieldAccess(Heap(renameExpr(*obj, from, to)), field.clone(), cloneSpan(span))
+        Expr.FieldAccess(obj, field) => {
+            return mkExpr(Expr.FieldAccess(renameExpr(*obj, from, to), field.clone()), sp)
         }
-        Expr.ArrayLit(elems, span) => {
-            return Expr.ArrayLit(renameExprs(elems, from, to), cloneSpan(span))
+        Expr.ArrayLit(elems) => {
+            return mkExpr(Expr.ArrayLit(renameExprs(elems, from, to)), sp)
         }
-        Expr.ArrayRepeat(value, count, span) => {
-            return Expr.ArrayRepeat(Heap(renameExpr(*value, from, to)), count, cloneSpan(span))
+        Expr.ArrayRepeat(value, count) => {
+            return mkExpr(Expr.ArrayRepeat(renameExpr(*value, from, to), count), sp)
         }
-        Expr.IndexAccess(obj, index, span) => {
-            return Expr.IndexAccess(Heap(renameExpr(*obj, from, to)), Heap(renameExpr(*index, from, to)), cloneSpan(span))
+        Expr.IndexAccess(obj, index) => {
+            return mkExpr(Expr.IndexAccess(renameExpr(*obj, from, to), renameExpr(*index, from, to)), sp)
         }
-        Expr.EnumLit(enumName, variant, args, span) => {
+        Expr.EnumLit(enumName, variant, args) => {
             var en = enumName.clone()
             if enumName == from {
                 en = to.clone()
             }
-            return Expr.EnumLit(en, variant.clone(), renameExprs(args, from, to), cloneSpan(span))
+            return mkExpr(Expr.EnumLit(en, variant.clone(), renameExprs(args, from, to)), sp)
         }
-        Expr.Unwrap(operand, span) => {
-            return Expr.Unwrap(Heap(renameExpr(*operand, from, to)), cloneSpan(span))
+        Expr.Unwrap(operand) => {
+            return mkExpr(Expr.Unwrap(renameExpr(*operand, from, to)), sp)
         }
-        Expr.Propagate(operand, span) => {
-            return Expr.Propagate(Heap(renameExpr(*operand, from, to)), cloneSpan(span))
+        Expr.Propagate(operand) => {
+            return mkExpr(Expr.Propagate(renameExpr(*operand, from, to)), sp)
         }
-        Expr.DefaultValue(operand, default, span) => {
-            return Expr.DefaultValue(Heap(renameExpr(*operand, from, to)), Heap(renameExpr(*default, from, to)), cloneSpan(span))
+        Expr.DefaultValue(operand, default) => {
+            return mkExpr(Expr.DefaultValue(renameExpr(*operand, from, to), renameExpr(*default, from, to)), sp)
         }
-        Expr.CastExpr(operand, targetType, span) => {
-            return Expr.CastExpr(Heap(renameExpr(*operand, from, to)), targetType.clone(), cloneSpan(span))
+        Expr.CastExpr(operand, targetType) => {
+            return mkExpr(Expr.CastExpr(renameExpr(*operand, from, to), targetType.clone()), sp)
         }
-        Expr.MethodCall(obj, method, args, span) => {
-            return Expr.MethodCall(Heap(renameExpr(*obj, from, to)), method.clone(), renameExprs(args, from, to), cloneSpan(span))
+        Expr.MethodCall(obj, method, args) => {
+            return mkExpr(Expr.MethodCall(renameExpr(*obj, from, to), method.clone(), renameExprs(args, from, to)), sp)
         }
-        Expr.Closure(params, retType, body, isMove, span) => {
+        Expr.Closure(params, retType, body, isMove) => {
             var ps: Vec<Param> = Vec.new()
             for i in 0..params.len {
                 ps.push(params[i].clone())
             }
-            return Expr.Closure(ps, cloneOptType(retType), renameStmts(body, from, to), isMove, cloneSpan(span))
+            return mkExpr(Expr.Closure(ps, cloneOptType(retType), renameStmts(body, from, to), isMove), sp)
         }
-        Expr.RangeExpr(start, end, span) => {
-            return Expr.RangeExpr(Heap(renameExpr(*start, from, to)), Heap(renameExpr(*end, from, to)), cloneSpan(span))
+        Expr.RangeExpr(start, end) => {
+            return mkExpr(Expr.RangeExpr(renameExpr(*start, from, to), renameExpr(*end, from, to)), sp)
         }
-        Expr.IfExpr(cond, thenBody, elseBody, span) => {
-            return Expr.IfExpr(Heap(renameExpr(*cond, from, to)), renameStmts(thenBody, from, to), renameStmts(elseBody, from, to), cloneSpan(span))
+        Expr.IfExpr(cond, thenBody, elseBody) => {
+            return mkExpr(Expr.IfExpr(renameExpr(*cond, from, to), renameStmts(thenBody, from, to), renameStmts(elseBody, from, to)), sp)
         }
-        Expr.IsExpr(subject, pattern, span) => {
-            return Expr.IsExpr(Heap(renameExpr(*subject, from, to)), Heap((*pattern).clone()), cloneSpan(span))
+        Expr.IsExpr(subject, pattern) => {
+            return mkExpr(Expr.IsExpr(renameExpr(*subject, from, to), Heap((*pattern).clone())), sp)
         }
-        Expr.MatchExpr(subject, arms, span) => {
+        Expr.MatchExpr(subject, arms) => {
             var armsOut: Vec<MatchArm> = Vec.new()
             for i in 0..arms.len {
                 armsOut.push(renameMatchArm(arms[i], from, to))
             }
-            return Expr.MatchExpr(Heap(renameExpr(*subject, from, to)), armsOut, cloneSpan(span))
+            return mkExpr(Expr.MatchExpr(renameExpr(*subject, from, to), armsOut), sp)
         }
     }
 }
@@ -863,19 +912,19 @@ pub fn renameExpr(e: &Expr, from: &string, to: &string): Expr {
 pub fn renameStmt(s: &Stmt, from: &string, to: &string): Stmt {
     match s {
         Stmt.LetDecl(name, typeAnno, value, span) => {
-            return Stmt.LetDecl(name.clone(), cloneOptType(typeAnno), Heap(renameExpr(*value, from, to)), cloneSpan(span))
+            return Stmt.LetDecl(name.clone(), cloneOptType(typeAnno), (renameExpr(*value, from, to)), cloneSpan(span))
         }
         Stmt.VarDecl(name, typeAnno, value, span) => {
-            return Stmt.VarDecl(name.clone(), cloneOptType(typeAnno), Heap(renameExpr(*value, from, to)), cloneSpan(span))
+            return Stmt.VarDecl(name.clone(), cloneOptType(typeAnno), (renameExpr(*value, from, to)), cloneSpan(span))
         }
         Stmt.Assign(target, value, span) => {
-            return Stmt.Assign(Heap(renameExpr(*target, from, to)), Heap(renameExpr(*value, from, to)), cloneSpan(span))
+            return Stmt.Assign((renameExpr(*target, from, to)), (renameExpr(*value, from, to)), cloneSpan(span))
         }
         Stmt.Return(value, span) => {
-            var v: Option<Heap<Expr>> = Option.None
+            var v: Option<Heap<ExprNode>> = Option.None
             match value {
                 Option.Some(e) => {
-                    v = Option.Some(Heap(renameExpr(*e, from, to)))
+                    v = Option.Some((renameExpr(*e, from, to)))
                 }
                 Option.None => {
                 }
@@ -883,20 +932,20 @@ pub fn renameStmt(s: &Stmt, from: &string, to: &string): Stmt {
             return Stmt.Return(v, cloneSpan(span))
         }
         Stmt.IfStmt(cond, thenBody, elseBody, span) => {
-            return Stmt.IfStmt(Heap(renameExpr(*cond, from, to)), renameStmts(thenBody, from, to), renameOptStmts(elseBody, from, to), cloneSpan(span))
+            return Stmt.IfStmt((renameExpr(*cond, from, to)), renameStmts(thenBody, from, to), renameOptStmts(elseBody, from, to), cloneSpan(span))
         }
         Stmt.WhileStmt(cond, body, span) => {
-            return Stmt.WhileStmt(Heap(renameExpr(*cond, from, to)), renameStmts(body, from, to), cloneSpan(span))
+            return Stmt.WhileStmt((renameExpr(*cond, from, to)), renameStmts(body, from, to), cloneSpan(span))
         }
         Stmt.ExprStmt(expr, span) => {
-            return Stmt.ExprStmt(Heap(renameExpr(*expr, from, to)), cloneSpan(span))
+            return Stmt.ExprStmt((renameExpr(*expr, from, to)), cloneSpan(span))
         }
         Stmt.MatchStmt(subject, arms, span) => {
             var armsOut: Vec<MatchArm> = Vec.new()
             for i in 0..arms.len {
                 armsOut.push(renameMatchArm(arms[i], from, to))
             }
-            return Stmt.MatchStmt(Heap(renameExpr(*subject, from, to)), armsOut, cloneSpan(span))
+            return Stmt.MatchStmt((renameExpr(*subject, from, to)), armsOut, cloneSpan(span))
         }
         Stmt.BreakStmt(span) => {
             return Stmt.BreakStmt(cloneSpan(span))
@@ -905,13 +954,13 @@ pub fn renameStmt(s: &Stmt, from: &string, to: &string): Stmt {
             return Stmt.ContinueStmt(cloneSpan(span))
         }
         Stmt.IfLetStmt(pattern, subject, thenBody, elseBody, span) => {
-            return Stmt.IfLetStmt(Heap((*pattern).clone()), Heap(renameExpr(*subject, from, to)), renameStmts(thenBody, from, to), renameOptStmts(elseBody, from, to), cloneSpan(span))
+            return Stmt.IfLetStmt(Heap((*pattern).clone()), (renameExpr(*subject, from, to)), renameStmts(thenBody, from, to), renameOptStmts(elseBody, from, to), cloneSpan(span))
         }
         Stmt.UnsafeBlock(body, span) => {
             return Stmt.UnsafeBlock(renameStmts(body, from, to), cloneSpan(span))
         }
         Stmt.ForInStmt(varName, idxName, iterable, body, span) => {
-            return Stmt.ForInStmt(varName.clone(), cloneOptString(idxName), Heap(renameExpr(*iterable, from, to)), renameStmts(body, from, to), cloneSpan(span))
+            return Stmt.ForInStmt(varName.clone(), cloneOptString(idxName), (renameExpr(*iterable, from, to)), renameStmts(body, from, to), cloneSpan(span))
         }
     }
 }
@@ -960,7 +1009,7 @@ pub fn renameGlobal(g: &GlobalDecl, from: &string, to: &string): GlobalDecl {
     return GlobalDecl {
         name: g.name.clone(),
         ty: ty,
-        value: Heap(renameExpr(*g.value, from, to)),
+        value: (renameExpr(*g.value, from, to)),
         mutable: g.mutable,
         span: cloneSpan(g.span),
     }

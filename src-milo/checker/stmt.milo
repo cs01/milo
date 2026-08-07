@@ -97,7 +97,7 @@ pub fn checkStmt(ck: &mut Checker, stmt: &Stmt, fnRetType: &TypeKind) {
 
 // -- Let/Var declarations --
 
-pub fn checkLetDecl(ck: &mut Checker, name: &string, typeAnno: &Option<MiloType>, value: &Expr, mutable: bool, span: &Option<Span>) {
+pub fn checkLetDecl(ck: &mut Checker, name: &string, typeAnno: &Option<MiloType>, value: &ExprNode, mutable: bool, span: &Option<Span>) {
     // Resolve the annotation first and expose it as the expected type, so a
     // generic call whose type params aren't determined by args can infer from it
     // (`let a: Arena<X> = arenaNew()`).
@@ -168,7 +168,7 @@ pub fn checkLetDecl(ck: &mut Checker, name: &string, typeAnno: &Option<MiloType>
 
 // -- Assignment --
 
-pub fn checkAssign(ck: &mut Checker, target: &Expr, value: &Expr, span: &Option<Span>) {
+pub fn checkAssign(ck: &mut Checker, target: &ExprNode, value: &ExprNode, span: &Option<Span>) {
     if !isRootMutable(ck, target) {
         error(ck, "cannot assign to immutable variable", cloneSpan(span))
         return
@@ -188,8 +188,8 @@ pub fn checkAssign(ck: &mut Checker, target: &Expr, value: &Expr, span: &Option<
     // deref alone would report "cannot assign &string to string" on `v = s[6..11]`.
     var targetType = tyUnknown()
     var targetDeclType = tyUnknown()
-    match target {
-        Expr.Ident(name, tspan) => {
+    match target.kind {
+        Expr.Ident(name) => {
             match lookup(ck, name) {
                 Option.Some(v) => {
                     targetType = deref(v.ty)
@@ -232,8 +232,8 @@ pub fn checkAssign(ck: &mut Checker, target: &Expr, value: &Expr, span: &Option<
     // Re-assigning un-moves the variable — or, for a field target, un-moves just
     // that place and anything nested under it (a different field was never
     // touched by this write).
-    match target {
-        Expr.Ident(name, tspan) => {
+    match target.kind {
+        Expr.Ident(name) => {
             setVarMoved(ck, name, false)
         }
         _ => {
@@ -251,7 +251,7 @@ pub fn checkAssign(ck: &mut Checker, target: &Expr, value: &Expr, span: &Option<
 
 // -- Return --
 
-pub fn checkReturn(ck: &mut Checker, value: &Option<Heap<Expr>>, fnRetType: &TypeKind, span: &Option<Span>) {
+pub fn checkReturn(ck: &mut Checker, value: &Option<Heap<ExprNode>>, fnRetType: &TypeKind, span: &Option<Span>) {
     match value {
         Option.Some(expr) => {
             ck.inReturn = true
@@ -305,7 +305,7 @@ pub fn checkReturn(ck: &mut Checker, value: &Option<Heap<Expr>>, fnRetType: &Typ
 
 // -- If statement --
 
-pub fn checkIf(ck: &mut Checker, cond: &Expr, thenBody: &Vec<Heap<Stmt>>, elseBody: &Option<Vec<Heap<Stmt>>>, fnRetType: &TypeKind, span: &Option<Span>) {
+pub fn checkIf(ck: &mut Checker, cond: &ExprNode, thenBody: &Vec<Heap<Stmt>>, elseBody: &Option<Vec<Heap<Stmt>>>, fnRetType: &TypeKind, span: &Option<Span>) {
     // A borrow taken to compute the condition (`s.slice(0,1).len > 0`) is
     // consumed evaluating the bool — no binding outlives it — so it must not
     // leak into the branches, let alone past this whole statement.
@@ -357,7 +357,7 @@ pub fn checkIf(ck: &mut Checker, cond: &Expr, thenBody: &Vec<Heap<Stmt>>, elseBo
 
 // -- While statement --
 
-pub fn checkWhile(ck: &mut Checker, cond: &Expr, body: &Vec<Heap<Stmt>>, fnRetType: &TypeKind, span: &Option<Span>) {
+pub fn checkWhile(ck: &mut Checker, cond: &ExprNode, body: &Vec<Heap<Stmt>>, fnRetType: &TypeKind, span: &Option<Span>) {
     // Same reasoning as checkIf's condition: a borrow taken to compute a
     // `while` condition is re-evaluated fresh each iteration at runtime, so
     // nothing should carry it forward past this one static check either.
@@ -379,7 +379,7 @@ pub fn checkWhile(ck: &mut Checker, cond: &Expr, body: &Vec<Heap<Stmt>>, fnRetTy
 
 // -- Match statement --
 
-pub fn checkMatch(ck: &mut Checker, subject: &Expr, arms: &Vec<MatchArm>, fnRetType: &TypeKind) {
+pub fn checkMatch(ck: &mut Checker, subject: &ExprNode, arms: &Vec<MatchArm>, fnRetType: &TypeKind) {
     // Same reasoning as checkIf's condition — a borrow taken to compute the
     // subject must not leak past this statement.
     let frozenBeforeSubj = snapshotFrozenNames(ck)
@@ -564,7 +564,7 @@ pub fn checkMatchArmValue(ck: &mut Checker, arm: &MatchArm, subjType: &TypeKind,
 // snapshot/join (an arm that diverges must not poison post-match moves), but
 // additionally unifies each producing arm's value type — same rule as
 // if-expression branches, with the same const-int coercion.
-pub fn checkMatchExpr(ck: &mut Checker, subject: &Expr, arms: &Vec<MatchArm>, fnRetType: &TypeKind, span: &Option<Span>): TypeKind {
+pub fn checkMatchExpr(ck: &mut Checker, subject: &ExprNode, arms: &Vec<MatchArm>, fnRetType: &TypeKind, span: &Option<Span>): TypeKind {
     let subjType = checkExpr(ck, subject)
 
     let preSnap = snapshotMoves(ck)
@@ -601,7 +601,7 @@ pub fn checkMatchExpr(ck: &mut Checker, subject: &Expr, arms: &Vec<MatchArm>, fn
 
 // -- If-let statement --
 
-pub fn checkIfLet(ck: &mut Checker, pattern: &Pattern, expr: &Expr, thenBody: &Vec<Heap<Stmt>>, elseBody: &Option<Vec<Heap<Stmt>>>, fnRetType: &TypeKind) {
+pub fn checkIfLet(ck: &mut Checker, pattern: &Pattern, expr: &ExprNode, thenBody: &Vec<Heap<Stmt>>, elseBody: &Option<Vec<Heap<Stmt>>>, fnRetType: &TypeKind) {
     // Same reasoning as checkIf's condition — a borrow taken to compute the
     // scrutinee must not leak past this statement.
     let frozenBeforeScrutinee = snapshotFrozenNames(ck)
@@ -687,13 +687,13 @@ fn peekDeref(t: TypeKind): TypeKind {
 // `text.splitView(sep)`) before EXPR is checked as an ordinary call, which would
 // report the wrong error. Deliberately partial: a None answer means "ask the real
 // checker", never "not a string".
-pub fn peekPathType(ck: &Checker, e: &Expr): Option<TypeKind> {
-    match e {
+pub fn peekPathType(ck: &Checker, e: &ExprNode): Option<TypeKind> {
+    match e.kind {
         // a literal's bytes are a module constant, so views into it outlive any loop
-        Expr.StringLit(v, s) => {
+        Expr.StringLit(v) => {
             return Option.Some(tyString())
         }
-        Expr.Ident(name, s) => {
+        Expr.Ident(name) => {
             match lookup(ck, name) {
                 Option.Some(info) => {
                     return Option.Some(info.ty)
@@ -703,7 +703,7 @@ pub fn peekPathType(ck: &Checker, e: &Expr): Option<TypeKind> {
                 }
             }
         }
-        Expr.FieldAccess(obj, field, s) => {
+        Expr.FieldAccess(obj, field) => {
             match peekPathType(ck, *obj) {
                 Option.Some(baseTy) => {
                     match peekDeref(baseTy) {
@@ -730,7 +730,7 @@ pub fn peekPathType(ck: &Checker, e: &Expr): Option<TypeKind> {
         }
         // `rows[i].lines()` — an element read, so the freeze on the root container
         // still covers the storage the pieces point into
-        Expr.IndexAccess(obj, idx, s) => {
+        Expr.IndexAccess(obj, idx) => {
             match peekPathType(ck, *obj) {
                 Option.Some(baseTy) => {
                     match peekDeref(baseTy) {
@@ -763,7 +763,7 @@ pub fn peekPathType(ck: &Checker, e: &Expr): Option<TypeKind> {
 // `&string` view into the receiver's own buffer — loop-only, matching the
 // second-class reference rule: a view can't travel through the `next(): Option<T>`
 // iterator protocol, since a reference inside an enum payload is a rejected return.
-pub fn checkStringViewForIn(ck: &mut Checker, varName: &string, varName2: &Option<string>, recv: &Expr, mode: &string, args: &Vec<Heap<Expr>>, body: &Vec<Heap<Stmt>>, fnRetType: &TypeKind, span: &Option<Span>) {
+pub fn checkStringViewForIn(ck: &mut Checker, varName: &string, varName2: &Option<string>, recv: &ExprNode, mode: &string, args: &Vec<Heap<ExprNode>>, body: &Vec<Heap<Stmt>>, fnRetType: &TypeKind, span: &Option<Span>) {
     checkExpr(ck, recv)
     if mode == "splitView" {
         if args.len != 1 {
@@ -826,10 +826,10 @@ pub fn checkStringViewForIn(ck: &mut Checker, varName: &string, varName2: &Optio
     }
 }
 
-pub fn checkForIn(ck: &mut Checker, varName: &string, varName2: &Option<string>, iterable: &Expr, body: &Vec<Heap<Stmt>>, fnRetType: &TypeKind, span: &Option<Span>) {
+pub fn checkForIn(ck: &mut Checker, varName: &string, varName2: &Option<string>, iterable: &ExprNode, body: &Vec<Heap<Stmt>>, fnRetType: &TypeKind, span: &Option<Span>) {
     // Range expression handled specially
-    match iterable {
-        Expr.RangeExpr(start, end, rspan) => {
+    match iterable.kind {
+        Expr.RangeExpr(start, end) => {
             let startType = checkExpr(ck, *start)
             let endType = checkExpr(ck, *end)
             if !isInteger(startType) && !typeEq(startType, tyUnknown()) {
@@ -885,8 +885,8 @@ pub fn checkForIn(ck: &mut Checker, varName: &string, varName2: &Option<string>,
     // checkStringMethod and report "no method 'lines' on string" (lines/splitView are
     // for-loop-only forms, not real methods) — peekPathType answers side-effect-free,
     // without checking (and thereby misreporting on) the call itself.
-    match iterable {
-        Expr.MethodCall(mObj, mMethod, mArgs, mSpan) => {
+    match iterable.kind {
+        Expr.MethodCall(mObj, mMethod, mArgs) => {
             if mMethod == "lines" || mMethod == "splitView" {
                 var recvIsString = false
                 match peekPathType(ck, *mObj) {
@@ -1184,18 +1184,18 @@ fn errorIfNestedRefReturn(ck: &mut Checker, func: &Function, retType: &TypeKind)
 // and nothing else, so a view into a method-local or another param would
 // dangle the moment that storage goes away. AST-level walk (not through the
 // type-checked expression path): only needs the raw shape of each `return`.
-fn viewReturnRoot(e: &Expr): Option<string> {
-    match e {
-        Expr.Ident(name, sp) => {
+fn viewReturnRoot(e: &ExprNode): Option<string> {
+    match e.kind {
+        Expr.Ident(name) => {
             return Option.Some(name.clone())
         }
-        Expr.FieldAccess(obj, field, sp) => {
+        Expr.FieldAccess(obj, field) => {
             return viewReturnRoot(*obj)
         }
-        Expr.IndexAccess(obj, idx, sp) => {
+        Expr.IndexAccess(obj, idx) => {
             return viewReturnRoot(*obj)
         }
-        Expr.MethodCall(obj, method, args, sp) => {
+        Expr.MethodCall(obj, method, args) => {
             return viewReturnRoot(*obj)
         }
         _ => {
@@ -1208,15 +1208,15 @@ fn viewReturnRoot(e: &Expr): Option<string> {
 // `["a"]`, `self.data` -> `["data"]`, bare `self` -> `[]`). None when the
 // value isn't rooted at self at all — that's already an error, reported by
 // checkViewReturnStmt separately, so provenance recording just declines.
-fn viewFieldChain(e: &Expr): Option<Vec<string>> {
-    match e {
-        Expr.Ident(name, sp) => {
+fn viewFieldChain(e: &ExprNode): Option<Vec<string>> {
+    match e.kind {
+        Expr.Ident(name) => {
             if name == "self" {
                 return Option.Some(Vec.new())
             }
             return Option.None
         }
-        Expr.FieldAccess(obj, field, sp) => {
+        Expr.FieldAccess(obj, field) => {
             match viewFieldChain(*obj) {
                 Option.Some(fs) => {
                     var nf = fs.clone()
@@ -1228,10 +1228,10 @@ fn viewFieldChain(e: &Expr): Option<Vec<string>> {
                 }
             }
         }
-        Expr.IndexAccess(obj, idx, sp) => {
+        Expr.IndexAccess(obj, idx) => {
             return viewFieldChain(*obj)
         }
-        Expr.MethodCall(obj, method, args, sp) => {
+        Expr.MethodCall(obj, method, args) => {
             return viewFieldChain(*obj)
         }
         _ => {

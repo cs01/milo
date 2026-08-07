@@ -48,11 +48,11 @@ from "src-milo/checker/derive_json.milo" import {
 // The value expression of a block arm, cloned out. Callers that only need to
 // inspect the tail should match it in place — this exists for the few spots that
 // must pass it on as an owned Expr.
-pub fn blockTailExpr(body: &Vec<Heap<Stmt>>): Option<Expr> {
+pub fn blockTailExpr(body: &Vec<Heap<Stmt>>): Option<Heap<ExprNode>> {
     if body.len > 0 {
         match *body[body.len - 1] {
             Stmt.ExprStmt(e, espan) => {
-                return Option.Some((*e).clone())
+                return Option.Some(Heap(e.clone()))
             }
             _ => {
             }
@@ -118,12 +118,12 @@ pub fn errorIfMovingBlockTail(ck: &mut Checker, body: &Vec<Heap<Stmt>>, span: &O
     }
 }
 
-pub fn tryMove(ck: &mut Checker, expr: &Expr) {
+pub fn tryMove(ck: &mut Checker, expr: &ExprNode) {
     if ck.inReturn {
         return
     }
-    match expr {
-        Expr.Ident(name, span) => {
+    match expr.kind {
+        Expr.Ident(name) => {
             match lookup(ck, name) {
                 Option.Some(v) => {
                     // Moving in an owned position through a borrow (`&T`, T non-Copy)
@@ -132,7 +132,7 @@ pub fn tryMove(ck: &mut Checker, expr: &Expr) {
                     match v.ty.clone() {
                         TypeKind.TRef(inner, mutable) => {
                             if !isCopyCk(ck, *inner) {
-                                errorHint(ck, "cannot move the borrowed value out of '" + name.clone() + "'", "'" + name.clone() + "' is a reference — call .clone() to take an owned copy", cloneSpan(span))
+                                errorHint(ck, "cannot move the borrowed value out of '" + name.clone() + "'", "'" + name.clone() + "' is a reference — call .clone() to take an owned copy", cloneSpan(expr.span))
                                 return
                             }
                         }
@@ -147,7 +147,7 @@ pub fn tryMove(ck: &mut Checker, expr: &Expr) {
                     // field off as real data.
                     match firstMovedField(ck, name) {
                         Option.Some(partial) => {
-                            errorHint(ck, "cannot move '" + name.clone() + "' because '" + name.clone() + partial.clone() + "' was already moved out of it", "move the remaining fields individually, or clone '" + name.clone() + partial.clone() + "' at the point it was transferred so '" + name.clone() + "' stays whole", cloneSpan(span))
+                            errorHint(ck, "cannot move '" + name.clone() + "' because '" + name.clone() + partial.clone() + "' was already moved out of it", "move the remaining fields individually, or clone '" + name.clone() + partial.clone() + "' at the point it was transferred so '" + name.clone() + "' stays whole", cloneSpan(expr.span))
                             return
                         }
                         Option.None => {
@@ -159,14 +159,14 @@ pub fn tryMove(ck: &mut Checker, expr: &Expr) {
                 }
             }
         }
-        Expr.FieldAccess(obj, field, span) => {
-            tryMoveField(ck, expr, span)
+        Expr.FieldAccess(obj, field) => {
+            tryMoveField(ck, expr, expr.span)
         }
-        Expr.IfExpr(cond, thenBody, elseBody, span) => {
+        Expr.IfExpr(cond, thenBody, elseBody) => {
             tryMoveBlockTail(ck, thenBody)
             tryMoveBlockTail(ck, elseBody)
         }
-        Expr.MatchExpr(subject, arms, span) => {
+        Expr.MatchExpr(subject, arms) => {
             for i in 0..arms.len {
                 if arms[i].body.len > 0 {
                     match *arms[i].body[arms[i].body.len - 1] {
@@ -179,13 +179,13 @@ pub fn tryMove(ck: &mut Checker, expr: &Expr) {
                 }
             }
         }
-        Expr.Unwrap(operand, span) => {
+        Expr.Unwrap(operand) => {
             tryMove(ck, *operand)
         }
-        Expr.Propagate(operand, span) => {
+        Expr.Propagate(operand) => {
             tryMove(ck, *operand)
         }
-        Expr.DefaultValue(operand, default, span) => {
+        Expr.DefaultValue(operand, default) => {
             tryMove(ck, *operand)
             tryMove(ck, *default)
         }
@@ -268,7 +268,7 @@ fn resolveFieldChain(ck: &Checker, root: &string, fields: &Vec<string>): Option<
 // so the exemption stays keyed to sortByKey alone rather than to closures in
 // general (tests/fixtures/sortByKeyString.milo; mapMoveFieldOutOfBorrow is the
 // negative fixture proving `.map` does NOT get it).
-fn fieldMoveOutOfBorrow(ck: &mut Checker, e: &Expr, span: &Option<Span>): bool {
+fn fieldMoveOutOfBorrow(ck: &mut Checker, e: &ExprNode, span: &Option<Span>): bool {
     match staticFieldPlace(e) {
         Option.Some(p) => {
             match lookup(ck, p.root) {
@@ -318,7 +318,7 @@ fn fieldMoveOutOfBorrow(ck: &mut Checker, e: &Expr, span: &Option<Span>): bool {
 // destructor runs against the whole value); otherwise record which field left
 // so a later whole-value use, or a later move of the SAME field, is caught
 // (checkIdent / checkFieldMoveState below).
-fn tryMoveField(ck: &mut Checker, e: &Expr, span: &Option<Span>) {
+fn tryMoveField(ck: &mut Checker, e: &ExprNode, span: &Option<Span>) {
     if fieldMoveOutOfBorrow(ck, e, span) {
         return
     }
@@ -354,7 +354,7 @@ fn tryMoveField(ck: &mut Checker, e: &Expr, span: &Option<Span>) {
 // suppressed while checking an assignment's own target — the field about to
 // be overwritten doesn't care whether it was already moved, and checkAssign
 // clears the place right after (ck.inAssignTargetDepth).
-fn checkFieldMoveState(ck: &mut Checker, obj: &Expr, field: &string, span: &Option<Span>) {
+fn checkFieldMoveState(ck: &mut Checker, obj: &ExprNode, field: &string, span: &Option<Span>) {
     if ck.inAssignTargetDepth > 0 {
         return
     }
@@ -391,9 +391,9 @@ fn checkFieldMoveState(ck: &mut Checker, obj: &Expr, field: &string, span: &Opti
 // Separate from tryMove (which also marks the variable moved for later
 // use-after-move checks): checkReturn deliberately never calls tryMove — see
 // its own comment — so this only ever REPORTS, never mutates move state.
-pub fn errorIfMovingBorrowedNonCopy(ck: &mut Checker, expr: &Expr, span: &Option<Span>) {
-    match expr {
-        Expr.Ident(name, sp) => {
+pub fn errorIfMovingBorrowedNonCopy(ck: &mut Checker, expr: &ExprNode, span: &Option<Span>) {
+    match expr.kind {
+        Expr.Ident(name) => {
             match lookup(ck, name) {
                 Option.Some(v) => {
                     match v.ty.clone() {
@@ -410,14 +410,14 @@ pub fn errorIfMovingBorrowedNonCopy(ck: &mut Checker, expr: &Expr, span: &Option
                 }
             }
         }
-        Expr.FieldAccess(obj, field, sp) => {
+        Expr.FieldAccess(obj, field) => {
             let _ = fieldMoveOutOfBorrow(ck, expr, span)
         }
-        Expr.IfExpr(cond, thenBody, elseBody, sp) => {
+        Expr.IfExpr(cond, thenBody, elseBody) => {
             errorIfMovingBlockTail(ck, thenBody, span)
             errorIfMovingBlockTail(ck, elseBody, span)
         }
-        Expr.MatchExpr(subject, arms, sp) => {
+        Expr.MatchExpr(subject, arms) => {
             for i in 0..arms.len {
                 if arms[i].body.len > 0 {
                     match *arms[i].body[arms[i].body.len - 1] {
@@ -430,13 +430,13 @@ pub fn errorIfMovingBorrowedNonCopy(ck: &mut Checker, expr: &Expr, span: &Option
                 }
             }
         }
-        Expr.Unwrap(operand, sp) => {
+        Expr.Unwrap(operand) => {
             errorIfMovingBorrowedNonCopy(ck, *operand, span)
         }
-        Expr.Propagate(operand, sp) => {
+        Expr.Propagate(operand) => {
             errorIfMovingBorrowedNonCopy(ck, *operand, span)
         }
-        Expr.DefaultValue(operand, default, sp) => {
+        Expr.DefaultValue(operand, default) => {
             errorIfMovingBorrowedNonCopy(ck, *operand, span)
             errorIfMovingBorrowedNonCopy(ck, *default, span)
         }
@@ -445,9 +445,9 @@ pub fn errorIfMovingBorrowedNonCopy(ck: &mut Checker, expr: &Expr, span: &Option
     }
 }
 
-pub fn isRootMutable(ck: &Checker, expr: &Expr): bool {
-    match expr {
-        Expr.Ident(name, span) => {
+pub fn isRootMutable(ck: &Checker, expr: &ExprNode): bool {
+    match expr.kind {
+        Expr.Ident(name) => {
             let info = lookup(ck, name)
             match info {
                 Option.Some(v) => {
@@ -458,11 +458,11 @@ pub fn isRootMutable(ck: &Checker, expr: &Expr): bool {
                 }
             }
         }
-        Expr.FieldAccess(obj, field, span) => {
+        Expr.FieldAccess(obj, field) => {
             // `p.x = …` where p is a raw pointer is an unsafe-gated store THROUGH the
             // pointer, not mutation of `p` — a `let p = buf as *Point` is a legal target
-            match *obj {
-                Expr.Ident(pname, pspan) => {
+            match (*obj).kind {
+                Expr.Ident(pname) => {
                     match lookup(ck, pname) {
                         Option.Some(v) => {
                             match deref(v.ty) {
@@ -482,12 +482,12 @@ pub fn isRootMutable(ck: &Checker, expr: &Expr): bool {
             }
             return isRootMutable(ck, *obj)
         }
-        Expr.IndexAccess(obj, idx, span) => {
+        Expr.IndexAccess(obj, idx) => {
             // writes through a raw-pointer index are unsafe-gated pointer
             // stores, not variable mutation — a `let p = buf as *i64` is a
             // legal write target
-            match *obj {
-                Expr.Ident(pname, pspan) => {
+            match (*obj).kind {
+                Expr.Ident(pname) => {
                     match lookup(ck, pname) {
                         Option.Some(v) => {
                             match deref(v.ty) {
@@ -509,7 +509,7 @@ pub fn isRootMutable(ck: &Checker, expr: &Expr): bool {
         }
         // writes through a deref target (*p).f / *p — raw pointers are gated
         // by unsafe, heap boxes own their pointee
-        Expr.UnaryOp(op, operand, span) => {
+        Expr.UnaryOp(op, operand) => {
             if op == "*" {
                 return true
             }
@@ -521,7 +521,7 @@ pub fn isRootMutable(ck: &Checker, expr: &Expr): bool {
         // mirrors). Without this case, `STORE.inner.n = x` and `STORE.items.push(x)`
         // fell through to the `_` arm below and reported every module-level
         // struct/Vec global as immutable, however it was declared.
-        Expr.EnumLit(enumName, variant, args, espan) => {
+        Expr.EnumLit(enumName, variant, args) => {
             if !ck.enums.contains(enumName) {
                 match lookup(ck, enumName) {
                     Option.Some(v) => {
@@ -557,98 +557,98 @@ pub fn deref(t: &TypeKind): TypeKind {
 
 // -- Main expression checker --
 
-pub fn checkExpr(ck: &mut Checker, expr: &Expr): TypeKind {
-    match expr {
-        Expr.IntLit(val, span) => {
+pub fn checkExpr(ck: &mut Checker, expr: &ExprNode): TypeKind {
+    match expr.kind {
+        Expr.IntLit(val) => {
             return tyI64()
         }
-        Expr.FloatLit(val, span) => {
+        Expr.FloatLit(val) => {
             return TypeKind.TFloat(64)
         }
-        Expr.BoolLit(val, span) => {
+        Expr.BoolLit(val) => {
             return tyBool()
         }
-        Expr.CharLit(val, span) => {
+        Expr.CharLit(val) => {
             return tyU8()
         }
-        Expr.StringLit(val, span) => {
+        Expr.StringLit(val) => {
             return tyString()
         }
-        Expr.Ident(name, span) => {
-            return checkIdent(ck, name, span)
+        Expr.Ident(name) => {
+            return checkIdent(ck, name, expr.span)
         }
-        Expr.BinOp(op, left, right, span) => {
-            return checkBinOp(ck, op, *left, *right, span)
+        Expr.BinOp(op, left, right) => {
+            return checkBinOp(ck, op, *left, *right, expr.span)
         }
-        Expr.UnaryOp(op, operand, span) => {
-            return checkUnaryOp(ck, op, *operand, span)
+        Expr.UnaryOp(op, operand) => {
+            return checkUnaryOp(ck, op, *operand, expr.span)
         }
-        Expr.Call(func, args, typeArgs, span) => {
-            return checkCall(ck, func, args, typeArgs, span)
+        Expr.Call(func, args, typeArgs) => {
+            return checkCall(ck, func, args, typeArgs, expr.span)
         }
-        Expr.StructLit(name, fields, span) => {
-            return checkStructLit(ck, name, fields, span)
+        Expr.StructLit(name, fields) => {
+            return checkStructLit(ck, name, fields, expr.span)
         }
-        Expr.JsonObject(fields, span) => {
+        Expr.JsonObject(fields) => {
             // a JSON object literal type-checks its field values and is a string
             for i in 0..fields.len {
                 let ft = checkExpr(ck, *fields[i].value)
                 if !isNumeric(ft) && !typeEq(ft, tyString()) && !typeEq(ft, tyBool()) && !typeEq(ft, tyUnknown()) {
-                    error(ck, "JSON object field '" + fields[i].name.clone() + "' must be string/number/bool", cloneSpan(span))
+                    error(ck, "JSON object field '" + fields[i].name.clone() + "' must be string/number/bool", cloneSpan(expr.span))
                 }
             }
             return tyString()
         }
-        Expr.FieldAccess(obj, field, span) => {
-            return checkFieldAccess(ck, *obj, field, span)
+        Expr.FieldAccess(obj, field) => {
+            return checkFieldAccess(ck, *obj, field, expr.span)
         }
-        Expr.ArrayLit(elements, span) => {
-            return checkArrayLit(ck, elements, span)
+        Expr.ArrayLit(elements) => {
+            return checkArrayLit(ck, elements, expr.span)
         }
-        Expr.ArrayRepeat(value, count, span) => {
+        Expr.ArrayRepeat(value, count) => {
             let elemType = checkExpr(ck, *value)
             return TypeKind.TArray(Heap(elemType), Option.Some(count))
         }
-        Expr.IndexAccess(obj, index, span) => {
-            return checkIndexAccess(ck, *obj, *index, span)
+        Expr.IndexAccess(obj, index) => {
+            return checkIndexAccess(ck, *obj, *index, expr.span)
         }
-        Expr.EnumLit(enumName, variant, args, span) => {
-            return checkEnumLit(ck, enumName, variant, args, span)
+        Expr.EnumLit(enumName, variant, args) => {
+            return checkEnumLit(ck, enumName, variant, args, expr.span)
         }
-        Expr.Unwrap(operand, span) => {
-            return checkUnwrap(ck, *operand, span)
+        Expr.Unwrap(operand) => {
+            return checkUnwrap(ck, *operand, expr.span)
         }
-        Expr.Propagate(operand, span) => {
-            return checkPropagate(ck, *operand, span)
+        Expr.Propagate(operand) => {
+            return checkPropagate(ck, *operand, expr.span)
         }
-        Expr.DefaultValue(operand, default, span) => {
-            return checkDefaultValue(ck, *operand, *default, span)
+        Expr.DefaultValue(operand, default) => {
+            return checkDefaultValue(ck, *operand, *default, expr.span)
         }
-        Expr.CastExpr(operand, targetType, span) => {
-            return checkCast(ck, *operand, targetType, span)
+        Expr.CastExpr(operand, targetType) => {
+            return checkCast(ck, *operand, targetType, expr.span)
         }
-        Expr.MethodCall(obj, method, args, span) => {
-            return checkMethodCall(ck, *obj, method, args, span)
+        Expr.MethodCall(obj, method, args) => {
+            return checkMethodCall(ck, *obj, method, args, expr.span)
         }
-        Expr.Closure(params, retType, body, isMove, span) => {
+        Expr.Closure(params, retType, body, isMove) => {
             return checkClosure(ck, params, retType, body)
         }
-        Expr.RangeExpr(start, end, span) => {
+        Expr.RangeExpr(start, end) => {
             let startType = checkExpr(ck, *start)
             let endType = checkExpr(ck, *end)
             if !isInteger(startType) {
-                error(ck, "range bounds must be integer", cloneSpan(span))
+                error(ck, "range bounds must be integer", cloneSpan(expr.span))
             }
             return tyVoid()
         }
-        Expr.IsExpr(operand, pattern, span) => {
+        Expr.IsExpr(operand, pattern) => {
             checkExpr(ck, *operand)
             return tyBool()
         }
-        Expr.IfExpr(cond, thenBody, elseBody, span) => {
+        Expr.IfExpr(cond, thenBody, elseBody) => {
             let condType = checkExpr(ck, *cond)
             if !typeEq(condType, tyBool()) && !typeEq(condType, tyUnknown()) {
-                error(ck, "if-expression condition must be bool, got " + typeName(condType), cloneSpan(span))
+                error(ck, "if-expression condition must be bool, got " + typeName(condType), cloneSpan(expr.span))
             }
             // Branches are checked in isolation from the pre-state (a move inside
             // one arm must not poison the other arm's read of the same name —
@@ -658,10 +658,10 @@ pub fn checkExpr(ck: &mut Checker, expr: &Expr): TypeKind {
             // fork-as-value.
             let fnRetType = ck.currentFnRetType.clone()
             let preSnap = snapshotMoves(ck)
-            let thenType = checkIfArmValue(ck, thenBody, fnRetType, span)
+            let thenType = checkIfArmValue(ck, thenBody, fnRetType, expr.span)
             let afterThen = snapshotMoves(ck)
             restoreMoves(ck, preSnap)
-            let elseType = checkIfArmValue(ck, elseBody, fnRetType, span)
+            let elseType = checkIfArmValue(ck, elseBody, fnRetType, expr.span)
             let afterElse = snapshotMoves(ck)
             restoreMoves(ck, preSnap)
             orMoves(ck, afterThen)
@@ -678,7 +678,7 @@ pub fn checkExpr(ck: &mut Checker, expr: &Expr): TypeKind {
                 // The clone is why this is guarded: only the mismatch path pays it.
                 match blockTailExpr(elseBody) {
                     Option.Some(tail) => {
-                        if intCoercible(thenType, elseType, tail) {
+                        if intCoercible(thenType, elseType, *tail) {
                             disagree = false
                         }
                     }
@@ -687,7 +687,7 @@ pub fn checkExpr(ck: &mut Checker, expr: &Expr): TypeKind {
                 }
             }
             if disagree {
-                error(ck, "if-expression branches disagree: " + typeName(thenType) + " vs " + typeName(elseType), cloneSpan(span))
+                error(ck, "if-expression branches disagree: " + typeName(thenType) + " vs " + typeName(elseType), cloneSpan(expr.span))
             }
             // A diverging arm types as unknown and lets the other arm decide.
             if containsUnknown(thenType) {
@@ -695,9 +695,9 @@ pub fn checkExpr(ck: &mut Checker, expr: &Expr): TypeKind {
             }
             return thenType
         }
-        Expr.MatchExpr(subject, arms, span) => {
+        Expr.MatchExpr(subject, arms) => {
             let fnRetType = ck.currentFnRetType.clone()
-            return checkMatchExpr(ck, *subject, arms, fnRetType, span)
+            return checkMatchExpr(ck, *subject, arms, fnRetType, expr.span)
         }
     }
 }
@@ -750,15 +750,15 @@ pub fn checkIdent(ck: &mut Checker, name: &string, span: &Option<Span>): TypeKin
 // The literal value of `e`, when it is one. Deliberately narrower than
 // isConstIntExpr: a range violation is reported with the offending NUMBER, so
 // only forms whose value is knowable without folding qualify.
-pub fn constIntValue(e: &Expr): Option<i64> {
-    match e {
-        Expr.IntLit(v, span) => {
+pub fn constIntValue(e: &ExprNode): Option<i64> {
+    match e.kind {
+        Expr.IntLit(v) => {
             return Option.Some(v)
         }
-        Expr.UnaryOp(op, operand, span) => {
+        Expr.UnaryOp(op, operand) => {
             if op == "-" {
-                match *operand {
-                    Expr.IntLit(v, ispan) => {
+                match (*operand).kind {
+                    Expr.IntLit(v) => {
                         return Option.Some(0 - v)
                     }
                     _ => {
@@ -779,7 +779,7 @@ pub fn constIntValue(e: &Expr): Option<i64> {
 // the runtime check. Without this the bound would only ever constrain the
 // declaration it was written on, and `f(500)` into an `i32(0..100)` parameter
 // would pass silently.
-pub fn enforceRangeInto(ck: &mut Checker, value: &Expr, target: &TypeKind, span: &Option<Span>) {
+pub fn enforceRangeInto(ck: &mut Checker, value: &ExprNode, target: &TypeKind, span: &Option<Span>) {
     match intRangeOf(target) {
         Option.Some(r) => {
             match constIntValue(value) {
@@ -926,14 +926,14 @@ fn isConstIntBlock(body: &Vec<Heap<Stmt>>): bool {
     }
 }
 
-pub fn isConstIntExpr(e: &Expr): bool {
-    match e {
-        Expr.IntLit(v, span) => {
+pub fn isConstIntExpr(e: &ExprNode): bool {
+    match e.kind {
+        Expr.IntLit(v) => {
             return true
         }
         // A char literal has no intrinsic width either — `'A' as u8` and a bare
         // 65 should coerce the same way.
-        Expr.CharLit(v, span) => {
+        Expr.CharLit(v) => {
             return true
         }
         // ANY operator over constant ints, not just the arithmetic five. Listing
@@ -943,10 +943,10 @@ pub fn isConstIntExpr(e: &Expr): bool {
         // u32 and every framebuffer-packing example failed to compile. Widening a
         // comparison in by accident is harmless: `1 < 2` types as bool, and every
         // caller (intCoercible) requires the source type to be an integer first.
-        Expr.UnaryOp(op, operand, span) => {
+        Expr.UnaryOp(op, operand) => {
             return isConstIntExpr(*operand)
         }
-        Expr.BinOp(op, l, r, span) => {
+        Expr.BinOp(op, l, r) => {
             return isConstIntExpr(*l) && isConstIntExpr(*r)
         }
         // `if c { 16 } else { 8 }` has no intrinsic width either, same as a bare
@@ -955,7 +955,7 @@ pub fn isConstIntExpr(e: &Expr): bool {
         // (codegen already threads the outer hint into both arms unconditionally;
         // only the checker was refusing to call this const). Recurses through an
         // `else if` chain since its else-arm is itself an Expr.IfExpr.
-        Expr.IfExpr(cond, thenBody, elseBody, span) => {
+        Expr.IfExpr(cond, thenBody, elseBody) => {
             return isConstIntBlock(thenBody) && isConstIntBlock(elseBody)
         }
         _ => {
@@ -969,18 +969,18 @@ pub fn isConstIntExpr(e: &Expr): bool {
 // context type — same generalization intCoercible gets from isConstIntExpr,
 // needed so a PARENTHESIZED literal subexpression (`(1.0 + 3.0) * w`) retypes
 // as a whole, not just a lone `FloatLit` leaf.
-pub fn isConstFloatExpr(e: &Expr): bool {
-    match e {
-        Expr.FloatLit(v, span) => {
+pub fn isConstFloatExpr(e: &ExprNode): bool {
+    match e.kind {
+        Expr.FloatLit(v) => {
             return true
         }
-        Expr.UnaryOp(op, operand, span) => {
+        Expr.UnaryOp(op, operand) => {
             if op == "-" {
                 return isConstFloatExpr(*operand)
             }
             return false
         }
-        Expr.BinOp(op, l, r, span) => {
+        Expr.BinOp(op, l, r) => {
             if op == "+" || op == "-" || op == "*" || op == "/" || op == "%" {
                 return isConstFloatExpr(*l) && isConstFloatExpr(*r)
             }
@@ -995,7 +995,7 @@ pub fn isConstFloatExpr(e: &Expr): bool {
 // A bare float literal (or const-float subtree) defaults to f64 but coerces
 // into an f32 (or any float) target the same way an int literal coerces
 // between integer widths.
-pub fn floatLitCoercible(to: &TypeKind, src: &TypeKind, srcExpr: &Expr): bool {
+pub fn floatLitCoercible(to: &TypeKind, src: &TypeKind, srcExpr: &ExprNode): bool {
     if !isFloat(to) {
         return false
     }
@@ -1007,7 +1007,7 @@ pub fn floatLitCoercible(to: &TypeKind, src: &TypeKind, srcExpr: &Expr): bool {
 
 // Whether a value of type `src`, produced by `srcExpr`, may be used where `to`
 // is expected: only when both are integers and `srcExpr` is a const int.
-pub fn intCoercible(to: &TypeKind, src: &TypeKind, srcExpr: &Expr): bool {
+pub fn intCoercible(to: &TypeKind, src: &TypeKind, srcExpr: &ExprNode): bool {
     if !isInteger(to) {
         return false
     }
@@ -1186,7 +1186,7 @@ pub fn structHasMethod(ck: &Checker, sname: &string, method: &string): bool {
     return false
 }
 
-pub fn checkBinOp(ck: &mut Checker, op: &string, left: &Expr, right: &Expr, span: &Option<Span>): TypeKind {
+pub fn checkBinOp(ck: &mut Checker, op: &string, left: &ExprNode, right: &ExprNode, span: &Option<Span>): TypeKind {
     // Logical operators
     if op == "&&" || op == "||" {
         let lt = checkExpr(ck, left)
@@ -1295,7 +1295,7 @@ pub fn checkBinOp(ck: &mut Checker, op: &string, left: &Expr, right: &Expr, span
 
 // -- Unary operators --
 
-pub fn checkUnaryOp(ck: &mut Checker, op: &string, operand: &Expr, span: &Option<Span>): TypeKind {
+pub fn checkUnaryOp(ck: &mut Checker, op: &string, operand: &ExprNode, span: &Option<Span>): TypeKind {
     let ot = checkExpr(ck, operand)
 
     if op == "*" {
@@ -1365,7 +1365,7 @@ pub fn isLocalCallableFn(ck: &Checker, name: &string): bool {
     }
 }
 
-pub fn checkCall(ck: &mut Checker, func: &string, args: &Vec<Heap<Expr>>, typeArgs: &Vec<MiloType>, span: &Option<Span>): TypeKind {
+pub fn checkCall(ck: &mut Checker, func: &string, args: &Vec<Heap<ExprNode>>, typeArgs: &Vec<MiloType>, span: &Option<Span>): TypeKind {
     // Static method on an instantiated generic type: Type<Args>.method(...)
     var dotIdx: i64 = -1
     for di in 0..func.len {
@@ -1469,8 +1469,8 @@ pub fn checkCall(ck: &mut Checker, func: &string, args: &Vec<Heap<Expr>>, typeAr
             error(ck, "embedFile() expects 1 argument, got " + args.len.toString(), cloneSpan(span))
         }
         if args.len >= 1 {
-            match *args[0] {
-                Expr.StringLit(s, sp) => {
+            match (*args[0]).kind {
+                Expr.StringLit(s) => {
                 }
                 _ => {
                     error(ck, "embedFile() argument must be a string literal", cloneSpan(span))
@@ -2107,9 +2107,9 @@ pub fn checkStructLit(ck: &mut Checker, name: &string, fields: &Vec<StructLitFie
 // TYPE name, not a variable — so they have to be recognized before the object is checked,
 // or `f64` resolves as an undefined variable. Mirrors `floatNamespaceConst` in the oracle's
 // ast.ts; the two must agree on the exact IEEE value.
-pub fn floatNamespaceBits(obj: &Expr, field: &string): i32 {
-    match obj {
-        Expr.Ident(name, _sp) => {
+pub fn floatNamespaceBits(obj: &ExprNode, field: &string): i32 {
+    match obj.kind {
+        Expr.Ident(name) => {
             if field != "NAN" && field != "INF" && field != "NEG_INF" {
                 return 0
             }
@@ -2127,7 +2127,7 @@ pub fn floatNamespaceBits(obj: &Expr, field: &string): i32 {
     }
 }
 
-pub fn checkFieldAccess(ck: &mut Checker, obj: &Expr, field: &string, span: &Option<Span>): TypeKind {
+pub fn checkFieldAccess(ck: &mut Checker, obj: &ExprNode, field: &string, span: &Option<Span>): TypeKind {
     let fbits = floatNamespaceBits(obj, field)
     if fbits > 0 {
         return TypeKind.TFloat(fbits)
@@ -2222,7 +2222,7 @@ pub fn checkFieldAccess(ck: &mut Checker, obj: &Expr, field: &string, span: &Opt
 
 // -- Array literals --
 
-pub fn checkArrayLit(ck: &mut Checker, elements: &Vec<Heap<Expr>>, span: &Option<Span>): TypeKind {
+pub fn checkArrayLit(ck: &mut Checker, elements: &Vec<Heap<ExprNode>>, span: &Option<Span>): TypeKind {
     // A Vec<T>-typed hint (let/var annotation, struct field, call/push arg,
     // assignment RHS, return) turns `[a, b, c]` into a Vec literal instead of a
     // fixed [T; N] — mirrors the TS oracle's checkExprWithHint ArrayLit branch.
@@ -2300,7 +2300,7 @@ pub fn checkArrayLit(ck: &mut Checker, elements: &Vec<Heap<Expr>>, span: &Option
 
 // -- Index access --
 
-pub fn checkIndexAccess(ck: &mut Checker, obj: &Expr, index: &Expr, span: &Option<Span>): TypeKind {
+pub fn checkIndexAccess(ck: &mut Checker, obj: &ExprNode, index: &ExprNode, span: &Option<Span>): TypeKind {
     ck.placeBaseDepth = ck.placeBaseDepth + 1
     var objType = checkExpr(ck, obj)
     ck.placeBaseDepth = ck.placeBaseDepth - 1
@@ -2341,7 +2341,7 @@ pub fn checkIndexAccess(ck: &mut Checker, obj: &Expr, index: &Expr, span: &Optio
 
 // -- Enum literals --
 
-pub fn checkEnumLit(ck: &mut Checker, enumName: &string, variant: &string, args: &Vec<Heap<Expr>>, span: &Option<Span>): TypeKind {
+pub fn checkEnumLit(ck: &mut Checker, enumName: &string, variant: &string, args: &Vec<Heap<ExprNode>>, span: &Option<Span>): TypeKind {
     // Vec.new() / HashMap.new() without type annotation
     // `Vec.new()` / `HashMap.new()` carry no element type. checkLetDecl overwrites
     // an unknown value type with the declared annotation, so return unknown quietly
@@ -2469,7 +2469,7 @@ pub fn checkEnumLit(ck: &mut Checker, enumName: &string, variant: &string, args:
         match lookup(ck, enumName) {
             Option.Some(v) => {
                 let objTy = deref(v.ty.clone())
-                let objExpr = Expr.Ident(enumName.clone(), cloneSpan(span))
+                let objExpr = mkExpr(Expr.Ident(enumName.clone()), cloneSpan(span))
                 var isField = false
                 match objTy.clone() {
                     TypeKind.TStruct(sname) => {
@@ -2486,9 +2486,9 @@ pub fn checkEnumLit(ck: &mut Checker, enumName: &string, variant: &string, args:
                     }
                 }
                 if isField && args.len == 0 {
-                    return checkFieldAccess(ck, objExpr, variant, span)
+                    return checkFieldAccess(ck, *objExpr, variant, span)
                 }
-                return checkMethodCall(ck, objExpr, variant, args, span)
+                return checkMethodCall(ck, *objExpr, variant, args, span)
             }
             Option.None => {
             }
@@ -2696,7 +2696,7 @@ pub fn inferFromAst(ck: &Checker, typeParams: &Vec<string>, declAst: &MiloType, 
     }
 }
 
-pub fn checkGenericCall(ck: &mut Checker, func: &string, args: &Vec<Heap<Expr>>, span: &Option<Span>): TypeKind {
+pub fn checkGenericCall(ck: &mut Checker, func: &string, args: &Vec<Heap<ExprNode>>, span: &Option<Span>): TypeKind {
     let generic = ck.genericFns.get(func)!
     if args.len != generic.decl.params.len {
         error(ck, "function '" + func.clone() + "' expects " + generic.decl.params.len.toString() + " args, got " + args.len.toString(), cloneSpan(span))
@@ -2756,7 +2756,7 @@ pub fn checkGenericCall(ck: &mut Checker, func: &string, args: &Vec<Heap<Expr>>,
     return sig.ret.clone()
 }
 
-pub fn checkGenericEnumLit(ck: &mut Checker, enumName: &string, variant: &string, args: &Vec<Heap<Expr>>, span: &Option<Span>): TypeKind {
+pub fn checkGenericEnumLit(ck: &mut Checker, enumName: &string, variant: &string, args: &Vec<Heap<ExprNode>>, span: &Option<Span>): TypeKind {
     let generic = ck.genericEnums.get(enumName)!
     if !generic.variants.contains(variant) {
         error(ck, "enum '" + enumName.clone() + "' has no variant '" + variant.clone() + "'", cloneSpan(span))
@@ -2958,7 +2958,7 @@ pub fn enumBaseName(ck: &Checker, t: &TypeKind): Option<string> {
 // that payload owned twice over (mirrors the oracle's consumeForwardedPayload).
 // Consuming the receiver keeps a single owner; a Copy payload is safe to
 // duplicate so it stays non-consuming there (same gate as unwrapOr).
-pub fn consumeForwardedPayload(ck: &mut Checker, obj: &Expr, forwarded: &TypeKind) {
+pub fn consumeForwardedPayload(ck: &mut Checker, obj: &ExprNode, forwarded: &TypeKind) {
     if !isCopyCk(ck, forwarded) {
         tryMove(ck, obj)
     }
@@ -2971,7 +2971,7 @@ pub fn consumeForwardedPayload(ck: &mut Checker, obj: &Expr, forwarded: &TypeKin
 // the same name still resolves normally via checkStructMethod (the caller falls
 // through to it on Option.None here). Mirrors src/checker.ts's Option/Result
 // combinator block almost line for line.
-pub fn checkOptionResultMethod(ck: &mut Checker, obj: &Expr, objType: &TypeKind, method: &string, args: &Vec<Heap<Expr>>, span: &Option<Span>): Option<TypeKind> {
+pub fn checkOptionResultMethod(ck: &mut Checker, obj: &ExprNode, objType: &TypeKind, method: &string, args: &Vec<Heap<ExprNode>>, span: &Option<Span>): Option<TypeKind> {
     var enumName = ""
     match objType {
         TypeKind.TEnum(n) => {
@@ -3308,7 +3308,7 @@ pub fn checkOptionResultMethod(ck: &mut Checker, obj: &Expr, objType: &TypeKind,
     return Option.None
 }
 
-pub fn checkUnwrap(ck: &mut Checker, operand: &Expr, span: &Option<Span>): TypeKind {
+pub fn checkUnwrap(ck: &mut Checker, operand: &ExprNode, span: &Option<Span>): TypeKind {
     let operandType = checkExpr(ck, operand)
     let inner = unwrapableInner(ck, operandType)
     match inner {
@@ -3324,7 +3324,7 @@ pub fn checkUnwrap(ck: &mut Checker, operand: &Expr, span: &Option<Span>): TypeK
 
 // -- Propagate (?) --
 
-pub fn checkPropagate(ck: &mut Checker, operand: &Expr, span: &Option<Span>): TypeKind {
+pub fn checkPropagate(ck: &mut Checker, operand: &ExprNode, span: &Option<Span>): TypeKind {
     let operandType = checkExpr(ck, operand)
     let inner = unwrapableInner(ck, operandType)
     match inner {
@@ -3348,7 +3348,7 @@ pub fn checkPropagate(ck: &mut Checker, operand: &Expr, span: &Option<Span>): Ty
 
 // -- Default value (??) --
 
-pub fn checkDefaultValue(ck: &mut Checker, operand: &Expr, default: &Expr, span: &Option<Span>): TypeKind {
+pub fn checkDefaultValue(ck: &mut Checker, operand: &ExprNode, default: &ExprNode, span: &Option<Span>): TypeKind {
     let operandType = checkExpr(ck, operand)
     let inner = unwrapableInner(ck, operandType)
     match inner {
@@ -3371,7 +3371,7 @@ pub fn checkDefaultValue(ck: &mut Checker, operand: &Expr, default: &Expr, span:
 
 // -- Cast expressions --
 
-pub fn checkCast(ck: &mut Checker, operand: &Expr, targetType: &MiloType, span: &Option<Span>): TypeKind {
+pub fn checkCast(ck: &mut Checker, operand: &ExprNode, targetType: &MiloType, span: &Option<Span>): TypeKind {
     let fromType = checkExpr(ck, operand)
     let toType = typeFromAst(targetType)
 
@@ -3430,8 +3430,8 @@ pub fn checkCast(ck: &mut Checker, operand: &Expr, targetType: &MiloType, span: 
             // oracle (checker.ts isNullPtrConst) so std's `0 as *u8` initializers
             // aren't spuriously unsafe-gated.
             var isNullPtrConst = false
-            match operand {
-                Expr.IntLit(v, s) => {
+            match operand.kind {
+                Expr.IntLit(v) => {
                     if v == 0 {
                         isNullPtrConst = true
                     }
@@ -3452,7 +3452,7 @@ pub fn checkCast(ck: &mut Checker, operand: &Expr, targetType: &MiloType, span: 
 
 // -- Method calls --
 
-pub fn checkMethodCall(ck: &mut Checker, obj: &Expr, method: &string, args: &Vec<Heap<Expr>>, span: &Option<Span>): TypeKind {
+pub fn checkMethodCall(ck: &mut Checker, obj: &ExprNode, method: &string, args: &Vec<Heap<ExprNode>>, span: &Option<Span>): TypeKind {
     var objType = checkExpr(ck, obj)
     // auto-deref references
     match objType.clone() {
@@ -3690,26 +3690,26 @@ pub fn checkMethodCall(ck: &mut Checker, obj: &Expr, method: &string, args: &Vec
     // disagreeing about the runtime element SIZE — the checker and codegen must decide
     // this from the same evidence, or one of them is lying to the other.
     if method == "push" && args.len == 1 {
-        match obj {
-            Expr.Ident(vname, vsp) => {
+        match obj.kind {
+            Expr.Ident(vname) => {
                 match objType {
                     TypeKind.TUnknown => {
                         let elemT = checkExpr(ck, *args[0])
                         var codegenCanSeeIt = false
-                        match *args[0] {
-                            Expr.IntLit(iv, isp) => {
+                        match (*args[0]).kind {
+                            Expr.IntLit(iv) => {
                                 codegenCanSeeIt = true
                             }
-                            Expr.BoolLit(bv, bsp) => {
+                            Expr.BoolLit(bv) => {
                                 codegenCanSeeIt = true
                             }
-                            Expr.StringLit(sv, ssp) => {
+                            Expr.StringLit(sv) => {
                                 codegenCanSeeIt = true
                             }
-                            Expr.FloatLit(fv, fsp) => {
+                            Expr.FloatLit(fv) => {
                                 codegenCanSeeIt = true
                             }
-                            Expr.StructLit(sname, sfields, slsp) => {
+                            Expr.StructLit(sname, sfields) => {
                                 match elemT.clone() {
                                     TypeKind.TStruct(rn) => {
                                         if rn == sname {
@@ -3726,13 +3726,13 @@ pub fn checkMethodCall(ck: &mut Checker, obj: &Expr, method: &string, args: &Vec
                             // type, so rejecting it left those Vecs <unknown>. codegen's
                             // pushArgStaticTy recurses through unary `-` for exactly
                             // this reason — the two gates must accept the same set.
-                            Expr.UnaryOp(uop, uoperand, usp) => {
+                            Expr.UnaryOp(uop, uoperand) => {
                                 if uop == "-" {
-                                    match *uoperand {
-                                        Expr.IntLit(niv, nisp) => {
+                                    match (*uoperand).kind {
+                                        Expr.IntLit(niv) => {
                                             codegenCanSeeIt = true
                                         }
-                                        Expr.FloatLit(nfv, nfsp) => {
+                                        Expr.FloatLit(nfv) => {
                                             codegenCanSeeIt = true
                                         }
                                         _ => {
@@ -3771,7 +3771,7 @@ pub fn checkMethodCall(ck: &mut Checker, obj: &Expr, method: &string, args: &Vec
 
 // -- Vec methods --
 
-pub fn checkVecMethod(ck: &mut Checker, obj: &Expr, elem: &TypeKind, method: &string, args: &Vec<Heap<Expr>>, span: &Option<Span>): TypeKind {
+pub fn checkVecMethod(ck: &mut Checker, obj: &ExprNode, elem: &TypeKind, method: &string, args: &Vec<Heap<ExprNode>>, span: &Option<Span>): TypeKind {
     // v.ptr(): *T — the Vec's backing data pointer. Safe to obtain (mirrors cstr).
     if method == "ptr" {
         if args.len != 0 {
@@ -4303,7 +4303,7 @@ pub fn checkVecMethod(ck: &mut Checker, obj: &Expr, elem: &TypeKind, method: &st
 
 // -- HashMap methods --
 
-pub fn checkHashMapMethod(ck: &mut Checker, obj: &Expr, key: &TypeKind, val: &TypeKind, method: &string, args: &Vec<Heap<Expr>>, span: &Option<Span>): TypeKind {
+pub fn checkHashMapMethod(ck: &mut Checker, obj: &ExprNode, key: &TypeKind, val: &TypeKind, method: &string, args: &Vec<Heap<ExprNode>>, span: &Option<Span>): TypeKind {
     if method == "insert" {
         if args.len != 2 {
             error(ck, "'insert' expects 2 arguments (key, value)", cloneSpan(span))
@@ -4426,7 +4426,7 @@ pub fn checkHashMapMethod(ck: &mut Checker, obj: &Expr, key: &TypeKind, val: &Ty
 
 // -- String methods --
 
-pub fn checkStringMethod(ck: &mut Checker, obj: &Expr, method: &string, args: &Vec<Heap<Expr>>, span: &Option<Span>): TypeKind {
+pub fn checkStringMethod(ck: &mut Checker, obj: &ExprNode, method: &string, args: &Vec<Heap<ExprNode>>, span: &Option<Span>): TypeKind {
     // `lines`/`splitView` are loop-only forms (checkForIn's peekPathType
     // intercepts them there, before this generic method dispatch ever runs).
     // Reaching them here means they were used OUTSIDE a `for ... in` — each
@@ -4673,7 +4673,7 @@ pub fn checkStringMethod(ck: &mut Checker, obj: &Expr, method: &string, args: &V
 
 // -- Struct/trait method calls --
 
-pub fn checkStructMethod(ck: &mut Checker, obj: &Expr, structName: &string, method: &string, args: &Vec<Heap<Expr>>, span: &Option<Span>): TypeKind {
+pub fn checkStructMethod(ck: &mut Checker, obj: &ExprNode, structName: &string, method: &string, args: &Vec<Heap<ExprNode>>, span: &Option<Span>): TypeKind {
     // Look up inherent implDecl method
     if ck.inherentImpls.contains(structName) {
         let implDecl = ck.inherentImpls.get(structName)!

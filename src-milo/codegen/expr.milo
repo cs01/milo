@@ -39,21 +39,21 @@ from "src-milo/codegen/strings.milo" import {
 // -- Struct literal --
 
 // Coarse type category of a literal field expression (no evaluation).
-pub fn exprCategory(e: &Expr): string {
-    match e {
-        Expr.IntLit(n, s) => {
+pub fn exprCategory(e: &ExprNode): string {
+    match e.kind {
+        Expr.IntLit(n) => {
             return "int"
         }
-        Expr.CharLit(c, s) => {
+        Expr.CharLit(c) => {
             return "int"
         }
-        Expr.BoolLit(b, s) => {
+        Expr.BoolLit(b) => {
             return "int"
         }
-        Expr.FloatLit(f, s) => {
+        Expr.FloatLit(f) => {
             return "float"
         }
-        Expr.StringLit(v, s) => {
+        Expr.StringLit(v) => {
             return "str"
         }
         _ => {
@@ -188,9 +188,9 @@ pub fn genStructLit(cg: &mut Cgen, name: &string, fields: &Vec<StructLitField>, 
 // name. LLVM has no textual spelling for these, so they are emitted as the IEEE bit
 // patterns; note LLVM writes an f32 constant as the DOUBLE that the float rounds to, which
 // is why the f32 arms carry the same hex as the f64 ones.
-pub fn floatNamespaceLit(object: &Expr, field: &string): string {
-    match object {
-        Expr.Ident(name, _sp) => {
+pub fn floatNamespaceLit(object: &ExprNode, field: &string): string {
+    match object.kind {
+        Expr.Ident(name) => {
             if name != "f64" && name != "f32" {
                 return ""
             }
@@ -211,12 +211,12 @@ pub fn floatNamespaceLit(object: &Expr, field: &string): string {
     }
 }
 
-pub fn genFieldAccess(cg: &mut Cgen, object: &Expr, field: &string, locs: &Vec<Local>, sigs: &Vec<CgFnSig>): Val {
+pub fn genFieldAccess(cg: &mut Cgen, object: &ExprNode, field: &string, locs: &Vec<Local>, sigs: &Vec<CgFnSig>): Val {
     let nsLit = floatNamespaceLit(object, field)
     if nsLit.len > 0 {
         var fty = "double"
-        match object {
-            Expr.Ident(nm, _s2) => {
+        match object.kind {
+            Expr.Ident(nm) => {
                 if nm == "f32" {
                     fty = "float"
                 }
@@ -307,9 +307,9 @@ pub fn genFieldAccess(cg: &mut Cgen, object: &Expr, field: &string, locs: &Vec<L
 
 // Pure (no emit) type of an addressable place expr. "" for non-places, bare fn
 // names, and derefs — anything genOwnedArg must not treat as an owned slot.
-pub fn placeTypeStr(cg: &Cgen, e: &Expr, locs: &Vec<Local>): string {
-    match e {
-        Expr.Ident(name, sp) => {
+pub fn placeTypeStr(cg: &Cgen, e: &ExprNode, locs: &Vec<Local>): string {
+    match e.kind {
+        Expr.Ident(name) => {
             if hasLocal(locs, name) {
                 return findLocal(locs, name).ty.clone()
             }
@@ -318,7 +318,7 @@ pub fn placeTypeStr(cg: &Cgen, e: &Expr, locs: &Vec<Local>): string {
             }
             return ""
         }
-        Expr.FieldAccess(obj, field, sp) => {
+        Expr.FieldAccess(obj, field) => {
             let ot = stripPercent(placeTypeStr(cg, *obj, locs))
             if ot.len == 0 {
                 return ""
@@ -329,7 +329,7 @@ pub fn placeTypeStr(cg: &Cgen, e: &Expr, locs: &Vec<Local>): string {
             }
             return lookupFieldType(cg, ot, idx)
         }
-        Expr.IndexAccess(obj, i, sp) => {
+        Expr.IndexAccess(obj, i) => {
             let ot = resolveTyStr(cg, placeTypeStr(cg, *obj, locs))
             if isVecTy(ot) {
                 return unwrapVec(ot)
@@ -342,7 +342,7 @@ pub fn placeTypeStr(cg: &Cgen, e: &Expr, locs: &Vec<Local>): string {
         // `*box` on a Heap<T> is the pointee's place; `*p` on a raw `*T` likewise.
         // Without this the deref of an owned box read as "unknown type", which made
         // every ownership decision about it (move? drop?) fall through to "no".
-        Expr.UnaryOp(op, operand, sp) => {
+        Expr.UnaryOp(op, operand) => {
             if op != "*" {
                 return ""
             }
@@ -365,18 +365,18 @@ pub fn placeTypeStr(cg: &Cgen, e: &Expr, locs: &Vec<Local>): string {
 // Is this place rooted in an OWNED local/global (as opposed to a `&T` binding)?
 // A move may only zero storage this frame owns; a borrow's pointee belongs to
 // someone else, and the checker already rejects moving out of one.
-fn placeRootIsOwned(e: &Expr, cg: &Cgen, locs: &Vec<Local>): bool {
-    match e {
-        Expr.Ident(name, sp) => {
+fn placeRootIsOwned(e: &ExprNode, cg: &Cgen, locs: &Vec<Local>): bool {
+    match e.kind {
+        Expr.Ident(name) => {
             if hasLocal(locs, name) {
                 return !findLocal(locs, name).isRef
             }
             return cg.globalVars.contains(name)
         }
-        Expr.FieldAccess(obj, field, sp) => {
+        Expr.FieldAccess(obj, field) => {
             return placeRootIsOwned(*obj, cg, locs)
         }
-        Expr.UnaryOp(op, operand, sp) => {
+        Expr.UnaryOp(op, operand) => {
             if op == "*" {
                 return placeRootIsOwned(*operand, cg, locs)
             }
@@ -394,7 +394,7 @@ fn placeRootIsOwned(e: &Expr, cg: &Cgen, locs: &Vec<Local>): bool {
 // known (Result.map forwards the Err payload into its result, so the receiver must
 // not be dropped again by the enclosing scope). Only whole owned places are
 // touched; a borrow's pointee belongs to someone else.
-pub fn markReceiverMoved(cg: &mut Cgen, e: &Expr, locs: &Vec<Local>, sigs: &Vec<CgFnSig>) {
+pub fn markReceiverMoved(cg: &mut Cgen, e: &ExprNode, locs: &Vec<Local>, sigs: &Vec<CgFnSig>) {
     let tyStr = placeTypeStr(cg, e, locs)
     if tyStr.len == 0 {
         return
@@ -405,13 +405,13 @@ pub fn markReceiverMoved(cg: &mut Cgen, e: &Expr, locs: &Vec<Local>, sigs: &Vec<
     if !placeRootIsOwned(e, cg, locs) {
         return
     }
-    match e {
-        Expr.Ident(name, sp) => {
+    match e.kind {
+        Expr.Ident(name) => {
             let lv = genLvalue(cg, e, locs, sigs)
             zeroStore(cg, lv.v, lv.ty)
             cg.movedLocalAddrs.push(lv.v.clone())
         }
-        Expr.FieldAccess(obj, field, sp) => {
+        Expr.FieldAccess(obj, field) => {
             let lv = genLvalue(cg, e, locs, sigs)
             zeroStore(cg, lv.v, lv.ty)
             cg.movedLocalAddrs.push(lv.v.clone())
@@ -430,12 +430,12 @@ pub fn markReceiverMoved(cg: &mut Cgen, e: &Expr, locs: &Vec<Local>, sigs: &Vec<
 // checker's isMove bit, which this compiler has no HIR to carry). Index accesses
 // do NOT: the checker treats `let x = v[i]` as a copy that leaves v[i] live, so
 // zeroing there would corrupt the source.
-pub fn genOwnedArg(cg: &mut Cgen, e: &Expr, hintTy: string, locs: &Vec<Local>, sigs: &Vec<CgFnSig>): Val {
-    match e {
-        Expr.Closure(cps, crt, cbody, cIsMove, csp) => {
+pub fn genOwnedArg(cg: &mut Cgen, e: &ExprNode, hintTy: string, locs: &Vec<Local>, sigs: &Vec<CgFnSig>): Val {
+    match e.kind {
+        Expr.Closure(cps, crt, cbody, cIsMove) => {
             let promoted = autoMoveClosureArg(e, locs)
-            match promoted {
-                Expr.Closure(p2, rt2, body2, isMove2, sp2) => {
+            match (*promoted).kind {
+                Expr.Closure(p2, rt2, body2, isMove2) => {
                     return genClosure(cg, p2, rt2, body2, isMove2, locs, sigs)
                 }
                 _ => {
@@ -445,12 +445,12 @@ pub fn genOwnedArg(cg: &mut Cgen, e: &Expr, hintTy: string, locs: &Vec<Local>, s
         _ => {
         }
     }
-    match e {
+    match e.kind {
         // `let d = dirs[i]` is a COPY, not a move (the checker leaves dirs[i] live),
         // so a droppable element has to be deep-cloned here: a shallow header copy
         // gives two owners of one buffer and whichever drops first empties the other.
         // Mirrors the oracle's indexAccessClones.
-        Expr.IndexAccess(obj, idx, sp) => {
+        Expr.IndexAccess(obj, idx) => {
             let elemTy = placeTypeStr(cg, e, locs)
             if elemTy.len > 0 && cgNeedsDrop(cg, elemTy) {
                 let lv = genLvalue(cg, e, locs, sigs)
@@ -466,11 +466,11 @@ pub fn genOwnedArg(cg: &mut Cgen, e: &Expr, hintTy: string, locs: &Vec<Local>, s
         _ => {
         }
     }
-    match e {
+    match e.kind {
         // `*box` in an owning position hands the POINTEE on (`sum(*left)` on a
         // Heap<Tree> payload): zero it so the box's own drop frees the box without
         // recursing into a subtree the callee already took and dropped.
-        Expr.UnaryOp(op, operand, sp) => {
+        Expr.UnaryOp(op, operand) => {
             let tyStr = placeTypeStr(cg, e, locs)
             if op == "*" && tyStr.len > 0 && cgNeedsDrop(cg, tyStr) {
                 if placeRootIsOwned(e, cg, locs) {
@@ -501,8 +501,8 @@ pub fn genOwnedArg(cg: &mut Cgen, e: &Expr, hintTy: string, locs: &Vec<Local>, s
         _ => {
         }
     }
-    match e {
-        Expr.FieldAccess(obj, field, sp) => {
+    match e.kind {
+        Expr.FieldAccess(obj, field) => {
             let tyStr = placeTypeStr(cg, e, locs)
             if tyStr.len > 0 && cgNeedsDrop(cg, tyStr) {
                 if placeRootIsOwned(e, cg, locs) {
@@ -534,8 +534,8 @@ pub fn genOwnedArg(cg: &mut Cgen, e: &Expr, hintTy: string, locs: &Vec<Local>, s
         _ => {
         }
     }
-    match e {
-        Expr.Ident(name, sp) => {
+    match e.kind {
+        Expr.Ident(name) => {
             let isLocal = hasLocal(locs, name)
             if (isLocal && !findLocal(locs, name).isRef) || (!isLocal && cg.globalVars.contains(name)) {
                 let tyStr = placeTypeStr(cg, e, locs)
@@ -622,7 +622,7 @@ pub fn genVecNew(cg: &mut Cgen, hintTy: &string): Val {
 // rejected it with EFAULT ("Bad address") — every std/net and std/fs read that
 // went through fdRead failed before a single byte moved. Mirrors
 // src/codegen.ts's genVecWithCapacity: malloc(cap*elemSize), len=0, cap=cap.
-pub fn genVecWithCapacity(cg: &mut Cgen, hintTy: &string, capExpr: &Expr, locs: &Vec<Local>, sigs: &Vec<CgFnSig>): Val {
+pub fn genVecWithCapacity(cg: &mut Cgen, hintTy: &string, capExpr: &ExprNode, locs: &Vec<Local>, sigs: &Vec<CgFnSig>): Val {
     ensureVecTy(cg)
     ensureMalloc(cg)
     var ty = hintTy.clone()
@@ -1475,7 +1475,7 @@ pub fn genHashMapRemove(cg: &mut Cgen, addr: &string, mapTy: &string, keyVal: &V
 
 // Fixed arrays lower onto the Vec runtime (see astTypeStr): a literal is a
 // malloc'd buffer with a {ptr, n, n} header.
-pub fn genArrayLit(cg: &mut Cgen, elems: &Vec<Heap<Expr>>, locs: &Vec<Local>, sigs: &Vec<CgFnSig>, hintTy: &string): Val {
+pub fn genArrayLit(cg: &mut Cgen, elems: &Vec<Heap<ExprNode>>, locs: &Vec<Local>, sigs: &Vec<CgFnSig>, hintTy: &string): Val {
     // Struct-field array (hintTy = the "[N]elem" inline marker, see
     // codegen/types.milo): build the real `[N x T]` aggregate via an alloca +
     // GEP + store sequence, not a malloc'd %Vec — there is no separate heap
@@ -1548,7 +1548,7 @@ pub fn genArrayLit(cg: &mut Cgen, elems: &Vec<Heap<Expr>>, locs: &Vec<Local>, si
 }
 
 // [x; N] — evaluate once, fill N slots with an emitted loop (N can be large).
-pub fn genArrayRepeat(cg: &mut Cgen, value: &Expr, count: i64, locs: &Vec<Local>, sigs: &Vec<CgFnSig>, hintTy: &string): Val {
+pub fn genArrayRepeat(cg: &mut Cgen, value: &ExprNode, count: i64, locs: &Vec<Local>, sigs: &Vec<CgFnSig>, hintTy: &string): Val {
     // Struct-field array — same inline-aggregate treatment as genArrayLit above.
     // Unrolled (count is always compile-time known for a fixed-size field).
     if isInlineArrTy(hintTy) {
@@ -1626,7 +1626,7 @@ pub fn genArrayRepeat(cg: &mut Cgen, value: &Expr, count: i64, locs: &Vec<Local>
 
 // `expr!` on Option_T / Result_T_E: tag 0 (Some/Ok) yields the payload;
 // otherwise print the oracle's message shape and exit(1).
-pub fn genUnwrap(cg: &mut Cgen, inner: &Expr, span: &Option<Span>, locs: &Vec<Local>, sigs: &Vec<CgFnSig>): Val {
+pub fn genUnwrap(cg: &mut Cgen, inner: &ExprNode, span: &Option<Span>, locs: &Vec<Local>, sigs: &Vec<CgFnSig>): Val {
     let v = genExpr(cg, inner, locs, sigs, "")
     let enumName = resolveEnumName(cg, resolveTyStr(cg, stripPercent(v.ty)))
     let enumTy = "%" + enumName
@@ -1717,7 +1717,7 @@ pub fn genUnwrap(cg: &mut Cgen, inner: &Expr, span: &Option<Span>, locs: &Vec<Lo
 // enclosing fn's result type. Same-enum propagation returns the value as-is;
 // differing Result enums copy the Err payload when the slot types match
 // (auto-From conversions are not ported yet — fail loud instead of silently).
-pub fn genPropagate(cg: &mut Cgen, inner: &Expr, locs: &Vec<Local>, sigs: &Vec<CgFnSig>): Val {
+pub fn genPropagate(cg: &mut Cgen, inner: &ExprNode, locs: &Vec<Local>, sigs: &Vec<CgFnSig>): Val {
     let v = genExpr(cg, inner, locs, sigs, "")
     let srcEnum = resolveEnumName(cg, resolveTyStr(cg, stripPercent(v.ty)))
     let srcTy = "%" + srcEnum
@@ -1863,7 +1863,7 @@ pub fn genPropagate(cg: &mut Cgen, inner: &Expr, locs: &Vec<Local>, sigs: &Vec<C
 }
 
 // `expr ?? default`: Some/Ok payload, else the default.
-pub fn genDefaultValue(cg: &mut Cgen, inner: &Expr, defaultE: &Expr, locs: &Vec<Local>, sigs: &Vec<CgFnSig>): Val {
+pub fn genDefaultValue(cg: &mut Cgen, inner: &ExprNode, defaultE: &ExprNode, locs: &Vec<Local>, sigs: &Vec<CgFnSig>): Val {
     let v = genExpr(cg, inner, locs, sigs, "")
     let enumName = resolveEnumName(cg, resolveTyStr(cg, stripPercent(v.ty)))
     let enumTy = "%" + enumName
@@ -1914,7 +1914,7 @@ pub fn genDefaultValue(cg: &mut Cgen, inner: &Expr, defaultE: &Expr, locs: &Vec<
 }
 
 // `subject is Enum.Variant` → i1 tag equality (no bindings; a boolean test).
-pub fn genIsExpr(cg: &mut Cgen, subject: &Expr, pattern: &Pattern, locs: &Vec<Local>, sigs: &Vec<CgFnSig>): Val {
+pub fn genIsExpr(cg: &mut Cgen, subject: &ExprNode, pattern: &Pattern, locs: &Vec<Local>, sigs: &Vec<CgFnSig>): Val {
     let sv = genExpr(cg, subject, locs, sigs, "")
     let svLl = llType(sv.ty)
     let rawName = stripPercent(sv.ty)
@@ -2217,7 +2217,7 @@ pub fn genPayloadPtr(cg: &mut Cgen, ov: &Val, enumName: &string, variant: &strin
 // unwrapOrElse(f) — unwrapOr with the default computed (and the closure called)
 // only on the fail branch. Option's f takes no args; Result's f takes the error
 // by ref, so it's appended to the call only when failVariant is "Err".
-pub fn genOptionResultUnwrapOrElse(cg: &mut Cgen, ov: &Val, enumName: &string, cbExpr: &Expr, locs: &Vec<Local>, sigs: &Vec<CgFnSig>): Val {
+pub fn genOptionResultUnwrapOrElse(cg: &mut Cgen, ov: &Val, enumName: &string, cbExpr: &ExprNode, locs: &Vec<Local>, sigs: &Vec<CgFnSig>): Val {
     var okVariant = "Some"
     var failVariant = "None"
     if variantTagOpt(cg, enumName, "Ok").isSome() {
@@ -2282,7 +2282,7 @@ pub fn genOptionResultUnwrapOrElse(cg: &mut Cgen, ov: &Val, enumName: &string, c
 // map(f): T -> U through the payload BY REF (the closure never consumes it).
 // Option<T> -> Option<U> forwards nothing on None; Result<T,E> -> Result<U,E>
 // forwards the receiver's Err payload untouched on the fail branch.
-pub fn genOptionResultMap(cg: &mut Cgen, ov: &Val, enumName: &string, isResult: bool, cbExpr: &Expr, locs: &Vec<Local>, sigs: &Vec<CgFnSig>): Val {
+pub fn genOptionResultMap(cg: &mut Cgen, ov: &Val, enumName: &string, isResult: bool, cbExpr: &ExprNode, locs: &Vec<Local>, sigs: &Vec<CgFnSig>): Val {
     var okVariant = "Some"
     if isResult {
         okVariant = "Ok"
@@ -2359,7 +2359,7 @@ pub fn genOptionResultMap(cg: &mut Cgen, ov: &Val, enumName: &string, isResult: 
 
 // mapErr(f): Result<T,E> -> Result<T,F> — the mirror of map, callback on the Err
 // side. The Ok payload is forwarded through untouched.
-pub fn genOptionResultMapErr(cg: &mut Cgen, ov: &Val, enumName: &string, cbExpr: &Expr, locs: &Vec<Local>, sigs: &Vec<CgFnSig>): Val {
+pub fn genOptionResultMapErr(cg: &mut Cgen, ov: &Val, enumName: &string, cbExpr: &ExprNode, locs: &Vec<Local>, sigs: &Vec<CgFnSig>): Val {
     let innerTy = lookupVariantPayload(cg, enumName, "Ok") [0].clone()
     var maperrHints: Vec<string> = Vec.new()
     maperrHints.push(lookupVariantPayload(cg, enumName, "Err") [0].clone())
@@ -2419,7 +2419,7 @@ pub fn genOptionResultMapErr(cg: &mut Cgen, ov: &Val, enumName: &string, cbExpr:
 // andThen(f): T -> Option<U>/Result<U,E>, f itself returning the whole enum — the
 // chaining form. The result's mono type IS the closure's return type. Result's Err
 // payload is forwarded untouched on the fail branch (same as map).
-pub fn genOptionResultAndThen(cg: &mut Cgen, ov: &Val, enumName: &string, isResult: bool, cbExpr: &Expr, locs: &Vec<Local>, sigs: &Vec<CgFnSig>): Val {
+pub fn genOptionResultAndThen(cg: &mut Cgen, ov: &Val, enumName: &string, isResult: bool, cbExpr: &ExprNode, locs: &Vec<Local>, sigs: &Vec<CgFnSig>): Val {
     var okVariant = "Some"
     if isResult {
         okVariant = "Ok"
@@ -2482,7 +2482,7 @@ pub fn genOptionResultAndThen(cg: &mut Cgen, ov: &Val, enumName: &string, isResu
 // orElse(f): the None/Err-side andThen — f: () -> Option<T> (Option) or
 // (&E) -> Result<T,F> (Result). The ok payload is forwarded through untouched on
 // the ok branch, into the (possibly re-typed-E) result.
-pub fn genOptionResultOrElse(cg: &mut Cgen, ov: &Val, enumName: &string, isResult: bool, cbExpr: &Expr, locs: &Vec<Local>, sigs: &Vec<CgFnSig>): Val {
+pub fn genOptionResultOrElse(cg: &mut Cgen, ov: &Val, enumName: &string, isResult: bool, cbExpr: &ExprNode, locs: &Vec<Local>, sigs: &Vec<CgFnSig>): Val {
     var okVariant = "Some"
     if isResult {
         okVariant = "Ok"
@@ -3016,21 +3016,21 @@ pub fn genBitIntrinsic(cg: &mut Cgen, obj: &Val, method: &string): Val {
 
 // Best-effort surface type of a simple payload arg WITHOUT emitting IR — used to
 // disambiguate which monomorphization of a generic enum literal to build.
-pub fn peekArgTy(e: &Expr, locs: &Vec<Local>): string {
-    match e {
-        Expr.IntLit(n, s) => {
+pub fn peekArgTy(e: &ExprNode, locs: &Vec<Local>): string {
+    match e.kind {
+        Expr.IntLit(n) => {
             return "i64"
         }
-        Expr.FloatLit(f, s) => {
+        Expr.FloatLit(f) => {
             return "double"
         }
-        Expr.BoolLit(b, s) => {
+        Expr.BoolLit(b) => {
             return "bool"
         }
-        Expr.StringLit(v, s) => {
+        Expr.StringLit(v) => {
             return "string"
         }
-        Expr.Ident(name, s) => {
+        Expr.Ident(name) => {
             if hasLocal(locs, name) {
                 return findLocal(locs, name).ty.clone()
             }
@@ -3041,7 +3041,7 @@ pub fn peekArgTy(e: &Expr, locs: &Vec<Local>): string {
         // for a full struct-field-type lookup. Exists so a generic-enum literal
         // whose payload is a field access (`Option.Some(v.len)`, ambiguous without
         // a hint) can still disambiguate by the payload's actual type below.
-        Expr.FieldAccess(obj, field, s) => {
+        Expr.FieldAccess(obj, field) => {
             if field == "len" {
                 return "i64"
             }
@@ -3057,18 +3057,18 @@ pub fn peekArgTy(e: &Expr, locs: &Vec<Local>): string {
 // literal, or unary-minus / arithmetic built ONLY from float literals — such a
 // subtree has no width of its own and may adopt a context type. Used by BinOp
 // codegen below, same as the IntLit-only special case it sits beside.
-pub fn isFloatLitAstExpr(e: &Expr): bool {
-    match e {
-        Expr.FloatLit(f, s) => {
+pub fn isFloatLitAstExpr(e: &ExprNode): bool {
+    match e.kind {
+        Expr.FloatLit(f) => {
             return true
         }
-        Expr.UnaryOp(op, operand, s) => {
+        Expr.UnaryOp(op, operand) => {
             if op == "-" {
                 return isFloatLitAstExpr(*operand)
             }
             return false
         }
-        Expr.BinOp(op, l, r, s) => {
+        Expr.BinOp(op, l, r) => {
             if op == "+" || op == "-" || op == "*" || op == "/" || op == "%" {
                 return isFloatLitAstExpr(*l) && isFloatLitAstExpr(*r)
             }
@@ -3080,7 +3080,7 @@ pub fn isFloatLitAstExpr(e: &Expr): bool {
     }
 }
 
-pub fn genEnumLit(cg: &mut Cgen, enumName: &string, variant: &string, args: &Vec<Heap<Expr>>, locs: &Vec<Local>, sigs: &Vec<CgFnSig>, hintTy: &string): Val {
+pub fn genEnumLit(cg: &mut Cgen, enumName: &string, variant: &string, args: &Vec<Heap<ExprNode>>, locs: &Vec<Local>, sigs: &Vec<CgFnSig>, hintTy: &string): Val {
     // Generic enums are registered under their mangled name
     var rEnum = resolveEnumName(cg, enumName)
     // `found` answers "is this a variant at all"; `tag` is only its number. They must stay
@@ -3159,11 +3159,11 @@ pub fn genEnumLit(cg: &mut Cgen, enumName: &string, variant: &string, args: &Vec
                     }
                 }
             }
-            let objExpr = Expr.Ident(enumName.clone(), Option.None)
+            let objExpr = mkExpr(Expr.Ident(enumName.clone()), Option.None)
             if isField && args.len == 0 {
-                return genFieldAccess(cg, objExpr, variant, locs, sigs)
+                return genFieldAccess(cg, *objExpr, variant, locs, sigs)
             }
-            return genMethodCall(cg, objExpr, variant, args, locs, sigs)
+            return genMethodCall(cg, *objExpr, variant, args, locs, sigs)
         }
         var emptyTA: Vec<MiloType> = Vec.new()
         var noSpan: Option<Span> = Option.None
@@ -3228,27 +3228,27 @@ pub fn genEnumLit(cg: &mut Cgen, enumName: &string, variant: &string, args: &Vec
 // invalid IR. Only forward the hint when `inner` is built ENTIRELY from
 // literals (no Ident/Call/FieldAccess/…), matching what the checker itself
 // would have resolved unhinted.
-pub fn isHintSafeCastOperand(e: &Expr): bool {
-    match e {
-        Expr.IntLit(n, s) => {
+pub fn isHintSafeCastOperand(e: &ExprNode): bool {
+    match e.kind {
+        Expr.IntLit(n) => {
             return true
         }
-        Expr.FloatLit(f, s) => {
+        Expr.FloatLit(f) => {
             return true
         }
-        Expr.BoolLit(b, s) => {
+        Expr.BoolLit(b) => {
             return true
         }
-        Expr.CharLit(c, s) => {
+        Expr.CharLit(c) => {
             return true
         }
-        Expr.UnaryOp(op, operand, s) => {
+        Expr.UnaryOp(op, operand) => {
             if op == "-" {
                 return isHintSafeCastOperand(*operand)
             }
             return false
         }
-        Expr.BinOp(op, l, r, s) => {
+        Expr.BinOp(op, l, r) => {
             if op == "+" || op == "-" || op == "*" || op == "/" || op == "%" {
                 return isHintSafeCastOperand(*l) && isHintSafeCastOperand(*r)
             }
@@ -3260,13 +3260,13 @@ pub fn isHintSafeCastOperand(e: &Expr): bool {
     }
 }
 
-pub fn genAsCast(cg: &mut Cgen, inner: &Expr, targetTy: &string, locs: &Vec<Local>, sigs: &Vec<CgFnSig>): Val {
+pub fn genAsCast(cg: &mut Cgen, inner: &ExprNode, targetTy: &string, locs: &Vec<Local>, sigs: &Vec<CgFnSig>): Val {
     // A bare fn name cast to a raw pointer (`_osThreadTrampoline as *u8`) is the
     // fn's own address, NOT a closure thunk — pass @name directly.
     let toPtr = (targetTy.len > 0 && targetTy[0] == 42) || llType(targetTy) == "ptr"
     if toPtr {
-        match inner {
-            Expr.Ident(nm, isp) => {
+        match inner.kind {
+            Expr.Ident(nm) => {
                 if !hasLocal(locs, nm) && cg.fnRets.contains(nm) {
                     return Val {
                         v: "@" + nm.clone(), ty: targetTy.clone()
@@ -3479,7 +3479,7 @@ pub fn genAsCast(cg: &mut Cgen, inner: &Expr, targetTy: &string, locs: &Vec<Loca
 
 // -- Heap deref --
 
-pub fn genHeapDeref(cg: &mut Cgen, inner: &Expr, locs: &Vec<Local>, sigs: &Vec<CgFnSig>): Val {
+pub fn genHeapDeref(cg: &mut Cgen, inner: &ExprNode, locs: &Vec<Local>, sigs: &Vec<CgFnSig>): Val {
     let v = genExpr(cg, inner, locs, sigs, "")
     let heapInner = unwrapHeap(v.ty)
     if heapInner.len > 0 {
@@ -4914,7 +4914,7 @@ pub fn genDeepCloneHashMapVal(cg: &mut Cgen, obj: &Val): Val {
     }
 }
 
-pub fn genMethodCall(cg: &mut Cgen, object: &Expr, method: &string, args: &Vec<Heap<Expr>>, locs: &Vec<Local>, sigs: &Vec<CgFnSig>): Val {
+pub fn genMethodCall(cg: &mut Cgen, object: &ExprNode, method: &string, args: &Vec<Heap<ExprNode>>, locs: &Vec<Local>, sigs: &Vec<CgFnSig>): Val {
     // x.addrOf(): the raw address of the receiver lvalue — identical to the old
     // `&x` (see the UnaryOp `&` arm). Resolve the lvalue, don't load a value.
     if method == "addrOf" {
@@ -6481,7 +6481,7 @@ pub fn emitNonNegativeCheck(cg: &mut Cgen, val: &string, what: &string) {
     emitLabel(cg, okLbl)
 }
 
-pub fn genIndex(cg: &mut Cgen, obj: &Expr, idx: &Expr, locs: &Vec<Local>, sigs: &Vec<CgFnSig>): Val {
+pub fn genIndex(cg: &mut Cgen, obj: &ExprNode, idx: &ExprNode, locs: &Vec<Local>, sigs: &Vec<CgFnSig>): Val {
     // Inline struct-field array (see isInlineArrTy): there is no %Vec header to
     // pull a data ptr out of by value, so index the field's ADDRESS directly
     // via genLvalue + GEP[0, i] instead of the by-value genExpr path below.
@@ -6546,7 +6546,7 @@ pub fn genIndex(cg: &mut Cgen, obj: &Expr, idx: &Expr, locs: &Vec<Local>, sigs: 
     }
 }
 
-pub fn genSlice(cg: &mut Cgen, obj: &Expr, a: &Expr, b: &Expr, locs: &Vec<Local>, sigs: &Vec<CgFnSig>): Val {
+pub fn genSlice(cg: &mut Cgen, obj: &ExprNode, a: &ExprNode, b: &ExprNode, locs: &Vec<Local>, sigs: &Vec<CgFnSig>): Val {
     let o = genExpr(cg, obj, locs, sigs, "")
     let av = genExpr(cg, a, locs, sigs, "i64")
     let bv = genExpr(cg, b, locs, sigs, "i64")
@@ -6898,7 +6898,7 @@ pub fn genEnumDisplay(cg: &mut Cgen, val: &string, enumName: &string, locs: &Vec
     }
 }
 
-pub fn genFormat(cg: &mut Cgen, args: &Vec<Heap<Expr>>, locs: &Vec<Local>, sigs: &Vec<CgFnSig>): Val {
+pub fn genFormat(cg: &mut Cgen, args: &Vec<Heap<ExprNode>>, locs: &Vec<Local>, sigs: &Vec<CgFnSig>): Val {
     ensureStringTy(cg)
     var acc = genStringLit(cg, "")
     for i in 0..args.len {
@@ -7014,7 +7014,7 @@ pub fn genJsonObject(cg: &mut Cgen, fields: &Vec<StructLitField>, locs: &Vec<Loc
     return acc
 }
 
-pub fn genJsonStringify(cg: &mut Cgen, arg: &Expr, locs: &Vec<Local>, sigs: &Vec<CgFnSig>): Val {
+pub fn genJsonStringify(cg: &mut Cgen, arg: &ExprNode, locs: &Vec<Local>, sigs: &Vec<CgFnSig>): Val {
     let sv = genExpr(cg, arg, locs, sigs, "")
     return genJsonStringifyFromVal(cg, sv, locs, sigs)
 }
@@ -7264,15 +7264,15 @@ pub fn ensureItable(cg: &mut Cgen, concrete: &string, iface: &string): string {
 
 // A receiver that denotes storage (re-evaluating it is side-effect-free and yields
 // the same address). Anything else (a fn-call result, etc.) must NOT be re-evaluated.
-pub fn isSimpleLvalue(e: &Expr): bool {
-    match e {
-        Expr.Ident(nm, sp) => {
+pub fn isSimpleLvalue(e: &ExprNode): bool {
+    match e.kind {
+        Expr.Ident(nm) => {
             return true
         }
-        Expr.FieldAccess(o, f, sp) => {
+        Expr.FieldAccess(o, f) => {
             return true
         }
-        Expr.IndexAccess(o, ix, sp) => {
+        Expr.IndexAccess(o, ix) => {
             return true
         }
         _ => {
@@ -7281,9 +7281,9 @@ pub fn isSimpleLvalue(e: &Expr): bool {
     }
 }
 
-pub fn isBareFnName(cg: &Cgen, e: &Expr, locs: &Vec<Local>): bool {
-    match e {
-        Expr.Ident(nm, sp) => {
+pub fn isBareFnName(cg: &Cgen, e: &ExprNode, locs: &Vec<Local>): bool {
+    match e.kind {
+        Expr.Ident(nm) => {
             return !hasLocal(locs, nm) && cg.fnRets.contains(nm)
         }
         _ => {
@@ -7468,16 +7468,16 @@ pub fn emitTempFrees(cg: &mut Cgen, frees: &Vec<string>) {
     }
 }
 
-pub fn isPlaceExprForFree(e: &Expr): bool {
-    match e {
-        Expr.BinOp(op, l, r, sp) => {
+pub fn isPlaceExprForFree(e: &ExprNode): bool {
+    match e.kind {
+        Expr.BinOp(op, l, r) => {
             // A concat builds a fresh buffer; every other binop on strings does too.
             return false
         }
-        Expr.MethodCall(o, m, a, sp) => {
+        Expr.MethodCall(o, m, a) => {
             return false
         }
-        Expr.Call(n, a, ta, sp) => {
+        Expr.Call(n, a, ta) => {
             return false
         }
         _ => {
@@ -7488,12 +7488,12 @@ pub fn isPlaceExprForFree(e: &Expr): bool {
 
 // A string operand the compiler already knows the value of: a literal, or the
 // `@targetOs()` builtin, which is a constant for the whole compilation.
-fn constString(cg: &Cgen, e: &Expr): Option<string> {
-    match e {
-        Expr.StringLit(v, span) => {
+fn constString(cg: &Cgen, e: &ExprNode): Option<string> {
+    match e.kind {
+        Expr.StringLit(v) => {
             return Option.Some(v.clone())
         }
-        Expr.Call(name, args, typeArgs, span) => {
+        Expr.Call(name, args, typeArgs) => {
             if name == "targetOs" && args.len == 0 {
                 return Option.Some(cg.targetOs.clone())
             }
@@ -7532,12 +7532,12 @@ fn foldIsFalse(o: &Option<bool>): bool {
 // statically known", i.e. the ordinary runtime path. Deliberately conservative:
 // only constant operands fold, so no runtime condition is ever short-circuited
 // by accident.
-pub fn constFoldBool(cg: &Cgen, e: &Expr): Option<bool> {
-    match e {
-        Expr.BoolLit(v, span) => {
+pub fn constFoldBool(cg: &Cgen, e: &ExprNode): Option<bool> {
+    match e.kind {
+        Expr.BoolLit(v) => {
             return Option.Some(v)
         }
-        Expr.UnaryOp(op, operand, span) => {
+        Expr.UnaryOp(op, operand) => {
             if op == "!" {
                 match constFoldBool(cg, *operand) {
                     Option.Some(inner) => {
@@ -7550,7 +7550,7 @@ pub fn constFoldBool(cg: &Cgen, e: &Expr): Option<bool> {
             }
             return Option.None
         }
-        Expr.BinOp(op, l, r, span) => {
+        Expr.BinOp(op, l, r) => {
             if op == "&&" {
                 let lb = constFoldBool(cg, *l)
                 let rb = constFoldBool(cg, *r)
@@ -7622,7 +7622,7 @@ pub fn constFoldBool(cg: &Cgen, e: &Expr): Option<bool> {
     }
 }
 
-pub fn genCall(cg: &mut Cgen, name: &string, args: &Vec<Heap<Expr>>, typeArgs: &Vec<MiloType>, locs: &Vec<Local>, sigs: &Vec<CgFnSig>, hintTy: &string, callSpan: &Option<Span>): Val {
+pub fn genCall(cg: &mut Cgen, name: &string, args: &Vec<Heap<ExprNode>>, typeArgs: &Vec<MiloType>, locs: &Vec<Local>, sigs: &Vec<CgFnSig>, hintTy: &string, callSpan: &Option<Span>): Val {
     if name == "format" {
         return genFormat(cg, args, locs, sigs)
     }
@@ -7642,10 +7642,10 @@ pub fn genCall(cg: &mut Cgen, name: &string, args: &Vec<Heap<Expr>>, typeArgs: &
         // the moment the embedding module is reached through an import from
         // another directory. Mirrors the oracle's lower.ts, which uses span.file.
         var callerDir = cg.sourceDir.clone()
-        match *args[0] {
-            Expr.StringLit(s, sp) => {
+        match (*args[0]).kind {
+            Expr.StringLit(s) => {
                 path = s.clone()
-                match sp {
+                match (*args[0]).span {
                     Option.Some(spn) => {
                         if spn.file.len > 0 {
                             callerDir = Path.dirname(spn.file)
@@ -7746,8 +7746,8 @@ pub fn genCall(cg: &mut Cgen, name: &string, args: &Vec<Heap<Expr>>, typeArgs: &
     if name == "offsetOf" && typeArgs.len == 1 && args.len == 1 {
         let sname = stripPercent(resolveAstTy(cg, typeArgs[0]))
         var fieldName = ""
-        match *args[0] {
-            Expr.StringLit(s, sp) => {
+        match (*args[0]).kind {
+            Expr.StringLit(s) => {
                 fieldName = s.clone()
             }
             _ => {
@@ -8240,8 +8240,8 @@ pub fn genCall(cg: &mut Cgen, name: &string, args: &Vec<Heap<Expr>>, typeArgs: &
             // a bare fn name passed to a C extern's fn-ptr param is the RAW function
             // address (@cmpI32, C signature), NOT milo's %Closure/env thunk.
             var fnm = ""
-            match *args[i] {
-                Expr.Ident(nm, sp) => {
+            match (*args[i]).kind {
+                Expr.Ident(nm) => {
                     fnm = nm.clone()
                 }
                 _ => {
@@ -8542,7 +8542,7 @@ pub fn genCall(cg: &mut Cgen, name: &string, args: &Vec<Heap<Expr>>, typeArgs: &
 
 // -- Lvalue (address-of) --
 
-pub fn genLvalue(cg: &mut Cgen, e: &Expr, locs: &Vec<Local>, sigs: &Vec<CgFnSig>): Val {
+pub fn genLvalue(cg: &mut Cgen, e: &ExprNode, locs: &Vec<Local>, sigs: &Vec<CgFnSig>): Val {
     return genLvalueWithHint(cg, e, locs, sigs, "")
 }
 
@@ -8551,9 +8551,9 @@ pub fn genLvalue(cg: &mut Cgen, e: &Expr, locs: &Vec<Local>, sigs: &Vec<CgFnSig>
 // to a `&T` param: `Texture2D.rgb32f(.., Vec.filled(n, 0.0), ..)` against `pixels:
 // &Vec<f32>` had no way to learn the element type, defaulted to Vec<i64>, and emitted
 // `store i64 0.0` — IR LLVM rejects outright.
-pub fn genLvalueWithHint(cg: &mut Cgen, e: &Expr, locs: &Vec<Local>, sigs: &Vec<CgFnSig>, hintTy: string): Val {
-    match e {
-        Expr.Ident(name, span) => {
+pub fn genLvalueWithHint(cg: &mut Cgen, e: &ExprNode, locs: &Vec<Local>, sigs: &Vec<CgFnSig>, hintTy: string): Val {
+    match e.kind {
+        Expr.Ident(name) => {
             // a module global's address is @name (used for push/field-store/etc.)
             if !hasLocal(locs, name) && cg.globalVars.contains(name) {
                 let surf = cg.globalVars.get(name)!
@@ -8566,7 +8566,7 @@ pub fn genLvalueWithHint(cg: &mut Cgen, e: &Expr, locs: &Vec<Local>, sigs: &Vec<
                 v: local.addr.clone(), ty: local.ty.clone()
             }
         }
-        Expr.FieldAccess(object, field, span) => {
+        Expr.FieldAccess(object, field) => {
             let inner = genLvalue(cg, *object, locs, sigs)
             let rawName = stripPercent(inner.ty)
             let idx = lookupFieldIndex(cg, rawName, field)
@@ -8590,7 +8590,7 @@ pub fn genLvalueWithHint(cg: &mut Cgen, e: &Expr, locs: &Vec<Local>, sigs: &Vec<
         // nothing and findLocal's documented "should not happen" fallback
         // silently hands back locs[0] (some UNRELATED local), and every field/
         // index computed on top of it is garbage.
-        Expr.EnumLit(enumName, variant, args, espan) => {
+        Expr.EnumLit(enumName, variant, args) => {
             let isVar = !cg.enums.contains(enumName) && (hasLocal(locs, enumName) || cg.globalVars.contains(enumName))
             if isVar {
                 // Plain string vars, not a reassigned Val — milo-self's own (still
@@ -8627,7 +8627,7 @@ pub fn genLvalueWithHint(cg: &mut Cgen, e: &Expr, locs: &Vec<Local>, sigs: &Vec<
                 v: addr, ty: v.ty
             }
         }
-        Expr.UnaryOp(op, operand, span) => {
+        Expr.UnaryOp(op, operand) => {
             // `*p` as an lvalue: the pointee's address IS the pointer value, so
             // evaluate the operand (Heap<T> box ptr or raw `*T`) and return it
             // with the pointee type. Covers `(*inner).field` reads and writes.
@@ -8648,7 +8648,7 @@ pub fn genLvalueWithHint(cg: &mut Cgen, e: &Expr, locs: &Vec<Local>, sigs: &Vec<
                 v: "0", ty: "i64"
             }
         }
-        Expr.IndexAccess(obj, idx, span) => {
+        Expr.IndexAccess(obj, idx) => {
             // `a[i]` as an lvalue — needed for `a[i].field = x` and `&a[i]`.
             // Inline struct-field array: index the field's address directly
             // (mirrors genIndex above — no %Vec header to extract a data ptr from).
@@ -8715,9 +8715,9 @@ pub fn genLvalueWithHint(cg: &mut Cgen, e: &Expr, locs: &Vec<Local>, sigs: &Vec<
 
 // The result expression of an expression-bodied closure statement (`=> expr`
 // lowers to one Return/ExprStmt). Returns None when it isn't that shape.
-pub fn genExpr(cg: &mut Cgen, e: &Expr, locs: &Vec<Local>, sigs: &Vec<CgFnSig>, hintTy: string): Val {
-    match e {
-        Expr.IntLit(n, span) => {
+pub fn genExpr(cg: &mut Cgen, e: &ExprNode, locs: &Vec<Local>, sigs: &Vec<CgFnSig>, hintTy: string): Val {
+    match e.kind {
+        Expr.IntLit(n) => {
             var ty = hintTy.clone()
             if ty.len == 0 {
                 ty = "i64"
@@ -8758,7 +8758,7 @@ pub fn genExpr(cg: &mut Cgen, e: &Expr, locs: &Vec<Local>, sigs: &Vec<CgFnSig>, 
                 v: n.toString(), ty: ty
             }
         }
-        Expr.FloatLit(f, span) => {
+        Expr.FloatLit(f) => {
             // Honor an f32 field/arg hint: a bare float literal defaults to double,
             // but in `float` position LLVM needs a `float` constant. Carry the
             // SURFACE type "f32" (not "float" — llType maps the surface alias
@@ -8780,7 +8780,7 @@ pub fn genExpr(cg: &mut Cgen, e: &Expr, locs: &Vec<Local>, sigs: &Vec<CgFnSig>, 
                 v: floatDecimalStr(f), ty: fll
             }
         }
-        Expr.BoolLit(b, span) => {
+        Expr.BoolLit(b) => {
             let v = if b {
                 "1"
             } else {
@@ -8790,15 +8790,15 @@ pub fn genExpr(cg: &mut Cgen, e: &Expr, locs: &Vec<Local>, sigs: &Vec<CgFnSig>, 
                 v: v, ty: "i1"
             }
         }
-        Expr.StringLit(s, span) => {
+        Expr.StringLit(s) => {
             return genStringLit(cg, s)
         }
-        Expr.CharLit(c, span) => {
+        Expr.CharLit(c) => {
             return Val {
                 v: c.toString(), ty: "i8"
             }
         }
-        Expr.Ident(name, span) => {
+        Expr.Ident(name) => {
             // A module global (unless a local shadows it): load @name.
             var isLocal = false
             for li in 0..locs.len {
@@ -8836,7 +8836,7 @@ pub fn genExpr(cg: &mut Cgen, e: &Expr, locs: &Vec<Local>, sigs: &Vec<CgFnSig>, 
                 v: loaded.v, ty: local.ty.clone()
             }
         }
-        Expr.UnaryOp(op, inner, span) => {
+        Expr.UnaryOp(op, inner) => {
             if op == "*" {
                 return genHeapDeref(cg, *inner, locs, sigs)
             }
@@ -8852,8 +8852,8 @@ pub fn genExpr(cg: &mut Cgen, e: &Expr, locs: &Vec<Local>, sigs: &Vec<CgFnSig>, 
             // as the unary minus of 2147483648) would emit a runtime checked-negate and
             // trap on the INT_MIN overflow now that negation is checked by default.
             if op == "-" {
-                match *inner {
-                    Expr.IntLit(n, ilsp) => {
+                match (*inner).kind {
+                    Expr.IntLit(n) => {
                         let v0 = genExpr(cg, *inner, locs, sigs, hintTy)
                         // i64 MIN is lexed as the negation of 9223372036854775808, a
                         // magnitude i64 cannot hold — it already wrapped to
@@ -8907,7 +8907,7 @@ pub fn genExpr(cg: &mut Cgen, e: &Expr, locs: &Vec<Local>, sigs: &Vec<CgFnSig>, 
             }
             return v
         }
-        Expr.BinOp(op, l, r, span) => {
+        Expr.BinOp(op, l, r) => {
             // Short-circuit && / || — the RHS must NOT be evaluated eagerly (it may
             // have side effects). Store into a slot to avoid phi/current-block bookkeeping.
             if op == "&&" || op == "||" {
@@ -8945,8 +8945,8 @@ pub fn genExpr(cg: &mut Cgen, e: &Expr, locs: &Vec<Local>, sigs: &Vec<CgFnSig>, 
             // at i64 and printed 2147483648 where wrapping i32 gives INT_MIN. Take the
             // width from the other operand instead.
             if lHint.len == 0 {
-                match *l {
-                    Expr.IntLit(nlit, lsp) => {
+                match (*l).kind {
+                    Expr.IntLit(nlit) => {
                         let rt = peekArgTy(*r, locs)
                         if isIntLlType(llType(rt)) {
                             lHint = rt
@@ -9273,7 +9273,7 @@ pub fn genExpr(cg: &mut Cgen, e: &Expr, locs: &Vec<Local>, sigs: &Vec<CgFnSig>, 
                 v: "0", ty: "i64"
             }
         }
-        Expr.Call(name, args, typeArgs, span) => {
+        Expr.Call(name, args, typeArgs) => {
             // a call whose callee is a %Closure-typed local is an indirect call
             if hasLocal(locs, name) {
                 let lc = findLocal(locs, name)
@@ -9281,21 +9281,21 @@ pub fn genExpr(cg: &mut Cgen, e: &Expr, locs: &Vec<Local>, sigs: &Vec<CgFnSig>, 
                     return genClosureCall(cg, lc, args, locs, sigs, hintTy)
                 }
             }
-            return genCall(cg, name, args, typeArgs, locs, sigs, hintTy, span)
+            return genCall(cg, name, args, typeArgs, locs, sigs, hintTy, e.span)
         }
-        Expr.StructLit(name, fields, span) => {
+        Expr.StructLit(name, fields) => {
             return genStructLit(cg, name, fields, locs, sigs, hintTy)
         }
-        Expr.JsonObject(fields, span) => {
+        Expr.JsonObject(fields) => {
             return genJsonObject(cg, fields, locs, sigs)
         }
-        Expr.FieldAccess(object, field, span) => {
+        Expr.FieldAccess(object, field) => {
             return genFieldAccess(cg, *object, field, locs, sigs)
         }
-        Expr.Closure(params, retType, body, isMove, span) => {
+        Expr.Closure(params, retType, body, isMove) => {
             return genClosure(cg, params, retType, body, isMove, locs, sigs)
         }
-        Expr.EnumLit(enumName, variant, args, span) => {
+        Expr.EnumLit(enumName, variant, args) => {
             if enumName == "Vec" && variant == "new" {
                 return genVecNew(cg, hintTy)
             }
@@ -9457,18 +9457,18 @@ pub fn genExpr(cg: &mut Cgen, e: &Expr, locs: &Vec<Local>, sigs: &Vec<CgFnSig>, 
             }
             return genEnumLit(cg, enumName, variant, args, locs, sigs, hintTy)
         }
-        Expr.CastExpr(inner, targetType, span) => {
+        Expr.CastExpr(inner, targetType) => {
             // full astTypeStr, not just .name: `x as *i64` must keep pointer-ness
             // (otherwise the target reads as plain i64 and the cast result loses it)
             return genAsCast(cg, *inner, astTypeStr(targetType), locs, sigs)
         }
-        Expr.MethodCall(object, method, args, span) => {
+        Expr.MethodCall(object, method, args) => {
             return genMethodCall(cg, *object, method, args, locs, sigs)
         }
-        Expr.IndexAccess(obj, idx, span) => {
+        Expr.IndexAccess(obj, idx) => {
             return genIndex(cg, *obj, *idx, locs, sigs)
         }
-        Expr.IfExpr(cond, thenBody, elseBody, span) => {
+        Expr.IfExpr(cond, thenBody, elseBody) => {
             // Same compile-time fold as the statement form (genIf): the value
             // comes from the taken arm alone, and the dead arm is never emitted.
             let folded = constFoldBool(cg, *cond)
@@ -9529,7 +9529,7 @@ pub fn genExpr(cg: &mut Cgen, e: &Expr, locs: &Vec<Local>, sigs: &Vec<CgFnSig>, 
                 v: r, ty: resTy
             }
         }
-        Expr.MatchExpr(subject, arms, span) => {
+        Expr.MatchExpr(subject, arms) => {
             // cg.curRetTy is the enclosing function's return type — needed so a
             // diverging arm's `return` statement (genStmt, reached through
             // genArmBody) emits the right `ret <ty> …`, same as any other return.
@@ -9537,32 +9537,32 @@ pub fn genExpr(cg: &mut Cgen, e: &Expr, locs: &Vec<Local>, sigs: &Vec<CgFnSig>, 
             let mg = genMatch(cg, *subject, arms, locs, sigs, retTyStr, true, hintTy)
             return mg.val
         }
-        Expr.ArrayLit(elems, span) => {
+        Expr.ArrayLit(elems) => {
             return genArrayLit(cg, elems, locs, sigs, hintTy)
         }
-        Expr.ArrayRepeat(value, count, span) => {
+        Expr.ArrayRepeat(value, count) => {
             return genArrayRepeat(cg, *value, count, locs, sigs, hintTy)
         }
-        Expr.Unwrap(inner, span) => {
+        Expr.Unwrap(inner) => {
             // `x!` takes the payload OUT of x — including the temp the let-else
             // desugar unwraps (`let v = __letelse_N!`). Without recording that move
             // the enclosing scope drops x too and the payload the binding now owns is
             // freed under it (letElse returned an empty string).
-            let uv = genUnwrap(cg, *inner, span, locs, sigs)
+            let uv = genUnwrap(cg, *inner, e.span, locs, sigs)
             markReceiverMoved(cg, *inner, locs, sigs)
             return uv
         }
-        Expr.DefaultValue(inner, defaultE, span) => {
+        Expr.DefaultValue(inner, defaultE) => {
             return genDefaultValue(cg, *inner, *defaultE, locs, sigs)
         }
-        Expr.Propagate(inner, span) => {
+        Expr.Propagate(inner) => {
             // `x?` moves the payload out on the success path and the error value into
             // the early return — either way x no longer owns it (same as Unwrap above).
             let pv = genPropagate(cg, *inner, locs, sigs)
             markReceiverMoved(cg, *inner, locs, sigs)
             return pv
         }
-        Expr.IsExpr(subject, pattern, span) => {
+        Expr.IsExpr(subject, pattern) => {
             return genIsExpr(cg, *subject, *pattern, locs, sigs)
         }
         _ => {

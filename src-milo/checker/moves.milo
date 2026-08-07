@@ -35,7 +35,7 @@ pub fn fieldPathString(fields: &Vec<string>): string {
 // named root, with no index/deref anywhere in it (an index offset is a runtime
 // value, so there's no static place to mark or check). Mirrors the oracle's
 // staticFieldPath.
-pub fn staticFieldPlace(e: &Expr): Option<AccessPath> {
+pub fn staticFieldPlace(e: &ExprNode): Option<AccessPath> {
     match accessPath(e) {
         Option.Some(p) => {
             if p.tainted || p.fields.len == 0 {

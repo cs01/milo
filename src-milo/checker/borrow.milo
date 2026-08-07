@@ -34,15 +34,15 @@ pub struct AccessPath {
     tainted: bool,
 }
 
-pub fn accessPath(e: &Expr): Option<AccessPath> {
-    match e {
-        Expr.Ident(name, sp) => {
+pub fn accessPath(e: &ExprNode): Option<AccessPath> {
+    match e.kind {
+        Expr.Ident(name) => {
             return Option.Some(AccessPath {
                 root: name.clone(), fields: Vec.new(), tainted: false
             }
             )
         }
-        Expr.FieldAccess(obj, field, sp) => {
+        Expr.FieldAccess(obj, field) => {
             match accessPath(*obj) {
                 Option.Some(p) => {
                     if p.tainted {
@@ -70,7 +70,7 @@ pub fn accessPath(e: &Expr): Option<AccessPath> {
                 }
             }
         }
-        Expr.IndexAccess(obj, idx, sp) => {
+        Expr.IndexAccess(obj, idx) => {
             match accessPath(*obj) {
                 Option.Some(p) => {
                     // `self.bps[i]` is imprecise about WHICH element, but the path to
@@ -95,15 +95,15 @@ pub fn accessPath(e: &Expr): Option<AccessPath> {
 
 // Root identifier of a chain, ignoring field/index steps — used where only the
 // binding matters (e.g. checking a `&mut` argument's source is mutable).
-pub fn rootIdentName(e: &Expr): Option<string> {
-    match e {
-        Expr.Ident(name, sp) => {
+pub fn rootIdentName(e: &ExprNode): Option<string> {
+    match e.kind {
+        Expr.Ident(name) => {
             return Option.Some(name.clone())
         }
-        Expr.FieldAccess(obj, field, sp) => {
+        Expr.FieldAccess(obj, field) => {
             return rootIdentName(*obj)
         }
-        Expr.IndexAccess(obj, idx, sp) => {
+        Expr.IndexAccess(obj, idx) => {
             return rootIdentName(*obj)
         }
         _ => {
@@ -256,7 +256,7 @@ pub fn frozenAgainst(ck: &Checker, name: &string, fields: &Vec<string>): bool {
 // when `place`'s root can't be determined (e.g. `v[a..b]` from `foo()[a..b]`,
 // where nothing is bound long enough to matter — matches the oracle's plain
 // `.slice()` freeze, which silently skips a non-Ident root without erroring).
-pub fn freezePlace(ck: &mut Checker, place: &Expr) {
+pub fn freezePlace(ck: &mut Checker, place: &ExprNode) {
     match accessPath(place) {
         Option.Some(p) => {
             freezeName(ck, p.root, p.fields)
@@ -278,7 +278,7 @@ pub fn freezePlace(ck: &mut Checker, place: &Expr) {
 // (tests/fixtures/viewFieldPrecision.milo). Skipped once the receiver path is
 // already imprecise (tainted): appending a field there would wrongly
 // re-narrow "conflicts with everything" down to one field.
-pub fn freezeViewMethodSource(ck: &mut Checker, obj: &Expr, extraFields: &Vec<string>, sp: &Option<Span>) {
+pub fn freezeViewMethodSource(ck: &mut Checker, obj: &ExprNode, extraFields: &Vec<string>, sp: &Option<Span>) {
     match accessPath(obj) {
         Option.Some(p) => {
             var nf = p.fields.clone()
@@ -299,7 +299,7 @@ pub fn freezeViewMethodSource(ck: &mut Checker, obj: &Expr, extraFields: &Vec<st
 // e.g. a `push` that reallocates the buffer a slice or loop iteration points
 // into. `action` reads as "cannot ACTION 'root' because it is borrowed", e.g.
 // "call 'push' on" or "pass".
-pub fn errorIfFrozenRoot(ck: &mut Checker, obj: &Expr, action: &string, sp: &Option<Span>) {
+pub fn errorIfFrozenRoot(ck: &mut Checker, obj: &ExprNode, action: &string, sp: &Option<Span>) {
     match accessPath(obj) {
         Option.Some(p) => {
             if frozenAgainst(ck, p.root, p.fields) {
@@ -314,15 +314,15 @@ pub fn errorIfFrozenRoot(ck: &mut Checker, obj: &Expr, action: &string, sp: &Opt
 // A short human-readable rendering of a place, for diagnostics ("h.data",
 // "lb.buf"). Only needs to handle the shapes that appear as assignment
 // targets/borrow sources in practice.
-pub fn describePlace(e: &Expr): string {
-    match e {
-        Expr.Ident(name, sp) => {
+pub fn describePlace(e: &ExprNode): string {
+    match e.kind {
+        Expr.Ident(name) => {
             return name.clone()
         }
-        Expr.FieldAccess(obj, field, sp) => {
+        Expr.FieldAccess(obj, field) => {
             return describePlace(*obj) + "." + field.clone()
         }
-        Expr.IndexAccess(obj, idx, sp) => {
+        Expr.IndexAccess(obj, idx) => {
             return describePlace(*obj) + "[...]"
         }
         _ => {
@@ -344,15 +344,15 @@ pub struct AssignTarget {
     hasIndex: bool,
 }
 
-pub fn assignTargetPath(e: &Expr): Option<AssignTarget> {
-    match e {
-        Expr.Ident(name, sp) => {
+pub fn assignTargetPath(e: &ExprNode): Option<AssignTarget> {
+    match e.kind {
+        Expr.Ident(name) => {
             return Option.Some(AssignTarget {
                 root: name.clone(), fields: Vec.new(), hasIndex: false
             }
             )
         }
-        Expr.FieldAccess(obj, field, sp) => {
+        Expr.FieldAccess(obj, field) => {
             match assignTargetPath(*obj) {
                 Option.Some(p) => {
                     if p.hasIndex {
@@ -373,7 +373,7 @@ pub fn assignTargetPath(e: &Expr): Option<AssignTarget> {
                 }
             }
         }
-        Expr.IndexAccess(obj, idx, sp) => {
+        Expr.IndexAccess(obj, idx) => {
             match assignTargetPath(*obj) {
                 Option.Some(p) => {
                     return Option.Some(AssignTarget {
@@ -396,7 +396,7 @@ pub fn assignTargetPath(e: &Expr): Option<AssignTarget> {
 // No-op for an in-place element write (hasIndex) or a target with no named
 // root. `target` is the full assignment target expression, used only to
 // render the diagnostic's place text ("h.data" vs the bare root).
-pub fn errorIfAssignFrozen(ck: &mut Checker, target: &Expr, sp: &Option<Span>) {
+pub fn errorIfAssignFrozen(ck: &mut Checker, target: &ExprNode, sp: &Option<Span>) {
     match assignTargetPath(target) {
         Option.Some(p) => {
             if p.hasIndex {
@@ -424,7 +424,7 @@ pub fn errorIfAssignFrozen(ck: &mut Checker, target: &Expr, sp: &Option<Span>) {
 // root for the callback-checking call only; returns the name to release
 // afterward, or None when there was no root to freeze (or it was already
 // frozen by an outer context, which owns the eventual unfreeze).
-pub fn borrowDuringCallback(ck: &mut Checker, obj: &Expr): Option<string> {
+pub fn borrowDuringCallback(ck: &mut Checker, obj: &ExprNode): Option<string> {
     match rootIdentName(obj) {
         Option.Some(name) => {
             if isFrozen(ck, name) {
@@ -453,7 +453,7 @@ pub struct BorrowArg {
     steps: Vec<Option<string>>, // None = index step, Some(name) = field step
 }
 
-pub fn borrowArgOf(e: &Expr): Option<BorrowArg> {
+pub fn borrowArgOf(e: &ExprNode): Option<BorrowArg> {
     match accessPath(e) {
         Option.Some(p) => {
             match accessSteps(e) {
@@ -474,12 +474,12 @@ pub fn borrowArgOf(e: &Expr): Option<BorrowArg> {
     }
 }
 
-fn accessSteps(e: &Expr): Option<Vec<Option<string>>> {
-    match e {
-        Expr.Ident(name, sp) => {
+fn accessSteps(e: &ExprNode): Option<Vec<Option<string>>> {
+    match e.kind {
+        Expr.Ident(name) => {
             return Option.Some(Vec.new())
         }
-        Expr.FieldAccess(obj, field, sp) => {
+        Expr.FieldAccess(obj, field) => {
             match accessSteps(*obj) {
                 Option.Some(s) => {
                     var ns = s.clone()
@@ -491,7 +491,7 @@ fn accessSteps(e: &Expr): Option<Vec<Option<string>>> {
                 }
             }
         }
-        Expr.IndexAccess(obj, idx, sp) => {
+        Expr.IndexAccess(obj, idx) => {
             match accessSteps(*obj) {
                 Option.Some(s) => {
                     var ns = s.clone()

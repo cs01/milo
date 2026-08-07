@@ -585,21 +585,21 @@ pub fn deriveEq(s: &StructDecl): Option<ImplDecl> {
 
     // Build body: return self.f1 == other.f1 && self.f2 == other.f2 && ...
     var body: Vec<Heap<Stmt>> = Vec.new()
-    var cond: Expr = Expr.BoolLit(true, Option.None)
+    var cond: Heap<ExprNode> = mkExpr(Expr.BoolLit(true), Option.None)
     var first = true
     for fi in 0..s.fields.len {
         let fname = s.fields[fi].name.clone()
-        let lhs = Expr.FieldAccess(Heap(Expr.Ident("self", Option.None)), fname.clone(), Option.None)
-        let rhs = Expr.FieldAccess(Heap(Expr.Ident("other", Option.None)), fname.clone(), Option.None)
-        let cmp = Expr.BinOp("==", Heap(lhs), Heap(rhs), Option.None)
+        let lhs = mkExpr(Expr.FieldAccess(mkExpr(Expr.Ident("self"), Option.None), fname.clone()), Option.None)
+        let rhs = mkExpr(Expr.FieldAccess(mkExpr(Expr.Ident("other"), Option.None), fname.clone()), Option.None)
+        let cmp = mkExpr(Expr.BinOp("==", lhs, rhs), Option.None)
         if first {
             cond = cmp
             first = false
         } else {
-            cond = Expr.BinOp("&&", Heap(cond), Heap(cmp), Option.None)
+            cond = mkExpr(Expr.BinOp("&&", cond, cmp), Option.None)
         }
     }
-    body.push(Heap(Stmt.Return(Option.Some(Heap(cond)), Option.None)))
+    body.push(Heap(Stmt.Return(Option.Some(cond), Option.None)))
 
     var methods: Vec<Function> = Vec.new()
     methods.push(Function {

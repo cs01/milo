@@ -93,7 +93,7 @@ pub fn isViewReturnType(t: &TypeKind): bool {
 }
 
 // An unknown ANYWHERE in a type means some upstream inference gave up; treat
-// the whole type as unknown for mismatch purposes (Heap<unknown> vs Heap<Expr>
+// the whole type as unknown for mismatch purposes (Heap<unknown> vs Heap<ExprNode>
 // must not error — the top-level tyUnknown() guards miss nested cases).
 pub fn containsUnknown(t: &TypeKind): bool {
     match t {

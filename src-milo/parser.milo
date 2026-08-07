@@ -758,12 +758,12 @@ pub fn parseLetElse(p: &mut Parser, s: &Option<Span>): Stmt {
         }
     }
 
-    var noArgs: Vec<Heap<Expr>> = Vec.new()
-    let guard = Expr.MethodCall(Heap(Expr.Ident(tmp.clone(), cloneSpan(s))), emptyName, noArgs, cloneSpan(s))
-    p.pending.push(Heap(Stmt.IfStmt(Heap(guard), elseBody, Option.None, cloneSpan(s))))
-    let bound = Expr.Unwrap(Heap(Expr.Ident(tmp.clone(), cloneSpan(s))), cloneSpan(s))
-    p.pending.push(Heap(Stmt.LetDecl(binding, Option.None, Heap(bound), cloneSpan(s))))
-    return Stmt.LetDecl(tmp, Option.None, Heap(subject), cloneSpan(s))
+    var noArgs: Vec<Heap<ExprNode>> = Vec.new()
+    let guard = mkExpr(Expr.MethodCall(mkExpr(Expr.Ident(tmp.clone()), cloneSpan(s)), emptyName, noArgs), cloneSpan(s))
+    p.pending.push(Heap(Stmt.IfStmt(guard, elseBody, Option.None, cloneSpan(s))))
+    let bound = mkExpr(Expr.Unwrap(mkExpr(Expr.Ident(tmp.clone()), cloneSpan(s))), cloneSpan(s))
+    p.pending.push(Heap(Stmt.LetDecl(binding, Option.None, bound, cloneSpan(s))))
+    return Stmt.LetDecl(tmp, Option.None, subject, cloneSpan(s))
 }
 
 pub fn parseLet(p: &mut Parser): Stmt {
@@ -780,7 +780,7 @@ pub fn parseLet(p: &mut Parser): Stmt {
     }
     expect(p, TokKind.Eq)
     let value = parseExpr(p)
-    return Stmt.LetDecl(name, ty, Heap(value), s)
+    return Stmt.LetDecl(name, ty, value, s)
 }
 
 pub fn parseVar(p: &mut Parser): Stmt {
@@ -793,7 +793,7 @@ pub fn parseVar(p: &mut Parser): Stmt {
     }
     expect(p, TokKind.Eq)
     let value = parseExpr(p)
-    return Stmt.VarDecl(name, ty, Heap(value), s)
+    return Stmt.VarDecl(name, ty, value, s)
 }
 
 pub fn parseReturn(p: &mut Parser): Stmt {
@@ -802,7 +802,7 @@ pub fn parseReturn(p: &mut Parser): Stmt {
     if at(p, TokKind.RBrace) {
         return Stmt.Return(Option.None, s)
     }
-    return Stmt.Return(Option.Some(Heap(parseExpr(p))), s)
+    return Stmt.Return(Option.Some(parseExpr(p)), s)
 }
 
 pub fn parseIf(p: &mut Parser): Stmt {
@@ -830,7 +830,7 @@ pub fn parseIf(p: &mut Parser): Stmt {
             expect(p, TokKind.RBrace)
         }
     }
-    return Stmt.IfStmt(Heap(cond), thenBody, elseBody, s)
+    return Stmt.IfStmt(cond, thenBody, elseBody, s)
 }
 
 pub fn parseIfLet(p: &mut Parser, s: Option<Span>): Stmt {
@@ -847,7 +847,7 @@ pub fn parseIfLet(p: &mut Parser, s: Option<Span>): Stmt {
         elseBody = Option.Some(parseStmts(p))
         expect(p, TokKind.RBrace)
     }
-    return Stmt.IfLetStmt(Heap(pattern), Heap(subject), thenBody, elseBody, s)
+    return Stmt.IfLetStmt(Heap(pattern), subject, thenBody, elseBody, s)
 }
 
 // `while let P = subj { body }` loops while subj matches P, rebinding the
@@ -867,10 +867,10 @@ pub fn parseWhileLet(p: &mut Parser, s: Option<Span>): Stmt {
     expect(p, TokKind.RBrace)
     var breakBody: Vec<Heap<Stmt>> = Vec.new()
     breakBody.push(Heap(Stmt.BreakStmt(cloneSpan(s))))
-    let ifLet = Stmt.IfLetStmt(Heap(pattern), Heap(subject), thenBody, Option.Some(breakBody), cloneSpan(s))
+    let ifLet = Stmt.IfLetStmt(Heap(pattern), subject, thenBody, Option.Some(breakBody), cloneSpan(s))
     var loopBody: Vec<Heap<Stmt>> = Vec.new()
     loopBody.push(Heap(ifLet))
-    return Stmt.WhileStmt(Heap(Expr.BoolLit(true, cloneSpan(s))), loopBody, s)
+    return Stmt.WhileStmt(mkExpr(Expr.BoolLit(true), cloneSpan(s)), loopBody, s)
 }
 
 pub fn parseWhile(p: &mut Parser): Stmt {
@@ -892,7 +892,7 @@ pub fn parseWhile(p: &mut Parser): Stmt {
     expect(p, TokKind.LBrace)
     let body = parseStmts(p)
     expect(p, TokKind.RBrace)
-    return Stmt.WhileStmt(Heap(cond), body, s)
+    return Stmt.WhileStmt(cond, body, s)
 }
 
 pub fn parseFor(p: &mut Parser): Stmt {
@@ -911,10 +911,10 @@ pub fn parseFor(p: &mut Parser): Stmt {
     let savedNS = p.noStructLit
     p.noStructLit = true
     let iterableOrStart = parseExpr(p)
-    var iterable: Heap<Expr> = Heap(iterableOrStart.clone())
+    var iterable: Heap<ExprNode> = Heap(iterableOrStart.clone())
     if matchTok(p, TokKind.DotDot) {
         let end = parseExpr(p)
-        iterable = Heap(Expr.RangeExpr(Heap(iterableOrStart), Heap(end), cloneSpan(s)))
+        iterable = mkExpr(Expr.RangeExpr(iterableOrStart, end), cloneSpan(s))
     }
     p.noStructLit = savedNS
     expect(p, TokKind.LBrace)
@@ -933,11 +933,11 @@ pub fn parseFor(p: &mut Parser): Stmt {
 
 // `for cp in EXPR.codePoints() { .. }` is the only shape this desugar fires on —
 // returns the receiver of a zero-arg `.codePoints()` call, or None otherwise.
-pub fn asCodePointsSubject(e: &Expr): Option<Expr> {
-    match e {
-        Expr.MethodCall(obj, m, a, sp) => {
+pub fn asCodePointsSubject(e: &ExprNode): Option<Heap<ExprNode>> {
+    match e.kind {
+        Expr.MethodCall(obj, m, a) => {
             if m == "codePoints" && a.len == 0 {
-                return Option.Some((*obj).clone())
+                return Option.Some(Heap(obj.clone()))
             }
             return Option.None
         }
@@ -950,15 +950,15 @@ pub fn asCodePointsSubject(e: &Expr): Option<Expr> {
 // A place expression is read in situ; anything else is a temporary that must be
 // bound once, or `.len` and each decode would re-evaluate it (and a borrow could
 // not be bound to a local at all).
-pub fn isPlaceExpr(e: &Expr): bool {
-    match e {
-        Expr.Ident(n, sp) => {
+pub fn isPlaceExpr(e: &ExprNode): bool {
+    match e.kind {
+        Expr.Ident(n) => {
             return true
         }
-        Expr.FieldAccess(o, f, sp) => {
+        Expr.FieldAccess(o, f) => {
             return true
         }
-        Expr.IndexAccess(o, i, sp) => {
+        Expr.IndexAccess(o, i) => {
             return true
         }
         _ => {
@@ -981,53 +981,53 @@ pub fn isPlaceExpr(e: &Expr): bool {
 // Wrapped in `if true { .. }` (there is no bare-block statement in milo0's AST)
 // so the cursor and any subject temporary stay scoped to the loop and cannot
 // leak into the enclosing block.
-pub fn desugarCodePointsLoop(p: &mut Parser, varName: string, varName2: Option<string>, subject: Expr, body: Vec<Heap<Stmt>>, s: Option<Span>): Stmt {
+pub fn desugarCodePointsLoop(p: &mut Parser, varName: string, varName2: Option<string>, subject: Heap<ExprNode>, body: Vec<Heap<Stmt>>, s: Option<Span>): Stmt {
     p.codePointLoopCounter = p.codePointLoopCounter + 1
     let uid = p.codePointLoopCounter
     let cursor = "__cpAt" + uid.toString()
     let decoded = "__cp" + uid.toString()
 
     var pre: Vec<Heap<Stmt>> = Vec.new()
-    var src = subject.clone()
-    if !isPlaceExpr(subject) {
+    var src = Heap(subject.clone())
+    if !isPlaceExpr(*subject) {
         let tmp = "__cpSrc" + uid.toString()
-        pre.push(Heap(Stmt.LetDecl(tmp.clone(), Option.None, Heap(subject), cloneSpan(s))))
-        src = Expr.Ident(tmp, cloneSpan(s))
+        pre.push(Heap(Stmt.LetDecl(tmp.clone(), Option.None, subject, cloneSpan(s))))
+        src = mkExpr(Expr.Ident(tmp), cloneSpan(s))
     }
-    pre.push(Heap(Stmt.VarDecl(cursor.clone(), Option.Some(simpleType("i64")), Heap(Expr.IntLit(0, cloneSpan(s))), cloneSpan(s))))
+    pre.push(Heap(Stmt.VarDecl(cursor.clone(), Option.Some(simpleType("i64")), mkExpr(Expr.IntLit(0), cloneSpan(s)), cloneSpan(s))))
 
     var loopBody: Vec<Heap<Stmt>> = Vec.new()
-    var decodeArgs: Vec<Heap<Expr>> = Vec.new()
+    var decodeArgs: Vec<Heap<ExprNode>> = Vec.new()
     decodeArgs.push(Heap(src.clone()))
-    decodeArgs.push(Heap(Expr.Ident(cursor.clone(), cloneSpan(s))))
+    decodeArgs.push(mkExpr(Expr.Ident(cursor.clone()), cloneSpan(s)))
     var noTypeArgs: Vec<MiloType> = Vec.new()
-    loopBody.push(Heap(Stmt.LetDecl(decoded.clone(), Option.None, Heap(Expr.Call("decodeCodepoint", decodeArgs, noTypeArgs, cloneSpan(s))), cloneSpan(s))))
+    loopBody.push(Heap(Stmt.LetDecl(decoded.clone(), Option.None, mkExpr(Expr.Call("decodeCodepoint", decodeArgs, noTypeArgs), cloneSpan(s)), cloneSpan(s))))
 
     // The index binding is the offset of the codepoint just decoded, so it must
     // be taken BEFORE the cursor advances.
     match varName2 {
         Option.Some(v2) => {
-            loopBody.push(Heap(Stmt.LetDecl(varName.clone(), Option.None, Heap(Expr.Ident(cursor.clone(), cloneSpan(s))), cloneSpan(s))))
-            loopBody.push(Heap(Stmt.LetDecl(v2, Option.None, Heap(Expr.FieldAccess(Heap(Expr.Ident(decoded.clone(), cloneSpan(s))), "value", cloneSpan(s))), cloneSpan(s))))
+            loopBody.push(Heap(Stmt.LetDecl(varName.clone(), Option.None, mkExpr(Expr.Ident(cursor.clone()), cloneSpan(s)), cloneSpan(s))))
+            loopBody.push(Heap(Stmt.LetDecl(v2, Option.None, mkExpr(Expr.FieldAccess(mkExpr(Expr.Ident(decoded.clone()), cloneSpan(s)), "value"), cloneSpan(s)), cloneSpan(s))))
         }
         Option.None => {
-            loopBody.push(Heap(Stmt.LetDecl(varName.clone(), Option.None, Heap(Expr.FieldAccess(Heap(Expr.Ident(decoded.clone(), cloneSpan(s))), "value", cloneSpan(s))), cloneSpan(s))))
+            loopBody.push(Heap(Stmt.LetDecl(varName.clone(), Option.None, mkExpr(Expr.FieldAccess(mkExpr(Expr.Ident(decoded.clone()), cloneSpan(s)), "value"), cloneSpan(s)), cloneSpan(s))))
         }
     }
 
     // Advance BEFORE the body: a `continue` in the body would otherwise skip the
     // increment and spin forever.
-    let advance = Expr.BinOp("+", Heap(Expr.Ident(cursor.clone(), cloneSpan(s))), Heap(Expr.FieldAccess(Heap(Expr.Ident(decoded.clone(), cloneSpan(s))), "size", cloneSpan(s))), cloneSpan(s))
-    loopBody.push(Heap(Stmt.Assign(Heap(Expr.Ident(cursor.clone(), cloneSpan(s))), Heap(advance), cloneSpan(s))))
+    let advance = mkExpr(Expr.BinOp("+", mkExpr(Expr.Ident(cursor.clone()), cloneSpan(s)), mkExpr(Expr.FieldAccess(mkExpr(Expr.Ident(decoded.clone()), cloneSpan(s)), "size"), cloneSpan(s))), cloneSpan(s))
+    loopBody.push(Heap(Stmt.Assign(mkExpr(Expr.Ident(cursor.clone()), cloneSpan(s)), advance, cloneSpan(s))))
 
     for i in 0..body.len {
         loopBody.push(Heap((*body[i]).clone()))
     }
 
-    let cond = Expr.BinOp("<", Heap(Expr.Ident(cursor.clone(), cloneSpan(s))), Heap(Expr.FieldAccess(Heap(src.clone()), "len", cloneSpan(s))), cloneSpan(s))
-    pre.push(Heap(Stmt.WhileStmt(Heap(cond), loopBody, cloneSpan(s))))
+    let cond = mkExpr(Expr.BinOp("<", mkExpr(Expr.Ident(cursor.clone()), cloneSpan(s)), mkExpr(Expr.FieldAccess(Heap(src.clone()), "len"), cloneSpan(s))), cloneSpan(s))
+    pre.push(Heap(Stmt.WhileStmt(cond, loopBody, cloneSpan(s))))
 
-    return Stmt.IfStmt(Heap(Expr.BoolLit(true, cloneSpan(s))), pre, Option.None, cloneSpan(s))
+    return Stmt.IfStmt(mkExpr(Expr.BoolLit(true), cloneSpan(s)), pre, Option.None, cloneSpan(s))
 }
 
 pub fn parseMatch(p: &mut Parser): Stmt {
@@ -1051,7 +1051,7 @@ pub fn parseMatch(p: &mut Parser): Stmt {
         )
     }
     expect(p, TokKind.RBrace)
-    return Stmt.MatchStmt(Heap(subject), arms, s)
+    return Stmt.MatchStmt(subject, arms, s)
 }
 
 pub fn parseStmt(p: &mut Parser): Stmt {
@@ -1098,17 +1098,17 @@ pub fn parseStmt(p: &mut Parser): Stmt {
     if at(p, TokKind.Eq) {
         advance(p)
         let value = parseExpr(p)
-        return Stmt.Assign(Heap(expr), Heap(value), s0)
+        return Stmt.Assign(expr, value, s0)
     }
     // compound assignment `x <op>= v` desugars to `x = x <op> v`
     let cop = compoundOp(peek(p).kind)
     if cop.len > 0 {
         advance(p)
         let rhs = parseExpr(p)
-        let value = Expr.BinOp(cop, Heap(expr.clone()), Heap(rhs), cloneSpan(s0))
-        return Stmt.Assign(Heap(expr), Heap(value), s0)
+        let value = mkExpr(Expr.BinOp(cop, Heap(expr.clone()), rhs), cloneSpan(s0))
+        return Stmt.Assign(expr, value, s0)
     }
-    return Stmt.ExprStmt(Heap(expr), s0)
+    return Stmt.ExprStmt(expr, s0)
 }
 
 // maps a compound-assign token to its binary operator, or "" if not compound
@@ -1221,73 +1221,73 @@ pub fn parsePattern(p: &mut Parser): Pattern {
 
 // -- Expression parsing (precedence climbing) --
 
-pub fn parseExpr(p: &mut Parser): Expr {
+pub fn parseExpr(p: &mut Parser): Heap<ExprNode> {
     var left = parseOr(p)
     if at(p, TokKind.QuestionQuestion) {
         advance(p)
         let defaultExpr = parseOr(p)
-        left = Expr.DefaultValue(Heap(left), Heap(defaultExpr), Option.None)
+        left = mkExpr(Expr.DefaultValue(left, defaultExpr), Option.None)
     }
     return left
 }
 
-pub fn parseOr(p: &mut Parser): Expr {
+pub fn parseOr(p: &mut Parser): Heap<ExprNode> {
     var left = parseAnd(p)
     while at(p, TokKind.PipePipe) {
         advance(p)
         let right = parseAnd(p)
-        left = Expr.BinOp("||", Heap(left), Heap(right), Option.None)
+        left = mkExpr(Expr.BinOp("||", left, right), Option.None)
     }
     return left
 }
 
-pub fn parseAnd(p: &mut Parser): Expr {
+pub fn parseAnd(p: &mut Parser): Heap<ExprNode> {
     var left = parseBitOr(p)
     while at(p, TokKind.AmpAmp) {
         advance(p)
         let right = parseBitOr(p)
-        left = Expr.BinOp("&&", Heap(left), Heap(right), Option.None)
+        left = mkExpr(Expr.BinOp("&&", left, right), Option.None)
     }
     return left
 }
 
-pub fn parseBitOr(p: &mut Parser): Expr {
+pub fn parseBitOr(p: &mut Parser): Heap<ExprNode> {
     var left = parseBitXor(p)
     while at(p, TokKind.Pipe) {
         advance(p)
         let right = parseBitXor(p)
-        left = Expr.BinOp("|", Heap(left), Heap(right), Option.None)
+        left = mkExpr(Expr.BinOp("|", left, right), Option.None)
     }
     return left
 }
 
-pub fn parseBitXor(p: &mut Parser): Expr {
+pub fn parseBitXor(p: &mut Parser): Heap<ExprNode> {
     var left = parseBitAnd(p)
     while at(p, TokKind.Caret) {
         advance(p)
         let right = parseBitAnd(p)
-        left = Expr.BinOp("^", Heap(left), Heap(right), Option.None)
+        left = mkExpr(Expr.BinOp("^", left, right), Option.None)
     }
     return left
 }
 
-pub fn parseBitAnd(p: &mut Parser): Expr {
+pub fn parseBitAnd(p: &mut Parser): Heap<ExprNode> {
     var left = parseComparison(p)
     // single & between exprs (&& already consumed at higher level)
     while at(p, TokKind.Amp) && peekN(p, 1).kind != TokKind.Mut {
         advance(p)
         let right = parseComparison(p)
-        left = Expr.BinOp("&", Heap(left), Heap(right), Option.None)
+        left = mkExpr(Expr.BinOp("&", left, right), Option.None)
     }
     return left
 }
 
-pub fn parseComparison(p: &mut Parser): Expr {
+pub fn parseComparison(p: &mut Parser): Heap<ExprNode> {
     var left = parseShift(p)
     if at(p, TokKind.Is) {
         advance(p)
         let pattern = parsePattern(p)
-        return Expr.IsExpr(Heap(left), Heap(pattern), Option.None)
+        return mkExpr(Expr.IsExpr(left, Heap(pattern)), Option.None)
     }
     while peek(p).kind == TokKind.EqEq || peek(p).kind == TokKind.Neq ||
     peek(p).kind == TokKind.LtEq || peek(p).kind == TokKind.GtEq ||
@@ -1295,12 +1295,12 @@ pub fn parseComparison(p: &mut Parser): Expr {
     (peek(p).kind == TokKind.Gt && !atAdjacent(p, TokKind.Gt)) {
         let opTok = advance(p)
         let right = parseShift(p)
-        left = Expr.BinOp(opTok.value, Heap(left), Heap(right), Option.None)
+        left = mkExpr(Expr.BinOp(opTok.value, left, right), Option.None)
     }
     return left
 }
 
-pub fn parseShift(p: &mut Parser): Expr {
+pub fn parseShift(p: &mut Parser): Heap<ExprNode> {
     var left = parseAdditive(p)
     while atAdjacent(p, TokKind.Lt) || atAdjacent(p, TokKind.Gt) {
         let isLeft = peek(p).kind == TokKind.Lt
@@ -1312,22 +1312,22 @@ pub fn parseShift(p: &mut Parser): Expr {
         } else {
             ">>"
         }
-        left = Expr.BinOp(op, Heap(left), Heap(right), Option.None)
+        left = mkExpr(Expr.BinOp(op, left, right), Option.None)
     }
     return left
 }
 
-pub fn parseAdditive(p: &mut Parser): Expr {
+pub fn parseAdditive(p: &mut Parser): Heap<ExprNode> {
     var left = parseMultiplicative(p)
     while peek(p).kind == TokKind.Plus || peek(p).kind == TokKind.Minus {
         let opTok = advance(p)
         let right = parseMultiplicative(p)
-        left = Expr.BinOp(opTok.value, Heap(left), Heap(right), Option.None)
+        left = mkExpr(Expr.BinOp(opTok.value, left, right), Option.None)
     }
     return left
 }
 
-pub fn parseMultiplicative(p: &mut Parser): Expr {
+pub fn parseMultiplicative(p: &mut Parser): Heap<ExprNode> {
     var left = parseUnary(p)
     while peek(p).kind == TokKind.Star || peek(p).kind == TokKind.Slash || peek(p).kind == TokKind.Percent {
         // * on new line = unary deref, not multiply
@@ -1336,12 +1336,12 @@ pub fn parseMultiplicative(p: &mut Parser): Expr {
         }
         let opTok = advance(p)
         let right = parseUnary(p)
-        left = Expr.BinOp(opTok.value, Heap(left), Heap(right), Option.None)
+        left = mkExpr(Expr.BinOp(opTok.value, left, right), Option.None)
     }
     return left
 }
 
-pub fn parseUnary(p: &mut Parser): Expr {
+pub fn parseUnary(p: &mut Parser): Heap<ExprNode> {
     if peek(p).kind == TokKind.Minus || peek(p).kind == TokKind.Bang ||
     peek(p).kind == TokKind.Star || peek(p).kind == TokKind.Tilde ||
     peek(p).kind == TokKind.Amp {
@@ -1349,12 +1349,12 @@ pub fn parseUnary(p: &mut Parser): Expr {
         let operand = parseUnary(p)
         // span() borrows tok, so take it before tok.value moves out of the struct.
         let s = span(p, tok)
-        return Expr.UnaryOp(tok.value, Heap(operand), s)
+        return mkExpr(Expr.UnaryOp(tok.value, operand), s)
     }
     return parsePostfix(p)
 }
 
-pub fn parsePostfix(p: &mut Parser): Expr {
+pub fn parsePostfix(p: &mut Parser): Heap<ExprNode> {
     // Every node built below carries this span. They used to be built with
     // Option.None while `startSpan` sat unused, so a diagnostic about a method call,
     // field access, or index — "cannot call 'add' on 'h' because it is borrowed" —
@@ -1369,15 +1369,15 @@ pub fn parsePostfix(p: &mut Parser): Expr {
             let field = expect(p, TokKind.Ident).value
             if at(p, TokKind.LParen) {
                 advance(p)
-                var args: Vec<Heap<Expr>> = Vec.new()
+                var args: Vec<Heap<ExprNode>> = Vec.new()
                 while !at(p, TokKind.RParen) && !at(p, TokKind.Eof) {
-                    args.push(Heap(parseExpr(p)))
+                    args.push(parseExpr(p))
                     matchTok(p, TokKind.Comma)
                 }
                 expect(p, TokKind.RParen)
-                expr = Expr.MethodCall(Heap(expr), field, args, cloneSpan(startSpan))
+                expr = mkExpr(Expr.MethodCall(expr, field, args), cloneSpan(startSpan))
             } else {
-                expr = Expr.FieldAccess(Heap(expr), field, cloneSpan(startSpan))
+                expr = mkExpr(Expr.FieldAccess(expr, field), cloneSpan(startSpan))
             }
         } else if at(p, TokKind.LBracket) {
             advance(p)
@@ -1387,26 +1387,26 @@ pub fn parsePostfix(p: &mut Parser): Expr {
                 let end = parseExpr(p)
                 expect(p, TokKind.RBracket)
                 // s[a..b] → .slice(a, b)
-                var sliceArgs: Vec<Heap<Expr>> = Vec.new()
-                sliceArgs.push(Heap(first))
-                sliceArgs.push(Heap(end))
-                expr = Expr.MethodCall(Heap(expr), "slice", sliceArgs, cloneSpan(startSpan))
+                var sliceArgs: Vec<Heap<ExprNode>> = Vec.new()
+                sliceArgs.push(first)
+                sliceArgs.push(end)
+                expr = mkExpr(Expr.MethodCall(expr, "slice", sliceArgs), cloneSpan(startSpan))
             } else {
                 expect(p, TokKind.RBracket)
-                expr = Expr.IndexAccess(Heap(expr), Heap(first), cloneSpan(startSpan))
+                expr = mkExpr(Expr.IndexAccess(expr, first), cloneSpan(startSpan))
             }
         } else if at(p, TokKind.Bang) {
             // span of the whole unwrapped expression (its start), matching the
             // oracle's `error at L:C` — not the `!` token position.
             advance(p)
-            expr = Expr.Unwrap(Heap(expr), cloneSpan(startSpan))
+            expr = mkExpr(Expr.Unwrap(expr), cloneSpan(startSpan))
         } else if at(p, TokKind.Question) {
             advance(p)
-            expr = Expr.Propagate(Heap(expr), Option.None)
+            expr = mkExpr(Expr.Propagate(expr), Option.None)
         } else if at(p, TokKind.As) {
             advance(p)
             let targetType = parseType(p)
-            expr = Expr.CastExpr(Heap(expr), targetType, Option.None)
+            expr = mkExpr(Expr.CastExpr(expr, targetType), Option.None)
         } else {
             break
         }
@@ -1441,7 +1441,7 @@ pub fn isArrowClosure(p: &mut Parser): bool {
     return false
 }
 
-pub fn parseClosure(p: &mut Parser, s: Option<Span>, isMove: bool): Expr {
+pub fn parseClosure(p: &mut Parser, s: Option<Span>, isMove: bool): Heap<ExprNode> {
     expect(p, TokKind.LParen)
     var params: Vec<Param> = Vec.new()
     while !at(p, TokKind.RParen) && !at(p, TokKind.Eof) {
@@ -1463,9 +1463,9 @@ pub fn parseClosure(p: &mut Parser, s: Option<Span>, isMove: bool): Expr {
         expect(p, TokKind.RBrace)
     } else {
         let expr = parseExpr(p)
-        body.push(Heap(Stmt.Return(Option.Some(Heap(expr)), Option.None)))
+        body.push(Heap(Stmt.Return(Option.Some(expr), Option.None)))
     }
-    return Expr.Closure(params, retType, body, isMove, s)
+    return mkExpr(Expr.Closure(params, retType, body, isMove), s)
 }
 
 // Rewrite a block's trailing statement-form if/else into an if-expression, in
@@ -1489,8 +1489,8 @@ fn valueTailToExpr(body: &mut Vec<Heap<Stmt>>) {
                     var e = cloneStmts(eb)
                     valueTailToExpr(t)
                     valueTailToExpr(e)
-                    let asExpr = Expr.IfExpr(Heap((*cond).clone()), t, e, cloneSpan(sp))
-                    rewritten = Option.Some(Heap(Stmt.ExprStmt(Heap(asExpr), cloneSpan(sp))))
+                    let asExpr = mkExpr(Expr.IfExpr(Heap((*cond).clone()), t, e), cloneSpan(sp))
+                    rewritten = Option.Some(Heap(Stmt.ExprStmt(asExpr, cloneSpan(sp))))
                 }
                 Option.None => {
                 }
@@ -1511,7 +1511,7 @@ fn valueTailToExpr(body: &mut Vec<Heap<Stmt>>) {
 // if-else in expression position: `if cond { stmts… value } else { … }`. Split
 // out of parsePrimary so an `else if` chain recurses straight back in rather
 // than round-tripping through primary dispatch.
-pub fn parseIfExprTail(p: &mut Parser, s: Option<Span>): Expr {
+pub fn parseIfExprTail(p: &mut Parser, s: Option<Span>): Heap<ExprNode> {
     expect(p, TokKind.If)
     // Same no-struct-literal rule the STATEMENT form uses, which this arm was
     // missing: without it `if n - pos < MAXMATCH {` reads `MAXMATCH { n - pos }` as a
@@ -1528,7 +1528,7 @@ pub fn parseIfExprTail(p: &mut Parser, s: Option<Span>): Expr {
     if at(p, TokKind.If) {
         let innerSpan = span(p, peek(p))
         let chained = parseIfExprTail(p, cloneSpan(innerSpan))
-        elseBody.push(Heap(Stmt.ExprStmt(Heap(chained), cloneSpan(innerSpan))))
+        elseBody.push(Heap(Stmt.ExprStmt(chained, cloneSpan(innerSpan))))
     } else {
         expect(p, TokKind.LBrace)
         elseBody = parseStmts(p)
@@ -1536,10 +1536,10 @@ pub fn parseIfExprTail(p: &mut Parser, s: Option<Span>): Expr {
     }
     valueTailToExpr(thenBody)
     valueTailToExpr(elseBody)
-    return Expr.IfExpr(Heap(cond), thenBody, elseBody, s)
+    return mkExpr(Expr.IfExpr(cond, thenBody, elseBody), s)
 }
 
-pub fn parsePrimary(p: &mut Parser): Expr {
+pub fn parsePrimary(p: &mut Parser): Heap<ExprNode> {
     let tok = peek(p)
     let s = span(p, tok)
 
@@ -1580,7 +1580,7 @@ pub fn parsePrimary(p: &mut Parser): Expr {
             } else {
                 let es = span(p, peek(p))
                 let ve = parseExpr(p)
-                body.push(Heap(Stmt.ExprStmt(Heap(ve), es)))
+                body.push(Heap(Stmt.ExprStmt(ve, es)))
             }
             arms.push(MatchArm {
                 pattern: pattern, body: body
@@ -1591,34 +1591,34 @@ pub fn parsePrimary(p: &mut Parser): Expr {
             matchTok(p, TokKind.Comma)
         }
         expect(p, TokKind.RBrace)
-        return Expr.MatchExpr(Heap(subject), arms, s)
+        return mkExpr(Expr.MatchExpr(subject, arms), s)
     }
 
     if tok.kind == TokKind.Int {
         advance(p)
-        return Expr.IntLit(intLiteralBits(tok.value), s)
+        return mkExpr(Expr.IntLit(intLiteralBits(tok.value)), s)
     }
     if tok.kind == TokKind.Float {
         advance(p)
-        return Expr.FloatLit(tok.value.parseF64() ?? 0.0, s)
+        return mkExpr(Expr.FloatLit(tok.value.parseF64() ?? 0.0), s)
     }
     if tok.kind == TokKind.True {
         advance(p)
-        return Expr.BoolLit(true, s)
+        return mkExpr(Expr.BoolLit(true), s)
     }
     if tok.kind == TokKind.False {
         advance(p)
-        return Expr.BoolLit(false, s)
+        return mkExpr(Expr.BoolLit(false), s)
     }
     if tok.kind == TokKind.Null {
         advance(p)
-        var emptyArgs: Vec<Heap<Expr>> = Vec.new()
+        var emptyArgs: Vec<Heap<ExprNode>> = Vec.new()
         var emptyTypeArgs: Vec<MiloType> = Vec.new()
-        return Expr.EnumLit("Option", "None", emptyArgs, s)
+        return mkExpr(Expr.EnumLit("Option", "None", emptyArgs), s)
     }
     if tok.kind == TokKind.String {
         advance(p)
-        return Expr.StringLit(tok.value, s)
+        return mkExpr(Expr.StringLit(tok.value), s)
     }
     if tok.kind == TokKind.FString {
         advance(p)
@@ -1626,7 +1626,7 @@ pub fn parsePrimary(p: &mut Parser): Expr {
     }
     if tok.kind == TokKind.Char {
         advance(p)
-        return Expr.CharLit(intLiteralBits(tok.value) as i32, s)
+        return mkExpr(Expr.CharLit(intLiteralBits(tok.value) as i32), s)
     }
     if tok.kind == TokKind.Ident {
         advance(p)
@@ -1634,15 +1634,15 @@ pub fn parsePrimary(p: &mut Parser): Expr {
         if at(p, TokKind.Dot) && tok.value[0] >= 65 && tok.value[0] <= 90 {
             advance(p)
             let variant = expect(p, TokKind.Ident).value
-            var args: Vec<Heap<Expr>> = Vec.new()
+            var args: Vec<Heap<ExprNode>> = Vec.new()
             if matchTok(p, TokKind.LParen) {
                 while !at(p, TokKind.RParen) && !at(p, TokKind.Eof) {
-                    args.push(Heap(parseExpr(p)))
+                    args.push(parseExpr(p))
                     matchTok(p, TokKind.Comma)
                 }
                 expect(p, TokKind.RParen)
             }
-            return Expr.EnumLit(tok.value, variant, args, s)
+            return mkExpr(Expr.EnumLit(tok.value, variant, args), s)
         }
         // Struct literal: Name { ... } — but not in condition position, where the
         // `{` opens the if/while/match block, not a struct-literal body.
@@ -1671,18 +1671,18 @@ pub fn parsePrimary(p: &mut Parser): Expr {
                 callName = callName + "." + methodName
             }
             expect(p, TokKind.LParen)
-            var args: Vec<Heap<Expr>> = Vec.new()
+            var args: Vec<Heap<ExprNode>> = Vec.new()
             while !at(p, TokKind.RParen) && !at(p, TokKind.Eof) {
                 if at(p, TokKind.Eof) {
                     break
                 }
-                args.push(Heap(parseExpr(p)))
+                args.push(parseExpr(p))
                 matchTok(p, TokKind.Comma)
             }
             expect(p, TokKind.RParen)
-            return Expr.Call(callName, args, typeArgs, s)
+            return mkExpr(Expr.Call(callName, args, typeArgs), s)
         }
-        return Expr.Ident(tok.value, s)
+        return mkExpr(Expr.Ident(tok.value), s)
     }
     // Array literal: [a, b, c]
     if tok.kind == TokKind.LBracket {
@@ -1696,7 +1696,7 @@ pub fn parsePrimary(p: &mut Parser): Expr {
         }
         // error: move must precede closure
         parseError(p, tok, "'move' must precede a closure", "")
-        return Expr.Ident("error_move", s)
+        return mkExpr(Expr.Ident("error_move"), s)
     }
     // Parenthesized expr or closure
     if tok.kind == TokKind.LParen {
@@ -1727,10 +1727,10 @@ pub fn parsePrimary(p: &mut Parser): Expr {
     // real cause here, same wording as expect()'s mismatch diagnostic.
     parseError(p, tok, "unexpected token '" + tok.value.clone() + "'", "")
     advance(p)
-    return Expr.Ident("error_unexpected", s)
+    return mkExpr(Expr.Ident("error_unexpected"), s)
 }
 
-pub fn parseStructLit(p: &mut Parser, name: string, s: Option<Span>): Expr {
+pub fn parseStructLit(p: &mut Parser, name: string, s: Option<Span>): Heap<ExprNode> {
     expect(p, TokKind.LBrace)
     var fields: Vec<StructLitField> = Vec.new()
     while !at(p, TokKind.RBrace) && !at(p, TokKind.Eof) {
@@ -1742,21 +1742,21 @@ pub fn parseStructLit(p: &mut Parser, name: string, s: Option<Span>): Expr {
         let value = if matchTok(p, TokKind.Colon) {
             parseExpr(p)
         } else {
-            Expr.Ident(fieldName.clone(), fieldSpan)
+            mkExpr(Expr.Ident(fieldName.clone()), fieldSpan)
         }
         fields.push(StructLitField {
-            name: fieldName, value: Heap(value)
+            name: fieldName, value: value
         }
         )
         matchTok(p, TokKind.Comma)
     }
     expect(p, TokKind.RBrace)
-    return Expr.StructLit(name, fields, s)
+    return mkExpr(Expr.StructLit(name, fields), s)
 }
 
 // Anonymous JSON object literal `{ key: value, … }` (no type name). Serializes
 // to a JSON string; used by `ctx.json({...})`.
-pub fn parseJsonObject(p: &mut Parser, s: Option<Span>): Expr {
+pub fn parseJsonObject(p: &mut Parser, s: Option<Span>): Heap<ExprNode> {
     expect(p, TokKind.LBrace)
     var fields: Vec<StructLitField> = Vec.new()
     while !at(p, TokKind.RBrace) && !at(p, TokKind.Eof) {
@@ -1769,32 +1769,32 @@ pub fn parseJsonObject(p: &mut Parser, s: Option<Span>): Expr {
         let value = if matchTok(p, TokKind.Colon) {
             parseExpr(p)
         } else {
-            Expr.Ident(fieldName.clone(), fieldSpan)
+            mkExpr(Expr.Ident(fieldName.clone()), fieldSpan)
         }
         fields.push(StructLitField {
-            name: fieldName, value: Heap(value)
+            name: fieldName, value: value
         }
         )
         matchTok(p, TokKind.Comma)
     }
     expect(p, TokKind.RBrace)
-    return Expr.JsonObject(fields, s)
+    return mkExpr(Expr.JsonObject(fields), s)
 }
 
-pub fn parseCall(p: &mut Parser, name: string, s: Option<Span>): Expr {
+pub fn parseCall(p: &mut Parser, name: string, s: Option<Span>): Heap<ExprNode> {
     expect(p, TokKind.LParen)
-    var args: Vec<Heap<Expr>> = Vec.new()
+    var args: Vec<Heap<ExprNode>> = Vec.new()
     while !at(p, TokKind.RParen) && !at(p, TokKind.Eof) {
         // a desynced parse must not spin at EOF forever
         if at(p, TokKind.Eof) {
             break
         }
-        args.push(Heap(parseExpr(p)))
+        args.push(parseExpr(p))
         matchTok(p, TokKind.Comma)
     }
     expect(p, TokKind.RParen)
     var typeArgs: Vec<MiloType> = Vec.new()
-    return Expr.Call(name, args, typeArgs, s)
+    return mkExpr(Expr.Call(name, args, typeArgs), s)
 }
 
 // Lookahead for `name<T, U>(` — distinguishes a type-arg call from a
@@ -1834,27 +1834,27 @@ pub fn isTypeArgCall(p: &Parser): bool {
     return after == TokKind.LParen || after == TokKind.Dot
 }
 
-pub fn parseArrayLit(p: &mut Parser): Expr {
+pub fn parseArrayLit(p: &mut Parser): Heap<ExprNode> {
     let s = span(p, peek(p))
     expect(p, TokKind.LBracket)
-    var elements: Vec<Heap<Expr>> = Vec.new()
+    var elements: Vec<Heap<ExprNode>> = Vec.new()
     while !at(p, TokKind.RBracket) && !at(p, TokKind.Eof) {
-        elements.push(Heap(parseExpr(p)))
+        elements.push(parseExpr(p))
         // [value; count] repeat syntax
         if elements.len == 1 && matchTok(p, TokKind.Semicolon) {
             let countTok = expect(p, TokKind.Int)
             expect(p, TokKind.RBracket)
-            return Expr.ArrayRepeat(elements[0], intLiteralBits(countTok.value), s)
+            return mkExpr(Expr.ArrayRepeat(elements[0], intLiteralBits(countTok.value)), s)
         }
         matchTok(p, TokKind.Comma)
     }
     expect(p, TokKind.RBracket)
-    return Expr.ArrayLit(elements, s)
+    return mkExpr(Expr.ArrayLit(elements), s)
 }
 
 // F-string: $"hello {name}" → format("hello ", name)
-pub fn parseFString(raw: string, s: &Option<Span>): Expr {
-    var args: Vec<Heap<Expr>> = Vec.new()
+pub fn parseFString(raw: string, s: &Option<Span>): Heap<ExprNode> {
+    var args: Vec<Heap<ExprNode>> = Vec.new()
     var lit = ""
     var hadInterp = false
     var i: i64 = 0
@@ -1873,7 +1873,7 @@ pub fn parseFString(raw: string, s: &Option<Span>): Expr {
         if raw[i] == 123 { // '{'
             hadInterp = true
             if lit.len > 0 {
-                args.push(Heap(Expr.StringLit(lit, cloneSpan(s))))
+                args.push(mkExpr(Expr.StringLit(lit), cloneSpan(s)))
                 lit = ""
             }
             i = i + 1
@@ -1896,7 +1896,7 @@ pub fn parseFString(raw: string, s: &Option<Span>): Expr {
             // Re-lex and parse the embedded expression
             let exprTokens = tokenize(exprStr)
             var subParser = newParser(exprTokens, subFile.clone())
-            args.push(Heap(parseExpr(subParser)))
+            args.push(parseExpr(subParser))
         } else if i + 2 < raw.len && raw[i] == 0xEF && raw[i + 1] == 0x9D && (raw[i + 2] == 0xBB || raw[i + 2] == 0xBD) {
             // Resolve the lexer's escaped-brace sentinel (U+F77B/U+F77D, UTF-8
             // EF 9D BB / EF 9D BD — see lexFString) back to a real brace, but
@@ -1916,16 +1916,16 @@ pub fn parseFString(raw: string, s: &Option<Span>): Expr {
         }
     }
     if lit.len > 0 {
-        args.push(Heap(Expr.StringLit(lit, cloneSpan(s))))
+        args.push(mkExpr(Expr.StringLit(lit), cloneSpan(s)))
     }
     // Only short-circuit a pure-text f-string (`$"hello"` → "hello"). A single
     // INTERPOLATION (`$"{x}"`) must still go through format() to stringify x —
     // returning the raw expr yielded its own type (e.g. f64), not a string.
     if args.len == 1 && !hadInterp {
-        return *args[0]
+        return Heap(args[0].clone())
     }
     var typeArgs: Vec<MiloType> = Vec.new()
-    return Expr.Call("format", args, typeArgs, cloneSpan(s))
+    return mkExpr(Expr.Call("format", args, typeArgs), cloneSpan(s))
 }
 
 // -- Top-level parse entry point --
@@ -2137,6 +2137,6 @@ pub fn parseGlobal(p: &mut Parser): GlobalDecl {
     expect(p, TokKind.Eq)
     let value = parseExpr(p)
     return GlobalDecl {
-        name: name, ty: ty, value: Heap(value), mutable: mutable, span: s
+        name: name, ty: ty, value: value, mutable: mutable, span: s
     }
 }

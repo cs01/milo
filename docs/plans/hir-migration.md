@@ -94,11 +94,52 @@ so it is non-Copy and plain assignment moves. No path yields two live nodes with
 Verification: pure refactor, so the type-re-derivation ratchet had to stay at 140 (it did),
 and the fixpoint had to stay byte-identical (it did — stage2 == stage3, 573,003 lines).
 
+## Slice 1 — done
+
+`hir.milo` (transcribed from `src/hir.ts`), `checkExpr` recording `exprTypes`, and
+`lower.milo`: statements become real `HStmt`, every expression rides `Unlowered`.
+
+Three things this slice had to settle that the plan above did not anticipate.
+
+**Lowering consumes the AST.** `impl Clone for ExprNode` mints a fresh id — deliberately,
+per slice 0. But `exprTypes` and `forIns` are keyed by that id, so a cloned node is a node
+with no recorded type and every lookup silently misses. Lowering therefore takes
+`prog: Program` by value and moves: fields out with `replace`, payloads out by matching an
+OWNED enum, vectors drained through a scratch Vec to keep source order. Nothing in
+`lower.milo` clones an `ExprNode`. A pleasant consequence: after lowering, the AST is gone
+except inside `Unlowered`, so nothing can accidentally read it.
+
+Two live bugs fell out of that rule, both the same shape. `compile()` merged the
+checker's monomorphized decls with `.clone()`, and `checkProgram`'s phase 4 *type-checked
+a throwaway copy* (`let monoFn = ck.monomorphizedFns[i].clone()`) — so every type and loop
+shape recorded for an impl method or a monomorphized body was keyed to nodes that died
+with that local. Both now move.
+
+**The checker records the for-in shape it picked.** `checkForIn` already decides between
+range / vec / string / hashmap / array / iterator / channel / string-view in order to
+declare the binding's type; the backend then decided it a second time from the syntax.
+`Checker.forIns: HashMap<u32, ForInInfo>` records the answer, keyed by the ITERABLE
+expression's node id — statements carry no id, and the iterable is unique per loop.
+A missing entry is fatal at lowering. It is never a default: the four loop shapes iterate
+different memory, so a wrong guess is a miscompile (walking a HashMap's slot array as a
+Vec), not a diagnostic.
+
+`ForInKind.FChannel` has no counterpart in `src/hir.ts`, which has no channel loop at all.
+It lowers onto `ForIterator` with a trailing `okVariant`, since the sentinel meaning "kept
+going" is `Result.Ok` for a channel and `Option.Some` for a `next()` iterator.
+
+**`tyStr(cg, &TypeKind, what)`** is the replacement for `resolveTyStr(astTypeStr(...))`:
+same output vocabulary, read off the checker's type instead of reconstructed from syntax.
+It aborts on `TUnknown` rather than returning `""` — the empty string is the failure value
+33 sites in this backend produce and callers read as "skip", and reintroducing it here
+would carry that silent-skip class straight into the typed pipeline.
+
+`HIRModule` carries a transitional block (`astTypeAliases`, `astTraits`, `astStructs`)
+because the backend still resolves types as strings and that path needs syntax a
+`TypeKind` no longer has. It goes when `tyStr` displaces `resolveTyStr(astTypeStr(...))`.
+
 ## Remaining slices
 
-1. `hir.milo`, transcribed from `src/hir.ts`. `checkExpr` stops dropping the type it
-   already computes. Codegen entry takes `HIRModule`. Everything lowers to `Unlowered`.
-   **Zero behavior change; IR must be byte-identical.** This slice proves the seam.
 2. Literals, `Ident`, `BinOp`/`UnaryOp` — kills `hintTy` at the leaves.
 3. `FieldAccess`/`IndexAccess` — kills `placeTypeStr`.
 4. `Call` + `HIRArg{passByRef, refMut}` — auto-borrow decided once.

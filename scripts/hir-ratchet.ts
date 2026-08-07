@@ -76,13 +76,22 @@ function stripComments(src: string): string {
   }).join("\n");
 }
 
+// An import list names a symbol; it does not use it. Counting it puts a floor under
+// every counter that no amount of migration can reach — a file with one remaining call
+// site reads as two, and the last call site can never census as zero while the import
+// that makes it callable is still there. The same reasoning as stripComments: this
+// ratchet must count work, not mentions.
+function stripImports(src: string): string {
+  return src.replace(/from\s+"[^"]+"\s+import\s*\{[^}]*\}/g, "");
+}
+
 const files = miloFiles(SRC_MILO);
 const counts: Record<string, number> = {};
 const byFile: Record<string, Record<string, number>> = {};
 
 for (const [name] of COUNTERS) counts[name] = 0;
 for (const f of files) {
-  const src = stripComments(readFileSync(f, "utf-8"));
+  const src = stripImports(stripComments(readFileSync(f, "utf-8")));
   for (const [name] of COUNTERS) {
     // `fn mkUnlowered(` is the definition, not a use of the bridge.
     const uses = src.match(new RegExp(`\\b${name}\\b`, "g")) ?? [];

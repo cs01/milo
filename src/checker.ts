@@ -1402,15 +1402,21 @@ export class TypeChecker {
   // checked. Shadowing is judged relative to this, not to the whole stack.
   private fnScopeFloor = 0;
 
-  // `span` is the binding site to point diagnostics at; VarInfo carries one for the
-  // binding forms that record it, and callers that don't (for-in, params) pass it here.
+  // `span` is the binding site to point diagnostics at; VarInfo carries one for every
+  // binding form now (params, pattern bindings, `let`/`var`, for-in), so `span` here is
+  // just an override for callers that want to point somewhere else.
   private declare(name: string, info: VarInfo, span?: Span) {
     const at = span ?? info.span;
     const scope = this.scopes[this.scopes.length - 1];
     // `_` is a discard, not a name: `let _ = f()` twice in one scope is the
     // conventional way to ignore two results, so each one rebinds rather than
     // colliding. Everything else still gets the shadowing error.
-    if (name !== "_" && scope.has(name)) { this.error(`variable '${name}' already declared in this scope`, at); return; }
+    if (name !== "_" && scope.has(name)) {
+      const prior = scope.get(name);
+      const hint = prior?.span ? `'${name}' was first declared at line ${prior.span.line}` : undefined;
+      this.error(`variable '${name}' already declared in this scope`, at, hint);
+      return;
+    }
     // Shadowing an ENCLOSING binding is rejected too, not just a same-scope
     // redeclaration. Rust allows it; Milo does not, because the reader of
     // `for row in nums` a screen below `let row = 5` has no way to tell which
@@ -1427,8 +1433,10 @@ export class TypeChecker {
     // reads. Two match arms both binding `_e` stay legal.
     if (name !== "_" && !name.startsWith("_")) {
       for (let i = this.scopes.length - 2; i >= this.fnScopeFloor; i--) {
-        if (this.scopes[i].has(name)) {
-          this.error(`'${name}' shadows an outer binding — pick a different name`, at);
+        const outer = this.scopes[i].get(name);
+        if (outer) {
+          const hint = outer.span ? `outer '${name}' is declared at line ${outer.span.line}` : undefined;
+          this.error(`'${name}' shadows an outer binding — pick a different name`, at, hint);
           break;
         }
       }
@@ -3762,7 +3770,7 @@ export class TypeChecker {
 
     for (const p of fn.params) {
       const pType = this.resolve(declaredType(p));
-      this.declare(p.name, { type: pType, mutable: pType.tag === "ref" && pType.mutable, moved: false, borrowed: false, read: false });
+      this.declare(p.name, { type: pType, mutable: pType.tag === "ref" && pType.mutable, moved: false, borrowed: false, read: false, span: p.span });
     }
 
     // Check contracts in a nested scope so `result` doesn't shadow body locals
@@ -4346,7 +4354,8 @@ export class TypeChecker {
             const bindTypes = variant.fields.slice(0, stmt.pattern.bindings.length).map(t => this.payloadBindType(t, subjBorrows));
             this.patternBindingTypes.set(stmt.pattern, bindTypes);
             for (let i = 0; i < Math.min(stmt.pattern.bindings.length, variant.fields.length); i++) {
-              this.declare(stmt.pattern.bindings[i], { type: bindTypes[i], mutable: false, moved: false, borrowed: false, read: false,
+              const bindSpan = stmt.pattern.bindingSpans?.[i] ?? stmt.pattern.span;
+              this.declare(stmt.pattern.bindings[i], { type: bindTypes[i], mutable: false, moved: false, borrowed: false, read: false, span: bindSpan,
                 copyBind: this.isCopyBind(bindTypes[i], this.isPlaceExpr(stmt.subject)) });
             }
           }
@@ -4416,7 +4425,8 @@ export class TypeChecker {
             this.patternBindingTypes.set(stmt.pattern, bindTypes);
             // Bindings escape into the CURRENT scope (the whole point vs if-let).
             for (let i = 0; i < Math.min(stmt.pattern.bindings.length, variant.fields.length); i++) {
-              this.declare(stmt.pattern.bindings[i], { type: bindTypes[i], mutable: false, moved: false, borrowed: false, read: false,
+              const bindSpan = stmt.pattern.bindingSpans?.[i] ?? stmt.pattern.span;
+              this.declare(stmt.pattern.bindings[i], { type: bindTypes[i], mutable: false, moved: false, borrowed: false, read: false, span: bindSpan,
                 copyBind: this.isCopyBind(bindTypes[i], this.isPlaceExpr(stmt.value)) });
             }
           }
@@ -7128,7 +7138,7 @@ export class TypeChecker {
         pType = { tag: "unknown" };
       }
       paramTypes.push(pType);
-      this.declare(p.name, { type: pType, mutable: pType.tag === "ref" && pType.mutable, moved: false, borrowed: false, read: false });
+      this.declare(p.name, { type: pType, mutable: pType.tag === "ref" && pType.mutable, moved: false, borrowed: false, read: false, span: p.span });
     }
     // An explicit annotation always wins; otherwise take the caller's expected return
     // type so literals in the body get coerced against it (`() => 0` against an
@@ -8716,7 +8726,8 @@ export class TypeChecker {
                 bt = { tag: "ref", inner: bt, mutable: false };
               }
               bindTypes.push(bt);
-              this.declare(arm.pattern.bindings[i], { type: bt, mutable: false, moved: false, borrowed: false, read: false,
+              const bindSpan = arm.pattern.bindingSpans?.[i] ?? arm.pattern.span;
+              this.declare(arm.pattern.bindings[i], { type: bt, mutable: false, moved: false, borrowed: false, read: false, span: bindSpan,
                 copyBind: this.isCopyBind(bt, this.isPlaceExpr(subject)) });
             }
             this.patternBindingTypes.set(arm.pattern, bindTypes);

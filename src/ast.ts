@@ -24,6 +24,9 @@ export function simpleType(name: string): MiloType {
 export interface Param {
   name: string;
   type: MiloType | null;
+  // Binding site, for shadowing/redeclaration diagnostics to point at. Optional
+  // because Param is also used in a couple of synthetic contexts with no source.
+  span?: Span;
 }
 
 // `Param.type` is null only for a closure param whose type is inferred
@@ -122,7 +125,10 @@ export interface BreakStmt { kind: "BreakStmt"; span?: Span }
 export interface ContinueStmt { kind: "ContinueStmt"; span?: Span }
 
 export type Pattern =
-  | { kind: "EnumPattern"; enumName: string; variant: string; bindings: string[]; span?: Span }
+  // `bindingSpans` is parallel to `bindings` — the identifier token's own position,
+  // not the whole pattern's — so a shadowing/redeclaration diagnostic on binding i
+  // can point at that name instead of the enclosing `Enum.Variant(...)`.
+  | { kind: "EnumPattern"; enumName: string; variant: string; bindings: string[]; bindingSpans?: Span[]; span?: Span }
   | { kind: "LiteralPattern"; value: number | string | boolean; literalKind: "int" | "float" | "string" | "char" | "bool"; span?: Span }
   | { kind: "WildcardPattern"; span?: Span };
 

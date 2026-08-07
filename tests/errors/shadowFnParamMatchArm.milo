@@ -1,0 +1,21 @@
+// @error: 'e' shadows an outer binding
+// A match-arm binding that shadows the function's own parameter must point at
+// the ARM's binding (the offending site), not print bare with no location. This
+// is the exact shape that once cost a downstream user several minutes of grep
+// archaeology: a `match` arm rebinding `e` inside `fn cloneExpr(e: Expr)`, with
+// no file/line/caret on the diagnostic at all.
+enum Expr {
+    Spread(i32),
+    Lit(i32),
+}
+
+fn cloneExpr(e: Expr): i32 {
+    match e {
+        Expr.Spread(e) => { return e }
+        Expr.Lit(v) => { return v }
+    }
+}
+
+fn main(): i32 {
+    return cloneExpr(Expr.Spread(3))
+}

@@ -1,0 +1,15 @@
+// @error: 'x' shadows an outer binding
+// `if let` pattern bindings route through the same declare() path as `match`
+// arms; a binding that shadows an outer local must point at the `if let`
+// pattern's own binding.
+enum Opt2 { Some2(i32), None2 }
+
+fn main(): i32 {
+    let x = 10
+    let o = Opt2.Some2(5)
+    if let Opt2.Some2(x) = o {
+        return x
+    } else {
+        return 0
+    }
+}

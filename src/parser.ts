@@ -435,10 +435,11 @@ export class Parser {
   // ── Functions ──
 
   private parseParam(): Param {
-    const name = this.expect(TokenKind.Ident).value;
+    const nameTok = this.expect(TokenKind.Ident);
+    const name = nameTok.value;
     this.expect(TokenKind.Colon);
     const type = this.parseType();
-    return { name, type };
+    return { name, type, span: this.span(nameTok) };
   }
 
   private parseParamList(): { params: Param[]; variadic: boolean } {
@@ -1143,14 +1144,17 @@ export class Parser {
       variant = this.expect(TokenKind.Ident).value;
     }
     const bindings: string[] = [];
+    const bindingSpans: Span[] = [];
     if (this.match(TokenKind.LParen)) {
       while (!this.at(TokenKind.RParen)) {
-        bindings.push(this.expect(TokenKind.Ident).value);
+        const bindTok = this.expect(TokenKind.Ident);
+        bindings.push(bindTok.value);
+        bindingSpans.push(this.span(bindTok));
         this.match(TokenKind.Comma);
       }
       this.expect(TokenKind.RParen);
     }
-    return { kind: "EnumPattern", enumName, variant, bindings, span: s };
+    return { kind: "EnumPattern", enumName, variant, bindings, bindingSpans, span: s };
   }
 
   // ── Expression parsing (precedence climbing) ──
@@ -1653,9 +1657,10 @@ export class Parser {
     this.expect(TokenKind.LParen);
     const params: Param[] = [];
     while (!this.at(TokenKind.RParen)) {
-      const name = this.expect(TokenKind.Ident).value;
+      const nameTok = this.expect(TokenKind.Ident);
+      const name = nameTok.value;
       const type = this.at(TokenKind.Colon) ? (this.advance(), this.parseType()) : null;
-      params.push({ name, type });
+      params.push({ name, type, span: this.span(nameTok) });
       if (!this.at(TokenKind.RParen)) this.expect(TokenKind.Comma);
     }
     this.expect(TokenKind.RParen);

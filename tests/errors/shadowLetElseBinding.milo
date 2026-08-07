@@ -1,0 +1,21 @@
+// @error: 'x' shadows an outer binding
+// `let ... else` bindings escape into the CURRENT scope (unlike `if let`) and
+// route through the same declare() path — nested one level inside an `if` so the
+// outer `x` (the function's own parameter) lives in an enclosing scope, this
+// must hit the shadowing branch, not the same-scope redeclaration branch, and
+// still point at the pattern's own binding site.
+enum Opt3 { Some3(i32), None3 }
+
+fn getVal(x: i32, o: Opt3): i32 {
+    if x > 0 {
+        let Opt3.Some3(x) = o else {
+            return 0
+        }
+        return x
+    }
+    return 0
+}
+
+fn main(): i32 {
+    return getVal(1, Opt3.Some3(4))
+}

@@ -1,0 +1,9 @@
+// @error: 'n' shadows an outer binding
+// A closure parameter shadowing an enclosing local used to be rejected with the
+// same bare, location-less diagnostic as the match-arm case: closure params are
+// declared without a span the same way function params were.
+pub fn main(): i32 {
+    let n = 5
+    let f = (n: i32): i32 => n + 1
+    return f(3)
+}

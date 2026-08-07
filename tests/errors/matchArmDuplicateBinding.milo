@@ -1,0 +1,12 @@
+// @error: variable 'a' already declared in this scope
+// Two bindings in the same pattern with the same name hit the same-scope
+// redeclaration branch of declare(), not the shadowing branch — must still
+// point at the offending (second) binding site, not print bare.
+enum Pair { Two(i32, i32) }
+
+fn main(): i32 {
+    let p = Pair.Two(1, 2)
+    match p {
+        Pair.Two(a, a) => { return a }
+    }
+}

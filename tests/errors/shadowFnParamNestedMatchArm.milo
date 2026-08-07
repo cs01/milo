@@ -1,0 +1,32 @@
+// @error: 'id' shadows an outer binding
+// Two levels deep: a match nested inside another match's arm rebinds `id`, which
+// is the outer function's own parameter. This mirrors the second real-world
+// occurrence of the shadow bug — `JSValue.Native(id)` nested inside
+// `fn evalExprFallback(prog, id: ExprId, ...)`, thousands of lines into a file,
+// with a diagnostic that carried no location at all.
+enum JSValue {
+    Native(i32),
+    Number(i32),
+}
+
+enum Op {
+    Wrap(i32),
+    Direct(i32),
+}
+
+fn evalExprFallback(id: i32, op: Op): i32 {
+    match op {
+        Op.Wrap(v) => {
+            var val = JSValue.Native(v)
+            match val {
+                JSValue.Native(id) => { return id }
+                JSValue.Number(id) => { return id }
+            }
+        }
+        Op.Direct(v) => { return v }
+    }
+}
+
+fn main(): i32 {
+    return evalExprFallback(1, Op.Direct(2))
+}

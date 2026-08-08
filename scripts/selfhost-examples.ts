@@ -142,9 +142,25 @@ results.sort((a, b) => a.file.localeCompare(b.file));
 
 const passing = results.filter(r => r.ok);
 const ran = passing.filter(r => r.bucket === "ran").length;
-console.log(`${passing.length}/${entries.length} examples build under milo-self (${ran} also ran clean, ${libs.length} library modules)\n`);
+const compileOnly = passing.filter(r => r.bucket === "compile-only");
+// "70/71 build" is the number that reads as success, and it is the weaker claim:
+// a build proves the frontend accepted the program, not that the code it emitted
+// is correct. The `??` double-free that broke examples/cli-tools/fmt.milo compiled
+// clean. So lead with the count that was actually EXECUTED, and print the
+// unverified remainder as its own line rather than folding it into the pass total.
+console.log(`${ran}/${entries.length} examples ran clean under milo-self`);
+console.log(`${compileOnly.length}/${entries.length} compiled but were NOT run (no \`// @run:\`) — codegen unverified`);
+if (passing.length < entries.length) {
+  console.log(`${entries.length - passing.length}/${entries.length} failed`);
+}
+console.log(`(${libs.length} library modules compile transitively)\n`);
 
 if (verbose) for (const r of passing) console.log(`  OK  ${r.bucket.padEnd(12)} ${r.file}`);
+else if (compileOnly.length) {
+  console.log("unverified (build-only):");
+  for (const r of compileOnly) console.log(`         ${r.file.replace(MILO_ROOT + "/", "")}`);
+  console.log("");
+}
 
 const byBucket = new Map<string, Outcome[]>();
 for (const r of results.filter(r => !r.ok)) {

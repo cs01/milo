@@ -82,6 +82,7 @@ closureMultiCapture
 closureMutCapture
 closureNoCapture
 closureStoredMove
+coalesceHeapPayload
 commandBuilder
 commandEnv
 commandStdioDirection

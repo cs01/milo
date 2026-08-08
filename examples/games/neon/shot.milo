@@ -1,3 +1,6 @@
+// @run: /tmp/milo-shot-neon 1
+// Absolute /tmp prefix on purpose: the example harnesses run from the repo root,
+// so a bare prefix would drop .ppm frames into the working tree.
 // Headless capture tool: runs the game with a scripted pilot and dumps frames as
 // binary PPM. Used to check the look without a display, and as a deterministic
 // smoke test for the whole simulation.

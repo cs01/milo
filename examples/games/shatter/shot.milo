@@ -1,3 +1,6 @@
+// @run: /tmp/milo-shot-shatter 1
+// Absolute /tmp prefix on purpose: the example harnesses run from the repo root,
+// so a bare prefix would drop .ppm frames into the working tree.
 // Headless capture: plays itself with a perfect paddle and dumps PPM frames.
 // Doubles as a deterministic smoke test for the whole simulation.
 //

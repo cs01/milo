@@ -1,3 +1,4 @@
+// @run:
 // Walk both dials across their whole range and look for an arc that jumps.
 //
 //   milo run examples/games/apsis/tools/sweepdials.milo

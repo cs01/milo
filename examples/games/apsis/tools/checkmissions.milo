@@ -1,3 +1,4 @@
+// @run:
 // Every mission, priced, headless.
 //
 //   milo run examples/games/apsis/tools/checkmissions.milo

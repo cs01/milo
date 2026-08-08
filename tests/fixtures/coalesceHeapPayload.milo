@@ -1,0 +1,65 @@
+// Regression: `??` on a payload that OWNS heap. Every other `??` fixture uses a
+// string literal, which is static — a bogus free of it is a silent no-op, so the
+// whole suite ran green over drop glue that freed the unwrapped payload while it
+// was still live. The payload here is built at runtime, so a double-free or an
+// early free corrupts the buffer that gets read back.
+
+fn mkOpt(n: i64): Option<string> {
+    var s: string = ""
+    for i in 0..n {
+        s = s + "ab"
+    }
+    return Option.Some(s)
+}
+
+fn mkRes(n: i64): Result<string, i64> {
+    var s: string = ""
+    for i in 0..n {
+        s = s + "xy"
+    }
+    return Result.Ok(s)
+}
+
+fn mkVec(n: i64): Option<Vec<i64>> {
+    var v: Vec<i64> = Vec.new()
+    for i in 0..n {
+        v.push(i * 3)
+    }
+    return Option.Some(v)
+}
+
+pub fn main(): void {
+    let a = mkOpt(8) ?? ""
+    print($"opt len={a.len} b0={a[0] as i64} last={a[a.len - 1] as i64}")
+
+    let b = mkRes(5) ?? ""
+    print($"res len={b.len} b0={b[0] as i64}")
+
+    // Defaulted arms: the heap payload never materializes, the default does.
+    let none: Option<string> = Option.None
+    var d: string = ""
+    for i in 0..3 {
+        d = d + "zz"
+    }
+    let c = none ?? d
+    print($"dflt len={c.len} b0={c[0] as i64}")
+
+    let v = mkVec(4) ?? Vec.new()
+    print($"vec len={v.len} v3={v[3]}")
+
+    // Reuse the allocator hard between the unwrap and the read: if the payload
+    // buffer was freed by the coalesce, these allocations reissue it.
+    var churn: string = ""
+    for i in 0..64 {
+        churn = churn + "DB"
+    }
+    print($"after churn len={a.len} b0={a[0] as i64}")
+    print($"churn len={churn.len}")
+}
+
+// @expect: opt len=16 b0=97 last=98
+// @expect: res len=10 b0=120
+// @expect: dflt len=6 b0=122
+// @expect: vec len=4 v3=9
+// @expect: after churn len=16 b0=97
+// @expect: churn len=128

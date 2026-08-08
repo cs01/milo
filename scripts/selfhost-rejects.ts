@@ -32,6 +32,7 @@ import { tmpdir } from "os";
 import { join, basename } from "path";
 import { parseExpectedError, parseExpectedRuntimeError } from "../tests/annotations";
 import { guardedRun } from "./guard";
+import { requireFreshSelfhost } from "./selfhost-stamp";
 
 const MILO_ROOT = join(import.meta.dir, "..");
 const MILO_SELF = join(MILO_ROOT, ".selfhost", "milo-self.bin");
@@ -47,10 +48,7 @@ const write = argv.includes("--write");
 const fi = argv.indexOf("--filter");
 const filter = fi >= 0 ? argv[fi + 1] : null;
 
-if (!existsSync(MILO_SELF)) {
-  console.error(`missing ${MILO_SELF} — run scripts/selfhost.sh first`);
-  process.exit(1);
-}
+requireFreshSelfhost();
 
 // "unmeasured" is not a verdict about the compiler — it means the guard killed the child
 // (watchdog or system memory pressure) before it could answer. Folding those into

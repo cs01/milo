@@ -19,6 +19,7 @@ import { readdirSync, statSync, readFileSync, mkdtempSync, existsSync } from "fs
 import { tmpdir } from "os";
 import { join } from "path";
 import { guardedRun } from "./guard";
+import { requireFreshSelfhost } from "./selfhost-stamp";
 
 const MILO_ROOT = join(import.meta.dir, "..");
 const MILO_SELF = join(MILO_ROOT, ".selfhost", "milo-self.bin");
@@ -37,10 +38,7 @@ const verbose = argv.includes("--verbose");
 const fi = argv.indexOf("--filter");
 const filter = fi >= 0 ? argv[fi + 1] : null;
 
-if (!existsSync(MILO_SELF)) {
-  console.error(`missing ${MILO_SELF} — run scripts/selfhost.sh first`);
-  process.exit(1);
-}
+requireFreshSelfhost();
 
 // First pattern to match a failure's output names its bucket. Unmatched failures land in
 // "other" and want triage — that bucket staying large means this list is out of date.

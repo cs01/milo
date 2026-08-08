@@ -16,6 +16,7 @@ import { tmpdir } from "os";
 import { join, basename } from "path";
 import { parseExpected, parseExpectedError, parseExpectedRuntimeError } from "../tests/annotations";
 import { guardedRun } from "./guard";
+import { requireFreshSelfhost } from "./selfhost-stamp";
 
 const MILO_ROOT = join(import.meta.dir, "..");
 const MILO_SELF = join(MILO_ROOT, ".selfhost", "milo-self.bin");
@@ -41,10 +42,7 @@ if (check && filter) {
   process.exit(2);
 }
 
-if (!existsSync(MILO_SELF)) {
-  console.error(`missing ${MILO_SELF} — run scripts/selfhost.sh first`);
-  process.exit(1);
-}
+requireFreshSelfhost();
 
 // Failure buckets, in match order. The first pattern that hits a fixture's
 // stderr names its bucket; unmatched failures land in "other" and want triage.

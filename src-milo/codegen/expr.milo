@@ -1869,6 +1869,33 @@ pub fn genPropagate(cg: &mut Cgen, inner: &ExprNode, locs: &Vec<Local>, sigs: &V
 }
 
 // `expr ?? default`: Some/Ok payload, else the default.
+// `??` moves the ok-payload out of its operand, or moves the default in. Zero the
+// slot the value came from so that slot's scope-end drop can't free a buffer the
+// result now owns. Emitted inside the branch that actually took the value, not
+// before the branch: on the default path the operand's other variant (a Result's
+// Err) still owns its payload and its drop must still fire, and on the ok path the
+// default was never evaluated so its variable is untouched.
+fn zeroMovedSource(cg: &mut Cgen, e: &ExprNode, payTy: &string, locs: &Vec<Local>) {
+    if !cgNeedsDrop(cg, payTy) {
+        return
+    }
+    match e.kind {
+        Expr.Ident(name) => {
+            if !hasLocal(locs, name) {
+                return
+            }
+            let loc = findLocal(locs, name)
+            // A ref param's pointee belongs to the caller — never zero through it.
+            if loc.isRef {
+                return
+            }
+            zeroStore(cg, loc.addr, loc.ty)
+        }
+        _ => {
+        }
+    }
+}
+
 pub fn genDefaultValue(cg: &mut Cgen, inner: &ExprNode, defaultE: &ExprNode, locs: &Vec<Local>, sigs: &Vec<CgFnSig>): Val {
     let v = genExpr(cg, inner, locs, sigs, "")
     let enumName = resolveEnumName(cg, resolveTyStr(cg, stripPercent(v.ty)))
@@ -1889,8 +1916,6 @@ pub fn genDefaultValue(cg: &mut Cgen, inner: &ExprNode, defaultE: &ExprNode, loc
     emit(cg, "  store " + enumTy + " " + v.v + ", ptr " + addr + "\n")
     let resAddr = nextTemp(cg)
     emit(cg, "  " + resAddr + " = alloca " + payLl + "\n")
-    let dv = genExpr(cg, defaultE, locs, sigs, payTy.clone())
-    emit(cg, "  store " + payLl + " " + dv.v + ", ptr " + resAddr + "\n")
     let tagPtr = nextTemp(cg)
     emit(cg, "  " + tagPtr + " = getelementptr " + enumTy + ", ptr " + addr + ", i32 0, i32 0\n")
     let tag = nextTemp(cg)
@@ -1899,8 +1924,9 @@ pub fn genDefaultValue(cg: &mut Cgen, inner: &ExprNode, defaultE: &ExprNode, loc
     let isOk = nextTemp(cg)
     emit(cg, "  " + isOk + " = icmp eq i32 " + tag + ", " + okTag.toString() + "\n")
     let okLbl = nextLabel(cg, "dflt.some")
+    let noneLbl = nextLabel(cg, "dflt.none")
     let endLbl = nextLabel(cg, "dflt.end")
-    emit(cg, "  br i1 " + isOk + ", label %" + okLbl + ", label %" + endLbl + "\n")
+    emit(cg, "  br i1 " + isOk + ", label %" + okLbl + ", label %" + noneLbl + "\n")
     emit(cg, okLbl + ":\n")
     let payPtr = nextTemp(cg)
     emit(cg, "  " + payPtr + " = getelementptr " + enumTy + ", ptr " + addr + ", i32 0, i32 1\n")
@@ -1910,6 +1936,15 @@ pub fn genDefaultValue(cg: &mut Cgen, inner: &ExprNode, defaultE: &ExprNode, loc
     let pv = nextTemp(cg)
     emit(cg, "  " + pv + " = load " + payLl + ", ptr " + fp + "\n")
     emit(cg, "  store " + payLl + " " + pv + ", ptr " + resAddr + "\n")
+    zeroMovedSource(cg, inner, payTy, locs)
+    emit(cg, "  br label %" + endLbl + "\n")
+    // The default is evaluated HERE, not before the branch: it may have side
+    // effects, and evaluating it eagerly also moved its source on the ok path
+    // where it is never used.
+    emit(cg, noneLbl + ":\n")
+    let dv = genExpr(cg, defaultE, locs, sigs, payTy.clone())
+    emit(cg, "  store " + payLl + " " + dv.v + ", ptr " + resAddr + "\n")
+    zeroMovedSource(cg, defaultE, payTy, locs)
     emit(cg, "  br label %" + endLbl + "\n")
     emit(cg, endLbl + ":\n")
     let r = nextTemp(cg)

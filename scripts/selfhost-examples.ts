@@ -23,10 +23,13 @@ import { guardedRun } from "./guard";
 const MILO_ROOT = join(import.meta.dir, "..");
 const MILO_SELF = join(MILO_ROOT, ".selfhost", "milo-self.bin");
 const CHILD_ENV = { ...process.env, MILO_ROOT };
-// Same budget as the fixture sweep: 4 workers x 1.5GB stays under the 8GB global cap
-// on a 16GB machine. Examples are bigger than fixtures, so the timeout is longer.
-const CONCURRENCY = Number(process.env.MILO_SWEEP_CONCURRENCY || 0) || 4;
-const COMPILE_MEM_MB = 1536;
+// Examples are far bigger than fixtures, and the cap covers the whole process tree —
+// clang -O2 on examples/games/flight/main.milo alone wants more than 1.5GB. At the
+// sweep's 1536MB that example reported `guard-memory` on every run, serial retry
+// included, which reads as a milo-self failure and is only this budget. 2 workers x
+// 3GB keeps N x cap under half of a 16GB host, the rule in CLAUDE.md.
+const CONCURRENCY = Number(process.env.MILO_SWEEP_CONCURRENCY || 0) || 2;
+const COMPILE_MEM_MB = 3072;
 const RUN_MEM_MB = 512;
 
 const argv = process.argv.slice(2);

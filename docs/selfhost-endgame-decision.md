@@ -3,7 +3,7 @@ system: selfhost-endgame-decision
 purpose: the precommitted rule that decides whether src-milo replaces src/ or freezes as proof, written before the census that feeds it
 key-files: scripts/selfhost-rejects.ts, scripts/selfhost-stamp.ts, docs/self-hosting.md
 update-when: the census runs and trips a threshold, or the endgame is decided
-last-verified: 2026-08-08 (census run: N=99, 51 buckets, top12=52%, singletons=31% — rules 1 and 2 both miss, rule 3 decides; classification column outstanding)
+last-verified: 2026-08-08 (census + classification complete; VERDICT: proof-only — misscoped+uncalled = 14/99, rule 3 required 50%)
 -->
 
 # Self-host endgame: the decision rule
@@ -91,7 +91,61 @@ spans `verifyCDecls` (8) + `checkCValue` (4) + `checkCLayout` (3) + `checkCSig`
 (3) + two `cOpaque` fixtures = **20 of 99 in one feature area**. If rule 3 lands
 on replacement, that cluster is the obvious first pass.
 
-Attribution method, for whoever repeats this: patch the diagnostic emitter to
+## Verdict (2026-08-08): proof-only
+
+Rule 3's column, measured over all 51 buckets:
+
+| state | fixtures | buckets |
+|---|---|---|
+| `uncalled` | **0** | 0 |
+| `misscoped` | **14** | 8 |
+| `absent` | **85** | 43 |
+| `unknown` | 0 | 0 |
+
+`misscoped + uncalled = 14/99 = 14%`. Rule 3 requires ≥50%. **Proof-only:
+freeze `src-milo/` at the fixpoint, bank it, stop paying the sync tax.**
+
+The verdict survives the most generous defensible re-reading. 21 of the 85
+`absent` fixtures (9 buckets) are `absent [live-site]` — the enclosing pass
+exists and runs, only the rule is unwritten, which is arguably as cheap as
+`misscoped`. Counting those as cheap gives `35/99 = 35%`, still short of 50.
+Strictly-absent, needing a genuinely new pass: **64 fixtures in 34 buckets.**
+
+`project_srcmilo_varinfo_byvalue_hazard` predicted `misscoped` would dominate.
+It did not. That prediction was the main reason to expect the cheap outcome, and
+measuring it is what this census was for.
+
+### The one fact that argues the other way, recorded rather than acted on
+
+The 85-fixture `absent` mass is not 85 scattered defects. It concentrates in
+whole features `src-milo` never implemented: C-decl verification (8), Send/Sync
+(5), `@pure` (5), contracts (7 across buckets 13/16/17/19), extern/repr
+validation (14). That is a different cost shape from a long tail of one-offs,
+and it is the strongest available argument for the replacement endgame.
+
+It is recorded here and deliberately NOT used to override the rule. The rule was
+written before the data precisely so this kind of after-the-fact reading could
+not quietly decide the outcome. Reopening the precommitment is legitimate, but
+it has to be an explicit decision made in the open, not a reinterpretation.
+
+### Known soft spot in the column
+
+Bucket 10 (`checkCallSiteExclusivity`, 3 fixtures) is the one place static
+reading and the manifest disagree: the pass exists, is called, and by code
+reading *should* reject `viewAliasesContainerArg` / `mutViewAliasesContainerArg`
+— yet the census measured both as accepted. The fact is settled (they are
+accepted); only the cause is not. It cannot move the verdict: 3 fixtures against
+a 36-fixture gap.
+
+The classification column is code reading, NOT empirically verified — the
+classifying agent could not build `milo-self` at all, because of the guard bug
+fixed in `91479476`. Re-running it now that guarded builds work would firm up
+the column, but the verdict is not sensitive at this margin: `misscoped` would
+have to be under-counted by 3.5x to reach 50.
+
+## Attribution method
+
+For whoever repeats this: patch the diagnostic emitter to
 append a stack trace, then run the oracle on each fixture. Every diagnostic then
 carries its own emitting frame. Grepping the message text back to a source line
 cannot disambiguate two sites that emit the same string, and guessing from the

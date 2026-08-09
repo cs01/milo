@@ -3,7 +3,7 @@ system: selfhost-endgame-decision
 purpose: the precommitted rule that decides whether src-milo replaces src/ or freezes as proof, written before the census that feeds it
 key-files: scripts/selfhost-rejects.ts, scripts/selfhost-stamp.ts, docs/self-hosting.md
 update-when: the census runs and trips a threshold, or the endgame is decided
-last-verified: 2026-08-07 (rule written; census not yet run — N unmeasured)
+last-verified: 2026-08-08 (census run: N=99, 51 buckets, top12=52%, singletons=31% — rules 1 and 2 both miss, rule 3 decides; classification column outstanding)
 -->
 
 # Self-host endgame: the decision rule
@@ -23,9 +23,14 @@ is the tar pit — transcribe forever, never delete `src/`, carry two compilers.
 
 ## What gets measured
 
-236 negative tests. 118 in the soundness manifest. The remaining 118 is the
-pre-split number and **is not the denominator** — it mixes three different
-backlogs. Split first:
+**255** negative tests — `tests/errors/` (236) plus `tests/runtime-errors/` (19).
+118 behave correctly under milo-self, so **137** are outstanding. (The number
+that circulated before this census was "236 tests, 118 outstanding"; both halves
+were wrong, and they were wrong in opposite directions, which is why the ratio
+looked plausible.)
+
+That 137 is the pre-split number and **is not the denominator** — it mixes three
+different backlogs. Split first:
 
 | lane | meaning | counts toward the decision? |
 |---|---|---|
@@ -33,7 +38,10 @@ backlogs. Split first:
 | wrong-message | the pass fired, the diagnostic is off | no — cheap, separate list |
 | build-failed / over-reject | feature gap (`contractRequiresFail`, i32/i64) | no — not a checker gap at all |
 
-**N = silent accepts only.** Every threshold below is a fraction of N, not of 118.
+**N = silent accepts only.** Every threshold below is a fraction of N, not of 137.
+
+Measured 2026-08-08: **N = 99** (96 `accepted` + 3 `did-not-trap`), 37
+`wrong-message`, 1 `build-failed`. Zero `unmeasured`. 96 + 3 + 37 + 1 = 137. ✓
 
 Bucket key is the **`src/checker.ts` emission site** — the function in the
 oracle that produces the diagnostic milo-self failed to produce. Not the error
@@ -51,7 +59,7 @@ Evaluated in order. First match wins.
    scheduled passes, not an open-ended transcription. Commit, schedule them,
    plan to delete `src/`.
 2. **Top bucket <10 AND singletons ≥40% of N** → **proof-only**. A long
-   singleton tail is 118 independent defects wearing a trenchcoat. Freeze at the
+   singleton tail is N independent defects wearing a trenchcoat. Freeze at the
    fixpoint.
 3. **Neither** → tiebreak on the census's third column, not on gut. If ≥50% of N
    sits in buckets marked `misscoped` or `uncalled` — wiring an existing pass,
@@ -60,6 +68,34 @@ Evaluated in order. First match wins.
 Rule 3 exists because rules 1 and 2 do not partition the space (13 buckets at
 82%, or a top bucket of 15 with 55 singletons, match neither), and an unhandled
 case is where the motivated reading gets back in.
+
+**Outcome, 2026-08-08.** Rule 0 misses (N=99). Rule 1 misses — 51 buckets, top 12
+cover 51/99 = **52%**, well short of 80%. Rule 2 misses — top bucket is 8 (<10),
+but singletons are 31 buckets = **31%** of N, short of 40%. **Rule 3 decides.**
+The shape landed in exactly the gap the first two arms left open, which is the
+argument for having written a third arm before seeing data rather than after.
+
+## Bucket shape (2026-08-08)
+
+51 buckets over N=99. 83 of the 96 `accepted` emit from `src/checker.ts`; the
+other 13 emit from `verifyCDecls` in `codegen.ts`/`main.ts` (8), `parser.ts` (3),
+`resolver.ts` (1), `lower.ts` (1).
+
+Bucket key is the emitting **function**, not `function:line` — `checkCValue`
+emitting from four lines is one missing pass, not four. The exception is
+`checkProgram` and its inline `<anonymous>` closures, where the checker top level
+inlines genuinely distinct features, so there the line *is* the feature.
+
+Largest coherent theme is not any single bucket: C-FFI attribute verification
+spans `verifyCDecls` (8) + `checkCValue` (4) + `checkCLayout` (3) + `checkCSig`
+(3) + two `cOpaque` fixtures = **20 of 99 in one feature area**. If rule 3 lands
+on replacement, that cluster is the obvious first pass.
+
+Attribution method, for whoever repeats this: patch the diagnostic emitter to
+append a stack trace, then run the oracle on each fixture. Every diagnostic then
+carries its own emitting frame. Grepping the message text back to a source line
+cannot disambiguate two sites that emit the same string, and guessing from the
+message is how this becomes the histogram it was designed not to be.
 
 ## Deliverable that the rule consumes
 

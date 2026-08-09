@@ -1,6 +1,10 @@
 // std/sqlite — SQLite3 database bindings
 //
-// Requires libsqlite3. Link flag added automatically by compiler.
+// Requires libsqlite3, linked via the @link below. The driver used to add the
+// flag by grepping emitted IR for "@sqlite3_" against a hardcoded Homebrew
+// path — which put one vendor's API name into a general-purpose compiler's
+// vocabulary, matched any symbol that merely contained that substring, and
+// resolved to a path that only exists on an arm64 Mac with Homebrew.
 //
 //   let db = dbOpen("app.db")!
 //   dbExec(db, "CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)")!
@@ -12,6 +16,7 @@
 //   dbFinalize(stmt)
 //   dbClose(db)
 
+@link("sqlite3")
 pub extern fn sqlite3_open(filename: *u8, db: *u8): i32
 
 pub extern fn sqlite3_close(db: *u8): i32

@@ -860,10 +860,45 @@ const STATIC_DEP_PROBES: Record<string, string> = {
 // Resolve `-lfoo` to a link spec. Dynamic is the default because a system dylib
 // picks up OpenSSL security fixes without a rebuild; --static-deps trades that away
 // for a binary that runs on machines with no Homebrew/openssl installed at all.
+// Where a given library's files actually sit on darwin. The caller's prefix is
+// tried first so every existing call keeps its exact behaviour; the rest is
+// Homebrew's KEG layout, which is a property of the package manager and not of
+// any particular vendor — brew installs each formula under opt/<formula> and
+// only symlinks some of it into the flat prefix. `.a` archives frequently are
+// not symlinked, which is why a flat-prefix-only search finds the dylib and
+// misses the archive.
+//
+// The trailing-digit strip is the one heuristic here: a library's -l name and
+// its formula name differ often enough to matter (`-lsqlite3` ships in the
+// `sqlite` formula), and dropping trailing digits covers that case without the
+// compiler learning any vendor's name.
+function darwinLibDirs(name: string, darwinPrefix: string): string[] {
+  const stripped = name.replace(/\d+$/, "");
+  return [
+    `${darwinPrefix}/lib`,
+    `/opt/homebrew/opt/${name}/lib`,
+    ...(stripped && stripped !== name ? [`/opt/homebrew/opt/${stripped}/lib`] : []),
+    `/opt/homebrew/lib`,
+  ];
+}
+
 function libSpec(names: string[], darwinPrefix: string, target: TargetInfo, staticDeps: boolean): string {
   const flags = names.map((n) => `-l${n}`).join(" ");
   if (!staticDeps) {
-    return target.os === "darwin" ? ` -L${darwinPrefix}/lib ${flags}` : ` ${flags}`;
+    if (target.os !== "darwin") return ` ${flags}`;
+    // Emit a -L only for a directory that actually holds the requested library.
+    // Adding every candidate looks harmless and is not: `/opt/homebrew/lib`
+    // always exists, so a blanket -L puts Homebrew's copies of common libraries
+    // (libz, libc++, …) ahead of the SDK's on the search path for every binary
+    // we link, whether or not it asked for anything from Homebrew.
+    const dirs = [...new Set(names.map((n) => {
+      const dir = darwinLibDirs(n, darwinPrefix)
+        .find((d) => existsSync(`${d}/lib${n}.dylib`) || existsSync(`${d}/lib${n}.a`));
+      // Nothing found: fall back to the caller's prefix, which is what this
+      // returned before there were any candidates, and let ld report it.
+      return dir ?? `${darwinPrefix}/lib`;
+    }))];
+    return ` ${dirs.map((d) => `-L${d}`).join(" ")} ${flags}`;
   }
   const transitive = names.map((n) => staticTransitiveDeps(n, target)).join("");
   if (target.os !== "darwin") {
@@ -873,11 +908,19 @@ function libSpec(names: string[], darwinPrefix: string, target: TargetInfo, stat
   }
   // ld64 has no -Bstatic; naming the archive directly is the supported way to force
   // a static member pull while everything else stays dynamic.
-  const archives = names.map((n) => `${darwinPrefix}/lib/lib${n}.a`);
-  const missing = archives.filter((a) => !existsSync(a));
+  const archives: string[] = [];
+  const missing: string[] = [];
+  for (const n of names) {
+    const found = darwinLibDirs(n, darwinPrefix).map((d) => `${d}/lib${n}.a`).find((a) => existsSync(a));
+    if (found) archives.push(found);
+    // Report the -l name, not one guessed path: the searched paths are several
+    // and naming only the first sends people to install something already present
+    // somewhere else. The old message said "try 'brew install homebrew'".
+    else missing.push(`lib${n}.a`);
+  }
   if (missing.length) {
     console.error(`error: --static-deps needs static archives that aren't installed: ${missing.join(", ")}`);
-    console.error(`hint: Homebrew ships them alongside the dylibs — try 'brew install ${basename(darwinPrefix)}'`);
+    console.error(`hint: Homebrew ships them alongside the dylibs — 'brew install' the formula providing ${missing.join(", ")}`);
     process.exit(1);
   }
   return " " + archives.join(" ") + transitive;
@@ -933,9 +976,9 @@ function detectLibs(ir: string, target: TargetInfo, staticDeps = false): string 
   if (!libs.includes("-lcrypto") && !libs.includes("libcrypto.a") && (ir.includes("@SHA256") || ir.includes("@MD5"))) {
     libs += libSpec(["crypto"], openssl, target, staticDeps);
   }
-  if (ir.includes("@sqlite3_")) {
-    libs += libSpec(["sqlite3"], "/opt/homebrew/opt/sqlite", target, staticDeps);
-  }
+  // sqlite3 used to be detected here by IR substring. std/sqlite now declares
+  // `@link("sqlite3")` on its first extern, so the flag comes from the binding
+  // that needs it — the mechanism the note below says every case should use.
   // JavaScriptCore: a system framework on darwin (zero install); on linux it's the
   // heavier libjavascriptcoregtk, so we only auto-link on darwin.
   if (ir.includes("@JSGlobalContextCreate") || ir.includes("@JSEvaluateScript")) {

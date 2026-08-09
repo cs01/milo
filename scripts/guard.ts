@@ -277,7 +277,20 @@ export function guardedRun(cmd: string, args: string[], opts: GuardOpts = {}): P
   const maxTicks = Math.ceil(timeoutMs / 250) + 40;
   // Pressure check mirrors the node watchdog: this layer must also fire when a
   // compressed runaway hides from RSS (level 4 = critical → kill own group
-  // immediately; level >= 2 sustained 2s → kill). Missing sysctl (linux) reads 1.
+  // immediately; sustained level >= 2 → kill). Missing sysctl (linux) reads 1.
+  //
+  // The sustain count is templated from the SAME constant the node watchdog
+  // uses. It was a hardcoded 8 here while the node side read
+  // PRESSURE_SUSTAIN_TICKS, so MILO_GUARD_PRESSURE_SUSTAIN_TICKS moved only one
+  // of the two layers. On a host sitting at level 2 (this dev Mac at idle with a
+  // browser resident) every guarded run then died at 8 ticks = 2s, exit 137, no
+  // stderr, whatever the operator set — five consecutive build attempts lost,
+  // and a census that could not be run at all.
+  //
+  // Default moves 8 -> 10 ticks (2s -> 2.5s of SUSTAINED warning). That is the
+  // only relaxation: the RSS cap, the ulimit -v/-t backstops, and the immediate
+  // level-4 critical kill are all untouched, and level 4 is the state that
+  // actually precedes an OS-killing runaway.
   const ulimits = `ulimit -t ${cpuSec} 2>/dev/null; ulimit -v ${virtualLimitKb} 2>/dev/null; ulimit -d ${virtualLimitKb} 2>/dev/null
 pgid=$$
 (
@@ -288,7 +301,7 @@ pgid=$$
     lvl=$(sysctl -n kern.memorystatus_vm_pressure_level 2>/dev/null || echo 1)
     case "$lvl" in (*[!0-9]*|"") lvl=1;; esac
     if [ "$lvl" -ge 2 ]; then warn=$((warn+1)); else warn=0; fi
-    if [ "\${rss:-0}" -gt ${limitKb} ] || [ "$t" -ge ${maxTicks} ] || [ "$lvl" -ge 4 ] || [ "$warn" -ge 8 ]; then
+    if [ "\${rss:-0}" -gt ${limitKb} ] || [ "$t" -ge ${maxTicks} ] || [ "$lvl" -ge 4 ] || [ "$warn" -ge ${PRESSURE_SUSTAIN_TICKS} ]; then
       kill -9 -"$pgid" 2>/dev/null
       exit 0
     fi

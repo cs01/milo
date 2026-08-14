@@ -15,6 +15,10 @@ import { join } from "path";
 
 const MILO = join(import.meta.dir, "..", "src", "main.ts");
 const dir = mkdtempSync(join(tmpdir(), "milo-sanitize-"));
+// LeakSanitizer rides along with ASan on Linux but not macOS, and a leaked allocation in
+// a two-line program would make these tests fail on one platform for a reason none of
+// them are about.
+const ENV = { ...process.env, ASAN_OPTIONS: "detect_leaks=0" };
 
 // A pointer captured before a reallocating push, read after. Nothing in safe Milo can
 // express this, which is the point: it is the shape `unsafe` exists to let through and
@@ -60,7 +64,7 @@ test("--sanitize composes with -g (attribute group precedes !dbg)", () => {
   // LLVM requires metadata attachments last; `#0 !dbg !N {` parses, `!dbg !N #0 {` does not.
   expect(ir).toMatch(/^define [^\n]* #0 !dbg !\d+ \{$/m);
   // And it has to survive the verifier, which the emit path alone would not prove.
-  execSync(`bun ${MILO} run -g --sanitize ${src}`, { encoding: "utf-8" });
+  execSync(`bun ${MILO} run -g --sanitize ${src}`, { encoding: "utf-8", env: ENV });
 });
 
 test("a --sanitize binary carries load/store instrumentation, not just the runtime", () => {
@@ -68,7 +72,10 @@ test("a --sanitize binary carries load/store instrumentation, not just the runti
   const bin = join(dir, "sym.bin");
   writeFileSync(src, "fn main() { print(\"ok\") }\n");
   execSync(`bun ${MILO} build --sanitize ${src} -o ${bin}`, { encoding: "utf-8" });
-  const syms = execSync(`nm -u ${bin}`, { encoding: "utf-8" });
+  // `nm`, not `nm -u`: clang links libasan statically for executables on Linux, so the
+  // interesting symbols are DEFINED there and undefined only on macOS. Asking for the
+  // name in any form is the check that means the same thing on both.
+  const syms = execSync(`nm ${bin}`, { encoding: "utf-8" });
   // __asan_init alone is what a runtime-only link looks like — the bug this guards.
   expect(syms).toContain("asan_init");
   expect(syms).toMatch(/asan_report_(load|store)/);
@@ -79,7 +86,7 @@ test("--sanitize reports a use-after-free read", () => {
   writeFileSync(src, UAF);
   let out = "";
   try {
-    out = execSync(`bun ${MILO} run --sanitize ${src} 2>&1`, { encoding: "utf-8" });
+    out = execSync(`bun ${MILO} run --sanitize ${src} 2>&1`, { encoding: "utf-8", env: ENV });
   } catch (e: any) {
     out = (e.stdout ?? "") + (e.stderr ?? "");
   }

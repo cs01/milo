@@ -436,7 +436,12 @@ const ASAN_REPORT = /ERROR: AddressSanitizer: ([a-z-]+)/;
 // Execute a generated program under both oracles. `--sanitize` does not change what the
 // program prints, so the stdout comparison the caller does is unaffected by it.
 function runProgram(file: string): Run & { asan: string | null } {
-  const r = sh(`bun ${MILO} run ${ASAN ? "--sanitize " : ""}${file}`, { MallocScribble: "1" });
+  // detect_leaks=0: LeakSanitizer rides along with ASan on Linux (not macOS) and a leak
+  // is not what this harness grades. Left on, a leaking generated program exits nonzero
+  // on Linux only and lands as a bogus miscompile, so CI would go red for the wrong
+  // reason on one platform. Leaks have their own gate (scripts/leak-check.ts).
+  const r = sh(`bun ${MILO} run ${ASAN ? "--sanitize " : ""}${file}`,
+    { MallocScribble: "1", ASAN_OPTIONS: "detect_leaks=0" });
   const m = ASAN_REPORT.exec(r.stderr);
   return { ...r, asan: m ? m[1]! : null };
 }

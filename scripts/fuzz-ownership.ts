@@ -446,6 +446,121 @@ const SHAPES: Shape[] = [
     },
   },
 
+  {
+    // `match` as a STATEMENT, not as the value of a binding. The expression form was
+    // already generated; this is the same rule reached through a different node, and
+    // match arms are where two separate ownership bugs have lived (a borrow through
+    // `match` on a reference, and a move in one arm the other arm did not know about).
+    name: "move-through-match-stmt",
+    apply(p) {
+      const live = p.live();
+      if (live.length === 0) return false;
+      const s = pick(live), o = p.fresh("mo");
+      p.emit(`let ${o}: Option<string> = Option.Some(${s.ref})`);
+      p.take(s);
+      p.open(`match ${o} {`);
+      p.open(`Option.Some(x) => {`);
+      p.emit(`print(consume(x))`);
+      p.close();
+      p.open(`Option.None => {`);
+      p.emit(`print("none")`);
+      p.close();
+      p.close();
+      // Always Some, so only the first arm runs — the fork is for the checker, not the
+      // program. The other arm still has to type-check against a value already moved.
+      p.expected.push(String(s.word.length));
+      return true;
+    },
+  },
+  {
+    // `if let` binds out of the scrutinee, consuming it. The binding is live only
+    // inside the block, which is the part a checker can get wrong in the quiet
+    // direction: leaving it live afterwards, or dropping it twice on the way out.
+    name: "move-through-if-let",
+    apply(p) {
+      const live = p.live();
+      if (live.length === 0) return false;
+      const s = pick(live), o = p.fresh("io");
+      p.emit(`let ${o}: Option<string> = Option.Some(${s.ref})`);
+      p.take(s);
+      p.open(`if let Option.Some(y) = ${o} {`);
+      p.emit(`print(y)`);
+      p.close();
+      p.expected.push(s.word);
+      return true;
+    },
+  },
+  {
+    // `let ... else` binds into the ENCLOSING scope on the success path and must
+    // diverge on the other, so the payload outlives the statement that unwrapped it.
+    // That is a different lifetime shape from `if let` and the only one of the two
+    // where the bound value is still usable on the next line.
+    name: "move-through-let-else",
+    apply(p) {
+      const live = p.live();
+      if (live.length === 0) return false;
+      const s = pick(live), o = p.fresh("lo"), v = p.fresh("le");
+      p.emit(`let ${o}: Option<string> = Option.Some(${s.ref})`);
+      p.take(s);
+      p.open(`let Option.Some(${v}) = ${o} else {`);
+      p.emit(`return`);
+      p.close();
+      p.slots.push({ ref: v, word: s.word, live: true });
+      return true;
+    },
+  },
+  {
+    // A move inside a loop body, of a value the body itself declares. The checker
+    // rejects moving a value declared OUTSIDE the loop (it would run twice), so this
+    // is the legal half of that rule — and the half that has to keep working. Two
+    // iterations, because a drop that runs once for a value created twice is exactly
+    // the mistake this catches.
+    name: "loop-local-move",
+    apply(p) {
+      const n = p.fresh("n"), w = p.fresh("lw"), word = pick(WORDS);
+      p.emit(`var ${n} = 0`);
+      p.open(`while ${n} < 2 {`);
+      p.emit(`let ${w} = "${word}"`);
+      p.emit(`print(consume(${w}))`);
+      p.emit(`${n} = ${n} + 1`);
+      p.close();
+      p.expected.push(String(word.length), String(word.length));
+      return true;
+    },
+  },
+  {
+    // A closure capturing by reference and called immediately. Deliberately does not
+    // escape: an escaping closure that captures an owned value is a known-open hole
+    // (docs/backlog.md, indirect closure escape), and a generator that reproduced it
+    // every run would turn this harness into a permanent red light instead of a
+    // detector. Capture-and-borrow is the part that is supposed to work.
+    name: "borrow-in-closure",
+    apply(p) {
+      const live = p.live();
+      if (live.length === 0) return false;
+      const s = pick(live), f = p.fresh("f");
+      p.emit(`let ${f} = () => borrow(${s.ref})`);
+      p.emit(`print(${f}())`);
+      p.expected.push(String(s.word.length));
+      return true;
+    },
+  },
+  {
+    // `sortByKey` is the ONE exemption to move-out-of-borrow in the whole checker
+    // (checker.ts, the sortByKey extractor depth counter). A hardcoded carve-out with
+    // no rule behind it is worth generating against on principle. Declines unless the
+    // vec's lengths are all distinct, so the resulting order is predictable without
+    // assuming the sort is stable.
+    name: "sort-by-key",
+    apply(p) {
+      const filled = p.filledVecs().filter(v => v.words.length > 1);
+      const q = filled.find(v => new Set(v.words.map(w => w.length)).size === v.words.length);
+      if (!q) return false;
+      p.emit(`${q.name}.sortByKey((e: &string) => e.len())`);
+      q.words.sort((a, b) => a.length - b.length);
+      return true;
+    },
+  },
 ];
 
 // ── generation ────────────────────────────────────────────────────────────────

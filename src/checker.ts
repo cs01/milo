@@ -112,11 +112,6 @@ export interface VarInfo {
   // statement ends) — so a binding can only ever adopt a width at its FIRST
   // read, never retroactively after an i32 use was already committed.
   flexInt?: { leaves: Expr[]; valueExpr: Expr };
-  // The closure literal this binding was initialized with, if any. A closure that
-  // escapes (returned by identifier) must own its captures; the Return path uses
-  // this to promote the underlying literal to `move` even when the return value is
-  // the binding, not the literal itself (`let f = ...; return f`).
-  boundClosure?: Expr;
 }
 
 // Builtins that may realloc, free, or shift collection memory — illegal on a
@@ -2072,7 +2067,7 @@ export class TypeChecker {
 
     // Also needs the finished maps: `closureCaptures` is filled as each closure body is
     // checked, and the auto-`move` promotions have all settled by now.
-    this.checkStoredClosures(program);
+    this.checkEscapingClosures(program);
 
     // File-level `pub` visibility: a reference to a non-`pub` decl defined in
     // another file is an error. Run last so it never masks a more basic type error.
@@ -2654,24 +2649,85 @@ export class TypeChecker {
   // `assert` is here because trapping is not an effect under this definition.
   private static readonly PURE_BUILTINS = new Set(["format", "max", "min", "assert"]);
 
-  // A closure without `move` captures its environment BY REFERENCE, so it is only
-  // meaningful while the frame owning those locals is alive. Returning one is already
-  // handled — the Return path promotes it to `move` so the captures become heap-owned.
-  // But a closure stashed inside a struct or a collection escapes by a side door that
-  // check never sees: the AGGREGATE is what leaves the function, and the closure rides
-  // along still pointing at the dead frame. That was a real use-after-return in safe
-  // code (silent garbage at -O0, a hang at -O2, invisible to ASAN because the capture
-  // lives on the stack).
+  // Does `fnName` KEEP its idx-th argument past the call? A fn-typed parameter that is
+  // only ever CALLED is consumed during the call and is safe to hand a borrowing closure;
+  // one that is stored, returned, or forwarded to something that stores it is not. The
+  // distinction falls out of the AST for free: `g(1)` parses as `Call{func:"g"}` and
+  // contributes no `Ident` node at all, so "appears as an Ident anywhere in the body" is
+  // exactly "used as a value rather than called".
   //
-  // Rejecting the STORE needs no escape analysis, which is the whole point: we cannot
-  // tell whether the aggregate escapes, so we assume it does. `move` is the escape
-  // hatch and is what the diagnostic points at.
-  private checkStoredClosures(program: Program): void {
+  // This is the *property* the `sortByKey` carve-out approximates with a name (see
+  // `keyExtractorDepth`) — computed here instead of annotated, which is why a user's own
+  // non-retaining combinator gets the same treatment std's does.
+  //
+  // Every unknown answers YES: no body, an extern, a variadic slot past the declared
+  // params, or a cycle in the forwarding graph. A wrong NO is a use-after-free.
+  private retainsParam(fns: Map<string, Function>, fnName: string, idx: number, seen: Set<string>): boolean {
+    const key = `${fnName}#${idx}`;
+    if (seen.has(key)) return true;
+    seen.add(key);
+    const fn = fns.get(fnName);
+    if (!fn || fn.isExtern || !fn.body) return true;
+    const param = fn.params[idx];
+    if (!param) return true;
+    let retained = false;
+    const walk = (node: unknown): void => {
+      if (retained || !node || typeof node !== "object") return;
+      if (Array.isArray(node)) { for (const x of node) walk(x); return; }
+      const n = node as Record<string, unknown> & { kind?: string };
+      if (n.kind === "Ident" && n.name === param.name) { retained = true; return; }
+      // Forwarding: `fn outer(g) { each(g) }` keeps `g` only if `each` does. Without this
+      // a one-line wrapper would be indistinguishable from a store.
+      if (n.kind === "Call" && Array.isArray(n.args)) {
+        const args = n.args as Expr[];
+        for (let i = 0; i < args.length; i++) {
+          const a = args[i]!;
+          if (a.kind === "Ident" && a.name === param.name) {
+            if (this.retainsParam(fns, n.func as string, i, seen)) { retained = true; return; }
+          } else walk(a);
+        }
+        return;
+      }
+      for (const k of Object.keys(n)) { if (k !== "span" && k !== "type") walk(n[k]); }
+    };
+    walk(fn.body);
+    return retained;
+  }
+
+  // A closure that captures by reference is a pointer into the frame it was written in.
+  // It is safe to CALL and unsafe to KEEP, so this pass rejects every route by which one
+  // can outlive that frame. All five were live use-after-frees in safe code — silent
+  // garbage at -O0, a hang or a SIGKILL at -O2, and invisible to ASan because the capture
+  // lives on the stack:
+  //
+  //     Box { f: g }         store into an aggregate       (closed 2026-07-31)
+  //     b.f = g              assign into a place
+  //     wrap(g)              hand to a fn that keeps it
+  //     wrap((x) => x + n)   the same, when the capture is a `var` — the call-site
+  //                          auto-`move` declines there because move-capturing would
+  //                          drop the write-back, so the literal escaped unpromoted
+  //     return g             hand to the caller
+  //
+  // The last one used to be PROMOTED rather than rejected: the Return path flipped the
+  // closure to `move` so its captures became heap-owned. That was unsound in a way the
+  // reject is not, because the promotion happened at the `return` — after the move
+  // checker had already walked the body. `let s = "…"; let f = () => s.len(); print(s);
+  // return f` moved `s` into the closure's env at the LITERAL and printed an empty line
+  // for `print(s)`, with no diagnostic. Rejecting needs no such retroactive edit.
+  //
+  // Rejecting needs no escape analysis either, which is the point: we cannot tell whether
+  // an aggregate escapes, so we assume it does. `move` is the escape hatch — it works
+  // even for a `var` capture, at the cost of dropping the write-back — and it is what
+  // every diagnostic here names.
+  private checkEscapingClosures(program: Program): void {
     const seen = new Set<string>();
+    const fns = new Map<string, Function>();
+    for (const f of [...program.functions, ...this.monomorphizedFns]) fns.set(f.name, f);
+    const globals = new Set(program.globals.map(g => g.name));
     // Approximate scoping on purpose: one flat map per body, so a closure bound by
     // `let f = …` is still recognized when `f` is stored later. Shadowing can only make
     // this reject something it would otherwise allow, never the reverse.
-    const check = (value: Expr, bound: Map<string, Expr>, what: string) => {
+    const check = (value: Expr, bound: Map<string, Expr>, message: (names: string) => string, holder: string) => {
       let c: Expr | null = null;
       if (value.kind === "Closure") c = value;
       else if (value.kind === "Ident") c = bound.get(value.name) ?? null;
@@ -2683,9 +2739,10 @@ export class TypeChecker {
       if (seen.has(key)) return;
       seen.add(key);
       const names = caps.map(c => `'${c.name}'`).join(", ");
-      this.error(`cannot store a closure that captures ${names} by reference`, span,
-        `this closure points at locals in the current frame, and the ${what} holding it can outlive them — write 'move ${caps.length === 1 ? "" : ""}(…) => …' so the closure owns its captures instead`);
+      this.error(message(names), span,
+        `this closure points at locals in the current frame, and ${holder} can outlive them — write 'move (…) => …' so the closure owns its captures instead`);
     };
+    const cannotStore = (names: string) => `cannot store a closure that captures ${names} by reference`;
     // Structural walk rather than a per-node switch: a missing arm here would silently
     // skip a whole subtree, which is exactly the class of bug this pass exists to close.
     const visit = (node: unknown, bound: Map<string, Expr>) => {
@@ -2693,30 +2750,79 @@ export class TypeChecker {
       if (Array.isArray(node)) { for (const n of node) visit(n, bound); return; }
       const n = node as Record<string, unknown> & { kind?: string };
       switch (n.kind) {
-        case "LetDecl": case "VarDecl":
-          if ((n.value as Expr | undefined)?.kind === "Closure") bound.set(n.name as string, n.value as Expr);
+        case "LetDecl": case "VarDecl": {
+          const v = n.value as Expr | undefined;
+          if (v?.kind === "Closure") bound.set(n.name as string, v);
+          // `let g = f` aliases the same closure. Without this the alias launders a
+          // borrowing closure past every check below — `let g = f; return g` printed
+          // garbage for exactly that reason.
+          else if (v?.kind === "Ident" && bound.has(v.name)) bound.set(n.name as string, bound.get(v.name)!);
           break;
+        }
         case "StructLit":
-          for (const f of n.fields as { name: string; value: Expr }[]) check(f.value, bound, "struct");
+          for (const f of n.fields as { name: string; value: Expr }[]) check(f.value, bound, cannotStore, "the struct holding it");
           break;
         case "ArrayLit":
-          for (const el of n.elements as Expr[]) check(el, bound, "array");
+          for (const el of n.elements as Expr[]) check(el, bound, cannotStore, "the array holding it");
           break;
         case "ArrayRepeat":
-          check(n.value as Expr, bound, "array");
+          check(n.value as Expr, bound, cannotStore, "the array holding it");
           break;
-        case "MethodCall":
-          // The collection-storing methods. A closure passed to `map`/`each`/`sortBy` is
-          // called and dropped within the call, so those stay legal — that is the common
-          // case and rejecting it would gut the combinators.
-          if (["push", "insert", "set"].includes(n.method as string)) {
-            for (const a of n.args as Expr[]) check(a, bound, "collection");
+        case "Return":
+          if (n.value) check(n.value as Expr, bound,
+            names => `cannot return a closure that captures ${names} by reference`, "the caller");
+          break;
+        case "Assign": {
+          // Assigning to a bare local is fine — the local dies with the same frame the
+          // captures live in. A field, an element, or a global is a place that outlives it.
+          const t = n.target as Expr;
+          const where = t.kind === "FieldAccess" ? "the struct holding it"
+            : t.kind === "IndexAccess" ? "the collection holding it"
+            : t.kind === "Ident" && globals.has(t.name) ? "a global"
+            : null;
+          if (where) check(n.value as Expr, bound, cannotStore, where);
+          break;
+        }
+        case "Call": {
+          const args = n.args as Expr[];
+          for (let i = 0; i < args.length; i++) {
+            if (!this.retainsParam(fns, n.func as string, i, new Set())) continue;
+            check(args[i]!, bound, names => `cannot pass a closure that captures ${names} by reference to '${n.func}', which keeps it`,
+              `'${n.func}'`);
           }
           break;
+        }
+        case "MethodCall": {
+          // The collection-storing methods. A closure passed to `map`/`each`/`sortBy` is
+          // called and dropped within the call, so those stay legal — that is the common
+          // case and rejecting it would gut the combinators. No builtin other than these
+          // three retains a fn value, which is what makes the unresolved case below safe
+          // to wave through; a builtin that starts retaining one must be added here.
+          if (["push", "insert", "set"].includes(n.method as string)) {
+            for (const a of n.args as Expr[]) check(a, bound, cannotStore, "the collection holding it");
+            break;
+          }
+          // A user-defined method resolves to the mangled `Type$method` and gets the same
+          // retention analysis a free function does.
+          const recv = this.exprTypes.get(n.object as Expr);
+          const base = recv?.tag === "ref" ? recv.inner : recv;
+          const owner = base && (base.tag === "struct" || base.tag === "enum") ? base.name : null;
+          if (!owner) break;
+          const mangled = `${owner}$${n.method}`;
+          if (!fns.has(mangled)) break;
+          const args = n.args as Expr[];
+          for (let i = 0; i < args.length; i++) {
+            // +1: the mangled method carries `self` as its first parameter.
+            if (!this.retainsParam(fns, mangled, i + 1, new Set())) continue;
+            check(args[i]!, bound, names => `cannot pass a closure that captures ${names} by reference to '${owner}.${n.method}', which keeps it`,
+              `'${owner}.${n.method}'`);
+          }
+          break;
+        }
         default:
           // Deliberately partial, and safe because of the line below: this switch only
-          // ADDS knowledge for the few node kinds that can store a closure. Every other
-          // kind is still descended into structurally, so nothing is skipped.
+          // ADDS knowledge for the few node kinds that can let a closure escape. Every
+          // other kind is still descended into structurally, so nothing is skipped.
           break;
       }
       for (const k of Object.keys(n)) { if (k !== "span" && k !== "type") visit(n[k], bound); }
@@ -3876,10 +3982,6 @@ export class TypeChecker {
             if (info) info.flexInt = { leaves, valueExpr: stmt.value };
           }
         }
-        if (stmt.value.kind === "Closure") {
-          const info = this.lookup(stmt.name);
-          if (info) info.boundClosure = stmt.value;
-        }
         if (bindingType.tag === "array") this.lintStackArray(stmt.name, bindingType, sp);
         this.tryMove(stmt.value);
         break;
@@ -3924,10 +4026,6 @@ export class TypeChecker {
           if (bindingType.tag !== "ref") for (const vi of newlyFrozen) this.unfreeze(vi);
           this.declare(stmt.name, { type: bindingType, mutable: true, moved: false, borrowed: false, read: false, span: sp, ...(bindingType.tag === "ref" && newlyFrozen.length > 0 && { freezes: newlyFrozen }) });
           if (bindingType.tag === "array") this.lintStackArray(stmt.name, bindingType, sp);
-        }
-        if (stmt.value.kind === "Closure") {
-          const info = this.lookup(stmt.name);
-          if (info) info.boundClosure = stmt.value;
         }
         this.tryMove(stmt.value);
         break;
@@ -4009,20 +4107,9 @@ export class TypeChecker {
             }
           }
           if (fnRetType.tag === "int") this.enforceRangeInto(stmt.value, valType, fnRetType, sp);
-          // A returned closure escapes its defining frame, so it must own its captures:
-          // a non-`move` closure captures by reference and would dangle into the dead
-          // frame (a use-after-return in safe code). Promote it to `move` — the same
-          // heap-allocation the call-argument path already applies — so tryMove below
-          // moves the captures into the closure's heap env instead of aliasing locals.
-          if (stmt.value.kind === "Closure" && !(stmt.value as any).isMove) {
-            (stmt.value as any).isMove = true;
-          } else if (stmt.value.kind === "Ident") {
-            // `let f = <closure>; return f` escapes the same way a direct return does,
-            // but the return value is the binding, not the literal. Promote the literal
-            // it was bound to so its captures are heap-owned rather than dangling refs.
-            const bound = this.lookup(stmt.value.name)?.boundClosure;
-            if (bound && !(bound as any).isMove) (bound as any).isMove = true;
-          }
+          // A returned closure that captures by reference is rejected, not promoted —
+          // see checkEscapingClosures for why the promotion that used to live here was
+          // itself unsound.
           if (this.isViewReturn(fnRetType)) this.checkViewProvenance(stmt.value, sp);
           this.tryMove(stmt.value);
           this.inReturnInLoop = prev;

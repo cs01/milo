@@ -33,28 +33,40 @@ gracefully.
   `bad(v[0], v)` passes an element ref and the container, inner `push` reallocs → dangling.
   Fix: reject a call where two `&mut` args provably overlap (`v[i]` and `v`).
 
-- [x] **C3 — escaping non-`move` closure captures by reference.** Returned/stored non-`move`
-  closure captures a local by reference into the dead frame. `checker.ts:1151` assumes
-  escaping closures are `move` but never enforces it. Fix: the Return path promotes an
-  escaping closure to `move` so its captures are heap-owned — both when the closure literal
-  is returned directly (`return (…) => …`) and when it is bound to a local and returned by
-  name (`let f = …; return f`), tracked via `VarInfo.boundClosure`.
-  Still open (not this pass): a closure that escapes *indirectly* — stored into a struct or
-  Vec that is then returned, or returned by a caller after being passed in — is not yet
-  promoted (verified still crashes, exit 133). Workaround for now: explicit `move`.
+- [x] **C3 — escaping non-`move` closure captures by reference.** CLOSED 2026-08-14 with the
+  conservative-reject rule below, which REPLACED the silent promotion that first shipped for
+  it. A closure that captures by reference is a pointer into the frame it was written in:
+  safe to call, unsafe to keep. Every route by which one could outlive that frame is now an
+  error (`checker.ts checkEscapingClosures`), and `move` is the escape hatch each diagnostic
+  names — it works even for a `var` capture, at the cost of dropping the write-back.
 
-  Planned follow-up shape (supersedes the silent-promotion approach above):
-  - **Conservative reject, not silent promote.** A closure that captures a local/param by
-    reference may not escape its defining function (returned, or stored into anything that
-    escapes). One rule catches the direct case *and* the struct/Vec-indirect case — the
-    reject direction needs no full escape analysis; escape analysis only buys permitting more.
-  - **Diagnostic names the culprit:** `closure escapes its scope; captures 'secret' by
-    reference to a frame that ends here` + a hint.
-  - **Opt-in ownership later:** if escaping closures are genuinely wanted, add an explicit
-    owned/boxed closure type (opt-in allocation, à la `move`) — never a silent heap alloc.
-  - **Open decision:** this reject rule would also reject the direct/`let`-return cases the
-    current fix silently boxes. Adopting it means replacing the silent-promotion behavior,
-    not just extending it. Needs a call before implementing.
+  Six routes, all verified live before the fix and all silent or fatal in safe code:
+
+  | route | symptom |
+  |---|---|
+  | `Box { f: g }` | garbage at -O0, hang at -O2 (closed 2026-07-31) |
+  | `b.f = g`, `b.f = (x) => x + n` | SIGKILL |
+  | `wrap(g)` — callee keeps it | SIGKILL |
+  | `wrap((x) => x + n)` with a `var` capture | SIGKILL (the call-site auto-`move` declines) |
+  | `let g = f; return g` | printed `-1` |
+  | `return f` | see below |
+
+  **Why the promotion had to go rather than be extended.** It flipped the closure to `move`
+  at the `return` — after the move checker had already walked the body — so the capture was
+  moved into the closure's env back at the *literal* and any read in between sailed past
+  unreported. `let s = "hello world"; let f = () => s.len(); print(s); return f` compiled and
+  printed an **empty line** for `print(s)`. Rejecting needs no such retroactive edit; with an
+  explicit `move` the same program now reports `use of moved variable 's'` at the `print`.
+  Blast radius of removing it, measured before the change: **3 sites across 739 files**, all
+  three inside the fixture written to test the promotion itself.
+
+  **Whether a callee retains its argument is computed, not annotated.** A fn-typed parameter
+  that only ever appears in callee position is consumed during the call — and `g(1)` parses
+  as `Call{func:"g"}` with no `Ident` node, so "appears as an `Ident` anywhere in the body"
+  is exactly "used as a value rather than called". Forwarding recurses so a one-line wrapper
+  is not punished; every unknown (no body, an extern, a variadic slot, a cycle) answers
+  *retains*. That is the property the `sortByKey` carve-out still approximates with a name.
+  Over-rejection measured at **0 across 258 std and example files**; fixtures 849/849.
 
 - [ ] **H1 — `f()(x)` / `arr[i](x)` callee never invoked.** DEFERRED (needs an AST change,
   not an isolated fix). Root cause: the AST `Call` node keys off `func: string` (a name),

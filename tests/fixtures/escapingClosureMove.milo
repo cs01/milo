@@ -1,0 +1,43 @@
+// A closure that escapes its defining frame must OWN its captures, and `move` is how you
+// say so. This used to be automatic: the Return path silently promoted a returned closure
+// to `move`. That promotion was unsound in a way the reject is not — it happened at the
+// `return`, after the move checker had already walked the body, so a read of the capture
+// between the closure and the return sailed past and printed empty
+// (tests/errors/escapingClosureReturn.milo now holds that program).
+//
+// All three return shapes work with an explicit `move`: a captured parameter, a captured
+// local, and a local bound first and returned by name.
+// @expect: 15
+// @expect: heap-owned!
+// @expect: bound!
+
+pub fn makeAdder(base: i64): (i64) => i64 {
+    return move(p: i64) => {
+        return base + p
+    }
+}
+
+pub fn makeGreeter(): () => string {
+    let s = "heap-owned"
+    return move(): string => {
+        return s + "!"
+    }
+}
+
+pub fn makeBound(): () => string {
+    let s = "bound"
+    let f = move(): string => {
+        return s + "!"
+    }
+    return f
+}
+
+pub fn main(): i32 {
+    let add = makeAdder(5)
+    print(add(10))
+    let g = makeGreeter()
+    print(g())
+    let b = makeBound()
+    print(b())
+    return 0
+}

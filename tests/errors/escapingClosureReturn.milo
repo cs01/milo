@@ -1,0 +1,19 @@
+// Returning a by-reference-capturing closure is rejected, not promoted. The promotion it
+// replaces set `move` at the `return` — after the move checker had already walked the
+// body — so this exact program compiled and printed an EMPTY LINE for `print(s)` with no
+// diagnostic: the capture had been moved into the closure's env back at the literal.
+// Writing `move` yourself gets the intended behaviour and a real 'use of moved variable'
+// on the `print` (tests/fixtures/escapingClosureMove.milo).
+// @error: cannot return a closure that captures 's' by reference
+
+fn make(): () => i64 {
+    let s = "hello world"
+    let f = () => s.len()
+    print(s)
+    return f
+}
+
+fn main() {
+    let g = make()
+    print(g())
+}

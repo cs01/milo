@@ -1,0 +1,25 @@
+// The other side of the retention rule: a callee that only CALLS its fn-typed parameter
+// does not keep it, so handing it a closure that captures by reference is safe and stays
+// accepted. `g(1)` parses as a call with no Ident node for `g`, so "appears as an Ident
+// anywhere in the body" is exactly "used as a value" — which is what makes this
+// computable rather than annotated. `forward` pins the recursive half: a one-line wrapper
+// keeps its argument only if what it forwards to does.
+// @expect: 6
+// @expect: 7
+
+fn each(g: (i64) => i64) {
+    print(g(1))
+}
+
+fn forward(g: (i64) => i64) {
+    each(g)
+}
+
+fn main() {
+    let n = 5
+    let f = (x: i64) => x + n
+    each(f)
+    let m = 6
+    let h = (x: i64) => x + m
+    forward(h)
+}

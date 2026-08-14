@@ -1,0 +1,16 @@
+// `let g = f` aliases the same closure, and the alias used to launder it past the return
+// check: this printed -1. The escape pass follows the binding, so the alias is the same
+// escape one hop removed and gets the same answer.
+// @error: cannot return a closure that captures 'n' by reference
+
+fn make(): (i64) => i64 {
+    let n = 5
+    let f = (x: i64) => x + n
+    let g = f
+    return g
+}
+
+fn main() {
+    let h = make()
+    print(h(1))
+}

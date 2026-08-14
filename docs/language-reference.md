@@ -2068,7 +2068,49 @@ print(count)   // 2
 `move` closures capture by value (copy into a heap-allocated environment).
 Safe to return from functions, store in structs, and send to threads.
 
-When a closure is passed to a function that takes an owned `Fn` parameter (not `&Fn`), the compiler automatically infers `move` — no keyword needed. Explicit `move` is still supported for clarity or when needed (e.g., returning a closure from a function).
+A closure **literal** passed to a function that takes an owned `Fn` parameter has `move` inferred — no keyword needed — because a literal has no other user. That inference is the only place it happens, and it declines when a capture is a `var`, since move-capturing would drop the write-back to the original.
+
+Everywhere else, a closure that captures by reference **may not escape the function it was written in**. It is a pointer into that frame, so it is safe to call and unsafe to keep, and all of these are rejected:
+
+```milo error
+fn make(): () => i64 {
+    let s = "hello"
+    return () => s.len()        // cannot return a closure that captures 's' by reference
+}
+```
+
+The same applies to every other way out of the frame — a field, a collection, or a callee
+that keeps what you hand it:
+
+```milo error
+struct Box {
+    f: (i64) => i64,
+}
+
+fn wrap(g: (i64) => i64): Box {
+    return Box { f: g }         // (fine here: `g` is wrap's own parameter)
+}
+
+fn make(): Box {
+    let n = 5
+    let f = (x: i64) => x + n
+    var b = Box { f: move (x: i64) => x }
+    b.f = f                     // cannot store … — the field outlives the frame
+    return wrap(f)              // cannot pass … to 'wrap', which keeps it
+}
+```
+
+Whether a callee *keeps* its argument is worked out from its body, not declared: a fn-typed parameter that is only ever **called** is consumed during the call, so passing it a borrowing closure is fine. `each` below is accepted for that reason, and so is a one-line wrapper that forwards to it.
+
+```milo
+fn each(g: (i64) => i64) { print(g(1)) }
+
+let n = 5
+let f = (x: i64) => x + n
+each(f)                         // fine — `each` calls `g`, it does not keep it
+```
+
+`move` is the escape hatch in every case, including a `var` capture. It is deliberately not applied for you: the allocation is real, and a `move` you wrote is a move the checker can see at the point it happens — so a read of the capture afterwards is a proper `use of moved variable` rather than a silently empty value.
 
 ```milo
 fn makeAdder(n: i32): (i32) => i32 {

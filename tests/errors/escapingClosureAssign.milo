@@ -1,0 +1,21 @@
+// A store into a struct LITERAL was already rejected; assigning into the field afterwards
+// reached the same place by a route the pass did not walk, and was a live SIGKILL.
+// Assigning a closure to a plain local stays legal — that local dies with the same frame
+// the captures live in. A field, an element, or a global outlives it.
+// @error: cannot store a closure that captures 'n' by reference
+
+struct Box {
+    f: (i64) => i64,
+}
+
+fn make(): Box {
+    let n = 5
+    var b = Box { f: move (x: i64) => x }
+    b.f = (x: i64) => x + n
+    return b
+}
+
+fn main() {
+    let b = make()
+    print(b.f(1))
+}

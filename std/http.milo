@@ -200,7 +200,9 @@ fn bufToStr(buf: &[u8; 8192], start: i64, end: i64): string {
     return s
 }
 
-fn parseRequest(buf: &[u8; 8192], n: i64): Request {
+// Parse a request out of a raw read buffer. Public so an alternate transport
+// (std/https) can reuse the parser without duplicating it.
+pub fn parseRequest(buf: &[u8; 8192], n: i64): Request {
     var i: i64 = 0
 
     // parse method
@@ -474,7 +476,11 @@ pub fn statusText(status: i32): string {
     return "200 OK"
 }
 
-fn sendRaw(fd: i32, status: i32, contentType: string, body: string, extraHeaders: &Vec<Param>): void {
+// The response bytes, built but not written. Split out of sendRaw so a transport that
+// is not a bare fd — std/https writes through SSL_write — reuses the exact wire format
+// instead of reimplementing it. std/http itself stays OpenSSL-free; that separation is
+// why TLS lives in another module.
+pub fn renderRaw(status: i32, contentType: &string, body: &string, extraHeaders: &Vec<Param>): string {
     var resp: string = "HTTP/1.1 " + statusText(status)
     resp = resp + "\r\nContent-Type: " + contentType
     resp = resp + "\r\nContent-Length: " + body.len.toString()
@@ -485,27 +491,38 @@ fn sendRaw(fd: i32, status: i32, contentType: string, body: string, extraHeaders
     resp = resp + "\r\nServer: milo"
     resp = resp + "\r\n\r\n"
     resp = resp + body
+    return resp
+}
+
+// Wire bytes for a Response, including the status line and headers.
+pub fn renderResponse(response: &Response, extraHeaders: &Vec<Param>): string {
+    match response {
+        Response.Text(body) => {
+            return renderRaw(200, "text/plain; charset=utf-8", body, extraHeaders)
+        }
+        Response.Html(body) => {
+            return renderRaw(200, "text/html; charset=utf-8", body, extraHeaders)
+        }
+        Response.Json(body) => {
+            return renderRaw(200, "application/json", body, extraHeaders)
+        }
+        Response.NotFound => {
+            return renderRaw(404, "text/plain; charset=utf-8", "404 Not Found", extraHeaders)
+        }
+        Response.Status(code, ct, body) => {
+            return renderRaw(code, ct, body, extraHeaders)
+        }
+    }
+}
+
+fn sendRaw(fd: i32, status: i32, contentType: string, body: string, extraHeaders: &Vec<Param>): void {
+    let resp = renderRaw(status, contentType, body, extraHeaders)
     write(fd, resp, resp.len)
 }
 
 fn sendResponse(fd: i32, response: Response, headers: &Vec<Param>): void {
-    match response {
-        Response.Text(body) => {
-            sendRaw(fd, 200, "text/plain; charset=utf-8", body, headers)
-        }
-        Response.Html(body) => {
-            sendRaw(fd, 200, "text/html; charset=utf-8", body, headers)
-        }
-        Response.Json(body) => {
-            sendRaw(fd, 200, "application/json", body, headers)
-        }
-        Response.NotFound => {
-            sendRaw(fd, 404, "text/plain; charset=utf-8", "404 Not Found", headers)
-        }
-        Response.Status(code, ct, body) => {
-            sendRaw(fd, code, ct, body, headers)
-        }
-    }
+    let resp = renderResponse(response, headers)
+    write(fd, resp, resp.len)
 }
 
 // ── Socket with automatic cleanup ──

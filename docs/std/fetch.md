@@ -16,7 +16,7 @@ caller has not set their own, so an explicit header always wins.
 ### `fetch`
 
 ```milo
-pub fn fetch(url: &string): Result<Response, NetError>
+pub fn fetch(url: &string): Result<FetchResponse, NetError>
 ```
 
 _Undocumented._
@@ -24,7 +24,7 @@ _Undocumented._
 ### `fetchDelete`
 
 ```milo
-pub fn fetchDelete(url: &string): Result<Response, NetError>
+pub fn fetchDelete(url: &string): Result<FetchResponse, NetError>
 ```
 
 _Undocumented._
@@ -32,7 +32,7 @@ _Undocumented._
 ### `fetchForm`
 
 ```milo
-pub fn fetchForm(url: &string, body: &string): Result<Response, NetError>
+pub fn fetchForm(url: &string, body: &string): Result<FetchResponse, NetError>
 ```
 
 POST an application/x-www-form-urlencoded body — build it with formEncode, or
@@ -42,7 +42,7 @@ hand-roll it with urlEncode. Several APIs that nominally accept a raw body
 ### `fetchPatch`
 
 ```milo
-pub fn fetchPatch(url: &string, body: &string): Result<Response, NetError>
+pub fn fetchPatch(url: &string, body: &string): Result<FetchResponse, NetError>
 ```
 
 _Undocumented._
@@ -50,7 +50,7 @@ _Undocumented._
 ### `fetchPost`
 
 ```milo
-pub fn fetchPost(url: &string, body: &string): Result<Response, NetError>
+pub fn fetchPost(url: &string, body: &string): Result<FetchResponse, NetError>
 ```
 
 _Undocumented._
@@ -58,15 +58,48 @@ _Undocumented._
 ### `fetchPut`
 
 ```milo
-pub fn fetchPut(url: &string, body: &string): Result<Response, NetError>
+pub fn fetchPut(url: &string, body: &string): Result<FetchResponse, NetError>
 ```
 
 _Undocumented._
 
+### `FetchResponse.header`
+
+```milo
+fn FetchResponse.header(self: &FetchResponse, name: &string): Option<string>
+```
+
+Value of response header `name` (case-insensitive), or None if the
+response did not carry it. A header sent with an empty value is Some("").
+
+### `FetchResponse.json`
+
+```milo
+fn FetchResponse.json(self: &FetchResponse): Json
+```
+
+Parse the response body as JSON.
+
+### `FetchResponse.ok`
+
+```milo
+fn FetchResponse.ok(self: &FetchResponse): bool
+```
+
+Return true if the status code is 2xx (success).
+
+### `FetchResponse.text`
+
+```milo
+fn FetchResponse.text(self: &FetchResponse): string
+```
+
+Return the response body as a string.
+
 ### `fetchWith`
 
 ```milo
-pub fn fetchWith(url: &string, opts: FetchOptions): Result<Response, NetError>
+pub fn fetchWith(url: &string, opts: FetchOptions): Result<FetchResponse, NetError>
 ```
 
 _Undocumented._
@@ -125,43 +158,10 @@ _Undocumented._
 ### `parseResponse`
 
 ```milo
-pub fn parseResponse(raw: string): Response
+pub fn parseResponse(raw: string): FetchResponse
 ```
 
 _Undocumented._
-
-### `Response.header`
-
-```milo
-fn Response.header(self: &Response, name: &string): Option<string>
-```
-
-Value of response header `name` (case-insensitive), or None if the
-response did not carry it. A header sent with an empty value is Some("").
-
-### `Response.json`
-
-```milo
-fn Response.json(self: &Response): Json
-```
-
-Parse the response body as JSON.
-
-### `Response.ok`
-
-```milo
-fn Response.ok(self: &Response): bool
-```
-
-Return true if the status code is 2xx (success).
-
-### `Response.text`
-
-```milo
-fn Response.text(self: &Response): string
-```
-
-Return the response body as a string.
 
 ### `TlsStream.connect`
 
@@ -170,6 +170,29 @@ fn TlsStream.connect(ip: u32, port: u16, hostname: &string): Result<TlsStream, N
 ```
 
 _Undocumented._
+
+### `TlsStream.connectWithCA`
+
+```milo
+fn TlsStream.connectWithCA(ip: u32, port: u16, hostname: &string, caFile: &string): Result<TlsStream, NetError>
+```
+
+connect() with one extra CA file trusted on top of the system store. The point is
+to keep verification ON while trusting a private CA: what users otherwise reach
+for is disabling verification, which throws the whole guarantee away.
+An empty caFile is exactly connect().
+
+### `TlsStream.fromFd`
+
+```milo
+fn TlsStream.fromFd(fd: i32, hostname: &string, caFile: &string): Result<TlsStream, NetError>
+```
+
+Client handshake over an ALREADY-connected fd. This is the entry point a protocol
+with in-band TLS negotiation needs — Postgres' SSLRequest, SMTP STARTTLS: the
+socket must carry plaintext first, so TLS setup cannot own the connect() too.
+OWNERSHIP: fd is taken over by the returned TlsStream, and closed on every error
+path here. The caller must neither close it nor keep using it.
 
 ### `TlsStream.incoming`
 
@@ -192,6 +215,16 @@ fn TlsStream.recv(self: &TlsStream): Result<string, NetError>
 
 Read everything until the peer closes, as one string (blocks to EOF).
 Prefer `incoming()` for streaming/incremental consumption.
+
+### `TlsStream.recvOnce`
+
+```milo
+fn TlsStream.recvOnce(self: &TlsStream): string
+```
+
+A single SSL_read of whatever has arrived, unlike `recv()` which loops to EOF.
+A server must answer a request while the client still holds the connection open,
+so recv() would deadlock there; this returns after one record.
 
 ### `TlsStream.send`
 

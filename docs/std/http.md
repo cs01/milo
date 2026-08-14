@@ -110,6 +110,34 @@ fn Context.text(self: &Context, body: string): Response
 
 _Undocumented._
 
+### `parseRequest`
+
+```milo
+pub fn parseRequest(buf: &[u8; 8192], n: i64): Request
+```
+
+Parse a request out of a raw read buffer. Public so an alternate transport
+(std/https) can reuse the parser without duplicating it.
+
+### `renderRaw`
+
+```milo
+pub fn renderRaw(status: i32, contentType: &string, body: &string, extraHeaders: &Vec<Param>): string
+```
+
+The response bytes, built but not written. Split out of sendRaw so a transport that
+is not a bare fd — std/https writes through SSL_write — reuses the exact wire format
+instead of reimplementing it. std/http itself stays OpenSSL-free; that separation is
+why TLS lives in another module.
+
+### `renderResponse`
+
+```milo
+pub fn renderResponse(response: &Response, extraHeaders: &Vec<Param>): string
+```
+
+Wire bytes for a Response, including the status line and headers.
+
 ### `Router.addRoute`
 
 ```milo

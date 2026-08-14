@@ -213,6 +213,30 @@ pub extern fn SSL_ctrl(ssl: *u8, cmd: i32, larg: i64, parg: *u8): i64
 
 pub extern fn SSL_get_error(ssl: *u8, ret: i32): i32
 
+// ── server side ──
+
+pub extern fn TLS_server_method(): *u8
+
+pub extern fn SSL_CTX_use_certificate_chain_file(ctx: *u8, file: *u8): i32
+
+// fileType is SSL_FILETYPE_PEM (1) or SSL_FILETYPE_ASN1 (2) — there is no
+// "detect from the bytes" mode, so a PEM key handed the ASN1 constant fails to load.
+pub extern fn SSL_CTX_use_PrivateKey_file(ctx: *u8, file: *u8, fileType: i32): i32
+
+// Both files load independently, so a cert/key pair that does not belong together is
+// accepted until this is called. Without it the mismatch first shows up as a handshake
+// failure on every client, with nothing on the server naming the cause.
+pub extern fn SSL_CTX_check_private_key(ctx: *u8): i32
+
+// Adds a CA file/dir to the trust store. Either argument may be null.
+pub extern fn SSL_CTX_load_verify_locations(ctx: *u8, caFile: *u8, caPath: *u8): i32
+
+pub extern fn SSL_accept(ssl: *u8): i32
+
+// Sends close_notify. Skipping it makes a peer see a truncated stream rather than a
+// clean EOF, which OpenSSL clients report as an "unexpected eof" error.
+pub extern fn SSL_shutdown(ssl: *u8): i32
+
 // ── DNS ──
 
 pub extern fn getaddrinfo(node: *u8, service: *u8, hints: *u8, res: *u8): i32
@@ -540,6 +564,31 @@ fn sslWantWrite(): i32 {
 pub fn sslConnectFd(ssl: *u8, fd: i32): i32 {
     while true {
         let r = SSL_connect(ssl)
+        if r == 1 {
+            return 1
+        }
+        if schedulerCurrent() as i64 == 0 {
+            return r
+        }
+        let e = SSL_get_error(ssl, r)
+        if e == sslWantRead() {
+            schedulerWaitRead(fd)
+            continue
+        }
+        if e == sslWantWrite() {
+            schedulerWaitWrite(fd)
+            continue
+        }
+        return r
+    }
+    return -1
+}
+
+// Drive SSL_accept to completion — the server-side mirror of sslConnectFd.
+// Returns 1 on success (SSL_accept result otherwise).
+pub fn sslAcceptFd(ssl: *u8, fd: i32): i32 {
+    while true {
+        let r = SSL_accept(ssl)
         if r == 1 {
             return 1
         }

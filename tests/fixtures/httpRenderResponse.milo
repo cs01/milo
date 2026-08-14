@@ -1,0 +1,43 @@
+// std/http's response wire format, pinned byte for byte.
+//
+// renderRaw/renderResponse were split out of sendRaw/sendResponse so std/https could
+// write the same bytes through SSL_write. Nothing else asserts what those bytes are —
+// the other http fixtures build a Context and never touch a socket — so a refactor of
+// the builder could reorder or drop a header with every test still green.
+from "std/http" import {
+    Param, Response, renderRaw, renderResponse
+}
+
+pub fn show(s: &string): void {
+    var out: string = ""
+    for i in 0..s.len {
+        if s[i] == '\r' {
+            out = out + "\\r"
+        } else if s[i] == '\n' {
+            out = out + "\\n"
+        } else {
+            out.push(s[i])
+        }
+    }
+    print(out)
+}
+
+pub fn main(): i32 {
+    let none: Vec<Param> = []
+    show(renderResponse(Response.Text("hi"), none))
+    show(renderResponse(Response.NotFound, none))
+    show(renderResponse(Response.Json("{}"), none))
+
+    var extra: Vec<Param> = []
+    extra.push(Param {
+        name: "X-Trace", value: "abc"
+    }
+    )
+    show(renderRaw(201, "text/html", "<b>", extra))
+    return 0
+}
+
+// @expect: HTTP/1.1 200 OK\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: 2\r\nConnection: close\r\nServer: milo\r\n\r\nhi
+// @expect: HTTP/1.1 404 Not Found\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: 13\r\nConnection: close\r\nServer: milo\r\n\r\n404 Not Found
+// @expect: HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\nServer: milo\r\n\r\n{}
+// @expect: HTTP/1.1 201 Created\r\nContent-Type: text/html\r\nContent-Length: 3\r\nX-Trace: abc\r\nConnection: close\r\nServer: milo\r\n\r\n<b>

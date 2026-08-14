@@ -8,6 +8,7 @@ from "std/net" import {
 }
 from "std/os" import {
     SSL_CTX_free,
+    SSL_CTX_load_verify_locations,
     SSL_CTX_new,
     SSL_CTX_set_default_verify_paths,
     SSL_CTX_set_verify,
@@ -17,7 +18,9 @@ from "std/os" import {
     SSL_new,
     SSL_set1_host,
     SSL_set_fd,
+    SSL_shutdown,
     TLS_client_method,
+    connectFdIn,
     socket,
     sslConnectFd,
     sslReadFd,
@@ -60,6 +63,10 @@ impl Drop for TlsStream {
     fn drop(self: &mut Self): void {
         unsafe {
             if self.ssl != 0 {
+                // close_notify before the fd goes away: an abrupt TCP close is an
+                // "unexpected eof" to an OpenSSL peer, which curl reports as a transfer
+                // error even when the body arrived complete.
+                SSL_shutdown(self.ssl as *u8)
                 SSL_free(self.ssl as *u8)
             }
             if self.ctx != 0 {
@@ -75,23 +82,40 @@ impl Drop for TlsStream {
 
 impl TlsStream {
     fn connect(ip: u32, port: u16, hostname: &string): Result<TlsStream, NetError> {
+        return TlsStream.connectWithCA(ip, port, hostname, "")
+    }
+
+    // connect() with one extra CA file trusted on top of the system store. The point is
+    // to keep verification ON while trusting a private CA: what users otherwise reach
+    // for is disabling verification, which throws the whole guarantee away.
+    // An empty caFile is exactly connect().
+    fn connectWithCA(ip: u32, port: u16, hostname: &string, caFile: &string): Result<TlsStream, NetError> {
         let AF_INET: i32 = 2
         let SOCK_STREAM: i32 = 1
 
         ensureNetInit()
+        let fd = socket(AF_INET, SOCK_STREAM, 0)
+        if fd < 0 {
+            return Result.Err(NetError.ConnectionFailed("socket() failed"))
+        }
+
+        var addr = makeSockaddr(port, ip)
+
+        if connectFdIn(fd, addr) < 0 {
+            close(fd)
+            return Result.Err(NetError.ConnectionFailed("connect() failed"))
+        }
+
+        return TlsStream.fromFd(fd, hostname, caFile)
+    }
+
+    // Client handshake over an ALREADY-connected fd. This is the entry point a protocol
+    // with in-band TLS negotiation needs — Postgres' SSLRequest, SMTP STARTTLS: the
+    // socket must carry plaintext first, so TLS setup cannot own the connect() too.
+    // OWNERSHIP: fd is taken over by the returned TlsStream, and closed on every error
+    // path here. The caller must neither close it nor keep using it.
+    fn fromFd(fd: i32, hostname: &string, caFile: &string): Result<TlsStream, NetError> {
         unsafe {
-            let fd = socket(AF_INET, SOCK_STREAM, 0)
-            if fd < 0 {
-                return Result.Err(NetError.ConnectionFailed("socket() failed"))
-            }
-
-            var addr = makeSockaddr(port, ip)
-
-            if connectFdIn(fd, addr) < 0 {
-                close(fd)
-                return Result.Err(NetError.ConnectionFailed("connect() failed"))
-            }
-
             let method = TLS_client_method()
             let ctx = SSL_CTX_new(method)
             let ctxAddr = ctx as i64
@@ -100,6 +124,15 @@ impl TlsStream {
                 return Result.Err(NetError.TlsError("SSL_CTX_new failed"))
             }
             SSL_CTX_set_default_verify_paths(ctx)
+            // Added to the default paths, not instead of them: a program that trusts a
+            // private CA still has to reach the public internet.
+            if caFile.len > 0 {
+                if SSL_CTX_load_verify_locations(ctx, caFile, 0 as *u8) != 1 {
+                    SSL_CTX_free(ctx)
+                    close(fd)
+                    return Result.Err(NetError.TlsError("SSL_CTX_load_verify_locations failed"))
+                }
+            }
             // Without SSL_VERIFY_PEER this client accepted ANY certificate — a
             // self-signed cert that `openssl s_client` rejects handshook fine, so a
             // MITM was undetectable. Loading the trust store above looks like
@@ -177,6 +210,23 @@ impl TlsStream {
         return Result.Ok(result)
     }
 
+    // A single SSL_read of whatever has arrived, unlike `recv()` which loops to EOF.
+    // A server must answer a request while the client still holds the connection open,
+    // so recv() would deadlock there; this returns after one record.
+    fn recvOnce(self: &Self): string {
+        var result: string = ""
+        var buf: [u8; 8192] = [0; 8192]
+        unsafe {
+            let n = sslReadFd(self.ssl as *u8, self.fd, buf as *u8, 8192)
+            if n > 0 {
+                for i in 0..n as i64 {
+                    result.push(buf[i])
+                }
+            }
+        }
+        return result
+    }
+
     // Stream decrypted inbound bytes as an iterable channel, pumped on a green
     // task — the uniform async-read API, TLS variant. Uses the SSL-aware read
     // (parks on WANT_READ) rather than the raw-fd fdChannel. `for chunk in
@@ -219,16 +269,21 @@ impl TlsStream {
     }
 }
 
-// ── HTTP Response ──
+// ── FetchResponse ──
 
 // HTTP response with status code, headers, and body.
-pub struct Response {
+//
+// Not `Response`: Milo's module namespace is flat and merged, so that name collided with
+// std/http's `Response` enum and no program could import both — i.e. could not serve HTTP
+// and fetch over HTTPS at once. The client type moved because handlers spell std/http's
+// `Response.Text(...)` constantly while this one is almost always used through inference.
+pub struct FetchResponse {
     status: i32,
     headers: string,
     body: string,
 }
 
-impl Response {
+impl FetchResponse {
     // Return the response body as a string.
     fn text(self: &Self): string {
         return self.body.clone()
@@ -399,7 +454,7 @@ fn decodeChunked(rawBody: &string): string {
     return result
 }
 
-pub fn parseResponse(raw: string): Response {
+pub fn parseResponse(raw: string): FetchResponse {
     let status = parseStatus(raw)
     let headers = parseRawHeaders(raw)
     var body = parseBody(raw)
@@ -408,7 +463,7 @@ pub fn parseResponse(raw: string): Response {
     if te.startsWith("chunked") {
         body = decodeChunked(body)
     }
-    return Response {
+    return FetchResponse {
         status: status, headers: headers, body: body
     }
 }
@@ -549,28 +604,28 @@ pub fn buildRequest(host: &string, path: &string, opts: &FetchOptions): string {
     return req
 }
 
-fn httpDo(ip: u32, port: u16, host: string, path: string, opts: &FetchOptions): Result<Response, NetError> {
+fn httpDo(ip: u32, port: u16, host: string, path: string, opts: &FetchOptions): Result<FetchResponse, NetError> {
     let stream = TcpStream.connect(ip, port)?
     stream.send(buildRequest(host, path, opts))?
     let raw = stream.recv()?
     return Result.Ok(parseResponse(raw))
 }
 
-fn httpsDo(ip: u32, port: u16, host: string, path: string, opts: &FetchOptions): Result<Response, NetError> {
+fn httpsDo(ip: u32, port: u16, host: string, path: string, opts: &FetchOptions): Result<FetchResponse, NetError> {
     let stream = TlsStream.connect(ip, port, host)?
     stream.send(buildRequest(host, path, opts))?
     let raw = stream.recv()?
     return Result.Ok(parseResponse(raw))
 }
 
-fn doFetch(url: string, opts: FetchOptions): Result<Response, NetError> {
+fn doFetch(url: string, opts: FetchOptions): Result<FetchResponse, NetError> {
     let useTls = isHttps(url)
     let host = parseHost(url)
     let port = parsePort(url)
     let path = parsePath(url)
     let ip = resolve(host)?
 
-    var resp: Result<Response, NetError> = Result.Err(NetError.Other(""))
+    var resp: Result<FetchResponse, NetError> = Result.Err(NetError.Other(""))
     if useTls {
         resp = httpsDo(ip, port, host.clone(), path, opts)
     } else {
@@ -601,18 +656,18 @@ fn doFetch(url: string, opts: FetchOptions): Result<Response, NetError> {
 
 // ── Public API ──
 
-pub fn fetch(url: &string): Result<Response, NetError> {
+pub fn fetch(url: &string): Result<FetchResponse, NetError> {
     var opts = FetchOptions {
         method: "GET", headers: "", body: ""
     }
     return doFetch(url.clone(), opts)
 }
 
-pub fn fetchWith(url: &string, opts: FetchOptions): Result<Response, NetError> {
+pub fn fetchWith(url: &string, opts: FetchOptions): Result<FetchResponse, NetError> {
     return doFetch(url.clone(), opts)
 }
 
-pub fn fetchPost(url: &string, body: &string): Result<Response, NetError> {
+pub fn fetchPost(url: &string, body: &string): Result<FetchResponse, NetError> {
     var opts = FetchOptions {
         method: "POST",
         headers: "Content-Type: application/json",
@@ -624,7 +679,7 @@ pub fn fetchPost(url: &string, body: &string): Result<Response, NetError> {
 // POST an application/x-www-form-urlencoded body — build it with formEncode, or
 // hand-roll it with urlEncode. Several APIs that nominally accept a raw body
 // (Overpass, most OAuth token endpoints) only accept this content type.
-pub fn fetchForm(url: &string, body: &string): Result<Response, NetError> {
+pub fn fetchForm(url: &string, body: &string): Result<FetchResponse, NetError> {
     var opts = FetchOptions {
         method: "POST",
         headers: "Content-Type: application/x-www-form-urlencoded",
@@ -633,7 +688,7 @@ pub fn fetchForm(url: &string, body: &string): Result<Response, NetError> {
     return doFetch(url.clone(), opts)
 }
 
-pub fn fetchPut(url: &string, body: &string): Result<Response, NetError> {
+pub fn fetchPut(url: &string, body: &string): Result<FetchResponse, NetError> {
     var opts = FetchOptions {
         method: "PUT",
         headers: "Content-Type: application/json",
@@ -642,14 +697,14 @@ pub fn fetchPut(url: &string, body: &string): Result<Response, NetError> {
     return doFetch(url.clone(), opts)
 }
 
-pub fn fetchDelete(url: &string): Result<Response, NetError> {
+pub fn fetchDelete(url: &string): Result<FetchResponse, NetError> {
     var opts = FetchOptions {
         method: "DELETE", headers: "", body: ""
     }
     return doFetch(url.clone(), opts)
 }
 
-pub fn fetchPatch(url: &string, body: &string): Result<Response, NetError> {
+pub fn fetchPatch(url: &string, body: &string): Result<FetchResponse, NetError> {
     var opts = FetchOptions {
         method: "PATCH",
         headers: "Content-Type: application/json",

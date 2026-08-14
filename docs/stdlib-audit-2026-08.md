@@ -76,8 +76,9 @@ shipped entries are deleted). This file is a record of a single audit, not a liv
   value-less header at the end of a block (`"A: b\r\nX-Empty:"` read as absent). No `queryOr`
   family added — `??` is the collapse spelling (`unwrapOr` is Copy-only, so `.unwrapOr("")` does
   not compile on `Option<string>`). Two follow-ups left behind: `std/ws` has a **third** private
-  copy of header lookup returning bare `string`, and `std/http`'s `Response` enum collides with
-  `std/fetch`'s `Response` struct in the flat namespace — a file cannot import both today.*
+  copy of header lookup returning bare `string`. (The second follow-up — `std/http`'s `Response`
+  enum colliding with `std/fetch`'s `Response` struct in the flat namespace, so no file could
+  import both — is fixed: the client struct is now `FetchResponse`.)*
   Original finding: `Context.query/param/header/cookie`,
   `fetch.findHeader`, `Response.header` and `ParsedArgs.getString` all return bare `string`.
   Milo *has* `Option` and `Env.get` already uses it — so the same concept has two answers in
@@ -371,9 +372,13 @@ Ranked by how often real programs hit them.
   knob no caller can set correctly). And **the arm64 fix has no CI fence** — `test-linux` runners
   are x86_64, where old and new code both pass; arm64 was verified by hand under podman only.
 
-- [ ] **No HTTPS server.** TLS is client-side only (`fetch.TlsStream`); `http.serve` is
-  plaintext. Also missing on the server: multipart/form-data, static file serving, body size
-  limits, request timeouts, chunked response streaming.
+- [ ] **No HTTPS server.** *Mostly fixed. `std/tls` adds the server transport (`TlsListener`
+  with cert/key loading + `SSL_accept`) and `std/https` adds `serveTls`/`serveRouterTls` over
+  std/http's wire format; `std/fetch` gains `TlsStream.fromFd` for upgrading an already-connected
+  socket (Postgres `SSLRequest`, STARTTLS) and `connectWithCA` for trusting a private CA without
+  turning verification off. `http.serve` itself stays plaintext and OpenSSL-free, which is the
+  point of the split.* Still missing on the server: multipart/form-data, static file serving,
+  body size limits, request timeouts, chunked response streaming, keep-alive.
 
 - [x] **Concurrency primitives are thin.** *Fixed. `std/sync` gains `Once` (three-branch wait
   matching `WaitGroup`: a green waiter parks, an OS-thread waiter cond-waits, main with a live

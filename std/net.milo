@@ -1,7 +1,7 @@
 // std/net — TCP, DNS with automatic cleanup. The TLS + HTTP client (TlsStream,
-// Response, fetch*) lives in std/fetch: keeping SSL_* out of this module is what
-// lets a plain-TCP program link without OpenSSL (required on Windows, whose xwin
-// sysroot ships none).
+// FetchResponse, fetch*) lives in std/fetch and the TLS server transport in std/tls:
+// keeping SSL_* out of this module is what lets a plain-TCP program link without
+// OpenSSL (required on Windows, whose xwin sysroot ships none).
 
 from "std/os" import {
     signal,

@@ -1,0 +1,123 @@
+// std/https — HTTPS server: std/http's wire format driven over std/tls.
+//
+// Why a separate module rather than a serveTls() in std/http: std/http must stay free of
+// OpenSSL so a plain HTTP server links without it (the same split that keeps SSL_* out of
+// std/net). Importing std/https — and only that — is what pulls OpenSSL in.
+//
+// It reaches TLS through std/tls, which holds the server transport; std/fetch is the
+// client half and is not needed here.
+
+from "std/http" import {
+    Param, Request, Response, Router, parseRequest, renderResponse
+}
+from "std/tls" import {
+    TlsListener
+}
+from "std/net" import {
+    NetError
+}
+
+// NetError's payload is already the message; this just erases the variant so the
+// serve* functions can return the Result<Unit> (E = string) shape std/http uses.
+fn netErrText(e: &NetError): string {
+    match e {
+        NetError.DnsFailure(m) => {
+            return m.clone()
+        }
+        NetError.ConnectionFailed(m) => {
+            return m.clone()
+        }
+        NetError.TlsError(m) => {
+            return m.clone()
+        }
+        NetError.SendFailed(m) => {
+            return m.clone()
+        }
+        NetError.Other(m) => {
+            return m.clone()
+        }
+    }
+}
+
+// parseRequest reads a fixed-size stack buffer (the shape std/http's own accept loop
+// hands it); the TLS read gives a string. Bytes past 8192 are dropped, matching the
+// plaintext server's single 8192-byte read.
+fn parseTlsRequest(raw: &string): Request {
+    var buf: [u8; 8192] = [0; 8192]
+    var n: i64 = 0
+    while n < raw.len && n < 8192 {
+        buf[n] = raw[n]
+        n = n + 1
+    }
+    return parseRequest(buf, n)
+}
+
+// Serve HTTPS on `port` (None = OS-chosen) with the PEM cert chain and private key at
+// `certPath`/`keyPath`. One request per connection, closed after the response — the same
+// contract as http.serve. Only returns on a fatal bind/listen error.
+pub fn serveTls(port: u16?, certPath: &string, keyPath: &string, handler: (&Request) => Response): Result<Unit> {
+    var bindPort: u16 = 0
+    if let Option.Some(p) = port {
+        bindPort = p
+    }
+
+    match TlsListener.bind(bindPort, certPath, keyPath) {
+        Result.Err(e) => {
+            return Result.Err(netErrText(e))
+        }
+        Result.Ok(listener) => {
+            print($"listening on https://localhost:{listener.port()}")
+            while true {
+                match listener.accept() {
+                    Result.Err(_e) => {
+                        // One client failing the handshake (wrong protocol, an untrusting
+                        // client hanging up mid-flight, a port scanner) must not be fatal.
+                        continue
+                    }
+                    Result.Ok(stream) => {
+                        let raw = stream.recvOnce()
+                        if raw.len > 0 {
+                            let resp = handler(parseTlsRequest(raw))
+                            let noHeaders: Vec<Param> = []
+                            let _sent = stream.send(renderResponse(resp, noHeaders))
+                        }
+                        // stream drops here: close_notify, SSL_free, close(fd)
+                    }
+                }
+            }
+        }
+    }
+    return Result.Err("server exited")
+}
+
+// serveRouter over TLS — routes and Context-set headers behave exactly as in std/http.
+pub fn serveRouterTls(port: u16?, certPath: &string, keyPath: &string, router: &Router): Result<Unit> {
+    var bindPort: u16 = 0
+    if let Option.Some(p) = port {
+        bindPort = p
+    }
+
+    match TlsListener.bind(bindPort, certPath, keyPath) {
+        Result.Err(e) => {
+            return Result.Err(netErrText(e))
+        }
+        Result.Ok(listener) => {
+            print($"listening on https://localhost:{listener.port()}")
+            while true {
+                match listener.accept() {
+                    Result.Err(_e) => {
+                        continue
+                    }
+                    Result.Ok(stream) => {
+                        let raw = stream.recvOnce()
+                        if raw.len > 0 {
+                            let handled = router.handle(parseTlsRequest(raw))
+                            let _sent = stream.send(renderResponse(handled.response, handled.headers))
+                        }
+                    }
+                }
+            }
+        }
+    }
+    return Result.Err("server exited")
+}

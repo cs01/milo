@@ -221,6 +221,8 @@ hkdfVectors
 hmacSha256
 hmacSha2Vectors
 html
+httpFetchCoexist
+httpRenderResponse
 if_expr
 ifElse
 ifExprCoerce

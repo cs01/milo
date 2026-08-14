@@ -20,7 +20,13 @@ const ROOT = join(import.meta.dir, "..");
 const MAIN = join(ROOT, "src", "main.ts");
 const PORT = 18443;
 let dir = "";
-let haveOpenssl = true;
+// Probed at module load, not in beforeAll: test.skipIf() is evaluated when the file is
+// read. An early `return` inside each case instead would report PASS on a host with no
+// openssl — three green cases that asserted nothing.
+const haveOpenssl = (() => {
+  try { execFileSync("openssl", ["version"], { stdio: ["pipe", "pipe", "pipe"] }); return true; }
+  catch { return false; }
+})();
 const servers: ChildProcess[] = [];
 
 function sh(cmd: string, args: string[]) {
@@ -28,9 +34,8 @@ function sh(cmd: string, args: string[]) {
 }
 
 beforeAll(() => {
+  if (!haveOpenssl) return;
   dir = mkdtempSync(join(tmpdir(), "milo-tls-"));
-  try { execFileSync("openssl", ["version"], { stdio: ["pipe", "pipe", "pipe"] }); }
-  catch { haveOpenssl = false; return; }
 
   // Self-signed: fails chain validation.
   sh("openssl", ["req", "-x509", "-newkey", "rsa:2048", "-keyout", "ss.key", "-out", "ss.pem",
@@ -86,24 +91,21 @@ function probe(host: string, caFile?: string): string {
   return out.trim();
 }
 
-test("a self-signed certificate is rejected", async () => {
-  if (!haveOpenssl) return;
+test.skipIf(!haveOpenssl)("a self-signed certificate is rejected", async () => {
   await serve("ss.key", "ss.pem");
   expect(probe("goodhost")).toContain("REJECTED");
 }, 120000);
 
 // The positive control: without it, a client that rejected EVERYTHING would pass the
 // test above and look correct.
-test("a cert from a trusted CA with a matching hostname connects", async () => {
-  if (!haveOpenssl) return;
+test.skipIf(!haveOpenssl)("a cert from a trusted CA with a matching hostname connects", async () => {
   await serve("srv.key", "srv.pem");
   expect(probe("goodhost", "ca.pem")).toBe("CONNECTED");
 }, 120000);
 
 // Same cert, same trusted CA — only the expected hostname differs. Chain validity is
 // held constant, so this can only be caught by the hostname check.
-test("a valid chain with the wrong hostname is rejected", async () => {
-  if (!haveOpenssl) return;
+test.skipIf(!haveOpenssl)("a valid chain with the wrong hostname is rejected", async () => {
   await serve("srv.key", "srv.pem");
   expect(probe("evilhost", "ca.pem")).toContain("REJECTED");
 }, 120000);

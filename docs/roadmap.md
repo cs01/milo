@@ -74,10 +74,10 @@ Green-tier concurrency with one OS-thread escape hatch:
 - **No async/await** — blocking-shaped code yields automatically in green context
 - Public `Thread`/`Mutex`/`RwLock`/`parallel` were **removed** 2026-07-10 (green tier only — see [concurrency-simplification.md](concurrency-simplification.md))
 
-### Standard Library (72 modules)
+### Standard Library (74 modules)
 
 I/O & system: `io`, `fs`, `path`, `env`, `environ`, `args`, `process`, `signal`, `dl`, `sysinfo`, `mem`, `os`, `platform`, `term`, `pty`, `keys`, `ansi`
-Networking: `net` (TCP + DNS), `unix` (AF_UNIX), `fetch` (HTTPS client + TLS), `http`, `httpmw`, `ws`, `url`
+Networking: `net` (TCP + DNS), `unix` (AF_UNIX), `fetch` (HTTPS client + TLS), `tls` (TLS server transport), `https` (HTTPS server), `http`, `httpmw`, `ws`, `url`
 Data: `json`, `csv`, `toml`, `base64`, `base32`, `hex`, `sqlite`, `arena`, `set`, `pool`, `png`
 Compression: `deflate`, `inflate`, `zip`, `zstd`
 Crypto & auth: `crypto`, `sha256`, `sha1`, `hmac`, `jwt`, `totp`, `checksum`, `xxhash`
@@ -94,9 +94,9 @@ Time: `time`, `datetime`, `uuid`
 Testing: `testing`
 Prelude: `prelude`
 
-(91 files — several modules are platform splits.) Discover signatures with `milo api <terms>`; dump a module with `milo api --module std/<name>`.
+(93 files — several modules are platform splits.) Discover signatures with `milo api <terms>`; dump a module with `milo api --module std/<name>`.
 
-TLS clients verify certificates (`SSL_VERIFY_PEER` + hostname binding); JSON parsing is RFC 8259-strict with a lenient `jsonParseJsonc` and a `jsonPull` streaming tokenizer.
+TLS clients verify certificates (`SSL_VERIFY_PEER` + hostname binding), and `std/https` serves HTTPS over the same OpenSSL binding; JSON parsing is RFC 8259-strict with a lenient `jsonParseJsonc` and a `jsonPull` streaming tokenizer.
 
 ### Self-Hosting — Bootstrap Converges
 

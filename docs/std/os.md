@@ -144,6 +144,15 @@ pub fn sendFd(fd: i32, buf: *u8, len: i64): i64
 
 _Undocumented._
 
+### `sslAcceptFd`
+
+```milo
+pub fn sslAcceptFd(ssl: *u8, fd: i32): i32
+```
+
+Drive SSL_accept to completion — the server-side mirror of sslConnectFd.
+Returns 1 on success (SSL_accept result otherwise).
+
 ### `sslConnectFd`
 
 ```milo

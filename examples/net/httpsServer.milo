@@ -1,0 +1,43 @@
+// httpsServer — the minimal HTTPS server.
+//
+// Generate a self-signed cert to try it (browsers/curl will warn — it is not CA-signed):
+//   openssl req -x509 -newkey rsa:2048 -keyout key.pem -out cert.pem \
+//     -days 365 -nodes -subj /CN=localhost -addext subjectAltName=DNS:localhost
+//   ./httpsServer && curl -k https://localhost:8443/
+from "std/https" import {
+    serveTls
+}
+from "std/http" import {
+    Request, Response
+}
+from "std/argparse" import {
+    ArgParser
+}
+
+pub fn handleRequest(req: &Request): Response {
+    if req.path == "/" {
+        return Response.Html("<h1>hello over TLS</h1>")
+    }
+    return Response.NotFound
+}
+
+pub fn main(): i32 {
+    var parser = ArgParser.new("httpsServer", "minimal HTTPS server")
+    parser.addString("cert", "c", "PEM certificate chain (leaf first)", "cert.pem")
+    parser.addString("key", "k", "PEM private key", "key.pem")
+    parser.addI64("port", "p", "port to listen on", 8443)
+    let args = parser.parse()
+
+    let cert: string = args.getString("cert") ?? "cert.pem"
+    let key: string = args.getString("key") ?? "key.pem"
+
+    match serveTls(args.getU16("port"), cert, key, handleRequest) {
+        Result.Err(msg) => {
+            print($"error: {msg}")
+            return 1
+        }
+        _ => {
+        }
+    }
+    return 0
+}

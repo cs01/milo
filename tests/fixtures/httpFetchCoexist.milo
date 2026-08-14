@@ -1,0 +1,42 @@
+// @skip-os: win32
+// Windows is skipped for the same reason as fetchResponseParse: importing std/fetch
+// links OpenSSL, which the xwin sysroot does not ship.
+//
+// One program that both serves HTTP and speaks the HTTP client. This did not compile
+// until std/fetch's client response type was renamed off `Response`: the module
+// namespace is flat and merged, so std/http's `Response` enum and std/fetch's struct
+// were the same name, and importing both left one of them shadowed — "cannot access
+// field on enum 'Response'" on a struct field read. Serving and fetching at once is an
+// ordinary shape for a proxy or a webhook relay, so the collision blocked real programs.
+
+from "std/http" import {
+    Response, renderResponse, Param
+}
+from "std/fetch" import {
+    parseResponse
+}
+
+// @expect: 200
+// @expect: hi
+// @expect: HTTP/1.1 200 OK
+fn main(): i32 {
+    let upstream = parseResponse("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nhi")
+    print(upstream.status.toString())
+    print(upstream.body)
+
+    let noHeaders: Vec<Param> = []
+    // Bound, not passed as an rvalue: `renderResponse(Response.Text(x), …)` leaks the
+    // temp's payload today (16 bytes, tracked in docs/backlog.md). Unrelated to what
+    // this fixture pins, and the leak ratchet runs over every fixture.
+    let reply = Response.Text(upstream.body.clone())
+    let wire = renderResponse(reply, noHeaders)
+    var firstLine: string = ""
+    for i in 0..wire.len {
+        if wire[i] == '\r' {
+            break
+        }
+        firstLine.push(wire[i])
+    }
+    print(firstLine)
+    return 0
+}

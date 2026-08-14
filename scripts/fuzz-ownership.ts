@@ -38,8 +38,9 @@
 // usually prints the right answer out of memory that has not been reused yet, and the
 // stdout oracle sees nothing (docs: project_uaf_proof_technique).
 //
-// Usage: bun scripts/fuzz-ownership.ts [--cases N] [--seed N] [--steps N] [--keep] [--verbose] [--no-asan]
-import { mkdtempSync, writeFileSync, rmSync } from "fs";
+// Usage: bun scripts/fuzz-ownership.ts [--cases N] [--seed N] [--steps N] [--keep] [--verbose]
+//        [--no-asan] [--corpus DIR]
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "fs";
 import { execSync } from "child_process";
 import { tmpdir } from "os";
 import { join } from "path";
@@ -58,6 +59,14 @@ const VERBOSE = process.argv.includes("--verbose");
 // ASan is the primary oracle; MallocScribble stays on underneath it (see runProgram).
 // `--no-asan` exists for a host with no working sanitizer, not as a speed knob.
 const ASAN = !process.argv.includes("--no-asan");
+// Write every generated program to a stable directory. scripts/fuzz-coverage.ts reads it
+// to ask which surface forms this generator can actually emit — a question the harness
+// cannot answer about itself, since a shape it never generates is invisible to its own
+// pass/fail line.
+const CORPUS = (() => {
+  const i = process.argv.indexOf("--corpus");
+  return i >= 0 && process.argv[i + 1] ? process.argv[i + 1]! : null;
+})();
 
 // Seeded PRNG so a finding is reproducible from the seed in the report.
 let state = SEED >>> 0 || 1;
@@ -496,6 +505,7 @@ interface Finding {
 }
 
 const dir = mkdtempSync(join(tmpdir(), "milo-ownfuzz-"));
+if (CORPUS) mkdirSync(CORPUS, { recursive: true });
 const findings: Finding[] = [];
 if (ASAN) assertAsanWorks();
 let validAccepted = 0, validTotal = 0, invalidRejected = 0, invalidTotal = 0, noInjection = 0;
@@ -515,6 +525,7 @@ for (let i = 0; i < CASES; i++) {
   const c = generate(invalidate);
   const file = join(dir, `case${i}.milo`);
   writeFileSync(file, c.src);
+  if (CORPUS) writeFileSync(join(CORPUS, `case${SEED}_${i}.milo`), c.src);
   if (VERBOSE) console.log(`\n── case ${i} (${invalidate ? "invalid" : "valid"})\n${c.src}`);
 
   const verdict = accepts(file);

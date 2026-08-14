@@ -134,7 +134,7 @@ enumWildcard
 envSetRemove
 eprint
 escapeApostrophe
-escapingClosureAutoMove
+escapingClosureMove
 escapingClosures
 eventLoop
 exePath

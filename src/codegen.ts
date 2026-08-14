@@ -11267,6 +11267,11 @@ export class Codegen {
     // A nested concat (`a + b + c`) is the same: the inner BinOp's result is owned
     // by nobody once the outer one has read it.
     switch (expr.kind) {
+      // An enum literal in an auto-borrowed argument position (`f(E.Text(s))`) owns
+      // its payload and nothing else ever will: the callee only borrows it, and the
+      // temp has no name for scope-drop to find. Without this the payload leaks on
+      // every call — `renderResponse(Response.Text(body), hdrs)` lost `body` each time.
+      case "EnumLit":
       case "NumberToString":
       case "BoolToString":
       case "JsonStringify":

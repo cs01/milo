@@ -25,12 +25,20 @@
 // docs/worksheets/2026-08-03-fail-closed-places.md). A generator that only emitted
 // `let b = a` would have found neither.
 //
-// Runs with MallocScribble=1: macOS fills freed blocks with 0x55 on release, which turns
-// a silent use-after-free into a visible wrong string. Without it a UAF on this platform
+// Two oracles run together on every executed program.
+//
+// AddressSanitizer is the primary one, and it is what sees a use-after-free READ at the
+// instruction that performs it. That matters more than it sounds: a stdout oracle only
+// notices a UAF whose freed bytes happen to have been reused by something else, so a
+// read of a block nothing has touched yet prints the correct answer and passes. ASan has
+// no such gap -- the block is poisoned the moment it is freed.
+//
+// MallocScribble=1 stays on underneath. macOS fills freed blocks with 0x55 on release,
+// which turns a silent use-after-free into a visible wrong string. Without it a UAF
 // usually prints the right answer out of memory that has not been reused yet, and the
 // stdout oracle sees nothing (docs: project_uaf_proof_technique).
 //
-// Usage: bun scripts/fuzz-ownership.ts [--cases N] [--seed N] [--steps N] [--keep] [--verbose]
+// Usage: bun scripts/fuzz-ownership.ts [--cases N] [--seed N] [--steps N] [--keep] [--verbose] [--no-asan]
 import { mkdtempSync, writeFileSync, rmSync } from "fs";
 import { execSync } from "child_process";
 import { tmpdir } from "os";
@@ -47,6 +55,9 @@ const SEED = argOf("--seed", 1);
 const STEPS = argOf("--steps", 9);
 const KEEP = process.argv.includes("--keep");
 const VERBOSE = process.argv.includes("--verbose");
+// ASan is the primary oracle; MallocScribble stays on underneath it (see runProgram).
+// `--no-asan` exists for a host with no working sanitizer, not as a speed knob.
+const ASAN = !process.argv.includes("--no-asan");
 
 // Seeded PRNG so a finding is reproducible from the seed in the report.
 let state = SEED >>> 0 || 1;
@@ -420,6 +431,46 @@ function sh(cmd: string, env?: Record<string, string>): Run {
   }
 }
 
+const ASAN_REPORT = /ERROR: AddressSanitizer: ([a-z-]+)/;
+
+// Execute a generated program under both oracles. `--sanitize` does not change what the
+// program prints, so the stdout comparison the caller does is unaffected by it.
+function runProgram(file: string): Run & { asan: string | null } {
+  const r = sh(`bun ${MILO} run ${ASAN ? "--sanitize " : ""}${file}`, { MallocScribble: "1" });
+  const m = ASAN_REPORT.exec(r.stderr);
+  return { ...r, asan: m ? m[1]! : null };
+}
+
+// A sanitizer that links but does not instrument reports every program clean, and this
+// harness would then print "no findings" for the exact class it added ASan to see. That
+// is not hypothetical -- `--sanitize` shipped in precisely that state (see
+// tests/sanitize.test.ts). Prove the oracle can fail before trusting it to pass.
+function assertAsanWorks(): void {
+  const probe = join(dir, "__asan_selfcheck.milo");
+  writeFileSync(probe, `fn main() {
+    var v: Vec<i32> = Vec.new()
+    v.push(1)
+    var x: i32 = 0
+    unsafe {
+        let p = v.ptr()
+        var i: i32 = 0
+        while i < 1000 { v.push(i); i = i + 1 }
+        x = *p
+    }
+    print(x)
+}
+`);
+  const r = runProgram(probe);
+  if (r.asan !== "heap-use-after-free") {
+    console.error("ASan self-check FAILED: a deliberate use-after-free read was not reported.");
+    console.error(`  got: ${r.asan ?? "no AddressSanitizer output"}`);
+    console.error("  The sanitizer is linked but not instrumenting, or clang is missing.");
+    console.error("  Refusing to run: results would read as clean for the class ASan is here to catch.");
+    console.error("  Re-run with --no-asan to fall back to the stdout oracle alone.");
+    process.exit(2);
+  }
+}
+
 // The checker's verdict, without paying for clang. `emit-hir` runs lexer → parser →
 // checker → lowering and exits nonzero on any error diagnostic.
 function accepts(file: string) {
@@ -441,6 +492,7 @@ interface Finding {
 
 const dir = mkdtempSync(join(tmpdir(), "milo-ownfuzz-"));
 const findings: Finding[] = [];
+if (ASAN) assertAsanWorks();
 let validAccepted = 0, validTotal = 0, invalidRejected = 0, invalidTotal = 0, noInjection = 0;
 
 function keep(i: number, src: string) {
@@ -476,12 +528,15 @@ for (let i = 0; i < CASES; i++) {
     // Accepted a program that uses a value it already gave away. Run it: an abort or a
     // wrong string turns "the checker has a gap" into "the gap is exploitable", which
     // is the difference between a backlog entry and a stop-everything bug.
-    const run = sh(`bun ${MILO} run ${file}`, { MallocScribble: "1" });
+    const run = runProgram(file);
     const aborted = run.status !== 0 || /malloc|double free|pointer being freed/i.test(run.stderr);
+    const why = run.asan
+      ? `AddressSanitizer: ${run.asan}`
+      : (run.stderr.split("\n").find(l => l.trim()) ?? `exit ${run.status}`).trim();
     findings.push({
-      kind: aborted ? "unsound-accept" : "false-accept",
+      kind: aborted || run.asan ? "unsound-accept" : "false-accept",
       detail: `use-after-move of '${c.invalid.ref}' spelled '${c.invalid.spelling}' compiled` +
-        (aborted ? ` and the program died: ${(run.stderr.split("\n").find(l => l.trim()) ?? `exit ${run.status}`).trim()}` : " (ran to completion — a gap, not yet a crash)"),
+        (aborted || run.asan ? ` and the program touched memory it does not own: ${why}` : " (ran to completion — a gap, not yet a crash)"),
       file: keep(i, c.src),
     });
     continue;
@@ -501,9 +556,20 @@ for (let i = 0; i < CASES; i++) {
   }
   validAccepted++;
 
-  const run = sh(`bun ${MILO} run ${file}`, { MallocScribble: "1" });
+  const run = runProgram(file);
   const got = run.stdout.split("\n").filter(l => l !== "");
-  if (run.status !== 0) {
+  // Ordered before the exit-code branch: an ASan abort is also a nonzero exit, and
+  // "memory error" is the finding, not "the program exited 1". A valid program that
+  // prints the right bytes off a freed block is the whole reason ASan is here -- the
+  // stdout oracle below would call it a pass.
+  if (run.asan) {
+    findings.push({
+      kind: "unsound-accept",
+      detail: `accepted program is memory-unsafe: AddressSanitizer: ${run.asan}` +
+        (got.join("\n") === c.expected.join("\n") ? " (stdout was correct — invisible without ASan)" : ""),
+      file: keep(i, c.src),
+    });
+  } else if (run.status !== 0) {
     findings.push({
       kind: "miscompile",
       detail: `exit ${run.status}: ${(run.stderr.split("\n").find(l => l.trim()) ?? "").trim()}`,
@@ -520,7 +586,7 @@ for (let i = 0; i < CASES; i++) {
 
 // ── report ────────────────────────────────────────────────────────────────────
 
-console.log(`seed ${SEED}, ${CASES} cases (${STEPS} steps each)`);
+console.log(`seed ${SEED}, ${CASES} cases (${STEPS} steps each), oracle: ${ASAN ? "ASan + stdout" : "stdout only (--no-asan)"}`);
 console.log(`valid programs accepted:   ${validAccepted}/${validTotal}`);
 console.log(`invalid programs rejected: ${invalidRejected}/${invalidTotal}`);
 if (noInjection > 0) console.log(`(${noInjection} invalid cases had no moved value to reuse)`);

@@ -106,8 +106,8 @@ function frontendToHIR(source: string, target: TargetInfo, filePath?: string, wa
   return lower(program, result, sourceDir, target.os);
 }
 
-function compile(source: string, target: TargetInfo, filePath?: string, warningConfig?: WarningConfig, trapOnOverflow = false, emitDebug = false, contractChecks = false, stripPanicLocations = false): string {
-  return compileWithGuards(source, target, filePath, warningConfig, trapOnOverflow, emitDebug, contractChecks, stripPanicLocations).ir;
+function compile(source: string, target: TargetInfo, filePath?: string, warningConfig?: WarningConfig, trapOnOverflow = false, emitDebug = false, contractChecks = false, stripPanicLocations = false, sanitize = false): string {
+  return compileWithGuards(source, target, filePath, warningConfig, trapOnOverflow, emitDebug, contractChecks, stripPanicLocations, sanitize).ir;
 }
 
 // Parse + resolve imports + type-check, rendering ParseErrors as clean Elm-style
@@ -135,9 +135,9 @@ function parseCheckProgram(src: string, target: TargetInfo, filePath: string, wa
 // `cGuards` is the `@cLayout`/`@cSig` verification TU (null when the program declares
 // neither) — see Codegen.cDeclGuards. It rides alongside the IR because only codegen
 // knows the field offsets and return widths it asserts.
-function compileWithGuards(source: string, target: TargetInfo, filePath?: string, warningConfig?: WarningConfig, trapOnOverflow = false, emitDebug = false, contractChecks = false, stripPanicLocations = false): { ir: string; cGuards: string | null; linkLibs: string[] } {
+function compileWithGuards(source: string, target: TargetInfo, filePath?: string, warningConfig?: WarningConfig, trapOnOverflow = false, emitDebug = false, contractChecks = false, stripPanicLocations = false, sanitize = false): { ir: string; cGuards: string | null; linkLibs: string[] } {
   const hirModule = frontendToHIR(source, target, filePath, warningConfig);
-  const cg = new Codegen(target, filePath, trapOnOverflow, emitDebug, contractChecks, stripPanicLocations);
+  const cg = new Codegen(target, filePath, trapOnOverflow, emitDebug, contractChecks, stripPanicLocations, sanitize);
   const ir = cg.generate(hirModule);
   return { ir, cGuards: cg.cDeclGuards(), linkLibs: hirModule.linkLibs ?? [] };
 }
@@ -277,9 +277,9 @@ function compileToJS(source: string, target: TargetInfo, filePath?: string, warn
   return new CodegenJS().generate(hirModule);
 }
 
-function compileToIr(sourcePath: string, outputPath: string | null, target: TargetInfo, warningConfig?: WarningConfig, trapOnOverflow = false, emitDebug = false, contractChecks = false, stripPanicLocations = false) {
+function compileToIr(sourcePath: string, outputPath: string | null, target: TargetInfo, warningConfig?: WarningConfig, trapOnOverflow = false, emitDebug = false, contractChecks = false, stripPanicLocations = false, sanitize = false) {
   const source = readFileSync(sourcePath, "utf-8");
-  const ir = compile(source, target, sourcePath, warningConfig, trapOnOverflow, emitDebug, contractChecks, stripPanicLocations);
+  const ir = compile(source, target, sourcePath, warningConfig, trapOnOverflow, emitDebug, contractChecks, stripPanicLocations, sanitize);
   if (outputPath) {
     writeFileSync(outputPath, ir);
     console.log(`wrote ${outputPath}`);
@@ -1018,7 +1018,7 @@ function compileToBinary(sourcePath: string, outputPath: string | null, target: 
   // DWARF is gated on -g alone (compose `-g --debug` for -O0 + line info). Keeping it
   // off --debug leaves the -O0 path — used by the runtime-error test harness — byte
   // -identical and free of per-build dsymutil / .dSYM litter.
-  const { ir, cGuards, linkLibs } = compileWithGuards(source, target, sourcePath, warningConfig, trapOnOverflow, emitDebug, contractChecks, stripPanicLocations);
+  const { ir, cGuards, linkLibs } = compileWithGuards(source, target, sourcePath, warningConfig, trapOnOverflow, emitDebug, contractChecks, stripPanicLocations, sanitize);
   verifyCDecls(cGuards, target, linkLibs);
   const base = basename(sourcePath).replace(/\.milo$/, "");
   const id = crypto.randomUUID().slice(0, 8);
@@ -2225,7 +2225,7 @@ async function main() {
   } else if (cmd === "emit-ir") {
     const trapOnOverflow = overflowChecks ?? true;
     const emitContractChecks = contractChecks ?? (optFlag === "-O0");
-    compileToIr(source!, output, target, warningConfig, trapOnOverflow, emitDebug, emitContractChecks, stripPanicLocations);
+    compileToIr(source!, output, target, warningConfig, trapOnOverflow, emitDebug, emitContractChecks, stripPanicLocations, sanitize);
   } else if (cmd === "emit-obj") {
     const t0 = Date.now();
     const obj = compileToObj(source!, output, target, optFlag, warningConfig, noEntry, overflowChecks, contractChecks);

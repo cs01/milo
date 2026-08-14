@@ -66,6 +66,10 @@ interface LocalInfo { type: string; typeKind: TypeKind; mutable: boolean; isRef:
 // newtypes make it free on the other side of the port. See docs/backlog.md.
 type Gen = [lines: string[], value: string, type: string];
 
+// Attribute-group number for the `--sanitize` marker. Emitted IR carries no other
+// attribute groups, so 0 is always free.
+const SANITIZE_ATTRS = 0;
+
 export class Codegen {
   private target: TargetInfo;
   private output: string[] = [];
@@ -237,18 +241,20 @@ export class Codegen {
   // filesystem and nothing else. Line numbers stay: alone they identify nothing, and
   // they are all that is left to correlate a user-reported panic against.
   private stripPanicLocations = false;
+  private sanitize = false;
   private currentSubprogramId: number | null = null;
   private currentSubprogramFileId = 0;
   private usedDbgDeclare = false;
   private diTypes = new Map<string, number>();
 
-  constructor(target: TargetInfo, filePath?: string, trapOnOverflow = false, emitDebug = false, contractChecks = false, stripPanicLocations = false) {
+  constructor(target: TargetInfo, filePath?: string, trapOnOverflow = false, emitDebug = false, contractChecks = false, stripPanicLocations = false, sanitize = false) {
     this.target = target;
     this.filePath = filePath;
     this.trapOnOverflow = trapOnOverflow;
     this.emitDebug = emitDebug;
     this.contractChecks = contractChecks;
     this.stripPanicLocations = stripPanicLocations;
+    this.sanitize = sanitize;
   }
 
   // The MSVC CRT is not POSIX: the byte-level I/O the print builtins lower to has
@@ -1633,8 +1639,34 @@ export class Codegen {
     }
 
     if (this.emitDebug) this.applyDebugInfo();
+    // After applyDebugInfo: that pass matches `!dbg !N {` at the end of a define line,
+    // and the attribute group this inserts sits before the metadata.
+    if (this.sanitize) this.applySanitizeAttribute();
 
     return this.output.join("\n") + "\n";
+  }
+
+  // Mark every emitted function `sanitize_address` so `-fsanitize=address` actually
+  // instruments loads and stores.
+  //
+  // clang attaches this attribute in the FRONTEND, which a `.ll` input bypasses — so
+  // `clang -fsanitize=address foo.ll` links the ASan runtime and instruments nothing.
+  // That failure is silent and looks like success: the malloc/free interceptors still
+  // fire, so double-free and invalid-free are still reported, and only use-after-free
+  // READS pass unnoticed. Every function needs it; ASan skips any function without it.
+  private applySanitizeAttribute(): void {
+    const out = this.output;
+    for (let i = 0; i < out.length; i++) {
+      const l = out[i];
+      if (!l.startsWith("define ") || !l.endsWith("{")) continue;
+      // An attribute group reference must precede any metadata attachment, so a
+      // `-g --sanitize` build has to insert before ` !dbg !N`, not at end of line.
+      const dbg = l.indexOf(" !dbg ");
+      out[i] = dbg >= 0
+        ? `${l.slice(0, dbg)} #${SANITIZE_ATTRS}${l.slice(dbg)}`
+        : `${l.slice(0, -1).trimEnd()} #${SANITIZE_ATTRS} {`;
+    }
+    out.push("", `attributes #${SANITIZE_ATTRS} = { sanitize_address }`);
   }
 
   // Resolve deferred ;MILODBG markers into real !dbg attachments over the assembled

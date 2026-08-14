@@ -84,6 +84,32 @@ function asanBinIsFresh(): boolean {
   return built > statSync(MILO_SELF).mtimeMs && built > newestMtime(SRC_MILO);
 }
 
+// clang attaches `sanitize_address` in the FRONTEND, so `-fsanitize=address` over a `.ll`
+// input links the ASan runtime and instruments NOTHING. The failure is silent and reads as
+// success: the malloc/free interceptors still fire, so double-free and invalid-free are
+// still caught — which is why every bug this harness has ever found was a second-owner
+// bug — while use-after-free READS pass with no report at all. milo-self emits IR without
+// the attribute, so the harness has to add it before linking.
+function instrumentIR(ir: string): string {
+  const marked = ir.replace(/^(define [^\n{]*?)( !dbg ![0-9]+)? \{$/gm,
+    (_m, head: string, dbg: string | undefined) => `${head} #0${dbg ?? ""} {`);
+  return marked + "\nattributes #0 = { sanitize_address }\n";
+}
+
+// Fail closed on the bug above. A census over an uninstrumented binary reports every
+// fixture clean for the read-UAF class it exists to detect, and a green ratchet then
+// certifies coverage that was never measured.
+function assertInstrumented(bin: string): void {
+  const nm = Bun.spawnSync(["nm", "-u", bin]);
+  const syms = nm.stdout.toString();
+  if (!/__asan_report_/.test(syms)) {
+    console.error(`${basename(bin)} links the ASan runtime but has no __asan_report_* references —`);
+    console.error("the code is NOT instrumented, so use-after-free reads would go unreported.");
+    console.error("Refusing to run a census that cannot see the bug class it is for. (--rebuild to redo the link.)");
+    process.exit(1);
+  }
+}
+
 async function buildStage2Asan(): Promise<void> {
   console.error("stage 2: milo-self compiles src-milo…");
   const emit = await guardedRun(MILO_SELF, ["emit-ir", join(SRC_MILO, "main.milo")],
@@ -99,7 +125,7 @@ async function buildStage2Asan(): Promise<void> {
     console.error(emit.stderr.trim().split("\n").slice(0, 10).join("\n"));
     process.exit(1);
   }
-  writeFileSync(STAGE2_LL, emit.stdout);
+  writeFileSync(STAGE2_LL, instrumentIR(emit.stdout.toString()));
 
   // -O1 deliberately. At -O0 nothing coalesces the per-variant allocas in
   // Expr$Clone$clone (44 x %Expr = a ~24 KB frame) and a 340-deep AST clone exhausts
@@ -117,10 +143,11 @@ async function buildStage2Asan(): Promise<void> {
     console.error(`clang failed (${link.exitCode}):\n${link.stderr.toString().slice(0, 2000)}`);
     process.exit(1);
   }
+  assertInstrumented(STAGE2_ASAN);
 }
 
 if (rebuild || !asanBinIsFresh()) await buildStage2Asan();
-else console.error(`reusing ${basename(STAGE2_ASAN)} (newer than milo-self and src-milo; --rebuild to force)`);
+else { console.error(`reusing ${basename(STAGE2_ASAN)} (newer than milo-self and src-milo; --rebuild to force)`); assertInstrumented(STAGE2_ASAN); }
 
 type Verdict = "ok" | "memory-error" | "unmeasured";
 // `name` is the repo-relative path, not a basename: examples/ has a dozen different

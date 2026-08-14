@@ -90,14 +90,16 @@ const WORDS = ["alfa", "bravo", "charlie", "delta", "echo", "foxtrot", "golf", "
 // program names it — `v3` for a binding, `s1.a` for a struct field — so a move out
 // of a field and a move out of a binding are the same operation to the generator,
 // which is exactly the distinction the checker keeps getting wrong.
-interface Slot { ref: string; word: string; live: boolean }
+// `mut` marks a slot the program can assign INTO, which is a second way for a value to
+// arrive somewhere and the only way for a moved-out binding to come back to life.
+interface Slot { ref: string; word: string; live: boolean; mut?: boolean }
 
 class Program {
   lines: string[] = [];
   expected: string[] = [];
   slots: Slot[] = [];
   conds: { name: string; value: boolean }[] = [];
-  vecs: string[] = [];
+  vecs: { name: string; words: string[] }[] = [];
   private n = 0;
   private indent = 1;
 
@@ -107,6 +109,8 @@ class Program {
   close() { this.indent--; this.emit("}"); }
 
   live() { return this.slots.filter(s => s.live); }
+  mutSlots() { return this.slots.filter(s => s.mut); }
+  filledVecs() { return this.vecs.filter(v => v.words.length > 0); }
   dead() { return this.slots.filter(s => !s.live); }
   take(s: Slot) { s.live = false; }
 
@@ -282,11 +286,12 @@ const SHAPES: Shape[] = [
       const s = pick(live);
       let q = p.vecs.length > 0 && chance(0.6) ? pick(p.vecs) : null;
       if (!q) {
-        q = p.fresh("q");
-        p.emit(`var ${q}: Vec<string> = Vec.new()`);
+        q = { name: p.fresh("q"), words: [] };
+        p.emit(`var ${q.name}: Vec<string> = Vec.new()`);
         p.vecs.push(q);
       }
-      p.emit(`${q}.push(${s.ref})`);
+      p.emit(`${q.name}.push(${s.ref})`);
+      q.words.push(s.word);
       p.take(s);
       return true;
     },
@@ -357,6 +362,90 @@ const SHAPES: Shape[] = [
       return true;
     },
   },
+  {
+    // A mutable binding. On its own it proves nothing; it is what `move-to-assign`
+    // needs a destination for, and assignment is the single most common statement in
+    // the fixture corpus that this generator could not previously spell.
+    name: "declare-var",
+    apply(p) {
+      const v = p.fresh("w"), word = pick(WORDS);
+      p.emit(`var ${v} = "${word}"`);
+      p.slots.push({ ref: v, word, live: true, mut: true });
+      return true;
+    },
+  },
+  {
+    // Assignment as a move destination. Two things are being tested at once and both
+    // have bitten before: the destination's OLD buffer has to be released exactly once
+    // (assigning over a live binding), and a binding that was moved out of has to come
+    // back to life (assigning over a dead one) rather than stay poisoned.
+    name: "move-to-assign",
+    apply(p) {
+      const dests = p.mutSlots();
+      if (dests.length === 0) return false;
+      const d = pick(dests);
+      const sources = p.live().filter(x => x !== d);
+      if (sources.length === 0) return false;
+      const src = pick(sources);
+      p.emit(`${d.ref} = ${src.ref}`);
+      p.take(src);
+      d.word = src.word;
+      d.live = true;
+      return true;
+    },
+  },
+  {
+    // `let x = q[i]` on a Vec<string>. This does NOT move the element out — it copies,
+    // and the vec keeps it — so the generated program ends up with two names for what
+    // must be two separate buffers. A shallow copy here is a double free at scope exit
+    // and identical stdout right up until it aborts, which is why ASan is the oracle
+    // that decides it (docs/backlog.md, the index silent-clone entry).
+    name: "read-index",
+    apply(p) {
+      const filled = p.filledVecs();
+      if (filled.length === 0) return false;
+      const q = pick(filled);
+      const i = Math.floor(rnd() * q.words.length);
+      const v = p.fresh("ix");
+      p.emit(`let ${v} = ${q.name}[${i}]`);
+      p.slots.push({ ref: v, word: q.words[i]!, live: true });
+      return true;
+    },
+  },
+  {
+    // `!` unwraps by consuming, the same as `??` but through a different node. Both
+    // spellings reach the same rule and only one of them was ever generated; the
+    // use-after-free this family produced was found by hand, not by this harness.
+    name: "move-through-unwrap",
+    apply(p) {
+      const live = p.live();
+      if (live.length === 0) return false;
+      const s = pick(live), o = p.fresh("u"), v = p.fresh("v");
+      p.emit(`let ${o}: Option<string> = Option.Some(${s.ref})`);
+      p.take(s);
+      p.emit(`let ${v} = ${o}!`);
+      p.slots.push({ ref: v, word: s.word, live: true });
+      return true;
+    },
+  },
+  {
+    // `for w in q` binds each element BY REFERENCE, so the loop reads what the vec owns
+    // without taking it. The predicted stdout is every word in insertion order, which
+    // also pins iteration itself: a loop that skips, repeats or reorders an element is
+    // a mismatch here even though no ownership rule was involved.
+    name: "borrow-in-forin",
+    apply(p) {
+      const filled = p.filledVecs();
+      if (filled.length === 0) return false;
+      const q = pick(filled);
+      p.open(`for w in ${q.name} {`);
+      p.emit(`print(w)`);
+      p.close();
+      for (const w of q.words) p.expected.push(w);
+      return true;
+    },
+  },
+
 ];
 
 // ── generation ────────────────────────────────────────────────────────────────

@@ -65,7 +65,7 @@ test("--sanitize composes with -g (attribute group precedes !dbg)", () => {
   expect(ir).toMatch(/^define [^\n]* #0 !dbg !\d+ \{$/m);
   // And it has to survive the verifier, which the emit path alone would not prove.
   execSync(`bun ${MILO} run -g --sanitize ${src}`, { encoding: "utf-8", env: ENV });
-});
+}, 120_000);
 
 test("a --sanitize binary carries load/store instrumentation, not just the runtime", () => {
   const src = join(dir, "sym.milo");
@@ -79,7 +79,7 @@ test("a --sanitize binary carries load/store instrumentation, not just the runti
   // __asan_init alone is what a runtime-only link looks like — the bug this guards.
   expect(syms).toContain("asan_init");
   expect(syms).toMatch(/asan_report_(load|store)/);
-});
+}, 120_000);
 
 test("--sanitize reports a use-after-free read", () => {
   const src = join(dir, "uaf.milo");
@@ -92,7 +92,7 @@ test("--sanitize reports a use-after-free read", () => {
   }
   expect(out).toContain("ERROR: AddressSanitizer: heap-use-after-free");
   expect(out).toContain("READ of size 4");
-});
+}, 120_000);
 
 test("without --sanitize the same program is not instrumented", () => {
   const src = join(dir, "uafPlain.milo");

@@ -41,5 +41,13 @@ test("no false accepts: an accepted program owns what it prints", () => {
   expect(Number(valid![1])).toBeGreaterThan(0);
   expect(Number(invalid![2])).toBeGreaterThan(0);
 
+  // Same reasoning one axis over. The generator can emit every form it knows and put all
+  // of them at the top level of `main`, which tests each rule alone and nothing about how
+  // they compose — and every ownership bug this compiler has had was a composition. A run
+  // that has quietly gone flat passes every other assertion here, so pin the depth.
+  const depth = out.match(/nesting depth: max (\d+)/);
+  expect(depth).not.toBeNull();
+  expect(Number(depth![1])).toBeGreaterThanOrEqual(3);
+
   expect(failed ? out : "").toBe("");
 }, 600000);

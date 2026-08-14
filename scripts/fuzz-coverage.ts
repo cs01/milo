@@ -56,6 +56,10 @@ function unionMembers(src: string, name: string): string[] {
 
 const astSrc = readFileSync(AST_TS, "utf-8");
 const byInterface = interfaceKinds(astSrc);
+// Statement kinds alone, used to recognise a block: there is no Block node in this AST —
+// a block is any array-valued field whose elements are statements (IfStmt.thenBranch,
+// MatchArm.body, ClosureExpr.body, …), so the set has to be derived to find them.
+const stmtKinds = new Set(unionMembers(astSrc, "Stmt").map(n => byInterface.get(n)).filter(Boolean) as string[]);
 const bodyKinds = new Set<string>();
 for (const name of [...unionMembers(astSrc, "Expr"), ...unionMembers(astSrc, "Stmt")]) {
   const kind = byInterface.get(name);
@@ -99,6 +103,39 @@ function kindsIn(file: string): Map<string, number> {
   return counts;
 }
 
+// How deeply nested is the code, as distinct from which forms it uses. The kind census
+// above measures SURFACE; a generator can emit all 39 kinds and still put every one of
+// them at the top level of `main`. Every ownership bug this compiler has had was a
+// composition — a move in a fork tail inside a match arm — so a corpus that is 39/39 wide
+// and one level deep is testing the rules one at a time and nothing about how they join.
+function maxBlockDepth(file: string): number {
+  const src = readFileSync(file, "utf-8");
+  let ast: unknown;
+  try {
+    ast = new Parser(new Lexer(src).tokenize(), src, file).parse();
+  } catch {
+    return 0;
+  }
+  let deepest = 0;
+  const seen = new Set<object>();
+  const walk = (n: unknown, depth: number): void => {
+    if (n === null || typeof n !== "object") return;
+    if (seen.has(n as object)) return;
+    seen.add(n as object);
+    if (Array.isArray(n)) { for (const x of n) walk(x, depth); return; }
+    for (const v of Object.values(n as Record<string, unknown>)) {
+      const isBlock = Array.isArray(v) && v.some(x =>
+        x && typeof x === "object" && stmtKinds.has(String((x as { kind?: unknown }).kind)));
+      if (isBlock) deepest = Math.max(deepest, depth + 1);
+      walk(v, isBlock ? depth + 1 : depth);
+    }
+  };
+  // The function body itself is depth 1, so a flat `main` scores 1 and a shape nested in
+  // one branch scores 2.
+  walk(ast, 0);
+  return deepest;
+}
+
 function census(files: string[]): Map<string, number> {
   const total = new Map<string, number>();
   for (const f of files) {
@@ -131,6 +168,17 @@ try {
   console.log(`  reached by the ownership fuzzer: ${covered.length}/${bodyKinds.size}` +
     ` (${Math.round((covered.length / bodyKinds.size) * 100)}%)`);
   console.log(`  reached by tests/fixtures:       ${[...bodyKinds].filter(k => (fix.get(k) ?? 0) > 0).length}/${bodyKinds.size}`);
+
+  // The second axis. Reported next to the kind census because they fail independently:
+  // adding a shape moves the first number and not the second, and adding nesting moves
+  // the second and not the first.
+  const depths = (files: string[]) => files.map(maxBlockDepth).filter(d => d > 0);
+  const genD = depths(generated), fixD = depths(fixtures);
+  const stat = (ds: number[]) => ds.length === 0 ? "n/a"
+    : `max ${Math.max(...ds)}, mean ${(ds.reduce((a, b) => a + b, 0) / ds.length).toFixed(1)}`;
+  console.log(`\nblock nesting depth (a flat function body is 1):`);
+  console.log(`  ownership fuzzer: ${stat(genD)}`);
+  console.log(`  tests/fixtures:   ${stat(fixD)}`);
 
   if (VERBOSE) {
     console.log("\nper kind (generated / fixtures):");

@@ -102,9 +102,23 @@ class Program {
   vecs: { name: string; words: string[] }[] = [];
   private n = 0;
   private indent = 1;
+  // How deep inside nested blocks generation currently is, and how many enclosing blocks
+  // the generator knows will not execute. Both are read by `fill` to decide which shapes
+  // may run here; see MAX_DEPTH.
+  depth = 0;
+  suppressed = 0;
+
+  // The deepest block this program reached, reported by the run so a generator that
+  // quietly stops nesting — every container declining, a bad MAX_DEPTH — is visible.
+  // Flat programs still pass every assertion this harness makes, which is the failure
+  // mode worth an explicit number rather than trust.
+  peak = 1;
 
   fresh(prefix: string) { return `${prefix}${this.n++}`; }
-  emit(line: string) { this.lines.push("    ".repeat(this.indent) + line); }
+  emit(line: string) {
+    this.peak = Math.max(this.peak, this.indent);
+    this.lines.push("    ".repeat(this.indent) + line);
+  }
   open(line: string) { this.emit(line); this.indent++; }
   close() { this.indent--; this.emit("}"); }
 
@@ -113,6 +127,52 @@ class Program {
   filledVecs() { return this.vecs.filter(v => v.words.length > 0); }
   dead() { return this.slots.filter(s => !s.live); }
   take(s: Slot) { s.live = false; }
+
+  // Predicted stdout, but only from code that actually runs. A shape inside a branch the
+  // generator knows is dead still emits its statement (the checker has to accept it) and
+  // still marks what it moved as moved (the checker has to assume it might run) — it
+  // just prints nothing.
+  say(...words: string[]) { if (this.suppressed === 0) this.expected.push(...words); }
+
+  // Suppression and scope unwinding, with no braces of its own. Three things have to be
+  // undone on the way out, and every one of them is a scope error rather than an ownership
+  // one if it is not: a binding, a cond's `let c`, and a Vec declared inside the block all
+  // stop existing at the closing brace, and a later shape that names one would make the
+  // harness report its own bookkeeping as a checker bug. A slot the block MOVED stays
+  // dead, which is the point — that death outlives the scope.
+  scoped(taken: boolean, body: () => void) {
+    const slotMark = this.slots.length, condMark = this.conds.length, vecMark = this.vecs.length;
+    const wasLive = this.slots.map(s => s.live);
+    if (!taken) this.suppressed++;
+    this.depth++;
+    body();
+    this.depth--;
+    if (!taken) this.suppressed--;
+    this.slots.length = slotMark;
+    this.conds.length = condMark;
+    this.vecs.length = vecMark;
+    // A block may KILL an outer slot but never RESURRECT one, whatever the generator
+    // knows about whether it runs. `w = other` inside one arm brings a moved-out binding
+    // back to life on that path only; the sibling arm and the code after the join still
+    // see it moved, and the checker is right to reject a use there. Without this the
+    // harness reports its own bookkeeping as a false reject — which is how it was found.
+    for (let i = 0; i < slotMark; i++) this.slots[i]!.live = wasLive[i]! && this.slots[i]!.live;
+  }
+
+  block(taken: boolean, header: string, body: () => void) {
+    this.scoped(taken, () => { this.open(header); body(); this.close(); });
+  }
+
+  // Both arms of one `if`, each its own scope. One method rather than two calls because
+  // `} else {` belongs to neither arm — a shape that emitted it would have to know about
+  // the indent counter, and getting that wrong turns one `if` into two.
+  ifElse(c: { name: string; value: boolean }, thenBody: () => void, elseBody: () => void) {
+    this.scoped(c.value, () => { this.open(`if ${c.name} {`); thenBody(); this.indent--; });
+    this.emit("} else {");
+    this.indent++;
+    this.scoped(!c.value, elseBody);
+    this.close();
+  }
 
   // A bool the generator knows the value of, so it can predict which arm of a fork
   // actually runs while the checker still has to assume either might.
@@ -165,7 +225,12 @@ ${this.lines.join("\n")}
 // preconditions are not met. All of them keep the model and the emitted code in
 // lockstep: a shape that consumes a slot in the program must mark it dead here, or
 // the harness starts reporting its own bookkeeping as compiler bugs.
-type Shape = { name: string; apply: (p: Program) => boolean };
+// `stateful` marks a shape whose model update is a RUNTIME fact rather than a compile-time
+// one — a vec's contents, a var's current word, a sort order. Those must not run inside a
+// block the generator knows is dead: the code would never execute, but the model would go
+// on predicting output from it. `container` marks a shape that nests other shapes inside
+// itself, which is what MAX_DEPTH bounds.
+type Shape = { name: string; stateful?: boolean; container?: boolean; apply: (p: Program) => boolean };
 
 const SHAPES: Shape[] = [
   {
@@ -183,7 +248,7 @@ const SHAPES: Shape[] = [
       const s = p.live()[0] ? pick(p.live()) : null;
       if (!s) return false;
       p.emit(`print(borrow(${s.ref}))`);
-      p.expected.push(String(s.word.length));
+      p.say(String(s.word.length));
       return true;
     },
   },
@@ -194,7 +259,7 @@ const SHAPES: Shape[] = [
       if (live.length === 0) return false;
       const s = pick(live);
       p.emit(`print(${s.ref})`);
-      p.expected.push(s.word);
+      p.say(s.word);
       return true;
     },
   },
@@ -205,7 +270,7 @@ const SHAPES: Shape[] = [
       if (live.length === 0) return false;
       const s = pick(live);
       p.emit(`print(consume(${s.ref}))`);
-      p.expected.push(String(s.word.length));
+      p.say(String(s.word.length));
       p.take(s);
       return true;
     },
@@ -280,6 +345,7 @@ const SHAPES: Shape[] = [
     // writes, and it moves — a checker that treats method arguments differently from
     // free-function arguments has a hole exactly the width of the standard library.
     name: "move-into-vec",
+    stateful: true,
     apply(p) {
       const live = p.live();
       if (live.length === 0) return false;
@@ -322,10 +388,10 @@ const SHAPES: Shape[] = [
       const live = p.live();
       if (live.length === 0) return false;
       const s = pick(live), c = p.cond();
-      p.open(`if ${c.name} {`);
-      p.emit(`print(consume(${s.ref}))`);
-      if (c.value) p.expected.push(String(s.word.length));
-      p.close();
+      p.block(c.value, `if ${c.name} {`, () => {
+        p.emit(`print(consume(${s.ref}))`);
+        p.say(String(s.word.length));
+      });
       p.take(s);
       return true;
     },
@@ -340,12 +406,12 @@ const SHAPES: Shape[] = [
       const c = p.cond();
       if (!c.value) return false;   // an untaken branch would print nothing to check
       const r = p.fresh("r"), word = pick(WORDS);
-      p.open(`if ${c.name} {`);
-      p.emit(`let ${r} = Res { name: "${word}" }`);
-      p.emit(`print(borrow(${r}.name))`);
-      p.expected.push(String(word.length));
-      p.close();
-      p.expected.push(`drop ${word}`);
+      p.block(true, `if ${c.name} {`, () => {
+        p.emit(`let ${r} = Res { name: "${word}" }`);
+        p.emit(`print(borrow(${r}.name))`);
+        p.say(String(word.length));
+      });
+      p.say(`drop ${word}`);
       return true;
     },
   },
@@ -380,6 +446,7 @@ const SHAPES: Shape[] = [
     // (assigning over a live binding), and a binding that was moved out of has to come
     // back to life (assigning over a dead one) rather than stay poisoned.
     name: "move-to-assign",
+    stateful: true,
     apply(p) {
       const dests = p.mutSlots();
       if (dests.length === 0) return false;
@@ -438,10 +505,8 @@ const SHAPES: Shape[] = [
       const filled = p.filledVecs();
       if (filled.length === 0) return false;
       const q = pick(filled);
-      p.open(`for w in ${q.name} {`);
-      p.emit(`print(w)`);
-      p.close();
-      for (const w of q.words) p.expected.push(w);
+      p.block(true, `for w in ${q.name} {`, () => p.emit(`print(w)`));
+      for (const w of q.words) p.say(w);
       return true;
     },
   },
@@ -468,7 +533,7 @@ const SHAPES: Shape[] = [
       p.close();
       // Always Some, so only the first arm runs — the fork is for the checker, not the
       // program. The other arm still has to type-check against a value already moved.
-      p.expected.push(String(s.word.length));
+      p.say(String(s.word.length));
       return true;
     },
   },
@@ -486,7 +551,7 @@ const SHAPES: Shape[] = [
       p.open(`if let Option.Some(y) = ${o} {`);
       p.emit(`print(y)`);
       p.close();
-      p.expected.push(s.word);
+      p.say(s.word);
       return true;
     },
   },
@@ -524,7 +589,7 @@ const SHAPES: Shape[] = [
       p.emit(`print(consume(${w}))`);
       p.emit(`${n} = ${n} + 1`);
       p.close();
-      p.expected.push(String(word.length), String(word.length));
+      p.say(String(word.length), String(word.length));
       return true;
     },
   },
@@ -541,7 +606,7 @@ const SHAPES: Shape[] = [
       const s = pick(live), f = p.fresh("f");
       p.emit(`let ${f} = () => borrow(${s.ref})`);
       p.emit(`print(${f}())`);
-      p.expected.push(String(s.word.length));
+      p.say(String(s.word.length));
       return true;
     },
   },
@@ -552,6 +617,7 @@ const SHAPES: Shape[] = [
     // vec's lengths are all distinct, so the resulting order is predictable without
     // assuming the sort is stable.
     name: "sort-by-key",
+    stateful: true,
     apply(p) {
       const filled = p.filledVecs().filter(v => v.words.length > 1);
       const q = filled.find(v => new Set(v.words.map(w => w.length)).size === v.words.length);
@@ -561,7 +627,105 @@ const SHAPES: Shape[] = [
       return true;
     },
   },
+  {
+    // A block with OTHER shapes inside it. Every shape above emits one statement at one
+    // level, and a generator that only does that tests the checker's rules one at a time
+    // — but every ownership bug this compiler has had was a COMPOSITION: a move in the
+    // tail of a fork inside a match arm, a field taken out of a struct inside a branch.
+    // A walker that handles each form correctly on its own and loses track one level down
+    // looks identical to a correct one on a flat program, which is all this harness had.
+    name: "nest-if",
+    container: true,
+    apply(p) {
+      const c = p.cond();
+      p.block(c.value, `if ${c.name} {`, () => fill(p));
+      return true;
+    },
+  },
+  {
+    // Two arms, each with its own shapes, exactly one of which runs. This is the shape
+    // that catches a checker reconciling arms by taking one of them: the moves in the arm
+    // that does NOT run still have to count, because which arm runs is a runtime fact.
+    name: "nest-if-else",
+    container: true,
+    apply(p) {
+      const c = p.cond();
+      p.ifElse(c, () => fill(p), () => fill(p));
+      return true;
+    },
+  },
+  {
+    // The same composition reached through `match` instead of `if`. Different node, same
+    // rule — and match arms are where two of the ownership bugs actually lived.
+    name: "nest-match-arms",
+    container: true,
+    apply(p) {
+      const c = p.cond();
+      p.open(`match ${c.name} {`);
+      p.block(c.value, `true => {`, () => fill(p));
+      p.block(!c.value, `false => {`, () => fill(p));
+      p.close();
+      return true;
+    },
+  },
+  {
+    // A fork in the VALUE position with another fork inside it. `move-through-if` reaches
+    // the tail of one `if`; nothing reached the tail of a tail. A walker that recurses one
+    // level and stops is indistinguishable from a correct one until this program exists.
+    name: "move-through-nested-if",
+    apply(p) {
+      const live = p.live();
+      if (live.length < 3) return false;
+      const x = pick(live);
+      const rest = live.filter(s => s !== x);
+      const y = pick(rest);
+      const z = pick(rest.filter(s => s !== y));
+      const c1 = p.cond(), c2 = p.cond(), v = p.fresh("v");
+      p.emit(`let ${v} = if ${c1.name} { if ${c2.name} { ${x.ref} } else { ${y.ref} } } else { ${z.ref} }`);
+      p.take(x); p.take(y); p.take(z);
+      // c1 and c2 may be the same cond; the model still reads the right arm either way.
+      p.slots.push({ ref: v, word: c1.value ? (c2.value ? x.word : y.word) : z.word, live: true });
+      return true;
+    },
+  },
+  {
+    // The payload of an `if let` is an owned value whose scope is exactly one block, and
+    // the shapes inside can move it, clone it, or bury it in a struct. Its death has to be
+    // reconciled at the closing brace rather than at the end of the function, which is a
+    // different question from the one `move-through-if-let` asks by only printing it.
+    name: "nest-if-let-body",
+    container: true,
+    apply(p) {
+      const live = p.live();
+      if (live.length === 0) return false;
+      const s = pick(live), o = p.fresh("no"), y = p.fresh("y");
+      p.emit(`let ${o}: Option<string> = Option.Some(${s.ref})`);
+      p.take(s);
+      // Always Some, so the block always runs; the fork is for the checker, not the model.
+      p.block(true, `if let Option.Some(${y}) = ${o} {`, () => {
+        p.slots.push({ ref: y, word: s.word, live: true });
+        fill(p);
+      });
+      return true;
+    },
+  },
 ];
+
+// Two levels of nesting, which is one more than every historical ownership bug needed and
+// enough that a walker cannot pass by recursing a fixed number of times.
+const MAX_DEPTH = 2;
+
+// Fill a block with a few shapes, chosen the way the top level chooses them minus two
+// exclusions: containers stop at MAX_DEPTH so nesting terminates, and stateful shapes stay
+// out of a block the generator knows will not run (see the `stateful` comment on Shape).
+function fill(p: Program): void {
+  const usable = SHAPES.filter(s =>
+    (!s.container || p.depth < MAX_DEPTH) && !(s.stateful && p.suppressed > 0));
+  const n = 1 + Math.floor(rnd() * 3);
+  for (let i = 0; i < n; i++) {
+    for (let attempt = 0; attempt < 6; attempt++) if (pick(usable).apply(p)) break;
+  }
+}
 
 // ── generation ────────────────────────────────────────────────────────────────
 
@@ -569,6 +733,7 @@ interface Case {
   src: string;
   expected: string[];
   invalid: null | { ref: string; spelling: string };
+  depth: number;
 }
 
 function generate(invalidate: boolean): Case {
@@ -625,7 +790,7 @@ function generate(invalidate: boolean): Case {
       invalid = { ref: s.ref, spelling };
     }
   }
-  return { src: p.source(), expected: p.expected, invalid };
+  return { src: p.source(), expected: p.expected, invalid, depth: p.peak };
 }
 
 // ── the oracles ───────────────────────────────────────────────────────────────
@@ -713,6 +878,7 @@ if (CORPUS) mkdirSync(CORPUS, { recursive: true });
 const findings: Finding[] = [];
 if (ASAN) assertAsanWorks();
 let validAccepted = 0, validTotal = 0, invalidRejected = 0, invalidTotal = 0, noInjection = 0;
+const depths: number[] = [];
 
 function keep(i: number, src: string) {
   const kept = join(ROOT, `ownership-finding-${i}.milo`);
@@ -730,6 +896,7 @@ for (let i = 0; i < CASES; i++) {
   const file = join(dir, `case${i}.milo`);
   writeFileSync(file, c.src);
   if (CORPUS) writeFileSync(join(CORPUS, `case${SEED}_${i}.milo`), c.src);
+  depths.push(c.depth);
   if (VERBOSE) console.log(`\n── case ${i} (${invalidate ? "invalid" : "valid"})\n${c.src}`);
 
   const verdict = accepts(file);
@@ -809,6 +976,8 @@ for (let i = 0; i < CASES; i++) {
 console.log(`seed ${SEED}, ${CASES} cases (${STEPS} steps each), oracle: ${ASAN ? "ASan + stdout" : "stdout only (--no-asan)"}`);
 console.log(`valid programs accepted:   ${validAccepted}/${validTotal}`);
 console.log(`invalid programs rejected: ${invalidRejected}/${invalidTotal}`);
+console.log(`nesting depth: max ${Math.max(...depths)}, mean ` +
+  `${(depths.reduce((a, b) => a + b, 0) / depths.length).toFixed(1)} (a flat function body is 1)`);
 if (noInjection > 0) console.log(`(${noInjection} invalid cases had no moved value to reuse)`);
 
 // A run where nothing compiled and nothing executed proves nothing about a checker that

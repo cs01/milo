@@ -66,13 +66,21 @@ ROI / Effort: **H**igh / **M**edium / **L**ow. Tiers = the quadrant that matters
 
 ## Tier 1 — landed 2026-08-03, residue only
 
-- **The ownership fuzzer generates two shapes.** `scripts/fuzz-ownership.ts`
-  covers string payloads in a two-field struct, a `Drop` type, a `Vec`, and an
-  `Option`. Vec-of-struct, enum payloads and move-capturing closures are untried
-  ground — each is a new entry in `SHAPES`, not a redesign. The `Drop` shape was
-  added after the string-only shapes could not express the destructor-skip bug,
-  which is the pattern to expect: a missing shape is a missing bug class
-  (`scripts/fuzz-ownership.ts`)
+- **The ownership fuzzer's remaining blind spots.** Updated 2026-08-14. The
+  generator now reaches **27 of the 39** expression/statement kinds in `src/ast.ts`
+  and nests them to depth 5 (`bun scripts/fuzz-coverage.ts` measures both axes;
+  they move independently — a new shape moves the first number, nesting moves the
+  second). It was 17/39 and depth 2 on 2026-08-13. What is left, and it is now a
+  short list rather than a vague one: the eight owning kinds the census names
+  (`ArrayLit`, `ArrayRepeat`, `CastExpr`, `IsExpr`, `Propagate`, `RangeExpr`,
+  `UnaryOp`, `UnsafeBlock`), enum payloads beyond `Option`, and Vec-of-struct.
+  Deliberately excluded, not missing: a move-capturing closure that ESCAPES is a
+  known-open hole, so generating it would make this harness a permanent red light
+  instead of a detector — it is the indirect-closure-escape entry, not this one.
+  The pattern to expect is the one the `Drop` shape set: a missing shape is a
+  missing bug class. The counter-evidence so far is that the ten shapes and the
+  nesting added on 2026-08-14 found nothing in the compiler — one model bug in the
+  harness, and that is all (`scripts/fuzz-ownership.ts`, `scripts/fuzz-coverage.ts`)
 
 ## Tier 3 — backlog (niche, deferred, or lower ROI)
 

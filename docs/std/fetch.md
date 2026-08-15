@@ -123,6 +123,18 @@ Build an application/x-www-form-urlencoded body. Both halves of every pair are
 percent-encoded, so a value containing '&' or '=' can't split the body into
 extra fields.
 
+### `hostHeader`
+
+```milo
+pub fn hostHeader(url: &string): string
+```
+
+The authority for the Host header: the host, plus `:port` whenever the port is
+not the scheme's default. RFC 7230 5.4 requires it, and leaving it off is not
+cosmetic — a server on a non-default port that authenticates the request
+(AWS SigV4 signs the Host header verbatim) rejects a request whose Host says
+one thing and whose connection says another.
+
 ### `isHttps`
 
 ```milo

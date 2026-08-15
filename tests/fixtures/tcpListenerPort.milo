@@ -1,3 +1,9 @@
+// @skip-os: win32
+// Windows is skipped for the same reason as ioSocketStream and tcpIpv6: TcpListener
+// needs the IOCP async tier that the Windows port does not have yet (docs/roadmap.md
+// lists Windows as core language + std/io only). Without the skip this fixture just
+// prints nothing there, which reads as a compiler fault rather than a missing tier.
+//
 // `bind(0)` asks the OS for an ephemeral port; without `port()` the caller had no
 // way to learn which one it got, so every test and ephemeral server hardcoded a
 // number and hoped. TlsListener has had this since the TLS server landed —

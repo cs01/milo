@@ -192,6 +192,39 @@ describe("add / install / lock", () => {
     expect(run.out).toContain("hi from greet");
   });
 
+  // A package's own tests import "../lib" and never take the package path, so a bug
+  // that only appears under mangling ships green. That is exactly what happened:
+  // milo-postgres v0.1.0 had `let NONCE_ALPHABET: string` and did not compile for
+  // anyone who installed it, while all 32 of its tests passed. `CAPS.field` parses
+  // as an EnumLit (the parser cannot tell a capitalised global from an enum), and
+  // the checker recovers by looking the name up as a value — a recovery that broke
+  // once mangling renamed the global out from under the un-rewritten reference.
+  test("a package's own capitalised global survives mangling", () => {
+    const dir = project("globalapp");
+    expect(milo(dir, "init").code).toBe(0);
+    writePkg("gconst", `{ "name": "gconst", "version": "0.1.0", "lib": "lib.milo" }`, {
+      "lib.milo":
+        `let ALPHA: string = "abcdef"\n` +
+        `let LIMIT: i32 = 42 as i32\n` +
+        `pub enum Shade: i32 { Dark, Light }\n` +
+        `pub fn pick(i: i64): u8 {\n  return ALPHA[i % ALPHA.len]\n}\n` +
+        `pub fn size(): i64 {\n  return ALPHA.len\n}\n` +
+        `pub fn limit(): string {\n  return LIMIT.toString()\n}\n` +
+        `pub fn shade(): i32 {\n  return Shade.Light as i32\n}\n`,
+    });
+    expect(milo(dir, "add", join(ROOT, "pkgs", "gconst")).code).toBe(0);
+    writeFileSync(join(dir, "main.milo"),
+      `from "gconst" import { pick, size, limit, shade }\n\n` +
+      `fn main() {\n  print(pick(2).toString())\n  print(size().toString())\n` +
+      `  print(limit())\n  print(shade().toString())\n}\n`);
+    const run = milo(dir, "run", "main.milo");
+    expect(run.code).toBe(0);
+    expect(run.out).toContain("99");   // ALPHA[2] == 'c'
+    expect(run.out).toContain("6");    // ALPHA.len
+    expect(run.out).toContain("42");   // scalar global reached through a method
+    expect(run.out).toContain("1");    // a real enum still resolves as a type
+  });
+
   test("run auto-installs a locked dep whose cache entry is gone", () => {
     const dir = project("autoapp");
     expect(milo(dir, "init").code).toBe(0);

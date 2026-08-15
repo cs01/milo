@@ -128,7 +128,20 @@ export function manglePackage(
         for (const f of e.fields) walkExpr(f.value, sc);
         break;
       case "EnumLit":
-        e.enumName = resolveType(e.enumName, sc);
+        // `SOME_GLOBAL.field` parses as an EnumLit — the parser cannot tell a
+        // capitalised global from an enum name, and the checker recovers by looking
+        // `enumName` up as a VALUE (rewriteStaticToMember). That recovery needs the
+        // name it was given to still match the declaration, so resolving this purely
+        // as a type left a package's own `NONCE_ALPHABET.len` pointing at an
+        // unmangled name while the global had become `pkg$NONCE_ALPHABET` — the
+        // consumer then saw "unknown type 'NONCE_ALPHABET'" and the package would
+        // not compile at all, though it built fine inside its own repo where nothing
+        // is mangled. Try the type namespace first (a real enum wins), then the value
+        // namespace, so the checker's recovery still has a name it can resolve.
+        {
+          const asType = resolveType(e.enumName, sc);
+          e.enumName = asType === e.enumName ? resolveValue(e.enumName, sc) : asType;
+        }
         for (const t of e.typeArgs ?? []) walkType(t, sc);
         for (const a of e.args) walkExpr(a, sc);
         break;

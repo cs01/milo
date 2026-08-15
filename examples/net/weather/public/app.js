@@ -1804,6 +1804,12 @@ var savedWxCache = {};
 // One current-conditions fetch per saved place, memoised for the session:
 // re-rendering the list (after a star toggle, say) must not refire a
 // weather.gov request for every chip.
+//
+// The *hourly* forecast, not the daily one: daily period[0] is whichever half
+// of the day you happen to be in, so it reads as today's high in the afternoon
+// and tonight's low after dark, and nothing on the chip says which. The hourly
+// period[0] is the current hour everywhere, matching the hero's own
+// currentTemp, so every chip means the same thing at every hour.
 function fetchSavedWx(fav) {
   if (savedWxCache[fav.label]) return Promise.resolve(savedWxCache[fav.label]);
   return fetch("https://api.weather.gov/points/" + fav.lat + "," + fav.lon)
@@ -1812,23 +1818,15 @@ function fetchSavedWx(fav) {
       return r.json();
     })
     .then(function (pts) {
-      return fetch(pts.properties.forecast).then(function (r) {
+      return fetch(pts.properties.forecast + "/hourly").then(function (r) {
+        if (!r.ok) throw new Error("hourly");
         return r.json();
       });
     })
     .then(function (fc) {
       var ps = fc.properties.periods;
       if (!ps || !ps.length) throw new Error("empty");
-      var p0 = ps[0];
-      var hi, lo;
-      if (p0.isDaytime) {
-        hi = p0.temperature;
-        lo = ps.length > 1 && !ps[1].isDaytime ? ps[1].temperature : p0.temperature;
-      } else {
-        lo = p0.temperature;
-        hi = ps.length > 1 && ps[1].isDaytime ? ps[1].temperature : p0.temperature;
-      }
-      var wx = { temp: p0.temperature, hi: hi, lo: lo, cond: p0.shortForecast };
+      var wx = { temp: ps[0].temperature, cond: ps[0].shortForecast };
       savedWxCache[fav.label] = wx;
       return wx;
     })
@@ -1853,8 +1851,9 @@ function placeChipHtml(p, wx, isFav) {
     esc(p.label) + '"' + (active ? ' aria-current="true"' : "") + ">" +
     (isFav ? starSvg(true) : clockSvg()) +
     '<span class="place-name">' + esc(p.label) + "</span>" +
-    '<span class="place-temp' + (wx ? "" : " place-pending") + '">' +
-    (wx ? wx.temp + "\u00B0" : "--\u00B0") + "</span>" +
+    '<span class="place-temp' + (wx ? "" : " place-pending") + '"' +
+    (wx ? ' title="Current temperature' + (wx.cond ? " \u2014 " + esc(wx.cond) : "") + '"' : "") +
+    ">" + (wx ? wx.temp + "\u00B0" : "--\u00B0") + "</span>" +
     (isFav
       ? '<span class="place-remove" role="button" tabindex="0" data-remove="' +
         esc(p.label) + '" title="Remove from favorites" ' +

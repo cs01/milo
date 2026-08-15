@@ -517,7 +517,10 @@ tcpIpv6
 temp_name_collision
 termSize
 testingAsserts
+tomlErrors
+tomlFeatures
 tomlParse
+tomlStringify
 totpRfc
 totpVerify
 traitBasic

@@ -1,0 +1,16 @@
+spread = [
+  # leading comment
+  1, # after one
+  # between
+  2,
+  # trailing comment
+]
+nested_spread = [
+  [
+    "a",
+  ],
+  { inline = true },
+]
+empty_with_comment = [
+  # nothing here
+]

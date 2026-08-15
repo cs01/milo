@@ -1,0 +1,74 @@
+// std/toml serializer: the emitted text must be valid TOML that re-parses to an
+// equal document. The round-trip is graded against Python's tomllib for the whole
+// corpus by scripts/toml-oracle.py; this fixture pins the actual text so a change
+// in layout is visible in a diff.
+from "std/toml" import {
+    Toml
+}
+
+pub fn main(): i32 {
+    let src = "title = \"a \\\"quoted\\\" title\"\n"
+    + "count = 42\nratio = 1.0\nwhole = 2.0\nflag = false\n"
+    + "when = 1979-05-27T07:32:00Z\n"
+    + "list = [1, \"two\", [3, 4]]\n"
+    + "\"needs quoting\" = 1\n"
+    + "\n[server]\nhost = \"localhost\"\n"
+    + "\n[server.tls]\non = true\n"
+    + "\n[[peer]]\nid = 1\n"
+    + "\n[[peer]]\nid = 2\n"
+    let doc = Toml.parse(src)!
+    let text = doc.stringify()
+    print(text)
+    print("---")
+    // Re-parsing the output must reproduce the same values, including the two
+    // spellings a naive writer loses: a whole float staying a float, and a
+    // datetime staying a datetime rather than becoming a string.
+    let back = Toml.parse(text.clone())!
+    print(back.str("title")!)
+    print(back.i64("count")!.toString())
+    print(back.get("whole")!.isFloat().toString())
+    print(back.get("count")!.isInt().toString())
+    print(back.get("when")!.isDateTime().toString())
+    print(back.strPath("list[1]")!)
+    print(back.i64Path("list[2][1]")!.toString())
+    print(back.i64("needs quoting")!.toString())
+    print(back.boolPath("server.tls.on")!.toString())
+    print(back.i64Path("peer[1].id")!.toString())
+    // Stringify is a fixed point: formatting an already-formatted document
+    // changes nothing.
+    print((back.stringify() == text).toString())
+    return 0
+}
+// @expect: title = "a \"quoted\" title"
+// @expect: count = 42
+// @expect: ratio = 1.0
+// @expect: whole = 2.0
+// @expect: flag = false
+// @expect: when = 1979-05-27T07:32:00Z
+// @expect: list = [1, "two", [3, 4]]
+// @expect: "needs quoting" = 1
+// @expect:
+// @expect: [server]
+// @expect: host = "localhost"
+// @expect:
+// @expect: [server.tls]
+// @expect: on = true
+// @expect:
+// @expect: [[peer]]
+// @expect: id = 1
+// @expect:
+// @expect: [[peer]]
+// @expect: id = 2
+// @expect:
+// @expect: ---
+// @expect: a "quoted" title
+// @expect: 42
+// @expect: true
+// @expect: true
+// @expect: true
+// @expect: two
+// @expect: 4
+// @expect: 1
+// @expect: true
+// @expect: 2
+// @expect: true

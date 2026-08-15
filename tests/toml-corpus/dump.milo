@@ -1,0 +1,109 @@
+// Differential-test driver for std/toml — see scripts/toml-oracle.py.
+//
+// Takes one or more .toml paths and prints one line per file:
+//   <path>\t<direct>\t<roundtrip>
+// where each field is a tagged canonical JSON encoding of the parsed document
+// ({"s":…} string, {"i":…} int, {"f":…} float, {"b":…} bool, {"d":…} datetime,
+// {"a":[…]} array, {"t":{…}} table). Tagging is what makes the comparison test
+// types and not just shape — an untagged dump cannot tell 1 from 1.0.
+//
+// `direct` is the parse; `roundtrip` is parse → stringify → parse, so the
+// serializer is graded against the same oracle as the parser.
+// A parse failure prints `!<message>` in place of both fields.
+from "std/toml" import {
+    Toml,
+    TomlKind
+}
+from "std/json" import {
+    jsonEscapeStr
+}
+from "std/fs" import {
+    readFile
+}
+from "std/args" import {
+    args
+}
+
+fn dumpNode(t: &Toml, cur: i64): string {
+    let k = t.curKind(cur)!
+    match k {
+        TomlKind.Str => {
+            return "{\"s\":\"" + jsonEscapeStr(t.curStr(cur)!) + "\"}"
+        }
+        TomlKind.DateTime => {
+            return "{\"d\":\"" + jsonEscapeStr(t.curStr(cur)!) + "\"}"
+        }
+        TomlKind.Int => {
+            return "{\"i\":\"" + t.curInt(cur)!.toString() + "\"}"
+        }
+        TomlKind.Float => {
+            return "{\"f\":\"" + t.curFloat(cur)!.toString() + "\"}"
+        }
+        TomlKind.Bool => {
+            if t.curBool(cur)! {
+                return "{\"b\":true}"
+            }
+            return "{\"b\":false}"
+        }
+        TomlKind.Array => {
+            var out: string = "{\"a\":["
+            var i: i64 = 0
+            while i < t.curLen(cur) {
+                if i > 0 {
+                    out = out + ","
+                }
+                out = out + dumpNode(t, t.curChild(cur, i))
+                i = i + 1
+            }
+            return out + "]}"
+        }
+        TomlKind.Table => {
+            var out: string = "{\"t\":{"
+            var i: i64 = 0
+            while i < t.curLen(cur) {
+                if i > 0 {
+                    out = out + ","
+                }
+                out = out + "\"" + jsonEscapeStr(t.curKey(cur, i)!) + "\":" + dumpNode(t, t.curChild(cur, i))
+                i = i + 1
+            }
+            return out + "}}"
+        }
+    }
+}
+
+pub fn main(): i32 {
+    let argv = args()
+    var i: i64 = 1
+    while i < argv.len() {
+        let path = argv[i].clone()
+        let text = readFile(path)
+        match text {
+            Result.Err(_e) => {
+                print(path + "\t!read failed")
+            }
+            Result.Ok(src) => {
+                match Toml.parse(src) {
+                    Result.Err(msg) => {
+                        print(path + "\t!" + msg)
+                    }
+                    Result.Ok(doc) => {
+                        let direct = dumpNode(doc, doc.curRoot())
+                        var round: string = ""
+                        match Toml.parse(doc.stringify()) {
+                            Result.Err(msg2) => {
+                                round = "!roundtrip: " + msg2
+                            }
+                            Result.Ok(doc2) => {
+                                round = dumpNode(doc2, doc2.curRoot())
+                            }
+                        }
+                        print(path + "\t" + direct + "\t" + round)
+                    }
+                }
+            }
+        }
+        i = i + 1
+    }
+    return 0
+}

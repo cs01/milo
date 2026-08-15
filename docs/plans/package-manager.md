@@ -18,7 +18,7 @@ below are locked unless marked open.
 
 - **One binary: `milo`.** Not a separate `milo-pkg`, and no `miloc` compiler binary either. Every verb — `build`, `run`, `test`, `fmt`, `lsp`, `lint`, `add`, `install`, `publish` — hangs off the same entry point. Rust needs `cargo` *and* `rustc` for historical reasons; there is no reason to grow a second entry point for the same program. Supersedes `docs/roadmap.md:49` ("Package manager (`milo-pkg`) … written in Milo").
 - **Written in TypeScript, in-tree.** The resolver already reads the manifest and sits in the compile path, so it stays TS regardless; splitting the fetcher into Milo would put a bootstrap dependency in front of `milo install` — the one command that must work before anything is built. Self-host dogfooding happens in `.selfhost`, where it belongs.
-- **`milo.json`**, JSON only. No TOML — it would mean writing and maintaining a TOML parser in std for a config file. `jsonParseJsonc` already gives comments and trailing commas.
+- **`milo.json`**, JSON only. No TOML. (The original reason — that it would mean writing and maintaining a TOML parser in std — expired when `std/toml` became a real v1.0.0 parser; the decision stands on the remaining one.) `jsonParseJsonc` already gives comments and trailing commas.
 - **GitHub repos are the registry.** No server, no index, no hosting, no name squatting, no single point of failure. `milo publish` is a git tag.
 - **std stays monolithic and compiler-versioned.** std is part of the language; it is never a package and has no version of its own.
 - **Per-package name mangling in the resolver** — prerequisite, see below.

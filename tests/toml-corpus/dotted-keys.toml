@@ -1,0 +1,11 @@
+name = "Orange"
+physical.color = "orange"
+physical.shape = "round"
+site."google.com" = true
+
+fruit.apple.smooth = true
+fruit.orange = 2
+
+[a]
+b.c.d = 1
+b.c.e = 2

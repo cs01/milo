@@ -1,0 +1,57 @@
+[build-system]
+requires = ["hatchling>=1.10.0"]
+build-backend = "hatchling.build"
+
+[project]
+name = "pipx"
+description = "Install and Run Python Applications in Isolated Environments"
+readme = "README.md"
+requires-python = ">=3.8"
+license = { file = "LICENSE" }
+keywords = ["pip", "install", "cli", "workflow", "Virtual Environment"]
+authors = [
+    { name = "Chad Smith", email = "chadsmith.software@gmail.com" },
+]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3 :: Only",
+]
+dependencies = [
+    "argcomplete>=1.9.4",
+    "packaging>=20.0",
+    "platformdirs>=2.1.0",
+    'importlib-metadata>=3.3; python_version < "3.8"',
+]
+dynamic = ["version"]
+
+[project.urls]
+Homepage = "https://pypa.github.io/pipx/"
+Source = "https://github.com/pypa/pipx"
+
+[project.scripts]
+pipx = "pipx.main:cli"
+
+[tool.hatch.version]
+path = "src/pipx/version.py"
+
+[tool.ruff]
+line-length = 120
+target-version = "py38"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "W"]
+ignore = ["E501"]
+
+[tool.mypy]
+strict = true
+warn_unreachable = true
+
+[[tool.mypy.overrides]]
+module = ["argcomplete.*", "pycparser.*"]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+minversion = "6.0"
+addopts = "-ra -q"
+testpaths = ["tests"]

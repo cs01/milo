@@ -1,0 +1,20 @@
+# Structure characters inside string values must not be seen by the parser.
+hash = """
+# this is not a comment
+[not.a.header]
+key = not a key/value pair
+]]] {{{ ,,, === """
+
+apostrophes = '''
+# nor here
+[[still not a header]]
+a = 1'''
+
+bracket_in_basic = "] # [ = {"
+bracket_in_literal = '] # [ = {'
+array_with_structure = [ "]", "#", "[", "=", "{" ]
+inline_with_structure = { a = "}", b = "#" }
+equals = "a = b = c"
+
+[table]
+value = "# not a comment"  # but this is

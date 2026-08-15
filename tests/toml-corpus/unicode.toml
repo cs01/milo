@@ -1,0 +1,4 @@
+# Non-ASCII in keys, values and comments — café 中文 😀
+"κερας" = "μερικά"
+emoji = "😀😁"
+mixed = "élève café naïve"

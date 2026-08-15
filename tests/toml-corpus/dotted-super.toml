@@ -1,0 +1,8 @@
+# The spec's own example: a table created by a dotted key may be traversed by a
+# later header, but not itself redefined by one.
+[fruit]
+apple.color = "red"
+apple.taste.sweet = true
+
+[fruit.apple.texture]
+smooth = true

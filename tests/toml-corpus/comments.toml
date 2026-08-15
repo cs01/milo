@@ -1,0 +1,10 @@
+# a full-line comment
+# another one
+
+key = "value" # a trailing comment
+
+# comment before a table
+[table] # comment after a header
+other = 1  # and here
+
+# trailing comment at EOF

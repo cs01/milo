@@ -1,0 +1,56 @@
+# A realistic application config, ~everything a config file actually uses.
+name = "milo-service"
+version = "0.4.2"
+tags = ["api", "internal"]
+
+[server]
+host = "0.0.0.0"
+port = 8080
+read_timeout_ms = 5_000
+tls = false
+
+[server.limits]
+max_body_bytes = 1_048_576
+max_connections = 512
+rate = { per_second = 100.0, burst = 250 }
+
+[logging]
+level = "info"
+format = "json"
+sinks = ["stdout", "file"]
+
+[logging.file]
+path = "/var/log/milo/service.log"
+rotate_mb = 64
+keep = 7
+
+[[database]]
+name = "primary"
+url = "postgres://db1.internal:5432/app"
+pool = 20
+readonly = false
+
+[[database]]
+name = "replica"
+url = "postgres://db2.internal:5432/app"
+pool = 40
+readonly = true
+
+[[database]]
+name = "analytics"
+url = "postgres://warehouse.internal:5432/olap"
+pool = 4
+readonly = true
+
+[features]
+new_router = true
+experimental = { tracing = true, sampling = 0.05 }
+
+[deploy]
+released_at = 2026-08-14T09:15:00Z
+window = { start = 02:00:00, end = 04:00:00 }
+regions = [
+  "us-east-1",
+  "eu-west-1",
+  "ap-south-1",
+]

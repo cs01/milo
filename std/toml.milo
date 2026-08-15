@@ -1,388 +1,2021 @@
-from "std/platform" import {
-    read
-}
-
-// std/toml — TOML config file parser
+// std/toml — TOML v1.0.0 parser and serializer.
 //
-//   let t = tomlParse(data)!
+// Flat node pool plus a lightweight handle, the same shape as std/json: Milo has
+// no pointers in safe code, so a recursive value type would need an arena anyway.
+// Nodes are all-scalar (kind tag, numeric payload, pool indices, sibling links)
+// and strings/keys live in side pools, which keeps `nodes[i]` a cheap copy —
+// a Vec element carrying a `string` field deep-copies on every index read.
+//
+//   let t = Toml.parse(text)!
 //   let name = t.str("name")!
-//   let port = t.i64("port")!
-//   let db = t.table("database")!
-//   let host = db.str("host")!
+//   let port = t.i64Path("server.port")!
+//   let bins = t.get("bin")!
+//   for i in 0..bins.len() { ... }
+//
+// Datetimes are recognised, range-checked and tagged `TomlKind.DateTime`; their
+// value is the original lexical text, read back with `asStr`. Richer typing over
+// `std/datetime` is future work — this module deliberately builds no temporal
+// values, because a lossy conversion would be worse than the raw text.
+//
+// Duplicate keys, duplicate table headers and redefining a table as a non-table
+// are errors, not last-wins. Errors carry line and column.
 
-pub struct Toml {
-    raw: string,
-    start: i64,
-    end: i64,
+// What a node holds. `Str` and `DateTime` both read back through `asStr`;
+// `Int` and `Float` are distinct (TOML's are), and both answer `isNum`.
+pub enum TomlKind: i32 {
+    Str,
+    Int,
+    Float,
+    Bool,
+    DateTime,
+    Array,
+    Table,
 }
 
-impl Toml {
-    // Parse a TOML document. Access values via t.str/i64/f64/bool/table.
-    fn parse(s: string): Result<Toml> {
-        return tomlParse(s)
+// Kind discriminants as stored in `TomlNode.kind`. Derived from the enum, so the
+// two cannot drift.
+let TK_STR: i32 = TomlKind.Str as i32
+let TK_INT: i32 = TomlKind.Int as i32
+let TK_FLOAT: i32 = TomlKind.Float as i32
+let TK_BOOL: i32 = TomlKind.Bool as i32
+let TK_DATETIME: i32 = TomlKind.DateTime as i32
+let TK_ARRAY: i32 = TomlKind.Array as i32
+let TK_TABLE: i32 = TomlKind.Table as i32
+
+// One entry in the pool. Children hang off a `firstChild`/`nextSibling` list
+// rather than a contiguous block (std/json's shape) because a TOML table grows
+// across the whole document — `[a]` … `[b]` … `[a.c]` interleaves its children
+// with everything else, so a contiguous run is not available at parse time.
+//
+// The four booleans are the duplicate-definition state machine:
+//   isExplicit — this table was named by a `[header]`/`[[header]]`
+//   isDotted   — this table was created (or traversed) by a dotted key
+//   isInline   — this table/array came from `{...}`/`[...]`, so it is frozen
+//   isAot      — this array was created by `[[header]]`, so it accepts appends
+pub struct TomlNode {
+    kind: i32,
+    boolVal: bool,
+    intVal: i64,
+    numVal: f64,
+    strIdx: i64,
+    keyIdx: i64,
+    firstChild: i64,
+    lastChild: i64,
+    nextSibling: i64,
+    childCount: i64,
+    isExplicit: bool,
+    isDotted: bool,
+    isInline: bool,
+    isAot: bool,
+}
+
+// A parsed TOML document, or a handle onto one node of it.
+pub struct Toml {
+    nodes: Vec<TomlNode>,
+    strs: Vec<string>,
+    keyStrs: Vec<string>,
+    root: i64,
+}
+
+// ── Parser state ──
+
+struct TomlP {
+    src: string,
+    pos: i64,
+    depth: i64,
+    nodes: Vec<TomlNode>,
+    strs: Vec<string>,
+    keyStrs: Vec<string>,
+    errMsg: string,
+    errPos: i64,
+}
+
+// Nesting cap for inline arrays/tables. Parsing is recursive, so hostile input
+// would otherwise blow the stack instead of returning an error.
+let TOML_MAX_DEPTH: i64 = 96
+
+fn tomlIsDigit(c: u8): bool {
+    return c >= '0' && c <= '9'
+}
+
+fn tomlIsBareKeyChar(c: u8): bool {
+    if c >= 'a' && c <= 'z' {
+        return true
+    }
+    if c >= 'A' && c <= 'Z' {
+        return true
+    }
+    if c >= '0' && c <= '9' {
+        return true
+    }
+    return c == '_' || c == '-'
+}
+
+fn tomlHexVal(c: u8): i64 {
+    if c >= '0' && c <= '9' {
+        return (c - 48) as i64
+    }
+    if c >= 'a' && c <= 'f' {
+        return (c - 97 + 10) as i64
+    }
+    if c >= 'A' && c <= 'F' {
+        return (c - 65 + 10) as i64
+    }
+    return -1
+}
+
+fn tomlPushUtf8(out: &mut string, cp: i64) {
+    if cp < 0x80 {
+        out.push(cp as u8)
+    } else if cp < 0x800 {
+        out.push((0xC0 | (cp >> 6)) as u8)
+        out.push((0x80 | (cp & 0x3F)) as u8)
+    } else if cp < 0x10000 {
+        out.push((0xE0 | (cp >> 12)) as u8)
+        out.push((0x80 | ((cp >> 6) & 0x3F)) as u8)
+        out.push((0x80 | (cp & 0x3F)) as u8)
+    } else {
+        out.push((0xF0 | (cp >> 18)) as u8)
+        out.push((0x80 | ((cp >> 12) & 0x3F)) as u8)
+        out.push((0x80 | ((cp >> 6) & 0x3F)) as u8)
+        out.push((0x80 | (cp & 0x3F)) as u8)
+    }
+}
+
+fn tomlDaysInMonth(year: i64, month: i64): i64 {
+    if month == 2 {
+        if (year % 4 == 0 && year % 100 != 0) || year % 400 == 0 {
+            return 29
+        }
+        return 28
+    }
+    if month == 4 || month == 6 || month == 9 || month == 11 {
+        return 30
+    }
+    return 31
+}
+
+// " (line 3, column 12)" for a byte offset. Recomputed from the source at error
+// time rather than tracked per byte — a parser that threads line/col through
+// every cursor move gets them wrong on exactly the paths that skip ahead.
+fn tomlPosSuffix(src: &string, pos: i64): string {
+    var stop: i64 = pos
+    if stop > src.len {
+        stop = src.len
+    }
+    var line: i64 = 1
+    var col: i64 = 1
+    var i: i64 = 0
+    while i < stop {
+        if src[i] == '\n' {
+            line = line + 1
+            col = 1
+        } else {
+            col = col + 1
+        }
+        i = i + 1
+    }
+    return " (line " + line.toString() + ", column " + col.toString() + ")"
+}
+
+impl TomlP {
+    // ── Cursor primitives ──
+
+    fn atEnd(self: &Self): bool {
+        return self.pos >= self.src.len
     }
 
-    fn str(self: &Self, key: &string): Option<string> {
-        return tomlGetStr(self.raw, self.start, self.end, key)
+    fn peek(self: &Self): u8 {
+        if self.pos >= self.src.len {
+            return 0
+        }
+        return self.src[self.pos]
     }
 
-    fn i64(self: &Self, key: &string): Option<i64> {
-        return tomlGetI64(self.raw, self.start, self.end, key)
+    fn peekAt(self: &Self, k: i64): u8 {
+        let p = self.pos + k
+        if p < 0 || p >= self.src.len {
+            return 0
+        }
+        return self.src[p]
     }
 
-    fn f64(self: &Self, key: &string): Option<f64> {
-        return tomlGetF64(self.raw, self.start, self.end, key)
+    fn failed(self: &Self): bool {
+        return self.errMsg.len > 0
     }
 
-    fn bool(self: &Self, key: &string): Option<bool> {
-        return tomlGetBool(self.raw, self.start, self.end, key)
+    // First error wins — later ones are usually cascade noise from a cursor that
+    // is already in the wrong place.
+    fn fail(self: &mut Self, msg: string, pos: i64) {
+        if self.errMsg.len == 0 {
+            self.errMsg = msg
+            self.errPos = pos
+        }
     }
 
-    fn table(self: &Self, key: &string): Option<Toml> {
-        return tomlGetTable(self.raw, self.start, self.end, key)
+    fn matchLit(self: &mut Self, lit: &string): bool {
+        if self.pos + lit.len > self.src.len {
+            return false
+        }
+        var i: i64 = 0
+        while i < lit.len {
+            if self.src[self.pos + i] != lit[i] {
+                return false
+            }
+            i = i + 1
+        }
+        self.pos = self.pos + lit.len
+        return true
     }
+
+    // ── Node pool ──
+
+    fn newNode(self: &mut Self, kind: i32): i64 {
+        let idx = self.nodes.len()
+        self.nodes.push(TomlNode {
+            kind: kind, boolVal: false, intVal: 0, numVal: 0.0, strIdx: -1, keyIdx: -1,
+            firstChild: -1, lastChild: -1, nextSibling: -1, childCount: 0,
+            isExplicit: false, isDotted: false, isInline: false, isAot: false,
+        }
+        )
+        return idx
+    }
+
+    fn internStr(self: &mut Self, s: string): i64 {
+        let i = self.strs.len()
+        self.strs.push(s)
+        return i
+    }
+
+    fn setKey(self: &mut Self, node: i64, key: string) {
+        let i = self.keyStrs.len()
+        self.keyStrs.push(key)
+        self.nodes[node].keyIdx = i
+    }
+
+    fn appendChild(self: &mut Self, parent: i64, child: i64) {
+        let last = self.nodes[parent].lastChild
+        if last < 0 {
+            self.nodes[parent].firstChild = child
+        } else {
+            self.nodes[last].nextSibling = child
+        }
+        self.nodes[parent].lastChild = child
+        self.nodes[parent].childCount = self.nodes[parent].childCount + 1
+    }
+
+    fn findChild(self: &Self, parent: i64, key: &string): i64 {
+        var c = self.nodes[parent].firstChild
+        while c >= 0 {
+            let ki = self.nodes[c].keyIdx
+            if ki >= 0 && self.keyStrs[ki] == key {
+                return c
+            }
+            c = self.nodes[c].nextSibling
+        }
+        return -1
+    }
+
+    // ── Whitespace, comments, line structure ──
+
+    fn skipSpaces(self: &mut Self) {
+        while self.pos < self.src.len {
+            let c = self.src[self.pos]
+            if c != ' ' && c != '\t' {
+                break
+            }
+            self.pos = self.pos + 1
+        }
+    }
+
+    // Positioned on '#'. A comment runs to end of line and, per the spec, may not
+    // carry control characters — a stray \x00 in a config is a corrupted file, not
+    // a comment.
+    fn skipComment(self: &mut Self) {
+        self.pos = self.pos + 1
+        while self.pos < self.src.len {
+            let c = self.src[self.pos]
+            if c == '\n' {
+                break
+            }
+            if c == '\r' && self.peekAt(1) == '\n' {
+                break
+            }
+            if (c < 0x20 && c != '\t') || c == 0x7F {
+                self.fail("illegal control character in comment", self.pos)
+                return
+            }
+            self.pos = self.pos + 1
+        }
+    }
+
+    fn skipWsAndNewlines(self: &mut Self) {
+        while self.pos < self.src.len && !self.failed() {
+            let c = self.src[self.pos]
+            if c == ' ' || c == '\t' || c == '\n' {
+                self.pos = self.pos + 1
+            } else if c == '\r' {
+                if self.peekAt(1) != '\n' {
+                    self.fail("bare carriage return", self.pos)
+                    return
+                }
+                self.pos = self.pos + 2
+            } else if c == '#' {
+                self.skipComment()
+            } else {
+                break
+            }
+        }
+    }
+
+    // After a key/value or a header: optional trailing comment, then the line must end.
+    fn finishLine(self: &mut Self) {
+        self.skipSpaces()
+        if self.pos < self.src.len && self.src[self.pos] == '#' {
+            self.skipComment()
+            if self.failed() {
+                return
+            }
+        }
+        if self.pos >= self.src.len {
+            return
+        }
+        let c = self.src[self.pos]
+        if c == '\n' {
+            self.pos = self.pos + 1
+            return
+        }
+        if c == '\r' && self.peekAt(1) == '\n' {
+            self.pos = self.pos + 2
+            return
+        }
+        self.fail("expected newline after value", self.pos)
+    }
+
+    // ── Keys ──
+
+    fn parseSimpleKey(self: &mut Self): string {
+        let c = self.peek()
+        if c == '"' {
+            return self.parseBasicString()
+        }
+        if c == '\'' {
+            return self.parseLiteralString()
+        }
+        let start = self.pos
+        while self.pos < self.src.len && tomlIsBareKeyChar(self.src[self.pos]) {
+            self.pos = self.pos + 1
+        }
+        if self.pos == start {
+            self.fail("expected a key", self.pos)
+            return ""
+        }
+        return self.src[start..self.pos].clone()
+    }
+
+    // A dotted key path: `a`, `a.b.c`, `site."google.com"`. Whitespace may surround
+    // the dots.
+    fn parseKeyPath(self: &mut Self): Vec<string> {
+        var segs: Vec<string> = Vec.new()
+        while true {
+            let seg = self.parseSimpleKey()
+            if self.failed() {
+                return segs
+            }
+            segs.push(seg)
+            self.skipSpaces()
+            if self.peek() != '.' {
+                break
+            }
+            self.pos = self.pos + 1
+            self.skipSpaces()
+        }
+        return segs
+    }
+
+    // ── Strings ──
+
+    // Positioned on the opening quote of a `"..."`.
+    fn parseBasicString(self: &mut Self): string {
+        self.pos = self.pos + 1
+        var out: string = ""
+        while true {
+            if self.pos >= self.src.len {
+                self.fail("unterminated basic string", self.pos)
+                return out
+            }
+            let c = self.src[self.pos]
+            if c == '"' {
+                self.pos = self.pos + 1
+                return out
+            }
+            if c == '\n' || c == '\r' {
+                self.fail("unterminated basic string", self.pos)
+                return out
+            }
+            if c == '\\' {
+                self.readEscape(out, false)
+                if self.failed() {
+                    return out
+                }
+            } else if (c < 0x20 && c != '\t') || c == 0x7F {
+                self.fail("illegal control character in string", self.pos)
+                return out
+            } else {
+                out.push(c)
+                self.pos = self.pos + 1
+            }
+        }
+        return out
+    }
+
+    // Positioned on the opening quote of a `'...'`. No escapes at all.
+    fn parseLiteralString(self: &mut Self): string {
+        self.pos = self.pos + 1
+        var out: string = ""
+        while true {
+            if self.pos >= self.src.len {
+                self.fail("unterminated literal string", self.pos)
+                return out
+            }
+            let c = self.src[self.pos]
+            if c == '\'' {
+                self.pos = self.pos + 1
+                return out
+            }
+            if c == '\n' || c == '\r' {
+                self.fail("unterminated literal string", self.pos)
+                return out
+            }
+            if (c < 0x20 && c != '\t') || c == 0x7F {
+                self.fail("illegal control character in string", self.pos)
+                return out
+            }
+            out.push(c)
+            self.pos = self.pos + 1
+        }
+        return out
+    }
+
+    // Positioned on the backslash. `multiline` enables the line-ending-backslash
+    // continuation, which is only legal inside `"""..."""`.
+    fn readEscape(self: &mut Self, out: &mut string, multiline: bool) {
+        let escPos = self.pos
+        self.pos = self.pos + 1
+        if self.pos >= self.src.len {
+            self.fail("unterminated escape sequence", escPos)
+            return
+        }
+        let e = self.src[self.pos]
+        self.pos = self.pos + 1
+        if e == 'n' {
+            out.push('\n')
+            return
+        }
+        if e == 't' {
+            out.push('\t')
+            return
+        }
+        if e == 'r' {
+            out.push('\r')
+            return
+        }
+        if e == '"' {
+            out.push('"')
+            return
+        }
+        if e == '\\' {
+            out.push('\\')
+            return
+        }
+        if e == 'b' {
+            out.push(8 as u8)
+            return
+        }
+        if e == 'f' {
+            out.push(12 as u8)
+            return
+        }
+        if e == 'u' {
+            self.readUnicodeEscape(out, 4, escPos)
+            return
+        }
+        if e == 'U' {
+            self.readUnicodeEscape(out, 8, escPos)
+            return
+        }
+        if multiline && (e == ' ' || e == '\t' || e == '\n' || e == '\r') {
+            // Line-ending backslash: the rest of this line must be whitespace, then
+            // everything up to the next non-whitespace byte is trimmed.
+            self.pos = escPos + 1
+            while self.pos < self.src.len && (self.src[self.pos] == ' ' || self.src[self.pos] == '\t') {
+                self.pos = self.pos + 1
+            }
+            if self.pos < self.src.len && self.src[self.pos] == '\r' && self.peekAt(1) == '\n' {
+                self.pos = self.pos + 1
+            }
+            if self.pos >= self.src.len || self.src[self.pos] != '\n' {
+                self.fail("invalid escape sequence", escPos)
+                return
+            }
+            while self.pos < self.src.len {
+                let c = self.src[self.pos]
+                if c != ' ' && c != '\t' && c != '\n' && c != '\r' {
+                    break
+                }
+                self.pos = self.pos + 1
+            }
+            return
+        }
+        self.fail("invalid escape sequence", escPos)
+    }
+
+    fn readUnicodeEscape(self: &mut Self, out: &mut string, digits: i64, escPos: i64) {
+        if self.pos + digits > self.src.len {
+            self.fail("invalid unicode escape", escPos)
+            return
+        }
+        var cp: i64 = 0
+        var i: i64 = 0
+        while i < digits {
+            let h = tomlHexVal(self.src[self.pos + i])
+            if h < 0 {
+                self.fail("invalid unicode escape", escPos)
+                return
+            }
+            cp = cp * 16 + h
+            i = i + 1
+        }
+        self.pos = self.pos + digits
+        // Surrogates are not Unicode scalar values; TOML escapes must name a scalar.
+        if cp > 0x10FFFF || (cp >= 0xD800 && cp <= 0xDFFF) {
+            self.fail("invalid unicode escape", escPos)
+            return
+        }
+        tomlPushUtf8(out, cp)
+    }
+
+    // Positioned on the first of the three opening quotes. `basic` selects `"""`
+    // (escapes honoured) over `'''` (verbatim).
+    fn parseMultilineString(self: &mut Self, basic: bool): string {
+        var delim: u8 = '\''
+        if basic {
+            delim = '"'
+        }
+        self.pos = self.pos + 3
+        var out: string = ""
+        // A newline immediately after the opening delimiter is not content.
+        if self.pos < self.src.len && self.src[self.pos] == '\n' {
+            self.pos = self.pos + 1
+        } else if self.pos + 1 < self.src.len && self.src[self.pos] == '\r' && self.src[self.pos + 1] == '\n' {
+            self.pos = self.pos + 2
+        }
+        while true {
+            if self.pos >= self.src.len {
+                self.fail("unterminated multi-line string", self.pos)
+                return out
+            }
+            let c = self.src[self.pos]
+            if c == delim {
+                // Up to two quotes may sit against the closing delimiter, so a run of
+                // 3..5 closes the string and contributes run-3 quotes of content.
+                var run: i64 = 0
+                while self.pos + run < self.src.len && self.src[self.pos + run] == delim {
+                    run = run + 1
+                }
+                if run < 3 {
+                    var k: i64 = 0
+                    while k < run {
+                        out.push(delim)
+                        k = k + 1
+                    }
+                    self.pos = self.pos + run
+                    continue
+                }
+                if run > 5 {
+                    self.fail("too many quotes at end of multi-line string", self.pos)
+                    return out
+                }
+                var extra: i64 = 0
+                while extra < run - 3 {
+                    out.push(delim)
+                    extra = extra + 1
+                }
+                self.pos = self.pos + run
+                return out
+            }
+            if c == '\\' && basic {
+                self.readEscape(out, true)
+                if self.failed() {
+                    return out
+                }
+                continue
+            }
+            if c == '\r' {
+                if self.peekAt(1) != '\n' {
+                    self.fail("bare carriage return in multi-line string", self.pos)
+                    return out
+                }
+                // CRLF normalizes to LF inside a string value. The spec permits it and
+                // the reference implementations do it; without it a config authored on
+                // Windows hands back values with a stray \r glued to every line.
+                out.push('\n')
+                self.pos = self.pos + 2
+                continue
+            }
+            if (c < 0x20 && c != '\t' && c != '\n') || c == 0x7F {
+                self.fail("illegal control character in string", self.pos)
+                return out
+            }
+            out.push(c)
+            self.pos = self.pos + 1
+        }
+        return out
+    }
+
+    // ── Numbers, booleans, datetimes ──
+
+    fn looksLikeDate(self: &Self): bool {
+        if self.pos + 4 >= self.src.len {
+            return false
+        }
+        var i: i64 = 0
+        while i < 4 {
+            if !tomlIsDigit(self.src[self.pos + i]) {
+                return false
+            }
+            i = i + 1
+        }
+        return self.src[self.pos + 4] == '-'
+    }
+
+    fn looksLikeTimeAt(self: &Self, p: i64): bool {
+        if p + 2 >= self.src.len {
+            return false
+        }
+        return tomlIsDigit(self.src[p]) && tomlIsDigit(self.src[p + 1]) && self.src[p + 2] == ':'
+    }
+
+    fn readDigits(self: &mut Self, count: i64): i64 {
+        var v: i64 = 0
+        var i: i64 = 0
+        while i < count {
+            if self.pos >= self.src.len || !tomlIsDigit(self.src[self.pos]) {
+                self.fail("malformed date or time", self.pos)
+                return 0
+            }
+            v = v * 10 + ((self.src[self.pos] as i64) - 48)
+            self.pos = self.pos + 1
+            i = i + 1
+        }
+        return v
+    }
+
+    fn expectByte(self: &mut Self, c: u8, msg: string) {
+        if self.pos >= self.src.len || self.src[self.pos] != c {
+            self.fail(msg, self.pos)
+            return
+        }
+        self.pos = self.pos + 1
+    }
+
+    // HH:MM:SS[.fraction], already validated to start with two digits and a colon.
+    fn parseTimeBody(self: &mut Self) {
+        let hour = self.readDigits(2)
+        self.expectByte(':', "malformed time")
+        let minute = self.readDigits(2)
+        self.expectByte(':', "malformed time")
+        let second = self.readDigits(2)
+        if self.failed() {
+            return
+        }
+        if hour > 23 || minute > 59 || second > 59 {
+            self.fail("time out of range", self.pos)
+            return
+        }
+        if self.pos < self.src.len && self.src[self.pos] == '.' {
+            self.pos = self.pos + 1
+            var n: i64 = 0
+            while self.pos < self.src.len && tomlIsDigit(self.src[self.pos]) {
+                self.pos = self.pos + 1
+                n = n + 1
+            }
+            if n == 0 {
+                self.fail("malformed fractional second", self.pos)
+            }
+        }
+    }
+
+    fn parseDateTimeValue(self: &mut Self): i64 {
+        let start = self.pos
+        let year = self.readDigits(4)
+        self.expectByte('-', "malformed date")
+        let month = self.readDigits(2)
+        self.expectByte('-', "malformed date")
+        let day = self.readDigits(2)
+        if self.failed() {
+            return -1
+        }
+        if month < 1 || month > 12 || day < 1 || day > tomlDaysInMonth(year, month) {
+            self.fail("date out of range", start)
+            return -1
+        }
+        let sep = self.peek()
+        var hasTime: bool = false
+        if sep == 'T' || sep == 't' {
+            hasTime = true
+            self.pos = self.pos + 1
+        } else if sep == ' ' && self.looksLikeTimeAt(self.pos + 1) {
+            hasTime = true
+            self.pos = self.pos + 1
+        }
+        if hasTime {
+            self.parseTimeBody()
+            if self.failed() {
+                return -1
+            }
+            let off = self.peek()
+            if off == 'Z' || off == 'z' {
+                self.pos = self.pos + 1
+            } else if off == '+' || off == '-' {
+                self.pos = self.pos + 1
+                let oh = self.readDigits(2)
+                self.expectByte(':', "malformed time offset")
+                let om = self.readDigits(2)
+                if self.failed() {
+                    return -1
+                }
+                if oh > 23 || om > 59 {
+                    self.fail("time offset out of range", self.pos)
+                    return -1
+                }
+            }
+        }
+        let idx = self.newNode(TK_DATETIME)
+        let text = self.src[start..self.pos].clone()
+        self.nodes[idx].strIdx = self.internStr(text)
+        return idx
+    }
+
+    fn parseLocalTimeValue(self: &mut Self): i64 {
+        let start = self.pos
+        self.parseTimeBody()
+        if self.failed() {
+            return -1
+        }
+        let idx = self.newNode(TK_DATETIME)
+        let text = self.src[start..self.pos].clone()
+        self.nodes[idx].strIdx = self.internStr(text)
+        return idx
+    }
+
+    // Digits in `base` with `_` separators, which must sit between two digits.
+    // Returns the magnitude; overflow past i64 is an error, per the spec's
+    // "must be handled losslessly or rejected".
+    fn readRadixDigits(self: &mut Self, base: i64, limit: u64): u64 {
+        var acc: u64 = 0
+        var count: i64 = 0
+        let bigBase = base as u64
+        while self.pos < self.src.len {
+            let c = self.src[self.pos]
+            if c == '_' {
+                if count == 0 || self.pos + 1 >= self.src.len || tomlDigitVal(self.src[self.pos + 1], base) < 0 {
+                    self.fail("misplaced underscore in number", self.pos)
+                    return 0
+                }
+                self.pos = self.pos + 1
+                continue
+            }
+            let d = tomlDigitVal(c, base)
+            if d < 0 {
+                break
+            }
+            let du = d as u64
+            if acc > (limit - du) / bigBase {
+                self.fail("integer out of range for i64", self.pos)
+                return 0
+            }
+            acc = acc * bigBase + du
+            count = count + 1
+            self.pos = self.pos + 1
+        }
+        if count == 0 {
+            self.fail("expected digits in number", self.pos)
+        }
+        return acc
+    }
+
+    fn parseNumberValue(self: &mut Self): i64 {
+        let start = self.pos
+        var neg: bool = false
+        var signed: bool = false
+        if self.peek() == '-' {
+            neg = true
+            signed = true
+            self.pos = self.pos + 1
+        } else if self.peek() == '+' {
+            signed = true
+            self.pos = self.pos + 1
+        }
+        if self.matchLit("inf") {
+            let idx = self.newNode(TK_FLOAT)
+            if neg {
+                self.nodes[idx].numVal = 0.0 - f64.INF
+            } else {
+                self.nodes[idx].numVal = f64.INF
+            }
+            return idx
+        }
+        if self.matchLit("nan") {
+            let idx = self.newNode(TK_FLOAT)
+            self.nodes[idx].numVal = f64.NAN
+            return idx
+        }
+        // Radix-prefixed integers take no sign, per the spec.
+        if self.peek() == '0' && (self.peekAt(1) == 'x' || self.peekAt(1) == 'o' || self.peekAt(1) == 'b') {
+            if signed {
+                self.fail("sign is not allowed on a prefixed integer", start)
+                return -1
+            }
+            var base: i64 = 16
+            if self.peekAt(1) == 'o' {
+                base = 8
+            } else if self.peekAt(1) == 'b' {
+                base = 2
+            }
+            self.pos = self.pos + 2
+            let mag = self.readRadixDigits(base, 9223372036854775807)
+            if self.failed() {
+                return -1
+            }
+            let idx = self.newNode(TK_INT)
+            self.nodes[idx].intVal = mag as i64
+            return idx
+        }
+        if self.pos >= self.src.len || !tomlIsDigit(self.src[self.pos]) {
+            self.fail("expected a value", start)
+            return -1
+        }
+        // Leading zeros are not decimal integers: `01` is a typo, not eight.
+        if self.src[self.pos] == '0' && (tomlIsDigit(self.peekAt(1)) || self.peekAt(1) == '_') {
+            self.fail("leading zeros are not allowed", self.pos)
+            return -1
+        }
+        let intStart = self.pos
+        var limit: u64 = 9223372036854775807
+        if neg {
+            limit = 9223372036854775808
+        }
+        let mag = self.readRadixDigits(10, limit)
+        if self.failed() {
+            return -1
+        }
+        let isFloat = self.pos < self.src.len && (self.src[self.pos] == '.' || self.src[self.pos] == 'e' || self.src[self.pos] == 'E')
+        if !isFloat {
+            let idx = self.newNode(TK_INT)
+            if neg {
+                if mag == 9223372036854775808 {
+                    // i64::MIN cannot be negated from its own magnitude under checked
+                    // arithmetic, so build it by subtraction instead.
+                    self.nodes[idx].intVal = 0 - 9223372036854775807 - 1
+                } else {
+                    self.nodes[idx].intVal = 0 - (mag as i64)
+                }
+            } else {
+                self.nodes[idx].intVal = mag as i64
+            }
+            return idx
+        }
+        // Float: re-scan the whole literal so the mantissa is not truncated by the
+        // integer accumulator above, and hand the cleaned text to the runtime's
+        // correctly-rounded parser.
+        self.pos = intStart
+        var buf: string = ""
+        self.copyFloatDigits(buf)
+        if self.failed() {
+            return -1
+        }
+        if self.pos < self.src.len && self.src[self.pos] == '.' {
+            buf.push('.')
+            self.pos = self.pos + 1
+            self.copyFloatDigits(buf)
+            if self.failed() {
+                return -1
+            }
+        }
+        if self.pos < self.src.len && (self.src[self.pos] == 'e' || self.src[self.pos] == 'E') {
+            buf.push('e')
+            self.pos = self.pos + 1
+            if self.pos < self.src.len && (self.src[self.pos] == '+' || self.src[self.pos] == '-') {
+                buf.push(self.src[self.pos])
+                self.pos = self.pos + 1
+            }
+            self.copyFloatDigits(buf)
+            if self.failed() {
+                return -1
+            }
+        }
+        let parsed = buf.parseF64()
+        let idx = self.newNode(TK_FLOAT)
+        if let Option.Some(v) = parsed {
+            if neg {
+                self.nodes[idx].numVal = 0.0 - v
+            } else {
+                self.nodes[idx].numVal = v
+            }
+        } else {
+            self.fail("malformed float", start)
+        }
+        return idx
+    }
+
+    // Copy a run of decimal digits into `buf`, dropping `_` separators and
+    // rejecting the ones not flanked by digits.
+    fn copyFloatDigits(self: &mut Self, buf: &mut string) {
+        var count: i64 = 0
+        while self.pos < self.src.len {
+            let c = self.src[self.pos]
+            if c == '_' {
+                if count == 0 || self.pos + 1 >= self.src.len || !tomlIsDigit(self.src[self.pos + 1]) {
+                    self.fail("misplaced underscore in number", self.pos)
+                    return
+                }
+                self.pos = self.pos + 1
+                continue
+            }
+            if !tomlIsDigit(c) {
+                break
+            }
+            buf.push(c)
+            count = count + 1
+            self.pos = self.pos + 1
+        }
+        if count == 0 {
+            self.fail("expected digits in number", self.pos)
+        }
+    }
+
+    // ── Values ──
+
+    fn parseValue(self: &mut Self): i64 {
+        if self.depth > TOML_MAX_DEPTH {
+            self.fail("nesting too deep", self.pos)
+            return -1
+        }
+        if self.atEnd() {
+            self.fail("expected a value", self.pos)
+            return -1
+        }
+        let c = self.peek()
+        if c == '"' {
+            if self.peekAt(1) == '"' && self.peekAt(2) == '"' {
+                let s = self.parseMultilineString(true)
+                let idx = self.newNode(TK_STR)
+                self.nodes[idx].strIdx = self.internStr(s)
+                return idx
+            }
+            let s = self.parseBasicString()
+            let idx = self.newNode(TK_STR)
+            self.nodes[idx].strIdx = self.internStr(s)
+            return idx
+        }
+        if c == '\'' {
+            if self.peekAt(1) == '\'' && self.peekAt(2) == '\'' {
+                let s = self.parseMultilineString(false)
+                let idx = self.newNode(TK_STR)
+                self.nodes[idx].strIdx = self.internStr(s)
+                return idx
+            }
+            let s = self.parseLiteralString()
+            let idx = self.newNode(TK_STR)
+            self.nodes[idx].strIdx = self.internStr(s)
+            return idx
+        }
+        if c == '[' {
+            return self.parseArrayValue()
+        }
+        if c == '{' {
+            return self.parseInlineTableValue()
+        }
+        if c == 't' {
+            if !self.matchLit("true") {
+                self.fail("expected a value", self.pos)
+                return -1
+            }
+            let idx = self.newNode(TK_BOOL)
+            self.nodes[idx].boolVal = true
+            return idx
+        }
+        if c == 'f' {
+            if !self.matchLit("false") {
+                self.fail("expected a value", self.pos)
+                return -1
+            }
+            let idx = self.newNode(TK_BOOL)
+            self.nodes[idx].boolVal = false
+            return idx
+        }
+        if self.looksLikeDate() {
+            return self.parseDateTimeValue()
+        }
+        if self.looksLikeTimeAt(self.pos) {
+            return self.parseLocalTimeValue()
+        }
+        if c == '+' || c == '-' || c == 'i' || c == 'n' || tomlIsDigit(c) {
+            return self.parseNumberValue()
+        }
+        self.fail("expected a value", self.pos)
+        return -1
+    }
+
+    fn parseArrayValue(self: &mut Self): i64 {
+        self.pos = self.pos + 1
+        self.depth = self.depth + 1
+        let arr = self.newNode(TK_ARRAY)
+        self.nodes[arr].isInline = true
+        while true {
+            self.skipWsAndNewlines()
+            if self.failed() {
+                break
+            }
+            if self.atEnd() {
+                self.fail("unterminated array", self.pos)
+                break
+            }
+            if self.peek() == ']' {
+                self.pos = self.pos + 1
+                break
+            }
+            let v = self.parseValue()
+            if self.failed() {
+                break
+            }
+            self.appendChild(arr, v)
+            self.skipWsAndNewlines()
+            if self.failed() {
+                break
+            }
+            if self.peek() == ',' {
+                self.pos = self.pos + 1
+                continue
+            }
+            if self.peek() == ']' {
+                self.pos = self.pos + 1
+                break
+            }
+            self.fail("expected ',' or ']' in array", self.pos)
+            break
+        }
+        self.depth = self.depth - 1
+        return arr
+    }
+
+    // TOML 1.0 inline tables are single-line and take no trailing comma. Both
+    // restrictions are load-bearing: a parser that quietly allows them accepts
+    // documents other TOML implementations reject.
+    fn parseInlineTableValue(self: &mut Self): i64 {
+        self.pos = self.pos + 1
+        self.depth = self.depth + 1
+        let tbl = self.newNode(TK_TABLE)
+        self.nodes[tbl].isInline = true
+        self.nodes[tbl].isExplicit = true
+        self.skipSpaces()
+        if self.peek() == '}' {
+            self.pos = self.pos + 1
+            self.depth = self.depth - 1
+            return tbl
+        }
+        while true {
+            self.skipSpaces()
+            if self.atEnd() {
+                self.fail("unterminated inline table", self.pos)
+                break
+            }
+            if self.peek() == '\n' || self.peek() == '\r' {
+                self.fail("newline is not allowed in an inline table", self.pos)
+                break
+            }
+            self.assignKeyValue(tbl, true)
+            if self.failed() {
+                break
+            }
+            self.skipSpaces()
+            if self.peek() == ',' {
+                self.pos = self.pos + 1
+                self.skipSpaces()
+                if self.peek() == '}' {
+                    self.fail("trailing comma is not allowed in an inline table", self.pos)
+                    break
+                }
+                continue
+            }
+            if self.peek() == '}' {
+                self.pos = self.pos + 1
+                break
+            }
+            self.fail("expected ',' or '}' in inline table", self.pos)
+            break
+        }
+        self.depth = self.depth - 1
+        return tbl
+    }
+
+    // ── Key/value assignment and the duplicate-definition rules ──
+
+    // Walk one segment of a dotted key. Creating tables here is allowed; walking
+    // into a `[header]` table, an inline table or a non-table is not.
+    fn dottedDescend(self: &mut Self, parent: i64, key: &string, errPos: i64): i64 {
+        let existing = self.findChild(parent, key)
+        if existing < 0 {
+            let n = self.newNode(TK_TABLE)
+            self.nodes[n].isDotted = true
+            self.setKey(n, key.clone())
+            self.appendChild(parent, n)
+            return n
+        }
+        if self.nodes[existing].kind != TK_TABLE {
+            self.fail("cannot redefine '" + key.clone() + "' as a table", errPos)
+            return -1
+        }
+        if self.nodes[existing].isInline {
+            self.fail("cannot extend inline table '" + key.clone() + "'", errPos)
+            return -1
+        }
+        if self.nodes[existing].isExplicit {
+            self.fail("cannot redefine table '" + key.clone() + "' with a dotted key", errPos)
+            return -1
+        }
+        // Traversing an implicit table with a dotted key claims it, so a later
+        // `[header]` naming it is a redefinition.
+        self.nodes[existing].isDotted = true
+        return existing
+    }
+
+    // `key = value` into `table`. `inlineCtx` marks values that came from a `{...}`
+    // so their sub-tables stay frozen.
+    fn assignKeyValue(self: &mut Self, table: i64, inlineCtx: bool) {
+        let keyPos = self.pos
+        let segs = self.parseKeyPath()
+        if self.failed() {
+            return
+        }
+        if segs.len() == 0 {
+            self.fail("expected a key", keyPos)
+            return
+        }
+        self.skipSpaces()
+        if self.peek() != '=' {
+            self.fail("expected '=' after key", self.pos)
+            return
+        }
+        self.pos = self.pos + 1
+        self.skipSpaces()
+        var parent = table
+        var i: i64 = 0
+        while i < segs.len() - 1 {
+            parent = self.dottedDescend(parent, segs[i], keyPos)
+            if parent < 0 {
+                return
+            }
+            i = i + 1
+        }
+        let last = segs[segs.len() - 1].clone()
+        if self.findChild(parent, last) >= 0 {
+            self.fail("duplicate key '" + last.clone() + "'", keyPos)
+            return
+        }
+        let v = self.parseValue()
+        if self.failed() {
+            return
+        }
+        // An inline table or array is a closed value: nothing may be added to it
+        // later, whether by `[header]` or by a dotted key.
+        if self.nodes[v].kind == TK_TABLE || self.nodes[v].kind == TK_ARRAY {
+            self.nodes[v].isInline = true
+        }
+        if inlineCtx {
+            self.nodes[v].isInline = true
+        }
+        self.setKey(v, last)
+        self.appendChild(parent, v)
+    }
+
+    // Walk one intermediate segment of a `[a.b.c]` header.
+    fn headerDescend(self: &mut Self, parent: i64, key: &string, errPos: i64): i64 {
+        let existing = self.findChild(parent, key)
+        if existing < 0 {
+            let n = self.newNode(TK_TABLE)
+            self.setKey(n, key.clone())
+            self.appendChild(parent, n)
+            return n
+        }
+        if self.nodes[existing].kind == TK_ARRAY {
+            if self.nodes[existing].isAot && self.nodes[existing].lastChild >= 0 {
+                return self.nodes[existing].lastChild
+            }
+            self.fail("cannot extend array '" + key.clone() + "' with a table header", errPos)
+            return -1
+        }
+        if self.nodes[existing].kind != TK_TABLE {
+            self.fail("cannot redefine '" + key.clone() + "' as a table", errPos)
+            return -1
+        }
+        if self.nodes[existing].isInline {
+            self.fail("cannot extend inline table '" + key.clone() + "'", errPos)
+            return -1
+        }
+        return existing
+    }
+
+    // `[a.b]` — returns the table that following key/values belong to.
+    fn parseTableHeader(self: &mut Self): i64 {
+        let hdrPos = self.pos
+        self.pos = self.pos + 1
+        self.skipSpaces()
+        let segs = self.parseKeyPath()
+        if self.failed() {
+            return 0
+        }
+        if segs.len() == 0 {
+            self.fail("expected a table name", hdrPos)
+            return 0
+        }
+        self.skipSpaces()
+        if self.peek() != ']' {
+            self.fail("expected ']' after table name", self.pos)
+            return 0
+        }
+        self.pos = self.pos + 1
+        var parent: i64 = 0
+        var i: i64 = 0
+        while i < segs.len() - 1 {
+            parent = self.headerDescend(parent, segs[i], hdrPos)
+            if parent < 0 {
+                return 0
+            }
+            i = i + 1
+        }
+        let last = segs[segs.len() - 1].clone()
+        let existing = self.findChild(parent, last)
+        if existing < 0 {
+            let n = self.newNode(TK_TABLE)
+            self.nodes[n].isExplicit = true
+            self.setKey(n, last)
+            self.appendChild(parent, n)
+            return n
+        }
+        if self.nodes[existing].kind != TK_TABLE {
+            self.fail("cannot redefine '" + last.clone() + "' as a table", hdrPos)
+            return 0
+        }
+        if self.nodes[existing].isExplicit || self.nodes[existing].isDotted || self.nodes[existing].isInline {
+            self.fail("table '" + last.clone() + "' is defined twice", hdrPos)
+            return 0
+        }
+        self.nodes[existing].isExplicit = true
+        return existing
+    }
+
+    // `[[a.b]]` — appends a fresh element and returns it.
+    fn parseArrayTableHeader(self: &mut Self): i64 {
+        let hdrPos = self.pos
+        self.pos = self.pos + 2
+        self.skipSpaces()
+        let segs = self.parseKeyPath()
+        if self.failed() {
+            return 0
+        }
+        if segs.len() == 0 {
+            self.fail("expected a table name", hdrPos)
+            return 0
+        }
+        self.skipSpaces()
+        if self.peek() != ']' || self.peekAt(1) != ']' {
+            self.fail("expected ']]' after array-of-tables name", self.pos)
+            return 0
+        }
+        self.pos = self.pos + 2
+        var parent: i64 = 0
+        var i: i64 = 0
+        while i < segs.len() - 1 {
+            parent = self.headerDescend(parent, segs[i], hdrPos)
+            if parent < 0 {
+                return 0
+            }
+            i = i + 1
+        }
+        let last = segs[segs.len() - 1].clone()
+        let existing = self.findChild(parent, last)
+        if existing < 0 {
+            let arr = self.newNode(TK_ARRAY)
+            self.nodes[arr].isAot = true
+            self.setKey(arr, last)
+            self.appendChild(parent, arr)
+            let elem = self.newNode(TK_TABLE)
+            self.nodes[elem].isExplicit = true
+            self.appendChild(arr, elem)
+            return elem
+        }
+        if self.nodes[existing].kind != TK_ARRAY || !self.nodes[existing].isAot {
+            self.fail("cannot redefine '" + last.clone() + "' as an array of tables", hdrPos)
+            return 0
+        }
+        let elem = self.newNode(TK_TABLE)
+        self.nodes[elem].isExplicit = true
+        self.appendChild(existing, elem)
+        return elem
+    }
+
+    fn parseDocument(self: &mut Self) {
+        let root = self.newNode(TK_TABLE)
+        self.nodes[root].isExplicit = true
+        var cur: i64 = root
+        self.skipWsAndNewlines()
+        while !self.atEnd() && !self.failed() {
+            if self.peek() == '[' {
+                if self.peekAt(1) == '[' {
+                    cur = self.parseArrayTableHeader()
+                } else {
+                    cur = self.parseTableHeader()
+                }
+            } else {
+                self.assignKeyValue(cur, false)
+            }
+            if self.failed() {
+                return
+            }
+            self.finishLine()
+            if self.failed() {
+                return
+            }
+            self.skipWsAndNewlines()
+        }
+    }
+}
+
+fn tomlDigitVal(c: u8, base: i64): i64 {
+    var v: i64 = -1
+    if c >= '0' && c <= '9' {
+        v = (c - 48) as i64
+    } else if c >= 'a' && c <= 'f' {
+        v = (c - 97 + 10) as i64
+    } else if c >= 'A' && c <= 'F' {
+        v = (c - 65 + 10) as i64
+    }
+    if v < 0 || v >= base {
+        return -1
+    }
+    return v
 }
 
 fn tomlParse(s: string): Result<Toml> {
-    if s.len == 0 {
-        return Result.Err("empty input")
+    var p = TomlP {
+        src: s, pos: 0, depth: 0,
+        nodes: Vec.new(), strs: Vec.new(), keyStrs: Vec.new(),
+        errMsg: "", errPos: 0,
     }
-    let n = s.len
+    p.parseDocument()
+    if p.errMsg.len > 0 {
+        return Result.Err("toml: " + p.errMsg + tomlPosSuffix(p.src, p.errPos))
+    }
     return Result.Ok(Toml {
-        raw: s, start: 0, end: n
+        nodes: p.nodes, strs: p.strs, keyStrs: p.keyStrs, root: 0
     }
     )
 }
 
-// ── Internal helpers ──
+// ── Handle plumbing ──
 
-fn tomlSkipWs(s: &string, pos: i64, end: i64): i64 {
-    var i = pos
-    while i < end {
-        let c = s[i]
-        if c == ' ' || c == '\t' || c == '\r' {
-            i = i + 1
-        } else if c == '#' {
-            while i < end && s[i] != '\n' {
-                i = i + 1
-            }
-        } else {
-            break
-        }
+fn tomlChildIndex(doc: &Toml, parent: i64, index: i64): i64 {
+    if parent < 0 || index < 0 {
+        return -1
     }
-    return i
+    var c = doc.nodes[parent].firstChild
+    var i: i64 = 0
+    while c >= 0 {
+        if i == index {
+            return c
+        }
+        c = doc.nodes[c].nextSibling
+        i = i + 1
+    }
+    return -1
 }
 
-fn tomlSkipLine(s: &string, pos: i64, end: i64): i64 {
-    var i = pos
-    while i < end && s[i] != '\n' {
-        i = i + 1
+fn tomlFieldIndex(doc: &Toml, parent: i64, key: &string): i64 {
+    if parent < 0 || doc.nodes[parent].kind != TK_TABLE {
+        return -1
     }
-    if i < end {
-        i = i + 1
+    var c = doc.nodes[parent].firstChild
+    while c >= 0 {
+        let ki = doc.nodes[c].keyIdx
+        if ki >= 0 && doc.keyStrs[ki] == key {
+            return c
+        }
+        c = doc.nodes[c].nextSibling
     }
-    return i
+    return -1
 }
 
-fn tomlKeyMatches(s: &string, pos: i64, end: i64, key: &string): bool {
-    var i = pos
-    var j: i64 = 0
-    // bare key
-    while i < end && j < key.len {
-        if s[i] != key[j] {
-            return false
+// `get`/`at`/`table`/`path` hand back an owned document rooted at one node, which
+// means copying the pool — the same trade std/json makes with jsonExtractSubtree.
+// Use the cursor API below to walk a large document without paying it.
+fn tomlSubdoc(src: &Toml, idx: i64): Toml {
+    var nodes: Vec<TomlNode> = Vec.new()
+    var i: i64 = 0
+    while i < src.nodes.len() {
+        let n = src.nodes[i]
+        nodes.push(TomlNode {
+            kind: n.kind, boolVal: n.boolVal, intVal: n.intVal, numVal: n.numVal,
+            strIdx: n.strIdx, keyIdx: n.keyIdx, firstChild: n.firstChild,
+            lastChild: n.lastChild, nextSibling: n.nextSibling, childCount: n.childCount,
+            isExplicit: n.isExplicit, isDotted: n.isDotted, isInline: n.isInline, isAot: n.isAot,
         }
+        )
         i = i + 1
-        j = j + 1
     }
-    if j != key.len {
-        return false
+    var strs: Vec<string> = Vec.new()
+    i = 0
+    while i < src.strs.len() {
+        strs.push(src.strs[i].clone())
+        i = i + 1
     }
-    // next non-ws char must be '='
-    let after = tomlSkipWs(s, i, end)
-    return after < end && s[after] == '='
+    var keyStrs: Vec<string> = Vec.new()
+    i = 0
+    while i < src.keyStrs.len() {
+        keyStrs.push(src.keyStrs[i].clone())
+        i = i + 1
+    }
+    return Toml {
+        nodes: nodes, strs: strs, keyStrs: keyStrs, root: idx
+    }
 }
 
-fn tomlReadValue(s: &string, pos: i64, end: i64): i64 {
-    // return end position of the value
-    var i = pos
-    if i >= end {
-        return i
-    }
-    let c = s[i]
-    if c == '"' {
-        // quoted string
-        i = i + 1
-        while i < end && s[i] != '"' {
-            if s[i] == '\\' {
-                i = i + 1
-            }
-            i = i + 1
-        }
-        if i < end {
-            i = i + 1
-        }
-        return i
-    }
-    if c == '\'' {
-        // literal string
-        i = i + 1
-        while i < end && s[i] != '\'' {
-            i = i + 1
-        }
-        if i < end {
-            i = i + 1
-        }
-        return i
-    }
-    if c == '[' {
-        // inline array — skip until matching ]
-        var depth: i32 = 1
-        i = i + 1
-        while i < end && depth > 0 {
-            if s[i] == '[' {
-                depth = depth + 1
-            }
-            if s[i] == ']' {
-                depth = depth - 1
-            }
-            if s[i] == '"' {
-                i = i + 1
-                while i < end && s[i] != '"' {
-                    if s[i] == '\\' {
-                        i = i + 1
-                    }
-                    i = i + 1
-                }
-            }
-            i = i + 1
-        }
-        return i
-    }
-    // bare value (number, bool, date) — read until newline or comment
-    while i < end && s[i] != '\n' && s[i] != '#' {
-        i = i + 1
-    }
-    // trim trailing whitespace
-    while i > pos && (s[i - 1] == ' ' || s[i - 1] == '\t' || s[i - 1] == '\r') {
-        i = i - 1
-    }
-    return i
-}
+impl Toml {
+    // ── Namespace entry point ──
 
-fn tomlFindKey(s: &string, start: i64, end: i64, key: &string): Option<Toml> {
-    var i = start
-    while i < end {
-        i = tomlSkipWs(s, i, end)
-        if i >= end {
-            break
-        }
-        if s[i] == '\n' {
-            i = i + 1
-            continue
-        }
-        // table header [name] — stop scanning if we hit one
-        if s[i] == '[' {
-            break
-        }
-        if tomlKeyMatches(s, i, end, key) {
-            // skip key and =
-            var j = i
-            while j < end && s[j] != '=' {
-                j = j + 1
-            }
-            j = j + 1
-            j = tomlSkipWs(s, j, end)
-            let valStart = j
-            let valEnd = tomlReadValue(s, j, end)
-            return Option.Some(Toml {
-                raw: s.clone(), start: valStart, end: valEnd
-            }
-            )
-        }
-        i = tomlSkipLine(s, i, end)
+    // Parse a TOML v1.0.0 document. The error carries a message plus the line and
+    // column it was detected at. Propagate with `?` or match on the error.
+    fn parse(s: string): Result<Toml> {
+        return tomlParse(s)
     }
-    return Option.None
-}
 
-fn tomlGetStr(s: &string, start: i64, end: i64, key: &string): Option<string> {
-    let v = tomlFindKey(s, start, end, key)
-    if let Option.Some(t) = v {
-        if t.start < t.end && (t.raw[t.start] == '"' || t.raw[t.start] == '\'') {
-            let quote = t.raw[t.start]
-            var result: string = ""
-            var i = t.start + 1
-            while i < t.end - 1 {
-                if t.raw[i] == '\\' && quote == '"' && i + 1 < t.end - 1 {
-                    i = i + 1
-                    let esc = t.raw[i]
-                    if esc == 'n' {
-                        result.push('\n')
-                    } 
-                    else if esc == 't' {
-                        result.push('\t')
-                    } 
-                    else if esc == 'r' {
-                        result.push('\r')
-                    } 
-                    else if esc == '"' {
-                        result.push('"')
-                    } 
-                    else if esc == '\\' {
-                        result.push('\\')
-                    } 
-                    else {
-                        result.push(esc)
-                    }
+    // ── Table field accessors ──
+
+    // The value at `key` in this table, or None if the key is absent or this is
+    // not a table.
+    fn get(self: &Self, key: &string): Option<Toml> {
+        let idx = tomlFieldIndex(self, self.root, key)
+        if idx < 0 {
+            return Option.None
+        }
+        return Option.Some(tomlSubdoc(self, idx))
+    }
+
+    // The string at `key`. A datetime answers with its original lexical text —
+    // see `kind()` when the distinction matters.
+    fn str(self: &Self, key: &string): Option<string> {
+        return self.curStr(tomlFieldIndex(self, self.root, key))
+    }
+
+    // The integer at `key`. A float answers None: TOML's `1.0` is not an integer,
+    // and silently truncating it would lose data with no signal.
+    fn i64(self: &Self, key: &string): Option<i64> {
+        return self.curInt(tomlFieldIndex(self, self.root, key))
+    }
+
+    // The float at `key`. An integer answers with its widened value.
+    fn f64(self: &Self, key: &string): Option<f64> {
+        return self.curFloat(tomlFieldIndex(self, self.root, key))
+    }
+
+    // The boolean at `key`.
+    fn bool(self: &Self, key: &string): Option<bool> {
+        return self.curBool(tomlFieldIndex(self, self.root, key))
+    }
+
+    // The sub-table at `key` — TOML's spelling of std/json's object accessor.
+    fn table(self: &Self, key: &string): Option<Toml> {
+        let idx = tomlFieldIndex(self, self.root, key)
+        if idx < 0 || self.nodes[idx].kind != TK_TABLE {
+            return Option.None
+        }
+        return Option.Some(tomlSubdoc(self, idx))
+    }
+
+    // Every key of this table, in document order. Empty for a non-table.
+    fn keys(self: &Self): Vec<string> {
+        var out: Vec<string> = Vec.new()
+        if self.nodes[self.root].kind != TK_TABLE {
+            return out
+        }
+        var c = self.nodes[self.root].firstChild
+        while c >= 0 {
+            let ki = self.nodes[c].keyIdx
+            if ki >= 0 {
+                out.push(self.keyStrs[ki].clone())
+            }
+            c = self.nodes[c].nextSibling
+        }
+        return out
+    }
+
+    // ── Array access ──
+
+    // The `index`-th element of this array. None for a table — a table's entries
+    // are reached by key, or by cursor when the order matters.
+    fn at(self: &Self, index: i64): Option<Toml> {
+        if self.nodes[self.root].kind != TK_ARRAY {
+            return Option.None
+        }
+        let idx = tomlChildIndex(self, self.root, index)
+        if idx < 0 {
+            return Option.None
+        }
+        return Option.Some(tomlSubdoc(self, idx))
+    }
+
+    // Element count of an array, or entry count of a table; 0 for a scalar.
+    fn len(self: &Self): i64 {
+        return self.nodes[self.root].childCount
+    }
+
+    // ── Bare value extraction ──
+
+    // The string value here. A datetime answers with its original lexical text.
+    fn asStr(self: &Self): Option<string> {
+        return self.curStr(self.root)
+    }
+
+    // The integer value here; None for a float, as with `i64`.
+    fn asI64(self: &Self): Option<i64> {
+        return self.curInt(self.root)
+    }
+
+    // The float value here; an integer widens.
+    fn asF64(self: &Self): Option<f64> {
+        return self.curFloat(self.root)
+    }
+
+    // The boolean value here.
+    fn asBool(self: &Self): Option<bool> {
+        return self.curBool(self.root)
+    }
+
+    // ── Type checks ──
+
+    // What this node holds. The one accessor that tells `Str` from `DateTime`,
+    // which both read back through `asStr`.
+    fn kind(self: &Self): TomlKind {
+        return TomlKind.tryFrom(self.nodes[self.root].kind)!
+    }
+
+    // True only for a string; a datetime answers `isDateTime`.
+    fn isStr(self: &Self): bool {
+        return self.nodes[self.root].kind == TK_STR
+    }
+
+    // True for both integers and floats — `isInt`/`isFloat` separate them.
+    fn isNum(self: &Self): bool {
+        return self.nodes[self.root].kind == TK_INT || self.nodes[self.root].kind == TK_FLOAT
+    }
+
+    // True for an integer only — `1.0` is a float in TOML, not an int.
+    fn isInt(self: &Self): bool {
+        return self.nodes[self.root].kind == TK_INT
+    }
+
+    // True for a float only.
+    fn isFloat(self: &Self): bool {
+        return self.nodes[self.root].kind == TK_FLOAT
+    }
+
+    // True for a boolean.
+    fn isBool(self: &Self): bool {
+        return self.nodes[self.root].kind == TK_BOOL
+    }
+
+    // An offset date-time, local date-time, local date or local time. Its lexical
+    // text is read with `asStr`.
+    fn isDateTime(self: &Self): bool {
+        return self.nodes[self.root].kind == TK_DATETIME
+    }
+
+    // True for an array, whether written inline or as `[[table]]` elements.
+    fn isArray(self: &Self): bool {
+        return self.nodes[self.root].kind == TK_ARRAY
+    }
+
+    // True for a table, whether written inline, as a `[header]`, or implied by a
+    // dotted key.
+    fn isTable(self: &Self): bool {
+        return self.nodes[self.root].kind == TK_TABLE
+    }
+
+    // ── Zero-copy cursor navigation ──
+    //
+    // `get`/`at`/`table` above return an owned Toml by copying the whole pool per
+    // call, so walking a large document with them is quadratic. A cursor is a plain
+    // node index into THIS document: navigation is allocation-free (-1 = missing)
+    // and only string reads materialize. Start at `curRoot()` and chain:
+    //   let host = doc.curField(doc.curField(doc.curRoot(), "server"), "host")
+    //   match doc.curStr(host) { Option.Some(s) => ..., Option.None => ... }
+    //
+    // Unlike std/json's, `curChild` indexes tables as well as arrays, and
+    // `curKey` names the child it lands on — that is what makes a generic walk
+    // over a TOML document possible without cloning at every level.
+    fn curRoot(self: &Self): i64 {
+        return self.root
+    }
+
+    // The `index`-th child of the array or table at `cur`; -1 if there is none.
+    fn curChild(self: &Self, cur: i64, index: i64): i64 {
+        if cur < 0 {
+            return -1
+        }
+        let k = self.nodes[cur].kind
+        if k != TK_ARRAY && k != TK_TABLE {
+            return -1
+        }
+        return tomlChildIndex(self, cur, index)
+    }
+
+    // The key of the `index`-th entry of the table at `cur`.
+    fn curKey(self: &Self, cur: i64, index: i64): Option<string> {
+        if cur < 0 || self.nodes[cur].kind != TK_TABLE {
+            return Option.None
+        }
+        let c = tomlChildIndex(self, cur, index)
+        if c < 0 {
+            return Option.None
+        }
+        let ki = self.nodes[c].keyIdx
+        if ki < 0 {
+            return Option.None
+        }
+        return Option.Some(self.keyStrs[ki].clone())
+    }
+
+    // The value at `key` in the table at `cur`; -1 if absent or not a table.
+    fn curField(self: &Self, cur: i64, key: &string): i64 {
+        return tomlFieldIndex(self, cur, key)
+    }
+
+    // Child count at the cursor: array elements or table entries; 0 for a scalar.
+    fn curLen(self: &Self, cur: i64): i64 {
+        if cur < 0 {
+            return 0
+        }
+        return self.nodes[cur].childCount
+    }
+
+    // The kind at the cursor, or None if the cursor is invalid.
+    fn curKind(self: &Self, cur: i64): Option<TomlKind> {
+        if cur < 0 {
+            return Option.None
+        }
+        return TomlKind.tryFrom(self.nodes[cur].kind)
+    }
+
+    // The string at the cursor, materialized. A datetime answers with its lexical
+    // text — the one place a cursor read allocates.
+    fn curStr(self: &Self, cur: i64): Option<string> {
+        if cur < 0 {
+            return Option.None
+        }
+        let n = self.nodes[cur]
+        if (n.kind == TK_STR || n.kind == TK_DATETIME) && n.strIdx >= 0 {
+            return Option.Some(self.strs[n.strIdx].clone())
+        }
+        return Option.None
+    }
+
+    // The integer at the cursor; None for a float.
+    fn curInt(self: &Self, cur: i64): Option<i64> {
+        if cur < 0 {
+            return Option.None
+        }
+        if self.nodes[cur].kind != TK_INT {
+            return Option.None
+        }
+        return Option.Some(self.nodes[cur].intVal)
+    }
+
+    // The float at the cursor; an integer widens.
+    fn curFloat(self: &Self, cur: i64): Option<f64> {
+        if cur < 0 {
+            return Option.None
+        }
+        if self.nodes[cur].kind == TK_FLOAT {
+            return Option.Some(self.nodes[cur].numVal)
+        }
+        if self.nodes[cur].kind == TK_INT {
+            return Option.Some(self.nodes[cur].intVal as f64)
+        }
+        return Option.None
+    }
+
+    // The boolean at the cursor.
+    fn curBool(self: &Self, cur: i64): Option<bool> {
+        if cur < 0 {
+            return Option.None
+        }
+        if self.nodes[cur].kind != TK_BOOL {
+            return Option.None
+        }
+        return Option.Some(self.nodes[cur].boolVal)
+    }
+
+    // ── Path accessors ──
+    //
+    // Reading a nested value through get().table().str() nests an Option per level
+    // even though the caller only wants "the value, or a default". These collapse
+    // the whole walk into one Option so `?? fallback` finishes the job.
+
+    // Cursor at the end of a dotted path — "server.host", "bin[0].name". A missing
+    // key, an out-of-range index or a shape mismatch yields -1, which every cursor
+    // accessor reads as "nothing here", so the walk is total for any input. A key
+    // containing '.' or '[' is not addressable this way; use get()/at().
+    fn curPath(self: &Self, p: &string): i64 {
+        var cur: i64 = self.root
+        var seg: string = ""
+        var inIndex: bool = false
+        var idx: i64 = 0
+        for b in p {
+            if inIndex {
+                if b == ']' {
+                    cur = self.curChild(cur, idx)
+                    inIndex = false
+                    idx = 0
+                } else if b >= '0' && b <= '9' {
+                    idx = idx * 10 + ((b as i64) - 48)
                 } else {
-                    result.push(t.raw[i])
+                    return -1
                 }
-                i = i + 1
+            } else if b == '.' {
+                if seg.len > 0 {
+                    cur = self.curField(cur, seg)
+                    seg = ""
+                }
+            } else if b == '[' {
+                if seg.len > 0 {
+                    cur = self.curField(cur, seg)
+                    seg = ""
+                }
+                inIndex = true
+                idx = 0
+            } else {
+                seg.push(b)
             }
-            return Option.Some(result)
-        }
-        // bare string
-        return Option.Some(t.raw[t.start..t.end].clone())
-    }
-    return Option.None
-}
-
-fn tomlGetI64(s: &string, start: i64, end: i64, key: &string): Option<i64> {
-    let v = tomlFindKey(s, start, end, key)
-    if let Option.Some(t) = v {
-        var result: i64 = 0
-        var negative: bool = false
-        var i = t.start
-        if i < t.end && t.raw[i] == '-' {
-            negative = true
-            i = i + 1
-        }
-        if i < t.end && t.raw[i] == '+' {
-            i = i + 1
-        }
-        while i < t.end && t.raw[i] >= '0' && t.raw[i] <= '9' {
-            result = result * 10 + (t.raw[i] as i32 - 48) as i64
-            i = i + 1
-        }
-        if negative {
-            result = 0 - result
-        }
-        return Option.Some(result)
-    }
-    return Option.None
-}
-
-fn tomlGetF64(s: &string, start: i64, end: i64, key: &string): Option<f64> {
-    let v = tomlFindKey(s, start, end, key)
-    if let Option.Some(t) = v {
-        var result: f64 = 0.0
-        var negative: bool = false
-        var i = t.start
-        if i < t.end && t.raw[i] == '-' {
-            negative = true
-            i = i + 1
-        }
-        if i < t.end && t.raw[i] == '+' {
-            i = i + 1
-        }
-        while i < t.end && t.raw[i] >= '0' && t.raw[i] <= '9' {
-            result = result * 10.0 + (t.raw[i] as i32 - 48) as f64
-            i = i + 1
-        }
-        if i < t.end && t.raw[i] == '.' {
-            i = i + 1
-            var frac: f64 = 0.1
-            while i < t.end && t.raw[i] >= '0' && t.raw[i] <= '9' {
-                result = result + (t.raw[i] as i32 - 48) as f64 * frac
-                frac = frac * 0.1
-                i = i + 1
+            if cur < 0 {
+                return -1
             }
         }
-        if negative {
-            result = 0.0 - result
+        // An unterminated '[' never resolved to a child, so the path is malformed.
+        if inIndex {
+            return -1
         }
-        return Option.Some(result)
+        if seg.len > 0 {
+            cur = self.curField(cur, seg)
+        }
+        return cur
     }
-    return Option.None
+
+    // The value at a dotted path, whatever its kind.
+    fn path(self: &Self, p: &string): Option<Toml> {
+        let cur = self.curPath(p)
+        if cur < 0 {
+            return Option.None
+        }
+        return Option.Some(tomlSubdoc(self, cur))
+    }
+
+    // The string at a dotted path — `t.strPath("server.host") ?? "localhost"`.
+    fn strPath(self: &Self, p: &string): Option<string> {
+        return self.curStr(self.curPath(p))
+    }
+
+    // The integer at a dotted path.
+    fn i64Path(self: &Self, p: &string): Option<i64> {
+        return self.curInt(self.curPath(p))
+    }
+
+    // The float at a dotted path; an integer widens.
+    fn f64Path(self: &Self, p: &string): Option<f64> {
+        return self.curFloat(self.curPath(p))
+    }
+
+    // The boolean at a dotted path.
+    fn boolPath(self: &Self, p: &string): Option<bool> {
+        return self.curBool(self.curPath(p))
+    }
+
+    // ── Serialization ──
+
+    // Render back to TOML text that re-parses to an equal document. Scalars are
+    // emitted first at each level, then `[table]` sections, then `[[array of
+    // table]]` blocks, because a bare key after a header would belong to that
+    // header's table. Inline-ness is not preserved — an inline table that owns
+    // only tables comes back as a section — but values, types and structure are.
+    fn stringify(self: &Self): string {
+        var out: string = ""
+        if self.nodes[self.root].kind != TK_TABLE {
+            return tomlInlineValue(self, self.root) + "\n"
+        }
+        tomlWriteTable(self, self.root, "", out)
+        return out
+    }
 }
 
-fn tomlGetBool(s: &string, start: i64, end: i64, key: &string): Option<bool> {
-    let v = tomlFindKey(s, start, end, key)
-    if let Option.Some(t) = v {
-        if t.end - t.start == 4 && t.raw[t.start] == 't' {
-            return Option.Some(true)
-        }
-        if t.end - t.start == 5 && t.raw[t.start] == 'f' {
-            return Option.Some(false)
-        }
-    }
-    return Option.None
-}
+// ── Serializer helpers ──
 
-fn tomlGetTable(s: &string, start: i64, end: i64, key: &string): Option<Toml> {
-    // search for [key] header
-    var i = start
-    while i < end {
-        i = tomlSkipWs(s, i, end)
-        if i >= end {
-            break
-        }
-        if s[i] == '\n' {
-            i = i + 1
-            continue
-        }
-        if s[i] == '[' && (i + 1 >= end || s[i + 1] != '[') {
-            let hdrStart = i + 1
-            var hdrEnd = hdrStart
-            while hdrEnd < end && s[hdrEnd] != ']' {
-                hdrEnd = hdrEnd + 1
-            }
-            let hdrName = s[hdrStart..hdrEnd]
-            if strEq(hdrName, key) {
-                // table body: from next line until next [header] or EOF
-                let bodyStart = tomlSkipLine(s, hdrEnd + 1, end)
-                var bodyEnd = bodyStart
-                var j = bodyStart
-                while j < end {
-                    j = tomlSkipWs(s, j, end)
-                    if j >= end {
-                        break
-                    }
-                    if s[j] == '\n' {
-                        j = j + 1
-                        continue
-                    }
-                    if s[j] == '[' {
-                        bodyEnd = j
-                        break
-                    }
-                    j = tomlSkipLine(s, j, end)
-                    bodyEnd = j
-                }
-                if j >= end {
-                    bodyEnd = end
-                }
-                return Option.Some(Toml {
-                    raw: s.clone(), start: bodyStart, end: bodyEnd
-                }
-                )
-            }
-        }
-        i = tomlSkipLine(s, i, end)
-    }
-    return Option.None
-}
-
-fn strEq(a: &string, b: &string): bool {
-    if a.len != b.len {
+fn tomlIsBareKey(s: &string): bool {
+    if s.len == 0 {
         return false
     }
     var i: i64 = 0
-    while i < a.len {
-        if a[i] != b[i] {
+    while i < s.len {
+        if !tomlIsBareKeyChar(s[i]) {
             return false
         }
         i = i + 1
     }
     return true
+}
+
+fn tomlEscapeStr(s: &string): string {
+    var out: string = "\""
+    var i: i64 = 0
+    while i < s.len {
+        let c = s[i]
+        if c == '"' {
+            out = out + "\\\""
+        } else if c == '\\' {
+            out = out + "\\\\"
+        } else if c == '\n' {
+            out = out + "\\n"
+        } else if c == '\t' {
+            out = out + "\\t"
+        } else if c == '\r' {
+            out = out + "\\r"
+        } else if c == 8 as u8 {
+            out = out + "\\b"
+        } else if c == 12 as u8 {
+            out = out + "\\f"
+        } else if c < 0x20 || c == 0x7F {
+            let digits: string = "0123456789ABCDEF"
+            out = out + "\\u00"
+            out.push(digits[((c as i64) >> 4) & 15])
+            out.push(digits[(c as i64) & 15])
+        } else {
+            out.push(c)
+        }
+        i = i + 1
+    }
+    return out + "\""
+}
+
+fn tomlRenderKey(s: &string): string {
+    if tomlIsBareKey(s) {
+        return s.clone()
+    }
+    return tomlEscapeStr(s)
+}
+
+// A float must never render as something that reads back as an integer, so a
+// value with no '.', 'e' or special spelling gains a ".0".
+fn tomlRenderFloat(v: f64): string {
+    if v != v {
+        return "nan"
+    }
+    if v == f64.INF {
+        return "inf"
+    }
+    if v == 0.0 - f64.INF {
+        return "-inf"
+    }
+    let s = v.toString()
+    var marked: bool = false
+    var i: i64 = 0
+    while i < s.len {
+        let c = s[i]
+        if c == '.' || c == 'e' || c == 'E' {
+            marked = true
+            break
+        }
+        i = i + 1
+    }
+    if marked {
+        return s
+    }
+    return s + ".0"
+}
+
+fn tomlInlineValue(doc: &Toml, idx: i64): string {
+    let n = doc.nodes[idx]
+    if n.kind == TK_STR {
+        return tomlEscapeStr(doc.strs[n.strIdx])
+    }
+    if n.kind == TK_DATETIME {
+        return doc.strs[n.strIdx].clone()
+    }
+    if n.kind == TK_INT {
+        return n.intVal.toString()
+    }
+    if n.kind == TK_FLOAT {
+        return tomlRenderFloat(n.numVal)
+    }
+    if n.kind == TK_BOOL {
+        if n.boolVal {
+            return "true"
+        }
+        return "false"
+    }
+    if n.kind == TK_ARRAY {
+        var out: string = "["
+        var c = n.firstChild
+        var first: bool = true
+        while c >= 0 {
+            if !first {
+                out = out + ", "
+            }
+            first = false
+            out = out + tomlInlineValue(doc, c)
+            c = doc.nodes[c].nextSibling
+        }
+        return out + "]"
+    }
+    var out: string = "{"
+    var c = n.firstChild
+    var first: bool = true
+    while c >= 0 {
+        if !first {
+            out = out + ", "
+        }
+        first = false
+        let ki = doc.nodes[c].keyIdx
+        out = out + tomlRenderKey(doc.keyStrs[ki]) + " = " + tomlInlineValue(doc, c)
+        c = doc.nodes[c].nextSibling
+    }
+    return out + "}"
+}
+
+// An array is emitted as `[[header]]` blocks only when it is non-empty and holds
+// nothing but tables; anything else round-trips fine as an inline array.
+fn tomlIsTableArray(doc: &Toml, idx: i64): bool {
+    if doc.nodes[idx].kind != TK_ARRAY || doc.nodes[idx].childCount == 0 {
+        return false
+    }
+    var c = doc.nodes[idx].firstChild
+    while c >= 0 {
+        if doc.nodes[c].kind != TK_TABLE {
+            return false
+        }
+        c = doc.nodes[c].nextSibling
+    }
+    return true
+}
+
+fn tomlJoinPath(prefix: &string, key: &string): string {
+    if prefix.len == 0 {
+        return tomlRenderKey(key)
+    }
+    return prefix.clone() + "." + tomlRenderKey(key)
+}
+
+fn tomlWriteTable(doc: &Toml, idx: i64, prefix: &string, out: &mut string) {
+    var c = doc.nodes[idx].firstChild
+    while c >= 0 {
+        let k = doc.nodes[c].kind
+        if k != TK_TABLE && !tomlIsTableArray(doc, c) {
+            let ki = doc.nodes[c].keyIdx
+            out = out + tomlRenderKey(doc.keyStrs[ki]) + " = " + tomlInlineValue(doc, c) + "\n"
+        }
+        c = doc.nodes[c].nextSibling
+    }
+    c = doc.nodes[idx].firstChild
+    while c >= 0 {
+        let ki = doc.nodes[c].keyIdx
+        let k = doc.nodes[c].kind
+        if k == TK_TABLE {
+            let sub = tomlJoinPath(prefix, doc.keyStrs[ki])
+            if out.len > 0 {
+                out = out + "\n"
+            }
+            out = out + "[" + sub.clone() + "]\n"
+            tomlWriteTable(doc, c, sub, out)
+        } else if tomlIsTableArray(doc, c) {
+            let sub = tomlJoinPath(prefix, doc.keyStrs[ki])
+            var e = doc.nodes[c].firstChild
+            while e >= 0 {
+                if out.len > 0 {
+                    out = out + "\n"
+                }
+                out = out + "[[" + sub.clone() + "]]\n"
+                tomlWriteTable(doc, e, sub, out)
+                e = doc.nodes[e].nextSibling
+            }
+        }
+        c = doc.nodes[c].nextSibling
+    }
 }

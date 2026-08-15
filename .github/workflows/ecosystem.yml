@@ -1,0 +1,38 @@
+name: Ecosystem
+
+# Compiles every published milo-language package against this checkout.
+#
+# WHY: a package's CI pins a *released* milo binary, so it cannot tell you that the
+# compiler you are about to ship breaks it. And nothing else here compiles third-party
+# code at all — the fixtures and examples are first-party, and they take the local
+# import path. Packages take the package path, which mangles names per package, and the
+# two can disagree.
+#
+# Both failure modes have already shipped:
+#   * milo-postgres v0.1.0 — 32 green tests in its own repo, uncompilable for every
+#     consumer, because a capitalised global was unresolvable under mangling.
+#   * milo-yaml v0.2.1 — the published tag predated a fix already on main.
+# Neither was catchable by the package's own suite.
+#
+# NOT on push: it resolves tags from GitHub, so it depends on the network and on other
+# repos' state. A red run here can mean "someone else's package regressed", which must
+# not block an unrelated commit to this repo. Scheduled, plus manual dispatch before a
+# release — that is when the answer actually matters.
+
+on:
+  schedule:
+    - cron: '37 6 * * *'
+  workflow_dispatch:
+
+jobs:
+  packages:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      # The compiler runs from source here (bun run src/main.ts), and `milo add`
+      # shells out to git — both are already present on the runner.
+      - run: bun install --frozen-lockfile
+      - name: Compile every published package
+        run: bun scripts/ecosystem-check.ts

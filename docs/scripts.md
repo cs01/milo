@@ -35,6 +35,7 @@ last-verified: 2026-08-14
 | `scripts/selfhost.sh` | rebuild `milo-self` (required before selfhost work; `.bin` is gitignored) |
 | `scripts/selfhost-sweep.ts` | guarded selfhost divergence sweep |
 | `scripts/js-sweep.ts` | JS-backend fixture sweep |
+| `scripts/ecosystem-check.ts` | installs every published milo-language package from GitHub and compiles it against this checkout — the only gate that takes the *package* import path a user takes, rather than the local one every in-repo test uses |
 | `scripts/build.sh` | build entry |
 | `scripts/bundle-stdlib.ts` | bundle stdlib into the compiler |
 | `scripts/gen-std-docs.ts` | regenerate stdlib API docs |

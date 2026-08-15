@@ -514,6 +514,7 @@ taskJoinGreen
 taskJoinLate
 tcpGreenConnectRefused
 tcpIpv6
+tcpListenerPort
 temp_name_collision
 termSize
 testingAsserts

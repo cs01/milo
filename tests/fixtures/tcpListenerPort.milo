@@ -1,0 +1,20 @@
+// `bind(0)` asks the OS for an ephemeral port; without `port()` the caller had no
+// way to learn which one it got, so every test and ephemeral server hardcoded a
+// number and hoped. TlsListener has had this since the TLS server landed —
+// TcpListener did not, which is how the postgres client's tests ended up pinned
+// to a fixed port.
+from "std/net" import {
+    TcpListener
+}
+
+// @expect: true
+// @expect: true
+pub fn main(): i32 {
+    let l = TcpListener.bind(0)!
+    let p = l.port()
+    print((p > 1024).toString())
+    // Two listeners must not be handed the same port.
+    let m = TcpListener.bind(0)!
+    print((m.port() != p).toString())
+    return 0
+}

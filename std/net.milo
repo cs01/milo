@@ -10,6 +10,7 @@ from "std/os" import {
     bind,
     connectFd,
     freeaddrinfo,
+    getSockPort,
     getaddrinfo,
     listen,
     readFd,
@@ -318,6 +319,17 @@ impl TcpListener {
             fd: fd
         }
         )
+    }
+
+    // The bound port — the point of `bind(0)`, which asks the OS to pick one.
+    // Without this a caller that binds 0 has no way to learn what it got, so
+    // every test and every ephemeral server has to hardcode a port and hope it
+    // is free. `TlsListener` has had this; `TcpListener` did not.
+    //
+    // -1 if getsockname fails, mirroring getSockPort rather than reporting a
+    // plausible-looking port number.
+    fn port(self: &Self): i32 {
+        return getSockPort(self.fd)
     }
 
     // Accept one connection. Inside the green scheduler this yields (via the

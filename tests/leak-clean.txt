@@ -461,6 +461,7 @@ targetOs
 taskJoin
 taskJoinLate
 tcpGreenConnectRefused
+tcpListenerPort
 temp_name_collision
 termSize
 testingAsserts

@@ -78,6 +78,20 @@ fn TcpListener.bind6(addr: [u8; 16], port: u16): Result<TcpListener, NetError>
 Bind an IPv6 listener. Added alongside bind(); pass the 16 raw bytes (`ip6("::1")`,
 or all-zero for the v6 wildcard "::").
 
+### `TcpListener.port`
+
+```milo
+fn TcpListener.port(self: &TcpListener): i32
+```
+
+The bound port — the point of `bind(0)`, which asks the OS to pick one.
+Without this a caller that binds 0 has no way to learn what it got, so
+every test and every ephemeral server has to hardcode a port and hope it
+is free. `TlsListener` has had this; `TcpListener` did not.
+
+-1 if getsockname fails, mirroring getSockPort rather than reporting a
+plausible-looking port number.
+
 ### `TcpStream.connect`
 
 ```milo

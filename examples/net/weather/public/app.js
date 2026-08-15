@@ -616,9 +616,12 @@ function uvCurveSvg(hourly, timeZone, nowTime) {
 // Semicircular dial over the range sea-level pressure actually spans (29–31 inHg)
 function pressureGaugeSvg(inHg) {
   var W = 130;
-  var H = 78;
+  // The Low/High baseline sits 12 below the dial centre, so the box needs 16
+  // under it to clear the descenders — at the old 10 the labels were sliced off
+  // by the viewBox edge.
+  var H = 84;
   var c = W / 2;
-  var cy = H - 10;
+  var cy = H - 16;
   var r = 52;
   var frac = Math.max(0, Math.min(1, (inHg - 29) / 2));
   var rad = ((180 + frac * 180) * Math.PI) / 180;
@@ -1854,11 +1857,14 @@ function placeChipHtml(p, wx, isFav) {
     '<span class="place-temp' + (wx ? "" : " place-pending") + '"' +
     (wx ? ' title="Current temperature' + (wx.cond ? " \u2014 " + esc(wx.cond) : "") + '"' : "") +
     ">" + (wx ? wx.temp + "\u00B0" : "--\u00B0") + "</span>" +
-    (isFav
-      ? '<span class="place-remove" role="button" tabindex="0" data-remove="' +
-        esc(p.label) + '" title="Remove from favorites" ' +
-        'aria-label="Remove ' + esc(p.label) + ' from favorites">\u00D7</span>'
-      : "") +
+    // Both lists dismiss the same way. Giving recents their own \u00D7 is also what
+    // keeps the rail's temperatures on one right edge: a chip without the
+    // control would run its number out to the space the \u00D7 occupies.
+    '<span class="place-remove" role="button" tabindex="0" data-remove="' +
+    esc(p.label) + '" data-remove-kind="' + (isFav ? "fav" : "recent") + '" ' +
+    'title="' + (isFav ? "Remove from favorites" : "Stop showing this place") + '" ' +
+    'aria-label="Remove ' + esc(p.label) +
+    (isFav ? " from favorites" : " from recent places") + '">\u00D7</span>' +
     "</button>"
   );
 }
@@ -1897,15 +1903,29 @@ function renderSaved() {
   placesEl.innerHTML = '<div class="places-head">Your places</div>' + rows;
   placesEl.classList.add("has-places");
 
+  placesEl.querySelectorAll(".place-remove").forEach(function (x) {
+    // role="button" is a promise the span has to keep; it is not a <button>
+    // (it sits inside one), so the keyboard activation is ours to wire.
+    x.addEventListener("keydown", function (e) {
+      if (e.key !== "Enter" && e.key !== " ") return;
+      e.preventDefault();
+      x.click();
+    });
+  });
+
   placesEl.querySelectorAll(".place-chip").forEach(function (chip) {
     chip.addEventListener("click", function (e) {
       var label = chip.getAttribute("data-label");
       if (e.target.hasAttribute("data-remove")) {
         e.stopPropagation();
-        var kept = loadFavorites().filter(function (x) {
-          return x.label !== label;
+        var key =
+          e.target.getAttribute("data-remove-kind") === "fav"
+            ? "weatherFavorites"
+            : "weatherRecents";
+        var kept = (loadJson(key) || []).filter(function (item) {
+          return item.label !== label;
         });
-        localStorage.setItem("weatherFavorites", JSON.stringify(kept));
+        localStorage.setItem(key, JSON.stringify(kept));
         renderSaved();
         syncFavButton();
         return;

@@ -44,7 +44,7 @@ export const EXPECTED: Record<string, Expected> = {
   // alloc paths discharge it, the free/set/modify paths cannot (they are gated by an
   // IndexAccess the translator has no rule for), so `arenaLen` reports as a CONDITIONAL
   // proof rather than a clean one.
-  "std/arena.milo": { proven: 3, unknown: 4, errors: 0 },
+  "std/arena.milo": { proven: 4, unknown: 4, errors: 0 },
   // The `impl Crypto` namespace wrappers restate the AES key/iv/tag-length `requires` of
   // the private free fns they forward to, so each wrapper's call into the free fn proves
   // its precondition at the wrapper's own call site (10 = 2 aesGcm + 2 aesGcm128 wrappers'
@@ -53,7 +53,7 @@ export const EXPECTED: Record<string, Expected> = {
   "std/crypto.windows.milo": { proven: 10, unknown: 0, errors: 0 },
   // `fixed` was refuted here until `construct` grew frame conditions (`ensures h.count.len
   // == old(h.count.len)`); the +6 proven is that baseline retiring.
-  "std/inflate.milo": { proven: 27, unknown: 38, errors: 0 },
+  "std/inflate.milo": { proven: 31, unknown: 44, errors: 0 },
   // `impl Math` static-method postconditions (abs/clamp `ensures result >= ...`); a
   // `Type.method()` call is normalized to a plain Call so the method's contracts verify
   // exactly as the free fns they replaced did.
@@ -67,6 +67,6 @@ export const EXPECTED: Record<string, Expected> = {
   "std/pty.darwin.milo": { proven: 0, unknown: 0, errors: 0 },
   "std/pty.windows.milo": { proven: 0, unknown: 0, errors: 0 },
   "std/sort.milo": { proven: 2, unknown: 0, errors: 0 },
-  "std/string.milo": { proven: 8, unknown: 4, errors: 0 },
+  "std/string.milo": { proven: 9, unknown: 21, errors: 0 },
   "std/sync.milo": { proven: 0, unknown: 0, errors: 0 },
 };

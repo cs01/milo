@@ -2,10 +2,10 @@
 
 Memory mapping and bump allocation primitives.
 
-> This is the raw memory arena (bump allocator). For a generational arena with typed `Handle<T>`, see `std/arena`.
+> This is the raw bump allocator. For a generational arena with typed `Handle<T>`, see `std/arena` — that module owns the name `Arena`.
 
 ```milo
-from "std/mem" import { MappedMemory, Arena, mmapAnon, arenaNew, arenaAlloc, arenaReset }
+from "std/mem" import { MappedMemory, Bump, mmapAnon, mmapFile }
 ```
 
 ## Types
@@ -21,17 +21,18 @@ struct MappedMemory {
 
 A region of memory-mapped address space.
 
-### Arena
+### Bump
 
 ```milo
-struct Arena {
+struct Bump {
     base: i64,
     cap: i64,
     used: i64,
 }
 ```
 
-A bump allocator backed by a contiguous memory region.
+A bump allocator backed by a contiguous heap region. All allocations are 8-byte
+aligned and the whole region is freed on drop.
 
 ## Functions
 
@@ -51,26 +52,34 @@ fn mmapFile(fd: i32, len: i64): Result<MappedMemory>
 
 Memory-maps `len` bytes from file descriptor `fd`.
 
-### arenaNew
+### Bump.new
 
 ```milo
-fn arenaNew(capacity: i64): Result<Arena>
+fn Bump.new(capacity: i64): Result<Bump>
 ```
 
-Creates a new arena with the given byte capacity (backed by `mmapAnon`).
+Creates a bump allocator with the given byte capacity.
 
-### arenaAlloc
+### Bump.alloc
 
 ```milo
-fn arenaAlloc(arena: &mut Arena, size: i64): Result<i64>
+fn Bump.alloc(self: &mut Bump, size: i64): Result<i64>
 ```
 
-Bump-allocates `size` bytes from the arena, returning a pointer. Fails if the arena is full.
+Bump-allocates `size` bytes, returning a pointer. Fails if the allocator is full.
 
-### arenaReset
+### Bump.reset
 
 ```milo
-fn arenaReset(arena: &mut Arena)
+fn Bump.reset(self: &mut Bump): void
 ```
 
-Resets the arena's used counter to zero, reclaiming all allocations.
+Resets the used counter to zero, reclaiming every allocation at once.
+
+### Bump.remaining
+
+```milo
+fn Bump.remaining(self: &Bump): i64
+```
+
+Bytes still available.

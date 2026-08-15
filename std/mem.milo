@@ -63,17 +63,19 @@ pub fn mmapFile(fFd: i32, size: i64): Result<MappedMemory> {
     )
 }
 
-// ── Arena ──
+// ── Bump ──
 
-// Bump allocator with automatic cleanup.
-// All allocations are 8-byte aligned. Use arenaReset() to reclaim without freeing.
-pub struct Arena {
+// Bump allocator with automatic cleanup. Named Bump, not Arena: std/arena owns
+// the name `Arena` for its generational typed-handle arena, and Milo merges every
+// module into one flat namespace, so a program cannot import both under one name.
+// All allocations are 8-byte aligned. Use bumpReset() to reclaim without freeing.
+pub struct Bump {
     base: i64,
     cap: i64,
     used: i64,
 }
 
-impl Drop for Arena {
+impl Drop for Bump {
     fn drop(self: &mut Self): void {
         if self.base != 0 {
             unsafe {
@@ -83,26 +85,26 @@ impl Drop for Arena {
     }
 }
 
-// Create a new arena with the given capacity in bytes.
-fn arenaNew(capacity: i64): Result<Arena>
+// Create a new bump allocator with the given capacity in bytes.
+fn bumpNew(capacity: i64): Result<Bump>
 requires capacity > 0
 {
     unsafe {
         let p = malloc(capacity)
         let addr = p as i64
         if addr == 0 {
-            return Result.Err("arena allocation failed")
+            return Result.Err("bump allocation failed")
         }
-        return Result.Ok(Arena {
+        return Result.Ok(Bump {
             base: addr, cap: capacity, used: 0
         }
         )
     }
 }
 
-// Allocate size bytes from the arena (8-byte aligned).
-// Returns Err if the arena doesn't have enough space.
-fn arenaAlloc(a: &mut Arena, size: i64): Result<i64>
+// Allocate size bytes from the bump allocator (8-byte aligned).
+// Returns Err if it doesn't have enough space.
+fn bumpAlloc(a: &mut Bump, size: i64): Result<i64>
 requires size > 0
 ensures a.used <= a.cap
 {
@@ -110,45 +112,45 @@ ensures a.used <= a.cap
     let seven: i64 = 7
     let aligned = (a.used + seven) & ~seven
     if aligned + size > a.cap {
-        return Result.Err("arena out of memory")
+        return Result.Err("bump allocator out of memory")
     }
     let ptr = a.base + aligned
     a.used = aligned + size
     return Result.Ok(ptr)
 }
 
-// Reset the arena, making all previously allocated memory available for reuse.
-fn arenaReset(a: &mut Arena): void
+// Reset the allocator, making all previously allocated memory available for reuse.
+fn bumpReset(a: &mut Bump): void
 ensures a.used == 0
 {
     a.used = 0
 }
 
-fn arenaRemaining(a: &Arena): i64
+fn bumpRemaining(a: &Bump): i64
 requires a.used <= a.cap
 ensures result >= 0
 {
     return a.cap - a.used
 }
 
-impl Arena {
-    // Restate each callee's preconditions on the wrapper (Arena has no struct
+impl Bump {
+    // Restate each callee's preconditions on the wrapper (Bump has no struct
     // invariant the solver models): without them the wrapper can't discharge the
     // free fn's `requires` — same restating pattern as Pool's free/live/available.
-    fn new(capacity: i64): Result<Arena>
+    fn new(capacity: i64): Result<Bump>
     requires capacity > 0
     {
-        return arenaNew(capacity)
+        return bumpNew(capacity)
     }
     fn alloc(self: &mut Self, size: i64): Result<i64>
     requires size > 0
     {
-        return arenaAlloc(self, size)
+        return bumpAlloc(self, size)
     }
     fn reset(self: &mut Self): void {
-        arenaReset(self)
+        bumpReset(self)
     }
     fn remaining(self: &Self): i64 {
-        return arenaRemaining(self)
+        return bumpRemaining(self)
     }
 }

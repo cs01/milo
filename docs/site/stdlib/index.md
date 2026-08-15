@@ -99,7 +99,7 @@ Most utilities are **namespaced**: call a static on the namespace (`Path.join`, 
 | [`std/sort`](sort) | Sorting for Vec — `sortI32`, `sortI64`, `sortStrings` |
 | [`std/testing`](testing) | `assert`, `assertEqual`, `assertStrEqual` |
 | [`std/log`](log) | Leveled structured logging — `Log`, `Logger`, `LogLevel`, `LogFormat` |
-| [`std/mem`](mem) | `mmapAnon`, `mmapFile`, bump-allocator arena |
+| [`std/mem`](mem) | `mmapAnon`, `mmapFile`, `Bump` bump allocator |
 
 ## Cryptography
 

@@ -1,0 +1,31 @@
+// std/arena's generational `Arena<T>` and std/mem's bump allocator used to share
+// the name `Arena` (and arenaNew/arenaAlloc), so a program importing both merged
+// one over the other. Regression guard for the rename to `Bump`/bump*.
+// @expect: 42
+// @expect: 1024
+// @expect: 960
+from "std/arena" import {
+    Arena, arenaAlloc, arenaGet, arenaNew
+}
+from "std/mem" import {
+    Bump
+}
+
+pub fn main(): i32 {
+    var arena: Arena<i32> = arenaNew()
+    let h = arenaAlloc(arena, 42)
+    match arenaGet(arena, h) {
+        Option.Some(v) => {
+            print(v)
+        }
+        Option.None => {
+            print("none")
+        }
+    }
+
+    var bump = Bump.new(1024)!
+    print(bump.remaining())
+    let _p = bump.alloc(64)!
+    print(bump.remaining())
+    return 0
+}

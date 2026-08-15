@@ -3,20 +3,20 @@
 // @expect: 1024
 
 from "std/mem" import {
-    Arena
+    Bump
 }
 
 pub fn main(): i32 {
-    var arena = Arena.new(1024)!
+    var bump = Bump.new(1024)!
 
-    let remaining = arena.remaining()
+    let remaining = bump.remaining()
     print(remaining)
 
-    let ptr = arena.alloc(64)!
+    let ptr = bump.alloc(64)!
     print(ptr > 0)
 
-    arena.reset()
-    print(arena.remaining())
+    bump.reset()
+    print(bump.remaining())
 
     return 0
 }

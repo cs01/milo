@@ -8,10 +8,10 @@
 //
 // Key format: "<repo-relative-file>::<function>".
 export const BASELINE: Record<string, string> = {
-  "std/mem.milo::Arena.remaining":
-    "arenaRemaining requires `used <= cap` and ensures `result >= 0`. That's a true " +
-    "Arena invariant — every constructor/alloc maintains used <= cap — but the caller " +
-    "(the Arena.remaining wrapper) holds an arbitrary &Arena the solver won't assume the " +
+  "std/mem.milo::Bump.remaining":
+    "bumpRemaining requires `used <= cap` and ensures `result >= 0`. That's a true " +
+    "Bump invariant — every constructor/alloc maintains used <= cap — but the caller " +
+    "(the Bump.remaining wrapper) holds an arbitrary &Bump the solver won't assume the " +
     "invariant for, so it refutes with used=1,cap=0. Propagating `requires used <= cap` " +
     "onto the wrapper would be tautological ceremony on a getter; retire this once " +
     "prove-milo models struct invariants (docs/verification-roadmap.md).",

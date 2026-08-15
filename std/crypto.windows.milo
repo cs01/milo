@@ -49,7 +49,7 @@ fn bytesToHex(raw: &string, n: i64): string {
 }
 
 // Compute SHA-256 hash of a string. Returns 64-char lowercase hex string.
-fn sha256(input: &string): string {
+fn cryptoSha256(input: &string): string {
     let raw = bcryptHash(65, input, 32)
     return bytesToHex(raw, 32)
 }
@@ -61,13 +61,13 @@ fn md5(input: &string): string {
 }
 
 // Compute SHA-1 hash. Returns 40-char lowercase hex string.
-fn sha1(input: &string): string {
+fn cryptoSha1(input: &string): string {
     let raw = bcryptHash(49, input, 20)
     return bytesToHex(raw, 20)
 }
 
 // Raw 20-byte SHA-1 digest as a string (for WebSocket handshake, HMAC, etc.)
-fn sha1Bytes(input: &string): string {
+fn cryptoSha1Bytes(input: &string): string {
     return bcryptHash(49, input, 20)
 }
 
@@ -120,13 +120,13 @@ pub struct Crypto {
 
 impl Crypto {
     fn sha256(input: &string): string {
-        return sha256(input)
+        return cryptoSha256(input)
     }
     fn sha1(input: &string): string {
-        return sha1(input)
+        return cryptoSha1(input)
     }
     fn sha1Bytes(input: &string): string {
-        return sha1Bytes(input)
+        return cryptoSha1Bytes(input)
     }
     fn md5(input: &string): string {
         return md5(input)

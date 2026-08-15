@@ -433,9 +433,24 @@ export function resolveImports(program: Program, sourceDir: string, target: Targ
     }
   }
 
+  // Every type/global declaration paired with the file that declared it. Unlike
+  // fns, these decls carry no `sourceFile`, and after the merge below the arrays
+  // are flat — so the origin has to be captured here, while each unit's file is
+  // still in hand. Structs, enums, traits, interfaces and type aliases go into
+  // ONE list because they share one namespace: `struct Response` in one module and
+  // `enum Response` in another really do collide.
+  const typeDecls: { name: string; kind: string; decl: unknown; file: string; span?: Span }[] = [];
+  const globalDecls: { name: string; decl: unknown; file: string; span?: Span }[] = [];
+
   // merge, in the traversal order the units were collected in
   for (const u of units) {
     recordDecls(u.prog, u.file);
+    for (const s of u.prog.structs) typeDecls.push({ name: s.name, kind: "struct", decl: s, file: u.file, span: s.span });
+    for (const e of u.prog.enums) typeDecls.push({ name: e.name, kind: "enum", decl: e, file: u.file, span: e.span });
+    for (const t of u.prog.traits) typeDecls.push({ name: t.name, kind: "trait", decl: t, file: u.file, span: t.span });
+    for (const i of u.prog.interfaces) typeDecls.push({ name: i.name, kind: "interface", decl: i, file: u.file, span: i.span });
+    for (const a of u.prog.typeAliases) typeDecls.push({ name: a.name, kind: "type alias", decl: a, file: u.file, span: a.span });
+    for (const g of u.prog.globals) globalDecls.push({ name: g.name, decl: g, file: u.file, span: g.span });
     structs.push(...u.prog.structs);
     enums.push(...u.prog.enums);
     functions.push(...u.prog.functions);
@@ -515,6 +530,77 @@ export function resolveImports(program: Program, sourceDir: string, target: Targ
       }, readSourceSafe(f.sourceFile), f.sourceFile);
     }
     if (!prev) fnDefs.set(f.name, { file: f.sourceFile ?? "(unknown)", body });
+  }
+
+  // A stdlib file reads as 'std/http.milo' rather than the absolute path it was
+  // resolved to; the point of naming both files is that the user can go open them.
+  const displayFile = (p: string) => (p.startsWith(STDLIB_DIR + "/") ? p.slice(STDLIB_DIR.length + 1) : p);
+  // "an enum", "an interface", "a struct" — the kind is interpolated, so the
+  // article has to be picked rather than written.
+  const a = (kind: string) => (/^[aeiou]/.test(kind) ? "an" : "a") + " " + kind;
+
+  // Types collapse in the flat namespace exactly like fns, and until now nothing
+  // checked them: `pub struct Response` in std/fetch and `pub enum Response` in
+  // std/http merged to whichever unit came last, and the losing module then
+  // type-checked against a type it never declared — "expected Response, got
+  // Response", pointing at correct code, with nothing naming the collision.
+  //
+  // Same tolerance as duplicate-fn: two files holding a byte-identical definition
+  // still merge (that is how a shared type gets vendored into two modules), and
+  // only a *different* definition in a *different* file is an error.
+  //
+  // Unlike fns there is no signature/body split to be lax about — a type's body IS
+  // its signature, so every difference is the hard-error case, including against
+  // the prelude. That matches the fn rule at the same granularity: a prelude fn
+  // redefined with a different signature is `shadows-stdlib`, an error, because
+  // the library's own uses break; a prelude type redefined with different fields
+  // breaks the library's own uses the same way.
+  const typeDefs = new Map<string, { file: string; kind: string; body: string }>();
+  for (const t of typeDecls) {
+    const body = JSON.stringify(t.decl, stripForCompare);
+    const prev = typeDefs.get(t.name);
+    if (prev && prev.file !== t.file && (prev.kind !== t.kind || prev.body !== body)) {
+      const sameKind = prev.kind === t.kind;
+      throw new ParseError({
+        severity: "error",
+        code: "duplicate-type",
+        span: t.span,
+        len: t.name.length,
+        message: `'${t.name}' is defined as ${a(prev.kind)} in '${displayFile(prev.file)}' and as ${a(t.kind)} in '${displayFile(t.file)}'`,
+        hint: `Milo merges every module into one flat namespace, so a type name has exactly one meaning program-wide${sameKind ? " and these two definitions differ" : ""} — only one of them survives and every use of '${t.name}' resolves to it, including the other module's own uses. Rename one${sameKind ? ", or move the shared definition into a single module both import" : ""}.`,
+      }, readSourceSafe(t.file), t.file);
+    }
+    if (!prev) typeDefs.set(t.name, { file: t.file, kind: t.kind, body });
+  }
+
+  // Globals live in the *value* namespace, alongside fns — `@name` is one LLVM
+  // symbol either way, so a global and a fn of the same name from two files is a
+  // raw "redefinition of function '@asciiIsDigit'" out of clang with no Milo
+  // diagnostic at all. checkDuplicateDecls already treats them as one namespace
+  // within a file; this is the same rule across files.
+  const fnFileByName = new Map<string, string>();
+  for (const f of functions) if (!fnFileByName.has(f.name)) fnFileByName.set(f.name, f.sourceFile ?? "(unknown)");
+  const globalDefs = new Map<string, { file: string; body: string }>();
+  for (const g of globalDecls) {
+    const body = JSON.stringify(g.decl, stripForCompare);
+    const prev = globalDefs.get(g.name);
+    const fnFile = fnFileByName.get(g.name);
+    const clash = prev && prev.file !== g.file && prev.body !== body
+      ? { file: prev.file, kind: "global" }
+      : fnFile !== undefined && fnFile !== g.file
+        ? { file: fnFile, kind: "function" }
+        : null;
+    if (clash) {
+      throw new ParseError({
+        severity: "error",
+        code: "duplicate-global",
+        span: g.span,
+        len: g.name.length,
+        message: `'${g.name}' is defined as ${a(clash.kind)} in '${displayFile(clash.file)}' and as a global in '${displayFile(g.file)}'`,
+        hint: `Milo merges every module into one flat namespace, and globals share it with functions — only one '${g.name}' survives and every use resolves to it. Rename one of them.`,
+      }, readSourceSafe(g.file), g.file);
+    }
+    if (!prev) globalDefs.set(g.name, { file: g.file, body });
   }
 
   // dedup: keep last occurrence of each name (user wins over prelude)

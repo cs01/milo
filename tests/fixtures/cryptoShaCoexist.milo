@@ -1,0 +1,25 @@
+// std/crypto's private hash helpers used to be named sha256/sha1/sha1Bytes, which
+// are exactly the free fns std/sha256 and std/sha1 define — with different bodies
+// (CommonCrypto/OpenSSL vs pure Milo). Importing both modules merged one set over
+// the other. Regression guard for the crypto* rename.
+// @expect: true
+// @expect: true
+// @expect: true
+from "std/crypto" import {
+    Crypto
+}
+from "std/sha256" import {
+    Sha256
+}
+from "std/sha1" import {
+    Sha1
+}
+
+pub fn main(): i32 {
+    let msg = "abc"
+    // Both implementations must survive the merge and agree.
+    print(Crypto.sha256(msg) == Sha256.hash(msg))
+    print(Crypto.sha1(msg) == Sha1.hash(msg))
+    print(Crypto.sha1Bytes(msg) == Sha1.bytes(msg))
+    return 0
+}

@@ -165,6 +165,137 @@ fn main(): void {
   expect(msg).not.toContain("err_main.milo:");
 });
 
+// ── types and globals share the fn story: one flat namespace, last-wins ──
+// The live case this closed: std/fetch's `pub struct Response` vs std/http's
+// `pub enum Response`. Importing both compiled the enum and silently discarded
+// the struct, so std/fetch's own code failed with "cannot access field on enum
+// 'Response'" and "expected Response, got Response" — errors pointing at correct
+// code, with nothing naming the collision.
+
+test("a struct and an enum with the same name in two modules is a compile error", () => {
+  write("ty_struct.milo", `pub struct Payload { code: i64 }\npub fn fromStruct(): Payload { return Payload { code: 1 } }\n`);
+  write("ty_enum.milo", `pub enum Payload { Ok, Bad }\npub fn fromEnum(): Payload { return Payload.Ok }\n`);
+  const main = write("ty_main.milo", `from "ty_struct" import { fromStruct }
+from "ty_enum" import { fromEnum }
+fn main(): void {
+    print(fromStruct().code)
+}
+`);
+  const r = milo(`run ${main}`);
+  expect(r.code).not.toBe(0);
+  const msg = r.err + r.out;
+  // Both kinds and both files, so the user can act without opening the compiler.
+  expect(msg).toContain("'Payload' is defined as a struct in");
+  expect(msg).toContain("and as an enum in");
+  expect(msg).toContain("ty_struct.milo");
+  expect(msg).toContain("ty_enum.milo");
+});
+
+test("same-named structs with different fields in two modules is a compile error", () => {
+  write("tyd_a.milo", `pub struct Config { host: string }\npub fn hostOf(c: &Config): string { return c.host }\n`);
+  write("tyd_b.milo", `pub struct Config { port: i64 }\npub fn portOf(c: &Config): i64 { return c.port }\n`);
+  const main = write("tyd_main.milo", `from "tyd_a" import { Config, hostOf }
+from "tyd_b" import { portOf }
+fn main(): void {
+    print(hostOf(Config { host: "x" }))
+}
+`);
+  const r = milo(`run ${main}`);
+  expect(r.code).not.toBe(0);
+  const msg = r.err + r.out;
+  expect(msg).toContain("'Config' is defined as a struct in");
+  expect(msg).toContain("tyd_a.milo");
+  expect(msg).toContain("tyd_b.milo");
+});
+
+// The tolerance guard. Vendoring the same type into two modules is legitimate and
+// must keep compiling — fns already get this and types must match them, or a
+// future tightening breaks working code with no test to catch it.
+test("byte-identical type definitions in two modules still merge", () => {
+  write("tysame_a.milo", `pub struct Pt { x: i64, y: i64 }\npub fn fromA(): Pt { return Pt { x: 1, y: 2 } }\n`);
+  write("tysame_b.milo", `pub struct Pt { x: i64, y: i64 }\npub fn fromB(): Pt { return Pt { x: 10, y: 20 } }\n`);
+  const main = write("tysame_main.milo", `from "tysame_a" import { Pt, fromA }
+from "tysame_b" import { fromB }
+fn main(): void {
+    let a = fromA()
+    let b = fromB()
+    print(a.x + a.y + b.x + b.y)
+}
+`);
+  const r = milo(`run ${main}`);
+  expect(r.err).toBe("");
+  expect(r.code).toBe(0);
+  expect(r.out.trim()).toBe("33");
+});
+
+test("identical enums merge even when only one copy is pub", () => {
+  // Same laxity fns get: `isPub` is not part of a definition.
+  write("tyenum_a.milo", `pub enum Color { Red, Blue }\npub fn fromA(): Color { return Color.Red }\n`);
+  write("tyenum_b.milo", `enum Color { Red, Blue }\npub fn fromB(): bool { return fromBInner() == Color.Blue }\nfn fromBInner(): Color { return Color.Blue }\n`);
+  const main = write("tyenum_main.milo", `from "tyenum_a" import { Color, fromA }
+from "tyenum_b" import { fromB }
+fn main(): void {
+    print(fromA() == Color.Red)
+    print(fromB())
+}
+`);
+  const r = milo(`run ${main}`);
+  expect(r.err).toBe("");
+  expect(r.code).toBe(0);
+  expect(r.out.trim().split("\n")).toEqual(["true", "true"]);
+});
+
+test("same-named globals with different values in two modules is a compile error", () => {
+  write("gl_a.milo", `let LIMIT: i64 = 10\npub fn fromA(): i64 { return LIMIT }\n`);
+  write("gl_b.milo", `let LIMIT: i64 = 20\npub fn fromB(): i64 { return LIMIT }\n`);
+  const main = write("gl_main.milo", `from "gl_a" import { fromA }
+from "gl_b" import { fromB }
+fn main(): void {
+    print(fromA() + fromB())
+}
+`);
+  const r = milo(`run ${main}`);
+  expect(r.code).not.toBe(0);
+  const msg = r.err + r.out;
+  expect(msg).toContain("'LIMIT' is defined as a global in");
+  expect(msg).toContain("gl_a.milo");
+  expect(msg).toContain("gl_b.milo");
+});
+
+test("identical globals in two modules still merge", () => {
+  // std/sha1 and std/sha256 both hold `let MASK32: i64 = 0xffffffff` — this is
+  // that shape, and it must stay legal.
+  write("glsame_a.milo", `let MASKV: i64 = 255\npub fn fromA(): i64 { return MASKV }\n`);
+  write("glsame_b.milo", `let MASKV: i64 = 255\npub fn fromB(): i64 { return MASKV }\n`);
+  const main = write("glsame_main.milo", `from "glsame_a" import { fromA }
+from "glsame_b" import { fromB }
+fn main(): void {
+    print(fromA() + fromB())
+}
+`);
+  const r = milo(`run ${main}`);
+  expect(r.err).toBe("");
+  expect(r.code).toBe(0);
+  expect(r.out.trim()).toBe("510");
+});
+
+// Globals and fns share the value namespace — `@name` is one LLVM symbol either
+// way. Before this check the only signal was clang's "redefinition of function
+// '@asciiIsDigit'" against generated IR the user never wrote.
+test("a global shadowing a stdlib function name is a compile error", () => {
+  const main = write("glfn_main.milo", `let asciiIsDigit: i64 = 5
+fn main(): void {
+    print(asciiIsDigit)
+}
+`);
+  const r = milo(`run ${main}`);
+  expect(r.code).not.toBe(0);
+  const msg = r.err + r.out;
+  expect(msg).toContain("'asciiIsDigit' is defined as a function in 'std/string.milo'");
+  expect(msg).toContain("and as a global in");
+  expect(msg).not.toContain("redefinition of function");
+});
+
 test("cleanup", () => {
   rmSync(DIR, { recursive: true, force: true });
 });

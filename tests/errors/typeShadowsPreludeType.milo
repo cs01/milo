@@ -1,0 +1,15 @@
+// A type's body IS its signature, so redefining a prelude type with different
+// fields is the type-level equivalent of the `shadows-stdlib` signature mismatch
+// fns already reject: std's own uses of `Unit` would bind to this definition.
+// (An identical redefinition still merges — see tests/modules.test.ts.)
+// @error: 'Unit' is defined as a struct in 'std/prelude.milo' and as a struct in
+
+pub struct Unit {
+    x: i64,
+}
+
+fn main(): i32 {
+    let u = Unit { x: 1 }
+    print(u.x)
+    return 0
+}

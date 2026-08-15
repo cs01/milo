@@ -1,15 +1,34 @@
 <!-- doc-meta
 system: breaking-changes
 purpose: source-level breaks users have to act on, with the migration and the reason a compat shim was impossible
-key-files: std/platform.*.milo, std/os.milo, std/string.milo, std/strconv.milo, std/uuid.milo, std/ws.milo, std/fetch.milo, std/zstd.milo, std/base64.milo, std/base32.milo, std/hex.milo, std/csv.milo
+key-files: std/platform.*.milo, std/mem.milo, std/os.milo, std/string.milo, std/strconv.milo, std/uuid.milo, std/ws.milo, std/fetch.milo, std/zstd.milo, std/base64.milo, std/base32.milo, std/hex.milo, std/csv.milo
 update-when: a public stdlib name moves, is renamed, or changes signature
-last-verified: 2026-08-03
+last-verified: 2026-08-14
 -->
 
 # Breaking changes
 
 Source-level breaks, newest first. Milo is pre-1.0 and does not promise
 compatibility, but every break belongs here with the migration spelled out.
+
+## `std/mem`'s bump allocator is renamed `Bump` (2026-08-14)
+
+**`std/mem`'s `Arena` is now `Bump`**, and its private helpers move with it
+(`arenaNew`/`arenaAlloc`/`arenaReset`/`arenaRemaining` → `bumpNew`/`bumpAlloc`/
+`bumpReset`/`bumpRemaining`). The methods keep their names, so only the type does:
+
+    from "std/mem" import { Arena }        // was
+    var a = Arena.new(1024)!
+
+    from "std/mem" import { Bump }         // now
+    var a = Bump.new(1024)!
+
+`std/arena` owns the name `Arena` for its generational `Arena<T>` + `Handle<T>`,
+which is the blessed one for cyclic data. Milo merges every module into one flat
+namespace, so the two could not coexist: a program importing both got whichever
+definition the merge happened to keep, silently. The resolver now rejects that
+outright (`duplicate-type`), which is what forced the rename rather than a shim —
+there is no namespace to hide a compat alias in.
 
 ## `std/json` drops its fixed-shape accessors (2026-08-04)
 
@@ -442,7 +461,7 @@ design rules:
 | `regexMatch(re, input)` | `re.isMatch(input)` |
 | `regexFind(re, input)` | `re.find(input)` |
 | `regexFindAll(re, input)` | `re.findAll(input)` |
-| `arenaNew(capacity)` from `std/mem` | `Arena.new(capacity)` |
+| `arenaNew(capacity)` from `std/mem` | `Arena.new(capacity)` — since renamed `Bump.new(capacity)`, see 2026-08-14 above |
 | `poolNew(size, count)` | `Pool.new(size, count)` |
 | `charIsDigit`, `charIsAlpha`, and related byte helpers | `asciiIsDigit`, `asciiIsAlpha`, and the `asciiIs*` family |
 | `toLowerChar`, `toUpperChar` | `asciiToLower`, `asciiToUpper` |

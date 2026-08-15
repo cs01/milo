@@ -2,36 +2,36 @@
 
 ## std/mem
 
-### `Arena.alloc`
+### `Bump.alloc`
 
 ```milo
-fn Arena.alloc(self: &mut Arena, size: i64): Result<i64>
+fn Bump.alloc(self: &mut Bump, size: i64): Result<i64>
 ```
 
 _Undocumented._
 
-### `Arena.new`
+### `Bump.new`
 
 ```milo
-fn Arena.new(capacity: i64): Result<Arena>
+fn Bump.new(capacity: i64): Result<Bump>
 ```
 
-Restate each callee's preconditions on the wrapper (Arena has no struct
+Restate each callee's preconditions on the wrapper (Bump has no struct
 invariant the solver models): without them the wrapper can't discharge the
 free fn's `requires` — same restating pattern as Pool's free/live/available.
 
-### `Arena.remaining`
+### `Bump.remaining`
 
 ```milo
-fn Arena.remaining(self: &Arena): i64
+fn Bump.remaining(self: &Bump): i64
 ```
 
 _Undocumented._
 
-### `Arena.reset`
+### `Bump.reset`
 
 ```milo
-fn Arena.reset(self: &mut Arena): void
+fn Bump.reset(self: &mut Bump): void
 ```
 
 _Undocumented._

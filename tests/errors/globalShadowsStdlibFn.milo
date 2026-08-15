@@ -1,0 +1,11 @@
+// Globals share the value namespace with functions — both become `@name` in the
+// IR. Before the resolver checked this, the only signal was clang rejecting
+// generated IR the user never wrote ("redefinition of function '@asciiIsDigit'").
+// @error: 'asciiIsDigit' is defined as a function in 'std/string.milo' and as a global in
+
+let asciiIsDigit: i64 = 5
+
+fn main(): i32 {
+    print(asciiIsDigit)
+    return 0
+}

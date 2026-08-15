@@ -11297,6 +11297,14 @@ export class Codegen {
       // temp has no name for scope-drop to find. Without this the payload leaks on
       // every call — `renderResponse(Response.Text(body), hdrs)` lost `body` each time.
       case "EnumLit":
+      // Array/Vec and struct literals in that same position are the identical case,
+      // and were missed when EnumLit was fixed: `f(["GET", key])` leaked the Vec's
+      // buffer and `f(Point { name: s })` leaked the field, once per call. Every
+      // client library built on a `cmd(&Vec<string>)` shape leaked a buffer per
+      // command. Only the borrow path reaches here — a by-value argument moves and
+      // is the callee's to drop — so this cannot double-free.
+      case "ArrayLit":
+      case "StructLit":
       case "NumberToString":
       case "BoolToString":
       case "JsonStringify":

@@ -1,0 +1,41 @@
+// A Vec/array/struct literal passed straight into a `&T` parameter owns its heap
+// and nobody else ever will — the callee only borrows it and the temp has no name
+// for scope-drop to find. Both used to leak once per call, which for a client
+// library shaped as `cmd(&Vec<string>)` is one leaked buffer per command.
+// The leak gate is what actually grades this; the counts below just keep it running.
+struct Holder {
+    name: string,
+    n: i64,
+}
+
+fn sumLens(args: &Vec<string>): i64 {
+    var total: i64 = 0
+    for a in args {
+        total = total + a.len
+    }
+    return total
+}
+
+fn holderLen(h: &Holder): i64 {
+    return h.name.len + h.n
+}
+
+// @expect: 640
+// @expect: 140
+fn main(): i32 {
+    var vecTotal: i64 = 0
+    for i in 0..50 {
+        vecTotal = vecTotal + sumLens(["INCR", "counter", i.toString()])
+    }
+    print(vecTotal.toString())
+
+    var structTotal: i64 = 0
+    for i in 0..50 {
+        structTotal = structTotal + holderLen(Holder {
+            name: i.toString(), n: 1
+        }
+        )
+    }
+    print(structTotal.toString())
+    return 0
+}

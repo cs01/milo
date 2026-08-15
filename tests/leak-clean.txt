@@ -7,6 +7,7 @@ arena_clear
 arenaBasic
 arenaContracts
 arenaCrossArena
+arenaMemCoexist
 arenaMethod
 arenaModify
 arenaWith
@@ -36,9 +37,11 @@ bitCount
 bitRotate
 blockScopeDrop
 booleanLogic
+borrowed_literal_arg_temp
 borrowIndexFieldPrecision
 borrowMutateAfterLoop
 borrowValidSlice
+boundsCheckShadowedVec
 boundsElision
 break_drop
 breakContinue
@@ -78,6 +81,7 @@ contracts
 contractsCallSite
 cryptoAesGcm
 cryptoSha1
+cryptoShaCoexist
 cSig
 cValue
 dateTime

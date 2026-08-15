@@ -81,3 +81,30 @@ Tag a release (`git tag v0.1.0 && git push origin v0.1.0`) and it is installable
 **Tag it** — without a tag, `milo add` tracks whatever `main` happens to be at
 install time, so two people adding your package on different days get different
 code.
+
+### Then install what you published
+
+A package's own tests import `"./lib"` or `"../lib"` — the **local** path. Nobody
+who installs your package takes that path; they take the package path, which
+mangles names per package. The two can disagree, and when they do your CI is
+green and your users cannot compile at all.
+
+Both failures have happened here, from different causes:
+
+* `milo-postgres` v0.1.0 shipped with 32 passing tests and did not compile for
+  anyone, because a capitalised global was unresolvable under package mangling.
+* `milo-yaml` v0.2.1 shipped without a fix that was already sitting on `main`,
+  so the tag `milo add` resolved to was older than the working code.
+
+Neither is catchable by a package's own test suite. The check that catches both
+takes ten seconds:
+
+```bash
+mkdir /tmp/verify && cd /tmp/verify
+echo '{ "name": "verify", "version": "0.0.1" }' > milo.json
+milo add github.com/you/milo-mylib          # the published artifact, not your checkout
+printf 'from "mylib" import { thing }\nfn main() { print(thing()) }\n' > main.milo
+milo run main.milo
+```
+
+Run it after tagging, from a directory that is not your repo.

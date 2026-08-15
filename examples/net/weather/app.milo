@@ -243,6 +243,11 @@ pub fn scriptHandler(ctx: &mut Context): Response {
     return Response.Status(200, "application/javascript; charset=utf-8", @embedFile("public/app.js"))
 }
 
+pub fn radarScriptHandler(ctx: &mut Context): Response {
+    ctx.setHeader("Cache-Control", "no-store")
+    return Response.Status(200, "application/javascript; charset=utf-8", @embedFile("public/radar.js"))
+}
+
 pub fn manifestHandler(ctx: &mut Context): Response {
     ctx.setHeader("Cache-Control", "no-store")
     return Response.Status(200, "application/manifest+json; charset=utf-8", @embedFile("public/manifest.webmanifest"))
@@ -297,6 +302,7 @@ pub fn main(): i32 {
     r.get("/index.html", indexHandler)
     r.get("/style.css", styleHandler)
     r.get("/app.js", scriptHandler)
+    r.get("/radar.js", radarScriptHandler)
     r.get("/api/cities", citiesHandler)
     r.get("/manifest.webmanifest", manifestHandler)
     r.get("/sw.js", swHandler)

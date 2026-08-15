@@ -1516,56 +1516,13 @@ svg.place-icon {
    it to sit inside the weather-tinted card instead of looking like a hole
    punched through it. */
 
-.radar-frame {
-  position: relative;
-  overflow: hidden;
-  border-radius: var(--radius-tile);
-  background: #fff;
-  line-height: 0;
-  box-shadow:
-    0 0 0 1px rgba(255, 255, 255, 0.28),
-    0 10px 20px -8px rgba(0, 0, 0, 0.45);
-}
+/* ── Radar panel ──
+   The GL canvas paints its own dark scene, so the panel sits on the weather
+   card as a self-contained instrument rather than inheriting the card's tint —
+   which is what lets one set of colours work under both the light and dark
+   variants of the hero gradient. */
 
-.on-light .radar-frame {
-  box-shadow:
-    0 0 0 1px rgba(31, 41, 55, 0.18),
-    0 10px 20px -8px rgba(0, 0, 0, 0.25);
-}
-
-.radar-img {
-  display: block;
-  width: 100%;
-  height: auto;
-}
-
-/* Decorative sweep only. Kept faint and screen-blended so it reads as panel
-   chrome and never darkens or recolours actual reflectivity pixels. */
-.radar-scan {
-  position: absolute;
-  inset: 0;
-  pointer-events: none;
-  mix-blend-mode: screen;
-  background: linear-gradient(
-    100deg,
-    transparent 42%,
-    rgba(80, 220, 160, 0.16) 50%,
-    transparent 58%
-  );
-  background-size: 260% 100%;
-  animation: radar-sweep 5.5s linear infinite;
-}
-
-@keyframes radar-sweep {
-  from {
-    background-position: 130% 0;
-  }
-  to {
-    background-position: -130% 0;
-  }
-}
-
-.radar-head {
+.wxr-head {
   margin-bottom: 0.5rem;
   display: flex;
   align-items: center;
@@ -1573,11 +1530,11 @@ svg.place-icon {
   gap: 0.5rem;
 }
 
-.radar-head .wx-section-title {
+.wxr-head .wx-section-title {
   margin-bottom: 0;
 }
 
-.radar-badge {
+.wxr-badge {
   display: flex;
   align-items: center;
   gap: 0.375rem;
@@ -1592,7 +1549,13 @@ svg.place-icon {
   text-shadow: none;
 }
 
-.radar-dot {
+/* The hero gradient has a light variant, and a white-on-white badge would
+   vanish on it. */
+.on-light .wxr-badge {
+  background: rgba(31, 41, 55, 0.1);
+}
+
+.wxr-live {
   width: 0.4375rem;
   height: 0.4375rem;
   border-radius: 50%;
@@ -1607,15 +1570,211 @@ svg.place-icon {
   }
 }
 
-.radar-note {
+.wxr-stage {
+  position: relative;
+  border-radius: var(--radius-tile);
+  overflow: hidden;
+  background: #080b12;
+  box-shadow:
+    0 0 0 1px rgba(255, 255, 255, 0.14),
+    0 14px 28px -12px rgba(0, 0, 0, 0.6);
+}
+
+.on-light .wxr-stage {
+  box-shadow:
+    0 0 0 1px rgba(31, 41, 55, 0.2),
+    0 14px 28px -12px rgba(0, 0, 0, 0.35);
+}
+
+.wxr-canvas {
+  display: block;
+  width: 100%;
+  /* Fixed aspect rather than a height: the extent is derived from the canvas's
+     own box, so the box has to be known before the first fetch. */
+  aspect-ratio: 16 / 9;
+  height: auto;
+}
+
+.wxr-status {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  font-size: 0.8125rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: rgba(148, 231, 214, 0.85);
+  text-shadow: 0 0 1.25rem rgba(45, 212, 191, 0.5);
+  pointer-events: none;
+}
+
+.wxr-scale {
+  position: absolute;
+  left: 0.625rem;
+  bottom: 0.625rem;
+  display: flex;
+  align-items: center;
+  gap: 0.375rem;
+  font-size: 0.5625rem;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: rgba(226, 240, 245, 0.65);
+  text-shadow: 0 1px 3px rgba(3, 7, 12, 0.9);
+  pointer-events: none;
+}
+
+/* Stops mirror the ramp() function in radar.js. Deliberately unlabelled in dBZ:
+   the service serves colour, not values, so the ramp position it can be
+   inverted to is an ordering — printing numbers on it would invent precision. */
+.wxr-scale-bar {
+  width: 6.5rem;
+  height: 0.3125rem;
+  border-radius: 999px;
+  background: linear-gradient(
+    90deg,
+    #1a24571a 0%, #1a4d9e 19%, #1a85bf 28%, #1a9e8c 37%,
+    #24b857 46%, #7ae63d 63%, #fcd933 72%, #fc8c29 81%,
+    #f83d3d 89%, #e84cdb 95%, #fff0ff 100%
+  );
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.15);
+}
+
+.wxr-rings {
+  position: absolute;
+  right: 0.625rem;
+  bottom: 0.625rem;
+  font-size: 0.5625rem;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: rgba(226, 240, 245, 0.5);
+  text-shadow: 0 1px 3px rgba(3, 7, 12, 0.9);
+  pointer-events: none;
+}
+
+.wxr-zoom {
+  position: absolute;
+  right: 0.625rem;
+  top: 0.625rem;
+  display: flex;
+  gap: 0.25rem;
+}
+
+.wxr-zoom button {
+  border: 0;
+  cursor: pointer;
+  padding: 0.25rem 0.4375rem;
+  border-radius: 0.375rem;
+  font: inherit;
+  font-size: 0.625rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  color: rgba(226, 240, 245, 0.7);
+  background: rgba(9, 18, 28, 0.6);
+  box-shadow: inset 0 0 0 1px rgba(148, 231, 214, 0.22);
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+}
+
+.wxr-zoom button:hover {
+  color: #e8fbf7;
+  background: rgba(15, 35, 45, 0.75);
+}
+
+.wxr-zoom button.is-on {
+  color: #071417;
+  background: #4fd6c0;
+  box-shadow: 0 0 0.75rem rgba(79, 214, 192, 0.45);
+}
+
+.wxr-bar {
   margin-top: 0.5rem;
+  display: flex;
+  align-items: center;
+  gap: 0.625rem;
+}
+
+.wxr-play {
+  flex: none;
+  width: 1.75rem;
+  height: 1.75rem;
+  border: 0;
+  cursor: pointer;
+  border-radius: 50%;
+  font: inherit;
   font-size: 0.75rem;
+  line-height: 1;
+  color: inherit;
+  background: rgba(255, 255, 255, 0.16);
+}
+
+.on-light .wxr-play {
+  background: rgba(31, 41, 55, 0.1);
+}
+
+.wxr-play:hover {
+  background: rgba(255, 255, 255, 0.26);
+}
+
+.on-light .wxr-play:hover {
+  background: rgba(31, 41, 55, 0.18);
+}
+
+.wxr-scrub {
+  flex: 1;
+  min-width: 0;
+  height: 1.25rem;
+  cursor: pointer;
+  accent-color: #34d399;
+  background: transparent;
+}
+
+.wxr-time {
+  flex: none;
+  font-size: 0.6875rem;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  font-variant-numeric: tabular-nums;
   opacity: 0.85;
 }
 
+/* Kept for the no-WebGL2 fallback, which drops back to NWS's own RIDGE loop. */
+.radar-frame {
+  position: relative;
+  overflow: hidden;
+  border-radius: var(--radius-tile);
+  background: #fff;
+  line-height: 0;
+  box-shadow:
+    0 0 0 1px rgba(255, 255, 255, 0.28),
+    0 10px 20px -8px rgba(0, 0, 0, 0.45);
+}
+
+.radar-img {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+
+/* At phone widths the legend and the ring caption would meet in the middle of
+   the bottom edge, so the caption — the less useful of the two — goes. */
+@media (max-width: 640px) {
+  .wxr-rings {
+    display: none;
+  }
+
+  .wxr-scale-bar {
+    width: 4.5rem;
+  }
+
+  .wxr-canvas {
+    aspect-ratio: 4 / 3;
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
-  .radar-scan,
-  .radar-dot {
+  .wxr-live {
     animation: none;
   }
 }

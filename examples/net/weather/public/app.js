@@ -1135,45 +1135,25 @@ function renderExtras() {
 }
 
 // ── Radar ──
-// The RIDGE composite weather.gov serves is already a finished picture: base
-// map, coastline, county and highway lines, city labels, the dBZ colour scale
-// and the frame timestamp, all burned into one 600x550 image. So this frames
-// it rather than redrawing it — the geography in the panel is NWS's own.
-//
-// The station badge sits above the image rather than on it: the composite's
-// own top strip is the tornado / severe thunderstorm / flash flood warning
-// legend, and covering that to label the station trades real information for
-// decoration.
-//
-// Deliberately no "you are here" pin: RIDGE images carry no documented
-// projection or corner extent, so any marker would be placed by guesswork, and
-// a pin sitting one county off is worse than no pin on a radar view.
+// The panel itself lives in radar.js, which renders NOAA's MRMS reflectivity
+// into a WebGL2 scene of our own. All that is needed here is the mount point
+// and the two things the panel cannot discover for itself: the point being
+// forecast, and the station serving it.
 function radarHtml() {
-  if (!radarStation) return "";
-  var st = encodeURIComponent(radarStation);
-  return (
-    '<div class="wx-divider">' +
-    '<div class="radar-head">' +
-    '<div class="wx-section-title">Radar</div>' +
-    '<div class="radar-badge"><span class="radar-dot"></span>NWS ' +
-    esc(radarStation) + "</div>" +
-    "</div>" +
-    '<div class="radar-frame">' +
-    '<img class="radar-img" src="https://radar.weather.gov/ridge/standard/' + st +
-    '_loop.gif" alt="National Weather Service ' + esc(radarStation) +
-    ' radar loop" loading="lazy" decoding="async" />' +
-    '<div class="radar-scan" aria-hidden="true"></div>' +
-    "</div>" +
-    '<div class="radar-note">Reflectivity loop, refreshed by NWS every few ' +
-    "minutes." +
-    "</div>" +
-    "</div>"
-  );
+  return '<div class="wx-divider"><div id="radarPanel"></div></div>';
 }
 
 function renderRadar() {
   var slot = document.getElementById("radarSlot");
-  if (slot) slot.innerHTML = radarHtml();
+  if (!slot) return;
+  if (!slot.firstChild) slot.innerHTML = radarHtml();
+  var host = document.getElementById("radarPanel");
+  if (!host || !window.MiloRadar) return;
+  window.MiloRadar.mount(host, {
+    lat: currentLat,
+    lon: currentLon,
+    station: radarStation,
+  });
 }
 
 // ── Active NWS alerts ──
@@ -1795,6 +1775,7 @@ function render(city, forecast, hourlyData, grid, timeZone) {
   }
 
   renderSaved();
+  renderRadar();
 }
 
 // ── Search / typeahead ──

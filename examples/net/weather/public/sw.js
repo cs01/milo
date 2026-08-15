@@ -2,13 +2,14 @@
 //
 // Bump CACHE whenever a shell asset changes — the binary embeds these files at
 // build time, so a deploy with a stale cache name would keep serving the old UI.
-var CACHE = "weather-v10";
+var CACHE = "weather-v11";
 
 // Relative to the SW's scope, so this works under nginx's /weather/ subpath.
 var SHELL = [
   "./",
   "./style.css",
   "./app.js",
+  "./radar.js",
   "./manifest.webmanifest",
   "./icons/icon-192.png",
   "./icons/icon-512.png",

@@ -1629,7 +1629,6 @@ Import with \`from "std/<name>" import { ... }\`. Key modules:
 | \`std/argparse\` | Declarative arg parser | \`ArgParser.new\`, \`ParsedArgs\` (see detailed section below) |
 | \`std/env\` | Environment vars | \`getEnv\`, \`setEnv\`, \`allEnv\` |
 | \`std/json\` | JSON parse/serialize | \`jsonParse\`, \`jsonStringify\`, \`JsonValue\` |
-| \`std/toml\` | TOML v1.0.0 parse/serialize | \`Toml.parse\`, \`.str\`, \`.i64\`, \`.table\`, \`.path\`, \`.stringify\` |
 | \`std/csv\` | CSV parser | \`csvParse\`, \`csvStringify\` |
 | \`std/http\` | HTTP client | \`httpGet\`, \`httpPost\`, \`httpRequest\`, \`HttpResponse\` |
 | \`std/net\` | TCP networking | \`tcpConnect\`, \`tcpListen\`, \`TcpStream\`, \`TcpListener\` |

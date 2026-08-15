@@ -1,8 +1,0 @@
-a.b.c.d.e.f.g = "deep"
-a.b.c.d.e.f.h = "sibling"
-a.b.x = 1
-
-[top]
-p.q.r = 1
-p.q.s = 2
-p.t = 3

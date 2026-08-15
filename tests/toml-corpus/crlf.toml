@@ -1,9 +1,0 @@
-# CRLF line endings throughout
-a = 1
-
-[t]
-b = "two"
-arr = [
-  1,
-  2,
-]

@@ -1,6 +1,0 @@
-title = "TOML Example"
-enabled = true
-disabled = false
-count = 42
-ratio = 0.5
-empty_string = ""

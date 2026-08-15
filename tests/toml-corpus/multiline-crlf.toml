@@ -1,9 +1,0 @@
-ml_basic = """
-first line
-second line"""
-ml_literal = '''
-raw first
-raw second'''
-ml_cont = """one \
-   two"""
-plain = "no newline here"

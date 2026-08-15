@@ -39,7 +39,6 @@ last-verified: 2026-08-14
 | `scripts/bundle-stdlib.ts` | bundle stdlib into the compiler |
 | `scripts/gen-std-docs.ts` | regenerate stdlib API docs |
 | `scripts/gen-json-conformance.ts` | generate JSON conformance fixtures |
-| `scripts/toml-oracle.py` | differential-test `std/toml` against Python's `tomllib` over `tests/toml-corpus/` (valid files must agree on values *and* types; `invalid/` must be rejected by both) |
 | `scripts/migrate-imports.ts` | codemod for import-syntax migration |
 | `.githooks/pre-commit` | formats staged `.milo`, then runs `lint.ts --staged --fix` |
 

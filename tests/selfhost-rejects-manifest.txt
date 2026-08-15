@@ -80,7 +80,6 @@ errors/stringViewOfOtherParam
 errors/structFieldVecOfRefs
 errors/swapTypeMismatch
 errors/targetOsArgs
-errors/tomlExplicitBorrow
 errors/typeMismatch
 errors/undefinedFn
 errors/undefinedVar

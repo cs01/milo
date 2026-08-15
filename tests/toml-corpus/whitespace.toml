@@ -1,9 +1,0 @@
-key	=	"tab separated"
-spaced   =    42
-a . b . c = "spaced dots"
-
-[  padded  ]
-inner = { x = 1 ,y = 2 }
-
-[ nested . header ]
-v = 1

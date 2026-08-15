@@ -92,7 +92,6 @@ Generated from `std/**/*.milo` doc-comments — do not edit by hand.
 - [std/time](./time.md)
 - [std/timer](./timer.md)
 - [std/tls](./tls.md)
-- [std/toml](./toml.md)
 - [std/totp](./totp.md)
 - [std/unicode](./unicode.md)
 - [std/unix](./unix.md)

@@ -3,7 +3,7 @@ system: testing
 purpose: how to write/run tests, what to avoid, and an index of every test file and what it covers
 key-files: tests/run.test.ts, tests/fixtures/, tests/errors/, tests/*.test.ts, tools/wasm/float-diff.sh
 update-when: a test file or out-of-band harness is added/removed/repurposed, or the fixture protocol changes
-last-verified: 2026-08-14 (added scripts/toml-oracle.py to the differential harness table)
+last-verified: 2026-08-15 (toml moved to the milo-toml package; its oracle went with it)
 -->
 
 # Testing
@@ -124,6 +124,5 @@ Not `bun test` — they need a toolchain CI supplies but a checkout may not, so 
 |---|---|---|
 | `tools/wasm/float-diff.sh` | wasm64 float formatting/parsing (`tools/wasm/runtime.c`'s dtoa + strtod) against the host libc, byte for byte — ~53k lines across a C-level probe (`float-selftest.c`: `%f`/`%e`/`%g` at fifteen precisions, `strtod` endptr/ties/subnormals) and a compiler-level one (`float-diff.milo`) | node + a clang with a wasm64 backend |
 | `scripts/windows-sweep.ts` | every fixture cross-compiled to windows-x64 and run under Wine | `MILO_WINDOWS_SDK`, wine |
-| `scripts/toml-oracle.py` | `std/toml` against Python's `tomllib` over `tests/toml-corpus/` — every valid file compared as *tagged* data so types are checked alongside values, both for the parse and for the parse→`stringify`→parse round trip, plus `invalid/` which both parsers must reject | python3 ≥ 3.11 (`tomllib`) |
 
 Both are differential: the native build is the oracle, so "it compiled" is never the pass condition. Before trusting a green run, break the thing under test on purpose and confirm the harness goes red.

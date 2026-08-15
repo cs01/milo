@@ -1,8 +1,0 @@
-1234 = "bare integer key"
-bare-key = 1
-bare_key = 2
--9 = 3
-0x1 = "not a number, a key"
-
-[1979-05-27]
-not_a_date = true

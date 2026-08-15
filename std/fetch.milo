@@ -513,6 +513,25 @@ pub fn parsePort(url: &string): u16 {
     return 80
 }
 
+// The authority for the Host header: the host, plus `:port` whenever the port is
+// not the scheme's default. RFC 7230 5.4 requires it, and leaving it off is not
+// cosmetic — a server on a non-default port that authenticates the request
+// (AWS SigV4 signs the Host header verbatim) rejects a request whose Host says
+// one thing and whose connection says another.
+pub fn hostHeader(url: &string): string {
+    let host = parseHost(url)
+    let port = parsePort(url)
+    let dflt: u16 = if isHttps(url) {
+        443 as u16
+    } else {
+        80 as u16
+    }
+    if port == dflt {
+        return host
+    }
+    return host + ":" + (port as i64).toString()
+}
+
 pub fn parsePath(url: &string): string {
     var i: i64 = schemeOffset(url)
     while i < url.len && url[i] != '/' {
@@ -604,16 +623,20 @@ pub fn buildRequest(host: &string, path: &string, opts: &FetchOptions): string {
     return req
 }
 
-fn httpDo(ip: u32, port: u16, host: string, path: string, opts: &FetchOptions): Result<FetchResponse, NetError> {
+fn httpDo(ip: u32, port: u16, hostHdr: string, path: string, opts: &FetchOptions): Result<FetchResponse, NetError> {
     let stream = TcpStream.connect(ip, port)?
-    stream.send(buildRequest(host, path, opts))?
+    stream.send(buildRequest(hostHdr, path, opts))?
     let raw = stream.recv()?
     return Result.Ok(parseResponse(raw))
 }
 
-fn httpsDo(ip: u32, port: u16, host: string, path: string, opts: &FetchOptions): Result<FetchResponse, NetError> {
-    let stream = TlsStream.connect(ip, port, host)?
-    stream.send(buildRequest(host, path, opts))?
+// `sni` is the bare hostname the certificate is checked against; `hostHdr` is the
+// authority that goes in the Host header and may carry a port. They differ on a
+// non-default port, and conflating them either breaks certificate validation or
+// emits a Host header that violates RFC 7230 5.4.
+fn httpsDo(ip: u32, port: u16, sni: string, hostHdr: string, path: string, opts: &FetchOptions): Result<FetchResponse, NetError> {
+    let stream = TlsStream.connect(ip, port, sni)?
+    stream.send(buildRequest(hostHdr, path, opts))?
     let raw = stream.recv()?
     return Result.Ok(parseResponse(raw))
 }
@@ -623,13 +646,14 @@ fn doFetch(url: string, opts: FetchOptions): Result<FetchResponse, NetError> {
     let host = parseHost(url)
     let port = parsePort(url)
     let path = parsePath(url)
+    let hdr = hostHeader(url)
     let ip = resolve(host)?
 
     var resp: Result<FetchResponse, NetError> = Result.Err(NetError.Other(""))
     if useTls {
-        resp = httpsDo(ip, port, host.clone(), path, opts)
+        resp = httpsDo(ip, port, host.clone(), hdr, path, opts)
     } else {
-        resp = httpDo(ip, port, host, path, opts)
+        resp = httpDo(ip, port, hdr, path, opts)
     }
 
     let r = resp?

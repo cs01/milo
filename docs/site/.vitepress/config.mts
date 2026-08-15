@@ -86,6 +86,7 @@ export default defineConfig({
         text: 'More',
         items: [
           { text: 'Standard Library', link: '/stdlib/' },
+          { text: 'Packages', link: '/packages' },
           { text: 'Benchmarks', link: '/benchmarks' },
           { text: 'Roadmap', link: '/roadmap' },
         ]

@@ -4,6 +4,7 @@
 // spiral — if these tests break, fix the guard before touching anything else.
 import { test, expect } from "bun:test";
 import { spawn } from "child_process";
+import { join } from "path";
 import { guardedRun, monitorPidTree } from "../scripts/guard";
 
 test("stops a runaway allocation at the memory cap, not at the timeout", async () => {
@@ -32,6 +33,32 @@ test("kills a process that exceeds the wall-clock timeout", async () => {
   expect(r.guardKill).toBe("timeout");
   expect(r.signal).toBe("SIGKILL");
 }, 10000);
+
+// MILO_GUARD_PRESSURE_KILL_LEVEL has to move BOTH watchdogs. The in-pgid shell
+// watchdog used to hardcode `-ge 2` while the node side read PRESSURE_KILL_LEVEL, so
+// on a host whose idle pressure IS 2 — this dev Mac, routinely — raising the knob
+// relented one layer and the other still SIGKILLed every tree older than
+// PRESSURE_SUSTAIN_TICKS (2.5s). An 8s self-host build could not complete at all, and
+// the failure looked like a compiler bug: exit 137, empty stdout, no diagnostic.
+//
+// This sleeps well past the sustain window, so it can only pass if the shell layer
+// honours the knob too. It is deliberately NOT the 1.5s timeout case above, which
+// passes either way because its timeout fires before the shell watchdog does.
+// Runs guard.ts as a CLI subprocess, not via guardedRun(): PRESSURE_KILL_LEVEL is a
+// module-load constant, so the env var has to be set before the guard's own import.
+test("raising the pressure kill level moves the shell watchdog too", async () => {
+  const code = await new Promise<number>(resolve => {
+    const p = spawn("bun", [join(import.meta.dir, "..", "scripts", "guard.ts"),
+      "--timeout-s", "20", "--", "sleep", "5"], {
+      env: { ...process.env, MILO_GUARD_PRESSURE_KILL_LEVEL: "3" },
+      stdio: "ignore",
+    });
+    p.on("exit", c => resolve(c ?? -1));
+  });
+  // 137 = SIGKILL: the shell watchdog ignored the knob and shed the tree at
+  // PRESSURE_SUSTAIN_TICKS, long before the 20s timeout.
+  expect(code).toBe(0);
+}, 40000);
 
 test("passes through a well-behaved process untouched", async () => {
   const r = await guardedRun("echo", ["ok"]);

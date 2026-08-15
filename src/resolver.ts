@@ -534,7 +534,17 @@ export function resolveImports(program: Program, sourceDir: string, target: Targ
 
   // A stdlib file reads as 'std/http.milo' rather than the absolute path it was
   // resolved to; the point of naming both files is that the user can go open them.
-  const displayFile = (p: string) => (p.startsWith(STDLIB_DIR + "/") ? p.slice(STDLIB_DIR.length + 1) : p);
+  // Separator-agnostic: on Windows both sides arrive with backslashes, so comparing
+  // against `STDLIB_DIR + "/"` never matched and the diagnostic printed the full
+  // 'D:\a\milo\milo\std\string.milo' instead of 'std/string.milo'. Compare
+  // normalised, and return the normalised relative path so the message reads the
+  // same on every host.
+  const toPosix = (p: string) => p.replace(/\\/g, "/");
+  const stdRoot = toPosix(STDLIB_DIR);
+  const displayFile = (p: string) => {
+    const norm = toPosix(p);
+    return norm.startsWith(stdRoot + "/") ? norm.slice(stdRoot.length + 1) : norm;
+  };
   // "an enum", "an interface", "a struct" — the kind is interpolated, so the
   // article has to be picked rather than written.
   const a = (kind: string) => (/^[aeiou]/.test(kind) ? "an" : "a") + " " + kind;

@@ -1,0 +1,48 @@
+// A loop's hoisted length must come from the vec the body actually indexes.
+// Both locals here are named `saves`: the first is bound on a branch this call
+// does not take, the second inside the loop. The preheader resolves the name in
+// the enclosing scope, so keying the hoisted length on the name alone checked
+// every `saves[i]` in the loop against the OTHER local's length — zero here, so
+// a valid index trapped 0/0. Found by milojs's regex engine (`String.match`
+// with /g), whose regexStrMatch has exactly this pair of same-named locals.
+
+// @expect: first=0 second=7 third=14
+// @expect: total=21
+
+fn mk(n: i64): Vec<i64> {
+    var v: Vec<i64> = Vec.new()
+    var i: i64 = 0
+    while i < n {
+        v.push(i * 7)
+        i = i + 1
+    }
+    return v
+}
+
+fn collect(global: bool): i64 {
+    if !global {
+        let saves = mk(2)
+        return saves[0]
+    }
+    var total: i64 = 0
+    var going = true
+    while going {
+        let saves = mk(3)
+        if saves.len() == 0 {
+            going = false
+        } else {
+            let first = saves[0]
+            let second = saves[1]
+            let third = saves[2]
+            print($"first={first} second={second} third={third}")
+            total = total + first + second + third
+            going = false
+        }
+    }
+    return total
+}
+
+pub fn main() {
+    let total = collect(true)
+    print($"total={total}")
+}

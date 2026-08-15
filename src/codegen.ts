@@ -141,7 +141,16 @@ export class Codegen {
   // the length, or a container reached through anything but a name or one field
   // hop all keep their check. Widening it to affine indices is docs/plans/
   // bounds-check-elision.md, and wants a range lattice rather than a pattern.
-  private provenInRange: { loopVar: string; container: string }[] = [];
+  // A name is not an identity: a function can declare the same name twice in
+  // sibling scopes, and a `let` is not a mutation, so `loopBodyMutates` does not
+  // reject one. Each entry therefore carries the LocalInfo record the name
+  // resolved to when the proof was made, and a use only counts as proven when the
+  // name still resolves to that same record — object identity, since every
+  // declaration allocates a fresh record and the scope restores put the original
+  // back. This half of the guard is defence in depth: the checker rejects nested
+  // shadowing, so no body can currently redeclare a name an enclosing proof
+  // covers. `hoistedLens` below is where the same hazard was live and observed.
+  private provenInRange: { loopVar: string; container: string; containerDecl?: LocalInfo; loopVarDecl?: LocalInfo }[] = [];
 
   // Loop-invariant lengths, hoisted into the preheader.
   //
@@ -154,7 +163,11 @@ export class Codegen {
   // resize a container, the length is loaded ONCE before the loop and every check
   // inside compares against that value. The check still happens; it just stops
   // paying for a memory round trip per element.
-  private hoistedLens: Map<string, string>[] = [];
+  //
+  // Keyed by source name, so the entry records which declaration that name meant
+  // when the length was loaded (see `provenInRange` above for why a name alone is
+  // not an identity).
+  private hoistedLens: Map<string, { len: string; decl?: LocalInfo }>[] = [];
   private globalVars = new Map<string, { type: string; typeKind: TypeKind }>();
   private userFnNames = new Set<string>();
   // Droppable locals are identified by their slot ADDRESS. A function can hold
@@ -2308,7 +2321,7 @@ export class Codegen {
 
   // Emit the once-per-loop length loads. Returns true if a scope was pushed.
   private pushHoistedLens(lines: string[], body: HIRStmt[]): boolean {
-    const scope = new Map<string, string>();
+    const scope = new Map<string, { len: string; decl?: LocalInfo }>();
     for (const [key, objExpr] of this.indexedContainers(body)) {
       const root = this.rootOf(key);
       // must already exist outside the loop, and must not be resizable inside it
@@ -2324,7 +2337,7 @@ export class Codegen {
         lines.push(`  ${lenPtr} = getelementptr %Vec, ptr ${vecPtr}, i32 0, i32 1`);
         lines.push(`  ${len} = load i64, ptr ${lenPtr}`);
         lines.push(`  ${len32} = trunc i64 ${len} to i32`);
-        scope.set(key, len32);
+        scope.set(key, { len: len32, decl: this.locals.get(root) });
       } catch {
         // an object shape genLValue cannot address: skip it, keep the per-access load
       }
@@ -2337,9 +2350,12 @@ export class Codegen {
   private hoistedLenFor(expr: HIRExpr): string | null {
     const key = this.containerKey(expr);
     if (key === null) return null;
+    const decl = this.locals.get(this.rootOf(key));
     for (let i = this.hoistedLens.length - 1; i >= 0; i--) {
       const v = this.hoistedLens[i].get(key);
-      if (v !== undefined) return v;
+      // A shadowing declaration invalidates the outer entries for this name too,
+      // so a mismatch stops the walk rather than continuing to an older scope.
+      if (v !== undefined) return v.decl === decl ? v.len : null;
     }
     return null;
   }
@@ -2353,7 +2369,12 @@ export class Codegen {
     // A global could be resized by any callee; only locals and params qualify.
     if (this.globalVars.has(this.rootOf(key))) return false;
     if (this.loopBodyMutates(stmt.body, key)) return false;
-    this.provenInRange.push({ loopVar: stmt.varName, container: key });
+    this.provenInRange.push({
+      loopVar: stmt.varName,
+      container: key,
+      containerDecl: this.locals.get(this.rootOf(key)),
+      loopVarDecl: this.locals.get(stmt.varName),
+    });
     return true;
   }
 
@@ -8780,8 +8801,12 @@ export class Codegen {
     if (expr.index.kind !== "Ident") return false;
     const key = this.containerKey(expr.object);
     if (key === null) return false;
-    for (const p of this.provenInRange) {
-      if (p.loopVar === expr.index.name && p.container === key) return true;
+    const containerDecl = this.locals.get(this.rootOf(key));
+    const loopVarDecl = this.locals.get(expr.index.name);
+    for (let i = this.provenInRange.length - 1; i >= 0; i--) {
+      const p = this.provenInRange[i];
+      if (p.loopVar !== expr.index.name || p.container !== key) continue;
+      return p.containerDecl === containerDecl && p.loopVarDecl === loopVarDecl;
     }
     return false;
   }

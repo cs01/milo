@@ -3,7 +3,7 @@ system: bounds-check-elision-plan
 purpose: implementation plan for removing provably-in-range bounds checks without a --no-bounds-checks flag
 key-files: src/codegen.ts, src/verify.ts, src/hir.ts, src/checker.ts
 update-when: the elision sequence, the range lattice, or the prover's index support changes
-last-verified: 2026-07-31
+last-verified: 2026-08-14
 -->
 
 # Bounds-check elision — implementation plan
@@ -18,6 +18,20 @@ tier. Overflow gets `@wrapping` because a wrapped add is still memory-safe. An u
 index is not, so there is no `--no-bounds-checks` and no `@unchecked` on a subscript —
 **the only way a check disappears is that something proved it redundant.** A proof that
 fails leaves the check in and stays silent; it never degrades safety, only speed.
+
+## The identity rule
+
+Both existing optimisations — the hoisted length and the `for i in 0..v.len()` proof —
+are keyed on the *source name* of the container. A name is not an identity: a function
+can declare the same name twice in sibling scopes, and a `let` is not a mutation, so
+`loopBodyMutates` does not reject one. Every entry therefore records the `LocalInfo`
+the name resolved to when it was made, and is honoured only while the name still
+resolves to that same record.
+
+Skipping that check produced a bounds check that compared one vec's index against
+another vec's length (found in milojs's regex engine, whose `regexStrMatch` binds
+`saves` twice). Fixtures: `tests/fixtures/boundsCheckShadowedVec.milo` and
+`tests/runtime-errors/boundsCheckShadowedProof.milo`.
 
 ## Where we start
 

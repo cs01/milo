@@ -287,6 +287,14 @@ export function guardedRun(cmd: string, args: string[], opts: GuardOpts = {}): P
   // stderr, whatever the operator set — five consecutive build attempts lost,
   // and a census that could not be run at all.
   //
+  // The same split bit the *level* too, and outlived the ticks fix: this shell
+  // hardcoded `-ge 2` while the node side read PRESSURE_KILL_LEVEL, so on a host
+  // whose idle pressure IS 2, MILO_GUARD_PRESSURE_KILL_LEVEL could not rescue it
+  // — the node layer relented and this one still killed every tree older than
+  // PRESSURE_SUSTAIN_TICKS. An 8s self-host build could not complete at all.
+  // Both layers now read the same knob; the hardcoded ceiling that matters,
+  // `-ge 4` (critical), is deliberately still hardcoded and unaffected.
+  //
   // Default moves 8 -> 10 ticks (2s -> 2.5s of SUSTAINED warning). That is the
   // only relaxation: the RSS cap, the ulimit -v/-t backstops, and the immediate
   // level-4 critical kill are all untouched, and level 4 is the state that
@@ -300,7 +308,7 @@ pgid=$$
     rss=$(ps -axo pgid=,rss= 2>/dev/null | awk -v g="$pgid" '$1==g {s+=$2} END {print s+0}')
     lvl=$(sysctl -n kern.memorystatus_vm_pressure_level 2>/dev/null || echo 1)
     case "$lvl" in (*[!0-9]*|"") lvl=1;; esac
-    if [ "$lvl" -ge 2 ]; then warn=$((warn+1)); else warn=0; fi
+    if [ "$lvl" -ge ${PRESSURE_KILL_LEVEL} ]; then warn=$((warn+1)); else warn=0; fi
     if [ "\${rss:-0}" -gt ${limitKb} ] || [ "$t" -ge ${maxTicks} ] || [ "$lvl" -ge 4 ] || [ "$warn" -ge ${PRESSURE_SUSTAIN_TICKS} ]; then
       kill -9 -"$pgid" 2>/dev/null
       exit 0

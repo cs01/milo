@@ -1,0 +1,40 @@
+// An enum built at a call site and passed to a `&T` parameter used to leak its
+// payload: codegen registers argument temporaries for drop via isOwnedTempExpr, and
+// EnumLit was not in that list, so the temp had no name for scope-drop to find and
+// no entry in the temp registry. `renderResponse(Response.Text(body), hdrs)` in
+// std/http lost `body` on every call.
+//
+// This fixture only pins that the program still prints the right bytes; the leak
+// itself is caught by tests/leak-clean.txt, which is where the regression would show.
+
+enum Payload {
+    Text(string),
+    Empty,
+    Tagged(i32, string, string),
+}
+
+fn describe(p: &Payload): string {
+    match p {
+        Payload.Text(b) => {
+            return "text:" + b
+        }
+        Payload.Empty => {
+            return "empty"
+        }
+        Payload.Tagged(n, a, b) => {
+            return "tagged:" + n.toString() + a + b
+        }
+    }
+}
+
+// @expect: text:hi
+// @expect: empty
+// @expect: tagged:7ab
+fn main(): i32 {
+    var body: string = "h"
+    body.push('i')
+    print(describe(Payload.Text(body.clone())))
+    print(describe(Payload.Empty))
+    print(describe(Payload.Tagged(7, "a".clone(), "b".clone())))
+    return 0
+}

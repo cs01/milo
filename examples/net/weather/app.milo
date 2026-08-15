@@ -73,6 +73,29 @@ pub fn cityMatchesState(c: &City, stateQ: &string): bool {
     return c.state.toLower() == stateQ
 }
 
+// Every whitespace-separated token must appear somewhere in the key, in any
+// order. The Census name for a place is often not the name people type:
+// "Emerald Hills" is what the residents and USPS call the CDP that GNIS (and
+// therefore this TSV) records as "Emerald Lake Hills". The words are right,
+// they're just not adjacent, so startsWith and contains both miss it. Runs
+// only as a last backfill so the ranked passes above keep their ordering.
+pub fn keyHasAllTokens(key: &string, q: &string): bool {
+    var n = 0
+    for t in q.split(" ") {
+        let tok = t.trim()
+        if tok.len == 0 {
+            continue
+        }
+        if !key.contains(tok) {
+            return false
+        }
+        n = n + 1
+    }
+    // A one-token query already had its shot in the contains pass; only a
+    // multi-token query can find anything new here.
+    return n > 1
+}
+
 // Typeahead over US place names. Nominatim is a geocoder, not a search index —
 // it can't prefix-match ("red" never reaches Redwood City) — so the lookup that
 // actually drives the search box lives here.
@@ -113,6 +136,21 @@ pub fn citiesHandler(ctx: &mut Context): Response {
                 break
             }
             if !c.key.startsWith(q) && c.key.contains(q)
+            && cityMatchesState(c, stateQ) {
+                out.push(cityJson(c))
+            }
+        }
+    }
+
+    // Last resort: tokens present but not contiguous. Guarding on !contains(q)
+    // is enough to exclude both passes above, since a prefix hit is also a
+    // substring hit.
+    if out.len < MAX_SUGGESTIONS {
+        for c in cities {
+            if out.len >= MAX_SUGGESTIONS {
+                break
+            }
+            if !c.key.contains(q) && keyHasAllTokens(c.key, q)
             && cityMatchesState(c, stateQ) {
                 out.push(cityJson(c))
             }

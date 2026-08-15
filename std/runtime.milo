@@ -73,12 +73,20 @@ pub fn guardPageSize(): i64 {
     return 4096
 }
 
+// The main task's stack. `main` keeps running the same code once it becomes a
+// green task, and the OS main thread it used to run on gets 8 MB on darwin and
+// linux — so the 1 MB default green stack would fault a recursive-descent
+// parser that was fine as a plain `main`. Match the OS instead of the default.
+pub fn mainTaskStackSize(): i64 {
+    return 8388608
+}
+
 pub fn taskStructSize(): i64 {
     return 88
 }
 
 pub fn schedStructSize(): i64 {
-    return 80
+    return 88
 }
 
 // task field offsets
@@ -176,6 +184,13 @@ pub fn sXferHead(): i64 {
 // select fd/timer waiter list (scheduler thread only)
 pub fn sSelFdHead(): i64 {
     return 72
+}
+
+// A task parked inside schedulerRunToCompletion, waiting for every OTHER task
+// to finish. Woken by the reaper, not by an fd — "the task list is empty" is
+// not an event the poll can observe.
+pub fn sDrainWaiter(): i64 {
+    return 80
 }
 
 // ── select waiter node (48 bytes) ──
@@ -425,13 +440,22 @@ impl Task {
     // space rather than resident memory.
     fn spawnWithStack(f: () => void, stackBytes: i64): Task {
         unsafe {
-            schedulerEnsureInit()
-            let sched = getSched()
-
             var fnPtr: *u8 = 0 as *u8
             var envPtr: *u8 = 0 as *u8
             memcpy((fnPtr.addrOf()) as *u8, (f.addrOf()) as *u8, 8)
             memcpy((envPtr.addrOf()) as *u8, ((f.addrOf()) as i64 + 8) as *u8, 8)
+            return Task.spawnRaw(fnPtr, envPtr, stackBytes)
+        }
+    }
+
+    // The closure-free spine of spawnWithStack. `schedulerRunMainRaw` has a bare
+    // function pointer and no captures, and wrapping one in a closure just to
+    // unwrap it here would heap-allocate an environment that nothing frees —
+    // a leak on every program whose main runs as a green task.
+    fn spawnRaw(fnPtr: *u8, envPtr: *u8, stackBytes: i64): Task {
+        unsafe {
+            schedulerEnsureInit()
+            let sched = getSched()
 
             let task = malloc(taskStructSize())
             memset(task, 0, taskStructSize())
@@ -771,6 +795,34 @@ pub fn schedulerWaitWrite(fd: i32): void {
     enqueueWait(sched, task)
 
     swapcontext(rtReadPtr(task, tCtx()), rtReadPtr(sched, sCtx()))
+}
+
+// Run the program's `main` as a green task, given its raw entry pointer.
+//
+// Every blocking std call reads `schedulerCurrent()` to choose between parking
+// and blocking the OS thread. `main` was never a task, so that read returned 0
+// and each such call blocked the one thread the cooperative scheduler runs on —
+// starving the very tasks that would have satisfied it. A server that spawns its
+// workers and then accepts in `main` is the natural way to write one, and it
+// hung with no error and no timeout.
+//
+// Fixing it per-call-site does not work (see docs/backlog.md): the fix is to
+// leave the OS stack to the scheduler loop and give `main` a task of its own,
+// which is Go's g0/m0 split. `join` from main context already drives the
+// scheduler, so this is the whole change.
+//
+// Go exit semantics are unchanged: this returns as soon as `main` returns, and
+// any task still running dies with the process.
+//
+// Called only from generated code, and only when the program can actually
+// create green tasks — codegen emits the call after finding `Task.spawnWithStack`
+// reachable from `main`. A program that never spawns keeps the plain entry, so
+// it pays nothing and targets without stackful coroutines (wasm) stay buildable.
+pub fn schedulerRunMainRaw(fnPtr: *u8): void {
+    schedulerEnsureInit()
+    let t = Task.spawnRaw(fnPtr, 0 as *u8, mainTaskStackSize())
+    t.join()
+    schedulerShutdown()
 }
 
 pub fn schedulerCurrent(): *u8 {
@@ -1195,6 +1247,13 @@ fn reapTask(sched: *u8, task: *u8): void {
     if joiner as i64 != 0 {
         schedulerUnpark(joiner)
     }
+    // The drain waiter is itself a task, so it is waiting to be the last one
+    // left — not for the count to hit zero.
+    let drainer = rtReadPtr(sched, sDrainWaiter())
+    if drainer as i64 != 0 && rtReadI64(sched, sNumTasks()) <= 1 {
+        rtWritePtr(sched, sDrainWaiter(), 0 as *u8)
+        schedulerUnpark(drainer)
+    }
 }
 
 // Run one batch of ready tasks, then poll events once with `timeoutMs`
@@ -1303,11 +1362,43 @@ pub fn schedulerRunToCompletion(): void {
         return
     }
 
+    // `main` is itself a green task whenever the program can spawn one, and
+    // this was written for a `main` that was not. Both of its assumptions break
+    // there: the caller is on the task count, so "> 0" never clears, and
+    // schedulerBlockMain would swapcontext out of a task stack into the
+    // scheduler loop that is already running on it. Park until the reaper says
+    // we are the last task standing, and leave the scheduler up — we are still
+    // running on it, so the teardown below would free the ground we stand on.
+    let cur = schedulerCurrent()
+    if cur as i64 != 0 {
+        while rtReadI64(sched, sNumTasks()) > 1 {
+            rtWritePtr(sched, sDrainWaiter(), cur)
+            schedulerPark()
+        }
+        rtWritePtr(sched, sDrainWaiter(), 0 as *u8)
+        return
+    }
+
     while rtReadI64(sched, sNumTasks()) > 0 {
         schedulerBlockMain()
     }
 
-    // cleanup
+    schedulerShutdown()
+}
+
+// Release the scheduler itself: its context, its event loop (and the wakeup fd
+// registered on it), and the cross-thread transfer mutex.
+//
+// Exactly one caller runs this per program. For a `main` that is not a green
+// task that is schedulerRunToCompletion, as it always was. For one that is, the
+// drain returns while still running ON the scheduler — freeing there would pull
+// the ground out from under the caller — so the wrapper does it after the main
+// task has been reaped.
+fn schedulerShutdown(): void {
+    let sched = getSched()
+    if sched as i64 == 0 {
+        return
+    }
     free(rtReadPtr(sched, sCtx()))
     var el = eventLoopFromFd(rtReadI32(sched, sElFd()))
     eventLoopCloseWakeup(el, rtReadI32(sched, sWakeupId()))

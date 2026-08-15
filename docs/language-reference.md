@@ -3286,7 +3286,7 @@ for k in 0..8 {
 let sums = Promise.all(parts).await()!   // 8 threads, joined through one await
 ```
 
-Awaiting inside a green task is the normal case and keeps the scheduler running. Awaiting a `Promise.blocking` at the top level of `main` parks the main thread on the worker and does not simultaneously drive other green tasks — await from within a task (or use `schedulerRunToCompletion`) if you need concurrency during the wait.
+Awaiting inside a green task is the normal case and keeps the scheduler running. Awaiting at the top level of `main` does too: whenever a program can spawn, `main` itself runs as a green task, so an await there parks it and lets every other task run. (Before that, `main` was not a task, and awaiting in it blocked the one thread the scheduler runs on.)
 
 ### Channels
 
@@ -3315,7 +3315,7 @@ producer.await()!
 // no destroy: ch and chW free the queue when the last of them drops
 ```
 
-Here the producer is a `Promise.blocking` worker so it runs while `main` consumes. Between two green tasks the same channel works with no thread — but a green producer only runs when the scheduler is driven, so don't block `main` on a channel that only a green task fills (await inside a task, or drive with `schedulerRunToCompletion`).
+Here the producer is a `Promise.blocking` worker so it runs while `main` consumes. Between two green tasks the same channel works with no thread — and `main` may be one end of it: because `main` runs as a green task in any program that spawns, blocking it on a channel only a green producer fills parks it and runs the producer, rather than deadlocking as it once did.
 
 Call `close()` to signal no more values will be sent. Remaining items are delivered before iteration ends. `send()` on a closed channel returns `Result.Err`.
 

@@ -66,6 +66,17 @@ pub fn kindSelWrite(): i64
 
 _Undocumented._
 
+### `mainTaskStackSize`
+
+```milo
+pub fn mainTaskStackSize(): i64
+```
+
+The main task's stack. `main` keeps running the same code once it becomes a
+green task, and the OS main thread it used to run on gets 8 MB on darwin and
+linux — so the 1 MB default green stack would fault a recursive-descent
+parser that was fine as a plain `main`. Match the OS instead of the default.
+
 ### `nodeA`
 
 ```milo
@@ -284,6 +295,34 @@ timeout keeps the scheduler advancing while letting the caller re-check its
 own condition (the channel buffer) between ticks — forward progress with at
 most a few ms of latency and no busy-spin.
 
+### `schedulerRunMainRaw`
+
+```milo
+pub fn schedulerRunMainRaw(fnPtr: *u8): void
+```
+
+Run the program's `main` as a green task, given its raw entry pointer.
+
+Every blocking std call reads `schedulerCurrent()` to choose between parking
+and blocking the OS thread. `main` was never a task, so that read returned 0
+and each such call blocked the one thread the cooperative scheduler runs on —
+starving the very tasks that would have satisfied it. A server that spawns its
+workers and then accepts in `main` is the natural way to write one, and it
+hung with no error and no timeout.
+
+Fixing it per-call-site does not work (see docs/backlog.md): the fix is to
+leave the OS stack to the scheduler loop and give `main` a task of its own,
+which is Go's g0/m0 split. `join` from main context already drives the
+scheduler, so this is the whole change.
+
+Go exit semantics are unchanged: this returns as soon as `main` returns, and
+any task still running dies with the process.
+
+Called only from generated code, and only when the program can actually
+create green tasks — codegen emits the call after finding `Task.spawnWithStack`
+reachable from `main`. A program that never spawns keeps the plain entry, so
+it pays nothing and targets without stackful coroutines (wasm) stay buildable.
+
 ### `schedulerRunToCompletion`
 
 ```milo
@@ -354,6 +393,16 @@ pub fn sCurrent(): i64
 ```
 
 _Undocumented._
+
+### `sDrainWaiter`
+
+```milo
+pub fn sDrainWaiter(): i64
+```
+
+A task parked inside schedulerRunToCompletion, waiting for every OTHER task
+to finish. Woken by the reaper, not by an fd — "the task list is empty" is
+not an event the poll can observe.
 
 ### `selectRegisterFd`
 
@@ -573,6 +622,17 @@ return a handle to it. Returns immediately — the task does not run until
 the scheduler is driven (by a blocking IO op, `schedulerYield`, or a
 `join`). Each task gets its own guard-paged stack. Await completion with
 `task.join()`.
+
+### `Task.spawnRaw`
+
+```milo
+fn Task.spawnRaw(fnPtr: *u8, envPtr: *u8, stackBytes: i64): Task
+```
+
+The closure-free spine of spawnWithStack. `schedulerRunMainRaw` has a bare
+function pointer and no captures, and wrapping one in a closure just to
+unwrap it here would heap-allocate an environment that nothing frees —
+a leak on every program whose main runs as a green task.
 
 ### `Task.spawnWithStack`
 

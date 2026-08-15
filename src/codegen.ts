@@ -1279,6 +1279,102 @@ export class Codegen {
     return offset;
   }
 
+  // ── main-as-green-task ──
+  //
+  // Every blocking std call picks its strategy from `schedulerCurrent()`, and
+  // `main` was never a green task — so that read returned 0 and the call blocked
+  // the single OS thread the cooperative scheduler runs on, starving the tasks
+  // that would have satisfied it. `accept` in `main` with the peer in a
+  // `Task.spawn` hung forever, with no error and no timeout.
+  //
+  // The fix is to leave the OS stack to the scheduler loop and run `main` on a
+  // task of its own (Go's g0/m0 split), which is what `schedulerRunMainRaw`
+  // does. Emitting that unconditionally is not an option: it would pull the
+  // ucontext scheduler into every hello-world, and wasm/bare-metal have no
+  // stackful coroutines at all. So it is emitted only when the program can
+  // actually create a green task — `Task$spawnWithStack` reachable from `main`
+  // or from a global initializer.
+  //
+  // The reachability walk over-approximates on purpose (any name mentioned in a
+  // reachable body is an edge, which sweeps in closures), but it is not total:
+  // a spawn reached only through a function pointer this walk cannot follow
+  // would leave the program unwrapped — i.e. exactly today's behavior, a hang,
+  // never a miscompile.
+  private static readonly GREEN_SPAWN_FN = "Task$spawnWithStack";
+  private static readonly GREEN_RUN_MAIN_FN = "schedulerRunMainRaw";
+  // main's own body, once the entry point becomes the wrapper that runs it.
+  private static readonly MAIN_BODY_FN = "__milo_main_body";
+  // The `() => void` shape spawnWithStack calls it through, and where main's
+  // exit code is captured on the way out.
+  private static readonly MAIN_TASK_FN = "__milo_main_task";
+  private static readonly MAIN_EXIT_GLOBAL = "_milo_main_exit";
+  private wrapMainGreen = false;
+
+  private collectCallees(node: unknown, out: Set<string>): void {
+    if (!node || typeof node !== "object") return;
+    if (Array.isArray(node)) {
+      for (const child of node) this.collectCallees(child, out);
+      return;
+    }
+    const n = node as Record<string, unknown>;
+    if (n.kind === "Call" && typeof n.func === "string") out.add(n.func);
+    for (const v of Object.values(n)) this.collectCallees(v, out);
+  }
+
+  private mainCanSpawnGreenTasks(functions: HIRFunction[], initFn: HIRFunction | null): boolean {
+    // wasm's makecontext is an abort stub and bare metal has no scheduler at
+    // all: a program targeting them that spawns is already broken, and wrapping
+    // would break the ones that don't.
+    const os = this.target.os;
+    if (os !== "darwin" && os !== "linux" && os !== "windows") return false;
+    const byName = new Map(functions.map(f => [f.name, f]));
+    if (!byName.has(Codegen.GREEN_RUN_MAIN_FN)) return false;
+    // The wrapper calls the body with no arguments; a `main` that takes any
+    // would emit a call that does not match its callee.
+    if ((byName.get("main")?.params.length ?? 0) > 0) return false;
+    const seen = new Set<string>();
+    const stack = ["main"];
+    if (initFn) stack.push(initFn.name);
+    while (stack.length > 0) {
+      const name = stack.pop()!;
+      if (seen.has(name)) continue;
+      seen.add(name);
+      if (name === Codegen.GREEN_SPAWN_FN) return true;
+      const fn = byName.get(name);
+      if (!fn) continue;
+      const callees = new Set<string>();
+      this.collectCallees(fn.body, callees);
+      for (const c of callees) if (!seen.has(c)) stack.push(c);
+    }
+    return false;
+  }
+
+  // The real `@main` when main runs as a green task: it keeps the entry-point
+  // work that must happen on the OS stack (argc/argv, global init), hands the
+  // body to the scheduler, and returns whatever exit code the body produced.
+  private greenMainEntry(): string[] {
+    const lines: string[] = [];
+    lines.push(`define i32 @main(i32 %_milo_argc, ptr %_milo_argv) {`);
+    lines.push("entry.bb:");
+    lines.push("  store i32 %_milo_argc, ptr @_milo_argc_global");
+    lines.push("  store ptr %_milo_argv, ptr @_milo_argv_global");
+    if (this.needsGlobalInit) lines.push(`  call void @${GLOBAL_INIT_FN}()`);
+    lines.push(`  call void @${Codegen.GREEN_RUN_MAIN_FN}(ptr @${Codegen.MAIN_TASK_FN})`);
+    lines.push(`  %exit = load i32, ptr @${Codegen.MAIN_EXIT_GLOBAL}`);
+    lines.push("  ret i32 %exit");
+    lines.push("}");
+    lines.push("");
+    // spawnWithStack calls this through the closure ABI, which passes an env
+    // pointer this entry has no use for.
+    lines.push(`define internal void @${Codegen.MAIN_TASK_FN}(ptr %__env) {`);
+    lines.push("entry.bb:");
+    lines.push(`  %code = call i32 @${Codegen.MAIN_BODY_FN}()`);
+    lines.push(`  store i32 %code, ptr @${Codegen.MAIN_EXIT_GLOBAL}`);
+    lines.push("  ret void");
+    lines.push("}");
+    return lines;
+  }
+
   generate(module: HIRModule): string {
     // register struct layouts
     for (const s of module.structs) {
@@ -1423,6 +1519,9 @@ export class Codegen {
       isExtern: false,
       isVariadic: false,
     };
+
+    this.wrapMainGreen = this.mainCanSpawnGreenTasks(functions, initFn);
+    if (this.wrapMainGreen) this.emit(`@${Codegen.MAIN_EXIT_GLOBAL} = internal global i32 0`);
 
     // generate function bodies first (collects string constants, sets needsBoundsCheck)
     const fnBodies: string[][] = [];
@@ -1618,6 +1717,8 @@ export class Codegen {
       this.output.splice(1, 0, `declare ${retType} @${ext.name}(${paramTypes.join(", ")})`);
     }
 
+    if (this.wrapMainGreen) fnBodies.push(this.greenMainEntry());
+
     // append function bodies
     for (const body of fnBodies) {
       this.emit("");
@@ -1762,7 +1863,11 @@ export class Codegen {
       this.currentSubprogramId = this.diSubprogram(fn);
       this.currentSubprogramFileId = this.diFile(fn.sourceFile ?? this.filePath ?? "<unknown>");
     }
-    if (fn.name === "main") {
+    if (fn.name === "main" && this.wrapMainGreen) {
+      // The entry point is the wrapper (greenMainEntry); this is just its body,
+      // so argc/argv and the global-init call belong there, not here.
+      lines.push(`define internal ${ret} @${Codegen.MAIN_BODY_FN}(${params})${dbgAttr} {`);
+    } else if (fn.name === "main") {
       const mainParams = params ? `i32 %_milo_argc, ptr %_milo_argv, ${params}` : "i32 %_milo_argc, ptr %_milo_argv";
       lines.push(`define ${ret} @${fn.name}(${mainParams})${dbgAttr} {`);
     } else {
@@ -1779,7 +1884,7 @@ export class Codegen {
     // `entry` (a legal Milo identifier) would otherwise collide with the entry
     // block. A `.` can't appear in a Milo identifier, so `entry.bb` never clashes.
     lines.push("entry.bb:");
-    if (fn.name === "main") {
+    if (fn.name === "main" && !this.wrapMainGreen) {
       lines.push("  store i32 %_milo_argc, ptr @_milo_argc_global");
       lines.push("  store ptr %_milo_argv, ptr @_milo_argv_global");
       // after argc/argv: a global initializer may read them (argparse-style defaults)

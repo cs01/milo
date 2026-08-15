@@ -22,6 +22,12 @@ pub struct City {
     // name lowercased once at load; matching every keystroke against 17k
     // freshly-lowercased strings would dominate the request
     key: string,
+    // Lowercased alternates from the TSV's optional 6th column. The name a
+    // place is filed under and the name its residents say are often different
+    // words: this row's GNIS name is "Emerald Lake Hills", but everyone in San
+    // Mateo County — and the USPS — calls it Emerald Hills. Both have to find
+    // it; only the one people say gets displayed.
+    altKeys: Vec<string>,
 }
 
 // Populated by loadCities() at startup. Module scope only permits a
@@ -40,12 +46,22 @@ pub fn loadCities(): void {
         if f.len < 4 {
             continue
         }
+        var alts: Vec<string> = []
+        if f.len > 5 {
+            for a in f[5].split(";") {
+                let alt = a.trim()
+                if alt.len > 0 {
+                    alts.push(alt.toLower())
+                }
+            }
+        }
         cities.push(City {
             name: f[0].clone(),
             state: f[1].clone(),
             lat: f[2].clone(),
             lon: f[3].clone(),
             key: f[0].toLower(),
+            altKeys: alts,
         }
         )
     }
@@ -96,6 +112,44 @@ pub fn keyHasAllTokens(key: &string, q: &string): bool {
     return n > 1
 }
 
+// Each pass below runs over the display name and every alternate, so a place
+// is reachable by any name it goes by while still rendering as one row.
+pub fn cityStartsWith(c: &City, q: &string): bool {
+    if c.key.startsWith(q) {
+        return true
+    }
+    for k in c.altKeys {
+        if k.startsWith(q) {
+            return true
+        }
+    }
+    return false
+}
+
+pub fn cityContains(c: &City, q: &string): bool {
+    if c.key.contains(q) {
+        return true
+    }
+    for k in c.altKeys {
+        if k.contains(q) {
+            return true
+        }
+    }
+    return false
+}
+
+pub fn cityHasAllTokens(c: &City, q: &string): bool {
+    if keyHasAllTokens(c.key, q) {
+        return true
+    }
+    for k in c.altKeys {
+        if keyHasAllTokens(k, q) {
+            return true
+        }
+    }
+    return false
+}
+
 // Typeahead over US place names. Nominatim is a geocoder, not a search index —
 // it can't prefix-match ("red" never reaches Redwood City) — so the lookup that
 // actually drives the search box lives here.
@@ -126,7 +180,7 @@ pub fn citiesHandler(ctx: &mut Context): Response {
         if out.len >= MAX_SUGGESTIONS {
             break
         }
-        if c.key.startsWith(q) && cityMatchesState(c, stateQ) {
+        if cityStartsWith(c, q) && cityMatchesState(c, stateQ) {
             out.push(cityJson(c))
         }
     }
@@ -135,7 +189,7 @@ pub fn citiesHandler(ctx: &mut Context): Response {
             if out.len >= MAX_SUGGESTIONS {
                 break
             }
-            if !c.key.startsWith(q) && c.key.contains(q)
+            if !cityStartsWith(c, q) && cityContains(c, q)
             && cityMatchesState(c, stateQ) {
                 out.push(cityJson(c))
             }
@@ -150,7 +204,7 @@ pub fn citiesHandler(ctx: &mut Context): Response {
             if out.len >= MAX_SUGGESTIONS {
                 break
             }
-            if !c.key.contains(q) && keyHasAllTokens(c.key, q)
+            if !cityContains(c, q) && cityHasAllTokens(c, q)
             && cityMatchesState(c, stateQ) {
                 out.push(cityJson(c))
             }

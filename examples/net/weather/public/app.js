@@ -10,6 +10,9 @@ var defaultCity = "San Francisco";
 var currentLat = defaultLat;
 var currentLon = defaultLon;
 var currentCityLabel = "";
+// NWS radar site covering the current point, e.g. "KMUX" for the Bay Area.
+// Comes from /points, so it is only known once that call lands.
+var radarStation = "";
 
 var icons = {
   Sunny: "\u2600\uFE0F",
@@ -731,6 +734,9 @@ function showError(msg) {
 function fetchWeather(lat, lon, city, saveLoc) {
   currentLat = lat;
   currentLon = lon;
+  // Cleared up front: leaving the last place's station set would caption the
+  // new city with a radar site a few hundred miles away.
+  radarStation = "";
   heroEl.innerHTML =
     '<div class="loading">Loading' + (city ? " " + esc(city) : "") + "\u2026</div>";
   errorEl.textContent = "";
@@ -749,6 +755,7 @@ function fetchWeather(lat, lon, city, saveLoc) {
     .then(function (points) {
       var p = points.properties;
       locationTz = p.timeZone || "";
+      radarStation = p.radarStation || "";
       if (!city) {
         var rl = p.relativeLocation.properties;
         city = rl.city + ", " + rl.state;
@@ -1125,6 +1132,48 @@ function extrasHtml() {
 function renderExtras() {
   var slot = document.getElementById("extraTiles");
   if (slot) slot.innerHTML = extrasHtml();
+}
+
+// ── Radar ──
+// The RIDGE composite weather.gov serves is already a finished picture: base
+// map, coastline, county and highway lines, city labels, the dBZ colour scale
+// and the frame timestamp, all burned into one 600x550 image. So this frames
+// it rather than redrawing it — the geography in the panel is NWS's own.
+//
+// The station badge sits above the image rather than on it: the composite's
+// own top strip is the tornado / severe thunderstorm / flash flood warning
+// legend, and covering that to label the station trades real information for
+// decoration.
+//
+// Deliberately no "you are here" pin: RIDGE images carry no documented
+// projection or corner extent, so any marker would be placed by guesswork, and
+// a pin sitting one county off is worse than no pin on a radar view.
+function radarHtml() {
+  if (!radarStation) return "";
+  var st = encodeURIComponent(radarStation);
+  return (
+    '<div class="wx-divider">' +
+    '<div class="radar-head">' +
+    '<div class="wx-section-title">Radar</div>' +
+    '<div class="radar-badge"><span class="radar-dot"></span>NWS ' +
+    esc(radarStation) + "</div>" +
+    "</div>" +
+    '<div class="radar-frame">' +
+    '<img class="radar-img" src="https://radar.weather.gov/ridge/standard/' + st +
+    '_loop.gif" alt="National Weather Service ' + esc(radarStation) +
+    ' radar loop" loading="lazy" decoding="async" />' +
+    '<div class="radar-scan" aria-hidden="true"></div>' +
+    "</div>" +
+    '<div class="radar-note">Reflectivity loop, refreshed by NWS every few ' +
+    "minutes." +
+    "</div>" +
+    "</div>"
+  );
+}
+
+function renderRadar() {
+  var slot = document.getElementById("radarSlot");
+  if (slot) slot.innerHTML = radarHtml();
 }
 
 // ── Active NWS alerts ──
@@ -1718,6 +1767,7 @@ function render(city, forecast, hourlyData, grid, timeZone) {
     '<div class="wx-divider"><div class="wx-section-title">Next 24 hours</div>' + hourly + "</div>" +
     dHtml +
     '<div class="wx-divider"><div class="tiles">' + tiles + "</div></div>" +
+    '<div id="radarSlot">' + radarHtml() + "</div>" +
     "</div></div>";
 
   if (sunNext.at) {

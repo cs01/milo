@@ -22,7 +22,16 @@ if [ -n "$staged" ]; then
     done
 fi
 
-# 2. Deterministic lint + auto-fix on all staged files (scripts/lint.ts).
+# 2. Regenerate the docs/scripts.md index when a script is added, removed, or has its
+# purpose line edited. tests/scriptsDoc.test.ts fails CI on a stale index, and the way
+# that happens is adding a script and committing it without the doc — so fix it here
+# rather than let the author find out from a red build.
+if git diff --cached --name-only --diff-filter=ACMDR | grep -qE '^(scripts/|\.githooks/)'; then
+    bun run scripts/gen-scripts-doc.ts >/dev/null
+    git add -- docs/scripts.md
+fi
+
+# 3. Deterministic lint + auto-fix on all staged files (scripts/lint.ts).
 # Runs regardless of whether any .milo files are staged. Fixes are re-staged
 # inside lint.ts; an unfixable error exits non-zero and aborts the commit.
 bun run scripts/lint.ts --staged --fix

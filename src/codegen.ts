@@ -915,6 +915,10 @@ export class Codegen {
   }
 
   private needsDropCg(t: TypeKind): boolean {
+    // An owning closure holds a heap environment. It is droppable exactly because it is
+    // not Copy (src/types.ts isCopy): single ownership is what makes running a destructor
+    // on it sound, and until that landed, attaching one produced a use-after-free.
+    if (t.tag === "fn" && t.owning === true) return true;
     if (needsDrop(t)) return true;
     if (t.tag === "enum") return this.droppableEnums.has(t.name);
     if (t.tag === "struct") return this.structNeedsDrop(t.name);
@@ -5712,6 +5716,33 @@ export class Codegen {
     return [lines, v2, "%Vec"];
   }
 
+  // The destructor for one move closure's environment: drop every capture that owns
+  // something, then free the block. Emitted per closure SHAPE, because the capture list
+  // is known here and nowhere later — at the drop site all that is known is the static
+  // type `move (T) => R`, which says a closure owns something but not what.
+  //
+  // Returns null when nothing in the environment needs dropping AND the block would only
+  // need freeing — no: it always returns a name for a move closure, because the malloc'd
+  // block itself always needs freeing even when every capture is Copy.
+  private emitClosureEnvDrop(closureName: string, envStructTy: string, captures: { name: string; type: TypeKind }[]): string {
+    const name = `${closureName}_envdrop`;
+    const body: string[] = [];
+    body.push(`define internal void @${name}(ptr %env) {`);
+    body.push("entry.bb:");
+    for (let i = 0; i < captures.length; i++) {
+      if (!this.needsDropCg(captures[i].type)) continue;
+      const slot = this.nextTemp();
+      body.push(`  ${slot} = getelementptr ${envStructTy}, ptr %env, i32 0, i32 ${i + 1}`);
+      this.emitDropValue(body, slot, captures[i].type);
+    }
+    this.needsFree = true;
+    body.push("  call void @free(ptr %env)");
+    body.push("  ret void");
+    body.push("}");
+    this.closureBodies.push(body);
+    return name;
+  }
+
   private genClosure(expr: HIRExpr & { kind: "Closure" }, lines: string[]): Gen {
     const lt = this.llvmType(expr.type);
     const closureName = `__closure_${this.closureCounter++}`;
@@ -5721,10 +5752,14 @@ export class Codegen {
     const isMove = !!(expr as any).isMove;
     // by-ref closures: env holds ptrs to original allocas
     // move closures: env holds copies of captured values
+    // Slot 0 of every environment is the drop function; captures start at 1. A by-
+    // reference environment carries the slot too, holding null: without it, a by-ref
+    // closure passed to a `move` parameter would have its stack environment read as a
+    // header and whatever happened to be in the frame called as a destructor.
     const envStructTy = captures.length > 0
       ? (isMove
-        ? `{ ${captures.map(c => this.llvmType(c.type)).join(", ")} }`
-        : `{ ${captures.map(() => "ptr").join(", ")} }`)
+        ? `{ ptr, ${captures.map(c => this.llvmType(c.type)).join(", ")} }`
+        : `{ ptr, ${captures.map(() => "ptr").join(", ")} }`)
       : "{}";
 
     // save codegen state
@@ -5770,7 +5805,8 @@ export class Codegen {
       const cap = captures[i];
       const capTy = this.llvmType(cap.type);
       const gepPtr = this.nextTemp();
-      closureBody.push(`  ${gepPtr} = getelementptr ${envStructTy}, ptr %env, i32 0, i32 ${i}`);
+      // i + 1: slot 0 is the drop-function header (see envStructTy).
+      closureBody.push(`  ${gepPtr} = getelementptr ${envStructTy}, ptr %env, i32 0, i32 ${i + 1}`);
       if (isMove) {
         // move closure: env holds the value directly — treat as local alloca
         this.locals.set(cap.name, { type: capTy, typeKind: cap.type, mutable: cap.mutable, isRef: false });
@@ -5839,20 +5875,28 @@ export class Codegen {
     // at the call site: build env struct and closure pair
     if (captures.length > 0) {
       const envAddr = this.nextTemp();
+      // The header slot is part of the allocation, so it is sized in here too.
+      const envSize = this.structPayloadSize(["ptr", ...captures.map(c => this.llvmType(c.type))]);
       if (isMove) {
         // heap-allocate env for move closures (safe to send to other threads)
-        const envSize = this.structPayloadSize(captures.map(c => this.llvmType(c.type)));
-        lines.push(`  ${envAddr} = call ptr @malloc(i64 ${Math.max(envSize, 8)})`);
+        this.needsMalloc = true;
+        lines.push(`  ${envAddr} = call ptr @malloc(i64 ${Math.max(envSize, 16)})`);
       } else {
         lines.push(`  ${envAddr} = alloca ${envStructTy}`);
       }
+      // Slot 0: how to release this environment. A move closure owns its captures and
+      // the block itself; a by-reference one owns neither, and stores null.
+      const dropFnName = isMove ? this.emitClosureEnvDrop(closureName, envStructTy, captures) : null;
+      const hdrSlot = this.nextTemp();
+      lines.push(`  ${hdrSlot} = getelementptr ${envStructTy}, ptr ${envAddr}, i32 0, i32 0`);
+      lines.push(`  store ptr ${dropFnName === null ? "null" : `@${dropFnName}`}, ptr ${hdrSlot}`);
       for (let i = 0; i < captures.length; i++) {
         const cap = captures[i];
         const capAddr = this.localAddr(cap.name);
         const local = this.locals.get(cap.name);
         const capTy = this.llvmType(cap.type);
         const gepSlot = this.nextTemp();
-        lines.push(`  ${gepSlot} = getelementptr ${envStructTy}, ptr ${envAddr}, i32 0, i32 ${i}`);
+        lines.push(`  ${gepSlot} = getelementptr ${envStructTy}, ptr ${envAddr}, i32 0, i32 ${i + 1}`);
         if (isMove) {
           // copy the VALUE into the env
           const loaded = this.nextTemp();
@@ -11584,6 +11628,34 @@ export class Codegen {
   }
 
   private emitDropValue(lines: string[], allocaPtr: string, typeKind: TypeKind) {
+    // An owning closure is `{ ptr fn, ptr env }`, and the drop glue lives in the FIRST
+    // word of the environment rather than in a third word of the pair. That choice is
+    // what keeps a closure two words wide, so nothing that passes one around — call
+    // sites, the Task struct, `_callClosureVoid`, emit-js — has to change. The header is
+    // null for a by-reference closure (its environment is a stack slot in the frame that
+    // built it, and freeing that would corrupt the frame), and the whole environment is
+    // null for a closure that captured nothing — the two null checks are what let one
+    // drop path serve all three shapes.
+    if (typeKind.tag === "fn" && typeKind.owning === true) {
+      const pair = this.nextTemp(), env = this.nextTemp(), isEnv = this.nextTemp();
+      const dropFn = this.nextTemp(), hasDrop = this.nextTemp();
+      const callLabel = this.nextLabel("cldrop.call");
+      const midLabel = this.nextLabel("cldrop.mid");
+      const doneLabel = this.nextLabel("cldrop.done");
+      lines.push(`  ${pair} = load { ptr, ptr }, ptr ${allocaPtr}`);
+      lines.push(`  ${env} = extractvalue { ptr, ptr } ${pair}, 1`);
+      lines.push(`  ${isEnv} = icmp ne ptr ${env}, null`);
+      lines.push(`  br i1 ${isEnv}, label %${midLabel}, label %${doneLabel}`);
+      lines.push(`${midLabel}:`);
+      lines.push(`  ${dropFn} = load ptr, ptr ${env}`);
+      lines.push(`  ${hasDrop} = icmp ne ptr ${dropFn}, null`);
+      lines.push(`  br i1 ${hasDrop}, label %${callLabel}, label %${doneLabel}`);
+      lines.push(`${callLabel}:`);
+      lines.push(`  call void ${dropFn}(ptr ${env})`);
+      lines.push(`  br label %${doneLabel}`);
+      lines.push(`${doneLabel}:`);
+      return;
+    }
     if (typeKind.tag === "string") {
       this.needsFree = true;
       const old = this.nextTemp();

@@ -14,8 +14,10 @@ export interface WarningInfo {
 export const WARNINGS: WarningInfo[] = [
   { name: "bare-embedfile" },
   { name: "bare-targetos" },
+  { name: "borrow-that-clones" },
   { name: "index-clone", offByDefault: true },
   { name: "large-stack-array", offByDefault: true },
+  { name: "manual-option-default" },
   { name: "missing-interpolation" },
   { name: "nan-comparison" },
   { name: "shadows-stdlib-override" },
@@ -24,6 +26,7 @@ export const WARNINGS: WarningInfo[] = [
   { name: "unused-result" },
   { name: "unused-unsafe" },
   { name: "unused-variable" },
+  { name: "useless-forget" },
   { name: "unverified-extern", offByDefault: true },
 ];
 

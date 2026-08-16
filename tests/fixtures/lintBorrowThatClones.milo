@@ -1,0 +1,55 @@
+// Two shapes that read as work but are spelled-out versions of one std call.
+// `arenaWith` exists to BORROW without copying; a closure whose whole body is
+// `.clone()` throws the borrow away and is `arenaGet`. And a two-arm match over
+// an Option that only supplies a default is `??`.
+//
+// Both are warnings, not errors: the code is correct, just longer than it needs
+// to be. Compiled here so the fixture also proves the suggested rewrites agree.
+from "std/arena" import {
+    Arena, Handle, arenaWith, arenaGet
+}
+
+fn theLongWay(a: &Arena<string>, h: Handle<string>): string {
+    match arenaWith(a, h, (s: &string): string => {
+        return s.clone()
+    }
+    ) {
+        Some(s) => {
+            return s
+        }
+        None => {
+            return "<dangling>"
+        }
+    }
+}
+
+fn theShortWay(a: &Arena<string>, h: Handle<string>): string {
+    return arenaGet(a, h) ?? "<dangling>"
+}
+
+// Neither lint fires here: the Some arm does work rather than handing the
+// binding straight back, and the closure computes rather than cloning.
+fn notALint(a: &Arena<string>, h: Handle<string>): i64 {
+    match arenaWith(a, h, (s: &string): i64 => {
+        return s.len
+    }
+    ) {
+        Some(n) => {
+            return n + 1
+        }
+        None => {
+            return 0
+        }
+    }
+}
+
+fn main() {
+    var a: Arena<string> = Arena<string>.new()
+    let h = a.alloc("hello")
+    // @expect: hello hello 6
+    print(theLongWay(a, h) + " " + theShortWay(a, h) + " " + notALint(a, h).toString())
+    let gone = a.alloc("bye")
+    let _ = a.free(gone)
+    // @expect: <dangling> <dangling>
+    print(theLongWay(a, gone) + " " + theShortWay(a, gone))
+}

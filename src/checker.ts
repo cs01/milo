@@ -952,7 +952,12 @@ export class TypeChecker {
   private resolve(ty: MiloType): TypeKind {
     if (ty.isFn && ty.fnParams && ty.fnRet) {
       const tag = ty.isCFn ? "cfn" as const : "fn" as const;
-      return { tag, params: ty.fnParams.map(p => this.resolve(p)), ret: this.resolve(ty.fnRet) };
+      const fnTy = { tag, params: ty.fnParams.map(p => this.resolve(p)), ret: this.resolve(ty.fnRet) };
+      // `move (T) => R` — carry the ownership through. This is a SECOND place fn types are
+      // built (typeFromAst is the other); a declared parameter comes through here, so
+      // losing the flag here meant a `move` parameter typed as non-owning: it was not Copy
+      // at the call site but the callee never dropped it, so every capture leaked anyway.
+      return (ty as { isMoveFn?: boolean }).isMoveFn ? { ...fnTy, owning: true } : fnTy;
     }
     // type alias resolution
     const alias = this.typeAliases.get(ty.name);
@@ -6234,8 +6239,29 @@ export class TypeChecker {
     return this.setType(expr, { tag: "unknown" });
   }
 
+  // `arenaWith(a, h, (s: &T): T => { return s.clone() })` is `arenaGet(a, h)` written
+  // the long way. The closure form exists to BORROW the value without copying it; a
+  // body that immediately clones throws that borrow away, so the caller paid a closure,
+  // a callback and a nested match for the copy `get` would have handed them. Detected
+  // structurally — one param, one statement, and that statement is a bare
+  // `return <thatParam>.clone()` — so a closure doing anything else is untouched.
+  private lintBorrowThatClones(expr: ExprOf<"Call">): void {
+    if (expr.func !== "arenaWith") return;
+    const cb = expr.args[expr.args.length - 1];
+    if (!cb || cb.kind !== "Closure" || cb.params.length !== 1 || cb.body.length !== 1) return;
+    const only = cb.body[0]!;
+    const ret = only.kind === "Return" ? only.value : only.kind === "ExprStmt" ? only.expr : null;
+    if (!ret || ret.kind !== "MethodCall" || ret.method !== "clone" || ret.args.length !== 0) return;
+    if (ret.object.kind !== "Ident" || ret.object.name !== cb.params[0]!.name) return;
+    this.warn("borrow-that-clones",
+      `this 'arenaWith' closure only clones its argument, which is what 'arenaGet' already does`,
+      expr.span,
+      "replace the whole call with 'arenaGet(arena, handle)' (or 'arena.get(handle)') — it returns the same Option<T>");
+  }
+
   private checkCallExpr(expr: ExprOf<"Call">): TypeKind {
     const sp = expr.span;
+    this.lintBorrowThatClones(expr);
     // `old(e)` is contract-only syntax, not a function: it names the value `e` held when
     // the function was entered. Recognised before the name lookup so a body-local
     // helper actually called `old` keeps working outside an `ensures`.
@@ -6547,6 +6573,17 @@ export class TypeChecker {
     if (!sig) {
       const varInfo = localCallable;
       if (varInfo && (varInfo.type.tag === "fn" || varInfo.type.tag === "cfn")) {
+        // Calling a moved closure is a use like any other. This path never checked it,
+        // which was invisible while nothing released a closure environment — the call
+        // simply ran against memory still lying around. Once an owning closure has a
+        // destructor it is a genuine use-after-free: `Task.spawn(f)` moves `f` into the
+        // task, the task is reaped, and `f()` afterwards runs from a freed environment.
+        if (varInfo.moved) {
+          this.error(`use of moved variable '${expr.func}'`, sp,
+            varInfo.type.tag === "fn" && varInfo.type.owning === true
+              ? `'${expr.func}' is a 'move' closure and it was transferred earlier, so calling it here would run against an environment its new owner may already have released.`
+              : `ownership of '${expr.func}' was transferred earlier and it can no longer be used here.`);
+        }
         varInfo.read = true;
         const fnType = varInfo.type;
         if (expr.args.length !== fnType.params.length) {
@@ -8782,9 +8819,41 @@ export class TypeChecker {
     pattern.enumName = subjType.name;
   }
 
+  // `match opt { Some(x) => { x } None => { d } }` is `opt ?? d`. Both arms have to be a
+  // single statement of the same shape, the Some arm has to hand back its binding
+  // untouched, and the subject has to be an owned Option — a `&Option` or a place
+  // subject binds the payload as a borrow, where `??` would not be the same program.
+  // `??` is short-circuit like the match, so a default with side effects stays correct.
+  private lintManualOptionDefault(subject: Expr, arms: MatchArm[], subjType: TypeKind, sp: Span | undefined): void {
+    if (arms.length !== 2) return;
+    if (subjType.tag !== "enum" || this.optionInnerType(subjType) === null) return;
+    const armFor = (v: string) => arms.find(a => a.pattern.kind === "EnumPattern" && a.pattern.variant === v);
+    const some = armFor("Some");
+    const none = armFor("None") ?? arms.find(a => a.pattern.kind === "WildcardPattern");
+    if (!some || !none || some === none) return;
+    const binding = some.pattern.kind === "EnumPattern" ? some.pattern.bindings[0] : undefined;
+    if (!binding || some.body.length !== 1 || none.body.length !== 1) return;
+    const shape = (st: Stmt) => st.kind === "Return" ? { via: "return", e: st.value }
+      : st.kind === "ExprStmt" ? { via: "value", e: st.expr } : null;
+    const s1 = shape(some.body[0]!);
+    const s2 = shape(none.body[0]!);
+    if (!s1 || !s2 || s1.via !== s2.via) return;
+    if (!s1.e || !s2.e) return;
+    if (s1.e.kind !== "Ident" || s1.e.name !== binding) return;
+    this.warn("manual-option-default",
+      `this match only supplies a default for None`,
+      sp,
+      s1.via === "return"
+        ? "write 'return <option> ?? <default>' instead"
+        : "write '<option> ?? <default>' instead");
+  }
+
   private checkMatchLike(subject: Expr, arms: MatchArm[], sp: Span | undefined, fnRetType: TypeKind): TypeKind[] {
     const armTypes: TypeKind[] = [];
     const rawSubjType = this.checkExpr(subject);
+    if (rawSubjType.tag !== "ref" && subject.kind !== "FieldAccess" && subject.kind !== "IndexAccess") {
+      this.lintManualOptionDefault(subject, arms, rawSubjType, sp);
+    }
     {
       const t = rawSubjType.tag === "ref" ? rawSubjType.inner : rawSubjType;
       for (const arm of arms) this.bindElidedPattern(arm.pattern, t);

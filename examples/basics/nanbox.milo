@@ -49,12 +49,10 @@ impl Value {
     // recycled slot alias an old handle back into validity, which is the one
     // thing the generation counter exists to prevent.
     fn str(h: Handle<string>): Value {
-        let idx = h.index as i64
-        let gen = h.generation as i64
-        assert(idx >= 0 && idx <= 16777215, "nanbox: index exceeds 24-bit payload")
-        assert(gen >= 0 && gen <= 67108863, "nanbox: generation exceeds 26-bit payload")
+        assert(h.index >= 0 && h.index <= 16777215, "nanbox: index exceeds 24-bit payload")
+        assert(h.generation >= 0 && h.generation <= 67108863, "nanbox: generation exceeds 26-bit payload")
         return Value {
-            bits: SIGN | QNAN | ((gen as u64) << 24) | (idx as u64)
+            bits: SIGN | QNAN | ((h.generation as u64) << 24) | (h.index as u64)
         }
     }
 

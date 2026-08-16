@@ -1,3 +1,4 @@
+// @skip-os: win32
 // @expect: roundtrip=[secret msg]
 // @expect: short-key rejected
 // @expect: short-tag rejected
@@ -7,6 +8,10 @@
 // --debug and DROPPED at the default -O2 — so a short key read past the end of the
 // caller's buffer in an ordinary build and "encrypted" with whatever followed it. An
 // out-of-bounds read reachable from safe Milo through a pub std API.
+//
+// Skipped on Windows because that arm has no AES to guard: the MSVC CRT provides no
+// C-linkable AES-GCM, so std/crypto.windows aborts by design (aesUnsupported). There is
+// no pointer handed to C there, and so no length to check.
 //
 // The lengths are checked at runtime now, so the guard holds in a release build. Both bad
 // cases here are derived at RUNTIME on purpose: a literal short key is caught by the

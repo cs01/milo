@@ -6278,6 +6278,28 @@ export class TypeChecker {
       this.offsetOfFields.set(expr, fieldName);
       return this.setType(expr, { tag: "int", bits: 64, signed: true });
     }
+    // `forget(x)` — end x's ownership WITHOUT running its drop. The one operation the
+    // move checker cannot otherwise express: every other way of consuming a value either
+    // drops it or hands it to something that will. It exists for the seams where
+    // ownership leaves through a raw pointer and the checker cannot see it go — a
+    // closure environment memcpy'd into a scheduler task, a buffer handed to C — where
+    // the alternative is a double free (the drop runs anyway) or a leak dressed up as
+    // safety. Deliberately not `unsafe`: forgetting a value is memory-SAFE (leaking is
+    // safe), it is merely usually wrong, and requiring `unsafe` here would push callers
+    // toward wrapping a whole region rather than this one call.
+    if (expr.func === "forget" && !this.functions.has("forget")) {
+      if (expr.args.length !== 1) {
+        this.error(`'forget' takes exactly one argument`, sp);
+        return this.setType(expr, { tag: "void" });
+      }
+      const t = this.checkExpr(expr.args[0]);
+      if (isCopy(t, (n) => this.isAllCopyEnum(n), (n) => this.isAllCopyStruct(n))) {
+        this.warn("useless-forget", `'forget' on a Copy value does nothing`, sp,
+          `${typeName(t)} owns no resource, so there is no drop to suppress`);
+      }
+      this.tryMove(expr.args[0]);
+      return this.setType(expr, { tag: "void" });
+    }
     if (expr.func === "zeroed") {
       if (!expr.typeArgs || expr.typeArgs.length !== 1) { this.error(`zeroed requires exactly one type argument`, sp); return this.setType(expr, { tag: "unknown" }); }
       if (expr.args.length !== 0) { this.error(`zeroed takes no value arguments`, sp); return this.setType(expr, { tag: "unknown" }); }

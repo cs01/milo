@@ -391,6 +391,7 @@ let s = identity("hello")  // T inferred as string
 | `exit(code)` | Exit the process |
 | `replace(place, value)` | Store `value` into a mutable `place`, returning its old contents. Move-in/move-out — needs no `clone`, works on non-copyable types |
 | `swap(a, b)` | Exchange two mutable places of the same type. Move-only, no `clone` |
+| `forget(x)` | Consume `x` WITHOUT running its drop. For seams where ownership leaves through a raw pointer the checker cannot see — the alternative there is a double free or a leak. Memory-safe (leaking is safe), so it needs no `unsafe`; it is merely usually wrong |
 | `jsonStringify(val)` | Serialize a flat struct (scalar fields only) to JSON string |
 | `@embedFile(path)` | Embed file contents as string at compile time (see [Compile-Time File Embedding](#compile-time-file-embedding)) |
 | `@targetOs()` | Compile-time OS string (`"darwin"`/`"linux"`/`"windows"`); folds `if` branches (see [Compile-Time Target OS](#compile-time-target-os)) |

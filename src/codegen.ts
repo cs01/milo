@@ -660,7 +660,7 @@ export class Codegen {
     this.usedDbgDeclare = true;
   }
 
-  // The dot is load-bearing: a parameter named `t0` is emitted as the LLVM value
+  // The dot is required: a parameter named `t0` is emitted as the LLVM value
   // `%t0` (see the param prologue), so a bare `%t${n}` counter collides with it
   // and LLVM rejects the module with "multiple definition of local value". Milo
   // identifiers cannot contain `.`, so this prefix cannot be reached from source.
@@ -4751,6 +4751,8 @@ export class Codegen {
         return this.genEnumTryFrom(expr, lines);
       case "MemSwap":
         return this.genMemSwap(expr, lines);
+      case "Forget":
+        return this.genForget(expr, lines);
       case "Cast":
         return this.genCast(expr, lines);
       case "IsCheck": {
@@ -5583,6 +5585,31 @@ export class Codegen {
     const out = this.nextTemp();
     lines.push(`  ${out} = load ${optTy}, ptr ${res}`);
     return [lines, out, optTy];
+  }
+
+  // `forget(x)` — end x's ownership without running its drop.
+  //
+  // For a named place that is exactly the bookkeeping every other transfer does: zero the
+  // slot and clear its alive flag, so scope exit walks past it. The difference from a real
+  // transfer is only that nothing on the other end will ever free it, which is the point —
+  // it is for seams where ownership left through a raw pointer the checker cannot see.
+  // Anything that is not a named place is still evaluated, for its side effects.
+  private genForget(expr: HIRExpr & { kind: "Forget" }, lines: string[]): Gen {
+    const v = expr.value;
+    const named = v.kind === "Ident" && this.locals.has(v.name);
+    if (named) {
+      const [pl, ptr] = this.genLValue(v);
+      lines.push(...pl);
+      if (ptr !== "null") {
+        lines.push(this.zeroStore(this.llvmType(v.type), ptr));
+        const dl = this.droppableLocals.find(d => d.addr === ptr);
+        if (dl) lines.push(`  store i1 0, ptr ${dl.aliveFlag}`);
+        return [lines, "", "void"];
+      }
+    }
+    const [el] = this.genExpr(v);
+    lines.push(...el);
+    return [lines, "", "void"];
   }
 
   private genMemSwap(expr: HIRExpr & { kind: "MemSwap" }, lines: string[]): Gen {

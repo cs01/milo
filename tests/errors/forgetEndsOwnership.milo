@@ -1,0 +1,9 @@
+// `forget` consumes its argument like any other transfer — the value is gone, it is only
+// the drop that does not run. Reading it afterwards is the same use-after-move as any.
+// @error: use of moved variable 's'
+fn main() {
+    var s = "heap"
+    s.pushStr("-buffer")
+    forget(s)
+    print(s)
+}

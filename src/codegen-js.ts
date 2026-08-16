@@ -785,6 +785,12 @@ export class CodegenJS {
         const place = this.genPlaceAccess(expr.place);
         return `((_n) => { const _o = ${place.read}; ${place.write("_n")}; return _o; })(${this.genExpr(expr.value)})`;
       }
+      case "Forget": {
+        // JS is garbage collected, so there is no drop to suppress — `forget` is only
+        // ever a no-op here. The operand is still evaluated for its side effects, which
+        // is the whole of its observable behaviour on this target.
+        return `(() => { ${this.genExpr(expr.value)}; })()`;
+      }
       case "MemSwap": {
         // swap(a, b): exchange two places, yielding nothing.
         const a = this.genPlaceAccess(expr.a);

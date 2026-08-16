@@ -36,6 +36,9 @@ export type HIRExpr =
   // `replace(place, value)`: stores `value` into `place` WITHOUT dropping the old occupant
   // (it is moved out and returned instead). `type` is the moved-out value's type.
   | { kind: "MemReplace"; place: HIRExpr; value: HIRExpr; type: TypeKind; span?: Span }
+  // `forget(x)` — evaluate x, then drop nothing. The move is already recorded on the
+  // operand, so the source slot is zeroed exactly as any other transfer would.
+  | { kind: "Forget"; value: HIRExpr; type: TypeKind; span?: Span }
   // `swap(a, b)`: exchanges two places in place; drops nothing. `type` is void.
   | { kind: "MemSwap"; a: HIRExpr; b: HIRExpr; type: TypeKind; span?: Span }
   // `Kind.tryFrom(n)` on a repr'd enum → Option<Kind>. `Some(variant)` when `value` equals

@@ -1916,6 +1916,16 @@ export class TypeChecker {
               this.error(`'@externalLinkage' on extern fn '${fn.name}' — extern declares a function defined elsewhere, so there is no definition here to give linkage to`, undefined,
                 `drop '@externalLinkage', or remove 'extern' if you meant to define it`);
             }
+            // Legal, and occasionally exactly right: a fn nothing in Milo references,
+            // resolved only by a dlopen'd library against this executable. So a warning,
+            // never an error. But the pairing is more often a slip — the author wanted
+            // "visible from outside" and reached for the linkage attribute instead of
+            // `pub`, or had both and dropped the `pub`. The two live in unrelated domains
+            // (module graph vs C linker) and nothing else flags them disagreeing.
+            else if (!fn.isPub && this.currentFnIsUser) {
+              this.warn("external-linkage-not-pub", `'@externalLinkage' on non-pub fn '${fn.name}'`, fn.span,
+                `'@externalLinkage' is a C-linker concern and does not make '${fn.name}' importable from Milo — add 'pub' if that is what you meant, and keep both if a dlopen'd library resolves this symbol`);
+            }
           }
           else if (attr.name === "link") {
             if (!fn.isExtern) {

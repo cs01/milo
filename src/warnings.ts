@@ -14,6 +14,7 @@ export interface WarningInfo {
 export const WARNINGS: WarningInfo[] = [
   { name: "bare-embedfile" },
   { name: "bare-targetos" },
+  { name: "external-linkage-not-pub" },
   { name: "borrow-that-clones" },
   { name: "index-clone", offByDefault: true },
   { name: "large-stack-array", offByDefault: true },

@@ -4201,6 +4201,15 @@ export class Codegen {
       // of a Copy payload is just a value copy — nothing to zero.
       if (!subjectIsRef && this.needsDropCg(fieldKind)) {
         lines.push(this.zeroStore(ty, fieldPtr));
+        // The binding now owns the payload, so the SUBJECT must stop being dropped.
+        // Zeroing the payload is not enough on its own: it makes the subject's glue
+        // free a null pointer (a no-op, which is why heap payloads looked fine), but a
+        // user `Drop` impl runs regardless and gets a zeroed value. For `Socket { fd:
+        // i32 }` in std/http that is `close(0)` — closing stdin — on a socket that was
+        // already moved out. Cleared HERE, inside the consuming arm, because an arm
+        // that binds nothing leaves the subject intact and must still drop it.
+        const subjLocal = this.droppableLocals.find(d => d.addr === subjAddr);
+        if (subjLocal) lines.push(`  store i1 0, ptr ${subjLocal.aliveFlag}`);
       }
       const addr = `%${name}.${uid}.addr`;
       lines.push(`  ${addr} = alloca ${ty}`);

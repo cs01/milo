@@ -1,0 +1,39 @@
+// A payload moved out of an enum by a pattern must leave the SUBJECT dead. Zeroing the
+// payload is not enough on its own: it makes the subject's drop glue free a null pointer
+// (a no-op, which is why heap payloads looked correct), but a user `Drop` impl runs
+// regardless and receives a zeroed value.
+//
+// So `Res { id: 1 }` used to drop TWICE — once as the binding, once as the moved-from
+// subject, printing `drop 0`. std/http's `Socket { fd: i32 }` is exactly this shape, and
+// there the spurious second drop is `close(0)`: closing stdin on a socket already moved
+// away. Only types whose fields are all Copy showed it, because a heap field's second
+// free was silently a no-op.
+struct Res {
+    id: i64,
+}
+
+impl Drop for Res {
+    fn drop(self: &mut Self): void {
+        print("drop ", self.id)
+    }
+}
+
+fn main() {
+    var o: Option<Res> = Option.Some(Res {
+        id: 1
+    }
+    )
+    match o {
+        Option.Some(r) => {
+            print("got ", r.id)
+        }
+        Option.None => {
+            print("none")
+        }
+    }
+    print("after")
+}
+
+// @expect: got 1
+// @expect: drop 1
+// @expect: after

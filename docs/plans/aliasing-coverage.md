@@ -36,6 +36,28 @@ and `Vec<&T>` bypassing second-class references.
 The cost is asymmetric here: "no use-after-free in safe code" is the product. A missed
 spelling is not a papercut, it is the guarantee failing.
 
+## A sibling class: checker and codegen disagreeing
+
+Probing the spellings above turned up a second shape worth naming separately, because the
+gate for it is different. Here both sides had a rule, and the rules disagreed:
+
+- The checker treats a pattern-consumed enum subject as **moved** (`match o { Some(r) => …}`
+  then using `o` is rejected as use-after-move).
+- Codegen zeroed the payload but left the SUBJECT's drop glue armed, so a user `Drop` impl
+  ran a second time on the zeroed value.
+
+Only types whose fields are all Copy showed it: a heap field's second free is a no-op on a
+zeroed pointer, which is why it hid for so long. `std/http`'s `Socket { fd: i32 }` is
+exactly this shape, and there the spurious second drop is `close(0)` — closing stdin on a
+socket that was already moved away. `std/mem`'s `MappedMemory { ptr: i64, len: i64 }` is
+the same shape. Fixed 2026-08-16 by clearing the subject's alive flag inside the consuming
+arm; locked by `tests/fixtures/matchConsumesSubjectDrop.milo`.
+
+The lesson for Phase 2: routing every rule through `placesOf` fixes the checker's half of
+this class and nothing else. Where codegen re-derives an ownership fact the checker already
+computed, the two drift, and the drift is invisible to a suite that only checks whether a
+program is accepted. Drop counts, not accept/reject, are what catches it.
+
 ## What already exists
 
 `placesOf(e: Expr): Place[]` in `src/checker.ts` is the right primitive and is already

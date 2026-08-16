@@ -51,6 +51,8 @@ const FAITHFUL: { name: string; ty: string; value: string; use: string }[] = [
   { name: "Vec of Vecs", ty: "Vec<Vec<i64>>", value: "Vec.new()", use: "print(x.len)" },
   { name: "fixed array of a generic", ty: "[Vec<i64>; 2]", value: "[Vec.new(), Vec.new()]", use: "print(x[0].len)" },
   { name: "HashMap", ty: "HashMap<string, i64>", value: "HashMap.new()", use: "print(x.len)" },
+  { name: "Vec.filled with a matching value", ty: "Vec<i64>", value: "Vec.filled(3, 7)", use: "print(x[0])" },
+  { name: "array repeat with a matching value", ty: "[i64; 3]", value: "[7; 3]", use: "print(x[2])" },
 ];
 
 describe("a representable annotation compiles and means itself", () => {
@@ -69,6 +71,10 @@ const MISMATCHED: { name: string; ty: string; value: string }[] = [
   { name: "array of references", ty: "[&string; 2]", value: `["x", "y"]` },
   { name: "string literal for an int array", ty: "[i64; 2]", value: `["a", "b"]` },
   { name: "wrong element type in a Vec", ty: "Vec<i64>", value: `["a"]` },
+  // Constructor forms reach the element through a different path than a literal does, and
+  // that path had the identical discard: the value was hint-checked and the answer dropped.
+  { name: "wrong fill value in Vec.filled", ty: "Vec<i64>", value: `Vec.filled(3, "a")` },
+  { name: "wrong repeated element", ty: "[i64; 3]", value: `["x"; 3]` },
 ];
 
 describe("a value of the wrong shape does not satisfy an annotation", () => {

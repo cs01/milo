@@ -6072,7 +6072,13 @@ export class TypeChecker {
       else {
         const c = this.checkExpr(expr.args[0]);
         if (c.tag !== "int" && c.tag !== "unknown") this.error(`'Vec.filled': count must be an integer, got ${typeName(c)}`, expr.span);
-        this.checkExprWithHint(expr.args[1], hint.element);
+        // Same discard as the array literals: the fill value was hint-checked and the
+        // answer dropped, so `Vec<i64> = Vec.filled(3, "a")` reached clang as `%String`
+        // where an `i64` was expected.
+        const fillType = this.checkExprWithHint(expr.args[1], hint.element);
+        if (!this.elementFits(fillType, hint.element, expr.args[1])) {
+          this.error(`'Vec.filled' value has type ${typeName(fillType)}, but the Vec is declared ${typeName(hint)}`, expr.args[1].span);
+        }
         // The value is copied into every slot, so it must be Copy — otherwise
         // N slots would alias one heap buffer and free it N times.
         if (!isCopy(hint.element, (n) => this.isAllCopyEnum(n), (n) => this.isAllCopyStruct(n))) {

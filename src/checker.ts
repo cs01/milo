@@ -116,6 +116,12 @@ export interface VarInfo {
   // sees the new value); a loop ITERATION does not, because the loop is handing out that
   // element and rewriting it mid-loop is the invalidation the rule exists to stop.
   borrowKinds?: BorrowKind[];
+  // Bound by a MATCH/if-let pattern rather than by a `let`/`var` declaration. Assignment
+  // to one is rejected like any other immutable binding, but the generic advice ("declare
+  // with 'var'") names a declaration the reader cannot find: there is no `let` here, and
+  // no spelling of the pattern makes the binding mutable. Recorded so the diagnostic can
+  // say what actually works instead.
+  patternBound?: boolean;
   // An unannotated `let x = <const-int-value>` whose width is still adaptable:
   // its value is built entirely from integer literals (directly, or as the arm
   // tails of an if/match expression), so it can be re-typed to a wider int on
@@ -4181,7 +4187,14 @@ export class TypeChecker {
       case "Assign": {
         const targetInfo = this.resolveAssignTarget(stmt.target);
         if (!targetInfo.mutable) {
-          this.error(`cannot assign to immutable variable '${this.describeExpr(stmt.target)}'`, sp, `declare with 'var' instead of 'let' to make it mutable`);
+          // A pattern binding has no declaration to change, so the generic advice would
+          // send the reader looking for a `let` that does not exist. Rebuilding the
+          // variant is the move that works, and it costs no clone.
+          const tgtInfo = stmt.target.kind === "Ident" ? this.lookup(stmt.target.name) : null;
+          this.error(`cannot assign to immutable variable '${this.describeExpr(stmt.target)}'`, sp,
+            tgtInfo?.patternBound
+              ? `'${this.describeExpr(stmt.target)}' is bound by a pattern, and no spelling of the pattern makes it mutable. Assign a rebuilt value to the matched variable instead (e.g. 'n = Node.Leaf(v + 1)')`
+              : `declare with 'var' instead of 'let' to make it mutable`);
           break;
         }
         // Assignment puts a value back, so whatever was moved out of this place is
@@ -4589,7 +4602,7 @@ export class TypeChecker {
             this.patternBindingTypes.set(stmt.pattern, bindTypes);
             for (let i = 0; i < Math.min(stmt.pattern.bindings.length, variant.fields.length); i++) {
               const bindSpan = stmt.pattern.bindingSpans?.[i] ?? stmt.pattern.span;
-              this.declare(stmt.pattern.bindings[i], { type: bindTypes[i], mutable: false, moved: false, borrowed: false, read: false, span: bindSpan,
+              this.declare(stmt.pattern.bindings[i], { type: bindTypes[i], mutable: false, moved: false, borrowed: false, read: false, span: bindSpan, patternBound: true,
                 copyBind: this.isCopyBind(bindTypes[i], this.isPlaceExpr(stmt.subject)) });
             }
           }
@@ -4660,7 +4673,7 @@ export class TypeChecker {
             // Bindings escape into the CURRENT scope (the whole point vs if-let).
             for (let i = 0; i < Math.min(stmt.pattern.bindings.length, variant.fields.length); i++) {
               const bindSpan = stmt.pattern.bindingSpans?.[i] ?? stmt.pattern.span;
-              this.declare(stmt.pattern.bindings[i], { type: bindTypes[i], mutable: false, moved: false, borrowed: false, read: false, span: bindSpan,
+              this.declare(stmt.pattern.bindings[i], { type: bindTypes[i], mutable: false, moved: false, borrowed: false, read: false, span: bindSpan, patternBound: true,
                 copyBind: this.isCopyBind(bindTypes[i], this.isPlaceExpr(stmt.value)) });
             }
           }
@@ -9174,7 +9187,7 @@ export class TypeChecker {
               }
               bindTypes.push(bt);
               const bindSpan = arm.pattern.bindingSpans?.[i] ?? arm.pattern.span;
-              this.declare(arm.pattern.bindings[i], { type: bt, mutable: false, moved: false, borrowed: false, read: false, span: bindSpan,
+              this.declare(arm.pattern.bindings[i], { type: bt, mutable: false, moved: false, borrowed: false, read: false, span: bindSpan, patternBound: true,
                 copyBind: this.isCopyBind(bt, this.isPlaceExpr(subject)) });
             }
             this.patternBindingTypes.set(arm.pattern, bindTypes);

@@ -7788,6 +7788,7 @@ export class TypeChecker {
         if (!inner) return this.setType(expr, { tag: "unknown" });
         const cbHint: TypeKind = { tag: "fn", params: [{ tag: "ref", inner, mutable: false }], ret: { tag: "unknown" } };
         const cbType = this.checkExprWithHint(expr.args[0], cbHint);
+        this.checkCallbackSig(cbType, cbHint, "map", sp);
         if (cbType.tag !== "fn") {
           this.error(`'map' argument must be a function`, sp);
           return this.setType(expr, { tag: "unknown" });
@@ -7811,6 +7812,7 @@ export class TypeChecker {
         if (inner) {
           const cbHint: TypeKind = { tag: "fn", params: [], ret: inner };
           const cbType = this.checkExprWithHint(expr.args[0], cbHint);
+          this.checkCallbackSig(cbType, cbHint, "unwrapOrElse", sp);
           if (cbType.tag !== "fn") {
             this.error(`'unwrapOrElse' argument must be a function`, sp);
             return this.setType(expr, inner);
@@ -7835,6 +7837,7 @@ export class TypeChecker {
         if (!inner) return this.setType(expr, { tag: "unknown" });
         const cbHint: TypeKind = { tag: "fn", params: [{ tag: "ref", inner, mutable: false }], ret: { tag: "unknown" } };
         const cbType = this.checkExprWithHint(expr.args[0], cbHint);
+        this.checkCallbackSig(cbType, cbHint, "andThen", sp);
         if (cbType.tag !== "fn") {
           this.error(`'andThen' argument must be a function`, sp);
           return this.setType(expr, { tag: "unknown" });
@@ -7856,6 +7859,7 @@ export class TypeChecker {
         if (!inner) return this.setType(expr, { tag: "unknown" });
         const cbHint: TypeKind = { tag: "fn", params: [], ret: objType };
         const cbType = this.checkExprWithHint(expr.args[0], cbHint);
+        this.checkCallbackSig(cbType, cbHint, "orElse", sp);
         if (cbType.tag !== "fn") {
           this.error(`'orElse' argument must be a function`, sp);
           return this.setType(expr, objType);
@@ -7909,6 +7913,7 @@ export class TypeChecker {
         if (!inner || !errT) return this.setType(expr, { tag: "unknown" });
         const cbHint: TypeKind = { tag: "fn", params: [{ tag: "ref", inner, mutable: false }], ret: { tag: "unknown" } };
         const cbType = this.checkExprWithHint(expr.args[0], cbHint);
+        this.checkCallbackSig(cbType, cbHint, "map", sp);
         if (cbType.tag !== "fn") {
           this.error(`'map' argument must be a function`, sp);
           return this.setType(expr, { tag: "unknown" });
@@ -7930,6 +7935,7 @@ export class TypeChecker {
         if (!inner || !errT) return this.setType(expr, { tag: "unknown" });
         const cbHint: TypeKind = { tag: "fn", params: [{ tag: "ref", inner: errT, mutable: false }], ret: { tag: "unknown" } };
         const cbType = this.checkExprWithHint(expr.args[0], cbHint);
+        this.checkCallbackSig(cbType, cbHint, "mapErr", sp);
         if (cbType.tag !== "fn") {
           this.error(`'mapErr' argument must be a function`, sp);
           return this.setType(expr, { tag: "unknown" });
@@ -7952,6 +7958,7 @@ export class TypeChecker {
         if (!inner || !errT) return this.setType(expr, { tag: "unknown" });
         const cbHint: TypeKind = { tag: "fn", params: [{ tag: "ref", inner, mutable: false }], ret: { tag: "unknown" } };
         const cbType = this.checkExprWithHint(expr.args[0], cbHint);
+        this.checkCallbackSig(cbType, cbHint, "andThen", sp);
         if (cbType.tag !== "fn") {
           this.error(`'andThen' argument must be a function`, sp);
           return this.setType(expr, { tag: "unknown" });
@@ -7985,6 +7992,7 @@ export class TypeChecker {
         if (inner && errT) {
           const cbHint: TypeKind = { tag: "fn", params: [{ tag: "ref", inner: errT, mutable: false }], ret: inner };
           const cbType = this.checkExprWithHint(expr.args[0], cbHint);
+          this.checkCallbackSig(cbType, cbHint, "unwrapOrElse", sp);
           if (cbType.tag !== "fn") {
             this.error(`'unwrapOrElse' argument must be a function`, sp);
             return this.setType(expr, inner);
@@ -8009,6 +8017,7 @@ export class TypeChecker {
         if (!inner || !errT) return this.setType(expr, { tag: "unknown" });
         const cbHint: TypeKind = { tag: "fn", params: [{ tag: "ref", inner: errT, mutable: false }], ret: { tag: "unknown" } };
         const cbType = this.checkExprWithHint(expr.args[0], cbHint);
+        this.checkCallbackSig(cbType, cbHint, "orElse", sp);
         if (cbType.tag !== "fn") {
           this.error(`'orElse' argument must be a function`, sp);
           return this.setType(expr, { tag: "unknown" });
@@ -8173,6 +8182,7 @@ export class TypeChecker {
         const cbHint: TypeKind = { tag: "fn", params: [elemRef], ret: { tag: "unknown" } };
         const cbBorrow = this.borrowDuringCallback(expr.object);
         const cbType = this.checkExprWithHint(expr.args[0], cbHint);
+        this.checkCallbackSig(cbType, cbHint, "map", sp);
         if (cbBorrow) this.unfreeze(cbBorrow);
         if (cbType.tag !== "fn") { this.error(`'map' argument must be a function`, sp); return this.setType(expr, { tag: "unknown" }); }
         return this.setType(expr, { tag: "vec", element: cbType.ret });
@@ -8183,6 +8193,7 @@ export class TypeChecker {
         const cbHint: TypeKind = { tag: "fn", params: [elemRef], ret: { tag: "bool" } };
         const cbBorrow = this.borrowDuringCallback(expr.object);
         const cbType = this.checkExprWithHint(expr.args[0], cbHint);
+        this.checkCallbackSig(cbType, cbHint, "filter", sp);
         if (cbBorrow) this.unfreeze(cbBorrow);
         if (cbType.tag !== "fn") { this.error(`'filter' argument must be a function`, sp); return this.setType(expr, { tag: "unknown" }); }
         return this.setType(expr, { tag: "vec", element: objType.element });
@@ -8192,7 +8203,8 @@ export class TypeChecker {
         const elemRef: TypeKind = { tag: "ref", inner: objType.element, mutable: false };
         const cbHint: TypeKind = { tag: "fn", params: [elemRef], ret: { tag: "void" } };
         const cbBorrow = this.borrowDuringCallback(expr.object);
-        this.checkExprWithHint(expr.args[0], cbHint);
+        const cbSig = this.checkExprWithHint(expr.args[0], cbHint);
+        this.checkCallbackSig(cbSig, cbHint, "each", sp);
         if (cbBorrow) this.unfreeze(cbBorrow);
         return this.setType(expr, { tag: "void" });
       }
@@ -8201,7 +8213,8 @@ export class TypeChecker {
         const elemRef: TypeKind = { tag: "ref", inner: objType.element, mutable: false };
         const cbHint: TypeKind = { tag: "fn", params: [{ tag: "int", bits: 64, signed: true }, elemRef], ret: { tag: "void" } };
         const cbBorrow = this.borrowDuringCallback(expr.object);
-        this.checkExprWithHint(expr.args[0], cbHint);
+        const cbSig = this.checkExprWithHint(expr.args[0], cbHint);
+        this.checkCallbackSig(cbSig, cbHint, "enumerate", sp);
         if (cbBorrow) this.unfreeze(cbBorrow);
         return this.setType(expr, { tag: "void" });
       }
@@ -8211,6 +8224,7 @@ export class TypeChecker {
         const cbHint: TypeKind = { tag: "fn", params: [elemRef], ret: { tag: "bool" } };
         const cbBorrow = this.borrowDuringCallback(expr.object);
         const cbType = this.checkExprWithHint(expr.args[0], cbHint);
+        this.checkCallbackSig(cbType, cbHint, "find", sp);
         if (cbBorrow) this.unfreeze(cbBorrow);
         if (cbType.tag !== "fn") { this.error(`'find' argument must be a function`, sp); return this.setType(expr, { tag: "unknown" }); }
         return this.setType(expr, this.resolveOptionForValue(objType.element, sp));
@@ -8220,7 +8234,8 @@ export class TypeChecker {
         const elemRef: TypeKind = { tag: "ref", inner: objType.element, mutable: false };
         const cbHint: TypeKind = { tag: "fn", params: [elemRef], ret: { tag: "bool" } };
         const cbBorrow = this.borrowDuringCallback(expr.object);
-        this.checkExprWithHint(expr.args[0], cbHint);
+        const cbSig = this.checkExprWithHint(expr.args[0], cbHint);
+        this.checkCallbackSig(cbSig, cbHint, "any", sp);
         if (cbBorrow) this.unfreeze(cbBorrow);
         return this.setType(expr, { tag: "bool" });
       }
@@ -8229,7 +8244,8 @@ export class TypeChecker {
         const elemRef: TypeKind = { tag: "ref", inner: objType.element, mutable: false };
         const cbHint: TypeKind = { tag: "fn", params: [elemRef], ret: { tag: "bool" } };
         const cbBorrow = this.borrowDuringCallback(expr.object);
-        this.checkExprWithHint(expr.args[0], cbHint);
+        const cbSig = this.checkExprWithHint(expr.args[0], cbHint);
+        this.checkCallbackSig(cbSig, cbHint, "all", sp);
         if (cbBorrow) this.unfreeze(cbBorrow);
         return this.setType(expr, { tag: "bool" });
       }
@@ -8362,6 +8378,7 @@ export class TypeChecker {
         const cbHint: TypeKind = { tag: "fn", params: [elemRef, elemRef], ret: { tag: "int", bits: 32, signed: true } };
         const cbBorrow = this.borrowDuringCallback(expr.object);
         const cbType = this.checkExprWithHint(expr.args[0], cbHint);
+        this.checkCallbackSig(cbType, cbHint, "sortBy", sp);
         if (cbBorrow) this.unfreeze(cbBorrow);
         if (cbType.tag !== "fn") { this.error(`'sortBy' argument must be a comparator function`, sp); }
         return this.setType(expr, { tag: "void" });
@@ -8378,6 +8395,7 @@ export class TypeChecker {
         // parameter: the sort reads the key to compare it and never stores or drops it.
         this.keyExtractorDepth++;
         const cbType = this.checkExprWithHint(expr.args[0], cbHint);
+        this.checkCallbackSig(cbType, cbHint, "sortByKey", sp);
         this.keyExtractorDepth--;
         if (cbBorrow) this.unfreeze(cbBorrow);
         if (cbType.tag !== "fn") { this.error(`'sortByKey' argument must be a function`, sp); return this.setType(expr, { tag: "void" }); }
@@ -8452,6 +8470,7 @@ export class TypeChecker {
         const cbHint: TypeKind = { tag: "fn", params: [elemRef], ret: { tag: "bool" } };
         const cbBorrow = this.borrowDuringCallback(expr.object);
         const cbType = this.checkExprWithHint(expr.args[0], cbHint);
+        this.checkCallbackSig(cbType, cbHint, "position", sp);
         if (cbBorrow) this.unfreeze(cbBorrow);
         if (cbType.tag !== "fn") { this.error(`'position' argument must be a function`, sp); return this.setType(expr, { tag: "unknown" }); }
         return this.setType(expr, this.resolveOptionForValue({ tag: "int", bits: 64, signed: true }, sp));
@@ -8483,6 +8502,7 @@ export class TypeChecker {
         const cbHint: TypeKind = { tag: "fn", params: [elemRef], ret: { tag: "bool" } };
         const cbBorrow = this.borrowDuringCallback(expr.object);
         const cbType = this.checkExprWithHint(expr.args[0], cbHint);
+        this.checkCallbackSig(cbType, cbHint, "retain", sp);
         if (cbBorrow) this.unfreeze(cbBorrow);
         if (cbType.tag !== "fn") { this.error(`'retain' argument must be a predicate function`, sp); }
         return this.setType(expr, { tag: "void" });
@@ -9082,6 +9102,36 @@ export class TypeChecker {
     const optInner = this.optionInnerType(want);
     if (optInner && typeEq(optInner, elemType) && want.tag === "enum") return true;
     return this.tryInterfaceCoercion(elem, elemType, want);
+  }
+
+  // Does a callback's DECLARED signature match what the combinator will actually pass it?
+  //
+  // Every combinator built a `cbHint` and handed it to `checkExprWithHint`, and at best
+  // asked whether the answer was a function at all. Nobody compared the parameters, so a
+  // closure could declare any type it liked and receive something else:
+  //
+  //     var v: Vec<i64> = …
+  //     v.each((x: &string) => print(x.len))   // accepted; printed a POINTER value
+  //     v.map((s: &string) => s.len)           // accepted; read the next element's bytes
+  //
+  // That is a type confusion the checker waved through, and with a smaller allocation it
+  // reads past the end rather than into the neighbour. Both spellings the language does
+  // support stay legal: the hint's own type (`&i64`), and its by-value form (`i64`), which
+  // is how a Copy element is idiomatically taken.
+  private checkCallbackSig(actual: TypeKind, want: TypeKind, method: string, sp?: Span): void {
+    if (actual.tag !== "fn" || want.tag !== "fn") return; // reported by the caller's own check
+    if (actual.params.length !== want.params.length) {
+      this.error(`'${method}' callback takes ${actual.params.length} parameter(s), but is called with ${want.params.length}`, sp);
+      return;
+    }
+    for (let i = 0; i < want.params.length; i++) {
+      const got = actual.params[i], expected = want.params[i];
+      if (got.tag === "unknown" || typeEq(got, expected)) continue;
+      // A `&T` position also accepts `T` when the closure takes it by value.
+      if (expected.tag === "ref" && typeEq(got, expected.inner)) continue;
+      this.error(`'${method}' callback parameter ${i + 1} is declared ${typeName(got)}, but ${method} passes ${typeName(expected)}`, sp);
+      return;
+    }
   }
 
   private isCopyBind(bt: TypeKind, subjectIsPlace: boolean): boolean {

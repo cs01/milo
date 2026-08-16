@@ -1,0 +1,16 @@
+// @error: callback parameter 1 is declared
+//
+// Every Vec combinator built a `cbHint` describing what it would pass, handed it to
+// `checkExprWithHint`, and at best asked whether the answer was a function at all. Nobody
+// compared the PARAMETERS, so a closure could declare any type it liked and be handed
+// something else. `v.each((x: &string) => print(x.len))` over a `Vec<i64>` was accepted and
+// printed a pointer value; `v.map((s: &string) => s.len)` read the next element's bytes,
+// and with a smaller allocation would read past the end.
+//
+// Both spellings the language does support stay legal: the hint's own type (`&i64`) and its
+// by-value form (`i64`), which is how a Copy element is idiomatically taken.
+fn main() {
+    var v: Vec<i64> = Vec.new()
+    v.push(3)
+    v.each((x: &string) => print(x.len))
+}

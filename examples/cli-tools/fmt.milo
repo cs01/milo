@@ -803,6 +803,56 @@ pub fn isInsideGeneric(tokens: &Vec<Token>, i: i64): bool {
     return false
 }
 
+// Is the `(` at position i the start of a `move (T) => R` TYPE, rather than the parameter
+// list of a `move(): T => { … }` closure expression? `move` is not in this formatter's
+// keyword list (it lexes as an Ident), so without this the type form came out as
+// `move() => void`, which reads as a call. Both spellings are legal Milo and only the
+// tail tells them apart: a type's parens are followed straight by `=>` and then a TYPE,
+// while a closure expression carries `: ret` before its `=>`, or a `{` body after it.
+pub fn isMoveFnType(tokens: &Vec<Token>, i: i64): bool {
+    if i == 0 {
+        return false
+    }
+    let prev = tokens[i - 1]
+    if prev.kind != TokKind.Ident || prev.text != "move" {
+        return false
+    }
+    var depth: i64 = 0
+    var sawColon = false
+    var j = i
+    while j < tokens.len {
+        let t = tokens[j]
+        if t.kind == TokKind.LParen {
+            depth = depth + 1
+        } else if t.kind == TokKind.Colon && depth == 1 {
+            // A `:` directly inside the parens is a PARAMETER annotation, so these are a
+            // closure's params, not a type's argument list: `move(x: i64) => x + n`. A
+            // type's parens hold bare types and never one.
+            sawColon = true
+        } else if t.kind == TokKind.RParen {
+            depth = depth - 1
+            if depth == 0 {
+                if sawColon {
+                    return false
+                }
+                // `)` then `=>` then anything but a block body. An expression-bodied
+                // closure with unannotated params (`move(x) => x`) is indistinguishable
+                // here and gets the space; that is cosmetic only, since the lexer skips
+                // whitespace and the parser decides `move` by position, not spacing.
+                if j + 2 >= tokens.len {
+                    return false
+                }
+                if tokens[j + 1].kind != TokKind.FatArrow {
+                    return false
+                }
+                return tokens[j + 2].kind != TokKind.LBrace
+            }
+        }
+        j = j + 1
+    }
+    return false
+}
+
 pub fn wantSpaceBefore(tokens: &Vec<Token>, i: i64): bool {
     if i == 0 {
         return false
@@ -815,6 +865,10 @@ pub fn wantSpaceBefore(tokens: &Vec<Token>, i: i64): bool {
     // Attribute name hugs its `@`: emit `@derive(...)`, not `@ derive(...)`.
     if isAtToken(prev) {
         return false
+    }
+    // `move (T) => R` keeps its space; `move(): T => {` does not (see isMoveFnType).
+    if tk == TokKind.LParen && isMoveFnType(tokens, i) {
+        return true
     }
     // Never space after ( [ . ::
     if pk == TokKind.LParen || pk == TokKind.LBracket ||
@@ -961,7 +1015,7 @@ pub fn formatSource(src: string): string {
     var atLineStart: bool = true
 
     var lastLine: i64 = 1
-    // Depth of `[ ]` nesting — the ';' in `[T; N]` array types is load-bearing
+    // Depth of `[ ]` nesting — the ';' in `[T; N]` array types is semantic
     // and must be kept, while statement-level ';' is dropped as cosmetic.
     var bracketDepth: i64 = 0
     // `( )` nesting. Together with bracketDepth this is the "statement level"
@@ -1018,7 +1072,7 @@ pub fn formatSource(src: string): string {
         // ';' is cosmetic ONLY at statement level (Milo is newline/grammar-delimited).
         // Drop it there; if another statement follows on the same line, put it on its
         // own line. A ';' inside ( ) or [ ] is NOT a statement separator — it's either
-        // load-bearing (`[T; N]`) or a syntax error the formatter must preserve
+        // semantic (`[T; N]`) or a syntax error the formatter must preserve
         // (stripping it would silently turn invalid code into valid) — so leave it.
         if tok.kind == TokKind.Semi && bracketDepth == 0 && parenDepth == 0 {
             if !atLineStart {

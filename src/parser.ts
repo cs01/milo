@@ -307,6 +307,15 @@ export class Parser {
       if (!cf.isFn) this.error("expected a function type after 'extern'", this.peek());
       return { ...cf, isCFn: true };
     }
+    // move (T1, T2) => R — an owning closure. Same keyword as the closure EXPRESSION
+    // form (`move(): void => {…}`) because it marks the same thing on both sides: this
+    // value took ownership of what it captured.
+    if (this.at(TokenKind.Move)) {
+      this.advance();
+      const inner = this.parseType();
+      if (!inner.isFn) this.error("expected a function type after 'move'", this.peek());
+      return { ...inner, isMoveFn: true };
+    }
     // (T1, T2) => R
     if (this.at(TokenKind.LParen) && this.isFnType()) {
       this.advance();

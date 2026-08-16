@@ -2068,6 +2068,35 @@ print(count)   // 2
 `move` closures capture by value (copy into a heap-allocated environment).
 Safe to return from functions, store in structs, and send to threads.
 
+Because it holds that environment, a `move` closure that captured something **owns** it,
+and its type says so: `move (T) => R`. That type is not `Copy` — there is exactly one of
+the value, and passing it on transfers it:
+
+```milo
+fn run(f: move () => void): void {
+    f()
+}
+```
+
+The reason is ownership, not ceremony. A closure value is a pair of pointers, one of them
+to the environment; if the value could be duplicated, two copies would own one environment
+and any release of it would be a double free. That is why a plain function pointer and a
+by-reference closure stay `Copy` — they own nothing — and why only a `move` closure that
+actually captured something is restricted. `move` with no captures owns nothing either, so
+it is `Copy` like the rest.
+
+A non-owning value passes to a `move` parameter freely, since nothing is lost by
+transferring something that owns nothing:
+
+```milo
+fn bare(): void {
+    print("hi")
+}
+
+run(bare)                       // a function value
+run((): void => print("hi"))    // a by-reference closure
+```
+
 A closure **literal** passed to a function that takes an owned `Fn` parameter has `move` inferred — no keyword needed — because a literal has no other user. That inference is the only place it happens, and it declines when a capture is a `var`, since move-capturing would drop the write-back to the original.
 
 Everywhere else, a closure that captures by reference **may not escape the function it was written in**. It is a pointer into that frame, so it is safe to call and unsafe to keep, and all of these are rejected:

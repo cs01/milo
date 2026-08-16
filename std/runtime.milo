@@ -428,7 +428,7 @@ impl Task {
     // the scheduler is driven (by a blocking IO op, `schedulerYield`, or a
     // `join`). Each task gets its own guard-paged stack. Await completion with
     // `task.join()`.
-    fn spawn(f: () => void): Task {
+    fn spawn(f: move () => void): Task {
         return Task.spawnWithStack(f, defaultStackSize())
     }
 
@@ -438,7 +438,7 @@ impl Task {
     // running it on a green task needs a comparable stack. The mapping is
     // anonymous and lazily committed, so a larger reservation costs address
     // space rather than resident memory.
-    fn spawnWithStack(f: () => void, stackBytes: i64): Task {
+    fn spawnWithStack(f: move () => void, stackBytes: i64): Task {
         unsafe {
             var fnPtr: *u8 = 0 as *u8
             var envPtr: *u8 = 0 as *u8
@@ -563,7 +563,7 @@ fn osThreadTrampoline(arg: *u8): *u8 {
 // thread exit with no join — nothing outlives the worker (the plan's no-leak
 // requirement). If main returns first, Go exit semantics abandon it, symmetric
 // with an abandoned green task.
-pub fn spawnOsThreadDetached(f: () => void): void {
+pub fn spawnOsThreadDetached(f: move () => void): void {
     unsafe {
         let packed = malloc(16)
         memcpy(packed, (f.addrOf()) as *u8, 16)
@@ -642,7 +642,7 @@ impl Promise<T> {
     // The caller never blocks here; the result arrives over the channel and is
     // collected with await(), like any Promise. Fan out across N cores by
     // pushing several Promise.blocking handles into Promise.all.
-    fn blocking(f: () => T): Promise<T> {
+    fn blocking(f: move () => T): Promise<T> {
         let ch = Channel<T>.new(1)!
         let chSend = ch.clone() // worker thread's owning handle
         spawnOsThreadDetached(move(): void => {

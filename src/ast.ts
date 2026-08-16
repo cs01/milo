@@ -11,6 +11,11 @@ export interface MiloType {
   isArray: boolean;    // [T]
   arraySize: number | null; // [T; N] — null for dynamic
   isFn?: boolean;      // fn(T): R
+  // `move (T) => R` — a closure that OWNS its captured environment, as opposed to a
+  // bare function pointer or a by-reference closure, which own nothing. The distinction
+  // is what makes an owning closure non-Copy: duplicating one would give two owners of
+  // the same heap environment, which is why no destructor could exist for it before.
+  isMoveFn?: boolean;
   isCFn?: boolean;     // extern (T) => R — bare C function pointer
   fnParams?: MiloType[];
   fnRet?: MiloType;

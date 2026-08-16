@@ -1,0 +1,17 @@
+// An owning closure holds a heap environment, so there is exactly one of it. Duplicating
+// the value would give two owners of that environment — the reason a destructor could
+// not exist for a closure at all before `move` became part of the type.
+// @error: use of moved variable 'f'
+fn call(f: move () => i64): i64 {
+    return f()
+}
+
+fn main() {
+    var s = "heap"
+    s.pushStr("-payload")
+    let f = move(): i64 => {
+        return s.len
+    }
+    print(call(f))
+    print(call(f))
+}

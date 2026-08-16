@@ -1,0 +1,46 @@
+// @expect: captured-heap
+// @expect: non-owning closure
+// @expect: bare fn value
+// @expect: 42
+
+// `move (T) => R` is the type of a closure that OWNS what it captured. It is a distinct
+// type from a plain `(T) => R` for one reason: it is NOT Copy. Two copies of the pair
+// would be two owners of one heap environment, which is why no destructor could exist
+// for a closure before the split. A non-owning value (a by-reference closure, or a bare
+// function) still passes to a `move` parameter — it owns nothing, so nothing is lost.
+from "std/runtime" import {
+    Task
+}
+
+fn bare(): void {
+    print("bare fn value")
+}
+
+fn run(f: move () => void): void {
+    f()
+}
+
+// A `move` closure that captures NOTHING owns nothing, so it stays Copy and is not
+// restricted — the type is about what the value holds, not which keyword introduced it.
+fn twice(f: () => i64): i64 {
+    return f() + f()
+}
+
+pub fn main(): i32 {
+    var s = "captured"
+    s.pushStr("-heap")
+    run(move(): void => {
+        print(s)
+    }
+    )
+    run((): void => {
+        print("non-owning closure")
+    }
+    )
+    run(bare)
+    let g = move(): i64 => {
+        return 21
+    }
+    print(twice(g))
+    return 0
+}

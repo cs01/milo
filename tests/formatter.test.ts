@@ -174,6 +174,33 @@ test("a comparison against a parenthesised expression is still spaced", () => {
   expect(out).toContain("y > (x)");
 });
 
+// `move` marks an owning closure in TYPE position too (`f: move () => void`), and the
+// formatter has to tell that from the closure EXPRESSION it shares a keyword with. It is
+// not in this formatter's keyword list, so without a rule the type came out `move() =>
+// void`, which reads as a call. Only the tail distinguishes them: a type's parens hold
+// bare types and are followed straight by `=>`; a closure's hold params (with `:`) or
+// carry `: ret` before the arrow, or open a `{` body after it.
+test("a move-closure TYPE keeps its space", () => {
+  const src = `fn run(f: move () => void): void {\n    f()\n}\n`;
+  const out = format(src);
+  expect(out).toContain("move () => void");
+  expect(format(out)).toBe(out);
+});
+
+test("a move-closure EXPRESSION does not gain one", () => {
+  const src = `fn main(): void {\n    let f = move(x: i64) => x + 1\n    print(f(1))\n}\n`;
+  const out = format(src);
+  expect(out).toContain("move(x: i64) => x + 1");
+  expect(out).not.toContain("move (x: i64)");
+});
+
+test("a move-closure expression with a block body does not gain one", () => {
+  const src = `fn main(): void {\n    let f = move(): void => {\n        print(1)\n    }\n    f()\n}\n`;
+  const out = format(src);
+  expect(out).toContain("move(): void =>");
+  expect(out).not.toContain("move ():");
+});
+
 test("`extern type` and `move` keywords keep a trailing space", () => {
   expect(format(`extern type Opaque\n`)).toContain("extern type Opaque");
   expect(format(`fn f(): i32 {\n    let g = move || 1\n    return 0\n}\n`)).toContain("move ||");

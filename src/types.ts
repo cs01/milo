@@ -13,7 +13,11 @@ export type TypeKind =
   | { tag: "vec"; element: TypeKind }
   | { tag: "hashmap"; key: TypeKind; value: TypeKind }
   | { tag: "array"; element: TypeKind; size: number | null }
-  | { tag: "fn"; params: TypeKind[]; ret: TypeKind }
+  // `owning` marks a closure that took ownership of its captured environment (`move`).
+  // It is deliberately NOT part of typeEq: a non-owning fn is usable wherever an owning
+  // one is expected (it owns nothing, so a drop is a no-op), and the checker rejects the
+  // unsound direction explicitly so it can say why. What the flag DOES change is isCopy.
+  | { tag: "fn"; params: TypeKind[]; ret: TypeKind; owning?: boolean }
   // A bare C function pointer (one word, no closure env). `fn` is a fat {ptr,ptr}
   // pair, so a pointer obtained from dlsym cannot become one — calling it would
   // pass an env argument the C callee never declared.
@@ -36,7 +40,8 @@ export const PRIMITIVE_TYPE_NAMES = [
 export function typeFromAst(ty: { name: string; isPtr: boolean; ptrDepth?: number; isRef: boolean; isRefMut: boolean; isArray: boolean; arraySize: number | null; isFn?: boolean; isCFn?: boolean; fnParams?: any[]; fnRet?: any; rangeMin?: number; rangeMax?: number }): TypeKind {
   if (ty.isFn && ty.fnParams && ty.fnRet) {
     const tag = ty.isCFn ? "cfn" as const : "fn" as const;
-    return { tag, params: ty.fnParams.map(typeFromAst), ret: typeFromAst(ty.fnRet) };
+    const base = { tag, params: ty.fnParams.map(typeFromAst), ret: typeFromAst(ty.fnRet) };
+    return (ty as { isMoveFn?: boolean }).isMoveFn ? { ...base, owning: true } : base;
   }
   let base: TypeKind;
   switch (ty.name) {
@@ -113,7 +118,7 @@ export function typeName(t: TypeKind): string {
     case "struct": return t.name;
     case "enum": return t.name;
     case "array": return t.size !== null ? `[${typeName(t.element)}; ${t.size}]` : `[${typeName(t.element)}]`;
-    case "fn": return `(${t.params.map(typeName).join(", ")}) => ${typeName(t.ret)}`;
+    case "fn": return `${t.owning ? "move " : ""}(${t.params.map(typeName).join(", ")}) => ${typeName(t.ret)}`;
     case "cfn": return `extern (${t.params.map(typeName).join(", ")}) => ${typeName(t.ret)}`;
     case "interface": return t.name;
     case "unknown": return "<unknown>";
@@ -137,7 +142,12 @@ export function isFloat(t: TypeKind): boolean {
 // The optional `enumIsPayloadFree` callback lets the caller (the checker) inject its
 // view of which enums have payload-bearing variants without us reaching into checker state here.
 export function isCopy(t: TypeKind, enumIsCopy?: (name: string) => boolean, structIsAllCopy?: (name: string) => boolean): boolean {
-  if (t.tag === "int" || t.tag === "float" || t.tag === "bool" || t.tag === "ptr" || t.tag === "fn" || t.tag === "cfn" || t.tag === "ref") return true;
+  // An OWNING closure is the one function-ish value that is not Copy: it holds a heap
+  // environment, and two copies of the pair would be two owners of it. Everything else in
+  // this list owns nothing — a bare function pointer, a C function pointer, a
+  // by-reference closure (its environment is a stack slot in the frame that made it).
+  if (t.tag === "fn") return !t.owning;
+  if (t.tag === "int" || t.tag === "float" || t.tag === "bool" || t.tag === "ptr" || t.tag === "cfn" || t.tag === "ref") return true;
   if (t.tag === "enum" && enumIsCopy && enumIsCopy(t.name)) return true;
   if (t.tag === "struct" && structIsAllCopy && structIsAllCopy(t.name)) return true;
   // A fixed-size array of Copy elements is itself Copy — it is a value with no heap and no

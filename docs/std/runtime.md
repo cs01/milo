@@ -147,7 +147,7 @@ _Undocumented._
 ### `Promise.blocking`
 
 ```milo
-fn Promise.blocking(f: () => T): Promise<T>
+fn Promise.blocking(f: move () => T): Promise<T>
 ```
 
 Run `f` on a real OS thread for CPU-bound work or blocking FFI — anything
@@ -489,7 +489,7 @@ _Undocumented._
 ### `spawnOsThreadDetached`
 
 ```milo
-pub fn spawnOsThreadDetached(f: () => void): void
+pub fn spawnOsThreadDetached(f: move () => void): void
 ```
 
 Run `f` on a detached OS thread. Detached so its resources are reclaimed at
@@ -614,7 +614,7 @@ parks; the main thread drives the scheduler until the done cell is set.
 ### `Task.spawn`
 
 ```milo
-fn Task.spawn(f: () => void): Task
+fn Task.spawn(f: move () => void): Task
 ```
 
 Spawn a Color.green (M:N) task that runs `f` on the cooperative scheduler, and
@@ -640,7 +640,7 @@ OWNERSHIP: the spawned task takes `envPtr`. It must be a malloc'd block or null 
 ### `Task.spawnWithStack`
 
 ```milo
-fn Task.spawnWithStack(f: () => void, stackBytes: i64): Task
+fn Task.spawnWithStack(f: move () => void, stackBytes: i64): Task
 ```
 
 Same as spawn, with an explicit stack size. The default 1 MB is generous

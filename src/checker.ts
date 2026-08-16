@@ -441,7 +441,7 @@ export class TypeChecker {
     // cases that *are* fixable with it. `--deny=unverified-extern` opts a project in
     // (e.g. a binding crate or a safety-critical build where every layout must be pinned).
     if (!config.denied.has("unverified-extern")) config.allowed.add("unverified-extern");
-    // unused-import is OFF unless asked for. An import can be load-bearing without the
+    // unused-import is OFF unless asked for. An import can be needed without the
     // entry file ever naming the symbol: node-milo's main.milo imports binding symbols
     // purely so those modules get compiled and linked. Warning by default would fire on
     // every one of them, and the fix ("just delete it") would break the build — so the
@@ -6015,10 +6015,16 @@ export class TypeChecker {
         // that cannot be applied. Point at the ownership question instead.
         const t = this.deref(info.type);
         const noCopy = t.tag === "struct" && this.structs.get(t.name)?.noCopy === true;
+        // An owning closure has no `.clone()` to suggest — cloning it would mean copying a
+        // captured environment whose contents may not be clonable at all, and duplicating
+        // the environment is exactly what makes it unsound to own. Say what it is instead.
+        const owningFn = t.tag === "fn" && t.owning === true;
         this.error(
           `use of moved variable '${expr.name}'`,
           sp,
-          noCopy
+          owningFn
+            ? `'${expr.name}' is a 'move' closure, so it OWNS what it captured and there is only one of it — passing it on transferred that ownership. Build a second closure, or restructure so the transfer happens last.`
+            : noCopy
             // A type from a package is stored as `gl$Texture2D`; the hint tells the
             // reader what to type, and what they type is the bare name they imported.
             ? `'${expr.name}' is a @noCopy handle, so transferring it ended its life here — copying one would let the same resource be released twice. Borrow it (pass it to a '&${typeName(t).split("$").pop()}' parameter) instead of transferring, or reorder so the transfer is last.`
@@ -7331,7 +7337,14 @@ export class TypeChecker {
     }
     this.closureScopeDepth = savedClosureScopeDepth;
     this.currentClosureCaptures = savedClosureCaptures;
-    return this.setType(expr, { tag: "fn", params: paramTypes, ret: inferredRet });
+    // Owning only when it MOVED something in. `move` with no captures lowers to a null
+    // environment and owns nothing, so typing it as owning would make it non-Copy for no
+    // reason; a by-reference closure's environment is a stack slot in the frame that built
+    // it, which that frame already owns. Only a move closure with captures holds heap.
+    const owning = !!(expr as { isMove?: boolean }).isMove && captures.length > 0;
+    return this.setType(expr, owning
+      ? { tag: "fn", params: paramTypes, ret: inferredRet, owning: true }
+      : { tag: "fn", params: paramTypes, ret: inferredRet });
   }
 
   private checkMethodCallExpr(expr: ExprOf<"MethodCall">): TypeKind {

@@ -11,6 +11,7 @@ arenaMemCoexist
 arenaMethod
 arenaModify
 arenaWith
+argparseAbsentVsEmpty
 arithmetic
 array_index_clone
 arrayCopy
@@ -72,6 +73,7 @@ closureNoCapture
 closureNonRetainingArg
 closureStoredMove
 coalesceHeapPayload
+coalesceUnboundTempDrop
 commandBuilder
 commandEnv
 commandStdioDirection
@@ -142,6 +144,7 @@ externStructTwoRegs
 externType
 f32Literal
 f64Literal
+fetchResponseParse
 fieldAccessOnCall
 fieldCloneOutOfContainer
 flexIntWidening
@@ -232,6 +235,7 @@ hkdfVectors
 hmacSha256
 hmacSha2Vectors
 html
+httpAbsentVsEmpty
 httpFetchCoexist
 httpRenderResponse
 if_expr
@@ -275,6 +279,7 @@ jsonExactInt
 jsonHashmap
 jsonLiteralStrict
 jsonParseResult
+jsonPath
 jsonPull
 jsonRawStrRoundTrip
 jsonStringify

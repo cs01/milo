@@ -1,0 +1,28 @@
+// @expect: 395
+// @expect: done
+
+// An unbound `??` result had no owner: the Some branch moves the payload out of the
+// Option and the None branch moves the default in, so nothing is left to free the
+// winner unless the result is bound to a name. `(maybe(i) ?? "x").len` therefore leaked
+// one payload per evaluation — the shape a redis client writes per command. On the leak
+// manifest, so the drop cannot silently go away again.
+fn maybe(i: i64): Option<string> {
+    if i % 2 == 0 {
+        var s = "even-"
+        s.pushStr(i.toString())
+        return Option.Some(s)
+    }
+    return Option.None
+}
+
+pub fn main(): i32 {
+    var total = 0
+    var i = 0
+    while i < 100 {
+        total = total + (maybe(i) ?? "x").len
+        i = i + 1
+    }
+    print(total.toString())
+    print("done")
+    return 0
+}

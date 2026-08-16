@@ -11507,9 +11507,27 @@ export class Codegen {
       case "Unwrap":
       case "Propagate":
         return this.unwrapMovesPayload(expr);
+      case "DefaultValue":
+        return this.defaultValueOwnsResult(expr);
       default:
         return false;
     }
+  }
+
+  // Whether a `??` result is a value nobody else owns. Both branches DO move — the Some
+  // branch loads the payload and zeroes the source enum, the None branch stores the
+  // default and zeroes its source (genDefaultValue) — so an unbound `(maybe(i) ?? "x").len`
+  // leaked one payload per evaluation with nothing left to free it.
+  //
+  // Deliberately narrower than "both branches move": the zeroing that makes a moved
+  // *variable* safe only happens when codegen can find the source slot, which it cannot
+  // for every Ident (an immutable `let` is an SSA register, not an alloca). A branch whose
+  // value is an owned temp needs no zeroing to begin with, and a string literal has cap 0
+  // so its drop is a no-op — those two are safe unconditionally. Everything else, Idents
+  // included, stays false and keeps leaking rather than risking a double free.
+  private defaultValueOwnsResult(expr: HIRExpr & { kind: "DefaultValue" }): boolean {
+    const branchOwns = (e: HIRExpr): boolean => e.kind === "StringLit" || this.isOwnedTempExpr(e);
+    return branchOwns(expr.operand) && branchOwns(expr.default);
   }
 
   // Owned temporaries materialised into an alloca so they could be passed by

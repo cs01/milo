@@ -34,6 +34,10 @@ pub struct MiloType {
     isArray: bool,
     arraySize: Option<i64>,
     isFn: bool,
+    // `move (T) => R` — an owning closure type. Parsed here so `std/runtime.milo`'s
+    // `fn spawn(f: move () => void)` is readable; the owning DROP semantics are a
+    // src/ feature this compiler still lags.
+    isMoveFn: bool,
     fnParams: Vec<MiloType>,
     fnRet: Option<Heap<MiloType>>,
     // `i32(0..100)` — a range constraint written on an integer annotation. Both
@@ -52,6 +56,7 @@ pub fn simpleType(name: string): MiloType {
         isArray: false,
         arraySize: Option.None,
         isFn: false,
+        isMoveFn: false,
         fnParams: Vec.new(),
         fnRet: Option.None,
         rangeMin: Option.None,
@@ -69,6 +74,7 @@ pub fn ptrType(name: string): MiloType {
         isArray: false,
         arraySize: Option.None,
         isFn: false,
+        isMoveFn: false,
         fnParams: Vec.new(),
         fnRet: Option.None,
         rangeMin: Option.None,
@@ -485,6 +491,7 @@ impl Clone for MiloType {
             isArray: self.isArray,
             arraySize: cloneOptI64(self.arraySize),
             isFn: self.isFn,
+            isMoveFn: self.isMoveFn,
             fnParams: cloneTypes(self.fnParams),
             fnRet: fnRet,
             rangeMin: cloneOptI64(self.rangeMin),

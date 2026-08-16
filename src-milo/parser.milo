@@ -185,6 +185,15 @@ pub fn parseType(p: &mut Parser): MiloType {
         inner.arraySize = arraySize
         return inner
     }
+    // move (T1, T2) => R — an owning closure type. Same keyword as the closure
+    // EXPRESSION form because it marks the same thing on both sides. Without this arm
+    // `std/runtime.milo`'s `fn spawn(f: move () => void)` failed to parse, which took
+    // the whole self-host fixpoint red on every commit that touched std/.
+    if matchTok(p, TokKind.Move) {
+        var inner = parseType(p)
+        inner.isMoveFn = true
+        return inner
+    }
     // (T1, T2) => R  — function type
     if at(p, TokKind.LParen) && isFnType(p) {
         advance(p)
@@ -207,6 +216,7 @@ pub fn parseType(p: &mut Parser): MiloType {
             isArray: false,
             arraySize: Option.None,
             isFn: true,
+            isMoveFn: false,
             fnParams: fnParams,
             fnRet: Option.Some(Heap(fnRet)),
             rangeMin: Option.None,
@@ -233,6 +243,7 @@ pub fn parseType(p: &mut Parser): MiloType {
         isArray: false,
         arraySize: Option.None,
         isFn: false,
+        isMoveFn: false,
         fnParams: Vec.new(),
         fnRet: Option.None,
         rangeMin: Option.None,
@@ -263,6 +274,7 @@ pub fn parseType(p: &mut Parser): MiloType {
             isArray: false,
             arraySize: Option.None,
             isFn: false,
+            isMoveFn: false,
             fnParams: Vec.new(),
             fnRet: Option.None,
             rangeMin: Option.None,

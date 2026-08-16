@@ -1498,6 +1498,19 @@ pub fn checkCall(ck: &mut Checker, func: &string, args: &Vec<Heap<ExprNode>>, ty
         return tyVoid()
     }
 
+    // forget(x) — consume a value and suppress its drop. This compiler does not yet
+    // emit the owning-closure drop glue that `forget` exists to suppress, so checking
+    // the argument and yielding void IS the whole behaviour here; std/runtime.milo
+    // calls it and without this arm the fixpoint died at "undefined function 'forget'".
+    if func == "forget" {
+        if args.len != 1 {
+            error(ck, "'forget' takes exactly one argument", cloneSpan(span))
+            return tyVoid()
+        }
+        checkExpr(ck, *args[0])
+        return tyVoid()
+    }
+
     // assert builtin
     if func == "assert" {
         if args.len < 1 || args.len > 2 {

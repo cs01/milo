@@ -7747,6 +7747,15 @@ pub fn genCall(cg: &mut Cgen, name: &string, args: &Vec<Heap<ExprNode>>, typeArg
     // assert(cond[, msg]): on false, print to stderr and exit(1); no-op when true.
     // built-in assert only when no real `assert` is in scope (std/testing defines
     // its own 1-arg assert with failure counting — don't shadow it).
+    // forget(x): evaluate the operand for its effects and drop the value on the floor.
+    // Suppressing a drop is a no-op while this compiler emits no owning-closure drop
+    // glue to suppress; the call still has to CODEGEN, or std/runtime.milo cannot build.
+    if name == "forget" && !cg.fnRets.contains("forget") {
+        genExpr(cg, *args[0], locs, sigs, "")
+        return Val {
+            v: "0", ty: "void"
+        }
+    }
     if name == "assert" && !cg.fnRets.contains("assert") {
         let cv = genExpr(cg, *args[0], locs, sigs, "bool")
         let okLbl = nextLabel(cg, "assert.ok")

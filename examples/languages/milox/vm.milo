@@ -570,17 +570,26 @@ impl VM {
                         let b = self.pop().asNum()
                         let a = self.pop().asNum()
                         self.push(Value.num(a + b))
-                    } else if self.isString(self.peek(0)) && self.isString(self.peek(1)) {
-                        let bs = self.stringOf(self.peek(0))
-                        let as_ = self.stringOf(self.peek(1))
-                        let _ = self.pop()
-                        let _ = self.pop()
+                    } else if self.isString(self.peek(0)) || self.isString(self.peek(1)) {
+                        // If either side is a string the other is rendered the way
+                        // `print` would render it. Nan-boxing is what makes this
+                        // cheap — the box already says what each operand is — but
+                        // it is a policy choice, not a consequence: the same
+                        // representation supports Python's refusal just as well.
+                        // A scripting language whose lists are heterogeneous and
+                        // whose `+` is not is annoying for no gain.
+                        let bs = self.format(self.peek(0))
+                        let as_ = self.format(self.peek(1))
+                        // Collect while both operands are still on the stack and
+                        // therefore still roots, never after popping them.
                         self.maybeCollect()
+                        let _ = self.pop()
+                        let _ = self.pop()
                         let joined = as_ + bs
                         let v = self.heap.allocStr(joined)
                         self.push(v)
                     } else {
-                        self.runtimeError("'+' operands must be two numbers or two strings", fi, here)
+                        self.runtimeError("'+' needs two numbers, or a string on one side", fi, here)
                         return false
                     }
                 }

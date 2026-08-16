@@ -20,7 +20,7 @@ print total;
 xs[0] = 100;
 print xs;
 
-var words = ["the", "quick", "brown"];
+var words = ["the", "quick", "brown", 45];
 var joined = "";
 i = 0;
 while (i < len(words)) {

@@ -146,6 +146,43 @@ fn demoForge() {
 // A host program embedding milox. The rule is authored as text, so it can come
 // from a config file, a designer, or a database, and changing it needs no
 // recompile of the host. Everything crossing the boundary is a Value.
+let DYNAMIC: string = "
+// one list, five different types
+var stuff = [1, \"two\", true, nil, [3, 4]];
+print stuff;
+print len(stuff);
+
+// a variable that changes type whenever it feels like it
+var x = 42;
+print x;
+x = \"now i am a string\";
+print x;
+x = [x, x];
+print x;
+
+// functions are values
+fn double(n) { return n * 2; }
+fn shout(s) { return s + \"!\"; }
+var ops = [double, shout];
+print ops;
+print ops[0](21);
+print ops[1](\"hey\");
+
+// pick a function at runtime
+fn pick(which) { if (which < 1) return double; return shout; }
+print pick(0)(50);
+print pick(9)(\"dynamic dispatch\");
+
+// nested structure, mutated in place
+var tree = [[1, 2], [3, [4, 5]]];
+tree[1][1][0] = 99;
+print tree;
+
+// closure-ish: a list carrying its own operation
+fn apply(f, v) { return f(v); }
+print apply(double, 8);
+"
+
 let RULE_CAUTIOUS: string = "
 if (hp < 30) {
   state = \"flee\";
@@ -215,13 +252,15 @@ fn demoEmbed() {
 fn usage() {
     print("milox — a small language with an 8-byte nan-boxed value")
     print("")
-    print("  milox <file.sl>        run a script")
-    print("  milox demo             run the built-in demo program")
-    print("  milox gc-bug           free a reachable object on purpose, watch it get caught")
-    print("  milox forge            forge 2M object references, watch none of them deref")
+    print("  milox <file.sl>       run a script")
+    print("  milox demo            a tour of the language")
+    print("  milox dynamic         heterogeneous lists, retyped variables, functions as values")
+    print("  milox embed           embed milox in a host program and pass values across")
+    print("  milox gc-bug          free a reachable object on purpose, watch it get caught")
+    print("  milox forge           forge 2M object references, watch none of them deref")
     print("")
-    print("  --disasm                dump bytecode before running")
-    print("  --stats                 print instruction, allocation and GC counts")
+    print("  --disasm              dump bytecode before running")
+    print("  --stats               print instruction, allocation and GC counts")
 }
 
 fn main() {
@@ -253,6 +292,10 @@ fn main() {
 
     if target == "demo" {
         let _ = runSource(DEMO, disasm, stats, false)
+        return
+    }
+    if target == "dynamic" {
+        let _ = runSource(DYNAMIC.clone(), disasm, stats, false)
         return
     }
     if target == "embed" {

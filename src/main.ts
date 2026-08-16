@@ -1878,6 +1878,14 @@ async function main() {
 
   const cmd = args[0];
 
+  // `--help` was exempted from the unknown-command guard but nothing then printed the
+  // banner: it fell through the whole dispatch to `unknown command: --help`, and `-h`
+  // reached "error: no source file". Both are the first thing anyone types.
+  if (cmd === "--help" || cmd === "-h") {
+    console.log(renderHelp());
+    process.exit(0);
+  }
+
   // Reject an unknown subcommand up front. Otherwise a bare file path (forgot `run`)
   // falls through every dispatch branch to the generic "no source file" below.
   const KNOWN_COMMANDS = new Set(knownCommandNames());

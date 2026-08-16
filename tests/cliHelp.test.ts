@@ -8,6 +8,7 @@
 // main.ts, and PKG_COMMANDS in pkgcli.ts.
 import { test, expect } from "bun:test";
 import { readFileSync } from "fs";
+import { execFileSync } from "child_process";
 import { join } from "path";
 import { COMPILER_COMMANDS, PACKAGE_COMMANDS, OPTIONS, knownCommandNames, renderHelp } from "../src/cli-help";
 import { PKG_COMMANDS } from "../src/pkgcli";
@@ -17,7 +18,9 @@ const MAIN = readFileSync(join(ROOT, "src", "main.ts"), "utf-8");
 
 test("every dispatched subcommand has a table entry, and every entry is dispatched", () => {
   const dispatched = new Set<string>();
-  for (const m of MAIN.matchAll(/cmd === "([a-z-]+)"/g)) dispatched.add(m[1]!);
+  // A subcommand starts with a letter; `cmd === "--help"` is a flag handled before the
+  // dispatch chain and is not a table row.
+  for (const m of MAIN.matchAll(/cmd === "([a-z][a-z-]*)"/g)) dispatched.add(m[1]!);
   expect(dispatched.size).toBeGreaterThan(10); // the scan must actually find the chain
 
   const tabled = new Set(COMPILER_COMMANDS.map(c => c.name));
@@ -52,6 +55,14 @@ test("every flag main.ts parses is documented, and no documented flag is unparse
   const undocumented = [...parsed].filter(f => !documented.has(f)).sort();
   expect(undocumented).toEqual([]);
 });
+
+test("--help and -h print the banner and exit 0", () => {
+  for (const flag of ["--help", "-h"]) {
+    const out = execFileSync("bun", ["run", join(ROOT, "src", "main.ts"), flag], { cwd: ROOT, encoding: "utf-8" });
+    expect(out).toContain("usage: milo <command>");
+    expect(out).toContain("run <file> [args]");
+  }
+}, 60000);
 
 test("the rendered banner lists every non-hidden command exactly once", () => {
   const help = renderHelp();

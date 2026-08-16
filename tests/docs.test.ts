@@ -135,7 +135,11 @@ function extractSnippets(relPath: string): Snippet[] {
 
 // Brace depth must ignore braces inside strings (incl. f-string {expr}), chars, comments.
 function stripLiterals(line: string): string {
+  // trimEnd() before the comment strip: `.` does not match a line terminator, so on a
+  // CRLF checkout `//.*$` matches nothing and a trailing comment survives — and a `{`
+  // inside one would then be counted as a real brace.
   return line
+    .trimEnd()
     .replace(/\$?"(?:[^"\\]|\\.)*"/g, '""')
     .replace(/'(?:[^'\\]|\\.)'/g, "' '")
     .replace(/\/\/.*$/, "");
@@ -205,8 +209,10 @@ function checkSignatureListing(code: string): string[] {
   const errs: string[] = [];
   for (const raw of code.split("\n")) {
     // A trailing `// also Be` annotates the signature; leaving it on would swallow the
-    // synthetic body that follows.
-    const line = raw.replace(/\s*\/\/.*$/, "").trim();
+    // synthetic body that follows. trim() runs FIRST: on a CRLF checkout the line ends
+    // in `\r`, and `.` does not match a line terminator, so `//.*$` matched nothing and
+    // the comment survived — a Windows-only parse failure.
+    const line = raw.trim().replace(/\s*\/\/.*$/, "").trim();
     if (line === "" || raw.trim().startsWith("//")) continue;
     // `extern fn`/`extern type` and `type` aliases are complete as written; giving
     // them a body is itself a parse error.

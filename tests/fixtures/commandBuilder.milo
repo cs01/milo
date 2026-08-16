@@ -61,7 +61,7 @@ fn runAndPrint(cmd: Command): void {
 }
 
 pub fn main(): i32 {
-    let dir = makeTempDir("miloCmd")!
+    let dir = makeTempDir("/tmp/miloCmd-")!
     let probe = Path.join(dir, "probe.txt")
     let outPath = Path.join(dir, "out.txt")
 

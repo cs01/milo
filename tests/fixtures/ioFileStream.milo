@@ -91,7 +91,7 @@ fn dropFlush(path: &string): void {
 }
 
 fn main(): void {
-    let dir = makeTempDir("miloio")!
+    let dir = makeTempDir("/tmp/miloio-")!
     let path = Path.join(dir, "stream.txt")
     writeLines(path)
     readBack(path)

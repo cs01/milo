@@ -1,0 +1,42 @@
+// @expect: pair-bytes=4
+// @expect: pair-equals-literal=true
+// @expect: lone-high=3
+// @expect: lone-low=3
+// @expect: high-then-ascii=4
+// @expect: bmp=2
+
+// JSON inherits JS's UTF-16 escapes, so a non-BMP character arrives as a SURROGATE PAIR:
+// "\ud83d\ude00" is one code point, U+1F600. Emitting the halves separately gave two
+// 3-byte sequences (CESU-8) — 6 bytes where UTF-8 needs 4, and not equal to the literal.
+// Every surrogate is an invalid Unicode scalar value, so that was not valid UTF-8 at all,
+// which is the one thing Milo's string type promises. Anything that stringifies with \u
+// escaping (JS's JSON.stringify among them) sends these.
+//
+// Byte counts AND an equality check: a count alone would pass for any 4-byte answer.
+// Lone surrogates have no UTF-8 encoding at all and become U+FFFD (3 bytes), which is
+// what the rest of std/json already substitutes for a malformed sequence.
+from "std/json" import {
+    Json
+}
+
+fn decodeStr(text: string): string {
+    match Json.parse(text) {
+        Result.Ok(doc) => {
+            return doc.curStr(doc.curRoot()) ?? ""
+        }
+        Result.Err(e) => {
+            return ""
+        }
+    }
+}
+
+pub fn main(): i32 {
+    let pair = decodeStr("\"\\ud83d\\ude00\"")
+    print("pair-bytes=" + pair.len.toString())
+    print("pair-equals-literal=" + (pair == "😀").toString())
+    print("lone-high=" + decodeStr("\"\\ud83d\"").len.toString())
+    print("lone-low=" + decodeStr("\"\\ude00\"").len.toString())
+    print("high-then-ascii=" + decodeStr("\"\\ud83dA\"").len.toString())
+    print("bmp=" + decodeStr("\"\\u00e9\"").len.toString())
+    return 0
+}

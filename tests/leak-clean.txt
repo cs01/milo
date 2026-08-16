@@ -284,6 +284,7 @@ jsonRawStrRoundTrip
 jsonStringify
 jsonStringifyEmpty
 jsonStringifyEscape
+jsonSurrogatePairs
 jsonUnicodeEscape
 jsonValidate
 jwtClaims

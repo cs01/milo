@@ -217,20 +217,48 @@ fn jsonMaterializeStr(source: &string, start: i64, len: i64): string {
                 result.push(12 as u8)
             } 
             else if esc == 'u' && i + 4 < len {
-                // \uXXXX → codepoint → UTF-8 bytes (BMP only; surrogate pairs
-                // emit per-half, which round-trips fine for terminal control input).
-                let cp = (jsonHexVal(source[start + i + 1]) << 12)
+                // \uXXXX → code point → UTF-8.
+                //
+                // A non-BMP character arrives as a SURROGATE PAIR, because JSON inherits
+                // JS's UTF-16 escapes — `"\ud83d\ude00"` is one code point, U+1F600.
+                // Emitting the halves separately produced two 3-byte sequences (CESU-8):
+                // 6 bytes where UTF-8 needs 4, and not equal to the literal "😀". Every
+                // surrogate is an invalid Unicode scalar value, so that output was not
+                // valid UTF-8 at all — which is the one thing Milo's string type promises.
+                var cp = (jsonHexVal(source[start + i + 1]) << 12)
                 | (jsonHexVal(source[start + i + 2]) << 8)
                 | (jsonHexVal(source[start + i + 3]) << 4)
                 | jsonHexVal(source[start + i + 4])
                 i = i + 4
+                if cp >= 0xD800 && cp <= 0xDBFF && i + 6 < len
+                && source[start + i + 1] == '\\' && source[start + i + 2] == 'u' {
+                    let lo = (jsonHexVal(source[start + i + 3]) << 12)
+                    | (jsonHexVal(source[start + i + 4]) << 8)
+                    | (jsonHexVal(source[start + i + 5]) << 4)
+                    | jsonHexVal(source[start + i + 6])
+                    if lo >= 0xDC00 && lo <= 0xDFFF {
+                        cp = 0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00)
+                        i = i + 6
+                    }
+                }
+                // An unpaired surrogate — a high one nothing followed, or a stray low —
+                // has no UTF-8 encoding. U+FFFD is what the rest of this module already
+                // substitutes for a malformed sequence (see REPLACEMENT_CHAR).
+                if cp >= 0xD800 && cp <= 0xDFFF {
+                    cp = 0xFFFD
+                }
                 if cp < 0x80 {
                     result.push(cp as u8)
                 } else if cp < 0x800 {
                     result.push((0xC0 | (cp >> 6)) as u8)
                     result.push((0x80 | (cp & 0x3F)) as u8)
-                } else {
+                } else if cp < 0x10000 {
                     result.push((0xE0 | (cp >> 12)) as u8)
+                    result.push((0x80 | ((cp >> 6) & 0x3F)) as u8)
+                    result.push((0x80 | (cp & 0x3F)) as u8)
+                } else {
+                    result.push((0xF0 | (cp >> 18)) as u8)
+                    result.push((0x80 | ((cp >> 12) & 0x3F)) as u8)
                     result.push((0x80 | ((cp >> 6) & 0x3F)) as u8)
                     result.push((0x80 | (cp & 0x3F)) as u8)
                 }

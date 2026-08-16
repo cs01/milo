@@ -1,0 +1,53 @@
+// @expect: too-small rejected
+// @expect: zero-count rejected
+// @expect: valid pool alloc ok
+
+// The free list threads an 8-byte pointer through each block, so a block SMALLER than 8
+// writes past the allocation. `requires size >= 8` said so, and a `requires` is dropped at
+// the default -O2 — ASan reported a heap-buffer-overflow WRITE of size 8 for
+// `Pool.new(2, 64)` in an ordinary build. Same shape as the AES-GCM read, one worse:
+// a write. Sizes are derived at runtime here so the prover cannot reject them statically,
+// which is what makes this a test of the RELEASE build rather than of the contract.
+from "std/pool" import {
+    Pool
+}
+
+fn runtimeVal(n: i64): i64 {
+    return n
+}
+
+pub fn main(): i32 {
+    match Pool.new(runtimeVal(2), 64) {
+        Result.Ok(p) => {
+            print("BAD: accepted a 2-byte block")
+        }
+        Result.Err(e) => {
+            print("too-small rejected")
+        }
+    }
+    match Pool.new(16, runtimeVal(0)) {
+        Result.Ok(p) => {
+            print("BAD: accepted a zero count")
+        }
+        Result.Err(e) => {
+            print("zero-count rejected")
+        }
+    }
+    match Pool.new(16, 8) {
+        Result.Ok(p) => {
+            var pool = p
+            match pool.alloc() {
+                Result.Ok(addr) => {
+                    print("valid pool alloc ok")
+                }
+                Result.Err(e) => {
+                    print("BAD: valid pool failed to allocate")
+                }
+            }
+        }
+        Result.Err(e) => {
+            print("BAD: valid pool rejected")
+        }
+    }
+    return 0
+}

@@ -32,6 +32,17 @@ fn poolNew(size: i64, count: i64): Result<Pool>
 requires size >= 8
 requires count > 0
 {
+    // Checked at runtime as well as by the `requires`, because the contract is dropped at
+    // the default -O2 and this body is unsafe. The free list threads an 8-byte pointer
+    // through each block, so a block SMALLER than 8 writes past the allocation — ASan
+    // reports a heap-buffer-overflow WRITE of size 8 for `Pool.new(2, 64)`. A `requires`
+    // alone cannot hold that line in a release build; see docs/backlog.md #27.
+    if size < 8 {
+        return Result.Err("pool: block size must be at least 8 bytes, got " + size.toString())
+    }
+    if count <= 0 {
+        return Result.Err("pool: count must be positive, got " + count.toString())
+    }
     let totalSize = size * count
     unsafe {
         let p = malloc(totalSize)

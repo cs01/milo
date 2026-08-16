@@ -58,7 +58,7 @@ while (i < len(words)) {
   i = i + 1;
 }
 print joined;
-print true and not false;
+print true and !false;
 print nil == nil;
 "
 

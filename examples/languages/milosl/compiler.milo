@@ -1,0 +1,910 @@
+// milosl compiler: tokens -> bytecode, in one pass, clox-shaped.
+//
+// There is no AST. Each parse function emits its own instructions as it
+// returns, which is why precedence is expressed as a chain of mutually
+// recursive functions rather than a table: the chain *is* the precedence
+// climb, and the emission order falls out of it for free.
+//
+// Two invariants the VM depends on and cannot re-derive:
+//
+//   1. `JumpIfFalse` does NOT pop its condition. Every use site emits an
+//      explicit `Pop` on both the taken and the untaken path. That is what
+//      lets `and`/`or` leave the deciding operand on the stack as the value
+//      of the whole expression while `if`/`while` discard it.
+//   2. Slot 0 of every function's local array is the callee itself. The VM's
+//      frame base points at the function value sitting just below the
+//      arguments, so a user local can never resolve to slot 0.
+from "./lexer" import {
+    TokKind, lex
+}
+from "./chunk" import {
+    Op
+}
+from "./function" import {
+    Function
+}
+from "./heap" import {
+    Heap
+}
+from "./value" import {
+    Value
+}
+from "std/strconv" import {
+    parseFloat
+}
+
+// One bad line should not produce a hundred diagnostics, and a file that is
+// not milosl at all should not produce a hundred thousand.
+let MAX_ERRORS: i64 = 25
+
+// 16 bits of operand, so every jump distance and constant index is bounded.
+let MAX_OPERAND: i64 = 65535
+
+pub struct CompileResult {
+    ok: bool,
+    errors: Vec<string>,
+    functions: Vec<Function>,
+}
+
+struct Local {
+    name: string,
+    // -1 means "declared but not yet initialized". `var a = a;` sees the new
+    // `a` at depth -1 and rejects, instead of silently reading the outer one.
+    depth: i64,
+}
+
+// Per-function compile state. A stack of these rides alongside the function
+// table so an inner function emits into its own chunk without the emit
+// helpers needing to know which function that is.
+struct FnState {
+    fnIndex: i64,
+    locals: Vec<Local>,
+    scopeDepth: i64,
+    // Identifier constants are deduped per function: `x = x + 1` in a loop
+    // would otherwise add a fresh heap string to the pool on every mention.
+    identNames: Vec<string>,
+    identSlots: Vec<i64>,
+}
+
+struct Compiler {
+    // The token stream is split into parallel arrays rather than kept as a
+    // Vec<Token>: `kinds[i]` and `lines[i]` are Copy reads, while indexing a
+    // Vec<Token> would deep-copy the token's string on every peek.
+    kinds: Vec<TokKind>,
+    texts: Vec<string>,
+    lines: Vec<i32>,
+    pos: i64,
+    errors: Vec<string>,
+    // Parallel to `errors`, and the reason a lexing error found up front can
+    // still be reported in source order among the parse errors that follow.
+    errLines: Vec<i32>,
+    panicMode: bool,
+    functions: Vec<Function>,
+    states: Vec<FnState>,
+}
+
+impl Compiler {
+    fn new(src: &string): Compiler {
+        var kinds: Vec<TokKind> = Vec.new()
+        var texts: Vec<string> = Vec.new()
+        var lines: Vec<i32> = Vec.new()
+        var errors: Vec<string> = Vec.new()
+        var errLines: Vec<i32> = Vec.new()
+        let toks = lex(src)
+        // Error tokens are reported here and dropped from the stream. Leaving
+        // them in would force every `check`/`match` in the parser to special
+        // case a kind that can never be part of a valid parse.
+        for t in toks {
+            if t.kind == TokKind.Error {
+                if errors.len < MAX_ERRORS {
+                    errors.push("[line " + t.line.toString() + "] error: " + t.text)
+                    errLines.push(t.line)
+                }
+                continue
+            }
+            kinds.push(t.kind)
+            texts.push(t.text.clone())
+            lines.push(t.line)
+        }
+        var functions: Vec<Function> = Vec.new()
+        functions.push(Function.new("<script>", 0))
+        var states: Vec<FnState> = Vec.new()
+        states.push(newFnState(0))
+        return Compiler {
+            kinds: kinds,
+            texts: texts,
+            lines: lines,
+            pos: 0,
+            errors: errors,
+            errLines: errLines,
+            panicMode: false,
+            functions: functions,
+            states: states,
+        }
+    }
+
+    // ── token cursor ──
+
+    fn prevIdx(self: &Self): i64 {
+        if self.pos > 0 {
+            return self.pos - 1
+        }
+        return 0
+    }
+    fn curKind(self: &Self): TokKind {
+        return self.kinds[self.pos]
+    }
+    fn curLine(self: &Self): i32 {
+        return self.lines[self.pos]
+    }
+    fn prevKind(self: &Self): TokKind {
+        return self.kinds[self.prevIdx()]
+    }
+    fn prevText(self: &Self): string {
+        return self.texts[self.prevIdx()].clone()
+    }
+    fn prevLine(self: &Self): i32 {
+        return self.lines[self.prevIdx()]
+    }
+    fn check(self: &Self, k: TokKind): bool {
+        return self.kinds[self.pos] == k
+    }
+    fn advance(self: &mut Self) {
+        // Never step past Eof: the sentinel has to stay readable so a
+        // truncated program cannot walk off the end of the arrays.
+        if self.pos + 1 < self.kinds.len {
+            self.pos = self.pos + 1
+        }
+    }
+    fn matchTok(self: &mut Self, k: TokKind): bool {
+        if self.check(k) {
+            self.advance()
+            return true
+        }
+        return false
+    }
+    fn consume(self: &mut Self, k: TokKind, msg: string) {
+        if self.check(k) {
+            self.advance()
+            return
+        }
+        self.errorAtCurrent(msg)
+    }
+
+    // ── diagnostics ──
+
+    fn errorAt(self: &mut Self, idx: i64, msg: string) {
+        if self.panicMode {
+            return
+        }
+        if self.errors.len >= MAX_ERRORS {
+            return
+        }
+        self.panicMode = true
+        var where = self.texts[idx].clone()
+        if self.kinds[idx] == TokKind.Eof {
+            where = "end"
+        }
+        let line = self.lines[idx]
+        self.pushError(line, "[line " + line.toString() + "] error at '" + where + "': " + msg)
+    }
+
+    // Insertion-sorted by line. Lexing errors are all discovered before
+    // parsing starts, so appending would print them ahead of every parse
+    // error no matter where in the file they occurred.
+    fn pushError(self: &mut Self, line: i32, msg: string) {
+        var i = self.errLines.len
+        while i > 0 && self.errLines[i - 1] > line {
+            i = i - 1
+        }
+        self.errors.insert(i, msg)
+        self.errLines.insert(i, line)
+    }
+    fn errorAtCurrent(self: &mut Self, msg: string) {
+        let i = self.pos
+        self.errorAt(i, msg)
+    }
+    fn errorAtPrev(self: &mut Self, msg: string) {
+        let i = self.prevIdx()
+        self.errorAt(i, msg)
+    }
+    fn tooManyErrors(self: &Self): bool {
+        return self.errors.len >= MAX_ERRORS
+    }
+
+    // Skip to something that plausibly starts a new statement, so one broken
+    // line does not cascade into a diagnostic per token to the end of file.
+    fn synchronize(self: &mut Self) {
+        self.panicMode = false
+        while !self.check(TokKind.Eof) {
+            if self.prevKind() == TokKind.Semicolon {
+                return
+            }
+            let k = self.curKind()
+            if k == TokKind.Fn || k == TokKind.Var || k == TokKind.If {
+                return
+            }
+            if k == TokKind.While || k == TokKind.Print || k == TokKind.Return {
+                return
+            }
+            self.advance()
+        }
+    }
+
+    // ── emission ──
+
+    fn fnIdx(self: &Self): i64 {
+        return self.states[self.states.len - 1].fnIndex
+    }
+    fn chunkLen(self: &Self): i64 {
+        return self.functions[self.states[self.states.len - 1].fnIndex].chunk.len()
+    }
+    fn emitOpAt(self: &mut Self, op: Op, line: i32) {
+        let f = self.fnIdx()
+        self.functions[f].chunk.writeOp(op, line)
+    }
+    fn emitOp(self: &mut Self, op: Op) {
+        let line = self.prevLine()
+        self.emitOpAt(op, line)
+    }
+    fn emitByte(self: &mut Self, b: u8) {
+        let line = self.prevLine()
+        let f = self.fnIdx()
+        self.functions[f].chunk.writeByte(b, line)
+    }
+    fn emitU16(self: &mut Self, v: i64) {
+        let line = self.prevLine()
+        let f = self.fnIdx()
+        self.functions[f].chunk.writeU16(v, line)
+    }
+    fn emitReturn(self: &mut Self) {
+        // Every chunk ends Nil/Return so falling off the end of a body is a
+        // nil result rather than the VM reading past the code array.
+        self.emitOp(Op.Nil)
+        self.emitOp(Op.Return)
+    }
+
+    // Emit a jump with a placeholder operand; returns the offset of the first
+    // operand byte for patchJump.
+    fn emitJump(self: &mut Self, op: Op): i64 {
+        self.emitOp(op)
+        self.emitByte(0xff as u8)
+        self.emitByte(0xff as u8)
+        return self.chunkLen() - 2
+    }
+
+    fn patchJump(self: &mut Self, offset: i64) {
+        // `offset + 2` is the address of the instruction after the jump, i.e.
+        // where ip already sits once the VM has read both operand bytes. The
+        // stored distance is measured from there.
+        let jump = self.chunkLen() - offset - 2
+        if jump > MAX_OPERAND {
+            self.errorAtPrev("too much code to jump over")
+            return
+        }
+        let f = self.fnIdx()
+        self.functions[f].chunk.code[offset] = ((jump >> 8) & 0xff) as u8
+        self.functions[f].chunk.code[offset + 1] = (jump & 0xff) as u8
+    }
+
+    fn emitLoop(self: &mut Self, loopStart: i64) {
+        self.emitOp(Op.Loop)
+        // chunkLen() here counts the opcode but not the two operand bytes the
+        // VM has yet to read. By the time it applies the offset, ip has
+        // advanced past both, hence the +2.
+        let offset = self.chunkLen() - loopStart + 2
+        if offset > MAX_OPERAND {
+            self.errorAtPrev("loop body too large")
+            return
+        }
+        self.emitByte(((offset >> 8) & 0xff) as u8)
+        self.emitByte((offset & 0xff) as u8)
+    }
+
+    fn emitConstIdx(self: &mut Self, idx: i64) {
+        if idx > MAX_OPERAND {
+            self.errorAtPrev("too many constants in one chunk")
+            return
+        }
+        self.emitOp(Op.Constant)
+        self.emitU16(idx)
+    }
+
+    // ── constants ──
+
+    fn stringConstant(self: &mut Self, h: &mut Heap, s: string): i64 {
+        let v = h.allocStr(s)
+        let f = self.fnIdx()
+        let idx = self.functions[f].chunk.addConstant(v)
+        // The collector has no way to walk a chunk, so every string constant
+        // has to announce itself as a root here.
+        self.functions[f].chunk.constantStrings.push(idx)
+        return idx
+    }
+
+    fn identifierConstant(self: &mut Self, h: &mut Heap, name: &string): i64 {
+        let t = self.states.len - 1
+        var i: i64 = 0
+        while i < self.states[t].identNames.len {
+            if self.states[t].identNames[i] == name {
+                return self.states[t].identSlots[i]
+            }
+            i = i + 1
+        }
+        let idx = self.stringConstant(h, name.clone())
+        self.states[t].identNames.push(name.clone())
+        self.states[t].identSlots.push(idx)
+        return idx
+    }
+
+    // ── scopes and locals ──
+
+    fn scopeDepth(self: &Self): i64 {
+        return self.states[self.states.len - 1].scopeDepth
+    }
+    fn localCount(self: &Self): i64 {
+        return self.states[self.states.len - 1].locals.len
+    }
+    fn localName(self: &Self, i: i64): string {
+        return self.states[self.states.len - 1].locals[i].name.clone()
+    }
+    fn localDepth(self: &Self, i: i64): i64 {
+        return self.states[self.states.len - 1].locals[i].depth
+    }
+
+    fn beginScope(self: &mut Self) {
+        let t = self.states.len - 1
+        self.states[t].scopeDepth = self.states[t].scopeDepth + 1
+    }
+
+    fn endScope(self: &mut Self) {
+        let t = self.states.len - 1
+        self.states[t].scopeDepth = self.states[t].scopeDepth - 1
+        while self.localCount() > 1 && self.localDepth(self.localCount() - 1) > self.scopeDepth() {
+            self.emitOp(Op.Pop)
+            let s = self.states.len - 1
+            self.states[s].locals.pop()!
+        }
+    }
+
+    fn addLocal(self: &mut Self, name: &string) {
+        if self.localCount() > MAX_OPERAND {
+            self.errorAtPrev("too many local variables in function")
+            return
+        }
+        let t = self.states.len - 1
+        self.states[t].locals.push(Local {
+            name: name.clone(), depth: -1
+        }
+        )
+    }
+
+    fn declareVariable(self: &mut Self, name: &string) {
+        if self.scopeDepth() == 0 {
+            return
+        }
+        var i = self.localCount() - 1
+        while i >= 0 {
+            let d = self.localDepth(i)
+            if d != -1 && d < self.scopeDepth() {
+                break
+            }
+            if self.localName(i) == name {
+                self.errorAtPrev("already a variable with this name in this scope")
+                break
+            }
+            i = i - 1
+        }
+        self.addLocal(name)
+    }
+
+    fn markInitialized(self: &mut Self) {
+        if self.scopeDepth() == 0 {
+            return
+        }
+        let t = self.states.len - 1
+        let last = self.states[t].locals.len - 1
+        let d = self.states[t].scopeDepth
+        self.states[t].locals[last].depth = d
+    }
+
+    fn resolveLocal(self: &mut Self, name: &string): i64 {
+        var i = self.localCount() - 1
+        // Innermost first: a shadowing local wins over the one it shadows.
+        // Slot 0 holds the callee under the empty name, which no identifier
+        // can match, so the loop can run all the way down.
+        while i >= 0 {
+            if self.localName(i) == name {
+                if self.localDepth(i) == -1 {
+                    self.errorAtPrev("cannot read local variable in its own initializer")
+                }
+                return i
+            }
+            i = i - 1
+        }
+        return -1
+    }
+
+    fn parseVariable(self: &mut Self, h: &mut Heap, msg: string): i64 {
+        self.consume(TokKind.Identifier, msg)
+        let name = self.prevText()
+        self.declareVariable(name)
+        if self.scopeDepth() > 0 {
+            return 0
+        }
+        return self.identifierConstant(h, name)
+    }
+
+    fn defineVariable(self: &mut Self, global: i64) {
+        if self.scopeDepth() > 0 {
+            // A local needs no instruction: the initializer's value already
+            // sits in the slot the local was assigned.
+            self.markInitialized()
+            return
+        }
+        self.emitOp(Op.DefineGlobal)
+        self.emitU16(global)
+    }
+
+    // ── declarations and statements ──
+
+    fn declaration(self: &mut Self, h: &mut Heap) {
+        if self.matchTok(TokKind.Fn) {
+            self.funDeclaration(h)
+        } else if self.matchTok(TokKind.Var) {
+            self.varDeclaration(h)
+        } else {
+            self.statement(h)
+        }
+        if self.panicMode {
+            self.synchronize()
+        }
+    }
+
+    fn varDeclaration(self: &mut Self, h: &mut Heap) {
+        let global = self.parseVariable(h, "expect variable name")
+        if self.matchTok(TokKind.Equal) {
+            self.expression(h)
+        } else {
+            self.emitOp(Op.Nil)
+        }
+        self.consume(TokKind.Semicolon, "expect ';' after variable declaration")
+        self.defineVariable(global)
+    }
+
+    fn funDeclaration(self: &mut Self, h: &mut Heap) {
+        if self.scopeDepth() > 0 {
+            self.errorAtPrev("functions can only be declared at the top level")
+        }
+        let global = self.parseVariable(h, "expect function name")
+        let name = self.prevText()
+        self.markInitialized()
+        self.compileFunction(h, name)
+        self.defineVariable(global)
+    }
+
+    fn compileFunction(self: &mut Self, h: &mut Heap, name: string) {
+        let idx = self.functions.len
+        self.functions.push(Function.new(name, 0))
+        self.states.push(newFnState(idx))
+        self.beginScope()
+        self.consume(TokKind.LeftParen, "expect '(' after function name")
+        var arity: i64 = 0
+        while !self.check(TokKind.RightParen) && !self.check(TokKind.Eof) {
+            arity = arity + 1
+            if arity > 255 {
+                self.errorAtCurrent("cannot have more than 255 parameters")
+            }
+            let slot = self.parseVariable(h, "expect parameter name")
+            self.defineVariable(slot)
+            if !self.matchTok(TokKind.Comma) {
+                break
+            }
+        }
+        self.consume(TokKind.RightParen, "expect ')' after parameters")
+        self.consume(TokKind.LeftBrace, "expect '{' before function body")
+        self.block(h)
+        self.emitReturn()
+        self.functions[idx].arity = arity
+        // No endScope: the frame dies with the call, so emitting a Pop per
+        // local after the Return would be dead code.
+        self.states.pop()!
+        let fv = h.allocFn(idx)
+        let f = self.fnIdx()
+        let ci = self.functions[f].chunk.addConstant(fv)
+        self.emitConstIdx(ci)
+    }
+
+    fn block(self: &mut Self, h: &mut Heap) {
+        while !self.check(TokKind.RightBrace) && !self.check(TokKind.Eof) {
+            if self.tooManyErrors() {
+                return
+            }
+            self.declaration(h)
+        }
+        self.consume(TokKind.RightBrace, "expect '}' after block")
+    }
+
+    fn statement(self: &mut Self, h: &mut Heap) {
+        if self.matchTok(TokKind.Print) {
+            self.expression(h)
+            self.consume(TokKind.Semicolon, "expect ';' after value")
+            self.emitOp(Op.Print)
+            return
+        }
+        if self.matchTok(TokKind.Return) {
+            self.returnStatement(h)
+            return
+        }
+        if self.matchTok(TokKind.If) {
+            self.ifStatement(h)
+            return
+        }
+        if self.matchTok(TokKind.While) {
+            self.whileStatement(h)
+            return
+        }
+        if self.matchTok(TokKind.LeftBrace) {
+            self.beginScope()
+            self.block(h)
+            self.endScope()
+            return
+        }
+        self.expression(h)
+        self.consume(TokKind.Semicolon, "expect ';' after expression")
+        self.emitOp(Op.Pop)
+    }
+
+    fn returnStatement(self: &mut Self, h: &mut Heap) {
+        if self.states.len <= 1 {
+            self.errorAtPrev("cannot return from top-level code")
+        }
+        if self.matchTok(TokKind.Semicolon) {
+            self.emitReturn()
+            return
+        }
+        self.expression(h)
+        self.consume(TokKind.Semicolon, "expect ';' after return value")
+        self.emitOp(Op.Return)
+    }
+
+    fn ifStatement(self: &mut Self, h: &mut Heap) {
+        self.consume(TokKind.LeftParen, "expect '(' after 'if'")
+        self.expression(h)
+        self.consume(TokKind.RightParen, "expect ')' after condition")
+        let thenJump = self.emitJump(Op.JumpIfFalse)
+        // JumpIfFalse leaves the condition on the stack; both arms pop it.
+        self.emitOp(Op.Pop)
+        self.statement(h)
+        if self.matchTok(TokKind.Else) {
+            let elseJump = self.emitJump(Op.Jump)
+            self.patchJump(thenJump)
+            self.emitOp(Op.Pop)
+            self.statement(h)
+            self.patchJump(elseJump)
+            return
+        }
+        self.patchJump(thenJump)
+        self.emitOp(Op.Pop)
+    }
+
+    fn whileStatement(self: &mut Self, h: &mut Heap) {
+        let loopStart = self.chunkLen()
+        self.consume(TokKind.LeftParen, "expect '(' after 'while'")
+        self.expression(h)
+        self.consume(TokKind.RightParen, "expect ')' after condition")
+        let exitJump = self.emitJump(Op.JumpIfFalse)
+        self.emitOp(Op.Pop)
+        self.statement(h)
+        self.emitLoop(loopStart)
+        self.patchJump(exitJump)
+        self.emitOp(Op.Pop)
+    }
+
+    // ── expressions ──
+    //
+    // `canAssign` is true only along the spine of a full expression. It goes
+    // false the moment an operator claims the operand, which is what makes
+    // `a + b = c` an error instead of an assignment to `b`.
+
+    fn expression(self: &mut Self, h: &mut Heap) {
+        self.orExpr(h, true)
+        if self.check(TokKind.Equal) {
+            self.errorAtCurrent("invalid assignment target")
+        }
+    }
+
+    fn orExpr(self: &mut Self, h: &mut Heap, canAssign: bool) {
+        self.andExpr(h, canAssign)
+        while self.matchTok(TokKind.Or) {
+            // Falsey left -> jump to the right operand. Truthy left -> skip
+            // it, leaving the left value as the result of the whole `or`.
+            let elseJump = self.emitJump(Op.JumpIfFalse)
+            let endJump = self.emitJump(Op.Jump)
+            self.patchJump(elseJump)
+            self.emitOp(Op.Pop)
+            self.andExpr(h, false)
+            self.patchJump(endJump)
+        }
+    }
+
+    fn andExpr(self: &mut Self, h: &mut Heap, canAssign: bool) {
+        self.equality(h, canAssign)
+        while self.matchTok(TokKind.And) {
+            let endJump = self.emitJump(Op.JumpIfFalse)
+            self.emitOp(Op.Pop)
+            self.equality(h, false)
+            self.patchJump(endJump)
+        }
+    }
+
+    fn equality(self: &mut Self, h: &mut Heap, canAssign: bool) {
+        self.comparison(h, canAssign)
+        var go = true
+        while go {
+            let line = self.curLine()
+            if self.matchTok(TokKind.EqualEqual) {
+                self.comparison(h, false)
+                self.emitOpAt(Op.Equal, line)
+            } else if self.matchTok(TokKind.BangEqual) {
+                self.comparison(h, false)
+                self.emitOpAt(Op.Equal, line)
+                self.emitOpAt(Op.Not, line)
+            } else {
+                go = false
+            }
+        }
+    }
+
+    fn comparison(self: &mut Self, h: &mut Heap, canAssign: bool) {
+        self.term(h, canAssign)
+        var go = true
+        while go {
+            let line = self.curLine()
+            if self.matchTok(TokKind.Less) {
+                self.term(h, false)
+                self.emitOpAt(Op.Less, line)
+            } else if self.matchTok(TokKind.Greater) {
+                self.term(h, false)
+                self.emitOpAt(Op.Greater, line)
+            } else if self.matchTok(TokKind.LessEqual) {
+                // a <= b is !(a > b); the VM needs only two comparisons.
+                self.term(h, false)
+                self.emitOpAt(Op.Greater, line)
+                self.emitOpAt(Op.Not, line)
+            } else if self.matchTok(TokKind.GreaterEqual) {
+                self.term(h, false)
+                self.emitOpAt(Op.Less, line)
+                self.emitOpAt(Op.Not, line)
+            } else {
+                go = false
+            }
+        }
+    }
+
+    fn term(self: &mut Self, h: &mut Heap, canAssign: bool) {
+        self.factor(h, canAssign)
+        var go = true
+        while go {
+            let line = self.curLine()
+            if self.matchTok(TokKind.Plus) {
+                self.factor(h, false)
+                self.emitOpAt(Op.Add, line)
+            } else if self.matchTok(TokKind.Minus) {
+                self.factor(h, false)
+                self.emitOpAt(Op.Subtract, line)
+            } else {
+                go = false
+            }
+        }
+    }
+
+    fn factor(self: &mut Self, h: &mut Heap, canAssign: bool) {
+        self.unary(h, canAssign)
+        var go = true
+        while go {
+            let line = self.curLine()
+            if self.matchTok(TokKind.Star) {
+                self.unary(h, false)
+                self.emitOpAt(Op.Multiply, line)
+            } else if self.matchTok(TokKind.Slash) {
+                self.unary(h, false)
+                self.emitOpAt(Op.Divide, line)
+            } else {
+                go = false
+            }
+        }
+    }
+
+    fn unary(self: &mut Self, h: &mut Heap, canAssign: bool) {
+        let line = self.curLine()
+        if self.matchTok(TokKind.Bang) {
+            self.unary(h, false)
+            self.emitOpAt(Op.Not, line)
+            return
+        }
+        if self.matchTok(TokKind.Minus) {
+            self.unary(h, false)
+            self.emitOpAt(Op.Negate, line)
+            return
+        }
+        self.callExpr(h, canAssign)
+    }
+
+    fn callExpr(self: &mut Self, h: &mut Heap, canAssign: bool) {
+        self.primary(h, canAssign)
+        var go = true
+        while go {
+            if self.matchTok(TokKind.LeftParen) {
+                let n = self.argumentList(h)
+                self.emitOp(Op.Call)
+                self.emitByte(n as u8)
+            } else if self.matchTok(TokKind.LeftBracket) {
+                self.expression(h)
+                self.consume(TokKind.RightBracket, "expect ']' after index")
+                if canAssign && self.matchTok(TokKind.Equal) {
+                    self.expression(h)
+                    self.emitOp(Op.SetIndex)
+                } else {
+                    self.emitOp(Op.Index)
+                }
+            } else {
+                go = false
+            }
+        }
+    }
+
+    fn argumentList(self: &mut Self, h: &mut Heap): i64 {
+        var count: i64 = 0
+        while !self.check(TokKind.RightParen) && !self.check(TokKind.Eof) {
+            self.expression(h)
+            count = count + 1
+            if count > 255 {
+                self.errorAtPrev("cannot have more than 255 arguments")
+            }
+            if !self.matchTok(TokKind.Comma) {
+                break
+            }
+        }
+        self.consume(TokKind.RightParen, "expect ')' after arguments")
+        return count
+    }
+
+    fn listLiteral(self: &mut Self, h: &mut Heap) {
+        var count: i64 = 0
+        // The loop condition also accepts a trailing comma: after a `,` the
+        // next check sees `]` and stops.
+        while !self.check(TokKind.RightBracket) && !self.check(TokKind.Eof) {
+            self.expression(h)
+            count = count + 1
+            if count > MAX_OPERAND {
+                self.errorAtPrev("too many elements in list literal")
+            }
+            if !self.matchTok(TokKind.Comma) {
+                break
+            }
+        }
+        self.consume(TokKind.RightBracket, "expect ']' after list elements")
+        self.emitOp(Op.NewList)
+        self.emitU16(count)
+    }
+
+    fn namedVariable(self: &mut Self, h: &mut Heap, name: &string, canAssign: bool) {
+        var getOp = Op.GetLocal
+        var setOp = Op.SetLocal
+        var arg = self.resolveLocal(name)
+        if arg < 0 {
+            getOp = Op.GetGlobal
+            setOp = Op.SetGlobal
+            arg = self.identifierConstant(h, name)
+        }
+        if canAssign && self.matchTok(TokKind.Equal) {
+            self.expression(h)
+            self.emitOp(setOp)
+            self.emitU16(arg)
+            return
+        }
+        self.emitOp(getOp)
+        self.emitU16(arg)
+    }
+
+    fn primary(self: &mut Self, h: &mut Heap, canAssign: bool) {
+        // Consume unconditionally so a token that starts no expression is
+        // still eaten; otherwise the error path could not make progress.
+        self.advance()
+        let k = self.prevKind()
+        if k == TokKind.Number {
+            let text = self.prevText()
+            match parseFloat(text) {
+                Some(d) => {
+                    let f = self.fnIdx()
+                    let ci = self.functions[f].chunk.addConstant(Value.num(d))
+                    self.emitConstIdx(ci)
+                }
+                None => {
+                    self.errorAtPrev("invalid number literal")
+                }
+            }
+            return
+        }
+        if k == TokKind.Str {
+            let text = self.prevText()
+            let ci = self.stringConstant(h, text)
+            self.emitConstIdx(ci)
+            return
+        }
+        if k == TokKind.True {
+            self.emitOp(Op.True)
+            return
+        }
+        if k == TokKind.False {
+            self.emitOp(Op.False)
+            return
+        }
+        if k == TokKind.Nil {
+            self.emitOp(Op.Nil)
+            return
+        }
+        if k == TokKind.LeftParen {
+            self.expression(h)
+            self.consume(TokKind.RightParen, "expect ')' after expression")
+            return
+        }
+        if k == TokKind.LeftBracket {
+            self.listLiteral(h)
+            return
+        }
+        if k == TokKind.Identifier {
+            let name = self.prevText()
+            // `len` is a reserved call form rather than a callable value, so
+            // the VM never has to model a native-function object: `len(x)`
+            // lowers to one opcode. Used any other way it is an ordinary
+            // identifier and will simply be an undefined global.
+            if name == "len" && self.check(TokKind.LeftParen) {
+                self.advance()
+                self.expression(h)
+                self.consume(TokKind.RightParen, "expect ')' after len argument")
+                self.emitOp(Op.Len)
+                return
+            }
+            self.namedVariable(h, name, canAssign)
+            return
+        }
+        self.errorAtPrev("expect expression")
+    }
+}
+
+fn newFnState(fnIndex: i64): FnState {
+    var locals: Vec<Local> = Vec.new()
+    // Slot 0 is the callee. Its empty name is unmatchable by any identifier,
+    // which is what reserves the slot without a special case in resolveLocal.
+    locals.push(Local {
+        name: "", depth: 0
+    }
+    )
+    return FnState {
+        fnIndex: fnIndex,
+        locals: locals,
+        scopeDepth: 0,
+        identNames: Vec.new(),
+        identSlots: Vec.new(),
+    }
+}
+
+pub fn compile(src: &string, heap: &mut Heap): CompileResult {
+    var c = Compiler.new(src)
+    while !c.check(TokKind.Eof) && !c.tooManyErrors() {
+        let before = c.pos
+        c.declaration(heap)
+        // Every error path in declaration() consumes at least one token, but
+        // asserting it here rather than assuming it keeps a future edit from
+        // turning a syntax error into a hang.
+        if c.pos == before {
+            c.advance()
+        }
+    }
+    c.emitReturn()
+    return CompileResult {
+        ok: c.errors.len == 0, errors: c.errors, functions: c.functions
+    }
+}

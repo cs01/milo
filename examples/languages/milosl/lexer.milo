@@ -1,0 +1,453 @@
+// milosl lexer: source text -> a flat Vec<Token>.
+//
+// The whole file is scanned up front rather than pulled one token at a time.
+// A milosl program is a string the host already holds entirely in memory, so
+// streaming buys nothing, and a materialized vector lets the compiler use a
+// plain integer cursor with trivial lookahead instead of a two-token window.
+//
+// Errors are tokens, not a side channel: a malformed literal becomes a
+// TokKind.Error whose `text` is the human-readable message. The compiler
+// drains those before parsing, so the lexer never needs to know how the
+// compiler formats a diagnostic.
+
+pub enum TokKind {
+    LeftParen,
+    RightParen,
+    LeftBrace,
+    RightBrace,
+    LeftBracket,
+    RightBracket,
+    Comma,
+    Semicolon,
+    Plus,
+    Minus,
+    Star,
+    Slash,
+    Bang,
+    BangEqual,
+    Equal,
+    EqualEqual,
+    Greater,
+    GreaterEqual,
+    Less,
+    LessEqual,
+    Identifier,
+    Str,
+    Number,
+    And,
+    Or,
+    True,
+    False,
+    Nil,
+    Var,
+    Fn,
+    Print,
+    Return,
+    If,
+    Else,
+    While,
+    Eof,
+    // `text` is the diagnostic message, not the offending lexeme.
+    Error,
+}
+
+pub struct Token {
+    kind: TokKind,
+    text: string,
+    line: i32,
+}
+
+fn tok(kind: TokKind, text: string, line: i32): Token {
+    return Token {
+        kind: kind, text: text, line: line
+    }
+}
+
+fn isDigit(c: u8): bool {
+    return c >= '0' && c <= '9'
+}
+
+fn isAlpha(c: u8): bool {
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_'
+}
+
+fn byteStr(c: u8): string {
+    var s = ""
+    s.push(c)
+    return s
+}
+
+fn keywordKind(word: &string): TokKind {
+    if word == "and" {
+        return TokKind.And
+    }
+    if word == "or" {
+        return TokKind.Or
+    }
+    if word == "true" {
+        return TokKind.True
+    }
+    if word == "false" {
+        return TokKind.False
+    }
+    if word == "nil" {
+        return TokKind.Nil
+    }
+    if word == "var" {
+        return TokKind.Var
+    }
+    if word == "fn" {
+        return TokKind.Fn
+    }
+    if word == "print" {
+        return TokKind.Print
+    }
+    if word == "return" {
+        return TokKind.Return
+    }
+    if word == "if" {
+        return TokKind.If
+    }
+    if word == "else" {
+        return TokKind.Else
+    }
+    if word == "while" {
+        return TokKind.While
+    }
+    return TokKind.Identifier
+}
+
+// Human-readable name for a kind. Used by the compiler only for diagnostics
+// about tokens with no lexeme worth quoting.
+pub fn kindName(k: TokKind): string {
+    match k {
+        LeftParen => {
+            return "("
+        }
+        RightParen => {
+            return ")"
+        }
+        LeftBrace => {
+            return "{"
+        }
+        RightBrace => {
+            return "}"
+        }
+        LeftBracket => {
+            return "["
+        }
+        RightBracket => {
+            return "]"
+        }
+        Comma => {
+            return ","
+        }
+        Semicolon => {
+            return ";"
+        }
+        Plus => {
+            return "+"
+        }
+        Minus => {
+            return "-"
+        }
+        Star => {
+            return "*"
+        }
+        Slash => {
+            return "/"
+        }
+        Bang => {
+            return "!"
+        }
+        BangEqual => {
+            return "!="
+        }
+        Equal => {
+            return "="
+        }
+        EqualEqual => {
+            return "=="
+        }
+        Greater => {
+            return ">"
+        }
+        GreaterEqual => {
+            return ">="
+        }
+        Less => {
+            return "<"
+        }
+        LessEqual => {
+            return "<="
+        }
+        Identifier => {
+            return "identifier"
+        }
+        Str => {
+            return "string"
+        }
+        Number => {
+            return "number"
+        }
+        And => {
+            return "and"
+        }
+        Or => {
+            return "or"
+        }
+        True => {
+            return "true"
+        }
+        False => {
+            return "false"
+        }
+        Nil => {
+            return "nil"
+        }
+        Var => {
+            return "var"
+        }
+        Fn => {
+            return "fn"
+        }
+        Print => {
+            return "print"
+        }
+        Return => {
+            return "return"
+        }
+        If => {
+            return "if"
+        }
+        Else => {
+            return "else"
+        }
+        While => {
+            return "while"
+        }
+        Eof => {
+            return "end"
+        }
+        Error => {
+            return "error"
+        }
+    }
+}
+
+pub fn lex(src: &string): Vec<Token> {
+    var toks: Vec<Token> = Vec.new()
+    let n = src.len
+    var i: i64 = 0
+    var line: i32 = 1
+    while i < n {
+        let c = src[i]
+        if c == ' ' || c == '\t' || c == '\r' {
+            i = i + 1
+            continue
+        }
+        if c == '\n' {
+            line = line + 1
+            i = i + 1
+            continue
+        }
+        // `//` to end of line. Checked before the `/` operator so a comment
+        // never lexes as a division.
+        if c == '/' && i + 1 < n && src[i + 1] == '/' {
+            while i < n && src[i] != '\n' {
+                i = i + 1
+            }
+            continue
+        }
+        if isDigit(c) {
+            let start = i
+            while i < n && isDigit(src[i]) {
+                i = i + 1
+            }
+            // A '.' is part of the number only with a digit behind it, so
+            // `1.` stays a number followed by an error rather than silently
+            // swallowing the dot.
+            if i + 1 < n && src[i] == '.' && isDigit(src[i + 1]) {
+                i = i + 1
+                while i < n && isDigit(src[i]) {
+                    i = i + 1
+                }
+            }
+            toks.push(tok(TokKind.Number, src.substr(start, i), line))
+            continue
+        }
+        if isAlpha(c) {
+            let start = i
+            while i < n && (isAlpha(src[i]) || isDigit(src[i])) {
+                i = i + 1
+            }
+            let word = src.substr(start, i)
+            let k = keywordKind(word)
+            toks.push(tok(k, word, line))
+            continue
+        }
+        if c == '"' {
+            let startLine = line
+            i = i + 1
+            var buf = ""
+            var closed = false
+            var errMsg = ""
+            while i < n {
+                let ch = src[i]
+                if ch == '"' {
+                    i = i + 1
+                    closed = true
+                    break
+                }
+                if ch == '\\' {
+                    if i + 1 >= n {
+                        break
+                    }
+                    let e = src[i + 1]
+                    if e == 'n' {
+                        buf.push('\n')
+                    } else if e == 't' {
+                        buf.push('\t')
+                    } else if e == '\\' {
+                        buf.push('\\')
+                    } else if e == '"' {
+                        buf.push('"')
+                    } else {
+                        errMsg = "unknown escape sequence '\\" + byteStr(e) + "'"
+                        i = i + 2
+                        break
+                    }
+                    i = i + 2
+                    continue
+                }
+                if ch == '\n' {
+                    line = line + 1
+                }
+                buf.push(ch)
+                i = i + 1
+            }
+            if errMsg != "" {
+                // Skip the rest of the literal so the next token starts on
+                // real syntax instead of the literal's tail.
+                while i < n && src[i] != '"' && src[i] != '\n' {
+                    i = i + 1
+                }
+                if i < n && src[i] == '"' {
+                    i = i + 1
+                }
+                toks.push(tok(TokKind.Error, errMsg, startLine))
+                continue
+            }
+            if !closed {
+                toks.push(tok(TokKind.Error, "unterminated string", startLine))
+                continue
+            }
+            toks.push(tok(TokKind.Str, buf, startLine))
+            continue
+        }
+        if c == '(' {
+            toks.push(tok(TokKind.LeftParen, "(", line))
+            i = i + 1
+            continue
+        }
+        if c == ')' {
+            toks.push(tok(TokKind.RightParen, ")", line))
+            i = i + 1
+            continue
+        }
+        if c == '{' {
+            toks.push(tok(TokKind.LeftBrace, "{", line))
+            i = i + 1
+            continue
+        }
+        if c == '}' {
+            toks.push(tok(TokKind.RightBrace, "}", line))
+            i = i + 1
+            continue
+        }
+        if c == '[' {
+            toks.push(tok(TokKind.LeftBracket, "[", line))
+            i = i + 1
+            continue
+        }
+        if c == ']' {
+            toks.push(tok(TokKind.RightBracket, "]", line))
+            i = i + 1
+            continue
+        }
+        if c == ',' {
+            toks.push(tok(TokKind.Comma, ",", line))
+            i = i + 1
+            continue
+        }
+        if c == ';' {
+            toks.push(tok(TokKind.Semicolon, ";", line))
+            i = i + 1
+            continue
+        }
+        if c == '+' {
+            toks.push(tok(TokKind.Plus, "+", line))
+            i = i + 1
+            continue
+        }
+        if c == '-' {
+            toks.push(tok(TokKind.Minus, "-", line))
+            i = i + 1
+            continue
+        }
+        if c == '*' {
+            toks.push(tok(TokKind.Star, "*", line))
+            i = i + 1
+            continue
+        }
+        if c == '/' {
+            toks.push(tok(TokKind.Slash, "/", line))
+            i = i + 1
+            continue
+        }
+        if c == '!' {
+            if i + 1 < n && src[i + 1] == '=' {
+                toks.push(tok(TokKind.BangEqual, "!=", line))
+                i = i + 2
+            } else {
+                toks.push(tok(TokKind.Bang, "!", line))
+                i = i + 1
+            }
+            continue
+        }
+        if c == '=' {
+            if i + 1 < n && src[i + 1] == '=' {
+                toks.push(tok(TokKind.EqualEqual, "==", line))
+                i = i + 2
+            } else {
+                toks.push(tok(TokKind.Equal, "=", line))
+                i = i + 1
+            }
+            continue
+        }
+        if c == '<' {
+            if i + 1 < n && src[i + 1] == '=' {
+                toks.push(tok(TokKind.LessEqual, "<=", line))
+                i = i + 2
+            } else {
+                toks.push(tok(TokKind.Less, "<", line))
+                i = i + 1
+            }
+            continue
+        }
+        if c == '>' {
+            if i + 1 < n && src[i + 1] == '=' {
+                toks.push(tok(TokKind.GreaterEqual, ">=", line))
+                i = i + 2
+            } else {
+                toks.push(tok(TokKind.Greater, ">", line))
+                i = i + 1
+            }
+            continue
+        }
+        toks.push(tok(TokKind.Error, "unexpected character '" + byteStr(c) + "'", line))
+        i = i + 1
+    }
+    toks.push(tok(TokKind.Eof, "", line))
+    return toks
+}

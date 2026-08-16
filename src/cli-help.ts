@@ -116,7 +116,7 @@ export const OPTIONS: CliOption[] = [
     help: [
       "treat all warnings as errors",
       "(off-by-default warnings: unused-move, unused-import,",
-      " unverified-extern, large-stack-array)",
+      " unverified-extern, large-stack-array, index-clone)",
     ],
   },
   { flag: "--safety=<level>", help: ["enforce safety profile (e.g. --safety=do178)"] },

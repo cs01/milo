@@ -77,3 +77,37 @@ test("check --json on a clean file says so, and exits zero", () => {
   expect(doc.ok).toBe(true);
   expect(doc.diagnostics.filter((d: any) => d.severity === "error")).toEqual([]);
 });
+
+test("prove --json reports each obligation's verdict as data", () => {
+  const fixture = join(ROOT, "tests", "prove", "addNonneg.milo");
+  const res = milo(["prove", fixture, "--json"]);
+  const doc = JSON.parse(res.out);
+  expect(doc.schema).toBe(1);
+  expect(doc.obligations.length).toBeGreaterThan(0);
+  for (const o of doc.obligations) {
+    expect(["proven", "failed", "unknown", "error"]).toContain(o.status);
+    expect(typeof o.fn).toBe("string");
+  }
+  // `unknown` is not `failed` — a gate that collapsed them would report an undecided
+  // proof as a broken one, which is the distinction this payload exists to preserve.
+  expect(doc.proven + doc.failed + doc.unknown + doc.errors).toBe(doc.obligations.length);
+});
+
+test("safety --json reports profile compliance as data", () => {
+  const fixture = join(ROOT, "examples", "embedded", "flightController.milo");
+  const doc = JSON.parse(milo(["safety", fixture, "--safety=do178", "--json"]).out);
+  expect(doc.schema).toBe(1);
+  expect(doc.level).toBe("do178c-b");
+  expect(Array.isArray(doc.violations)).toBe(true);
+  expect(doc.ok).toBe(!doc.violations.some((v: any) => v.severity === "error"));
+});
+
+test("test --json reports per-test records, and only the payload on stdout", () => {
+  const res = milo(["test", join(ROOT, "tests", "milo-tests", "basics_test.milo"), "--json"]);
+  // Nothing but the document: a ✓ line leaking into stdout makes the payload unparseable.
+  const doc = JSON.parse(res.out);
+  expect(doc.schema).toBe(1);
+  expect(doc.tests.length).toBeGreaterThan(0);
+  expect(doc.passed + doc.failed).toBe(doc.tests.length);
+  for (const t of doc.tests) expect(typeof t.ms).toBe("number");
+});

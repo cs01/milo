@@ -28,7 +28,7 @@ export const COMPILER_COMMANDS: CliCommand[] = [
   { name: "run", usage: "run <file> [args]", help: ["compile and run (no artifacts left behind)"] },
   { name: "build", usage: "build <file> [-o out]", help: ["compile to executable"] },
   {
-    name: "test", usage: "test [file|dir...]",
+    name: "test", usage: "test [file|dir...] [--json]",
     help: [
       "run tests (*_test.milo, recursive in a dir; cwd by default)",
       "a test is a top-level `fn test*()` with no parameters;",
@@ -49,7 +49,7 @@ export const COMPILER_COMMANDS: CliCommand[] = [
   { name: "emit-js", usage: "emit-js <file>", help: ["emit JavaScript (playground target)"] },
   { name: "fmt", usage: "fmt <file...>", help: ["format source files (-w to write in place)"] },
   {
-    name: "prove", usage: "prove <file>",
+    name: "prove", usage: "prove <file> [--json]",
     help: [
       "prove contracts hold, via std/smt, the milo-native prover",
       "  --solver=z3   use z3 instead (adds non-linear arithmetic)",
@@ -130,6 +130,13 @@ export const OPTIONS: CliOption[] = [
       // Rendered from src/warnings.ts: this line used to be prose and had to be edited by
       // hand every time a warning landed, which is how it fell behind the checker.
       `(off-by-default warnings: ${OFF_BY_DEFAULT.join(", ")})`,
+    ],
+  },
+  {
+    flag: "--json",
+    help: [
+      "machine-readable output, for tooling instead of a human",
+      "(api, lang, check, prove, safety, test — see docs/json-api.md)",
     ],
   },
   { flag: "--safety=<level>", help: ["enforce safety profile (e.g. --safety=do178)"] },

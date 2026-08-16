@@ -2355,6 +2355,35 @@ export function proveWithZ3(result: VerifyResult): ProveResult {
   };
 }
 
+// Machine-readable proof report (schema 1). A certification workflow, a CI dashboard or a
+// ratchet wants the per-obligation verdict as data, not a rendered table — and parsing the
+// table is how a consumer ends up depending on its column widths. The SMT-LIB text of each
+// obligation is deliberately NOT included: it is large, it is an implementation detail of
+// the translator, and `--emit-smt` already prints it for anyone who wants it.
+export const PROVE_JSON_SCHEMA = 1;
+
+export function proveJson(pr: ProveResult): string {
+  return JSON.stringify({
+    schema: PROVE_JSON_SCHEMA,
+    proven: pr.proven,
+    failed: pr.failed,
+    unknown: pr.unknown,
+    errors: pr.errors,
+    // `unknown` is not `failed`: the prover could not decide, which is a different fact
+    // about the program and must stay distinguishable to whatever gates on this.
+    ok: pr.failed === 0 && pr.errors === 0,
+    obligations: pr.results.map(r => ({
+      fn: r.vc.fn,
+      kind: r.vc.kind,
+      description: r.vc.description,
+      status: r.status,
+      ...(r.detail ? { detail: r.detail } : {}),
+      ...(r.vc.assumes?.length ? { assumes: r.vc.assumes } : {}),
+      ...(r.vc.assumesInvariants?.length ? { assumesInvariants: r.vc.assumesInvariants } : {}),
+    })),
+  }, null, 2) + "\n";
+}
+
 export function formatProveReport(pr: ProveResult): string {
   const lines: string[] = [];
   lines.push(`verification: ${pr.results.length} conditions`);

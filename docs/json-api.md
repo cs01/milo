@@ -17,6 +17,9 @@ milo api --module std/json --json    # one module
 milo api "parse json" --json         # ranked search results
 milo lang --json                     # keywords, primitive types, operators, builtin methods, warning names
 milo check <file> --json             # diagnostics as data (exit 1 if any error)
+milo prove <file> --json             # per-obligation proof verdicts
+milo safety <file> --safety=X --json # safety-profile compliance
+milo test <dir> --json               # per-test records
 milo emit-ast <file> [--all --spans] # parsed AST
 milo emit-hir <file> [--all --spans] # typed HIR — every expression carries its type
 milo lex <file>                      # token stream
@@ -99,6 +102,27 @@ to distinguish "crashed" from "rejected". Exit code is 1 when any diagnostic is 
 `code` is present only where the diagnostic carries one; most do not yet, so classify on
 `code` when you can and treat its absence as "uncoded", not as a shape change.
 
+### `milo prove --json` (schema 1)
+
+`proven` / `failed` / `unknown` / `errors` counts, `ok` (no failures and no errors), and an
+`obligations` array of `{ fn, kind, description, status, detail?, assumes?, assumesInvariants? }`.
+**`unknown` is not `failed`** — the prover could not decide, which is a different fact
+about the program, and a consumer that collapses the two reports an undecided proof as a
+broken one. The SMT-LIB text is deliberately absent: it is large and it is a translator
+detail; `prove --emit-smt` prints it for anyone who wants it.
+
+### `milo safety --json` (schema 1)
+
+`{ schema, level, file, ok, violations: [{ rule, severity, message, file, line, col }] }`.
+This is the output a certification artifact quotes, so it is records, not a rendered report.
+
+### `milo test --json` (schema 1)
+
+`{ schema, ok, passed, failed, compileErrors, filteredOut, durationMs, tests: [{ file, name, ok, ms, output? }] }`.
+`compileErrors` is separate from `failed` on purpose: a file that would not compile ran no
+tests at all — counting it as one failed test understates it, and dropping it makes a
+broken suite look green. In `--json` mode nothing but the document reaches stdout.
+
 ## Rules for these surfaces
 
 - **Schema is versioned.** Bump `schema` on a breaking change; additive fields do not
@@ -125,6 +149,8 @@ to distinguish "crashed" from "rejected". Exit code is 1 when any diagnostic is 
 | editors / tree-sitter / highlighters | `lang --json` | cannot import TypeScript at all |
 | package tooling, doc sites | `api --json` | works on any package, not just std |
 | CI annotations, non-LSP editors | `check --json` | the alternative is parsing Elm-style terminal output |
+| CI dashboards, flake trackers | `test --json` | the ✓/✗ log lines were never a contract |
+| certification workflows | `prove --json`, `safety --json` | a proof verdict per obligation is the artifact, not a table |
 
 Two things still import the compiler on purpose:
 

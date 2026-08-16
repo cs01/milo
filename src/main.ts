@@ -18,9 +18,9 @@ import { generateHeader } from "./headergen";
 import { writeStdout } from "./stdout";
 import { formatDiagnostic, ParseError, RESET, BOLD, GREEN, DIM, type WarningConfig, type Diagnostic } from "./diagnostics";
 import { type TargetInfo, getHostTarget, resolveTarget, listTargets, UnsupportedHostError } from "./target";
-import { generateVerificationConditions, formatVerifyReport, proveWithZ3, formatProveReport } from "./verify";
+import { generateVerificationConditions, formatVerifyReport, proveWithZ3, formatProveReport, proveJson } from "./verify";
 import { proveWithMilo } from "./prove-milo";
-import { parseSafetyLevel, checkSafetyCompliance, formatSafetyReport, listSafetyLevels } from "./safety";
+import { parseSafetyLevel, checkSafetyCompliance, formatSafetyReport, safetyJson, listSafetyLevels } from "./safety";
 import { versionString } from "./version";
 import { extractFlowFacts, formatFlowFacts } from "./wcet";
 import { estimateLoopCycles, formatCycleEstimate } from "./wcet-cycles";
@@ -1232,13 +1232,22 @@ async function mapPool<T>(items: T[], limit: number, fn: (item: T, index: number
 
 type TestOutcome = { file: string; name: string; ok: boolean; ms: number; output: string };
 
+// `milo test [--json]`. The JSON form (schema 1) is a PUBLIC surface: a CI dashboard, a
+// flake tracker or a bisect script wants per-test records, and the alternative is scraping
+// a log whose ✓/✗ lines were never a contract.
+export const TEST_JSON_SCHEMA = 1;
+
 async function runTests(
   testFiles: string[],
   target: TargetInfo,
   optFlag: string,
   warningConfig?: WarningConfig,
   filter?: string,
+  json = false,
 ) {
+  // In JSON mode nothing but the payload may reach stdout, or the consumer parses a log
+  // line as the document.
+  const log = (line: string) => { if (!json) console.log(line); };
   let re: RegExp | null = null;
   if (filter) {
     try { re = new RegExp(filter); } catch { re = null; }
@@ -1266,7 +1275,7 @@ async function runTests(
       continue;
     }
     for (const r of found.rejected) {
-      console.log(`${DIM}  ${file}: skipping ${r.name} — ${r.why}${RESET}`);
+      log(`${DIM}  ${file}: skipping ${r.name} — ${r.why}${RESET}`);
     }
     const selected = found.tests.filter(name => matches(file, name));
     skipped += found.tests.length - selected.length;
@@ -1280,7 +1289,7 @@ async function runTests(
       continue;
     }
 
-    console.log(`\n${BOLD}${file}${RESET}`);
+    log(`\n${BOLD}${file}${RESET}`);
     const fileOutcomes: TestOutcome[] = new Array(selected.length);
     try {
       await mapPool(selected, jobs, async (name, i) => {
@@ -1297,10 +1306,10 @@ async function runTests(
     // Printed after the pool so concurrent tests cannot interleave their lines.
     for (const o of fileOutcomes) {
       if (!o) continue;
-      console.log(o.ok ? `  ${GREEN}✓${RESET} ${o.name} ${DIM}[${o.ms}ms]${RESET}`
-                       : `  ✗ ${o.name} ${DIM}[${o.ms}ms]${RESET}`);
+      log(o.ok ? `  ${GREEN}✓${RESET} ${o.name} ${DIM}[${o.ms}ms]${RESET}`
+               : `  ✗ ${o.name} ${DIM}[${o.ms}ms]${RESET}`);
       if (!o.ok && o.output.trim()) {
-        for (const line of o.output.trimEnd().split("\n")) console.log(`      ${line}`);
+        for (const line of o.output.trimEnd().split("\n")) log(`      ${line}`);
       }
       outcomes.push(o);
     }
@@ -1309,6 +1318,28 @@ async function runTests(
   const passed = outcomes.filter(o => o.ok).length;
   const failed = outcomes.length - passed;
   const elapsed = ((Date.now() - started) / 1000).toFixed(2);
+
+  if (json) {
+    writeStdout(JSON.stringify({
+      schema: TEST_JSON_SCHEMA,
+      ok: failed === 0 && compileErrors.length === 0,
+      passed,
+      failed,
+      // A file that would not compile ran no tests at all: reporting it as a failed test
+      // would understate it, and dropping it would make a broken suite look green.
+      compileErrors,
+      filteredOut: skipped,
+      durationMs: Date.now() - started,
+      tests: outcomes.map(o => ({
+        file: o.file, name: o.name, ok: o.ok, ms: o.ms,
+        ...(o.ok ? {} : { output: o.output }),
+      })),
+    }, null, 2) + "\n");
+    if (failed > 0 || compileErrors.length > 0) process.exit(1);
+    if (outcomes.length === 0 && filter) process.exit(1);
+    return;
+  }
+
   console.log("");
   if (compileErrors.length) {
     for (const c of compileErrors) console.log(`${c.file}: compile error\n  ${c.message.split("\n").join("\n  ")}`);
@@ -2118,7 +2149,7 @@ async function main() {
       }
     }
     if (files.length === 0) { console.error("no test files found"); process.exit(1); }
-    await runTests(files, target, testOpt, testWc, testFilter);
+    await runTests(files, target, testOpt, testWc, testFilter, testArgs.includes("--json"));
     return;
   }
 
@@ -2184,7 +2215,8 @@ async function main() {
     // opts into z3 for the theories std/smt doesn't yet model.
     const useZ3 = rest.includes("--solver=z3") || rest.includes("--z3");
     const pr = useZ3 ? proveWithZ3(vcs) : proveWithMilo(vcs);
-    console.log(formatProveReport(pr));
+    if (rest.includes("--json")) writeStdout(proveJson(pr));
+    else console.log(formatProveReport(pr));
     if (pr.failed > 0) process.exit(1);
     return;
   }
@@ -2199,7 +2231,8 @@ async function main() {
     const src = readFileSync(source!, "utf-8");
     const program = parseCheckProgram(src, target, source!, warningConfig);
     const violations = checkSafetyCompliance(program, level);
-    console.log(formatSafetyReport(violations, level));
+    if (rest.includes("--json")) writeStdout(safetyJson(violations, level, source!));
+    else console.log(formatSafetyReport(violations, level));
     if (violations.some(v => v.severity === "error")) process.exit(1);
     return;
   }

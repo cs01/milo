@@ -769,6 +769,27 @@ function walkExprs(stmts: Stmt[], onExpr: (e: Expr) => void, onStmt?: (s: Stmt) 
   st(stmts);
 }
 
+// Machine-readable compliance report (schema 1). A safety profile is exactly the kind of
+// result that gets pasted into a certification artifact or gated on in CI, and both of
+// those want records, not a rendered report.
+export const SAFETY_JSON_SCHEMA = 1;
+
+export function safetyJson(violations: SafetyViolation[], level: SafetyLevel, file: string): string {
+  return JSON.stringify({
+    schema: SAFETY_JSON_SCHEMA,
+    level,
+    file,
+    ok: !violations.some(v => v.severity === "error"),
+    violations: violations.map(v => ({
+      rule: v.rule,
+      severity: v.severity,
+      message: v.message,
+      file: v.span?.file ?? file,
+      ...(v.span ? { line: v.span.line, col: v.span.col } : {}),
+    })),
+  }, null, 2) + "\n";
+}
+
 export function formatSafetyReport(violations: SafetyViolation[], level: SafetyLevel): string {
   if (violations.length === 0) {
     return `safety check passed: ${level} — all constraints satisfied`;

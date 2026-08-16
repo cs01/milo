@@ -101,8 +101,16 @@ test("a failed static call reports the real mistake, not 'unknown enum'", () => 
   expect(errorFor(unknown)).toBe("unknown type 'Frobnicator'");
 });
 
+// The type arguments of a bare static are inferred from the ARGUMENTS, so this hint is
+// now reserved for the shape where there is nothing to infer from. `Box.make(1)` used to
+// land here and now compiles — see tests/fixtures/genericStaticInfer.milo.
 test("a bare static call on a generic type says to spell the type arguments", () => {
-  const src = `struct Box<T> { v: T }\nimpl Box<T> { fn make(v: T): Box<T> { return Box { v: v } } }\nfn main() {\n  let b = Box.make(1)\n  print(1)\n}\n`;
+  const src = `struct Box<T> { v: i64 }\nimpl Box<T> { fn make(): Box<T> { return Box { v: 0 } } }\nfn main() {\n  let b = Box.make()\n  print(1)\n}\n`;
   expect(hintFor(src)).toContain("is generic");
   expect(hintFor(src)).toContain("Box<T>.make");
+});
+
+test("a bare static call whose arguments pin the type parameters needs no hint", () => {
+  const src = `struct Box<T> { v: T }\nimpl Box<T> { fn make(v: T): Box<T> { return Box { v: v } } }\nfn main() {\n  let b = Box.make(1)\n  print(b.v)\n}\n`;
+  expect(errorFor(src)).toBeUndefined();
 });

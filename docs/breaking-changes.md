@@ -11,6 +11,27 @@ last-verified: 2026-08-14
 Source-level breaks, newest first. Milo is pre-1.0 and does not promise
 compatibility, but every break belongs here with the migration spelled out.
 
+## Closure parameters that take ownership say `move` (2026-08-15)
+
+**`spawnOsThreadDetached`, `Task.spawn`, `Task.spawnWithStack` and `Promise.blocking`
+now take `move () => T` rather than `() => T`.**
+
+    pub fn spawnOsThreadDetached(f: () => void): void        // was
+    pub fn spawnOsThreadDetached(f: move () => void): void   // now
+
+**Existing call sites do not change.** A `move` parameter accepts every value a plain
+one did — a bare function, a by-reference closure, a `move` closure — because
+transferring something that owns nothing loses nothing. The spelling is what these four
+always meant: each hands the closure to a task or a thread that outlives the call.
+
+What DOES change is your own signatures, if you wrote a function that stores a closure
+and lives past the call. `move (T) => R` is a distinct type from `(T) => R` and is not
+`Copy`: an owning closure holds a heap environment, so there is exactly one of it, and
+duplicating one would give two owners of that environment. Passing it on transfers it,
+and using it afterwards is a use-after-move error rather than a silent second owner.
+That restriction is what makes it possible to release a closure's captures at all —
+before it, every capturing closure leaked them.
+
 ## `std/pty`'s command-line helpers are private (2026-08-15)
 
 **`std/pty`'s `buildCmdLine` and `quoteArg` are now `_ptyBuildCmdLine` and

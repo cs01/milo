@@ -12,6 +12,9 @@ export interface WarningInfo {
 }
 
 export const WARNINGS: WarningInfo[] = [
+  // Reported when `--expect=<name>` was given and that warning never fired. On by
+  // default: an expectation nobody is told about is just a quieter `--allow`.
+  { name: "unfulfilled-expectation" },
   { name: "bare-embedfile" },
   { name: "bare-targetos" },
   { name: "external-linkage-not-pub" },

@@ -18,6 +18,10 @@ export interface Diagnostic {
 export interface WarningConfig {
   denied: Set<string>;
   allowed: Set<string>;
+  // `--expect=<name>`: suppress the warning AND report if it stops occurring. An `allow`
+  // that outlives its cause is silent forever and nothing ever deletes it; an `expect`
+  // deletes itself the moment the code it excused is fixed.
+  expected?: Set<string>;
   // Byte threshold for the `large-stack-array` lint (`--max-stack-array`).
   // Undefined → the checker's built-in default (512 KiB).
   maxStackArrayBytes?: number;

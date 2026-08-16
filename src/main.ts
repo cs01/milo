@@ -1,6 +1,7 @@
 // CLI driver: subcommand dispatch for build/run/emit-*/test/fmt/lsp and the rest of
 // the surface described in src/cli-help.ts.
 import { readFileSync, writeFileSync, unlinkSync, existsSync, readdirSync, mkdirSync, statSync } from "fs";
+import { WARNING_NAMES } from "./warnings";
 import { execSync, spawnSync, spawn } from "child_process";
 import { guardedRun, monitorPidTree, DEFAULT_MEM_MB } from "../scripts/guard";
 import { fileURLToPath } from "url";
@@ -1482,6 +1483,8 @@ function parseArgs(args: string[]): { output: string | null; source: string | nu
   const rest: string[] = [];
   const denied = new Set<string>();
   const allowed = new Set<string>();
+  // `--expect=<name>`: suppress like `--allow`, but report if the warning stops firing.
+  const expected = new Set<string>();
   let maxStackArrayBytes: number | undefined;
   let overflowChecks: boolean | null = null;
   let contractChecks: boolean | null = null;
@@ -1524,6 +1527,8 @@ function parseArgs(args: string[]): { output: string | null; source: string | nu
     else if (args[i] === "--deny-all") { denied.add("*"); }
     else if (args[i].startsWith("--deny=")) { denied.add(args[i].slice(7)); }
     else if (args[i] === "--deny" && i + 1 < args.length) { denied.add(args[++i]); }
+    else if (args[i].startsWith("--expect=")) { expected.add(args[i].slice(9)); }
+    else if (args[i] === "--expect" && i + 1 < args.length) { expected.add(args[++i]); }
     else if (args[i].startsWith("--allow=")) { allowed.add(args[i].slice(8)); }
     else if (args[i] === "--allow" && i + 1 < args.length) { allowed.add(args[++i]); }
     else if (args[i].startsWith("--max-stack-array=") || args[i] === "--max-stack-array") {
@@ -1546,7 +1551,19 @@ function parseArgs(args: string[]): { output: string | null; source: string | nu
     else if (!source) { source = args[i]; }
     else { rest.push(args[i]); }
   }
-  return { output, source, rest, optFlag, warningConfig: { denied, allowed, maxStackArrayBytes }, noEntry, safetyLevel, sanitize, targetName, emitHeader, emitDebug, heapSize, overflowChecks, contractChecks, staticDeps, emitAll, emitSpans, stripPanicLocations };
+  // A misspelled warning name used to be accepted in silence, which is the failure this
+  // flag family is least able to afford: `--deny=unused-varibale` looked like a project
+  // enforcing a lint and enforced nothing. `*` is `--deny-all`, not a name.
+  for (const [flag, names] of [["--deny", denied], ["--allow", allowed], ["--expect", expected]] as const) {
+    for (const n of names) {
+      if (n === "*" || WARNING_NAMES.includes(n)) continue;
+      const near = WARNING_NAMES.filter(w => w.startsWith(n.slice(0, 3)) || n.startsWith(w.slice(0, 3)));
+      console.error(`error: unknown warning '${n}' in ${flag}=${n}`
+        + (near.length ? `\n  did you mean: ${near.join(", ")}?` : `\n  known warnings: ${WARNING_NAMES.join(", ")}`));
+      process.exit(1);
+    }
+  }
+  return { output, source, rest, optFlag, warningConfig: { denied, allowed, expected, maxStackArrayBytes }, noEntry, safetyLevel, sanitize, targetName, emitHeader, emitDebug, heapSize, overflowChecks, contractChecks, staticDeps, emitAll, emitSpans, stripPanicLocations };
 }
 
 const SKILL_TEXT = `# Milo Language Guide

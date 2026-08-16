@@ -123,6 +123,7 @@ export const OPTIONS: CliOption[] = [
   { flag: "--cgus=<n>", help: ["codegen units compiled in parallel (default: auto, 1 for --release/-g)"] },
   { flag: "--deny=<warning>", help: ["treat warning as error (e.g. --deny=unused-variable)"] },
   { flag: "--allow=<warning>", help: ["suppress warning (e.g. --allow=unused-result)"] },
+  { flag: "--expect=<warning>", help: ["suppress it, and report if it stops occurring (e.g. --expect=index-clone)"] },
   {
     flag: "--deny-all",
     help: [

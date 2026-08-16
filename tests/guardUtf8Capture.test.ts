@@ -28,7 +28,7 @@ test("a UTF-8 character split across chunks is captured intact", async () => {
     `setTimeout(() => process.stdout.write(full.subarray(cut)), 60);`,
   ].join("\n"));
 
-  const r = await guardedRun(process.execPath, [script], { virtualMemMb: 2048, timeoutSec: 30 });
+  const r = await guardedRun(process.execPath, [script], { virtualMemMb: 2048, timeoutMs: 30_000 });
 
   expect({
     stdout: r.stdout.trim(),

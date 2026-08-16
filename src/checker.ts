@@ -449,30 +449,33 @@ export class TypeChecker {
 
   constructor(warningConfig?: WarningConfig) {
     const config = warningConfig ?? { denied: new Set(), allowed: new Set() };
-    if (!config.denied.has("unused-move")) config.allowed.add("unused-move");
+    // `--expect=<name>` counts as asking for the warning, exactly as `--deny` does.
+    // Without this an off-by-default lint stayed off, never fired, and the expectation
+    // then reported itself unfulfilled against code that does contain the finding.
+    if (!config.denied.has("unused-move") && !config.expected?.has("unused-move")) config.allowed.add("unused-move");
     // unverified-extern is OFF unless asked for: pairing an `extern struct` with a local
     // .c peer (no header) is a legitimate, common FFI shape — this repo's own ABI-test
     // fixtures do exactly that — and @cLayout has no header to name there. A lint that
     // fires on code that cannot be fixed is one users turn off wholesale, taking the
     // cases that *are* fixable with it. `--deny=unverified-extern` opts a project in
     // (e.g. a binding crate or a safety-critical build where every layout must be pinned).
-    if (!config.denied.has("unverified-extern")) config.allowed.add("unverified-extern");
+    if (!config.denied.has("unverified-extern") && !config.expected?.has("unverified-extern")) config.allowed.add("unverified-extern");
     // unused-import is OFF unless asked for. An import can be needed without the
     // entry file ever naming the symbol: node-milo's main.milo imports binding symbols
     // purely so those modules get compiled and linked. Warning by default would fire on
     // every one of them, and the fix ("just delete it") would break the build — so the
     // projects that don't do that opt in.
-    if (!config.denied.has("unused-import")) config.allowed.add("unused-import");
+    if (!config.denied.has("unused-import") && !config.expected?.has("unused-import")) config.allowed.add("unused-import");
     // large-stack-array is OFF unless asked for. Big fixed-size locals are a real
     // stack-overflow footgun, but plenty are intentional (main-thread framebuffers
     // that work fine), so warning by default would nag every graphics program. The
     // always-on hover note already surfaces the size; projects opt into the hard lint.
-    if (!config.denied.has("large-stack-array")) config.allowed.add("large-stack-array");
+    if (!config.denied.has("large-stack-array") && !config.expected?.has("large-stack-array")) config.allowed.add("large-stack-array");
     // index-clone is OFF unless asked for, pending the count below. Binding an element
     // out of a container is a normal thing to write and the clone is what keeps the
     // container intact, so most hits are working code paying a cost the author may well
     // accept. `--deny=index-clone` turns it into the audit it is meant to be.
-    if (!config.denied.has("index-clone")) config.allowed.add("index-clone");
+    if (!config.denied.has("index-clone") && !config.expected?.has("index-clone")) config.allowed.add("index-clone");
     // unused-unsafe is on by default but fires only in user code (see currentFnIsUser):
     // the permissive safe-extern rule makes most stdlib unsafe blocks technically
     // removable, so warning on imported std would flood every compile.
@@ -631,7 +634,16 @@ export class TypeChecker {
     }
   }
 
+  // Names given to `--expect=` that actually fired, so an expectation that never did can
+  // be reported. Recorded BEFORE the allow/deny decision, because whether the finding
+  // occurred is a different question from whether it was shown.
+  private firedWarnings = new Set<string>();
+
   private warn(code: string, msg: string, span?: Span, hint?: string, len?: number) {
+    if (this.warningConfig.expected?.has(code)) {
+      this.firedWarnings.add(code);
+      return; // expected findings are suppressed, exactly like an allow
+    }
     if (this.warningConfig.allowed.has(code)) return;
     const severity = (this.warningConfig.denied.has(code) || this.warningConfig.denied.has("*")) ? "error" : "warning";
     this.diagnostics.push({ severity, span, len, message: msg, hint, code });
@@ -2188,6 +2200,16 @@ export class TypeChecker {
     // Also needs the finished maps: `closureCaptures` is filled as each closure body is
     // checked, and the auto-`move` promotions have all settled by now.
     this.checkEscapingClosures(program);
+
+    // An expectation that never fired means the code it excused was fixed and the
+    // suppression outlived its cause. Reported here, after every warning has had its
+    // chance to fire.
+    for (const name of this.warningConfig.expected ?? []) {
+      if (this.firedWarnings.has(name)) continue;
+      this.warn("unfulfilled-expectation",
+        `'--expect=${name}' was given but no '${name}' warning was reported`, undefined,
+        `the code this suppression excused looks fixed: drop the flag, or switch it to '--allow=${name}' if you meant to silence it unconditionally`);
+    }
 
     // File-level `pub` visibility: a reference to a non-`pub` decl defined in
     // another file is an error. Run last so it never masks a more basic type error.

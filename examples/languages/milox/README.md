@@ -43,7 +43,7 @@ milo run examples/languages/milox/main.milo -- dynamic   # the program above
 milo run examples/languages/milox/main.milo -- embed     # milox inside a host program
 milo run examples/languages/milox/main.milo -- gc-bug    # a deliberately broken collector
 milo run examples/languages/milox/main.milo -- forge     # 2M forged object references
-milo run examples/languages/milox/main.milo -- scripts/dynamic.sl --disasm
+milo run examples/languages/milox/main.milo -- scripts/dynamic.milox --disasm
 ```
 
 ## The value

@@ -222,6 +222,10 @@ impl VM {
     fn setGcEnabled(self: &mut Self, on: bool) {
         self.gcEnabled = on
     }
+    fn setStressGc(self: &mut Self, on: bool) {
+        self.heap.setStress(on)
+    }
+
     fn setBuggyGc(self: &mut Self, on: bool) {
         self.heap.setBuggy(on)
     }
@@ -666,6 +670,14 @@ impl VM {
                 NewList => {
                     let n = self.readU16(fi, ip)
                     ip = ip + 2
+                    // Collect BEFORE the elements come off the stack. Popping first
+                    // and collecting after was a live bug: the popped values are no
+                    // longer roots, so a collection triggered here could free a
+                    // freshly built nested element and leave the new list holding a
+                    // stale box. The generation check turns that into a caught
+                    // dangling reference rather than a use-after-free, which is
+                    // exactly why it was survivable long enough to find.
+                    self.maybeCollect()
                     var xs: Vec<Value> = Vec.new()
                     var i: i64 = 0
                     while i < n {
@@ -677,7 +689,6 @@ impl VM {
                         let _ = self.pop()
                         i = i + 1
                     }
-                    self.maybeCollect()
                     let v = self.heap.allocList(xs)
                     self.push(v)
                 }
@@ -896,6 +907,9 @@ impl VM {
                 NewDict => {
                     let n = self.readU16(fi, ip)
                     ip = ip + 2
+                    // Collect while the entries are still on the stack and still
+                    // roots. Doing it after the pops would be the NewList bug.
+                    self.maybeCollect()
                     // The stack holds key,value,key,value,... with the first
                     // pair deepest, which is source order.
                     let start = self.stack.len - 2 * n
@@ -923,9 +937,6 @@ impl VM {
                         self.runtimeError("dictionary key must be a string", fi, here)
                         return false
                     }
-                    // No maybeCollect here: the entries are held only in `d`,
-                    // which is not a root, so a collection between popping
-                    // them and allocating the dict could free them.
                     let v = self.heap.allocDict(d)
                     self.push(v)
                 }

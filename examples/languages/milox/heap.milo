@@ -54,6 +54,12 @@ pub struct Heap {
     // When true, the sweep also frees one *reachable* object. This is the
     // deliberate collector bug the demo shows being caught.
     buggy: bool,
+    // Collect on every single allocation. This is clox's DEBUG_STRESS_GC, and it
+    // exists because collector bugs are timing bugs: at a sane threshold they hit
+    // a narrow window and hide for thousands of runs. Ordering `NewList` to pop
+    // its elements before collecting was such a bug — invisible under the default
+    // schedule, instant under this one.
+    stress: bool,
 }
 
 impl Heap {
@@ -73,6 +79,7 @@ impl Heap {
             gcRuns: 0,
             danglingCaught: 0,
             buggy: false,
+            stress: false,
         }
     }
 
@@ -128,6 +135,10 @@ impl Heap {
     fn danglingCount(self: &Self): i64 {
         return self.danglingCaught
     }
+    fn setStress(self: &mut Self, b: bool) {
+        self.stress = b
+    }
+
     fn setBuggy(self: &mut Self, b: bool) {
         self.buggy = b
     }
@@ -141,6 +152,9 @@ impl Heap {
     // frame or a global table looks like.
 
     fn gcShouldRun(self: &Self): bool {
+        if self.stress {
+            return true
+        }
         return self.allocs >= self.nextGc
     }
 

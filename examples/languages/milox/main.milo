@@ -75,7 +75,7 @@ while (i < 400) {
 print keep[0];
 "
 
-fn runSource(src: string, disasm: bool, stats: bool, buggyGc: bool): bool {
+fn runSource(src: string, disasm: bool, stats: bool, buggyGc: bool, stressGc: bool): bool {
     var heap: Heap = Heap.new()
     let result = compile(src, heap)
     if !result.ok {
@@ -89,6 +89,7 @@ fn runSource(src: string, disasm: bool, stats: bool, buggyGc: bool): bool {
     }
     var vm: VM = VM.new(heap, result.functions)
     vm.setBuggyGc(buggyGc)
+    vm.setStressGc(stressGc)
     let t0 = now()
     let ok = vm.run()
     let d = since(t0)
@@ -273,7 +274,7 @@ fn demoEmbed() {
 fn usage() {
     print("milox — a small language with an 8-byte nan-boxed value")
     print("")
-    print("  milox <file.sl>       run a script")
+    print("  milox <file.milox>    run a script")
     print("  milox demo            a tour of the language")
     print("  milox dynamic         heterogeneous lists, retyped variables, functions as values")
     print("  milox embed           embed milox in a host program and pass values across")
@@ -282,18 +283,23 @@ fn usage() {
     print("")
     print("  --disasm              dump bytecode before running")
     print("  --stats               print instruction, allocation and GC counts")
+    print("  --gc-stress           collect on every allocation (clox's DEBUG_STRESS_GC)")
 }
 
 fn main() {
     let argv = args()
     var disasm = false
     var stats = false
+    var stressGc = false
     var target = ""
     var i: i64 = 1
     while i < argv.len {
         let a = argv[i]
         if a == "--disasm" {
             disasm = true
+        } 
+        else if a == "--gc-stress" {
+            stressGc = true
         } 
         else if a == "--stats" {
             stats = true
@@ -312,11 +318,11 @@ fn main() {
     }
 
     if target == "demo" {
-        let _ = runSource(DEMO, disasm, stats, false)
+        let _ = runSource(DEMO, disasm, stats, false, stressGc)
         return
     }
     if target == "dynamic" {
-        let _ = runSource(DYNAMIC.clone(), disasm, stats, false)
+        let _ = runSource(DYNAMIC.clone(), disasm, stats, false, stressGc)
         return
     }
     if target == "embed" {
@@ -330,7 +336,7 @@ fn main() {
     if target == "gc-bug" {
         print("running with a deliberately broken collector that frees one reachable object")
         print("")
-        let ok = runSource(GC_BUG_PROGRAM, disasm, true, true)
+        let ok = runSource(GC_BUG_PROGRAM, disasm, true, true, stressGc)
         print("")
         if ok {
             print("the collector bug did not happen to hit a live object this run")
@@ -343,7 +349,7 @@ fn main() {
     }
     match readFile(target) {
         Ok(src) => {
-            let _ = runSource(src, disasm, stats, false)
+            let _ = runSource(src, disasm, stats, false, stressGc)
         }
         Err(e) => {
             print("milox: cannot read '" + target + "'")

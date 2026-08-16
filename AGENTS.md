@@ -147,3 +147,10 @@ If none fits, write the gate before you write the claim. Two rules that follow f
   a stale grammar for months).
 - **A generator's CLI half must be behind `if (import.meta.main)`** — a test that imports
   it and thereby rewrites the file it is checking proves nothing.
+
+And the corollary for *tools*: read the compiler through its machine-readable surfaces
+(`milo api --json`, `milo lang --json`, `milo check --json`, `emit-ast`, `emit-hir`), not
+by importing `src/*.ts`. An importer can only ever be a file inside this repo written in
+this repo's current host language — which is TypeScript today and is planned to be Rust or
+Milo. See [docs/json-api.md](docs/json-api.md) for the payloads and the rules that keep
+them honest.

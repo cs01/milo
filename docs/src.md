@@ -38,6 +38,7 @@ Source → Lexer → Parser → AST → Resolver (imports) → AST (merged) → 
 | `src/fmtbin.ts` | Resolves the one milo-fmt binary that every formatter entry point shells out to (`milo fmt`, the LSP's textDocument/formatting handler, the pre-commit hook). |
 | `src/headergen.ts` | C header generator for `milo build-lib`. |
 | `src/hir.ts` | Typed HIR — every expression carries its resolved TypeKind. |
+| `src/lang-info.ts` | `milo lang [--json]` — the language's own vocabulary, as data. |
 | `src/lexer.ts` | Tokenizer: source text -> the token stream the parser consumes. |
 | `src/lower.ts` | AST + CheckResult → HIRModule lowering pass. |
 | `src/lsp.ts` | milod — Milo Language Server Speaks LSP over JSON-RPC/stdio. |
@@ -51,6 +52,7 @@ Source → Lexer → Parser → AST → Resolver (imports) → AST (merged) → 
 | `src/resolver.ts` | resolves import declarations by recursively parsing imported files and merging all declarations into a single program |
 | `src/safety.ts` | Compiler-enforced safety profiles for domain-specific certification standards |
 | `src/stdlibBundle.ts` | Shared read-through access to the stdlib: disk first, embedded bundle as a fallback. |
+| `src/stdout.ts` | Synchronous stdout, for command output that a caller pipes. |
 | `src/suggest.ts` | "Did you mean ...?" hints for the checker. |
 | `src/target.ts` | host platform detection for platform-specific stdlib resolution, plus cross-compilation target definitions (incl. |
 | `src/tokens.ts` | Token types and the keyword lists the lexer, parser and generated editor grammar all read from. |
@@ -58,6 +60,7 @@ Source → Lexer → Parser → AST → Resolver (imports) → AST (merged) → 
 | `src/verify.ts` | Verification condition generator — produces SMT-LIB2 from contract annotations and symbolically executes function bodies to prove postconditions. |
 | `src/version.ts` | Compiler version, reported by `milo --version`. |
 | `src/visibility.ts` | File-level visibility enforcement for `pub`. |
+| `src/warnings.ts` | The warning names `--deny=` / `--allow=` accept, and which of them are off by default. |
 | `src/wcet-cycles.ts` | Static WCET cycle estimation for Cortex-M3 — the "real WCET" step. |
 | `src/wcet.ts` | WCET flow-fact extraction. |
 <!-- END GENERATED INDEX -->

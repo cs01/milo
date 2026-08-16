@@ -130,7 +130,7 @@
       "patterns": [
         {
           "name": "support.type.primitive.milo",
-          "match": "\\b(i8|i16|i32|i64|int|u8|byte|u16|u32|u64|f32|f64|float|bool|void|string)\\b"
+          "match": "\\b(bool|byte|f32|f64|float|i16|i32|i64|i8|int|string|u16|u32|u64|u8|void)\\b"
         },
         {
           "name": "support.type.builtin.milo",

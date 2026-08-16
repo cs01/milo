@@ -11,9 +11,20 @@
 // what cannot drift is the membership — SCOPES must partition KEYWORDS ∪ SOFT_KEYWORDS
 // exactly, and assignPartition throws if it does not.
 import { readFileSync, writeFileSync } from "fs";
+import { execFileSync } from "child_process";
 import { join } from "path";
-import { KEYWORDS, SOFT_KEYWORDS } from "../src/tokens";
-import { PRIMITIVE_TYPE_NAMES } from "../src/types";
+
+// Read the vocabulary through `milo lang --json`, not by importing src/tokens.ts. An
+// editor grammar is the canonical out-of-repo consumer — tree-sitter, Zed, Neovim and the
+// docs site all need exactly this list and none of them can import TypeScript — so this
+// generator uses the same door they do, which is the only way the door stays working.
+const lang = JSON.parse(execFileSync(
+  "bun", ["run", join(import.meta.dir, "..", "src", "main.ts"), "lang", "--json"],
+  { encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"] },
+));
+const KEYWORDS: string[] = lang.keywords;
+const SOFT_KEYWORDS: string[] = lang.softKeywords;
+const PRIMITIVE_TYPE_NAMES: string[] = lang.primitiveTypes;
 
 const OUT = join(import.meta.dir, "..", "editors", "vscode", "syntaxes", "milo.tmLanguage.json");
 

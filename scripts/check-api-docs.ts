@@ -15,13 +15,34 @@
 // declarations, and `struct` listings. Example programs in the same page are prose and
 // tests/docs.test.ts owns whether they compile.
 import { readFileSync, readdirSync, existsSync } from "fs";
+import { execFileSync } from "child_process";
 import { join } from "path";
-import { stdDocsByModule } from "../src/api-search";
-import { BUILTIN_MEMBERS } from "../src/builtin-members";
-import { STDLIB_DIR } from "../src/stdlibBundle";
 
 const ROOT = join(import.meta.dir, "..");
 const SITE = join(ROOT, "docs", "site", "stdlib");
+
+// Read the compiler through its published JSON surface, not by importing its TypeScript.
+// This tool answers "does the documentation match the language", which is a question any
+// package's docs should be able to ask — and an importer can only ever be a file inside
+// this repo, written in this repo's host language. `milo api --json` and
+// `milo lang --json` are the seam: the day the compiler is rewritten in Rust or in Milo,
+// this keeps working unchanged.
+// Memoized: check() runs checkOne once per page, and spawning the compiler per page made
+// the gate 50x slower than the work it does.
+const cache = new Map<string, any>();
+function milo(args: string[]): any {
+  const key = args.join(" ");
+  const hit = cache.get(key);
+  if (hit) return hit;
+  const out = execFileSync("bun", ["run", join(ROOT, "src", "main.ts"), ...args], {
+    encoding: "utf-8",
+    maxBuffer: 64 * 1024 * 1024,   // the full std dump is ~800 KB
+    stdio: ["pipe", "pipe", "pipe"],
+  });
+  const parsed = JSON.parse(out);
+  cache.set(key, parsed);
+  return parsed;
+}
 
 // Pages whose listings do not match the API yet, measured 2026-08-15. A RATCHET: a page
 // may only be REMOVED. Rewriting a page's signatures is prose work — the headings, the
@@ -37,24 +58,40 @@ interface Entry { name: string; signature: string }
 function apiByModule(): Map<string, Entry[]> {
   const out = new Map<string, Entry[]>();
   const add = (mod: string, e: Entry) => out.set(mod, [...(out.get(mod) ?? []), e]);
-  for (const [mod, body] of stdDocsByModule()) {
+  for (const e of milo(["api", "--json"]).entries) {
+    if (e.kind !== "function") continue;
     // Platform arms (regex.darwin, crypto.linux) are one importable module behind one
     // name; the site documents `std/regex`, so the arms fold together here.
-    const base = mod.split(".")[0]!;
-    for (const m of body.matchAll(/### `([^`]+)`\n\n```milo\n([^\n]+)\n```/g)) {
-      add(base, { name: m[1]!, signature: m[2]! });
-    }
+    const base = e.module.replace(/^std\//, "").split(".")[0]!;
+    add(base, { name: e.name, signature: e.signature });
   }
   // The string page documents methods the CHECKER dispatches, not functions in
   // std/string.milo — without this the whole page reads as "no such function" and the
-  // one real bug in it (indexOf returns Option<i64>, the page says i64) stays buried.
-  for (const [receiver, members] of Object.entries(BUILTIN_MEMBERS)) {
+  // one real bug in it (indexOf returns Option<i64>, the page said i64) stays buried.
+  const lang = milo(["lang", "--json"]);
+  for (const [receiver, members] of Object.entries(lang.builtinMembers) as [string, any[]][]) {
     for (const m of members) {
-      const sig = m.sig.startsWith("(")
-        ? `fn ${m.name}(self: &${receiver}, ${m.sig.slice(1)}`.replace("(self: &" + receiver + ", )", "(self: &" + receiver + ")")
-        : `fn ${m.name}(self: &${receiver})${m.sig}`;
+      const sig = m.signature.startsWith("(")
+        ? `fn ${m.name}(self: &${receiver}, ${m.signature.slice(1)}`
+        : `fn ${m.name}(self: &${receiver})${m.signature}`;
       add(receiver, { name: m.name, signature: sig.replace(", )", ")") });
     }
+  }
+  return out;
+}
+
+// Struct field lists come from the same payload: `milo api --json` carries a type
+// entry's fields, so this tool never reads std/*.milo. The json page published
+// `struct Json { raw, start, end }` against a real six-field parse tree — a listing is as
+// much a claim as a signature is, and it was the one nothing looked at.
+function structsByModule(): Map<string, Map<string, string[]>> {
+  const out = new Map<string, Map<string, string[]>>();
+  for (const e of milo(["api", "--json"]).entries) {
+    if (e.kind !== "type" || !e.fields) continue;
+    const mod = e.module.replace(/^std\//, "").split(".")[0]!;
+    const structs = out.get(mod) ?? new Map<string, string[]>();
+    structs.set(e.name, e.fields.map((f: any) => f.name));
+    out.set(mod, structs);
   }
   return out;
 }
@@ -84,7 +121,8 @@ function normalize(sig: string): string {
 }
 
 // Split on top-level commas only — `HashMap<string, i64>` and `(&Request) => Response`
-// both carry commas that are not parameter separators.
+// both carry commas that are not parameter separators. (The compiler does this too, in
+// its JSON payload; the doc side is raw markdown, so it still needs the scan here.)
 function splitParams(text: string): string[] {
   const out: string[] = [];
   let depth = 0, start = 0;
@@ -100,27 +138,6 @@ function splitParams(text: string): string[] {
 }
 
 const baseName = (n: string) => n.split(".").pop()!;
-
-// Struct field lists, read straight from the std sources. The json page published
-// `struct Json { raw, start, end }` against a real six-field parse tree — a listing is
-// as much a claim as a signature is, and it was the one nothing looked at.
-function structsByModule(): Map<string, Map<string, string[]>> {
-  const out = new Map<string, Map<string, string[]>>();
-  for (const file of readdirSync(join(STDLIB_DIR, "std"))) {
-    if (!file.endsWith(".milo")) continue;
-    const mod = file.replace(/\.milo$/, "").split(".")[0]!;
-    const text = readFileSync(join(STDLIB_DIR, "std", file), "utf-8");
-    const structs = out.get(mod) ?? new Map<string, string[]>();
-    for (const m of text.matchAll(/^(?:pub )?(?:extern )?struct ([A-Za-z_][A-Za-z0-9_]*)(?:<[^>]*>)?\s*\{([^}]*)\}/gm)) {
-      const fields = m[2]!.split("\n")
-        .map(l => /^\s*([A-Za-z_][A-Za-z0-9_]*)\s*:/.exec(l)?.[1])
-        .filter((f): f is string => !!f);
-      if (fields.length) structs.set(m[1]!, fields);
-    }
-    out.set(mod, structs);
-  }
-  return out;
-}
 
 export interface Problem { module: string; line: number; detail: string }
 

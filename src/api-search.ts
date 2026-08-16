@@ -12,6 +12,7 @@ import { fileURLToPath } from "url";
 import { resolve, dirname, relative, join } from "path";
 import { STDLIB_DIR, readStd, bundledStdPaths } from "./stdlibBundle";
 import { must } from "./must";
+import { writeStdout } from "./stdout";
 
 interface Entry {
   kind: "function" | "type";
@@ -20,7 +21,15 @@ interface Entry {
   doc: string;       // first line of the leading doc-comment, "" if none
   docFull: string;   // the whole leading doc-comment (all lines), "" if none
   name: string;      // "strPadStart" or "String.split"
+  fields?: Field[];  // struct fields, for kind === "type"
 }
+
+export interface Field { name: string; type: string }
+
+// One parameter of a function signature, split out so a consumer does not have to
+// re-implement the top-level comma scan (`HashMap<string, i64>` and `(&T) => U` both
+// carry commas that are not separators).
+export interface Param { name: string; type: string }
 
 const HOST_STD_SUFFIX = process.platform === "win32" ? "windows" : process.platform;
 
@@ -77,6 +86,51 @@ function leadingDoc(lines: string[], idx: number): { first: string; full: string
   return { first: visible.length ? visible[0] : "", full: visible.join("\n"), internal };
 }
 
+// Field list of a struct declaration starting at `idx`, read to the closing brace.
+// Grep-backed like the rest of this module: good enough to answer "does this struct
+// have that field", which is the question tooling asks.
+function readFields(lines: string[], idx: number): Field[] {
+  const out: Field[] = [];
+  for (let i = idx; i < lines.length; i++) {
+    const t = lines[i].trim();
+    if (i > idx && t === "}") break;
+    const m = /^([A-Za-z_][A-Za-z0-9_]*)\s*:\s*(.+?),?$/.exec(t);
+    if (m && !t.startsWith("//")) out.push({ name: m[1]!, type: m[2]!.trim() });
+  }
+  return out;
+}
+
+// Split a parameter list on TOP-LEVEL commas only.
+export function splitParams(text: string): string[] {
+  const out: string[] = [];
+  let depth = 0, start = 0;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i]!;
+    if ("<([".includes(c)) depth++;
+    else if (">)]".includes(c)) depth--;
+    else if (c === "," && depth === 0) { out.push(text.slice(start, i)); start = i + 1; }
+  }
+  const last = text.slice(start).trim();
+  if (last) out.push(last);
+  return out.map(p => p.trim()).filter(Boolean);
+}
+
+// Structured view of a signature: `fn f(a: i64, b: &string): bool` → params + return.
+// A signature with no `: T` tail returns void, which is what the checker infers.
+export function signatureParts(signature: string): { params: Param[]; returns: string } {
+  const open = signature.indexOf("(");
+  const close = signature.lastIndexOf(")");
+  if (open < 0 || close < 0) return { params: [], returns: "void" };
+  const params = splitParams(signature.slice(open + 1, close)).map(p => {
+    const colon = p.indexOf(":");
+    // `self` may be written bare in a trait method.
+    if (colon < 0) return { name: p.trim(), type: "" };
+    return { name: p.slice(0, colon).trim(), type: p.slice(colon + 1).trim() };
+  });
+  const tail = signature.slice(close + 1).replace(/^\s*:\s*/, "").trim();
+  return { params, returns: tail || "void" };
+}
+
 // `root` names an arbitrary project directory: the module is then its path relative
 // to that root, and the source comes off disk. Without it this is the std path, where
 // modules are "std/"-prefixed and readStd also serves the bundle embedded in a shipped
@@ -111,7 +165,8 @@ function parseModule(file: string, root?: string): Entry[] {
       if (!ld.internal) {
         const brace = trimmed.indexOf("{");
         const signature = (brace >= 0 ? trimmed.slice(0, brace) : trimmed).trim();
-        entries.push({ kind: "type", module, signature, doc: ld.first, docFull: ld.full, name: typeMatch[2] });
+        const fields = typeMatch[1] === "struct" ? readFields(lines, i) : undefined;
+        entries.push({ kind: "type", module, signature, doc: ld.first, docFull: ld.full, name: typeMatch[2], ...(fields?.length ? { fields } : {}) });
       }
     }
     const implMatch = trimmed.match(/^impl\s+([A-Za-z_][A-Za-z0-9_]*)/);
@@ -226,7 +281,7 @@ function printEntries(entries: Entry[]): void {
   const pad = Math.min(24, entries.reduce((m, e) => Math.max(m, e.module.length), 0));
   for (const e of entries) {
     const mod = e.module.padEnd(pad);
-    process.stdout.write(`${mod}  ${e.signature}\n`);
+    writeStdout(`${mod}  ${e.signature}\n`);
   }
 }
 
@@ -278,7 +333,7 @@ export function runMiloDoc(args: string[]): number {
     return 1;
   }
   if (!outDir) {
-    process.stdout.write([...docs.keys()].sort().map(k => must(docs, k, "docs")).join("\n"));
+    writeStdout([...docs.keys()].sort().map(k => must(docs, k, "docs")).join("\n"));
     return 0;
   }
   for (const [module, md] of docs) {
@@ -290,8 +345,40 @@ export function runMiloDoc(args: string[]): number {
   return 0;
 }
 
+// Machine-readable projection of the same entries `milo api` prints. This is a PUBLIC
+// surface: editors, package tooling, doc generators and agents consume it instead of
+// importing the compiler's TypeScript, which only code inside this repo can do. Bump
+// `schema` on a breaking change; tests/apiJson.test.ts pins the shape.
+export const API_JSON_SCHEMA = 1;
+
+export function apiJson(entries: Entry[]): string {
+  const out = {
+    schema: API_JSON_SCHEMA,
+    entries: [...entries]
+      .sort((a, b) => a.module.localeCompare(b.module) || a.name.localeCompare(b.name))
+      .map(e => {
+        const { params, returns } = e.kind === "function"
+          ? signatureParts(e.signature)
+          : { params: [], returns: "" };
+        return {
+          kind: e.kind,
+          module: e.module,
+          name: e.name,
+          signature: e.signature,
+          // Split out so a consumer never re-implements the top-level comma scan.
+          ...(e.kind === "function" ? { params, returns } : {}),
+          ...(e.fields ? { fields: e.fields } : {}),
+          doc: e.doc,
+          docFull: e.docFull,
+        };
+      }),
+  };
+  return JSON.stringify(out, null, 2) + "\n";
+}
+
 export function runApiSearch(args: string[]): number {
   const markdown = args.includes("--markdown");
+  const json = args.includes("--json");
   const moduleFlag = args.find(a => a.startsWith("--module="))?.slice("--module=".length)
     ?? (args.includes("--module") ? args[args.indexOf("--module") + 1] : undefined);
   const positional = args.filter(a => a !== "--module" && !a.startsWith("--") && a !== moduleFlag);
@@ -308,13 +395,16 @@ export function runApiSearch(args: string[]): number {
     const inMod = all.filter(e => e.module === `std/${want}` || e.module === moduleFlag);
     if (inMod.length === 0) { console.error(`milo api: no module '${moduleFlag}'`); return 1; }
     inMod.sort((a, b) => a.name.localeCompare(b.name));
-    if (markdown) { process.stdout.write(renderMarkdown(inMod)); return 0; }
+    if (json) { writeStdout(apiJson(inMod)); return 0; }
+    if (markdown) { writeStdout(renderMarkdown(inMod)); return 0; }
     printEntries(inMod);
     return 0;
   }
 
-  // `--markdown` with no module/query → full std reference (doc generator).
-  if (markdown && !query) { process.stdout.write(renderMarkdown(all)); return 0; }
+  // `--markdown` / `--json` with no module or query → the whole std surface. That is the
+  // form a doc generator or an out-of-repo tool wants; the query form is for humans.
+  if (json && !query) { writeStdout(apiJson(loadAll(true))); return 0; }
+  if (markdown && !query) { writeStdout(renderMarkdown(all)); return 0; }
 
   if (!query) {
     console.error("usage: milo api <search terms>   |   milo api --module std/<name>");
@@ -334,6 +424,7 @@ export function runApiSearch(args: string[]): number {
     console.error(`milo api: no matches for '${query}'`);
     return 1;
   }
+  if (json) { writeStdout(apiJson(ranked)); return 0; }
   printEntries(ranked);
   return 0;
 }

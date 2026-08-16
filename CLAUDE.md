@@ -20,9 +20,17 @@ bun test                                                  # full test suite
 bun test tests/run.test.ts -t "arithmetic"                # single fixture by name
 ./benchmarks/run.sh                                       # reproduce perf numbers
 bun run src/main.ts api <terms>                           # search std signatures (name + doc, ranked)
+bun run src/main.ts api --json                            # every std symbol as JSON (docs/json-api.md)
+bun run src/main.ts lang --json                           # keywords/types/operators/builtins/warnings as JSON
+bun run src/main.ts check foo.milo --json                 # type-check only; diagnostics as JSON
 bun run src/main.ts doc <file|dir> [-o out]               # reference markdown from doc-comments
 bun run src/main.ts api --module std/json                 # dump one module's full API
 ```
+
+**Tooling reads JSON, not `src/`:** anything that needs compiler knowledge (a doc gate, an
+editor grammar, a linter, an agent) goes through `milo api --json` / `lang --json` /
+`check --json` — see [docs/json-api.md](docs/json-api.md). Importing `src/*.ts` pins the
+tool to the host language; the JSON survives a Rust or self-hosted rewrite.
 
 **Finding stdlib APIs:** before writing stdlib-adjacent code, run `milo api <terms>` to find existing signatures — don't roll your own. Grep-backed and auto-discovered: it scans `std/**/*.milo` fresh each call, so new/edited `.milo` files appear with no registration. Lexical only (no generics/re-exports/visibility) — good for discovery, not a spec.
 

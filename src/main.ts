@@ -15,7 +15,8 @@ import { CodegenJS } from "./codegen-js";
 import { lower } from "./lower";
 import { resolveImports } from "./resolver";
 import { generateHeader } from "./headergen";
-import { formatDiagnostic, ParseError, RESET, BOLD, GREEN, DIM, type WarningConfig } from "./diagnostics";
+import { writeStdout } from "./stdout";
+import { formatDiagnostic, ParseError, RESET, BOLD, GREEN, DIM, type WarningConfig, type Diagnostic } from "./diagnostics";
 import { type TargetInfo, getHostTarget, resolveTarget, listTargets, UnsupportedHostError } from "./target";
 import { generateVerificationConditions, formatVerifyReport, proveWithZ3, formatProveReport } from "./verify";
 import { proveWithMilo } from "./prove-milo";
@@ -107,6 +108,63 @@ function frontendToHIR(source: string, target: TargetInfo, filePath?: string, wa
   }
 
   return lower(program, result, sourceDir, target.os);
+}
+
+// `milo check <file> [--json]` — parse + resolve + type-check, report, stop. No codegen.
+//
+// The JSON form is a PUBLIC surface (schema 1): CI annotations, editors that do not speak
+// LSP, and fuzzers that want to classify a rejection by diagnostic code instead of
+// grepping the rendered message. Before it, every consumer outside this repo had to parse
+// Elm-style terminal output — or import the TypeScript, which only in-repo code can do.
+export const CHECK_JSON_SCHEMA = 1;
+
+function runCheck(source: string, filePath: string, target: TargetInfo, warningConfig: WarningConfig | undefined, json: boolean): void {
+  const sourceDir = dirname(resolve(filePath));
+  let diagnostics: Diagnostic[] = [];
+  try {
+    const tokens = new Lexer(source).tokenize();
+    let program = new Parser(tokens, source, filePath).parse();
+    program = resolveImports(program, sourceDir, target, filePath);
+    diagnostics = new TypeChecker(warningConfig).check(program).diagnostics;
+  } catch (e: any) {
+    // A parse error ends the run, but it is still a diagnostic — a consumer should not
+    // have to handle "crashed" and "rejected" as two different shapes.
+    if (e instanceof ParseError) diagnostics = [e.diagnostic];
+    else if (json) diagnostics = [{ severity: "error", message: e.message }];
+    else { console.error(e.message); process.exit(1); }
+  }
+
+  const errors = diagnostics.filter(d => d.severity === "error");
+  if (json) {
+    writeStdout(JSON.stringify({
+      schema: CHECK_JSON_SCHEMA,
+      file: filePath,
+      ok: errors.length === 0,
+      diagnostics: diagnostics.map(d => ({
+        severity: d.severity,
+        ...(d.code ? { code: d.code } : {}),
+        message: d.message,
+        ...(d.hint ? { hint: d.hint } : {}),
+        // A diagnostic from an imported module carries its own file; the entry file is
+        // the fallback, not the answer.
+        file: d.span?.file ?? filePath,
+        ...(d.span ? { line: d.span.line, col: d.span.col, len: d.len ?? 1 } : {}),
+      })),
+    }, null, 2) + "\n");
+    process.exit(errors.length ? 1 : 0);
+  }
+
+  const srcCache = new Map<string, string | undefined>();
+  const resolveSource = (f: string): string | undefined => {
+    if (f === filePath) return source;
+    if (!srcCache.has(f)) {
+      try { srcCache.set(f, readFileSync(f, "utf-8")); } catch { srcCache.set(f, undefined); }
+    }
+    return srcCache.get(f);
+  };
+  for (const d of diagnostics) console.error(formatDiagnostic(d, source, filePath, resolveSource));
+  if (errors.length) process.exit(1);
+  console.log(`${filePath}: ok`);
 }
 
 function compile(source: string, target: TargetInfo, filePath?: string, warningConfig?: WarningConfig, trapOnOverflow = false, emitDebug = false, contractChecks = false, stripPanicLocations = false, sanitize = false): string {
@@ -1919,6 +1977,11 @@ async function main() {
     process.exit(runApiSearch(args.slice(1)));
   }
 
+  if (cmd === "lang") {
+    const { runLangInfo } = require("./lang-info");
+    process.exit(runLangInfo(args.slice(1)));
+  }
+
   if (cmd === "doc") {
     const { runMiloDoc } = require("./api-search");
     process.exit(runMiloDoc(args.slice(1)));
@@ -2164,6 +2227,8 @@ async function main() {
     const t0 = Date.now();
     const bin = compileToBinary(source!, output, target, optFlag, warningConfig, rest, sanitize, emitDebug, heapSize, overflowChecks, staticDeps, contractChecks, stripPanicLocations);
     reportCompiled(source!, bin, Date.now() - t0);
+  } else if (cmd === "check") {
+    runCheck(readFileSync(source!, "utf-8"), source!, target, warningConfig, args.includes("--json"));
   } else if (cmd === "emit-ast") {
     emitAst(source!, output, target, emitAll, emitSpans);
   } else if (cmd === "emit-hir") {

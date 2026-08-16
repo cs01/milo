@@ -1,0 +1,137 @@
+<!-- doc-meta
+system: tooling-api
+purpose: the compiler's machine-readable surfaces — what tooling reads instead of importing TypeScript
+key-files: src/api-search.ts, src/lang-info.ts, src/warnings.ts, src/main.ts (runCheck), tests/apiJson.test.ts, tests/langInfo.test.ts
+update-when: a JSON payload gains or loses a field, or a new machine-readable command lands
+last-verified: 2026-08-15
+-->
+
+# Machine-readable compiler API
+
+Everything the compiler knows about the language and the standard library is available as
+JSON on stdout. Tooling reads *that* — never `import { … } from "../src/…"`.
+
+```bash
+milo api --json                      # every public std symbol: signature, params, return, doc, struct fields
+milo api --module std/json --json    # one module
+milo api "parse json" --json         # ranked search results
+milo lang --json                     # keywords, primitive types, operators, builtin methods, warning names
+milo check <file> --json             # diagnostics as data (exit 1 if any error)
+milo emit-ast <file> [--all --spans] # parsed AST
+milo emit-hir <file> [--all --spans] # typed HIR — every expression carries its type
+milo lex <file>                      # token stream
+```
+
+## Why this exists
+
+**The host language must not be load-bearing.** The compiler is TypeScript today; the
+roadmap has it in Rust or in Milo eventually. Every tool that reaches into `src/*.ts` is a
+tool that has to be rewritten on that day — and a tool nobody outside this repository could
+have written in the first place. A JSON payload is a contract that survives the rewrite:
+whatever language the compiler is written in next has to produce the same bytes, which
+turns the existing tooling into a conformance suite for it.
+
+**Copying is the alternative, and copies rot silently.** Before `milo lang --json`, anyone
+outside `src/` who needed the keyword list had exactly one option: retype it. The docs
+site did, and shipped a syntax grammar highlighting `char`, `String` and `Box` — none of
+which exist in Milo — while missing `unsafe`, `trait`, `interface` and `from`, for months,
+with no test able to notice. See **Generate it, don't restate it** in
+[AGENTS.md](../AGENTS.md).
+
+**It is the surface an agent should use.** `milo api --json` answers "does
+`FetchResponse.header` exist and what does it return" with a fact. That question, asked
+cheaply, is what would have prevented the 110 wrong signatures the stdlib doc pages
+published.
+
+## What each payload carries
+
+### `milo api --json` (schema 1)
+
+```json
+{
+  "schema": 1,
+  "entries": [
+    {
+      "kind": "function",
+      "module": "std/json",
+      "name": "Json.get",
+      "signature": "fn Json.get(self: &Json, key: &string): Option<Json>",
+      "params": [{ "name": "self", "type": "&Json" }, { "name": "key", "type": "&string" }],
+      "returns": "Option<Json>",
+      "doc": "Look up an object key.",
+      "docFull": "Look up an object key.\nReturns a view, not a copy."
+    },
+    {
+      "kind": "type",
+      "module": "std/json",
+      "name": "Json",
+      "signature": "pub struct Json",
+      "fields": [{ "name": "source", "type": "string" }, { "name": "root", "type": "i64" }]
+    }
+  ]
+}
+```
+
+`params` is split on **top-level** commas by the compiler, so a consumer never has to scan
+`HashMap<string, i64>` or `(&Request, i64) => Response` itself. `returns` is `"void"` when
+the signature has no return type. Struct `fields` mean a consumer never re-reads
+`std/*.milo` to answer "does this type have that field".
+
+Works on any package, not just std: the same extractor backs `milo doc <file|dir>`.
+
+### `milo lang --json` (schema 1)
+
+`keywords`, `softKeywords` (contextual — legal identifiers elsewhere, which a highlighter
+must know), `primitiveTypes`, `symbols` (operator token name → spelling), `builtinMembers`
+(receiver → the methods the checker dispatches by hand, with signatures and caveats), and
+`warnings` (name + `offByDefault`, i.e. what `--deny=` accepts).
+
+### `milo check <file> --json` (schema 1)
+
+```json
+{ "schema": 1, "file": "a.milo", "ok": false,
+  "diagnostics": [{ "severity": "error", "message": "...", "hint": "...",
+                    "file": "a.milo", "line": 14, "col": 16, "len": 1 }] }
+```
+
+A parse error is reported in the same shape as a type error — a consumer should not have
+to distinguish "crashed" from "rejected". Exit code is 1 when any diagnostic is an error.
+`code` is present only where the diagnostic carries one; most do not yet, so classify on
+`code` when you can and treat its absence as "uncoded", not as a shape change.
+
+## Rules for these surfaces
+
+- **Schema is versioned.** Bump `schema` on a breaking change; additive fields do not
+  need one. Consumers should ignore unknown fields.
+- **Gated, not asserted.** `tests/apiJson.test.ts` and `tests/langInfo.test.ts` pin the
+  shape *and* hold every list to the compiler data it derives from — a payload that
+  silently emptied would otherwise pass every subset check.
+- **One source per fact.** The payload is projected from the same constant the compiler
+  itself uses (`src/tokens.ts`, `src/builtin-members.ts`, `src/warnings.ts`). Never a
+  second hand-written table.
+- **Write to stdout synchronously.** Use `writeStdout` from `src/stdout.ts`.
+  `process.stdout.write()` to a pipe is async and `process.exit()` does not drain it:
+  `milo api --json` silently lost its last 6 KB that way — perfect on a terminal, invalid
+  JSON through `execFileSync`.
+- **Add a surface with a consumer, not before.** A speculative `--json` rots faster than
+  a doc.
+
+## Who consumes them
+
+| consumer | reads | why not import |
+|---|---|---|
+| `scripts/check-api-docs.ts` | `api --json`, `lang --json` | the question ("do these docs match the language") is one any package should be able to ask |
+| `scripts/gen-tmlanguage.ts` | `lang --json` | an editor grammar is the canonical out-of-repo consumer; using the same door keeps it working |
+| editors / tree-sitter / highlighters | `lang --json` | cannot import TypeScript at all |
+| package tooling, doc sites | `api --json` | works on any package, not just std |
+| CI annotations, non-LSP editors | `check --json` | the alternative is parsing Elm-style terminal output |
+
+Two things still import the compiler on purpose:
+
+- **The fuzzers** (`scripts/fuzz-*.ts`) drive `Lexer`/`Parser`/`TypeChecker` in-process
+  because they run millions of mutants; a subprocess per mutant is a thousand times
+  slower. `milo check --json` is the out-of-repo equivalent for anyone who needs it.
+- **`scripts/gen-std-docs.ts`** renders the compiler's own reference markdown. Moving the
+  renderer into a script would give the repo two markdown renderers to keep in step, which
+  is the drift this whole document exists to prevent. `milo api --module <m> --markdown`
+  and `milo doc <file|dir> -o <dir>` are the public equivalents.

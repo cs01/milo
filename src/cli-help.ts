@@ -10,6 +10,7 @@
 // Package-manager verbs live in pkgcli.ts's PKG_COMMANDS; their help text is here so
 // the banner is one document, and the test checks the two agree.
 
+import { OFF_BY_DEFAULT } from "./warnings";
 export interface CliCommand {
   /** The dispatch token, e.g. "emit-ir". */
   name: string;
@@ -36,6 +37,10 @@ export const COMPILER_COMMANDS: CliCommand[] = [
       "              long form: --test-name-pattern <pattern>",
     ],
   },
+  {
+    name: "check", usage: "check <file> [--json]",
+    help: ["type-check only — no codegen (--json for machine-readable diagnostics)"],
+  },
   { name: "emit-ast", usage: "emit-ast <file>", help: ["emit the parsed AST as JSON (--all imports, --spans keep spans)"] },
   { name: "emit-hir", usage: "emit-hir <file>", help: ["emit the typed HIR as JSON (--all full module, --spans keep spans)"] },
   { name: "emit-ir", usage: "emit-ir <file>", help: ["emit LLVM IR"] },
@@ -59,6 +64,13 @@ export const COMPILER_COMMANDS: CliCommand[] = [
   { name: "wcet", usage: "wcet <file>", help: ["emit OTAWA flow facts (loop bounds) for WCET analysis"] },
   { name: "lsp", usage: "lsp", help: ["run the language server on stdio (what an editor launches)"] },
   { name: "skill", usage: "skill", help: ["print language guide for LLMs"] },
+  {
+    name: "lang", usage: "lang [--json]",
+    help: [
+      "the language's own vocabulary as data: keywords, primitive types,",
+      "operators, builtin methods, warning names (--json for tooling)",
+    ],
+  },
   { name: "api", usage: "api <terms>", help: ["search std signatures by name/doc (--module std/x to dump one, --markdown to emit reference docs)"] },
   { name: "doc", usage: "doc <file|dir>", help: ["reference markdown from doc-comments (-o <dir> to write one .md per module)"] },
   { name: "lex", usage: "lex <file>", help: ["dump the token stream as JSON"], hidden: "compiler-debug output, not a user-facing command" },
@@ -115,8 +127,9 @@ export const OPTIONS: CliOption[] = [
     flag: "--deny-all",
     help: [
       "treat all warnings as errors",
-      "(off-by-default warnings: unused-move, unused-import,",
-      " unverified-extern, large-stack-array, index-clone)",
+      // Rendered from src/warnings.ts: this line used to be prose and had to be edited by
+      // hand every time a warning landed, which is how it fell behind the checker.
+      `(off-by-default warnings: ${OFF_BY_DEFAULT.join(", ")})`,
     ],
   },
   { flag: "--safety=<level>", help: ["enforce safety profile (e.g. --safety=do178)"] },

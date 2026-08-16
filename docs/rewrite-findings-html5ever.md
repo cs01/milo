@@ -4,7 +4,7 @@ Status: scaffold complete (`examples/basics/domArena.milo`). Answers the open qu
 
 ## The question, and the answer
 
-ripgrep already exercised search/regex/mmap/parallel-walk. The next stress test is a **self-referential tree** — the canonical case where Rust gives up lifetimes. We surveyed `servo/html5ever` + `causal-agent/scraper` and built the load-bearing piece (the DOM + the ~12 core `TreeSink` operations) in Milo.
+ripgrep already exercised search/regex/mmap/parallel-walk. The next stress test is a **self-referential tree** — the canonical case where Rust gives up lifetimes. We surveyed `servo/html5ever` + `causal-agent/scraper` and built the core piece (the DOM + the ~12 core `TreeSink` operations) in Milo.
 
 **Verdict: the model holds.** All 12 ops, zero `unsafe`, zero handle juggling beyond the generational-arena indices Rust *itself* uses here.
 

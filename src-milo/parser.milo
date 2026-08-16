@@ -117,7 +117,7 @@ pub fn matchTok(p: &mut Parser, kind: TokKind): bool {
 pub fn expect(p: &mut Parser, kind: TokKind): Token {
     let tok = advance(p)
     // Soft validation: on a kind mismatch this prints but still returns the token, so
-    // parsing continues (no recovery yet). That tolerance is load-bearing and also
+    // parsing continues (no recovery yet). That tolerance is required and also
     // dangerous — a caller expecting the wrong kind still gets correct output, so the
     // only symptom is the diagnostic. Exactly that hid a parseAttribute bug for 42
     // errors per self-build. Include the token text: a bare line:col names neither the

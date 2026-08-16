@@ -117,7 +117,7 @@ resetArena(a)
 a.get(h)               // COMPILE ERROR: h invalidated (a passed as &mut after h created)
 ```
 
-Not shipped, and not load-bearing: `clear()` gives the arena a fresh identity, so a
+Not shipped, and not required: `clear()` gives the arena a fresh identity, so a
 pre-clear handle fails the identity check and reads `None` at runtime rather than
 aliasing a recycled slot. This phase would move that from a runtime `None` to a
 compile error.

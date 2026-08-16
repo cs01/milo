@@ -26,7 +26,7 @@ Answered by an audited `unsafe` hatch — the same way every kernel in every lan
 **(D) The kernel object model is refcounted.** Not one of the original three; it showed up
 when the kernel's Rust was actually counted (below). It bites on a single core too.
 
-The green-task runtime is *not* load-bearing for any of this; freestanding drops it. Conceding
+The green-task runtime is *not* required for any of this; freestanding drops it. Conceding
 that was the whole point of splitting (A) out.
 
 ## (A) is done

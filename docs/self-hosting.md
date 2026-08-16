@@ -1581,7 +1581,7 @@ literal/ident arg).
 
 NEXT — genericRefInfer (`getVal(w)` with `w: Wrapper<i64>` calls bare `@getVal`, not
 `@getVal_i64`): `disambiguateGenericCall` can't tell `getVal_i64` from `getVal_string` because
-a `&Wrapper<T>` ref param is passed as `ptr` and the arg Val's ty is the load-bearing `"ptr"`
+a `&Wrapper<T>` ref param is passed as `ptr` and the arg Val's ty is the significant `"ptr"`
 (used for emission). Fix needs the arg's pointee type threaded in separately (a small refactor
 of the argVals/disambiguation path). Deferred.
 

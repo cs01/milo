@@ -5,16 +5,31 @@
 // reference) that you pass to the arena to reach that value later:
 //
 //     var a = Arena<Node>.new()
-//     let h = a.alloc(Node { ... })     // Handle<Node> — copy/store it freely
-//     let n = a.get(h)                  // Option<Node>: None once freed
-//     a.modify(h, |n| Node { ... })     // mutate the slot in place
-//     a.free(h)                         // bumps generation → old h now stale
-//     a.clear()                          // drops everything, frees storage,
-//                                        // invalidates every outstanding handle
+//     let h = a.alloc(Node { ... })            // Handle<Node> — copy/store it freely
+//     let n = a.get(h)                         // Option<Node>: None once freed
+//     a.modify(h, (v: Node): Node => { ... })  // mutate the slot in place
+//     a.free(h)                                // bumps generation → old h now stale
+//     a.clear()                                // drops everything, frees storage,
+//                                              // invalidates every outstanding handle
 //
 // Reach for this over &T for graph/cyclic data: handles can live in struct fields
 // and be returned, and each slot's generation counter turns a use-after-free into
-// a None instead of silent aliasing. See the `impl Arena` block for the full API.
+// a None instead of silent aliasing.
+//
+// `get` and `modify` move whole values in and out of the slot. When T is large,
+// or you only touch a field, use the borrowing pair instead — they hand a
+// second-class ref to a closure so nothing is copied:
+//
+//     let len = arenaWith(a, h, (n: &Node): i64 => n.edges.len)   // Option<i64>
+//     arenaModifyMut(a, h, (n: &mut Node): void => { n.mark = true })
+//
+// Those two are free functions, not methods: a method carrying its own type
+// parameter (the `R` in arenaWith) cannot infer it at the call site today.
+//
+// T is one fixed type per arena. Heterogeneous data — an interpreter heap of
+// strings, closures and tables — wants ONE Arena<Obj> over an `enum Obj`, not
+// an arena per kind; otherwise every handle must also record which arena it
+// came from. See the `impl Arena` block for the full API.
 
 // A copyable token naming one slot in an Arena<T> — the arena's stand-in for a
 // pointer. You do not use it directly: get one from arenaAlloc (a.alloc), then
@@ -28,7 +43,31 @@ pub struct Handle<T> {
     generation: i32,
 }
 
-// Generational arena backed by Vec<T>.
+// A pool of T values addressed by generational Handle<T> rather than by
+// reference. Allocation appends to `data` or reuses a slot from `freeList`;
+// every operation is O(1) and none of them can dangle.
+//
+// The safety of a handle rests on two checks, one per field pair:
+//
+//   `id`    — a per-process identity stamped into every handle this arena
+//             hands out, so a handle from a DIFFERENT arena (or from this one
+//             before a clear) is rejected outright instead of indexing into
+//             unrelated memory.
+//   `gens`  — one counter per slot, parallel to `data`, bumped on every free.
+//             A handle carries the generation current when it was made, so a
+//             read through a freed-and-reused slot mismatches and yields None.
+//             A slot that reaches i32 max is retired, never wrapped, so the
+//             counter cannot alias an old handle by rolling over.
+//
+// Memory model worth knowing before you build on it: freeing recycles a slot
+// but never shrinks `data`, so a long-lived arena holds its PEAK footprint for
+// as long as it lives. `clear` is the only thing that gives storage back.
+//
+// Nothing here is a garbage collector. `free` is logical deletion — it marks a
+// slot dead so the generation check can catch stale handles. The arena's actual
+// memory is owned by `data` and released when the arena drops, like any other
+// Milo value. If your object graph has cycles, reclaiming them is a sweep you
+// write yourself over `handles()`.
 pub struct Arena<T> {
     id: i64,
     data: Vec<T>,
@@ -62,7 +101,9 @@ pub fn arenaNew<T>(): Arena<T> {
 }
 
 // Insert a value and return a handle to it.
-pub fn arenaAlloc<T>(a: &mut Arena<T>, val: T): Handle<T> {
+pub fn arenaAlloc<T>(a: &mut Arena<T>, val: T): Handle<T>
+ensures a.live == old(a.live) + 1
+{
     if a.freeList.len > 0 {
         let fi = a.freeList[a.freeList.len - 1]
         a.freeList.pop()!
@@ -108,7 +149,9 @@ pub fn arenaValid<T>(a: &Arena<T>, h: Handle<T>): bool {
 
 // Free a slot, bumping its generation so stale handles are detected. A slot at
 // maximum generation is retired rather than wrapped back onto an old handle.
-pub fn arenaFree<T>(a: &mut Arena<T>, h: Handle<T>): bool {
+pub fn arenaFree<T>(a: &mut Arena<T>, h: Handle<T>): bool
+ensures a.live <= old(a.live)
+{
     if h.arenaId != a.id {
         return false
     }
@@ -252,7 +295,9 @@ ensures result >= 0
 // Every outstanding handle goes stale because the arena takes a fresh identity —
 // a pre-clear handle fails the arenaId check outright. Restarting generations at
 // 1 on a recycled Vec would otherwise let an old handle alias a new value.
-pub fn arenaClear<T>(a: &mut Arena<T>) {
+pub fn arenaClear<T>(a: &mut Arena<T>)
+ensures a.live == 0
+{
     var id: i64 = 0
     unsafe {
         id = _atomicAddI64((nextArenaId.addrOf()) as *u8, 1)
@@ -284,47 +329,87 @@ pub fn arenaHandles<T>(arena: &Arena<T>): Vec<Handle<T>> {
 }
 
 // Method API — same functionality, nicer syntax.
+//
+// These are the forms you will actually write, so each carries its own doc: the
+// free function it delegates to is the same code, not a different behaviour.
+// The one gap is arenaWith, which has no method form here — see its note below.
 impl Arena<T> {
+    // A new empty arena with a fresh identity. Spell the type argument
+    // (`Arena<Node>.new()`); a bare `Arena.new()` cannot infer T.
     fn new(): Arena<T> {
         return arenaNew<T>()
     }
 
+    // Move `val` into a free slot and return a Handle<T> naming it. Reuses a
+    // slot from the free list when one exists, otherwise grows the arena.
     fn alloc(self: &mut Self, val: T): Handle<T> {
         return arenaAlloc(self, val)
     }
 
+    // A COPY of the value at `h`, or None if `h` is stale.
+    //
+    // This copies the whole T out of the slot every call — reading one field of
+    // a large T clones the rest with it. To read without copying, use the free
+    // function arenaWith(self, h, f), which lends `&T` to a closure:
+    //
+    //     let n = arenaWith(a, h, (v: &Node): i64 => v.edges.len)
+    //
+    // It has no method form because a method with its own type parameter (the
+    // closure's return type) cannot infer it at the call site today.
     fn get(self: &Self, h: Handle<T>): Option<T> {
         return arenaGet(self, h)
     }
 
+    // Replace the value at `h`. False (and no write) if `h` is stale.
     fn set(self: &mut Self, h: Handle<T>, val: T): bool {
         return arenaSet(self, h, val)
     }
 
+    // Update the slot by mapping its value through `f`. False (and `f` not
+    // called) if `h` is stale. Moves T out and back, so prefer modifyMut when T
+    // is large or you touch only a field or two.
     fn modify(self: &mut Self, h: Handle<T>, f: (T) => T): bool {
         return arenaModify(self, h, f)
     }
 
+    // Mutate the live value in place through `&mut T`. No copy in, no copy out.
+    // False (and `f` not called) if `h` is stale. This is the write counterpart
+    // to arenaWith and the right default for large T.
     fn modifyMut(self: &mut Self, h: Handle<T>, f: (&mut T) => void): bool {
         return arenaModifyMut(self, h, f)
     }
 
+    // Logically delete the slot: drop the value, bump the slot's generation so
+    // every outstanding handle to it goes stale, and offer the index for reuse.
+    // False if `h` was already stale — so a double free is a no-op, not a fault.
+    // Does NOT shrink the arena, and does not chase handles held INSIDE the
+    // freed value; a cyclic graph still needs a sweep you write.
     fn free(self: &mut Self, h: Handle<T>): bool {
         return arenaFree(self, h)
     }
 
+    // Drop every value and release the backing storage. The arena takes a fresh
+    // identity, so every handle ever issued before this point is now stale.
+    // The only operation that returns memory to the allocator.
     fn clear(self: &mut Self) {
         arenaClear(self)
     }
 
+    // Whether `h` still names a live value in THIS arena — identity and
+    // generation both checked. A handle from another arena reads as invalid.
     fn valid(self: &Self, h: Handle<T>): bool {
         return arenaValid(self, h)
     }
 
+    // Live entries, not slots: freed slots awaiting reuse are excluded, so this
+    // can be far below the arena's actual footprint.
     fn len(self: &Self): i64 {
         return arenaLen(self)
     }
 
+    // A snapshot Vec of every currently live handle — the enumeration shape a
+    // collector sweeps. Frees after this call invalidate entries in the Vec;
+    // allocs after it do not appear in it.
     fn handles(self: &Self): Vec<Handle<T>> {
         return arenaHandles(self)
     }

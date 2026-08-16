@@ -86,7 +86,7 @@ function buildCmd(src: string, outBin: string): [string, string[]] {
 // `leaks` prints a summary line per process; anything nonzero is a real leak.
 // Its exit code is 1 when leaks are found and also 1 for some failures to attach,
 // so parse the line rather than trusting the code.
-// The `s?` is load-bearing: the summary reads "1 leak for 32 total leaked bytes" in
+// The `s?` is required: the summary reads "1 leak for 32 total leaked bytes" in
 // the singular, and a plural-only pattern scored every single-leak fixture as
 // "no verdict" — 17 of them — which the ratchet then declined to count either way.
 const MAC_SUMMARY = /(\d+) leaks? for (\d+) total leaked bytes/;

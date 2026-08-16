@@ -535,7 +535,7 @@ fn fdError(op: &string, fd: i32): IoError {
 
 // One read syscall's worth of bytes. `socket` picks the recv/send seam instead of
 // read/write: on Windows a SOCKET is not a CRT descriptor and _read fast-fails on
-// one, so the distinction is load-bearing, not cosmetic.
+// one, so the distinction is semantic, not cosmetic.
 fn fdRead(fd: i32, socket: bool, max: i64): Result<string, IoError> {
     if max <= 0 {
         return Result.Ok("")

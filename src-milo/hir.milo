@@ -10,7 +10,7 @@ from "src-milo/checker/types.milo" import {
 
 // A lowered expression, its type, and where it came from.
 //
-// `ty` is Option, not a bare TypeKind, and that is load-bearing. Milo has no per-field
+// `ty` is Option, not a bare TypeKind, and that is deliberate. Milo has no per-field
 // visibility (field-level visibility is all-or-nothing per struct), so an accessor that
 // "should" be used instead of the field is convention only — across 9574 lines of
 // codegen/expr.milo somebody writes `n.ty`. A bare field on an Unlowered node would have

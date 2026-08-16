@@ -6408,7 +6408,7 @@ pub fn genMethodCall(cg: &mut Cgen, object: &ExprNode, method: &string, args: &V
     // should be a scalar, not a Vec/String/HashMap (those all have their own clone
     // case above, which already returned before this point).
     //
-    // "Should be" was load-bearing and unenforced, which is how HashMap.clone()
+    // "Should be" was relied on and unenforced, which is how HashMap.clone()
     // became a silent aliasing copy: no case above matched, this arm accepted it,
     // and a deep copy the source asked for by name never happened. An owning
     // container that reaches here means its clone case is MISSING — say so instead

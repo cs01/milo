@@ -34,7 +34,7 @@ removable if it doesn't.
 | System | Model | Lesson taken |
 |---|---|---|
 | ratatui (Rust) | immediate-mode API over a double-buffered **cell** diff; events out of scope | the engine — `Cell`/`Buffer` grid + `diff_iter` + dumb `draw(diff)` backend |
-| codex (ratatui) | central `App` + one `AppEvent` enum + `tokio::select`; `FrameRequester` coalesces invalidations → one repaint | **explicit invalidation, not redraw-every-tick** — the load-bearing trick |
+| codex (ratatui) | central `App` + one `AppEvent` enum + `tokio::select`; `FrameRequester` coalesces invalidations → one repaint | **explicit invalidation, not redraw-every-tick** — the key trick |
 | Ink (React/JS) | react-reconciler → own DOM → Yoga flexbox → cell grid → erase-lines/redraw; hooks | the **DX**: `<Box>/<Text>`, `useInput/useFocus`, the tiny node model |
 | opencode (Solid/OpenTUI) | fine-grained signals → retained scene graph, no diff | least code, most perf — but hardest teardown w/o GC. **v2, not v1.** |
 

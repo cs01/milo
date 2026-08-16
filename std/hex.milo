@@ -14,7 +14,7 @@ pub fn hexChar(val: u8): u8 {
     return val - 10 + 97
 }
 
-// Value of an ASCII hex digit, or -1 when `ch` is not one. The -1 is load-bearing:
+// Value of an ASCII hex digit, or -1 when `ch` is not one. The -1 is deliberate:
 // a decoder has to be able to tell "digit zero" from "not a digit".
 fn hexNibble(ch: u8): i64 {
     if ch >= 48 && ch <= 57 {

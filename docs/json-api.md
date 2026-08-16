@@ -27,7 +27,7 @@ milo lex <file>                      # token stream
 
 ## Why this exists
 
-**The host language must not be load-bearing.** The compiler is TypeScript today; the
+**Nothing may depend on the host language.** The compiler is TypeScript today; the
 roadmap has it in Rust or in Milo eventually. Every tool that reaches into `src/*.ts` is a
 tool that has to be rewritten on that day — and a tool nobody outside this repository could
 have written in the first place. A JSON payload is a contract that survives the rewrite:

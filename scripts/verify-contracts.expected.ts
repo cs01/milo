@@ -40,11 +40,15 @@ export const EXPECTED: Record<string, Expected> = {
   "examples/games/neon/director.milo": { proven: 3, unknown: 0, errors: 0 },
   // Both AES-128 key-length preconditions into std/crypto, proven at the call site.
   "examples/net/termpair/encryption.milo": { proven: 2, unknown: 4, errors: 0 },
-  // 3 proven / 4 unknown since `Arena` grew `invariant live >= 0`: construction and the
-  // alloc paths discharge it, the free/set/modify paths cannot (they are gated by an
-  // IndexAccess the translator has no rule for), so `arenaLen` reports as a CONDITIONAL
-  // proof rather than a clean one.
-  "std/arena.milo": { proven: 4, unknown: 4, errors: 0 },
+  // `Arena`'s `invariant live >= 0` is discharged by construction and by the alloc paths;
+  // the free/set/modify paths cannot discharge it (they are gated by an IndexAccess the
+  // translator has no rule for), so `arenaLen` reports as a CONDITIONAL proof rather than
+  // a clean one. The `live`-delta postconditions on the mutators are what give a CALLER
+  // any fact at all about `live` after a call, since a `&mut` arg is otherwise havoced:
+  // arenaClear's `live == 0` proves, while arenaAlloc's (StructLit on the return path) and
+  // arenaFree's (IndexAccess in the generation check) are true but untranslatable, and are
+  // reported as assumed-callee conditionals wherever a caller leans on them.
+  "std/arena.milo": { proven: 5, unknown: 6, errors: 0 },
   // The `impl Crypto` namespace wrappers restate the AES key/iv/tag-length `requires` of
   // the private free fns they forward to, so each wrapper's call into the free fn proves
   // its precondition at the wrapper's own call site (10 = 2 aesGcm + 2 aesGcm128 wrappers'

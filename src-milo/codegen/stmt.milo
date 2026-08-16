@@ -902,7 +902,7 @@ pub fn genForStrView(cg: &mut Cgen, varName: &string, varName2: &Option<string>,
 
 pub fn genIf(cg: &mut Cgen, cond: &HExprNode, thenBody: &Vec<Heap<HStmt>>, elseBody: &Option<Vec<Heap<HStmt>>>, locs: &mut Vec<Local>, sigs: &Vec<CgFnSig>, retTy: &string): bool {
     // A statically-known condition (`@targetOs() == "…"`) emits ONLY the taken
-    // arm. Load-bearing, not an optimization: the dead arm may call a symbol
+    // arm. Required, not an optimization: the dead arm may call a symbol
     // that exists on no other target, and it must never reach the linker even
     // though it type-checked. The fold reads the SYNTAX, so it needs the AST node
     // rather than the value the condition evaluates to.

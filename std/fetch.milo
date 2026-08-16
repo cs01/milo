@@ -359,7 +359,7 @@ pub fn findHeader(headers: &string, name: &string): Option<string> {
     return Option.None
 }
 
-// Hex value of an ASCII hex digit, or -1. The -1 is load-bearing: decodeChunked
+// Hex value of an ASCII hex digit, or -1. The -1 is deliberate: decodeChunked
 // uses it to find the end of a chunk-size field. std/hex's equivalent is private
 // to that module, so this is a local copy rather than an import.
 fn hexDigit(c: u8): i64 {

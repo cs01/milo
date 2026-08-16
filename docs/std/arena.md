@@ -8,7 +8,8 @@
 fn Arena.alloc(self: &mut Arena, val: T): Handle<T>
 ```
 
-_Undocumented._
+Move `val` into a free slot and return a Handle<T> naming it. Reuses a
+slot from the free list when one exists, otherwise grows the arena.
 
 ### `Arena.clear`
 
@@ -16,7 +17,9 @@ _Undocumented._
 fn Arena.clear(self: &mut Arena)
 ```
 
-_Undocumented._
+Drop every value and release the backing storage. The arena takes a fresh
+identity, so every handle ever issued before this point is now stale.
+The only operation that returns memory to the allocator.
 
 ### `Arena.free`
 
@@ -24,7 +27,11 @@ _Undocumented._
 fn Arena.free(self: &mut Arena, h: Handle<T>): bool
 ```
 
-_Undocumented._
+Logically delete the slot: drop the value, bump the slot's generation so
+every outstanding handle to it goes stale, and offer the index for reuse.
+False if `h` was already stale — so a double free is a no-op, not a fault.
+Does NOT shrink the arena, and does not chase handles held INSIDE the
+freed value; a cyclic graph still needs a sweep you write.
 
 ### `Arena.get`
 
@@ -32,7 +39,16 @@ _Undocumented._
 fn Arena.get(self: &Arena, h: Handle<T>): Option<T>
 ```
 
-_Undocumented._
+A COPY of the value at `h`, or None if `h` is stale.
+
+This copies the whole T out of the slot every call — reading one field of
+a large T clones the rest with it. To read without copying, use the free
+function arenaWith(self, h, f), which lends `&T` to a closure:
+
+    let n = arenaWith(a, h, (v: &Node): i64 => v.edges.len)
+
+It has no method form because a method with its own type parameter (the
+closure's return type) cannot infer it at the call site today.
 
 ### `Arena.handles`
 
@@ -40,7 +56,9 @@ _Undocumented._
 fn Arena.handles(self: &Arena): Vec<Handle<T>>
 ```
 
-_Undocumented._
+A snapshot Vec of every currently live handle — the enumeration shape a
+collector sweeps. Frees after this call invalidate entries in the Vec;
+allocs after it do not appear in it.
 
 ### `Arena.len`
 
@@ -48,7 +66,8 @@ _Undocumented._
 fn Arena.len(self: &Arena): i64
 ```
 
-_Undocumented._
+Live entries, not slots: freed slots awaiting reuse are excluded, so this
+can be far below the arena's actual footprint.
 
 ### `Arena.modify`
 
@@ -56,7 +75,9 @@ _Undocumented._
 fn Arena.modify(self: &mut Arena, h: Handle<T>, f: (T) => T): bool
 ```
 
-_Undocumented._
+Update the slot by mapping its value through `f`. False (and `f` not
+called) if `h` is stale. Moves T out and back, so prefer modifyMut when T
+is large or you touch only a field or two.
 
 ### `Arena.modifyMut`
 
@@ -64,7 +85,9 @@ _Undocumented._
 fn Arena.modifyMut(self: &mut Arena, h: Handle<T>, f: (&mut T) => void): bool
 ```
 
-_Undocumented._
+Mutate the live value in place through `&mut T`. No copy in, no copy out.
+False (and `f` not called) if `h` is stale. This is the write counterpart
+to arenaWith and the right default for large T.
 
 ### `Arena.new`
 
@@ -72,7 +95,8 @@ _Undocumented._
 fn Arena.new(): Arena<T>
 ```
 
-_Undocumented._
+A new empty arena with a fresh identity. Spell the type argument
+(`Arena<Node>.new()`); a bare `Arena.new()` cannot infer T.
 
 ### `Arena.set`
 
@@ -80,7 +104,7 @@ _Undocumented._
 fn Arena.set(self: &mut Arena, h: Handle<T>, val: T): bool
 ```
 
-_Undocumented._
+Replace the value at `h`. False (and no write) if `h` is stale.
 
 ### `Arena.valid`
 
@@ -88,7 +112,8 @@ _Undocumented._
 fn Arena.valid(self: &Arena, h: Handle<T>): bool
 ```
 
-_Undocumented._
+Whether `h` still names a live value in THIS arena — identity and
+generation both checked. A handle from another arena reads as invalid.
 
 ### `arenaAlloc`
 

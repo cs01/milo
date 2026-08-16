@@ -18,7 +18,7 @@ Values are closed: nothing aliases in, nothing escapes out. Every item below is 
 
 `&mut` exclusivity **is enforced** — `checkCallSiteExclusivity` (`checker.ts:3368`). Field-path-precise, index-aware. Catches `&mut`+`&` and `&mut`+`&mut` on the same-or-contained place; allows provably-disjoint fields and `v[i]`/`v[j]` siblings.
 
-Residual, load-bearing for the prover: static enforcement is **syntactic, call-site, arg-origin**. Sufficient for closedness (param list = frame). But index-qualified places can't be proven disjoint statically — `f(v[i], v[j])` with `i == j` gives two live `&mut` to one place, which was a **soundness hole**, not a contract TODO.
+Residual, required by the prover: static enforcement is **syntactic, call-site, arg-origin**. Sufficient for closedness (param list = frame). But index-qualified places can't be proven disjoint statically — `f(v[i], v[j])` with `i == j` gives two live `&mut` to one place, which was a **soundness hole**, not a contract TODO.
 
 **Shipped (`codegen.ts` `emitAliasGuards`, commit `721a2ca9`):** a runtime guard — pairwise `icmp eq ptr` on by-ref arg addresses, abort if an at-risk pair coincides (fires only when ≥1 is mutable). This is what makes `noalias` on `&mut` params sound to emit: index-coincidence aliasing traps *before* the call. The SMT fact the contract prover may still lean on statically is **"distinct roots or divergent field paths,"** never "distinct indices"; the `i != j` proof obligation is the elision target that later removes the runtime check (consistent with the prover having no `IndexAccess` — see [verification-roadmap](../verification-roadmap.md)). Known gap: dynamic-dispatch receiver-vs-arg aliasing (interface `self` is prepended outside `expr.args`).
 

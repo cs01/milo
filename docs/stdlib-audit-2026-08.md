@@ -14,7 +14,7 @@ against Go's stdlib, Rust's `std` + the de-facto crate set, and Node's core modu
 **Breadth is not the problem.** zstd, PNG, TLS client, WebSocket, PTY, SQLite, regex and
 JWT are all present, which beats Go's and Rust's *core* libraries outright. What the sweep
 found is **five unresolved conventions running side by side**, plus a short list of gaps
-that are load-bearing rather than cosmetic.
+that are semantic rather than cosmetic.
 
 **Verify before working an entry.** Findings are written from a point-in-time probe and rot
 as code lands. Every behavioral claim below has its probe recorded — re-run it before
@@ -196,9 +196,11 @@ shipped entries are deleted). This file is a record of a single audit, not a liv
   `BufReader<File>` — and this item's own complaint was too many shapes. The new one is the only
   *streaming* one; the two slurps were left un-deduplicated.
 
-  Constructors are turbofish (`BufReader<FdStream>.new(...)`) because bare `Type.new()` on a
-  generic struct is the known Tier-1 backlog gap; the compiler already emits a hint teaching the
-  spelling, and it becomes optional for free when that gap closes. Free-function constructors
+  Constructors were turbofish (`BufReader<FdStream>.new(...)`) because bare `Type.new()` on a
+  generic struct was the known Tier-1 backlog gap. **Closed 2026-08-16**: the type arguments are
+  now inferred from the argument types, so `BufReader.new(f)` compiles. The turbofish still
+  resolves the same call, and is still required where no argument mentions the parameter
+  (`HashSet.new()`), which the hint continues to teach. Free-function constructors
   were rejected — they would permanently violate the constructors-live-on-the-type convention to
   work around a temporary hole.
 
@@ -488,6 +490,8 @@ Ranked by how often real programs hit them.
   for x in s      → error: cannot iterate over type 'HashSet_i64': no 'next' method found
   HashSet.new()   → error: 'HashSet' is generic — spell its type arguments
   ```
+  (`HashSet.new()` still needs the turbofish after the 2026-08-16 inference change: it takes no
+  arguments, so there is nothing to infer the element type from. `BufReader.new(f)` does not.)
   Five methods total (`add`/`contains`/`len`/`remove`/`new`). No iteration, no
   union/intersect/difference, no `fromVec`/`toVec`. Rust `HashSet`, Node `Set` (with ES2025 set
   ops) and Go's `map[T]struct{}` idiom all enumerate. A set you cannot enumerate is a bloom

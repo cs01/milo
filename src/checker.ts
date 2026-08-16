@@ -4913,6 +4913,57 @@ export class TypeChecker {
 
   // Match a generic fn return type (MiloType) against a concrete hint (TypeKind) to infer type params.
   // e.g. retType=Arena<T>, hint={tag:"struct",name:"Arena_i32"} → T=i32
+  // Bare `Pair.new(1, "x")` on a generic struct. A generic impl is registered per
+  // MONOMORPHIZATION, so at this point nothing named `Pair` carries a static to look up
+  // and only the turbofish resolved. Recover the type arguments by unifying the argument
+  // types against the generic impl's own parameter list, then let the explicit path run
+  // unchanged.
+  //
+  // The arguments are typed twice: once here to unify, once by the explicit path against
+  // the substituted parameter types. Diagnostics from this pass are discarded, because
+  // the second pass reports against the concrete types — the ones the user can act on.
+  // Returning null anywhere leaves the existing "spell its type arguments" error in
+  // place, so a shape this cannot infer is no worse off than before.
+  private inferGenericStaticTypeArgs(expr: Extract<Expr, { kind: "EnumLit" }>): MiloType[] | "argError" | null {
+    const generic = this.genericStructs.get(expr.enumName);
+    if (!generic || generic.typeParams.length === 0) return null;
+    let method: import("./ast").Function | undefined;
+    for (const t of this.genericImpls.get(expr.enumName) ?? []) {
+      const m = t.impl.methods.find(mm => mm.name === expr.variant);
+      if (m) { method = m; break; }
+    }
+    if (!method) return null;
+    // A static has no `self`; an instance method reached through `Type.method(...)` is a
+    // different call shape and is not this branch's business.
+    if (method.params.length > 0 && method.params[0].name === "self") return null;
+    if (method.params.length !== expr.args.length) return null;
+
+    const typeMap = new Map<string, TypeKind>();
+    const mark = this.diagnostics.length;
+    let argFailed = false;
+    try {
+      for (let i = 0; i < method.params.length; i++) {
+        const argType = this.checkExpr(expr.args[i]);
+        if (argType.tag === "unknown") { argFailed = true; break; }
+        this.inferTypeParamsFromHint(declaredType(method.params[i]), argType, generic.typeParams, typeMap);
+      }
+    } catch {
+      argFailed = true;
+    }
+    // An argument that did not type is the real error, and it is the one the reader has
+    // to fix. Keep its diagnostics and tell the caller to stop, rather than discarding
+    // them and reporting "no static method 'new'" — which blames the call for a typo in
+    // its argument. On the success path the explicit branch re-reports against the
+    // substituted types, so this pass's copies go.
+    if (argFailed) return "argError";
+    this.diagnostics.length = mark;
+
+    // A parameter no argument mentions stays unbound; there is no struct-level default
+    // to fall back on, so the turbofish is still the only spelling for that shape.
+    if (generic.typeParams.some(tp => !typeMap.has(tp))) return null;
+    return generic.typeParams.map(tp => this.typeKindToMiloType(must(typeMap, tp, "type map")));
+  }
+
   private inferTypeParamsFromHint(retType: MiloType, hint: TypeKind, typeParams: string[], typeMap: Map<string, TypeKind>) {
     // A bare type parameter (`T`, no further args) binds directly to the hint. First
     // binding wins; a later conflicting one surfaces as a field/arg type mismatch in the
@@ -7142,6 +7193,14 @@ export class TypeChecker {
       const mangled = this.monomorphizeEnum(expr.enumName, typeArgs);
       this.rewrittenEnums.set(expr, mangled);
       return this.setType(expr, { tag: "enum", name: mangled });
+    }
+    // Infer the type arguments a bare `Pair.new(...)` did not spell, so the call below
+    // sees the same shape the turbofish produces.
+    if ((!expr.typeArgs || expr.typeArgs.length === 0) && this.genericStructs.has(expr.enumName)
+        && !this.enums.has(expr.enumName) && !this.structs.has(expr.enumName)) {
+      const inferred = this.inferGenericStaticTypeArgs(expr);
+      if (inferred === "argError") return this.setType(expr, { tag: "unknown" });
+      if (inferred) expr.typeArgs = inferred;
     }
     // generic struct static call: Struct<T>.method(args) with explicit type args
     if (expr.typeArgs && expr.typeArgs.length > 0 && this.genericStructs.has(expr.enumName)) {

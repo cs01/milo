@@ -203,7 +203,7 @@ Should packages be able to declare a public surface (only listed names importabl
 
 **`milo` version constraint earns its place.** The language moves fast. A package written against 0.3 syntax must fail with `http2 needs milo >=0.4, you have 0.3.2` — not a parse error 40 lines into someone else's file.
 
-**`nativeHints` is advisory by construction.** It cannot drift into being wrong-but-load-bearing, because nothing reads it during linking. `main.ts:671` already prints a note naming the `@link` that requested a missing lib; this upgrades that note to name the install command.
+**`nativeHints` is advisory by construction.** It cannot drift into being wrong-but-relied-upon, because nothing reads it during linking. `main.ts:671` already prints a note naming the `@link` that requested a missing lib; this upgrades that note to name the install command.
 
 ### Lockfile — `milo.lock`
 
@@ -283,7 +283,7 @@ milo tool run <pkg> <args>
 
 ### Libraries vs binaries
 
-A package is a library, a set of binaries, or both. The distinction is not organizational — the flat namespace makes it load-bearing.
+A package is a library, a set of binaries, or both. The distinction is not organizational — the flat namespace makes it affect resolution.
 
 `resolvePath` merges every declaration of whatever it resolves. If a dependency's *binary* entry were importable, `import "mgrep"` would merge that package's `fn main` into the consumer, colliding with the consumer's own `main` — either a `duplicate-fn` error (`resolver.ts:279`) or a silent last-wins rebind. So:
 
@@ -373,7 +373,7 @@ The known cost, stated up front: **no short names.** Deps are always `github.com
 Two, both real, both dogfood:
 
 - **`milo-language/hello-package`** — minimal correct package. Exists to be read: manifest, `lib.milo`, exports, tests, a tagged release. The thing `milo new` scaffolds and the thing docs link to.
-- **`milo-language/yaml`** — **shipped 2026-07-24, v0.1.1.** A YAML 1.2 subset parser (block/flow collections, block scalars, anchors + merge keys, multi-document streams), differential-tested against `ruamel.yaml` on a k8s/Actions/OpenAPI corpus, CI green on Linux. Installs with `milo add github.com/milo-language/milo-yaml@v0.1.1`. Deliberately not in std, and real enough to exercise nested deps, the `milo` version constraint, and `milo publish` end to end. Widely needed, unpleasant format, nobody's favorite — which is exactly the profile of a thing that belongs in a package rather than the language. std is not where personal taste gets to be load-bearing; packages are how someone else's taste gets served without the language carrying it forever.
+- **`milo-language/yaml`** — **shipped 2026-07-24, v0.1.1.** A YAML 1.2 subset parser (block/flow collections, block scalars, anchors + merge keys, multi-document streams), differential-tested against `ruamel.yaml` on a k8s/Actions/OpenAPI corpus, CI green on Linux. Installs with `milo add github.com/milo-language/milo-yaml@v0.1.1`. Deliberately not in std, and real enough to exercise nested deps, the `milo` version constraint, and `milo publish` end to end. Widely needed, unpleasant format, nobody's favorite — which is exactly the profile of a thing that belongs in a package rather than the language. std is not where personal taste gets to set the rules; packages are how someone else's taste gets served without the language carrying it forever.
 
   (TOML was the obvious candidate until it wasn't — `std/toml.milo` already ships, listed in `roadmap.md:34`. Worth revisiting whether it should have: by the rule above it is package material, and the same argument applies to `csv`, `png`, `zip`, and `zstd`. Not a P0 question, but once packages exist, "what earns a place in std" needs an actual answer, and moving something *out* of std is a breaking change that gets harder every release.)
 

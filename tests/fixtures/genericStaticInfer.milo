@@ -1,0 +1,53 @@
+// A bare static call on a generic struct infers the type arguments from the argument
+// types. Before this, a generic impl was only registered per monomorphization, so
+// `Pair.new(1, "x")` found nothing to call and the turbofish was the only spelling.
+struct Pair<A, B> {
+    a: A, b: B
+}
+
+impl Pair<A, B> {
+    fn new(a: A, b: B): Pair<A, B> {
+        return Pair {
+            a: a, b: b
+        }
+    }
+}
+
+struct Wrap<T> {
+    v: Vec<T>
+}
+
+impl Wrap<T> {
+    fn of(v: Vec<T>): Wrap<T> {
+        return Wrap {
+            v: v
+        }
+    }
+}
+
+fn main() {
+    let p = Pair.new(1, "x")
+    print(p.a.toString())
+    // @expect: 1
+    print(p.b)
+    // @expect: x
+
+    // the turbofish still resolves the same call
+    let q = Pair<i64, string>.new(2, "y")
+    print(q.a.toString())
+    // @expect: 2
+
+    // a type argument nested inside a container is recovered too
+    var v: Vec<i64> = Vec.new()
+    v.push(7)
+    let w = Wrap.of(v)
+    print(w.v[0].toString())
+    // @expect: 7
+
+    // the inferred call composes with itself
+    let n = Pair.new(Pair.new(3, 4), "deep")
+    print(n.a.b.toString())
+    // @expect: 4
+    print(n.b)
+    // @expect: deep
+}

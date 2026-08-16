@@ -32,6 +32,7 @@
 </template>
 
 <script setup>
+// gen:benchmarks
 const benchmarks = [
   { name: 'matmul 512×512', c: 12.8, milo: 12.0, go: 13.2 },
   { name: 'binarytrees depth 18', c: 3.9, milo: 3.0, go: 10.5 },
@@ -44,6 +45,7 @@ const benchmarks = [
   { name: 'grep -c 5MB', c: 2.1, milo: 5.5, go: 4.0 },
   { name: 'json parse+walk 1MB', c: 1.6, milo: 7.1, go: 9.7, cNote: '*' },
 ]
+// /gen:benchmarks
 
 function pct(b, val) {
   const max = Math.max(b.c, b.milo, b.go)

@@ -10,6 +10,7 @@ Env vars: `RUNS=5` `WARMUP=1` `CC=clang` `CFLAGS="-O2 -march=native"`.
 
 ## Results (Apple M-series, macOS, Milo at -O2)
 
+<!-- gen:benchmarks -->
 | Benchmark              | C       | Milo    | Go      | Milo vs C |
 |------------------------|---------|---------|---------|-----------|
 | matmul 512×512         | 12.8 ms | 12.0 ms | 13.2 ms | **0.94x** |
@@ -19,9 +20,10 @@ Env vars: `RUNS=5` `WARMUP=1` `CC=clang` `CFLAGS="-O2 -march=native"`.
 | stringops 100k concat  | 3.1 ms  | 3.2 ms  | 6.5 ms  | 1.03x     |
 | fib(42)                | 18.4 ms | 20.8 ms | 21.6 ms | 1.13x     |
 | sieve to 10M           | 2.1 ms  | 2.5 ms  | 3.4 ms  | 1.19x     |
-| maplookup 100k         | 3.3 ms  | 4.4 ms  | 5.0 ms  | 1.32x     |
-| grep -c 5MB            | 2.1 ms  | 5.5 ms  | 4.0 ms  | 2.56x     |
+| maplookup 100k         | 3.3 ms  | 4.4 ms  | 5.0 ms  | 1.33x     |
+| grep -c 5MB            | 2.1 ms  | 5.5 ms  | 4.0 ms  | 2.62x     |
 | json parse+walk 1MB    | 1.6 ms* | 7.1 ms  | 9.7 ms  | 4.44x     |
+<!-- /gen:benchmarks -->
 
 \* C uses yyjson (best-in-class C library); Go and Milo use their stdlibs.
 

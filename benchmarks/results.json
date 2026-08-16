@@ -1,0 +1,16 @@
+{
+  "_comment": "Canonical benchmark numbers. Written by `bun run scripts/gen-benchmarks.ts --from-results` after ./benchmarks/run.sh, and rendered into benchmarks/README.md and the docs-site chart by the same script. Do not hand-edit the tables it generates.",
+  "_measured": "Apple M-series, macOS, Milo at -O2",
+  "benchmarks": [
+    { "stem": "matmul",      "name": "matmul 512×512",       "c": 12.8, "milo": 12.0, "go": 13.2 },
+    { "stem": "binarytrees", "name": "binarytrees depth 18",  "c": 3.9,  "milo": 3.0,  "go": 10.5 },
+    { "stem": "sort",        "name": "quicksort 2M f64",      "c": 35.7, "milo": 34.7, "go": 34.7 },
+    { "stem": "startup",     "name": "startup empty main",    "c": 1.2,  "milo": 1.2,  "go": 1.5 },
+    { "stem": "stringops",   "name": "stringops 100k concat", "c": 3.1,  "milo": 3.2,  "go": 6.5 },
+    { "stem": "fib",         "name": "fib(42)",               "c": 18.4, "milo": 20.8, "go": 21.6 },
+    { "stem": "sieve",       "name": "sieve to 10M",          "c": 2.1,  "milo": 2.5,  "go": 3.4 },
+    { "stem": "maplookup",   "name": "maplookup 100k",        "c": 3.3,  "milo": 4.4,  "go": 5.0 },
+    { "stem": "grep",        "name": "grep -c 5MB",           "c": 2.1,  "milo": 5.5,  "go": 4.0 },
+    { "stem": "json",        "name": "json parse+walk 1MB",   "c": 1.6,  "milo": 7.1,  "go": 9.7, "cNote": "*" }
+  ]
+}

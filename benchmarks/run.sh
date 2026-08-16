@@ -147,4 +147,9 @@ hyperfine -N --warmup $WARMUP --runs $RUNS --export-markdown "$DIR/results-sort.
   -n "c"    "./sort_c" \
   -n "go"   "./sort_go"
 
-bold "==> results saved to $DIR/results-*.md"
+# Fold this run into benchmarks/results.json — the one place the published numbers
+# live — and re-render the README table and the docs-site chart from it. They used to
+# be transcribed by hand and had already drifted from the measurements next to them.
+bun run "$REPO/scripts/gen-benchmarks.ts" --from-results
+
+bold "==> results saved to $DIR/results-*.md; README + docs chart regenerated"

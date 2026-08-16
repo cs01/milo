@@ -5,7 +5,7 @@ import { typeFromAst, typeEq, typeName, isNumeric, isCopy, isScalar } from "./ty
 import type { Diagnostic, WarningConfig } from "./diagnostics";
 import { checkVisibility } from "./visibility";
 import { countCSigParams } from "./csig";
-import { memberHint, closest, importHint, stdExportNames, VEC_MEMBERS, HASHMAP_MEMBERS, STRING_MEMBERS, OPTION_MEMBERS, RESULT_MEMBERS } from "./suggest";
+import { memberHint, closest, importHint, stdExportNames, VEC_MEMBERS, HASHMAP_MEMBERS, STRING_MEMBERS, OPTION_MEMBERS, RESULT_MEMBERS, INT_MEMBERS, FLOAT_MEMBERS, BOOL_MEMBERS } from "./suggest";
 import { deriveJsonSource, type JsonPlan, type JsonFieldPlan } from "./derive-json";
 import { Lexer } from "./lexer";
 import { Parser } from "./parser";
@@ -468,6 +468,12 @@ export class TypeChecker {
       case "vec": case "array": return [...VEC_MEMBERS];
       case "hashmap": return [...HASHMAP_MEMBERS];
       case "string": return [...STRING_MEMBERS];
+      // Scalars dispatch by hand too, and their surface is the overflow escape
+      // hatch (wrappingAdd, checkedMul, …) — without these a typo there was the
+      // one member mistake in the language that got no suggestion at all.
+      case "int": return [...INT_MEMBERS];
+      case "float": return [...FLOAT_MEMBERS];
+      case "bool": return [...BOOL_MEMBERS];
       default: break;
     }
     const name = (bare as any).name;

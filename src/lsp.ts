@@ -4,6 +4,7 @@
 import { Lexer } from "./lexer";
 import { Parser } from "./parser";
 import { TypeChecker, type CheckResult } from "./checker";
+import { BUILTIN_MEMBERS, memberDetail, type BuiltinMember, type BuiltinReceiver } from "./builtin-members";
 import { resolveImports } from "./resolver";
 import { ParseError, type Diagnostic } from "./diagnostics";
 import type { Program, Function, Stmt, Expr, Span } from "./ast";
@@ -1289,129 +1290,27 @@ const CIK_INTERFACE = 8; // trait
 // These are the same method surfaces the checker recognizes (src/checker.ts) and
 // the lowerer maps (src/lower.ts) — keep this list in sync when methods change.
 // String ops live here (not as free functions) so `s.tr` completes to `trim()`.
-const STRING_BUILTIN_METHODS: { name: string; sig: string }[] = [
-  { name: "contains", sig: "(needle: string): bool" },
-  { name: "startsWith", sig: "(prefix: string): bool" },
-  { name: "endsWith", sig: "(suffix: string): bool" },
-  { name: "indexOf", sig: "(needle: string): i64" },
-  { name: "indexOfFrom", sig: "(needle: string, from: i64): i64" },
-  { name: "lastIndexOf", sig: "(needle: string): i64" },
-  { name: "toLower", sig: "(): string" },
-  { name: "toUpper", sig: "(): string" },
-  { name: "trim", sig: "(): string" },
-  { name: "trimStart", sig: "(): string" },
-  { name: "trimEnd", sig: "(): string" },
-  { name: "split", sig: "(sep: string): Vec<string>" },
-  // for-in only: both yield &string views into the receiver, never owned copies
-  { name: "lines", sig: "(): &string pieces — 'for line in s.lines()'" },
-  { name: "splitView", sig: "(sep: string): &string pieces — 'for f in s.splitView(sep)'" },
-  { name: "splitWords", sig: "(): Vec<string>" },
-  { name: "splitWhitespace", sig: "(): Vec<string>" },
-  { name: "repeat", sig: "(n: i64): string" },
-  { name: "padStart", sig: "(targetLen: i64, pad: string): string" },
-  { name: "padEnd", sig: "(targetLen: i64, pad: string): string" },
-  { name: "replace", sig: "(old: string, new: string): string" },
-  { name: "replaceFirst", sig: "(old: string, new: string): string" },
-  { name: "isEmpty", sig: "(): bool" },
-  { name: "charAt", sig: "(i: i64): string" },
-  { name: "reverse", sig: "(): string" },
-  { name: "parseInt", sig: "(): Option<i64>" },
-  { name: "parseF64", sig: "(): Option<f64>" },
-  { name: "substr", sig: "(start: i64, end: i64): string" },
-  { name: "slice", sig: "(start: i64, end: i64): string" },
-  { name: "clone", sig: "(): string" },
-  { name: "len", sig: ": i64" },
-];
-const VEC_BUILTIN_METHODS: { name: string; sig: string }[] = [
-  { name: "push", sig: "(value: T)" },
-  { name: "pop", sig: "(): Option<T>" },
-  { name: "get", sig: "(index: i64): Option<T>" },
-  { name: "first", sig: "(): Option<T>" },
-  { name: "last", sig: "(): Option<T>" },
-  { name: "insert", sig: "(index: i64, value: T)" },
-  { name: "remove", sig: "(index: i64): T" },
-  { name: "swap", sig: "(a: i64, b: i64)" },
-  { name: "extend", sig: "(other: Vec<T>) — moves other in" },
-  { name: "retain", sig: "(pred) — in-place filter" },
-  { name: "reverse", sig: "()" },
-  { name: "sort", sig: "()" },
-  { name: "sortBy", sig: "(cmp)" },
-  { name: "sortByKey", sig: "(key)" },
-  { name: "contains", sig: "(value: T): bool" },
-  { name: "indexOf", sig: "(value: T): Option<i64>" },
-  { name: "position", sig: "(pred): Option<i64>" },
-  { name: "join", sig: "(sep: string): string" },
-  { name: "map", sig: "(f): Vec<U>" },
-  { name: "filter", sig: "(pred): Vec<T>" },
-  { name: "fold", sig: "(init: A, f: (A, &T) => A): A" },
-  { name: "each", sig: "(f)" },
-  { name: "enumerate", sig: "(f)" },
-  { name: "find", sig: "(pred): Option<T>" },
-  { name: "any", sig: "(pred): bool" },
-  { name: "all", sig: "(pred): bool" },
-  { name: "sum", sig: "(): T" },
-  { name: "min", sig: "(): Option<T>" },
-  { name: "max", sig: "(): Option<T>" },
-  { name: "truncate", sig: "(len: i64)" },
-  { name: "clear", sig: "()" },
-  { name: "len", sig: ": i64" },
-  { name: "capacity", sig: "(): i64" },
-  { name: "reserve", sig: "(extra: i64)" },
-  { name: "isEmpty", sig: "(): bool" },
-  { name: "clone", sig: "(): Vec<T>" },
-];
-const MAP_BUILTIN_METHODS: { name: string; sig: string }[] = [
-  { name: "insert", sig: "(key: K, value: V)" },
-  { name: "get", sig: "(key: K): Option<V>" },
-  { name: "contains", sig: "(key: K): bool" },
-  { name: "remove", sig: "(key: K)" },
-  { name: "getOrDefault", sig: "(key: K, fallback: V): V" },
-  { name: "keys", sig: "(): Vec<K>" },
-  { name: "values", sig: "(): Vec<V>" },
-  { name: "clear", sig: "()" },
-  { name: "len", sig: ": i64" },
-  { name: "isEmpty", sig: "(): bool" },
-  { name: "clone", sig: "(): HashMap<K, V>" },
-];
-
-const OPTION_BUILTIN_METHODS: { name: string; sig: string }[] = [
-  { name: "isSome", sig: "(): bool" },
-  { name: "isNone", sig: "(): bool" },
-  { name: "unwrapOr", sig: "(default: T): T — Copy T only; '??' has no such limit" },
-  { name: "unwrapOrElse", sig: "(f: () => T): T — Copy T only; f runs only on None" },
-  { name: "map", sig: "(f: (&T) => U): Option<U>" },
-  { name: "andThen", sig: "(f: (&T) => Option<U>): Option<U>" },
-  { name: "orElse", sig: "(f: () => Option<T>): Option<T> — consumes a non-Copy receiver" },
-];
-
-const RESULT_BUILTIN_METHODS: { name: string; sig: string }[] = [
-  { name: "isOk", sig: "(): bool" },
-  { name: "isErr", sig: "(): bool" },
-  { name: "unwrapOr", sig: "(default: T): T — Copy T only; '??' has no such limit" },
-  { name: "unwrapOrElse", sig: "(f: (&E) => T): T — Copy T only; f runs only on Err" },
-  { name: "map", sig: "(f: (&T) => U): Result<U, E>" },
-  { name: "mapErr", sig: "(f: (&E) => F): Result<T, F>" },
-  { name: "andThen", sig: "(f: (&T) => Result<U, E>): Result<U, E>" },
-  { name: "orElse", sig: "(f: (&E) => Result<T, F>): Result<T, F>" },
-];
-
 // Builtin methods available on a receiver of the given type, or null if the
 // type has no builtin method surface (e.g. a plain int, or a user struct whose
 // methods come from impl blocks, handled elsewhere).
 function builtinMethodsForType(
   tk: import("./types").TypeKind | undefined,
   enums?: Map<string, { baseName?: string }>,
-): { name: string; sig: string }[] | null {
+): BuiltinMember[] | null {
   if (!tk) return null;
-  if (tk.tag === "string") return STRING_BUILTIN_METHODS;
-  if (tk.tag === "vec" || tk.tag === "array") return VEC_BUILTIN_METHODS;
-  if (tk.tag === "hashmap") return MAP_BUILTIN_METHODS;
+  const forReceiver = (r: BuiltinReceiver) => [...BUILTIN_MEMBERS[r], ...BUILTIN_MEMBERS.any];
+  if (tk.tag === "string") return forReceiver("string");
+  if (tk.tag === "vec" || tk.tag === "array") return forReceiver("vec");
+  if (tk.tag === "hashmap") return forReceiver("hashmap");
+  if (tk.tag === "int") return forReceiver("int");
+  if (tk.tag === "float") return forReceiver("float");
+  if (tk.tag === "bool") return forReceiver("bool");
   // Option/Result reach here as their monomorphized names (Option_i64), so the
   // baseName from the checker is what identifies them, not the type name.
   if (tk.tag === "enum") {
     const base = enums?.get(tk.name)?.baseName;
-    if (base === "Option") return OPTION_BUILTIN_METHODS;
-    if (base === "Result") return RESULT_BUILTIN_METHODS;
+    if (base === "Option") return forReceiver("option");
+    if (base === "Result") return forReceiver("result");
   }
   return null;
 }
@@ -1493,9 +1392,9 @@ function handleCompletion(uri: string, line: number, character: number): object 
   if (memberMatch) {
     const recvIdent = memberMatch[1]; // undefined when receiver is a string literal
     const partial = memberMatch[2] ?? "";
-    let methods: { name: string; sig: string }[] | null = null;
+    let methods: BuiltinMember[] | null = null;
     if (recvIdent === undefined) {
-      methods = STRING_BUILTIN_METHODS; // "literal".<...>
+      methods = [...BUILTIN_MEMBERS.string, ...BUILTIN_MEMBERS.any]; // "literal".<...>
     } else {
       try {
         const tokens = new Lexer(source).tokenize();
@@ -1511,7 +1410,7 @@ function handleCompletion(uri: string, line: number, character: number): object 
     if (methods) {
       const items = methods
         .filter(m => m.name.startsWith(partial))
-        .map(m => ({ label: m.name, kind: CIK_METHOD, detail: recvIdent ? undefined : "string", labelDetails: { detail: m.sig } }));
+        .map(m => ({ label: m.name, kind: CIK_METHOD, detail: recvIdent ? undefined : "string", labelDetails: { detail: memberDetail(m) } }));
       return { isIncomplete: false, items };
     }
     // Namespace/static call — `Json.parse`, `Crypto.sha256`. The receiver is a

@@ -194,6 +194,17 @@ const MEMBER_SRC = `fn main() {
 `;
 const MEMBER_URI = "file:///tmp/milo-lsp-member.milo";
 
+// Integer member completion. The wrapping/saturating/checked families are the only
+// way to opt out of the default overflow trap, and until src/builtin-members.ts made
+// one table the source of truth the LSP had no scalar table at all — the escape hatch
+// was undiscoverable from the editor.
+const INT_MEMBER_SRC = `fn main() {
+    var n: i64 = 1
+    let t = n.wrapp
+}
+`;
+const INT_MEMBER_URI = "file:///tmp/milo-lsp-int-member.milo";
+
 // Namespace completion: `Json.pa` must offer the static methods parse/parseJsonc
 // (imported namespace-object API). Proves `Crypto.`, `Math.` etc. will complete too.
 const NS_SRC = `from "std/json" import { Json }
@@ -257,7 +268,7 @@ beforeAll(async () => {
   })();
   await req(1, "initialize", { capabilities: {} });
   await send({ jsonrpc: "2.0", method: "initialized", params: {} });
-  for (const [uri, text] of [[STDLIB_URI, STDLIB_SRC], [RICH_URI, RICH_SRC], [MATCH_URI, MATCH_SRC], [BUILTIN_URI, BUILTIN_SRC], [PRIM_URI, PRIM_SRC], [GLOBAL_URI, GLOBAL_SRC], [IMPL_URI, IMPL_SRC], [ENUM_URI, ENUM_SRC], [METHOD_URI, METHOD_SRC], [SCOPE_URI, SCOPE_SRC], [SHADOW_URI, SHADOW_SRC], [ARRAY_URI, ARRAY_SRC], [EMBED_URI, EMBED_SRC], [MEMBER_URI, MEMBER_SRC], [NS_URI, NS_SRC]] as const) {
+  for (const [uri, text] of [[STDLIB_URI, STDLIB_SRC], [RICH_URI, RICH_SRC], [MATCH_URI, MATCH_SRC], [BUILTIN_URI, BUILTIN_SRC], [PRIM_URI, PRIM_SRC], [GLOBAL_URI, GLOBAL_SRC], [IMPL_URI, IMPL_SRC], [ENUM_URI, ENUM_SRC], [METHOD_URI, METHOD_SRC], [SCOPE_URI, SCOPE_SRC], [SHADOW_URI, SHADOW_SRC], [ARRAY_URI, ARRAY_SRC], [EMBED_URI, EMBED_SRC], [MEMBER_URI, MEMBER_SRC], [INT_MEMBER_URI, INT_MEMBER_SRC], [NS_URI, NS_SRC]] as const) {
     await send({ jsonrpc: "2.0", method: "textDocument/didOpen", params: { textDocument: { uri, languageId: "milo", version: 1, text } } });
   }
 });
@@ -496,6 +507,18 @@ test("member completion offers builtin string methods (s.tr → trim)", async ()
   // partial "tr" must filter out unrelated methods
   expect(labels).not.toContain("split");
   expect(labels.every((l: string) => l.startsWith("tr"))).toBe(true);
+});
+
+test("member completion offers builtin int methods (n.wrapp → wrappingAdd)", async () => {
+  // Cursor after `n.wrapp` on `    let t = n.wrapp` (0-based line 2, char 19).
+  const res = await req(61, "textDocument/completion", {
+    textDocument: { uri: INT_MEMBER_URI }, position: { line: 2, character: 19 },
+  });
+  const labels = res.items.map((i: any) => i.label);
+  expect(labels).toContain("wrappingAdd");
+  expect(labels).toContain("wrappingSub");
+  expect(labels).toContain("wrappingMul");
+  expect(labels).not.toContain("checkedAdd");
 });
 
 test("namespace completion offers a type's static methods (Json.pa → parse)", async () => {

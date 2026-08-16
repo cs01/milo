@@ -13,6 +13,7 @@
 import { existsSync, readdirSync, statSync } from "fs";
 import { resolve, relative } from "path";
 import { STDLIB_DIR, bundledStdPaths, readStd } from "./stdlibBundle";
+import { memberNames } from "./builtin-members";
 
 // Damerau-Levenshtein (optimal string alignment), bailing out once the best
 // possible score exceeds `max`. The cap matters because this runs over every member
@@ -151,38 +152,16 @@ const OPERATOR_FORMS: ReadonlyMap<string, string> = new Map([
 ]);
 
 // Builtin members per receiver, for the types whose dispatch is a hand-written
-// if-chain in the checker rather than a symbol table.
-export const VEC_MEMBERS = [
-  "push", "pop", "len", "get", "first", "last", "insert", "remove", "clear",
-  "truncate", "swap", "extend", "retain", "map", "filter", "fold", "each",
-  "enumerate", "find", "position", "indexOf", "any", "all", "sum", "min", "max",
-  "join", "contains", "isEmpty", "sort", "sortBy", "sortByKey", "reverse",
-  "slice", "clone", "capacity", "reserve",
-] as const;
-
-export const HASHMAP_MEMBERS = [
-  "insert", "get", "getOrDefault", "remove", "contains", "len", "isEmpty", "clone",
-  "clear", "keys", "values",
-] as const;
-
-export const STRING_MEMBERS = [
-  "len", "push", "pushStr", "toUpper", "toLower", "trim", "trimStart", "trimEnd",
-  "split", "splitView", "splitWords", "splitWhitespace", "lines", "contains",
-  "startsWith", "endsWith", "indexOf", "indexOfFrom", "lastIndexOf", "replace",
-  "replaceFirst", "padStart", "padEnd", "isEmpty", "charAt", "reverse", "repeat",
-  "substr", "slice", "parseInt", "parseF64", "codePoints", "clone", "cstr",
-] as const;
-
-// The two lists differ only where the types genuinely differ: `mapErr` has no Option
-// analogue because None carries no payload to map. Everything else is deliberately
-// symmetric — see docs/language-reference.md §Option Combinators.
-export const OPTION_MEMBERS = [
-  "isSome", "isNone", "unwrapOr", "unwrapOrElse", "map", "andThen", "orElse",
-] as const;
-
-export const RESULT_MEMBERS = [
-  "isOk", "isErr", "unwrapOr", "unwrapOrElse", "map", "andThen", "orElse", "mapErr",
-] as const;
+// if-chain in the checker rather than a symbol table. Names only — the signatures,
+// and the single list both these and the LSP read, live in ./builtin-members.
+export const VEC_MEMBERS = memberNames("vec");
+export const HASHMAP_MEMBERS = memberNames("hashmap");
+export const STRING_MEMBERS = memberNames("string");
+export const OPTION_MEMBERS = memberNames("option");
+export const RESULT_MEMBERS = memberNames("result");
+export const INT_MEMBERS = memberNames("int");
+export const FLOAT_MEMBERS = memberNames("float");
+export const BOOL_MEMBERS = memberNames("bool");
 
 // The hint for a member that doesn't exist on `receiver`. `candidates` is the
 // receiver's real members; pass an empty list when they aren't enumerable and

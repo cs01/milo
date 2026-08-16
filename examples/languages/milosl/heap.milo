@@ -230,3 +230,25 @@ pub fn heapSet(h: &mut Heap, v: &Value, o: Obj): bool {
     let handle = h.handleOf(v)
     return h.objs.set(handle, o)
 }
+
+// Move the object out, transform it, move it back. False when the box is stale.
+//
+// Two things forced this shape. First, Milo binds enum payloads immutably even
+// when the match subject is `&mut` (checker.ts pins the binding to
+// `{ tag: "ref", mutable: false }`), so a payload cannot be mutated in place —
+// the caller moves the Vec out with `var ys = xs` and returns a rebuilt Obj.
+// That is O(1): the enum is a tag plus a pointer-sized payload and a Vec's
+// buffer travels with the move, so it costs a 24-byte memcpy.
+//
+// Second, this forwards to the free function `arenaModify` rather than the
+// `objs.modify` method, which is NOT a style preference. The closure-escape
+// analysis forwards a closure parameter through a plain call but not through a
+// method call, so the method version rejects every caller whose closure
+// captures a local. Same semantics, one compiles.
+pub fn heapUpdate(h: &mut Heap, v: &Value, f: (Obj) => Obj): bool {
+    if !v.isObj() {
+        return false
+    }
+    let handle = h.handleOf(v)
+    return arenaModify(h.objs, handle, f)
+}

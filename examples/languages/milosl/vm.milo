@@ -622,13 +622,7 @@ impl VM {
                     let i = idxV.asNum() as i64
                     var ok = false
                     var oob = false
-                    // Calls the arena directly rather than through a helper in
-                    // heap.milo: a user-defined function taking a closure is
-                    // assumed to keep it, so passing one that captures locals is
-                    // rejected. std's arena functions are known not to escape, so
-                    // the same closure is accepted when handed to them straight.
-                    let listHandle = self.heap.handleOf(listV)
-                    let touched = self.heap.objs.modify(listHandle, (o: Obj): Obj => {
+                    let touched = heapUpdate(self.heap, listV, (o: Obj): Obj => {
                         match o {
                             List(xs) => {
                                 var ys = xs

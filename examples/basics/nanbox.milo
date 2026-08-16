@@ -68,29 +68,33 @@ impl Value {
     fn generation(self: &Self): i32 {
         return ((self.bits >> 24) & 0x3ffffff) as i32
     }
-}
 
-// A Value never holds an address — only a slot number in this arena and the
-// generation that slot had when the box was made. The arena's own id is read
-// off the arena, never out of the box, so a value cannot even name a different
-// arena.
-fn handleOf(strings: &Arena<string>, v: &Value): Handle<string> {
-    return Handle {
-        arenaId: strings.id, index: v.index(), generation: v.generation()
+    // A Value never holds an address — only a slot number in this arena and the
+    // generation that slot had when the box was made. The arena's own id is
+    // read off the arena, never out of the box, so a value cannot even name a
+    // different arena.
+    fn handle(self: &Self, strings: &Arena<string>): Handle<string> {
+        return Handle {
+            arenaId: strings.id, index: self.index(), generation: self.generation()
+        }
     }
-}
 
-// Ask a value what it is and render it. This is the whole "it knows how to
-// print itself": one mask test, then either a bitcast or a checked arena
-// lookup. `get` checks four things before it touches memory — arena id, index
-// sign, index bounds, slot generation — and returns None if any of them fail,
-// which is why a stale or forged box becomes "<dangling>" instead of a read of
-// freed memory.
-fn show(strings: &Arena<string>, v: &Value): string {
-    if v.isNum() {
-        return v.asNum().toString()
+    // Ask a value what it is and render it. This is the whole "it knows how to
+    // print itself": one mask test, then either a bitcast or a checked arena
+    // lookup. `get` checks four things before it touches memory — arena id,
+    // index sign, index bounds, slot generation — and returns None if any fail,
+    // which is why a stale or forged box becomes "<dangling>" instead of a read
+    // of freed memory.
+    //
+    // It takes the arena rather than owning one on purpose. A Value is 8 bytes
+    // and means nothing without the arena its handle indexes; a wrapper type
+    // holding both would hide exactly the coupling this file exists to show.
+    fn show(self: &Self, strings: &Arena<string>): string {
+        if self.isNum() {
+            return self.asNum().toString()
+        }
+        return strings.get(self.handle(strings)) ?? "<dangling>"
     }
-    return strings.get(handleOf(strings, v)) ?? "<dangling>"
 }
 
 fn main() {
@@ -105,7 +109,7 @@ fn main() {
     arr.push(Value.num(3.5))
     arr.push(Value.str(strings.alloc("and a string")))
     for v in arr {
-        print(show(strings, v))
+        print(v.show(strings))
     }
 
     // ── real NaN and infinity are still numbers, not tags ──
@@ -115,9 +119,9 @@ fn main() {
     // ── a freed string is caught, not dereferenced ──
     let h = strings.alloc("about to be freed")
     let doomed = Value.str(h)
-    print("before free: " + show(strings, doomed))
+    print("before free: " + doomed.show(strings))
     let _ = strings.free(h)
-    print("after free:  " + show(strings, doomed))
+    print("after free:  " + doomed.show(strings))
 
     // ── no 64-bit pattern reaches memory ──
     // In C the payload is an address, so a forged box is an arbitrary read.
@@ -133,7 +137,7 @@ fn main() {
         let forged = Value {
             bits: SIGN | QNAN | (st & 0x3ffffffffffff)
         }
-        if show(strings, forged) != "<dangling>" {
+        if forged.show(strings) != "<dangling>" {
             reached = reached + 1
         }
         i = i + 1

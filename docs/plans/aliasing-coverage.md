@@ -1,7 +1,7 @@
 <!-- doc-meta
 system: aliasing-coverage
 purpose: kill the recurring "rule covers one spelling, not its siblings" defect class in the checker
-key-files: src/checker.ts (placesOf, freeze/unfreeze), tests/errors/forInField*.milo, tests/aliasingMatrix.test.ts
+key-files: src/checker.ts (placesOf, freeze/unfreeze), tests/errors/forInField*.milo, tests/aliasingSpellings.test.ts
 update-when: a phase lands, a new aliasing rule is added, or a new leak of this class is found
 last-verified: 2026-08-16
 -->
@@ -103,6 +103,12 @@ Generate the cross product of
 and assert each combination is rejected (or accepted, where disjoint). A new container or
 a new root spelling adds a row; a rule that only covers one spelling fails the matrix
 immediately instead of years later under ASan.
+
+Lives in `tests/aliasingSpellings.test.ts`. Note the neighbouring
+`tests/aliasingMatrix.test.ts` is a *different* axis — a golden matrix over containers x
+operations, checking that each container's behaviour is written down rather than
+inherited from whichever code path it hits. The two are complementary: that one varies
+the operation, this one varies the spelling.
 
 ## Grade criteria
 

@@ -169,6 +169,7 @@
   "softKeywordFromIn.milo": "crash",
   "sortByKeyString.milo": "noEmit",
   "spawnCapturingClosureLeak.milo": "noEmit",
+  "spawnClosureStillValid.milo": "noEmit",
   "spawnMoveClosures.milo": "noEmit",
   "spawnMoveHeapString.milo": "noEmit",
   "stdCrypto.milo": "noEmit",

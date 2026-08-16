@@ -1,0 +1,40 @@
+from "std/arena" import {
+    Arena
+}
+
+enum O {
+    L(Vec<i64>), S(string)
+}
+
+fn main() {
+    var a: Arena<O> = Arena<O>.new()
+    var xs: Vec<i64> = Vec.new()
+    xs.push(1)
+    xs.push(2)
+    let h = a.alloc(O.L(xs))
+    let i: i64 = 0
+    var ok = false
+    let touched = a.modify(h, (o: O): O => {
+        match o {
+            L(v) => {
+                var ys = v
+                ys[i] = 99
+                ok = true
+                return O.L(ys)
+            }
+            S(s) => {
+                return O.S(s)
+            }
+        }
+    }
+    )
+    print("touched " + touched.toString() + " ok " + ok.toString())
+    let r = a.get(h)
+    match r! {
+        L(v) => {
+            print("v0 " + v[0].toString() + " len " + v.len.toString())
+        }
+        S(s) => {
+        }
+    }
+}

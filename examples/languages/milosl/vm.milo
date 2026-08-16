@@ -1,0 +1,777 @@
+// milosl virtual machine: a stack machine over the bytecode in chunk.milo.
+//
+// The hot loop reads `self.functions[fi].chunk.code[ip]` directly rather than
+// caching a reference to the code vector, because Milo's references are
+// second-class and cannot be stored. Measured: chained field-and-index
+// projection borrows through with no copy, so this costs the same as indexing
+// a bare Vec<u8>. (Binding the element instead — `let c = v[i]` on a Vec of a
+// non-Copy struct — is what deep-copies.)
+from "./value" import {
+    Value
+}
+from "./heap" import {
+    Heap, Obj, heapWith
+}
+from "./chunk" import {
+    Op, Chunk, opFromByte, opName
+}
+from "./function" import {
+    Function
+}
+from "std/math" import {
+    Math
+}
+
+struct Frame {
+    fnIndex: i64,
+    // Saved instruction pointer of the *caller*, restored on return. The
+    // executing frame's ip lives in a local in `run`, not here.
+    ip: i64,
+    // Stack index of the frame's slot 0, which holds the callee itself.
+    base: i64,
+}
+
+pub struct VM {
+    heap: Heap,
+    functions: Vec<Function>,
+    stack: Vec<Value>,
+    frames: Vec<Frame>,
+
+    // Globals are resolved to dense slots at link time. Every string constant
+    // gets a slot whether or not it is ever used as a variable name; that
+    // wastes a pointer-sized entry per string literal and buys an O(1) array
+    // read on every global access instead of pulling the name string back out
+    // of the heap and hashing it, which in a recursive benchmark is the
+    // difference between millions of string clones and none.
+    globals: Vec<Value>,
+    globalDefined: Vec<bool>,
+    globalNames: Vec<string>,
+    // [fnIndex][constIndex] -> global slot, or -1 when that constant is not a
+    // string and therefore can never name a global.
+    globalMap: Vec<Vec<i64>>,
+
+    err: string,
+    hadError: bool,
+    steps: i64,
+    gcEnabled: bool,
+}
+
+pub let MAX_FRAMES: i64 = 256
+
+pub let MAX_STACK: i64 = 65536
+
+impl VM {
+    fn new(heap: Heap, functions: Vec<Function>): VM {
+        var vm: VM = VM {
+            heap: heap,
+            functions: functions,
+            stack: Vec.new(),
+            frames: Vec.new(),
+            globals: Vec.new(),
+            globalDefined: Vec.new(),
+            globalNames: Vec.new(),
+            globalMap: Vec.new(),
+            err: "",
+            hadError: false,
+            steps: 0,
+            gcEnabled: true,
+        }
+        vm.link()
+        return vm
+    }
+
+    // Assign a global slot to every string constant, interning by name so the
+    // same identifier in two different functions lands on one slot.
+    fn link(self: &mut Self) {
+        var byName: HashMap<string, i64> = HashMap.new()
+        var fi: i64 = 0
+        while fi < self.functions.len {
+            var perConst: Vec<i64> = Vec.new()
+            var ci: i64 = 0
+            while ci < self.functions[fi].chunk.constants.len {
+                perConst.push(-1)
+                ci = ci + 1
+            }
+            var k: i64 = 0
+            while k < self.functions[fi].chunk.constantStrings.len {
+                let idx = self.functions[fi].chunk.constantStrings[k]
+                let name = self.constString(fi, idx)
+                var slot: i64 = 0
+                match byName.get(name) {
+                    Some(s) => {
+                        slot = s
+                    }
+                    None => {
+                        slot = self.globals.len
+                        self.globals.push(Value.nil())
+                        self.globalDefined.push(false)
+                        self.globalNames.push(name.clone())
+                        byName.insert(name.clone(), slot)
+                    }
+                }
+                perConst[idx] = slot
+                k = k + 1
+            }
+            self.globalMap.push(perConst)
+            fi = fi + 1
+        }
+    }
+
+    fn constString(self: &Self, fi: i64, ci: i64): string {
+        let v = self.functions[fi].chunk.constants[ci]
+        let got = heapWith(self.heap, v, (o: &Obj): string => {
+            match o {
+                Str(s) => {
+                    return s.clone()
+                }
+                List(xs) => {
+                    return ""
+                }
+                Fn(n) => {
+                    return ""
+                }
+            }
+        }
+        )
+        match got {
+            Some(s) => {
+                return s
+            }
+            None => {
+                return ""
+            }
+        }
+    }
+
+    fn setGcEnabled(self: &mut Self, on: bool) {
+        self.gcEnabled = on
+    }
+    fn setBuggyGc(self: &mut Self, on: bool) {
+        self.heap.setBuggy(on)
+    }
+    fn stepCount(self: &Self): i64 {
+        return self.steps
+    }
+    fn gcCount(self: &Self): i64 {
+        return self.heap.gcCount()
+    }
+    fn allocCount(self: &Self): i64 {
+        return self.heap.allocCount()
+    }
+    fn liveObjects(self: &Self): i64 {
+        return self.heap.liveCount()
+    }
+    fn danglingCaught(self: &Self): i64 {
+        return self.heap.danglingCount()
+    }
+    fn error(self: &Self): string {
+        return self.err.clone()
+    }
+
+    // ── GC ──
+    //
+    // Roots are gathered into a flat Vec first and only then handed to the
+    // heap. Values are 8 bytes and Copy, so this snapshot is cheap, and it
+    // keeps the heap from having to borrow the VM while the VM is mutating it.
+    fn maybeCollect(self: &mut Self) {
+        if !self.gcEnabled {
+            return
+        }
+        if !self.heap.gcShouldRun() {
+            return
+        }
+        var roots: Vec<Value> = Vec.new()
+        for v in self.stack {
+            roots.push(v)
+        }
+        for v in self.globals {
+            roots.push(v)
+        }
+        var fi: i64 = 0
+        while fi < self.functions.len {
+            var ci: i64 = 0
+            while ci < self.functions[fi].chunk.constants.len {
+                roots.push(self.functions[fi].chunk.constants[ci])
+                ci = ci + 1
+            }
+            fi = fi + 1
+        }
+        self.heap.gcBegin()
+        for r in roots {
+            self.heap.gcMark(r)
+        }
+        let _ = self.heap.gcSweep()
+    }
+
+    // ── stack ──
+
+    fn push(self: &mut Self, v: Value) {
+        self.stack.push(v)
+    }
+    fn pop(self: &mut Self): Value {
+        let v = self.stack[self.stack.len - 1]
+        self.stack.pop()!
+        return v
+    }
+    fn peek(self: &Self, distance: i64): Value {
+        return self.stack[self.stack.len - 1 - distance]
+    }
+
+    fn runtimeError(self: &mut Self, msg: string, fi: i64, ip: i64) {
+        let line = self.functions[fi].chunk.lineAt(ip)
+        self.err = "[line " + (line as i64).toString() + "] runtime error: " + msg
+        self.hadError = true
+    }
+
+    // ── string helpers ──
+
+    // Returns the empty string for a non-string or a stale box; callers that
+    // care about the difference test isString first.
+    fn stringOf(self: &Self, v: &Value): string {
+        let got = heapWith(self.heap, v, (o: &Obj): string => {
+            match o {
+                Str(s) => {
+                    return s.clone()
+                }
+                List(xs) => {
+                    return ""
+                }
+                Fn(n) => {
+                    return ""
+                }
+            }
+        }
+        )
+        match got {
+            Some(s) => {
+                return s
+            }
+            None => {
+                return ""
+            }
+        }
+    }
+
+    fn isString(self: &Self, v: &Value): bool {
+        let r = heapWith(self.heap, v, (o: &Obj): bool => {
+            match o {
+                Str(s) => {
+                    return true
+                }
+                List(xs) => {
+                    return false
+                }
+                Fn(n) => {
+                    return false
+                }
+            }
+        }
+        )
+        match r {
+            Some(b) => {
+                return b
+            }
+            None => {
+                return false
+            }
+        }
+    }
+
+    fn format(self: &Self, v: &Value): string {
+        if v.isNum() {
+            let d = v.asNum()
+            if d == Math.floor(d) && d > -1000000000000000.0 && d < 1000000000000000.0 {
+                return (d as i64).toString()
+            }
+            return d.toString()
+        }
+        if v.isNil() {
+            return "nil"
+        }
+        if v.isBool() {
+            if v.asBool() {
+                return "true"
+            }
+            return "false"
+        }
+        // A stale box formats as a visible marker rather than a crash. In C
+        // this branch is a use-after-free; here it is a value you can print.
+        // A closure cannot capture `self`, so the borrow yields only plain
+        // data: a kind tag, the string body, the function index, and the
+        // element values. Everything that needs the VM happens after it.
+        var kind: i64 = 0
+        var body = ""
+        var fnIdx: i64 = -1
+        var elems: Vec<Value> = Vec.new()
+        let got = heapWith(self.heap, v, (o: &Obj): i64 => {
+            match o {
+                Str(s) => {
+                    kind = 1
+                    body = s.clone()
+                    return 0
+                }
+                List(xs) => {
+                    kind = 2
+                    for x in xs {
+                        elems.push(x)
+                    }
+                    return 0
+                }
+                Fn(n) => {
+                    kind = 3
+                    fnIdx = n
+                    return 0
+                }
+            }
+        }
+        )
+        if got.isNone() {
+            return "<dangling>"
+        }
+        if kind == 1 {
+            return body
+        }
+        if kind == 3 {
+            return "<fn " + self.functions[fnIdx].name.clone() + ">"
+        }
+        var s = "["
+        var i: i64 = 0
+        while i < elems.len {
+            if i > 0 {
+                s = s + ", "
+            }
+            s = s + self.format(elems[i])
+            i = i + 1
+        }
+        return s + "]"
+    }
+
+    // ── interpreter ──
+
+    fn run(self: &mut Self): bool {
+        if self.functions.len == 0 {
+            return true
+        }
+        self.stack.push(Value.nil())
+        self.frames.push(Frame {
+            fnIndex: 0, ip: 0, base: 0
+        }
+        )
+        var fi: i64 = 0
+        var ip: i64 = 0
+        var base: i64 = 0
+
+        while true {
+            self.steps = self.steps + 1
+            let opByteVal = self.functions[fi].chunk.code[ip]
+            let here = ip
+            ip = ip + 1
+            match opFromByte(opByteVal) {
+                Constant => {
+                    let idx = self.readU16(fi, ip)
+                    ip = ip + 2
+                    self.push(self.functions[fi].chunk.constants[idx])
+                }
+                Nil => {
+                    self.push(Value.nil())
+                }
+                True => {
+                    self.push(Value.bool(true))
+                }
+                False => {
+                    self.push(Value.bool(false))
+                }
+                Pop => {
+                    let _ = self.pop()
+                }
+                GetLocal => {
+                    let slot = self.readU16(fi, ip)
+                    ip = ip + 2
+                    self.push(self.stack[base + slot])
+                }
+                SetLocal => {
+                    let slot = self.readU16(fi, ip)
+                    ip = ip + 2
+                    self.stack[base + slot] = self.peek(0)
+                }
+                GetGlobal => {
+                    let ci = self.readU16(fi, ip)
+                    ip = ip + 2
+                    let slot = self.globalMap[fi][ci]
+                    if slot < 0 || !self.globalDefined[slot] {
+                        self.runtimeError("undefined variable '" + self.constString(fi, ci) + "'", fi, here)
+                        return false
+                    }
+                    self.push(self.globals[slot])
+                }
+                SetGlobal => {
+                    let ci = self.readU16(fi, ip)
+                    ip = ip + 2
+                    let slot = self.globalMap[fi][ci]
+                    if slot < 0 || !self.globalDefined[slot] {
+                        self.runtimeError("undefined variable '" + self.constString(fi, ci) + "'", fi, here)
+                        return false
+                    }
+                    self.globals[slot] = self.peek(0)
+                }
+                DefineGlobal => {
+                    let ci = self.readU16(fi, ip)
+                    ip = ip + 2
+                    let slot = self.globalMap[fi][ci]
+                    self.globals[slot] = self.peek(0)
+                    self.globalDefined[slot] = true
+                    let _ = self.pop()
+                }
+                Equal => {
+                    let b = self.pop()
+                    let a = self.pop()
+                    self.push(Value.bool(self.valuesEqual(a, b)))
+                }
+                Greater => {
+                    if !self.peek(0).isNum() || !self.peek(1).isNum() {
+                        self.runtimeError("comparison operands must be numbers", fi, here)
+                        return false
+                    }
+                    let b = self.pop().asNum()
+                    let a = self.pop().asNum()
+                    self.push(Value.bool(a > b))
+                }
+                Less => {
+                    if !self.peek(0).isNum() || !self.peek(1).isNum() {
+                        self.runtimeError("comparison operands must be numbers", fi, here)
+                        return false
+                    }
+                    let b = self.pop().asNum()
+                    let a = self.pop().asNum()
+                    self.push(Value.bool(a < b))
+                }
+                Add => {
+                    if self.peek(0).isNum() && self.peek(1).isNum() {
+                        let b = self.pop().asNum()
+                        let a = self.pop().asNum()
+                        self.push(Value.num(a + b))
+                    } else if self.isString(self.peek(0)) && self.isString(self.peek(1)) {
+                        let bs = self.stringOf(self.peek(0))
+                        let as_ = self.stringOf(self.peek(1))
+                        let _ = self.pop()
+                        let _ = self.pop()
+                        self.maybeCollect()
+                        let joined = as_ + bs
+                        let v = self.heap.allocStr(joined)
+                        self.push(v)
+                    } else {
+                        self.runtimeError("'+' operands must be two numbers or two strings", fi, here)
+                        return false
+                    }
+                }
+                Subtract => {
+                    if !self.binaryNumbersOk(fi, here) {
+                        return false
+                    }
+                    let b = self.pop().asNum()
+                    let a = self.pop().asNum()
+                    self.push(Value.num(a - b))
+                }
+                Multiply => {
+                    if !self.binaryNumbersOk(fi, here) {
+                        return false
+                    }
+                    let b = self.pop().asNum()
+                    let a = self.pop().asNum()
+                    self.push(Value.num(a * b))
+                }
+                Divide => {
+                    if !self.binaryNumbersOk(fi, here) {
+                        return false
+                    }
+                    let b = self.pop().asNum()
+                    let a = self.pop().asNum()
+                    self.push(Value.num(a / b))
+                }
+                Not => {
+                    let v = self.pop()
+                    self.push(Value.bool(!v.truthy()))
+                }
+                Negate => {
+                    if !self.peek(0).isNum() {
+                        self.runtimeError("operand of '-' must be a number", fi, here)
+                        return false
+                    }
+                    let v = self.pop().asNum()
+                    self.push(Value.num(0.0 - v))
+                }
+                Print => {
+                    let v = self.pop()
+                    print(self.format(v))
+                }
+                Jump => {
+                    let off = self.readU16(fi, ip)
+                    ip = ip + 2 + off
+                }
+                JumpIfFalse => {
+                    let off = self.readU16(fi, ip)
+                    ip = ip + 2
+                    if !self.peek(0).truthy() {
+                        ip = ip + off
+                    }
+                }
+                Loop => {
+                    let off = self.readU16(fi, ip)
+                    ip = ip + 2 - off
+                }
+                Call => {
+                    let argc = self.functions[fi].chunk.code[ip] as i64
+                    ip = ip + 1
+                    let callee = self.peek(argc)
+                    let target = self.functionIndexOf(callee)
+                    if target < 0 {
+                        self.runtimeError("can only call a function", fi, here)
+                        return false
+                    }
+                    if self.functions[target].arity != argc {
+                        self.runtimeError("'" + self.functions[target].name + "' expects " + self.functions[target].arity.toString() + " arguments but got " + argc.toString(), fi, here)
+                        return false
+                    }
+                    if self.frames.len >= MAX_FRAMES {
+                        self.runtimeError("stack overflow", fi, here)
+                        return false
+                    }
+                    // Save the caller's ip in its frame, then switch.
+                    self.frames[self.frames.len - 1].ip = ip
+                    let newBase = self.stack.len - argc - 1
+                    self.frames.push(Frame {
+                        fnIndex: target, ip: 0, base: newBase
+                    }
+                    )
+                    fi = target
+                    ip = 0
+                    base = newBase
+                }
+                NewList => {
+                    let n = self.readU16(fi, ip)
+                    ip = ip + 2
+                    var xs: Vec<Value> = Vec.new()
+                    var i: i64 = 0
+                    while i < n {
+                        xs.push(self.stack[self.stack.len - n + i])
+                        i = i + 1
+                    }
+                    i = 0
+                    while i < n {
+                        let _ = self.pop()
+                        i = i + 1
+                    }
+                    self.maybeCollect()
+                    let v = self.heap.allocList(xs)
+                    self.push(v)
+                }
+                Index => {
+                    let idxV = self.pop()
+                    let listV = self.pop()
+                    if !idxV.isNum() {
+                        self.runtimeError("list index must be a number", fi, here)
+                        return false
+                    }
+                    let i = idxV.asNum() as i64
+                    var found = Value.nil()
+                    var ok = false
+                    var oob = false
+                    let got = heapWith(self.heap, listV, (o: &Obj): i64 => {
+                        match o {
+                            List(xs) => {
+                                if i < 0 || i >= xs.len {
+                                    oob = true
+                                    return 0
+                                }
+                                found = xs[i]
+                                ok = true
+                                return 0
+                            }
+                            Str(s) => {
+                                return 0
+                            }
+                            Fn(n) => {
+                                return 0
+                            }
+                        }
+                    }
+                    )
+                    if got.isNone() {
+                        self.heap.noteDangling()
+                        self.runtimeError("indexed a dangling object reference (the box outlived its object)", fi, here)
+                        return false
+                    }
+                    if oob {
+                        self.runtimeError("list index " + i.toString() + " out of range", fi, here)
+                        return false
+                    }
+                    if !ok {
+                        self.runtimeError("only a list can be indexed", fi, here)
+                        return false
+                    }
+                    self.push(found)
+                }
+                SetIndex => {
+                    let valV = self.pop()
+                    let idxV = self.pop()
+                    let listV = self.pop()
+                    if !idxV.isNum() {
+                        self.runtimeError("list index must be a number", fi, here)
+                        return false
+                    }
+                    let i = idxV.asNum() as i64
+                    var ok = false
+                    var oob = false
+                    // Calls the arena directly rather than through a helper in
+                    // heap.milo: a user-defined function taking a closure is
+                    // assumed to keep it, so passing one that captures locals is
+                    // rejected. std's arena functions are known not to escape, so
+                    // the same closure is accepted when handed to them straight.
+                    let listHandle = self.heap.handleOf(listV)
+                    let touched = self.heap.objs.modify(listHandle, (o: Obj): Obj => {
+                        match o {
+                            List(xs) => {
+                                var ys = xs
+                                if i < 0 || i >= ys.len {
+                                    oob = true
+                                } else {
+                                    ys[i] = valV
+                                    ok = true
+                                }
+                                return Obj.List(ys)
+                            }
+                            Str(s) => {
+                                return Obj.Str(s)
+                            }
+                            Fn(n) => {
+                                return Obj.Fn(n)
+                            }
+                        }
+                    }
+                    )
+                    if !touched {
+                        self.heap.noteDangling()
+                        self.runtimeError("assigned through a dangling object reference (the box outlived its object)", fi, here)
+                        return false
+                    }
+                    if oob {
+                        self.runtimeError("list index " + i.toString() + " out of range", fi, here)
+                        return false
+                    }
+                    if !ok {
+                        self.runtimeError("only a list supports index assignment", fi, here)
+                        return false
+                    }
+                    self.push(valV)
+                }
+                Len => {
+                    let v = self.pop()
+                    var n: i64 = -1
+                    let got = heapWith(self.heap, v, (o: &Obj): i64 => {
+                        match o {
+                            List(xs) => {
+                                return xs.len
+                            }
+                            Str(s) => {
+                                return s.len
+                            }
+                            Fn(f) => {
+                                return -1
+                            }
+                        }
+                    }
+                    )
+                    match got {
+                        Some(x) => {
+                            n = x
+                        }
+                        None => {
+                            self.heap.noteDangling()
+                            self.runtimeError("len() of a dangling object reference (the box outlived its object)", fi, here)
+                            return false
+                        }
+                    }
+                    if n < 0 {
+                        self.runtimeError("len() expects a list or a string", fi, here)
+                        return false
+                    }
+                    self.push(Value.num(n as f64))
+                }
+                Return => {
+                    let result = self.pop()
+                    self.frames.pop()!
+                    if self.frames.len == 0 {
+                        let _ = self.pop()
+                        return true
+                    }
+                    // Discard the callee and its arguments in one truncation.
+                    while self.stack.len > base {
+                        let _ = self.pop()
+                    }
+                    self.push(result)
+                    let caller = self.frames[self.frames.len - 1]
+                    fi = caller.fnIndex
+                    ip = caller.ip
+                    base = caller.base
+                }
+            }
+        }
+        return true
+    }
+
+    fn readU16(self: &Self, fi: i64, at: i64): i64 {
+        let hi = self.functions[fi].chunk.code[at] as i64
+        let lo = self.functions[fi].chunk.code[at + 1] as i64
+        return (hi << 8) | lo
+    }
+
+    fn binaryNumbersOk(self: &mut Self, fi: i64, here: i64): bool {
+        if self.peek(0).isNum() && self.peek(1).isNum() {
+            return true
+        }
+        self.runtimeError("arithmetic operands must be numbers", fi, here)
+        return false
+    }
+
+    fn functionIndexOf(self: &Self, v: Value): i64 {
+        let got = heapWith(self.heap, v, (o: &Obj): i64 => {
+            match o {
+                Fn(n) => {
+                    return n
+                }
+                Str(s) => {
+                    return -1
+                }
+                List(xs) => {
+                    return -1
+                }
+            }
+        }
+        )
+        match got {
+            Some(n) => {
+                return n
+            }
+            None => {
+                return -1
+            }
+        }
+    }
+
+    fn valuesEqual(self: &Self, a: Value, b: Value): bool {
+        if a.isNum() && b.isNum() {
+            return a.asNum() == b.asNum()
+        }
+        if a.isObj() && b.isObj() {
+            if a.sameBits(b) {
+                return true
+            }
+            // Strings compare by content; other objects by identity.
+            if self.isString(a) && self.isString(b) {
+                return self.stringOf(a) == self.stringOf(b)
+            }
+            return false
+        }
+        return a.sameBits(b)
+    }
+}

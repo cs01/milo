@@ -1,0 +1,133 @@
+// Bytecode disassembler. Exists so the compiler's jump arithmetic can be
+// checked by eye rather than by trusting it.
+from "./chunk" import {
+    Chunk, opName
+}
+from "./function" import {
+    Function
+}
+from "./value" import {
+    Value
+}
+from "./heap" import {
+    Heap, Obj, heapWith
+}
+
+fn pad(s: string, width: i64): string {
+    var out = s
+    while out.len < width {
+        out = out + " "
+    }
+    return out
+}
+
+fn pad4(n: i64): string {
+    var s = n.toString()
+    while s.len < 4 {
+        s = "0" + s
+    }
+    return s
+}
+
+pub fn disassembleFunction(f: &Function, fi: i64, heap: &Heap): string {
+    var out = "== fn#" + fi.toString() + " " + f.name.clone() + "/" + f.arity.toString() + " ==\n"
+    var ip: i64 = 0
+    while ip < f.chunk.code.len {
+        let b = f.chunk.code[ip]
+        let name = opName(b)
+        var line = pad4(ip) + "  " + pad(name, 9)
+        let bi = b as i64
+        // Operand widths mirror the comments on `enum Op`.
+        if bi == 0 || bi == 5 || bi == 6 || bi == 7 || bi == 8 || bi == 9 || bi == 24 {
+            let v = readU16(f.chunk, ip + 1)
+            line = line + " " + v.toString()
+            if bi == 0 {
+                line = line + "   ; " + constRepr(f.chunk, v, heap)
+            }
+            if bi == 7 || bi == 8 || bi == 9 {
+                line = line + "   ; " + constRepr(f.chunk, v, heap)
+            }
+            ip = ip + 3
+        } else if bi == 20 || bi == 21 {
+            let v = readU16(f.chunk, ip + 1)
+            line = line + " " + v.toString() + "   -> " + (ip + 3 + v).toString()
+            ip = ip + 3
+        } else if bi == 22 {
+            let v = readU16(f.chunk, ip + 1)
+            line = line + " " + v.toString() + "   -> " + (ip + 3 - v).toString()
+            ip = ip + 3
+        } else if bi == 23 {
+            line = line + " " + (f.chunk.code[ip + 1] as i64).toString()
+            ip = ip + 2
+        } else {
+            ip = ip + 1
+        }
+        out = out + line + "\n"
+    }
+    return out
+}
+
+fn readU16(c: &Chunk, at: i64): i64 {
+    return ((c.code[at] as i64) << 8) | (c.code[at + 1] as i64)
+}
+
+fn constRepr(c: &Chunk, idx: i64, heap: &Heap): string {
+    if idx < 0 || idx >= c.constants.len {
+        return "?"
+    }
+    let v = c.constants[idx]
+    if v.isNum() {
+        return v.asNum().toString()
+    }
+    if v.isNil() {
+        return "nil"
+    }
+    if v.isBool() {
+        if v.asBool() {
+            return "true"
+        }
+        return "false"
+    }
+    var kind: i64 = 0
+    var body = ""
+    var fnIdx: i64 = -1
+    let got = heapWith(heap, v, (o: &Obj): i64 => {
+        match o {
+            Str(s) => {
+                kind = 1
+                body = s.clone()
+                return 0
+            }
+            List(xs) => {
+                kind = 2
+                return 0
+            }
+            Fn(n) => {
+                kind = 3
+                fnIdx = n
+                return 0
+            }
+        }
+    }
+    )
+    if got.isNone() {
+        return "<dangling>"
+    }
+    if kind == 1 {
+        return "\"" + body + "\""
+    }
+    if kind == 3 {
+        return "<fn#" + fnIdx.toString() + ">"
+    }
+    return "<list>"
+}
+
+pub fn disassemble(functions: &Vec<Function>, heap: &Heap): string {
+    var out = ""
+    var i: i64 = 0
+    while i < functions.len {
+        out = out + disassembleFunction(functions[i], i, heap) + "\n"
+        i = i + 1
+    }
+    return out
+}

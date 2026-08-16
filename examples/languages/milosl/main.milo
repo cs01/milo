@@ -1,0 +1,272 @@
+// milosl — a small scripting language whose entire point is its value
+// representation. See README.md.
+//
+// @run: demo
+from "./value" import {
+    Value, QNAN, SIGN
+}
+from "./heap" import {
+    Heap, Obj, heapWith
+}
+from "./compiler" import {
+    compile, CompileResult
+}
+from "./vm" import {
+    VM
+}
+from "./disasm" import {
+    disassemble
+}
+from "std/args" import {
+    args
+}
+from "std/fs" import {
+    readFile
+}
+from "std/time" import {
+    now, since
+}
+
+let DEMO: string = "
+// milosl demo: everything the language has.
+var greeting = \"milosl\";
+print greeting + \" says hi\";
+
+fn fib(n) {
+  if (n < 2) return n;
+  return fib(n - 1) + fib(n - 2);
+}
+print fib(20);
+
+var xs = [1, 2, 3, 4, 5];
+var total = 0;
+var i = 0;
+while (i < len(xs)) {
+  total = total + xs[i];
+  i = i + 1;
+}
+print total;
+
+xs[0] = 100;
+print xs;
+
+var words = [\"the\", \"quick\", \"brown\"];
+var joined = \"\";
+i = 0;
+while (i < len(words)) {
+  joined = joined + words[i] + \" \";
+  i = i + 1;
+}
+print joined;
+print true and not false;
+print nil == nil;
+"
+
+let BENCH_FIB: string = "
+fn fib(n) {
+  if (n < 2) return n;
+  return fib(n - 1) + fib(n - 2);
+}
+print fib(27);
+"
+
+let BENCH_LOOP: string = "
+var i = 0;
+var acc = 0;
+while (i < 2000000) {
+  acc = acc + i * 2 - 1;
+  i = i + 1;
+}
+print acc;
+"
+
+let BENCH_ALLOC: string = "
+var i = 0;
+var last = nil;
+while (i < 120000) {
+  last = [i, i + 1, i + 2];
+  i = i + 1;
+}
+print last;
+"
+
+// A reachable list is handed to a collector that has been told to free one live
+// object. In C this is a use-after-free that surfaces later as corrupted data;
+// here the next touch of the box fails the generation check.
+let GC_BUG_PROGRAM: string = "
+var keep = [1, 2, 3];
+var i = 0;
+while (i < 400) {
+  var garbage = [i, i];
+  i = i + 1;
+}
+print keep[0];
+"
+
+fn runSource(src: string, disasm: bool, stats: bool, buggyGc: bool): bool {
+    var heap: Heap = Heap.new()
+    let result = compile(src, heap)
+    if !result.ok {
+        for e in result.errors {
+            print(e)
+        }
+        return false
+    }
+    if disasm {
+        print(disassemble(result.functions, heap))
+    }
+    var vm: VM = VM.new(heap, result.functions)
+    vm.setBuggyGc(buggyGc)
+    let t0 = now()
+    let ok = vm.run()
+    let d = since(t0)
+    if !ok {
+        print(vm.error())
+    }
+    if stats {
+        print("--- " + d.toMillis().toString() + "ms, " + vm.stepCount().toString() + " instructions, " + vm.allocCount().toString() + " allocations, " + vm.gcCount().toString() + " collections, " + vm.liveObjects().toString() + " live objects, " + vm.danglingCaught().toString() + " dangling references caught")
+    }
+    return ok
+}
+
+fn bench(name: string, src: string) {
+    var heap: Heap = Heap.new()
+    let result = compile(src, heap)
+    if !result.ok {
+        for e in result.errors {
+            print(e)
+        }
+        return
+    }
+    var vm: VM = VM.new(heap, result.functions)
+    let t0 = now()
+    let ok = vm.run()
+    let d = since(t0)
+    if !ok {
+        print(vm.error())
+        return
+    }
+    print("  " + name + ": " + d.toMillis().toString() + "ms  (" + vm.stepCount().toString() + " instructions, " + vm.gcCount().toString() + " collections)")
+}
+
+// Every 64-bit pattern an attacker could produce, tagged to claim it is a heap
+// pointer. In a C nan-boxed VM the mantissa becomes an address and gets
+// dereferenced; bun shipped exactly that bug in `bun:ffi` (upstream commit
+// 179978a6f9, "purify NaNs before NaN-boxing doubles from native code").
+fn demoForge() {
+    var heap: Heap = Heap.new()
+    let real = heap.allocStr("a live object")
+    var st: u64 = 0x9e3779b97f4a7c15
+    var i: i64 = 0
+    var reached: i64 = 0
+    var rejected: i64 = 0
+    let N: i64 = 2000000
+    while i < N {
+        st = st ^ (st << 13)
+        st = st ^ (st >> 7)
+        st = st ^ (st << 17)
+        let forged = Value {
+            bits: SIGN | QNAN | (st & 0x3ffffffffffff)
+        }
+        match heapWith(heap, forged, (o: &Obj): i64 => {
+            return 1
+        }
+        ) {
+            Some(n) => {
+                reached = reached + 1
+            }
+            None => {
+                rejected = rejected + 1
+            }
+        }
+        i = i + 1
+    }
+    print("forged " + N.toString() + " object boxes from random 64-bit payloads")
+    print("  dereferenced: " + reached.toString())
+    print("  rejected by the generation check: " + rejected.toString())
+    let stillThere = heapWith(heap, real, (o: &Obj): bool => {
+        return true
+    }
+    )
+    print("  the real object is untouched: " + stillThere.isSome().toString())
+}
+
+fn usage() {
+    print("milosl — a small language with an 8-byte nan-boxed value")
+    print("")
+    print("  milosl <file.sl>        run a script")
+    print("  milosl demo             run the built-in demo program")
+    print("  milosl bench            run the benchmarks")
+    print("  milosl gc-bug           free a reachable object on purpose, watch it get caught")
+    print("  milosl forge            forge 2M object references, watch none of them deref")
+    print("")
+    print("  --disasm                dump bytecode before running")
+    print("  --stats                 print instruction, allocation and GC counts")
+}
+
+fn main() {
+    let argv = args()
+    var disasm = false
+    var stats = false
+    var target = ""
+    var i: i64 = 1
+    while i < argv.len {
+        let a = argv[i]
+        if a == "--disasm" {
+            disasm = true
+        } 
+        else if a == "--stats" {
+            stats = true
+        } 
+        else if a == "-h" || a == "--help" {
+            usage()
+            return
+        } 
+        else {
+            target = a.clone()
+        }
+        i = i + 1
+    }
+    if target == "" {
+        target = "demo"
+    }
+
+    if target == "demo" {
+        let _ = runSource(DEMO, disasm, stats, false)
+        return
+    }
+    if target == "forge" {
+        demoForge()
+        return
+    }
+    if target == "gc-bug" {
+        print("running with a deliberately broken collector that frees one reachable object")
+        print("")
+        let ok = runSource(GC_BUG_PROGRAM, disasm, true, true)
+        print("")
+        if ok {
+            print("the collector bug did not happen to hit a live object this run")
+        } else {
+            print("caught at the instruction that touched it, with a line number.")
+            print("the same bug in a C nan-boxed VM is a use-after-free that surfaces")
+            print("somewhere else entirely, as corrupted data or a crash.")
+        }
+        return
+    }
+    if target == "bench" {
+        print("milosl benchmarks")
+        bench("fib(27)      ", BENCH_FIB)
+        bench("loop 2M      ", BENCH_LOOP)
+        bench("alloc 120k   ", BENCH_ALLOC)
+        return
+    }
+    match readFile(target) {
+        Ok(src) => {
+            let _ = runSource(src, disasm, stats, false)
+        }
+        Err(e) => {
+            print("milosl: cannot read '" + target + "'")
+            usage()
+        }
+    }
+}

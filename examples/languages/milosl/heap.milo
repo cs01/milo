@@ -230,12 +230,3 @@ pub fn heapSet(h: &mut Heap, v: &Value, o: Obj): bool {
     let handle = h.handleOf(v)
     return h.objs.set(handle, o)
 }
-
-// Mutate the object in place. False when the box is stale.
-pub fn heapModify(h: &mut Heap, v: &Value, f: (&mut Obj) => void): bool {
-    if !v.isObj() {
-        return false
-    }
-    let handle = h.handleOf(v)
-    return h.objs.modifyMut(handle, f)
-}

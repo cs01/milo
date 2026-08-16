@@ -92,7 +92,14 @@ _Undocumented._
 pub fn isAlphaStr(s: &string): bool
 ```
 
-Check if an entire string is alphabetic.
+Is every byte an ASCII letter? **ASCII only, despite living here** — it walks BYTES
+calling `asciiIsAlpha`, so any multibyte letter fails on its first continuation byte:
+`isAlphaStr("café")`, `isAlphaStr("привет")` and `isAlphaStr("αβγ")` are all false.
+Use it as an ASCII-identifier test, not as a Unicode letter test.
+
+The code-point layer in this module IS correct (`codepointCount("café")` is 4); it is
+the classification that is ASCII, because a Unicode general-category table is a
+generated artefact nobody has built here yet (docs/backlog.md).
 
 ### `isCombining`
 

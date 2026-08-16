@@ -1,4 +1,13 @@
-// std/unicode — character classification, case conversion, and UTF-8 decoding
+// std/unicode — UTF-8 decoding and encoding, plus ASCII-level classification
+//
+// The header used to promise "case conversion", which this module does not contain — the
+// only case helpers anywhere are `asciiToUpper`/`asciiToLower` in std/string, and they
+// are byte-level. Unicode case mapping is not a delta on a code point (ß uppercases to
+// SS, which GROWS the string), so it needs a generated table nobody has built here yet.
+//
+// What IS correct here is the code-point layer: `codepointCount`, `decodeCodepoint`,
+// `nextCodepointBoundary`, `encodeCodepoint`. What is ASCII-only is the classification
+// (`isAlphaStr`, `isNumeric`) — each says so at its definition.
 
 // Check if an entire string is numeric (all digits).
 pub fn isNumeric(s: &string): bool {
@@ -14,8 +23,17 @@ pub fn isNumeric(s: &string): bool {
     }
     return true
 }
+// ^ ASCII only, like isAlphaStr below: a non-ASCII digit (Arabic-Indic, fullwidth)
+// answers false. Narrower promise than "alphabetic", so it surprises less often.
 
-// Check if an entire string is alphabetic.
+// Is every byte an ASCII letter? **ASCII only, despite living here** — it walks BYTES
+// calling `asciiIsAlpha`, so any multibyte letter fails on its first continuation byte:
+// `isAlphaStr("café")`, `isAlphaStr("привет")` and `isAlphaStr("αβγ")` are all false.
+// Use it as an ASCII-identifier test, not as a Unicode letter test.
+//
+// The code-point layer in this module IS correct (`codepointCount("café")` is 4); it is
+// the classification that is ASCII, because a Unicode general-category table is a
+// generated artefact nobody has built here yet (docs/backlog.md).
 pub fn isAlphaStr(s: &string): bool {
     if s.len == 0 {
         return false
@@ -213,7 +231,7 @@ pub fn fromSurrogatePair(high: i32, low: i32): i32 {
 // expressed as comparison chains rather than a table so lookup allocates
 // nothing and stays usable in a per-frame render loop.
 //
-// Coverage is the practically-load-bearing subset of the Unicode data, not the
+// Coverage is the practically-needed subset of the Unicode data, not the
 // full UCD: the East Asian Wide/Fullwidth blocks, the emoji planes, and the
 // combining-mark blocks in wide use. Rare historic scripts may measure one cell
 // short. Generating the exhaustive table from UnicodeData.txt is the follow-up;

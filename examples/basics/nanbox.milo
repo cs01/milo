@@ -71,12 +71,12 @@ impl Value {
 }
 
 // A Value never holds an address — only a slot number in this arena and the
-// generation that slot had when the box was made. Rebuilding the handle takes
-// the arena's id from the caller, never from the box, so a value cannot even
-// name a different arena.
-fn handleOf(arenaId: i64, v: &Value): Handle<string> {
+// generation that slot had when the box was made. The arena's own id is read
+// off the arena, never out of the box, so a value cannot even name a different
+// arena.
+fn handleOf(strings: &Arena<string>, v: &Value): Handle<string> {
     return Handle {
-        arenaId: arenaId, index: v.index(), generation: v.generation()
+        arenaId: strings.id, index: v.index(), generation: v.generation()
     }
 }
 
@@ -86,19 +86,17 @@ fn handleOf(arenaId: i64, v: &Value): Handle<string> {
 // sign, index bounds, slot generation — and returns None if any of them fail,
 // which is why a stale or forged box becomes "<dangling>" instead of a read of
 // freed memory.
-fn show(strings: &Arena<string>, arenaId: i64, v: &Value): string {
+fn show(strings: &Arena<string>, v: &Value): string {
     if v.isNum() {
         return v.asNum().toString()
     }
-    return strings.get(handleOf(arenaId, v)) ?? "<dangling>"
+    return strings.get(handleOf(strings, v)) ?? "<dangling>"
 }
 
 fn main() {
     // The strings live here, and nowhere else. Every string Value is an index
     // into this arena plus a generation.
     var strings: Arena<string> = Arena<string>.new()
-    // An arena's id is only observable through a handle, so take one now.
-    let arenaId = strings.alloc("").arenaId
 
     // ── an array of mixed values, 8 bytes each ──
     var arr: Vec<Value> = Vec.new()
@@ -108,7 +106,7 @@ fn main() {
     arr.push(Value.str(strings.alloc("and a string")))
     var line = ""
     for v in arr {
-        line = line + show(strings, arenaId, v) + "  "
+        line = line + show(strings, v) + "  "
     }
     print(line)
 
@@ -119,9 +117,9 @@ fn main() {
     // ── a freed string is caught, not dereferenced ──
     let h = strings.alloc("about to be freed")
     let doomed = Value.str(h)
-    print("before free: " + show(strings, arenaId, doomed))
+    print("before free: " + show(strings, doomed))
     let _ = strings.free(h)
-    print("after free:  " + show(strings, arenaId, doomed))
+    print("after free:  " + show(strings, doomed))
 
     // ── no 64-bit pattern reaches memory ──
     // In C the payload is an address, so a forged box is an arbitrary read.
@@ -137,7 +135,7 @@ fn main() {
         let forged = Value {
             bits: SIGN | QNAN | (st & 0x3ffffffffffff)
         }
-        if show(strings, arenaId, forged) != "<dangling>" {
+        if show(strings, forged) != "<dangling>" {
             reached = reached + 1
         }
         i = i + 1

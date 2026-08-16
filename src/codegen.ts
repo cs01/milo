@@ -324,27 +324,41 @@ export class Codegen {
   // is still the right default for throughput (see emitStdoutWrite), so retuning is
   // opt-in and belongs to whoever might do the killing: set MILO_LINE_BUFFERED and pay
   // a write per line to get output up to the hang instead of nothing.
+  private static readonly LINE_BUF_INIT_FN = "__milo_line_buffer_init";
+
   private emitStdoutBufferingOptIn(lines: string[]): void {
     if (this.target.os === "none") return; // freestanding: no environment, no stdio streams
     this.needsSetvbuf = true;
-    // A named constant spliced in with the other declares, NOT addString: the green-main
-    // entry is emitted after the string table has already been written out, so a string
-    // interned here would be referenced by an @.str.N global that never gets defined.
-    const label = "@.milo_line_buf_env";
-    const env = this.nextTemp(), isSet = this.nextTemp(), mode = this.nextTemp(), handle = this.nextTemp();
-    lines.push(`  ${env} = call ptr @getenv(ptr ${label})`);
+    lines.push(`  call void @${Codegen.LINE_BUF_INIT_FN}()`);
+  }
+
+  // Emitted once, as its own function rather than inline in main, for two reasons: the
+  // branch would otherwise split main's entry block and push every following alloca out
+  // of it (see allocaHoist), and the call has to be skipped rather than made harmless
+  // when the variable is unset. There is no no-op setvbuf: MSVC's validates size > 0 for
+  // _IOFBF/_IOLBF and routes a 0 to the invalid-parameter handler, which terminates the
+  // process — a branchless `select` between _IONBF and _IOFBF killed every Windows
+  // binary at startup while POSIX shrugged it off.
+  private lineBufferInitFn(): string[] {
+    const lines: string[] = [];
+    const env = this.nextTemp(), isSet = this.nextTemp(), handle = this.nextTemp();
+    // MSVC maps _IOLBF onto _IOFBF, so line buffering there does nothing; _IONBF (4) is
+    // the mode that actually reaches the fd per write.
+    const mode = this.isWindows ? 4 : 1;
+    lines.push(`define internal void @${Codegen.LINE_BUF_INIT_FN}() {`);
+    lines.push("entry.bb:");
+    lines.push(`  ${env} = call ptr @getenv(ptr @.milo_line_buf_env)`);
     lines.push(`  ${isSet} = icmp ne ptr ${env}, null`);
-    // Branchless on purpose: the unset arm passes _IOFBF (0), which is the mode the
-    // stream already had, so this is a no-op call rather than a skipped one. MSVC maps
-    // _IOLBF onto _IOFBF and would silently do nothing, so Windows opts into _IONBF (4).
-    lines.push(`  ${mode} = select i1 ${isSet}, i32 ${this.isWindows ? 4 : 1}, i32 0`);
-    if (this.isWindows) {
-      this.needsIob = true;
-      lines.push(`  ${handle} = call ptr @__acrt_iob_func(i32 1)`);
-    } else {
-      lines.push(`  ${handle} = load ptr, ptr @${this.stdoutSymbol}`);
-    }
+    lines.push(`  br i1 ${isSet}, label %linebuf.set, label %linebuf.done`);
+    lines.push("linebuf.set:");
+    if (this.isWindows) lines.push(`  ${handle} = call ptr @__acrt_iob_func(i32 1)`);
+    else lines.push(`  ${handle} = load ptr, ptr @${this.stdoutSymbol}`);
     lines.push(`  call i32 @setvbuf(ptr ${handle}, ptr null, i32 ${mode}, i64 0)`);
+    lines.push("  br label %linebuf.done");
+    lines.push("linebuf.done:");
+    lines.push("  ret void");
+    lines.push("}");
+    return lines;
   }
 
   // dprintf(fd, fmt, ...) has no UCRT equivalent. stderr is not a linkable data symbol
@@ -1637,6 +1651,7 @@ export class Codegen {
     // emitStdoutBufferingOptIn, so its externs have to be declared from the fact that
     // it will run, not from its having run.
     if (this.wrapMainGreen && this.target.os !== "none") this.needsSetvbuf = true;
+    if (this.needsSetvbuf && this.isWindows) this.needsIob = true;
     if ((this.needsFwrite || this.needsSetvbuf) && !this.isWindows && !declaredExterns.has(this.stdoutSymbol))
       this.output.splice(1, 0, `@${this.stdoutSymbol} = external global ptr`);
     if (this.needsSetvbuf) {
@@ -1758,6 +1773,7 @@ export class Codegen {
       this.output.splice(1, 0, `declare ${retType} @${ext.name}(${paramTypes.join(", ")})`);
     }
 
+    if (this.needsSetvbuf) fnBodies.push(this.lineBufferInitFn());
     if (this.wrapMainGreen) fnBodies.push(this.greenMainEntry());
 
     // append function bodies

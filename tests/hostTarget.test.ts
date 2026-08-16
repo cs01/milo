@@ -5,13 +5,15 @@
 // IR: it didn't fail, it lied. Windows is a real target now; every other unknown host
 // must still be refused explicitly rather than silently mislabelled.
 import { test, expect } from "bun:test";
-import { execFileSync } from "child_process";
+import { execFileSync, spawnSync } from "child_process";
 import { existsSync, unlinkSync } from "fs";
 import { join } from "path";
-import { tmpdir } from "os";
+import { homedir, tmpdir } from "os";
 import { hostTargetFor, getHostTarget, resolveTarget, UnsupportedHostError } from "../src/target";
 
 const ROOT = join(import.meta.dir, "..");
+// `wine --version` rather than a PATH lookup: a broken install should skip, not fail.
+const hasWine = spawnSync("wine", ["--version"], { encoding: "utf-8" }).status === 0;
 const MAIN = join(ROOT, "src", "main.ts");
 
 test("hosts resolve to their native triple", () => {
@@ -47,17 +49,34 @@ test("the real host resolves on every platform this suite runs on", () => {
 // has if someone ran `xwin splat` and pointed MILO_WINDOWS_SDK at it. Skipped otherwise
 // rather than failed: an unset env var means "not set up here", not "broken".
 // Setup: cargo install xwin && xwin --accept-license --arch x86_64 splat --output ~/.xwin
-const SDK = process.env.MILO_WINDOWS_SDK;
+// Default to the path the setup line above produces. A dev who ran xwin once should get
+// the Windows gate without also having to remember an env var — a skip nobody notices is
+// how a codegen change reaches CI's test-windows job untested.
+const SDK = process.env.MILO_WINDOWS_SDK
+  ?? (existsSync(join(homedir(), ".xwin")) ? join(homedir(), ".xwin") : undefined);
 test.skipIf(!SDK || process.platform === "win32")("cross-compiles a windows PE from a posix host", () => {
   const out = join(tmpdir(), `milo_wintest_${process.pid}`);
   const exe = `${out}.exe`;
   try {
     execFileSync("bun", ["run", MAIN, "build", join(ROOT, "examples", "hello.milo"),
-      "--target=windows-x64", "-o", out], { cwd: ROOT, encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"] });
+      "--target=windows-x64", "-o", out],
+      { cwd: ROOT, encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"], env: { ...process.env, MILO_WINDOWS_SDK: SDK } });
     expect(existsSync(exe)).toBe(true);
     // PE32+ magic: "MZ" DOS header. Proves we emitted COFF, not ELF or Mach-O.
     const head = execFileSync("head", ["-c", "2", exe], { encoding: "latin1" });
     expect(head).toBe("MZ");
+
+    // Linking is not running. A `setvbuf(stdout, NULL, _IOFBF, 0)` emitted into main
+    // linked cleanly here and then killed every Windows binary at startup, because MSVC
+    // validates that size and routes a 0 to the invalid-parameter handler — caught only
+    // by CI's test-windows job, one push later. Wine is not Windows (that job stays the
+    // authority), but it runs the real CRT, so it catches a whole class of startup and
+    // libc-contract faults on the dev host. Skipped when wine is absent.
+    if (hasWine) {
+      const r = spawnSync("wine", [exe], { encoding: "utf-8", timeout: 120000, env: { ...process.env, WINEDEBUG: "-all" } });
+      expect(r.status).toBe(0);
+      expect(r.stdout).toContain("Hello, Milo!");
+    }
   } finally {
     try { unlinkSync(exe); } catch {}
   }

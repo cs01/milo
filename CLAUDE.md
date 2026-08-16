@@ -110,6 +110,10 @@ Source → Lexer → Parser → AST → Resolver (imports) → AST (merged) → 
     ./milo build examples/hello.milo --target=windows-x64 -o hello   # needs lld-link
   WINEDEBUG=-all wine hello.exe                                       # optional: run it locally
   ```
+  Once `~/.xwin` exists, `bun test tests/hostTarget.test.ts` picks it up with no env var
+  and — if `wine` is installed — RUNS the cross-built exe rather than only linking it.
+  That distinction matters: a `setvbuf` call MSVC rejects at startup linked cleanly and
+  killed every Windows binary, and only CI caught it.
   Wine validates the link and the CRT calls but is not the OS — CI's `test-windows` job is the authority on whether generated code actually runs. With `MILO_WINDOWS_SDK` set, `verifyCDecls` DOES run the `@cLayout`/`@cSig` guards on a Windows cross-compile (it compiles the guard TU with `--target=<triple>` against xwin's headers), so a wrong layout is caught on the dev host, not only in CI. Other target≠host crosses still skip (no sysroot to read).
 
 ## Layout

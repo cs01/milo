@@ -15,12 +15,27 @@ from "std/arena" import {
     Arena, Handle, arenaWith, arenaHandles
 }
 
+// An insertion-ordered string-keyed dictionary, as two parallel vectors with
+// linear lookup. Not a HashMap for two reasons: Milo's HashMap iteration order
+// is randomized, which would make `keys(d)` and `print d` nondeterministic and
+// break every script that prints one; and milox is a demo-scale language where
+// a dictionary holds a handful of entries, so O(n) lookup over a contiguous
+// Vec<string> beats hashing. That is a deliberate choice, not an oversight.
+//
+// It is a struct rather than two enum payloads because an enum variant holds
+// one payload comfortably.
+pub struct DictObj {
+    keys: Vec<string>,
+    vals: Vec<Value>,
+}
+
 pub enum Obj {
     Str(string),
     List(Vec<Value>),
     // Index into the VM's function table. Functions are compile-time entities
     // that outlive every collection, so the object only carries the index.
     Fn(i64),
+    Dict(DictObj),
 }
 
 pub struct Heap {
@@ -79,6 +94,9 @@ impl Heap {
     }
     fn allocFn(self: &mut Self, fnIndex: i64): Value {
         return self.alloc(Obj.Fn(fnIndex))
+    }
+    fn allocDict(self: &mut Self, d: DictObj): Value {
+        return self.alloc(Obj.Dict(d))
     }
 
     fn handleOf(self: &Self, v: &Value): Handle<Obj> {
@@ -171,6 +189,15 @@ impl Heap {
                         return 0
                     }
                     Fn(n) => {
+                        return 0
+                    }
+                    // A dictionary's values are heap references like a list's,
+                    // so they are traced exactly the same way. Missing this is
+                    // a collected-live-object bug that only shows up later.
+                    Dict(d) => {
+                        for x in d.vals {
+                            work.push(x)
+                        }
                         return 0
                     }
                 }

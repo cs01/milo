@@ -181,6 +181,27 @@ print tree;
 // closure-ish: a list carrying its own operation
 fn apply(f, v) { return f(v); }
 print apply(double, 8);
+
+// dictionaries: string keys, insertion order, values of any type
+var enemy = {\"name\": \"goblin\", \"hp\": 12, \"tags\": [\"cave\", \"fast\"]};
+print enemy;
+print enemy[\"hp\"];
+enemy[\"hp\"] = 3;
+enemy[\"state\"] = \"flee\";
+print enemy;
+print keys(enemy);
+print len(enemy);
+print has(enemy, \"state\");
+print enemy[\"gold\"];
+print {};
+
+// dicts and lists nest either way around
+var party = [{\"n\": \"a\"}, {\"n\": \"b\"}];
+party[1][\"n\"] = \"z\";
+print party;
+var world = {\"grid\": [[1, 2], [3, 4]]};
+world[\"grid\"][1][0] = 9;
+print world;
 "
 
 let RULE_CAUTIOUS: string = "

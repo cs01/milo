@@ -789,6 +789,30 @@ impl Compiler {
         self.emitU16(count)
     }
 
+    // A `{` in *expression* position is a dictionary literal; a `{` in
+    // statement position is a block. There is no ambiguity to resolve, because
+    // primary() only ever runs in expression position.
+    fn dictLiteral(self: &mut Self, h: &mut Heap) {
+        var count: i64 = 0
+        // As with lists, the loop condition also accepts a trailing comma:
+        // after a `,` the next check sees `}` and stops.
+        while !self.check(TokKind.RightBrace) && !self.check(TokKind.Eof) {
+            self.expression(h)
+            self.consume(TokKind.Colon, "expect ':' after dictionary key")
+            self.expression(h)
+            count = count + 1
+            if count > MAX_OPERAND {
+                self.errorAtPrev("too many entries in dictionary literal")
+            }
+            if !self.matchTok(TokKind.Comma) {
+                break
+            }
+        }
+        self.consume(TokKind.RightBrace, "expect '}' after dictionary entries")
+        self.emitOp(Op.NewDict)
+        self.emitU16(count)
+    }
+
     fn namedVariable(self: &mut Self, h: &mut Heap, name: &string, canAssign: bool) {
         var getOp = Op.GetLocal
         var setOp = Op.SetLocal
@@ -854,6 +878,10 @@ impl Compiler {
             self.listLiteral(h)
             return
         }
+        if k == TokKind.LeftBrace {
+            self.dictLiteral(h)
+            return
+        }
         if k == TokKind.Identifier {
             let name = self.prevText()
             // `len` is a reserved call form rather than a callable value, so
@@ -865,6 +893,22 @@ impl Compiler {
                 self.expression(h)
                 self.consume(TokKind.RightParen, "expect ')' after len argument")
                 self.emitOp(Op.Len)
+                return
+            }
+            if name == "keys" && self.check(TokKind.LeftParen) {
+                self.advance()
+                self.expression(h)
+                self.consume(TokKind.RightParen, "expect ')' after keys argument")
+                self.emitOp(Op.Keys)
+                return
+            }
+            if name == "has" && self.check(TokKind.LeftParen) {
+                self.advance()
+                self.expression(h)
+                self.consume(TokKind.Comma, "expect ',' after has dictionary")
+                self.expression(h)
+                self.consume(TokKind.RightParen, "expect ')' after has arguments")
+                self.emitOp(Op.Has)
                 return
             }
             self.namedVariable(h, name, canAssign)

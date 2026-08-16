@@ -10,7 +10,7 @@ from "./value" import {
     Value
 }
 from "./heap" import {
-    Heap, Obj, heapWith
+    Heap, Obj, DictObj, heapWith
 }
 from "./chunk" import {
     Op, Chunk, opFromByte, opName
@@ -203,6 +203,9 @@ impl VM {
                 Fn(n) => {
                     return ""
                 }
+                Dict(d) => {
+                    return ""
+                }
             }
         }
         )
@@ -312,6 +315,9 @@ impl VM {
                 Fn(n) => {
                     return ""
                 }
+                Dict(d) => {
+                    return ""
+                }
             }
         }
         )
@@ -335,6 +341,9 @@ impl VM {
                     return false
                 }
                 Fn(n) => {
+                    return false
+                }
+                Dict(d) => {
                     return false
                 }
             }
@@ -385,6 +394,7 @@ impl VM {
         var body = ""
         var fnIdx: i64 = -1
         var elems: Vec<Value> = Vec.new()
+        var dkeys: Vec<string> = Vec.new()
         let got = heapWith(self.heap, v, (o: &Obj): i64 => {
             match o {
                 Str(s) => {
@@ -404,6 +414,16 @@ impl VM {
                     fnIdx = n
                     return 0
                 }
+                Dict(d) => {
+                    kind = 4
+                    for k in d.keys {
+                        dkeys.push(k.clone())
+                    }
+                    for x in d.vals {
+                        elems.push(x)
+                    }
+                    return 0
+                }
             }
         }
         )
@@ -415,6 +435,20 @@ impl VM {
         }
         if kind == 3 {
             return "<fn " + self.functions[fnIdx].name.clone() + ">"
+        }
+        if kind == 4 {
+            // Keys are always quoted; values go through formatInner, so a
+            // nested string is quoted and a nested list or dict recurses.
+            var ds = "{"
+            var di: i64 = 0
+            while di < dkeys.len {
+                if di > 0 {
+                    ds = ds + ", "
+                }
+                ds = ds + "\"" + dkeys[di] + "\": " + self.formatInner(elems[di])
+                di = di + 1
+            }
+            return ds + "}"
         }
         var s = "["
         var i: i64 = 0
@@ -649,23 +683,59 @@ impl VM {
                 }
                 Index => {
                     let idxV = self.pop()
-                    let listV = self.pop()
-                    if !idxV.isNum() {
-                        self.runtimeError("list index must be a number", fi, here)
-                        return false
+                    let contV = self.pop()
+                    // Both possible subscript shapes are decided before the
+                    // borrow, because a closure cannot capture self and the
+                    // container's kind is only known inside it.
+                    let idxIsNum = idxV.isNum()
+                    let keyIsStr = self.isString(idxV)
+                    let keyStr = self.stringOf(idxV)
+                    var i: i64 = 0
+                    if idxIsNum {
+                        i = idxV.asNum() as i64
                     }
-                    let i = idxV.asNum() as i64
                     var found = Value.nil()
+                    var kind: i64 = 0
                     var ok = false
                     var oob = false
-                    let got = heapWith(self.heap, listV, (o: &Obj): i64 => {
+                    var badIdx = false
+                    var badKey = false
+                    let got = heapWith(self.heap, contV, (o: &Obj): i64 => {
                         match o {
                             List(xs) => {
+                                kind = 1
+                                if !idxIsNum {
+                                    badIdx = true
+                                    return 0
+                                }
                                 if i < 0 || i >= xs.len {
                                     oob = true
                                     return 0
                                 }
                                 found = xs[i]
+                                ok = true
+                                return 0
+                            }
+                            Dict(d) => {
+                                kind = 2
+                                if !keyIsStr {
+                                    badKey = true
+                                    return 0
+                                }
+                                var j: i64 = 0
+                                while j < d.keys.len {
+                                    if d.keys[j] == keyStr {
+                                        found = d.vals[j]
+                                        ok = true
+                                        return 0
+                                    }
+                                    j = j + 1
+                                }
+                                // A missing key reads nil rather than
+                                // faulting. Deliberate: a script asking "is
+                                // there a value here" should not need a `has`
+                                // guard around every read, and nil is already
+                                // the language's absent value.
                                 ok = true
                                 return 0
                             }
@@ -683,12 +753,20 @@ impl VM {
                         self.runtimeError("indexed a dangling object reference (the box outlived its object)", fi, here)
                         return false
                     }
+                    if badIdx {
+                        self.runtimeError("list index must be a number", fi, here)
+                        return false
+                    }
+                    if badKey {
+                        self.runtimeError("dictionary key must be a string", fi, here)
+                        return false
+                    }
                     if oob {
                         self.runtimeError("list index " + i.toString() + " out of range", fi, here)
                         return false
                     }
                     if !ok {
-                        self.runtimeError("only a list can be indexed", fi, here)
+                        self.runtimeError("only a list or a dictionary can be indexed", fi, here)
                         return false
                     }
                     self.push(found)
@@ -696,25 +774,56 @@ impl VM {
                 SetIndex => {
                     let valV = self.pop()
                     let idxV = self.pop()
-                    let listV = self.pop()
-                    if !idxV.isNum() {
-                        self.runtimeError("list index must be a number", fi, here)
-                        return false
+                    let contV = self.pop()
+                    let idxIsNum = idxV.isNum()
+                    let keyIsStr = self.isString(idxV)
+                    let keyStr = self.stringOf(idxV)
+                    var i: i64 = 0
+                    if idxIsNum {
+                        i = idxV.asNum() as i64
                     }
-                    let i = idxV.asNum() as i64
                     var ok = false
                     var oob = false
-                    let touched = heapUpdate(self.heap, listV, (o: Obj): Obj => {
+                    var badIdx = false
+                    var badKey = false
+                    let touched = heapUpdate(self.heap, contV, (o: Obj): Obj => {
                         match o {
                             List(xs) => {
                                 var ys = xs
-                                if i < 0 || i >= ys.len {
+                                if !idxIsNum {
+                                    badIdx = true
+                                } else if i < 0 || i >= ys.len {
                                     oob = true
                                 } else {
                                     ys[i] = valV
                                     ok = true
                                 }
                                 return Obj.List(ys)
+                            }
+                            Dict(dd) => {
+                                var d = dd
+                                if !keyIsStr {
+                                    badKey = true
+                                    return Obj.Dict(d)
+                                }
+                                var j: i64 = 0
+                                var hit = false
+                                while j < d.keys.len && !hit {
+                                    if d.keys[j] == keyStr {
+                                        // Updating an existing key keeps its
+                                        // position: insertion order is the
+                                        // dictionary's contract.
+                                        d.vals[j] = valV
+                                        hit = true
+                                    }
+                                    j = j + 1
+                                }
+                                if !hit {
+                                    d.keys.push(keyStr.clone())
+                                    d.vals.push(valV)
+                                }
+                                ok = true
+                                return Obj.Dict(d)
                             }
                             Str(s) => {
                                 return Obj.Str(s)
@@ -730,12 +839,20 @@ impl VM {
                         self.runtimeError("assigned through a dangling object reference (the box outlived its object)", fi, here)
                         return false
                     }
+                    if badIdx {
+                        self.runtimeError("list index must be a number", fi, here)
+                        return false
+                    }
+                    if badKey {
+                        self.runtimeError("dictionary key must be a string", fi, here)
+                        return false
+                    }
                     if oob {
                         self.runtimeError("list index " + i.toString() + " out of range", fi, here)
                         return false
                     }
                     if !ok {
-                        self.runtimeError("only a list supports index assignment", fi, here)
+                        self.runtimeError("only a list or a dictionary supports index assignment", fi, here)
                         return false
                     }
                     self.push(valV)
@@ -754,6 +871,9 @@ impl VM {
                             Fn(f) => {
                                 return -1
                             }
+                            Dict(d) => {
+                                return d.keys.len
+                            }
                         }
                     }
                     )
@@ -768,10 +888,137 @@ impl VM {
                         }
                     }
                     if n < 0 {
-                        self.runtimeError("len() expects a list or a string", fi, here)
+                        self.runtimeError("len() expects a list, a string or a dictionary", fi, here)
                         return false
                     }
                     self.push(Value.num(n as f64))
+                }
+                NewDict => {
+                    let n = self.readU16(fi, ip)
+                    ip = ip + 2
+                    // The stack holds key,value,key,value,... with the first
+                    // pair deepest, which is source order.
+                    let start = self.stack.len - 2 * n
+                    var d = DictObj {
+                        keys: Vec.new(), vals: Vec.new()
+                    }
+                    var badKey = false
+                    var i: i64 = 0
+                    while i < n && !badKey {
+                        let kv = self.stack[start + 2 * i]
+                        let vv = self.stack[start + 2 * i + 1]
+                        if !self.isString(kv) {
+                            badKey = true
+                        } else {
+                            dictPut(d, self.stringOf(kv), vv)
+                        }
+                        i = i + 1
+                    }
+                    i = 0
+                    while i < 2 * n {
+                        let _ = self.pop()
+                        i = i + 1
+                    }
+                    if badKey {
+                        self.runtimeError("dictionary key must be a string", fi, here)
+                        return false
+                    }
+                    // No maybeCollect here: the entries are held only in `d`,
+                    // which is not a root, so a collection between popping
+                    // them and allocating the dict could free them.
+                    let v = self.heap.allocDict(d)
+                    self.push(v)
+                }
+                Keys => {
+                    let dv = self.pop()
+                    var ks: Vec<string> = Vec.new()
+                    var isDict = false
+                    let got = heapWith(self.heap, dv, (o: &Obj): i64 => {
+                        match o {
+                            Dict(d) => {
+                                isDict = true
+                                for k in d.keys {
+                                    ks.push(k.clone())
+                                }
+                                return 0
+                            }
+                            List(xs) => {
+                                return 0
+                            }
+                            Str(s) => {
+                                return 0
+                            }
+                            Fn(n) => {
+                                return 0
+                            }
+                        }
+                    }
+                    )
+                    if got.isNone() {
+                        self.heap.noteDangling()
+                        self.runtimeError("keys() of a dangling object reference (the box outlived its object)", fi, here)
+                        return false
+                    }
+                    if !isDict {
+                        self.runtimeError("keys() expects a dictionary", fi, here)
+                        return false
+                    }
+                    // Same reasoning as NewDict: the freshly allocated key
+                    // strings live only in `xs` until the list exists, so no
+                    // collection may run in between.
+                    var xs: Vec<Value> = Vec.new()
+                    for k in ks {
+                        xs.push(self.heap.allocStr(k.clone()))
+                    }
+                    let lv = self.heap.allocList(xs)
+                    self.push(lv)
+                }
+                Has => {
+                    let kv = self.pop()
+                    let dv = self.pop()
+                    let keyIsStr = self.isString(kv)
+                    let keyStr = self.stringOf(kv)
+                    var isDict = false
+                    var present = false
+                    let got = heapWith(self.heap, dv, (o: &Obj): i64 => {
+                        match o {
+                            Dict(d) => {
+                                isDict = true
+                                var j: i64 = 0
+                                while j < d.keys.len && !present {
+                                    if d.keys[j] == keyStr {
+                                        present = true
+                                    }
+                                    j = j + 1
+                                }
+                                return 0
+                            }
+                            List(xs) => {
+                                return 0
+                            }
+                            Str(s) => {
+                                return 0
+                            }
+                            Fn(n) => {
+                                return 0
+                            }
+                        }
+                    }
+                    )
+                    if got.isNone() {
+                        self.heap.noteDangling()
+                        self.runtimeError("has() of a dangling object reference (the box outlived its object)", fi, here)
+                        return false
+                    }
+                    if !isDict {
+                        self.runtimeError("has() expects a dictionary", fi, here)
+                        return false
+                    }
+                    if !keyIsStr {
+                        self.runtimeError("dictionary key must be a string", fi, here)
+                        return false
+                    }
+                    self.push(Value.bool(present))
                 }
                 Return => {
                     let result = self.pop()
@@ -821,6 +1068,9 @@ impl VM {
                 List(xs) => {
                     return -1
                 }
+                Dict(d) => {
+                    return -1
+                }
             }
         }
         )
@@ -850,4 +1100,22 @@ impl VM {
         }
         return a.sameBits(b)
     }
+}
+
+// Insert or update one entry, preserving insertion order. A duplicate key in
+// a literal updates the value already recorded rather than appending a second
+// entry, which keeps `{"a": 1, "a": 2}` printing as one entry like an update
+// would. Linear scan: see DictObj in heap.milo for why that is the right shape
+// at this scale.
+fn dictPut(d: &mut DictObj, key: string, v: Value) {
+    var j: i64 = 0
+    while j < d.keys.len {
+        if d.keys[j] == key {
+            d.vals[j] = v
+            return
+        }
+        j = j + 1
+    }
+    d.keys.push(key)
+    d.vals.push(v)
 }

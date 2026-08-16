@@ -17,12 +17,23 @@ hey!
 dynamic dispatch!
 [[1, 2], [3, [99, 5]]]
 16
+{"name": "goblin", "hp": 12, "tags": ["cave", "fast"]}
+12
+{"name": "goblin", "hp": 3, "tags": ["cave", "fast"], "state": "flee"}
+["name", "hp", "tags", "state"]
+4
+true
+nil
+{}
+[{"n": "a"}, {"n": "z"}]
+{"grid": [[1, 2], [9, 4]]}
 ```
 
 Heterogeneous lists, variables that change type, functions as values, calling a
 function out of a list, calling the function another function returned, mutating
-a nested list in place. Written in a language with no GC, no reference counting,
-and no pointers in safe code.
+a nested list in place, dictionaries that keep the order you wrote them in.
+Written in a language with no GC, no reference counting, and no pointers in safe
+code.
 
 ## Try it
 
@@ -185,11 +196,39 @@ while (cond) stmt
 { ... }                         // block, opens a scope
 ```
 
-Values: numbers (f64), strings, `true`, `false`, `nil`, lists. Operators
-`+ - * / == != < > <= >= ! and or`, `+` also concatenates strings. Lists are
-`[a, b, c]`, indexed `xs[i]`, assigned `xs[i] = v`, measured `len(xs)`.
-Functions are values: put them in a list, return them, call the result. `//`
-comments.
+Values: numbers (f64), strings, `true`, `false`, `nil`, lists, dictionaries.
+Operators `+ - * / == != < > <= >= ! and or`, `+` also concatenates strings.
+Lists are `[a, b, c]`, indexed `xs[i]`, assigned `xs[i] = v`, measured
+`len(xs)`. Functions are values: put them in a list, return them, call the
+result. `//` comments.
+
+Dictionaries are string-keyed and **insertion-ordered**:
+
+```
+var d = {"hp": 12, "state": "flee"};   // trailing comma allowed; {} is empty
+print d["hp"];                          // 12
+print d["gold"];                        // nil — a missing key reads nil
+d["hp"] = 3;                            // update, keeps its position
+d["mana"] = 50;                         // insert, goes to the end
+print len(d);                           // 3
+print keys(d);                          // ["hp", "state", "mana"]
+print has(d, "mana");                   // true
+print d;                                // {"hp": 3, "state": "flee", "mana": 50}
+```
+
+A `{` in expression position is a dictionary literal; a `{` in statement
+position is still a block, and the two never compete because the expression
+parser is the only thing that sees the literal form. Keys are evaluated
+expressions that must be strings **at runtime** — `{1: "one"}` is the runtime
+error `dictionary key must be a string`, the same as `d[1]`. Values are any
+expression, so dicts and lists nest either way around and a nested element is
+assignable through the index chain (`world["grid"][1][0] = 9`).
+
+Entries are two parallel vectors with linear lookup rather than a hash table:
+that is what makes `keys(d)` and `print d` deterministic, and at demo scale it
+is also the faster shape. `keys` and `has` are reserved call forms compiled to
+one opcode each, exactly like `len`, so the VM never has to model a callable
+native function.
 
 ## Layout
 

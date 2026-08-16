@@ -1,0 +1,32 @@
+// milox demo: everything the language has.
+var greeting = "milox";
+print greeting + " says hi";
+
+fn fib(n) {
+  if (n < 2) return n;
+  return fib(n - 1) + fib(n - 2);
+}
+print fib(20);
+
+var xs = [1, 2, 3, 4, 5];
+var total = 0;
+var i = 0;
+while (i < len(xs)) {
+  total = total + xs[i];
+  i = i + 1;
+}
+print total;
+
+xs[0] = 100;
+print xs;
+
+var words = ["the", "quick", "brown"];
+var joined = "";
+i = 0;
+while (i < len(words)) {
+  joined = joined + words[i] + " ";
+  i = i + 1;
+}
+print joined;
+print true and !false;
+print nil == nil;

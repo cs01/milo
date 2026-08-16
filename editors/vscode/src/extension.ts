@@ -41,13 +41,25 @@ export async function activate(context: ExtensionContext) {
       const next = resolveServer(context.extensionPath);
       if (next) await start(next);
     }),
-    commands.registerCommand("milo.runFile", () => {
-      const doc = window.activeTextEditor?.document;
-      if (!doc || doc.languageId !== "milo") { window.showWarningMessage("Milo: no .milo file is active."); return; }
-      void doc.save();
-      const terminal = window.createTerminal("Milo Run");
-      terminal.show();
-      terminal.sendText(shellCommand(server, ["run", doc.fileName]));
+    // The CodeLens passes the file path; the palette entry falls back to the
+    // active editor. Taking the argument matters for a multi-file project, where
+    // the lens you clicked is not necessarily in the focused editor.
+    commands.registerCommand("milo.runFile", async (filePath?: string) => {
+      await runMiloFile(server, filePath, []);
+    }),
+    commands.registerCommand("milo.runFileWithArgs", async (filePath?: string) => {
+      const file = filePath ?? activeMiloFile();
+      if (!file) { window.showWarningMessage("Milo: no .milo file is active."); return; }
+      const remembered = lastArgs.get(file) ?? "";
+      const entered = await window.showInputBox({
+        title: `Run ${path.basename(file)}`,
+        prompt: "Arguments passed to the program (after --)",
+        value: remembered,
+        placeHolder: "--verbose input.txt",
+      });
+      if (entered === undefined) return;   // dismissed, not "no arguments"
+      lastArgs.set(file, entered);
+      await runMiloFile(server, file, splitArgs(entered));
     }),
     // The CodeLens passes the file path; the palette entry falls back to the active editor.
     commands.registerCommand("milo.debugFile", async (filePath?: string) => {
@@ -70,6 +82,41 @@ export async function activate(context: ExtensionContext) {
 function activeMiloFile(): string | undefined {
   const doc = window.activeTextEditor?.document;
   return doc?.languageId === "milo" ? doc.fileName : undefined;
+}
+
+// Per-file, per-session memory of the last arguments, so re-running an
+// arg-taking program is one click and Enter rather than retyping them.
+const lastArgs = new Map<string, string>();
+
+async function runMiloFile(server: Server, filePath: string | undefined, args: string[]): Promise<void> {
+  const file = filePath ?? activeMiloFile();
+  if (!file) { window.showWarningMessage("Milo: no .milo file is active."); return; }
+  const open = workspace.textDocuments.find(d => d.fileName === file);
+  if (open?.isDirty) await open.save();
+  const terminal = window.createTerminal("Milo Run");
+  terminal.show();
+  // `--` separates milo's own flags from the program's argv.
+  terminal.sendText(shellCommand(server, ["run", file, ...(args.length > 0 ? ["--", ...args] : [])]));
+}
+
+// Shell-ish splitting: whitespace separates, single and double quotes group.
+// Enough for an argument prompt; anything more elaborate belongs in a terminal.
+function splitArgs(input: string): string[] {
+  const out: string[] = [];
+  let cur = "";
+  let quote: string | null = null;
+  let has = false;
+  for (const ch of input) {
+    if (quote) {
+      if (ch === quote) quote = null; else cur += ch;
+      continue;
+    }
+    if (ch === '"' || ch === "'") { quote = ch; has = true; continue; }
+    if (/\s/.test(ch)) { if (has || cur.length > 0) { out.push(cur); cur = ""; has = false; } continue; }
+    cur += ch;
+  }
+  if (has || cur.length > 0) out.push(cur);
+  return out;
 }
 
 // ── Debugging ──

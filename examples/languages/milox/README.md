@@ -242,7 +242,10 @@ native function.
 | `function.milo` | a compiled function |
 | `vm.milo` | the stack machine, and the embedding API |
 | `disasm.milo` | `--disasm`, so jump arithmetic can be checked by eye |
-| `main.milo` | CLI and the demos |
+| `runner.milo` | compile-and-run, which is also the whole embedding recipe |
+| `demos.milo` | the four demonstrations |
+| `main.milo` | the command line, and nothing else |
+| `scripts/*.milox` | every milox program used above, as real files, `@embedFile`d into the binary |
 
 Architecture is deliberately clox-shaped (*Crafting Interpreters*, Part III) so
 the comparison with the reference C implementation is apples-to-apples: same

@@ -1,0 +1,7 @@
+if (hp < 30) {
+  state = "flee";
+  speed = speed * 2;
+} else {
+  state = "attack";
+}
+log = [name, state, hp, speed];

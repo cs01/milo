@@ -1,96 +1,154 @@
 {
   "name": "milo-lang",
   "displayName": "Milo Language",
-  "description": "Language support for Milo — syntax highlighting, diagnostics, hover, go-to-definition, format on save",
+  "description": "Language support for Milo \u2014 syntax highlighting, diagnostics, hover, go-to-definition, format on save",
   "publisher": "milo-language",
   "version": "0.3.0",
   "license": "MIT",
   "icon": "icon.png",
-  "repository": { "type": "git", "url": "https://github.com/milo-language/milo.git", "directory": "editors/vscode" },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/milo-language/milo.git",
+    "directory": "editors/vscode"
+  },
   "homepage": "https://milo-language.github.io/milo/",
-  "bugs": { "url": "https://github.com/milo-language/milo/issues" },
-  "keywords": ["milo", "systems programming", "memory safety", "llvm", "language server"],
-  "engines": { "vscode": "^1.75.0" },
-  "categories": ["Programming Languages", "Formatters"],
+  "bugs": {
+    "url": "https://github.com/milo-language/milo/issues"
+  },
+  "keywords": [
+    "milo",
+    "systems programming",
+    "memory safety",
+    "llvm",
+    "language server"
+  ],
+  "engines": {
+    "vscode": "^1.75.0"
+  },
+  "categories": [
+    "Programming Languages",
+    "Formatters"
+  ],
   "main": "./out/extension.js",
-  "activationEvents": ["onLanguage:milo", "onDebugResolve:milo"],
+  "activationEvents": [
+    "onLanguage:milo",
+    "onDebugResolve:milo"
+  ],
   "contributes": {
-    "languages": [{
-      "id": "milo",
-      "aliases": ["Milo", "milo"],
-      "extensions": [".milo"],
-      "configuration": "./language-configuration.json"
-    }],
-    "grammars": [{
-      "language": "milo",
-      "scopeName": "source.milo",
-      "path": "./syntaxes/milo.tmLanguage.json"
-    }],
-    "commands": [
-      { "command": "milo.runFile", "title": "Milo: Run Current File" },
-      { "command": "milo.debugFile", "title": "Milo: Debug Current File" },
-      { "command": "milo.restartServer", "title": "Milo: Restart Language Server" }
+    "languages": [
+      {
+        "id": "milo",
+        "aliases": [
+          "Milo",
+          "milo"
+        ],
+        "extensions": [
+          ".milo"
+        ],
+        "configuration": "./language-configuration.json"
+      }
     ],
-    "breakpoints": [{ "language": "milo" }],
-    "debuggers": [{
-      "type": "milo",
-      "label": "Milo",
-      "languages": ["milo"],
-      "configurationAttributes": {
-        "launch": {
-          "required": ["program"],
-          "properties": {
-            "program": {
-              "type": "string",
-              "description": "Path to a .milo source file (compiled with `-g --debug` before launch) or to an already-built executable.",
-              "default": "${file}"
-            },
-            "args": {
-              "type": "array",
-              "items": { "type": "string" },
-              "description": "Command-line arguments passed to the program.",
-              "default": []
-            },
-            "cwd": {
-              "type": "string",
-              "description": "Working directory. Defaults to the directory containing the source file.",
-              "default": "${workspaceFolder}"
-            },
-            "env": {
-              "type": "object",
-              "description": "Environment variables for the debuggee.",
-              "default": {}
-            },
-            "stopOnEntry": {
-              "type": "boolean",
-              "description": "Break at the program's entry point.",
-              "default": false
-            },
-            "runInTerminal": {
-              "type": "boolean",
-              "description": "Run the program in VS Code's integrated terminal instead of the Debug Console (needed for programs that read stdin).",
-              "default": false
+    "grammars": [
+      {
+        "language": "milo",
+        "scopeName": "source.milo",
+        "path": "./syntaxes/milo.tmLanguage.json"
+      }
+    ],
+    "commands": [
+      {
+        "command": "milo.runFile",
+        "title": "Milo: Run Current File"
+      },
+      {
+        "command": "milo.runFileWithArgs",
+        "title": "Milo: Run Current File with Arguments"
+      },
+      {
+        "command": "milo.debugFile",
+        "title": "Milo: Debug Current File"
+      },
+      {
+        "command": "milo.restartServer",
+        "title": "Milo: Restart Language Server"
+      }
+    ],
+    "breakpoints": [
+      {
+        "language": "milo"
+      }
+    ],
+    "debuggers": [
+      {
+        "type": "milo",
+        "label": "Milo",
+        "languages": [
+          "milo"
+        ],
+        "configurationAttributes": {
+          "launch": {
+            "required": [
+              "program"
+            ],
+            "properties": {
+              "program": {
+                "type": "string",
+                "description": "Path to a .milo source file (compiled with `-g --debug` before launch) or to an already-built executable.",
+                "default": "${file}"
+              },
+              "args": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "description": "Command-line arguments passed to the program.",
+                "default": []
+              },
+              "cwd": {
+                "type": "string",
+                "description": "Working directory. Defaults to the directory containing the source file.",
+                "default": "${workspaceFolder}"
+              },
+              "env": {
+                "type": "object",
+                "description": "Environment variables for the debuggee.",
+                "default": {}
+              },
+              "stopOnEntry": {
+                "type": "boolean",
+                "description": "Break at the program's entry point.",
+                "default": false
+              },
+              "runInTerminal": {
+                "type": "boolean",
+                "description": "Run the program in VS Code's integrated terminal instead of the Debug Console (needed for programs that read stdin).",
+                "default": false
+              }
             }
           }
-        }
-      },
-      "initialConfigurations": [{
-        "type": "milo",
-        "request": "launch",
-        "name": "Debug Milo file",
-        "program": "${file}"
-      }],
-      "configurationSnippets": [{
-        "label": "Milo: Debug the active file",
-        "description": "Build the active .milo file with -g --debug and launch it under lldb-dap",
-        "body": {
-          "type": "milo",
-          "request": "launch",
-          "name": "Debug Milo file",
-          "program": "^\"\\${file}\""
-        }
-      }]
-    }],
+        },
+        "initialConfigurations": [
+          {
+            "type": "milo",
+            "request": "launch",
+            "name": "Debug Milo file",
+            "program": "${file}"
+          }
+        ],
+        "configurationSnippets": [
+          {
+            "label": "Milo: Debug the active file",
+            "description": "Build the active .milo file with -g --debug and launch it under lldb-dap",
+            "body": {
+              "type": "milo",
+              "request": "launch",
+              "name": "Debug Milo file",
+              "program": "^\"\\${file}\""
+            }
+          }
+        ]
+      }
+    ],
     "configurationDefaults": {
       "[milo]": {
         "editor.formatOnSave": true,
@@ -108,7 +166,7 @@
         "milo.compilerRoot": {
           "type": "string",
           "default": "",
-          "markdownDescription": "Dev-only fallback: absolute path to a Milo compiler checkout (the dir containing `src/main.ts`), run via `bun`. Only consulted when no `milo` executable is found — set `milo.path` instead unless you're working on the compiler itself."
+          "markdownDescription": "Dev-only fallback: absolute path to a Milo compiler checkout (the dir containing `src/main.ts`), run via `bun`. Only consulted when no `milo` executable is found \u2014 set `milo.path` instead unless you're working on the compiler itself."
         },
         "milo.lldbDapPath": {
           "type": "string",

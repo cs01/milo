@@ -213,7 +213,10 @@ function extractDocComment(source: string, declLineIndex: number): string | null
       break;
     }
   }
-  return comments.length > 0 ? comments.join("\n") : null;
+  // Two trailing spaces = a markdown hard break. A bare "\n" is only a space to a
+  // markdown renderer, which collapsed every multi-line doc comment into one wall of
+  // prose in the VS Code hover. Blank lines still separate paragraphs as written.
+  return comments.length > 0 ? comments.join("  \n") : null;
 }
 
 function findSymbolDoc(source: string, word: string, kind: "fn" | "struct" | "enum"): string | null {
@@ -1512,6 +1515,10 @@ function handleCodeLens(uri: string): object[] {
     if (/\bfn\s+main\s*\(/.test(lines[i])) {
       const range = { start: { line: i, character: 0 }, end: { line: i, character: 0 } };
       lenses.push({ range, command: { title: "▶ Run", command: "milo.runFile", arguments: [filePath] } });
+      // A `fn main` that reads argv needs a way to get one from the lens. Without
+      // this the only way to run an arg-taking program from the editor is to
+      // retype the whole `milo run … --` invocation in a terminal.
+      lenses.push({ range, command: { title: "▶ Run with args…", command: "milo.runFileWithArgs", arguments: [filePath] } });
       lenses.push({ range, command: { title: "🐞 Debug", command: "milo.debugFile", arguments: [filePath] } });
       break;
     }

@@ -18,6 +18,8 @@ pub enum TokKind {
     LeftBracket,
     RightBracket,
     Comma,
+    // Only ever appears between a dictionary literal's key and its value.
+    Colon,
     Semicolon,
     Plus,
     Minus,
@@ -141,6 +143,9 @@ pub fn kindName(k: TokKind): string {
         }
         Comma => {
             return ","
+        }
+        Colon => {
+            return ":"
         }
         Semicolon => {
             return ";"
@@ -377,6 +382,11 @@ pub fn lex(src: &string): Vec<Token> {
         }
         if c == ',' {
             toks.push(tok(TokKind.Comma, ",", line))
+            i = i + 1
+            continue
+        }
+        if c == ':' {
+            toks.push(tok(TokKind.Colon, ":", line))
             i = i + 1
             continue
         }

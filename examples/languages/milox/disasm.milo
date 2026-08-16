@@ -38,7 +38,10 @@ pub fn disassembleFunction(f: &Function, fi: i64, heap: &Heap): string {
         var line = pad4(ip) + "  " + pad(name, 9)
         let bi = b as i64
         // Operand widths mirror the comments on `enum Op`.
-        if bi == 0 || bi == 5 || bi == 6 || bi == 7 || bi == 8 || bi == 9 || bi == 24 {
+        // 29 is NewDict. This list is maintained by hand, so a new opcode with
+        // an operand has to be added here or the decoder desynchronizes and
+        // every instruction printed after it is garbage.
+        if bi == 0 || bi == 5 || bi == 6 || bi == 7 || bi == 8 || bi == 9 || bi == 24 || bi == 29 {
             let v = readU16(f.chunk, ip + 1)
             line = line + " " + v.toString()
             if bi == 0 {
@@ -107,6 +110,10 @@ fn constRepr(c: &Chunk, idx: i64, heap: &Heap): string {
                 fnIdx = n
                 return 0
             }
+            Dict(d) => {
+                kind = 4
+                return 0
+            }
         }
     }
     )
@@ -118,6 +125,9 @@ fn constRepr(c: &Chunk, idx: i64, heap: &Heap): string {
     }
     if kind == 3 {
         return "<fn#" + fnIdx.toString() + ">"
+    }
+    if kind == 4 {
+        return "<dict>"
     }
     return "<list>"
 }

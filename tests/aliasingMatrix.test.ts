@@ -1,346 +1,155 @@
-// One rule, checked across every container that can hold a non-Copy value.
+// The spelling matrix for the "mutation during iteration" rule.
 //
-// The bug this exists to prevent: "move a non-Copy element out of a borrow" was
-// enforced in checker.ts for FIELDS and in codegen.ts for INDICES, so the two
-// drifted — `b.v` was a hard error while `arr[0]` silently loaded in place and
-// double-freed (fixed 2026-08-01). Nothing tested the two spellings against each
-// other, so the divergence was invisible for as long as it existed.
+// Every use-after-free found in this checker in safe code has had one shape: an aliasing
+// rule written against a node KIND rather than a place, so it covered the spelling its
+// author was looking at and silently exempted the siblings. `for x in v` was rejected
+// and `for x in b.items` was a heap-use-after-free, because the freeze only fired for a
+// bare Ident.
 //
-// This is a GOLDEN matrix, not an equality assertion: the cells legitimately
-// differ today (field errors, index clones). The point is that every cell is
-// written down in one place, so a change to any container's behaviour shows up
-// as a diff here, and a newly added container has to declare its cell rather
-// than inheriting whichever code path it happens to hit.
+// So the coverage question ("did I handle every spelling?") is answered here by
+// generation instead of by memory. Each container is crossed with each way of NAMING it
+// and each route by which the loop body can reach it. A rule that covers one spelling
+// fails this file immediately rather than years later under ASan.
 //
-// Update the golden with MILO_UPDATE_MATRIX=1 bun test tests/aliasingMatrix.test.ts
-import { test, expect, describe, beforeAll, afterAll } from "bun:test";
-import { readFileSync, writeFileSync, mkdtempSync, rmSync, existsSync } from "fs";
-import { execSync } from "child_process";
-import { tmpdir } from "os";
+// Adding a container or a new root spelling means adding a row, not remembering to go
+// re-audit the checker. See docs/plans/aliasing-coverage.md.
+import { test, expect, describe } from "bun:test";
+import { mkdtempSync } from "fs";
+import { writeFileSync } from "fs";
 import { join } from "path";
-import { guardedRun, type RunResult } from "../scripts/guard";
+import { tmpdir } from "os";
+import { Lexer } from "../src/lexer";
+import { Parser } from "../src/parser";
+import { TypeChecker } from "../src/checker";
 
-const MILO_ROOT = join(import.meta.dir, "..");
-const GOLDEN = join(import.meta.dir, "aliasing-matrix.golden.md");
-const IS_WINDOWS = process.platform === "win32";
-const EXE = IS_WINDOWS ? ".exe" : "";
-const WORK = mkdtempSync(join(tmpdir(), "milo-matrix-"));
-const MILOC = join(WORK, "miloc") + EXE;
-const CHILD_ENV = { ...process.env, MILO_ROOT };
+const dir = mkdtempSync(join(tmpdir(), "milo-alias-"));
+let n = 0;
 
-afterAll(() => {
-  try { rmSync(WORK, { recursive: true, force: true }); } catch {}
-});
+function errorsFor(src: string): string[] {
+  const entry = join(dir, `m${n++}.milo`);
+  writeFileSync(entry, src);
+  const prog = new Parser(new Lexer(src).tokenize(), src, entry).parse();
+  return new TypeChecker().check(prog).diagnostics
+    .filter(d => d.severity === "error").map(d => d.message);
+}
 
-// Each container supplies the same four probes over a non-Copy element type
-// (string — a heap buffer, so an aliased copy double-frees and an independent
-// one costs a malloc). Empty string = the probe is not expressible for that
-// container and the cell records why.
-type Probe = "moveOutOfBorrow" | "extractThenMutate" | "consumeInline" | "mutateWhileBorrowed";
-
-const CONTAINERS: Record<string, Record<Probe, string>> = {
-  // A struct field: the spelling the checker rejects outright.
-  field: {
-    moveOutOfBorrow: `
-struct Box { v: string }
-fn peek(b: &Box): string { return b.v }
-fn main(): i32 {
-    let b = Box { v: $"heap {0}" }
-    print(peek(b))
-    return 0
-}`,
-    // The explicit `.clone()` is the point, not an unfair handicap: a bare
-    // `let taken = b.v` is rejected, so a field is the one container where the
-    // copy has to be asked for. Every other row gets the same copy for free.
-    extractThenMutate: `
-struct Box { v: string }
-fn main(): i32 {
-    var b = Box { v: $"heap {0}" }
-    let taken = b.v.clone()
-    b.v = $"replaced {1}"
-    print(taken)
-    print(b.v)
-    return 0
-}`,
-    consumeInline: `
-struct Box { v: string }
-fn main(): i32 {
-    let b = Box { v: $"heap {0}" }
-    var n = 0
-    var i = 0
-    while i < 50 {
-        n = n + b.v.len
-        i = i + 1
-    }
-    print($"{n}")
-    return 0
-}`,
-    mutateWhileBorrowed: `
-struct Box { v: string }
-fn bump(b: &mut Box, s: &string): void { b.v = $"clobber {1}"; print(s) }
-fn main(): i32 {
-    var b = Box { v: $"heap {0}" }
-    bump(b, b.v)
-    return 0
-}`,
-  },
-  vec: {
-    moveOutOfBorrow: `
-fn peek(v: &Vec<string>): string { return v[0] }
-fn main(): i32 {
-    var v: Vec<string> = Vec.new()
-    v.push($"heap {0}")
-    print(peek(v))
-    return 0
-}`,
-    extractThenMutate: `
-fn main(): i32 {
-    var v: Vec<string> = Vec.new()
-    v.push($"heap {0}")
-    let taken = v[0]
-    v[0] = $"replaced {1}"
-    print(taken)
-    print(v[0])
-    return 0
-}`,
-    consumeInline: `
-fn main(): i32 {
-    var v: Vec<string> = Vec.new()
-    v.push($"heap {0}")
-    var n = 0
-    var i = 0
-    while i < 50 {
-        n = n + v[0].len
-        i = i + 1
-    }
-    print($"{n}")
-    return 0
-}`,
-    mutateWhileBorrowed: `
-fn grow(v: &mut Vec<string>, s: &[string]): void { v.push($"clobber {1}"); print(s[0]) }
-fn main(): i32 {
-    var v: Vec<string> = Vec.new()
-    v.push($"heap {0}")
-    grow(v, v[0..1])
-    return 0
-}`,
-  },
-  // A sized array: the arm that had no clone and double-freed.
-  array: {
-    moveOutOfBorrow: `
-fn peek(a: &[string; 2]): string { return a[0] }
-fn main(): i32 {
-    var a: [string; 2] = [$"heap {0}", $"heap {1}"]
-    print(peek(a))
-    return 0
-}`,
-    extractThenMutate: `
-fn main(): i32 {
-    var a: [string; 2] = [$"heap {0}", $"heap {1}"]
-    let taken = a[0]
-    a[0] = $"replaced {1}"
-    print(taken)
-    print(a[0])
-    return 0
-}`,
-    consumeInline: `
-fn main(): i32 {
-    var a: [string; 2] = [$"heap {0}", $"heap {1}"]
-    var n = 0
-    var i = 0
-    while i < 50 {
-        n = n + a[0].len
-        i = i + 1
-    }
-    print($"{n}")
-    return 0
-}`,
-    mutateWhileBorrowed: `
-fn clobber(a: &mut [string; 2], s: &string): void { a[0] = $"clobber {1}"; print(s) }
-fn main(): i32 {
-    var a: [string; 2] = [$"heap {0}", $"heap {1}"]
-    clobber(a, a[1])
-    return 0
-}`,
-  },
-  slice: {
-    moveOutOfBorrow: `
-fn peek(s: &[string]): string { return s[0] }
-fn main(): i32 {
-    var v: Vec<string> = Vec.new()
-    v.push($"heap {0}")
-    print(peek(v[0..1]))
-    return 0
-}`,
-    extractThenMutate: `
-fn main(): i32 {
-    var v: Vec<string> = Vec.new()
-    v.push($"heap {0}")
-    let s = v[0..1]
-    let taken = s[0]
-    v[0] = $"replaced {1}"
-    print(taken)
-    print(v[0])
-    return 0
-}`,
-    consumeInline: `
-fn main(): i32 {
-    var v: Vec<string> = Vec.new()
-    v.push($"heap {0}")
-    let s = v[0..1]
-    var n = 0
-    var i = 0
-    while i < 50 {
-        n = n + s[0].len
-        i = i + 1
-    }
-    print($"{n}")
-    return 0
-}`,
-    mutateWhileBorrowed: `
-fn main(): i32 {
-    var v: Vec<string> = Vec.new()
-    v.push($"heap {0}")
-    let s = v[0..1]
-    v.push($"clobber {1}")
-    print(s[0])
-    return 0
-}`,
-  },
-  arena: {
-    moveOutOfBorrow: `
-from "std/arena" import { Arena }
-fn peek(a: &Arena<string>, h: Handle<string>): string { return a.get(h)! }
-fn main(): i32 {
-    var a: Arena<string> = Arena<string>.new()
-    let h = a.alloc($"heap {0}")
-    print(peek(a, h))
-    return 0
-}`,
-    extractThenMutate: `
-from "std/arena" import { Arena }
-fn main(): i32 {
-    var a: Arena<string> = Arena<string>.new()
-    let h = a.alloc($"heap {0}")
-    let taken = a.get(h)!
-    a.set(h, $"replaced {1}")
-    print(taken)
-    print(a.get(h)!)
-    return 0
-}`,
-    consumeInline: `
-from "std/arena" import { Arena }
-fn main(): i32 {
-    var a: Arena<string> = Arena<string>.new()
-    let h = a.alloc($"heap {0}")
-    var n = 0
-    var i = 0
-    while i < 50 {
-        n = n + a.get(h)!.len
-        i = i + 1
-    }
-    print($"{n}")
-    return 0
-}`,
-    mutateWhileBorrowed: `
-from "std/arena" import { Arena }
-fn main(): i32 {
-    var a: Arena<string> = Arena<string>.new()
-    let h = a.alloc($"heap {0}")
-    let taken = a.get(h)!
-    a.clear()
-    print(taken)
-    print($"{a.valid(h)}")
-    return 0
-}`,
-  },
+type Container = {
+  name: string;
+  ty: string;
+  init: string;
+  /** seed the container so the loop has something to iterate */
+  seed: (place: string) => string;
+  /** the mutation that must be rejected inside the loop */
+  mutate: (place: string) => string;
+  /** loop bindings — a map yields two */
+  bind: string;
 };
 
-const PROBES: Probe[] = ["moveOutOfBorrow", "extractThenMutate", "consumeInline", "mutateWhileBorrowed"];
+const CONTAINERS: Container[] = [
+  {
+    name: "Vec",
+    ty: "Vec<string>",
+    init: "Vec.new()",
+    seed: p => `${p}.push("a")`,
+    mutate: p => `${p}.push("z")`,
+    bind: "it",
+  },
+  {
+    name: "HashMap",
+    ty: "HashMap<string, string>",
+    init: "HashMap.new()",
+    seed: p => `${p}.insert("a", "b")`,
+    mutate: p => `${p}.insert("z", "z")`,
+    bind: "k, it",
+  },
+  {
+    name: "Array",
+    ty: "[string; 2]",
+    init: `["a", "b"]`,
+    seed: () => "",
+    mutate: p => `${p}[0] = "z"`,
+    bind: "it",
+  },
+];
 
-// Collapse a run into one cell: what a user would observe, with anything
-// host-specific (paths, temp names, line numbers) stripped so the golden is
-// stable across machines and platforms.
-function cell(build: RunResult, run: RunResult | null): string {
-  if (build.code !== 0) {
-    // Diagnostics are colourised; strip SGR before matching or the `error:`
-    // marker is split across escape sequences.
-    const plain = build.stderr.replace(/\x1b\[[0-9;]*m/g, "");
-    const m = plain.match(/error:\s*(.+)/);
-    return `compile error — ${m ? m[1].trim() : "build failed"}`;
-  }
-  if (!run) return "compiled (not run)";
-  if (run.signal || run.code !== 0) return `RUNTIME FAILURE — ${run.signal ?? `exit ${run.code}`}`;
-  return `runs — ${run.stdout.trim().split("\n").map(l => l.trim()).join(" / ")}`;
+type Root = {
+  name: string;
+  /** struct declarations this spelling needs */
+  decls: (ty: string) => string;
+  /** how `main` builds it */
+  setup: (ty: string, init: string) => string;
+  /** the binding the loop's root resolves to */
+  owner: string;
+  /** the owner's type, for a `&mut` parameter */
+  ownerTy: (ty: string) => string;
+  /** steps from the owner down to the container */
+  path: string;
+};
+
+const ROOTS: Root[] = [
+  {
+    name: "local",
+    decls: () => "",
+    setup: (ty, init) => `    var c: ${ty} = ${init}`,
+    owner: "c",
+    ownerTy: ty => ty,
+    path: "",
+  },
+  {
+    name: "field",
+    decls: ty => `struct Holder { c: ${ty} }`,
+    setup: (_ty, init) => `    var h = Holder { c: ${init} }`,
+    owner: "h",
+    ownerTy: () => "Holder",
+    path: ".c",
+  },
+  {
+    name: "nested field",
+    decls: ty => `struct Inner { c: ${ty} }\nstruct Outer { i: Inner }`,
+    setup: (_ty, init) => `    var o = Outer { i: Inner { c: ${init} } }`,
+    owner: "o",
+    ownerTy: () => "Outer",
+    path: ".i.c",
+  },
+];
+
+const ROUTES = ["direct", "through a &mut fn"] as const;
+
+function program(c: Container, r: Root, route: (typeof ROUTES)[number]): string {
+  const place = r.owner + r.path;
+  const seed = c.seed(place);
+  const viaFn = route === "through a &mut fn";
+  const touch = viaFn
+    ? `fn touch(x: &mut ${r.ownerTy(c.ty)}) {\n    ${c.mutate("x" + r.path)}\n}\n`
+    : "";
+  const body = viaFn ? `touch(${r.owner})` : c.mutate(place);
+  return `${r.decls(c.ty)}\n${touch}\nfn main() {\n${r.setup(c.ty, c.init)}\n${seed ? `    ${seed}\n` : ""}    for ${c.bind} in ${place} {\n        ${body}\n        print(it)\n    }\n}\n`;
 }
 
-function renderGolden(rows: Record<string, Record<string, string>>): string {
-  const head = `# Aliasing consistency matrix
-
-Generated by \`tests/aliasingMatrix.test.ts\` — do not hand-edit; regenerate with
-\`MILO_UPDATE_MATRIX=1 bun test tests/aliasingMatrix.test.ts\`.
-
-Each cell is what a user observes when they apply one operation to one kind of
-container holding a non-Copy element (\`string\`). Cells that disagree across a
-row are places where the same concept is taught differently depending on the
-spelling — that is the signal this file exists to surface, not a failure.
-
-| container | ${PROBES.join(" | ")} |
-|---|${PROBES.map(() => "---").join("|")}|
-`;
-  const body = Object.keys(CONTAINERS)
-    .map(c => `| \`${c}\` | ${PROBES.map(p => rows[c][p]).join(" | ")} |`)
-    .join("\n");
-  return head + body + "\n";
-}
-
-describe("aliasing consistency matrix", () => {
-  const rows: Record<string, Record<string, string>> = {};
-
-  beforeAll(async () => {
-    execSync(`bun build --compile ${join(MILO_ROOT, "src", "main.ts")} --outfile ${MILOC}`, {
-      stdio: ["pipe", "pipe", "pipe"],
-    });
-    for (const [container, probes] of Object.entries(CONTAINERS)) {
-      rows[container] = {};
-      for (const probe of PROBES) {
-        const src = probes[probe];
-        const stem = `${container}_${probe}`;
-        const srcPath = join(WORK, `${stem}.milo`);
-        const binPath = join(WORK, stem);
-        writeFileSync(srcPath, src.trimStart() + "\n");
-        const build = await guardedRun(MILOC, ["build", srcPath, "-o", binPath], {
-          env: CHILD_ENV, virtualMemMb: 8192,
+describe("mutation during iteration is rejected for every spelling", () => {
+  for (const c of CONTAINERS) {
+    for (const r of ROOTS) {
+      for (const route of ROUTES) {
+        test(`${c.name} as a ${r.name}, mutated ${route}`, () => {
+          const errs = errorsFor(program(c, r, route));
+          // Either wording is the rule firing: a mutating METHOD reports the borrow,
+          // an element ASSIGNMENT reports the iteration. Both are a rejection.
+          expect(errs.join("\n")).toMatch(/is borrowed|being iterated/);
         });
-        const run = build.code === 0 && existsSync(binPath + EXE)
-          ? await guardedRun(binPath + EXE, [], { env: CHILD_ENV, virtualMemMb: 8192 })
-          : null;
-        rows[container][probe] = cell(build, run);
       }
     }
-  }, 600_000);
+  }
+});
 
-  test("matrix matches the committed golden", () => {
-    const actual = renderGolden(rows);
-    if (process.env.MILO_UPDATE_MATRIX) {
-      writeFileSync(GOLDEN, actual);
-      return;
-    }
-    expect(actual).toEqual(readFileSync(GOLDEN, "utf-8"));
-  });
-
-  // The one property that is NOT allowed to differ: no container may hand out an
-  // aliased copy that the runtime then double-frees. A cell reading RUNTIME
-  // FAILURE is a memory-safety bug in safe code no matter which container it is.
-  test("no container aborts at runtime", () => {
-    const failures: string[] = [];
-    for (const container of Object.keys(CONTAINERS)) {
-      for (const probe of PROBES) {
-        if (rows[container][probe].startsWith("RUNTIME FAILURE")) {
-          failures.push(`${container}.${probe}: ${rows[container][probe]}`);
-        }
-      }
-    }
-    expect(failures).toEqual([]);
-  });
+// The rule has to be precise as well as total: freezing the ROOT must not reject a
+// mutation of a sibling field, or every `for x in self.items { self.count += 1 }` in the
+// stdlib stops compiling. This is the half that a blunt "freeze the whole struct" fix
+// would break, so it is asserted rather than assumed.
+describe("a disjoint field of the same root still compiles", () => {
+  for (const c of CONTAINERS) {
+    test(`${c.name}: iterate one field, mutate another`, () => {
+      const src = `struct Two { c: ${c.ty}, other: Vec<string>, n: i64 }\n\nfn main() {\n    var t = Two { c: ${c.init}, other: Vec.new(), n: 0 }\n${c.seed("t.c") ? `    ${c.seed("t.c")}\n` : ""}    for ${c.bind} in t.c {\n        t.other.push("ok")\n        t.n = t.n + 1\n        print(it)\n    }\n}\n`;
+      expect(errorsFor(src)).toEqual([]);
+    });
+  }
 });

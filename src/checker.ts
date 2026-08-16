@@ -18,6 +18,11 @@ import { must } from "./must";
 // One hop from a place to a place inside it. `index` is deliberately opaque —
 // two index steps may or may not select the same element, and nothing here tries
 // to decide that. `payload` is the inside of an Option/Result reached by `!`/`?`.
+// Why a variable is frozen. The distinction matters at exactly one place — an
+// index-qualified assignment (`v[0] = x`) — which a view survives and an iteration
+// does not. See `freeze` and the Assign case.
+export type BorrowKind = "view" | "iteration";
+
 export type PlaceStep =
   | { tag: "field"; name: string }
   | { tag: "index" }
@@ -106,6 +111,11 @@ export interface VarInfo {
   // Absent while `borrowed` is true is read the same as `[null]`. Only mutations whose
   // own path overlaps a frozen one are rejected, so a view of `x.a` leaves `x.b` writable.
   borrowedPaths?: (string[] | null)[];
+  // Why each borrow in `borrowedPaths` was taken, same order. A slice VIEW tolerates an
+  // in-place element write (the slot does not move, so the view stays valid and simply
+  // sees the new value); a loop ITERATION does not, because the loop is handing out that
+  // element and rewriting it mid-loop is the invalidation the rule exists to stop.
+  borrowKinds?: BorrowKind[];
   // An unannotated `let x = <const-int-value>` whose width is still adaptable:
   // its value is built entirely from integer literals (directly, or as the arm
   // tails of an if/match expression), so it can be re-typed to a wider int on
@@ -1490,20 +1500,59 @@ export class TypeChecker {
 
   // Freeze `info` for a borrow of `place`. The path is recorded so a later mutation of a
   // provably different field isn't rejected; pass null when the borrowed place is unknown.
-  private freeze(info: VarInfo, place: Expr | null) {
+  private freeze(info: VarInfo, place: Expr | null, kind: BorrowKind = "view") {
     info.borrowed = true;
-    const path = place ? this.accessPath(place) : null;
-    (info.borrowedPaths ??= []).push(path ? path.fields : null);
+    (info.borrowedPaths ??= []).push(place ? this.borrowPrefix(place) : null);
+    (info.borrowKinds ??= []).push(kind);
+  }
+
+  // The exact field prefix of a borrowed place, stopping at the first step that is not a
+  // field. An index makes it imprecise about WHICH element, so everything below the index
+  // conflicts — but the path ABOVE it is still exact, and that is what keeps a borrow of
+  // `self.items[i].ids` from freezing `self.log` as well. `accessPath` answers `null`
+  // (conflicts with everything) for the same expression, which is sound but so blunt it
+  // rejects the disjoint sibling; see tests/fixtures/borrowIndexFieldPrecision.milo.
+  // A place with no single named root stays `null` — unknown must keep meaning "any".
+  private borrowPrefix(place: Expr): string[] | null {
+    const p = this.soloPath(place);
+    if (!p) return null;
+    const fields: string[] = [];
+    for (const s of p.steps) {
+      if (s.tag !== "field") break;
+      fields.push(s.name);
+    }
+    return fields;
   }
 
   private unfreeze(info: VarInfo) {
     info.borrowed = false;
     info.borrowedPaths = undefined;
+    info.borrowKinds = undefined;
   }
 
   // Whether a mutation of `target` collides with a live borrow of `info`. Two chains off
   // one root can alias only when neither diverges from the other at a named field; an
   // unknown path on either side (an index or deref step) is treated as a collision.
+  // Is any live borrow of `info` that collides with `target` an ITERATION borrow?
+  // Only iteration cares about an in-place element write, so this is what lets the
+  // index exemption below stay true for slice views while closing it for loops.
+  private frozenByIteration(info: VarInfo, target: Expr | null): boolean {
+    if (!this.frozenAgainst(info, target)) return false;
+    const kinds = info.borrowKinds;
+    if (!kinds || kinds.length === 0) return false;
+    const paths = info.borrowedPaths;
+    const mut = target ? this.accessPath(target) : null;
+    const mutFields = mut ? mut.fields : null;
+    return kinds.some((k, i) => {
+      if (k !== "iteration") return false;
+      const p = paths?.[i];
+      if (p === null || p === undefined || mutFields === null) return true;
+      const n = Math.min(p.length, mutFields.length);
+      for (let j = 0; j < n; j++) if (p[j] !== mutFields[j]) return false;
+      return true;
+    });
+  }
+
   private frozenAgainst(info: VarInfo, target: Expr | null): boolean {
     if (!info.borrowed) return false;
     const paths = info.borrowedPaths;
@@ -4153,7 +4202,20 @@ export class TypeChecker {
         // in-place element write never reallocates, so views stay valid and see it
         // (tests/fixtures/viewFreezeRelease.milo).
         const assignPath = this.accessSteps(stmt.target);
-        if (assignPath && !assignPath.steps.some((s) => s === "[]" || s === "*")) {
+        // The index/deref exemption above is a VIEW's exemption: writing an element in
+        // place never reallocates, so a live slice stays valid and simply observes the
+        // write. A `for-in` is the case it does not cover — the loop is handing out that
+        // very element, so `for it in v { v[0] = x }` rewrites what `it` names. Without
+        // this the rule gave two answers to one question depending on spelling:
+        // `v.push(x)` was rejected inside the loop and `v[0] = x` was not.
+        const indexQualified = assignPath ? assignPath.steps.some((s) => s === "[]" || s === "*") : false;
+        const assignInfo = assignPath ? this.lookup(assignPath.root) : null;
+        if (assignPath && indexQualified && assignInfo && this.frozenByIteration(assignInfo, stmt.target)) {
+          this.error(`cannot assign to '${this.describeExpr(stmt.target)}' because '${assignPath.root}' is being iterated`, sp,
+            `the loop hands out this element — finish the loop, or collect the writes and apply them after it`);
+          break;
+        }
+        if (assignPath && !indexQualified) {
           const info = this.lookup(assignPath.root);
           const isCapturedMutation = this.closureScopeDepth !== null && this.currentClosureCaptures?.has(assignPath.root);
           if (info && !isCapturedMutation && this.frozenAgainst(info, stmt.target)) {
@@ -4326,22 +4388,10 @@ export class TypeChecker {
               }
             }
           }
+          // One freeze for every container shape below — see freezeIterable.
+          const iterBorrowInfo = this.freezeIterable(stmt.iterable);
           if (iterType.tag === "vec") {
             const elemRef: TypeKind = { tag: "ref", inner: iterType.element, mutable: false };
-            // mark vec as borrowed to prevent mutation during iteration
-            let vecBorrowInfo: import("./checker").VarInfo | null = null;
-            // Freeze the ROOT of whatever place is being iterated, not just a bare name.
-            // `for x in v` was frozen and `for x in b.items` was not, so pushing to
-            // `b.items` inside its own loop — directly, or through any fn taking `b` as
-            // `&mut` — reallocated the buffer the loop holds a pointer into. Both were
-            // heap-use-after-free in safe code with zero `unsafe` (ASan, 2026-08-16).
-            // The recorded path is what keeps this from over-rejecting: mutating a
-            // DIFFERENT field of the same struct does not collide.
-            const iterPlace = this.accessPath(stmt.iterable);
-            if (iterPlace) {
-              const info = this.lookup(iterPlace.root);
-              if (info) { vecBorrowInfo = info; this.freeze(info, stmt.iterable); }
-            }
             const preMoves = this.snapshotMoveState();
             this.returnOnlyMovesStack.push(new Set());
             this.pushScope();
@@ -4358,7 +4408,6 @@ export class TypeChecker {
             for (const s of stmt.body) this.checkStmt(s, fnRetType);
             this.loopDepth--;
             this.popScope();
-            if (vecBorrowInfo) this.unfreeze(vecBorrowInfo);
             const returnMoves = this.returnOnlyMovesStack.pop()!;
             this.checkLoopMoves(preMoves, returnMoves, sp);
           } else if (iterType.tag === "string") {
@@ -4383,12 +4432,6 @@ export class TypeChecker {
           } else if (iterType.tag === "hashmap") {
             const keyRef: TypeKind = { tag: "ref", inner: iterType.key, mutable: false };
             const valRef: TypeKind = { tag: "ref", inner: iterType.value, mutable: false };
-            // mark map as borrowed
-            let mapBorrowInfo: import("./checker").VarInfo | null = null;
-            if (stmt.iterable.kind === "Ident") {
-              const info = this.lookup(stmt.iterable.name);
-              if (info) { mapBorrowInfo = info; this.freeze(info, stmt.iterable); }
-            }
             const preMoves = this.snapshotMoveState();
             this.returnOnlyMovesStack.push(new Set());
             this.pushScope();
@@ -4401,16 +4444,10 @@ export class TypeChecker {
             for (const s of stmt.body) this.checkStmt(s, fnRetType);
             this.loopDepth--;
             this.popScope();
-            if (mapBorrowInfo) this.unfreeze(mapBorrowInfo);
             const returnMoves4 = this.returnOnlyMovesStack.pop()!;
             this.checkLoopMoves(preMoves, returnMoves4, sp);
           } else if (iterType.tag === "array") {
             const elemRef: TypeKind = { tag: "ref", inner: iterType.element, mutable: false };
-            let arrBorrowInfo: import("./checker").VarInfo | null = null;
-            if (stmt.iterable.kind === "Ident") {
-              const info = this.lookup(stmt.iterable.name);
-              if (info) { arrBorrowInfo = info; this.freeze(info, stmt.iterable); }
-            }
             const preMoves = this.snapshotMoveState();
             this.returnOnlyMovesStack.push(new Set());
             this.pushScope();
@@ -4426,7 +4463,6 @@ export class TypeChecker {
             for (const s of stmt.body) this.checkStmt(s, fnRetType);
             this.loopDepth--;
             this.popScope();
-            if (arrBorrowInfo) this.unfreeze(arrBorrowInfo);
             const returnMoves5 = this.returnOnlyMovesStack.pop()!;
             this.checkLoopMoves(preMoves, returnMoves5, sp);
           } else if (iterType.tag === "struct" || iterType.tag === "enum") {
@@ -4438,10 +4474,6 @@ export class TypeChecker {
             // unknown; the per-instantiation re-check binds the real type and sets up the
             // iteration. A real type that simply lacks `next` still errors.
             if (!resolved && !this.structs.has(iterType.name) && !this.enums.has(iterType.name)) {
-              if (stmt.iterable.kind === "Ident") {
-                const info = this.lookup(stmt.iterable.name);
-                if (info) this.freeze(info, stmt.iterable);
-              }
               this.pushScope();
               this.declare(stmt.varName, { type: { tag: "unknown" }, mutable: false, moved: false, borrowed: false, read: false }, stmt.span);
               for (const inv of stmt.invariants ?? []) this.checkContractClause(inv);
@@ -4474,7 +4506,6 @@ export class TypeChecker {
                   if (info && !info.mutable) {
                     this.error(`cannot iterate: '${stmt.iterable.name}' must be 'var' (iterator mutates via next())`, sp);
                   }
-                  if (info) this.freeze(info, stmt.iterable);
                 }
                 if (stmt.varName2) {
                   this.error("iterator for loop takes one binding, not two", sp);
@@ -4496,6 +4527,10 @@ export class TypeChecker {
           } else if (iterType.tag !== "unknown") {
             this.error(`cannot iterate over type '${typeName(iterType)}'`, sp);
           }
+          // Released once, for whichever arm above ran. Paired with the single
+          // freezeIterable before the dispatch — see that function for why the pairing
+          // is here and not inside each arm.
+          if (iterBorrowInfo) this.unfreeze(iterBorrowInfo);
         }
         break;
       }
@@ -5657,6 +5692,28 @@ export class TypeChecker {
     const _exhaustive: never = e;
     void _exhaustive;
     return [OPAQUE];
+  }
+
+  // Freeze the storage a `for-in` iterates, for the whole loop.
+  //
+  // Taken ONCE, before the per-container dispatch, so every iteration shape inherits it
+  // — vec, hashmap, array, string, user iterator, and whatever is added next. It used to
+  // be re-derived inside four separate arms, each keyed to `iterable.kind === "Ident"`,
+  // so `for x in v` was frozen and `for x in b.items` was frozen by nobody: pushing to
+  // that field inside its own loop reallocated the buffer the loop reads. Vec and
+  // HashMap were both heap-use-after-free in safe code (ASan, 2026-08-16).
+  //
+  // The root is resolved through the place walker rather than matched as a node kind,
+  // which is the whole point: a new way to SPELL the iterable inherits the rule instead
+  // of escaping it. The recorded path is what keeps this from over-rejecting — mutating
+  // a different field of the same struct does not collide with the borrow.
+  private freezeIterable(iterable: Expr): import("./checker").VarInfo | null {
+    const place = this.accessPath(iterable);
+    if (!place) return null;
+    const info = this.lookup(place.root);
+    if (!info) return null;
+    this.freeze(info, iterable, "iteration");
+    return info;
   }
 
   // Extend every place the base expression reaches by one step. A step off a

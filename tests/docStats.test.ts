@@ -25,9 +25,15 @@ test("the stat functions count something", () => {
 });
 
 test("the fixture count is the number the test driver actually walks", () => {
-  // Independent of gen-stats.ts: if both used the same helper, a bug in it would
-  // agree with itself.
-  const onDisk = readdirSync(join(ROOT, "tests", "fixtures")).filter(f => f.endsWith(".milo")).length;
+  // Independent of gen-stats.ts: if both used the same helper, a bug in it would agree
+  // with itself. Untracked files are excluded to match — a shared checkout regularly
+  // holds another agent's scratch fixture, and CI would never see it.
+  const untracked = new Set(
+    execFileSync("git", ["ls-files", "--others", "--exclude-standard", "--", "tests/fixtures/*.milo"],
+      { cwd: ROOT, encoding: "utf-8" }).split("\n").filter(Boolean).map(p => p.replace("tests/fixtures/", "")),
+  );
+  const onDisk = readdirSync(join(ROOT, "tests", "fixtures"))
+    .filter(f => f.endsWith(".milo") && !untracked.has(f)).length;
   const claimed = /<!-- stat:fixtures -->(\d+)<!-- \/stat -->/.exec(readFileSync(join(ROOT, "CLAUDE.md"), "utf-8"))?.[1];
   expect(claimed).toBe(String(onDisk));
 });

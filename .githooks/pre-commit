@@ -31,7 +31,15 @@ if git diff --cached --name-only --diff-filter=ACMDR | grep -qE '^(scripts/|\.gi
     git add -- docs/scripts.md
 fi
 
-# 3. Deterministic lint + auto-fix on all staged files (scripts/lint.ts).
+# 3. Refill the corpus counts quoted in prose when the corpus changes. Same reasoning as
+# above: tests/docStats.test.ts fails CI on a stale count, and the way that happens is
+# adding a fixture. Counts come from `git ls-files`, so this must run AFTER staging.
+if git diff --cached --name-only --diff-filter=ACMDR | grep -qE '^(tests/(fixtures|errors|runtime-errors|prove)/|std/|examples/)'; then
+    bun run scripts/gen-stats.ts >/dev/null
+    git add -- CLAUDE.md AGENTS.md README.md docs/testing.md docs/roadmap.md
+fi
+
+# 4. Deterministic lint + auto-fix on all staged files (scripts/lint.ts).
 # Runs regardless of whether any .milo files are staged. Fixes are re-staged
 # inside lint.ts; an unfixable error exits non-zero and aborts the commit.
 bun run scripts/lint.ts --staged --fix

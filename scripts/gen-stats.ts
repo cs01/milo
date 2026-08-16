@@ -13,25 +13,26 @@
 // Only LIVE claims get markers. A dated audit or decision record (stdlib-audit-*.md,
 // selfhost-endgame-decision.md, security-audit-*.md) states what was true when it was
 // written; rewriting those numbers would falsify the record, so they stay untouched.
-import { readFileSync, writeFileSync, readdirSync, existsSync } from "fs";
+import { readFileSync, writeFileSync, readdirSync } from "fs";
+import { execFileSync } from "child_process";
 import { join } from "path";
 
 const ROOT = join(import.meta.dir, "..");
 
-const countMilo = (dir: string) =>
-  existsSync(join(ROOT, dir)) ? readdirSync(join(ROOT, dir)).filter(f => f.endsWith(".milo")).length : 0;
-
-function countExamples(): number {
-  let n = 0;
-  const walk = (dir: string) => {
-    for (const e of readdirSync(dir, { withFileTypes: true })) {
-      if (e.isDirectory()) walk(join(dir, e.name));
-      else if (e.name.endsWith(".milo")) n++;
-    }
-  };
-  walk(join(ROOT, "examples"));
-  return n;
+// Counts come from git, not the working tree. This repo is often a shared checkout with
+// another agent's untracked scratch fixtures in it; counting those made the docs claim a
+// number CI could never reproduce, and the gate then failed for everyone.
+function tracked(dir: string): string[] {
+  const out = execFileSync("git", ["ls-files", "--", `${dir}/*.milo`], { cwd: ROOT, encoding: "utf-8" });
+  return out.split("\n").filter(Boolean);
 }
+
+// Test CASES only. tests/fixtures/lib/ holds helper modules that fixtures import, and
+// they are not tests — `git ls-files` recurses, so they have to be filtered out here.
+const countMilo = (dir: string) =>
+  tracked(dir).filter(f => f.slice(dir.length + 1).indexOf("/") < 0).length;
+
+const countExamples = () => tracked("examples").length;
 
 export const STATS: Record<string, () => number> = {
   fixtures: () => countMilo("tests/fixtures"),

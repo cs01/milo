@@ -168,6 +168,7 @@
   "socketBind.milo": "noEmit",
   "softKeywordFromIn.milo": "crash",
   "sortByKeyString.milo": "noEmit",
+  "spawnCapturingClosureLeak.milo": "noEmit",
   "spawnMoveClosures.milo": "noEmit",
   "spawnMoveHeapString.milo": "noEmit",
   "stdCrypto.milo": "noEmit",

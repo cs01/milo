@@ -126,7 +126,16 @@ pub fn uid(): u32
 ```
 
 Windows identities are SIDs, not numeric ids — there is no uid/gid/euid/egid to
-report. 0 matches the darwin/linux failure return; it does NOT mean "root".
+report, so these return u32 MAX as "no such concept here".
+
+NOT 0, which is what they used to return. The comment justifying that said 0 "matches
+the darwin/linux failure return", and there is no such thing: `getuid()` cannot fail,
+so on the POSIX arms 0 means the process IS root. The standard portable guard —
+`if uid() == 0 { … }`, whether it refuses to run as root or unlocks a privileged path —
+therefore took the root branch unconditionally on Windows. That is precisely the
+"plausible-looking value" the port's convention exists to forbid (CLAUDE.md); u32 MAX
+is not a uid any system issues, so a caller that ignores it gets a wrong answer that
+looks wrong rather than one that looks like root.
 
 ### `uptime`
 

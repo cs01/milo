@@ -11,6 +11,25 @@ last-verified: 2026-08-14
 Source-level breaks, newest first. Milo is pre-1.0 and does not promise
 compatibility, but every break belongs here with the migration spelled out.
 
+## `std/sysinfo`'s identity calls return u32 MAX on Windows, not 0 (2026-08-16)
+
+**`uid`, `gid`, `euid` and `egid` return `4294967295` on Windows** where they previously
+returned `0`.
+
+Windows identities are SIDs, so there is no numeric id to report and some sentinel is
+unavoidable. `0` was the wrong one: the comment defending it said 0 "matches the
+darwin/linux failure return", and there is no such return — `getuid()` cannot fail, so on
+the POSIX arms `0` means the process IS root. The standard portable guard therefore took
+the root branch unconditionally on Windows:
+
+    if uid() == 0 {
+        // refuse to run as root, or unlock a privileged path
+    }
+
+u32 MAX is not an id any system issues, so a caller that ignores the platform gets an
+answer that looks wrong rather than one that looks like root. If you compare against a
+sentinel, compare against `4294967295`; if you branch on privilege, do it per-platform.
+
 ## Closure parameters that take ownership say `move` (2026-08-15)
 
 **`spawnOsThreadDetached`, `Task.spawn`, `Task.spawnWithStack` and `Promise.blocking`

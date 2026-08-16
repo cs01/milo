@@ -33,6 +33,8 @@ jobs:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # tags, for tests/breakingChanges.test.ts
       - uses: oven-sh/setup-bun@v2
       # tests/typecheck.test.ts runs tsc, which needs @types/bun from node_modules.
       # `bun test` runs fine without deps, so a missing install only shows up as the

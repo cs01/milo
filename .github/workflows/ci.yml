@@ -5,6 +5,12 @@ jobs:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # tests/breakingChanges.test.ts diffs the public std surface against the last
+          # release tag. actions/checkout fetches no tags by default, so the gate found
+          # none and failed rather than silently passing — which is the right failure,
+          # but the fix belongs here.
+          fetch-depth: 0
       - uses: oven-sh/setup-bun@v2
       # tests/typecheck.test.ts runs tsc, which needs @types/bun from node_modules —
       # without it every `console`/`process`/`Buffer` is an error. `bun test` happens to
@@ -41,6 +47,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # tags, for tests/breakingChanges.test.ts
       - uses: oven-sh/setup-bun@v2
       - run: bun install --frozen-lockfile
       # clang is what milo shells out to for every compile, so the job cannot work without
@@ -79,6 +87,8 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # tags, for tests/breakingChanges.test.ts
       - uses: oven-sh/setup-bun@v2
       - run: bun install --frozen-lockfile
       # clang emits the COFF object and drives the link; the runner's bundled MSVC

@@ -1,0 +1,41 @@
+// @skip-os: win32
+// @expect: dot-accented=3
+// @expect: dot-cjk=2
+// @expect: class-ascii=2
+// @expect: quantifier-multibyte=1
+// @expect: float=1.5
+
+// std/regex wraps POSIX regex, which asks the C LOCALE what a character is — and a
+// program that never calls setlocale runs in the "C" locale, where a character is a
+// BYTE. `.` therefore matched 4 times in "aéb": 3 code points, 4 bytes. Milo strings are
+// UTF-8 by definition, so the matcher forces an LC_CTYPE that agrees.
+//
+// The float line is not decoration. The fix must not use LC_ALL: LC_NUMERIC decides the
+// decimal separator, and moving it would rewrite every float the program prints. This
+// pins that only the ctype category moved.
+//
+// Windows is skipped because that arm has no regex to fix — the MSVC CRT provides no
+// C-linkable engine, so it aborts by design (std/regex.windows.milo).
+from "std/regex" import {
+    Regex
+}
+
+fn count(pat: string, input: &string): i64 {
+    match Regex.compile(pat) {
+        Result.Ok(r) => {
+            return r.findAll(input).len
+        }
+        Result.Err(e) => {
+            return -1
+        }
+    }
+}
+
+pub fn main(): i32 {
+    print("dot-accented=" + count(".", "aéb").toString())
+    print("dot-cjk=" + count(".", "日本").toString())
+    print("class-ascii=" + count("[a-z]", "aéb").toString())
+    print("quantifier-multibyte=" + count("é+", "aééb").toString())
+    print("float=" + (1.5).toString())
+    return 0
+}

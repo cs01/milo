@@ -33,7 +33,38 @@ pub struct Regex {
 }
 
 // Compile a POSIX extended regex with explicit cflags. REG_EXTENDED=1, REG_ICASE=2.
+// Milo strings are UTF-8 by definition, but POSIX regex asks the C LOCALE what a
+// character is — and a program that never calls setlocale runs in the "C" locale, where
+// a character is a BYTE. So `.` matched 4 times in "aéb" (3 code points, 4 bytes) and a
+// quantifier bound to the last byte of a multibyte literal. Setting LC_CTYPE fixes both
+// (measured: 4 -> 3).
+//
+// Forced to UTF-8 rather than taken from the environment with "": with LANG and LC_ALL
+// unset — the usual state in CI and in a container — "" resolves to "C" and the byte
+// behaviour comes straight back. Milo's string type does not vary with the environment,
+// so neither should its matcher.
+//
+// LC_CTYPE alone, never LC_ALL: LC_NUMERIC decides the decimal separator, and moving it
+// would rewrite every float this program prints (a comma in a locale like de_DE), which
+// is a far worse bug than the one being fixed. Verified that float output is unchanged.
+pub extern fn setlocale(_category: i32, _locale: *u8): *u8
+
+var _regexLocaleSet: bool = false
+
+// Category 2 is LC_CTYPE on darwin.
+fn regexEnsureUtf8Ctype(): void {
+    if _regexLocaleSet {
+        return
+    }
+    _regexLocaleSet = true
+    unsafe {
+        let want = "UTF-8"
+        setlocale(2, want.cstr())
+    }
+}
+
 fn regexNewFlags(pattern: string, cflags: i32): Result<Regex> {
+    regexEnsureUtf8Ctype()
     var r = Regex {
         _preg: [0; 128], _valid: false
     }

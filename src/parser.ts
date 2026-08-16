@@ -291,14 +291,34 @@ export class Parser {
       return { ...inner, isPtr: true, ptrDepth: depth };
     }
     // [T] or [T; N]
-    if (this.match(TokenKind.LBracket)) {
+    if (this.at(TokenKind.LBracket)) {
+      const lb = this.peek();
+      this.match(TokenKind.LBracket);
       const inner = this.parseType();
       let arraySize: number | null = null;
       if (this.match(TokenKind.Semicolon)) {
         arraySize = parseInt(this.expect(TokenKind.Int).value);
       }
       this.expect(TokenKind.RBracket);
-      return { name: inner.name, isPtr: false, isRef: false, isRefMut: false, isArray: true, arraySize };
+      // `MiloType` carries ONE `isArray` flag, so an array OF an array has nowhere to
+      // record the inner one. This used to build the type from `inner.name` alone, which
+      // silently dropped it: `var g: [[i64; 2]; 2] = [1, 2]` was ACCEPTED and `g` was an
+      // `[i64; 2]`. The annotation meant something the writer never asked for, and the
+      // mismatch surfaced far away as invalid LLVM IR when a nested literal was stored
+      // into a flat slot. Say it instead.
+      if (inner.isArray) {
+        this.error(`a nested fixed array '[[T; N]; M]' is not supported: use 'Vec<[T; N]>' or 'Vec<Vec<T>>'`, lb);
+      }
+      // Same shape, different modifier: `[&string; 2]` silently became `[string; 2]`, an
+      // OWNED array. References are second-class and cannot be stored, so an array of
+      // them is not expressible at all.
+      if (inner.isRef || inner.isRefMut) {
+        this.error(`an array of references is not expressible: '&T' is second-class and cannot be stored, so '[&T; N]' has no representation`, lb);
+      }
+      // Spread rather than rebuild from `name`: this also carries `typeArgs`, which the
+      // old form dropped, so `[Vec<i64>; 2]` lost its element type and reported the
+      // baffling "cannot infer Vec element type" against an annotation that stated it.
+      return { ...inner, isArray: true, arraySize };
     }
     // extern (T1, T2) => R — a C function pointer, e.g. the result of dlsym
     if (this.at(TokenKind.Extern)) {

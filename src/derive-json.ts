@@ -23,6 +23,10 @@ export type JsonPlan =
   | { k: "struct"; name: string }
   | { k: "unitEnum"; name: string; variants: string[] }
   | { k: "vec"; ty: string; elem: JsonPlan }
+  // A FIXED array. `size` is the exact element count the wire must supply, and `zero` is
+  // the element expression the slots are built with before they are filled — a fixed
+  // array cannot be grown into like a Vec.
+  | { k: "array"; ty: string; elem: JsonPlan; size: number; zero: string }
   // Keys are always `string` — a JSON object has no other kind. `ty` is the Milo
   // spelling of the whole map, needed to declare the accumulator on decode.
   | { k: "map"; ty: string; value: JsonPlan }
@@ -71,6 +75,9 @@ function emitSer(p: JsonPlan, val: string, g: Gen, d: number): string {
       g.push(d, `}`);
       return s;
     }
+    // Serialising a fixed array is exactly serialising a Vec: both iterate and both emit
+    // a JSON array. Only the DECODE side differs, because one grows and the other cannot.
+    case "array":
     case "vec": {
       const s = g.tmp("s");
       const i = g.tmp("i");
@@ -213,6 +220,32 @@ function emitDe(p: JsonPlan, node: string, path: string, g: Gen, d: number): str
       const oneOf = p.variants.map(v => `"${v}"`).join(", ");
       g.push(d + 1, `return Result.Err(JsonError.Mismatch(JsonMismatch { path: ${path}, `
         + `expected: ${lit(`one of ${oneOf}`)}, actual: "\\"" + ${s} + "\\"" }))`);
+      g.push(d, `}`);
+      return t;
+    }
+    case "array": {
+      const t = g.tmp("a");
+      const i = g.tmp("i");
+      const c = g.tmp("c");
+      g.push(d, `if doc.curKind(${node}) != 4 {`);
+      g.push(d + 1, `return ${mismatch(path, "array", node)}`);
+      g.push(d, `}`);
+      // A fixed array has exactly this many slots, so a wire array of any other length
+      // cannot be represented. Reported rather than truncated or zero-padded: silently
+      // accepting the wrong length is how a caller ends up reading a slot the sender
+      // never wrote.
+      g.push(d, `if doc.curLen(${node}) != ${p.size} {`);
+      g.push(d + 1, `return Result.Err(JsonError.Mismatch(JsonMismatch { path: ${path}, `
+        + `expected: ${lit(`an array of exactly ${p.size} elements`)}, actual: "an array of " + doc.curLen(${node}).toString() + " elements" }))`);
+      g.push(d, `}`);
+      g.push(d, `var ${t}: ${p.ty} = [${p.zero}; ${p.size}]`);
+      g.push(d, `var ${i}: i64 = 0`);
+      g.push(d, `while ${i} < ${p.size} {`);
+      g.push(d + 1, `let ${c} = doc.curChild(${node}, ${i})`);
+      const aElemPath = `${path} + "[" + ${i}.toString() + "]"`;
+      const aInner = emitDe(p.elem, c, aElemPath, g, d + 1);
+      g.push(d + 1, `${t}[${i}] = ${aInner}`);
+      g.push(d + 1, `${i} = ${i} + 1`);
       g.push(d, `}`);
       return t;
     }

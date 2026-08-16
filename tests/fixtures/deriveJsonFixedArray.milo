@@ -1,0 +1,39 @@
+// `@derive(Json)` on a fixed-array field. A Vec grows into, a fixed array cannot: it has
+// to exist before it is filled, so decoding one needs both a zero value to build the slots
+// with and an exact-length check. A wire array of the wrong length is REPORTED rather than
+// truncated or zero-padded, because silently accepting it hands the caller a slot the
+// sender never wrote.
+@derive(Json)
+struct Board {
+    cells: [i64; 3],
+    name: string,
+    flags: [bool; 2],
+}
+
+fn main() {
+    let b = Board {
+        cells: [1, 2, 3], name: "b", flags: [true, false]
+    }
+    let s = b.toJson()
+    print(s)
+    match Board.fromJson(s) {
+        Result.Ok(r) => {
+            print("rt ", r.cells[0], r.cells[2], r.name, r.flags[0])
+        }
+        Result.Err(e) => {
+            print("decode failed")
+        }
+    }
+    match Board.fromJson("{\"cells\":[1,2],\"name\":\"b\",\"flags\":[true,false]}") {
+        Result.Ok(r) => {
+            print("wrong length accepted")
+        }
+        Result.Err(e) => {
+            print("wrong length rejected")
+        }
+    }
+}
+
+// @expect: {"cells":[1,2,3],"name":"b","flags":[true,false]}
+// @expect: rt 13btrue
+// @expect: wrong length rejected

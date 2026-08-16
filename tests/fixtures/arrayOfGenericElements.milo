@@ -1,0 +1,23 @@
+// A fixed array whose element is a generic type. `resolve` handled the type ARGUMENTS and
+// returned the element while dropping the array entirely, so `[Vec<i64>; 2]` resolved to a
+// plain `Vec<i64>`: iterating it yielded an i64, and the error a reader saw was "cannot
+// iterate over type 'i64'" against a program that never wrote one.
+fn total(a: [Vec<i64>; 2]): i64 {
+    var s = 0
+    for v in a {
+        for x in v {
+            s = s + x
+        }
+    }
+    return s
+}
+
+fn main() {
+    var p: Vec<i64> = Vec.new()
+    p.push(3)
+    var q: Vec<i64> = Vec.new()
+    q.push(4)
+    print(total([p, q]))
+}
+
+// @expect: 7

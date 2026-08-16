@@ -1,0 +1,12 @@
+// @error: a nested fixed array
+//
+// `MiloType` carries ONE `isArray` flag, so an array of an array has nowhere to record
+// the inner one. The parser built the type from the inner type's NAME alone, which
+// silently dropped it: this annotation was accepted and meant `[i64; 2]`. A flat literal
+// satisfied it, `g[1][0]` reported "cannot index type i64" against a program that had
+// written a 2D array, and a nested literal reached clang as a store of `[2 x i64]` into
+// an `i64` slot. An annotation the language cannot represent now says so.
+fn main() {
+    var g: [[i64; 2]; 2] = [1, 2]
+    print(g[0])
+}

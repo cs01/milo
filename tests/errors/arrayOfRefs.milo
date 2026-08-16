@@ -1,0 +1,10 @@
+// @error: an array of references is not expressible
+//
+// Same dropped-modifier bug as nestedFixedArray, different modifier: the parser kept only
+// the inner type's name, so `[&string; 2]` silently became `[string; 2]` — an OWNED array.
+// References are second-class and cannot be stored, so an array of them has no
+// representation at all, and accepting the annotation promised one.
+fn main() {
+    var a: [&string; 2] = ["x", "y"]
+    print(a[0])
+}

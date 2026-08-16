@@ -1047,6 +1047,12 @@ export class TypeChecker {
           }
         }
       }
+      // `[Vec<i64>; 2]` arrives here because of its type ARGUMENTS, and this branch used
+      // to return the element type and drop the array entirely: the annotation resolved to
+      // a plain `Vec<i64>`, so `for v in a` yielded an i64 and the reported error was
+      // "cannot iterate over type 'i64'" against a program that never wrote one. Wrap here,
+      // inside the ref/ptr wrappers, which belong outside the array.
+      if (ty.isArray) result = { tag: "array", element: result, size: ty.arraySize };
       if (ty.isRef) return { tag: "ref", inner: result, mutable: false };
       if (ty.isRefMut) return { tag: "ref", inner: result, mutable: true };
       return result;
@@ -2303,6 +2309,7 @@ export class TypeChecker {
   // Different from `typeName` in one place that matters: an Option is a
   // monomorphized enum whose *name* is mangled, but its written form is not.
   private jsonTypeSpelling(t: TypeKind): string {
+    if (t.tag === "array" && t.size !== null) return `[${this.jsonTypeSpelling(t.element)}; ${t.size}]`;
     if (t.tag === "vec") return `Vec<${this.jsonTypeSpelling(t.element)}>`;
     if (t.tag === "hashmap") return `HashMap<${this.jsonTypeSpelling(t.key)}, ${this.jsonTypeSpelling(t.value)}>`;
     if (t.tag === "enum") {
@@ -2310,6 +2317,25 @@ export class TypeChecker {
       if (inner) return `Option<${this.jsonTypeSpelling(inner)}>`;
     }
     return typeName(t);
+  }
+
+  // A fixed array has to exist before it can be filled, so decoding one needs a value to
+  // build the N slots with. Only types with an obvious zero qualify; anything else has no
+  // neutral element to stand in, and inventing one (a struct of zeros) would put a value
+  // the wire never sent into a field the caller reads.
+  private jsonZeroFor(t: TypeKind): string | null {
+    switch (t.tag) {
+      case "int": return "0";
+      case "float": return "0.0";
+      case "bool": return "false";
+      case "string": return `""`;
+      // Deliberately NOT recursive into another array. A nested fixed array cannot be
+      // indexed (`g[1][0]` is `cannot index type i64`) or element-assigned (the store
+      // emits `[2 x i64]` into an `i64` slot and clang rejects the module), so generating
+      // a decoder for one produces code that does not link. Refusing here turns that into
+      // a sentence at the derive.
+      default: return null;
+    }
   }
 
   // Reduce a field type to a generator plan, or return why it cannot be one.
@@ -2363,6 +2389,22 @@ export class TypeChecker {
         const p = this.jsonPlanFor(t.element);
         if ("err" in p) return p;
         return { k: "vec", ty: this.jsonTypeSpelling(t), elem: p };
+      }
+      case "array": {
+        // A slice borrows, so a decoder would have nothing to own the buffer it filled.
+        if (t.size === null) {
+          return { err: `a slice '&[T]' has no JSON form because it borrows — decode into a 'Vec<T>' and slice that` };
+        }
+        const p = this.jsonPlanFor(t.element);
+        if ("err" in p) return p;
+        if (t.element.tag === "array") {
+          return { err: `a nested fixed array has no JSON form yet — '[[T; N]; M]' cannot be indexed or element-assigned in this language, so a decoder for one would not compile; use 'Vec<Vec<T>>' or 'Vec<[T; N]>'` };
+        }
+        const zero = this.jsonZeroFor(t.element);
+        if (zero === null) {
+          return { err: `'[${typeName(t.element)}; ${t.size}]' has no JSON form: a fixed array must be built before it is filled, and '${typeName(t.element)}' has no zero value to build it with. Use 'Vec<${typeName(t.element)}>'` };
+        }
+        return { k: "array", ty: this.jsonTypeSpelling(t), elem: p, size: t.size, zero };
       }
       case "hashmap": {
         // A JSON object's keys are strings and nothing else. An i64-keyed map has no

@@ -2,15 +2,6 @@
 
 ## std/pty.windows
 
-### `buildCmdLine`
-
-```milo
-pub fn buildCmdLine(program: &string, args: &Vec<string>): *u8
-```
-
-Build a CreateProcess command line: `program arg1 arg2 ...`, quoting tokens that
-contain whitespace. Malloc'd + NUL-terminated; CreateProcessA may write into it.
-
 ### `fdIsTerminal`
 
 ```milo
@@ -119,14 +110,6 @@ _Undocumented._
 
 ```milo
 fn Pty.writeStdout(self: &Pty, s: &string): i64
-```
-
-_Undocumented._
-
-### `quoteArg`
-
-```milo
-pub fn quoteArg(arg: &string): string
 ```
 
 _Undocumented._

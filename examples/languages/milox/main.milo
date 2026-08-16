@@ -62,34 +62,6 @@ print true and !false;
 print nil == nil;
 "
 
-let BENCH_FIB: string = "
-fn fib(n) {
-  if (n < 2) return n;
-  return fib(n - 1) + fib(n - 2);
-}
-print fib(27);
-"
-
-let BENCH_LOOP: string = "
-var i = 0;
-var acc = 0;
-while (i < 2000000) {
-  acc = acc + i * 2 - 1;
-  i = i + 1;
-}
-print acc;
-"
-
-let BENCH_ALLOC: string = "
-var i = 0;
-var last = nil;
-while (i < 120000) {
-  last = [i, i + 1, i + 2];
-  i = i + 1;
-}
-print last;
-"
-
 // A reachable list is handed to a collector that has been told to free one live
 // object. In C this is a use-after-free that surfaces later as corrupted data;
 // here the next touch of the box fails the generation check.
@@ -127,26 +99,6 @@ fn runSource(src: string, disasm: bool, stats: bool, buggyGc: bool): bool {
         print("--- " + d.toMillis().toString() + "ms, " + vm.stepCount().toString() + " instructions, " + vm.allocCount().toString() + " allocations, " + vm.gcCount().toString() + " collections, " + vm.liveObjects().toString() + " live objects, " + vm.danglingCaught().toString() + " dangling references caught")
     }
     return ok
-}
-
-fn bench(name: string, src: string) {
-    var heap: Heap = Heap.new()
-    let result = compile(src, heap)
-    if !result.ok {
-        for e in result.errors {
-            print(e)
-        }
-        return
-    }
-    var vm: VM = VM.new(heap, result.functions)
-    let t0 = now()
-    let ok = vm.run()
-    let d = since(t0)
-    if !ok {
-        print(vm.error())
-        return
-    }
-    print("  " + name + ": " + d.toMillis().toString() + "ms  (" + vm.stepCount().toString() + " instructions, " + vm.gcCount().toString() + " collections)")
 }
 
 // Every 64-bit pattern an attacker could produce, tagged to claim it is a heap
@@ -191,12 +143,80 @@ fn demoForge() {
     print("  the real object is untouched: " + stillThere.isSome().toString())
 }
 
+// A host program embedding milox. The rule is authored as text, so it can come
+// from a config file, a designer, or a database, and changing it needs no
+// recompile of the host. Everything crossing the boundary is a Value.
+let RULE_CAUTIOUS: string = "
+if (hp < 30) {
+  state = \"flee\";
+  speed = speed * 2;
+} else {
+  state = \"attack\";
+}
+log = [name, state, hp, speed];
+"
+
+let RULE_RECKLESS: string = "
+state = \"attack\";
+speed = speed * 3;
+log = [name, state, hp, speed];
+"
+
+let RULE_BROKEN: string = "
+var xs = [1, 2, 3];
+state = \"about to reach past the end\";
+print xs[9999];
+state = \"never runs\";
+"
+
+fn runRule(label: string, rule: string, hp: f64, speed: f64, name: string) {
+    var heap: Heap = Heap.new()
+    let r = compile(rule, heap)
+    if !r.ok {
+        for e in r.errors {
+            print("  " + e)
+        }
+        return
+    }
+    var vm: VM = VM.new(heap, r.functions)
+    // Host state in.
+    vm.defineGlobalString("name", name)
+    vm.defineGlobalNumber("hp", hp)
+    vm.defineGlobalNumber("speed", speed)
+    vm.defineGlobalString("state", "idle")
+    vm.defineGlobalNumber("log", 0.0)
+    let ok = vm.run()
+    print("  " + label)
+    if !ok {
+        print("    " + vm.error())
+    }
+    // Host state out — readable whether or not the script finished.
+    print("    state = " + vm.showGlobal("state"))
+    print("    speed = " + vm.showGlobal("speed"))
+    print("    log   = " + vm.showGlobal("log"))
+}
+
+fn demoEmbed() {
+    print("one host, three scripts, no recompile between them")
+    print("")
+    runRule("cautious rule, wounded (hp 12)", RULE_CAUTIOUS.clone(), 12.0, 3.0, "goblin")
+    print("")
+    runRule("cautious rule, healthy (hp 80)", RULE_CAUTIOUS.clone(), 80.0, 3.0, "goblin")
+    print("")
+    runRule("reckless rule, same host", RULE_RECKLESS.clone(), 80.0, 3.0, "ogre")
+    print("")
+    runRule("broken rule reaches past the end of a list", RULE_BROKEN.clone(), 80.0, 3.0, "imp")
+    print("")
+    print("the broken script stopped at the bad instruction and the host still")
+    print("read its state back. a script cannot express an address, so there is")
+    print("no bug it can write that reaches host memory.")
+}
+
 fn usage() {
     print("milox — a small language with an 8-byte nan-boxed value")
     print("")
     print("  milox <file.sl>        run a script")
     print("  milox demo             run the built-in demo program")
-    print("  milox bench            run the benchmarks")
     print("  milox gc-bug           free a reachable object on purpose, watch it get caught")
     print("  milox forge            forge 2M object references, watch none of them deref")
     print("")
@@ -235,6 +255,10 @@ fn main() {
         let _ = runSource(DEMO, disasm, stats, false)
         return
     }
+    if target == "embed" {
+        demoEmbed()
+        return
+    }
     if target == "forge" {
         demoForge()
         return
@@ -251,13 +275,6 @@ fn main() {
             print("the same bug in a C nan-boxed VM is a use-after-free that surfaces")
             print("somewhere else entirely, as corrupted data or a crash.")
         }
-        return
-    }
-    if target == "bench" {
-        print("milox benchmarks")
-        bench("fib(27)      ", BENCH_FIB)
-        bench("loop 2M      ", BENCH_LOOP)
-        bench("alloc 120k   ", BENCH_ALLOC)
         return
     }
     match readFile(target) {

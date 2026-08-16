@@ -46,6 +46,10 @@ pub struct VM {
     globals: Vec<Value>,
     globalDefined: Vec<bool>,
     globalNames: Vec<string>,
+    // Kept past link time so a host program can define and read globals by
+    // name. This is the whole embedding surface: the host hands values in, the
+    // script computes, the host reads values back.
+    globalIndex: HashMap<string, i64>,
     // [fnIndex][constIndex] -> global slot, or -1 when that constant is not a
     // string and therefore can never name a global.
     globalMap: Vec<Vec<i64>>,
@@ -70,6 +74,7 @@ impl VM {
             globals: Vec.new(),
             globalDefined: Vec.new(),
             globalNames: Vec.new(),
+            globalIndex: HashMap.new(),
             globalMap: Vec.new(),
             err: "",
             hadError: false,
@@ -83,7 +88,6 @@ impl VM {
     // Assign a global slot to every string constant, interning by name so the
     // same identifier in two different functions lands on one slot.
     fn link(self: &mut Self) {
-        var byName: HashMap<string, i64> = HashMap.new()
         var fi: i64 = 0
         while fi < self.functions.len {
             var perConst: Vec<i64> = Vec.new()
@@ -97,7 +101,7 @@ impl VM {
                 let idx = self.functions[fi].chunk.constantStrings[k]
                 let name = self.constString(fi, idx)
                 var slot: i64 = 0
-                match byName.get(name) {
+                match self.globalIndex.get(name) {
                     Some(s) => {
                         slot = s
                     }
@@ -106,7 +110,7 @@ impl VM {
                         self.globals.push(Value.nil())
                         self.globalDefined.push(false)
                         self.globalNames.push(name.clone())
-                        byName.insert(name.clone(), slot)
+                        self.globalIndex.insert(name.clone(), slot)
                     }
                 }
                 perConst[idx] = slot
@@ -114,6 +118,75 @@ impl VM {
             }
             self.globalMap.push(perConst)
             fi = fi + 1
+        }
+    }
+
+    // ── embedding ──
+    //
+    // A host program that embeds milox can seed globals before `run` and read
+    // them back after. Everything crossing this boundary is a Value: 8 bytes,
+    // and for heap values an index plus a generation. There is no address in
+    // it, so a script cannot hand the host a pointer and the host cannot hand
+    // the script one. That is the property a C scripting VM cannot offer.
+
+    fn globalSlot(self: &mut Self, name: string): i64 {
+        match self.globalIndex.get(name.clone()) {
+            Some(s) => {
+                return s
+            }
+            None => {
+                let slot = self.globals.len
+                self.globals.push(Value.nil())
+                self.globalDefined.push(false)
+                self.globalNames.push(name.clone())
+                self.globalIndex.insert(name.clone(), slot)
+                return slot
+            }
+        }
+    }
+
+    fn defineGlobal(self: &mut Self, name: string, v: Value) {
+        let slot = self.globalSlot(name)
+        self.globals[slot] = v
+        self.globalDefined[slot] = true
+    }
+
+    fn defineGlobalNumber(self: &mut Self, name: string, d: f64) {
+        self.defineGlobal(name, Value.num(d))
+    }
+
+    fn defineGlobalString(self: &mut Self, name: string, s: string) {
+        let v = self.heap.allocStr(s)
+        self.defineGlobal(name, v)
+    }
+
+    fn defineGlobalBool(self: &mut Self, name: string, b: bool) {
+        self.defineGlobal(name, Value.bool(b))
+    }
+
+    fn getGlobal(self: &Self, name: string): Option<Value> {
+        match self.globalIndex.get(name) {
+            Some(slot) => {
+                if !self.globalDefined[slot] {
+                    return Option.None
+                }
+                return Option.Some(self.globals[slot])
+            }
+            None => {
+                return Option.None
+            }
+        }
+    }
+
+    // The global rendered the way `print` would render it, or "<undefined>".
+    fn showGlobal(self: &Self, name: string): string {
+        match self.getGlobal(name) {
+            Some(v) => {
+                return self.format(v)
+            }
+            None => {
+                return "<undefined>"
+            }
         }
     }
 
@@ -277,6 +350,15 @@ impl VM {
         }
     }
 
+    // Nested strings are quoted so `[1, "two"]` is distinguishable from a list
+    // holding the identifier-looking string `two`. A bare `print s` is not.
+    fn formatInner(self: &Self, v: &Value): string {
+        if self.isString(v) {
+            return "\"" + self.stringOf(v) + "\""
+        }
+        return self.format(v)
+    }
+
     fn format(self: &Self, v: &Value): string {
         if v.isNum() {
             let d = v.asNum()
@@ -340,7 +422,7 @@ impl VM {
             if i > 0 {
                 s = s + ", "
             }
-            s = s + self.format(elems[i])
+            s = s + self.formatInner(elems[i])
             i = i + 1
         }
         return s + "]"

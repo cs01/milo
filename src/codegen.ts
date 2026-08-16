@@ -6291,8 +6291,24 @@ export class Codegen {
     lines.push(`  ${cmp} = icmp eq i32 ${tag}, 0`);
     lines.push(`  br i1 ${cmp}, label %${okLabel}, label %${errLabel}`);
 
-    // error branch — reconstruct caller's return type with the Err payload
+    // error branch — reconstruct caller's return type with the Err payload.
+    //
+    // This is a RETURN, so it owes the same scope drops a `return` statement emits. It
+    // did not emit them, and every owned local live at a `?` leaked on the error path —
+    // idiomatic Milo error handling, so the leak was everywhere. std/inflate's
+    // zlibDecompress lost its decompression buffer on every malformed input, which for a
+    // decompressor of untrusted bytes is an unbounded leak driven by a peer.
+    //
+    // It stayed invisible because a toy reproduction does NOT leak: with nothing
+    // observing the allocation, LLVM deletes it outright at -O2. It only shows when the
+    // buffer is actually used, which is why it surfaced from a real module and not from
+    // any of the small cases written to hunt it.
+    //
+    // emitGuardedDrop reads each local's alive flag, and a local consumed BY the `?`
+    // operand was already zeroed and marked dead by the move machinery, so returning its
+    // payload here cannot double-free.
     lines.push(`${errLabel}:`);
+    this.emitDropGlue(lines);
     const retEnumName = expr.retType.tag === "enum" ? expr.retType.name : expr.enumName;
     if (retEnumName === expr.enumName && !expr.fromConversion) {
       // same enum type — return as-is. When the enclosing fn is sret-lowered

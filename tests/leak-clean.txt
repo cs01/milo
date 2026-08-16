@@ -1,6 +1,7 @@
 # Fixtures that exit with no leaked heap. Regenerate: bun scripts/leak-check.ts --write
 # Gate: bun scripts/leak-check.ts --check
 addressOf
+aesGcmLengthGuards
 aliasBehindRef
 aliasResultFromConversion
 arena_clear
@@ -72,6 +73,7 @@ closureMutCapture
 closureNoCapture
 closureNonRetainingArg
 closureStoredMove
+closureWrapperMethodForward
 coalesceHeapPayload
 coalesceUnboundTempDrop
 commandBuilder
@@ -254,6 +256,7 @@ importNamedMulti
 importString
 importTransitive
 indexCloneNoLeak
+inflateCorruptInput
 inflateGzip
 intConstCoerce
 interfaceBasic
@@ -293,6 +296,7 @@ keysDecode
 lenMethod
 letElse
 letInWhile
+lintBorrowThatClones
 logicalOps
 loopBreakDrop
 loopInvariant
@@ -313,6 +317,7 @@ matchTempBindMutate
 mime
 module_globals
 moduleWrapping
+moveClosureType
 moveFieldThenReassign
 moveIfElse
 moveVarIntoEnumReturn
@@ -341,6 +346,7 @@ pbkdf2Vectors
 png_roundtrip
 pngDecode
 poolAlloc
+poolBlockSizeGuard
 preludeStringMethods
 printContainers
 printFormat
@@ -502,6 +508,7 @@ unicodeStringLiteral
 unsigned
 unwrap_temp_no_leak
 unwrapOption
+urlParse
 variables
 vec_infer_from_push
 vec_swap

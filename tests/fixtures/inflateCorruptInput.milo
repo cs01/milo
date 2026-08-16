@@ -1,0 +1,63 @@
+// @expect: compressed=244
+// @expect: all-outcomes-handled=true
+// @expect: survived
+
+// std/inflate decodes bytes a program did not write — an upload, a response body, a file.
+// Corrupt input must come back as `Err`, never a trap and never a read past a buffer. The
+// module's twelve `requires` clauses are internal invariants and are dropped at -O2, so
+// the property being pinned here is that the code VALIDATES before relying on them rather
+// than leaning on the contracts (which is what std/pool and std/crypto were doing wrong).
+//
+// Mutating a VALID stream rather than feeding random bytes: 3000 random payloads behind a
+// zlib header all failed at the header and never reached Huffman decoding at all. A
+// single flipped byte in a real stream gets deep, and about 1% still decode.
+from "std/inflate" import {
+    Inflate
+}
+from "std/deflate" import {
+    Deflate
+}
+from "std/rng" import {
+    Rng
+}
+
+pub fn main(): i32 {
+    var src = ""
+    var k = 0
+    while k < 400 {
+        src.pushStr("the quick brown fox jumps over the lazy dog 0123456789 ")
+        k = k + 1
+    }
+    let comp = Deflate.zlib(src)
+    print("compressed=" + comp.len.toString())
+
+    var r = Rng.new(987654)
+    var handled = 0
+    var i = 0
+    while i < 300 {
+        let pos = r.int(comp.len)
+        let newByte = (r.int(256)) as u8
+        var m = ""
+        var j = 0
+        while j < comp.len {
+            if j == pos {
+                m.push(newByte)
+            } else {
+                m.push(comp[j])
+            }
+            j = j + 1
+        }
+        match Inflate.zlib(m) {
+            Result.Ok(v) => {
+                handled = handled + 1
+            }
+            Result.Err(e) => {
+                handled = handled + 1
+            }
+        }
+        i = i + 1
+    }
+    print("all-outcomes-handled=" + (handled == 300).toString())
+    print("survived")
+    return 0
+}

@@ -1,10 +1,11 @@
-// NaN-boxing in one file: two types, 8 bytes each, no interpreter.
+// NaN-boxing: numbers and strings sharing one 8-byte slot.
 //
-// A 64-bit float has 2^52 bit patterns that all mean NaN. Exactly one of them
-// is ever produced by arithmetic, so the rest are free real estate. Store a
-// number as itself, and hide everything else in a NaN payload.
+// A 64-bit float has 2^52 bit patterns that all mean NaN, and arithmetic only
+// ever produces one of them. The rest are free real estate. So: store a number
+// as itself, and hide anything that is not a number inside a NaN payload.
 //
-// The alternative is an enum:
+// What that buys is an array of mixed values where each element is 8 bytes and
+// still knows what it is. The alternative is an enum:
 //
 //     enum Value { Num(f64), Str(Handle<string>) }
 //
@@ -12,9 +13,10 @@
 // overlap the widest payload. Nan-boxing folds the tag into bits the payload
 // was never using, so it is 8.
 //
-// The part that is not like the C version: C packs a raw pointer into the
-// payload, so a stale box is a use-after-free. This packs a generational arena
-// handle, so a stale box is a caught None.
+// One thing here is not like the C version of this trick. C packs a raw pointer
+// into the payload, so a stale box is a use-after-free. This packs a
+// generational arena handle, so a stale box is a caught None. See the last two
+// sections of main.
 //
 // @run:
 from "std/binary" import {
@@ -28,12 +30,8 @@ from "std/arena" import {
 // 0x7ff8_0000_0000_0000, which leaves bit 50 clear, so real NaN and both
 // infinities survive as numbers. Only this one encoding is spent.
 let QNAN: u64 = 0x7ffc000000000000
-// Sign bit on top of that marks a string.
+// The sign bit on top of that marks a string.
 let SIGN: u64 = 0x8000000000000000
-
-// 50 payload bits: 24 of slot index, 26 of generation.
-let MAX_INDEX: i64 = 16777215
-let MAX_GENERATION: i64 = 67108863
 
 pub struct Value {
     bits: u64,
@@ -46,14 +44,15 @@ impl Value {
         }
     }
 
-    // Aborts rather than truncating. A generation masked down to fit would let
-    // a recycled slot alias an old handle back into validity, which is the one
+    // 50 payload bits: 24 of slot index, 26 of generation. Both limits are
+    // asserted rather than masked — a generation truncated to fit would let a
+    // recycled slot alias an old handle back into validity, which is the one
     // thing the generation counter exists to prevent.
     fn str(h: Handle<string>): Value {
         let idx = h.index as i64
         let gen = h.generation as i64
-        assert(idx >= 0 && idx <= MAX_INDEX, "nanbox: index exceeds 24-bit payload")
-        assert(gen >= 0 && gen <= MAX_GENERATION, "nanbox: generation exceeds 26-bit payload")
+        assert(idx >= 0 && idx <= 16777215, "nanbox: index exceeds 24-bit payload")
+        assert(gen >= 0 && gen <= 67108863, "nanbox: generation exceeds 26-bit payload")
         return Value {
             bits: SIGN | QNAN | ((gen as u64) << 24) | (idx as u64)
         }
@@ -61,9 +60,6 @@ impl Value {
 
     fn isNum(self: &Self): bool {
         return (self.bits & QNAN) != QNAN
-    }
-    fn isStr(self: &Self): bool {
-        return (self.bits & (QNAN | SIGN)) == (QNAN | SIGN)
     }
     fn asNum(self: &Self): f64 {
         return Bytes.f64FromBits(self.bits)
@@ -73,9 +69,6 @@ impl Value {
     }
     fn generation(self: &Self): i32 {
         return ((self.bits >> 24) & 0x3ffffff) as i32
-    }
-    fn raw(self: &Self): u64 {
-        return self.bits
     }
 }
 
@@ -98,8 +91,11 @@ impl Heap {
     }
 
     fn alloc(self: &mut Self, s: string): Value {
-        let h = self.strings.alloc(s)
-        return Value.str(h)
+        return Value.str(self.strings.alloc(s))
+    }
+
+    fn free(self: &mut Self, v: &Value): bool {
+        return self.strings.free(self.handleOf(v))
     }
 
     fn handleOf(self: &Self, v: &Value): Handle<string> {
@@ -110,23 +106,20 @@ impl Heap {
         }
     }
 
-    fn free(self: &mut Self, v: &Value): bool {
-        return self.strings.free(self.handleOf(v))
-    }
-
-    // The only way to reach a string's contents, and it is checked four ways:
-    // arena id, index sign, index bounds, and slot generation. None of those
-    // can be skipped, which is what makes "every dereference is checked" a
-    // property of the type rather than a convention.
+    // Ask a value what it is and render it. This is the whole "it knows how to
+    // print itself": one mask test, then either a bitcast or a checked arena
+    // lookup. Reaching a string's contents is checked four ways — arena id,
+    // index sign, index bounds, slot generation — and there is no other route
+    // to them, which is what makes "every dereference is checked" a property of
+    // the type rather than a convention.
     fn show(self: &Self, v: &Value): string {
         if v.isNum() {
             return v.asNum().toString()
         }
-        let got = arenaWith(self.strings, self.handleOf(v), (s: &string): string => {
+        match arenaWith(self.strings, self.handleOf(v), (s: &string): string => {
             return s.clone()
         }
-        )
-        match got {
+        ) {
             Some(s) => {
                 return s
             }
@@ -140,22 +133,21 @@ impl Heap {
 fn main() {
     var heap: Heap = Heap.new()
 
-    // ── two types, one 8-byte slot ──
-    var stack: Vec<Value> = Vec.new()
-    stack.push(Value.num(3.14))
-    stack.push(heap.alloc("hello"))
-    stack.push(Value.num(42.0))
-    stack.push(heap.alloc("world"))
-    for v in stack {
-        print(heap.show(v))
+    // ── an array of mixed values, 8 bytes each ──
+    var arr: Vec<Value> = Vec.new()
+    arr.push(Value.num(4.0))
+    arr.push(heap.alloc("boo"))
+    arr.push(Value.num(3.5))
+    arr.push(heap.alloc("and a string"))
+    var line = ""
+    for v in arr {
+        line = line + heap.show(v) + "  "
     }
+    print(line)
 
     // ── real NaN and infinity are still numbers, not tags ──
     var zero: f64 = 0.0
-    let nan = zero / zero
-    let inf = 1.0 / zero
-    print("NaN reads as a number: " + Value.num(nan).isNum().toString())
-    print("inf reads as a number: " + Value.num(inf).isNum().toString())
+    print("NaN is a number: " + Value.num(zero / zero).isNum().toString() + ", inf is a number: " + Value.num(1.0 / zero).isNum().toString())
 
     // ── a freed string is caught, not dereferenced ──
     let doomed = heap.alloc("about to be freed")
@@ -165,13 +157,12 @@ fn main() {
 
     // ── no 64-bit pattern reaches memory ──
     // In C the payload is an address, so a forged box is an arbitrary read.
-    // Bun shipped exactly that bug in `bun:ffi` (upstream 179978a6f9): a C
-    // function returning a double could hand JavaScript a forged pointer.
+    // Bun shipped exactly that in `bun:ffi` (upstream 179978a6f9): a C function
+    // returning a double could hand JavaScript a forged pointer.
     var st: u64 = 0x9e3779b97f4a7c15
     var i: i64 = 0
     var reached: i64 = 0
-    let N: i64 = 1000000
-    while i < N {
+    while i < 1000000 {
         st = st ^ (st << 13)
         st = st ^ (st >> 7)
         st = st ^ (st << 17)
@@ -183,5 +174,5 @@ fn main() {
         }
         i = i + 1
     }
-    print("forged " + N.toString() + " string references, dereferenced " + reached.toString())
+    print("forged 1000000 string references, dereferenced " + reached.toString())
 }

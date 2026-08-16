@@ -11588,6 +11588,12 @@ export class Codegen {
       case "VecGetOpt":
       case "VecMinMax":
       case "VecPop":
+      // `remove` moves the element out of the buffer exactly as `pop` does, and was the
+      // sibling this list forgot: `v.remove(0)` as a statement dropped NOTHING, so the
+      // element's destructor never ran and its heap went with it. Discarding a `pop` was
+      // already correct, which is what made the gap invisible — the two spellings of
+      // "take an element out and ignore it" disagreed.
+      case "VecRemove":
       case "VecFind":
       // HashMap.get clones the value out of the table for the same reason. Its
       // sibling getOrDefault is deliberately NOT here: on a miss it hands back the

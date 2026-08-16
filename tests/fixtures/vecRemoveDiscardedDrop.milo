@@ -1,0 +1,35 @@
+// `v.remove(i)` moves the element out of the buffer and hands it back. Discarding that
+// value has to destroy it — but `VecRemove` was missing from codegen's owned-temp list
+// while its sibling `VecPop` was present, so `v.remove(0)` as a statement dropped
+// NOTHING: the element's destructor never ran and its heap went with it.
+//
+// The two spellings of "take an element out and ignore it" disagreed, which is what kept
+// it invisible. Found by counting destructor runs (tests/dropCounting.test.ts) rather
+// than by checking whether the program was accepted.
+struct Res {
+    id: i64,
+}
+
+impl Drop for Res {
+    fn drop(self: &mut Self): void {
+        print("drop ", self.id)
+    }
+}
+
+fn main() {
+    var v: Vec<Res> = Vec.new()
+    v.push(Res {
+        id: 1
+    }
+    )
+    v.push(Res {
+        id: 2
+    }
+    )
+    v.remove(0)
+    print("removed")
+}
+
+// @expect: drop 1
+// @expect: removed
+// @expect: drop 2

@@ -64,6 +64,15 @@ Push to main is allowed org-wide. Note `milo` itself sits at `~/git/milo`, *outs
 `~/git/milo-language/` — it predates the layout and has live worktrees under
 `.claude/worktrees/`, so moving it would break them.
 
+**After a compiler change to codegen, closures, the scheduler or `std/runtime`, run
+milojs's app check** — `tools/check-apps.sh` in `~/git/milo-language/milojs` (one arg
+runs a single app). It boots real applications (an express + Prisma + tRPC server, and an
+express + ws chat) under node and under milojs and diffs the served bytes. Three defects
+have reached it that BOTH repos' fixture suites missed, which is the point: this repo's
+874 fixtures exercise a few dozen concurrency shapes, and a closure or scheduler change
+touches every capturing closure in every program. A missing app checkout skips rather
+than fails, so it is safe to run anywhere.
+
 Three traps in the paths above:
 
 - The emulators and the debugger were deleted from `examples/` once they got their own repos —

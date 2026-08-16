@@ -28,8 +28,8 @@ A handle to a spawned green task. `join` blocks the caller until it finishes.
 ## Spawning
 
 ```milo
-fn Task.spawn(f: () => void): Task
-fn Task.spawnWithStack(f: () => void, stackBytes: i64): Task
+fn Task.spawn(f: move () => void): Task
+fn Task.spawnWithStack(f: move () => void, stackBytes: i64): Task
 fn Task.join(self: &Task): void
 ```
 

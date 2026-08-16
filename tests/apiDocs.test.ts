@@ -14,7 +14,7 @@ test("--markdown emits a signature code block + doc for a documented API", () =>
   expect(md).toContain("## std/runtime");
   expect(md).toContain("### `Task.spawn`");
   expect(md).toContain("```milo");
-  expect(md).toContain("fn Task.spawn(f: () => void): Task");
+  expect(md).toContain("fn Task.spawn(f: move () => void): Task");
   // full doc-comment body, not just the first line
   expect(md).toContain("guard-paged stack");
 });

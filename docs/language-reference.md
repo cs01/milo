@@ -2093,8 +2093,17 @@ fn bare(): void {
     print("hi")
 }
 
-run(bare)                       // a function value
-run((): void => print("hi"))    // a by-reference closure
+fn run(f: move () => void): void {
+    f()
+}
+
+fn demo(): void {
+    run(bare)                       // a function value
+    run((): void => {               // a by-reference closure
+        print("hi")
+    }
+    )
+}
 ```
 
 A closure **literal** passed to a function that takes an owned `Fn` parameter has `move` inferred — no keyword needed — because a literal has no other user. That inference is the only place it happens, and it declines when a capture is a `var`, since move-capturing would drop the write-back to the original.

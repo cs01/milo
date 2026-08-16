@@ -3912,6 +3912,7 @@ export class TypeChecker {
   private peekPathType(e: Expr): TypeKind | null {
     // A literal's bytes are a module constant, so views of it outlive any loop
     if (e.kind === "StringLit") return { tag: "string" };
+    // ident-ok: asks what type a NAME has, and is the base case of a walk that handles the other steps itself
     if (e.kind === "Ident") return this.lookup(e.name)?.type ?? this._globalTypes.get(e.name) ?? null;
     if (e.kind === "FieldAccess") {
       let base = this.peekPathType(e.object);
@@ -3949,10 +3950,7 @@ export class TypeChecker {
     }
     // Same freeze a slice takes: every piece points into the receiver's buffer, so it must
     // not be mutated, moved or reallocated for the whole loop.
-    let root: Expr = call.object;
-    while (root.kind === "FieldAccess" || root.kind === "IndexAccess") root = root.object;
-    const rootInfo = root.kind === "Ident" ? this.lookup(root.name) : null;
-    if (rootInfo) this.freeze(rootInfo, call.object);
+    const rootInfo = this.freezeRootOf(call.object);
     this.borrowedExprs.add(call.object);
     this.stringViewForIns.set(stmt, { mode });
 
@@ -4232,6 +4230,7 @@ export class TypeChecker {
           // A pattern binding has no declaration to change, so the generic advice would
           // send the reader looking for a `let` that does not exist. Rebuilding the
           // variant is the move that works, and it costs no clone.
+          // ident-ok: asks whether the assigned NAME is a pattern binding, to choose a hint; a place has no binding kind
           const tgtInfo = stmt.target.kind === "Ident" ? this.lookup(stmt.target.name) : null;
           this.error(`cannot assign to immutable variable '${this.describeExpr(stmt.target)}'`, sp,
             tgtInfo?.patternBound
@@ -4241,6 +4240,7 @@ export class TypeChecker {
         }
         // Assignment puts a value back, so whatever was moved out of this place is
         // live again. An Ident target replaces the whole variable and clears all of it.
+        // ident-ok: an Ident target replaces the WHOLE variable; the field case is the else branch, via staticFieldPath
         if (stmt.target.kind === "Ident") {
           const whole = this.lookup(stmt.target.name);
           if (whole) this.clearMovedPlace(whole, null);
@@ -4299,6 +4299,7 @@ export class TypeChecker {
         }
         for (const scope of this.scopes) for (const [, vi] of scope) if (vi.borrowed && !frozenBeforeRhs.has(vi)) this.unfreeze(vi);
         if (targetInfo.type.tag === "int") this.enforceRangeInto(stmt.value, valType, targetInfo.type, sp);
+        // ident-ok: assigning a whole variable revives it, and a field assignment deliberately must not revive the whole
         if (stmt.target.kind === "Ident") {
           const info = this.lookup(stmt.target.name);
           if (info) info.moved = false;
@@ -4556,11 +4557,15 @@ export class TypeChecker {
                 this.error(`iterator 'next' method must return Option<T>, got ${typeName(retType)}`, sp);
               } else {
                 // require iterable to be mutable (next takes &mut Self)
-                if (stmt.iterable.kind === "Ident") {
-                  const info = this.lookup(stmt.iterable.name);
-                  if (info && !info.mutable) {
-                    this.error(`cannot iterate: '${stmt.iterable.name}' must be 'var' (iterator mutates via next())`, sp);
-                  }
+                // Asks the PLACE whether its root is mutable, so an iterator held in a
+                // field or reached any other way is checked too. Keyed to a bare `Ident`,
+                // this rule simply did not run for `for x in self.cursor`.
+                // Only a NAMED root can be immutable. An rvalue iterable (`for x in
+                // makeChannel()`) has no root at all: it is materialized into a temp, and
+                // a temp is mutable, so demanding `var` of it rejects a legal program.
+                const iterRoot = this.accessPath(stmt.iterable);
+                if (iterRoot && !this.isRootMutable(stmt.iterable)) {
+                  this.error(`cannot iterate: '${this.describeExpr(stmt.iterable)}' must be 'var' (iterator mutates via next())`, sp);
                 }
                 if (stmt.varName2) {
                   this.error("iterator for loop takes one binding, not two", sp);
@@ -4654,6 +4659,7 @@ export class TypeChecker {
           let patternMovedInfo: { moved: boolean } | null = null;
           if (!subjBorrows && this.armConsumesSubject(stmt.pattern, enumInfo)) {
             this.tryMove(stmt.subject);
+            // ident-ok: tracks a NAMED binding so the then-body can read it again; a field subject has no binding to un-mark
             if (stmt.subject.kind === "Ident") {
               const info = this.lookup(stmt.subject.name);
               if (info) { patternMovedInfo = info; this.movedByPattern.add(info); }
@@ -5197,6 +5203,7 @@ export class TypeChecker {
   }
 
   private tryMoveLeaf(expr: Expr) {
+    // ident-ok: asks whether the BINDING was declared `&T`, which is a property of the declaration, not of storage
     if (expr.kind === "Ident") {
       const info = this.lookup(expr.name);
       // Moving in an owned position through a borrow (`&T`, T non-Copy) would
@@ -5259,6 +5266,7 @@ export class TypeChecker {
       const elemType = this.exprTypes.get(expr);
       if (elemType && !isCopy(elemType, (n) => this.isAllCopyEnum(n), (n) => this.isAllCopyStruct(n))) {
         let objectIsRef = false;
+        // ident-ok: asks whether the receiver BINDING was declared `&T`, same reason as tryMoveLeaf above
         if (expr.object.kind === "Ident") {
           const info = this.lookup(expr.object.name);
           if (info && info.type.tag === "ref") objectIsRef = true;
@@ -5354,17 +5362,18 @@ export class TypeChecker {
   // takes the old value out of a place (`replace`), which the plain assignment path does
   // not count as a use.
   private markPlaceRead(expr: Expr) {
-    let e: Expr = expr;
-    for (;;) {
-      if (e.kind === "Ident") { const i = this.lookup(e.name); if (i) i.read = true; return; }
-      if (e.kind === "FieldAccess") { e = e.object; continue; }
-      if (e.kind === "IndexAccess") { e = e.object; continue; }
-      return;
-    }
+    // Root resolved through the place walker rather than by stepping over the two node
+    // kinds this loop used to know. Reading `o!.field` marks `o` read; the old walk saw an
+    // Unwrap, gave up, and left the binding looking unused.
+    const ap = this.accessPath(expr);
+    if (!ap) return;
+    const info = this.lookup(ap.root);
+    if (info) info.read = true;
   }
 
   private resolveAssignTarget(expr: Expr): { type: TypeKind; mutable: boolean } {
     const sp = expr.span;
+    // ident-ok: the Ident base case of a walk that recurses through FieldAccess/IndexAccess itself
     if (expr.kind === "Ident") {
       const info = this.lookup(expr.name);
       if (!info) this.fatal(`undefined variable '${expr.name}'`, sp, this.nameHint(expr.name));
@@ -5763,11 +5772,30 @@ export class TypeChecker {
   // of escaping it. The recorded path is what keeps this from over-rejecting — mutating
   // a different field of the same struct does not collide with the borrow.
   private freezeIterable(iterable: Expr): import("./checker").VarInfo | null {
-    const place = this.accessPath(iterable);
-    if (!place) return null;
-    const info = this.lookup(place.root);
+    return this.freezeRootOf(iterable, "iteration");
+  }
+
+  // Freeze the root of any borrowed place, resolved through the place walker.
+  //
+  // This replaces three hand-rolled copies of the same loop — `while (root.kind ===
+  // "FieldAccess" || root.kind === "IndexAccess") root = root.object` then match `Ident`
+  // — which lived in the string-view for-in, the slice-view expression and the
+  // string-view expression. Each knew exactly two ways to step toward a root, so a place
+  // spelled any other way (an unwrap, a cast, the tail of a fork) resolved to no root and
+  // was silently not frozen. That is the same shape as the for-in freeze that was keyed
+  // to a bare `Ident` and turned out to be a use-after-free; these three had two steps
+  // instead of one, which makes them narrower holes rather than different ones.
+  //
+  // `accessPath` goes through `soloPath`/`placesOf`, which is total over the expression
+  // grammar and fails closed, so a new `Expr` kind inherits this rule instead of escaping
+  // it. Returns null when the place has no single named root, which is the honest answer
+  // and leaves the caller no worse off than the hand-rolled walk did.
+  private freezeRootOf(place: Expr, kind: BorrowKind = "view"): import("./checker").VarInfo | null {
+    const ap = this.accessPath(place);
+    if (!ap) return null;
+    const info = this.lookup(ap.root);
     if (!info) return null;
-    this.freeze(info, iterable, "iteration");
+    this.freeze(info, place, kind);
     return info;
   }
 
@@ -5895,6 +5923,7 @@ export class TypeChecker {
 
   private isRootMutable(expr: Expr): boolean {
     this.markCaptureMutated(expr);
+    // ident-ok: the Ident base case of isRootMutable, which IS the mutability walk over places
     if (expr.kind === "Ident") {
       const info = this.lookup(expr.name);
       return info?.mutable ?? false;
@@ -8034,12 +8063,7 @@ export class TypeChecker {
       if (startType.tag !== "int" && startType.tag !== "unknown") this.error(`slice start: expected integer, got ${typeName(startType)}`, sp);
       if (endType.tag !== "int" && endType.tag !== "unknown") this.error(`slice end: expected integer, got ${typeName(endType)}`, sp);
       // freeze the source — mutation could realloc/free the memory this view points into
-      let root: Expr = expr.object;
-      while (root.kind === "FieldAccess" || root.kind === "IndexAccess") root = root.object;
-      if (root.kind === "Ident") {
-        const info = this.lookup(root.name);
-        if (info) this.freeze(info, expr.object);
-      }
+      this.freezeRootOf(expr.object);
       this.borrowedExprs.add(expr);
       return this.setType(expr, refSlice);
     }
@@ -8590,12 +8614,7 @@ export class TypeChecker {
         // mark source as borrowed — prevents mutation/move while slice is live.
         // Walk to the root variable: `buf.data[a..b]` views storage owned by `buf`,
         // so replacing any part of `buf` can free what this points into.
-        let strRoot: Expr = expr.object;
-        while (strRoot.kind === "FieldAccess" || strRoot.kind === "IndexAccess") strRoot = strRoot.object;
-        if (strRoot.kind === "Ident") {
-          const info = this.lookup(strRoot.name);
-          if (info) this.freeze(info, expr.object);
-        }
+        this.freezeRootOf(expr.object);
         this.borrowedExprs.add(expr);
         return this.setType(expr, refStr);
       }
@@ -8968,6 +8987,7 @@ export class TypeChecker {
   private enumSubjectBorrow(subject: Expr, rawSubjType: TypeKind): { subjType: TypeKind; subjBorrows: boolean } {
     let subjIsRef = rawSubjType.tag === "ref" && rawSubjType.inner.tag === "enum";
     let subjType: TypeKind = subjIsRef && rawSubjType.tag === "ref" ? rawSubjType.inner : rawSubjType;
+    // ident-ok: asks whether the subject BINDING was declared `&E`, a property of the declaration
     if (!subjIsRef && subject.kind === "Ident") {
       const info = this.lookup(subject.name);
       if (info && info.type.tag === "ref" && info.type.inner.tag === "enum") { subjIsRef = true; subjType = info.type.inner; }
@@ -9086,6 +9106,7 @@ export class TypeChecker {
     // Reading a ref Ident auto-derefs, so also consult its declared type.
     let subjIsRef = rawSubjType.tag === "ref" && rawSubjType.inner.tag === "enum";
     let subjType = subjIsRef && rawSubjType.tag === "ref" ? rawSubjType.inner : rawSubjType;
+    // ident-ok: asks whether the subject BINDING was declared `&E`, a property of the declaration
     if (!subjIsRef && subject.kind === "Ident") {
       const info = this.lookup(subject.name);
       if (info && info.type.tag === "ref" && info.type.inner.tag === "enum") {
@@ -9243,6 +9264,7 @@ export class TypeChecker {
         let patternMovedInfo: object | null = null;
         if (armConsumes) {
           this.tryMove(subject);
+          // ident-ok: tracks a NAMED binding so the arm body can read it again, like the if-let case above
           if (subject.kind === "Ident") {
             const info = this.lookup(subject.name);
             if (info) { patternMovedInfo = info; this.movedByPattern.add(info); }

@@ -110,7 +110,31 @@ Removes four ad-hoc `kind === "Ident"` blocks.
 (mutating a *different* field of the same struct) still compiles, and fixtures lock both
 directions.
 
-### Phase 2 — route the remaining rules through `placesOf`
+### Phase 2 — route the remaining rules through `placesOf` — **DONE 2026-08-16**
+
+Five rules converted. Three of them (`checkStringViewForIn`, the slice-view expression and
+the string-view expression) each carried their own copy of
+
+    let root = e.object;
+    while (root.kind === "FieldAccess" || root.kind === "IndexAccess") root = root.object;
+    if (root.kind === "Ident") { … }
+
+which is the for-in bug one step deeper: two known ways to reach a root instead of one, so
+a place spelled any other way resolved to nothing and the freeze did not happen. All three
+now call `freezeRootOf`, which resolves through `accessPath`/`placesOf`. `markPlaceRead`
+carried a fourth copy and is converted too, so reading `o!.field` now marks `o` read
+instead of leaving the binding looking unused. The iterator-mutability check asked the
+SPELLING (`iterable.kind === "Ident"`) and so never ran for `for x in self.cursor`; it now
+asks the place. One subtlety that fixture `forInRvalueIterator` caught immediately: only a
+NAMED root can be immutable, because an rvalue iterable is materialized into a temp and a
+temp is mutable, so the check applies only when `accessPath` finds a root.
+
+The 12 sites that remain are genuinely about a NAME rather than about storage — the base
+case of a recursive walk, or a question about how a binding was DECLARED (`is this
+parameter a &T?`). Each now carries its reason inline, enforced by Phase 3.
+
+#### Original scope
+
 
 Inventory every rule that answers "what storage does this expression reach" and convert
 it. The ad-hoc walkers to eliminate or reduce to thin wrappers: `accessPath`,
@@ -127,7 +151,19 @@ Two known traps, both learned by breaking them:
    `checkCallSiteExclusivity`'s job because it compares access paths and knows
    `v[0..2]`/`v[2..4]` do not overlap, which the freeze check cannot see.
 
-### Phase 3 — make bypass detectable
+### Phase 3 — make bypass detectable — **DONE 2026-08-16**
+
+`tests/placeRuleCoverage.test.ts` fails on any *new* site that decides which variable an
+expression names by matching `Ident` and then calling `lookup`, unless the reason is
+written at the site as `ident-ok: <why>`. Verified non-vacuous by deleting one marker and
+watching it fail with the right line. The census went 17 sites -> 12 explained, and a
+thirteenth cannot be added silently.
+
+This is the property that was missing: `placesOf` being total did nothing for a rule that
+never called it, and now not calling it is the thing that has to be justified.
+
+#### Original scope
+
 
 A total walker does not help if a new rule simply does not call it. Add a gate that fails
 when an aliasing-relevant rule reaches for a node kind instead of a place. Cheapest honest

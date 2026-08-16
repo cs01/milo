@@ -1,3 +1,5 @@
+// CLI driver: subcommand dispatch for build/run/emit-*/test/fmt/lsp and the rest of
+// the surface described in src/cli-help.ts.
 import { readFileSync, writeFileSync, unlinkSync, existsSync, readdirSync, mkdirSync, statSync } from "fs";
 import { execSync, spawnSync, spawn } from "child_process";
 import { guardedRun, monitorPidTree, DEFAULT_MEM_MB } from "../scripts/guard";

@@ -1,3 +1,5 @@
+// HIR -> LLVM IR emission, including drop glue, monomorphization and the per-target
+// calling conventions. IR uses opaque `ptr` (LLVM 15+), never `i8*`.
 import type { HIRModule, HIRFunction, HIRStmt, HIRExpr, HIRArg, HIRPattern, HIRContract, HIRStruct } from "./hir";
 import { type TypeKind, needsDrop, typeName } from "./types";
 import type { TargetInfo } from "./target";

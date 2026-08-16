@@ -1,3 +1,5 @@
+// Elm-style error formatting: source context, carets and severity, shared by the CLI
+// and the LSP so a message reads the same in a terminal and an editor.
 import type { Span } from "./ast";
 
 export type Severity = "error" | "warning" | "hint";

@@ -1,3 +1,4 @@
+// Internal type representations: the TypeKind tagged union every later stage speaks.
 export type TypeKind =
   | { tag: "int"; bits: number; signed: boolean; min?: number; max?: number }
   | { tag: "float"; bits: number }

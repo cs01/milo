@@ -1,3 +1,6 @@
+// Type checking, move checking and scope validation over the merged AST, producing
+// the CheckResult that lowering reads. Semantic errors are caught HERE, before codegen:
+// if codegen can reach an invalid state, this file missed it.
 import type { Program, Function, Stmt, Expr, MiloType, StructDecl, Pattern, Span, TraitDecl, MatchArm, Attribute, GlobalDecl } from "./ast";
 import { simpleType, declaredType, floatNamespaceConst } from "./ast";
 import type { TypeKind } from "./types";
@@ -449,6 +452,11 @@ export class TypeChecker {
     // that work fine), so warning by default would nag every graphics program. The
     // always-on hover note already surfaces the size; projects opt into the hard lint.
     if (!config.denied.has("large-stack-array")) config.allowed.add("large-stack-array");
+    // index-clone is OFF unless asked for, pending the count below. Binding an element
+    // out of a container is a normal thing to write and the clone is what keeps the
+    // container intact, so most hits are working code paying a cost the author may well
+    // accept. `--deny=index-clone` turns it into the audit it is meant to be.
+    if (!config.denied.has("index-clone")) config.allowed.add("index-clone");
     // unused-unsafe is on by default but fires only in user code (see currentFnIsUser):
     // the permissive safe-extern rule makes most stdlib unsafe blocks technically
     // removable, so warning on imported std would flood every compile.
@@ -647,6 +655,28 @@ export class TypeChecker {
       `'${name}' is a ${human} stack allocation`,
       span,
       `large local arrays can overflow the stack; use Vec<${elemName}> for a heap buffer`,
+    );
+  }
+
+  // `let m = v[i]` on a non-Copy element is a deep copy: indexing clones so the
+  // container stays intact (the field spelling `b.v` is a hard error instead — see the
+  // aliasing matrix). The cost is invisible at the use site, because the SAME syntax is
+  // free or a malloc depending on a field of the element type you cannot see there:
+  // `Vec<i64>` costs nothing, `Vec<Mark>` costs an allocation per heap field, per row,
+  // per iteration. `for m in v` binds by reference and clones nothing, so the cheap
+  // spelling already exists — it is just undiscoverable at the moment it matters.
+  private lintIndexClone(value: Expr, ty: TypeKind, span?: Span) {
+    if (this.warningConfig.allowed.has("index-clone")) return;
+    if (value.kind !== "IndexAccess") return;
+    // Copy elements are a register move, not an allocation — nothing to warn about.
+    if (isCopy(ty, (n) => this.isAllCopyEnum(n), (n) => this.isAllCopyStruct(n))) return;
+    // A ref binding (`let r: &T = ...`) borrows rather than clones.
+    if (ty.tag === "ref") return;
+    this.warn(
+      "index-clone",
+      `this binding deep-copies the ${typeName(ty)} out of the container`,
+      span,
+      `indexing clones so the container stays intact; 'for x in <container>' binds by reference and copies nothing, and a field read ('v[i].n') materialises no element`,
     );
   }
 
@@ -3989,6 +4019,7 @@ export class TypeChecker {
           }
         }
         if (bindingType.tag === "array") this.lintStackArray(stmt.name, bindingType, sp);
+        this.lintIndexClone(stmt.value, bindingType, sp);
         this.tryMove(stmt.value);
         break;
       }
@@ -4032,6 +4063,7 @@ export class TypeChecker {
           if (bindingType.tag !== "ref") for (const vi of newlyFrozen) this.unfreeze(vi);
           this.declare(stmt.name, { type: bindingType, mutable: true, moved: false, borrowed: false, read: false, span: sp, ...(bindingType.tag === "ref" && newlyFrozen.length > 0 && { freezes: newlyFrozen }) });
           if (bindingType.tag === "array") this.lintStackArray(stmt.name, bindingType, sp);
+          this.lintIndexClone(stmt.value, bindingType, sp);
         }
         this.tryMove(stmt.value);
         break;

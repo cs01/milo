@@ -1,3 +1,4 @@
+// Recursive-descent parser: token stream -> AST.
 import type { Token } from "./tokens";
 import { TokenKind } from "./tokens";
 import { Lexer, FSTRING_LBRACE, FSTRING_RBRACE } from "./lexer";

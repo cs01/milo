@@ -1,3 +1,4 @@
+// AST node types: what the parser produces and the checker walks.
 export interface Span { line: number; col: number; file?: string }
 
 export interface MiloType {

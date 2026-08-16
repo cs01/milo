@@ -1,3 +1,5 @@
+// Token types and the keyword lists the lexer, parser and generated editor grammar
+// all read from.
 export enum TokenKind {
   // literals
   Int = "INT",

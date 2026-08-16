@@ -28,6 +28,12 @@ jobs:
       # Checks every scalar-returning `extern fn` against this runner's real headers.
       # Needs no annotations; see the script's header for what it does and doesn't cover.
       - run: bun run scripts/audit-extern-returns.ts
+      # tests/examples.test.ts only emit-ir's the examples — it never links or RUNS one, so
+      # a codegen bug that produces valid-looking IR and a broken binary passes it. This
+      # script builds every entry point through clang and executes the 32 that carry a
+      # `// @run:` annotation. It existed and was wired to nothing.
+      - run: bun run scripts/run-examples.ts
+
       # A fixture that leaks still prints the right bytes, so `bun test` cannot see one.
       # That blind spot let the self-hosted compiler leak every owned local for months
       # while the sweep stayed green. This ratchets against tests/leak-clean.txt.

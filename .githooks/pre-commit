@@ -31,7 +31,15 @@ if git diff --cached --name-only --diff-filter=ACMDR | grep -qE '^(scripts/|\.gi
     git add -- docs/scripts.md
 fi
 
-# 3. Refill the corpus counts quoted in prose when the corpus changes. Same reasoning as
+# 3. Regenerate the compiler-source index when a src file is added, removed, or has its
+# purpose line edited. Same reasoning as the scripts index: tests/srcDoc.test.ts fails CI
+# on a stale one, and the way that happens is adding a file to src/.
+if git diff --cached --name-only --diff-filter=ACMDR | grep -qE '^src/.*\.ts$'; then
+    bun run scripts/gen-src-doc.ts >/dev/null
+    git add -- docs/src.md
+fi
+
+# 4. Refill the corpus counts quoted in prose when the corpus changes. Same reasoning as
 # above: tests/docStats.test.ts fails CI on a stale count, and the way that happens is
 # adding a fixture. Counts come from `git ls-files`, so this must run AFTER staging.
 if git diff --cached --name-only --diff-filter=ACMDR | grep -qE '^(tests/(fixtures|errors|runtime-errors|prove)/|std/|examples/)'; then
@@ -39,7 +47,7 @@ if git diff --cached --name-only --diff-filter=ACMDR | grep -qE '^(tests/(fixtur
     git add -- CLAUDE.md AGENTS.md README.md docs/testing.md docs/roadmap.md
 fi
 
-# 4. Deterministic lint + auto-fix on all staged files (scripts/lint.ts).
+# 5. Deterministic lint + auto-fix on all staged files (scripts/lint.ts).
 # Runs regardless of whether any .milo files are staged. Fixes are re-staged
 # inside lint.ts; an unfixable error exits non-zero and aborts the commit.
 bun run scripts/lint.ts --staged --fix

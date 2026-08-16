@@ -25,7 +25,9 @@ interface Entry { path: string; purpose: string }
 // end of the comment block, then the text is cut at the first sentence terminator.
 const MAX_PURPOSE = 200;
 
-function purposeOf(file: string): string | null {
+// Exported: scripts/gen-src-doc.ts projects src/ the same way, and two copies of a
+// comment parser drift apart.
+export function purposeOf(file: string): string | null {
   const words: string[] = [];
   for (const raw of readFileSync(file, "utf-8").split("\n").slice(0, 24)) {
     const line = raw.trim();
@@ -82,15 +84,19 @@ function rewrite(doc: string): string {
   return doc.slice(0, start) + table() + doc.slice(end + END.length);
 }
 
-const current = readFileSync(DOC, "utf-8");
-const next = rewrite(current);
-if (process.argv.includes("--check")) {
-  if (current !== next) {
-    console.error("docs/scripts.md index is stale — run: bun run scripts/gen-scripts-doc.ts");
-    process.exit(1);
+// The CLI half must not run on import — gen-src-doc.ts imports purposeOf, and a doc
+// generator that rewrites files as a side effect of being imported is a trap.
+if (import.meta.main) {
+  const current = readFileSync(DOC, "utf-8");
+  const next = rewrite(current);
+  if (process.argv.includes("--check")) {
+    if (current !== next) {
+      console.error("docs/scripts.md index is stale — run: bun run scripts/gen-scripts-doc.ts");
+      process.exit(1);
+    }
+    console.log("docs/scripts.md index is up to date");
+  } else {
+    writeFileSync(DOC, next);
+    console.log(`wrote the index in ${DOC}`);
   }
-  console.log("docs/scripts.md index is up to date");
-} else {
-  writeFileSync(DOC, next);
-  console.log(`wrote the index in ${DOC}`);
 }

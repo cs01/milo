@@ -1,3 +1,4 @@
+// Tokenizer: source text -> the token stream the parser consumes.
 import type { Token, Trivia } from "./tokens";
 import { TokenKind, KEYWORDS } from "./tokens";
 import { ParseError } from "./diagnostics";

@@ -50,6 +50,7 @@ To change an entry, change that line — this table is a projection of it.
 | `scripts/gen-error-catalog.ts` | Generates docs/errors.md — every compile error the test suite pins, with the program that provokes it. |
 | `scripts/gen-json-conformance.ts` | Generates a JSON conformance fixture from the canonical json.org JSON_checker suite (fail1..33, pass1..3) as vendored by CPython's test_json. |
 | `scripts/gen-scripts-doc.ts` | Regenerates the Index table in docs/scripts.md from each script's own first comment line, so the index cannot fall behind the directory. |
+| `scripts/gen-src-doc.ts` | Regenerates the compiler-source index in docs/src.md from each src/*.ts file's own first comment line, so the map of the compiler cannot fall behind the directory. |
 | `scripts/gen-stats.ts` | Fills in the corpus counts quoted in prose, so a doc cannot claim a number the repo stopped matching. |
 | `scripts/gen-std-docs.ts` | Regenerate docs/std/<module>.md from the std doc-comments (source of truth). |
 | `scripts/gen-tmlanguage.ts` | Regenerates editors/vscode/syntaxes/milo.tmLanguage.json from the compiler's own keyword and primitive-type lists. |

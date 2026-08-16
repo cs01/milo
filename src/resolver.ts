@@ -2,7 +2,7 @@
 // and merging all declarations into a single program
 
 import { readFileSync, existsSync } from "fs";
-import { resolve, dirname } from "path";
+import { resolve, dirname, sep } from "path";
 import { cacheRoot } from "./pkg";
 import type { Program, Span, DeclOrigins, DeclOrigin, ImportDecl } from "./ast";
 import { ParseError } from "./diagnostics";
@@ -38,7 +38,9 @@ try {
 // a hash would not. Two files can share a basename in different directories, so a
 // collision gets a numeric suffix — the id only has to be unique within one build.
 function uniqueModuleId(file: string, used: Set<string>): string {
-  const base = file.split("/").pop()!.replace(/\.milo$/, "").replace(/[^A-Za-z0-9_]/g, "_");
+  // Split on BOTH separators: a Windows path would otherwise yield the whole drive path
+  // as the "basename", which still mangles uniquely but reads as noise in a diagnostic.
+  const base = file.split(/[\\/]/).pop()!.replace(/\.milo$/, "").replace(/[^A-Za-z0-9_]/g, "_");
   let id = base === "" ? "mod" : base;
   for (let n = 2; used.has(id); n++) id = `${base}_${n}`;
   used.add(id);
@@ -486,7 +488,10 @@ export function resolveImports(program: Program, sourceDir: string, target: Targ
   // buys nothing and pays that cost on every program, so the pass first asks which
   // private names are contested and touches only those. A program with no collision is
   // byte-for-byte what it was.
-  const stdModuleRoot = resolve(STDLIB_DIR, "std") + "/";
+  // `sep`, not a hardcoded "/": `resolve` returns platform-native separators, so on
+  // Windows this prefix never matched and every std file was treated as a user module —
+  // which changed the std-shadowing diagnostics and failed only on the Windows runner.
+  const stdModuleRoot = resolve(STDLIB_DIR, "std") + sep;
   const userUnits = units.filter(u => u.pkg === "" && !u.file.startsWith(stdModuleRoot));
 
   // Every top-level name each user unit declares, private or not: a private helper can

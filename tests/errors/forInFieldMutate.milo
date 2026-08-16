@@ -1,0 +1,17 @@
+// @error: cannot call 'push' on 'b' because it is borrowed
+//
+// `for it in b.items` holds a pointer into that Vec's buffer for the loop's life, so
+// pushing to it reallocates the memory the loop is reading. This was accepted until
+// 2026-08-16 and was a heap-use-after-free in safe code (ASan, zero `unsafe`): the
+// for-in freeze only fired when the iterable was a bare IDENT, so `for x in v` was
+// caught and `for x in b.items` was not.
+struct Bag { items: Vec<string> }
+
+fn main() {
+    var b = Bag { items: Vec.new() }
+    b.items.push("alpha")
+    for it in b.items {
+        b.items.push("realloc")
+        print(it)
+    }
+}

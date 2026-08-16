@@ -1,0 +1,19 @@
+// @error: cannot pass 'b' because it is borrowed
+//
+// The same reallocation as forInFieldMutate, reached through a function that takes the
+// struct as `&mut` instead of by touching the field directly. Freezing the iterable's
+// ROOT is what catches both spellings; freezing only the field would leave this one.
+struct Bag { items: Vec<string> }
+
+fn grow(b: &mut Bag) {
+    b.items.push("realloc")
+}
+
+fn main() {
+    var b = Bag { items: Vec.new() }
+    b.items.push("alpha")
+    for it in b.items {
+        grow(b)
+        print(it)
+    }
+}

@@ -4330,8 +4330,16 @@ export class TypeChecker {
             const elemRef: TypeKind = { tag: "ref", inner: iterType.element, mutable: false };
             // mark vec as borrowed to prevent mutation during iteration
             let vecBorrowInfo: import("./checker").VarInfo | null = null;
-            if (stmt.iterable.kind === "Ident") {
-              const info = this.lookup(stmt.iterable.name);
+            // Freeze the ROOT of whatever place is being iterated, not just a bare name.
+            // `for x in v` was frozen and `for x in b.items` was not, so pushing to
+            // `b.items` inside its own loop — directly, or through any fn taking `b` as
+            // `&mut` — reallocated the buffer the loop holds a pointer into. Both were
+            // heap-use-after-free in safe code with zero `unsafe` (ASan, 2026-08-16).
+            // The recorded path is what keeps this from over-rejecting: mutating a
+            // DIFFERENT field of the same struct does not collide.
+            const iterPlace = this.accessPath(stmt.iterable);
+            if (iterPlace) {
+              const info = this.lookup(iterPlace.root);
               if (info) { vecBorrowInfo = info; this.freeze(info, stmt.iterable); }
             }
             const preMoves = this.snapshotMoveState();

@@ -7178,6 +7178,18 @@ export class TypeChecker {
     if (!typeEq(inner, defaultType) && defaultType.tag !== "unknown") {
       this.error(`'??' default type mismatch: expected ${typeName(inner)}, got ${typeName(defaultType)}`, sp);
     }
+    // `??` consumes BOTH operands wherever it is evaluated: codegen moves the payload
+    // out of the Option and moves the default in, whichever branch runs. `moveTargets`
+    // has always known that (`case "DefaultValue": return [operand, default]`), but it
+    // is only reached when the RESULT lands in a move position — so `let s = o ?? d`
+    // was checked and `(o ?? d).len` was not. The moves still happened: after it, `d`
+    // read back as "" and `o` still reported `Some` with an emptied payload, both with
+    // no diagnostic, which is the silent-empty-string failure the move checker exists
+    // to prevent. Record them here, where the operator is checked, so the use position
+    // of the result cannot change whether ownership is tracked. tryMoveLeaf gates on
+    // isCopy itself, so `Option<i64> ?? 0` still moves nothing.
+    this.tryMove(expr.operand);
+    this.tryMove(expr.default);
     return this.setType(expr, inner);
   }
 

@@ -1,0 +1,18 @@
+// `??` moves its default operand whether or not its result is bound. Recording that
+// only when the result landed in a move position meant `(o ?? d).len` moved `d` with
+// no diagnostic, and the later read of `d` printed an empty string.
+// @error: use of moved variable 'd'
+fn maybe(i: i64): Option<string> {
+    if i > 0 {
+        return Option.Some("s")
+    }
+    return Option.None
+}
+
+fn main() {
+    var d = "default-"
+    d.pushStr("x")
+    let n = (maybe(0) ?? d).len
+    print(n.toString())
+    print(d)
+}

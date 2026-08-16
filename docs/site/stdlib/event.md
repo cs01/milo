@@ -52,6 +52,7 @@ fn eventPoll(el: &EventLoop, readyFds: *i32, maxEvents: i32, timeoutMs: i32): i3
 `timeoutMs` blocks indefinitely.
 
 ```milo
+let fd: i32 = 0                 // stdin, or any descriptor you own
 var el = EventLoop.new()!
 setNonblocking(fd)
 eventRegisterRead(el, fd)

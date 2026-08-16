@@ -3,7 +3,7 @@
 Pure-Milo DEFLATE compression (RFC 1951) plus the gzip (RFC 1952) and zlib (RFC 1950) container framings. No external codec dependency. Decompress with [`std/inflate`](inflate).
 
 ```milo
-from "std/Deflate.raw" import { Deflate }
+from "std/deflate" import { Deflate }
 ```
 
 ## Functions

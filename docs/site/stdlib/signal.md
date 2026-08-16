@@ -23,10 +23,12 @@ from "std/signal" import { onSignal, ignoreSignal, resetSignal, SIGINT, SIGTERM,
 ### onSignal
 
 ```milo
-fn onSignal(sig: i32, handler: fn(i32): void)
+fn onSignal(sig: i32, handler: *u8)
 ```
 
-Register a handler function for the given signal. The handler receives the signal number.
+Register a handler for the given signal. The handler receives the signal number.
+
+`handler` must be a **top-level `fn (i32): void` passed as a raw pointer** — `myHandler as *u8` — never a closure. A C signal handler has no user-data slot, so a captured environment has nowhere to live: the closure's code pointer takes `(env, sig)`, C calls it with the signal number in the `env` slot, and the handler reads garbage as its `sig`.
 
 ### ignoreSignal
 
@@ -48,17 +50,21 @@ Reset the signal to its default disposition.
 
 ```milo
 from "std/signal" import { onSignal, SIGINT, SIGTERM }
+from "std/os" import { exit }
+
+fn onInterrupt(_sig: i32): void {
+    print("caught interrupt, cleaning up...")
+    exit(0)
+}
+
+fn onTerminate(_sig: i32): void {
+    print("terminated")
+    exit(0)
+}
 
 fn main(): i32 {
-    onSignal(SIGINT, (sig: i32): void => {
-        print("caught interrupt, cleaning up...")
-        exit(0)
-    })
-
-    onSignal(SIGTERM, (sig: i32): void => {
-        print("terminated")
-        exit(0)
-    })
+    onSignal(SIGINT, onInterrupt as *u8)
+    onSignal(SIGTERM, onTerminate as *u8)
 
     // main loop...
     return 0

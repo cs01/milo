@@ -39,6 +39,7 @@ Every doc in this repo starts with a 7-line `<!-- doc-meta ... -->` block. To fi
 | Debug an emulator bug (black screen, garbled gfx, freeze) | skill `/emu-debug` |
 | Understand the compiler internals | [CLAUDE.md](CLAUDE.md) §Architecture, [docs/design.md](docs/design.md) |
 | The language spec / grammar | [docs/language-reference.md](docs/language-reference.md), [docs/grammar.ebnf](docs/grammar.ebnf) |
+| Look up a compile error, or see what a rule rejects | [docs/errors.md](docs/errors.md) — every pinned message with the program that provokes it (generated from `tests/errors/`) |
 | What's planned / allowed to build | [docs/roadmap.md](docs/roadmap.md) — check before proposing features |
 | Move or rename a public stdlib name | record it in [docs/breaking-changes.md](docs/breaking-changes.md) — the flat namespace makes compat shims impossible, so the doc is the only migration path users get |
 | Find an stdlib API | `bun run src/main.ts api <terms>` |

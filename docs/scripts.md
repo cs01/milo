@@ -46,6 +46,7 @@ To change an entry, change that line — this table is a projection of it.
 | `scripts/fuzz-ownership.ts` | Differential falsifier for the OWNERSHIP checker. |
 | `scripts/fuzz-scan.ts` | Raw lexical splitter used by the frontend fuzzer for mutation and reduction. |
 | `scripts/fuzz-worker.ts` | Case runner for scripts/fuzz-frontend.ts. |
+| `scripts/gen-error-catalog.ts` | Generates docs/errors.md — every compile error the test suite pins, with the program that provokes it. |
 | `scripts/gen-json-conformance.ts` | Generates a JSON conformance fixture from the canonical json.org JSON_checker suite (fail1..33, pass1..3) as vendored by CPython's test_json. |
 | `scripts/gen-scripts-doc.ts` | Regenerates the Index table in docs/scripts.md from each script's own first comment line, so the index cannot fall behind the directory. |
 | `scripts/gen-stats.ts` | Fills in the corpus counts quoted in prose, so a doc cannot claim a number the repo stopped matching. |

@@ -198,9 +198,11 @@ describe("errors (type checker rejects)", () => {
 
       const r = results.get(file)!;
       expect(r.code !== 0).toBe(true);
-      if (expectedError) {
-        expect(r.stderr).toContain(expectedError);
-      }
+      // Required, not optional. Without the message assertion the test only says the
+      // program failed to compile — which an unrelated syntax typo would satisfy just
+      // as well as the rule the fixture exists to pin.
+      expect(`${file}: ${expectedError ?? "NO @error: ANNOTATION"}`).toBe(`${file}: ${expectedError}`);
+      expect(r.stderr).toContain(expectedError!);
     });
   }
 });

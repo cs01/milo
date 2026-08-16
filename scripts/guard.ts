@@ -11,6 +11,7 @@
 // backstop against spin loops.
 //
 // Library:  import { guardedRun } from "../scripts/guard"
+import { StringDecoder } from "node:string_decoder";
 // CLI:      bun scripts/guard.ts [--mem-mb N] [--virtual-mem-mb N] [--timeout-s N] -- cmd args...
 //           (required for any manual milo-self invocation — never run it bare)
 import { spawn, execFile } from "child_process";
@@ -244,11 +245,19 @@ function windowsRun(cmd: string, args: string[], opts: GuardOpts, timeoutMs: num
     let stderr = "";
     let captured = 0;
     let guardKill: GuardKill | undefined;
+    // Decoded through a StringDecoder, NOT `d.toString()` per chunk. A UTF-8 character
+    // straddling a chunk boundary decodes to replacement characters in BOTH halves when
+    // each chunk is decoded alone: `héllo → ok` split inside the arrow comes back as
+    // `héllo ??? ok`. The decoder holds the incomplete tail until the next chunk
+    // completes it. `milo run` captures through this path, so the corruption was never
+    // confined to the test harness.
+    const outDec = new StringDecoder("utf8");
+    const errDec = new StringDecoder("utf8");
     const append = (which: "out" | "err", d: Buffer) => {
       captured += d.length;
       if (captured > MAX_CAPTURE_BYTES) return;
-      if (which === "out") stdout += d.toString();
-      else stderr += d.toString();
+      if (which === "out") stdout += outDec.write(d);
+      else stderr += errDec.write(d);
     };
     child.stdout?.on("data", d => append("out", d));
     child.stderr?.on("data", d => append("err", d));
@@ -261,6 +270,10 @@ function windowsRun(cmd: string, args: string[], opts: GuardOpts, timeoutMs: num
     (timer as any).unref?.();
 
     const finish = (code: number, signal: string | null) => {
+      // A truncated tail (the child killed mid-character) becomes a replacement character
+      // rather than vanishing, which is the honest rendering of partial output.
+      stdout += outDec.end();
+      stderr += errDec.end();
       clearTimeout(timer);
       if (guardKill === "timeout") stderr += `\n[guard] killed: exceeded ${timeoutMs} ms`;
       resolve({ stdout, stderr, code, signal, guardKill });
@@ -363,11 +376,19 @@ exec "$@"`;
     let captured = 0;
     let guardKill: GuardKill | undefined;
 
+    // Decoded through a StringDecoder, NOT `d.toString()` per chunk. A UTF-8 character
+    // straddling a chunk boundary decodes to replacement characters in BOTH halves when
+    // each chunk is decoded alone: `héllo → ok` split inside the arrow comes back as
+    // `héllo ??? ok`. The decoder holds the incomplete tail until the next chunk
+    // completes it. `milo run` captures through this path, so the corruption was never
+    // confined to the test harness.
+    const outDec = new StringDecoder("utf8");
+    const errDec = new StringDecoder("utf8");
     const append = (which: "out" | "err", d: Buffer) => {
       captured += d.length;
       if (captured > MAX_CAPTURE_BYTES) return; // truncate; wall timeout bounds the spew
-      if (which === "out") stdout += d.toString();
-      else stderr += d.toString();
+      if (which === "out") stdout += outDec.write(d);
+      else stderr += errDec.write(d);
     };
     child.stdout?.on("data", d => append("out", d));
     child.stderr?.on("data", d => append("err", d));
@@ -391,6 +412,10 @@ exec "$@"`;
     }
 
     const finish = (code: number, signal: string | null) => {
+      // A truncated tail (the child killed mid-character) becomes a replacement character
+      // rather than vanishing, which is the honest rendering of partial output.
+      stdout += outDec.end();
+      stderr += errDec.end();
       if (pid !== undefined) live.delete(pid);
       if (guardKill === "memory") stderr += `\n[guard] SIGKILL: process tree exceeded ${memMb} MB RSS`;
       else if (guardKill === "footprint")

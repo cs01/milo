@@ -1,7 +1,7 @@
 // Everything that happens to a frame after the geometry: the sea, the 2D overlay,
 // bloom, and the tone map that turns unbounded linear light into a picture.
 //
-// The order is load-bearing and worth stating once:
+// The order matters and is worth stating once:
 //
 //   1. sky + geometry, into `world` — colour in rgb, camera depth in alpha
 //   2. sea, reading `world`, writing `scene`

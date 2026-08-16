@@ -1,4 +1,0 @@
-var xs = [1, 2, 3];
-state = "about to reach past the end";
-print xs[9999];
-state = "never runs";

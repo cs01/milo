@@ -62,6 +62,7 @@ closureCapture
 closureCaptureClosure
 closureCaptureHeap
 closureCaptureMutableLocal
+closureCapturesDropped
 closureEmptyParams
 closureInferParams
 closureLet

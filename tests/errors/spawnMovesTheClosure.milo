@@ -1,0 +1,20 @@
+// Spawning transfers the closure: an owning closure is not Copy, so `Task.spawn(f)` moves
+// it, `spawnWithStack` forgets it after handing the environment to the task, and the task
+// releases it when it is reaped. Calling `f` afterwards would run against that released
+// environment — this exact program printed a captured string's length as 34 inside the
+// task and 5 after the join, back when the free was added without the ownership.
+// @error: use of moved variable 'f'
+from "std/runtime" import {
+    Task
+}
+
+fn main() {
+    var s = "heap"
+    s.pushStr("-payload-long-enough-to-matter")
+    let f = move(): void => {
+        print("in-task len=" + s.len.toString())
+    }
+    let t = Task.spawn(f)
+    t.join()
+    f()
+}

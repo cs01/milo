@@ -1,3 +1,0 @@
-state = "attack";
-speed = speed * 3;
-log = [name, state, hp, speed];

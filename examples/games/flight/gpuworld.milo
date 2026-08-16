@@ -12,7 +12,7 @@
 //   - The sky, the haze and the sea are the same function now (see sky.milo).
 //     They could not be before: the haze was three constants because a per-pixel
 //     sky was not affordable in a scanline loop.
-//   - Depth is the driver's. Draw order stops being load-bearing, which is what
+//   - Depth is the driver's. Draw order stops mattering, which is what
 //     let the second flush and the interleaving rules go away.
 //   - Texturing is free, so the LOD dodges that existed to avoid it — a detail
 //     texture that faded out past ring 7 and stopped entirely at ring 11 — are

@@ -1,5 +1,5 @@
 // Unit tests for the unused-import lint. OFF by default and opted into with
-// `--deny=unused-import`, because an import can be load-bearing without the entry file
+// `--deny=unused-import`, because an import can be needed without the entry file
 // ever naming the symbol: node-milo's main.milo imports binding symbols purely so those
 // modules get compiled and linked. Warning by default would fire on every one of them,
 // and the obvious "fix" would break the build.

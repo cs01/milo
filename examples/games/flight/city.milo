@@ -940,7 +940,7 @@ fn computeTop(c: &mut City) {
 // layer drew — the two are the same structure described twice. The bridge owns it:
 // any footprint whose centre is over water AND inside a deck's corridor is dropped.
 //
-// Both halves of that test are load-bearing. Over water alone would take piers and
+// Both halves of that test are required. Over water alone would take piers and
 // ferry terminals; inside the corridor alone would take the buildings a city road
 // bridge runs between, and San Francisco has plenty of those.
 fn claimBridgeStructures(c: &mut City) {

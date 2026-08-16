@@ -1,5 +1,5 @@
 // Trailing/separating ';' is a cosmetic no-op in Milo (statements are
-// newline/grammar-delimited). The load-bearing ';' in `[T; N]` still works.
+// newline/grammar-delimited). The semantic ';' in `[T; N]` still works.
 // @expect: 3
 // @expect: 42
 

@@ -1,0 +1,50 @@
+// @expect: 290
+// @expect: spawned: captured-heap-payload
+// @expect: done
+
+// The closure drop glue. An owning closure holds a heap environment; slot 0 of that
+// environment is its drop function, emitted per closure SHAPE because the capture list is
+// known only where the closure is built — at the drop site all that is known is the type
+// `move () => R`, which says a closure owns something but not what. Keeping the glue in
+// the environment rather than in a third word of the pair is what leaves a closure two
+// words wide, so nothing that passes one around had to change.
+//
+// On tests/leak-clean.txt: before this, every one of these leaked its captures.
+from "std/runtime" import {
+    Task
+}
+
+fn mk(i: i64): string {
+    var s = "cap-"
+    s.pushStr(i.toString())
+    return s
+}
+
+fn call(f: move () => i64): i64 {
+    return f()
+}
+
+pub fn main(): i32 {
+    var i = 0
+    var t = 0
+    while i < 50 {
+        let s = mk(i)
+        let f = move(): i64 => {
+            return s.len
+        }
+        t = t + call(f)
+        i = i + 1
+    }
+    print(t.toString())
+
+    // The spawn seam: ownership leaves through a raw memcpy, so the task releases it.
+    var payload = "captured"
+    payload.pushStr("-heap-payload")
+    let task = Task.spawn(move(): void => {
+        print("spawned: " + payload)
+    }
+    )
+    task.join()
+    print("done")
+    return 0
+}

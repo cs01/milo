@@ -346,6 +346,9 @@ for (const doc of DOCS) {
   describe(doc, () => {
     for (const c of checkDoc(doc)) {
       const name = `${doc}:${c.snippet.line}`;
+      // Skipped because the fence says ```milo skip — pseudo-code, an elided body, or a
+      // platform-specific snippet the host cannot compile. Reported as skipped rather
+      // than omitted so the count stays visible.
       if (c.snippet.mode === "skip") { test.skip(name, () => {}); continue; }
       test(name, () => {
         if (c.snippet.mode === "error") {

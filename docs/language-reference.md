@@ -2935,7 +2935,7 @@ r.get("/static/*", handleReq)                  // wildcard suffix
 
 ## Complete Example: JSON Parser
 
-This example exercises enums with complex payloads, Heap, Vec, structs, recursion, and string operations. See [`examples/json_parser.milo`](../examples/json_parser.milo) for the full source.
+This example exercises enums with complex payloads, Heap, Vec, structs, recursion, and string operations. See [`examples/basics/json.milo`](../examples/basics/json.milo) for the full source.
 
 ```milo
 struct JsonKV {

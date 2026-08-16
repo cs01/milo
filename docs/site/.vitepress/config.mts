@@ -4,8 +4,17 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { toDate } from './postdate'
 
+// The canonical grammar is generated from the compiler's keyword lists by
+// scripts/gen-tmlanguage.ts and gated by tests/tmLanguage.test.ts. This used to be a
+// hand-made COPY sitting next to this config, and it had drifted to the pre-generator
+// version: it highlighted `char`, `String` and `Box` (none exist in Milo) and missed
+// `unsafe`, `from`, `trait`, `interface`, `type`, `move`, the contract keywords and the
+// `int`/`byte`/`float`/`string` type names. Read the one file the gate covers.
 const miloGrammar = JSON.parse(
-  fs.readFileSync(path.resolve(__dirname, 'milo.tmLanguage.json'), 'utf-8')
+  fs.readFileSync(
+    path.resolve(__dirname, '../../../editors/vscode/syntaxes/milo.tmLanguage.json'),
+    'utf-8',
+  ),
 )
 
 const SITE = 'https://milo-language.github.io/milo'

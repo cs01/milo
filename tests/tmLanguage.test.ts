@@ -67,3 +67,16 @@ test("the grammar highlights no word the compiler does not know", () => {
     for (const w of words) expect(`${p.name}: ${w}`).toBe(`${p.name}: ${known.has(w) ? w : `UNKNOWN(${w})`}`);
   }
 });
+
+// The docs site kept its own hand-made copy of the grammar next to the VitePress
+// config, and nothing compared the two: the site shipped the pre-generator version for
+// months, highlighting `char`/`String`/`Box` and missing `unsafe`, `from`, `trait` and
+// the contract keywords. One tracked grammar file, read by everyone who needs it.
+test("there is exactly one grammar file, and the docs site reads it", () => {
+  const tracked = execFileSync("git", ["ls-files", "*.tmLanguage.json"], { cwd: ROOT, encoding: "utf-8" })
+    .split("\n").filter(Boolean);
+  expect(tracked).toEqual(["editors/vscode/syntaxes/milo.tmLanguage.json"]);
+
+  const config = readFileSync(join(ROOT, "docs/site/.vitepress/config.mts"), "utf-8");
+  expect(config).toContain("editors/vscode/syntaxes/milo.tmLanguage.json");
+});

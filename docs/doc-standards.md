@@ -8,7 +8,7 @@ last-verified: 2026-07-11
 
 # Documentation Standards
 
-Docs in this repo are **self-healing**: whoever changes a system fixes its doc in the same change. A stale doc is a bug, filed against the persona that owns it ([docs/agent-review.md](docs/agent-review.md)).
+Docs in this repo are **self-healing**: whoever changes a system fixes its doc in the same change. A stale doc is a bug, filed against the persona that owns it ([docs/agent-review.md](agent-review.md)).
 
 ## The `doc-meta` header
 

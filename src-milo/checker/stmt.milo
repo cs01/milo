@@ -2016,7 +2016,19 @@ pub fn checkProgram(ck: &mut Checker, program: &Program) {
 
     // Anything still pending never got an element from a push. Reported here, at the
     // end, because a push arbitrarily far away is still a resolution.
+    //
+    // The list is moved out before the walk: `for pv in ck.pendingVecInfer` holds a
+    // borrow of `ck` for the loop's whole body, and `error` needs `&mut ck`. milo-self
+    // rejects that (correctly); the oracle compiled it, which is a gap in the oracle.
+    var pending: Vec<PendingVecInfer> = Vec.new()
     for pv in ck.pendingVecInfer {
+        pending.push(PendingVecInfer {
+            name: pv.name.clone(), span: cloneSpan(pv.span)
+        }
+        )
+    }
+    ck.pendingVecInfer = Vec.new()
+    for pv in pending {
         error(ck, "cannot infer Vec element type — no 'push' found to infer from; add a type annotation: 'let v: Vec<T> = Vec.new()'", cloneSpan(pv.span))
     }
 }

@@ -6098,7 +6098,10 @@ export class TypeChecker {
     }
     if (hint && expr.kind === "ArrayLit" && hint.tag === "array") {
       for (const elem of expr.elements) {
-        this.checkExprWithHint(elem, hint.element);
+        const et = this.checkExprWithHint(elem, hint.element);
+        if (!this.elementFits(et, hint.element, elem)) {
+          this.error(`array element has type ${typeName(et)}, but the array is declared ${typeName(hint)}`, elem.span);
+        }
       }
       const result: TypeKind = { tag: "array", element: hint.element, size: expr.elements.length };
       return this.setType(expr, result);
@@ -6106,13 +6109,19 @@ export class TypeChecker {
     // Vec literal: `let v: Vec<T> = [a, b, c]` lowers to Vec.new() + N pushes in codegen.
     if (hint && expr.kind === "ArrayLit" && hint.tag === "vec") {
       for (const elem of expr.elements) {
-        this.checkExprWithHint(elem, hint.element);
+        const et = this.checkExprWithHint(elem, hint.element);
+        if (!this.elementFits(et, hint.element, elem)) {
+          this.error(`Vec element has type ${typeName(et)}, but the Vec is declared ${typeName(hint)}`, elem.span);
+        }
         this.tryMove(elem);
       }
       return this.setType(expr, hint);
     }
     if (hint && expr.kind === "ArrayRepeat" && hint.tag === "array") {
-      this.checkExprWithHint(expr.value, hint.element);
+      const rt = this.checkExprWithHint(expr.value, hint.element);
+      if (!this.elementFits(rt, hint.element, expr.value)) {
+        this.error(`repeated element has type ${typeName(rt)}, but the array is declared ${typeName(hint)}`, expr.value.span);
+      }
       const result: TypeKind = { tag: "array", element: hint.element, size: expr.count };
       return this.setType(expr, result);
     }
@@ -9052,6 +9061,23 @@ export class TypeChecker {
   // That last one is what keeps `match Child.spawn(...) { Ok(child) => child.close() }`
   // legal: the subject is a temporary, so the binding is the only owner and its write is
   // the real one. Only `var b = ...; match b { ... }` can observe the discard.
+  // Does an element of a literal fit the annotated element type?
+  //
+  // Both array-literal paths used to call `checkExprWithHint(elem, hint.element)` and throw
+  // the answer away, so nothing ever compared them: `var x: [i64; 2] = ["a", "b"]` and
+  // `var v: Vec<i64> = ["a"]` type-checked, and the mismatch surfaced as an LLVM error
+  // about `%String` where an `i64` was expected — a type error escaping to clang, reported
+  // in a language the user does not write.
+  //
+  // Mirrors the binding rule rather than inventing one: an unknown is already an error
+  // reported elsewhere, an Option auto-wraps, and an interface coerces.
+  private elementFits(elemType: TypeKind, want: TypeKind, elem: Expr): boolean {
+    if (typeEq(want, elemType) || elemType.tag === "unknown") return true;
+    const optInner = this.optionInnerType(want);
+    if (optInner && typeEq(optInner, elemType) && want.tag === "enum") return true;
+    return this.tryInterfaceCoercion(elem, elemType, want);
+  }
+
   private isCopyBind(bt: TypeKind, subjectIsPlace: boolean): boolean {
     if (!subjectIsPlace) return false;
     if (bt.tag === "ref") return false;

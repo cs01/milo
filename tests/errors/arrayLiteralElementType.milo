@@ -1,0 +1,14 @@
+// @error: array element has type string, but the array is declared [i64; 2]
+//
+// Both array-literal paths called `checkExprWithHint(elem, hint.element)` and threw the
+// answer away, so nothing ever compared them. `var x: [i64; 2] = ["a", "b"]` type-checked,
+// and the mismatch surfaced as an LLVM error — `'%t.3' defined with type '%String' but
+// expected 'i64'` — which is a type error escaping to clang and reported in a language the
+// user does not write. `Vec<i64> = ["a"]` had the identical shape.
+//
+// Found by tests/typeAnnotationFidelity.test.ts, which asks whether a value of the WRONG
+// shape can satisfy an annotation.
+fn main() {
+    var x: [i64; 2] = ["a", "b"]
+    print(x[0])
+}

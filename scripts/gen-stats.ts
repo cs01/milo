@@ -50,6 +50,11 @@ export const STATS: Record<string, () => number> = {
 // Docs whose counts are current claims, not a dated record.
 const TRACKED = ["CLAUDE.md", "AGENTS.md", "README.md", "docs/testing.md", "docs/roadmap.md"];
 
+// The placeholder in AGENTS.md's own table documents this syntax, so it is written
+// `stat:<name>` — the angle brackets keep it out of `[a-z-]+` and stop the generator
+// matching its own documentation. It did: every commit failed the pre-commit hook with
+// "AGENTS.md: unknown stat 'name'", because a doc that teaches a marker format is
+// indistinguishable from a use of it unless one of the two is escaped.
 const MARKER = /<!-- stat:([a-z-]+) -->(.*?)<!-- \/stat -->/g;
 
 function rewrite(text: string, file: string): string {

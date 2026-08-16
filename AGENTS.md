@@ -132,7 +132,7 @@ Before you add a claim about the code to any doc, ask which of these it is:
 
 | Claim | Mechanism | Example |
 |---|---|---|
-| a count | `<!-- stat:name -->N<!-- /stat -->` marker | `scripts/gen-stats.ts`, gated by `tests/docStats.test.ts` |
+| a count | `<!-- stat:<name> -->N<!-- /stat -->` marker | `scripts/gen-stats.ts`, gated by `tests/docStats.test.ts` |
 | a list of files | project it from the files' own headers | `scripts/gen-src-doc.ts`, `scripts/gen-scripts-doc.ts` |
 | an API signature | generate from doc-comments, or gate against the real API | `scripts/gen-std-docs.ts`, `scripts/check-api-docs.ts` |
 | a measured number | one source file, rendered into every place it appears | `benchmarks/results.json` → `scripts/gen-benchmarks.ts` |

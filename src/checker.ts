@@ -2736,6 +2736,32 @@ export class TypeChecker {
         }
         return;
       }
+      // The same forwarding through a METHOD call. Without this arm a MethodCall fell to
+      // the structural walk below, which saw the bare `Ident` and marked the parameter
+      // retained — so `fn w(f) { a.modify(h, f) }` was rejected while the identical
+      // `fn w(f) { arenaModify(a, h, f) }` was accepted. That is over-rejection, not
+      // unsoundness, but it walls off every wrapper around a std higher-order method.
+      if (n.kind === "MethodCall" && Array.isArray(n.args)) {
+        const args = n.args as Expr[];
+        walk(n.object);
+        // The three builtins that store a fn value, mirroring the call-site check.
+        const storesIt = ["push", "insert", "set"].includes(n.method as string);
+        const recv = this.exprTypes.get(n.object as Expr);
+        const base = recv?.tag === "ref" ? recv.inner : recv;
+        const owner = base && (base.tag === "struct" || base.tag === "enum") ? base.name : null;
+        const mangled = owner ? `${owner}$${n.method}` : null;
+        for (let i = 0; i < args.length; i++) {
+          const a = args[i]!;
+          if (a.kind === "Ident" && a.name === param.name) {
+            if (storesIt) { retained = true; return; }
+            // +1: the mangled method carries `self` as its first parameter.
+            if (mangled && fns.has(mangled) && this.retainsParam(fns, mangled, i + 1, seen)) { retained = true; return; }
+            // An unresolved receiver is waved through on the same reasoning the call
+            // site uses: no builtin other than the three above retains a fn value.
+          } else walk(a);
+        }
+        return;
+      }
       for (const k of Object.keys(n)) { if (k !== "span" && k !== "type") walk(n[k]); }
     };
     walk(fn.body);

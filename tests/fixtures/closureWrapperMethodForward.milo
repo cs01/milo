@@ -1,0 +1,66 @@
+// A wrapper that forwards a closure parameter through a METHOD call must be
+// treated like one that forwards through a plain call. Before the fix,
+// `viaMethod` below was rejected ("cannot pass a closure that captures 'seen'
+// by reference to 'viaMethod', which keeps it") while the semantically
+// identical `viaFreeFn` was accepted, because the escape analysis only
+// followed a closure parameter through a Call node, never a MethodCall.
+from "std/arena" import {
+    Arena, arenaModify
+}
+
+enum Obj {
+    List(Vec<i64>)
+}
+
+fn viaFreeFn(a: &mut Arena<Obj>, i: i64, f: (Obj) => Obj): bool {
+    return arenaModify(a, a.handles() [i], f)
+}
+
+fn viaMethod(a: &mut Arena<Obj>, i: i64, f: (Obj) => Obj): bool {
+    return a.modify(a.handles() [i], f)
+}
+
+fn main() {
+    var a: Arena<Obj> = Arena<Obj>.new()
+    var xs: Vec<i64> = Vec.new()
+    xs.push(1)
+    xs.push(2)
+    let _h = a.alloc(Obj.List(xs))
+
+    var seen: i64 = 0
+    let r1 = viaFreeFn(a, 0, (o: Obj): Obj => {
+        match o {
+            List(v) => {
+                var ys = v
+                ys[0] = 10
+                seen = ys.len
+                return Obj.List(ys)
+            }
+        }
+    }
+    )
+    // @expect: free fn true 2
+    print("free fn " + r1.toString() + " " + seen.toString())
+
+    var touched: i64 = 0
+    let r2 = viaMethod(a, 0, (o: Obj): Obj => {
+        match o {
+            List(v) => {
+                var ys = v
+                ys[1] = 20
+                touched = ys[0]
+                return Obj.List(ys)
+            }
+        }
+    }
+    )
+    // @expect: method true 10
+    print("method " + r2.toString() + " " + touched.toString())
+
+    match a.get(a.handles() [0])! {
+        List(v) => {
+            // @expect: final 10 20
+            print("final " + v[0].toString() + " " + v[1].toString())
+        }
+    }
+}

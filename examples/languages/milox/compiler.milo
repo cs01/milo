@@ -576,16 +576,18 @@ impl Compiler {
         // JumpIfFalse leaves the condition on the stack; both arms pop it.
         self.emitOp(Op.Pop)
         self.statement(h)
-        if self.matchTok(TokKind.Else) {
-            let elseJump = self.emitJump(Op.Jump)
-            self.patchJump(thenJump)
-            self.emitOp(Op.Pop)
-            self.statement(h)
-            self.patchJump(elseJump)
-            return
-        }
+        // The unconditional jump is emitted even with no `else`, and it is NOT a
+        // dead instruction: without it the then-branch falls straight into the
+        // else-path's Pop and the condition gets popped twice. `if (x > 0) { x = 2; }`
+        // then underflows the stack by one every time the condition is true, which
+        // surfaces far away as a local read past the end of the stack.
+        let elseJump = self.emitJump(Op.Jump)
         self.patchJump(thenJump)
         self.emitOp(Op.Pop)
+        if self.matchTok(TokKind.Else) {
+            self.statement(h)
+        }
+        self.patchJump(elseJump)
     }
 
     fn whileStatement(self: &mut Self, h: &mut Heap) {

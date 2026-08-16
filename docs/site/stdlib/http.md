@@ -106,7 +106,7 @@ struct Router {
 ### serve
 
 ```milo
-fn serve(port: u16?, handler: (&Request) => Response): Result<void>
+fn serve(port: u16?, handler: (&Request) => Response): Result<Unit>
 ```
 
 Simple server — takes a port and handler function. Good for static file servers or single-handler apps.
@@ -114,7 +114,7 @@ Simple server — takes a port and handler function. Good for static file server
 ### serveRouter
 
 ```milo
-fn serveRouter(port: u16?, router: &Router): Result<void>
+fn serveRouter(port: u16?, router: &Router): Result<Unit>
 ```
 
 Start an HTTP server using a Router. Context `respHeaders` are sent on the wire.

@@ -21,15 +21,15 @@ True if `s` contains `needle`.
 ### `s.indexOf` / `s.lastIndexOf`
 
 ```milo
-fn indexOf(self: &string, needle: &string): i64
+fn indexOf(self: &string, needle: string): Option<i64>
 ```
 
-Byte index of the first (last) occurrence of `needle`, or `-1`.
+Byte index of the first (last) occurrence of `needle`; `None` when it is absent.
 
 ### `s.indexOfFrom`
 
 ```milo
-fn indexOfFrom(self: &string, needle: &string, start: i64): i64
+fn indexOfFrom(self: &string, needle: string, from: i64): Option<i64>
 ```
 
 Like `indexOf`, but begins searching from byte offset `start`.

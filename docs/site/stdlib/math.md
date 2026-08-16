@@ -46,7 +46,7 @@ fn clampF64(x: f64, lo: f64, hi: f64): f64
 ### Constants
 
 ```milo
-fn mathPi(): f64
-fn mathE(): f64
-fn mathInf(): f64
+fn Math.pi(): f64
+fn Math.e(): f64
+fn Math.inf(): f64
 ```

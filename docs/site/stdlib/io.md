@@ -89,10 +89,10 @@ fn File.openAppend(path: &string): Result<File, IoError>
 
 Open a file for appending (creates if missing).
 
-### f.fileSize
+### f.size
 
 ```milo
-fn fileSize(self: &File): i64
+fn File.size(self: &File): i64
 ```
 
 Get the size of an open file in bytes.

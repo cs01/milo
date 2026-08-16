@@ -36,6 +36,7 @@ To change an entry, change that line — this table is a projection of it.
 | `scripts/audit-extern-returns.ts` | Audit every `extern fn` in std/ against the real C headers — no annotations needed. |
 | `scripts/build.sh` | Build a standalone, self-contained milo binary. |
 | `scripts/bundle-stdlib.ts` | Generates src/stdlib-bundle.ts, embedding every std/*.milo file as a string. |
+| `scripts/check-api-docs.ts` | Checks the signature listings on the docs-site stdlib pages against the real std API. |
 | `scripts/check-breaking.ts` | Detects source-level breaks in the public std surface since the last release tag, and requires each one to be written up in docs/breaking-changes.md. |
 | `scripts/ecosystem-check.ts` | Compile every published milo-language package against THIS checkout. |
 | `scripts/fetch-assets.sh` | Regenerates the game assets that are deliberately NOT in git: the FLYBY city files (82 MB of terrain, footprints and aerial drape) and the APSIS planet maps. |

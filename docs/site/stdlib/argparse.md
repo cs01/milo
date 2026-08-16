@@ -56,12 +56,13 @@ Define flags, call `parse()`, access typed values. `--help` is generated automat
 
 ```milo
 struct FlagDef {
-    long: string,
-    short: string,
-    description: string,
-    required: bool,
+    longName: string,
+    shortName: string,
+    help: string,
+    defaultVal: string,
     isBool: bool,
     isI64: bool,
+    required: bool,
 }
 ```
 
@@ -70,7 +71,7 @@ struct FlagDef {
 ```milo
 struct PositionalDef {
     name: string,
-    description: string,
+    help: string,
     required: bool,
 }
 ```
@@ -79,8 +80,9 @@ struct PositionalDef {
 
 ```milo
 struct ArgEntry {
-    key: string,
+    name: string,
     value: string,
+    present: bool,
 }
 ```
 
@@ -100,15 +102,15 @@ struct ArgParser {
 ### addString
 
 ```milo
-fn addString(parser: &ArgParser, long: string, short: string, description: string)
+fn ArgParser.addString(self: &mut ArgParser, long: string, short: string, help: string, defaultVal: string): void
 ```
 
-Register an optional string flag (e.g. `--output`, `-o`).
+Register an optional string flag (e.g. `--output`, `-o`). `defaultVal` is what `getString` returns when the flag is absent; pass `""` for no default.
 
 ### addRequired
 
 ```milo
-fn addRequired(parser: &ArgParser, long: string, short: string, description: string)
+fn ArgParser.addRequired(self: &mut ArgParser, long: string, short: string, help: string): void
 ```
 
 Register a required string flag. Parsing fails if omitted.
@@ -116,7 +118,7 @@ Register a required string flag. Parsing fails if omitted.
 ### addBool
 
 ```milo
-fn addBool(parser: &ArgParser, long: string, short: string, description: string)
+fn ArgParser.addBool(self: &mut ArgParser, long: string, short: string, help: string): void
 ```
 
 Register a boolean flag. Present = true, absent = false.
@@ -124,7 +126,7 @@ Register a boolean flag. Present = true, absent = false.
 ### addI64
 
 ```milo
-fn addI64(parser: &ArgParser, long: string, short: string, description: string, defaultVal: i64)
+fn ArgParser.addI64(self: &mut ArgParser, long: string, short: string, help: string, defaultVal: i64): void
 ```
 
 Register an integer flag with a default value. The value is validated as numeric at parse time.
@@ -132,7 +134,7 @@ Register an integer flag with a default value. The value is validated as numeric
 ### addPositional
 
 ```milo
-fn addPositional(parser: &ArgParser, name: string, description: string)
+fn ArgParser.addPositional(self: &mut ArgParser, name: string, help: string): void
 ```
 
 Register a required positional argument.
@@ -140,7 +142,7 @@ Register a required positional argument.
 ### addOptionalPositional
 
 ```milo
-fn addOptionalPositional(parser: &ArgParser, name: string, description: string)
+fn ArgParser.addOptionalPositional(self: &mut ArgParser, name: string, help: string): void
 ```
 
 Register an optional positional argument.
@@ -148,7 +150,7 @@ Register an optional positional argument.
 ### enableTrailingArgs
 
 ```milo
-fn enableTrailingArgs(parser: &mut ArgParser)
+fn ArgParser.enableTrailingArgs(self: &mut ArgParser): void
 ```
 
 Stop flag parsing after the first positional argument. All remaining arguments are collected as positionals without interpretation. Useful for runtimes and wrappers where flags before the command are yours, and everything after belongs to the child process.
@@ -167,7 +169,7 @@ let args = parser.parse()
 ### helpText
 
 ```milo
-fn helpText(parser: &ArgParser): string
+fn ArgParser.helpText(self: &ArgParser): string
 ```
 
 Generate a formatted help/usage string.
@@ -175,10 +177,24 @@ Generate a formatted help/usage string.
 ### parse
 
 ```milo
-fn parse(parser: &ArgParser, args: Vec<string>): Result<ParsedArgs>
+fn ArgParser.parse(self: &ArgParser): ParsedArgs
+fn ArgParser.parseFrom(self: &ArgParser, argv: Vec<string>): ParsedArgs
 ```
 
-Parse a vector of CLI arguments against the registered flags and positionals.
+`parse` reads the real process argv; `parseFrom` takes the vector, which is what a test
+wants. Neither returns a `Result`: a missing required flag or a bad `--help` prints usage
+and exits, so the parsed value is always usable.
+
+### setEpilog / enableIgnoreUnknown
+
+```milo
+fn ArgParser.setEpilog(self: &mut ArgParser, text: string): void
+fn ArgParser.enableIgnoreUnknown(self: &mut ArgParser): void
+```
+
+`setEpilog` appends a block of text below the generated options list. `enableIgnoreUnknown`
+passes an unrecognised flag through instead of erroring — for a wrapper that forwards flags
+it does not itself define.
 
 ### ParsedArgs
 
@@ -203,23 +219,24 @@ default is a value, so it comes back as `Some`. Use `?? "fallback"` to collapse.
 ### getI64
 
 ```milo
-fn getI64(args: &ParsedArgs, key: &string): Option<i64>
+fn ParsedArgs.getI64(self: &ParsedArgs, name: &string): i64
 ```
 
-Get a value parsed as `i64`.
+Value of the flag parsed as `i64` — the default registered with `addI64` when it was not
+supplied, and `0` for a name that was never declared.
 
 ### getU16
 
 ```milo
-fn getU16(args: &ParsedArgs, key: &string): Option<u16>
+fn ParsedArgs.getU16(self: &ParsedArgs, name: &string): u16
 ```
 
-Get a value parsed as `u16`.
+The same value narrowed to `u16`, for a port or similar.
 
 ### getBool
 
 ```milo
-fn getBool(args: &ParsedArgs, key: &string): bool
+fn ParsedArgs.getBool(self: &ParsedArgs, name: &string): bool
 ```
 
 Returns `true` if the boolean flag was present.
@@ -227,7 +244,7 @@ Returns `true` if the boolean flag was present.
 ### has
 
 ```milo
-fn has(args: &ParsedArgs, key: &string): bool
+fn ParsedArgs.has(self: &ParsedArgs, name: &string): bool
 ```
 
 Check whether a key exists in the parsed results.

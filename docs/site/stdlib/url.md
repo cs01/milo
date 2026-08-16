@@ -29,23 +29,23 @@ A parsed URL with its components.
 ### Url.parse
 
 ```milo
-fn Url.parse(input: string): Result<Url>
+fn Url.parse(s: string): Result<Url>
 ```
 
 Parses a URL string into its components.
 
-### urlQueryGet
+### Url.queryGet
 
 ```milo
-fn urlQueryGet(url: &Url, key: &string): Option<string>
+fn Url.queryGet(self: &Url, key: &string): Option<string>
 ```
 
 Extracts a query parameter value by key.
 
-### urlString
+### Url.toString
 
 ```milo
-fn urlString(url: &Url): string
+fn Url.toString(self: &Url): string
 ```
 
 Reconstructs the URL as a string.

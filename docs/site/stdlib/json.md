@@ -12,13 +12,19 @@ from "std/json" import { Json }
 
 ```milo
 struct Json {
-    raw: string,
-    start: i64,
-    end: i64,
+    source: string,
+    nodes: Vec<JsonNode>,
+    childIdx: Vec<i64>,
+    keyOffsets: Vec<i64>,
+    keyLens: Vec<i64>,
+    root: i64,
 }
 ```
 
-A view into a parsed JSON string. All accessors operate on the underlying `raw` buffer without copying.
+A parsed document: one flat pool of nodes over the original `source`, plus the index
+side-tables the accessors walk. Strings and numbers are stored as offsets into `source`,
+not copies, so a `Json` value is cheap to pass around and every accessor returns a view
+rather than allocating. Treat the fields as internal — use the accessors below.
 
 #### Json.get
 

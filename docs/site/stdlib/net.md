@@ -1,5 +1,7 @@
 # std/net
 
+<!-- api: std/net, std/fetch -->
+
 TCP and DNS resolution. The TLS socket (`TlsStream`) and the HTTP client
 (`fetch`, `FetchResponse`, `FetchOptions`) live in `std/fetch` — kept out of `std/net`
 so a plain-TCP program links without OpenSSL.
@@ -33,10 +35,10 @@ struct TlsStream {
 
 An owned TLS connection over TCP. Freed when dropped.
 
-### Response
+### FetchResponse
 
 ```milo
-struct Response {
+struct FetchResponse {
     status: i32,
     headers: string,
     body: string,
@@ -45,37 +47,37 @@ struct Response {
 
 HTTP response returned by the `fetch` functions.
 
-#### Response.text
+#### FetchResponse.text
 
 ```milo
-fn text(self): string
+fn FetchResponse.text(self: &FetchResponse): string
 ```
 
 Return the response body as a string.
 
-#### Response.json
+#### FetchResponse.json
 
 ```milo
-fn json(self): Json
+fn FetchResponse.json(self: &FetchResponse): Json
 ```
 
 Parse the response body as JSON.
 
-#### Response.ok
+#### FetchResponse.ok
 
 ```milo
-fn ok(self): bool
+fn FetchResponse.ok(self: &FetchResponse): bool
 ```
 
 True if status is 200-299.
 
-#### Response.header
+#### FetchResponse.header
 
 ```milo
-fn header(self, name: &string): string
+fn FetchResponse.header(self: &FetchResponse, name: &string): Option<string>
 ```
 
-Get a response header value by name.
+Get a response header value by name; `None` when the header is absent.
 
 ### FetchOptions
 
@@ -170,7 +172,7 @@ Receive data from a TLS connection.
 ### fetch
 
 ```milo
-fn fetch(url: &string): Result<Response, NetError>
+fn fetch(url: &string): Result<FetchResponse, NetError>
 ```
 
 HTTP GET with automatic TLS and DNS resolution.
@@ -183,7 +185,7 @@ writeStdout(&resp.body)
 ### fetchWith
 
 ```milo
-fn fetchWith(url: &string, opts: FetchOptions): Result<Response, NetError>
+fn fetchWith(url: &string, opts: FetchOptions): Result<FetchResponse, NetError>
 ```
 
 HTTP request with full control over method, headers, and body.
@@ -191,7 +193,7 @@ HTTP request with full control over method, headers, and body.
 ### fetchPost
 
 ```milo
-fn fetchPost(url: &string, body: &string): Result<Response, NetError>
+fn fetchPost(url: &string, body: &string): Result<FetchResponse, NetError>
 ```
 
 HTTP POST with a body.
@@ -199,7 +201,7 @@ HTTP POST with a body.
 ### fetchPut
 
 ```milo
-fn fetchPut(url: &string, body: &string): Result<Response, NetError>
+fn fetchPut(url: &string, body: &string): Result<FetchResponse, NetError>
 ```
 
 HTTP PUT with a body.
@@ -207,7 +209,7 @@ HTTP PUT with a body.
 ### fetchDelete
 
 ```milo
-fn fetchDelete(url: &string): Result<Response, NetError>
+fn fetchDelete(url: &string): Result<FetchResponse, NetError>
 ```
 
 HTTP DELETE.
@@ -215,7 +217,7 @@ HTTP DELETE.
 ### fetchPatch
 
 ```milo
-fn fetchPatch(url: &string, body: &string): Result<Response, NetError>
+fn fetchPatch(url: &string, body: &string): Result<FetchResponse, NetError>
 ```
 
 HTTP PATCH with a body.

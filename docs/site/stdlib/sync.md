@@ -18,7 +18,7 @@ Every type here is a reference-counted handle. `.clone()` gives another task or 
 
 ```milo
 struct Channel {
-    _ptr: *u8,
+    h: *u8,
 }
 ```
 
@@ -28,7 +28,7 @@ Bounded FIFO channel for streaming values between green tasks and `Promise.block
 
 ```milo
 struct WaitGroup {
-    _ptr: *u8,
+    _p: *u8,
 }
 ```
 
@@ -91,7 +91,7 @@ There is no `AtomicPtr`. A raw pointer is only dereferenceable inside `unsafe`, 
 ### Channel.new
 
 ```milo
-fn Channel.new(capacity: i64): Result<Channel>
+fn Channel.new(capacity: i64): Result<Channel<T>>
 ```
 
 Create a bounded channel with the given capacity.
@@ -99,7 +99,7 @@ Create a bounded channel with the given capacity.
 ### ch.send
 
 ```milo
-fn send(self: &Channel, val: i64): Result<i32>
+fn Channel.send(self: &Channel, val: T): Result<i32>
 ```
 
 Send a value into the channel. Blocks if full.
@@ -107,7 +107,7 @@ Send a value into the channel. Blocks if full.
 ### ch.recv
 
 ```milo
-fn recv(self: &Channel): Result<i64>
+fn Channel.recv(self: &Channel): Result<T>
 ```
 
 Receive a value from the channel. Blocks if empty.
@@ -115,7 +115,7 @@ Receive a value from the channel. Blocks if empty.
 ### ch.trySend
 
 ```milo
-fn trySend(self: &Channel, val: i64): bool
+fn Channel.trySend(self: &Channel, val: T): bool
 ```
 
 Non-blocking send. Returns true if sent, false if full.
@@ -123,7 +123,7 @@ Non-blocking send. Returns true if sent, false if full.
 ### ch.tryRecv
 
 ```milo
-fn tryRecv(self: &Channel): Option<i64>
+fn Channel.tryRecv(self: &Channel): Option<T>
 ```
 
 Non-blocking receive. Returns `Option.None` if empty.
@@ -131,7 +131,7 @@ Non-blocking receive. Returns `Option.None` if empty.
 ### ch.len
 
 ```milo
-fn len(self: &Channel): i64
+fn Channel.len(self: &Channel): i64
 ```
 
 Current number of items in the channel.
@@ -139,7 +139,7 @@ Current number of items in the channel.
 ### ch.clone
 
 ```milo
-fn clone(self: &Channel): Channel
+fn Channel.clone(self: &Channel): Channel<T>
 ```
 
 Give another owner (a producer task, a worker thread) its own handle. The queue is torn down when the last one drops.

@@ -88,6 +88,10 @@ type Root = {
   ownerTy: (ty: string) => string;
   /** steps from the owner down to the container */
   path: string;
+  /** the type an `impl` block can hang off, or null when the owner is a builtin */
+  implTarget: string | null;
+  /** steps from `self` down to the container, inside that impl */
+  implPath: string;
 };
 
 const ROOTS: Root[] = [
@@ -98,6 +102,8 @@ const ROOTS: Root[] = [
     owner: "c",
     ownerTy: ty => ty,
     path: "",
+    implTarget: null,
+    implPath: "",
   },
   {
     name: "field",
@@ -106,6 +112,8 @@ const ROOTS: Root[] = [
     owner: "h",
     ownerTy: () => "Holder",
     path: ".c",
+    implTarget: "Holder",
+    implPath: ".c",
   },
   {
     name: "nested field",
@@ -114,33 +122,122 @@ const ROOTS: Root[] = [
     owner: "o",
     ownerTy: () => "Outer",
     path: ".i.c",
+    implTarget: "Outer",
+    implPath: ".i.c",
+  },
+  {
+    // An index step makes the path imprecise about WHICH element, which is exactly the
+    // spot where a walker is tempted to give up and return "no place" — and "no place"
+    // read as "nothing to check" is how this class of hole gets made.
+    name: "index element",
+    decls: ty => `struct G { c: ${ty} }`,
+    setup: (_ty, init) => `    var v: Vec<G> = Vec.new()\n    v.push(G { c: ${init} })`,
+    owner: "v",
+    ownerTy: () => "Vec<G>",
+    path: "[0].c",
+    implTarget: null,
+    implPath: "",
+  },
+  {
+    name: "global",
+    decls: ty => `var GC: ${ty} = INIT_PLACEHOLDER`,
+    setup: () => "",
+    owner: "GC",
+    ownerTy: ty => ty,
+    path: "",
+    implTarget: null,
+    implPath: "",
   },
 ];
 
-const ROUTES = ["direct", "through a &mut fn"] as const;
+// How the loop body reaches the container. The routes matter as much as the spellings:
+// a rule can resolve the place correctly and still miss it if the mutation arrives
+// through a call it never inspects.
+type Route = {
+  name: string;
+  /** not every route fits every root — a bare `Vec<string>` local has no impl block */
+  applicable: (r: Root) => boolean;
+  /** top-level declarations this route needs */
+  decls: (c: Container, r: Root) => string;
+  /** what goes in the loop body */
+  body: (c: Container, r: Root) => string;
+};
 
-function program(c: Container, r: Root, route: (typeof ROUTES)[number]): string {
+const ROUTES: Route[] = [
+  {
+    name: "direct",
+    applicable: () => true,
+    decls: () => "",
+    body: (c, r) => c.mutate(r.owner + r.path),
+  },
+  {
+    name: "through a &mut fn",
+    applicable: () => true,
+    decls: (c, r) => `fn touch(x: &mut ${r.ownerTy(c.ty)}) {\n    ${c.mutate("x" + r.path)}\n}\n`,
+    body: (_c, r) => `touch(${r.owner})`,
+  },
+  {
+    // Two hops, because a one-level check can be satisfied by inspecting the immediate
+    // callee's signature; this one is only caught by treating the borrow as live across
+    // the whole call.
+    name: "through a two-level &mut chain",
+    applicable: () => true,
+    decls: (c, r) =>
+      `fn inner(x: &mut ${r.ownerTy(c.ty)}) {\n    ${c.mutate("x" + r.path)}\n}\nfn outer(x: &mut ${r.ownerTy(c.ty)}) {\n    inner(x)\n}\n`,
+    body: (_c, r) => `outer(${r.owner})`,
+  },
+  {
+    name: "through a method on the owner",
+    applicable: r => r.implTarget !== null,
+    decls: (c, r) =>
+      `impl ${r.implTarget} {\n    fn touch(self: &mut ${r.implTarget}) {\n        ${c.mutate("self" + r.implPath)}\n    }\n}\n`,
+    body: (_c, r) => `${r.owner}.touch()`,
+  },
+  {
+    name: "from inside a closure",
+    applicable: () => true,
+    decls: () => "",
+    body: (c, r) => `let f = () => { ${c.mutate(r.owner + r.path)} }\n        f()`,
+  },
+];
+
+function program(c: Container, r: Root, route: Route): string {
   const place = r.owner + r.path;
   const seed = c.seed(place);
-  const viaFn = route === "through a &mut fn";
-  const touch = viaFn
-    ? `fn touch(x: &mut ${r.ownerTy(c.ty)}) {\n    ${c.mutate("x" + r.path)}\n}\n`
-    : "";
-  const body = viaFn ? `touch(${r.owner})` : c.mutate(place);
-  return `${r.decls(c.ty)}\n${touch}\nfn main() {\n${r.setup(c.ty, c.init)}\n${seed ? `    ${seed}\n` : ""}    for ${c.bind} in ${place} {\n        ${body}\n        print(it)\n    }\n}\n`;
+  const decls = r.decls(c.ty).replace("INIT_PLACEHOLDER", c.init);
+  return `${decls}\n${route.decls(c, r)}\nfn main() {\n${r.setup(c.ty, c.init)}\n${seed ? `    ${seed}\n` : ""}    for ${c.bind} in ${place} {\n        ${route.body(c, r)}\n        print(it)\n    }\n}\n`;
 }
 
 describe("mutation during iteration is rejected for every spelling", () => {
   for (const c of CONTAINERS) {
     for (const r of ROOTS) {
       for (const route of ROUTES) {
-        test(`${c.name} as a ${r.name}, mutated ${route}`, () => {
+        if (!route.applicable(r)) continue;
+        test(`${c.name} as a ${r.name}, mutated ${route.name}`, () => {
           const errs = errorsFor(program(c, r, route));
           // Either wording is the rule firing: a mutating METHOD reports the borrow,
           // an element ASSIGNMENT reports the iteration. Both are a rejection.
           expect(errs.join("\n")).toMatch(/is borrowed|being iterated/);
         });
       }
+    }
+  }
+});
+
+// Anti-vacuity control. A matrix that only asserts REJECTION passes just as happily if
+// the generator emits programs that fail for some unrelated reason — a syntax slip in a
+// template would look exactly like full coverage. So every (container, root) pair is also
+// generated with a benign body and required to compile clean. If these go red, the
+// rejection rows above are not evidence of anything.
+describe("the same loop without the mutation compiles", () => {
+  for (const c of CONTAINERS) {
+    for (const r of ROOTS) {
+      test(`${c.name} as a ${r.name}`, () => {
+        const benign: Route = {
+          name: "none", applicable: () => true, decls: () => "", body: () => `print(it)`,
+        };
+        expect(errorsFor(program(c, r, benign))).toEqual([]);
+      });
     }
   }
 });

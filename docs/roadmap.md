@@ -3,7 +3,7 @@ system: planning
 purpose: canonical status — what shipped, what is in flight, what is planned, what was retired
 key-files: docs/backlog.md (ROI ordering over the open items), docs/safety-roadmap.md, docs/self-hosting.md, docs/verification-roadmap.md
 update-when: a feature ships, a track is abandoned, or a new track opens
-last-verified: 2026-08-06 (wasm64 float support shipped; the target's entry rewritten to match)
+last-verified: 2026-08-15 (self-host endgame decided proof-only and src-milo frozen; packages ecosystem at 8 published with an install-and-build gate; green main; counts re-measured)
 -->
 
 # Milo Roadmap
@@ -27,7 +27,7 @@ Diagnostics carry "did you mean" suggestions on a missed method, field, or name 
 - **Ownership**: single-owner moves, compiler-tracked drops, no GC, no RC
 - **Null safety**: `Option<T>` — no null in safe code
 - **Race safety**: structural `Send`/`Sync`, checked at `spawn()`/`Promise.blocking` boundaries
-- **Overflow safety**: compile-time range proof + runtime traps on `+ - * -x` (and shift-out-of-range, div-by-zero, `INT_MIN / -1`) in **all** build modes; `--no-overflow-checks` / `--fast` opt back into wrapping for `+ - *`, `.wrappingAdd`/`.saturatingAdd`/`.checkedAdd` name it per op
+- **Overflow safety**: compile-time range proof + runtime traps on `+ - * -x` (and shift-out-of-range, div-by-zero, `INT_MIN / -1`) in **all** build modes; `--no-overflow-checks` / `--fast` opt back into wrapping for `+ - *`, `.wrappingAdd`/`.saturatingAdd`/`.checkedAdd` name it per op. The silent release wrap was the one inherited footgun (Ethos #1). The compiler proves most arithmetic safe and emits no check at all (`matmul` emits zero traps with checks on); arithmetic-dominated code with unprovable operand ranges measured **~+8%** worst case (0.37s → 0.40s over 400M iterations), near-zero on real sub-0.3s benchmarks. A trap `abort()`s for a supervisor-visible abnormal exit and a core dump
 - **`unsafe` blocks**: required for deref, pointer indexing, address-of, pointer casts, `zeroed<T>()`, unsafe-signature extern calls; unused-`unsafe` lint on by default
 - **Borrow invalidation**: ref-while-frozen and use-after-invalidate for built-in borrows; call-site exclusivity (`f(&mut v, &v[0])` rejected)
 - **Arena safety**: identity + generation validation at runtime for `Arena<T>`/`Handle<T>`
@@ -72,6 +72,7 @@ Green-tier concurrency with one OS-thread escape hatch:
 - **`std/sync`**: `Channel<T>` (bounded FIFO, multi-producer, blocking + non-blocking), `AtomicI64`, `AtomicBool`
 - **`std/select`**: fd, timer, channel, promise and child-exit arms
 - **No async/await** — blocking-shaped code yields automatically in green context
+- **`main` is itself a green task** wherever the program can reach `spawn`. Before this, a blocking call in `main` starved the very tasks that would satisfy it — `main` ran on the OS thread and nothing else could progress. Codegen decides this per program, so a program with no spawn keeps a plain `main`. Std APIs that block must therefore branch on `schedulerCurrent()` rather than assume they are off-scheduler
 - Public `Thread`/`Mutex`/`RwLock`/`parallel` were **removed** 2026-07-10 (green tier only — see [concurrency-simplification.md](concurrency-simplification.md))
 
 ### Standard Library (80 modules)
@@ -98,13 +99,17 @@ Prelude: `prelude`
 
 TLS clients verify certificates (`SSL_VERIFY_PEER` + hostname binding), and `std/https` serves HTTPS over the same OpenSSL binding; JSON parsing is RFC 8259-strict with a lenient `jsonParseJsonc` and a `jsonPull` streaming tokenizer.
 
-### Self-Hosting — Bootstrap Converges
+### Self-Hosting — Bootstrap Converges, and the Endgame Is Decided
 
-`milo0` (`src-milo/`, ~20.8K lines) — the Milo compiler written in Milo — compiles its own source to a **byte-identical fixed point at the production `-O2` level**: `stage1 == stage2 == stage3`. Manifest-wide, 212/339 fixtures emit byte-identical IR between stage1 and stage2, zero divergences. Drop-glue slice 1 (drop infra, `Ident` move-zeroing, reassign-drop) has landed and stays ASAN-clean.
+`milo0` (`src-milo/`, ~37.9K lines across 32 files) — the Milo compiler written in Milo — compiles its own source to a **byte-identical fixed point at the production `-O2` level**: `stage1 == stage2 == stage3`. 590 fixtures pass under `milo-self` (`tests/selfhost-manifest.txt` is the ratchet); 118 of 255 negative tests behave correctly under it.
+
+**The endgame was decided 2026-08-09: proof-only. `src-milo/` is frozen at the fixpoint and `src/` is not going away.** The rule was precommitted in [selfhost-endgame-decision.md](selfhost-endgame-decision.md) *before* the census that feeds it, precisely so a histogram read afterwards could not be narrated into whichever answer was already wanted. It measured N = 99 silent accepts (unsoundness — programs milo-self compiles that it must reject), of which misscoped-plus-uncalled came in at **14 of 99 where the replacement rule needed 50%**. So the fixpoint is the deliverable, banked; the sync tax stops.
+
+That freeze is why `src-milo/` has had no commits since 2026-08-09, and it is deliberate — not neglect.
 
 See [self-hosting.md](self-hosting.md) for the M0–M5 milestone log and the eight oracle miscompiles the self-compile exposed and fixed.
 
-Reproduce: `sh scripts/selfhost.sh` (builds stage1 via the oracle — required; `.selfhost/milo-self.bin` is gitignored), then `bun test tests/selfhost.test.ts`. **Never run `.selfhost/milo-self.bin` bare** — see the memory guards in CLAUDE.md.
+Reproduce: `sh scripts/selfhost.sh` (builds stage1 via the oracle — required; `.selfhost/milo-self.bin` is gitignored), then `bun test tests/selfhost.test.ts`. CI runs the fixpoint and the soundness/HIR ratchets on any commit touching `src-milo/`, `std/`, or the selfhost scripts, and sweeps every fixture nightly. **Never run `.selfhost/milo-self.bin` bare** — see the memory guards in CLAUDE.md.
 
 ### Platforms
 
@@ -125,23 +130,25 @@ Reproduce: `sh scripts/selfhost.sh` (builds stage1 via the oracle — required; 
 - **LSP**: diagnostics, hover, go-to-definition, completions, code lens, document symbols, workspace symbols, code actions, signature help, inlay hints, references, document highlight, rename, formatting
 - **VS Code extension**: syntax highlighting + LSP client
 - **Formatter**: `milo fmt` — written in Milo (`fmt.milo` is the only implementation)
-- **Package manager**: `milo init/new/add/remove/install/update/tree/why/vendor/publish` plus `tool install/uninstall/list/run`, git-based cache with a lockfile, GitHub repos as the registry, per-package name mangling. Folded into the one `milo` binary. First published package: [milo-language/yaml](https://github.com/milo-language/milo-yaml). See [plans/package-manager.md](plans/package-manager.md)
+- **Package manager**: `milo init/new/add/remove/install/update/tree/why/vendor/publish` plus `tool install/uninstall/list/run`, git-based cache with a lockfile, GitHub repos as the registry, per-package name mangling. Folded into the one `milo` binary. See [plans/package-manager.md](plans/package-manager.md)
+- **Published packages (8)**: postgres, redis, markdown, toml, yaml, json-rpc, gl, sdl — indexed on [the packages page](site/packages.md), each graded against something that is *not itself* (CommonMark's 655 spec examples and `cmark`, Python's `tomllib`, a real PostgreSQL requiring SCRAM, a real Redis, `ruamel.yaml`). `scripts/ecosystem-check.ts` is the gate that installs each one from GitHub and builds it against this checkout — added after two packages shipped green in-repo and uninstallable to everyone else, for two different reasons (a string global invisible to its own package's functions, and a capitalised global parsing as an enumlit and recovering by a value lookup that mangling had already renamed away)
 - **Docs from source**: `milo doc <file|dir>` generates reference markdown from doc-comments; `milo api <terms>` searches std signatures
-- **Test framework**: `@expect:`/`@error:` annotations, `milo test` runner — 494 fixtures, 167 error fixtures, 26 prove fixtures
+- **Test framework**: `@expect:`/`@error:` annotations, `milo test` runner — 597 fixtures, 242 error fixtures, 31 prove fixtures
+- **Fuzzers**: `scripts/fuzz-frontend.ts` (2 bugs per 150k mutants) and `scripts/fuzz-ownership.ts`, which grades ownership bugs under a *real* ASan oracle. Two silent-success bugs were found in the harness itself before it graded anything: `--sanitize` linked the ASan runtime but instrumented nothing, so every use-after-free read passed while the interceptors kept the sanitizer looking alive; and the fuzzer graded a UAF by whether the freed bytes happened to be reused. Surface coverage is 27 of 39 expression and statement forms, now composed at depth 5–7 rather than emitted alone at the top level of `main` — a generator can reach 39/39 wide and still test nothing about how the rules compose
 - **Benchmarks**: `benchmarks/run.sh` with per-benchmark `results-*.md` (fib, binarytrees, grep, json, matmul, maplookup)
 - **JS target**: `milo emit-js` — the playground on the docs site runs the compiler output in-browser
-- **CI**: build + test on push/PR across macOS, Linux and Windows; release pipeline with `--static-deps` static linking (built on ubuntu-22.04 runners for glibc compatibility, never musl)
-- **Examples**: `basics/` (9), `cli-tools/` (13), `net/` (7), `graphics/` (6), `games/` (4), `simulation/` (4), `terminal/` (6), `embedded/` (4), `tools/java-dap`. Treated as integration smoke tests for stdlib changes
+- **CI**: build + test on push/PR across macOS-arm64, linux-x64 and Windows-x64 (**no linux-arm64 — see In Progress**); release pipeline with `--static-deps` static linking (built on ubuntu-22.04 runners for glibc compatibility, never musl)
+- **Ratchets** — monotone gates that fail the build on a regression rather than on a threshold someone has to remember: the leak baseline (`tests/leak-clean.txt`, via `leaks -atExit`; no LSan on macOS), the `src-milo` HIR re-derivation count (115 sites, monotone to zero, and raising it needs an explicit flag *and* a written reason), the proven-contract floor (losing a proof fails the build, so a contract silently degrading from `proven` to `unknown` is caught), the selfhost fixture manifest, and the emit-js parity baseline. Every one of these keys fixtures by filename, so renaming a fixture reads as a regression and a new fixture at once
+- **Examples**: 160 `.milo` files over nine domains — `basics/` (9), `cli-tools/` (16), `net/` (10), `graphics/` (8), `games/` (99, mostly the multi-file apsis/neon/flight projects), `simulation/` (6), `terminal/` (6), `embedded/` (2), `tools/` (3). Treated as integration smoke tests for stdlib changes. The census grades what **ran**, not what compiled, and names the unverified rest — it used to report building as passing
 - **Debugging**: `-g` emits DWARF that composes with any `-O`; the DAP debugger lives in [milo-language/dapweb](https://github.com/milo-language/dapweb)
 
 ---
 
 ## In Progress
 
-### Self-Hosting — M6
+### Platform Coverage — the linux-arm64 hole
 
-- [ ] Drop-glue slice 2 — scope and loop drops (slice 1 landed; this is the big leak win)
-- [ ] Grow the fixture manifest toward parity. Expected gaps are what bootstrap doesn't need: closures (the `%Closure` decay fix is written up in `self-hosting.md`), user generics, traits beyond `impl Clone`, the green runtime
+- [ ] **CI has no linux-arm64 runner.** The matrix is macOS-arm64, linux-x64 and Windows-x64. Nothing in this repo exercises linux-arm64 codegen, and the gap is not theoretical: milojs's release job — which builds against this compiler's rolling `latest` — has aborted on that target since 2026-08-15 with `free(): invalid pointer` on a hello-world, while linux-x64 and darwin-arm64 are clean. A `ubuntu-22.04-arm` runner belongs in `ci.yml`, and the failure should be reproduced here rather than diagnosed downstream
 
 ### Windows — Remaining Tiers
 
@@ -151,10 +158,6 @@ Reproduce: `sh scripts/selfhost.sh` (builds stage1 via the oracle — required; 
 - [ ] **`std/regex`** — no C-linkable regex exists on Windows, so the Windows arm is a fail-loud stub. The real fix is a pure-Milo engine (which would drop the libc dependency everywhere)
 - [ ] **fd width** — `socket`/`accept` return `SOCKET` (`UINT_PTR`) but `std/os` declares `i32`; the audit script correctly flags it and stays off the Windows CI job until the fd layer goes i64
 - [ ] Unskip `tcpIpv6` / `tcpGreenConnectRefused` once real Windows confirms them (they link; Wine can't emulate `AF_INET6` or a refused `FD_CONNECT`)
-
-### Overflow Traps by Default — DONE
-
-`+ - * -x` trap on overflow in **every** build mode (Ethos #1; the silent release wrap was the one inherited footgun). `--no-overflow-checks`/`--fast` opt back into wrapping; `wrappingAdd`/`saturatingAdd`/`checkedAdd` name it per op. The compiler proves most arithmetic safe and emits no check at all (`matmul` emits zero traps even with checks on); arithmetic-dominated code with unprovable operand ranges measured **~+8%** worst case (0.37s → 0.40s over 400M iterations), near-zero on real sub-0.3s benchmarks. Traps `abort()` (SIGABRT) for a supervisor-visible abnormal exit + core dump. Shipped alongside all-mode shift-out-of-range traps and float→int saturating casts.
 
 ---
 
@@ -198,7 +201,7 @@ Phases 1–3a are done (see Type System & Safety). Remaining, from [safety-roadm
 - [ ] **3b — purity inference** for safe overlap at call sites
 - [ ] **4a — debug ref counting** for patterns static analysis can't reach (`--sanitize` already links ASAN)
 - [ ] **`unsafe fn` declarations** and `--deny-unsafe` for user code; `unsafe` visibility in the LSP
-- [x] **Closure escape — the direct store.** A non-`move` closure with captures can no longer be written into a struct literal, an array literal, or `push`/`insert`/`set` on a collection; `move` heap-owns the captures and is what the diagnostic points at. Closes the use-after-return that read a dead stack frame (silent garbage at `--debug`, a hang at `-O2`, invisible to ASAN)
+- [x] **Closure escape — the direct store.** A non-`move` closure with captures can no longer be written into a struct literal, an array literal, or `push`/`insert`/`set` on a collection; `move` heap-owns the captures and is what the diagnostic points at. Closes the use-after-return that read a dead stack frame (silent garbage at `--debug`, a hang at `-O2`, invisible to ASAN). **The rule is reject, not promote** — the first attempt auto-promoted the closure to `move` at the return, which fired *after* the checker had already walked the body, so a read of the capture printed empty with no diagnostic. A retroactive rule is invisible to the pass that has to see it
 - [ ] **Closure escape — the arg-then-stored residual.** `let f = <closure>; wrap(f)` where the callee stores `f` still dangles: a closure *literal* passed to an owned `fn` param is auto-`move`d, an Ident is not. Needs a callee-retains property rather than a wider promotion (backlog Tier 1 #4)
 
 ---

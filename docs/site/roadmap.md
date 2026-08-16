@@ -3,7 +3,7 @@ system: planning
 purpose: public-facing roadmap for the docs site — a condensed view of docs/roadmap.md
 key-files: docs/roadmap.md (canonical status; keep this file in step with it)
 update-when: docs/roadmap.md changes status for anything a user would see
-last-verified: 2026-07-24
+last-verified: 2026-08-15 (re-synced with docs/roadmap.md: overflow traps ship in all modes, self-host endgame decided, counts re-measured)
 -->
 
 # Milo Roadmap
@@ -21,7 +21,7 @@ Primitive types, let/var bindings, if/else, while/for loops, functions, structs,
 - **Ownership**: single-owner move semantics, compiler-tracked drops, no GC, no reference counting
 - **Null safety**: `Option<T>` — no null pointers in safe code
 - **Race safety**: structural `Send`/`Sync` — the compiler rejects data races at `spawn()` boundaries
-- **Overflow safety**: compile-time range proof plus traps in debug builds; `--overflow-checks` turns traps on at any optimization level
+- **Overflow safety**: compile-time range proof plus runtime traps on `+ - * -x` — and shift-out-of-range, divide-by-zero, `INT_MIN / -1` — in **every** build mode, release included. `--no-overflow-checks` opts back into wrapping, and `wrappingAdd`/`saturatingAdd`/`checkedAdd` name it per operation. Most arithmetic is proved safe and emits no check at all
 - **`unsafe` blocks**: pointer work is quarantined behind a grep target, with an unused-`unsafe` lint on by default
 - **Borrow invalidation**: ref-while-frozen, use-after-invalidate, and call-site exclusivity are compile errors
 - **Arena safety**: identity and generation validation for `Arena<T>`/`Handle<T>`
@@ -51,12 +51,13 @@ One model — green tasks — with a single OS-thread escape hatch. No async/awa
 - **OS-thread escape hatch**: `Promise<T>.blocking()` runs `Send` closures on a real thread for CPU-bound work or blocking FFI; the result returns through the same `.await()`
 - **Synchronization** (`std/sync`): `Channel<T>` (bounded FIFO, multi-producer, blocking + non-blocking), `WaitGroup`, `AtomicI64`, `AtomicBool`; `select` over fd, timer, channel, promise, and child-exit arms (`std/select`)
 - **Go exit semantics**: when `main` returns the process exits and outstanding tasks are abandoned — wait explicitly, or drive with `schedulerRunToCompletion()`
+- **`main` is itself a green task** in any program that can reach `spawn`, so a blocking call in `main` no longer starves the tasks that would satisfy it
 
-### Standard Library (69 modules)
+### Standard Library (80 modules)
 
 I/O & system: io, fs, path, env, environ, args, process, signal, dl, sysinfo, mem, os, platform, term, pty, keys, ansi
-Networking: net, unix, fetch, http, httpmw, ws, url
-Data: json, csv, toml, base64, base32, hex, sqlite, arena, set, pool, png
+Networking: net, unix, fetch, tls, https, http, httpmw, ws, url
+Data: json, csv, base64, base32, hex, sqlite, arena, set, pool, png
 Compression: deflate, inflate, zip, zstd
 Crypto & auth: crypto, sha256, sha1, hmac, jwt, totp, checksum, xxhash
 Concurrency: runtime, sync, select, event
@@ -66,7 +67,9 @@ CLI: argparse, color, log
 Time: time, datetime, uuid
 Testing: testing
 
-TLS clients verify certificates and bind hostnames. JSON parsing is RFC 8259-strict, with a lenient JSONC mode and a streaming pull tokenizer.
+TLS clients verify certificates and bind hostnames, and `std/https` serves HTTPS over the same binding. JSON parsing is RFC 8259-strict, with a lenient JSONC mode and a streaming pull tokenizer.
+
+Formats with credible competitors and clients that track someone else's release cycle live as [packages](/packages) rather than in `std`, so a fix ships the same day on its own tag instead of waiting for a compiler release. TOML moved out for exactly that reason.
 
 ### C Interop
 
@@ -83,22 +86,23 @@ macOS and Linux are fully supported on both aarch64 and x86_64. Windows is a par
 - **Formatter**: `milo fmt`, written in Milo
 - **Package manager**: `milo add`/`install`/`publish` plus `milo tool install`, with a lockfile, a git-based cache, and GitHub repositories as the registry — built into the one `milo` binary. [Published packages](/packages) cover PostgreSQL, Redis, markdown, TOML, YAML, JSON-RPC, OpenGL and SDL.
 - **Docs from source**: `milo doc` generates reference markdown from doc-comments; `milo api` searches the standard library
-- **Test framework**: `@expect:`/`@error:` annotations and a `milo test` runner over 441 fixtures
+- **Test framework**: `@expect:`/`@error:` annotations and a `milo test` runner over 597 fixtures, plus 242 that must fail to compile and 31 that must be proved
 - **Debugging**: `-g` emits DWARF that composes with any optimization level
 - **CI**: build and test on macOS, Linux, and Windows, plus a release pipeline with static linking
 - **Playground**: the compiler's JavaScript backend running in the browser
 
 ### Self-Hosting
 
-`milo0` — the Milo compiler written in Milo — compiles its own source to a byte-identical fixed point at the production `-O2` level: stage1 == stage2 == stage3. Across the fixture manifest, 212 of 339 fixtures emit byte-identical IR between stages, with zero divergences.
+`milo0` — the Milo compiler written in Milo, about 38k lines — compiles its own source to a byte-identical fixed point at the production `-O2` level: stage1 == stage2 == stage3. 590 fixtures pass under the self-hosted compiler.
+
+The fixed point was the deliverable, and it is banked. Replacing `src/` with `milo0` was measured against a rule written down *before* the census that would decide it, and the census came in well under the threshold — so `milo0` is frozen as proof rather than carried as a second compiler. Milo is proven able to compile itself; it is not going to pay the cost of maintaining two front ends to say so twice.
 
 ---
 
 ## In Progress
 
-- **Self-hosting**: growing the fixture manifest toward full parity, and finishing drop-glue for scope and loop exits
 - **Windows**: overlapped IO for pipe readiness, a TLS backend, AES-GCM, and a regex engine
-- **Overflow traps by default in release builds** — the direction is decided; what remains is a credible benchmark on a quiet machine (worst measured case is about +8%, and most arithmetic is proved safe and emits no check at all)
+- **linux-arm64 CI coverage**: macOS-arm64, linux-x64 and Windows-x64 are tested on every push; linux-arm64 is not yet, and needs to be
 
 ---
 
@@ -106,11 +110,11 @@ macOS and Linux are fully supported on both aarch64 and x86_64. Windows is a par
 
 ### Language
 
-- **`&mut [T]` views and a checked disjoint split** — slices are immutable-only today, so nothing can hand several workers non-overlapping mutable windows into one buffer
+- **A dynamic disjoint split of `&mut [T]`** — mutable slice parameters and literal-range disjoint windows both ship (`two(v[0..2], v[2..4])` is accepted, an overlapping pair is rejected). What remains is splitting into a *runtime* number of windows, which second-class references cannot return as a tuple and so wants a callback form with the disjointness discharged by the prover
 - **Borrowed byte views** — offset/length I/O, buffer interop, zero-copy protocol parsing
 - **Named enum-variant fields** — `ForEach { varName: string, … }` instead of long positional payloads
 - **Tuple binding in for-in** — `for (i, x) in vec.enumerate()`
-- **Iterator breadth** — `fold`/`sum`/`take`/`skip`/`zip`, and combinators beyond `Vec` (`map`/`filter`/`each`/`enumerate`/`find`/`any`/`all` already ship on `Vec`)
+- **Combinators beyond `Vec`** — `map`/`filter`/`each`/`enumerate`/`find`/`any`/`all`/`sum` ship, but are gated on `Vec`, so `&[T]` and `[T; N]` get none of them. Lifting that gate is the work; `fold` is the one adapter genuinely missing
 - **`Heap<Interface>`** — heterogeneous collections such as `Vec<Heap<Shape>>`
 - **Error boxing** — the `anyhow`-style half of error conversion
 - **Ranged integers L3** — branch narrowing: after `if x < 50`, `x` is known to be `(min..49)` in the then-branch
@@ -143,5 +147,6 @@ macOS and Linux are fully supported on both aarch64 and x86_64. Windows is a par
 ## Not Planned
 
 - **Lazy iterator adapters** — laziness pays off only through aggressive inlining and would pull associated types into the trait system. Eager stages stay.
+- **`take` / `skip` / `zip` as adapters** — `take(n)` and `skip(n)` are already spelled `v[0..n]` and `v[n..v.len]`, which slicing gives zero-copy and in `&mut` form; an eager adapter would allocate and clone what a view hands back for free. `zip` has no type to return, since there are no tuples. Revisit `zip` only if tuples land.
 - **Dependent types and hand-written proof terms** — Milo's lane is SMT-discharged contracts with no proof obligations to write by hand.
 - **OS threads as a public API** — `Thread`/`Mutex`/`RwLock` were removed in favour of the green tier and `Promise.blocking()`.

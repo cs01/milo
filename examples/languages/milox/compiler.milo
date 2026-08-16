@@ -1,4 +1,4 @@
-// milosl compiler: tokens -> bytecode, in one pass, clox-shaped.
+// milox compiler: tokens -> bytecode, in one pass, clox-shaped.
 //
 // There is no AST. Each parse function emits its own instructions as it
 // returns, which is why precedence is expressed as a chain of mutually
@@ -34,7 +34,7 @@ from "std/strconv" import {
 }
 
 // One bad line should not produce a hundred diagnostics, and a file that is
-// not milosl at all should not produce a hundred thousand.
+// not milox at all should not produce a hundred thousand.
 let MAX_ERRORS: i64 = 25
 
 // 16 bits of operand, so every jump distance and constant index is bounded.

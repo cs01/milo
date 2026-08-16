@@ -1,4 +1,4 @@
-// milosl — a small scripting language whose entire point is its value
+// milox — a small scripting language whose entire point is its value
 // representation. See README.md.
 //
 // @run: demo
@@ -28,8 +28,8 @@ from "std/time" import {
 }
 
 let DEMO: string = "
-// milosl demo: everything the language has.
-var greeting = \"milosl\";
+// milox demo: everything the language has.
+var greeting = \"milox\";
 print greeting + \" says hi\";
 
 fn fib(n) {
@@ -192,13 +192,13 @@ fn demoForge() {
 }
 
 fn usage() {
-    print("milosl — a small language with an 8-byte nan-boxed value")
+    print("milox — a small language with an 8-byte nan-boxed value")
     print("")
-    print("  milosl <file.sl>        run a script")
-    print("  milosl demo             run the built-in demo program")
-    print("  milosl bench            run the benchmarks")
-    print("  milosl gc-bug           free a reachable object on purpose, watch it get caught")
-    print("  milosl forge            forge 2M object references, watch none of them deref")
+    print("  milox <file.sl>        run a script")
+    print("  milox demo             run the built-in demo program")
+    print("  milox bench            run the benchmarks")
+    print("  milox gc-bug           free a reachable object on purpose, watch it get caught")
+    print("  milox forge            forge 2M object references, watch none of them deref")
     print("")
     print("  --disasm                dump bytecode before running")
     print("  --stats                 print instruction, allocation and GC counts")
@@ -254,7 +254,7 @@ fn main() {
         return
     }
     if target == "bench" {
-        print("milosl benchmarks")
+        print("milox benchmarks")
         bench("fib(27)      ", BENCH_FIB)
         bench("loop 2M      ", BENCH_LOOP)
         bench("alloc 120k   ", BENCH_ALLOC)
@@ -265,7 +265,7 @@ fn main() {
             let _ = runSource(src, disasm, stats, false)
         }
         Err(e) => {
-            print("milosl: cannot read '" + target + "'")
+            print("milox: cannot read '" + target + "'")
             usage()
         }
     }

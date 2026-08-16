@@ -1,4 +1,4 @@
-// A compiled milosl function. Functions are compile-time entities held in a
+// A compiled milox function. Functions are compile-time entities held in a
 // flat table on the VM; a Value referring to one is a heap Obj.Fn carrying its
 // table index, so the collector never has to trace bytecode.
 from "./chunk" import {

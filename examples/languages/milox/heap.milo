@@ -1,4 +1,4 @@
-// milosl object heap: one generational arena for every heap value, plus a
+// milox object heap: one generational arena for every heap value, plus a
 // mark-sweep collector over it.
 //
 // The reason the collector is worth writing at all in an example this small:

@@ -1,4 +1,4 @@
-// milosl value representation: every runtime value is exactly 8 bytes.
+// milox value representation: every runtime value is exactly 8 bytes.
 //
 // A double is stored as itself. Everything else hides in the payload of a
 // quiet NaN, which is the one f64 bit pattern nobody computes with. The
@@ -75,8 +75,8 @@ impl Value {
     fn obj(index: i32, generation: i32): Value {
         let idx = index as i64
         let gen = generation as i64
-        assert(idx >= 0 && idx <= MAX_INDEX, "milosl: heap index exceeds 24-bit nan-box payload")
-        assert(gen >= 0 && gen <= MAX_GENERATION, "milosl: slot generation exceeds 26-bit nan-box payload")
+        assert(idx >= 0 && idx <= MAX_INDEX, "milox: heap index exceeds 24-bit nan-box payload")
+        assert(gen >= 0 && gen <= MAX_GENERATION, "milox: slot generation exceeds 26-bit nan-box payload")
         let payload = ((gen as u64) << INDEX_BITS) | (idx as u64)
         return Value {
             bits: SIGN | QNAN | payload

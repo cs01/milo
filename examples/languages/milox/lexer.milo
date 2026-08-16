@@ -1,7 +1,7 @@
-// milosl lexer: source text -> a flat Vec<Token>.
+// milox lexer: source text -> a flat Vec<Token>.
 //
 // The whole file is scanned up front rather than pulled one token at a time.
-// A milosl program is a string the host already holds entirely in memory, so
+// A milox program is a string the host already holds entirely in memory, so
 // streaming buys nothing, and a materialized vector lets the compiler use a
 // plain integer cursor with trivial lookahead instead of a two-token window.
 //

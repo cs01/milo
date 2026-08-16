@@ -1,4 +1,4 @@
-// milosl virtual machine: a stack machine over the bytecode in chunk.milo.
+// milox virtual machine: a stack machine over the bytecode in chunk.milo.
 //
 // The hot loop reads `self.functions[fi].chunk.code[ip]` directly rather than
 // caching a reference to the code vector, because Milo's references are

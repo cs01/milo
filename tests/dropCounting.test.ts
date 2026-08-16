@@ -50,7 +50,10 @@ const SHAPES: Record<string, { decl: string; mk: (n: string) => string }> = {
 };
 
 // Each route takes ownership of exactly one resource by a different path.
-const ROUTES: Record<string, { decls?: string; body: string }> = {
+// `expect` is the number of resources the route CREATES, so it is the number of
+// destructor runs required. Most routes create one; a reassignment creates two and must
+// destroy both — the overwritten value is the one a compiler forgets.
+const ROUTES: Record<string, { decls?: string; body: string; expect?: number }> = {
   "held in a local": {
     body: `    var r = MK
     print("use ", r.id)`,
@@ -98,13 +101,50 @@ const ROUTES: Record<string, { decls?: string; body: string }> = {
     body: `    var o: Option<Res> = Option.Some(MK)
     if let Option.Some(r) = o { print("got ", r.id) }`,
   },
+  // Two resources, two destructor runs. The overwritten value is the one that gets
+  // forgotten: nothing in the program mentions it again, so a backend that only drops
+  // at scope exit leaks it silently.
+  "overwritten by a reassignment": {
+    body: `    var r = MK
+    print("first ", r.id)
+    r = MK2
+    print("second ", r.id)`,
+    expect: 2,
+  },
+  "nested two structs deep": {
+    decls: `struct Inner { r: Res }
+struct Outer { i: Inner }`,
+    body: `    var o = Outer { i: Inner { r: MK } }
+    print("deep ", o.i.r.id)`,
+  },
+  "alive across an early return": {
+    decls: `fn go(flag: bool): i64 {
+    var r = MK
+    if flag { return r.id }
+    return 0
+}`,
+    body: `    print("ret ", go(true))`,
+  },
+  "captured by a move closure that runs": {
+    body: `    var r = MK
+    let f = move () => { print("cap ", r.id) }
+    f()`,
+  },
+  "held in a Vec that has elements": {
+    body: `    var v: Vec<Res> = Vec.new()
+    v.push(MK)
+    v.push(MK2)
+    print("len ", v.len)`,
+    expect: 2,
+  },
 };
 
 function program(shape: keyof typeof SHAPES, route: keyof typeof ROUTES): string {
   const s = SHAPES[shape];
   const r = ROUTES[route];
-  const body = r.body.replaceAll("MK", s.mk("1"));
-  const decls = (r.decls ?? "").replaceAll("MK", s.mk("1"));
+  const sub = (t: string) => t.replaceAll("MK2", s.mk("2")).replaceAll("MK", s.mk("1"));
+  const body = sub(r.body);
+  const decls = sub(r.decls ?? "");
   return `${s.decl}
 
 impl Drop for Res {
@@ -120,10 +160,16 @@ ${body}
 `;
 }
 
+// Each cell is a compile AND a run, so the matrix costs ~40 child processes. That is
+// cheap on a CI runner and unaffordable on a busy dev box, where the guard sheds builds
+// under memory pressure and the whole file reports UNMEASURED. Same gate the emit-js
+// parity sweep uses: on in CI, opt-in locally.
+const enabled = !!process.env.CI || !!process.env.MILO_DROP_MATRIX;
+
 type Cell = { drops: number; detail: string };
 const results: Record<string, Record<string, Cell>> = {};
 
-describe("a resource is destroyed exactly once", () => {
+describe.skipIf(!enabled)("a resource is destroyed exactly once", () => {
   beforeAll(async () => {
     execSync(`bun build --compile ${join(MILO_ROOT, "src", "main.ts")} --outfile ${MILOC}`, {
       stdio: ["pipe", "pipe", "pipe"],
@@ -158,6 +204,19 @@ describe("a resource is destroyed exactly once", () => {
     }
   }, 900_000);
 
+  // A cell the guard killed is skipped below, which is right — a shed build is not
+  // evidence of a leak. But skipping EVERY cell and reporting green is how a gate becomes
+  // decoration: the first run of this file after adding six routes reported "42 pass"
+  // with 41 cells unmeasured. Unknown has to read as unknown, so the coverage itself is
+  // asserted.
+  test("enough cells were actually measured to mean anything", () => {
+    const cells = Object.values(results).flatMap(r => Object.values(r));
+    const measured = cells.filter(c => c.drops !== -1).length;
+    const detail = cells.filter(c => c.drops === -1).map(c => c.detail)[0] ?? "";
+    expect({ measured: measured >= Math.ceil(cells.length * 0.8), of: cells.length, firstUnmeasured: detail })
+      .toEqual({ measured: true, of: cells.length, firstUnmeasured: detail });
+  });
+
   for (const shape of Object.keys(SHAPES)) {
     for (const route of Object.keys(ROUTES)) {
       test(`${shape}, ${route}`, () => {
@@ -167,8 +226,9 @@ describe("a resource is destroyed exactly once", () => {
           console.log(`  UNMEASURED ${shape}/${route}: ${cell.detail}`);
           return;
         }
+        const want = ROUTES[route].expect ?? 1;
         expect({ route, drops: cell.drops, output: cell.detail })
-          .toEqual({ route, drops: 1, output: cell.detail });
+          .toEqual({ route, drops: want, output: cell.detail });
       });
     }
   }

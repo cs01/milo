@@ -97,6 +97,28 @@ impl Value {
     }
 }
 
+// The counterpart to `show`. `show` returns an owned string, so `get` copies one
+// out of the arena — right for printing, wrong for a hot loop. `arenaWith` hands
+// the closure a borrow instead, so this walks every string and copies none.
+//
+// That is the whole Milo/Rust trade. Rust's `get` returns `Option<&String>` and
+// makes you write `.cloned()` when you want to own it; Milo's returns `Option<T>`
+// and makes you reach for `arenaWith` when you don't. Same two operations, and
+// each language picks a different one to be the short spelling.
+fn totalStringBytes(strings: &Arena<string>, arr: &Vec<Value>): i64 {
+    var total: i64 = 0
+    for v in arr {
+        if v.isNum() {
+            continue
+        }
+        total = total + (arenaWith(strings, v.handle(strings), (s: &string): i64 => {
+            return s.len
+        }
+        ) ?? 0)
+    }
+    return total
+}
+
 fn main() {
     // The strings live here, and nowhere else. Every string Value is an index
     // into this arena plus a generation.
@@ -111,6 +133,9 @@ fn main() {
     for v in arr {
         print(v.show(strings))
     }
+
+    // ── reading without copying ──
+    print("string bytes, none of them copied: " + totalStringBytes(strings, arr).toString())
 
     // ── real NaN and infinity are still numbers, not tags ──
     var zero: f64 = 0.0

@@ -117,3 +117,33 @@ Review personas own the docs for their domain and keep them current (see [docs/a
 ## Self-healing rule
 
 If you touch a system and its doc is wrong or missing, **fix the doc in the same change**. A stale doc is a bug. Update the `last-verified` line when you confirm a doc still matches reality.
+
+## Generate it, don't restate it
+
+**A fact stated in prose is a fact that will be wrong.** Every count, list, signature,
+table and index in this repo that describes the code must either be *generated from the
+code* or *gated by a test that compares it to the code*. Hand-synced copies always drift,
+and they drift silently — the docs site shipped a syntax grammar that highlighted three
+keywords Milo does not have, the argparse page documented a free-function API that never
+existed, and the front-page benchmark table disagreed with the hyperfine output sitting
+next to it in the same directory.
+
+Before you add a claim about the code to any doc, ask which of these it is:
+
+| Claim | Mechanism | Example |
+|---|---|---|
+| a count | `<!-- stat:name -->N<!-- /stat -->` marker | `scripts/gen-stats.ts`, gated by `tests/docStats.test.ts` |
+| a list of files | project it from the files' own headers | `scripts/gen-src-doc.ts`, `scripts/gen-scripts-doc.ts` |
+| an API signature | generate from doc-comments, or gate against the real API | `scripts/gen-std-docs.ts`, `scripts/check-api-docs.ts` |
+| a measured number | one source file, rendered into every place it appears | `benchmarks/results.json` → `scripts/gen-benchmarks.ts` |
+| a code snippet | make it compile in the doc-test harness | `tests/docs.test.ts` (```` ```milo ```` fences) |
+| a keyword/token list | derive it from `src/tokens.ts` | `scripts/gen-tmlanguage.ts`, `tests/grammar.test.ts` |
+| a link to a file | `tests/docLinks.test.ts` checks it resolves | — |
+
+If none fits, write the gate before you write the claim. Two rules that follow from this:
+
+- **One copy.** If a value has to appear twice, the second copy is generated from the
+  first. Never two hand-edited copies of the same table (that is how the docs site ran on
+  a stale grammar for months).
+- **A generator's CLI half must be behind `if (import.meta.main)`** — a test that imports
+  it and thereby rewrites the file it is checking proves nothing.

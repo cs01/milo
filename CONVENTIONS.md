@@ -41,6 +41,13 @@ The rules reviewers check by hand. Anything mechanically checkable lives in `scr
 - Never run `.selfhost/milo-self.bin` bare. Never commit `MILO_RUN_UNGUARDED=1`.
 - Don't raise sweep/test concurrency or per-child mem caps without redoing the math in `scripts/guard.ts`.
 
+## Docs that describe code
+- Generate it or gate it — never restate it. A count, list, signature, table or index that
+  describes the code must come from the code (`scripts/gen-*.ts`) or be compared to it by a
+  test. See **Generate it, don't restate it** in [AGENTS.md](AGENTS.md) for the mechanism per
+  claim type. Adding a hand-typed second copy of anything the compiler already knows is the
+  defect, not the documentation gap it fills.
+
 ## Commits
 - One line, all lowercase. No "coded with Claude". Commit worksheets + feedback with the work. Tag with `ws/<slug>`.
 - Commit directly to `main` (Milo convention). Never force-push shared history.

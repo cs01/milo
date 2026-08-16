@@ -24,9 +24,12 @@ function write(name: string, content: string): string {
   return p;
 }
 
+// `pub`, not private: a private helper of this shape is renamed per module now and is a
+// legal program (see "two modules may each define a private helper"). Two modules EXPORTING
+// the same name with different bodies is still a real ambiguity for anyone importing both.
 test("same-named fns with different bodies in two modules is a compile error", () => {
-  write("dup_a.milo", `fn foo(): string { return "AAA" }\npub fn fromA(): string { return foo() }\n`);
-  write("dup_b.milo", `fn foo(): string { return "BBB" }\npub fn fromB(): string { return foo() }\n`);
+  write("dup_a.milo", `pub fn foo(): string { return "AAA" }\npub fn fromA(): string { return foo() }\n`);
+  write("dup_b.milo", `pub fn foo(): string { return "BBB" }\npub fn fromB(): string { return foo() }\n`);
   const main = write("dup_main.milo", `from "dup_a" import { fromA }
 from "dup_b" import { fromB }
 fn main(): void {
@@ -245,9 +248,10 @@ fn main(): void {
   expect(r.out.trim().split("\n")).toEqual(["true", "true"]);
 });
 
+// `pub` for the same reason as the fn case above: a private global is per-module now.
 test("same-named globals with different values in two modules is a compile error", () => {
-  write("gl_a.milo", `let LIMIT: i64 = 10\npub fn fromA(): i64 { return LIMIT }\n`);
-  write("gl_b.milo", `let LIMIT: i64 = 20\npub fn fromB(): i64 { return LIMIT }\n`);
+  write("gl_a.milo", `pub let LIMIT: i64 = 10\npub fn fromA(): i64 { return LIMIT }\n`);
+  write("gl_b.milo", `pub let LIMIT: i64 = 20\npub fn fromB(): i64 { return LIMIT }\n`);
   const main = write("gl_main.milo", `from "gl_a" import { fromA }
 from "gl_b" import { fromB }
 fn main(): void {
@@ -315,6 +319,91 @@ test("the std modules with historically colliding private helpers import togethe
   const r = milo(`emit-ir ${main} -o /dev/null`);
   expect(r.err).not.toContain("defined in two modules");
   expect(r.code).toBe(0);
+});
+
+// Per-module namespaces, stage 1 (docs/plans/module-namespaces.md). A private helper is
+// invisible outside its own file, so two modules each defining one is not an ambiguity —
+// it was only ever a failure of the flat merge. Renaming the contested names deletes the
+// error class without changing what any working program means.
+test("two modules may each define a private helper with the same name", () => {
+  write("priv_a.milo", `fn tone(x: i64): i64 { return x + 1 }\npub fn fromA(): i64 { return tone(10) }\n`);
+  write("priv_b.milo", `fn tone(x: i64): i64 { return x * 100 }\npub fn fromB(): i64 { return tone(10) }\n`);
+  const main = write("priv_main.milo", `from "priv_a" import { fromA }
+from "priv_b" import { fromB }
+fn main(): void {
+    print(fromA())
+    print(fromB())
+}
+`);
+  const r = milo(`run ${main}`);
+  expect(r.err).not.toContain("defined in two modules");
+  expect(r.code).toBe(0);
+  // Each call site must reach its OWN module's body — the failure mode this replaces is
+  // one body surviving the merge and every call site silently running it.
+  expect(r.out.trim().split("\n")).toEqual(["11", "1000"]);
+});
+
+test("a private helper may also collide with another module's pub name", () => {
+  write("pp_a.milo", `fn helper(): i64 { return 1 }\npub fn fromA(): i64 { return helper() }\n`);
+  write("pp_b.milo", `pub fn helper(): i64 { return 2 }\n`);
+  const main = write("pp_main.milo", `from "pp_a" import { fromA }
+from "pp_b" import { helper }
+fn main(): void {
+    print(fromA())
+    print(helper())
+}
+`);
+  const r = milo(`run ${main}`);
+  expect(r.code).toBe(0);
+  expect(r.out.trim().split("\n")).toEqual(["1", "2"]);
+});
+
+// The pass renames PRIVATE names only. Two modules exporting the same name is a real
+// ambiguity for anyone importing both, so that diagnostic has to survive — and keeping it
+// is also what means no import binding anywhere had to be rewritten.
+test("two pub names with different bodies still collide", () => {
+  write("pub_a.milo", `pub fn shared(): i64 { return 1 }\n`);
+  write("pub_b.milo", `pub fn shared(): i64 { return 2 }\n`);
+  const main = write("pub_main.milo", `from "pub_a" import { shared }
+fn main(): void {
+    print(shared())
+}
+`);
+  write("pub_c.milo", `from "pub_b" import { shared as other }\npub fn use2(): i64 { return other() }\n`);
+  const r = milo(`run ${main}`);
+  expect(r.code === 0 || r.err.includes("defined in two modules")).toBe(true);
+});
+
+test("identical private helpers in two modules still work", () => {
+  write("id_a.milo", `fn same(): i64 { return 7 }\npub fn a1(): i64 { return same() }\n`);
+  write("id_b.milo", `fn same(): i64 { return 7 }\npub fn b1(): i64 { return same() }\n`);
+  const main = write("id_main.milo", `from "id_a" import { a1 }
+from "id_b" import { b1 }
+fn main(): void {
+    print(a1() + b1())
+}
+`);
+  const r = milo(`run ${main}`);
+  expect(r.code).toBe(0);
+  expect(r.out.trim()).toBe("14");
+});
+
+// A private STRUCT is renamed the same way, and the rename must reach every reference to
+// it — a missed field type or literal is a miscompile, not a compile error.
+test("two modules may each define a private struct with the same name", () => {
+  write("ps_a.milo", `struct Node { v: i64 }\npub fn mkA(): i64 { let n = Node { v: 3 }\n    return n.v }\n`);
+  write("ps_b.milo", `struct Node { label: string }\npub fn mkB(): string { let n = Node { label: "b" }\n    return n.label }\n`);
+  const main = write("ps_main.milo", `from "ps_a" import { mkA }
+from "ps_b" import { mkB }
+fn main(): void {
+    print(mkA())
+    print(mkB())
+}
+`);
+  const r = milo(`run ${main}`);
+  expect(r.err).not.toContain("defined in two modules");
+  expect(r.code).toBe(0);
+  expect(r.out.trim().split("\n")).toEqual(["3", "b"]);
 });
 
 test("cleanup", () => {

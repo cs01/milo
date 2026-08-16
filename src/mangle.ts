@@ -41,6 +41,37 @@ export function isManglableFn(f: Function): boolean {
   return true;
 }
 
+// Stage 1 of per-module namespaces (docs/plans/module-namespaces.md): the extra
+// carve-outs that apply when the unit being renamed is a plain user MODULE rather than
+// a package. `main` is looked up by the linker under that exact name, and a `@cName` or
+// `@cLayout` decl exists precisely to pin a symbol or a layout a C peer names.
+export function isModuleManglableFn(f: Function): boolean {
+  if (!isManglableFn(f)) return false;
+  if (f.name === "main") return false;
+  return !f.attributes?.some((a) => a.name === "cName");
+}
+
+function hasCAttr(attrs: { name: string }[] | undefined): boolean {
+  return !!attrs?.some((a) => a.name === "cName" || a.name === "cLayout");
+}
+
+// One file's FILE-PRIVATE top-level names — the only ones stage 1 renames.
+//
+// A `pub` name is part of a module's surface, and two modules exporting the same name is
+// a real ambiguity for anyone importing both, so leaving `pub` alone both preserves that
+// diagnostic and means no import binding anywhere has to be rewritten. A private name is
+// invisible outside its own file by construction, so renaming it cannot change the
+// meaning of any program that compiles today — which is the entire argument for the pass.
+export function collectModulePrivateDecls(prog: Program, out: PkgDeclNames): void {
+  for (const f of prog.functions) if (!f.isPub && isModuleManglableFn(f)) out.values.add(f.name);
+  for (const g of prog.globals) if (!g.isPub) out.values.add(g.name);
+  for (const s of prog.structs) if (!s.isPub && !s.isExtern && !hasCAttr(s.attributes)) out.types.add(s.name);
+  for (const e of prog.enums) if (!e.isPub && !hasCAttr(e.attributes)) out.types.add(e.name);
+  for (const t of prog.traits) if (!t.isPub) out.types.add(t.name);
+  for (const i of prog.interfaces) if (!i.isPub) out.types.add(i.name);
+  for (const a of prog.typeAliases) if (!a.isPub) out.types.add(a.name);
+}
+
 // Accumulate one file's top-level names into a package-wide index. Called for
 // every file of a package BEFORE any rewriting, because an intra-package
 // reference may point at a name declared in a sibling file.
@@ -76,11 +107,17 @@ class Scopes {
  * @param bindings  local name → fully mangled name, from this file's imports of
  *                  a mangled package (honors `import { x as y }`)
  */
+// `restrictToDecls` renames only the names present in `decls`, instead of every top-level
+// decl in the file. A package owns its whole file, so the default is right there; a module
+// pass owns only the file's PRIVATE names and must leave its `pub` surface alone, or every
+// importer would have to be rewritten to match. Reference rewriting already consults
+// `decls`, so both modes resolve references the same way.
 export function manglePackage(
   prog: Program,
   pkg: string,
   decls: PkgDeclNames,
   bindings: Map<string, string>,
+  restrictToDecls = false,
 ): void {
   if (pkg === "" && bindings.size === 0) return; // strict no-op
 
@@ -313,13 +350,15 @@ export function manglePackage(
   // ── 1. rename declarations (reference rewriting below reads the ORIGINAL
   //       name index, so the order of these two phases does not matter) ──
   if (pkg !== "") {
-    for (const f of prog.functions) if (isManglableFn(f)) f.name = q(f.name);
-    for (const g of prog.globals) g.name = q(g.name);
-    for (const s of prog.structs) s.name = q(s.name);
-    for (const e of prog.enums) e.name = q(e.name);
-    for (const t of prog.traits) t.name = q(t.name);
-    for (const i of prog.interfaces) i.name = q(i.name);
-    for (const a of prog.typeAliases) a.name = q(a.name);
+    const val = (n: string) => !restrictToDecls || decls.values.has(n);
+    const typ = (n: string) => !restrictToDecls || decls.types.has(n);
+    for (const f of prog.functions) if (isManglableFn(f) && val(f.name)) f.name = q(f.name);
+    for (const g of prog.globals) if (val(g.name)) g.name = q(g.name);
+    for (const s of prog.structs) if (typ(s.name)) s.name = q(s.name);
+    for (const e of prog.enums) if (typ(e.name)) e.name = q(e.name);
+    for (const t of prog.traits) if (typ(t.name)) t.name = q(t.name);
+    for (const i of prog.interfaces) if (typ(i.name)) i.name = q(i.name);
+    for (const a of prog.typeAliases) if (typ(a.name)) a.name = q(a.name);
   }
 
   // ── 2. rewrite references ──

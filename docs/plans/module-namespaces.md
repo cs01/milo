@@ -47,7 +47,50 @@ from that file's import list.
 
 ## Sequence
 
-**Stage 1 — mangle user modules only.** Leave `std/` and the prelude at `pkg=""` and
+**Stage 1 — SHIPPED 2026-08-15, and narrower than this plan proposed: rename only the
+names that actually COLLIDE.**
+
+The plan said to mangle every private name in every user module. That was implemented and
+it works — the collision disappears and each call site reaches its own module's body — but
+a mangled name is not only a link-time symbol. Measured on the fixture suite: 24 failures,
+in two clusters. `print` of a struct emitted `printContainers$User` instead of `User`, and
+14 error fixtures stopped matching their `@error:` text because the diagnostic named a
+mangled type. Both are the stage-3 concern below, arriving early and as a hard blocker.
+
+Renaming a name that nothing else declares buys nothing, so the shipped pass indexes every
+user module's top-level names first and renames a private name only when some other user
+module declares the same one. A program with no collision compiles byte-for-byte as before
+(866/866 fixtures, unchanged output), so the display problem is confined to the rare
+programs that were previously rejected outright — which is a strictly better place for it
+than every program in the language.
+
+What ships:
+
+- Private names only (`fn`, `global`, `struct`, `enum`, `trait`, `interface`, `type`). A
+  `pub` name stays put, so **no import binding anywhere had to be rewritten** — and two
+  modules exporting the same name with different bodies is still an error, which is right:
+  that one is a genuine ambiguity for anyone importing both.
+- A private name may also collide with another module's `pub` name; the private side is
+  renamed, for the same reason.
+- Carve-outs, in `isModuleManglableFn` / `collectModulePrivateDecls`: `extern`,
+  `@externalLinkage` (both already honoured by `isManglableFn`), `main`, `@cName` and
+  `@cLayout`.
+- Packages and `std/` are skipped entirely — packages already carry a `<pkg>$` prefix and
+  stacking a second would rename the same decl twice.
+- `manglePackage` gained a `restrictToDecls` mode, because its rename phase renames every
+  top-level decl in the file, which is right for a package (it owns the file) and wrong for
+  a module pass (it owns only the private names).
+
+Two tests in `tests/modules.test.ts` asserted the old rule for PRIVATE fns and globals and
+now assert it for `pub` ones, which is the behaviour that survived.
+
+**Still open after stage 1:** a colliding private name reaches diagnostics, `print` output
+and DWARF in its mangled form. Fixing that means a display name carried alongside the
+symbol (or a demangle step fed by the module-id set the resolver already builds), and it is
+the prerequisite for ever widening the pass beyond collisions. LSP go-to-definition on a
+collided private name is also untested — the suite has no colliding modules in it.
+
+**Stage 1 (original proposal) — mangle user modules only.** Leave `std/` and the prelude at `pkg=""` and
 unmangled. This bounds the blast radius to user code and keeps the stdlib's flat surface
 (which `milo api`, `milo doc`, and `docs/breaking-changes.md` all assume) untouched. Collisions
 between two user modules stop being errors; a user-vs-std collision keeps today's behavior.
@@ -69,7 +112,7 @@ genuine conflict and needs a clear message naming both origins and suggesting `a
 go-to-definition, `milo doc`, and stack traces all currently show unmangled names and must
 keep doing so — mangling is an internal symbol concern, never a user-visible one.
 
-**Stage 4 — std.** Only if it proves worth it. The stdlib's flat namespace is load-bearing for
+**Stage 4 — std.** Only if it proves worth it. The stdlib's flat namespace is required for
 `milo api` discovery and is documented as such; changing it is a much larger decision than the
 user-module fix and should not ride along with it.
 

@@ -9,7 +9,7 @@ import { ParseError } from "./diagnostics";
 import type { TargetInfo } from "./target";
 import { Lexer } from "./lexer";
 import { Parser } from "./parser";
-import { collectPkgDecls, emptyPkgDecls, manglePackage, type PkgDeclNames } from "./mangle";
+import { collectModulePrivateDecls, collectPkgDecls, emptyPkgDecls, manglePackage, type PkgDeclNames } from "./mangle";
 
 // repo root: walk up from src/ to find the directory containing std/.
 // MILO_ROOT overrides for contexts where import.meta.url doesn't map to the repo
@@ -32,6 +32,18 @@ let STDLIB_BUNDLE: Map<string, string> | null = null;
 try {
   if (!existsSync(resolve(STDLIB_DIR, "std"))) STDLIB_BUNDLE = require("./stdlib-bundle").STDLIB;
 } catch {}
+
+// A symbol-safe, readable id for one module. The file's basename, because a mangled name
+// reaches diagnostics and DWARF: `gfx$tone` still tells a reader where `tone` lives, where
+// a hash would not. Two files can share a basename in different directories, so a
+// collision gets a numeric suffix — the id only has to be unique within one build.
+function uniqueModuleId(file: string, used: Set<string>): string {
+  const base = file.split("/").pop()!.replace(/\.milo$/, "").replace(/[^A-Za-z0-9_]/g, "_");
+  let id = base === "" ? "mod" : base;
+  for (let n = 2; used.has(id); n++) id = `${base}_${n}`;
+  used.add(id);
+  return id;
+}
 
 function toStdlibKey(absPath: string): string | null {
   return absPath.startsWith(STDLIB_DIR + "/") ? absPath.slice(STDLIB_DIR.length + 1) : null;
@@ -452,6 +464,53 @@ export function resolveImports(program: Program, sourceDir: string, target: Targ
     if (bindings.size > 0 || u.pkg !== "") {
       manglePackage(u.prog, u.pkg, pkgDecls.get(u.pkg) ?? emptyPkgDecls(), bindings);
     }
+  }
+
+  // ── stage 1 of per-module namespaces (docs/plans/module-namespaces.md) ──
+  // Two user modules that each define a private `fn tone` used to collide, in code
+  // neither of them can see: name RESOLUTION is already per-module (a name from another
+  // file is invisible without an import), and only the final flat merge failed. Renaming
+  // each file's private names removes the collision without touching a single working
+  // program's meaning — a private name has no importers to rewrite by construction.
+  //
+  // Packages are skipped: they already carry a `<pkg>$` namespace from the pass above,
+  // and stacking a second prefix would rename the same decl twice. std is skipped too
+  // (stage 4) — `milo api` discovery and docs/breaking-changes.md both index std by its
+  // flat names, so renaming there is a much larger decision than the user-module fix.
+  //
+  // Renames only names that ACTUALLY collide, which is what keeps the pass invisible.
+  // Mangling every private name works — the collision disappears and both bodies run —
+  // but a mangled name is not only a symbol: `print` of a struct emitted
+  // `printContainers$User`, and 14 error fixtures stopped matching their `@error:` text
+  // because the diagnostic named a mangled type. Renaming a name nothing else declares
+  // buys nothing and pays that cost on every program, so the pass first asks which
+  // private names are contested and touches only those. A program with no collision is
+  // byte-for-byte what it was.
+  const stdModuleRoot = resolve(STDLIB_DIR, "std") + "/";
+  const userUnits = units.filter(u => u.pkg === "" && !u.file.startsWith(stdModuleRoot));
+
+  // Every top-level name each user unit declares, private or not: a private helper can
+  // just as easily collide with another module's `pub` name, and renaming the private
+  // side is safe there for the same reason (it has no importers).
+  const declCount = new Map<string, number>();
+  for (const u of userUnits) {
+    const all = emptyPkgDecls();
+    collectPkgDecls(u.prog, all);
+    for (const g of u.prog.globals) all.values.add(g.name);
+    for (const n of new Set([...all.values, ...all.types])) declCount.set(n, (declCount.get(n) ?? 0) + 1);
+  }
+
+  const moduleNames = new Set<string>();
+  const usedModuleIds = new Set<string>();
+  for (const u of userUnits) {
+    const priv = emptyPkgDecls();
+    collectModulePrivateDecls(u.prog, priv);
+    for (const n of [...priv.values]) if ((declCount.get(n) ?? 0) < 2) priv.values.delete(n);
+    for (const n of [...priv.types]) if ((declCount.get(n) ?? 0) < 2) priv.types.delete(n);
+    if (priv.values.size === 0 && priv.types.size === 0) continue;
+    const id = uniqueModuleId(u.file, usedModuleIds);
+    moduleNames.add(id);
+    manglePackage(u.prog, id, priv, new Map(), true);
   }
 
   // Every type/global declaration paired with the file that declared it. Unlike

@@ -123,7 +123,8 @@ struct Outer { i: Inner }`,
     if flag { return r.id }
     return 0
 }`,
-    body: `    print("ret ", go(true))`,
+    body: `    let n = go(true)
+    print("ret ", n)`,
   },
   "captured by a move closure that runs": {
     body: `    var r = MK
@@ -148,7 +149,7 @@ function program(shape: keyof typeof SHAPES, route: keyof typeof ROUTES): string
   return `${s.decl}
 
 impl Drop for Res {
-    fn drop(self: &mut Self): void { print("drop ", self.id) }
+    fn drop(self: &mut Self): void { print("[drop]") }
 }
 
 ${decls}
@@ -197,7 +198,10 @@ describe.skipIf(!enabled)("a resource is destroyed exactly once", () => {
           continue;
         }
         results[shape][route] = {
-          drops: out.split("\n").filter(l => l.startsWith("drop ")).length,
+          // Counted as occurrences, not line prefixes. `print("ret ", go())` emits the
+          // literal before evaluating the call, so a drop during argument evaluation
+          // appears mid-line ("ret [drop]") and a startsWith test scores it zero.
+          drops: out.split("[drop]").length - 1,
           detail: out.trim().replace(/\n/g, " | "),
         };
       }

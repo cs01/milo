@@ -667,6 +667,14 @@ export class TypeChecker {
   // spelling already exists — it is just undiscoverable at the moment it matters.
   private lintIndexClone(value: Expr, ty: TypeKind, span?: Span) {
     if (this.warningConfig.allowed.has("index-clone")) return;
+    // Fork tails count: `if c { v[0] } else { v[1] }` clones whichever arm runs, and the
+    // reader has no more reason to expect an allocation there than in the direct form.
+    // moveTargets already knows where a value actually comes from, so reuse it rather
+    // than re-deriving the tail rules here.
+    if (value.kind === "IfExpr" || value.kind === "MatchExpr") {
+      for (const t of this.moveTargets(value)) this.lintIndexClone(t, ty, t.span ?? span);
+      return;
+    }
     if (value.kind !== "IndexAccess") return;
     // Copy elements are a register move, not an allocation — nothing to warn about.
     if (isCopy(ty, (n) => this.isAllCopyEnum(n), (n) => this.isAllCopyStruct(n))) return;
@@ -674,7 +682,7 @@ export class TypeChecker {
     if (ty.tag === "ref") return;
     this.warn(
       "index-clone",
-      `this binding deep-copies the ${typeName(ty)} out of the container`,
+      `this deep-copies the ${typeName(ty)} out of the container`,
       span,
       `indexing clones so the container stays intact; 'for x in <container>' binds by reference and copies nothing, and a field read ('v[i].n') materialises no element`,
     );
@@ -4202,6 +4210,11 @@ export class TypeChecker {
           // see checkEscapingClosures for why the promotion that used to live here was
           // itself unsound.
           if (this.isViewReturn(fnRetType)) this.checkViewProvenance(stmt.value, sp);
+          // A `return v[i]` allocates exactly like `let m = v[i]` does, and was invisible
+          // even with the lint on: the check only ran at a binding. `return b.v[0]` on a
+          // borrowed struct is the shape docs/backlog.md #7 is about — the field spelling
+          // is a hard error, the index spelling silently deep-copies.
+          this.lintIndexClone(stmt.value, valType, sp);
           this.tryMove(stmt.value);
           this.inReturnInLoop = prev;
         }

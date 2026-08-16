@@ -1,6 +1,10 @@
 // std/regex — regular expression matching (Linux, wraps POSIX regex.h)
 // Linux: regex_t = 64 bytes, regmatch_t = {i32, i32} = 8 bytes
 
+from "std/unicode" import {
+    nextCodepointBoundary
+}
+
 pub extern fn regcomp(_preg: *u8, _regex: *u8, _cflags: i32): i32
 
 pub extern fn regexec(_preg: *u8, _str: *u8, _nmatch: i64, _pmatch: *u8, _eflags: i32): i32
@@ -148,7 +152,12 @@ fn regexFindAll(re: &Regex, input: &string): Vec<RegexMatch> {
         )
         offset = eo
         if so == eo {
-            offset = offset + 1
+            // A zero-width match advances by one CODE POINT, not one byte. Advancing a
+            // byte lands inside a multibyte character, and in a UTF-8 locale regexec
+            // rejects that start position — so the loop hit `rc != 0` and BROKE, silently
+            // returning a truncated list. `x*` over "aéb" gave 2 matches instead of one
+            // per character boundary, and over "日本" gave 1.
+            offset = nextCodepointBoundary(input, offset)
         }
     }
     return matches

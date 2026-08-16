@@ -38,6 +38,7 @@ To change an entry, change that line — this table is a projection of it.
 | `scripts/bundle-stdlib.ts` | Generates src/stdlib-bundle.ts, embedding every std/*.milo file as a string. |
 | `scripts/check-api-docs.ts` | Checks the signature listings on the docs-site stdlib pages against the real std API. |
 | `scripts/check-breaking.ts` | Detects source-level breaks in the public std surface since the last release tag, and requires each one to be written up in docs/breaking-changes.md. |
+| `scripts/check-packages.sh` | Run the sibling Milo packages' OWN test suites against this checkout's compiler. |
 | `scripts/ecosystem-check.ts` | Compile every published milo-language package against THIS checkout. |
 | `scripts/fetch-assets.sh` | Regenerates the game assets that are deliberately NOT in git: the FLYBY city files (82 MB of terrain, footprints and aerial drape) and the APSIS planet maps. |
 | `scripts/fuzz-check.ts` | The frontend contract the fuzzer tests, in one place so the Worker and the main-thread confirmation stage run byte-identical logic. |

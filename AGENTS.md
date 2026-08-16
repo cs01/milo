@@ -64,6 +64,14 @@ Push to main is allowed org-wide. Note `milo` itself sits at `~/git/milo`, *outs
 `~/git/milo-language/` — it predates the layout and has live worktrees under
 `.claude/worktrees/`, so moving it would break them.
 
+**After a compiler or std change, run the packages' own suites** —
+`sh scripts/check-packages.sh` (one arg runs a single package). It runs the sibling Milo
+packages' test suites — yaml, toml, markdown, aws, milo-json-rpc and friends — against
+this checkout. Those were written by people solving a different problem and reach std
+through APIs no fixture here calls: 72 tests that this repo's own suite says nothing
+about. Missing checkouts skip, so it is safe to run anywhere; suites needing a live
+service (postgres, redis, aws/s3) skip by name rather than by guessing from the error.
+
 **After a compiler change to codegen, closures, the scheduler or `std/runtime`, run
 milojs's app check** — `tools/check-apps.sh` in `~/git/milo-language/milojs` (one arg
 runs a single app). It boots real applications (an express + Prisma + tRPC server, and an

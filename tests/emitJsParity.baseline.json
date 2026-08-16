@@ -1,5 +1,6 @@
 {
   "addressOf.milo": "noEmit",
+  "aesGcmLengthGuards.milo": "noEmit",
   "aliasBehindRef.milo": "noEmit",
   "aliasResultFromConversion.milo": "crash",
   "arenaBasic.milo": "noEmit",
@@ -128,6 +129,7 @@
   "pngDecode.milo": "noEmit",
   "png_roundtrip.milo": "noEmit",
   "poolAlloc.milo": "noEmit",
+  "poolBlockSizeGuard.milo": "noEmit",
   "preludeStringMethods.milo": "crash",
   "printSlice.milo": "noEmit",
   "processPipe.milo": "noEmit",

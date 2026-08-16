@@ -452,6 +452,9 @@ impl Task {
     // function pointer and no captures, and wrapping one in a closure just to
     // unwrap it here would heap-allocate an environment that nothing frees —
     // a leak on every program whose main runs as a green task.
+    //
+    // OWNERSHIP: the spawned task takes `envPtr`. It must be a malloc'd block or null —
+    // `reapTask` frees it. Pass 0 for a bare function pointer.
     fn spawnRaw(fnPtr: *u8, envPtr: *u8, stackBytes: i64): Task {
         unsafe {
             schedulerEnsureInit()
@@ -1236,6 +1239,16 @@ fn reapTask(sched: *u8, task: *u8): void {
     let cell = rtReadPtr(task, tJoinCell())
     munmap(rtReadPtr(task, tStack()), rtReadI64(task, tStackSize()))
     free(rtReadPtr(task, tCtx()))
+    // The task owns its closure environment: `spawnWithStack` copies the env pointer out
+    // of the closure value, and nothing on the caller's side ever frees it, so every
+    // spawn whose closure captured anything leaked its captures. A non-capturing closure
+    // lowers its env to null (codegen stores `ptr null` in the pair), and the two
+    // closure-free spawnRaw call sites pass 0, so the null check is the whole ownership
+    // test — there is no non-heap env to guard against.
+    let env = rtReadPtr(task, tClosureEnv())
+    if env as i64 != 0 {
+        free(env)
+    }
     free(task)
     rtWriteI64(sched, sNumTasks(), rtReadI64(sched, sNumTasks()) - 1)
     if cell as i64 != 0 {

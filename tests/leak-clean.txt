@@ -23,6 +23,7 @@ arrays
 arraySlice
 assertBuiltin
 assignI64Lit
+asyncCallOrdering
 atomics
 atomicWidths
 autoEq
@@ -111,12 +112,12 @@ embedFile
 embedFileBare
 enumBasic
 enumCtorIntCoerce
-enumTempBorrowDrop
 enumerate
 enumMultiPayload
 enumPayload
 enumPayloadOptionLayout
 enumRepr
+enumTempBorrowDrop
 enumTryFrom
 enumWildcard
 envSetRemove
@@ -204,6 +205,7 @@ globalStructArray
 globalStructInit
 globalStructMutation
 greenStackSize
+greenThreadEcho
 greenThreadMany
 greenThreadYield
 hashmapBasic
@@ -259,6 +261,7 @@ intLiteralDefaultI64
 intMinLiteral
 ioFileStream
 ioReaderWriter
+ioSocketStream
 isPattern
 iteratorTrait
 iterDelegateField
@@ -396,6 +399,7 @@ sliceViewReturn
 socketBind
 softKeywordFromIn
 sortByKeyString
+spawnCapturingClosureLeak
 stdBase64
 stdCrypto
 stdCsv
@@ -447,8 +451,8 @@ stringViewIter
 stringViewReturn
 stringViewSplitParity
 stringWithCapacity
-structCloneOutOfContainer
 struct_field_shorthand
+structCloneOutOfContainer
 structCopy
 structFfiPtr
 structFieldIntCoerce
@@ -465,6 +469,7 @@ targetOs
 taskJoin
 taskJoinLate
 tcpGreenConnectRefused
+tcpIpv6
 tcpListenerPort
 temp_name_collision
 termSize
@@ -490,6 +495,7 @@ unicodeDisplayWidth
 unicodeEscape
 unicodeReverse
 unicodeStringLiteral
+unixSocket
 unsigned
 unwrap_temp_no_leak
 unwrapOption

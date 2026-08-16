@@ -634,6 +634,9 @@ function pointer and no captures, and wrapping one in a closure just to
 unwrap it here would heap-allocate an environment that nothing frees —
 a leak on every program whose main runs as a green task.
 
+OWNERSHIP: the spawned task takes `envPtr`. It must be a malloc'd block or null —
+`reapTask` frees it. Pass 0 for a bare function pointer.
+
 ### `Task.spawnWithStack`
 
 ```milo

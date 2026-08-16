@@ -1,0 +1,24 @@
+// @expect: captured 42
+// @expect: done
+
+// The leak gate was blind to this shape: every capturing spawn leaked its closure
+// environment, because spawnWithStack copies the env pointer into the task and nothing
+// on the caller's side owns it any more. All 11 green fixtures on the manifest captured
+// NOTHING, and a non-capturing closure lowers its env to null — the one shape that
+// cannot exhibit the bug. Captures a scalar deliberately: an owned heap capture is a
+// SEPARATE, still-open leak (the env box is freed, the values moved into it are not),
+// and mixing them here would leave this fixture off the manifest and blind again.
+from "std/runtime" import {
+    Task
+}
+
+pub fn main(): i32 {
+    let n = 42
+    let t = Task.spawn(move(): void => {
+        print("captured ", n.toString())
+    }
+    )
+    t.join()
+    print("done")
+    return 0
+}

@@ -296,6 +296,27 @@ fn main(): void {
   expect(msg).not.toContain("redefinition of function");
 });
 
+// std ships as one flat namespace, so a private helper in one module can collide with
+// a private helper in another and make the PAIR unimportable — `std/sha1` + `std/xxhash`
+// both defined `rotl`, with different bodies, so any program wanting both failed to
+// compile with an error naming neither of its own lines. That is invisible to per-module
+// tests: each module is fine alone. One program importing the whole hazard set catches
+// every such collision in a single compile, so this is the regression lock for the
+// module-prefixed helper names (_xxRotl, _sha1Rotl, _uuidHexValue, _httpHexValue, ...).
+test("the std modules with historically colliding private helpers import together", () => {
+  const imports = [
+    ["std/hex", "Hex"], ["std/http", "Param"], ["std/hmac", "Hmac"],
+    ["std/sha1", "Sha1"], ["std/sha256", "Sha256"], ["std/uuid", "Uuid"],
+    ["std/xxhash", "Xxhash"], ["std/process", "Process"], ["std/pty", "tiocgwinsz"],
+    ["std/crypto", "Crypto"], ["std/base64", "Base64"], ["std/json", "JsonNode"],
+  ];
+  const src = imports.map(([m, n]) => `from "${m}" import { ${n} }`).join("\n");
+  const main = write("std_flat_namespace.milo", `${src}\nfn main() { print("ok") }\n`);
+  const r = milo(`emit-ir ${main} -o /dev/null`);
+  expect(r.err).not.toContain("defined in two modules");
+  expect(r.code).toBe(0);
+});
+
 test("cleanup", () => {
   rmSync(DIR, { recursive: true, force: true });
 });

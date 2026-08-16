@@ -20,6 +20,18 @@ export type TypeKind =
   | { tag: "interface"; name: string }
   | { tag: "unknown" };
 
+// Every name `typeFromAst` resolves to a builtin rather than a user struct, aliases
+// included (`int`/`byte`/`float` alongside `i64`/`u8`/`f64`). Anything absent here is
+// a struct name, so this doubles as the editor grammar's primitive list — the old
+// hand-written one highlighted `char`, which is a literal kind and not a type, and
+// missed `string`, `int`, `byte` and `float` entirely.
+export const PRIMITIVE_TYPE_NAMES = [
+  "i8", "i16", "i32", "i64", "int",
+  "u8", "byte", "u16", "u32", "u64",
+  "f32", "f64", "float",
+  "bool", "void", "string",
+] as const;
+
 export function typeFromAst(ty: { name: string; isPtr: boolean; ptrDepth?: number; isRef: boolean; isRefMut: boolean; isArray: boolean; arraySize: number | null; isFn?: boolean; isCFn?: boolean; fnParams?: any[]; fnRet?: any; rangeMin?: number; rangeMax?: number }): TypeKind {
   if (ty.isFn && ty.fnParams && ty.fnRet) {
     const tag = ty.isCFn ? "cfn" as const : "fn" as const;

@@ -115,3 +115,12 @@ export const KEYWORDS = new Set([
   "break", "continue", "as", "trait", "impl", "for", "unsafe", "move", "null", "is", "type", "interface",
   "requires", "ensures", "invariant", "decreases",
 ]);
+
+// Contextual keywords: reserved only where the grammar expects them, so they stay
+// legal identifiers everywhere else and never enter KEYWORDS. The parser recognises
+// them by value (`atSoftKw`, or a direct `peek().value` check for thread_local);
+// tests/tmLanguage.test.ts holds this list to what the parser actually looks for, so
+// the editor grammar generated from it cannot drift.
+export const SOFT_KEYWORDS = new Set([
+  "from", "in", "pub", "thread_local",
+]);

@@ -63,7 +63,8 @@ Most utilities are **namespaced**: call a static on the namespace (`Path.join`, 
 
 | Module | What it provides |
 |--------|-----------------|
-| `std/runtime` | `Task.spawn`, `Promise` / `Promise.blocking`, green scheduler |
+| [`std/runtime`](runtime) | `Task.spawn`, `Promise` / `Promise.blocking`, green scheduler |
+| [`std/event`](event) | kqueue/epoll/IOCP readiness polling — the layer `std/runtime` drives |
 | [`std/sync`](sync) | `Channel`, `WaitGroup`, `AtomicI64`, `AtomicBool` — all method-based |
 
 ## Database & Network

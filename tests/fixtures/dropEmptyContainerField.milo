@@ -1,0 +1,28 @@
+// A struct's drop glue decides "was this moved out of and zeroed?" by probing a field's
+// data pointer. An empty container defeats that probe: `Vec.new()` that never grew has a
+// null data pointer and is perfectly alive, so a struct whose FIRST heap field was an
+// empty Vec skipped its entire destructor — user `Drop` impl included — and silently
+// never cleaned up.
+//
+// Found by tests/dropCounting.test.ts, which counts destructor runs instead of checking
+// whether a program is accepted. The accept/reject suites cannot see a missing drop.
+struct Res {
+    id: i64,
+    v: Vec<string>,
+}
+
+impl Drop for Res {
+    fn drop(self: &mut Self): void {
+        print("dropped ", self.id)
+    }
+}
+
+fn main() {
+    var r = Res {
+        id: 1, v: Vec.new()
+    }
+    print("made ", r.id)
+}
+
+// @expect: made 1
+// @expect: dropped 1

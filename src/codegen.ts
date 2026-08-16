@@ -11977,18 +11977,60 @@ export class Codegen {
     body.push("entry.bb:");
     const skipLabel = this.nextLabel("struct.drop.skip");
     const dropLabel = this.nextLabel("struct.drop");
-    // Find a droppable field to use as sentinel — heap types (string, vec, hashmap)
-    // have non-null data pointers when alive, so null check is a reliable "was zeroed" test.
-    const sentinelIdx = layout.fields.findIndex(f =>
-      f.typeKind.tag === "string" || f.typeKind.tag === "vec" || f.typeKind.tag === "hashmap" || f.typeKind.tag === "heap");
-    if (sentinelIdx >= 0) {
-      const sentinelPtr = this.nextTemp();
-      body.push(`  ${sentinelPtr} = getelementptr %${structName}, ptr %self, i32 0, i32 ${sentinelIdx}`);
-      const probe = this.nextTemp();
-      body.push(`  ${probe} = load ptr, ptr ${sentinelPtr}`);
-      const isNull = this.nextTemp();
-      body.push(`  ${isNull} = icmp eq ptr ${probe}, null`);
-      body.push(`  br i1 ${isNull}, label %${skipLabel}, label %${dropLabel}`);
+    // Sentinel test for "this struct was moved out of and zeroed". Heap types carry a
+    // data pointer that is non-null while alive, so a null one suggests the bytes were
+    // cleared.
+    //
+    // It must consult EVERY such field, not the first one. An empty container is
+    // indistinguishable from a zeroed one by this test — `Vec.new()` that never grew has
+    // a null data pointer and is perfectly alive — so keying on the first field alone
+    // meant a struct whose first field happened to be an empty Vec skipped its whole
+    // destructor, user `Drop` impl included, and silently never cleaned up. A moved-from
+    // struct has ALL of its bytes zeroed, so "every candidate is null" is the honest
+    // reading of the same evidence and costs one compare per field.
+    //
+    // Residual, and it is a real hole rather than a rounding error: a struct whose only
+    // droppable field is an empty container still cannot be told apart from a moved-from
+    // one by value. Deciding that needs a liveness FLAG rather than a value probe — see
+    // docs/plans/aliasing-coverage.md.
+    // A heap field proves liveness by a non-null data pointer; an integer or bool field
+    // proves it by being non-zero. Both are read from the same evidence — a moved-from
+    // struct has every byte cleared — and together they cover far more shapes than the
+    // pointer probe alone: `Res { id: 1, v: Vec.new() }` is alive on the strength of
+    // `id`, which the pointer-only test could not see.
+    const heapCandidates = layout.fields.flatMap((f, i) => {
+      const t = f.typeKind.tag;
+      return t === "string" || t === "vec" || t === "hashmap" || t === "heap" ? [{ i, ll: "ptr", zero: "null" }] : [];
+    });
+    // Scalars only AUGMENT a pointer probe; they never create one. A struct with no heap
+    // field had no probe at all and was dropped unconditionally, which is correct — the
+    // zeroed-ness of an integer says nothing about liveness on its own, and gating on it
+    // silently skipped the destructor of every `Tracked { id: 0 }`
+    // (tests/fixtures/dropAccounting.milo caught exactly that).
+    const scalarCandidates = heapCandidates.length > 0
+      ? layout.fields.flatMap((f, i) =>
+          f.typeKind.tag === "int" || f.typeKind.tag === "bool" ? [{ i, ll: f.type, zero: "0" }] : [])
+      : [];
+    const candidates = [...heapCandidates, ...scalarCandidates];
+    if (candidates.length > 0) {
+      // alive = OR over the candidates; skip only when every one of them reads as zeroed.
+      let alive: string | null = null;
+      for (const c of candidates) {
+        const fieldPtr = this.nextTemp();
+        body.push(`  ${fieldPtr} = getelementptr %${structName}, ptr %self, i32 0, i32 ${c.i}`);
+        const probe = this.nextTemp();
+        body.push(`  ${probe} = load ${c.ll}, ptr ${fieldPtr}`);
+        const nonZero = this.nextTemp();
+        body.push(`  ${nonZero} = icmp ne ${c.ll} ${probe}, ${c.zero}`);
+        if (alive === null) {
+          alive = nonZero;
+        } else {
+          const merged = this.nextTemp();
+          body.push(`  ${merged} = or i1 ${alive}, ${nonZero}`);
+          alive = merged;
+        }
+      }
+      body.push(`  br i1 ${alive}, label %${dropLabel}, label %${skipLabel}`);
     } else {
       body.push(`  br label %${dropLabel}`);
     }

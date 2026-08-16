@@ -53,6 +53,22 @@ socket that was already moved away. `std/mem`'s `MappedMemory { ptr: i64, len: i
 the same shape. Fixed 2026-08-16 by clearing the subject's alive flag inside the consuming
 arm; locked by `tests/fixtures/matchConsumesSubjectDrop.milo`.
 
+A second instance of the same class, found by counting rather than by accepting/rejecting:
+a struct's drop glue decided "was this moved out of and zeroed?" by probing ONE field's
+data pointer. An empty container defeats that probe — `Vec.new()` that never grew has a
+null data pointer and is perfectly alive — so a struct whose first heap field was an empty
+Vec skipped its entire destructor, user `Drop` impl included. Improved 2026-08-16 to
+consult every heap field (a moved-from struct has all of them null) and to let a non-zero
+integer field vouch for liveness alongside them.
+
+**Residual, recorded rather than papered over:** a struct whose fields all read as zero —
+`Res { id: 0, v: Vec.new() }`, or one whose only field is an empty container — still cannot
+be told apart from a moved-from one BY VALUE, and its destructor is still skipped. Deciding
+that needs a liveness flag rather than a value probe. Note the flag must not be applied
+where no heap field exists: a struct with only scalars had no probe and dropped
+unconditionally, which is correct, and gating it on `id != 0` silently skipped every
+`Tracked { id: 0 }` (caught by `tests/fixtures/dropAccounting.milo`).
+
 The lesson for Phase 2: routing every rule through `placesOf` fixes the checker's half of
 this class and nothing else. Where codegen re-derives an ownership fact the checker already
 computed, the two drift, and the drift is invisible to a suite that only checks whether a

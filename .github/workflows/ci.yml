@@ -24,6 +24,11 @@ jobs:
       # lld provides ld.lld, which `milo build --target=cortex-m3` invokes via
       # -fuse-ld=lld to link freestanding ARM ELF executables (tests/embedded.test.ts).
       - run: brew install lld
+      # 14 of the shipped examples — every game, both raytracers, the simulations — bind
+      # SDL2 through the `sdl` package and fail at LINK time without it ("ld: library
+      # 'SDL2' not found"). tests/examples.test.ts never noticed because it stops at
+      # emit-ir; scripts/run-examples.ts links and runs, which is the point of it.
+      - run: brew install sdl2
       - run: bun test
       # Checks every scalar-returning `extern fn` against this runner's real headers.
       # Needs no annotations; see the script's header for what it does and doesn't cover.

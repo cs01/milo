@@ -104,11 +104,9 @@ fn main() {
     arr.push(Value.str(strings.alloc("boo")))
     arr.push(Value.num(3.5))
     arr.push(Value.str(strings.alloc("and a string")))
-    var line = ""
     for v in arr {
-        line = line + show(strings, v) + "  "
+        print(show(strings, v))
     }
-    print(line)
 
     // ── real NaN and infinity are still numbers, not tags ──
     var zero: f64 = 0.0

@@ -363,6 +363,13 @@ for (const doc of DOCS) {
 // The ratchet may only shrink. A page that starts compiling must come off the list, or
 // the exclusion silently outlives the problem it was added for.
 describe("snippet ratchet", () => {
+  test("the site walk actually found pages to check", () => {
+    // Without this the suite passes with DOCS holding only the three original files:
+    // a broken directory walk would read as "every site page compiles".
+    expect(siteDocs.length).toBeGreaterThan(80);
+    expect(DOCS.filter(d => d.startsWith("docs/site/")).length).toBeGreaterThan(20);
+  });
+
   test("every excluded page exists", () => {
     for (const doc of SNIPPETS_NOT_YET_CHECKED) {
       expect(`${doc}: ${existsSync(join(REPO_ROOT, doc)) ? "found" : "missing"}`).toBe(`${doc}: found`);

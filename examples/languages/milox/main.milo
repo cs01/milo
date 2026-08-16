@@ -17,8 +17,8 @@ from "./vm" import {
 from "./disasm" import {
     disassemble
 }
-from "std/args" import {
-    args
+from "std/argparse" import {
+    ArgParser
 }
 from "std/fs" import {
     readFile
@@ -271,67 +271,39 @@ fn demoEmbed() {
     print("no bug it can write that reaches host memory.")
 }
 
-fn usage() {
-    print("milox — a small language with an 8-byte nan-boxed value")
-    print("")
-    print("  milox <file.milox>    run a script")
-    print("  milox demo            a tour of the language")
-    print("  milox dynamic         heterogeneous lists, retyped variables, functions as values")
-    print("  milox embed           embed milox in a host program and pass values across")
-    print("  milox gc-bug          free a reachable object on purpose, watch it get caught")
-    print("  milox forge           forge 2M object references, watch none of them deref")
-    print("")
-    print("  --disasm              dump bytecode before running")
-    print("  --stats               print instruction, allocation and GC counts")
-    print("  --gc-stress           collect on every allocation (clox's DEBUG_STRESS_GC)")
-}
+pub fn main(): i32 {
+    var parser = ArgParser.new("milox", "a small scripting language whose every runtime value is 8 bytes")
+    parser.addOptionalPositional("target", "a .milox script to run, or a demo name (default: demo)")
+    parser.addBool("disasm", "d", "dump bytecode before running")
+    parser.addBool("stats", "s", "print instruction, allocation and GC counts")
+    parser.addBool("gc-stress", "", "collect on every allocation (clox's DEBUG_STRESS_GC)")
+    parser.setEpilog("demos:\n" + "  demo      a tour of the language\n" + "  dynamic   heterogeneous lists, retyped variables, functions as values\n" + "  embed     embed milox in a host program and pass values across\n" + "  gc-bug    free a reachable object on purpose, watch it get caught\n" + "  forge     forge 2M object references, watch none of them deref")
+    let parsed = parser.parse()
 
-fn main() {
-    let argv = args()
-    var disasm = false
-    var stats = false
-    var stressGc = false
-    var target = ""
-    var i: i64 = 1
-    while i < argv.len {
-        let a = argv[i]
-        if a == "--disasm" {
-            disasm = true
-        } 
-        else if a == "--gc-stress" {
-            stressGc = true
-        } 
-        else if a == "--stats" {
-            stats = true
-        } 
-        else if a == "-h" || a == "--help" {
-            usage()
-            return
-        } 
-        else {
-            target = a.clone()
-        }
-        i = i + 1
-    }
-    if target == "" {
-        target = "demo"
-    }
+    let target = parsed.getString("target") ?? "demo"
+    let disasm = parsed.getBool("disasm")
+    let stats = parsed.getBool("stats")
+    let stressGc = parsed.getBool("gc-stress")
 
     if target == "demo" {
-        let _ = runSource(DEMO, disasm, stats, false, stressGc)
-        return
+        if !runSource(DEMO, disasm, stats, false, stressGc) {
+            return 1
+        }
+        return 0
     }
     if target == "dynamic" {
-        let _ = runSource(DYNAMIC.clone(), disasm, stats, false, stressGc)
-        return
+        if !runSource(DYNAMIC.clone(), disasm, stats, false, stressGc) {
+            return 1
+        }
+        return 0
     }
     if target == "embed" {
         demoEmbed()
-        return
+        return 0
     }
     if target == "forge" {
         demoForge()
-        return
+        return 0
     }
     if target == "gc-bug" {
         print("running with a deliberately broken collector that frees one reachable object")
@@ -345,15 +317,20 @@ fn main() {
             print("the same bug in a C nan-boxed VM is a use-after-free that surfaces")
             print("somewhere else entirely, as corrupted data or a crash.")
         }
-        return
+        // The planted bug being caught is the demo succeeding.
+        return 0
     }
     match readFile(target) {
         Ok(src) => {
-            let _ = runSource(src, disasm, stats, false, stressGc)
+            if !runSource(src, disasm, stats, false, stressGc) {
+                return 1
+            }
+            return 0
         }
         Err(e) => {
             print("milox: cannot read '" + target + "'")
-            usage()
+            print(parser.helpText())
+            return 1
         }
     }
 }

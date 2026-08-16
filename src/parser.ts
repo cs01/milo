@@ -1451,6 +1451,7 @@ export class Parser {
       // comparison. The trailing `.`/`(` requirement is the disambiguator.
       if (this.at(TokenKind.Lt)) {
         const saved = this.pos;
+        let badStructTurbofish: { name: string; args: string; tok: Token } | null = null;
         try {
           this.advance(); // consume <
           const typeArgs: import("./ast").MiloType[] = [this.parseType()];
@@ -1481,9 +1482,30 @@ export class Parser {
             this.expect(TokenKind.RParen);
             return { kind: "Call", func: tok.value, args, typeArgs, span: s };
           }
+          // `Name<T, U> { … }` is not a struct-literal form. It reads like one because
+          // `Name<T, U>.method()` IS valid, so say what to write instead of restoring and
+          // letting `<` parse as a comparison — which reported `unexpected token ','` at
+          // the type-argument comma, pointing at a character the author had no reason to
+          // suspect. A struct literal takes its type arguments from the fields, or from
+          // the binding's annotation when the fields do not determine them.
+          if (this.at(TokenKind.LBrace) && tok.value[0] >= "A" && tok.value[0] <= "Z") {
+            // Recorded, not thrown: this whole block is speculative and its `catch`
+            // restores, so raising here would be swallowed and the parse would fall back
+            // to `<`-as-comparison — which is how this reported `unexpected token ','` at
+            // the type-argument comma in the first place.
+            badStructTurbofish = { name: tok.value, args: typeArgs.map(t => t.name).join(", "), tok: this.peek() };
+          }
           this.pos = saved; // not a turbofish — fall through to `<` as comparison
         } catch {
           this.pos = saved;
+        }
+        // `Name<T, U> { … }` is not a struct-literal form, and it reads like one because
+        // `Name<T, U>.method()` IS valid. Say what to write instead of failing at a comma
+        // the author had no reason to suspect.
+        if (badStructTurbofish) {
+          const b = badStructTurbofish;
+          this.error(`'${b.name}<${b.args}> { … }' is not a struct literal`, b.tok, undefined,
+            `a struct literal infers its type arguments from its fields — write '${b.name} { … }', or annotate the binding when the fields do not determine them: 'let x: ${b.name}<${b.args}> = ${b.name} { … }'`);
         }
       }
       // struct literal: Name { field: value, ... }

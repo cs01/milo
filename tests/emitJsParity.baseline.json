@@ -220,6 +220,7 @@
   "vecClearTruncate.milo": "noEmit",
   "vecConstructors.milo": "noEmit",
   "vecReadsAndReshape.milo": "noEmit",
+  "vecRemoveDiscardedDrop.milo": "mismatch",
   "vecSlice.milo": "noEmit",
   "vecSum.milo": "noEmit",
   "vec_infer_from_push.milo": "noEmit",

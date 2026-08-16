@@ -1,5 +1,7 @@
-// codegen-js coverage sweep: compile every tests/fixtures/*.milo to JS via `emit-js`,
-// run it, and compare (trimmed, per-line) to the fixture's `// @expect:` annotations —
+// codegen-js coverage sweep: how many fixtures run byte-identical under `emit-js`.
+//
+// Compiles every tests/fixtures/*.milo to JS,
+// runs it, and compares (trimmed, per-line) to the fixture's `// @expect:` annotations —
 // exactly as tests/run.test.ts does for the native binary. Measures how many programs
 // the in-browser playground backend runs byte-identical to native.
 //

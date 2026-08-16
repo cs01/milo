@@ -1,4 +1,6 @@
-// Renders the mascot to editors/vscode/icon.png — the VS Code Marketplace and
+// Renders the mascot to editors/vscode/icon.png.
+//
+// The VS Code Marketplace and
 // Open VSX both reject SVG icons, so the pixel grid is rasterized here rather
 // than converted from logo.svg (no rasterizer dependency, and nearest-neighbor
 // scaling keeps the pixel art crisp instead of blurring it).

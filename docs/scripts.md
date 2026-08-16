@@ -3,7 +3,7 @@ system: dev-scripts
 purpose: index of agent-facing scripts and how to write new ones well; agents should keep building these out
 key-files: scripts/, bin/, .githooks/, scripts/lint.ts, scripts/agent_review.sh
 update-when: a script is added/removed/changed, or the scripting conventions change
-last-verified: 2026-08-14
+last-verified: 2026-08-15
 -->
 
 # Dev Scripts & Tools
@@ -25,22 +25,62 @@ last-verified: 2026-08-14
 - **No secrets in the file.** Read from env; document required vars in the header.
 
 ## Index
+
+Generated from each script's own first comment line by `scripts/gen-scripts-doc.ts`.
+To change an entry, change that line — this table is a projection of it.
+
+<!-- BEGIN GENERATED INDEX -->
 | Script | Purpose |
 |---|---|
-| `scripts/lint.ts` | repo linter — smells + auto-`--fix`; run by the pre-commit hook (`--staged`) and manually (`--all`) |
-| `scripts/run-examples.ts` | compiles every example entrypoint (hard gate) + runs those annotated `// @run:` — the "always run the app" gate |
-| `scripts/fetch-assets.sh` | redownloads the game assets that are not in git (FLYBY cities, APSIS planet maps); holds the parameters each committed city was built from |
-| `scripts/agent_review.sh` | cross-model / multi-persona review driver ([docs/agent-review.md](docs/agent-review.md)) |
-| `scripts/guard.ts` | mem/timeout watchdog wrapper for running milo binaries safely (sets `MILO_LINE_BUFFERED=1` so a SIGKILLed child's stdout survives) |
-| `scripts/selfhost.sh` | rebuild `milo-self` (required before selfhost work; `.bin` is gitignored) |
-| `scripts/selfhost-sweep.ts` | guarded selfhost divergence sweep |
-| `scripts/js-sweep.ts` | JS-backend fixture sweep |
-| `scripts/ecosystem-check.ts` | installs every published milo-language package from GitHub and compiles it against this checkout — the only gate that takes the *package* import path a user takes, rather than the local one every in-repo test uses |
-| `scripts/build.sh` | build entry |
-| `scripts/bundle-stdlib.ts` | bundle stdlib into the compiler |
-| `scripts/gen-std-docs.ts` | regenerate stdlib API docs |
-| `scripts/gen-json-conformance.ts` | generate JSON conformance fixtures |
-| `scripts/migrate-imports.ts` | codemod for import-syntax migration |
-| `.githooks/pre-commit` | formats staged `.milo`, then runs `lint.ts --staged --fix` |
+| `scripts/agent_review.sh` | Cross-model / multi-persona code review driver. |
+| `scripts/audit-extern-returns.ts` | Audit every `extern fn` in std/ against the real C headers — no annotations needed. |
+| `scripts/build.sh` | Build a standalone, self-contained milo binary. |
+| `scripts/bundle-stdlib.ts` | Generates src/stdlib-bundle.ts, embedding every std/*.milo file as a string. |
+| `scripts/ecosystem-check.ts` | Compile every published milo-language package against THIS checkout. |
+| `scripts/fetch-assets.sh` | Regenerates the game assets that are deliberately NOT in git: the FLYBY city files (82 MB of terrain, footprints and aerial drape) and the APSIS planet maps. |
+| `scripts/fuzz-check.ts` | The frontend contract the fuzzer tests, in one place so the Worker and the main-thread confirmation stage run byte-identical logic. |
+| `scripts/fuzz-confirm.ts` | Re-runs one fuzz case on a fresh process's MAIN thread and reports the verdict as JSON on stdout. |
+| `scripts/fuzz-coverage.ts` | Which surface forms can the ownership fuzzer actually emit? |
+| `scripts/fuzz-frontend.ts` | Token-mutation fuzzer for the Milo frontend (lexer → parser → [resolver] → checker). |
+| `scripts/fuzz-ownership.ts` | Differential falsifier for the OWNERSHIP checker. |
+| `scripts/fuzz-scan.ts` | Raw lexical splitter used by the frontend fuzzer for mutation and reduction. |
+| `scripts/fuzz-worker.ts` | Case runner for scripts/fuzz-frontend.ts. |
+| `scripts/gen-json-conformance.ts` | Generates a JSON conformance fixture from the canonical json.org JSON_checker suite (fail1..33, pass1..3) as vendored by CPython's test_json. |
+| `scripts/gen-scripts-doc.ts` | Regenerates the Index table in docs/scripts.md from each script's own first comment line, so the index cannot fall behind the directory. |
+| `scripts/gen-std-docs.ts` | Regenerate docs/std/<module>.md from the std doc-comments (source of truth). |
+| `scripts/gen-tmlanguage.ts` | Regenerates editors/vscode/syntaxes/milo.tmLanguage.json from the compiler's own keyword and primitive-type lists. |
+| `scripts/gen-vscode-icon.ts` | Renders the mascot to editors/vscode/icon.png. |
+| `scripts/guard.ts` | Guarded child execution: hard memory + wall-clock + CPU caps for every process the test harnesses spawn. |
+| `scripts/hir-ratchet.ts` | How much of src-milo's backend still re-derives what the frontend already knew? |
+| `scripts/ir-diff.ts` | Byte-exact IR differential: emit LLVM IR for every fixture with BOTH compilers and compare the bytes. |
+| `scripts/js-sweep.ts` | codegen-js coverage sweep: how many fixtures run byte-identical under `emit-js`. |
+| `scripts/leak-check.ts` | Leak gate: compile every stdout-comparable fixture, run it, and fail if the process exits still holding heap it allocated. |
+| `scripts/lint.ts` | Repo linter: deterministic smell checks with auto-fix. |
+| `scripts/lsp-probe.ts` | Differential + crash-safety probe for the Milo language server. |
+| `scripts/mascot.ts` | The Milo mascot as a char grid — the single source for every rendering of it (docs/site/scripts/gen-logo.ts → logo.svg, scripts/gen-vscode-icon.ts → the extension's icon.png). |
+| `scripts/migrate-imports.ts` | Migration script: convert `from "X" import *` to explicit imports Usage: bun run scripts/migrate-imports.ts |
+| `scripts/napi-probe.ts` | Generate a Milo host that can load a Node-API (.node) addon, and trace which napi_* entry points the addon actually calls. |
+| `scripts/prove-soundness-fuzz.ts` | Differential falsifier for `milo prove`. |
+| `scripts/release-meta.ts` | Shared facts about a release: the target list and how a git tag maps to a version string. |
+| `scripts/render-formula.ts` | Renders the Homebrew formula for a release and prints it to stdout. |
+| `scripts/rgbench.sh` | rgbench — compare our rg against real ripgrep, honestly. |
+| `scripts/rgdiff.sh` | Differential test: our Milo port of ripgrep (examples/cli-tools/rg.milo) vs real `rg`. |
+| `scripts/run-examples.ts` | Compiles every example entrypoint and runs the ones marked runnable. |
+| `scripts/selfhost-asan.ts` | Is the code milo-self GENERATES memory-safe? |
+| `scripts/selfhost-examples.ts` | Compile every examples/ entrypoint with milo-self (the Milo compiler written in Milo) and bucket the failures — the examples-side counterpart to scripts/selfhost-sweep.ts. |
+| `scripts/selfhost-fixpoint.sh` | Verify the self-hosting FIXED POINT: milo0 compiled by the oracle and milo0 compiled by itself must emit byte-identical IR. |
+| `scripts/selfhost-irsize.ts` | How much IR does milo-self emit for its own source, and is that number drifting? |
+| `scripts/selfhost-rejects.ts` | Does milo-self REJECT the programs it is supposed to reject? |
+| `scripts/selfhost-selfcheck.sh` | Can milo-self still type-check src-milo? |
+| `scripts/selfhost-stamp.ts` | Provenance for .selfhost/milo-self.bin: which source built it. |
+| `scripts/selfhost-sweep.ts` | Differential sweep: run every tests/fixtures/*.milo through milo-self and bucket the failures. |
+| `scripts/selfhost.sh` | Build milo-self (the Milo compiler written in Milo) with the TS compiler. |
+| `scripts/stamp-version.ts` | Stamps the current commit into src/version.ts so a released binary can report which commit built it. |
+| `scripts/verify-contracts.baseline.ts` | Accepted (baselined) contract refutations. |
+| `scripts/verify-contracts.expected.ts` | Per-file prove-verdict ratchet. |
+| `scripts/verify-contracts.ts` | Static contract gate: run `milo prove` over every contract-bearing .milo in std/ and examples/ and FAIL if any contract is *refuted* (the solver found a counterexample proving it false). |
+| `scripts/windows-sweep.ts` | Cross-compiles every tests/fixtures/*.milo to windows-x64 and runs the PE under Wine, comparing stdout to the fixture's `// @expect:` lines. |
+| `.githooks/pre-commit` | Format staged .milo files with bin/milo-fmt (built on demand by `milo fmt`). |
+<!-- END GENERATED INDEX -->
 
-Keep this table current — it's how agents discover what already exists before writing a duplicate.
+This table is regenerated, not maintained — it is how agents discover what already exists before writing a duplicate.

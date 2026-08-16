@@ -1,5 +1,6 @@
-// generates src/stdlib-bundle.ts with all std/*.milo files embedded as strings,
-// plus the formatter's source — a shipped binary has no repo to build fmt.milo
+// Generates src/stdlib-bundle.ts, embedding every std/*.milo file as a string.
+//
+// The formatter's source goes in too: a shipped binary has no repo to build fmt.milo
 // from, and `milo fmt` / LSP format-on-save both need it (see src/fmtbin.ts).
 import { readdirSync, readFileSync, writeFileSync } from "fs";
 import { resolve, dirname } from "path";

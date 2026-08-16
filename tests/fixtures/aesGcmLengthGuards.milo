@@ -1,0 +1,58 @@
+// @expect: roundtrip=[secret msg]
+// @expect: short-key rejected
+// @expect: short-tag rejected
+
+// The AES-GCM entry points pass 32/16/12 to the C API as CONSTANTS, whatever length
+// actually arrived. `requires key.len == 32` states that, but a `requires` is asserted in
+// --debug and DROPPED at the default -O2 — so a short key read past the end of the
+// caller's buffer in an ordinary build and "encrypted" with whatever followed it. An
+// out-of-bounds read reachable from safe Milo through a pub std API.
+//
+// The lengths are checked at runtime now, so the guard holds in a release build. Both bad
+// cases here are derived at RUNTIME on purpose: a literal short key is caught by the
+// prover at compile time, which proves the contract works but not that the release build
+// is safe, which is the thing that was broken.
+from "std/crypto" import {
+    Crypto
+}
+
+fn shorten(s: &string, n: i64): string {
+    return s.substr(0, n)
+}
+
+pub fn main(): i32 {
+    let key = "01234567890123456789012345678901"
+    let iv = "123456789012"
+    match Crypto.aesGcmEncrypt(key, iv, "secret msg", "aad") {
+        Result.Ok(r) => {
+            match Crypto.aesGcmDecrypt(key, iv, r.ciphertext, r.tag, "aad") {
+                Result.Ok(pt) => {
+                    print("roundtrip=[" + pt + "]")
+                }
+                Result.Err(e) => {
+                    print("decrypt failed")
+                }
+            }
+            match Crypto.aesGcmEncrypt(shorten(key, 8), iv, "x", "") {
+                Result.Ok(bad) => {
+                    print("BAD: accepted a short key")
+                }
+                Result.Err(e) => {
+                    print("short-key rejected")
+                }
+            }
+            match Crypto.aesGcmDecrypt(key, iv, r.ciphertext, shorten(r.tag, 5), "aad") {
+                Result.Ok(pt) => {
+                    print("BAD: accepted a short tag")
+                }
+                Result.Err(e) => {
+                    print("short-tag rejected")
+                }
+            }
+        }
+        Result.Err(e) => {
+            print("encrypt failed")
+        }
+    }
+    return 0
+}

@@ -29,6 +29,21 @@ pub struct DictObj {
     vals: Vec<Value>,
 }
 
+// Everything that lives on the heap, in one enum and therefore one arena.
+//
+// Keeping all heap shapes in a single type is what lets a boxed Value carry
+// nothing but an index and a generation: with one arena there is no "which
+// heap?" question, so no type tag has to be spent in the 50 payload bits.
+// The variant tag lives with the object, where it is read once on deref, and
+// not in the box, where it would be copied around on every stack push.
+//
+// The cost is that adding a variant widens EVERY object to the largest one,
+// and obliges a new arm in every `match o { … }` across vm.milo, disasm.milo
+// and gcMark. That last one is the dangerous one: a variant whose children the
+// collector does not trace gets its contents swept while reachable. There are
+// deliberately no `_ =>` arms over this type anywhere, so adding a variant is
+// a compile error at every site that must be taught about it rather than a
+// silent behavior change at one of them.
 pub enum Obj {
     Str(string),
     List(Vec<Value>),
@@ -44,7 +59,23 @@ pub struct Heap {
     // off some previously-issued handle at every unbox site is the kind of
     // bookkeeping that belongs in one place.
     id: i64,
+    // One mark bit per arena slot, indexed by Handle.index — the "mark" half of
+    // mark-sweep. `gcBegin` clears it, `gcMark` sets a bit for every object
+    // reachable from the roots, `gcSweep` frees every slot whose bit is still
+    // clear.
+    //
+    // It sits beside the arena rather than inside the object because it is
+    // collector bookkeeping, not program data: an `Obj` should not carry a
+    // field that is meaningless everywhere except the few microseconds a
+    // collection is running. Kept as a parallel Vec that only ever grows (see
+    // `alloc`), so a slot recycled through the free list already has its entry.
+    //
+    // A bit being set means "reachable as of the last gcBegin", so reading it
+    // outside a collection is meaningless.
     marks: Vec<bool>,
+    // Allocations since the last collection, and the count that triggers the
+    // next one. `gcSweep` sets nextGc to twice the surviving object count, so
+    // a program with a big live set collects proportionally less often.
     allocs: i64,
     nextGc: i64,
     gcRuns: i64,

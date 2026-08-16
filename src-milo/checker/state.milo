@@ -186,6 +186,11 @@ pub struct GenericEnumInfo {
     variants: HashMap<string, VariantInfo>,
 }
 
+pub struct PendingVecInfer {
+    name: string,
+    span: Option<Span>,
+}
+
 pub struct Checker {
     diagnostics: Vec<Diagnostic>,
     functions: HashMap<string, FnSig>,
@@ -232,6 +237,12 @@ pub struct Checker {
     // can't validate its own field type, since its toJson/fromJsonNode don't
     // exist yet at the point its plan is computed — mirrors the TS oracle's
     // jsonCapableStructs pre-pass.
+    // Unannotated `var v = Vec.new()` bindings whose element type nothing has
+    // supplied yet. An entry is cleared the moment `setVarType` refines the local
+    // (which is what a first `push` does); whatever is still here when the program
+    // finishes never had an element to infer, and is an error rather than a silently
+    // element-less Vec. Mirrors the oracle's pendingInferVecs.
+    pendingVecInfer: Vec<PendingVecInfer>,
     jsonCapableStructs: HashMap<string, bool>,
     // The type checkExpr computed for each expression, keyed by ExprNode.id. The backend
     // otherwise re-derives this from syntax as a string, through a partial function whose
@@ -293,6 +304,7 @@ pub struct Checker {
 
 pub fn newChecker(): Checker {
     return Checker {
+        pendingVecInfer: Vec.new(),
         diagnostics: Vec.new(),
         functions: HashMap.new(),
         structs: HashMap.new(),
@@ -415,6 +427,17 @@ pub fn lookup(ck: &Checker, name: &string): Option<VarInfo> {
 // Refine a local's recorded type in place. Used to give `var w = Vec.new()` its element
 // type from the first `push`.
 pub fn setVarType(ck: &mut Checker, name: &string, ty: TypeKind) {
+    // Refining the local IS the resolution a pending Vec was waiting for.
+    var kept: Vec<PendingVecInfer> = Vec.new()
+    for pv in ck.pendingVecInfer {
+        if pv.name != name {
+            kept.push(PendingVecInfer {
+                name: pv.name.clone(), span: cloneSpan(pv.span)
+            }
+            )
+        }
+    }
+    ck.pendingVecInfer = kept
     var i: i64 = ck.scopes.len - 1
     while i >= 0 {
         if ck.scopes[i].contains(name) {

@@ -168,6 +168,23 @@ pub fn checkLetDecl(ck: &mut Checker, name: &string, typeAnno: &Option<MiloType>
         span: cloneSpan(span),
     }
     )
+    // An unannotated `Vec.new()` has no element type yet. Record it so that never
+    // acquiring one is reported, instead of leaving a Vec whose element is unknown to
+    // flow onward and fail somewhere unrelated.
+    if !hasHint {
+        match value.kind {
+            Expr.EnumLit(en, vr, eargs) => {
+                if en == "Vec" && (vr == "new" || vr == "withCapacity") {
+                    ck.pendingVecInfer.push(PendingVecInfer {
+                        name: name.clone(), span: cloneSpan(span),
+                    }
+                    )
+                }
+            }
+            _ => {
+            }
+        }
+    }
     tryMove(ck, value)
 }
 
@@ -1995,5 +2012,11 @@ pub fn checkProgram(ck: &mut Checker, program: &Program) {
         // entry at all in exprTypes or forIns.
         ck.monomorphizedFns[i] = monoFn
         i = i + 1
+    }
+
+    // Anything still pending never got an element from a push. Reported here, at the
+    // end, because a push arbitrarily far away is still a resolution.
+    for pv in ck.pendingVecInfer {
+        error(ck, "cannot infer Vec element type — no 'push' found to infer from; add a type annotation: 'let v: Vec<T> = Vec.new()'", cloneSpan(pv.span))
     }
 }

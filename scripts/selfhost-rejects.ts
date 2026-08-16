@@ -203,8 +203,17 @@ if (check || write) {
     console.error(`\nREFUSING TO WRITE: manifest would shrink — these regressed:\n  ${regressed.join("\n  ")}`);
     process.exit(1);
   }
-  writeFileSync(MANIFEST, `${header}\n${okNames.join("\n")}\n`);
-  console.log(`\nmanifest: ${claimed.length} → ${okNames.length} negative tests`);
+  // An entry the guard killed is UNKNOWN, not broken — the `regressed` check above
+  // exempts it for exactly that reason. Writing plain `okNames` would then delete it
+  // from the manifest anyway, so a --write from a busy machine silently lowers the
+  // ratchet by however many entries happened to be shed. Carry those rows forward.
+  const carried = claimed.filter(n => !okNames.includes(n) && unmeasuredNames.has(n));
+  if (carried.length) {
+    console.log(`\ncarrying ${carried.length} unmeasured manifest entr(y/ies) forward — the guard shed them, which is not a regression:\n  ${carried.join("\n  ")}`);
+  }
+  const written = [...okNames, ...carried].sort();
+  writeFileSync(MANIFEST, `${header}\n${written.join("\n")}\n`);
+  console.log(`\nmanifest: ${claimed.length} → ${written.length} negative tests`);
   process.exit(0);
 }
 

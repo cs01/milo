@@ -11,6 +11,31 @@ import { resolve, dirname, basename, relative, isAbsolute } from "path";
 import { STDLIB_DIR } from "./stdlibBundle";
 import { must } from "./must";
 
+// Every HIRExpr kind that is NOT an owned temporary: it yields a scalar, a void, a
+// borrowed view, or a place someone else already owns, so discarding its result frees
+// nothing and drop glue must not run on it.
+//
+// Listed rather than left as the implicit `false` at the bottom of `isOwnedTempExpr`,
+// because implicit is exactly how `VecRemove` was missed: it moves an element out of the
+// buffer like its sibling `VecPop`, `VecPop` was in the list and it was not, and
+// `v.remove(0)` as a statement therefore destroyed nothing. `tests/ownedTempCoverage.test.ts`
+// requires every kind in `HIRExpr` to appear either here or in `isOwnedTempExpr`, so a
+// newly added node cannot inherit an answer nobody chose.
+export const NOT_OWNED_TEMP: readonly string[] = [
+  "ArrayLen", "ArrayRepeat", "BitIntrinsic", "BoolLit", "CFnCall", "Cast",
+  "CharLit", "CheckedArith", "Closure", "EnumTryFrom", "FieldAccess", "FloatLit",
+  "Forget", "HashMapClear", "HashMapContains", "HashMapGetOrDefault", "HashMapInsert", "HashMapLen",
+  "HashMapNew", "HashMapRemove", "HeapCreate", "HeapDeref", "Ident", "IfExpr",
+  "IntLit", "InterfaceCoerce", "IsCheck", "MatchExpr", "MemSwap", "OffsetOf",
+  "OptionOp", "PtrDeref", "RangeCheck", "SaturatingArith", "SizeOf", "StringCstr",
+  "StringFind", "StringLen", "StringLit", "StringPush", "StringPushStr", "StringSlice",
+  "UnaryOp", "VecAll", "VecAny", "VecCapacity", "VecContains", "VecEach",
+  "VecEnumerate", "VecExtend", "VecFold", "VecIndexOf", "VecInsert", "VecIsEmpty",
+  "VecLen", "VecPosition", "VecPtr", "VecPush", "VecReserve", "VecRetain",
+  "VecReverse", "VecSlice", "VecSort", "VecSortBy", "VecSortByKey", "VecSum",
+  "VecSwap", "VecTruncate", "WrappingArith", "Zeroed",
+];
+
 // `.` can't appear in a Milo identifier, so this never collides with a user function.
 const GLOBAL_INIT_FN = "__milo.global_init";
 

@@ -191,6 +191,31 @@ operations, checking that each container's behaviour is written down rather than
 inherited from whichever code path it hits. The two are complementary: that one varies
 the operation, this one varies the spelling.
 
+## The same habit outside the checker
+
+Routing every rule through `placesOf` fixes the checker's half of this and nothing else.
+The habit is "a rule enumerated over node kinds, with a sibling forgotten", and the checker
+is only where it was noticed first. Three instances landed on the same day in three other
+files:
+
+| where | what was forgotten | cost |
+|---|---|---|
+| `codegen.ts isOwnedTempExpr` | `VecRemove`, while its sibling `VecPop` was present | `v.remove(0)` discarded destroyed nothing |
+| itable layout | no destructor slot at all | a value behind a boxed interface was never destroyed |
+| `parser.ts` array type | built from the inner type's NAME alone | `[[i64; 2]; 2]` silently meant `[i64; 2]` |
+
+**Gated 2026-08-16 for the first of the three.** `isOwnedTempExpr` classified 33 of
+`HIRExpr`'s 103 kinds and the other 70 fell off the bottom of the switch as an implicit
+`false` — so nobody ever had to decide, which is how the sibling was lost. Those 70 are now
+named in an exported `NOT_OWNED_TEMP`, and `tests/ownedTempCoverage.test.ts` requires every
+kind to appear in exactly one of the two lists. Verified by adding a node to `hir.ts` and
+watching the gate name it. The list is imported by the test rather than scraped, so it
+stays referenced code instead of a comment nobody is obliged to keep.
+
+The itable and the parser are one-off fixes with fixtures, not yet gated. A gate for those
+would have to be shaped differently (there is no enumeration to compare against), which is
+the honest reason they are still open rather than an oversight.
+
 ## Grade criteria
 
 The compiler is at **B** because of this class alone. What **A** requires, concretely:
@@ -200,6 +225,9 @@ The compiler is at **B** because of this class alone. What **A** requires, concr
    (Phase 4).
 3. A new `Expr` kind or a new container type inherits every existing aliasing rule by
    default, and the way to *escape* a rule is an explicit, written exemption.
+4. The same discipline outside `src/checker.ts`. One of the three known instances is gated
+   (`isOwnedTempExpr`); the itable drop slot and the parser's type construction are fixed
+   but ungated.
 
 Until 1–3 hold, the honest position is that the next spelling nobody thought of is
 already broken, and it will be found by a user rather than by a gate.

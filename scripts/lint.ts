@@ -151,6 +151,25 @@ for (const f of fileList()) {
     });
   }
 
+  // R8: two CONVENTIONS.md rules that are pure text and were only ever enforced by a
+  // review persona reading the diff — which is to say, not enforced.
+  // The linter and the conventions doc both have to QUOTE the banned text to state the
+  // rule, so they are the two files it cannot apply to.
+  if (!f.startsWith("docs/") && f !== "CONVENTIONS.md" && f !== "scripts/lint.ts") {
+    lines.forEach((ln, i) => {
+      // "Don't market Milo as 'like TypeScript'" — it is a Rust+TS blend, and the
+      // TypeScript framing sets exactly the wrong expectation about ownership.
+      if (/\blike TypeScript\b/i.test(ln)) {
+        errors.push({ file: f, line: i + 1, msg: "don't describe Milo as \"like TypeScript\" — it's a Rust+TS blend (CONVENTIONS.md)", fixable: false });
+      }
+      // Emitted IR must use opaque `ptr` (LLVM 15+). A typed pointer in an emitted
+      // string is rejected by the verifier at a distance from the code that wrote it.
+      if (isTs(f) && f.startsWith("src/") && !ln.trim().startsWith("//") && /["'`][^"'`]*\bi8\*/.test(ln)) {
+        errors.push({ file: f, line: i + 1, msg: "emit opaque `ptr`, never `i8*` (LLVM 15+)", fixable: false });
+      }
+    });
+  }
+
   let out = lines.join("\n");
 
   // R5: exactly one trailing newline on text files.

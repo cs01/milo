@@ -78,13 +78,13 @@ Green-tier concurrency with one OS-thread escape hatch:
 ### Standard Library (<!-- stat:std-modules -->80<!-- /stat --> modules)
 
 I/O & system: `io`, `fs`, `path`, `env`, `environ`, `args`, `process`, `signal`, `dl`, `sysinfo`, `mem`, `os`, `platform`, `term`, `pty`, `keys`, `ansi`
-Networking: `net` (TCP + DNS), `unix` (AF_UNIX), `fetch` (HTTPS client + TLS), `tls` (TLS server transport), `https` (HTTPS server), `http`, `httpmw`, `ws`, `url`
-Data: `json`, `csv`, `base64`, `base32`, `hex`, `sqlite`, `arena`, `set`, `pool`, `png`
+Networking: `net` (TCP + DNS), `unix` (AF_UNIX), `fetch` (HTTPS client + TLS), `tls` (TLS server transport), `https` (HTTPS server), `http`, `httpmw`, `multipart`, `mime`, `html`, `ws`, `url`
+Data: `json`, `csv`, `base64`, `base32`, `hex`, `binary`, `sqlite`, `arena`, `set`, `pool`, `png`
 Compression: `deflate`, `inflate`, `zip`, `zstd`
-Crypto & auth: `crypto`, `sha256`, `sha1`, `hmac`, `jwt`, `totp`, `checksum`, `xxhash`
-Concurrency: `runtime`, `sync`, `select`, `event`
+Crypto & auth: `crypto`, `sha256`, `sha512`, `sha1`, `hmac`, `hkdf`, `pbkdf2`, `subtle`, `jwt`, `totp`, `checksum`, `xxhash`
+Concurrency: `runtime`, `sync`, `select`, `event`, `timer`
 Strings: `string`, `fmt`, `strconv`, `unicode`, `regex`, `cstr`
-Math & verification: `math`, `random`, `sort`, `smt`
+Math & verification: `math`, `random`, `rng`, `sort`, `smt`
 
 The supported surface follows [the stdlib design](stdlib-design.md): `milo api`
 hides private/internal plumbing, commands use `Result<Unit>`, ordinary absence

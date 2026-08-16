@@ -1,97 +1,142 @@
 (* Milo Language Grammar — EBNF *)
-(* Phase 1 subset *)
+(*
+   Derived from src/parser.ts, and gated by tests/grammar.test.ts: every quoted
+   word-terminal below must be a real keyword or primitive type name, every keyword the
+   lexer knows must appear here, and every symbol terminal must be a token the lexer can
+   produce. Before that gate this file described a "Phase 1 subset" that had stopped
+   matching the language years earlier — no struct, enum, match, impl, trait, import or
+   closure, and a `-> type` return arrow the parser has never accepted.
 
-program     = { function_decl } ;
+   Not expressible in EBNF, enforced by the checker: `pub` may not mark an import or an
+   impl; `decreases` is meaningless on a struct; a repr'd enum's variants carry no
+   payload; `&x` is not an expression (borrows are implicit at call sites).
+*)
 
-function_decl
-            = extern_fn | fn_def ;
+program     = { attribute | declaration } ;
 
-extern_fn   = "extern" "fn" IDENT "(" [ param_list ] ")" [ "->" type ] ;
+declaration = import_decl
+            | [ "pub" ] ( struct_decl | enum_decl | fn_decl | extern_decl
+                        | trait_decl | interface_decl | type_alias | global_decl )
+            | impl_decl ;
 
-fn_def      = [ "pub" ] "fn" IDENT [ type_params ] "(" [ param_list ] ")" [ "->" type ] { contract } block ;
+(* ── Imports ── *)
+(* There is no glob form and no bare `import "path"`; the resolver picks a platform arm
+   by filename suffix (std/x.darwin.milo), so the path never names one. *)
+import_decl = "from" STRING "import" "{" import_name { "," import_name } [ "," ] "}" ;
+import_name = IDENT [ "as" IDENT ] ;
 
-(* Visibility: a top-level declaration is file-private unless prefixed with "pub",
-   which exports it (importable/referenceable from other files). The optional
-   [ "pub" ] shown on fn_def applies identically to every top-level declaration form
-   — struct, enum, trait, type alias, interface, and globals (let/var/thread_local).
-   It does NOT prefix an impl block (visibility follows the implemented type) or an
-   import. "pub" is a soft keyword: special only immediately before a declaration, so
-   it stays usable as an ordinary IDENT elsewhere. *)
+(* ── Attributes ── *)
+(* `@!name` is a file-level directive (e.g. @!wrapping); `@name` decorates the next
+   declaration or, inside an extern struct, the next field. *)
+attribute   = "@" [ "!" ] IDENT [ "(" attribute_arg { "," attribute_arg } ")" ] ;
+attribute_arg = IDENT | STRING ;
 
-contract    = ( "requires" | "ensures" | "invariant" ) expr
-            | "decreases" expr ;   (* an INTEGER measure, not a boolean claim *)
+(* ── Types ── *)
+(* A reference type is only legal in parameter position (second-class references). *)
+type        = [ "&" [ "mut" ] ] base_type [ "?" ] ;
+base_type   = "*" base_type                                  (* raw pointer, unsafe only *)
+            | "[" type [ ";" INT ] "]"                       (* array; sized or slice *)
+            | "(" [ type { "," type } ] ")" "=>" type        (* function type *)
+            | "extern" "(" [ type { "," type } ] ")" "=>" type
+            | type_name [ type_args ] [ range_bound ] ;
+type_name   = "i8" | "i16" | "i32" | "i64" | "int"
+            | "u8" | "byte" | "u16" | "u32" | "u64"
+            | "f32" | "f64" | "float"
+            | "bool" | "string" | "void" | IDENT ;
+type_args   = "<" type { "," type } ">" ;
+range_bound = "(" [ "-" ] INT ".." [ "-" ] INT ")" ;         (* ranged integer: i32(0..100) *)
 
-(* Inside an "ensures", old(e) denotes the value e held on entry. It is not a function:
-   there is no such name to call, and it is rejected in any other clause. e must be a
-   scalar (integer, float, bool) — a contract-checking build snapshots it at entry. *)
+(* ── Declarations ── *)
+struct_decl = "struct" IDENT [ type_params ] "{" { [ attribute ] IDENT ":" type [ "," ] } "}"
+              { contract } ;
+enum_decl   = "enum" IDENT [ type_params ] [ ":" IDENT ] "{" { enum_variant [ "," ] } "}" ;
+enum_variant = IDENT [ "(" type { "," type } ")" ] [ "=" [ "-" ] INT ] ;
 
-(* A struct may carry trailing "invariant" clauses, written after its closing brace over
-   the struct's own field names with no receiver ("invariant chr.len > 0"). The clause is
-   a property of the TYPE: assumed wherever a value of it is observed, and owed at every
-   struct literal and every function taking it by "&mut". *)
+fn_decl     = "fn" IDENT [ type_params ] "(" [ param_list ] ")" [ ":" type ]
+              { contract } block ;
+extern_decl = "extern" ( extern_fn | extern_struct | extern_type ) ;
+extern_fn   = "fn" IDENT "(" [ param_list ] ")" [ ":" type ] ;
+extern_struct = "struct" IDENT "{" { [ attribute ] IDENT ":" type [ "," ] } "}" ;
+extern_type = "type" IDENT ;                                 (* opaque handle *)
 
-param_list  = param { "," param } ;
+trait_decl  = "trait" IDENT [ ":" IDENT { "+" IDENT } ] "{" { trait_method } "}" ;
+trait_method = "fn" IDENT "(" [ param_list ] ")" [ ":" type ] [ block ] ;
+interface_decl = "interface" IDENT "{" { trait_method } "}" ;
+impl_decl   = [ "unsafe" ] "impl" IDENT [ "for" IDENT ] "{" { fn_decl } "}" ;
+
+type_alias  = "type" IDENT "=" type ;
+global_decl = [ "thread_local" ] ( "let" | "var" ) IDENT [ ":" type ] "=" expr ;
+
+type_params = "<" IDENT [ ":" IDENT { "+" IDENT } ] { "," IDENT [ ":" IDENT { "+" IDENT } ] } ">" ;
+param_list  = param { "," param } [ "," "..." ] ;            (* "..." only on extern fns *)
 param       = [ "&" [ "mut" ] ] IDENT ":" type ;
+contract    = ( "requires" | "ensures" | "invariant" | "decreases" ) expr ;
 
-type        = [ "*" ] type_name ;
-type_name   = "i8" | "i16" | "i32" | "i64"
-            | "u8" | "u16" | "u32" | "u64"
-            | "f32" | "f64"
-            | "bool" | "void"
-            | IDENT ;
-
-(* Statements are newline/grammar-delimited; a ";" between or after them is an
-   optional cosmetic no-op (the formatter strips it). It is not a value-voiding
-   terminator as in Rust. Note: the ";" in "[T; N]" array types is separate. *)
+(* ── Statements ── *)
+(* ';' is cosmetic: statements are delimited by the grammar, and a stray ';' at a
+   statement boundary is a no-op. Inside an expression it is an error. *)
 block       = "{" { ";" | statement } "}" ;
-
-statement   = let_decl | let_else | var_decl | assign_stmt | return_stmt
-            | if_stmt | while_stmt | for_stmt | break_stmt | continue_stmt
-            | expr_stmt ;
-
-let_decl    = "let" IDENT [ ":" type ] "=" expr ;
-let_else    = "let" pattern "=" expr "else" block ;  (* pattern binds into the enclosing scope; block must diverge *)
+statement   = let_decl | var_decl | return_stmt | if_stmt | while_stmt | for_stmt
+            | match_stmt | unsafe_block | "break" | "continue" | assign_stmt | expr ;
+let_decl    = "let" ( IDENT [ ":" type ] | pattern ) "=" expr [ "else" block ] ;
 var_decl    = "var" IDENT [ ":" type ] "=" expr ;
-assign_stmt = IDENT "=" expr ;
 return_stmt = "return" [ expr ] ;
-if_stmt     = "if" expr block [ "else" ( if_stmt | block ) ] ;
+if_stmt     = "if" ( expr | "let" pattern "=" expr ) block [ "else" ( if_stmt | block ) ] ;
 while_stmt  = "while" expr { loop_contract } block ;
-for_stmt    = "for" IDENT [ "," IDENT ] "in" expr { loop_contract } block ;  (* expr is a range (a..b) or an iterable (Vec, etc.) *)
-
-(* An iterable is a range, Vec, slice, array, string, HashMap, a struct with a "next"
-   method, or a struct with an "@iter"-marked field — the loop then walks that field
-   as if it had been written out. See docs/language-reference.md. *)
+for_stmt    = "for" IDENT [ "," IDENT ] "in" expr { loop_contract } block ;
 loop_contract = ( "invariant" | "decreases" ) expr ;
-break_stmt  = "break" ;      (* only valid inside a loop body; exits the innermost loop *)
-continue_stmt = "continue" ; (* only valid inside a loop body; jumps to the innermost loop's next iteration *)
-expr_stmt   = expr ;
+match_stmt  = "match" expr "{" { match_arm } "}" ;
+match_arm   = pattern "=>" ( expr | block ) [ "," ] ;
+unsafe_block = "unsafe" block ;
+assign_stmt = expr ( "=" | "+=" | "-=" | "*=" | "/=" | "%=" | "&=" | "|=" | "^=" ) expr ;
 
-(* Expressions — precedence low to high *)
-expr        = comparison ;
-comparison  = additive { ( "==" | "!=" | "<" | ">" | "<=" | ">=" ) additive } ;
+pattern     = "_"
+            | [ "-" ] ( INT | FLOAT ) | STRING | CHAR | "true" | "false"
+            | IDENT [ "." IDENT ] [ "(" [ IDENT { "," IDENT } ] ")" ] ;
+
+(* ── Expressions, loosest binding first ── *)
+expr        = coalesce ;
+coalesce    = or_expr [ "??" or_expr ] ;
+or_expr     = and_expr { "||" and_expr } ;
+and_expr    = bitor_expr { "&&" bitor_expr } ;
+bitor_expr  = bitxor_expr { "|" bitxor_expr } ;
+bitxor_expr = bitand_expr { "^" bitand_expr } ;
+bitand_expr = comparison { "&" comparison } ;
+comparison  = shift { ( "==" | "!=" | "<" | ">" | "<=" | ">=" ) shift }
+            | expr "is" IDENT [ "." IDENT ] ;                (* enum variant test *)
+shift       = additive { ( "<" "<" | ">" ">" ) additive } ;  (* lexed adjacent, never spaced *)
 additive    = multiplicative { ( "+" | "-" ) multiplicative } ;
 multiplicative = unary { ( "*" | "/" | "%" ) unary } ;
-unary       = ( "-" | "!" ) unary | primary ;
-
-primary     = INT | STRING | "true" | "false"
-            | IDENT [ "(" [ arg_list ] ")" ]
-            | sigil_call
-            | "(" expr ")" ;
-
-(* Compile-time builtin. The "@" must hug the name (no whitespace), same as an
-   attribute. Currently only "embedFile", whose argument must be a STRING literal
-   — the compiler reads that file and inlines its bytes. The bare "embedFile(...)"
-   call form is still accepted but warns (bare-embedfile). *)
-sigil_call  = "@" "embedFile" "(" STRING ")" ;
-
+unary       = ( "-" | "!" | "*" | "~" | "&" ) unary | postfix ;
+postfix     = primary { "." IDENT [ "(" [ arg_list ] ")" ]  (* field access / method call *)
+                      | "[" expr [ ".." expr ] "]"          (* index, or slice *)
+                      | "!"                                  (* unwrap Option/Result *)
+                      | "?"                                  (* propagate Result *)
+                      | "as" type } ;                        (* cast *)
+primary     = INT | FLOAT | STRING | FSTRING | CHAR
+            | "true" | "false" | "null"
+            | IDENT [ "::" type_args ] [ "(" [ arg_list ] ")" ]
+            | struct_lit | array_lit | closure | if_expr | match_expr
+            | "(" expr ")"
+            | expr ".." expr                                 (* range, for-in only *)
+            | "@" IDENT "(" STRING ")" ;                     (* @embedFile("path") *)
+struct_lit  = IDENT [ type_args ] "{" { IDENT ":" expr [ "," ] } "}" ;
+array_lit   = "[" [ expr { "," expr } ] "]" ;
+closure     = [ "move" ] "(" [ param_list ] ")" [ ":" type ] "=>" ( expr | block ) ;
+if_expr     = "if" expr block "else" block ;                 (* both arms required *)
+match_expr  = "match" expr "{" { match_arm } "}" ;
 arg_list    = expr { "," expr } ;
 
-(* Tokens *)
-IDENT       = letter { letter | digit | "_" } ;
-INT         = digit { digit } ;   (* also 0x.. hex and 0b.. binary; "_" separators allowed *)
-FLOAT       = digit { digit } [ "." digit { digit } ] [ ( "e" | "E" ) [ "+" | "-" ] digit { digit } ] ;
-              (* a float has a "." fraction, an exponent, or both — e.g. 1.5, 1e18, 1.5e-3, 2E+9 *)
-STRING      = '"' { char | escape } '"' ;
+(* ── Lexical ── *)
+IDENT       = letter { letter | digit } ;
+INT         = digit { digit | "_" } | "0x" hexdigit { hexdigit | "_" }
+            | "0b" ( "0" | "1" ) { "0" | "1" | "_" } ;
+FLOAT       = digit { digit | "_" } "." digit { digit | "_" } [ ( "e" | "E" ) [ "-" ] digit { digit } ] ;
+STRING      = '"' { character | escape } '"' ;
+FSTRING     = '$' '"' { character | escape | "{" expr "}" } '"' ;
+CHAR        = "'" ( character | escape ) "'" ;
 letter      = "a".."z" | "A".."Z" | "_" ;
 digit       = "0".."9" ;
-escape      = "\" ( "n" | "t" | "\" | '"' | "0" ) ;
+hexdigit    = digit | "a".."f" | "A".."F" ;
+escape      = "\" ( "n" | "t" | "r" | "0" | "\" | '"' | "'" | "{" ) ;
+comment     = "//" { character } newline ;

@@ -37,3 +37,27 @@ test("the fixture count is the number the test driver actually walks", () => {
   const claimed = /<!-- stat:fixtures -->(\d+)<!-- \/stat -->/.exec(readFileSync(join(ROOT, "CLAUDE.md"), "utf-8"))?.[1];
   expect(claimed).toBe(String(onDisk));
 });
+
+// The roadmap's Standard Library section names every module by hand under a category.
+// The COUNT next to the heading is generated (stat:std-modules) and was right; the LIST
+// under it had fallen ten modules behind — binary, hkdf, html, mime, multipart, pbkdf2,
+// rng, sha512, subtle, timer were all shipped and unlisted. A count that says 80 above a
+// list of 70 names reads as complete, which is worse than an obviously stale doc.
+test("the roadmap's stdlib list names every module, and no module it lacks", () => {
+  const roadmap = readFileSync(join(ROOT, "docs", "roadmap.md"), "utf-8");
+  const section = roadmap.split("### Standard Library")[1]!.split("\n###")[0]!;
+  // Only the category lines ("Data: `json`, `csv`, …") are the list; the prose around
+  // them mentions modules too, and a phantom check over prose would fire on a sentence.
+  const categories = section.split("\n").filter(l => /^[A-Z][A-Za-z /&]*: `/.test(l)).join("\n");
+  expect(categories.split("\n").length).toBeGreaterThan(5);
+  const listed = new Set([...categories.matchAll(/`([a-z0-9]+)`/g)].map(m => m[1]!));
+  const real = new Set(
+    execFileSync("git", ["ls-files", "std/*.milo"], { cwd: ROOT, encoding: "utf-8" })
+      .split("\n").filter(Boolean)
+      .map(f => f.slice("std/".length).split(".")[0]!),
+  );
+  expect(real.size).toBeGreaterThan(50); // the scan must actually find std
+  expect([...real].filter(m => !listed.has(m)).sort()).toEqual([]);
+  // A name the list carries that std does not have is the same bug pointed the other way.
+  expect([...listed].filter(w => !real.has(w)).sort()).toEqual([]);
+});

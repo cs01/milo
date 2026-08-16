@@ -22,6 +22,7 @@ import { versionString } from "./version";
 import { extractFlowFacts, formatFlowFacts } from "./wcet";
 import { estimateLoopCycles, formatCycleEstimate } from "./wcet-cycles";
 import { PKG_COMMANDS, ensureDepsInstalled } from "./pkgcli";
+import { renderHelp, knownCommandNames } from "./cli-help";
 import { ensureFmtBinary } from "./fmtbin";
 import { must } from "./must";
 import { splitModule, type SplitStats } from "./cgu";
@@ -1871,67 +1872,7 @@ async function main() {
   }
 
   if (args.length < 1) {
-    console.log("usage: milo <command> [options] <file>");
-    console.log("commands:");
-    console.log("  run <file> [args]      compile and run (no artifacts left behind)");
-    console.log("  build <file> [-o out]  compile to executable");
-    console.log("  test [file|dir...]     run tests (*_test.milo, recursive in a dir; cwd by default)");
-    console.log("                         a test is a top-level `fn test*()` with no parameters;");
-    console.log("                         each runs in its own process, so a trap fails only that test");
-    console.log("                         -t <pattern>  run only tests matching (substring or regex)");
-    console.log("  emit-ast <file>        emit the parsed AST as JSON (--all imports, --spans keep spans)");
-    console.log("  emit-hir <file>        emit the typed HIR as JSON (--all full module, --spans keep spans)");
-    console.log("  emit-ir <file>         emit LLVM IR");
-    console.log("  emit-obj <file>        compile to object file (.o)");
-    console.log("  build-lib <files...>   compile to static library (.a)");
-    console.log("  emit-js <file>         emit JavaScript (playground target)");
-    console.log("  fmt <file...>          format source files (-w to write in place)");
-    console.log("  prove <file>           prove contracts hold, via std/smt, the milo-native prover");
-    console.log("                           --solver=z3   use z3 instead (adds non-linear arithmetic)");
-    console.log("                           --emit-smt    print the SMT-LIB2 obligations instead of solving them");
-    console.log("                           --all         include imported stdlib");
-    console.log("  safety <file>          check safety profile compliance");
-    console.log("  safety --list          list available safety profiles");
-    console.log("  wcet <file>            emit OTAWA flow facts (loop bounds) for WCET analysis");
-    console.log("  skill                  print language guide for LLMs");
-    console.log("  api <terms>            search std signatures by name/doc (--module std/x to dump one, --markdown to emit reference docs)");
-    console.log("  doc <file|dir>         reference markdown from doc-comments (-o <dir> to write one .md per module)");
-    console.log("packages:");
-    console.log("  init | new <name>      create milo.json here / scaffold a new project");
-    console.log("  add [--dev] <pkg>      add a library dependency (milo.json + milo.lock)");
-    console.log("  remove <pkg>           drop a dependency and prune the lock");
-    console.log("  install [--frozen]     sync this project from milo.lock (--frozen: fail if stale)");
-    console.log("  update [pkg]           re-resolve tags and rewrite the lock");
-    console.log("  tree | why <pkg>       dependency graph / who pulls a package in");
-    console.log("  vendor                 copy deps into ./vendor and rewrite to local paths");
-    console.log("  publish                validate, tag, push");
-    console.log("  tool install <pkg>     build and install a global executable (~/.local/bin)");
-    console.log("  tool uninstall <name>  remove an installed executable");
-    console.log("  tool list [--repair]   list installed executables (--repair: rebuild the index)");
-    console.log("  tool run <pkg> [args]  build and run a package's binary without installing");
-    console.log("options:");
-    console.log("  --release              optimize (-O3)");
-    console.log("  --debug                no optimization (-O0)");
-    console.log("  -g                     emit DWARF line info (source-level lldb/hades); composes with any -O / --debug");
-    console.log("  -O<level>              clang opt level: 0,1,2,3,s,z (default: -O2)");
-    console.log("  --sanitize             link with AddressSanitizer (requires clang)");
-    console.log("  --static-deps          static-link native deps (openssl/sqlite) for a portable binary");
-    console.log("  --overflow-checks     trap on +/-/* overflow at any -O (on by default in every mode)");
-    console.log("  --no-overflow-checks  wrap on +/-/* overflow at any -O (opt out of the default traps)");
-    console.log("  --contract-checks     assert requires/ensures/invariant at any -O (default: only --debug)");
-    console.log("  --no-contract-checks  drop those asserts at any -O (e.g. fast -O0 builds)");
-    console.log("  --strip-panic-locations  blank source paths out of runtime panic messages (-g still embeds them)");
-    console.log("  --fast                quick edit-loop build: -O0, wrapping (~2x faster compile)");
-    console.log("  --cgus=<n>             codegen units compiled in parallel (default: auto, 1 for --release/-g)");
-    console.log("  --deny=<warning>       treat warning as error (e.g. --deny=unused-variable)");
-    console.log("  --allow=<warning>      suppress warning (e.g. --allow=unused-result)");
-    console.log("  --deny-all             treat all warnings as errors");
-    console.log("                         (off-by-default warnings: unused-move, unused-import,");
-    console.log("                          unverified-extern, large-stack-array)");
-    console.log("  --safety=<level>       enforce safety profile (e.g. --safety=do178)");
-    console.log("  --target=<name>        cross-compile target (e.g. cortex-m3)");
-    console.log("  --heap-size=<N>        bare-metal heap cap in bytes or k/m (e.g. 64k); default: all free RAM");
-    console.log("  --version              print the compiler version and exit");
+    console.log(renderHelp());
     process.exit(1);
   }
 
@@ -1939,11 +1880,7 @@ async function main() {
 
   // Reject an unknown subcommand up front. Otherwise a bare file path (forgot `run`)
   // falls through every dispatch branch to the generic "no source file" below.
-  const KNOWN_COMMANDS = new Set([
-    "skill", "api", "doc", "lsp", "lex", "fmt", "build-lib", "safety", "verify",
-    "wcet", "prove", "test", "run", "build", "emit-ast", "emit-hir", "emit-ir", "emit-obj", "emit-js",
-    ...PKG_COMMANDS,
-  ]);
+  const KNOWN_COMMANDS = new Set(knownCommandNames());
   if (!KNOWN_COMMANDS.has(cmd) && cmd !== "--help" && cmd !== "-h") {
     console.error(`error: unknown command '${cmd}'`);
     console.error(`run 'milo' with no arguments to see available commands`);

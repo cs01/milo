@@ -9,6 +9,7 @@ import { readFileSync, readdirSync } from "fs";
 import { join } from "path";
 import { execFileSync } from "child_process";
 import { cases } from "../scripts/gen-error-catalog";
+import { parseExpectedError } from "./annotations";
 
 const ROOT = join(import.meta.dir, "..");
 
@@ -31,4 +32,13 @@ test("the catalog documents every distinct message", () => {
   const messages = new Set(cases().map(c => c.message));
   expect(messages.size).toBeGreaterThan(100);
   expect([...messages].filter(m => !doc.includes(`## ${m}`))).toEqual([]);
+});
+
+test("the annotation parser survives a CRLF checkout", () => {
+  // The Windows runner checks out CRLF. `.` does not match a line terminator, so a
+  // regex ending in `(.+)$` matched nothing on any line and every error fixture there
+  // reported "no annotation" while macOS and Linux passed.
+  expect(parseExpectedError("// @error: use of moved variable\r\n")).toBe("use of moved variable");
+  expect(parseExpectedError("  for x in y {  // @error: shadows an outer binding\r\n")).toBe("shadows an outer binding");
+  expect(parseExpectedError("fn main() {}\r\n")).toBe(null);
 });

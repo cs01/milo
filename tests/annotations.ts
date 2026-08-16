@@ -19,8 +19,11 @@ export function parseExpected(source: string): string[] {
 // message assertion entirely, leaving "the compiler rejected this for SOME reason" as
 // the whole test.
 export function parseExpectedError(source: string): string | null {
-  for (const line of source.split("\n")) {
-    const m = /\/\/\s*@error:\s*(.+)$/.exec(line);
+  for (const raw of source.split("\n")) {
+    // trim() first: a CRLF checkout leaves `\r` on every line, and `.` does not match a
+    // line terminator, so `(.+)$` failed on ALL of them — every error fixture on the
+    // Windows runner reported "no annotation" while macOS and Linux were fine.
+    const m = /\/\/\s*@error:\s*(.+)$/.exec(raw.trim());
     if (m) return m[1]!.trim();
   }
   return null;

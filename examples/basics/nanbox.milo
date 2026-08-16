@@ -72,76 +72,45 @@ impl Value {
     }
 }
 
-// The string heap. A Value never holds an address, only a slot number and the
-// generation that slot had when the box was made.
-pub struct Heap {
-    strings: Arena<string>,
-    id: i64,
+// A Value never holds an address — only a slot number in this arena and the
+// generation that slot had when the box was made. Rebuilding the handle takes
+// the arena's id from the caller, never from the box, so a value cannot even
+// name a different arena.
+fn handleOf(arenaId: i64, v: &Value): Handle<string> {
+    return Handle {
+        arenaId: arenaId, index: v.index(), generation: v.generation()
+    }
 }
 
-impl Heap {
-    fn new(): Heap {
-        var strings: Arena<string> = Arena<string>.new()
-        // Allocating a sentinel is also how the arena's id is learned; it is
-        // only observable through a handle.
-        let sentinel = strings.alloc("")
-        return Heap {
-            strings: strings, id: sentinel.arenaId
-        }
+// Ask a value what it is and render it. This is the whole "it knows how to
+// print itself": one mask test, then either a bitcast or a checked arena
+// lookup. `get` checks four things before it touches memory — arena id, index
+// sign, index bounds, slot generation — and returns None if any of them fail,
+// which is why a stale or forged box becomes "<dangling>" instead of a read of
+// freed memory.
+fn show(strings: &Arena<string>, arenaId: i64, v: &Value): string {
+    if v.isNum() {
+        return v.asNum().toString()
     }
-
-    fn alloc(self: &mut Self, s: string): Value {
-        return Value.str(self.strings.alloc(s))
-    }
-
-    fn free(self: &mut Self, v: &Value): bool {
-        return self.strings.free(self.handleOf(v))
-    }
-
-    fn handleOf(self: &Self, v: &Value): Handle<string> {
-        // The arena id comes from the heap, never from the box, so a value
-        // cannot even name a different arena.
-        return Handle {
-            arenaId: self.id, index: v.index(), generation: v.generation()
-        }
-    }
-
-    // Ask a value what it is and render it. This is the whole "it knows how to
-    // print itself": one mask test, then either a bitcast or a checked arena
-    // lookup. Reaching a string's contents is checked four ways — arena id,
-    // index sign, index bounds, slot generation — and there is no other route
-    // to them, which is what makes "every dereference is checked" a property of
-    // the type rather than a convention.
-    fn show(self: &Self, v: &Value): string {
-        if v.isNum() {
-            return v.asNum().toString()
-        }
-        match arenaWith(self.strings, self.handleOf(v), (s: &string): string => {
-            return s.clone()
-        }
-        ) {
-            Some(s) => {
-                return s
-            }
-            None => {
-                return "<dangling>"
-            }
-        }
-    }
+    return strings.get(handleOf(arenaId, v)) ?? "<dangling>"
 }
 
 fn main() {
-    var heap: Heap = Heap.new()
+    // The strings live here, and nowhere else. Every string Value is an index
+    // into this arena plus a generation.
+    var strings: Arena<string> = Arena<string>.new()
+    // An arena's id is only observable through a handle, so take one now.
+    let arenaId = strings.alloc("").arenaId
 
     // ── an array of mixed values, 8 bytes each ──
     var arr: Vec<Value> = Vec.new()
     arr.push(Value.num(4.0))
-    arr.push(heap.alloc("boo"))
+    arr.push(Value.str(strings.alloc("boo")))
     arr.push(Value.num(3.5))
-    arr.push(heap.alloc("and a string"))
+    arr.push(Value.str(strings.alloc("and a string")))
     var line = ""
     for v in arr {
-        line = line + heap.show(v) + "  "
+        line = line + show(strings, arenaId, v) + "  "
     }
     print(line)
 
@@ -150,10 +119,11 @@ fn main() {
     print("NaN is a number: " + Value.num(zero / zero).isNum().toString() + ", inf is a number: " + Value.num(1.0 / zero).isNum().toString())
 
     // ── a freed string is caught, not dereferenced ──
-    let doomed = heap.alloc("about to be freed")
-    print("before free: " + heap.show(doomed))
-    let _ = heap.free(doomed)
-    print("after free:  " + heap.show(doomed))
+    let h = strings.alloc("about to be freed")
+    let doomed = Value.str(h)
+    print("before free: " + show(strings, arenaId, doomed))
+    let _ = strings.free(h)
+    print("after free:  " + show(strings, arenaId, doomed))
 
     // ── no 64-bit pattern reaches memory ──
     // In C the payload is an address, so a forged box is an arbitrary read.
@@ -169,7 +139,7 @@ fn main() {
         let forged = Value {
             bits: SIGN | QNAN | (st & 0x3ffffffffffff)
         }
-        if heap.show(forged) != "<dangling>" {
+        if show(strings, arenaId, forged) != "<dangling>" {
             reached = reached + 1
         }
         i = i + 1

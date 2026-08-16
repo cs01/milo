@@ -106,6 +106,18 @@ fn Json.curInt(self: &Json, cur: i64): Option<i64>
 
 _Undocumented._
 
+### `Json.curKeyAt`
+
+```milo
+fn Json.curKeyAt(self: &Json, cur: i64, index: i64): string
+```
+
+Key of the object child at `index`. `keys()` answers the same question for the
+ROOT only, which is no help to a nested object whose keys are not known ahead of
+time — decoding a `HashMap<string, V>` field has to walk children it cannot name.
+Empty string for a non-object cursor or an out-of-range index; "" is also a legal
+JSON key, so bound the walk with `curLen` rather than testing the result.
+
 ### `Json.curKind`
 
 ```milo
@@ -171,6 +183,17 @@ fn Json.curUint(self: &Json, cur: i64): Option<u64>
 ```
 
 Unsigned read, for values above i64::MAX that `curInt` must reject.
+
+### `Json.curValueAt`
+
+```milo
+fn Json.curValueAt(self: &Json, cur: i64, index: i64): i64
+```
+
+Value of the object child at `index`, the other half of curKeyAt. Deliberately
+separate from `curChild`, which is the ARRAY accessor and returns -1 for an object:
+"element i of an array" and "entry i of an object" are different questions, and one
+function answering both would make an object walked as an array look like it worked.
 
 ### `Json.f64`
 

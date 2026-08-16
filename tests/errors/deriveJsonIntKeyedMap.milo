@@ -1,0 +1,12 @@
+// A JSON object's keys are strings and nothing else, so only HashMap<string, V> has an
+// encoding. Stringifying an i64 key would round-trip 1 and "1" to the same place.
+// @error: a JSON object's keys are strings
+@derive(Json)
+struct Bad {
+    m: HashMap<i64, string>,
+}
+
+fn main() {
+    let b = Bad { m: HashMap.new() }
+    print(b.toJson())
+}

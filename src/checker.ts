@@ -2226,6 +2226,7 @@ export class TypeChecker {
   // monomorphized enum whose *name* is mangled, but its written form is not.
   private jsonTypeSpelling(t: TypeKind): string {
     if (t.tag === "vec") return `Vec<${this.jsonTypeSpelling(t.element)}>`;
+    if (t.tag === "hashmap") return `HashMap<${this.jsonTypeSpelling(t.key)}, ${this.jsonTypeSpelling(t.value)}>`;
     if (t.tag === "enum") {
       const inner = this.optionInnerType(t);
       if (inner) return `Option<${this.jsonTypeSpelling(inner)}>`;
@@ -2284,6 +2285,17 @@ export class TypeChecker {
         const p = this.jsonPlanFor(t.element);
         if ("err" in p) return p;
         return { k: "vec", ty: this.jsonTypeSpelling(t), elem: p };
+      }
+      case "hashmap": {
+        // A JSON object's keys are strings and nothing else. An i64-keyed map has no
+        // lossless encoding — stringifying the key would round-trip `1` and `"1"` to the
+        // same place — so say that rather than inventing one.
+        if (t.key.tag !== "string") {
+          return { err: `HashMap key '${typeName(t.key)}' has no JSON form — a JSON object's keys are strings, so only HashMap<string, V> encodes` };
+        }
+        const p = this.jsonPlanFor(t.value);
+        if ("err" in p) return p;
+        return { k: "map", ty: this.jsonTypeSpelling(t), value: p };
       }
       default:
         return { err: `type '${typeName(t)}' has no JSON form` };

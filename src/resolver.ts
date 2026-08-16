@@ -265,6 +265,16 @@ export function resolveImports(program: Program, sourceDir: string, target: Targ
     return { path: absPath, pkg };
   }
 
+  // Does this written type mention a HashMap anywhere in it? `Vec<HashMap<string, i64>>`
+  // needs the sort import just as much as a bare map field does.
+  function mentionsHashMap(t: import("./ast").MiloType | null): boolean {
+    if (!t) return false;
+    if (t.name === "HashMap") return true;
+    return (t.typeArgs ?? []).some(mentionsHashMap)
+      || (t.fnParams ?? []).some(mentionsHashMap)
+      || mentionsHashMap(t.fnRet ?? null);
+  }
+
   function processImports(prog: Program, dir: string, pkg: string, unit: Unit) {
     // `@derive(Json)` synthesizes method bodies that call std/json (the cursor
     // API, JsonError, jsonQuote…). Pulling the module in here keeps the attribute
@@ -272,11 +282,22 @@ export function resolveImports(program: Program, sourceDir: string, target: Targ
     // would report "unknown type 'Json'" pointing at code the user never wrote.
     // Not appended to prog.imports — the unused-import lint reads that list and
     // would flag an import nobody typed.
-    const derivesJson = prog.structs.some(s =>
+    const jsonDerivers = prog.structs.filter(s =>
       s.attributes?.some(a => a.name === "derive" && a.args.includes("Json")));
+    const derivesJson = jsonDerivers.length > 0;
     const synthetic: ImportDecl[] = derivesJson && !prog.imports.some(i => i.path === "std/json")
       ? [{ kind: "ImportDecl", path: "std/json", names: ["Json"] }]
       : [];
+    // A `HashMap<string, V>` field encodes as a JSON object, and the generated encoder
+    // sorts its keys before emitting (Milo's HashMap iterates in a different order on
+    // every run, so unsorted output would not even be reproducible across runs of one
+    // binary). That needs std/sort. Pulled in only when a deriving struct actually has a
+    // map field — syntactically, since plans are not computed until the checker runs —
+    // so the common derive keeps its current dependencies.
+    const derivesMap = jsonDerivers.some(s => s.fields.some(f => mentionsHashMap(f.type)));
+    if (derivesMap && !prog.imports.some(i => i.path === "std/sort")) {
+      synthetic.push({ kind: "ImportDecl", path: "std/sort", names: ["sortStrings"] });
+    }
     for (const imp of [...prog.imports, ...synthetic]) {
       const resolved = resolvePath(dir, imp.path, pkg);
       const absPath = resolved.path;

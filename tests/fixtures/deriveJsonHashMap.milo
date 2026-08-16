@@ -1,0 +1,70 @@
+// @expect: {"limits":{"a":1,"b":2,"c":3},"name":"n","tags":["x","y"]}
+// @expect: rt={"limits":{"a":1,"b":2,"c":3},"name":"n","tags":["x","y"]}
+// @expect: a=1
+// @expect: nested={"lists":{"nums":[1,2]},"objs":{"k":{"v":7}},"opt":{"z":"zz"}}
+
+// A `HashMap<string, V>` field encodes as a JSON object. The expected output above is
+// KEY-SORTED on purpose and this fixture would be flaky without it: Milo's HashMap
+// iterates in a different order on every run of the same binary, so the encoder sorts
+// before emitting. Fields are declared out of alphabetical order to show that struct
+// field order is NOT what is being sorted — only map keys are.
+@derive(Json)
+struct Cfg {
+    limits: HashMap<string, i64>,
+    name: string,
+    tags: Vec<string>,
+}
+
+@derive(Json)
+struct Inner {
+    v: i64,
+}
+
+@derive(Json)
+struct Deep {
+    lists: HashMap<string, Vec<i64>>,
+    objs: HashMap<string, Inner>,
+    opt: Option<HashMap<string, string>>,
+}
+
+pub fn main(): i32 {
+    var m: HashMap<string, i64> = HashMap.new()
+    m.insert("c", 3)
+    m.insert("a", 1)
+    m.insert("b", 2)
+    var t: Vec<string> = Vec.new()
+    t.push("x")
+    t.push("y")
+    let c = Cfg {
+        limits: m, name: "n", tags: t
+    }
+    let s = c.toJson()
+    print(s)
+    match Cfg.fromJson(s) {
+        Result.Ok(back) => {
+            print("rt=" + back.toJson())
+            print("a=" + back.limits.getOrDefault("a", -1).toString())
+        }
+        Result.Err(e) => {
+            print("decode failed")
+        }
+    }
+
+    var l: HashMap<string, Vec<i64>> = HashMap.new()
+    var v1: Vec<i64> = Vec.new()
+    v1.push(1)
+    v1.push(2)
+    l.insert("nums", v1)
+    var o: HashMap<string, Inner> = HashMap.new()
+    o.insert("k", Inner {
+        v: 7
+    }
+    )
+    var so: HashMap<string, string> = HashMap.new()
+    so.insert("z", "zz")
+    let d = Deep {
+        lists: l, objs: o, opt: Option.Some(so)
+    }
+    print("nested=" + d.toJson())
+    return 0
+}

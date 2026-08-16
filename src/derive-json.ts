@@ -23,6 +23,9 @@ export type JsonPlan =
   | { k: "struct"; name: string }
   | { k: "unitEnum"; name: string; variants: string[] }
   | { k: "vec"; ty: string; elem: JsonPlan }
+  // Keys are always `string` — a JSON object has no other kind. `ty` is the Milo
+  // spelling of the whole map, needed to declare the accumulator on decode.
+  | { k: "map"; ty: string; value: JsonPlan }
   | { k: "option"; ty: string; inner: JsonPlan };
 
 export interface JsonFieldPlan {
@@ -83,6 +86,40 @@ function emitSer(p: JsonPlan, val: string, g: Gen, d: number): string {
       g.push(d + 1, `${i} = ${i} + 1`);
       g.push(d, `}`);
       g.push(d, `${s} = ${s} + "]"`);
+      return s;
+    }
+    case "map": {
+      const s = g.tmp("s");
+      const ks = g.tmp("ks");
+      const i = g.tmp("i");
+      const k = g.tmp("k");
+      const v = g.tmp("v");
+      g.push(d, `var ${s}: string = "{"`);
+      // Sorted, NOT in map order. Milo's HashMap iterates in a different order on every
+      // RUN of the same binary (verified: three runs, three orders), so an unsorted
+      // encoder would emit a different byte string each time — a config file that churns
+      // its own diff, and a test that cannot assert on its output. JSON objects are
+      // unordered, so sorting costs nothing semantically and buys reproducibility.
+      g.push(d, `var ${ks}: Vec<string> = ${val}.keys()`);
+      g.push(d, `sortStrings(${ks})`);
+      g.push(d, `var ${i}: i64 = 0`);
+      g.push(d, `for ${k} in ${ks} {`);
+      g.push(d + 1, `if ${i} > 0 {`);
+      g.push(d + 2, `${s} = ${s} + ","`);
+      g.push(d + 1, `}`);
+      // The key came out of the map, so the lookup cannot miss; `match` rather than an
+      // unwrap keeps the generated code inside the same rules hand-written code obeys.
+      g.push(d + 1, `match ${val}.get(${k}) {`);
+      g.push(d + 2, `Option.Some(${v}) => {`);
+      const inner = emitSer(p.value, v, g, d + 3);
+      g.push(d + 3, `${s} = ${s} + jsonQuote(${k}) + ":" + ${inner}`);
+      g.push(d + 2, `}`);
+      g.push(d + 2, `Option.None => {`);
+      g.push(d + 2, `}`);
+      g.push(d + 1, `}`);
+      g.push(d + 1, `${i} = ${i} + 1`);
+      g.push(d, `}`);
+      g.push(d, `${s} = ${s} + "}"`);
       return s;
     }
     case "option": {
@@ -193,6 +230,28 @@ function emitDe(p: JsonPlan, node: string, path: string, g: Gen, d: number): str
       const elemPath = `${path} + "[" + ${i}.toString() + "]"`;
       const inner = emitDe(p.elem, c, elemPath, g, d + 1);
       g.push(d + 1, `${t}.push(${inner})`);
+      g.push(d + 1, `${i} = ${i} + 1`);
+      g.push(d, `}`);
+      return t;
+    }
+    case "map": {
+      const t = g.tmp("m");
+      const i = g.tmp("i");
+      const k = g.tmp("k");
+      const c = g.tmp("c");
+      g.push(d, `if doc.curKind(${node}) != 5 {`);
+      g.push(d + 1, `return ${mismatch(path, "object", node)}`);
+      g.push(d, `}`);
+      g.push(d, `var ${t}: ${p.ty} = HashMap.new()`);
+      g.push(d, `var ${i}: i64 = 0`);
+      g.push(d, `while ${i} < doc.curLen(${node}) {`);
+      // curKeyAt/curValueAt, not curField: the keys are the DATA here, so they cannot be
+      // named at generation time the way a struct field's can.
+      g.push(d + 1, `let ${k} = doc.curKeyAt(${node}, ${i})`);
+      g.push(d + 1, `let ${c} = doc.curValueAt(${node}, ${i})`);
+      const entryPath = `${path} + "." + ${k}`;
+      const inner = emitDe(p.value, c, entryPath, g, d + 1);
+      g.push(d + 1, `${t}.insert(${k}, ${inner})`);
       g.push(d + 1, `${i} = ${i} + 1`);
       g.push(d, `}`);
       return t;

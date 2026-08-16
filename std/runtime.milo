@@ -1239,16 +1239,14 @@ fn reapTask(sched: *u8, task: *u8): void {
     let cell = rtReadPtr(task, tJoinCell())
     munmap(rtReadPtr(task, tStack()), rtReadI64(task, tStackSize()))
     free(rtReadPtr(task, tCtx()))
-    // The task owns its closure environment: `spawnWithStack` copies the env pointer out
-    // of the closure value, and nothing on the caller's side ever frees it, so every
-    // spawn whose closure captured anything leaked its captures. A non-capturing closure
-    // lowers its env to null (codegen stores `ptr null` in the pair), and the two
-    // closure-free spawnRaw call sites pass 0, so the null check is the whole ownership
-    // test — there is no non-heap env to guard against.
-    let env = rtReadPtr(task, tClosureEnv())
-    if env as i64 != 0 {
-        free(env)
-    }
+    // NOT freed here: the closure environment. It leaks, deliberately, and the reason is
+    // that the task does not OWN it. A closure value is `{ptr fn, ptr env}` and `fn` is a
+    // Copy type (`src/types.ts` isCopy), so `Task.spawn(f)` copies the pair and leaves the
+    // caller holding an equally valid one — `let f = move(...); Task.spawn(f).join(); f()`
+    // read freed memory the moment this function freed the env (measured: the captured
+    // string's len went 34 -> 5 across the join). Freeing here is only sound once an
+    // owning closure is non-Copy so passing it into spawn is a MOVE; until then the leak
+    // is the safe half of the trade. See docs/backlog.md #20.
     free(task)
     rtWriteI64(sched, sNumTasks(), rtReadI64(sched, sNumTasks()) - 1)
     if cell as i64 != 0 {

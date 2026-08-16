@@ -1,13 +1,14 @@
 // @expect: captured 42
 // @expect: done
 
-// The leak gate was blind to this shape: every capturing spawn leaked its closure
-// environment, because spawnWithStack copies the env pointer into the task and nothing
-// on the caller's side owns it any more. All 11 green fixtures on the manifest captured
-// NOTHING, and a non-capturing closure lowers its env to null — the one shape that
-// cannot exhibit the bug. Captures a scalar deliberately: an owned heap capture is a
-// SEPARATE, still-open leak (the env box is freed, the values moved into it are not),
-// and mixing them here would leave this fixture off the manifest and blind again.
+// Every capturing spawn leaks its closure environment, and this fixture is NOT on
+// tests/leak-clean.txt for that reason. It was, briefly: `reapTask` was made to free the
+// env, which looked like ownership and was not — `fn` is a Copy type, so `Task.spawn(f)`
+// gives the task a COPY of `{ptr fn, ptr env}` and the caller keeps an equally valid one.
+// Freeing on the task's side turned a leak into a use-after-free (see
+// spawnClosureStillValid.milo, which pins the safe behaviour). Fixing it for real means
+// making an owning closure non-Copy so spawn MOVES it — docs/backlog.md #20 — and until
+// then this program is a correctness test, not a leak test.
 from "std/runtime" import {
     Task
 }

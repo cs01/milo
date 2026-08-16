@@ -24,7 +24,6 @@ arrays
 arraySlice
 assertBuiltin
 assignI64Lit
-asyncCallOrdering
 atomics
 atomicWidths
 autoEq
@@ -95,6 +94,7 @@ derefStore
 deriveJsonErrors
 deriveJsonGeneric
 deriveJsonHandWritten
+deriveJsonHashMap
 deriveJsonRecursive
 discardRebind
 displayStructEnum
@@ -208,7 +208,6 @@ globalStructArray
 globalStructInit
 globalStructMutation
 greenStackSize
-greenThreadEcho
 greenThreadMany
 greenThreadYield
 hashmapBasic
@@ -265,7 +264,6 @@ intLiteralDefaultI64
 intMinLiteral
 ioFileStream
 ioReaderWriter
-ioSocketStream
 isPattern
 iteratorTrait
 iterDelegateField
@@ -404,7 +402,6 @@ sliceViewReturn
 socketBind
 softKeywordFromIn
 sortByKeyString
-spawnCapturingClosureLeak
 stdBase64
 stdCrypto
 stdCsv
@@ -474,7 +471,6 @@ targetOs
 taskJoin
 taskJoinLate
 tcpGreenConnectRefused
-tcpIpv6
 tcpListenerPort
 temp_name_collision
 termSize
@@ -500,7 +496,6 @@ unicodeDisplayWidth
 unicodeEscape
 unicodeReverse
 unicodeStringLiteral
-unixSocket
 unsigned
 unwrap_temp_no_leak
 unwrapOption

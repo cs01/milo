@@ -1,0 +1,51 @@
+// @expect: 2
+// @expect: pair=heap-payload:42
+
+// Writing THROUGH a `&mut` is what one is for, so it counts as a use. This function's
+// whole job is to be written through, and it used to warn `unused variable 'n'` with a
+// hint to rename it `_n` — which would have broken the code that writes it. `replace`
+// reads too: it hands the old occupant back.
+//
+// The shape is also the workaround for enum payloads not being mutable through `&mut`
+// (docs/backlog.md #24): take the whole enum out, rebuild the variant, put it back.
+// `replace` is move-out/move-in, so the heap payload below moves through uncloned.
+enum Node {
+    Leaf(i64),
+    Pair(string, i64),
+}
+
+fn bump(n: &mut Node): void {
+    let old = replace(n, Node.Leaf(0))
+    match old {
+        Node.Leaf(v) => {
+            n = Node.Leaf(v + 1)
+        }
+        Node.Pair(s, k) => {
+            n = Node.Pair(s, k + 1)
+        }
+    }
+}
+
+pub fn main(): i32 {
+    var a = Node.Leaf(1)
+    bump(a)
+    match a {
+        Node.Leaf(v) => {
+            print(v.toString())
+        }
+        Node.Pair(s, k) => {
+            print("pair")
+        }
+    }
+    var b = Node.Pair("heap-payload", 41)
+    bump(b)
+    match b {
+        Node.Leaf(v) => {
+            print("leaf")
+        }
+        Node.Pair(s, k) => {
+            print("pair=" + s + ":" + k.toString())
+        }
+    }
+    return 0
+}

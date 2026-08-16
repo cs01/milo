@@ -5178,12 +5178,30 @@ export class TypeChecker {
   // thing as a half-resolved assignment target — the callers that used to null-check
   // had nothing to do with the answer but bail, and one that forgot would assign
   // through a place the diagnostic had just said does not exist.
+  // Mark the variable a place expression is rooted at as read. Used where an operation
+  // takes the old value out of a place (`replace`), which the plain assignment path does
+  // not count as a use.
+  private markPlaceRead(expr: Expr) {
+    let e: Expr = expr;
+    for (;;) {
+      if (e.kind === "Ident") { const i = this.lookup(e.name); if (i) i.read = true; return; }
+      if (e.kind === "FieldAccess") { e = e.object; continue; }
+      if (e.kind === "IndexAccess") { e = e.object; continue; }
+      return;
+    }
+  }
+
   private resolveAssignTarget(expr: Expr): { type: TypeKind; mutable: boolean } {
     const sp = expr.span;
     if (expr.kind === "Ident") {
       const info = this.lookup(expr.name);
       if (!info) this.fatal(`undefined variable '${expr.name}'`, sp, this.nameHint(expr.name));
       if (info.type.tag === "ref" && info.type.mutable) {
+        // Writing THROUGH a `&mut` is what one is for, so it counts as a use. Without
+        // this a parameter whose whole job is to be written — `fn bump(n: &mut E)` that
+        // only assigns to `n` — was reported as an unused variable, and the suggested
+        // fix (rename to `_n`) would have broken the code that writes it.
+        info.read = true;
         this.setType(expr, info.type.inner);
         return { type: info.type.inner, mutable: true };
       }
@@ -6342,6 +6360,9 @@ export class TypeChecker {
     if (expr.func === "replace" && !this.functions.has("replace")) {
       if (expr.args.length !== 2) { this.error(`replace(place, value) takes exactly two arguments`, sp); return this.setType(expr, { tag: "unknown" }); }
       const place = this.resolveAssignTarget(expr.args[0]);
+      // `replace` hands the old occupant back, so the place is genuinely READ here even
+      // when it is an owned local rather than a borrow.
+      this.markPlaceRead(expr.args[0]);
       if (!place.mutable) this.error(`cannot replace through an immutable place`, expr.args[0].span, `declare it with 'var'`);
       // value moves in, old occupant moves out to the caller — the place stays valid,
       // so it is NOT invalidated here (only the by-value argument is consumed).

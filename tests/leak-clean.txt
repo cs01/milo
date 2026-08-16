@@ -316,6 +316,7 @@ moveFieldThenReassign
 moveIfElse
 moveVarIntoEnumReturn
 multiWidthTypes
+mutParamWriteIsUse
 mutSlice
 mutSliceDisjointArgs
 nestedCalls

@@ -11,6 +11,45 @@ last-verified: 2026-08-14
 Source-level breaks, newest first. Milo is pre-1.0 and does not promise
 compatibility, but every break belongs here with the migration spelled out.
 
+## `std/pty`'s command-line helpers are private (2026-08-15)
+
+**`std/pty`'s `buildCmdLine` and `quoteArg` are now `_ptyBuildCmdLine` and
+`_ptyQuoteArg`, and no longer public.** They were internal helpers of the Windows arm
+that happened to be `pub`, and in a flat namespace that made them collide with the
+identically-named helpers in `std/process` — the two modules could not be imported into
+one program. Nothing in the toolchain called them from outside `std/pty`. If you did,
+build the command line yourself: `_ptyQuoteArg` wrapped an argument in quotes and
+escaped embedded quotes and backslashes per the MSVCRT rules.
+
+## `std/fetch`'s response type is `FetchResponse` (2026-08-14)
+
+**`fetch`/`fetchPost`/`fetchPut`/`fetchPatch`/`fetchDelete`/`fetchForm` now return
+`Result<FetchResponse, NetError>`**, not `Result<Response, NetError>`.
+
+    from "std/fetch" import { fetchGet, Response }        // was
+    from "std/fetch" import { fetchGet, FetchResponse }   // now
+
+`std/http` already exported a `Response`, and std is one flat namespace, so the two
+definitions shadowed each other: no program could serve HTTP and fetch HTTPS at once.
+Only the type name changed — the fields and methods are the same.
+
+## `std/toml` moved to the `milo-toml` package (2026-08-14)
+
+**`std/toml` and its `Toml` type are no longer in the standard library.** Add the
+package instead — in `milo.json`:
+
+    "dependencies": {
+        "toml": "github.com/milo-language/milo-toml@v0.1.0"
+    }
+
+then `milo pkg install`, and change the import:
+
+    from "std/toml" import { Toml }   // was
+    from "toml" import { Toml }       // now
+
+Nothing in the toolchain reads TOML, so the module was shipping on the compiler's
+release cadence for no reason; as a package it ships on its own tags.
+
 ## `std/mem`'s bump allocator is renamed `Bump` (2026-08-14)
 
 **`std/mem`'s `Arena` is now `Bump`**, and its private helpers move with it

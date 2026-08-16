@@ -1,0 +1,187 @@
+// NaN-boxing in one file: two types, 8 bytes each, no interpreter.
+//
+// A 64-bit float has 2^52 bit patterns that all mean NaN. Exactly one of them
+// is ever produced by arithmetic, so the rest are free real estate. Store a
+// number as itself, and hide everything else in a NaN payload.
+//
+// The alternative is an enum:
+//
+//     enum Value { Num(f64), Str(Handle<string>) }
+//
+// which LLVM lowers to `{ i32, [2 x i64] }` — 24 bytes, because the tag cannot
+// overlap the widest payload. Nan-boxing folds the tag into bits the payload
+// was never using, so it is 8.
+//
+// The part that is not like the C version: C packs a raw pointer into the
+// payload, so a stale box is a use-after-free. This packs a generational arena
+// handle, so a stale box is a caught None.
+//
+// @run:
+from "std/binary" import {
+    Bytes
+}
+from "std/arena" import {
+    Arena, Handle, arenaWith
+}
+
+// Bits 62..50 all set marks a non-number. Hardware NaN from 0.0/0.0 is
+// 0x7ff8_0000_0000_0000, which leaves bit 50 clear, so real NaN and both
+// infinities survive as numbers. Only this one encoding is spent.
+let QNAN: u64 = 0x7ffc000000000000
+// Sign bit on top of that marks a string.
+let SIGN: u64 = 0x8000000000000000
+
+// 50 payload bits: 24 of slot index, 26 of generation.
+let MAX_INDEX: i64 = 16777215
+let MAX_GENERATION: i64 = 67108863
+
+pub struct Value {
+    bits: u64,
+}
+
+impl Value {
+    fn num(d: f64): Value {
+        return Value {
+            bits: Bytes.f64ToBits(d)
+        }
+    }
+
+    // Aborts rather than truncating. A generation masked down to fit would let
+    // a recycled slot alias an old handle back into validity, which is the one
+    // thing the generation counter exists to prevent.
+    fn str(h: Handle<string>): Value {
+        let idx = h.index as i64
+        let gen = h.generation as i64
+        assert(idx >= 0 && idx <= MAX_INDEX, "nanbox: index exceeds 24-bit payload")
+        assert(gen >= 0 && gen <= MAX_GENERATION, "nanbox: generation exceeds 26-bit payload")
+        return Value {
+            bits: SIGN | QNAN | ((gen as u64) << 24) | (idx as u64)
+        }
+    }
+
+    fn isNum(self: &Self): bool {
+        return (self.bits & QNAN) != QNAN
+    }
+    fn isStr(self: &Self): bool {
+        return (self.bits & (QNAN | SIGN)) == (QNAN | SIGN)
+    }
+    fn asNum(self: &Self): f64 {
+        return Bytes.f64FromBits(self.bits)
+    }
+    fn index(self: &Self): i32 {
+        return (self.bits & 0xffffff) as i32
+    }
+    fn generation(self: &Self): i32 {
+        return ((self.bits >> 24) & 0x3ffffff) as i32
+    }
+    fn raw(self: &Self): u64 {
+        return self.bits
+    }
+}
+
+// The string heap. A Value never holds an address, only a slot number and the
+// generation that slot had when the box was made.
+pub struct Heap {
+    strings: Arena<string>,
+    id: i64,
+}
+
+impl Heap {
+    fn new(): Heap {
+        var strings: Arena<string> = Arena<string>.new()
+        // Allocating a sentinel is also how the arena's id is learned; it is
+        // only observable through a handle.
+        let sentinel = strings.alloc("")
+        return Heap {
+            strings: strings, id: sentinel.arenaId
+        }
+    }
+
+    fn alloc(self: &mut Self, s: string): Value {
+        let h = self.strings.alloc(s)
+        return Value.str(h)
+    }
+
+    fn handleOf(self: &Self, v: &Value): Handle<string> {
+        // The arena id comes from the heap, never from the box, so a value
+        // cannot even name a different arena.
+        return Handle {
+            arenaId: self.id, index: v.index(), generation: v.generation()
+        }
+    }
+
+    fn free(self: &mut Self, v: &Value): bool {
+        return self.strings.free(self.handleOf(v))
+    }
+
+    // The only way to reach a string's contents, and it is checked four ways:
+    // arena id, index sign, index bounds, and slot generation. None of those
+    // can be skipped, which is what makes "every dereference is checked" a
+    // property of the type rather than a convention.
+    fn show(self: &Self, v: &Value): string {
+        if v.isNum() {
+            return v.asNum().toString()
+        }
+        let got = arenaWith(self.strings, self.handleOf(v), (s: &string): string => {
+            return s.clone()
+        }
+        )
+        match got {
+            Some(s) => {
+                return s
+            }
+            None => {
+                return "<dangling>"
+            }
+        }
+    }
+}
+
+fn main() {
+    var heap: Heap = Heap.new()
+
+    // ── two types, one 8-byte slot ──
+    var stack: Vec<Value> = Vec.new()
+    stack.push(Value.num(3.14))
+    stack.push(heap.alloc("hello"))
+    stack.push(Value.num(42.0))
+    stack.push(heap.alloc("world"))
+    for v in stack {
+        print(heap.show(v))
+    }
+
+    // ── real NaN and infinity are still numbers, not tags ──
+    var zero: f64 = 0.0
+    let nan = zero / zero
+    let inf = 1.0 / zero
+    print("NaN reads as a number: " + Value.num(nan).isNum().toString())
+    print("inf reads as a number: " + Value.num(inf).isNum().toString())
+
+    // ── a freed string is caught, not dereferenced ──
+    let doomed = heap.alloc("about to be freed")
+    print("before free: " + heap.show(doomed))
+    let _ = heap.free(doomed)
+    print("after free:  " + heap.show(doomed))
+
+    // ── no 64-bit pattern reaches memory ──
+    // In C the payload is an address, so a forged box is an arbitrary read.
+    // Bun shipped exactly that bug in `bun:ffi` (upstream 179978a6f9): a C
+    // function returning a double could hand JavaScript a forged pointer.
+    var st: u64 = 0x9e3779b97f4a7c15
+    var i: i64 = 0
+    var reached: i64 = 0
+    let N: i64 = 1000000
+    while i < N {
+        st = st ^ (st << 13)
+        st = st ^ (st >> 7)
+        st = st ^ (st << 17)
+        let forged = Value {
+            bits: SIGN | QNAN | (st & 0x3ffffffffffff)
+        }
+        if heap.show(forged) != "<dangling>" {
+            reached = reached + 1
+        }
+        i = i + 1
+    }
+    print("forged " + N.toString() + " string references, dereferenced " + reached.toString())
+}

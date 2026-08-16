@@ -39,19 +39,23 @@ function table(): string {
   return [BEGIN, "| File | Purpose |", "|---|---|", ...rows, END].join("\n");
 }
 
-const current = readFileSync(DOC, "utf-8");
-const start = current.indexOf(BEGIN);
-const end = current.indexOf(END);
-if (start < 0 || end < 0) throw new Error(`docs/src.md is missing the ${BEGIN} / ${END} markers`);
-const next = current.slice(0, start) + table() + current.slice(end + END.length);
+// The CLI half must not run on import — tests/srcDoc.test.ts imports sourceFiles, and a
+// test that rewrites the doc it is checking proves nothing.
+if (import.meta.main) {
+  const current = readFileSync(DOC, "utf-8");
+  const start = current.indexOf(BEGIN);
+  const end = current.indexOf(END);
+  if (start < 0 || end < 0) throw new Error(`docs/src.md is missing the ${BEGIN} / ${END} markers`);
+  const next = current.slice(0, start) + table() + current.slice(end + END.length);
 
-if (process.argv.includes("--check")) {
-  if (current !== next) {
-    console.error("docs/src.md index is stale — run: bun run scripts/gen-src-doc.ts");
-    process.exit(1);
+  if (process.argv.includes("--check")) {
+    if (current !== next) {
+      console.error("docs/src.md index is stale — run: bun run scripts/gen-src-doc.ts");
+      process.exit(1);
+    }
+    console.log("docs/src.md index is up to date");
+  } else {
+    writeFileSync(DOC, next);
+    console.log(`wrote the index in ${DOC}`);
   }
-  console.log("docs/src.md index is up to date");
-} else {
-  writeFileSync(DOC, next);
-  console.log(`wrote the index in ${DOC}`);
 }

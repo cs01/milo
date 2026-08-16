@@ -761,6 +761,13 @@ pub fn isGenericOpen(tokens: &Vec<Token>, i: i64): bool {
         // all, and `fn copyStream<R: Reader, W: Writer>(...)` came back out as
         // `fn copyStream < R: Reader, W: Writer > (...)`.
         t.kind == TokKind.Colon || t.kind == TokKind.Plus ||
+        // Parens and the fat arrow are a fn type used as a type argument:
+        // `Vec<(i64) => i64>`. Without them the scan stops at the `(` and the
+        // brackets read as comparisons, so the formatter rewrote every such
+        // annotation as `Vec < (i64) => i64 >` — still parses, so nothing failed
+        // loudly, but `milo fmt --check` never converges on code using them.
+        t.kind == TokKind.LParen || t.kind == TokKind.RParen ||
+        t.kind == TokKind.FatArrow ||
         t.kind == TokKind.Semi || t.kind == TokKind.Question {
             // type-like tokens — keep scanning
         } else {

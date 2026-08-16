@@ -16,9 +16,9 @@ pub fn makeHolder(): Holder {
     }
 }
 
-pub fn makeVec(): Vec < (i64) => i64 > {
+pub fn makeVec(): Vec<(i64) => i64> {
     let n = 6
-    var v: Vec < (i64) => i64 > = Vec.new()
+    var v: Vec<(i64) => i64> = Vec.new()
     v.push(move(x: i64) => x + n)
     return v
 }

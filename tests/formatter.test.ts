@@ -153,6 +153,27 @@ test("shift operators stay glued (<< and >> are adjacency-lexed)", () => {
   expect(out).not.toMatch(/>\s+>/);
 });
 
+// A fn type as a type argument is the one generic whose interior is not type-like
+// tokens: `Vec<(i64) => i64>` opens with a paren, which stopped isGenericOpen's scan
+// and left the brackets classified as comparisons. The result still parsed, so nothing
+// failed loudly — it just spaced out as `Vec < (i64) => i64 >`, and the pre-commit hook
+// wrote that back into std/http.milo and a fixture. The other half has to keep holding:
+// a genuine `<` before a parenthesised expression is still a comparison.
+test("a fn type used as a generic argument keeps its brackets glued", () => {
+  const src = `fn apply(fs: Vec<(i64) => i64>, x: i64): i64 {\n    return x\n}\n`;
+  const out = format(src);
+  expect(out).toContain("Vec<(i64) => i64>");
+  expect(out).not.toMatch(/Vec\s+</);
+  expect(format(out)).toBe(out);
+});
+
+test("a comparison against a parenthesised expression is still spaced", () => {
+  const src = `fn f(x: i64, y: i64): bool {\n    return x < (y + 1) && y > (x)\n}\n`;
+  const out = format(src);
+  expect(out).toContain("x < (y + 1)");
+  expect(out).toContain("y > (x)");
+});
+
 test("`extern type` and `move` keywords keep a trailing space", () => {
   expect(format(`extern type Opaque\n`)).toContain("extern type Opaque");
   expect(format(`fn f(): i32 {\n    let g = move || 1\n    return 0\n}\n`)).toContain("move ||");

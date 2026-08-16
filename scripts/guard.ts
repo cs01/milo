@@ -42,6 +42,16 @@ const MAX_CAPTURE_BYTES = 64 * 1024 * 1024;
 //     guarded children — they are untrusted, Chrome is not.
 const PRESSURE_KILL_LEVEL = Number(process.env.MILO_GUARD_PRESSURE_KILL_LEVEL || 0) || 2;
 const PRESSURE_SUSTAIN_TICKS = Number(process.env.MILO_GUARD_PRESSURE_SUSTAIN_TICKS || 0) || 10;
+
+// A guarded child can be SIGKILLed (timeout, RSS cap, system pressure), and a SIGKILL
+// cannot flush stdio — so with a piped stdout the child's own output, which is the only
+// record of how far it got, dies with it. Milo honours MILO_LINE_BUFFERED at startup;
+// anything this guard might kill should have it on. Set MILO_GUARD_NO_LINE_BUFFER=1 to
+// opt a throughput-sensitive run back out.
+function guardedEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  if (env.MILO_GUARD_NO_LINE_BUFFER || env.MILO_LINE_BUFFERED !== undefined) return env;
+  return { ...env, MILO_LINE_BUFFERED: "1" };
+}
 const FOOTPRINT_EVERY_TICKS = 10;
 
 export type GuardKill =
@@ -219,7 +229,7 @@ function windowsRun(cmd: string, args: string[], opts: GuardOpts, timeoutMs: num
   return new Promise(resolve => {
     const child = spawn(cmd, args, {
       cwd: opts.cwd,
-      env: opts.env ?? process.env,
+      env: guardedEnv(opts.env ?? process.env),
       // stdin follows the same inheritStdio switch as stdout/stderr: CLI mode
       // (guard.ts invoked as `bun scripts/guard.ts -- cmd args`) always sets
       // it, so a guarded interactive process (e.g. `milo-self lsp`, which
@@ -324,7 +334,7 @@ exec "$@"`;
     // down the entire tree, including grandchildren that reparented to init.
     const child = spawn("/bin/sh", ["-c", ulimits, "sh", cmd, ...args], {
       cwd: opts.cwd,
-      env: opts.env ?? process.env,
+      env: guardedEnv(opts.env ?? process.env),
       detached: true,
       // stdin follows the same inheritStdio switch as stdout/stderr: CLI mode
       // (guard.ts invoked as `bun scripts/guard.ts -- cmd args`) always sets

@@ -111,6 +111,7 @@ export class Codegen {
   private needsPutchar = false;
   private needsFwrite = false;
   private needsIob = false;
+  private needsSetvbuf = false;
   private needsExit = false;
   private needsMalloc = false;
   private needsFree = false;
@@ -316,6 +317,35 @@ export class Codegen {
 
   // Apple's libc exposes stdout as `__stdoutp`; glibc/musl as `stdout`.
   private get stdoutSymbol(): string { return this.target.os === "darwin" ? "__stdoutp" : "stdout"; }
+
+  // A SIGKILL cannot flush stdio, so a program killed by a watchdog (scripts/guard.ts,
+  // a CI timeout) with a piped stdout loses every line it printed — precisely the case
+  // where that output is the only evidence of where it hung. Block buffering on a pipe
+  // is still the right default for throughput (see emitStdoutWrite), so retuning is
+  // opt-in and belongs to whoever might do the killing: set MILO_LINE_BUFFERED and pay
+  // a write per line to get output up to the hang instead of nothing.
+  private emitStdoutBufferingOptIn(lines: string[]): void {
+    if (this.target.os === "none") return; // freestanding: no environment, no stdio streams
+    this.needsSetvbuf = true;
+    // A named constant spliced in with the other declares, NOT addString: the green-main
+    // entry is emitted after the string table has already been written out, so a string
+    // interned here would be referenced by an @.str.N global that never gets defined.
+    const label = "@.milo_line_buf_env";
+    const env = this.nextTemp(), isSet = this.nextTemp(), mode = this.nextTemp(), handle = this.nextTemp();
+    lines.push(`  ${env} = call ptr @getenv(ptr ${label})`);
+    lines.push(`  ${isSet} = icmp ne ptr ${env}, null`);
+    // Branchless on purpose: the unset arm passes _IOFBF (0), which is the mode the
+    // stream already had, so this is a no-op call rather than a skipped one. MSVC maps
+    // _IOLBF onto _IOFBF and would silently do nothing, so Windows opts into _IONBF (4).
+    lines.push(`  ${mode} = select i1 ${isSet}, i32 ${this.isWindows ? 4 : 1}, i32 0`);
+    if (this.isWindows) {
+      this.needsIob = true;
+      lines.push(`  ${handle} = call ptr @__acrt_iob_func(i32 1)`);
+    } else {
+      lines.push(`  ${handle} = load ptr, ptr @${this.stdoutSymbol}`);
+    }
+    lines.push(`  call i32 @setvbuf(ptr ${handle}, ptr null, i32 ${mode}, i64 0)`);
+  }
 
   // dprintf(fd, fmt, ...) has no UCRT equivalent. stderr is not a linkable data symbol
   // on MSVC either — it is the macro `__acrt_iob_func(2)` — so eprint lowers to an
@@ -1358,6 +1388,8 @@ export class Codegen {
     lines.push("entry.bb:");
     lines.push("  store i32 %_milo_argc, ptr @_milo_argc_global");
     lines.push("  store ptr %_milo_argv, ptr @_milo_argv_global");
+    // before global init: an initializer can print, and setvbuf must precede any I/O
+    this.emitStdoutBufferingOptIn(lines);
     if (this.needsGlobalInit) lines.push(`  call void @${GLOBAL_INIT_FN}()`);
     lines.push(`  call void @${Codegen.GREEN_RUN_MAIN_FN}(ptr @${Codegen.MAIN_TASK_FN})`);
     lines.push(`  %exit = load i32, ptr @${Codegen.MAIN_EXIT_GLOBAL}`);
@@ -1601,8 +1633,17 @@ export class Codegen {
     // it under that guard meant a program declaring its own `extern fn fwrite`
     // — writing a file, say — got print's `load ptr @__stdoutp` with nothing
     // declaring @__stdoutp, and failed to link.
-    if (this.needsFwrite && !this.isWindows && !declaredExterns.has(this.stdoutSymbol))
+    // greenMainEntry() is appended AFTER this splice point but calls
+    // emitStdoutBufferingOptIn, so its externs have to be declared from the fact that
+    // it will run, not from its having run.
+    if (this.wrapMainGreen && this.target.os !== "none") this.needsSetvbuf = true;
+    if ((this.needsFwrite || this.needsSetvbuf) && !this.isWindows && !declaredExterns.has(this.stdoutSymbol))
       this.output.splice(1, 0, `@${this.stdoutSymbol} = external global ptr`);
+    if (this.needsSetvbuf) {
+      if (!declaredExterns.has("setvbuf")) this.output.splice(1, 0, `declare i32 @setvbuf(ptr, ptr, i32, i64)`);
+      if (!declaredExterns.has("getenv")) this.output.splice(1, 0, `declare ptr @getenv(ptr)`);
+      this.output.splice(1, 0, `@.milo_line_buf_env = private unnamed_addr constant [19 x i8] c"MILO_LINE_BUFFERED\\00"`);
+    }
     // Both eprint and print-to-stdout need it on MSVC; declaring it twice is an LLVM error.
     if (this.needsIob && !declaredExterns.has("__acrt_iob_func"))
       this.output.splice(1, 0, `declare ptr @__acrt_iob_func(i32)`);
@@ -1887,6 +1928,8 @@ export class Codegen {
     if (fn.name === "main" && !this.wrapMainGreen) {
       lines.push("  store i32 %_milo_argc, ptr @_milo_argc_global");
       lines.push("  store ptr %_milo_argv, ptr @_milo_argv_global");
+      // before global init: an initializer can print, and setvbuf must precede any I/O
+      this.emitStdoutBufferingOptIn(lines);
       // after argc/argv: a global initializer may read them (argparse-style defaults)
       if (this.needsGlobalInit) lines.push(`  call void @${GLOBAL_INIT_FN}()`);
     }

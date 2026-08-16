@@ -3,7 +3,9 @@
 // standing between a runaway milo-self allocation and an OS-crashing swap
 // spiral — if these tests break, fix the guard before touching anything else.
 import { test, expect } from "bun:test";
-import { spawn } from "child_process";
+import { spawn, execFileSync } from "child_process";
+import { mkdtempSync, rmSync, writeFileSync } from "fs";
+import { tmpdir } from "os";
 import { join } from "path";
 import { guardedRun, monitorPidTree } from "../scripts/guard";
 
@@ -110,3 +112,32 @@ test("monitorPidTree kills an allocating child", async () => {
   expect(signal).toBe("SIGKILL");
   expect(breachedMb).toBeGreaterThan(512);
 }, 30000);
+
+// A SIGKILL cannot flush stdio, so on a piped stdout every line a killed program
+// printed used to die with it — the guard reported "SIGKILL: exceeded Nms" and the
+// program's own trace of how far it got was gone, which is exactly the evidence you
+// are killing it to collect. The guard now sets MILO_LINE_BUFFERED for its children
+// and codegen honours it with setvbuf at entry. Both halves have to hold: this test
+// fails if either the guard stops setting the variable or main stops reading it.
+test("a program the guard kills still delivers what it printed", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "milo-linebuf-"));
+  try {
+    const src = join(dir, "hang.milo");
+    const bin = join(dir, "hang");
+    writeFileSync(src, 'fn main() {\n  print("printed before the hang")\n  var i = 0\n  while true { i = i + 1 }\n}\n');
+    execFileSync("bun", ["run", join(import.meta.dir, "..", "src", "main.ts"), "build", src, "-o", bin],
+      { cwd: join(import.meta.dir, ".."), stdio: ["pipe", "pipe", "pipe"] });
+
+    const killed = await guardedRun(bin, [], { timeoutMs: 2000 });
+    expect(killed.guardKill).toBe("timeout");
+    expect(killed.stdout).toContain("printed before the hang");
+
+    // ...and the default stays block-buffered, so the opt-out is real and print keeps
+    // costing one write per BUFFER on a pipe rather than one per line.
+    const optedOut = await guardedRun(bin, [], { timeoutMs: 2000, env: { ...process.env, MILO_GUARD_NO_LINE_BUFFER: "1" } });
+    expect(optedOut.guardKill).toBe("timeout");
+    expect(optedOut.stdout).toBe("");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}, 120000);

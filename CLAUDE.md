@@ -88,6 +88,11 @@ Source → Lexer → Parser → AST → Resolver (imports) → AST (merged) → 
   - `milo run` / `milo test` / `milo fmt` guard their child binaries by default
     (`MILO_RUN_MEM_MB` to raise, `MILO_RUN_UNGUARDED=1` to disable — don't, for
     milo-self or anything it compiled).
+  - A guarded child is SIGKILLed, and a SIGKILL cannot flush stdio — so on a piped
+    stdout a killed program used to print NOTHING. `guard.ts` now sets
+    `MILO_LINE_BUFFERED=1` for its children, which makes the compiled binary
+    line-buffer stdout at startup, so you see output up to the hang. Set it yourself
+    for any un-guarded run you may kill; `MILO_GUARD_NO_LINE_BUFFER=1` opts back out.
   - `bun test tests/selfhost.test.ts`, `scripts/selfhost.sh`, and
     `scripts/selfhost-sweep.ts` are already guarded — prefer them.
   - Do not raise sweep/test concurrency or per-child mem caps without checking the

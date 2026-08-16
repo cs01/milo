@@ -60,6 +60,7 @@
   "discardRebind.milo": "crash",
   "dlSelfSymbol.milo": "noEmit",
   "dropAccounting.milo": "mismatch",
+  "dropBehindTraitObject.milo": "mismatch",
   "dropEarlyReturn.milo": "mismatch",
   "dropEmptyContainerField.milo": "mismatch",
   "dropMatchBinding.milo": "mismatch",

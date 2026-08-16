@@ -1,0 +1,63 @@
+// A value behind a boxed interface must still run its destructor. The concrete type is
+// erased at the box, so the only route to its `Drop` impl is the itable — and the itable
+// carried method pointers only. `Heap<Iface>` therefore freed the box and never destroyed
+// what was inside it: RAII through polymorphism was silently a no-op, while the identical
+// `Heap<Concrete>` was correct.
+//
+// Fixed by appending one slot to every itable holding the concrete type's destructor (or
+// null when it has none), which is why `B` below prints nothing. Appended rather than
+// prepended so existing method indices stay valid.
+interface Show {
+    fn value(self: &Self): i64
+}
+
+struct A {
+    id: i64,
+}
+
+impl A {
+    fn value(self: &Self): i64 {
+        return self.id
+    }
+}
+
+impl Drop for A {
+    fn drop(self: &mut Self): void {
+        print("dropA ", self.id)
+    }
+}
+
+struct B {
+    n: i64,
+}
+
+impl B {
+    fn value(self: &Self): i64 {
+        return self.n
+    }
+}
+
+fn main() {
+    var v: Vec<Heap<Show>> = Vec.new()
+    v.push(Heap(A {
+        id: 1
+    }
+    ))
+    v.push(Heap(B {
+        n: 2
+    }
+    ))
+    v.push(Heap(A {
+        id: 3
+    }
+    ))
+    var sum = 0
+    for it in v {
+        sum = sum + it.value()
+    }
+    print("sum ", sum)
+}
+
+// @expect: sum 6
+// @expect: dropA 1
+// @expect: dropA 3

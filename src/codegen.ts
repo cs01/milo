@@ -187,6 +187,10 @@ export class Codegen {
   private needsStrtof = false;
   private generatedStructDropHelpers = new Set<string>();
   private dropHelperBodies: string[][] = [];
+  // Method count per interface, so a `Heap<Iface>` drop knows which itable slot holds the
+  // concrete type's destructor. Populated before any body is generated; the itable
+  // globals themselves are emitted much later, in the finalization pass.
+  private ifaceMethodCounts = new Map<string, number>();
   private helperFnBodies: string[][] = [];
   private emittedStrFind = false;
   private closureBodies: string[][] = [];
@@ -1472,6 +1476,10 @@ export class Codegen {
       if (!changed) break;
     }
 
+    // Every concrete impl of one interface has the same method count — it is the
+    // interface's, not the type's — so this is well defined per interface name.
+    for (const it of module.itables) this.ifaceMethodCounts.set(it.ifaceName, it.methods.length);
+
     // store user-defined Drop impls
     this.dropImpls = module.dropImpls;
     this.structDropCache.clear();
@@ -1718,8 +1726,21 @@ export class Codegen {
     // emit itable globals for interface dispatch
     for (const itable of module.itables) {
       const globalName = `@itable.${itable.concreteType}.${itable.ifaceName}`;
-      const ptrs = itable.methods.map(m => `ptr @${m}`).join(", ");
-      const structTy = `{ ${itable.methods.map(() => "ptr").join(", ")} }`;
+      // One extra slot after the methods: the concrete type's destructor, or null when it
+      // has none. Behind an interface the concrete type is erased, so this is the only
+      // route by which a boxed value's `Drop` impl can run — without it `Heap<Iface>`
+      // freed the box and never destroyed what was in it. Appended rather than prepended
+      // so every existing method index stays valid; dispatch GEPs by index and never
+      // reads the struct type.
+      const slots = itable.methods.map(m => `ptr @${m}`);
+      if (this.structNeedsDrop(itable.concreteType)) {
+        this.ensureStructDropHelper(itable.concreteType);
+        slots.push(`ptr @milo.drop.struct.${itable.concreteType}`);
+      } else {
+        slots.push("ptr null");
+      }
+      const ptrs = slots.join(", ");
+      const structTy = `{ ${slots.map(() => "ptr").join(", ")} }`;
       this.output.splice(1, 0, `${globalName} = private unnamed_addr constant ${structTy} { ${ptrs} }`);
       this.itableLayouts.set(`${itable.concreteType}.${itable.ifaceName}`, {
         globalName,
@@ -11768,7 +11789,30 @@ export class Codegen {
       const skipLabel = this.nextLabel("heap.skip");
       lines.push(`  br i1 ${isNull}, label %${skipLabel}, label %${dropLabel}`);
       lines.push(`${dropLabel}:`);
-      if (this.needsDropCg(typeKind.inner)) {
+      if (typeKind.inner.tag === "interface") {
+        // The concrete type is erased here, so its destructor is reached through the
+        // itable's trailing drop slot. A null slot means the concrete type has none.
+        const n = this.ifaceMethodCounts.get(typeKind.inner.name);
+        if (n !== undefined) {
+          const fat = this.nextTemp();
+          lines.push(`  ${fat} = load { ptr, ptr }, ptr ${allocaPtr}`);
+          const itab = this.nextTemp();
+          lines.push(`  ${itab} = extractvalue { ptr, ptr } ${fat}, 1`);
+          const slot = this.nextTemp();
+          lines.push(`  ${slot} = getelementptr ptr, ptr ${itab}, i32 ${n}`);
+          const dropFn = this.nextTemp();
+          lines.push(`  ${dropFn} = load ptr, ptr ${slot}`);
+          const noDrop = this.nextTemp();
+          lines.push(`  ${noDrop} = icmp eq ptr ${dropFn}, null`);
+          const callLbl = this.nextLabel("iface.drop.call");
+          const afterLbl = this.nextLabel("iface.drop.after");
+          lines.push(`  br i1 ${noDrop}, label %${afterLbl}, label %${callLbl}`);
+          lines.push(`${callLbl}:`);
+          lines.push(`  call void ${dropFn}(ptr ${heapPtr})`);
+          lines.push(`  br label %${afterLbl}`);
+          lines.push(`${afterLbl}:`);
+        }
+      } else if (this.needsDropCg(typeKind.inner)) {
         this.emitDropValue(lines, heapPtr, typeKind.inner);
       }
       lines.push(`  call void @free(ptr ${heapPtr})`);

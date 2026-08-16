@@ -185,6 +185,20 @@ and assert each combination is rejected (or accepted, where disjoint). A new con
 a new root spelling adds a row; a rule that only covers one spelling fails the matrix
 immediately instead of years later under ASan.
 
+**A second rule matrixed 2026-08-16**: `tests/moveOutOfBorrowSpellings.test.ts` crosses 7
+ways of SPELLING a place reached through a borrow (field, nested field, fixed-array
+element, Vec element, and three shapes of fork) with 5 positions that consume it (returned,
+bound, passed as an owned argument, stored in a struct literal, pushed into a Vec), plus
+the same 7 spellings out of an OWNED root, which must all be legal — without that half the
+matrix would be satisfied by a checker that rejects every field access.
+
+The measured answer: every field-shaped spelling errors, including through a fork and an
+unwrap, and every index-shaped one silently deep-clones. That split is Tier 1 #7 and is a
+filed decision rather than a hole, so it is PINNED here in both directions: changing it
+shows up as a diff in this file, and a newly added spelling cannot quietly inherit
+whichever branch it happens to hit. A fork whose tails MIX the two answers errors, which is
+the conservative direction.
+
 Lives in `tests/aliasingSpellings.test.ts`. Note the neighbouring
 `tests/aliasingMatrix.test.ts` is a *different* axis — a golden matrix over containers x
 operations, checking that each container's behaviour is written down rather than

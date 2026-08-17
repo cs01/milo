@@ -50,7 +50,7 @@ from "./gpupost" import {
     CoverGrid
 }
 from "./gpuworld" import {
-    clearOrtho, drawSkyPass, drawStreams, gpuWorldFree, gpuWorldNew, setOrtho, uploadStreams, drawShadowPass
+    clearOrtho, drawSkyPass, drawStreams, gpuWorldFree, gpuWorldNew, setOrtho, uploadStreams, drawShadowPass, gpuWorldSetClouds
 }
 from "std/math" import {
     Math
@@ -471,6 +471,7 @@ pub fn main(): i32 {
         // one the geometry was just drawn with.
         if w.env.cloudsDirty {
             screenSetClouds(scr, w.env.clouds)
+            gpuWorldSetClouds(gw, w.env.clouds)
             w.env.cloudsDirty = false
         }
         screenPresent(scr, c, view, s, grid, cover, coverDirty, cityHasSea(w.city), w.time, 0.35, exposure)

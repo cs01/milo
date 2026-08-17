@@ -48,7 +48,7 @@ from "./gpupost" import {
     CoverGrid, postBeginWorld, postFinish, postFree, postNew, postBindWorld, postSetClouds
 }
 from "./gpuworld" import {
-    drawSkyPass, drawStreams, gpuWorldFree, gpuWorldNew, setOrtho, uploadStreams, drawShadowPass
+    drawSkyPass, drawStreams, gpuWorldFree, gpuWorldNew, setOrtho, uploadStreams, drawShadowPass, gpuWorldSetClouds
 }
 from "./city" import {
     City, cityAttachOrtho, cityEmpty, cityHasSea, cityLoad, demHeights
@@ -246,6 +246,7 @@ pub fn main(): i32 {
         drawHud(c, w, s, 60)
         if w.env.cloudsDirty {
             postSetClouds(p, w.env.clouds)
+            gpuWorldSetClouds(gw, w.env.clouds)
             w.env.cloudsDirty = false
         }
         postFinish(p, c, view, s, grid, dem, first, cityHasSea(w.city), w.time, 0.35, 1.0, W, H)

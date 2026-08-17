@@ -172,6 +172,52 @@ pub fn cloudUpdate(tex: &Texture2D, f: &CloudField) {
     tex.updateRgb32f(f.texel)
 }
 
+// The cloud grid as seen by the GROUND pass, for shadows.
+//
+// Separate from CLOUD_GLSL because the geometry shader needs to ask one cheap
+// question — is this patch of ground under a cloud — and has no use for the
+// march, the phase function or the light integration. Pasting the whole volume
+// renderer into it to get one texture lookup would compile a great deal of dead
+// code into the shader that draws every triangle in the frame.
+//
+// This is the thing a projected sky deck could never do. A cloud at a map
+// coordinate with a known altitude casts its shadow on a KNOWN PATCH OF CITY, and
+// on a broken day that moving pattern of light and dark across the ground is most
+// of what the weather actually looks like from the air.
+pub let CLOUD_SHADOW_GLSL: string = "
+uniform sampler2D uCloudTex;
+uniform float uCloudBase;
+uniform float uCloudTopMax;
+uniform float uCloudReach;
+uniform float uCloudOn;
+
+vec2 cloudShadowUv(vec2 xz) {
+    vec2 q = xz / (2.0 * uCloudReach) + 0.5;
+    vec2 f = abs(fract(q * 0.5) * 2.0 - 1.0);
+    return clamp(f, 0.002, 0.998);
+}
+
+// How much sun reaches a point on the ground through the cloud layer.
+float cloudSunlight(vec3 world) {
+    if (uCloudOn < 0.5) { return 1.0; }
+    // Shadows are cast from the middle of the layer rather than its base. The
+    // base is where the cloud starts and the middle is where most of its mass is,
+    // and using the base slides every shadow toward the sun by the layer's own
+    // half-thickness — hundreds of metres, which over a city is whole blocks.
+    float mid = mix(uCloudBase, uCloudTopMax, 0.4);
+    if (world.y > mid) { return 1.0; }
+    // A sun near the horizon casts a shadow from a cloud arbitrarily far away, and
+    // the clamp is what stops that reaching outside the map entirely at sunset.
+    float sy = max(uSun.y, 0.10);
+    vec3 p = world + uSun * ((mid - world.y) / sy);
+    float cover = texture(uCloudTex, cloudShadowUv(p.xz)).r;
+    // Never all the way to zero: a shadowed street is still lit by the sky, and
+    // the shader that calls this already has its own floor for that. This is only
+    // the direct beam.
+    return 1.0 - clamp(cover, 0.0, 1.0) * 0.90;
+}
+"
+
 // Pasted into the pass that owns the view ray. It needs `skyColor`, `sunLight`
 // and `skyTint` from SKY_GLSL, and must be concatenated after it.
 pub let CLOUD_GLSL: string = "

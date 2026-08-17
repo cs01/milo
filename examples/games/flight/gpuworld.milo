@@ -40,6 +40,9 @@ from "std/math" import {
 from "./sky" import {
     SKY_GLSL
 }
+from "./cloud" import {
+    CLOUD_SHADOW_GLSL, CloudField, cloudEmpty, cloudUpload, cloudUpdate
+}
 from "./gpushadow" import {
     ShadowMap, SHADOW_SAMPLE_GLSL, SHADOW_EXTENT, SHADOW_DEPTH, lightMatrix, shadowNew, shadowFree
 }
@@ -104,7 +107,7 @@ uniform vec3 uEye;
 uniform vec2 uFogRange;
 "
 
-    + SKY_GLSL + SHADOW_SAMPLE_GLSL + "
+    + SKY_GLSL + SHADOW_SAMPLE_GLSL + CLOUD_SHADOW_GLSL + "
 uniform float uShadowAmb;   // how bright a shadowed surface is, against sunlit
 
 void main() {
@@ -121,7 +124,9 @@ void main() {
     // by the sky, which is dimmer and blue. That is what actually happens
     // outdoors, and it is the only form this can take without a sixth float per
     // vertex.
-    float vis = sunVisibility(vWorld);
+    // Two things can stand between this point and the sun: something solid, and
+    // the weather. They multiply.
+    float vis = sunVisibility(vWorld) * cloudSunlight(vWorld);
     vec3 sun = sunLight();
     vec3 lightCol = mix(sun * uShadowAmb * skyTint(), sun, vis);
     vec3 col = albedo * vLight * lightCol;
@@ -340,6 +345,12 @@ pub struct GpuWorld {
     // The aerial drape arrives with a city and changes when the place does.
     ortho: Option<Texture2D>,
     shadow: ShadowMap,
+    // A second copy of the weather grid, because the sea pass owns the one in
+    // `Post` and both passes need it. It is 128x128 of three floats and it is
+    // written only when a fetch lands, so the duplication costs 196 KB and no
+    // per-frame work — considerably less than threading one texture through two
+    // module boundaries and four call sites would cost in signatures.
+    cloudTex: Texture2D,
 }
 
 pub fn gpuWorldNew(gl: &mut GlContext, ground: &Texture, skin: &Texture, facade: &Texture): Result<GpuWorld, string> {
@@ -368,6 +379,7 @@ pub fn gpuWorldNew(gl: &mut GlContext, ground: &Texture, skin: &Texture, facade:
         // 2048 over a 2.6 km square is 1.3 m a texel, which is about the width
         // of the narrowest thing in a city that casts a shadow worth seeing.
         shadow: shadowNew(gl, 2048)?,
+        cloudTex: cloudUpload(gl, cloudEmpty()),
     }
     )
 }
@@ -628,6 +640,12 @@ pub fn drawStreams(g: &mut GpuWorld, s: &mut Scene, v: &View, w: f64, h: f64, ti
     g.shader.uniformI("uTex", 0)
     skyUniforms(g.shader, s, time)
     shadowUniforms(g, g.shader, s)
+    g.cloudTex.bind(2)
+    g.shader.uniformI("uCloudTex", 2)
+    g.shader.uniformF("uCloudBase", s.cloudBase)
+    g.shader.uniformF("uCloudTopMax", s.cloudTopMax)
+    g.shader.uniformF("uCloudReach", s.cloudReach)
+    g.shader.uniformF("uCloudOn", s.cloudOn)
 
     drawSlot(g, s, SLOT_NONE)
     drawSlot(g, s, SLOT_GROUND)
@@ -739,6 +757,11 @@ pub fn skyUniforms(sh: &Shader, s: &Scene, time: f64) {
     sh.uniformF("uHaze", s.haze)
 }
 
+// Push a new weather field to the geometry pass's copy.
+pub fn gpuWorldSetClouds(g: &GpuWorld, f: &CloudField) {
+    cloudUpdate(g.cloudTex, f)
+}
+
 pub fn gpuWorldFree(gl: &mut GlContext, g: GpuWorld) {
     var own = g
     // The drape lives in an Option and `free` consumes it, so it has to come out
@@ -750,6 +773,7 @@ pub fn gpuWorldFree(gl: &mut GlContext, g: GpuWorld) {
         Option.None => {
         }
     }
+    own.cloudTex.free(gl)
     shadowFree(gl, own.shadow)
     own.shader.free(gl)
     own.fall.free(gl)

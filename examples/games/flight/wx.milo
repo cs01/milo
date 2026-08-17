@@ -336,7 +336,14 @@ fn stationIdOf(url: &string): string {
 // a PNG back. That is exactly what a map service is for, and it is why neither
 // of these needs a projection library — the server reprojects into the box that
 // was asked for.
-fn fetchWms(base: &string, layer: &string, lat: f64, lon: f64, reach: f64, n: i64, transparent: bool): Option<Vec<f32>> {
+// How a WMS PNG is turned into a number per cell. The two services encode
+// completely different things and reading one the way the other is read produces
+// confident nonsense.
+pub let WMS_LUMA: i64 = 0
+
+pub let WMS_REFLECTIVITY: i64 = 1
+
+fn fetchWms(base: &string, layer: &string, lat: f64, lon: f64, reach: f64, n: i64, transparent: bool, mode: i64): Option<Vec<f32>> {
     let mPerLon = M_PER_DEG_LAT * Math.cos(lat * 3.14159265358979 / 180.0)
     let latMin = lat - reach / M_PER_DEG_LAT
     let latMax = lat + reach / M_PER_DEG_LAT
@@ -361,7 +368,7 @@ fn fetchWms(base: &string, layer: &string, lat: f64, lon: f64, reach: f64, n: i6
             }
             match Png.decode(r.text()) {
                 Result.Ok(img) => {
-                    return Option.Some(gridOf(img.width, img.height, img.channels, img.pixels, n))
+                    return Option.Some(gridOf(img.width, img.height, img.channels, img.pixels, n, mode))
                 }
                 Result.Err(_) => {
                     return Option.None
@@ -380,7 +387,58 @@ fn fetchWms(base: &string, layer: &string, lat: f64, lon: f64, reach: f64, n: i6
 // the world's +z is north — so the row index is flipped on the way in. Getting
 // this wrong mirrors the weather north-to-south, which over a uniform overcast is
 // invisible and over a squall line is completely wrong.
-fn gridOf(w: i64, h: i64, ch: i64, px: &string, n: i64): Vec<f32> {
+// Reflectivity from an N0Q pixel, 0 to 1, or 0 for anything that is not a real
+// echo.
+//
+// The palette runs cyan to green to yellow to red as the returned power rises,
+// and every step of it is SATURATED. What is not saturated is not weather: the
+// service paints areas with no meaningful return in a desaturated blue-grey, and
+// it paints them OPAQUE. Measured over Honolulu, which sits outside the mosaic:
+// rgb(145,154,180), saturation 0.19, covering a quarter of the tile. Read as
+// brightness — which is how this started — that is a steady heavy rain over Oahu
+// that is not falling, and the sky over a real place is exactly the thing that
+// must not be invented. Measured over live CONUS returns the same day, the
+// weakest real echo is rgb(101,194,220) at saturation 0.54.
+//
+// Intensity then comes from `r - b`, which increases monotonically along that
+// ramp — cyan is strongly blue, red is not blue at all — and needs no palette
+// table to invert.
+fn reflectivityOf(r: f64, g: f64, b: f64, a: f64): f64 {
+    if a < 128.0 {
+        return 0.0
+    }
+    var mx = r
+    if g > mx {
+        mx = g
+    }
+    if b > mx {
+        mx = b
+    }
+    var mn = r
+    if g < mn {
+        mn = g
+    }
+    if b < mn {
+        mn = b
+    }
+    if mx < 1.0 {
+        return 0.0
+    }
+    let sat = (mx - mn) / mx
+    if sat < 0.35 {
+        return 0.0
+    }
+    var v = (r - b + 140.0) / 300.0
+    if v < 0.0 {
+        v = 0.0
+    }
+    if v > 1.0 {
+        v = 1.0
+    }
+    return v
+}
+
+fn gridOf(w: i64, h: i64, ch: i64, px: &string, n: i64, mode: i64): Vec<f32> {
     var out: Vec<f32> = Vec.filled(n * n, 0.0)
     if w <= 0 || h <= 0 {
         return out
@@ -399,8 +457,12 @@ fn gridOf(w: i64, h: i64, ch: i64, px: &string, n: i64): Vec<f32> {
                 let r = px[k] as f64
                 let g = px[k + 1] as f64
                 let b = px[k + 2] as f64
-                let lum = (0.299 * r + 0.587 * g + 0.114 * b) / 255.0
-                out[j * n + i] = ((lum * (a / 255.0)) as f32)
+                if mode == WMS_REFLECTIVITY {
+                    out[j * n + i] = (reflectivityOf(r, g, b, a) as f32)
+                } else {
+                    let lum = (0.299 * r + 0.587 * g + 0.114 * b) / 255.0
+                    out[j * n + i] = ((lum * (a / 255.0)) as f32)
+                }
             }
         }
     }
@@ -415,7 +477,7 @@ fn gridOf(w: i64, h: i64, ch: i64, px: &string, n: i64): Vec<f32> {
 // ramp runs dark-warm to bright-cold. Checked against a live CONUS frame rather
 // than taken from documentation, because the service publishes none.
 pub fn fetchIr(lat: f64, lon: f64, reach: f64, n: i64): Option<Vec<f32>> {
-    return fetchWms("https://mesonet.agron.iastate.edu/cgi-bin/wms/goes/conus_ir.cgi", "goes_conus_ir", lat, lon, reach, n, false)
+    return fetchWms("https://mesonet.agron.iastate.edu/cgi-bin/wms/goes/conus_ir.cgi", "goes_conus_ir", lat, lon, reach, n, false, WMS_LUMA)
 }
 
 // Radar base reflectivity over the map square, 0 (nothing) to 1 (violent).
@@ -426,7 +488,7 @@ pub fn fetchIr(lat: f64, lon: f64, reach: f64, n: i64): Option<Vec<f32>> {
 // raining" and useless for anything with an edge. Asking the WMS for the box
 // directly gets the underlying radar gates resampled to whatever grid is wanted.
 pub fn fetchRadar(lat: f64, lon: f64, reach: f64, n: i64): Option<Vec<f32>> {
-    return fetchWms("https://mesonet.agron.iastate.edu/cgi-bin/wms/nexrad/n0q.cgi", "nexrad-n0q", lat, lon, reach, n, true)
+    return fetchWms("https://mesonet.agron.iastate.edu/cgi-bin/wms/nexrad/n0q.cgi", "nexrad-n0q", lat, lon, reach, n, true, WMS_REFLECTIVITY)
 }
 
 // The lifting condensation level, metres above the surface.

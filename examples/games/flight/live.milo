@@ -96,9 +96,14 @@ pub struct LiveEnv {
     // meteorological range is where contrast falls to 2%, which is an optical
     // depth of ln(1/0.02) = 3.912.
     hazeK: f64,
-    // Peak radar reflectivity anywhere on the map, 0..1. Drives whether it is
-    // raining at all.
+    // Peak radar reflectivity anywhere on the map, 0..1, which sets how hard it
+    // is raining where it is raining.
     rainPeak: f64,
+    // Fraction of the map under meaningful reflectivity. Kept separately because
+    // "is it raining here" and "how hard" are different questions and one number
+    // answers neither well: a single bright cell in a corner is a peak of 1.0 and
+    // is not a rainy day.
+    rainFrac: f64,
     // Set when the field has changed and the GPU copy is stale. The renderer
     // clears it after uploading; nothing else writes it.
     cloudsDirty: bool,
@@ -167,6 +172,7 @@ pub fn envNew(lat: f64, lon: f64, reach: f64, groundM: f64): LiveEnv {
         obs: obsEmpty(),
         hazeK: 0.00013,
         rainPeak: 0.0,
+        rainFrac: 0.0,
         cloudsDirty: true,
     }
     envRetime(e, 0.0)
@@ -199,6 +205,7 @@ pub fn envSynthWeather(e: &mut LiveEnv, reachIn: f64) {
     if fake > 0.01 {
         cloudAddTestCell(f, reach * 0.25, 0.0 - reach * 0.15, reach * 0.30, fake)
         e.rainPeak = fake
+        e.rainFrac = 0.08
     }
     e.clouds = f
     e.cloudSource = EnvSource.Synthetic
@@ -259,11 +266,16 @@ pub fn envFetchLive(e: &mut LiveEnv, reachIn: f64): bool {
     }
     var rain: Vec<f32> = Vec.filled(CLOUD_N * CLOUD_N, 0.0)
     var peak = 0.0
+    var wet = 0
     match fetchRadar(e.lat, e.lon, reach, CLOUD_N) {
         Option.Some(g) => {
             for i in 0..g.len {
-                if (g[i] as f64) > peak {
-                    peak = g[i] as f64
+                let v = g[i] as f64
+                if v > peak {
+                    peak = v
+                }
+                if v > 0.15 {
+                    wet = wet + 1
                 }
             }
             rain = g
@@ -272,6 +284,7 @@ pub fn envFetchLive(e: &mut LiveEnv, reachIn: f64): bool {
         }
     }
     e.rainPeak = peak
+    e.rainFrac = (wet as f64) / ((CLOUD_N * CLOUD_N) as f64)
 
     var f = cloudEmpty()
     f.reach = reach
@@ -388,9 +401,21 @@ pub fn envGoLive(e: &mut LiveEnv, reach: f64): bool {
 pub fn envWeatherLabel(e: &LiveEnv): string {
     if (e.cloudSource as i32) == (EnvSource.Live as i32) {
         var s = "LIVE " + e.obs.station.clone()
-        s = s + "  " + ((e.obs.coverOktas as i64)).toString() + "/8"
+        // "0/8" and "nobody told us" are different statements and only one of
+        // them is a measurement. Hawaii is the live case: PHNL is the nearest
+        // station and an airport, and its observation currently carries no
+        // temperature and no layers at all, so nothing in the chain ever reported
+        // a sky. Printing 0/8 there would be inventing a clear sky — and the radar
+        // is simultaneously showing showers over Oahu, which is how it was caught.
+        if e.obs.coverOktas <= 0.0 && e.obs.baseM < 0.0 {
+            s = s + "  SKY UNREPORTED"
+        } else {
+            s = s + "  " + ((e.obs.coverOktas as i64)).toString() + "/8"
+        }
         s = s + "  base " + ((e.clouds.baseM as i64)).toString() + "m"
-        if e.rainPeak > 0.02 {
+        // One bright cell in a corner is not a rainy day. A fiftieth of the map
+        // under a real echo is.
+        if e.rainFrac > 0.02 {
             s = s + "  RAIN"
         }
         return s

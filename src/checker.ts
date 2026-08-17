@@ -3856,6 +3856,89 @@ export class TypeChecker {
     }
   }
 
+  // Check a call against an already-resolved concrete method and record the symbol codegen
+  // must emit. Shared by the two paths that resolve a method by instantiating it rather
+  // than by looking it up: a generic method (`fn map<R>`) and a blanket container impl
+  // (`impl Trait for Vec<T>`). The ordinary path is not routed through here because it
+  // carries the `json` auto-stringify special case, which neither of these can reach.
+  private dispatchMangledMethod(expr: Extract<Expr, { kind: "MethodCall" }>, mangled: string, sp?: Span): TypeKind {
+    const sig = must(this.functions, mangled, "instantiated method");
+    const selfParam = sig.params[0];
+    if (selfParam?.type.tag === "ref") {
+      if (selfParam.type.mutable) {
+        this.errorIfFrozen(expr.object, `call '${expr.method}' on`, sp);
+        this.errorIfCopyBind(expr.object, expr.method, sp);
+      }
+      this.autoBorrowed.set(expr.object, { mutable: selfParam.type.mutable });
+    } else {
+      this.tryMove(expr.object);
+    }
+    if (expr.args.length !== sig.params.length - 1) {
+      this.error(`'${expr.method}' expects ${sig.params.length - 1} argument(s), got ${expr.args.length}`, sp);
+    }
+    for (let i = 0; i < expr.args.length; i++) {
+      const expected = sig.params[i + 1];
+      if (!expected) break;
+      const bare = expected.type.tag === "ref" ? expected.type.inner : expected.type;
+      const argType = this.checkExprWithHint(expr.args[i]!, bare);
+      if (!typeEq(bare, argType) && argType.tag !== "unknown") {
+        this.error(`'${expr.method}' argument ${i + 1}: expected ${typeName(bare)}, got ${typeName(argType)}`, expr.args[i]!.span);
+      }
+      if (expected.type.tag === "ref") this.setAutoBorrowChecked(expr.args[i]!, expected.type.mutable, sp);
+      else this.tryMove(expr.args[i]!);
+    }
+    this.resolvedMethods.set(expr, mangled);
+    return this.setType(expr, sig.ret);
+  }
+
+  // `impl Trait for Vec<T>` — a blanket impl on a BUILTIN container.
+  //
+  // These parse and land in `genericImpls` under the bare name "Vec", and nothing
+  // instantiated them: `monomorphizeStruct` is what instantiates a generic impl, and a
+  // builtin container is not a struct, so it is never called. The call then died in the
+  // container's own method arm, which errors before anything consults a trait impl —
+  // `Vec has no method 'toJ'` even though the program clearly defines one.
+  //
+  // Instantiated per ELEMENT type and registered under a mangled name (`Vec_i64`), which
+  // is what stops every `Vec<T>` impl from collapsing onto one entry: `resolveMethod` is
+  // keyed by a bare type name, so without the mangling a `Vec<i64>` impl and a
+  // `Vec<string>` impl are the same key.
+  private instantiateContainerImpl(container: string, elem: TypeKind, method: string): { mangled: string; sig: FnSig } | null {
+    const templates = this.genericImpls.get(container);
+    if (!templates || templates.length === 0) return null;
+    const concreteName = `${container}_${this.mangleTypeName(elem)}`;
+    const already = this.resolveMethod(concreteName, method);
+    if (already) return already;
+    if (!templates.some(t => t.impl.methods.some(m => m.name === method))) return null;
+
+    const elemMilo = this.typeKindToMiloType(elem);
+    for (const { impl: gi, program: prog } of templates) {
+      const names = gi.typeParams.map(t => t.name);
+      // The receiver keeps its real container type: `self: &Self` on a `Vec<T>` impl must
+      // stay a Vec, not become the mangled struct name, or the body cannot index it.
+      const concreteImpl: import("./ast").ImplDecl = {
+        kind: "ImplDecl",
+        traitName: gi.traitName,
+        typeName: concreteName,
+        typeParams: [],
+        methods: gi.methods.map(m => ({
+          ...m,
+          params: m.params.map(p => ({
+            name: p.name,
+            type: p.name === "self"
+              ? { name: container, typeArgs: [elemMilo], isPtr: false, isRef: true, isRefMut: false, isArray: false, arraySize: null }
+              : this.substituteMiloType(declaredType(p), names, [elem]),
+          })),
+          retType: this.substituteMiloType(m.retType, names, [elem]),
+          body: this.substituteBody(m.body, names, [elem]),
+        })),
+        span: gi.span,
+      };
+      this.registerImpl(concreteImpl, prog, this._pendingImplFns);
+    }
+    return this.resolveMethod(concreteName, method);
+  }
+
   private resolveMethod(objTypeName: string, methodName: string): { mangled: string; sig: FnSig } | null {
     // inherent first
     const inherent = this.inherentImpls.get(objTypeName);
@@ -8729,6 +8812,10 @@ export class TypeChecker {
         if (nType.tag !== "int" && nType.tag !== "unknown") { this.error(`'reserve': expected an integer, got ${typeName(nType)}`, sp); }
         return this.setType(expr, { tag: "void" });
       }
+      {
+        const blanket = this.instantiateContainerImpl("Vec", objType.element, expr.method);
+        if (blanket) return this.dispatchMangledMethod(expr, blanket.mangled, sp);
+      }
       this.error(`Vec has no method '${expr.method}'`, sp, memberHint(expr.method, VEC_MEMBERS));
       return this.setType(expr, { tag: "unknown" });
     }
@@ -9050,32 +9137,7 @@ export class TypeChecker {
         return this.setType(expr, { tag: "unknown" });
       }
       const mangled = this.monomorphizeMethod(genericKey, typeArgs);
-      if (mangled) {
-        const sig = must(this.functions, mangled, "monomorphized method");
-        const selfParam = sig.params[0];
-        if (selfParam?.type.tag === "ref") {
-          if (selfParam.type.mutable) this.errorIfFrozen(expr.object, `call '${expr.method}' on`, sp);
-          this.autoBorrowed.set(expr.object, { mutable: selfParam.type.mutable });
-        } else {
-          this.tryMove(expr.object);
-        }
-        if (expr.args.length !== sig.params.length - 1) {
-          this.error(`'${expr.method}' expects ${sig.params.length - 1} argument(s), got ${expr.args.length}`, sp);
-        }
-        for (let i = 0; i < expr.args.length; i++) {
-          const expected = sig.params[i + 1];
-          if (!expected) break;
-          const bare = expected.type.tag === "ref" ? expected.type.inner : expected.type;
-          const argType = this.checkExprWithHint(expr.args[i]!, bare);
-          if (!typeEq(bare, argType) && argType.tag !== "unknown") {
-            this.error(`'${expr.method}' argument ${i + 1}: expected ${typeName(bare)}, got ${typeName(argType)}`, expr.args[i]!.span);
-          }
-          if (expected.type.tag === "ref") this.setAutoBorrowChecked(expr.args[i]!, expected.type.mutable, sp);
-          else this.tryMove(expr.args[i]!);
-        }
-        this.resolvedMethods.set(expr, mangled);
-        return this.setType(expr, sig.ret);
-      }
+      if (mangled) return this.dispatchMangledMethod(expr, mangled, sp);
     }
 
     const resolved = this.resolveMethod(objTName, expr.method);

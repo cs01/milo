@@ -1,0 +1,68 @@
+// `impl Trait for Vec<T>` — a blanket impl on a builtin container.
+//
+// These parsed and landed in the generic-impl table under the bare name "Vec", and nothing
+// ever instantiated them: `monomorphizeStruct` is what instantiates a generic impl, and a
+// builtin container is not a struct, so it was never called. The call then died in Vec's
+// own method arm, which errors before anything consults a trait impl — `Vec has no method
+// 'toJ'` on a program that plainly defines one.
+//
+// They are instantiated per ELEMENT type under a mangled name (`Vec_i64`), which is what
+// keeps two of them apart: `resolveMethod` is keyed by a bare type name, so without the
+// mangling a `Vec<i64>` impl and a `Vec<string>` impl are the same key. Both are exercised
+// below for exactly that reason.
+// @expect: [1,2]
+// @expect: ["a"]
+// @expect: [[1],[2]]
+
+trait ToJ {
+    fn toJ(self: &Self): string
+}
+
+impl ToJ for i64 {
+    fn toJ(self: &Self): string {
+        return $"{self}"
+    }
+}
+
+impl ToJ for string {
+    fn toJ(self: &Self): string {
+        return $"\"{self}\""
+    }
+}
+
+impl ToJ for Vec<T> {
+    fn toJ(self: &Self): string {
+        var out = "["
+        var first = true
+        for x in self {
+            if !first {
+                out.pushStr(",")
+            }
+            out.pushStr(x.toJ())
+            first = false
+        }
+        return out + "]"
+    }
+}
+
+fn main() {
+    var v: Vec<i64> = Vec.new()
+    v.push(1)
+    v.push(2)
+    print(v.toJ())
+
+    var s: Vec<string> = Vec.new()
+    s.push("a")
+    print(s.toJ())
+
+    // Nested: the impl applies to its own output type, so Vec<Vec<i64>> resolves by
+    // instantiating the same template twice at different element types.
+    var a: Vec<i64> = Vec.new()
+    a.push(1)
+    var b: Vec<i64> = Vec.new()
+    b.push(2)
+    var nested: Vec<Vec<i64>> = Vec.new()
+    nested.push(a)
+    nested.push(b)
+    print(nested.toJ())
+}

@@ -1,18 +1,17 @@
-// The dogfood case for user-defined derives, and the measurement that answers "could
-// @derive(Json) move out of the compiler into userland?"
+// The dogfood case for user-defined derives: a complete, recursive JSON serializer written
+// entirely in Milo, with no compiler change and no `src/derive-json.ts`.
 //
-// This is a complete, RECURSIVE JSON serializer written entirely in Milo — no compiler
-// change, no `src/derive-json.ts`. It works because a trait can be implemented for a
-// primitive, so the template body is uniform (`self.@name.toJ()`) and dispatch is the
-// ordinary trait dispatch rather than a conditional in the template language.
+// It works because dispatch does the type-directed part that a macro would otherwise have
+// to do: the template body is uniform (`self.@name.toJ()`) and traits pick the right
+// implementation per field. That is the same division of labour serde uses — the macro
+// emits `self.field.serialize()` and the blanket impls carry the weight — and it is why the
+// template language needs no conditionals and stays non-Turing-complete.
 //
-// **Where it stops, which is the whole answer:** a `Vec<T>`, `Option<T>` or `HashMap<K,V>`
-// field cannot be covered. `impl<T: ToJ> ToJ for Vec<T>` is a parse error (impl blocks take
-// no type parameters of their own) and `impl ToJ for Vec<i64>` parses but the method is
-// never found (builtin container methods do not consult user trait impls). So a userland
-// codec covers structs of primitives and nested structs, and the built-in derive stays for
-// containers, narrow-int range checks and wire renames. See backlog Tier 2.
-// @expect: {"id":7,"name":"x","ok":true,"sub":{"n":3}}
+// **This used to stop at container fields.** `impl ToJ for Vec<T>` parsed and was never
+// instantiated, so a `Vec<string>` field reported `Vec has no method 'toJ'`. Blanket impls
+// on builtin containers close that (see tests/fixtures/blanketImpl.milo), and the `tags`
+// and `nums` fields below are here to keep it closed.
+// @expect: {"id":7,"name":"x","ok":true,"sub":{"n":3},"tags":["a","b"],"nums":[1,2]}
 
 trait ToJ {
     fn toJ(self: &Self): string
@@ -39,6 +38,21 @@ impl ToJ for string {
     }
 }
 
+impl ToJ for Vec<T> {
+    fn toJ(self: &Self): string {
+        var out = "["
+        var first = true
+        for x in self {
+            if !first {
+                out.pushStr(",")
+            }
+            out.pushStr(x.toJ())
+            first = false
+        }
+        return out + "]"
+    }
+}
+
 derive ToJ {
     fn toJ(self: &Self): string {
         var out = "{"
@@ -60,14 +74,21 @@ struct Inner {
 
 @derive(ToJ)
 struct Outer {
-    id: i64, name: string, ok: bool, sub: Inner,
+    id: i64, name: string, ok: bool, sub: Inner, tags: Vec<string>, nums: Vec<i64>,
 }
 
 fn main() {
+    var tags: Vec<string> = Vec.new()
+    tags.push("a")
+    tags.push("b")
+    var nums: Vec<i64> = Vec.new()
+    nums.push(1)
+    nums.push(2)
     let o = Outer {
         id: 7, name: "x", ok: true, sub: Inner {
             n: 3
         }
+        , tags: tags, nums: nums
     }
     print(o.toJ())
 }

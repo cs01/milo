@@ -54,7 +54,7 @@ from "./city" import {
     City, cityAttachOrtho, cityEmpty, cityHasSea, cityLoad, demHeights
 }
 from "./world3d" import {
-    World, heightAt
+    World, heightAt, settleUnderCeiling
 }
 from "./live" import {
     envF64, envLiveRequested, envGoLive, envWeatherLabel
@@ -174,6 +174,7 @@ pub fn main(): i32 {
     if envLiveRequested() {
         if envGoLive(w.env, w.city.reach) {
             print("weather: " + envWeatherLabel(w.env))
+            settleUnderCeiling(w)
         } else {
             print("weather: fetch failed, keeping synthetic sky")
         }

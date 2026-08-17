@@ -11,7 +11,7 @@ from "./gfx3d" import {
     Camera, Scene, Vec3, altScale
 }
 from "./live" import {
-    LiveEnv, envNew, envSetPlace, envRetime
+    LiveEnv, envNew, envSetPlace, envRetime, envF64
 }
 from "./city" import {
     City, cityEmpty, cityHeightAt, cityCoverAt, cityRoofAt, COVER_URBAN
@@ -530,7 +530,32 @@ fn spawnAt(w: &mut World) {
     // Above whatever is under the SPAWN, not above the map origin. Yosemite's
     // valley floor and its rim are 900 m apart, and the origin is not where you
     // are standing any more.
-    w.plane.y = solidAt(w.city, w.plane.x, w.plane.z, 20.0) + 320.0
+    let ground = solidAt(w.city, w.plane.x, w.plane.z, 20.0)
+    var spawnY = ground + 320.0
+    // Spawn UNDER the ceiling when there is one.
+    //
+    // 320 m is a good height to see a city from and a terrible one under a real
+    // overcast: New York reported eight eighths at 261 m while this was being
+    // written, which put the aircraft inside the cloud on the first frame with
+    // nothing visible in any direction. That is a true rendering of that weather
+    // and a broken start to a flight. A pilot under a low ceiling does the
+    // obvious thing and flies beneath it, so this does too — and only when it has
+    // to, since dropping below a base that is already high would throw away the
+    // view for nothing.
+    if w.env.clouds.valid {
+        let under = w.env.clouds.baseM - 90.0
+        if under < spawnY {
+            spawnY = under
+        }
+        // Never so low that the city is above the aircraft.
+        if spawnY < ground + 130.0 {
+            spawnY = ground + 130.0
+        }
+    }
+    w.plane.y = spawnY
+    if envF64("FLYBY_DEBUG_SPAWN", 0.0) > 0.5 {
+        print("spawn: ground " + ((ground as i64)).toString() + " base " + ((w.env.clouds.baseM as i64)).toString() + " -> plane y " + ((spawnY as i64)).toString())
+    }
     let pose = chasePose(w)
     w.cam = pose
 }
@@ -990,6 +1015,32 @@ fn autoSteer(w: &mut World, dt: f64) {
     // aerobatics; this is meant to read as an airliner turning onto final.
     let bank = Math.clampF64(diff * 0.8, 0.0 - 0.6, 0.6)
     w.plane.roll = w.plane.roll + (bank - w.plane.roll) * Math.minF64(1.0, dt * 1.4)
+}
+
+// Put the aircraft back under the ceiling after the weather has changed beneath
+// it.
+//
+// The first spawn happens before the first fetch — the world is built, and only
+// then does anything go to the network — so it clamps against whatever synthetic
+// sky was there and not against the real one that arrives a moment later. Place
+// changes do not have this problem, because they refetch before they respawn.
+// Rather than reorder startup around a network call, the caller applies this once
+// the sky it asked for has actually landed.
+pub fn settleUnderCeiling(w: &mut World) {
+    if !w.env.clouds.valid {
+        return
+    }
+    let ground = solidAt(w.city, w.plane.x, w.plane.z, 20.0)
+    let under = w.env.clouds.baseM - 90.0
+    if under >= w.plane.y {
+        return
+    }
+    var y = under
+    if y < ground + 130.0 {
+        y = ground + 130.0
+    }
+    w.plane.y = y
+    w.cam = chasePose(w)
 }
 
 // How high you may fly. Two rules, the higher of the two wins:

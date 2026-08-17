@@ -78,9 +78,30 @@ Done, each verified against a rendered frame rather than by inspection:
 - Cloud shadows on the ground, measured at 11.8% of pixels changed.
 - Rain shafts under radar returns.
 
-Not done: drape resolution (the USGS endpoint caps a single request at 2048 px,
-so this needs tiled fetching and stitching), terrain LOD, draw distance from
-altitude, weather refresh during flight, HUD attribution.
+- Draw distance scaled to altitude, so the view from 3 km is 17 km of world for
+  the same triangle count.
+- The aerial drape at 3.9 m/px, stitched from four requests because the export
+  service caps one at 2048 px.
+- Station and hour on the HUD, and live weather refetched at every place change.
+
+Not done: terrain quads are still 110 m against 30 m DEM posts, so cliffs are
+smoothed; weather is fetched at startup and at place changes but not on a timer
+during a long flight.
+
+## What is measured and what is not
+
+Worth keeping straight, because a rendered sky looks equally convincing either
+way:
+
+- MEASURED: cloud amount, cloud base, wind, visibility, temperature, and where
+  precipitation is falling.
+- MEASURED but coarse: the horizontal structure of cloud, from infrared at about
+  4 km, and only when the cloud is cold enough to be seen at all.
+- ESTIMATED: cloud top height. The greyscale-to-temperature calibration of the
+  public composite is not published; the ramp direction was established
+  empirically and the conversion to altitude assumes a lapse rate.
+- INVENTED: everything, when a fetch fails or no station reports. The HUD says
+  so in those words.
 
 ## Order of work
 

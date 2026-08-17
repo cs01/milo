@@ -366,7 +366,15 @@ float cloudDensity(vec3 p) {
     // tapered bottom rather than a flat one.
     if (p.y < uCloudBase) {
         float rain = c.b;
-        if (rain <= 0.01) { return 0.0; }
+        // Rain falls OUT OF CLOUD. Both conditions matter and neither was here.
+        //
+        // Without the coverage test, a cell with a weak echo and no cloud above it
+        // still rendered a shaft — and when the condensation level is high (a dry
+        // day at Yosemite put it five kilometres up) that shaft is five kilometres
+        // tall, standing in a clear sky, stretched into a column by the vertical
+        // noise that makes real rain look like it is falling. Without the higher
+        // threshold, the faintest return in the mosaic was enough to start one.
+        if (rain <= 0.12 || cover < 0.15) { return 0.0; }
         float f = clamp(p.y / max(uCloudBase, 1.0), 0.0, 1.0);
         // Eroded in 3D, for the same reason the cloud above it is.
         //

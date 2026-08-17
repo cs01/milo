@@ -124,7 +124,10 @@ pub fn applyClouds(s: &mut Scene, w: &World) {
     // The slab only reaches the ground where rain is actually falling somewhere
     // on the map; extending it costs march resolution in the cloud above.
     s.rainPeak = 0.0
-    if w.env.rainFrac > 0.01 {
+    // The same threshold the HUD uses to say RAIN. They disagreed: below 0.02 the
+    // label stayed off while the volume still reached the ground, so a map with a
+    // trace of echo rendered shafts under a sky it was calling dry.
+    if w.env.rainFrac > 0.02 {
         s.rainPeak = w.env.rainPeak
     }
     if w.env.clouds.valid {
@@ -1644,7 +1647,12 @@ fn drawCity(s: &mut Scene, w: &World, v: &View, facade: &Texture) {
                         // they cost as much as the towers and show nothing.
                         let hgt = w.city.bHeight[b]
                         let d = Math.sqrt(d2) + 1.0
-                        if hgt / d < 0.0055 {
+                        // About six pixels tall at a 720p vertical field of view.
+                        // It was 0.0055 — three pixels — and in a city the size of
+                        // Manhattan the difference is thousands of prisms a frame,
+                        // each of them recorded, uploaded and rasterised twice, to
+                        // show a smudge.
+                        if hgt / d < 0.010 {
                             continue
                         }
                         // The box stands in for the real outline only once the

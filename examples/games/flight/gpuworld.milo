@@ -376,9 +376,17 @@ pub fn gpuWorldNew(gl: &mut GlContext, ground: &Texture, skin: &Texture, facade:
         skin: uploadTexture(gl, skin),
         facade: uploadTexture(gl, facade),
         ortho: Option.None,
-        // 2048 over a 2.6 km square is 1.3 m a texel, which is about the width
-        // of the narrowest thing in a city that casts a shadow worth seeing.
-        shadow: shadowNew(gl, 2048)?,
+        // 1024 over a 2.6 km square is 2.5 m a texel.
+        //
+        // It was 2048, on the reasoning that finer is better. What that missed is
+        // that a shadow map is a FILL cost paid every frame: four megapixels of
+        // it, and over Manhattan every one of those texels is overdrawn by a stack
+        // of towers. Measured there, the shadow pass alone was 14 ms of a 36 ms
+        // frame — more than a third of the budget for a buffer nobody looks at.
+        // At half the side it is a quarter of the fill and costs about 2 ms, and
+        // the shadows it casts are visibly the same: at this range what reads is
+        // the PATTERN of shadow down the avenues, not its edge sharpness.
+        shadow: shadowNew(gl, 1024)?,
         cloudTex: cloudUpload(gl, cloudEmpty()),
     }
     )

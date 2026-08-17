@@ -2,6 +2,7 @@
 // Speaks LSP over JSON-RPC/stdio. Provides diagnostics, hover, go-to-definition.
 
 import { Lexer } from "./lexer";
+import { MILO_VERSION } from "./version";
 import { SOFT_KEYWORDS, type Token } from "./tokens";
 import { KEYWORD_DOCS, CONTRACT_WORD_DOCS } from "./keyword-docs";
 import { formatMiloType } from "./derive-template";
@@ -2269,7 +2270,10 @@ function handleRequest(id: number | string, method: string, params: any) {
           workspaceSymbolProvider: true,
           inlayHintProvider: true,
         },
-        serverInfo: { name: "milod", version: "0.1.0" },
+        // MILO_VERSION, not a literal: a hardcoded copy here reports the version the
+        // server was WRITTEN at forever, and an editor bug report naming it sends the
+        // reader to the wrong release.
+        serverInfo: { name: "milod", version: MILO_VERSION },
       });
       break;
     }

@@ -11,6 +11,12 @@ last-verified: 2026-08-14
 Source-level breaks, newest first. Milo is pre-1.0 and does not promise
 compatibility, but every break belongs here with the migration spelled out.
 
+Below 1.0 the MINOR is the breaking position: everything in this file shipped in
+**v0.2.0**, and a package that wants to stay on the previous surface pins
+`"milo": "^0.1.0"` in its `milo.json` (see
+[the package manager plan](plans/package-manager.md#the-milo-constraint)). A release
+marker is added here each time a version is cut.
+
 ## `std/sysinfo`'s identity calls return u32 MAX on Windows, not 0 (2026-08-16)
 
 **`uid`, `gid`, `euid` and `egid` return `4294967295` on Windows** where they previously

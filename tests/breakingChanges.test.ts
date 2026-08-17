@@ -9,17 +9,27 @@
 // The prose cannot be generated. The DETECTION can, and that is what this checks; it
 // cannot tell whether the migration text is any good, only that the name appears.
 import { test, expect } from "bun:test";
-import { breaksSince, undocumented, lastReleaseTag } from "../scripts/check-breaking";
+import { breaksSince, undocumented, lastReleaseTag, surfaceAt } from "../scripts/check-breaking";
 
 test("there is a release tag to compare against", () => {
   expect(lastReleaseTag()).toMatch(/^v\d/);
 });
 
+// The control this gate needs, stated against the SCAN rather than the result.
+//
+// It used to assert `breaks.length > 0`, reasoning that a comparison finding nothing
+// would pass for free. True, but it made a fresh release fail: the moment a tag is cut,
+// `lastReleaseTag()` is HEAD, there are legitimately zero breaks since it, and the gate
+// went red for having nothing to report. Cutting a release should not be the thing that
+// breaks CI. What actually needs proving is that the git read and the surface scan still
+// work, and reading a non-empty std surface at the base tag proves exactly that.
+test("the surface scan can still read std at the last release tag", () => {
+  const before = surfaceAt(lastReleaseTag());
+  expect(Object.keys(before).length).toBeGreaterThan(100);
+}, 120000);
+
 test("every public std break since the last release is documented", () => {
   const breaks = breaksSince(lastReleaseTag());
-  // A comparison that found no breaks at all would pass for free — since v0.1.0 there
-  // are dozens, so a zero here means the surface scan or the git read stopped working.
-  expect(breaks.length).toBeGreaterThan(0);
   const missing = undocumented(breaks).map(b => `${b.kind} ${b.name}`);
   expect(missing).toEqual([]);
 }, 120000);

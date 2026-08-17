@@ -55,7 +55,7 @@ function surfaceFrom(files: Map<string, string>): Surface {
   return out;
 }
 
-function surfaceAt(ref: string): Surface {
+export function surfaceAt(ref: string): Surface {
   const listing = execFileSync("git", ["ls-tree", "-r", "--name-only", ref, "std/"], { cwd: ROOT, encoding: "utf-8" });
   const files = new Map<string, string>();
   for (const f of listing.split("\n").filter(l => l.endsWith(".milo"))) {

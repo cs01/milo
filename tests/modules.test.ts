@@ -4,7 +4,7 @@
 // separately-compiled objects keep their own copies at link time (internal linkage).
 import { test, expect } from "bun:test";
 import { execSync, spawnSync } from "child_process";
-import { writeFileSync, mkdtempSync, rmSync } from "fs";
+import { writeFileSync, mkdtempSync, mkdirSync, rmSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
 
@@ -13,8 +13,12 @@ const DIR = mkdtempSync(join(tmpdir(), "milo-modules-"));
 
 // spawnSync (not execSync) so stderr is captured on BOTH exit paths — a non-fatal
 // warning exits 0, and execSync only surfaces stderr on a non-zero exit.
-function milo(args: string): { code: number; out: string; err: string } {
-  const r = spawnSync("bun", ["run", COMPILER, ...args.split(" ").filter(Boolean)], { encoding: "utf-8" });
+function milo(args: string, opts?: { env?: Record<string, string>; cwd?: string }): { code: number; out: string; err: string } {
+  const r = spawnSync("bun", ["run", COMPILER, ...args.split(" ").filter(Boolean)], {
+    encoding: "utf-8",
+    ...(opts?.env ? { env: { ...process.env, ...opts.env } } : {}),
+    ...(opts?.cwd ? { cwd: opts.cwd } : {}),
+  });
   return { code: r.status ?? 1, out: r.stdout ?? "", err: r.stderr ?? "" };
 }
 
@@ -408,4 +412,44 @@ fn main(): void {
 
 test("cleanup", () => {
   rmSync(DIR, { recursive: true, force: true });
+});
+
+// A package import resolves against the manifest NEAREST THE IMPORTING FILE, not against
+// the entry point's.
+//
+// Resolving it once from the entry's directory made an import's meaning depend on where
+// compilation started: a library file sitting beside a milo.json that declares `dep`
+// resolved `from "dep" import …` when the entry was its neighbour and failed with
+// `cannot open 'dep'` when the entry was a test fixture two directories away — the same
+// file, the same import, two different answers. It broke `tests/fixtures/flybyGeometry.milo`
+// the moment an example it imports grew a package dependency, and it would break any
+// fixture that reaches a package-using module.
+//
+// Built as a local-path dependency so this needs no network and no package cache.
+test("a package import resolves against the importing file's manifest, not the entry's", () => {
+  const root = join(DIR, "pkgscope");
+  const lib = join(root, "lib");       // has a manifest naming the dep
+  const dep = join(root, "dep");       // the dependency itself
+  const entry = join(root, "entry");   // NO manifest — the entry lives here
+  const cache = join(root, "cache");   // isolated: never touch the developer's ~/.milo
+  for (const d of [root, lib, dep, entry, cache]) mkdirSync(d, { recursive: true });
+
+  writeFileSync(join(dep, "milo.json"), JSON.stringify({ name: "dep", version: "0.1.0", lib: "lib.milo" }));
+  writeFileSync(join(dep, "lib.milo"), "pub fn depValue(): i64 { return 7 }\n");
+  writeFileSync(join(lib, "milo.json"), JSON.stringify({
+    name: "lib", version: "0.1.0", deps: { dep },
+  }));
+  writeFileSync(join(lib, "helper.milo"),
+    'from "dep" import { depValue }\n\npub fn helper(): i64 { return depValue() + 1 }\n');
+  writeFileSync(join(entry, "main.milo"),
+    'from "../lib/helper" import { helper }\n\nfn main() { print(helper()) }\n');
+
+  const env = { XDG_CACHE_HOME: cache, XDG_DATA_HOME: join(root, "data") };
+  const inst = milo("install", { env, cwd: lib });
+  // If install cannot run at all the assertion below would "pass" for the wrong reason.
+  expect(`install: ${inst.code} ${inst.err}`).toContain("install: 0");
+
+  const r = milo(`run ${join(entry, "main.milo")}`, { env });
+  expect(`${r.code} ${r.out.trim()} ${r.err}`).toContain("8");
+  expect(r.code).toBe(0);
 });

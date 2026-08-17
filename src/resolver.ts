@@ -70,7 +70,7 @@ function readSource(absPath: string): string {
   return readFileSync(absPath, "utf-8");
 }
 
-// find milo.json by walking up from sourceDir
+// find milo.json by walking up from a directory
 function findManifest(startDir: string): Record<string, string> | null {
   let dir = startDir;
   for (let i = 0; i < 20; i++) {
@@ -167,6 +167,26 @@ export function resolveImports(program: Program, sourceDir: string, target: Targ
   const deriveTemplates: typeof program.deriveTemplates = [];
 
   const deps = findManifest(sourceDir);
+  // A package import means whatever the manifest NEAREST THE IMPORTING FILE says, not
+  // whatever the entry point's manifest says. Resolving once from `sourceDir` made an
+  // import's meaning depend on where compilation happened to start: `cloud.milo` sits
+  // beside a milo.json that declares `gl`, and `from "gl" import …` in it resolved when
+  // the entry was the example next door and failed with `cannot open 'gl'` when the entry
+  // was a test fixture two directories away — same file, same import, different answer.
+  //
+  // The entry map stays as a fallback so nothing that resolves today stops: walking up
+  // from the importing file reaches the project root anyway in the ordinary case, and this
+  // only adds an answer where there was none. Memoized per directory because the walk hits
+  // the filesystem and a large tree imports from the same handful of directories.
+  const depsByDir = new Map<string, Record<string, string> | null>();
+  const depsFor = (dir: string): Record<string, string> | null => {
+    let d = depsByDir.get(dir);
+    if (d === undefined) {
+      d = findManifest(dir);
+      depsByDir.set(dir, d);
+    }
+    return d ?? deps;
+  };
 
   // Visibility index, filled as each file is parsed — i.e. before the dedup and
   // last-wins override below discard same-named decls. See DeclOrigins in ast.ts.
@@ -234,6 +254,7 @@ export function resolveImports(program: Program, sourceDir: string, target: Targ
     }
 
     // check if import starts with a known package name from milo.json
+    const deps = depsFor(dir);
     if (deps) {
       const firstSlash = importPath.indexOf("/");
       const pkgName = firstSlash !== -1 ? importPath.slice(0, firstSlash) : importPath;

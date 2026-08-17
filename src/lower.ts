@@ -6,7 +6,7 @@ import { declaredType, floatNamespaceConst } from "./ast";
 import type { CheckResult, FnSig, EnumInfo } from "./checker";
 import type { HIRModule, HIRFunction, HIRStmt, HIRExpr, HIRArg, HIRPattern, HIRStruct, HIREnum, HIRGlobal, HIRContract } from "./hir";
 import type { TypeKind } from "./types";
-import { typeFromAst } from "./types";
+import { typeFromAst, SLICE_COMBINATORS } from "./types";
 import { readFileSync, existsSync, statSync } from "fs";
 import { resolve, dirname } from "path";
 import { must } from "./must";
@@ -916,7 +916,15 @@ class LowerCtx {
       case "MethodCall": {
         const rawObjType = this.typeOf(expr.object);
         // auto-deref `&T` so methods (.substr, .len, .clone, etc.) dispatch through slices
-        const objType = rawObjType?.tag === "ref" ? rawObjType.inner : rawObjType;
+        const objTypeRaw = rawObjType?.tag === "ref" ? rawObjType.inner : rawObjType;
+        // Mirrors the checker: a slice shares the Vec representation, so the read-only
+        // combinators lower through the Vec nodes unchanged. The two must use the same
+        // whitelist — the checker accepting what the lowerer cannot emit is a crash, not
+        // a diagnostic, and that is how this first surfaced ("unsupported method call: sum").
+        const objType = (objTypeRaw?.tag === "array" && objTypeRaw.size === null
+          && SLICE_COMBINATORS.has(expr.method))
+          ? { tag: "vec" as const, element: objTypeRaw.element }
+          : objTypeRaw;
         // x.addrOf() → the same address-of the old `&x` emitted, so codegen and
         // hence the selfhost output are byte-identical for migrated sites.
         if (expr.method === "addrOf") {

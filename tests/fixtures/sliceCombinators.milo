@@ -1,0 +1,58 @@
+// The read-only Vec combinators, on a slice.
+//
+// `&[T]` already carries the SAME `%Vec` layout a Vec does — `llvmType` returns `%Vec` for
+// both — so these needed no new emitter. They were unavailable only because the checker
+// and the lowerer each gate on `tag === "vec"`, which walled the whole combinator set off
+// from every function taking a slice: `fn total(s: &[i64]) { return s.sum() }` reported
+// *"type '[i64]' has no method 'sum'"*.
+//
+// The set is a WHITELIST, not a widening, because the same code paths carry `push`, `pop`,
+// `insert` and `sort` — a slice is a non-owning view and must not grow or reorder the
+// storage it points at. `s.push(1)` is still *"type '[i64]' has no method 'push'"*.
+//
+// The checker and the lowerer share one list (`SLICE_COMBINATORS` in src/types.ts) for a
+// reason worth keeping: when only the checker was widened, the compiler ACCEPTED `s.sum()`
+// and then died in lowering with `unsupported method call: sum` — a crash, not a
+// diagnostic. Two gates that must agree should read from one place.
+//
+// Still NOT covered: a FIXED array (`[i64; 4]`). That is laid out inline as `[N x T]`, not
+// as a `%Vec`, so it needs a real conversion rather than a re-tag — see backlog Tier 2 #6.
+// @expect: 7
+// @expect: 2
+// @expect: 4
+// @expect: true
+
+fn total(s: &[i64]): i64 {
+    return s.sum()
+}
+
+fn evens(s: &[i64]): Vec<i64> {
+    return s.filter((x: &i64) => x % 2 == 0)
+}
+
+fn biggest(s: &[i64]): i64 {
+    return s.fold(0, (acc: i64, n: &i64) => if acc > n {
+        acc
+    } else {
+        n
+    }
+    )
+}
+
+fn hasThree(s: &[i64]): bool {
+    return s.any((x: &i64) => x == 3)
+}
+
+fn main() {
+    var v: Vec<i64> = Vec.new()
+    v.push(1)
+    v.push(2)
+    v.push(4)
+    print(total(v))
+    print(evens(v).len)
+    print(biggest(v))
+
+    var w: Vec<i64> = Vec.new()
+    w.push(3)
+    print(hasThree(w))
+}

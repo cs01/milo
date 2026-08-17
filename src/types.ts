@@ -172,3 +172,19 @@ export function isScalar(t: TypeKind): boolean {
 export function needsDrop(t: TypeKind): boolean {
   return t.tag === "string" || t.tag === "heap" || t.tag === "vec" || t.tag === "hashmap";
 }
+
+// Vec methods that only READ, and so are meaningful on a slice (`&[T]`, an array with no
+// size). A slice carries the SAME `%Vec` layout a Vec does, so these need no separate
+// emitter — they were excluded only because the checker and the lowerer both gate on
+// `tag === "vec"`, which walled them off from every function taking a slice.
+//
+// Whitelisted rather than widened: the same code paths carry `push`/`pop`/`insert`/`sort`,
+// and a slice is a non-owning view that must not grow or reorder the storage it points at.
+// Shared by src/checker.ts and src/lower.ts so the two can never disagree about which
+// methods a slice has — a divergence there is an accepted program the lowerer then cannot
+// emit, which is exactly how this landed the first time.
+export const SLICE_COMBINATORS: ReadonlySet<string> = new Set([
+  "sum", "map", "filter", "fold", "reduce", "each", "enumerate",
+  "find", "position", "indexOf", "any", "all", "contains",
+  "isEmpty", "join", "first", "last", "get", "min", "max", "clone",
+]);

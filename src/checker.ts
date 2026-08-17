@@ -4,7 +4,7 @@
 import type { Program, Function, Stmt, Expr, MiloType, StructDecl, Pattern, Span, TraitDecl, MatchArm, Attribute, GlobalDecl } from "./ast";
 import { simpleType, declaredType, floatNamespaceConst } from "./ast";
 import type { TypeKind } from "./types";
-import { typeFromAst, typeEq, typeName, isNumeric, isCopy, isScalar } from "./types";
+import { typeFromAst, typeEq, typeName, isNumeric, isCopy, isScalar, SLICE_COMBINATORS } from "./types";
 import type { Diagnostic, WarningConfig } from "./diagnostics";
 import { checkVisibility } from "./visibility";
 import { countCSigParams } from "./csig";
@@ -8029,7 +8029,20 @@ export class TypeChecker {
     const sp = expr.span;
     const rawObjType = this.checkExpr(expr.object);
     // auto-deref `&T` for method dispatch (mutating methods still need !isRootMutable to allow)
-    const objType = rawObjType.tag === "ref" ? rawObjType.inner : rawObjType;
+    const objTypeRaw = rawObjType.tag === "ref" ? rawObjType.inner : rawObjType;
+    // A slice (`&[T]`, an array with no size) carries the SAME `%Vec` layout a Vec does —
+    // `llvmType` returns `%Vec` for both — so the read-only combinators need no separate
+    // emitter and were excluded only because the arm below gates on `tag === "vec"`. That
+    // walled them off from every function taking a slice: `fn total(s: &[i64]) { s.sum() }`
+    // reported *"type '[i64]' has no method 'sum'"*.
+    //
+    // Whitelisted rather than widened, because the same arm also carries `push`/`pop`/
+    // `insert`/`sort` — a slice is a non-owning view and must not grow or reorder its
+    // source. Anything outside this set still reaches the array path and is rejected.
+    const objType = (objTypeRaw.tag === "array" && objTypeRaw.size === null
+      && SLICE_COMBINATORS.has(expr.method))
+      ? { tag: "vec", element: objTypeRaw.element } as TypeKind
+      : objTypeRaw;
     if ((objType.tag === "int" || objType.tag === "float" || objType.tag === "bool") && expr.method === "toString") {
       if (expr.args.length !== 0) { this.error(`'toString' takes no arguments`, sp); }
       return this.setType(expr, { tag: "string" });

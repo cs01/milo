@@ -59,6 +59,13 @@ pub enum EnvSource: i32 {
 // off the frame path is that the frame never sees a half-updated sky.
 pub struct WxSnapshot {
     ok: bool,
+    // The place this was fetched FOR. A background fetch takes about a second and
+    // a place change takes less, so a snapshot can outlive the city that asked for
+    // it — and installing San Francisco's sky over Honolulu is exactly the class
+    // of error this whole file exists to prevent. Checked on install; a mismatch
+    // is dropped.
+    forLat: f64,
+    forLon: f64,
     clouds: CloudField,
     obs: Obs,
     hazeK: f64,
@@ -267,6 +274,8 @@ let WX_REFRESH_SECS: i64 = 300
 // between the two statements.
 var WX_SNAP: WxSnapshot = WxSnapshot {
     ok: false,
+    forLat: 0.0,
+    forLon: 0.0,
     clouds: cloudEmpty(),
     obs: obsEmpty(),
     hazeK: 0.00013,
@@ -279,6 +288,8 @@ var WX_READY: bool = false
 fn snapshotEmpty(): WxSnapshot {
     return WxSnapshot {
         ok: false,
+        forLat: 0.0,
+        forLon: 0.0,
         clouds: cloudEmpty(),
         obs: obsEmpty(),
         hazeK: 0.00013,
@@ -465,6 +476,8 @@ fn buildSnapshot(lat: f64, lon: f64, reachIn: f64, groundM: f64): WxSnapshot {
     }
     return WxSnapshot {
         ok: true,
+        forLat: lat,
+        forLon: lon,
         clouds: f,
         obs: o,
         hazeK: hazeK,
@@ -499,7 +512,12 @@ pub fn envWeatherTick(e: &mut LiveEnv, reachIn: f64) {
             WX_READY = false
             let snap = replace(WX_SNAP, snapshotEmpty())
             e.fetching = false
-            if snap.ok {
+            // Dropped if the aircraft has moved to another place since this was
+            // asked for. Comparing coordinates rather than a sequence number
+            // because the coordinates ARE the identity of the request.
+            let sameLat = snap.forLat - e.lat < 0.0001 && e.lat - snap.forLat < 0.0001
+            let sameLon = snap.forLon - e.lon < 0.0001 && e.lon - snap.forLon < 0.0001
+            if snap.ok && sameLat && sameLon {
                 e.lastFetchSec = epochSecs()
                 envInstall(e, snap)
                 if envF64("FLYBY_DEBUG_WX", 0.0) > 0.5 {
